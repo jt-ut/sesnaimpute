@@ -31,46 +31,22 @@ def _dec(v):
     return v.decode("utf-8") if isinstance(v, bytes) else str(v)
 
 
-def _load_herschel_arm(config, region, n_sources):
-    """`{covered, a_k, sigma_a_k, map_id, map_names}` for `region`, or
-    `None` where the region has no Herschel coverage at all.
-
-    Repoint when sky/derived/herschel/column_herschel_source lands: this
-    reads the OLD stand-in per-source Herschel column product instead,
-    reordered by its own ROW into catalogue-row order."""
-    new_path = config_module.product_path(config, "sky/derived", "herschel", "column", "source", region=region)
-    if os.path.exists(new_path):
-        with h5py.File(new_path, "r") as f:
-            return dict(
-                covered=np.asarray(f["COVERED"][:], dtype=bool),
-                a_k=np.asarray(f["A_K"][:], dtype=np.float64),
-                sigma_a_k=np.asarray(f["SIGMA_A_K"][:], dtype=np.float64),
-                map_id=np.asarray(f["MAP_ID"][:], dtype=np.int32),
-                map_names=np.asarray(f["MAP_NAME"][:]),
-            )
-
-    old_path = os.path.join(config.data_root, "sky/derived/source/herschel_dust-columns",
-                            "dust_column_herschel_arm.hdf5")
-    if not os.path.exists(old_path):
-        return None
-    with h5py.File(old_path, "r") as f:
-        pr = f["per_region"]
-        if region not in pr:
-            return None
-        g = pr[region]
-        row = np.asarray(g["ROW"][:], dtype=np.int64)
-        if row.size != n_sources or not np.array_equal(np.sort(row), np.arange(n_sources)):
-            raise ValueError(
-                f"sky.derived.column.build: Herschel stand-in ROW for {region!r} is not a "
-                f"permutation of range({n_sources}) -- cannot align to the curated catalogue"
-            )
-        order = np.argsort(row)
+def _load_herschel_arm(config, region):
+    """`{covered, a_k, sigma_a_k, map_id, map_names}` for `region`, in
+    catalogue row order."""
+    path = config_module.product_path(config, "sky/derived", "herschel", "column", "source", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"sky.derived.column.build: Herschel arm missing for region {region!r} at "
+            f"{path!r} -- run the sesnaimpute.sky.derived.herschel_column RUNBOOK line for it"
+        )
+    with h5py.File(path, "r") as f:
         return dict(
-            covered=np.asarray(g["COVERED"][:], dtype=bool)[order],
-            a_k=np.asarray(g["A_HERSCHEL_K"][:], dtype=np.float64)[order],
-            sigma_a_k=np.asarray(g["SIG_A_HERSCHEL_K"][:], dtype=np.float64)[order],
-            map_id=np.asarray(g["MAP_ID"][:], dtype=np.int32)[order],
-            map_names=np.asarray(g["MAP_NAMES"][:]),
+            covered=np.asarray(f["COVERED"][:], dtype=bool),
+            a_k=np.asarray(f["A_K"][:], dtype=np.float64),
+            sigma_a_k=np.asarray(f["SIGMA_A_K"][:], dtype=np.float64),
+            map_id=np.asarray(f["MAP_ID"][:], dtype=np.int32),
+            map_names=np.asarray(f["MAP_NAME"][:]),
         )
 
 
@@ -91,18 +67,16 @@ def merge_region(config, region, cal):
     fwhm = np.full(n, cal["fwhm_arcmin"] * 60.0, dtype=np.float32)
     prov = np.full(n, PROV_PLANCK, dtype=np.uint8)
     map_id = np.full(n, -1, dtype=np.int32)
-    map_names = np.array([], dtype=object)
 
-    herschel = _load_herschel_arm(config, region, n)
-    if herschel is not None:
-        covered, a_h, sig_h = herschel["covered"], herschel["a_k"], herschel["sigma_a_k"]
-        use_h = covered & np.isfinite(a_h) & (a_h > 0)
-        a_col[use_h] = a_h[use_h]
-        sig_col[use_h] = sig_h[use_h]
-        fwhm[use_h] = HERSCHEL_STATED_FWHM_ARCSEC
-        prov[use_h] = PROV_HERSCHEL
-        map_id[use_h] = herschel["map_id"][use_h]
-        map_names = herschel["map_names"]
+    herschel = _load_herschel_arm(config, region)
+    covered, a_h, sig_h = herschel["covered"], herschel["a_k"], herschel["sigma_a_k"]
+    use_h = covered & np.isfinite(a_h) & (a_h > 0)
+    a_col[use_h] = a_h[use_h]
+    sig_col[use_h] = sig_h[use_h]
+    fwhm[use_h] = HERSCHEL_STATED_FWHM_ARCSEC
+    prov[use_h] = PROV_HERSCHEL
+    map_id[use_h] = herschel["map_id"][use_h]
+    map_names = herschel["map_names"]
 
     bad = ~np.isfinite(a_col) | (a_col <= 0)
     if np.any(bad):

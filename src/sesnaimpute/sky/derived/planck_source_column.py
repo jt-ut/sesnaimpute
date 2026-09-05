@@ -15,7 +15,6 @@ Planck beam). This is one of the two arms merged in `column.py`; never
 blended with the Herschel arm here.
 """
 
-import json
 import os
 
 import h5py
@@ -71,38 +70,21 @@ def _load_planck_calibration(config):
     A_K coefficient), SIGMA_WITHIN_S0/SIGMA_WITHIN_F (the within-region
     dispersion's offset and slope), SIGMA_REGION_FRAC (the region-to-
     region scatter, as a fraction of A_K), PLANCK_FWHM_ARCMIN (the
-    measured effective beam).
-
-    Repoint when sky/derived/planck/calibration_planck_survey lands: this
-    reads the OLD stand-in `emission_dust_column_ainf` product's own
-    `/calibration` group instead."""
-    new_path = config_module.product_path(config, "sky/derived", "planck", "calibration", "survey")
-    if os.path.exists(new_path):
-        with h5py.File(new_path, "r") as f:
-            return dict(
-                a_tau=float(f.attrs["A_TAU"]),
-                s0_mag=float(f.attrs["SIGMA_WITHIN_S0"]),
-                f_rel=float(f.attrs["SIGMA_WITHIN_F"]),
-                sig_region_frac=float(f.attrs["SIGMA_REGION_FRAC"]),
-                fwhm_arcmin=float(f.attrs["PLANCK_FWHM_ARCMIN"]),
-            )
-    old_path = os.path.join(config.data_root, "sky/derived/healpix256/planck-r120_emission-dust-column",
-                            "emission_dust_column_ainf.hdf5")
-    if not os.path.exists(old_path):
+    measured effective beam)."""
+    path = config_module.product_path(config, "sky/derived", "planck", "calibration", "survey")
+    if not os.path.exists(path):
         raise FileNotFoundError(
-            "sky.derived.planck_source_column.build: neither the Planck calibration product "
-            f"nor its OLD stand-in exists at {old_path!r}"
+            f"sky.derived.planck_source_column.build: Planck calibration product missing at {path!r} "
+            "-- run the sesnaimpute.sky.derived.planck_column RUNBOOK line for it"
         )
-    with h5py.File(old_path, "r") as f:
-        blob = json.loads(f["calibration"].attrs["json"])
-    adopted = blob["adopted"]
-    return dict(
-        a_tau=float(adopted["a"]),
-        s0_mag=float(adopted["sigma_within_s0"]),
-        f_rel=float(adopted["sigma_within_f"]),
-        sig_region_frac=float(adopted["sigma_region_frac"]),
-        fwhm_arcmin=float(blob["planck_fwhm_arcmin_measured"]),
-    )
+    with h5py.File(path, "r") as f:
+        return dict(
+            a_tau=float(f.attrs["A_TAU"]),
+            s0_mag=float(f.attrs["SIGMA_WITHIN_S0"]),
+            f_rel=float(f.attrs["SIGMA_WITHIN_F"]),
+            sig_region_frac=float(f.attrs["SIGMA_REGION_FRAC"]),
+            fwhm_arcmin=float(f.attrs["PLANCK_FWHM_ARCMIN"]),
+        )
 
 
 def sample_planck_column(l_deg, b_deg, tau353, err_tau, nside=PLANCK_NSIDE):
