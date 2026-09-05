@@ -7,17 +7,26 @@ section 6, build order stage 7).
 Two pieces, per occupied nside-512 anchor pixel (the same pixels and
 edges `prior.anchor_tiles.write_histograms` already wrote).
 
-COUNT. The pixel's own SESNA sources each carry their own adopted
-column and arm, so each has its own law count (`prior.yso.law_count`,
-section 6.1); the pixel's expectation is the MEAN of those source-level
-law counts times the pixel's own solid angle (`OMEGA_PIX_DEG2`):
+COUNT. The anchor subtraction is an AREA count (SPEC_PRIORS.md section
+2.1's "young stars in the anchors" row: "the law count integrated over
+the tile"), so the pixel's expectation is the law integrated over the
+column MAP inside the pixel, `prior.yso.law_area_integral` (section 6.1's
+area form: Herschel-covered pixels integrate the HGBS map's own cells at
+their native beam scale; elsewhere the Planck sightline column carries
+the kernel's sub-beam variance), times the pixel's own solid angle
+(`OMEGA_PIX_DEG2`):
 
-    N_YOUNG_TOTAL(pix) = mean_i[ N_law(A_col_i, arm_i) ] * Omega_pix
+    N_YOUNG_TOTAL(pix) = law_area_integral(pix) * Omega_pix
 
-Stated approximation: `N_law` is nonlinear (squared) in column, so this
-averages the law count each source's own column implies, rather than
-evaluating the law once at the sources' mean column -- the pixel's own
-catalogued sources are the only sample of its column field at hand.
+`N_law` is convex (squared) in column, so the MEAN of the pixel's own
+SOURCE-level law counts (`prior.yso.law_count` at each source's own
+adopted column and arm) under-runs this integral: SESNA's own sources
+avoid the densest gas, so they are a biased-low sample of the pixel's own
+column field (Jensen's inequality on the unsampled structure). That
+source-sampled quantity is carried alongside, unused past this module, so
+the gap is visible:
+
+    N_YOUNG_SOURCE_MEAN(pix) = mean_i[ N_law(A_col_i, arm_i) ] * Omega_pix
 
 MAGNITUDES. Masses are drawn from the Chabrier system IMF over
 0.1-1.4 Msun (`prior.yso_selection`'s closed-form IMF and its own mass
@@ -69,10 +78,13 @@ Products, per region, `bms/anchors/young-stars_anchors_hpx512__<Region>
 .hdf5`: `HPX_PIX_512`; `N_G_YOUNG` (n_pix, n_G_bins), Gaia-weighted;
 `N_KS_YOUNG` (n_pix, n_Ks_bins), the 1 Myr isochrone; `N_KS_YOUNG_3MYR`
 (n_pix, n_Ks_bins), the same construction at 3 Myr for the section 6.2
-age band; `N_YOUNG_TOTAL` (n_pix), the count above; `N_BRIGHT` (n_pix),
-the disclosed >1.4 Msun share of it, never binned; `G_EDGES`, `KS_EDGES`
+age band; `N_YOUNG_TOTAL` (n_pix), the area-integrated count above;
+`N_YOUNG_SOURCE_MEAN` (n_pix), the source-sampled count beside it so the
+area-integration gap is visible; `N_BRIGHT` (n_pix), the disclosed
+>1.4 Msun share of `N_YOUNG_TOTAL`, never binned; `G_EDGES`, `KS_EDGES`
 (copied from the histograms product so a consumer never has to
-cross-open it); root attr `GRANULE="hpx512"`.
+cross-open it); root attrs `GRANULE="hpx512"`, `N_YOUNG_TOTAL_REGION` and
+`N_YOUNG_SOURCE_MEAN_REGION` (the region sums of the two counts above).
 
 Algebraic acceptance (reported at build, per pixel, to 1e-9): the 1 Myr
 Ks histogram's own bins, plus whatever of the binned (0.1-1.4 Msun)
@@ -224,9 +236,10 @@ def mass_grid_and_weight(n=N_MASS_QUADRATURE):
 
 def law_count_per_pixel(config, region, pixels):
     """`N_law` averaged per pixel (deg^-2), aligned to `pixels` -- the
-    module docstring's stated approximation: the mean of each pixel's
-    own sources' `prior.yso.law_count`, not the law evaluated at their
-    mean column.
+    SOURCE-sampled mean of each pixel's own sources' `prior.yso.law_count`
+    (module docstring's `N_YOUNG_SOURCE_MEAN`), kept only as the reported
+    comparison against the area-integrated `prior.yso.law_area_integral`
+    this module now uses for `N_YOUNG_TOTAL`.
     """
     rs = access.region_slice(config, region)
     a_col, provenance = yso._adopted_columns(config, region)
@@ -363,7 +376,8 @@ def build_region(config, region):
         g_edges = np.asarray(f["G_EDGES"][:], dtype=np.float64)
         ks_edges = np.asarray(f["KS_EDGES"][:], dtype=np.float64)
 
-    n_young_total = law_count_per_pixel(config, region, pixels) * omega_pix_deg2
+    n_young_source_mean = law_count_per_pixel(config, region, pixels) * omega_pix_deg2
+    n_young_total = yso.law_area_integral(config, region, pixels) * omega_pix_deg2
     u_edges, p_u = sightline_lookup(config, region, pixels)
 
     mass_grid, mass_weight = mass_grid_and_weight()
@@ -407,6 +421,7 @@ def build_region(config, region):
     return dict(
         pixels=pixels, a_pix=a_pix, n_g_young=n_g_young, n_ks_young=n_ks_young,
         n_ks_young_3myr=n_ks_young_3myr, n_young_total=n_young_total,
+        n_young_source_mean=n_young_source_mean,
         n_bright=n_bright, g_edges=g_edges, ks_edges=ks_edges,
         ks_faint_overflow=ks_faint, ks_bright_overflow=ks_bright,
         max_rel_dev=max_rel_dev,
@@ -419,11 +434,14 @@ def _write_product(config, region, result):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "hpx512"
+        f.attrs["N_YOUNG_TOTAL_REGION"] = float(result["n_young_total"].sum())
+        f.attrs["N_YOUNG_SOURCE_MEAN_REGION"] = float(result["n_young_source_mean"].sum())
         f.create_dataset("HPX_PIX_512", data=result["pixels"].astype(np.int64))
         f.create_dataset("N_G_YOUNG", data=result["n_g_young"].astype(np.float32))
         f.create_dataset("N_KS_YOUNG", data=result["n_ks_young"].astype(np.float32))
         f.create_dataset("N_KS_YOUNG_3MYR", data=result["n_ks_young_3myr"].astype(np.float32))
         f.create_dataset("N_YOUNG_TOTAL", data=result["n_young_total"].astype(np.float64))
+        f.create_dataset("N_YOUNG_SOURCE_MEAN", data=result["n_young_source_mean"].astype(np.float64))
         f.create_dataset("N_BRIGHT", data=result["n_bright"].astype(np.float64))
         f.create_dataset("G_EDGES", data=result["g_edges"])
         f.create_dataset("KS_EDGES", data=result["ks_edges"])
@@ -448,15 +466,20 @@ def build(config, regions=None):
             n_ks_obs = np.asarray(f["N_KS_OBS"][:], dtype=np.float64).sum(axis=1)
 
         total_young = float(result["n_young_total"].sum())
+        total_source_mean = float(result["n_young_source_mean"].sum())
         total_obs = float(n_ks_obs.sum())
         ratio = total_young / total_obs if total_obs > 0 else float("nan")
+        area_over_source = (total_young / total_source_mean
+                             if total_source_mean > 0 else float("nan"))
         share = np.where(n_ks_obs > 0, result["n_young_total"] / n_ks_obs, 0.0)
         i_worst = int(np.argmax(share))
         print(
-            "prior.young_stars: %s N_YOUNG_TOTAL=%.2f 2MASS(Ks<14.3)=%.2f "
-            "ratio=%.4f worst-pixel young/2MASS share=%.4f at A_PIX_K=%.3f "
+            "prior.young_stars: %s N_YOUNG_TOTAL=%.2f N_YOUNG_SOURCE_MEAN=%.2f "
+            "(area/source-mean=%.3fx) 2MASS(Ks<14.3)=%.2f ratio=%.4f "
+            "worst-pixel young/2MASS share=%.4f at A_PIX_K=%.3f "
             "max_rel_dev=%.3e -> %s"
-            % (region, total_young, total_obs, ratio, share[i_worst],
+            % (region, total_young, total_source_mean, area_over_source,
+               total_obs, ratio, share[i_worst],
                result["a_pix"][i_worst], result["max_rel_dev"], path))
 
 

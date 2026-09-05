@@ -47,7 +47,10 @@ neither reads a template register or an IMF.
 import os
 
 import h5py
+import healpy as hp
 import numpy as np
+from astropy.coordinates import SkyCoord
+import astropy.units as u
 from joblib import Parallel, delayed
 
 from sesnaimpute import config as config_module
@@ -56,6 +59,8 @@ from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.prior import column_grid
 from sesnaimpute.prior import kernel as kernel_module
+from sesnaimpute.sky.derived import herschel_column as sky_herschel_column
+from sesnaimpute.sky.derived import planck_column as sky_planck_column
 
 # ====================================================================
 # 6.1 -- the law count
@@ -173,6 +178,196 @@ def _write_law_product(config, rows):
         f.create_dataset("KAPPA_PLANCK", data=np.float64(KAPPA_PLANCK))
         f.create_dataset("LAW_BAND_DEX", data=np.float64(LAW_BAND_DEX))
     return path
+
+
+# ====================================================================
+# 6.1 (area form) -- the law count integrated over an anchor pixel's area
+# ====================================================================
+#
+# SPEC_PRIORS.md section 2.1's "young stars in the anchors" row needs "the
+# law count integrated over the tile", not a source-sampled mean: the
+# anchor subtraction is an AREA count, and `N_law` is convex (squared) in
+# column, so the mean of SOURCE-level law counts under-runs the true area
+# integral -- SESNA's own sources avoid the densest gas, so they are a
+# biased-low sample of the pixel's own column field. Section 6.4 item 1's
+# per-cloud check needs the same integral, so it is served once here.
+
+#: The anchor histograms' own HEALPix resolution (`prior.anchor_tiles`,
+#: `prior.young_stars`): the nside this integral is evaluated at.
+NSIDE_ANCHOR = 512
+
+_KERNEL_CACHE = {}
+
+
+def _load_kernel(config):
+    """The composed column kernel (`prior.kernel.load`), cached per config
+    like this module's other survey-wide reads (`_ADOPTED_COLUMN_CACHE`):
+    `law_area_integral` is called once per region and the kernel's own
+    build reads every region's adopted columns, so an uncached reload
+    would cost O(regions^2)."""
+    key = id(config)
+    if key not in _KERNEL_CACHE:
+        _KERNEL_CACHE[key] = kernel_module.load(config)
+    return _KERNEL_CACHE[key]
+
+
+def _map_block_a_k(path):
+    """One HGBS map's own valid cells, block-reduced to
+    `sky.derived.planck_column.BLOCK_TARGET_ARCSEC` (~12", already
+    well-sampled relative to Herschel's own 36.3" beam -- the same cell
+    size `planck_column` degrades HGBS maps to for its calibration,
+    reused rather than the map's raw few-arcsec pixel grid, which a timed
+    survey build cannot afford to carry through a coordinate transform
+    whole): `(hpx512, a_k)`, the block's own nside-512 NESTED galactic
+    pixel and its `A_K` (`sky.derived.herschel_column`'s currency),
+    vectorised over the whole map at once (rule 8)."""
+    data, wcs, pixscale = sky_herschel_column._open_hgbs_map(path)
+    finite = np.isfinite(data) & (data > 0)
+    f = max(1, int(round(sky_planck_column.BLOCK_TARGET_ARCSEC / pixscale)))
+    bs, bn, _ny2, _nx2 = sky_planck_column._block_reduce(data, finite, f)
+    bmean = np.where(bn > 0, bs / np.maximum(bn, 1), np.nan)
+    by, bx = np.mgrid[0:bmean.shape[0], 0:bmean.shape[1]]
+    sel = bn > 0
+    if not sel.any():
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+    xc = bx[sel] * f + (f - 1) / 2.0
+    yc = by[sel] * f + (f - 1) / 2.0
+    ra, dec = wcs.wcs_pix2world(xc.astype(np.float64), yc.astype(np.float64), 0)
+    gal = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs").galactic
+    hpx = hp.ang2pix(NSIDE_ANCHOR, gal.l.deg, gal.b.deg, nest=True, lonlat=True)
+    a_k = bmean[sel].astype(np.float64) * sky_herschel_column.NH2_TO_AK
+    return hpx.astype(np.int64), a_k
+
+
+def _region_bbox_icrs(hpx_pix_512):
+    """(ra_min, ra_max, dec_min, dec_max) of a set of nside-512 NESTED
+    galactic pixel centres -- the same bbox-overlap screen
+    `sky.derived.herschel_column._boxes_overlap` runs on, so only maps
+    that can possibly touch this pixel set are opened."""
+    l_deg, b_deg = hp.pix2ang(NSIDE_ANCHOR, hpx_pix_512, nest=True, lonlat=True)
+    icrs = SkyCoord(l=l_deg * u.deg, b=b_deg * u.deg, frame="galactic").icrs
+    ra, dec = icrs.ra.deg, icrs.dec.deg
+    return float(ra.min()), float(ra.max()), float(dec.min()), float(dec.max())
+
+
+def _herschel_pixel_stats(config, pix_sorted, pedestal_k_value):
+    """`(sum_sq, count)`, each `(n_pix,)`, aligned to `pix_sorted`
+    (ascending): the sum and count of `max(A_cell - p_r, 0)^2` over every
+    HGBS map cell (`_map_block_a_k`) whose own nside-512 pixel is in the
+    set, over every map overlapping the set's own footprint. Maps are the
+    largest independent iterator here (rule 8) and are parallelised with
+    joblib; a pixel that two overlapping map reductions both touch is not
+    deduplicated -- disclosed: HGBS reductions rarely overlap, and the
+    effect on a pixel mean is second order against the gain this area
+    integral makes over the source-sampled mean it replaces."""
+    maps = sky_herschel_column._map_list(config)
+    headers = {m["name"]: sky_herschel_column._map_header(m["path"]) for m in maps}
+    rbox = _region_bbox_icrs(pix_sorted)
+    candidates = [m for m in maps
+                  if sky_herschel_column._boxes_overlap(headers[m["name"]]["bbox"], rbox, pad=0.1)]
+
+    results = Parallel(n_jobs=-1)(delayed(_map_block_a_k)(m["path"]) for m in candidates)
+
+    n_pix = pix_sorted.size
+    sum_sq = np.zeros(n_pix)
+    count = np.zeros(n_pix)
+    for hpx, a_k in results:
+        if hpx.size == 0:
+            continue
+        loc = np.searchsorted(pix_sorted, hpx)
+        capped = np.minimum(loc, max(n_pix - 1, 0))
+        matched = (n_pix > 0) & (pix_sorted[capped] == hpx)
+        if not matched.any():
+            continue
+        idx = capped[matched]
+        a_cloud = np.maximum(a_k[matched] - pedestal_k_value, 0.0)
+        sum_sq += np.bincount(idx, weights=a_cloud ** 2, minlength=n_pix)
+        count += np.bincount(idx, weights=np.ones(idx.size), minlength=n_pix)
+    return sum_sq, count
+
+
+def _planck_parent_column(config, parent256):
+    """`A_K` of every requested nside-256 pixel (`parent256`), from the
+    survey-wide Planck sightline product
+    (`sky.derived.planck_column.build_column`) -- the fallback arm's own
+    column, for pixels the Herschel maps do not reach."""
+    path = config_module.product_path(config, "sky/derived", "planck",
+                                       "column", "sightline")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "prior.yso: Planck sightline column missing at %s -- run the "
+            "'sky.derived.planck_column' RUNBOOK line first" % path)
+    with h5py.File(path, "r") as f:
+        sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
+        a_k = np.asarray(f["A_K"][:], dtype=np.float64)
+    order = np.argsort(sl_pix)
+    sl_pix_sorted, a_k_sorted = sl_pix[order], a_k[order]
+    loc = np.searchsorted(sl_pix_sorted, parent256)
+    capped = np.minimum(loc, max(sl_pix_sorted.size - 1, 0))
+    matched = (sl_pix_sorted.size > 0) & (sl_pix_sorted[capped] == parent256)
+    if not np.all(matched):
+        raise ValueError(
+            "prior.yso: an anchor pixel's parent nside-256 sightline is "
+            "absent from the Planck column product")
+    return a_k_sorted[capped]
+
+
+def law_area_integral(config, region, hpx_pix_512):
+    """`N_law` integrated over each requested nside-512 pixel's own area
+    (SPEC_PRIORS.md section 2.1's "young stars in the anchors" row, "the
+    law count integrated over the tile"; section 6.4 item 1's per-cloud
+    check reuses it). Returns young stars deg^-2, aligned to
+    `hpx_pix_512`, in `law_count`'s own convention (a consumer multiplies
+    by the pixel's own solid angle for a count) -- but genuinely
+    area-averaged over the column MAP, not over the pixel's own catalogued
+    sources, which avoid the densest gas and under-run a convex (squared)
+    law.
+
+    Herschel-covered pixels (any HGBS map cell falls inside,
+    `_herschel_pixel_stats` at the map's own beam-scale resolution):
+
+        kappa_H * mean_over_map_cells[ max(A_cell - p_r, 0)^2 ]
+
+    No coverage-fraction weighting: a pixel only partly inside the HGBS
+    mosaic still carries Gaia/2MASS detections across its WHOLE area,
+    since the anchor histograms are all-sky (SPEC_PRIORS.md section 2.1)
+    and never gated on the Herschel footprint; the covered cells' own mean
+    is the best estimate available for the pixel's whole area and stands
+    for it, rather than being scaled down by a coverage fraction that
+    would zero out real young stars the anchors do see.
+
+    Elsewhere, the Planck sightline column `A_P` of the parent nside-256
+    pixel, with the sub-beam variance `prior.kernel.Kernel.second_moment`
+    supplies (the true-column dispersion the Planck beam hides,
+    SPEC_PRIORS.md section 1.2):
+
+        kappa_P * ((A_P - p_r)^2 + Var(T | A_P))     for A_P > p_r, else 0
+    """
+    hpx_pix_512 = np.asarray(hpx_pix_512, dtype=np.int64)
+    order = np.argsort(hpx_pix_512)
+    pix_sorted = hpx_pix_512[order]
+
+    p_r = pedestal_k(config, region)
+    d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
+    pc2 = pc2_per_deg2(d_r_pc)
+    kappa_h_full = KAPPA_HERSCHEL * pc2
+    kappa_p_full = KAPPA_PLANCK * pc2
+
+    sum_sq, count = _herschel_pixel_stats(config, pix_sorted, p_r)
+    herschel_covered = count > 0
+    herschel_value = kappa_h_full * np.divide(
+        sum_sq, count, out=np.zeros_like(sum_sq), where=herschel_covered)
+
+    a_p = _planck_parent_column(config, pix_sorted >> 2)
+    sigma2_sub = _load_kernel(config).second_moment(a_p)
+    a_cloud_p = a_p - p_r
+    planck_value = np.where(a_cloud_p > 0.0,
+                             kappa_p_full * (a_cloud_p ** 2 + sigma2_sub), 0.0)
+
+    value_sorted = np.where(herschel_covered, herschel_value, planck_value)
+    out = np.empty_like(value_sorted)
+    out[order] = value_sorted
+    return out
 
 
 # ====================================================================
