@@ -70,6 +70,7 @@ $PY -m sesnaimpute.sky.derived.profile $CONFIG
 # groups, field stars, anchor weights, the per-class priors and
 # selection tables, the prior table.
 $PY -m sesnaimpute.prior.field_stars $CONFIG
+$PY -m sesnaimpute.prior.anchor_tiles $CONFIG
 $PY -m sesnaimpute.prior.depth_groups $CONFIG
 
 # --- fit ---
