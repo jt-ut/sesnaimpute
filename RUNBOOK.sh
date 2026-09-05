@@ -58,17 +58,19 @@ $PY -m sesnaimpute.sky.download.gaia_counts.build $CONFIG
 $PY -m sesnaimpute.sky.download.twomass_counts.build $CONFIG
 $PY -m sesnaimpute.sky.derived.gaia_counts $CONFIG
 $PY -m sesnaimpute.sky.derived.twomass_counts $CONFIG
-$PY -m sesnaimpute.sky.derived.subbeam $CONFIG
 $PY -m sesnaimpute.sky.derived.herschel_column $CONFIG
+$PY -m sesnaimpute.sky.derived.subbeam $CONFIG
 $PY -m sesnaimpute.sky.derived.planck_column $CONFIG
 $PY -m sesnaimpute.sky.derived.planck_source_column $CONFIG
 $PY -m sesnaimpute.sky.derived.column $CONFIG
 $PY -m sesnaimpute.sky.derived.profile $CONFIG
 
 # --- prior ---
-# bms/ prior products: column kernel, PAHC curve, column grid, depth
-# groups, field stars, anchor weights, the per-class priors and
-# selection tables, the prior table.
+# bms/ prior products: the column grid (every class build reads its
+# nodes), the column kernel, the PAHC curve, depth groups, field stars,
+# anchor weights, the per-class priors and selection tables, the prior
+# table.
+$PY -m sesnaimpute.prior.column_grid $CONFIG
 $PY -m sesnaimpute.prior.field_stars $CONFIG
 $PY -m sesnaimpute.prior.depth_groups $CONFIG
 

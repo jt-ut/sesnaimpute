@@ -24,7 +24,6 @@ and an offset exponent `p` through the two measured median offsets at 302
 and 821 arcsec via `offset(L) = -c*L**p` (only `p` is stored; `c` cancels).
 """
 
-import json
 import os
 
 import h5py
@@ -36,6 +35,8 @@ from scipy import fft as sfft
 from sesnaimpute import config as config_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
+from sesnaimpute.sky.derived.herschel_column import _map_header
+from sesnaimpute.sky.download.herschel_hgbs.build import _FILES as HGBS_FILES
 
 #: N(H2) -> A_K, ZGR23 (matches sesnaimpute.sky.derived.column's own use).
 AK_PER_NH2 = 1.12e-22
@@ -464,30 +465,52 @@ def _region_join(per_map, cloud_regions, herschel_regions):
     return scales, per_region
 
 def _map_inventory(config, regions):
-    """`(jobs, cloud_regions)` from the HGBS maps' own `PRODUCT.json`: one job
-    per fetched map `(cloud, local_path, pixel_scale_arcsec)`, largest first;
-    `cloud_regions[cloud]` is its `overlap_regions` restricted to `regions`.
-    Nothing else is read from `PRODUCT.json`."""
-    inv_path = os.path.join(config.data_root, "sky", "download", "herschel-hgbs",
-                            "PRODUCT.json")
-    with open(inv_path) as fh:
-        products = json.load(fh)["products"]
-    jobs, cloud_regions = [], {}
-    for name, meta in products.items():
-        regs = [r for r in meta.get("overlap_regions", []) if r in regions]
-        if not meta.get("fetched") or not regs:
+    """`(jobs, cloud_regions)`: one job per HGBS map (`sky/download/
+    herschel_hgbs.build`'s `_FILES`, files at `<data_root>/sky/download/
+    herschel_hgbs/<name>`), largest file first, each map's pixel scale read
+    from its own FITS header. Which regions a map serves comes from data,
+    never a manifest: `cloud_regions[name]` is every requested region whose
+    Herschel `column`/`source` product (SPEC_PRIORS.md section 1.1) has a
+    `COVERED` source whose `MAP_ID` points to that map's name in the
+    product's own `MAP_NAME` list."""
+    hub = os.path.join(config.data_root, "sky", "download", "herschel_hgbs")
+    cloud_regions = {name: [] for name in HGBS_FILES}
+    for region in sorted(regions):
+        col_path = config_module.product_path(config, "sky/derived", "herschel", "column",
+                                               "source", region=region)
+        if not os.path.exists(col_path):
+            raise FileNotFoundError(
+                "subbeam.build: Herschel column missing for region %r at %s -- run "
+                "the 'sky.derived.herschel_column' RUNBOOK line first" % (region, col_path))
+        with h5py.File(col_path, "r") as f:
+            covered = np.asarray(f["COVERED"][:], dtype=bool)
+            map_id = np.asarray(f["MAP_ID"][:])
+            map_name = np.asarray(f["MAP_NAME"][:])
+        served_ids = np.unique(map_id[covered])
+        for raw in map_name[served_ids[served_ids >= 0]]:
+            name = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+            if name in cloud_regions:
+                cloud_regions[name].append(region)
+
+    jobs = []
+    for name, regs in cloud_regions.items():
+        if not regs:
             continue
-        cloud = meta["cloud"]
-        cloud_regions[cloud] = regs
-        jobs.append((meta["bytes"], (cloud, meta["local_path"],
-                                     float(meta["pixel_scale_arcsec"]))))
+        path = os.path.join(hub, name)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                "subbeam.build: HGBS map %r missing at %s -- run the "
+                "'sky.download.herschel_hgbs' RUNBOOK line first" % (name, path))
+        pixscale = _map_header(path)["pixscale_arcsec"]
+        jobs.append((os.path.getsize(path), (name, path, pixscale)))
     jobs.sort(key=lambda j: -j[0])
     return [j for _, j in jobs], cloud_regions
 
 def build(config, regions=None):
     """Builds the sub-beam region product, parallelised over HGBS maps with
-    joblib (largest map first); reads the map inventory from
-    `sky/download/herschel-hgbs/PRODUCT.json`."""
+    joblib (largest map first); the map inventory and which regions each
+    map serves come from `_map_inventory` (the fetched file set and the
+    Herschel column products), never a manifest."""
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
     regions = set(regions) & {r.name for r in regions_module.REGIONS}
