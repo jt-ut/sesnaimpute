@@ -12,13 +12,20 @@ is therefore two survey machinery pieces, assembled into the shape
    counts N(>S), fitted once, region-independent (`build_counts_law`,
    written to the `counts/survey` product).
 2. `eps[k, node, j]`, the fraction of an external, four-band galaxy
-   population (SWIRE, Surace et al. 2005 DR2 release) that clears any two of
-   the four IRAC bands at a depth group's own limits, after the population
-   is dimmed through a query column `a` in every band
-   (`build_region_selection`, written to the `prior/region` product, one
-   file per region). A second table, `EPS_2BAND`, requires *both* 3.6 and
-   4.5um -- the SEDS-era two-band form -- as the reported comparison
-   (SPEC_PRIORS.md section 5, "Checks").
+   population (SWIRE, Surace et al. 2005 DR2 release), its stars removed,
+   that clears any two of the four IRAC bands at a depth group's own
+   limits, after the population is dimmed through a query column `a` in
+   every band (`build_region_selection`, written to the `prior/region`
+   product, one file per region). A second table, `EPS_2BAND`, requires
+   *both* 3.6 and 4.5um -- the SEDS-era two-band form -- as the reported
+   comparison (SPEC_PRIORS.md section 5, "Checks"). A third, `EPS_NO_
+   REMOVAL`, is the same construction with no star removal at all, for
+   comparison (owner ruling 2026-09-05).
+
+The star-galaxy split itself is chosen once, survey-wide
+(`select_star_galaxy_split`): among the candidate rules that reproduce
+Fazio's star-subtracted counts at 0.1-1mJy within the fitted
+cosmic-variance spread, the one removing the fewest SWIRE rows.
 
 The library register never enters either quantity (SPEC_PRIORS.md section
 0.3, C3): it supplies SED templates to the fitter only.
@@ -110,6 +117,22 @@ EXT_FL_EXTENDED = (1, 2)
 #: documentation itself warns the index "is not reliable at low flux
 #: levels", which is worst in 5.8/8.0um where non-detections are common.
 STELLARITY_STAR_MIN = 0.9
+
+#: Star-galaxy split candidates (SPEC_PRIORS.md section 5.1, owner ruling
+#: 2026-09-05): the split adopted is the one that reproduces Fazio's
+#: star-subtracted counts at 0.1-1mJy within the fitted cosmic-variance
+#: spread, optical stellarity preferred where the release has it. The
+#: SWIRE pull (`sky.download.swire.build.COLUMNS`) carries no optical
+#: (measured off the optical image) stellarity column -- only the four
+#: per-band IRAC stellarities (`stell_36` etc, SExtractor run on the IRAC
+#: images themselves) and the per-band extended flag -- so the "optical
+#: preferred" branch never fires here; the stellarity candidate below
+#: reads IRAC 3.6um, the best-PSF-sampled band, instead.
+SPLIT_STELLARITY_GRID = tuple(np.round(np.arange(0.50, 0.951, 0.05), 2))
+
+#: The three fluxes SPEC_PRIORS.md 5.1 names for the split criterion,
+#: 4.5um, mJy.
+SPLIT_CRITERION_S_MJY = (0.1, 0.3, 1.0)
 
 #: Rule 9: subsample once, fixed seed, at most this many galaxies per
 #: log10 S bin of the 61-point grid.
@@ -327,11 +350,12 @@ def read_swire_catalogue(config):
     return flux_mjy, stell, ext_fl
 
 
-def classify_galaxy(stell, ext_fl):
+def classify_galaxy_extended_flag(stell, ext_fl):
     """`(n,)` bool: which SWIRE rows are galaxies, by the release's own
     per-band extended flag (3.6, 4.5um only -- the two best-PSF-sampled
     bands), falling back to the SExtractor stellarity threshold only where
-    the flag itself is "indeterminate" in both bands.
+    the flag itself is "indeterminate" in both bands. Split candidate (b):
+    the release's extended flag, as the earlier construction used it.
     """
     ext36, ext45 = ext_fl[:, 0], ext_fl[:, 1]
     st36, st45 = stell[:, 0], stell[:, 1]
@@ -344,6 +368,83 @@ def classify_galaxy(stell, ext_fl):
     )
     is_star = point_flagged | star_by_stellarity
     return ~is_star
+
+
+def classify_galaxy_stellarity(stell, threshold):
+    """`(n,)` bool: which SWIRE rows are galaxies by IRAC 3.6um
+    stellarity alone -- the "optical stellarity where available, else
+    IRAC 3.6um" rule (SPEC_PRIORS.md 5.1), with no optical column in this
+    release's pull (see the module docstring). A row is a star if its
+    3.6um stellarity is measured and at or above `threshold`; an
+    unmeasured stellarity is kept as a galaxy, the same conservative
+    default `classify_galaxy_extended_flag` uses for an unresolved flag.
+    Split candidate (a), one point of `SPLIT_STELLARITY_GRID`.
+    """
+    st36 = stell[:, 0]
+    is_star = np.isfinite(st36) & (st36 >= threshold)
+    return ~is_star
+
+
+def classify_galaxy_no_removal(n):
+    """`(n,)` bool, all `True`: split candidate (c), no star removal at
+    all -- the "also reported with no removal" branch of SPEC_PRIORS.md
+    5.1, and the population `EPS_NO_REMOVAL` is built on.
+    """
+    return np.ones(n, dtype=bool)
+
+
+def candidate_star_galaxy_splits(stell, ext_fl):
+    """`{label: is_galaxy}` over every split candidate SPEC_PRIORS.md 5.1
+    names: `"no_removal"` (c), `"extended_flag"` (b), and one
+    `"stellarity_t=..."` (a) per `SPLIT_STELLARITY_GRID` point.
+    """
+    n = stell.shape[0]
+    out = {
+        "no_removal": classify_galaxy_no_removal(n),
+        "extended_flag": classify_galaxy_extended_flag(stell, ext_fl),
+    }
+    for t in SPLIT_STELLARITY_GRID:
+        out[f"stellarity_t={t:.2f}"] = classify_galaxy_stellarity(stell, t)
+    return out
+
+
+def select_star_galaxy_split(flux_mjy_i2, stell, ext_fl, fit, cosmic_variance_dex,
+                              s_values=SPLIT_CRITERION_S_MJY):
+    """Grades every `candidate_star_galaxy_splits` candidate against the
+    Fazio fit's own `N(>S)` at `s_values` (SPEC_PRIORS.md 5.1's
+    criterion): each candidate's ratio of its own SWIRE galaxy count to
+    the Fazio target at each flux, in dex. A candidate "passes" if every
+    one of those `|dex|` is within `cosmic_variance_dex`. The adopted
+    split is the passing candidate removing the fewest SWIRE rows (the
+    least intervention that meets the standard); if none passes, the
+    candidate with the smallest maximum `|dex|`, flagged as such.
+
+    Returns `(adopted_label, is_galaxy_adopted, rows, none_passed)`,
+    `rows` a list of dicts (`label`, `n_removed`, `ratio` per `s_values`,
+    `dex` per `s_values`, `max_abs_dex`, `passed`), one per candidate, in
+    `candidate_star_galaxy_splits` order.
+    """
+    fazio_n = np.array([fit.cumulative(s) for s in s_values])
+    candidates = candidate_star_galaxy_splits(stell, ext_fl)
+
+    rows = []
+    for label, is_galaxy in candidates.items():
+        swire_n = np.array([swire_band_cumulative(flux_mjy_i2, is_galaxy, s) for s in s_values])
+        dex = np.log10(swire_n) - np.log10(fazio_n)
+        rows.append(dict(
+            label=label, n_removed=int((~is_galaxy).sum()),
+            ratio=(swire_n / fazio_n).tolist(), dex=dex.tolist(),
+            max_abs_dex=float(np.max(np.abs(dex))),
+            passed=bool(np.all(np.abs(dex) <= cosmic_variance_dex)),
+        ))
+
+    passing = [r for r in rows if r["passed"]]
+    none_passed = len(passing) == 0
+    if not none_passed:
+        best = min(passing, key=lambda r: r["n_removed"])
+    else:
+        best = min(rows, key=lambda r: r["max_abs_dex"])
+    return best["label"], candidates[best["label"]], rows, none_passed
 
 
 def subsample_population(flux_mjy, log10_s_grid, seed=SUBSAMPLE_SEED, cap=SUBSAMPLE_CAP_PER_BIN):
@@ -438,14 +539,19 @@ def build_region_selection(a_nodes, kappa4_all, log10_flux_irac, finite_irac,
     return eps, eps_2band, bin_counts
 
 
-def write_region(path, a_nodes, log10_s_grid, eps, eps_2band, knots):
+def write_region(path, a_nodes, log10_s_grid, eps, eps_2band, eps_no_removal, knots,
+                  split_label, split_row):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "region"
+        f.attrs["SPLIT"] = split_label
+        f.attrs["SPLIT_CRITERION_S_MJY"] = np.array(SPLIT_CRITERION_S_MJY, dtype=np.float64)
+        f.attrs["SPLIT_RATIO_SWIRE_OVER_FAZIO"] = np.array(split_row["ratio"], dtype=np.float64)
         f.create_dataset("A_NODES", data=a_nodes.astype(np.float64))
         f.create_dataset("LOG10_S_GRID", data=log10_s_grid.astype(np.float64))
         f.create_dataset("EPS", data=eps.astype(np.float32))
         f.create_dataset("EPS_2BAND", data=eps_2band.astype(np.float32))
+        f.create_dataset("EPS_NO_REMOVAL", data=eps_no_removal.astype(np.float32))
         f.create_dataset("GROUP_CENTRES", data=knots.group_centres.astype(np.float64))
         f.create_dataset("REF_LOG10_FLIM", data=knots.ref_log10_flim.astype(np.float64))
 
@@ -552,10 +658,29 @@ def build(config, regions=None):
           f"cosmic_variance={counts_result['cosmic_variance_dex']:.4f} dex -> {counts_path}")
 
     flux_mjy_all, stell_all, ext_fl_all = read_swire_catalogue(config)
-    is_galaxy_all = classify_galaxy(stell_all, ext_fl_all)
+    print("gal: SWIRE pull carries no optical stellarity column (sky.download.swire.build.COLUMNS); "
+          "the stellarity split candidate reads IRAC 3.6um in its place")
+
+    split_label, is_galaxy_all, split_rows, none_passed = select_star_galaxy_split(
+        flux_mjy_all[:, IRAC_BAND_KEYS.index("I2")], stell_all, ext_fl_all,
+        fit, counts_result["cosmic_variance_dex"])
+    print("gal: star-galaxy split candidates (Fazio N(>S) reproduction at "
+          f"S={SPLIT_CRITERION_S_MJY} mJy, cosmic-variance band ="
+          f" {counts_result['cosmic_variance_dex']:.4f} dex):")
+    for r in split_rows:
+        ratio_str = ", ".join(f"{s}mJy={ratio:.3f}" for s, ratio in zip(SPLIT_CRITERION_S_MJY, r["ratio"]))
+        print(f"gal:   {r['label']}: n_removed={r['n_removed']} ratio(swire/fazio) [{ratio_str}] "
+              f"max|dex|={r['max_abs_dex']:.4f} passed={r['passed']}")
+    if none_passed:
+        print(f"gal: no split candidate reproduces Fazio's counts within the cosmic-variance band; "
+              f"adopting the smallest max|dex| candidate: {split_label}")
+    else:
+        print(f"gal: adopted split: {split_label} (least intervention among candidates meeting the standard)")
+    split_row = next(r for r in split_rows if r["label"] == split_label)
+
     n_star = int((~is_galaxy_all).sum())
-    print(f"gal: SWIRE: {flux_mjy_all.shape[0]} rows, {is_galaxy_all.sum()} classed galaxy, "
-          f"{n_star} classed star")
+    print(f"gal: SWIRE: {flux_mjy_all.shape[0]} rows, {is_galaxy_all.sum()} classed galaxy under "
+          f"{split_label}, {n_star} classed star")
 
     log10_s_grid = counts_result["log10_s_grid"]
     keep_idx, bin_idx = subsample_population(flux_mjy_all[is_galaxy_all], log10_s_grid)
@@ -566,6 +691,14 @@ def build(config, regions=None):
     print("gal: subsample: %d galaxies (cap %d/bin); fraction with a measured flux: %s" % (
         flux_mjy.shape[0], SUBSAMPLE_CAP_PER_BIN,
         ", ".join(f"{b}={frac_measured[j]:.3f}" for j, b in enumerate(IRAC_BAND_KEYS))))
+
+    # EPS_NO_REMOVAL's own population: candidate (c), no star removal at
+    # all (SPEC_PRIORS.md 5.1, "the selection fraction is also reported
+    # with no removal"), subsampled the same way.
+    keep_idx_nr, bin_idx_nr = subsample_population(flux_mjy_all, log10_s_grid)
+    flux_mjy_nr = flux_mjy_all[keep_idx_nr]
+    finite_irac_nr = np.isfinite(flux_mjy_nr) & (flux_mjy_nr > 0)
+    log10_flux_irac_nr = np.where(finite_irac_nr, np.log10(np.where(finite_irac_nr, flux_mjy_nr, 1.0)), -np.inf)
 
     a_nodes = column_grid_module.nodes(config)
     w_nodes = selection_module.law_dense_weight(a_nodes)
@@ -596,7 +729,10 @@ def build(config, regions=None):
         for s_check in (0.05, 0.5):
             e4, e2 = eps_at_survey_median(config, log10_flux_irac, finite_irac, bin_idx, log10_s_grid,
                                            a_check, s_check)
-            print(f"gal: survey-median eps(a={a_check}, S={s_check}mJy): 4-band={e4:.4f} 2-band={e2:.4f}")
+            e4_nr, _e2_nr = eps_at_survey_median(config, log10_flux_irac_nr, finite_irac_nr, bin_idx_nr,
+                                                  log10_s_grid, a_check, s_check)
+            print(f"gal: survey-median eps(a={a_check}, S={s_check}mJy): 4-band={e4:.4f} "
+                  f"2-band={e2:.4f} no_removal={e4_nr:.4f} (adopted split: {split_label})")
 
     max_2band_violation = 0.0
     max_monotone_violation = 0.0
@@ -604,6 +740,8 @@ def build(config, regions=None):
         knots, limit_log10 = region_irac_limits(config, region)
         eps, eps_2band, bin_counts = build_region_selection(
             a_nodes, kappa4_all, log10_flux_irac, finite_irac, bin_idx, log10_s_grid.size, limit_log10)
+        eps_no_removal, _eps_2band_nr, _bin_counts_nr = build_region_selection(
+            a_nodes, kappa4_all, log10_flux_irac_nr, finite_irac_nr, bin_idx_nr, log10_s_grid.size, limit_log10)
 
         max_2band_violation = max(max_2band_violation, float(np.max(eps_2band - eps)))
         d = np.diff(eps.astype(np.float64), axis=1)
@@ -612,12 +750,14 @@ def build(config, regions=None):
         S_lin = 10.0 ** log10_s_grid
         k_median = int(np.argsort(knots.group_centres[:, IRAC_BAND_KEYS.index("I2")])[knots.n_groups // 2])
         n_gal_region = float(np.trapz(counts_result["phi_s"] * eps[k_median, 0, :], S_lin))
+        n_gal_region_nr = float(np.trapz(counts_result["phi_s"] * eps_no_removal[k_median, 0, :], S_lin))
         fazio_at_median_limit = float(fit.cumulative(10.0 ** knots.ref_log10_flim[IRAC_BAND_IDX[
             IRAC_BAND_KEYS.index("I2")]]))
 
         path = config_module.product_path(config, "bms", "gal", "prior", "region", region=region)
-        write_region(path, a_nodes, log10_s_grid, eps, eps_2band, knots)
-        print(f"gal: {region}: K={knots.n_groups} N_GAL(a=0, median group)={n_gal_region:.1f} deg^-2 "
+        write_region(path, a_nodes, log10_s_grid, eps, eps_2band, eps_no_removal, knots, split_label, split_row)
+        print(f"gal: {region}: K={knots.n_groups} N_GAL(a=0, median group) adopted={n_gal_region:.1f} deg^-2 "
+              f"no_removal={n_gal_region_nr:.1f} deg^-2 "
               f"Fazio N(>region median I2 limit)={fazio_at_median_limit:.1f} deg^-2 -> {path}")
 
     print(f"gal: acceptance: max(EPS_2BAND - EPS)={max_2band_violation:.6g} "
