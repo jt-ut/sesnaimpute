@@ -1,27 +1,17 @@
-"""The column kernel `p(T | A_measured)` (SPEC_PRIORS.md section 1.2).
-
-The prior conditions on a beam-measured column. This module answers what
-the true pencil-beam column `T` can be, given that measurement, by
-composing three terms in order:
-
-  1. the arm's per-source measurement uncertainty (`A_COL_SIG_K`), served
-     as a scale mixture over nearby sources rather than one number per
-     column node -- the per-source width distribution is bimodal
-     (Herschel near-constant, Planck much wider), so a single node width
-     would misrepresent both populations;
-  2. the dispersion of true column within the beam, a property of cloud
-     structure that grows with column, evaluated at the arm's STATED beam
-     (36.3" Herschel, 301.52" Planck -- never a per-source roll-off beam,
-     spec 1.2's "the only place the sightline's width enters");
-  3. the Herschel field zero point, folded into the measurement sigma in
-     quadrature (`sigma_total = sqrt(sigma**2 + sigma_zp**2)`, Planck
-     carries no zero-point term).
-
-Every class's `a`-axis is convolved with this kernel once, at tabulation.
+"""The column kernel `p(T | A_measured)` (SPEC_PRIORS.md section 1.2):
+what the true pencil-beam column `T` can be given a beam measurement,
+composing three terms in order: (1) the arm's per-source measurement
+uncertainty (`A_COL_SIG_K`) as a scale mixture over nearby sources, since
+the per-source width is bimodal (Herschel near-constant, Planck much
+wider) and one node width would misrepresent both; (2) the dispersion of
+true column within the beam, growing with column, at the arm's STATED
+beam (36.3" Herschel, 301.52" Planck -- the only place the sightline's
+width enters); (3) the Herschel field zero point, folded into the
+measurement sigma in quadrature (Planck carries none). Every class's
+`a`-axis is convolved with this kernel once, at tabulation.
 """
 
 import glob
-import json
 import math
 import os
 import re
@@ -29,6 +19,8 @@ import re
 import h5py
 import numpy as np
 from scipy.special import erf
+
+from sesnaimpute import config as config_module
 
 # ====================================================================
 # Inputs
@@ -42,18 +34,12 @@ _OLD_DUST_COLUMN_DIR = (
     "herschel-planck_adopted-dust-columns")
 _ARM_PRODUCT_RE = re.compile(r"^dust_column_(planck_arm_.+|herschel_arm)\.hdf5$")
 
-_OLD_SUBBEAM_PATH = (
-    "/Users/jtaylor/Dropbox/Research/SESNA_Complete/sky/derived/region/"
-    "herschel-column-structure/herschel_column_structure.hdf5")
-_OLD_BLUR_SCALING_PATH = (
-    "/Users/jtaylor/Dropbox/Research/SESNA_Complete/bms/prior/staging/"
-    "herschel-region_blur_scaling.hdf5")
-
 #: The three beams the sub-beam conditional tables are tabulated at.
 _TABULATED = (("L108", 108.0), ("L302", 301.8), ("L821", 821.0))
-#: The `spread/table` column each map class's stated-beam width is pooled
-#: from (for `Kernel.second_moment`).
-_POOLED_WIDTH_COLUMN = {"herschel": "W_abs_36.3", "planck": "W_abs_302"}
+#: A conditioning-column (KA) bin with fewer counts than this in the
+#: persisted 2-D histogram carries no resolvable quantile -- the same
+#: floor `sky.derived.subbeam.quant()` uses.
+_MIN_KERNEL_COUNTS = 200.0
 
 #: The two beams the sub-beam term is ever evaluated at (spec 1.2).
 STATED_BEAM_ARCSEC = {"herschel": 36.3, "planck": 301.52072}
@@ -64,8 +50,8 @@ def _load_source_columns(dust_column_dir=_OLD_DUST_COLUMN_DIR):
     per-source uncertainty, and its arm code (0 Herschel / 1 Planck),
     concatenated over every region's `dust_column_<region>.hdf5`.
 
-    repoint when <catalog/source columns> product lands: reads the OLD
-    per-region files directly; the new catalog product replaces this glob.
+    repoint when sky/derived/column lands: reads the OLD per-region files
+    directly; the new catalog product replaces this glob.
     """
     paths = sorted(
         p for p in glob.glob(os.path.join(dust_column_dir, "dust_column_*.hdf5"))
@@ -83,52 +69,71 @@ def _load_source_columns(dust_column_dir=_OLD_DUST_COLUMN_DIR):
     return np.concatenate(col), np.concatenate(sig), np.concatenate(code)
 
 
-def _load_subbeam_and_scaling(subbeam_path=_OLD_SUBBEAM_PATH,
-                              blur_scaling_path=_OLD_BLUR_SCALING_PATH):
-    """`(conditional, spread, scalars, sigma_zp_ak)`: the sub-beam
-    conditional quantile tables and the region-pooled spread table (both
-    from the sub-beam product), and the per-region beam-scaling exponents
-    plus the Herschel field zero point (from the blur-scaling product).
-
-    repoint when <sky/derived/subbeam region> product lands: reads the OLD
-    `herschel_column_structure.hdf5` (conditional tables, spread table)
-    and the OLD `blur_scaling.hdf5` (scalars, field zero point) exactly as
-    `blur.SubbeamKernel.__init__` and `acol_kernel._pooled_subbeam_widths`
-    read them; the new sub-beam product folds both into one region file.
+def _conditional_table(kern2d, ka_col, kd_col):
+    """`(table, ci)` in `_RegionKernel`'s own shape, built from one
+    region's persisted KA x KD count histogram at one tabulated beam:
+    per occupied KA bin, `(A_HERSCHEL_SMOOTH_K, median_d, q16, q84, q99)`
+    read off the bin's own KD cumulative distribution. A KA bin with fewer
+    than `_MIN_KERNEL_COUNTS` counts has no resolvable quantile and is
+    dropped, not filled with an invented value.
     """
-    conditional = {}
-    with h5py.File(subbeam_path, "r") as f:
-        regions = list(f["per_region"].keys())
-        for reg in regions:
-            tables = {}
-            for lab, _ in _TABULATED:
-                d = f["per_region/%s/conditional/%s" % (reg, lab)]
-                cols = json.loads(d.attrs["columns"])
-                ci = {c: i for i, c in enumerate(cols)}
-                tables[lab] = (d[:], ci)
-            conditional[reg] = tables
-        columns = json.loads(f["spread"].attrs["columns"])
-        ci_spread = {c: i for i, c in enumerate(columns)}
-        spread_regions = [r.decode() if isinstance(r, bytes) else r
-                          for r in f["spread/region"][:]]
-        spread_table = f["spread/table"][:]
+    counts = kern2d.astype(np.float64)
+    tot = counts.sum(axis=1)
+    good = tot >= _MIN_KERNEL_COUNTS
+    cdf = np.cumsum(counts[good], axis=1) / tot[good, None]
+    q = np.array([np.interp([0.50, 0.16, 0.84, 0.99], cdf[i], kd_col)
+                  for i in range(cdf.shape[0])])
+    table = np.column_stack([ka_col[good], q])
+    ci = {"A_HERSCHEL_SMOOTH_K": 0, "median_d": 1, "q16": 2, "q84": 3, "q99": 4}
+    return table, ci
 
-    with h5py.File(blur_scaling_path, "r") as f:
-        sigma_zp_ak = float(f["field_zeropoint"].attrs["sigma_zp_ak"])
-        scalars = {}
-        for reg in regions:
-            a = f["per_region/" + reg].attrs
-            scalars[reg] = dict(
-                beta=float(a["beta"]), W_abs_36p3=float(a["W_abs_36p3"]),
-                completion_L108=float(a["completion_L108"]),
-                completion_L302=float(a["completion_L302"]),
-                completion_L821=float(a["completion_L821"]),
-                med_off_302=float(a["med_off_302"]),
-                offset_powerlaw_p=float(a["offset_powerlaw_p"]))
 
-    spread = {"columns": ci_spread, "regions": spread_regions,
-              "table": spread_table}
-    return regions, conditional, spread, scalars, sigma_zp_ak
+def _load_subbeam_and_scaling(config):
+    """`(regions, conditional, scalars, w_herschel_36p3, w_planck_301p8)`:
+    everything the sub-beam kernel needs, read from the one
+    `sky/derived/herschel/subbeam/region` product -- the per-region
+    beam-rescaling and offset-rescaling scalars, the two map classes'
+    pooled `W_abs` at their stated beams, and the column-conditional
+    kernel tables at the three tabulated beams (built here from the
+    product's persisted KA x KD count histograms; see
+    `sky.derived.subbeam.build`).
+
+    The Herschel field zero point (formerly `blur_scaling.hdf5`) is not
+    yet a measured quantity in this pipeline -- `load` below zeroes it
+    rather than blocking on a product that does not exist.
+    """
+    path = config_module.product_path(config, "sky/derived", "herschel",
+                                      "subbeam", "region")
+    with h5py.File(path, "r") as f:
+        regions = [r.decode() if isinstance(r, bytes) else r
+                  for r in f["REGION"][:]]
+        ka_edges, kd_edges = f["KA_EDGES"][:], f["KD_EDGES"][:]
+        ka_col = np.exp(0.5 * (ka_edges[:-1] + ka_edges[1:]))
+        kd_col = 0.5 * (kd_edges[:-1] + kd_edges[1:])
+        scales, qs = f["SCALES"][:], f["QS"][:]
+        i302 = int(np.argmin(np.abs(scales - 301.8)))
+        i_med = int(np.argmin(np.abs(qs - 0.50)))
+        cond_quant = f["COND_QUANTILES"][:]        # (n_region, n_scale, n_q)
+        w_36p3, w_302 = f["W_ABS_36P3"][:], f["W_ABS_L302"][:]
+        beta = f["BETA"][:]
+        comp108, comp302, comp821 = (f["COMPLETION_L108"][:],
+                                     f["COMPLETION_L302"][:],
+                                     f["COMPLETION_L821"][:])
+        offset_p = f["OFFSET_EXPONENT"][:]
+        kern = {lab: f["COND_KERNEL_%s" % lab][:] for lab, _ in _TABULATED}
+
+    scalars, conditional = {}, {}
+    for i, reg in enumerate(regions):
+        scalars[reg] = dict(
+            beta=float(beta[i]), W_abs_36p3=float(w_36p3[i]),
+            completion_L108=float(comp108[i]), completion_L302=float(comp302[i]),
+            completion_L821=float(comp821[i]),
+            med_off_302=float(cond_quant[i, i302, i_med]),
+            offset_powerlaw_p=float(offset_p[i]))
+        conditional[reg] = {lab: _conditional_table(kern[lab][i], ka_col, kd_col)
+                            for lab, _ in _TABULATED}
+    return (regions, conditional, scalars,
+           float(np.mean(w_36p3)), float(np.mean(w_302)))
 
 
 # ====================================================================
@@ -412,11 +417,9 @@ class _RegionKernel(object):
 class _SubbeamKernel(object):
     """`p(T | column, beam)`: the sub-beam term, marginalised over the
     Herschel-region spread as an equal-weight mixture (region labels are
-    never a conditioning variable). Below the smallest column any region's
-    conditional table was measured at, the conditioning column is floored
-    -- `s = ln(T) - ln(column)` is a log-ratio that diverges as the
-    conditioning column falls toward zero.
-    """
+    never a conditioning variable). Floored at the smallest column any
+    region's conditional table was measured at -- `s = ln(T) - ln(column)`
+    diverges as the conditioning column falls toward zero."""
 
     def __init__(self, regions, conditional, scalars):
         self._kernels = []
@@ -574,12 +577,9 @@ class Kernel(object):
 
     def _compose_gaussian_blur_batch(self, columns, sigma_meas, beam, n=None):
         """`(t, w)`, each `(M, n)`: row `i` is `p(T) = Integral K_subbeam(T
-        | A', beam) N(A'; columns[i], sigma_meas[i]) dA'`, the measurement
-        blur (already carrying the zero point in quadrature) composed
-        with the sub-beam kernel by Gauss-Hermite quadrature. A row with
-        `sigma_meas <= 0` is the exact special case: the sub-beam kernel's
-        own density at `columns[i]`, no quadrature.
-        """
+        | A', beam) N(A'; columns[i], sigma_meas[i]) dA'` by Gauss-Hermite
+        quadrature. `sigma_meas <= 0` is the exact special case: the
+        sub-beam kernel's own density at `columns[i]`, no quadrature."""
         columns = np.asarray(columns, dtype=float)
         sigma_meas = np.asarray(sigma_meas, dtype=float)
         floor = self._subbeam.min_conditioning_column_ak
@@ -630,10 +630,8 @@ class Kernel(object):
     # -- public: the quadrature form, batched over sources -------------
     def per_sources(self, columns, sigma, map_class, n=None):
         """`(t, w)`, each `(M, n)`: the measurement blur (the source's own
-        `sigma`, with the Herschel field zero point folded in in
-        quadrature) composed with the sub-beam kernel at `map_class`'s
-        stated beam. Weights sum to 1 per row.
-        """
+        `sigma`, zero point folded in) composed with the sub-beam kernel
+        at `map_class`'s stated beam. Weights sum to 1 per row."""
         if map_class not in STATED_BEAM_ARCSEC:
             raise ValueError("map_class must be one of %r, got %r"
                              % (sorted(STATED_BEAM_ARCSEC), map_class))
@@ -650,12 +648,10 @@ class Kernel(object):
     def nodes(self, column, map_class, n=None):
         """`(t, w)` on `T`: the node-tabulated composed kernel at column
         node `column` -- the measurement blur's own scale-mixture
-        components at this node (`ColumnSigmaKernel.components`), each
-        composed with the sub-beam kernel by Gauss-Hermite quadrature and
-        combined by its own mixture weight. The Herschel field zero point
-        is folded into every component in quadrature (the marginal
-        route), matching `.per_sources`.
-        """
+        components (`ColumnSigmaKernel.components`), each composed with
+        the sub-beam kernel by Gauss-Hermite quadrature and combined by
+        its own mixture weight, zero point folded in (matching
+        `.per_sources`)."""
         if map_class not in STATED_BEAM_ARCSEC:
             raise ValueError("map_class must be one of %r, got %r"
                              % (sorted(STATED_BEAM_ARCSEC), map_class))
@@ -739,28 +735,18 @@ class Kernel(object):
         return var.reshape(np.shape(A)) if np.ndim(A) else float(var[0])
 
 
-def _pooled_subbeam_widths(spread):
-    """`(w_herschel_36p3, w_planck_301p8)`: the unweighted arithmetic mean,
-    over every Herschel-covered region, of that region's own `W_abs` at
-    each map class's stated beam -- the widths `Kernel.second_moment`
-    mixes over map class.
-    """
-    table, ci = spread["table"], spread["columns"]
-    pooled = {}
-    for map_class, col in _POOLED_WIDTH_COLUMN.items():
-        pooled[map_class] = float(np.mean(table[:, ci[col]]))
-    return pooled["herschel"], pooled["planck"]
-
-
 def load(config):
     """Builds the composed column kernel from the survey's adopted-column
-    products and sub-beam/blur-scaling products (SPEC_PRIORS.md 1.2)."""
+    products and the sub-beam region product (SPEC_PRIORS.md 1.2)."""
     column, sigma, code = _load_source_columns()
     acol = ColumnSigmaKernel(column, sigma, code)
 
-    regions, conditional, spread, scalars, sigma_zp_ak = \
-        _load_subbeam_and_scaling()
+    regions, conditional, scalars, w_herschel_36p3, w_planck_301p8 = \
+        _load_subbeam_and_scaling(config)
     subbeam = _SubbeamKernel(regions, conditional, scalars)
-    w_herschel_36p3, w_planck_301p8 = _pooled_subbeam_widths(spread)
+
+    # Not yet measured by this pipeline (formerly blur_scaling.hdf5) --
+    # zeroed, not blocked on.
+    sigma_zp_ak = 0.0
 
     return Kernel(acol, subbeam, sigma_zp_ak, w_herschel_36p3, w_planck_301p8)
