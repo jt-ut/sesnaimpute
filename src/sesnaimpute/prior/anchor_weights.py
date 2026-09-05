@@ -27,9 +27,13 @@ weighted pooled observed-over-predicted ratio, over every populated bin
 on both anchors, departs from the region's MEDIAN of that same statistic
 by more than `CLUSTER_EXCLUSION_BAND_DEX` (quarry
 `anchor_reweighting.cluster_excluded_tiles`, lifted); (ii) the tile
-overlaps a Hunt & Reffert 2023 cluster (A&A 673, A114; VizieR
-J/A+A/673/A114, `sky/download/hunt_reffert2023/clusters.dat.gz`) within
-its own tidal radius `rt` plus half the tile's own side (`L_STAR_DEG/2`).
+overlaps a Hunt & Reffert 2023 bound cluster (A&A 673, A114; VizieR
+J/A+A/673/A114, `sky/download/hunt_reffert2023/clusters.dat.gz`; their
+`Type` "o" open or "g" globular, not the unbound moving groups "m")
+within its own measured total radius `rtot` plus half the tile's own
+side (`L_STAR_DEG/2`); their fitted tidal radius `rt` is an approximate
+estimate that runs to 20-54 degrees for 25 entries and would mask whole
+regions (owner, 2026-09-05).
 An excluded tile is masked out of both fits -- it contributes nothing to
 the region-pooled value other tiles shrink toward -- and, being masked,
 its own stored weight IS that region-pooled value (never 1.0, per
@@ -89,10 +93,18 @@ EXCLUSION_BOTH = 3
 
 #: Hunt & Reffert 2023 (A&A 673, A114) `clusters.dat.gz`'s own byte
 #: layout (its ReadMe, "Byte-by-byte Description of file: clusters.dat"):
-#: Name (1-20), GLON (339-350, deg), GLAT (352-362, deg), rt (388-398,
-#: deg, tidal radius) -- 0-based half-open `pandas.read_fwf` colspecs.
-_CLUSTER_COLSPECS = [(0, 20), (338, 350), (351, 362), (387, 398)]
-_CLUSTER_NAMES = ["NAME", "GLON", "GLAT", "RT_DEG"]
+#: Name (1-20), Type (274, "o" open / "g" globular / "m" unbound moving
+#: group), GLON (339-350, deg), GLAT (352-362, deg), rtot (400-410, deg,
+#: the cluster's measured total radius, the radius of its outermost
+#: member -- their fitted tidal radius `rt` is an approximate estimate
+#: that runs to 20-54 degrees for 25 entries and would mask whole
+#: regions, owner 2026-09-05) -- 0-based half-open `pandas.read_fwf`
+#: colspecs.
+_CLUSTER_COLSPECS = [(0, 20), (273, 274), (338, 350), (351, 362), (399, 410)]
+_CLUSTER_NAMES = ["NAME", "TYPE", "GLON", "GLAT", "RTOT_DEG"]
+#: decision 4(ii): only bound clusters count as a mask; Hunt & Reffert's
+#: unbound moving groups ("m") are not clusters an anchor star avoids.
+_CLUSTER_TYPES_KEPT = ("o", "g")
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +242,10 @@ def cluster_excluded_by_ratio(n_obs_gaia, n_pred_gaia, n_obs_ks, n_pred_ks,
 # ---------------------------------------------------------------------------
 
 def _read_hunt_reffert_clusters(config):
+    """Bound clusters only (`Type` in "o" open, "g" globular; the unbound
+    moving groups "m" are dropped), by their measured total radius
+    `rtot` (SPEC_PRIORS.md section 2.1, "cluster exclusion", as amended
+    2026-09-05)."""
     path = f"{config.data_root}/sky/download/hunt_reffert2023/clusters.dat.gz"
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -237,14 +253,16 @@ def _read_hunt_reffert_clusters(config):
             f"{path} -- run `sesnaimpute.sky.download.hunt_reffert2023.build` first")
     df = pd.read_fwf(path, colspecs=_CLUSTER_COLSPECS, names=_CLUSTER_NAMES,
                       header=None, dtype=str, compression="gzip")
-    for col in ("GLON", "GLAT", "RT_DEG"):
+    df["TYPE"] = df["TYPE"].str.strip()
+    for col in ("GLON", "GLAT", "RTOT_DEG"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
-    ok = np.isfinite(df["GLON"]) & np.isfinite(df["GLAT"]) & np.isfinite(df["RT_DEG"])
+    ok = (df["TYPE"].isin(_CLUSTER_TYPES_KEPT) & np.isfinite(df["GLON"])
+          & np.isfinite(df["GLAT"]) & np.isfinite(df["RTOT_DEG"]))
     df = df[ok]
     return dict(name=df["NAME"].str.strip().to_numpy(dtype=str),
                 glon=df["GLON"].to_numpy(dtype=np.float64),
                 glat=df["GLAT"].to_numpy(dtype=np.float64),
-                rt_deg=df["RT_DEG"].to_numpy(dtype=np.float64))
+                rtot_deg=df["RTOT_DEG"].to_numpy(dtype=np.float64))
 
 
 def _angular_sep_deg(l1_deg, b1_deg, l2_deg, b2_deg):
@@ -261,17 +279,19 @@ def _angular_sep_deg(l1_deg, b1_deg, l2_deg, b2_deg):
 
 def cluster_excluded_tiles(tile_l_deg, tile_b_deg, l_star_deg, clusters):
     """Decision 4(ii): a tile whose centre sits within a Hunt & Reffert
-    2023 cluster's own tidal radius `rt` PLUS half the tile's own side
-    (`l_star_deg / 2`, this region's tile grid resolution -- module
-    docstring's "tile centre within rt plus half the tile's own
-    extent"). Returns the exclusion mask and, per tile, the name of the
-    nearest satisfying cluster (empty string where none).
+    2023 bound cluster's own measured total radius `rtot` PLUS half the
+    tile's own side (`l_star_deg / 2`, this region's tile grid resolution
+    -- module docstring's "tile centre within rtot plus half the tile's
+    own extent"). `clusters` already carries only `Type` "o"/"g" entries
+    (`_read_hunt_reffert_clusters`). Returns the exclusion mask and, per
+    tile, the name of the nearest satisfying cluster (empty string where
+    none).
     """
     n_t = tile_l_deg.size
     half_extent = 0.5 * float(l_star_deg)
     sep = _angular_sep_deg(tile_l_deg[:, None], tile_b_deg[:, None],
                             clusters["glon"][None, :], clusters["glat"][None, :])
-    margin = sep - (clusters["rt_deg"][None, :] + half_extent)
+    margin = sep - (clusters["rtot_deg"][None, :] + half_extent)
     inside = margin <= 0.0
     excluded = inside.any(axis=1)
     nearest = np.full(n_t, "", dtype=object)
