@@ -272,6 +272,7 @@ def build_region(config, region, atmosphere):
     log_teff = df["logTe"].to_numpy(dtype=np.float64)
     logg = df["logg"].to_numpy(dtype=np.float64)
     mh = df["[M/H]"].to_numpy(dtype=np.float64)
+    log_l = df["logL"].to_numpy(dtype=np.float64)
     ks_mag = df["Ks"].to_numpy(dtype=np.float64)
 
     idx, match_dist = match_templates(10.0 ** log_teff, logg, mh, atmosphere["grid"])
@@ -303,6 +304,7 @@ def build_region(config, region, atmosphere):
             log_teff=log_teff[keep],
             log_g=logg[keep],
             mh=mh[keep],
+            log_l=log_l[keep],
             fnu_mjy=flux[keep],
             g_proxy=g_proxy[keep],
             ks_mag=ks_mag[keep],
@@ -328,6 +330,7 @@ def write_region(path, region, result):
         f.create_dataset("LOG_TEFF", data=ret["log_teff"].astype(np.float32))
         f.create_dataset("LOG_G", data=ret["log_g"].astype(np.float32))
         f.create_dataset("MH", data=ret["mh"].astype(np.float32))
+        f.create_dataset("LOG_L", data=ret["log_l"].astype(np.float32))
         f.create_dataset("FNU_MJY", data=ret["fnu_mjy"].astype(np.float32))
         f.create_dataset("G_PROXY", data=ret["g_proxy"].astype(np.float32))
         f.create_dataset("KS_MAG", data=ret["ks_mag"].astype(np.float32))

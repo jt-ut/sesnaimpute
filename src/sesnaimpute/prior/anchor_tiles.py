@@ -109,6 +109,25 @@ def gaia_detection_weight(g_obs):
     return 1.0 / (1.0 + np.exp(-(GAIA_G_LIM_MAG - g_obs) / GAIA_G_ROLLOFF_MAG))
 
 
+def magnitudes_at_extinction(a_local, g_proxy, ks_mag, k_g_diffuse, k_g_dense,
+                              r_diffuse, r_dense):
+    """`(G_obs, Ks_obs)` for a population already placed at its own local
+    extinction `a_local` (module docstring, "the Gaia dimming
+    coefficient"): `Ks_obs` dims by `a_local` exactly (the project's own
+    currency); `G_obs` dims by `a_local` through the star's own
+    diffuse/dense `A_G/A_K` coefficient, blended by the section 1.3 ramp
+    at that same local column. The one place this project turns a star's
+    own local column into its two anchor magnitudes; `anchor_observables`
+    below and `prior.star_population`'s per-tile placement both call it.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = selection.law_dense_weight(a_local)
+    kappa_g = (1.0 - w) * (k_g_diffuse / r_diffuse) + w * (k_g_dense / r_dense)
+    g_obs = g_proxy + a_local * kappa_g
+    ks_obs = ks_mag + a_local
+    return g_obs, ks_obs
+
+
 def anchor_observables(dist_pc, g_proxy, ks_mag, k_g_diffuse, k_g_dense,
                         profile_obj, parent_hpx256, a_pix_k, r_diffuse, r_dense):
     """`(G_obs, Ks_obs)` for the region's raw population placed at one
@@ -117,18 +136,12 @@ def anchor_observables(dist_pc, g_proxy, ks_mag, k_g_diffuse, k_g_dense,
     `profile.a_of_d(d, hpx_pix=parent, total_column_ak=a_pix_k)` already
     returns the star's own local extinction `a_local = a_pix_k * u(d)`
     (SPEC_PRIORS.md section 1.4): `u` never has to be read back out and
-    multiplied through separately. `Ks_obs` dims by `a_local` exactly
-    (the project's own currency); `G_obs` dims by `a_local` through the
-    star's own diffuse/dense `A_G/A_K` coefficient, blended by the
-    section 1.3 ramp at that same local column (module docstring).
+    multiplied through separately. `magnitudes_at_extinction` turns that
+    `a_local` into the two anchor magnitudes.
     """
     a_local = profile_obj.a_of_d(dist_pc, hpx_pix=parent_hpx256, total_column_ak=a_pix_k)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        w = selection.law_dense_weight(a_local)
-    kappa_g = (1.0 - w) * (k_g_diffuse / r_diffuse) + w * (k_g_dense / r_dense)
-    g_obs = g_proxy + a_local * kappa_g
-    ks_obs = ks_mag + a_local
-    return g_obs, ks_obs
+    return magnitudes_at_extinction(a_local, g_proxy, ks_mag, k_g_diffuse, k_g_dense,
+                                     r_diffuse, r_dense)
 
 
 # ---------------------------------------------------------------------------
