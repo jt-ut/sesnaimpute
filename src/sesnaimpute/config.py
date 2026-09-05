@@ -11,7 +11,7 @@ from types import MappingProxyType
 
 from sesnaimpute import definitions
 
-_AREAS = ("sky/download", "sky/derived", "catalog", "bms")
+_AREAS = ("sky/download", "sky/derived", "catalog", "granules", "bms")
 
 
 @dataclass(frozen=True)
@@ -29,15 +29,22 @@ def load(path):
     return Config(data_root=data_root, inputs=inputs)
 
 
-def product_path(config, area, source, quantity, granule):
-    """Returns `<data_root>/<area>/<source>/<quantity>_<source>_<granule>.hdf5`.
+def product_path(config, area, source, quantity, granule, region=None):
+    """Returns the one place a product lives:
 
-    `area` is one of "sky/download", "sky/derived", "catalog", "bms".
-    `granule` must be one of `definitions.GRANULES`.
+        <data_root>/<area>/<source>/<quantity>_<source>_<granule>.hdf5
+
+    or, for a per-region product, with `__<Region>` before the extension,
+    the region name verbatim. `area` is one of "sky/download", "sky/derived",
+    "catalog", "granules", "bms". `granule` must be one of
+    `definitions.GRANULES`. Every build writes here and every reader reads
+    here; nothing else encodes the tree.
     """
     if area not in _AREAS:
         raise ValueError(f"product_path: unknown area {area!r}, must be one of {_AREAS}")
     if granule not in definitions.GRANULES:
         raise ValueError(f"product_path: unknown granule {granule!r}, must be one of {definitions.GRANULES}")
-    filename = f"{quantity}_{source}_{granule}.hdf5"
-    return f"{config.data_root}/{area}/{source}/{filename}"
+    stem = f"{quantity}_{source}_{granule}"
+    if region is not None:
+        stem = f"{stem}__{region}"
+    return f"{config.data_root}/{area}/{source}/{stem}.hdf5"
