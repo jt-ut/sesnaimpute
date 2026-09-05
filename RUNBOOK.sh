@@ -70,6 +70,7 @@ $PY -m sesnaimpute.sky.derived.profile $CONFIG
 # table.
 $PY -m sesnaimpute.prior.column_grid $CONFIG
 $PY -m sesnaimpute.prior.field_stars $CONFIG
+$PY -m sesnaimpute.prior.pahc_curve $CONFIG   # PAHC contamination P(q), survey-wide (SPEC_PRIORS.md sec 4)
 $PY -m sesnaimpute.prior.anchor_tiles $CONFIG
 $PY -m sesnaimpute.prior.depth_groups $CONFIG
 $PY -m sesnaimpute.prior.yso $CONFIG   # YSO law count + per-sightline shape (SPEC_PRIORS.md sec 6.1, 6.3)
