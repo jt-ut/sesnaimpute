@@ -32,14 +32,6 @@ $PY -m sesnaimpute.sky.download.fazio2004.build $CONFIG
 # (Froebrich+2015, MNRAS 454, 2586, behind institutional auth) -- no
 # reachable URL for any of the four; acquire by hand and place verbatim
 # at sky/download/h2_knot_surveys/.
-# --- sky derived ---
-# sky/derived/<source>/ -- one product per computation from those bytes.
-# Derive never fetches.
-$PY -m sesnaimpute.sky.derived.herschel_column $CONFIG
-$PY -m sesnaimpute.granules.build $CONFIG
-# TODO: move below the planck sightline column build once its RUNBOOK line lands (profile.build reads its product).
-$PY -m sesnaimpute.sky.derived.profile $CONFIG   # writes profile_edenhofer_sightline and depth_edenhofer_region together, one build
-
 # --- catalog ---
 # catalog/ -- reads only SESNA: curated catalogues, survey depths, the
 # sigma model.
@@ -58,6 +50,18 @@ $PY -m sesnaimpute.sky.derived.planck_column $CONFIG
 
 $PY -m sesnaimpute.sky.derived.planck_source_column $CONFIG
 $PY -m sesnaimpute.sky.derived.column $CONFIG
+
+# --- sky derived ---
+# sky/derived/<source>/ -- one product per computation from those bytes.
+# Derive never fetches. Reads SESNA positions and region membership from
+# the curated catalogue above, never SESNA fluxes.
+$PY -m sesnaimpute.granules.build $CONFIG
+$PY -m sesnaimpute.sky.derived.subbeam $CONFIG
+$PY -m sesnaimpute.sky.derived.herschel_column $CONFIG
+$PY -m sesnaimpute.sky.derived.planck_column $CONFIG
+$PY -m sesnaimpute.sky.derived.planck_source_column $CONFIG
+$PY -m sesnaimpute.sky.derived.column $CONFIG
+$PY -m sesnaimpute.sky.derived.profile $CONFIG
 
 # --- prior ---
 # bms/ prior products: column kernel, PAHC curve, column grid, depth
