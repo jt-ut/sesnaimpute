@@ -95,7 +95,8 @@ region's PAHC limit grid; one HDF5 group `tile_<id>` per tile with
 datasets `STAR_INDEX` (row into `prior.field_stars`' retained group),
 `U`, `A`, `W`, `WEIGHT_RULE`, `W_STAR`, `W_AGB`, `IS_EVOLVED`, `LOG10_B`,
 `LOG10_B_PAHC`, `LOG10_B_AGB_C`, `LOG10_B_AGB_O`, `P_PAHC` (n_star, 8),
-and attrs `A_TILE_K`, `N_SIGHTLINES`.
+`LOG10_Q0` (the star's own 8um contrast at unit limit, `prior.star_shapes`'
+PAHC shape axis), and attrs `A_TILE_K`, `N_SIGHTLINES`.
 """
 
 import os
@@ -464,15 +465,19 @@ def pahc_limit_grid_mjy(config, region):
 
 
 def pahc_contamination_weight(fnu_8um, a_i, limit_grid_mjy, config, curve):
-    """`P_PAHC`, `(n_star, 8)` (spec section 4): per star and per grid
-    limit, `q = F_lim,8 / (F_i(8um)` dimmed by the star's own tile
-    extinction`)`, `P(q)` read off the measured curve
-    (`prior.pahc_curve.read`)."""
+    """`(P_PAHC, LOG10_Q0)` (spec section 4; `prior.star_shapes`'s own
+    `q_0,i = 1 / (F_i(8um)` dimmed by the star's own tile extinction`)`,
+    the contrast a limit of 1 mJy would see): per star and per grid limit,
+    `q = F_lim,8 / (F_i(8um)` dimmed`)`, `P(q)` read off the measured
+    curve (`prior.pahc_curve.read`); `LOG10_Q0` is the same dimmed flux's
+    own reciprocal, limit-independent, so `prior.star_shapes` can apply
+    any source's own limit at read time without a limit grid."""
     w_dense = selection.law_dense_weight(a_i)
     kappa_8 = selection.kappa_hybrid(config, w_dense)[:, IDX_I4]
     dimmed_flux_8 = fnu_8um * 10.0 ** (-0.4 * a_i * kappa_8)
     q = limit_grid_mjy[None, :] / dimmed_flux_8[:, None]
-    return curve(np.log10(q))
+    log10_q0 = -np.log10(dimmed_flux_8)
+    return curve(np.log10(q)), log10_q0
 
 
 # ---------------------------------------------------------------------------
@@ -612,7 +617,7 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
 
     # PAHC's own weight (spec section 4): the star's own tile extinction
     # `a_i` dims its intrinsic 8um flux before the contrast `q` is formed.
-    p_pahc = pahc_contamination_weight(
+    p_pahc, log10_q0 = pahc_contamination_weight(
         stars["fnu_mjy"][:, IDX_I4], a_i, stars["limit_grid_mjy"], config, curve)
 
     return dict(
@@ -621,7 +626,7 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
         u=u_i.astype(np.float32), a=a_i.astype(np.float32),
         w=w.astype(np.float32), rule=rule,
         w_star=w_star.astype(np.float32), w_agb=w_agb.astype(np.float32),
-        p_pahc=p_pahc.astype(np.float32),
+        p_pahc=p_pahc.astype(np.float32), log10_q0=log10_q0.astype(np.float32),
         mean_u=mean_u, use_joint_any=bool(weights["use_joint"][t].any()),
         w_g=w_g, w_ks=w_ks, bin_g=bin_g, bin_ks=bin_ks,
     )
@@ -708,6 +713,7 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c, l_o_lsun, n_riebe
             grp.create_dataset("LOG10_B_AGB_C", data=result["log10_b_agb_c"].astype(np.float32))
             grp.create_dataset("LOG10_B_AGB_O", data=result["log10_b_agb_o"].astype(np.float32))
             grp.create_dataset("P_PAHC", data=tile_result["p_pahc"])
+            grp.create_dataset("LOG10_Q0", data=tile_result["log10_q0"])
     return path
 
 
