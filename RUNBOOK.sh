@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# RUNBOOK.sh -- the only orchestration for sesnaimpute.
+#
+# This file's line order IS the dependency order: each stage below reads
+# only the products of stages already listed above it. Each line
+# overwrites its own product. A manual, one-off acquisition appears as a
+# comment line carrying the exact URL and destination, not as a script
+# step. A build whose input file is missing fails with one sentence
+# naming the RUNBOOK line that makes it -- that is the only existence
+# check in this pipeline.
+set -euo pipefail
+
+PY=/usr/local/bin/python3.9
+CONFIG=/Users/jtaylor/Dropbox/Research/SESNA_Complete/config/root.cfg
+
+# --- downloads ---
+# sky/download/<source>/ -- external bytes, verbatim. Download never computes.
+
+# --- sky derived ---
+# sky/derived/<source>/ -- one product per computation from those bytes.
+# Derive never fetches.
+
+# --- catalog ---
+# catalog/ -- reads only SESNA: curated catalogues, survey depths, the
+# sigma model.
+
+# --- prior ---
+# bms/ prior products: column kernel, PAHC curve, column grid, depth
+# groups, field stars, anchor weights, the per-class priors and
+# selection tables, the prior table.
+
+# --- fit ---
+# bms/ posterior fit of class and subclass probabilities from the prior
+# table.
+
+# --- impute ---
+# bms/ final impute decisions and diagnostics.
