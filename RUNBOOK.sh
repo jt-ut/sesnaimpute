@@ -15,6 +15,9 @@ CONFIG=/Users/jtaylor/Dropbox/Research/SESNA_Complete/config/root.cfg
 
 # --- downloads ---
 # sky/download/<source>/ -- external bytes, verbatim. Download never computes.
+$PY -m sesnaimpute.sky.download.hunt_reffert2023.build $CONFIG
+$PY -m sesnaimpute.sky.download.baraffe2015_bhac15.build $CONFIG
+$PY -m sesnaimpute.sky.download.riebel2012.build $CONFIG
 
 # --- sky derived ---
 # sky/derived/<source>/ -- one product per computation from those bytes.
