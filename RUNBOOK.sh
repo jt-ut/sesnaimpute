@@ -23,6 +23,9 @@ CONFIG=/Users/jtaylor/Dropbox/Research/SESNA_Complete/config/root.cfg
 # --- catalog ---
 # catalog/ -- reads only SESNA: curated catalogues, survey depths, the
 # sigma model.
+$PY -m sesnaimpute.catalog.curated $CONFIG
+$PY -m sesnaimpute.catalog.depths $CONFIG
+# limits.py has no build: catalog.limits.limits(config, region) reads curated + depths.
 
 # --- prior ---
 # bms/ prior products: column kernel, PAHC curve, column grid, depth
