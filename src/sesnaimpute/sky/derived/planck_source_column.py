@@ -36,11 +36,11 @@ _MAP_CACHE = {}
 
 def _planck_map_path(config):
     import glob
-    found = sorted(glob.glob(os.path.join(config.data_root, "sky/download/planck-r120", "*.fits")))
+    found = sorted(glob.glob(os.path.join(config.data_root, "sky/download/planck_r120", "*.fits")))
     if not found:
         raise FileNotFoundError(
             "sky.derived.planck_source_column.build: no Planck R1.20 FITS map under "
-            f"{config.data_root}/sky/download/planck-r120 -- run the Planck R1.20 download RUNBOOK line"
+            f"{config.data_root}/sky/download/planck_r120 -- run the Planck R1.20 download RUNBOOK line"
         )
     return found[0]
 

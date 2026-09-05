@@ -84,10 +84,10 @@ BEAM_LADDER = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0,
 
 
 def _planck_path(config):
-    files = sorted(glob.glob(f"{config.data_root}/sky/download/planck-r120/*.fits"))
+    files = sorted(glob.glob(f"{config.data_root}/sky/download/planck_r120/*.fits"))
     if not files:
         raise FileNotFoundError(
-            "planck_column: no Planck R1.20 FITS under sky/download/planck-r120")
+            "planck_column: no Planck R1.20 FITS under sky/download/planck_r120")
     return files[0]
 
 

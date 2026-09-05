@@ -74,7 +74,7 @@ MODE_DISC = 1
 
 
 def _input_dir(config):
-    return f"{config.data_root}/sky/download/edenhofer-profile-inputs"
+    return f"{config.data_root}/sky/download/edenhofer2023"
 
 
 def read_zgr23_extinction_curve(path):
@@ -564,8 +564,15 @@ def _build_one_region(config, region, canon, input_dir):
     a_inf = _join_total_column(config, region, admitted_pix)
     gl, gb = hp.pix2ang(NSIDE, admitted_pix, nest=True, lonlat=True)
 
-    inner = read_inner_map(f"{input_dir}/{MAP_INNER_NAME}", admitted_pix, ZGR23_R_KS)
-    splice = read_outer_increment(f"{input_dir}/{MAP_OUTER_NAME}", admitted_pix, ZGR23_R_KS)
+    inner_path = f"{input_dir}/{MAP_INNER_NAME}"
+    outer_path = f"{input_dir}/{MAP_OUTER_NAME}"
+    for path in (inner_path, outer_path):
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                "profile.build: Edenhofer input missing at %s -- run the "
+                "sesnaimpute.sky.download.edenhofer2023.build RUNBOOK line for it" % path)
+    inner = read_inner_map(inner_path, admitted_pix, ZGR23_R_KS)
+    splice = read_outer_increment(outer_path, admitted_pix, ZGR23_R_KS)
     dist_new, rho_dist_new = splice_axes(inner["dist1"], inner["radii1"], splice["bnd2"], splice["cen2"], splice["k"])
 
     weight = region_weight(nsrc)
