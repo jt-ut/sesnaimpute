@@ -11,28 +11,19 @@ measurement sigma in quadrature (Planck carries none). Every class's
 `a`-axis is convolved with this kernel once, at tabulation.
 """
 
-import glob
 import math
 import os
-import re
 
 import h5py
 import numpy as np
 from scipy.special import erf
 
 from sesnaimpute import config as config_module
+from sesnaimpute import regions as regions_module
 
 # ====================================================================
 # Inputs
 # ====================================================================
-
-#: The old per-region adopted-column directory. `A_COL_K`/`A_COL_SIG_K` are
-#: the currency SPEC_PRIORS.md section 1.1 defines; `A_COL_PROVENANCE` is
-#: 0 = Herschel / 1 = Planck.
-_OLD_DUST_COLUMN_DIR = (
-    "/Users/jtaylor/Dropbox/Research/SESNA_Complete/sky/derived/source/"
-    "herschel-planck_adopted-dust-columns")
-_ARM_PRODUCT_RE = re.compile(r"^dust_column_(planck_arm_.+|herschel_arm)\.hdf5$")
 
 #: The three beams the sub-beam conditional tables are tabulated at.
 _TABULATED = (("L108", 108.0), ("L302", 301.8), ("L821", 821.0))
@@ -45,28 +36,39 @@ _MIN_KERNEL_COUNTS = 200.0
 STATED_BEAM_ARCSEC = {"herschel": 36.3, "planck": 301.52072}
 
 
-def _load_source_columns(dust_column_dir=_OLD_DUST_COLUMN_DIR):
-    """`(column, sigma, provenance)`: every source's adopted column, its
-    per-source uncertainty, and its arm code (0 Herschel / 1 Planck),
-    concatenated over every region's `dust_column_<region>.hdf5`.
-
-    repoint when sky/derived/column lands: reads the OLD per-region files
-    directly; the new catalog product replaces this glob.
-    """
-    paths = sorted(
-        p for p in glob.glob(os.path.join(dust_column_dir, "dust_column_*.hdf5"))
-        if not _ARM_PRODUCT_RE.match(os.path.basename(p)))
-    if not paths:
-        raise ValueError(
-            "the column kernel needs the adopted-column products and none "
-            "matched %s" % dust_column_dir)
+def _load_source_columns(config):
+    """`(column, sigma, provenance)`: every source's adopted column
+    (`A_COL_K`), its per-source uncertainty (`A_COL_SIG_K`), and its arm
+    code (`A_COL_PROVENANCE`, 0 Herschel / 1 Planck -- SPEC_PRIORS.md
+    section 1.1), concatenated over every region's adopted `column/source`
+    product (`sky.derived.column`)."""
     col, sig, code = [], [], []
-    for p in paths:
-        with h5py.File(p, "r") as f:
+    for region in regions_module.REGIONS:
+        path = config_module.product_path(config, "sky/derived", "adopted",
+                                          "column", "source", region=region.name)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                "prior.kernel: adopted column missing for region %r at %s -- "
+                "run the 'sky.derived.column' RUNBOOK line first" % (region.name, path))
+        with h5py.File(path, "r") as f:
             col.append(f["A_COL_K"][:].astype(np.float64))
             sig.append(f["A_COL_SIG_K"][:].astype(np.float64))
             code.append(f["A_COL_PROVENANCE"][:])
     return np.concatenate(col), np.concatenate(sig), np.concatenate(code)
+
+
+def _load_sigma_zp_herschel(config):
+    """`SIGMA_ZP_K`: the Herschel field zero point (SPEC_PRIORS.md section
+    1.2, term 3), from the survey-wide sigma product
+    `sky.derived.herschel_column.build` writes alongside each map's beam."""
+    path = config_module.product_path(config, "sky/derived", "herschel",
+                                      "sigma", "survey")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "prior.kernel: Herschel sigma survey product missing at %s -- "
+            "run the 'sky.derived.herschel_column' RUNBOOK line first" % path)
+    with h5py.File(path, "r") as f:
+        return float(f["SIGMA_ZP_K"][()])
 
 
 def _conditional_table(kern2d, ka_col, kd_col):
@@ -97,10 +99,6 @@ def _load_subbeam_and_scaling(config):
     kernel tables at the three tabulated beams (built here from the
     product's persisted KA x KD count histograms; see
     `sky.derived.subbeam.build`).
-
-    The Herschel field zero point (formerly `blur_scaling.hdf5`) is not
-    yet a measured quantity in this pipeline -- `load` below zeroes it
-    rather than blocking on a product that does not exist.
     """
     path = config_module.product_path(config, "sky/derived", "herschel",
                                       "subbeam", "region")
@@ -737,16 +735,15 @@ class Kernel(object):
 
 def load(config):
     """Builds the composed column kernel from the survey's adopted-column
-    products and the sub-beam region product (SPEC_PRIORS.md 1.2)."""
-    column, sigma, code = _load_source_columns()
+    products, the sub-beam region product, and the Herschel field zero
+    point (SPEC_PRIORS.md 1.2)."""
+    column, sigma, code = _load_source_columns(config)
     acol = ColumnSigmaKernel(column, sigma, code)
 
     regions, conditional, scalars, w_herschel_36p3, w_planck_301p8 = \
         _load_subbeam_and_scaling(config)
     subbeam = _SubbeamKernel(regions, conditional, scalars)
 
-    # Not yet measured by this pipeline (formerly blur_scaling.hdf5) --
-    # zeroed, not blocked on.
-    sigma_zp_ak = 0.0
+    sigma_zp_ak = _load_sigma_zp_herschel(config)
 
     return Kernel(acol, subbeam, sigma_zp_ak, w_herschel_36p3, w_planck_301p8)

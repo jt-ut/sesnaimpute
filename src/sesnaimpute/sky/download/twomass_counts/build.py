@@ -37,6 +37,7 @@ project's own Galactic nside-512 grid directly.
 """
 
 import os
+import re
 import urllib.parse
 import urllib.request
 
@@ -53,25 +54,57 @@ NSIDE = 512
 KS_HIST_LIMIT = 15.5  # old module's KS_HIST_LIMIT / SPEC_PRIORS.md 2.1 histogram top
 CLEAN_CC_FLAG = "000"
 BOX_PAD_DEG = 0.1  # more than half an hpx512 pixel's ~6.9' diagonal
+#: Every query's Galactic-latitude span is cut to at most this many
+#: degrees, so no single sync query -- even the densest region's, whose
+#: full-box query timed out server-side -- is large enough for IRSA's
+#: synchronous query limit to reject or truncate it.
+BOX_STRIP_DEG = 1.0
+CSV_HEADER = "glon,glat,k_m"
 
 
 def _lb_bounding_box(config, region, pad_deg=BOX_PAD_DEG):
     """A padded Galactic (l, b) box enclosing every nside-512 pixel the
-    region's own catalogued sources occupy, per the granule map."""
+    region's own catalogued sources occupy, per the granule map.
+    Wrap-safe about the pixel set's own median longitude, so a region
+    straddling the l = 0/360 seam (e.g. Pipe) reads as its true few-
+    degree span rather than nearly the whole sky in longitude."""
     pix = np.unique(access.region_slice(config, region)["hpx_pix_512"])
     l_deg, b_deg = hp.pix2ang(NSIDE, pix, nest=True, lonlat=True)
+    c = float(np.median(l_deg))
+    l_deg = c + ((l_deg - c + 180.0) % 360.0 - 180.0)
     return (float(l_deg.min()) - pad_deg, float(l_deg.max()) + pad_deg,
             float(b_deg.min()) - pad_deg, float(b_deg.max()) + pad_deg)
 
 
-def region_query(config, region):
-    """The exact ADQL text this module sends for `region`."""
-    l0, l1, b0, b1 = _lb_bounding_box(config, region)
+def region_strip_boxes(config, region, pad_deg=BOX_PAD_DEG, strip_deg=BOX_STRIP_DEG):
+    """`region`'s padded (l, b) box cut into Galactic-latitude strips at
+    most `strip_deg` wide: `[(l0, l1, b0_i, b1_i), ...]`, full longitude
+    span, one query per strip."""
+    l0, l1, b0, b1 = _lb_bounding_box(config, region, pad_deg)
+    n_strips = max(1, int(np.ceil((b1 - b0) / strip_deg)))
+    edges = np.linspace(b0, b1, n_strips + 1)
+    return [(l0, l1, float(edges[i]), float(edges[i + 1])) for i in range(n_strips)]
+
+
+def _glon_clause(l0, l1):
+    """The `glon` WHERE clause for one (l0, l1) span: a plain `BETWEEN`
+    when it sits inside one 0-360 turn, else the OR of the two pieces
+    the l = 0/360 seam splits it into (`_lb_bounding_box` reports a
+    wrapped span as `l0 < 0` or `l1 > 360`; `fp_psc`'s own `glon` is
+    stored in [0, 360))."""
+    if l0 >= 0.0 and l1 <= 360.0:
+        return f"glon BETWEEN {l0:.6f} AND {l1:.6f}"
+    lo, hi = l0 % 360.0, l1 % 360.0
+    return f"(glon >= {lo:.6f} OR glon <= {hi:.6f})"
+
+
+def strip_query(l0, l1, b0, b1):
+    """The exact ADQL text for one (l0, l1, b0, b1) query box."""
     return (
         "SELECT glon, glat, k_m FROM "
         f"{TABLE} WHERE k_m IS NOT NULL AND k_m < {KS_HIST_LIMIT:.1f} "
         f"AND cc_flg = '{CLEAN_CC_FLAG}' "
-        f"AND glon BETWEEN {l0:.6f} AND {l1:.6f} AND glat BETWEEN {b0:.6f} AND {b1:.6f}"
+        f"AND {_glon_clause(l0, l1)} AND glat BETWEEN {b0:.6f} AND {b1:.6f}"
     )
 
 
@@ -81,23 +114,55 @@ def _tap_sync_csv(query, sync_url=IRSA_TAP_SYNC_URL, timeout=600):
         return resp.read().decode("utf-8")
 
 
+def _service_message(text):
+    """A one-line description of what IRSA sent back instead of the
+    `fp_psc` CSV: the VOTable `INFO` error text a server-side failure
+    (e.g. a sync-query timeout) carries, else the response's own first
+    line."""
+    m = re.search(r'<INFO[^>]*name="QUERY_STATUS"[^>]*value="ERROR"[^>]*>(.*?)</INFO>',
+                  text, re.S)
+    if m:
+        return m.group(1).strip()
+    first = text.split("\n", 1)[0].strip()
+    return first if first else "<empty response>"
+
+
+def _strip_rows(config, region, l0, l1, b0, b1):
+    """One strip's data rows (header stripped): raises if the response's
+    first line is not the `fp_psc` CSV header, quoting IRSA's own
+    message."""
+    text = _tap_sync_csv(strip_query(l0, l1, b0, b1))
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != CSV_HEADER:
+        raise ValueError(
+            "twomass_counts.build: region %r glat strip [%.3f, %.3f] -- IRSA "
+            "did not return the fp_psc CSV header, it said: %s"
+            % (region, b0, b1, _service_message(text)))
+    return lines[1:]
+
+
 def build(config, regions=None):
     """Writes `sky/download/twomass_counts/counts_twomass_hpx512__<Region>.csv`
-    for each requested region (default: all thirty), each the verbatim
-    CSV response of one clean-photometry row query (see module docstring
-    for why this one is per-source rows, not per-pixel counts)."""
+    for each requested region (default: all thirty): one clean-photometry
+    row query per Galactic-latitude strip of the region's box (see
+    `region_strip_boxes`), concatenated under one header (see module
+    docstring for why this is per-source rows, not per-pixel counts)."""
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
     dest_dir = f"{config.data_root}/sky/download/twomass_counts"
     os.makedirs(dest_dir, exist_ok=True)
     for region in regions:
-        query = region_query(config, region)
-        text = _tap_sync_csv(query)
+        boxes = region_strip_boxes(config, region)
+        rows = []
+        for l0, l1, b0, b1 in boxes:
+            rows.extend(_strip_rows(config, region, l0, l1, b0, b1))
         dest_path = f"{dest_dir}/counts_twomass_hpx512__{region}.csv"
         with open(dest_path, "w") as f:
-            f.write(text)
-        n_rows = max(0, text.count("\n") - 1)
-        print(f"twomass_counts build: {region} -> {dest_path}: {n_rows} rows")
+            f.write(CSV_HEADER + "\n")
+            for line in rows:
+                f.write(line + "\n")
+        print(f"twomass_counts build: {region} -> {dest_path}: {len(rows)} rows "
+              f"({len(boxes)} strip(s))")
 
 
 if __name__ == "__main__":
