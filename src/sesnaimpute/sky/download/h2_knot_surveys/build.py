@@ -50,14 +50,10 @@ Feeds SPEC_PRIORS.md section 7 (H2S), via `sky.derived.knots`.
 """
 
 import os
-import shutil
 
 from sesnaimpute.build import run
 from sesnaimpute.sky.download._fetch import fetch
 
-#: Pre-staged location the two manual acquisitions (Walawender, the UWISH2
-#: PDF transcription) are copied from -- see module docstring.
-_STAGED_DIR = "/Users/jtaylor/Dropbox/Research/SESNA_Complete/sky/download/h2-shock-surveys"
 
 #: CDS catalogue -> (base URL, files its own ReadMe File Summary lists).
 _CDS_CATALOGUES = {
@@ -97,37 +93,33 @@ def _fetch_cds(dest_dir):
     return n_files
 
 
-def _copy_manual(dest_dir):
-    """Copies the two manual acquisitions (Walawender html/mhtml table
-    pages, the UWISH2 PDF-appendix transcription) from the staged tree.
-    Returns the number of files copied."""
-    n_files = 0
-    for name in _WALAWENDER_FILES:
-        src = f"{_STAGED_DIR}/raw/walawender/{name}"
-        dst = f"{dest_dir}/walawender/{name}"
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copyfile(src, dst)
-        n_files += 1
-    src = f"{_STAGED_DIR}/parsed/uwish2_tabled1.hdf5"
-    dst = f"{dest_dir}/uwish2/tabled1_transcribed.hdf5"
-    os.makedirs(os.path.dirname(dst), exist_ok=True)
-    shutil.copyfile(src, dst)
-    n_files += 1
-    return n_files
+def _require_manual(dest_dir):
+    """The two hand-placed acquisitions (Walawender html/mhtml table pages;
+    the UWISH2 PDF-appendix transcription) must already be at their
+    destinations; a missing one fails naming where to put it. Returns the
+    number of files present."""
+    wanted = [f"{dest_dir}/walawender/{name}" for name in _WALAWENDER_FILES]
+    wanted.append(f"{dest_dir}/uwish2/tabled1_transcribed.hdf5")
+    missing = [w for w in wanted if not os.path.isfile(w)]
+    if missing:
+        raise FileNotFoundError(
+            "h2_knot_surveys: hand-placed input missing -- acquire it by hand "
+            f"(see this module's docstring) and place it at {missing[0]!r}")
+    return len(wanted)
 
 
 def build(config, regions=None):
-    """Fetches the four CDS-reachable knot-survey catalogues and copies the
-    two manual acquisitions (Walawender: no CDS entry; UWISH2 Table D1: a
-    PDF appendix) verbatim to `<data_root>/sky/download/h2_knot_surveys/`.
+    """Fetches the four CDS-reachable knot-survey catalogues into
+    `<data_root>/sky/download/h2_knot_surveys/` and requires the two hand-placed
+    acquisitions (Walawender: no CDS entry; UWISH2 Table D1: a PDF appendix) there.
     `regions` is accepted for interface uniformity and ignored: this is a
     survey-wide product.
     """
     dest_dir = f"{config.data_root}/sky/download/h2_knot_surveys"
     n_fetched = _fetch_cds(dest_dir)
-    n_copied = _copy_manual(dest_dir)
+    n_manual = _require_manual(dest_dir)
     print(f"h2_knot_surveys build: {n_fetched} files fetched from CDS, "
-          f"{n_copied} files copied from manual acquisitions")
+          f"{n_manual} hand-placed files present")
 
 
 if __name__ == "__main__":
