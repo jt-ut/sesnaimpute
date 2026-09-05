@@ -79,6 +79,7 @@ $PY -m sesnaimpute.prior.young_stars $CONFIG   # expected young stars per STAR a
 $PY -m sesnaimpute.prior.anchor_observed $CONFIG   # observed STAR anchor joint histogram, young-star subtracted (SPEC_PRIORS.md sec 2.1)
 $PY -m sesnaimpute.prior.anchor_weights $CONFIG   # per-tile STAR anchor weight W, cluster exclusion, faint-end trend (SPEC_PRIORS.md sec 2.1)
 $PY -m sesnaimpute.prior.star_population $CONFIG   # per-tile field-star placement (u, a) and anchor weight W (SPEC_PRIORS.md sec 1.4, 1.5, 2.1, 2.2)
+$PY -m sesnaimpute.prior.star_selection $CONFIG   # STAR/AGB/PAHC exact-selection tables per depth group (SPEC_PRIORS.md sec 1.3, 2.1, 3, 4)
 $PY -m sesnaimpute.prior.yso_selection $CONFIG
 $PY -m sesnaimpute.prior.h2s $CONFIG                    # H2S: law-blurred field, region lognormal + knot-colour selection (SPEC_PRIORS.md sec 7)
 $PY -m sesnaimpute.prior.gal $CONFIG                    # GAL: Fazio counts law + SWIRE selection tables
