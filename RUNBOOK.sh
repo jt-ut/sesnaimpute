@@ -26,6 +26,7 @@ $PY -m sesnaimpute.sky.download.scosmos.build $CONFIG
 # Derive never fetches.
 
 $PY -m sesnaimpute.granules.build $CONFIG
+$PY -m sesnaimpute.sky.derived.planck_column $CONFIG
 
 # --- catalog ---
 # catalog/ -- reads only SESNA: curated catalogues, survey depths, the
