@@ -27,10 +27,20 @@ stored again (IMPLEMENTATION.md section 3, H2S row).
    knot population standing in for a template library (C3): every
    jet-class UWISH2 knot in Cygnus X and the North America Nebula,
    transported to this region's distance, its aperture-limited surface
-   brightness converted to a Ks-band-equivalent flux density and thence,
-   through Giannini+2013's own measured knot colours, to the other seven
-   bands. Written per region, `bms/h2s/prior_h2s_region`, alongside
-   `eta_r`/`eps_ext` and the region's own brightness lognormal.
+   brightness converted to a Ks-band-equivalent flux density (exact, one
+   value per knot) and thence, through Giannini+2013's own measured knot
+   colours, to the four IRAC bands -- not one drawn ratio per knot per
+   band, but the EXACT expectation over every measured ratio of that
+   band, equal weight (`build_region_selection`): each IRAC band's own
+   clearing probability is read off its own ratio population's empirical
+   CDF, and the two-of-eight test combines the four bands' probabilities
+   in closed form (the persisted ratio arrays carry no shared per-knot
+   index back to Giannini's table, so the four bands are treated as
+   independent populations here, disclosed rather than assumed away;
+   pairing them by knot, were the index available, would be the better
+   form -- it preserves the measured colour correlations). Written per
+   region, `bms/h2s/prior_h2s_region`, alongside `eta_r`/`eps_ext` and
+   the region's own brightness lognormal.
 
 No library enters a count or a shape (C3): the h2shock template register
 supplies SED templates to the fitter only, never a selection average.
@@ -155,11 +165,6 @@ _KS_WAVELENGTH_UM = definitions.BANDS_BY_KEY["Ks"].wvl_um
 _DELTA_NU_KS_HZ = (C_M_S * (KS_BANDWIDTH_UM * 1e-6)
                    / (_KS_WAVELENGTH_UM * 1e-6) ** 2)
 KS_INBAND_MJY_PER_ERG_S_CM2 = 1.0e26 / _DELTA_NU_KS_HZ
-
-#: The knot-colour ratio draw's fixed seed (SPEC_PRIORS.md section 7,
-#: "draw one ratio per knot per band from the empirical arrays, fixed
-#: seed").
-RATIO_SEED = 0
 
 #: The brightness axis's own tabulation: 41 points spanning the region's
 #: fitted lognormal +/- this many standard deviations in log10 Sigma
@@ -403,33 +408,26 @@ def _load_giannini_ratios(config):
     return out
 
 
-def knot_band_log10_flux(log10_sigma, ratios, seed=RATIO_SEED):
-    """`(n_knot, 8)` log10 mJy, `definitions.BANDS` order: each knot's
-    aperture-collected 2.12um line flux (`Sigma . Omega_ap`), converted to
-    a Ks-band-equivalent flux density through the 2MASS Ks bandwidth's
-    flat-filter convention (`KS_INBAND_MJY_PER_ERG_S_CM2`, lifted from the
-    quarry's `_h2s_knot_log10_i_mjy_per_sr` -- a narrow line spread evenly
-    across the filter's own effective width), then, for the four IRAC
-    bands, multiplied by one ratio per knot per band drawn (fixed seed,
-    with replacement, vectorised) from Giannini+2013's own measured
-    `F_band/F_2.12` distribution. J, H and M1 carry no Giannini ratio and
-    so no knot flux (`-inf`, never clears a limit) -- SPEC_PRIORS.md
-    section 7 discloses this rather than substituting a library value.
+def knot_ks_log10_flux(log10_sigma):
+    """`(n_knot,)` log10 mJy: each knot's aperture-collected 2.12um line
+    flux (`Sigma . Omega_ap`), converted to a Ks-band-equivalent flux
+    density through the 2MASS Ks bandwidth's flat-filter convention
+    (`KS_INBAND_MJY_PER_ERG_S_CM2`, lifted from the quarry's
+    `_h2s_knot_log10_i_mjy_per_sr` -- a narrow line spread evenly across
+    the filter's own effective width) -- the one band every knot carries
+    a single, exact flux for. The four IRAC bands carry no single flux
+    per knot (SPEC_PRIORS.md section 7, "the knot colours"): their own
+    empirical `F_band/F_2.12` ratio populations enter the selection
+    directly, at the population's own equal weight, in
+    `build_region_selection`. J, H and M1 carry no Giannini ratio and so
+    never clear a limit, which that function's reduced two-of-eight form
+    encodes directly.
     """
     log10_sigma = np.asarray(log10_sigma, dtype=float)
-    n_knot = log10_sigma.size
     f_line_w_m2 = 10.0 ** log10_sigma * OMEGA_AP_SR
     f_line_erg_s_cm2 = f_line_w_m2 * W_M2_TO_ERG_S_CM2
     f_ks_mjy = f_line_erg_s_cm2 * KS_INBAND_MJY_PER_ERG_S_CM2
-
-    out = np.full((n_knot, len(BAND_KEYS)), -np.inf, dtype=float)
-    out[:, KS_IDX] = np.log10(f_ks_mjy)
-
-    rng = np.random.default_rng(seed)
-    for band in IRAC_RATIO_BAND_KEYS:
-        draw = rng.choice(ratios[band], size=n_knot, replace=True)
-        out[:, BAND_KEYS.index(band)] = np.log10(f_ks_mjy) + draw
-    return out
+    return np.log10(f_ks_mjy)
 
 
 # ---------------------------------------------------------------------------
@@ -453,28 +451,49 @@ def region_limit_log10_8(config, region):
     return knots, limit_log10
 
 
-def build_region_selection(a_nodes, config, log10_flux8, log10_sigma_grid, bin_idx, limit_log10):
-    """`(eps, bin_counts)`: `eps` is `(K, n_node, n_sigma)`, the fraction
-    of the transported knot population that, dimmed through column
-    `a_nodes[i]` by `10**(-0.4*a*kappa_i(a))` in every band, clears any two
-    of eight bands (SPEC_PRIORS.md section 1.3) at depth group `k`'s own
-    limit, binned onto `log10_sigma_grid`.
+def build_region_selection(a_nodes, config, log10_ks_flux, ratios, log10_sigma_grid,
+                            bin_idx, limit_log10):
+    """`(eps, bin_counts)`: `eps` is `(K, n_node, n_sigma)`, the EXACT
+    expectation of the two-of-eight test (SPEC_PRIORS.md section 1.3)
+    over Giannini+2013's own empirical `F_band/F_2.12` ratio populations
+    (section 7, "the knot colours") -- not a drawn realisation. Ks is
+    exact per knot (from Sigma alone); J, H and M1 carry no Giannini
+    ratio and never clear a limit; the four IRAC bands carry no single
+    flux, only their own measured ratio population, every ratio
+    entering with equal weight. Because the persisted ratio arrays carry
+    no shared per-knot index back to Giannini's table (each band kept
+    its own `usable`-filtered subset upstream), the four bands are
+    treated as INDEPENDENT populations here -- disclosed, not assumed
+    away; pairing them by knot, were the index available, would be the
+    better form (it preserves the measured colour correlations).
 
-    Vectorised over knots and bands within each node (one matmul against a
-    knot-to-bin indicator); looped only over the shared column-grid nodes,
-    the same structure `prior.gal.build_region_selection` uses for its own
-    four-band population. The dimming vector `kappa_i(a)` is computed once
-    for every node ahead of the loop (`selection.kappa_hybrid` has no
-    batched per-node form of its own only in the sense that each node's
-    ramp weight differs; the call itself is already vectorised over nodes).
+    Given that, the two-of-eight test reduces to: Ks clears and >= 1 of
+    the 4 IRAC bands clears, or Ks fails and >= 2 of the 4 clear
+    (`MIN_BANDS == 2` asserted, since the closed form below is specific
+    to it). Each IRAC band's own clearing probability is exact -- the
+    fraction of its own ratio array putting the dimmed flux at or above
+    the limit, read off the array's own empirical CDF by searchsorted,
+    never a draw. The four independent probabilities combine by the
+    closed-form "at least k of 4" sum.
+
+    Vectorised over knots and depth groups within each node (matmul
+    against a knot-to-bin indicator, as before); looped only over the
+    shared column-grid nodes and the four IRAC bands (a fixed design
+    constant, not an iterator over knots or sources).
     """
-    n_knot = log10_flux8.shape[0]
+    if selection_module.MIN_BANDS != 2:
+        raise ValueError(
+            "h2s.build_region_selection: the closed-form two-of-four "
+            "combination assumes MIN_BANDS == 2, got %r"
+            % (selection_module.MIN_BANDS,))
+    n_knot = log10_ks_flux.size
     n_node = a_nodes.size
     n_sigma = log10_sigma_grid.size
     K = limit_log10.shape[0]
-    finite8 = np.isfinite(log10_flux8)
     kappa8_by_node = selection_module.kappa_hybrid(
         config, selection_module.law_dense_weight(a_nodes))          # (n_node, 8)
+    sorted_ratio = {band: np.sort(ratios[band]) for band in IRAC_RATIO_BAND_KEYS}
+    n_ratio = {band: sorted_ratio[band].size for band in IRAC_RATIO_BAND_KEYS}
 
     indicator = np.zeros((n_knot, n_sigma), dtype=np.float32)
     indicator[np.arange(n_knot), bin_idx] = 1.0
@@ -483,10 +502,31 @@ def build_region_selection(a_nodes, config, log10_flux8, log10_sigma_grid, bin_i
 
     eps = np.zeros((K, n_node, n_sigma), dtype=np.float32)
     for i in range(n_node):
-        dimmed = log10_flux8 - 0.4 * a_nodes[i] * kappa8_by_node[i][None, :]   # (n_knot, 8)
-        clears = finite8 & (dimmed[None, :, :] >= limit_log10[:, None, :])     # (K, n_knot, 8)
-        passed = (clears.sum(axis=2) >= selection_module.MIN_BANDS).astype(np.float32)
-        num = passed @ indicator                                              # (K, n_sigma)
+        dimmed_ks = log10_ks_flux[None, :] - 0.4 * a_nodes[i] * kappa8_by_node[i, KS_IDX]
+        ks_clears = dimmed_ks >= limit_log10[:, KS_IDX, None]                   # (K, n_knot)
+
+        p_band, q_band, q_prod = [], [], np.ones((K, n_knot), dtype=np.float64)
+        for band, b_idx in zip(IRAC_RATIO_BAND_KEYS, IRAC_RATIO_BAND_IDX):
+            # a ratio clears iff Sigma's own Ks flux plus the ratio, dimmed
+            # by this node's column, is at or above the limit -- the
+            # threshold every ratio in the band's own array is tested
+            # against, its exact empirical CDF read by one searchsorted.
+            threshold = (limit_log10[:, b_idx, None] - log10_ks_flux[None, :]
+                         + 0.4 * a_nodes[i] * kappa8_by_node[i, b_idx])          # (K, n_knot)
+            below = np.searchsorted(sorted_ratio[band], threshold, side="left")
+            p_b = 1.0 - below / float(n_ratio[band])
+            p_band.append(p_b)
+            q_band.append(1.0 - p_b)
+            q_prod = q_prod * (1.0 - p_b)
+
+        p_exactly1 = sum(
+            p_band[j] * np.prod([q_band[m] for m in range(4) if m != j], axis=0)
+            for j in range(4))
+        p_ge1 = 1.0 - q_prod
+        p_ge2 = np.clip(1.0 - q_prod - p_exactly1, 0.0, 1.0)
+        passed_prob = np.where(ks_clears, p_ge1, p_ge2)                         # (K, n_knot)
+
+        num = passed_prob.astype(np.float32) @ indicator                        # (K, n_sigma)
         eps[:, i, :] = np.where(bin_counts > 0, num / safe_counts, 0.0)
     return eps, bin_counts
 
@@ -595,13 +635,13 @@ def build(config, regions=None):
             logsig_mean - SIGMA_GRID_NSIGMA * logsig_std,
             logsig_mean + SIGMA_GRID_NSIGMA * logsig_std, N_SIGMA_GRID)
 
-        log10_flux8 = knot_band_log10_flux(log10_sigma, ratios)
+        log10_ks_flux = knot_ks_log10_flux(log10_sigma)
         edges = 0.5 * (log10_sigma_grid[1:] + log10_sigma_grid[:-1])
         bin_idx = np.clip(np.searchsorted(edges, log10_sigma), 0, N_SIGMA_GRID - 1)
 
         knots, limit_log10 = region_limit_log10_8(config, region)
         eps, bin_counts = build_region_selection(
-            a_nodes, config, log10_flux8, log10_sigma_grid, bin_idx, limit_log10)
+            a_nodes, config, log10_ks_flux, ratios, log10_sigma_grid, bin_idx, limit_log10)
 
         path_region = config_module.product_path(config, "bms", "h2s", "prior",
                                                   "region", region=region)

@@ -29,16 +29,28 @@ sightline. The brightness axis is the same placement read on distance:
 rho_gas^(3/2)-weighted ridge fitted along the same ray, width the ridge's
 own conditional residual. Per column-grid node, the `a`-marginal folds
 in the column-measurement kernel (section 1.2) as a scale mixture over
-its quadrature, `p(a|A) = sum_q w_q * p_u(a/T_q) / T_q`. `build` writes
-one product per region, sightline granule: `U_EDGES`/`P_U` (the shape
-itself), `RIDGE_*` (the closed-form conditional brightness density), and
-`A_GRID`/`A_MARGINAL` (the node marginals the prior table blends between).
-`A_GRID` per node spans 0 to the weighted `(1 - A_GRID_MASS_TOL)` point of
-the node's own kernel quadrature in `T`, not the quadrature's full
-numerical extent (most of which carries negligible weight); the bound
-this leaves on `A_MARGINAL` mass beyond the grid is printed once at
-build (`_node_quadrature`'s `worst_excluded_frac`, a property of the
-kernel and column grid alone) and must stay under `A_GRID_MASS_TOL`.
+its quadrature, `p(a|A) = sum_q w_q * p_u(a/T_q) / T_q` -- evaluated
+EXACTLY at any `a`, never re-tabulated on an `a`-grid: `p_u` is a step
+function, so the marginal is a finite sum of exact lookups and its
+integral (`cdf`) is piecewise linear in `a` for the same reason. `build`
+writes one product per region, sightline granule: `U_EDGES`/`P_U` (the
+shape itself), `RIDGE_*` (the closed-form conditional brightness
+density), `IS_HERSCHEL` (each sightline's own map class), and
+`KERNEL_T_HERSCHEL`/`KERNEL_W_HERSCHEL`/`KERNEL_T_PLANCK`/`KERNEL_W_PLANCK`
+(the composed column kernel's own quadrature at every column-grid node,
+one `(n_node, n_q)` pair of arrays per map class -- identical across the
+whole build, since the kernel depends only on the node's column value
+and the arm, and written once into every region's product). `YsoShape.
+read` loads these and evaluates `marginal`/`cdf` exactly: at one
+sightline and node (`marginal`, `cdf`), or batched over sources with the
+node blend of IMPLEMENTATION.md section 2 (`marginal_at`, `cdf_at`).
+
+The retired `A_GRID`/`A_MARGINAL` tabulation resampled this same exact
+sum onto a linear 256-point `a`-grid per node; the kernel's components
+in `T` span orders of magnitude, so that re-integration lost 5-14% of
+the mass, which the tabulation's own renormalisation then hid. Nothing
+here needs renormalising: the exact sum's own quadrature weights already
+total 1.
 
 No selection (section 6.2) and no library enter either product (C3):
 neither reads a template register or an IMF.
@@ -198,21 +210,11 @@ _RHO_FLOOR = np.finfo(np.float64).tiny
 #: (SPEC_PRIORS.md section 1.1/1.2).
 MAP_CLASSES = ("herschel", "planck")
 
-#: The `a`-marginal's own tabulation resolution (IMPLEMENTATION.md
-#: section 3, YSO row: "per node ... A_GRID (n_node, 256)").
-N_A_GRID = 256
-
-#: `A_GRID`'s own tabulation fidelity bar (IMPLEMENTATION.md section 2's
-#: column-grid bar, 0.002 relative L1, restated for this axis): the grid
-#: spans only out to the node's kernel-quadrature weighted (1 - tol)
-#: point of `T`, not the quadrature's full numerical extent, most of
-#: which (section 1.2's wide `_t_grid` window) carries negligible weight.
-A_GRID_MASS_TOL = 1.0e-4
-
-#: Sightlines per joblib block (rule 8: parallelise the largest
-#: iterator; a block amortises the kernel-quadrature arrays' overhead
-#: across a handful of sightlines per dispatched task).
-SIGHTLINE_BLOCK = 16
+#: `YsoShape._row_bin`'s per-source offset gap: `u` lies in `[0, 1]` by
+#: construction (`embedding_and_ridge`), so a gap of 2 between sources
+#: keeps every source's own edge block disjoint in the single global
+#: sort a batched bin lookup uses (no Python loop over sources).
+_ROW_OFFSET_SPAN = 2.0
 
 
 def _profile_path(config, region):
@@ -355,46 +357,17 @@ def _majority_map_class(config, region, sl_pix):
     return np.where(majority_herschel, "herschel", "planck")
 
 
-def _t_cutoff(t, w, tol):
-    """`(t_cut, excluded_frac)` per row: `t_cut` is the smallest `T`
-    beyond which the row's kernel-quadrature weight is below `tol` of
-    its total -- the weighted `(1 - tol)` point of `T`; `excluded_frac`
-    is the weight actually left beyond it, `<= tol` by construction. `t`
-    is already ascending (`kernel._t_grid`'s own construction), so its
-    cumulative weight is a proper CDF and the cutoff is the first grid
-    point clearing `1 - tol`."""
-    cdf = np.cumsum(w, axis=1)
-    cdf = cdf / cdf[:, -1:]
-    idx = np.argmax(cdf >= (1.0 - tol), axis=1)
-    rows = np.arange(t.shape[0])
-    return t[rows, idx], 1.0 - cdf[rows, idx]
-
-
-def _node_quadrature(config, nodes_arr):
-    """`(a_grid, quad_by_class, worst_excluded_frac)`: the composed
-    column kernel's quadrature at every column-grid node, for both map
-    classes (SPEC_PRIORS.md section 1.2) -- built once for the whole
-    build, since the kernel depends only on the node's column value and
-    the arm, never on the sightline (so this fidelity number is a
-    property of the kernel and the column grid alone, the same for
-    every region). `a_grid[k]` runs 0 to the larger of the two arms'
-    weighted `(1 - A_GRID_MASS_TOL)` point of `T` at node `k`: the
-    quadrature's own `_t_grid` window (section 1.2) is widened for the
-    low-column, one-sided tail and spans 100-150x the node's column, but
-    almost all of that width carries negligible weight, so tabulating
-    `a` out to the raw numerical extent (the old `t.max()`) put most of
-    `A_GRID`'s 256 points where the density is zero. Spanning to the
-    mass cutoff instead concentrates the grid where the density lives.
-
-    `worst_excluded_frac`, printed by `build` (Part 0's required number):
-    the largest, over every node and arm, of the kernel-quadrature weight
-    left beyond that arm's own cutoff -- an exact upper bound (not a
-    grid-resolution estimate) on the share of any sightline's
-    `A_MARGINAL` mass that falls beyond `A_GRID`'s edge, since a
-    sightline's marginal at `a > t_cut` can only be built from the
-    excluded quadrature components (T_q > t_cut) and each contributes at
-    most its own weight. Guaranteed `< A_GRID_MASS_TOL` by the cutoff's
-    own construction.
+def _node_kernel_quadrature(config, nodes_arr):
+    """`(kernel_t, kernel_w)`, each `{map_class: (n_node, n_q)}`: the
+    composed column kernel's own quadrature at every column-grid node
+    (SPEC_PRIORS.md section 1.2), for both map classes -- built once for
+    the whole build, since `kernel.load(config).nodes(A, map_class)`
+    depends only on the node's column value and the arm, never on the
+    sightline or region, so the same pair of arrays is written into
+    every region's shape product. Weights sum to 1 per node/class row by
+    that call's own renormalisation. This IS the marginal's quadrature
+    (SPEC_PRIORS.md section 6.3): `YsoShape.marginal`/`.cdf` evaluate it
+    exactly at any query `a`, with no further `a`-grid tabulation.
     """
     kern = kernel_module.load(config)
     n_node = nodes_arr.size
@@ -403,54 +376,191 @@ def _node_quadrature(config, nodes_arr):
     # form (rule 8), so the iterator itself is parallelised with joblib
     # threads, sharing the one loaded `Kernel` rather than re-pickling it.
     jobs = [(map_class, k) for map_class in MAP_CLASSES for k in range(n_node)]
-    results = Parallel(n_jobs=-1, prefer="threads")(
+    results = Parallel(n_jobs=4, prefer="threads")(
         delayed(kern.nodes)(float(nodes_arr[k]), map_class) for map_class, k in jobs)
-    quad_by_class = {}
-    t_cut = np.zeros(n_node)
-    worst_excluded_frac = 0.0
+    kernel_t, kernel_w = {}, {}
     for i, map_class in enumerate(MAP_CLASSES):
         block = results[i * n_node:(i + 1) * n_node]
-        t = np.stack([r[0] for r in block], axis=0)
-        w = np.stack([r[1] for r in block], axis=0)
-        quad_by_class[map_class] = (t, w)
-        cut, excluded = _t_cutoff(t, w, A_GRID_MASS_TOL)
-        t_cut = np.maximum(t_cut, cut)
-        worst_excluded_frac = max(worst_excluded_frac, float(excluded.max()))
-    a_grid = np.linspace(np.zeros(n_node), t_cut, N_A_GRID, axis=1)
-    return a_grid, quad_by_class, worst_excluded_frac
+        kernel_t[map_class] = np.stack([r[0] for r in block], axis=0)
+        kernel_w[map_class] = np.stack([r[1] for r in block], axis=0)
+    return kernel_t, kernel_w
 
 
-def _sightline_block(u_edges_blk, p_u_blk, map_class_blk, a_grid, quad_by_class):
-    """One block's `A_MARGINAL`: for every sightline in the block,
-    vectorised over every column-grid node, every kernel-quadrature
-    point and every `a`-grid point at once (no Python loop below the
-    sightline) -- `p(a|A) = sum_q w_q * p_u(a/T_q) / T_q`
-    (SPEC_PRIORS.md section 6.3), `p_u` the sightline's own
-    piecewise-constant embedding density located by one vectorised
-    `searchsorted` into its `u` edges.
+class YsoShape(object):
+    """One region's YSO shape, read once and evaluated exactly
+    (SPEC_PRIORS.md section 6.3): the per-sightline embedding density
+    (`U_EDGES`/`P_U`, a step function on `u`) and the column kernel's
+    own quadrature at every column-grid node, for both map classes
+    (`KERNEL_T`/`KERNEL_W`). The marginal
+
+        p(a | A) = sum_q w_q * p_u(a / T_q) / T_q
+
+    is evaluated at the exact query `a`, never on a fixed grid: `p_u` is
+    piecewise constant, so this is a finite sum of exact lookups, and
+    its integral (`cdf`) is piecewise linear in `a` for the same reason.
+    Nothing here is renormalised: the quadrature's own weights already
+    total 1 (`kernel.Kernel.nodes`'s own construction).
     """
-    n_blk, n_node, n_grid = u_edges_blk.shape[0], a_grid.shape[0], a_grid.shape[1]
-    out = np.empty((n_blk, n_node, n_grid), dtype=np.float32)
-    for i in range(n_blk):
-        edges = u_edges_blk[i]
-        p_u = p_u_blk[i]
-        t_q, w_q = quad_by_class[map_class_blk[i]]           # (n_node, n_quad)
-        x = a_grid[:, None, :] / t_q[:, :, None]              # (n_node, n_quad, n_grid)
-        bin_idx = np.searchsorted(edges, x.ravel(), side="right").reshape(x.shape) - 1
-        bin_idx = np.clip(bin_idx, 0, p_u.size - 1)
-        valid = (x >= 0.0) & (x <= 1.0)
-        density = np.where(valid, p_u[bin_idx] / t_q[:, :, None], 0.0)
-        marginal = np.sum(w_q[:, :, None] * density, axis=1)  # (n_node, n_grid)
-        # algebraic acceptance (SPEC_PRIORS.md section 6.3 tabulation):
-        # every row integrates to 1 on its own a_grid, by construction
-        # (the T-quadrature's own weight sums to 1, section 1.2, and
-        # A_GRID's cutoff leaves only A_GRID_MASS_TOL of it out).
-        norm = np.trapz(marginal, a_grid, axis=1)[:, None]
-        out[i] = (marginal / norm).astype(np.float32)
-    return out
+
+    def __init__(self, u_edges, p_u, is_herschel, kernel_t, kernel_w,
+                 hpx_pix_256, sightline_id):
+        self.u_edges = u_edges                      # (n_sl, n_cell+1)
+        self.p_u = p_u                               # (n_sl, n_cell)
+        self.is_herschel = is_herschel               # (n_sl,) bool
+        self.kernel_t = kernel_t                     # {map_class: (n_node, n_q)}
+        self.kernel_w = kernel_w
+        self.hpx_pix_256 = hpx_pix_256
+        self.sightline_id = sightline_id
+        self.n_node = next(iter(kernel_t.values())).shape[0]
+        # the embedding density's own cumulative mass at every u edge --
+        # the exact integral of a step function is piecewise linear
+        # (SPEC_PRIORS.md section 6.3); CUM_U[:, -1] = 1 by p_u's own
+        # normalisation (`embedding_and_ridge`).
+        widths = np.diff(u_edges, axis=1)
+        self.cum_u = np.concatenate(
+            [np.zeros((u_edges.shape[0], 1)), np.cumsum(p_u * widths, axis=1)],
+            axis=1)
+
+    @classmethod
+    def read(cls, config, region):
+        """Reads one region's `bms/yso/prior_yso_sightline` product
+        (`build_shape`'s own output)."""
+        path = config_module.product_path(config, "bms", "yso", "prior",
+                                           "sightline", region=region)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                "prior.yso.YsoShape: no shape product for region %r at %s "
+                "-- run the 'prior.yso' RUNBOOK line first" % (region, path))
+        with h5py.File(path, "r") as f:
+            u_edges = np.asarray(f["U_EDGES"][:], dtype=np.float64)
+            p_u = np.asarray(f["P_U"][:], dtype=np.float64)
+            is_herschel = np.asarray(f["IS_HERSCHEL"][:]).astype(bool)
+            kernel_t = {"herschel": np.asarray(f["KERNEL_T_HERSCHEL"][:], dtype=np.float64),
+                        "planck": np.asarray(f["KERNEL_T_PLANCK"][:], dtype=np.float64)}
+            kernel_w = {"herschel": np.asarray(f["KERNEL_W_HERSCHEL"][:], dtype=np.float64),
+                        "planck": np.asarray(f["KERNEL_W_PLANCK"][:], dtype=np.float64)}
+            hpx_pix_256 = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
+            sightline_id = np.asarray(f["SIGHTLINE_ID"][:], dtype=np.int64)
+        return cls(u_edges, p_u, is_herschel, kernel_t, kernel_w,
+                   hpx_pix_256, sightline_id)
+
+    # -- the exact per-source bin lookup, batched over sources ---------
+    @staticmethod
+    def _row_bin(edges, x):
+        """Bin index (unclipped: `-1` at or below the first edge, `m-2`
+        at or above the last) of each `x[i, :]` in `edges[i, :]`, one row
+        per source, vectorised over both the source and query axes in
+        one global sort -- `u` lies in `[0, 1]` by construction, so
+        offsetting row `i` by `i * _ROW_OFFSET_SPAN` keeps every row's
+        own block disjoint and lets one `searchsorted` answer every row
+        at once. No Python loop over sources."""
+        n, m = edges.shape
+        offset = _ROW_OFFSET_SPAN * np.arange(n, dtype=np.float64)[:, None]
+        edges_flat = (edges + offset).ravel()
+        x_flat = (x + offset).ravel()
+        pos = np.searchsorted(edges_flat, x_flat, side="right")
+        row_base = (np.arange(n) * m)[:, None]
+        return pos.reshape(x.shape) - row_base - 1
+
+    def _gather_quadrature(self, rows, node_idx):
+        """`(t, w)`, each `(n_src, n_q)`: node `node_idx[i]`'s kernel
+        quadrature at source `i`'s own sightline's map class."""
+        is_h = self.is_herschel[rows]
+        t = np.where(is_h[:, None], self.kernel_t["herschel"][node_idx],
+                     self.kernel_t["planck"][node_idx])
+        w = np.where(is_h[:, None], self.kernel_w["herschel"][node_idx],
+                     self.kernel_w["planck"][node_idx])
+        return t, w
+
+    def _marginal_rows(self, a, rows, t, w):
+        """`p(a | A)`, one row per source, kernel quadrature `(t, w)`
+        already matched to each source's own map class (SPEC_PRIORS.md
+        section 6.3): `sum_q w_q p_u(a/T_q)/T_q`, `p_u` read exactly off
+        each source's own sightline edges -- vectorised over sources and
+        the quadrature index `q` together, no Python loop over sources."""
+        u = a[:, None] / t                                    # (n_src, n_q)
+        valid = (u >= 0.0) & (u <= 1.0)
+        u_c = np.clip(u, 0.0, 1.0)
+        n_cell = self.p_u.shape[1]
+        bin_idx = np.clip(self._row_bin(self.u_edges[rows], u_c), 0, n_cell - 1)
+        p_u_val = np.take_along_axis(self.p_u[rows], bin_idx, axis=1)
+        density = np.where(valid, p_u_val / t, 0.0)
+        return np.sum(w * density, axis=1)
+
+    def _cdf_rows(self, a, rows, t, w):
+        """`P(a' <= a | A)`, the exact integral of `_marginal_rows`
+        (piecewise linear in `a`, section 6.3): each quadrature
+        component saturates at 1 once `a >= T_q` (`u` clipped to 1
+        reaches the step function's own total mass), so the sum reaches
+        exactly 1 at `a = max_q T_q`."""
+        edges = self.u_edges[rows]
+        u = np.clip(a[:, None] / t, 0.0, 1.0)                  # (n_src, n_q)
+        n_cell = self.p_u.shape[1]
+        bin_idx = np.clip(self._row_bin(edges, u), 0, n_cell - 1)
+        p_u_val = np.take_along_axis(self.p_u[rows], bin_idx, axis=1)
+        edge_lo = np.take_along_axis(edges, bin_idx, axis=1)
+        cum_lo = np.take_along_axis(self.cum_u[rows], bin_idx, axis=1)
+        cdf_u = np.clip(cum_lo + p_u_val * (u - edge_lo), 0.0, 1.0)
+        return np.sum(w * cdf_u, axis=1)
+
+    # -- public: one sightline, one column-grid node, no blend ---------
+    def marginal(self, a, sightline_row, node_index):
+        """`p(a | A)` at one sightline and one column-grid node exactly
+        (SPEC_PRIORS.md section 6.3), no node blend. `a` scalar or
+        array."""
+        a = np.atleast_1d(np.asarray(a, dtype=float))
+        rows = np.full(a.shape, int(sightline_row), dtype=np.intp)
+        node_idx = np.full(a.shape, int(node_index), dtype=np.intp)
+        t, w = self._gather_quadrature(rows, node_idx)
+        return self._marginal_rows(a, rows, t, w)
+
+    def cdf(self, a, sightline_row, node_index):
+        """`P(a' <= a | A)` at one sightline and one node exactly -- the
+        exact integral of `marginal` (section 6.3). `a` scalar or
+        array."""
+        a = np.atleast_1d(np.asarray(a, dtype=float))
+        rows = np.full(a.shape, int(sightline_row), dtype=np.intp)
+        node_idx = np.full(a.shape, int(node_index), dtype=np.intp)
+        t, w = self._gather_quadrature(rows, node_idx)
+        return self._cdf_rows(a, rows, t, w)
+
+    # -- public: batched over sources, node-blended (IMPLEMENTATION.md
+    # section 2: a source's shape is the linear blend of the two node
+    # tabulations it brackets, `prior.column_grid.bracket`) ------------
+    def marginal_at(self, a, rows, node_lo, node_w):
+        """`lambda~_YSO`'s `a`-marginal at a batch of sources, each with
+        its own sightline row and bracketing node/blend weight. Fully
+        vectorised over sources and the kernel's own quadrature; no
+        Python loop over sources."""
+        a = np.asarray(a, dtype=float)
+        rows = np.asarray(rows, dtype=np.intp)
+        node_lo = np.asarray(node_lo, dtype=np.intp)
+        node_w = np.asarray(node_w, dtype=float)
+        node_hi = np.clip(node_lo + 1, 0, self.n_node - 1)
+        t_lo, w_lo = self._gather_quadrature(rows, node_lo)
+        t_hi, w_hi = self._gather_quadrature(rows, node_hi)
+        m_lo = self._marginal_rows(a, rows, t_lo, w_lo)
+        m_hi = self._marginal_rows(a, rows, t_hi, w_hi)
+        return (1.0 - node_w) * m_lo + node_w * m_hi
+
+    def cdf_at(self, a, rows, node_lo, node_w):
+        """`cdf` at a batch of sources, node-blended, matching
+        `marginal_at` -- the sum-over-breakpoints form a selection
+        integral at prior-table build reads."""
+        a = np.asarray(a, dtype=float)
+        rows = np.asarray(rows, dtype=np.intp)
+        node_lo = np.asarray(node_lo, dtype=np.intp)
+        node_w = np.asarray(node_w, dtype=float)
+        node_hi = np.clip(node_lo + 1, 0, self.n_node - 1)
+        t_lo, w_lo = self._gather_quadrature(rows, node_lo)
+        t_hi, w_hi = self._gather_quadrature(rows, node_hi)
+        c_lo = self._cdf_rows(a, rows, t_lo, w_lo)
+        c_hi = self._cdf_rows(a, rows, t_hi, w_hi)
+        return (1.0 - node_w) * c_lo + node_w * c_hi
 
 
-def _write_shape_product(path, hpx_pix_256, sightline_id, embed, a_grid, a_marginal):
+def _write_shape_product(path, hpx_pix_256, sightline_id, embed, is_herschel,
+                          kernel_t, kernel_w):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "sightline"
@@ -463,8 +573,11 @@ def _write_shape_product(path, hpx_pix_256, sightline_id, embed, a_grid, a_margi
         f.create_dataset("RIDGE_SLOPE", data=embed["ridge_slope"])
         f.create_dataset("RIDGE_WIDTH", data=embed["ridge_resid_sigma"])
         f.create_dataset("RIDGE_CORR", data=embed["ridge_corr"])
-        f.create_dataset("A_GRID", data=a_grid.astype(np.float32))
-        f.create_dataset("A_MARGINAL", data=a_marginal)
+        f.create_dataset("IS_HERSCHEL", data=is_herschel.astype(np.int8))
+        f.create_dataset("KERNEL_T_HERSCHEL", data=kernel_t["herschel"])
+        f.create_dataset("KERNEL_W_HERSCHEL", data=kernel_w["herschel"])
+        f.create_dataset("KERNEL_T_PLANCK", data=kernel_t["planck"])
+        f.create_dataset("KERNEL_W_PLANCK", data=kernel_w["planck"])
 
 
 def _sightline_id_lookup(config, region, sl_pix):
@@ -485,55 +598,47 @@ def _sightline_id_lookup(config, region, sl_pix):
     return np.where(matched, src_sid_sorted[capped], -1).astype(np.int64)
 
 
-def build_shape(config, region, nodes_arr, a_grid, quad_by_class):
+def build_shape(config, region, nodes_arr, kernel_t, kernel_w):
     """Writes one region's `prior/yso/prior_yso_sightline` product
     (SPEC_PRIORS.md section 6.3): the embedding shape and a-B ridge for
-    every occupied sightline, and the kernel-convolved a-marginal at
-    every column-grid node, blocked over sightlines via joblib.
+    every occupied sightline, its own map class, and the column
+    kernel's own per-node quadrature (shared across the whole build,
+    section 1.2) -- the exact ingredients `YsoShape` evaluates the
+    a-marginal from, at any `a`, with no further tabulation.
     """
     profile = _load_profile_arrays(config, region)
     sl_pix = profile["hpx_pix_256"]
     embed = embedding_and_ridge(profile)
     map_class = _majority_map_class(config, region, sl_pix)
+    is_herschel = map_class == "herschel"
     sightline_id = _sightline_id_lookup(config, region, sl_pix)
-
-    n_sl = sl_pix.size
-    starts = list(range(0, n_sl, SIGHTLINE_BLOCK))
-    blocks = Parallel(n_jobs=-1)(
-        delayed(_sightline_block)(
-            embed["u_edges"][s:s + SIGHTLINE_BLOCK],
-            embed["p_u"][s:s + SIGHTLINE_BLOCK],
-            map_class[s:s + SIGHTLINE_BLOCK],
-            a_grid, quad_by_class)
-        for s in starts)
-    a_marginal = (np.concatenate(blocks, axis=0) if blocks
-                  else np.empty((0, nodes_arr.size, N_A_GRID), dtype=np.float32))
 
     path = config_module.product_path(config, "bms", "yso", "prior",
                                        "sightline", region=region)
-    _write_shape_product(path, sl_pix, sightline_id, embed, a_grid, a_marginal)
+    _write_shape_product(path, sl_pix, sightline_id, embed, is_herschel,
+                          kernel_t, kernel_w)
     return path, embed["u_median"], embed["ridge_resid_sigma"]
 
 
 def build(config, regions=None):
-    """Writes, per region, the YSO shape product (section 6.3), and one
-    30-row (or subset) law product (section 6.1) over `regions`
-    (default: all thirty). Prints `A_GRID`'s fidelity number once
-    (Part 0, a property of the kernel and column grid alone, not of any
-    one region): the worst-case fraction of any node's kernel-quadrature
-    weight left beyond `A_GRID`'s cutoff, which bounds how much of any
-    sightline's `A_MARGINAL` mass can fall beyond the grid; must stay
-    under `A_GRID_MASS_TOL`."""
+    """Writes, per region, the YSO shape product (section 6.3) -- the
+    embedding density, its map class, and the column kernel's own
+    per-node quadrature, computed once and shared across every region
+    since the kernel does not depend on region -- and one 30-row (or
+    subset) law product (section 6.1) over `regions` (default: all
+    thirty)."""
     names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
     nodes_arr = column_grid.nodes(config)
-    a_grid, quad_by_class, worst_excluded_frac = _node_quadrature(config, nodes_arr)
-    print("prior.yso: A_GRID worst-node kernel-quadrature mass beyond the "
-          "grid = %.3e (bar %.1e)" % (worst_excluded_frac, A_GRID_MASS_TOL))
+    kernel_t, kernel_w = _node_kernel_quadrature(config, nodes_arr)
+    n_q = kernel_t["herschel"].shape[1]
+    print("prior.yso: kernel quadrature %d nodes x %d points per map class"
+          % (nodes_arr.size, n_q))
 
     law_rows = []
     for region in names:
-        build_shape(config, region, nodes_arr, a_grid, quad_by_class)
+        path, _, _ = build_shape(config, region, nodes_arr, kernel_t, kernel_w)
+        print("prior.yso: %s -> %s" % (region, path))
         law_rows.append(_law_row(config, region))
     _write_law_product(config, law_rows)
 
