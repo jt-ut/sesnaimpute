@@ -44,8 +44,11 @@ Products, per region:
 
   `histograms_anchors_hpx512__<Region>.hdf5` -- `HPX_PIX_512`,
   `A_PIX_K`, `OMEGA_PIX_DEG2`, `G_EDGES`, `KS_EDGES`, `N_G_OBS`,
-  `N_G_PRED`, `N_KS_OBS`, `N_KS_PRED` (n_pix, n_bins), `RATIO_PASS1`;
-  root attr `GRANULE="hpx512"`.
+  `N_G_PRED`, `N_KS_OBS`, `N_KS_PRED` (n_pix, n_bins), `N_GK_PRED`
+  (n_pix, n_G_bins, n_Ks_bins) -- the same raw stars, same weights and
+  Gaia detection weight as `N_G_PRED`, 2-D digitised on `(G_obs, Ks_obs)`
+  onto `G_EDGES`/`KS_EDGES` (SPEC_PRIORS.md section 2.1, "joint and
+  marginal bins") -- `RATIO_PASS1`; root attr `GRANULE="hpx512"`.
 """
 
 import os
@@ -339,14 +342,17 @@ def _read_anchor_counts(config, region, pixels):
 
 def _predicted_histograms(profile_obj, parent256, a_pix, raw, g_edges, ks_edges,
                            r_diffuse, r_dense, weight_star):
-    """`(N_G_PRED, N_KS_PRED)`, each `(n_pix, n_bin)`: every raw star's
-    own anchor observables at each pixel's own column and parent
-    sightline (`anchor_observables`), binned and weighted by the Gaia
-    detection probability (Ks carries none -- 2MASS's cut is treated as
-    complete to `KS_CUT_MAG`), then scaled by each star's `Ω_pix/Ω_sim`
-    share. Vectorised over the whole raw population per pixel; the
-    Python loop is over pixels only, run in threads (profile evaluation
-    and histogramming are numpy/C and release the GIL, and the raw
+    """`(N_G_PRED, N_KS_PRED, N_GK_PRED)`: every raw star's own anchor
+    observables at each pixel's own column and parent sightline
+    (`anchor_observables`), binned and weighted by the Gaia detection
+    probability (Ks carries none -- 2MASS's cut is treated as complete
+    to `KS_CUT_MAG`), then scaled by each star's `Ω_pix/Ω_sim` share.
+    `N_GK_PRED` (n_pix, n_G_bin, n_Ks_bin) is the same population, same
+    Gaia-weight, digitised jointly on `(G_obs, Ks_obs)` onto the same two
+    edge arrays (SPEC_PRIORS.md section 2.1, "joint and marginal bins").
+    Vectorised over the whole raw population per pixel; the Python loop
+    is over pixels only, run in threads (profile evaluation and
+    histogramming are numpy/C and release the GIL, and the raw
     population and profile are shared read-only rather than repickled
     per pixel).
     """
@@ -363,13 +369,15 @@ def _predicted_histograms(profile_obj, parent256, a_pix, raw, g_edges, ks_edges,
         p_g = gaia_detection_weight(g_obs)
         n_g = np.histogram(g_obs, bins=g_edges, weights=p_g)[0]
         n_ks = np.histogram(ks_obs, bins=ks_edges)[0]
-        return n_g, n_ks
+        n_gk = np.histogram2d(g_obs, ks_obs, bins=[g_edges, ks_edges], weights=p_g)[0]
+        return n_g, n_ks, n_gk
 
     results = Parallel(n_jobs=-1, prefer="threads")(
         delayed(_one_pixel)(parent256[i], a_pix[i]) for i in range(parent256.size))
     n_g_pred = np.stack([r[0] for r in results]) * weight_star
     n_ks_pred = np.stack([r[1] for r in results]) * weight_star
-    return n_g_pred, n_ks_pred
+    n_gk_pred = np.stack([r[2] for r in results]) * weight_star
+    return n_g_pred, n_ks_pred, n_gk_pred
 
 
 def _acceptance_check_one_pixel(profile_obj, parent256, a_pix, raw, g_edges, r_diffuse, r_dense,
@@ -403,7 +411,7 @@ def build_region(config, region):
     omega_pix_deg2 = float(hp.nside2pixarea(NSIDE, degrees=True))
     weight_star = omega_pix_deg2 / omega_sim_deg2
 
-    n_g_pred, n_ks_pred = _predicted_histograms(
+    n_g_pred, n_ks_pred, n_gk_pred = _predicted_histograms(
         profile_obj, parent256, a_pix, raw, g_edges, ks_edges, r_diffuse, r_dense, weight_star)
 
     rel_dev, n_below_g10 = _acceptance_check_one_pixel(
@@ -425,6 +433,7 @@ def build_region(config, region):
         region=region, pixels=pixels, a_pix=a_pix, omega_pix_deg2=omega_pix_deg2,
         g_edges=g_edges, ks_edges=ks_edges,
         n_g_obs=n_g_obs, n_g_pred=n_g_pred, n_ks_obs=n_ks_obs, n_ks_pred=n_ks_pred,
+        n_gk_pred=n_gk_pred,
         ratio_pass1=ratio_pass1, tiles=tiles,
         sigma_obs_deg2=sigma_obs_deg2, gradient=grad,
         n_raw=raw["dist_pc"].size, omega_sim_deg2=omega_sim_deg2,
@@ -462,6 +471,7 @@ def write_histograms(config, region, result):
         f.create_dataset("N_G_PRED", data=result["n_g_pred"])
         f.create_dataset("N_KS_OBS", data=result["n_ks_obs"])
         f.create_dataset("N_KS_PRED", data=result["n_ks_pred"])
+        f.create_dataset("N_GK_PRED", data=result["n_gk_pred"])
         f.create_dataset("RATIO_PASS1", data=result["ratio_pass1"])
 
 
