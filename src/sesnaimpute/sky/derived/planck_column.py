@@ -61,7 +61,6 @@ NSIDE_P = 2048
 NCHILD = (NSIDE_P // NSIDE) ** 2                      # 64
 PIXAREA_DEG2 = 4.0 * np.pi * (180.0 / np.pi) ** 2 / (12 * NSIDE ** 2)
 BAD = -1.6375e30                                       # HEALPix FITS blank sentinel
-N_JOBS = 4
 
 # SPEC_PRIORS.md 1.1: the shared column currency.
 NH2_TO_AK = 1.12e-22                                   # mag cm^2, A_K per N(H2)
@@ -190,7 +189,7 @@ def load_hgbs(config, min_fill=MIN_FILL):
     joblib since maps are the largest independent iterator here."""
     region_map = _hgbs_region_map(config)
     all_maps = sorted({p for names in region_map.values() for _, p in names})
-    results = Parallel(n_jobs=N_JOBS)(delayed(_hgbs_one)(p) for p in all_maps)
+    results = Parallel(n_jobs=config.n_jobs)(delayed(_hgbs_one)(p) for p in all_maps)
     by_path = dict(zip(all_maps, results))
     pixarea_arcsec2 = PIXAREA_DEG2 * 3600.0 * 3600.0
 
@@ -294,7 +293,7 @@ def measure_beam(config):
     joblib -- one job per map, the largest independent iterator here."""
     hgbs_dir = _hgbs_dir(config)
     planck_path = _planck_path(config)
-    peaks = Parallel(n_jobs=min(N_JOBS, len(BEAM_MAPS)))(
+    peaks = Parallel(n_jobs=min(config.n_jobs, len(BEAM_MAPS)))(
         delayed(_beam_one)(hgbs_dir, planck_path, fname) for fname in BEAM_MAPS)
     return float(np.median(peaks))
 

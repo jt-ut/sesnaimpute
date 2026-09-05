@@ -141,7 +141,7 @@ def load_field_star_colours(config, region_names):
         with h5py.File(path, "r") as f:
             return f["FNU_MJY"][:]
 
-    parts = Parallel(n_jobs=-1)(delayed(_one_region)(r) for r in region_names)
+    parts = Parallel(n_jobs=config.n_jobs)(delayed(_one_region)(r) for r in region_names)
     fnu = np.concatenate(parts, axis=0)
     mag = -2.5 * np.log10(fnu / ZERO_POINT_MJY[None, :])
     c12 = mag[:, IDX_I1] - mag[:, IDX_I2]
@@ -388,7 +388,7 @@ def build(config, regions=None):
           f"(width {COLOUR_BIN_WIDTH_MAG} mag), "
           f"[3.6]-[4.5] median={colour45_median:.4f} width={colour45_width:.4f} mag", flush=True)
 
-    results = Parallel(n_jobs=-1)(
+    results = Parallel(n_jobs=config.n_jobs)(
         delayed(region_measurement)(config, region, knots, colour45_median, colour45_width)
         for region in region_names)
     q = np.concatenate([r[0] for r in results]) if results else np.empty(0)

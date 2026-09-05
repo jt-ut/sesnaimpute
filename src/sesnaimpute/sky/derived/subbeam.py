@@ -518,7 +518,7 @@ def build(config, regions=None):
     jobs, cloud_regions = _map_inventory(config, regions)
     print("subbeam: %d HGBS maps overlapping the requested regions" % len(jobs),
           flush=True)
-    results = Parallel(n_jobs=-1)(delayed(process_map)(j) for j in jobs)
+    results = Parallel(n_jobs=config.n_jobs)(delayed(process_map)(j) for j in jobs)
     per_map = {cloud: payload for cloud, payload in results if payload is not None}
     print("subbeam: %d/%d maps processed" % (len(per_map), len(jobs)), flush=True)
 

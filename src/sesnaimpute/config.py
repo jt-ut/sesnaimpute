@@ -1,8 +1,10 @@
 """Loads the installation config: the data root and the external input paths.
 
 Reads `root.cfg`'s `[output] data_root` and `[inputs]` section with
-configparser. A `paths` section (the internal tree layout under `data_root`)
-is not built yet; only `product_path` below encodes it.
+configparser, plus the `[run] n_jobs` worker count (CODING_RULES.md 10a's
+cap, default 4 where the key is absent). A `paths` section (the internal
+tree layout under `data_root`) is not built yet; only `product_path` below
+encodes it.
 """
 
 import configparser
@@ -13,11 +15,16 @@ from sesnaimpute import definitions
 
 _AREAS = ("sky/download", "sky/derived", "catalog", "granules", "bms")
 
+#: CODING_RULES.md 10a: cap joblib worker pools at 4 where root.cfg names
+#: no `[run] n_jobs`.
+DEFAULT_N_JOBS = 4
+
 
 @dataclass(frozen=True)
 class Config:
     data_root: str
     inputs: MappingProxyType
+    n_jobs: int
 
 
 def load(path):
@@ -26,7 +33,8 @@ def load(path):
     parser.read(path)
     data_root = parser["output"]["data_root"]
     inputs = MappingProxyType(dict(parser["inputs"]))
-    return Config(data_root=data_root, inputs=inputs)
+    n_jobs = parser.getint("run", "n_jobs", fallback=DEFAULT_N_JOBS)
+    return Config(data_root=data_root, inputs=inputs, n_jobs=n_jobs)
 
 
 def product_path(config, area, source, quantity, granule, region=None):

@@ -389,7 +389,7 @@ def build_region(config, region):
 
     n_pix = pixels.size
     starts = list(range(0, n_pix, PIXEL_BLOCK))
-    blocks = Parallel(n_jobs=-1)(
+    blocks = Parallel(n_jobs=config.n_jobs)(
         delayed(_pixel_block)(
             config, a_pix[s:s + PIXEL_BLOCK], u_edges[s:s + PIXEL_BLOCK],
             p_u[s:s + PIXEL_BLOCK], n_young_total[s:s + PIXEL_BLOCK],

@@ -219,7 +219,7 @@ def build(config, regions=None):
             "these are SESNA's own mosaics and are expected already staged in the "
             "data root; nothing acquires them" % masks_path)
     names = regions or [r.name for r in regions_module.REGIONS]
-    Parallel(n_jobs=-1)(delayed(_build_one_region)(config, name, masks_path) for name in names)
+    Parallel(n_jobs=config.n_jobs)(delayed(_build_one_region)(config, name, masks_path) for name in names)
 
 
 if __name__ == "__main__":
