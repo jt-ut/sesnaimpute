@@ -155,7 +155,7 @@ def build(config, regions=None):
         regions = [r.name for r in regions_module.REGIONS]
     fits_path = _planck_map_path(config)
     cal = _load_planck_calibration(config)
-    Parallel(n_jobs=-1)(delayed(_build_one_region)(config, region, fits_path, cal) for region in regions)
+    Parallel(n_jobs=config.n_jobs)(delayed(_build_one_region)(config, region, fits_path, cal) for region in regions)
 
 
 if __name__ == "__main__":

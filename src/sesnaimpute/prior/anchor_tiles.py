@@ -340,7 +340,7 @@ def _read_anchor_counts(config, region, pixels):
     return g_edges, n_g_obs, ks_edges, ks_n
 
 
-def _predicted_histograms(profile_obj, parent256, a_pix, raw, g_edges, ks_edges,
+def _predicted_histograms(config, profile_obj, parent256, a_pix, raw, g_edges, ks_edges,
                            r_diffuse, r_dense, weight_star):
     """`(N_G_PRED, N_KS_PRED, N_GK_PRED)`: every raw star's own anchor
     observables at each pixel's own column and parent sightline
@@ -372,7 +372,7 @@ def _predicted_histograms(profile_obj, parent256, a_pix, raw, g_edges, ks_edges,
         n_gk = np.histogram2d(g_obs, ks_obs, bins=[g_edges, ks_edges], weights=p_g)[0]
         return n_g, n_ks, n_gk
 
-    results = Parallel(n_jobs=-1, prefer="threads")(
+    results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
         delayed(_one_pixel)(parent256[i], a_pix[i]) for i in range(parent256.size))
     n_g_pred = np.stack([r[0] for r in results]) * weight_star
     n_ks_pred = np.stack([r[1] for r in results]) * weight_star
@@ -412,7 +412,7 @@ def build_region(config, region):
     weight_star = omega_pix_deg2 / omega_sim_deg2
 
     n_g_pred, n_ks_pred, n_gk_pred = _predicted_histograms(
-        profile_obj, parent256, a_pix, raw, g_edges, ks_edges, r_diffuse, r_dense, weight_star)
+        config, profile_obj, parent256, a_pix, raw, g_edges, ks_edges, r_diffuse, r_dense, weight_star)
 
     rel_dev, n_below_g10 = _acceptance_check_one_pixel(
         profile_obj, parent256, a_pix, raw, g_edges, r_diffuse, r_dense, weight_star, n_g_pred[0])

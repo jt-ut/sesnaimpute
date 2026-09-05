@@ -645,7 +645,7 @@ def build(config, regions=None):
     names = regions or [r.name for r in regions_module.REGIONS]
     canon_by_name = regions_module.REGIONS_BY_NAME
     input_dir = _input_dir(config)
-    rows = Parallel(n_jobs=-1)(
+    rows = Parallel(n_jobs=config.n_jobs)(
         delayed(_build_one_region)(config, name, canon_by_name[name], input_dir) for name in names)
 
     depth_path = product_path(config, "sky/derived", "edenhofer", "depth", "region")

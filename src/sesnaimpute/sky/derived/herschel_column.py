@@ -37,11 +37,6 @@ NH2_TO_AK = AV_PER_NH2 * AK_PER_AV  # 1.12e-22 mag cm^2
 #: The HGBS survey's own quoted beam (Andre et al. 2010, A&A 518, L102).
 HERSCHEL_STATED_FWHM_ARCSEC = 36.3
 
-#: The largest HGBS map is tens of megapixels of float32; capped rather
-#: than one-worker-per-core so a full-survey run does not hold the whole
-#: map set in memory at once.
-MAP_WORKERS = 8
-
 #: Standard header keywords carrying a beam FWHM, degrees or arcsec.
 _BEAM_KEYWORDS_DEG = ("BMAJ",)
 _BEAM_KEYWORDS_ARCSEC = ("BEAM", "BEAMFWHM", "FWHM", "RESOLUTN", "RESOLUTION")
@@ -333,7 +328,7 @@ def build(config, regions=None):
                  for i in range(len(maps)) for j in range(i + 1, len(maps))
                  if _boxes_overlap(maps[i]["bbox"], maps[j]["bbox"])]
     t_sig0 = time.time()
-    pair_results = Parallel(n_jobs=MAP_WORKERS)(delayed(_pair_native)(*p) for p in pair_jobs)
+    pair_results = Parallel(n_jobs=config.n_jobs)(delayed(_pair_native)(*p) for p in pair_jobs)
     sig = _sig_model(pair_results)
     sigma_wall_s = time.time() - t_sig0
     _write_sigma_survey(config, maps, header_by_name, sig)
@@ -348,7 +343,7 @@ def build(config, regions=None):
             ra.size and _boxes_overlap(
                 m["bbox"], (float(ra.min()), float(ra.max()), float(dec.min()), float(dec.max())), pad=0.05)
             for ra, dec in region_ra_dec.values())])
-    sample_results = Parallel(n_jobs=MAP_WORKERS)(
+    sample_results = Parallel(n_jobs=config.n_jobs)(
         delayed(_sample_map_job)(m, region_ra_dec) for m in candidate_maps)
     per_map = dict(sample_results)
 

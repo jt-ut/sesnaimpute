@@ -62,7 +62,6 @@ NSIDE_P = 2048
 NCHILD = (NSIDE_P // NSIDE) ** 2                      # 64
 PIXAREA_DEG2 = 4.0 * np.pi * (180.0 / np.pi) ** 2 / (12 * NSIDE ** 2)
 BAD = -1.6375e30                                       # HEALPix FITS blank sentinel
-N_JOBS = 4
 
 # SPEC_PRIORS.md 1.1: the shared column currency.
 NH2_TO_AK = 1.12e-22                                   # mag cm^2, A_K per N(H2)
@@ -289,10 +288,10 @@ def _beam_one(planck_path, path):
 def measure_beam(config):
     """Planck's effective FWHM (arcmin): the median, over `BEAM_MAPS`, of
     each map's own cross-correlation peak, computed in parallel with
-    joblib -- one job per map, capped at `N_JOBS` (CODING_RULES.md 10a)."""
+    joblib -- one job per map, capped at `config.n_jobs` (CODING_RULES.md 10a)."""
     planck_path = _planck_path(config)
     paths_by_name = {m["name"]: m["path"] for m in sky_herschel_column._map_list(config)}
-    peaks = Parallel(n_jobs=min(N_JOBS, len(BEAM_MAPS)))(
+    peaks = Parallel(n_jobs=min(config.n_jobs, len(BEAM_MAPS)))(
         delayed(_beam_one)(planck_path, paths_by_name[fname]) for fname in BEAM_MAPS)
     return float(np.median(peaks))
 

@@ -227,7 +227,7 @@ def build_sightline(config):
     planck_pix, planck_ak, planck_sig = _load_planck_sightline(config)
     codes = _region_codes(config, regions)
 
-    rows = Parallel(n_jobs=-1)(
+    rows = Parallel(n_jobs=config.n_jobs)(
         delayed(_sightline_row_one_region)(
             config, region, codes[region], herschel, planck_pix, planck_ak, planck_sig, sig_zp, c0, c1)
         for region in regions)
@@ -388,7 +388,7 @@ def build(config, regions=None):
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
     cal = _load_planck_calibration(config)
-    Parallel(n_jobs=-1)(delayed(_build_one_region)(config, region, cal) for region in regions)
+    Parallel(n_jobs=config.n_jobs)(delayed(_build_one_region)(config, region, cal) for region in regions)
     build_sightline(config)
     build_column_check(config)
 

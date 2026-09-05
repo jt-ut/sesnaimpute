@@ -282,7 +282,7 @@ def _herschel_pixel_stats(config, pix_sorted, pedestal_k_value):
     candidates = [m for m in maps
                   if sky_herschel_column._boxes_overlap(headers[m["name"]]["bbox"], rbox, pad=0.1)]
 
-    results = Parallel(n_jobs=-1)(delayed(_map_block_a_k)(m["path"]) for m in candidates)
+    results = Parallel(n_jobs=config.n_jobs)(delayed(_map_block_a_k)(m["path"]) for m in candidates)
 
     n_pix = pix_sorted.size
     sum_sq = np.zeros(n_pix)
@@ -575,7 +575,7 @@ def _node_kernel_quadrature(config, nodes_arr):
     # form (rule 8), so the iterator itself is parallelised with joblib
     # threads, sharing the one loaded `Kernel` rather than re-pickling it.
     jobs = [(map_class, k) for map_class in MAP_CLASSES for k in range(n_node)]
-    results = Parallel(n_jobs=4, prefer="threads")(
+    results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
         delayed(kern.nodes)(float(nodes_arr[k]), map_class) for map_class, k in jobs)
     kernel_t, kernel_w = {}, {}
     for i, map_class in enumerate(MAP_CLASSES):

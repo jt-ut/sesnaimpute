@@ -78,10 +78,6 @@ BOOTSTRAP_RESAMPLES = 1000
 # Fixed so the fit is reproducible bit-for-bit from the catalogue alone.
 BOOTSTRAP_SEED = 20260822
 
-# Region-loop parallelism cap (CODING_RULES.md 10a): the whole process,
-# every joblib worker together, stays under 8 GB resident.
-N_JOBS = 4
-
 _ALPHA_BOUNDS = (-2.0, 2.0)
 _W_BOUNDS = (0.02, 3.0)
 
@@ -282,7 +278,7 @@ def _region_depths(curated_path):
 def build(config, regions=None):
     """Builds the region-granule survey-depths product for the given
     regions (default: every region in `regions.REGIONS`), parallelised
-    over regions with joblib (capped at `N_JOBS` workers). Reads the
+    over regions with joblib (capped at `config.n_jobs` workers). Reads the
     curated catalogues from `curated.build`, and updates only the given
     regions' rows of the product (`tables.update_rows`).
     """
@@ -299,7 +295,7 @@ def build(config, regions=None):
             )
         curated_paths.append(p)
 
-    results = Parallel(n_jobs=N_JOBS, prefer="threads")(delayed(_region_depths)(p) for p in curated_paths)
+    results = Parallel(n_jobs=config.n_jobs, prefer="threads")(delayed(_region_depths)(p) for p in curated_paths)
     delta_dex = np.array([r[0] for r in results])
     sigma_delta_dex = np.array([r[1] for r in results])
     w_mag = np.array([r[2] for r in results])

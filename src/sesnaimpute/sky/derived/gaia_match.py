@@ -454,7 +454,7 @@ def build(config, regions=None):
     joblib; every computation inside a region is vectorised over sources."""
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
-    Parallel(n_jobs=-1)(delayed(_build_one_region)(config, region) for region in regions)
+    Parallel(n_jobs=config.n_jobs)(delayed(_build_one_region)(config, region) for region in regions)
 
 
 if __name__ == "__main__":
