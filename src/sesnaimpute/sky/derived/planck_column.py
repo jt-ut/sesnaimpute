@@ -40,7 +40,6 @@ own dust temperature at the pixel, is carried for the atlas.
 """
 
 import glob
-import json
 import os
 
 import h5py
@@ -54,7 +53,10 @@ from joblib import Parallel, delayed
 from scipy.ndimage import gaussian_filter
 
 from sesnaimpute import build as build_module
+from sesnaimpute import regions as regions_module
 from sesnaimpute.config import product_path
+from sesnaimpute.sky.derived.herschel_column import _boxes_overlap, _map_header, _region_sources
+from sesnaimpute.sky.download.herschel_hgbs.build import _FILES as HGBS_FILES
 
 NSIDE = 256
 NSIDE_P = 2048
@@ -83,32 +85,48 @@ BEAM_LADDER = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0,
 
 
 def _planck_path(config):
-    files = sorted(glob.glob(f"{config.data_root}/sky/download/planck-r120/*.fits"))
+    files = sorted(glob.glob(f"{config.data_root}/sky/download/planck_r120/*.fits"))
     if not files:
         raise FileNotFoundError(
-            "planck_column: no Planck R1.20 FITS under sky/download/planck-r120")
+            "planck_column: no Planck R1.20 FITS under sky/download/planck_r120 -- run "
+            "the sesnaimpute.sky.download.planck_r120.build RUNBOOK line")
     return files[0]
 
 
 def _hgbs_dir(config):
-    return f"{config.data_root}/sky/download/herschel-hgbs"
+    return f"{config.data_root}/sky/download/herschel_hgbs"
 
 
-def _hgbs_manifest(config):
-    with open(f"{_hgbs_dir(config)}/PRODUCT.json") as f:
-        return json.load(f)
+def _hgbs_map_list(config):
+    """[(map file name, local path)] for every HGBS map `herschel_hgbs.
+    build` fetches, failing on any file not yet on disk."""
+    hub = _hgbs_dir(config)
+    out = []
+    for name in sorted(HGBS_FILES):
+        path = os.path.join(hub, name)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                "planck_column: HGBS map %r missing at %s -- run the "
+                "sesnaimpute.sky.download.herschel_hgbs.build RUNBOOK line" % (name, path))
+        out.append((name, path))
+    return out
 
 
 def _hgbs_region_map(config):
-    """region name -> list of (map file name, local path) whose
-    `overlap_regions` names it, read once from the HGBS PRODUCT.json."""
-    man = _hgbs_manifest(config)
+    """region name -> list of (map file name, local path) whose WCS
+    footprint bbox overlaps the region's curated source positions -- read
+    from the map headers and the catalogue, never a manifest."""
+    maps = _hgbs_map_list(config)
+    bbox_by_name = {name: _map_header(path)["bbox"] for name, path in maps}
     out = {}
-    for name, entry in man["products"].items():
-        if not entry.get("fetched"):
+    for region in [r.name for r in regions_module.REGIONS]:
+        ra, dec = _region_sources(config, region)
+        if ra.size == 0:
             continue
-        for region in entry.get("overlap_regions", []):
-            out.setdefault(region, []).append((name, entry["local_path"]))
+        rbox = (float(ra.min()), float(ra.max()), float(dec.min()), float(dec.max()))
+        for name, path in maps:
+            if _boxes_overlap(bbox_by_name[name], rbox, pad=0.05):
+                out.setdefault(region, []).append((name, path))
     return out
 
 
@@ -253,7 +271,7 @@ def _beam_one(hgbs_dir, planck_path, fname):
     `BEAM_LADDER`, against native Planck tau353 sampled at the same cell
     centres; the FWHM maximising the correlation is that MEASUREMENT's
     estimate of Planck's own effective beam."""
-    path = os.path.join(hgbs_dir, "maps", fname)
+    path = os.path.join(hgbs_dir, fname)
     with fits.open(path, memmap=False) as hd:
         data = np.asarray(hd[0].data, dtype=np.float64)
         hdr = hd[0].header
