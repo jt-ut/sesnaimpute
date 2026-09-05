@@ -43,18 +43,6 @@ $PY -m sesnaimpute.catalog.depths $CONFIG
 # sky/derived/<source>/ -- one product per computation from those bytes.
 # Derive never fetches. Reads SESNA positions and region membership from
 # the curated catalogue above, never SESNA fluxes.
-
-$PY -m sesnaimpute.granules.build $CONFIG
-$PY -m sesnaimpute.sky.derived.subbeam $CONFIG
-$PY -m sesnaimpute.sky.derived.planck_column $CONFIG
-
-$PY -m sesnaimpute.sky.derived.planck_source_column $CONFIG
-$PY -m sesnaimpute.sky.derived.column $CONFIG
-
-# --- sky derived ---
-# sky/derived/<source>/ -- one product per computation from those bytes.
-# Derive never fetches. Reads SESNA positions and region membership from
-# the curated catalogue above, never SESNA fluxes.
 $PY -m sesnaimpute.granules.build $CONFIG
 $PY -m sesnaimpute.sky.derived.subbeam $CONFIG
 $PY -m sesnaimpute.sky.derived.herschel_column $CONFIG
