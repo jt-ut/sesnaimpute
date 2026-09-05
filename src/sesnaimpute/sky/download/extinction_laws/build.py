@@ -16,17 +16,14 @@ Citations, transcribed from that tree's own `extinction/README.md`:
     site and reduced to [wavelength, K_ext] (K_ext = K_abs / (1 - albedo))
     with wavelength sorted ascending.
 
-    `whitney.r550` is a Kim, Martin & Hendry (1994) Galactic ISM curve
-    with mid-IR properties modified per Indebetouw et al. (2005); it was
-    distributed with Robitaille's `using_the_models.ipynb` notebook.
+    `whitney.r550` is the dense-cloud curve of Indebetouw et al. (2005,
+    ApJ 619, 931): a Kim, Martin & Hendry (1994) Galactic ISM grain model
+    with the mid-infrared opacities adjusted to the IRAC measurements, as
+    distributed with Robitaille's `using_the_models.ipynb` notebook and
+    commonly called the Whitney law (owner, 2026-09-05). The R_V = 5.5
+    tag is the notebook's file name; no R_V is stated in the file.
 
-Both are used exactly as published, with no renormalisation. Note the
-`whitney.r550` attribution is less certain than `draine_rv3.1`'s: the law
-directory's own `.README` only *guesses* an origin paper ("I believe this
-law came from..."), and neither source file states an R_V value -- "r550"
-is inferred, not published, to mean R_V=5.5. Neither file names Whitney et
-al. 2003. This module carries the tree's own citation as written; it does
-not strengthen it.
+Both are used exactly as published, with no renormalisation.
 
 Feeds SPEC_PRIORS.md section 1.3 (the diffuse/dense-cloud law blend
 `kappa_i(a)`, `prior.selection.LAW_DIFFUSE`/`LAW_DENSE`).
