@@ -30,9 +30,9 @@ by more than `CLUSTER_EXCLUSION_BAND_DEX` (quarry
 overlaps a Hunt & Reffert 2023 bound cluster (A&A 673, A114; VizieR
 J/A+A/673/A114, `sky/download/hunt_reffert2023/clusters.dat.gz`; their
 `Type` "o" open or "g" globular, not the unbound moving groups "m")
-within its own half-member radius `r50` plus half the tile's own
-side (`L_STAR_DEG/2`); its measured half-member radius, where the
-cluster is dense enough to distort a tile's count (SPEC_PRIORS.md 2.1).
+within its own half-member radius `r50` (the measured radius holding
+half its members, where it is dense enough to distort a tile's count;
+SPEC_PRIORS.md 2.1) plus half the tile's own side (`L_STAR_DEG/2`).
 
 Faint end (decision 5): the tables stop at `G_EDGES`/`KS_EDGES`' own
 faint edges (the anchors' own limits); the log10 trend of the region-
