@@ -53,25 +53,66 @@ have to trace through the upstream build to learn.
 WEIGHT_RULE codes, per star: 0 joint, 1 G marginal only, 2 Ks marginal
 only, 3 faint end, 4 bright end, 5 both marginals (geometric mean).
 
+Partition (spec section 3, "AGB"). Every retained field star is evolved
+or not by one HR-diagram cut on TRILEGAL's own raw columns (`log g < 1,
+log T_e < 3.6, log L > 3`, `evolved_selector`); an evolved star's tile
+weight splits `w_AGB = F_dusty * w`, `w_STAR = w - w_AGB`, row by row, so
+`w_STAR + w_AGB == w` exactly (reading note 04_star_family.md section C,
+`partition_weights`). TRILEGAL carries no chemistry per star, so
+`F_dusty` is the weighted mean over the two chemistries measured once,
+survey-wide, off Riebel et al. (2012, ApJ 753, 71) per-star GRAMS fits
+against the curated GRAMS library's own optical-depth floor
+(`f_dusty_by_chemistry`, spec section 10 item 2); `f_C = 0.18` (Le Bertre
+et al. 2003) is the fixed carbon-fraction weight.
+
+Brightness units (C3, spec section 2.2, section 3, section 4). Every
+star, evolved or not, carries `LOG10_B` (STAR): the median over the
+eight bands of its own TRILEGAL flux over its matched atmosphere
+template's reference flux (`prior.field_stars`' own `TEMPLATE_INDEX`
+into `sed_models/registers/sps_register.hdf5`) -- a unit change only
+(C3). `LOG10_B_PAHC` is the same median, J/H/Ks only, against the PAHC
+library's own continuum reference (`sed_models/registers/
+pahc_register.hdf5`'s `library/pahc_fstar` table, nearest of its eleven
+`T_EFF` nodes). An evolved star additionally carries `LOG10_B_AGB_C` and
+`LOG10_B_AGB_O` (spec section 3's closed forms, `b_agb`); NaN for a
+non-evolved star.
+
+PAHC weights (spec section 4). Every retained star (the whole
+population, `w` unreduced) carries `P_PAHC`, one nebular-contamination
+probability per node of a small, region-wide grid of eight 8 micron
+completeness limits (the 5/20/35/50/65/80/95/99th percentiles of the
+region's own sources' 50%-completeness limit at I4, `catalog.limits.
+limits`): `q = F_lim,8 / (F_i(8um) dimmed by the star's own tile
+extinction)`, `P_PAHC = P(q)` from the measured curve
+(`prior.pahc_curve.read`).
+
 Writes, per region, `bms/star/population_star_tile__<Region>.hdf5`: root
-attrs `GRANULE="tile"`, `OMEGA_SIM_DEG2`; a `DIST_GRID` dataset, the
-common distance grid every tile's mean profile and every star's `U` were
-read off; one HDF5 group `tile_<id>` per tile with datasets `STAR_INDEX`
-(row into `prior.field_stars`' retained group), `U`, `A`, `W`,
-`WEIGHT_RULE`, and attrs `A_TILE_K`, `N_SIGHTLINES`.
+attrs `GRANULE="tile"`, `OMEGA_SIM_DEG2`, `F_DUSTY_O`, `F_DUSTY_C`,
+`F_DUSTY_MEAN`, `F_C`, `L_O_LSUN`, `N_RIEBEL_O`, `N_RIEBEL_C`; a
+`DIST_GRID` dataset, the common distance grid every tile's mean profile
+and every star's `U` were read off; a `LIMIT8_GRID_MJY` (8,) dataset, the
+region's PAHC limit grid; one HDF5 group `tile_<id>` per tile with
+datasets `STAR_INDEX` (row into `prior.field_stars`' retained group),
+`U`, `A`, `W`, `WEIGHT_RULE`, `W_STAR`, `W_AGB`, `IS_EVOLVED`, `LOG10_B`,
+`LOG10_B_PAHC`, `LOG10_B_AGB_C`, `LOG10_B_AGB_O`, `P_PAHC` (n_star, 8),
+and attrs `A_TILE_K`, `N_SIGHTLINES`.
 """
 
 import os
 
 import h5py
 import numpy as np
+import pandas as pd
+from astropy.io import fits
 from joblib import Parallel, delayed
 
 from sesnaimpute import config as config_module
+from sesnaimpute import definitions
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
+from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
-from sesnaimpute.prior import anchor_tiles, selection
+from sesnaimpute.prior import anchor_tiles, pahc_curve, selection
 from sesnaimpute.sky.derived import profile as profile_module
 
 # ---------------------------------------------------------------------------
@@ -99,6 +140,45 @@ WEIGHT_RULE_FAINT_END = 3
 WEIGHT_RULE_BRIGHT_END = 4
 WEIGHT_RULE_BOTH_MARGINAL = 5
 N_WEIGHT_RULES = 6
+
+#: The project's own eight census bands, in the order every register and
+#: `catalog.limits` share (module docstring, "Brightness units").
+BAND_KEYS = tuple(b.key for b in definitions.BANDS)
+IDX_I4 = BAND_KEYS.index("I4")
+IDX_JHK = tuple(BAND_KEYS.index(k) for k in ("J", "H", "Ks"))
+
+#: Evolved-star HR-diagram cut on TRILEGAL's own raw columns (SPEC_PRIORS.md
+#: section 3): "evolved stars are selected by an HR-diagram cut ... log g
+#: < 1, log T_e < 3.6, log L > 3".
+EVOLVED_LOGG_MAX = 1.0
+EVOLVED_LOGTE_MAX = 3.6
+EVOLVED_LOGL_MIN = 3.0
+
+#: Carbon fraction among dusty evolved stars (SPEC_PRIORS.md section 3
+#: table): Le Bertre et al. 2003, A&A 403, 943 (126/689 carbon stars in
+#: their sample); one Galaxy-wide value, band 0.18-0.47 recorded but not
+#: applied (Ishihara et al. 2011's radial gradient).
+F_C = 0.18
+
+#: Riebel et al. 2012 (ApJ 753, 71, VizieR J/ApJ/753/71) fit one optical
+#: depth per star, at 10.0um for their O-rich GRAMS fits and 11.3um for
+#: their C-rich fits (table3.dat ReadMe, note 4) -- one column, the right
+#: band already selected per star by the fit itself.
+RIEBEL_GCL_COLSPEC = (33, 34)
+RIEBEL_TAU_COLSPEC = (85, 92)
+
+#: The curated GRAMS library's own detectability floor in that same
+#: per-chemistry band (SPEC_PRIORS.md section 3): "tau_10 >= 0.0128
+#: (O-rich) and tau_11.3 >= 0.02 (C-rich)".
+TAU_FLOOR_O = 0.0128
+TAU_FLOOR_C = 0.02
+
+#: PAHC's own small grid of 8 micron completeness-limit values (SPEC_PRIORS.md
+#: section 4, `IMPLEMENTATION.md` section 3): the percentiles of the
+#: region's sources' own 50%-completeness limit at I4 the shape is
+#: tabulated on.
+PAHC_LIMIT_QUANTILES = (5.0, 20.0, 35.0, 50.0, 65.0, 80.0, 95.0, 99.0)
+PAHC_LIMIT_MEDIAN_INDEX = PAHC_LIMIT_QUANTILES.index(50.0)
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +289,193 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
 
 
 # ---------------------------------------------------------------------------
+# F_dusty, survey-wide, from Riebel+2012's per-star GRAMS fits (spec
+# section 3, section 10 item 2)
+# ---------------------------------------------------------------------------
+
+def read_riebel_optical_depths(config):
+    """`(gcl, tau)`, `(n,)` each: every Riebel et al. 2012 AGB candidate's
+    own GRAMS chemistry class ("o"/"c") and fitted optical depth, read by
+    byte position off the fixed-width `table3.dat.gz` (module docstring's
+    `RIEBEL_*_COLSPEC`, `sky.download.riebel2012`'s own ReadMe)."""
+    path = f"{config.data_root}/sky/download/riebel2012/table3.dat.gz"
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "prior.star_population: no Riebel+2012 table at %r -- run the "
+            "sesnaimpute.sky.download.riebel2012 RUNBOOK line first" % path)
+    df = pd.read_fwf(path, colspecs=[RIEBEL_GCL_COLSPEC, RIEBEL_TAU_COLSPEC],
+                      names=["GCL", "TAU"], compression="gzip")
+    return df["GCL"].to_numpy(dtype=str), df["TAU"].to_numpy(dtype=np.float64)
+
+
+def f_dusty_by_chemistry(config):
+    """`(f_dusty_o, f_dusty_c, n_o, n_c)` (SPEC_PRIORS.md section 3, "the
+    value is the fraction of Riebel's stars whose fitted optical depth
+    exceeds the on-disk floor, per chemistry"): the per-chemistry share
+    of Riebel+2012's own per-star fits whose fitted `tau` clears the
+    curated GRAMS library's own detectability floor, `TAU_FLOOR_O`/
+    `TAU_FLOOR_C`, at that chemistry's own fitted band (10.0um O-rich,
+    11.3um C-rich -- one column already carries the right band)."""
+    gcl, tau = read_riebel_optical_depths(config)
+    is_o, is_c = gcl == "o", gcl == "c"
+    n_o, n_c = int(is_o.sum()), int(is_c.sum())
+    f_o = float(np.mean(tau[is_o] >= TAU_FLOOR_O)) if n_o else float("nan")
+    f_c = float(np.mean(tau[is_c] >= TAU_FLOOR_C)) if n_c else float("nan")
+    return f_o, f_c, n_o, n_c
+
+
+def agb_orich_l_sun(config):
+    """`(L_O, n_model)` (SPEC_PRIORS.md section 3 table: "read live from
+    the built GRAMS O-rich library (one shared luminosity, 4820 Lsun)"):
+    every O-rich model in the curated GRAMS library
+    (`sed_models/agb/parameters.fits`) shares one bolometric luminosity,
+    so the class mean is exact to floating precision, not a fit. Fails
+    loudly if a re-curated library ever ships a spread of O-rich
+    luminosities, since `b_agb`'s closed form assumes one shared value."""
+    path = f"{config.data_root}/sed_models/agb/parameters.fits"
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "prior.star_population: no AGB library parameters at %r -- "
+            "the GRAMS library must be curated before this build" % path)
+    with fits.open(path) as hdul:
+        data = hdul[1].data
+        chem = np.array([c.strip() for c in np.asarray(data["CHEM"]).astype(str)])
+        l_sun = np.asarray(data["L_SUN"], dtype=np.float64)
+    o_vals = l_sun[chem == "O"]
+    if o_vals.size == 0:
+        raise ValueError("prior.star_population: no CHEM=='O' rows in %r" % path)
+    spread = float(o_vals.max() - o_vals.min())
+    if spread > 1e-3 * float(o_vals.mean()):
+        raise ValueError(
+            "prior.star_population: the AGB library's O-rich L_SUN is not "
+            "one shared value (spread %.6f Lsun) -- b_agb's closed form "
+            "assumes it is" % spread)
+    return float(o_vals.mean()), int(o_vals.size)
+
+
+# ---------------------------------------------------------------------------
+# the two libraries' own reference fluxes: STAR's sps match, PAHC's
+# continuum table (spec section 2.2, section 4; C3, a unit change only)
+# ---------------------------------------------------------------------------
+
+def load_sps_reference_fluxes(config):
+    """`(n_model, 8)` mJy, `BAND_KEYS` order: every sps atmosphere
+    template's own reference flux (`sed_models/registers/
+    sps_register.hdf5`), indexed later by `prior.field_stars`'
+    `TEMPLATE_INDEX` for `LOG10_B` (STAR, all eight bands)."""
+    path = f"{config.data_root}/sed_models/registers/sps_register.hdf5"
+    with h5py.File(path, "r") as f:
+        models = f["models"]
+        return np.column_stack(
+            [np.asarray(models["F_REF_%s" % key], dtype=np.float64) for key in BAND_KEYS])
+
+
+def load_pahc_continuum_reference(config):
+    """`(teff_node, ref_jhk)`: the PAHC library's own continuum reference
+    table (`sed_models/registers/pahc_register.hdf5`, `library/
+    pahc_fstar`), eleven `T_EFF` nodes each carrying the underlying
+    star's own J/H/Ks reference flux before any PAH template is added --
+    the PAHC register's own reference fluxes (module docstring,
+    `LOG10_B_PAHC`), not the atmosphere template's, since the register
+    carries them. Its per-model `F_REF_J/H/Ks` (one row per PAH-template
+    combination, thousands of rows) carry no independent T_EFF key to
+    match a star against economically, so this reduced table -- the
+    register's own built-in T_EFF grid -- is what a star's own T_eff is
+    matched to."""
+    path = f"{config.data_root}/sed_models/registers/pahc_register.hdf5"
+    with h5py.File(path, "r") as f:
+        grp = f["library/pahc_fstar"]
+        teff_node = np.asarray(grp["T_EFF"], dtype=np.float64)
+        ref_jhk = np.column_stack(
+            [np.asarray(grp["J"], dtype=np.float64), np.asarray(grp["H"], dtype=np.float64),
+             np.asarray(grp["Ks"], dtype=np.float64)])
+    return teff_node, ref_jhk
+
+
+# ---------------------------------------------------------------------------
+# partition (spec section 3) and the per-star brightness units (C3,
+# spec section 2.2, section 3, section 4)
+# ---------------------------------------------------------------------------
+
+def evolved_selector(log_g, log_teff, log_l):
+    """Which retained field stars are evolved (module docstring's
+    `EVOLVED_*` cut), on TRILEGAL's own raw `logg`, `logTe`, `logL`
+    columns verbatim."""
+    log_g = np.asarray(log_g, dtype=np.float64)
+    log_teff = np.asarray(log_teff, dtype=np.float64)
+    log_l = np.asarray(log_l, dtype=np.float64)
+    return ((log_g < EVOLVED_LOGG_MAX) & (log_teff < EVOLVED_LOGTE_MAX)
+            & (log_l > EVOLVED_LOGL_MIN))
+
+
+def star_brightness_log10_b(fnu_mjy, template_index, f_ref_sps):
+    """`LOG10_B` (STAR, module docstring): `log10` of the median over the
+    eight bands of a star's own TRILEGAL flux over its matched sps
+    template's reference flux -- a unit change only (C3), no floor
+    correction (the floor guards a single band's log against a near-zero
+    flux, not a same-model ratio of two positive fluxes;
+    `prior.field_stars.load_atmosphere_grid`'s own precedent)."""
+    ratio = fnu_mjy / f_ref_sps[template_index]
+    return np.log10(np.median(ratio, axis=1))
+
+
+def pahc_brightness_log10_b(fnu_mjy, log_teff, teff_node, ref_jhk):
+    """`LOG10_B_PAHC` (module docstring): `log10` of the median over
+    J/H/Ks of a star's own TRILEGAL flux over the PAHC continuum
+    reference at its nearest `T_EFF` node (`load_pahc_continuum_reference`),
+    matched in log T_eff."""
+    node_log_teff = np.log10(teff_node)
+    star_log_teff = np.asarray(log_teff, dtype=np.float64)
+    nearest = np.argmin(np.abs(star_log_teff[:, None] - node_log_teff[None, :]), axis=1)
+    ratio = fnu_mjy[:, IDX_JHK] / ref_jhk[nearest]
+    return np.log10(np.median(ratio, axis=1))
+
+
+def agb_brightness_log10_b(dist_pc, log_l, l_o_lsun, is_evolved):
+    """`(LOG10_B_AGB_C, LOG10_B_AGB_O)` (spec section 3's closed forms,
+    `b_agb`): `2*log10(1kpc/d)` for the carbon-rich unit,
+    `log10(L/L_O) + 2*log10(1kpc/d)` for the oxygen-rich unit; NaN for a
+    non-evolved star (module docstring)."""
+    d_kpc = np.asarray(dist_pc, dtype=np.float64) / 1000.0
+    two_log_inv_d = 2.0 * np.log10(1.0 / d_kpc)
+    log10_b_c = np.where(is_evolved, two_log_inv_d, np.nan)
+    log_l_over_l_o = np.asarray(log_l, dtype=np.float64) - np.log10(l_o_lsun)
+    log10_b_o = np.where(is_evolved, log_l_over_l_o + two_log_inv_d, np.nan)
+    return log10_b_c, log10_b_o
+
+
+def partition_weights(w, is_evolved, f_dusty_mean):
+    """`(w_star, w_agb)` (spec section 3, reading note 04's
+    `partition_weights`): `w_AGB = F_dusty * w` on the evolved rows,
+    `w_STAR = w - w_AGB`, so `w_STAR + w_AGB == w` row by row -- a
+    reweighting, never a filter."""
+    w = np.asarray(w, dtype=np.float64)
+    w_agb = np.where(is_evolved, f_dusty_mean * w, 0.0)
+    return w - w_agb, w_agb
+
+
+def pahc_limit_grid_mjy(config, region):
+    """`(8,)` mJy (module docstring, `PAHC_LIMIT_QUANTILES`): the
+    region's own sources' 50%-completeness limit at I4
+    (`catalog.limits.limits`), at the eight percentiles PAHC's shape is
+    tabulated on."""
+    f_lim_i4 = limits_module.limits(config, region)[:, IDX_I4]
+    return np.percentile(f_lim_i4, PAHC_LIMIT_QUANTILES)
+
+
+def pahc_contamination_weight(fnu_8um, a_i, limit_grid_mjy, config, curve):
+    """`P_PAHC`, `(n_star, 8)` (spec section 4): per star and per grid
+    limit, `q = F_lim,8 / (F_i(8um)` dimmed by the star's own tile
+    extinction`)`, `P(q)` read off the measured curve
+    (`prior.pahc_curve.read`)."""
+    w_dense = selection.law_dense_weight(a_i)
+    kappa_8 = selection.kappa_hybrid(config, w_dense)[:, IDX_I4]
+    dimmed_flux_8 = fnu_8um * 10.0 ** (-0.4 * a_i * kappa_8)
+    q = limit_grid_mjy[None, :] / dimmed_flux_8[:, None]
+    return curve(np.log10(q))
+
+
+# ---------------------------------------------------------------------------
 # per-region reads
 # ---------------------------------------------------------------------------
 
@@ -221,6 +488,11 @@ def _read_field_stars(config, region):
             ks_mag=f["KS_MAG"][:].astype(np.float64),
             k_g_diffuse=f["K_G_DIFFUSE"][:].astype(np.float64),
             k_g_dense=f["K_G_DENSE"][:].astype(np.float64),
+            log_g=f["LOG_G"][:].astype(np.float64),
+            log_teff=f["LOG_TEFF"][:].astype(np.float64),
+            log_l=f["LOG_L"][:].astype(np.float64),
+            fnu_mjy=f["FNU_MJY"][:].astype(np.float64),
+            template_index=f["TEMPLATE_INDEX"][:].astype(np.int64),
         )
         omega_sim_deg2 = float(f.attrs["OMEGA_SIM_DEG2"])
         n_raw = int(f.attrs["N_RAW"])
@@ -304,12 +576,12 @@ def _region_source_geometry(config, region, tiles):
 # per-tile build
 # ---------------------------------------------------------------------------
 
-def _build_one_tile(t, geom, stars, weights, profile_obj, dist_grid):
-    """One tile's placement and weight for the WHOLE retained field-star
-    population (spec section 2.2, "Per tile": the same population,
-    deposited one by one, per tile). Returns the tile's own datasets plus
-    its mean-profile array and a few report-only diagnostics (not written
-    to the product)."""
+def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, curve):
+    """One tile's placement, weight, partition and brightness units for
+    the WHOLE retained field-star population (spec section 2.2, "Per
+    tile": the same population, deposited one by one, per tile). Returns
+    the tile's own datasets plus its mean-profile array and a few
+    report-only diagnostics (not written to the product)."""
     in_tile = geom["tile"] == t
     pix256_t = geom["pix256"][in_tile]
     a_col_t = geom["a_col"][in_tile]
@@ -334,21 +606,50 @@ def _build_one_tile(t, geom, stars, weights, profile_obj, dist_grid):
         w_joint, weights["use_joint"][t], w_g, w_ks,
         weights["w_region_g"], weights["w_region_ks"])
 
+    # the partition (spec section 3): a REWEIGHTING of this tile's own W,
+    # never a filter -- w_star + w_agb == w row by row.
+    w_star, w_agb = partition_weights(w, stars["is_evolved"], stars["f_dusty_mean"])
+
+    # PAHC's own weight (spec section 4): the star's own tile extinction
+    # `a_i` dims its intrinsic 8um flux before the contrast `q` is formed.
+    p_pahc = pahc_contamination_weight(
+        stars["fnu_mjy"][:, IDX_I4], a_i, stars["limit_grid_mjy"], config, curve)
+
     return dict(
         tile=t, n_sightlines=int(sightlines.size), a_tile=a_tile,
         star_index=np.arange(stars["dist_pc"].size, dtype=np.int32),
         u=u_i.astype(np.float32), a=a_i.astype(np.float32),
         w=w.astype(np.float32), rule=rule,
+        w_star=w_star.astype(np.float32), w_agb=w_agb.astype(np.float32),
+        p_pahc=p_pahc.astype(np.float32),
         mean_u=mean_u, use_joint_any=bool(weights["use_joint"][t].any()),
         w_g=w_g, w_ks=w_ks, bin_g=bin_g, bin_ks=bin_ks,
     )
 
 
-def build_region(config, region):
+def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
+                  f_ref_sps, teff_node, ref_jhk, curve):
     stars_raw, omega_sim_deg2, n_raw = _read_field_stars(config, region)
     r_diffuse = float(selection.ak_per_av(config, 0.0))
     r_dense = float(selection.ak_per_av(config, 1.0))
-    stars = dict(stars_raw, r_diffuse=r_diffuse, r_dense=r_dense)
+
+    # region-level, placement-independent per-star quantities (module
+    # docstring, "Partition", "Brightness units"): computed once, not per
+    # tile, since neither the HR-diagram cut nor a unit-change ratio
+    # depends on where a star sits on a tile's own profile.
+    is_evolved = evolved_selector(stars_raw["log_g"], stars_raw["log_teff"], stars_raw["log_l"])
+    f_dusty_mean = (1.0 - F_C) * f_dusty_o + F_C * f_dusty_c
+    log10_b = star_brightness_log10_b(stars_raw["fnu_mjy"], stars_raw["template_index"], f_ref_sps)
+    log10_b_pahc = pahc_brightness_log10_b(stars_raw["fnu_mjy"], stars_raw["log_teff"], teff_node, ref_jhk)
+    log10_b_agb_c, log10_b_agb_o = agb_brightness_log10_b(
+        stars_raw["dist_pc"], stars_raw["log_l"], l_o_lsun, is_evolved)
+    limit_grid_mjy = pahc_limit_grid_mjy(config, region)
+
+    stars = dict(stars_raw, r_diffuse=r_diffuse, r_dense=r_dense,
+                 is_evolved=is_evolved, f_dusty_mean=f_dusty_mean,
+                 log10_b=log10_b, log10_b_pahc=log10_b_pahc,
+                 log10_b_agb_c=log10_b_agb_c, log10_b_agb_o=log10_b_agb_o,
+                 limit_grid_mjy=limit_grid_mjy)
 
     tiles = _read_tiles(config, region)
     weights = _read_weights(config, region)
@@ -358,27 +659,38 @@ def build_region(config, region):
     dist_grid = shared_distance_grid(profile_obj)
 
     results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
-        delayed(_build_one_tile)(t, geom, stars, weights, profile_obj, dist_grid)
+        delayed(_build_one_tile)(config, t, geom, stars, weights, profile_obj, dist_grid, curve)
         for t in range(tiles["n_tile"]))
 
     return dict(region=region, n_star=stars["dist_pc"].size, n_raw=n_raw,
                 omega_sim_deg2=omega_sim_deg2, dist_grid=dist_grid,
                 tiles=results, n_tile=tiles["n_tile"],
                 tile_omega_deg2=tiles["tile_omega_deg2"],
-                region_anchor_ratio=_read_anchor_ratio(config, region))
+                region_anchor_ratio=_read_anchor_ratio(config, region),
+                is_evolved=is_evolved, log10_b=log10_b, log10_b_pahc=log10_b_pahc,
+                log10_b_agb_c=log10_b_agb_c, log10_b_agb_o=log10_b_agb_o,
+                limit_grid_mjy=limit_grid_mjy, f_dusty_mean=f_dusty_mean)
 
 
 # ---------------------------------------------------------------------------
 # write
 # ---------------------------------------------------------------------------
 
-def write_region(config, region, result):
+def write_region(config, region, result, f_dusty_o, f_dusty_c, l_o_lsun, n_riebel_o, n_riebel_c):
     path = config_module.product_path(config, "bms", "star", "population", "tile", region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "tile"
         f.attrs["OMEGA_SIM_DEG2"] = result["omega_sim_deg2"]
+        f.attrs["F_DUSTY_O"] = f_dusty_o
+        f.attrs["F_DUSTY_C"] = f_dusty_c
+        f.attrs["F_DUSTY_MEAN"] = result["f_dusty_mean"]
+        f.attrs["F_C"] = F_C
+        f.attrs["L_O_LSUN"] = l_o_lsun
+        f.attrs["N_RIEBEL_O"] = n_riebel_o
+        f.attrs["N_RIEBEL_C"] = n_riebel_c
         f.create_dataset("DIST_GRID", data=result["dist_grid"])
+        f.create_dataset("LIMIT8_GRID_MJY", data=result["limit_grid_mjy"])
         for tile_result in result["tiles"]:
             grp = f.create_group("tile_%d" % tile_result["tile"])
             grp.attrs["A_TILE_K"] = tile_result["a_tile"]
@@ -388,6 +700,14 @@ def write_region(config, region, result):
             grp.create_dataset("A", data=tile_result["a"])
             grp.create_dataset("W", data=tile_result["w"])
             grp.create_dataset("WEIGHT_RULE", data=tile_result["rule"])
+            grp.create_dataset("W_STAR", data=tile_result["w_star"])
+            grp.create_dataset("W_AGB", data=tile_result["w_agb"])
+            grp.create_dataset("IS_EVOLVED", data=result["is_evolved"].astype(np.int8))
+            grp.create_dataset("LOG10_B", data=result["log10_b"].astype(np.float32))
+            grp.create_dataset("LOG10_B_PAHC", data=result["log10_b_pahc"].astype(np.float32))
+            grp.create_dataset("LOG10_B_AGB_C", data=result["log10_b_agb_c"].astype(np.float32))
+            grp.create_dataset("LOG10_B_AGB_O", data=result["log10_b_agb_o"].astype(np.float32))
+            grp.create_dataset("P_PAHC", data=tile_result["p_pahc"])
     return path
 
 
@@ -447,6 +767,38 @@ def _report(result):
     frac_no_joint_non_marginal = (n_no_joint_non_marginal / n_no_joint_stars
                                    if n_no_joint_stars else float("nan"))
 
+    # tile-Omega-weighted combination of a per-tile sum into one region
+    # count per deg2 (module docstring's Sigma w_STAR/Sigma w_AGB/Sigma
+    # (w.P_PAHC); the same combination `sigma_w_over_n_raw` already uses
+    # for the retained-fraction check, here against `OMEGA_SIM_DEG2`
+    # rather than `N_RAW`, per the brief).
+    def _combined_per_deg2(sums_per_tile):
+        ratio = np.asarray(sums_per_tile) / result["omega_sim_deg2"]
+        return float(np.sum(ratio * omega) / np.sum(omega))
+
+    sigma_w_star = [float(t["w_star"].sum()) for t in tiles]
+    sigma_w_agb = [float(t["w_agb"].sum()) for t in tiles]
+    sigma_w_pahc_median = [float((t["w"] * t["p_pahc"][:, PAHC_LIMIT_MEDIAN_INDEX]).sum())
+                            for t in tiles]
+    star_per_deg2 = _combined_per_deg2(sigma_w_star)
+    agb_per_deg2 = _combined_per_deg2(sigma_w_agb)
+    pahc_per_deg2 = _combined_per_deg2(sigma_w_pahc_median)
+
+    frac_evolved_stars = float(np.mean(result["is_evolved"]))
+    frac_evolved_weight_per_tile = [
+        float(t["w"][result["is_evolved"]].sum() / t["w"].sum()) for t in tiles]
+    frac_evolved_weight = float(
+        np.sum(np.asarray(frac_evolved_weight_per_tile) * omega) / np.sum(omega))
+
+    log10_b = result["log10_b"]
+    log10_b_median = float(np.median(log10_b))
+    log10_b_p16, log10_b_p84 = (float(x) for x in np.percentile(log10_b, [16.0, 84.0]))
+
+    # algebraic identity (spec section 3): w_star + w_agb == w row by row.
+    max_partition_dev = max(
+        float(np.max(np.abs((t["w_star"] + t["w_agb"]).astype(np.float64) - t["w"].astype(np.float64))))
+        for t in tiles)
+
     return dict(
         n_tile=n_tile, a_tile_min=float(a_tile.min()), a_tile_max=float(a_tile.max()),
         u300_median=float(np.median(u300)), u1000_median=float(np.median(u1000)),
@@ -456,16 +808,37 @@ def _report(result):
         n_no_joint_tiles=len(no_joint_tiles), n_marginal_checked=n_marginal_checked,
         max_marginal_dev=max_marginal_dev,
         frac_no_joint_non_marginal=frac_no_joint_non_marginal,
+        star_per_deg2=star_per_deg2, agb_per_deg2=agb_per_deg2, pahc_per_deg2=pahc_per_deg2,
+        frac_evolved_stars=frac_evolved_stars, frac_evolved_weight=frac_evolved_weight,
+        log10_b_median=log10_b_median, log10_b_p16=log10_b_p16, log10_b_p84=log10_b_p84,
+        max_partition_dev=max_partition_dev,
     )
 
 
 def build(config, regions=None):
     """Writes the per-tile placement-and-weight product for `regions`
-    (default: all thirty), one file per region (module docstring)."""
+    (default: all thirty), one file per region (module docstring). The
+    literature `F_dusty` (Riebel+2012 against the curated GRAMS floor)
+    and the GRAMS O-rich library's own shared luminosity are survey-wide
+    and read once, not per region (rule 9); likewise the two libraries'
+    own reference-flux tables and the measured PAHC curve."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
+
+    f_dusty_o, f_dusty_c, n_riebel_o, n_riebel_c = f_dusty_by_chemistry(config)
+    l_o_lsun, n_orich_models = agb_orich_l_sun(config)
+    f_ref_sps = load_sps_reference_fluxes(config)
+    teff_node, ref_jhk = load_pahc_continuum_reference(config)
+    curve = pahc_curve.read(config)
+    print(
+        "star_population: F_dusty_O=%.4f (n=%d) F_dusty_C=%.4f (n=%d) "
+        "L_O=%.2f Lsun (n_model=%d, sed_models/agb/parameters.fits CHEM=='O') f_C=%.2f"
+        % (f_dusty_o, n_riebel_o, f_dusty_c, n_riebel_c, l_o_lsun, n_orich_models, F_C))
+
     for region in region_names:
-        result = build_region(config, region)
-        path = write_region(config, region, result)
+        result = build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
+                               f_ref_sps, teff_node, ref_jhk, curve)
+        path = write_region(config, region, result, f_dusty_o, f_dusty_c, l_o_lsun,
+                             n_riebel_o, n_riebel_c)
         rep = _report(result)
         rule_str = " ".join("%d=%.3f" % (k, rep["rule_frac"][k]) for k in range(N_WEIGHT_RULES))
         print(
@@ -482,6 +855,15 @@ def build(config, regions=None):
                rep["n_no_joint_tiles"], rep["n_marginal_checked"], rep["max_marginal_dev"],
                rep["frac_no_joint_non_marginal"],
                path))
+        print(
+            "star_population: %s: STAR/deg2=%.3f AGB/deg2=%.3f PAHC/deg2@median_limit=%.3f "
+            "evolved_frac(stars)=%.4f evolved_frac(weight)=%.4f "
+            "LOG10_B_median=%.3f [16-84%%]=[%.3f,%.3f] "
+            "partition_identity_max_dev=%.2e"
+            % (region, rep["star_per_deg2"], rep["agb_per_deg2"], rep["pahc_per_deg2"],
+               rep["frac_evolved_stars"], rep["frac_evolved_weight"],
+               rep["log10_b_median"], rep["log10_b_p16"], rep["log10_b_p84"],
+               rep["max_partition_dev"]))
 
 
 if __name__ == "__main__":
