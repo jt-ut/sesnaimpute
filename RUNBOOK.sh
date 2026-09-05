@@ -75,6 +75,7 @@ $PY -m sesnaimpute.prior.column_grid $CONFIG
 $PY -m sesnaimpute.prior.field_stars $CONFIG
 $PY -m sesnaimpute.prior.anchor_tiles $CONFIG
 $PY -m sesnaimpute.prior.depth_groups $CONFIG
+$PY -m sesnaimpute.prior.gal $CONFIG                    # GAL: Fazio counts law + SWIRE selection tables
 
 # --- fit ---
 # bms/ posterior fit of class and subclass probabilities from the prior
