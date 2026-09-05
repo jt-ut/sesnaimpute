@@ -6,7 +6,8 @@ mean differential-extinction map, converted E -> A_K through the ZGR23 R(Ks)
 ratio, spliced to the deeper 2 kpc release using only its increment past the
 517-boundary splice point, then completed to infinity by an exponential
 dust-disc tail anchored so `A(inf)` equals the sightline's own total column
-(from the Planck-anchored emission column product). It also writes one
+(from the adopted sightline column product, SPEC_PRIORS.md 1.1: Herschel
+where covered, Planck elsewhere). It also writes one
 survey-wide file of each region's cloud distance and line-of-sight depth,
 read off the same profiles: the half-width between the 16th/84th percentile
 of extinction-weighted distance inside the structure nearest the region's
@@ -534,13 +535,14 @@ def _admitted_sightlines(config, region):
 
 
 def _join_total_column(config, region, admitted_pix):
-    """The sightline's total column to infinity, A_K, from the Planck
-    sightline column product."""
-    path = product_path(config, "sky/derived", "planck", "column", "sightline")
+    """The sightline's total column to infinity, A_K, from the adopted
+    sightline column product (SPEC_PRIORS.md 1.1: Herschel where covered,
+    Planck elsewhere)."""
+    path = product_path(config, "sky/derived", "adopted", "column", "sightline")
     if not os.path.exists(path):
         raise FileNotFoundError(
-            "profile.build: Planck sightline column product missing at %s -- run the "
-            "sesnaimpute.sky.derived.planck_column RUNBOOK line for it" % path)
+            "profile.build: adopted sightline column product missing at %s -- run the "
+            "sesnaimpute.sky.derived.column RUNBOOK line for it" % path)
     with h5py.File(path, "r") as f:
         hpx = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
         a_inf = np.asarray(f["A_K"][:], dtype=float)
