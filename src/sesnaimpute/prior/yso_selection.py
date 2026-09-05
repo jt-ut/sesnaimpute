@@ -72,6 +72,7 @@ from sesnaimpute import config as config_module
 from sesnaimpute import constants
 from sesnaimpute import definitions
 from sesnaimpute import regions as regions_module
+from sesnaimpute import tables as tables_module
 from sesnaimpute.build import run
 from sesnaimpute.prior import column_grid as column_grid_module
 from sesnaimpute.prior import depth_groups as depth_groups_module
@@ -449,16 +450,16 @@ def build(config, regions=None):
         g3_a0_row.append(float(result["G_3MYR"][result["MEDIAN_GROUP"], 0]))
 
     summary_path = config_module.product_path(config, "bms", "yso", "summary", "region")
-    os.makedirs(os.path.dirname(summary_path), exist_ok=True)
-    with h5py.File(summary_path, "w") as f:
-        f.attrs["GRANULE"] = "region"
-        f.attrs["IMF_FRAC_ABOVE_1P4"] = IMF_FRAC_ABOVE_1P4
-        f.create_dataset("REGION", data=np.array([r.encode("utf-8") for r in region_rows]))
-        f.create_dataset("D_R_PC", data=np.asarray(d_r_pc_row, dtype=np.float64))
-        f.create_dataset("M_LIM_8UM_1MYR", data=np.asarray(m_lim_row, dtype=np.float64))
-        f.create_dataset("IMF_FRAC_ABOVE_MLIM", data=np.asarray(f_above_row, dtype=np.float64))
-        f.create_dataset("G_1MYR_A0_MEDIAN_GROUP", data=np.asarray(g1_a0_row, dtype=np.float64))
-        f.create_dataset("G_3MYR_A0_MEDIAN_GROUP", data=np.asarray(g3_a0_row, dtype=np.float64))
+    tables_module.update_rows(
+        summary_path, region_names,
+        {
+            "D_R_PC": np.asarray(d_r_pc_row, dtype=np.float64),
+            "M_LIM_8UM_1MYR": np.asarray(m_lim_row, dtype=np.float64),
+            "IMF_FRAC_ABOVE_MLIM": np.asarray(f_above_row, dtype=np.float64),
+            "G_1MYR_A0_MEDIAN_GROUP": np.asarray(g1_a0_row, dtype=np.float64),
+            "G_3MYR_A0_MEDIAN_GROUP": np.asarray(g3_a0_row, dtype=np.float64),
+        },
+        granule="region", attrs={"IMF_FRAC_ABOVE_1P4": IMF_FRAC_ABOVE_1P4})
     print(f"yso_selection: summary -> {summary_path}")
 
 

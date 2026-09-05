@@ -37,6 +37,7 @@ from astropy.io import fits
 from joblib import Parallel, delayed
 
 from sesnaimpute import regions as regions_module
+from sesnaimpute import tables as tables_module
 from sesnaimpute.config import product_path
 
 # --- the unit chain (spec 1.4) -------------------------------------------
@@ -641,15 +642,14 @@ def build(config, regions=None):
         delayed(_build_one_region)(config, name, canon_by_name[name], input_dir) for name in names)
 
     depth_path = product_path(config, "sky/derived", "edenhofer", "depth", "region")
-    os.makedirs(os.path.dirname(depth_path), exist_ok=True)
-    with h5py.File(depth_path, "w") as f:
-        f.attrs["GRANULE"] = "region"
-        f.create_dataset("REGION", data=np.array([r["region"] for r in rows], dtype="S64"))
+    depth_rows = {
+        key: np.array([r[col] for r in rows], dtype=np.float64)
         for key, col in (("D_R_PC", "d_r_pc"), ("SIGMA_D_PC", "sigma_d_pc"), ("D_PEAK_PC", "d_peak_pc"),
-                         ("D_LO_PC", "d_lo_pc"), ("D_HI_PC", "d_hi_pc"), ("SIGMA_DEPTH_PC", "sigma_depth_pc"),
-                         ("FWHM_PC", "fwhm_pc")):
-            f.create_dataset(key, data=np.array([r[col] for r in rows], dtype=np.float64))
-        f.create_dataset("DEPTH_OK", data=np.array([r["depth_ok"] for r in rows], dtype=bool))
+                          ("D_LO_PC", "d_lo_pc"), ("D_HI_PC", "d_hi_pc"), ("SIGMA_DEPTH_PC", "sigma_depth_pc"),
+                          ("FWHM_PC", "fwhm_pc"))
+    }
+    depth_rows["DEPTH_OK"] = np.array([r["depth_ok"] for r in rows], dtype=bool)
+    tables_module.update_rows(depth_path, names, depth_rows, granule="region")
 
 
 # --- the reader -------------------------------------------------------
