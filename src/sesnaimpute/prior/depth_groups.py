@@ -23,6 +23,7 @@ from scipy.cluster.vq import kmeans2
 
 from sesnaimpute import config as config_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute import tables as tables_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.prior import selection
@@ -65,14 +66,10 @@ class DepthGroups:
 
     def write(self, path):
         """Upserts this region's group into the shared depth-groups
-        file at `path`, creating it if absent.
+        file at `path`, creating it if absent and leaving every other
+        region's group untouched (CODING_RULES.md 5c).
         """
-        d = os.path.dirname(path)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        mode = "a" if os.path.exists(path) else "w"
-        with h5py.File(path, mode) as f:
-            f.attrs["GRANULE"] = "region"
+        with tables_module.open_product(path, granule="region") as f:
             if self.region in f:
                 del f[self.region]
             g = f.create_group(self.region)

@@ -1,59 +1,105 @@
-"""Region-axis products: create-once, update-in-place (CODING_RULES.md
-rule 5c).
-
-A product that is one file with a region axis (thirty rows) is created
-whole the first time any build writes it and, after that, updated in
-place: a build given a subset of regions overwrites only those rows and
-leaves the rest of the file untouched. `update_rows` is the one place
-that does this for every module shipping such a table, so a region list
-never rewrites all thirty.
+"""Row-level updates for the thirty-region products (CODING_RULES.md 5c):
+a build given a subset of regions writes only those regions' rows (or,
+for a per-region-group product, only those regions' groups) and leaves
+the rest of the file exactly as it was.
 """
 
 import os
+from contextlib import contextmanager
 
 import h5py
 import numpy as np
 
-from sesnaimpute import regions as regions_module
+from sesnaimpute.regions import REGIONS
+
+ALL_REGIONS = [r.name for r in REGIONS]
+ROW_IDX = {name: i for i, name in enumerate(ALL_REGIONS)}
+
+
+@contextmanager
+def open_product(path, granule="region"):
+    """Opens the shared product at `path` in append mode if it already
+    exists -- so a caller's own per-row or per-group upsert leaves every
+    other row or group untouched -- and in create mode otherwise; sets
+    the root `GRANULE` attribute either way."""
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    mode = "a" if os.path.exists(path) else "w"
+    with h5py.File(path, mode) as f:
+        f.attrs["GRANULE"] = granule
+        yield f
 
 
 def _fill_value(dtype):
-    """The absent-row fill for a dataset's dtype: `False` for a boolean
-    dataset, `NaN` otherwise.
-    """
+    """The placeholder a freshly created row carries before any build
+    has written it: NaN for floats, -1 for integers, False for bool."""
+    if np.issubdtype(dtype, np.floating):
+        return np.nan
     if np.issubdtype(dtype, np.bool_):
         return False
-    return np.nan
+    if np.issubdtype(dtype, np.integer):
+        return -1
+    raise ValueError(f"tables.update_rows: no fill value for dtype {dtype}")
 
 
-def update_rows(path, regions, rows, granule="region"):
-    """Writes `rows` (a `{dataset name: array}` map whose first axis
-    matches `regions`) into the region-axis product at `path`.
+def _widen_to_canonical(f):
+    """Upgrades a file whose `REGION` dataset does not already list all
+    thirty regions in `ALL_REGIONS` order (a product last written before
+    this module existed, holding only whichever regions its own last
+    build touched) to the canonical thirty-row shape: every dataset is
+    rebuilt at that shape, each old row carried to its own region's slot
+    by name, every other slot taking that dataset's own placeholder. A
+    file already in canonical shape is left untouched."""
+    if "REGION" not in f:
+        return
+    existing = [r.decode() if isinstance(r, bytes) else r for r in f["REGION"][:]]
+    if existing == ALL_REGIONS:
+        return
+    old_idx = {name: i for i, name in enumerate(existing)}
+    for name in list(f.keys()):
+        if name == "REGION":
+            continue
+        old = np.asarray(f[name][()])
+        if old.ndim == 0 or old.shape[0] != len(existing):
+            continue  # a global scalar (e.g. a region-independent constant), not a row
+        new = np.full((len(ALL_REGIONS),) + old.shape[1:],
+                       _fill_value(old.dtype), dtype=old.dtype)
+        for region, i in old_idx.items():
+            if region in ROW_IDX:
+                new[ROW_IDX[region]] = old[i]
+        del f[name]
+        f.create_dataset(name, data=new)
+    del f["REGION"]
+    f.create_dataset("REGION", data=np.array(
+        [r.encode("utf-8") for r in ALL_REGIONS], dtype="S64"))
 
-    Creates the file if it is absent, with all thirty rows: `REGION` from
-    `sesnaimpute.regions.REGIONS`, in that order, every dataset in `rows`
-    NaN-filled (`False`-filled if boolean), and the root attribute
-    `GRANULE` set to `granule`. A dataset named in `rows` that the file
-    does not yet carry (an older build of the same product, before a
-    dataset was added) is created the same way. Either way, only the
-    rows for `regions` are then written.
+
+def update_rows(path, regions, rows, granule="region", attrs=None):
+    """Writes `rows` (dataset name -> array, first axis aligned to
+    `regions`) into the thirty-row product at `path`: creates the file
+    with all thirty regions' rows, every dataset filled with its own
+    placeholder, when the file or a dataset is absent, and writes only
+    the given regions' rows -- the rest of the file is left exactly as
+    it was (CODING_RULES.md 5c). `attrs`, if given, are set as root
+    attributes.
     """
-    all_regions = [r.name for r in regions_module.REGIONS]
-
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with h5py.File(path, "a") as f:
+    regions = list(regions)
+    row_idx = ROW_IDX
+    with open_product(path, granule) as f:
+        _widen_to_canonical(f)
         if "REGION" not in f:
-            f.attrs["GRANULE"] = granule
-            f.create_dataset("REGION", data=np.array([r.encode("utf-8") for r in all_regions]))
-
-        file_regions = [r.decode() if isinstance(r, bytes) else r for r in f["REGION"][:]]
-        row_index = [file_regions.index(r) for r in regions]
-
-        for name, arr in rows.items():
-            arr = np.asarray(arr)
+            f.create_dataset("REGION", data=np.array(
+                [r.encode("utf-8") for r in ALL_REGIONS], dtype="S64"))
+        for name, values in rows.items():
+            values = np.asarray(values)
             if name not in f:
-                shape = (len(file_regions),) + arr.shape[1:]
-                f.create_dataset(name, data=np.full(shape, _fill_value(arr.dtype), dtype=arr.dtype))
+                shape = (len(ALL_REGIONS),) + values.shape[1:]
+                f.create_dataset(name, data=np.full(
+                    shape, _fill_value(values.dtype), dtype=values.dtype))
             dset = f[name]
-            for k, i in enumerate(row_index):
-                dset[i, ...] = arr[k]
+            for i, region in enumerate(regions):
+                dset[row_idx[region]] = values[i]
+        if attrs:
+            for key, value in attrs.items():
+                f.attrs[key] = value

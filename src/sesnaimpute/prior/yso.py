@@ -65,6 +65,7 @@ from joblib import Parallel, delayed
 
 from sesnaimpute import config as config_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute import tables as tables_module
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.prior import column_grid
@@ -169,24 +170,29 @@ def _law_row(config, region):
                 pc2_per_deg2=pc2, pedestal_removed_frac=removed_frac)
 
 
-def _write_law_product(config, rows):
+def _write_law_product(config, regions, rows):
+    """Writes the 30-row law product, in place for `regions`
+    (CODING_RULES.md 5c), plus the three region-independent constants
+    (`KAPPA_HERSCHEL`, `KAPPA_PLANCK`, `LAW_BAND_DEX`) as the same
+    root-level scalar datasets every build has always written -- created
+    once, since their value never depends on which regions ran."""
     path = config_module.product_path(config, "bms", "yso", "law", "region")
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with h5py.File(path, "w") as f:
-        f.attrs["GRANULE"] = "region"
-        f.create_dataset("REGION", data=np.array(
-            [r["region"] for r in rows], dtype="S64"))
-        f.create_dataset("PEDESTAL_K", data=np.array(
-            [r["pedestal_k"] for r in rows], dtype=np.float64))
-        f.create_dataset("D_R_PC", data=np.array(
-            [r["d_r_pc"] for r in rows], dtype=np.float64))
-        f.create_dataset("PC2_PER_DEG2", data=np.array(
-            [r["pc2_per_deg2"] for r in rows], dtype=np.float64))
-        f.create_dataset("PEDESTAL_REMOVED_FRAC", data=np.array(
-            [r["pedestal_removed_frac"] for r in rows], dtype=np.float64))
-        f.create_dataset("KAPPA_HERSCHEL", data=np.float64(KAPPA_HERSCHEL))
-        f.create_dataset("KAPPA_PLANCK", data=np.float64(KAPPA_PLANCK))
-        f.create_dataset("LAW_BAND_DEX", data=np.float64(LAW_BAND_DEX))
+    tables_module.update_rows(
+        path, regions,
+        {
+            "PEDESTAL_K": np.array([r["pedestal_k"] for r in rows], dtype=np.float64),
+            "D_R_PC": np.array([r["d_r_pc"] for r in rows], dtype=np.float64),
+            "PC2_PER_DEG2": np.array([r["pc2_per_deg2"] for r in rows], dtype=np.float64),
+            "PEDESTAL_REMOVED_FRAC": np.array(
+                [r["pedestal_removed_frac"] for r in rows], dtype=np.float64),
+        },
+        granule="region")
+    with tables_module.open_product(path, granule="region") as f:
+        for name, value in (("KAPPA_HERSCHEL", KAPPA_HERSCHEL),
+                             ("KAPPA_PLANCK", KAPPA_PLANCK),
+                             ("LAW_BAND_DEX", LAW_BAND_DEX)):
+            if name not in f:
+                f.create_dataset(name, data=np.float64(value))
     return path
 
 
@@ -833,7 +839,7 @@ def build(config, regions=None):
         path, _, _ = build_shape(config, region, nodes_arr, kernel_t, kernel_w)
         print("prior.yso: %s -> %s" % (region, path))
         law_rows.append(_law_row(config, region))
-    _write_law_product(config, law_rows)
+    _write_law_product(config, names, law_rows)
 
 
 if __name__ == "__main__":

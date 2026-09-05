@@ -40,7 +40,6 @@ own dust temperature at the pixel, is carried for the atlas.
 """
 
 import glob
-import json
 import os
 
 import h5py
@@ -54,7 +53,9 @@ from joblib import Parallel, delayed
 from scipy.ndimage import gaussian_filter
 
 from sesnaimpute import build as build_module
+from sesnaimpute import regions as regions_module
 from sesnaimpute.config import product_path
+from sesnaimpute.sky.derived import herschel_column as sky_herschel_column
 
 NSIDE = 256
 NSIDE_P = 2048
@@ -90,25 +91,21 @@ def _planck_path(config):
     return files[0]
 
 
-def _hgbs_dir(config):
-    return f"{config.data_root}/sky/download/herschel-hgbs"
-
-
-def _hgbs_manifest(config):
-    with open(f"{_hgbs_dir(config)}/PRODUCT.json") as f:
-        return json.load(f)
-
-
 def _hgbs_region_map(config):
-    """region name -> list of (map file name, local path) whose
-    `overlap_regions` names it, read once from the HGBS PRODUCT.json."""
-    man = _hgbs_manifest(config)
+    """region name -> [(map file name, local path)] for every HGBS map
+    whose finite pixels catch at least one of that region's curated
+    sources: the calibration's own region label, for the region-balanced
+    fit below, needs no manifest -- it is `sky.derived.herschel_column`'s
+    own coverage test (`_sample_map_job`), reused rather than recomputed,
+    against every map `sky.download.herschel_hgbs.build` fetches."""
+    maps = sky_herschel_column._map_list(config)
+    region_names = [r.name for r in regions_module.REGIONS]
+    region_ra_dec = {r: sky_herschel_column._region_sources(config, r) for r in region_names}
     out = {}
-    for name, entry in man["products"].items():
-        if not entry.get("fetched"):
-            continue
-        for region in entry.get("overlap_regions", []):
-            out.setdefault(region, []).append((name, entry["local_path"]))
+    for m in maps:
+        _, served = sky_herschel_column._sample_map_job(m, region_ra_dec)
+        for region in served:
+            out.setdefault(region, []).append((m["name"], m["path"]))
     return out
 
 
@@ -186,12 +183,14 @@ def load_hgbs(config, min_fill=MIN_FILL):
     """`{region: {pix, ak, sd, fill}}`: every HGBS-covered region's
     nside-256 pixels whose finite HGBS coverage clears `min_fill`, with
     `A_K = 1.12e-22 * N(H2)` (SPEC_PRIORS.md 1.1) and its within-pixel
-    scatter, each region's own maps block-averaged in parallel with
-    joblib since maps are the largest independent iterator here."""
+    scatter. Maps are block-averaged one at a time, each one's own
+    full-resolution array freed before the next is opened (CODING_RULES.md
+    10a): a single HGBS map is this build's largest memory cost, so
+    running them in series -- not a joblib pool holding several at once
+    -- is what keeps the whole process inside the shared 8 GB budget."""
     region_map = _hgbs_region_map(config)
     all_maps = sorted({p for names in region_map.values() for _, p in names})
-    results = Parallel(n_jobs=N_JOBS)(delayed(_hgbs_one)(p) for p in all_maps)
-    by_path = dict(zip(all_maps, results))
+    by_path = {p: _hgbs_one(p) for p in all_maps}
     pixarea_arcsec2 = PIXAREA_DEG2 * 3600.0 * 3600.0
 
     out = {}
@@ -248,12 +247,11 @@ def _peak(x, y):
     return float(-b / (2 * a)) if a < 0 else float(x1)
 
 
-def _beam_one(hgbs_dir, planck_path, fname):
+def _beam_one(planck_path, path):
     """Cross-correlates one native-resolution HGBS map, smoothed through
     `BEAM_LADDER`, against native Planck tau353 sampled at the same cell
     centres; the FWHM maximising the correlation is that MEASUREMENT's
     estimate of Planck's own effective beam."""
-    path = os.path.join(hgbs_dir, "maps", fname)
     with fits.open(path, memmap=False) as hd:
         data = np.asarray(hd[0].data, dtype=np.float64)
         hdr = hd[0].header
@@ -291,11 +289,11 @@ def _beam_one(hgbs_dir, planck_path, fname):
 def measure_beam(config):
     """Planck's effective FWHM (arcmin): the median, over `BEAM_MAPS`, of
     each map's own cross-correlation peak, computed in parallel with
-    joblib -- one job per map, the largest independent iterator here."""
-    hgbs_dir = _hgbs_dir(config)
+    joblib -- one job per map, capped at `N_JOBS` (CODING_RULES.md 10a)."""
     planck_path = _planck_path(config)
+    paths_by_name = {m["name"]: m["path"] for m in sky_herschel_column._map_list(config)}
     peaks = Parallel(n_jobs=min(N_JOBS, len(BEAM_MAPS)))(
-        delayed(_beam_one)(hgbs_dir, planck_path, fname) for fname in BEAM_MAPS)
+        delayed(_beam_one)(planck_path, paths_by_name[fname]) for fname in BEAM_MAPS)
     return float(np.median(peaks))
 
 
