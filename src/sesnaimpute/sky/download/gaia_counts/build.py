@@ -100,6 +100,10 @@ def build(config, regions=None):
     dest_dir = f"{config.data_root}/sky/download/gaia_counts"
     os.makedirs(dest_dir, exist_ok=True)
     for region in regions:
+        dest_path = f"{dest_dir}/counts_gaia_hpx512__{region}.csv"
+        if os.path.exists(dest_path):
+            print(f"gaia_counts build: {dest_path} present, skipped")
+            continue
         query = region_query(config, region)
         text = _tap_sync_csv(query)
         dest_path = f"{dest_dir}/counts_gaia_hpx512__{region}.csv"

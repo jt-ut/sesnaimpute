@@ -136,6 +136,10 @@ def build(config, regions=None):
     dest_dir = f"{config.data_root}/sky/download/gaia_crossmatch"
     os.makedirs(dest_dir, exist_ok=True)
     for region in regions:
+        dest_path = f"{dest_dir}/candidates_gaia_source__{region}.csv"
+        if os.path.exists(dest_path):
+            print(f"gaia_crossmatch build: {dest_path} present, skipped")
+            continue
         positions = _read_positions(config, region)
         candidates = _pull_region(positions, region)
         dest_path = f"{dest_dir}/candidates_gaia_source__{region}.csv"

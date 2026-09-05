@@ -152,6 +152,10 @@ def build(config, regions=None):
     dest_dir = f"{config.data_root}/sky/download/twomass_counts"
     os.makedirs(dest_dir, exist_ok=True)
     for region in regions:
+        dest_path = f"{dest_dir}/counts_twomass_hpx512__{region}.csv"
+        if os.path.exists(dest_path):
+            print(f"twomass_counts build: {dest_path} present, skipped")
+            continue
         boxes = region_strip_boxes(config, region)
         rows = []
         for l0, l1, b0, b1 in boxes:

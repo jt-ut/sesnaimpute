@@ -18,6 +18,10 @@ def query_csv(table, columns, key_column, dest_path, page_size=200000, sync_url=
     ascending on `key_column` (must be `columns[0]`) in chunks of
     `page_size` rows. Returns `(n_rows, n_bytes)` written.
     """
+    if os.path.exists(dest_path):
+        print(f"tap: {dest_path} present, skipped")
+        n_lines = sum(1 for _ in open(dest_path)) - 1
+        return n_lines, os.path.getsize(dest_path)
     if columns[0] != key_column:
         raise ValueError("query_csv: key_column must be columns[0] to read the page cursor")
     col_list = ", ".join(columns)

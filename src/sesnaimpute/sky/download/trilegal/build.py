@@ -389,6 +389,9 @@ def build(config, regions=None, _limit=None):
             file_names = file_names[:_limit]
         for name in file_names:
             dest_path = f"{dest_dir}/{name}"
+            if os.path.exists(dest_path):
+                print(f"trilegal build: {dest_path} present, skipped (delete it to draw a new realisation)")
+                continue
             n_out, wall_time_s = fetch_region_part(
                 info["l_deg"], info["b_deg"], area_per_part, dest_path, defaults, action_url)
             n_files += 1
