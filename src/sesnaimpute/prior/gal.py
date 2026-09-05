@@ -645,8 +645,9 @@ def build(config, regions=None):
     fazio_path = f"{config.data_root}/sky/download/fazio2004/fazio2004_table1_irac_counts.csv"
     if not os.path.exists(fazio_path):
         raise FileNotFoundError(
-            f"gal: no Fazio 2004 table at {fazio_path!r} -- run the "
-            f"'sesnaimpute.sky.download.fazio2004.build' RUNBOOK line")
+            f"gal: no Fazio 2004 table at {fazio_path!r} -- see the "
+            f"'sky/download/fazio2004' RUNBOOK comment line: manual "
+            f"acquisition, no reachable download URL")
 
     counts_result = build_counts_law(fazio_path)
     counts_path = config_module.product_path(config, "bms", "gal", "counts", "survey")

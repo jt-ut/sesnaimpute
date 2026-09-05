@@ -23,12 +23,13 @@ $PY -m sesnaimpute.sky.download.scosmos.build $CONFIG
 $PY -m sesnaimpute.sky.download.planck_r120.build $CONFIG
 $PY -m sesnaimpute.sky.download.herschel_hgbs.build $CONFIG
 $PY -m sesnaimpute.sky.download.edenhofer2023.build $CONFIG
-$PY -m sesnaimpute.sky.download.fazio2004.build $CONFIG
+# fazio2004 (Fazio et al. 2004, ApJS 154, 39, Table 1, IRAC galaxy source
+# counts): no CDS/VizieR entry and IOPscience's machine-readable-table
+# service serves no bytes for this DOI (10.1086/422843) -- acquire by hand
+# and place verbatim at sky/download/fazio2004/.
 $PY -m sesnaimpute.sky.download.trilegal.build $CONFIG
 $PY -m sesnaimpute.sky.download.extinction_laws.build $CONFIG
-# ashby2013_seds (VizieR J/ApJ/769/80, SEDS Tables 7-11 + ReadMe): no
-# programmatic CDS/VizieR URL was ever pinned down for these five tables;
-# acquire by hand and place verbatim at sky/download/ashby2013_seds/.
+$PY -m sesnaimpute.sky.download.ashby2013_seds.build $CONFIG
 $PY -m sesnaimpute.sky.download.h2_knot_surveys.build $CONFIG
 # --- catalog ---
 # catalog/ -- reads only SESNA: curated catalogues, survey depths, the
