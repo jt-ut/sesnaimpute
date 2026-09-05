@@ -17,7 +17,13 @@ canon distance.
 the tail's amplitude set by the caller's own total column (never a value
 read out of the file); `u(d_pc, ...)` is `A(d)/A(inf)` per spec 1.4 -- it
 divides by the sightline's total column, never by the profile's measured
-back edge. `tail_shape`, `sightline_row`, `distance_knots_pc` and
+back edge. Per spec 1.4's last paragraph, where the map's own cumulative
+extinction at its edge exceeds the caller's total column, `a_of_d` scales
+the in-map profile down to that column and zeroes the tail, so `u <= 1`
+everywhere; the same rule is applied once already at build time (the
+stored profile and `TAIL_RESIDUAL_K`), so a read against the sightline's
+own build-time column and a read against a source's own adopted column
+agree. `tail_shape`, `sightline_row`, `distance_knots_pc` and
 `cloud_back_edge_pc` are the supporting pieces a class shape needs.
 """
 
@@ -472,14 +478,10 @@ def _far_field_for_region(hpx, gl, gb, a_edge, a_inf, nsrc, d_edge):
     return tail, fallback
 
 
-def region_weight(a_s_mean, n_src):
-    """The A_s-weighted mean-profile weight; falls back to source counts
-    where no pixel carries a positive column (a region with no per-source
-    column input still has a mean profile, weighted by where its sources
-    are)."""
-    weight = a_s_mean.copy()
-    if not np.any(weight > 0):
-        weight = n_src.astype(float)
+def region_weight(n_src):
+    """The region's fallback (no-`hpx_pix`) mean profile is weighted by
+    each admitted sightline's share of the region's catalogued sources."""
+    weight = n_src.astype(float)
     return weight / weight.sum()
 
 
@@ -532,26 +534,16 @@ def _admitted_sightlines(config, region):
 
 
 def _join_total_column(config, region, admitted_pix):
-    """The sightline's total column to infinity, A_K: the Planck sightline
-    column product if it has landed, else (repoint when planck column
-    lands) the old per-region emission-dust-column file."""
-    new_path = product_path(config, "sky/derived", "planck", "column", "sightline")
-    if os.path.exists(new_path):
-        with h5py.File(new_path, "r") as f:
-            hpx = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
-            a_inf = np.asarray(f["A_K"][:], dtype=float)
-        source_desc = new_path
-    else:
-        old_path = f"{config.data_root}/sky/derived/healpix256/planck-r120_emission-dust-column/emission_dust_column_ainf.hdf5"
-        if not os.path.exists(old_path):
-            raise FileNotFoundError(
-                "profile.build: no total-column product at %s or %s -- run the "
-                "planck sightline column RUNBOOK line first" % (new_path, old_path))
-        with h5py.File(old_path, "r") as f:
-            g = f["per_region"][region]
-            hpx = np.asarray(g["HPX_PIX"][:], dtype=np.int64)
-            a_inf = np.asarray(g["A_COL_SIGHTLINE_PLANCK_K"][:], dtype=float)
-        source_desc = old_path
+    """The sightline's total column to infinity, A_K, from the Planck
+    sightline column product."""
+    path = product_path(config, "sky/derived", "planck", "column", "sightline")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "profile.build: Planck sightline column product missing at %s -- run the "
+            "sesnaimpute.sky.derived.planck_column RUNBOOK line for it" % path)
+    with h5py.File(path, "r") as f:
+        hpx = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
+        a_inf = np.asarray(f["A_K"][:], dtype=float)
     order = np.argsort(hpx)
     hpx_sorted = hpx[order]
     pos = np.searchsorted(hpx_sorted, admitted_pix)
@@ -560,7 +552,7 @@ def _join_total_column(config, region, admitted_pix):
     if not np.all(ok):
         missing = admitted_pix[~np.asarray(ok)][:5]
         raise ValueError("profile.build: %s has no total column for sightline(s) %s of region %r"
-                         % (source_desc, missing.tolist(), region))
+                         % (path, missing.tolist(), region))
     return a_inf[order][capped]
 
 
@@ -573,11 +565,24 @@ def _build_one_region(config, region, canon, input_dir):
     splice = read_outer_increment(f"{input_dir}/{MAP_OUTER_NAME}", admitted_pix, ZGR23_R_KS)
     dist_new, rho_dist_new = splice_axes(inner["dist1"], inner["radii1"], splice["bnd2"], splice["cen2"], splice["k"])
 
-    weight = region_weight(np.zeros(admitted_pix.size), nsrc)
+    weight = region_weight(nsrc)
     measured = measure_region(canon.d_r_pc, inner, splice, dist_new, rho_dist_new, weight)
     a_out, sig_u, sig_c, depth = measured["a_out"], measured["sig_u"], measured["sig_c"], measured["depth"]
 
     a_edge = a_out[:, -1]
+    # spec 1.4, last paragraph: where the map's own cumulative extinction
+    # at its edge already exceeds the sightline's total column, the map
+    # supplies only the shape -- scale the in-map profile by A_inf/A_edge
+    # so u = A(d)/A(inf) <= 1 holds inside the map too; the tail residual
+    # (below) is already max(0, A_inf - A_edge), zero in this regime.
+    rescaled = a_edge > a_inf
+    scale = np.where(rescaled, a_inf / np.where(a_edge > 0, a_edge, 1.0), 1.0)
+    a_out = a_out * scale[:, np.newaxis]
+    a_edge = a_out[:, -1]
+    rescaled_frac = float(np.mean(rescaled))
+    print("profile.build: %s: %d/%d sightlines rescaled (%.1f%%)"
+          % (region, int(np.count_nonzero(rescaled)), rescaled.size, 100.0 * rescaled_frac))
+
     tail, fallback = _far_field_for_region(admitted_pix, gl, gb, a_edge, a_inf, nsrc, dist_new[-1])
 
     dist_pc = np.concatenate([[0.0], dist_new])
@@ -604,6 +609,7 @@ def _build_one_region(config, region, canon, input_dir):
         f.create_dataset("TAIL_SCALE_PC", data=tail["scale"])
         f.create_dataset("TAIL_EFOLD_PC", data=tail["efold"])
         f.create_dataset("A_INF_K", data=a_inf)
+        f.create_dataset("RESCALED", data=rescaled)
         fb = f.create_group("fallback")
         fb.create_dataset("DIST_PC", data=dist_pc)
         fb.create_dataset("A_CUM_K", data=fallback_a_cum)
@@ -618,7 +624,8 @@ def _build_one_region(config, region, canon, input_dir):
 
     return dict(region=region, d_r_pc=canon.d_r_pc, sigma_d_pc=canon.sigma_pc,
                 d_peak_pc=depth["d_peak_pc"], d_lo_pc=depth["d_lo_pc"], d_hi_pc=depth["d_hi_pc"],
-                sigma_depth_pc=depth["sigma_depth_pc"], fwhm_pc=depth["fwhm_pc"], depth_ok=bool(depth["ok"]))
+                sigma_depth_pc=depth["sigma_depth_pc"], fwhm_pc=depth["fwhm_pc"], depth_ok=bool(depth["ok"]),
+                rescaled_frac=rescaled_frac)
 
 
 def build(config, regions=None):
@@ -705,7 +712,14 @@ class _RegionProfile:
     def a_of_d(self, d_pc, hpx_pix=None, *, total_column_ak):
         """Cumulative extinction A_K from 0 to `d_pc`: the measured
         profile inside the map's edge, `A_edge + residual * tail_shape(d)`
-        beyond it, with `residual = max(0, total_column_ak - A_edge)`."""
+        beyond it, with `residual = max(0, total_column_ak - A_edge)`.
+
+        Spec 1.4, last paragraph: where the stored `A_edge` exceeds the
+        caller's own `total_column_ak`, the in-map profile is scaled down
+        by `total_column_ak / A_edge` and the residual is zero, so
+        `u = A(d)/A(inf) <= 1` on every sightline -- the same rule the
+        build already applied once against the sightline's own column,
+        re-applied here against whatever column the caller supplies."""
         d = np.asarray(d_pc, dtype=float)
         if hpx_pix is None:
             inside = np.interp(d, self.dist, self.fb_a_cum)
@@ -714,13 +728,17 @@ class _RegionProfile:
             row = int(np.asarray(self.sightline_row(hpx_pix)))
             inside = np.interp(d, self.dist, self.a_cum[row])
             a_edge = float(self.a_cum[row, -1])
-        residual = max(0.0, float(total_column_ak) - a_edge) if np.ndim(total_column_ak) == 0 \
-            else np.maximum(0.0, np.asarray(total_column_ak, dtype=float) - a_edge)
-        return inside + residual * self.tail_shape(d, hpx_pix)
+        total = np.asarray(total_column_ak, dtype=float)
+        scale = np.minimum(1.0, total / a_edge) if a_edge > 0 else np.ones_like(total)
+        residual = np.maximum(0.0, total - a_edge * scale)
+        return inside * scale + residual * self.tail_shape(d, hpx_pix)
 
     def u(self, d_pc, hpx_pix=None, *, total_column_ak):
         """`u(d) = A(d) / A(inf)` (spec 1.4): divides by the sightline's
-        total column, never by the measured profile's back edge."""
+        total column, never by the measured profile's back edge. `a_of_d`
+        already scales the in-map profile down to `total_column_ak` where
+        the map's own edge would otherwise exceed it, so `u <= 1` holds
+        here by construction."""
         a = self.a_of_d(d_pc, hpx_pix, total_column_ak=total_column_ak)
         return a / np.asarray(total_column_ak, dtype=float)
 
