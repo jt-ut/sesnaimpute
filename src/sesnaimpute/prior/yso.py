@@ -33,6 +33,12 @@ its quadrature, `p(a|A) = sum_q w_q * p_u(a/T_q) / T_q`. `build` writes
 one product per region, sightline granule: `U_EDGES`/`P_U` (the shape
 itself), `RIDGE_*` (the closed-form conditional brightness density), and
 `A_GRID`/`A_MARGINAL` (the node marginals the prior table blends between).
+`A_GRID` per node spans 0 to the weighted `(1 - A_GRID_MASS_TOL)` point of
+the node's own kernel quadrature in `T`, not the quadrature's full
+numerical extent (most of which carries negligible weight); the bound
+this leaves on `A_MARGINAL` mass beyond the grid is printed once at
+build (`_node_quadrature`'s `worst_excluded_frac`, a property of the
+kernel and column grid alone) and must stay under `A_GRID_MASS_TOL`.
 
 No selection (section 6.2) and no library enter either product (C3):
 neither reads a template register or an IMF.
@@ -196,6 +202,13 @@ MAP_CLASSES = ("herschel", "planck")
 #: section 3, YSO row: "per node ... A_GRID (n_node, 256)").
 N_A_GRID = 256
 
+#: `A_GRID`'s own tabulation fidelity bar (IMPLEMENTATION.md section 2's
+#: column-grid bar, 0.002 relative L1, restated for this axis): the grid
+#: spans only out to the node's kernel-quadrature weighted (1 - tol)
+#: point of `T`, not the quadrature's full numerical extent, most of
+#: which (section 1.2's wide `_t_grid` window) carries negligible weight.
+A_GRID_MASS_TOL = 1.0e-4
+
 #: Sightlines per joblib block (rule 8: parallelise the largest
 #: iterator; a block amortises the kernel-quadrature arrays' overhead
 #: across a handful of sightlines per dispatched task).
@@ -342,17 +355,46 @@ def _majority_map_class(config, region, sl_pix):
     return np.where(majority_herschel, "herschel", "planck")
 
 
+def _t_cutoff(t, w, tol):
+    """`(t_cut, excluded_frac)` per row: `t_cut` is the smallest `T`
+    beyond which the row's kernel-quadrature weight is below `tol` of
+    its total -- the weighted `(1 - tol)` point of `T`; `excluded_frac`
+    is the weight actually left beyond it, `<= tol` by construction. `t`
+    is already ascending (`kernel._t_grid`'s own construction), so its
+    cumulative weight is a proper CDF and the cutoff is the first grid
+    point clearing `1 - tol`."""
+    cdf = np.cumsum(w, axis=1)
+    cdf = cdf / cdf[:, -1:]
+    idx = np.argmax(cdf >= (1.0 - tol), axis=1)
+    rows = np.arange(t.shape[0])
+    return t[rows, idx], 1.0 - cdf[rows, idx]
+
+
 def _node_quadrature(config, nodes_arr):
-    """`(a_grid, quad_by_class)`: the composed column kernel's quadrature
-    at every column-grid node, for both map classes (SPEC_PRIORS.md
-    section 1.2) -- built once for the whole build, since the kernel
-    depends only on the node's column value and the arm, never on the
-    sightline. `a_grid[k]` runs 0 to the largest `T` either arm's
-    quadrature places any weight on at node `k` (IMPLEMENTATION.md
-    section 3: "from 0 to the node's own column times the kernel's
-    largest T/A"), which is exactly that quadrature's own `t.max()`
-    since `T/A * A = T`; every `a = T*u` with `u <= 1` is then inside
-    the grid by construction.
+    """`(a_grid, quad_by_class, worst_excluded_frac)`: the composed
+    column kernel's quadrature at every column-grid node, for both map
+    classes (SPEC_PRIORS.md section 1.2) -- built once for the whole
+    build, since the kernel depends only on the node's column value and
+    the arm, never on the sightline (so this fidelity number is a
+    property of the kernel and the column grid alone, the same for
+    every region). `a_grid[k]` runs 0 to the larger of the two arms'
+    weighted `(1 - A_GRID_MASS_TOL)` point of `T` at node `k`: the
+    quadrature's own `_t_grid` window (section 1.2) is widened for the
+    low-column, one-sided tail and spans 100-150x the node's column, but
+    almost all of that width carries negligible weight, so tabulating
+    `a` out to the raw numerical extent (the old `t.max()`) put most of
+    `A_GRID`'s 256 points where the density is zero. Spanning to the
+    mass cutoff instead concentrates the grid where the density lives.
+
+    `worst_excluded_frac`, printed by `build` (Part 0's required number):
+    the largest, over every node and arm, of the kernel-quadrature weight
+    left beyond that arm's own cutoff -- an exact upper bound (not a
+    grid-resolution estimate) on the share of any sightline's
+    `A_MARGINAL` mass that falls beyond `A_GRID`'s edge, since a
+    sightline's marginal at `a > t_cut` can only be built from the
+    excluded quadrature components (T_q > t_cut) and each contributes at
+    most its own weight. Guaranteed `< A_GRID_MASS_TOL` by the cutoff's
+    own construction.
     """
     kern = kernel_module.load(config)
     n_node = nodes_arr.size
@@ -364,15 +406,18 @@ def _node_quadrature(config, nodes_arr):
     results = Parallel(n_jobs=-1, prefer="threads")(
         delayed(kern.nodes)(float(nodes_arr[k]), map_class) for map_class, k in jobs)
     quad_by_class = {}
-    t_max = np.zeros(n_node)
+    t_cut = np.zeros(n_node)
+    worst_excluded_frac = 0.0
     for i, map_class in enumerate(MAP_CLASSES):
         block = results[i * n_node:(i + 1) * n_node]
         t = np.stack([r[0] for r in block], axis=0)
         w = np.stack([r[1] for r in block], axis=0)
         quad_by_class[map_class] = (t, w)
-        t_max = np.maximum(t_max, t.max(axis=1))
-    a_grid = np.linspace(np.zeros(n_node), t_max, N_A_GRID, axis=1)
-    return a_grid, quad_by_class
+        cut, excluded = _t_cutoff(t, w, A_GRID_MASS_TOL)
+        t_cut = np.maximum(t_cut, cut)
+        worst_excluded_frac = max(worst_excluded_frac, float(excluded.max()))
+    a_grid = np.linspace(np.zeros(n_node), t_cut, N_A_GRID, axis=1)
+    return a_grid, quad_by_class, worst_excluded_frac
 
 
 def _sightline_block(u_edges_blk, p_u_blk, map_class_blk, a_grid, quad_by_class):
@@ -397,7 +442,9 @@ def _sightline_block(u_edges_blk, p_u_blk, map_class_blk, a_grid, quad_by_class)
         density = np.where(valid, p_u[bin_idx] / t_q[:, :, None], 0.0)
         marginal = np.sum(w_q[:, :, None] * density, axis=1)  # (n_node, n_grid)
         # algebraic acceptance (SPEC_PRIORS.md section 6.3 tabulation):
-        # every row integrates to 1 on its own a_grid, by construction.
+        # every row integrates to 1 on its own a_grid, by construction
+        # (the T-quadrature's own weight sums to 1, section 1.2, and
+        # A_GRID's cutoff leaves only A_GRID_MASS_TOL of it out).
         norm = np.trapz(marginal, a_grid, axis=1)[:, None]
         out[i] = (marginal / norm).astype(np.float32)
     return out
@@ -471,11 +518,18 @@ def build_shape(config, region, nodes_arr, a_grid, quad_by_class):
 def build(config, regions=None):
     """Writes, per region, the YSO shape product (section 6.3), and one
     30-row (or subset) law product (section 6.1) over `regions`
-    (default: all thirty)."""
+    (default: all thirty). Prints `A_GRID`'s fidelity number once
+    (Part 0, a property of the kernel and column grid alone, not of any
+    one region): the worst-case fraction of any node's kernel-quadrature
+    weight left beyond `A_GRID`'s cutoff, which bounds how much of any
+    sightline's `A_MARGINAL` mass can fall beyond the grid; must stay
+    under `A_GRID_MASS_TOL`."""
     names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
     nodes_arr = column_grid.nodes(config)
-    a_grid, quad_by_class = _node_quadrature(config, nodes_arr)
+    a_grid, quad_by_class, worst_excluded_frac = _node_quadrature(config, nodes_arr)
+    print("prior.yso: A_GRID worst-node kernel-quadrature mass beyond the "
+          "grid = %.3e (bar %.1e)" % (worst_excluded_frac, A_GRID_MASS_TOL))
 
     law_rows = []
     for region in names:
