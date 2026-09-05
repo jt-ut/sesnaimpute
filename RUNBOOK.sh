@@ -70,6 +70,7 @@ $PY -m sesnaimpute.sky.derived.profile $CONFIG
 # anchor weights, the per-class priors and selection tables, the prior
 # table.
 $PY -m sesnaimpute.prior.column_grid $CONFIG
+$PY -m sesnaimpute.prior.posterior_width $CONFIG   # survey-wide source (a, log10 B) posterior width from the catalogue's own flux errors (IMPLEMENTATION.md sec 3 amendment; 10_POSTERIOR.md sec 1)
 $PY -m sesnaimpute.prior.field_stars $CONFIG
 $PY -m sesnaimpute.prior.pahc_curve $CONFIG   # PAHC contamination P(q), survey-wide (SPEC_PRIORS.md sec 4)
 $PY -m sesnaimpute.prior.anchor_tiles $CONFIG
