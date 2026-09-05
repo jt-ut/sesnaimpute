@@ -58,6 +58,7 @@ $PY -m sesnaimpute.sky.download.gaia_counts.build $CONFIG
 $PY -m sesnaimpute.sky.download.twomass_counts.build $CONFIG
 $PY -m sesnaimpute.sky.derived.gaia_counts $CONFIG
 $PY -m sesnaimpute.sky.derived.twomass_counts $CONFIG
+$PY -m sesnaimpute.sky.derived.gaia_match $CONFIG
 $PY -m sesnaimpute.sky.derived.herschel_column $CONFIG
 $PY -m sesnaimpute.sky.derived.subbeam $CONFIG
 $PY -m sesnaimpute.sky.derived.planck_column $CONFIG
