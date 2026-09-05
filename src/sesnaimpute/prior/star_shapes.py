@@ -21,28 +21,61 @@ this reuse, not any per-node cost, is where the fidelity-driven
 candidate scan over the shared column grid dominates the build's own
 wall time (`build`'s own timed report).
 
-Shape nodes (a coarse subset of the shared column grid, `prior.column_
-grid.nodes`) and the tabulation grid's own resolution are both chosen by
-the 0.002 relative-L1 fidelity bar (`IMPLEMENTATION.md` section 2's
-`EPS_GRID`, reused here as section 3's shape bar), measured on the
-region's first tile (spec section 3's own convention for the AGB/PAHC
-grid choice, extended here to STAR): the grid is chosen first, by testing
-whether halving `x` or `log10 B` resolution on the RAW (pre-kernel)
-histogram still reconstructs the finer histogram via the evaluator's own
-bilinear read to within the bar; nodes are chosen second, on that grid,
-by testing whether a candidate node's own convolved shape is reproduced,
-to within the bar, by linear interpolation in `log A` between its
-immediate neighbours in the full column-grid candidate list.
+**The tabulation grid comes from the catalogue's own resolution, not from
+the deposited histogram's shot noise** (`IMPLEMENTATION.md` section 3's
+amendment, 2026-09-05). `prior.posterior_width` measures, for every
+source, the 1-sigma width of its own `(a, log10 B)` posterior from its
+detected bands' flux errors alone -- the same curvature the fitter's
+nuisance quadrature forms at fit time (`10_POSTERIOR.md` section 1) --
+and this module reads back its survey medians, `sigma_a` (K magnitudes)
+and `sigma_logB`. The deposited histogram is smoothed to that scale
+before any node sees it: a Gaussian of width `sigma_logB` on the `log10
+B` axis (one operator per class, independent of node, applied once per
+tile before the per-node step below), and, on `x`, a Gaussian of width
+`sigma_a / A` AT THE SHAPE NODE'S OWN COLUMN `A` -- folded into the same
+per-node matrix as the kernel's relative-width convolution
+(`combined_x_matrix`), since both are linear operators along `x` and a
+single matrix product carries both. The `x`-axis tabulation (`x_max`,
+hence `x_edges`) does not depend on class -- STAR, AGB and PAHC share one
+field-star population's `u` column and one kernel -- so the per-node
+combined operator is built ONCE per region, at every column-grid
+candidate, and shared by every class's node selection and tile
+evaluation (`shared_x_matrices`); only the `log10 B` (and PAHC's `log10
+q0`) axis is class-specific.
+
+The grid cell on each axis is set to HALF that axis's smoothing width --
+`sigma_logB / 2` on `log10 B`; on `x`, `0.5 * sigma_a / A_max` where
+`A_max` is the shared column grid's own ceiling (`AK_CAP`, the largest
+column any node in use can sit at): `x` cells are one grid shared by
+every node, so the finest requirement -- the smallest fractional width,
+at the largest column -- has to set it, or a low-column node's coarser
+natural scale would under-resolve a high-column node sharing the same
+grid. Bin counts are rounded UP to the next power of two on each axis
+and reported alongside the un-rounded count (`choose_x_grid`, `choose_
+b_grid`).
+
+Shape nodes are a coarse subset of the shared column grid
+(`prior.column_grid.nodes`), chosen on the SMOOTHED density by the 0.002
+relative-L1 fidelity bar (`IMPLEMENTATION.md` section 2's `EPS_GRID`,
+reused here as section 3's shape bar): a candidate node is dropped when
+linear interpolation, in `log A`, between its surviving neighbours
+reproduces its own smoothed, convolved shape to within the bar
+(`select_shape_nodes`). Candidates are evaluated lazily, one at a time,
+and only currently-surviving shapes are cached -- a dropped candidate's
+shape is discarded immediately -- so the full column-grid candidate list
+(order 183) is never resident as shapes all at once, one class at a
+time (owner, 2026-09-05).
 
 AGB blends the O-rich and C-rich shapes (spec section 3) BEFORE the
-kernel convolution and the fidelity tests see it, so what the fidelity
-bar measures is the object that is finally stored. PAHC carries a third,
-uncoveloved axis, `log10 q0` (the star's own 8um contrast at a unit
-limit, `prior.star_population.LOG10_Q0`); its resolution is fixed at 24
-bins (spec section 4, `IMPLEMENTATION.md` section 3's own PAHC row),
-never halved, since the product's own `LOG10_Q0_EDGES` is a fixed-length
-dataset; the read-time collapse over this axis (`ClassShape.density`'s
-`f_lim8`) is the only place a source's own completeness limit enters.
+smoothing and the fidelity tests see it, so what the fidelity bar
+measures is the object that is finally stored. PAHC carries a third,
+unconvolved axis, `log10 q0` (the star's own 8um contrast at a unit
+limit, `prior.star_population.LOG10_Q0`); its resolution is fixed at 48
+bins (spec section 4, `IMPLEMENTATION.md` section 3's own PAHC row --
+the measured contamination curve's own notch needs them), never halved,
+since the product's own `LOG10_Q0_EDGES` is a fixed-length dataset; the
+read-time collapse over this axis (`ClassShape.density`'s `f_lim8`) is
+the only place a source's own completeness limit enters.
 
 Analytic tails beyond the tabulated box (one-sided at the far `x` edge,
 two-sided in `log10 B`) are declared from the convolved shape's own edge
@@ -61,6 +94,7 @@ import os
 import h5py
 import numpy as np
 from joblib import Parallel, delayed
+from scipy.special import ndtr
 
 from sesnaimpute import config as config_module
 from sesnaimpute import regions as regions_module
@@ -69,6 +103,7 @@ from sesnaimpute.granules import access
 from sesnaimpute.prior import column_grid
 from sesnaimpute.prior import kernel as kernel_module
 from sesnaimpute.prior import pahc_curve
+from sesnaimpute.prior import posterior_width
 
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
@@ -94,15 +129,11 @@ X_MAX_EPS = 2.0e-4
 #: for PAHC, `log10 q0`), fixed per region (`IMPLEMENTATION.md` section 3).
 RANGE_PERCENTILE = (0.1, 99.9)
 
-#: Starting tabulation resolution before the halving search
-#: (`IMPLEMENTATION.md` section 3): "start at 256 x 128".
-N_X_START = 256
-N_B_START = 128
-
-#: PAHC's own `log10 q0` axis is fixed at 24 bins, never halved (spec
-#: section 4, `IMPLEMENTATION.md` section 3): the product's own
-#: `LOG10_Q0_EDGES` is a 25-edge dataset by construction.
-N_Q0_BINS = 24
+#: PAHC's own `log10 q0` axis is fixed at 48 bins, never halved (spec
+#: section 4, `IMPLEMENTATION.md` section 3: the measured contamination
+#: curve's own notch needs them): the product's own `LOG10_Q0_EDGES` is
+#: a 49-edge dataset by construction.
+N_Q0_BINS = 48
 
 #: The column kernel's own per-node `T` quadrature (`prior.kernel.Kernel.
 #: nodes`) is called at its own default resolution (`n=None`): a coarser
@@ -346,7 +377,7 @@ def q0_range(pop):
 
 
 # ---------------------------------------------------------------------------
-# the fidelity bar: grid resolution, then shape nodes (step 3)
+# the catalogue's own smoothing (module docstring's amendment)
 # ---------------------------------------------------------------------------
 
 def _rel_l1(reference, candidate):
@@ -356,85 +387,101 @@ def _rel_l1(reference, candidate):
     return float(np.sum(np.abs(candidate - reference)) / denom)
 
 
-def _bilinear_reconstruct(density, centers0, centers1, query0, query1):
-    """The coarse-grid evaluator's own bilinear read (`ClassShape._eval_
-    interior`'s construction, inlined for the fidelity test): `density`
-    on `(centers0, centers1)`, sampled at every `(query0, query1)` pair."""
-    i0, t0 = column_grid.bracket(query0, centers0)
-    i1, t1 = column_grid.bracket(query1, centers1)
-    v00 = density[np.ix_(i0, i1)]
-    v01 = density[np.ix_(i0, i1 + 1)]
-    v10 = density[np.ix_(i0 + 1, i1)]
-    v11 = density[np.ix_(i0 + 1, i1 + 1)]
-    return ((1 - t0)[:, None] * (1 - t1)[None, :] * v00
-            + (1 - t0)[:, None] * t1[None, :] * v01
-            + t0[:, None] * (1 - t1)[None, :] * v10
-            + t0[:, None] * t1[None, :] * v11)
+def _next_power_of_two(n):
+    """The smallest power of two `>= n` -- never coarser than the
+    resolution the data set (module docstring: bin counts round UP)."""
+    return int(2 ** np.ceil(np.log2(max(1.0, float(n)))))
 
 
-def _halve_axis_ok(pop, tile_idx, cls, x_edges, b_edges, axis, eps):
-    """One halving trial (`IMPLEMENTATION.md` section 3, "halve an axis
-    while the coarser grid's mass moves by less than 0.002 relative L1
-    against the finer one"): the coarser RAW histogram, read back by the
-    evaluator's own bilinear interpolation at the finer grid's bin
-    centres, must reproduce the finer RAW histogram (both CIC-deposited
-    straight from the point cloud, never resampled from each other)."""
-    edges = [x_edges, b_edges]
-    if edges[axis].size - 1 < 4 or (edges[axis].size - 1) % 2 != 0:
-        return False, None
-    coarse_edges = list(edges)
-    coarse_edges[axis] = edges[axis][::2]
-
-    centers = [0.5 * (e[:-1] + e[1:]) for e in edges]
-    coarse_centers = [0.5 * (e[:-1] + e[1:]) for e in coarse_edges]
-
-    fine_hist = class_raw_hist(pop, tile_idx, cls, centers[0], centers[1])
-    coarse_hist = class_raw_hist(pop, tile_idx, cls, coarse_centers[0], coarse_centers[1])
-
-    dx_fine, db_fine = np.diff(edges[0]), np.diff(edges[1])
-    dx_coarse, db_coarse = np.diff(coarse_edges[0]), np.diff(coarse_edges[1])
-    coarse_density = coarse_hist / dx_coarse[:, None] / db_coarse[None, :]
-    approx_density = _bilinear_reconstruct(coarse_density, coarse_centers[0], coarse_centers[1],
-                                           centers[0], centers[1])
-    approx_mass = approx_density * dx_fine[:, None] * db_fine[None, :]
-    ok = _rel_l1(fine_hist, approx_mass) < eps
-    return ok, (coarse_edges[axis] if ok else None)
+def gaussian_smoothing_matrix(edges, sigma):
+    """The bin-integrated Gaussian smoothing operator on `edges`' own
+    bins (module docstring): mass placed at a bin's own centre spreads
+    into every output bin by the Gaussian's cumulative distribution
+    across that bin's edges, `M[i, j] = Phi((edges[i+1] - centre_j) /
+    sigma) - Phi((edges[i] - centre_j) / sigma)`. Mass the truncated
+    tabulation box cannot hold is not renormalised back in here -- it
+    becomes part of the declared analytic tail (`finalise_node_shape`),
+    the same convention `convolution_matrix` uses. `sigma <= 0` (no
+    catalogue width to smooth by) is the identity."""
+    if not (sigma > 0.0) or not np.isfinite(sigma):
+        return np.eye(edges.size - 1)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    z = (edges[:, None] - centers[None, :]) / sigma
+    return np.diff(ndtr(z), axis=0)
 
 
-def choose_grid(pop, tile_idx, cls, x_max, b_lo, b_hi, eps=EPS_SHAPE):
-    """`(x_edges, b_edges)` (`IMPLEMENTATION.md` section 3): start at
-    `N_X_START` x `N_B_START`, halve `x` while the bar holds, then halve
-    `log10 B` at the resulting `x` resolution -- one axis at a time, on
-    the region's first tile."""
-    x_edges = np.linspace(0.0, x_max, N_X_START + 1)
-    b_edges = np.linspace(b_lo, b_hi, N_B_START + 1)
-    while True:
-        ok, coarser = _halve_axis_ok(pop, tile_idx, cls, x_edges, b_edges, axis=0, eps=eps)
-        if not ok:
-            break
-        x_edges = coarser
-    while True:
-        ok, coarser = _halve_axis_ok(pop, tile_idx, cls, x_edges, b_edges, axis=1, eps=eps)
-        if not ok:
-            break
-        b_edges = coarser
-    return x_edges, b_edges
+def apply_b_smoothing(m_b, raw):
+    """`m_b` applied along the `log10 B` axis (axis 1) of `raw`, `(n_x,
+    n_b)` for STAR/AGB or `(n_x, n_b, n_q0)` for PAHC's node-selection
+    marginal (module docstring): `log10 B` smoothing does not depend on
+    the shape node, so it is applied once per tile, before the per-node
+    `x` convolution (`combined_x_matrix`) sees the histogram."""
+    moved = np.moveaxis(raw, 1, 0)
+    shape = moved.shape
+    out = m_b.dot(moved.reshape(shape[0], -1)).reshape((m_b.shape[0],) + shape[1:])
+    return np.moveaxis(out, 0, 1)
 
 
-def select_shape_nodes(candidate_a, node_shapes, eps=EPS_SHAPE):
-    """The kept subset of `candidate_a` (`IMPLEMENTATION.md` section 3):
+def combined_x_matrix(x_edges, r, w, sigma_a_median, node_a):
+    """One shape node's combined `x`-axis operator (module docstring):
+    the column kernel's own relative-width convolution (`convolution_
+    matrix`) followed by the Gaussian smoothing at this node's own
+    fractional width `sigma_a_median / node_a` -- two linear operators
+    on the same axis, folded into one matrix product so evaluation
+    costs exactly what the kernel convolution alone used to."""
+    kernel_matrix = convolution_matrix(x_edges, r, w)
+    smoothing_matrix = gaussian_smoothing_matrix(x_edges, sigma_a_median / node_a)
+    return smoothing_matrix.dot(kernel_matrix)
+
+
+def choose_x_grid(sigma_a_median, a_max_candidate, x_max):
+    """`(x_edges, report)` (module docstring): cell = half the smallest
+    fractional catalogue width any node in use can have, `sigma_a_median
+    / a_max_candidate`; bin count rounded up to the next power of two.
+    Class-independent (the `x`-axis tabulation does not depend on
+    class), so this is computed once per region and shared."""
+    x_cell = 0.5 * sigma_a_median / a_max_candidate
+    n_x_raw = x_max / x_cell if x_cell > 0.0 else 1.0
+    n_x = _next_power_of_two(n_x_raw)
+    x_edges = np.linspace(0.0, x_max, n_x + 1)
+    return x_edges, dict(n_x=n_x, n_x_raw=float(n_x_raw), x_cell=float(x_cell))
+
+
+def choose_b_grid(sigma_logb_median, b_lo, b_hi):
+    """`(b_edges, report)` (module docstring): cell = half the survey-
+    median `sigma_logB`; bin count rounded up to the next power of two.
+    One class's own `log10 B` range, so this is chosen per class."""
+    b_cell = sigma_logb_median / 2.0
+    n_b_raw = (b_hi - b_lo) / b_cell if b_cell > 0.0 else 1.0
+    n_b = _next_power_of_two(n_b_raw)
+    b_edges = np.linspace(b_lo, b_hi, n_b + 1)
+    return b_edges, dict(n_b=n_b, n_b_raw=float(n_b_raw), b_cell=float(b_cell))
+
+
+def select_shape_nodes(candidate_a, shape_fn, eps=EPS_SHAPE):
+    """The kept subset of `candidate_a` (`IMPLEMENTATION.md` section 3),
+    on the SMOOTHED density `shape_fn(i)` returns for candidate `i`:
     drop a node when linear interpolation, in `log A`, between its
-    surviving neighbours reproduces its own convolved shape to within
-    `eps` relative L1; endpoints are always kept. One left-to-right pass
-    drops every candidate it can, chaining a dropped node's own left
-    anchor forward so a run of droppable nodes is tested against the
-    same surviving neighbour; repeated to a fixed point (a node spared
-    only because of a neighbour dropped later in the same pass can still
-    fall on the next one) -- O(n) per pass rather than restarting the
-    scan after every single removal."""
+    surviving neighbours reproduces its own shape to within `eps`
+    relative L1; endpoints are always kept. One left-to-right pass drops
+    every candidate it can, chaining a dropped node's own left anchor
+    forward so a run of droppable nodes is tested against the same
+    surviving neighbour; repeated to a fixed point (a node spared only
+    because of a neighbour dropped later in the same pass can still fall
+    on the next one). `shape_fn` is called lazily and its results cached
+    only for the currently-surviving scan window -- a dropped candidate's
+    shape is evicted immediately -- so candidates never all sit resident
+    at once (module docstring)."""
     n = len(candidate_a)
     keep = np.ones(n, dtype=bool)
     log_a = np.log(candidate_a)
+    cache = {}
+
+    def shape(i):
+        if i not in cache:
+            cache[i] = shape_fn(i)
+        return cache[i]
+
     changed = True
     while changed:
         changed = False
@@ -446,12 +493,18 @@ def select_shape_nodes(candidate_a, node_shapes, eps=EPS_SHAPE):
             i, lo, hi = kept_idx[pos], kept_idx[anchor_pos], kept_idx[pos + 1]
             span = log_a[hi] - log_a[lo]
             t = 0.0 if span <= 0.0 else (log_a[i] - log_a[lo]) / span
-            interp = (1.0 - t) * node_shapes[lo] + t * node_shapes[hi]
-            if _rel_l1(node_shapes[i], interp) < eps:
+            interp = (1.0 - t) * shape(lo) + t * shape(hi)
+            if _rel_l1(shape(i), interp) < eps:
                 keep[i] = False
+                cache.pop(i, None)
                 changed = True
             else:
+                cache.pop(lo, None)  # the old anchor is never read again this pass
                 anchor_pos = pos
+        # end of pass: only nodes still kept can be reused by the next
+        # pass's scan, so nothing else needs to stay cached.
+        for stale in [k for k in cache if not keep[k]]:
+            cache.pop(stale, None)
     return np.flatnonzero(keep)
 
 
@@ -508,11 +561,14 @@ def finalise_node_shape(conv, x_centers, b_centers, is_3d):
 # ---------------------------------------------------------------------------
 
 def _tile_shapes(pop, t, cls, kept_nodes, matrices_by_map_class, map_class,
-                 x_centers, b_centers, q0_centers, is_3d):
+                 x_centers, b_centers, q0_centers, is_3d, m_b):
     """One tile's own densities at every kept shape node (rule 8: the
-    per-tile cost is one raw histogram plus one matrix product per node,
-    never per star)."""
+    per-tile cost is one raw histogram, one `log10 B` smoothing, plus
+    one combined `x`-matrix product per node, never per star). `m_b`
+    smooths the deposit on `log10 B` before the per-node `x` matrices
+    (module docstring) -- computed once here, not once per node."""
     raw = class_raw_hist(pop, t, cls, x_centers, b_centers, q0_centers)
+    raw = apply_b_smoothing(m_b, raw)
     matrices = matrices_by_map_class[map_class]
     density = np.empty((len(kept_nodes),) + raw.shape, dtype=np.float32)
     tail_x, tail_b_lo, tail_b_hi, mass_outside = (np.empty(len(kept_nodes)) for _ in range(4))
@@ -538,28 +594,17 @@ def _kernel_relative_widths(kern, cache, a, map_class):
     return cached
 
 
-def build_region_class(config, region, cls, kern, candidate_a, kernel_cache):
-    """One region and class, end to end (module docstring): reads the
-    population, chooses the grid then the shape nodes on the first tile,
-    builds the node's convolution matrix once per (node, map class), and
-    applies it to every tile in parallel (rule 8, 10a). `kernel_cache` is
-    shared across every region and class this build call touches (rule
-    9): the kernel's own `r = T/A` distribution at a given column and map
-    class does not depend on the region or the class, only on the shared
-    column-grid candidates and the two map classes, so it is the single
-    most expensive per-item computation this module repeats needlessly if
-    not shared."""
+def build_region_shared(config, region, kern, candidate_a, kernel_cache):
+    """Everything a region's three classes share (module docstring):
+    the population read, the tile map classes, and the `x`-axis
+    tabulation -- STAR, AGB and PAHC deposit the same field-star `u`
+    column and read the same kernel, so `x_max` (hence `x_edges`, hence
+    every per-node `x`-operator) does not depend on class. Computed
+    once per region."""
     pop = read_population(config, region)
     n_tile = pop["n_tile"]
     map_classes = tile_map_classes(config, region, n_tile)
-    is_3d = cls == "pahc"
-
-    b_lo, b_hi = class_b_range(pop, cls)
-    q0_centers = q0_edges = None
-    if is_3d:
-        q0_lo, q0_hi = q0_range(pop)
-        q0_edges = np.linspace(q0_lo, q0_hi, N_Q0_BINS + 1)
-        q0_centers = 0.5 * (q0_edges[:-1] + q0_edges[1:])
+    distinct_map_classes = sorted(set(map_classes))
 
     # x_max (module docstring): the largest kernel ratio r=T/A "in use",
     # over every candidate node and every map class this region's tiles
@@ -571,7 +616,6 @@ def build_region_class(config, region, cls, kern, candidate_a, kernel_cache):
     # not the raw grid extent -- the same fidelity bar as everywhere
     # else, with the excluded mass falling to the declared analytic tail.
     raw_x_max = max(float(t["u"].max()) for t in pop["tiles"])
-    distinct_map_classes = sorted(set(map_classes))
     r_max = 0.0
     for mc in distinct_map_classes:
         for a in candidate_a:
@@ -582,36 +626,71 @@ def build_region_class(config, region, cls, kern, candidate_a, kernel_cache):
             r_max = max(r_max, float(r[order][idx]))
     x_max = r_max * raw_x_max
 
-    x_edges, b_edges = choose_grid(pop, 0, cls, x_max, b_lo, b_hi)
-    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
-    b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
+    return dict(pop=pop, n_tile=n_tile, map_classes=map_classes,
+               distinct_map_classes=distinct_map_classes, x_max=x_max,
+               a_max_candidate=float(candidate_a.max()))
 
-    # node selection (`IMPLEMENTATION.md` section 3): every candidate's
-    # own convolved shape, on the first tile's own map class, at the
-    # chosen grid.
+
+def shared_x_matrices(x_edges, candidate_a, kern, kernel_cache, distinct_map_classes,
+                      sigma_a_median):
+    """`{(map_class, candidate_index): matrix}` (module docstring): the
+    kernel convolution folded with the node's own `x`-smoothing
+    (`combined_x_matrix`), built once per (map class, column-grid
+    candidate) and shared by every class's node selection and tile
+    evaluation ("share the per-node x matrices across the three
+    classes"). Cheap to hold in full: the grid is now sized to the
+    catalogue's own resolution, not 256 bins, so 183 candidates times
+    two map classes of small `(n_x, n_x)` matrices is a minor cost next
+    to the per-tile density arrays these matrices multiply."""
+    mats = {}
+    for mc in distinct_map_classes:
+        for i, a in enumerate(candidate_a):
+            r, w_q = _kernel_relative_widths(kern, kernel_cache, a, mc)
+            mats[(mc, i)] = combined_x_matrix(x_edges, r, w_q, sigma_a_median, float(a))
+    return mats
+
+
+def build_region_class(config, region, cls, shared, x_matrices, candidate_a, x_edges, x_centers,
+                       sigma_logb_median):
+    """One region and class, end to end (module docstring): the class's
+    own `log10 B` range and smoothing, node selection on the smoothed
+    density (streamed, `select_shape_nodes`), and the per-tile
+    evaluation in parallel (rule 8, 10a), reusing `shared`'s population
+    and `x_matrices`' per-node operators rather than rebuilding either."""
+    pop, n_tile = shared["pop"], shared["n_tile"]
+    map_classes, distinct_map_classes = shared["map_classes"], shared["distinct_map_classes"]
+    is_3d = cls == "pahc"
+
+    b_lo, b_hi = class_b_range(pop, cls)
+    q0_centers = q0_edges = None
+    if is_3d:
+        q0_lo, q0_hi = q0_range(pop)
+        q0_edges = np.linspace(q0_lo, q0_hi, N_Q0_BINS + 1)
+        q0_centers = 0.5 * (q0_edges[:-1] + q0_edges[1:])
+
+    b_edges, b_grid_report = choose_b_grid(sigma_logb_median, b_lo, b_hi)
+    b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
+    m_b = gaussian_smoothing_matrix(b_edges, sigma_logb_median)
+
+    # node selection (`IMPLEMENTATION.md` section 3): the first tile's
+    # own smoothed density at every candidate, evaluated lazily
+    # (`select_shape_nodes`) so candidates never all sit resident at once.
     map_class0 = map_classes[0]
-    raw0 = class_raw_hist(pop, 0, cls, x_centers, b_centers, q0_centers)
-    node_shapes = []
-    for a in candidate_a:
-        r, w_q = _kernel_relative_widths(kern, kernel_cache, a, map_class0)
-        m = convolution_matrix(x_edges, r, w_q)
-        node_shapes.append(apply_convolution(m, raw0))
-    kept = select_shape_nodes(candidate_a, node_shapes, EPS_SHAPE)
+    raw0 = class_raw_hist(pop, 0, cls, x_centers, b_centers, q0_centers=None)
+    raw0 = apply_b_smoothing(m_b, raw0)
+    shape_fn = lambda idx: apply_convolution(x_matrices[(map_class0, idx)], raw0)
+    kept = select_shape_nodes(candidate_a, shape_fn, EPS_SHAPE)
     shape_nodes = candidate_a[kept]
 
-    # one convolution matrix per (kept node, distinct map class) --
-    # reused across every tile that shares a map class (module docstring).
-    matrices_by_map_class = {}
-    for mc in distinct_map_classes:
-        mats = []
-        for a in shape_nodes:
-            r, w_q = _kernel_relative_widths(kern, kernel_cache, a, mc)
-            mats.append(convolution_matrix(x_edges, r, w_q))
-        matrices_by_map_class[mc] = mats
+    # the kept nodes' already-built combined operators, one list per
+    # map class -- no matrix is rebuilt here (module docstring, "share
+    # the per-node x matrices across the three classes").
+    matrices_by_map_class = {mc: [x_matrices[(mc, int(idx))] for idx in kept]
+                             for mc in distinct_map_classes}
 
     results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
         delayed(_tile_shapes)(pop, t, cls, shape_nodes, matrices_by_map_class,
-                              map_classes[t], x_centers, b_centers, q0_centers, is_3d)
+                              map_classes[t], x_centers, b_centers, q0_centers, is_3d, m_b)
         for t in range(n_tile))
 
     density = np.stack([r[0] for r in results], axis=0)
@@ -625,6 +704,7 @@ def build_region_class(config, region, cls, kern, candidate_a, kernel_cache):
         q0_edges=q0_edges, density=density, tail_x=tail_x, tail_b_lo=tail_b_lo,
         tail_b_hi=tail_b_hi, mass_outside=mass_outside, map_classes=map_classes,
         n_tile=n_tile, n_candidate=len(candidate_a), f_c=pop["f_c"], pop=pop,
+        b_grid_report=b_grid_report,
     )
 
 
@@ -911,16 +991,31 @@ def build(config, regions=None):
     """Writes the per-tile STAR/AGB/PAHC shape products for `regions`
     (default: all thirty), one file per region and class (module
     docstring). The column kernel, the shared column-grid node
-    candidates, and the per-(column, map class) kernel cache are
-    survey-wide and built once, not per region or per class (rule 9)."""
+    candidates, the survey posterior width, and the per-(column, map
+    class) kernel cache are survey-wide and built once, not per region
+    or per class (rule 9); the `x`-axis tabulation and its per-node
+    operators are class-independent and built once per region
+    (`build_region_shared`, `shared_x_matrices`)."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     kern = kernel_module.load(config)
     candidate_a = column_grid.nodes(config)
     kernel_cache = {}
+    sigma_a_median, sigma_logb_median = posterior_width.read(config)
+    print("star_shapes: catalogue posterior width sigma_a_median=%.4g A_K "
+         "sigma_logb_median=%.4g (prior.posterior_width)" % (sigma_a_median, sigma_logb_median),
+         flush=True)
 
     for region in region_names:
+        shared = build_region_shared(config, region, kern, candidate_a, kernel_cache)
+        x_edges, x_grid_report = choose_x_grid(sigma_a_median, shared["a_max_candidate"],
+                                               shared["x_max"])
+        x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+        x_matrices = shared_x_matrices(x_edges, candidate_a, kern, kernel_cache,
+                                       shared["distinct_map_classes"], sigma_a_median)
+
         for cls in CLASSES:
-            result = build_region_class(config, region, cls, kern, candidate_a, kernel_cache)
+            result = build_region_class(config, region, cls, shared, x_matrices, candidate_a,
+                                        x_edges, x_centers, sigma_logb_median)
             path = write_region_class(config, region, cls, result)
             rep = _report(result)
             expected, measured, rel_dev = _mean_moment_check(config, region, cls, result, kern)
@@ -931,10 +1026,13 @@ def build(config, regions=None):
                 pahc_line = " pahc_collapse_rel_l1=%.2e" % pahc_rel_l1
             print(
                 "star_shapes: %s/%s: candidates=%d nodes_kept=%d grid=%dx%d "
+                "(x_cell=%.4g raw_n_x=%.1f b_cell=%.4g raw_n_b=%.1f) "
                 "median_mass_outside=%.4e sum_identity_max_dev=%.2e "
                 "mean_moment(expected=%.4f measured=%.4f rel_dev=%.2e) "
                 "grid_centre_exact_max_dev=%.2e%s -> %s"
                 % (region, cls, rep["n_candidate"], rep["n_node"], rep["n_x"], rep["n_b"],
+                   x_grid_report["x_cell"], x_grid_report["n_x_raw"],
+                   result["b_grid_report"]["b_cell"], result["b_grid_report"]["n_b_raw"],
                    rep["median_mass_outside"], rep["sum_identity_dev"],
                    expected, measured, rel_dev, exact_dev, pahc_line, path))
 
