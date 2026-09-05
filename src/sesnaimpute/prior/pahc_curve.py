@@ -19,38 +19,62 @@ docstring):
   - the photospheric colour relation, [4.5]-[8.0] as the median function of
     [3.6]-[4.5] in narrow bins of the latter -- what predicts a source's
     own photospheric 8 micron flux from its own 3.6 and 4.5 micron fluxes;
-  - the population's [3.6]-[4.5] median and 16-84% half-width, a single
-    pair of numbers standing in for "a photosphere's [3.6]-[4.5] is nearly
-    constant" -- what predicts a source's own photospheric 4.5 micron flux
-    from its own 3.6 micron flux, for the 4.5 micron excess test that
-    separates a circumstellar disk (whose excess grows smoothly with
-    wavelength and shows already at 4.5 micron, where there is no PAH
-    feature) from PAH contamination (which does not).
+  - the population's constant [3.6]-[4.5] median -- what predicts a
+    source's own photospheric 4.5 micron flux from its own 3.6 micron
+    flux, for the 4.5 micron excess test that separates a circumstellar
+    disk (whose excess grows smoothly with wavelength and shows already
+    at 4.5 micron, where there is no PAH feature) from PAH contamination
+    (which does not).
 
 Every TRILEGAL retained star enters the colour relation with equal weight
 (SPEC_PRIORS.md section 0.3, C3, "population-weighted"): the STAR anchor
 reweighting that turns this same population into a count is a later
 stage's own step and plays no part here.
 
-The shipped curve is measured on sources with no 4.5 micron excess; the
-curve on the 4.5-micron-excess sources is reported beside it, and the
-same shipped construction is repeated per region as a check
-(SPEC_PRIORS.md section 4, "Checks"). Both curves and the region checks
-share one 40-bin log10 q grid, spanning the full eligible population's own
-measured range. The shipped curve's floor -- the mean 8 micron excess
-fraction among eligible, no-4.5-excess sources on the flat shelf
-`0.1 <= q <= 2.0`, measured per source, not bin-quantized -- is subtracted
-and clipped at zero, since a probability cannot be negative; the raw curve
-is kept beside it.
+De-reddening (SPEC_PRIORS.md section 4, "the photospheric prediction"): a
+source's own observed 3.6 and 4.5 micron fluxes are corrected by its own
+adopted column before its colour enters the TRILEGAL relation --
+`F_i,0 = F_i * 10**(0.4*a*kappa_i(a))`, `a` the source's own `A_COL_K`
+(`sky/derived/adopted/column_adopted_source`) and `kappa_i(a)` the
+blended diffuse/dense extinction-curve ratio at that column
+(`prior.selection.kappa_hybrid`, SPEC_PRIORS.md section 1.3) -- the
+relation itself is built from TRILEGAL's own undimmed fluxes, so a
+reddened source colour would read the wrong point on it. The 8 micron and
+4.5 micron predictions are made in this de-reddened frame and reddened
+back with the source's own `kappa_8` or `kappa_4.5` before comparison to
+the source's *observed* flux, so both excess tests live in the observed,
+catalogued frame throughout.
 
-Reads only SESNA photometry (the curated catalogues, their own detection
-limits) and the external TRILEGAL population -- never a classification
-label (rule 7) and never a source's dust column: the [3.6]-[4.5] colour
-this module reads off a source is its own *observed* colour, unreddened,
-because IRAC's 3.6/4.5/8.0 micron bands sit close enough in wavelength
-that their differential reddening is small next to the relation's own
-scatter and the catalogue's own photometric error, both already inside
-this module's sigma. Writes one survey-wide product,
+Sigma on each excess test combines the catalogue's own flux error with a
+relation term measured on the population itself, not the TRILEGAL
+relation's own binned scatter: the robust width -- 1.4826 times the
+median absolute deviation, the standard Gaussian-equivalent scaling -- of
+the observed-minus-predicted residual, in magnitudes, on the shelf
+population (`0.1 <= q <= 2`, no 4.5 micron excess), one number
+survey-wide per test (`RESIDUAL_WIDTH_MAG` for [4.5]-[8.0],
+`RESIDUAL_WIDTH_45_MAG` for [3.6]-[4.5]), converted to a flux-domain sigma
+per source from that source's own predicted flux level. The shelf
+population that defines the widths is itself selected by the 4.5 micron
+excess test the width feeds, so the widths are measured twice: once with
+no 4.5 micron cut at all, to get a first sigma for the 4.5 micron test and
+flag its excess sources; then again on the shelf with that cut applied,
+which is what is shipped and used for both tests' final sigma. Both
+iterations are reported at build.
+
+The shipped curve is measured on sources with no 4.5 micron excess (the
+final iteration's flag); the curve on the 4.5-micron-excess sources is
+reported beside it, and the same shipped construction is repeated per
+region as a check (SPEC_PRIORS.md section 4, "Checks"). Both curves and
+the region checks share one 40-bin log10 q grid, spanning the full
+eligible population's own measured range. The shipped curve's floor --
+the mean 8 micron excess fraction among eligible, no-4.5-excess sources
+on the flat shelf `0.1 <= q <= 2.0`, measured per source, not
+bin-quantized -- is subtracted and clipped at zero, since a probability
+cannot be negative; the raw curve is kept beside it.
+
+Reads SESNA photometry (the curated catalogues, their own detection
+limits and adopted column) and the external TRILEGAL population -- never
+a classification label (rule 7). Writes one survey-wide product,
 `bms/pahc/curve_pahc_survey.hdf5`.
 """
 
@@ -68,6 +92,8 @@ from sesnaimpute import definitions
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
+from sesnaimpute.granules import access
+from sesnaimpute.prior import selection as selection_module
 
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
@@ -118,10 +144,28 @@ FLOOR_Q_LO, FLOOR_Q_HI = 0.1, 2.0
 #: all three of I1, I2, I4.
 ELIGIBLE_BAND_IDX = (IDX_I1, IDX_I2, IDX_I4)
 
+#: The robust, Gaussian-equivalent scaling of the median absolute
+#: deviation (`1 / Phi^-1(0.75)`, the standard estimator) -- turns the
+#: shelf population's residual MAD into the relation term of sigma
+#: (SPEC_PRIORS.md section 4, "the photospheric prediction").
+MAD_TO_SIGMA = 1.4826
+
+#: Regions are read and measured in chunks of `config.n_jobs` at a time
+#: (CODING_RULES.md 10a: an 8 GB resident-memory budget for every worker
+#: together; never all thirty regions' sources resident at once).
+
 
 # ---------------------------------------------------------------------------
 # 1. the photospheric colour relation, external, from pooled TRILEGAL stars
 # ---------------------------------------------------------------------------
+
+def _chunks(seq, size):
+    """`seq` split into consecutive chunks of at most `size` items
+    (CODING_RULES.md 10a: never hold every region's own arrays resident
+    at once; process the thirty regions in chunks of the worker cap)."""
+    seq = list(seq)
+    return [seq[i:i + size] for i in range(0, len(seq), size)]
+
 
 def load_field_star_colours(config, region_names):
     """Reads the retained TRILEGAL population's own intrinsic fluxes
@@ -141,7 +185,9 @@ def load_field_star_colours(config, region_names):
         with h5py.File(path, "r") as f:
             return f["FNU_MJY"][:]
 
-    parts = Parallel(n_jobs=config.n_jobs)(delayed(_one_region)(r) for r in region_names)
+    parts = []
+    for chunk in _chunks(region_names, config.n_jobs):
+        parts.extend(Parallel(n_jobs=config.n_jobs)(delayed(_one_region)(r) for r in chunk))
     fnu = np.concatenate(parts, axis=0)
     mag = -2.5 * np.log10(fnu / ZERO_POINT_MJY[None, :])
     c12 = mag[:, IDX_I1] - mag[:, IDX_I2]
@@ -206,11 +252,27 @@ def _predicted_flux(f_in_mjy, colour_out_minus_in, zp_in, zp_out):
     return f_in_mjy * (zp_out / zp_in) * 10.0 ** (0.4 * colour_out_minus_in)
 
 
-def region_measurement(config, region, colour_knots, colour45_median, colour45_width):
-    """One region's eligible sources (SPEC_PRIORS.md section 4): `q`,
-    the 8 micron excess flag, and the 4.5 micron excess flag, `(m,)` each,
-    `m` the region's own eligible count -- vectorised over the region's
-    sources, no Python loop.
+def _dereddened(f, a_col, kappa):
+    """`F_i,0 = F_i * 10**(0.4*a*kappa_i(a))` (SPEC_PRIORS.md section 4,
+    "the photospheric prediction"): the observed flux `f` undone of its
+    own sightline dimming at column `a_col` and per-band ratio `kappa`."""
+    return f * 10.0 ** (0.4 * a_col * kappa)
+
+
+def _reddened(f0, a_col, kappa):
+    """The inverse of `_dereddened`: a de-reddened-frame flux `f0`
+    dimmed back to the observed frame at column `a_col`."""
+    return f0 * 10.0 ** (-0.4 * a_col * kappa)
+
+
+def region_measurement(config, region, colour_knots, colour45_median):
+    """One region's eligible sources (SPEC_PRIORS.md section 4): `q` and
+    the six arrays the survey-wide excess tests are built from --
+    `(q, f2, f2_pred, f4, f4_pred, sigma2, sigma4)`, `(m,)` each, `m` the
+    region's own eligible count -- vectorised over the region's sources,
+    no Python loop. The excess flags themselves are not computed here:
+    their sigma is a survey-wide constant (module docstring) not known
+    until every region's residuals are pooled.
     """
     src_path = config_module.product_path(
         config, "catalog", "sesna", "sources", "source", region=region)
@@ -228,9 +290,9 @@ def region_measurement(config, region, colour_knots, colour45_median, colour45_w
     finite = np.all(np.isfinite(flux3) & (flux3 > 0), axis=1)
     eligible = measured & finite
     n_eligible = int(eligible.sum())
+    empty = np.empty(0, dtype=np.float64)
     if n_eligible == 0:
-        empty = np.empty(0, dtype=np.float64)
-        return empty, np.empty(0, dtype=bool), np.empty(0, dtype=bool)
+        return empty, empty, empty, empty, empty, empty, empty
 
     f1 = fnu[eligible, IDX_I1]
     f2 = fnu[eligible, IDX_I2]
@@ -239,31 +301,80 @@ def region_measurement(config, region, colour_knots, colour45_median, colour45_w
     sigma4 = sigma[eligible, IDX_I4]
     zp1, zp2, zp4 = ZERO_POINT_MJY[IDX_I1], ZERO_POINT_MJY[IDX_I2], ZERO_POINT_MJY[IDX_I4]
 
-    # the source's own observed [3.6]-[4.5], unreddened (module docstring)
-    c12 = -2.5 * np.log10(f1 / zp1) + 2.5 * np.log10(f2 / zp2)
+    # the source's own adopted column and its per-band dimming ratio
+    # (SPEC_PRIORS.md section 1.3, "kappa_i(a)"), catalogue order
+    a_col_path = config_module.product_path(
+        config, "sky/derived", "adopted", "column", "source", region=region)
+    a_col_all = access.per_source(config, region, a_col_path, ["A_COL_K"])["A_COL_K"]
+    a_col = np.asarray(a_col_all, dtype=np.float64)[eligible]
+    kappa = selection_module.kappa_hybrid(config, selection_module.law_dense_weight(a_col))
+    kappa1, kappa2, kappa4 = kappa[:, IDX_I1], kappa[:, IDX_I2], kappa[:, IDX_I4]
 
-    # the photospheric prediction (SPEC_PRIORS.md section 4, "the
-    # photospheric prediction"): F_8,pred from F_1, F_2 through the
-    # TRILEGAL colour relation
+    # de-redden the observed 3.6 and 4.5 micron fluxes before the colour
+    # relation reads them (module docstring, "De-reddening"): the
+    # relation is built from TRILEGAL's own undimmed fluxes
+    f1_0 = _dereddened(f1, a_col, kappa1)
+    f2_0 = _dereddened(f2, a_col, kappa2)
+    c12 = -2.5 * np.log10(f1_0 / zp1) + 2.5 * np.log10(f2_0 / zp2)
+
+    # the photospheric prediction, in the de-reddened frame, reddened
+    # back with kappa_8 to the observed frame the catalogue's own flux
+    # and sigma live in (module docstring)
     centers, medians, widths = colour_knots
-    c48_pred, width48 = predict_colour_48(c12, centers, medians, widths)
-    f4_pred = _predicted_flux(f2, c48_pred, zp2, zp4)
-    sigma_relation_48 = f4_pred * np.log(10.0) * 0.4 * width48
-    sigma8 = np.sqrt(sigma4 ** 2 + sigma_relation_48 ** 2)
-    excess8 = (f4 - f4_pred) / sigma8 > EXCESS_SIGMA
+    c48_pred, _ = predict_colour_48(c12, centers, medians, widths)
+    f4_pred_0 = _predicted_flux(f2_0, c48_pred, zp2, zp4)
+    f4_pred = _reddened(f4_pred_0, a_col, kappa4)
 
-    # the 4.5 micron excess (SPEC_PRIORS.md section 4, "disks separated
-    # from PAH"): the same construction, through the population's
-    # constant photospheric [3.6]-[4.5]
-    f2_pred = _predicted_flux(f1, colour45_median, zp1, zp2)
-    sigma_relation_45 = f2_pred * np.log(10.0) * 0.4 * colour45_width
-    sigma45 = np.sqrt(sigma2 ** 2 + sigma_relation_45 ** 2)
-    excess45 = (f2 - f2_pred) / sigma45 > EXCESS_SIGMA
+    # the 4.5 micron excess's own prediction (SPEC_PRIORS.md section 4,
+    # "disks separated from PAH"): the population's constant
+    # photospheric [3.6]-[4.5], de-reddened frame, reddened back with
+    # kappa_4.5
+    f2_pred_0 = _predicted_flux(f1_0, colour45_median, zp1, zp2)
+    f2_pred = _reddened(f2_pred_0, a_col, kappa2)
 
     f_lim8 = limits_module.limits(config, region)[eligible, IDX_I4]
     q = f_lim8 / f4_pred
 
-    return q, excess8, excess45
+    return q, f2, f2_pred, f4, f4_pred, sigma2, sigma4
+
+
+# ---------------------------------------------------------------------------
+# 2a. the survey-wide residual width and the excess tests it feeds
+# ---------------------------------------------------------------------------
+
+def mag_residual(f_obs, f_pred):
+    """`mag(f_obs) - mag(f_pred) = -2.5*log10(f_obs/f_pred)`: the
+    observed-minus-predicted residual, in magnitudes, that both the
+    robust width and the excess test read (SPEC_PRIORS.md section 4)."""
+    return -2.5 * np.log10(f_obs / f_pred)
+
+
+def robust_width_mag(residual, shelf):
+    """`RESIDUAL_WIDTH_MAG`/`RESIDUAL_WIDTH_45_MAG` (SPEC_PRIORS.md
+    section 4): 1.4826 times the median absolute deviation of
+    `residual[shelf]`, the robust, Gaussian-equivalent width of the
+    observed-minus-predicted residual on the shelf population."""
+    x = residual[shelf]
+    med = np.median(x)
+    return MAD_TO_SIGMA * float(np.median(np.abs(x - med)))
+
+
+def flux_sigma_relation(f_pred, width_mag):
+    """The relation term of sigma in flux units at `f_pred`'s own level:
+    a magnitude width carried through `dF/dm = -F*ln(10)/2.5`
+    (SPEC_PRIORS.md section 4)."""
+    return f_pred * np.log(10.0) * 0.4 * width_mag
+
+
+def excess_flags(f_obs, f_pred, sigma_meas, width_mag, valid):
+    """One excess test (SPEC_PRIORS.md section 4, `EXCESS_SIGMA`): sigma
+    is the catalogue's own measurement error combined in quadrature with
+    the relation term at `width_mag`; `valid` masks sources with no
+    finite prediction (kept False there, never counted an excess)."""
+    sigma = np.sqrt(sigma_meas ** 2 + flux_sigma_relation(f_pred, width_mag) ** 2)
+    excess = np.zeros(f_obs.shape, dtype=bool)
+    excess[valid] = (f_obs[valid] - f_pred[valid]) / sigma[valid] > EXCESS_SIGMA
+    return excess
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +437,7 @@ def build_curve(q, excess8, excess45, region_idx, n_region, n_bins=N_Q_BINS):
 # ---------------------------------------------------------------------------
 
 def write_curve(path, curve, colour_edges, colour_medians, colour_widths,
-                 colour45_median, colour45_width):
+                 colour45_median, residual_width_mag, residual_width_45_mag):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "survey"
@@ -345,7 +456,10 @@ def write_curve(path, curve, colour_edges, colour_medians, colour_widths,
         cr.create_dataset("WIDTHS", data=colour_widths.astype(np.float64))
 
         f.create_dataset("COLOUR_45_MEDIAN", data=np.float64(colour45_median))
-        f.create_dataset("COLOUR_45_WIDTH", data=np.float64(colour45_width))
+        # the shelf population's own robust residual widths, final
+        # iteration (SPEC_PRIORS.md section 4, module docstring)
+        f.create_dataset("RESIDUAL_WIDTH_MAG", data=np.float64(residual_width_mag))
+        f.create_dataset("RESIDUAL_WIDTH_45_MAG", data=np.float64(residual_width_45_mag))
 
 
 def read(config):
@@ -373,38 +487,69 @@ def read(config):
 def build(config, regions=None):
     """Measures `P(q)` over the pool of sources in `regions` (default:
     all thirty), writes `bms/pahc/curve_pahc_survey.hdf5`. The
-    photospheric colour relation and the 4.5 micron constant colour pool
-    the TRILEGAL retained population of the same region set."""
+    photospheric colour relation pools the TRILEGAL retained population
+    of the same region set. The regions are read in chunks of at most
+    `config.n_jobs` at a time (CODING_RULES.md 10a)."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
     c12_star, c48_star = load_field_star_colours(config, region_names)
     colour_edges, colour_medians, colour_widths, colour_counts = colour_relation(c12_star, c48_star)
     knots = colour_relation_knots(colour_edges, colour_medians, colour_widths)
     colour45_median = float(np.median(c12_star))
-    p16, p84 = np.percentile(c12_star, [16.0, 84.0])
-    colour45_width = float(0.5 * (p84 - p16))
     print(f"pahc_curve: {c12_star.size} pooled TRILEGAL retained stars, "
           f"{knots[0].size}/{colour_medians.size} trusted colour bins "
           f"(width {COLOUR_BIN_WIDTH_MAG} mag), "
-          f"[3.6]-[4.5] median={colour45_median:.4f} width={colour45_width:.4f} mag", flush=True)
+          f"[3.6]-[4.5] median={colour45_median:.4f} mag", flush=True)
 
-    results = Parallel(n_jobs=config.n_jobs)(
-        delayed(region_measurement)(config, region, knots, colour45_median, colour45_width)
-        for region in region_names)
+    results = []
+    for chunk in _chunks(region_names, config.n_jobs):
+        results.extend(Parallel(n_jobs=config.n_jobs)(
+            delayed(region_measurement)(config, region, knots, colour45_median)
+            for region in chunk))
     q = np.concatenate([r[0] for r in results]) if results else np.empty(0)
-    excess8 = np.concatenate([r[1] for r in results]) if results else np.empty(0, dtype=bool)
-    excess45 = np.concatenate([r[2] for r in results]) if results else np.empty(0, dtype=bool)
+    f2 = np.concatenate([r[1] for r in results]) if results else np.empty(0)
+    f2_pred = np.concatenate([r[2] for r in results]) if results else np.empty(0)
+    f4 = np.concatenate([r[3] for r in results]) if results else np.empty(0)
+    f4_pred = np.concatenate([r[4] for r in results]) if results else np.empty(0)
+    sigma2 = np.concatenate([r[5] for r in results]) if results else np.empty(0)
+    sigma4 = np.concatenate([r[6] for r in results]) if results else np.empty(0)
     region_idx = np.concatenate([
         np.full(r[0].size, i, dtype=np.int64) for i, r in enumerate(results)]) if results else np.empty(0, dtype=np.int64)
     n_eligible_total = q.size
     print(f"pahc_curve: {n_eligible_total} eligible sources "
           f"(measured I1, I2, I4 in {len(region_names)} regions)", flush=True)
 
+    # the survey-wide relation width and the excess flags it feeds
+    # (module docstring, "Sigma on each excess test"): the shelf that
+    # defines the width is itself the 4.5 micron test's own no-excess
+    # subsample, so the width is measured twice -- once with no 4.5
+    # micron cut, to get a first sigma for that test; once more on the
+    # cut shelf, shipped
+    valid = np.isfinite(q) & (q > 0) & np.isfinite(f2_pred) & (f2_pred > 0) & np.isfinite(f4_pred) & (f4_pred > 0)
+    resid48 = np.where(valid, mag_residual(f4, f4_pred), np.nan)
+    resid45 = np.where(valid, mag_residual(f2, f2_pred), np.nan)
+    shelf_q = valid & (q >= FLOOR_Q_LO) & (q <= FLOOR_Q_HI)
+
+    width48_pass0 = robust_width_mag(resid48, shelf_q)
+    width45_pass0 = robust_width_mag(resid45, shelf_q)
+    excess45_pass0 = excess_flags(f2, f2_pred, sigma2, width45_pass0, valid)
+
+    shelf_final = shelf_q & ~excess45_pass0
+    width48 = robust_width_mag(resid48, shelf_final)
+    width45 = robust_width_mag(resid45, shelf_final)
+    excess45 = excess_flags(f2, f2_pred, sigma2, width45, valid)
+    excess8 = excess_flags(f4, f4_pred, sigma4, width48, valid)
+
+    print(f"pahc_curve: residual width pass 0 (no 4.5um cut, n={int(shelf_q.sum())}) "
+          f"[4.5]-[8.0]={width48_pass0:.4f} [3.6]-[4.5]={width45_pass0:.4f} mag; "
+          f"pass 1 (4.5um cut applied, shipped, n={int(shelf_final.sum())}) "
+          f"[4.5]-[8.0]={width48:.4f} [3.6]-[4.5]={width45:.4f} mag", flush=True)
+
     curve = build_curve(q, excess8, excess45, region_idx, len(region_names))
 
     out_path = config_module.product_path(config, "bms", "pahc", "curve", "survey")
     write_curve(out_path, curve, colour_edges, colour_medians, colour_widths,
-                colour45_median, colour45_width)
+                colour45_median, width48, width45)
 
     print(f"pahc_curve: shipped n={curve['n_shipped']} disk-excess n={curve['n_disk_excess']} "
           f"floor={curve['floor']:.6f} -> {out_path}", flush=True)
