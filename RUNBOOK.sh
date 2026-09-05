@@ -20,6 +20,18 @@ $PY -m sesnaimpute.sky.download.baraffe2015_bhac15.build $CONFIG
 $PY -m sesnaimpute.sky.download.riebel2012.build $CONFIG
 $PY -m sesnaimpute.sky.download.swire.build $CONFIG
 $PY -m sesnaimpute.sky.download.scosmos.build $CONFIG
+$PY -m sesnaimpute.sky.download.planck_r120.build $CONFIG
+$PY -m sesnaimpute.sky.download.herschel_hgbs.build $CONFIG
+$PY -m sesnaimpute.sky.download.edenhofer2023.build $CONFIG
+$PY -m sesnaimpute.sky.download.fazio2004.build $CONFIG
+# ashby2013_seds (VizieR J/ApJ/769/80, SEDS Tables 7-11 + ReadMe): no
+# programmatic CDS/VizieR URL was ever pinned down for these five tables;
+# acquire by hand and place verbatim at sky/download/ashby2013_seds/.
+# h2_knot_surveys: Giannini+2013 (VizieR J/ApJ/767/147), Davis+2009
+# (VizieR J/A+A/496/153), Walawender+2005 (AJ 129/130), UWISH2 Table D1
+# (Froebrich+2015, MNRAS 454, 2586, behind institutional auth) -- no
+# reachable URL for any of the four; acquire by hand and place verbatim
+# at sky/download/h2_knot_surveys/.
 
 # --- sky derived ---
 # sky/derived/<source>/ -- one product per computation from those bytes.
