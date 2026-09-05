@@ -46,6 +46,15 @@ $PY -m sesnaimpute.sky.download.gaia_crossmatch.build $CONFIG
 # Derive never fetches. Reads SESNA positions and region membership from
 # the curated catalogue above, never SESNA fluxes.
 $PY -m sesnaimpute.granules.build $CONFIG
+# gaia_counts / twomass_counts (SPEC_PRIORS.md section 2.1, STAR anchor
+# counts) build each query from the granule map's own per-region nside-512
+# pixel set, so -- like gaia_crossmatch above -- these two download lines
+# sit here, after their dependency, rather than in the '--- downloads ---'
+# block.
+$PY -m sesnaimpute.sky.download.gaia_counts.build $CONFIG
+$PY -m sesnaimpute.sky.download.twomass_counts.build $CONFIG
+$PY -m sesnaimpute.sky.derived.gaia_counts $CONFIG
+$PY -m sesnaimpute.sky.derived.twomass_counts $CONFIG
 $PY -m sesnaimpute.sky.derived.subbeam $CONFIG
 $PY -m sesnaimpute.sky.derived.herschel_column $CONFIG
 $PY -m sesnaimpute.sky.derived.planck_column $CONFIG
