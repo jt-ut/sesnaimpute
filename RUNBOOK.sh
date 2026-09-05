@@ -33,27 +33,24 @@ $PY -m sesnaimpute.sky.download.fazio2004.build $CONFIG
 # reachable URL for any of the four; acquire by hand and place verbatim
 # at sky/download/h2_knot_surveys/.
 
-# --- sky derived ---
-# sky/derived/<source>/ -- one product per computation from those bytes.
-# Derive never fetches.
-
-$PY -m sesnaimpute.granules.build $CONFIG
-$PY -m sesnaimpute.sky.derived.subbeam $CONFIG
-$PY -m sesnaimpute.sky.derived.planck_column $CONFIG
-
-# planck_source_column and column both read GAL_L_DEG/GAL_B_DEG from the
-# curated catalogue (the "--- catalog ---" block below) -- run that block
-# first on a fresh root, ahead of these two lines, until the RUNBOOK's
-# own section order is straightened out.
-$PY -m sesnaimpute.sky.derived.planck_source_column $CONFIG
-$PY -m sesnaimpute.sky.derived.column $CONFIG
-
 # --- catalog ---
 # catalog/ -- reads only SESNA: curated catalogues, survey depths, the
 # sigma model.
 $PY -m sesnaimpute.catalog.curated $CONFIG
 $PY -m sesnaimpute.catalog.depths $CONFIG
 # limits.py has no build: catalog.limits.limits(config, region) reads curated + depths.
+
+# --- sky derived ---
+# sky/derived/<source>/ -- one product per computation from those bytes.
+# Derive never fetches. Reads SESNA positions and region membership from
+# the curated catalogue above, never SESNA fluxes.
+
+$PY -m sesnaimpute.granules.build $CONFIG
+$PY -m sesnaimpute.sky.derived.subbeam $CONFIG
+$PY -m sesnaimpute.sky.derived.planck_column $CONFIG
+
+$PY -m sesnaimpute.sky.derived.planck_source_column $CONFIG
+$PY -m sesnaimpute.sky.derived.column $CONFIG
 
 # --- prior ---
 # bms/ prior products: column kernel, PAHC curve, column grid, depth
