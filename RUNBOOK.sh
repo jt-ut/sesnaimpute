@@ -77,6 +77,7 @@ $PY -m sesnaimpute.prior.depth_groups $CONFIG
 $PY -m sesnaimpute.prior.yso $CONFIG   # YSO law count + per-sightline shape (SPEC_PRIORS.md sec 6.1, 6.3)
 $PY -m sesnaimpute.prior.young_stars $CONFIG   # expected young stars per STAR anchor pixel/bin (SPEC_PRIORS.md sec 2.1)
 $PY -m sesnaimpute.prior.anchor_observed $CONFIG   # observed STAR anchor joint histogram, young-star subtracted (SPEC_PRIORS.md sec 2.1)
+$PY -m sesnaimpute.prior.anchor_weights $CONFIG   # per-tile STAR anchor weight W, cluster exclusion, faint-end trend (SPEC_PRIORS.md sec 2.1)
 $PY -m sesnaimpute.prior.yso_selection $CONFIG
 $PY -m sesnaimpute.prior.h2s $CONFIG                    # H2S: law-blurred field, region lognormal + knot-colour selection (SPEC_PRIORS.md sec 7)
 $PY -m sesnaimpute.prior.gal $CONFIG                    # GAL: Fazio counts law + SWIRE selection tables
