@@ -25,6 +25,8 @@ $PY -m sesnaimpute.sky.download.scosmos.build $CONFIG
 # sky/derived/<source>/ -- one product per computation from those bytes.
 # Derive never fetches.
 
+$PY -m sesnaimpute.sky.derived.herschel_column $CONFIG
+
 $PY -m sesnaimpute.granules.build $CONFIG
 
 # --- catalog ---
