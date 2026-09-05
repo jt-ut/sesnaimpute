@@ -37,6 +37,8 @@ $PY -m sesnaimpute.sky.download.fazio2004.build $CONFIG
 # Derive never fetches.
 $PY -m sesnaimpute.sky.derived.herschel_column $CONFIG
 $PY -m sesnaimpute.granules.build $CONFIG
+# TODO: move below the planck sightline column build once its RUNBOOK line lands (profile.build reads its product).
+$PY -m sesnaimpute.sky.derived.profile $CONFIG   # writes profile_edenhofer_sightline and depth_edenhofer_region together, one build
 
 # --- catalog ---
 # catalog/ -- reads only SESNA: curated catalogues, survey depths, the
