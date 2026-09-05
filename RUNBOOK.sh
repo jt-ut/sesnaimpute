@@ -69,6 +69,7 @@ $PY -m sesnaimpute.sky.derived.profile $CONFIG
 # bms/ prior products: column kernel, PAHC curve, column grid, depth
 # groups, field stars, anchor weights, the per-class priors and
 # selection tables, the prior table.
+$PY -m sesnaimpute.prior.field_stars $CONFIG
 $PY -m sesnaimpute.prior.depth_groups $CONFIG
 
 # --- fit ---
