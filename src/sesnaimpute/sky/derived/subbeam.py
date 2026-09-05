@@ -382,10 +382,12 @@ def _region_join(per_map, cloud_regions, herschel_regions):
         if not clouds:
             continue
         hd = np.zeros((ns, N_D))
+        kern_sum = np.zeros((ns, len(K_A_EDGES) - 1, len(K_D_EDGES) - 1), dtype=np.int64)
         ladder, tiles, L0s = {}, [], []
         for c in clouds:
             r = per_map[c]
             hd += r["hist_d"]
+            kern_sum += r["kern"]
             tiles.append(r["hist_tile"].reshape(r["hist_tile"].shape[0], -1))
             L0s.append(r["L0"])
             for kk, vv in r["ladder"].items():
@@ -449,7 +451,9 @@ def _region_join(per_map, cloud_regions, herschel_regions):
             completion_302=w_boot_med[2] / sd[i302],
             completion_821=w_boot_med[3] / sd[i821],
             rescale_exponent=(beta - 2.0) / 2.0, offset_exponent=offset_exponent,
-            n_fit=n_fit, n_pred=n_pred, rms_pred_dex=rms_pred_dex, quantiles=Q)
+            n_fit=n_fit, n_pred=n_pred, rms_pred_dex=rms_pred_dex, quantiles=Q,
+            kern_L108=kern_sum[i108], kern_L302=kern_sum[i302],
+            kern_L821=kern_sum[i821])
 
         print("  subbeam REGION %-16s maps=%d tiles=%4d beta=%.2f "
               "completion(108/302/821)=%.3f/%.3f/%.3f rms_pred=%.3f dex"
@@ -521,6 +525,17 @@ def build(config, regions=None):
             fh.create_dataset(name, data=np.array([per_region[r][key] for r in regs]))
         fh.create_dataset("COND_QUANTILES",
                           data=np.array([per_region[r]["quantiles"] for r in regs]))
+        # The column-conditional kernel `prior/kernel.py` evaluates: the
+        # 2-D KA (log column) x KD (log ratio) count histogram `kern`,
+        # summed over this region's maps, at each of the three tabulated
+        # beams. KA_EDGES/KD_EDGES are the shared axes (K_A_EDGES/K_D_EDGES
+        # above); K_A_EDGES is already in ln(column).
+        fh.create_dataset("KA_EDGES", data=K_A_EDGES)
+        fh.create_dataset("KD_EDGES", data=K_D_EDGES)
+        for lab in ("L108", "L302", "L821"):
+            fh.create_dataset("COND_KERNEL_%s" % lab,
+                              data=np.array([per_region[r]["kern_%s" % lab]
+                                            for r in regs]))
     print("subbeam: wrote %s (%.2f MB)"
           % (out_path, os.path.getsize(out_path) / 1e6), flush=True)
 
