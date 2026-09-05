@@ -45,10 +45,8 @@ read` loads these and evaluates `marginal`/`cdf` exactly: at one
 sightline and node (`marginal`, `cdf`), or batched over sources with the
 node blend of IMPLEMENTATION.md section 2 (`marginal_at`, `cdf_at`).
 
-The retired `A_GRID`/`A_MARGINAL` tabulation resampled this same exact
-sum onto a linear 256-point `a`-grid per node; the kernel's components
-in `T` span orders of magnitude, so that re-integration lost 5-14% of
-the mass, which the tabulation's own renormalisation then hid. Nothing
+A tabulation on a linear `a`-grid cannot hold this density (the kernel's
+components in `T` span orders of magnitude), so none is stored. Nothing
 here needs renormalising: the exact sum's own quadrature weights already
 total 1.
 
