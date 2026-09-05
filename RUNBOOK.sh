@@ -75,6 +75,7 @@ $PY -m sesnaimpute.prior.anchor_tiles $CONFIG
 $PY -m sesnaimpute.prior.depth_groups $CONFIG
 $PY -m sesnaimpute.prior.yso $CONFIG   # YSO law count + per-sightline shape (SPEC_PRIORS.md sec 6.1, 6.3)
 $PY -m sesnaimpute.prior.yso_selection $CONFIG
+$PY -m sesnaimpute.prior.h2s $CONFIG                    # H2S: law-blurred field, region lognormal + knot-colour selection (SPEC_PRIORS.md sec 7)
 $PY -m sesnaimpute.prior.gal $CONFIG                    # GAL: Fazio counts law + SWIRE selection tables
 
 # --- fit ---
