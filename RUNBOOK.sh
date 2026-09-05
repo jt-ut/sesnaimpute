@@ -73,6 +73,7 @@ $PY -m sesnaimpute.sky.derived.profile $CONFIG
 # table.
 $PY -m sesnaimpute.prior.column_grid $CONFIG
 $PY -m sesnaimpute.prior.field_stars $CONFIG
+$PY -m sesnaimpute.prior.anchor_tiles $CONFIG
 $PY -m sesnaimpute.prior.depth_groups $CONFIG
 
 # --- fit ---

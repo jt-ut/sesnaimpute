@@ -1,9 +1,10 @@
 """2MASS PSC anchor counts per nside-512 HEALPix pixel (SPEC_PRIORS.md
 section 2.1: "2MASS PSC at Ks < 14.3, clean photometry flag ...
 Half-magnitude histograms per nside-512 pixel", read against
-`04_star_family.md` section B's `read_anchor_counts` row and the old
-`fetch_external.twomass_source_counts.build.healpix512` module's
-half-mag, 9.0-15.5 histogram).
+`04_star_family.md` section B's `read_anchor_counts` row). The grid runs
+half-magnitude bins from 9.0 to the spec cut at 14.3 -- ten whole bins
+(9.0-14.0) plus one partial closing bin (14.0-14.3) that carries the
+anchor exactly to the cut, rather than a full magnitude past it.
 
 Derive never fetches, but this is the one computing half of the 2MASS
 pair: `sky.download.twomass_counts.build` could not get IRSA to bin by
@@ -29,7 +30,9 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.granules import access
 
 NSIDE = 512
-MAG_EDGES = np.arange(9.0, 15.5001, 0.5)  # the old module's KS_HIST_EDGES: thirteen half-mag bins, 9-15.5
+#: Ten half-mag bins (9.0-14.0) plus the closing partial bin to the spec
+#: cut (SPEC_PRIORS.md section 2.1, "2MASS PSC ... Ks < 14.3").
+MAG_EDGES = np.append(np.arange(9.0, 14.0001, 0.5), 14.3)
 
 
 def _download_path(config, region):

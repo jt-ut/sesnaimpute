@@ -44,8 +44,9 @@ bookkeeping the science does not need.
 
 Writes one product per region: `field-stars_trilegal_region.hdf5`, root
 datasets the retained sample (one row per star clearing retention), plus
-a `RAW` group carrying the pre-retention population's own four columns
--- what SPEC_PRIORS.md section 2.1's anchor prediction needs, since
+a `RAW` group carrying the pre-retention population's own six columns
+(position, magnitude, and the per-star Gaia dimming coefficients) --
+what SPEC_PRIORS.md section 2.1's anchor prediction needs, since
 retention itself biases that prediction (reading note 04, section A,
 `raw_anchor_columns`).
 """
@@ -294,6 +295,8 @@ def build_region(config, region, atmosphere):
             ks_mag=ks_mag,
             dist_pc=dist_pc,
             pointing_index=pointing_index,
+            k_g_diffuse=kg_diffuse,
+            k_g_dense=kg_dense,
         ),
         retained=dict(
             dist_pc=dist_pc[keep],
@@ -339,6 +342,13 @@ def write_region(path, region, result):
         raw_group.create_dataset("KS_MAG", data=raw["ks_mag"].astype(np.float32))
         raw_group.create_dataset("DIST_PC", data=raw["dist_pc"].astype(np.float32))
         raw_group.create_dataset("POINTING_INDEX", data=raw["pointing_index"].astype(np.int16))
+        # the anchor prediction (SPEC_PRIORS.md section 2.1, "N^{model->obs}")
+        # dims every raw row in G through its own diffuse/dense Gaia
+        # coefficient, blended by the section 1.3 ramp at the star's own
+        # local column -- carried here so the prediction never re-matches
+        # the atmosphere register.
+        raw_group.create_dataset("K_G_DIFFUSE", data=raw["k_g_diffuse"].astype(np.float32))
+        raw_group.create_dataset("K_G_DENSE", data=raw["k_g_dense"].astype(np.float32))
 
         f.attrs["GRANULE"] = "region"
         f.attrs["OMEGA_SIM_DEG2"] = float(result["area_deg2"])
