@@ -27,6 +27,13 @@ $PY -m sesnaimpute.sky.download.scosmos.build $CONFIG
 
 $PY -m sesnaimpute.granules.build $CONFIG
 
+# planck_source_column and column both read GAL_L_DEG/GAL_B_DEG from the
+# curated catalogue (the "--- catalog ---" block below) -- run that block
+# first on a fresh root, ahead of these two lines, until the RUNBOOK's
+# own section order is straightened out.
+$PY -m sesnaimpute.sky.derived.planck_source_column $CONFIG
+$PY -m sesnaimpute.sky.derived.column $CONFIG
+
 # --- catalog ---
 # catalog/ -- reads only SESNA: curated catalogues, survey depths, the
 # sigma model.
