@@ -72,9 +72,9 @@ $PY -m sesnaimpute.prior.column_grid $CONFIG
 $PY -m sesnaimpute.prior.field_stars $CONFIG
 $PY -m sesnaimpute.prior.anchor_tiles $CONFIG
 $PY -m sesnaimpute.prior.depth_groups $CONFIG
+$PY -m sesnaimpute.prior.yso $CONFIG   # YSO law count + per-sightline shape (SPEC_PRIORS.md sec 6.1, 6.3)
 $PY -m sesnaimpute.prior.yso_selection $CONFIG
 $PY -m sesnaimpute.prior.gal $CONFIG                    # GAL: Fazio counts law + SWIRE selection tables
-$PY -m sesnaimpute.prior.yso $CONFIG   # YSO law count + per-sightline shape (SPEC_PRIORS.md sec 6.1, 6.3)
 
 # --- fit ---
 # bms/ posterior fit of class and subclass probabilities from the prior
