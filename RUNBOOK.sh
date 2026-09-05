@@ -18,6 +18,8 @@ CONFIG=/Users/jtaylor/Dropbox/Research/SESNA_Complete/config/root.cfg
 $PY -m sesnaimpute.sky.download.hunt_reffert2023.build $CONFIG
 $PY -m sesnaimpute.sky.download.baraffe2015_bhac15.build $CONFIG
 $PY -m sesnaimpute.sky.download.riebel2012.build $CONFIG
+$PY -m sesnaimpute.sky.download.swire.build $CONFIG
+$PY -m sesnaimpute.sky.download.scosmos.build $CONFIG
 
 # --- sky derived ---
 # sky/derived/<source>/ -- one product per computation from those bytes.
