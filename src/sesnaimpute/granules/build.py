@@ -54,45 +54,24 @@ def _iter_catalog(config, region, chunk_rows=CHUNK_ROWS):
                    np.asarray(name).astype(NAME_DTYPE))
 
 
-def _coverage_paths(config, region):
-    """The per-region positive-support coverage files, at the location the
-    dispatch names; a later unit repoints this once sky/derived carries
-    per-region coverage products."""
-    root = config.data_root
-    return (f"{root}/sky/derived/healpix256/{region}_coverage_fraction.hdf5",
-            f"{root}/sky/derived/healpix512/{region}_coverage_fraction.hdf5")
-
-
-def _global_coverage_path(config, nside):
-    root = config.data_root
-    return (f"{root}/sky/derived/healpix{nside}/sesna-spitzer_mosaic-coverage-fractions/"
-            f"sesna_spitzer_mosaic_coverage_fractions_hpx{nside}.hdf5")
+_COVERAGE_GRANULE = {256: "sightline", 512: "hpx512"}
 
 
 def _supported_pixels(config, region, nside):
-    """Sorted nside-`nside` galactic NESTED pixels with finite, strictly
-    positive any-band Spitzer mosaic coverage for `region`, read from the
-    region's own coverage file if present, else from the one survey-wide
-    coverage file the coverage build writes today (region carried there as
-    normalized lineage)."""
-    per_region_path = _coverage_paths(config, region)[0 if nside == 256 else 1]
-    path = per_region_path if os.path.exists(per_region_path) else _global_coverage_path(config, nside)
-    key = f"HPX_PIX_{nside}"
+    """Sorted nside-`nside` galactic NESTED pixels with positive coverage
+    in any Spitzer band for `region` (IMPLEMENTATION.md section 1,
+    SPEC_PRIORS.md section 2.1), read from that region's own
+    `coverage_spitzer_{sightline,hpx512}` product."""
+    granule = _COVERAGE_GRANULE[nside]
+    path = product_path(config, "sky/derived", "spitzer", "coverage", granule, region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "granules.build: no coverage product at %s -- run "
+            "sesnaimpute.sky.derived.coverage first" % path)
     with h5py.File(path, "r") as f:
-        if "REGIONS" in f:
-            names = [v.decode("utf-8") for v in f["REGIONS"][:]]
-            code = names.index(region)
-            lineage = f["LINEAGE"]
-            in_region = np.asarray(lineage["REGION_CODE"][:]) == code
-            selected = np.asarray(lineage[key][:], dtype=np.int64)[in_region]
-            all_pix = np.asarray(f[key][:], dtype=np.int64)
-            all_frac = np.asarray(f["FRAC_ANY_SPITZER"][:], dtype=np.float64)
-            pos = np.searchsorted(all_pix, selected)
-            pix, frac = selected, all_frac[pos]
-        else:
-            pix = np.asarray(f["PIX"][:], dtype=np.int64)
-            frac = np.asarray(f["COVERED_FRAC_ALLBAND_UNION"][:], dtype=np.float64)
-    positive = np.isfinite(frac) & (frac > 0.0)
+        pix = np.asarray(f["HPX_PIX"][:], dtype=np.int64)
+        frac = np.asarray(f["FRAC"][:], dtype=np.float64)
+    positive = np.any(frac > 0.0, axis=1) if frac.size else np.zeros(0, dtype=bool)
     return np.sort(pix[positive])
 
 
