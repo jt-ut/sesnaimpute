@@ -29,11 +29,7 @@ $PY -m sesnaimpute.sky.download.extinction_laws.build $CONFIG
 # ashby2013_seds (VizieR J/ApJ/769/80, SEDS Tables 7-11 + ReadMe): no
 # programmatic CDS/VizieR URL was ever pinned down for these five tables;
 # acquire by hand and place verbatim at sky/download/ashby2013_seds/.
-# h2_knot_surveys: Giannini+2013 (VizieR J/ApJ/767/147), Davis+2009
-# (VizieR J/A+A/496/153), Walawender+2005 (AJ 129/130), UWISH2 Table D1
-# (Froebrich+2015, MNRAS 454, 2586, behind institutional auth) -- no
-# reachable URL for any of the four; acquire by hand and place verbatim
-# at sky/download/h2_knot_surveys/.
+$PY -m sesnaimpute.sky.download.h2_knot_surveys.build $CONFIG
 # --- catalog ---
 # catalog/ -- reads only SESNA: curated catalogues, survey depths, the
 # sigma model.
@@ -48,6 +44,7 @@ $PY -m sesnaimpute.sky.download.gaia_crossmatch.build $CONFIG
 # Derive never fetches. Reads SESNA positions and region membership from
 # the curated catalogue above, never SESNA fluxes.
 $PY -m sesnaimpute.sky.derived.coverage $CONFIG   # Spitzer coverage before granulation (pixel admission)
+$PY -m sesnaimpute.sky.derived.knots $CONFIG   # H2S knot survey tables and the Giannini knot-colour ratio distribution (SPEC_PRIORS.md sec 7)
 $PY -m sesnaimpute.granules.build $CONFIG
 # gaia_counts / twomass_counts (SPEC_PRIORS.md section 2.1, STAR anchor
 # counts) build each query from the granule map's own per-region nside-512
