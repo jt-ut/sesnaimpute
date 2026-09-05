@@ -7,8 +7,8 @@ catalogues (91 per-region ascii files, some regions split into parts by the
 form's own per-query row cap) were already retrieved by hand and staged at
 `<data_root>/sky/download/trilegal-v2/`. This module copies those 91 files
 verbatim, byte-for-byte, to the canonical location below, keeping their
-names -- the same pattern `sky.download.fazio2004.build` uses for another
-web-form-only source.
+names -- the pattern any web-form-only source with no programmatic URL
+uses.
 
 The staged directory also carries a `MANIFEST.json`/`MANIFEST.md` receipt
 (per-part SHA-256, retrieval timestamps, service output URLs) and a

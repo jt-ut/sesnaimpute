@@ -6,8 +6,8 @@ plus a sibling `<law>.info` file naming which columns of the `.par` hold
 wavelength and opacity. Both were assembled for the SED fitter and have
 lived, unversioned, in the predecessor package's data tree ever since --
 there is no reachable download URL for either; this module copies the two
-files each law ships verbatim, byte-for-byte, from that tree, the same
-pattern `sky.download.fazio2004.build` uses for another URL-less source.
+files each law ships verbatim, byte-for-byte, from that tree, the pattern
+any URL-less source uses.
 
 Citations, transcribed from that tree's own `extinction/README.md`:
 
