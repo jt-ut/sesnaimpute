@@ -32,6 +32,11 @@ $PY -m sesnaimpute.sky.download.fazio2004.build $CONFIG
 # (Froebrich+2015, MNRAS 454, 2586, behind institutional auth) -- no
 # reachable URL for any of the four; acquire by hand and place verbatim
 # at sky/download/h2_knot_surveys/.
+# --- sky derived ---
+# sky/derived/<source>/ -- one product per computation from those bytes.
+# Derive never fetches.
+$PY -m sesnaimpute.sky.derived.herschel_column $CONFIG
+$PY -m sesnaimpute.granules.build $CONFIG
 
 # --- catalog ---
 # catalog/ -- reads only SESNA: curated catalogues, survey depths, the
