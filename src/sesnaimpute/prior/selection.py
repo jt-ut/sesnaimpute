@@ -46,15 +46,6 @@ LAW_RAMP_HI = 1.0
 
 _V_BAND_UM = 0.55
 
-#: The two extinction-law curve files this module reads (wavelength,
-#: opacity) plus the curve-internal A_V/A_K each ships with -- staged
-#: under the old package's data directory pending the port of the law
-#: curves to sky/download; repoint this constant when they land there.
-_LAW_DATA_ROOT = (
-    "/Users/jtaylor/Dropbox/Software/JT_Py_Pkgs/sesna-complete/"
-    "src/sesnacomplete/data/extinction"
-)
-
 _LAW_CACHE = {}
 _K_CACHE = {}
 
@@ -70,20 +61,25 @@ def _parse_info(text):
     return fields
 
 
-def _load_law_curve(law):
+def _load_law_curve(config, law):
     """`(wave_um, opacity_cm2_per_g)`, sorted ascending in wavelength,
-    read from `<_LAW_DATA_ROOT>/<law>/<law>.par` at the columns named
-    in the sibling `<law>.info` file -- the same file pair and column
-    convention the SED fitter's own law loader reads.
+    read from `<data_root>/sky/download/extinction_laws/<law>/<law>.par`
+    at the columns named in the sibling `<law>.info` file -- the same
+    file pair and column convention the SED fitter's own law loader
+    reads. Fails with one sentence naming the RUNBOOK line that makes
+    the input (`sky.download.extinction_laws.build`) when either file
+    is missing.
     """
-    if law in _LAW_CACHE:
-        return _LAW_CACHE[law]
-    law_dir = os.path.join(_LAW_DATA_ROOT, law)
+    cache_key = (config.data_root, law)
+    if cache_key in _LAW_CACHE:
+        return _LAW_CACHE[cache_key]
+    law_dir = f"{config.data_root}/sky/download/extinction_laws/{law}"
     info_path = os.path.join(law_dir, f"{law}.info")
     par_path = os.path.join(law_dir, f"{law}.par")
     if not os.path.isfile(info_path) or not os.path.isfile(par_path):
         raise ValueError(
-            f"prior.selection: no extinction law {law!r} at {law_dir!r}")
+            f"prior.selection: no extinction law {law!r} at {law_dir!r} "
+            f"-- run RUNBOOK.sh's sesnaimpute.sky.download.extinction_laws.build line")
     with open(info_path) as f:
         info = _parse_info(f.read())
     colidx_wav = int(info["colidx_wav"])
@@ -91,35 +87,36 @@ def _load_law_curve(law):
     raw = np.loadtxt(par_path, usecols=(colidx_wav, colidx_extinction))
     order = np.argsort(raw[:, 0])
     wave_um, opacity = raw[order, 0], raw[order, 1]
-    _LAW_CACHE[law] = (wave_um, opacity)
-    return _LAW_CACHE[law]
+    _LAW_CACHE[cache_key] = (wave_um, opacity)
+    return _LAW_CACHE[cache_key]
 
 
-def extinction_k(law):
+def extinction_k(config, law):
     """`k_i = chi(lambda_i) / chi(0.55um)` for the 8 census bands, from
     the law's own tabulated curve, linear interpolation in wavelength.
     """
-    if law not in _K_CACHE:
-        wave_um, opacity = _load_law_curve(law)
+    cache_key = (config.data_root, law)
+    if cache_key not in _K_CACHE:
+        wave_um, opacity = _load_law_curve(config, law)
         wav = np.array([b.wvl_um for b in definitions.BANDS])
-        _K_CACHE[law] = (np.interp(wav, wave_um, opacity)
-                         / np.interp(_V_BAND_UM, wave_um, opacity))
-    return _K_CACHE[law].copy()
+        _K_CACHE[cache_key] = (np.interp(wav, wave_um, opacity)
+                               / np.interp(_V_BAND_UM, wave_um, opacity))
+    return _K_CACHE[cache_key].copy()
 
 
-def kappa_ak(law):
+def kappa_ak(config, law):
     """`kappa_i = k_i / k_Ks` -- the K-currency per-band dimming vector;
     `kappa_Ks == 1` exactly.
     """
-    k = extinction_k(law)
+    k = extinction_k(config, law)
     return k / k[BAND_KEYS.index("Ks")]
 
 
-def _ak_per_av_curve(law):
+def _ak_per_av_curve(config, law):
     """`(A_K/A_V)` for `law`, read off the law's own curve at 0.55um and
-    Ks -- the reciprocal of `extinction_k(law)` at Ks.
+    Ks -- the reciprocal of `extinction_k(config, law)` at Ks.
     """
-    return float(extinction_k(law)[BAND_KEYS.index("Ks")])
+    return float(extinction_k(config, law)[BAND_KEYS.index("Ks")])
 
 
 def law_dense_weight(a):
@@ -133,33 +130,34 @@ def law_dense_weight(a):
     return x * x * (3.0 - 2.0 * x)
 
 
-def kappa_hybrid(w):
+def kappa_hybrid(config, w):
     """The per-band dimming vector at ramp weight `w`: the K-normalised
-    convex blend `(1-w)*kappa_ak(LAW_DIFFUSE) + w*kappa_ak(LAW_DENSE)`.
+    convex blend `(1-w)*kappa_ak(config, LAW_DIFFUSE) + w*kappa_ak(config,
+    LAW_DENSE)`.
     """
     w = np.asarray(w, dtype=float)
-    kd = kappa_ak(LAW_DIFFUSE)
-    kw = kappa_ak(LAW_DENSE)
+    kd = kappa_ak(config, LAW_DIFFUSE)
+    kw = kappa_ak(config, LAW_DENSE)
     return (1.0 - w)[..., None] * kd + w[..., None] * kw
 
 
-def ak_per_av(w):
+def ak_per_av(config, w):
     """`(A_K/A_V)` at ramp weight `w`: the harmonic blend of the two
     laws' own curve-internal ratios.
     """
-    r_d = _ak_per_av_curve(LAW_DIFFUSE)
-    r_w = _ak_per_av_curve(LAW_DENSE)
+    r_d = _ak_per_av_curve(config, LAW_DIFFUSE)
+    r_w = _ak_per_av_curve(config, LAW_DENSE)
     w = np.asarray(w, dtype=float)
     return 1.0 / ((1.0 - w) / r_d + w / r_w)
 
 
-def _kappa(law):
+def _kappa(config, law):
     """Resolve `law` to an `(8,)` K-currency dimming vector: a
     registered name (`kappa_ak`) or an already-built `(8,)` vector
     passed through unchanged.
     """
     if isinstance(law, str):
-        return kappa_ak(law)
+        return kappa_ak(config, law)
     kap = np.asarray(law, dtype=float)
     if kap.shape != (N_BANDS,):
         raise ValueError(
@@ -168,7 +166,7 @@ def _kappa(law):
     return kap
 
 
-def _limit_offsets(f_lim, a, law):
+def _limit_offsets(config, f_lim, a, law):
     """`L_i = log10 F_lim,i + 0.4 * a * kappa_i` -- the dimmed limits,
     in the log-flux units a source's own `log10 F` is measured in.
     `f_lim` is `(..., 8)` mJy; `a` broadcasts against its leading axes.
@@ -178,10 +176,10 @@ def _limit_offsets(f_lim, a, law):
         raise ValueError(f"f_lim last axis must be {N_BANDS}, got {f_lim.shape}")
     if np.any(f_lim <= 0) or not np.all(np.isfinite(f_lim)):
         raise ValueError("detection limits must be positive and finite")
-    return np.log10(f_lim) + 0.4 * np.asarray(a, dtype=float)[..., None] * _kappa(law)
+    return np.log10(f_lim) + 0.4 * np.asarray(a, dtype=float)[..., None] * _kappa(config, law)
 
 
-def epsilon(flux, f_lim, a, law, coord_flux=None, weights=None,
+def epsilon(config, flux, f_lim, a, law, coord_flux=None, weights=None,
             min_bands=MIN_BANDS):
     """The two-of-eight detection test (SPEC_PRIORS.md 1.3), counted the
     direct way: the (weighted) fraction of `flux` rows whose dimmed
@@ -192,7 +190,7 @@ def epsilon(flux, f_lim, a, law, coord_flux=None, weights=None,
         coord_index = BAND_KEYS.index("I2")
         flux = flux * (float(coord_flux) / flux[:, coord_index:coord_index + 1])
     n_clear = np.sum(
-        np.log10(flux) - 0.4 * float(a) * _kappa(law)
+        np.log10(flux) - 0.4 * float(a) * _kappa(config, law)
         >= np.log10(np.asarray(f_lim, dtype=float)), axis=1)
     passed = n_clear >= min_bands
     if weights is None:
@@ -201,13 +199,13 @@ def epsilon(flux, f_lim, a, law, coord_flux=None, weights=None,
     return float(np.sum(weights * passed) / np.sum(weights))
 
 
-def column_threshold(flux, f_lim, law, min_bands=MIN_BANDS):
+def column_threshold(config, flux, f_lim, law, min_bands=MIN_BANDS):
     """`A_max`: the largest K-band column at which an object still
     clears the catalog cut -- the exact algebraic reduction of `epsilon`
     (second-largest of `(log f - log F_lim) / (0.4 kappa)` per band).
     """
     flux = np.asarray(flux, dtype=float)
-    kap = _kappa(law)
+    kap = _kappa(config, law)
     with np.errstate(divide="ignore", invalid="ignore"):
         a_band = (np.log10(flux) - np.log10(np.asarray(f_lim, dtype=float))) / (0.4 * kap)
     a_band = np.where(np.isfinite(a_band), a_band, -np.inf)

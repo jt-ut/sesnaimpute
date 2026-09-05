@@ -24,6 +24,8 @@ $PY -m sesnaimpute.sky.download.planck_r120.build $CONFIG
 $PY -m sesnaimpute.sky.download.herschel_hgbs.build $CONFIG
 $PY -m sesnaimpute.sky.download.edenhofer2023.build $CONFIG
 $PY -m sesnaimpute.sky.download.fazio2004.build $CONFIG
+$PY -m sesnaimpute.sky.download.trilegal.build $CONFIG
+$PY -m sesnaimpute.sky.download.extinction_laws.build $CONFIG
 # ashby2013_seds (VizieR J/ApJ/769/80, SEDS Tables 7-11 + ReadMe): no
 # programmatic CDS/VizieR URL was ever pinned down for these five tables;
 # acquire by hand and place verbatim at sky/download/ashby2013_seds/.
