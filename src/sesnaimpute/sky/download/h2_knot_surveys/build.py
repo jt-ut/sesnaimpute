@@ -27,7 +27,7 @@ Summary lists, verbatim, into `<dest>/<catalogue>/`:
         knot table is built from it.
 
 Two further acquisitions have no reachable CDS/VizieR table and stay
-manual, copied from the owner's staged tree:
+manual, placed by hand at the destinations below:
 
     walawender/*.html, *.mhtml -- Walawender J., Bally J. & Reipurth B.
         2005, AJ 129, 2308 (Perseus) and Walawender J., Bally J.,
