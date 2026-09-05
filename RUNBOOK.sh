@@ -24,6 +24,10 @@ $PY -m sesnaimpute.sky.download.planck_r120.build $CONFIG
 $PY -m sesnaimpute.sky.download.herschel_hgbs.build $CONFIG
 $PY -m sesnaimpute.sky.download.edenhofer2023.build $CONFIG
 $PY -m sesnaimpute.sky.download.fazio2004.build $CONFIG
+# gaia_crossmatch reads NAME/RA_DEG/DEC_DEG from the curated catalogue
+# (the "--- catalog ---" block below), the one download exception to this
+# block's own external-bytes-only order; run it after catalog.curated.
+$PY -m sesnaimpute.sky.download.gaia_crossmatch.build $CONFIG
 # ashby2013_seds (VizieR J/ApJ/769/80, SEDS Tables 7-11 + ReadMe): no
 # programmatic CDS/VizieR URL was ever pinned down for these five tables;
 # acquire by hand and place verbatim at sky/download/ashby2013_seds/.
