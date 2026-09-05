@@ -13,12 +13,18 @@ keeping each source's own DCOMP90 spatial pattern and moving only the
 region's typical value. For each region and 2MASS band (J, H, Ks), which
 carries no per-source completeness map, `F_50` itself is the limit.
 
-A region-band's Delta ships only if resolved: fewer than 4 natural
-Freedman-Diaconis bins, or a Delta not distinguishable from its own
-bootstrap sampling noise (`N_SIGMA_FLOOR` re-runs of the whole estimator
-on resamples of the region's detections), is unresolved and takes its
-band's median Delta over the regions that did resolve it; which regions
-were substituted is recorded in `SUBSTITUTED`.
+A region-band's Delta ships as its own measurement, whatever its sign: a
+negative Delta says the catalogue's detections in that band turn over
+brighter than the completeness map's 90% level, and the region's own
+turnover is still the limit. The only substitution is for a region whose
+histogram is too sparse to have a turnover at all (fewer than
+`MIN_RAW_BINS` natural Freedman-Diaconis bins), which takes its band's
+median Delta over the regions that did resolve it; which regions were
+substituted is recorded in `SUBSTITUTED`. The bootstrap uncertainty of
+each Delta (`BOOTSTRAP_RESAMPLES` re-runs of the whole estimator on
+resamples of the region's detections) is stored beside it in
+`SIGMA_DELTA_DEX`; it is small (0.01-0.05 dex on every region measured)
+and never decides anything.
 """
 
 import os
@@ -45,10 +51,6 @@ BOOTSTRAP_RESAMPLES = 1000
 # Fixed so the resolved/unresolved verdict is reproducible bit-for-bit
 # from the catalogue alone.
 BOOTSTRAP_SEED = 20260822
-
-# Conventional significance floor: Delta is resolved only when it exceeds
-# this many of its own bootstrap sampling standard deviations.
-N_SIGMA_FLOOR = 3
 
 MIN_RAW_BINS = 4
 
@@ -108,7 +110,7 @@ def _bootstrap_sigma_log10_f50(x, n_resamples=BOOTSTRAP_RESAMPLES, seed=BOOTSTRA
 
 def _region_depths(curated_path):
     """One region's F_50 (2MASS) and Delta (Spitzer), with the resolved
-    flag per Spitzer band.
+    flag and the bootstrap uncertainty of Delta per Spitzer band.
     """
     with h5py.File(curated_path, "r") as f:
         fnu = f["FNU_MJY"][:]
@@ -117,6 +119,7 @@ def _region_depths(curated_path):
         bands = [b.decode() if isinstance(b, bytes) else b for b in f.attrs["BANDS"]]
 
     delta_dex = np.full(len(IRAC_MIPS_KEYS), np.nan)
+    sigma_delta_dex = np.full(len(IRAC_MIPS_KEYS), np.nan)
     resolved = np.zeros(len(IRAC_MIPS_KEYS), dtype=bool)
     for j, key in enumerate(IRAC_MIPS_KEYS):
         b = bands.index(key)
@@ -126,7 +129,8 @@ def _region_depths(curated_path):
         d = log10_dcomp_med - log10_f50
         sigma_boot = _bootstrap_sigma_log10_f50(np.log10(detected))
         delta_dex[j] = d
-        resolved[j] = (n_raw >= MIN_RAW_BINS) and (d > N_SIGMA_FLOOR * sigma_boot)
+        sigma_delta_dex[j] = sigma_boot
+        resolved[j] = n_raw >= MIN_RAW_BINS
 
     f50_2mass = np.full(len(TWOMASS_KEYS), np.nan)
     for j, key in enumerate(TWOMASS_KEYS):
@@ -135,7 +139,7 @@ def _region_depths(curated_path):
         log10_f50, _ = _rollover_from_log10(np.log10(detected))
         f50_2mass[j] = 10.0 ** log10_f50
 
-    return delta_dex, resolved, f50_2mass
+    return delta_dex, sigma_delta_dex, resolved, f50_2mass
 
 
 def build(config, regions=None):
@@ -159,8 +163,9 @@ def build(config, regions=None):
 
     results = Parallel(n_jobs=-1)(delayed(_region_depths)(p) for p in curated_paths)
     delta_dex = np.array([r[0] for r in results])
-    resolved = np.array([r[1] for r in results])
-    f50_2mass = np.array([r[2] for r in results])
+    sigma_delta_dex = np.array([r[1] for r in results])
+    resolved = np.array([r[2] for r in results])
+    f50_2mass = np.array([r[3] for r in results])
 
     substituted = ~resolved
     for j in range(len(IRAC_MIPS_KEYS)):
@@ -182,6 +187,7 @@ def build(config, regions=None):
         f.attrs["GRANULE"] = "region"
         f.create_dataset("REGION", data=region_bytes)
         f.create_dataset("DELTA_DEX", data=delta_dex)
+        f.create_dataset("SIGMA_DELTA_DEX", data=sigma_delta_dex)
         f.create_dataset("F50_2MASS_MJY", data=f50_2mass)
         f.create_dataset("SUBSTITUTED", data=substituted_full)
 
