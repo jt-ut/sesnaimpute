@@ -24,9 +24,8 @@ reported below, never tuned). Below 0.1 Msun the IMF carries no weight
 (the integration floor), so nothing there needs a photosphere at all.
 The closed-form Chabrier integral (`chabrier_integral`, an error-function
 antiderivative below 1 Msun, a power law above) and the isochrone loader
-below are lifted from `bms_prior.class_densities.yso_catalogued` in the
-retired package and generalised from one band (the literature check
-below) to the survey's own two-of-eight test on all eight bands.
+below serve the survey's own two-of-eight test on all eight bands; the one-band
+form (the literature check below) is the same machinery on 8 um alone.
 
 THE PHOTOSPHERE. J, H, Ks come from `BHAC15_iso.2mass`, absolute
 magnitudes in the Vega system (its own header: "apparent Vega mag is
