@@ -52,6 +52,7 @@ $PY -m sesnaimpute.catalog.depths $CONFIG
 # bms/ prior products: column kernel, PAHC curve, column grid, depth
 # groups, field stars, anchor weights, the per-class priors and
 # selection tables, the prior table.
+$PY -m sesnaimpute.prior.depth_groups $CONFIG
 
 # --- fit ---
 # bms/ posterior fit of class and subclass probabilities from the prior
