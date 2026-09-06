@@ -93,7 +93,6 @@ PY sesnaimpute.prior.column_grid
 PY sesnaimpute.prior.field_stars
 PY sesnaimpute.prior.pahc_curve   # PAHC contamination P(q), survey-wide (SPEC_PRIORS.md sec 4)
 PY sesnaimpute.prior.anchor_tiles
-PY sesnaimpute.prior.depth_groups
 PY sesnaimpute.prior.kernel   # the log-normal column kernel: mu, sigma per arm on the column grid (SPEC_PRIORS.md sec 1.2)
 PY sesnaimpute.prior.yso   # YSO law count + per-sightline shape (SPEC_PRIORS.md sec 6.1, 6.3)
 PY sesnaimpute.prior.young_stars   # expected young stars per STAR anchor pixel/bin (SPEC_PRIORS.md sec 2.1)
@@ -101,7 +100,7 @@ PY sesnaimpute.prior.anchor_observed   # observed STAR anchor joint histogram, y
 PY sesnaimpute.prior.anchor_weights   # per-tile STAR anchor weight W, cluster exclusion, faint-end trend (SPEC_PRIORS.md sec 2.1)
 PY sesnaimpute.prior.star_population   # per-tile field-star placement (u, a) and anchor weight W (SPEC_PRIORS.md sec 1.4, 1.5, 2.1, 2.2)
 PY sesnaimpute.prior.star_shapes   # per-tile STAR/AGB/PAHC shapes, kernel-convolved at fidelity-chosen nodes and grid (SPEC_PRIORS.md sec 2.2, 3, 4; IMPLEMENTATION.md sec 3)
-PY sesnaimpute.prior.star_selection   # STAR/AGB/PAHC exact-selection tables per depth group (SPEC_PRIORS.md sec 1.3, 2.1, 3, 4)
+PY sesnaimpute.prior.star_selection   # STAR/AGB/PAHC exact selection per source (SPEC_PRIORS.md sec 1.3)
 PY sesnaimpute.prior.yso_selection
 PY sesnaimpute.prior.h2s                    # H2S: law-blurred field, region lognormal + knot-colour selection (SPEC_PRIORS.md sec 7)
 PY sesnaimpute.prior.gal                    # GAL: Fazio counts law + SWIRE selection tables
