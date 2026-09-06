@@ -1,16 +1,20 @@
 """The YSO mass-based selection (SPEC_PRIORS.md section 6.2): the inner
-integral of `epsilon_YSO`, per region and depth group, on the shared
-extinction grid --
+integral of `epsilon_YSO`, per source, at the source's own eight limits
+and its own scaled-extinction ladder --
 
-    g[k, j] = Integral dM f_IMF(M) * 1[ photosphere(M) at d_r,
-              dimmed by A_GRID[j], clears >= 2 of 8 at group k's limits ]
+    g[n, k] = Integral dM f_IMF(M) * 1[ photosphere(M) at d_r,
+              dimmed by X_LADDER[k] * A_s[n], clears >= 2 of 8 at
+              source n's own limits ]
 
 for the 1 Myr and 3 Myr BHAC15 (Baraffe et al. 2015, A&A 577, A42)
 isochrones. `epsilon_YSO(s)` itself (the extinction integral over a
 sightline's own embedding density, `Integral da p(a | A_s) * g(a)`) is
 built elsewhere, per sightline; this module ships only `g`, the
-population- and photosphere-side factor, tabulated once per region so
-that stage is a lookup, not a per-source isochrone evaluation.
+population- and photosphere-side factor, tabulated once per source on
+the shared ladder so that stage is a lookup, not a per-source isochrone
+evaluation. Selection is now exact per source (SPEC_PRIORS.md 1.3): no
+depth groups, no common-mode shift, every source's own eight limits and
+own column enter directly.
 
 THE POPULATION. The Chabrier (2003, PASP 115, 763) system IMF: a
 lognormal below 1 Msun (M_c = 0.2 Msun, sigma = 0.55 dex), a power law
@@ -45,19 +49,17 @@ against the isochrone's own tabulated masses.
 
 THE TEST. Apparent flux at the region's own `d_r_pc` (`constants.
 REGIONS`), dimmed by `10**(-0.4 * a * kappa_i(a))` with the blended
-diffuse/dense law (`prior.selection.kappa_hybrid`), compared to a depth
-group's own 8-band limit vector: the region's reference limit
-(`depth_groups.DepthGroups.ref_log10_flim`) with the five Spitzer bands
-shifted by the group's own `Delta` centre (`prior.depth_groups`,
-`prior.selection.BANDS_DEPTH`). `>= 2` of 8 clearing is a catalogued
+diffuse/dense law (`prior.selection.kappa_hybrid`), compared to the
+source's own 8-band limit vector (`catalog.limits.limits`) at query
+extinction `a = X_LADDER * A_s`. `>= 2` of 8 clearing is a catalogued
 detection (`prior.selection.MIN_BANDS`).
 
 THE LITERATURE CHECK (reported, not shipped; SPEC_PRIORS.md 6.2, 6.5 item
 4). Gutermuth et al. (2009) sec. 7.1's one-band form: the mass whose I4
 (8.0 um) photospheric magnitude, undimmed, at a region's own distance
-equals the region's own reference I4 limit, and the IMF fraction above
-it. Written to the 30-row summary alongside `D_R_PC` and `g` at zero
-extinction for both ages at the region's median depth group.
+equals a limit equals the region's own reference I4 limit, and the IMF
+fraction above it. `mass_limit_one_band` is vectorised over sources and
+written per source alongside `g`.
 """
 
 import os
@@ -68,23 +70,25 @@ import numpy as np
 from scipy.special import erf
 
 from sesnaimpute import astro_utils
+from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
 from sesnaimpute import constants
 from sesnaimpute import definitions
 from sesnaimpute import regions as regions_module
-from sesnaimpute import tables as tables_module
 from sesnaimpute.build import run
-from sesnaimpute.prior import column_grid as column_grid_module
-from sesnaimpute.prior import depth_groups as depth_groups_module
+from sesnaimpute.catalog import limits as limits_module
+from sesnaimpute.granules import access
 from sesnaimpute.prior import selection
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
 
-#: Index, in `BAND_KEYS` order, of the five bands a depth group's own
-#: `Delta` shifts (`prior.selection.BANDS_DEPTH`); the three 2MASS bands
-#: keep the region's reference limit unchanged (SPEC_PRIORS.md 1.3).
-_DEPTH_IDX = np.array([BAND_KEYS.index(b) for b in selection.BANDS_DEPTH])
+#: The shared scaled-extinction ladder (`prior.selection`, the one place
+#: it is defined).
+X_LADDER = selection.X_LADDER
+
+#: The per-batch working-array budget (`sesnaimpute.batches.batches`).
+BATCH_BUDGET_BYTES = 512 << 20
 
 # --- the population: Chabrier 2003 system IMF (SPEC_PRIORS.md 6.2) ---
 CHABRIER_MC_MSUN = 0.2
@@ -105,7 +109,7 @@ AGE_3MYR_GYR = 0.0030
 #: with the isochrone, 0.1-1.4 Msun (SPEC_PRIORS.md 6.2).
 N_MASS_QUADRATURE = 500
 #: A finer grid for the one-band literature check's own mass inversion
-#: (a single evaluation per region, not a per-node tabulation).
+#: (one evaluation per source, not a per-node tabulation).
 _N_MASS_INVERT = 4000
 
 #: The AB system's own defining zero point (Oke & Gunn 1983, ApJS 43,
@@ -311,27 +315,16 @@ def mass_quadrature():
 
 
 # ---------------------------------------------------------------------
-# the inner selection integral, per region
+# the inner selection integral, per source
 # ---------------------------------------------------------------------
 
-def group_limit_vectors(depth_groups):
-    """`(K, 8)`: each depth group's own 8-band log10 limit vector, in
-    `BAND_KEYS` order -- the region's reference limit
-    (`depth_groups.ref_log10_flim`) with the five Spitzer bands shifted
-    by the group's own `Delta` centre (SPEC_PRIORS.md 1.3).
-    """
-    n_groups = depth_groups.group_centres.shape[0]
-    limits = np.tile(depth_groups.ref_log10_flim[None, :], (n_groups, 1))
-    limits[:, _DEPTH_IDX] = (
-        depth_groups.ref_log10_flim[_DEPTH_IDX][None, :] + depth_groups.group_centres)
-    return limits
-
-
-def selection_table(config, age_gyr, d_r_pc, a_grid, group_limits, mass_grid, imf_weight):
-    """`(K, n_a)`: `g[k, j]`, the IMF-weighted two-of-eight selection at
-    `age_gyr`, every depth group and every extinction node -- the module
-    docstring's inner integral, fully vectorised (no loop over sources,
-    masses, groups or nodes).
+def selection_table(config, age_gyr, d_r_pc, a_query, source_limits, mass_grid, imf_weight):
+    """`(n_src, n_x)`: `g[n, k]`, the IMF-weighted two-of-eight selection
+    at `age_gyr` for every source in the batch and every ladder point --
+    the module docstring's inner integral, fully vectorised (no loop
+    over sources, masses or ladder points). `a_query` (n_src, n_x) is
+    `X_LADDER * A_s`; `source_limits` (n_src, 8) is that source's own
+    log10 detection limits (`catalog.limits.limits`).
     """
     abs_mag = abs_mag_grid(config, age_gyr, mass_grid)  # (n_mass, 8)
     mu = astro_utils.distance_modulus(d_r_pc)
@@ -339,19 +332,25 @@ def selection_table(config, age_gyr, d_r_pc, a_grid, group_limits, mass_grid, im
     apparent_mag = abs_mag + mu  # undimmed, (n_mass, 8)
     log10_f0 = np.log10(zero_points)[None, :] - 0.4 * apparent_mag  # (n_mass, 8)
 
-    with np.errstate(divide="ignore"):
-        w = selection.law_dense_weight(a_grid)  # a_grid[0] == 0 -> log(0), clipped to weight 0
-    kappa_at_a = selection.kappa_hybrid(config, w)  # (n_a, 8)
-    dimming = 0.4 * np.asarray(a_grid, dtype=float)[:, None] * kappa_at_a  # (n_a, 8)
-    log10_f = log10_f0[:, None, :] - dimming[None, :, :]  # (n_mass, n_a, 8)
+    w = selection.law_dense_weight(a_query)  # (n_src, n_x)
+    kappa_at_a = selection.kappa_hybrid(config, w)  # (n_src, n_x, 8)
+    dimming = 0.4 * a_query[:, :, None] * kappa_at_a  # (n_src, n_x, 8)
+    log10_f = log10_f0[None, None, :, :] - dimming[:, :, None, :]  # (n_src, n_x, n_mass, 8)
 
     n_clear = np.sum(
-        log10_f[None, :, :, :] >= group_limits[:, None, None, :], axis=-1)  # (K, n_mass, n_a)
+        log10_f >= source_limits[:, None, None, :], axis=-1)  # (n_src, n_x, n_mass)
     cleared = (n_clear >= selection.MIN_BANDS).astype(np.float64)
 
     log10_mass = np.log10(mass_grid)
-    inner = np.trapz(cleared * imf_weight[None, :, None], x=log10_mass, axis=1)  # (K, n_a)
+    inner = np.trapz(cleared * imf_weight[None, None, :], x=log10_mass, axis=2)  # (n_src, n_x)
     return inner + IMF_FRAC_ABOVE_1P4
+
+
+def _row_bytes(n_x, n_mass):
+    """The per-source working-array footprint one batch holds: the
+    dominant term is the `(n_x, n_mass, 8)` dimmed-flux array built
+    twice (1 Myr and 3 Myr) per source."""
+    return 2 * n_x * n_mass * N_BANDS * 8 + n_x * N_BANDS * 8 * 2 + N_BANDS * 8
 
 
 # ---------------------------------------------------------------------
@@ -364,103 +363,92 @@ def mass_limit_one_band(config, d_r_pc, log10_flim_i4, age_gyr=AGE_1MYR_GYR):
     2009 sec. 7.1's mass-sensitivity construction, the reported check
     (SPEC_PRIORS.md 6.2, 6.5 item 4). Beyond the tabulated magnitude
     range, clamped to the isochrone's own mass edge, never extrapolated.
+    `log10_flim_i4` may be a scalar or an `(n,)` array of per-source
+    limits; vectorised throughout.
     """
     fine_masses = np.geomspace(ISOCHRONE_MASS_MIN_MSUN, ISOCHRONE_MASS_MAX_MSUN, _N_MASS_INVERT)
     abs_mag_i4 = abs_mag_grid(config, age_gyr, fine_masses)[:, BAND_KEYS.index("I4")]
     mu = astro_utils.distance_modulus(d_r_pc)
     zp = _BAND_ZERO_POINT_MJY["I4"]
-    apparent_mag_target = -2.5 * (log10_flim_i4 - np.log10(zp))
+    apparent_mag_target = -2.5 * (np.asarray(log10_flim_i4, dtype=float) - np.log10(zp))
     abs_mag_target = apparent_mag_target - mu
     order = np.argsort(abs_mag_i4)
-    return float(np.interp(abs_mag_target, abs_mag_i4[order], fine_masses[order]))
+    return np.interp(abs_mag_target, abs_mag_i4[order], fine_masses[order])
 
 
 # ---------------------------------------------------------------------
-# per-region build
+# per-region build: one batched pass over sources
 # ---------------------------------------------------------------------
 
-def build_region(config, region):
-    """Computes the selection tables and the literature-check summary
-    row for one region.
+def build_and_write_region(config, region):
+    """Computes and writes the region's exact per-source YSO mass
+    selection, one batch of sources at a time so no batch's working
+    arrays exceed `BATCH_BUDGET_BYTES`.
     """
     d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
-    depth_groups_path = config_module.product_path(
-        config, "bms", "sesna", "depth-groups", "region")
-    depth_groups = depth_groups_module.DepthGroups.read(depth_groups_path, region)
-    group_limits = group_limit_vectors(depth_groups)
+    log10_lim = np.log10(limits_module.limits(config, region))
+    n_source = log10_lim.shape[0]
 
-    nodes = column_grid_module.nodes(config)
-    a_grid = np.concatenate(([0.0], np.asarray(nodes, dtype=float)))
+    adopted_path = config_module.product_path(
+        config, "sky/derived", "adopted", "column", "source", region=region)
+    a_col = np.asarray(
+        access.per_source(config, region, adopted_path, ["A_COL_K"])["A_COL_K"], dtype=np.float64)
+    if a_col.shape[0] != n_source:
+        raise ValueError(
+            "prior.yso_selection: %r's column count (%d) does not match "
+            "the region's %d sources" % (adopted_path, a_col.shape[0], n_source))
 
     mass_grid, imf_weight = mass_quadrature()
-    g_1myr = selection_table(config, AGE_1MYR_GYR, d_r_pc, a_grid, group_limits,
-                             mass_grid, imf_weight)
-    g_3myr = selection_table(config, AGE_3MYR_GYR, d_r_pc, a_grid, group_limits,
-                             mass_grid, imf_weight)
+    x_ladder = X_LADDER
+    n_x = x_ladder.size
 
-    log10_flim_i4 = float(depth_groups.ref_log10_flim[BAND_KEYS.index("I4")])
-    m_lim = mass_limit_one_band(config, d_r_pc, log10_flim_i4, AGE_1MYR_GYR)
-
-    median_group = int(depth_groups.assign_group(np.zeros((1, len(selection.BANDS_DEPTH))))[0])
-
-    return {
-        "A_GRID": a_grid, "G_1MYR": g_1myr, "G_3MYR": g_3myr,
-        "GROUP_CENTRES": depth_groups.group_centres, "D_R_PC": d_r_pc,
-        "M_LIM_8UM_1MYR": m_lim, "IMF_FRAC_ABOVE_MLIM": float(imf_fraction_above(m_lim)),
-        "MEDIAN_GROUP": median_group,
-    }
-
-
-def _write_selection(path, result):
+    path = config_module.product_path(config, "bms", "yso", "selection", "source", region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
-        f.attrs["GRANULE"] = "region"
-        f.attrs["D_R_PC"] = float(result["D_R_PC"])
+        f.attrs["GRANULE"] = "source"
+        f.attrs["D_R_PC"] = float(d_r_pc)
         f.attrs["IMF_FRAC_ABOVE_1P4"] = IMF_FRAC_ABOVE_1P4
-        f.create_dataset("A_GRID", data=result["A_GRID"].astype(np.float64))
-        f.create_dataset("G_1MYR", data=result["G_1MYR"].astype(np.float32))
-        f.create_dataset("G_3MYR", data=result["G_3MYR"].astype(np.float32))
-        f.create_dataset("GROUP_CENTRES", data=result["GROUP_CENTRES"].astype(np.float64))
+        f.create_dataset("X_LADDER", data=x_ladder.astype("f8"))
+        ds_g1 = f.create_dataset("G_1MYR", shape=(n_source, n_x), dtype="f4")
+        ds_g3 = f.create_dataset("G_3MYR", shape=(n_source, n_x), dtype="f4")
+        ds_mlim = f.create_dataset("M_LIM_8UM_1MYR", shape=(n_source,), dtype="f4")
+        ds_flim = f.create_dataset("IMF_FRAC_ABOVE_MLIM", shape=(n_source,), dtype="f4")
+
+        row_bytes = _row_bytes(n_x, mass_grid.size)
+        for start, stop in batches_module.batches(n_source, row_bytes, budget_bytes=BATCH_BUDGET_BYTES):
+            lim_b = np.ascontiguousarray(log10_lim[start:stop])
+            a_b = a_col[start:stop]
+            a_query_b = np.ascontiguousarray(x_ladder[None, :] * a_b[:, None])
+
+            ds_g1[start:stop] = selection_table(
+                config, AGE_1MYR_GYR, d_r_pc, a_query_b, lim_b, mass_grid, imf_weight).astype("f4")
+            ds_g3[start:stop] = selection_table(
+                config, AGE_3MYR_GYR, d_r_pc, a_query_b, lim_b, mass_grid, imf_weight).astype("f4")
+
+            m_lim_b = mass_limit_one_band(config, d_r_pc, lim_b[:, BAND_KEYS.index("I4")], AGE_1MYR_GYR)
+            ds_mlim[start:stop] = m_lim_b.astype("f4")
+            ds_flim[start:stop] = imf_fraction_above(m_lim_b).astype("f4")
+
+    return path, n_source
+
+
+def _build_one(config, region):
+    path, n_source = build_and_write_region(config, region)
+    with h5py.File(path, "r") as f:
+        m_lim_med = float(np.median(f["M_LIM_8UM_1MYR"][:]))
+        f_above_med = float(np.median(f["IMF_FRAC_ABOVE_MLIM"][:]))
+    print(f"yso_selection: {region}: n_source={n_source} "
+          f"median(M_LIM_8UM_1MYR)={m_lim_med:.4f} Msun "
+          f"median(f_IMF(>M_lim))={f_above_med:.4f} -> {path}")
+    return path
 
 
 def build(config, regions=None):
-    """Writes, per region (default: all thirty), `bms/yso/selection_yso_
-    region__<Region>.hdf5` (`A_GRID`, `G_1MYR`, `G_3MYR`,
-    `GROUP_CENTRES`), and the 30-row literature-check summary
-    `bms/yso/summary_yso_region.hdf5` (SPEC_PRIORS.md 6.2, 6.4).
-    """
+    """Writes the exact per-source YSO mass selection for `regions`
+    (default: all thirty), one product per region (module docstring)."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
-
-    region_rows, d_r_pc_row, m_lim_row, f_above_row = [], [], [], []
-    g1_a0_row, g3_a0_row = [], []
     for region in region_names:
-        result = build_region(config, region)
-        sel_path = config_module.product_path(
-            config, "bms", "yso", "selection", "region", region=region)
-        _write_selection(sel_path, result)
-        print(f"yso_selection: {region}: K={result['GROUP_CENTRES'].shape[0]} "
-              f"M_LIM_8UM_1MYR={result['M_LIM_8UM_1MYR']:.4f} Msun "
-              f"f_IMF(>M_lim)={result['IMF_FRAC_ABOVE_MLIM']:.4f} -> {sel_path}")
-
-        region_rows.append(region)
-        d_r_pc_row.append(result["D_R_PC"])
-        m_lim_row.append(result["M_LIM_8UM_1MYR"])
-        f_above_row.append(result["IMF_FRAC_ABOVE_MLIM"])
-        g1_a0_row.append(float(result["G_1MYR"][result["MEDIAN_GROUP"], 0]))
-        g3_a0_row.append(float(result["G_3MYR"][result["MEDIAN_GROUP"], 0]))
-
-    summary_path = config_module.product_path(config, "bms", "yso", "summary", "region")
-    tables_module.update_rows(
-        summary_path, region_names,
-        {
-            "D_R_PC": np.asarray(d_r_pc_row, dtype=np.float64),
-            "M_LIM_8UM_1MYR": np.asarray(m_lim_row, dtype=np.float64),
-            "IMF_FRAC_ABOVE_MLIM": np.asarray(f_above_row, dtype=np.float64),
-            "G_1MYR_A0_MEDIAN_GROUP": np.asarray(g1_a0_row, dtype=np.float64),
-            "G_3MYR_A0_MEDIAN_GROUP": np.asarray(g3_a0_row, dtype=np.float64),
-        },
-        granule="region", attrs={"IMF_FRAC_ABOVE_1P4": IMF_FRAC_ABOVE_1P4})
-    print(f"yso_selection: summary -> {summary_path}")
+        _build_one(config, region)
 
 
 if __name__ == "__main__":
