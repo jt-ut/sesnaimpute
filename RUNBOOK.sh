@@ -106,8 +106,8 @@ PY sesnaimpute.prior.h2s                    # H2S: law-blurred field, region log
 PY sesnaimpute.prior.gal                    # GAL: Fazio counts law + SWIRE selection tables
 PY sesnaimpute.prior.counts_star_family
 PY sesnaimpute.prior.counts_cloud           # YSO/H2S per-source counts on the cloud law (SPEC_PRIORS.md sec 6.2, 7)
-PY sesnaimpute.prior.table                  # the prior table: the join, one row per catalogue source (IMPLEMENTATION.md sec 5)
 PY sesnaimpute.prior.levels                 # the one scalar per region normalising the six counts to the catalogued source count (SPEC_PRIORS.md sec 0.2)
+PY sesnaimpute.prior.table                  # the prior table: the join, one row per catalogue source (IMPLEMENTATION.md sec 5)
 
 # --- fit ---
 # bms/ posterior fit of class and subclass probabilities from the prior
