@@ -16,9 +16,8 @@ x` of the population's own `log10 U` histogram with the kernel's `log10
 r` distribution. This is why the axis is `log10 x`, not `x`: no `(n_x,
 n_x)` matrix is built anywhere in this module: every node's operator is
 one small 1-D array (`node_log_x_kernel`), applied to the whole
-`(log10 x, log10 B[, log10 q0])` histogram by one FFT convolution along
-axis 0 (`apply_log_x_kernel`), batched over every `log10 B` (and `log10
-q0`) column at once.
+`(log10 x, log10 B)` histogram by one FFT convolution along axis 0
+(`apply_log_x_kernel`), batched over every `log10 B` column at once.
 
 **The smoothing width comes from the population, not the fitter's own
 resolution** (`IMPLEMENTATION.md` section 3, amended 2026-09-05). Per
@@ -57,7 +56,7 @@ the largest column -- the node needing the finest resolution,
 and the grid cell on each axis is then DOUBLED alternately while the
 BICUBIC reconstruction (`scipy.interpolate.RectBivariateSpline`,
 `kx = ky = BICUBIC_DEGREE = 3`) of that reference density from the
-coarser grid stays within `EPS_SHAPE` (0.002) relative L1
+coarser grid stays within `EPS_SHAPE` (0.02) relative L1
 (`choose_grid_by_bar`); each candidate coarser grid is built directly at
 its own resolution (deposit, smooth, convolve), not by downsampling the
 fine array, since a density already smoothed to the population's own
@@ -77,34 +76,30 @@ is never resident as shapes all at once.
 
 AGB blends the O-rich and C-rich shapes (spec section 3) BEFORE the
 smoothing and the fidelity tests see it; its own bandwidth is measured
-on the same blend (`class_x_b_samples`). PAHC carries no `log10 q0` axis
-at all: its `(log10 x, log10 B)` density is STAR's own construction (the
-whole population, unreduced weight), and per tile, in each `log10 B`
-cell, the weight-weighted mean and standard deviation of `log10 q0`
-(`Q0_MEAN`, `Q0_STD`, one pair per tile and cell -- `q0` is a per-star
-quantity at the tile's own column, not a function of shape node) are
-stored beside it (`pahc_q0_bin_stats`). At read time, a source's own
-8 micron limit turns a cell's conditional into a scalar weight,
-`Integral P(q0 . F_lim,8) N(log10 q0; mean, std) d log10 q0`, by a fixed
-`N_GAUSS_HERMITE`-point Gauss-Hermite quadrature against the measured
-curve (`prior.pahc_curve.read`, `_gauss_hermite_pahc_factor`); the
-`(log10 x, log10 B)` density is multiplied by that per-`log10 B`-cell
-weight and renormalised (`ClassShape._slab`). Validated at build against
-a direct histogram of the population weighted by the measured `P_PAHC`
-column at the region's median limit, both smoothed the same way
-(`_pahc_collapse_check`): the comparison isolates the Gaussian-
-conditional approximation from the smoothing every node already gets.
+on the same blend (`class_x_b_samples`). PAHC's grid and shape nodes are
+chosen exactly as STAR's own, on the whole population's unreduced weight
+(`class_raw_hist`'s "pahc" branch, unchanged) -- the fidelity tests never
+see the limit weighting. The STORED density at each node is then built
+separately for every entry of the population product's own eight 8
+micron completeness limits (`LIMIT8_GRID_MJY`): the same `(log10 u,
+LOG10_B_PAHC)` point cloud, deposited, smoothed and convolved exactly
+like STAR, but weighted by that limit's own measured nebular-
+contamination probability, `W * P_PAHC[:, j]` (spec section 4,
+`pahc_raw_hist_for_limit`) -- exact per limit, no conditional
+approximation. At read time, a source's own 8 micron limit brackets two
+of the eight stored limit grids and blends linearly between them in
+`log10` limit, the same bracket-and-blend rule the shape nodes use in
+`log A` (`ClassShape.density`).
 
 Analytic tails beyond the tabulated box (two-sided on `log10 x` as well
-as `log10 B`, since the axis no longer starts at zero) are declared from
-the convolved shape's own edge behaviour (a matched-slope exponential,
-`_edge_tail`), on the pre-`log10 q0`-weighting shape for PAHC (a stated
-simplification: the source's own limit enters only within the tabulated
-box), and the interior array is rescaled so interior mass plus declared
-tail mass sums to exactly one.
+as `log10 B`, since the axis no longer starts at zero) are declared per
+stored (tile, node[, limit]) slab from its own convolved edge behaviour
+(a matched-slope exponential, `_edge_tail`), and the interior array is
+rescaled so interior mass plus declared tail mass sums to exactly one.
 
 Writes, per region and class, `bms/<class>/shape_<class>_tile__<Region>.
-hdf5` for `class` in `star`, `agb`, `pahc`.
+hdf5` for `class` in `star`, `agb`, `pahc`; PAHC's own file carries the
+extra `LIMIT8_GRID_MJY` grid and an extra `DENSITY`/tail axis over it.
 """
 
 import os
@@ -122,7 +117,6 @@ from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.prior import column_grid
 from sesnaimpute.prior import kernel as kernel_module
-from sesnaimpute.prior import pahc_curve
 
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
@@ -130,10 +124,15 @@ from sesnaimpute.prior import pahc_curve
 
 CLASSES = ("star", "agb", "pahc")
 
-#: The fidelity bar (`IMPLEMENTATION.md` section 2's `EPS_GRID`, reused by
-#: section 3 for the shape nodes and the grid-coarsening test): relative
-#: L1 mass a coarser representation is allowed to misplace.
-EPS_SHAPE = 0.002
+#: The SHAPE fidelity bar (`IMPLEMENTATION.md` section 3, amended
+#: 2026-09-05), reused for both the grid-coarsening test and the shape-
+#: node selection: relative L1 mass a coarser representation is allowed
+#: to misplace, set by the priors' own uncertainty bands (STAR 10 % from
+#: the anchor weights, GAL 0.1 dex, YSO 0.36 dex) an order of magnitude
+#: below any of them -- fifty times looser than the column grid's own
+#: `EPS_GRID` (0.002, `IMPLEMENTATION.md` section 2), which governs where
+#: a source's column sits, not a shape.
+EPS_SHAPE = 0.02
 
 #: The mass fraction of the kernel's own `r = T/A` distribution excluded
 #: from the tabulated `log10 x` range (module docstring): tighter than
@@ -161,11 +160,6 @@ FINE_CELL_BANDWIDTH_DIVISOR = 5.0
 #: Bicubic grid choice and read (brief item 2):
 #: `scipy.interpolate.RectBivariateSpline`'s degree per axis.
 BICUBIC_DEGREE = 3
-
-#: PAHC's per-`log10 B`-cell `log10 q0` conditional is integrated against
-#: the measured contamination curve by a FIXED Gauss-Hermite quadrature
-#: of this order (brief item 3; `numpy.polynomial.hermite.hermgauss`).
-N_GAUSS_HERMITE = 16
 
 #: `ln(10)`: converts a fractional (linear) width to a `log10` width by
 #: the small-perturbation identity `d(log10 x) = dx / (x ln 10)`
@@ -197,12 +191,6 @@ _GAUSSIAN_TRUNCATE_SIGMA = 6.0
 #: below the tabulated box and reads as the declared low-`x` tail).
 _LOG_FLOOR = 1.0e-300
 
-#: The fixed `N_GAUSS_HERMITE`-point Gauss-Hermite nodes and weights
-#: (physicists' convention, weight `exp(-t**2)`), computed once: for
-#: `X ~ N(mean, std**2)`, `E[f(X)] = (1/sqrt(pi)) * Sum w_k * f(mean +
-#: std*sqrt(2)*t_k)` (brief item 3).
-_GH_NODES, _GH_WEIGHTS = np.polynomial.hermite.hermgauss(N_GAUSS_HERMITE)
-
 
 # ---------------------------------------------------------------------------
 # reads: the population product, the tile-to-map-class table
@@ -211,8 +199,9 @@ _GH_NODES, _GH_WEIGHTS = np.polynomial.hermite.hermgauss(N_GAUSS_HERMITE)
 def read_population(config, region):
     """The region's per-tile field-star point cloud (`prior.star_
     population`'s own product): `F_C`, `LIMIT8_GRID_MJY`, and, per tile,
-    `U` (=`x`, module docstring) and its `log10`, the class weights, and
-    the three brightness units plus `LOG10_Q0`."""
+    `U` (=`x`, module docstring) and its `log10`, the class weights, the
+    three brightness units, and PAHC's own per-star, per-limit
+    contamination probability `P_PAHC`."""
     path = config_module.product_path(config, "bms", "star", "population", "tile", region=region)
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -239,7 +228,7 @@ def read_population(config, region):
                 log10_b_pahc=g["LOG10_B_PAHC"][:].astype(np.float64),
                 log10_b_agb_c=g["LOG10_B_AGB_C"][:].astype(np.float64),
                 log10_b_agb_o=g["LOG10_B_AGB_O"][:].astype(np.float64),
-                log10_q0=g["LOG10_Q0"][:].astype(np.float64),
+                p_pahc=g["P_PAHC"][:].astype(np.float64),
             ))
     return dict(f_c=f_c, limit8_grid_mjy=limit8_grid_mjy, tiles=tiles, n_tile=len(tiles))
 
@@ -326,8 +315,10 @@ def class_raw_hist(pop, tile_idx, cls, log_x_centers, b_centers):
     the evolved subset before blending by `f_C` (spec section 3), so the
     blended object -- not either chemistry alone -- is what the kernel
     convolves and the fidelity tests measure. PAHC deposits the WHOLE
-    population's weight, unreduced (spec section 4): its own `log10 q0`
-    conditional lives in `pahc_q0_bin_stats`, not in this histogram."""
+    population's weight, unreduced (spec section 4): this is the grid-
+    and node-CHOICE density only -- the density actually stored per
+    limit is `pahc_raw_hist_for_limit`'s own, weighted by that limit's
+    measured contamination probability."""
     tile = pop["tiles"][tile_idx]
     if cls == "star":
         h = _cic_hist([tile["log10_u"], tile["log10_b"]], tile["w_star"],
@@ -446,45 +437,19 @@ def tile_class_bandwidths(pop, cls):
     return out
 
 
-def pahc_q0_bin_stats(tile, b_centers, b_edges):
-    """`(Q0_MEAN, Q0_STD)`, shape `(n_b,)`: per `log10 B` cell, the
-    weight-weighted mean and standard deviation of `log10 q0` over the
-    tile's own stars in that cell (brief item 3) -- `q0` is a per-star
-    quantity at the tile's own column, independent of shape node, so one
-    pair per cell per tile is all PAHC needs. Cells the tile's own stars
-    fall in are aggregated in one vectorised pass (`np.bincount`, rule 8:
-    no loop over `log10 B` bins); a cell with no weight (an edge of the
-    class's own `log10 B` range this tile's stars do not reach) takes the
-    tile's own pooled mean/std, since the interior density there is
-    itself vanishing and needs no resolved conditional."""
-    w = tile["w"]
-    log_b = tile["log10_b_pahc"]
-    log_q0 = tile["log10_q0"]
-    n_b = b_centers.size
-    mean_all, std_all = _weighted_mean_std(log_q0, w)
-
-    idx = np.clip(np.searchsorted(b_edges, log_b, side="right") - 1, 0, n_b - 1)
-    w_sum = np.bincount(idx, weights=w, minlength=n_b)
-    wq_sum = np.bincount(idx, weights=w * log_q0, minlength=n_b)
-    wq2_sum = np.bincount(idx, weights=w * log_q0 ** 2, minlength=n_b)
-
-    safe = w_sum > 0.0
-    denom = np.where(safe, w_sum, 1.0)
-    mean = np.where(safe, wq_sum / denom, mean_all)
-    var = np.where(safe, wq2_sum / denom - mean ** 2, std_all ** 2)
-    std = np.sqrt(np.clip(var, 0.0, None))
-    std = np.where(safe, std, std_all)
-    return mean, std
-
-
-def _gauss_hermite_pahc_factor(curve, mean, std, f_lim8):
-    """The Gauss-Hermite estimate of `Integral P(q0 * f_lim8) N(log10 q0;
-    mean, std) d log10 q0` per `log10 B` cell (brief item 3), shared by
-    the build-time check (`_pahc_collapse_check`) and `ClassShape`'s own
-    read-time evaluator so both apply the identical fixed rule."""
-    log_q = mean[:, None] + std[:, None] * (np.sqrt(2.0) * _GH_NODES)[None, :] + np.log10(f_lim8)
-    vals = np.clip(curve(log_q), 0.0, None)
-    return (vals * _GH_WEIGHTS[None, :]).sum(axis=1) / np.sqrt(np.pi)
+def pahc_raw_hist_for_limit(tile, limit_idx, log_x_centers, b_centers):
+    """PAHC's one CIC-deposited, unit-mass `(log10 x, log10 B)` histogram
+    for one tile at one of the population product's eight 8 micron
+    completeness-limit grid values (`IMPLEMENTATION.md` section 3,
+    amended 2026-09-05): the same whole-population `(log10 u, LOG10_B_
+    PAHC)` point cloud `class_raw_hist`'s "pahc" branch deposits, but
+    weighted by this limit's own measured nebular-contamination
+    probability, `W * P_PAHC[:, limit_idx]` (spec section 4) -- exact per
+    limit, no conditional approximation of the per-star weight."""
+    w = tile["w"] * tile["p_pahc"][:, limit_idx]
+    h = _cic_hist([tile["log10_u"], tile["log10_b_pahc"]], w, [log_x_centers, b_centers])
+    total = float(w.sum())
+    return h / total if total > 0.0 else h
 
 
 # ---------------------------------------------------------------------------
@@ -652,12 +617,12 @@ def node_log_x_kernel(point_arr, point_off, kernel_width_dex, cell, sigma_x_dex)
 
 
 def apply_log_x_kernel_fft(raw_fft, nfft, n_x, kernel_arr, offset_lo):
-    """`raw_fft` (the `rfft` of a `(n_x, n_b[, n_q0])` histogram along
-    axis 0, at a FIXED `nfft` shared by every node this tile evaluates),
-    convolved with one node's combined kernel by multiplying in the
-    frequency domain and inverting (module docstring: shift-invariant
-    because the axis is `log10 x`), batched over every `log10 B` (and
-    `log10 q0`) column at once. `nfft` MUST be the same value across
+    """`raw_fft` (the `rfft` of a `(n_x, n_b)` histogram along axis 0, at
+    a FIXED `nfft` shared by every node this tile evaluates), convolved
+    with one node's combined kernel by multiplying in the frequency
+    domain and inverting (module docstring: shift-invariant because the
+    axis is `log10 x`), batched over every `log10 B` column at once.
+    `nfft` MUST be the same value across
     every call sharing one `raw_fft` -- `scipy.fft`'s own transform-size
     cache holds a working buffer close to the FULL padded array size per
     DISTINCT length it sees, so calling this with a size that changes
@@ -890,11 +855,10 @@ def _edge_tail(marginal, grid, side):
 
 
 def finalise_node_shape(conv, x_centers, b_centers):
-    """The stored per-(tile, node) product (step 2): declares the
-    analytic tail from the convolved array's own edge marginals
-    (`(log10 x, log10 B)` -- PAHC's own `log10 q0` conditional is stored
-    and applied separately, `pahc_q0_bin_stats`/`ClassShape._slab`, so
-    this array is always 2-D), two-sided on `log10 x` as well as
+    """The stored per-(tile, node[, limit]) product (step 2): declares the
+    analytic tail from the convolved array's own `(log10 x, log10 B)`
+    edge marginals (always 2-D, one call per stored slab -- PAHC calls it
+    once per limit, `_tile_shapes`), two-sided on `log10 x` as well as
     `log10 B` since the axis no longer starts at zero, then rescales the
     interior array so interior mass plus declared tail mass sums to
     exactly one (algebraic acceptance: `DENSITY.sum() == 1 -
@@ -918,42 +882,71 @@ def finalise_node_shape(conv, x_centers, b_centers):
 # ---------------------------------------------------------------------------
 
 def _tile_shapes(density_ds, t, pop, cls, kept_nodes, point_kernels_by_map_class, map_class,
-                 x_centers, b_centers, x_cell, h_x, h_b, b_edges, nfft, checked_node_indices=()):
+                 x_centers, b_centers, x_cell, h_x, h_b, b_edges, nfft, checked_node_indices=(),
+                 checked_pahc_keys=None):
     """One tile's own densities at every kept shape node, WRITTEN ONE
-    NODE AT A TIME into `density_ds[t, j]` (CODING_RULES.md 10a): holding
-    every kept node's finalised array for one tile before returning it
-    (as an earlier version of this function did) multiplies the working
-    set by `n_node`, which is exactly what drove PAHC's third axis past
-    the memory ceiling before it was retired (owner, 2026-09-05).
-    Writing straight into the pre-sized HDF5 dataset (safe from multiple
-    `prefer="threads"` workers: h5py serialises the underlying HDF5 calls
-    with its own global lock) means only ONE node's convolved array is
-    ever resident per tile, on top of the one raw histogram and its one
-    `rfft` (rule 8: the per-tile cost is one raw histogram, one `log10 B`
-    smoothing at the tile's own Silverman `h_b`, ONE forward FFT, plus one
-    small per-node kernel build and FFT/inverse along `log10 x` at the
-    tile's own `h_x` combined with the node's own kernel width, never per
-    star -- `nfft`, fixed for every node this tile evaluates, is what
-    keeps that per-node FFT cheap and bounded,
-    `apply_log_x_kernel_fft`'s own docstring).
-    `checked_node_indices` (tile 0 only, the report's own acceptance
-    checks -- module docstring) keeps a COPY of just those few nodes'
-    arrays, not a second `n_node`-sized accumulator: an earlier version
-    of this streaming rewrite kept every node's array "for tile 0" to
-    feed the checks and reintroduced the exact blow-up this function
-    exists to avoid (owner, 2026-09-05). PAHC additionally returns its
-    own tile's `(Q0_MEAN, Q0_STD)` (brief item 3), node-independent."""
-    raw = class_raw_hist(pop, t, cls, x_centers, b_centers)
+    NODE (PAHC: one node and limit) AT A TIME into `density_ds[t, j]`
+    (CODING_RULES.md 10a): holding every kept node's finalised array for
+    one tile before returning it (as an earlier version of this function
+    did) multiplies the working set by `n_node`, which is exactly what
+    drove PAHC's third axis past the memory ceiling before it was retired
+    (owner, 2026-09-05). Writing straight into the pre-sized HDF5 dataset
+    (safe from multiple `prefer="threads"` workers: h5py serialises the
+    underlying HDF5 calls with its own global lock) means only ONE node's
+    (PAHC: one node-and-limit's) convolved array is ever resident per
+    tile, on top of the raw histogram(s) and their own `rfft` (rule 8:
+    the per-tile cost is one raw histogram, one `log10 B` smoothing at
+    the tile's own Silverman `h_b`, ONE forward FFT -- PAHC: one PER
+    LIMIT, `IMPLEMENTATION.md` section 3's own "eight times" cost --
+    plus one small per-node kernel build and FFT/inverse along `log10 x`
+    at the tile's own `h_x` combined with the node's own kernel width,
+    never per star -- `nfft`, fixed for every node this tile evaluates,
+    is what keeps that per-node FFT cheap and bounded,
+    `apply_log_x_kernel_fft`'s own docstring). `checked_node_indices`
+    (PAHC: `checked_pahc_keys`, `(node, limit)` pairs) -- tile 0 only, the
+    report's own acceptance checks -- keeps a COPY of just those few
+    arrays, not a second `n_node`- (or `n_node * n_limit`-) sized
+    accumulator: an earlier version of this streaming rewrite kept every
+    node's array "for tile 0" to feed the checks and reintroduced the
+    exact blow-up this function exists to avoid (owner, 2026-09-05)."""
     m_b = gaussian_smoothing_matrix(b_edges, h_b)
-    raw = apply_b_smoothing(m_b, raw).astype(np.float32, copy=False)
     n_x = x_centers.size
-    raw_fft = rfft(raw, n=nfft, axis=0)
     point_kernels = point_kernels_by_map_class[map_class]
     n_node = len(kept_nodes)
-    tail_x_lo, tail_x_hi, tail_b_lo, tail_b_hi, mass_outside = (
-        np.empty(n_node) for _ in range(5))
     sum_identity_dev = 0.0
     checked_density = {}
+
+    if cls == "pahc":
+        tile = pop["tiles"][t]
+        n_limit = pop["limit8_grid_mjy"].size
+        raw_ffts = []
+        for k in range(n_limit):
+            raw_k = pahc_raw_hist_for_limit(tile, k, x_centers, b_centers)
+            raw_k = apply_b_smoothing(m_b, raw_k).astype(np.float32, copy=False)
+            raw_ffts.append(rfft(raw_k, n=nfft, axis=0))
+        tail_x_lo, tail_x_hi, tail_b_lo, tail_b_hi, mass_outside = (
+            np.empty((n_node, n_limit)) for _ in range(5))
+        for j, (point_arr, point_off, kernel_width_dex) in enumerate(point_kernels):
+            kernel_arr, offset_lo, _ = node_log_x_kernel(point_arr, point_off, kernel_width_dex,
+                                                          x_cell, h_x)
+            for k in range(n_limit):
+                conv = apply_log_x_kernel_fft(raw_ffts[k], nfft, n_x, kernel_arr, offset_lo)
+                d, sxlo, sxhi, slo, shi, mo = finalise_node_shape(conv, x_centers, b_centers)
+                density_ds[t, j, k] = d
+                if t == 0 and checked_pahc_keys and (j, k) in checked_pahc_keys:
+                    checked_density[(j, k)] = d.copy()
+                tail_x_lo[j, k], tail_x_hi[j, k], tail_b_lo[j, k], tail_b_hi[j, k], \
+                    mass_outside[j, k] = sxlo, sxhi, slo, shi, mo
+                dev = abs(float(d.astype(np.float64).sum()) + mo - 1.0)
+                sum_identity_dev = max(sum_identity_dev, dev)
+        return (tail_x_lo, tail_x_hi, tail_b_lo, tail_b_hi, mass_outside,
+               sum_identity_dev, checked_density)
+
+    raw = class_raw_hist(pop, t, cls, x_centers, b_centers)
+    raw = apply_b_smoothing(m_b, raw).astype(np.float32, copy=False)
+    raw_fft = rfft(raw, n=nfft, axis=0)
+    tail_x_lo, tail_x_hi, tail_b_lo, tail_b_hi, mass_outside = (
+        np.empty(n_node) for _ in range(5))
     for j, (point_arr, point_off, kernel_width_dex) in enumerate(point_kernels):
         kernel_arr, offset_lo, _ = node_log_x_kernel(point_arr, point_off, kernel_width_dex,
                                                       x_cell, h_x)
@@ -966,11 +959,8 @@ def _tile_shapes(density_ds, t, pop, cls, kept_nodes, point_kernels_by_map_class
             sxlo, sxhi, slo, shi, mo)
         dev = abs(float(d.astype(np.float64).sum()) + mo - 1.0)
         sum_identity_dev = max(sum_identity_dev, dev)
-    q0_mean = q0_std = None
-    if cls == "pahc":
-        q0_mean, q0_std = pahc_q0_bin_stats(pop["tiles"][t], b_centers, b_edges)
     return (tail_x_lo, tail_x_hi, tail_b_lo, tail_b_hi, mass_outside,
-           sum_identity_dev, checked_density, q0_mean, q0_std)
+           sum_identity_dev, checked_density)
 
 
 def build_region_shared(config, region, kern, candidate_a, kernel_cache):
@@ -1093,19 +1083,42 @@ def build_region_class(config, region, cls, shared, candidate_a, kern, kernel_ca
                                   for mc in distinct_map_classes}
 
     # the report's acceptance checks (`_mean_moment_check`, `_grid_
-    # centre_exact_check`, PAHC's `_pahc_collapse_check`) each read
-    # exactly one shape node's array for tile 0 -- `checked_node_indices`
-    # tells `_tile_shapes` to keep a copy of only those, not every kept
-    # node's array for tile 0 (module docstring).
+    # centre_exact_check`, PAHC's `_pahc_between_check`) each read a
+    # handful of (tile 0, node[, limit]) arrays -- `checked_node_indices`
+    # (PAHC: `checked_pahc_keys`) tells `_tile_shapes` to keep a copy of
+    # only those, not every kept node's array for tile 0 (module
+    # docstring).
     node_idx_moment = int(np.argmin(np.abs(shape_nodes - pop["tiles"][0]["a_tile"])))
     node_idx_exact = 0
     checked_node_indices = frozenset((node_idx_moment, node_idx_exact))
 
-    path, density_checks, sum_identity_dev, tails, mass_outside, q0_stats = (
+    checked_pahc_keys = None
+    limit_lo_idx = limit_hi_idx = None
+    f_lim8_median = None
+    if cls == "pahc":
+        # `IMPLEMENTATION.md` section 3: a source's own 8um limit brackets
+        # two of the eight stored limit grids; the region's own median
+        # real-source limit (`catalog.limits.limits`, the same per-source
+        # array the population product's own grid is percentiled from)
+        # exercises that bracket for the report's own interpolation check.
+        from sesnaimpute.catalog import limits as limits_module
+        from sesnaimpute.prior import star_population
+        f_lim_i4 = limits_module.limits(config, region)[:, star_population.IDX_I4]
+        f_lim8_median = float(np.median(f_lim_i4))
+        limit_grid = pop["limit8_grid_mjy"]
+        lo_arr, _ = column_grid.bracket(
+            np.array([np.log10(f_lim8_median)]), np.log10(limit_grid))
+        limit_lo_idx = int(lo_arr[0])
+        limit_hi_idx = min(limit_lo_idx + 1, limit_grid.size - 1)
+        checked_pahc_keys = frozenset(((node_idx_moment, limit_lo_idx),
+                                       (node_idx_exact, limit_lo_idx),
+                                       (node_idx_exact, limit_hi_idx)))
+
+    path, density_checks, sum_identity_dev, tails, mass_outside = (
         _write_region_class_streaming(
             config, region, cls, pop, n_tile, map_classes, shape_nodes, x_edges, b_edges,
             point_kernels_by_map_class, x_centers, b_centers, tile_bw, config.n_jobs,
-            checked_node_indices, nfft))
+            checked_node_indices, nfft, checked_pahc_keys))
 
     result = dict(
         region=region, cls=cls, shape_nodes=shape_nodes, x_edges=x_edges, b_edges=b_edges,
@@ -1117,29 +1130,9 @@ def build_region_class(config, region, cls, shared, candidate_a, kern, kernel_ca
         path=path, fine_cell=fine_cell,
         h_x_tiles=np.array([bw["h_x"] for bw in tile_bw]),
         h_b_tiles=np.array([bw["h_b"] for bw in tile_bw]),
+        pahc_limit_lo_idx=limit_lo_idx, pahc_limit_hi_idx=limit_hi_idx,
+        pahc_limit_median_mjy=f_lim8_median,
     )
-
-    if cls == "pahc":
-        # brief item 3: validate the Gaussian-conditional collapse at the
-        # region's median 8um limit against a direct histogram of the
-        # population weighted by the measured P_PAHC column, both
-        # smoothed the same way (tile 0, the node nearest its own column).
-        from sesnaimpute.prior import star_population
-        pop_path = config_module.product_path(config, "bms", "star", "population",
-                                              "tile", region=region)
-        with h5py.File(pop_path, "r") as f:
-            p_pahc_median = f["tile_0"]["P_PAHC"][
-                :, star_population.PAHC_LIMIT_MEDIAN_INDEX].astype(np.float64)
-        f_lim8_median = float(pop["limit8_grid_mjy"][star_population.PAHC_LIMIT_MEDIAN_INDEX])
-        point_arr, point_off, kw = point_kernels_by_map_class[map_class0][node_idx_moment]
-        kernel_arr, offset_lo, _ = node_log_x_kernel(point_arr, point_off, kw, x_cell, h_x0)
-        curve = pahc_curve.read(config)
-        q0_mean0, q0_std0 = q0_stats[0][0], q0_stats[1][0]
-        result["pahc_collapse_rel_l1"] = _pahc_collapse_check(
-            pop, 0, density_checks[node_idx_moment].astype(np.float64), p_pahc_median,
-            f_lim8_median, x_centers, b_centers, kernel_arr, offset_lo, m_b0, curve,
-            q0_mean0, q0_std0)
-
     return result
 
 
@@ -1148,29 +1141,30 @@ def build_region_class(config, region, cls, shared, candidate_a, kern, kernel_ca
 # HDF5 file's DENSITY dataset -- the one array whose full-survey size
 # matters -- is pre-sized and filled tile by tile; only `config.n_jobs`
 # tiles' own density arrays are ever resident together, never all of
-# `n_tile`. The tail scales, `MASS_OUTSIDE`, and PAHC's `Q0_MEAN`/`Q0_STD`
-# are all `(n_tile, n_node)` or `(n_tile, n_b)` scalars per class --
-# negligible next to `DENSITY` -- and are still assembled as ordinary
-# in-memory arrays.
+# `n_tile`. The tail scales and `MASS_OUTSIDE` are `(n_tile, n_node)`
+# (PAHC: `(n_tile, n_node, n_limit)`) scalars per class -- negligible next
+# to `DENSITY` -- and are still assembled as ordinary in-memory arrays.
 # ---------------------------------------------------------------------------
 
 def _write_region_class_streaming(config, region, cls, pop, n_tile, map_classes, shape_nodes,
                                   x_edges, b_edges, point_kernels_by_map_class,
                                   x_centers, b_centers, tile_bw, n_jobs,
-                                  checked_node_indices, nfft):
+                                  checked_node_indices, nfft, checked_pahc_keys=None):
     n_node = shape_nodes.size
     grid_shape = (x_centers.size, b_centers.size)
     x_cell = float(np.mean(np.diff(x_edges)))
     path = config_module.product_path(config, "bms", cls, "shape", "tile", region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
-    tail_x_lo = np.empty((n_tile, n_node))
-    tail_x_hi = np.empty((n_tile, n_node))
-    tail_b_lo = np.empty((n_tile, n_node))
-    tail_b_hi = np.empty((n_tile, n_node))
-    mass_outside = np.empty((n_tile, n_node))
-    q0_mean_all = np.empty((n_tile, b_centers.size)) if cls == "pahc" else None
-    q0_std_all = np.empty((n_tile, b_centers.size)) if cls == "pahc" else None
+    is_pahc = cls == "pahc"
+    n_limit = int(pop["limit8_grid_mjy"].size) if is_pahc else None
+    tail_shape = (n_tile, n_node, n_limit) if is_pahc else (n_tile, n_node)
+
+    tail_x_lo = np.empty(tail_shape)
+    tail_x_hi = np.empty(tail_shape)
+    tail_b_lo = np.empty(tail_shape)
+    tail_b_hi = np.empty(tail_shape)
+    mass_outside = np.empty(tail_shape)
     density_checks = {}
     sum_identity_dev = 0.0
 
@@ -1183,20 +1177,27 @@ def _write_region_class_streaming(config, region, cls, pop, n_tile, map_classes,
         f.create_dataset("LOG10_B_EDGES", data=b_edges.astype(np.float64))
         f.create_dataset("TILE_ID", data=np.arange(n_tile, dtype=np.int64))
         f.create_dataset("MAP_CLASS", data=np.array(map_classes, dtype="S8"))
-        # one HDF5 chunk per (tile, node) slice: `_tile_shapes` writes one
-        # node at a time, and a chunk any bigger (e.g. a whole tile) would
-        # force HDF5 to hold the WHOLE chunk's worth of nodes in memory
-        # while it fills in one slice at a time -- reintroducing the same
-        # `n_node`-times blow-up one level down, inside the HDF5 library.
+        # one HDF5 chunk per (tile, node[, limit]) slice: `_tile_shapes`
+        # writes one such slice at a time, and a chunk any bigger (e.g. a
+        # whole tile) would force HDF5 to hold the WHOLE chunk's worth in
+        # memory while it fills in one slice at a time -- reintroducing
+        # the same blow-up one level down, inside the HDF5 library.
         # gzip level 1 with the byte-shuffle filter (rule 8, timed): level
         # 4 on order-50 MB (tile, node) chunks measured minutes per region
         # on real data, dominated by compression, not I/O; level 1 plus
         # shuffle (which reorders a float array's bytes so gzip sees long
         # runs) is markedly faster on this mostly-smooth, many-zero data
         # for a comparable ratio.
+        if is_pahc:
+            f.create_dataset("LIMIT8_GRID_MJY", data=pop["limit8_grid_mjy"].astype(np.float64))
+            density_shape = (n_tile, n_node, n_limit) + grid_shape
+            chunks = (1, 1, 1) + grid_shape
+        else:
+            density_shape = (n_tile, n_node) + grid_shape
+            chunks = (1, 1) + grid_shape
         density_ds = f.create_dataset(
-            "DENSITY", shape=(n_tile, n_node) + grid_shape, dtype=np.float32,
-            chunks=(1, 1) + grid_shape, shuffle=True, compression="gzip", compression_opts=1)
+            "DENSITY", shape=density_shape, dtype=np.float32,
+            chunks=chunks, shuffle=True, compression="gzip", compression_opts=1)
 
         for batch_start in range(0, n_tile, n_jobs):
             batch = range(batch_start, min(batch_start + n_jobs, n_tile))
@@ -1205,16 +1206,14 @@ def _write_region_class_streaming(config, region, cls, pop, n_tile, map_classes,
                                       point_kernels_by_map_class, map_classes[t],
                                       x_centers, b_centers, x_cell,
                                       tile_bw[t]["h_x"], tile_bw[t]["h_b"], b_edges,
-                                      nfft, checked_node_indices)
+                                      nfft, checked_node_indices, checked_pahc_keys)
                 for t in batch)
-            for t, (sxlo, sxhi, slo, shi, mo, dev, checked, q0m, q0s) in zip(batch, batch_results):
+            for t, (sxlo, sxhi, slo, shi, mo, dev, checked) in zip(batch, batch_results):
                 tail_x_lo[t], tail_x_hi[t], tail_b_lo[t], tail_b_hi[t], mass_outside[t] = (
                     sxlo, sxhi, slo, shi, mo)
                 sum_identity_dev = max(sum_identity_dev, dev)
                 if checked:
                     density_checks.update(checked)
-                if cls == "pahc":
-                    q0_mean_all[t], q0_std_all[t] = q0m, q0s
             del batch_results
 
         f.create_dataset("TAIL_X_LO_SCALE", data=tail_x_lo)
@@ -1222,13 +1221,9 @@ def _write_region_class_streaming(config, region, cls, pop, n_tile, map_classes,
         f.create_dataset("TAIL_B_LO_SCALE", data=tail_b_lo)
         f.create_dataset("TAIL_B_HI_SCALE", data=tail_b_hi)
         f.create_dataset("MASS_OUTSIDE", data=mass_outside)
-        if cls == "pahc":
-            f.create_dataset("Q0_MEAN", data=q0_mean_all)
-            f.create_dataset("Q0_STD", data=q0_std_all)
 
-    q0_stats = (q0_mean_all, q0_std_all) if cls == "pahc" else None
     return (path, density_checks, sum_identity_dev,
-           (tail_x_lo, tail_x_hi, tail_b_lo, tail_b_hi), mass_outside, q0_stats)
+           (tail_x_lo, tail_x_hi, tail_b_lo, tail_b_hi), mass_outside)
 
 
 # ---------------------------------------------------------------------------
@@ -1241,11 +1236,16 @@ class ClassShape(object):
     bracketing shape nodes blended in `log A`, BICUBIC in `(log10 x,
     log10 B)` inside the grid (brief item 2), the analytic tail outside
     on either axis, `a < 0` (or `a == 0`, which has no `log10 x`) mapped
-    to the low-`x` tail or zero. Vectorised over sources (rule 8)."""
+    to the low-`x` tail or zero. PAHC additionally carries a limit grid
+    (`limit_grid_mjy`, `IMPLEMENTATION.md` section 3, amended 2026-09-05):
+    a source's own 8 micron limit brackets two of the eight stored limit
+    grids and blends between them linearly in `log10` limit, the same
+    bracket-and-blend rule the shape nodes use in `log A` -- the four
+    (node, limit) corners are evaluated and bilinearly combined.
+    Vectorised over sources (rule 8)."""
 
     def __init__(self, cls, shape_nodes, x_edges, b_edges, density, tail_x_lo, tail_x_hi,
-                 tail_b_lo, tail_b_hi, mass_outside, q0_mean=None, q0_std=None,
-                 pahc_curve_fn=None):
+                 tail_b_lo, tail_b_hi, mass_outside, limit_grid_mjy=None):
         self.cls = cls
         self.shape_nodes = np.asarray(shape_nodes, dtype=np.float64)
         self.x_edges = np.asarray(x_edges, dtype=np.float64)  # log10 x
@@ -1258,41 +1258,36 @@ class ClassShape(object):
         self.tail_b_lo = np.asarray(tail_b_lo, dtype=np.float64)
         self.tail_b_hi = np.asarray(tail_b_hi, dtype=np.float64)
         self.mass_outside = np.asarray(mass_outside, dtype=np.float64)
-        # PAHC only (brief item 3): the tile's per-log10-B-cell log10 q0
-        # conditional, (n_tile, n_b), node-independent.
-        self.q0_mean = None if q0_mean is None else np.asarray(q0_mean, dtype=np.float64)
-        self.q0_std = None if q0_std is None else np.asarray(q0_std, dtype=np.float64)
-        self._curve = pahc_curve_fn
+        # PAHC only: log10 of the eight stored 8um completeness-limit
+        # grid values (`IMPLEMENTATION.md` section 3), sorted ascending.
+        self.limit_log = (None if limit_grid_mjy is None else
+                          np.log10(np.asarray(limit_grid_mjy, dtype=np.float64)))
 
-    def _pahc_b_factor(self, tile_idx, f_lim8):
-        """PAHC only (brief item 3): the per-`log10 B`-cell weight, the
-        measured contamination curve integrated against this cell's own
-        `log10 q0` Gaussian by the fixed Gauss-Hermite rule
-        (`_gauss_hermite_pahc_factor`), at this source's own 8um limit."""
-        return _gauss_hermite_pahc_factor(self._curve, self.q0_mean[tile_idx],
-                                          self.q0_std[tile_idx], f_lim8)
+    def _slab(self, tile_idx, node_idx, limit_idx):
+        """The stored `(log10 x, log10 B)` array at one (tile, node[,
+        limit]) -- `limit_idx` is `None` for STAR/AGB, an integer index
+        into the limit grid for PAHC."""
+        if limit_idx is None:
+            return self.density_table[tile_idx, node_idx]
+        return self.density_table[tile_idx, node_idx, limit_idx]
 
-    def _slab(self, tile_idx, node_idx, f_lim8):
-        base = self.density_table[tile_idx, node_idx]
-        if self.q0_mean is None:
-            return base
-        factor = self._pahc_b_factor(tile_idx, f_lim8)
-        weighted = base * factor[None, :]
-        total = weighted.sum()
-        return weighted / total if total > 0.0 else weighted
-
-    def _eval_interior(self, tile_ids, node_idx, log_x, logb, f_lim8):
+    def _eval_interior(self, tile_ids, node_idx, log_x, logb, limit_idx):
         n = log_x.shape[0]
         out = np.empty(n, dtype=np.float64)
-        # grouped by (tile, node): a query slab is built, and its bicubic
-        # spline fitted, once per group, not per source (rule 8/9).
-        keys = tile_ids.astype(np.int64) * (self.shape_nodes.size + 1) + node_idx
+        # grouped by (tile, node[, limit]): a query slab is built, and
+        # its bicubic spline fitted, once per group, not per source
+        # (rule 8/9).
+        if limit_idx is None:
+            keys = tile_ids.astype(np.int64) * (self.shape_nodes.size + 1) + node_idx
+        else:
+            keys = ((tile_ids.astype(np.int64) * (self.shape_nodes.size + 1) + node_idx)
+                    * (self.limit_log.size + 1) + limit_idx)
         for key in np.unique(keys):
             sel = keys == key
             t_i = int(tile_ids[sel][0])
             n_i = int(node_idx[sel][0])
-            lim = float(f_lim8[sel][0]) if f_lim8 is not None else None
-            slab = self._slab(t_i, n_i, lim)
+            l_i = int(limit_idx[sel][0]) if limit_idx is not None else None
+            slab = self._slab(t_i, n_i, l_i)
             spline = RectBivariateSpline(self.x_centers, self.b_centers, slab,
                                          kx=BICUBIC_DEGREE, ky=BICUBIC_DEGREE)
             out[sel] = spline.ev(log_x[sel], logb[sel])
@@ -1301,11 +1296,12 @@ class ClassShape(object):
         # a tuned threshold).
         return np.clip(out, 0.0, None)
 
-    def _eval_node(self, tile_ids, node_idx, log_x, logb, f_lim8):
-        """One shape node's value, blending the interior bilinear read
-        with the declared analytic tail beyond either `log10 x` edge or
-        either `log10 B` edge (`finalise_node_shape`)."""
-        interior = self._eval_interior(tile_ids, node_idx, log_x, logb, f_lim8)
+    def _eval_node(self, tile_ids, node_idx, log_x, logb, limit_idx):
+        """One shape node's (PAHC: one shape-node-and-limit-grid's) value,
+        blending the interior bicubic read with the declared analytic
+        tail beyond either `log10 x` edge or either `log10 B` edge
+        (`finalise_node_shape`)."""
+        interior = self._eval_interior(tile_ids, node_idx, log_x, logb, limit_idx)
         x_lo = log_x < self.x_edges[0]
         x_hi = log_x > self.x_edges[-1]
         b_lo = logb < self.b_edges[0]
@@ -1314,11 +1310,13 @@ class ClassShape(object):
             return interior
         edge_x = np.clip(log_x, self.x_edges[0], self.x_edges[-1])
         edge_b = np.clip(logb, self.b_edges[0], self.b_edges[-1])
-        edge_val = self._eval_interior(tile_ids, node_idx, edge_x, edge_b, f_lim8)
-        txlo = self.tail_x_lo[tile_ids, node_idx]
-        txhi = self.tail_x_hi[tile_ids, node_idx]
-        tblo = self.tail_b_lo[tile_ids, node_idx]
-        tbhi = self.tail_b_hi[tile_ids, node_idx]
+        edge_val = self._eval_interior(tile_ids, node_idx, edge_x, edge_b, limit_idx)
+        if limit_idx is None:
+            idx = (tile_ids, node_idx)
+        else:
+            idx = (tile_ids, node_idx, limit_idx)
+        txlo, txhi = self.tail_x_lo[idx], self.tail_x_hi[idx]
+        tblo, tbhi = self.tail_b_lo[idx], self.tail_b_hi[idx]
         out = interior.copy()
         out = np.where(x_lo, edge_val * np.exp(txlo * (log_x - self.x_edges[0])), out)
         out = np.where(x_hi & ~x_lo, edge_val * np.exp(txhi * (log_x - self.x_edges[-1])), out)
@@ -1331,15 +1329,15 @@ class ClassShape(object):
     def density(self, a, log10_b, tile_ids, a_col, f_lim8=None):
         """`density(a, log10_b, tile_ids, a_col[, f_lim8])`
         (`IMPLEMENTATION.md` section 3): `x = a/a_col` per source,
-        `log10 x`, the two bracketing shape nodes blended in `log A`,
+        `log10 x`, the two bracketing shape nodes blended in `log A`
+        (PAHC: crossed with the two bracketing limit grids, `f_lim8`
+        this source's own 8 micron limit, blended in `log10` limit),
         `a < 0` mapped to zero (`a == 0`, having no `log10 x`, reads as
         the declared low-`x` tail's own limit)."""
         a = np.asarray(a, dtype=np.float64)
         log10_b = np.asarray(log10_b, dtype=np.float64)
         a_col = np.asarray(a_col, dtype=np.float64)
         tile_ids = np.asarray(tile_ids, dtype=np.int64)
-        f_lim8_arr = None if f_lim8 is None else np.broadcast_to(
-            np.asarray(f_lim8, dtype=np.float64), a.shape)
         ok = a >= 0.0
         x_lin = np.zeros_like(a)
         x_lin[ok] = a[ok] / a_col[ok]
@@ -1350,12 +1348,24 @@ class ClassShape(object):
                          self.x_edges[0] - 1.0e3)
 
         log_nodes = np.log(self.shape_nodes)
-        i_lo, t = column_grid.bracket(np.log(a_col), log_nodes)
+        i_lo, t_node = column_grid.bracket(np.log(a_col), log_nodes)
         i_hi = np.minimum(i_lo + 1, self.shape_nodes.size - 1)
 
-        val_lo = self._eval_node(tile_ids, i_lo, log_x, log10_b, f_lim8_arr)
-        val_hi = self._eval_node(tile_ids, i_hi, log_x, log10_b, f_lim8_arr)
-        out = (1.0 - t) * val_lo + t * val_hi
+        if self.limit_log is None:
+            val_lo = self._eval_node(tile_ids, i_lo, log_x, log10_b, None)
+            val_hi = self._eval_node(tile_ids, i_hi, log_x, log10_b, None)
+        else:
+            log_f = np.broadcast_to(
+                np.log10(np.asarray(f_lim8, dtype=np.float64)), a.shape)
+            m_lo, t_limit = column_grid.bracket(log_f, self.limit_log)
+            m_hi = np.minimum(m_lo + 1, self.limit_log.size - 1)
+            v_lo_lo = self._eval_node(tile_ids, i_lo, log_x, log10_b, m_lo)
+            v_lo_hi = self._eval_node(tile_ids, i_lo, log_x, log10_b, m_hi)
+            v_hi_lo = self._eval_node(tile_ids, i_hi, log_x, log10_b, m_lo)
+            v_hi_hi = self._eval_node(tile_ids, i_hi, log_x, log10_b, m_hi)
+            val_lo = (1.0 - t_limit) * v_lo_lo + t_limit * v_lo_hi
+            val_hi = (1.0 - t_limit) * v_hi_lo + t_limit * v_hi_hi
+        out = (1.0 - t_node) * val_lo + t_node * val_hi
         out[~ok] = 0.0
         return out
 
@@ -1379,12 +1389,9 @@ def read(config, region, cls):
         tail_b_lo = f["TAIL_B_LO_SCALE"][:]
         tail_b_hi = f["TAIL_B_HI_SCALE"][:]
         mass_outside = f["MASS_OUTSIDE"][:]
-        q0_mean = f["Q0_MEAN"][:] if "Q0_MEAN" in f else None
-        q0_std = f["Q0_STD"][:] if "Q0_STD" in f else None
-    curve_fn = pahc_curve.read(config) if cls == "pahc" else None
+        limit_grid_mjy = f["LIMIT8_GRID_MJY"][:] if "LIMIT8_GRID_MJY" in f else None
     return ClassShape(cls, shape_nodes, x_edges, b_edges, density, tail_x_lo, tail_x_hi,
-                      tail_b_lo, tail_b_hi, mass_outside, q0_mean=q0_mean, q0_std=q0_std,
-                      pahc_curve_fn=curve_fn)
+                      tail_b_lo, tail_b_hi, mass_outside, limit_grid_mjy=limit_grid_mjy)
 
 
 # ---------------------------------------------------------------------------
@@ -1408,8 +1415,10 @@ def _report(result):
 def _mean_moment_check(config, region, cls, result, kern):
     """Acceptance (brief): the `log10 x`-marginal's mean at a shape node
     equals `E[log10 r] + mean(log10 u)` (module docstring's algebraic
-    identity, `log x = log r + log u`) within 1e-3 dex -- measured on the
-    first tile, at the node nearest the tile's own column."""
+    identity, `log x = log r + log u`) -- measured on the first tile, at
+    the node nearest the tile's own column (PAHC: at the stored limit
+    grid bracketing the region's own median source limit, so the
+    checked slab is one this module actually keeps)."""
     pop = result["pop"]
     tile0 = pop["tiles"][0]
     map_class0 = result["map_classes"][0]
@@ -1421,16 +1430,21 @@ def _mean_moment_check(config, region, cls, result, kern):
 
     if cls == "star":
         w, log_u = tile0["w_star"], tile0["log10_u"]
+        key = node_idx
     elif cls == "agb":
         ev = tile0["is_evolved"]
         w, log_u = tile0["w_agb"][ev], tile0["log10_u"][ev]
+        key = node_idx
     else:
-        w, log_u = tile0["w"], tile0["log10_u"]
+        limit_idx = result["pahc_limit_lo_idx"]
+        w = tile0["w"] * tile0["p_pahc"][:, limit_idx]
+        log_u = tile0["log10_u"]
+        key = (node_idx, limit_idx)
     mean_log_u = float(np.sum(w * log_u) / np.sum(w)) if w.sum() > 0 else float("nan")
     expected = e_log_r + mean_log_u
 
     x_centers = 0.5 * (result["x_edges"][:-1] + result["x_edges"][1:])
-    d = result["density_checks"][node_idx]
+    d = result["density_checks"][key]
     x_marg = d.sum(axis=1)
     measured = float(np.sum(x_marg * x_centers) / np.sum(x_marg)) if x_marg.sum() > 0 else float("nan")
     dev = abs(measured - expected)
@@ -1440,69 +1454,110 @@ def _mean_moment_check(config, region, cls, result, kern):
 def _grid_centre_exact_check(result):
     """Acceptance (brief): the evaluator at a grid centre, with a source
     whose `a_col` equals a shape node, reproduces the stored value
-    exactly. Built from `density_checks[node_idx_exact]`, the ONE node's
-    array kept for tile 0 (module docstring) -- not the whole node axis,
-    which `_write_region_class_streaming` never keeps resident. A second,
-    duplicated dummy node gives `column_grid.bracket` a valid span; the
-    query's `a_col` sits exactly on the first node, so the duplicate's
+    exactly (PAHC additionally: at a source's own 8um limit equal to one
+    of the eight stored limit grids). Built from a single cached
+    `density_checks` array for tile 0 (module docstring) -- not the whole
+    node (or node x limit) axis, which `_write_region_class_streaming`
+    never keeps resident. A second, duplicated dummy node (PAHC: also a
+    duplicated dummy limit) gives `column_grid.bracket` a valid span; the
+    query sits exactly on the first of each pair, so the duplicate's
     interpolation weight is always zero."""
     shape_nodes, x_edges, b_edges = result["shape_nodes"], result["x_edges"], result["b_edges"]
     node_idx = result["node_idx_exact"]
-    d = result["density_checks"][node_idx]
     is_pahc = result["cls"] == "pahc"
     a_node = float(shape_nodes[node_idx])
     shape_nodes_pair = np.array([a_node, a_node * (1.0 + 1.0e-9)])
-    density_pair = np.stack([d, d])[np.newaxis]  # (1 tile, 2 node, n_x, n_b)
-    tx_lo = np.full((1, 2), result["tail_x_lo"][0, node_idx])
-    tx_hi = np.full((1, 2), result["tail_x_hi"][0, node_idx])
-    tb_lo = np.full((1, 2), result["tail_b_lo"][0, node_idx])
-    tb_hi = np.full((1, 2), result["tail_b_hi"][0, node_idx])
-    mo = np.full((1, 2), result["mass_outside"][0, node_idx])
-    # a neutral PAHC conditional (mean/std = 0, a curve that is always 1)
-    # makes the per-cell factor exactly 1 everywhere, so the check
-    # measures the SAME bicubic-read-reproduces-the-knot identity as
-    # STAR/AGB, undiluted by the q0 weighting (brief item 3 is checked
-    # separately, `_pahc_collapse_check`).
-    q0_mean = np.zeros((1, d.shape[1])) if is_pahc else None
-    q0_std = np.zeros((1, d.shape[1])) if is_pahc else None
-    curve_fn = (lambda lq: np.ones_like(lq)) if is_pahc else None
+
+    if is_pahc:
+        limit_idx = result["pahc_limit_lo_idx"]
+        d = result["density_checks"][(node_idx, limit_idx)]
+        limit_val = float(result["pop"]["limit8_grid_mjy"][limit_idx])
+        limit_grid_pair = np.array([limit_val, limit_val * (1.0 + 1.0e-9)])
+        density_pair = np.empty((1, 2, 2) + d.shape, dtype=np.float32)
+        density_pair[0, :, :] = d
+        tx_lo = np.full((1, 2, 2), result["tail_x_lo"][0, node_idx, limit_idx])
+        tx_hi = np.full((1, 2, 2), result["tail_x_hi"][0, node_idx, limit_idx])
+        tb_lo = np.full((1, 2, 2), result["tail_b_lo"][0, node_idx, limit_idx])
+        tb_hi = np.full((1, 2, 2), result["tail_b_hi"][0, node_idx, limit_idx])
+        mo = np.full((1, 2, 2), result["mass_outside"][0, node_idx, limit_idx])
+    else:
+        d = result["density_checks"][node_idx]
+        limit_grid_pair = None
+        density_pair = np.stack([d, d])[np.newaxis]  # (1 tile, 2 node, n_x, n_b)
+        tx_lo = np.full((1, 2), result["tail_x_lo"][0, node_idx])
+        tx_hi = np.full((1, 2), result["tail_x_hi"][0, node_idx])
+        tb_lo = np.full((1, 2), result["tail_b_lo"][0, node_idx])
+        tb_hi = np.full((1, 2), result["tail_b_hi"][0, node_idx])
+        mo = np.full((1, 2), result["mass_outside"][0, node_idx])
+
     shape = ClassShape(result["cls"], shape_nodes_pair, x_edges, b_edges, density_pair,
-                       tx_lo, tx_hi, tb_lo, tb_hi, mo, q0_mean=q0_mean, q0_std=q0_std,
-                       pahc_curve_fn=curve_fn)
+                       tx_lo, tx_hi, tb_lo, tb_hi, mo, limit_grid_mjy=limit_grid_pair)
     x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
     b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
     a_query = a_node * (10.0 ** x_centers)
     tile_ids = np.zeros(a_query.size, dtype=np.int64)
     a_col = np.full(a_query.size, a_node)
-    f_lim8 = np.full(a_query.size, 1.0) if is_pahc else None
+    f_lim8 = np.full(a_query.size, limit_val) if is_pahc else None
     got = shape.density(a_query, np.full(a_query.size, b_centers[0]), tile_ids, a_col,
                           f_lim8=f_lim8)
     expected = d[:, 0]
     return float(np.max(np.abs(got - expected)))
 
 
-def _pahc_collapse_check(pop, tile_idx, cls_density, p_pahc_col, f_lim8, x_centers, b_centers,
-                         kernel_arr, offset_lo, m_b, curve, q0_mean, q0_std):
-    """Acceptance (brief item 3, PAHC only): the read-time Gaussian-
-    conditional collapse of `log10 q0` against a direct histogram of the
-    population weighted by the measured `P_PAHC` column, BOTH smoothed by
-    the SAME `log10 B` Gaussian and the SAME node's `log10 x` kernel, so
-    the comparison isolates the Gaussian-conditional approximation from
-    the smoothing every node already gets ("the check tells whether the
-    approximation the owner accepted holds")."""
-    tile = pop["tiles"][tile_idx]
-    direct_raw = _cic_hist([tile["log10_u"], tile["log10_b_pahc"]], tile["w"] * p_pahc_col,
-                           [x_centers, b_centers])
-    direct_smoothed = apply_b_smoothing(m_b, direct_raw.astype(np.float32, copy=False))
-    direct_conv = apply_log_x_kernel(direct_smoothed, kernel_arr, offset_lo).astype(np.float64)
-    direct_total = float(direct_conv.sum())
-    direct = direct_conv / direct_total if direct_total > 0.0 else direct_conv
+def _pahc_between_check(config, region, result):
+    """Acceptance (brief, PAHC only): a read at the region's own median
+    source 8um limit lies between the two limit grids it brackets,
+    cell by cell -- convexity of the linear blend in `log10` limit
+    (`ClassShape.density`), at a column held exactly on a tabulated shape
+    node (a duplicated dummy pair, `_grid_centre_exact_check`'s own
+    trick) so only the limit axis is exercised. Built from the two REAL
+    limit grids `build_region_class` already cached for tile 0 at
+    `node_idx_exact` (`checked_pahc_keys`)."""
+    node_idx = result["node_idx_exact"]
+    i_lo, i_hi = result["pahc_limit_lo_idx"], result["pahc_limit_hi_idx"]
+    f_lim8_median = result["pahc_limit_median_mjy"]
+    limit_grid = result["pop"]["limit8_grid_mjy"]
+    d_lo = result["density_checks"][(node_idx, i_lo)]
+    d_hi = result["density_checks"][(node_idx, i_hi)]
 
-    factor = _gauss_hermite_pahc_factor(curve, q0_mean, q0_std, f_lim8)
-    collapsed = cls_density * factor[None, :]
-    collapsed_total = float(collapsed.sum())
-    collapsed = collapsed / collapsed_total if collapsed_total > 0.0 else collapsed
-    return _rel_l1(direct, collapsed)
+    shape_nodes, x_edges, b_edges = result["shape_nodes"], result["x_edges"], result["b_edges"]
+    a_node = float(shape_nodes[node_idx])
+    shape_nodes_pair = np.array([a_node, a_node * (1.0 + 1.0e-9)])
+    limit_grid_pair = np.array([float(limit_grid[i_lo]), float(limit_grid[i_hi])])
+    density_pair = np.empty((1, 2, 2) + d_lo.shape, dtype=np.float32)
+    density_pair[0, :, 0] = d_lo
+    density_pair[0, :, 1] = d_hi
+    tx_lo = np.stack([np.full((1, 2), result["tail_x_lo"][0, node_idx, i_lo]),
+                      np.full((1, 2), result["tail_x_lo"][0, node_idx, i_hi])], axis=-1)
+    tx_hi = np.stack([np.full((1, 2), result["tail_x_hi"][0, node_idx, i_lo]),
+                      np.full((1, 2), result["tail_x_hi"][0, node_idx, i_hi])], axis=-1)
+    tb_lo = np.stack([np.full((1, 2), result["tail_b_lo"][0, node_idx, i_lo]),
+                      np.full((1, 2), result["tail_b_lo"][0, node_idx, i_hi])], axis=-1)
+    tb_hi = np.stack([np.full((1, 2), result["tail_b_hi"][0, node_idx, i_lo]),
+                      np.full((1, 2), result["tail_b_hi"][0, node_idx, i_hi])], axis=-1)
+    mo = np.stack([np.full((1, 2), result["mass_outside"][0, node_idx, i_lo]),
+                   np.full((1, 2), result["mass_outside"][0, node_idx, i_hi])], axis=-1)
+
+    shape = ClassShape("pahc", shape_nodes_pair, x_edges, b_edges, density_pair,
+                       tx_lo, tx_hi, tb_lo, tb_hi, mo, limit_grid_mjy=limit_grid_pair)
+    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
+    a_query = a_node * (10.0 ** x_centers)
+    tile_ids = np.zeros(a_query.size, dtype=np.int64)
+    a_col = np.full(a_query.size, a_node)
+    f_lim8 = np.full(a_query.size, f_lim8_median)
+    got = shape.density(a_query, np.full(a_query.size, b_centers[0]), tile_ids, a_col,
+                          f_lim8=f_lim8)
+    lo_vals, hi_vals = d_lo[:, 0], d_hi[:, 0]
+    cell_lo = np.minimum(lo_vals, hi_vals)
+    cell_hi = np.maximum(lo_vals, hi_vals)
+    violation = np.maximum(cell_lo - got, got - cell_hi)
+    t_limit = float(np.clip(
+        (np.log10(f_lim8_median) - np.log10(limit_grid[i_lo]))
+        / (np.log10(limit_grid[i_hi]) - np.log10(limit_grid[i_lo])), 0.0, 1.0))
+    return dict(f_lim8_median=f_lim8_median, limit_lo_mjy=float(limit_grid[i_lo]),
+               limit_hi_mjy=float(limit_grid[i_hi]), t_limit=t_limit,
+               max_violation=float(np.max(violation)))
 
 
 def build(config, regions=None):
@@ -1535,7 +1590,20 @@ def build(config, regions=None):
             exact_dev = _grid_centre_exact_check(result)
             pahc_line = ""
             if cls == "pahc":
-                pahc_line = " pahc_collapse_rel_l1=%.2e" % result["pahc_collapse_rel_l1"]
+                # grid_centre_exact_max_dev above is measured AT a real
+                # limit-grid value (result["pahc_limit_lo_idx"]) for PAHC,
+                # so it already IS the "reproduces one of the eight grid
+                # values exactly" check; only the interpolation check is
+                # new here.
+                between = _pahc_between_check(config, region, result)
+                pahc_line = (
+                    " (grid_centre_exact measured at limit=%.4g mJy, grid index %d) "
+                    "pahc_median_between(f_lim8_median=%.4g mJy, bracket=[%.4g,%.4g] mJy, "
+                    "t=%.3f, max_violation=%.2e)"
+                    % (result["pop"]["limit8_grid_mjy"][result["pahc_limit_lo_idx"]],
+                       result["pahc_limit_lo_idx"], between["f_lim8_median"],
+                       between["limit_lo_mjy"], between["limit_hi_mjy"], between["t_limit"],
+                       between["max_violation"]))
             gr = result["grid_report"]
             print(
                 "star_shapes: %s/%s: bandwidth h_x(median)=%.4g h_b(median)=%.4g dex "
