@@ -393,14 +393,34 @@ def family_amplitude(config, region, cls, cond):
 # region's own simulated population, already on disk.
 # ---------------------------------------------------------------------------
 
-@numba.njit(cache=True, fastmath=True)
-def _bilinear_clamped(table, x_ladder, b_grid, x, b):
-    """`table(x, b)`, `table` an `(n_x, n_b)` grid on `x_ladder` (linear)
-    by `b_grid` (linear), bilinearly evaluated at one point, clamped at
-    either edge (module docstring's "clamped at the ladder's own ends",
-    departure 5 of the blessing page)."""
+def _b_bracket_arrays(logb, b_grid):
+    """`(ib, tb)`, each `(n_member,)`: every member's own linear bracket
+    on the class's fixed `b_grid` axis, computed ONCE per tile in plain
+    numpy. The brightness axis does not depend on the source or the
+    quadrature point, only on the member -- so this used to be
+    recomputed by a linear search inside the compiled loop's innermost
+    pass, once per (source, mixture component, quadrature point, member)
+    -- 16 times per member per source for nothing, since the answer never
+    changed. Hoisting it out here (profiled: this and the matching x-only
+    search below turned NGC 7129's STAR pass from 2.5 s to a fraction of
+    that) leaves the compiled loop only the `x` bracket, which DOES
+    change every quadrature draw."""
+    b_grid = np.asarray(b_grid, dtype=np.float64)
+    logb = np.clip(np.asarray(logb, dtype=np.float64), b_grid[0], b_grid[-1])
+    ib = np.clip(np.searchsorted(b_grid, logb) - 1, 0, b_grid.size - 2)
+    span = b_grid[ib + 1] - b_grid[ib]
+    tb = np.where(span > 0.0, (logb - b_grid[ib]) / np.where(span > 0.0, span, 1.0), 0.0)
+    return ib.astype(np.int64), tb.astype(np.float64)
+
+
+@numba.njit(cache=True, fastmath=True, inline="always")
+def _x_bracket(x_ladder, x):
+    """`(ix, tx)`: the linear bracket on `x_ladder`, clamped at either
+    end (module docstring's "clamped at the ladder's own ends", departure
+    5 of the blessing page) -- the one axis the direct sum's inner loop
+    still has to search, since `x = u_i . T/A_s` moves with every
+    quadrature draw."""
     n_x = x_ladder.shape[0]
-    n_b = b_grid.shape[0]
     if x < x_ladder[0]:
         x = x_ladder[0]
     elif x > x_ladder[n_x - 1]:
@@ -412,34 +432,17 @@ def _bilinear_clamped(table, x_ladder, b_grid, x, b):
             break
     span_x = x_ladder[ix + 1] - x_ladder[ix]
     tx = (x - x_ladder[ix]) / span_x if span_x > 0.0 else 0.0
-
-    if b < b_grid[0]:
-        b = b_grid[0]
-    elif b > b_grid[n_b - 1]:
-        b = b_grid[n_b - 1]
-    ib = n_b - 2
-    for j in range(n_b - 1):
-        if b < b_grid[j + 1]:
-            ib = j
-            break
-    span_b = b_grid[ib + 1] - b_grid[ib]
-    tb = (b - b_grid[ib]) / span_b if span_b > 0.0 else 0.0
-
-    v00 = table[ix, ib]
-    v10 = table[ix + 1, ib]
-    v01 = table[ix, ib + 1]
-    v11 = table[ix + 1, ib + 1]
-    return ((1.0 - tx) * (1.0 - tb) * v00 + tx * (1.0 - tb) * v10
-            + (1.0 - tx) * tb * v01 + tx * tb * v11)
+    return ix, tx
 
 
 @numba.njit(cache=True, parallel=True, fastmath=True)
-def _direct_sum_fixed_weight(weight, u, logb, eps, x_ladder, b_grid,
+def _direct_sum_fixed_weight(weight, u, ib, tb, eps, x_ladder,
                               w_mix, mu_mix, sigma_mix, gh_z, gh_w):
     """`(n_source,)`: `Sum_i weight_i . E_T[eps_s(u_i . T/A_s, B_i)]` for
-    every source in this batch, `weight`/`u`/`logb` the tile's own fixed
-    per-star arrays (STAR, AGB -- the same for every source of the tile,
-    module docstring)."""
+    every source in this batch, `weight`/`u`/`ib`/`tb` the tile's own
+    fixed per-star arrays (STAR, AGB -- the same for every source of the
+    tile, module docstring); `ib`/`tb` are `_b_bracket_arrays`'s
+    precomputed brightness bracket, one per member."""
     n_source = eps.shape[0]
     n_member = u.shape[0]
     n_q = gh_z.shape[0]
@@ -460,14 +463,22 @@ def _direct_sum_fixed_weight(weight, u, logb, eps, x_ladder, b_grid,
                     wi = weight[i]
                     if wi == 0.0:
                         continue
-                    comp += wi * _bilinear_clamped(eps_s, x_ladder, b_grid, u[i] * mult, logb[i])
+                    ix, tx = _x_bracket(x_ladder, u[i] * mult)
+                    ibi, tbi = ib[i], tb[i]
+                    v00 = eps_s[ix, ibi]
+                    v10 = eps_s[ix + 1, ibi]
+                    v01 = eps_s[ix, ibi + 1]
+                    v11 = eps_s[ix + 1, ibi + 1]
+                    val = ((1.0 - tx) * (1.0 - tbi) * v00 + tx * (1.0 - tbi) * v10
+                           + (1.0 - tx) * tbi * v01 + tx * tbi * v11)
+                    comp += wi * val
                 total += wk * gh_w[q] * comp
         out[s] = total
     return out
 
 
 @numba.njit(cache=True, parallel=True, fastmath=True)
-def _direct_sum_per_source_weight(weight, u, logb, eps, x_ladder, b_grid,
+def _direct_sum_per_source_weight(weight, u, ib, tb, eps, x_ladder,
                                    w_mix, mu_mix, sigma_mix, gh_z, gh_w):
     """As `_direct_sum_fixed_weight`, but `weight` is `(n_source,
     n_member)` -- PAHC's own `W_i . P(q_i(s))`, a different number per
@@ -494,9 +505,52 @@ def _direct_sum_per_source_weight(weight, u, logb, eps, x_ladder, b_grid,
                     wi = weight_s[i]
                     if wi == 0.0:
                         continue
-                    comp += wi * _bilinear_clamped(eps_s, x_ladder, b_grid, u[i] * mult, logb[i])
+                    ix, tx = _x_bracket(x_ladder, u[i] * mult)
+                    ibi, tbi = ib[i], tb[i]
+                    v00 = eps_s[ix, ibi]
+                    v10 = eps_s[ix + 1, ibi]
+                    v01 = eps_s[ix, ibi + 1]
+                    v11 = eps_s[ix + 1, ibi + 1]
+                    val = ((1.0 - tx) * (1.0 - tbi) * v00 + tx * (1.0 - tbi) * v10
+                           + (1.0 - tx) * tbi * v01 + tx * tbi * v11)
+                    comp += wi * val
                 total += wk * gh_w[q] * comp
         out[s] = total
+    return out
+
+
+@numba.njit(cache=True, parallel=True, fastmath=True)
+def _pahc_weight_matrix(log10_flim8, log10_q0, w_raw, x0, dx, curve_y):
+    """`(n_source, n_member)`: PAHC's own per-source member weight,
+    `w_raw_i . P(q_i(s))`, `q_i(s) = F_lim,8(s) . 10**LOG10_Q0_i` (module
+    docstring). `P(q)` is `prior.pahc_curve.read`'s curve read off its
+    OWN evenly-spaced `log10 q` grid (`x0`, the spacing `dx`, and
+    `curve_y`, the plateau already folded into its own end values so a
+    plain clamp reproduces the curve's `fill_value` exactly) by direct
+    index arithmetic, no search. One fused, parallel, compiled pass over
+    the whole `(n_source, n_member)` grid -- profiled: building this
+    weight matrix as a chain of separate numpy ops (bracket, two gathers,
+    two blends, then the `w_raw` multiply) was the batch's real cost, not
+    the direct sum's own compiled loop, each numpy pass paying for a full
+    memory round trip over an array this size."""
+    n_source = log10_flim8.shape[0]
+    n_member = log10_q0.shape[0]
+    n_bin = curve_y.shape[0]
+    out = np.empty((n_source, n_member), dtype=np.float64)
+    for s in numba.prange(n_source):
+        flim = log10_flim8[s]
+        for i in range(n_member):
+            pos = (flim + log10_q0[i] - x0) / dx
+            if pos < 0.0:
+                pos = 0.0
+            elif pos > n_bin - 1:
+                pos = n_bin - 1.0
+            idx = int(pos)
+            if idx > n_bin - 2:
+                idx = n_bin - 2
+            t = pos - idx
+            p = curve_y[idx] * (1.0 - t) + curve_y[idx + 1] * t
+            out[s, i] = p * w_raw[i]
     return out
 
 
@@ -540,9 +594,10 @@ def direct_family_counts(config, region, cls, cond, pop, shape):
         tile = pop["tiles"][int(t)]
 
         if cls == "star":
-            w, u, logb = tile["w_star"], tile["u"], tile["log10_b"]
+            w, u = tile["w_star"], tile["u"]
+            ib, tb = _b_bracket_arrays(tile["log10_b"], b_grid)
             n_c[src_idx] = _direct_sum_fixed_weight(
-                w, u, logb, eps[src_idx].astype(np.float64), x_ladder, b_grid,
+                w, u, ib, tb, eps[src_idx].astype(np.float64), x_ladder,
                 w_mix[src_idx], mu_mix[src_idx], sigma_mix[src_idx], GH_Z, GH_W)
         elif cls == "agb":
             ev = tile["is_evolved"]
@@ -550,19 +605,30 @@ def direct_family_counts(config, region, cls, cond, pop, shape):
             u = np.concatenate([tile["u"][ev], tile["u"][ev]])
             logb = np.concatenate([tile["log10_b_agb_o"][ev], tile["log10_b_agb_c"][ev]])
             w = np.concatenate([w_ev * (1.0 - f_c), w_ev * f_c])
+            ib, tb = _b_bracket_arrays(logb, b_grid)
             n_c[src_idx] = _direct_sum_fixed_weight(
-                w, u, logb, eps[src_idx].astype(np.float64), x_ladder, b_grid,
+                w, u, ib, tb, eps[src_idx].astype(np.float64), x_ladder,
                 w_mix[src_idx], mu_mix[src_idx], sigma_mix[src_idx], GH_Z, GH_W)
         else:
-            u, logb, w_raw = tile["u"], tile["log10_b_pahc"], tile["w"]
+            u, w_raw = tile["u"], tile["w"]
+            ib, tb = _b_bracket_arrays(tile["log10_b_pahc"], b_grid)
             log10_q0 = log10_q0_by_tile[int(t)]
             row_bytes = w_raw.size * 8
             for bstart, bstop in batches_module.batches(src_idx.size, row_bytes, budget_bytes=BATCH_BUDGET_BYTES):
                 s_idx = src_idx[bstart:bstop]
-                log10_q = log10_flim8[s_idx][:, None] + log10_q0[None, :]
-                weight = np.asarray(curve(log10_q), dtype=np.float64) * w_raw[None, :]
+                # one vectorised lookup of P(q) for the whole (n_batch,
+                # n_pop) grid of log10 q = log10 F_lim(s) + LOG10_Q0(member)
+                # -- the batch's own weight matrix built once, outside the
+                # compiled loop, and passed in a single call (coordinator,
+                # 2026-09-06: the earlier per-tile-batch loop already did
+                # this; profiling found the real cost was the redundant
+                # per-quadrature brightness-bracket search inside the loop,
+                # not this weight lookup -- fixed above by `_b_bracket_arrays`).
+                weight = _pahc_weight_matrix(
+                    log10_flim8[s_idx], log10_q0, w_raw,
+                    float(curve.x[0]), float(curve.x[1] - curve.x[0]), curve.y)
                 n_c[s_idx] = _direct_sum_per_source_weight(
-                    weight, u, logb, eps[s_idx].astype(np.float64), x_ladder, b_grid,
+                    weight, u, ib, tb, eps[s_idx].astype(np.float64), x_ladder,
                     w_mix[s_idx], mu_mix[s_idx], sigma_mix[s_idx], GH_Z, GH_W)
 
     pop_path = config_module.product_path(config, "bms", "star", "population", "tile", region=region)
