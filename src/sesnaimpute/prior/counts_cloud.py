@@ -7,18 +7,20 @@ For every catalogued source `s`, this module reads the region's own
 tabulated pieces -- the YSO mass-based selection `g_k(a)` per depth group
 (`prior.yso_selection`), the H2S selection `eps_k(a, Sigma)` per depth
 group (`prior.h2s`), and the sightline's own exact extinction marginal
-`p(a | A_s)` (`prior.yso.YsoShape`) -- and combines them:
+`p(a | A_s)` (`prior.yso.YsoShape`, the log-normal closed form) -- and
+combines them:
 
     EPS_YSO(s)      = Integral da g_k(a) p(a | A_s)
     N_YSO(s)        = N_law(s) * EPS_YSO(s)
     EPS_H2S(s)      = Integral da dlog10(Sigma) eps_k(a, Sigma) p(a | A_s) p_r(log10 Sigma)
     N_H2S(s)        = N_LAW_BLURRED(s) * ETA_r * EPS_EXT * EPS_H2S(s)
 
-Both integrals are exact in the extinction axis: `p(a | A_s)` is a step
-function (`YsoShape.cdf_at`'s own construction), so its mass in any `a`
-bin is an exact difference of two `cdf_at` calls; the group's own curve,
-tabulated only at the shared grid's nodes, is read at each bin's midpoint
-by the linear blend between its two bracketing nodes (the same
+Both integrals are exact in the extinction axis: `p(a | A_s)` integrates
+in closed form (`YsoShape.cdf_exact`), so its mass in any `a` bin is an
+exact difference of two `cdf_exact` calls at each source's own adopted
+column and measurement uncertainty; the group's own curve, tabulated
+only at the shared grid's nodes, is read at each bin's midpoint by the
+linear blend between its two bracketing nodes (the same
 node-interpolation convention every class shares, IMPLEMENTATION.md
 section 2). The `log10 Sigma` axis is a plain quadrature on the region's
 own 41-point grid, as `prior.h2s.source_pass_fraction` already does for
@@ -30,23 +32,19 @@ EPS_H2S`), since nothing else in this module's `Lambda_H2S` still needs
 renormalising against it.
 
 Sources sharing a sightline do NOT share one column: `A_COL_K` is a
-per-source adopted value, so a source's own extinction integral depends
-on its own node bracket, not merely its sightline. But the bracket
-itself (`NODE_LO`, `NODE_W` from `column_grid.bracket`) is one of only
-`n_node` DISCRETE values, and `YsoShape.cdf_at`'s own node blend is
-linear in `NODE_W` between two node-exact evaluations
-(`cdf_lo`/`cdf_hi`) that depend only on the DISCRETE pair `(sightline
-row, node index)` -- so this module evaluates the exact marginal's
-`a`-grid cdf once per distinct `(sightline row, node index)` pair that
-actually occurs (`_unique_row_node_pairs`; a region's own sources touch
-orders of magnitude fewer such pairs than sources, since one sightline's
-many sources share its row and cluster onto a handful of nodes), not
-once per source -- then blends and differences per source, which is
-cheap (CODING_RULES.md rule 8: the pair evaluation is the region's
-largest real iterator, so it is what `joblib` chunks over at
-`config.n_jobs`, rule 10a; every other step below is a plain vectorised
-`(n_source, n_grid)` array op, never `n_source` by the kernel's own
-quadrature).
+per-source adopted value, and the closed form reads it exactly, not
+through a shared node table -- there is no quadrature left to
+deduplicate, so `bin_mass_exact` is a plain vectorised `(n_source,
+n_edges)` closed-form evaluation, batched over sources
+(`sesnaimpute.batches.batches`) so one batch's transient array stays
+bounded regardless of a region's own source count (CODING_RULES.md rule
+10b).
+
+The `NODE_LO`/`NODE_W` bracket (`prior.column_grid.bracket`) is still
+computed and written to the output product, since other classes' node
+blend (IMPLEMENTATION.md section 2) reads it from the prior table -- it
+plays no part in this module's own extinction integral, which uses each
+source's exact column directly.
 
 The YSO `A_GRID` (`prior.yso_selection`, a zero prepended to
 `column_grid.nodes`) and the H2S `A_NODES`-plus-zero grid
@@ -60,8 +58,8 @@ import os
 import h5py
 import healpy as hp
 import numpy as np
-from joblib import Parallel, delayed
 
+from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
@@ -72,11 +70,10 @@ from sesnaimpute.prior import depth_groups as depth_groups_module
 from sesnaimpute.prior import selection as selection_module
 from sesnaimpute.prior import yso as yso_module
 
-#: Distinct `(sightline row, node index)` pairs per joblib chunk
-#: (CODING_RULES.md rule 10a): each chunk's own transient array is
-#: `(chunk pairs * n_edges, n_quadrature)`, bounded well under the 8 GB
-#: ceiling regardless of a region's own source or sightline count.
-PAIR_CHUNK = 40
+#: Per-batch memory budget for `bin_mass_exact`'s closed-form evaluation
+#: (CODING_RULES.md rule 10b): well under the 8 GB ceiling regardless of
+#: a region's own source count.
+BIN_MASS_BUDGET_BYTES = 256 << 20
 
 #: The anchor pixelisation the section 6.4 item 1 check integrates over
 #: (`prior.yso.NSIDE_ANCHOR`, the same nside `prior.young_stars` uses for
@@ -89,13 +86,15 @@ _OMEGA_PIX512_DEG2 = hp.nside2pixarea(yso_module.NSIDE_ANCHOR, degrees=True)
 # ---------------------------------------------------------------------
 
 def _adopted_columns(config, region):
-    """`(a_col, provenance)`, every source of `region`, in catalogue row
-    order (the same adopted-column product `prior.yso.law_count` reads)."""
+    """`(a_col, sigma_col, provenance)`, every source of `region`, in
+    catalogue row order (the same adopted-column product
+    `prior.yso.law_count` reads)."""
     path = config_module.product_path(config, "sky/derived", "adopted",
                                        "column", "source", region=region)
     cols = access.per_source(config, region, path,
-                              ["A_COL_K", "A_COL_PROVENANCE"])
+                              ["A_COL_K", "A_COL_SIG_K", "A_COL_PROVENANCE"])
     return (np.asarray(cols["A_COL_K"], dtype=float),
+            np.asarray(cols["A_COL_SIG_K"], dtype=float),
             np.asarray(cols["A_COL_PROVENANCE"]))
 
 
@@ -177,70 +176,31 @@ def _ridge(config, region):
 
 
 # ---------------------------------------------------------------------
-# the exact extinction-axis quadrature: cdf differences on a fixed grid,
-# evaluated once per distinct (sightline row, node index) pair
+# the exact extinction-axis integral: closed-form cdf differences at
+# each source's own column, batched over sources
 # ---------------------------------------------------------------------
 
-def _unique_row_node_pairs(rows, node_lo, node_hi, n_node):
-    """Every distinct `(sightline row, node index)` pair a region's own
-    sources touch through either side of their own node bracket (module
-    docstring): `(uniq_row, uniq_node)`, and each source's own index into
-    them for its `NODE_LO` side and its `NODE_HI` side."""
-    rows = rows.astype(np.int64)
-    key_lo = rows * n_node + node_lo.astype(np.int64)
-    key_hi = rows * n_node + node_hi.astype(np.int64)
-    uniq_keys, inverse = np.unique(np.concatenate([key_lo, key_hi]), return_inverse=True)
-    uniq_row = (uniq_keys // n_node).astype(np.intp)
-    uniq_node = (uniq_keys % n_node).astype(np.intp)
-    n_src = rows.size
-    return uniq_row, uniq_node, inverse[:n_src], inverse[n_src:]
-
-
-def _cdf_pairs_chunk(shape, a_edges, row_chunk, node_chunk):
-    """`(n_pairs, n_edges)`: the exact marginal's cdf at every edge of
-    `a_edges`, one row per `(sightline, node)` pair -- one batched call
-    into `YsoShape`'s own per-row machinery (`_gather_quadrature`,
-    `_cdf_rows`), the same primitives `cdf_at` uses for its per-source
-    node blend, called here directly since the blend itself is done
-    afterwards, once per source, not per pair (module docstring)."""
-    n_pairs = row_chunk.size
-    n_edges = a_edges.size
-    rows_rep = np.repeat(row_chunk, n_edges)
-    node_rep = np.repeat(node_chunk, n_edges)
-    a_rep = np.tile(a_edges, n_pairs)
-    t, w = shape._gather_quadrature(rows_rep, node_rep)
-    cdf = shape._cdf_rows(a_rep, rows_rep, t, w)
-    return cdf.reshape(n_pairs, n_edges)
-
-
-def bin_mass_exact(config, shape, a_edges, rows, node_lo, node_w):
+def bin_mass_exact(shape, a_edges, rows, a_col, sigma_col):
     """`(n_src, n_edges - 1)`: the exact mass `p(a | A_s)` places in each
     of `a_edges`'s bins, one source per row (SPEC_PRIORS.md sections
-    6.2/7's "a sum over grid bins ... cdf_at differences") -- the pair-
-    deduplicated cdf (`_cdf_pairs_chunk`, chunked over pairs under
-    `joblib` at `config.n_jobs`), looked up per source and node-blended,
-    then differenced along the edge axis."""
-    n_node = shape.n_node
-    node_hi = np.clip(node_lo + 1, 0, n_node - 1)
-    uniq_row, uniq_node, inv_lo, inv_hi = _unique_row_node_pairs(rows, node_lo, node_hi, n_node)
-
-    n_pairs = uniq_row.size
-    n_chunks = max(1, int(np.ceil(n_pairs / PAIR_CHUNK)))
-    idx_chunks = np.array_split(np.arange(n_pairs), n_chunks)
-    # threads, not processes (CODING_RULES.md 10a): a process-based pool
-    # would pickle a full copy of `shape` -- the region's whole sightline
-    # array set -- into every worker, the same duplication `prior.yso`'s
-    # own kernel-quadrature `Parallel` call avoids by sharing the one
-    # loaded object; the chunk body is plain numpy array arithmetic, free
-    # of the GIL.
-    results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
-        delayed(_cdf_pairs_chunk)(shape, a_edges, uniq_row[idx], uniq_node[idx])
-        for idx in idx_chunks)
-    cdf_pairs = (np.concatenate(results, axis=0) if n_pairs
-                 else np.empty((0, a_edges.size), dtype=np.float64))
-
-    cdf = (1.0 - node_w)[:, None] * cdf_pairs[inv_lo] + node_w[:, None] * cdf_pairs[inv_hi]
-    return np.diff(cdf, axis=1)
+    6.2/7's "a sum over grid bins ... cdf_exact differences") -- the
+    closed-form cdf (`YsoShape.cdf_exact`) at each source's own adopted
+    column and measurement uncertainty, evaluated at every edge and
+    differenced, batched over sources so one batch's transient
+    `(batch, n_edges)` array stays under `BIN_MASS_BUDGET_BYTES`."""
+    n_src = rows.size
+    n_edges = a_edges.size
+    out = np.empty((n_src, n_edges - 1), dtype=np.float64)
+    row_bytes = 2 * n_edges * 8  # the (batch, n_edges) cdf array, float64
+    for start, stop in batches_module.batches(n_src, row_bytes, BIN_MASS_BUDGET_BYTES):
+        nb = stop - start
+        rows_rep = np.repeat(rows[start:stop], n_edges)
+        a_col_rep = np.repeat(a_col[start:stop], n_edges)
+        sigma_rep = np.repeat(sigma_col[start:stop], n_edges)
+        a_rep = np.tile(a_edges, nb)
+        cdf = shape.cdf_exact(a_rep, rows_rep, a_col_rep, sigma_rep).reshape(nb, n_edges)
+        out[start:stop] = np.diff(cdf, axis=1)
+    return out
 
 
 def eps_yso_from_bin_mass(bin_mass, g_row):
@@ -305,7 +265,7 @@ def build_region(config, region):
     n_src = rs["n_sources"]
     sightline_row = np.asarray(rs["hpx256_row"], dtype=np.intp)
 
-    a_col, provenance = _adopted_columns(config, region)
+    a_col, sigma_col, provenance = _adopted_columns(config, region)
     nodes = column_grid_module.nodes(config)
     node_lo, node_w = column_grid_module.bracket(a_col, nodes)
 
@@ -329,7 +289,7 @@ def build_region(config, region):
             "grid disagree -- both are built from column_grid.nodes and "
             "should be identical" % region)
 
-    bin_mass = bin_mass_exact(config, shape, a_edges, sightline_row, node_lo, node_w)
+    bin_mass = bin_mass_exact(shape, a_edges, sightline_row, a_col, sigma_col)
     eps_yso = eps_yso_from_bin_mass(bin_mass, sel["g_1myr"][group_idx])
     eps_yso_3myr = eps_yso_from_bin_mass(bin_mass, sel["g_3myr"][group_idx])
     eps_h2s = eps_h2s_from_bin_mass(bin_mass, group_idx, h2s["eps"],
