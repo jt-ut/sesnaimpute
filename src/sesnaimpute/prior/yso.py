@@ -615,11 +615,13 @@ def _lognormal_cdf(t, m, s):
 
 def _lognormal_inv_moment_upto(t, m, s):
     """`E[1/T ; T <= t]` for `ln T ~ Normal(m, s)`: the log-normal's
-    partial inverse moment, `exp(-m + s^2/2) * Phi((ln t - m)/s - s)`
-    (SPEC_PRIORS.md section 6.3's derivation). `t = 0` gives 0, `t = inf`
-    gives the total `E[1/T] = exp(-m + s^2/2)`."""
+    partial inverse moment, `exp(-m + s^2/2) * Phi((ln t - m)/s + s)`
+    (SPEC_PRIORS.md section 6.3's derivation: `e^{-X}` tilts `X ~
+    Normal(m, s^2)` to `Normal(m - s^2, s^2)`, so the truncation CDF's
+    own argument is `(ln t - (m - s^2))/s = (ln t - m)/s + s`). `t = 0`
+    gives 0, `t = inf` gives the total `E[1/T] = exp(-m + s^2/2)`."""
     with np.errstate(divide="ignore", invalid="ignore"):
-        z = (np.log(t) - m) / s - s
+        z = (np.log(t) - m) / s + s
     return np.exp(-m + 0.5 * s * s) * _normal_cdf(z)
 
 
