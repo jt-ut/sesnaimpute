@@ -46,11 +46,15 @@ successive model batches.
 time: every per-source quantity (the hybrid law, the fit, the prior
 read, the evidence fold, the top-K) is one array expression over a
 `(n_block, n_model[, n_band])` working set, `n_block` sized by
-`sesnaimpute.batches.batches` to keep that set under 512 MB (CODING_
-RULES.md 10a/10b) -- large for small registers (STAR), small for large
-ones (YSO), but never a Python loop over sources. The `gamma`/`psi`
-hooks are the one exception: their signature takes one source at a
-time, so they are called in a plain loop over each block's rows.
+`sesnaimpute.batches.batches` to keep that set under `config.
+fit_block_budget_mb` (owner ruling 2026-09-06, default 512 MB,
+CODING_RULES.md 10a/10b) -- large for small registers (STAR), small for
+large ones (YSO), but never a Python loop over sources. See the block-
+size formula's own comment, below `fit_batch`'s `keep = min(topk,
+n_model)` line, for the measured array census (`tracemalloc`) the
+budget is actually bounding. The `gamma`/`psi` hooks are the one
+exception: their signature takes one source at a time, so they are
+called in a plain loop over each block's rows.
 
 THE BLOCKS OF ONE BATCH RUN IN PARALLEL, ON THREADS. By the time
 `fit_batch` is called, the caller has already called `prior.
@@ -132,7 +136,9 @@ ALPHA_RHO = 1.0
 
 #: Kept models per source, ranked by full posterior weight
 #: (`sesnacomplete.sed_fit.streaming.DEFAULT_NKEEP`, the documented
-#: production default).
+#: production default) -- a fallback only; `fit_batch` reads the live
+#: value off `config.fit_topk` (owner ruling 2026-09-06, `config.py`'s
+#: `[fit] topk`).
 TOPK = 5
 
 #: class code -> the library register key: `definitions.CLASS_REGISTER`,
@@ -389,8 +395,11 @@ def fit_batch(config, region, cls, rows, prior, gamma=None, psi=None):
     `EVIDENCE` `(n_source, n_sub)` (natural-log, this class's own
     subclasses in `definitions.SUBCLASSES_OF[cls]` order), `FLUX_MEAN`
     `(n_source, 8)`, `FLUX_COV` `(n_source, 8, 8)`, `TOPK_MODEL`/
-    `TOPK_A`/`TOPK_LOG10B`/`TOPK_LNL` `(n_source, TOPK)`, `N_DETECTED`
-    `(n_source,)`.
+    `TOPK_A`/`TOPK_LOG10B`/`TOPK_LNL`/`TOPK_CHI2` `(n_source, topk)`,
+    `TOPK_FLUX` `(n_source, topk, 8)` (each kept model's own fitted --
+    scaled, reddened -- flux in `definitions.BANDS` order, mJy),
+    `N_DETECTED` `(n_source,)`. `topk` is `config.fit_topk` (owner ruling
+    2026-09-06).
     """
     if cls not in CLASS_REGISTER:
         raise ValueError(f"fit.sweep.fit_batch: unknown class {cls!r}, "
@@ -413,13 +422,17 @@ def fit_batch(config, region, cls, rows, prior, gamma=None, psi=None):
     needs_model_index = prior_cls in ("gal", "h2s")
     model_index_1d = np.arange(n_model, dtype=np.intp) if needs_model_index else None
 
+    topk = int(getattr(config, "fit_topk", TOPK))
+
     evidence = np.full((n_source, n_sub), -np.inf, dtype=np.float64)
     flux_mean = np.zeros((n_source, _N_BAND), dtype=np.float64)
     flux_cov = np.zeros((n_source, _N_BAND, _N_BAND), dtype=np.float64)
-    topk_model = np.full((n_source, TOPK), -1, dtype=np.int64)
-    topk_a = np.full((n_source, TOPK), np.nan, dtype=np.float64)
-    topk_log10b = np.full((n_source, TOPK), np.nan, dtype=np.float64)
-    topk_lnl = np.full((n_source, TOPK), -np.inf, dtype=np.float64)
+    topk_model = np.full((n_source, topk), -1, dtype=np.int64)
+    topk_a = np.full((n_source, topk), np.nan, dtype=np.float64)
+    topk_log10b = np.full((n_source, topk), np.nan, dtype=np.float64)
+    topk_lnl = np.full((n_source, topk), -np.inf, dtype=np.float64)
+    topk_chi2 = np.full((n_source, topk), np.inf, dtype=np.float64)
+    topk_flux = np.full((n_source, topk, _N_BAND), np.nan, dtype=np.float64)
     n_detected = np.zeros(n_source, dtype=np.int64)
 
     # one-hot subclass membership (n_model, n_sub): turns the per-source
@@ -428,12 +441,32 @@ def fit_batch(config, region, cls, rows, prior, gamma=None, psi=None):
     onehot[np.arange(n_model), subclass_idx] = 1.0
 
     model_index_full = np.arange(n_model, dtype=np.intp)
-    keep = min(TOPK, n_model)
+    keep = min(topk, n_model)
 
-    # block size: a (n_block, n_model, n_band) float64 working set (the
-    # fit's residual/model/chi2 temporaries, several alive at once) held
-    # under CODING_RULES.md 10b's 512 MB budget.
-    row_bytes = n_model * _N_BAND * 8 * 8
+    # MEMORY DRIVER (owner ruling 2026-09-06, item 4), measured with
+    # `tracemalloc` on STAR/NGC 7129 (n_model=4066), one job,
+    # single-threaded, n=300 source rows split by the OLD formula
+    # (16 "arrays", see below) into two blocks: traced Python-heap peak
+    # 1.17 GB against a naive two-block estimate of ~625 MB at "8 arrays
+    # of (n_block, n_model, 8) float64" -- roughly 1.9x. The uncounted
+    # bulk is `_process_block`'s flux-covariance step: `outer =
+    # np.einsum("bki,bkj->bij", weighted_flux, model_fluxes_mjy)` is a
+    # per-source (8, 8) reduction over the WHOLE model axis k, and numpy's
+    # general-shape einsum optimizer does not always recognise this as a
+    # batched matmul -- it can materialise a (n_block, n_model, 8, 8)
+    # intermediate before summing over k, which is 8x the size of any one
+    # of `residual`/`model`/`model_fluxes_mjy`/`weighted_flux` alone.
+    # Counting that intermediate (worth ~8 of the (n_block, n_model, 8)
+    # arrays) alongside the five genuinely-alive (n_block, n_model, 8)
+    # arrays (`residual`, `model`, `chi2_array`'s transient, `model_fluxes
+    # _mjy`, `weighted_flux`) gives ~13; rounded up to 16 for headroom
+    # (thread-local BLAS scratch, the `bad`/`zero_weight` boolean masks).
+    # So: row_bytes = n_model * n_band(8) * 8 bytes/float64 * 16
+    # "array-equivalents", bounded under `config.fit_block_budget_mb`
+    # (`config.py`'s `[fit] block_budget_mb`, default 512 MB) -- at
+    # n_jobs=4 threads this targets ~4 * 512 MB = 2 GB, down from the
+    # measured 6.3 GB peak at the old 8x formula.
+    row_bytes = n_model * _N_BAND * 8 * 16
 
     def _process_block(start, stop):
         blk = slice(start, stop)
@@ -525,8 +558,15 @@ def fit_batch(config, region, cls, rows, prior, gamma=None, psi=None):
             any_finite[:, None], np.take_along_axis(log10_b_hat, order_top, axis=1), np.nan)
         topk_lnl[blk, :keep] = np.where(
             any_finite[:, None], np.take_along_axis(ln_l, order_top, axis=1), -np.inf)
+        topk_chi2[blk, :keep] = np.where(
+            any_finite[:, None], np.take_along_axis(chi2, order_top, axis=1), np.inf)
+        topk_flux_blk = np.take_along_axis(
+            model_fluxes_mjy, order_top[:, :, None], axis=1)
+        topk_flux[blk, :keep, :] = np.where(
+            any_finite[:, None, None], topk_flux_blk, np.nan)
 
-    blocks = list(batches_module.batches(n_source, row_bytes))
+    block_budget_mb = int(getattr(config, "fit_block_budget_mb", 512))
+    blocks = list(batches_module.batches(n_source, row_bytes, budget_bytes=block_budget_mb << 20))
     if len(blocks) > 1:
         # `config.n_jobs` Python threads is the parallelism (module
         # docstring); each thread's own BLAS calls (the fit's normal
@@ -548,5 +588,6 @@ def fit_batch(config, region, cls, rows, prior, gamma=None, psi=None):
     return {
         "EVIDENCE": evidence, "FLUX_MEAN": flux_mean, "FLUX_COV": flux_cov,
         "TOPK_MODEL": topk_model, "TOPK_A": topk_a, "TOPK_LOG10B": topk_log10b,
-        "TOPK_LNL": topk_lnl, "N_DETECTED": n_detected,
+        "TOPK_LNL": topk_lnl, "TOPK_CHI2": topk_chi2, "TOPK_FLUX": topk_flux,
+        "N_DETECTED": n_detected,
     }
