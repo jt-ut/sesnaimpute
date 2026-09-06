@@ -36,11 +36,13 @@ of it from the 64 x 64 build; `_width_interp_residual_report` compares,
 at the geometric midpoint of each adjacent width pair, the two-width
 blend against a direct build at that width.
 
-At read time (`ClassShape.density`), a source's own `(mu_s, sigma_s) =
-Kernel.params(a_col, sigma_col, map_class)` gives the shift and the total
-width; `sigma_s` is bracketed in the width ladder (log-linear blend,
-clamped at the ends) and the bicubic read is taken at `(log10(a / a_col)
-- mu_s, log10 B)` -- the shift moves the query, not the table.
+At read time (`ClassShape.density`), a source's own `(w, mu, sigma) =
+Kernel.mixture(a_col, sigma_col, map_class)` gives the mixture weight and
+each of the two components' own shift and total width; each component's
+`sigma` is bracketed in the width ladder separately (log-linear blend,
+clamped at the ends) and its own bicubic read taken at `(log10(a / a_col)
+- mu, log10 B)` -- the shift moves the query, not the table -- and the
+two component reads combined `w * D_1 + (1 - w) * D_2`.
 
 AGB blends the O-rich and C-rich shapes (spec section 3) before the
 smoothing sees it; its own bandwidth is measured on the same blend
@@ -777,7 +779,10 @@ class _FixedKernel(object):
     """A stand-in `Kernel` for the acceptance checks below: fixes `mu=0`
     and `sigma` to a chosen ladder width regardless of `a_col`, so a
     query lands exactly on a ladder entry -- independent of the real
-    column kernel, which the checks below are not testing."""
+    column kernel, which the checks below are not testing. Both mixture
+    components are given the same `(mu, sigma)`, so `mixture`'s weight
+    does not matter -- the two-component read reduces to the same single
+    read `params` describes."""
 
     def __init__(self, sigma_val):
         self.sigma_val = float(sigma_val)
@@ -786,19 +791,28 @@ class _FixedKernel(object):
         a_col = np.asarray(a_col, dtype=np.float64)
         return np.zeros_like(a_col), np.full_like(a_col, self.sigma_val)
 
+    def mixture(self, a_col, sigma_col, map_class):
+        a_col = np.asarray(a_col, dtype=np.float64)
+        w = np.full(a_col.shape, 0.5)
+        mu = np.zeros(a_col.shape + (2,))
+        sigma = np.full(a_col.shape + (2,), self.sigma_val)
+        return w, mu, sigma
+
 
 class ClassShape(object):
     """One class's per-tile shape, evaluated per source (`IMPLEMENTATION.md`
-    section 3's evaluation column): the tile's own density, the source's
-    own `(mu_s, sigma_s) = Kernel.params(a_col, sigma_col, map_class)`,
-    `sigma_s` bracketed in the width ladder and blended, BICUBIC in
-    `(log10(a/a_col) - mu_s, log10 B)` inside the grid, the analytic tail
-    outside on either axis, `a < 0` (or `a == 0`, which has no `log10 x`)
-    mapped to the low-`x` tail or zero. PAHC additionally carries a limit
-    grid (`limit_grid_mjy`): a source's own 8 micron limit brackets two
-    of the eight stored limit grids and blends between them linearly in
-    `log10` limit -- the four (width, limit) corners are evaluated and
-    bilinearly combined. Vectorised over sources."""
+    section 3's evaluation column): the tile's own density, read once per
+    component of the source's own two-component kernel mixture `(w, mu,
+    sigma) = Kernel.mixture(a_col, sigma_col, map_class)` and combined `w
+    * D_1 + (1 - w) * D_2`. Each component's own `sigma` is bracketed in
+    the width ladder and blended, BICUBIC in `(log10(a/a_col) - mu, log10
+    B)` inside the grid, the analytic tail outside on either axis, `a < 0`
+    (or `a == 0`, which has no `log10 x`) mapped to the low-`x` tail or
+    zero. PAHC additionally carries a limit grid (`limit_grid_mjy`): a
+    source's own 8 micron limit brackets two of the eight stored limit
+    grids and blends between them linearly in `log10` limit -- the four
+    (width, limit) corners are evaluated and bilinearly combined, per
+    mixture component. Vectorised over sources."""
 
     def __init__(self, cls, shape_nodes, x_edges, b_edges, density, tail_x_lo, tail_x_hi,
                  tail_b_lo, tail_b_hi, mass_outside, kern, limit_grid_mjy=None):
@@ -901,19 +915,51 @@ class ClassShape(object):
                       amp_b * np.exp(tbhi * (logb - self.b_centers[-1])), out)
         return out
 
+    def _component_density(self, log_x_raw, log10_b, tile_ids, mu_c, sigma_c, f_lim8):
+        """One mixture component's bracket-and-blend read: the component's
+        own shift `mu_c` moves the query (`log_x = log_x_raw - mu_c`),
+        the component's own total width `sigma_c` is bracketed in the
+        width ladder (log-linear blend, clamped at the ends -- clamps
+        counted in `n_clamp_lo`/`n_clamp_hi`) and the bicubic read taken
+        at `(log_x, log10 B)` (PAHC: crossed with the two bracketing
+        limit grids, `f_lim8` this source's own 8 micron limit, blended
+        in `log10` limit). Shared by both components of the kernel
+        mixture in `density`."""
+        log_x = log_x_raw - mu_c
+
+        log_widths = np.log(self.shape_nodes)
+        i_lo, t_w = column_grid.bracket(np.log(sigma_c), log_widths)
+        self.n_clamp_lo += int(np.sum(sigma_c < self.shape_nodes[0]))
+        self.n_clamp_hi += int(np.sum(sigma_c > self.shape_nodes[-1]))
+        i_hi = np.minimum(i_lo + 1, self.shape_nodes.size - 1)
+
+        if self.limit_log is None:
+            val_lo = self._eval_node(tile_ids, i_lo, log_x, log10_b, None)
+            val_hi = self._eval_node(tile_ids, i_hi, log_x, log10_b, None)
+        else:
+            log_f = np.broadcast_to(
+                np.log10(np.asarray(f_lim8, dtype=np.float64)), log_x.shape)
+            m_lo, t_limit = column_grid.bracket(log_f, self.limit_log)
+            m_hi = np.minimum(m_lo + 1, self.limit_log.size - 1)
+            v_lo_lo = self._eval_node(tile_ids, i_lo, log_x, log10_b, m_lo)
+            v_lo_hi = self._eval_node(tile_ids, i_lo, log_x, log10_b, m_hi)
+            v_hi_lo = self._eval_node(tile_ids, i_hi, log_x, log10_b, m_lo)
+            v_hi_hi = self._eval_node(tile_ids, i_hi, log_x, log10_b, m_hi)
+            val_lo = (1.0 - t_limit) * v_lo_lo + t_limit * v_lo_hi
+            val_hi = (1.0 - t_limit) * v_hi_lo + t_limit * v_hi_hi
+        return (1.0 - t_w) * val_lo + t_w * val_hi
+
     def density(self, a, log10_b, tile_ids, a_col, sigma_col, map_class, f_lim8=None):
         """`density(a, log10_b, tile_ids, a_col, sigma_col, map_class[,
-        f_lim8])`: per source `(mu_s, sigma_s) = Kernel.params(a_col,
-        sigma_col, map_class)` -- the sub-beam width composed in
-        quadrature with the source's own measurement uncertainty and,
-        for Herschel, the field zero point. `sigma_s` is bracketed in the
-        width ladder (log-linear blend, clamped at the ends -- clamps
-        counted in `n_clamp_lo`/`n_clamp_hi`) and the bicubic read is
-        taken at `(log10(a / a_col) - mu_s, log10 B)` (PAHC: crossed with
-        the two bracketing limit grids, `f_lim8` this source's own 8
-        micron limit, blended in `log10` limit). `a < 0` mapped to zero
-        (`a == 0`, having no `log10 x`, reads as the declared low-`x`
-        tail's own limit)."""
+        f_lim8])`: per source `(w, mu, sigma) = Kernel.mixture(a_col,
+        sigma_col, map_class)`, `mu`/`sigma` shape `(n, 2)` -- each
+        component's own sub-beam width composed in quadrature with the
+        source's own measurement uncertainty and, for Herschel, the field
+        zero point. Each component is read separately
+        (`_component_density`: its own shift and width-ladder bracket)
+        and the two combined `w * D_1 + (1 - w) * D_2`. `a < 0` mapped to
+        zero (`a == 0`, having no `log10 x`, reads as the declared
+        low-`x` tail's own limit)."""
         a = np.asarray(a, dtype=np.float64)
         log10_b = np.asarray(log10_b, dtype=np.float64)
         a_col = np.asarray(a_col, dtype=np.float64)
@@ -927,30 +973,10 @@ class ClassShape(object):
         log_x_raw = np.where(x_lin > 0.0, np.log10(np.clip(x_lin, _LOG_FLOOR, None)),
                              self.x_edges[0] - 1.0e3)
 
-        mu_s, sigma_s = self.kern.params(a_col, sigma_col, map_class)
-        log_x = log_x_raw - mu_s
-
-        log_widths = np.log(self.shape_nodes)
-        i_lo, t_w = column_grid.bracket(np.log(sigma_s), log_widths)
-        self.n_clamp_lo += int(np.sum(sigma_s < self.shape_nodes[0]))
-        self.n_clamp_hi += int(np.sum(sigma_s > self.shape_nodes[-1]))
-        i_hi = np.minimum(i_lo + 1, self.shape_nodes.size - 1)
-
-        if self.limit_log is None:
-            val_lo = self._eval_node(tile_ids, i_lo, log_x, log10_b, None)
-            val_hi = self._eval_node(tile_ids, i_hi, log_x, log10_b, None)
-        else:
-            log_f = np.broadcast_to(
-                np.log10(np.asarray(f_lim8, dtype=np.float64)), a.shape)
-            m_lo, t_limit = column_grid.bracket(log_f, self.limit_log)
-            m_hi = np.minimum(m_lo + 1, self.limit_log.size - 1)
-            v_lo_lo = self._eval_node(tile_ids, i_lo, log_x, log10_b, m_lo)
-            v_lo_hi = self._eval_node(tile_ids, i_lo, log_x, log10_b, m_hi)
-            v_hi_lo = self._eval_node(tile_ids, i_hi, log_x, log10_b, m_lo)
-            v_hi_hi = self._eval_node(tile_ids, i_hi, log_x, log10_b, m_hi)
-            val_lo = (1.0 - t_limit) * v_lo_lo + t_limit * v_lo_hi
-            val_hi = (1.0 - t_limit) * v_hi_lo + t_limit * v_hi_hi
-        out = (1.0 - t_w) * val_lo + t_w * val_hi
+        w, mu, sigma = self.kern.mixture(a_col, sigma_col, map_class)
+        val_1 = self._component_density(log_x_raw, log10_b, tile_ids, mu[:, 0], sigma[:, 0], f_lim8)
+        val_2 = self._component_density(log_x_raw, log10_b, tile_ids, mu[:, 1], sigma[:, 1], f_lim8)
+        out = w * val_1 + (1.0 - w) * val_2
         out[~ok] = 0.0
         return out
 
