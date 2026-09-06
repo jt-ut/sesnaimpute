@@ -81,9 +81,12 @@ DEX_PER_MAG = 0.4
 Z90 = 1.2816
 
 # Resamples per region-band for the bootstrap sampling uncertainty on
-# Delta -- re-fitting the whole estimator this many times is a build-time
-# cost paid once.
-BOOTSTRAP_RESAMPLES = 1000
+# Delta. Delta itself does not depend on this number -- the substitution
+# rule triggers on non-convergence or a too-sparse histogram, never on
+# the bootstrap sigma -- so it only needs to be large enough for the
+# reported sigma to be a useful number: at 200 resamples the sigma's own
+# precision is about 5%, adequate for a report.
+BOOTSTRAP_RESAMPLES = 200
 
 # Fixed so the fit is reproducible bit-for-bit from the catalogue alone.
 BOOTSTRAP_SEED = 20260822
