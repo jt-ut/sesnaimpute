@@ -11,16 +11,19 @@ is therefore two survey machinery pieces, assembled into the shape
    2004, ApJS 154, 39, Table 1): one smooth broken power law in cumulative
    counts N(>S), fitted once, region-independent (`build_counts_law`,
    written to the `counts/survey` product).
-2. `eps[k, node, j]`, the fraction of an external, four-band galaxy
+2. `EPS[n, n_x, n_s]`, the exact per-source selection: for each catalogued
+   source, on the shared scaled-extinction ladder `X_LADDER` (`a_query =
+   X_LADDER * A_s`, a background galaxy carrying the whole column) by
+   `LOG10_S_GRID`, the fraction of an external, four-band galaxy
    population (SWIRE, Surace et al. 2005 DR2 release), its stars removed,
-   that clears any two of the four IRAC bands at a depth group's own
-   limits, after the population is dimmed through a query column `a` in
-   every band (`build_region_selection`, written to the `prior/region`
-   product, one file per region). A second table, `EPS_2BAND`, requires
-   *both* 3.6 and 4.5um -- the SEDS-era two-band form -- as the reported
-   comparison (SPEC_PRIORS.md section 5, "Checks"). A third, `EPS_NO_
-   REMOVAL`, is the same construction with no star removal at all, for
-   comparison (owner ruling 2026-09-05).
+   that clears any two of the four IRAC bands at *that source's own*
+   eight limits (`build_source_selection`, written to the `prior/
+   selection/source` product, one file per region, SPEC_PRIORS.md
+   section 1.3). Two comparison variants are kept at the region's own
+   median 8-band limit, on the column-grid nodes, in the region-level
+   `prior/region` product: `EPS_2BAND` requires *both* 3.6 and 4.5um --
+   the SEDS-era two-band form; `EPS_NO_REMOVAL` is the four-band test
+   with no star removal at all (SPEC_PRIORS.md section 5, "Checks").
 
 The star-galaxy split itself is chosen once, survey-wide
 (`select_star_galaxy_split`): among the candidate rules that reproduce
@@ -38,12 +41,14 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import least_squares
 
+from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
+from sesnaimpute.catalog import limits as limits_module
+from sesnaimpute.granules import access
 from sesnaimpute.prior import column_grid as column_grid_module
-from sesnaimpute.prior import depth_groups as depth_groups_module
 from sesnaimpute.prior import selection as selection_module
 
 # ---------------------------------------------------------------------------
@@ -472,26 +477,90 @@ def subsample_population(flux_mjy, log10_s_grid, seed=SUBSAMPLE_SEED, cap=SUBSAM
 
 
 # ---------------------------------------------------------------------------
-# 3. Per-region selection tables eps[k, node, j]
+# 3a. The per-source selection EPS[n, n_x, n_s] (SPEC_PRIORS.md section 1.3)
 # ---------------------------------------------------------------------------
 
-def _depth_groups_path(config):
-    return config_module.product_path(config, "bms", "sesna", "depth-groups", "region")
-
-
-def region_irac_limits(config, region):
-    """`(knots, limit_log10)`: the region's depth-group knots
-    (`depth_groups.DepthGroups.read`) and each group's own dimmed-limit
-    origin over the four IRAC bands, `(K, 4)` log10 mJy -- the group
-    centre's own Delta added to the region's reference limit, no
-    common-mode shift (that is applied per source at prior-table
-    assembly, SPEC_PRIORS.md section 1.3).
+def region_median_irac_limit(config, region):
+    """`(8,)` log10 mJy: the region's own median 8-band detection limit
+    over its sources (`catalog.limits.limits`) -- the single limit the
+    two comparison variants `EPS_2BAND`/`EPS_NO_REMOVAL` are evaluated
+    at, on the column-grid nodes (no depth grouping).
     """
-    knots = depth_groups_module.DepthGroups.read(_depth_groups_path(config), region)
-    ref_irac = knots.ref_log10_flim[IRAC_BAND_IDX]
-    delta_irac = knots.group_centres[:, :len(IRAC_BAND_KEYS)]
-    return knots, ref_irac[None, :] + delta_irac
+    lim = limits_module.limits(config, region)
+    with np.errstate(divide="ignore"):
+        return np.median(np.log10(lim), axis=0)
 
+
+def population_eight_band(log10_flux_irac):
+    """`(n_pop, 8)`: the subsampled SWIRE population's own four IRAC
+    log10 fluxes placed in `definitions.BANDS` order, the three 2MASS
+    slots and the 24um slot left non-finite so they never clear a band
+    test (SPEC_PRIORS.md section 5.1: "the 2MASS bands are excluded").
+    """
+    n_pop = log10_flux_irac.shape[0]
+    out = np.full((n_pop, len(BAND_KEYS)), -np.inf, dtype=np.float64)
+    out[:, IRAC_BAND_IDX] = log10_flux_irac
+    other = np.array([j for j in range(len(BAND_KEYS)) if j not in set(IRAC_BAND_IDX.tolist())])
+    out[:, other] = np.nan
+    return out
+
+
+def build_source_selection(config, region, log10_flux_irac, log10_b_pop, bin_of_pop, log10_s_grid,
+                            batch_budget_bytes=(512 << 20)):
+    """Writes the region's exact per-source GAL selection
+    (SPEC_PRIORS.md section 1.3): for every catalogued source, on
+    `selection.X_LADDER` by `log10_s_grid`, the fraction of the
+    (already subsampled, star-galaxy-separated) SWIRE population, binned
+    by its own `log10 S` (`bin_of_pop`), that clears the source's own
+    eight-band limits when the whole population is dimmed through the
+    query column `a_query = X_LADDER * A_s` (a background galaxy carries
+    the entire column, SPEC_PRIORS.md section 5.2). Sources are batched
+    (`sesnaimpute.batches.batches`) so no batch's working arrays exceed
+    `batch_budget_bytes`. Returns the product path.
+    """
+    log10_lim = np.log10(limits_module.limits(config, region))
+    n_source = log10_lim.shape[0]
+    n_x = selection_module.X_LADDER.size
+    n_s = log10_s_grid.size
+
+    adopted_path = config_module.product_path(
+        config, "sky/derived", "adopted", "column", "source", region=region)
+    a_col = np.asarray(
+        access.per_source(config, region, adopted_path, ["A_COL_K"])["A_COL_K"], dtype=np.float64)
+    if a_col.shape[0] != n_source:
+        raise ValueError(
+            "gal: %r's column count (%d) does not match the region's %d sources"
+            % (adopted_path, a_col.shape[0], n_source))
+
+    log10_flux_8band = np.ascontiguousarray(population_eight_band(log10_flux_irac))
+    log10_b_pop = np.ascontiguousarray(np.asarray(log10_b_pop, dtype=np.float64))
+    bin_of_pop = np.ascontiguousarray(np.asarray(bin_of_pop, dtype=np.int64))
+    weight = np.ones(log10_b_pop.shape[0], dtype=np.float64)
+
+    path = config_module.product_path(config, "bms", "gal", "selection", "source", region=region)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    row_bytes = len(BAND_KEYS) * 8 + n_x * 8 + n_x * len(BAND_KEYS) * 8 + n_x * n_s * 4
+    with h5py.File(path, "w") as f:
+        f.attrs["GRANULE"] = "source"
+        f.create_dataset("X_LADDER", data=selection_module.X_LADDER.astype(np.float64))
+        f.create_dataset("LOG10_S_GRID", data=np.asarray(log10_s_grid, dtype=np.float64))
+        ds_eps = f.create_dataset("EPS", shape=(n_source, n_x, n_s), dtype="f2")
+        for start, stop in batches_module.batches(n_source, row_bytes, budget_bytes=batch_budget_bytes):
+            lim_b = np.ascontiguousarray(log10_lim[start:stop])
+            a_b = a_col[start:stop]
+            a_query_b = np.ascontiguousarray(selection_module.X_LADDER[None, :] * a_b[:, None])
+            w_dense_b = selection_module.law_dense_weight(a_query_b)
+            kappa_b = np.ascontiguousarray(selection_module.kappa_hybrid(config, w_dense_b))
+            eps = selection_module.pass_fractions_binned(
+                lim_b, a_query_b, kappa_b, log10_flux_8band, log10_b_pop, weight,
+                np.asarray(log10_s_grid, dtype=np.float64), bin_of_pop)
+            ds_eps[start:stop] = eps.astype("f2")
+    return path
+
+
+# ---------------------------------------------------------------------------
+# 3b. The two comparison variants, region median limit, column-grid nodes
+# ---------------------------------------------------------------------------
 
 def build_region_selection(a_nodes, kappa4_all, log10_flux_irac, finite_irac,
                             bin_idx, n_bins, limit_log10):
@@ -499,15 +568,13 @@ def build_region_selection(a_nodes, kappa4_all, log10_flux_irac, finite_irac,
     (already subsampled, star-galaxy-separated) SWIRE population that,
     dimmed through column `a_nodes[i]` in every IRAC band by
     `10**(-0.4*a*kappa_i(a))`, clears any two of the four bands (`eps`) or
-    both 3.6 and 4.5um (`eps_2band`, the SEDS-era comparison) at group
-    `k`'s own limit `limit_log10[k]`.
+    both 3.6 and 4.5um (`eps_2band`, the SEDS-era comparison) at row
+    `k`'s own limit `limit_log10[k]`. `K` is 1 here: the region's own
+    median 8-band limit, no depth grouping.
 
-    Vectorised over galaxies, bands and depth groups (one matmul against a
+    Vectorised over galaxies and bands (one matmul against a
     galaxy-to-bin indicator per node); looped only over the column-grid
-    nodes (183): the full (node, group, galaxy, band) array would be
-    ~890M elements at this subsample's size (K=16, ~120k galaxies), too
-    large to hold as one array, while a single node's own arrays are tens
-    of MB.
+    nodes (183).
     """
     n_gal = log10_flux_irac.shape[0]
     n_node = a_nodes.size
@@ -539,8 +606,14 @@ def build_region_selection(a_nodes, kappa4_all, log10_flux_irac, finite_irac,
     return eps, eps_2band, bin_counts
 
 
-def write_region(path, a_nodes, log10_s_grid, eps, eps_2band, eps_no_removal, knots,
+def write_region(path, a_nodes, log10_s_grid, eps_2band, eps_no_removal, median_limit_log10,
                   split_label, split_row):
+    """The region-level comparison product: `EPS_2BAND` and
+    `EPS_NO_REMOVAL`, one row each on `a_nodes` by `log10_s_grid`, both
+    evaluated at the region's own median 8-band limit (no depth
+    grouping). The per-source `EPS` lives in the sibling `prior/
+    selection/source` product (`build_source_selection`).
+    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "region"
@@ -549,32 +622,28 @@ def write_region(path, a_nodes, log10_s_grid, eps, eps_2band, eps_no_removal, kn
         f.attrs["SPLIT_RATIO_SWIRE_OVER_FAZIO"] = np.array(split_row["ratio"], dtype=np.float64)
         f.create_dataset("A_NODES", data=a_nodes.astype(np.float64))
         f.create_dataset("LOG10_S_GRID", data=log10_s_grid.astype(np.float64))
-        f.create_dataset("EPS", data=eps.astype(np.float32))
         f.create_dataset("EPS_2BAND", data=eps_2band.astype(np.float32))
         f.create_dataset("EPS_NO_REMOVAL", data=eps_no_removal.astype(np.float32))
-        f.create_dataset("GROUP_CENTRES", data=knots.group_centres.astype(np.float64))
-        f.create_dataset("REF_LOG10_FLIM", data=knots.ref_log10_flim.astype(np.float64))
+        f.create_dataset("MEDIAN_LOG10_FLIM", data=median_limit_log10.astype(np.float64))
 
 
 # ---------------------------------------------------------------------------
 # report-only checks (SPEC_PRIORS.md section 5.1 last rows, "Checks")
 # ---------------------------------------------------------------------------
 
-def regions_below_swire_depth(config):
-    """`{region: {band: True}}` for every region (all thirty, regardless of
-    which are being built) whose own reference IRAC limit is fainter than
-    SWIRE's 5-sigma depth in that band -- SWIRE would then not reach deep
-    enough to characterise the population the region's own catalogue can
-    see.
+def regions_below_swire_depth(config, region_names):
+    """`{region: {band: True}}` for `region_names` whose own median IRAC
+    limit is fainter than SWIRE's 5-sigma depth in that band -- SWIRE
+    would then not reach deep enough to characterise the population the
+    region's own catalogue can see.
     """
     swire_mjy = np.array([SWIRE_5SIGMA_UJY[b] / 1000.0 for b in IRAC_BAND_KEYS])
     below = {}
-    for region in regions_module.REGIONS:
-        knots = depth_groups_module.DepthGroups.read(_depth_groups_path(config), region.name)
-        ref_mjy = 10.0 ** knots.ref_log10_flim[IRAC_BAND_IDX]
-        flagged = ref_mjy < swire_mjy
+    for region in region_names:
+        median_irac_log10 = region_median_irac_limit(config, region)[IRAC_BAND_IDX]
+        flagged = 10.0 ** median_irac_log10 < swire_mjy
         if flagged.any():
-            below[region.name] = {b: bool(f) for b, f in zip(IRAC_BAND_KEYS, flagged) if f}
+            below[region] = {b: bool(f) for b, f in zip(IRAC_BAND_KEYS, flagged) if f}
     return below
 
 
@@ -603,18 +672,13 @@ def scosmos_8um_cumulative(config, threshold_mjy):
     return float(np.sum(good)) / SCOSMOS_AREA_DEG2
 
 
-def eps_at_survey_median(config, log10_flux_irac, finite_irac, bin_idx, log10_s_grid, a, s_mjy):
+def eps_at_survey_median(config, log10_flux_irac, finite_irac, bin_idx, log10_s_grid, a, s_mjy,
+                          limit_log10):
     """`(eps, eps_2band)` at one `(a, S)` point, evaluated directly against
-    the survey-median reference IRAC limit (median over all thirty
-    regions' own `REF_LOG10_FLIM`, no group Delta) -- the report-only
-    sensitivity point named in the brief, not a stored table.
+    `limit_log10` (the region's own median 8-band limit, IRAC bands only)
+    -- the report-only sensitivity point named in the brief, not a
+    stored table.
     """
-    refs = np.array([
-        depth_groups_module.DepthGroups.read(_depth_groups_path(config), r.name).ref_log10_flim[IRAC_BAND_IDX]
-        for r in regions_module.REGIONS
-    ])
-    limit_log10 = np.median(refs, axis=0)
-
     w = selection_module.law_dense_weight(np.array([a]))
     kappa4 = selection_module.kappa_hybrid(config, w)[0, IRAC_BAND_IDX]
     dimmed = log10_flux_irac - 0.4 * a * kappa4[None, :]
@@ -640,6 +704,8 @@ def build(config, regions=None):
     """Writes the survey-wide counts law and, for `regions` (default: all
     thirty), the per-region selection tables.
     """
+    import numba
+    numba.set_num_threads(max(1, int(config.n_jobs)))
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
     fazio_path = f"{config.data_root}/sky/download/fazio2004/fazio2004_table1_irac_counts.csv"
@@ -705,7 +771,7 @@ def build(config, regions=None):
     w_nodes = selection_module.law_dense_weight(a_nodes)
     kappa4_all = selection_module.kappa_hybrid(config, w_nodes)[:, IRAC_BAND_IDX]
 
-    below = regions_below_swire_depth(config)
+    below = regions_below_swire_depth(config, region_names)
     if below:
         print(f"gal: regions whose own reference limit is fainter than SWIRE's 5-sigma depth: {below}")
     else:
@@ -726,20 +792,22 @@ def build(config, regions=None):
           f"ratio={scosmos_80_01 / swire_80_01:.3f}" if swire_80_01 > 0 else
           "gal: S-COSMOS/SWIRE 8um N(>0.1mJy): swire count is zero, ratio undefined")
 
-    for a_check in (0.0, 2.0):
-        for s_check in (0.05, 0.5):
-            e4, e2 = eps_at_survey_median(config, log10_flux_irac, finite_irac, bin_idx, log10_s_grid,
-                                           a_check, s_check)
-            e4_nr, _e2_nr = eps_at_survey_median(config, log10_flux_irac_nr, finite_irac_nr, bin_idx_nr,
-                                                  log10_s_grid, a_check, s_check)
-            print(f"gal: survey-median eps(a={a_check}, S={s_check}mJy): 4-band={e4:.4f} "
-                  f"2-band={e2:.4f} no_removal={e4_nr:.4f} (adopted split: {split_label})")
-
     max_2band_violation = 0.0
     max_monotone_violation = 0.0
     for region in region_names:
-        knots, limit_log10 = region_irac_limits(config, region)
-        eps, eps_2band, bin_counts = build_region_selection(
+        median_limit_log10 = region_median_irac_limit(config, region)
+        limit_log10 = median_limit_log10[IRAC_BAND_IDX][None, :]
+
+        for a_check in (0.0, 2.0):
+            for s_check in (0.05, 0.5):
+                e4, e2 = eps_at_survey_median(config, log10_flux_irac, finite_irac, bin_idx, log10_s_grid,
+                                               a_check, s_check, limit_log10[0])
+                e4_nr, _e2_nr = eps_at_survey_median(config, log10_flux_irac_nr, finite_irac_nr, bin_idx_nr,
+                                                      log10_s_grid, a_check, s_check, limit_log10[0])
+                print(f"gal: {region} median-limit eps(a={a_check}, S={s_check}mJy): 4-band={e4:.4f} "
+                      f"2-band={e2:.4f} no_removal={e4_nr:.4f} (adopted split: {split_label})")
+
+        eps, eps_2band, _bin_counts = build_region_selection(
             a_nodes, kappa4_all, log10_flux_irac, finite_irac, bin_idx, log10_s_grid.size, limit_log10)
         eps_no_removal, _eps_2band_nr, _bin_counts_nr = build_region_selection(
             a_nodes, kappa4_all, log10_flux_irac_nr, finite_irac_nr, bin_idx_nr, log10_s_grid.size, limit_log10)
@@ -749,17 +817,22 @@ def build(config, regions=None):
         max_monotone_violation = max(max_monotone_violation, float(np.max(np.clip(d, 0.0, None))))
 
         S_lin = 10.0 ** log10_s_grid
-        k_median = int(np.argsort(knots.group_centres[:, IRAC_BAND_KEYS.index("I2")])[knots.n_groups // 2])
-        n_gal_region = float(np.trapz(counts_result["phi_s"] * eps[k_median, 0, :], S_lin))
-        n_gal_region_nr = float(np.trapz(counts_result["phi_s"] * eps_no_removal[k_median, 0, :], S_lin))
-        fazio_at_median_limit = float(fit.cumulative(10.0 ** knots.ref_log10_flim[IRAC_BAND_IDX[
+        n_gal_region = float(np.trapz(counts_result["phi_s"] * eps[0, 0, :], S_lin))
+        n_gal_region_nr = float(np.trapz(counts_result["phi_s"] * eps_no_removal[0, 0, :], S_lin))
+        fazio_at_median_limit = float(fit.cumulative(10.0 ** median_limit_log10[IRAC_BAND_IDX[
             IRAC_BAND_KEYS.index("I2")]]))
 
-        path = config_module.product_path(config, "bms", "gal", "prior", "region", region=region)
-        write_region(path, a_nodes, log10_s_grid, eps, eps_2band, eps_no_removal, knots, split_label, split_row)
-        print(f"gal: {region}: K={knots.n_groups} N_GAL(a=0, median group) adopted={n_gal_region:.1f} deg^-2 "
+        region_path = config_module.product_path(config, "bms", "gal", "prior", "region", region=region)
+        write_region(region_path, a_nodes, log10_s_grid, eps_2band[0], eps_no_removal[0], median_limit_log10,
+                     split_label, split_row)
+        print(f"gal: {region}: N_GAL(a=0, median limit) adopted={n_gal_region:.1f} deg^-2 "
               f"no_removal={n_gal_region_nr:.1f} deg^-2 "
-              f"Fazio N(>region median I2 limit)={fazio_at_median_limit:.1f} deg^-2 -> {path}")
+              f"Fazio N(>region median I2 limit)={fazio_at_median_limit:.1f} deg^-2 -> {region_path}")
+
+        source_path = build_source_selection(config, region, log10_flux_irac, log10_flux_irac[:, IRAC_BAND_KEYS.index("I2")],
+                                              bin_idx, log10_s_grid)
+        print(f"gal: {region}: per-source selection ({log10_flux_irac.shape[0]} population members, "
+              f"{selection_module.X_LADDER.size} x-nodes, {log10_s_grid.size} S-grid points) -> {source_path}")
 
     print(f"gal: acceptance: max(EPS_2BAND - EPS)={max_2band_violation:.6g} "
           f"(expect <= 0); max positive d(EPS)/d(node)={max_monotone_violation:.6g} (expect ~0)")
