@@ -22,15 +22,18 @@ an extrapolation. Both are added to each component's sigma in quadrature,
 at the source's own column, converted to dex.
 
 The zero point is one systematic per field (owner, 2026-09-06;
-`sky.derived.herschel_column.field_zeropoints`), not one survey constant:
-what folds into a Herschel-arm source's width is its own field's
-`ZP_SIGMA_FIELD` -- the uncertainty OF the per-field offset, not the
-offset itself, which the column stage never adds to `A_COL_K` (it is
-carried only as a sigma term; `sky.derived.column.merge_region` copies
-the Herschel arm's value through unchanged). `Kernel.mixture`/`.params`
-take an optional `field` array; when a source's field is not given, or
-is a field with no fit, the survey-wide RMS of the per-field values
-(`ZP_HERSCHEL_K`) stands in, so every existing call site is unaffected.
+`sky.derived.herschel_column.field_zeropoints`), not one survey constant,
+and a measured systematic left unapplied is an error of its own size: the
+column stage (`sky.derived.column.merge_region`) now subtracts the
+field's own offset from a Herschel-arm source's `A_COL_K` and writes the
+offset's uncertainty as that source's own `ZP_SIGMA_K` (0 for a
+Planck-arm source). `Kernel.mixture`/`.params`/`.pdf`/`.cdf` take that
+same per-source `ZP_SIGMA_K` directly (mag, already resolved to the
+source's field, or 0) rather than a field name -- simpler than having the
+kernel carry its own field lookup, since the column product has already
+done the join. Omitting it (every call site not yet updated) falls back
+to the survey-wide RMS `ZP_HERSCHEL_K` for every Herschel source, exactly
+the pre-fix behaviour.
 """
 
 import os
@@ -63,29 +66,12 @@ _SQRT2PI = float(np.sqrt(2.0 * np.pi))
 def _load_sigma_zp_herschel(config):
     """`SIGMA_ZP_K`: the survey-wide RMS of the per-field Herschel zero
     points (SPEC_PRIORS.md section 1.2), from
-    `sky.derived.herschel_column.write_field_zeropoint`. Kept as its own
-    reader, unchanged, for the one scalar a field-less caller falls back
-    to; `_load_herschel_field_zeropoints` reads the per-field table."""
+    `sky.derived.herschel_column.write_field_zeropoint` -- the fallback a
+    caller with no per-source `ZP_SIGMA_K` of its own gets."""
     path = config_module.product_path(config, "sky/derived", "herschel",
                                       "sigma", "survey")
     with h5py.File(path, "r") as f:
         return float(f["SIGMA_ZP_K"][()])
-
-
-def _load_herschel_field_zeropoints(config):
-    """`(names, zp_sigma_field)`: the per-field Herschel zero-point
-    uncertainty (`ZP_SIGMA_FIELD`, keyed by `FIELD_NAME`) from the same
-    product `_load_sigma_zp_herschel` reads its scalar from. Empty lists
-    if the product predates the per-field measurement (owner, 2026-09-06)
-    -- a caller then gets the survey-wide scalar for every source, exactly
-    as before."""
-    path = config_module.product_path(config, "sky/derived", "herschel", "sigma", "survey")
-    with h5py.File(path, "r") as f:
-        if "FIELD_NAME" not in f:
-            return [], np.empty(0, dtype=np.float64)
-        names = [x.decode("utf-8") if isinstance(x, bytes) else str(x) for x in f["FIELD_NAME"][:]]
-        zp_sigma_field = np.asarray(f["ZP_SIGMA_FIELD"][:], dtype=np.float64)
-    return names, zp_sigma_field
 
 
 def _mixture_mean_var(w, mu1, sigma1, mu2, sigma2):
@@ -103,17 +89,16 @@ class Kernel(object):
     Built by `build(config)`, loaded by `read(config)`.
     """
 
-    def __init__(self, a_nodes, w, mu, sigma, zp_herschel_k, field_names=(), zp_sigma_field=()):
+    def __init__(self, a_nodes, w, mu, sigma, zp_herschel_k):
         self._a_nodes = np.asarray(a_nodes, dtype=float)
         self._ln_nodes = np.log(self._a_nodes)
         self._w = np.asarray(w, dtype=float)          # (n_arm, n_node)
         self._mu = np.asarray(mu, dtype=float)         # (n_arm, n_node, 2)
         self._sigma = np.asarray(sigma, dtype=float)    # (n_arm, n_node, 2)
+        #: the survey-wide RMS of the per-field zero points -- the
+        #: fallback for a Herschel source whose call site does not yet
+        #: pass its own `ZP_SIGMA_K` (owner, 2026-09-06).
         self.zp_herschel_k = float(zp_herschel_k)
-        #: field name -> ZP_SIGMA_FIELD (mag), the per-field zero-point
-        #: uncertainty (owner, 2026-09-06); empty if the kernel product
-        #: predates it, so every lookup falls back to `zp_herschel_k`.
-        self._zp_sigma_by_field = dict(zip(field_names, (float(v) for v in zp_sigma_field)))
 
     @classmethod
     def read(cls, config):
@@ -123,12 +108,8 @@ class Kernel(object):
                 "prior.kernel: no kernel product at %s -- run the "
                 "'prior.kernel' RUNBOOK line first" % path)
         with h5py.File(path, "r") as f:
-            field_names = ([x.decode("utf-8") if isinstance(x, bytes) else str(x)
-                            for x in f["ZP_FIELD_NAME"][:]] if "ZP_FIELD_NAME" in f else [])
-            zp_sigma_field = f["ZP_SIGMA_FIELD"][:] if "ZP_SIGMA_FIELD" in f else []
             return cls(f["A_NODES"][:], f["MIX_W"][:], f["MIX_MU"][:],
-                       f["MIX_SIGMA"][:], float(f["ZP_HERSCHEL_K"][()]),
-                       field_names, zp_sigma_field)
+                       f["MIX_SIGMA"][:], float(f["ZP_HERSCHEL_K"][()]))
 
     def _interp_idx(self, a_col):
         """`(i, t)`: the node bracket and fractional position in `log A` for
@@ -204,34 +185,30 @@ class Kernel(object):
         mean, _ = _mixture_mean_var(w, mu[:, 0], sigma[:, 0], mu[:, 1], sigma[:, 1])
         return mean
 
-    def _zp_herschel_dex(self, a_col, arm_idx, field):
+    def _zp_herschel_dex(self, a_col, arm_idx, zp_sigma_k):
         """The zero-point term folded into a Herschel-arm source's width,
-        in dex at `a_col`: that source's own field's `ZP_SIGMA_FIELD` where
-        `field` names one and the kernel has a fit for it, else the
-        survey-wide RMS `zp_herschel_k` (owner, 2026-09-06). Zero for a
-        Planck-arm source, as before. `field` is optional and defaults to
-        the old, field-less behaviour -- every existing caller is
+        in dex at `a_col`: the source's own `ZP_SIGMA_K` (mag, already
+        resolved to its field by `sky.derived.column.merge_region`) where
+        given, else the survey-wide RMS `zp_herschel_k` (owner,
+        2026-09-06). Zero for a Planck-arm source either way. `zp_sigma_k`
+        is optional so every existing caller (none pass it yet) is
         unaffected."""
         is_h = arm_idx == _ARM_CODE["herschel"]
-        if field is None or not self._zp_sigma_by_field:
+        if zp_sigma_k is None:
             zp_ak = np.where(is_h, self.zp_herschel_k, 0.0)
         else:
-            field = np.asarray(field)
-            if field.dtype.kind == "S":
-                field = field.astype("U")
-            zp_ak = np.array([self._zp_sigma_by_field.get(str(fld), self.zp_herschel_k)
-                              for fld in field], dtype=float)
-            zp_ak = np.where(is_h, zp_ak, 0.0)
+            zp_ak = np.where(is_h, np.asarray(zp_sigma_k, dtype=float), 0.0)
         return zp_ak / (a_col * _LN10)
 
-    def mixture(self, a_col, sigma_col, map_class, field=None):
+    def mixture(self, a_col, sigma_col, map_class, zp_sigma_k=None):
         """`(w, mu, sigma)`: `w (n,)`, `mu (n, 2)`, `sigma (n, 2)` -- the
         pooled structural mixture at `a_col`, with the source's own
-        measurement uncertainty and, for Herschel, the field zero point
-        added to each component's width in quadrature, both converted to
-        dex at `a_col`. `field`, one field name per source, is optional;
-        omitting it (every current call site does) uses the survey-wide
-        zero point for every Herschel source, as before."""
+        measurement uncertainty and, for Herschel, the zero point's own
+        uncertainty added to each component's width in quadrature, both
+        converted to dex at `a_col`. `zp_sigma_k`, one per source (mag,
+        0 for Planck-arm), is optional; omitting it (every call site not
+        yet wired) uses the survey-wide zero point for every Herschel
+        source, as before the per-field fix."""
         a_col = np.asarray(a_col, dtype=float)
         sigma_col = np.asarray(sigma_col, dtype=float)
         arm_idx = self._arm_index(map_class)
@@ -241,18 +218,18 @@ class Kernel(object):
         # independently-typed string comparison against `map_class`
         # (the bug this fix removes: `mc == "herschel"` silently failed
         # for a numeric or bytes `map_class`, zeroing the zero point).
-        zp_dex = self._zp_herschel_dex(a_col, arm_idx, field)
+        zp_dex = self._zp_herschel_dex(a_col, arm_idx, zp_sigma_k)
         extra_var = sigma_col_dex * sigma_col_dex + zp_dex * zp_dex
         sigma = np.sqrt(sigma0 * sigma0 + extra_var[:, np.newaxis])
         return w, mu, sigma
 
-    def params(self, a_col, sigma_col, map_class, field=None):
+    def params(self, a_col, sigma_col, map_class, zp_sigma_k=None):
         """`(mu, sigma)`, each `(n,)`: the mixture's exact overall mean and
         standard deviation in log10 T at `a_col`, per-source terms
         included -- what a consumer that treats the kernel as a single
-        Gaussian needs. `field` is the same optional per-source field name
-        `mixture` takes."""
-        w, mu, sigma = self.mixture(a_col, sigma_col, map_class, field=field)
+        Gaussian needs. `zp_sigma_k` is the same optional per-source
+        zero-point uncertainty `mixture` takes."""
+        w, mu, sigma = self.mixture(a_col, sigma_col, map_class, zp_sigma_k=zp_sigma_k)
         mean, var = _mixture_mean_var(w, mu[:, 0], sigma[:, 0], mu[:, 1], sigma[:, 1])
         return mean, np.sqrt(np.maximum(var, 0.0))
 
@@ -262,11 +239,12 @@ class Kernel(object):
             t = np.broadcast_to(t[np.newaxis, :], (n, t.shape[0]))
         return t
 
-    def pdf(self, t, a_col, sigma_col, map_class):
+    def pdf(self, t, a_col, sigma_col, map_class, zp_sigma_k=None):
         """`p(t | a_col)` in `T` (per unit `A_K`): `(n, m)`, `t` broadcast
-        against the `n` sources; the mixture density."""
+        against the `n` sources; the mixture density. `zp_sigma_k` is
+        `mixture`'s same optional per-source zero-point uncertainty."""
         a_col = np.asarray(a_col, dtype=float)
-        w, mu, sigma = self.mixture(a_col, sigma_col, map_class)
+        w, mu, sigma = self.mixture(a_col, sigma_col, map_class, zp_sigma_k=zp_sigma_k)
         tt = self._broadcast_t(t, a_col.size)
         log10t = np.log10(tt)
         dens = np.zeros_like(log10t)
@@ -278,11 +256,12 @@ class Kernel(object):
                      / (sigma[:, k][:, np.newaxis] * _SQRT2PI))
         return dens / (tt * _LN10)
 
-    def cdf(self, t, a_col, sigma_col, map_class):
+    def cdf(self, t, a_col, sigma_col, map_class, zp_sigma_k=None):
         """`P(T <= t | a_col)`: `(n, m)`, same broadcasting as `pdf`; the
-        mixture CDF."""
+        mixture CDF. `zp_sigma_k` is `mixture`'s same optional per-source
+        zero-point uncertainty."""
         a_col = np.asarray(a_col, dtype=float)
-        w, mu, sigma = self.mixture(a_col, sigma_col, map_class)
+        w, mu, sigma = self.mixture(a_col, sigma_col, map_class, zp_sigma_k=zp_sigma_k)
         tt = self._broadcast_t(t, a_col.size)
         log10t = np.log10(tt)
         out = np.zeros_like(log10t)
@@ -340,7 +319,6 @@ def build(config, regions=None):
     subbeam_path = config_module.product_path(config, "sky/derived", "herschel",
                                               "subbeam", "region")
     zp = _load_sigma_zp_herschel(config)
-    zp_field_names, zp_sigma_field = _load_herschel_field_zeropoints(config)
     a_nodes = column_grid.nodes(config)
     n_node = a_nodes.size
 
@@ -372,12 +350,9 @@ def build(config, regions=None):
         f.create_dataset("MIX_SIGMA", data=SIGMA.astype(np.float64))
         f.create_dataset("MAP_CLASS_CODES", data=codes)
         f.create_dataset("ZP_HERSCHEL_K", data=np.float64(zp))
-        if zp_field_names:
-            f.create_dataset("ZP_FIELD_NAME", data=np.array([n.encode("utf-8") for n in zp_field_names]))
-            f.create_dataset("ZP_SIGMA_FIELD", data=np.asarray(zp_sigma_field, dtype=np.float64))
 
-    print("kernel: %d arms x %d nodes (mixture), zp_herschel_k=%.4f, %d fields -> %s"
-          % (len(_ARM_ORDER), n_node, zp, len(zp_field_names), out_path), flush=True)
+    print("kernel: %d arms x %d nodes (mixture), zp_herschel_k=%.4f -> %s"
+          % (len(_ARM_ORDER), n_node, zp, out_path), flush=True)
 
 
 if __name__ == "__main__":

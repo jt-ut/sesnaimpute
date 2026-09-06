@@ -102,6 +102,17 @@ def _source_tile_ids(config, region):
     return tile_of_pix[order][capped]
 
 
+def _read_zp_sigma_k(path, n):
+    """`ZP_SIGMA_K` (mag) per source -- the Herschel field zero point's own
+    uncertainty, 0 for a Planck-arm source (owner, 2026-09-06) -- if the
+    adopted column product has it, else zeros: a region not yet rebuilt
+    with the per-field offset runs exactly as before."""
+    with h5py.File(path, "r") as f:
+        if "ZP_SIGMA_K" in f:
+            return np.asarray(f["ZP_SIGMA_K"][:], dtype=np.float64)
+    return np.zeros(n, dtype=np.float64)
+
+
 def source_conditioning(config, region):
     """Every catalogued source's own conditioning scalars: `TILE_ID`, the
     shared column-kernel grid's own bracket on `A_COL_K` (`NODE_LO`/
@@ -125,10 +136,11 @@ def source_conditioning(config, region):
     sigma_col = np.asarray(adopted["A_COL_SIG_K"], dtype=np.float64)
     provenance = np.asarray(adopted["A_COL_PROVENANCE"])
     map_class = np.where(provenance == star_shapes._PLANCK_PROVENANCE_CODE, "planck", "herschel")
+    zp_sigma_k = _read_zp_sigma_k(adopted_path, a_col.size)
 
     return dict(n_source=f_lim_8band.shape[0], a_col=a_col, f_lim8=f_lim8,
                node_lo=node_lo, node_w=node_w, tile_id=tile_id,
-               sigma_col=sigma_col, map_class=map_class)
+               sigma_col=sigma_col, map_class=map_class, zp_sigma_k=zp_sigma_k)
 
 
 # ---------------------------------------------------------------------------
@@ -260,10 +272,11 @@ def family_counts(config, region, cls, cond):
     n_source = cond["n_source"]
     a_col, tile_id = cond["a_col"], cond["tile_id"]
     sigma_col, map_class = cond["sigma_col"], cond["map_class"]
+    zp_sigma_k = cond["zp_sigma_k"]
     amp = family_amplitude(config, region, cls, cond)
 
     kern = shape.kern
-    w_mix, mu_mix, sigma_mix = kern.mixture(a_col, sigma_col, map_class)  # (n,), (n,2), (n,2)
+    w_mix, mu_mix, sigma_mix = kern.mixture(a_col, sigma_col, map_class, zp_sigma_k=zp_sigma_k)  # (n,), (n,2), (n,2)
     log_shape_nodes = np.log(shape.shape_nodes)
     is_pahc = cls == "pahc"
     if is_pahc:
@@ -392,9 +405,10 @@ def gal_counts(config, region, cond):
     # each ladder cell, from the kernel's own closed-form CDF.
     kern = Kernel.read(config)
     a_col, sigma_col, map_class = cond["a_col"], cond["sigma_col"], cond["map_class"]
+    zp_sigma_k = cond["zp_sigma_k"]
     mids = 0.5 * (x_ladder[:-1] + x_ladder[1:])                    # (n_x_ladder - 1,)
     t_edges = mids[np.newaxis, :] * a_col[:, np.newaxis]           # (n_source, n_x_ladder - 1)
-    cdf_edges = kern.cdf(t_edges, a_col, sigma_col, map_class)     # (n_source, n_x_ladder - 1)
+    cdf_edges = kern.cdf(t_edges, a_col, sigma_col, map_class, zp_sigma_k=zp_sigma_k)     # (n_source, n_x_ladder - 1)
     w_x = np.empty((a_col.size, x_ladder.size), dtype=np.float64)
     w_x[:, 0] = cdf_edges[:, 0]
     w_x[:, 1:-1] = np.diff(cdf_edges, axis=1)
