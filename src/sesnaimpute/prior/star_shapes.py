@@ -1008,13 +1008,16 @@ class ClassShape(object):
             val_hi = (1.0 - t_limit) * v_hi_lo + t_limit * v_hi_hi
         return (1.0 - t_w) * val_lo + t_w * val_hi
 
-    def density(self, a, log10_b, tile_ids, a_col, sigma_col, map_class, f_lim8=None):
+    def density(self, a, log10_b, tile_ids, a_col, sigma_col, map_class, f_lim8=None,
+               zp_sigma_k=None):
         """`density(a, log10_b, tile_ids, a_col, sigma_col, map_class[,
-        f_lim8])`: per source `(w, mu, sigma) = Kernel.mixture(a_col,
-        sigma_col, map_class)`, `mu`/`sigma` shape `(n, 2)` -- each
-        component's own sub-beam width composed in quadrature with the
-        source's own measurement uncertainty and, for Herschel, the field
-        zero point. Each component is read separately
+        f_lim8, zp_sigma_k])`: per source `(w, mu, sigma) = Kernel.mixture(
+        a_col, sigma_col, map_class, zp_sigma_k=zp_sigma_k)`, `mu`/`sigma`
+        shape `(n, 2)` -- each component's own sub-beam width composed in
+        quadrature with the source's own measurement uncertainty and, for
+        Herschel, the field zero point's own uncertainty (`zp_sigma_k`,
+        mag, 0 for Planck-arm; the survey-wide RMS if omitted, owner,
+        2026-09-06). Each component is read separately
         (`_component_density`: its own shift and width-ladder bracket)
         and the two combined `w * D_1 + (1 - w) * D_2`. `a < 0` mapped to
         zero (`a == 0`, having no `log10 x`, reads as the declared
@@ -1032,7 +1035,7 @@ class ClassShape(object):
         log_x_raw = np.where(x_lin > 0.0, np.log10(np.clip(x_lin, _LOG_FLOOR, None)),
                              self.x_edges[0] - 1.0e3)
 
-        w, mu, sigma = self.kern.mixture(a_col, sigma_col, map_class)
+        w, mu, sigma = self.kern.mixture(a_col, sigma_col, map_class, zp_sigma_k=zp_sigma_k)
         val_1 = self._component_density(log_x_raw, log10_b, tile_ids, mu[:, 0], sigma[:, 0], f_lim8)
         val_2 = self._component_density(log_x_raw, log10_b, tile_ids, mu[:, 1], sigma[:, 1], f_lim8)
         out = w * val_1 + (1.0 - w) * val_2

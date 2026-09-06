@@ -788,24 +788,32 @@ class YsoShape(object):
         return np.where(self.is_herschel[rows], "herschel", "planck")
 
     # -- public: each source's own exact column and measurement error --
-    def marginal_exact(self, a, rows, a_col, sigma_col):
+    def marginal_exact(self, a, rows, a_col, sigma_col, zp_sigma_k=None):
         """`p(a | A_s)` at a batch of sources, each at its own exact
         adopted column and measurement uncertainty (SPEC_PRIORS.md
         section 1.2/6.3): no approximation. The column kernel is a two-
         component mixture (`Kernel.mixture`); the marginal under a
         mixture is the weighted sum of the one-component marginal at each
-        component's own `(mu, sigma)` (class docstring)."""
-        w, mu, sigma = self.kernel.mixture(a_col, sigma_col, self._map_class(rows))
+        component's own `(mu, sigma)` (class docstring). `zp_sigma_k`,
+        one per source (mag, 0 for Planck-arm), is the source's own
+        Herschel field zero-point uncertainty (owner, 2026-09-06); `rows`
+        indexes the sightline, not the source, so this cannot come from
+        anywhere but the caller's own per-source read. Omitting it falls
+        back to the survey-wide RMS, as before."""
+        w, mu, sigma = self.kernel.mixture(a_col, sigma_col, self._map_class(rows),
+                                           zp_sigma_k=zp_sigma_k)
         m1 = self._marginal_rows(a, rows, a_col, mu[:, 0], sigma[:, 0])
         m2 = self._marginal_rows(a, rows, a_col, mu[:, 1], sigma[:, 1])
         return w * m1 + (1.0 - w) * m2
 
-    def cdf_exact(self, a, rows, a_col, sigma_col):
+    def cdf_exact(self, a, rows, a_col, sigma_col, zp_sigma_k=None):
         """`cdf` at each source's own exact column and measurement
         uncertainty, matching `marginal_exact`: the weighted sum of the
         one-component cdf at each mixture component's own `(mu,
-        sigma)`."""
-        w, mu, sigma = self.kernel.mixture(a_col, sigma_col, self._map_class(rows))
+        sigma)`. `zp_sigma_k` is `marginal_exact`'s same optional
+        per-source zero-point uncertainty."""
+        w, mu, sigma = self.kernel.mixture(a_col, sigma_col, self._map_class(rows),
+                                           zp_sigma_k=zp_sigma_k)
         c1 = self._cdf_rows(a, rows, a_col, mu[:, 0], sigma[:, 0])
         c2 = self._cdf_rows(a, rows, a_col, mu[:, 1], sigma[:, 1])
         return w * c1 + (1.0 - w) * c2
