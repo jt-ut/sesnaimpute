@@ -830,27 +830,49 @@ def select_shape_nodes(candidate_a, shape_fn, eps=EPS_SHAPE):
 # analytic tails beyond the tabulated box (step 2), two-sided on log10 x
 # ---------------------------------------------------------------------------
 
-def _edge_tail(marginal, grid, side):
+def _edge_tail(marginal, grid, cell, side):
     """One edge's matched-slope exponential tail, `(slope, mass)` --
     `(0.0, 0.0)` where matching would require an upward slope (never
-    extrapolate upward). `side="hi"` matches the grid's last two points
-    (slope must be negative); `side="lo"` matches the first two (slope
-    must be positive)."""
+    extrapolate upward). `side="hi"` matches the grid's last two bin
+    CENTRES (slope must be negative); `side="lo"` matches the first two
+    (slope must be positive). `marginal` has already summed the OTHER
+    axis (`finalise_node_shape`'s own x/b marginals), so its value at a
+    centre is a BIN MASS over one cell of width `cell` on THIS axis, not
+    a density -- dividing by `cell` is the same bin-mass-to-density
+    conversion `prior.callable`'s own module docstring applies to a
+    pointwise `ClassShape.density` read (`10_POSTERIOR.md` section 3's
+    normalisation), and it is what the mass integral below needs to be a
+    probability rather than a bin count (omitting it declared a tail
+    mass smaller than the true one by a factor of `cell`, while
+    `ClassShape._eval_node`'s own tail, read at the true edge with no
+    such factor, carried far more mass than that declaration -- brief
+    item 1's "large deviations"). The declared mass integrates the model
+    from the TABULATED EDGE -- half a cell beyond the outermost centre,
+    where the tabulated array's own last bin already stops -- to
+    infinity, not from the centre itself, so it does not double the mass
+    that bin already carries; `ClassShape._eval_node` reads the same
+    centre value and the same slope and reaches the same edge amplitude
+    by the same algebra (`exp(slope . half_cell) . exp(slope . (query -
+    edge)) == exp(slope . (query - centre))`), so declaration and
+    evaluation are one model, not two."""
     if side == "hi":
-        v0, v1, g0, g1, edge_val = marginal[-2], marginal[-1], grid[-2], grid[-1], marginal[-1]
+        v0, v1, g0, g1 = marginal[-2], marginal[-1], grid[-2], grid[-1]
     else:
-        v0, v1, g0, g1, edge_val = marginal[0], marginal[1], grid[0], grid[1], marginal[0]
-    if not (v0 > 0.0 and v1 > 0.0 and edge_val > 0.0 and g1 > g0):
+        v0, v1, g0, g1 = marginal[0], marginal[1], grid[0], grid[1]
+    if not (v0 > 0.0 and v1 > 0.0 and g1 > g0):
         return 0.0, 0.0
     slope = float((np.log(v1) - np.log(v0)) / (g1 - g0))
+    half_cell = 0.5 * cell
     if side == "hi":
         if not slope < 0.0:
             return 0.0, 0.0
-        mass = edge_val / (-slope)
+        density_at_edge = (v1 / cell) * np.exp(slope * half_cell)
+        mass = density_at_edge / (-slope)
     else:
         if not slope > 0.0:
             return 0.0, 0.0
-        mass = edge_val / slope
+        density_at_edge = (v0 / cell) * np.exp(-slope * half_cell)
+        mass = density_at_edge / slope
     return slope, float(mass)
 
 
@@ -863,12 +885,14 @@ def finalise_node_shape(conv, x_centers, b_centers):
     interior array so interior mass plus declared tail mass sums to
     exactly one (algebraic acceptance: `DENSITY.sum() == 1 -
     MASS_OUTSIDE`)."""
+    x_cell = float(x_centers[1] - x_centers[0])
+    b_cell = float(b_centers[1] - b_centers[0])
     x_marg = conv.sum(axis=1)
     b_marg = conv.sum(axis=0)
-    x_lo_slope, x_lo_mass = _edge_tail(x_marg, x_centers, "lo")
-    x_hi_slope, x_hi_mass = _edge_tail(x_marg, x_centers, "hi")
-    b_lo_slope, b_lo_mass = _edge_tail(b_marg, b_centers, "lo")
-    b_hi_slope, b_hi_mass = _edge_tail(b_marg, b_centers, "hi")
+    x_lo_slope, x_lo_mass = _edge_tail(x_marg, x_centers, x_cell, "lo")
+    x_hi_slope, x_hi_mass = _edge_tail(x_marg, x_centers, x_cell, "hi")
+    b_lo_slope, b_lo_mass = _edge_tail(b_marg, b_centers, b_cell, "lo")
+    b_hi_slope, b_hi_mass = _edge_tail(b_marg, b_centers, b_cell, "hi")
     tail_mass = x_lo_mass + x_hi_mass + b_lo_mass + b_hi_mass
     total = float(conv.sum()) + tail_mass
     density = (conv / total) if total > 0.0 else conv
@@ -1300,7 +1324,16 @@ class ClassShape(object):
         """One shape node's (PAHC: one shape-node-and-limit-grid's) value,
         blending the interior bicubic read with the declared analytic
         tail beyond either `log10 x` edge or either `log10 B` edge
-        (`finalise_node_shape`)."""
+        (`finalise_node_shape`). The tail amplitude is read at the
+        tabulated grid's own outermost bin CENTRE -- never extrapolated
+        past the bicubic fit's own support -- and the exponent is
+        referenced from that same centre, matching `_edge_tail`'s own
+        declaration exactly (that function's own docstring algebra), so
+        the mass this evaluator delivers when integrated is the mass
+        `finalise_node_shape` declared as `MASS_OUTSIDE`, not a
+        different number reached by extrapolating a spline past its own
+        edge with an unrelated amplitude and reference point (brief item
+        1)."""
         interior = self._eval_interior(tile_ids, node_idx, log_x, logb, limit_idx)
         x_lo = log_x < self.x_edges[0]
         x_hi = log_x > self.x_edges[-1]
@@ -1308,9 +1341,18 @@ class ClassShape(object):
         b_hi = logb > self.b_edges[-1]
         if not (x_lo.any() or x_hi.any() or b_lo.any() or b_hi.any()):
             return interior
-        edge_x = np.clip(log_x, self.x_edges[0], self.x_edges[-1])
-        edge_b = np.clip(logb, self.b_edges[0], self.b_edges[-1])
-        edge_val = self._eval_interior(tile_ids, node_idx, edge_x, edge_b, limit_idx)
+        # a corner (both axes out of range) reads the tail along the axis
+        # that triggers first in the mutually exclusive chain below (x
+        # over b, matching `finalise_node_shape`'s own two independent,
+        # one-axis-at-a-time tail declarations) -- the OTHER axis's own
+        # query value, clipped into the box, is what that axis's
+        # amplitude is read at.
+        centre_x = np.where(x_lo, self.x_centers[0], np.where(x_hi, self.x_centers[-1], log_x))
+        centre_b = np.where(b_lo, self.b_centers[0], np.where(b_hi, self.b_centers[-1], logb))
+        clip_b = np.clip(logb, self.b_edges[0], self.b_edges[-1])
+        clip_x = np.clip(log_x, self.x_edges[0], self.x_edges[-1])
+        amp_x = self._eval_interior(tile_ids, node_idx, centre_x, clip_b, limit_idx)
+        amp_b = self._eval_interior(tile_ids, node_idx, clip_x, centre_b, limit_idx)
         if limit_idx is None:
             idx = (tile_ids, node_idx)
         else:
@@ -1318,12 +1360,12 @@ class ClassShape(object):
         txlo, txhi = self.tail_x_lo[idx], self.tail_x_hi[idx]
         tblo, tbhi = self.tail_b_lo[idx], self.tail_b_hi[idx]
         out = interior.copy()
-        out = np.where(x_lo, edge_val * np.exp(txlo * (log_x - self.x_edges[0])), out)
-        out = np.where(x_hi & ~x_lo, edge_val * np.exp(txhi * (log_x - self.x_edges[-1])), out)
+        out = np.where(x_lo, amp_x * np.exp(txlo * (log_x - self.x_centers[0])), out)
+        out = np.where(x_hi & ~x_lo, amp_x * np.exp(txhi * (log_x - self.x_centers[-1])), out)
         out = np.where(b_lo & ~x_lo & ~x_hi,
-                      edge_val * np.exp(tblo * (logb - self.b_edges[0])), out)
+                      amp_b * np.exp(tblo * (logb - self.b_centers[0])), out)
         out = np.where(b_hi & ~x_lo & ~x_hi,
-                      edge_val * np.exp(tbhi * (logb - self.b_edges[-1])), out)
+                      amp_b * np.exp(tbhi * (logb - self.b_centers[-1])), out)
         return out
 
     def density(self, a, log10_b, tile_ids, a_col, f_lim8=None):
