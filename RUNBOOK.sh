@@ -100,7 +100,7 @@ PY sesnaimpute.prior.young_stars   # expected young stars per STAR anchor pixel/
 PY sesnaimpute.prior.anchor_observed   # observed STAR anchor joint histogram, young-star subtracted (SPEC_PRIORS.md sec 2.1)
 PY sesnaimpute.prior.anchor_weights   # per-tile STAR anchor weight W, cluster exclusion, faint-end trend (SPEC_PRIORS.md sec 2.1)
 PY sesnaimpute.prior.star_population   # per-tile field-star placement (u, a) and anchor weight W (SPEC_PRIORS.md sec 1.4, 1.5, 2.1, 2.2)
-PY sesnaimpute.prior.star_shapes   # per-tile STAR/AGB/PAHC shapes, kernel-convolved at fidelity-chosen nodes and grid (SPEC_PRIORS.md sec 2.2, 3, 4; IMPLEMENTATION.md sec 3)
+PY sesnaimpute.prior.star_shapes   # per-tile STAR/AGB/PAHC shapes on a fixed 64x64 grid and ten fixed shape nodes, log-normal kernel shift+smoothing (SPEC_PRIORS.md sec 2.2, 3, 4; IMPLEMENTATION.md sec 3)
 PY sesnaimpute.prior.star_selection   # STAR/AGB/PAHC exact-selection tables per depth group (SPEC_PRIORS.md sec 1.3, 2.1, 3, 4)
 PY sesnaimpute.prior.yso_selection
 PY sesnaimpute.prior.h2s                    # H2S: law-blurred field, region lognormal + knot-colour selection (SPEC_PRIORS.md sec 7)
