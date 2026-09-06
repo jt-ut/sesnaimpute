@@ -40,12 +40,13 @@ batch's own flattened ``(source, x, b)`` grid.
 GAL (spec section 5.1) needs no shape: a galaxy's ``a`` is the true
 column, spread around the source's own adopted column ``A_s`` by the
 same kernel mixture (``prior.kernel.Kernel``) every other class reads.
-Its per-source selection (``prior.gal``'s ``EPS``, on ``X_LADDER`` by
-``LOG10_S_GRID``) is read at every ladder point, the survey counts law
-integrated out first (``numpy.trapz`` over ``LOG10_S_GRID``, normalised
-to one), then the ladder points combined by the kernel's own exact
-probability mass in each ladder cell (``Kernel.cdf``, no bicubic, no
-Monte Carlo).
+Its selection is evaluated on the fly, per batch of sources, at every
+``X_LADDER`` point (``prior.gal.source_selection_from_cdf`` against the
+survey-wide colour-CDF tables -- there is no per-source galaxy product,
+owner 2026-09-06), the survey counts law integrated out first
+(``numpy.trapz`` over ``LOG10_S_GRID``, normalised to one), then the
+ladder points combined by the kernel's own exact probability mass in
+each ladder cell (``Kernel.cdf``, no bicubic, no Monte Carlo).
 
 Writes, per region, ``bms/table/counts-star-family_table_source.hdf5``:
 root attr ``GRANULE = "source"``; ``TILE_ID``, ``NODE_LO``, ``NODE_W``
@@ -67,6 +68,7 @@ from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
 from sesnaimpute.prior import column_grid, selection, star_population, star_shapes
+from sesnaimpute.prior import gal as gal_module
 
 FAMILY_CLASSES = ("star", "agb", "pahc")
 
@@ -168,19 +170,10 @@ def read_family_selection(config, region, cls):
     return eps, x_ladder, b_grid
 
 
-def read_gal_selection(config, region):
-    """`(eps, x_ladder, log10_s_grid)`: GAL's exact per-source selection
-    off `prior.gal`'s product -- `eps` is `(n_source, n_x, n_s)`."""
-    path = config_module.product_path(config, "bms", "gal", "selection", "source", region=region)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "prior.counts_star_family: no GAL selection product for region %r at %s -- "
-            "run the 'prior.gal' RUNBOOK line first" % (region, path))
-    with h5py.File(path, "r") as f:
-        eps = f["EPS"][:].astype(np.float64)
-        x_ladder = f["X_LADDER"][:].astype(np.float64)
-        log10_s_grid = f["LOG10_S_GRID"][:].astype(np.float64)
-    return eps, x_ladder, log10_s_grid
+#: `gal_counts`'s own per-batch working-set budget (owner, 2026-09-06: no
+#: per-source galaxy product -- the exact selection is read from the
+#: survey-wide colour-CDF tables on the fly, per batch, instead).
+GAL_BATCH_BUDGET_BYTES = 512 << 20
 
 
 # ---------------------------------------------------------------------------
@@ -369,52 +362,69 @@ def gal_counts(config, region, cond):
     exactly, so the extinction factor is the kernel's own mixture
     density in `a` (`Kernel`'s two-component log-normal mixture), not a
     single point at `x = a / A_s = 1`: the source's own selection curve
-    is read at every ladder point (`x_ladder`), the flux integral done
-    first at each of those (the counts law normalised to one), then the
-    result is weighted by the exact PROBABILITY MASS the mixture places
-    in each ladder cell -- the cell edges are the midpoints between
-    consecutive ladder nodes (the first cell running down to `a = 0`,
-    the last running up to `a = Infinity`), read off the kernel's own
-    closed-form CDF (`Kernel.cdf`, the two-Gaussian mixture in `log10
-    T`), so no bicubic and no Monte Carlo, only the ladder's own
-    resolution."""
+    is read at every ladder point (`selection.X_LADDER`), the flux
+    integral done first at each of those (the counts law normalised to
+    one), then the result is weighted by the exact PROBABILITY MASS the
+    mixture places in each ladder cell -- the cell edges are the
+    midpoints between consecutive ladder nodes (the first cell running
+    down to `a = 0`, the last running up to `a = Infinity`), read off the
+    kernel's own closed-form CDF (`Kernel.cdf`, the two-Gaussian mixture
+    in `log10 T`), so no bicubic and no Monte Carlo, only the ladder's
+    own resolution.
+
+    There is no per-source galaxy selection product (owner, 2026-09-06):
+    `eps` is evaluated on the fly, per batch of sources, by
+    `prior.gal.source_selection_from_cdf` against the survey-wide
+    colour-CDF tables (`prior.gal.read_cdf_tables`, loaded once), the
+    working set kept under `GAL_BATCH_BUDGET_BYTES` per batch."""
     from sesnaimpute.prior.kernel import Kernel
 
-    eps, x_ladder, log10_s_grid = read_gal_selection(config, region)
-
+    x_ladder = selection.X_LADDER
     counts_path = config_module.product_path(config, "bms", "gal", "counts", "survey")
     with h5py.File(counts_path, "r") as f:
-        law_log10_s_grid = f["LOG10_S_GRID"][:].astype(np.float64)
+        log10_s_grid = f["LOG10_S_GRID"][:].astype(np.float64)
         phi_s = f["PHI_S"][:].astype(np.float64)
         fazio_params = dict(log10_a=float(f["LOG10_A"][()]), log10_s_break=float(f["LOG10_S_BREAK"][()]),
                             alpha_faint=float(f["ALPHA_FAINT"][()]), alpha_bright=float(f["ALPHA_BRIGHT"][()]),
                             smoothness=float(f["SMOOTHNESS"][()]))
-    if not np.allclose(law_log10_s_grid, log10_s_grid):
-        raise ValueError("prior.counts_star_family: GAL's per-source selection and the survey counts "
-                         "law disagree on LOG10_S_GRID for region %r" % region)
+    cdf = gal_module.read_cdf_tables(counts_path)
 
     s_lin = 10.0 ** log10_s_grid
     ln10 = float(np.log(10.0))
     w1 = phi_s * s_lin * ln10          # Integral phi(S) eps dS = Integral w1(S) eps dlogS
     amplitude = float(np.trapz(w1, log10_s_grid))
 
-    # the flux integral at every ladder x point: (n_source, n_x_ladder)
-    eps_s_integral = np.trapz(eps * w1[np.newaxis, np.newaxis, :], log10_s_grid, axis=2) / amplitude
-
-    # the extinction integral: the mixture's exact probability mass in
-    # each ladder cell, from the kernel's own closed-form CDF.
-    kern = Kernel.read(config)
+    log10_lim = np.log10(limits_module.limits(config, region))     # (n_source, 8)
     a_col, sigma_col, map_class = cond["a_col"], cond["sigma_col"], cond["map_class"]
     zp_sigma_k = cond["zp_sigma_k"]
-    mids = 0.5 * (x_ladder[:-1] + x_ladder[1:])                    # (n_x_ladder - 1,)
-    t_edges = mids[np.newaxis, :] * a_col[:, np.newaxis]           # (n_source, n_x_ladder - 1)
-    cdf_edges = kern.cdf(t_edges, a_col, sigma_col, map_class, zp_sigma_k=zp_sigma_k)     # (n_source, n_x_ladder - 1)
-    w_x = np.empty((a_col.size, x_ladder.size), dtype=np.float64)
-    w_x[:, 0] = cdf_edges[:, 0]
-    w_x[:, 1:-1] = np.diff(cdf_edges, axis=1)
-    w_x[:, -1] = 1.0 - cdf_edges[:, -1]
+    n_source = a_col.size
+    n_x, n_s = x_ladder.size, log10_s_grid.size
 
-    z_gal = np.sum(w_x * eps_s_integral, axis=1)
+    kern = Kernel.read(config)
+    mids = 0.5 * (x_ladder[:-1] + x_ladder[1:])                    # (n_x - 1,)
+
+    row_bytes = n_x * (log10_lim.shape[1] * 8 + 8) + n_x * n_s * 8 * 3
+    z_gal = np.zeros(n_source, dtype=np.float64)
+    for start, stop in batches_module.batches(n_source, row_bytes, budget_bytes=GAL_BATCH_BUDGET_BYTES):
+        lim_b = np.ascontiguousarray(log10_lim[start:stop])
+        a_b = a_col[start:stop]
+        a_query_b = np.ascontiguousarray(x_ladder[np.newaxis, :] * a_b[:, np.newaxis])
+        w_dense_b = selection.law_dense_weight(a_query_b)
+        kappa_b = np.ascontiguousarray(selection.kappa_hybrid(config, w_dense_b))
+        eps_b = gal_module.source_selection_from_cdf(lim_b, a_query_b, kappa_b, log10_s_grid, cdf)
+
+        eps_s_integral_b = np.trapz(eps_b * w1[np.newaxis, np.newaxis, :], log10_s_grid, axis=2) / amplitude
+
+        t_edges = mids[np.newaxis, :] * a_b[:, np.newaxis]         # (n_batch, n_x - 1)
+        cdf_edges = kern.cdf(t_edges, a_b, sigma_col[start:stop], map_class[start:stop],
+                              zp_sigma_k=zp_sigma_k[start:stop])
+        w_x = np.empty((stop - start, n_x), dtype=np.float64)
+        w_x[:, 0] = cdf_edges[:, 0]
+        w_x[:, 1:-1] = np.diff(cdf_edges, axis=1)
+        w_x[:, -1] = 1.0 - cdf_edges[:, -1]
+
+        z_gal[start:stop] = np.sum(w_x * eps_s_integral_b, axis=1)
+
     n_gal = amplitude * z_gal
     return n_gal, z_gal, fazio_params
 

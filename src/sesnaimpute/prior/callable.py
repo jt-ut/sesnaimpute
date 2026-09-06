@@ -10,18 +10,21 @@ sightline shape and its shared column kernel (`prior.yso.YsoShape`,
 and the H2S region lognormal (`bms/h2s/prior_h2s_region`) that `cls`
 actually needs -- `cls=None` loads all six, for the identity check below;
 a fitter worker scoped to one class loads only that class's own
-materials and `log_density` refuses every other class. Every class's
-selection is now read directly
-per source from the exact per-source selection products (`prior.
-star_selection`, `prior.gal`, `prior.h2s`): `EPS_<cls>[s]`, an `(n_x, n_b)`
-curve on the shared scaled-extinction ladder `X_LADDER` (`x = a / A_s`) by
-the class's own second axis. `SourcePrior.prepare(rows)` gathers, once per
-batch, only these three products' rows (float16 on disk, converted to
-float32 for the batch) -- the one quantity too large to hold for a whole
-survey in memory at once. `log_density(cls, rows, a, log10_b,
-model_index=None)` returns `ln lambda~_cls(a, log10 B | I_s)`, vectorised
-over the batch of sources and query points (rule 8): no Python loop over
-either.
+materials and `log_density` refuses every other class. STAR/AGB/PAHC and
+H2S read their selection directly per source from their own exact
+per-source selection products (`prior.star_selection`, `prior.h2s`):
+`EPS_<cls>[s]`, an `(n_x, n_b)` curve on the shared scaled-extinction
+ladder `X_LADDER` (`x = a / A_s`) by the class's own second axis.
+`SourcePrior.prepare(rows)` gathers, once per batch, only these two
+products' rows (float16 on disk, converted to float32 for the batch) --
+the one quantity too large to hold for a whole survey in memory at once.
+GAL has no per-source product (owner, 2026-09-06): its selection is
+looked up on the fly, per query point, in the survey-wide colour-CDF
+tables loaded once in `__init__`, from the source's own four IRAC
+limits (already resident in the region table) -- no `prepare` gather.
+`log_density(cls, rows, a, log10_b, model_index=None)` returns `ln
+lambda~_cls(a, log10 B | I_s)`, vectorised over the batch of sources and
+query points (rule 8): no Python loop over either.
 
 **The five formulas** (`SPEC_PRIORS.md` section 0.2's identity `N_C(s) =
 Integral p_C(a,b|I_s) eps_s(a,b) da db`, `lambda~_C = p_C eps_s / N_C`):
@@ -61,11 +64,18 @@ GAL
 
     `p(log10 S, a)` is the counts law's own normalised density
     (`gal_phi_total = Integral phi(S) . S ln10 dlog10 S`, a survey-wide
-    constant) times this source's own `EPS[s]` (`prior.gal`'s per-source
-    selection, an `(n_x, n_s)` curve on `X_LADDER` x `LOG10_S_GRID`),
-    bilinearly interpolated at `x = a / A_s` and `log10 S = log10 B +
-    log10 f_ref,h` (the query's library model's own 4.5 micron reference
-    flux, `galz_register`'s `F_REF_I2`).
+    constant) times this source's own selection, evaluated at `log10 S =
+    log10 B + log10 f_ref,h` (the query's library model's own 4.5 micron
+    reference flux, `galz_register`'s `F_REF_I2`) and `a`: there is no
+    per-source galaxy product (owner, 2026-09-06); the selection is
+    looked up directly, inside the compiled kernel, in the survey-wide
+    colour-CDF tables (`prior.gal.read_cdf_tables`, loaded once in
+    `__init__`) from this source's own four IRAC limits (`F_LIM_50_MJY`,
+    already in the region table) and the hybrid law's dimming at `a`
+    (`selection.law_dense_weight`/`kappa_hybrid`, inlined as scalar
+    arithmetic), linearly interpolated only across the S-grid's bins --
+    `prior.gal.source_selection_from_cdf`'s own arithmetic, not a
+    bilinear read of a stored array.
 
     `Z_GAL` is the table's own stored normaliser (`counts_star_family.
     gal_counts`'s per-source integral), read directly rather than
@@ -106,15 +116,17 @@ YSO/H2S are analytic in `a` throughout their support and Gaussian in
 `log10 B`.
 
 **Per-batch tabulation (`prepare`).** The only quantity too large to hold
-in memory for a whole survey at once is the three per-source selection
-products' `EPS` arrays (float16 on disk, `(n_source, n_x, n_b-or-s-or-
-sigma)`): `prepare(rows)` reads and float32-converts only the rows of the
-current batch (about ten thousand sources, `CODING_RULES.md` 10b) from
-each of the three files. Every other per-source quantity (`A_COL_K`,
-`A_COL_SIG_K`, the ridge, the normalisers) is already resident in the
-region table loaded once in `__init__`, and every extinction marginal
-(GAL's kernel `pdf`, YSO/H2S's `marginal_exact`) is now closed-form, so
-`log_density` needs no further per-batch tabulation for them.
+in memory for a whole survey at once is the STAR-family and H2S
+per-source selection products' `EPS` arrays (float16 on disk, `(n_source,
+n_x, n_b-or-sigma)`): `prepare(rows)` reads and float32-converts only the
+rows of the current batch (about ten thousand sources, `CODING_RULES.md`
+10b) from each of the two files. GAL needs no gather -- there is no
+per-source galaxy product (owner, 2026-09-06). Every other per-source
+quantity (`A_COL_K`, `A_COL_SIG_K`, the ridge, the normalisers, GAL's own
+four IRAC limits) is already resident in the region table loaded once in
+`__init__`, and every extinction marginal (GAL's kernel `pdf`, YSO/H2S's
+`marginal_exact`) is now closed-form, so `log_density` needs no further
+per-batch tabulation for them.
 """
 
 import os
@@ -126,6 +138,8 @@ import numpy as np
 
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
+from sesnaimpute.prior import gal as gal_module
+from sesnaimpute.prior import selection as selection_module
 from sesnaimpute.prior import star_shapes
 from sesnaimpute.prior import table as table_module
 from sesnaimpute.prior import yso as yso_module
@@ -270,23 +284,105 @@ def _bracket(grid, x):
     return lo, t
 
 
+#: The hybrid extinction law's own ramp domain (`selection.LAW_RAMP_LO`/
+#: `LAW_RAMP_HI`), inlined as compile-time constants so the compiled GAL
+#: kernel needs no Python call back into `selection.law_dense_weight`
+#: per point (owner, 2026-09-06: no per-source galaxy product -- the
+#: kernel now dims the source's own four IRAC limits itself).
+_LAW_RAMP_LO = selection_module.LAW_RAMP_LO
+_LAW_RAMP_HI = selection_module.LAW_RAMP_HI
+
+
 @numba.njit(cache=True, fastmath=True)
-def _gal_log_density_numba(a, b, mi, a_col, sigma_col, arm_idx, z, local_idx,
-                           gal_fref, eps_batch, x_ladder, log10_s_grid, phi_density_grid,
+def _interp1_scalar(row, axis, x):
+    i, t = _bracket(axis, x)
+    return row[i] + t * (row[i + 1] - row[i])
+
+
+@numba.njit(cache=True, fastmath=True)
+def _interp2_scalar(table, axis_a, axis_b, xa, xb):
+    ia, ta = _bracket(axis_a, xa)
+    ib, tb = _bracket(axis_b, xb)
+    v_lo = table[ia, ib] + tb * (table[ia, ib + 1] - table[ia, ib])
+    v_hi = table[ia + 1, ib] + tb * (table[ia + 1, ib + 1] - table[ia + 1, ib])
+    return v_lo + ta * (v_hi - v_lo)
+
+
+@numba.njit(cache=True, fastmath=True)
+def _interp3_scalar(table, axis_a, axis_b, axis_c, xa, xb, xc):
+    ia, ta = _bracket(axis_a, xa)
+    ib, tb = _bracket(axis_b, xb)
+    ic, tc = _bracket(axis_c, xc)
+    v00 = table[ia, ib, ic] + tc * (table[ia, ib, ic + 1] - table[ia, ib, ic])
+    v01 = table[ia, ib + 1, ic] + tc * (table[ia, ib + 1, ic + 1] - table[ia, ib + 1, ic])
+    v10 = table[ia + 1, ib, ic] + tc * (table[ia + 1, ib, ic + 1] - table[ia + 1, ib, ic])
+    v11 = table[ia + 1, ib + 1, ic] + tc * (table[ia + 1, ib + 1, ic + 1] - table[ia + 1, ib + 1, ic])
+    v_lo = v00 + tb * (v01 - v00)
+    v_hi = v10 + tb * (v11 - v10)
+    return v_lo + ta * (v_hi - v_lo)
+
+
+@numba.njit(cache=True, fastmath=True)
+def _gal_eps_at_sgrid(j, lim1, lim2, lim3, lim4, dim1, dim2, dim3, dim4, log10_s_grid,
+                       g1, g3, g4, joint, pair13, pair14, pair34, marg1, marg3, marg4):
+    """One S-grid point's exact two-of-four pass fraction, the scalar
+    version of `prior.gal.source_selection_from_cdf`'s own inner loop:
+    the orthant probability of the survey-wide colour-CDF tables at this
+    source's own four thresholds, no galaxy touched."""
+    s = log10_s_grid[j]
+    tau1 = lim1 - s + dim1
+    tau2 = lim2 - s + dim2
+    tau3 = lim3 - s + dim3
+    tau4 = lim4 - s + dim4
+
+    f3d = _interp3_scalar(joint[j], g1, g3, g4, tau1, tau3, tau4)
+    at_least1 = 1.0 - f3d
+
+    f1 = _interp1_scalar(marg1[j], g1, tau1)
+    f3 = _interp1_scalar(marg3[j], g3, tau3)
+    f4 = _interp1_scalar(marg4[j], g4, tau4)
+    f13 = _interp2_scalar(pair13[j], g1, g3, tau1, tau3)
+    f14 = _interp2_scalar(pair14[j], g1, g4, tau1, tau4)
+    f34 = _interp2_scalar(pair34[j], g3, g4, tau3, tau4)
+    pair_ab = 1.0 - f1 - f3 + f13
+    pair_ac = 1.0 - f1 - f4 + f14
+    pair_bc = 1.0 - f3 - f4 + f34
+    triple = 1.0 - f1 - f3 - f4 + f13 + f14 + f34 - f3d
+    at_least2 = pair_ab + pair_ac + pair_bc - 2.0 * triple
+
+    eps = at_least1 if tau2 <= 0.0 else at_least2
+    if eps < 0.0:
+        eps = 0.0
+    elif eps > 1.0:
+        eps = 1.0
+    return eps
+
+
+@numba.njit(cache=True, fastmath=True)
+def _gal_log_density_numba(a, b, mi, a_col, sigma_col, arm_idx, z,
+                           gal_fref, log10_lim_irac, kd_irac, kw_irac,
+                           log10_s_grid, phi_density_grid,
+                           cdf_g1, cdf_g3, cdf_g4, cdf_joint, cdf_pair13, cdf_pair14, cdf_pair34,
+                           cdf_marg1, cdf_marg3, cdf_marg4,
                            kernel_ln_nodes, kernel_w, kernel_mu, kernel_sigma, zp_sigma_k):
     """`(n,)`: GAL's `ln lambda~_GAL` at every query point, one compiled
-    loop replacing the shape reader's own Python (`Kernel.mixture`'s
-    node bracket, `Kernel.pdf`'s two-component sum, and the eps/phi
-    bilinear reads) with scalar arithmetic per point -- no Python-level
-    per-chunk gather of `eps_batch` (module docstring's own `_INTERP_CHUNK`
-    workaround), since the per-source array is indexed in place by
-    `local_idx`. `arm_idx` is the SOURCE's own `A_COL_PROVENANCE` (fixed
-    defect, owner 2026-09-06: was the sightline's block-averaged arm).
-    `zp_sigma_k`, one per point (mag, 0 for Planck-arm), is the source's
-    own Herschel field zero-point uncertainty, not one survey scalar."""
+    loop doing `Kernel.mixture`'s own node bracket, `Kernel.pdf`'s
+    two-component sum, and the selection itself -- the hybrid law's
+    dimming at this query's own `a` (`selection.law_dense_weight`/
+    `kappa_hybrid`, inlined) and the exact two-of-four colour-CDF lookup
+    (`_gal_eps_at_sgrid`) at this SOURCE's own four IRAC limits
+    (`log10_lim_irac`) -- as scalar arithmetic per point. There is no
+    per-source galaxy product (owner, 2026-09-06): nothing here is
+    gathered from a per-batch array by a local row index; `log10_lim_
+    irac` is read straight off the region table, already resident.
+    `arm_idx` is the SOURCE's own `A_COL_PROVENANCE` (fixed defect, owner
+    2026-09-06: was the sightline's block-averaged arm). `zp_sigma_k`,
+    one per point (mag, 0 for Planck-arm), is the source's own Herschel
+    field zero-point uncertainty, not one survey scalar."""
     n = a.shape[0]
     out = np.empty(n, dtype=np.float64)
     ln10 = np.log(10.0)
+    ln_ramp_ratio = np.log(_LAW_RAMP_HI / _LAW_RAMP_LO)
     for k in range(n):
         ak = a[k]
         if ak <= 0.0:
@@ -317,19 +413,33 @@ def _gal_log_density_numba(a, b, mi, a_col, sigma_col, arm_idx, z, local_idx,
                + (1.0 - w) * np.exp(-0.5 * z1 * z1) / (sigma1 * _SQRT2PI))
         p_a = dens / (ak * ln10)
 
+        # the hybrid law's dimming at this query's own column `ak`
+        # (`selection.law_dense_weight`/`kappa_hybrid`, module docstring).
+        xw = np.log(ak / _LAW_RAMP_LO) / ln_ramp_ratio
+        if xw < 0.0:
+            xw = 0.0
+        elif xw > 1.0:
+            xw = 1.0
+        wd = xw * xw * (3.0 - 2.0 * xw)
+        dim1 = 0.4 * ak * ((1.0 - wd) * kd_irac[0] + wd * kw_irac[0])
+        dim2 = 0.4 * ak * ((1.0 - wd) * kd_irac[1] + wd * kw_irac[1])
+        dim3 = 0.4 * ak * ((1.0 - wd) * kd_irac[2] + wd * kw_irac[2])
+        dim4 = 0.4 * ak * ((1.0 - wd) * kd_irac[3] + wd * kw_irac[3])
+
         log10_s = b[k] + np.log10(gal_fref[mi[k]])
-        x_q = ak / acol
-        ix, tx = _bracket(x_ladder, x_q)
         iv, tv = _bracket(log10_s_grid, log10_s)
 
-        loc = local_idx[k]
-        e00 = eps_batch[loc, ix, iv]
-        e01 = eps_batch[loc, ix, iv + 1]
-        e10 = eps_batch[loc, ix + 1, iv]
-        e11 = eps_batch[loc, ix + 1, iv + 1]
-        e_lo = e00 + tv * (e01 - e00)
-        e_hi = e10 + tv * (e11 - e10)
-        eps_val = e_lo + tx * (e_hi - e_lo)
+        lim1 = log10_lim_irac[k, 0]
+        lim2 = log10_lim_irac[k, 1]
+        lim3 = log10_lim_irac[k, 2]
+        lim4 = log10_lim_irac[k, 3]
+        e_lo = _gal_eps_at_sgrid(iv, lim1, lim2, lim3, lim4, dim1, dim2, dim3, dim4, log10_s_grid,
+                                 cdf_g1, cdf_g3, cdf_g4, cdf_joint, cdf_pair13, cdf_pair14, cdf_pair34,
+                                 cdf_marg1, cdf_marg3, cdf_marg4)
+        e_hi = _gal_eps_at_sgrid(iv + 1, lim1, lim2, lim3, lim4, dim1, dim2, dim3, dim4, log10_s_grid,
+                                 cdf_g1, cdf_g3, cdf_g4, cdf_joint, cdf_pair13, cdf_pair14, cdf_pair34,
+                                 cdf_marg1, cdf_marg3, cdf_marg4)
+        eps_val = e_lo + tv * (e_hi - e_lo)
 
         pd_lo = phi_density_grid[iv]
         pd_hi = phi_density_grid[iv + 1]
@@ -399,26 +509,32 @@ class SourcePrior(object):
                         dx=dx, db=db, x_ladder=x_ladder,
                         b_grid=f["LOG10_B_GRID_%s" % c.upper()][:].astype(np.float64))
 
-        # -- GAL: the survey-wide counts law and this region's per-source
-        # selection curve (`prior.gal`'s own `EPS[n, n_x, n_s]`).
-        self._gal_selection_path = None
-        self.gal_x_ladder = self.gal_log10_s_grid = self.gal_fref = None
+        # -- GAL: the survey-wide counts law and the survey-wide colour-CDF
+        # tables (`prior.gal.read_cdf_tables`) -- there is no per-source
+        # galaxy product (owner, 2026-09-06); the selection is looked up
+        # per query point, inside the compiled kernel, from this source's
+        # own four IRAC limits instead.
+        self.gal_log10_s_grid = self.gal_fref = None
         self.gal_phi_total = self._gal_phi_density_grid = None
+        self._gal_cdf = None
+        self.gal_kd_irac = self.gal_kw_irac = None
+        self._gal_irac_idx = None
         if gal_wanted:
-            self._gal_selection_path = config_module.product_path(
-                config, "bms", "gal", "selection", "source", region=region)
             counts_path = config_module.product_path(config, "bms", "gal", "counts", "survey")
             with h5py.File(counts_path, "r") as f:
-                law_log10_s_grid = f["LOG10_S_GRID"][:].astype(np.float64)
-                gal_phi_s = f["PHI_S"][:].astype(np.float64)
-            with h5py.File(self._gal_selection_path, "r") as f:
-                self.gal_x_ladder = f["X_LADDER"][:].astype(np.float64)
                 self.gal_log10_s_grid = f["LOG10_S_GRID"][:].astype(np.float64)
-                if not np.allclose(law_log10_s_grid, self.gal_log10_s_grid):
-                    raise ValueError(
-                        "prior.callable: GAL's per-source selection and the survey "
-                        "counts law disagree on LOG10_S_GRID for region %r" % region)
+                gal_phi_s = f["PHI_S"][:].astype(np.float64)
+            self._gal_cdf = gal_module.read_cdf_tables(counts_path)
             self.gal_fref = _library_reference_flux(config, "gal")
+
+            # the hybrid law's two fixed curves at the four IRAC bands
+            # only (module docstring): the compiled kernel blends them by
+            # each query's own ramp weight, no per-source table.
+            self.gal_kd_irac = selection_module.kappa_ak(
+                config, selection_module.LAW_DIFFUSE)[gal_module.IRAC_BAND_IDX]
+            self.gal_kw_irac = selection_module.kappa_ak(
+                config, selection_module.LAW_DENSE)[gal_module.IRAC_BAND_IDX]
+            self._gal_irac_idx = gal_module.IRAC_BAND_IDX
 
             # `phi(S).S` is only PROPORTIONAL to a density (`SPEC_PRIORS.md`
             # section 5.2's own "prop"); `gal_phi_total` (a survey-wide
@@ -461,15 +577,18 @@ class SourcePrior(object):
         # until then (rule 6: fail on the impossible).
         self._prep_rows = None
         self._prep_star_eps = None
-        self._prep_gal_eps = None
         self._prep_h2s_eps = None
 
     def prepare(self, rows):
         """Gathers this batch's own rows (about ten thousand sources,
-        `CODING_RULES.md` 10b) from whichever of the three per-source
-        selection products this instance was scoped to, float16 ->
-        float32 -- the one quantity too large to hold for a whole survey
-        in memory at once (module docstring)."""
+        `CODING_RULES.md` 10b) from whichever of the two remaining
+        per-source selection products (STAR family, H2S) this instance
+        was scoped to, float16 -> float32 -- the one quantity too large
+        to hold for a whole survey in memory at once (module docstring).
+        GAL needs no such gather: there is no per-source galaxy product
+        (owner, 2026-09-06); its compiled kernel reads the source's own
+        four IRAC limits straight off the region table, already
+        resident."""
         rows = np.asarray(rows, dtype=np.intp)
         uniq_rows = np.unique(rows)
 
@@ -478,10 +597,6 @@ class SourcePrior(object):
             with h5py.File(self._star_selection_path, "r") as f:
                 for c in self.shapes:
                     star_eps[c] = f["EPS_%s" % c.upper()][uniq_rows, :, :].astype(np.float32)
-        gal_eps = None
-        if self._gal_selection_path is not None:
-            with h5py.File(self._gal_selection_path, "r") as f:
-                gal_eps = f["EPS"][uniq_rows, :, :].astype(np.float32)
         h2s_eps = None
         if self._h2s_selection_path is not None:
             with h5py.File(self._h2s_selection_path, "r") as f:
@@ -489,7 +604,6 @@ class SourcePrior(object):
 
         self._prep_rows = uniq_rows
         self._prep_star_eps = star_eps
-        self._prep_gal_eps = gal_eps
         self._prep_h2s_eps = h2s_eps
 
     def _prep_local_index(self, rows):
@@ -619,10 +733,11 @@ class SourcePrior(object):
     def _log_density_gal(self, rows2d, a2, b2, mi2):
         """One compiled loop (`_gal_log_density_numba`) doing `Kernel.
         mixture`'s own node bracket, the two-component pdf, and the
-        eps/phi bilinear reads as scalar arithmetic per query point --
-        the shape reader's own arithmetic, not its Python (no per-chunk
-        `eps_batch` gather: the per-source array is indexed in place by
-        each point's own batch-local row)."""
+        selection itself -- the hybrid law's dimming and the colour-CDF
+        orthant-probability lookup -- as scalar arithmetic per query
+        point. No `prepare`d gather: there is no per-source galaxy
+        product (owner, 2026-09-06); the source's own four IRAC limits
+        come straight off the region table."""
         rows = rows2d.ravel()
         a = a2.ravel()
         b = b2.ravel()
@@ -639,14 +754,18 @@ class SourcePrior(object):
         arm_idx = self.table["A_COL_PROVENANCE"][rows].astype(np.int64)
         zp_sigma_k = self._zp_sigma_k[rows]
         z = self.table["Z_GAL"][rows]
-        local = self._prep_local_index(rows).astype(np.int64)
+        log10_lim_irac = np.ascontiguousarray(
+            np.log10(self.table["F_LIM_50_MJY"][rows][:, self._gal_irac_idx]))
         kern = self.yso_shape.kernel
 
         ln_val = _gal_log_density_numba(
-            a, b, mi.astype(np.int64), a_col, sigma_col, arm_idx, z, local,
-            self.gal_fref, self._prep_gal_eps, self.gal_x_ladder, self.gal_log10_s_grid,
-            self._gal_phi_density_grid, kern._ln_nodes, kern._w, kern._mu, kern._sigma,
-            zp_sigma_k)
+            a, b, mi.astype(np.int64), a_col, sigma_col, arm_idx, z,
+            self.gal_fref, log10_lim_irac, self.gal_kd_irac, self.gal_kw_irac,
+            self.gal_log10_s_grid, self._gal_phi_density_grid,
+            self._gal_cdf["g1"], self._gal_cdf["g3"], self._gal_cdf["g4"], self._gal_cdf["joint"],
+            self._gal_cdf["pair13"], self._gal_cdf["pair14"], self._gal_cdf["pair34"],
+            self._gal_cdf["marg1"], self._gal_cdf["marg3"], self._gal_cdf["marg4"],
+            kern._ln_nodes, kern._w, kern._mu, kern._sigma, zp_sigma_k)
         return ln_val
 
     # -----------------------------------------------------------------

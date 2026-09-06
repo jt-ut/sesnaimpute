@@ -11,19 +11,22 @@ is therefore two survey machinery pieces, assembled into the shape
    2004, ApJS 154, 39, Table 1): one smooth broken power law in cumulative
    counts N(>S), fitted once, region-independent (`build_counts_law`,
    written to the `counts/survey` product).
-2. `EPS[n, n_x, n_s]`, the exact per-source selection: for each catalogued
-   source, on the shared scaled-extinction ladder `X_LADDER` (`a_query =
-   X_LADDER * A_s`, a background galaxy carrying the whole column) by
-   `LOG10_S_GRID`, the fraction of an external, four-band galaxy
-   population (SWIRE, Surace et al. 2005 DR2 release), its stars removed,
-   that clears any two of the four IRAC bands at *that source's own*
-   eight limits (`build_source_selection`, written to the `prior/
-   selection/source` product, one file per region, SPEC_PRIORS.md
-   section 1.3). Two comparison variants are kept at the region's own
-   median 8-band limit, on the column-grid nodes, in the region-level
-   `prior/region` product: `EPS_2BAND` requires *both* 3.6 and 4.5um --
-   the SEDS-era two-band form; `EPS_NO_REMOVAL` is the four-band test
-   with no star removal at all (SPEC_PRIORS.md section 5, "Checks").
+2. The exact per-source selection, `source_selection_from_cdf`: the
+   fraction of an external, four-band galaxy population (SWIRE, Surace
+   et al. 2005 DR2 release), its stars removed, that clears any two of
+   the four IRAC bands at *that source's own* limits, read at build time
+   from the survey-wide colour-CDF tables (`build_colour_cdf_tables`,
+   244 MB, this module's own `counts/survey` product) rather than stored
+   per source (owner, 2026-09-06: no per-source galaxy product -- the
+   3.2 GB it would have been at Cygnus X is unnecessary). Every consumer
+   -- `prior.counts_star_family.gal_counts`, `prior.callable`'s GAL path
+   -- loads the CDF tables once (`read_cdf_tables`) and evaluates the
+   lookup itself, per batch of sources or per query point. Two comparison
+   variants are kept at the region's own median 8-band limit, on the
+   column-grid nodes, in the region-level `prior/region` product:
+   `EPS_2BAND` requires *both* 3.6 and 4.5um -- the SEDS-era two-band
+   form; `EPS_NO_REMOVAL` is the four-band test with no star removal at
+   all (SPEC_PRIORS.md section 5, "Checks").
 
 The star-galaxy split itself is chosen once, survey-wide
 (`select_star_galaxy_split`): among the candidate rules that reproduce
@@ -47,7 +50,6 @@ from sesnaimpute import definitions
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
-from sesnaimpute.granules import access
 from sesnaimpute.prior import column_grid as column_grid_module
 from sesnaimpute.prior import selection as selection_module
 
@@ -237,7 +239,7 @@ def fit_counts(log10_S, log10_N):
     def resid(p):
         return BrokenPowerLaw(p).log10_cumulative(x) - y
 
-    sol = least_squares(resid, p0, bounds=([0.0, -5.0, 0.05, 0.3, 0.05], [9.0, 3.0, 3.0, 5.0, 4.0]))
+    sol = least_squares(resid, p0, bounds=([0.0, -5.0, -10.0, 0.3, 0.05], [9.0, 3.0, 10.0, 5.0, 4.0]))
     r = resid(sol.x)
     fit = BrokenPowerLaw(sol.x, log_range=(float(x.min()), float(x.max())))
     return fit, {"rms_dex": float(np.sqrt(np.mean(r ** 2))), "max_abs_dex": float(np.max(np.abs(r)))}
@@ -702,47 +704,22 @@ def source_selection_from_cdf(log10_lim_b, a_query_b, kappa_b, log10_s_grid, cdf
     return np.clip(eps, 0.0, 1.0)
 
 
-def build_source_selection(config, region, cdf, log10_s_grid, batch_budget_bytes=(512 << 20)):
-    """Writes the region's exact per-source GAL selection
-    (SPEC_PRIORS.md section 1.3): for every catalogued source, on
-    `selection.X_LADDER` by `log10_s_grid`, the exact two-of-four pass
-    fraction read from the survey-wide colour-CDF tables (`build_colour_
-    cdf_tables`, `source_selection_from_cdf`) -- a background galaxy
-    carries the entire column (SPEC_PRIORS.md section 5.2). Sources are
-    batched (`sesnaimpute.batches.batches`) so no batch's working arrays
-    exceed `batch_budget_bytes`. Returns the product path.
+def read_cdf_tables(path):
+    """The colour-CDF tables `write_cdf_tables` appended to the
+    survey-level GAL product at `path`, back into the same dict
+    `build_colour_cdf_tables` returns (`g1`/`g3`/`g4`/`joint`/`pair13`/
+    `pair14`/`pair34`/`marg1`/`marg3`/`marg4`) -- there is no longer a
+    per-source galaxy product (owner, 2026-09-06): every consumer reads
+    this once and evaluates `source_selection_from_cdf` itself, per
+    batch of sources, on the fly.
     """
-    log10_lim = np.log10(limits_module.limits(config, region))
-    n_source = log10_lim.shape[0]
-    n_x = selection_module.X_LADDER.size
-    n_s = log10_s_grid.size
-
-    adopted_path = config_module.product_path(
-        config, "sky/derived", "adopted", "column", "source", region=region)
-    a_col = np.asarray(
-        access.per_source(config, region, adopted_path, ["A_COL_K"])["A_COL_K"], dtype=np.float64)
-    if a_col.shape[0] != n_source:
-        raise ValueError(
-            "gal: %r's column count (%d) does not match the region's %d sources"
-            % (adopted_path, a_col.shape[0], n_source))
-
-    path = config_module.product_path(config, "bms", "gal", "selection", "source", region=region)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    row_bytes = len(BAND_KEYS) * 8 + n_x * 8 + n_x * len(BAND_KEYS) * 8 + n_x * n_s * 8 * 4
-    with h5py.File(path, "w") as f:
-        f.attrs["GRANULE"] = "source"
-        f.create_dataset("X_LADDER", data=selection_module.X_LADDER.astype(np.float64))
-        f.create_dataset("LOG10_S_GRID", data=np.asarray(log10_s_grid, dtype=np.float64))
-        ds_eps = f.create_dataset("EPS", shape=(n_source, n_x, n_s), dtype="f2")
-        for start, stop in batches_module.batches(n_source, row_bytes, budget_bytes=batch_budget_bytes):
-            lim_b = np.ascontiguousarray(log10_lim[start:stop])
-            a_b = a_col[start:stop]
-            a_query_b = np.ascontiguousarray(selection_module.X_LADDER[None, :] * a_b[:, None])
-            w_dense_b = selection_module.law_dense_weight(a_query_b)
-            kappa_b = np.ascontiguousarray(selection_module.kappa_hybrid(config, w_dense_b))
-            eps = source_selection_from_cdf(lim_b, a_query_b, kappa_b, log10_s_grid, cdf)
-            ds_eps[start:stop] = eps.astype("f2")
-    return path
+    with h5py.File(path, "r") as f:
+        return dict(
+            g1=f["CDF_GRID_I1"][:].astype(np.float64), g3=f["CDF_GRID_I3"][:].astype(np.float64),
+            g4=f["CDF_GRID_I4"][:].astype(np.float64), joint=f["CDF_JOINT"][:].astype(np.float64),
+            pair13=f["CDF_PAIR_I1I3"][:].astype(np.float64), pair14=f["CDF_PAIR_I1I4"][:].astype(np.float64),
+            pair34=f["CDF_PAIR_I3I4"][:].astype(np.float64), marg1=f["CDF_MARGINAL_I1"][:].astype(np.float64),
+            marg3=f["CDF_MARGINAL_I3"][:].astype(np.float64), marg4=f["CDF_MARGINAL_I4"][:].astype(np.float64))
 
 
 # ---------------------------------------------------------------------------
@@ -1030,10 +1007,6 @@ def build(config, regions=None):
         print(f"gal: {region}: N_GAL(a=0, median limit) adopted={n_gal_region:.1f} deg^-2 "
               f"no_removal={n_gal_region_nr:.1f} deg^-2 "
               f"Fazio N(>region median I2 limit)={fazio_at_median_limit:.1f} deg^-2 -> {region_path}")
-
-        source_path = build_source_selection(config, region, cdf, log10_s_grid)
-        print(f"gal: {region}: per-source selection (colour-CDF interpolation, "
-              f"{selection_module.X_LADDER.size} x-nodes, {log10_s_grid.size} S-grid points) -> {source_path}")
 
     print(f"gal: acceptance: max(EPS_2BAND - EPS)={max_2band_violation:.6g} "
           f"(expect <= 0); max positive d(EPS)/d(node)={max_monotone_violation:.6g} (expect ~0)")
