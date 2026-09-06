@@ -2,12 +2,16 @@
 section 3's three properties; `SPEC_PRIORS.md` section 0.2; the prior
 table's own join, `IMPLEMENTATION.md` sections 3 and 5).
 
-`SourcePrior(config, region)` loads every upstream product for one region
-once: the prior table (`prior.table.read`), the three field-family tile
-shapes (`prior.star_shapes`), the YSO sightline shape and its shared
-column kernel (`prior.yso.YsoShape`, `prior.kernel.Kernel`), the galaxy
-counts law (`bms/gal/counts/survey`), and the H2S region lognormal
-(`bms/h2s/prior_h2s_region`). Every class's selection is now read directly
+`SourcePrior(config, region, cls=None)` loads one region's upstream
+products: the prior table (`prior.table.read`) always, plus whichever of
+the three field-family tile shapes (`prior.star_shapes`), the YSO
+sightline shape and its shared column kernel (`prior.yso.YsoShape`,
+`prior.kernel.Kernel`), the galaxy counts law (`bms/gal/counts/survey`),
+and the H2S region lognormal (`bms/h2s/prior_h2s_region`) that `cls`
+actually needs -- `cls=None` loads all six, for the identity check below;
+a fitter worker scoped to one class loads only that class's own
+materials and `log_density` refuses every other class. Every class's
+selection is now read directly
 per source from the exact per-source selection products (`prior.
 star_selection`, `prior.gal`, `prior.h2s`): `EPS_<cls>[s]`, an `(n_x, n_b)`
 curve on the shared scaled-extinction ladder `X_LADDER` (`x = a / A_s`) by
@@ -117,6 +121,7 @@ import os
 import time
 
 import h5py
+import numba
 import numpy as np
 
 from sesnaimpute import config as config_module
@@ -218,82 +223,209 @@ def _interp_eps_2d(eps_batch, x_ladder, grid, x_query, val_query):
     return out
 
 
+_SQRT2PI = float(np.sqrt(2.0 * np.pi))
+_HERSCHEL_ARM_CODE = 0
+
+
+@numba.njit(cache=True, fastmath=True)
+def _bracket(grid, x):
+    """`(i, t)`: the bracket index and fractional position of `x` on the
+    increasing `grid`, clamped at either end -- the compiled kernels' own
+    scalar version of `column_grid.bracket`/`np.searchsorted`."""
+    n = grid.shape[0]
+    xc = x
+    if xc < grid[0]:
+        xc = grid[0]
+    elif xc > grid[n - 1]:
+        xc = grid[n - 1]
+    lo = 0
+    hi = n - 1
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if grid[mid] <= xc:
+            lo = mid
+        else:
+            hi = mid
+    span = grid[lo + 1] - grid[lo]
+    t = (xc - grid[lo]) / span if span > 0.0 else 0.0
+    return lo, t
+
+
+@numba.njit(cache=True, fastmath=True)
+def _gal_log_density_numba(a, b, mi, a_col, sigma_col, arm_idx, z, local_idx,
+                           gal_fref, eps_batch, x_ladder, log10_s_grid, phi_density_grid,
+                           kernel_ln_nodes, kernel_w, kernel_mu, kernel_sigma, zp_herschel_k):
+    """`(n,)`: GAL's `ln lambda~_GAL` at every query point, one compiled
+    loop replacing the shape reader's own Python (`Kernel.mixture`'s
+    node bracket, `Kernel.pdf`'s two-component sum, and the eps/phi
+    bilinear reads) with scalar arithmetic per point -- no Python-level
+    per-chunk gather of `eps_batch` (module docstring's own `_INTERP_CHUNK`
+    workaround), since the per-source array is indexed in place by
+    `local_idx`."""
+    n = a.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    ln10 = np.log(10.0)
+    for k in range(n):
+        ak = a[k]
+        if ak <= 0.0:
+            out[k] = -np.inf
+            continue
+        acol = a_col[k]
+        scol = sigma_col[k]
+        arm = arm_idx[k]
+        zk = z[k]
+
+        i, t = _bracket(kernel_ln_nodes, np.log(acol))
+        w = kernel_w[arm, i] + t * (kernel_w[arm, i + 1] - kernel_w[arm, i])
+        mu0 = kernel_mu[arm, i, 0] + t * (kernel_mu[arm, i + 1, 0] - kernel_mu[arm, i, 0])
+        mu1 = kernel_mu[arm, i, 1] + t * (kernel_mu[arm, i + 1, 1] - kernel_mu[arm, i, 1])
+        sg0 = kernel_sigma[arm, i, 0] + t * (kernel_sigma[arm, i + 1, 0] - kernel_sigma[arm, i, 0])
+        sg1 = kernel_sigma[arm, i, 1] + t * (kernel_sigma[arm, i + 1, 1] - kernel_sigma[arm, i, 1])
+
+        sigma_col_dex = scol / (acol * ln10)
+        zp_dex = zp_herschel_k / (acol * ln10) if arm == _HERSCHEL_ARM_CODE else 0.0
+        extra_var = sigma_col_dex * sigma_col_dex + zp_dex * zp_dex
+        sigma0 = np.sqrt(sg0 * sg0 + extra_var)
+        sigma1 = np.sqrt(sg1 * sg1 + extra_var)
+
+        log10t = np.log10(ak)
+        z0 = (log10t - (np.log10(acol) + mu0)) / sigma0
+        z1 = (log10t - (np.log10(acol) + mu1)) / sigma1
+        dens = (w * np.exp(-0.5 * z0 * z0) / (sigma0 * _SQRT2PI)
+               + (1.0 - w) * np.exp(-0.5 * z1 * z1) / (sigma1 * _SQRT2PI))
+        p_a = dens / (ak * ln10)
+
+        log10_s = b[k] + np.log10(gal_fref[mi[k]])
+        x_q = ak / acol
+        ix, tx = _bracket(x_ladder, x_q)
+        iv, tv = _bracket(log10_s_grid, log10_s)
+
+        loc = local_idx[k]
+        e00 = eps_batch[loc, ix, iv]
+        e01 = eps_batch[loc, ix, iv + 1]
+        e10 = eps_batch[loc, ix + 1, iv]
+        e11 = eps_batch[loc, ix + 1, iv + 1]
+        e_lo = e00 + tv * (e01 - e00)
+        e_hi = e10 + tv * (e11 - e10)
+        eps_val = e_lo + tx * (e_hi - e_lo)
+
+        pd_lo = phi_density_grid[iv]
+        pd_hi = phi_density_grid[iv + 1]
+        phi_density = pd_lo + tv * (pd_hi - pd_lo)
+
+        numerator = p_a * phi_density * eps_val
+        if numerator > 0.0 and zk > 0.0:
+            out[k] = np.log(numerator) - np.log(zk)
+        else:
+            out[k] = -np.inf
+    return out
+
+
 class SourcePrior(object):
     """`log_density(cls, rows, a, log10_b, model_index=None)`, one region's
-    every upstream product loaded once (module docstring)."""
+    upstream products loaded once (module docstring). `cls=None` (the
+    default) loads all six classes' materials, for the all-class
+    identity check; a fitter worker that only ever fits one class passes
+    that class's name and this loads ONLY that class's own shape/kernel/
+    selection/table materials -- the other five classes then raise if
+    called. GAL and H2S/YSO all share the one sightline shape
+    (`YsoShape`): GAL for its column kernel and per-sightline arm,
+    YSO/H2S for `marginal_exact` itself."""
 
-    def __init__(self, config, region):
+    def __init__(self, config, region, cls=None):
+        if cls is not None and cls not in CLASSES:
+            raise ValueError(
+                "SourcePrior: unknown class %r, must be one of %r or None" % (cls, CLASSES))
         self.config = config
         self.region = region
+        self.cls = cls
         self.table = table_module.read(config, region)
         self.n_source = self.table["A_COL_K"].shape[0]
         self._idx_i4 = BAND_KEYS.index("I4")
 
+        family_wanted = FAMILY_CLASSES if cls is None else (
+            (cls,) if cls in FAMILY_CLASSES else ())
+        gal_wanted = cls is None or cls == "gal"
+        h2s_wanted = cls is None or cls == "h2s"
+        yso_shape_wanted = cls is None or cls in ("gal", "yso", "h2s")
+
         # -- STAR, AGB, PAHC: the tile shape (density only) and the
         # per-source selection product's own grids (its `EPS` arrays are
-        # read per batch, `prepare`).
+        # read per batch, `prepare`) -- only the classes this instance
+        # was asked for.
         self.shapes = {}
         self.family_grids = {}
-        self._star_selection_path = config_module.product_path(
-            config, "bms", "star", "selection", "source", region=region)
-        with h5py.File(self._star_selection_path, "r") as f:
-            x_ladder = f["X_LADDER"][:].astype(np.float64)
-            for cls in FAMILY_CLASSES:
-                shape = star_shapes.read(config, region, cls)
-                dx = float(np.mean(np.diff(shape.x_edges)))
-                db = float(np.mean(np.diff(shape.b_edges)))
-                self.shapes[cls] = shape
-                self.family_grids[cls] = dict(
-                    dx=dx, db=db, x_ladder=x_ladder,
-                    b_grid=f["LOG10_B_GRID_%s" % cls.upper()][:].astype(np.float64))
+        self._star_selection_path = None
+        if family_wanted:
+            self._star_selection_path = config_module.product_path(
+                config, "bms", "star", "selection", "source", region=region)
+            with h5py.File(self._star_selection_path, "r") as f:
+                x_ladder = f["X_LADDER"][:].astype(np.float64)
+                for c in family_wanted:
+                    shape = star_shapes.read(config, region, c)
+                    dx = float(np.mean(np.diff(shape.x_edges)))
+                    db = float(np.mean(np.diff(shape.b_edges)))
+                    self.shapes[c] = shape
+                    self.family_grids[c] = dict(
+                        dx=dx, db=db, x_ladder=x_ladder,
+                        b_grid=f["LOG10_B_GRID_%s" % c.upper()][:].astype(np.float64))
 
         # -- GAL: the survey-wide counts law and this region's per-source
         # selection curve (`prior.gal`'s own `EPS[n, n_x, n_s]`).
-        self._gal_selection_path = config_module.product_path(
-            config, "bms", "gal", "selection", "source", region=region)
-        counts_path = config_module.product_path(config, "bms", "gal", "counts", "survey")
-        with h5py.File(counts_path, "r") as f:
-            law_log10_s_grid = f["LOG10_S_GRID"][:].astype(np.float64)
-            gal_phi_s = f["PHI_S"][:].astype(np.float64)
-        with h5py.File(self._gal_selection_path, "r") as f:
-            self.gal_x_ladder = f["X_LADDER"][:].astype(np.float64)
-            self.gal_log10_s_grid = f["LOG10_S_GRID"][:].astype(np.float64)
-            if not np.allclose(law_log10_s_grid, self.gal_log10_s_grid):
-                raise ValueError(
-                    "prior.callable: GAL's per-source selection and the survey "
-                    "counts law disagree on LOG10_S_GRID for region %r" % region)
-        self.gal_fref = _library_reference_flux(config, "gal")
+        self._gal_selection_path = None
+        self.gal_x_ladder = self.gal_log10_s_grid = self.gal_fref = None
+        self.gal_phi_total = self._gal_phi_density_grid = None
+        if gal_wanted:
+            self._gal_selection_path = config_module.product_path(
+                config, "bms", "gal", "selection", "source", region=region)
+            counts_path = config_module.product_path(config, "bms", "gal", "counts", "survey")
+            with h5py.File(counts_path, "r") as f:
+                law_log10_s_grid = f["LOG10_S_GRID"][:].astype(np.float64)
+                gal_phi_s = f["PHI_S"][:].astype(np.float64)
+            with h5py.File(self._gal_selection_path, "r") as f:
+                self.gal_x_ladder = f["X_LADDER"][:].astype(np.float64)
+                self.gal_log10_s_grid = f["LOG10_S_GRID"][:].astype(np.float64)
+                if not np.allclose(law_log10_s_grid, self.gal_log10_s_grid):
+                    raise ValueError(
+                        "prior.callable: GAL's per-source selection and the survey "
+                        "counts law disagree on LOG10_S_GRID for region %r" % region)
+            self.gal_fref = _library_reference_flux(config, "gal")
 
-        # `phi(S).S` is only PROPORTIONAL to a density (`SPEC_PRIORS.md`
-        # section 5.2's own "prop"); `gal_phi_total` (a survey-wide
-        # constant) makes it one. The normaliser `Z_GAL` itself is read
-        # from the table (`Z_GAL`, `counts_star_family.gal_counts`'s own
-        # full per-source integral of the counts law against this
-        # source's own selection over ALL of extinction and flux, fixed
-        # defect: this used to be recomputed here at the nominal column
-        # `x = 1` alone).
-        self.gal_phi_total = float(np.trapz(
-            gal_phi_s * (10.0 ** self.gal_log10_s_grid) * LN10, self.gal_log10_s_grid))
-        self._gal_phi_density_grid = (
-            gal_phi_s * (10.0 ** self.gal_log10_s_grid) * LN10) / self.gal_phi_total
+            # `phi(S).S` is only PROPORTIONAL to a density (`SPEC_PRIORS.md`
+            # section 5.2's own "prop"); `gal_phi_total` (a survey-wide
+            # constant) makes it one. The normaliser `Z_GAL` itself is read
+            # from the table (`Z_GAL`, `counts_star_family.gal_counts`'s own
+            # full per-source integral of the counts law against this
+            # source's own selection over ALL of extinction and flux, fixed
+            # defect: this used to be recomputed here at the nominal column
+            # `x = 1` alone).
+            self.gal_phi_total = float(np.trapz(
+                gal_phi_s * (10.0 ** self.gal_log10_s_grid) * LN10, self.gal_log10_s_grid))
+            self._gal_phi_density_grid = (
+                gal_phi_s * (10.0 ** self.gal_log10_s_grid) * LN10) / self.gal_phi_total
 
-        # -- YSO: the sightline shape (`marginal_exact`, shared with H2S).
-        self.yso_shape = yso_module.YsoShape.read(config, region)
+        # -- YSO/H2S/GAL: the shared sightline shape (`marginal_exact`
+        # for YSO/H2S; the column kernel and per-sightline arm for GAL).
+        self.yso_shape = yso_module.YsoShape.read(config, region) if yso_shape_wanted else None
 
         # -- H2S: the region's Sigma lognormal and this region's
         # per-source selection curve (`prior.h2s`'s own `EPS[n, n_x,
         # n_sigma]`).
-        self._h2s_selection_path = config_module.product_path(
-            config, "bms", "h2s", "selection", "source", region=region)
-        with h5py.File(self._h2s_selection_path, "r") as f:
-            self.h2s_x_ladder = f["X_LADDER"][:].astype(np.float64)
-            self.h2s_log10_sigma_grid = f["LOG10_SIGMA_GRID"][:].astype(np.float64)
-        h2s_region_path = config_module.product_path(
-            config, "bms", "h2s", "prior", "region", region=region)
-        with h5py.File(h2s_region_path, "r") as f:
-            self.h2s_logsig_mean = float(f["LOGSIG_MEAN"][()])
-            self.h2s_logsig_std = float(f["LOGSIG_STD"][()])
-        self.h2s_fref = _library_reference_flux(config, "h2s")
+        self._h2s_selection_path = None
+        self.h2s_x_ladder = self.h2s_log10_sigma_grid = None
+        self.h2s_logsig_mean = self.h2s_logsig_std = self.h2s_fref = None
+        if h2s_wanted:
+            self._h2s_selection_path = config_module.product_path(
+                config, "bms", "h2s", "selection", "source", region=region)
+            with h5py.File(self._h2s_selection_path, "r") as f:
+                self.h2s_x_ladder = f["X_LADDER"][:].astype(np.float64)
+                self.h2s_log10_sigma_grid = f["LOG10_SIGMA_GRID"][:].astype(np.float64)
+            h2s_region_path = config_module.product_path(
+                config, "bms", "h2s", "prior", "region", region=region)
+            with h5py.File(h2s_region_path, "r") as f:
+                self.h2s_logsig_mean = float(f["LOGSIG_MEAN"][()])
+                self.h2s_logsig_std = float(f["LOGSIG_STD"][()])
+            self.h2s_fref = _library_reference_flux(config, "h2s")
 
         # -- per-batch tabulation (`prepare`, module docstring): unset
         # until a batch is prepared; `log_density` refuses every class
@@ -305,20 +437,26 @@ class SourcePrior(object):
 
     def prepare(self, rows):
         """Gathers this batch's own rows (about ten thousand sources,
-        `CODING_RULES.md` 10b) from the three per-source selection
-        products, float16 -> float32 -- the one quantity too large to
-        hold for a whole survey in memory at once (module docstring)."""
+        `CODING_RULES.md` 10b) from whichever of the three per-source
+        selection products this instance was scoped to, float16 ->
+        float32 -- the one quantity too large to hold for a whole survey
+        in memory at once (module docstring)."""
         rows = np.asarray(rows, dtype=np.intp)
         uniq_rows = np.unique(rows)
 
         star_eps = {}
-        with h5py.File(self._star_selection_path, "r") as f:
-            for cls in FAMILY_CLASSES:
-                star_eps[cls] = f["EPS_%s" % cls.upper()][uniq_rows, :, :].astype(np.float32)
-        with h5py.File(self._gal_selection_path, "r") as f:
-            gal_eps = f["EPS"][uniq_rows, :, :].astype(np.float32)
-        with h5py.File(self._h2s_selection_path, "r") as f:
-            h2s_eps = f["EPS"][uniq_rows, :, :].astype(np.float32)
+        if self._star_selection_path is not None:
+            with h5py.File(self._star_selection_path, "r") as f:
+                for c in self.shapes:
+                    star_eps[c] = f["EPS_%s" % c.upper()][uniq_rows, :, :].astype(np.float32)
+        gal_eps = None
+        if self._gal_selection_path is not None:
+            with h5py.File(self._gal_selection_path, "r") as f:
+                gal_eps = f["EPS"][uniq_rows, :, :].astype(np.float32)
+        h2s_eps = None
+        if self._h2s_selection_path is not None:
+            with h5py.File(self._h2s_selection_path, "r") as f:
+                h2s_eps = f["EPS"][uniq_rows, :, :].astype(np.float32)
 
         self._prep_rows = uniq_rows
         self._prep_star_eps = star_eps
@@ -383,6 +521,10 @@ class SourcePrior(object):
         if cls not in CLASSES:
             raise ValueError("SourcePrior.log_density: unknown class %r, must be one of %r"
                              % (cls, CLASSES))
+        if self.cls is not None and cls != self.cls:
+            raise ValueError(
+                "SourcePrior.log_density: this instance was scoped to class %r at "
+                "construction, cannot read class %r" % (self.cls, cls))
         if cls in ("gal", "h2s") and model_index is None:
             raise ValueError("SourcePrior.log_density: class %r needs model_index" % (cls,))
         rows2d, a2, b2, mi2, shp = self._prepare(rows, a, log10_b, model_index)
@@ -444,40 +586,35 @@ class SourcePrior(object):
     # -----------------------------------------------------------------
 
     def _log_density_gal(self, rows2d, a2, b2, mi2):
-        """`p_a` is `Kernel.pdf`, the mixture's own two-component density
-        in `T`, evaluated at each row's own `(a, A_s, sigma_col,
-        map_class)`, one query point per source (`pdf`'s own `t` passed
-        as an `(n, 1)` column so its per-source broadcasting reduces to
-        the diagonal rather than the single-Gaussian moment-matched
-        `params` this used to read)."""
+        """One compiled loop (`_gal_log_density_numba`) doing `Kernel.
+        mixture`'s own node bracket, the two-component pdf, and the
+        eps/phi bilinear reads as scalar arithmetic per query point --
+        the shape reader's own arithmetic, not its Python (no per-chunk
+        `eps_batch` gather: the per-source array is indexed in place by
+        each point's own batch-local row)."""
         rows = rows2d.ravel()
         a = a2.ravel()
         b = b2.ravel()
         mi = mi2.ravel()
-        valid = a > 0.0
-        a_safe = np.where(valid, a, 1.0)
 
         a_col = self.table["A_COL_K"][rows]
         sigma_col = self.table["A_COL_SIG_K"][rows]
         sl_rows = self.table["HPX256_ROW"][rows]
-        map_class = self.yso_shape._map_class(sl_rows)
-        p_a = self.yso_shape.kernel.pdf(a_safe[:, None], a_col, sigma_col, map_class)[:, 0]
-        p_a = np.where(valid, p_a, 0.0)
-
-        x_query = np.where(valid, a_safe / a_col, 0.0)
-        local = self._prep_local_index(rows)
-        eps_batch = self._prep_gal_eps[local]
-        log10_s = b + np.log10(self.gal_fref[mi])
-        eps_val = _interp_eps_2d(eps_batch, self.gal_x_ladder, self.gal_log10_s_grid,
-                                 x_query, log10_s)
-        phi_density = np.interp(log10_s, self.gal_log10_s_grid, self._gal_phi_density_grid)
-        p_logs = phi_density * eps_val
-
-        numerator = p_a * p_logs
+        # the SIGHTLINE's own arm (`YsoShape.is_herschel`, module docstring's
+        # shared kernel/arm), not the source's own `A_COL_PROVENANCE` --
+        # `_map_class`'s own convention, matching `Kernel._ARM_CODE`
+        # (0=herschel, 1=planck).
+        arm_idx = np.where(self.yso_shape.is_herschel[sl_rows], 0, 1).astype(np.int64)
         z = self.table["Z_GAL"][rows]
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ln_val = np.log(numerator) - np.log(z)
-        return np.where((numerator > 0.0) & (z > 0.0) & valid, ln_val, -np.inf)
+        local = self._prep_local_index(rows).astype(np.int64)
+        kern = self.yso_shape.kernel
+
+        ln_val = _gal_log_density_numba(
+            a, b, mi.astype(np.int64), a_col, sigma_col, arm_idx, z, local,
+            self.gal_fref, self._prep_gal_eps, self.gal_x_ladder, self.gal_log10_s_grid,
+            self._gal_phi_density_grid, kern._ln_nodes, kern._w, kern._mu, kern._sigma,
+            kern.zp_herschel_k)
+        return ln_val
 
     # -----------------------------------------------------------------
     # YSO
