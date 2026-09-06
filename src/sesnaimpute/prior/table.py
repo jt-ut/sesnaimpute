@@ -3,8 +3,8 @@
 scalar the fitter's callable needs to assemble `N_C(s)` and `lambda~_C`
 for the six classes at that source. The table carries the numbers a
 consumer reads and nothing else: no provenance, no manifest, one root
-attribute `GRANULE` plus the three per-region scalars the YSO/H2S classes
-are conditioned by (`M_LIM_8UM_1MYR`, `ETA`, `EPS_EXT`).
+attribute `GRANULE` plus the two per-region scalars the H2S class is
+conditioned by (`ETA`, `EPS_EXT`).
 
 The table does no science of its own: every count, normaliser, node
 bracket and ridge parameter already lives in an upstream product
@@ -14,12 +14,13 @@ column product; the curated catalogue; the granule map). This module only
 reads each one in catalogue-row order and writes it once, so the fitter
 opens one file per region instead of five.
 
-`NODE_LO`, `NODE_W` and `GROUP` are computed independently in
-`prior.counts_star_family` and `prior.counts_cloud`, both from the same
-adopted column and the same region depth groups (IMPLEMENTATION.md
-section 2's node bracket and section 1.3's nearest depth-group). Build
-asserts the two products agree; a disagreement is a bug in one of them,
-not a join choice, so it fails rather than picking one.
+`NODE_LO`/`NODE_W` are computed independently in `prior.counts_star_family`
+and `prior.counts_cloud`, both from the same adopted column
+(IMPLEMENTATION.md section 2's node bracket). Build asserts the two
+products agree; a disagreement is a bug in one of them, not a join
+choice, so it fails rather than picking one. Depth groups no longer
+exist (SPEC_PRIORS.md section 1.3): every class's selection is now
+exact per source.
 """
 
 import os
@@ -41,7 +42,7 @@ from sesnaimpute.prior import levels as levels_module
 CONDITIONING_COLUMNS = (
     "A_COL_K", "A_COL_SIG_K", "A_COL_PROVENANCE",
     "HPX_PIX_512", "HPX_PIX_256", "HPX256_ROW",
-    "TILE_ID", "GROUP", "S_SHIFT", "F_LIM_50_MJY",
+    "TILE_ID", "F_LIM_50_MJY",
     "NODE_LO", "NODE_W",
 )
 COUNT_COLUMNS = ("N_STAR", "N_AGB", "N_PAHC", "N_GAL", "N_YSO", "N_H2S")
@@ -54,19 +55,20 @@ NORMALISER_COLUMNS = ("Z_STAR", "Z_AGB", "Z_PAHC", "Z_GAL", "Z_YSO", "Z_H2S")
 _COUNT_CLASS = dict(zip(COUNT_COLUMNS, levels_module.CLASSES))
 LEVEL_ATTRS = ("F_REGION",)
 RIDGE_COLUMNS = ("RIDGE_INTERCEPT", "RIDGE_SLOPE", "RIDGE_WIDTH")
-YSO_DIAGNOSTIC_COLUMNS = ("EPS_YSO", "EPS_YSO_3MYR", "N_YSO_3MYR", "N_LAW")
+YSO_DIAGNOSTIC_COLUMNS = ("EPS_YSO", "EPS_YSO_3MYR", "N_YSO_3MYR", "N_LAW",
+                         "M_LIM_8UM_1MYR", "IMF_FRAC_ABOVE_MLIM")
 ALL_COLUMNS = (("NAME",) + CONDITIONING_COLUMNS + COUNT_COLUMNS + NORMALISER_COLUMNS
               + RIDGE_COLUMNS + YSO_DIAGNOSTIC_COLUMNS)
 
 #: The per-region root attributes the fitter reads beside the columns
-#: (SPEC_PRIORS.md section 6.1's law count, section 7's H2S amplitude):
-#: computed once in `prior.counts_cloud` and copied through here.
-REGION_ATTRS = ("M_LIM_8UM_1MYR", "ETA", "EPS_EXT")
+#: (SPEC_PRIORS.md section 7's H2S amplitude): computed once in
+#: `prior.counts_cloud` and copied through here.
+REGION_ATTRS = ("ETA", "EPS_EXT")
 
-_STAR_FAMILY_COLUMNS = ("TILE_ID", "GROUP", "S_SHIFT", "NODE_LO", "NODE_W",
+_STAR_FAMILY_COLUMNS = ("TILE_ID", "NODE_LO", "NODE_W",
                         "N_STAR", "N_AGB", "N_PAHC", "N_GAL",
                         "Z_STAR", "Z_AGB", "Z_PAHC", "Z_GAL")
-_CLOUD_COLUMNS = ("GROUP", "NODE_LO", "NODE_W", "N_YSO", "N_H2S", "Z_YSO", "Z_H2S") \
+_CLOUD_COLUMNS = ("NODE_LO", "NODE_W", "N_YSO", "N_H2S", "Z_YSO", "Z_H2S") \
     + RIDGE_COLUMNS + YSO_DIAGNOSTIC_COLUMNS
 
 
@@ -124,27 +126,18 @@ def _cloud(config, region):
     return cols, region_attrs
 
 
-def _assert_node_group_agree(region, star, cloud):
+def _assert_node_agree(region, star, cloud):
     """The one bug the join cannot fix by picking a side
-    (IMPLEMENTATION.md section 5): `NODE_LO`/`NODE_W`/`GROUP` computed
+    (IMPLEMENTATION.md section 5): `NODE_LO`/`NODE_W` computed
     independently in `prior.counts_star_family` and `prior.counts_cloud`
-    from the same adopted column and the same region depth groups must
-    already agree exactly (up to the two products' own float32
-    storage)."""
+    from the same adopted column must already agree exactly (up to the
+    two products' own float32 storage)."""
     node_lo_sf = np.rint(star["NODE_LO"]).astype(np.int64)
     node_lo_cl = np.rint(cloud["NODE_LO"]).astype(np.int64)
     if not np.array_equal(node_lo_sf, node_lo_cl):
         raise ValueError(
             "prior.table: %r's counts-star-family and counts-cloud products disagree on "
             "NODE_LO -- both are computed from the same adopted column, so this is a bug "
-            "in one of the two upstream builds" % region)
-
-    group_sf = np.rint(star["GROUP"]).astype(np.int64)
-    group_cl = np.rint(cloud["GROUP"]).astype(np.int64)
-    if not np.array_equal(group_sf, group_cl):
-        raise ValueError(
-            "prior.table: %r's counts-star-family and counts-cloud products disagree on "
-            "GROUP -- both are computed from the same region depth groups, so this is a bug "
             "in one of the two upstream builds" % region)
 
     if not np.allclose(star["NODE_W"], cloud["NODE_W"], atol=1e-4):
@@ -194,8 +187,6 @@ def _write(config, region, name, f_lim_50_mjy, rs, adopted, star, cloud, region_
         f.create_dataset("HPX_PIX_256", data=rs["hpx_pix_256"].astype(np.int64))
         f.create_dataset("HPX256_ROW", data=rs["hpx256_row"].astype(np.int64))
         f.create_dataset("TILE_ID", data=star["TILE_ID"].astype(np.int32))
-        f.create_dataset("GROUP", data=np.rint(star["GROUP"]).astype(np.int32))
-        f.create_dataset("S_SHIFT", data=star["S_SHIFT"].astype(np.float32))
         f.create_dataset("F_LIM_50_MJY", data=f_lim_50_mjy.astype(np.float32))
         f.create_dataset("NODE_LO", data=np.rint(star["NODE_LO"]).astype(np.int32))
         f.create_dataset("NODE_W", data=star["NODE_W"].astype(np.float32))
@@ -358,7 +349,7 @@ def _build_one(config, region):
     cloud, region_attrs = _cloud(config, region)
     level_factors = levels_module.read(config, region)
 
-    _assert_node_group_agree(region, star, cloud)
+    _assert_node_agree(region, star, cloud)
     _assert_row_counts(region, n_sources, {
         "NAME": name, "F_LIM_50_MJY": f_lim_50_mjy,
         "A_COL_K": adopted["A_COL_K"], "N_STAR": star["N_STAR"], "N_YSO": cloud["N_YSO"],
