@@ -227,7 +227,13 @@ def bin_mass_exact(config, shape, a_edges, rows, node_lo, node_w):
     n_pairs = uniq_row.size
     n_chunks = max(1, int(np.ceil(n_pairs / PAIR_CHUNK)))
     idx_chunks = np.array_split(np.arange(n_pairs), n_chunks)
-    results = Parallel(n_jobs=config.n_jobs)(
+    # threads, not processes (CODING_RULES.md 10a): a process-based pool
+    # would pickle a full copy of `shape` -- the region's whole sightline
+    # array set -- into every worker, the same duplication `prior.yso`'s
+    # own kernel-quadrature `Parallel` call avoids by sharing the one
+    # loaded object; the chunk body is plain numpy array arithmetic, free
+    # of the GIL.
+    results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
         delayed(_cdf_pairs_chunk)(shape, a_edges, uniq_row[idx], uniq_node[idx])
         for idx in idx_chunks)
     cdf_pairs = (np.concatenate(results, axis=0) if n_pairs

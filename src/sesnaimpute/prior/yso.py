@@ -6,17 +6,12 @@ Two products, independent of each other and of the mass-based selection
 
 `law_count` (section 6.1): disk-bearing young stars form in proportion to
 the square of the cloud's own column, `N_law = kappa * (d_r*pi/180)^2 *
-max(A_s - p_r, 0)^2`, with `kappa` Lada, Lombardi et al. 2013's
-area-sampled Orion A+B level (their section 4.1, 12 young stars per pc^2
-per mag^2 of A_K on the Megeath+2012 Class I+II census at NICEST's 3'
-resolution), transferred to the two beams by the measured beam term:
-10.0 at Herschel's 36.3", 12.9 at Planck's 5.03'. `p_r`, the region's own
-diffuse pedestal, is the 10th percentile of its adopted columns -- the
-cloud's own column is what the law was fitted to, not the total column
-with two kiloparsecs of unrelated diffuse dust folded in. `build` writes
-one 30-row product with `p_r`, the region distance and the pc^2/deg^2
-factor it multiplies, and the pedestal-removed fraction of the law count
-(section 6.4 item 4).
+A_s^2`, the source's whole adopted column, with `kappa` Pokhrel+2020's
+pooled star-gas relation on Herschel columns: 14.5 young stars pc^-2 per
+mag^2 of A_K at the Herschel arm's 36.3" beam, transferred to the Planck
+arm's 5.03' by the measured beam ratio, 1.29, giving 18.7. `build` writes
+one 30-row product with the region distance and the pc^2/deg^2 factor it
+multiplies.
 
 The shape (section 6.3): a young star sits at a depth drawn from the
 cloud's own gas density, `p(u) ~ rho_gas(d(u))^(1/2)` where
@@ -77,18 +72,14 @@ from sesnaimpute.sky.derived import planck_column as sky_planck_column
 # 6.1 -- the law count
 # ====================================================================
 
-#: Lada, Lombardi et al. 2013 section 4.1: 12 young stars pc^-2 mag^-2 of
-#: A_K at NICEST's 3' resolution, fixed to Megeath+2012's Orion A+B Class
-#: I+II census, transferred to the survey's two column-measurement beams
-#: by the measured beam term (SPEC_PRIORS.md section 6.1's "three routes"
-#: table): 36.3" (Herschel Gould Belt Survey) and 5.03' (Planck).
-KAPPA_HERSCHEL = 10.0
-KAPPA_PLANCK = 12.9
+#: Pokhrel+2020's pooled star-gas relation on Herschel columns: 14.5 young
+#: stars pc^-2 mag^-2 of A_K at the Herschel arm's 36.3" beam
+#: (SPEC_PRIORS.md section 6.1).
+KAPPA_HERSCHEL = 14.5
 
-#: The region's own 10th percentile of adopted column, `p_r` (SPEC_PRIORS.md
-#: section 6.1): the cloud's own column is the total column less this
-#: diffuse pedestal, floored at zero.
-PEDESTAL_PERCENTILE = 10.0
+#: The Herschel level transferred to the Planck arm's 5.03' beam by the
+#: same measured beam ratio (1.29) used before (SPEC_PRIORS.md section 6.1).
+KAPPA_PLANCK = 18.7
 
 #: Pokhrel+2020's cloud-to-cloud scatter of the normalisation: the
 #: uncertainty on any one region's law level, reported and never
@@ -128,46 +119,28 @@ def _adopted_columns(config, region):
     return out
 
 
-def pedestal_k(config, region):
-    """`p_r`: the 10th percentile of `region`'s own adopted-column
-    distribution (SPEC_PRIORS.md section 6.1)."""
-    a_col, _ = _adopted_columns(config, region)
-    return float(np.percentile(a_col, PEDESTAL_PERCENTILE))
-
-
 def law_count(config, region, a_col, provenance):
     """`N_law`, young stars deg^-2, for arrays of adopted column and arm
     (SPEC_PRIORS.md section 6.1):
 
-        N_law = kappa_arm * (d_r*pi/180)^2 * max(a_col - p_r, 0)^2
+        N_law = kappa_arm * (d_r*pi/180)^2 * a_col^2
+
+    the source's whole adopted column, no pedestal.
     """
     a_col = np.asarray(a_col, dtype=float)
     provenance = np.asarray(provenance)
-    p_r = pedestal_k(config, region)
     d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
     kappa = np.where(provenance == PROVENANCE_HERSCHEL,
                       KAPPA_HERSCHEL, KAPPA_PLANCK)
-    a_cloud = np.maximum(a_col - p_r, 0.0)
-    return kappa * pc2_per_deg2(d_r_pc) * a_cloud ** 2
+    return kappa * pc2_per_deg2(d_r_pc) * a_col ** 2
 
 
 def _law_row(config, region):
-    """One region's law-product row, plus the pedestal-removed fraction
-    of the law count (SPEC_PRIORS.md section 6.4 item 4): the built law
-    count (with the pedestal subtracted) against what the same sources
-    would give the total column, unsubtracted."""
-    a_col, provenance = _adopted_columns(config, region)
-    p_r = pedestal_k(config, region)
+    """One region's law-product row: the region distance and the
+    pc^2/deg^2 factor `law_count` multiplies."""
     d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
     pc2 = float(pc2_per_deg2(d_r_pc))
-    kappa = np.where(provenance == PROVENANCE_HERSCHEL,
-                      KAPPA_HERSCHEL, KAPPA_PLANCK)
-    n_with_pedestal = law_count(config, region, a_col, provenance)
-    n_without_pedestal = kappa * pc2 * a_col ** 2
-    removed_frac = 1.0 - float(np.sum(n_with_pedestal)
-                                / np.sum(n_without_pedestal))
-    return dict(region=region, pedestal_k=p_r, d_r_pc=float(d_r_pc),
-                pc2_per_deg2=pc2, pedestal_removed_frac=removed_frac)
+    return dict(region=region, d_r_pc=float(d_r_pc), pc2_per_deg2=pc2)
 
 
 def _write_law_product(config, regions, rows):
@@ -180,19 +153,20 @@ def _write_law_product(config, regions, rows):
     tables_module.update_rows(
         path, regions,
         {
-            "PEDESTAL_K": np.array([r["pedestal_k"] for r in rows], dtype=np.float64),
             "D_R_PC": np.array([r["d_r_pc"] for r in rows], dtype=np.float64),
             "PC2_PER_DEG2": np.array([r["pc2_per_deg2"] for r in rows], dtype=np.float64),
-            "PEDESTAL_REMOVED_FRAC": np.array(
-                [r["pedestal_removed_frac"] for r in rows], dtype=np.float64),
         },
         granule="region")
     with tables_module.open_product(path, granule="region") as f:
         for name, value in (("KAPPA_HERSCHEL", KAPPA_HERSCHEL),
                              ("KAPPA_PLANCK", KAPPA_PLANCK),
                              ("LAW_BAND_DEX", LAW_BAND_DEX)):
-            if name not in f:
-                f.create_dataset(name, data=np.float64(value))
+            if name in f:
+                del f[name]
+            f.create_dataset(name, data=np.float64(value))
+        for stale in ("PEDESTAL_K", "PEDESTAL_REMOVED_FRAC"):
+            if stale in f:
+                del f[stale]
     return path
 
 
@@ -266,9 +240,9 @@ def _region_bbox_icrs(hpx_pix_512):
     return float(ra.min()), float(ra.max()), float(dec.min()), float(dec.max())
 
 
-def _herschel_pixel_stats(config, pix_sorted, pedestal_k_value):
+def _herschel_pixel_stats(config, pix_sorted):
     """`(sum_sq, count)`, each `(n_pix,)`, aligned to `pix_sorted`
-    (ascending): the sum and count of `max(A_cell - p_r, 0)^2` over every
+    (ascending): the sum and count of `A_cell^2` over every
     HGBS map cell (`_map_block_a_k`) whose own nside-512 pixel is in the
     set, over every map overlapping the set's own footprint. Maps are the
     largest independent iterator here (rule 8) and are parallelised with
@@ -296,8 +270,7 @@ def _herschel_pixel_stats(config, pix_sorted, pedestal_k_value):
         if not matched.any():
             continue
         idx = capped[matched]
-        a_cloud = np.maximum(a_k[matched] - pedestal_k_value, 0.0)
-        sum_sq += np.bincount(idx, weights=a_cloud ** 2, minlength=n_pix)
+        sum_sq += np.bincount(idx, weights=a_k[matched] ** 2, minlength=n_pix)
         count += np.bincount(idx, weights=np.ones(idx.size), minlength=n_pix)
     return sum_sq, count
 
@@ -342,7 +315,7 @@ def law_area_integral(config, region, hpx_pix_512):
     Herschel-covered pixels (any HGBS map cell falls inside,
     `_herschel_pixel_stats` at the map's own beam-scale resolution):
 
-        kappa_H * mean_over_map_cells[ max(A_cell - p_r, 0)^2 ]
+        kappa_H * mean_over_map_cells[ A_cell^2 ]
 
     No coverage-fraction weighting: a pixel only partly inside the HGBS
     mosaic still carries Gaia/2MASS detections across its WHOLE area,
@@ -357,28 +330,25 @@ def law_area_integral(config, region, hpx_pix_512):
     supplies (the true-column dispersion the Planck beam hides,
     SPEC_PRIORS.md section 1.2):
 
-        kappa_P * ((A_P - p_r)^2 + Var(T | A_P))     for A_P > p_r, else 0
+        kappa_P * (A_P^2 + Var(T | A_P))
     """
     hpx_pix_512 = np.asarray(hpx_pix_512, dtype=np.int64)
     order = np.argsort(hpx_pix_512)
     pix_sorted = hpx_pix_512[order]
 
-    p_r = pedestal_k(config, region)
     d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
     pc2 = pc2_per_deg2(d_r_pc)
     kappa_h_full = KAPPA_HERSCHEL * pc2
     kappa_p_full = KAPPA_PLANCK * pc2
 
-    sum_sq, count = _herschel_pixel_stats(config, pix_sorted, p_r)
+    sum_sq, count = _herschel_pixel_stats(config, pix_sorted)
     herschel_covered = count > 0
     herschel_value = kappa_h_full * np.divide(
         sum_sq, count, out=np.zeros_like(sum_sq), where=herschel_covered)
 
     a_p = _planck_parent_column(config, pix_sorted >> 2)
     sigma2_sub = _load_kernel(config).second_moment(a_p)
-    a_cloud_p = a_p - p_r
-    planck_value = np.where(a_cloud_p > 0.0,
-                             kappa_p_full * (a_cloud_p ** 2 + sigma2_sub), 0.0)
+    planck_value = kappa_p_full * (a_p ** 2 + sigma2_sub)
 
     value_sorted = np.where(herschel_covered, herschel_value, planck_value)
     out = np.empty_like(value_sorted)
