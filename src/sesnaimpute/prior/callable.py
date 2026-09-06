@@ -166,13 +166,15 @@ _INTERP_CHUNK = 20000
 _MARGINAL_CHUNK = 20000
 
 
-def _marginal_exact_chunked(yso_shape, a, sl_rows, a_col, sigma_col, zp_sigma_k=None):
+def _marginal_exact_chunked(yso_shape, a, sl_rows, a_col, sigma_col, map_class, zp_sigma_k=None):
     """`(n,)`: `YsoShape.marginal_exact`, called in `_MARGINAL_CHUNK`
     blocks so its own per-call `(chunk, n_embedding_cell)` gather never
-    scales with the caller's own batch (module docstring). `zp_sigma_k`,
-    one per source (mag, 0 for Planck-arm), is the Herschel field zero
-    point's own uncertainty (owner, 2026-09-06); omitting it falls back
-    to the survey-wide RMS, as before."""
+    scales with the caller's own batch (module docstring). `map_class` is
+    the SOURCE's own arm (`A_COL_PROVENANCE`), required -- never the
+    sightline's block-averaged one (fixed defect, owner 2026-09-06).
+    `zp_sigma_k`, one per source (mag, 0 for Planck-arm), is the Herschel
+    field zero point's own uncertainty; omitting it falls back to the
+    survey-wide RMS, as before."""
     n = a.shape[0]
     out = np.empty(n, dtype=np.float64)
     for start in range(0, n, _MARGINAL_CHUNK):
@@ -180,7 +182,7 @@ def _marginal_exact_chunked(yso_shape, a, sl_rows, a_col, sigma_col, zp_sigma_k=
         zp_chunk = zp_sigma_k[start:stop] if zp_sigma_k is not None else None
         out[start:stop] = yso_shape.marginal_exact(
             a[start:stop], sl_rows[start:stop], a_col[start:stop], sigma_col[start:stop],
-            zp_sigma_k=zp_chunk)
+            map_class[start:stop], zp_sigma_k=zp_chunk)
     return out
 
 
@@ -271,14 +273,17 @@ def _bracket(grid, x):
 @numba.njit(cache=True, fastmath=True)
 def _gal_log_density_numba(a, b, mi, a_col, sigma_col, arm_idx, z, local_idx,
                            gal_fref, eps_batch, x_ladder, log10_s_grid, phi_density_grid,
-                           kernel_ln_nodes, kernel_w, kernel_mu, kernel_sigma, zp_herschel_k):
+                           kernel_ln_nodes, kernel_w, kernel_mu, kernel_sigma, zp_sigma_k):
     """`(n,)`: GAL's `ln lambda~_GAL` at every query point, one compiled
     loop replacing the shape reader's own Python (`Kernel.mixture`'s
     node bracket, `Kernel.pdf`'s two-component sum, and the eps/phi
     bilinear reads) with scalar arithmetic per point -- no Python-level
     per-chunk gather of `eps_batch` (module docstring's own `_INTERP_CHUNK`
     workaround), since the per-source array is indexed in place by
-    `local_idx`."""
+    `local_idx`. `arm_idx` is the SOURCE's own `A_COL_PROVENANCE` (fixed
+    defect, owner 2026-09-06: was the sightline's block-averaged arm).
+    `zp_sigma_k`, one per point (mag, 0 for Planck-arm), is the source's
+    own Herschel field zero-point uncertainty, not one survey scalar."""
     n = a.shape[0]
     out = np.empty(n, dtype=np.float64)
     ln10 = np.log(10.0)
@@ -300,7 +305,7 @@ def _gal_log_density_numba(a, b, mi, a_col, sigma_col, arm_idx, z, local_idx,
         sg1 = kernel_sigma[arm, i, 1] + t * (kernel_sigma[arm, i + 1, 1] - kernel_sigma[arm, i, 1])
 
         sigma_col_dex = scol / (acol * ln10)
-        zp_dex = zp_herschel_k / (acol * ln10) if arm == _HERSCHEL_ARM_CODE else 0.0
+        zp_dex = zp_sigma_k[k] / (acol * ln10) if arm == _HERSCHEL_ARM_CODE else 0.0
         extra_var = sigma_col_dex * sigma_col_dex + zp_dex * zp_dex
         sigma0 = np.sqrt(sg0 * sg0 + extra_var)
         sigma1 = np.sqrt(sg1 * sg1 + extra_var)
@@ -625,12 +630,14 @@ class SourcePrior(object):
 
         a_col = self.table["A_COL_K"][rows]
         sigma_col = self.table["A_COL_SIG_K"][rows]
-        sl_rows = self.table["HPX256_ROW"][rows]
-        # the SIGHTLINE's own arm (`YsoShape.is_herschel`, module docstring's
-        # shared kernel/arm), not the source's own `A_COL_PROVENANCE` --
-        # `_map_class`'s own convention, matching `Kernel._ARM_CODE`
-        # (0=herschel, 1=planck).
-        arm_idx = np.where(self.yso_shape.is_herschel[sl_rows], 0, 1).astype(np.int64)
+        # the SOURCE's own arm (fixed defect, owner 2026-09-06: was the
+        # SIGHTLINE's block-averaged majority, `YsoShape.is_herschel
+        # [sl_rows]` -- wrong for the ~43% of Perseus's Herschel-arm
+        # sources whose own sightline majority is Planck). Matches
+        # `Kernel._ARM_CODE` exactly: `A_COL_PROVENANCE` 0=herschel,
+        # 1=planck, the same codes `column.py` writes.
+        arm_idx = self.table["A_COL_PROVENANCE"][rows].astype(np.int64)
+        zp_sigma_k = self._zp_sigma_k[rows]
         z = self.table["Z_GAL"][rows]
         local = self._prep_local_index(rows).astype(np.int64)
         kern = self.yso_shape.kernel
@@ -639,7 +646,7 @@ class SourcePrior(object):
             a, b, mi.astype(np.int64), a_col, sigma_col, arm_idx, z, local,
             self.gal_fref, self._prep_gal_eps, self.gal_x_ladder, self.gal_log10_s_grid,
             self._gal_phi_density_grid, kern._ln_nodes, kern._w, kern._mu, kern._sigma,
-            kern.zp_herschel_k)
+            zp_sigma_k)
         return ln_val
 
     # -----------------------------------------------------------------
@@ -657,8 +664,11 @@ class SourcePrior(object):
         a_col = self.table["A_COL_K"][rows]
         sigma_col = self.table["A_COL_SIG_K"][rows]
         sl_rows = self.table["HPX256_ROW"][rows]
+        # the SOURCE's own arm, not the sightline's (fixed defect, owner
+        # 2026-09-06) -- `_marginal_exact_chunked`'s `map_class`.
+        map_class = self.table["A_COL_PROVENANCE"][rows]
         zp_sigma_k = self._zp_sigma_k[rows]
-        p_a = _marginal_exact_chunked(self.yso_shape, a, sl_rows, a_col, sigma_col,
+        p_a = _marginal_exact_chunked(self.yso_shape, a, sl_rows, a_col, sigma_col, map_class,
                                       zp_sigma_k=zp_sigma_k)
         p_a = np.where(a > 0.0, p_a, 0.0)
 
@@ -690,8 +700,11 @@ class SourcePrior(object):
         a_col = self.table["A_COL_K"][rows]
         sigma_col = self.table["A_COL_SIG_K"][rows]
         sl_rows = self.table["HPX256_ROW"][rows]
+        # the SOURCE's own arm, not the sightline's (fixed defect, owner
+        # 2026-09-06) -- `_marginal_exact_chunked`'s `map_class`.
+        map_class = self.table["A_COL_PROVENANCE"][rows]
         zp_sigma_k = self._zp_sigma_k[rows]
-        p_a = _marginal_exact_chunked(self.yso_shape, a, sl_rows, a_col, sigma_col,
+        p_a = _marginal_exact_chunked(self.yso_shape, a, sl_rows, a_col, sigma_col, map_class,
                                       zp_sigma_k=zp_sigma_k)
         p_a = np.where(valid, p_a, 0.0)
 
@@ -797,14 +810,14 @@ def _integrate_yso(prior, row, a_grid):
 
 def _extinction_grid(prior, row, a_col):
     """Log-spaced `a` grid from a tiny floor to `_A_GRID_SIGMAS` kernel
-    sigmas past `a_col`, at this source's own sightline arm: the exact
-    extinction marginal every class but the family shapes reads is
-    sharply peaked toward `a_col`, so log-spacing (the same fix
-    `star_shapes` uses for its own `log10 x` axis) is needed to resolve
-    the peak."""
-    sl_row = int(prior.table["HPX256_ROW"][row])
+    sigmas past `a_col`, at this source's own arm: the exact extinction
+    marginal every class but the family shapes reads is sharply peaked
+    toward `a_col`, so log-spacing (the same fix `star_shapes` uses for
+    its own `log10 x` axis) is needed to resolve the peak. `map_class` is
+    the source's own `A_COL_PROVENANCE` (fixed defect, owner 2026-09-06:
+    was `YsoShape._map_class`'s sightline majority)."""
     sigma_col = float(prior.table["A_COL_SIG_K"][row])
-    map_class = prior.yso_shape._map_class(np.array([sl_row]))
+    map_class = prior.table["A_COL_PROVENANCE"][row:row + 1]
     mu, sigma = prior.yso_shape.kernel.params(
         np.array([a_col]), np.array([sigma_col]), map_class)
     a_hi = a_col * 10.0 ** (mu[0] + _A_GRID_SIGMAS * sigma[0])
