@@ -651,6 +651,121 @@ class _H2sClass(object):
         return eps_val.reshape(shp)
 
 
+#: `Z`'s own fixed quadrature grid (owner ruling, 2026-09-06): `Z` is
+#: the normaliser of the density the fitter actually reads, so it is
+#: computed here, at `prepare` time, by the SAME `shape`/`selection`
+#: read `log_density` composes -- not a separately-stored upstream
+#: integral. One rectangular grid per source: `_Z_QUAD_NA` log-spaced
+#: points in `a` from a floor of `_Z_QUAD_A_FLOOR_FRAC . A_s` to
+#: `_Z_QUAD_SIGMAS` kernel sigmas past the shifted mean (the same
+#: generous bound `_extinction_grid` uses for the identity check, read
+#: off the class's OWN kernel -- `ClassShape.kern` for STAR/AGB/PAHC,
+#: the shared `YsoShape.kernel` for GAL/YSO/H2S), `_Z_QUAD_NB` points in
+#: `log10 B` over the class's own tabulated/nominal range. Trapezoid in
+#: both axes.
+_Z_QUAD_NA = 48
+_Z_QUAD_NB = 64
+_Z_QUAD_SIGMAS = 6.0
+_Z_QUAD_A_FLOOR_FRAC = 1.0e-3
+
+
+def _quad_grid_log(lo, hi, num):
+    """`(n, num)`: log-spaced grid per source between per-source `lo`
+    and `hi` (both `(n,)`, `hi` floored at ten times `lo` so a
+    degenerate source still gets a real span)."""
+    t = np.linspace(0.0, 1.0, num)
+    log_lo = np.log10(lo)
+    log_hi = np.log10(np.maximum(hi, lo * 10.0))
+    return 10.0 ** (log_lo[:, None] + t[None, :] * (log_hi - log_lo)[:, None])
+
+
+def _quad_grid_lin(lo, hi, num):
+    """`(n, num)`: linearly-spaced grid per source between per-source
+    `lo` and `hi` (both `(n,)`)."""
+    t = np.linspace(0.0, 1.0, num)
+    return lo[:, None] + t[None, :] * (hi - lo)[:, None]
+
+
+def _z_by_quadrature(prior, cls, rows):
+    """`(n,)`: `Z[s] = trapz_(log10 B) trapz_a shape(a, log10 B) .
+    selection(a, log10 B)` on the `_Z_QUAD_NA` x `_Z_QUAD_NB` grid
+    (module docstring), one rectangle per source. Reads `prior`'s own
+    `shape`/`selection` objects -- the exact arithmetic `log_density`
+    composes -- so a source whose selection is genuinely zero
+    everywhere (no object of this class could be catalogued at its own
+    limits) returns `Z = 0` here, the correct statement that the class
+    is impossible on this sightline, not a defect (owner ruling,
+    2026-09-06)."""
+    obj = prior._classes[cls]
+    n = rows.shape[0]
+    a_col = prior.table["A_COL_K"][rows]
+    sigma_col = prior.table["A_COL_SIG_K"][rows]
+    map_class_code = prior.table["A_COL_PROVENANCE"][rows]
+    a_floor = _Z_QUAD_A_FLOOR_FRAC * a_col
+
+    if cls in FAMILY_CLASSES:
+        shape_obj = prior.shapes[cls]
+        map_class_str = np.where(
+            map_class_code == star_shapes._PLANCK_PROVENANCE_CODE, "planck", "herschel")
+        _, mu, sigma = shape_obj.kern.mixture(a_col, sigma_col, map_class_str)
+        mu_tail = np.maximum(mu[:, 0] + _Z_QUAD_SIGMAS * sigma[:, 0],
+                             mu[:, 1] + _Z_QUAD_SIGMAS * sigma[:, 1])
+        a_hi = a_col * 10.0 ** mu_tail
+        a_grid = _quad_grid_log(a_floor, a_hi, _Z_QUAD_NA)
+        b_cell = float(np.mean(np.diff(shape_obj.b_edges)))
+        b_row = np.linspace(shape_obj.b_edges[0] - 6 * b_cell,
+                            shape_obj.b_edges[-1] + 6 * b_cell, _Z_QUAD_NB)
+        b_grid = np.broadcast_to(b_row, (n, _Z_QUAD_NB))
+        mi_grid = None
+    elif cls in ("gal", "h2s"):
+        mu, sigma = prior.yso_shape.kernel.params(a_col, sigma_col, map_class_code)
+        a_hi = a_col * 10.0 ** (mu + _Z_QUAD_SIGMAS * sigma)
+        a_grid = _quad_grid_log(a_floor, a_hi, _Z_QUAD_NA)
+        if cls == "gal":
+            s_grid, fref0 = prior.gal_log10_s_grid, prior.gal_fref[0]
+        else:
+            s_grid, fref0 = prior.h2s_log10_sigma_grid, prior.h2s_fref[0]
+        b_row = np.linspace(s_grid[0], s_grid[-1], _Z_QUAD_NB) - np.log10(fref0)
+        b_grid = np.broadcast_to(b_row, (n, _Z_QUAD_NB))
+        mi_grid = np.zeros((n, _Z_QUAD_NA * _Z_QUAD_NB), dtype=np.intp)
+    else:  # yso
+        mu, sigma = prior.yso_shape.kernel.params(a_col, sigma_col, map_class_code)
+        a_hi = a_col * 10.0 ** (mu + _Z_QUAD_SIGMAS * sigma)
+        a_grid = _quad_grid_log(a_floor, a_hi, _Z_QUAD_NA)
+        # the ridge's own mean MOVES with `a` (`RIDGE_SLOPE`); a `b_grid`
+        # fixed at the nominal `a_col` misses essentially all the density
+        # at the far end of a wide `a_grid` (the bug this sheared grid
+        # fixes -- caught by a 5 source smoke test reading Z 5-10x too
+        # small before this fix, `_integrate_yso`'s own sheared identity
+        # grid is the model). `b_grid` is 3-D here, `(n, NA, NB)`, not
+        # `(n, NB)`: one sheared window PER `a_grid` point.
+        ridge_width = prior.table["RIDGE_WIDTH"][rows]
+        mean_b_grid = (prior.table["RIDGE_INTERCEPT"][rows][:, None]
+                       + prior.table["RIDGE_SLOPE"][rows][:, None] * a_grid)
+        t = np.linspace(-1.0, 1.0, _Z_QUAD_NB) * _Z_QUAD_SIGMAS
+        b_grid_3d = mean_b_grid[:, :, None] + t[None, None, :] * ridge_width[:, None, None]
+        a_full = np.repeat(a_grid, _Z_QUAD_NB, axis=1)
+        b_full = b_grid_3d.reshape(n, _Z_QUAD_NA * _Z_QUAD_NB)
+        rows2d = np.broadcast_to(rows[:, None], a_full.shape)
+        shape_val = obj.shape(rows2d, a_full, b_full, model_index=None)
+        sel_val = obj.selection(rows2d, a_full, b_full, model_index=None)
+        dens = (shape_val * sel_val).reshape(n, _Z_QUAD_NA, _Z_QUAD_NB)
+        inner = np.trapz(dens, x=b_grid_3d, axis=2)
+        return np.trapz(inner, x=a_grid, axis=1)
+
+    a_full = np.repeat(a_grid, _Z_QUAD_NB, axis=1)
+    b_full = np.tile(b_grid, (1, _Z_QUAD_NA))
+    rows2d = np.broadcast_to(rows[:, None], a_full.shape)
+
+    shape_val = obj.shape(rows2d, a_full, b_full, model_index=mi_grid)
+    sel_val = obj.selection(rows2d, a_full, b_full, model_index=mi_grid)
+    dens = (shape_val * sel_val).reshape(n, _Z_QUAD_NA, _Z_QUAD_NB)
+
+    b_grid_3d = np.broadcast_to(b_grid[:, None, :], dens.shape)
+    inner = np.trapz(dens, x=b_grid_3d, axis=2)
+    return np.trapz(inner, x=a_grid, axis=1)
+
+
 class SourcePrior(object):
     """`log_density(cls, rows, a, log10_b, model_index=None)`, one region's
     upstream products loaded once (module docstring). `cls=None` (the
@@ -817,6 +932,14 @@ class SourcePrior(object):
         self._prep_star_eps = star_eps
         self._prep_h2s_eps = h2s_eps
 
+        # `Z[s]` by quadrature (owner ruling, 2026-09-06): the normaliser
+        # of the density the fitter actually reads, computed where the
+        # read lives -- not `Z_<CLS>` off the table any more (module
+        # docstring above `_z_by_quadrature`). Needs `_prep_star_eps`/
+        # `_prep_h2s_eps` already set (just above): the family/H2S
+        # `selection` read gathers from them.
+        self._prep_z = {c: _z_by_quadrature(self, c, uniq_rows) for c in self._classes}
+
     def _prep_local_index(self, rows):
         """`(n,)`: `rows`'s own position in the last `prepare`d batch --
         every class's one gather into that batch's `EPS` arrays (rule 6:
@@ -874,8 +997,13 @@ class SourcePrior(object):
         (module docstring). ONE composition for all six classes (owner
         ruling, 2026-09-06): `ln shape + ln selection - ln Z[rows]`,
         where `shape`/`selection` are the class's own object (below) and
-        `Z` is the table's own normaliser column, except YSO, whose
-        `z_column` is `None` (`Z_YSO = 1` by construction, not read)."""
+        `Z` is `prepare`'s own quadrature (`_z_by_quadrature`), the
+        normaliser of THIS density, not `Z_<CLS>` off the table any
+        more. `Z = 0` (every object of this class is genuinely
+        impossible at this source's own limits) correctly returns
+        `-inf` for every template -- that is not a defect, `check`
+        below counts such sources separately rather than folding them
+        into the identity's own worst/typical deviation."""
         if cls not in CLASSES:
             raise ValueError("SourcePrior.log_density: unknown class %r, must be one of %r"
                              % (cls, CLASSES))
@@ -891,8 +1019,8 @@ class SourcePrior(object):
         shape_val = obj.shape(rows2d, a2, b2, model_index=mi2)
         sel_val = obj.selection(rows2d, a2, b2, model_index=mi2)
         numerator = shape_val * sel_val
-        z = (self.table[obj.z_column][rows2d] if obj.z_column is not None
-            else np.ones_like(numerator))
+        local2d = self._prep_local_index(rows2d.ravel()).reshape(rows2d.shape)
+        z = self._prep_z[cls][local2d]
         with np.errstate(divide="ignore", invalid="ignore"):
             ln_val = np.log(numerator) - np.log(z)
         return np.where((numerator > 0.0) & (z > 0.0), ln_val, -np.inf)
@@ -1001,8 +1129,14 @@ def check(config, region, n_sources=50, seed=0):
     """For `n_sources` random catalogue rows and each of the six classes,
     the numerical integral of `exp(log_density)` over a fine `(a, log10
     B)` grid against 1: within 0.02 for STAR/AGB/PAHC/GAL/H2S
-    (`star_shapes.EPS_SHAPE`), within 1e-3 for YSO (analytic). Reports the
-    worst deviation per class, and the wall time of one source's
+    (`star_shapes.EPS_SHAPE`), within 1e-3 for YSO (analytic). A source
+    whose quadrature `Z` (`_z_by_quadrature`, `prepare`) is zero has no
+    object of this class catalogueable at its own limits -- every
+    template correctly reads `-inf` there, so its integral is correctly
+    zero, and it is counted separately (`n_zero`) rather than folded
+    into the identity's own typical/worst deviation (owner ruling,
+    2026-09-06). Reports typical (median) and worst deviation per class
+    over the sources where `Z > 0`, and the wall time of one source's
     `log_density` call for one class at 4,066 models times 9 query
     points, extrapolated linearly to the survey's 8.66e6 sources."""
     prior = SourcePrior(config, region)
@@ -1011,36 +1145,53 @@ def check(config, region, n_sources=50, seed=0):
     rows = rng.choice(prior.n_source, size=n, replace=False)
     prior.prepare(rows)
 
-    worst = {cls: 0.0 for cls in CLASSES}
+    devs = {cls: [] for cls in CLASSES}
+    n_zero = {cls: 0 for cls in CLASSES}
     for row in rows:
         a_col = float(prior.table["A_COL_K"][row])
+        local = int(prior._prep_local_index(np.array([row], dtype=np.intp))[0])
 
         for cls in FAMILY_CLASSES:
+            if prior._prep_z[cls][local] <= 0.0:
+                n_zero[cls] += 1
+                continue
             shape = prior.shapes[cls]
             a_grid, b_grid = _family_grid(shape, a_col)
             a_grid = a_grid[a_grid > 0.0]
             integral = _integrate(prior, cls, row, a_grid, b_grid)
-            worst[cls] = max(worst[cls], abs(integral - 1.0))
+            devs[cls].append(abs(integral - 1.0))
 
         a_grid_cloud = _extinction_grid(prior, row, a_col)
 
-        b_grid_gal = prior.gal_log10_s_grid - np.log10(prior.gal_fref[0])
-        integral = _integrate(prior, "gal", row, a_grid_cloud, b_grid_gal, model_index=0)
-        worst["gal"] = max(worst["gal"], abs(integral - 1.0))
+        if prior._prep_z["gal"][local] <= 0.0:
+            n_zero["gal"] += 1
+        else:
+            b_grid_gal = prior.gal_log10_s_grid - np.log10(prior.gal_fref[0])
+            integral = _integrate(prior, "gal", row, a_grid_cloud, b_grid_gal, model_index=0)
+            devs["gal"].append(abs(integral - 1.0))
 
-        integral = _integrate_yso(prior, row, a_grid_cloud)
-        worst["yso"] = max(worst["yso"], abs(integral - 1.0))
+        if prior._prep_z["yso"][local] <= 0.0:
+            n_zero["yso"] += 1
+        else:
+            integral = _integrate_yso(prior, row, a_grid_cloud)
+            devs["yso"].append(abs(integral - 1.0))
 
         # The check's own Sigma domain must be the same grid `_interp_eps_2d`
         # interpolates on (module docstring's "end bins held" convention) --
         # a wider independent range double-counts the held edge value past
         # the real grid, the row-1222 callable/product mismatch this fixes.
-        log10_sigma_lo = prior.h2s_log10_sigma_grid[0]
-        log10_sigma_hi = prior.h2s_log10_sigma_grid[-1]
-        b_grid_h2s = (np.linspace(log10_sigma_lo, log10_sigma_hi, _CHECK_GRID_N)
-                     - np.log10(prior.h2s_fref[0]))
-        integral = _integrate(prior, "h2s", row, a_grid_cloud, b_grid_h2s, model_index=0)
-        worst["h2s"] = max(worst["h2s"], abs(integral - 1.0))
+        if prior._prep_z["h2s"][local] <= 0.0:
+            n_zero["h2s"] += 1
+        else:
+            log10_sigma_lo = prior.h2s_log10_sigma_grid[0]
+            log10_sigma_hi = prior.h2s_log10_sigma_grid[-1]
+            b_grid_h2s = (np.linspace(log10_sigma_lo, log10_sigma_hi, _CHECK_GRID_N)
+                         - np.log10(prior.h2s_fref[0]))
+            integral = _integrate(prior, "h2s", row, a_grid_cloud, b_grid_h2s, model_index=0)
+            devs["h2s"].append(abs(integral - 1.0))
+
+    worst = {cls: (max(devs[cls]) if devs[cls] else 0.0) for cls in CLASSES}
+    typical = {cls: (float(np.median(devs[cls])) if devs[cls] else 0.0) for cls in CLASSES}
 
     read_cost = {}
     probe_row = int(rows[0])
@@ -1066,16 +1217,18 @@ def check(config, region, n_sources=50, seed=0):
         read_cost[cls] = dict(n_model=_READ_COST_N_MODEL, wall_s=wall_s, per_source_s=wall_s,
                               survey_hours=wall_s * _SURVEY_N_SOURCES / 3600.0)
 
-    return worst, read_cost
+    return worst, typical, n_zero, read_cost
 
 
-def report(region, worst, read_cost):
-    lines = ["prior.callable: %s: normalisation check (bar 0.02 all but YSO 1e-3)" % region]
+def report(region, worst, typical, n_zero, read_cost):
+    lines = ["prior.callable: %s: normalisation check, sources with Z > 0 only "
+            "(bar 0.02 all but YSO 1e-3)" % region]
     for cls in CLASSES:
         bar = 1.0e-3 if cls == "yso" else 0.02
-        lines.append("prior.callable: %s: %s: worst |integral - 1| = %.4g (bar %.4g)%s"
-                     % (region, cls, worst[cls], bar,
-                        "" if worst[cls] <= bar else "  ** EXCEEDS BAR **"))
+        lines.append("prior.callable: %s: %s: typical |integral - 1| = %.4g, "
+                     "worst = %.4g (bar %.4g)%s, Z=0 sources: %d"
+                     % (region, cls, typical[cls], worst[cls], bar,
+                        "" if worst[cls] <= bar else "  ** EXCEEDS BAR **", n_zero[cls]))
     lines.append("prior.callable: %s: read cost (one source x N models x %d query points)"
                  % (region, _N_QUERY_TIMING))
     for cls in CLASSES:
@@ -1093,6 +1246,6 @@ if __name__ == "__main__":
 
     cfg = _config_module.load(sys.argv[1])
     for _region in sys.argv[2:]:
-        _worst, _read_cost = check(cfg, _region)
-        for _line in report(_region, _worst, _read_cost):
+        _worst, _typical, _n_zero, _read_cost = check(cfg, _region)
+        for _line in report(_region, _worst, _typical, _n_zero, _read_cost):
             print(_line, flush=True)
