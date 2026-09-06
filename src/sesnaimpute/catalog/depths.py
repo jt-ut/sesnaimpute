@@ -1,30 +1,40 @@
 """Survey depth: the 50%-completeness flux, per region and band
 (SPEC_PRIORS.md section 1.3).
 
-For each region and Spitzer band (I1-I4, M1) the detected-flux histogram,
-in magnitude `m = -2.5 log10(F)` of the sources with `ORIGIN_FNU == 1`
-(0.1-mag bins from the bright end to 2 mag beyond the faintest
-detection), is fit with power-law counts times an error-function
-completeness roll-off, `N(m) = A * 10**(alpha*m) * C(m)`,
-`C(m) = 0.5 * erfc((m - m50) / (sqrt(2) * w))`. The roll-off's 90% point
-is pegged to the region's own completeness map, `m90 = -2.5
-log10(median DCOMP90)`, `C(m90) = 0.9`, which fixes `m50 = m90 + 1.2816 w`
-and leaves `A`, `alpha`, `w` free, fit by Poisson likelihood on the whole
-histogram. `Delta = 0.4 * 1.2816 * w` (dex, positive by construction) is
-the offset that turns the map into a source's own 50%-completeness limit,
-`F_lim,50 = DCOMP90 * 10**(-Delta)` (`limits.py`): the map supplies the
-spatial pattern of depth, the catalogue's own detections set the width.
-The fit's relative L1 distance from the histogram, restricted to the
-roll-off region (bins fainter than `m90 - 1` mag), is reported alongside
-the fitted width; a band whose histogram cannot be fit by a roll-off at
-the map's level shows this as a large residual rather than a hidden bias
-in Delta.
+For each region and Spitzer band (I1-I4, M1), every detection is first
+put in units of its own map depth: `x = m - m90`, where `m =
+-2.5 log10(F)` is the detection's magnitude and `m90 = -2.5
+log10(DCOMP90)` is that same source's own completeness-map value. The
+histogram of `x` over the sources with `ORIGIN_FNU == 1` (0.1-mag bins
+from the bright end to 2 mag beyond the faintest detection) is fit with
+power-law counts times an error-function completeness roll-off,
+`N(x) = A * 10**(alpha*x) * C(x)`, `C(x) = 0.5 * erfc((x - x50) /
+(sqrt(2) * w))`, with `A`, `alpha`, `x50` and `w` all free, by Poisson
+likelihood on the whole histogram. Because each detection already carries
+its own map value out before histogramming, the map's spatial spread
+across the region no longer enters the fitted width -- only one width is
+learned, per region and band, same as before.
+
+`x = 0` is the map's own 90%-completeness point, so `x50` is directly the
+survey's 90%-to-50% offset in magnitude, and `Delta = 0.4 * x50` (dex) is
+the offset applied to every source's own `DCOMP90` to reach its
+50%-completeness limit, `F_lim,50 = DCOMP90 * 10**(-Delta)` (`limits.py`).
+Delta can come out negative: where a band's detections turn over
+brighter than the map's own 90% level, `x50` and hence Delta land below
+zero, and the fitted curve says so instead of being forced positive. The
+roll-off's own 90% point, `x = delta_offset`, floats along with the
+width; `delta_offset = x50 - 1.2816 * w` is reported alongside Delta and
+recovers to the mag-space offset the ruling calls `delta`. The fit's
+relative L1 distance from the histogram, restricted to the roll-off
+region (bins fainter than `x = -1`), is reported alongside the fitted
+width; a band whose histogram cannot be fit by a roll-off shows this as a
+large residual rather than a hidden bias in Delta.
 
 The three 2MASS bands (J, H, Ks) carry no per-source completeness map, so
-the same model is fit with `m50` and `w` both free; `F50_2MASS_MJY =
-10**(-0.4 m50)` is the region's 50%-completeness flux and the analogous
-relative L1 residual (bins fainter than `m50 - 1` mag) is reported beside
-it.
+the same model is fit directly on absolute magnitude `m`, with `m50` and
+`w` both free; `F50_2MASS_MJY = 10**(-0.4 m50)` is the region's
+50%-completeness flux and the analogous relative L1 residual (bins
+fainter than `m50 - 1` mag) is reported beside it.
 
 A Spitzer band is substituted -- taking its band's median Delta over the
 regions that fit -- only when its fit fails to converge or its histogram
@@ -65,9 +75,9 @@ MIN_POPULATED_BINS = 4
 # implies (the Pogson magnitude-flux relation).
 DEX_PER_MAG = 0.4
 
-# The standard normal distribution's one-sided 90% quantile, Phi^-1(0.9)
-# (Abramowitz & Stegun 1964, table 26.1): fixes the roll-off's 90% point
-# at `m90 = m50 + Z90 * w` for an error-function completeness curve.
+# The standard normal distribution's one-sided 90% quantile, Phi^-1(0.9):
+# an error-function completeness curve's 90% point sits `Z90 * w`
+# brighter than its 50% point, so `delta_offset = m50 - Z90 * w`.
 Z90 = 1.2816
 
 # Resamples per region-band for the bootstrap sampling uncertainty on
@@ -87,17 +97,12 @@ def _completeness(m, m50, w):
     return 0.5 * erfc((m - m50) / (np.sqrt(2.0) * w))
 
 
-def _model_pegged(m, alpha, w, m90):
-    """`N(m)` shape (up to the amplitude `A`) with `m50` pegged to the
-    region's map through `m90` and `Z90`.
-    """
-    m50 = m90 + Z90 * w
-    return 10.0 ** (alpha * m) * _completeness(m, m50, w)
-
-
 def _model_free(m, alpha, m50, w):
-    """`N(m)` shape (up to `A`) with `m50` and `w` both free (the 2MASS
-    bands, which carry no per-source completeness map to peg to).
+    """`N(m)` shape (up to `A`) with `m50` and `w` both free: used both
+    for the 2MASS bands (no per-source map to peg to) and for the
+    Spitzer bands, where `m` is each detection's magnitude relative to
+    its own map value and `m50` is therefore the survey's own
+    90%-to-50% offset rather than an absolute magnitude.
     """
     return 10.0 ** (alpha * m) * _completeness(m, m50, w)
 
@@ -118,11 +123,10 @@ def _poisson_nll_and_amplitude(f, n):
     return nll, amplitude
 
 
-def _mag_histogram(detected_flux):
-    """The detected-flux histogram in magnitude: 0.1-mag bins from the
-    bright end to 2 mag beyond the faintest detection.
+def _bin_histogram(m):
+    """Bins a magnitude-like array into 0.1-mag bins from the bright end
+    to 2 mag beyond the faintest value.
     """
-    m = -2.5 * np.log10(detected_flux)
     lo = float(m.min())
     hi = float(m.max()) + 2.0
     n_bins = max(1, int(np.ceil((hi - lo) / MAG_BIN)))
@@ -132,17 +136,27 @@ def _mag_histogram(detected_flux):
     return centers, counts.astype(float)
 
 
-def _fit_pegged(centers, counts, m90):
-    """Poisson-likelihood fit of `(alpha, w)` with `m50` pegged to `m90`."""
-    def nll(theta):
-        alpha, w = theta
-        f = _model_pegged(centers, alpha, w, m90)
-        val, _ = _poisson_nll_and_amplitude(f, counts)
-        return val
+def _mag_histogram(detected_flux):
+    """The detected-flux histogram in absolute magnitude (2MASS, which
+    has no per-source map to measure relative to).
+    """
+    return _bin_histogram(-2.5 * np.log10(detected_flux))
 
-    x0 = np.array([0.3, 0.3])
-    bounds = (_ALPHA_BOUNDS, _W_BOUNDS)
-    return minimize(nll, x0=x0, method="L-BFGS-B", bounds=bounds)
+
+def _relative_mag(detected_flux, dcomp90_detected):
+    """Each detection's magnitude relative to its own map value,
+    `m - m90 = -2.5 log10(F / DCOMP90)`.
+    """
+    return -2.5 * np.log10(detected_flux / dcomp90_detected)
+
+
+def _relative_mag_histogram(detected_flux, dcomp90_detected):
+    """The Spitzer detected-flux histogram in magnitude relative to each
+    source's own map value: `x = 0` is the map's own 90%-completeness
+    point for every source, so the map's spatial spread across the
+    region does not enter the histogram's width.
+    """
+    return _bin_histogram(_relative_mag(detected_flux, dcomp90_detected))
 
 
 def _fit_free(centers, counts):
@@ -173,48 +187,54 @@ def _relative_l1_residual(centers, counts, model_values, reference_mag):
     return float(np.sum(np.abs(model_values[mask] - counts[mask])) / denom)
 
 
-def _bootstrap_sigma_delta_pegged(detected_flux, m90, n_resamples=BOOTSTRAP_RESAMPLES,
-                                   seed=BOOTSTRAP_SEED):
+def _bootstrap_sigma_delta_spitzer(detected_flux, dcomp90_detected, n_resamples=BOOTSTRAP_RESAMPLES,
+                                    seed=BOOTSTRAP_SEED):
     """The estimator's own sampling uncertainty on Delta: resample the
-    detections with replacement and re-fit the whole pegged model on
-    each resample, one resample at a time -- never a full
-    `(n_resamples, n_detections)` index array, which for a
-    tens-of-thousands-detection band would itself be the size of the
-    catalogue many times over.
+    detections (flux and each one's own map value, paired) with
+    replacement and re-fit the whole free model on each resample, one
+    resample at a time -- never a full `(n_resamples, n_detections)`
+    index array, which for a tens-of-thousands-detection band would
+    itself be the size of the catalogue many times over.
     """
     rng = np.random.default_rng(seed)
     n = detected_flux.size
     deltas = np.full(n_resamples, np.nan)
     for k in range(n_resamples):
         idx = rng.integers(0, n, size=n)
-        centers, counts = _mag_histogram(detected_flux[idx])
+        centers, counts = _relative_mag_histogram(detected_flux[idx], dcomp90_detected[idx])
         if np.count_nonzero(counts > 0) < MIN_POPULATED_BINS:
             continue
-        res = _fit_pegged(centers, counts, m90)
+        res = _fit_free(centers, counts)
         if res.success:
-            deltas[k] = DEX_PER_MAG * Z90 * res.x[1]
+            deltas[k] = DEX_PER_MAG * res.x[1]
     return float(np.nanstd(deltas))
 
 
-def _fit_spitzer_band(detected_flux, m90):
-    """One Spitzer band's pegged fit: Delta, its fitted width, its
-    bootstrap sigma, its fit residual, and whether it converged.
+def _fit_spitzer_band(detected_flux, dcomp90_detected):
+    """One Spitzer band's fit, on each detection's magnitude relative to
+    its own map value: Delta, its offset from the map's own 90% point
+    (`delta_offset`), the fitted width, the bootstrap sigma, the fit
+    residual, and whether it converged.
     """
-    centers, counts = _mag_histogram(detected_flux)
+    centers, counts = _relative_mag_histogram(detected_flux, dcomp90_detected)
+    empty = dict(converged=False, delta=np.nan, delta_offset=np.nan, w=np.nan,
+                 sigma=np.nan, residual=np.nan)
     if np.count_nonzero(counts > 0) < MIN_POPULATED_BINS:
-        return dict(converged=False, delta=np.nan, w=np.nan, sigma=np.nan, residual=np.nan)
+        return empty
 
-    res = _fit_pegged(centers, counts, m90)
+    res = _fit_free(centers, counts)
     if not res.success:
-        return dict(converged=False, delta=np.nan, w=np.nan, sigma=np.nan, residual=np.nan)
+        return empty
 
-    alpha_hat, w_hat = res.x
-    model_values = _model_pegged(centers, alpha_hat, w_hat, m90)
+    alpha_hat, m50_hat, w_hat = res.x
+    model_values = _model_free(centers, alpha_hat, m50_hat, w_hat)
     _, amplitude = _poisson_nll_and_amplitude(model_values, counts)
-    residual = _relative_l1_residual(centers, counts, amplitude * model_values, m90)
-    delta = DEX_PER_MAG * Z90 * w_hat
-    sigma = _bootstrap_sigma_delta_pegged(detected_flux, m90)
-    return dict(converged=True, delta=delta, w=w_hat, sigma=sigma, residual=residual)
+    residual = _relative_l1_residual(centers, counts, amplitude * model_values, 0.0)
+    delta = DEX_PER_MAG * m50_hat
+    delta_offset = m50_hat - Z90 * w_hat
+    sigma = _bootstrap_sigma_delta_spitzer(detected_flux, dcomp90_detected)
+    return dict(converged=True, delta=delta, delta_offset=delta_offset, w=w_hat,
+                sigma=sigma, residual=residual)
 
 
 def _fit_twomass_band(detected_flux):
@@ -254,9 +274,10 @@ def _region_depths(curated_path):
     converged = np.zeros(len(IRAC_MIPS_KEYS), dtype=bool)
     for j, key in enumerate(IRAC_MIPS_KEYS):
         b = bands.index(key)
-        detected = fnu[origin[:, b] == 1, b]
-        m90 = -2.5 * np.log10(np.median(dcomp90[:, b]))
-        result = _fit_spitzer_band(detected, m90)
+        mask = origin[:, b] == 1
+        detected = fnu[mask, b]
+        dcomp90_detected = dcomp90[mask, b]
+        result = _fit_spitzer_band(detected, dcomp90_detected)
         delta_dex[j] = result["delta"]
         sigma_delta_dex[j] = result["sigma"]
         w_mag[j] = result["w"]
