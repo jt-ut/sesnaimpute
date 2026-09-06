@@ -12,6 +12,7 @@ dependencies = [
     "scipy",
     "joblib",
     "healpy",
+    "numba",
 ]
 
 [tool.setuptools.packages.find]
