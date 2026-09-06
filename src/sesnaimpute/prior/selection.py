@@ -340,16 +340,17 @@ class PassFractionModel:
     def _eps_curve(self, node_lo, node_w, delta_5):
         """`(n, n_b)`: this batch's own eps-vs-b curve in the reference
         frame (`b` not yet shifted by `s`) -- the group lookup plus
-        node blend `evaluate`/`integrate_count` both share.
+        node blend `evaluate`/`integrate_count` both share. Reads its own
+        two bracketing `(group, node)` rows directly off `eps_table` by
+        paired fancy indexing (rule 10a): never materialises the whole
+        `(n, n_a, n_b)` per-source table `eps_table[group]` would be.
         """
         n_a = self.a_nodes.size
         lo = np.clip(node_lo, 0, n_a - 1)
         hi = np.clip(node_lo + 1, 0, n_a - 1)
         group = self.knots.assign_group(delta_5)
-        row = np.arange(group.shape[0])
-        table = self.eps_table[group]
-        c_lo = table[row, lo]
-        c_hi = table[row, hi]
+        c_lo = self.eps_table[group, lo]
+        c_hi = self.eps_table[group, hi]
         w = node_w[:, None]
         curve = (1.0 - w) * c_lo + w * c_hi
         return np.clip(curve, 0.0, 1.0)
