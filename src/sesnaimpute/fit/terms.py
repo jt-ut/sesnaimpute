@@ -18,15 +18,21 @@ extinction and brightness (the register's `G0_FLUX`, dimmed by `KG_DRAINE`/
 depends on the source and class only, never on the model: a Normal in
 parallax anchored at the cloud for YSO/H2S, at zero parallax for GAL, and
 the region's simulated field-star population's own 1/D marginal for
-STAR/AGB. A source with no Gaia counterpart at all carries no information
-(Gamma = 1, ln Gamma = 0, every model); a matched source with no usable
-astrometric solution degrades to A_X = 1, the same "toward no information,
-never a cliff" rule the quarry states for its own no-parallax branch.
+STAR/AGB/PAHC (`SPEC_PRIORS.md` section 4: PAHC's parent population is the
+whole simulated field-star population, so it shares STAR's shape). A
+source with no Gaia counterpart at all carries no information (Gamma = 1,
+ln Gamma = 0, every model); a matched source with no usable astrometric
+solution degrades to A_X = 1, the same "toward no information, never a
+cliff" rule the quarry states for its own no-parallax branch.
 
-PAHC is out of scope: the quarry anchors it at the cloud distance like
-YSO/H2S, but this port does not carry the depth-term fix through that
-class (not named in the brief, not exercised by the timed run) -- `cls =
-"pahc"` raises rather than guess.
+PAHC's marginal is STAR's own field-star `1/D` marginal, unweighted: the
+per-star PAHC contamination weight the population carries
+(`bms/star/population_star_tile__<R>.hdf5`'s `P_PAHC`, per simulated star
+per tile, at a grid of 8 micron limit values) is keyed by `STAR_INDEX`
+within each tile, not by the row order `prior.field_stars`' pooled,
+region-wide population uses, and picking one grid column ("the median
+limit") then summing per star over tiles is a second join this term does
+not carry -- disclosed, not silently guessed (brief's own fallback).
 """
 
 import h5py
@@ -34,6 +40,7 @@ import numpy as np
 
 from sesnaimpute import config as config_module
 from sesnaimpute import constants
+from sesnaimpute import definitions
 from sesnaimpute import regions as regions_module
 from sesnaimpute.prior import selection
 from sesnaimpute.prior import star_population
@@ -52,14 +59,12 @@ __all__ = ["GaiaTerm", "library_weights", "GAIA_G_LIM_MAG", "GAIA_G_ROLLOFF_MAG"
 #: (GAL, H2S) and `prior.field_stars` (STAR's own atmosphere templates)
 #: already read for their class's geometry; AGB's own dusty-shell library
 #: is `agb_register.hdf5`, distinct from the sps atmosphere templates
-#: `prior.field_stars` matches a TRILEGAL star to.
-_REGISTER_FILE = {
-    "yso": "yso_register.hdf5",
-    "h2s": "h2shock_register.hdf5",
-    "gal": "galz_register.hdf5",
-    "agb": "agb_register.hdf5",
-    "star": "sps_register.hdf5",
-}
+#: `prior.field_stars` matches a TRILEGAL star to. Built off
+#: `definitions.CLASS_REGISTER` (shared with `fit.sweep`), lower-cased to
+#: this module's own class-name convention, so every class the registers
+#: cover -- STAR, AGB, PAHC, GAL, YSO, H2S -- resolves to a file here.
+_REGISTER_FILE = {cls.lower(): "%s_register.hdf5" % key
+                   for cls, key in definitions.CLASS_REGISTER.items()}
 
 #: alpha_rho: the exponent on the register's own sampling density
 #: (`RHO_KDE1`) that turns it into a quadrature weight. The quarry's
@@ -75,8 +80,13 @@ LIBRARY_ALPHA_RHO = 1.0
 CLOUD_ANCHORED_CLASSES = ("yso", "h2s")
 
 #: Classes whose A_X is the region's simulated field-star population's own
-#: parallax marginal (quarry term_hooks.STAR_MARGINAL_CLASSES).
-STAR_MARGINAL_CLASSES = ("star", "agb")
+#: parallax marginal (quarry term_hooks.STAR_MARGINAL_CLASSES). PAHC added
+#: here (not in the quarry): `SPEC_PRIORS.md` section 4's parent
+#: population is the whole field-star population, the same one STAR
+#: draws its own marginal from, so `_build_star_marginal`'s "else" branch
+#: (the non-evolved complement, `cls != "agb"`) already gives PAHC STAR's
+#: own marginal with no further branching.
+STAR_MARGINAL_CLASSES = ("star", "agb", "pahc")
 
 #: Bin width for the field-star parallax marginal, mas. The quarry's own
 #: basis (term_hooks.STAR_MARGINAL_BIN_WIDTH_MAS): narrow enough that the
@@ -148,17 +158,21 @@ def _load_gaia_match(config, region):
 
 
 def _build_star_marginal(config, region, cls, bin_width_mas=STAR_MARGINAL_BIN_WIDTH_MAS):
-    """`(bin_centres_mas, p_bin)`: STAR or AGB's binned parallax marginal
+    """`(bin_centres_mas, p_bin)`: STAR/AGB/PAHC's binned parallax marginal
     off the region's simulated field-star population (10_POSTERIOR.md's
-    STAR/AGB row) -- `1000/DIST_PC` for the class's own retained stars,
-    uniform weight (every retained field star already carries
+    STAR/AGB row; `SPEC_PRIORS.md` section 4's PAHC row, same parent
+    population as STAR) -- `1000/DIST_PC` for the class's own retained
+    stars, uniform weight (every retained field star already carries
     `w_trilegal = 1`, `prior.field_stars`). AGB keeps the evolved subset
     (`star_population.evolved_selector`'s mask) uniformly, matching the
     quarry's own "evolved partition directly, uniform weight" branch;
-    STAR keeps the non-evolved complement. This omits the small dusty
-    remainder `partition_weights` would move from the evolved rows into
-    STAR's own marginal (that split needs `f_dusty_by_chemistry`, out of
-    scope for this term -- see the task report).
+    STAR and PAHC both keep the non-evolved complement, unweighted by
+    PAHC's own per-star contamination probability (this term's own module
+    docstring: that weight's per-tile `STAR_INDEX` keying is a second join
+    not carried here). This omits the small dusty remainder
+    `partition_weights` would move from the evolved rows into STAR's own
+    marginal (that split needs `f_dusty_by_chemistry`, out of scope for
+    this term -- see the task report).
     """
     path = config_module.product_path(config, "bms", "trilegal", "field-stars", "region", region=region)
     with h5py.File(path, "r") as f:
@@ -238,7 +252,8 @@ class GaiaTerm:
         `1` if the source is matched but carries no usable parallax
         (`NO_PM`, a non-finite `PLX_MAS`, or a degenerate `sigma_eff`);
         else the cloud-anchored Normal (depth added in quadrature), the
-        zero-parallax Normal (GAL), or the field-star marginal (STAR/AGB).
+        zero-parallax Normal (GAL), or the field-star marginal
+        (STAR/AGB/PAHC).
         """
         if not self._gaia["matched"][row]:
             return None, None

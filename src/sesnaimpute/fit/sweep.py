@@ -104,18 +104,10 @@ ALPHA_RHO = 1.0
 #: production default).
 TOPK = 5
 
-#: class code (`definitions.CLASSES`) -> the library register key
-#: (`sed_models/registers/<key>_register.hdf5`). GAL/H2S transcribed
-#: from `sesnaimpute.prior.callable._LIBRARY_KEY`; STAR/PAHC/AGB/YSO
-#: from the register file names their own modules already read
-#: (`sesnaimpute.prior.field_stars`/`star_population`: `sps_register.
-#: hdf5`, `pahc_register.hdf5`; the on-disk `agb_register.hdf5`,
-#: `yso_register.hdf5`, the latter a pooled register over YSO's five
-#: sub-grids).
-CLASS_REGISTER = {
-    "STAR": "sps", "AGB": "agb", "PAHC": "pahc",
-    "GAL": "galz", "YSO": "yso", "H2S": "h2shock",
-}
+#: class code -> the library register key: `definitions.CLASS_REGISTER`,
+#: shared with `fit.terms` so both modules read one class's register
+#: under the same key.
+CLASS_REGISTER = definitions.CLASS_REGISTER
 
 _BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 _N_BAND = len(_BAND_KEYS)

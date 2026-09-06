@@ -99,6 +99,19 @@ CLASSMAP = (
 )
 SUBCLASSES_OF = {c.code: tuple(s.name for s in CLASSMAP if s.cls == c.code) for c in CLASSES}
 
+#: class code -> the library register key (`sed_models/registers/<key>_
+#: register.hdf5`). GAL/H2S transcribed from the old `prior.callable.
+#: _LIBRARY_KEY`; STAR/PAHC/AGB/YSO from the register file names their own
+#: modules already read (`prior.field_stars`/`star_population`: `sps_
+#: register.hdf5`, `pahc_register.hdf5`; the on-disk `agb_register.hdf5`,
+#: `yso_register.hdf5`, the latter a pooled register over YSO's five
+#: sub-grids). Shared by `fit.sweep` (the fit's own model grid) and
+#: `fit.terms` (the Gaia term's per-class register reads).
+CLASS_REGISTER = {
+    "STAR": "sps", "AGB": "agb", "PAHC": "pahc",
+    "GAL": "galz", "YSO": "yso", "H2S": "h2shock",
+}
+
 
 # --- (c) Granules ---
 #
