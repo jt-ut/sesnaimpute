@@ -139,10 +139,14 @@ SPLIT_STELLARITY_GRID = tuple(np.round(np.arange(0.50, 0.951, 0.05), 2))
 #: 4.5um, mJy.
 SPLIT_CRITERION_S_MJY = (0.1, 0.3, 1.0)
 
-#: Rule 9: subsample once, fixed seed, at most this many galaxies per
-#: log10 S bin of the 61-point grid.
-SUBSAMPLE_CAP_PER_BIN = 2000
-SUBSAMPLE_SEED = 0
+#: The colour-cell width, dex, that compresses the full SWIRE population
+#: (SPEC_PRIORS.md section 5.1): within one 4.5um flux bin, every galaxy
+#: at the same (3.6, 5.8, 8.0um minus 4.5um) colour to this resolution is
+#: interchangeable for the two-of-four test (only the colour survives the
+#: coordinate-band rescale the selection kernel applies), so one weighted
+#: cell member stands in for all of them exactly to within this cell's own
+#: width -- the only approximation left, no population cap.
+COLOUR_CELL_DEX = 0.05
 
 #: The shared flux grid every eps table and PHI_S is tabulated on: 61
 #: points, SWIRE's I2 depth to Fazio's bright end (IMPLEMENTATION.md
@@ -452,28 +456,85 @@ def select_star_galaxy_split(flux_mjy_i2, stell, ext_fl, fit, cosmic_variance_de
     return best["label"], candidates[best["label"]], rows, none_passed
 
 
-def subsample_population(flux_mjy, log10_s_grid, seed=SUBSAMPLE_SEED, cap=SUBSAMPLE_CAP_PER_BIN):
-    """Rule 9: at most `cap` galaxies per log10 S bin of `log10_s_grid`
-    (bin edges the midpoints between grid points), fixed seed, no
-    replacement within a bin. Returns `(keep_idx, bin_idx)` into `flux_mjy`
-    -- `keep_idx` the rows kept, `bin_idx` each kept row's own bin.
+#: A cell index this far outside any real colour cell marks "this band's
+#: flux is not finite" -- its own axis category, never confused with a
+#: real 0.05-dex cell.
+_MISSING_CELL = -(1 << 40)
+
+
+def compress_population_by_colour(flux_mjy, is_galaxy, log10_s_grid, cell_dex=COLOUR_CELL_DEX):
+    """The FULL classified population, losslessly binned down to one
+    weighted member per occupied cell (module constant `COLOUR_CELL_DEX`
+    docstring): every galaxy is placed in its own 4.5um flux bin of
+    `log10_s_grid` (bin edges the midpoints between grid points) and, per
+    band, its own colour relative to 4.5um (log10 flux minus log10 I2
+    flux) is floored to a `cell_dex`-wide cell, or the sentinel
+    `_MISSING_CELL` if that band's flux is not finite -- the selection
+    kernel's own coordinate-band rescale (`prior.selection.pass_fractions_
+    binned`) depends on a member only through these colours, never its
+    absolute flux, so every galaxy sharing an (S-bin, cell_I1, cell_I3,
+    cell_I4) quadruple is exactly interchangeable for the two-of-four
+    test up to the cell's own 0.05-dex width -- the only approximation
+    left, no subsample cap. `is_galaxy` is the star-galaxy split's own
+    per-row mask, `None` for no removal at all.
+
+    Returns `(log10_flux_irac, bin_of_pop, weight, cell_counts)`:
+    `log10_flux_irac` `(n_cell, 4)` (I2 held at the arbitrary constant 0,
+    per-band colours added for I1/I3/I4, `-inf` where missing),
+    `bin_of_pop`/`weight` `(n_cell,)` (weight = the cell's own galaxy
+    count), `cell_counts` `(n_s,)` occupied cells per S-bin (reported,
+    not used downstream).
     """
-    coord = np.log10(flux_mjy[:, IRAC_BAND_KEYS.index("I2")])
-    valid = np.isfinite(coord) & (flux_mjy[:, IRAC_BAND_KEYS.index("I2")] > 0)
+    i1, i2, i3, i4 = (IRAC_BAND_KEYS.index(b) for b in ("I1", "I2", "I3", "I4"))
+    coord = flux_mjy[:, i2]
+    valid = np.isfinite(coord) & (coord > 0)
+    if is_galaxy is not None:
+        valid = valid & is_galaxy
+    idx = np.flatnonzero(valid)
+    log10_i2 = np.log10(coord[idx])
+    edges = 0.5 * (log10_s_grid[1:] + log10_s_grid[:-1])
+    sbin = np.clip(np.searchsorted(edges, log10_i2), 0, log10_s_grid.size - 1).astype(np.int64)
+
+    def cell_of(band_idx):
+        f = flux_mjy[idx, band_idx]
+        finite = np.isfinite(f) & (f > 0)
+        colour = np.where(finite, np.log10(np.where(finite, f, 1.0)) - log10_i2, 0.0)
+        cell = np.floor(colour / cell_dex).astype(np.int64)
+        return np.where(finite, cell, _MISSING_CELL)
+
+    c1, c3, c4 = cell_of(i1), cell_of(i3), cell_of(i4)
+    key = np.stack([sbin, c1, c3, c4], axis=1)
+    uniq, counts = np.unique(key, axis=0, return_counts=True)
+
+    n_cell = uniq.shape[0]
+    log10_flux_irac = np.full((n_cell, 4), -np.inf, dtype=np.float64)
+    log10_flux_irac[:, i2] = 0.0  # the arbitrary coordinate-band constant
+    for local_idx, uniq_col in ((i1, 1), (i3, 2), (i4, 3)):
+        cells = uniq[:, uniq_col]
+        finite = cells != _MISSING_CELL
+        log10_flux_irac[finite, local_idx] = cells[finite] * cell_dex + 0.5 * cell_dex
+
+    bin_of_pop = uniq[:, 0]
+    weight = counts.astype(np.float64)
+    cell_counts = np.zeros(log10_s_grid.size, dtype=np.int64)
+    np.add.at(cell_counts, bin_of_pop, 1)
+    return log10_flux_irac, bin_of_pop, weight, cell_counts
+
+
+def population_flux_bins(flux_mjy, log10_s_grid):
+    """`(idx_valid, bin_idx)`: the FULL population's own valid rows (finite,
+    positive I2 flux) and their 4.5um flux bin on `log10_s_grid` (bin edges
+    the midpoints between grid points) -- no subsample cap; used where a
+    consumer needs the population's own absolute flux (`build_region_
+    selection`, `eps_at_survey_median`), not the colour-cell compression
+    `compress_population_by_colour` builds for the per-source kernel.
+    """
+    coord = flux_mjy[:, IRAC_BAND_KEYS.index("I2")]
+    valid = np.isfinite(coord) & (coord > 0)
     idx_valid = np.flatnonzero(valid)
     edges = 0.5 * (log10_s_grid[1:] + log10_s_grid[:-1])
-    bin_of_valid = np.clip(np.searchsorted(edges, coord[idx_valid]), 0, log10_s_grid.size - 1)
-
-    rng = np.random.default_rng(seed)
-    kept = []
-    for j in range(log10_s_grid.size):
-        members = idx_valid[bin_of_valid == j]
-        if members.size > cap:
-            members = rng.choice(members, size=cap, replace=False)
-        kept.append(members)
-    keep_idx = np.concatenate(kept)
-    bin_idx = np.clip(np.searchsorted(edges, coord[keep_idx]), 0, log10_s_grid.size - 1)
-    return keep_idx, bin_idx
+    bin_idx = np.clip(np.searchsorted(edges, np.log10(coord[idx_valid])), 0, log10_s_grid.size - 1)
+    return idx_valid, bin_idx
 
 
 # ---------------------------------------------------------------------------
@@ -506,17 +567,19 @@ def population_eight_band(log10_flux_irac):
 
 
 def build_source_selection(config, region, log10_flux_irac, log10_b_pop, bin_of_pop, log10_s_grid,
-                            batch_budget_bytes=(512 << 20)):
+                            weight=None, batch_budget_bytes=(512 << 20)):
     """Writes the region's exact per-source GAL selection
     (SPEC_PRIORS.md section 1.3): for every catalogued source, on
     `selection.X_LADDER` by `log10_s_grid`, the fraction of the
-    (already subsampled, star-galaxy-separated) SWIRE population, binned
-    by its own `log10 S` (`bin_of_pop`), that clears the source's own
-    eight-band limits when the whole population is dimmed through the
-    query column `a_query = X_LADDER * A_s` (a background galaxy carries
-    the entire column, SPEC_PRIORS.md section 5.2). Sources are batched
-    (`sesnaimpute.batches.batches`) so no batch's working arrays exceed
-    `batch_budget_bytes`. Returns the product path.
+    (colour-cell-compressed, star-galaxy-separated) SWIRE population,
+    binned by its own `log10 S` (`bin_of_pop`) and weighted by each
+    cell's own galaxy count (`weight`, `compress_population_by_colour`),
+    that clears the source's own eight-band limits when the whole
+    population is dimmed through the query column `a_query = X_LADDER *
+    A_s` (a background galaxy carries the entire column, SPEC_PRIORS.md
+    section 5.2). Sources are batched (`sesnaimpute.batches.batches`) so
+    no batch's working arrays exceed `batch_budget_bytes`. Returns the
+    product path.
     """
     log10_lim = np.log10(limits_module.limits(config, region))
     n_source = log10_lim.shape[0]
@@ -535,7 +598,8 @@ def build_source_selection(config, region, log10_flux_irac, log10_b_pop, bin_of_
     log10_flux_8band = np.ascontiguousarray(population_eight_band(log10_flux_irac))
     log10_b_pop = np.ascontiguousarray(np.asarray(log10_b_pop, dtype=np.float64))
     bin_of_pop = np.ascontiguousarray(np.asarray(bin_of_pop, dtype=np.int64))
-    weight = np.ones(log10_b_pop.shape[0], dtype=np.float64)
+    weight = (np.ones(log10_b_pop.shape[0], dtype=np.float64) if weight is None
+              else np.ascontiguousarray(np.asarray(weight, dtype=np.float64)))
 
     path = config_module.product_path(config, "bms", "gal", "selection", "source", region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -750,22 +814,36 @@ def build(config, regions=None):
           f"{split_label}, {n_star} classed star")
 
     log10_s_grid = counts_result["log10_s_grid"]
-    keep_idx, bin_idx = subsample_population(flux_mjy_all[is_galaxy_all], log10_s_grid)
-    flux_mjy = flux_mjy_all[is_galaxy_all][keep_idx]
+
+    # The FULL population's own absolute fluxes, no subsample cap: for the
+    # region-level comparison variants and report-only checks, which read a
+    # galaxy's actual I1/I2 flux directly (not the colour-only rescale the
+    # per-source kernel uses).
+    idx_valid, bin_idx = population_flux_bins(flux_mjy_all[is_galaxy_all], log10_s_grid)
+    flux_mjy = flux_mjy_all[is_galaxy_all][idx_valid]
     finite_irac = np.isfinite(flux_mjy) & (flux_mjy > 0)
     log10_flux_irac = np.where(finite_irac, np.log10(np.where(finite_irac, flux_mjy, 1.0)), -np.inf)
     frac_measured = finite_irac.mean(axis=0)
-    print("gal: subsample: %d galaxies (cap %d/bin); fraction with a measured flux: %s" % (
-        flux_mjy.shape[0], SUBSAMPLE_CAP_PER_BIN,
+    print("gal: full population: %d galaxies; fraction with a measured flux: %s" % (
+        flux_mjy.shape[0],
         ", ".join(f"{b}={frac_measured[j]:.3f}" for j, b in enumerate(IRAC_BAND_KEYS))))
 
-    # EPS_NO_REMOVAL's own population: candidate (c), no star removal at
-    # all (SPEC_PRIORS.md 5.1, "the selection fraction is also reported
-    # with no removal"), subsampled the same way.
-    keep_idx_nr, bin_idx_nr = subsample_population(flux_mjy_all, log10_s_grid)
-    flux_mjy_nr = flux_mjy_all[keep_idx_nr]
+    idx_valid_nr, bin_idx_nr = population_flux_bins(flux_mjy_all, log10_s_grid)
+    flux_mjy_nr = flux_mjy_all[idx_valid_nr]
     finite_irac_nr = np.isfinite(flux_mjy_nr) & (flux_mjy_nr > 0)
     log10_flux_irac_nr = np.where(finite_irac_nr, np.log10(np.where(finite_irac_nr, flux_mjy_nr, 1.0)), -np.inf)
+
+    # The per-source kernel's own population: the FULL population,
+    # colour-cell compressed (module docstring; `pass_fractions_binned`
+    # depends on a member only through its colour relative to 4.5um, so
+    # this loses nothing the kernel would otherwise use).
+    src_flux_irac, src_bin_of_pop, src_weight, src_cell_counts = compress_population_by_colour(
+        flux_mjy_all, is_galaxy_all, log10_s_grid)
+    occ = src_cell_counts[src_cell_counts > 0]
+    print("gal: colour-cell compression (adopted split, %.2f dex cells): %d occupied cells over %d "
+          "galaxies; occupied cells per S-bin: typical (median) %.1f, max %d" % (
+              COLOUR_CELL_DEX, src_flux_irac.shape[0], flux_mjy.shape[0],
+              float(np.median(occ)) if occ.size else 0.0, int(occ.max()) if occ.size else 0))
 
     a_nodes = column_grid_module.nodes(config)
     w_nodes = selection_module.law_dense_weight(a_nodes)
@@ -829,9 +907,10 @@ def build(config, regions=None):
               f"no_removal={n_gal_region_nr:.1f} deg^-2 "
               f"Fazio N(>region median I2 limit)={fazio_at_median_limit:.1f} deg^-2 -> {region_path}")
 
-        source_path = build_source_selection(config, region, log10_flux_irac, log10_flux_irac[:, IRAC_BAND_KEYS.index("I2")],
-                                              bin_idx, log10_s_grid)
-        print(f"gal: {region}: per-source selection ({log10_flux_irac.shape[0]} population members, "
+        source_path = build_source_selection(
+            config, region, src_flux_irac, src_flux_irac[:, IRAC_BAND_KEYS.index("I2")],
+            src_bin_of_pop, log10_s_grid, weight=src_weight)
+        print(f"gal: {region}: per-source selection ({src_flux_irac.shape[0]} occupied colour cells, "
               f"{selection_module.X_LADDER.size} x-nodes, {log10_s_grid.size} S-grid points) -> {source_path}")
 
     print(f"gal: acceptance: max(EPS_2BAND - EPS)={max_2band_violation:.6g} "
