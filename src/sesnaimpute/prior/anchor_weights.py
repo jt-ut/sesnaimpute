@@ -49,6 +49,21 @@ Product, per region, `bms/anchors/weights_anchors_tile__<Region>.hdf5`:
 `EXCLUSION_REASON` (n_tile, 0 none/1 ratio/2 catalogue/3 both),
 `G_EDGES`, `KS_EDGES`; root attrs `GRANULE="tile"`,
 `FAINT_TREND_G_DEX_PER_MAG`, `FAINT_TREND_KS_DEX_PER_MAG`.
+
+Owner ruling 2026-09-06. `W_POOL_G`/`W_POOL_KS` (n_G/n_Ks): the SURVEY-
+POOLED weight (`survey_pooled_weights`), the ratio of observed to
+predicted counts summed over every region's own populated tiles,
+computed once over all thirty regions and written identically into every
+region's file (item 1). `POPULATED_G`/`POPULATED_KS` (n_G/n_Ks, bool):
+this region had at least one of its own unmasked tiles in this bin --
+the explicit flag `faint_trend_dex_per_mag` and `star_population` now
+read, replacing the old `w_region != 1.0` sentinel (item 3). `POOLED_G`/
+`POOLED_KS` (n_G/n_Ks, bool): this region had NO usable tile of its own
+in this bin and took `W_POOL_*` instead of unity (item 1's fallback,
+never triggered on the joint grid, which has no survey-pooled
+counterpart). Root attr `POOL_SKIPPED_REGIONS`: comma-joined names of
+any region left out of the pool sum because its `G_EDGES`/`KS_EDGES`
+disagreed with the first region read.
 """
 
 import os
@@ -298,7 +313,8 @@ def cluster_excluded_tiles(tile_l_deg, tile_b_deg, l_star_deg, clusters):
 # the per-axis and joint weight fit
 # ---------------------------------------------------------------------------
 
-def fit_tile_weights(n_obs, n_pred, cluster_excluded, min_counts=MIN_COUNTS):
+def fit_tile_weights(n_obs, n_pred, cluster_excluded, min_counts=MIN_COUNTS,
+                      w_pool=None):
     """The per-tile, per-bin reweighting factor on one axis (`(n_tile,
     n_bin)`, the marginal `G`/`Ks` grid or the joint grid flattened to
     one bin axis): the sky's own count over the model's, shrunk toward
@@ -308,6 +324,21 @@ def fit_tile_weights(n_obs, n_pred, cluster_excluded, min_counts=MIN_COUNTS):
     (reading note 04B's `fit_tile_weights`) -- so its own stored weight
     IS the region-pooled value with no separate override, and its
     evidence never enters the pool other tiles shrink toward.
+
+    Owner ruling 2026-09-06, item 1: a bin with NO unmasked tile at all
+    (every tile in the region is below the counting floor or cluster-
+    excluded) no longer stays at unity. It takes `w_pool[k]`, the
+    SURVEY-POOLED ratio for this bin (`survey_pooled_weights`, summed
+    over every region's own populated tiles) -- never 1.0, the
+    uncalibrated TRILEGAL level. `w_pool` is `None` only when a caller
+    is computing the pool itself and has none yet to fall back on; in
+    that one case the bin is dropped from the pool sum (see
+    `survey_pooled_weights`), not set to unity.
+
+    Returns `populated` (bin had at least one unmasked tile of its OWN
+    region -- the explicit flag item 3 asks for, replacing the `w_region
+    != 1.0` sentinel) and `pooled` (bin fell back to the survey pool)
+    alongside the usual `w`/`b`/`w_region`.
     """
     n_t, n_bin = n_obs.shape
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -321,34 +352,157 @@ def fit_tile_weights(n_obs, n_pred, cluster_excluded, min_counts=MIN_COUNTS):
     w = np.ones((n_t, n_bin))
     b = np.zeros((n_t, n_bin))
     w_region = np.ones(n_bin)
+    populated = np.zeros(n_bin, dtype=bool)
+    pooled = np.zeros(n_bin, dtype=bool)
     for k in range(n_bin):
         mask_k = low_counts[:, k] | unmeasured[:, k] | cluster_excluded
         if np.all(mask_k):
-            # no tile carries a usable count in this bin at all: there is
-            # no evidence to reweight or to pool by, so the bin stays at
-            # unity rather than pooling nothing into something
+            # no tile in THIS region carries a usable count in this bin:
+            # no region evidence to reweight or pool by, so fall back to
+            # the survey-pooled ratio rather than pooling nothing into
+            # something.
+            if w_pool is not None and np.isfinite(w_pool[k]) and w_pool[k] > 0:
+                w[:, k] = w_pool[k]
+                w_region[k] = w_pool[k]
+                pooled[k] = True
             continue
-        pooled = shrink_log_normal(ratio[:, k], sigma[:, k], mask=mask_k)
-        w[:, k] = pooled["f_rt"]
-        b[:, k] = pooled["shrinkage_weight"]
-        w_region[k] = pooled["mu_factor"]
-    return dict(w=w, b=b, w_region=w_region, ratio=ratio)
+        populated[k] = True
+        pooled_fit = shrink_log_normal(ratio[:, k], sigma[:, k], mask=mask_k)
+        w[:, k] = pooled_fit["f_rt"]
+        b[:, k] = pooled_fit["shrinkage_weight"]
+        w_region[k] = pooled_fit["mu_factor"]
+    return dict(w=w, b=b, w_region=w_region, ratio=ratio, populated=populated,
+                pooled=pooled)
+
+
+# ---------------------------------------------------------------------------
+# owner ruling 2026-09-06, item 1: the survey-pooled fallback weight
+# ---------------------------------------------------------------------------
+
+def region_tile_counts(config, region, clusters, min_counts=MIN_COUNTS):
+    """One region's tile-level predicted/observed counts and exclusion
+    mask, with no weight fit performed -- the read-and-aggregate half of
+    `build_region`, split out so `survey_pooled_weights` (the once-over-
+    all-thirty-regions pass, item 1) and the per-region fit share the
+    same counts rather than reading the on-disk products twice with two
+    slightly different code paths."""
+    tiles = _read_tiles(config, region)
+    hist = _read_histograms(config, region)
+    obs = _read_observed(config, region)
+
+    if not (np.array_equal(tiles["pixels"], hist["pixels"])
+            and np.array_equal(tiles["pixels"], obs["pixels"])):
+        raise ValueError(
+            f"prior.anchor_weights: {region!r}'s tiles/histograms/observed products "
+            "disagree on their own pixel set -- rerun `prior.anchor_tiles` and "
+            "`prior.anchor_observed` for this region")
+    if not (np.array_equal(hist["g_edges"], obs["g_edges"])
+            and np.array_equal(hist["ks_edges"], obs["ks_edges"])):
+        raise ValueError(
+            f"prior.anchor_weights: {region!r}'s histograms/observed products carry "
+            "different G_EDGES/KS_EDGES -- rerun `prior.anchor_tiles` and "
+            "`prior.anchor_observed` for this region")
+
+    n_tile = tiles["tile_l_deg"].size
+    tile_of_pix = tiles["tile_of_pix"]
+    n_g, n_ks = hist["g_edges"].size - 1, hist["ks_edges"].size - 1
+
+    n_pred_g = _aggregate_to_tiles(hist["n_g_pred"], tile_of_pix, n_tile)
+    n_pred_ks = _aggregate_to_tiles(hist["n_ks_pred"], tile_of_pix, n_tile)
+    n_pred_joint = _aggregate_to_tiles(hist["n_gk_pred"], tile_of_pix, n_tile)
+    n_obs_g = _aggregate_to_tiles(obs["n_g_sub"], tile_of_pix, n_tile)
+    n_obs_ks = _aggregate_to_tiles(obs["n_ks_sub"], tile_of_pix, n_tile)
+    n_obs_joint = _aggregate_to_tiles(obs["n_gk_sub"], tile_of_pix, n_tile)
+
+    ratio_mask = cluster_excluded_by_ratio(n_obs_g, n_pred_g, n_obs_ks, n_pred_ks)
+    excluded_ratio = ratio_mask["excluded"]
+    excluded_catalog, nearest_cluster = cluster_excluded_tiles(
+        tiles["tile_l_deg"], tiles["tile_b_deg"], tiles["l_star_deg"], clusters)
+    excluded = excluded_ratio | excluded_catalog
+    reason = np.full(n_tile, EXCLUSION_NONE, dtype=np.int64)
+    reason[excluded_ratio & ~excluded_catalog] = EXCLUSION_RATIO
+    reason[~excluded_ratio & excluded_catalog] = EXCLUSION_CATALOGUE
+    reason[excluded_ratio & excluded_catalog] = EXCLUSION_BOTH
+
+    return dict(
+        region=region, n_tile=n_tile, tiles=tiles, hist=hist, obs=obs,
+        n_pred_g=n_pred_g, n_pred_ks=n_pred_ks, n_pred_joint=n_pred_joint,
+        n_obs_g=n_obs_g, n_obs_ks=n_obs_ks, n_obs_joint=n_obs_joint,
+        excluded=excluded, reason=reason, nearest_cluster=nearest_cluster,
+        ratio_mask=ratio_mask, excluded_ratio=excluded_ratio,
+        excluded_catalog=excluded_catalog)
+
+
+def survey_pooled_weights(config, region_names, clusters, min_counts=MIN_COUNTS):
+    """The SURVEY-POOLED weight per magnitude bin, on the `G` and `Ks`
+    marginals (owner ruling 2026-09-06, item 1): sum the observed and
+    the predicted counts over EVERY region's own populated tiles (not
+    cluster-excluded, both counts clearing `min_counts`) and take one
+    ratio per bin -- computed once over all thirty regions' stored
+    anchor products, never per region. Regions whose `G_EDGES`/`KS_EDGES`
+    disagree with the first region read are skipped from the sum (their
+    on-disk bin grid cannot be added bin-for-bin) and reported, not
+    silently dropped.
+
+    Returns `(w_pool_g, w_pool_ks, g_edges, ks_edges, skipped)`.
+    """
+    sum_obs_g = sum_pred_g = sum_obs_ks = sum_pred_ks = None
+    g_edges = ks_edges = None
+    skipped = []
+    for region in region_names:
+        try:
+            rc = region_tile_counts(config, region, clusters, min_counts)
+        except (FileNotFoundError, KeyError) as exc:
+            # flag, do not block: a region whose upstream anchor products
+            # are missing or stale (an older schema without N_GK_PRED,
+            # say) is left out of the survey pool and named in
+            # `skipped`, rather than stopping every other region's build.
+            print("prior.anchor_weights: survey pool skipping %r (%s: %s)"
+                  % (region, type(exc).__name__, exc))
+            skipped.append(region)
+            continue
+        if g_edges is None:
+            g_edges = rc["hist"]["g_edges"]
+            ks_edges = rc["hist"]["ks_edges"]
+        elif not (np.array_equal(g_edges, rc["hist"]["g_edges"])
+                  and np.array_equal(ks_edges, rc["hist"]["ks_edges"])):
+            skipped.append(region)
+            continue
+        usable_g = (~rc["excluded"])[:, None] & (rc["n_obs_g"] >= min_counts) \
+            & (rc["n_pred_g"] >= min_counts)
+        usable_ks = (~rc["excluded"])[:, None] & (rc["n_obs_ks"] >= min_counts) \
+            & (rc["n_pred_ks"] >= min_counts)
+        og = np.where(usable_g, rc["n_obs_g"], 0.0).sum(axis=0)
+        pg = np.where(usable_g, rc["n_pred_g"], 0.0).sum(axis=0)
+        ok = np.where(usable_ks, rc["n_obs_ks"], 0.0).sum(axis=0)
+        pk = np.where(usable_ks, rc["n_pred_ks"], 0.0).sum(axis=0)
+        sum_obs_g = og if sum_obs_g is None else sum_obs_g + og
+        sum_pred_g = pg if sum_pred_g is None else sum_pred_g + pg
+        sum_obs_ks = ok if sum_obs_ks is None else sum_obs_ks + ok
+        sum_pred_ks = pk if sum_pred_ks is None else sum_pred_ks + pk
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w_pool_g = np.where(sum_pred_g > 0,
+                             sum_obs_g / np.where(sum_pred_g > 0, sum_pred_g, 1.0), np.nan)
+        w_pool_ks = np.where(sum_pred_ks > 0,
+                              sum_obs_ks / np.where(sum_pred_ks > 0, sum_pred_ks, 1.0), np.nan)
+    return w_pool_g, w_pool_ks, g_edges, ks_edges, skipped
 
 
 # ---------------------------------------------------------------------------
 # the faint-end trend (decision 5)
 # ---------------------------------------------------------------------------
 
-def faint_trend_dex_per_mag(w_region, edges, n_bins=FAINT_TREND_N_BINS):
+def faint_trend_dex_per_mag(w_region, edges, populated, n_bins=FAINT_TREND_N_BINS):
     """The log10 slope of the region-pooled weight across the faintest
-    `n_bins` POPULATED bins (`w_region != 1.0`, this axis's own "no
-    evidence anywhere" placeholder from `fit_tile_weights`) -- the
-    uncertainty the faint-end extrapolation carries (SPEC_PRIORS.md
-    section 2.1, "faint end" row). `nan` where fewer than two populated
-    bins exist to fit a slope through.
+    `n_bins` POPULATED bins -- "populated" now the explicit per-bin flag
+    `fit_tile_weights` returns (owner ruling 2026-09-06, item 3), not the
+    `w_region != 1.0` sentinel: a bin measured to exactly 1.0 by real
+    tile evidence is populated, and a bin that fell back to the survey
+    pool is not, regardless of what number either lands on. `nan` where
+    fewer than two populated bins exist to fit a slope through.
     """
     centres = 0.5 * (np.asarray(edges[:-1]) + np.asarray(edges[1:]))
-    populated = np.flatnonzero(w_region != 1.0)
+    populated = np.flatnonzero(np.asarray(populated, dtype=bool))
     if populated.size < 2:
         return float("nan")
     faintest = populated[np.argsort(centres[populated])][-n_bins:]
@@ -467,61 +621,34 @@ def check_gaia_vs_2mass(n_obs_g, n_pred_g, n_obs_ks, n_pred_ks):
 # per-region build
 # ---------------------------------------------------------------------------
 
-def build_region(config, region, clusters):
-    tiles = _read_tiles(config, region)
-    hist = _read_histograms(config, region)
-    obs = _read_observed(config, region)
-
-    if not (np.array_equal(tiles["pixels"], hist["pixels"])
-            and np.array_equal(tiles["pixels"], obs["pixels"])):
-        raise ValueError(
-            f"prior.anchor_weights: {region!r}'s tiles/histograms/observed products "
-            "disagree on their own pixel set -- rerun `prior.anchor_tiles` and "
-            "`prior.anchor_observed` for this region")
-    if not (np.array_equal(hist["g_edges"], obs["g_edges"])
-            and np.array_equal(hist["ks_edges"], obs["ks_edges"])):
-        raise ValueError(
-            f"prior.anchor_weights: {region!r}'s histograms/observed products carry "
-            "different G_EDGES/KS_EDGES -- rerun `prior.anchor_tiles` and "
-            "`prior.anchor_observed` for this region")
-
-    n_tile = tiles["tile_l_deg"].size
-    tile_of_pix = tiles["tile_of_pix"]
+def build_region(config, region, clusters, w_pool_g, w_pool_ks):
+    rc = region_tile_counts(config, region, clusters)
+    tiles, hist = rc["tiles"], rc["hist"]
+    n_tile = rc["n_tile"]
     n_g, n_ks = hist["g_edges"].size - 1, hist["ks_edges"].size - 1
+    n_pred_g, n_pred_ks, n_pred_joint = rc["n_pred_g"], rc["n_pred_ks"], rc["n_pred_joint"]
+    n_obs_g, n_obs_ks, n_obs_joint = rc["n_obs_g"], rc["n_obs_ks"], rc["n_obs_joint"]
+    excluded, reason, nearest_cluster = rc["excluded"], rc["reason"], rc["nearest_cluster"]
+    ratio_mask = rc["ratio_mask"]
+    excluded_ratio, excluded_catalog = rc["excluded_ratio"], rc["excluded_catalog"]
 
-    n_pred_g = _aggregate_to_tiles(hist["n_g_pred"], tile_of_pix, n_tile)
-    n_pred_ks = _aggregate_to_tiles(hist["n_ks_pred"], tile_of_pix, n_tile)
-    n_pred_joint = _aggregate_to_tiles(hist["n_gk_pred"], tile_of_pix, n_tile)
-    n_obs_g = _aggregate_to_tiles(obs["n_g_sub"], tile_of_pix, n_tile)
-    n_obs_ks = _aggregate_to_tiles(obs["n_ks_sub"], tile_of_pix, n_tile)
-    n_obs_joint = _aggregate_to_tiles(obs["n_gk_sub"], tile_of_pix, n_tile)
-
-    # decision 4(i): the ratio-departs-from-median mask
-    ratio_mask = cluster_excluded_by_ratio(n_obs_g, n_pred_g, n_obs_ks, n_pred_ks)
-    excluded_ratio = ratio_mask["excluded"]
-
-    # decision 4(ii): the Hunt & Reffert 2023 catalogue mask
-    excluded_catalog, nearest_cluster = cluster_excluded_tiles(
-        tiles["tile_l_deg"], tiles["tile_b_deg"], tiles["l_star_deg"], clusters)
-
-    excluded = excluded_ratio | excluded_catalog
-    reason = np.full(n_tile, EXCLUSION_NONE, dtype=np.int64)
-    reason[excluded_ratio & ~excluded_catalog] = EXCLUSION_RATIO
-    reason[~excluded_ratio & excluded_catalog] = EXCLUSION_CATALOGUE
-    reason[excluded_ratio & excluded_catalog] = EXCLUSION_BOTH
-
-    fit_g = fit_tile_weights(n_obs_g, n_pred_g, excluded)
-    fit_ks = fit_tile_weights(n_obs_ks, n_pred_ks, excluded)
+    fit_g = fit_tile_weights(n_obs_g, n_pred_g, excluded, w_pool=w_pool_g)
+    fit_ks = fit_tile_weights(n_obs_ks, n_pred_ks, excluded, w_pool=w_pool_ks)
 
     n_obs_joint_flat = n_obs_joint.reshape(n_tile, n_g * n_ks)
     n_pred_joint_flat = n_pred_joint.reshape(n_tile, n_g * n_ks)
+    # the joint grid has no survey-pooled counterpart (item 1 asks for the
+    # G/Ks marginals only); an all-masked joint bin stays at unity, as
+    # before -- the marginal weights are what a star actually falls back
+    # to (star_population.star_weights), the joint table is a refinement
+    # only where a real crossmatch populates it.
     fit_joint = fit_tile_weights(n_obs_joint_flat, n_pred_joint_flat, excluded)
     w_joint = fit_joint["w"].reshape(n_tile, n_g, n_ks)
     w_region_joint = fit_joint["w_region"].reshape(n_g, n_ks)
     use_joint = n_obs_joint > 0.0  # decision 3: the joint bin is populated
 
-    faint_g = faint_trend_dex_per_mag(fit_g["w_region"], hist["g_edges"])
-    faint_ks = faint_trend_dex_per_mag(fit_ks["w_region"], hist["ks_edges"])
+    faint_g = faint_trend_dex_per_mag(fit_g["w_region"], hist["g_edges"], fit_g["populated"])
+    faint_ks = faint_trend_dex_per_mag(fit_ks["w_region"], hist["ks_edges"], fit_ks["populated"])
 
     # acceptance (CODING_RULES.md rule 11): the raw ratio, before
     # shrinkage, reproduces N_OBS_G exactly wherever the marginal is used
@@ -535,7 +662,7 @@ def build_region(config, region, clusters):
 
     region_total_ratio_g = n_obs_g.sum(axis=0) / np.where(
         n_pred_g.sum(axis=0) > 0, n_pred_g.sum(axis=0), 1.0)
-    pooled_bins = fit_g["w_region"] != 1.0
+    pooled_bins = fit_g["populated"]
     if np.any(pooled_bins):
         rel_dev = np.abs(fit_g["w_region"][pooled_bins] - region_total_ratio_g[pooled_bins]) \
             / np.where(region_total_ratio_g[pooled_bins] > 0, region_total_ratio_g[pooled_bins], 1.0)
@@ -551,7 +678,9 @@ def build_region(config, region, clusters):
         region=region, n_tile=n_tile,
         g_edges=hist["g_edges"], ks_edges=hist["ks_edges"],
         n_obs_g=n_obs_g, n_pred_g=n_pred_g, w_g=fit_g["w"], b_g=fit_g["b"], w_region_g=fit_g["w_region"],
+        populated_g=fit_g["populated"], pooled_g=fit_g["pooled"],
         n_obs_ks=n_obs_ks, n_pred_ks=n_pred_ks, w_ks=fit_ks["w"], b_ks=fit_ks["b"], w_region_ks=fit_ks["w_region"],
+        populated_ks=fit_ks["populated"], pooled_ks=fit_ks["pooled"],
         n_obs_joint=n_obs_joint, n_pred_joint=n_pred_joint, w_joint=w_joint,
         w_region_joint=w_region_joint, use_joint=use_joint,
         excluded=excluded, reason=reason, nearest_cluster=nearest_cluster,
@@ -567,13 +696,18 @@ def build_region(config, region, clusters):
     )
 
 
-def _write_product(config, region, result):
+def _write_product(config, region, result, w_pool_g, w_pool_ks, pool_skipped):
     path = config_module.product_path(config, "bms", "anchors", "weights", "tile", region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "tile"
         f.attrs["FAINT_TREND_G_DEX_PER_MAG"] = result["faint_trend_g"]
         f.attrs["FAINT_TREND_KS_DEX_PER_MAG"] = result["faint_trend_ks"]
+        # owner ruling 2026-09-06, item 1: the survey-pooled fallback --
+        # the SAME array in every region's own file, the ratio of
+        # observed to predicted counts summed over every region's own
+        # populated tiles, computed once by `survey_pooled_weights`.
+        f.attrs["POOL_SKIPPED_REGIONS"] = ",".join(pool_skipped)
         f.create_dataset("TILE_ID", data=np.arange(result["n_tile"], dtype=np.int64))
         f.create_dataset("G_EDGES", data=result["g_edges"])
         f.create_dataset("KS_EDGES", data=result["ks_edges"])
@@ -582,11 +716,20 @@ def _write_product(config, region, result):
         f.create_dataset("W_G", data=result["w_g"])
         f.create_dataset("SHRINK_B_G", data=result["b_g"])
         f.create_dataset("W_REGION_G", data=result["w_region_g"])
+        f.create_dataset("W_POOL_G", data=w_pool_g)
+        # item 3: the explicit per-bin flag, replacing the `w_region !=
+        # 1.0` sentinel -- POPULATED (this region's own tile evidence)
+        # and POOLED (fell back to the survey-pooled value; item 1).
+        f.create_dataset("POPULATED_G", data=result["populated_g"])
+        f.create_dataset("POOLED_G", data=result["pooled_g"])
         f.create_dataset("N_OBS_KS", data=result["n_obs_ks"])
         f.create_dataset("N_PRED_KS", data=result["n_pred_ks"])
         f.create_dataset("W_KS", data=result["w_ks"])
         f.create_dataset("SHRINK_B_KS", data=result["b_ks"])
         f.create_dataset("W_REGION_KS", data=result["w_region_ks"])
+        f.create_dataset("W_POOL_KS", data=w_pool_ks)
+        f.create_dataset("POPULATED_KS", data=result["populated_ks"])
+        f.create_dataset("POOLED_KS", data=result["pooled_ks"])
         f.create_dataset("N_OBS_JOINT", data=result["n_obs_joint"])
         f.create_dataset("N_PRED_JOINT", data=result["n_pred_joint"])
         f.create_dataset("W_JOINT", data=result["w_joint"])
@@ -606,9 +749,23 @@ def build(config, regions=None):
     """
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     clusters = _read_hunt_reffert_clusters(config)
+
+    # item 1: the survey pool, over ALL thirty regions, computed once,
+    # before any per-region fit -- every region (even one being rebuilt
+    # alone) needs the same pooled fallback, not a pool of itself.
+    all_region_names = [r.name for r in regions_module.REGIONS]
+    w_pool_g, w_pool_ks, pool_g_edges, pool_ks_edges, pool_skipped = \
+        survey_pooled_weights(config, all_region_names, clusters)
+    print(
+        "prior.anchor_weights: survey pool over %d regions (skipped %s): "
+        "W_POOL_G=[%.3f,%.3f] W_POOL_KS=[%.3f,%.3f]"
+        % (len(all_region_names) - len(pool_skipped), pool_skipped or "[]",
+           float(np.nanmin(w_pool_g)), float(np.nanmax(w_pool_g)),
+           float(np.nanmin(w_pool_ks)), float(np.nanmax(w_pool_ks))))
+
     for region in region_names:
-        result = build_region(config, region, clusters)
-        path = _write_product(config, region, result)
+        result = build_region(config, region, clusters, w_pool_g, w_pool_ks)
+        path = _write_product(config, region, result, w_pool_g, w_pool_ks, pool_skipped)
 
         w_all = np.concatenate([result["w_g"].ravel(), result["w_ks"].ravel()])
         print(
