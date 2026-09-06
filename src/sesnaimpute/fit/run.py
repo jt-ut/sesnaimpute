@@ -46,7 +46,9 @@ from sesnaimpute.granules import access
 from sesnaimpute.prior.callable import SourcePrior
 
 #: Sources per batch (module docstring): the SED fitter's own
-#: long-standing default.
+#: long-standing default -- a fallback only; `_fit_one` reads the live
+#: value off `config.fit_batch_size` (owner ruling 2026-09-06,
+#: `config.py`'s `[fit] batch_size`).
 BATCH_SIZE = 10_000
 
 CLASSES = tuple(c.code for c in definitions.CLASSES)
@@ -106,11 +108,16 @@ def _fit_one(config, region, cls):
     row order.
     """
     n_sources = access.region_slice(config, region)["n_sources"]
-    prior = SourcePrior(config, region, cls)
+    # SourcePrior's own class vocabulary is lower-case (`prior.callable.
+    # CLASSES`); `definitions.CLASSES` codes (this module's own `cls`,
+    # `CLASSES` above) are upper-case -- lower() at the one boundary
+    # where a fitter job hands its class to the prior.
+    prior = SourcePrior(config, region, cls.lower())
     gaia = GaiaTerm(config, region)
-    psi_term = PsiTerm(config, cls)
+    psi_term = PsiTerm(config, cls, beta=config.fit_beta)
     native_flux = _library_native_flux(config, cls)
     gaia_cls = cls.lower()
+    batch_size = config.fit_batch_size
 
     def gamma(row, model_index, a, log10_b):
         return gaia.ln_gamma(row, model_index, a, log10_b, gaia_cls)
@@ -119,8 +126,8 @@ def _fit_one(config, region, cls):
         return psi_term.ln_psi(native_flux, model_index, a, log10_b)
 
     batch_paths = []
-    for i, start in enumerate(range(0, n_sources, BATCH_SIZE)):
-        rows = np.arange(start, min(start + BATCH_SIZE, n_sources))
+    for i, start in enumerate(range(0, n_sources, batch_size)):
+        rows = np.arange(start, min(start + batch_size, n_sources))
         prior.prepare(rows)
         arrays = fit_batch(config, region, cls, rows, prior, gamma=gamma, psi=psi)
         path = _batch_path(config, region, cls, i)
