@@ -359,39 +359,28 @@ def _gal_eps_at_sgrid(j, lim1, lim2, lim3, lim4, dim1, dim2, dim3, dim4, log10_s
 
 
 @numba.njit(cache=True, fastmath=True)
-def _gal_log_density_numba(a, b, mi, a_col, sigma_col, arm_idx, z,
-                           gal_fref, log10_lim_irac, kd_irac, kw_irac,
-                           log10_s_grid, phi_density_grid,
-                           cdf_g1, cdf_g3, cdf_g4, cdf_joint, cdf_pair13, cdf_pair14, cdf_pair34,
-                           cdf_marg1, cdf_marg3, cdf_marg4,
-                           kernel_ln_nodes, kernel_w, kernel_mu, kernel_sigma, zp_sigma_k):
-    """`(n,)`: GAL's `ln lambda~_GAL` at every query point, one compiled
-    loop doing `Kernel.mixture`'s own node bracket, `Kernel.pdf`'s
-    two-component sum, and the selection itself -- the hybrid law's
-    dimming at this query's own `a` (`selection.law_dense_weight`/
-    `kappa_hybrid`, inlined) and the exact two-of-four colour-CDF lookup
-    (`_gal_eps_at_sgrid`) at this SOURCE's own four IRAC limits
-    (`log10_lim_irac`) -- as scalar arithmetic per point. There is no
-    per-source galaxy product (owner, 2026-09-06): nothing here is
-    gathered from a per-batch array by a local row index; `log10_lim_
-    irac` is read straight off the region table, already resident.
-    `arm_idx` is the SOURCE's own `A_COL_PROVENANCE` (fixed defect, owner
-    2026-09-06: was the sightline's block-averaged arm). `zp_sigma_k`,
-    one per point (mag, 0 for Planck-arm), is the source's own Herschel
-    field zero-point uncertainty, not one survey scalar."""
+def _gal_shape_numba(a, b, mi, a_col, sigma_col, arm_idx, zp_sigma_k, gal_fref,
+                     log10_s_grid, phi_density_grid,
+                     kernel_ln_nodes, kernel_w, kernel_mu, kernel_sigma):
+    """`(n,)`: GAL's SHAPE half, `p_a . p(log10 S, a)`'s first factor --
+    `Kernel.pdf`'s own node bracket and two-component sum at this
+    SOURCE's own arm (`arm_idx`, fixed defect, owner 2026-09-06: was the
+    sightline's block-averaged majority) times the counts law's
+    normalised density at `log10 S = log10 B + log10 f_ref`. Zero at `a
+    <= 0` (the class's own support). The same arithmetic the fused
+    reader always did, split out so the class's `shape`/`selection` pair
+    (owner ruling, 2026-09-06) can be read, and timed, apart."""
     n = a.shape[0]
     out = np.empty(n, dtype=np.float64)
     ln10 = np.log(10.0)
-    ln_ramp_ratio = np.log(_LAW_RAMP_HI / _LAW_RAMP_LO)
     for k in range(n):
         ak = a[k]
         if ak <= 0.0:
-            out[k] = -np.inf
+            out[k] = 0.0
             continue
         acol = a_col[k]
         scol = sigma_col[k]
         arm = arm_idx[k]
-        zk = z[k]
 
         i, t = _bracket(kernel_ln_nodes, np.log(acol))
         w = kernel_w[arm, i] + t * (kernel_w[arm, i + 1] - kernel_w[arm, i])
@@ -413,6 +402,37 @@ def _gal_log_density_numba(a, b, mi, a_col, sigma_col, arm_idx, z,
                + (1.0 - w) * np.exp(-0.5 * z1 * z1) / (sigma1 * _SQRT2PI))
         p_a = dens / (ak * ln10)
 
+        log10_s = b[k] + np.log10(gal_fref[mi[k]])
+        iv, tv = _bracket(log10_s_grid, log10_s)
+        pd_lo = phi_density_grid[iv]
+        pd_hi = phi_density_grid[iv + 1]
+        phi_density = pd_lo + tv * (pd_hi - pd_lo)
+
+        out[k] = p_a * phi_density
+    return out
+
+
+@numba.njit(cache=True, fastmath=True)
+def _gal_selection_numba(a, b, mi, gal_fref, log10_lim_irac, kd_irac, kw_irac,
+                         log10_s_grid,
+                         cdf_g1, cdf_g3, cdf_g4, cdf_joint, cdf_pair13, cdf_pair14, cdf_pair34,
+                         cdf_marg1, cdf_marg3, cdf_marg4):
+    """`(n,)`: GAL's SELECTION half -- the hybrid law's dimming at this
+    query's own `a` (`selection.law_dense_weight`/`kappa_hybrid`,
+    inlined) and the exact two-of-four colour-CDF lookup
+    (`_gal_eps_at_sgrid`) at this SOURCE's own four IRAC limits
+    (`log10_lim_irac`, already resident on the region table -- there is
+    no per-source galaxy product, owner 2026-09-06). Zero at `a <= 0`;
+    the value there is discarded by the composition's zero `shape`
+    anyway. The same arithmetic the fused reader always did."""
+    n = a.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    ln_ramp_ratio = np.log(_LAW_RAMP_HI / _LAW_RAMP_LO)
+    for k in range(n):
+        ak = a[k]
+        if ak <= 0.0:
+            out[k] = 0.0
+            continue
         # the hybrid law's dimming at this query's own column `ak`
         # (`selection.law_dense_weight`/`kappa_hybrid`, module docstring).
         xw = np.log(ak / _LAW_RAMP_LO) / ln_ramp_ratio
@@ -439,18 +459,196 @@ def _gal_log_density_numba(a, b, mi, a_col, sigma_col, arm_idx, z,
         e_hi = _gal_eps_at_sgrid(iv + 1, lim1, lim2, lim3, lim4, dim1, dim2, dim3, dim4, log10_s_grid,
                                  cdf_g1, cdf_g3, cdf_g4, cdf_joint, cdf_pair13, cdf_pair14, cdf_pair34,
                                  cdf_marg1, cdf_marg3, cdf_marg4)
-        eps_val = e_lo + tv * (e_hi - e_lo)
-
-        pd_lo = phi_density_grid[iv]
-        pd_hi = phi_density_grid[iv + 1]
-        phi_density = pd_lo + tv * (pd_hi - pd_lo)
-
-        numerator = p_a * phi_density * eps_val
-        if numerator > 0.0 and zk > 0.0:
-            out[k] = np.log(numerator) - np.log(zk)
-        else:
-            out[k] = -np.inf
+        out[k] = e_lo + tv * (e_hi - e_lo)
     return out
+
+
+class _FamilyClass(object):
+    """STAR/AGB/PAHC's `shape`/`selection` pair (owner ruling, 2026-09-06):
+    `shape` is `ClassShape.density` converted to a density in `(a, log10
+    B)` by the fixed cell area and the `d(log10 x)/da` Jacobian;
+    `selection` is this source's own tabulated `EPS_<cls>`, bilinear on
+    `(x = a/A_s, log10 B)`. Both take the SAME `(rows, a, log10_b)`
+    block every class's pair takes; `Z_%s` is read by the shared
+    composition, not here."""
+
+    def __init__(self, prior, cls):
+        self._prior = prior
+        self.cls = cls
+        self.z_column = "Z_%s" % cls.upper()
+
+    def shape(self, rows, a, log10_b, model_index=None):
+        p = self._prior
+        shape_obj = p.shapes[self.cls]
+        fg = p.family_grids[self.cls]
+        shp = a.shape
+        rows_f, a_f, b_f = rows.ravel(), a.ravel(), log10_b.ravel()
+        valid = a_f > 0.0
+        a_safe = np.where(valid, a_f, 1.0)
+
+        tile_id = p.table["TILE_ID"][rows_f]
+        a_col = p.table["A_COL_K"][rows_f]
+        sigma_col = p.table["A_COL_SIG_K"][rows_f]
+        map_class = np.where(
+            p.table["A_COL_PROVENANCE"][rows_f] == star_shapes._PLANCK_PROVENANCE_CODE,
+            "planck", "herschel")
+        f_lim8 = (p.table["F_LIM_50_MJY"][rows_f, p._idx_i4] if self.cls == "pahc" else None)
+        zp_sigma_k = p._zp_sigma_k[rows_f]
+
+        mass = shape_obj.density(a_f, b_f, tile_id, a_col, sigma_col, map_class, f_lim8=f_lim8,
+                                 zp_sigma_k=zp_sigma_k)
+        p_ab = np.where(valid, mass / (a_safe * LN10 * fg["dx"] * fg["db"]), 0.0)
+        return p_ab.reshape(shp)
+
+    def selection(self, rows, a, log10_b, model_index=None):
+        p = self._prior
+        fg = p.family_grids[self.cls]
+        shp = a.shape
+        rows_f, a_f, b_f = rows.ravel(), a.ravel(), log10_b.ravel()
+        valid = a_f > 0.0
+        a_safe = np.where(valid, a_f, 1.0)
+        a_col = p.table["A_COL_K"][rows_f]
+        x_query = np.where(valid, a_safe / a_col, 0.0)
+
+        local = p._prep_local_index(rows_f)
+        eps_batch = p._prep_star_eps[self.cls][local]
+        eps_s = _interp_eps_2d(eps_batch, fg["x_ladder"], fg["b_grid"], x_query, b_f)
+        return eps_s.reshape(shp)
+
+
+class _GalClass(object):
+    """GAL's `shape`/`selection` pair: `shape` is `Kernel.pdf`'s
+    two-component mixture times the counts law's own normalised density
+    at `log10 S = log10 B + log10 f_ref`; `selection` is the colour-CDF
+    lookup at this source's own four IRAC limits (already compiled --
+    owner, 2026-09-06: no per-source galaxy product any more). `Z_GAL`
+    is read by the shared composition."""
+
+    z_column = "Z_GAL"
+
+    def __init__(self, prior):
+        self._prior = prior
+
+    def shape(self, rows, a, log10_b, model_index=None):
+        p = self._prior
+        shp = a.shape
+        rows_f = rows.ravel()
+        a_f, b_f = a.ravel(), log10_b.ravel()
+        mi_f = model_index.ravel().astype(np.int64)
+        a_col = p.table["A_COL_K"][rows_f]
+        sigma_col = p.table["A_COL_SIG_K"][rows_f]
+        arm_idx = p.table["A_COL_PROVENANCE"][rows_f].astype(np.int64)
+        zp_sigma_k = p._zp_sigma_k[rows_f]
+        kern = p.yso_shape.kernel
+        out = _gal_shape_numba(a_f, b_f, mi_f, a_col, sigma_col, arm_idx, zp_sigma_k,
+                               p.gal_fref, p.gal_log10_s_grid, p._gal_phi_density_grid,
+                               kern._ln_nodes, kern._w, kern._mu, kern._sigma)
+        return out.reshape(shp)
+
+    def selection(self, rows, a, log10_b, model_index=None):
+        p = self._prior
+        shp = a.shape
+        rows_f = rows.ravel()
+        a_f, b_f = a.ravel(), log10_b.ravel()
+        mi_f = model_index.ravel().astype(np.int64)
+        log10_lim_irac = np.ascontiguousarray(
+            np.log10(p.table["F_LIM_50_MJY"][rows_f][:, p._gal_irac_idx]))
+        cdf = p._gal_cdf
+        out = _gal_selection_numba(a_f, b_f, mi_f, p.gal_fref, log10_lim_irac,
+                                   p.gal_kd_irac, p.gal_kw_irac, p.gal_log10_s_grid,
+                                   cdf["g1"], cdf["g3"], cdf["g4"], cdf["joint"],
+                                   cdf["pair13"], cdf["pair14"], cdf["pair34"],
+                                   cdf["marg1"], cdf["marg3"], cdf["marg4"])
+        return out.reshape(shp)
+
+
+class _YsoClass(object):
+    """YSO's `shape`/`selection` pair: `shape` is `YsoShape.
+    marginal_exact` (this source's own exact extinction marginal) times
+    the closed-form conditional Gaussian on the ridge; `selection` is
+    ONE everywhere -- the YSO shape carries no selection at all, `Z_YSO
+    = 1` by construction (module docstring, disclosed asymmetry, owner
+    2026-09-06's single question)."""
+
+    z_column = None
+
+    def __init__(self, prior):
+        self._prior = prior
+
+    def shape(self, rows, a, log10_b, model_index=None):
+        p = self._prior
+        shp = a.shape
+        rows_f, a_f, b_f = rows.ravel(), a.ravel(), log10_b.ravel()
+
+        a_col = p.table["A_COL_K"][rows_f]
+        sigma_col = p.table["A_COL_SIG_K"][rows_f]
+        sl_rows = p.table["HPX256_ROW"][rows_f]
+        map_class = p.table["A_COL_PROVENANCE"][rows_f]
+        zp_sigma_k = p._zp_sigma_k[rows_f]
+        p_a = _marginal_exact_chunked(p.yso_shape, a_f, sl_rows, a_col, sigma_col, map_class,
+                                      zp_sigma_k=zp_sigma_k)
+        p_a = np.where(a_f > 0.0, p_a, 0.0)
+
+        mean_b = p.table["RIDGE_INTERCEPT"][rows_f] + p.table["RIDGE_SLOPE"][rows_f] * a_f
+        width = p.table["RIDGE_WIDTH"][rows_f]
+        z_score = (b_f - mean_b) / width
+        p_b = _INV_SQRT_2PI / width * np.exp(-0.5 * z_score ** 2)
+        return (p_a * p_b).reshape(shp)
+
+    def selection(self, rows, a, log10_b, model_index=None):
+        return np.ones_like(a, dtype=np.float64)
+
+
+class _H2sClass(object):
+    """H2S's `shape`/`selection` pair: `shape` is `YsoShape.
+    marginal_exact` (shared with YSO, not copied) times the region's own
+    `log10 Sigma` lognormal; `selection` is this source's own tabulated
+    `EPS`, bilinear on `(x = a/A_s, log10 Sigma)`. `Z_H2S` is read by the
+    shared composition."""
+
+    z_column = "Z_H2S"
+
+    def __init__(self, prior):
+        self._prior = prior
+
+    def shape(self, rows, a, log10_b, model_index=None):
+        p = self._prior
+        shp = a.shape
+        rows_f, a_f, b_f = rows.ravel(), a.ravel(), log10_b.ravel()
+        mi_f = model_index.ravel()
+        valid = a_f > 0.0
+
+        a_col = p.table["A_COL_K"][rows_f]
+        sigma_col = p.table["A_COL_SIG_K"][rows_f]
+        sl_rows = p.table["HPX256_ROW"][rows_f]
+        map_class = p.table["A_COL_PROVENANCE"][rows_f]
+        zp_sigma_k = p._zp_sigma_k[rows_f]
+        p_a = _marginal_exact_chunked(p.yso_shape, a_f, sl_rows, a_col, sigma_col, map_class,
+                                      zp_sigma_k=zp_sigma_k)
+        p_a = np.where(valid, p_a, 0.0)
+
+        log10_sigma = b_f + np.log10(p.h2s_fref[mi_f])
+        z_score = (log10_sigma - p.h2s_logsig_mean) / p.h2s_logsig_std
+        p_sigma = _INV_SQRT_2PI / p.h2s_logsig_std * np.exp(-0.5 * z_score ** 2)
+        return (p_a * p_sigma).reshape(shp)
+
+    def selection(self, rows, a, log10_b, model_index=None):
+        p = self._prior
+        shp = a.shape
+        rows_f, a_f, b_f = rows.ravel(), a.ravel(), log10_b.ravel()
+        mi_f = model_index.ravel()
+        valid = a_f > 0.0
+        a_safe = np.where(valid, a_f, 1.0)
+
+        a_col = p.table["A_COL_K"][rows_f]
+        log10_sigma = b_f + np.log10(p.h2s_fref[mi_f])
+        x_query = np.where(valid, a_safe / a_col, 0.0)
+
+        local = p._prep_local_index(rows_f)
+        eps_batch = p._prep_h2s_eps[local]
+        eps_val = _interp_eps_2d(eps_batch, p.h2s_x_ladder, p.h2s_log10_sigma_grid,
+                                 x_query, log10_sigma)
+        return eps_val.reshape(shp)
 
 
 class SourcePrior(object):
@@ -579,6 +777,19 @@ class SourcePrior(object):
         self._prep_star_eps = None
         self._prep_h2s_eps = None
 
+        # -- one object per class, the shape/selection protocol (owner
+        # ruling, 2026-09-06): built only for the classes this instance
+        # was scoped to load, same as `self.shapes` etc above.
+        self._classes = {}
+        for c in family_wanted:
+            self._classes[c] = _FamilyClass(self, c)
+        if gal_wanted:
+            self._classes["gal"] = _GalClass(self)
+        if cls is None or cls == "yso":
+            self._classes["yso"] = _YsoClass(self)
+        if h2s_wanted:
+            self._classes["h2s"] = _H2sClass(self)
+
     def prepare(self, rows):
         """Gathers this batch's own rows (about ten thousand sources,
         `CODING_RULES.md` 10b) from whichever of the two remaining
@@ -660,7 +871,11 @@ class SourcePrior(object):
         """`ln lambda~_cls(a, log10 B | I_s)` for catalogue `rows` (n,)
         and query points `a`/`log10_b` ((n,) or (n,m)); `model_index`
         ((m,) or (n,m)) is required for GAL and H2S, ignored otherwise
-        (module docstring)."""
+        (module docstring). ONE composition for all six classes (owner
+        ruling, 2026-09-06): `ln shape + ln selection - ln Z[rows]`,
+        where `shape`/`selection` are the class's own object (below) and
+        `Z` is the table's own normaliser column, except YSO, whose
+        `z_column` is `None` (`Z_YSO = 1` by construction, not read)."""
         if cls not in CLASSES:
             raise ValueError("SourcePrior.log_density: unknown class %r, must be one of %r"
                              % (cls, CLASSES))
@@ -671,177 +886,16 @@ class SourcePrior(object):
         if cls in ("gal", "h2s") and model_index is None:
             raise ValueError("SourcePrior.log_density: class %r needs model_index" % (cls,))
         rows2d, a2, b2, mi2, shp = self._prepare(rows, a, log10_b, model_index)
-        if cls in FAMILY_CLASSES:
-            out = self._log_density_family(cls, rows2d, a2, b2)
-        elif cls == "gal":
-            out = self._log_density_gal(rows2d, a2, b2, mi2)
-        elif cls == "yso":
-            out = self._log_density_yso(rows2d, a2, b2)
-        else:
-            out = self._log_density_h2s(rows2d, a2, b2, mi2)
-        return out.reshape(shp)
 
-    # -----------------------------------------------------------------
-    # STAR, AGB, PAHC
-    # -----------------------------------------------------------------
-
-    def _log_density_family(self, cls, rows2d, a2, b2):
-        """`p_C` read through `ClassShape.density` itself -- the source's
-        own two-component kernel mixture (shift and width per component,
-        blended by the mixture weight), not a single-width bracket of
-        the column against the shape's width ladder (fixed defect: the
-        old code bracketed `A_COL_K` against the WIDTH nodes, a
-        mismatched axis, and zeroed everything outside the tabulated box
-        instead of reading the shape's own declared analytic tail
-        there)."""
-        shape = self.shapes[cls]
-        fg = self.family_grids[cls]
-        rows = rows2d.ravel()
-        a = a2.ravel()
-        b = b2.ravel()
-        valid = a > 0.0
-        a_safe = np.where(valid, a, 1.0)
-
-        tile_id = self.table["TILE_ID"][rows]
-        a_col = self.table["A_COL_K"][rows]
-        sigma_col = self.table["A_COL_SIG_K"][rows]
-        map_class = np.where(
-            self.table["A_COL_PROVENANCE"][rows] == star_shapes._PLANCK_PROVENANCE_CODE,
-            "planck", "herschel")
-        f_lim8 = (self.table["F_LIM_50_MJY"][rows, self._idx_i4] if cls == "pahc" else None)
-        zp_sigma_k = self._zp_sigma_k[rows]
-
-        mass = shape.density(a, b, tile_id, a_col, sigma_col, map_class, f_lim8=f_lim8,
-                             zp_sigma_k=zp_sigma_k)
-        p_ab = np.where(valid, mass / (a_safe * LN10 * fg["dx"] * fg["db"]), 0.0)
-
-        x_query = np.where(valid, a_safe / a_col, 0.0)
-        local = self._prep_local_index(rows)
-        eps_batch = self._prep_star_eps[cls][local]
-        eps_s = _interp_eps_2d(eps_batch, fg["x_ladder"], fg["b_grid"], x_query, b)
-
-        numerator = np.where(valid, p_ab * eps_s, 0.0)
-        z = self.table["Z_%s" % cls.upper()][rows]
+        obj = self._classes[cls]
+        shape_val = obj.shape(rows2d, a2, b2, model_index=mi2)
+        sel_val = obj.selection(rows2d, a2, b2, model_index=mi2)
+        numerator = shape_val * sel_val
+        z = (self.table[obj.z_column][rows2d] if obj.z_column is not None
+            else np.ones_like(numerator))
         with np.errstate(divide="ignore", invalid="ignore"):
             ln_val = np.log(numerator) - np.log(z)
-        return np.where((numerator > 0.0) & (z > 0.0) & valid, ln_val, -np.inf)
-
-    # -----------------------------------------------------------------
-    # GAL
-    # -----------------------------------------------------------------
-
-    def _log_density_gal(self, rows2d, a2, b2, mi2):
-        """One compiled loop (`_gal_log_density_numba`) doing `Kernel.
-        mixture`'s own node bracket, the two-component pdf, and the
-        selection itself -- the hybrid law's dimming and the colour-CDF
-        orthant-probability lookup -- as scalar arithmetic per query
-        point. No `prepare`d gather: there is no per-source galaxy
-        product (owner, 2026-09-06); the source's own four IRAC limits
-        come straight off the region table."""
-        rows = rows2d.ravel()
-        a = a2.ravel()
-        b = b2.ravel()
-        mi = mi2.ravel()
-
-        a_col = self.table["A_COL_K"][rows]
-        sigma_col = self.table["A_COL_SIG_K"][rows]
-        # the SOURCE's own arm (fixed defect, owner 2026-09-06: was the
-        # SIGHTLINE's block-averaged majority, `YsoShape.is_herschel
-        # [sl_rows]` -- wrong for the ~43% of Perseus's Herschel-arm
-        # sources whose own sightline majority is Planck). Matches
-        # `Kernel._ARM_CODE` exactly: `A_COL_PROVENANCE` 0=herschel,
-        # 1=planck, the same codes `column.py` writes.
-        arm_idx = self.table["A_COL_PROVENANCE"][rows].astype(np.int64)
-        zp_sigma_k = self._zp_sigma_k[rows]
-        z = self.table["Z_GAL"][rows]
-        log10_lim_irac = np.ascontiguousarray(
-            np.log10(self.table["F_LIM_50_MJY"][rows][:, self._gal_irac_idx]))
-        kern = self.yso_shape.kernel
-
-        ln_val = _gal_log_density_numba(
-            a, b, mi.astype(np.int64), a_col, sigma_col, arm_idx, z,
-            self.gal_fref, log10_lim_irac, self.gal_kd_irac, self.gal_kw_irac,
-            self.gal_log10_s_grid, self._gal_phi_density_grid,
-            self._gal_cdf["g1"], self._gal_cdf["g3"], self._gal_cdf["g4"], self._gal_cdf["joint"],
-            self._gal_cdf["pair13"], self._gal_cdf["pair14"], self._gal_cdf["pair34"],
-            self._gal_cdf["marg1"], self._gal_cdf["marg3"], self._gal_cdf["marg4"],
-            kern._ln_nodes, kern._w, kern._mu, kern._sigma, zp_sigma_k)
-        return ln_val
-
-    # -----------------------------------------------------------------
-    # YSO
-    # -----------------------------------------------------------------
-
-    def _log_density_yso(self, rows2d, a2, b2):
-        """`p(a | A_s)` via `YsoShape.marginal_exact`, this source's own
-        exact adopted column AND measurement uncertainty (module
-        docstring: the exact form, not the node-bracket `marginal_at`)."""
-        rows = rows2d.ravel()
-        a = a2.ravel()
-        b = b2.ravel()
-
-        a_col = self.table["A_COL_K"][rows]
-        sigma_col = self.table["A_COL_SIG_K"][rows]
-        sl_rows = self.table["HPX256_ROW"][rows]
-        # the SOURCE's own arm, not the sightline's (fixed defect, owner
-        # 2026-09-06) -- `_marginal_exact_chunked`'s `map_class`.
-        map_class = self.table["A_COL_PROVENANCE"][rows]
-        zp_sigma_k = self._zp_sigma_k[rows]
-        p_a = _marginal_exact_chunked(self.yso_shape, a, sl_rows, a_col, sigma_col, map_class,
-                                      zp_sigma_k=zp_sigma_k)
-        p_a = np.where(a > 0.0, p_a, 0.0)
-
-        mean_b = self.table["RIDGE_INTERCEPT"][rows] + self.table["RIDGE_SLOPE"][rows] * a
-        width = self.table["RIDGE_WIDTH"][rows]
-        z_score = (b - mean_b) / width
-        p_b = _INV_SQRT_2PI / width * np.exp(-0.5 * z_score ** 2)
-
-        numerator = p_a * p_b
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ln_val = np.log(numerator)
-        return np.where((numerator > 0.0) & (a >= 0.0), ln_val, -np.inf)
-
-    # -----------------------------------------------------------------
-    # H2S
-    # -----------------------------------------------------------------
-
-    def _log_density_h2s(self, rows2d, a2, b2, mi2):
-        """`p(a | A_s)` shared with YSO's `marginal_exact`; `eps` this
-        source's own H2S `EPS[s]`, bilinearly interpolated (module
-        docstring), no depth-group index."""
-        rows = rows2d.ravel()
-        a = a2.ravel()
-        b = b2.ravel()
-        mi = mi2.ravel()
-        valid = a > 0.0
-        a_safe = np.where(valid, a, 1.0)
-
-        a_col = self.table["A_COL_K"][rows]
-        sigma_col = self.table["A_COL_SIG_K"][rows]
-        sl_rows = self.table["HPX256_ROW"][rows]
-        # the SOURCE's own arm, not the sightline's (fixed defect, owner
-        # 2026-09-06) -- `_marginal_exact_chunked`'s `map_class`.
-        map_class = self.table["A_COL_PROVENANCE"][rows]
-        zp_sigma_k = self._zp_sigma_k[rows]
-        p_a = _marginal_exact_chunked(self.yso_shape, a, sl_rows, a_col, sigma_col, map_class,
-                                      zp_sigma_k=zp_sigma_k)
-        p_a = np.where(valid, p_a, 0.0)
-
-        log10_sigma = b + np.log10(self.h2s_fref[mi])
-        z_score = (log10_sigma - self.h2s_logsig_mean) / self.h2s_logsig_std
-        p_sigma = _INV_SQRT_2PI / self.h2s_logsig_std * np.exp(-0.5 * z_score ** 2)
-
-        x_query = np.where(valid, a_safe / a_col, 0.0)
-        local = self._prep_local_index(rows)
-        eps_batch = self._prep_h2s_eps[local]
-        eps_val = _interp_eps_2d(eps_batch, self.h2s_x_ladder, self.h2s_log10_sigma_grid,
-                                 x_query, log10_sigma)
-
-        z = self.table["Z_H2S"][rows]
-        numerator = p_a * p_sigma * eps_val
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ln_val = np.log(numerator) - np.log(z)
-        return np.where((numerator > 0.0) & (z > 0.0) & valid, ln_val, -np.inf)
+        return np.where((numerator > 0.0) & (z > 0.0), ln_val, -np.inf)
 
 
 # ---------------------------------------------------------------------------
