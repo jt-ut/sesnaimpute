@@ -23,14 +23,21 @@ profile grid's nside-256 pixel), the beam-rescaling exponent `(beta-2)/2`,
 and an offset exponent `p` through the two measured median offsets at 302
 and 821 arcsec via `offset(L) = -c*L**p` (only `p` is stored; `c` cancels).
 
-Each map job holds at most 3 simultaneous native-resolution arrays (the
-map, its validity mask, and one transient mask copy) at up to 4 bytes per
-pixel, so the map-level joblib pool is capped to
-`floor(6 GiB / (largest_map_pixels * 4 B * 3))` workers -- the largest map,
-orionB at 84,722,900 pixels, bounds this to 6 workers by formula.
+One map job's peak resident memory is a fixed per-worker baseline (the
+interpreter and its imported libraries) plus a measured cost per native
+pixel -- calibrated by profiling the largest map (orionB, 84,722,900
+pixels) alone, with the map read via a bounded-memory streaming
+decompression (never holding the compressed and fully-decompressed bytes
+at once) rather than astropy's whole-file gzip read, and the beam-ladder
+convolution kept in float32 throughout rather than upcast to float64. The
+map-level joblib pool is capped to
+`floor(6 GiB / (300 MiB + largest_map_pixels * 17 B))` workers -- orionB
+bounds this to 3 workers by formula.
 """
 
+import gzip
 import os
+import tempfile
 
 import h5py
 import numpy as np
@@ -68,12 +75,13 @@ MIN_WEIGHT = 0.90
 #: Block-bootstrap tile size.
 BOOT_TILE_ARCSEC = 512.0
 
-#: The joblib memory-cap formula (module docstring): bytes per pixel of a
-#: native-resolution array during `process_map`, how many such arrays are
-#: alive together at the peak point, and the ceiling the pool must fit
+#: The joblib memory-cap formula (module docstring): one worker's fixed
+#: interpreter/library overhead, the per-pixel cost of one map job above
+#: that baseline (measured on the orionB map, the largest, with a margin
+#: over the observed peak), and the ceiling the pool must fit
 #: workers-times-per-job under.
-PEAK_BYTES_PER_PIXEL = 4
-PEAK_ARRAYS = 3
+PROCESS_BASELINE_BYTES = 300 * (1024 ** 2)
+PEAK_BYTES_PER_PIXEL = 17
 POOL_MEM_CEILING_BYTES = 6 * (1024 ** 3)
 
 # d = ln A_ref - ln A_L, the two-scale increment histogram grid.
@@ -226,8 +234,30 @@ def build_pairs(hist_d, ladder, scales, L0, cent, stat):
 # ------------------------------------------------------------------ helpers
 
 def _load_map(path):
-    d = np.squeeze(np.asarray(fits.getdata(path)))
-    return d.astype(np.float32, copy=False)
+    """Loads one HGBS map as float32. A `.gz` map is streamed to a plain
+    temporary FITS file in bounded chunks rather than decompressed
+    wholesale into a Python buffer, so the load never holds the
+    compressed stream and a full in-memory decompressed copy at the same
+    time; the temporary file is then memory-mapped and copied into the
+    one float32 array this function returns, and removed."""
+    if path.endswith(".gz"):
+        fd, tmp_path = tempfile.mkstemp(suffix=".fits")
+        os.close(fd)
+        try:
+            with gzip.open(path, "rb") as src, open(tmp_path, "wb") as dst:
+                while True:
+                    chunk = src.read(1 << 24)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+            raw = fits.getdata(tmp_path, memmap=True)
+            out = np.squeeze(np.asarray(raw)).astype(np.float32, copy=True)
+        finally:
+            os.remove(tmp_path)
+    else:
+        raw = fits.getdata(path, memmap=True)
+        out = np.squeeze(np.asarray(raw)).astype(np.float32, copy=False)
+    return out
 
 def _decimate_mean(ak, valid, f):
     """Block-mean by integer factor `f`, NaN-aware; `w` is the real-sky
@@ -273,7 +303,7 @@ def _gauss_stack(A, W, pix, sig_list):
         tf = np.exp(-2.0 * (np.pi ** 2) * (s_px ** 2) * k2)
         n = sfft.irfft2(FN * tf, s=(py, px_), workers=1)[:ny, :nx]
         d = sfft.irfft2(FD * tf, s=(py, px_), workers=1)[:ny, :nx]
-        yield n.astype(np.float64), d.astype(np.float64)
+        yield n, d
 
 def _hist_pair(idx, nbins):
     return np.bincount(idx, minlength=nbins)[:nbins].astype(np.int64)
@@ -534,13 +564,13 @@ def _pixel_count(path):
 
 def _pool_n_jobs(config, jobs):
     """Caps the map-level pool so `workers * per_map_peak` stays under
-    `POOL_MEM_CEILING_BYTES`, `per_map_peak` being the largest map's pixel
-    count times `PEAK_BYTES_PER_PIXEL` times `PEAK_ARRAYS` (module
-    docstring)."""
+    `POOL_MEM_CEILING_BYTES`, `per_map_peak` being one worker's fixed
+    baseline plus the largest map's pixel count times `PEAK_BYTES_PER_PIXEL`
+    (module docstring)."""
     if not jobs:
         return config.n_jobs
     max_pixels = max(_pixel_count(path) for _, path, _ in jobs)
-    per_map_peak = max_pixels * PEAK_BYTES_PER_PIXEL * PEAK_ARRAYS
+    per_map_peak = PROCESS_BASELINE_BYTES + max_pixels * PEAK_BYTES_PER_PIXEL
     cap = max(1, POOL_MEM_CEILING_BYTES // max(per_map_peak, 1))
     return int(min(config.n_jobs, cap))
 
