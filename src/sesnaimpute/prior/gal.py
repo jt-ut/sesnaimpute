@@ -139,14 +139,6 @@ SPLIT_STELLARITY_GRID = tuple(np.round(np.arange(0.50, 0.951, 0.05), 2))
 #: 4.5um, mJy.
 SPLIT_CRITERION_S_MJY = (0.1, 0.3, 1.0)
 
-#: The colour-cell width, dex, that compresses the full SWIRE population
-#: (SPEC_PRIORS.md section 5.1): within one 4.5um flux bin, every galaxy
-#: at the same (3.6, 5.8, 8.0um minus 4.5um) colour to this resolution is
-#: interchangeable for the two-of-four test (only the colour survives the
-#: coordinate-band rescale the selection kernel applies), so one weighted
-#: cell member stands in for all of them exactly to within this cell's own
-#: width -- the only approximation left, no population cap.
-COLOUR_CELL_DEX = 0.05
 
 #: The shared flux grid every eps table and PHI_S is tabulated on: 61
 #: points, SWIRE's I2 depth to Fazio's bright end (IMPLEMENTATION.md
@@ -333,6 +325,24 @@ def write_counts(path, result):
         f.create_dataset("FIT_RMS_DEX", data=np.float64(result["stats"]["rms_dex"]))
 
 
+def write_cdf_tables(path, cdf):
+    """Appends the colour-CDF tables (`build_colour_cdf_tables`) to the
+    survey-level GAL product at `path` (`write_counts`'s own file):
+    `CDF_GRID_I1`/`I3`/`I4` (`N_COLOUR_GRID`,) f4 the three colour axes,
+    `CDF_JOINT` (n_bin, N, N, N) f4, `CDF_PAIR_I1I3`/`I1I4`/`I3I4`
+    (n_bin, N, N) f4, `CDF_MARGINAL_I1`/`I3`/`I4` (n_bin, N) f4.
+    """
+    with h5py.File(path, "a") as f:
+        for name, arr in (("CDF_GRID_I1", cdf["g1"]), ("CDF_GRID_I3", cdf["g3"]),
+                          ("CDF_GRID_I4", cdf["g4"]), ("CDF_JOINT", cdf["joint"]),
+                          ("CDF_PAIR_I1I3", cdf["pair13"]), ("CDF_PAIR_I1I4", cdf["pair14"]),
+                          ("CDF_PAIR_I3I4", cdf["pair34"]), ("CDF_MARGINAL_I1", cdf["marg1"]),
+                          ("CDF_MARGINAL_I3", cdf["marg3"]), ("CDF_MARGINAL_I4", cdf["marg4"])):
+            if name in f:
+                del f[name]
+            f.create_dataset(name, data=arr.astype(np.float32))
+
+
 # ---------------------------------------------------------------------------
 # 2. The selection population -- SWIRE, star-galaxy separated, subsampled
 # ---------------------------------------------------------------------------
@@ -456,34 +466,62 @@ def select_star_galaxy_split(flux_mjy_i2, stell, ext_fl, fit, cosmic_variance_de
     return best["label"], candidates[best["label"]], rows, none_passed
 
 
-#: A cell index this far outside any real colour cell marks "this band's
-#: flux is not finite" -- its own axis category, never confused with a
-#: real 0.05-dex cell.
-_MISSING_CELL = -(1 << 40)
+#: The joint-colour CDF grid: points per axis and the target spacing,
+#: dex (SPEC_PRIORS.md section 5.1's exact-selection design, restated
+#: here as three colours' orthant probability -- see module docstring
+#: at `build_colour_cdf_tables`).
+N_COLOUR_GRID = 100
+COLOUR_GRID_DEX = 0.02
 
 
-def compress_population_by_colour(flux_mjy, is_galaxy, log10_s_grid, cell_dex=COLOUR_CELL_DEX):
-    """The FULL classified population, losslessly binned down to one
-    weighted member per occupied cell (module constant `COLOUR_CELL_DEX`
-    docstring): every galaxy is placed in its own 4.5um flux bin of
-    `log10_s_grid` (bin edges the midpoints between grid points) and, per
-    band, its own colour relative to 4.5um (log10 flux minus log10 I2
-    flux) is floored to a `cell_dex`-wide cell, or the sentinel
-    `_MISSING_CELL` if that band's flux is not finite -- the selection
-    kernel's own coordinate-band rescale (`prior.selection.pass_fractions_
-    binned`) depends on a member only through these colours, never its
-    absolute flux, so every galaxy sharing an (S-bin, cell_I1, cell_I3,
-    cell_I4) quadruple is exactly interchangeable for the two-of-four
-    test up to the cell's own 0.05-dex width -- the only approximation
-    left, no subsample cap. `is_galaxy` is the star-galaxy split's own
-    per-row mask, `None` for no removal at all.
+def _colour_of(flux_mjy, band_idx, log10_i2):
+    """log10(flux) - log10(I2 flux) for `band_idx`, `-inf` where that
+    band's own flux is not finite (never clears, and never counted as
+    a real value in the CDF's support -- see `_axis_index`)."""
+    f = flux_mjy[:, band_idx]
+    finite = np.isfinite(f) & (f > 0)
+    return np.where(finite, np.log10(np.where(finite, f, 1.0)) - log10_i2, -np.inf)
 
-    Returns `(log10_flux_irac, bin_of_pop, weight, cell_counts)`:
-    `log10_flux_irac` `(n_cell, 4)` (I2 held at the arbitrary constant 0,
-    per-band colours added for I1/I3/I4, `-inf` where missing),
-    `bin_of_pop`/`weight` `(n_cell,)` (weight = the cell's own galaxy
-    count), `cell_counts` `(n_s,)` occupied cells per S-bin (reported,
-    not used downstream).
+
+def _colour_axis(colour, n=N_COLOUR_GRID, dex=COLOUR_GRID_DEX):
+    """`(n,)` ascending: a grid spanning the population's own 0.1-99.9th
+    percentile colour range (padded two cells either side), the range a
+    real threshold can fall in."""
+    finite = colour[np.isfinite(colour)]
+    lo, hi = np.percentile(finite, [0.1, 99.9])
+    pad = 2.0 * dex
+    return np.linspace(lo - pad, hi + pad, n)
+
+
+def _axis_index(colour, axis):
+    """Each colour's own grid cell (0..N-1): the index of the smallest
+    grid point at or above it, so a cumulative count through cell `m`
+    is exactly the count with colour `<= axis[m]` (the CDF's own
+    definition, not one cell off it). `-inf` (missing) always lands in
+    cell 0, so it is counted as "colour <= threshold" at every grid
+    point -- a missing band never clears, matching the direct test."""
+    idx = np.searchsorted(axis, colour, side="left")
+    return np.clip(idx, 0, axis.size - 1)
+
+
+def build_colour_cdf_tables(flux_mjy, is_galaxy, log10_s_grid):
+    """The exact joint-colour CDF of the FULL classified population, per
+    4.5um flux bin (SPEC_PRIORS.md section 5.1): within one bin, a
+    galaxy's pass/fail depends on the source only through four
+    thresholds on its own colours (module docstring's rescale), so
+    "two of four clear" is an orthant probability of the bin's
+    three-dimensional colour distribution (3.6, 5.8, 8.0 relative to
+    4.5um) -- tabulated here once per survey, read by trilinear/
+    bilinear/linear interpolation per source in `build_source_selection`,
+    no population member touched per source. `is_galaxy` is the
+    star-galaxy split's own per-row mask, `None` for no removal.
+
+    Returns a dict: `g1`/`g3`/`g4` (`N_COLOUR_GRID`,) the three colour
+    axes (I1, I3, I4 each relative to I2); `joint` (n_bin, N, N, N) f4
+    the 3-D CDF F(c1,c3,c4); `pair13`/`pair14`/`pair34` (n_bin, N, N) f4
+    the three pairwise 2-D CDFs; `marg1`/`marg3`/`marg4` (n_bin, N) f4
+    the three 1-D marginal CDFs -- everything an exact inclusion-
+    exclusion needs for "at least 2 of {I1,I3,I4} clear".
     """
     i1, i2, i3, i4 = (IRAC_BAND_KEYS.index(b) for b in ("I1", "I2", "I3", "I4"))
     coord = flux_mjy[:, i2]
@@ -493,32 +531,83 @@ def compress_population_by_colour(flux_mjy, is_galaxy, log10_s_grid, cell_dex=CO
     idx = np.flatnonzero(valid)
     log10_i2 = np.log10(coord[idx])
     edges = 0.5 * (log10_s_grid[1:] + log10_s_grid[:-1])
-    sbin = np.clip(np.searchsorted(edges, log10_i2), 0, log10_s_grid.size - 1).astype(np.int64)
+    sbin = np.clip(np.searchsorted(edges, log10_i2), 0, log10_s_grid.size - 1)
 
-    def cell_of(band_idx):
-        f = flux_mjy[idx, band_idx]
-        finite = np.isfinite(f) & (f > 0)
-        colour = np.where(finite, np.log10(np.where(finite, f, 1.0)) - log10_i2, 0.0)
-        cell = np.floor(colour / cell_dex).astype(np.int64)
-        return np.where(finite, cell, _MISSING_CELL)
+    flux = flux_mjy[idx]
+    c1 = _colour_of(flux, i1, log10_i2)
+    c3 = _colour_of(flux, i3, log10_i2)
+    c4 = _colour_of(flux, i4, log10_i2)
+    g1, g3, g4 = _colour_axis(c1), _colour_axis(c3), _colour_axis(c4)
+    n1, n3, n4 = _axis_index(c1, g1), _axis_index(c3, g3), _axis_index(c4, g4)
 
-    c1, c3, c4 = cell_of(i1), cell_of(i3), cell_of(i4)
-    key = np.stack([sbin, c1, c3, c4], axis=1)
-    uniq, counts = np.unique(key, axis=0, return_counts=True)
+    n_bin = log10_s_grid.size
+    N = N_COLOUR_GRID
+    joint = np.zeros((n_bin, N, N, N), dtype=np.float32)
+    pair13 = np.zeros((n_bin, N, N), dtype=np.float32)
+    pair14 = np.zeros((n_bin, N, N), dtype=np.float32)
+    pair34 = np.zeros((n_bin, N, N), dtype=np.float32)
+    marg1 = np.zeros((n_bin, N), dtype=np.float32)
+    marg3 = np.zeros((n_bin, N), dtype=np.float32)
+    marg4 = np.zeros((n_bin, N), dtype=np.float32)
 
-    n_cell = uniq.shape[0]
-    log10_flux_irac = np.full((n_cell, 4), -np.inf, dtype=np.float64)
-    log10_flux_irac[:, i2] = 0.0  # the arbitrary coordinate-band constant
-    for local_idx, uniq_col in ((i1, 1), (i3, 2), (i4, 3)):
-        cells = uniq[:, uniq_col]
-        finite = cells != _MISSING_CELL
-        log10_flux_irac[finite, local_idx] = cells[finite] * cell_dex + 0.5 * cell_dex
+    for j in range(n_bin):
+        m = sbin == j
+        n_m = int(m.sum())
+        if n_m == 0:
+            continue
+        a1, a3, a4 = n1[m], n3[m], n4[m]
+        hist3 = np.bincount((a1 * N + a3) * N + a4, minlength=N ** 3).reshape(N, N, N)
+        joint[j] = (np.cumsum(np.cumsum(np.cumsum(hist3, 0), 1), 2) / n_m).astype(np.float32)
+        h13 = np.bincount(a1 * N + a3, minlength=N * N).reshape(N, N)
+        pair13[j] = (np.cumsum(np.cumsum(h13, 0), 1) / n_m).astype(np.float32)
+        h14 = np.bincount(a1 * N + a4, minlength=N * N).reshape(N, N)
+        pair14[j] = (np.cumsum(np.cumsum(h14, 0), 1) / n_m).astype(np.float32)
+        h34 = np.bincount(a3 * N + a4, minlength=N * N).reshape(N, N)
+        pair34[j] = (np.cumsum(np.cumsum(h34, 0), 1) / n_m).astype(np.float32)
+        marg1[j] = (np.cumsum(np.bincount(a1, minlength=N)) / n_m).astype(np.float32)
+        marg3[j] = (np.cumsum(np.bincount(a3, minlength=N)) / n_m).astype(np.float32)
+        marg4[j] = (np.cumsum(np.bincount(a4, minlength=N)) / n_m).astype(np.float32)
 
-    bin_of_pop = uniq[:, 0]
-    weight = counts.astype(np.float64)
-    cell_counts = np.zeros(log10_s_grid.size, dtype=np.int64)
-    np.add.at(cell_counts, bin_of_pop, 1)
-    return log10_flux_irac, bin_of_pop, weight, cell_counts
+    return dict(g1=g1, g3=g3, g4=g4, joint=joint, pair13=pair13, pair14=pair14, pair34=pair34,
+                marg1=marg1, marg3=marg3, marg4=marg4)
+
+
+def _interp1(table_row, axis, x):
+    return np.interp(x, axis, table_row)
+
+
+def _bracket(axis, x):
+    xc = np.clip(x, axis[0], axis[-1])
+    i = np.clip(np.searchsorted(axis, xc) - 1, 0, axis.size - 2)
+    t = (xc - axis[i]) / (axis[i + 1] - axis[i])
+    return i, t
+
+
+def _interp2(table, axis_a, axis_b, xa, xb):
+    ia, ta = _bracket(axis_a, xa)
+    ib, tb = _bracket(axis_b, xb)
+    out = np.zeros_like(xa, dtype=np.float64)
+    for da in (0, 1):
+        wa = ta if da else (1.0 - ta)
+        for db in (0, 1):
+            wb = tb if db else (1.0 - tb)
+            out += wa * wb * table[ia + da, ib + db]
+    return out
+
+
+def _interp3(table, axis_a, axis_b, axis_c, xa, xb, xc):
+    ia, ta = _bracket(axis_a, xa)
+    ib, tb = _bracket(axis_b, xb)
+    ic, tc = _bracket(axis_c, xc)
+    out = np.zeros_like(xa, dtype=np.float64)
+    for da in (0, 1):
+        wa = ta if da else (1.0 - ta)
+        for db in (0, 1):
+            wb = tb if db else (1.0 - tb)
+            for dc in (0, 1):
+                wc = tc if dc else (1.0 - tc)
+                out += wa * wb * wc * table[ia + da, ib + db, ic + dc]
+    return out
 
 
 def population_flux_bins(flux_mjy, log10_s_grid):
@@ -526,8 +615,8 @@ def population_flux_bins(flux_mjy, log10_s_grid):
     positive I2 flux) and their 4.5um flux bin on `log10_s_grid` (bin edges
     the midpoints between grid points) -- no subsample cap; used where a
     consumer needs the population's own absolute flux (`build_region_
-    selection`, `eps_at_survey_median`), not the colour-cell compression
-    `compress_population_by_colour` builds for the per-source kernel.
+    selection`, `eps_at_survey_median`), not the colour-CDF tables
+    `build_colour_cdf_tables` builds for the per-source kernel.
     """
     coord = flux_mjy[:, IRAC_BAND_KEYS.index("I2")]
     valid = np.isfinite(coord) & (coord > 0)
@@ -566,20 +655,62 @@ def population_eight_band(log10_flux_irac):
     return out
 
 
-def build_source_selection(config, region, log10_flux_irac, log10_b_pop, bin_of_pop, log10_s_grid,
-                            weight=None, batch_budget_bytes=(512 << 20)):
+def source_selection_from_cdf(log10_lim_b, a_query_b, kappa_b, log10_s_grid, cdf):
+    """`(n_batch, n_x, n_s)` f8: the exact two-of-four pass fraction from
+    the colour-CDF tables (`build_colour_cdf_tables`), one S-bin at a
+    time. Per band `i` in {I1, I3, I4}, the threshold `tau_i = log10_lim
+    - log10(S) + 0.4 a kappa_i` is the colour a galaxy must clear (the
+    module docstring's rescale); the 4.5um band's own threshold `tau_2`
+    compares against colour zero. If 4.5um clears, the pass fraction is
+    `1 - F(tau1, tau3, tau4)` (at least one of the other three clears);
+    otherwise it is `P(>=2 of 3 clear)`, the fixed inclusion-exclusion
+    `sum(pairwise survivals) - 2*(triple survival)`, both built from the
+    tabulated 1-D/2-D/3-D CDFs by linear/bilinear/trilinear interpolation
+    -- no population member is read here.
+    """
+    i1, i2, i3, i4 = (IRAC_BAND_IDX[IRAC_BAND_KEYS.index(b)] for b in ("I1", "I2", "I3", "I4"))
+    n_b, n_x = a_query_b.shape[0], a_query_b.shape[1]
+    n_s = log10_s_grid.size
+    eps = np.zeros((n_b, n_x, n_s), dtype=np.float64)
+    dim1 = 0.4 * a_query_b * kappa_b[:, :, i1]
+    dim2 = 0.4 * a_query_b * kappa_b[:, :, i2]
+    dim3 = 0.4 * a_query_b * kappa_b[:, :, i3]
+    dim4 = 0.4 * a_query_b * kappa_b[:, :, i4]
+    for j in range(n_s):
+        s = log10_s_grid[j]
+        tau1 = (log10_lim_b[:, i1, None] - s + dim1)
+        tau2 = (log10_lim_b[:, i2, None] - s + dim2)
+        tau3 = (log10_lim_b[:, i3, None] - s + dim3)
+        tau4 = (log10_lim_b[:, i4, None] - s + dim4)
+
+        f3d = _interp3(cdf["joint"][j], cdf["g1"], cdf["g3"], cdf["g4"], tau1, tau3, tau4)
+        at_least1 = 1.0 - f3d
+
+        f1 = _interp1(cdf["marg1"][j], cdf["g1"], tau1)
+        f3 = _interp1(cdf["marg3"][j], cdf["g3"], tau3)
+        f4 = _interp1(cdf["marg4"][j], cdf["g4"], tau4)
+        f13 = _interp2(cdf["pair13"][j], cdf["g1"], cdf["g3"], tau1, tau3)
+        f14 = _interp2(cdf["pair14"][j], cdf["g1"], cdf["g4"], tau1, tau4)
+        f34 = _interp2(cdf["pair34"][j], cdf["g3"], cdf["g4"], tau3, tau4)
+        pair_ab = 1.0 - f1 - f3 + f13
+        pair_ac = 1.0 - f1 - f4 + f14
+        pair_bc = 1.0 - f3 - f4 + f34
+        triple = 1.0 - f1 - f3 - f4 + f13 + f14 + f34 - f3d
+        at_least2 = pair_ab + pair_ac + pair_bc - 2.0 * triple
+
+        eps[:, :, j] = np.where(tau2 <= 0.0, at_least1, at_least2)
+    return np.clip(eps, 0.0, 1.0)
+
+
+def build_source_selection(config, region, cdf, log10_s_grid, batch_budget_bytes=(512 << 20)):
     """Writes the region's exact per-source GAL selection
     (SPEC_PRIORS.md section 1.3): for every catalogued source, on
-    `selection.X_LADDER` by `log10_s_grid`, the fraction of the
-    (colour-cell-compressed, star-galaxy-separated) SWIRE population,
-    binned by its own `log10 S` (`bin_of_pop`) and weighted by each
-    cell's own galaxy count (`weight`, `compress_population_by_colour`),
-    that clears the source's own eight-band limits when the whole
-    population is dimmed through the query column `a_query = X_LADDER *
-    A_s` (a background galaxy carries the entire column, SPEC_PRIORS.md
-    section 5.2). Sources are batched (`sesnaimpute.batches.batches`) so
-    no batch's working arrays exceed `batch_budget_bytes`. Returns the
-    product path.
+    `selection.X_LADDER` by `log10_s_grid`, the exact two-of-four pass
+    fraction read from the survey-wide colour-CDF tables (`build_colour_
+    cdf_tables`, `source_selection_from_cdf`) -- a background galaxy
+    carries the entire column (SPEC_PRIORS.md section 5.2). Sources are
+    batched (`sesnaimpute.batches.batches`) so no batch's working arrays
+    exceed `batch_budget_bytes`. Returns the product path.
     """
     log10_lim = np.log10(limits_module.limits(config, region))
     n_source = log10_lim.shape[0]
@@ -595,15 +726,9 @@ def build_source_selection(config, region, log10_flux_irac, log10_b_pop, bin_of_
             "gal: %r's column count (%d) does not match the region's %d sources"
             % (adopted_path, a_col.shape[0], n_source))
 
-    log10_flux_8band = np.ascontiguousarray(population_eight_band(log10_flux_irac))
-    log10_b_pop = np.ascontiguousarray(np.asarray(log10_b_pop, dtype=np.float64))
-    bin_of_pop = np.ascontiguousarray(np.asarray(bin_of_pop, dtype=np.int64))
-    weight = (np.ones(log10_b_pop.shape[0], dtype=np.float64) if weight is None
-              else np.ascontiguousarray(np.asarray(weight, dtype=np.float64)))
-
     path = config_module.product_path(config, "bms", "gal", "selection", "source", region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    row_bytes = len(BAND_KEYS) * 8 + n_x * 8 + n_x * len(BAND_KEYS) * 8 + n_x * n_s * 4
+    row_bytes = len(BAND_KEYS) * 8 + n_x * 8 + n_x * len(BAND_KEYS) * 8 + n_x * n_s * 8 * 4
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "source"
         f.create_dataset("X_LADDER", data=selection_module.X_LADDER.astype(np.float64))
@@ -615,9 +740,7 @@ def build_source_selection(config, region, log10_flux_irac, log10_b_pop, bin_of_
             a_query_b = np.ascontiguousarray(selection_module.X_LADDER[None, :] * a_b[:, None])
             w_dense_b = selection_module.law_dense_weight(a_query_b)
             kappa_b = np.ascontiguousarray(selection_module.kappa_hybrid(config, w_dense_b))
-            eps = selection_module.pass_fractions_binned(
-                lim_b, a_query_b, kappa_b, log10_flux_8band, log10_b_pop, weight,
-                np.asarray(log10_s_grid, dtype=np.float64), bin_of_pop)
+            eps = source_selection_from_cdf(lim_b, a_query_b, kappa_b, log10_s_grid, cdf)
             ds_eps[start:stop] = eps.astype("f2")
     return path
 
@@ -833,17 +956,18 @@ def build(config, regions=None):
     finite_irac_nr = np.isfinite(flux_mjy_nr) & (flux_mjy_nr > 0)
     log10_flux_irac_nr = np.where(finite_irac_nr, np.log10(np.where(finite_irac_nr, flux_mjy_nr, 1.0)), -np.inf)
 
-    # The per-source kernel's own population: the FULL population,
-    # colour-cell compressed (module docstring; `pass_fractions_binned`
-    # depends on a member only through its colour relative to 4.5um, so
-    # this loses nothing the kernel would otherwise use).
-    src_flux_irac, src_bin_of_pop, src_weight, src_cell_counts = compress_population_by_colour(
-        flux_mjy_all, is_galaxy_all, log10_s_grid)
-    occ = src_cell_counts[src_cell_counts > 0]
-    print("gal: colour-cell compression (adopted split, %.2f dex cells): %d occupied cells over %d "
-          "galaxies; occupied cells per S-bin: typical (median) %.1f, max %d" % (
-              COLOUR_CELL_DEX, src_flux_irac.shape[0], flux_mjy.shape[0],
-              float(np.median(occ)) if occ.size else 0.0, int(occ.max()) if occ.size else 0))
+    # The per-source kernel's own population: not touched per source at
+    # all -- the exact joint-colour CDF of the FULL population, once per
+    # survey, per 4.5um flux bin (module docstring at `build_colour_cdf_
+    # tables`); `build_source_selection` reads it by interpolation.
+    import time as _time
+    _t0 = _time.time()
+    cdf = build_colour_cdf_tables(flux_mjy_all, is_galaxy_all, log10_s_grid)
+    cdf_build_s = _time.time() - _t0
+    write_cdf_tables(counts_path, cdf)
+    cdf_bytes = sum(a.nbytes for a in cdf.values() if hasattr(a, "nbytes"))
+    print("gal: colour-CDF tables: %d points/axis, %d S-bins, %.1f MB total, built in %.2f s -> %s" % (
+        N_COLOUR_GRID, log10_s_grid.size, cdf_bytes / 1e6, cdf_build_s, counts_path))
 
     a_nodes = column_grid_module.nodes(config)
     w_nodes = selection_module.law_dense_weight(a_nodes)
@@ -907,10 +1031,8 @@ def build(config, regions=None):
               f"no_removal={n_gal_region_nr:.1f} deg^-2 "
               f"Fazio N(>region median I2 limit)={fazio_at_median_limit:.1f} deg^-2 -> {region_path}")
 
-        source_path = build_source_selection(
-            config, region, src_flux_irac, src_flux_irac[:, IRAC_BAND_KEYS.index("I2")],
-            src_bin_of_pop, log10_s_grid, weight=src_weight)
-        print(f"gal: {region}: per-source selection ({src_flux_irac.shape[0]} occupied colour cells, "
+        source_path = build_source_selection(config, region, cdf, log10_s_grid)
+        print(f"gal: {region}: per-source selection (colour-CDF interpolation, "
               f"{selection_module.X_LADDER.size} x-nodes, {log10_s_grid.size} S-grid points) -> {source_path}")
 
     print(f"gal: acceptance: max(EPS_2BAND - EPS)={max_2band_violation:.6g} "
