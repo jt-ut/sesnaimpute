@@ -51,12 +51,33 @@ RULES.md 10a/10b) -- large for small registers (STAR), small for large
 ones (YSO), but never a Python loop over sources. The `gamma`/`psi`
 hooks are the one exception: their signature takes one source at a
 time, so they are called in a plain loop over each block's rows.
+
+THE BLOCKS OF ONE BATCH RUN IN PARALLEL, ON THREADS. By the time
+`fit_batch` is called, the caller has already called `prior.
+prepare(rows)` once for this whole batch (`fit.run._fit_one`'s own
+docstring) -- so every block's `prior.log_density` call below is a pure
+read against that one already-built tabulation, never a write, and
+every block writes into its own disjoint `evidence[blk]`/`flux_mean
+[blk]`/... slice of the arrays this function preallocates. Two blocks
+therefore share no mutable state, so they are dispatched across
+`config.n_jobs` THREADS (`joblib.Parallel(prefer="threads")`), not
+processes: threads share the one `prior`/`gamma`/`psi` objects and the
+register arrays by reference, with no pickling and no per-worker
+rebuild. This only speeds anything up because the block's own numpy
+calls (the fit, the prior read, the evidence fold, all array-at-once)
+release the GIL while they run; the one piece that does NOT -- the
+`gamma`/`psi` hooks' plain Python loop over each block's rows -- still
+runs under the GIL like any interpreted loop, so a block dominated by
+many sources with few models (where that per-row loop, not the array
+work, is the bottleneck) will not speed up in proportion to `n_jobs`.
 """
 
 import os
 
 import h5py
 import numpy as np
+from joblib import Parallel, delayed
+from threadpoolctl import threadpool_limits
 
 from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
@@ -413,7 +434,8 @@ def fit_batch(config, region, cls, rows, prior, gamma=None, psi=None):
     # fit's residual/model/chi2 temporaries, several alive at once) held
     # under CODING_RULES.md 10b's 512 MB budget.
     row_bytes = n_model * _N_BAND * 8 * 8
-    for start, stop in batches_module.batches(n_source, row_bytes):
+
+    def _process_block(start, stop):
         blk = slice(start, stop)
         n_blk = stop - start
         rows_blk = rows[blk]
@@ -503,6 +525,25 @@ def fit_batch(config, region, cls, rows, prior, gamma=None, psi=None):
             any_finite[:, None], np.take_along_axis(log10_b_hat, order_top, axis=1), np.nan)
         topk_lnl[blk, :keep] = np.where(
             any_finite[:, None], np.take_along_axis(ln_l, order_top, axis=1), -np.inf)
+
+    blocks = list(batches_module.batches(n_source, row_bytes))
+    if len(blocks) > 1:
+        # `config.n_jobs` Python threads is the parallelism (module
+        # docstring); each thread's own BLAS calls (the fit's normal
+        # equations, `lin.dot(onehot)`, the flux-covariance einsum) must
+        # stay single-threaded here or BLAS spawns its own thread pool
+        # per call, `n_jobs` of them at once, oversubscribing the
+        # machine's cores and inflating memory (measured: STAR/NGC 7129
+        # peaked at 6.5 GB uncapped vs 2.7 GB single-threaded, for the
+        # same one-block-at-a-time work) -- `threadpool_limits(1)`
+        # forces BLAS to do exactly the same arithmetic on the one
+        # thread that called it.
+        with threadpool_limits(1):
+            Parallel(n_jobs=config.n_jobs, prefer="threads")(
+                delayed(_process_block)(start, stop) for start, stop in blocks)
+    else:
+        for start, stop in blocks:
+            _process_block(start, stop)
 
     return {
         "EVIDENCE": evidence, "FLUX_MEAN": flux_mean, "FLUX_COV": flux_cov,

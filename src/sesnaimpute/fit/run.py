@@ -5,51 +5,29 @@ class (`10_POSTERIOR.md` section 1's `L_hat`/`Gamma`/`Psi` sweep;
 batch loop, lifted without its provenance, fingerprint or schema-validator
 machinery).
 
-For one region and one class, the sources are read in batches of
-`BATCH_SIZE` (the SED fitter's own long-standing default,
+One job is one {region, class}: the census prior for that one class
+(`prior.callable.SourcePrior(config, region, cls)`, class-scoped so a
+job never tabulates the other five classes' material), the Gaia
+congruence term and the colour-cascade term are each built exactly once,
+before any source is swept, and held for the whole job -- never rebuilt
+per batch. The region's sources are then read in batches of `BATCH_SIZE`
+(the SED fitter's own long-standing default,
 `sesnacomplete.sed_fit.batch.generate_batch_ranges`'s `batch_size=10000`,
 the unit `CODING_RULES.md` 10b and `prior.callable.SourcePrior.prepare`'s
-own per-batch tabulation are both sized to). The batches of one {region,
-class} are dispatched to `config.n_jobs` `loky` worker processes
-(`joblib.Parallel`, module docstring's "PARALLEL DISPATCH" section below)
--- separate processes, not threads, so each worker's own numpy calls stay
-single-threaded and do not oversubscribe the machine's cores. Each worker
-builds its own `SourcePrior`/`GaiaTerm`/`PsiTerm` (they hold open HDF5
-handles and per-region tabulations that cannot cross a process boundary),
-calls `prior.prepare(rows)` for its batch, sweeps it with `fit.sweep.
-fit_batch`, and writes its own batch file. Once every batch of a {region,
-class} has landed, they are joined into one evidence file in catalogue
-row order -- the same read-all-write-once join `sed_fit.io.
+own per-batch tabulation are both sized to): each batch calls `prior.
+prepare(rows)` (sequentially -- it mutates the one shared prior's batch
+tabulation, so two batches must never prepare it at once), then `fit.
+sweep.fit_batch` sweeps the class's library against the batch. The
+parallelism (`CODING_RULES.md` 10a's `n_jobs`) lives inside `fit_batch`
+itself: once a batch is prepared, every block of that batch's sources is
+an independent read against the one shared, already-prepared prior, so
+`fit_batch` dispatches its blocks across `config.n_jobs` THREADS (`fit.
+sweep`'s own module docstring) rather than processes -- the prior, the
+Gaia/Psi terms and the register arrays are read, not copied, by every
+thread. Each batch's arrays are written to their own file; once every
+batch of a job has landed, they are joined into one evidence file in
+catalogue row order -- the same read-all-write-once join `sed_fit.io.
 assemble_fitres` performs -- and the batch files are removed.
-
-PARALLEL DISPATCH AND ITS MEMORY BUDGET (item 1). Two nested budgets
-apply, both already governed by existing sizing rules, multiplied by
-`n_jobs`:
-
-- `fit.sweep.fit_batch`'s own inner block (its module docstring): a
-  `(n_block, n_model, n_band)` float64 working set held under 512 MB via
-  `sesnaimpute.batches.batches(n_source, row_bytes)`, `row_bytes = n_model
-  * n_band * 8 bytes/float64 * 8` (about eight such arrays alive at once
-  -- residual, model, chi2 and their block-sized cousins). For the
-  largest register, YSO (`n_model = 200,000`, `n_band = 8`): `row_bytes =
-  200,000 * 8 * 8 * 8 = 102,400,000` bytes (~97.8 MB/source), so `n_block
-  = 512 MiB // 97.8 MiB = 5` sources per inner block -- YSO's outer
-  10,000-source batch is swept 5 sources at a time internally, capped at
-  512 MB regardless of `n_jobs`.
-- `SourcePrior.prepare(rows)`'s per-batch tabulation (its own docstring):
-  three float32 `EPS` arrays gathered for `BATCH_SIZE = 10,000` rows,
-  bytes-per-source bounded by the selection grids' own small axes (`X_
-  LADDER` has 8 points; the class/band grids are tens of points), so this
-  is tens of MB per batch, independent of the class's register size.
-
-  So one worker's transient peak is dominated by the 512 MB sweep block
-  (worst case, any class) plus a few tens of MB of prior tabulation and
-  register arrays; `n_jobs` such workers running at once (the parallel
-  dispatch this file now does) sit near `n_jobs * (512 MB + tens of MB)`
-  -- at `n_jobs = 4` (`root.cfg`'s `[run] n_jobs`), about 2.1-2.5 GB,
-  comfortably under the 8 GB ceiling (`CODING_RULES.md` 10a) with room
-  for the `SourcePrior`/register/evidence-array overhead measured in the
-  timing run below.
 """
 
 import os
@@ -57,7 +35,6 @@ import time
 
 import h5py
 import numpy as np
-from joblib import Parallel, delayed
 
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
@@ -119,72 +96,36 @@ def _library_native_flux(config, cls):
     return flux
 
 
-#: One process's own `(SourcePrior, GaiaTerm, PsiTerm, native_flux)` for
-#: the {region, class} it is currently sweeping (module docstring's
-#: "PARALLEL DISPATCH"): built on first use inside that `loky` worker,
-#: then reused for every further batch `joblib` hands that same worker
-#: within one `_fit_one` call -- each of these objects holds open HDF5
-#: reads and a region-wide tabulation that cannot be pickled across a
-#: process boundary, so every worker must build its own, but only once.
-_WORKER_STATE = {}
-
-
-def _worker_state(config, region, cls):
-    """This worker process's own `(prior, gamma, psi, gaia_cls)` for
-    `{region, cls}`, building it on first use and caching it under
-    `_WORKER_STATE` (this function's own docstring above) for later
-    batches this same worker draws in the same sweep."""
-    key = (config.data_root, region, cls)
-    state = _WORKER_STATE.get(key)
-    if state is None:
-        prior = SourcePrior(config, region)
-        gaia = GaiaTerm(config, region)
-        psi_term = PsiTerm(config, cls)
-        native_flux = _library_native_flux(config, cls)
-        gaia_cls = cls.lower()
-
-        def gamma(row, model_index, a, log10_b):
-            return gaia.ln_gamma(row, model_index, a, log10_b, gaia_cls)
-
-        def psi(row, model_index, a, log10_b):
-            return psi_term.ln_psi(native_flux, model_index, a, log10_b)
-
-        state = (prior, gamma, psi)
-        _WORKER_STATE.clear()  # one {region, class} live per worker at a time
-        _WORKER_STATE[key] = state
-    return state
-
-
-def _run_one_batch(config, region, cls, i, start, stop):
-    """One batch, run inside a `loky` worker process (module docstring):
-    this worker's own `SourcePrior` is prepared for `[start, stop)`'s
-    rows, the class's library is swept against them
-    (`fit.sweep.fit_batch`), and the result is written to that batch's
-    own file (`_batch_path`), matching the serial path bit for bit --
-    `PsiTerm`'s default `beta=0` (its own module docstring) makes `psi`
-    the identity, matching `impute.posterior`'s own `BETA = 0`.
-    """
-    prior, gamma, psi = _worker_state(config, region, cls)
-    rows = np.arange(start, stop)
-    prior.prepare(rows)
-    arrays = fit_batch(config, region, cls, rows, prior, gamma=gamma, psi=psi)
-    path = _batch_path(config, region, cls, i)
-    _write_batch(path, arrays)
-    return path
-
-
 def _fit_one(config, region, cls):
-    """Sweeps one {region, class} in batches of `BATCH_SIZE`, dispatched
-    across `config.n_jobs` `loky` worker processes (module docstring's
-    "PARALLEL DISPATCH"), then joins the batch files into one evidence
-    file in catalogue row order."""
+    """Sweeps one {region, class} job (module docstring): the class's
+    `SourcePrior`, `GaiaTerm` and `PsiTerm` are built once, here, before
+    the batch loop, and held for every batch of this job; each batch of
+    `BATCH_SIZE` sources is prepared sequentially and swept by `fit.
+    sweep.fit_batch` (which does its own thread-parallel work inside);
+    the batch files are then joined into one evidence file in catalogue
+    row order.
+    """
     n_sources = access.region_slice(config, region)["n_sources"]
-    bounds = [(i, start, min(start + BATCH_SIZE, n_sources))
-              for i, start in enumerate(range(0, n_sources, BATCH_SIZE))]
+    prior = SourcePrior(config, region, cls)
+    gaia = GaiaTerm(config, region)
+    psi_term = PsiTerm(config, cls)
+    native_flux = _library_native_flux(config, cls)
+    gaia_cls = cls.lower()
 
-    batch_paths = Parallel(n_jobs=config.n_jobs, backend="loky")(
-        delayed(_run_one_batch)(config, region, cls, i, start, stop)
-        for i, start, stop in bounds)
+    def gamma(row, model_index, a, log10_b):
+        return gaia.ln_gamma(row, model_index, a, log10_b, gaia_cls)
+
+    def psi(row, model_index, a, log10_b):
+        return psi_term.ln_psi(native_flux, model_index, a, log10_b)
+
+    batch_paths = []
+    for i, start in enumerate(range(0, n_sources, BATCH_SIZE)):
+        rows = np.arange(start, min(start + BATCH_SIZE, n_sources))
+        prior.prepare(rows)
+        arrays = fit_batch(config, region, cls, rows, prior, gamma=gamma, psi=psi)
+        path = _batch_path(config, region, cls, i)
+        _write_batch(path, arrays)
+        batch_paths.append(path)
 
     joined = _join(config, region, cls, batch_paths, n_sources)
     for path in batch_paths:
