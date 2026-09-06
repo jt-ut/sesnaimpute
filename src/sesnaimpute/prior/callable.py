@@ -977,8 +977,12 @@ def check(config, region, n_sources=50, seed=0):
         integral = _integrate_yso(prior, row, a_grid_cloud)
         worst["yso"] = max(worst["yso"], abs(integral - 1.0))
 
-        log10_sigma_lo = prior.h2s_logsig_mean - 6 * prior.h2s_logsig_std
-        log10_sigma_hi = prior.h2s_logsig_mean + 6 * prior.h2s_logsig_std
+        # The check's own Sigma domain must be the same grid `_interp_eps_2d`
+        # interpolates on (module docstring's "end bins held" convention) --
+        # a wider independent range double-counts the held edge value past
+        # the real grid, the row-1222 callable/product mismatch this fixes.
+        log10_sigma_lo = prior.h2s_log10_sigma_grid[0]
+        log10_sigma_hi = prior.h2s_log10_sigma_grid[-1]
         b_grid_h2s = (np.linspace(log10_sigma_lo, log10_sigma_hi, _CHECK_GRID_N)
                      - np.log10(prior.h2s_fref[0]))
         integral = _integrate(prior, "h2s", row, a_grid_cloud, b_grid_h2s, model_index=0)

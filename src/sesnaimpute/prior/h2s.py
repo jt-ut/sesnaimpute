@@ -48,6 +48,7 @@ No library enters a count or a shape (C3): the h2shock template register
 supplies SED templates to the fitter only, never a selection average.
 """
 
+import math
 import os
 
 import h5py
@@ -510,6 +511,68 @@ def exact_source_selection(log10_lim, a_query, kappa, log10_sigma_grid, sorted_r
     return np.where(ks_clears, 1.0 - p0, 1.0 - p0 - p1_exact)
 
 
+def _sigma_at_target(worst_lim, sorted_ratios, target, lo, hi, tol=1.0e-3, max_iter=60):
+    """Bisection for the single `log10 Sigma` at which the closed-form
+    selection (`exact_source_selection`, monotone non-decreasing in
+    Sigma) crosses `target`, evaluated at zero dimming (`x = 0`, so
+    `kappa` plays no part) against one fixed per-band limit row. No
+    grid: one source, one ladder point, one trial Sigma per iteration.
+    """
+    log10_lim_row = worst_lim[None, :]
+    a_query = np.zeros((1, 1))
+    kappa = np.ones((1, 1, worst_lim.size))
+
+    def eps_at(sigma):
+        eps = exact_source_selection(log10_lim_row, a_query, kappa, np.array([sigma]), sorted_ratios)
+        return float(eps[0, 0, 0])
+
+    if eps_at(hi) < target:
+        return hi
+    if eps_at(lo) >= target:
+        return lo
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        if eps_at(mid) < target:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < tol:
+            break
+    return hi
+
+
+def region_sigma_grid(config, region, logsig_mean, logsig_std):
+    """The region's `log10 Sigma` grid for the H2S selection
+    (SPEC_PRIORS.md section 7). Runs from `mean - 4 sigma` to the LARGER
+    of `mean + 4 sigma` and the Sigma at which the exact selection
+    (`exact_source_selection`) reaches 0.999 at `x = 0` (no dimming) and
+    the region's own brightest -- i.e. hardest-to-clear, the maximum over
+    sources -- per-band limits: the worst-case source's own saturation
+    point, found once per region by bisection on the closed-form
+    selection, no grid needed for the search. Spacing is the smaller of
+    `sigma / 8` and a quarter of the selection's own 0.001-to-0.999
+    transition width, so the step where `eps_s` jumps from 0 to order 1
+    (the row-1222 defect) is resolved by several cells, never one.
+    Returns `(grid, sigma_999, transition_width)`.
+    """
+    log10_lim = np.log10(limits_module.limits(config, region))
+    worst_lim = np.max(log10_lim, axis=0)
+    sorted_ratios = _sorted_giannini_ratios(config)
+
+    search_lo = logsig_mean - 2.0 * SIGMA_GRID_NSIGMA * logsig_std
+    search_hi = logsig_mean + 8.0 * SIGMA_GRID_NSIGMA * logsig_std
+    sigma_999 = _sigma_at_target(worst_lim, sorted_ratios, 0.999, search_lo, search_hi)
+    sigma_001 = _sigma_at_target(worst_lim, sorted_ratios, 0.001, search_lo, sigma_999)
+    transition_width = max(sigma_999 - sigma_001, 1.0e-6)
+
+    lo = logsig_mean - SIGMA_GRID_NSIGMA * logsig_std
+    hi = max(logsig_mean + SIGMA_GRID_NSIGMA * logsig_std, sigma_999)
+    spacing = min(logsig_std / 8.0, transition_width / 4.0)
+    n_points = max(N_SIGMA_GRID, int(np.ceil((hi - lo) / spacing)) + 1)
+    grid = np.linspace(lo, hi, n_points)
+    return grid, sigma_999, transition_width
+
+
 def _row_bytes(n_x, n_sigma):
     """The per-source working-array footprint one batch holds: the
     `(n_x, n_sigma)` per-band clearing-probability arrays, four of them
@@ -653,9 +716,15 @@ def build(config, regions=None):
 
         log10_sigma = transport_log10_sigma(log10_sb_native, area_pc2, d_r_pc)
         logsig_mean, logsig_std = region_sigma_lognormal(log10_sigma)
-        log10_sigma_grid = np.linspace(
-            logsig_mean - SIGMA_GRID_NSIGMA * logsig_std,
-            logsig_mean + SIGMA_GRID_NSIGMA * logsig_std, N_SIGMA_GRID)
+        log10_sigma_grid, sigma_999, transition_width = region_sigma_grid(
+            config, region, logsig_mean, logsig_std)
+        old_edge = logsig_mean + SIGMA_GRID_NSIGMA * logsig_std
+        tail_mass_beyond_old_edge = 0.5 * math.erfc(SIGMA_GRID_NSIGMA / math.sqrt(2.0))
+        print(f"h2s: {region}: sigma grid: [{log10_sigma_grid[0]:.4f}, "
+              f"{log10_sigma_grid[-1]:.4f}] n={log10_sigma_grid.size} "
+              f"(old fixed edge={old_edge:.4f}, saturation(0.999)={sigma_999:.4f}, "
+              f"transition_width={transition_width:.4f} dex) lognormal one-sided tail "
+              f"beyond old edge={tail_mass_beyond_old_edge:.3e}")
 
         path_source, n_source, bin_counts = build_and_write_source_selection(
             config, region, log10_sigma_grid)
