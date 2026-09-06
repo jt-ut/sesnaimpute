@@ -31,15 +31,18 @@ A_s + mu, sigma)`. `F_u` is piecewise linear on `u_edges`, so this splits
 over its cells into closed-form terms of the normal CDF `Phi` at the
 cell's own `T`-range boundaries and the log-normal's partial inverse
 moment `E[1/T; T in (lo, hi)]`, no quadrature and no `a`-grid: `YsoShape.
-_cdf_rows`/`_marginal_rows` evaluate it exactly at any `a`. `build`
-writes one product per region, sightline granule: `U_EDGES`/`P_U` (the
-shape itself), `RIDGE_*` (the closed-form conditional brightness
-density), and `IS_HERSCHEL` (each sightline's own map class). `YsoShape.
-read` loads these plus the survey's column kernel and node grid, and
-evaluates the marginal/cdf batched over sources, node-blended
-(`marginal_at`, `cdf_at`, IMPLEMENTATION.md section 2) or at each
-source's own exact column and measurement uncertainty (`marginal_exact`,
-`cdf_exact`).
+_cdf_rows`/`_marginal_rows` evaluate it exactly at any `a`, for one
+log-normal component. The column kernel is a two-component mixture
+(`prior.kernel.Kernel.mixture`), so the exact marginal/cdf is the
+weight-averaged sum of that one-component form evaluated at each
+component's own `(mu, sigma)` -- an expectation is linear in a mixture,
+so no other part of the derivation changes. `build` writes one product
+per region, sightline granule: `U_EDGES`/`P_U` (the shape itself),
+`RIDGE_*` (the closed-form conditional brightness density), and
+`IS_HERSCHEL` (each sightline's own map class). `YsoShape.read` loads
+these plus the survey's column kernel, and evaluates the marginal/cdf
+batched over sources at each source's own exact column and measurement
+uncertainty (`marginal_exact`, `cdf_exact`).
 
 No selection (section 6.2) and no library enter either product (C3):
 neither reads a template register or an IMF.
@@ -60,7 +63,6 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute import tables as tables_module
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
-from sesnaimpute.prior import column_grid
 from sesnaimpute.prior import kernel as kernel_module
 from sesnaimpute.sky.derived import herschel_column as sky_herschel_column
 from sesnaimpute.sky.derived import planck_column as sky_planck_column
@@ -628,41 +630,33 @@ def _lognormal_inv_moment_upto(t, m, s):
 class YsoShape(object):
     """One region's YSO shape, read once and evaluated exactly
     (SPEC_PRIORS.md section 6.3): the per-sightline embedding density
-    (`U_EDGES`/`P_U`, a step function on `u`) and the survey's log-normal
-    column kernel (`prior.kernel.Kernel`). The marginal
+    (`U_EDGES`/`P_U`, a step function on `u`) and the survey's two-
+    component log-normal-mixture column kernel (`prior.kernel.Kernel`).
+    The marginal
 
         P(a <= a0 | A_s) = E_T[F_u(a0 / T)]
 
-    is the exact expectation of the embedding CDF under `T`'s log-normal
-    distribution given `A_s`: `F_u` is piecewise linear, so this splits
-    over its cells into closed-form terms of the normal CDF and the
-    log-normal's partial inverse moment (module docstring), evaluated at
-    the exact query `a`, never on a fixed grid; the density `p(a0|A_s)`
-    is the matching closed form for `F_u`'s own derivative, `p_u`.
+    is the exact expectation of the embedding CDF under `T`'s distribution
+    given `A_s`: `F_u` is piecewise linear, so for one log-normal
+    component this splits over its cells into closed-form terms of the
+    normal CDF and the log-normal's partial inverse moment (module
+    docstring), evaluated at the exact query `a`, never on a fixed grid;
+    the density `p(a0|A_s)` is the matching closed form for `F_u`'s own
+    derivative, `p_u`. `T`'s kernel is a two-component mixture
+    (`Kernel.mixture`), and expectation is linear in a mixture, so the
+    marginal/cdf under the mixture is the weight-averaged sum of that one-
+    component closed form evaluated at each component's own `(mu, sigma)`.
 
-    Two ways to supply the per-source `(mu, sigma)` this needs from the
-    kernel:
-
-    - `marginal_exact`/`cdf_exact` take the source's own column and
-      measurement uncertainty directly.
-    - `marginal_at`/`cdf_at` keep the node-bracket signature
-      (IMPLEMENTATION.md section 2) other consumers already call:
-      `node_lo`/`node_w` are read back through the column grid to
-      recover the source's own `A_s` exactly (the inverse of
-      `column_grid.bracket`, which is linear in `A_s`), at zero
-      source-measurement uncertainty -- the node bracket carries no
-      per-source sigma, so this path drops that one (usually small)
-      term rather than adding a fifth argument to a shared signature.
+    `marginal_exact`/`cdf_exact` take the source's own exact adopted
+    column and measurement uncertainty.
     """
 
-    def __init__(self, u_edges, p_u, is_herschel, kernel, nodes_arr,
+    def __init__(self, u_edges, p_u, is_herschel, kernel,
                  hpx_pix_256, sightline_id):
         self.u_edges = u_edges                      # (n_sl, n_cell+1)
         self.p_u = p_u                               # (n_sl, n_cell)
         self.is_herschel = is_herschel               # (n_sl,) bool
         self.kernel = kernel                         # prior.kernel.Kernel
-        self.nodes_arr = nodes_arr                   # (n_node,) column grid
-        self.n_node = nodes_arr.size
         self.hpx_pix_256 = hpx_pix_256
         self.sightline_id = sightline_id
         # the embedding density's own cumulative mass at every u edge --
@@ -677,8 +671,8 @@ class YsoShape(object):
     @classmethod
     def read(cls, config, region):
         """Reads one region's `bms/yso/prior_yso_sightline` product
-        (`build_shape`'s own output) plus the survey's column kernel and
-        node grid, shared across every region."""
+        (`build_shape`'s own output) plus the survey's column kernel,
+        shared across every region."""
         path = config_module.product_path(config, "bms", "yso", "prior",
                                            "sightline", region=region)
         if not os.path.exists(path):
@@ -692,8 +686,7 @@ class YsoShape(object):
             hpx_pix_256 = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
             sightline_id = np.asarray(f["SIGHTLINE_ID"][:], dtype=np.int64)
         kernel = kernel_module.Kernel.read(config)
-        nodes_arr = column_grid.nodes(config)
-        return cls(u_edges, p_u, is_herschel, kernel, nodes_arr,
+        return cls(u_edges, p_u, is_herschel, kernel,
                    hpx_pix_256, sightline_id)
 
     # -- the closed-form extinction marginal, given per-source (A_s, mu,
@@ -703,8 +696,11 @@ class YsoShape(object):
         docstring): the `T <= a` bulk (`F_u = 1` there) plus, cell by
         cell of the embedding step function, the normal-CDF mass and the
         log-normal partial inverse moment of `T` in that cell's own
-        `a`-implied range. A Python loop over the (small, fixed) number
-        of embedding cells, vectorised over every (row, a) pair."""
+        `a`-implied range. Broadcast over every (row, cell) pair at once --
+        the profile's own cell count runs into the hundreds, so a Python
+        loop over cells costs far more in interpreter overhead than the
+        arithmetic itself; this evaluates every cell in one vectorised
+        pass instead."""
         a = np.asarray(a, dtype=float)
         m = np.log(a_col) + mu * _LN10
         s = sigma * _LN10
@@ -712,36 +708,36 @@ class YsoShape(object):
         edges = self.u_edges[rows]
         cum_u = self.cum_u[rows]
         p_u = self.p_u[rows]
-        total = _lognormal_cdf(a_safe, m, s)
-        for k in range(p_u.shape[1]):
-            e_lo, e_hi = edges[:, k], edges[:, k + 1]
-            with np.errstate(divide="ignore"):
-                hi_k = a_safe / e_lo
-            lo_k = a_safe / e_hi
-            d_cdf = _lognormal_cdf(hi_k, m, s) - _lognormal_cdf(lo_k, m, s)
-            d_inv = (_lognormal_inv_moment_upto(hi_k, m, s)
-                     - _lognormal_inv_moment_upto(lo_k, m, s))
-            total = total + cum_u[:, k] * d_cdf + p_u[:, k] * (a_safe * d_inv - e_lo * d_cdf)
+        m2, s2, a2 = m[:, None], s[:, None], a_safe[:, None]
+        e_lo, e_hi = edges[:, :-1], edges[:, 1:]
+        with np.errstate(divide="ignore"):
+            hi_k = a2 / e_lo
+        lo_k = a2 / e_hi
+        d_cdf = _lognormal_cdf(hi_k, m2, s2) - _lognormal_cdf(lo_k, m2, s2)
+        d_inv = (_lognormal_inv_moment_upto(hi_k, m2, s2)
+                 - _lognormal_inv_moment_upto(lo_k, m2, s2))
+        cells = cum_u[:, :-1] * d_cdf + p_u * (a2 * d_inv - e_lo * d_cdf)
+        total = _lognormal_cdf(a_safe, m, s) + cells.sum(axis=1)
         return np.where(a > 0.0, np.clip(total, 0.0, 1.0), 0.0)
 
     def _marginal_rows(self, a, rows, a_col, mu, sigma):
         """`p(a | A_s) = sum_k p_k * E[1/T; a/T in cell k]`, closed form
-        (module docstring), matching `_cdf_rows`'s own cells."""
+        (module docstring), matching `_cdf_rows`'s own cells -- the same
+        one-vectorised-pass evaluation over every cell."""
         a = np.asarray(a, dtype=float)
         m = np.log(a_col) + mu * _LN10
         s = sigma * _LN10
         a_safe = np.where(a > 0.0, a, 1.0)
         edges = self.u_edges[rows]
         p_u = self.p_u[rows]
-        total = np.zeros_like(a_safe)
-        for k in range(p_u.shape[1]):
-            e_lo, e_hi = edges[:, k], edges[:, k + 1]
-            with np.errstate(divide="ignore"):
-                hi_k = a_safe / e_lo
-            lo_k = a_safe / e_hi
-            d_inv = (_lognormal_inv_moment_upto(hi_k, m, s)
-                     - _lognormal_inv_moment_upto(lo_k, m, s))
-            total = total + p_u[:, k] * d_inv
+        m2, s2, a2 = m[:, None], s[:, None], a_safe[:, None]
+        e_lo, e_hi = edges[:, :-1], edges[:, 1:]
+        with np.errstate(divide="ignore"):
+            hi_k = a2 / e_lo
+        lo_k = a2 / e_hi
+        d_inv = (_lognormal_inv_moment_upto(hi_k, m2, s2)
+                 - _lognormal_inv_moment_upto(lo_k, m2, s2))
+        total = (p_u * d_inv).sum(axis=1)
         return np.where(a > 0.0, np.maximum(total, 0.0), 0.0)
 
     def _map_class(self, rows):
@@ -751,41 +747,24 @@ class YsoShape(object):
     def marginal_exact(self, a, rows, a_col, sigma_col):
         """`p(a | A_s)` at a batch of sources, each at its own exact
         adopted column and measurement uncertainty (SPEC_PRIORS.md
-        section 1.2/6.3): no node bracket, no approximation."""
-        mu, sigma = self.kernel.params(a_col, sigma_col, self._map_class(rows))
-        return self._marginal_rows(a, rows, a_col, mu, sigma)
+        section 1.2/6.3): no approximation. The column kernel is a two-
+        component mixture (`Kernel.mixture`); the marginal under a
+        mixture is the weighted sum of the one-component marginal at each
+        component's own `(mu, sigma)` (class docstring)."""
+        w, mu, sigma = self.kernel.mixture(a_col, sigma_col, self._map_class(rows))
+        m1 = self._marginal_rows(a, rows, a_col, mu[:, 0], sigma[:, 0])
+        m2 = self._marginal_rows(a, rows, a_col, mu[:, 1], sigma[:, 1])
+        return w * m1 + (1.0 - w) * m2
 
     def cdf_exact(self, a, rows, a_col, sigma_col):
         """`cdf` at each source's own exact column and measurement
-        uncertainty, matching `marginal_exact`."""
-        mu, sigma = self.kernel.params(a_col, sigma_col, self._map_class(rows))
-        return self._cdf_rows(a, rows, a_col, mu, sigma)
-
-    # -- public: the node-bracket signature (IMPLEMENTATION.md section 2)
-    def _node_bracket_column(self, node_lo, node_w):
-        """`A_s`, recovered exactly from `(NODE_LO, NODE_W)` -- the
-        inverse of `column_grid.bracket`, which is linear in `A_s`."""
-        node_lo = np.asarray(node_lo, dtype=np.intp)
-        node_hi = np.clip(node_lo + 1, 0, self.n_node - 1)
-        lo, hi = self.nodes_arr[node_lo], self.nodes_arr[node_hi]
-        return lo + np.asarray(node_w, dtype=float) * (hi - lo)
-
-    def marginal_at(self, a, rows, node_lo, node_w):
-        """`p(a | A_s)` at a batch of sources, each with its own
-        sightline row and node bracket (class docstring: `A_s` exact,
-        source measurement uncertainty dropped)."""
-        rows = np.asarray(rows, dtype=np.intp)
-        a_col = self._node_bracket_column(node_lo, node_w)
-        mu, sigma = self.kernel.params(a_col, np.zeros_like(a_col), self._map_class(rows))
-        return self._marginal_rows(a, rows, a_col, mu, sigma)
-
-    def cdf_at(self, a, rows, node_lo, node_w):
-        """`cdf` at a batch of sources via the node bracket, matching
-        `marginal_at`."""
-        rows = np.asarray(rows, dtype=np.intp)
-        a_col = self._node_bracket_column(node_lo, node_w)
-        mu, sigma = self.kernel.params(a_col, np.zeros_like(a_col), self._map_class(rows))
-        return self._cdf_rows(a, rows, a_col, mu, sigma)
+        uncertainty, matching `marginal_exact`: the weighted sum of the
+        one-component cdf at each mixture component's own `(mu,
+        sigma)`."""
+        w, mu, sigma = self.kernel.mixture(a_col, sigma_col, self._map_class(rows))
+        c1 = self._cdf_rows(a, rows, a_col, mu[:, 0], sigma[:, 0])
+        c2 = self._cdf_rows(a, rows, a_col, mu[:, 1], sigma[:, 1])
+        return w * c1 + (1.0 - w) * c2
 
 
 def _write_shape_product(path, hpx_pix_256, sightline_id, embed, is_herschel):

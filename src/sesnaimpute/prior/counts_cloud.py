@@ -54,6 +54,7 @@ import os
 import h5py
 import healpy as hp
 import numpy as np
+from joblib import Parallel, delayed
 
 from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
@@ -166,26 +167,57 @@ def _ridge(config, region):
 # each source's own column and own ladder, batched over sources
 # ---------------------------------------------------------------------
 
-def bin_mass_exact(shape, x_ladder, rows, a_col, sigma_col):
+def _bin_mass_batch(shape, x_ladder, rows, a_col, sigma_col, start, stop):
+    """One batch's own bin masses (`bin_mass_exact`'s inner step)."""
+    n_x = x_ladder.size
+    nb = stop - start
+    rows_rep = np.repeat(rows[start:stop], n_x)
+    a_col_rep = np.repeat(a_col[start:stop], n_x)
+    sigma_rep = np.repeat(sigma_col[start:stop], n_x)
+    a_rep = (x_ladder[None, :] * a_col[start:stop, None]).reshape(-1)
+    cdf = shape.cdf_exact(a_rep, rows_rep, a_col_rep, sigma_rep).reshape(nb, n_x)
+    return start, np.diff(cdf, axis=1)
+
+
+def bin_mass_exact(shape, x_ladder, rows, a_col, sigma_col, n_jobs=1):
     """`(n_src, n_x - 1)`: the exact mass `p(a | A_s)` places in each of
     this source's own ladder bins, `a = X_LADDER . A_s` (SPEC_PRIORS.md
     sections 6.2/7) -- the closed-form cdf (`YsoShape.cdf_exact`) at each
     source's own adopted column and measurement uncertainty, evaluated at
     every ladder point (scaled by that source's own column) and
-    differenced, batched over sources so one batch's transient `(batch,
-    n_x)` array stays under `BIN_MASS_BUDGET_BYTES`."""
+    differenced, batched over sources so one batch's transient arrays stay
+    under `BIN_MASS_BUDGET_BYTES`.
+
+    The dominant cost per expanded (source, ladder-point) row is not the
+    small `(batch, n_x)` cdf array itself but `cdf_exact`'s own internal
+    per-cell arrays, each `(expanded_batch, n_cell)` wide where `n_cell`
+    is the region's own embedding-profile cell count (a sightline
+    property, not fixed): the batch size has to shrink with `n_cell`, or
+    a region with a deep profile (many map cells) overruns the ceiling
+    regardless of `n_src`.
+
+    Batches are independent (each writes its own row range), so at
+    `n_jobs > 1` they run on a thread pool: the per-cell work is plain
+    numpy arithmetic on arrays wide enough (`n_cell`) that numpy releases
+    the GIL for most of it, so threads -- not processes -- get the
+    parallelism without copying `shape`'s own per-sightline arrays into
+    every worker."""
     n_src = rows.size
     n_x = x_ladder.size
+    n_cell = shape.p_u.shape[1]
     out = np.empty((n_src, n_x - 1), dtype=np.float64)
-    row_bytes = 2 * n_x * 8  # the (batch, n_x) cdf array, float64
-    for start, stop in batches_module.batches(n_src, row_bytes, BIN_MASS_BUDGET_BYTES):
-        nb = stop - start
-        rows_rep = np.repeat(rows[start:stop], n_x)
-        a_col_rep = np.repeat(a_col[start:stop], n_x)
-        sigma_rep = np.repeat(sigma_col[start:stop], n_x)
-        a_rep = (x_ladder[None, :] * a_col[start:stop, None]).reshape(-1)
-        cdf = shape.cdf_exact(a_rep, rows_rep, a_col_rep, sigma_rep).reshape(nb, n_x)
-        out[start:stop] = np.diff(cdf, axis=1)
+    # per source: n_x expanded rows, each holding about 9 arrays of width
+    # n_cell (+1) live at once inside one mixture component's closed form
+    # (the cell axis is evaluated in one vectorised pass, not a Python
+    # loop, so all of it is resident together rather than one cell at a
+    # time).
+    row_bytes = n_x * (9 * (n_cell + 1) * 8 + 2 * 8)
+    spans = list(batches_module.batches(n_src, row_bytes, BIN_MASS_BUDGET_BYTES))
+    results = Parallel(n_jobs=max(1, n_jobs), prefer="threads")(
+        delayed(_bin_mass_batch)(shape, x_ladder, rows, a_col, sigma_col, start, stop)
+        for start, stop in spans)
+    for start, diff in results:
+        out[start:start + diff.shape[0]] = diff
     return out
 
 
@@ -264,7 +296,8 @@ def build_region(config, region):
             "selection.X_LADDER`" % region)
     x_ladder = sel["x_ladder"]
 
-    bin_mass = bin_mass_exact(shape, x_ladder, sightline_row, a_col, sigma_col)
+    bin_mass = bin_mass_exact(shape, x_ladder, sightline_row, a_col, sigma_col,
+                               n_jobs=config.n_jobs)
     eps_yso = eps_yso_from_bin_mass(bin_mass, sel["g_1myr"])
     eps_yso_3myr = eps_yso_from_bin_mass(bin_mass, sel["g_3myr"])
     eps_h2s = eps_h2s_from_bin_mass(bin_mass, h2s_sel["eps"],
