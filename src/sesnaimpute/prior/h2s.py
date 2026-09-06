@@ -19,28 +19,27 @@ stored again (IMPLEMENTATION.md section 3, H2S row).
    vary per source. `eta_r` is knots present per intrinsic law-predicted
    young star (S-D37b); `eps_ext` is the fraction of knots clearing the
    survey's limits that SESNA's own extraction actually rows (S-D44).
-3. `eps_s(a, Sigma)`: the selection tables, per region, on the knots'
-   own aperture-limited surface brightness `Sigma` and the column grid's
-   `a` nodes -- the same exact-selection-per-depth-group machinery every
-   other class uses (`prior.selection.split_common_mode`,
-   `prior.depth_groups.DepthGroups`), but with the measured UWISH2
-   knot population standing in for a template library (C3): every
-   jet-class UWISH2 knot in Cygnus X and the North America Nebula,
-   transported to this region's distance, its aperture-limited surface
-   brightness converted to a Ks-band-equivalent flux density (exact, one
-   value per knot) and thence, through Giannini+2013's own measured knot
-   colours, to the four IRAC bands -- not one drawn ratio per knot per
-   band, but the EXACT expectation over every measured ratio of that
-   band, equal weight (`build_region_selection`): each IRAC band's own
-   clearing probability is read off its own ratio population's empirical
-   CDF, and the two-of-eight test combines the four bands' probabilities
-   in closed form (the persisted ratio arrays carry no shared per-knot
-   index back to Giannini's table, so the four bands are treated as
-   independent populations here, disclosed rather than assumed away;
-   pairing them by knot, were the index available, would be the better
-   form -- it preserves the measured colour correlations). Written per
-   region, `bms/h2s/prior_h2s_region`, alongside `eta_r`/`eps_ext` and
-   the region's own brightness lognormal.
+3. `eps_s(a, Sigma)`: the selection, per source and exact over the ratio
+   distribution (SPEC_PRIORS.md 1.3, 7): the population members are
+   every (Sigma-grid point, drawn Giannini colour-ratio combination)
+   pair -- a synthetic knot at surface brightness Sigma with that
+   combination's 8-band SED (`knot_ks_log10_flux` for Ks, the ratio
+   table added in log space for the four IRAC bands; J, H and M1 carry
+   no Giannini ratio and never clear). `bin_of_pop` is the member's own
+   Sigma-grid index, so `prior.selection.pass_fractions_binned` returns
+   `EPS[n, n_x, n_sigma]` directly on the shared scaled-extinction ladder
+   `X_LADDER`, at every source's own eight limits (`catalog.limits.
+   limits`) and own column -- no depth groups, no common-mode shift. The
+   persisted ratio arrays carry no shared per-knot index back to
+   Giannini's table, so the four IRAC bands are drawn as independent
+   populations here, disclosed rather than assumed away; pairing them by
+   knot, were the index available, would be the better form (it
+   preserves the measured colour correlations). Written per source,
+   `bms/h2s/selection_h2s_source`.
+
+The region product (`bms/h2s/prior_h2s_region`) keeps everything else:
+the law-blurred field, `eta_r`, `eps_ext`, and the region's own
+brightness lognormal.
 
 No library enters a count or a shape (C3): the h2shock template register
 supplies SED templates to the fitter only, never a selection average.
@@ -55,14 +54,13 @@ from astropy.coordinates import SkyCoord
 import healpy as hp
 from scipy.signal import fftconvolve
 
+from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
-from sesnaimpute.prior import column_grid as column_grid_module
-from sesnaimpute.prior import depth_groups as depth_groups_module
 from sesnaimpute.prior import selection as selection_module
 from sesnaimpute.prior import yso as yso_module
 
@@ -71,6 +69,7 @@ from sesnaimpute.prior import yso as yso_module
 # ---------------------------------------------------------------------------
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
+N_BANDS = len(BAND_KEYS)
 KS_IDX = BAND_KEYS.index("Ks")
 IRAC_RATIO_BAND_KEYS = ("I1", "I2", "I3", "I4")
 IRAC_RATIO_BAND_IDX = np.array([BAND_KEYS.index(b) for b in IRAC_RATIO_BAND_KEYS])
@@ -431,108 +430,109 @@ def knot_ks_log10_flux(log10_sigma):
 
 
 # ---------------------------------------------------------------------------
-# 4. The per-region selection tables EPS[k, node, sigma]
+# 4. The per-source selection EPS[n, n_x, n_sigma]
 # ---------------------------------------------------------------------------
 
-def _depth_groups_path(config):
-    return config_module.product_path(config, "bms", "sesna", "depth-groups", "region")
+#: The per-batch working-array budget (`sesnaimpute.batches.batches`).
+BATCH_BUDGET_BYTES = 512 << 20
+
+#: Re-exported from `prior.selection`, the one place they are defined.
+X_LADDER = selection_module.X_LADDER
+SUBSAMPLE_CAP = selection_module.SUBSAMPLE_CAP
+SUBSAMPLE_SEED = 0
 
 
-def region_limit_log10_8(config, region):
-    """`(knots, limit_log10)`: the region's depth-group knots and each
-    group's own 8-band dimmed-limit origin -- the reference limit with the
-    group centre's own Delta added over the five Spitzer bands only (the
-    three 2MASS bands, Ks included, carry no per-source depth map and stay
-    at the region's reference value, SPEC_PRIORS.md section 1.3)."""
-    knots = depth_groups_module.DepthGroups.read(_depth_groups_path(config), region)
-    depth_idx = np.array([BAND_KEYS.index(b) for b in selection_module.BANDS_DEPTH])
-    limit_log10 = np.broadcast_to(knots.ref_log10_flim, (knots.n_groups, len(BAND_KEYS))).copy()
-    limit_log10[:, depth_idx] += knots.group_centres
-    return knots, limit_log10
+def ratio_population(config, log10_sigma_grid, n_ratio_draws=None, seed=SUBSAMPLE_SEED):
+    """The synthetic knot population `pass_fractions_binned` needs
+    (module docstring, point 3): a fixed-seed draw of colour-ratio
+    combinations, crossed with every Sigma-grid point. Each of the
+    `n_ratio_draws` combinations is one independent draw per IRAC band
+    from that band's own Giannini+2013 ratio array (the four bands carry
+    no shared per-knot index, so they are drawn independently,
+    disclosed in the module docstring); Ks is exact from Sigma alone; J,
+    H and M1 carry no ratio and are given `-inf` flux so they never
+    clear. Total population size `n_sigma * n_ratio_draws` sits at the
+    survey-wide `SUBSAMPLE_CAP` (0.5% Monte Carlo error per Sigma bin).
 
-
-def build_region_selection(a_nodes, config, log10_ks_flux, ratios, log10_sigma_grid,
-                            bin_idx, limit_log10):
-    """`(eps, bin_counts)`: `eps` is `(K, n_node, n_sigma)`, the EXACT
-    expectation of the two-of-eight test (SPEC_PRIORS.md section 1.3)
-    over Giannini+2013's own empirical `F_band/F_2.12` ratio populations
-    (section 7, "the knot colours") -- not a drawn realisation. Ks is
-    exact per knot (from Sigma alone); J, H and M1 carry no Giannini
-    ratio and never clear a limit; the four IRAC bands carry no single
-    flux, only their own measured ratio population, every ratio
-    entering with equal weight. Because the persisted ratio arrays carry
-    no shared per-knot index back to Giannini's table (each band kept
-    its own `usable`-filtered subset upstream), the four bands are
-    treated as INDEPENDENT populations here -- disclosed, not assumed
-    away; pairing them by knot, were the index available, would be the
-    better form (it preserves the measured colour correlations).
-
-    Given that, the two-of-eight test reduces to: Ks clears and >= 1 of
-    the 4 IRAC bands clears, or Ks fails and >= 2 of the 4 clear
-    (`MIN_BANDS == 2` asserted, since the closed form below is specific
-    to it). Each IRAC band's own clearing probability is exact -- the
-    fraction of its own ratio array putting the dimmed flux at or above
-    the limit, read off the array's own empirical CDF by searchsorted,
-    never a draw. The four independent probabilities combine by the
-    closed-form "at least k of 4" sum.
-
-    Vectorised over knots and depth groups within each node (matmul
-    against a knot-to-bin indicator, as before); looped only over the
-    shared column-grid nodes and the four IRAC bands (a fixed design
-    constant, not an iterator over knots or sources).
+    Returns `(log10_flux, log10_b_pop, bin_of_pop, weight)`:
+    `log10_flux` `(n_pop, 8)`, `log10_b_pop`/`bin_of_pop`/`weight`
+    `(n_pop,)`.
     """
-    if selection_module.MIN_BANDS != 2:
-        raise ValueError(
-            "h2s.build_region_selection: the closed-form two-of-four "
-            "combination assumes MIN_BANDS == 2, got %r"
-            % (selection_module.MIN_BANDS,))
-    n_knot = log10_ks_flux.size
-    n_node = a_nodes.size
+    ratios = _load_giannini_ratios(config)
     n_sigma = log10_sigma_grid.size
-    K = limit_log10.shape[0]
-    kappa8_by_node = selection_module.kappa_hybrid(
-        config, selection_module.law_dense_weight(a_nodes))          # (n_node, 8)
-    sorted_ratio = {band: np.sort(ratios[band]) for band in IRAC_RATIO_BAND_KEYS}
-    n_ratio = {band: sorted_ratio[band].size for band in IRAC_RATIO_BAND_KEYS}
+    if n_ratio_draws is None:
+        n_ratio_draws = max(1, SUBSAMPLE_CAP // n_sigma)
+    rng = np.random.default_rng(seed)
+    drawn = {band: ratios[band][rng.integers(0, ratios[band].size, size=n_ratio_draws)]
+             for band in IRAC_RATIO_BAND_KEYS}
 
-    indicator = np.zeros((n_knot, n_sigma), dtype=np.float32)
-    indicator[np.arange(n_knot), bin_idx] = 1.0
-    bin_counts = indicator.sum(axis=0)
-    safe_counts = np.where(bin_counts > 0, bin_counts, 1.0)
+    n_pop = n_sigma * n_ratio_draws
+    log10_flux = np.full((n_pop, N_BANDS), -np.inf, dtype=np.float64)
+    log10_b_pop = np.repeat(log10_sigma_grid, n_ratio_draws)
+    bin_of_pop = np.repeat(np.arange(n_sigma, dtype=np.int64), n_ratio_draws)
+    log10_ks = knot_ks_log10_flux(log10_b_pop)
+    log10_flux[:, KS_IDX] = log10_ks
+    for band, b_idx in zip(IRAC_RATIO_BAND_KEYS, IRAC_RATIO_BAND_IDX):
+        log10_flux[:, b_idx] = log10_ks + np.tile(drawn[band], n_sigma)
+    weight = np.ones(n_pop, dtype=np.float64)
+    return log10_flux, log10_b_pop, bin_of_pop, weight
 
-    eps = np.zeros((K, n_node, n_sigma), dtype=np.float32)
-    for i in range(n_node):
-        dimmed_ks = log10_ks_flux[None, :] - 0.4 * a_nodes[i] * kappa8_by_node[i, KS_IDX]
-        ks_clears = dimmed_ks >= limit_log10[:, KS_IDX, None]                   # (K, n_knot)
 
-        p_band, q_band, q_prod = [], [], np.ones((K, n_knot), dtype=np.float64)
-        for band, b_idx in zip(IRAC_RATIO_BAND_KEYS, IRAC_RATIO_BAND_IDX):
-            # a ratio clears iff Sigma's own Ks flux plus the ratio, dimmed
-            # by this node's column, is at or above the limit -- the
-            # threshold every ratio in the band's own array is tested
-            # against, its exact empirical CDF read by one searchsorted.
-            threshold = (limit_log10[:, b_idx, None] - log10_ks_flux[None, :]
-                         + 0.4 * a_nodes[i] * kappa8_by_node[i, b_idx])          # (K, n_knot)
-            below = np.searchsorted(sorted_ratio[band], threshold, side="left")
-            p_b = 1.0 - below / float(n_ratio[band])
-            p_band.append(p_b)
-            q_band.append(1.0 - p_b)
-            q_prod = q_prod * (1.0 - p_b)
+def _row_bytes(n_x, n_pop):
+    """The per-source working-array footprint one batch holds: the
+    dominant term is `pass_fractions_binned`'s own `(n_x, 8)` per-source
+    kappa array plus the query-extinction array; the population arrays
+    are shared across the whole region, not per source."""
+    return N_BANDS * 8 + n_x * 8 + n_x * N_BANDS * 8
 
-        p_exactly1 = sum(
-            p_band[j] * np.prod([q_band[m] for m in range(4) if m != j], axis=0)
-            for j in range(4))
-        p_ge1 = 1.0 - q_prod
-        p_ge2 = np.clip(1.0 - q_prod - p_exactly1, 0.0, 1.0)
-        passed_prob = np.where(ks_clears, p_ge1, p_ge2)                         # (K, n_knot)
 
-        num = passed_prob.astype(np.float32) @ indicator                        # (K, n_sigma)
-        eps[:, i, :] = np.where(bin_counts > 0, num / safe_counts, 0.0)
-    return eps, bin_counts
+def build_and_write_source_selection(config, region, log10_sigma_grid):
+    """Writes `bms/h2s/selection_h2s_source`: `EPS[n, n_x, n_sigma]` f2,
+    the exact per-source H2S selection on `X_LADDER` and the region's
+    Sigma grid (module docstring, point 3), batched under
+    `BATCH_BUDGET_BYTES`.
+    """
+    log10_flux, log10_b_pop, bin_of_pop, weight = ratio_population(config, log10_sigma_grid)
+
+    log10_lim = np.log10(limits_module.limits(config, region))
+    n_source = log10_lim.shape[0]
+    adopted_path = config_module.product_path(
+        config, "sky/derived", "adopted", "column", "source", region=region)
+    a_col = np.asarray(
+        access.per_source(config, region, adopted_path, ["A_COL_K"])["A_COL_K"], dtype=np.float64)
+
+    x_ladder = X_LADDER
+    n_x = x_ladder.size
+    n_sigma = log10_sigma_grid.size
+
+    path = config_module.product_path(config, "bms", "h2s", "selection", "source", region=region)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with h5py.File(path, "w") as f:
+        f.attrs["GRANULE"] = "source"
+        f.create_dataset("X_LADDER", data=x_ladder.astype("f8"))
+        f.create_dataset("LOG10_SIGMA_GRID", data=log10_sigma_grid.astype("f8"))
+        ds_eps = f.create_dataset("EPS", shape=(n_source, n_x, n_sigma), dtype="f2")
+
+        row_bytes = _row_bytes(n_x, log10_flux.shape[0])
+        for start, stop in batches_module.batches(n_source, row_bytes, budget_bytes=BATCH_BUDGET_BYTES):
+            lim_b = np.ascontiguousarray(log10_lim[start:stop])
+            a_b = a_col[start:stop]
+            a_query_b = np.ascontiguousarray(x_ladder[None, :] * a_b[:, None])
+            w_dense_b = selection_module.law_dense_weight(a_query_b)
+            kappa_b = np.ascontiguousarray(selection_module.kappa_hybrid(config, w_dense_b))
+
+            eps = selection_module.pass_fractions_binned(
+                lim_b, a_query_b, kappa_b, log10_flux, log10_b_pop, weight,
+                log10_sigma_grid, bin_of_pop)
+            ds_eps[start:stop] = eps.astype("f2")
+
+    bin_counts = np.zeros(n_sigma, dtype=np.float64)
+    np.add.at(bin_counts, bin_of_pop, weight)
+    return path, n_source, bin_counts
 
 
 def write_region(path, eta, eps_ext, lambda_pc, d_r_pc, logsig_mean, logsig_std,
-                  n_knots_ref, log10_sigma_grid, a_nodes, eps, group_centres):
+                  n_knots_ref, log10_sigma_grid):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "region"
@@ -547,27 +547,21 @@ def write_region(path, eta, eps_ext, lambda_pc, d_r_pc, logsig_mean, logsig_std,
         f.create_dataset("LOGSIG_STD", data=np.float64(logsig_std))
         f.create_dataset("N_KNOTS_REF", data=np.int64(n_knots_ref))
         f.create_dataset("LOG10_SIGMA_GRID", data=log10_sigma_grid.astype(np.float64))
-        f.create_dataset("A_NODES", data=a_nodes.astype(np.float64))
-        f.create_dataset("EPS", data=eps.astype(np.float32))
-        f.create_dataset("GROUP_CENTRES", data=group_centres.astype(np.float64))
 
 
 # ---------------------------------------------------------------------------
 # report-only checks (SPEC_PRIORS.md section 7, "Checks")
 # ---------------------------------------------------------------------------
 
-def source_pass_fraction(a_col, nodes, group_idx, eps_table, log10_sigma_grid,
-                          logsig_mean, logsig_std):
+def source_pass_fraction(eps_own_column, log10_sigma_grid, logsig_mean, logsig_std):
     """`(n,)`: each source's own `eps_s`, the region's Sigma lognormal
-    integrated against its depth group's selection curve, node-blended --
+    integrated against `eps_own_column` (n, n_sigma) -- the source's own
+    exact selection curve at `x = 1` (its own column, no interpolation:
+    every source's EPS is already tabulated at its own `A_s`) --
     vectorised over sources, no per-source Python loop."""
-    node_lo, node_w = column_grid_module.bracket(a_col, nodes)
-    curve_lo = eps_table[group_idx, node_lo, :]
-    curve_hi = eps_table[group_idx, np.clip(node_lo + 1, 0, nodes.size - 1), :]
-    curve = (1.0 - node_w)[:, None] * curve_lo + node_w[:, None] * curve_hi
     density = np.exp(-0.5 * ((log10_sigma_grid - logsig_mean) / logsig_std) ** 2)
     density /= np.trapz(density, log10_sigma_grid)
-    return np.trapz(curve * density[None, :], log10_sigma_grid, axis=1)
+    return np.trapz(eps_own_column * density[None, :], log10_sigma_grid, axis=1)
 
 
 def kernel_mass_conservation(n_law_source, n_law_blurred):
@@ -582,20 +576,18 @@ def kernel_mass_conservation(n_law_source, n_law_blurred):
 
 
 def eps_monotonicity_violations(eps, bin_counts):
-    """`(max_a_violation, max_sigma_violation)`: EPS must be non-increasing
-    in `a` (more extinction never helps) and non-decreasing in `log10
-    Sigma` (a brighter knot never clears fewer bands); both expected 0.
-    The Sigma direction is graded only between adjacent bins that both
-    hold at least one transported knot -- an empty bin's EPS is a
-    construction default (`build_region_selection`'s own `bin_counts > 0`
-    guard), not a measurement, and a boundary against it is not a real
-    test of the population's own monotonicity."""
-    d_a = np.diff(eps.astype(np.float64), axis=1)
-    both_populated = (bin_counts[:-1] > 0) & (bin_counts[1:] > 0)
-    d_sigma = np.diff(eps.astype(np.float64), axis=2)[:, :, both_populated]
-    sigma_violation = (float(np.max(np.clip(-d_sigma, 0.0, None)))
-                       if d_sigma.size else 0.0)
-    return float(np.max(np.clip(d_a, 0.0, None))), sigma_violation
+    """`(max_x_violation, max_sigma_violation)`: EPS must be non-increasing
+    along the extinction ladder `X_LADDER` (more extinction never helps)
+    and non-decreasing in `log10 Sigma` (a brighter knot never clears
+    fewer bands); both expected 0. Every Sigma-grid bin is populated by
+    construction now (`ratio_population` crosses every bin with the same
+    ratio draws), so the Sigma direction is graded across the whole
+    grid, no `bin_counts` gating needed; the argument is kept for the
+    call-site contract."""
+    d_x = np.diff(eps.astype(np.float64), axis=1)
+    d_sigma = np.diff(eps.astype(np.float64), axis=2)
+    sigma_violation = float(np.max(np.clip(-d_sigma, 0.0, None))) if d_sigma.size else 0.0
+    return float(np.max(np.clip(d_x, 0.0, None))), sigma_violation
 
 
 # ---------------------------------------------------------------------------
@@ -603,17 +595,19 @@ def eps_monotonicity_violations(eps, bin_counts):
 # ---------------------------------------------------------------------------
 
 def build(config, regions=None):
-    """Writes, per region, the blurred law field (source granule) and the
-    region product (eta, eps_ext, the brightness lognormal, the selection
-    tables). `regions` default: all thirty."""
+    """Writes, per region, the blurred law field and the exact per-source
+    selection (both source granule), and the region product (eta,
+    eps_ext, the brightness lognormal). `regions` default: all thirty."""
+    import numba
+    numba.set_num_threads(max(1, int(config.n_jobs)))
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
-    a_nodes = column_grid_module.nodes(config)
-    ratios = _load_giannini_ratios(config)
     log10_sb_native, area_pc2 = uwish2_reference_knots(config)
     n_knots_ref = log10_sb_native.size
     print(f"h2s: {n_knots_ref} UWISH2 jet-class reference knots "
           f"({', '.join(UWISH2_REFERENCE_REGIONS)})")
+
+    x1_idx = int(np.argmin(np.abs(X_LADDER - 1.0)))
 
     for region in region_names:
         d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
@@ -635,40 +629,29 @@ def build(config, regions=None):
             logsig_mean - SIGMA_GRID_NSIGMA * logsig_std,
             logsig_mean + SIGMA_GRID_NSIGMA * logsig_std, N_SIGMA_GRID)
 
-        log10_ks_flux = knot_ks_log10_flux(log10_sigma)
-        edges = 0.5 * (log10_sigma_grid[1:] + log10_sigma_grid[:-1])
-        bin_idx = np.clip(np.searchsorted(edges, log10_sigma), 0, N_SIGMA_GRID - 1)
-
-        knots, limit_log10 = region_limit_log10_8(config, region)
-        eps, bin_counts = build_region_selection(
-            a_nodes, config, log10_ks_flux, ratios, log10_sigma_grid, bin_idx, limit_log10)
+        path_source, n_source, bin_counts = build_and_write_source_selection(
+            config, region, log10_sigma_grid)
 
         path_region = config_module.product_path(config, "bms", "h2s", "prior",
                                                   "region", region=region)
         write_region(path_region, eta, EPS_EXT, LAMBDA_PC, d_r_pc, logsig_mean, logsig_std,
-                    n_knots_ref, log10_sigma_grid, a_nodes, eps, knots.group_centres)
+                    n_knots_ref, log10_sigma_grid)
 
-        max_a_violation, max_sigma_violation = eps_monotonicity_violations(eps, bin_counts)
-        k_median = knots.n_groups // 2
-        i_a0 = int(np.argmin(np.abs(a_nodes - 0.0)))
-        i_a2 = int(np.argmin(np.abs(a_nodes - 2.0)))
+        with h5py.File(path_source, "r") as f:
+            eps = f["EPS"][:]
+        max_x_violation, max_sigma_violation = eps_monotonicity_violations(eps, bin_counts)
         j_mean = int(np.argmin(np.abs(log10_sigma_grid - logsig_mean)))
-        eps_a0 = float(eps[k_median, i_a0, j_mean])
-        eps_a2 = float(eps[k_median, i_a2, j_mean])
-        print(f"h2s: {region}: LOGSIG_MEAN={logsig_mean:.4f} LOGSIG_STD={logsig_std:.4f} "
-              f"K={knots.n_groups} eps(a=0,Sigma=mean)={eps_a0:.4f} "
-              f"eps(a=2,Sigma=mean)={eps_a2:.4f} max_a_violation={max_a_violation:.3e} "
-              f"max_sigma_violation={max_sigma_violation:.3e} -> {path_region}")
+        eps_a0 = float(np.median(eps[:, 0, j_mean]))
+        eps_x1 = float(np.median(eps[:, x1_idx, j_mean]))
+        print(f"h2s: {region}: n_source={n_source} LOGSIG_MEAN={logsig_mean:.4f} "
+              f"LOGSIG_STD={logsig_std:.4f} median_eps(x=0,Sigma=mean)={eps_a0:.4f} "
+              f"median_eps(x=1,Sigma=mean)={eps_x1:.4f} max_x_violation={max_x_violation:.3e} "
+              f"max_sigma_violation={max_sigma_violation:.3e} -> {path_source} ; {path_region}")
 
         if region == "Vela D":
-            f_lim8 = limits_module.limits(config, region)
-            log10_flim8_source = np.log10(f_lim8)
-            _s, delta5_source = selection_module.split_common_mode(
-                log10_flim8_source, knots.ref_log10_flim)
-            group_idx = knots.assign_group(delta5_source)
+            eps_own_column = eps[:, x1_idx, :]
+            eps_s_source = source_pass_fraction(eps_own_column, log10_sigma_grid, logsig_mean, logsig_std)
             a_col_vela, prov_vela = _adopted_columns(config, region)
-            eps_s_source = source_pass_fraction(
-                a_col_vela, a_nodes, group_idx, eps, log10_sigma_grid, logsig_mean, logsig_std)
             n_law_vela = yso_module.law_count(config, region, a_col_vela, prov_vela)
             knots_per_deg2 = float(np.mean(n_law_vela * eta * eps_s_source))
             print(f"h2s: Vela D literature check: mean(N_law . eta . eps_s) = "
