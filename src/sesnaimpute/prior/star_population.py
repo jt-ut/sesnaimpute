@@ -31,27 +31,36 @@ project's one place a local column becomes the two anchor magnitudes);
 the tile's own `W_JOINT` table (`prior.anchor_weights`) supplies the
 weight where the bin is populated by a real crossmatch (`USE_JOINT`),
 else the `G` or `Ks` marginal the star's own predicted magnitude falls
-inside. Where BOTH marginals apply and the joint bin does not, the two
-marginals' geometric mean stands in (spec section 2.1, "if both, the
-geometric mean") -- recorded under its own `WEIGHT_RULE` code, 5, beyond
-the five the brief names, so the per-rule star counts this module reports
-add up honestly. A star beyond both anchors' faint (or both anchors'
-bright) edges reads its own tile's faintest (brightest) POPULATED bin --
-populated in the region-pooled table's own sense (`W_REGION_G/KS/JOINT
-!= 1`, `prior.anchor_weights`' own "no evidence anywhere" placeholder) --
-under the same joint-or-marginal rule; where the two axes disagree (one
-out on the faint side, the other on the bright side -- a physically rare,
-intrinsically very red or very blue star), the star is reported faint-end
-by priority, but each axis still reads its own out-of-range direction's
-populated edge bin. A cluster-excluded tile (`EXCLUDED`) reads its weight
-from the region-pooled table (`W_REGION_*`) rather than its own tile row;
-`prior.anchor_weights`' own shrinkage already collapses an excluded
-tile's stored row to exactly this value, so reading `W_REGION_*` directly
-makes that fact part of the code a reader sees rather than something they
-have to trace through the upstream build to learn.
+inside. Where BOTH marginals apply and the joint bin does not, the star's
+own PLACEMENT decides which one anchor stands in (owner ruling
+2026-09-06, item 2, replacing the geometric mean this module used to
+cite to a §2.1 phrase that is not there): a star in front of the cloud
+(its own `u = A(d)/A(inf)` below `star_weights.
+U_FRONT_BEHIND_THRESHOLD`) takes the Gaia weight at its own magnitude, a
+star behind the cloud takes the 2MASS weight, and where that side's own
+bin carries no finite weight at all -- unmeasured even after
+`prior.anchor_weights`' survey-pooled fallback -- the star takes the
+OTHER anchor's weight instead. Recorded under its own `WEIGHT_RULE` code,
+5, beyond the five the brief names, so the per-rule star counts this
+module reports add up honestly. A star beyond both anchors' faint (or
+both anchors' bright) edges reads its own tile's faintest (brightest)
+POPULATED bin -- populated in the EXPLICIT per-bin sense
+(`POPULATED_G`/`POPULATED_KS`, `prior.anchor_weights.fit_tile_weights`'
+own evidence flag, item 3) -- under the same joint-or-placement rule;
+where the two axes disagree (one out on the faint side, the other on the
+bright side -- a physically rare, intrinsically very red or very blue
+star), the star is reported faint-end by priority, but each axis still
+reads its own out-of-range direction's populated edge bin. A cluster-
+excluded tile (`EXCLUDED`) reads its weight from the region-pooled table
+(`W_REGION_*`) rather than its own tile row; `prior.anchor_weights`' own
+shrinkage already collapses an excluded tile's stored row to exactly this
+value, so reading `W_REGION_*` directly makes that fact part of the code
+a reader sees rather than something they have to trace through the
+upstream build to learn.
 
 WEIGHT_RULE codes, per star: 0 joint, 1 G marginal only, 2 Ks marginal
-only, 3 faint end, 4 bright end, 5 both marginals (geometric mean).
+only, 3 faint end, 4 bright end, 5 both marginals (placement-selected:
+front of the cloud reads Gaia, behind reads 2MASS).
 
 Partition (spec section 3, "AGB"). Every retained field star is evolved
 or not by one HR-diagram cut on TRILEGAL's own raw columns (`log g < 1,
@@ -215,28 +224,55 @@ def tile_mean_u(profile_obj, dist_grid, pix256, a_pix, n_src):
 
 
 # ---------------------------------------------------------------------------
-# the per-star weight: joint, marginal, geometric mean, faint/bright end
+# the per-star weight: joint, marginal, placement-selected marginal, faint/bright end
 # ---------------------------------------------------------------------------
 
-def _populated_edge_indices(w_region):
+#: Owner ruling 2026-09-06, item 2: the front/behind placement threshold
+#: on `u = A(d)/A(inf)`. `profile._RegionProfile` exposes only the
+#: cloud's own FAR edge (`cloud_back_edge_pc`, the structure bracket's
+#: `D_HI_PC`); it has no public near-edge (`D_LO_PC`) accessor, so the
+#: near-edge bracket the ruling asks for first is not available through
+#: this module's read path. This uses `u < 0.5` instead -- the star sits
+#: in front of (behind) the half of the column the cloud's own profile
+#: places nearer (farther than) the line of sight's midpoint -- and says
+#: so here rather than silently.
+U_FRONT_BEHIND_THRESHOLD = 0.5
+
+
+def _populated_edge_indices(populated, n_bin):
     """`(bright_idx, faint_idx)`: the first and last bin index the
-    region-pooled table actually measured (`w_region != 1`, its own "no
-    evidence anywhere" placeholder; `prior.anchor_weights.
-    faint_trend_dex_per_mag` uses the same test). Falls back to the
-    table's own structural edges where nothing at all is populated."""
-    populated = np.flatnonzero(w_region != 1.0)
-    if populated.size == 0:
-        return 0, w_region.size - 1
-    return int(populated[0]), int(populated[-1])
+    region-pooled table actually measured -- the EXPLICIT `POPULATED_G`/
+    `POPULATED_KS` flag `prior.anchor_weights.fit_tile_weights` now
+    returns (owner ruling 2026-09-06, item 3), not the `w_region != 1`
+    sentinel. Falls back to the table's own structural edges where
+    nothing at all is populated."""
+    idx = np.flatnonzero(np.asarray(populated, dtype=bool))
+    if idx.size == 0:
+        return 0, n_bin - 1
+    return int(idx[0]), int(idx[-1])
 
 
 def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
-                  w_g, w_ks, w_region_g, w_region_ks):
+                  w_g, w_ks, populated_g, populated_ks, u_star):
     """Per star, `(W, WEIGHT_RULE)` (module docstring). `w_joint`/`w_g`/
     `w_ks` are the tables this tile actually reads from -- its own, or
     (an excluded tile) the region-pooled `W_REGION_*`, chosen by the
     caller; `use_joint` is always the tile's own (a real crossmatch either
-    did or did not populate a bin, independent of exclusion)."""
+    did or did not populate a bin, independent of exclusion).
+    `populated_g`/`populated_ks` are this tile's table's own explicit
+    per-bin evidence flag (item 3); `u_star` is the star's own placement
+    `A(d)/A(inf)` on this tile's mean profile (`tile_mean_u`).
+
+    Owner ruling 2026-09-06, item 2: where both marginals are in range
+    but the joint bin is not populated, the geometric mean is replaced by
+    PLACEMENT -- a star in front of the cloud (`u_star` below the front/
+    behind threshold, `U_FRONT_BEHIND_THRESHOLD`) takes the Gaia weight
+    at its own magnitude; a star behind it takes the 2MASS weight. Where
+    a star's own anchor is unmeasured in its bin even after the survey
+    pool (`populated_*` false AND the stored weight itself is not
+    finite -- `prior.anchor_weights`' pool fallback already fills most of
+    these), it takes the OTHER anchor's weight instead.
+    """
     n_g, n_ks = w_g.size, w_ks.size
     bin_g_raw = np.digitize(g_obs, g_edges) - 1
     bin_ks_raw = np.digitize(ks_obs, ks_edges) - 1
@@ -245,8 +281,8 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
     in_range_g = ~out_g_faint & ~out_g_bright
     in_range_ks = ~out_ks_faint & ~out_ks_bright
 
-    g_bright_idx, g_faint_idx = _populated_edge_indices(w_region_g)
-    ks_bright_idx, ks_faint_idx = _populated_edge_indices(w_region_ks)
+    g_bright_idx, g_faint_idx = _populated_edge_indices(populated_g, n_g)
+    ks_bright_idx, ks_faint_idx = _populated_edge_indices(populated_ks, n_ks)
 
     bin_g = np.where(out_g_faint, g_faint_idx,
                       np.where(out_g_bright, g_bright_idx, np.clip(bin_g_raw, 0, n_g - 1)))
@@ -260,12 +296,23 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
     g_val = w_g[bin_g]
     ks_val = w_ks[bin_ks]
     joint_val = w_joint[bin_g, bin_ks]
-    geomean_val = np.sqrt(g_val * ks_val)
+
+    # placement-selected marginal (item 2): front of the cloud reads
+    # Gaia, behind reads 2MASS; if that side's own bin has no finite
+    # weight at all (unmeasured even after the survey pool), fall to the
+    # other anchor instead.
+    g_measured = np.isfinite(g_val)
+    ks_measured = np.isfinite(ks_val)
+    front = np.asarray(u_star) < U_FRONT_BEHIND_THRESHOLD
+    placement_val = np.where(
+        front,
+        np.where(g_measured, g_val, ks_val),
+        np.where(ks_measured, ks_val, g_val))
 
     # priority: fainter than BOTH anchors' faint edges, or brighter than
     # BOTH anchors' bright edges (module docstring); then joint or the
-    # geometric mean of both marginals where both magnitudes are in
-    # range; then whichever single marginal is in range. The physically
+    # placement-selected marginal where both magnitudes are in range;
+    # then whichever single marginal is in range. The physically
     # near-impossible remainder -- one axis out on the faint side, the
     # other on the bright side, e.g. an intrinsically extreme colour --
     # falls to the `default`, faint-end priority (module docstring).
@@ -284,10 +331,10 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
     weight = np.select(
         [rule == WEIGHT_RULE_JOINT, rule == WEIGHT_RULE_G_MARGINAL,
          rule == WEIGHT_RULE_KS_MARGINAL, rule == WEIGHT_RULE_BOTH_MARGINAL],
-        [joint_val, g_val, ks_val, geomean_val],
-        # faint end / bright end: the same joint-or-marginal rule, at the
+        [joint_val, g_val, ks_val, placement_val],
+        # faint end / bright end: the same joint-or-placement rule, at the
         # clamped populated edge bin.
-        default=np.where(joint_here, joint_val, geomean_val))
+        default=np.where(joint_here, joint_val, placement_val))
     return weight, rule, bin_g, bin_ks
 
 
@@ -537,6 +584,11 @@ def _read_weights(config, region):
             w_region_joint=np.asarray(f["W_REGION_JOINT"][:], dtype=np.float64),
             w_region_g=np.asarray(f["W_REGION_G"][:], dtype=np.float64),
             w_region_ks=np.asarray(f["W_REGION_KS"][:], dtype=np.float64),
+            # owner ruling 2026-09-06, item 3: the explicit per-bin
+            # evidence flag, read straight off `prior.anchor_weights`
+            # rather than re-derived from a `!= 1` sentinel here.
+            populated_g=np.asarray(f["POPULATED_G"][:], dtype=bool),
+            populated_ks=np.asarray(f["POPULATED_KS"][:], dtype=bool),
             excluded=np.asarray(f["EXCLUDED"][:], dtype=bool),
             g_edges=np.asarray(f["G_EDGES"][:], dtype=np.float64),
             ks_edges=np.asarray(f["KS_EDGES"][:], dtype=np.float64),
@@ -640,7 +692,7 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     w, rule, bin_g, bin_ks = star_weights(
         g_obs, ks_obs, weights["g_edges"], weights["ks_edges"],
         w_joint, weights["use_joint"][t], w_g, w_ks,
-        weights["w_region_g"], weights["w_region_ks"])
+        weights["populated_g"], weights["populated_ks"], u_i)
 
     # the partition (spec section 3): a REWEIGHTING of this tile's own W,
     # never a filter -- w_star + w_agb == w row by row.
@@ -809,7 +861,7 @@ def _report(result):
         n_marginal_checked += int(np.count_nonzero(is_g) + np.count_nonzero(is_ks))
         n_no_joint_stars += t["rule"].size
         # a tile with no populated joint bin can still see a star fall
-        # into the "both marginals" geometric mean (rule 5) or a faint/
+        # into the "both marginals" placement-selected rule (rule 5) or a faint/
         # bright-end clamp that resolves to it (rule 3/4 with no joint):
         # honestly out of scope for a single-marginal-table identity.
         n_no_joint_non_marginal += int(np.count_nonzero(~is_g & ~is_ks))
