@@ -445,27 +445,31 @@ def fit_batch(config, region, cls, rows, prior, gamma=None, psi=None):
 
     # MEMORY DRIVER (owner ruling 2026-09-06, item 4), measured with
     # `tracemalloc` on STAR/NGC 7129 (n_model=4066), one job,
-    # single-threaded, n=300 source rows split by the OLD formula
-    # (16 "arrays", see below) into two blocks: traced Python-heap peak
-    # 1.17 GB against a naive two-block estimate of ~625 MB at "8 arrays
-    # of (n_block, n_model, 8) float64" -- roughly 1.9x. The uncounted
-    # bulk is `_process_block`'s flux-covariance step: `outer =
-    # np.einsum("bki,bkj->bij", weighted_flux, model_fluxes_mjy)` is a
-    # per-source (8, 8) reduction over the WHOLE model axis k, and numpy's
-    # general-shape einsum optimizer does not always recognise this as a
-    # batched matmul -- it can materialise a (n_block, n_model, 8, 8)
-    # intermediate before summing over k, which is 8x the size of any one
-    # of `residual`/`model`/`model_fluxes_mjy`/`weighted_flux` alone.
-    # Counting that intermediate (worth ~8 of the (n_block, n_model, 8)
-    # arrays) alongside the five genuinely-alive (n_block, n_model, 8)
-    # arrays (`residual`, `model`, `chi2_array`'s transient, `model_fluxes
-    # _mjy`, `weighted_flux`) gives ~13; rounded up to 16 for headroom
-    # (thread-local BLAS scratch, the `bad`/`zero_weight` boolean masks).
-    # So: row_bytes = n_model * n_band(8) * 8 bytes/float64 * 16
+    # single-threaded, n=300 source rows split into two blocks: traced
+    # Python-heap peak 1.17 GB against a naive two-block estimate of
+    # ~625 MB at "8 arrays of (n_block, n_model, 8) float64" -- roughly
+    # 1.9x. The flux-covariance step's `outer = np.einsum("bki,bkj->bij",
+    # weighted_flux, model_fluxes_mjy, optimize=True)` was the first
+    # suspect -- a per-source (8, 8) reduction over the WHOLE model axis
+    # k looks like it could materialise a (n_block, n_model, 8, 8)
+    # intermediate before summing over k -- but CHECKED, NOT ASSUMED:
+    # `np.einsum_path` on that exact call (n_block=245, n_model=4066)
+    # reports its own largest intermediate as the (n_block, 8, 8) OUTPUT
+    # itself (1.568e4 elements), so it was never the driver. It is still
+    # replaced below by an explicit `np.matmul` (a batched `W^T @ F`),
+    # the owner-directed form, unambiguously BLAS-dispatched where
+    # `einsum`'s own C loop is not guaranteed to be -- but this is a
+    # robustness/performance change, not a fix for the excess peak. The
+    # remaining five genuinely-alive (n_block, n_model, 8) arrays
+    # (`residual`, `model`, `chi2_array`'s transient, `model_fluxes_mjy`,
+    # `weighted_flux`) do not explain the measured 1.9x either; the
+    # 16-array multiplier below is an empirical safety margin (it
+    # measurably dropped STAR/NGC 7129's n_jobs=4 peak from 6.3 GB to
+    # 4.1 GB), not a fully-identified array census. The true remaining
+    # driver is still open.
+    # row_bytes = n_model * n_band(8) * 8 bytes/float64 * 16
     # "array-equivalents", bounded under `config.fit_block_budget_mb`
-    # (`config.py`'s `[fit] block_budget_mb`, default 512 MB) -- at
-    # n_jobs=4 threads this targets ~4 * 512 MB = 2 GB, down from the
-    # measured 6.3 GB peak at the old 8x formula.
+    # (`config.py`'s `[fit] block_budget_mb`, default 512 MB).
     row_bytes = n_model * _N_BAND * 8 * 16
 
     def _process_block(start, stop):
@@ -535,8 +539,22 @@ def fit_batch(config, region, cls, rows, prior, gamma=None, psi=None):
         model_fluxes_mjy = 10.0 ** (model + template_log[None, :, :])
         weighted_flux = lin[:, :, None] * model_fluxes_mjy
         mean_flux = weighted_flux.sum(axis=1) / safe_total[:, None]
-        outer = (np.einsum("bki,bkj->bij", weighted_flux, model_fluxes_mjy, optimize=True)
-                 / safe_total[:, None, None])
+        # Sum_k w_k f_k f_k^T, per source: a batched matmul, `(W^T @ F)`
+        # per block-row -- `np.swapaxes(weighted_flux, 1, 2)` is
+        # `(n_block, 8, n_model)`, `model_fluxes_mjy` is `(n_block,
+        # n_model, 8)`, `np.matmul` contracts the shared `n_model` axis
+        # straight to `(n_block, 8, 8)` via BLAS batched-gemm -- the same
+        # arithmetic the earlier `np.einsum("bki,bkj->bij", ...,
+        # optimize=True)` form computed. Checked, not assumed:
+        # `np.einsum_path("bki,bkj->bij", ...)` on that form reports its
+        # own largest intermediate as the `(n_block, 8, 8)` OUTPUT
+        # itself (1.568e4 elements at n_block=245, n_model=4066) -- so
+        # this einsum was never materialising the `(n_block, n_model, 8,
+        # 8)` array this module's block-size comment (below) suspected.
+        # `matmul` is kept over `einsum` anyway, as the owner-directed
+        # form for this contraction: it is unambiguously dispatched to
+        # BLAS, where `einsum`'s own C loop is not guaranteed to be.
+        outer = np.matmul(np.swapaxes(weighted_flux, 1, 2), model_fluxes_mjy) / safe_total[:, None, None]
         cov = outer - np.einsum("bi,bj->bij", mean_flux, mean_flux)
         flux_mean[blk] = np.where(has_total[:, None], mean_flux, 0.0)
         flux_cov[blk] = np.where(has_total[:, None, None], cov, 0.0)
