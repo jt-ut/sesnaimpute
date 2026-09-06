@@ -84,6 +84,7 @@ $PY -m sesnaimpute.prior.star_selection $CONFIG   # STAR/AGB/PAHC exact-selectio
 $PY -m sesnaimpute.prior.yso_selection $CONFIG
 $PY -m sesnaimpute.prior.h2s $CONFIG                    # H2S: law-blurred field, region lognormal + knot-colour selection (SPEC_PRIORS.md sec 7)
 $PY -m sesnaimpute.prior.gal $CONFIG                    # GAL: Fazio counts law + SWIRE selection tables
+$PY -m sesnaimpute.prior.counts_star_family $CONFIG
 $PY -m sesnaimpute.prior.counts_cloud $CONFIG           # YSO/H2S per-source counts on the cloud law (SPEC_PRIORS.md sec 6.2, 7)
 
 # --- fit ---
