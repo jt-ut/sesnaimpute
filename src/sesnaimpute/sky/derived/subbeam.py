@@ -37,10 +37,11 @@ import numpy as np
 from astropy.io import fits
 from joblib import Parallel, delayed
 from scipy import fft as sfft
+from scipy import optimize
+from scipy.special import ndtr
 
 from sesnaimpute import config as config_module
 from sesnaimpute import regions as regions_module
-from sesnaimpute.build import run
 from sesnaimpute.sky.derived.herschel_column import _map_header
 from sesnaimpute.sky.download.herschel_hgbs.build import _FILES as HGBS_FILES
 
@@ -600,6 +601,199 @@ def build(config, regions=None):
                                             for r in regs]))
     print("subbeam: wrote %s (%.2f MB)"
           % (out_path, os.path.getsize(out_path) / 1e6), flush=True)
+    _write_mixture_datasets(out_path)
+
+#: A (region, beam, KA) cell needs this many counts before a mixture is fit.
+MIX_MIN_COUNTS = 200
+#: Gauss-Hermite nodes used to average the noise-convolved model over the
+#: fine map's Gaussian noise `eps ~ Normal(0, sigma_map)`.
+N_GH_NOISE = 31
+_GH_X, _GH_W = np.polynomial.hermite.hermgauss(N_GH_NOISE)
+_GH_WN = _GH_W / np.sqrt(np.pi)
+#: A structural mixture is reported as reducible to one Gaussian when the
+#: two CDFs differ by no more than this everywhere.
+SINGLE_GAUSS_CDF_TOL = 0.02
+
+
+def _estimate_fine_noise(kern_L108_region, ka_cent, kd_cent):
+    """Fine-map (36.3 arcsec) noise level in A_K units for one region, from
+    its own 108 arcsec conditional histogram alone (no per-map error plane
+    or header noise value is read here). At the lowest populated column
+    bin the true column is close to the map floor, so the OBSERVED
+    `s = ln(T/A)` distribution's upper half is driven almost entirely by
+    positive additive noise excursions pushing `T` up from a near-floor
+    value -- unlike the lower half, which is compressed against the floor
+    by the log. Half the 50-84 percentile spread of `s` in that bin,
+    converted back to linear units by the bin's own `A`, estimates the
+    noise's standard deviation."""
+    counts_per_bin = kern_L108_region.sum(axis=1)
+    order = np.argsort(ka_cent)
+    for j in order:
+        if counts_per_bin[j] >= MIX_MIN_COUNTS:
+            c = kern_L108_region[j].astype(np.float64)
+            tot = c.sum()
+            cdf = np.cumsum(c) / tot
+            q50, q84 = np.interp([0.50, 0.84], cdf, kd_cent)
+            A = float(np.exp(ka_cent[j]))
+            return A * (q84 - q50)
+    return np.nan
+
+
+def _mixture_cdf(x, w, mu1, s1, mu2, s2):
+    """CDF of the two-Gaussian structural mixture at `x`."""
+    return w * ndtr((x - mu1) / s1) + (1.0 - w) * ndtr((x - mu2) / s2)
+
+
+def mixture_moments(w, mu1, s1, mu2, s2):
+    """Mean, standard deviation, skewness and excess kurtosis of the
+    two-Gaussian mixture, in closed form from its component parameters."""
+    mean = w * mu1 + (1.0 - w) * mu2
+    d1, d2 = mu1 - mean, mu2 - mean
+    var = w * (s1 ** 2 + d1 ** 2) + (1.0 - w) * (s2 ** 2 + d2 ** 2)
+    sd = np.sqrt(np.maximum(var, 0.0))
+    m3 = w * d1 * (d1 ** 2 + 3.0 * s1 ** 2) + (1.0 - w) * d2 * (d2 ** 2 + 3.0 * s2 ** 2)
+    m4 = (w * (3.0 * s1 ** 4 + 6.0 * s1 ** 2 * d1 ** 2 + d1 ** 4)
+          + (1.0 - w) * (3.0 * s2 ** 4 + 6.0 * s2 ** 2 * d2 ** 2 + d2 ** 4))
+    skew = m3 / sd ** 3 if sd > 0 else np.nan
+    kurt = m4 / sd ** 4 - 3.0 if sd > 0 else np.nan
+    return mean, sd, skew, kurt
+
+
+def forward_obs_cdf(edges, A, w, mu1, s1, mu2, s2, sigma_map):
+    """CDF of the OBSERVED `s_obs = ln(max(A*exp(s)+eps, floor)/A)` at each
+    of `edges`, `s` drawn from the structural mixture and
+    `eps ~ Normal(0, sigma_map)` the fine map's own noise. Because
+    `T_obs = max(A*exp(s)+eps, floor)` is monotonic non-decreasing in `s`
+    for fixed `eps`, `P(s_obs<=edge | eps) = mixture_cdf(ln((A*exp(edge)-eps)/A))`
+    whenever `A*exp(edge)-eps` is positive (zero otherwise, since `T` itself
+    is always positive), and the noise is integrated out by Gauss-Hermite
+    quadrature over `eps`."""
+    Tobs_edge = A * np.exp(np.asarray(edges, dtype=np.float64))
+    eps = sigma_map * np.sqrt(2.0) * _GH_X
+    thresh = Tobs_edge[:, None] - eps[None, :]
+    pos = thresh > 0.0
+    safe = np.where(pos, thresh, 1.0)
+    s_true_thr = np.log(safe / A)
+    cdf_k = np.where(pos, _mixture_cdf(s_true_thr, w, mu1, s1, mu2, s2), 0.0)
+    cdf_edge = (cdf_k * _GH_WN[None, :]).sum(axis=1)
+    return np.where(Tobs_edge >= AK_FLOOR, cdf_edge, 0.0)
+
+
+def fit_one_mixture(counts, A, sigma_map, kd_edges, kd_cent):
+    """Weighted-least-squares fit of the noise-convolved forward model
+    (`forward_obs_cdf`) to one observed histogram `counts` on `kd_edges`,
+    from a moment-matched two-component start. Returns
+    `(w, mu1, s1, mu2, s2, max_cdf_err)`, `max_cdf_err` the largest
+    absolute difference between the fitted model's CDF and the raw
+    empirical CDF at the bin edges."""
+    counts = np.asarray(counts, dtype=np.float64)
+    tot = counts.sum()
+    p = counts / tot
+    mean = float(np.sum(p * kd_cent))
+    sd = float(np.sqrt(max(np.sum(p * (kd_cent - mean) ** 2), 1e-8)))
+
+    def resid(theta):
+        wl, mu1, ls1, dmu, ls2 = theta
+        w = 1.0 / (1.0 + np.exp(-wl))
+        s1, s2 = np.exp(ls1), np.exp(ls2)
+        mu2 = mu1 + dmu
+        cdf = forward_obs_cdf(kd_edges, A, w, mu1, s1, mu2, s2, sigma_map)
+        pred = np.diff(cdf) * tot
+        return (counts - pred) / np.sqrt(pred + 1.0)
+
+    theta0 = [0.0, mean - 0.3 * sd, np.log(max(sd * 0.7, 1e-3)),
+              0.6 * sd, np.log(max(sd * 1.5, 1e-3))]
+    res = optimize.least_squares(resid, theta0, method="lm", max_nfev=400)
+    wl, mu1, ls1, dmu, ls2 = res.x
+    w = 1.0 / (1.0 + np.exp(-wl))
+    s1, s2 = np.exp(ls1), np.exp(ls2)
+    mu2 = mu1 + dmu
+    if mu1 > mu2:
+        mu1, mu2 = mu2, mu1
+        s1, s2 = s2, s1
+        w = 1.0 - w
+    cdf_fit = forward_obs_cdf(kd_edges, A, w, mu1, s1, mu2, s2, sigma_map)
+    cdf_emp = np.concatenate(([0.0], np.cumsum(counts) / tot))
+    max_err = float(np.max(np.abs(cdf_fit - cdf_emp)))
+    return w, float(mu1), float(s1), float(mu2), float(s2), max_err
+
+
+def _write_mixture_datasets(out_path):
+    """Fits the noise-separated structural mixture at every (region, beam,
+    KA bin) with at least `MIX_MIN_COUNTS` counts, from the histograms
+    already stored in the sub-beam product, and adds the fit as new
+    datasets (nothing already in the file is touched)."""
+    beams = ("L108", "L302", "L821")
+    with h5py.File(out_path, "r") as fh:
+        ka_edges = fh["KA_EDGES"][:]
+        kd_edges = fh["KD_EDGES"][:]
+        kern = {lab: fh["COND_KERNEL_%s" % lab][:] for lab in beams}
+    ka_cent = 0.5 * (ka_edges[:-1] + ka_edges[1:])
+    kd_cent = 0.5 * (kd_edges[:-1] + kd_edges[1:])
+    n_region, n_ka = kern["L108"].shape[0], len(ka_cent)
+    n_beam = len(beams)
+
+    fine_noise = np.array([_estimate_fine_noise(kern["L108"][r], ka_cent, kd_cent)
+                           for r in range(n_region)])
+
+    shp = (n_region, n_beam, n_ka)
+    W = np.full(shp, np.nan)
+    MU1 = np.full(shp, np.nan)
+    MU2 = np.full(shp, np.nan)
+    S1 = np.full(shp, np.nan)
+    S2 = np.full(shp, np.nan)
+    ERR = np.full(shp, np.nan)
+
+    for r in range(n_region):
+        sigma_map = fine_noise[r]
+        for b, lab in enumerate(beams):
+            K = kern[lab][r]
+            counts_per_bin = K.sum(axis=1)
+            for j in range(n_ka):
+                if counts_per_bin[j] < MIX_MIN_COUNTS or not np.isfinite(sigma_map):
+                    continue
+                A = float(np.exp(ka_cent[j]))
+                w, mu1, s1, mu2, s2, err = fit_one_mixture(
+                    K[j], A, sigma_map, kd_edges, kd_cent)
+                W[r, b, j], MU1[r, b, j], MU2[r, b, j] = w, mu1, mu2
+                S1[r, b, j], S2[r, b, j], ERR[r, b, j] = s1, s2, err
+
+    with h5py.File(out_path, "a") as fh:
+        for name in ("MIX_W", "MIX_MU1", "MIX_MU2", "MIX_SIG1", "MIX_SIG2",
+                     "MIX_MAX_CDF_ERR", "MIX_KA_CENTRES", "FINE_MAP_NOISE_K"):
+            if name in fh:
+                del fh[name]
+        fh.create_dataset("MIX_W", data=W)
+        fh.create_dataset("MIX_MU1", data=MU1)
+        fh.create_dataset("MIX_MU2", data=MU2)
+        fh.create_dataset("MIX_SIG1", data=S1)
+        fh.create_dataset("MIX_SIG2", data=S2)
+        fh.create_dataset("MIX_MAX_CDF_ERR", data=ERR)
+        fh.create_dataset("MIX_KA_CENTRES", data=ka_cent)
+        fh.create_dataset("FINE_MAP_NOISE_K", data=fine_noise)
+    print("subbeam: wrote mixture fit datasets to %s" % out_path, flush=True)
+
+
+def fit_only(config, regions=None):
+    """Fits and stores the noise-separated mixture datasets from the
+    sub-beam product already on disk, without touching any map."""
+    out_path = config_module.product_path(config, "sky/derived", "herschel",
+                                          "subbeam", "region")
+    _write_mixture_datasets(out_path)
+
 
 if __name__ == "__main__":
-    run(build)
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("config")
+    parser.add_argument("--regions", nargs="+", default=None)
+    parser.add_argument("--fit-only", action="store_true",
+                        help="fit the noise-separated mixture from the "
+                             "persisted histograms only; no map is read")
+    args = parser.parse_args()
+    cfg = config_module.load(args.config)
+    if args.fit_only:
+        fit_only(cfg, regions=args.regions)
+    else:
+        build(cfg, regions=args.regions)
