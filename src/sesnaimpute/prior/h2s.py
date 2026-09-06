@@ -78,17 +78,30 @@ IRAC_RATIO_BAND_KEYS = ("I1", "I2", "I3", "I4")
 IRAC_RATIO_BAND_IDX = np.array([BAND_KEYS.index(b) for b in IRAC_RATIO_BAND_KEYS])
 
 #: Knots present per intrinsic law-predicted young star, per field
-#: (SPEC_PRIORS.md section 7; S-D37b, "eta against the law as served
-#: today"): the external knot survey's own knot surface density, depth-
-#: corrected, over the law count's integral on the same footprint.
+#: (SPEC_PRIORS.md section 7 decision 3): the external knot survey's own
+#: knot surface density, depth-corrected, over the CURRENT law's own area
+#: integral (`prior.yso.law_area_integral`: Pokhrel's kappa, the whole
+#: adopted column, no pedestal) on the same footprint -- re-measured
+#: 2026-09-06 against the law as it now stands, replacing S-D37b's numbers,
+#: which were measured against the retired dust-temperature/kappa_r
+#: denominator. Old value beside each new one, and the old/new ratio:
+#:   Cygnus X               0.0105 -> 0.0065  (old/new 1.62x)
+#:   North America Nebula   0.0572 -> 0.0394  (old/new 1.45x)
+#:   Vela D                 0.0668 -> 0.0408  (old/new 1.64x)
 #: Measured only where an external H2 knot survey covers the field; every
 #: other region is nearer than Cygnus X, so it takes the elsewhere value.
+#: The old elsewhere value (0.06) is not the knot-count-weighted mean of
+#: the three fields (that would have been 0.0141) nor the added pooled
+#: reading (0.0082) -- it matches, to rounding, the plain mean of the two
+#: NEARER fields' own eta (North America Nebula, Vela D), excluding
+#: Cygnus X, which is the one field "elsewhere" is not nearer than: (0.0572
+#: + 0.0668)/2 = 0.0620 -> 0.06. That is the rule applied here too.
 ETA = {
-    "Cygnus X": 0.0105,
-    "North America Nebula": 0.0572,
-    "Vela D": 0.0668,
+    "Cygnus X": 0.0065,
+    "North America Nebula": 0.0394,
+    "Vela D": 0.0408,
 }
-ETA_ELSEWHERE = 0.06
+ETA_ELSEWHERE = 0.0401
 
 #: The three-field spread of `eta`, dex (SPEC_PRIORS.md section 7 table;
 #: S-D37b measures 0.447, restated to two figures). Reported, never
