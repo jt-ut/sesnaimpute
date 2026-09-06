@@ -580,6 +580,50 @@ def embedding_and_ridge(profile):
                 ridge_resid_sigma=np.sqrt(resid_var), ridge_corr=corr)
 
 
+#: The stored embedding profile's own cell count (SPEC_PRIORS.md section
+#: 6.3): the 3-D map's ~600 distance cells carry no information the
+#: profile's own one-degree resolution and the cloud's real few-cell
+#: structure along the ray support, so `build_shape` coarsens to this
+#: many equal-mass cells once at build; `cdf_exact`/`marginal_exact` then
+#: sum this many closed-form terms per query, not the map's own cell
+#: count. 16 failed the 0.02 check bar (200 fixed-seed NGC 7129 sources,
+#: worst density relative L1 0.027); 32 is the smallest power of two that
+#: passes (worst CDF 0.0026, worst density relative L1 0.0055).
+N_PROFILE_CELLS = 32
+
+
+def coarsen_profile(u_edges, p_u, n_out):
+    """`(u_edges, p_u)` re-cut to `n_out` equal-mass cells: the new edges
+    are the embedding CDF's own mass quantiles (`i / n_out`), read off the
+    piecewise-linear CDF by exact inversion (the same interpolation
+    `embedding_and_ridge` uses for the reported median, generalised to
+    `n_out - 1` interior quantiles), so every new cell carries exactly
+    `1 / n_out` of the sightline's own mass and the new density is that
+    fixed mass over the new cell's own width -- mass-preserving by
+    construction, not a re-fit."""
+    n_sl, n_cell = p_u.shape
+    widths = np.diff(u_edges, axis=1)
+    cum = np.concatenate(
+        [np.zeros((n_sl, 1)), np.cumsum(p_u * widths, axis=1)], axis=1)
+    cum[:, -1] = 1.0
+    new_edges = np.empty((n_sl, n_out + 1))
+    new_edges[:, 0] = u_edges[:, 0]
+    new_edges[:, -1] = u_edges[:, -1]
+    for i in range(1, n_out):
+        t = i / n_out
+        idx = np.clip(np.sum(cum <= t, axis=1) - 1, 0, n_cell - 1)
+        cum_lo = np.take_along_axis(cum, idx[:, None], axis=1)[:, 0]
+        cum_hi = np.take_along_axis(cum, (idx + 1)[:, None], axis=1)[:, 0]
+        u_lo = np.take_along_axis(u_edges, idx[:, None], axis=1)[:, 0]
+        u_hi = np.take_along_axis(u_edges, (idx + 1)[:, None], axis=1)[:, 0]
+        frac = np.where(cum_hi > cum_lo,
+                        (t - cum_lo) / np.maximum(cum_hi - cum_lo, 1e-300), 0.0)
+        new_edges[:, i] = u_lo + frac * (u_hi - u_lo)
+    new_widths = np.diff(new_edges, axis=1)
+    new_p_u = np.where(new_widths > 0, (1.0 / n_out) / np.maximum(new_widths, 1e-300), 0.0)
+    return new_edges, new_p_u
+
+
 def _majority_map_class(config, region, sl_pix):
     """Per sightline, the map class (`herschel`/`planck`) of the majority
     of its own sources' adopted-column arm (SPEC_PRIORS.md section 6.3's
@@ -807,11 +851,16 @@ def build_shape(config, region):
     every occupied sightline and its own map class -- the exact
     ingredients `YsoShape` evaluates the closed-form a-marginal from
     (with the survey's column kernel, read once at `YsoShape.read`), at
-    any `a`, with no tabulation.
+    any `a`, with no tabulation. The stored `u_edges`/`p_u` are the
+    embedding density coarsened to `N_PROFILE_CELLS` equal-mass cells
+    (`coarsen_profile`); the reported median and the ridge are still read
+    off the full-resolution profile, unaffected.
     """
     profile = _load_profile_arrays(config, region)
     sl_pix = profile["hpx_pix_256"]
     embed = embedding_and_ridge(profile)
+    coarse_edges, coarse_p_u = coarsen_profile(embed["u_edges"], embed["p_u"], N_PROFILE_CELLS)
+    embed = dict(embed, u_edges=coarse_edges, p_u=coarse_p_u)
     map_class = _majority_map_class(config, region, sl_pix)
     is_herschel = map_class == "herschel"
     sightline_id = _sightline_id_lookup(config, region, sl_pix)
