@@ -19,23 +19,26 @@ stored again (IMPLEMENTATION.md section 3, H2S row).
    vary per source. `eta_r` is knots present per intrinsic law-predicted
    young star (S-D37b); `eps_ext` is the fraction of knots clearing the
    survey's limits that SESNA's own extraction actually rows (S-D44).
-3. `eps_s(a, Sigma)`: the selection, per source and exact over the ratio
-   distribution (SPEC_PRIORS.md 1.3, 7): the population members are
-   every (Sigma-grid point, drawn Giannini colour-ratio combination)
-   pair -- a synthetic knot at surface brightness Sigma with that
-   combination's 8-band SED (`knot_ks_log10_flux` for Ks, the ratio
-   table added in log space for the four IRAC bands; J, H and M1 carry
-   no Giannini ratio and never clear). `bin_of_pop` is the member's own
-   Sigma-grid index, so `prior.selection.pass_fractions_binned` returns
-   `EPS[n, n_x, n_sigma]` directly on the shared scaled-extinction ladder
-   `X_LADDER`, at every source's own eight limits (`catalog.limits.
-   limits`) and own column -- no depth groups, no common-mode shift. The
-   persisted ratio arrays carry no shared per-knot index back to
-   Giannini's table, so the four IRAC bands are drawn as independent
-   populations here, disclosed rather than assumed away; pairing them by
-   knot, were the index available, would be the better form (it
-   preserves the measured colour correlations). Written per source,
-   `bms/h2s/selection_h2s_source`.
+3. `eps_s(a, Sigma)`: the selection, per source and exact (SPEC_PRIORS.md
+   1.3, 7): at surface brightness Sigma, Ks (`knot_ks_log10_flux`) and
+   the dimming are single exact numbers, so only the four IRAC bands
+   carry any randomness, each an independent draw from its own tiny
+   Giannini colour-ratio table (13-52 measured knots; J, H and M1 carry
+   no Giannini ratio and never clear). With that few distinct values,
+   the two-of-eight test's own pass probability is worked out in closed
+   form (`exact_source_selection`) rather than approximated by drawing
+   combinations: each band's own exact clearing fraction against its
+   whole table (`band_clear_fraction`, a `searchsorted`, no sampling
+   error), combined algebraically over the 2^4 ways the four can clear.
+   `EPS[n, n_x, n_sigma]` is written directly on the shared scaled-
+   extinction ladder `X_LADDER`, at every source's own eight limits
+   (`catalog.limits.limits`) and own column -- no depth groups, no
+   common-mode shift. The persisted ratio arrays carry no shared
+   per-knot index back to Giannini's table, so the four IRAC bands are
+   treated as independent populations here, disclosed rather than
+   assumed away; pairing them by knot, were the index available, would
+   be the better form (it preserves the measured colour correlations).
+   Written per source, `bms/h2s/selection_h2s_source`.
 
 The region product (`bms/h2s/prior_h2s_region`) keeps everything else:
 the law-blurred field, `eta_r`, `eps_ext`, and the region's own
@@ -438,52 +441,68 @@ BATCH_BUDGET_BYTES = 512 << 20
 
 #: Re-exported from `prior.selection`, the one place they are defined.
 X_LADDER = selection_module.X_LADDER
-SUBSAMPLE_CAP = selection_module.SUBSAMPLE_CAP
-SUBSAMPLE_SEED = 0
 
 
-def ratio_population(config, log10_sigma_grid, n_ratio_draws=None, seed=SUBSAMPLE_SEED):
-    """The synthetic knot population `pass_fractions_binned` needs
-    (module docstring, point 3): a fixed-seed draw of colour-ratio
-    combinations, crossed with every Sigma-grid point. Each of the
-    `n_ratio_draws` combinations is one independent draw per IRAC band
-    from that band's own Giannini+2013 ratio array (the four bands carry
-    no shared per-knot index, so they are drawn independently,
-    disclosed in the module docstring); Ks is exact from Sigma alone; J,
-    H and M1 carry no ratio and are given `-inf` flux so they never
-    clear. Total population size `n_sigma * n_ratio_draws` sits at the
-    survey-wide `SUBSAMPLE_CAP` (0.5% Monte Carlo error per Sigma bin).
+def _sorted_giannini_ratios(config):
+    """`{band_key: ascending log10_ratio_array}`, cached: Giannini's own
+    per-band tables are tiny (13-52 measured knots), so a source's exact
+    clearing probability against one is a `searchsorted` on the sorted
+    table, not a Monte Carlo draw from it."""
+    return {band: np.sort(arr) for band, arr in _load_giannini_ratios(config).items()}
 
-    Returns `(log10_flux, log10_b_pop, bin_of_pop, weight)`:
-    `log10_flux` `(n_pop, 8)`, `log10_b_pop`/`bin_of_pop`/`weight`
-    `(n_pop,)`.
+
+def band_clear_fraction(threshold, sorted_ratio_vals):
+    """The EXACT fraction of one IRAC band's own Giannini colour-ratio
+    table at or above `threshold` (any shape): every measured ratio is
+    an equally-weighted population member (module docstring, point 3),
+    so this is the table's own empirical survival fraction, read off by
+    `searchsorted` -- no draw, so no Monte Carlo error at all.
     """
-    ratios = _load_giannini_ratios(config)
-    n_sigma = log10_sigma_grid.size
-    if n_ratio_draws is None:
-        n_ratio_draws = max(1, SUBSAMPLE_CAP // n_sigma)
-    rng = np.random.default_rng(seed)
-    drawn = {band: ratios[band][rng.integers(0, ratios[band].size, size=n_ratio_draws)]
-             for band in IRAC_RATIO_BAND_KEYS}
+    n = sorted_ratio_vals.size
+    idx = np.searchsorted(sorted_ratio_vals, threshold, side="left")
+    return 1.0 - idx / n
 
-    n_pop = n_sigma * n_ratio_draws
-    log10_flux = np.full((n_pop, N_BANDS), -np.inf, dtype=np.float64)
-    log10_b_pop = np.repeat(log10_sigma_grid, n_ratio_draws)
-    bin_of_pop = np.repeat(np.arange(n_sigma, dtype=np.int64), n_ratio_draws)
-    log10_ks = knot_ks_log10_flux(log10_b_pop)
-    log10_flux[:, KS_IDX] = log10_ks
+
+def exact_source_selection(log10_lim, a_query, kappa, log10_sigma_grid, sorted_ratios):
+    """`(n_src, n_x, n_sigma)` f8: the EXACT two-of-eight pass fraction
+    (module docstring, point 3), computed in closed form rather than by
+    drawing colour-ratio combinations. Ks and the dimming are exact
+    per (source, ladder point, Sigma point); J, H and M1 never clear.
+    Only the four IRAC bands are random, each an independent draw from
+    its own tiny Giannini table (disclosed in the module docstring), so
+    the two-of-eight test's probability is exact algebra on the four
+    bands' own per-point clearing probabilities `p_i` (`band_clear_
+    fraction`), not a sampling average: with Ks failing, >=2 of the 4
+    IRAC bands must clear; with Ks clearing, >=1 must. Both reduce to a
+    direct sum over the 2^4 = 16 ways the four bands can clear, taking
+    each band's own probability or its complement.
+    """
+    log10_ks = knot_ks_log10_flux(log10_sigma_grid)  # (n_sigma,)
+    dimming = 0.4 * a_query[:, :, None] * kappa[:, :, :]  # (n_src, n_x, 8)
+
+    ks_clears = (log10_ks[None, None, :]
+                 >= (log10_lim[:, None, None, KS_IDX] + dimming[:, :, None, KS_IDX]))
+
+    p = []
     for band, b_idx in zip(IRAC_RATIO_BAND_KEYS, IRAC_RATIO_BAND_IDX):
-        log10_flux[:, b_idx] = log10_ks + np.tile(drawn[band], n_sigma)
-    weight = np.ones(n_pop, dtype=np.float64)
-    return log10_flux, log10_b_pop, bin_of_pop, weight
+        threshold = (log10_lim[:, None, None, b_idx] + dimming[:, :, None, b_idx]
+                     - log10_ks[None, None, :])  # (n_src, n_x, n_sigma)
+        p.append(band_clear_fraction(threshold, sorted_ratios[band]))
+    p1, p2, p3, p4 = p
+    q1, q2, q3, q4 = (1.0 - x for x in p)
+
+    p0 = q1 * q2 * q3 * q4
+    p1_exact = (p1 * q2 * q3 * q4 + q1 * p2 * q3 * q4
+                + q1 * q2 * p3 * q4 + q1 * q2 * q3 * p4)
+    return np.where(ks_clears, 1.0 - p0, 1.0 - p0 - p1_exact)
 
 
-def _row_bytes(n_x, n_pop):
+def _row_bytes(n_x, n_sigma):
     """The per-source working-array footprint one batch holds: the
-    dominant term is `pass_fractions_binned`'s own `(n_x, 8)` per-source
-    kappa array plus the query-extinction array; the population arrays
-    are shared across the whole region, not per source."""
-    return N_BANDS * 8 + n_x * 8 + n_x * N_BANDS * 8
+    `(n_x, n_sigma)` per-band clearing-probability arrays, four of them
+    plus a few working copies -- no population array at all (`exact_
+    source_selection` reads each Giannini table directly)."""
+    return 12 * n_x * n_sigma * 8 + N_BANDS * 8 + n_x * N_BANDS * 8
 
 
 def build_and_write_source_selection(config, region, log10_sigma_grid):
@@ -492,7 +511,7 @@ def build_and_write_source_selection(config, region, log10_sigma_grid):
     Sigma grid (module docstring, point 3), batched under
     `BATCH_BUDGET_BYTES`.
     """
-    log10_flux, log10_b_pop, bin_of_pop, weight = ratio_population(config, log10_sigma_grid)
+    sorted_ratios = _sorted_giannini_ratios(config)
 
     log10_lim = np.log10(limits_module.limits(config, region))
     n_source = log10_lim.shape[0]
@@ -513,7 +532,7 @@ def build_and_write_source_selection(config, region, log10_sigma_grid):
         f.create_dataset("LOG10_SIGMA_GRID", data=log10_sigma_grid.astype("f8"))
         ds_eps = f.create_dataset("EPS", shape=(n_source, n_x, n_sigma), dtype="f2")
 
-        row_bytes = _row_bytes(n_x, log10_flux.shape[0])
+        row_bytes = _row_bytes(n_x, n_sigma)
         for start, stop in batches_module.batches(n_source, row_bytes, budget_bytes=BATCH_BUDGET_BYTES):
             lim_b = np.ascontiguousarray(log10_lim[start:stop])
             a_b = a_col[start:stop]
@@ -521,13 +540,10 @@ def build_and_write_source_selection(config, region, log10_sigma_grid):
             w_dense_b = selection_module.law_dense_weight(a_query_b)
             kappa_b = np.ascontiguousarray(selection_module.kappa_hybrid(config, w_dense_b))
 
-            eps = selection_module.pass_fractions_binned(
-                lim_b, a_query_b, kappa_b, log10_flux, log10_b_pop, weight,
-                log10_sigma_grid, bin_of_pop)
+            eps = exact_source_selection(lim_b, a_query_b, kappa_b, log10_sigma_grid, sorted_ratios)
             ds_eps[start:stop] = eps.astype("f2")
 
-    bin_counts = np.zeros(n_sigma, dtype=np.float64)
-    np.add.at(bin_counts, bin_of_pop, weight)
+    bin_counts = np.ones(n_sigma, dtype=np.float64)
     return path, n_source, bin_counts
 
 
@@ -579,11 +595,10 @@ def eps_monotonicity_violations(eps, bin_counts):
     """`(max_x_violation, max_sigma_violation)`: EPS must be non-increasing
     along the extinction ladder `X_LADDER` (more extinction never helps)
     and non-decreasing in `log10 Sigma` (a brighter knot never clears
-    fewer bands); both expected 0. Every Sigma-grid bin is populated by
-    construction now (`ratio_population` crosses every bin with the same
-    ratio draws), so the Sigma direction is graded across the whole
-    grid, no `bin_counts` gating needed; the argument is kept for the
-    call-site contract."""
+    fewer bands); both expected 0. `exact_source_selection` evaluates
+    every Sigma-grid point exactly, so the Sigma direction is graded
+    across the whole grid, no `bin_counts` gating needed; the argument
+    is kept for the call-site contract."""
     d_x = np.diff(eps.astype(np.float64), axis=1)
     d_sigma = np.diff(eps.astype(np.float64), axis=2)
     sigma_violation = float(np.max(np.clip(-d_sigma, 0.0, None))) if d_sigma.size else 0.0
