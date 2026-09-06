@@ -25,32 +25,33 @@ per depth-group centre on the SAME shared column-grid nodes
 
 is evaluated by MARGINALISING the shape's own stored density over its
 ``log10 x`` axis, AT EACH SHAPE NODE EXACTLY (never at a source's own
-blended column): ``prior.star_selection``'s own exact-selection tables
-are themselves built on ONE region-wide fallback placement (its own
-module docstring: "this is that approximation"), so evaluating the
-survived fraction at a source's own displaced extinction inside the
-tile's point cloud would be more precise than the tables this module
-reads already are. Treating the star at exactly ``a = a_node`` for the
-purpose of selection -- while keeping its own ``log10 B`` spread, which
-IS what the class's tabulated ``EPS`` axis distinguishes -- is exactly
-the reading-note precedent (``04_star_family.md`` section D,
-``gathers.integrate_count_per_source``): ``eps_k``'s intrinsic-density
-argument is the shape's own ``log10 B`` marginal AT ONE NODE, one
-``PassFractionModel.integrate_count`` call per DISTINCT (tile, node[,
-PAHC limit]) combination -- never per source -- and the two bracketing
-nodes' own selected fractions are blended by the SAME linear weight
-``ClassShape.density`` uses for the shape itself, so the count is
-algebraically the two-node blend of two "pure" evaluations, matching how
-the shape's own storage already represents an intermediate column
-(IMPLEMENTATION.md section 2). ``PassFractionModel.integrate_count``'s
-own continuous interpolation across its ``b_grid`` is exactly the "s
-varies by less than one b-grid cell" rule the brief names: ``s`` and the
-depth-group ``Delta`` are passed PER SOURCE, exactly, to every call, so
-no separate depth-group bucketing is needed -- only the marginal density
-itself (tile, node[, limit]) is looked up once per distinct combination.
-Rule 8: joblib over tiles (`_grouped_eval`), each tile's own handful of
-node combinations handled by cheap boolean masks, never a python loop
-over sources.
+blended column): the two bracketing nodes' own selected fractions are
+blended by the SAME linear weight ``ClassShape.density`` uses for the
+shape itself (PAHC: also the two bracketing limit grids).
+
+Per DISTINCT shape node (PAHC: node and limit-grid pair) present
+anywhere in the region -- never per source, never per depth group --
+``eps_grid_all_groups`` builds the class's exact selection at every
+point of the shape's own ``(log10 x, log10 B)`` tabulation grid for
+EVERY depth group at once, one vectorised pass over the flattened
+``(group, x, b)`` product, reading the class's own stored selection
+table directly by group index rather than through a per-row nearest-
+centre search (every group is wanted here, so a search would cost
+`K` times more than a direct read for nothing). The source's own
+common-mode depth shift ``s`` is applied to the SHAPE's density instead
+of to the selection table: the shape's ``log10 B`` axis is uniform, so a
+shift by ``s`` is a roll by ``s / cell`` whole cells
+(``_shift_density_cells``), the leftover fraction of a cell blended
+between the two neighbouring whole-cell rolls, and every source's own
+continuous ``s`` is binned to whichever of the handful of DISTINCT
+whole-cell rolls it brackets. Every (tile, shift-bin) x depth-group
+integral at a node is then one matrix product of the region's own
+tiles' rolled density against that node's eps grid; a source reads its
+own (tile, shift-bin, group) entry off that matrix and blends its own
+fractional shift residual, both by fancy indexing. Rule 8: the only
+python loop left is over the handful of distinct shape nodes[, PAHC
+limit grids] present in the region; the group axis, the tile axis, the
+shift-bin axis and the source axis are all array arithmetic.
 
 GAL (spec section 5.1) needs no tile loop and no shape read: a galaxy's
 ``a`` **is** the column exactly (no placement spread), so
@@ -80,7 +81,6 @@ import os
 
 import h5py
 import numpy as np
-from joblib import Parallel, delayed
 
 from sesnaimpute import config as config_module
 from sesnaimpute import regions as regions_module
@@ -200,14 +200,73 @@ def _node_a_bracket(x_centers, a_node, a_nodes_full):
     return column_grid.bracket(a_grid, a_nodes_full)
 
 
+def eps_grid_all_groups(model, node_lo_ix, node_w_ix, b_centers):
+    """`(K, n_x, n_b)`: the class's exact selection evaluated at EVERY
+    point of the shape's own tabulation grid, `s = 0`, for EVERY depth
+    group AT ONCE (brief item 1) -- one vectorised pass over the
+    flattened `(group, x, b)` cartesian product, reading `model`'s own
+    stored `eps_table`/`b_grid` directly by group INDEX rather than
+    through `PassFractionModel.evaluate`'s per-source nearest-centre
+    search (`DepthGroups.assign_group`): every group is wanted here, by
+    construction, so a lookup that finds the nearest of `K` centres for
+    each of `K` queried rows would cost `O(K^2)` for nothing. The node
+    blend and the `b_grid`-to-`b_centers` interpolation are the same
+    arithmetic `PassFractionModel._eps_curve`/`evaluate` do. Independent
+    of tile: reused by every tile touching this node[, PAHC limit]."""
+    n_a = model.a_nodes.size
+    lo = np.clip(node_lo_ix, 0, n_a - 1)
+    hi = np.clip(node_lo_ix + 1, 0, n_a - 1)
+    table = model.eps_table                              # (K, n_a, n_b_table)
+    c_lo, c_hi = table[:, lo, :], table[:, hi, :]         # (K, n_x, n_b_table)
+    w = node_w_ix[None, :, None]
+    curve = np.clip((1.0 - w) * c_lo + w * c_hi, 0.0, 1.0)
+
+    b_grid = model.b_grid
+    shifted = np.clip(b_centers, b_grid[0], b_grid[-1])
+    idx = np.clip(np.searchsorted(b_grid, shifted) - 1, 0, b_grid.size - 2)
+    span = b_grid[idx + 1] - b_grid[idx]
+    safe_span = np.where(span > 0.0, span, 1.0)
+    t = np.where(span > 0.0, (shifted - b_grid[idx]) / safe_span, 0.0)
+    eps = curve[:, :, idx] * (1.0 - t)[None, None, :] + curve[:, :, idx + 1] * t[None, None, :]
+    return np.clip(eps, 0.0, 1.0).astype(np.float32)
+
+
+def _shift_density_cells(density, k):
+    """`(..., n_b)`: `density` rolled `k` whole cells along its own
+    uniform `log10 B` axis (brief item 2) -- the common-mode shift the
+    old scheme applied to the selection table, moved onto the shape's
+    density instead, so it is the small per-tile density that varies
+    with the shift, not a per-source table. Interior cells simply move,
+    `new[..., j] = density[..., j + k]`; any mass a plain move would push
+    past either edge piles up on that edge instead, preserving, for
+    every fixed `eps`, `Sum_i density[i] . eps[clip(i - k, 0, n_b - 1)]
+    == Sum_j new[j] . eps[j]` -- the same edge-clamped extension the
+    class's own selection table always used at its `log10 B` boundary."""
+    n_b = density.shape[-1]
+    if k == 0:
+        return density
+    out = np.zeros_like(density)
+    if k > 0:
+        kk = min(k, n_b - 1)
+        out[..., 0] = density[..., :kk + 1].sum(axis=-1)
+        rest = n_b - 1 - kk
+        if rest > 0:
+            out[..., 1:1 + rest] = density[..., kk + 1:kk + 1 + rest]
+    else:
+        m = min(-k, n_b - 1)
+        out[..., -1] = density[..., n_b - 1 - m:].sum(axis=-1)
+        rest = n_b - 1 - m
+        if rest > 0:
+            out[..., n_b - 1 - rest:n_b - 1] = density[..., :rest]
+    return out
+
+
 def eps_base_grid(model, node_lo_ix, node_w_ix, b_centers, group_centre_row):
     """`(n_x, n_b)`: the class's exact selection evaluated at EVERY point
-    of the shape's own tabulation grid, `s = 0`, one depth-group centre --
-    ONE vectorised `PassFractionModel.evaluate` call over the full `(x,
-    b)` cartesian product (module docstring: this, not a b-only marginal,
-    is the "distinct integral" the brief names; the shape's own `a`
-    dependence is not thrown away). Independent of tile: reused by every
-    tile sharing this (node[, limit], group)."""
+    of the shape's own tabulation grid, `s = 0`, one NAMED depth-group
+    centre -- the algebraic acceptance check's own direct-vs-approx
+    comparison (`algebraic_check`) reads exactly one group, one node, one
+    tile, so it evaluates one group's grid rather than every group's."""
     n_x, n_b = node_lo_ix.size, b_centers.size
     node_lo_q = np.repeat(node_lo_ix, n_b)
     node_w_q = np.repeat(node_w_ix, n_b)
@@ -220,19 +279,13 @@ def eps_base_grid(model, node_lo_ix, node_w_ix, b_centers, group_centre_row):
 
 def shift_sum(density_batch, eps_base, b_centers, s_values):
     """`(n_source,)`: `Sum_x,b density_batch[s,x,b] . eps_base[x, b - s]`
-    for every source sharing this `(node[, limit], group)` combination,
-    regardless of tile -- `density_batch[i]` is source `i`'s OWN tile's
-    stored density slab (gathered by fancy indexing on `TILE_ID`,
-    `grouped_eval`), `eps_base` shifted along `log10 B` by each source's
-    own, exactly continuous common-mode depth shift `s` (the algebraic
-    identity `prior.selection.PassFractionModel` itself uses: a `log10 B`
-    shift by `-s` is exactly a limit shift by `+s`) via one linear
-    interpolation, vectorised over every source sharing the combination
-    at once (`np.einsum`, never a per-source or per-grid-point python
-    loop) -- this is the brief's "interpolating in s where s varies
-    within a group by less than the table's b cell": the shift is
-    continuous, not bucketed, and the interpolation's own error is
-    bounded by the b-grid's own cell width."""
+    for a small direct-vs-approx comparison (`algebraic_check`), at one
+    tile and one node -- `eps_base` shifted along `log10 B` by each
+    source's own, exactly continuous common-mode depth shift `s` (the
+    algebraic identity `prior.selection.PassFractionModel` itself uses: a
+    `log10 B` shift by `-s` is exactly a limit shift by `+s`) via one
+    linear interpolation, vectorised over the batch at once (never a
+    per-source or per-grid-point python loop)."""
     n_x, n_b = eps_base.shape
     s_values = np.asarray(s_values, dtype=np.float64)
     shifted = b_centers[None, :] - s_values[:, None]
@@ -248,70 +301,102 @@ def shift_sum(density_batch, eps_base, b_centers, s_values):
 
 
 # ---------------------------------------------------------------------------
-# one distinct (node[, limit], group) evaluation, joblib over combinations
+# one distinct (node[, limit]) evaluation: every group and every source
+# sharing it read off one matrix product (brief items 1-3)
 # ---------------------------------------------------------------------------
 
-def grouped_eval(model, shape, tile_id, node_idx_shape, s, group_idx, limit_idx=None, n_jobs=1):
-    """`(n_source,)`: `eps_base_grid` built once per distinct `(node[,
-    limit], group)` combination present ANYWHERE in the region -- tile-
-    independent, so this is the "one integral per distinct node[, limit,
-    group] covering every source" the reading note and the brief both
-    name -- then `shift_sum` applied to every source sharing that
-    combination AT ONCE, its own tile's density slab gathered by fancy
-    indexing on `TILE_ID` (`shape.density_table[tile_id[sel], node]`),
-    never a per-tile inner loop: the tile only ever enters as an index
-    into an already-built array, so the python-level loop this function
-    runs is over the combination axis (rule 8's "largest iterator" here
-    is the number of distinct combinations, not the number of tiles --
-    tiles enter only as a fancy-index gather, not a loop). Rule 8: joblib
-    over that combination axis."""
+def grouped_eval(model, shape, tile_id, node_idx_shape, s, group_idx, limit_idx=None):
+    """`((n_source,), n_combos, n_s)`: the class's own selected fraction
+    at every source's own queried shape node[, PAHC limit], the number of
+    distinct node[, limit] combinations evaluated, and the number of
+    distinct whole-cell shift bins used. Per DISTINCT
+    node[, limit] value present ANYWHERE in the region -- never per
+    source, never per depth group -- `eps_grid_all_groups` builds every
+    group's own selection grid at once; the region's own tiles' stored
+    density is read once (float32, never the whole population, only the
+    tiles this region's sources actually sit in) and rolled by each of
+    the handful of DISTINCT whole-cell common-mode shifts the region's
+    sources round to (`_shift_density_cells`, `s` binned at the shape's
+    own `log10 B` cell); every (tile, shift-bin) x group integral at this
+    node is then the one matrix product `S @ E`. A source reads its own
+    (tile, shift-bin, group) entry off that matrix and blends its own
+    fractional shift residual between the two neighbouring whole-cell
+    rolls -- both by fancy indexing, never a python loop over sources,
+    groups, or shifts. The only python loop left is over the distinct
+    node[, limit] values."""
     b_centers = shape.b_centers
     x_centers = shape.x_centers
     a_nodes_full = model.a_nodes
+    cell = float(b_centers[1] - b_centers[0])
+
+    s = np.asarray(s, dtype=np.float64)
+    s_cells = s / cell
+    k_lo = np.floor(s_cells).astype(np.int64)
+    k_hi = k_lo + 1
+    frac = (s_cells - k_lo).astype(np.float32)
+    distinct_k = np.unique(np.concatenate([k_lo, k_hi]))
+    klo_idx = np.searchsorted(distinct_k, k_lo)
+    khi_idx = np.searchsorted(distinct_k, k_hi)
+    n_s = int(distinct_k.size)
+
+    uniq_tiles, tile_pos = np.unique(tile_id, return_inverse=True)
+    tile_pos = tile_pos.reshape(-1)
+    n_tile_used = uniq_tiles.size
 
     if limit_idx is None:
-        combo_keys = np.stack([node_idx_shape, group_idx], axis=1)
+        combo_keys = node_idx_shape.astype(np.int64)
     else:
-        combo_keys = np.stack([node_idx_shape, limit_idx, group_idx], axis=1)
-    uniq_combos, inverse = np.unique(combo_keys, axis=0, return_inverse=True)
+        combo_keys = (node_idx_shape.astype(np.int64) * (shape.limit_log.size + 1)
+                     + np.asarray(limit_idx, dtype=np.int64))
+    uniq_combos, inverse = np.unique(combo_keys, return_inverse=True)
     inverse = inverse.reshape(-1)
 
     node_bracket_cache = {}
+    out = np.empty(tile_id.shape[0], dtype=np.float64)
 
-    def _one_combo(c):
-        combo = uniq_combos[c]
-        nv, gv = int(combo[0]), int(combo[-1])
-        lv = int(combo[1]) if limit_idx is not None else None
+    for c in range(uniq_combos.shape[0]):
+        sel = np.flatnonzero(inverse == c)
+        nv = int(node_idx_shape[sel[0]])
+        lv = int(limit_idx[sel[0]]) if limit_idx is not None else None
+
         if nv not in node_bracket_cache:
             node_bracket_cache[nv] = _node_a_bracket(x_centers, shape.shape_nodes[nv], a_nodes_full)
         node_lo_ix, node_w_ix = node_bracket_cache[nv]
-        group_centre_row = model.knots.group_centres[gv:gv + 1]
-        eps_base = eps_base_grid(model, node_lo_ix, node_w_ix, b_centers, group_centre_row)
 
-        sel = np.flatnonzero(inverse == c)
-        tiles_here = tile_id[sel]
-        density_batch = (shape.density_table[tiles_here, nv] if lv is None
-                         else shape.density_table[tiles_here, nv, lv]).astype(np.float64)
-        vals = shift_sum(density_batch, eps_base, b_centers, s[sel])
-        return sel, vals
+        e_node = eps_grid_all_groups(model, node_lo_ix, node_w_ix, b_centers)
+        n_k = e_node.shape[0]
+        e_flat = e_node.reshape(n_k, -1)
 
-    results = Parallel(n_jobs=n_jobs, prefer="threads")(
-        delayed(_one_combo)(c) for c in range(uniq_combos.shape[0]))
-    out = np.empty(tile_id.shape[0], dtype=np.float64)
-    for sel, vals in results:
-        out[sel] = vals
-    return out, uniq_combos.shape[0]
+        density_slab = (shape.density_table[uniq_tiles, nv] if lv is None
+                        else shape.density_table[uniq_tiles, nv, lv]).astype(np.float32)
+        n_x, n_b = density_slab.shape[1], density_slab.shape[2]
+
+        s_mat = np.empty((n_tile_used, n_s, n_x * n_b), dtype=np.float32)
+        for si in range(n_s):
+            s_mat[:, si, :] = _shift_density_cells(density_slab, int(distinct_k[si])).reshape(n_tile_used, -1)
+
+        result = (s_mat.reshape(n_tile_used * n_s, -1) @ e_flat.T).reshape(n_tile_used, n_s, n_k)
+
+        ti = tile_pos[sel]
+        g = group_idx[sel]
+        lo_val = result[ti, klo_idx[sel], g]
+        hi_val = result[ti, khi_idx[sel], g]
+        out[sel] = (1.0 - frac[sel]) * lo_val + frac[sel] * hi_val
+
+    return out, uniq_combos.shape[0], n_s
 
 
 # ---------------------------------------------------------------------------
 # STAR / AGB / PAHC: the selected fraction E[eps] and the tile amplitude
 # ---------------------------------------------------------------------------
 
-def family_e_eps(config, region, cls, cond, n_jobs):
-    """`(e_eps, n_calls, shape, model)`: the selected-fraction normaliser
-    `Z_C = E[eps]` (spec section 0.2) for one family class, at every
-    source, node-blended (PAHC: node- and limit-blended) exactly as
-    `prior.star_shapes.ClassShape.density` blends the shape itself."""
+def family_e_eps(config, region, cls, cond):
+    """`(e_eps, n_calls, n_s, shape, model)`: the selected-fraction
+    normaliser `Z_C = E[eps]` (spec section 0.2) for one family class, at
+    every source, node-blended (PAHC: node- and limit-blended) exactly as
+    `prior.star_shapes.ClassShape.density` blends the shape itself.
+    `n_s` is the number of distinct whole-cell common-mode shift bins
+    the region's own sources round to (brief item 2)."""
     shape = star_shapes.read(config, region, cls)
     model = read_class_model(config, region, cls)
     group_idx = model.knots.assign_group(cond["delta5"])
@@ -321,27 +406,27 @@ def family_e_eps(config, region, cls, cond, n_jobs):
     node_hi_shape = np.minimum(node_lo_shape + 1, shape.shape_nodes.size - 1)
 
     if cls != "pahc":
-        val_lo, n_lo = grouped_eval(model, shape, cond["tile_id"], node_lo_shape,
-                                    cond["s"], group_idx, n_jobs=n_jobs)
-        val_hi, n_hi = grouped_eval(model, shape, cond["tile_id"], node_hi_shape,
-                                    cond["s"], group_idx, n_jobs=n_jobs)
+        val_lo, n_lo, n_s = grouped_eval(model, shape, cond["tile_id"], node_lo_shape,
+                                         cond["s"], group_idx)
+        val_hi, n_hi, _ = grouped_eval(model, shape, cond["tile_id"], node_hi_shape,
+                                       cond["s"], group_idx)
         e_eps = (1.0 - t_node) * val_lo + t_node * val_hi
-        return e_eps, n_lo + n_hi, shape, model
+        return e_eps, n_lo + n_hi, n_s, shape, model
 
     limit_lo, t_limit = column_grid.bracket(np.log10(cond["f_lim8"]), shape.limit_log)
     limit_hi = np.minimum(limit_lo + 1, shape.limit_log.size - 1)
-    v_lolo, n1 = grouped_eval(model, shape, cond["tile_id"], node_lo_shape,
-                              cond["s"], group_idx, limit_idx=limit_lo, n_jobs=n_jobs)
-    v_lohi, n2 = grouped_eval(model, shape, cond["tile_id"], node_lo_shape,
-                              cond["s"], group_idx, limit_idx=limit_hi, n_jobs=n_jobs)
-    v_hilo, n3 = grouped_eval(model, shape, cond["tile_id"], node_hi_shape,
-                              cond["s"], group_idx, limit_idx=limit_lo, n_jobs=n_jobs)
-    v_hihi, n4 = grouped_eval(model, shape, cond["tile_id"], node_hi_shape,
-                              cond["s"], group_idx, limit_idx=limit_hi, n_jobs=n_jobs)
+    v_lolo, n1, n_s = grouped_eval(model, shape, cond["tile_id"], node_lo_shape,
+                                   cond["s"], group_idx, limit_idx=limit_lo)
+    v_lohi, n2, _ = grouped_eval(model, shape, cond["tile_id"], node_lo_shape,
+                                 cond["s"], group_idx, limit_idx=limit_hi)
+    v_hilo, n3, _ = grouped_eval(model, shape, cond["tile_id"], node_hi_shape,
+                                 cond["s"], group_idx, limit_idx=limit_lo)
+    v_hihi, n4, _ = grouped_eval(model, shape, cond["tile_id"], node_hi_shape,
+                                 cond["s"], group_idx, limit_idx=limit_hi)
     val_lo = (1.0 - t_limit) * v_lolo + t_limit * v_lohi
     val_hi = (1.0 - t_limit) * v_hilo + t_limit * v_hihi
     e_eps = (1.0 - t_node) * val_lo + t_node * val_hi
-    return e_eps, n1 + n2 + n3 + n4, shape, model
+    return e_eps, n1 + n2 + n3 + n4, n_s, shape, model
 
 
 def family_amplitude(config, region, cls, cond):
@@ -430,6 +515,33 @@ def gal_counts(config, region, cond):
 # s = 0, the region's own median depth group
 # ---------------------------------------------------------------------------
 
+def _evaluate_one_group(model, k, node_lo, node_w, log10_b):
+    """`(n,)`: `model.evaluate` at `s = 0`, restricted to the ONE named
+    depth group `k` -- the same node blend and `b_grid` interpolation
+    `PassFractionModel.evaluate` does, reading `eps_table[k]` directly
+    rather than through `DepthGroups.assign_group`'s nearest-centre
+    search over every one of the class's `K` groups: the algebraic
+    check's own per-star population (`algebraic_check`) can run into the
+    millions of rows, and every one of them already wants this same
+    group, so a per-row search over `K` centres would cost `K` times
+    more for an answer already known."""
+    n_a = model.a_nodes.size
+    lo = np.clip(node_lo, 0, n_a - 1)
+    hi = np.clip(node_lo + 1, 0, n_a - 1)
+    row = model.eps_table[k]
+    curve = np.clip((1.0 - node_w)[:, None] * row[lo] + node_w[:, None] * row[hi], 0.0, 1.0)
+    b_grid = model.b_grid
+    log10_b = np.asarray(log10_b, dtype=np.float64)
+    shifted = np.clip(log10_b, b_grid[0], b_grid[-1])
+    idx = np.clip(np.searchsorted(b_grid, shifted) - 1, 0, b_grid.size - 2)
+    span = b_grid[idx + 1] - b_grid[idx]
+    safe_span = np.where(span > 0.0, span, 1.0)
+    t = np.where(span > 0.0, (shifted - b_grid[idx]) / safe_span, 0.0)
+    row_idx = np.arange(curve.shape[0])
+    eps = curve[row_idx, idx] * (1.0 - t) + curve[row_idx, idx + 1] * t
+    return np.clip(eps, 0.0, 1.0)
+
+
 def algebraic_check(shape, model, pop, cls, node_idx=0, limit_idx=0):
     """`(direct, approx, dev)`: at shape node `node_idx` (PAHC: also
     limit `limit_idx`) and `s = 0`, the median-group `eps` -- the DIRECT
@@ -465,9 +577,7 @@ def algebraic_check(shape, model, pop, cls, node_idx=0, limit_idx=0):
 
     a_i = a_node * u
     node_lo_i, node_w_i = column_grid.bracket(a_i, model.a_nodes)
-    delta5_rep = np.broadcast_to(group_centre, (a_i.size, group_centre.shape[1]))
-    eps_i = model.evaluate(node_lo=node_lo_i, node_w=node_w_i, log10_b=logb,
-                           s=np.zeros(a_i.size), delta_5=delta5_rep)
+    eps_i = _evaluate_one_group(model, k_mid, node_lo_i, node_w_i, logb)
     direct = float(np.sum(w * eps_i) / np.sum(w))
 
     node_lo_ix, node_w_ix = _node_a_bracket(shape.x_centers, a_node, model.a_nodes)
@@ -593,18 +703,19 @@ def _build_one(config, region):
     import time
     t0 = time.time()
     cond = source_conditioning(config, region)
-    n_jobs = config.n_jobs
 
     out = {}
     checks = {}
     pop = star_shapes.read_population(config, region)
     n_calls_total = 0
+    shift_bin_report = []
     for cls in FAMILY_CLASSES:
-        e_eps, n_calls, shape, model = family_e_eps(config, region, cls, cond, n_jobs)
+        e_eps, n_calls, n_s, shape, model = family_e_eps(config, region, cls, cond)
         amp = family_amplitude(config, region, cls, cond)
         out["N_%s" % cls.upper()] = amp * e_eps
         out["Z_%s" % cls.upper()] = e_eps
         n_calls_total += n_calls
+        shift_bin_report.append((cls, n_s))
         checks[cls] = algebraic_check(shape, model, pop, cls, node_idx=0, limit_idx=0)
 
     n_gal, z_gal, gal_model, fazio_params = gal_counts(config, region, cond)
@@ -616,6 +727,9 @@ def _build_one(config, region):
 
     for line in report(config, region, cond, out, wall_s, n_calls_total):
         print(line, flush=True)
+    for cls, n_s in shift_bin_report:
+        print("counts_star_family: %s: %s: %d distinct whole-cell log10 B shift bins (brief item 2)"
+             % (region, cls, n_s), flush=True)
     for line in report_gal_check(region, cond, n_gal, fazio_params):
         print(line, flush=True)
     for line in report_algebraic_checks(region, checks):
