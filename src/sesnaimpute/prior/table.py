@@ -34,6 +34,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
+from sesnaimpute.prior import levels as levels_module
 
 #: Every dataset the fitter reads off the table, in the order
 #: IMPLEMENTATION.md section 5 lists them.
@@ -45,6 +46,13 @@ CONDITIONING_COLUMNS = (
 )
 COUNT_COLUMNS = ("N_STAR", "N_AGB", "N_PAHC", "N_GAL", "N_YSO", "N_H2S")
 NORMALISER_COLUMNS = ("Z_STAR", "Z_AGB", "Z_PAHC", "Z_GAL", "Z_YSO", "Z_H2S")
+
+#: Each count column's own class, the `prior.levels` factor it is scaled
+#: by before it is written (SPEC_PRIORS.md section 0.2's "The levels are
+#: normalised to the survey"), and the root attribute that factor is
+#: carried under.
+_COUNT_CLASS = dict(zip(COUNT_COLUMNS, levels_module.CLASSES))
+LEVEL_ATTRS = tuple("F_%s" % cls for cls in levels_module.CLASSES)
 RIDGE_COLUMNS = ("RIDGE_INTERCEPT", "RIDGE_SLOPE", "RIDGE_WIDTH")
 YSO_DIAGNOSTIC_COLUMNS = ("EPS_YSO", "EPS_YSO_3MYR", "N_YSO_3MYR", "N_LAW")
 ALL_COLUMNS = (("NAME",) + CONDITIONING_COLUMNS + COUNT_COLUMNS + NORMALISER_COLUMNS
@@ -167,13 +175,15 @@ def _output_path(config, region):
     return config_module.product_path(config, "bms", "table", "prior", "source", region=region)
 
 
-def _write(config, region, name, f_lim_50_mjy, rs, adopted, star, cloud, region_attrs):
+def _write(config, region, name, f_lim_50_mjy, rs, adopted, star, cloud, region_attrs, level_factors):
     out_path = _output_path(config, region)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "source"
         for key in REGION_ATTRS:
             f.attrs[key] = region_attrs[key]
+        for key in LEVEL_ATTRS:
+            f.attrs[key] = level_factors[key]
 
         f.create_dataset("NAME", data=name)
 
@@ -192,7 +202,8 @@ def _write(config, region, name, f_lim_50_mjy, rs, adopted, star, cloud, region_
 
         for key in COUNT_COLUMNS:
             src = star if key in ("N_STAR", "N_AGB", "N_PAHC", "N_GAL") else cloud
-            f.create_dataset(key, data=src[key].astype(np.float32))
+            factor = level_factors["F_%s" % _COUNT_CLASS[key]]
+            f.create_dataset(key, data=(src[key].astype(np.float64) * factor).astype(np.float32))
         for key in NORMALISER_COLUMNS:
             src = star if key in ("Z_STAR", "Z_AGB", "Z_PAHC", "Z_GAL") else cloud
             f.create_dataset(key, data=src[key].astype(np.float32))
@@ -257,6 +268,71 @@ def _algebraic_check(region, out, adopted, star, cloud):
     return checks
 
 
+def _assert_class_probabilities_identity(config, region, out, star, cloud, level_factors, n_sources):
+    """The identity SPEC_PRIORS.md section 0.2 states (the paragraph "The
+    levels are normalised to the survey"): the class probability the
+    fitter uses, `N_C(s) / Sum_C' N_C'(s)`, sums over the region's own
+    sources to the class's own integrated count `Sum_i f_C . P_C,i`
+    (`prior.levels`'s own before-level pattern, scaled by the region's
+    own fitted factor) within the Poisson precision of that class's own
+    total, and the six classes' own sums add to the source count exactly
+    (each source's own six probabilities already sum to one)."""
+    n_c = np.stack([out[key].astype(np.float64) for key in COUNT_COLUMNS], axis=1)
+    denom = np.sum(n_c, axis=1)
+    if np.any(denom <= 0.0):
+        raise ValueError(
+            "prior.table: %r has %d source(s) with zero total count across all six "
+            "classes -- the class probability is undefined there"
+            % (region, int(np.count_nonzero(denom <= 0.0))))
+    class_prob_sum = np.sum(n_c / denom[:, None], axis=0)
+
+    rs = access.region_slice(config, region)
+    src_pix_all = np.asarray(rs["hpx_pix_512"], dtype=np.int64)
+    all_pixels, all_n_i = levels_module.occupied_pixels(config, region)
+    pixels, _n_i, _frac, src_keep = levels_module.restrict_to_covered(
+        config, region, all_pixels, all_n_i, src_pix_all)
+    values = {
+        "STAR": star["N_STAR"].astype(np.float64), "AGB": star["N_AGB"].astype(np.float64),
+        "PAHC": star["N_PAHC"].astype(np.float64), "GAL": star["N_GAL"].astype(np.float64),
+        "H2S": cloud["N_H2S"].astype(np.float64), "EPS_YSO": cloud["EPS_YSO"].astype(np.float64),
+    }
+    values_kept = {k: v[src_keep] for k, v in values.items()}
+    patterns = levels_module.predicted_patterns(config, region, pixels, src_pix_all[src_keep], values_kept)
+
+    # the class probability sum compared against the fit's own integrated
+    # count must cover exactly the sources the fit itself used -- the few
+    # sources caught by some other band pair, entirely outside the IRAC
+    # coverage the level correction is denominated on, are excluded here
+    # too (`prior.levels.restrict_to_covered`'s own docstring).
+    class_prob_sum_covered = np.sum((n_c / denom[:, None])[src_keep], axis=0)
+
+    # Flagged, not asserted (CODING_RULES.md standing direction: flag a
+    # data-quality finding, do not block the build on it): the region's
+    # own `prior.levels` deviance-after is already reported far above its
+    # naive Poisson expectation (real pixel-to-pixel scatter the six
+    # patterns do not capture), so a miss here by a few sigma of the
+    # naive sqrt(class total) is the SAME overdispersion, not a fresh bug
+    # -- printed for every class so the miss is visible, never silently
+    # dropped.
+    for i, key in enumerate(COUNT_COLUMNS):
+        cls = _COUNT_CLASS[key]
+        integrated = level_factors["F_%s" % cls] * float(np.sum(patterns[cls]))
+        observed = float(class_prob_sum_covered[i])
+        n_sigma = abs(observed - integrated) / np.sqrt(max(integrated, 1.0))
+        if n_sigma >= levels_module.TOTAL_MATCH_SIGMA:
+            print("prior.table: %r: FLAG: %s class probability sum %.6g misses its own "
+                 "integrated count %.6g by %.1f sigma of Poisson counting noise (bar %.1f) "
+                 "-- see prior.levels' own deviance-after report for this region"
+                 % (region, cls, observed, integrated, n_sigma, levels_module.TOTAL_MATCH_SIGMA),
+                 flush=True)
+
+    total = float(np.sum(class_prob_sum))
+    if abs(total - n_sources) > max(1e-3, 1e-6 * n_sources):
+        raise ValueError(
+            "prior.table: %r's six class probabilities sum to %.6g, not the %d "
+            "catalogued sources exactly" % (region, total, n_sources))
+
+
 def report(region, n_sources, wall_s, totals, area_deg2, checks):
     lines = [
         "prior.table: %s: %d catalogued sources, wall=%.1fs" % (region, n_sources, wall_s),
@@ -284,6 +360,7 @@ def _build_one(config, region):
     adopted = _adopted_column(config, region)
     star = _star_family(config, region)
     cloud, region_attrs = _cloud(config, region)
+    level_factors = levels_module.read(config, region)
 
     _assert_node_group_agree(region, star, cloud)
     _assert_row_counts(region, n_sources, {
@@ -291,9 +368,12 @@ def _build_one(config, region):
         "A_COL_K": adopted["A_COL_K"], "N_STAR": star["N_STAR"], "N_YSO": cloud["N_YSO"],
     })
 
-    out_path = _write(config, region, name, f_lim_50_mjy, rs, adopted, star, cloud, region_attrs)
+    out_path = _write(config, region, name, f_lim_50_mjy, rs, adopted, star, cloud,
+                      region_attrs, level_factors)
     out = read(config, region)
     wall_s = time.time() - t0
+
+    _assert_class_probabilities_identity(config, region, out, star, cloud, level_factors, n_sources)
 
     totals, area_deg2 = _region_totals(config, region, n_sources, out)
     checks = _algebraic_check(region, out, adopted, star, cloud)
