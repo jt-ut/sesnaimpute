@@ -33,10 +33,13 @@ renormalising against it.
 
 Sources sharing a sightline do NOT share one column: `A_COL_K` is a
 per-source adopted value, and the closed form reads it exactly, not
-through a shared node table -- `bin_mass_exact` is a plain vectorised
-`(n_source, n_edges)` closed-form evaluation, batched over sources
-(`sesnaimpute.batches.batches`) so one batch's transient array stays
-bounded regardless of a region's own source count.
+through a shared node table -- `_bin_mass_batch` is a plain vectorised
+`(batch, n_edges)` closed-form evaluation. `build_region` runs its whole
+per-source pipeline in source batches (`sesnaimpute.batches.batches`):
+every per-source array, the H2S selection's own `EPS` table above all
+(`n_source, 8, 41)`, is read from its own product file by row-range slice
+inside the batch loop and never held for the whole region at once, so
+memory stays bounded regardless of a region's own source count.
 
 The `NODE_LO`/`NODE_W` bracket (`prior.column_grid.bracket`) is still
 computed and written to the output product, since other classes' node
@@ -64,68 +67,44 @@ from sesnaimpute.granules import access
 from sesnaimpute.prior import column_grid as column_grid_module
 from sesnaimpute.prior import yso as yso_module
 
-#: Per-batch memory budget for `bin_mass_exact`'s closed-form evaluation:
-#: well under the 8 GB ceiling regardless of a region's own source count.
-BIN_MASS_BUDGET_BYTES = 256 << 20
+#: Per-batch memory budget for `build_region`'s own source loop: every
+#: per-source array it reads has to fit `_build_row_bytes(...)` times the
+#: batch size under this ceiling, well inside the 8 GB process limit.
+BUILD_REGION_BUDGET_BYTES = 512 << 20
 
 #: The anchor pixelisation the section 6.4 item 1 check integrates over
 #: (`prior.yso.NSIDE_ANCHOR`, the same nside `prior.young_stars` uses for
 #: "young stars in the anchors").
 _OMEGA_PIX512_DEG2 = hp.nside2pixarea(yso_module.NSIDE_ANCHOR, degrees=True)
 
+#: Row-identity columns `granules.access.per_source` would need to permute
+#: a "source"-granule file's rows into catalogue order; none of this
+#: module's per-source products carry one (checked at read time,
+#: `_check_no_permutation`), so a batch's own disk row range already is
+#: its catalogue-row range and a direct `h5py` slice needs no reordering.
+_ROW_IDENTITY_COLUMNS = ("CATALOG_ROW", "ROWINDEX", "ROW")
+
+
+def _check_no_permutation(f, path):
+    found = [c for c in _ROW_IDENTITY_COLUMNS if c in f]
+    if found:
+        raise ValueError(
+            "prior.counts_cloud: %s carries a row-identity column %s -- "
+            "batched reads assume disk row order is already catalogue-row "
+            "order (granules.access.per_source's fast path); this file "
+            "needs the permuting read instead" % (path, found))
+
 
 # ---------------------------------------------------------------------
-# per-region reads
+# per-region reads (small, whole-region: one row per sightline or one row
+# per region, never one row per source)
 # ---------------------------------------------------------------------
-
-def _adopted_columns(config, region):
-    """`(a_col, sigma_col, provenance)`, every source of `region`, in
-    catalogue row order (the same adopted-column product
-    `prior.yso.law_count` reads)."""
-    path = config_module.product_path(config, "sky/derived", "adopted",
-                                       "column", "source", region=region)
-    cols = access.per_source(config, region, path,
-                              ["A_COL_K", "A_COL_SIG_K", "A_COL_PROVENANCE"])
-    return (np.asarray(cols["A_COL_K"], dtype=float),
-            np.asarray(cols["A_COL_SIG_K"], dtype=float),
-            np.asarray(cols["A_COL_PROVENANCE"]))
-
-
-def _yso_source_selection(config, region):
-    """`X_LADDER`, `G_1MYR`, `G_3MYR` (`n_source, n_x`), `M_LIM_8UM_1MYR`
-    and `IMF_FRAC_ABOVE_MLIM` (`n_source,`) -- `prior.yso_selection`'s
-    own per-source product."""
-    path = config_module.product_path(config, "bms", "yso", "selection", "source", region=region)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "prior.counts_cloud: no YSO selection product for region %r at %s "
-            "-- run the 'prior.yso_selection' RUNBOOK line first" % (region, path))
-    with h5py.File(path, "r") as f:
-        return dict(x_ladder=np.asarray(f["X_LADDER"][:], dtype=np.float64),
-                    g_1myr=np.asarray(f["G_1MYR"][:], dtype=np.float64),
-                    g_3myr=np.asarray(f["G_3MYR"][:], dtype=np.float64),
-                    m_lim_8um_1myr=np.asarray(f["M_LIM_8UM_1MYR"][:], dtype=np.float64),
-                    imf_frac_above_mlim=np.asarray(f["IMF_FRAC_ABOVE_MLIM"][:], dtype=np.float64))
-
-
-def _h2s_source_selection(config, region):
-    """`X_LADDER`, `EPS` (`n_source, n_x, n_sigma`) -- `prior.h2s`'s own
-    per-source product."""
-    path = config_module.product_path(config, "bms", "h2s", "selection", "source", region=region)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "prior.counts_cloud: no H2S selection product for region %r at %s "
-            "-- run the 'prior.h2s' RUNBOOK line first" % (region, path))
-    with h5py.File(path, "r") as f:
-        return dict(x_ladder=np.asarray(f["X_LADDER"][:], dtype=np.float64),
-                    eps=np.asarray(f["EPS"][:], dtype=np.float64))
-
 
 def _h2s_region_product(config, region):
     """`ETA`, `EPS_EXT`, the brightness lognormal, `LOG10_SIGMA_GRID`
     (`prior.h2s.build`'s own per-region product; the tabulated per-source
     `A_NODES`/`EPS` it used to carry now live in the per-source selection
-    product, `_h2s_source_selection`)."""
+    product, read by `build_region` in its own batch loop)."""
     path = config_module.product_path(config, "bms", "h2s", "prior", "region", region=region)
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -137,18 +116,6 @@ def _h2s_region_product(config, region):
             logsig_mean=float(f["LOGSIG_MEAN"][()]), logsig_std=float(f["LOGSIG_STD"][()]),
             log10_sigma_grid=np.asarray(f["LOG10_SIGMA_GRID"][:], dtype=np.float64),
         )
-
-
-def _n_law_blurred(config, region):
-    """`N_LAW_BLURRED_DEG2`, every source (`prior.h2s.build_law_blurred`'s
-    own per-source product)."""
-    path = config_module.product_path(config, "bms", "h2s", "law-blurred", "source", region=region)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "prior.counts_cloud: no H2S law-blurred product for region %r at %s "
-            "-- run the 'prior.h2s' RUNBOOK line first" % (region, path))
-    cols = access.per_source(config, region, path, ["N_LAW_BLURRED_DEG2"])
-    return np.asarray(cols["N_LAW_BLURRED_DEG2"], dtype=np.float64)
 
 
 def _ridge(config, region):
@@ -164,61 +131,29 @@ def _ridge(config, region):
 
 # ---------------------------------------------------------------------
 # the exact extinction-axis integral: closed-form cdf differences at
-# each source's own column and own ladder, batched over sources
+# each source's own column and own ladder, one already-loaded batch
 # ---------------------------------------------------------------------
 
-def _bin_mass_batch(shape, x_ladder, rows, a_col, sigma_col, start, stop):
-    """One batch's own bin masses (`bin_mass_exact`'s inner step)."""
-    n_x = x_ladder.size
-    nb = stop - start
-    rows_rep = np.repeat(rows[start:stop], n_x)
-    a_col_rep = np.repeat(a_col[start:stop], n_x)
-    sigma_rep = np.repeat(sigma_col[start:stop], n_x)
-    a_rep = (x_ladder[None, :] * a_col[start:stop, None]).reshape(-1)
-    cdf = shape.cdf_exact(a_rep, rows_rep, a_col_rep, sigma_rep).reshape(nb, n_x)
-    return start, np.diff(cdf, axis=1)
-
-
-def bin_mass_exact(shape, x_ladder, rows, a_col, sigma_col, n_jobs=1):
-    """`(n_src, n_x - 1)`: the exact mass `p(a | A_s)` places in each of
-    this source's own ladder bins, `a = X_LADDER . A_s` (SPEC_PRIORS.md
+def _bin_mass_batch(shape, x_ladder, rows, a_col, sigma_col):
+    """`(batch, n_x - 1)`: the exact mass `p(a | A_s)` places in each of
+    this batch's own ladder bins, `a = X_LADDER . A_s` (SPEC_PRIORS.md
     sections 6.2/7) -- the closed-form cdf (`YsoShape.cdf_exact`) at each
     source's own adopted column and measurement uncertainty, evaluated at
     every ladder point (scaled by that source's own column) and
-    differenced, batched over sources so one batch's transient arrays stay
-    under `BIN_MASS_BUDGET_BYTES`.
-
-    The dominant cost per expanded (source, ladder-point) row is not the
-    small `(batch, n_x)` cdf array itself but `cdf_exact`'s own internal
-    per-cell arrays, each `(expanded_batch, n_cell)` wide where `n_cell`
-    is the region's own embedding-profile cell count (a sightline
-    property, not fixed): the batch size has to shrink with `n_cell`, or
-    a region with a deep profile (many map cells) overruns the ceiling
-    regardless of `n_src`.
-
-    Batches are independent (each writes its own row range), so at
-    `n_jobs > 1` they run on a thread pool: the per-cell work is plain
-    numpy arithmetic on arrays wide enough (`n_cell`) that numpy releases
-    the GIL for most of it, so threads -- not processes -- get the
-    parallelism without copying `shape`'s own per-sightline arrays into
-    every worker."""
-    n_src = rows.size
+    differenced. Operates on one already-loaded batch (`build_region`'s
+    own source loop, item 3): the caller owns the batch size, since the
+    dominant cost per expanded (source, ladder-point) row is not this
+    function's own small `(batch, n_x)` cdf array but `cdf_exact`'s
+    internal per-cell arrays, each `(expanded_batch, n_cell)` wide where
+    `n_cell` is the region's own embedding-profile cell count."""
     n_x = x_ladder.size
-    n_cell = shape.p_u.shape[1]
-    out = np.empty((n_src, n_x - 1), dtype=np.float64)
-    # per source: n_x expanded rows, each holding about 9 arrays of width
-    # n_cell (+1) live at once inside one mixture component's closed form
-    # (the cell axis is evaluated in one vectorised pass, not a Python
-    # loop, so all of it is resident together rather than one cell at a
-    # time).
-    row_bytes = n_x * (9 * (n_cell + 1) * 8 + 2 * 8)
-    spans = list(batches_module.batches(n_src, row_bytes, BIN_MASS_BUDGET_BYTES))
-    results = Parallel(n_jobs=max(1, n_jobs), prefer="threads")(
-        delayed(_bin_mass_batch)(shape, x_ladder, rows, a_col, sigma_col, start, stop)
-        for start, stop in spans)
-    for start, diff in results:
-        out[start:start + diff.shape[0]] = diff
-    return out
+    nb = rows.size
+    rows_rep = np.repeat(rows, n_x)
+    a_col_rep = np.repeat(a_col, n_x)
+    sigma_rep = np.repeat(sigma_col, n_x)
+    a_rep = (x_ladder[None, :] * a_col[:, None]).reshape(-1)
+    cdf = shape.cdf_exact(a_rep, rows_rep, a_col_rep, sigma_rep).reshape(nb, n_x)
+    return np.diff(cdf, axis=1)
 
 
 def eps_yso_from_bin_mass(bin_mass, g_row):
@@ -270,81 +205,151 @@ def law_area_check(config, region):
 # per-region build
 # ---------------------------------------------------------------------
 
+#: The names, in write order, of `build_region`'s own output datasets --
+#: every per-source column of `bms/table/counts-cloud_table_source`
+#: (module docstring), preallocated once per region and filled by batch.
+_OUTPUT_COLUMNS = (
+    "SIGHTLINE_ROW", "NODE_LO", "NODE_W", "N_YSO", "N_YSO_3MYR",
+    "EPS_YSO", "EPS_YSO_3MYR", "N_LAW", "RIDGE_INTERCEPT", "RIDGE_SLOPE",
+    "RIDGE_WIDTH", "N_H2S", "EPS_H2S", "Z_YSO", "Z_H2S",
+    "M_LIM_8UM_1MYR", "IMF_FRAC_ABOVE_MLIM",
+)
+
+
+def _build_row_bytes(n_cell, n_x, n_sigma):
+    """The per-source byte budget `build_region`'s own batch loop sizes
+    itself against (item 3): the H2S selection's own `EPS` row, `n_x *
+    n_sigma` float64 (8 x 41 x 8 = 2,624 bytes at this survey's ladder and
+    sigma-grid widths) -- the largest single per-source array read --
+    plus the closed-form extinction integral's own working set for one
+    source (`_bin_mass_batch`'s docstring: `n_x` expanded rows, each
+    holding about 9 arrays of width `n_cell + 1` for one live mixture
+    component)."""
+    eps_row_bytes = n_x * n_sigma * 8
+    closed_form_row_bytes = n_x * (9 * (n_cell + 1) * 8 + 2 * 8)
+    return eps_row_bytes + closed_form_row_bytes
+
+
 def build_region(config, region):
-    """Computes every per-source dataset for one region (module
-    docstring)."""
+    """Computes and writes one region's `bms/table/counts-cloud_table_
+    source` product (module docstring), end to end on the same source
+    chunks throughout: every per-source array -- the adopted columns, the
+    YSO selection `G_1MYR`/`G_3MYR`, the H2S selection `EPS`, the blurred
+    law count, the ridge -- is read from its own product file by `h5py`
+    row-range slice inside the batch loop, never as a whole-region array,
+    and each batch's own results are written into the (preallocated)
+    output datasets before the next batch is read. `EPS`, at `(n_source,
+    8, 41)` float64, is by far the largest of them (`_build_row_bytes`):
+    at Cygnus X's 3,313,391 sources a whole-region read would be about
+    8.7 GB by itself, over the 8 GB ceiling before anything else runs.
+    Returns `(n_src, path)`.
+    """
     rs = access.region_slice(config, region)
     n_src = rs["n_sources"]
     sightline_row = np.asarray(rs["hpx256_row"], dtype=np.intp)
 
-    a_col, sigma_col, provenance = _adopted_columns(config, region)
-    nodes = column_grid_module.nodes(config)
-    node_lo, node_w = column_grid_module.bracket(a_col, nodes)
-
-    n_law = yso_module.law_count(config, region, a_col, provenance)
     shape = yso_module.YsoShape.read(config, region)
-    sel = _yso_source_selection(config, region)
-    h2s_sel = _h2s_source_selection(config, region)
     h2s = _h2s_region_product(config, region)
-    n_law_blurred = _n_law_blurred(config, region)
     ridge = _ridge(config, region)
+    nodes = column_grid_module.nodes(config)
+    n_cell = shape.p_u.shape[1]
 
-    if not np.array_equal(sel["x_ladder"], h2s_sel["x_ladder"]):
-        raise ValueError(
-            "prior.counts_cloud: %r's YSO and H2S per-source selection "
-            "products disagree on X_LADDER -- both should be `prior."
-            "selection.X_LADDER`" % region)
-    x_ladder = sel["x_ladder"]
+    adopted_path = config_module.product_path(config, "sky/derived", "adopted",
+                                               "column", "source", region=region)
+    yso_sel_path = config_module.product_path(config, "bms", "yso", "selection",
+                                               "source", region=region)
+    h2s_sel_path = config_module.product_path(config, "bms", "h2s", "selection",
+                                               "source", region=region)
+    law_blur_path = config_module.product_path(config, "bms", "h2s", "law-blurred",
+                                                "source", region=region)
+    for path, label in ((yso_sel_path, "YSO selection"), (h2s_sel_path, "H2S selection"),
+                        (law_blur_path, "H2S law-blurred")):
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                "prior.counts_cloud: no %s product for region %r at %s -- "
+                "run its RUNBOOK line first" % (label, region, path))
 
-    bin_mass = bin_mass_exact(shape, x_ladder, sightline_row, a_col, sigma_col,
-                               n_jobs=config.n_jobs)
-    eps_yso = eps_yso_from_bin_mass(bin_mass, sel["g_1myr"])
-    eps_yso_3myr = eps_yso_from_bin_mass(bin_mass, sel["g_3myr"])
-    eps_h2s = eps_h2s_from_bin_mass(bin_mass, h2s_sel["eps"],
-                                    h2s["log10_sigma_grid"], h2s["logsig_mean"],
-                                    h2s["logsig_std"])
+    out_path = config_module.product_path(config, "bms", "table", "counts-cloud",
+                                          "source", region=region)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
-    n_yso = n_law * eps_yso
-    n_yso_3myr = n_law * eps_yso_3myr
-    n_h2s = n_law_blurred * h2s["eta"] * h2s["eps_ext"] * eps_h2s
+    with h5py.File(adopted_path, "r") as fa, \
+         h5py.File(yso_sel_path, "r") as fy, \
+         h5py.File(h2s_sel_path, "r") as fh, \
+         h5py.File(law_blur_path, "r") as fl, \
+         h5py.File(out_path, "w") as fo:
 
-    return dict(
-        sightline_row=sightline_row, node_lo=node_lo, node_w=node_w,
-        n_yso=n_yso, n_yso_3myr=n_yso_3myr, eps_yso=eps_yso, eps_yso_3myr=eps_yso_3myr,
-        n_law=n_law,
-        ridge_intercept=ridge["intercept"][sightline_row],
-        ridge_slope=ridge["slope"][sightline_row],
-        ridge_width=ridge["width"][sightline_row],
-        n_h2s=n_h2s, eps_h2s=eps_h2s,
-        z_yso=np.ones(n_src, dtype=np.float64), z_h2s=eps_h2s,
-        m_lim_8um_1myr=sel["m_lim_8um_1myr"], imf_frac_above_mlim=sel["imf_frac_above_mlim"],
-        eta=h2s["eta"], eps_ext=h2s["eps_ext"],
-    )
+        for f, path in ((fa, adopted_path), (fy, yso_sel_path),
+                        (fh, h2s_sel_path), (fl, law_blur_path)):
+            _check_no_permutation(f, path)
 
+        x_ladder = np.asarray(fy["X_LADDER"][:], dtype=np.float64)
+        x_ladder_h2s = np.asarray(fh["X_LADDER"][:], dtype=np.float64)
+        if not np.array_equal(x_ladder, x_ladder_h2s):
+            raise ValueError(
+                "prior.counts_cloud: %r's YSO and H2S per-source selection "
+                "products disagree on X_LADDER -- both should be `prior."
+                "selection.X_LADDER`" % region)
+        n_x = x_ladder.size
+        n_sigma = h2s["log10_sigma_grid"].size
 
-def _write_product(path, out):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    datasets = {
-        "SIGHTLINE_ROW": out["sightline_row"], "NODE_LO": out["node_lo"],
-        "NODE_W": out["node_w"],
-        "N_YSO": out["n_yso"], "N_YSO_3MYR": out["n_yso_3myr"],
-        "EPS_YSO": out["eps_yso"], "EPS_YSO_3MYR": out["eps_yso_3myr"],
-        "N_LAW": out["n_law"],
-        "RIDGE_INTERCEPT": out["ridge_intercept"], "RIDGE_SLOPE": out["ridge_slope"],
-        "RIDGE_WIDTH": out["ridge_width"],
-        "N_H2S": out["n_h2s"], "EPS_H2S": out["eps_h2s"],
-        "Z_YSO": out["z_yso"], "Z_H2S": out["z_h2s"],
-        "M_LIM_8UM_1MYR": out["m_lim_8um_1myr"],
-        "IMF_FRAC_ABOVE_MLIM": out["imf_frac_above_mlim"],
-    }
-    with h5py.File(path, "w") as f:
-        f.attrs["GRANULE"] = "source"
-        f.attrs["ETA"] = out["eta"]
-        f.attrs["EPS_EXT"] = out["eps_ext"]
-        f.attrs["KAPPA_HERSCHEL"] = yso_module.KAPPA_HERSCHEL
-        f.attrs["KAPPA_PLANCK"] = yso_module.KAPPA_PLANCK
-        for name, arr in datasets.items():
-            f.create_dataset(name, data=np.asarray(arr, dtype=np.float32))
+        fo.attrs["GRANULE"] = "source"
+        fo.attrs["ETA"] = h2s["eta"]
+        fo.attrs["EPS_EXT"] = h2s["eps_ext"]
+        fo.attrs["KAPPA_HERSCHEL"] = yso_module.KAPPA_HERSCHEL
+        fo.attrs["KAPPA_PLANCK"] = yso_module.KAPPA_PLANCK
+        dsets = {name: fo.create_dataset(name, shape=(n_src,), dtype=np.float32)
+                 for name in _OUTPUT_COLUMNS}
+
+        row_bytes = _build_row_bytes(n_cell, n_x, n_sigma)
+        spans = list(batches_module.batches(n_src, row_bytes, BUILD_REGION_BUDGET_BYTES))
+
+        def _one_batch(start, stop):
+            rows = sightline_row[start:stop]
+            a_col = np.asarray(fa["A_COL_K"][start:stop], dtype=np.float64)
+            sigma_col = np.asarray(fa["A_COL_SIG_K"][start:stop], dtype=np.float64)
+            provenance = np.asarray(fa["A_COL_PROVENANCE"][start:stop])
+            node_lo, node_w = column_grid_module.bracket(a_col, nodes)
+            n_law = yso_module.law_count(config, region, a_col, provenance)
+
+            g_1myr = np.asarray(fy["G_1MYR"][start:stop], dtype=np.float64)
+            g_3myr = np.asarray(fy["G_3MYR"][start:stop], dtype=np.float64)
+            m_lim = np.asarray(fy["M_LIM_8UM_1MYR"][start:stop], dtype=np.float64)
+            imf_frac = np.asarray(fy["IMF_FRAC_ABOVE_MLIM"][start:stop], dtype=np.float64)
+            eps_table = np.asarray(fh["EPS"][start:stop], dtype=np.float64)
+            n_law_blurred = np.asarray(fl["N_LAW_BLURRED_DEG2"][start:stop], dtype=np.float64)
+
+            bin_mass = _bin_mass_batch(shape, x_ladder, rows, a_col, sigma_col)
+            eps_yso = eps_yso_from_bin_mass(bin_mass, g_1myr)
+            eps_yso_3myr = eps_yso_from_bin_mass(bin_mass, g_3myr)
+            eps_h2s = eps_h2s_from_bin_mass(bin_mass, eps_table, h2s["log10_sigma_grid"],
+                                            h2s["logsig_mean"], h2s["logsig_std"])
+
+            n_yso = n_law * eps_yso
+            n_yso_3myr = n_law * eps_yso_3myr
+            n_h2s = n_law_blurred * h2s["eta"] * h2s["eps_ext"] * eps_h2s
+            nb = stop - start
+
+            values = dict(
+                SIGHTLINE_ROW=rows, NODE_LO=node_lo, NODE_W=node_w,
+                N_YSO=n_yso, N_YSO_3MYR=n_yso_3myr, EPS_YSO=eps_yso,
+                EPS_YSO_3MYR=eps_yso_3myr, N_LAW=n_law,
+                RIDGE_INTERCEPT=ridge["intercept"][rows], RIDGE_SLOPE=ridge["slope"][rows],
+                RIDGE_WIDTH=ridge["width"][rows],
+                N_H2S=n_h2s, EPS_H2S=eps_h2s,
+                Z_YSO=np.ones(nb, dtype=np.float64), Z_H2S=eps_h2s,
+                M_LIM_8UM_1MYR=m_lim, IMF_FRAC_ABOVE_MLIM=imf_frac,
+            )
+            # each batch owns a disjoint row range, so writing here (rather
+            # than collecting every batch's arrays back on the main thread
+            # first) never holds more than one batch's output in memory.
+            for name, arr in values.items():
+                dsets[name][start:stop] = np.asarray(arr, dtype=np.float32)
+
+        Parallel(n_jobs=max(1, config.n_jobs), prefer="threads")(
+            delayed(_one_batch)(start, stop) for start, stop in spans)
+
+    return n_src, out_path
 
 
 def build(config, regions=None):
@@ -355,15 +360,12 @@ def build(config, regions=None):
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
     for region in region_names:
-        out = build_region(config, region)
-        path = config_module.product_path(config, "bms", "table", "counts-cloud",
-                                          "source", region=region)
-        _write_product(path, out)
+        n_src, path = build_region(config, region)
         n_law_total = law_area_check(config, region)
         print("prior.counts_cloud: %s: %d sources, N_law region total=%.4g "
               "young stars (section 6.4 item 1, against Pokhrel+2020's Table 2 "
               "total per the S-D38 study record) -> %s"
-              % (region, out["sightline_row"].size, n_law_total, path))
+              % (region, n_src, n_law_total, path))
 
 
 if __name__ == "__main__":
