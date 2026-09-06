@@ -33,22 +33,32 @@ fitter's own gray scale, not a physical distance.
 A SECOND SIMPLIFICATION: the quarry batches MODELS (`DEFAULT_MODEL_
 BATCH_SIZE = 10000`) to bound an `(n_model, n_band)` temporary under
 `sedfitter`'s `astropy.units.Quantity` wrapper. Nothing here builds that
-wrapper (`sedfitter.fitting_routines` is called directly on plain
-float64), and one source's whole `(n_model, n_band)` array is at most
-200,000 x 8 float64 = 12.8 MB (YSO, the largest register) -- far under
-CODING_RULES.md 10a's ceiling -- so models are never batched within a
-source; only rule 10b's source-batching (about ten thousand at a time,
-the caller's concern) applies. The evidence log-sum-exp therefore needs
-no running-max rescale either: it is one `exp()` over the source's whole
-model axis, not folded across successive model batches.
+wrapper -- the fit algebra (`sedfitter.fitting_routines.linear_
+regression`/`optimal_scaling`/`chi_squared`) is reimplemented in this
+module as `_linear_regression_block`/`_optimal_scaling_block`/
+`_chi_squared_block`, plain float64 arithmetic with one extra leading
+source axis -- so the model axis is never batched within a source. The
+evidence log-sum-exp therefore needs no running-max rescale either: it
+is one `exp()` over the source's whole model axis, not folded across
+successive model batches.
+
+`fit_batch` itself works over BLOCKS of sources, not one source at a
+time: every per-source quantity (the hybrid law, the fit, the prior
+read, the evidence fold, the top-K) is one array expression over a
+`(n_block, n_model[, n_band])` working set, `n_block` sized by
+`sesnaimpute.batches.batches` to keep that set under 512 MB (CODING_
+RULES.md 10a/10b) -- large for small registers (STAR), small for large
+ones (YSO), but never a Python loop over sources. The `gamma`/`psi`
+hooks are the one exception: their signature takes one source at a
+time, so they are called in a plain loop over each block's rows.
 """
 
 import os
 
 import h5py
 import numpy as np
-from sedfitter import fitting_routines as sedfit_algebra
 
+from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute.prior import selection
@@ -175,45 +185,6 @@ def _register_arrays(config, cls):
     }
 
 
-def hybrid_av_law(config, w, av_law_draine, av_law_whitney):
-    """The `av_law` design vector (log10-flux-per-A_V, per band) for one
-    source at ramp weight `w`, blended between the register's own two
-    pure laws.
-
-    Lifted from `sesnacomplete.sed_fit.fit.hybrid_av_law`: undo each pure
-    vector's own magnitude-to-flux scaling to recover its K-normalised
-    dimming vector (`kappa = av_law / (-0.4 * (A_K/A_V)_pure)`), blend
-    the two `kappa`s convexly at `w`, then re-apply the hybrid curve's
-    own `(A_K/A_V)` at that weight (`sesnaimpute.prior.selection.
-    ak_per_av`'s harmonic blend). At `w = 0` or `w = 1` the pure endpoint
-    vector is returned directly (bit-exact), not through the round trip.
-    """
-    if w <= 0.0:
-        return av_law_draine
-    if w >= 1.0:
-        return av_law_whitney
-    r_diffuse = selection.ak_per_av(config, 0.0)
-    r_dense = selection.ak_per_av(config, 1.0)
-    kappa_diffuse = av_law_draine / (-0.4 * r_diffuse)
-    kappa_dense = av_law_whitney / (-0.4 * r_dense)
-    kappa_s = (1.0 - w) * kappa_diffuse + w * kappa_dense
-    ak_per_av_s = float(selection.ak_per_av(config, w))
-    return -0.4 * ak_per_av_s * kappa_s
-
-
-def av_range_for_law_weight(config, w):
-    """`(av_min, av_max)`: the project's A_K bound (`AK_MIN`/`AK_MAX`),
-    converted to A_V through this source's own ramp weight's `(A_K/A_V)`
-    -- lifted from `sesnacomplete.sed_fit.fit.av_range_for_law_weight`.
-    The bound is declared in A_K because the law blends per source, so
-    one nominal A_V number would be a different physical limit at every
-    weight; converted here, `AK_MAX` is the same physical limit at every
-    `w`, in that weight's own A_V.
-    """
-    ak_per_av_w = float(selection.ak_per_av(config, w))
-    return AK_MIN / ak_per_av_w, AK_MAX / ak_per_av_w
-
-
 def _catalog_bands(config, region, rows):
     """`(fnu, sigma_fnu, origin)`, each `(n_source, 8)`, `definitions.
     BANDS` order -- the curated catalogue's own on-disk order, which
@@ -233,17 +204,37 @@ def _catalog_bands(config, region, rows):
     return fnu, sigma_fnu, origin
 
 
-def _source_log_fluxes(flux, sigma, origin):
-    """`(valid, weight, log_flux, log_error)`, each `(8,)`: one source's
-    `ORIGIN_FNU` codes translated to `sedfitter`'s `valid` vocabulary,
-    then `sedfitter.source.Source.get_log_fluxes`'s own algebra
-    (transcribed, not called -- there is no `Source` object here, only
-    plain arrays)."""
+def _hybrid_av_law_block(config, w, av_law_draine, av_law_whitney):
+    """`hybrid_av_law` and `av_range_for_law_weight`'s `ak_per_av`, both
+    evaluated for a whole block of sources' ramp weights `w` `(n_block,)`
+    at once -- `selection.ak_per_av` already vectorises over `w`, so the
+    round-trip blend is one array expression; the `w<=0`/`w>=1` endpoints
+    are restored bit-exact by `np.where`, same as the scalar function.
+    Returns `(av_law, ak_per_av_w)`, `(n_block, n_band)` and `(n_block,)`.
+    """
+    w = np.asarray(w, dtype=np.float64)
+    r_diffuse = selection.ak_per_av(config, 0.0)
+    r_dense = selection.ak_per_av(config, 1.0)
+    kappa_diffuse = av_law_draine / (-0.4 * r_diffuse)
+    kappa_dense = av_law_whitney / (-0.4 * r_dense)
+    kappa_s = (1.0 - w)[:, None] * kappa_diffuse[None, :] + w[:, None] * kappa_dense[None, :]
+    ak_per_av_w = np.asarray(selection.ak_per_av(config, w), dtype=np.float64)
+    av_law = -0.4 * ak_per_av_w[:, None] * kappa_s
+    av_law = np.where((w <= 0.0)[:, None], av_law_draine[None, :], av_law)
+    av_law = np.where((w >= 1.0)[:, None], av_law_whitney[None, :], av_law)
+    return av_law, ak_per_av_w
+
+
+def _source_log_fluxes_block(flux, sigma, origin):
+    """`(valid, weight, log_flux, log_error)`, each `(n_block, 8)` --
+    `_source_log_fluxes`'s algebra applied to a whole block at once
+    (purely elementwise, so the block axis changes nothing but shape).
+    """
     valid = np.where(np.isin(origin, ORIGIN_UPPER_LIMIT), VALID_UPPER_LIMIT,
                      np.where(origin == ORIGIN_DETECTED, VALID_DETECTION, VALID_EXCLUDED))
-    weight = np.zeros(_N_BAND, dtype=np.float64)
-    log_flux = np.zeros(_N_BAND, dtype=np.float64)
-    log_error = np.zeros(_N_BAND, dtype=np.float64)
+    weight = np.zeros_like(flux)
+    log_flux = np.zeros_like(flux)
+    log_error = np.zeros_like(flux)
 
     det = valid == VALID_DETECTION
     log_flux[det] = np.log10(flux[det]) - 0.5 * (sigma[det] / flux[det]) ** 2 / np.log(10.0)
@@ -252,27 +243,83 @@ def _source_log_fluxes(flux, sigma, origin):
 
     lim = valid == VALID_UPPER_LIMIT
     log_flux[lim] = np.log10(flux[lim])
-    log_error[lim] = sigma[lim]  # the confidence c; weight stays 0 (Q5)
+    log_error[lim] = sigma[lim]
 
     return valid, weight, log_flux, log_error
 
 
-def _fit_one_model_grid(valid, weight, log_flux, log_error, template_log, av_law, av_min, av_max):
-    """The closed-form free-scale fit (`sesnacomplete.sed_fit.batched.
-    fit_models_batched`'s FREE_SCALE branch, transcribed): profiled A_V
-    and gray scale, and the chi-squared at that optimum, for every model
-    of `template_log` at once (the vectorised axis). Returns `(av_hat,
-    sc_hat, chi2)`, each `(n_model,)`.
+def _linear_regression_block(data, weights, pattern1, pattern2):
+    """`sedfitter.fitting_routines.linear_regression`, one extra leading
+    source axis: `data` is `(n_block, n_model, n_band)`, `weights`/
+    `pattern1` are `(n_block, n_band)` (the per-source hybrid law and its
+    fit weights), `pattern2` is `(n_band,)` (the fixed gray-scale law,
+    the same design vector for every source). Each source's `(m11, m12,
+    m22)` normal-equation entries are independent of every other
+    source's -- the block axis is a pure broadcast, not a new sum -- so
+    this is bit-identical to calling the scalar routine once per source.
+    Returns `(av_hat, sc_hat)`, each `(n_block, n_model)`.
     """
-    residual = log_flux[None, :] - template_log
+    c1 = np.sum(data * pattern1[:, None, :] * weights[:, None, :], axis=2)
+    c2 = np.sum(data * pattern2[None, None, :] * weights[:, None, :], axis=2)
+    m11 = np.sum(pattern1 * pattern1 * weights, axis=1)
+    m12 = np.sum(pattern1 * pattern2[None, :] * weights, axis=1)
+    m22 = np.sum(pattern2[None, :] * pattern2[None, :] * weights, axis=1)
+    inv_det = 1.0 / (m11 * m22 - m12 * m12)
+    p1 = (m22[:, None] * c1 - m12[:, None] * c2) * inv_det[:, None]
+    p2 = (m11[:, None] * c2 - m12[:, None] * c1) * inv_det[:, None]
+    return p1, p2
 
-    # the zero-weight guard (batched.py's module docstring): a
-    # legitimate zero model flux in a band the fit already excluded
-    # (weight == 0) must contribute nothing, not NaN.
+
+def _optimal_scaling_block(data, weights, pattern1):
+    """`sedfitter.fitting_routines.optimal_scaling`, one extra leading
+    source axis: `data` is `(n_block, n_model, n_band)`, `weights` is
+    `(n_block, n_band)`, `pattern1` is `(n_band,)`. Returns `(n_block,
+    n_model)`.
+    """
+    num = np.sum(data * pattern1[None, None, :] * weights[:, None, :], axis=2)
+    denom = np.sum(pattern1[None, :] * pattern1[None, :] * weights, axis=1)
+    return num / denom[:, None]
+
+
+def _chi_squared_block(valid, data, error, weight, model):
+    """`sedfitter.fitting_routines.chi_squared`, one extra leading source
+    axis: `valid`/`error`/`weight` are `(n_block, n_band)`, `data`/
+    `model` are `(n_block, n_model, n_band)`. The `valid == 2` (lower
+    limit) branch is omitted -- this catalogue never carries that code
+    (module docstring at `VALID_UPPER_LIMIT`) -- everything else is the
+    same elementwise algebra, per source, broadcast over the block.
+    Returns `(n_block, n_model)`.
+    """
+    chi2_array = (data - model) ** 2 * weight[:, None, :]
+
+    zero = np.broadcast_to((valid == VALID_EXCLUDED)[:, None, :], chi2_array.shape)
+    chi2_array[zero] = 0.0
+
+    lim = (valid == VALID_UPPER_LIMIT)[:, None, :]
+    reset = lim & (model > data)
+    penalty = -2.0 * np.log(1.0 - error)
+    chi2_array = np.where(reset, penalty[:, None, :], chi2_array)
+
+    chi2_array[np.isinf(chi2_array)] = 1.0e30
+    return np.sum(chi2_array, axis=2)
+
+
+def _fit_model_grid_block(valid, weight, log_flux, log_error, template_log,
+                          av_law, av_min, av_max):
+    """`_fit_one_model_grid`, one extra leading source axis: the
+    closed-form free-scale fit for a whole block of sources against the
+    class's whole model register at once. `av_min`/`av_max` are
+    `(n_block,)`. Returns `(av_hat, sc_hat, chi2, model)`, `av_hat`/
+    `sc_hat`/`chi2` `(n_block, n_model)`, `model` `(n_block, n_model,
+    n_band)`.
+    """
+    residual = log_flux[:, None, :] - template_log[None, :, :]
+    residual = np.array(residual)  # writable; broadcast subtraction already copies
+
     zero_weight = weight == 0.0
     bad = None
     if zero_weight.any():
-        bad = zero_weight[None, :] & ~np.isfinite(residual)
+        bad = zero_weight[:, None, :] & ~np.isfinite(residual)
         if not bad.any():
             bad = None
     sign = None
@@ -281,23 +328,24 @@ def _fit_one_model_grid(valid, weight, log_flux, log_error, template_log, av_law
         sign[np.isnan(sign)] = 0.0
         residual[bad] = 0.0
 
-    av_hat, sc_hat = sedfit_algebra.linear_regression(residual, weight, av_law, _SC_LAW)
+    av_hat, sc_hat = _linear_regression_block(residual, weight, av_law, _SC_LAW)
 
-    reset_lo = av_hat < av_min
-    reset_hi = av_hat > av_max
-    av_hat = np.where(reset_lo, av_min, np.where(reset_hi, av_max, av_hat))
+    reset_lo = av_hat < av_min[:, None]
+    reset_hi = av_hat > av_max[:, None]
+    av_hat = np.where(reset_lo, av_min[:, None], np.where(reset_hi, av_max[:, None], av_hat))
     reset = reset_lo | reset_hi
     if reset.any():
         sc_hat = sc_hat.copy()
-        sc_hat[reset] = sedfit_algebra.optimal_scaling(
-            residual[reset] - av_hat[reset][:, None] * av_law[None, :], weight, _SC_LAW)
+        sc_hat_full = _optimal_scaling_block(
+            residual - av_hat[:, :, None] * av_law[:, None, :], weight, _SC_LAW)
+        sc_hat[reset] = sc_hat_full[reset]
 
-    model = av_hat[:, None] * av_law[None, :] + sc_hat[:, None] * _SC_LAW[None, :]
+    model = av_hat[:, :, None] * av_law[:, None, :] + sc_hat[:, :, None] * _SC_LAW[None, None, :]
 
     if bad is not None:
         residual[bad] = model[bad] + sign
 
-    chi2 = sedfit_algebra.chi_squared(valid, residual, log_error, weight, model)
+    chi2 = _chi_squared_block(valid, residual, log_error, weight, model)
     return av_hat, sc_hat, chi2, model
 
 
@@ -353,59 +401,108 @@ def fit_batch(config, region, cls, rows, prior, gamma=None, psi=None):
     topk_lnl = np.full((n_source, TOPK), -np.inf, dtype=np.float64)
     n_detected = np.zeros(n_source, dtype=np.int64)
 
-    for i in range(n_source):
-        row = int(rows[i])
-        w = float(ramp_w[i])
-        av_law = hybrid_av_law(config, w, av_law_draine, av_law_whitney)
-        ak_per_av_w = float(selection.ak_per_av(config, w))
-        av_min, av_max = av_range_for_law_weight(config, w)
+    # one-hot subclass membership (n_model, n_sub): turns the per-source
+    # `np.bincount(subclass_idx, weights=...)` into one matmul per block.
+    onehot = np.zeros((n_model, n_sub), dtype=np.float64)
+    onehot[np.arange(n_model), subclass_idx] = 1.0
 
-        valid, weight, log_flux, log_error = _source_log_fluxes(
-            fnu[i], sigma_fnu[i], origin[i])
-        n_detected[i] = int(np.sum(valid == VALID_DETECTION))
+    model_index_full = np.arange(n_model, dtype=np.intp)
+    keep = min(TOPK, n_model)
 
-        av_hat, sc_hat, chi2, model = _fit_one_model_grid(
-            valid, weight, log_flux, log_error, template_log, av_law, av_min, av_max)
+    # block size: a (n_block, n_model, n_band) float64 working set (the
+    # fit's residual/model/chi2 temporaries, several alive at once) held
+    # under CODING_RULES.md 10b's 512 MB budget.
+    row_bytes = n_model * _N_BAND * 8 * 8
+    for start, stop in batches_module.batches(n_source, row_bytes):
+        blk = slice(start, stop)
+        n_blk = stop - start
+        rows_blk = rows[blk]
+        w_blk = ramp_w[blk]
 
-        a_hat = av_hat * ak_per_av_w          # A_K, this source's own ramp law
-        log10_b_hat = -2.0 * sc_hat           # 10_POSTERIOR.md section 1
+        av_law_blk, ak_per_av_blk = _hybrid_av_law_block(
+            config, w_blk, av_law_draine, av_law_whitney)
+        av_min_blk = AK_MIN / ak_per_av_blk
+        av_max_blk = AK_MAX / ak_per_av_blk
+
+        valid, weight, log_flux, log_error = _source_log_fluxes_block(
+            fnu[blk], sigma_fnu[blk], origin[blk])
+        n_detected[blk] = np.sum(valid == VALID_DETECTION, axis=1)
+
+        av_hat, sc_hat, chi2, model = _fit_model_grid_block(
+            valid, weight, log_flux, log_error, template_log,
+            av_law_blk, av_min_blk, av_max_blk)
+
+        a_hat = av_hat * ak_per_av_blk[:, None]   # A_K, each source's own ramp law
+        log10_b_hat = -2.0 * sc_hat               # 10_POSTERIOR.md section 1
         ln_l = -0.5 * chi2
 
-        rows_probe = np.array([row], dtype=np.intp)
+        # the prior read: still the source's own fitted (a_hat,
+        # log10_b_hat) per model, no quadrature -- one call for the
+        # whole block, since `SourcePrior.log_density` already accepts
+        # `rows` (n,) and `a`/`log10_b` (n, m) (its own docstring).
         ln_lambda = prior.log_density(
-            prior_cls, rows_probe, a_hat[None, :], log10_b_hat[None, :],
-            model_index=model_index_1d)[0]
+            prior_cls, rows_blk, a_hat, log10_b_hat,
+            model_index=model_index_1d)
 
-        ln_gamma = (np.zeros(n_model) if gamma is None
-                   else np.asarray(gamma(row, np.arange(n_model), a_hat, log10_b_hat)))
-        ln_psi = (np.zeros(n_model) if psi is None
-                 else np.asarray(psi(row, np.arange(n_model), a_hat, log10_b_hat)))
+        if gamma is None:
+            ln_gamma = np.zeros((n_blk, n_model), dtype=np.float64)
+        else:
+            # gamma's signature takes one row at a time; not vectorised.
+            ln_gamma = np.stack([
+                np.asarray(gamma(int(rows_blk[j]), model_index_full,
+                                  a_hat[j], log10_b_hat[j]))
+                for j in range(n_blk)])
+        if psi is None:
+            ln_psi = np.zeros((n_blk, n_model), dtype=np.float64)
+        else:
+            # psi's signature takes one row at a time; not vectorised.
+            ln_psi = np.stack([
+                np.asarray(psi(int(rows_blk[j]), model_index_full,
+                                a_hat[j], log10_b_hat[j]))
+                for j in range(n_blk)])
 
-        ln_w_full = ln_w_h + ln_lambda + ln_l + ln_gamma + ln_psi
+        ln_w_full = ln_w_h[None, :] + ln_lambda + ln_l + ln_gamma + ln_psi
 
         finite = np.isfinite(ln_w_full)
-        if finite.any():
-            m = float(np.max(ln_w_full[finite]))
-            lin = np.where(finite, np.exp(ln_w_full - m), 0.0)
-            sub_sum = np.bincount(subclass_idx, weights=lin, minlength=n_sub)
-            with np.errstate(divide="ignore"):
-                evidence[i] = np.where(sub_sum > 0.0, m + np.log(sub_sum), -np.inf)
+        m = np.where(finite.any(axis=1),
+                     np.max(np.where(finite, ln_w_full, -np.inf), axis=1), 0.0)
+        lin = np.where(finite, np.exp(ln_w_full - m[:, None]), 0.0)
 
-            total = float(lin.sum())
-            if total > 0.0:
-                model_fluxes_mjy = 10.0 ** (model + template_log)
-                mean_flux = (lin[:, None] * model_fluxes_mjy).sum(axis=0) / total
-                outer = np.einsum("k,ki,kj->ij", lin, model_fluxes_mjy, model_fluxes_mjy) / total
-                flux_mean[i] = mean_flux
-                flux_cov[i] = outer - np.outer(mean_flux, mean_flux)
+        sub_sum = lin.dot(onehot)
+        with np.errstate(divide="ignore"):
+            evidence[blk] = np.where(
+                sub_sum > 0.0, m[:, None] + np.log(np.where(sub_sum > 0.0, sub_sum, 1.0)),
+                -np.inf)
 
-            keep = min(TOPK, n_model)
-            best = np.argpartition(-ln_w_full, keep - 1)[:keep] if n_model > keep else np.arange(n_model)
-            order = best[np.argsort(-ln_w_full[best])]
-            topk_model[i, :keep] = order
-            topk_a[i, :keep] = a_hat[order]
-            topk_log10b[i, :keep] = log10_b_hat[order]
-            topk_lnl[i, :keep] = ln_l[order]
+        total = lin.sum(axis=1)
+        has_total = total > 0.0
+        safe_total = np.where(has_total, total, 1.0)
+        model_fluxes_mjy = 10.0 ** (model + template_log[None, :, :])
+        weighted_flux = lin[:, :, None] * model_fluxes_mjy
+        mean_flux = weighted_flux.sum(axis=1) / safe_total[:, None]
+        outer = (np.einsum("bki,bkj->bij", weighted_flux, model_fluxes_mjy, optimize=True)
+                 / safe_total[:, None, None])
+        cov = outer - np.einsum("bi,bj->bij", mean_flux, mean_flux)
+        flux_mean[blk] = np.where(has_total[:, None], mean_flux, 0.0)
+        flux_cov[blk] = np.where(has_total[:, None, None], cov, 0.0)
+
+        if n_model > keep:
+            part = np.argpartition(-ln_w_full, keep - 1, axis=1)[:, :keep]
+            part_vals = np.take_along_axis(ln_w_full, part, axis=1)
+            local_order = np.argsort(-part_vals, axis=1)
+            order = np.take_along_axis(part, local_order, axis=1)
+        else:
+            order = np.argsort(-ln_w_full, axis=1)
+        order_top = order[:, :keep]
+        any_finite = finite.any(axis=1)
+
+        topk_model[blk, :keep] = np.where(any_finite[:, None], order_top, -1)
+        topk_a[blk, :keep] = np.where(
+            any_finite[:, None], np.take_along_axis(a_hat, order_top, axis=1), np.nan)
+        topk_log10b[blk, :keep] = np.where(
+            any_finite[:, None], np.take_along_axis(log10_b_hat, order_top, axis=1), np.nan)
+        topk_lnl[blk, :keep] = np.where(
+            any_finite[:, None], np.take_along_axis(ln_l, order_top, axis=1), -np.inf)
 
     return {
         "EVIDENCE": evidence, "FLUX_MEAN": flux_mean, "FLUX_COV": flux_cov,
