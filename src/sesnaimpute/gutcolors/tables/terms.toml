@@ -1,0 +1,157 @@
+#
+# Term table -- ternary incidence over the 45 boundary rows.
+#
+#   rows = { ROW_ID = 1 }   require the row TRUE
+#   rows = { ROW_ID = -1 }  require the row FALSE
+#   absent                  row not involved
+#
+# A term is the AND over its rows (with sign).  A gate is the OR over the
+# terms carrying that gate.  Precedence lives in schedule.toml, not here --
+# this table is unordered.
+#
+# `gate` here is AUTHORITATIVE for gate composition.  The `gate` field on a
+# boundary row is provenance only (which appendix subsection it came from).
+#
+# 20 terms, 59 nonzeros.
+#
+schema_version = 1
+
+# ---- Phase 1 -------------------------------------------------------------
+
+# PAH galaxies: two independent rule sets in different colour spaces, which
+# is why the paper plots them in two panels.
+[[term]]
+id    = "T_PAH_A"
+gate  = "P1_PAH"
+panel = "pah_ccd_a"
+rows  = { PAH_A1 = 1, PAH_A2 = 1, PAH_A3 = 1, PAH_A4 = 1 }
+
+[[term]]
+id    = "T_PAH_B"
+gate  = "P1_PAH"
+panel = "pah_ccd_b"
+rows  = { PAH_B1 = 1, PAH_B2 = 1, PAH_B3 = 1, PAH_B4 = 1 }
+
+# AGN: (AGN1 & AGN2 & AGN3) & (AGN4 | AGN5 | AGN6), expanded to DNF.
+# The only disjunction inside a single class in the scheme.
+[[term]]
+id    = "T_AGN_a"
+gate  = "P1_AGN"
+panel = "agn_cmd"
+rows  = { AGN1 = 1, AGN2 = 1, AGN3 = 1, AGN4 = 1 }
+
+[[term]]
+id    = "T_AGN_b"
+gate  = "P1_AGN"
+panel = "agn_cmd"
+rows  = { AGN1 = 1, AGN2 = 1, AGN3 = 1, AGN5 = 1 }
+
+[[term]]
+id    = "T_AGN_c"
+gate  = "P1_AGN"
+panel = "agn_cmd"
+rows  = { AGN1 = 1, AGN2 = 1, AGN3 = 1, AGN6 = 1 }
+
+[[term]]
+id    = "T_SHOCK"
+gate  = "P1_SHOCK"
+panel = "irac_ccd_1"
+rows  = { SHK1 = 1, SHK2 = 1, SHK3 = 1 }
+
+[[term]]
+id    = "T_PAHAP"
+gate  = "P1_PAHAP"
+panel = "irac_ccd_1"
+rows  = { PAP1 = 1, PAP2 = 1 }
+
+[[term]]
+id    = "T_C1"
+gate  = "P1_CLASS_I"
+panel = "irac_ccd_1"
+rows  = { C1_1 = 1, C1_2 = 1 }
+
+[[term]]
+id    = "T_C2"
+gate  = "P1_CLASS_II"
+panel = "irac_ccd_2"
+rows  = { C2_1 = 1, C2_2 = 1, C2_3 = 1, C2_4 = 1 }
+
+# ---- Phase 2 -------------------------------------------------------------
+# P2_PROTO implies P2_YSO3 identically (parallel lines, offset 2.05714), so
+# the protostar cut is a nested refinement of the YSO cut, not an
+# independent condition.  The Class II term carries P2_PROTO = -1: a YSO
+# that is NOT a protostar.
+
+[[term]]
+id    = "T_P2_PROTO"
+gate  = "P2_PROTO"
+panel = "k12_ccd"
+rows  = { P2_YSO1 = 1, P2_YSO2 = 1, P2_YSO3 = 1, P2_PROTO = 1, P2_BRT_I = 1 }
+
+[[term]]
+id    = "T_P2_C2"
+gate  = "P2_CLASS_II"
+panel = "k12_ccd"
+rows  = { P2_YSO1 = 1, P2_YSO2 = 1, P2_YSO3 = 1, P2_PROTO = -1, P2_BRT_II = 1 }
+
+# ---- Phase 3 -------------------------------------------------------------
+
+# Transition disks: (5.8 excess OR 4.5 excess) AND bright at 3.6.
+[[term]]
+id    = "T_TD_58"
+gate  = "P3_TRANS"
+panel = "td_cmd_58"
+rows  = { TD_EXC_58 = 1, TD_BRT = 1 }
+
+[[term]]
+id    = "T_TD_45"
+gate  = "P3_TRANS"
+panel = "td_cmd_45"
+rows  = { TD_EXC_45 = 1, TD_BRT = 1 }
+
+# Deeply embedded: bright at 24 um AND red against the LONGEST-WAVELENGTH
+# IRAC band the source actually has.  The four terms are mutually exclusive,
+# selected by the detection mask via each row's guard.
+[[term]]
+id    = "T_EMB_36"
+gate  = "P3_EMB"
+panel = "emb_cmd_36"
+rows  = { EMB_BRT = 1, EMB_X_36 = 1 }
+
+[[term]]
+id    = "T_EMB_45"
+gate  = "P3_EMB"
+panel = "emb_cmd_45"
+rows  = { EMB_BRT = 1, EMB_X_45 = 1 }
+
+[[term]]
+id    = "T_EMB_58"
+gate  = "P3_EMB"
+panel = "emb_cmd_58"
+rows  = { EMB_BRT = 1, EMB_X_58 = 1 }
+
+[[term]]
+id    = "T_EMB_80"
+gate  = "P3_EMB"
+panel = "emb_cmd_80"
+rows  = { EMB_BRT = 1, EMB_X_80 = 1 }
+
+[[term]]
+id    = "T_REINST"
+gate  = "P3_REINST"
+panel = "mips_ccd"
+rows  = { RI_BRT = 1, RI_D = 1, RI_G = 1, RI_I = 1 }
+
+# Protostar audit.  The gate fires when the source PASSES; failure is what
+# demotes it (see schedule.toml, which fires this entry on "not_fire").
+[[term]]
+id    = "T_AUD_58"
+gate  = "P3_AUDIT"
+panel = "emb_cmd_58"
+rows  = { AUD_58 = 1 }
+
+[[term]]
+id    = "T_AUD_45"
+gate  = "P3_AUDIT"
+panel = "emb_cmd_45"
+rows  = { AUD_45 = 1 }

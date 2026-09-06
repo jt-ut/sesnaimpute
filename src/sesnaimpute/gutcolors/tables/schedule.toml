@@ -1,0 +1,145 @@
+#
+# Schedule -- the ordered part of the scheme.  13 entries.
+#
+# Phases 1-2 are a CASCADE: first gate to fire wins, and each entry requires
+# the source to still be unassigned.
+#
+# Phase 3 is a STATE MACHINE: each entry is a transition with a precondition
+# on the label already assigned, applied in the order listed.
+#
+# Fields
+#   phase       1, 2 or 3
+#   gate        gate id from terms.toml; omitted for the Phase-1 residual
+#   assign      label to write
+#   when        "unassigned", or a list of labels the source must currently hold
+#   on          "fire" (default) or "not_fire" -- see P3_AUDIT
+#   route       admission route(s) this entry applies to
+#   guard       extra condition on the detection mask
+#
+schema_version = 1
+
+# ---- Phase 1 cascade -----------------------------------------------------
+# Contaminants first: each is removed from further consideration, which is
+# why order is load-bearing rather than cosmetic.
+
+[[entry]]
+phase = 1
+gate  = "P1_PAH"
+assign = "PAH_GALAXY"
+when  = "unassigned"
+route = ["P1"]
+
+[[entry]]
+phase = 1
+gate  = "P1_AGN"
+assign = "AGN"
+when  = "unassigned"
+route = ["P1"]
+
+[[entry]]
+phase = 1
+gate  = "P1_SHOCK"
+assign = "SHOCK_BLOB"
+when  = "unassigned"
+route = ["P1"]
+
+[[entry]]
+phase = 1
+gate  = "P1_PAHAP"
+assign = "PAH_APERTURE"
+when  = "unassigned"
+route = ["P1"]
+
+[[entry]]
+phase = 1
+gate  = "P1_CLASS_I"
+assign = "CLASS_I"
+when  = "unassigned"
+route = ["P1"]
+
+[[entry]]
+phase = 1
+gate  = "P1_CLASS_II"
+assign = "CLASS_II"
+when  = "unassigned"
+route = ["P1"]
+
+# Residual: admitted to Phase 1, matched nothing.  No detected IR excess.
+# The scheme cannot separate diskless cluster members from field stars.
+[[entry]]
+phase = 1
+assign = "DISKLESS_STAR"
+when  = "unassigned"
+route = ["P1"]
+
+# ---- Phase 2 -------------------------------------------------------------
+# Protostars before Class II: T_P2_C2 already carries P2_PROTO = -1, so the
+# two are mutually exclusive and the order is belt-and-braces.
+#
+[[entry]]
+phase = 2
+gate  = "P2_PROTO"
+assign = "CLASS_I"
+when  = "unassigned"
+route = ["P2"]
+
+[[entry]]
+phase = 2
+gate  = "P2_CLASS_II"
+assign = "CLASS_II"
+when  = "unassigned"
+route = ["P2"]
+
+# Phase-2 residual.  The appendix says only that Phase 2 ADDS YSOs and never
+# states what becomes of a Phase-2 source that fails the cuts (erratum E11).
+# Settled empirically against SESNA: in Perseus, 1625 sources that we would
+# otherwise leave UNCLASSIFIED carry CLASS = 99 (Diskless Star), and they are
+# route-P2 sources missing 8.0 um in 99.5% of cases.  So Phase 2 does assign
+# the residual, exactly as Phase 1 does.
+[[entry]]
+phase = 2
+assign = "DISKLESS_STAR"
+when  = "unassigned"
+route = ["P2"]
+
+# ---- Phase 3 state machine -----------------------------------------------
+# Order: TRANS -> EMB -> REINST -> AUDIT (erratum E6, configurable).
+
+# Photospheric sources with a 24 um excess.  The paper's "Class II*".
+[[entry]]
+phase = 3
+gate  = "P3_TRANS"
+assign = "TRANSITION_DISK"
+when  = ["DISKLESS_STAR"]
+
+# Sources too embedded to yield usable photometry in some IRAC bands, but
+# bright at 24 um.  The paper's "Class I*".
+[[entry]]
+phase = 3
+gate  = "P3_EMB"
+assign = "DEEPLY_EMBEDDED"
+when  = "any"
+guard = "irac_incomplete"
+
+# With 24 um in hand, low-luminosity YSOs can be pulled back out of the AGN
+# and shock flags applied in Phase 1.  Reinstated sources came from Phase 1
+# and therefore have all four IRAC bands, so they can never satisfy the
+# deeply-embedded guard above -- reinstatement always lands on Class I.
+[[entry]]
+phase = 3
+gate  = "P3_REINST"
+assign = "CLASS_I"
+when  = ["AGN", "SHOCK_BLOB"]
+
+# Every protostar with a 24 um detection must show an SED still rising from
+# IRAC to MIPS.  FAILING the audit demotes it to Class II -- hence
+# on = "not_fire".  Runs after reinstatement, so a reinstated source can
+# subsequently be demoted: RI_G implies AUD_45 but not AUD_58, so the path
+# is reachable for reinstated sources that possess 5.8 um photometry.
+[[entry]]
+phase = 3
+gate  = "P3_AUDIT"
+assign = "CLASS_II"
+when  = ["CLASS_I", "DEEPLY_EMBEDDED"]
+on    = "not_fire"
+guard = "auditable"

@@ -1,0 +1,598 @@
+#
+# Gutermuth+2009 (ApJS 184, 18) Appendix A — boundary table
+#
+# 45 rows.  Each row is one published constraint, normalised to
+#
+#       ( w · f  +  k · sigma )   SENSE   t
+#
+# where `w` is a linear combination over colours/magnitudes (§features),
+# `k` a linear combination over propagated colour uncertainties (§sigmas),
+# and SENSE one of  >  <  >=  <=   (strictness is per-row and load-bearing).
+#
+# `coef` and `t` are stored as EXPRESSION STRINGS, evaluated at load.  Do not
+# replace them with rounded decimals: 1.05/1.2 and 1.4*(-0.7)+0.15 do not land
+# on exact binary, and rounding introduces a permanent silent offset.
+#
+# `published` reproduces the appendix equation verbatim and is what the
+# transcription test (T1) checks each normalised row against.
+#
+schema_version = 1
+
+# --------------------------------------------------------------------------
+# Feature basis
+# --------------------------------------------------------------------------
+# Colours and magnitudes, defined as linear combinations of the eight band
+# magnitudes.  D = A+B and E = B+C are redundant; they are kept so the table
+# diffs line-by-line against the appendix.
+
+[features]
+A     = { mags = { I1 =  1, I2 = -1 }, label = "[3.6]-[4.5]" }
+B     = { mags = { I2 =  1, I3 = -1 }, label = "[4.5]-[5.8]" }
+C     = { mags = { I3 =  1, I4 = -1 }, label = "[5.8]-[8.0]" }
+D     = { mags = { I1 =  1, I3 = -1 }, label = "[3.6]-[5.8]" }
+E     = { mags = { I2 =  1, I4 = -1 }, label = "[4.5]-[8.0]" }
+F     = { mags = { I1 =  1, M1 = -1 }, label = "[3.6]-[24]"  }
+G     = { mags = { I2 =  1, M1 = -1 }, label = "[4.5]-[24]"  }
+H     = { mags = { I3 =  1, M1 = -1 }, label = "[5.8]-[24]"  }
+I     = { mags = { I4 =  1, M1 = -1 }, label = "[8.0]-[24]"  }
+m36   = { mags = { I1 =  1 },          label = "[3.6]"       }
+m45   = { mags = { I2 =  1 },          label = "[4.5]"       }
+m24   = { mags = { M1 =  1 },          label = "[24]"        }
+
+# Dereddened quantities.  Piecewise-linear in the band magnitudes: affine
+# within a dereddening branch, with the branch chosen by featurize.py.  Not
+# expressible as a fixed `mags` dict, hence kind = "derived".
+X0    = { kind = "derived", label = "[[3.6]-[4.5]]_0" }
+Y0    = { kind = "derived", label = "[Ks-[3.6]]_0"    }
+m36_0 = { kind = "derived", label = "[3.6]_0"         }
+
+# Propagated colour uncertainties: quadrature over the constituent bands.
+[sigmas]
+sA = { bands = ["I1", "I2"], of = "A" }
+sB = { bands = ["I2", "I3"], of = "B" }
+sC = { bands = ["I3", "I4"], of = "C" }
+sD = { bands = ["I1", "I3"], of = "D" }
+sE = { bands = ["I2", "I4"], of = "E" }
+sY = { bands = ["Ks", "I1"], of = "Ks-[3.6]" }
+
+# Display planes, referenced by rows for plotting.  Axis inversion is stored
+# because m45 runs 18 -> 3 in the AGN colour-magnitude diagram.
+[panels]
+pah_ccd_a  = { x = "C",  y = "B",  xlim = [-1.0,  3.0], ylim = [-1.0, 3.0] }
+pah_ccd_b  = { x = "E",  y = "D",  xlim = [-1.0,  4.0], ylim = [-1.0, 3.0] }
+agn_cmd    = { x = "E",  y = "m45", xlim = [-1.0, 4.0], ylim = [18.0, 3.0], y_invert = true }
+irac_ccd_1 = { x = "B",  y = "A",  xlim = [-1.0,  3.0], ylim = [-1.0, 3.2] }
+irac_ccd_2 = { x = "E",  y = "D",  xlim = [-1.0,  4.0], ylim = [-1.0, 3.0] }
+k12_ccd    = { x = "X0", y = "Y0", xlim = [-0.5,  2.0], ylim = [-0.5, 3.0] }
+mips_ccd   = { x = "G",  y = "D",  xlim = [-1.0, 10.0], ylim = [-1.0, 3.0] }
+
+# Phase 3 has no single plane: every criterion pairs a 24 um colour with a
+# brightness cut, and which IRAC band supplies the colour is chosen per source
+# by the detection mask.  So each Phase-3 term gets its own colour-magnitude
+# plane, which is what makes it drawable at all.  Display metadata only --
+# nothing in the cascade reads these.
+td_cmd_58  = { x = "H",  y = "m36", xlim = [-1.0,  8.0], ylim = [18.0, 6.0], y_invert = true }
+td_cmd_45  = { x = "G",  y = "m36", xlim = [-1.0,  8.0], ylim = [18.0, 6.0], y_invert = true }
+emb_cmd_36 = { x = "F",  y = "m24", xlim = [-1.0, 10.0], ylim = [14.0, 0.0], y_invert = true }
+emb_cmd_45 = { x = "G",  y = "m24", xlim = [-1.0, 10.0], ylim = [14.0, 0.0], y_invert = true }
+emb_cmd_58 = { x = "H",  y = "m24", xlim = [-1.0, 10.0], ylim = [14.0, 0.0], y_invert = true }
+emb_cmd_80 = { x = "I",  y = "m24", xlim = [-1.0, 10.0], ylim = [14.0, 0.0], y_invert = true }
+
+# ==========================================================================
+# PHASE 1 — IRAC four-band
+# ==========================================================================
+
+# --- PAH-emitting galaxies, rule set A ------------------------------------
+
+[[row]]
+id        = "PAH_A1"
+gate      = "P1_PAH"
+term      = "T_PAH_A"
+panel     = "pah_ccd_a"
+published = "[4.5]-[5.8] < (1.05/1.2)*([5.8]-[8.0]-1)"
+coef      = { B = "1", C = "-(1.05/1.2)" }
+sense     = "<"
+t         = "-(1.05/1.2)"
+
+[[row]]
+id        = "PAH_A2"
+gate      = "P1_PAH"
+term      = "T_PAH_A"
+panel     = "pah_ccd_a"
+published = "[4.5]-[5.8] < 1.05"
+coef      = { B = "1" }
+sense     = "<"
+t         = "1.05"
+
+[[row]]
+id        = "PAH_A3"
+gate      = "P1_PAH"
+term      = "T_PAH_A"
+panel     = "pah_ccd_a"
+published = "[5.8]-[8.0] > 1"
+coef      = { C = "1" }
+sense     = ">"
+t         = "1"
+
+[[row]]
+id        = "PAH_A4"
+gate      = "P1_PAH"
+term      = "T_PAH_A"
+panel     = "pah_ccd_a"
+published = "[4.5] > 11.5"
+coef      = { m45 = "1" }
+sense     = ">"
+t         = "11.5"
+
+# --- PAH-emitting galaxies, rule set B ------------------------------------
+
+[[row]]
+id        = "PAH_B1"
+gate      = "P1_PAH"
+term      = "T_PAH_B"
+panel     = "pah_ccd_b"
+published = "[3.6]-[5.8] < (1.5/2)*([4.5]-[8.0]-1)"
+coef      = { D = "1", E = "-(1.5/2)" }
+sense     = "<"
+t         = "-(1.5/2)"
+
+[[row]]
+id        = "PAH_B2"
+gate      = "P1_PAH"
+term      = "T_PAH_B"
+panel     = "pah_ccd_b"
+published = "[3.6]-[5.8] < 1.5"
+coef      = { D = "1" }
+sense     = "<"
+t         = "1.5"
+
+[[row]]
+id        = "PAH_B3"
+gate      = "P1_PAH"
+term      = "T_PAH_B"
+panel     = "pah_ccd_b"
+published = "[4.5]-[8.0] > 1"
+coef      = { E = "1" }
+sense     = ">"
+t         = "1"
+
+[[row]]
+id        = "PAH_B4"
+gate      = "P1_PAH"
+term      = "T_PAH_B"
+panel     = "pah_ccd_b"
+published = "[4.5] > 11.5"
+coef      = { m45 = "1" }
+sense     = ">"
+t         = "11.5"
+
+# --- Broad-line AGN -------------------------------------------------------
+# Fires on (AGN1 & AGN2 & AGN3) & (AGN4 | AGN5 | AGN6).  The disjunction is
+# expressed as three terms in terms.toml, each carrying AGN1-3 plus one of
+# AGN4-6.  This is the only OR inside a single class in the scheme.
+
+[[row]]
+id        = "AGN1"
+gate      = "P1_AGN"
+panel     = "agn_cmd"
+published = "[4.5]-[8.0] > 0.5"
+coef      = { E = "1" }
+sense     = ">"
+t         = "0.5"
+
+[[row]]
+id        = "AGN2"
+gate      = "P1_AGN"
+panel     = "agn_cmd"
+published = "[4.5] > 13.5 + ([4.5]-[8.0]-2.3)/0.4"
+coef      = { m45 = "1", E = "-(1/0.4)" }
+sense     = ">"
+t         = "13.5 - 2.3/0.4"
+
+[[row]]
+id        = "AGN3"
+gate      = "P1_AGN"
+panel     = "agn_cmd"
+published = "[4.5] > 13.5"
+coef      = { m45 = "1" }
+sense     = ">"
+t         = "13.5"
+
+[[row]]
+id        = "AGN4"
+gate      = "P1_AGN"
+panel     = "agn_cmd"
+published = "[4.5] > 14 + ([4.5]-[8.0]-0.5)"
+coef      = { m45 = "1", E = "-1" }
+sense     = ">"
+t         = "14 - 0.5"
+
+[[row]]
+id        = "AGN5"
+gate      = "P1_AGN"
+panel     = "agn_cmd"
+published = "[4.5] > 14.5 - ([4.5]-[8.0]-1.2)/0.3"
+coef      = { m45 = "1", E = "1/0.3" }
+sense     = ">"
+t         = "14.5 + 1.2/0.3"
+
+[[row]]
+id        = "AGN6"
+gate      = "P1_AGN"
+panel     = "agn_cmd"
+published = "[4.5] > 14.5"
+coef      = { m45 = "1" }
+sense     = ">"
+t         = "14.5"
+
+# --- Unresolved shock-emission knots --------------------------------------
+
+[[row]]
+id        = "SHK1"
+gate      = "P1_SHOCK"
+term      = "T_SHOCK"
+panel     = "irac_ccd_1"
+published = "[3.6]-[4.5] > (1.2/0.55)*(([4.5]-[5.8])-0.3) + 0.8"
+coef      = { A = "1", B = "-(1.2/0.55)" }
+sense     = ">"
+t         = "(1.2/0.55)*(-0.3) + 0.8"
+
+[[row]]
+id        = "SHK2"
+gate      = "P1_SHOCK"
+term      = "T_SHOCK"
+panel     = "irac_ccd_1"
+published = "[4.5]-[5.8] <= 0.85"
+coef      = { B = "1" }
+sense     = "<="
+t         = "0.85"
+
+[[row]]
+id        = "SHK3"
+gate      = "P1_SHOCK"
+term      = "T_SHOCK"
+panel     = "irac_ccd_1"
+published = "[3.6]-[4.5] > 1.05"
+coef      = { A = "1" }
+sense     = ">"
+t         = "1.05"
+
+# --- PAH-contaminated apertures -------------------------------------------
+# sigma_4 = sigma{[4.5]-[5.8]} = sB;  sigma_5 = sigma{[3.6]-[4.5]} = sA.
+# The sigma signs make flagging EASIER as uncertainty grows — the cut is
+# deliberately biased toward purity of the YSO list.  Preserved as published.
+
+[[row]]
+id        = "PAP1"
+gate      = "P1_PAHAP"
+term      = "T_PAHAP"
+panel     = "irac_ccd_1"
+published = "[3.6]-[4.5] - s5 <= 1.4*(([4.5]-[5.8]) + s4 - 0.7) + 0.15"
+coef      = { A = "1", B = "-1.4" }
+ksigma    = { sA = "-1", sB = "-1.4" }
+sense     = "<="
+t         = "1.4*(-0.7) + 0.15"
+
+[[row]]
+id        = "PAP2"
+gate      = "P1_PAHAP"
+term      = "T_PAHAP"
+panel     = "irac_ccd_1"
+published = "[3.6]-[4.5] - s5 <= 1.65"
+coef      = { A = "1" }
+ksigma    = { sA = "-1" }
+sense     = "<="
+t         = "1.65"
+
+# --- Class I protostars ---------------------------------------------------
+# No sigma terms in the arXiv source.  The published version's
+# "s3 = sigma{[4.5]-[5.8]} > 0.7" is a typesetting artefact of merged
+# definition and constraint lines (erratum E12).
+
+[[row]]
+id        = "C1_1"
+gate      = "P1_CLASS_I"
+term      = "T_C1"
+panel     = "irac_ccd_1"
+published = "[4.5]-[5.8] > 0.7"
+coef      = { B = "1" }
+sense     = ">"
+t         = "0.7"
+
+[[row]]
+id        = "C1_2"
+gate      = "P1_CLASS_I"
+term      = "T_C1"
+panel     = "irac_ccd_1"
+published = "[3.6]-[4.5] > 0.7"
+coef      = { A = "1" }
+sense     = ">"
+t         = "0.7"
+
+# --- Class II YSOs --------------------------------------------------------
+# Bare `sigma` in the appendix, bound per-term to the sigma of the colour
+# appearing in that term (erratum E3, SIGMA_BINDING = "per_colour").
+
+[[row]]
+id        = "C2_1"
+gate      = "P1_CLASS_II"
+term      = "T_C2"
+panel     = "irac_ccd_2"
+published = "[4.5]-[8.0] - s > 0.5"
+coef      = { E = "1" }
+ksigma    = { sE = "-1" }
+sense     = ">"
+t         = "0.5"
+
+[[row]]
+id        = "C2_2"
+gate      = "P1_CLASS_II"
+term      = "T_C2"
+panel     = "irac_ccd_2"
+published = "[3.6]-[5.8] - s > 0.35"
+coef      = { D = "1" }
+ksigma    = { sD = "-1" }
+sense     = ">"
+t         = "0.35"
+
+[[row]]
+id        = "C2_3"
+gate      = "P1_CLASS_II"
+term      = "T_C2"
+panel     = "irac_ccd_2"
+published = "[3.6]-[5.8] + s <= (0.14/0.04)*(([4.5]-[8.0] - s) - 0.5) + 0.5"
+coef      = { D = "1", E = "-(0.14/0.04)" }
+ksigma    = { sD = "1", sE = "0.14/0.04" }
+sense     = "<="
+t         = "(0.14/0.04)*(-0.5) + 0.5"
+
+[[row]]
+id        = "C2_4"
+gate      = "P1_CLASS_II"
+term      = "T_C2"
+panel     = "irac_ccd_2"
+published = "[3.6]-[4.5] - s > 0.15"
+coef      = { A = "1" }
+ksigma    = { sA = "-1" }
+sense     = ">"
+t         = "0.15"
+
+# ==========================================================================
+# PHASE 2 — JHKs + [3.6][4.5], in dereddened colours
+# ==========================================================================
+# sigma_1 = sigma{[[3.6]-[4.5]]_meas} = sA
+# sigma_2 = sigma{[Ks-[3.6]]_meas}    = sY
+# Both are uncertainties on the MEASURED colours, not the dereddened ones.
+#
+# The printed decimal 2.85714 is used, not 20/7 — the published scheme is the
+# decimal, and the 1.4e-5 slope difference is not ours to correct.
+
+[[row]]
+id        = "P2_YSO1"
+gate      = "P2_YSO"
+term      = "T_P2_YSO"
+panel     = "k12_ccd"
+published = "[[3.6]-[4.5]]_0 - s1 > 0.101"
+coef      = { X0 = "1" }
+ksigma    = { sA = "-1" }
+sense     = ">"
+t         = "0.101"
+
+[[row]]
+id        = "P2_YSO2"
+gate      = "P2_YSO"
+term      = "T_P2_YSO"
+panel     = "k12_ccd"
+published = "[Ks-[3.6]]_0 - s2 > 0"
+coef      = { Y0 = "1" }
+ksigma    = { sY = "-1" }
+sense     = ">"
+t         = "0"
+
+[[row]]
+id        = "P2_YSO3"
+gate      = "P2_YSO"
+term      = "T_P2_YSO"
+panel     = "k12_ccd"
+published = "[Ks-[3.6]]_0 - s2 > -2.85714*([[3.6]-[4.5]]_0 - s1 - 0.101) + 0.5"
+coef      = { Y0 = "1", X0 = "2.85714" }
+ksigma    = { sY = "-1", sA = "-2.85714" }
+sense     = ">"
+t         = "0.5 + 2.85714*0.101"
+
+[[row]]
+id        = "P2_PROTO"
+gate      = "P2_PROTO"
+term      = "T_P2_PROTO"
+panel     = "k12_ccd"
+published = "[Ks-[3.6]]_0 - s2 > -2.85714*([[3.6]-[4.5]]_0 - s1 - 0.401) + 1.7"
+coef      = { Y0 = "1", X0 = "2.85714" }
+ksigma    = { sY = "-1", sA = "-2.85714" }
+sense     = ">"
+t         = "1.7 + 2.85714*0.401"
+
+[[row]]
+id        = "P2_BRT_II"
+gate      = "P2_CLASS_II"
+term      = "T_P2_C2"
+panel     = "k12_ccd"
+published = "[3.6]_0 < 14.5"
+coef      = { m36_0 = "1" }
+sense     = "<"
+t         = "14.5"
+
+[[row]]
+id        = "P2_BRT_I"
+gate      = "P2_PROTO"
+term      = "T_P2_PROTO"
+panel     = "k12_ccd"
+published = "[3.6]_0 < 15"
+coef      = { m36_0 = "1" }
+sense     = "<"
+t         = "15"
+
+# ==========================================================================
+# PHASE 3 — MIPS 24 um re-examination
+# ==========================================================================
+
+# --- Transition disks -----------------------------------------------------
+
+[[row]]
+id        = "TD_EXC_58"
+gate      = "P3_TRANS"
+term      = "T_TD_58"
+panel     = "mips_ccd"
+published = "[5.8]-[24] > 2.5"
+coef      = { H = "1" }
+sense     = ">"
+t         = "2.5"
+guard     = "has_I3"
+
+[[row]]
+id        = "TD_EXC_45"
+gate      = "P3_TRANS"
+term      = "T_TD_45"
+panel     = "mips_ccd"
+published = "[4.5]-[24] > 2.5"
+coef      = { G = "1" }
+sense     = ">"
+t         = "2.5"
+guard     = "has_I2"
+
+[[row]]
+id        = "TD_BRT"
+gate      = "P3_TRANS"
+panel     = "mips_ccd"
+published = "[3.6] < 14"
+coef      = { m36 = "1" }
+sense     = "<"
+t         = "14"
+guard     = "has_I1"
+
+# --- Deeply embedded protostars -------------------------------------------
+# EMB_X_* are mutually exclusive: the operand is the LONGEST-WAVELENGTH IRAC
+# band the source actually has, selected by the detection mask, not by value.
+
+[[row]]
+id        = "EMB_BRT"
+gate      = "P3_EMB"
+panel     = "mips_ccd"
+published = "[24] < 7"
+coef      = { m24 = "1" }
+sense     = "<"
+t         = "7"
+
+[[row]]
+id        = "EMB_X_36"
+gate      = "P3_EMB"
+term      = "T_EMB_36"
+panel     = "mips_ccd"
+published = "[3.6]-[24] > 4.5"
+coef      = { F = "1" }
+sense     = ">"
+t         = "4.5"
+guard     = "longest_irac == I1"
+
+[[row]]
+id        = "EMB_X_45"
+gate      = "P3_EMB"
+term      = "T_EMB_45"
+panel     = "mips_ccd"
+published = "[4.5]-[24] > 4.5"
+coef      = { G = "1" }
+sense     = ">"
+t         = "4.5"
+guard     = "longest_irac == I2"
+
+[[row]]
+id        = "EMB_X_58"
+gate      = "P3_EMB"
+term      = "T_EMB_58"
+panel     = "mips_ccd"
+published = "[5.8]-[24] > 4.5"
+coef      = { H = "1" }
+sense     = ">"
+t         = "4.5"
+guard     = "longest_irac == I3"
+
+[[row]]
+id        = "EMB_X_80"
+gate      = "P3_EMB"
+term      = "T_EMB_80"
+panel     = "mips_ccd"
+published = "[8.0]-[24] > 4.5"
+coef      = { I = "1" }
+sense     = ">"
+t         = "4.5"
+guard     = "longest_irac == I4"
+
+# --- Contaminant reinstatement --------------------------------------------
+
+[[row]]
+id        = "RI_BRT"
+gate      = "P3_REINST"
+term      = "T_REINST"
+panel     = "mips_ccd"
+published = "[24] < 7"
+coef      = { m24 = "1" }
+sense     = "<"
+t         = "7"
+
+[[row]]
+id        = "RI_D"
+gate      = "P3_REINST"
+term      = "T_REINST"
+panel     = "mips_ccd"
+published = "[3.6]-[5.8] > 0.5"
+coef      = { D = "1" }
+sense     = ">"
+t         = "0.5"
+guard     = "has_I1, has_I3"
+
+[[row]]
+id        = "RI_G"
+gate      = "P3_REINST"
+term      = "T_REINST"
+panel     = "mips_ccd"
+published = "[4.5]-[24] > 4.5"
+coef      = { G = "1" }
+sense     = ">"
+t         = "4.5"
+guard     = "has_I2"
+
+[[row]]
+id        = "RI_I"
+gate      = "P3_REINST"
+term      = "T_REINST"
+panel     = "mips_ccd"
+published = "[8.0]-[24] > 4"
+coef      = { I = "1" }
+sense     = ">"
+t         = "4"
+guard     = "has_I4"
+
+# --- Protostar audit ------------------------------------------------------
+# AUD_58 applies if the source has 5.8 um photometry, otherwise AUD_45.
+# Operand selected by the detection mask.  FAILURE demotes to Class II.
+
+[[row]]
+id        = "AUD_58"
+gate      = "P3_AUDIT"
+term      = "T_AUD_58"
+panel     = "mips_ccd"
+published = "[5.8]-[24] > 4"
+coef      = { H = "1" }
+sense     = ">"
+t         = "4"
+guard     = "has_I3"
+
+[[row]]
+id        = "AUD_45"
+gate      = "P3_AUDIT"
+term      = "T_AUD_45"
+panel     = "mips_ccd"
+published = "[4.5]-[24] > 4"
+coef      = { G = "1" }
+sense     = ">"
+t         = "4"
+guard     = "not has_I3, has_I2"
