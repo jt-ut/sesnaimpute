@@ -161,6 +161,51 @@ states for PAHC's own limit interpolation); YSO and H2S are analytic in
 `a` throughout their support by construction (`YsoShape.marginal_at`'s own
 finite quadrature sum) and Gaussian in `log10 B`, so no tail declaration
 is needed for either.
+
+**Per-batch tabulation (`prepare`).** The fitter reads every model of a
+class once per source (the paragraph above, `10_POSTERIOR.md`'s adopted
+reading), so GAL/YSO/H2S's exact extinction machinery -- a sum over the
+column kernel's own hundreds of quadrature points, `YsoShape.
+marginal_at`/`_kernel_density_rows` -- would otherwise be recomputed once
+per (source, model) pair: for YSO's 200,000 models that is 200,000 exact
+sums per source. `SourcePrior.prepare(rows)` tabulates, once per batch of
+about ten thousand sources (`CODING_RULES.md` 10b), every quantity those
+three classes' reads need, on a fixed 256-point `log10 a` grid (`N_A_GRID`)
+sized from the shared column grid's own floor to four times the largest
+kernel quadrature node the batch's sources touch (the check's own
+normalisation grid reaches three times that same bound, `_extinction_grid`,
+so the margin keeps every query the check makes inside the interpolation
+range):
+
+  - YSO's `p(a | A_s)` (shared with H2S, `YsoShape.marginal_at`'s own
+    formula) and GAL's `p_a` (`_kernel_density_rows`'s own formula, the
+    embedding-density-free kernel reconstruction -- a DIFFERENT quantity
+    from YSO's, despite sharing the same underlying kernel quadrature),
+    each `(n_batch, 256)`, built once per DISTINCT `(sightline row, node
+    index)` pair the batch touches (`prior.counts_cloud.bin_mass_exact`'s
+    own grouping idiom: a region's sources touch orders of magnitude fewer
+    such pairs than sources) and then node-blended per source, never
+    evaluated per source directly.
+  - GAL's `p(log10 S)`, `(n_batch, 61)`, already divided by the source's
+    own `Z_GAL` -- built at the source's OWN adopted-column node bracket
+    (the same bracket `gal_z`'s build-time integral already uses in
+    `__init__`, so this tabulation's numerator and that denominator agree
+    by construction, tightening rather than loosening the query-a bracket
+    the un-tabulated read used).
+  - H2S's `eps(a, Sigma)`, `(K depth groups, 256, 41)`, node-blended in
+    `a` at every one of the 256 grid points for every depth group at once
+    -- independent of which particular sources the batch holds beyond the
+    shared grid, so one small table serves the whole batch and every
+    source reads it by its own `GROUP` index.
+
+`log_density` then reads only these tables (a `log10 a`, and for GAL/H2S a
+further `log10 S`/`Sigma`, linear interpolation, held at the nearest edge
+value outside the tabulated range, the same convention
+`_kernel_density_rows` already used) for GAL/YSO/H2S; STAR/AGB/PAHC are
+unchanged (their own per-read cost was already at the STAR floor, module
+docstring's measured numbers, so tabulating their selection factor too
+would add `counts_star_family.grouped_eval`'s own machinery for no
+measured speed gain -- not done, see `readcost.py`'s own report).
 """
 
 import os
@@ -168,6 +213,7 @@ import time
 
 import h5py
 import numpy as np
+from joblib import Parallel, delayed
 
 from sesnaimpute import config as config_module
 from sesnaimpute.catalog import limits as limits_module
@@ -187,10 +233,10 @@ _INV_SQRT_2PI = 1.0 / np.sqrt(2.0 * np.pi)
 FAMILY_CLASSES = ("star", "agb", "pahc")
 CLASSES = ("star", "agb", "pahc", "gal", "yso", "h2s")
 
-#: `CODING_RULES.md` 10a: GAL's own kernel-marginal reconstruction
-#: (`SourcePrior._kernel_marginal_u1`) processes its query batch in
-#: blocks of this many rows, so its `(chunk, n_kernel_quadrature)`
-#: intermediates never scale with the caller's own `n . m`.
+#: `CODING_RULES.md` 10a: `_interp_rows`/`_interp_h2s_eps` (GAL/YSO/H2S's
+#: table reads) process their query batch in blocks of this many rows, so
+#: their `(chunk, grid.size)` intermediates never scale with the caller's
+#: own `n . m`.
 _KERNEL_CHUNK = 20000
 
 #: The two library keys `IMPLEMENTATION.md` section 3's GAL/H2S rows need
@@ -199,6 +245,41 @@ _KERNEL_CHUNK = 20000
 #: carrying no dedicated H2 1-0 S(1) dataset).
 _LIBRARY_KEY = {"gal": "galz", "h2s": "h2shock"}
 _LIBRARY_BAND = {"gal": "F_REF_I2", "h2s": "F_REF_Ks"}
+
+#: `prepare`'s own `log10 a` tabulation width (module docstring): fine
+#: enough that the linear interpolation between adjacent grid points is
+#: far below the classes' own 0.02 shape fidelity bar over the smooth
+#: kernel-quadrature marginals it replaces.
+N_A_GRID = 256
+
+#: `prepare`'s and `_extinction_grid`'s shared floor: GAL/YSO/H2S's exact
+#: marginals do not vanish as `a -> 0` (the embedding density's near-field
+#: cell, or the kernel's own near-`T=0` mass, is generically nonzero
+#: there), so both the tabulation and the check's own integration grid
+#: must reach this close to zero rather than the shared column grid's own
+#: measured floor (`column_grid.nodes`'s first node), which is calibrated
+#: to a source's own measurement uncertainty, not to this tail.
+_A_GRID_FLOOR = 1.0e-6
+
+#: `prepare`'s grid ceiling is this many times the largest kernel
+#: quadrature node (`T`) the batch's sources touch; the check's own
+#: normalisation grid (`_extinction_grid`) reaches three times that same
+#: bound, so this margin keeps every query the check makes inside the
+#: interpolation range.
+_A_GRID_SAFETY = 4.0
+
+#: Distinct `(sightline row, node index)` pairs per joblib chunk
+#: (CODING_RULES.md 10a): each chunk's own transient arrays are `(chunk
+#: pairs * N_A_GRID, n_quadrature)`, several of them alive at once inside
+#: `_marginal_rows`/`_kernel_density_rows`/`_row_bin`, and up to
+#: `config.n_jobs` chunks run at once -- a smaller bound than
+#: `prior.counts_cloud.PAIR_CHUNK` uses, because this module's own grid
+#: (`N_A_GRID` = 256) is wider than that module's bin-edge count and the
+#: kernel's own quadrature order (measured ~257) multiplies it again; a
+#: region with many sightlines and nodes (Perseus: 297 sightlines x 183
+#: nodes) touches thousands of distinct pairs, so the bound must hold per
+#: chunk, not just in total.
+_PREP_PAIR_CHUNK = 40
 
 
 def _library_reference_flux(config, cls):
@@ -236,6 +317,135 @@ def _kernel_density_rows(t, w, a_query):
     span = np.where(hi > lo, hi - lo, 1.0)
     frac = np.clip((log_a - lo) / span, 0.0, 1.0)
     return d_lo + frac * (d_hi - d_lo)
+
+
+def _unique_row_node_pairs(rows, node_lo, node_hi, n_node):
+    """Every distinct `(sightline row, node index)` pair a batch's own
+    sources touch through either side of their own node bracket (the same
+    helper `prior.counts_cloud._unique_row_node_pairs` uses): `(uniq_row,
+    uniq_node)`, and each source's own index into them for its `NODE_LO`
+    side and its `NODE_HI` side."""
+    rows = rows.astype(np.int64)
+    key_lo = rows * n_node + node_lo.astype(np.int64)
+    key_hi = rows * n_node + node_hi.astype(np.int64)
+    uniq_keys, inverse = np.unique(np.concatenate([key_lo, key_hi]), return_inverse=True)
+    uniq_row = (uniq_keys // n_node).astype(np.intp)
+    uniq_node = (uniq_keys % n_node).astype(np.intp)
+    n_src = rows.size
+    return uniq_row, uniq_node, inverse[:n_src], inverse[n_src:]
+
+
+def _pair_grid_values(shape, a_grid, row_chunk, node_chunk):
+    """`(marginal, kernel_density)`, each `(n_pairs, N_A_GRID)`: YSO's
+    exact `p(a | A_s)` (`YsoShape._marginal_rows`) and GAL's exact kernel
+    reconstruction at embedding density `u = 1` (`_kernel_density_rows`,
+    module docstring -- a DIFFERENT quantity sharing the same underlying
+    kernel quadrature), both evaluated at every grid point of `a_grid` for
+    one chunk of distinct `(sightline row, node index)` pairs -- one
+    batched call into `YsoShape`'s own per-row machinery, the same
+    primitives `marginal_at`'s own per-source formula uses, evaluated here
+    once per pair rather than once per source."""
+    n_pairs = row_chunk.size
+    n_grid = a_grid.size
+    rows_rep = np.repeat(row_chunk, n_grid)
+    node_rep = np.repeat(node_chunk, n_grid)
+    a_rep = np.tile(a_grid, n_pairs)
+    t, w = shape._gather_quadrature(rows_rep, node_rep)
+    marginal = shape._marginal_rows(a_rep, rows_rep, t, w)
+    kernel_density = _kernel_density_rows(t, w, a_rep)
+    return marginal.reshape(n_pairs, n_grid), kernel_density.reshape(n_pairs, n_grid)
+
+
+def _build_pair_tables(config, shape, a_grid, rows, node_lo, node_w):
+    """`(p_a_yso, p_a_gal)`, each `(n_batch, N_A_GRID)` float32: YSO/H2S's
+    shared extinction marginal and GAL's own kernel reconstruction, tiled
+    on `a_grid` and node-blended per source, from one deduplicated pass over
+    the batch's own distinct `(sightline row, node index)` pairs
+    (`_unique_row_node_pairs`; module docstring's `prepare`). Chunked over
+    pairs under `joblib` threads (`CODING_RULES.md` 10a), the same
+    thread-pool idiom `prior.counts_cloud.bin_mass_exact` uses so `shape`
+    (a whole region's sightline arrays) is never pickled into a worker."""
+    n_node = shape.n_node
+    node_hi = np.clip(node_lo + 1, 0, n_node - 1)
+    uniq_row, uniq_node, inv_lo, inv_hi = _unique_row_node_pairs(rows, node_lo, node_hi, n_node)
+
+    n_pairs = uniq_row.size
+    n_chunks = max(1, int(np.ceil(n_pairs / _PREP_PAIR_CHUNK)))
+    idx_chunks = np.array_split(np.arange(n_pairs), n_chunks)
+    results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
+        delayed(_pair_grid_values)(shape, a_grid, uniq_row[idx], uniq_node[idx])
+        for idx in idx_chunks)
+    if n_pairs:
+        m_pairs = np.concatenate([r[0] for r in results], axis=0)
+        k_pairs = np.concatenate([r[1] for r in results], axis=0)
+    else:
+        m_pairs = np.empty((0, a_grid.size))
+        k_pairs = np.empty((0, a_grid.size))
+
+    w = node_w[:, None]
+    p_a_yso = (1.0 - w) * m_pairs[inv_lo] + w * m_pairs[inv_hi]
+    p_a_gal = (1.0 - w) * k_pairs[inv_lo] + w * k_pairs[inv_hi]
+    return p_a_yso.astype(np.float32), p_a_gal.astype(np.float32)
+
+
+def _interp_rows(table, grid, local_idx, query):
+    """`(n,)`: linear interpolation of `table[local_idx[i], :]` at
+    `query[i]` on the shared ascending 1-D `grid`, held at the nearest
+    edge value outside the tabulated range (`_kernel_density_rows`'s own
+    "end bins held" convention). Processed in `_KERNEL_CHUNK` blocks
+    (`CODING_RULES.md` 10a) so the `(chunk, grid.size)` gather this needs
+    never scales with the caller's own, possibly source-times-model-sized,
+    batch."""
+    n = query.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    n_grid = grid.size
+    for start in range(0, n, _KERNEL_CHUNK):
+        stop = min(start + _KERNEL_CHUNK, n)
+        li = local_idx[start:stop]
+        clamped = np.clip(query[start:stop], grid[0], grid[-1])
+        idx = np.clip(np.searchsorted(grid, clamped) - 1, 0, n_grid - 2)
+        lo, hi = grid[idx], grid[idx + 1]
+        span = np.where(hi > lo, hi - lo, 1.0)
+        frac = np.where(hi > lo, (clamped - lo) / span, 0.0)
+        rows_i = np.arange(li.size)
+        v_lo = table[li, idx]
+        v_hi = table[li, idx + 1]
+        out[start:stop] = v_lo + frac * (v_hi - v_lo)
+    return out
+
+
+def _interp_h2s_eps(eps_grid, log10_a_grid, log10_sigma_grid, group_idx, log10_a, log10_sigma):
+    """`(n,)`: H2S's tabulated `eps(a, Sigma)` (`prepare`'s `(K, N_A_GRID,
+    41)` table) read by one linear interpolation in `a`, then one in
+    `Sigma`, at each row's own depth group -- both edges held (the same
+    convention `_interp_rows` uses). Processed in `_KERNEL_CHUNK` blocks
+    (`CODING_RULES.md` 10a): the intermediate `(chunk, n_sigma)` curve this
+    needs never scales with the caller's own batch."""
+    n = group_idx.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    n_a_grid = log10_a_grid.size
+    n_sigma_grid = log10_sigma_grid.size
+    for start in range(0, n, _KERNEL_CHUNK):
+        stop = min(start + _KERNEL_CHUNK, n)
+        g = group_idx[start:stop]
+        la = np.clip(log10_a[start:stop], log10_a_grid[0], log10_a_grid[-1])
+        ls = np.clip(log10_sigma[start:stop], log10_sigma_grid[0], log10_sigma_grid[-1])
+
+        idx_a = np.clip(np.searchsorted(log10_a_grid, la) - 1, 0, n_a_grid - 2)
+        lo_a, hi_a = log10_a_grid[idx_a], log10_a_grid[idx_a + 1]
+        span_a = np.where(hi_a > lo_a, hi_a - lo_a, 1.0)
+        frac_a = np.where(hi_a > lo_a, (la - lo_a) / span_a, 0.0)
+        curve = ((1.0 - frac_a)[:, None] * eps_grid[g, idx_a, :]
+                 + frac_a[:, None] * eps_grid[g, idx_a + 1, :])          # (chunk, n_sigma)
+
+        idx_s = np.clip(np.searchsorted(log10_sigma_grid, ls) - 1, 0, n_sigma_grid - 2)
+        lo_s, hi_s = log10_sigma_grid[idx_s], log10_sigma_grid[idx_s + 1]
+        span_s = np.where(hi_s > lo_s, hi_s - lo_s, 1.0)
+        frac_s = np.where(hi_s > lo_s, (ls - lo_s) / span_s, 0.0)
+        rows_i = np.arange(curve.shape[0])
+        out[start:stop] = (curve[rows_i, idx_s]
+                           + frac_s * (curve[rows_i, idx_s + 1] - curve[rows_i, idx_s]))
+    return out
 
 
 class SourcePrior(object):
@@ -312,6 +522,11 @@ class SourcePrior(object):
         node_lo_all, node_w_all = column_grid.bracket(self.table["A_COL_K"], self.gal_model.a_nodes)
         self.gal_z = np.asarray(self.gal_model.integrate_count(
             w1_norm[None, :], node_lo_all, node_w_all, self.gal_s, self.gal_delta5))
+        # `w1_norm` IS `phi(S).S.ln10 / gal_phi_total` on `gal_log10_s_grid`
+        # itself (the interpolated form `_log_density_gal` reads at a query
+        # point is the same array evaluated off-grid) -- `prepare` reuses
+        # it verbatim for the GAL `p(log10 S)` tabulation (module docstring).
+        self._gal_phi_density_grid = w1_norm
 
         # -- YSO: the sightline shape (marginal_at, shared with H2S).
         self.yso_shape = yso_module.YsoShape.read(config, region)
@@ -327,6 +542,98 @@ class SourcePrior(object):
             self.h2s_logsig_mean = float(f["LOGSIG_MEAN"][()])
             self.h2s_logsig_std = float(f["LOGSIG_STD"][()])
         self.h2s_fref = _library_reference_flux(config, "h2s")
+
+        # -- per-batch tabulation (`prepare`, module docstring): unset
+        # until a batch is prepared; `log_density` refuses GAL/YSO/H2S
+        # until then (rule 6: fail on the impossible, not silently
+        # recompute the batch's own exact quadrature per read).
+        self._prep_rows = None
+        self._prep_log10_a_grid = None
+        self._prep_p_a_yso = None
+        self._prep_p_a_gal = None
+        self._prep_gal_eps_curve = None
+        self._prep_h2s_eps_grid = None
+
+    def prepare(self, rows):
+        """Tabulates every quantity GAL/YSO/H2S's reads need for exactly
+        the sources in `rows` (about ten thousand, `CODING_RULES.md` 10b) --
+        called once per batch, before that batch's `log_density` calls
+        (module docstring). Distinct `(sightline row, node index)` pairs are
+        evaluated once and shared by every source touching them
+        (`_build_pair_tables`), never once per source; H2S's selection
+        table is built once for every depth group at once, independent of
+        which particular sources the batch holds beyond the shared grid."""
+        rows = np.asarray(rows, dtype=np.intp)
+        uniq_rows = np.unique(rows)
+
+        sl_rows = self.table["HPX256_ROW"][uniq_rows].astype(np.intp)
+        node_lo = self.table["NODE_LO"][uniq_rows].astype(np.intp)
+        node_w = self.table["NODE_W"][uniq_rows]
+
+        # the tabulation's `log10 a` grid (module docstring): the shared
+        # column grid's own measured floor to `_A_GRID_SAFETY` times the
+        # largest kernel quadrature node this batch's sources touch, on
+        # either side of their own node bracket.
+        node_hi = np.clip(node_lo + 1, 0, self.yso_shape.n_node - 1)
+        touched_nodes = np.unique(np.concatenate([node_lo, node_hi]))
+        t_max = max(float(self.yso_shape.kernel_t["herschel"][touched_nodes].max()),
+                    float(self.yso_shape.kernel_t["planck"][touched_nodes].max()))
+        log10_a_grid = np.linspace(np.log10(_A_GRID_FLOOR),
+                                    np.log10(t_max * _A_GRID_SAFETY), N_A_GRID)
+        a_grid = 10.0 ** log10_a_grid
+
+        p_a_yso, p_a_gal = _build_pair_tables(self.config, self.yso_shape, a_grid,
+                                              sl_rows, node_lo, node_w)
+
+        # GAL: the exact selection curve `eps(log10 S)`, already divided by
+        # Z_GAL, at the source's own adopted-column node bracket (module
+        # docstring: the same bracket `gal_z`'s own build-time integral
+        # already uses) -- NOT the counts law's own `phi` density: `phi`
+        # multiplies at the query's own RAW `log10 S` (`_gal_phi_density_
+        # grid`, survey-wide, applied at read time by a plain shared
+        # interpolation) while only `eps` is read after the source's own
+        # common-mode shift `s` (`PassFractionModel.evaluate`'s own split);
+        # folding `phi` into this per-source, shift-indexed table would
+        # apply that shift to `phi` too, which the exact formula never does.
+        a_col_batch = self.table["A_COL_K"][uniq_rows]
+        node_lo_g, node_w_g = column_grid.bracket(a_col_batch, self.gal_model.a_nodes)
+        curve = self.gal_model._eps_curve(node_lo_g, node_w_g, self.gal_delta5[uniq_rows])
+        z_batch = self.gal_z[uniq_rows]
+        safe_z = np.where(z_batch > 0.0, z_batch, 1.0)[:, None]
+        p_logs = np.where(z_batch[:, None] > 0.0, curve / safe_z, 0.0)
+
+        # H2S: eps(a, Sigma) node-blended in a at every grid point, for
+        # every depth group at once (module docstring).
+        node_lo_h, node_w_h = column_grid.bracket(a_grid, self.h2s_a_nodes)
+        node_hi_h = np.minimum(node_lo_h + 1, self.h2s_a_nodes.size - 1)
+        curve_lo = self.h2s_eps[:, node_lo_h, :]
+        curve_hi = self.h2s_eps[:, node_hi_h, :]
+        eps_grid_h2s = ((1.0 - node_w_h)[None, :, None] * curve_lo
+                        + node_w_h[None, :, None] * curve_hi)
+
+        self._prep_rows = uniq_rows
+        self._prep_log10_a_grid = log10_a_grid
+        self._prep_p_a_yso = p_a_yso
+        self._prep_p_a_gal = p_a_gal
+        self._prep_gal_eps_curve = p_logs.astype(np.float32)
+        self._prep_h2s_eps_grid = eps_grid_h2s.astype(np.float32)
+
+    def _prep_local_index(self, rows):
+        """`(n,)`: `rows`'s own position in the last `prepare`d batch --
+        every GAL/YSO/H2S read's one gather into that batch's tables (rule
+        6: raise, do not silently recompute, when a row was never
+        prepared)."""
+        if self._prep_rows is None:
+            raise ValueError(
+                "SourcePrior.log_density: call prepare(rows) once per batch "
+                "before reading class 'gal', 'yso' or 'h2s'")
+        loc = np.searchsorted(self._prep_rows, rows)
+        capped = np.minimum(loc, max(self._prep_rows.size - 1, 0))
+        if self._prep_rows.size == 0 or not np.all(self._prep_rows[capped] == rows):
+            raise ValueError(
+                "SourcePrior.log_density: rows are not a subset of the last "
+                "prepare(rows) batch")
+        return capped
 
     # -----------------------------------------------------------------
     # broadcasting: rows (n,), a/log10_b (n,) or (n,m), model_index (m,)
@@ -418,73 +725,54 @@ class SourcePrior(object):
     # GAL
     # -----------------------------------------------------------------
 
-    def _kernel_marginal_u1(self, rows, a_query):
-        """`p(a | A_s)` at embedding density `u = 1` (module docstring's
-        GAL formula): the source's own bracketing pair of `YsoShape`'s
-        pre-tabulated per-node kernel quadratures, each converted to a
-        density and interpolated at `a_query` (`_kernel_density_rows`),
-        then blended by the SAME `NODE_W` the shape classes use. Chunked
-        over the query batch (`CODING_RULES.md` 10a): each `(chunk,
-        n_kernel_q)` intermediate this needs is `_KERNEL_CHUNK` rows deep
-        at most, however large the caller's own `n . m` batch is."""
-        ys = self.yso_shape
-        n = rows.shape[0]
-        out = np.empty(n, dtype=np.float64)
-        for start in range(0, n, _KERNEL_CHUNK):
-            stop = min(start + _KERNEL_CHUNK, n)
-            r, a = rows[start:stop], a_query[start:stop]
-            sl_rows = self.table["HPX256_ROW"][r].astype(np.intp)
-            node_lo = self.table["NODE_LO"][r].astype(np.intp)
-            node_w = self.table["NODE_W"][r]
-            node_hi = np.minimum(node_lo + 1, ys.n_node - 1)
-            t_lo, w_lo = ys._gather_quadrature(sl_rows, node_lo)
-            t_hi, w_hi = ys._gather_quadrature(sl_rows, node_hi)
-            d_lo = _kernel_density_rows(t_lo, w_lo, a)
-            d_hi = _kernel_density_rows(t_hi, w_hi, a)
-            out[start:stop] = (1.0 - node_w) * d_lo + node_w * d_hi
-        return out
-
     def _log_density_gal(self, rows2d, a2, b2, mi2):
+        """Reads only `prepare`'s tables (module docstring): GAL's own
+        `p_a` at the query's `a`; `p(log10 S)` splits into the counts
+        law's own density `phi` at the query's RAW `log10 S` (a plain
+        shared interpolation, `_gal_phi_density_grid` -- survey-wide, no
+        per-source table) and the exact selection `eps` (already divided
+        by `Z_GAL`) at `log10 S` shifted by the source's own common-mode
+        `s` (`prepare`'s own `_prep_gal_eps_curve`) -- no
+        `PassFractionModel` call and no kernel quadrature sum."""
         rows = rows2d.ravel()
         a = a2.ravel()
         b = b2.ravel()
         mi = mi2.ravel()
         valid = a > 0.0
-        a_safe = np.where(valid, a, 1.0)
+        local = self._prep_local_index(rows)
 
         log10_s = b + np.log10(self.gal_fref[mi])
-        phi = np.interp(log10_s, self.gal_log10_s_grid, self.gal_phi_s)
-        s_lin = 10.0 ** log10_s
+        phi_density = np.interp(log10_s, self.gal_log10_s_grid, self._gal_phi_density_grid)
+        shifted = log10_s - self.gal_s[rows]
+        eps_over_z = _interp_rows(self._prep_gal_eps_curve, self.gal_log10_s_grid, local, shifted)
+        p_logs = phi_density * eps_over_z
 
-        node_lo, node_w = column_grid.bracket(a_safe, self.gal_model.a_nodes)
-        eps = self.gal_model.evaluate(node_lo=node_lo, node_w=node_w, log10_b=log10_s,
-                                      s=self.gal_s[rows], delta_5=self.gal_delta5[rows])
-        # phi(S).S is only proportional to a density (SPEC_PRIORS.md
-        # section 5.2); `gal_phi_total` is its own normaliser (module
-        # docstring's GAL correction).
-        p_logs = (phi / self.gal_phi_total) * s_lin * LN10 * eps
-
-        p_a = self._kernel_marginal_u1(rows, a_safe)
+        log10_a = np.log10(np.clip(a, 1.0e-300, None))
+        p_a = _interp_rows(self._prep_p_a_gal, self._prep_log10_a_grid, local, log10_a)
         p_a = np.where(valid, p_a, 0.0)
 
-        z = self.gal_z[rows]
         numerator = p_a * p_logs
         with np.errstate(divide="ignore", invalid="ignore"):
-            ln_val = np.log(numerator) - np.log(z)
-        return np.where((numerator > 0.0) & (z > 0.0) & valid, ln_val, -np.inf)
+            ln_val = np.log(numerator)
+        return np.where((numerator > 0.0) & valid, ln_val, -np.inf)
 
     # -----------------------------------------------------------------
     # YSO
     # -----------------------------------------------------------------
 
     def _log_density_yso(self, rows2d, a2, b2):
+        """Reads only `prepare`'s tables (module docstring): the shared
+        `p(a | A_s)` at the query's `a`, one `log10 a` interpolation, no
+        kernel quadrature sum; the conditional brightness stays the
+        closed-form Gaussian it always was."""
         rows = rows2d.ravel()
         a = a2.ravel()
         b = b2.ravel()
-        sl_rows = self.table["HPX256_ROW"][rows].astype(np.intp)
-        node_lo = self.table["NODE_LO"][rows].astype(np.intp)
-        node_w = self.table["NODE_W"][rows]
-        p_a = self.yso_shape.marginal_at(a, sl_rows, node_lo, node_w)
+        local = self._prep_local_index(rows)
+
+        log10_a = np.log10(np.clip(a, 1.0e-300, None))
+        p_a = _interp_rows(self._prep_p_a_yso, self._prep_log10_a_grid, local, log10_a)
+        p_a = np.where(a > 0.0, p_a, 0.0)
 
         mean_b = self.table["RIDGE_INTERCEPT"][rows] + self.table["RIDGE_SLOPE"][rows] * a
         width = self.table["RIDGE_WIDTH"][rows]
@@ -501,31 +789,28 @@ class SourcePrior(object):
     # -----------------------------------------------------------------
 
     def _log_density_h2s(self, rows2d, a2, b2, mi2):
+        """Reads only `prepare`'s tables (module docstring): YSO's shared
+        `p(a | A_s)` and the `(K, N_A_GRID, 41)` selection table at the
+        source's own depth group, one `log10 a` interpolation then one
+        `log10 Sigma` interpolation (`_interp_h2s_eps`); the region
+        lognormal stays the closed-form Gaussian it always was."""
         rows = rows2d.ravel()
         a = a2.ravel()
         b = b2.ravel()
         mi = mi2.ravel()
+        local = self._prep_local_index(rows)
 
-        sl_rows = self.table["HPX256_ROW"][rows].astype(np.intp)
-        node_lo_y = self.table["NODE_LO"][rows].astype(np.intp)
-        node_w_y = self.table["NODE_W"][rows]
-        p_a = self.yso_shape.marginal_at(a, sl_rows, node_lo_y, node_w_y)
+        log10_a = np.log10(np.clip(a, 1.0e-300, None))
+        p_a = _interp_rows(self._prep_p_a_yso, self._prep_log10_a_grid, local, log10_a)
+        p_a = np.where(a > 0.0, p_a, 0.0)
 
         log10_sigma = b + np.log10(self.h2s_fref[mi])
         z_score = (log10_sigma - self.h2s_logsig_mean) / self.h2s_logsig_std
         p_sigma = _INV_SQRT_2PI / self.h2s_logsig_std * np.exp(-0.5 * z_score ** 2)
 
         group_idx = self.table["GROUP"][rows].astype(np.intp)
-        node_lo_h, node_w_h = column_grid.bracket(a, self.h2s_a_nodes)
-        node_hi_h = np.minimum(node_lo_h + 1, self.h2s_a_nodes.size - 1)
-        curve_lo = self.h2s_eps[group_idx, node_lo_h, :]
-        curve_hi = self.h2s_eps[group_idx, node_hi_h, :]
-        curve = (1.0 - node_w_h)[:, None] * curve_lo + node_w_h[:, None] * curve_hi
-
-        sig_lo, sig_w = column_grid.bracket(log10_sigma, self.h2s_log10_sigma_grid)
-        sig_hi = np.minimum(sig_lo + 1, self.h2s_log10_sigma_grid.size - 1)
-        rows_idx = np.arange(curve.shape[0])
-        eps_val = ((1.0 - sig_w) * curve[rows_idx, sig_lo] + sig_w * curve[rows_idx, sig_hi])
+        eps_val = _interp_h2s_eps(self._prep_h2s_eps_grid, self._prep_log10_a_grid,
+                                  self.h2s_log10_sigma_grid, group_idx, log10_a, log10_sigma)
 
         z = self.table["Z_H2S"][rows]
         numerator = p_a * p_sigma * eps_val
@@ -640,8 +925,9 @@ def _extinction_grid(a_col, a_hi):
     the kernel's own near-`A_s` core) -- a LINEAR grid spends almost all
     of its `_CHECK_GRID_N` points where the density is smooth and starves
     the peak; log-spacing is the same fix `star_shapes` uses for its own
-    `log10 x` axis."""
-    return np.geomspace(1.0e-6, max(a_hi, 1.0e-5), _CHECK_GRID_N)
+    `log10 x` axis. Shares `prepare`'s own `_A_GRID_FLOOR` so the check's
+    query never falls below the tabulation's own interpolation range."""
+    return np.geomspace(_A_GRID_FLOOR, max(a_hi, 1.0e-5), _CHECK_GRID_N)
 
 
 def check(config, region, n_sources=50, seed=0):
@@ -661,6 +947,9 @@ def check(config, region, n_sources=50, seed=0):
     rng = np.random.default_rng(seed)
     n = min(int(n_sources), prior.n_source)
     rows = rng.choice(prior.n_source, size=n, replace=False)
+    # GAL/YSO/H2S now read only `prepare`'s tables (module docstring): this
+    # check's own batch is exactly the `n` rows it queries.
+    prior.prepare(rows)
 
     worst = {cls: 0.0 for cls in CLASSES}
     for row in rows:
