@@ -6,14 +6,20 @@ mixture of two log-normals in the true column,
 
 `w`, `mu_1`, `mu_2`, `sigma_1`, `sigma_2` are the sub-beam stage's fitted
 structural mixture (`sesnaimpute.sky.derived.subbeam`, its noise-corrected
-forward model), pooled over regions and tabulated on the column grid, for
-each arm at its own stated beam. The Planck arm reads the 302 arcsec
-sub-beam table. The Herschel arm's own stated beam (36.3 arcsec) is the
-finest map there is -- no sub-beam data exists below it -- so its
-structural term is a point mass at `T = A_s` (zero width, zero shift):
-its kernel is the per-source measurement uncertainty and the field zero
-point alone, not an extrapolation. Both are added to each component's
-sigma in quadrature, at the source's own column, converted to dex.
+forward model), tabulated on the column grid, for each arm at its own
+stated beam. The Planck arm is built from the sub-beam stage's own
+SURVEY-POOLED 302 arcsec fit (`MIX_POOLED_*`: the regions' raw histograms
+summed count-for-count, then refit with the same forward model and a
+count-weighted pooled noise level) -- not an average of the regions'
+separately-fitted parameters, which is not the pooled distribution.
+Planck is used only where no Herschel map covers a source, so one
+survey-wide pooled fit, not a per-region one, is the right object for it.
+The Herschel arm's own stated beam (36.3 arcsec) is the finest map there
+is -- no sub-beam data exists below it -- so its structural term is a
+point mass at `T = A_s` (zero width, zero shift): its kernel is the
+per-source measurement uncertainty and the field zero point alone, not
+an extrapolation. Both are added to each component's sigma in quadrature,
+at the source's own column, converted to dex.
 """
 
 import os
@@ -197,40 +203,27 @@ class Kernel(object):
 
 
 def _pool_planck_mixture(subbeam_path, a_nodes):
-    """Pools the sub-beam stage's fitted 302 arcsec mixture over regions,
-    weighting each region's five parameters at a KA bin by that region's
-    own bin counts there (a weighted average of the fitted numbers, not a
-    refit of the pooled histogram -- simpler, and the per-region fits
-    already share one forward model and one KA grid), skipping regions
-    with too few counts to have a fit; interpolates the pooled numbers in
-    `log A` onto `a_nodes`, clamped at the ends, skipping KA bins with no
-    pooled value anywhere.
+    """Reads the sub-beam stage's own survey-pooled 302 arcsec mixture fit
+    (`MIX_POOLED_*`: the regions' raw histograms summed count-for-count and
+    refit with the same forward model and a count-weighted pooled noise
+    level -- the pooled distribution is the count-weighted mixture of the
+    regions' distributions, not an average of their fitted parameters) and
+    interpolates its five numbers in `log A` onto `a_nodes`, clamped at the
+    ends, skipping KA bins with no pooled fit.
 
     Returns `(w, mu1, mu2, sigma1, sigma2)`, each `(len(a_nodes),)`, in
     natural-log units of `s = ln(T / A)` (converted to log10 by the
     caller).
     """
     with h5py.File(subbeam_path, "r") as f:
-        w_r = f["MIX_W"][:, _POOL_BEAM_INDEX, :]
-        mu1_r = f["MIX_MU1"][:, _POOL_BEAM_INDEX, :]
-        mu2_r = f["MIX_MU2"][:, _POOL_BEAM_INDEX, :]
-        sig1_r = f["MIX_SIG1"][:, _POOL_BEAM_INDEX, :]
-        sig2_r = f["MIX_SIG2"][:, _POOL_BEAM_INDEX, :]
+        w_p = f["MIX_POOLED_W"][_POOL_BEAM_INDEX, :]
+        mu1_p = f["MIX_POOLED_MU1"][_POOL_BEAM_INDEX, :]
+        mu2_p = f["MIX_POOLED_MU2"][_POOL_BEAM_INDEX, :]
+        sig1_p = f["MIX_POOLED_SIG1"][_POOL_BEAM_INDEX, :]
+        sig2_p = f["MIX_POOLED_SIG2"][_POOL_BEAM_INDEX, :]
         ka_cent = f["MIX_KA_CENTRES"][:]
-        counts_r = f["COND_KERNEL_%s" % _POOL_BEAM_LABEL][:].sum(axis=2).astype(np.float64)
 
-    valid = np.isfinite(w_r) & (counts_r > 0)
-    wt = np.where(valid, counts_r, 0.0)
-    tot = wt.sum(axis=0)
-
-    def pool(x):
-        s = np.where(valid, x * wt, 0.0).sum(axis=0)
-        out = np.full(tot.shape, np.nan)
-        ok = tot > 0
-        out[ok] = s[ok] / tot[ok]
-        return out
-
-    pooled = [pool(x) for x in (w_r, mu1_r, mu2_r, sig1_r, sig2_r)]
+    pooled = (w_p, mu1_p, mu2_p, sig1_p, sig2_p)
     finite = np.isfinite(pooled[0])
     ln_ka = ka_cent[finite]
     ln_nodes = np.log(a_nodes)
@@ -241,9 +234,11 @@ def build(config, regions=None):
     """Tabulates the pooled two-component log-normal mixture (weight, the
     two means, the two widths, all in log10 T) on every node of the
     column grid, for both arms at their own stated beam, and writes
-    `bms/sesna/kernel_sesna_survey.hdf5`. The Planck arm pools the sub-beam
-    stage's fitted 302 arcsec mixture over regions (`_pool_planck_mixture`);
-    the Herschel arm has no sub-beam data at its own 36.3 arcsec beam, so
+    `bms/sesna/kernel_sesna_survey.hdf5`. The Planck arm reads the sub-beam
+    stage's own survey-pooled 302 arcsec mixture fit (`_pool_planck_mixture`,
+    `MIX_POOLED_*` -- the regions' histograms summed and refit, not their
+    fitted parameters averaged); the Herschel arm has no sub-beam data at
+    its own 36.3 arcsec beam, so
     its structural term is a point mass (`w = 0.5`, both means and both
     widths zero) -- disclosed, not extrapolated (SPEC_PRIORS.md section
     1.2). Survey-wide; `regions` is accepted and ignored.

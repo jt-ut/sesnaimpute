@@ -718,10 +718,50 @@ def fit_one_mixture(counts, A, sigma_map, kd_edges, kd_cent):
     return w, float(mu1), float(s1), float(mu2), float(s2), max_err
 
 
+def _fit_pooled_mixture(kern, fine_noise, ka_cent, kd_edges, kd_cent, n_beam, n_ka, beams):
+    """Fits the noise-separated structural mixture on the SURVEY-POOLED
+    histogram at every (beam, KA bin): the raw per-region histograms are
+    summed count-for-count (a count-weighted pool of histograms is just
+    their sum), and the noise level fed to the same forward model is the
+    count-weighted root-mean-square of the contributing regions' own
+    `FINE_MAP_NOISE_K`, weighted by each region's own counts in that bin
+    -- the pooled distribution is the count-weighted mixture of the
+    regions' distributions, not an average of their fitted parameters, so
+    it needs its own fit. Returns `(W, MU1, MU2, SIG1, SIG2, ERR)`, each
+    `(n_beam, n_ka)`."""
+    shp = (n_beam, n_ka)
+    W = np.full(shp, np.nan)
+    MU1 = np.full(shp, np.nan)
+    MU2 = np.full(shp, np.nan)
+    S1 = np.full(shp, np.nan)
+    S2 = np.full(shp, np.nan)
+    ERR = np.full(shp, np.nan)
+    for b, lab in enumerate(beams):
+        K = kern[lab]                              # (n_region, n_ka, n_kd)
+        counts_per_bin = K.sum(axis=2)              # (n_region, n_ka)
+        for j in range(n_ka):
+            pooled_counts = K[:, j, :].sum(axis=0)  # (n_kd,)
+            if pooled_counts.sum() < MIX_MIN_COUNTS:
+                continue
+            wt = counts_per_bin[:, j]
+            ok = np.isfinite(fine_noise) & (wt > 0)
+            if not ok.any():
+                continue
+            sigma_pool = float(np.sqrt(np.sum(wt[ok] * fine_noise[ok] ** 2)
+                                       / np.sum(wt[ok])))
+            A = float(np.exp(ka_cent[j]))
+            w, mu1, s1, mu2, s2, err = fit_one_mixture(
+                pooled_counts, A, sigma_pool, kd_edges, kd_cent)
+            W[b, j], MU1[b, j], MU2[b, j] = w, mu1, mu2
+            S1[b, j], S2[b, j], ERR[b, j] = s1, s2, err
+    return W, MU1, MU2, S1, S2, ERR
+
+
 def _write_mixture_datasets(out_path):
     """Fits the noise-separated structural mixture at every (region, beam,
     KA bin) with at least `MIX_MIN_COUNTS` counts, from the histograms
-    already stored in the sub-beam product, and adds the fit as new
+    already stored in the sub-beam product, plus the survey-pooled fit at
+    every (beam, KA bin) (`_fit_pooled_mixture`), and adds both as new
     datasets (nothing already in the file is touched)."""
     beams = ("L108", "L302", "L821")
     with h5py.File(out_path, "r") as fh:
@@ -758,9 +798,14 @@ def _write_mixture_datasets(out_path):
                 W[r, b, j], MU1[r, b, j], MU2[r, b, j] = w, mu1, mu2
                 S1[r, b, j], S2[r, b, j], ERR[r, b, j] = s1, s2, err
 
+    (PW, PMU1, PMU2, PS1, PS2, PERR) = _fit_pooled_mixture(
+        kern, fine_noise, ka_cent, kd_edges, kd_cent, n_beam, n_ka, beams)
+
     with h5py.File(out_path, "a") as fh:
         for name in ("MIX_W", "MIX_MU1", "MIX_MU2", "MIX_SIG1", "MIX_SIG2",
-                     "MIX_MAX_CDF_ERR", "MIX_KA_CENTRES", "FINE_MAP_NOISE_K"):
+                     "MIX_MAX_CDF_ERR", "MIX_KA_CENTRES", "FINE_MAP_NOISE_K",
+                     "MIX_POOLED_W", "MIX_POOLED_MU1", "MIX_POOLED_MU2",
+                     "MIX_POOLED_SIG1", "MIX_POOLED_SIG2", "MIX_POOLED_MAX_CDF_ERR"):
             if name in fh:
                 del fh[name]
         fh.create_dataset("MIX_W", data=W)
@@ -771,7 +816,14 @@ def _write_mixture_datasets(out_path):
         fh.create_dataset("MIX_MAX_CDF_ERR", data=ERR)
         fh.create_dataset("MIX_KA_CENTRES", data=ka_cent)
         fh.create_dataset("FINE_MAP_NOISE_K", data=fine_noise)
-    print("subbeam: wrote mixture fit datasets to %s" % out_path, flush=True)
+        fh.create_dataset("MIX_POOLED_W", data=PW)
+        fh.create_dataset("MIX_POOLED_MU1", data=PMU1)
+        fh.create_dataset("MIX_POOLED_MU2", data=PMU2)
+        fh.create_dataset("MIX_POOLED_SIG1", data=PS1)
+        fh.create_dataset("MIX_POOLED_SIG2", data=PS2)
+        fh.create_dataset("MIX_POOLED_MAX_CDF_ERR", data=PERR)
+    print("subbeam: wrote mixture fit datasets (per-region and pooled) to %s"
+          % out_path, flush=True)
 
 
 def fit_only(config, regions=None):
