@@ -166,17 +166,34 @@ _INTERP_CHUNK = 20000
 _MARGINAL_CHUNK = 20000
 
 
-def _marginal_exact_chunked(yso_shape, a, sl_rows, a_col, sigma_col):
+def _marginal_exact_chunked(yso_shape, a, sl_rows, a_col, sigma_col, zp_sigma_k=None):
     """`(n,)`: `YsoShape.marginal_exact`, called in `_MARGINAL_CHUNK`
     blocks so its own per-call `(chunk, n_embedding_cell)` gather never
-    scales with the caller's own batch (module docstring)."""
+    scales with the caller's own batch (module docstring). `zp_sigma_k`,
+    one per source (mag, 0 for Planck-arm), is the Herschel field zero
+    point's own uncertainty (owner, 2026-09-06); omitting it falls back
+    to the survey-wide RMS, as before."""
     n = a.shape[0]
     out = np.empty(n, dtype=np.float64)
     for start in range(0, n, _MARGINAL_CHUNK):
         stop = min(start + _MARGINAL_CHUNK, n)
+        zp_chunk = zp_sigma_k[start:stop] if zp_sigma_k is not None else None
         out[start:stop] = yso_shape.marginal_exact(
-            a[start:stop], sl_rows[start:stop], a_col[start:stop], sigma_col[start:stop])
+            a[start:stop], sl_rows[start:stop], a_col[start:stop], sigma_col[start:stop],
+            zp_sigma_k=zp_chunk)
     return out
+
+
+def _read_zp_sigma_k(path, n):
+    """`ZP_SIGMA_K` (mag) per source -- the Herschel field zero point's
+    own uncertainty, 0 for a Planck-arm source (owner, 2026-09-06) -- if
+    the adopted column product has it, else zeros: a region not yet
+    rebuilt with the per-field offset runs exactly as before (matches
+    `prior.counts_star_family._read_zp_sigma_k`)."""
+    with h5py.File(path, "r") as f:
+        if "ZP_SIGMA_K" in f:
+            return np.asarray(f["ZP_SIGMA_K"][:], dtype=np.float64)
+    return np.zeros(n, dtype=np.float64)
 
 
 def _library_reference_flux(config, cls):
@@ -342,6 +359,13 @@ class SourcePrior(object):
         self.table = table_module.read(config, region)
         self.n_source = self.table["A_COL_K"].shape[0]
         self._idx_i4 = BAND_KEYS.index("I4")
+        # `ZP_SIGMA_K` is read from the adopted column product itself, not
+        # `self.table` (`prior.table` does not carry it) -- the Herschel
+        # field zero point's own per-source uncertainty (owner,
+        # 2026-09-06), 0 for a Planck-arm source.
+        adopted_path = config_module.product_path(
+            config, "sky/derived", "adopted", "column", "source", region=region)
+        self._zp_sigma_k = _read_zp_sigma_k(adopted_path, self.n_source)
 
         family_wanted = FAMILY_CLASSES if cls is None else (
             (cls,) if cls in FAMILY_CLASSES else ())
@@ -566,8 +590,10 @@ class SourcePrior(object):
             self.table["A_COL_PROVENANCE"][rows] == star_shapes._PLANCK_PROVENANCE_CODE,
             "planck", "herschel")
         f_lim8 = (self.table["F_LIM_50_MJY"][rows, self._idx_i4] if cls == "pahc" else None)
+        zp_sigma_k = self._zp_sigma_k[rows]
 
-        mass = shape.density(a, b, tile_id, a_col, sigma_col, map_class, f_lim8=f_lim8)
+        mass = shape.density(a, b, tile_id, a_col, sigma_col, map_class, f_lim8=f_lim8,
+                             zp_sigma_k=zp_sigma_k)
         p_ab = np.where(valid, mass / (a_safe * LN10 * fg["dx"] * fg["db"]), 0.0)
 
         x_query = np.where(valid, a_safe / a_col, 0.0)
@@ -631,7 +657,9 @@ class SourcePrior(object):
         a_col = self.table["A_COL_K"][rows]
         sigma_col = self.table["A_COL_SIG_K"][rows]
         sl_rows = self.table["HPX256_ROW"][rows]
-        p_a = _marginal_exact_chunked(self.yso_shape, a, sl_rows, a_col, sigma_col)
+        zp_sigma_k = self._zp_sigma_k[rows]
+        p_a = _marginal_exact_chunked(self.yso_shape, a, sl_rows, a_col, sigma_col,
+                                      zp_sigma_k=zp_sigma_k)
         p_a = np.where(a > 0.0, p_a, 0.0)
 
         mean_b = self.table["RIDGE_INTERCEPT"][rows] + self.table["RIDGE_SLOPE"][rows] * a
@@ -662,7 +690,9 @@ class SourcePrior(object):
         a_col = self.table["A_COL_K"][rows]
         sigma_col = self.table["A_COL_SIG_K"][rows]
         sl_rows = self.table["HPX256_ROW"][rows]
-        p_a = _marginal_exact_chunked(self.yso_shape, a, sl_rows, a_col, sigma_col)
+        zp_sigma_k = self._zp_sigma_k[rows]
+        p_a = _marginal_exact_chunked(self.yso_shape, a, sl_rows, a_col, sigma_col,
+                                      zp_sigma_k=zp_sigma_k)
         p_a = np.where(valid, p_a, 0.0)
 
         log10_sigma = b + np.log10(self.h2s_fref[mi])

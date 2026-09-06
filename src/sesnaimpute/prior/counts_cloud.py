@@ -134,7 +134,7 @@ def _ridge(config, region):
 # each source's own column and own ladder, one already-loaded batch
 # ---------------------------------------------------------------------
 
-def _bin_mass_batch(shape, x_ladder, rows, a_col, sigma_col):
+def _bin_mass_batch(shape, x_ladder, rows, a_col, sigma_col, zp_sigma_k=None):
     """`(batch, n_x - 1)`: the exact mass `p(a | A_s)` places in each of
     this batch's own ladder bins, `a = X_LADDER . A_s` (SPEC_PRIORS.md
     sections 6.2/7) -- the closed-form cdf (`YsoShape.cdf_exact`) at each
@@ -145,14 +145,19 @@ def _bin_mass_batch(shape, x_ladder, rows, a_col, sigma_col):
     dominant cost per expanded (source, ladder-point) row is not this
     function's own small `(batch, n_x)` cdf array but `cdf_exact`'s
     internal per-cell arrays, each `(expanded_batch, n_cell)` wide where
-    `n_cell` is the region's own embedding-profile cell count."""
+    `n_cell` is the region's own embedding-profile cell count.
+    `zp_sigma_k`, one per source (mag, 0 for Planck-arm), is the
+    Herschel field zero point's own uncertainty (owner, 2026-09-06);
+    omitting it falls back to the survey-wide RMS, as before."""
     n_x = x_ladder.size
     nb = rows.size
     rows_rep = np.repeat(rows, n_x)
     a_col_rep = np.repeat(a_col, n_x)
     sigma_rep = np.repeat(sigma_col, n_x)
+    zp_rep = np.repeat(zp_sigma_k, n_x) if zp_sigma_k is not None else None
     a_rep = (x_ladder[None, :] * a_col[:, None]).reshape(-1)
-    cdf = shape.cdf_exact(a_rep, rows_rep, a_col_rep, sigma_rep).reshape(nb, n_x)
+    cdf = shape.cdf_exact(a_rep, rows_rep, a_col_rep, sigma_rep,
+                          zp_sigma_k=zp_rep).reshape(nb, n_x)
     return np.diff(cdf, axis=1)
 
 
@@ -304,11 +309,19 @@ def build_region(config, region):
         row_bytes = _build_row_bytes(n_cell, n_x, n_sigma)
         spans = list(batches_module.batches(n_src, row_bytes, BUILD_REGION_BUDGET_BYTES))
 
+        has_zp_sigma_k = "ZP_SIGMA_K" in fa
+
         def _one_batch(start, stop):
             rows = sightline_row[start:stop]
             a_col = np.asarray(fa["A_COL_K"][start:stop], dtype=np.float64)
             sigma_col = np.asarray(fa["A_COL_SIG_K"][start:stop], dtype=np.float64)
             provenance = np.asarray(fa["A_COL_PROVENANCE"][start:stop])
+            # the Herschel field zero point's own uncertainty (owner,
+            # 2026-09-06), 0 for Planck-arm sources; zeros (the old,
+            # field-less behaviour) for a region whose adopted column
+            # product predates it.
+            zp_sigma_k = (np.asarray(fa["ZP_SIGMA_K"][start:stop], dtype=np.float64)
+                         if has_zp_sigma_k else np.zeros(stop - start, dtype=np.float64))
             node_lo, node_w = column_grid_module.bracket(a_col, nodes)
             n_law = yso_module.law_count(config, region, a_col, provenance)
 
@@ -319,7 +332,7 @@ def build_region(config, region):
             eps_table = np.asarray(fh["EPS"][start:stop], dtype=np.float64)
             n_law_blurred = np.asarray(fl["N_LAW_BLURRED_DEG2"][start:stop], dtype=np.float64)
 
-            bin_mass = _bin_mass_batch(shape, x_ladder, rows, a_col, sigma_col)
+            bin_mass = _bin_mass_batch(shape, x_ladder, rows, a_col, sigma_col, zp_sigma_k=zp_sigma_k)
             eps_yso = eps_yso_from_bin_mass(bin_mass, g_1myr)
             eps_yso_3myr = eps_yso_from_bin_mass(bin_mass, g_3myr)
             eps_h2s = eps_h2s_from_bin_mass(bin_mass, eps_table, h2s["log10_sigma_grid"],
