@@ -22,6 +22,12 @@ tabulated at (108, 301.8, 821 arcsec -- Planck's beam and the extinction-
 profile grid's nside-256 pixel), the beam-rescaling exponent `(beta-2)/2`,
 and an offset exponent `p` through the two measured median offsets at 302
 and 821 arcsec via `offset(L) = -c*L**p` (only `p` is stored; `c` cancels).
+
+Each map job holds at most 3 simultaneous native-resolution arrays (the
+map, its validity mask, and one transient mask copy) at up to 4 bytes per
+pixel, so the map-level joblib pool is capped to
+`floor(6 GiB / (largest_map_pixels * 4 B * 3))` workers -- the largest map,
+orionB at 84,722,900 pixels, bounds this to 6 workers by formula.
 """
 
 import os
@@ -60,6 +66,14 @@ SCALES = np.array([45.0, 54.0, 72.0, 90.0, 108.0, 130.0, 160.0, 190.0, 230.0,
 MIN_WEIGHT = 0.90
 #: Block-bootstrap tile size.
 BOOT_TILE_ARCSEC = 512.0
+
+#: The joblib memory-cap formula (module docstring): bytes per pixel of a
+#: native-resolution array during `process_map`, how many such arrays are
+#: alive together at the peak point, and the ceiling the pool must fit
+#: workers-times-per-job under.
+PEAK_BYTES_PER_PIXEL = 4
+PEAK_ARRAYS = 3
+POOL_MEM_CEILING_BYTES = 6 * (1024 ** 3)
 
 # d = ln A_ref - ln A_L, the two-scale increment histogram grid.
 D_LO, D_HI, N_D = -2.0, 2.0, 4000
@@ -212,16 +226,21 @@ def build_pairs(hist_d, ladder, scales, L0, cent, stat):
 
 def _load_map(path):
     d = np.squeeze(np.asarray(fits.getdata(path)))
-    return d.astype(np.float32)
+    return d.astype(np.float32, copy=False)
 
 def _decimate_mean(ak, valid, f):
-    """Block-mean by integer factor `f`, NaN-aware; `w` is the real-sky fraction per cell."""
+    """Block-mean by integer factor `f`, NaN-aware; `w` is the real-sky
+    fraction per cell. `ak` is zeroed at its invalid pixels in place (the
+    caller's copy is not needed again), so no full native-resolution
+    temporary is made; each block sum accumulates in float64 -- the only
+    float64 use here -- and is cast back to float32 right away."""
     h, w = ak.shape
     h2, w2 = (h // f) * f, (w // f) * f
-    a = np.where(valid[:h2, :w2], ak[:h2, :w2], 0.0).astype(np.float64)
-    m = valid[:h2, :w2].astype(np.float64)
-    a = a.reshape(h2 // f, f, w2 // f, f).sum(axis=(1, 3))
-    m = m.reshape(h2 // f, f, w2 // f, f).sum(axis=(1, 3))
+    ak = ak[:h2, :w2]
+    valid = valid[:h2, :w2]
+    ak[~valid] = 0.0
+    a = ak.reshape(h2 // f, f, w2 // f, f).sum(axis=(1, 3), dtype=np.float64).astype(np.float32)
+    m = valid.reshape(h2 // f, f, w2 // f, f).sum(axis=(1, 3), dtype=np.float64).astype(np.float32)
     out = np.zeros_like(a)
     ok = m > 0
     out[ok] = a[ok] / m[ok]
@@ -270,9 +289,8 @@ def process_map(job):
     f = max(1, int(round(TARGET_PIX_ARCSEC / pix_native)))
     pix = pix_native * f
 
-    dat = _load_map(path)
-    ak = dat.astype(np.float64) * AK_PER_NH2
-    del dat
+    ak = _load_map(path)
+    ak *= np.float32(AK_PER_NH2)
     valid = np.isfinite(ak) & (ak > AK_FLOOR)
     if int(valid.sum()) < 10000:
         return cloud, None
@@ -506,11 +524,31 @@ def _map_inventory(config, regions):
     jobs.sort(key=lambda j: -j[0])
     return [j for _, j in jobs], cloud_regions
 
+def _pixel_count(path):
+    """A map's pixel count from its header alone (no pixel data read)."""
+    with fits.open(path, memmap=False) as hd:
+        chosen = next(c for c in hd if c.header.get("NAXIS", 0) >= 2)
+        ny, nx = chosen.shape[-2:]
+    return int(ny) * int(nx)
+
+def _pool_n_jobs(config, jobs):
+    """Caps the map-level pool so `workers * per_map_peak` stays under
+    `POOL_MEM_CEILING_BYTES`, `per_map_peak` being the largest map's pixel
+    count times `PEAK_BYTES_PER_PIXEL` times `PEAK_ARRAYS` (module
+    docstring)."""
+    if not jobs:
+        return config.n_jobs
+    max_pixels = max(_pixel_count(path) for _, path, _ in jobs)
+    per_map_peak = max_pixels * PEAK_BYTES_PER_PIXEL * PEAK_ARRAYS
+    cap = max(1, POOL_MEM_CEILING_BYTES // max(per_map_peak, 1))
+    return int(min(config.n_jobs, cap))
+
 def build(config, regions=None):
     """Builds the sub-beam region product, parallelised over HGBS maps with
-    joblib (largest map first); the map inventory and which regions each
-    map serves come from `_map_inventory` (the fetched file set and the
-    Herschel column products), never a manifest."""
+    joblib (largest map first, pool size capped by `_pool_n_jobs`); the map
+    inventory and which regions each map serves come from `_map_inventory`
+    (the fetched file set and the Herschel column products), never a
+    manifest."""
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
     regions = set(regions) & {r.name for r in regions_module.REGIONS}
@@ -518,7 +556,8 @@ def build(config, regions=None):
     jobs, cloud_regions = _map_inventory(config, regions)
     print("subbeam: %d HGBS maps overlapping the requested regions" % len(jobs),
           flush=True)
-    results = Parallel(n_jobs=config.n_jobs)(delayed(process_map)(j) for j in jobs)
+    n_jobs = _pool_n_jobs(config, jobs)
+    results = Parallel(n_jobs=n_jobs)(delayed(process_map)(j) for j in jobs)
     per_map = {cloud: payload for cloud, payload in results if payload is not None}
     print("subbeam: %d/%d maps processed" % (len(per_map), len(jobs)), flush=True)
 
