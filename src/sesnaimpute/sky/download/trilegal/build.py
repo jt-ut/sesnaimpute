@@ -28,7 +28,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import healpy as hp
+import numpy as np
+
 from sesnaimpute.build import run
+from sesnaimpute.granules import access as granules_access
 
 FORM_URL = "http://stev.oapd.inaf.it/cgi-bin/trilegal"
 
@@ -139,10 +143,24 @@ FORM_MAX_AREA_DEG2 = 10.0
 POLL_INTERVAL_S = 15
 POLL_TIMEOUT_S = 900
 
-#: Per region: the form's pointing (`gc_l`, `gc_b`, Galactic degrees -- the
-#: midpoint of the region's coordinate bounding box) and the total queried
-#: solid angle (`field`, deg^2, split evenly across `n_parts` sub-queries
-#: when a region needs more than one).
+#: The pointing grid spacing (SPEC_PRIORS.md section 1.5, "pointings every
+#: 1-2 degrees"): a region's admitted footprint (the granules product's own
+#: per-source nside-512 pixels) is covered by one TRILEGAL pointing per
+#: occupied cell of a grid this wide, anchored on the region's own
+#: `REGION_POINTINGS` centre so a region whose whole footprint fits inside
+#: one cell keeps that historical single pointing exactly (NGC 7129: 0.5
+#: deg across, one pointing, unchanged).
+POINTING_GRID_DEG = 1.5
+
+#: Per region: the historical single pointing (`gc_l`, `gc_b`, Galactic
+#: degrees -- the midpoint of the region's coordinate bounding box), now
+#: the ANCHOR every pointing grid is built around, and the solid angle
+#: (`field`, deg^2) EVERY pointing in the region queries -- the area
+#: convention (owner ruling 2026-09-06): one pointing simulates the same
+#: area a region used to simulate as a whole, so a region's total
+#: simulated area is `n_pointings * area_deg2`, not a share of it. Split
+#: evenly across `n_parts` sub-queries per pointing when the per-pointing
+#: area exceeds the form's own cap.
 REGION_POINTINGS = {
     "AFGL 490": dict(l_deg=142.12770, b_deg=1.88267, area_deg2=0.7177, n_parts=2),
     "Aquila": dict(l_deg=27.33967, b_deg=5.67689, area_deg2=0.3984, n_parts=4),
@@ -352,22 +370,62 @@ def fetch_region_part(l_deg, b_deg, area_deg2, dest_path, defaults, action_url):
     return len(data), wall_time_s
 
 
-def _file_names(region, n_parts):
-    """The file name(s) `region` is saved under: one bare `<region>.dat`
-    when the query fits in a single part, else `<region>_part1.dat ..
-    _part<n_parts>.dat`.
+def region_pointings(config, region):
+    """The region's own pointing grid (module docstring, `POINTING_GRID_DEG`):
+    one dict per occupied grid cell (`l_deg`, `b_deg`, `area_deg2`,
+    `n_parts`), sorted by `(l_deg, b_deg)` for a deterministic pointing
+    index. The grid is anchored on `REGION_POINTINGS[region]`'s own centre
+    and stepped by `POINTING_GRID_DEG` along each axis until it covers
+    every admitted nside-512 pixel the granules product has for this
+    region (`granules.access.region_slice`, galactic nested lon/lat); a
+    pixel is assigned to its NEAREST node on each axis independently, so a
+    footprint entirely inside one cell -- NGC 7129 -- returns exactly the
+    one historical pointing, unchanged.
     """
+    info = REGION_POINTINGS[region]
+    c_l, c_b = info["l_deg"], info["b_deg"]
+    rs = granules_access.region_slice(config, region)
+    pix512 = np.unique(np.asarray(rs["hpx_pix_512"], dtype=np.int64))
+    l, b = hp.pix2ang(512, pix512, nest=True, lonlat=True)
+    l = np.where(l > 180.0, l - 360.0, l)
+
+    def axis_nodes(x, c):
+        n_below = int(np.ceil(max(0.0, c - float(x.min())) / POINTING_GRID_DEG))
+        n_above = int(np.ceil(max(0.0, float(x.max()) - c) / POINTING_GRID_DEG))
+        return np.array([c + i * POINTING_GRID_DEG for i in range(-n_below, n_above + 1)])
+
+    l_nodes = axis_nodes(l, c_l)
+    b_nodes = axis_nodes(b, c_b)
+    il = np.argmin(np.abs(l[:, None] - l_nodes[None, :]), axis=1)
+    ib = np.argmin(np.abs(b[:, None] - b_nodes[None, :]), axis=1)
+    cells = np.unique(np.stack([il, ib], axis=1), axis=0)
+    order = sorted(range(len(cells)),
+                    key=lambda k: (l_nodes[cells[k, 0]], b_nodes[cells[k, 1]]))
+    return tuple(
+        dict(l_deg=float(l_nodes[cells[k, 0]]), b_deg=float(b_nodes[cells[k, 1]]),
+             area_deg2=info["area_deg2"], n_parts=info["n_parts"])
+        for k in order)
+
+
+def _file_names(region, n_pointings, pointing_idx, n_parts):
+    """The file name(s) one pointing's query is saved under. A region with
+    a single pointing keeps the historical bare `<region>.dat` (or
+    `<region>_part<i>.dat`) name so a region whose footprint needs no more
+    than one cell (NGC 7129) reads its existing cache unchanged; a region
+    with more than one pointing gets `<region>_pt<pointing_idx>[_part<i>].dat`.
+    """
+    prefix = region if n_pointings == 1 else f"{region}_pt{pointing_idx}"
     if n_parts == 1:
-        return (f"{region}.dat",)
-    return tuple(f"{region}_part{i}.dat" for i in range(1, n_parts + 1))
+        return (f"{prefix}.dat",)
+    return tuple(f"{prefix}_part{i}.dat" for i in range(1, n_parts + 1))
 
 
 def build(config, regions=None, _limit=None):
-    """Drives the TRILEGAL web form once per region (once per part, for a
-    region whose area is split) and saves each reply verbatim at
+    """Drives the TRILEGAL web form once per pointing (once per part, for a
+    pointing whose area is split) and saves each reply verbatim at
     `<data_root>/sky/download/trilegal`. `regions` restricts which
     regions are queried (default: all 30 in `REGION_POINTINGS`); `_limit`
-    is a rehearsal knob capping the number of parts queried per region.
+    is a rehearsal knob capping the number of parts queried per pointing.
     """
     version, action_url, defaults = read_form()
     print(f"trilegal build: form version {version!r}, POST target {action_url}")
@@ -378,26 +436,34 @@ def build(config, regions=None, _limit=None):
     n_files = 0
     n_bytes = 0
     for region in names:
-        info = REGION_POINTINGS[region]
-        n_parts = info["n_parts"]
-        area_per_part = info["area_deg2"] / n_parts
-        if area_per_part > FORM_MAX_AREA_DEG2:
-            raise ValueError(f"trilegal build: {region!r} needs area {area_per_part} deg2 per "
-                              f"part, above the form's {FORM_MAX_AREA_DEG2} deg2 cap -- raise n_parts")
-        file_names = _file_names(region, n_parts)
-        if _limit is not None:
-            file_names = file_names[:_limit]
-        for name in file_names:
-            dest_path = f"{dest_dir}/{name}"
-            if os.path.exists(dest_path):
-                print(f"trilegal build: {dest_path} present, skipped (delete it to draw a new realisation)")
-                continue
-            n_out, wall_time_s = fetch_region_part(
-                info["l_deg"], info["b_deg"], area_per_part, dest_path, defaults, action_url)
-            n_files += 1
-            n_bytes += n_out
-            print(f"trilegal build: {region!r} -> {dest_path} "
-                  f"({n_out} bytes, {wall_time_s:.0f}s)")
+        pointings = region_pointings(config, region)
+        n_pointings = len(pointings)
+        print(f"trilegal build: {region!r}: {n_pointings} pointing(s) on the "
+              f"{POINTING_GRID_DEG} deg grid")
+        for p_idx, pt in enumerate(pointings):
+            n_parts = pt["n_parts"]
+            area_per_part = pt["area_deg2"] / n_parts
+            if area_per_part > FORM_MAX_AREA_DEG2:
+                raise ValueError(
+                    f"trilegal build: {region!r} pointing {p_idx} needs area "
+                    f"{area_per_part} deg2 per part, above the form's "
+                    f"{FORM_MAX_AREA_DEG2} deg2 cap -- raise n_parts")
+            file_names = _file_names(region, n_pointings, p_idx, n_parts)
+            if _limit is not None:
+                file_names = file_names[:_limit]
+            for name in file_names:
+                dest_path = f"{dest_dir}/{name}"
+                if os.path.exists(dest_path):
+                    print(f"trilegal build: {dest_path} present, skipped "
+                          f"(delete it to draw a new realisation)")
+                    continue
+                n_out, wall_time_s = fetch_region_part(
+                    pt["l_deg"], pt["b_deg"], area_per_part, dest_path, defaults, action_url)
+                n_files += 1
+                n_bytes += n_out
+                print(f"trilegal build: {region!r} pointing {p_idx} "
+                      f"(l={pt['l_deg']:.4f}, b={pt['b_deg']:.4f}) -> {dest_path} "
+                      f"({n_out} bytes, {wall_time_s:.0f}s)")
     print(f"trilegal build: {n_files} files, {n_bytes} bytes total, "
           f"{len(names)} regions")
 

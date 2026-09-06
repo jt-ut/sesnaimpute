@@ -197,21 +197,33 @@ def _read_trilegal_part(path):
 
 
 def read_region_trilegal(config, region):
-    """The region's whole TRILEGAL population (every part concatenated)
-    and its pointing: `(df, area_deg2)`. The file names, the pointing's
-    galactic (l, b) and its simulated solid angle come from
-    `sky.download.trilegal.build.REGION_POINTINGS`, the one place this
-    project's TRILEGAL acquisition is described.
+    """The region's whole TRILEGAL population, every pointing's every part
+    concatenated, each row's own `POINTING_INDEX` attached: `(df,
+    area_deg2)`. The pointing grid, its file names, and each pointing's
+    galactic (l, b) and simulated solid angle come from
+    `sky.download.trilegal.build.region_pointings`, the one place this
+    project's TRILEGAL acquisition is described. Area convention (owner
+    ruling 2026-09-06, SPEC_PRIORS.md section 1.5): every pointing draws
+    the SAME area the region used to draw as a whole
+    (`REGION_POINTINGS[region]["area_deg2"]`), so the region's total
+    simulated area is `n_pointings * area_deg2`, not a share of it.
     """
     if region not in trilegal_download.REGION_POINTINGS:
         raise ValueError(f"field_stars: {region!r} is not in "
                           f"sky.download.trilegal.build.REGION_POINTINGS")
-    info = trilegal_download.REGION_POINTINGS[region]
+    pointings = trilegal_download.region_pointings(config, region)
+    n_pointings = len(pointings)
     trilegal_dir = f"{config.data_root}/sky/download/trilegal"
-    file_names = trilegal_download._file_names(region, info["n_parts"])
-    parts = [_read_trilegal_part(f"{trilegal_dir}/{name}") for name in file_names]
-    df = pd.concat(parts, ignore_index=True)
-    return df, float(info["area_deg2"])
+    frames = []
+    for p_idx, pt in enumerate(pointings):
+        file_names = trilegal_download._file_names(region, n_pointings, p_idx, pt["n_parts"])
+        parts = [_read_trilegal_part(f"{trilegal_dir}/{name}") for name in file_names]
+        df_p = pd.concat(parts, ignore_index=True)
+        df_p["POINTING_INDEX"] = p_idx
+        frames.append(df_p)
+    df = pd.concat(frames, ignore_index=True)
+    area_deg2 = n_pointings * float(pointings[0]["area_deg2"])
+    return df, area_deg2
 
 
 def intrinsic_fluxes_mjy(df):
@@ -280,10 +292,11 @@ def build_region(config, region, atmosphere):
     kg_diffuse = atmosphere["kg_diffuse"][idx]
     kg_dense = atmosphere["kg_dense"][idx]
 
-    # this population carries one TRILEGAL query pointing per region
-    # (`sky.download.trilegal.build.REGION_POINTINGS`): every row shares
-    # pointing index 0.
-    pointing_index = np.zeros(n_raw, dtype=np.int16)
+    # each row's own pointing (`sky.download.trilegal.build.region_pointings`,
+    # SPEC_PRIORS.md section 1.5's "pointings every 1-2 degrees"): a region
+    # whose admitted footprint needs only one grid cell (NGC 7129) still has
+    # every row at pointing index 0, unchanged.
+    pointing_index = df["POINTING_INDEX"].to_numpy(dtype=np.int16)
 
     f_lim_deep = deepest_limits(config, region)
     keep = passes_two_of_eight(flux, f_lim_deep)

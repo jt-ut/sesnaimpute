@@ -102,6 +102,7 @@ PAHC shape axis), and attrs `A_TILE_K`, `N_SIGHTLINES`.
 import os
 
 import h5py
+import healpy as hp
 import numpy as np
 import pandas as pd
 from astropy.io import fits
@@ -115,6 +116,7 @@ from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
 from sesnaimpute.prior import anchor_tiles, pahc_curve, selection
 from sesnaimpute.sky.derived import profile as profile_module
+from sesnaimpute.sky.download.trilegal import build as trilegal_download
 
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
@@ -498,6 +500,7 @@ def _read_field_stars(config, region):
             log_l=f["LOG_L"][:].astype(np.float64),
             fnu_mjy=f["FNU_MJY"][:].astype(np.float64),
             template_index=f["TEMPLATE_INDEX"][:].astype(np.int64),
+            pointing_index=f["POINTING_INDEX"][:].astype(np.int64),
         )
         omega_sim_deg2 = float(f.attrs["OMEGA_SIM_DEG2"])
         n_raw = int(f.attrs["N_RAW"])
@@ -581,12 +584,35 @@ def _region_source_geometry(config, region, tiles):
 # per-tile build
 # ---------------------------------------------------------------------------
 
-def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, curve):
-    """One tile's placement, weight, partition and brightness units for
-    the WHOLE retained field-star population (spec section 2.2, "Per
-    tile": the same population, deposited one by one, per tile). Returns
-    the tile's own datasets plus its mean-profile array and a few
-    report-only diagnostics (not written to the product)."""
+def tile_centre_lb(pix256_t):
+    """The tile's own centre in galactic (l, b) degrees: the plain mean
+    over its distinct nside-256 sightlines' pixel centres (owner ruling
+    2026-09-06's "by tile centre"). Longitude is unwrapped through 180 deg
+    first, matching `sky.download.trilegal.build.region_pointings`'s own
+    convention, so a tile never sits on the wrong side of a wrap."""
+    l, b = hp.pix2ang(256, np.unique(pix256_t), nest=True, lonlat=True)
+    l = np.where(l > 180.0, l - 360.0, l)
+    return float(np.mean(l)), float(np.mean(b))
+
+
+def nearest_pointing(tile_l, tile_b, pointing_l, pointing_b):
+    """Index into `pointing_l`/`pointing_b` of the pointing nearest this
+    tile's own centre, plain Euclidean in (l, b) degrees -- pointings are
+    1.5 deg apart, far coarser than the angular distortion `cos(b)` would
+    correct for."""
+    d2 = (pointing_l - tile_l) ** 2 + (pointing_b - tile_b) ** 2
+    return int(np.argmin(d2))
+
+
+def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, curve,
+                     pointing_l, pointing_b):
+    """One tile's placement, weight, partition and brightness units, built
+    from ONE pointing's simulated stars only (owner ruling 2026-09-06:
+    each tile is assigned to its nearest pointing by tile centre; spec
+    section 2.2's "Per tile" population is that pointing's retained
+    stars, not the whole region's). Returns the tile's own datasets plus
+    its mean-profile array and a few report-only diagnostics (not written
+    to the product)."""
     in_tile = geom["tile"] == t
     pix256_t = geom["pix256"][in_tile]
     a_col_t = geom["a_col"][in_tile]
@@ -595,7 +621,11 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     mean_u = tile_mean_u(profile_obj, dist_grid, sightlines, a_pix, n_src)
     a_tile = float(a_col_t.mean())
 
-    u_i = np.interp(stars["dist_pc"], dist_grid, mean_u)
+    tile_l, tile_b = tile_centre_lb(pix256_t)
+    p_idx = nearest_pointing(tile_l, tile_b, pointing_l, pointing_b)
+    star_index = np.flatnonzero(stars["pointing_index"] == p_idx).astype(np.int32)
+
+    u_i = np.interp(stars["dist_pc"][star_index], dist_grid, mean_u)
     a_i = a_tile * u_i
 
     excluded = bool(weights["excluded"][t])
@@ -604,7 +634,8 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     w_ks = weights["w_region_ks"] if excluded else weights["w_ks"][t]
 
     g_obs, ks_obs = anchor_tiles.magnitudes_at_extinction(
-        a_i, stars["g_proxy"], stars["ks_mag"], stars["k_g_diffuse"], stars["k_g_dense"],
+        a_i, stars["g_proxy"][star_index], stars["ks_mag"][star_index],
+        stars["k_g_diffuse"][star_index], stars["k_g_dense"][star_index],
         stars["r_diffuse"], stars["r_dense"])
     w, rule, bin_g, bin_ks = star_weights(
         g_obs, ks_obs, weights["g_edges"], weights["ks_edges"],
@@ -613,16 +644,17 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
 
     # the partition (spec section 3): a REWEIGHTING of this tile's own W,
     # never a filter -- w_star + w_agb == w row by row.
-    w_star, w_agb = partition_weights(w, stars["is_evolved"], stars["f_dusty_mean"])
+    w_star, w_agb = partition_weights(w, stars["is_evolved"][star_index], stars["f_dusty_mean"])
 
     # PAHC's own weight (spec section 4): the star's own tile extinction
     # `a_i` dims its intrinsic 8um flux before the contrast `q` is formed.
     p_pahc, log10_q0 = pahc_contamination_weight(
-        stars["fnu_mjy"][:, IDX_I4], a_i, stars["limit_grid_mjy"], config, curve)
+        stars["fnu_mjy"][star_index][:, IDX_I4], a_i, stars["limit_grid_mjy"], config, curve)
 
     return dict(
         tile=t, n_sightlines=int(sightlines.size), a_tile=a_tile,
-        star_index=np.arange(stars["dist_pc"].size, dtype=np.int32),
+        pointing_index=p_idx, tile_l=tile_l, tile_b=tile_b,
+        star_index=star_index,
         u=u_i.astype(np.float32), a=a_i.astype(np.float32),
         w=w.astype(np.float32), rule=rule,
         w_star=w_star.astype(np.float32), w_agb=w_agb.astype(np.float32),
@@ -663,9 +695,25 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
     profile_obj = profile_module.read(config, region)
     dist_grid = shared_distance_grid(profile_obj)
 
+    # the region's own pointing grid (owner ruling 2026-09-06): each
+    # tile below is assigned to its nearest pointing centre, in the same
+    # order `prior.field_stars` used to number `POINTING_INDEX`.
+    pointings = trilegal_download.region_pointings(config, region)
+    pointing_l = np.array([p["l_deg"] for p in pointings])
+    pointing_b = np.array([p["b_deg"] for p in pointings])
+
     results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
-        delayed(_build_one_tile)(config, t, geom, stars, weights, profile_obj, dist_grid, curve)
+        delayed(_build_one_tile)(config, t, geom, stars, weights, profile_obj, dist_grid, curve,
+                                  pointing_l, pointing_b)
         for t in range(tiles["n_tile"]))
+
+    # report-only (blessing check, owner ruling 2026-09-06): the pointing a
+    # tile would have used under the OLD one-pointing-per-region scheme --
+    # nearest to the region's own historical centre -- against the one it
+    # actually got, so `_report` can state what fraction of tiles moved.
+    old_info = trilegal_download.REGION_POINTINGS[region]
+    region_centre_pointing = nearest_pointing(
+        old_info["l_deg"], old_info["b_deg"], pointing_l, pointing_b)
 
     return dict(region=region, n_star=stars["dist_pc"].size, n_raw=n_raw,
                 omega_sim_deg2=omega_sim_deg2, dist_grid=dist_grid,
@@ -674,7 +722,9 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
                 region_anchor_ratio=_read_anchor_ratio(config, region),
                 is_evolved=is_evolved, log10_b=log10_b, log10_b_pahc=log10_b_pahc,
                 log10_b_agb_c=log10_b_agb_c, log10_b_agb_o=log10_b_agb_o,
-                limit_grid_mjy=limit_grid_mjy, f_dusty_mean=f_dusty_mean)
+                limit_grid_mjy=limit_grid_mjy, f_dusty_mean=f_dusty_mean,
+                n_pointing=len(pointings), pointing_l=pointing_l, pointing_b=pointing_b,
+                region_centre_pointing=region_centre_pointing)
 
 
 # ---------------------------------------------------------------------------
@@ -707,11 +757,12 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c, l_o_lsun, n_riebe
             grp.create_dataset("WEIGHT_RULE", data=tile_result["rule"])
             grp.create_dataset("W_STAR", data=tile_result["w_star"])
             grp.create_dataset("W_AGB", data=tile_result["w_agb"])
-            grp.create_dataset("IS_EVOLVED", data=result["is_evolved"].astype(np.int8))
-            grp.create_dataset("LOG10_B", data=result["log10_b"].astype(np.float32))
-            grp.create_dataset("LOG10_B_PAHC", data=result["log10_b_pahc"].astype(np.float32))
-            grp.create_dataset("LOG10_B_AGB_C", data=result["log10_b_agb_c"].astype(np.float32))
-            grp.create_dataset("LOG10_B_AGB_O", data=result["log10_b_agb_o"].astype(np.float32))
+            si = tile_result["star_index"]
+            grp.create_dataset("IS_EVOLVED", data=result["is_evolved"][si].astype(np.int8))
+            grp.create_dataset("LOG10_B", data=result["log10_b"][si].astype(np.float32))
+            grp.create_dataset("LOG10_B_PAHC", data=result["log10_b_pahc"][si].astype(np.float32))
+            grp.create_dataset("LOG10_B_AGB_C", data=result["log10_b_agb_c"][si].astype(np.float32))
+            grp.create_dataset("LOG10_B_AGB_O", data=result["log10_b_agb_o"][si].astype(np.float32))
             grp.create_dataset("P_PAHC", data=tile_result["p_pahc"])
             grp.create_dataset("LOG10_Q0", data=tile_result["log10_q0"])
     return path
@@ -792,7 +843,7 @@ def _report(result):
 
     frac_evolved_stars = float(np.mean(result["is_evolved"]))
     frac_evolved_weight_per_tile = [
-        float(t["w"][result["is_evolved"]].sum() / t["w"].sum()) for t in tiles]
+        float(t["w"][result["is_evolved"][t["star_index"]]].sum() / t["w"].sum()) for t in tiles]
     frac_evolved_weight = float(
         np.sum(np.asarray(frac_evolved_weight_per_tile) * omega) / np.sum(omega))
 
@@ -805,8 +856,12 @@ def _report(result):
         float(np.max(np.abs((t["w_star"] + t["w_agb"]).astype(np.float64) - t["w"].astype(np.float64))))
         for t in tiles)
 
+    frac_pointing_changed = float(np.mean(
+        [t["pointing_index"] != result["region_centre_pointing"] for t in tiles]))
+
     return dict(
         n_tile=n_tile, a_tile_min=float(a_tile.min()), a_tile_max=float(a_tile.max()),
+        n_pointing=result["n_pointing"], frac_pointing_changed=frac_pointing_changed,
         u300_median=float(np.median(u300)), u1000_median=float(np.median(u1000)),
         rule_frac=rule_frac, sigma_w_over_n_raw=sigma_w_over_n_raw,
         region_anchor_ratio=result["region_anchor_ratio"],
@@ -848,13 +903,15 @@ def build(config, regions=None):
         rep = _report(result)
         rule_str = " ".join("%d=%.3f" % (k, rep["rule_frac"][k]) for k in range(N_WEIGHT_RULES))
         print(
-            "star_population: %s: n_tile=%d A_TILE_K=[%.3f,%.3f] "
+            "star_population: %s: n_tile=%d n_pointing=%d frac_pointing_changed=%.4f "
+            "A_TILE_K=[%.3f,%.3f] "
             "median_u(300pc)=%.4f median_u(1kpc)=%.4f "
             "weight_rule_frac(0-5)=[%s] sigma_w_over_n_raw=%.4f region_anchor_ratio=%.4f "
             "u_max_decrease=%.2e u_max_over_one=%.2e "
             "no_joint_tiles=%d marginal_checked=%d marginal_max_dev=%.2e "
             "no_joint_non_marginal_frac=%.4f -> %s"
-            % (region, rep["n_tile"], rep["a_tile_min"], rep["a_tile_max"],
+            % (region, rep["n_tile"], rep["n_pointing"], rep["frac_pointing_changed"],
+               rep["a_tile_min"], rep["a_tile_max"],
                rep["u300_median"], rep["u1000_median"], rule_str,
                rep["sigma_w_over_n_raw"], rep["region_anchor_ratio"],
                rep["max_decrease"], rep["max_over_one"],
