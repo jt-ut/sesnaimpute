@@ -94,6 +94,7 @@ PY sesnaimpute.prior.field_stars
 PY sesnaimpute.prior.pahc_curve   # PAHC contamination P(q), survey-wide (SPEC_PRIORS.md sec 4)
 PY sesnaimpute.prior.anchor_tiles
 PY sesnaimpute.prior.depth_groups
+PY sesnaimpute.prior.kernel   # the log-normal column kernel: mu, sigma per arm on the column grid (SPEC_PRIORS.md sec 1.2)
 PY sesnaimpute.prior.yso   # YSO law count + per-sightline shape (SPEC_PRIORS.md sec 6.1, 6.3)
 PY sesnaimpute.prior.young_stars   # expected young stars per STAR anchor pixel/bin (SPEC_PRIORS.md sec 2.1)
 PY sesnaimpute.prior.anchor_observed   # observed STAR anchor joint histogram, young-star subtracted (SPEC_PRIORS.md sec 2.1)
