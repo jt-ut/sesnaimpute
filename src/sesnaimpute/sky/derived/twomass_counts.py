@@ -23,13 +23,23 @@ import os
 import h5py
 import healpy as hp
 import numpy as np
+import pandas as pd
 
+from sesnaimpute import batches as batches_module
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.granules import access
 
 NSIDE = 512
+
+#: Row-batch memory budget for the per-source download CSV (rule 10b):
+#: unlike the Gaia sibling, this download is one row per 2MASS detection,
+#: not one row per (pixel, bin) -- a dense region's file can carry
+#: millions of rows (measured 4.2 GB resident reading it whole at Cygnus
+#: X). The histogram accumulation (`np.add.at`) is exact and order-free,
+#: so summing it one batch at a time changes nothing it computes.
+ROW_BATCH_BUDGET_BYTES = 512 << 20
 #: Ten half-mag bins (9.0-14.0) plus the closing partial bin to the spec
 #: cut (SPEC_PRIORS.md section 2.1, "2MASS PSC ... Ks < 14.3").
 MAG_EDGES = np.append(np.arange(9.0, 14.0001, 0.5), 14.3)
@@ -44,29 +54,48 @@ def _region_pixels(config, region):
     return np.unique(access.region_slice(config, region)["hpx_pix_512"])
 
 
+def _csv_row_batch_size(csv_path, budget_bytes=ROW_BATCH_BUDGET_BYTES):
+    """Rows per batch (rule 10b) for `csv_path`: its own first data row's
+    byte width sets `batches.batches`' per-row footprint, so a dense
+    region's file (millions of detection rows) is never read whole."""
+    with open(csv_path, "r") as f:
+        f.readline()  # header
+        first = f.readline()
+    if not first:
+        return 1
+    with open(csv_path, "r") as f:
+        n_rows = sum(1 for _ in f) - 1
+    row_bytes = len(first.encode("utf-8"))
+    _, stop = next(batches_module.batches(max(n_rows, 1), row_bytes, budget_bytes=budget_bytes))
+    return stop
+
+
 def _counts_matrix(pixels, csv_path):
     """`(n_pix, n_bins)` int64: each downloaded clean-photometry row
     placed at its own Galactic nside-512 pixel and Ks half-mag bin,
-    restricted to `pixels` (the region's own occupied set)."""
+    restricted to `pixels` (the region's own occupied set). Read in row
+    batches (rule 10b): the histogram this accumulates into is exact and
+    order-independent, so no batching changes any count."""
     n_pix, n_bins = pixels.size, MAG_EDGES.size - 1
     n = np.zeros((n_pix, n_bins), dtype=np.int64)
     if not os.path.exists(csv_path):
         raise FileNotFoundError(
             f"twomass_counts derive: no download CSV at {csv_path} -- run the "
             "'sesnaimpute.sky.download.twomass_counts.build' RUNBOOK line first")
-    table = np.genfromtxt(csv_path, delimiter=",", names=True, dtype=None, encoding="utf-8", ndmin=1)
-    if table.size == 0:
-        return n
-    glon = table["glon"].astype(np.float64)
-    glat = table["glat"].astype(np.float64)
-    k_m = table["k_m"].astype(np.float64)
-    row_pix = hp.ang2pix(NSIDE, glon, glat, nest=True, lonlat=True).astype(np.int64)
-    bin_idx = np.searchsorted(MAG_EDGES, k_m, side="right") - 1
-    loc = np.searchsorted(pixels, row_pix)
-    in_set = (loc < n_pix) & (pixels[np.minimum(loc, n_pix - 1)] == row_pix)
-    in_bin = (bin_idx >= 0) & (bin_idx < n_bins)
-    keep = in_set & in_bin
-    np.add.at(n, (loc[keep], bin_idx[keep]), 1)
+    chunksize = _csv_row_batch_size(csv_path)
+    for chunk in pd.read_csv(csv_path, chunksize=chunksize):
+        if chunk.empty:
+            continue
+        glon = chunk["glon"].to_numpy(dtype=np.float64)
+        glat = chunk["glat"].to_numpy(dtype=np.float64)
+        k_m = chunk["k_m"].to_numpy(dtype=np.float64)
+        row_pix = hp.ang2pix(NSIDE, glon, glat, nest=True, lonlat=True).astype(np.int64)
+        bin_idx = np.searchsorted(MAG_EDGES, k_m, side="right") - 1
+        loc = np.searchsorted(pixels, row_pix)
+        in_set = (loc < n_pix) & (pixels[np.minimum(loc, n_pix - 1)] == row_pix)
+        in_bin = (bin_idx >= 0) & (bin_idx < n_bins)
+        keep = in_set & in_bin
+        np.add.at(n, (loc[keep], bin_idx[keep]), 1)
     return n
 
 

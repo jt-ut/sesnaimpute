@@ -155,7 +155,13 @@ def build(config, regions=None):
         regions = [r.name for r in regions_module.REGIONS]
     fits_path = _planck_map_path(config)
     cal = _load_planck_calibration(config)
-    Parallel(n_jobs=config.n_jobs)(delayed(_build_one_region)(config, region, fits_path, cal) for region in regions)
+    # Threads, not processes: `_MAP_CACHE` is process-local, so a process
+    # pool would hold one 1.6 GB Planck map per worker (config.n_jobs
+    # copies at once); every per-region computation here is vectorised
+    # numpy/healpy array arithmetic, which releases the GIL, so threads
+    # cost nothing and keep the map to the one cached copy (CODING_RULES.md 10a).
+    Parallel(n_jobs=config.n_jobs, prefer="threads")(
+        delayed(_build_one_region)(config, region, fits_path, cal) for region in regions)
 
 
 if __name__ == "__main__":

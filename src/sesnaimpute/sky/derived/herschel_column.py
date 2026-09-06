@@ -27,6 +27,13 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.sky.download.herschel_hgbs.build import _FILES as HGBS_FILES
 
+#: `_pair_native` holds two full-resolution HGBS maps at once (up to
+#: 22,500x13,000 float32, ~1.17 GB each) plus their eroded masks --
+#: about 2.9 GB at the largest pair -- so `config.n_jobs` concurrent
+#: pair jobs is bounded here, not left at the general worker count, to
+#: keep the pool's total under the 6 GB stage budget (CODING_RULES.md 10a).
+PAIR_JOBS_MAX_CONCURRENT = 2
+
 #: N(H2) [cm^-2] -> A_K [mag]. AV_PER_NH2: Bohlin, Savage & Drake 1978
 #: gas-to-dust ratio, A_V/N(H2). AK_PER_AV: Rieke & Lebofsky 1985,
 #: ApJ 288, 618, A_K/A_V.
@@ -328,7 +335,8 @@ def build(config, regions=None):
                  for i in range(len(maps)) for j in range(i + 1, len(maps))
                  if _boxes_overlap(maps[i]["bbox"], maps[j]["bbox"])]
     t_sig0 = time.time()
-    pair_results = Parallel(n_jobs=config.n_jobs)(delayed(_pair_native)(*p) for p in pair_jobs)
+    pair_results = Parallel(n_jobs=min(config.n_jobs, PAIR_JOBS_MAX_CONCURRENT))(
+        delayed(_pair_native)(*p) for p in pair_jobs)
     sig = _sig_model(pair_results)
     sigma_wall_s = time.time() - t_sig0
     _write_sigma_survey(config, maps, header_by_name, sig)

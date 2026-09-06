@@ -32,10 +32,18 @@ import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
 
+from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
+
+#: Row-batch memory budget for the raw-delivery read (rule 10b): the raw
+#: delivery carries far more columns than this module selects (measured
+#: 18.8 GB resident reading Cygnus X's full un-selected column set), so
+#: `_read_raw_delivery` never asks `pandas.read_fwf` for a column it does
+#: not keep, and reads even that reduced set one row-batch at a time.
+ROW_BATCH_BUDGET_BYTES = 512 << 20
 
 _RAW_SUFFIX = {
     "J": "J", "H": "H", "Ks": "KS",
@@ -61,37 +69,53 @@ DEFAULT_NN_K = 5
 _DTYPE_MAPPER = {"CHAR": str, "DOUBLE": float, "FLOAT": float, "INT": "Int64"}
 
 
-def _read_raw_delivery(path, select_columns):
+def _read_raw_delivery(path, select_columns, batch_budget_bytes=ROW_BATCH_BUDGET_BYTES):
     """Reads one region's IPAC1 raw-delivery text file: 5 header lines
     (a `\\created` stamp, pipe-delimited fixed-width column names, dtypes,
     units, null-value sentinels), then one fixed-width row per source.
-    Returns the selected columns as a `pandas.DataFrame` (missing values
-    left as the file's own sentinel, not NaN) and a `{column: sentinel}`
-    map.
+    `pandas.read_fwf` is asked for `select_columns`'s own byte ranges
+    only -- the raw delivery carries many more columns than this module
+    keeps, and parsing the ones it discards is the module's dominant
+    memory cost -- and is called once per row batch (rule 10b), each
+    batch's rows concatenated in file order. Returns the selected columns
+    as a `pandas.DataFrame` (missing values left as the file's own
+    sentinel, not NaN) and a `{column: sentinel}` map.
     """
     with open(path, "r") as f:
         head = [next(f) for _ in range(5)]
     pipelocs = np.array([m.start() for m in re.finditer(r"\|", head[1])])
-    lo, hi = pipelocs[:-1] + 1, pipelocs[1:]
-    names = [head[1][i:j].strip() for i, j in zip(lo, hi)]
-    dtype_names = [head[2][i:j].strip() for i, j in zip(lo, hi)]
-    naval_strs = [head[4][i:j].strip() for i, j in zip(lo, hi)]
-
-    colspecs = list(zip(lo.tolist(), hi.tolist()))
-    df = pd.read_fwf(path, colspecs=colspecs, skiprows=5, header=None, names=names)
+    lo_all, hi_all = pipelocs[:-1] + 1, pipelocs[1:]
+    names_all = [head[1][i:j].strip() for i, j in zip(lo_all, hi_all)]
+    dtype_names_all = [head[2][i:j].strip() for i, j in zip(lo_all, hi_all)]
+    naval_strs_all = [head[4][i:j].strip() for i, j in zip(lo_all, hi_all)]
 
     select = list(select_columns)
-    df = df[select]
+    order_of = {n: k for k, n in enumerate(select)}
+    keep = sorted((i for i, n in enumerate(names_all) if n in order_of),
+                  key=lambda i: order_of[names_all[i]])
+    colspecs = [(int(lo_all[i]), int(hi_all[i])) for i in keep]
+    names = [names_all[i] for i in keep]
+
     navals = {}
-    for n, v, dt in zip(names, naval_strs, dtype_names):
-        if n not in select:
-            continue
+    for i in keep:
+        n, v, dt = names_all[i], naval_strs_all[i], dtype_names_all[i]
         if v == "null":
             navals[n] = None
         elif dt == "INT":
             navals[n] = int(float(v))
         else:
             navals[n] = float(v)
+
+    with open(path, "r") as f:
+        n_rows = sum(1 for _ in f) - 5
+    row_bytes = int(sum(hi - lo for lo, hi in colspecs)) or 1
+
+    parts = [
+        pd.read_fwf(path, colspecs=colspecs, skiprows=5 + start, nrows=stop - start,
+                    header=None, names=names)
+        for start, stop in batches_module.batches(n_rows, row_bytes, budget_bytes=batch_budget_bytes)
+    ]
+    df = pd.concat(parts, ignore_index=True) if len(parts) > 1 else parts[0]
     return df, navals
 
 
@@ -228,7 +252,7 @@ def build(config, regions=None):
             config, "catalog", "sesna", "sources", "source", region=region
         )
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        name_bytes = np.array([s.encode("utf-8") for s in assembled["name"]])
+        name_bytes = assembled["name"].astype("S")
         with h5py.File(out_path, "w") as f:
             f.attrs["GRANULE"] = "source"
             f.attrs["REGION"] = region
