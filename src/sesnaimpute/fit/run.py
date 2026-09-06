@@ -29,7 +29,9 @@ import numpy as np
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import regions as regions_module
+from sesnaimpute.fit.psi import PsiTerm
 from sesnaimpute.fit.sweep import fit_batch
+from sesnaimpute.fit.terms import GaiaTerm
 from sesnaimpute.granules import access
 from sesnaimpute.prior.callable import SourcePrior
 
@@ -67,18 +69,52 @@ def _write_batch(path, arrays):
             f.create_dataset(key, data=np.asarray(arr))
 
 
+def _library_native_flux(config, cls):
+    """`(n_model, 8)`: this class's library models' own native flux (mJy,
+    `definitions.BANDS` order, zero extinction, the library's own
+    brightness reference) -- the `rows` argument `fit.psi.PsiTerm.ln_psi`
+    reads its model colours off, read once per class straight from its
+    register's `F_REF_<band>` columns (`definitions.CLASS_REGISTER`, the
+    same key `fit.sweep` reads its own template flux from)."""
+    key = definitions.CLASS_REGISTER[cls]
+    path = os.path.join(config.inputs["sed_models"], "registers", "%s_register.hdf5" % key)
+    with h5py.File(path, "r") as f:
+        n_model = f["models"]["MODEL_NAME"].shape[0]
+        flux = np.empty((n_model, len(definitions.BANDS)), dtype=np.float64)
+        for j, band in enumerate(definitions.BANDS):
+            flux[:, j] = np.asarray(f["models"]["F_REF_%s" % band.key][:], dtype=np.float64)
+    return flux
+
+
 def _fit_one(config, region, cls):
     """Sweeps one {region, class} in batches of `BATCH_SIZE`, writing
     each batch's own file, then joins them into one evidence file in
-    catalogue row order (module docstring)."""
+    catalogue row order (module docstring). The census prior
+    (`SourcePrior`), the Gaia congruence term (`GaiaTerm`) and the
+    colour-cascade term (`PsiTerm`) are each built once here, before the
+    batch loop, and shared across every batch of this {region, class}
+    sweep (`10_POSTERIOR.md` section 1's `Gamma`, `Psi` factors) --
+    `PsiTerm`'s default `beta=0` (its own module docstring) makes `psi`
+    the identity, matching `impute.posterior`'s own `BETA = 0`.
+    """
     n_sources = access.region_slice(config, region)["n_sources"]
     prior = SourcePrior(config, region)
+    gaia = GaiaTerm(config, region)
+    psi_term = PsiTerm(config, cls)
+    native_flux = _library_native_flux(config, cls)
+    gaia_cls = cls.lower()
+
+    def gamma(row, model_index, a, log10_b):
+        return gaia.ln_gamma(row, model_index, a, log10_b, gaia_cls)
+
+    def psi(row, model_index, a, log10_b):
+        return psi_term.ln_psi(native_flux, model_index, a, log10_b)
 
     batch_paths = []
     for i, start in enumerate(range(0, n_sources, BATCH_SIZE)):
         rows = np.arange(start, min(start + BATCH_SIZE, n_sources))
         prior.prepare(rows)
-        arrays = fit_batch(config, region, cls, rows, prior)
+        arrays = fit_batch(config, region, cls, rows, prior, gamma=gamma, psi=psi)
         path = _batch_path(config, region, cls, i)
         _write_batch(path, arrays)
         batch_paths.append(path)
