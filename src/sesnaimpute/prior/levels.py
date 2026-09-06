@@ -26,7 +26,6 @@ before the level correction, `P_C,i`, is:
     passed the selection `EPS_YSO` is the fraction of).
 
 The six factors `f_C` maximise the Poisson likelihood of `n_i` given
-`mu_i = Sum_C f_C . P_C,i`, fitted as `scipy.optimize.minimize` on the
 six log-factors (so `f_C > 0` by construction) with the analytic
 gradient, started at `f_C = 1`. Standard errors and the correlation
 matrix come from the observed (Fisher) information in `f`-space itself,
@@ -46,7 +45,6 @@ import time
 import h5py
 import healpy as hp
 import numpy as np
-from scipy.optimize import minimize
 
 from sesnaimpute import config as config_module
 from sesnaimpute import regions as regions_module
@@ -75,7 +73,6 @@ OMEGA_PIX_DEG2 = float(hp.nside2pixarea(NSIDE, degrees=True))
 #: The Poisson-precision bar the fitted total is graded against (brief
 #: item 2): `TOTAL_AFTER` must land within this many `sqrt(TOTAL_OBSERVED)`
 #: of `TOTAL_OBSERVED`.
-TOTAL_MATCH_SIGMA = 3.0
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +128,7 @@ def per_source_counts(config, region):
 
     cloud_path = config_module.product_path(config, "bms", "table", "counts-cloud",
                                              "source", region=region)
-    cloud = access.per_source(config, region, cloud_path, ["N_H2S", "EPS_YSO"])
+    cloud = access.per_source(config, region, cloud_path, ["N_H2S", "N_YSO", "EPS_YSO"])
 
     values = {
         "STAR": np.asarray(star["N_STAR"], dtype=np.float64),
@@ -139,6 +136,7 @@ def per_source_counts(config, region):
         "PAHC": np.asarray(star["N_PAHC"], dtype=np.float64),
         "GAL": np.asarray(star["N_GAL"], dtype=np.float64),
         "H2S": np.asarray(cloud["N_H2S"], dtype=np.float64),
+        "YSO": np.asarray(cloud["N_YSO"], dtype=np.float64),
         "EPS_YSO": np.asarray(cloud["EPS_YSO"], dtype=np.float64),
     }
     return src_pix, values
@@ -245,40 +243,20 @@ def predicted_patterns(config, region, pixels, src_pix, values):
 # the Poisson fit (brief item 2)
 # ---------------------------------------------------------------------------
 
-def _neg_log_likelihood_and_grad(theta, p_matrix, n):
-    """`(nll, grad)`: the Poisson negative log-likelihood of `n` given
-    `mu = p_matrix @ exp(theta)` (`theta` the six log-factors) and its
-    analytic gradient in `theta` -- the `log(n_i!)` term is dropped (a
-    constant, does not move the optimum)."""
-    f = np.exp(theta)
-    mu = np.maximum(p_matrix @ f, 1e-300)
-    nll = float(np.sum(mu - n * np.log(mu)))
-    resid = 1.0 - n / mu                       # d(nll)/d(mu_i)
-    grad = (p_matrix.T @ resid) * f             # chain rule through mu = P @ exp(theta)
-    return nll, grad
-
-
-def fit_levels(patterns, n_i):
-    """`(f, cov, mu)`: the six non-negative level factors maximising the
-    region's own Poisson likelihood (module docstring), the observed-
-    information covariance of `f` itself, and the fitted `mu_i`."""
+def region_factor(patterns, n_i):
+    """`(f, mu_before)`: the one scalar per region (SPEC_PRIORS.md 0.2, owner
+    2026-09-06) that makes the six counts, integrated over the region,
+    sum to the number of catalogued sources: `f = sum(n_i) / sum_i sum_C
+    P_C,i`. The same factor multiplies every class, so no source moves
+    between classes and no class probability changes; the factor and the
+    total before it are the diagnostic of the calibrations' absolute level."""
     p_matrix = np.column_stack([patterns[c] for c in CLASSES])
-    n_i = np.asarray(n_i, dtype=np.float64)
-
-    theta0 = np.zeros(len(CLASSES))
-    result = minimize(_neg_log_likelihood_and_grad, theta0, args=(p_matrix, n_i),
-                      jac=True, method="L-BFGS-B")
-    if not result.success:
-        raise ValueError("prior.levels: the Poisson fit did not converge (%s)" % result.message)
-    f = np.exp(result.x)
-
-    mu = np.maximum(p_matrix @ f, 1e-300)
-    # the observed information directly in f-space (mu is linear in f,
-    # so this is the exact Hessian of the Poisson -log-likelihood in f,
-    # not a delta-method transform of the log-factor Hessian):
-    info = (p_matrix.T * (n_i / mu**2)) @ p_matrix
-    cov = np.linalg.inv(info)
-    return f, cov, mu
+    mu_before = p_matrix @ np.ones(len(CLASSES))
+    total_before = float(np.sum(mu_before))
+    if total_before <= 0.0:
+        raise ValueError("prior.levels: the six counts integrate to zero over the region")
+    f = float(np.sum(n_i)) / total_before
+    return f, mu_before
 
 
 def poisson_deviance(n_i, mu_i):
@@ -301,53 +279,20 @@ def _output_path(config):
 
 
 def read(config, region):
-    """The region's own row of the levels product: `F_*`/`SIGMA_F_*` as a
-    dict, plus `CORR`, the totals and the deviances."""
-    path = _output_path(config)
-    with h5py.File(path, "r") as f:
-        names = [n.decode() if isinstance(n, bytes) else n for n in f["REGION"][:]]
-        if region not in names:
-            raise ValueError("prior.levels: %r has no row in %s" % (region, path))
+    """The region's own row of the levels product as a dict: F_REGION (the one
+    scalar), TOTAL_OBSERVED, TOTAL_BEFORE, DEVIANCE_BEFORE/AFTER, N_PIXELS and
+    the per-class diagnostic ratios RATIO_<class>."""
+    with h5py.File(_output_path(config), "r") as f:
+        names = [n.decode() if isinstance(n, bytes) else str(n) for n in f["REGION"][:]]
         i = names.index(region)
-        out = {"F_%s" % c: float(f["F_%s" % c][i]) for c in CLASSES}
-        out.update({"SIGMA_F_%s" % c: float(f["SIGMA_F_%s" % c][i]) for c in CLASSES})
-        out["CORR"] = np.asarray(f["CORR"][i], dtype=np.float64)
-        for key in ("TOTAL_OBSERVED", "TOTAL_BEFORE", "TOTAL_AFTER",
-                   "DEVIANCE_BEFORE", "DEVIANCE_AFTER", "N_PIXELS"):
-            out[key] = float(f[key][i])
+        keys = ["F_REGION", "TOTAL_OBSERVED", "TOTAL_BEFORE", "DEVIANCE_BEFORE",
+                "DEVIANCE_AFTER", "N_PIXELS"] + ["RATIO_%s" % c for c in CLASSES]
+        out = {k: float(f[k][i]) for k in keys}
+    if not np.isfinite(out["F_REGION"]):
+        raise ValueError("prior.levels: no factor built for region %r -- run the RUNBOOK line "
+                         "sesnaimpute.prior.levels for it" % region)
     return out
 
-
-# ---------------------------------------------------------------------------
-# report (rules 10, 11, 13)
-# ---------------------------------------------------------------------------
-
-def report(region, n_pixels, wall_s, f, sigma, corr, total_observed, total_before,
-          total_after, dev_before, dev_after, mosaic_area_deg2, covered_area_deg2):
-    lines = ["prior.levels: %s: %d occupied nside-512 pixels, wall=%.1fs"
-            % (region, n_pixels, wall_s),
-            "prior.levels: %s: mosaic area=%.4g deg^2, covered-fraction-weighted area=%.4g "
-            "deg^2 (max of the four IRAC bands' own coverage fraction per pixel)"
-            % (region, mosaic_area_deg2, covered_area_deg2)]
-    for i, cls in enumerate(CLASSES):
-        lines.append("prior.levels: %s: F_%s=%.4f +/- %.4f" % (region, cls, f[i], sigma[i]))
-    i_yso, i_pahc = CLASSES.index("YSO"), CLASSES.index("PAHC")
-    corr_yso_pahc = float(corr[i_yso, i_pahc])
-    lines.append("prior.levels: %s: corr(YSO, PAHC)=%.3f -- %s"
-                 % (region, corr_yso_pahc,
-                    "the two classes separate in this fit" if abs(corr_yso_pahc) < 0.5
-                    else "the two classes are poorly separated in this fit"))
-    lines.append("prior.levels: %s: total observed=%.6g, total before=%.6g, total after=%.6g "
-                "(bar: |after-observed|/sqrt(observed) < %.1f)"
-                % (region, total_observed, total_before, total_after, TOTAL_MATCH_SIGMA))
-    lines.append("prior.levels: %s: deviance before=%.6g, deviance after=%.6g (%d pixels)"
-                % (region, dev_before, dev_after, n_pixels))
-    return lines
-
-
-# ---------------------------------------------------------------------------
-# build
-# ---------------------------------------------------------------------------
 
 def _build_one(config, region):
     t0 = time.time()
@@ -364,43 +309,40 @@ def _build_one(config, region):
     src_pix, values = src_pix[src_keep], {k: v[src_keep] for k, v in values.items()}
     patterns = predicted_patterns(config, region, pixels, src_pix, values)
 
-    f, cov, mu_after = fit_levels(patterns, n_i)
-    sigma = np.sqrt(np.diag(cov))
-    corr = cov / np.outer(sigma, sigma)
-
-    p_matrix = np.column_stack([patterns[c] for c in CLASSES])
-    mu_before = p_matrix @ np.ones(len(CLASSES))
-
+    f, mu_before = region_factor(patterns, n_i)
+    mu_after = f * mu_before
     total_observed = float(np.sum(n_i))
     total_before = float(np.sum(mu_before))
-    total_after = float(np.sum(mu_after))
     dev_before = poisson_deviance(n_i, mu_before)
     dev_after = poisson_deviance(n_i, mu_after)
 
-    if abs(total_after - total_observed) / np.sqrt(total_observed) >= TOTAL_MATCH_SIGMA:
-        raise ValueError(
-            "prior.levels: %r's fitted total %.6g misses the observed total %.6g by more "
-            "than %.1f sigma of Poisson counting noise -- the six classes' own patterns "
-            "cannot jointly reproduce the region's catalogued source density"
-            % (region, total_after, total_observed, TOTAL_MATCH_SIGMA))
+    # the per-class diagnostic (reported, never enforced): the prior class
+    # probability summed over the region's sources against the class's
+    # integrated count after the factor; a ratio away from 1 says the count's
+    # spatial pattern does not follow the catalogue's source density.
+    n_tot = np.zeros(src_pix.size)
+    for c in CLASSES:
+        n_tot += values[c]
+    ratios = {}
+    for c in CLASSES:
+        prob_sum = float(np.sum(np.where(n_tot > 0, values[c] / np.where(n_tot > 0, n_tot, 1.0), 0.0)))
+        integrated = f * float(np.sum(patterns[c]))
+        ratios[c] = prob_sum / integrated if integrated > 0 else np.nan
 
     wall_s = time.time() - t0
     mosaic_area_deg2 = pixels.size * OMEGA_PIX_DEG2
     covered_area_deg2 = float(np.sum(frac)) * OMEGA_PIX_DEG2
-    for line in report(region, pixels.size, wall_s, f, sigma, corr, total_observed,
-                       total_before, total_after, dev_before, dev_after,
-                       mosaic_area_deg2, covered_area_deg2):
-        print(line, flush=True)
+    print("prior.levels: %s: %d pixels, %.1f s; factor f = %.4f (counts integrate to %.1f "
+          "against %d catalogued sources); deviance before/after %.0f/%.0f; mosaic %.2f deg2, "
+          "covered-weighted %.2f deg2" % (region, pixels.size, wall_s, f, total_before,
+          int(total_observed), dev_before, dev_after, mosaic_area_deg2, covered_area_deg2), flush=True)
+    print("prior.levels: %s: prob-sum / integrated-count per class: %s"
+          % (region, ", ".join("%s %.2f" % (c, ratios[c]) for c in CLASSES)), flush=True)
 
-    rows = {"F_%s" % c: [f[i]] for i, c in enumerate(CLASSES)}
-    rows.update({"SIGMA_F_%s" % c: [sigma[i]] for i, c in enumerate(CLASSES)})
-    rows["CORR"] = corr[None, :, :]
-    rows["TOTAL_OBSERVED"] = [total_observed]
-    rows["TOTAL_BEFORE"] = [total_before]
-    rows["TOTAL_AFTER"] = [total_after]
-    rows["DEVIANCE_BEFORE"] = [dev_before]
-    rows["DEVIANCE_AFTER"] = [dev_after]
-    rows["N_PIXELS"] = [float(pixels.size)]
+    rows = {"F_REGION": [f], "TOTAL_OBSERVED": [total_observed], "TOTAL_BEFORE": [total_before],
+            "DEVIANCE_BEFORE": [dev_before], "DEVIANCE_AFTER": [dev_after],
+            "N_PIXELS": [float(pixels.size)]}
+    rows.update({"RATIO_%s" % c: [ratios[c]] for c in CLASSES})
     return rows
 
 

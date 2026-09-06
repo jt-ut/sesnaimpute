@@ -52,7 +52,7 @@ NORMALISER_COLUMNS = ("Z_STAR", "Z_AGB", "Z_PAHC", "Z_GAL", "Z_YSO", "Z_H2S")
 #: normalised to the survey"), and the root attribute that factor is
 #: carried under.
 _COUNT_CLASS = dict(zip(COUNT_COLUMNS, levels_module.CLASSES))
-LEVEL_ATTRS = tuple("F_%s" % cls for cls in levels_module.CLASSES)
+LEVEL_ATTRS = ("F_REGION",)
 RIDGE_COLUMNS = ("RIDGE_INTERCEPT", "RIDGE_SLOPE", "RIDGE_WIDTH")
 YSO_DIAGNOSTIC_COLUMNS = ("EPS_YSO", "EPS_YSO_3MYR", "N_YSO_3MYR", "N_LAW")
 ALL_COLUMNS = (("NAME",) + CONDITIONING_COLUMNS + COUNT_COLUMNS + NORMALISER_COLUMNS
@@ -202,7 +202,7 @@ def _write(config, region, name, f_lim_50_mjy, rs, adopted, star, cloud, region_
 
         for key in COUNT_COLUMNS:
             src = star if key in ("N_STAR", "N_AGB", "N_PAHC", "N_GAL") else cloud
-            factor = level_factors["F_%s" % _COUNT_CLASS[key]]
+            factor = level_factors["F_REGION"]
             f.create_dataset(key, data=(src[key].astype(np.float64) * factor).astype(np.float32))
         for key in NORMALISER_COLUMNS:
             src = star if key in ("Z_STAR", "Z_AGB", "Z_PAHC", "Z_GAL") else cloud
@@ -316,15 +316,11 @@ def _assert_class_probabilities_identity(config, region, out, star, cloud, level
     # dropped.
     for i, key in enumerate(COUNT_COLUMNS):
         cls = _COUNT_CLASS[key]
-        integrated = level_factors["F_%s" % cls] * float(np.sum(patterns[cls]))
+        integrated = level_factors["F_REGION"] * float(np.sum(patterns[cls]))
         observed = float(class_prob_sum_covered[i])
         n_sigma = abs(observed - integrated) / np.sqrt(max(integrated, 1.0))
-        if n_sigma >= levels_module.TOTAL_MATCH_SIGMA:
-            print("prior.table: %r: FLAG: %s class probability sum %.6g misses its own "
-                 "integrated count %.6g by %.1f sigma of Poisson counting noise (bar %.1f) "
-                 "-- see prior.levels' own deviance-after report for this region"
-                 % (region, cls, observed, integrated, n_sigma, levels_module.TOTAL_MATCH_SIGMA),
-                 flush=True)
+        print("prior.table: %s: %s prob-sum %.1f against integrated %.1f (%.1f sigma) -- a diagnostic "
+              "of the count's spatial pattern, reported not enforced" % (region, cls, observed, integrated, n_sigma), flush=True)
 
     total = float(np.sum(class_prob_sum))
     if abs(total - n_sources) > max(1e-3, 1e-6 * n_sources):
