@@ -77,8 +77,12 @@ N_CELLS = 64
 #: The finer grid the bicubic-reconstruction residual is measured against.
 N_CELLS_CHECK = 128
 
-#: The number of fixed shape nodes on the column-grid floor-to-cap ladder.
-N_SHAPE_NODES = 10
+#: The number of fixed shape nodes on the column-grid floor-to-cap
+#: ladder: linear-interpolation error between adjacent nodes scales with
+#: the square of the node spacing, so doubling the count from the
+#: original 10 (node_interp_rel_l1 measured 0.037-0.045 against it) cuts
+#: that error about fourfold.
+N_SHAPE_NODES = 20
 
 #: The column grid's own floor and cap (`column_grid.py`): the ladder
 #: `SHAPE_NODE_COLUMNS` is log-spaced over, fixed regardless of region.
