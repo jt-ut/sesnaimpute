@@ -55,6 +55,7 @@ import os
 
 import h5py
 import numpy as np
+from joblib import Parallel, delayed
 
 from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
@@ -117,8 +118,14 @@ def source_conditioning(config, region):
 
     tile_id = _source_tile_ids(config, region)
 
+    adopted = access.per_source(config, region, adopted_path, ["A_COL_SIG_K", "A_COL_PROVENANCE"])
+    sigma_col = np.asarray(adopted["A_COL_SIG_K"], dtype=np.float64)
+    provenance = np.asarray(adopted["A_COL_PROVENANCE"])
+    map_class = np.where(provenance == star_shapes._PLANCK_PROVENANCE_CODE, "planck", "herschel")
+
     return dict(n_source=f_lim_8band.shape[0], a_col=a_col, f_lim8=f_lim8,
-               node_lo=node_lo, node_w=node_w, tile_id=tile_id)
+               node_lo=node_lo, node_w=node_w, tile_id=tile_id,
+               sigma_col=sigma_col, map_class=map_class)
 
 
 # ---------------------------------------------------------------------------
@@ -184,58 +191,118 @@ def _lin_interp_matrix(grid, query):
 
 
 def selection_on_shape_grid(shape, x_ladder, b_grid):
-    """`(Wx, Wb)`: the fixed bilinear-interpolation matrices carrying a
-    source's own small `(n_x, n_b)` selection array onto the shape's
-    own `(x_centers, b_centers)` tabulation grid (module docstring) --
-    `Wx` is `(n_x_shape, n_x_ladder)` in LINEAR `x` (the shape grid's
-    `log10 x` exponentiated, since the ladder is linear), `Wb` is
-    `(n_b_shape, n_b_class)` in `log10 B` directly."""
-    wx = _lin_interp_matrix(x_ladder, 10.0 ** shape.x_centers)
-    wb = _lin_interp_matrix(b_grid, shape.b_centers)
-    return wx, wb
+    """`Wb`: the fixed bilinear-interpolation matrix carrying a source's
+    own small selection array's `log10 B` axis onto the shape's own
+    `b_centers` tabulation axis (module docstring), `(n_b_shape,
+    n_b_class)` -- the same matrix for every source, since only the
+    class's own selection brightness grid and the shape's own grid are
+    involved, neither of which varies by source. The `x` axis carries
+    the per-source kernel shift instead (`_shift_and_interp_eps`), so it
+    has no fixed matrix."""
+    return _lin_interp_matrix(b_grid, shape.b_centers)
+
+
+def _shift_and_interp_eps(eps_batch, x_ladder, wb, x_centers, mu_shift):
+    """`(nb, n_x_shape, n_b_shape)`: a batch's own small selection array
+    read onto the shape's grid with the class shape's per-source, per-
+    mixture-component shift applied to the SELECTION's query point
+    instead of the density's (the fix, item 1) -- `Sum_x shape(x - mu) .
+    eps(x)` and `Sum_x shape(x) . eps(x - mu)` are the same integral
+    (a plain relabelling of which factor carries the shift), and only the
+    second needs no per-source density read: `x` (linear) is queried at
+    `10**(x_centers - mu_shift)` per source, clamped at the ladder's own
+    ends, and interpolated by the SAME two-point linear rule the fixed
+    build-time matrix used, now evaluated per source since the query
+    point now depends on the source; `log10 B` uses the fixed `wb`
+    unchanged (no shift on that axis)."""
+    query_log_x = x_centers[np.newaxis, :] - mu_shift[:, np.newaxis]     # (nb, n_x_shape)
+    query_x = np.clip(10.0 ** query_log_x, x_ladder[0], x_ladder[-1])
+    idx = np.clip(np.searchsorted(x_ladder, query_x) - 1, 0, x_ladder.size - 2)
+    span = x_ladder[idx + 1] - x_ladder[idx]
+    t = np.where(span > 0.0, (query_x - x_ladder[idx]) / np.where(span > 0.0, span, 1.0), 0.0)
+    rows = np.arange(eps_batch.shape[0])[:, np.newaxis]
+    lo = eps_batch[rows, idx, :]                                        # (nb, n_x_shape, n_b_class)
+    hi = eps_batch[rows, idx + 1, :]
+    eps_x = (1.0 - t)[..., np.newaxis] * lo + t[..., np.newaxis] * hi
+    return np.einsum("bj,nxj->nxb", wb, eps_x)                          # (nb, n_x_shape, n_b_shape)
 
 
 # ---------------------------------------------------------------------------
 # STAR / AGB / PAHC: Z_C = E[eps] by grid quadrature on the shape's own
-# tabulation grid, batched over sources
+# tabulation grid, batched over sources -- no bicubic read: the stored
+# tile array read at its own two bracketing width nodes (PAHC: also its
+# own two bracketing limit grids), doubled under the mixture kernel and
+# combined by its own weight (brief item 1)
 # ---------------------------------------------------------------------------
 
 def family_counts(config, region, cls, cond):
     """`(n_c, z_c, shape)`: the count and normaliser for one family class
-    at every source, evaluated on the shape's own `(x_centers, b_centers)`
-    grid (module docstring): the source's own small selection array is
-    interpolated onto that grid (`Wx`, `Wb`, fixed across sources) and
-    multiplied against `ClassShape.density` at the source's own column
-    and tile (which does its own node -- and, for PAHC, limit -- blend
-    internally), summed."""
+    at every source. `Z_C(s)` is the dot product, on the shape's own
+    `(x_centers, b_centers)` grid, of the shape's own stored tile array
+    (read exactly at its two bracketing width-ladder nodes and linearly
+    blended -- no bicubic) with the source's own small selection array
+    (interpolated onto the grid, its query point carrying the per-source
+    kernel shift instead of the density, brief item 1). The kernel is
+    now a two-component mixture (`Kernel.mixture`): each component has
+    its own shift and width, so the whole thing is built twice -- once
+    per component, each with its own width-node blend and its own
+    shifted selection read -- and combined by the mixture's own weight
+    `w`. PAHC additionally blends the two bracketing 8-micron limit
+    grids, on top of the width blend, for each component."""
     shape = star_shapes.read(config, region, cls)
     eps, x_ladder, b_grid = read_family_selection(config, region, cls)
-    wx, wb = selection_on_shape_grid(shape, x_ladder, b_grid)
+    wb = selection_on_shape_grid(shape, x_ladder, b_grid)
 
     n_x, n_b = shape.x_centers.size, shape.b_centers.size
-    a_x = 10.0 ** shape.x_centers            # (n_x,), the shape grid's own linear x
-    logb_flat = np.tile(shape.b_centers, n_x)  # (n_x*n_b,)
-
     n_source = cond["n_source"]
-    a_col, tile_id, f_lim8 = cond["a_col"], cond["tile_id"], cond["f_lim8"]
+    a_col, tile_id = cond["a_col"], cond["tile_id"]
+    sigma_col, map_class = cond["sigma_col"], cond["map_class"]
     amp = family_amplitude(config, region, cls, cond)
 
-    z_c = np.empty(n_source, dtype=np.float64)
-    row_bytes = n_x * n_b * 8 * 3
-    for start, stop in batches_module.batches(n_source, row_bytes, budget_bytes=BATCH_BUDGET_BYTES):
-        nb = stop - start
-        eps_batch = eps[start:stop].astype(np.float64)              # (nb, n_x_ladder, n_b_class)
-        eps_interp = np.einsum("xi,nij,bj->nxb", wx, eps_batch, wb)  # (nb, n_x, n_b)
+    kern = shape.kern
+    w_mix, mu_mix, sigma_mix = kern.mixture(a_col, sigma_col, map_class)  # (n,), (n,2), (n,2)
+    log_shape_nodes = np.log(shape.shape_nodes)
+    is_pahc = cls == "pahc"
+    if is_pahc:
+        m_lo, t_limit = column_grid.bracket(np.log10(cond["f_lim8"]), shape.limit_log)
+        m_hi = np.minimum(m_lo + 1, shape.limit_log.size - 1)
 
-        a_full = (a_col[start:stop, None] * a_x[None, :]).repeat(n_b, axis=1).reshape(-1)
-        logb_full = np.tile(logb_flat, nb)
-        tile_full = np.repeat(tile_id[start:stop], n_x * n_b)
-        acol_full = np.repeat(a_col[start:stop], n_x * n_b)
-        flim_full = np.repeat(f_lim8[start:stop], n_x * n_b) if cls == "pahc" else None
+    row_bytes = n_x * n_b * 8 * 8
 
-        density_flat = shape.density(a_full, logb_full, tile_full, acol_full, flim_full)
-        density_grid = density_flat.reshape(nb, n_x, n_b)
-        z_c[start:stop] = (density_grid * eps_interp).sum(axis=(1, 2))
+    def _one_batch(start, stop):
+        eps_batch = eps[start:stop].astype(np.float64)   # (nb, n_x_ladder, n_b_class)
+        tile_b = tile_id[start:stop]
+        comp_sum = np.zeros(stop - start, dtype=np.float64)
+
+        for k in range(2):
+            mu_k = mu_mix[start:stop, k]
+            sigma_k = sigma_mix[start:stop, k]
+            i_lo, t_w = column_grid.bracket(np.log(sigma_k), log_shape_nodes)
+            i_hi = np.minimum(i_lo + 1, shape.shape_nodes.size - 1)
+
+            if is_pahc:
+                mlo_b, mhi_b, tlim_b = m_lo[start:stop], m_hi[start:stop], t_limit[start:stop]
+                d_lolo = shape.density_table[tile_b, i_lo, mlo_b]
+                d_lohi = shape.density_table[tile_b, i_lo, mhi_b]
+                d_hilo = shape.density_table[tile_b, i_hi, mlo_b]
+                d_hihi = shape.density_table[tile_b, i_hi, mhi_b]
+                d_lo = (1.0 - tlim_b)[:, None, None] * d_lolo + tlim_b[:, None, None] * d_lohi
+                d_hi = (1.0 - tlim_b)[:, None, None] * d_hilo + tlim_b[:, None, None] * d_hihi
+            else:
+                d_lo = shape.density_table[tile_b, i_lo]
+                d_hi = shape.density_table[tile_b, i_hi]
+            dens_k = (1.0 - t_w)[:, None, None] * d_lo + t_w[:, None, None] * d_hi
+
+            eps_grid_k = _shift_and_interp_eps(eps_batch, x_ladder, wb, shape.x_centers, mu_k)
+            weight_k = w_mix[start:stop] if k == 0 else (1.0 - w_mix[start:stop])
+            comp_sum += weight_k * (dens_k * eps_grid_k).sum(axis=(1, 2))
+        return start, stop, comp_sum
+
+    spans = list(batches_module.batches(n_source, row_bytes, budget_bytes=BATCH_BUDGET_BYTES))
+    z_c = np.zeros(n_source, dtype=np.float64)
+    for start, stop, comp_sum in Parallel(n_jobs=config.n_jobs, prefer="threads")(
+            delayed(_one_batch)(start, stop) for start, stop in spans):
+        z_c[start:stop] = comp_sum
 
     n_c = amp * z_c
     return n_c, z_c, shape
@@ -278,9 +345,14 @@ def family_amplitude(config, region, cls, cond):
 
 def gal_counts(config, region, cond):
     """`(n_gal, z_gal, fazio_params)`: `N_GAL = Integral phi(S) eps(S | A_s)
-    dS`, `Z_GAL` the S-weighted average of `eps`, both `numpy.trapz` over
-    `LOG10_S_GRID`, `eps` read at the one ladder point `x = 1` (module
-    docstring)."""
+    dS`, the full per-source integral over flux (extinction needs no
+    integral: a galaxy's `a` IS the column, module docstring, so the one
+    ladder point `x = 1` already carries it exactly). `Z_GAL` is that
+    SAME per-source integral against the counts law normalised to one
+    (`phi(S) / Integral phi(S) dS`), so `N_GAL = amplitude . Z_GAL` with
+    `amplitude = Integral phi(S) dS` -- the same amplitude-times-
+    normalised-shape-integral factoring `family_counts` uses for
+    STAR/AGB/PAHC, not an S-weighted average of `eps`."""
     eps, x_ladder, log10_s_grid = read_gal_selection(config, region)
     ladder_ix1 = int(np.argmin(np.abs(x_ladder - 1.0)))
     if abs(x_ladder[ladder_ix1] - 1.0) > 1.0e-9:
@@ -300,13 +372,11 @@ def gal_counts(config, region, cond):
 
     s_lin = 10.0 ** log10_s_grid
     ln10 = float(np.log(10.0))
-    w1 = phi_s * s_lin * ln10          # N_GAL: Integral phi(S) eps dS = Integral w1(S) eps dlogS
-    w2 = w1 * s_lin                    # Z_GAL: S-weighted average of eps
+    w1 = phi_s * s_lin * ln10          # Integral phi(S) eps dS = Integral w1(S) eps dlogS
 
     n_gal = np.trapz(eps_curve * w1[None, :], log10_s_grid, axis=1)
-    num = np.trapz(eps_curve * w2[None, :], log10_s_grid, axis=1)
-    den = float(np.trapz(w2, log10_s_grid))
-    z_gal = num / den
+    amplitude = float(np.trapz(w1, log10_s_grid))
+    z_gal = n_gal / amplitude
     return n_gal, z_gal, fazio_params
 
 
