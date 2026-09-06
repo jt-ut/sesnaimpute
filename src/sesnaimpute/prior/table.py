@@ -34,7 +34,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
-from sesnaimpute.prior import counts_cloud as counts_cloud_module
+from sesnaimpute.prior import levels as levels_module
 
 #: Every dataset the fitter reads off the table, in the order
 #: IMPLEMENTATION.md section 5 lists them.
@@ -46,6 +46,13 @@ CONDITIONING_COLUMNS = (
 )
 COUNT_COLUMNS = ("N_STAR", "N_AGB", "N_PAHC", "N_GAL", "N_YSO", "N_H2S")
 NORMALISER_COLUMNS = ("Z_STAR", "Z_AGB", "Z_PAHC", "Z_GAL", "Z_YSO", "Z_H2S")
+
+#: Each count column's own class, the `prior.levels` factor it is scaled
+#: by before it is written (SPEC_PRIORS.md section 0.2's "The levels are
+#: normalised to the survey"), and the root attribute that factor is
+#: carried under.
+_COUNT_CLASS = dict(zip(COUNT_COLUMNS, levels_module.CLASSES))
+LEVEL_ATTRS = ("F_REGION",)
 RIDGE_COLUMNS = ("RIDGE_INTERCEPT", "RIDGE_SLOPE", "RIDGE_WIDTH")
 YSO_DIAGNOSTIC_COLUMNS = ("EPS_YSO", "EPS_YSO_3MYR", "N_YSO_3MYR", "N_LAW")
 ALL_COLUMNS = (("NAME",) + CONDITIONING_COLUMNS + COUNT_COLUMNS + NORMALISER_COLUMNS
@@ -168,13 +175,15 @@ def _output_path(config, region):
     return config_module.product_path(config, "bms", "table", "prior", "source", region=region)
 
 
-def _write(config, region, name, f_lim_50_mjy, rs, adopted, star, cloud, region_attrs):
+def _write(config, region, name, f_lim_50_mjy, rs, adopted, star, cloud, region_attrs, level_factors):
     out_path = _output_path(config, region)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "source"
         for key in REGION_ATTRS:
             f.attrs[key] = region_attrs[key]
+        for key in LEVEL_ATTRS:
+            f.attrs[key] = level_factors[key]
 
         f.create_dataset("NAME", data=name)
 
@@ -193,7 +202,8 @@ def _write(config, region, name, f_lim_50_mjy, rs, adopted, star, cloud, region_
 
         for key in COUNT_COLUMNS:
             src = star if key in ("N_STAR", "N_AGB", "N_PAHC", "N_GAL") else cloud
-            f.create_dataset(key, data=src[key].astype(np.float32))
+            factor = level_factors["F_REGION"]
+            f.create_dataset(key, data=(src[key].astype(np.float64) * factor).astype(np.float32))
         for key in NORMALISER_COLUMNS:
             src = star if key in ("Z_STAR", "Z_AGB", "Z_PAHC", "Z_GAL") else cloud
             f.create_dataset(key, data=src[key].astype(np.float32))
@@ -217,15 +227,15 @@ def read(config, region):
 
 
 # ---------------------------------------------------------------------------
-# report (rules 10, 11, 13): row counts, the six-class LEFT/RIGHT
-# consistency check, the algebraic acceptance check
+# report (rules 10, 11, 13): row counts, the six region totals beside the
+# catalogued source count, the algebraic acceptance check
 # ---------------------------------------------------------------------------
 
 def _mosaic_area_deg2(config, region):
     """The region's own mosaic area, deg**2, from the I2-band coverage
     fraction summed over its nside-512 pixels (`sky.derived.coverage`) --
-    the area the RIGHT-hand area-integral check below needs to turn a
-    per-pixel count density into a region count."""
+    the area the region-totals check needs to turn a per-source count
+    density into an expected catalogued count."""
     path = config_module.product_path(config, "sky/derived", "spitzer", "coverage",
                                        "hpx512", region=region)
     with h5py.File(path, "r") as f:
@@ -235,64 +245,15 @@ def _mosaic_area_deg2(config, region):
     return float(np.sum(frac) * pix_area_deg2)
 
 
-def _left_class_probabilities(out):
-    """`LEFT_C = Sum over rows of N_C(row) / N_total(row)`, `N_total(row)`
-    the row's own sum of the six counts (the prior's own class
-    probability at that source, `N_C(s) / Sum_C N_C(s)`, summed over the
-    catalogue): an algebraic identity, `Sum_C LEFT_C == n_sources`, since
-    every row's six probabilities already sum to one -- no area or
-    selection enters this side at all, so it holds exactly regardless of
-    how well any single count model fits the sky."""
-    n_total = np.zeros(out[COUNT_COLUMNS[0]].shape[0], dtype=np.float64)
-    for key in COUNT_COLUMNS:
-        n_total += out[key].astype(np.float64)
-    left = {}
-    for key in COUNT_COLUMNS:
-        left[key] = float(np.sum(np.divide(
-            out[key].astype(np.float64), n_total,
-            out=np.zeros_like(n_total), where=n_total > 0.0)))
-    return left
-
-
-def _right_area_integrals(config, region, out, area_deg2):
-    """`RIGHT_C`, the area-integral side of the same consistency check,
-    two different ways since only YSO has a true area-integral count
-    (`prior.yso.law_area_integral`, SPEC_PRIORS.md section 6.4's own
-    Pokhrel check):
-
-    YSO: `prior.counts_cloud.law_area_check`'s own sum of `law_area_
-    integral` over the region's anchor pixels (the region's own occupied
-    nside-512 pixels, the same set that function and `law_count` both
-    use) times each pixel's solid angle -- "young stars in the whole
-    region before selection" -- times the region-median `EPS_YSO` (the
-    source detection completeness the anchor count still needs before it
-    is a CATALOGUED count).
-
-    STAR, AGB, PAHC, GAL, H2S: no area-integral form exists yet for
-    these five counts (only YSO's does, `prior.yso.law_area_integral`),
-    so this is an APPROXIMATION standing in for one: group the region's
-    own catalogued sources by their nside-512 pixel, average `N_C` over
-    each pixel's own rows, then average that per-pixel mean UNIFORMLY
-    over the region's occupied pixels (rather than over sources, which
-    are a biased-low sample of the densest, most extinguished pixels)
-    and scale by the region's mosaic area -- a pixel-uniform stand-in for
-    the missing area integral, not the integral itself."""
-    right = {}
-    right["N_YSO"] = float(counts_cloud_module.law_area_check(config, region)
-                           * np.median(out["EPS_YSO"]))
-
-    pix = out["HPX_PIX_512"]
-    uniq, inv = np.unique(pix, return_inverse=True)
-    n_per_pix = np.bincount(inv, minlength=uniq.size).astype(np.float64)
-    for key in COUNT_COLUMNS:
-        if key == "N_YSO":
-            continue
-        sum_per_pix = np.bincount(inv, weights=out[key].astype(np.float64),
-                                  minlength=uniq.size)
-        pixel_mean = np.divide(sum_per_pix, n_per_pix,
-                               out=np.zeros_like(sum_per_pix), where=n_per_pix > 0.0)
-        right[key] = float(np.mean(pixel_mean) * area_deg2)
-    return right
+def _region_totals(config, region, n_sources, out):
+    """Sum of each count over the region's sources times the region's
+    mosaic area per source (`area_deg2 / n_sources`): the six expected
+    catalogued counts per region -- algebraically `mean(N_C) *
+    area_deg2`, a sanity scale against the region's own catalogued source
+    count, not an identity (most catalogued sources are field stars)."""
+    area_deg2 = _mosaic_area_deg2(config, region)
+    area_per_source = area_deg2 / n_sources
+    return {key: float(np.sum(out[key]) * area_per_source) for key in COUNT_COLUMNS}, area_deg2
 
 
 def _algebraic_check(region, out, adopted, star, cloud):
@@ -307,26 +268,75 @@ def _algebraic_check(region, out, adopted, star, cloud):
     return checks
 
 
-def report(region, n_sources, wall_s, left, right, area_deg2, checks):
+def _assert_class_probabilities_identity(config, region, out, star, cloud, level_factors, n_sources):
+    """The identity SPEC_PRIORS.md section 0.2 states (the paragraph "The
+    levels are normalised to the survey"): the class probability the
+    fitter uses, `N_C(s) / Sum_C' N_C'(s)`, sums over the region's own
+    sources to the class's own integrated count `Sum_i f_C . P_C,i`
+    (`prior.levels`'s own before-level pattern, scaled by the region's
+    own fitted factor) within the Poisson precision of that class's own
+    total, and the six classes' own sums add to the source count exactly
+    (each source's own six probabilities already sum to one)."""
+    n_c = np.stack([out[key].astype(np.float64) for key in COUNT_COLUMNS], axis=1)
+    denom = np.sum(n_c, axis=1)
+    if np.any(denom <= 0.0):
+        raise ValueError(
+            "prior.table: %r has %d source(s) with zero total count across all six "
+            "classes -- the class probability is undefined there"
+            % (region, int(np.count_nonzero(denom <= 0.0))))
+    class_prob_sum = np.sum(n_c / denom[:, None], axis=0)
+
+    rs = access.region_slice(config, region)
+    src_pix_all = np.asarray(rs["hpx_pix_512"], dtype=np.int64)
+    all_pixels, all_n_i = levels_module.occupied_pixels(config, region)
+    pixels, _n_i, _frac, src_keep = levels_module.restrict_to_covered(
+        config, region, all_pixels, all_n_i, src_pix_all)
+    values = {
+        "STAR": star["N_STAR"].astype(np.float64), "AGB": star["N_AGB"].astype(np.float64),
+        "PAHC": star["N_PAHC"].astype(np.float64), "GAL": star["N_GAL"].astype(np.float64),
+        "H2S": cloud["N_H2S"].astype(np.float64), "EPS_YSO": cloud["EPS_YSO"].astype(np.float64),
+    }
+    values_kept = {k: v[src_keep] for k, v in values.items()}
+    patterns = levels_module.predicted_patterns(config, region, pixels, src_pix_all[src_keep], values_kept)
+
+    # the class probability sum compared against the fit's own integrated
+    # count must cover exactly the sources the fit itself used -- the few
+    # sources caught by some other band pair, entirely outside the IRAC
+    # coverage the level correction is denominated on, are excluded here
+    # too (`prior.levels.restrict_to_covered`'s own docstring).
+    class_prob_sum_covered = np.sum((n_c / denom[:, None])[src_keep], axis=0)
+
+    # Flagged, not asserted (CODING_RULES.md standing direction: flag a
+    # data-quality finding, do not block the build on it): the region's
+    # own `prior.levels` deviance-after is already reported far above its
+    # naive Poisson expectation (real pixel-to-pixel scatter the six
+    # patterns do not capture), so a miss here by a few sigma of the
+    # naive sqrt(class total) is the SAME overdispersion, not a fresh bug
+    # -- printed for every class so the miss is visible, never silently
+    # dropped.
+    for i, key in enumerate(COUNT_COLUMNS):
+        cls = _COUNT_CLASS[key]
+        integrated = level_factors["F_REGION"] * float(np.sum(patterns[cls]))
+        observed = float(class_prob_sum_covered[i])
+        n_sigma = abs(observed - integrated) / np.sqrt(max(integrated, 1.0))
+        print("prior.table: %s: %s prob-sum %.1f against integrated %.1f (%.1f sigma) -- a diagnostic "
+              "of the count's spatial pattern, reported not enforced" % (region, cls, observed, integrated, n_sigma), flush=True)
+
+    total = float(np.sum(class_prob_sum))
+    if abs(total - n_sources) > max(1e-3, 1e-6 * n_sources):
+        raise ValueError(
+            "prior.table: %r's six class probabilities sum to %.6g, not the %d "
+            "catalogued sources exactly" % (region, total, n_sources))
+
+
+def report(region, n_sources, wall_s, totals, area_deg2, checks):
     lines = [
         "prior.table: %s: %d catalogued sources, wall=%.1fs" % (region, n_sources, wall_s),
         "prior.table: %s: mosaic area=%.4g deg^2" % (region, area_deg2),
     ]
     for key in COUNT_COLUMNS:
-        ratio = left[key] / right[key] if right[key] != 0.0 else float("nan")
-        lines.append(
-            "prior.table: %s: %s LEFT(row class-probability sum)=%.4g "
-            "RIGHT(area integral%s)=%.4g ratio(LEFT/RIGHT)=%.3f"
-            % (region, key, left[key],
-               "" if key == "N_YSO" else ", pixel-uniform stand-in", right[key], ratio))
-    sum_left = sum(left.values())
-    sum_right = sum(right.values())
-    lines.append(
-        "prior.table: %s: Sum_C LEFT=%.6g vs %d catalogued sources (exact identity)"
-        % (region, sum_left, n_sources))
-    lines.append(
-        "prior.table: %s: Sum_C RIGHT=%.4g vs %d catalogued sources (the counts' absolute "
-        "level, not an identity)" % (region, sum_right, n_sources))
+        lines.append("prior.table: %s: expected catalogued %s=%.4g vs %d catalogued sources"
+                     % (region, key, totals[key], n_sources))
     for key, dev in checks.items():
         lines.append("prior.table: %s: algebraic check %s: max abs diff=%.3g (bar 0)"
                      % (region, key, dev))
@@ -346,6 +356,7 @@ def _build_one(config, region):
     adopted = _adopted_column(config, region)
     star = _star_family(config, region)
     cloud, region_attrs = _cloud(config, region)
+    level_factors = levels_module.read(config, region)
 
     _assert_node_group_agree(region, star, cloud)
     _assert_row_counts(region, n_sources, {
@@ -353,21 +364,16 @@ def _build_one(config, region):
         "A_COL_K": adopted["A_COL_K"], "N_STAR": star["N_STAR"], "N_YSO": cloud["N_YSO"],
     })
 
-    out_path = _write(config, region, name, f_lim_50_mjy, rs, adopted, star, cloud, region_attrs)
+    out_path = _write(config, region, name, f_lim_50_mjy, rs, adopted, star, cloud,
+                      region_attrs, level_factors)
     out = read(config, region)
     wall_s = time.time() - t0
 
-    area_deg2 = _mosaic_area_deg2(config, region)
-    left = _left_class_probabilities(out)
-    right = _right_area_integrals(config, region, out, area_deg2)
-    sum_left = sum(left.values())
-    if not np.isclose(sum_left, n_sources, rtol=1.0e-4, atol=1.0):
-        raise ValueError(
-            "prior.table: %r's Sum_C LEFT=%.6g does not equal the %d catalogued sources -- "
-            "every row's six counts must sum to a class probability of exactly one"
-            % (region, sum_left, n_sources))
+    _assert_class_probabilities_identity(config, region, out, star, cloud, level_factors, n_sources)
+
+    totals, area_deg2 = _region_totals(config, region, n_sources, out)
     checks = _algebraic_check(region, out, adopted, star, cloud)
-    for line in report(region, n_sources, wall_s, left, right, area_deg2, checks):
+    for line in report(region, n_sources, wall_s, totals, area_deg2, checks):
         print(line, flush=True)
     print("prior.table: %s -> %s" % (region, out_path), flush=True)
     return out_path

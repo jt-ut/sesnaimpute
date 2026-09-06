@@ -107,6 +107,25 @@ PY sesnaimpute.prior.gal                    # GAL: Fazio counts law + SWIRE sele
 PY sesnaimpute.prior.counts_star_family
 PY sesnaimpute.prior.counts_cloud           # YSO/H2S per-source counts on the cloud law (SPEC_PRIORS.md sec 6.2, 7)
 PY sesnaimpute.prior.table                  # the prior table: the join, one row per catalogue source (IMPLEMENTATION.md sec 5)
+$PY -m sesnaimpute.prior.column_grid $CONFIG
+$PY -m sesnaimpute.prior.field_stars $CONFIG
+$PY -m sesnaimpute.prior.pahc_curve $CONFIG   # PAHC contamination P(q), survey-wide (SPEC_PRIORS.md sec 4)
+$PY -m sesnaimpute.prior.anchor_tiles $CONFIG
+$PY -m sesnaimpute.prior.depth_groups $CONFIG
+$PY -m sesnaimpute.prior.yso $CONFIG   # YSO law count + per-sightline shape (SPEC_PRIORS.md sec 6.1, 6.3)
+$PY -m sesnaimpute.prior.young_stars $CONFIG   # expected young stars per STAR anchor pixel/bin (SPEC_PRIORS.md sec 2.1)
+$PY -m sesnaimpute.prior.anchor_observed $CONFIG   # observed STAR anchor joint histogram, young-star subtracted (SPEC_PRIORS.md sec 2.1)
+$PY -m sesnaimpute.prior.anchor_weights $CONFIG   # per-tile STAR anchor weight W, cluster exclusion, faint-end trend (SPEC_PRIORS.md sec 2.1)
+$PY -m sesnaimpute.prior.star_population $CONFIG   # per-tile field-star placement (u, a) and anchor weight W (SPEC_PRIORS.md sec 1.4, 1.5, 2.1, 2.2)
+$PY -m sesnaimpute.prior.star_shapes $CONFIG   # per-tile STAR/AGB/PAHC shapes, kernel-convolved at fidelity-chosen nodes and grid (SPEC_PRIORS.md sec 2.2, 3, 4; IMPLEMENTATION.md sec 3)
+$PY -m sesnaimpute.prior.star_selection $CONFIG   # STAR/AGB/PAHC exact-selection tables per depth group (SPEC_PRIORS.md sec 1.3, 2.1, 3, 4)
+$PY -m sesnaimpute.prior.yso_selection $CONFIG
+$PY -m sesnaimpute.prior.h2s $CONFIG                    # H2S: law-blurred field, region lognormal + knot-colour selection (SPEC_PRIORS.md sec 7)
+$PY -m sesnaimpute.prior.gal $CONFIG                    # GAL: Fazio counts law + SWIRE selection tables
+$PY -m sesnaimpute.prior.counts_star_family $CONFIG
+$PY -m sesnaimpute.prior.counts_cloud $CONFIG           # YSO/H2S per-source counts on the cloud law (SPEC_PRIORS.md sec 6.2, 7)
+$PY -m sesnaimpute.prior.levels $CONFIG                 # the six per-region level factors, fitted to catalogued source density per pixel (SPEC_PRIORS.md sec 0.2; IMPLEMENTATION.md sec 6 stage 12a)
+$PY -m sesnaimpute.prior.table $CONFIG                  # the prior table: the join, one row per catalogue source (IMPLEMENTATION.md sec 5)
 
 # --- fit ---
 # bms/ posterior fit of class and subclass probabilities from the prior
