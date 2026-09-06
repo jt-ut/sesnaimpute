@@ -490,40 +490,68 @@ def _bicubic_reconstruct(coarse, coarse_x_centers, coarse_b_centers,
 # log10 B
 # ---------------------------------------------------------------------------
 
+#: The floor on `_edge_tail`'s decay LENGTH, as a fraction of the axis's
+#: own tabulated range: a tail that has not decayed within a quarter of
+#: the box's own extent is not "the mass the fixed grid cannot hold"
+#: (module docstring) any more, it is most of the distribution, so the
+#: magnitude is floored to decay within this fraction instead.
+_EDGE_TAIL_MAX_DECAY_FRACTION = 0.25
+
+#: How many of the outermost cells `_edge_tail` fits its magnitude from
+#: -- more than the bare two, so one noisy adjacent pair cannot set it.
+_EDGE_TAIL_FIT_CELLS = 4
+
+
 def _edge_tail(marginal, grid, cell, side):
-    """One edge's matched-slope exponential tail, `(slope, mass)` --
-    `(0.0, 0.0)` where matching would require an upward slope (never
-    extrapolate upward). `side="hi"` matches the grid's last two bin
-    CENTRES (slope must be negative); `side="lo"` matches the first two
-    (slope must be positive). `marginal` has already summed the OTHER
-    axis, so its value at a centre is a BIN MASS over one cell of width
-    `cell` on THIS axis, not a density -- dividing by `cell` is the same
-    bin-mass-to-density conversion a pointwise `ClassShape.density` read
-    applies, and it is what the mass integral below needs to be a
-    probability rather than a bin count. The declared mass integrates the
-    model from the TABULATED EDGE -- half a cell beyond the outermost
-    centre -- to infinity, not from the centre itself, so it does not
-    double the mass that bin already carries; `ClassShape._eval_node`
-    reads the same centre value and the same slope and reaches the same
-    edge amplitude by the same algebra, so declaration and evaluation are
-    one model, not two."""
+    """One edge's exponential tail, `(slope, mass)`. The SIGN is fixed by
+    `side` alone -- `"hi"` always decays negative (outward, rightward),
+    `"lo"` always positive -- never inferred from the data and never
+    allowed to flip, so a noisy or non-monotonic edge cannot declare a
+    tail that GROWS away from the grid. The MAGNITUDE is the median
+    log-slope over the outermost `_EDGE_TAIL_FIT_CELLS` cells (robust to
+    one noisy adjacent pair), floored so the tail decays within
+    `_EDGE_TAIL_MAX_DECAY_FRACTION` of the axis's own tabulated range --
+    a bound on the tail's own mass, not a fit. Where the edge cell's own
+    value is zero (or negative -- CIC/smoothing noise), there is nothing
+    to anchor a tail to and it is exactly zero. `marginal` has already
+    summed the OTHER axis, so its value at a centre is a BIN MASS over
+    one cell of width `cell` on THIS axis, not a density -- dividing by
+    `cell` is the same bin-mass-to-density conversion a pointwise
+    `ClassShape.density` read applies, and it is what the mass integral
+    below needs to be a probability rather than a bin count. The
+    declared mass integrates the model from the TABULATED EDGE -- half a
+    cell beyond the outermost centre -- to infinity, not from the centre
+    itself, so it does not double the mass that bin already carries;
+    `ClassShape._eval_node` reads the same centre value and the same
+    slope and reaches the same edge amplitude by the same algebra, so
+    declaration and evaluation are one model, not two."""
+    n_fit = min(_EDGE_TAIL_FIT_CELLS, marginal.size)
     if side == "hi":
-        v0, v1, g0, g1 = marginal[-2], marginal[-1], grid[-2], grid[-1]
+        vs, gs = marginal[-n_fit:], grid[-n_fit:]
+        v_edge = vs[-1]
     else:
-        v0, v1, g0, g1 = marginal[0], marginal[1], grid[0], grid[1]
-    if not (v0 > 0.0 and v1 > 0.0 and g1 > g0):
+        vs, gs = marginal[:n_fit], grid[:n_fit]
+        v_edge = vs[0]
+    if not (v_edge > 0.0):
         return 0.0, 0.0
-    slope = float((np.log(v1) - np.log(v0)) / (g1 - g0))
+
+    valid = vs > 0.0
+    if valid.sum() >= 2:
+        raw_slopes = np.diff(np.log(vs[valid])) / np.diff(gs[valid])
+        magnitude = float(np.median(np.abs(raw_slopes)))
+    else:
+        magnitude = 0.0
+    grid_range = float(grid[-1] - grid[0])
+    if grid_range > 0.0:
+        magnitude = max(magnitude, 1.0 / (_EDGE_TAIL_MAX_DECAY_FRACTION * grid_range))
+    slope = -magnitude if side == "hi" else magnitude
+
     half_cell = 0.5 * cell
     if side == "hi":
-        if not slope < 0.0:
-            return 0.0, 0.0
-        density_at_edge = (v1 / cell) * np.exp(slope * half_cell)
+        density_at_edge = (v_edge / cell) * np.exp(slope * half_cell)
         mass = density_at_edge / (-slope)
     else:
-        if not slope > 0.0:
-            return 0.0, 0.0
-        density_at_edge = (v0 / cell) * np.exp(-slope * half_cell)
+        density_at_edge = (v_edge / cell) * np.exp(-slope * half_cell)
         mass = density_at_edge / slope
     return slope, float(mass)
 
