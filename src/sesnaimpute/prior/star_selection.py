@@ -4,12 +4,16 @@ limits; section 2.1's `eps_s(a_i, B_i)` on TRILEGAL's own fluxes;
 section 3 "Selection" on GRAMS colours with the photospheric bound;
 section 4's PAHC weight `w * P(q)`).
 
-`prior.selection.pass_curves` needs, for one class, the class's own
-external population (SPEC_PRIORS.md 0.3, C3) and, per source, the query
-extinctions `a = x * A_s` on the shared scaled-extinction ladder
-`selection.X_LADDER`, `x = a / A_s`, and the hybrid law's per-band
-dimming at each query extinction. No depth grouping and no common-mode
-split: every source's own eight limits and own column enter directly.
+`prior.selection.pass_fractions_binned`/`pass_fractions_binned_multi`
+need, for one class, the class's own external population (SPEC_PRIORS.md
+0.3, C3) and, per source, the query extinctions `a = x * A_s` on the
+shared scaled-extinction ladder `selection.X_LADDER`, `x = a / A_s`, and
+the hybrid law's per-band dimming at each query extinction. No depth
+grouping and no common-mode split: every source's own eight limits and
+own column enter directly. The population's colour distribution is
+conditioned on brightness: each member is counted only within its own
+`log10 B` bin on the class's 24-point grid, not across the whole
+population (SPEC_PRIORS.md 1.3).
 
 Members per class: STAR is the whole field-star population weighted by
 `W_STAR`; PAHC is the same population weighted by `W * P_PAHC` at the
@@ -17,7 +21,13 @@ region's median 8 micron completeness limit; AGB dusty is the evolved
 stars matched to the nearest GRAMS model by chemistry, weighted by the
 O/C split of `W_AGB`; AGB photosphere is the same evolved stars and
 weights with the star's own TRILEGAL flux standing in for the GRAMS
-flux, the lower bound SPEC_PRIORS.md section 3 calls for.
+flux, the lower bound SPEC_PRIORS.md section 3 calls for. STAR and PAHC
+share one field-star population, so they are drawn as ONE fixed-seed
+member subsample (`shared_subsample`, the union of rows either class
+weights nonzero) and run through the compiled kernel together
+(`_FusedPair`, `pass_fractions_binned_multi`): each member's 8-band flux
+is read once and both classes' critical brightness computed from that
+one read.
 
 Writes one product per region, row-aligned with the curated catalogue,
 `bms/star/selection_star_source.hdf5`: root attr `GRANULE="source"`,
@@ -260,6 +270,29 @@ def subsample_population(weight, cap=SUBSAMPLE_CAP, seed=SUBSAMPLE_SEED):
     return idx, n_nonzero
 
 
+def shared_subsample(weight_a, weight_b, cap=SUBSAMPLE_CAP, seed=SUBSAMPLE_SEED):
+    """As `subsample_population`, but over the union of rows with a
+    nonzero weight in EITHER `weight_a` or `weight_b` -- the one member
+    draw two classes share (module docstring, STAR/PAHC fusion)."""
+    weight_a = np.asarray(weight_a, dtype=np.float64)
+    weight_b = np.asarray(weight_b, dtype=np.float64)
+    idx = np.flatnonzero((weight_a > 0.0) | (weight_b > 0.0))
+    n_nonzero = idx.size
+    if n_nonzero > cap:
+        rng = np.random.default_rng(seed)
+        idx = np.sort(rng.choice(idx, size=cap, replace=False))
+    return idx, n_nonzero
+
+
+def bin_of_pop_for(log10_b, b_grid):
+    """`(n,)` int64: the index of `b_grid`'s own nearest point to each
+    member's `log10_b` (`prior.gal`'s own bin-by-own-value pattern) --
+    the cell edges are the grid's own midpoints, so a member always
+    lands in the single bin its value is closest to."""
+    edges = 0.5 * (b_grid[1:] + b_grid[:-1])
+    return np.clip(np.searchsorted(edges, log10_b), 0, b_grid.size - 1).astype(np.int64)
+
+
 def _log10_finite(flux):
     with np.errstate(divide="ignore", invalid="ignore"):
         return np.log10(np.asarray(flux, dtype=np.float64))
@@ -271,25 +304,66 @@ def _log10_finite(flux):
 
 class _ClassPopulation:
     """One class's subsampled population, ready for `selection.
-    pass_curves`: `log10_flux` (n_used, 8), `log10_b` (n_used,), `weight`
-    (n_used,), and the class's own `b_grid` (N_B_GRID,)."""
+    pass_fractions_binned`: `log10_flux` (n_used, 8), `log10_b`
+    (n_used,), `weight` (n_used,), the class's own `b_grid` (N_B_GRID,),
+    and `bin_of_pop` (n_used,) int -- each member's own nearest `b_grid`
+    point, the colour distribution conditioned on brightness
+    (SPEC_PRIORS.md 1.3)."""
 
     def __init__(self, flux, log10_b, weight):
+        log10_b = np.asarray(log10_b, dtype=np.float64)
+        weight = np.asarray(weight, dtype=np.float64)
         b_grid = log10_b_grid_for(log10_b, weight)
         idx, n_nonzero = subsample_population(weight)
         self.log10_flux = np.ascontiguousarray(_log10_finite(flux[idx]))
-        self.log10_b = np.ascontiguousarray(np.asarray(log10_b, dtype=np.float64)[idx])
-        self.weight = np.ascontiguousarray(np.asarray(weight, dtype=np.float64)[idx])
+        self.log10_b = np.ascontiguousarray(log10_b[idx])
+        self.weight = np.ascontiguousarray(weight[idx])
         self.b_grid = np.ascontiguousarray(b_grid)
+        self.bin_of_pop = np.ascontiguousarray(bin_of_pop_for(self.log10_b, self.b_grid))
         self.n_used = idx.size
         self.n_nonzero = n_nonzero
 
 
+class _FusedPair:
+    """STAR and PAHC together, drawn from ONE shared member subsample
+    (module docstring) so `selection.pass_fractions_binned_multi` reads
+    each member's 8-band flux once for both classes: `log10_flux`
+    (n_used, 8) shared; `log10_b_pop`, `weight`, `bin_of_pop` each
+    (n_used, 2) [STAR, PAHC]; `b_grid` (N_B_GRID, 2). `n_used_a`/
+    `n_used_b`, `n_nonzero_a`/`n_nonzero_b` are each class's own
+    nonzero-weight count for the report; `n_used`/`n_nonzero` are the
+    shared draw's own size and its union nonzero count."""
+
+    def __init__(self, flux, log10_b_a, weight_a, log10_b_b, weight_b):
+        log10_b_a = np.asarray(log10_b_a, dtype=np.float64)
+        log10_b_b = np.asarray(log10_b_b, dtype=np.float64)
+        weight_a = np.asarray(weight_a, dtype=np.float64)
+        weight_b = np.asarray(weight_b, dtype=np.float64)
+        b_grid_a = log10_b_grid_for(log10_b_a, weight_a)
+        b_grid_b = log10_b_grid_for(log10_b_b, weight_b)
+        idx, n_nonzero = shared_subsample(weight_a, weight_b)
+
+        self.log10_flux = np.ascontiguousarray(_log10_finite(flux[idx]))
+        self.log10_b_pop = np.ascontiguousarray(
+            np.stack([log10_b_a[idx], log10_b_b[idx]], axis=1))
+        self.weight = np.ascontiguousarray(np.stack([weight_a[idx], weight_b[idx]], axis=1))
+        self.bin_of_pop = np.ascontiguousarray(np.stack(
+            [bin_of_pop_for(log10_b_a[idx], b_grid_a),
+             bin_of_pop_for(log10_b_b[idx], b_grid_b)], axis=1))
+        self.b_grid = np.ascontiguousarray(np.stack([b_grid_a, b_grid_b], axis=1))
+        self.b_grid_a, self.b_grid_b = b_grid_a, b_grid_b
+        self.n_used = idx.size
+        self.n_nonzero = n_nonzero
+        self.n_nonzero_a = int(np.count_nonzero(weight_a > 0.0))
+        self.n_nonzero_b = int(np.count_nonzero(weight_b > 0.0))
+
+
 def _class_populations(config, pop):
-    """`{"star":..., "pahc":..., "agb":..., "agb_photo":...}`, one
-    `_ClassPopulation` per class (module docstring's four member sets)."""
-    star = _ClassPopulation(pop["flux"], pop["log10_b"], pop["w_star_total"])
-    pahc = _ClassPopulation(pop["flux"], pop["log10_b_pahc"], pop["w_pahc_total"])
+    """`{"star_pahc": _FusedPair, "agb": ..., "agb_photo": ...}`
+    (module docstring's four member sets; STAR and PAHC fused onto one
+    shared member draw)."""
+    star_pahc = _FusedPair(pop["flux"], pop["log10_b"], pop["w_star_total"],
+                            pop["log10_b_pahc"], pop["w_pahc_total"])
 
     evolved = pop["is_evolved"]
     flux_o, flux_c = agb_matched_flux(
@@ -310,27 +384,30 @@ def _class_populations(config, pop):
     # the photospheric lower bound (SPEC_PRIORS.md section 3): the same
     # evolved population, weights and brightness axis, the star's own
     # TRILEGAL flux standing in for the GRAMS model -- shares the dusty
-    # table's own `log10 B` grid so the two products sit beside one
-    # another, and (since weight and log10_b are identical) the SAME
-    # subsample, drawn with the same seed.
+    # table's own `log10 B` grid and bin assignment so the two products
+    # sit beside one another, and (since weight and log10_b are
+    # identical) the SAME subsample, drawn with the same seed.
     idx_photo, _ = subsample_population(weight_combined)
     agb_photo = _ClassPopulation.__new__(_ClassPopulation)
     agb_photo.log10_flux = np.ascontiguousarray(_log10_finite(flux_photo[idx_photo]))
     agb_photo.log10_b = agb.log10_b
     agb_photo.weight = agb.weight
     agb_photo.b_grid = agb.b_grid
+    agb_photo.bin_of_pop = agb.bin_of_pop
     agb_photo.n_used = agb.n_used
     agb_photo.n_nonzero = agb.n_nonzero
 
-    return dict(star=star, pahc=pahc, agb=agb, agb_photo=agb_photo)
+    return dict(star_pahc=star_pahc, agb=agb, agb_photo=agb_photo)
 
 
 def _row_bytes(n_x, n_b):
     """The per-source working-array footprint one batch holds: the
-    source's own limits and query-extinction/kappa arrays, plus the four
-    classes' `f4` eps outputs before they are cast to `f2` on write."""
+    source's own limits and query-extinction/kappa arrays, plus the
+    fused STAR+PAHC pass's `(n_x, n_b, 2)` f4 output and the two AGB
+    passes' `(n_x, n_b)` f4 outputs, before each is cast to `f2` on
+    write."""
     return (N_BANDS * 8 + n_x * 8 + n_x * N_BANDS * 8
-            + 4 * n_x * n_b * 4)
+            + (2 * n_x * n_b + 2 * n_x * n_b) * 4)
 
 
 def build_and_write_region(config, region):
@@ -361,8 +438,8 @@ def build_and_write_region(config, region):
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "source"
         f.create_dataset("X_LADDER", data=x_ladder.astype("f8"))
-        f.create_dataset("LOG10_B_GRID_STAR", data=classes["star"].b_grid.astype("f8"))
-        f.create_dataset("LOG10_B_GRID_PAHC", data=classes["pahc"].b_grid.astype("f8"))
+        f.create_dataset("LOG10_B_GRID_STAR", data=classes["star_pahc"].b_grid_a.astype("f8"))
+        f.create_dataset("LOG10_B_GRID_PAHC", data=classes["star_pahc"].b_grid_b.astype("f8"))
         f.create_dataset("LOG10_B_GRID_AGB", data=classes["agb"].b_grid.astype("f8"))
         ds_star = f.create_dataset("EPS_STAR", shape=(n_source, n_x, n_b), dtype="f2")
         ds_pahc = f.create_dataset("EPS_PAHC", shape=(n_source, n_x, n_b), dtype="f2")
@@ -377,20 +454,27 @@ def build_and_write_region(config, region):
             w_dense_b = selection.law_dense_weight(a_query_b)
             kappa_b = np.ascontiguousarray(selection.kappa_hybrid(config, w_dense_b))
 
-            cp = classes["star"]
-            eps = selection.pass_curves(lim_b, a_query_b, kappa_b, cp.log10_flux, cp.log10_b, cp.weight, cp.b_grid)
-            ds_star[start:stop] = eps.astype("f2")
+            fp = classes["star_pahc"]
+            eps2 = selection.pass_fractions_binned_multi(
+                lim_b, a_query_b, kappa_b, fp.log10_flux, fp.log10_b_pop,
+                fp.weight, fp.bin_of_pop, fp.b_grid)
+            ds_star[start:stop] = eps2[..., 0].astype("f2")
+            ds_pahc[start:stop] = eps2[..., 1].astype("f2")
 
-            cp = classes["pahc"]
-            eps = selection.pass_curves(lim_b, a_query_b, kappa_b, cp.log10_flux, cp.log10_b, cp.weight, cp.b_grid)
-            ds_pahc[start:stop] = eps.astype("f2")
-
+            # AGB and AGB-photosphere: unchanged -- marginal (not
+            # brightness-conditioned), unfused. Their population is a
+            # handful of GRAMS-matched stars (tens of members), far too
+            # few for the 24-bin conditioning STAR/PAHC now use: most
+            # bins would hold zero or one member and read as a hard
+            # zero rather than the population's real, smooth density.
             cp = classes["agb"]
-            eps = selection.pass_curves(lim_b, a_query_b, kappa_b, cp.log10_flux, cp.log10_b, cp.weight, cp.b_grid)
+            eps = selection.pass_curves(
+                lim_b, a_query_b, kappa_b, cp.log10_flux, cp.log10_b, cp.weight, cp.b_grid)
             ds_agb[start:stop] = eps.astype("f2")
 
             cp = classes["agb_photo"]
-            eps = selection.pass_curves(lim_b, a_query_b, kappa_b, cp.log10_flux, cp.log10_b, cp.weight, cp.b_grid)
+            eps = selection.pass_curves(
+                lim_b, a_query_b, kappa_b, cp.log10_flux, cp.log10_b, cp.weight, cp.b_grid)
             ds_agb_photo[start:stop] = eps.astype("f2")
 
     return path, classes, n_source
@@ -402,7 +486,12 @@ def build_and_write_region(config, region):
 
 def report(region, classes, n_source, path):
     lines = []
-    for name in ("star", "pahc", "agb", "agb_photo"):
+    fp = classes["star_pahc"]
+    lines.append(
+        "star_selection: %s star+pahc (fused): n_used=%d shared draw, "
+        "star nonzero=%d, pahc nonzero=%d, n_source=%d"
+        % (region, fp.n_used, fp.n_nonzero_a, fp.n_nonzero_b, n_source))
+    for name in ("agb", "agb_photo"):
         cp = classes[name]
         lines.append(
             "star_selection: %s %s: n_used=%d/%d nonzero-weight, n_source=%d"

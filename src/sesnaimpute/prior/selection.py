@@ -1,6 +1,6 @@
 """Whether a source clears SESNA's own catalog cut, the hybrid
-extinction law the test dims by, and the two compiled kernels that turn
-a class's external population into a source's exact pass fraction
+extinction law the test dims by, and the compiled kernels that turn a
+class's external population into a source's exact pass fraction
 (SPEC_PRIORS.md section 1.3, IMPLEMENTATION.md section 4).
 
 SESNA catalogs a source when at least two of its eight bands, dimmed by
@@ -9,11 +9,14 @@ its own dust column, clear the source's detection limit
 fixed law: it blends smoothly, in log column, from a diffuse-ISM curve
 below A_K = 0.5 to a dense-cloud curve above A_K = 1.0
 (`law_dense_weight`, `kappa_hybrid`). A class's selection is evaluated
-exactly, per source, at the source's own eight limits: `pass_curves` and
-`pass_fractions_binned` walk a class's whole external population once
-per source and per query extinction, reducing the two-of-eight test to
-one critical brightness per population member and reading the pass
-fraction off as a weighted cumulative count.
+exactly, per source, at the source's own eight limits, and the
+population's colour distribution is conditioned on brightness (each
+member counted only within its own brightness bin): `pass_fractions_
+binned` (one class) and `pass_fractions_binned_multi` (several classes
+sharing one member subsample) walk a class's whole external population
+once per source and per query extinction, reducing the two-of-eight test
+to one critical brightness per population member and reading the pass
+fraction off as a weight fraction within that member's own bin.
 """
 
 import os
@@ -51,9 +54,17 @@ X_LADDER = np.array([0.0, 0.25, 0.5, 0.75, 1.0, 1.4, 2.0, 2.8])
 #: A class's own brightness grid: this many points.
 N_B_GRID = 24
 
-#: The fixed-seed population subsample cap: the Monte Carlo error on a
-#: pass fraction near 0.5 at this many draws is 0.5%.
-SUBSAMPLE_CAP = 10_000
+#: The fixed-seed population subsample cap. The colour distribution is
+#: now conditioned on brightness (binned by each member's own log10 B on
+#: the class's 24-point grid, `pass_fractions_binned`), so the relevant
+#: draw size is per BIN, not the total: 20,000 members over 24 bins is
+#: ~833/bin if the population were spread evenly (Monte Carlo error on a
+#: pass fraction near 0.5, sqrt(0.25/833) ~ 1.7%), but the population
+#: concentrates toward the middle of its own 0.1-99.9% brightness range,
+#: so the populated central bins hold several thousand members each
+#: (error well under 1%) and only the sparse tail bins run above it,
+#: disclosed per source rather than hidden in an average.
+SUBSAMPLE_CAP = 20_000
 
 
 def _parse_info(text):
@@ -208,7 +219,11 @@ def column_threshold(config, flux, f_lim, law, min_bands=MIN_BANDS):
 @numba.njit(parallel=True)
 def pass_curves(log10_lim, a_query, kappa, log10_flux, log10_b_pop, weight, b_grid):
     """`(n_src, n_x, n_b)` f4: the marginal exact selection curve for
-    every source and query extinction, against the whole population.
+    every source and query extinction, against the whole population,
+    colour taken independent of brightness -- kept for AGB and AGB's
+    photospheric bound, whose population (a handful of GRAMS-matched
+    stars) is too small for the brightness-conditioned binning
+    `pass_fractions_binned` uses for STAR and PAHC.
 
     `log10_lim` (n_src, 8): the source's own 8-band log10 detection
     limits (mJy), `catalog.limits` order. `a_query` (n_src, n_x): the
@@ -265,6 +280,62 @@ def pass_curves(log10_lim, a_query, kappa, log10_flux, log10_b_pop, weight, b_gr
                 cum += bin_w[m]
                 if w_total > 0.0:
                     eps[s, k, m] = cum / w_total
+    return eps
+
+
+@numba.njit(parallel=True)
+def pass_fractions_binned_multi(log10_lim, a_query, kappa, log10_flux, log10_b_pop,
+                                 weight, bin_of_pop, b_grid):
+    """As `pass_fractions_binned`, but for `n_w` classes sharing ONE
+    member subsample at once: `log10_flux` (n_pop, 8) and `log10_b_pop`
+    (n_pop, n_w) -- each class's own brightness column for the SAME
+    members -- `weight` and `bin_of_pop` (n_pop, n_w), `b_grid` (n_b,
+    n_w). Returns `(n_src, n_x, n_b, n_w)` f4. Each population member's
+    8-band flux is read once per `(s, k)` and its per-class critical
+    brightness computed from that one read, rather than re-reading the
+    same member's flux once per class.
+    """
+    n_src, n_x = a_query.shape
+    n_pop, n_bands = log10_flux.shape
+    n_b, n_w = b_grid.shape
+    eps = np.zeros((n_src, n_x, n_b, n_w), dtype=np.float32)
+
+    bin_total = np.zeros((n_b, n_w), dtype=np.float64)
+    for j in range(n_pop):
+        for w in range(n_w):
+            bin_total[bin_of_pop[j, w], w] += weight[j, w]
+
+    for s in numba.prange(n_src):
+        thresh = np.empty((n_x, n_bands), dtype=np.float64)
+        for k in range(n_x):
+            for i in range(n_bands):
+                thresh[k, i] = log10_lim[s, i] + 0.4 * a_query[s, k] * kappa[s, k, i]
+        for k in range(n_x):
+            num = np.zeros((n_b, n_w), dtype=np.float64)
+            for j in range(n_pop):
+                lf_row = log10_flux[j]
+                for w in range(n_w):
+                    m = bin_of_pop[j, w]
+                    lb = log10_b_pop[j, w]
+                    smallest = np.inf
+                    second = np.inf
+                    for i in range(n_bands):
+                        lf = lf_row[i]
+                        if not np.isfinite(lf):
+                            val = np.inf
+                        else:
+                            val = thresh[k, i] - lf + lb
+                        if val < smallest:
+                            second = smallest
+                            smallest = val
+                        elif val < second:
+                            second = val
+                    if second <= b_grid[m, w]:
+                        num[m, w] += weight[j, w]
+            for m in range(n_b):
+                for w in range(n_w):
+                    if bin_total[m, w] > 0.0:
+                        eps[s, k, m, w] = num[m, w] / bin_total[m, w]
     return eps
 
 
