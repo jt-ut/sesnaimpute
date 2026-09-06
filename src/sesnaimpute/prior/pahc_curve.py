@@ -138,6 +138,20 @@ N_Q_BINS = 40
 #: row: "the floor being the flat shelf at 0.1 <= q <= 2").
 FLOOR_Q_LO, FLOOR_Q_HI = 0.1, 2.0
 
+#: `read()`'s own right-hand extrapolation rule, not the stored curve: a
+#: bin below this count is too sparse to hold on its own beyond the
+#: measured range -- the binomial error on a probability near 0.27 at
+#: N = 25 is sqrt(0.27*0.73/25) = 0.09, already comparable to the
+#: plateau's own bin-to-bin scatter, so a bin thinner than this can swing
+#: the held value by tens of points of probability on a handful of stars.
+MIN_PLATEAU_BIN_COUNT = 25
+
+#: The q above which the curve sits on its own flat, high-q shelf (found
+#: by reading the shipped curve, not a stored number): `read()` averages
+#: the well-populated bins at and above this q, count-weighted, to get the
+#: value it holds beyond the last well-measured bin.
+PLATEAU_LOG10_Q_MIN = np.log10(15.0)
+
 #: SESNA's own eligibility test for this measurement (SPEC_PRIORS.md
 #: section 4, "the 1.64 M sources with 3.6, 4.5 and 8.0 micron
 #: photometry"): a measured (`ORIGIN_FNU == 1`), finite, positive flux in
@@ -463,10 +477,17 @@ def write_curve(path, curve, colour_edges, colour_medians, colour_widths,
 
 
 def read(config):
-    """The shipped curve `P(q)` as a callable, linear in log10 q, holding
-    the edge value beyond the measured range (SPEC_PRIORS.md section 4:
-    "Interpolated linearly in log10 q, end bins held beyond the measured
-    range")."""
+    """The shipped curve `P(q)` as a callable, linear in log10 q. Left of
+    the measured range, the first bin's own value is held. Right of it,
+    the value held is not necessarily the last bin's own value: a bin
+    with fewer than `MIN_PLATEAU_BIN_COUNT` stars is too sparse to trust
+    on its own (a couple of stars can put it far from the shelf), so
+    every bin beyond the last bin that clears that count is folded into
+    one plateau value -- the count-weighted mean `P` over the bins at
+    `q` above `PLATEAU_LOG10_Q_MIN`, the curve's own flat high-q shelf --
+    and that plateau is what both those bins and the right-hand fill
+    hold. The stored bins and counts on disk are unchanged; only how
+    this reader extrapolates beyond them."""
     path = config_module.product_path(config, "bms", "pahc", "curve", "survey")
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -475,9 +496,22 @@ def read(config):
     with h5py.File(path, "r") as f:
         edges = f["LOG10_Q_EDGES"][:]
         p_q = f["P_Q"][:]
+        n_per_bin = f["N_PER_BIN"][:]
     centers = 0.5 * (edges[:-1] + edges[1:])
-    return interp1d(centers, p_q, kind="linear", bounds_error=False,
-                     fill_value=(float(p_q[0]), float(p_q[-1])))
+
+    on_plateau = (centers >= PLATEAU_LOG10_Q_MIN) & (n_per_bin > 0)
+    plateau = (float(np.average(p_q[on_plateau], weights=n_per_bin[on_plateau]))
+               if on_plateau.any() else float(p_q[-1]))
+
+    well_measured = np.flatnonzero(n_per_bin >= MIN_PLATEAU_BIN_COUNT)
+    p_q_read = p_q.copy()
+    if well_measured.size:
+        p_q_read[well_measured[-1] + 1:] = plateau
+    else:
+        p_q_read[:] = plateau
+
+    return interp1d(centers, p_q_read, kind="linear", bounds_error=False,
+                     fill_value=(float(p_q_read[0]), plateau))
 
 
 # ---------------------------------------------------------------------------
