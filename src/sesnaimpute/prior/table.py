@@ -34,6 +34,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
+from sesnaimpute.prior import counts_cloud as counts_cloud_module
 
 #: Every dataset the fitter reads off the table, in the order
 #: IMPLEMENTATION.md section 5 lists them.
@@ -216,15 +217,15 @@ def read(config, region):
 
 
 # ---------------------------------------------------------------------------
-# report (rules 10, 11, 13): row counts, the six region totals beside the
-# catalogued source count, the algebraic acceptance check
+# report (rules 10, 11, 13): row counts, the six-class LEFT/RIGHT
+# consistency check, the algebraic acceptance check
 # ---------------------------------------------------------------------------
 
 def _mosaic_area_deg2(config, region):
     """The region's own mosaic area, deg**2, from the I2-band coverage
     fraction summed over its nside-512 pixels (`sky.derived.coverage`) --
-    the area the region-totals check needs to turn a per-source count
-    density into an expected catalogued count."""
+    the area the RIGHT-hand area-integral check below needs to turn a
+    per-pixel count density into a region count."""
     path = config_module.product_path(config, "sky/derived", "spitzer", "coverage",
                                        "hpx512", region=region)
     with h5py.File(path, "r") as f:
@@ -234,15 +235,64 @@ def _mosaic_area_deg2(config, region):
     return float(np.sum(frac) * pix_area_deg2)
 
 
-def _region_totals(config, region, n_sources, out):
-    """Sum of each count over the region's sources times the region's
-    mosaic area per source (`area_deg2 / n_sources`): the six expected
-    catalogued counts per region -- algebraically `mean(N_C) *
-    area_deg2`, a sanity scale against the region's own catalogued source
-    count, not an identity (most catalogued sources are field stars)."""
-    area_deg2 = _mosaic_area_deg2(config, region)
-    area_per_source = area_deg2 / n_sources
-    return {key: float(np.sum(out[key]) * area_per_source) for key in COUNT_COLUMNS}, area_deg2
+def _left_class_probabilities(out):
+    """`LEFT_C = Sum over rows of N_C(row) / N_total(row)`, `N_total(row)`
+    the row's own sum of the six counts (the prior's own class
+    probability at that source, `N_C(s) / Sum_C N_C(s)`, summed over the
+    catalogue): an algebraic identity, `Sum_C LEFT_C == n_sources`, since
+    every row's six probabilities already sum to one -- no area or
+    selection enters this side at all, so it holds exactly regardless of
+    how well any single count model fits the sky."""
+    n_total = np.zeros(out[COUNT_COLUMNS[0]].shape[0], dtype=np.float64)
+    for key in COUNT_COLUMNS:
+        n_total += out[key].astype(np.float64)
+    left = {}
+    for key in COUNT_COLUMNS:
+        left[key] = float(np.sum(np.divide(
+            out[key].astype(np.float64), n_total,
+            out=np.zeros_like(n_total), where=n_total > 0.0)))
+    return left
+
+
+def _right_area_integrals(config, region, out, area_deg2):
+    """`RIGHT_C`, the area-integral side of the same consistency check,
+    two different ways since only YSO has a true area-integral count
+    (`prior.yso.law_area_integral`, SPEC_PRIORS.md section 6.4's own
+    Pokhrel check):
+
+    YSO: `prior.counts_cloud.law_area_check`'s own sum of `law_area_
+    integral` over the region's anchor pixels (the region's own occupied
+    nside-512 pixels, the same set that function and `law_count` both
+    use) times each pixel's solid angle -- "young stars in the whole
+    region before selection" -- times the region-median `EPS_YSO` (the
+    source detection completeness the anchor count still needs before it
+    is a CATALOGUED count).
+
+    STAR, AGB, PAHC, GAL, H2S: no area-integral form exists yet for
+    these five counts (only YSO's does, `prior.yso.law_area_integral`),
+    so this is an APPROXIMATION standing in for one: group the region's
+    own catalogued sources by their nside-512 pixel, average `N_C` over
+    each pixel's own rows, then average that per-pixel mean UNIFORMLY
+    over the region's occupied pixels (rather than over sources, which
+    are a biased-low sample of the densest, most extinguished pixels)
+    and scale by the region's mosaic area -- a pixel-uniform stand-in for
+    the missing area integral, not the integral itself."""
+    right = {}
+    right["N_YSO"] = float(counts_cloud_module.law_area_check(config, region)
+                           * np.median(out["EPS_YSO"]))
+
+    pix = out["HPX_PIX_512"]
+    uniq, inv = np.unique(pix, return_inverse=True)
+    n_per_pix = np.bincount(inv, minlength=uniq.size).astype(np.float64)
+    for key in COUNT_COLUMNS:
+        if key == "N_YSO":
+            continue
+        sum_per_pix = np.bincount(inv, weights=out[key].astype(np.float64),
+                                  minlength=uniq.size)
+        pixel_mean = np.divide(sum_per_pix, n_per_pix,
+                               out=np.zeros_like(sum_per_pix), where=n_per_pix > 0.0)
+        right[key] = float(np.mean(pixel_mean) * area_deg2)
+    return right
 
 
 def _algebraic_check(region, out, adopted, star, cloud):
@@ -257,14 +307,26 @@ def _algebraic_check(region, out, adopted, star, cloud):
     return checks
 
 
-def report(region, n_sources, wall_s, totals, area_deg2, checks):
+def report(region, n_sources, wall_s, left, right, area_deg2, checks):
     lines = [
         "prior.table: %s: %d catalogued sources, wall=%.1fs" % (region, n_sources, wall_s),
         "prior.table: %s: mosaic area=%.4g deg^2" % (region, area_deg2),
     ]
     for key in COUNT_COLUMNS:
-        lines.append("prior.table: %s: expected catalogued %s=%.4g vs %d catalogued sources"
-                     % (region, key, totals[key], n_sources))
+        ratio = left[key] / right[key] if right[key] != 0.0 else float("nan")
+        lines.append(
+            "prior.table: %s: %s LEFT(row class-probability sum)=%.4g "
+            "RIGHT(area integral%s)=%.4g ratio(LEFT/RIGHT)=%.3f"
+            % (region, key, left[key],
+               "" if key == "N_YSO" else ", pixel-uniform stand-in", right[key], ratio))
+    sum_left = sum(left.values())
+    sum_right = sum(right.values())
+    lines.append(
+        "prior.table: %s: Sum_C LEFT=%.6g vs %d catalogued sources (exact identity)"
+        % (region, sum_left, n_sources))
+    lines.append(
+        "prior.table: %s: Sum_C RIGHT=%.4g vs %d catalogued sources (the counts' absolute "
+        "level, not an identity)" % (region, sum_right, n_sources))
     for key, dev in checks.items():
         lines.append("prior.table: %s: algebraic check %s: max abs diff=%.3g (bar 0)"
                      % (region, key, dev))
@@ -295,9 +357,17 @@ def _build_one(config, region):
     out = read(config, region)
     wall_s = time.time() - t0
 
-    totals, area_deg2 = _region_totals(config, region, n_sources, out)
+    area_deg2 = _mosaic_area_deg2(config, region)
+    left = _left_class_probabilities(out)
+    right = _right_area_integrals(config, region, out, area_deg2)
+    sum_left = sum(left.values())
+    if not np.isclose(sum_left, n_sources, rtol=1.0e-4, atol=1.0):
+        raise ValueError(
+            "prior.table: %r's Sum_C LEFT=%.6g does not equal the %d catalogued sources -- "
+            "every row's six counts must sum to a class probability of exactly one"
+            % (region, sum_left, n_sources))
     checks = _algebraic_check(region, out, adopted, star, cloud)
-    for line in report(region, n_sources, wall_s, totals, area_deg2, checks):
+    for line in report(region, n_sources, wall_s, left, right, area_deg2, checks):
         print(line, flush=True)
     print("prior.table: %s -> %s" % (region, out_path), flush=True)
     return out_path
