@@ -965,12 +965,24 @@ class ClassShape(object):
         txlo, txhi = self.tail_x_lo[idx], self.tail_x_hi[idx]
         tblo, tbhi = self.tail_b_lo[idx], self.tail_b_hi[idx]
         out = interior.copy()
-        out = np.where(x_lo, amp_x * np.exp(txlo * (log_x - self.x_centers[0])), out)
-        out = np.where(x_hi & ~x_lo, amp_x * np.exp(txhi * (log_x - self.x_centers[-1])), out)
-        out = np.where(b_lo & ~x_lo & ~x_hi,
-                      amp_b * np.exp(tblo * (logb - self.b_centers[0])), out)
-        out = np.where(b_hi & ~x_lo & ~x_hi,
-                      amp_b * np.exp(tbhi * (logb - self.b_centers[-1])), out)
+        # `np.where` evaluates BOTH branches at every point, not just the
+        # ones it keeps -- so the "hi" formula gets fed the far-below-range
+        # "lo" points (and vice versa for the other three branches). At a
+        # correctly-selected point the exponent is <= 0 (the tail decays
+        # away from its own edge); a wrong-side point run through the other
+        # branch's exponent gets the sign flipped and can be enormous, and
+        # `exp` of that overflows even though the result is about to be
+        # discarded. Clipping each exponent at 0 leaves every real,
+        # in-mask evaluation untouched and makes every discarded one
+        # `exp(<=0) <= 1`, finite and harmless.
+        out = np.where(x_lo, amp_x * np.exp(np.minimum(
+            txlo * (log_x - self.x_centers[0]), 0.0)), out)
+        out = np.where(x_hi & ~x_lo, amp_x * np.exp(np.minimum(
+            txhi * (log_x - self.x_centers[-1]), 0.0)), out)
+        out = np.where(b_lo & ~x_lo & ~x_hi, amp_b * np.exp(np.minimum(
+            tblo * (logb - self.b_centers[0]), 0.0)), out)
+        out = np.where(b_hi & ~x_lo & ~x_hi, amp_b * np.exp(np.minimum(
+            tbhi * (logb - self.b_centers[-1]), 0.0)), out)
         return out
 
     def _component_density(self, log_x_raw, log10_b, tile_ids, mu_c, sigma_c, f_lim8):
