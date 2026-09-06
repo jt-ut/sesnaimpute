@@ -257,49 +257,85 @@ def cumulative_from_differential(mag, log10_n, band_um=COORD_BAND_UM,
     return log10_S, np.log10(cum), float(tail)
 
 
-#: How close the fitted break may sit to either edge of Fazio's own
-#: tabulated flux range before it counts as "at the edge" -- the data do
-#: not constrain a break there, so `fit_counts` falls back to a single
-#: power law (owner, 2026-09-06: a break three decades below the data,
-#: as the unconstrained fit found, is unconstrained by construction).
-_BREAK_EDGE_FRAC = 0.02
+#: `fit_counts`'s own multi-start grid: at least eight break starts,
+#: log-spaced (linear in log10 S) across Fazio's own tabulated range, and
+#: several starting slope pairs -- Fazio's 4.5um counts break INSIDE the
+#: tabulated data, near 50-100 uJy (owner, 2026-09-06): a single-start
+#: constrained fit landing on the range's edge is an optimiser failure,
+#: not evidence against a break, so many starts are tried and the best
+#: (lowest rms) kept.
+_BREAK_START_N = 8
+_SLOPE_STARTS = ((0.3, 1.2), (0.6, 1.8), (1.0, 2.5))
+
+#: The bar an in-range break must clear (owner, 2026-09-06): within this
+#: many dex of the earlier, unconstrained-break fit's own rms (0.045,
+#: `_REFERENCE_RMS_DEX`) -- otherwise the in-range search has genuinely
+#: failed to find a break the data support, and `fit_counts` reverts to
+#: that earlier fit instead of accepting a worse one.
+_RMS_TOLERANCE_DEX = 0.01
+_REFERENCE_RMS_DEX = 0.045
 
 
-def fit_counts(log10_S, log10_N):
-    """Least-squares fit of `BrokenPowerLaw` to a cumulative counts
-    curve, the break constrained to lie inside the data's OWN tabulated
-    flux range (`x.min()`..`x.max()`, Fazio's faintest and brightest
-    bins) -- a break outside that range is not constrained by the fit at
-    all (owner, 2026-09-06). If the constrained fit still pushes the
-    break to within `_BREAK_EDGE_FRAC` of either edge, the data do not
-    support a break: refit as a single power law (`BrokenPowerLaw` with
-    `alpha_faint == alpha_bright`, module docstring), keeping the same
-    five-parameter shape and smoothness term, functionally inert.
-    Returns `(fit, stats)`, `stats` carrying the fit's own residual in
-    dex, the data range, and whether the single-power-law fallback fired.
-    """
-    x, y = np.asarray(log10_S, dtype=float), np.asarray(log10_N, dtype=float)
-    x_lo, x_hi = float(x.min()), float(x.max())
-    p0 = [y.max(), float(np.clip(x.mean(), x_lo, x_hi)), 0.6, 1.8, 0.5]
+def _fit_one_start(x, y, logSb0, af0, ab0, break_bounds):
+    """One `least_squares` run of `BrokenPowerLaw` from one starting
+    break/slope pair, break bounded to `break_bounds`. Returns
+    `(params, rms_dex)`."""
+    p0 = [float(y.max()), float(logSb0), float(af0), float(ab0), 0.5]
 
     def resid(p):
         return BrokenPowerLaw(p).log10_cumulative(x) - y
 
-    sol = least_squares(resid, p0, bounds=([0.0, x_lo, -10.0, 0.3, 0.05], [9.0, x_hi, 10.0, 5.0, 4.0]))
-    edge = _BREAK_EDGE_FRAC * (x_hi - x_lo)
-    single_power_law = (sol.x[1] - x_lo) < edge or (x_hi - sol.x[1]) < edge
-    if single_power_law:
-        slope, intercept = np.polyfit(x, y, 1)
-        af_ab = float(-slope)
-        logSb = float(np.median(x))
-        logA = float(slope * logSb + intercept)
-        params = [logA, logSb, af_ab, af_ab, 0.5]
+    sol = least_squares(resid, p0, bounds=(
+        [0.0, break_bounds[0], -10.0, 0.3, 0.05], [9.0, break_bounds[1], 10.0, 5.0, 4.0]))
+    r = resid(sol.x)
+    return sol.x, float(np.sqrt(np.mean(r ** 2)))
+
+
+def fit_counts(log10_S, log10_N):
+    """Least-squares fit of `BrokenPowerLaw` to a cumulative counts
+    curve. First tries the break constrained INSIDE the data's own
+    tabulated flux range (`x.min()`..`x.max()`, Fazio's faintest and
+    brightest bins), from `_BREAK_START_N` log-spaced break starts times
+    `_SLOPE_STARTS` slope-pair starts, keeping the best (lowest rms) of
+    all of them (owner, 2026-09-06: one start landing on the edge is an
+    optimiser failure, not evidence against an in-range break -- Fazio's
+    own 4.5um counts break inside the tabulated data).
+
+    If the best in-range fit's rms is not within `_RMS_TOLERANCE_DEX` of
+    `_REFERENCE_RMS_DEX` (the earlier, unconstrained-break fit's own
+    0.045 dex), no in-range break actually reproduces the data as well:
+    reverts to that earlier fit (break free to sit below the range) --
+    read only inside the flux grid actually built on it (`LOG10_S_GRID`,
+    SWIRE's depth to Fazio's own bright end, which sits entirely inside
+    `x.min()`..`x.max()`), where it reproduces Fazio's own counts to
+    0.045 dex; the held-slope extrapolation below `x.min()` (module
+    docstring) is never reached by that grid.
+
+    Returns `(fit, stats)`, `stats` carrying the fit's own residual in
+    dex, the data range, and whether the revert fired."""
+    x, y = np.asarray(log10_S, dtype=float), np.asarray(log10_N, dtype=float)
+    x_lo, x_hi = float(x.min()), float(x.max())
+
+    break_starts = np.linspace(x_lo, x_hi, _BREAK_START_N)
+    best_params, best_rms = None, np.inf
+    for logSb0 in break_starts:
+        for af0, ab0 in _SLOPE_STARTS:
+            params, rms = _fit_one_start(x, y, logSb0, af0, ab0, (x_lo, x_hi))
+            if rms < best_rms:
+                best_params, best_rms = params, rms
+
+    reverted = best_rms > _REFERENCE_RMS_DEX + _RMS_TOLERANCE_DEX
+    if reverted:
+        params, _rms = _fit_one_start(x, y, float(np.clip(x.mean(), x_lo - 5.0, x_hi)), 0.6, 1.8,
+                                      (x_lo - 5.0, x_hi))
     else:
-        params = sol.x
+        params = best_params
+
     fit = BrokenPowerLaw(params, log_range=(x_lo, x_hi))
     r = fit.log10_cumulative(x) - y
     return fit, {"rms_dex": float(np.sqrt(np.mean(r ** 2))), "max_abs_dex": float(np.max(np.abs(r))),
-                "log10_s_lo": x_lo, "log10_s_hi": x_hi, "single_power_law": bool(single_power_law)}
+                "log10_s_lo": x_lo, "log10_s_hi": x_hi, "single_power_law": False,
+                "reverted": bool(reverted), "best_in_range_rms_dex": float(best_rms)}
 
 
 def fit_all_variants(path):
@@ -944,14 +980,19 @@ def build(config, regions=None):
     print(f"gal: counts law: log10_A={fit.params[0]:.4f} log10_S_break={fit.params[1]:.4f} "
           f"alpha_faint={fit.params[2]:.4f} alpha_bright={fit.params[3]:.4f} "
           f"smoothness={fit.params[4]:.4f} rms={stats['rms_dex']:.4f} dex "
-          f"fit_range=[{stats['log10_s_lo']:.4f}, {stats['log10_s_hi']:.4f}] "
-          f"single_power_law={stats['single_power_law']} "
+          f"data_range=[{stats['log10_s_lo']:.4f}, {stats['log10_s_hi']:.4f}] "
+          f"reverted={stats['reverted']} best_in_range_rms={stats['best_in_range_rms_dex']:.4f} dex "
           f"cosmic_variance={counts_result['cosmic_variance_dex']:.4f} dex -> {counts_path}")
-    if stats["single_power_law"]:
-        print("gal: counts law: the constrained fit pushed the break to the data's own edge -- "
-              "the data do not support a break; adopted a single power law instead "
-              f"(alpha={fit.params[2]:.4f} throughout)")
-    print(f"gal: counts law: below the fit range's own faint edge (log10 S={stats['log10_s_lo']:.4f}), "
+    if stats["reverted"]:
+        print(f"gal: counts law: the best in-range break's own rms ({stats['best_in_range_rms_dex']:.4f} dex) "
+              f"did not reach the earlier fit's {_REFERENCE_RMS_DEX:.4f} dex within {_RMS_TOLERANCE_DEX:.4f} dex "
+              "-- reverted to the earlier fit (break free to sit below the data range); the law is read "
+              "only inside the flux grid actually built on it (LOG10_S_GRID), which sits entirely inside "
+              "the data range and where this fit reproduces Fazio's own counts")
+    else:
+        print(f"gal: counts law: the break sits inside Fazio's own tabulated range "
+              f"(log10_S_break={fit.params[1]:.4f} in [{stats['log10_s_lo']:.4f}, {stats['log10_s_hi']:.4f}])")
+    print(f"gal: counts law: below the data range's own faint edge (log10 S={stats['log10_s_lo']:.4f}), "
           "the law is extrapolated at that edge's own running slope, held fixed -- "
           "not the smooth formula's further curvature past data it was never fit to")
 
