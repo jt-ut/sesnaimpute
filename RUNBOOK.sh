@@ -23,6 +23,7 @@ while [ $# -gt 0 ]; do case "$1" in
   *) echo "RUNBOOK.sh: unknown argument $1" >&2; exit 2 ;;
 esac; done
 PYBIN=/usr/local/bin/python3.9
+export PYTHONPATH="$(cd "$(dirname "$0")" && pwd)/src"
 CONFIG=/Users/jtaylor/Dropbox/Research/SESNA_Complete/config/root.cfg
 STARTED=0; [ -z "$FROM" ] && STARTED=1
 # Every stage runs through capped.sh (CODING_RULES 10a) with the region list.
