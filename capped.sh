@@ -3,6 +3,9 @@
 # resident-memory ceiling (CODING_RULES.md 10a: 8 GB). Polls every second;
 # reports the peak. Usage: ./capped.sh <command...>
 CEILING_KB=${CAPPED_CEILING_KB:-8388608}
+# joblib's loky workers re-parent to launchd when their parent dies and keep
+# their memory; any such worker is an orphan and is removed.
+orphans() { for p in $(ps -eo pid,ppid,command | awk '$2==1 && /joblib.externals.loky/ {print $1}'); do kill -9 "$p" 2>/dev/null; done; }
 "$@" &
 ROOT=$!
 peak=0
@@ -19,10 +22,11 @@ while kill -0 "$ROOT" 2>/dev/null; do
   if [ "$total" -gt "$CEILING_KB" ]; then
     echo "capped: process tree at $((total/1024)) MB resident, above the $((CEILING_KB/1024)) MB ceiling -- killed" >&2
     pkill -9 -P "$ROOT" 2>/dev/null; kill -9 "$ROOT" 2>/dev/null
-    exit 137
+    orphans; exit 137
   fi
   sleep 1
 done
 wait "$ROOT"; rc=$?
+orphans
 echo "capped: peak resident $((peak/1024)) MB, exit $rc" >&2
 exit $rc
