@@ -1,12 +1,12 @@
 """The shared column axis every class tabulates on (`IMPLEMENTATION.md`
-section 2): nodes spaced uniformly in the cumulative column-kernel width
-
-    tau(A) = Integral_floor^A dA' / sigma_a(A')
-
-from a floor (the 1st percentile of `A_COL_SIG_K` survey-wide) to the cap
-`AK_CAP`, with spacing `sqrt(8 * EPS_GRID)` -- the grid's fidelity bar of
-`EPS_GRID` relative L1 in misplaced mass. `sigma_a(A)` is the composed
-column kernel's own resolution width, `sqrt(kernel.Kernel.second_moment(A))`.
+section 2): a fixed ladder, evenly spaced in log10 column, from a floor
+(`AK_FLOOR`) to a cap (`AK_CAP`, a tabulation extent, not the kernel's
+support -- mass beyond it is carried analytically), at `DEX_STEP` dex per
+step. The ladder is fixed by these three numbers alone -- it does not read
+any region's data, does not consult the column kernel, and is not searched
+for: the narrowest column-kernel width in use (0.05 dex, wider still once
+the measurement term is added) is broader than the step, so linear
+interpolation between adjacent nodes is faithful everywhere on the ladder.
 A source's `A_s` brackets two nodes; its shape is the linear blend of the
 two node tabulations, at `(NODE_LO, NODE_W)` from `bracket`.
 """
@@ -17,76 +17,29 @@ import h5py
 import numpy as np
 
 from sesnaimpute import config as config_module
-from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
-from sesnaimpute.prior import kernel as kernel_module
 
-#: The grid's fidelity bar: relative L1 mass misplaced by the linear blend
-#: between adjacent nodes (IMPLEMENTATION.md section 2).
-EPS_GRID = 0.002
+#: The ladder's floor, in A_K magnitudes -- fixed, not measured.
+AK_FLOOR = 0.037
 
 #: The tabulation extent, not the kernel's support -- mass beyond it is
-#: carried analytically (IMPLEMENTATION.md section 2).
-AK_CAP = 14.232012269510967
+#: carried analytically (IMPLEMENTATION.md section 2). Fixed, not measured.
+AK_CAP = 14.23
 
-#: Probe count for the tau(A) quadrature. sigma_a(A) is smooth over the
-#: grid's range, so this resolves the integral far below EPS_GRID's own
-#: slack; fixed so the grid is reproducible.
-N_PROBES = 512
-
-
-def _ak_floor(config, regions):
-    """The 1st percentile of `A_COL_SIG_K` survey-wide -- clamping a
-    source to it moves that source by less than the smallest per-source
-    measurement uncertainty anywhere in the survey."""
-    parts = []
-    for region in regions:
-        path = config_module.product_path(config, "sky/derived", "adopted",
-                                          "column", "source", region=region.name)
-        if not os.path.exists(path):
-            raise FileNotFoundError(
-                "prior.column_grid: adopted column missing for region %r at %s "
-                "-- run the 'sky.derived.column' RUNBOOK line first"
-                % (region.name, path))
-        with h5py.File(path, "r") as f:
-            sig = np.asarray(f["A_COL_SIG_K"][:], dtype=np.float64)
-        finite = sig[np.isfinite(sig)]
-        if finite.size:
-            parts.append(finite)
-    if not parts:
-        raise ValueError(
-            "prior.column_grid: no finite A_COL_SIG_K found across any "
-            "region's adopted column product")
-    return float(np.percentile(np.concatenate(parts), 1.0))
+#: The ladder's spacing in log10(A_K), dex. Narrower than the narrowest
+#: column-kernel width in use (0.05 dex structural, wider once the
+#: measurement term is added), so linear interpolation between adjacent
+#: nodes is faithful everywhere.
+DEX_STEP = 0.02
 
 
-def derive(config, regions=None, eps=EPS_GRID, n_probes=N_PROBES):
-    """`(nodes, probes, sigma)`: nodes uniform in `tau(A)`, from the
-    measured floor to `AK_CAP`, spacing `sqrt(8 * eps)`, endpoints pinned
-    exactly. `sigma` is the composed kernel's resolution width at every
-    probe, one vectorised call."""
-    regions = list(regions_module.REGIONS) if regions is None else list(regions)
-    floor = _ak_floor(config, regions)
-
-    probes = np.geomspace(floor, AK_CAP, n_probes)
-    kern = kernel_module.load(config)
-    sigma = np.sqrt(kern.second_moment(probes))
-    if not np.all(np.isfinite(sigma)) or np.any(sigma <= 0.0):
-        raise ValueError("prior.column_grid: sigma_a is not positive-finite "
-                          "over [%.6g, %.6g]" % (floor, AK_CAP))
-
-    inv = 1.0 / sigma
-    dtau = 0.5 * (inv[1:] + inv[:-1]) * np.diff(probes)
-    tau = np.concatenate([[0.0], np.cumsum(dtau)])
-    tau_total = float(tau[-1])
-    delta_tau = float(np.sqrt(8.0 * eps))
-    n_nodes = int(np.ceil(tau_total / delta_tau))
-    levels = np.linspace(0.0, tau_total, n_nodes + 1)
-    nodes = np.interp(levels, tau, probes)
-    nodes[0], nodes[-1] = floor, AK_CAP
-    if not np.all(np.diff(nodes) > 0.0):
-        raise ValueError("prior.column_grid: node grid is not strictly increasing")
-    return nodes, probes, sigma
+def _fixed_nodes():
+    """The fixed ladder itself: evenly spaced in log10(A_K) from
+    `AK_FLOOR` to `AK_CAP` at `DEX_STEP` dex, endpoints pinned exactly
+    (the step count is rounded to the nearest integer, so the realised
+    spacing is `DEX_STEP` to within rounding, never wider)."""
+    n_steps = int(round(np.log10(AK_CAP / AK_FLOOR) / DEX_STEP))
+    return np.logspace(np.log10(AK_FLOOR), np.log10(AK_CAP), n_steps + 1)
 
 
 def bracket(a, nodes):
@@ -103,36 +56,28 @@ def bracket(a, nodes):
 
 
 def nodes(config):
-    """The stored node array -- the one reader every class build uses."""
-    path = config_module.product_path(config, "bms", "sesna", "column-grid", "survey")
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "prior.column_grid: no column-grid product at %s -- run the "
-            "'prior.column_grid' RUNBOOK line first" % path)
-    with h5py.File(path, "r") as f:
-        return f["A_NODES"][:]
+    """The fixed node ladder -- the one reader every class build uses.
+    Computed directly (`AK_FLOOR`, `AK_CAP`, `DEX_STEP` are all fixed
+    constants); no file read, no region loop, no dependence on the
+    column kernel."""
+    return _fixed_nodes()
 
 
 def build(config, regions=None):
-    """Derives the node grid over the requested regions (`regions=None`
-    read as all thirty; the product is a survey total regardless) and
-    writes `bms/sesna/column-grid_sesna_survey.hdf5`."""
-    regions = list(regions_module.REGIONS) if regions is None else \
-        [r for r in regions_module.REGIONS if r.name in set(regions)]
-    node_arr, probes, sigma = derive(config, regions=regions)
+    """Writes the fixed ladder to `bms/sesna/column-grid_sesna_survey.hdf5`
+    for readers that open the file directly, `A_NODES` only. `regions` is
+    accepted for RUNBOOK compatibility and ignored -- the ladder is fixed
+    and does not vary by region."""
+    node_arr = _fixed_nodes()
 
     out_path = config_module.product_path(config, "bms", "sesna", "column-grid", "survey")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "survey"
         f.create_dataset("A_NODES", data=node_arr.astype(np.float64))
-        f.create_dataset("EPS_GRID", data=np.float64(EPS_GRID))
-        f.create_dataset("AK_CAP", data=np.float64(AK_CAP))
-        f.create_dataset("A_PROBE", data=probes.astype(np.float64))
-        f.create_dataset("SIGMA_A_PROBE", data=sigma.astype(np.float64))
 
-    print("column_grid: floor=%.6f cap=%.6f eps=%g -> %d nodes -> %s"
-          % (node_arr[0], node_arr[-1], EPS_GRID, node_arr.size, out_path),
+    print("column_grid: floor=%.6f cap=%.6f step=%g dex -> %d nodes -> %s"
+          % (node_arr[0], node_arr[-1], DEX_STEP, node_arr.size, out_path),
           flush=True)
 
 
