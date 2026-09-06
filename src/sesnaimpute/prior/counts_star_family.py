@@ -399,7 +399,16 @@ def family_e_eps(config, region, cls, cond):
     the region's own sources round to (brief item 2)."""
     shape = star_shapes.read(config, region, cls)
     model = read_class_model(config, region, cls)
-    group_idx = model.knots.assign_group(cond["delta5"])
+    # `cond["s"]`/`cond["delta5"]` (`source_conditioning`) are built
+    # against the SHARED `prior.depth_groups` product's reference limit
+    # vector; this class's own selection table is independently fit
+    # (`prior.star_selection`'s own K and its own `REF_LOG10_FLIM`,
+    # `read_class_model`), so `model.knots.assign_group` needs THIS
+    # class's own reference, not the shared one, exactly the mismatch
+    # `prior.callable`'s own docstring diagnoses for why it recomputes
+    # Delta per class rather than reusing the table's shared `GROUP`.
+    s, delta5 = selection.split_common_mode(cond["log10_flim8"], model.knots.ref_log10_flim)
+    group_idx = model.knots.assign_group(delta5)
 
     log_shape_nodes = np.log(shape.shape_nodes)
     node_lo_shape, t_node = column_grid.bracket(np.log(cond["a_col"]), log_shape_nodes)
@@ -407,22 +416,22 @@ def family_e_eps(config, region, cls, cond):
 
     if cls != "pahc":
         val_lo, n_lo, n_s = grouped_eval(model, shape, cond["tile_id"], node_lo_shape,
-                                         cond["s"], group_idx)
+                                         s, group_idx)
         val_hi, n_hi, _ = grouped_eval(model, shape, cond["tile_id"], node_hi_shape,
-                                       cond["s"], group_idx)
+                                       s, group_idx)
         e_eps = (1.0 - t_node) * val_lo + t_node * val_hi
         return e_eps, n_lo + n_hi, n_s, shape, model
 
     limit_lo, t_limit = column_grid.bracket(np.log10(cond["f_lim8"]), shape.limit_log)
     limit_hi = np.minimum(limit_lo + 1, shape.limit_log.size - 1)
     v_lolo, n1, n_s = grouped_eval(model, shape, cond["tile_id"], node_lo_shape,
-                                   cond["s"], group_idx, limit_idx=limit_lo)
+                                   s, group_idx, limit_idx=limit_lo)
     v_lohi, n2, _ = grouped_eval(model, shape, cond["tile_id"], node_lo_shape,
-                                 cond["s"], group_idx, limit_idx=limit_hi)
+                                 s, group_idx, limit_idx=limit_hi)
     v_hilo, n3, _ = grouped_eval(model, shape, cond["tile_id"], node_hi_shape,
-                                 cond["s"], group_idx, limit_idx=limit_lo)
+                                 s, group_idx, limit_idx=limit_lo)
     v_hihi, n4, _ = grouped_eval(model, shape, cond["tile_id"], node_hi_shape,
-                                 cond["s"], group_idx, limit_idx=limit_hi)
+                                 s, group_idx, limit_idx=limit_hi)
     val_lo = (1.0 - t_limit) * v_lolo + t_limit * v_lohi
     val_hi = (1.0 - t_limit) * v_hilo + t_limit * v_hihi
     e_eps = (1.0 - t_node) * val_lo + t_node * val_hi

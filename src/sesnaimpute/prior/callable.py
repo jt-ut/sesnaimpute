@@ -706,17 +706,59 @@ class SourcePrior(object):
 
         tile_id = self.table["TILE_ID"][rows]
         a_col = self.table["A_COL_K"][rows]
-        f_lim8 = (self.table["F_LIM_50_MJY"][rows, self._idx_i4] if cls == "pahc" else None)
-        raw = shape.density(a_safe, b, tile_id, a_col, f_lim8=f_lim8)
-        p_ab = raw / (a_safe * LN10 * fm["dx"] * fm["db"])
-        p_ab = np.where(valid, p_ab, 0.0)
+        x_query = np.where(a_safe > 0.0, a_safe / a_col, 0.0)
+        log_x = np.log10(np.where(x_query > 0.0, x_query, 1.0e-300))
+        in_box = ((log_x >= shape.x_edges[0]) & (log_x <= shape.x_edges[-1])
+                 & (b >= shape.b_edges[0]) & (b <= shape.b_edges[-1]))
 
-        node_lo, node_w = column_grid.bracket(a_safe, model.a_nodes)
-        eps = model.evaluate(node_lo=node_lo, node_w=node_w, log10_b=b,
-                             s=fm["s"][rows], delta_5=fm["delta5"][rows])
+        # `Z_C` (`counts_star_family.eps_grid_all_groups`/`grouped_eval`)
+        # sums only the shape's own tabulated interior grid (its own
+        # module docstring drops the declared analytic tail as "within
+        # the tolerance the brief already states" -- measured false for
+        # AGB/PAHC, tail mass up to order the interior mass itself) and,
+        # per bracketing shape node, maps that node's OWN fixed `(log10
+        # x, log10 B)` tabulation grid to physical `a` through THAT
+        # node's own column value `a_node . x` -- never through the
+        # source's adopted `A_s` -- before reading the selection
+        # (`counts_star_family._node_a_bracket`). This numerator must
+        # match both: a query outside the tabulated box reads as zero
+        # density, and each bracketing node's own selection reads at
+        # `a = a_node . (a_query / A_s)`, the same `x` the density read
+        # already uses, so `Integral p_ab.eps da db == Z_C` holds on the
+        # identical support and mapping both sides share
+        # (`readcost.py`, `10_POSTERIOR.md` section 3).
+        node_lo_shape, t_node = column_grid.bracket(np.log(a_col), np.log(shape.shape_nodes))
+        node_hi_shape = np.minimum(node_lo_shape + 1, shape.shape_nodes.size - 1)
+
+        def _density(node_idx, limit_idx):
+            mass = shape._eval_node(tile_id, node_idx, log_x, b, limit_idx)
+            mass = np.where(in_box, mass, 0.0)
+            return mass / (a_safe * LN10 * fm["dx"] * fm["db"])
+
+        def _eps_at_node(node_idx):
+            a_eff = shape.shape_nodes[node_idx] * x_query
+            node_lo_e, node_w_e = column_grid.bracket(a_eff, model.a_nodes)
+            return model.evaluate(node_lo=node_lo_e, node_w=node_w_e, log10_b=b,
+                                  s=fm["s"][rows], delta_5=fm["delta5"][rows])
+
+        if cls != "pahc":
+            p_lo = _density(node_lo_shape, None)
+            p_hi = _density(node_hi_shape, None)
+        else:
+            f_lim8 = self.table["F_LIM_50_MJY"][rows, self._idx_i4]
+            limit_lo, t_limit = column_grid.bracket(np.log10(f_lim8), shape.limit_log)
+            limit_hi = np.minimum(limit_lo + 1, shape.limit_log.size - 1)
+            p_lolo, p_lohi = _density(node_lo_shape, limit_lo), _density(node_lo_shape, limit_hi)
+            p_hilo, p_hihi = _density(node_hi_shape, limit_lo), _density(node_hi_shape, limit_hi)
+            p_lo = (1.0 - t_limit) * p_lolo + t_limit * p_lohi
+            p_hi = (1.0 - t_limit) * p_hilo + t_limit * p_hihi
+
+        eps_lo = _eps_at_node(node_lo_shape)
+        eps_hi = _eps_at_node(node_hi_shape)
+        numerator = (1.0 - t_node) * (p_lo * eps_lo) + t_node * (p_hi * eps_hi)
+        numerator = np.where(valid, numerator, 0.0)
 
         z = self.table["Z_%s" % cls.upper()][rows]
-        numerator = p_ab * eps
         with np.errstate(divide="ignore", invalid="ignore"):
             ln_val = np.log(numerator) - np.log(z)
         return np.where((numerator > 0.0) & (z > 0.0) & valid, ln_val, -np.inf)
