@@ -82,11 +82,16 @@ from sesnaimpute.prior.kernel import Kernel
 
 CLASSES = ("star", "agb", "pahc")
 
-#: The build grid, fixed per axis, per region and class.
-N_CELLS = 64
+#: The build grid, fixed per axis, per region and class: bicubic
+#: reconstruction error scales as the fourth power of the cell size, so
+#: halving the cell (64 -> 128) takes the ~6% reconstruction error
+#: measured at the widths sources actually use to well under 1%.
+N_CELLS = 128
 
-#: The finer grid the bicubic-reconstruction residual is measured against.
-N_CELLS_CHECK = 128
+#: The finer grid the bicubic-reconstruction residual is measured
+#: against -- kept twice `N_CELLS` so the check still reconstructs a
+#: strictly finer grid from the build grid.
+N_CELLS_CHECK = 256
 
 #: The fixed ladder of kernel WIDTHS (dex) shape nodes are built at,
 #: replacing a column ladder: the sub-beam width alone runs 0.05-0.26 dex
@@ -674,46 +679,71 @@ def _build_width_density(pop, cls, tile_idx, h_x, h_b, w_k, x_edges, b_edges, pa
     return mx.dot(raw)
 
 
-def _bicubic_residual_report(pop, cls, tile0_bw, w_max, x_edges, b_edges):
-    """Tile 0's density at `w_max` (the ladder's largest width), built
-    directly on both the region's own `N_CELLS` grid and an `N_CELLS_
-    CHECK` grid spanning the same range; the relative L1 error of a
-    bicubic reconstruction of the fine grid from the coarse one
+def _bicubic_residual_report(pop, cls, tile0_bw, widths, x_edges, b_edges):
+    """Tile 0's density at each of `widths`, built directly on both the
+    region's own `N_CELLS` grid and an `N_CELLS_CHECK` grid spanning the
+    same range; the relative L1 error of a bicubic reconstruction of the
+    fine grid from the coarse one, one number per width
     (`IMPLEMENTATION.md` section 3, report only, never searched)."""
-    coarse = _build_width_density(pop, cls, 0, tile0_bw["h_x"], tile0_bw["h_b"], w_max,
-                                  x_edges, b_edges)
     x_edges_fine = np.linspace(x_edges[0], x_edges[-1], N_CELLS_CHECK + 1)
     b_edges_fine = np.linspace(b_edges[0], b_edges[-1], N_CELLS_CHECK + 1)
-    fine = _build_width_density(pop, cls, 0, tile0_bw["h_x"], tile0_bw["h_b"], w_max,
-                                x_edges_fine, b_edges_fine)
     x_c = 0.5 * (x_edges[:-1] + x_edges[1:])
     b_c = 0.5 * (b_edges[:-1] + b_edges[1:])
     x_c_fine = 0.5 * (x_edges_fine[:-1] + x_edges_fine[1:])
     b_c_fine = 0.5 * (b_edges_fine[:-1] + b_edges_fine[1:])
     group = N_CELLS_CHECK // N_CELLS
-    recon = _bicubic_reconstruct(coarse / (group * group), x_c, b_c, x_c_fine, b_c_fine)
-    return _rel_l1(fine, recon)
+    out = []
+    for w in widths:
+        coarse = _build_width_density(pop, cls, 0, tile0_bw["h_x"], tile0_bw["h_b"], w,
+                                      x_edges, b_edges)
+        fine = _build_width_density(pop, cls, 0, tile0_bw["h_x"], tile0_bw["h_b"], w,
+                                    x_edges_fine, b_edges_fine)
+        recon = _bicubic_reconstruct(coarse / (group * group), x_c, b_c, x_c_fine, b_c_fine)
+        out.append(_rel_l1(fine, recon))
+    return out
 
 
-def _width_interp_residual_report(pop, cls, tile0_bw, width_ladder, x_edges, b_edges, density0):
-    """The worst, over adjacent width-ladder pairs, relative L1 between
-    the width blend (`ClassShape.density`'s own rule) at the pair's
-    geometric midpoint width and a direct build at that width, tile 0
+def _width_interp_residual_report(pop, cls, tile0_bw, width_ladder, x_edges, b_edges, density0,
+                                  widths):
+    """The relative L1 between the width blend (`ClassShape.density`'s
+    own bracket-and-blend rule) and a direct build, at each of `widths`
+    (bracketed in the ladder the same way a read would), tile 0
     (`IMPLEMENTATION.md` section 3, report only, never searched)."""
     x_c = 0.5 * (x_edges[:-1] + x_edges[1:])
     b_c = 0.5 * (b_edges[:-1] + b_edges[1:])
-    worst = 0.0
-    for i in range(width_ladder.size - 1):
-        w_mid = float(np.sqrt(width_ladder[i] * width_ladder[i + 1]))
-        direct = _build_width_density(pop, cls, 0, tile0_bw["h_x"], tile0_bw["h_b"], w_mid,
+    log_widths = np.log(width_ladder)
+    out = []
+    for w in widths:
+        i_lo_arr, t_arr = column_grid.bracket(np.array([np.log(w)]), log_widths)
+        i_lo, t = int(i_lo_arr[0]), float(t_arr[0])
+        i_hi = min(i_lo + 1, width_ladder.size - 1)
+        direct = _build_width_density(pop, cls, 0, tile0_bw["h_x"], tile0_bw["h_b"], w,
                                       x_edges, b_edges)
         direct_density = finalise_node_shape(direct, x_c, b_c)[0].astype(np.float64)
         if cls == "pahc":
-            blended = 0.5 * (density0[i, 0].astype(np.float64) + density0[i + 1, 0].astype(np.float64))
+            blended = ((1.0 - t) * density0[i_lo, 0].astype(np.float64)
+                      + t * density0[i_hi, 0].astype(np.float64))
         else:
-            blended = 0.5 * (density0[i].astype(np.float64) + density0[i + 1].astype(np.float64))
-        worst = max(worst, _rel_l1(direct_density, blended))
-    return worst
+            blended = ((1.0 - t) * density0[i_lo].astype(np.float64)
+                      + t * density0[i_hi].astype(np.float64))
+        out.append(_rel_l1(direct_density, blended))
+    return out
+
+
+def median_kernel_width(config, region):
+    """The median, over the region's own catalogued sources, of `Kernel.
+    params`'s single-Gaussian-equivalent width at each source's own
+    column, uncertainty and arm -- the middle of the three widths (the
+    ladder floor, this, and the ladder top) the two residual reports
+    above are measured at, since the ladder floor and top rarely bracket
+    the widths sources actually read."""
+    from sesnaimpute.prior import table as table_module
+    from sesnaimpute.prior.kernel import Kernel
+    src = table_module.read(config, region)
+    kern = Kernel.read(config)
+    map_class = np.where(src["A_COL_PROVENANCE"] == _PLANCK_PROVENANCE_CODE, "planck", "herschel")
+    _, sigma = kern.params(src["A_COL_K"], src["A_COL_SIG_K"], map_class)
+    return float(np.median(sigma))
 
 
 def build_region_class(config, region, cls, shared, width_ladder):
@@ -754,10 +784,10 @@ def build_region_class(config, region, cls, shared, width_ladder):
     with h5py.File(path, "r") as f:
         density0 = f["DENSITY"][0]
 
-    w_max = float(width_ladder.max())
-    bicubic_rel_l1 = _bicubic_residual_report(pop, cls, tile_bw[0], w_max, x_edges, b_edges)
+    report_widths = [float(width_ladder[0]), shared["median_kernel_width"], float(width_ladder[-1])]
+    bicubic_rel_l1 = _bicubic_residual_report(pop, cls, tile_bw[0], report_widths, x_edges, b_edges)
     width_interp_rel_l1 = _width_interp_residual_report(
-        pop, cls, tile_bw[0], width_ladder, x_edges, b_edges, density0)
+        pop, cls, tile_bw[0], width_ladder, x_edges, b_edges, density0, report_widths)
 
     return dict(
         region=region, cls=cls, shape_nodes=width_ladder, x_edges=x_edges, b_edges=b_edges,
@@ -767,6 +797,7 @@ def build_region_class(config, region, cls, shared, width_ladder):
         f_c=pop["f_c"], pop=pop, path=path, h_x0=tile_bw[0]["h_x"],
         pahc_limit_lo_idx=limit_lo_idx, pahc_limit_hi_idx=limit_hi_idx,
         pahc_limit_median_mjy=f_lim8_median,
+        report_widths=report_widths,
         bicubic_rel_l1=bicubic_rel_l1, width_interp_rel_l1=width_interp_rel_l1,
     )
 
@@ -1168,7 +1199,8 @@ def build(config, regions=None):
         pop = read_population(config, region)
         n_tile = pop["n_tile"]
         map_classes = tile_map_classes(config, region, n_tile)
-        shared = dict(pop=pop, n_tile=n_tile, map_classes=map_classes)
+        shared = dict(pop=pop, n_tile=n_tile, map_classes=map_classes,
+                      median_kernel_width=median_kernel_width(config, region))
 
         for cls in CLASSES:
             result = build_region_class(config, region, cls, shared, width_ladder)
@@ -1186,16 +1218,22 @@ def build(config, regions=None):
                        between["limit_hi_mjy"], between["t_limit"], between["max_violation"]))
             n_x = result["x_edges"].size - 1
             n_b = result["b_edges"].size - 1
+            width_labels = ("floor", "median_kernel", "top")
+            residual_line = " ".join(
+                "bicubic_rel_l1[%s w=%.4f]=%.4f width_interp_rel_l1[%s w=%.4f]=%.4f"
+                % (label, w, bic, label, w, wid)
+                for label, w, bic, wid in zip(
+                    width_labels, result["report_widths"],
+                    result["bicubic_rel_l1"], result["width_interp_rel_l1"]))
             print(
                 "star_shapes: %s/%s: grid=%dx%d widths=%d "
                 "median_mass_outside=%.4e std_growth(w=%.4f expected_var=%.5f "
                 "measured_var=%.5f mean_dev=%.2e dex) "
-                "grid_centre_exact_max_dev=%.2e bicubic_rel_l1=%.4f (bar=%.2f) "
-                "width_interp_rel_l1=%.4f (bar=%.2f)%s -> %s"
+                "grid_centre_exact_max_dev=%.2e %s (bar=%.2f)%s -> %s"
                 % (region, cls, n_x, n_b, width_ladder.size,
                    float(np.median(result["mass_outside"])), w_k, expected_growth,
                    measured_growth, mean_dev, exact_dev,
-                   result["bicubic_rel_l1"], EPS_SHAPE, result["width_interp_rel_l1"], EPS_SHAPE,
+                   residual_line, EPS_SHAPE,
                    pahc_line, path), flush=True)
 
 
