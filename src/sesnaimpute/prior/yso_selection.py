@@ -20,11 +20,14 @@ THE POPULATION. The Chabrier (2003, PASP 115, 763) system IMF: a
 lognormal below 1 Msun (M_c = 0.2 Msun, sigma = 0.55 dex), a power law
 dN/dlog10(M) ~ M^-1.35 above it, continuous at the join, normalised over
 0.1-150 Msun (SPEC_PRIORS.md 6.2). The installed BHAC15 grid covers only
-0.01-1.4 Msun, so a star above 1.4 Msun is treated as detected outright
-(a 1 Myr photosphere above 1.4 Msun clears any SESNA limit inside 2 kpc)
-and `g` is the mass integral over [0.1, 1.4] plus the IMF's own mass
-fraction above 1.4 Msun, `IMF_FRAC_ABOVE_1P4` (about 0.1, computed and
-reported below, never tuned). Below 0.1 Msun the IMF carries no weight
+0.01-1.4 Msun, so a star above 1.4 Msun is scored by the 1.4 Msun model's
+OWN two-of-eight result at that ladder point and those limits (2026-09-06
+ruling: no longer counted as detected outright at every extinction) -- a
+lower bound on the tail, since a heavier photosphere is brighter and would
+clear at least as often -- and `g` is the mass integral over [0.1, 1.4]
+plus the IMF's own mass fraction above 1.4 Msun, `IMF_FRAC_ABOVE_1P4`
+(about 0.1, computed and reported below, never tuned), scaled by that same
+1.4 Msun clearing indicator. Below 0.1 Msun the IMF carries no weight
 (the integration floor), so nothing there needs a photosphere at all.
 The closed-form Chabrier integral (`chabrier_integral`, an error-function
 antiderivative below 1 Msun, a power law above) and the isochrone loader
@@ -343,7 +346,11 @@ def selection_table(config, age_gyr, d_r_pc, a_query, source_limits, mass_grid, 
 
     log10_mass = np.log10(mass_grid)
     inner = np.trapz(cleared * imf_weight[None, None, :], x=log10_mass, axis=2)  # (n_src, n_x)
-    return inner + IMF_FRAC_ABOVE_1P4
+    # the mass above the isochrone's own 1.4 Msun top is scored by that top
+    # mass's own two-of-eight result (`cleared`'s last mass row), not
+    # counted as detected outright (module docstring).
+    top_cleared = cleared[:, :, -1]  # (n_src, n_x)
+    return inner + IMF_FRAC_ABOVE_1P4 * top_cleared
 
 
 def _row_bytes(n_x, n_mass):
