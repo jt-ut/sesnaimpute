@@ -71,6 +71,14 @@ N_B_GRID = 24
 #: error per brightness bin at the 1% bar, scaling as 1/sqrt(n).
 SUBSAMPLE_CAP = 15_000
 
+#: A brightness bin with fewer than this many subsample members is too
+#: sparse for the conditioned (own-bin) estimate -- Monte Carlo error
+#: above ~2% at eps=0.5 (owner, 2026-09-06). Below it, the bin's stored
+#: selection is the MARGINAL estimate instead (every subsample member
+#: rescaled to the bin's own brightness, the `pass_curves` form): a
+#: statistician's pooled-stratum fallback, not a hidden zero.
+MIN_BIN_MEMBERS = 500
+
 
 def _parse_info(text):
     fields = {}
@@ -347,7 +355,9 @@ def pass_fractions_binned_multi(log10_lim, a_query, kappa, log10_flux, log10_b_p
 @numba.njit(parallel=True)
 def pass_fractions_binned_star_pahc(log10_lim, a_query, kappa, log10_flux,
                                      log10_b_star, weight_star, bin_of_star, b_grid_star,
-                                     log10_b_pahc, weight_pahc, bin_of_pahc, b_grid_pahc):
+                                     conditioned_star,
+                                     log10_b_pahc, weight_pahc, bin_of_pahc, b_grid_pahc,
+                                     conditioned_pahc):
     """STAR and PAHC fused onto one shared member draw and one flux read
     (as `pass_fractions_binned_multi`), but PAHC's member weight is not
     one number per member -- it is `W_j * P(q_j(s))` (SPEC_PRIORS.md
@@ -358,8 +368,17 @@ def pass_fractions_binned_star_pahc(log10_lim, a_query, kappa, log10_flux,
     `(n_pop,)`. Because PAHC's weight varies by source, so does its
     per-bin normalising total -- computed here, per source, from
     `weight_pahc[s]` -- while STAR's is computed once, outside the
-    source loop. Returns `(eps_star, eps_pahc)`, each `(n_src, n_x,
-    n_b)` f4.
+    source loop.
+
+    `conditioned_star`/`conditioned_pahc` (n_b,) bool (owner, 2026-09-06):
+    a bin with too few subsample members for the conditioned (own-bin)
+    estimate to be trustworthy is instead read off the MARGINAL curve --
+    every member's critical brightness compared straight to the grid
+    point, `pass_curves`' form, not restricted to members whose own
+    brightness lands in that bin. Both the conditioned and the marginal
+    accumulators are built from the SAME per-member critical-brightness
+    pass (one loop over `j`), so carrying both costs one pass, not two.
+    Returns `(eps_star, eps_pahc)`, each `(n_src, n_x, n_b)` f4.
     """
     n_src, n_x = a_query.shape
     n_pop, n_bands = log10_flux.shape
@@ -370,11 +389,13 @@ def pass_fractions_binned_star_pahc(log10_lim, a_query, kappa, log10_flux,
     bin_total_star = np.zeros(n_b, dtype=np.float64)
     for j in range(n_pop):
         bin_total_star[bin_of_star[j]] += weight_star[j]
+    w_total_star = bin_total_star.sum()
 
     for s in numba.prange(n_src):
         bin_total_pahc = np.zeros(n_b, dtype=np.float64)
         for j in range(n_pop):
             bin_total_pahc[bin_of_pahc[j]] += weight_pahc[s, j]
+        w_total_pahc = bin_total_pahc.sum()
 
         thresh = np.empty((n_x, n_bands), dtype=np.float64)
         for k in range(n_x):
@@ -384,6 +405,8 @@ def pass_fractions_binned_star_pahc(log10_lim, a_query, kappa, log10_flux,
         for k in range(n_x):
             num_star = np.zeros(n_b, dtype=np.float64)
             num_pahc = np.zeros(n_b, dtype=np.float64)
+            hist_star = np.zeros(n_b + 1, dtype=np.float64)
+            hist_pahc = np.zeros(n_b + 1, dtype=np.float64)
             for j in range(n_pop):
                 smallest_star, second_star = np.inf, np.inf
                 smallest_pahc, second_pahc = np.inf, np.inf
@@ -408,17 +431,40 @@ def pass_fractions_binned_star_pahc(log10_lim, a_query, kappa, log10_flux,
                         smallest_pahc = val_pahc
                     elif val_pahc < second_pahc:
                         second_pahc = val_pahc
+
+                w_star_j = weight_star[j]
                 m_star = bin_of_star[j]
                 if second_star <= b_grid_star[m_star]:
-                    num_star[m_star] += weight_star[j]
+                    num_star[m_star] += w_star_j
+                idx_star = np.searchsorted(b_grid_star, second_star)
+                if idx_star > n_b:
+                    idx_star = n_b
+                hist_star[idx_star] += w_star_j
+
+                w_pahc_j = weight_pahc[s, j]
                 m_pahc = bin_of_pahc[j]
                 if second_pahc <= b_grid_pahc[m_pahc]:
-                    num_pahc[m_pahc] += weight_pahc[s, j]
+                    num_pahc[m_pahc] += w_pahc_j
+                idx_pahc = np.searchsorted(b_grid_pahc, second_pahc)
+                if idx_pahc > n_b:
+                    idx_pahc = n_b
+                hist_pahc[idx_pahc] += w_pahc_j
+
+            cum_star = 0.0
+            cum_pahc = 0.0
             for m in range(n_b):
-                if bin_total_star[m] > 0.0:
-                    eps_star[s, k, m] = num_star[m] / bin_total_star[m]
-                if bin_total_pahc[m] > 0.0:
-                    eps_pahc[s, k, m] = num_pahc[m] / bin_total_pahc[m]
+                cum_star += hist_star[m]
+                cum_pahc += hist_pahc[m]
+                if conditioned_star[m]:
+                    if bin_total_star[m] > 0.0:
+                        eps_star[s, k, m] = num_star[m] / bin_total_star[m]
+                elif w_total_star > 0.0:
+                    eps_star[s, k, m] = cum_star / w_total_star
+                if conditioned_pahc[m]:
+                    if bin_total_pahc[m] > 0.0:
+                        eps_pahc[s, k, m] = num_pahc[m] / bin_total_pahc[m]
+                elif w_total_pahc > 0.0:
+                    eps_pahc[s, k, m] = cum_pahc / w_total_pahc
     return eps_star, eps_pahc
 
 

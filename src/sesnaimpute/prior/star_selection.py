@@ -36,7 +36,10 @@ one read.
 
 Writes one product per region, row-aligned with the curated catalogue,
 `bms/star/selection_star_source.hdf5`: root attr `GRANULE="source"`,
-`X_LADDER` (n_x,) f8, `LOG10_B_GRID_STAR`/`_PAHC`/`_AGB` (n_b,) f8, and
+`X_LADDER` (n_x,) f8, `LOG10_B_GRID_STAR`/`_PAHC`/`_AGB` (n_b,) f8,
+`CONDITIONED_STAR`/`CONDITIONED_PAHC` (n_b,) i1 (owner, 2026-09-06: which
+bins are the conditioned, own-bin estimate versus the pooled marginal
+one, so a reader can tell the two apart), and
 `EPS_STAR`/`EPS_PAHC`/`EPS_AGB`/`EPS_AGB_PHOTOSPHERE` (n, n_x, n_b) f2.
 Sources are batched (`sesnaimpute.batches.batches`) so no batch's working
 arrays exceed the byte budget.
@@ -295,6 +298,15 @@ def shared_subsample(weight_a, weight_b, cap=SUBSAMPLE_CAP, seed=SUBSAMPLE_SEED)
     return idx, n_nonzero
 
 
+def conditioned_flag_for(bin_of_pop, n_b, min_members=selection.MIN_BIN_MEMBERS):
+    """`(n_b,)` bool: whether each brightness bin holds at least
+    `min_members` SUBSAMPLE members (owner, 2026-09-06) -- the bins
+    below it are too sparse for the conditioned (own-bin) estimate and
+    fall back to the marginal one (module docstring)."""
+    counts = np.bincount(np.asarray(bin_of_pop, dtype=np.int64), minlength=n_b)
+    return counts >= min_members
+
+
 def bin_of_pop_for(log10_b, b_grid):
     """`(n,)` int64: the index of `b_grid`'s own nearest point to each
     member's `log10_b` (`prior.gal`'s own bin-by-own-value pattern) --
@@ -371,6 +383,10 @@ class _FusedPair:
         self.log10_q0 = np.ascontiguousarray(log10_q0[idx])
         self.bin_of_pahc = np.ascontiguousarray(bin_of_pop_for(log10_b_b[idx], b_grid_b))
         self.b_grid_a, self.b_grid_b = b_grid_a, b_grid_b
+        self.conditioned_star = np.ascontiguousarray(
+            conditioned_flag_for(self.bin_of_star, b_grid_a.size))
+        self.conditioned_pahc = np.ascontiguousarray(
+            conditioned_flag_for(self.bin_of_pahc, b_grid_b.size))
         self.n_used = idx.size
         self.n_nonzero = n_nonzero
         self.n_nonzero_a = int(np.count_nonzero(weight_a > 0.0))
@@ -466,6 +482,8 @@ def build_and_write_region(config, region):
         f.create_dataset("LOG10_B_GRID_STAR", data=classes["star_pahc"].b_grid_a.astype("f8"))
         f.create_dataset("LOG10_B_GRID_PAHC", data=classes["star_pahc"].b_grid_b.astype("f8"))
         f.create_dataset("LOG10_B_GRID_AGB", data=classes["agb"].b_grid.astype("f8"))
+        f.create_dataset("CONDITIONED_STAR", data=classes["star_pahc"].conditioned_star.astype("i1"))
+        f.create_dataset("CONDITIONED_PAHC", data=classes["star_pahc"].conditioned_pahc.astype("i1"))
         ds_star = f.create_dataset("EPS_STAR", shape=(n_source, n_x, n_b), dtype="f2")
         ds_pahc = f.create_dataset("EPS_PAHC", shape=(n_source, n_x, n_b), dtype="f2")
         ds_agb = f.create_dataset("EPS_AGB", shape=(n_source, n_x, n_b), dtype="f2")
@@ -493,8 +511,8 @@ def build_and_write_region(config, region):
 
             eps_star, eps_pahc = selection.pass_fractions_binned_star_pahc(
                 lim_b, a_query_b, kappa_b, fp.log10_flux,
-                fp.log10_b_a, fp.weight_star, fp.bin_of_star, fp.b_grid_a,
-                fp.log10_b_b, weight_pahc_b, fp.bin_of_pahc, fp.b_grid_b)
+                fp.log10_b_a, fp.weight_star, fp.bin_of_star, fp.b_grid_a, fp.conditioned_star,
+                fp.log10_b_b, weight_pahc_b, fp.bin_of_pahc, fp.b_grid_b, fp.conditioned_pahc)
             ds_star[start:stop] = eps_star.astype("f2")
             ds_pahc[start:stop] = eps_pahc.astype("f2")
 
