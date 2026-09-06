@@ -161,8 +161,19 @@ class BrokenPowerLaw:
 
     with faint-end slope `af`, bright-end slope `ab`, break `S_b` and
     smoothness `D`. `differential` is its analytic derivative, `phi(S) =
-    -dN/dS`, never a numerical one.
-    """
+    -dN/dS`, never a numerical one. A single power law (`fit_counts`'s
+    own fallback when the break is not supported by the data) is the
+    same class with `af == ab`: the break/smoothness terms then cancel
+    out of the formula exactly, leaving a straight line in log-log, so
+    no separate class is needed.
+
+    `log_range`, when given (`fit_counts`'s own bound: the data's
+    faintest and brightest tabulated bins), is where the formula was
+    actually fitted. Below `log_range[0]` (fainter than Fazio's own
+    faintest bin) every method here extrapolates by holding the running
+    slope fixed at its own value AT that faintest bin -- a straight
+    power-law continuation, not the smooth formula's own further
+    curvature past data it was never fit to (owner, 2026-09-06)."""
 
     PARAM_NAMES = ("log10_A", "log10_S_break", "alpha_faint", "alpha_bright", "smoothness")
 
@@ -170,22 +181,40 @@ class BrokenPowerLaw:
         self.params = np.asarray(params, dtype=float)
         self.log_range = None if log_range is None else (float(log_range[0]), float(log_range[1]))
 
-    def log10_cumulative(self, log10_S):
+    def _raw_log10_cumulative(self, log10_S):
         logA, logSb, af, ab, D = self.params
-        u = (np.asarray(log10_S, dtype=float) - logSb) / D
+        u = (log10_S - logSb) / D
         soft = np.logaddexp(0.0, u * np.log(10.0)) / np.log(10.0)
-        return logA - af * (np.asarray(log10_S, dtype=float) - logSb) - (ab - af) * D * soft
+        return logA - af * (log10_S - logSb) - (ab - af) * D * soft
+
+    def _raw_local_slope(self, log10_S):
+        logA, logSb, af, ab, D = self.params
+        u = (log10_S - logSb) / D
+        w = 1.0 / (1.0 + 10.0 ** np.clip(-u, -300, 300))
+        return af + (ab - af) * w
+
+    def log10_cumulative(self, log10_S):
+        log10_S = np.asarray(log10_S, dtype=float)
+        if self.log_range is None:
+            return self._raw_log10_cumulative(log10_S)
+        xlo = self.log_range[0]
+        below = log10_S < xlo
+        val = self._raw_log10_cumulative(np.where(below, xlo, log10_S))
+        slope_lo = self._raw_local_slope(np.asarray(xlo, dtype=float))
+        return np.where(below, val + slope_lo * (xlo - log10_S), val)
 
     def cumulative(self, S):
         """N(>S), galaxies deg^-2 brighter than flux S (mJy)."""
         return 10.0 ** self.log10_cumulative(np.log10(np.asarray(S, dtype=float)))
 
     def local_slope(self, log10_S):
-        """-d log10 N / d log10 S, the running cumulative slope."""
-        logA, logSb, af, ab, D = self.params
-        u = (np.asarray(log10_S, dtype=float) - logSb) / D
-        w = 1.0 / (1.0 + 10.0 ** np.clip(-u, -300, 300))
-        return af + (ab - af) * w
+        """-d log10 N / d log10 S, the running cumulative slope, held at
+        the faintest tabulated bin's own value below `log_range[0]`."""
+        log10_S = np.asarray(log10_S, dtype=float)
+        if self.log_range is None:
+            return self._raw_local_slope(log10_S)
+        xlo = self.log_range[0]
+        return self._raw_local_slope(np.where(log10_S < xlo, xlo, log10_S))
 
     def differential(self, S):
         """phi(S) = -dN(>S)/dS, galaxies deg^-2 mJy^-1, positive everywhere."""
@@ -228,21 +257,49 @@ def cumulative_from_differential(mag, log10_n, band_um=COORD_BAND_UM,
     return log10_S, np.log10(cum), float(tail)
 
 
+#: How close the fitted break may sit to either edge of Fazio's own
+#: tabulated flux range before it counts as "at the edge" -- the data do
+#: not constrain a break there, so `fit_counts` falls back to a single
+#: power law (owner, 2026-09-06: a break three decades below the data,
+#: as the unconstrained fit found, is unconstrained by construction).
+_BREAK_EDGE_FRAC = 0.02
+
+
 def fit_counts(log10_S, log10_N):
-    """Least-squares fit of `BrokenPowerLaw` to a cumulative counts curve.
-    Returns `(fit, stats)`, `stats` carrying the fit's own residual in dex
-    so its adequacy is a number, not a claim.
+    """Least-squares fit of `BrokenPowerLaw` to a cumulative counts
+    curve, the break constrained to lie inside the data's OWN tabulated
+    flux range (`x.min()`..`x.max()`, Fazio's faintest and brightest
+    bins) -- a break outside that range is not constrained by the fit at
+    all (owner, 2026-09-06). If the constrained fit still pushes the
+    break to within `_BREAK_EDGE_FRAC` of either edge, the data do not
+    support a break: refit as a single power law (`BrokenPowerLaw` with
+    `alpha_faint == alpha_bright`, module docstring), keeping the same
+    five-parameter shape and smoothness term, functionally inert.
+    Returns `(fit, stats)`, `stats` carrying the fit's own residual in
+    dex, the data range, and whether the single-power-law fallback fired.
     """
     x, y = np.asarray(log10_S, dtype=float), np.asarray(log10_N, dtype=float)
-    p0 = [y.max(), x.mean(), 0.6, 1.8, 0.5]
+    x_lo, x_hi = float(x.min()), float(x.max())
+    p0 = [y.max(), float(np.clip(x.mean(), x_lo, x_hi)), 0.6, 1.8, 0.5]
 
     def resid(p):
         return BrokenPowerLaw(p).log10_cumulative(x) - y
 
-    sol = least_squares(resid, p0, bounds=([0.0, -5.0, -10.0, 0.3, 0.05], [9.0, 3.0, 10.0, 5.0, 4.0]))
-    r = resid(sol.x)
-    fit = BrokenPowerLaw(sol.x, log_range=(float(x.min()), float(x.max())))
-    return fit, {"rms_dex": float(np.sqrt(np.mean(r ** 2))), "max_abs_dex": float(np.max(np.abs(r)))}
+    sol = least_squares(resid, p0, bounds=([0.0, x_lo, -10.0, 0.3, 0.05], [9.0, x_hi, 10.0, 5.0, 4.0]))
+    edge = _BREAK_EDGE_FRAC * (x_hi - x_lo)
+    single_power_law = (sol.x[1] - x_lo) < edge or (x_hi - sol.x[1]) < edge
+    if single_power_law:
+        slope, intercept = np.polyfit(x, y, 1)
+        af_ab = float(-slope)
+        logSb = float(np.median(x))
+        logA = float(slope * logSb + intercept)
+        params = [logA, logSb, af_ab, af_ab, 0.5]
+    else:
+        params = sol.x
+    fit = BrokenPowerLaw(params, log_range=(x_lo, x_hi))
+    r = fit.log10_cumulative(x) - y
+    return fit, {"rms_dex": float(np.sqrt(np.mean(r ** 2))), "max_abs_dex": float(np.max(np.abs(r))),
+                "log10_s_lo": x_lo, "log10_s_hi": x_hi, "single_power_law": bool(single_power_law)}
 
 
 def fit_all_variants(path):
@@ -883,10 +940,20 @@ def build(config, regions=None):
     counts_path = config_module.product_path(config, "bms", "gal", "counts", "survey")
     write_counts(counts_path, counts_result)
     fit = counts_result["fit"]
+    stats = counts_result["stats"]
     print(f"gal: counts law: log10_A={fit.params[0]:.4f} log10_S_break={fit.params[1]:.4f} "
           f"alpha_faint={fit.params[2]:.4f} alpha_bright={fit.params[3]:.4f} "
-          f"smoothness={fit.params[4]:.4f} rms={counts_result['stats']['rms_dex']:.4f} dex "
+          f"smoothness={fit.params[4]:.4f} rms={stats['rms_dex']:.4f} dex "
+          f"fit_range=[{stats['log10_s_lo']:.4f}, {stats['log10_s_hi']:.4f}] "
+          f"single_power_law={stats['single_power_law']} "
           f"cosmic_variance={counts_result['cosmic_variance_dex']:.4f} dex -> {counts_path}")
+    if stats["single_power_law"]:
+        print("gal: counts law: the constrained fit pushed the break to the data's own edge -- "
+              "the data do not support a break; adopted a single power law instead "
+              f"(alpha={fit.params[2]:.4f} throughout)")
+    print(f"gal: counts law: below the fit range's own faint edge (log10 S={stats['log10_s_lo']:.4f}), "
+          "the law is extrapolated at that edge's own running slope, held fixed -- "
+          "not the smooth formula's further curvature past data it was never fit to")
 
     flux_mjy_all, stell_all, ext_fl_all = read_swire_catalogue(config)
     print("gal: SWIRE pull carries no optical stellarity column (sky.download.swire.build.COLUMNS); "
