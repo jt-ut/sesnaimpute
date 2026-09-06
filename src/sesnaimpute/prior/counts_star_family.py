@@ -37,12 +37,15 @@ batches``) this collapses to one small matrix product for the eps
 interpolation and one vectorised call to ``ClassShape.density`` over the
 batch's own flattened ``(source, x, b)`` grid.
 
-GAL (spec section 5.1) needs no shape and no grid: a galaxy's ``a`` IS
-the column exactly, so its own ladder coordinate is always ``x = 1``,
-one exact point on ``X_LADDER``. Its per-source selection (``prior.
-gal``'s ``EPS``, on ``X_LADDER`` by ``LOG10_S_GRID``) is read at that one
-ladder point and combined with the survey counts law by direct
-quadrature (``numpy.trapz``) over ``LOG10_S_GRID``.
+GAL (spec section 5.1) needs no shape: a galaxy's ``a`` is the true
+column, spread around the source's own adopted column ``A_s`` by the
+same kernel mixture (``prior.kernel.Kernel``) every other class reads.
+Its per-source selection (``prior.gal``'s ``EPS``, on ``X_LADDER`` by
+``LOG10_S_GRID``) is read at every ladder point, the survey counts law
+integrated out first (``numpy.trapz`` over ``LOG10_S_GRID``, normalised
+to one), then the ladder points combined by the kernel's own exact
+probability mass in each ladder cell (``Kernel.cdf``, no bicubic, no
+Monte Carlo).
 
 Writes, per region, ``bms/table/counts-star-family_table_source.hdf5``:
 root attr ``GRANULE = "source"``; ``TILE_ID``, ``NODE_LO``, ``NODE_W``
@@ -339,25 +342,32 @@ def family_amplitude(config, region, cls, cond):
 
 
 # ---------------------------------------------------------------------------
-# GAL: N_GAL and Z_GAL by direct quadrature at the one ladder point
-# x = 1 (a galaxy carries the whole column, module docstring)
+# GAL: N_GAL and Z_GAL by quadrature over BOTH flux and extinction -- a
+# galaxy's own true column is spread by the kernel around A_s, exactly
+# as the callable reads it (`Kernel.pdf(a | A_s) . eps_s(a, S)`)
 # ---------------------------------------------------------------------------
 
 def gal_counts(config, region, cond):
-    """`(n_gal, z_gal, fazio_params)`: `N_GAL = Integral phi(S) eps(S | A_s)
-    dS`, the full per-source integral over flux (extinction needs no
-    integral: a galaxy's `a` IS the column, module docstring, so the one
-    ladder point `x = 1` already carries it exactly). `Z_GAL` is that
-    SAME per-source integral against the counts law normalised to one
-    (`phi(S) / Integral phi(S) dS`), so `N_GAL = amplitude . Z_GAL` with
-    `amplitude = Integral phi(S) dS` -- the same amplitude-times-
-    normalised-shape-integral factoring `family_counts` uses for
-    STAR/AGB/PAHC, not an S-weighted average of `eps`."""
+    """`(n_gal, z_gal, fazio_params)`: `Z_GAL(s) = Integral da p_T(a |
+    A_s) . Integral dlog10 S p(log10 S) . eps_s(a, log10 S)`, `N_GAL =
+    amplitude . Z_GAL` with `amplitude = Integral phi(S) dS` (the same
+    amplitude-times-normalised-integral factoring `family_counts` uses
+    for STAR/AGB/PAHC). A galaxy carries the true column, not `A_s`
+    exactly, so the extinction factor is the kernel's own mixture
+    density in `a` (`Kernel`'s two-component log-normal mixture), not a
+    single point at `x = a / A_s = 1`: the source's own selection curve
+    is read at every ladder point (`x_ladder`), the flux integral done
+    first at each of those (the counts law normalised to one), then the
+    result is weighted by the exact PROBABILITY MASS the mixture places
+    in each ladder cell -- the cell edges are the midpoints between
+    consecutive ladder nodes (the first cell running down to `a = 0`,
+    the last running up to `a = Infinity`), read off the kernel's own
+    closed-form CDF (`Kernel.cdf`, the two-Gaussian mixture in `log10
+    T`), so no bicubic and no Monte Carlo, only the ladder's own
+    resolution."""
+    from sesnaimpute.prior.kernel import Kernel
+
     eps, x_ladder, log10_s_grid = read_gal_selection(config, region)
-    ladder_ix1 = int(np.argmin(np.abs(x_ladder - 1.0)))
-    if abs(x_ladder[ladder_ix1] - 1.0) > 1.0e-9:
-        raise ValueError("prior.counts_star_family: GAL selection's X_LADDER carries no exact x=1 point")
-    eps_curve = eps[:, ladder_ix1, :]                              # (n_source, n_s)
 
     counts_path = config_module.product_path(config, "bms", "gal", "counts", "survey")
     with h5py.File(counts_path, "r") as f:
@@ -373,10 +383,25 @@ def gal_counts(config, region, cond):
     s_lin = 10.0 ** log10_s_grid
     ln10 = float(np.log(10.0))
     w1 = phi_s * s_lin * ln10          # Integral phi(S) eps dS = Integral w1(S) eps dlogS
-
-    n_gal = np.trapz(eps_curve * w1[None, :], log10_s_grid, axis=1)
     amplitude = float(np.trapz(w1, log10_s_grid))
-    z_gal = n_gal / amplitude
+
+    # the flux integral at every ladder x point: (n_source, n_x_ladder)
+    eps_s_integral = np.trapz(eps * w1[np.newaxis, np.newaxis, :], log10_s_grid, axis=2) / amplitude
+
+    # the extinction integral: the mixture's exact probability mass in
+    # each ladder cell, from the kernel's own closed-form CDF.
+    kern = Kernel.read(config)
+    a_col, sigma_col, map_class = cond["a_col"], cond["sigma_col"], cond["map_class"]
+    mids = 0.5 * (x_ladder[:-1] + x_ladder[1:])                    # (n_x_ladder - 1,)
+    t_edges = mids[np.newaxis, :] * a_col[:, np.newaxis]           # (n_source, n_x_ladder - 1)
+    cdf_edges = kern.cdf(t_edges, a_col, sigma_col, map_class)     # (n_source, n_x_ladder - 1)
+    w_x = np.empty((a_col.size, x_ladder.size), dtype=np.float64)
+    w_x[:, 0] = cdf_edges[:, 0]
+    w_x[:, 1:-1] = np.diff(cdf_edges, axis=1)
+    w_x[:, -1] = 1.0 - cdf_edges[:, -1]
+
+    z_gal = np.sum(w_x * eps_s_integral, axis=1)
+    n_gal = amplitude * z_gal
     return n_gal, z_gal, fazio_params
 
 
