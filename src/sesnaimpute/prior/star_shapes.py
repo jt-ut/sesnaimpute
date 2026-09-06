@@ -159,7 +159,6 @@ def read_population(config, region):
             g = f[name]
             u = g["U"][:].astype(np.float64)
             tiles.append(dict(
-                a_tile=float(g.attrs["A_TILE_K"]),
                 u=u,
                 log10_u=np.log10(np.clip(u, _LOG_FLOOR, None)),
                 w=g["W"][:].astype(np.float64),

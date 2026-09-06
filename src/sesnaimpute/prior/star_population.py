@@ -93,10 +93,18 @@ attrs `GRANULE="tile"`, `OMEGA_SIM_DEG2`, `F_DUSTY_O`, `F_DUSTY_C`,
 and every star's `U` were read off; a `LIMIT8_GRID_MJY` (8,) dataset, the
 region's PAHC limit grid; one HDF5 group `tile_<id>` per tile with
 datasets `STAR_INDEX` (row into `prior.field_stars`' retained group),
-`U`, `A`, `W`, `WEIGHT_RULE`, `W_STAR`, `W_AGB`, `IS_EVOLVED`, `LOG10_B`,
+`U`, `W`, `WEIGHT_RULE`, `W_STAR`, `W_AGB`, `IS_EVOLVED`, `LOG10_B`,
 `LOG10_B_PAHC`, `LOG10_B_AGB_C`, `LOG10_B_AGB_O`, `P_PAHC` (n_star, 8),
 `LOG10_Q0` (the star's own 8um contrast at unit limit, `prior.star_shapes`'
-PAHC shape axis), and attrs `A_TILE_K`, `N_SIGHTLINES`.
+PAHC shape axis), and attr `N_SIGHTLINES`. The population stores each
+star's placement fraction `U` alone (owner, 2026-09-06): a star's own
+extinction is `A_s * U`, `A_s` a real source's own adopted column, formed
+at read time by the consumer that has a source to apply it to; this
+module never stores a tile-mean extinction. The tile's own mean column
+(`a_tile`, computed below) is still used internally, unstored, to place
+each simulated star's predicted magnitude for the anchor-weight lookup
+and the PAHC contamination weight -- the same per-tile approximation the
+module docstring above already describes for `U` itself.
 """
 
 import os
@@ -623,7 +631,7 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     return dict(
         tile=t, n_sightlines=int(sightlines.size), a_tile=a_tile,
         star_index=np.arange(stars["dist_pc"].size, dtype=np.int32),
-        u=u_i.astype(np.float32), a=a_i.astype(np.float32),
+        u=u_i.astype(np.float32),
         w=w.astype(np.float32), rule=rule,
         w_star=w_star.astype(np.float32), w_agb=w_agb.astype(np.float32),
         p_pahc=p_pahc.astype(np.float32), log10_q0=log10_q0.astype(np.float32),
@@ -698,11 +706,9 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c, l_o_lsun, n_riebe
         f.create_dataset("LIMIT8_GRID_MJY", data=result["limit_grid_mjy"])
         for tile_result in result["tiles"]:
             grp = f.create_group("tile_%d" % tile_result["tile"])
-            grp.attrs["A_TILE_K"] = tile_result["a_tile"]
             grp.attrs["N_SIGHTLINES"] = tile_result["n_sightlines"]
             grp.create_dataset("STAR_INDEX", data=tile_result["star_index"])
             grp.create_dataset("U", data=tile_result["u"])
-            grp.create_dataset("A", data=tile_result["a"])
             grp.create_dataset("W", data=tile_result["w"])
             grp.create_dataset("WEIGHT_RULE", data=tile_result["rule"])
             grp.create_dataset("W_STAR", data=tile_result["w_star"])
