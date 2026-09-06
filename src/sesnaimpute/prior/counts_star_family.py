@@ -10,7 +10,21 @@ intrinsic mass survives selection here" (``Z_C``, the normaliser the
 fitter's shape divides by, spec section 0.2). YSO and H2S are built
 elsewhere; this module writes only the four named here.
 
-STAR, AGB, PAHC share one construction. Each class's per-tile shape
+Owner ruling 2026-09-06: ``N_C`` and ``Z_C`` are two different
+computations, not one identity read twice. ``N_C`` (STAR, AGB, PAHC) is
+``direct_family_counts``: the population sum spec section 2.1/4 write --
+every one of the tile's simulated stars, its own class weight, its own
+extinction under a true column drawn from the kernel mixture (an 8-point
+Gauss-Hermite quadrature per component), its own detection read off the
+source's exact selection array. ``Z_C`` stays ``family_counts``'s dot
+product of the smoothed, gridded shape against the selection -- the
+fitter's own pointwise density needs a normaliser built from the SAME
+tabulation it reads, not from the population. The two differ by exactly
+the shape's smoothing (measured on NGC 7129: STAR +2.9%, PAHC +21.5%,
+AGB negligible where selection barely bites) -- a kernel-density
+bandwidth chosen for the shape has no business deciding the count.
+
+STAR, AGB, PAHC share one construction for ``Z_C``. Each class's per-tile shape
 (``prior.star_shapes.ClassShape``) already blends its own two bracketing
 shape nodes (and, for PAHC, its own two bracketing limit grids) in the
 source's own column and 8 micron limit -- ``ClassShape.density(a,
@@ -57,6 +71,7 @@ four counts and four normalisers, catalogue row order, float32.
 import os
 
 import h5py
+import numba
 import numpy as np
 from joblib import Parallel, delayed
 
@@ -66,13 +81,23 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
-from sesnaimpute.prior import column_grid, selection, star_population, star_shapes
+from sesnaimpute.prior import column_grid, pahc_curve, selection, star_population, star_shapes
 
 FAMILY_CLASSES = ("star", "agb", "pahc")
 
 #: The per-batch working-array budget for the (source, shape-x, shape-b)
 #: grid expansion, the module's own largest intermediate.
 BATCH_BUDGET_BYTES = 512 << 20
+
+#: The fixed 8-point quadrature the direct count (below) uses for the
+#: expectation over the true column `T` inside one mixture component
+#: (owner ruling 2026-09-06: "a small fixed quadrature per component, 8
+#: points"). Physicists' Gauss-Hermite nodes/weights, converted once to a
+#: standard-normal `z` and a weight that sums to one: `E[f(Z)] ~= Sum_q
+#: GH_W[q] . f(GH_Z[q])` for `Z ~ Normal(0, 1)`.
+_GH_NODES, _GH_WEIGHTS = np.polynomial.hermite.hermgauss(8)
+GH_Z = (np.sqrt(2.0) * _GH_NODES).astype(np.float64)
+GH_W = (_GH_WEIGHTS / np.sqrt(np.pi)).astype(np.float64)
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +380,205 @@ def family_amplitude(config, region, cls, cond):
 
 
 # ---------------------------------------------------------------------------
+# STAR / AGB / PAHC: the DIRECT count, owner ruling 2026-09-06 -- the
+# population sum SPEC_PRIORS.md section 2.1/4 write, not the tabulated
+# shape's own integral (`family_counts` above, kept solely for `Z_C`, the
+# fitter's smoothed-density normaliser, and for a diagnostic "before"
+# number in the blessing report). Per source: every one of the tile's
+# simulated stars, at its own placement `u_i` and brightness `B_i`,
+# carries its own class weight (PAHC: `W_i . P(q_i(s))` at THIS source's
+# own 8 micron limit, not a limit-grid interpolation); its extinction is
+# `a_i(T) = T . u_i` for a true column `T` drawn from the source's own
+# two-component kernel mixture (`Kernel.mixture`), and its detection is
+# the source's OWN exact selection array (`read_family_selection`) read
+# at `(a_i(T) / A_s, B_i) = (u_i . T/A_s, B_i)` by bilinear interpolation,
+# clamped at the ladder's own ends. The expectation over `T` within one
+# mixture component has a known distribution (`log10(T/A_s) ~ Normal(mu_k,
+# sigma_k)`) and is taken by the fixed 8-point Gauss-Hermite quadrature
+# `GH_Z`/`GH_W` above; the two components are combined by the mixture's
+# own weight. No shape, no smoothing, no grid: the sum is over the
+# region's own simulated population, already on disk.
+# ---------------------------------------------------------------------------
+
+@numba.njit(cache=True, fastmath=True)
+def _bilinear_clamped(table, x_ladder, b_grid, x, b):
+    """`table(x, b)`, `table` an `(n_x, n_b)` grid on `x_ladder` (linear)
+    by `b_grid` (linear), bilinearly evaluated at one point, clamped at
+    either edge (module docstring's "clamped at the ladder's own ends",
+    departure 5 of the blessing page)."""
+    n_x = x_ladder.shape[0]
+    n_b = b_grid.shape[0]
+    if x < x_ladder[0]:
+        x = x_ladder[0]
+    elif x > x_ladder[n_x - 1]:
+        x = x_ladder[n_x - 1]
+    ix = n_x - 2
+    for j in range(n_x - 1):
+        if x < x_ladder[j + 1]:
+            ix = j
+            break
+    span_x = x_ladder[ix + 1] - x_ladder[ix]
+    tx = (x - x_ladder[ix]) / span_x if span_x > 0.0 else 0.0
+
+    if b < b_grid[0]:
+        b = b_grid[0]
+    elif b > b_grid[n_b - 1]:
+        b = b_grid[n_b - 1]
+    ib = n_b - 2
+    for j in range(n_b - 1):
+        if b < b_grid[j + 1]:
+            ib = j
+            break
+    span_b = b_grid[ib + 1] - b_grid[ib]
+    tb = (b - b_grid[ib]) / span_b if span_b > 0.0 else 0.0
+
+    v00 = table[ix, ib]
+    v10 = table[ix + 1, ib]
+    v01 = table[ix, ib + 1]
+    v11 = table[ix + 1, ib + 1]
+    return ((1.0 - tx) * (1.0 - tb) * v00 + tx * (1.0 - tb) * v10
+            + (1.0 - tx) * tb * v01 + tx * tb * v11)
+
+
+@numba.njit(cache=True, parallel=True, fastmath=True)
+def _direct_sum_fixed_weight(weight, u, logb, eps, x_ladder, b_grid,
+                              w_mix, mu_mix, sigma_mix, gh_z, gh_w):
+    """`(n_source,)`: `Sum_i weight_i . E_T[eps_s(u_i . T/A_s, B_i)]` for
+    every source in this batch, `weight`/`u`/`logb` the tile's own fixed
+    per-star arrays (STAR, AGB -- the same for every source of the tile,
+    module docstring)."""
+    n_source = eps.shape[0]
+    n_member = u.shape[0]
+    n_q = gh_z.shape[0]
+    out = np.zeros(n_source, dtype=np.float64)
+    for s in numba.prange(n_source):
+        eps_s = eps[s]
+        total = 0.0
+        for k in range(2):
+            wk = w_mix[s] if k == 0 else (1.0 - w_mix[s])
+            if wk <= 0.0:
+                continue
+            mu_k = mu_mix[s, k]
+            sigma_k = sigma_mix[s, k]
+            for q in range(n_q):
+                mult = 10.0 ** (mu_k + sigma_k * gh_z[q])
+                comp = 0.0
+                for i in range(n_member):
+                    wi = weight[i]
+                    if wi == 0.0:
+                        continue
+                    comp += wi * _bilinear_clamped(eps_s, x_ladder, b_grid, u[i] * mult, logb[i])
+                total += wk * gh_w[q] * comp
+        out[s] = total
+    return out
+
+
+@numba.njit(cache=True, parallel=True, fastmath=True)
+def _direct_sum_per_source_weight(weight, u, logb, eps, x_ladder, b_grid,
+                                   w_mix, mu_mix, sigma_mix, gh_z, gh_w):
+    """As `_direct_sum_fixed_weight`, but `weight` is `(n_source,
+    n_member)` -- PAHC's own `W_i . P(q_i(s))`, a different number per
+    source since `q` depends on the source's own 8 micron limit (module
+    docstring)."""
+    n_source = eps.shape[0]
+    n_member = u.shape[0]
+    n_q = gh_z.shape[0]
+    out = np.zeros(n_source, dtype=np.float64)
+    for s in numba.prange(n_source):
+        eps_s = eps[s]
+        weight_s = weight[s]
+        total = 0.0
+        for k in range(2):
+            wk = w_mix[s] if k == 0 else (1.0 - w_mix[s])
+            if wk <= 0.0:
+                continue
+            mu_k = mu_mix[s, k]
+            sigma_k = sigma_mix[s, k]
+            for q in range(n_q):
+                mult = 10.0 ** (mu_k + sigma_k * gh_z[q])
+                comp = 0.0
+                for i in range(n_member):
+                    wi = weight_s[i]
+                    if wi == 0.0:
+                        continue
+                    comp += wi * _bilinear_clamped(eps_s, x_ladder, b_grid, u[i] * mult, logb[i])
+                total += wk * gh_w[q] * comp
+        out[s] = total
+    return out
+
+
+def _tile_log10_q0(config, region, n_tile):
+    """`LOG10_Q0` per tile (n_star,), straight off `prior.star_population`'s
+    own product -- the star's own 8 micron contrast at unit limit
+    (`pahc_contamination_weight`), not carried by `star_shapes.
+    read_population` since the shape-density path never needed it as a
+    per-star number (only the region-wide limit-grid `P_PAHC`, module
+    docstring)."""
+    path = config_module.product_path(config, "bms", "star", "population", "tile", region=region)
+    with h5py.File(path, "r") as f:
+        return [np.asarray(f["tile_%d/LOG10_Q0" % t][:], dtype=np.float64) for t in range(n_tile)]
+
+
+def direct_family_counts(config, region, cls, cond, pop, shape):
+    """`N_C(s)` (n_source,), objects per deg**2 (module docstring): the
+    population sum SPEC_PRIORS.md section 2.1 (STAR/AGB) and section 4
+    (PAHC) write, one tile at a time (every source of a tile shares that
+    tile's own simulated population), PAHC's own per-source weight matrix
+    batched through `sesnaimpute.batches` so no tile holds more than
+    `BATCH_BUDGET_BYTES` of it at once."""
+    eps, x_ladder, b_grid = read_family_selection(config, region, cls)
+    n_source = cond["n_source"]
+    tile_id = cond["tile_id"]
+    a_col, sigma_col, map_class = cond["a_col"], cond["sigma_col"], cond["map_class"]
+    zp_sigma_k = cond["zp_sigma_k"]
+    kern = shape.kern
+    w_mix, mu_mix, sigma_mix = kern.mixture(a_col, sigma_col, map_class, zp_sigma_k=zp_sigma_k)
+
+    n_c = np.zeros(n_source, dtype=np.float64)
+    n_tile = len(pop["tiles"])
+
+    if cls == "pahc":
+        log10_q0_by_tile = _tile_log10_q0(config, region, n_tile)
+        curve = pahc_curve.read(config)
+        log10_flim8 = np.log10(cond["f_lim8"])
+
+    for t in np.unique(tile_id):
+        src_idx = np.flatnonzero(tile_id == t)
+        tile = pop["tiles"][int(t)]
+
+        if cls == "star":
+            w, u, logb = tile["w_star"], tile["u"], tile["log10_b"]
+            n_c[src_idx] = _direct_sum_fixed_weight(
+                w, u, logb, eps[src_idx].astype(np.float64), x_ladder, b_grid,
+                w_mix[src_idx], mu_mix[src_idx], sigma_mix[src_idx], GH_Z, GH_W)
+        elif cls == "agb":
+            ev = tile["is_evolved"]
+            w_ev, f_c = tile["w_agb"][ev], pop["f_c"]
+            u = np.concatenate([tile["u"][ev], tile["u"][ev]])
+            logb = np.concatenate([tile["log10_b_agb_o"][ev], tile["log10_b_agb_c"][ev]])
+            w = np.concatenate([w_ev * (1.0 - f_c), w_ev * f_c])
+            n_c[src_idx] = _direct_sum_fixed_weight(
+                w, u, logb, eps[src_idx].astype(np.float64), x_ladder, b_grid,
+                w_mix[src_idx], mu_mix[src_idx], sigma_mix[src_idx], GH_Z, GH_W)
+        else:
+            u, logb, w_raw = tile["u"], tile["log10_b_pahc"], tile["w"]
+            log10_q0 = log10_q0_by_tile[int(t)]
+            row_bytes = w_raw.size * 8
+            for bstart, bstop in batches_module.batches(src_idx.size, row_bytes, budget_bytes=BATCH_BUDGET_BYTES):
+                s_idx = src_idx[bstart:bstop]
+                log10_q = log10_flim8[s_idx][:, None] + log10_q0[None, :]
+                weight = np.asarray(curve(log10_q), dtype=np.float64) * w_raw[None, :]
+                n_c[s_idx] = _direct_sum_per_source_weight(
+                    weight, u, logb, eps[s_idx].astype(np.float64), x_ladder, b_grid,
+                    w_mix[s_idx], mu_mix[s_idx], sigma_mix[s_idx], GH_Z, GH_W)
+
+    pop_path = config_module.product_path(config, "bms", "star", "population", "tile", region=region)
+    with h5py.File(pop_path, "r") as f:
+        omega_sim_deg2 = float(f.attrs["OMEGA_SIM_DEG2"])
+    return n_c / omega_sim_deg2
+
+
+# ---------------------------------------------------------------------------
 # GAL: N_GAL and Z_GAL by quadrature over BOTH flux and extinction -- a
 # galaxy's own true column is spread by the kernel around A_s, exactly
 # as the callable reads it (`Kernel.pdf(a | A_s) . eps_s(a, S)`)
@@ -522,7 +746,7 @@ def _mosaic_area_deg2(config, region):
     return float(np.sum(frac) * pix_area_deg2)
 
 
-def report(config, region, cond, out, wall_s):
+def report(config, region, cond, out, wall_s, tabulated_medians=None):
     lines = []
     n_source = cond["n_source"]
     lines.append("counts_star_family: %s: %d sources, wall=%.1fs" % (region, n_source, wall_s))
@@ -530,6 +754,13 @@ def report(config, region, cond, out, wall_s):
         lo, med, hi = _pct(out[key])
         lines.append("counts_star_family: %s: %s median=%.5g [16%%=%.5g, 84%%=%.5g]"
                      % (region, key, med, lo, hi))
+    if tabulated_medians:
+        for cls, before in tabulated_medians.items():
+            after = float(np.median(out["N_%s" % cls.upper()]))
+            lines.append(
+                "counts_star_family: %s: N_%s before(tabulated shape)=%.5g after(direct "
+                "population sum)=%.5g ratio(after/before)=%.4f"
+                % (region, cls.upper(), before, after, after / before if before else float("nan")))
 
     z_all = np.concatenate([out["Z_STAR"], out["Z_AGB"], out["Z_PAHC"], out["Z_GAL"]])
     z_all = z_all[np.isfinite(z_all)]
@@ -591,11 +822,19 @@ def _build_one(config, region):
 
     out = {}
     checks = {}
+    tabulated_medians = {}
     pop = star_shapes.read_population(config, region)
     for cls in FAMILY_CLASSES:
-        n_c, z_c, shape = family_counts(config, region, cls, cond)
+        # `family_counts` still supplies Z_C (the fitter's smoothed-shape
+        # normaliser, unchanged) and, as `n_c_tabulated`, the amplitude-
+        # times-tabulated-shape number the blessing page's "before" column
+        # reports; the shipped N_C is the population sum (owner ruling
+        # 2026-09-06, `direct_family_counts`).
+        n_c_tabulated, z_c, shape = family_counts(config, region, cls, cond)
+        n_c = direct_family_counts(config, region, cls, cond, pop, shape)
         out["N_%s" % cls.upper()] = n_c
         out["Z_%s" % cls.upper()] = z_c
+        tabulated_medians[cls] = float(np.median(n_c_tabulated[np.isfinite(n_c_tabulated)]))
         checks[cls] = algebraic_check(config, region, cls, cond, pop, z_c, src_idx=0)
 
     n_gal, z_gal, fazio_params = gal_counts(config, region, cond)
@@ -605,7 +844,7 @@ def _build_one(config, region):
     path = _write(config, region, cond, out)
     wall_s = time.time() - t0
 
-    for line in report(config, region, cond, out, wall_s):
+    for line in report(config, region, cond, out, wall_s, tabulated_medians=tabulated_medians):
         print(line, flush=True)
     for line in report_gal_check(config, region, cond, n_gal, fazio_params):
         print(line, flush=True)
