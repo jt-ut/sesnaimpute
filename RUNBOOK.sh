@@ -103,7 +103,7 @@ PY sesnaimpute.prior.star_shapes   # per-tile STAR/AGB/PAHC shapes on a fixed 64
 PY sesnaimpute.prior.star_selection   # STAR/AGB/PAHC exact selection per source (SPEC_PRIORS.md sec 1.3)
 PY sesnaimpute.prior.yso_selection   # YSO IMF-mass selection, exact per source on X_LADDER (SPEC_PRIORS.md sec 1.3, 6.2)
 PY sesnaimpute.prior.h2s                    # H2S: law-blurred field, region lognormal, exact per-source knot-colour selection (SPEC_PRIORS.md sec 1.3, 7)
-PY sesnaimpute.prior.gal                    # GAL: Fazio counts law + exact per-source SWIRE selection (SPEC_PRIORS.md sec 1.3, 5)
+PY sesnaimpute.prior.gal                    # GAL: Fazio counts law + survey-wide SWIRE colour-CDF tables, selection read on the fly, no per-source product (SPEC_PRIORS.md sec 1.3, 5)
 PY sesnaimpute.prior.counts_star_family     # STAR/AGB/PAHC/GAL per-source counts and normalisers, exact selection against the shape (SPEC_PRIORS.md sec 0.2, 2-5)
 PY sesnaimpute.prior.counts_cloud           # YSO/H2S per-source counts on the cloud law (SPEC_PRIORS.md sec 6.2, 7)
 PY sesnaimpute.prior.levels                 # the one scalar per region normalising the six counts to the catalogued source count (SPEC_PRIORS.md sec 0.2)
