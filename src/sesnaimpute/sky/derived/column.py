@@ -1,14 +1,24 @@
 """The adopted source column: the finer arm wherever it reaches
 (SPEC_PRIORS.md section 1.1).
 
-`A_COL_K = A_HERSCHEL_K` (36.3 arcsec beam) where the region has a
-Herschel product and the source is covered, finite and positive;
-`A_COL_K = A_K` from the Planck arm (`planck_source_column.py`, PLANCK_FWHM_ARCMIN
-beam) elsewhere. Sigma, the beam and the Herschel map id all follow the
-same arm as the value -- one arm per source, never blended. A merged
-value that is anywhere non-finite or non-positive raises rather than
-ships, since both arms guarantee 100% finite, positive coverage on their
-own.
+`A_COL_K = A_HERSCHEL_K - ZP_FIELD[field]` (36.3 arcsec beam) where the
+region has a Herschel product and the source is covered, finite and
+positive; `A_COL_K = A_K` from the Planck arm (`planck_source_column.py`,
+PLANCK_FWHM_ARCMIN beam) elsewhere. A measured systematic left unapplied
+is an error of its own size (owner, 2026-09-06): `field` is the source's
+own region, one of the 13 named in `herschel_column.py`'s `sigma`/
+`survey` `FIELD_NAME`/`ZP_FIELD`/`ZP_SIGMA_FIELD`; a Herschel-covered
+region absent from that table (no column-check pixels) gets no offset
+and `ZP_SIGMA_K = 0`, unchanged from before. Sigma, the beam and the
+Herschel map id all follow the same arm as the value -- one arm per
+source, never blended; sigma is rebuilt from the Herschel arm's own
+random term (`SIGMA_RAND_K`) plus the field's own `ZP_SIGMA_K`, not
+copied from `column`/`source`'s stale, pre-refit `SIGMA_A_K`.
+`ZP_SIGMA_K` (mag), zero for a Planck-arm source, is a new per-source
+column of the adopted product: the field offset's own uncertainty, not
+the offset itself. A merged value that is anywhere non-finite or
+non-positive raises rather than ships, since both arms guarantee 100%
+finite, positive coverage on their own before this correction.
 
 `build_sightline` writes the same Herschel-where-covered, Planck-elsewhere
 rule at sightline granule (SPEC_PRIORS.md 1.1, 1.4): the adopted column
@@ -57,8 +67,11 @@ def _dec(v):
 
 
 def _load_herschel_arm(config, region):
-    """`{covered, a_k, sigma_a_k, map_id, map_names}` for `region`, in
-    catalogue row order."""
+    """`{covered, a_k, sigma_rand_k, map_id, map_names}` for `region`, in
+    catalogue row order. `sigma_rand_k` is the per-map random term alone
+    (`herschel_column.py`'s `SIGMA_RAND_K`, no zero point in it) -- the
+    field zero point is composed in fresh here, per field, not read from
+    this file's own (pre-refit) `SIGMA_A_K`."""
     path = config_module.product_path(config, "sky/derived", "herschel", "column", "source", region=region)
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -69,15 +82,36 @@ def _load_herschel_arm(config, region):
         return dict(
             covered=np.asarray(f["COVERED"][:], dtype=bool),
             a_k=np.asarray(f["A_K"][:], dtype=np.float64),
-            sigma_a_k=np.asarray(f["SIGMA_A_K"][:], dtype=np.float64),
+            sigma_rand_k=np.asarray(f["SIGMA_RAND_K"][:], dtype=np.float64),
             map_id=np.asarray(f["MAP_ID"][:], dtype=np.int32),
             map_names=np.asarray(f["MAP_NAME"][:]),
         )
 
 
-def merge_region(config, region, cal):
+def _load_field_zeropoints(config):
+    """`{field: (zp_field, zp_sigma_field)}` from `herschel_column.py`'s
+    `sigma`/`survey` product (owner, 2026-09-06) -- empty if the product
+    predates the per-field measurement, so every region falls back to no
+    offset and `ZP_SIGMA_K = 0`, exactly the old behaviour."""
+    path = config_module.product_path(config, "sky/derived", "herschel", "sigma", "survey")
+    with h5py.File(path, "r") as f:
+        if "FIELD_NAME" not in f:
+            return {}
+        names = [_dec(x) for x in f["FIELD_NAME"][:]]
+        zp = np.asarray(f["ZP_FIELD"][:], dtype=np.float64)
+        zp_sigma = np.asarray(f["ZP_SIGMA_FIELD"][:], dtype=np.float64)
+    return {n: (float(z), float(s)) for n, z, s in zip(names, zp, zp_sigma)}
+
+
+def merge_region(config, region, cal, field_zp=None):
     """Reads this region's two arms and merges them: Herschel where
-    covered, finite and positive; else Planck. Returns the merged arrays."""
+    covered, finite and positive (its own field's zero point subtracted,
+    the offset's uncertainty carried as `ZP_SIGMA_K`); else Planck.
+    Returns the merged arrays. `field_zp` is `_load_field_zeropoints`'s
+    dict, loaded once by `build()`; `merge_region(config, region, cal)`
+    still works standalone, loading it itself."""
+    if field_zp is None:
+        field_zp = _load_field_zeropoints(config)
     planck_path = config_module.product_path(config, "sky/derived", "planck", "column", "source", region=region)
     if not os.path.exists(planck_path):
         raise FileNotFoundError(
@@ -92,12 +126,16 @@ def merge_region(config, region, cal):
     fwhm = np.full(n, cal["fwhm_arcmin"] * 60.0, dtype=np.float32)
     prov = np.full(n, PROV_PLANCK, dtype=np.uint8)
     map_id = np.full(n, -1, dtype=np.int32)
+    zp_sigma_k = np.zeros(n, dtype=np.float64)
 
     herschel = _load_herschel_arm(config, region)
-    covered, a_h, sig_h = herschel["covered"], herschel["a_k"], herschel["sigma_a_k"]
+    covered, a_h_raw, sig_rand = herschel["covered"], herschel["a_k"], herschel["sigma_rand_k"]
+    zp_offset, zp_sigma = field_zp.get(region, (0.0, 0.0))
+    a_h = a_h_raw - zp_offset
     use_h = covered & np.isfinite(a_h) & (a_h > 0)
     a_col[use_h] = a_h[use_h]
-    sig_col[use_h] = sig_h[use_h]
+    sig_col[use_h] = np.sqrt(sig_rand[use_h] ** 2 + zp_sigma ** 2)
+    zp_sigma_k[use_h] = zp_sigma
     fwhm[use_h] = HERSCHEL_STATED_FWHM_ARCSEC
     prov[use_h] = PROV_HERSCHEL
     map_id[use_h] = herschel["map_id"][use_h]
@@ -111,11 +149,11 @@ def merge_region(config, region, cal):
         )
 
     return dict(a_col=a_col, sig_col=sig_col, prov=prov, fwhm=fwhm, map_id=map_id, map_names=map_names,
-               n_herschel=int(np.count_nonzero(prov == PROV_HERSCHEL)), n=n)
+               zp_sigma_k=zp_sigma_k, n_herschel=int(np.count_nonzero(prov == PROV_HERSCHEL)), n=n)
 
 
-def _build_one_region(config, region, cal):
-    d = merge_region(config, region, cal)
+def _build_one_region(config, region, cal, field_zp=None):
+    d = merge_region(config, region, cal, field_zp=field_zp)
     out_path = config_module.product_path(config, "sky/derived", "adopted", "column", "source", region=region)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     name_bytes = np.array([(x if isinstance(x, bytes) else str(x).encode("utf-8")) for x in d["map_names"]])
@@ -127,6 +165,7 @@ def _build_one_region(config, region, cal):
         f.create_dataset("A_COL_FWHM_ARCSEC", data=d["fwhm"])
         f.create_dataset("HERSCHEL_MAP_ID", data=d["map_id"])
         f.create_dataset("MAP_NAME", data=name_bytes)
+        f.create_dataset("ZP_SIGMA_K", data=d["zp_sigma_k"].astype(np.float32))
     return region, d["n"], d["n_herschel"]
 
 
@@ -388,7 +427,9 @@ def build(config, regions=None):
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
     cal = _load_planck_calibration(config)
-    Parallel(n_jobs=config.n_jobs)(delayed(_build_one_region)(config, region, cal) for region in regions)
+    field_zp = _load_field_zeropoints(config)
+    Parallel(n_jobs=config.n_jobs)(
+        delayed(_build_one_region)(config, region, cal, field_zp=field_zp) for region in regions)
     build_sightline(config)
     build_column_check(config)
 
