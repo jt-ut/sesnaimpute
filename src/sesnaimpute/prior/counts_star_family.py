@@ -83,6 +83,7 @@ from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
 from sesnaimpute.prior import column_grid, pahc_curve, selection, star_population, star_shapes
+from sesnaimpute.prior import star_selection as star_selection_module
 from sesnaimpute.prior import gal as gal_module
 
 FAMILY_CLASSES = ("star", "agb", "pahc")
@@ -373,82 +374,116 @@ def family_amplitude(config, region, cls, cond):
 
 
 # ---------------------------------------------------------------------------
-# STAR / AGB / PAHC: the DIRECT count, owner ruling 2026-09-06 -- the
-# population sum SPEC_PRIORS.md section 2.1/4 write, not the tabulated
-# shape's own integral (`family_counts` above, kept solely for `Z_C`, the
-# fitter's smoothed-density normaliser, and for a diagnostic "before"
-# number in the blessing report). Per source: every one of the tile's
-# simulated stars, at its own placement `u_i` and brightness `B_i`,
-# carries its own class weight (PAHC: `W_i . P(q_i(s))` at THIS source's
-# own 8 micron limit, not a limit-grid interpolation); its extinction is
-# `a_i(T) = T . u_i` for a true column `T` drawn from the source's own
-# two-component kernel mixture (`Kernel.mixture`), and its detection is
-# the source's OWN exact selection array (`read_family_selection`) read
-# at `(a_i(T) / A_s, B_i) = (u_i . T/A_s, B_i)` by bilinear interpolation,
-# clamped at the ladder's own ends. The expectation over `T` within one
-# mixture component has a known distribution (`log10(T/A_s) ~ Normal(mu_k,
-# sigma_k)`) and is taken by the fixed 8-point Gauss-Hermite quadrature
-# `GH_Z`/`GH_W` above; the two components are combined by the mixture's
-# own weight. No shape, no smoothing, no grid: the sum is over the
-# region's own simulated population, already on disk.
+# STAR / AGB / PAHC: the DIRECT count, coordinator ruling 2026-09-06 -- NO
+# selection table. The count is the population sum SPEC_PRIORS.md section
+# 2.1/4 write with the two-of-eight test itself run inside the compiled
+# loop, on the star's own 8-band flux dimmed at its own drawn extinction,
+# against the SOURCE's own eight limits directly (`selection.epsilon`'s
+# arithmetic, `catalog.limits`, the hybrid law's per-band kappa) -- not a
+# bilinear read of a pre-tabulated `eps_s(x, B)` array (the earlier form,
+# still how `family_counts`/`Z_C` reads the shape's own normaliser below;
+# the fitter still reads the stored selection table pointwise, only the
+# count no longer does). Per source: every one of the tile's simulated
+# stars, at its own placement `u_i` and its own 8-band flux, carries its
+# own class weight (PAHC: `W_i . P(q_i(s))` at THIS source's own 8 micron
+# limit); its extinction is `a_i(T) = T . u_i` for a true column `T` drawn
+# from the source's own two-component kernel mixture (`Kernel.mixture`),
+# and its detection is `sum(log10_flux_i - 0.4 . a_i(T) . kappa(a_i(T)) >=
+# log10_lim_s) >= 2`, `kappa` the hybrid law's own smooth blend between
+# the diffuse and dense curves (`selection.law_dense_weight`/`kappa_ak`,
+# hoisted to two plain (8,) vectors and blended inside the loop). The
+# expectation over `T` within one mixture component has a known
+# distribution (`log10(T/A_s) ~ Normal(mu_k, sigma_k)`) and is taken by
+# the fixed 8-point Gauss-Hermite quadrature `GH_Z`/`GH_W` above (found,
+# by testing 8-point/32-point Gauss-Hermite and an exact 48-cell mass form
+# against the literal 200k-draw reference, to already be converged -- the
+# residual against that reference lived in the selection TABLE this form
+# removes, not in the column quadrature); the two components are combined
+# by the mixture's own weight. This IS the reference's own arithmetic, run
+# inside the compiled loop instead of by Monte Carlo sampling.
 # ---------------------------------------------------------------------------
 
-def _b_bracket_arrays(logb, b_grid):
-    """`(ib, tb)`, each `(n_member,)`: every member's own linear bracket
-    on the class's fixed `b_grid` axis, computed ONCE per tile in plain
-    numpy. The brightness axis does not depend on the source or the
-    quadrature point, only on the member -- so this used to be
-    recomputed by a linear search inside the compiled loop's innermost
-    pass, once per (source, mixture component, quadrature point, member)
-    -- 16 times per member per source for nothing, since the answer never
-    changed. Hoisting it out here (profiled: this and the matching x-only
-    search below turned NGC 7129's STAR pass from 2.5 s to a fraction of
-    that) leaves the compiled loop only the `x` bracket, which DOES
-    change every quadrature draw."""
-    b_grid = np.asarray(b_grid, dtype=np.float64)
-    logb = np.clip(np.asarray(logb, dtype=np.float64), b_grid[0], b_grid[-1])
-    ib = np.clip(np.searchsorted(b_grid, logb) - 1, 0, b_grid.size - 2)
-    span = b_grid[ib + 1] - b_grid[ib]
-    tb = np.where(span > 0.0, (logb - b_grid[ib]) / np.where(span > 0.0, span, 1.0), 0.0)
-    return ib.astype(np.int64), tb.astype(np.float64)
+#: The hybrid law's ramp domain (`selection.LAW_RAMP_LO`/`LAW_RAMP_HI`),
+#: inlined as plain floats so the compiled loop below needs no call back
+#: into `selection` per member.
+_RAMP_LO = float(selection.LAW_RAMP_LO)
+_RAMP_HI = float(selection.LAW_RAMP_HI)
+_LN_RAMP_SPAN = float(np.log(_RAMP_HI / _RAMP_LO))
+_MIN_BANDS = int(selection.MIN_BANDS)
+_N_BANDS = int(selection.N_BANDS)
+
+
+def _tile_star_index(config, region, n_tile):
+    """`STAR_INDEX` per tile (n_star,) int64, straight off `prior.
+    star_population`'s own product -- the row into the region's field-star
+    register (`prior.field_stars`) each tile member is, not carried by
+    `star_shapes.read_population` since the shape-density path never
+    needed a member's own flux, only its already-reduced brightness unit."""
+    path = config_module.product_path(config, "bms", "star", "population", "tile", region=region)
+    with h5py.File(path, "r") as f:
+        return [np.asarray(f["tile_%d/STAR_INDEX" % t][:], dtype=np.int64) for t in range(n_tile)]
+
+
+def _region_log10_flux_and_l(config, region):
+    """`(log10_flux, log_l)`: the region's own TRILEGAL field-star
+    register (`bms/trilegal/field-stars/region`), `log10_flux` `(n, 8)`
+    with a non-positive flux mapped to a large negative sentinel (never
+    finite, never clears a limit -- `pass_curves`' own "a band whose
+    log10_flux is not finite never clears" rule, made a finite sentinel
+    here since the compiled loop below runs under `fastmath`, which does
+    not guarantee IEEE NaN/inf comparisons)."""
+    path = config_module.product_path(config, "bms", "trilegal", "field-stars", "region", region=region)
+    with h5py.File(path, "r") as f:
+        flux = f["FNU_MJY"][:].astype(np.float64)
+        log_l = f["LOG_L"][:].astype(np.float64)
+    log10_flux = np.where(flux > 0.0, np.log10(np.where(flux > 0.0, flux, 1.0)), -1.0e30)
+    return log10_flux, log_l
 
 
 @numba.njit(cache=True, fastmath=True, inline="always")
-def _x_bracket(x_ladder, x):
-    """`(ix, tx)`: the linear bracket on `x_ladder`, clamped at either
-    end (module docstring's "clamped at the ladder's own ends", departure
-    5 of the blessing page) -- the one axis the direct sum's inner loop
-    still has to search, since `x = u_i . T/A_s` moves with every
-    quadrature draw."""
-    n_x = x_ladder.shape[0]
-    if x < x_ladder[0]:
-        x = x_ladder[0]
-    elif x > x_ladder[n_x - 1]:
-        x = x_ladder[n_x - 1]
-    ix = n_x - 2
-    for j in range(n_x - 1):
-        if x < x_ladder[j + 1]:
-            ix = j
-            break
-    span_x = x_ladder[ix + 1] - x_ladder[ix]
-    tx = (x - x_ladder[ix]) / span_x if span_x > 0.0 else 0.0
-    return ix, tx
+def _passes_two_of_eight(a, log10_flux_i, log10_lim_s, kd, kw, ramp_lo, ln_ramp_span, min_bands, n_bands):
+    """Whether one star, dimmed by extinction `a`, clears the source's own
+    detection cut (`selection.epsilon`'s arithmetic, module docstring):
+    the hybrid law's ramp weight at `a` (`selection.law_dense_weight`),
+    the per-band kappa it gives (`selection.kappa_hybrid`), and the
+    two-of-eight count against `log10_lim_s`."""
+    if a <= ramp_lo:
+        wramp = 0.0
+    else:
+        x = np.log(a / ramp_lo) / ln_ramp_span
+        if x >= 1.0:
+            wramp = 1.0
+        else:
+            wramp = x * x * (3.0 - 2.0 * x)
+    n_clear = 0
+    for b in range(n_bands):
+        kappa_b = (1.0 - wramp) * kd[b] + wramp * kw[b]
+        if log10_flux_i[b] - 0.4 * a * kappa_b >= log10_lim_s[b]:
+            n_clear += 1
+    return n_clear >= min_bands
 
 
 @numba.njit(cache=True, parallel=True, fastmath=True)
-def _direct_sum_fixed_weight(weight, u, ib, tb, eps, x_ladder,
-                              w_mix, mu_mix, sigma_mix, gh_z, gh_w):
-    """`(n_source,)`: `Sum_i weight_i . E_T[eps_s(u_i . T/A_s, B_i)]` for
-    every source in this batch, `weight`/`u`/`ib`/`tb` the tile's own
-    fixed per-star arrays (STAR, AGB -- the same for every source of the
-    tile, module docstring); `ib`/`tb` are `_b_bracket_arrays`'s
-    precomputed brightness bracket, one per member."""
-    n_source = eps.shape[0]
+def _direct_sum_literal_fixed(weight, u, log10_flux, log10_lim, a_col, kd, kw,
+                               w_mix, mu_mix, sigma_mix, gh_z, gh_w,
+                               ramp_lo, ln_ramp_span, min_bands, n_bands):
+    """`(n_source,)`: `Sum_i weight_i . E_T[epsilon(a_i(T), B_i)]`, the
+    two-of-eight test run directly (module docstring) -- `weight`/`u`/
+    `log10_flux` the tile's own fixed per-star arrays (STAR, AGB -- the
+    same for every source of the tile), `log10_lim` `(n_source, 8)` each
+    source's own limits, `a_col` `(n_source,)` each source's own adopted
+    column: the quadrature draws `mult = T/A_s` (the kernel mixture is in
+    that ratio), so the star's own REAL extinction is `a = u_i . T = u_i
+    . mult . A_s` -- the `. a_col[s]` matters, since `epsilon`'s dimming
+    `0.4 . a . kappa(a)` needs the true magnitude, not the scaled ratio
+    the old table's `x`-axis used."""
+    n_source = log10_lim.shape[0]
     n_member = u.shape[0]
     n_q = gh_z.shape[0]
     out = np.zeros(n_source, dtype=np.float64)
     for s in numba.prange(n_source):
-        eps_s = eps[s]
+        lim_s = log10_lim[s]
+        a_s = a_col[s]
         total = 0.0
         for k in range(2):
             wk = w_mix[s] if k == 0 else (1.0 - w_mix[s])
@@ -457,40 +492,36 @@ def _direct_sum_fixed_weight(weight, u, ib, tb, eps, x_ladder,
             mu_k = mu_mix[s, k]
             sigma_k = sigma_mix[s, k]
             for q in range(n_q):
-                mult = 10.0 ** (mu_k + sigma_k * gh_z[q])
+                mult = a_s * 10.0 ** (mu_k + sigma_k * gh_z[q])
                 comp = 0.0
                 for i in range(n_member):
                     wi = weight[i]
                     if wi == 0.0:
                         continue
-                    ix, tx = _x_bracket(x_ladder, u[i] * mult)
-                    ibi, tbi = ib[i], tb[i]
-                    v00 = eps_s[ix, ibi]
-                    v10 = eps_s[ix + 1, ibi]
-                    v01 = eps_s[ix, ibi + 1]
-                    v11 = eps_s[ix + 1, ibi + 1]
-                    val = ((1.0 - tx) * (1.0 - tbi) * v00 + tx * (1.0 - tbi) * v10
-                           + (1.0 - tx) * tbi * v01 + tx * tbi * v11)
-                    comp += wi * val
+                    a = u[i] * mult
+                    if _passes_two_of_eight(a, log10_flux[i], lim_s, kd, kw,
+                                             ramp_lo, ln_ramp_span, min_bands, n_bands):
+                        comp += wi
                 total += wk * gh_w[q] * comp
         out[s] = total
     return out
 
 
 @numba.njit(cache=True, parallel=True, fastmath=True)
-def _direct_sum_per_source_weight(weight, u, ib, tb, eps, x_ladder,
-                                   w_mix, mu_mix, sigma_mix, gh_z, gh_w):
-    """As `_direct_sum_fixed_weight`, but `weight` is `(n_source,
+def _direct_sum_literal_pahc(weight, u, log10_flux, log10_lim, a_col, kd, kw,
+                              w_mix, mu_mix, sigma_mix, gh_z, gh_w,
+                              ramp_lo, ln_ramp_span, min_bands, n_bands):
+    """As `_direct_sum_literal_fixed`, but `weight` is `(n_source,
     n_member)` -- PAHC's own `W_i . P(q_i(s))`, a different number per
-    source since `q` depends on the source's own 8 micron limit (module
-    docstring)."""
-    n_source = eps.shape[0]
+    source since `q` depends on the source's own 8 micron limit."""
+    n_source = log10_lim.shape[0]
     n_member = u.shape[0]
     n_q = gh_z.shape[0]
     out = np.zeros(n_source, dtype=np.float64)
     for s in numba.prange(n_source):
-        eps_s = eps[s]
+        lim_s = log10_lim[s]
         weight_s = weight[s]
+        a_s = a_col[s]
         total = 0.0
         for k in range(2):
             wk = w_mix[s] if k == 0 else (1.0 - w_mix[s])
@@ -499,21 +530,16 @@ def _direct_sum_per_source_weight(weight, u, ib, tb, eps, x_ladder,
             mu_k = mu_mix[s, k]
             sigma_k = sigma_mix[s, k]
             for q in range(n_q):
-                mult = 10.0 ** (mu_k + sigma_k * gh_z[q])
+                mult = a_s * 10.0 ** (mu_k + sigma_k * gh_z[q])
                 comp = 0.0
                 for i in range(n_member):
                     wi = weight_s[i]
                     if wi == 0.0:
                         continue
-                    ix, tx = _x_bracket(x_ladder, u[i] * mult)
-                    ibi, tbi = ib[i], tb[i]
-                    v00 = eps_s[ix, ibi]
-                    v10 = eps_s[ix + 1, ibi]
-                    v01 = eps_s[ix, ibi + 1]
-                    v11 = eps_s[ix + 1, ibi + 1]
-                    val = ((1.0 - tx) * (1.0 - tbi) * v00 + tx * (1.0 - tbi) * v10
-                           + (1.0 - tx) * tbi * v01 + tx * tbi * v11)
-                    comp += wi * val
+                    a = u[i] * mult
+                    if _passes_two_of_eight(a, log10_flux[i], lim_s, kd, kw,
+                                             ramp_lo, ln_ramp_span, min_bands, n_bands):
+                        comp += wi
                 total += wk * gh_w[q] * comp
         out[s] = total
     return out
@@ -569,11 +595,12 @@ def _tile_log10_q0(config, region, n_tile):
 def direct_family_counts(config, region, cls, cond, pop, shape):
     """`N_C(s)` (n_source,), objects per deg**2 (module docstring): the
     population sum SPEC_PRIORS.md section 2.1 (STAR/AGB) and section 4
-    (PAHC) write, one tile at a time (every source of a tile shares that
-    tile's own simulated population), PAHC's own per-source weight matrix
-    batched through `sesnaimpute.batches` so no tile holds more than
+    (PAHC) write, the two-of-eight test itself run inside the compiled
+    loop against the source's own eight limits -- no selection table, one
+    tile at a time (every source of a tile shares that tile's own
+    simulated population), PAHC's own per-source weight matrix batched
+    through `sesnaimpute.batches` so no tile holds more than
     `BATCH_BUDGET_BYTES` of it at once."""
-    eps, x_ladder, b_grid = read_family_selection(config, region, cls)
     n_source = cond["n_source"]
     tile_id = cond["tile_id"]
     a_col, sigma_col, map_class = cond["a_col"], cond["sigma_col"], cond["map_class"]
@@ -581,55 +608,63 @@ def direct_family_counts(config, region, cls, cond, pop, shape):
     kern = shape.kern
     w_mix, mu_mix, sigma_mix = kern.mixture(a_col, sigma_col, map_class, zp_sigma_k=zp_sigma_k)
 
+    log10_lim = np.log10(limits_module.limits(config, region)).astype(np.float64)
+    kd = selection.kappa_ak(config, selection.LAW_DIFFUSE).astype(np.float64)
+    kw = selection.kappa_ak(config, selection.LAW_DENSE).astype(np.float64)
+
     n_c = np.zeros(n_source, dtype=np.float64)
     n_tile = len(pop["tiles"])
+    star_index_by_tile = _tile_star_index(config, region, n_tile)
+    log10_flux_region, log_l_region = _region_log10_flux_and_l(config, region)
 
     if cls == "pahc":
         log10_q0_by_tile = _tile_log10_q0(config, region, n_tile)
         curve = pahc_curve.read(config)
         log10_flim8 = np.log10(cond["f_lim8"])
 
+    ramp_args = (_RAMP_LO, _LN_RAMP_SPAN, _MIN_BANDS, _N_BANDS)
+
     for t in np.unique(tile_id):
         src_idx = np.flatnonzero(tile_id == t)
         tile = pop["tiles"][int(t)]
+        star_index = star_index_by_tile[int(t)]
 
         if cls == "star":
             w, u = tile["w_star"], tile["u"]
-            ib, tb = _b_bracket_arrays(tile["log10_b"], b_grid)
-            n_c[src_idx] = _direct_sum_fixed_weight(
-                w, u, ib, tb, eps[src_idx].astype(np.float64), x_ladder,
-                w_mix[src_idx], mu_mix[src_idx], sigma_mix[src_idx], GH_Z, GH_W)
+            log10_flux = log10_flux_region[star_index]
+            n_c[src_idx] = _direct_sum_literal_fixed(
+                w, u, log10_flux, log10_lim[src_idx], a_col[src_idx], kd, kw,
+                w_mix[src_idx], mu_mix[src_idx], sigma_mix[src_idx], GH_Z, GH_W, *ramp_args)
         elif cls == "agb":
             ev = tile["is_evolved"]
             w_ev, f_c = tile["w_agb"][ev], pop["f_c"]
             u = np.concatenate([tile["u"][ev], tile["u"][ev]])
-            logb = np.concatenate([tile["log10_b_agb_o"][ev], tile["log10_b_agb_c"][ev]])
             w = np.concatenate([w_ev * (1.0 - f_c), w_ev * f_c])
-            ib, tb = _b_bracket_arrays(logb, b_grid)
-            n_c[src_idx] = _direct_sum_fixed_weight(
-                w, u, ib, tb, eps[src_idx].astype(np.float64), x_ladder,
-                w_mix[src_idx], mu_mix[src_idx], sigma_mix[src_idx], GH_Z, GH_W)
+            log_l_ev = log_l_region[star_index[ev]]
+            flux_o, flux_c = star_selection_module.agb_matched_flux(
+                config, log_l_ev, tile["log10_b_agb_o"][ev], tile["log10_b_agb_c"][ev])
+            log10_flux = np.concatenate([
+                np.where(flux_o > 0.0, np.log10(np.where(flux_o > 0.0, flux_o, 1.0)), -1.0e30),
+                np.where(flux_c > 0.0, np.log10(np.where(flux_c > 0.0, flux_c, 1.0)), -1.0e30)], axis=0)
+            n_c[src_idx] = _direct_sum_literal_fixed(
+                w, u, log10_flux, log10_lim[src_idx], a_col[src_idx], kd, kw,
+                w_mix[src_idx], mu_mix[src_idx], sigma_mix[src_idx], GH_Z, GH_W, *ramp_args)
         else:
             u, w_raw = tile["u"], tile["w"]
-            ib, tb = _b_bracket_arrays(tile["log10_b_pahc"], b_grid)
+            log10_flux = log10_flux_region[star_index]
             log10_q0 = log10_q0_by_tile[int(t)]
             row_bytes = w_raw.size * 8
             for bstart, bstop in batches_module.batches(src_idx.size, row_bytes, budget_bytes=BATCH_BUDGET_BYTES):
                 s_idx = src_idx[bstart:bstop]
-                # one vectorised lookup of P(q) for the whole (n_batch,
-                # n_pop) grid of log10 q = log10 F_lim(s) + LOG10_Q0(member)
-                # -- the batch's own weight matrix built once, outside the
-                # compiled loop, and passed in a single call (coordinator,
-                # 2026-09-06: the earlier per-tile-batch loop already did
-                # this; profiling found the real cost was the redundant
-                # per-quadrature brightness-bracket search inside the loop,
-                # not this weight lookup -- fixed above by `_b_bracket_arrays`).
+                # one vectorised, fused lookup of P(q) for the whole
+                # (n_batch, n_pop) grid of log10 q = log10 F_lim(s) +
+                # LOG10_Q0(member), built once outside the compiled loop.
                 weight = _pahc_weight_matrix(
                     log10_flim8[s_idx], log10_q0, w_raw,
                     float(curve.x[0]), float(curve.x[1] - curve.x[0]), curve.y)
-                n_c[s_idx] = _direct_sum_per_source_weight(
-                    weight, u, ib, tb, eps[s_idx].astype(np.float64), x_ladder,
-                    w_mix[s_idx], mu_mix[s_idx], sigma_mix[s_idx], GH_Z, GH_W)
+                n_c[s_idx] = _direct_sum_literal_pahc(
+                    weight, u, log10_flux, log10_lim[s_idx], a_col[s_idx], kd, kw,
+                    w_mix[s_idx], mu_mix[s_idx], sigma_mix[s_idx], GH_Z, GH_W, *ramp_args)
 
     pop_path = config_module.product_path(config, "bms", "star", "population", "tile", region=region)
     with h5py.File(pop_path, "r") as f:
