@@ -76,7 +76,7 @@ from sesnaimpute.prior import yso as yso_module
 #: (CODING_RULES.md rule 10a): each chunk's own transient array is
 #: `(chunk pairs * n_edges, n_quadrature)`, bounded well under the 8 GB
 #: ceiling regardless of a region's own source or sightline count.
-PAIR_CHUNK = 400
+PAIR_CHUNK = 40
 
 #: The anchor pixelisation the section 6.4 item 1 check integrates over
 #: (`prior.yso.NSIDE_ANCHOR`, the same nside `prior.young_stars` uses for
