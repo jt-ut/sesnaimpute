@@ -9,9 +9,14 @@ count: every catalogued source is one of the six classes, so the six
 counts, integrated over the region, must equal the number of sources
 catalogued there. The same factor multiplies every class, so no source
 moves between classes and no source's class probability changes; the
-per-class ratios (below) are printed diagnostics of how well each
-class's own spatial pattern follows the catalogue's, never a second
-correction.
+per-class source-sum / area-integral figures (below) are printed
+SAMPLING diagnostics of how well each class's own spatial pattern
+follows the catalogue's -- not a level check, since the level factor
+`f` above is the only thing this module fits -- never a second
+correction. For YSO in particular the figure runs above 1 in cluster
+regions by construction: the law rises with the column squared, so
+sources concentrated in the densest pixels sum to more than the
+pixel-mean-times-area integral would predict there.
 
 Per pixel `i`, `n_i` is the pixel's own catalogued source count (the
 granule map's own `N_SOURCE_ROWS`) and each class `C`'s predicted count
@@ -35,8 +40,9 @@ The one factor `f = sum(n_i) / sum_i sum_C P_C,i` is the closed-form
 Poisson-likelihood maximiser for a single multiplicative scalar on a
 linear predictor, so no iteration is needed. The Poisson deviance before
 and after is reported as the goodness-of-fit diagnostic; the per-class
-ratio of the class's own summed prior probability to its own integrated,
-levelled count is reported per class (module `read`'s `RATIO_<class>`).
+source-sum / area-integral SAMPLING diagnostic (not a level check; YSO's
+own runs above 1 in cluster regions by construction) is reported per
+class (module `read`'s `RATIO_<class>`).
 
 Writes one 30-row product, `bms/table/levels_table_region.hdf5`: root
 attr `GRANULE = "region"`; `F_REGION`, `RATIO_STAR` ... `RATIO_H2S`,
@@ -345,10 +351,14 @@ def _build_one(config, region):
     dev_before = poisson_deviance(n_i, mu_before)
     dev_after = poisson_deviance(n_i, mu_after)
 
-    # the per-class diagnostic (reported, never enforced): the prior class
-    # probability summed over the region's sources against the class's
-    # integrated count after the factor; a ratio away from 1 says the count's
+    # the per-class SAMPLING diagnostic (reported, never enforced, not a
+    # level check -- that is `f` above): the prior class probability
+    # summed over the region's sources against the class's integrated
+    # count after the factor; a ratio away from 1 says the count's
     # spatial pattern does not follow the catalogue's source density.
+    # YSO's own ratio runs above 1 in cluster regions by construction
+    # (the law rises with the column squared, so sources concentrated in
+    # the densest pixels sum to more than the pixel mean predicts).
     n_tot = np.zeros(src_pix.size)
     for c in CLASSES:
         n_tot += values[c]
@@ -365,7 +375,8 @@ def _build_one(config, region):
           "against %d catalogued sources); deviance before/after %.0f/%.0f; mosaic %.2f deg2, "
           "covered-weighted %.2f deg2" % (region, pixels.size, wall_s, f, total_before,
           int(total_observed), dev_before, dev_after, mosaic_area_deg2, covered_area_deg2), flush=True)
-    print("prior.levels: %s: prob-sum / integrated-count per class: %s"
+    print("prior.levels: %s: source-sum / area-integral per class (sampling diagnostic, "
+          "not a level check; YSO's own > 1 in cluster regions by construction): %s"
           % (region, ", ".join("%s %.2f" % (c, ratios[c]) for c in CLASSES)), flush=True)
 
     rows = {"F_REGION": [f], "TOTAL_OBSERVED": [total_observed], "TOTAL_BEFORE": [total_before],
