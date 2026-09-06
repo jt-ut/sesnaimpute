@@ -16,8 +16,13 @@ conditioned on brightness: each member is counted only within its own
 population (SPEC_PRIORS.md 1.3).
 
 Members per class: STAR is the whole field-star population weighted by
-`W_STAR`; PAHC is the same population weighted by `W * P_PAHC` at the
-region's median 8 micron completeness limit; AGB dusty is the evolved
+`W_STAR`; PAHC is the same population, raw `W` unreduced, weighted by
+`P(q)` evaluated PER SOURCE (owner, 2026-09-06; SPEC_PRIORS.md section 4):
+`q = F_lim,8(s) / f_8(member)`, the member's own 8 micron flux dimmed at
+its own (fixed, not ladder-scaled) tile extinction, per section 4's
+decision 1 -- so PAHC's member weight is `(n_src, n_pop)`, computed a
+batch of sources at a time (`pahc_curve.read`, `LOG10_Q0`), not one
+number per member; AGB dusty is the evolved
 stars matched to the nearest GRAMS model by chemistry, weighted by the
 O/C split of `W_AGB`; AGB photosphere is the same evolved stars and
 weights with the star's own TRILEGAL flux standing in for the GRAMS
@@ -51,10 +56,11 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
-from sesnaimpute.prior import selection, star_population
+from sesnaimpute.prior import pahc_curve, selection, star_population
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
+IDX_I4 = BAND_KEYS.index("I4")
 
 #: The shared scaled-extinction ladder and brightness-grid size (module
 #: docstring): re-exported from `prior.selection`, the one place they
@@ -90,11 +96,12 @@ def _tile_group_names(f):
 
 def region_population(config, region):
     """The region-level population for the exact per-source selection
-    (module docstring): TRILEGAL's own fluxes and luminosities, and one
-    total weight per star for each of STAR, AGB and PAHC (the sum, over
-    tiles, of that tile's own `W_STAR` / `W_AGB` / `W * P_PAHC[:,
-    median]`).
-    """
+    (module docstring): TRILEGAL's own fluxes and luminosities, one
+    total weight per star for STAR and AGB (the sum, over tiles, of that
+    tile's own `W_STAR` / `W_AGB`), and for PAHC the raw `W` (sum over
+    tiles, unreduced) and a `LOG10_Q0` (the tile-`W`-weighted mean, over
+    tiles, of that tile's own `LOG10_Q0`) that the per-source build turns
+    into `P(q)` at each source's own limit (module docstring)."""
     pop_path = config_module.product_path(config, "bms", "star", "population", "tile", region=region)
     if not os.path.exists(pop_path):
         raise FileNotFoundError(
@@ -111,17 +118,20 @@ def region_population(config, region):
         log10_b_pahc = g0["LOG10_B_PAHC"][:].astype(np.float64)
         log10_b_agb_c = g0["LOG10_B_AGB_C"][:].astype(np.float64)
         log10_b_agb_o = g0["LOG10_B_AGB_O"][:].astype(np.float64)
-        median_idx = star_population.PAHC_LIMIT_MEDIAN_INDEX
 
         w_star_total = np.zeros(n_star, dtype=np.float64)
         w_agb_total = np.zeros(n_star, dtype=np.float64)
-        w_pahc_total = np.zeros(n_star, dtype=np.float64)
+        w_raw_total = np.zeros(n_star, dtype=np.float64)
+        log10_q0_wsum = np.zeros(n_star, dtype=np.float64)
         for name in tile_names:
             g = f[name]
             w_tile = g["W"][:].astype(np.float64)
             w_star_total += g["W_STAR"][:].astype(np.float64)
             w_agb_total += g["W_AGB"][:].astype(np.float64)
-            w_pahc_total += w_tile * g["P_PAHC"][:, median_idx].astype(np.float64)
+            w_raw_total += w_tile
+            log10_q0_wsum += w_tile * g["LOG10_Q0"][:].astype(np.float64)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log10_q0 = np.where(w_raw_total > 0.0, log10_q0_wsum / w_raw_total, 0.0)
 
     field_path = config_module.product_path(config, "bms", "trilegal", "field-stars", "region", region=region)
     with h5py.File(field_path, "r") as f:
@@ -136,7 +146,8 @@ def region_population(config, region):
         flux=flux, log_l=log_l, is_evolved=is_evolved,
         log10_b=log10_b, log10_b_pahc=log10_b_pahc,
         log10_b_agb_c=log10_b_agb_c, log10_b_agb_o=log10_b_agb_o,
-        w_star_total=w_star_total, w_agb_total=w_agb_total, w_pahc_total=w_pahc_total)
+        w_star_total=w_star_total, w_agb_total=w_agb_total,
+        w_raw_total=w_raw_total, log10_q0=log10_q0)
 
 
 # ---------------------------------------------------------------------------
@@ -326,36 +337,44 @@ class _ClassPopulation:
 
 class _FusedPair:
     """STAR and PAHC together, drawn from ONE shared member subsample
-    (module docstring) so `selection.pass_fractions_binned_multi` reads
-    each member's 8-band flux once for both classes: `log10_flux`
-    (n_used, 8) shared; `log10_b_pop`, `weight`, `bin_of_pop` each
-    (n_used, 2) [STAR, PAHC]; `b_grid` (N_B_GRID, 2). `n_used_a`/
-    `n_used_b`, `n_nonzero_a`/`n_nonzero_b` are each class's own
-    nonzero-weight count for the report; `n_used`/`n_nonzero` are the
+    (module docstring) so `selection.pass_fractions_binned_star_pahc`
+    reads each member's 8-band flux once for both classes: `log10_flux`
+    (n_used, 8) shared. STAR keeps one weight per member,
+    `weight_star`/`bin_of_star` (n_used,), `b_grid_a`. PAHC's member
+    weight is not fixed -- it is `W_j * P(q_j(s))`, a different number
+    per source (module docstring) -- so this class carries only the
+    per-member pieces that ARE fixed: `log10_b_b`, `w_raw` (the raw `W`,
+    unreduced) and `log10_q0` (so a batch of sources can each fold its
+    own `P(q)` into a weight at build time), plus `bin_of_pahc`/`b_grid_b`
+    (brightness binning is geometric, weight-independent). `n_nonzero_a`/
+    `n_nonzero_b` are each class's own nonzero-weight count for the
+    report (PAHC's counted on `w_raw > 0`, since its real per-source
+    weight is not known until build time); `n_used`/`n_nonzero` are the
     shared draw's own size and its union nonzero count."""
 
-    def __init__(self, flux, log10_b_a, weight_a, log10_b_b, weight_b):
+    def __init__(self, flux, log10_b_a, weight_a, log10_b_b, w_raw, log10_q0):
         log10_b_a = np.asarray(log10_b_a, dtype=np.float64)
         log10_b_b = np.asarray(log10_b_b, dtype=np.float64)
         weight_a = np.asarray(weight_a, dtype=np.float64)
-        weight_b = np.asarray(weight_b, dtype=np.float64)
+        w_raw = np.asarray(w_raw, dtype=np.float64)
+        log10_q0 = np.asarray(log10_q0, dtype=np.float64)
         b_grid_a = log10_b_grid_for(log10_b_a, weight_a)
-        b_grid_b = log10_b_grid_for(log10_b_b, weight_b)
-        idx, n_nonzero = shared_subsample(weight_a, weight_b)
+        b_grid_b = log10_b_grid_for(log10_b_b, w_raw)
+        idx, n_nonzero = shared_subsample(weight_a, w_raw)
 
         self.log10_flux = np.ascontiguousarray(_log10_finite(flux[idx]))
-        self.log10_b_pop = np.ascontiguousarray(
-            np.stack([log10_b_a[idx], log10_b_b[idx]], axis=1))
-        self.weight = np.ascontiguousarray(np.stack([weight_a[idx], weight_b[idx]], axis=1))
-        self.bin_of_pop = np.ascontiguousarray(np.stack(
-            [bin_of_pop_for(log10_b_a[idx], b_grid_a),
-             bin_of_pop_for(log10_b_b[idx], b_grid_b)], axis=1))
-        self.b_grid = np.ascontiguousarray(np.stack([b_grid_a, b_grid_b], axis=1))
+        self.log10_b_a = np.ascontiguousarray(log10_b_a[idx])
+        self.weight_star = np.ascontiguousarray(weight_a[idx])
+        self.bin_of_star = np.ascontiguousarray(bin_of_pop_for(log10_b_a[idx], b_grid_a))
+        self.log10_b_b = np.ascontiguousarray(log10_b_b[idx])
+        self.w_raw = np.ascontiguousarray(w_raw[idx])
+        self.log10_q0 = np.ascontiguousarray(log10_q0[idx])
+        self.bin_of_pahc = np.ascontiguousarray(bin_of_pop_for(log10_b_b[idx], b_grid_b))
         self.b_grid_a, self.b_grid_b = b_grid_a, b_grid_b
         self.n_used = idx.size
         self.n_nonzero = n_nonzero
         self.n_nonzero_a = int(np.count_nonzero(weight_a > 0.0))
-        self.n_nonzero_b = int(np.count_nonzero(weight_b > 0.0))
+        self.n_nonzero_b = int(np.count_nonzero(w_raw > 0.0))
 
 
 def _class_populations(config, pop):
@@ -363,7 +382,7 @@ def _class_populations(config, pop):
     (module docstring's four member sets; STAR and PAHC fused onto one
     shared member draw)."""
     star_pahc = _FusedPair(pop["flux"], pop["log10_b"], pop["w_star_total"],
-                            pop["log10_b_pahc"], pop["w_pahc_total"])
+                            pop["log10_b_pahc"], pop["w_raw_total"], pop["log10_q0"])
 
     evolved = pop["is_evolved"]
     flux_o, flux_c = agb_matched_flux(
@@ -400,14 +419,19 @@ def _class_populations(config, pop):
     return dict(star_pahc=star_pahc, agb=agb, agb_photo=agb_photo)
 
 
-def _row_bytes(n_x, n_b):
+def _row_bytes(n_x, n_b, n_pop_pahc=0):
     """The per-source working-array footprint one batch holds: the
-    source's own limits and query-extinction/kappa arrays, plus the
-    fused STAR+PAHC pass's `(n_x, n_b, 2)` f4 output and the two AGB
-    passes' `(n_x, n_b)` f4 outputs, before each is cast to `f2` on
-    write."""
+    source's own limits and query-extinction/kappa arrays, the fused
+    STAR+PAHC pass's two `(n_x, n_b)` f4 outputs and the two AGB passes'
+    `(n_x, n_b)` f4 outputs (before each is cast to `f2` on write), plus
+    PAHC's own per-source member weight (owner, 2026-09-06): `log10 q`,
+    `P(q)` and the folded weight, three f8 arrays of `n_pop_pahc`
+    members, per source in the batch -- the term `batches_module.batches`
+    sizes the batch down for, since it is (with 15,000 members) the
+    largest per-row cost."""
     return (N_BANDS * 8 + n_x * 8 + n_x * N_BANDS * 8
-            + (2 * n_x * n_b + 2 * n_x * n_b) * 4)
+            + (2 * n_x * n_b + 2 * n_x * n_b) * 4
+            + 3 * n_pop_pahc * 8)
 
 
 def build_and_write_region(config, region):
@@ -432,6 +456,7 @@ def build_and_write_region(config, region):
     x_ladder = X_LADDER
     n_x = x_ladder.size
     n_b = N_B_GRID
+    pahc_p_of_q = pahc_curve.read(config)
 
     path = config_module.product_path(config, "bms", "star", "selection", "source", region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -446,7 +471,8 @@ def build_and_write_region(config, region):
         ds_agb = f.create_dataset("EPS_AGB", shape=(n_source, n_x, n_b), dtype="f2")
         ds_agb_photo = f.create_dataset("EPS_AGB_PHOTOSPHERE", shape=(n_source, n_x, n_b), dtype="f2")
 
-        row_bytes = _row_bytes(n_x, n_b)
+        fp = classes["star_pahc"]
+        row_bytes = _row_bytes(n_x, n_b, fp.log10_q0.size)
         for start, stop in batches_module.batches(n_source, row_bytes, budget_bytes=BATCH_BUDGET_BYTES):
             lim_b = np.ascontiguousarray(log10_lim[start:stop])
             a_b = a_col[start:stop]
@@ -454,12 +480,23 @@ def build_and_write_region(config, region):
             w_dense_b = selection.law_dense_weight(a_query_b)
             kappa_b = np.ascontiguousarray(selection.kappa_hybrid(config, w_dense_b))
 
-            fp = classes["star_pahc"]
-            eps2 = selection.pass_fractions_binned_multi(
-                lim_b, a_query_b, kappa_b, fp.log10_flux, fp.log10_b_pop,
-                fp.weight, fp.bin_of_pop, fp.b_grid)
-            ds_star[start:stop] = eps2[..., 0].astype("f2")
-            ds_pahc[start:stop] = eps2[..., 1].astype("f2")
+            # PAHC's own per-source member weight (owner, 2026-09-06;
+            # SPEC_PRIORS.md section 4): q = F_lim,8(s) / f_8(member),
+            # the member's 8um flux dimmed at its own fixed tile
+            # extinction (LOG10_Q0, not the ladder point's a_query) --
+            # log10(q) = log10(F_lim,8(s)) + LOG10_Q0(member), one batch
+            # of sources' worth of (n_batch, n_pop) at a time.
+            log10_flim8_b = lim_b[:, IDX_I4]
+            log10_q_b = log10_flim8_b[:, None] + fp.log10_q0[None, :]
+            weight_pahc_b = np.ascontiguousarray(
+                pahc_p_of_q(log10_q_b) * fp.w_raw[None, :])
+
+            eps_star, eps_pahc = selection.pass_fractions_binned_star_pahc(
+                lim_b, a_query_b, kappa_b, fp.log10_flux,
+                fp.log10_b_a, fp.weight_star, fp.bin_of_star, fp.b_grid_a,
+                fp.log10_b_b, weight_pahc_b, fp.bin_of_pahc, fp.b_grid_b)
+            ds_star[start:stop] = eps_star.astype("f2")
+            ds_pahc[start:stop] = eps_pahc.astype("f2")
 
             # AGB and AGB-photosphere: unchanged -- marginal (not
             # brightness-conditioned), unfused. Their population is a

@@ -47,9 +47,11 @@ _LAW_CACHE = {}
 _K_CACHE = {}
 
 #: The shared scaled-extinction ladder a source's exact selection is
-#: tabulated on: `x = a / A_s`. The last three points cover the column
-#: kernel's tail past the source's own column.
-X_LADDER = np.array([0.0, 0.25, 0.5, 0.75, 1.0, 1.4, 2.0, 2.8])
+#: tabulated on: `x = a / A_s`. The last four points cover the column
+#: kernel's tail past the source's own column; `1.7` was added (owner,
+#: 2026-09-06) because the tail past it held 5-10% of the kernel's mass
+#: and interpolated at 6-8% error before the point was there.
+X_LADDER = np.array([0.0, 0.25, 0.5, 0.75, 1.0, 1.4, 1.7, 2.0, 2.8])
 
 #: A class's own brightness grid: this many points.
 N_B_GRID = 24
@@ -64,7 +66,10 @@ N_B_GRID = 24
 #: so the populated central bins hold several thousand members each
 #: (error well under 1%) and only the sparse tail bins run above it,
 #: disclosed per source rather than hidden in an average.
-SUBSAMPLE_CAP = 20_000
+#: Cut from 20,000 to 15,000 (owner, 2026-09-06): 20,000 measured 109 min
+#: for Cygnus X, over the one-hour target; 15,000 costs ~0.8% Monte Carlo
+#: error per brightness bin at the 1% bar, scaling as 1/sqrt(n).
+SUBSAMPLE_CAP = 15_000
 
 
 def _parse_info(text):
@@ -337,6 +342,84 @@ def pass_fractions_binned_multi(log10_lim, a_query, kappa, log10_flux, log10_b_p
                     if bin_total[m, w] > 0.0:
                         eps[s, k, m, w] = num[m, w] / bin_total[m, w]
     return eps
+
+
+@numba.njit(parallel=True)
+def pass_fractions_binned_star_pahc(log10_lim, a_query, kappa, log10_flux,
+                                     log10_b_star, weight_star, bin_of_star, b_grid_star,
+                                     log10_b_pahc, weight_pahc, bin_of_pahc, b_grid_pahc):
+    """STAR and PAHC fused onto one shared member draw and one flux read
+    (as `pass_fractions_binned_multi`), but PAHC's member weight is not
+    one number per member -- it is `W_j * P(q_j(s))` (SPEC_PRIORS.md
+    section 4, owner 2026-09-06): `q` uses the SOURCE's own 8 micron
+    limit, so it is a different number for every source `s`, and the
+    caller passes it in already folded to weight, as `weight_pahc`
+    `(n_src, n_pop)`. STAR keeps one weight per member, `weight_star`
+    `(n_pop,)`. Because PAHC's weight varies by source, so does its
+    per-bin normalising total -- computed here, per source, from
+    `weight_pahc[s]` -- while STAR's is computed once, outside the
+    source loop. Returns `(eps_star, eps_pahc)`, each `(n_src, n_x,
+    n_b)` f4.
+    """
+    n_src, n_x = a_query.shape
+    n_pop, n_bands = log10_flux.shape
+    n_b = b_grid_star.shape[0]
+    eps_star = np.zeros((n_src, n_x, n_b), dtype=np.float32)
+    eps_pahc = np.zeros((n_src, n_x, n_b), dtype=np.float32)
+
+    bin_total_star = np.zeros(n_b, dtype=np.float64)
+    for j in range(n_pop):
+        bin_total_star[bin_of_star[j]] += weight_star[j]
+
+    for s in numba.prange(n_src):
+        bin_total_pahc = np.zeros(n_b, dtype=np.float64)
+        for j in range(n_pop):
+            bin_total_pahc[bin_of_pahc[j]] += weight_pahc[s, j]
+
+        thresh = np.empty((n_x, n_bands), dtype=np.float64)
+        for k in range(n_x):
+            for i in range(n_bands):
+                thresh[k, i] = log10_lim[s, i] + 0.4 * a_query[s, k] * kappa[s, k, i]
+
+        for k in range(n_x):
+            num_star = np.zeros(n_b, dtype=np.float64)
+            num_pahc = np.zeros(n_b, dtype=np.float64)
+            for j in range(n_pop):
+                smallest_star, second_star = np.inf, np.inf
+                smallest_pahc, second_pahc = np.inf, np.inf
+                lb_star = log10_b_star[j]
+                lb_pahc = log10_b_pahc[j]
+                for i in range(n_bands):
+                    lf = log10_flux[j, i]
+                    if not np.isfinite(lf):
+                        val_star = np.inf
+                        val_pahc = np.inf
+                    else:
+                        base = thresh[k, i] - lf
+                        val_star = base + lb_star
+                        val_pahc = base + lb_pahc
+                    if val_star < smallest_star:
+                        second_star = smallest_star
+                        smallest_star = val_star
+                    elif val_star < second_star:
+                        second_star = val_star
+                    if val_pahc < smallest_pahc:
+                        second_pahc = smallest_pahc
+                        smallest_pahc = val_pahc
+                    elif val_pahc < second_pahc:
+                        second_pahc = val_pahc
+                m_star = bin_of_star[j]
+                if second_star <= b_grid_star[m_star]:
+                    num_star[m_star] += weight_star[j]
+                m_pahc = bin_of_pahc[j]
+                if second_pahc <= b_grid_pahc[m_pahc]:
+                    num_pahc[m_pahc] += weight_pahc[s, j]
+            for m in range(n_b):
+                if bin_total_star[m] > 0.0:
+                    eps_star[s, k, m] = num_star[m] / bin_total_star[m]
+                if bin_total_pahc[m] > 0.0:
+                    eps_pahc[s, k, m] = num_pahc[m] / bin_total_pahc[m]
+    return eps_star, eps_pahc
 
 
 @numba.njit(parallel=True)
