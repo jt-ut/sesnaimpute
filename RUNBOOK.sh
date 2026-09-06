@@ -86,6 +86,7 @@ $PY -m sesnaimpute.prior.h2s $CONFIG                    # H2S: law-blurred field
 $PY -m sesnaimpute.prior.gal $CONFIG                    # GAL: Fazio counts law + SWIRE selection tables
 $PY -m sesnaimpute.prior.counts_star_family $CONFIG
 $PY -m sesnaimpute.prior.counts_cloud $CONFIG           # YSO/H2S per-source counts on the cloud law (SPEC_PRIORS.md sec 6.2, 7)
+$PY -m sesnaimpute.prior.table $CONFIG                  # the prior table: the join, one row per catalogue source (IMPLEMENTATION.md sec 5)
 
 # --- fit ---
 # bms/ posterior fit of class and subclass probabilities from the prior
