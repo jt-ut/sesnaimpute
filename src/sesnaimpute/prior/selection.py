@@ -239,7 +239,7 @@ def pass_curves(log10_lim, a_query, kappa, log10_flux, log10_b_pop, weight, b_gr
         thresh = np.empty((n_x, n_bands), dtype=np.float64)
         for k in range(n_x):
             for i in range(n_bands):
-                thresh[k, i] = log10_lim[s, i] - 0.4 * a_query[s, k] * kappa[s, k, i]
+                thresh[k, i] = log10_lim[s, i] + 0.4 * a_query[s, k] * kappa[s, k, i]
         for k in range(n_x):
             bin_w = np.zeros(n_b + 1, dtype=np.float64)
             for j in range(n_pop):
@@ -289,7 +289,7 @@ def pass_fractions_binned(log10_lim, a_query, kappa, log10_flux, log10_b_pop, we
         thresh = np.empty((n_x, n_bands), dtype=np.float64)
         for k in range(n_x):
             for i in range(n_bands):
-                thresh[k, i] = log10_lim[s, i] - 0.4 * a_query[s, k] * kappa[s, k, i]
+                thresh[k, i] = log10_lim[s, i] + 0.4 * a_query[s, k] * kappa[s, k, i]
         for k in range(n_x):
             num = np.zeros(n_b, dtype=np.float64)
             for j in range(n_pop):
