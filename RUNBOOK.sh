@@ -111,6 +111,8 @@ PY sesnaimpute.prior.table                  # the prior table: the join, one row
 # --- fit ---
 # bms/ posterior fit of class and subclass probabilities from the prior
 # table.
+PY sesnaimpute.fit.run                      # the class-posterior evidence sweep, batched (IMPLEMENTATION.md sec 5; 10_POSTERIOR.md sec 1)
 
 # --- impute ---
 # bms/ final impute decisions and diagnostics.
+PY sesnaimpute.impute.posterior             # class/subclass posteriors, argmax-commit flux imputation, entropies (10_POSTERIOR.md sec 1)
