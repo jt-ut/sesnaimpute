@@ -666,7 +666,7 @@ class _RegionProfile:
     """One region's evaluator, loaded from its `profile_edenhofer_sightline`
     and `depth_edenhofer_region` files."""
 
-    def __init__(self, profile_path, back_edge_pc):
+    def __init__(self, profile_path, back_edge_pc, front_edge_pc):
         with h5py.File(profile_path, "r") as f:
             self.dist = f["DIST_PC"][:].astype(float)
             self.a_cum = f["A_CUM_K"][:].astype(float)
@@ -685,6 +685,7 @@ class _RegionProfile:
         self.hpx_sorted = self.hpx[self.order]
         self.d_edge = float(self.dist[-1])
         self.back_edge_pc = back_edge_pc
+        self.front_edge_pc = front_edge_pc
         self._quad_cache = {}
 
     def _quad(self, key, l_deg, b_deg):
@@ -760,6 +761,14 @@ class _RegionProfile:
         structure `structure_depth` found nearest the canon distance)."""
         return self.back_edge_pc
 
+    def cloud_front_edge_pc(self):
+        """The region's measured cloud NEAR edge, pc (`D_LO_PC` of the
+        same structure bracket `structure_depth` found nearest the canon
+        distance, stored beside `D_HI_PC` in the depth product; owner
+        ruling 2026-09-06, item 1: `star_population`'s front/behind
+        placement threshold is `u` at this distance, not a fixed 0.5)."""
+        return self.front_edge_pc
+
 
 def read(config, region):
     """The region's profile evaluator (see `_RegionProfile`)."""
@@ -770,7 +779,8 @@ def read(config, region):
         if region not in names:
             raise ValueError("profile.read: region %r has no row in %s" % (region, depth_path))
         back_edge_pc = float(f["D_HI_PC"][names.index(region)])
-    return _RegionProfile(profile_path, back_edge_pc)
+        front_edge_pc = float(f["D_LO_PC"][names.index(region)])
+    return _RegionProfile(profile_path, back_edge_pc, front_edge_pc)
 
 
 if __name__ == "__main__":

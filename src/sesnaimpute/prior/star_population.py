@@ -35,8 +35,9 @@ inside. Where BOTH marginals apply and the joint bin does not, the star's
 own PLACEMENT decides which one anchor stands in (owner ruling
 2026-09-06, item 2, replacing the geometric mean this module used to
 cite to a §2.1 phrase that is not there): a star in front of the cloud
-(its own `u = A(d)/A(inf)` below `star_weights.
-U_FRONT_BEHIND_THRESHOLD`) takes the Gaia weight at its own magnitude, a
+(its own `u = A(d)/A(inf)` below `u_front`, this tile's mean profile
+read at the cloud's own measured near edge, `profile.
+cloud_front_edge_pc`) takes the Gaia weight at its own magnitude, a
 star behind the cloud takes the 2MASS weight, and where that side's own
 bin carries no finite weight at all -- unmeasured even after
 `prior.anchor_weights`' survey-pooled fallback -- the star takes the
@@ -227,18 +228,6 @@ def tile_mean_u(profile_obj, dist_grid, pix256, a_pix, n_src):
 # the per-star weight: joint, marginal, placement-selected marginal, faint/bright end
 # ---------------------------------------------------------------------------
 
-#: Owner ruling 2026-09-06, item 2: the front/behind placement threshold
-#: on `u = A(d)/A(inf)`. `profile._RegionProfile` exposes only the
-#: cloud's own FAR edge (`cloud_back_edge_pc`, the structure bracket's
-#: `D_HI_PC`); it has no public near-edge (`D_LO_PC`) accessor, so the
-#: near-edge bracket the ruling asks for first is not available through
-#: this module's read path. This uses `u < 0.5` instead -- the star sits
-#: in front of (behind) the half of the column the cloud's own profile
-#: places nearer (farther than) the line of sight's midpoint -- and says
-#: so here rather than silently.
-U_FRONT_BEHIND_THRESHOLD = 0.5
-
-
 def _populated_edge_indices(populated, n_bin):
     """`(bright_idx, faint_idx)`: the first and last bin index the
     region-pooled table actually measured -- the EXPLICIT `POPULATED_G`/
@@ -253,7 +242,7 @@ def _populated_edge_indices(populated, n_bin):
 
 
 def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
-                  w_g, w_ks, populated_g, populated_ks, u_star):
+                  w_g, w_ks, populated_g, populated_ks, u_star, u_front):
     """Per star, `(W, WEIGHT_RULE)` (module docstring). `w_joint`/`w_g`/
     `w_ks` are the tables this tile actually reads from -- its own, or
     (an excluded tile) the region-pooled `W_REGION_*`, chosen by the
@@ -261,12 +250,16 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
     did or did not populate a bin, independent of exclusion).
     `populated_g`/`populated_ks` are this tile's table's own explicit
     per-bin evidence flag (item 3); `u_star` is the star's own placement
-    `A(d)/A(inf)` on this tile's mean profile (`tile_mean_u`).
+    `A(d)/A(inf)` on this tile's mean profile (`tile_mean_u`); `u_front`
+    is that SAME mean profile's own value at the cloud's measured near
+    edge (`profile.cloud_front_edge_pc`, `_build_one_tile`'s
+    `u_front_tile`) -- the front/behind boundary a star's own placement is
+    compared against.
 
     Owner ruling 2026-09-06, item 2: where both marginals are in range
     but the joint bin is not populated, the geometric mean is replaced by
-    PLACEMENT -- a star in front of the cloud (`u_star` below the front/
-    behind threshold, `U_FRONT_BEHIND_THRESHOLD`) takes the Gaia weight
+    PLACEMENT -- a star in front of the cloud (`u_star` below `u_front`)
+    takes the Gaia weight
     at its own magnitude; a star behind it takes the 2MASS weight. Where
     a star's own anchor is unmeasured in its bin even after the survey
     pool (`populated_*` false AND the stored weight itself is not
@@ -303,7 +296,7 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
     # other anchor instead.
     g_measured = np.isfinite(g_val)
     ks_measured = np.isfinite(ks_val)
-    front = np.asarray(u_star) < U_FRONT_BEHIND_THRESHOLD
+    front = np.asarray(u_star) < u_front
     placement_val = np.where(
         front,
         np.where(g_measured, g_val, ks_val),
@@ -657,7 +650,7 @@ def nearest_pointing(tile_l, tile_b, pointing_l, pointing_b):
 
 
 def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, curve,
-                     pointing_l, pointing_b):
+                     pointing_l, pointing_b, front_edge_pc):
     """One tile's placement, weight, partition and brightness units, built
     from ONE pointing's simulated stars only (owner ruling 2026-09-06:
     each tile is assigned to its nearest pointing by tile centre; spec
@@ -672,6 +665,11 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     a_pix = np.bincount(inv, weights=a_col_t) / n_src
     mean_u = tile_mean_u(profile_obj, dist_grid, sightlines, a_pix, n_src)
     a_tile = float(a_col_t.mean())
+    # owner ruling 2026-09-06, item 1 (of the second brief): the front/
+    # behind boundary is THIS tile's own mean profile read at the cloud's
+    # measured near edge -- the same one-tile-one-mean-profile
+    # approximation `u_i` below already makes, not a fixed 0.5.
+    u_front_tile = float(np.interp(front_edge_pc, dist_grid, mean_u))
 
     tile_l, tile_b = tile_centre_lb(pix256_t)
     p_idx = nearest_pointing(tile_l, tile_b, pointing_l, pointing_b)
@@ -692,7 +690,7 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     w, rule, bin_g, bin_ks = star_weights(
         g_obs, ks_obs, weights["g_edges"], weights["ks_edges"],
         w_joint, weights["use_joint"][t], w_g, w_ks,
-        weights["populated_g"], weights["populated_ks"], u_i)
+        weights["populated_g"], weights["populated_ks"], u_i, u_front_tile)
 
     # the partition (spec section 3): a REWEIGHTING of this tile's own W,
     # never a filter -- w_star + w_agb == w row by row.
@@ -707,7 +705,7 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
         tile=t, n_sightlines=int(sightlines.size), a_tile=a_tile,
         pointing_index=p_idx, tile_l=tile_l, tile_b=tile_b,
         star_index=star_index,
-        u=u_i.astype(np.float32), a=a_i.astype(np.float32),
+        u=u_i.astype(np.float32), a=a_i.astype(np.float32), u_front=u_front_tile,
         w=w.astype(np.float32), rule=rule,
         w_star=w_star.astype(np.float32), w_agb=w_agb.astype(np.float32),
         p_pahc=p_pahc.astype(np.float32), log10_q0=log10_q0.astype(np.float32),
@@ -746,6 +744,7 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
 
     profile_obj = profile_module.read(config, region)
     dist_grid = shared_distance_grid(profile_obj)
+    front_edge_pc = profile_obj.cloud_front_edge_pc()
 
     # the region's own pointing grid (owner ruling 2026-09-06): each
     # tile below is assigned to its nearest pointing centre, in the same
@@ -756,7 +755,7 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
 
     results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
         delayed(_build_one_tile)(config, t, geom, stars, weights, profile_obj, dist_grid, curve,
-                                  pointing_l, pointing_b)
+                                  pointing_l, pointing_b, front_edge_pc)
         for t in range(tiles["n_tile"]))
 
     # report-only (blessing check, owner ruling 2026-09-06): the pointing a
