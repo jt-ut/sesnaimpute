@@ -153,6 +153,29 @@ _LIBRARY_BAND = {"gal": "F_REF_I2", "h2s": "F_REF_Ks"}
 _INTERP_CHUNK = 20000
 
 
+#: `_marginal_exact_chunked`'s own query-batch block size
+#: (`CODING_RULES.md` 10a): `YsoShape.marginal_exact`'s own internal gather
+#: is `(chunk, n_embedding_cell)` (hundreds of cells per sightline), so a
+#: caller passing this file's own source-times-query-point batch straight
+#: through would blow past the 8 GB ceiling on a batch of any size; this
+#: chunk keeps that gather bounded regardless of how many query points the
+#: caller passes.
+_MARGINAL_CHUNK = 20000
+
+
+def _marginal_exact_chunked(yso_shape, a, sl_rows, a_col, sigma_col):
+    """`(n,)`: `YsoShape.marginal_exact`, called in `_MARGINAL_CHUNK`
+    blocks so its own per-call `(chunk, n_embedding_cell)` gather never
+    scales with the caller's own batch (module docstring)."""
+    n = a.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    for start in range(0, n, _MARGINAL_CHUNK):
+        stop = min(start + _MARGINAL_CHUNK, n)
+        out[start:stop] = yso_shape.marginal_exact(
+            a[start:stop], sl_rows[start:stop], a_col[start:stop], sigma_col[start:stop])
+    return out
+
+
 def _library_reference_flux(config, cls):
     """`(n_model,)`: `_LIBRARY_BAND[cls]` off `_LIBRARY_KEY[cls]`'s own
     register (module docstring's GAL/H2S "a change of units" reads)."""
@@ -489,7 +512,7 @@ class SourcePrior(object):
         a_col = self.table["A_COL_K"][rows]
         sigma_col = self.table["A_COL_SIG_K"][rows]
         sl_rows = self.table["HPX256_ROW"][rows]
-        p_a = self.yso_shape.marginal_exact(a, sl_rows, a_col, sigma_col)
+        p_a = _marginal_exact_chunked(self.yso_shape, a, sl_rows, a_col, sigma_col)
         p_a = np.where(a > 0.0, p_a, 0.0)
 
         mean_b = self.table["RIDGE_INTERCEPT"][rows] + self.table["RIDGE_SLOPE"][rows] * a
@@ -520,7 +543,7 @@ class SourcePrior(object):
         a_col = self.table["A_COL_K"][rows]
         sigma_col = self.table["A_COL_SIG_K"][rows]
         sl_rows = self.table["HPX256_ROW"][rows]
-        p_a = self.yso_shape.marginal_exact(a, sl_rows, a_col, sigma_col)
+        p_a = _marginal_exact_chunked(self.yso_shape, a, sl_rows, a_col, sigma_col)
         p_a = np.where(valid, p_a, 0.0)
 
         log10_sigma = b + np.log10(self.h2s_fref[mi])
