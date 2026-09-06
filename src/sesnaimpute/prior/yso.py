@@ -216,19 +216,73 @@ def _kernel_second_moment_planck(config, a_col):
     return a_col ** 2 * 10.0 ** (2.0 * mu) * np.exp(2.0 * s * s)
 
 
-def _map_block_a_k(path):
-    """One HGBS map's own valid cells, block-reduced to
-    `sky.derived.planck_column.BLOCK_TARGET_ARCSEC` (~12", already
-    well-sampled relative to Herschel's own 36.3" beam -- the same cell
-    size `planck_column` degrades HGBS maps to for its calibration,
-    reused rather than the map's raw few-arcsec pixel grid, which a timed
-    survey build cannot afford to carry through a coordinate transform
-    whole): `(hpx512, a_k)`, the block's own nside-512 NESTED galactic
-    pixel and its `A_K` (`sky.derived.herschel_column`'s currency),
-    vectorised over the whole map at once (rule 8)."""
-    data, wcs, pixscale = sky_herschel_column._open_hgbs_map(path)
-    finite = np.isfinite(data) & (data > 0)
+#: Memory rules for the Herschel-map joblib pool in `_herschel_pixel_stats`:
+#: the total concurrent budget, and the per-worker array multiplier (the
+#: float32 cutout itself, its finite mask, and the block-reduce sum/count
+#: arrays -- four arrays of about the cutout's own size at worst).
+_HERSCHEL_POOL_BUDGET_BYTES = 6 * (1 << 30)
+_HERSCHEL_ARRAYS_PER_WORKER = 4
+
+
+def _map_window(path, rbox, pad_deg=0.1):
+    """The FITS pixel window of one HGBS map covering `rbox` (padded by
+    `pad_deg`, matching the candidate screen's own pad) -- header and WCS
+    only, no pixel data touched, so every candidate map's cutout size is
+    known before any of them is read: `dict(wcs, x0, x1, y0, y1, f,
+    pixscale)`, an empty window (`x1 <= x0` or `y1 <= y0`) where the
+    padded bbox misses the map's own pixel grid. `x0`/`y0` are rounded
+    down, `x1`/`y1` up, to the block factor `f`
+    (`sky.derived.planck_column.BLOCK_TARGET_ARCSEC`), so the cutout's
+    own block grid lands on the same absolute pixel boundaries the
+    un-cropped map's block-reduce would use -- the cutout changes what is
+    read, never the block-reduced result, bit-identical to reading the
+    whole mosaic (the generous padding means a block actually used by the
+    region's anchor pixels is never split across the cutout edge)."""
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    with fits.open(path, memmap=True) as hd:
+        chosen = next(c for c in hd if c.header.get("NAXIS", 0) >= 2)
+        hdr = chosen.header
+        ny, nx = chosen.shape[-2:]
+        wcs = WCS(hdr).celestial
+        cd = hdr.get("CDELT1", hdr.get("CD1_1"))
+        pixscale = abs(float(cd)) * 3600.0
     f = max(1, int(round(sky_planck_column.BLOCK_TARGET_ARCSEC / pixscale)))
+    ra_lo, ra_hi, dec_lo, dec_hi = rbox
+    ra_lo, ra_hi = ra_lo - pad_deg, ra_hi + pad_deg
+    dec_lo, dec_hi = dec_lo - pad_deg, dec_hi + pad_deg
+    xs, ys = wcs.wcs_world2pix([ra_lo, ra_lo, ra_hi, ra_hi],
+                               [dec_lo, dec_hi, dec_lo, dec_hi], 0)
+    x0 = int(np.clip((int(np.floor(np.nanmin(xs))) // f) * f, 0, nx))
+    x1 = int(np.clip(int(np.ceil((np.nanmax(xs) + 1) / f)) * f, 0, nx))
+    y0 = int(np.clip((int(np.floor(np.nanmin(ys))) // f) * f, 0, ny))
+    y1 = int(np.clip(int(np.ceil((np.nanmax(ys) + 1) / f)) * f, 0, ny))
+    return dict(wcs=wcs, x0=x0, x1=x1, y0=y0, y1=y1, f=f, pixscale=pixscale)
+
+
+def _map_block_a_k(path, window):
+    """One HGBS map's own valid cells inside its precomputed pixel
+    `window` (`_map_window`) -- the FITS section is read off disk via
+    memmap, never the whole mosaic (some HGBS mosaics run to several GB)
+    -- block-reduced to `sky.derived.planck_column.BLOCK_TARGET_ARCSEC`
+    (~12", already well-sampled relative to Herschel's own 36.3" beam):
+    `(hpx512, a_k)`, the block's own nside-512 NESTED galactic pixel and
+    its `A_K` (`sky.derived.herschel_column`'s currency), vectorised over
+    the cutout at once (rule 8)."""
+    x0, x1, y0, y1 = window["x0"], window["x1"], window["y0"], window["y1"]
+    if x1 <= x0 or y1 <= y0:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+    from astropy.io import fits
+    with fits.open(path, memmap=True) as hd:
+        chosen = next(c for c in hd if c.header.get("NAXIS", 0) >= 2)
+        raw = np.asarray(chosen.data[..., y0:y1, x0:x1])
+    data = np.squeeze(raw).astype(np.float32, copy=False)
+    while data.ndim > 2:
+        data = data[0]
+    cutout_wcs = window["wcs"].deepcopy()
+    cutout_wcs.wcs.crpix = cutout_wcs.wcs.crpix - np.array([x0, y0])
+    f = window["f"]
+    finite = np.isfinite(data) & (data > 0)
     bs, bn, _ny2, _nx2 = sky_planck_column._block_reduce(data, finite, f)
     bmean = np.where(bn > 0, bs / np.maximum(bn, 1), np.nan)
     by, bx = np.mgrid[0:bmean.shape[0], 0:bmean.shape[1]]
@@ -237,7 +291,7 @@ def _map_block_a_k(path):
         return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
     xc = bx[sel] * f + (f - 1) / 2.0
     yc = by[sel] * f + (f - 1) / 2.0
-    ra, dec = wcs.wcs_pix2world(xc.astype(np.float64), yc.astype(np.float64), 0)
+    ra, dec = cutout_wcs.wcs_pix2world(xc.astype(np.float64), yc.astype(np.float64), 0)
     gal = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs").galactic
     hpx = hp.ang2pix(NSIDE_ANCHOR, gal.l.deg, gal.b.deg, nest=True, lonlat=True)
     a_k = bmean[sel].astype(np.float64) * sky_herschel_column.NH2_TO_AK
@@ -259,19 +313,35 @@ def _herschel_pixel_stats(config, pix_sorted):
     """`(sum_sq, count)`, each `(n_pix,)`, aligned to `pix_sorted`
     (ascending): the sum and count of `A_cell^2` over every
     HGBS map cell (`_map_block_a_k`) whose own nside-512 pixel is in the
-    set, over every map overlapping the set's own footprint. Maps are the
-    largest independent iterator here (rule 8) and are parallelised with
-    joblib; a pixel that two overlapping map reductions both touch is not
-    deduplicated -- disclosed: HGBS reductions rarely overlap, and the
-    effect on a pixel mean is second order against the gain this area
-    integral makes over the source-sampled mean it replaces."""
+    set, over every map overlapping the set's own footprint, each map
+    read only as the FITS section covering that footprint (`_map_window`
+    / `_map_block_a_k`), never the whole mosaic. The joblib pool is
+    capped at `floor(_HERSCHEL_POOL_BUDGET_BYTES / (_HERSCHEL_ARRAYS_PER_
+    WORKER * max_cutout_bytes))` workers -- 6 GB / (4 x the largest
+    candidate cutout, known from `_map_window` before any data is read)
+    -- so the worst case (every worker mid-reduction on its own cutout at
+    once) stays under 6 GB regardless of `config.n_jobs` or how large the
+    overlapping mosaics are. A pixel that two overlapping map reductions
+    both touch is not deduplicated -- disclosed: HGBS reductions rarely
+    overlap, and the effect on a pixel mean is second order against the
+    gain this area integral makes over the source-sampled mean it
+    replaces."""
     maps = sky_herschel_column._map_list(config)
     headers = {m["name"]: sky_herschel_column._map_header(m["path"]) for m in maps}
     rbox = _region_bbox_icrs(pix_sorted)
     candidates = [m for m in maps
                   if sky_herschel_column._boxes_overlap(headers[m["name"]]["bbox"], rbox, pad=0.1)]
 
-    results = Parallel(n_jobs=config.n_jobs)(delayed(_map_block_a_k)(m["path"]) for m in candidates)
+    windows = [_map_window(m["path"], rbox) for m in candidates]
+    cutout_bytes = [4 * max(0, w["x1"] - w["x0"]) * max(0, w["y1"] - w["y0"])
+                    for w in windows]
+    max_bytes = max(cutout_bytes) if cutout_bytes else 0
+    n_jobs_bound = (_HERSCHEL_POOL_BUDGET_BYTES // (_HERSCHEL_ARRAYS_PER_WORKER * max_bytes)
+                    if max_bytes else config.n_jobs)
+    n_jobs_eff = max(1, int(min(config.n_jobs, n_jobs_bound)))
+
+    results = Parallel(n_jobs=n_jobs_eff)(
+        delayed(_map_block_a_k)(m["path"], w) for m, w in zip(candidates, windows))
 
     n_pix = pix_sorted.size
     sum_sq = np.zeros(n_pix)
