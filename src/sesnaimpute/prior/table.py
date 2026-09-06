@@ -30,12 +30,21 @@ import h5py
 import healpy as hp
 import numpy as np
 
+from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
+from sesnaimpute.prior import counts_star_family as counts_star_family_module
 from sesnaimpute.prior import levels as levels_module
+from sesnaimpute.prior import star_shapes as star_shapes_module
+
+#: The fixed-seed row subset the re-read check (brief item 1) compares
+#: against every column's own source array -- small enough to check every
+#: column, not just the three the region-wide algebraic check covers.
+CHECK_SEED = 0
+N_CHECK_ROWS = 20
 
 #: Every dataset the fitter reads off the table, in the order
 #: IMPLEMENTATION.md section 5 lists them.
@@ -247,27 +256,163 @@ def _region_totals(config, region, n_sources, out):
     return {key: float(np.sum(out[key]) * area_per_source) for key in COUNT_COLUMNS}, area_deg2
 
 
-def _algebraic_check(region, out, adopted, star, cloud):
-    """The join reproduces each input's column bit for bit (rule 11): max
-    abs diff against the source products for `N_STAR`, `N_YSO`,
-    `A_COL_K`."""
+def _algebraic_check(region, out, adopted, star, cloud, level_factors):
+    """The join reproduces each input's column bit for bit (rule 11), over
+    every source in the region: `N_STAR` and `N_YSO` are level-scaled
+    (SPEC_PRIORS.md section 0.2), so the comparand is the source product's
+    own value times the region's own `F_REGION` before the max abs diff is
+    taken; `A_COL_K` is never scaled and compares directly."""
+    factor = level_factors["F_REGION"]
     checks = {
-        "N_STAR": float(np.max(np.abs(out["N_STAR"] - star["N_STAR"].astype(np.float32)))),
-        "N_YSO": float(np.max(np.abs(out["N_YSO"] - cloud["N_YSO"].astype(np.float32)))),
+        "N_STAR": float(np.max(np.abs(
+            out["N_STAR"] - (star["N_STAR"].astype(np.float64) * factor).astype(np.float32)))),
+        "N_YSO": float(np.max(np.abs(
+            out["N_YSO"] - (cloud["N_YSO"].astype(np.float64) * factor).astype(np.float32)))),
         "A_COL_K": float(np.max(np.abs(out["A_COL_K"] - adopted["A_COL_K"].astype(np.float32)))),
     }
     return checks
 
 
-def _assert_class_probabilities_identity(config, region, out, star, cloud, level_factors, n_sources):
-    """The identity SPEC_PRIORS.md section 0.2 states (the paragraph "The
-    levels are normalised to the survey"): the class probability the
-    fitter uses, `N_C(s) / Sum_C' N_C'(s)`, sums over the region's own
-    sources to the class's own integrated count `Sum_i f_C . P_C,i`
-    (`prior.levels`'s own before-level pattern, scaled by the region's
-    own fitted factor) within the Poisson precision of that class's own
-    total, and the six classes' own sums add to the source count exactly
-    (each source's own six probabilities already sum to one)."""
+def _fixed_seed_rows(n_sources):
+    """`N_CHECK_ROWS` fixed-seed row indices into the region's own
+    catalogue order, ascending, so every run checks the identical rows
+    regardless of platform or thread count."""
+    n = min(N_CHECK_ROWS, n_sources)
+    return np.sort(np.random.RandomState(CHECK_SEED).choice(n_sources, size=n, replace=False))
+
+
+def _reread_check(region, out, name, f_lim_50_mjy, rs, adopted, star, cloud, level_factors, rows):
+    """Every column of the table re-read from its own source array at a
+    fixed-seed subset of rows and compared against what the build wrote
+    (brief item 2's check for this stage: the module docstring says the
+    table does no science, only a join, so every column must reproduce
+    its source exactly). The six counts are compared against the source
+    value times the region's own `F_REGION`; every other column is the
+    source value through the same dtype cast `_write` applies. Returns
+    the worst absolute difference across every numeric column (bar 0)."""
+    factor = level_factors["F_REGION"]
+    expected = {
+        "A_COL_K": adopted["A_COL_K"].astype(np.float32),
+        "A_COL_SIG_K": adopted["A_COL_SIG_K"].astype(np.float32),
+        "A_COL_PROVENANCE": adopted["A_COL_PROVENANCE"],
+        "HPX_PIX_512": rs["hpx_pix_512"].astype(np.int64),
+        "HPX_PIX_256": rs["hpx_pix_256"].astype(np.int64),
+        "HPX256_ROW": rs["hpx256_row"].astype(np.int64),
+        "TILE_ID": star["TILE_ID"].astype(np.int32),
+        "F_LIM_50_MJY": f_lim_50_mjy.astype(np.float32),
+        "NODE_LO": np.rint(star["NODE_LO"]).astype(np.int32),
+        "NODE_W": star["NODE_W"].astype(np.float32),
+    }
+    for key in ("N_STAR", "N_AGB", "N_PAHC", "N_GAL"):
+        expected[key] = (star[key].astype(np.float64) * factor).astype(np.float32)
+    for key in ("N_YSO", "N_H2S"):
+        expected[key] = (cloud[key].astype(np.float64) * factor).astype(np.float32)
+    for key in ("Z_STAR", "Z_AGB", "Z_PAHC", "Z_GAL"):
+        expected[key] = star[key].astype(np.float32)
+    for key in ("Z_YSO", "Z_H2S"):
+        expected[key] = cloud[key].astype(np.float32)
+    for key in RIDGE_COLUMNS + YSO_DIAGNOSTIC_COLUMNS:
+        expected[key] = cloud[key].astype(np.float32)
+
+    worst = 0.0
+    for key, arr in expected.items():
+        table_val = np.asarray(out[key])[rows].astype(np.float64)
+        src_val = np.asarray(arr)[rows].astype(np.float64)
+        diff = float(np.max(np.abs(table_val - src_val)))
+        if diff > 0.0:
+            raise ValueError(
+                "prior.table: %r's re-read check: column %s differs from its source "
+                "product at a fixed-seed row by %.3g (bar 0)" % (region, key, diff))
+        worst = max(worst, diff)
+
+    if not np.array_equal(np.asarray(out["NAME"])[rows], np.asarray(name)[rows]):
+        raise ValueError("prior.table: %r's re-read check: NAME differs from the curated "
+                         "catalogue at a fixed-seed row" % region)
+    return worst
+
+
+#: The AGB photospheric-ratio diagnostic (below) is report-only, so it is
+#: evaluated on a fixed-seed subsample rather than every source -- the
+#: same reasoning `prior.selection`'s own Monte Carlo subsample uses
+#: (IMPLEMENTATION.md section 4): measured at ~7 ms/source unsampled
+#: (bicubic shape evaluation per source, batched but still per-source
+#: work), which would run to hours at Cygnus X's 3.3M sources; capping
+#: the sample bounds the cost regardless of the region's own size (brief
+#: item 3's fix for the one part of this stage that scales with n_source).
+AGB_RATIO_SEED = 0
+AGB_RATIO_MAX_SOURCES = 10000
+
+
+def _agb_photospheric_ratio(config, region, adopted, star, n_sources):
+    """SPEC_PRIORS.md section 3's reported lower bound: on a fixed-seed
+    subsample of at most `AGB_RATIO_MAX_SOURCES` sources, the AGB count
+    recomputed with `prior.star_selection`'s `EPS_AGB_PHOTOSPHERE` (the
+    bare-photosphere selection) in place of the dusty `EPS_AGB`, as the
+    ratio to the dusty `N_AGB` this table actually carries over the SAME
+    subsample -- one printed number per region (brief item 2), never a
+    table column. Uses `prior.counts_star_family`'s own shared building
+    blocks (the shape, the tile amplitude, the fixed interpolation
+    matrices) so this is the identical grid quadrature, with only the
+    selection array swapped."""
+    n_sample = min(AGB_RATIO_MAX_SOURCES, n_sources)
+    rows = np.sort(np.random.RandomState(AGB_RATIO_SEED).choice(n_sources, size=n_sample, replace=False))
+
+    shape = star_shapes_module.read(config, region, "agb")
+    sel_path = config_module.product_path(config, "bms", "star", "selection", "source", region=region)
+    with h5py.File(sel_path, "r") as f:
+        eps_photo = f["EPS_AGB_PHOTOSPHERE"][rows].astype(np.float64)
+        x_ladder = f["X_LADDER"][:].astype(np.float64)
+        b_grid = f["LOG10_B_GRID_AGB"][:].astype(np.float64)
+    wx, wb = counts_star_family_module.selection_on_shape_grid(shape, x_ladder, b_grid)
+
+    n_x, n_b = shape.x_centers.size, shape.b_centers.size
+    a_x = 10.0 ** shape.x_centers
+    logb_flat = np.tile(shape.b_centers, n_x)
+
+    a_col = adopted["A_COL_K"].astype(np.float64)[rows]
+    sigma_col = adopted["A_COL_SIG_K"].astype(np.float64)[rows]
+    map_class = np.asarray(adopted["A_COL_PROVENANCE"])[rows]
+    tile_id = star["TILE_ID"].astype(np.int64)[rows]
+    amp = counts_star_family_module.family_amplitude(config, region, "agb", {"tile_id": tile_id})
+
+    z_photo = np.empty(n_sample, dtype=np.float64)
+    row_bytes = n_x * n_b * 8 * 5
+    for start, stop in batches_module.batches(n_sample, row_bytes):
+        nb = stop - start
+        eps_interp = np.einsum("xi,nij,bj->nxb", wx, eps_photo[start:stop], wb)
+        a_full = (a_col[start:stop, None] * a_x[None, :]).repeat(n_b, axis=1).reshape(-1)
+        logb_full = np.tile(logb_flat, nb)
+        tile_full = np.repeat(tile_id[start:stop], n_x * n_b)
+        acol_full = np.repeat(a_col[start:stop], n_x * n_b)
+        sigma_full = np.repeat(sigma_col[start:stop], n_x * n_b)
+        map_full = np.repeat(map_class[start:stop], n_x * n_b)
+        density_flat = shape.density(a_full, logb_full, tile_full, acol_full, sigma_full, map_full)
+        z_photo[start:stop] = (density_flat.reshape(nb, n_x, n_b) * eps_interp).sum(axis=(1, 2))
+
+    n_dusty_sample = float(np.sum(star["N_AGB"][rows]))
+    return float(np.sum(amp * z_photo)) / n_dusty_sample if n_dusty_sample > 0.0 else float("nan")
+
+
+def _assert_class_probabilities_identity(config, region, out, level_factors, n_sources):
+    """The two identities SPEC_PRIORS.md section 0.2 states (the paragraph
+    "The levels are normalised to the survey"), both recomputed directly
+    from this table's own written columns (brief item 1's check for the
+    levels stage: "recompute the region total of the six scaled counts
+    ... directly from the table"), never re-derived from the upstream
+    counts products:
+
+    1. The class probability the fitter uses, `N_C(s) / Sum_C' N_C'(s)`,
+       sums over the region's own sources to exactly the source count
+       (each source's own six probabilities already sum to one) --
+       asserted, bar 0.
+    2. The six already-levelled counts, unscaled by `F_REGION` to recover
+       `prior.levels.predicted_patterns`'s own "before" values (EPS_YSO
+       is never scaled) and integrated by the SAME per-pixel rule
+       `prior.levels.region_factor` fit against, sum to the region's own
+       catalogued, IRAC-covered source count exactly -- this is the
+       identity the level factor was built to satisfy; recomputing it
+       from the table catches a join bug the factor's own report cannot
+       see. Asserted, bar 0 (float32 storage roundoff only)."""
     n_c = np.stack([out[key].astype(np.float64) for key in COUNT_COLUMNS], axis=1)
     denom = np.sum(n_c, axis=1)
     if np.any(denom <= 0.0):
@@ -276,48 +421,50 @@ def _assert_class_probabilities_identity(config, region, out, star, cloud, level
             "classes -- the class probability is undefined there"
             % (region, int(np.count_nonzero(denom <= 0.0))))
     class_prob_sum = np.sum(n_c / denom[:, None], axis=0)
-
-    rs = access.region_slice(config, region)
-    src_pix_all = np.asarray(rs["hpx_pix_512"], dtype=np.int64)
-    all_pixels, all_n_i = levels_module.occupied_pixels(config, region)
-    pixels, _n_i, _frac, src_keep = levels_module.restrict_to_covered(
-        config, region, all_pixels, all_n_i, src_pix_all)
-    values = {
-        "STAR": star["N_STAR"].astype(np.float64), "AGB": star["N_AGB"].astype(np.float64),
-        "PAHC": star["N_PAHC"].astype(np.float64), "GAL": star["N_GAL"].astype(np.float64),
-        "H2S": cloud["N_H2S"].astype(np.float64), "EPS_YSO": cloud["EPS_YSO"].astype(np.float64),
-    }
-    values_kept = {k: v[src_keep] for k, v in values.items()}
-    patterns = levels_module.predicted_patterns(config, region, pixels, src_pix_all[src_keep], values_kept)
-
-    # the class probability sum compared against the fit's own integrated
-    # count must cover exactly the sources the fit itself used -- the few
-    # sources caught by some other band pair, entirely outside the IRAC
-    # coverage the level correction is denominated on, are excluded here
-    # too (`prior.levels.restrict_to_covered`'s own docstring).
-    class_prob_sum_covered = np.sum((n_c / denom[:, None])[src_keep], axis=0)
-
-    # Flagged, not asserted (CODING_RULES.md standing direction: flag a
-    # data-quality finding, do not block the build on it): the region's
-    # own `prior.levels` deviance-after is already reported far above its
-    # naive Poisson expectation (real pixel-to-pixel scatter the six
-    # patterns do not capture), so a miss here by a few sigma of the
-    # naive sqrt(class total) is the SAME overdispersion, not a fresh bug
-    # -- printed for every class so the miss is visible, never silently
-    # dropped.
-    for i, key in enumerate(COUNT_COLUMNS):
-        cls = _COUNT_CLASS[key]
-        integrated = level_factors["F_REGION"] * float(np.sum(patterns[cls]))
-        observed = float(class_prob_sum_covered[i])
-        n_sigma = abs(observed - integrated) / np.sqrt(max(integrated, 1.0))
-        print("prior.table: %s: %s prob-sum %.1f against integrated %.1f (%.1f sigma) -- a diagnostic "
-              "of the count's spatial pattern, reported not enforced" % (region, cls, observed, integrated, n_sigma), flush=True)
-
     total = float(np.sum(class_prob_sum))
     if abs(total - n_sources) > max(1e-3, 1e-6 * n_sources):
         raise ValueError(
             "prior.table: %r's six class probabilities sum to %.6g, not the %d "
             "catalogued sources exactly" % (region, total, n_sources))
+
+    factor = level_factors["F_REGION"]
+    src_pix = out["HPX_PIX_512"].astype(np.int64)
+    all_pixels, all_n_i = levels_module.occupied_pixels(config, region)
+    pixels, n_i, _frac, src_keep = levels_module.restrict_to_covered(config, region, all_pixels, all_n_i, src_pix)
+    values = {cls: (out[key].astype(np.float64) / factor)[src_keep]
+             for key, cls in zip(COUNT_COLUMNS, levels_module.CLASSES)}
+    values["EPS_YSO"] = out["EPS_YSO"].astype(np.float64)[src_keep]
+    patterns = levels_module.predicted_patterns(config, region, pixels, src_pix[src_keep], values)
+
+    # Flagged, not asserted (CODING_RULES.md standing direction: flag a
+    # data-quality finding, do not block the build on it): the region's
+    # own `prior.levels` deviance-after is already reported far above its
+    # naive Poisson expectation (real pixel-to-pixel scatter the six
+    # patterns do not capture), so a per-class miss here by a few sigma
+    # of the naive sqrt(class total) is the SAME overdispersion, not a
+    # fresh bug -- printed for every class so the miss is visible, never
+    # silently dropped.
+    class_prob_sum_covered = np.sum((n_c / denom[:, None])[src_keep], axis=0)
+    for i, key in enumerate(COUNT_COLUMNS):
+        cls = _COUNT_CLASS[key]
+        integrated = factor * float(np.sum(patterns[cls]))
+        observed = float(class_prob_sum_covered[i])
+        n_sigma = abs(observed - integrated) / np.sqrt(max(integrated, 1.0))
+        print("prior.table: %s: %s prob-sum %.1f against integrated %.1f (%.1f sigma) -- a diagnostic "
+              "of the count's spatial pattern, reported not enforced" % (region, cls, observed, integrated, n_sigma), flush=True)
+
+    total_after = factor * float(sum(np.sum(p) for p in patterns.values()))
+    observed_total = float(np.sum(n_i))
+    diff = abs(total_after - observed_total)
+    if diff > max(1e-2, 1e-6 * observed_total):
+        raise ValueError(
+            "prior.table: %r's six scaled counts, integrated over the region directly from "
+            "the table, sum to %.6g against %d catalogued (IRAC-covered) sources -- the levels "
+            "identity does not hold" % (region, total_after, int(observed_total)))
+    print("prior.table: %s: levels identity from the table: six scaled counts integrate to "
+          "%.4f against %d catalogued sources (diff %.3g, bar 0)"
+          % (region, total_after, int(observed_total), diff), flush=True)
+    return diff
 
 
 def report(region, n_sources, wall_s, totals, area_deg2, checks):
@@ -358,14 +505,28 @@ def _build_one(config, region):
     out_path = _write(config, region, name, f_lim_50_mjy, rs, adopted, star, cloud,
                       region_attrs, level_factors)
     out = read(config, region)
-    wall_s = time.time() - t0
+    wall_build_s = time.time() - t0
 
-    _assert_class_probabilities_identity(config, region, out, star, cloud, level_factors, n_sources)
+    t1 = time.time()
+    _assert_class_probabilities_identity(config, region, out, level_factors, n_sources)
+
+    rows = _fixed_seed_rows(n_sources)
+    worst = _reread_check(region, out, name, f_lim_50_mjy, rs, adopted, star, cloud, level_factors, rows)
+    print("prior.table: %s: re-read check, %d fixed-seed rows, every column: worst abs diff=%.3g (bar 0)"
+          % (region, rows.size, worst), flush=True)
+
+    agb_ratio = _agb_photospheric_ratio(config, region, adopted, star, n_sources)
+    print("prior.table: %s: AGB photospheric-selection lower bound: N_AGB(photosphere)/N_AGB(dusty) = %.4f"
+          % (region, agb_ratio), flush=True)
+    wall_check_s = time.time() - t1
 
     totals, area_deg2 = _region_totals(config, region, n_sources, out)
-    checks = _algebraic_check(region, out, adopted, star, cloud)
+    checks = _algebraic_check(region, out, adopted, star, cloud, level_factors)
+    wall_s = time.time() - t0
     for line in report(region, n_sources, wall_s, totals, area_deg2, checks):
         print(line, flush=True)
+    print("prior.table: %s: wall split: build+write %.1fs, report-only checks %.1fs (of %.1fs total)"
+          % (region, wall_build_s, wall_check_s, wall_s), flush=True)
     print("prior.table: %s -> %s" % (region, out_path), flush=True)
     return out_path
 

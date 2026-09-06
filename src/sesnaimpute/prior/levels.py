@@ -1,11 +1,17 @@
-"""The six per-region level factors (SPEC_PRIORS.md section 0.2, the
+"""The one per-region level factor (SPEC_PRIORS.md section 0.2, the
 paragraph "The levels are normalised to the survey"; IMPLEMENTATION.md
 section 6, stage 12a): each class's count is calibrated on something
 outside SESNA, and their sum was never held to SESNA's own total. This
-module fits, per region, one non-negative factor per class that brings
-the six classes' own predicted count patterns -- positions and counts
-only, never a label -- into a Poisson fit of the region's catalogued
-source density per occupied nside-512 pixel.
+module fits, per region, the single non-negative scalar that brings the
+sum of the six classes' own predicted count patterns -- positions and
+counts only, never a label -- to the region's own catalogued source
+count: every catalogued source is one of the six classes, so the six
+counts, integrated over the region, must equal the number of sources
+catalogued there. The same factor multiplies every class, so no source
+moves between classes and no source's class probability changes; the
+per-class ratios (below) are printed diagnostics of how well each
+class's own spatial pattern follows the catalogue's, never a second
+correction.
 
 Per pixel `i`, `n_i` is the pixel's own catalogued source count (the
 granule map's own `N_SOURCE_ROWS`) and each class `C`'s predicted count
@@ -25,18 +31,17 @@ before the level correction, `P_C,i`, is:
     the mean selected fraction is not (SESNA sources have already
     passed the selection `EPS_YSO` is the fraction of).
 
-The six factors `f_C` maximise the Poisson likelihood of `n_i` given
-six log-factors (so `f_C > 0` by construction) with the analytic
-gradient, started at `f_C = 1`. Standard errors and the correlation
-matrix come from the observed (Fisher) information in `f`-space itself,
-not in the log-factors the optimizer runs in: `mu_i` is linear in `f`,
-so the Poisson log-likelihood's Hessian in `f`-space is the plain
-weighted Gram matrix `P^T diag(n / mu**2) P`.
+The one factor `f = sum(n_i) / sum_i sum_C P_C,i` is the closed-form
+Poisson-likelihood maximiser for a single multiplicative scalar on a
+linear predictor, so no iteration is needed. The Poisson deviance before
+and after is reported as the goodness-of-fit diagnostic; the per-class
+ratio of the class's own summed prior probability to its own integrated,
+levelled count is reported per class (module `read`'s `RATIO_<class>`).
 
 Writes one 30-row product, `bms/table/levels_table_region.hdf5`: root
-attr `GRANULE = "region"`; `F_STAR` ... `F_H2S`, `SIGMA_F_STAR` ...
-`SIGMA_F_H2S`, `CORR` (6x6), `TOTAL_OBSERVED`, `TOTAL_BEFORE`,
-`TOTAL_AFTER`, `DEVIANCE_BEFORE`, `DEVIANCE_AFTER`, `N_PIXELS`.
+attr `GRANULE = "region"`; `F_REGION`, `RATIO_STAR` ... `RATIO_H2S`,
+`TOTAL_OBSERVED`, `TOTAL_BEFORE`, `DEVIANCE_BEFORE`, `DEVIANCE_AFTER`,
+`N_PIXELS`.
 """
 
 import os
@@ -69,11 +74,6 @@ _STAR_FAMILY_CLASSES = ("STAR", "AGB", "PAHC", "GAL")
 #: angle is one HEALPix constant, not a per-pixel read.
 NSIDE = 512
 OMEGA_PIX_DEG2 = float(hp.nside2pixarea(NSIDE, degrees=True))
-
-#: The Poisson-precision bar the fitted total is graded against (brief
-#: item 2): `TOTAL_AFTER` must land within this many `sqrt(TOTAL_OBSERVED)`
-#: of `TOTAL_OBSERVED`.
-
 
 # ---------------------------------------------------------------------------
 # per-region reads: the occupied pixels, their catalogued source counts,
