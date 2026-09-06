@@ -42,6 +42,35 @@ Writes one 30-row product, `bms/table/levels_table_region.hdf5`: root
 attr `GRANULE = "region"`; `F_REGION`, `RATIO_STAR` ... `RATIO_H2S`,
 `TOTAL_OBSERVED`, `TOTAL_BEFORE`, `DEVIANCE_BEFORE`, `DEVIANCE_AFTER`,
 `N_PIXELS`.
+
+Memory: this module's own per-source working set is exactly what the
+fit needs, six counts and a pixel index, `values.values()` plus
+`src_pix` in `per_source_counts` -- measured at 64 bytes/source (5.2 MB
+on Perseus's 80,496 sources), not a source of region-to-region growth.
+Measured instead: `predicted_patterns`'s YSO term calls `prior.yso.
+law_area_integral`, which reads the Herschel Gould Belt Survey FITS
+maps overlapping the region's own sky footprint through a joblib worker
+pool (`prior.yso._herschel_pixel_stats`, budgeted at up to 6 GB across
+workers) -- a cost set by how much HGBS-mapped sky the region's own
+bounding box overlaps, not by its source count or its occupied-pixel
+count. Isolating that one call (`_herschel_pixel_stats` +
+`_planck_parent_column`) on Perseus's 705 occupied pixels alone
+reproduces essentially the whole region's peak (924 of 1,032/1,090 MB
+measured for the full build): the "13 kB/source" figure is an artefact
+of dividing this fixed, region-footprint-driven cost by Perseus's own
+source count, not a real per-source rate, and it does not extrapolate
+by source count to Cygnus X -- a region's own HGBS overlap does not
+grow with its catalogue size (Cygnus X, at ~1.4 kpc, is likely mostly
+or entirely outside the nearby-cloud HGBS footprint that drives this
+cost at all). Splitting the YSO call into smaller pixel batches was
+tried and rejected: `_herschel_pixel_stats` does not cache maps across
+calls, so each extra call re-opens and re-reduces the same FITS files,
+trading a bounded memory win for an unbounded, multiplicative wall-time
+loss (a Perseus run in 64-pixel batches did not finish in 120 s, against
+~11 s unbatched). The actual fix belongs in `prior.yso._herschel_
+pixel_stats` (a tighter pool budget, or streaming the block-reduce so a
+cutout's own float32 array is not held whole) -- outside this module's
+own file and this pass's scope.
 """
 
 import os

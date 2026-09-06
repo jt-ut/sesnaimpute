@@ -103,10 +103,38 @@ class Kernel(object):
         return i, t
 
     def _arm_index(self, map_class):
+        """`(n,)` intp, `_ARM_CODE[arm]` per entry of `map_class`, which
+        arrives in either of two forms: the arm's own name (a majority-
+        vote map class such as `prior.yso`'s `_majority_map_class` or
+        `prior.star_shapes`'s per-tile `MAP_CLASS`, as `str` or, read
+        back from HDF5, fixed-length `bytes`), or already the numeric
+        provenance code (`sky.derived.column`'s `A_COL_PROVENANCE`, 0/1,
+        exactly `_ARM_CODE`'s own values). Comparing a numeric or `bytes`
+        array against the `str` literals below silently returns a single
+        scalar `False` (a numpy `FutureWarning`, "elementwise comparison
+        failed"), which left every source's index at its `np.zeros`
+        default -- arm 0, Herschel, regardless of the source's real arm.
+        Every branch here is an exact, same-dtype comparison instead."""
         mc = np.asarray(map_class)
+        if np.issubdtype(mc.dtype, np.integer):
+            idx = mc.astype(np.intp)
+            bad = (idx < 0) | (idx > max(_ARM_CODE.values()))
+            if np.any(bad):
+                raise ValueError(
+                    "prior.kernel: map_class carries a numeric provenance code outside "
+                    "%r" % (sorted(_ARM_CODE.values()),))
+            return idx
+        if mc.dtype.kind == "S":
+            mc = mc.astype("U")
+        resolved = np.zeros(mc.shape, dtype=bool)
         idx = np.zeros(mc.shape, dtype=np.intp)
         for arm in _ARM_ORDER:
-            idx[mc == arm] = _ARM_CODE[arm]
+            hit = mc == arm
+            idx[hit] = _ARM_CODE[arm]
+            resolved |= hit
+        if not np.all(resolved):
+            raise ValueError(
+                "prior.kernel: map_class carries a value outside %r" % (_ARM_ORDER,))
         return idx
 
     def _structural(self, a_col, arm_idx):
@@ -146,11 +174,15 @@ class Kernel(object):
         dex at `a_col`."""
         a_col = np.asarray(a_col, dtype=float)
         sigma_col = np.asarray(sigma_col, dtype=float)
-        mc = np.asarray(map_class)
-        arm_idx = self._arm_index(mc)
+        arm_idx = self._arm_index(map_class)
         w, mu, sigma0 = self._structural(a_col, arm_idx)
         sigma_col_dex = sigma_col / (a_col * _LN10)
-        zp_dex = np.where(mc == "herschel", self.zp_herschel_k / (a_col * _LN10), 0.0)
+        # the same arm index `_arm_index` already resolved, not a second,
+        # independently-typed string comparison against `map_class`
+        # (the bug this fix removes: `mc == "herschel"` silently failed
+        # for a numeric or bytes `map_class`, zeroing the zero point).
+        zp_dex = np.where(arm_idx == _ARM_CODE["herschel"],
+                          self.zp_herschel_k / (a_col * _LN10), 0.0)
         extra_var = sigma_col_dex * sigma_col_dex + zp_dex * zp_dex
         sigma = np.sqrt(sigma0 * sigma0 + extra_var[:, np.newaxis])
         return w, mu, sigma
