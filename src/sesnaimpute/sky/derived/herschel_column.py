@@ -9,9 +9,22 @@ regions a map serves is read from the data -- curated sources sampled
 against each map, screened first by its WCS bbox -- never a manifest.
 `build` writes one `column`/`source` file per requested region, including
 one no map reaches, so a consumer fails only on a missing file.
-SIGMA is survey-wide, from overlapping map pairs' half-difference
+SIGMA_RAND is survey-wide, from overlapping map pairs' half-difference
 (sigma_rand^2 = c0^2 + c1^2 A^2), written to `sigma`/`survey` with each
 map's beam FWHM from its FITS header where stated, else 36.3".
+
+The zero point is one systematic per field, measured per field, not one
+survey constant from two overlapping map pairs (owner, 2026-09-06). A
+"field" here is one HGBS-covered SESNA region. `field_zeropoints` /
+`write_field_zeropoint` measure it from the data that constrain it: each
+field's own median (A_HERSCHEL - A_PLANCK) at low column, from the
+column-check product (`sky.derived.column.build_column_check`), and
+rewrite `sigma`/`survey`'s `ZP_FIELD` / `ZP_SIGMA_FIELD` / `ZP_N_FIELD`,
+keyed by `FIELD_NAME`. `SIGMA_ZP_K` is kept, as the RMS of the per-field
+values, for a reader that still wants one number. This never touches
+`A_K`: the offset is carried only as an uncertainty on the Herschel arm's
+sigma budget, never subtracted from the value (see `column.py`'s merge,
+which copies the Herschel arm's `A_K` through unchanged).
 """
 
 import os
@@ -257,6 +270,95 @@ def _write_sigma_survey(config, maps, header_by_name, sig):
         f.create_dataset("C1", data=np.float64(sig["rand_c1"]))
         f.create_dataset("N_PAIRS", data=np.int64(sig["n_pairs"]))
 
+#: Below this Planck-arm column, the two arms' disagreement is dominated
+#: by Herschel's additive zero point rather than the tau353 calibration's
+#: own multiplicative residual: the column-check table (page 5's read of
+#: `column-check_adopted_survey.hdf5`) shows the Planck/Herschel ratio
+#: departing from unity mostly below A_K ~ 0.3 and sitting within 1-5% of
+#: unity from 0.19 to 0.50, so a cut here isolates the offset the way the
+#: measurement is meant to.
+FIELD_ZP_LOW_COLUMN_CUT_AK = 0.3
+
+
+def _robust_sigma(x):
+    """1.4826 * MAD: the same robust scatter estimator `_pair_native`
+    already uses for the per-pair random term."""
+    med = np.median(x)
+    return float(1.482602218505602 * np.median(np.abs(x - med)))
+
+
+def field_zeropoints(config):
+    """The Herschel zero point, one number per field (owner, 2026-09-06):
+    for every HGBS-covered SESNA region in the column-check product
+    (`sky.derived.column.build_column_check`), the median of
+    `A_HERSCHEL - A_PLANCK` over that region's Herschel-covered admitted
+    sightline pixels with `A_PLANCK < FIELD_ZP_LOW_COLUMN_CUT_AK`, and its
+    uncertainty as that offset's own scatter (`_robust_sigma` of the same
+    per-pixel differences) divided by sqrt(n). Returns
+    `(names, zp_ak, zp_sigma_ak, n)`, one entry per field with at least 2
+    qualifying pixels, in the column-check product's own field order."""
+    path = config_module.product_path(config, "sky/derived", "adopted", "column-check", "survey")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "herschel_column.field_zeropoints: column-check product missing at %r -- "
+            "run sky.derived.column's build_column_check first" % path)
+    with h5py.File(path, "r") as f:
+        region_code = np.asarray(f["REGION_CODE"][:])
+        a_h = np.asarray(f["A_HERSCHEL"][:], dtype=np.float64)
+        a_p = np.asarray(f["A_PLANCK"][:], dtype=np.float64)
+        field_names_all = [x.decode("utf-8") if isinstance(x, bytes) else str(x)
+                            for x in f["REGION"][:]]
+        field_code_axis = np.asarray(f["REGION_CODE_AXIS"][:])
+
+    names, zp, zp_sigma, n_out = [], [], [], []
+    for name, code in zip(field_names_all, field_code_axis):
+        sel = (region_code == code) & (a_p < FIELD_ZP_LOW_COLUMN_CUT_AK)
+        n = int(np.count_nonzero(sel))
+        if n < 2:
+            continue
+        d = a_h[sel] - a_p[sel]
+        names.append(name)
+        zp.append(float(np.median(d)))
+        zp_sigma.append(_robust_sigma(d) / np.sqrt(n))
+        n_out.append(n)
+    return (names, np.asarray(zp, dtype=np.float64),
+            np.asarray(zp_sigma, dtype=np.float64), np.asarray(n_out, dtype=np.int64))
+
+
+def write_field_zeropoint(config):
+    """Recomputes the Herschel zero point per field (`field_zeropoints`)
+    and rewrites it into `sigma`/`survey`, in place of the old two-pair
+    survey-wide constant (owner, 2026-09-06). Leaves `BEAM_FWHM_ARCSEC`,
+    `C0`, `C1`, `N_PAIRS` and `MAP_NAME` as already on disk -- the random
+    term is untouched, only the zero point changes -- and does not rebuild
+    `column`/`source` (SPEC_PRIORS.md 1.1's per-source products stay). One
+    field-worth of pixels each, so this is a read of a small product, not
+    a rebuild of the maps."""
+    out_path = config_module.product_path(config, "sky/derived", "herschel", "sigma", "survey")
+    if not os.path.exists(out_path):
+        raise FileNotFoundError(
+            "herschel_column.write_field_zeropoint: %r missing -- run herschel_column.build "
+            "first so C0/C1/BEAM_FWHM_ARCSEC/MAP_NAME exist to preserve" % out_path)
+    names, zp, zp_sigma, n_field = field_zeropoints(config)
+    sigma_zp_survey = float(np.sqrt(np.mean(zp ** 2))) if zp.size else 0.0
+
+    with h5py.File(out_path, "a") as f:
+        for ds in ("FIELD_NAME", "ZP_FIELD", "ZP_SIGMA_FIELD", "ZP_N_FIELD", "SIGMA_ZP_K"):
+            if ds in f:
+                del f[ds]
+        f.create_dataset("FIELD_NAME", data=np.array([n.encode("utf-8") for n in names]))
+        f.create_dataset("ZP_FIELD", data=zp)
+        f.create_dataset("ZP_SIGMA_FIELD", data=zp_sigma)
+        f.create_dataset("ZP_N_FIELD", data=n_field)
+        f.create_dataset("SIGMA_ZP_K", data=np.float64(sigma_zp_survey))
+
+    print("herschel_column FIELD_ZP n_fields=%d cut=A_PLANCK<%.2f sigma_zp_survey_rms=%.4f (was single "
+          "two-pair constant)" % (len(names), FIELD_ZP_LOW_COLUMN_CUT_AK, sigma_zp_survey), flush=True)
+    for name, z, zs, n in zip(names, zp, zp_sigma, n_field):
+        print("  field %-22s n=%5d  ZP_FIELD=%+.4f  ZP_SIGMA_FIELD=%.4f" % (name, n, z, zs), flush=True)
+    return dict(names=names, zp=zp, zp_sigma=zp_sigma, n_field=n_field, sigma_zp_survey=sigma_zp_survey)
+
+
 # COLUMN: per-source, per-map sampling and the per-region merge.
 
 def _region_sources(config, region):
@@ -390,6 +492,14 @@ def build(config, regions=None):
         found = "%.2f" % h["beam_arcsec"] if h["beam_arcsec"] else "none"
         print("herschel_column BEAM %-45s header=%s used=%.2f"
               % (m["name"], found, h["beam_arcsec"] or HERSCHEL_STATED_FWHM_ARCSEC), flush=True)
+
+    check_path = config_module.product_path(config, "sky/derived", "adopted", "column-check", "survey")
+    if os.path.exists(check_path):
+        write_field_zeropoint(config)
+    else:
+        print("herschel_column FIELD_ZP skipped: no column-check product yet at %s -- "
+              "SIGMA_ZP_K stays the two-pair constant until sky.derived.column.build_column_check "
+              "runs and herschel_column.write_field_zeropoint is called" % check_path, flush=True)
 
     return dict(sigma_wall_s=sigma_wall_s, sample_wall_s=sample_wall_s,
                 regions_written=written, sig_model=sig)
