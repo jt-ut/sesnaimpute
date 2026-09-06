@@ -25,13 +25,15 @@ Integral p_C(a,b|I_s) eps_s(a,b) da db`, `lambda~_C = p_C eps_s / N_C`):
 STAR, AGB, PAHC
     `lambda~_C(a, log10 B) = p_C(a, log10 B | I_s) . eps_s(a, log10 B) / Z_C`
 
-    `p_C` is the source's own tile shape (`star_shapes.ClassShape.
-    density`'s own machinery, inlined here as the blend of the two shape
-    nodes bracketing `A_s` in `log A`, bicubic in `(log10 x, log10 B)`,
-    PAHC additionally blended over its own 8 micron limit grid) converted
-    from the stored array's own MASS units to a density in `(a, log10 B)`
-    by the grid's fixed cell area and the `d(log10 x)/da = 1/(a ln10)`
-    Jacobian, exactly as before.
+    `p_C` is the source's own tile shape, read through `star_shapes.
+    ClassShape.density(a, log10_b, tile_id, A_s, sigma_col, map_class[,
+    f_lim8])` itself: the shape's own two-component kernel mixture
+    (`Kernel.mixture`), each component read at its own shift and width
+    (bracketed in the width ladder, bicubic in `(log10 x, log10 B)`,
+    PAHC additionally blended over its own 8 micron limit grid) and the
+    two combined by the mixture weight `w`. Its MASS-per-cell output is
+    converted to a density in `(a, log10 B)` here by the grid's fixed
+    cell area and the `d(log10 x)/da = 1/(a ln10)` Jacobian.
 
     `eps_s(a, log10 B)` is this source's own `EPS_STAR`/`EPS_AGB`/
     `EPS_PAHC[s]`, an `(n_x, n_b)` curve on `X_LADDER` x
@@ -61,13 +63,9 @@ GAL
     log10 f_ref,h` (the query's library model's own 4.5 micron reference
     flux, `galz_register`'s `F_REF_I2`).
 
-    `Z_GAL` is `Integral (normalised p(log10 S)) . eps(x=1, log10 S)
-    dlog10 S`, computed once per source in `__init__`, evaluated at the
-    source's own nominal column (`x = 1`, `a = A_s`) rather than
-    integrated jointly over `a` as well: `p_a`'s own mass concentrates
-    within a few tenths of a dex of `A_s` at the kernel's measured sigma,
-    where the per-source `eps` curve's variation with `x` is small next
-    to its variation with `log10 S` -- disclosed, not integrated exactly.
+    `Z_GAL` is the table's own stored normaliser (`counts_star_family.
+    gal_counts`'s per-source integral), read directly rather than
+    recomputed here at the nominal column alone.
 
 YSO
     `lambda~_YSO(a, log10 B) = p(a | A_s) . N(log10 B; mu(a), sigma)`,
@@ -123,7 +121,7 @@ import numpy as np
 
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
-from sesnaimpute.prior import column_grid, star_shapes
+from sesnaimpute.prior import star_shapes
 from sesnaimpute.prior import table as table_module
 from sesnaimpute.prior import yso as yso_module
 
@@ -264,25 +262,20 @@ class SourcePrior(object):
                 raise ValueError(
                     "prior.callable: GAL's per-source selection and the survey "
                     "counts law disagree on LOG10_S_GRID for region %r" % region)
-            idx_x1 = int(np.argmin(np.abs(self.gal_x_ladder - 1.0)))
-            eps_at_a_col = f["EPS"][:, idx_x1, :].astype(np.float32)
         self.gal_fref = _library_reference_flux(config, "gal")
 
         # `phi(S).S` is only PROPORTIONAL to a density (`SPEC_PRIORS.md`
         # section 5.2's own "prop"); `gal_phi_total` (a survey-wide
-        # constant) makes it one. `gal_z[s]`, evaluated at this source's
-        # own nominal column (module docstring's disclosed x=1
-        # approximation), is the normaliser `Integral shape . eps = Z`
-        # actually needs -- NOT `prior.gal`'s own stored `Z_GAL`
-        # (`counts_star_family.gal_counts`'s eps-weighted average, an
-        # unrelated quantity).
+        # constant) makes it one. The normaliser `Z_GAL` itself is read
+        # from the table (`Z_GAL`, `counts_star_family.gal_counts`'s own
+        # full per-source integral of the counts law against this
+        # source's own selection over ALL of extinction and flux, fixed
+        # defect: this used to be recomputed here at the nominal column
+        # `x = 1` alone).
         self.gal_phi_total = float(np.trapz(
             gal_phi_s * (10.0 ** self.gal_log10_s_grid) * LN10, self.gal_log10_s_grid))
         self._gal_phi_density_grid = (
             gal_phi_s * (10.0 ** self.gal_log10_s_grid) * LN10) / self.gal_phi_total
-        self.gal_z = np.trapz(
-            self._gal_phi_density_grid[None, :] * eps_at_a_col,
-            self.gal_log10_s_grid, axis=1)
 
         # -- YSO: the sightline shape (`marginal_exact`, shared with H2S).
         self.yso_shape = yso_module.YsoShape.read(config, region)
@@ -408,6 +401,14 @@ class SourcePrior(object):
     # -----------------------------------------------------------------
 
     def _log_density_family(self, cls, rows2d, a2, b2):
+        """`p_C` read through `ClassShape.density` itself -- the source's
+        own two-component kernel mixture (shift and width per component,
+        blended by the mixture weight), not a single-width bracket of
+        the column against the shape's width ladder (fixed defect: the
+        old code bracketed `A_COL_K` against the WIDTH nodes, a
+        mismatched axis, and zeroed everything outside the tabulated box
+        instead of reading the shape's own declared analytic tail
+        there)."""
         shape = self.shapes[cls]
         fg = self.family_grids[cls]
         rows = rows2d.ravel()
@@ -418,33 +419,16 @@ class SourcePrior(object):
 
         tile_id = self.table["TILE_ID"][rows]
         a_col = self.table["A_COL_K"][rows]
+        sigma_col = self.table["A_COL_SIG_K"][rows]
+        map_class = np.where(
+            self.table["A_COL_PROVENANCE"][rows] == star_shapes._PLANCK_PROVENANCE_CODE,
+            "planck", "herschel")
+        f_lim8 = (self.table["F_LIM_50_MJY"][rows, self._idx_i4] if cls == "pahc" else None)
+
+        mass = shape.density(a, b, tile_id, a_col, sigma_col, map_class, f_lim8=f_lim8)
+        p_ab = np.where(valid, mass / (a_safe * LN10 * fg["dx"] * fg["db"]), 0.0)
+
         x_query = np.where(valid, a_safe / a_col, 0.0)
-        log_x = np.log10(np.where(x_query > 0.0, x_query, 1.0e-300))
-        in_box = ((log_x >= shape.x_edges[0]) & (log_x <= shape.x_edges[-1])
-                 & (b >= shape.b_edges[0]) & (b <= shape.b_edges[-1]))
-
-        node_lo_shape, t_node = column_grid.bracket(np.log(a_col), np.log(shape.shape_nodes))
-        node_hi_shape = np.minimum(node_lo_shape + 1, shape.shape_nodes.size - 1)
-
-        def _density(node_idx, limit_idx):
-            mass = shape._eval_node(tile_id, node_idx, log_x, b, limit_idx)
-            mass = np.where(in_box, mass, 0.0)
-            return mass / (a_safe * LN10 * fg["dx"] * fg["db"])
-
-        if cls != "pahc":
-            p_lo = _density(node_lo_shape, None)
-            p_hi = _density(node_hi_shape, None)
-        else:
-            f_lim8 = self.table["F_LIM_50_MJY"][rows, self._idx_i4]
-            limit_lo, t_limit = column_grid.bracket(np.log10(f_lim8), shape.limit_log)
-            limit_hi = np.minimum(limit_lo + 1, shape.limit_log.size - 1)
-            p_lolo, p_lohi = _density(node_lo_shape, limit_lo), _density(node_lo_shape, limit_hi)
-            p_hilo, p_hihi = _density(node_hi_shape, limit_lo), _density(node_hi_shape, limit_hi)
-            p_lo = (1.0 - t_limit) * p_lolo + t_limit * p_lohi
-            p_hi = (1.0 - t_limit) * p_hilo + t_limit * p_hihi
-
-        p_ab = (1.0 - t_node) * p_lo + t_node * p_hi
-
         local = self._prep_local_index(rows)
         eps_batch = self._prep_star_eps[cls][local]
         eps_s = _interp_eps_2d(eps_batch, fg["x_ladder"], fg["b_grid"], x_query, b)
@@ -460,10 +444,12 @@ class SourcePrior(object):
     # -----------------------------------------------------------------
 
     def _log_density_gal(self, rows2d, a2, b2, mi2):
-        """`p_a` a plain elementwise log-normal density at each row's own
-        `(A_s, sigma_col, map_class)` (module docstring: `Kernel.pdf`'s
-        own formula, evaluated one `t` per source rather than `Kernel.
-        pdf`'s own shared-`t`-across-sources broadcasting)."""
+        """`p_a` is `Kernel.pdf`, the mixture's own two-component density
+        in `T`, evaluated at each row's own `(a, A_s, sigma_col,
+        map_class)`, one query point per source (`pdf`'s own `t` passed
+        as an `(n, 1)` column so its per-source broadcasting reduces to
+        the diagonal rather than the single-Gaussian moment-matched
+        `params` this used to read)."""
         rows = rows2d.ravel()
         a = a2.ravel()
         b = b2.ravel()
@@ -475,11 +461,7 @@ class SourcePrior(object):
         sigma_col = self.table["A_COL_SIG_K"][rows]
         sl_rows = self.table["HPX256_ROW"][rows]
         map_class = self.yso_shape._map_class(sl_rows)
-        mu, sigma = self.yso_shape.kernel.params(a_col, sigma_col, map_class)
-        loc = np.log10(a_col) + mu
-        z_score = (np.log10(a_safe) - loc) / sigma
-        p_a = (np.exp(-0.5 * z_score * z_score) / (sigma * np.sqrt(2.0 * np.pi))
-              / (a_safe * LN10))
+        p_a = self.yso_shape.kernel.pdf(a_safe[:, None], a_col, sigma_col, map_class)[:, 0]
         p_a = np.where(valid, p_a, 0.0)
 
         x_query = np.where(valid, a_safe / a_col, 0.0)
@@ -492,7 +474,7 @@ class SourcePrior(object):
         p_logs = phi_density * eps_val
 
         numerator = p_a * p_logs
-        z = self.gal_z[rows]
+        z = self.table["Z_GAL"][rows]
         with np.errstate(divide="ignore", invalid="ignore"):
             ln_val = np.log(numerator) - np.log(z)
         return np.where((numerator > 0.0) & (z > 0.0) & valid, ln_val, -np.inf)
