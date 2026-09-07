@@ -12,16 +12,19 @@
 # check in this pipeline.
 set -euo pipefail
 
-# Usage: RUNBOOKtp.sh [--from <module>] [--regions R1 R2 ...]
+# Usage: RUNBOOKtp.sh [--from <module>] [--to <module>] [--regions R1 R2 ...]
 #   --from     start at the line whose module is <module> (fully qualified,
 #              e.g. sesnaimpute.prior.yso, matching the PY lines below
 #              verbatim) and run everything after it: a change to one stage
 #              rebuilds only its dependants. Lines before it are skipped.
+#   --to       stop after the line whose module is <module> (inclusive): a prior-only
+#              build is `--from sesnaimpute.population.column_grid --to sesnaimpute.bmstp.atlas`.
 #   --regions  passed to every build; per-region products are rebuilt for those
 #              regions only, region-axis tables update those rows in place.
-FROM=""; REGIONS=()
+FROM=""; TO=""; REGIONS=()
 while [ $# -gt 0 ]; do case "$1" in
   --from) FROM="$2"; shift 2 ;;
+  --to) TO="$2"; shift 2 ;;
   --regions) shift; while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do REGIONS+=("$1"); shift; done ;;
   *) echo "RUNBOOKtp.sh: unknown argument $1" >&2; exit 2 ;;
 esac; done
@@ -29,6 +32,7 @@ PYBIN=/usr/local/bin/python3.9
 export PYTHONPATH="$(cd "$(dirname "$0")" && pwd)/src"
 CONFIG=/Users/jtaylor/Dropbox/Research/SESNA_Complete/config/root.cfg
 STARTED=0; [ -z "$FROM" ] && STARTED=1
+STOPPED=0
 # Every stage runs through capped.sh (CODING_RULES 10a) with the region list.
 # Extra arguments after the module name (e.g. the fit loop's own
 # `--classes <C>`, below) pass straight through to that one invocation --
@@ -37,8 +41,11 @@ STARTED=0; [ -z "$FROM" ] && STARTED=1
 # memory ceiling with another.
 PY() { local module="$1"; shift
   if [ $STARTED -eq 0 ]; then [ "$module" = "$FROM" ] && STARTED=1 || return 0; fi
+  [ $STOPPED -eq 1 ] && return 0
   echo "== $module ${REGIONS[*]:-} $*"
   "$(dirname "$0")/capped.sh" "$PYBIN" -m "$module" "$CONFIG" ${REGIONS[@]+--regions "${REGIONS[@]}"} "$@"
+  [ -n "$TO" ] && [ "$module" = "$TO" ] && STOPPED=1
+  return 0
 }
 
 # --- downloads ---
