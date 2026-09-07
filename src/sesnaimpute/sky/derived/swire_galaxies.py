@@ -21,11 +21,25 @@ which scored worse against Fazio's counts). Verified directly against
 adoption here.
 
 Each IRAC colour is stored as `prior.gal`'s own internal convention,
-log10(flux_a) - log10(flux_b) -- not a magnitude scaled by -2.5 -- because
-this is the exact quantity `prior.gal.build_colour_cdf_tables` tabulates
-`bms/gal/counts_gal_survey.hdf5`'s CDF_GRID_I1/CDF_MARGINAL_I1 axes on; only
-this convention lets this module's acceptance identity (the two CDFs
-agreeing exactly) hold.
+log10(flux_a) - log10(flux_b), dex -- not a magnitude scaled by -2.5 --
+because this is the exact quantity `prior.gal.build_colour_cdf_tables`
+tabulates `bms/gal/counts_gal_survey.hdf5`'s CDF axes on; only this
+convention lets this module's acceptance identity (the two CDFs agreeing
+exactly for I1, up to the axis sign for I3/I4 -- see below) hold. The sign
+convention is uniform, `COLOUR_AB = log10(F_A) - log10(F_B)`, for all three
+pairs; `prior.gal`'s own I3/I4 axes are built on the opposite sign
+(`log10(F_I3) - log10(F_I2)`, `log10(F_I4) - log10(F_I2)`), so this
+module's acceptance check evaluates those two up to that sign flip, not a
+literal equality of the raw arrays. `UNIT`/`DEFINITION` attrs on every
+COLOUR_*/SIGMA_COLOUR_* dataset say so for a reader of the file alone.
+
+A band is missing when its flux or its uncertainty is absent or a sentinel
+(flux <= 0 or uncertainty <= 0, the SWIRE -99 sentinel included; no
+bandwidth is ever formed from a sentinel): both the colour and the sigma
+built from it are `NaN`, not +-inf. `N_FINITE_I1I2`/`I2I3`/`I2I4`/`ALL`
+(file attrs) and `N_NODE_I1I2`/`N_NODE_ALL` ((61,) datasets, per S node)
+report how many rows actually carry a usable value -- what `population`'s
+GAL template-weight kernel (SPEC_BMSTP_DRAFT sec 5.4) can build from.
 """
 
 import os
@@ -71,6 +85,17 @@ N_S_GRID = 61
 LOG10_S_GRID_LO = -2.221848749616356
 LOG10_S_GRID_HI = 1.2540644529143379
 
+#: Per-dataset `UNIT`/`DEFINITION` attrs (owner ruling): a reader of the
+#: file alone gets the convention without reading this module.
+_COLOUR_DEFINITIONS = {
+    "COLOUR_I1I2": "log10(F_I1) - log10(F_I2), IRAC fluxes in mJy",
+    "COLOUR_I2I3": "log10(F_I2) - log10(F_I3), IRAC fluxes in mJy",
+    "COLOUR_I2I4": "log10(F_I2) - log10(F_I4), IRAC fluxes in mJy",
+    "SIGMA_COLOUR_I1I2": "sigma_f / (f ln 10), summed in quadrature over the two bands (I1, I2)",
+    "SIGMA_COLOUR_I2I3": "sigma_f / (f ln 10), summed in quadrature over the two bands (I2, I3)",
+    "SIGMA_COLOUR_I2I4": "sigma_f / (f ln 10), summed in quadrature over the two bands (I2, I4)",
+}
+
 
 def _read_field(path, field_index):
     """One SWIRE field CSV -> the surviving galaxies' rows (rule 10b: the
@@ -94,36 +119,48 @@ def _read_field(path, field_index):
     f1k, f2k, f3k, f4k = f1[idx], f2[idx], f3[idx], f4[idx]
     e1, e2, e3, e4 = err_mjy[idx, 0], err_mjy[idx, 1], err_mjy[idx, 2], err_mjy[idx, 3]
 
-    def log10_safe(x):
-        # -inf for a missing band, matching prior.gal._colour_of's own
-        # convention -- a missing band never clears a threshold, so its
-        # colour must sit below every possible threshold, not drop out of
-        # the sample (prior.gal.build_colour_cdf_tables counts it as
-        # "cleared" at cell 0 of every axis, never excluded from n_m).
-        finite = np.isfinite(x) & (x > 0)
-        return np.where(finite, np.log10(np.where(finite, x, 1.0)), -np.inf)
+    # A band is missing -- flux or its own uncertainty absent or a
+    # sentinel (SWIRE's -99), never usable for a colour or a bandwidth --
+    # so both go NaN for that band, not +-inf (owner ruling): a reader
+    # forming a kernel bandwidth downstream must never see a sentinel.
+    def band_valid(f, e):
+        return np.isfinite(f) & (f > 0) & np.isfinite(e) & (e > 0)
 
-    log10_f1, log10_f2 = log10_safe(f1k), log10_safe(f2k)
-    log10_f3, log10_f4 = log10_safe(f3k), log10_safe(f4k)
+    v1, v2, v3, v4 = band_valid(f1k, e1), band_valid(f2k, e2), band_valid(f3k, e3), band_valid(f4k, e4)
+
+    def log10_or_nan(f, v):
+        return np.where(v, np.log10(np.where(v, f, 1.0)), np.nan)
+
+    log10_f1, log10_f2 = log10_or_nan(f1k, v1), log10_or_nan(f2k, v2)
+    log10_f3, log10_f4 = log10_or_nan(f3k, v3), log10_or_nan(f4k, v4)
 
     ln10 = np.log(10.0)
-    sigma1 = e1 / (f1k * ln10)
-    sigma2 = e2 / (f2k * ln10)
-    sigma3 = e3 / (f3k * ln10)
-    sigma4 = e4 / (f4k * ln10)
+    sigma1 = np.where(v1, e1 / (f1k * ln10), np.nan)
+    sigma2 = np.where(v2, e2 / (f2k * ln10), np.nan)
+    sigma3 = np.where(v3, e3 / (f3k * ln10), np.nan)
+    sigma4 = np.where(v4, e4 / (f4k * ln10), np.nan)
 
+    # NODE reads I2's flux alone (the split's own gate, `valid_i2`, already
+    # guarantees it is finite and positive), independent of whether I2's
+    # own uncertainty is a sentinel -- a bad error never removes a galaxy
+    # from the flux grid, only from a colour or sigma that uses that band.
     log10_s_grid = np.linspace(LOG10_S_GRID_LO, LOG10_S_GRID_HI, N_S_GRID)
     edges = 0.5 * (log10_s_grid[1:] + log10_s_grid[:-1])
-    in_range = (log10_f2 >= LOG10_S_GRID_LO) & (log10_f2 <= LOG10_S_GRID_HI)
-    node = np.clip(np.searchsorted(edges, log10_f2), 0, N_S_GRID - 1)
+    log10_f2_flux = np.log10(f2k)
+    in_range = (log10_f2_flux >= LOG10_S_GRID_LO) & (log10_f2_flux <= LOG10_S_GRID_HI)
+    node = np.clip(np.searchsorted(edges, log10_f2_flux), 0, N_S_GRID - 1)
     node = np.where(in_range, node, -1).astype(np.int16)
 
+    colour_i1i2 = (log10_f1 - log10_f2).astype(np.float32)
+    colour_i2i3 = (log10_f2 - log10_f3).astype(np.float32)
+    colour_i2i4 = (log10_f2 - log10_f4).astype(np.float32)
+
     return dict(
-        LOG10_S=log10_f2.astype(np.float32),
+        LOG10_S=log10_f2_flux.astype(np.float32),
         NODE=node,
-        COLOUR_I1I2=(log10_f1 - log10_f2).astype(np.float32),
-        COLOUR_I2I3=(log10_f2 - log10_f3).astype(np.float32),
-        COLOUR_I2I4=(log10_f2 - log10_f4).astype(np.float32),
+        COLOUR_I1I2=colour_i1i2,
+        COLOUR_I2I3=colour_i2i3,
+        COLOUR_I2I4=colour_i2i4,
         SIGMA_COLOUR_I1I2=np.sqrt(sigma1 ** 2 + sigma2 ** 2).astype(np.float32),
         SIGMA_COLOUR_I2I3=np.sqrt(sigma2 ** 2 + sigma3 ** 2).astype(np.float32),
         SIGMA_COLOUR_I2I4=np.sqrt(sigma2 ** 2 + sigma4 ** 2).astype(np.float32),
@@ -157,6 +194,17 @@ def build(config, regions=None):
         columns = {k: np.concatenate([b[k] for b in field_blocks]) for k in field_blocks[0]}
         n_galaxies = int(columns["LOG10_S"].size)
 
+        finite_i1i2 = np.isfinite(columns["COLOUR_I1I2"])
+        finite_i2i3 = np.isfinite(columns["COLOUR_I2I3"])
+        finite_i2i4 = np.isfinite(columns["COLOUR_I2I4"])
+        finite_all = finite_i1i2 & finite_i2i3 & finite_i2i4
+        node = columns["NODE"]
+        n_node_i1i2 = np.zeros(N_S_GRID, dtype=np.int64)
+        n_node_all = np.zeros(N_S_GRID, dtype=np.int64)
+        in_grid = node >= 0
+        np.add.at(n_node_i1i2, node[in_grid & finite_i1i2], 1)
+        np.add.at(n_node_all, node[in_grid & finite_all], 1)
+
         out_path = config_module.product_path(config, "sky/derived", "swire", "galaxies", "survey")
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with h5py.File(out_path, "w") as f:
@@ -165,10 +213,19 @@ def build(config, regions=None):
             f.attrs["FIELDS"] = ";".join(SWIRE_FIELD_FILES)
             f.attrs["N_STARS_REMOVED"] = n_stars_removed
             f.attrs["N_GALAXIES"] = n_galaxies
+            f.attrs["N_FINITE_I1I2"] = int(finite_i1i2.sum())
+            f.attrs["N_FINITE_I2I3"] = int(finite_i2i3.sum())
+            f.attrs["N_FINITE_I2I4"] = int(finite_i2i4.sum())
+            f.attrs["N_FINITE_ALL"] = int(finite_all.sum())
             f.create_dataset("LOG10_S_GRID",
                               data=np.linspace(LOG10_S_GRID_LO, LOG10_S_GRID_HI, N_S_GRID).astype(np.float64))
+            f.create_dataset("N_NODE_I1I2", data=n_node_i1i2)
+            f.create_dataset("N_NODE_ALL", data=n_node_all)
             for name, arr in columns.items():
-                f.create_dataset(name, data=arr)
+                dset = f.create_dataset(name, data=arr)
+                if name in _COLOUR_DEFINITIONS:
+                    dset.attrs["UNIT"] = "dex"
+                    dset.attrs["DEFINITION"] = _COLOUR_DEFINITIONS[name]
 
         st.done(out_path, n_galaxies=n_galaxies, n_stars_removed=n_stars_removed)
     return dict(n_galaxies=n_galaxies, n_stars_removed=n_stars_removed, path=out_path)
