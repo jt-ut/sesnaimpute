@@ -88,6 +88,7 @@ PY sesnaimpute.sky.derived.planck_column
 PY sesnaimpute.sky.derived.planck_source_column
 PY sesnaimpute.sky.derived.column
 PY sesnaimpute.sky.derived.profile
+PY sesnaimpute.sky.derived.swire_galaxies   # SWIRE galaxies after the adopted star-galaxy split, survey-wide (SPEC_BMSTP_DRAFT.md sec 3.2, 5.4)
 
 # --- prior ---
 # bms/ prior products: the column grid (every class build reads its
