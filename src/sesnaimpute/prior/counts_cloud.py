@@ -36,10 +36,13 @@ per-source adopted value, and the closed form reads it exactly, not
 through a shared node table -- `_bin_mass_batch` is a plain vectorised
 `(batch, n_edges)` closed-form evaluation. `build_region` runs its whole
 per-source pipeline in source batches (`sesnaimpute.batches.batches`):
-every per-source array, the H2S selection's own `EPS` table above all
-(`n_source, 8, 41)`, is read from its own product file by row-range slice
-inside the batch loop and never held for the whole region at once, so
-memory stays bounded regardless of a region's own source count.
+every per-source array is read from its own product file by row-range
+slice inside the batch loop and never held for the whole region at once;
+the H2S selection's own `EPS` table (`n_source, 8, 41`), by far the
+largest of them, is not read from a product file at all any more (owner,
+2026-09-06) -- `prior.h2s.source_selection` computes it on the fly, one
+batch at a time, so memory stays bounded regardless of a region's own
+source count.
 
 The `NODE_LO`/`NODE_W` bracket (`prior.column_grid.bracket`) is still
 computed and written to the output product, since other classes' node
@@ -63,8 +66,10 @@ from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
+from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
 from sesnaimpute.prior import column_grid as column_grid_module
+from sesnaimpute.prior import h2s as h2s_module
 from sesnaimpute.prior import yso as yso_module
 
 #: Per-batch memory budget for `build_region`'s own source loop: every
@@ -242,15 +247,18 @@ def build_region(config, region):
     """Computes and writes one region's `bms/table/counts-cloud_table_
     source` product (module docstring), end to end on the same source
     chunks throughout: every per-source array -- the adopted columns, the
-    YSO selection `G_1MYR`/`G_3MYR`, the H2S selection `EPS`, the blurred
-    law count, the ridge -- is read from its own product file by `h5py`
-    row-range slice inside the batch loop, never as a whole-region array,
-    and each batch's own results are written into the (preallocated)
-    output datasets before the next batch is read. `EPS`, at `(n_source,
-    8, 41)` float64, is by far the largest of them (`_build_row_bytes`):
-    at Cygnus X's 3,313,391 sources a whole-region read would be about
-    8.7 GB by itself, over the 8 GB ceiling before anything else runs.
-    Returns `(n_src, path)`.
+    YSO selection `G_1MYR`/`G_3MYR`, the blurred law count, the ridge --
+    is read from its own product file by `h5py` row-range slice inside
+    the batch loop, never as a whole-region array, and each batch's own
+    results are written into the (preallocated) output datasets before
+    the next batch is read. The H2S selection `EPS` is no longer read
+    from a product file at all (owner, 2026-09-06): `h2s.source_
+    selection` computes it on the fly, per batch, from the region's own
+    limits and query extinctions -- at `(n_source, 8, 41)` float64 it was
+    by far the largest of the old per-source arrays (`_build_row_bytes`):
+    at Cygnus X's 3,313,391 sources a whole-region read would have been
+    about 8.7 GB by itself, over the 8 GB ceiling before anything else
+    runs. Returns `(n_src, path)`.
     """
     rs = access.region_slice(config, region)
     n_src = rs["n_sources"]
@@ -261,17 +269,15 @@ def build_region(config, region):
     ridge = _ridge(config, region)
     nodes = column_grid_module.nodes(config)
     n_cell = shape.p_u.shape[1]
+    log10_lim = np.log10(limits_module.limits(config, region))
 
     adopted_path = config_module.product_path(config, "sky/derived", "adopted",
                                                "column", "source", region=region)
     yso_sel_path = config_module.product_path(config, "bms", "yso", "selection",
                                                "source", region=region)
-    h2s_sel_path = config_module.product_path(config, "bms", "h2s", "selection",
-                                               "source", region=region)
     law_blur_path = config_module.product_path(config, "bms", "h2s", "law-blurred",
                                                 "source", region=region)
-    for path, label in ((yso_sel_path, "YSO selection"), (h2s_sel_path, "H2S selection"),
-                        (law_blur_path, "H2S law-blurred")):
+    for path, label in ((yso_sel_path, "YSO selection"), (law_blur_path, "H2S law-blurred")):
         if not os.path.exists(path):
             raise FileNotFoundError(
                 "prior.counts_cloud: no %s product for region %r at %s -- "
@@ -283,21 +289,18 @@ def build_region(config, region):
 
     with h5py.File(adopted_path, "r") as fa, \
          h5py.File(yso_sel_path, "r") as fy, \
-         h5py.File(h2s_sel_path, "r") as fh, \
          h5py.File(law_blur_path, "r") as fl, \
          h5py.File(out_path, "w") as fo:
 
-        for f, path in ((fa, adopted_path), (fy, yso_sel_path),
-                        (fh, h2s_sel_path), (fl, law_blur_path)):
+        for f, path in ((fa, adopted_path), (fy, yso_sel_path), (fl, law_blur_path)):
             _check_no_permutation(f, path)
 
         x_ladder = np.asarray(fy["X_LADDER"][:], dtype=np.float64)
-        x_ladder_h2s = np.asarray(fh["X_LADDER"][:], dtype=np.float64)
-        if not np.array_equal(x_ladder, x_ladder_h2s):
+        if not np.array_equal(x_ladder, h2s_module.X_LADDER):
             raise ValueError(
-                "prior.counts_cloud: %r's YSO and H2S per-source selection "
-                "products disagree on X_LADDER -- both should be `prior."
-                "selection.X_LADDER`" % region)
+                "prior.counts_cloud: %r's YSO per-source selection product's "
+                "X_LADDER disagrees with prior.h2s.X_LADDER -- both should be "
+                "`prior.selection.X_LADDER`" % region)
         n_x = x_ladder.size
         n_sigma = h2s["log10_sigma_grid"].size
 
@@ -332,7 +335,12 @@ def build_region(config, region):
             g_3myr = np.asarray(fy["G_3MYR"][start:stop], dtype=np.float64)
             m_lim = np.asarray(fy["M_LIM_8UM_1MYR"][start:stop], dtype=np.float64)
             imf_frac = np.asarray(fy["IMF_FRAC_ABOVE_MLIM"][start:stop], dtype=np.float64)
-            eps_table = np.asarray(fh["EPS"][start:stop], dtype=np.float64)
+            # H2S selection, on the fly (module docstring; owner,
+            # 2026-09-06): the same closed-form lookup the old per-source
+            # product batched to disk, now computed directly from this
+            # batch's own limits and ladder-scaled query extinctions.
+            a_query_b = x_ladder[None, :] * a_col[:, None]
+            eps_table = h2s_module.source_selection(config, region, log10_lim[start:stop], a_query_b)
             n_law_blurred = np.asarray(fl["N_LAW_BLURRED_DEG2"][start:stop], dtype=np.float64)
 
             bin_mass = _bin_mass_batch(shape, x_ladder, rows, a_col, sigma_col, provenance, zp_sigma_k=zp_sigma_k)

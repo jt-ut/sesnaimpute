@@ -3,9 +3,14 @@
 Stores, once per catalogued source, its nside-256 and nside-512 galactic
 NESTED HEALPix pixel, its sightline row (the row into its region's own
 sorted source-bearing nside-256 pixels), its survey-wide sightline id, and
-its region. A nside-256 pixel is admitted if it holds a source or has
-positive any-band Spitzer mosaic support; every nside-512 child of an
-admitted nside-256 pixel is admitted too.
+its region. A nside-256 pixel is admitted if it carries at least one
+SESNA source (SPEC_PRIORS.md section 0.2's admission definition); every
+nside-512 child of an admitted nside-256 pixel is admitted too. A pixel
+with positive Spitzer mosaic support but no catalogued source is no
+longer admitted (owner, 2026-09-06) -- mosaic-support-only pixels fed no
+source-keyed product, so admitting them only inflated the granule map's
+own footprint; each pixel's own mosaic-support flag is kept regardless
+(`SESNA_MOSAIC_SUPPORTED`), for a reader that still wants it.
 """
 
 import os
@@ -149,19 +154,43 @@ def build(config, regions=None):
         _region_dataset(reg, "SOURCE_ROW_OFFSET", np.array([r["source_offset"] for r in per_region], dtype=np.int64))
         _region_dataset(reg, "N_SOURCE_ROWS", np.array([r["n"] for r in per_region], dtype=np.int64))
 
-        # admission: a pixel holds a source or has positive mosaic support;
-        # every nside-512 child of an admitted nside-256 pixel is admitted
+        # admission (owner, 2026-09-06): a pixel carries at least one
+        # SESNA source, full stop; every nside-512 child of an admitted
+        # nside-256 pixel is admitted too. `direct256`/`direct512` (the
+        # mosaic-support-only pixels) no longer widen admission -- they
+        # are kept only to flag `SESNA_MOSAIC_SUPPORTED` below and to
+        # report the before/after admission counts.
         direct256 = np.unique(np.concatenate([r["supported256"] for r in per_region])) \
             if per_region else np.empty(0, dtype=np.int64)
         all_source_pix256 = np.concatenate([r["pix256"] for r in per_region]) if n_sources else np.empty(0, "i8")
         source256, counts256 = np.unique(all_source_pix256, return_counts=True)
-        healpix256 = np.union1d(source256, direct256)
+        healpix256_before = np.union1d(source256, direct256)
+        healpix256 = source256
         healpix512 = (healpix256[:, None] * 4 + np.arange(4, dtype=np.int64)[None, :]).reshape(-1) \
             if healpix256.size else np.empty(0, dtype=np.int64)
+        healpix512_before = (healpix256_before[:, None] * 4 + np.arange(4, dtype=np.int64)[None, :]).reshape(-1) \
+            if healpix256_before.size else np.empty(0, dtype=np.int64)
         direct512 = np.unique(np.concatenate([r["supported512"] for r in per_region])) \
             if per_region else np.empty(0, dtype=np.int64)
         all_source_pix512 = np.concatenate([r["pix512"] for r in per_region]) if n_sources else np.empty(0, "i8")
         source512, counts512 = np.unique(all_source_pix512, return_counts=True)
+
+        print("granules.build: admission (SESNA-source pixels only): "
+              "nside-256 %d -> %d (dropped %d mosaic-support-only), "
+              "nside-512 %d -> %d (dropped %d)"
+              % (healpix256_before.size, healpix256.size, healpix256_before.size - healpix256.size,
+                 healpix512_before.size, healpix512.size, healpix512_before.size - healpix512.size))
+        for r in per_region:
+            if r["region"] != "NGC 7129":
+                continue
+            before256 = np.union1d(r["source_pix256"], r["supported256"])
+            before512 = (before256[:, None] * 4 + np.arange(4, dtype=np.int64)[None, :]).reshape(-1) \
+                if before256.size else np.empty(0, dtype=np.int64)
+            after512 = (r["source_pix256"][:, None] * 4 + np.arange(4, dtype=np.int64)[None, :]).reshape(-1) \
+                if r["source_pix256"].size else np.empty(0, dtype=np.int64)
+            print("granules.build: NGC 7129 admission: nside-256 %d -> %d, "
+                  "nside-512 %d -> %d"
+                  % (before256.size, r["source_pix256"].size, before512.size, after512.size))
 
         n_rows256 = np.zeros(healpix256.shape, dtype=np.int64)
         loc = np.searchsorted(healpix256, source256)

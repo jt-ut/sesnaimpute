@@ -40,9 +40,16 @@ Writes one product per region, row-aligned with the curated catalogue,
 `CONDITIONED_STAR`/`CONDITIONED_PAHC` (n_b,) i1 (owner, 2026-09-06: which
 bins are the conditioned, own-bin estimate versus the pooled marginal
 one, so a reader can tell the two apart), and
-`EPS_STAR`/`EPS_PAHC`/`EPS_AGB`/`EPS_AGB_PHOTOSPHERE` (n, n_x, n_b) f2.
+`EPS_STAR`/`EPS_PAHC`/`EPS_AGB` (n, n_x, n_b) f2.
 Sources are batched (`sesnaimpute.batches.batches`) so no batch's working
 arrays exceed the byte budget.
+
+The AGB photospheric lower bound (SPEC_PRIORS.md section 3) is report-
+only (owner, 2026-09-06): no `EPS_AGB_PHOTOSPHERE` per-source dataset is
+written any more; `report_agb_photosphere_bound` prints, per region, the
+AGB selected fraction under the photospheric SEDs against the dusty
+(GRAMS) SEDs, one number each, at the region's own median eight-band
+limit.
 """
 
 import os
@@ -487,7 +494,6 @@ def build_and_write_region(config, region):
         ds_star = f.create_dataset("EPS_STAR", shape=(n_source, n_x, n_b), dtype="f2")
         ds_pahc = f.create_dataset("EPS_PAHC", shape=(n_source, n_x, n_b), dtype="f2")
         ds_agb = f.create_dataset("EPS_AGB", shape=(n_source, n_x, n_b), dtype="f2")
-        ds_agb_photo = f.create_dataset("EPS_AGB_PHOTOSPHERE", shape=(n_source, n_x, n_b), dtype="f2")
 
         fp = classes["star_pahc"]
         row_bytes = _row_bytes(n_x, n_b, fp.log10_q0.size)
@@ -527,12 +533,39 @@ def build_and_write_region(config, region):
                 lim_b, a_query_b, kappa_b, cp.log10_flux, cp.log10_b, cp.weight, cp.b_grid)
             ds_agb[start:stop] = eps.astype("f2")
 
-            cp = classes["agb_photo"]
-            eps = selection.pass_curves(
-                lim_b, a_query_b, kappa_b, cp.log10_flux, cp.log10_b, cp.weight, cp.b_grid)
-            ds_agb_photo[start:stop] = eps.astype("f2")
-
     return path, classes, n_source
+
+
+def report_agb_photosphere_bound(config, region, classes):
+    """Report-only (SPEC_PRIORS.md section 3, owner 2026-09-06): the AGB
+    photospheric lower bound is no longer written per source as
+    `EPS_AGB_PHOTOSPHERE` -- it is printed here instead, one number each,
+    at the region's own median eight-band limit and zero extinction: the
+    dusty (GRAMS) selected fraction against the photospheric (TRILEGAL
+    flux standing in for the GRAMS model) selected fraction, weighted
+    over the shared population by each member's own AGB weight and
+    brightness bin (`classes["agb"]`/`classes["agb_photo"]` share the
+    same weight, `log10_b` and bin assignment -- only the flux differs).
+    """
+    median_lim = np.log10(np.median(limits_module.limits(config, region), axis=0))[None, :]
+    a_query = np.zeros((1, 1))
+    kappa = selection.kappa_hybrid(config, selection.law_dense_weight(a_query))
+
+    cp_dusty, cp_photo = classes["agb"], classes["agb_photo"]
+    bin_weight = np.bincount(cp_dusty.bin_of_pop, weights=cp_dusty.weight, minlength=cp_dusty.b_grid.size)
+    total_weight = float(bin_weight.sum())
+
+    eps_dusty = selection.pass_curves(median_lim, a_query, kappa, cp_dusty.log10_flux,
+                                      cp_dusty.log10_b, cp_dusty.weight, cp_dusty.b_grid)
+    eps_photo = selection.pass_curves(median_lim, a_query, kappa, cp_photo.log10_flux,
+                                      cp_photo.log10_b, cp_photo.weight, cp_photo.b_grid)
+    if total_weight > 0:
+        frac_dusty = float(np.sum(bin_weight * eps_dusty[0, 0, :]) / total_weight)
+        frac_photo = float(np.sum(bin_weight * eps_photo[0, 0, :]) / total_weight)
+    else:
+        frac_dusty = frac_photo = float("nan")
+    print(f"star_selection: {region}: AGB selected fraction at the region's median limits "
+          f"(a=0): dusty={frac_dusty:.4f} photospheric_lower_bound={frac_photo:.4f}")
 
 
 # ---------------------------------------------------------------------------
@@ -563,6 +596,7 @@ def _build_one(config, region):
     path, classes, n_source = build_and_write_region(config, region)
     for line in report(region, classes, n_source, path):
         print(line, flush=True)
+    report_agb_photosphere_bound(config, region, classes)
     return path
 
 

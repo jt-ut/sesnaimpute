@@ -43,6 +43,7 @@ import numpy as np
 from scipy.special import erf
 
 from sesnaimpute import config as config_module
+from sesnaimpute.sky.derived.subbeam import HGBS_BEAM_ARCSEC, PLANCK_BEAM_ARCSEC
 
 #: How far past `A_s`, in sigma, consumers take the kernel's tail.
 X_TAIL_SIGMAS = 3.0
@@ -53,8 +54,14 @@ _POOL_BEAM_LABEL = "L302"
 _POOL_BEAM_INDEX = 1
 
 #: The two beams the kernel is ever evaluated at (spec 1.2), and the fixed
-#: order/codes the tabulated product's arm axis uses.
-STATED_BEAM_ARCSEC = {"herschel": 36.3, "planck": 301.52072}
+#: order/codes the tabulated product's arm axis uses. Both numbers are
+#: `sky.derived.subbeam`'s own constants, defined there once (the
+#: sub-beam stage's ladder and completion factor are tabulated at the
+#: same beams) and imported here, never redefined -- see
+#: `subbeam.PLANCK_BEAM_ARCSEC`'s docstring for which value this is and
+#: why (the R1.20 product's own measured beam, not the nominal
+#: 2015-release scan-beam FWHM).
+STATED_BEAM_ARCSEC = {"herschel": HGBS_BEAM_ARCSEC, "planck": PLANCK_BEAM_ARCSEC}
 _ARM_ORDER = ("herschel", "planck")
 _ARM_CODE = {"herschel": 0, "planck": 1}
 

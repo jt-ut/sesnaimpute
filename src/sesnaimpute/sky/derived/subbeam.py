@@ -59,6 +59,21 @@ AK_FLOOR = 1.0e-3
 #: The HGBS column maps' own stated beam FWHM.
 HGBS_BEAM_ARCSEC = 36.3
 
+#: Planck's own beam at 353 GHz, arcsec, as it actually acts on the R1.20
+#: all-sky thermal-dust product this pipeline reads (`sky.derived.
+#: planck_column`'s `measure_beam`): 5.03', found by cross-correlating a
+#: native-resolution HGBS map, smoothed through a trial-beam ladder,
+#: against native Planck tau353, since Planck's own FITS header carries
+#: no beam keyword for this product. NOT the nominal 2015-release 353 GHz
+#: scan-beam FWHM (4.94' = 296") -- that is the instrument's beam on the
+#: sky; this is the map's own effective resolution after the R1.20
+#: pipeline's own smoothing and pixelisation, the beam this project's
+#: column actually carries. The one Planck beam every consumer reads:
+#: the sub-beam ladder's own nearest rung (`SCALES`), the completion
+#: factor's own tabulation point (`L302` below), and `prior.kernel`'s
+#: `STATED_BEAM_ARCSEC["planck"]` (imported from here, never redefined).
+PLANCK_BEAM_ARCSEC = 301.8
+
 #: Common working grid every map is decimated onto before smoothing.
 TARGET_PIX_ARCSEC = 12.0
 #: Gaussian FWHM with the same variance as a working-cell top hat, sqrt(8 ln2 / 12).
@@ -106,7 +121,7 @@ K_D_EDGES = np.linspace(-1.5, 1.5, 301)
 FWHM = 2.3548200450309493
 #: The three beams the completion factor is tabulated at, and the target
 #: added at the map's own reference beam for the beam-rescaling law.
-L_REF, L108, L302, L821 = HGBS_BEAM_ARCSEC, 108.0, 301.8, 821.0
+L_REF, L108, L302, L821 = HGBS_BEAM_ARCSEC, 108.0, PLANCK_BEAM_ARCSEC, 821.0
 TARGETS = np.array([L_REF, L108, L302, L821])
 BETA_GRID = np.arange(2.05, 5.001, 0.005)
 U = np.exp(np.linspace(np.log(1e-4), np.log(60.0), 4000))
