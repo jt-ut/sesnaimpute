@@ -1060,10 +1060,50 @@ class ClassShape(object):
         return out
 
 
+def _precompute_bicubic_splines(density_table, x_centers, b_centers):
+    """`(tx, ty, coef)`: `RectBivariateSpline` fit ONCE per (tile, rung[,
+    limit]) group, here at load time, not per query (`_eval_interior`'s
+    old per-call re-fit) -- `prior.callable`'s De Boor kernel needs only
+    the knots and coefficients, not scipy's own fitting machinery, at
+    read time (owner ruling, 2026-09-06, step C2e). `tx`/`ty` are the
+    ONE knot vector every group of this class shares -- a not-a-knot
+    cubic spline's own knots depend only on `x_centers`/`b_centers`'s
+    positions, never the group's own data (verified: every group of
+    STAR, and of PAHC, shares bit-identical knots with every other group
+    of the SAME class). `coef` is `(*group_shape, n_cx, n_cy)` float32,
+    each group's own `RectBivariateSpline.get_coeffs()` reshaped to its
+    own `(n_cx, n_cy)` grid, `BICUBIC_DEGREE = 3` throughout."""
+    group_shape = density_table.shape[:-2]
+    n_x, n_b = density_table.shape[-2:]
+    flat = density_table.reshape(-1, n_x, n_b)
+    tx = ty = None
+    coefs = np.empty((flat.shape[0], n_x, n_b), dtype=np.float32)
+    for g in range(flat.shape[0]):
+        sp = RectBivariateSpline(x_centers, b_centers, flat[g],
+                                 kx=BICUBIC_DEGREE, ky=BICUBIC_DEGREE)
+        gtx, gty = sp.get_knots()
+        if tx is None:
+            tx, ty = gtx.astype(np.float64), gty.astype(np.float64)
+        n_cx = gtx.size - BICUBIC_DEGREE - 1
+        n_cy = gty.size - BICUBIC_DEGREE - 1
+        if n_cx != n_x or n_cy != n_b or not (
+                np.array_equal(gtx, tx) and np.array_equal(gty, ty)):
+            raise ValueError(
+                "prior.star_shapes: group %d's bicubic spline does not share this "
+                "class's own knot vector/coefficient count -- the shared-knot "
+                "assumption `prior.callable`'s De Boor kernel relies on does not "
+                "hold for this product" % g)
+        coefs[g, :n_cx, :n_cy] = sp.get_coeffs().reshape(n_cx, n_cy)
+    coef = coefs.reshape(group_shape + (n_x, n_b))
+    return tx, ty, coef
+
+
 def read(config, region, cls):
     """The stored per-tile shape as a `ClassShape`, with the survey-wide
     column kernel attached for the shift/width `Kernel.params` needs at
-    read time."""
+    read time, and its own bicubic spline knots/coefficients precomputed
+    once here (`_precompute_bicubic_splines`, owner ruling, 2026-09-06,
+    step C2e) for `prior.callable`'s compiled De Boor read."""
     path = config_module.product_path(config, "bms", cls, "shape", "tile", region=region)
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -1081,8 +1121,11 @@ def read(config, region, cls):
         mass_outside = f["MASS_OUTSIDE"][:]
         limit_grid_mjy = f["LIMIT8_GRID_MJY"][:] if "LIMIT8_GRID_MJY" in f else None
     kern = Kernel.read(config)
-    return ClassShape(cls, shape_nodes, x_edges, b_edges, density, tail_x_lo, tail_x_hi,
-                      tail_b_lo, tail_b_hi, mass_outside, kern, limit_grid_mjy=limit_grid_mjy)
+    shape = ClassShape(cls, shape_nodes, x_edges, b_edges, density, tail_x_lo, tail_x_hi,
+                       tail_b_lo, tail_b_hi, mass_outside, kern, limit_grid_mjy=limit_grid_mjy)
+    shape.spline_tx, shape.spline_ty, shape.spline_coef = _precompute_bicubic_splines(
+        density, shape.x_centers, shape.b_centers)
+    return shape
 
 
 # ---------------------------------------------------------------------------

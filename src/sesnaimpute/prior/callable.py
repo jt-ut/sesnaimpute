@@ -724,6 +724,271 @@ def _gal_selection_numba(a, b, mi, gal_fref, log10_lim_irac, kd_irac, kw_irac,
     return out
 
 
+#: The star family's compiled bicubic read (owner ruling, 2026-09-06,
+#: step C2e), from the two verified building blocks: a De Boor cubic
+#: tensor-spline evaluator (matches scipy `RectBivariateSpline.ev()` to
+#: 1e-15 on a synthetic grid) reading `star_shapes.read`'s own
+#: precomputed knots/coefficients (`_precompute_bicubic_splines`), and
+#: the fact that every (tile, rung[, limit]) group of one class shares
+#: an identical knot vector, so only the coefficient array varies by
+#: group. Replaces `_eval_interior`'s old per-call scipy re-fit
+#: entirely; the bounded-tail blend (`_eval_node`'s own logic, exponent
+#: clipped at 0 so a wrong-side point's eagerly-evaluated branch cannot
+#: overflow) and the two-component/width-ladder/PAHC-limit-grid blend
+#: (`density`/`_component_density`'s own logic) are reproduced exactly,
+#: scalar, per point.
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _bspline_span(t, n_basis, x):
+    """The knot span `k <= span < n_basis` such that `t[span] <= x <
+    t[span+1]`, clamped at either end -- de Boor's own span search,
+    `BICUBIC_DEGREE = 3` hardcoded as `k`."""
+    k = 3
+    if x <= t[k]:
+        return k
+    if x >= t[n_basis]:
+        return n_basis - 1
+    lo = k
+    hi = n_basis
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if t[mid] <= x:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _deboor_cubic_scalar(t, span, d0, d1, d2, d3, x):
+    """One De Boor recursion, degree 3, at knot span `span` -- the
+    textbook algorithm, unrolled for `k=3` (`BICUBIC_DEGREE`)."""
+    d = np.empty(4)
+    d[0] = d0
+    d[1] = d1
+    d[2] = d2
+    d[3] = d3
+    for r in range(1, 4):
+        for j in range(3, r - 1, -1):
+            left = t[span - 3 + j]
+            right = t[span + 1 + j - r]
+            denom = right - left
+            alpha = (x - left) / denom if denom != 0.0 else 0.0
+            d[j] = (1.0 - alpha) * d[j - 1] + alpha * d[j]
+    return d[3]
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _bicubic_eval_scalar(tx, ty, coef, x, y):
+    """One (tile, rung[, limit]) group's bicubic tensor-spline value at
+    `(x, y)`: de Boor in `y` for each of the 4 rows the `x`-span needs,
+    then de Boor in `x` on those 4 results (verified against scipy
+    `RectBivariateSpline.ev()` to 1e-15). `x`/`y` are clamped to the
+    spline's own fitted domain (`tx[3]..tx[n_cx]` = `x_centers[0]
+    ..x_centers[-1]`, `ty` likewise) before evaluating -- scipy's `.ev()`
+    does the same for an out-of-domain query (clamps to the boundary
+    value, does NOT extrapolate the boundary polynomial); the caller's
+    own edge-based in/out-of-box test (`x_edges`/`b_edges`) is looser
+    than the spline's own CENTRES-based domain by half a cell on each
+    side, so a point can be "interior" by that test yet still need this
+    clamp (a real bug this fixed: an unclamped point there silently
+    extrapolated to 0 instead of scipy's own small positive value).
+    Clipped at 0 after (`_eval_interior`'s own non-negativity identity:
+    a cubic spline can ring slightly below zero near a sharp edge)."""
+    n_cx = coef.shape[0]
+    n_cy = coef.shape[1]
+    xc = x
+    if xc < tx[3]:
+        xc = tx[3]
+    elif xc > tx[n_cx]:
+        xc = tx[n_cx]
+    yc = y
+    if yc < ty[3]:
+        yc = ty[3]
+    elif yc > ty[n_cy]:
+        yc = ty[n_cy]
+    x = xc
+    y = yc
+    sx = _bspline_span(tx, n_cx, x)
+    sy = _bspline_span(ty, n_cy, y)
+    r0 = _deboor_cubic_scalar(ty, sy, coef[sx - 3, sy - 3], coef[sx - 3, sy - 2],
+                              coef[sx - 3, sy - 1], coef[sx - 3, sy], y)
+    r1 = _deboor_cubic_scalar(ty, sy, coef[sx - 2, sy - 3], coef[sx - 2, sy - 2],
+                              coef[sx - 2, sy - 1], coef[sx - 2, sy], y)
+    r2 = _deboor_cubic_scalar(ty, sy, coef[sx - 1, sy - 3], coef[sx - 1, sy - 2],
+                              coef[sx - 1, sy - 1], coef[sx - 1, sy], y)
+    r3 = _deboor_cubic_scalar(ty, sy, coef[sx, sy - 3], coef[sx, sy - 2],
+                              coef[sx, sy - 1], coef[sx, sy], y)
+    val = _deboor_cubic_scalar(tx, sx, r0, r1, r2, r3, x)
+    return val if val > 0.0 else 0.0
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _eval_node_scalar(coef_g, tx, ty, x_e0, x_eN, b_e0, b_eN, xc0, xcN, bc0, bcN,
+                      txlo, txhi, tblo, tbhi, log_x, logb):
+    """One (tile, rung[, limit]) group's `_eval_node` -- the bicubic
+    interior read, blended with the declared analytic tail beyond
+    whichever edge is out of range (`star_shapes.ClassShape._eval_node`'s
+    own priority: x-lo, x-hi, b-lo, b-hi, mutually exclusive). Exponent
+    clipped at 0 (`star_shapes.py`'s own bounded-tail fix: a wrong-side
+    point's eagerly-evaluated branch cannot overflow)."""
+    x_lo = log_x < x_e0
+    x_hi = log_x > x_eN
+    b_lo = logb < b_e0
+    b_hi = logb > b_eN
+    if not (x_lo or x_hi or b_lo or b_hi):
+        return _bicubic_eval_scalar(tx, ty, coef_g, log_x, logb)
+
+    clip_b = logb
+    if clip_b < b_e0:
+        clip_b = b_e0
+    elif clip_b > b_eN:
+        clip_b = b_eN
+    clip_x = log_x
+    if clip_x < x_e0:
+        clip_x = x_e0
+    elif clip_x > x_eN:
+        clip_x = x_eN
+
+    if x_lo:
+        amp_x = _bicubic_eval_scalar(tx, ty, coef_g, xc0, clip_b)
+        expo = txlo * (log_x - xc0)
+        if expo > 0.0:
+            expo = 0.0
+        return amp_x * math.exp(expo)
+    elif x_hi:
+        amp_x = _bicubic_eval_scalar(tx, ty, coef_g, xcN, clip_b)
+        expo = txhi * (log_x - xcN)
+        if expo > 0.0:
+            expo = 0.0
+        return amp_x * math.exp(expo)
+    elif b_lo:
+        amp_b = _bicubic_eval_scalar(tx, ty, coef_g, clip_x, bc0)
+        expo = tblo * (logb - bc0)
+        if expo > 0.0:
+            expo = 0.0
+        return amp_b * math.exp(expo)
+    else:
+        amp_b = _bicubic_eval_scalar(tx, ty, coef_g, clip_x, bcN)
+        expo = tbhi * (logb - bcN)
+        if expo > 0.0:
+            expo = 0.0
+        return amp_b * math.exp(expo)
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _family_shape_numba(a, logb, tile_ids, a_col, w, mu0, sigma0, mu1, sigma1,
+                        coef, tx, ty, x_edges, b_edges, x_centers, b_centers,
+                        tail_xlo, tail_xhi, tail_blo, tail_bhi, shape_nodes_log):
+    """`(n,)`: STAR/AGB's `ClassShape.density` -- two mixture components,
+    each its own width-ladder bracket (`_bracket`, shared with GAL) and
+    bicubic-with-tail read (`_eval_node_scalar`), blended -- one
+    compiled loop, no limit-grid dimension."""
+    n = a.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    n_nodes = shape_nodes_log.shape[0]
+    x_e0, x_eN = x_edges[0], x_edges[x_edges.shape[0] - 1]
+    b_e0, b_eN = b_edges[0], b_edges[b_edges.shape[0] - 1]
+    xc0, xcN = x_centers[0], x_centers[x_centers.shape[0] - 1]
+    bc0, bcN = b_centers[0], b_centers[b_centers.shape[0] - 1]
+    for k in range(n):
+        ak = a[k]
+        if ak < 0.0:
+            out[k] = 0.0
+            continue
+        tid = tile_ids[k]
+        acol = a_col[k]
+        log_x_raw = math.log10(ak / acol) if ak > 0.0 else x_e0 - 1.0e3
+        b_k = logb[k]
+
+        val_total = 0.0
+        for comp in range(2):
+            if comp == 0:
+                mu_c, sigma_c, wc = mu0[k], sigma0[k], w[k]
+            else:
+                mu_c, sigma_c, wc = mu1[k], sigma1[k], 1.0 - w[k]
+            log_x = log_x_raw - mu_c
+            i_lo, t_w = _bracket(shape_nodes_log, math.log(sigma_c))
+            i_hi = i_lo + 1
+            if i_hi > n_nodes - 1:
+                i_hi = n_nodes - 1
+            val_lo = _eval_node_scalar(coef[tid, i_lo], tx, ty, x_e0, x_eN, b_e0, b_eN,
+                                       xc0, xcN, bc0, bcN, tail_xlo[tid, i_lo],
+                                       tail_xhi[tid, i_lo], tail_blo[tid, i_lo],
+                                       tail_bhi[tid, i_lo], log_x, b_k)
+            val_hi = _eval_node_scalar(coef[tid, i_hi], tx, ty, x_e0, x_eN, b_e0, b_eN,
+                                       xc0, xcN, bc0, bcN, tail_xlo[tid, i_hi],
+                                       tail_xhi[tid, i_hi], tail_blo[tid, i_hi],
+                                       tail_bhi[tid, i_hi], log_x, b_k)
+            val_total += wc * ((1.0 - t_w) * val_lo + t_w * val_hi)
+        out[k] = val_total
+    return out
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _family_shape_numba_pahc(a, logb, tile_ids, a_col, w, mu0, sigma0, mu1, sigma1, log_f_lim8,
+                             coef, tx, ty, x_edges, b_edges, x_centers, b_centers,
+                             tail_xlo, tail_xhi, tail_blo, tail_bhi, shape_nodes_log, limit_log):
+    """`(n,)`: PAHC's `ClassShape.density` -- `_family_shape_numba`'s
+    same two-component/width-ladder logic, each component ALSO
+    bracketing the 8-micron limit grid (`limit_log`) and blending its
+    four (rung, limit) corners."""
+    n = a.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    n_nodes = shape_nodes_log.shape[0]
+    n_limit = limit_log.shape[0]
+    x_e0, x_eN = x_edges[0], x_edges[x_edges.shape[0] - 1]
+    b_e0, b_eN = b_edges[0], b_edges[b_edges.shape[0] - 1]
+    xc0, xcN = x_centers[0], x_centers[x_centers.shape[0] - 1]
+    bc0, bcN = b_centers[0], b_centers[b_centers.shape[0] - 1]
+    for k in range(n):
+        ak = a[k]
+        if ak < 0.0:
+            out[k] = 0.0
+            continue
+        tid = tile_ids[k]
+        acol = a_col[k]
+        log_x_raw = math.log10(ak / acol) if ak > 0.0 else x_e0 - 1.0e3
+        b_k = logb[k]
+        m_lo, t_limit = _bracket(limit_log, log_f_lim8[k])
+        m_hi = m_lo + 1
+        if m_hi > n_limit - 1:
+            m_hi = n_limit - 1
+
+        val_total = 0.0
+        for comp in range(2):
+            if comp == 0:
+                mu_c, sigma_c, wc = mu0[k], sigma0[k], w[k]
+            else:
+                mu_c, sigma_c, wc = mu1[k], sigma1[k], 1.0 - w[k]
+            log_x = log_x_raw - mu_c
+            i_lo, t_w = _bracket(shape_nodes_log, math.log(sigma_c))
+            i_hi = i_lo + 1
+            if i_hi > n_nodes - 1:
+                i_hi = n_nodes - 1
+
+            v_lo_lo = _eval_node_scalar(coef[tid, i_lo, m_lo], tx, ty, x_e0, x_eN, b_e0, b_eN,
+                                        xc0, xcN, bc0, bcN, tail_xlo[tid, i_lo, m_lo],
+                                        tail_xhi[tid, i_lo, m_lo], tail_blo[tid, i_lo, m_lo],
+                                        tail_bhi[tid, i_lo, m_lo], log_x, b_k)
+            v_lo_hi = _eval_node_scalar(coef[tid, i_lo, m_hi], tx, ty, x_e0, x_eN, b_e0, b_eN,
+                                        xc0, xcN, bc0, bcN, tail_xlo[tid, i_lo, m_hi],
+                                        tail_xhi[tid, i_lo, m_hi], tail_blo[tid, i_lo, m_hi],
+                                        tail_bhi[tid, i_lo, m_hi], log_x, b_k)
+            v_hi_lo = _eval_node_scalar(coef[tid, i_hi, m_lo], tx, ty, x_e0, x_eN, b_e0, b_eN,
+                                        xc0, xcN, bc0, bcN, tail_xlo[tid, i_hi, m_lo],
+                                        tail_xhi[tid, i_hi, m_lo], tail_blo[tid, i_hi, m_lo],
+                                        tail_bhi[tid, i_hi, m_lo], log_x, b_k)
+            v_hi_hi = _eval_node_scalar(coef[tid, i_hi, m_hi], tx, ty, x_e0, x_eN, b_e0, b_eN,
+                                        xc0, xcN, bc0, bcN, tail_xlo[tid, i_hi, m_hi],
+                                        tail_xhi[tid, i_hi, m_hi], tail_blo[tid, i_hi, m_hi],
+                                        tail_bhi[tid, i_hi, m_hi], log_x, b_k)
+            val_lo = (1.0 - t_limit) * v_lo_lo + t_limit * v_lo_hi
+            val_hi = (1.0 - t_limit) * v_hi_lo + t_limit * v_hi_hi
+            val_total += wc * ((1.0 - t_w) * val_lo + t_w * val_hi)
+        out[k] = val_total
+    return out
+
+
 class _FamilyClass(object):
     """STAR/AGB/PAHC's `shape`/`selection` pair (owner ruling, 2026-09-06):
     `shape` is `ClassShape.density` converted to a density in `(a, log10
@@ -747,17 +1012,37 @@ class _FamilyClass(object):
         valid = a_f > 0.0
         a_safe = np.where(valid, a_f, 1.0)
 
-        tile_id = p.table["TILE_ID"][rows_f]
+        tile_id = p.table["TILE_ID"][rows_f].astype(np.int64)
         a_col = p.table["A_COL_K"][rows_f]
         sigma_col = p.table["A_COL_SIG_K"][rows_f]
         map_class = np.where(
             p.table["A_COL_PROVENANCE"][rows_f] == star_shapes._PLANCK_PROVENANCE_CODE,
             "planck", "herschel")
-        f_lim8 = (p.table["F_LIM_50_MJY"][rows_f, p._idx_i4] if self.cls == "pahc" else None)
         zp_sigma_k = p._zp_sigma_k[rows_f]
 
-        mass = shape_obj.density(a_f, b_f, tile_id, a_col, sigma_col, map_class, f_lim8=f_lim8,
-                                 zp_sigma_k=zp_sigma_k)
+        # `Kernel.mixture`'s own structural interpolation stays in numpy
+        # (cheap, vectorised, unchanged); the compiled kernel below is
+        # `ClassShape.density`'s bicubic-with-tail read (owner ruling,
+        # 2026-09-06, step C2e), not this.
+        w, mu, sigma = shape_obj.kern.mixture(a_col, sigma_col, map_class,
+                                              zp_sigma_k=zp_sigma_k)
+        shape_nodes_log = np.log(shape_obj.shape_nodes)
+        if self.cls == "pahc":
+            f_lim8 = p.table["F_LIM_50_MJY"][rows_f, p._idx_i4]
+            log_f_lim8 = np.log10(f_lim8)
+            mass = _family_shape_numba_pahc(
+                a_f, b_f, tile_id, a_col, w, mu[:, 0], sigma[:, 0], mu[:, 1], sigma[:, 1],
+                log_f_lim8, shape_obj.spline_coef, shape_obj.spline_tx, shape_obj.spline_ty,
+                shape_obj.x_edges, shape_obj.b_edges, shape_obj.x_centers, shape_obj.b_centers,
+                shape_obj.tail_x_lo, shape_obj.tail_x_hi, shape_obj.tail_b_lo,
+                shape_obj.tail_b_hi, shape_nodes_log, shape_obj.limit_log)
+        else:
+            mass = _family_shape_numba(
+                a_f, b_f, tile_id, a_col, w, mu[:, 0], sigma[:, 0], mu[:, 1], sigma[:, 1],
+                shape_obj.spline_coef, shape_obj.spline_tx, shape_obj.spline_ty,
+                shape_obj.x_edges, shape_obj.b_edges, shape_obj.x_centers, shape_obj.b_centers,
+                shape_obj.tail_x_lo, shape_obj.tail_x_hi, shape_obj.tail_b_lo,
+                shape_obj.tail_b_hi, shape_nodes_log)
         p_ab = np.where(valid, mass / (a_safe * LN10 * fg["dx"] * fg["db"]), 0.0)
         return p_ab.reshape(shp)
 
