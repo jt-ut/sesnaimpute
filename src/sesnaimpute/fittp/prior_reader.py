@@ -45,15 +45,17 @@ _SQRT2 = float(np.sqrt(2.0))
 _SQRT2PI = float(np.sqrt(2.0 * np.pi))
 
 #: SPEC_BMSTP_DRAFT.md section 4.2: a window at most this many cells wide
-#: is summed by exact per-cell erf differences; a wider one (sigma_a
-#: gtrsim 0.1 mag) reads the source's own a'-grid table instead (W6d item 2).
+#: is summed by exact per-cell erf differences; a wider one reads the
+#: source's own a'-grid table instead, by window width alone -- whatever
+#: sigma_a is (W6d item 2, ruling: window width, not sigma_a, decides).
 N_EXACT = 8
-#: the a'-grid step, section 4.2 ("a fine grid of a_hat (0.01 mag)").
-A_STAR_TABLE_STEP = 0.01
-#: below this sigma_a the window is always narrow enough for the exact
-#: path (section 4.2's "sigma_a gtrsim 0.1 mag" for the table's <0.13%
-#: interpolation error), so no table is built for the source at all.
-A_STAR_SIGMA_MIN = 0.1
+#: the a'-grid step's coarse limit, section 4.2 ("a fine grid of a_hat
+#: (0.01 mag)"). The per-source step is min(this, sigma_a / 10), so a
+#: narrow Gaussian's table stays accurate (interpolation error
+#: (step / sigma_a)^2 / 8 <= 0.125% at the sigma_a/10 floor) even though
+#: its window can still be wide near the grid's low-extinction end, where
+#: cells are far narrower than sigma_a itself (W6d ruling).
+A_STAR_TABLE_STEP_MAX = 0.01
 
 
 class Prior(object):
@@ -238,19 +240,24 @@ def _factor_ln(reader, rows, a_hat, log10_b_hat, slope, sigma_a, model_index):
     return total
 
 
-def _build_a_star_tables(a_col, x_edges, sigma_a):
+def _build_a_star_tables(a_col, x_edges, sigma_a, a_hat):
     """The hybrid cell-mass table of SPEC_BMSTP_DRAFT.md section 4.2, one
-    per source with `sigma_a >= A_STAR_SIGMA_MIN`: on an `a'` grid of step
-    `A_STAR_TABLE_STEP` covering `[-5 sigma_a, A_COL_K * 10^x_max + 5
+    per source: on an `a'` grid of step `min(A_STAR_TABLE_STEP_MAX, sigma_a
+    / 10)` covering this block's templates' `a_hat` range (`(n,)` `a_hat`
+    rows, one per source) clipped to `[-5 sigma_a, A_COL_K * 10^x_max + 5
     sigma_a]`, the cell mass `M_i(a')` and the cell's truncated-normal mean
     `a*_i(a')` (both `(n_ap, n_x)`), by one vectorised `scipy.special.erf`
     and `exp` pass over the whole grid (no erf/exp inside the per-template
-    kernel loop for these sources, W6d item 2), plus each `a'` bin's own
-    cell window `i_lo, i_hi` from the grid's geometric spacing. Sources
-    below `A_STAR_SIGMA_MIN` get `n_ap = 0` (the kernel's exact path
-    always). Returns padded float32 `(n, max_ap, n_x)` M and a* tables,
-    int32 `(n, max_ap)` window tables, float64 `(n,)` grid origins and
-    int32 `(n,)` real lengths.
+    kernel loop, W6d item 2 as ruled: the exact/table choice is by window
+    width alone, so every source gets a table regardless of `sigma_a`; the
+    `sigma_a / 10` step floor keeps a narrow Gaussian's interpolation error
+    at `(step / sigma_a)^2 / 8 <= 0.125%` even on the rare narrow-`sigma_a`
+    template whose window is still wide because it sits near the grid's
+    low-extinction end, where cells are far narrower than `sigma_a`),
+    plus each `a'` bin's own cell window `i_lo, i_hi` from the grid's
+    geometric spacing. Returns padded float32 `(n, max_ap, n_x)` M and a*
+    tables, int32 `(n, max_ap)` window tables, float64 `(n,)` grid origins
+    and int32 `(n,)` real lengths.
     """
     from scipy.special import erf
     n = sigma_a.size
@@ -259,14 +266,22 @@ def _build_a_star_tables(a_col, x_edges, sigma_a):
     dlx = float(x_edges[1] - x_edges[0])
     x_max = float(x_edges[-1])
     a_min = np.zeros(n, dtype=np.float64)
+    step = np.zeros(n, dtype=np.float64)
     n_ap = np.zeros(n, dtype=np.int64)
     edges_per_source = [None] * n
     for s in range(n):
-        if sigma_a[s] < A_STAR_SIGMA_MIN or a_col[s] <= 0.0:
+        if sigma_a[s] <= 0.0 or a_col[s] <= 0.0:
             continue
-        amin = -5.0 * sigma_a[s]
-        amax = a_col[s] * 10.0 ** x_max + 5.0 * sigma_a[s]
-        n_ap[s] = int(np.ceil((amax - amin) / A_STAR_TABLE_STEP)) + 1
+        lo_bound = -5.0 * sigma_a[s]
+        hi_bound = a_col[s] * 10.0 ** x_max + 5.0 * sigma_a[s]
+        row = a_hat[s]
+        amin = max(lo_bound, float(np.min(row)))
+        amax = min(hi_bound, float(np.max(row)))
+        st = min(A_STAR_TABLE_STEP_MAX, sigma_a[s] / 10.0)
+        if amax <= amin:
+            amax = amin + st
+        step[s] = st
+        n_ap[s] = int(np.ceil((amax - amin) / st)) + 1
         a_min[s] = amin
         edges_per_source[s] = a_col[s] * 10.0 ** x_edges
     max_ap = int(n_ap.max()) if n else 0
@@ -277,7 +292,7 @@ def _build_a_star_tables(a_col, x_edges, sigma_a):
     for s in range(n):
         if n_ap[s] == 0:
             continue
-        ap = a_min[s] + A_STAR_TABLE_STEP * np.arange(n_ap[s])
+        ap = a_min[s] + step[s] * np.arange(n_ap[s])
         edges = edges_per_source[s]
         z = (edges[None, :] - ap[:, None]) / sigma_a[s]
         cdf = 0.5 * (1.0 + erf(z / _SQRT2))
@@ -302,7 +317,7 @@ def _build_a_star_tables(a_col, x_edges, sigma_a):
         ilo = np.where(lo_a > 0.0, np.clip(np.floor((lx_lo - x0) / dlx), 0, n_x - 1), 0.0).astype(np.int64)
         ilo_tab[s, :n_ap[s]] = ilo.astype(np.int32)
         ihi_tab[s, :n_ap[s]] = ihi.astype(np.int32)
-    return m_tab, a_tab, ilo_tab, ihi_tab, a_min, n_ap.astype(np.int32)
+    return m_tab, a_tab, ilo_tab, ihi_tab, a_min, step, n_ap.astype(np.int32)
 
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy")
@@ -346,7 +361,7 @@ def _ln_half_erfc(z):
 @numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
 def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               b_origin, dlb, dlx, a_edges_buf,
-              m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, n_ap_tab):
+              m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab):
     """The cell sum of SPEC_BMSTP_DRAFT.md section 4.2, per source and
     template: the cell window `[i_lo, i_hi]` holding `a_hat +/- 5 sigma_a`
     found in O(1) from the grid's own geometric spacing (no scan of the
@@ -355,14 +370,16 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     `a_hat` itself for a narrow Gaussian, the cell's midpoint for a wide
     one, so `h`'s gather and the Jacobian `1 / a*_i` both sit at the
     mass's own mean within the cell. A window at most `N_EXACT` cells
-    wide (most sources: the well-measured case) still pays one erf and
-    one exp per cell exactly; a wider one (`sigma_a` well above
-    `A_STAR_SIGMA_MIN`) instead gathers `M_i`, `a*_i` from the source's
-    own `a'`-grid table (`_build_a_star_tables`, W6d item 2) by linear
-    interpolation in `a'` -- no erf, no exp, no per-template log10 for
-    that window's mass, only the one log10 pair that still decides which
-    path a given template's window takes (measured negligible next to the
-    erf/exp it replaces, W6d report). The dot with `M` runs over cells
+    wide still pays one erf and one exp per cell exactly; a wider one --
+    by window width alone, whatever `sigma_a` is (W6d ruling: a narrow
+    Gaussian near the grid's low-extinction end can still have a wide
+    window, since cells there are far narrower than `sigma_a`) -- instead
+    gathers `M_i`, `a*_i` from the source's own `a'`-grid table
+    (`_build_a_star_tables`, W6d item 2) by linear interpolation in `a'`
+    -- no erf, no exp, no per-template log10 for that window's mass, only
+    the one log10 pair that still decides which path a given template's
+    window takes (measured negligible next to the erf/exp it replaces,
+    W6d report). The dot with `M` runs over cells
     above 1e-6. `A_COL_K` and `ln 10` in the Jacobian, common to every
     template at a source, are dropped. No `(n_source x n_model x cells)`
     intermediate. `a_edges_buf` is `(n, n_x+1)` scratch, one row per
@@ -389,6 +406,7 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
         inv_sig = 1.0 / sig
         n_ap = n_ap_tab[s]
         a_min = a_min_tab[s]
+        a_step = step_tab[s]
         for th in numba.prange(m):
             ah = a_hat[s, th]
             lo_a = ah - 5.0 * sig
@@ -407,7 +425,7 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 pass  # the +/-5 sigma window never reaches positive extinction
             elif n_ap > 0 and (i_hi - i_lo + 1) > N_EXACT:
                 # the hybrid table path: M_i, a*_i by linear interpolation in a'
-                kpos = (ah - a_min) / A_STAR_TABLE_STEP
+                kpos = (ah - a_min) / a_step
                 k0 = int(math.floor(kpos))
                 if k0 < 0:
                     k0 = 0
@@ -509,13 +527,14 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index):
     c_theta = reader.c_theta[model_index] if reader.c_theta.size else np.zeros(m)
     a_edges_buf = np.empty((rows.size, n_x + 1), dtype=np.float64)
     sigma_a = np.asarray(sigma_a, dtype=np.float64)
-    m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, n_ap_tab = _build_a_star_tables(
-        a_col, reader.x_edges, sigma_a)
+    a_hat64 = np.asarray(a_hat, dtype=np.float64)
+    m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab = _build_a_star_tables(
+        a_col, reader.x_edges, sigma_a, a_hat64)
     core = _cell_sum(a_col, reader.x_edges, sigma_a,
-                      np.asarray(a_hat, dtype=np.float64), np.asarray(log10_b_hat, dtype=np.float64),
+                      a_hat64, np.asarray(log10_b_hat, dtype=np.float64),
                       np.asarray(slope, dtype=np.float64), np.asarray(c_theta, dtype=np.float64),
                       h, reader.b_origin, reader.dlb, reader.dlx, a_edges_buf,
-                      m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, n_ap_tab)
+                      m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab)
     factor_term = _factor_ln(reader, rows, np.asarray(a_hat, dtype=np.float64),
                               np.asarray(log10_b_hat, dtype=np.float64),
                               np.asarray(slope, dtype=np.float64),
