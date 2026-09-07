@@ -30,6 +30,7 @@ catalogue row order -- the same read-all-write-once join `sed_fit.io.
 assemble_fitres` performs -- and the batch files are removed.
 """
 
+import gc
 import os
 import time
 
@@ -195,12 +196,31 @@ def _join(config, region, cls, batch_paths, n_sources):
 def build(config, regions=None, classes=None):
     """Sweeps every (region, class) pair, batched (module docstring):
     `regions` defaults to `constants.REGIONS` (all thirty, `CODING_RULES.md`
-    5c), `classes` to the six `definitions.CLASSES` codes."""
+    5c), `classes` to the six `definitions.CLASSES` codes.
+
+    `RUNBOOK.sh`'s own fit line calls this with one class at a time (a
+    fresh process per class, one process's memory never shared with the
+    class before it) -- this all-six-classes-per-call path stays here as
+    `fit.run`'s own default, for another caller only (e.g. a cluster's
+    generated `bms/fit/jobs.sh`, already one job per line). Whenever more
+    than one class DOES run in this one process, `gc.collect()` between
+    classes (below) frees what the class just finished was still holding
+    -- its `SourcePrior`, `GaiaTerm`/`PsiTerm` and register arrays are
+    all local to `_fit_one` and go out of scope when it returns, but
+    their teardown pulls in reference cycles (joblib's `Parallel`/
+    `delayed` task objects from `fit_batch`'s own thread dispatch,
+    `threadpool_limits`'s context manager, h5py's object trees) that
+    CPython's generational collector does not necessarily clear before
+    the next class's own allocations run -- see the STAR-then-AGB,
+    NGC 7129, one-process before/after peaks this collect call was
+    measured against (owner ruling 2026-09-06, reported alongside this
+    change, not repeated here as the figures will go stale)."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     class_codes = classes if classes is not None else list(CLASSES)
     for region in region_names:
         for cls in class_codes:
             _fit_one(config, region, cls)
+            gc.collect()
 
 
 def jobs(config):

@@ -605,6 +605,15 @@ def fit_batch(config, region, cls, rows, prior, gamma=None, psi=None, stage=None
             with _tick_lock:
                 _blocks_done[0] += 1
                 done = _blocks_done[0]
+                if done == 1:
+                    # Force the very first completed block through
+                    # `stage`'s own ten-second throttle (`progress.Stage.
+                    # tick`'s `now - self._last >= _MIN_INTERVAL_S`
+                    # check): a long class (H2S killed under `capped.sh`
+                    # before its first throttled tick, owner ruling
+                    # 2026-09-06) must show life immediately, not after
+                    # ten seconds of silence.
+                    stage._last = 0.0
             stage.tick(done, n_blocks, "blocks")
 
     block_budget_mb = int(getattr(config, "fit_block_budget_mb", 512))

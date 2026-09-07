@@ -28,10 +28,15 @@ export PYTHONPATH="$(cd "$(dirname "$0")" && pwd)/src"
 CONFIG=/Users/jtaylor/Dropbox/Research/SESNA_Complete/config/root.cfg
 STARTED=0; [ -z "$FROM" ] && STARTED=1
 # Every stage runs through capped.sh (CODING_RULES 10a) with the region list.
+# Extra arguments after the module name (e.g. the fit loop's own
+# `--classes <C>`, below) pass straight through to that one invocation --
+# capped.sh then caps that one process alone, so a line that calls PY
+# more than once (one process per call) never shares one process's
+# memory ceiling with another.
 PY() { local module="$1"; shift
   if [ $STARTED -eq 0 ]; then [ "$module" = "$FROM" ] && STARTED=1 || return 0; fi
-  echo "== $module ${REGIONS[*]:-}"
-  "$(dirname "$0")/capped.sh" "$PYBIN" -m "$module" "$CONFIG" ${REGIONS[@]+--regions "${REGIONS[@]}"}
+  echo "== $module ${REGIONS[*]:-} $*"
+  "$(dirname "$0")/capped.sh" "$PYBIN" -m "$module" "$CONFIG" ${REGIONS[@]+--regions "${REGIONS[@]}"} "$@"
 }
 
 # --- downloads ---
@@ -111,9 +116,22 @@ PY sesnaimpute.prior.table                  # the prior table: the join, one row
 
 # --- fit ---
 # bms/ posterior fit of class and subclass probabilities from the prior
-# table. No --classes here: fit.run.build's own default is all six
-# classes, every region, so this one line runs every {region, class}.
-PY sesnaimpute.fit.run                      # the class-posterior evidence sweep, batched (IMPLEMENTATION.md sec 5; 10_POSTERIOR.md sec 1)
+# table. One job is one {region, class} (fit.run's own module docstring)
+# and the NGC 7129 dry run (owner ruling 2026-09-06) found resident
+# memory is NOT released between classes swept in one process (STAR 4.0
+# GB -> AGB 6.2 -> PAHC 6.7 -> GAL 7.8 -> YSO 7.8 -> H2S killed above the
+# 8 GB capped.sh ceiling) -- so this line runs the six classes as six
+# SEPARATE `capped.sh`-wrapped processes, in `fit.run.CLASSES`'s own
+# order (STAR AGB PAHC GAL YSO H2S), each capped and reported on its own:
+# one class's peak is then that class's process's own peak, never summed
+# with the class before it. `fit.run.build`'s in-process all-six-classes
+# path (its own `--classes` default) still exists for another caller --
+# e.g. a cluster's `bms/fit/jobs.sh` (below), already one job per line --
+# but this RUNBOOK always passes one `--classes` value, so that
+# in-process multi-class path never actually runs here.
+for FIT_CLASS in STAR AGB PAHC GAL YSO H2S; do
+  PY sesnaimpute.fit.run --classes "$FIT_CLASS"   # the class-posterior evidence sweep, batched (IMPLEMENTATION.md sec 5; 10_POSTERIOR.md sec 1)
+done
 # bms/fit/jobs.sh (one line per {region, class} job, for a cluster) is
 # not built by this RUNBOOK -- it targets a different machine than the
 # one running this script. Write/refresh it by hand with:

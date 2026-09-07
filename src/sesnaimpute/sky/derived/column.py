@@ -254,23 +254,36 @@ def _sightline_row_one_region(config, region, region_code, herschel, planck_pix,
                a_col=a_col, sig_col=sig_col, prov=prov)
 
 
-def build_sightline(config):
+def build_sightline(config, stage=None):
     """Writes the adopted sightline column (SPEC_PRIORS.md 1.1, 1.4): one
     row per admitted nside-256 pixel of every region, Herschel where
     covered, else Planck. Survey-wide regardless of any `regions` list a
     caller passed to `build` -- `profile.py` looks up whatever pixel it is
     currently building, of whatever region, so the product cannot be
-    partial."""
+    partial.
+
+    `stage`, if given, is the caller's own `progress.Stage`: regions are
+    dispatched in chunks (still `config.n_jobs`-wide within a chunk) so
+    one `stage.tick` fires after each chunk -- this stage otherwise runs
+    to completion with no progress line at all (owner ruling
+    2026-09-06)."""
     regions = [r.name for r in regions_module.REGIONS]
     herschel = planck_column.load_hgbs(config, min_fill=SIGHTLINE_MIN_FILL)
     sig_zp, c0, c1 = _herschel_sigma_model(config)
     planck_pix, planck_ak, planck_sig = _load_planck_sightline(config)
     codes = _region_codes(config, regions)
 
-    rows = Parallel(n_jobs=config.n_jobs)(
-        delayed(_sightline_row_one_region)(
-            config, region, codes[region], herschel, planck_pix, planck_ak, planck_sig, sig_zp, c0, c1)
-        for region in regions)
+    n_regions = len(regions)
+    chunk = max(1, config.n_jobs)
+    rows = []
+    for start in range(0, n_regions, chunk):
+        part = regions[start:start + chunk]
+        rows.extend(Parallel(n_jobs=config.n_jobs)(
+            delayed(_sightline_row_one_region)(
+                config, region, codes[region], herschel, planck_pix, planck_ak, planck_sig, sig_zp, c0, c1)
+            for region in part))
+        if stage is not None:
+            stage.tick(min(start + chunk, n_regions), n_regions, "regions")
 
     pix = np.concatenate([r["pix"] for r in rows])
     region_code = np.concatenate([r["region_code"] for r in rows])
@@ -327,14 +340,19 @@ def _binned_stats(x, group, n_groups):
     return med, lo, hi
 
 
-def build_column_check(config):
+def build_column_check(config, stage=None):
     """Writes and prints SPEC_PRIORS.md 1.1/1.4's tracer-disagreement
     check: on every Herschel-covered sightline pixel, A_HERSCHEL,
     A_PLANCK, and A_MAP_EDGE (the 3-D map's own cumulative extinction at
     its edge, unrescaled), and the two ratios A_MAP_EDGE/A_HERSCHEL and
     A_PLANCK/A_HERSCHEL, binned by quartile of A_HERSCHEL and by region --
     whether the Planck calibration runs low on diffuse sightlines, the 3-D
-    map runs high, or both."""
+    map runs high, or both.
+
+    `stage`, if given, is the caller's own `progress.Stage`: one
+    `stage.tick` per region of this function's own sequential loop
+    (owner ruling 2026-09-06 -- this stage otherwise runs to completion
+    with no progress line at all)."""
     herschel = planck_column.load_hgbs(config, min_fill=SIGHTLINE_MIN_FILL)
     covered_regions = sorted(r for r, h in herschel.items() if h["pix"].size)
     planck_pix, planck_ak, _ = _load_planck_sightline(config)
@@ -342,16 +360,21 @@ def build_column_check(config):
     input_dir = profile_module._input_dir(config)
 
     per_region = []
-    for region in covered_regions:
+    n_covered = len(covered_regions)
+    for i, region in enumerate(covered_regions):
         admitted_pix, _ = profile_module._admitted_sightlines(config, region)
         _, pix, a_h = _herschel_on_admitted(admitted_pix, herschel[region])
         if pix.size == 0:
+            if stage is not None:
+                stage.tick(i + 1, n_covered, "regions")
             continue
         loc = np.searchsorted(planck_pix, pix)
         a_p = planck_ak[loc]
         a_edge = _map_edge_for_pixels(config, region, pix, input_dir)
         per_region.append(dict(region=region, code=codes[region], pix=pix,
                                a_herschel=a_h, a_planck=a_p, a_edge=a_edge))
+        if stage is not None:
+            stage.tick(i + 1, n_covered, "regions")
 
     if not per_region:
         raise ValueError("sky.derived.column.build_column_check: no Herschel-covered "
@@ -445,11 +468,11 @@ def build(config, regions=None):
         st.done(None, regions=n_regions, sources=total_n, herschel_sources=total_herschel)
 
     with progress_module.Stage("sky.derived.column.sightline") as st:
-        out_path = build_sightline(config)
+        out_path = build_sightline(config, stage=st)
         st.done(out_path)
 
     with progress_module.Stage("sky.derived.column.column_check") as st:
-        out_path = build_column_check(config)
+        out_path = build_column_check(config, stage=st)
         st.done(out_path)
 
 

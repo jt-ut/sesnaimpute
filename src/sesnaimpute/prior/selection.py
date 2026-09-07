@@ -155,7 +155,11 @@ def law_dense_weight(a):
     `LAW_RAMP_HI`, evaluated in log column (SPEC_PRIORS.md 1.3).
     """
     a = np.asarray(a, dtype=float)
-    x = np.log(a / LAW_RAMP_LO) / np.log(LAW_RAMP_HI / LAW_RAMP_LO)
+    # a == 0 is the ruled Z = 0 case (callable.py): log(0) = -inf, clipped
+    # to 0.0 two lines down, so let it through quietly instead of the
+    # spurious "divide by zero" RuntimeWarning.
+    with np.errstate(divide="ignore"):
+        x = np.log(a / LAW_RAMP_LO) / np.log(LAW_RAMP_HI / LAW_RAMP_LO)
     x = np.clip(x, 0.0, 1.0)
     return x * x * (3.0 - 2.0 * x)
 

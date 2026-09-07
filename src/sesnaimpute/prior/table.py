@@ -415,22 +415,24 @@ def _assert_class_probabilities_identity(config, region, out, level_factors, n_s
     values["EPS_YSO"] = out["EPS_YSO"].astype(np.float64)[src_keep]
     patterns = levels_module.predicted_patterns(config, region, pixels, src_pix[src_keep], values)
 
-    # Flagged, not asserted (CODING_RULES.md standing direction: flag a
-    # data-quality finding, do not block the build on it): the region's
-    # own `prior.levels` deviance-after is already reported far above its
-    # naive Poisson expectation (real pixel-to-pixel scatter the six
-    # patterns do not capture), so a per-class miss here by a few sigma
-    # of the naive sqrt(class total) is the SAME overdispersion, not a
-    # fresh bug -- printed for every class so the miss is visible, never
-    # silently dropped.
+    # The same source-sum / area-integral SAMPLING diagnostic `prior.
+    # levels` prints (that module's own comment, above its `ratios`
+    # loop): the prior class probability summed over this region's
+    # covered sources against the class's integrated count -- never a
+    # level check and never a significance test. A ratio away from 1
+    # says the count's spatial pattern does not follow the catalogue's
+    # source density (YSO's own ratio runs above 1 in cluster regions by
+    # construction). Printed for every class so a mismatch is visible,
+    # never silently dropped.
     class_prob_sum_covered = np.sum((n_c / denom[:, None])[src_keep], axis=0)
     for i, key in enumerate(COUNT_COLUMNS):
         cls = _COUNT_CLASS[key]
         integrated = factor * float(np.sum(patterns[cls]))
         observed = float(class_prob_sum_covered[i])
-        n_sigma = abs(observed - integrated) / np.sqrt(max(integrated, 1.0))
-        print("prior.table: %s: %s prob-sum %.1f against integrated %.1f (%.1f sigma) -- a diagnostic "
-              "of the count's spatial pattern, reported not enforced" % (region, cls, observed, integrated, n_sigma), flush=True)
+        ratio = observed / integrated if integrated > 0 else float("nan")
+        print("prior.table: %s: %s source-sum %.1f / area-integral %.1f = %.2f -- sampling diagnostic "
+              "of the count's spatial pattern (not a sigma test; > 1 in cluster regions by "
+              "construction), reported not enforced" % (region, cls, observed, integrated, ratio), flush=True)
 
     total_after = factor * float(sum(np.sum(p) for p in patterns.values()))
     observed_total = float(np.sum(n_i))
