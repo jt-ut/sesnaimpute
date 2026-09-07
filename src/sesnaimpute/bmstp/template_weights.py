@@ -45,18 +45,29 @@ from sesnaimpute.population import star_population
 CHABRIER_LOG_MC = np.log10(0.2)     # dex, the lognormal centre, Msun
 CHABRIER_SIGMA_DEX = 0.55           # dex, the lognormal width below 1 Msun
 CHABRIER_SLOPE = 1.35               # dN/dlog M ~ M^-CHABRIER_SLOPE above 1 Msun
-CHABRIER_M_LO_MSUN = 0.1
-CHABRIER_M_HI_MSUN = 150.0
 
-#: Evans et al. (2009, ApJS 181, 321) statistical lifetimes, assuming a
-#: constant star-formation rate and a Class II half-life of 2 Myr (their
-#: sec 5): Class 0 0.10 Myr, Class I 0.44 Myr, Class II 2.0 Myr. Evans+2009
-#: does not constrain a Class III lifetime (their own census is
-#: incomplete there) -- disclosed: Class III (and TD, the register's fifth
-#: sub-grid) carries no lifetime reweighting (weight 1), so the stage
-#: factor only reweights the three lifetime-constrained stages relative
-#: to each other.
-EVANS_LIFETIME_MYR = {"C0": 0.10, "CI": 0.44, "CII": 2.0}
+#: Statistical lifetimes for the five sub-grids (spec sec 5.5): Class 0
+#: 0.10 Myr and Class I (plus flat-spectrum) 0.54 Myr from Evans et al.
+#: (2009, ApJS 181, 321) Table 4; Class II 2.0 Myr, the Class II lifetime
+#: their sec 7 assumes; transition disc 0.45 Myr, their sec 7's timescale
+#: derived from the TD/II number ratio; Class III 2.0 Myr from the disc
+#: half-life (2-3 Myr, Haisch, Lada & Lada 2001, ApJL 553, L153) and
+#: Hernandez et al. (2008, ApJ 686, 1195), whose argument sets the
+#: diskless young population comparable to Class II over the survey's
+#: 1-3 Myr range -- disclosed as the least certain of the five. Fractions
+#: are each lifetime over the sum of all five.
+STAGE_LIFETIME_MYR = {"C0": 0.10, "CI": 0.54, "CII": 2.0, "CIII": 2.0, "TD": 0.45}
+
+#: A normalised factor's value in an empty cell, and the floor every
+#: normalised template-weight factor is renormalised against (spec sec 2,
+#: "the floor": no hypothesis at -inf from the prior); shared with
+#: `bmstp.grid`'s shape floor, same number, same citation.
+FACTOR_FLOOR = grid.FLOOR
+
+#: A probability factor (not a distribution over templates) is floored
+#: and capped at the same `FACTOR_FLOOR`/`1 - FACTOR_FLOOR` for the same
+#: reason (spec sec 2).
+PROB_CAP = 1.0 - FACTOR_FLOOR
 
 #: Carbon fraction f_C (spec sec 5.2, Le Bertre et al. 2003), also on the
 #: star_population product's own attrs; used here to mix the two
@@ -126,6 +137,36 @@ def _broadcast(vec, n_b):
     return np.repeat(vec[:, None], n_b, axis=1)
 
 
+def _floor_normalised(w):
+    """A normalised factor floored at `FACTOR_FLOOR` of its own cell
+    maximum and renormalised (spec sec 2, "the floor"): the fraction of
+    cells x templates that sat at zero before the floor is also
+    returned, float64 throughout (the cast to float32 is the writer's
+    job, spec sec 9's bar applies here)."""
+    cell_max = w.max(axis=0, keepdims=True)
+    frac_zero = float(np.mean(w <= 0.0))
+    floored = np.maximum(w, FACTOR_FLOOR * cell_max)
+    return floored / floored.sum(axis=0, keepdims=True), frac_zero
+
+
+def _floor_probability(p):
+    """A probability factor (not renormalised: sec 1.4) floored at
+    `FACTOR_FLOOR` and capped at `PROB_CAP` (spec sec 2); the fraction
+    of entries that sat at zero before the floor is also returned."""
+    frac_zero = float(np.mean(p <= 0.0))
+    return np.clip(p, FACTOR_FLOOR, PROB_CAP), frac_zero
+
+
+def _weighted_quartiles(values, weight):
+    """`(q25, q50, q75)` of `values` weighted by `weight` (report only,
+    brief item 7): the weighted-CDF inverse by linear interpolation."""
+    order = np.argsort(values)
+    v = values[order]
+    cw = np.cumsum(weight[order])
+    cw = cw / cw[-1]
+    return tuple(float(np.interp(q, cw, v)) for q in (0.25, 0.5, 0.75))
+
+
 # ---------------------------------------------------------------------------
 # P5 writer
 # ---------------------------------------------------------------------------
@@ -165,27 +206,25 @@ def _read_pahc_curve(config):
     with h5py.File(path, "r") as f:
         edges = f["LOG10_Q_EDGES"][:].astype(np.float64)
         p_q = f["P_Q"][:].astype(np.float64)
-        floor = float(f["FLOOR"][()])
-    return 0.5 * (edges[:-1] + edges[1:]), p_q, edges[0], edges[-1], floor
+    return 0.5 * (edges[:-1] + edges[1:]), p_q
 
 
-def _p_at_neg_log10_q(neg_log10_q_query, centers, p_q, lo, hi, floor):
+def _p_at_neg_log10_q(neg_log10_q_query, centers, p_q):
     """`P(q)` at `-log10 q = neg_log10_q_query` (spec sec 5.3): linear
-    interpolation on the curve's own bin centers, floored at the curve's
-    own shelf value outside the tabulated `log10 q` range (never
-    extrapolated)."""
+    interpolation on the curve's own bin centers; outside the tabulated
+    `log10 q` range `np.interp`'s own clamping holds the nearest
+    measured bin's value at each end (constant extrapolation, never the
+    shelf -- the shelf subtraction is the curve product's own business,
+    not repeated here)."""
     log10_q = -neg_log10_q_query
-    p = np.interp(log10_q, centers, p_q, left=np.nan, right=np.nan)
-    outside = (log10_q < lo) | (log10_q > hi)
-    p = np.where(outside, floor, p)
-    return p
+    return np.interp(log10_q, centers, p_q)
 
 
 def _pahc_contrast_row(config, n_b_centers):
     """The one row `P(-log10 q = LOG10_B_CENTERS[k])`, the same for every
     template (spec sec 5.3: template enters only through `C_F`)."""
-    centers, p_q, lo, hi, floor = _read_pahc_curve(config)
-    return _p_at_neg_log10_q(n_b_centers, centers, p_q, lo, hi, floor)
+    centers, p_q = _read_pahc_curve(config)
+    return _p_at_neg_log10_q(n_b_centers, centers, p_q)
 
 
 # ---------------------------------------------------------------------------
@@ -211,18 +250,6 @@ def _chabrier_dn_dlogm(m_star):
     c_join = np.exp(-(0.0 - CHABRIER_LOG_MC) ** 2 / (2.0 * CHABRIER_SIGMA_DEX ** 2))
     powerlaw = c_join * np.power(m_star, -CHABRIER_SLOPE)
     return np.where(m_star <= 1.0, lognormal, powerlaw)
-
-
-def _chabrier_fraction_above_1msun():
-    """The literature check (brief's acceptance): the Chabrier system
-    IMF's own fraction of stars above 1 Msun over its 0.1-150 Msun range,
-    by numerical quadrature in log10 M (dN/dlog M is what `_chabrier_
-    dn_dlogm` returns, so the integral is a plain trapezoid in log10 M)."""
-    log_m = np.linspace(np.log10(CHABRIER_M_LO_MSUN), np.log10(CHABRIER_M_HI_MSUN), 200001)
-    psi = _chabrier_dn_dlogm(10 ** log_m)
-    total = np.trapz(psi, log_m)
-    above = np.trapz(np.where(log_m >= 0.0, psi, 0.0), log_m)
-    return float(above / total)
 
 
 def build_yso(config):
@@ -253,6 +280,7 @@ def build_yso(config):
             incl_label.append(np.full(n.size, label))
         incl_names = np.concatenate(incl_names)
         incl_deg = np.concatenate(incl_deg)
+        incl_label = np.concatenate(incl_label)
         n_matched_incl = int(np.sum(incl_names == names)) if incl_names.size == n_model else 0
         if n_matched_incl != n_model:
             raise ValueError(
@@ -261,45 +289,71 @@ def build_yso(config):
 
         log10_b_centers = _log10_b_centers(_LOG10_B_ORIGIN_YSO)
         n_b = log10_b_centers.size
+        subgrid_label = incl_label  # register-order label, verified above
 
-        # imf: carries the one 1/rho division for the whole library
-        # product (spec sec 5.5: "divided once, not three times").
-        psi = _chabrier_dn_dlogm(m_star)
-        imf_raw = psi / rho
-        imf_w = _normalise_over_theta(_broadcast(imf_raw, n_b))
+        # rho per sub-grid (spec sec 1.4): the register's rho is pooled
+        # over the five geometries; rescale it to integrate to one over
+        # each sub-grid's own templates, so 1/rho weights within a
+        # sub-grid and the stage factor alone sets the weight between
+        # sub-grids.
+        rho_sub = np.empty_like(rho)
+        for _subdir, label in YSO_SUBGRIDS:
+            m = (subgrid_label == label)
+            rho_sub[m] = rho[m] / rho[m].sum()
 
-        # stage: Evans+2009 lifetimes through the register's own soft
-        # subclass probabilities; Class III/TD carry no lifetime weight
-        # (disclosed in the constants block above).
+        # imf, stage and inclination share the plain argument log10 B
+        # (no C_F, no D_F): one stored factor (spec sec 1.4, sec 5.5),
+        # not three separately-normalised factors whose product then
+        # misses Sigma_theta pi = 1.
+        psi = _chabrier_dn_dlogm(m_star)  # imf: dN/dlog10 M, Chabrier 2003
         sp = reg["subclass_prob"]
-        stage_raw = (EVANS_LIFETIME_MYR["C0"] * sp["C0"] + EVANS_LIFETIME_MYR["CI"] * sp["CI"]
-                     + EVANS_LIFETIME_MYR["CII"] * sp["CII"] + sp["CIII"] + sp["TD"])
-        stage_w = _normalise_over_theta(_broadcast(stage_raw, n_b))
+        stage_raw = sum(STAGE_LIFETIME_MYR[label] * sp[label] for _subdir, label in YSO_SUBGRIDS)
+        incl_raw = np.sin(np.radians(incl_deg))  # uniform in cos i (spec sec 5.5)
+        shape_raw = psi * stage_raw * incl_raw / rho_sub  # divided by rho once, sec 1.4
 
-        # inclination: uniform in cos i against the grid's uniform-in-
-        # angle sampling -> W ~ sin i (spec sec 5.5).
-        incl_raw = np.sin(np.radians(incl_deg))
-        incl_w = _normalise_over_theta(_broadcast(incl_raw, n_b))
+        # the weight BETWEEN sub-grids is the stage fraction's job alone
+        # (spec sec 1.4): normalise the imf x stage x inclination shape
+        # to sum to one WITHIN each sub-grid first -- so the sub-grid's
+        # own template count and rho scale drop out of the between-
+        # sub-grid balance -- then scale by that sub-grid's Evans+2009
+        # lifetime fraction; the five scaled blocks concatenate to a
+        # factor that already sums to one over the whole class.
+        stage_total = sum(STAGE_LIFETIME_MYR.values())
+        population_template = np.empty(n_model)
+        subgrid_report = []
+        for _subdir, label in YSO_SUBGRIDS:
+            m = (subgrid_label == label)
+            within = shape_raw[m] / shape_raw[m].sum()
+            stage_fraction = STAGE_LIFETIME_MYR[label] / stage_total
+            population_template[m] = within * stage_fraction
+            q25, q50, q75 = _weighted_quartiles(m_star[m], within)
+            subgrid_report.append((label, stage_fraction, q25, q50, q75))
 
-        frac_template = float(psi[m_star > 1.0].sum() / psi.sum())
-        frac_chabrier = _chabrier_fraction_above_1msun()
+        population_w = _broadcast(population_template, n_b)
+        population_w, frac_zero = _floor_normalised(population_w)
+        subgrid_report = [
+            (label, float(population_w[subgrid_label == label, 0].sum()), stage_fraction,
+             q25, q50, q75)
+            for label, stage_fraction, q25, q50, q75 in subgrid_report
+        ]
 
         factors = {
-            "imf": (imf_w, np.zeros(n_model), "", True, "population.yso_mass; Chabrier 2003"),
-            "stage": (stage_w, np.zeros(n_model), "", True,
-                      "yso register subclass_prob; Evans et al. 2009"),
-            "inclination": (incl_w, np.zeros(n_model), "", True,
-                             "yso sub-grid parameters.fits inclination"),
+            "population": (population_w, np.zeros(n_model), "", True,
+                            "population.yso_mass Chabrier 2003; yso register subclass_prob "
+                            "Evans et al. 2009; yso sub-grid parameters.fits inclination"),
         }
         c_theta = np.zeros(n_model)
-        path = _write_library(config, "yso", "survey", names, c_theta, log10_b_centers, factors)
-        for name, (w, *_r) in factors.items():
-            col_sum = w.sum(axis=0)
-            print(f"template_weights.yso: factor={name} max|colsum-1|="
-                  f"{float(np.max(np.abs(col_sum - 1.0))):.3g}", flush=True)
-        st.done(path, n_model=n_model, frac_template_above_1msun=frac_template,
-                 frac_chabrier_above_1msun=frac_chabrier)
-    return frac_template, frac_chabrier
+        path = _write_library(config, "yso", "survey", names, c_theta, log10_b_centers, factors,
+                               extra_attrs={"COMPONENTS": "imf,stage,inclination"})
+        col_sum = population_w.sum(axis=0)
+        print(f"template_weights.yso: factor=population max|colsum-1|="
+              f"{float(np.max(np.abs(col_sum - 1.0))):.3g} floored_fraction={frac_zero:.4f}",
+              flush=True)
+        for label, built_share, stage_fraction, q25, q50, q75 in subgrid_report:
+            print(f"template_weights.yso: sub-grid={label} built_weight_share={built_share:.4f} "
+                  f"stage_fraction={stage_fraction:.4f} mass_quartiles(Msun)="
+                  f"{q25:.3f}/{q50:.3f}/{q75:.3f}", flush=True)
+        st.done(path, n_model=n_model, floored_fraction=frac_zero)
 
 
 # ---------------------------------------------------------------------------
@@ -397,17 +451,29 @@ def build_galz(config):
         node_w = _normalise_over_theta((node_density / rho[None, :]).T).T  # (n_node, n_model)
 
         # interpolate the per-node, per-template normalised density onto
-        # LOG10_B_CENTERS + origin (spec sec 5.4), vectorised over every
-        # template at once: a linear combination of the two bracketing
-        # nodes' own theta-normalised vectors, clamped at the node edges
-        # (which keeps the per-cell sum at 1, sec 5.4's "normalised over
-        # theta at each S": a convex combination of two vectors that each
+        # log10_b_centers (already origin + 0.1(k+1/2), sec 2 -- no
+        # second origin add), vectorised over every template at once: a
+        # linear combination of the two bracketing nodes' own
+        # theta-normalised vectors, clamped at the node edges (which
+        # keeps the per-cell sum at 1, sec 5.4's "normalised over theta
+        # at each S": a convex combination of two vectors that each
         # already sum to 1 sums to 1 too).
-        s_query = np.clip(log10_b_centers + origin, log10_s_grid[0], log10_s_grid[-1])
+        s_query = np.clip(log10_b_centers, log10_s_grid[0], log10_s_grid[-1])
         hi = np.clip(np.searchsorted(log10_s_grid, s_query), 1, n_node - 1)
         lo = hi - 1
         frac = (s_query - log10_s_grid[lo]) / (log10_s_grid[hi] - log10_s_grid[lo])
         w = ((1.0 - frac)[:, None] * node_w[lo] + frac[:, None] * node_w[hi]).T  # (n_model, n_b)
+        w, frac_zero = _floor_normalised(w)
+
+        # the varying-cell range (brief item 1's check): a cell whose
+        # s_query clips to a grid edge repeats that edge node's
+        # per-template vector exactly, so it is identical across the
+        # brightness axis to the first (or last) cell; the varying span
+        # is the cells that differ from both edges.
+        same_lo = np.all(w == w[:, [0]], axis=0)
+        same_hi = np.all(w == w[:, [-1]], axis=0)
+        varying = np.where(~(same_lo | same_hi))[0]
+        varying_range = (int(varying.min()), int(varying.max())) if varying.size else (-1, -1)
 
         factors = {
             "colour": (w, c_theta, "", True,
@@ -417,10 +483,11 @@ def build_galz(config):
         col_sum = w.sum(axis=0)
         print(f"template_weights.galz: origin={origin:.4f} ({origin_source}); "
               f"max|colsum-1|={float(np.max(np.abs(col_sum - 1.0))):.3g}; "
+              f"floored_fraction={frac_zero:.4f}; varying cells={varying_range[0]}-{varying_range[1]}; "
               "beyond-3-bandwidths fraction per node: "
               + ",".join(f"{v:.3f}" for v in beyond3_fraction), flush=True)
         st.done(path, n_model=n_model, n_node=n_node,
-                 beyond3_mean=float(np.mean(beyond3_fraction)))
+                 beyond3_mean=float(np.mean(beyond3_fraction)), floored_fraction=frac_zero)
     return beyond3_fraction
 
 
@@ -484,9 +551,11 @@ def build_sps(config, region):
 
         _names_check, _rho_check, h, weight = _sps_raw_type_histogram(config, region)
         type_w = _normalise_over_theta(h / rho[:, None])
+        type_w, frac_zero_type = _floor_normalised(type_w)
 
         n_b_row = _pahc_contrast_row(config, log10_b_centers)
         unc_raw = 1.0 - np.repeat(n_b_row[None, :], n_model, axis=0)  # 1 - P(q), sec 5.1
+        unc_raw, frac_zero_unc = _floor_probability(unc_raw)
         c_f_unc = np.log10(reg["f_ref"]["I4"])  # the sps template's own 8um photosphere
 
         factors = {
@@ -501,9 +570,14 @@ def build_sps(config, region):
         retained_weighted = float(weight.sum())
         histogram_weighted = float(h.sum())
         col_sum = type_w.sum(axis=0)
+        _curve_centers, curve_p_q = _read_pahc_curve(config)
         print(f"template_weights.sps [{region}]: retained weighted count={retained_weighted:.4f} "
               f"histogram sum={histogram_weighted:.4f} "
-              f"max|colsum-1|={float(np.max(np.abs(col_sum - 1.0))):.3g}", flush=True)
+              f"max|colsum-1|={float(np.max(np.abs(col_sum - 1.0))):.3g} "
+              f"floored_fraction type={frac_zero_type:.4f} uncontaminated={frac_zero_unc:.4f}; "
+              f"P(q) at axis ends={float(n_b_row[0]):.4f}/{float(n_b_row[-1]):.4f} "
+              f"vs curve end bins={float(curve_p_q[0]):.4f}/{float(curve_p_q[-1]):.4f}",
+              flush=True)
         st.done(path, n_model=n_model, n_star=weight.size,
                  retained_weighted=retained_weighted)
 
@@ -547,6 +621,7 @@ def build_agb(config, region):
         n_b = log10_b_centers.size
         tau_raw = p_mix / rho
         tau_w = _normalise_over_theta(_broadcast(tau_raw, n_b))
+        tau_w, frac_zero = _floor_normalised(tau_w)
 
         factors = {
             "tau": (tau_w, np.zeros(n_model), "", True,
@@ -558,8 +633,9 @@ def build_agb(config, region):
         col_sum = tau_w.sum(axis=0)
         print(f"template_weights.agb [{region}]: n_riebel_o={log10_tau_o.size} "
               f"n_riebel_c={log10_tau_c.size} max|colsum-1|="
-              f"{float(np.max(np.abs(col_sum - 1.0))):.3g}", flush=True)
-        st.done(path, n_model=n_model)
+              f"{float(np.max(np.abs(col_sum - 1.0))):.3g} floored_fraction={frac_zero:.4f}",
+              flush=True)
+        st.done(path, n_model=n_model, floored_fraction=frac_zero)
 
 
 # ---------------------------------------------------------------------------
@@ -623,9 +699,11 @@ def build_pahc(config, region):
         # library, not a copy of the sps one).
         raw_type = h_sps[sps_idx, :] / rho[:, None]
         type_w = _normalise_over_theta(raw_type)
+        type_w, frac_zero_type = _floor_normalised(type_w)
 
         row = _pahc_contrast_row(config, log10_b_centers)
         contrast_w = np.repeat(row[None, :], n_model, axis=0)
+        contrast_w, frac_zero_contrast = _floor_probability(contrast_w)
         c_f = np.log10(reg["f_ref"]["I4"])  # +log10 f_ref,8,theta (spec sec 5.3)
 
         factors = {
@@ -640,10 +718,14 @@ def build_pahc(config, region):
                                region=region)
         col_sum = type_w.sum(axis=0)
         n_matched_sps_used = int(np.unique(sps_idx).size)
+        _curve_centers, curve_p_q = _read_pahc_curve(config)
         print(f"template_weights.pahc [{region}]: match n=median {float(np.median(dist)):.4f} "
               f"max {float(dist.max()):.4f} (log10 T_EFF, LOGG); "
               f"{n_matched_sps_used}/{sps_names.size} sps templates ever matched; "
-              f"max|colsum-1|={float(np.max(np.abs(col_sum - 1.0))):.3g}", flush=True)
+              f"max|colsum-1|={float(np.max(np.abs(col_sum - 1.0))):.3g} "
+              f"floored_fraction type={frac_zero_type:.4f} contrast={frac_zero_contrast:.4f}; "
+              f"contrast at axis ends={float(row[0]):.4f}/{float(row[-1]):.4f} "
+              f"vs curve end bins={float(curve_p_q[0]):.4f}/{float(curve_p_q[-1]):.4f}", flush=True)
         st.done(path, n_model=n_model, n_matched_sps_used=n_matched_sps_used)
 
 
@@ -703,7 +785,7 @@ def build(config, regions=None):
     region's own sps type histogram (owner ruling)."""
     region_list = regions if regions else [r.name for r in regions_module.REGIONS]
 
-    frac_template, frac_chabrier = build_yso(config)
+    build_yso(config)
     build_galz(config)
     build_h2shock(config)
     for region in region_list:
@@ -716,8 +798,6 @@ def build(config, regions=None):
         build_sps(config, region)
         build_pahc(config, region)
         build_agb(config, region)
-    print(f"template_weights: yso IMF-weighted fraction above 1 Msun={frac_template:.4f} "
-          f"vs Chabrier's own analytic fraction={frac_chabrier:.4f}", flush=True)
 
 
 if __name__ == "__main__":
