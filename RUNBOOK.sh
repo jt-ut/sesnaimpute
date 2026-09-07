@@ -110,8 +110,13 @@ PY sesnaimpute.prior.table                  # the prior table: the join, one row
 
 # --- fit ---
 # bms/ posterior fit of class and subclass probabilities from the prior
-# table.
+# table. No --classes here: fit.run.build's own default is all six
+# classes, every region, so this one line runs every {region, class}.
 PY sesnaimpute.fit.run                      # the class-posterior evidence sweep, batched (IMPLEMENTATION.md sec 5; 10_POSTERIOR.md sec 1)
+# bms/fit/jobs.sh (one line per {region, class} job, for a cluster) is
+# not built by this RUNBOOK -- it targets a different machine than the
+# one running this script. Write/refresh it by hand with:
+#   $PYBIN -m sesnaimpute.fit.run $CONFIG --jobs
 
 # --- impute ---
 # bms/ final impute decisions and diagnostics.

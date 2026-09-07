@@ -77,6 +77,7 @@ work, is the bottleneck) will not speed up in proportion to `n_jobs`.
 """
 
 import os
+import threading
 
 import h5py
 import numpy as np
@@ -154,6 +155,16 @@ _N_BAND = len(_BAND_KEYS)
 #: Q1) -- `10_POSTERIOR.md` section 1's `log10 B = -2*SC`, `SC` the
 #: fitted coefficient on this vector.
 _SC_LAW = np.full(_N_BAND, -2.0, dtype=np.float64)
+
+
+def block_size(n_model, block_budget_mb):
+    """Sources per block a `block_budget_mb`-MB budget holds for a register
+    of `n_model` models -- the same row-bytes formula `fit_batch` bounds
+    its own blocks by (see that function's own MEMORY DRIVER comment,
+    below `keep = min(topk, n_model)`), exposed here so `fit.run` can
+    print the number before a job's first batch is even prepared."""
+    row_bytes = n_model * _N_BAND * 8 * 16
+    return max(1, (block_budget_mb << 20) // max(1, row_bytes))
 
 
 def _register_arrays(config, cls):
@@ -376,7 +387,7 @@ def _fit_model_grid_block(valid, weight, log_flux, log_error, template_log,
     return av_hat, sc_hat, chi2, model
 
 
-def fit_batch(config, region, cls, rows, prior, gamma=None, psi=None):
+def fit_batch(config, region, cls, rows, prior, gamma=None, psi=None, stage=None):
     """One region, one class, one batch of catalogue rows: the full
     model-grid fit and posterior fold for each source in `rows`.
 
@@ -390,6 +401,13 @@ def fit_batch(config, region, cls, rows, prior, gamma=None, psi=None):
     (`10_POSTERIOR.md` section 1's `Gamma`, `Psi`), left as arguments
     defaulting to zero (a parallel unit's own scope): each, if given, is
     called as `f(row, model_index, a, log10_b) -> ln value, (n_model,)`.
+
+    `stage` is the caller's own `sesnaimpute.progress.Stage` for this
+    whole class job (owner ruling 2026-09-06): when given, one block's
+    completion calls `stage.tick(done, n_blocks, "blocks")` -- the
+    helper's own ten-second throttle means this only actually prints
+    when one batch's blocks are running long, sharing the same
+    throttle clock as the caller's own per-batch tick.
 
     Returns a dict of plain numpy arrays, row-aligned to `rows`:
     `EVIDENCE` `(n_source, n_sub)` (natural-log, this class's own
@@ -583,8 +601,17 @@ def fit_batch(config, region, cls, rows, prior, gamma=None, psi=None):
         topk_flux[blk, :keep, :] = np.where(
             any_finite[:, None, None], topk_flux_blk, np.nan)
 
+        if stage is not None:
+            with _tick_lock:
+                _blocks_done[0] += 1
+                done = _blocks_done[0]
+            stage.tick(done, n_blocks, "blocks")
+
     block_budget_mb = int(getattr(config, "fit_block_budget_mb", 512))
     blocks = list(batches_module.batches(n_source, row_bytes, budget_bytes=block_budget_mb << 20))
+    n_blocks = len(blocks)
+    _tick_lock = threading.Lock()
+    _blocks_done = [0]
     if len(blocks) > 1:
         # `config.n_jobs` Python threads is the parallelism (module
         # docstring); each thread's own BLAS calls (the fit's normal
