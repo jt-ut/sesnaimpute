@@ -247,27 +247,33 @@ def _cell_index(a_val, log10_ak, x0, dlx, n_x):
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
 def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
-              b_origin, dlb, dlx, a_edges_buf, a_mid_buf):
+              b_origin, dlb, dlx, a_edges_buf):
     """The cell sum of SPEC_BMSTP_DRAFT.md section 4.2, per source and
     template: the cell window `[i_lo, i_hi]` holding `a_hat +/- 5 sigma_a`
     found in O(1) from the grid's own geometric spacing (no table, no
-    scan of the other 125 cells), the Gaussian's mass `M_i` in each by an
-    erf difference, the gather of `h` along the conditional brightness
-    line (linear within the cell), the dot with `M` over cells above
-    1e-6, and the Jacobian `1 / a_i_mid` per cell. `A_COL_K` and `ln 10`
-    in the Jacobian, common to every template at a source, are dropped.
-    No `(n_source x n_model x cells)` intermediate. `a_edges_buf`/
-    `a_mid_buf` are `(n, n_x+1)`/`(n, n_x)` scratch, one row per source:
-    passed in rather than allocated per `prange` iteration, since numba's
-    auto-parallelisation can hoist a loop-invariant-shaped `np.empty` out
-    of the parallel loop and share one buffer across threads -- a real
-    race this reader hit at n > 1 sources, silently wrong answers, not a
-    crash."""
+    scan of the other 125 cells); in each cell the Gaussian's mass `M_i`
+    by an erf difference and the brightness argument `a*_i`, the cell's
+    own truncated-normal mean `a_hat + sigma_a * (phi(alpha_i) -
+    phi(beta_i)) / M_i` with `alpha_i`, `beta_i` the cell's edges in
+    sigma units (section 4.2) -- `a_hat` itself for a narrow Gaussian,
+    the cell's midpoint for a wide one, so `h`'s gather and the Jacobian
+    `1 / a*_i` both sit at the mass's own mean within the cell, not the
+    cell's geometric center. The dot with `M` runs over cells above
+    1e-6. `A_COL_K` and `ln 10` in the Jacobian, common to every template
+    at a source, are dropped. No `(n_source x n_model x cells)`
+    intermediate. `a_edges_buf` is `(n, n_x+1)` scratch, one row per
+    source: passed in rather than allocated per `prange` iteration, since
+    numba's auto-parallelisation can hoist a loop-invariant-shaped
+    `np.empty` out of the parallel loop and share one buffer across
+    threads -- a real race this reader hit at n > 1 sources, silently
+    wrong answers, not a crash."""
     n, m = a_hat.shape
     n_x = x_edges.size - 1
     n_b = h.shape[2]
     x0 = x_edges[0]
     out = np.full((n, m), -np.inf, dtype=np.float32)
+    sqrt2 = 1.4142135623730951
+    sqrt2pi = 2.5066282746310002  # sqrt(2 pi), the normal density's normalisation
     for s in numba.prange(n):
         AK = a_col[s]
         sig = sigma_a[s]
@@ -275,12 +281,9 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
             continue
         log10_ak = math.log10(AK)
         a_edges = a_edges_buf[s]
-        a_mid = a_mid_buf[s]
         for i in range(n_x + 1):
             a_edges[i] = AK * 10.0 ** x_edges[i]
-        for i in range(n_x):
-            a_mid[i] = 0.5 * (a_edges[i] + a_edges[i + 1])  # section 2: the cell's midpoint in a
-        inv = 1.0 / (sig * 1.4142135623730951)
+        inv_sig = 1.0 / sig
         for th in range(m):
             ah = a_hat[s, th]
             lo_a = ah - 5.0 * sig
@@ -293,25 +296,32 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
             lbh = log10_b_hat[s, th]
             sl = slope[s]
             ct = c_theta[th]
-            cdf_prev = 0.5 * (1.0 + math.erf((a_edges[i_lo] - ah) * inv))
+            z_prev = (a_edges[i_lo] - ah) * inv_sig
+            cdf_prev = 0.5 * (1.0 + math.erf(z_prev / sqrt2))
+            phi_prev = math.exp(-0.5 * z_prev * z_prev) / sqrt2pi
             for i in range(i_lo, i_hi + 1):
-                cdf_next = 0.5 * (1.0 + math.erf((a_edges[i + 1] - ah) * inv))
+                z_next = (a_edges[i + 1] - ah) * inv_sig
+                cdf_next = 0.5 * (1.0 + math.erf(z_next / sqrt2))
+                phi_next = math.exp(-0.5 * z_next * z_next) / sqrt2pi
                 mi = cdf_next - cdf_prev
+                if mi >= 1e-6:
+                    # a*_i: the Gaussian's mean within cell i (section 4.2)
+                    a_star = ah + sig * (phi_prev - phi_next) / mi
+                    bval = lbh + sl * (a_star - ah) + ct
+                    bpos = (bval - b_origin) / dlb - 0.5
+                    j0 = int(math.floor(bpos))
+                    frac = bpos - j0
+                    if j0 < 0:
+                        j0 = 0
+                        frac = 0.0
+                    elif j0 >= n_b - 1:
+                        j0 = n_b - 2
+                        frac = 1.0
+                    dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
+                    total += dens * mi / a_star
                 cdf_prev = cdf_next
-                if mi < 1e-6:
-                    continue
-                bval = lbh + sl * (a_mid[i] - ah) + ct
-                bpos = (bval - b_origin) / dlb - 0.5
-                j0 = int(math.floor(bpos))
-                frac = bpos - j0
-                if j0 < 0:
-                    j0 = 0
-                    frac = 0.0
-                elif j0 >= n_b - 1:
-                    j0 = n_b - 2
-                    frac = 1.0
-                dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
-                total += dens * mi / a_mid[i]
+                phi_prev = phi_next
+                z_prev = z_next
             if total > 0.0:
                 out[s, th] = np.log(total)
     return out
@@ -336,11 +346,10 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index):
     n_x = reader.x_edges.size - 1
     c_theta = reader.c_theta[model_index] if reader.c_theta.size else np.zeros(m)
     a_edges_buf = np.empty((rows.size, n_x + 1), dtype=np.float64)
-    a_mid_buf = np.empty((rows.size, n_x), dtype=np.float64)
     core = _cell_sum(a_col, reader.x_edges, np.asarray(sigma_a, dtype=np.float64),
                       np.asarray(a_hat, dtype=np.float64), np.asarray(log10_b_hat, dtype=np.float64),
                       np.asarray(slope, dtype=np.float64), np.asarray(c_theta, dtype=np.float64),
-                      h, reader.b_origin, reader.dlb, reader.dlx, a_edges_buf, a_mid_buf)
+                      h, reader.b_origin, reader.dlb, reader.dlx, a_edges_buf)
     factor_term = _factor_ln(reader, rows, np.asarray(a_hat, dtype=np.float64),
                               np.asarray(log10_b_hat, dtype=np.float64),
                               np.asarray(slope, dtype=np.float64),
