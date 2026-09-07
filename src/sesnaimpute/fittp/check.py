@@ -203,14 +203,19 @@ def _cascade_confusion(config, region):
 def _prior_vs_posterior_share(config, region, prior_shares):
     """P11's mean `P(C|D)` per pixel, averaged over admitted pixels,
     against P6's `SHARE_<CLS>` likewise averaged -- the first diagnostic
-    of section 8."""
+    of section 8. STAR/AGB/PAHC are `nan` at the pixels outside the
+    star-family tile footprint (P6/P11 both, W5c), so both sides average
+    with `nanmean`, disclosed by the pixel count returned alongside."""
     path = config_module.product_path(config, "fittp", "atlas", "posterior", "hpx512", region=region)
     _require(path, "sesnaimpute.fittp.atlas")
     out = {}
     with h5py.File(path, "r") as f:
         for cls in CLASSES:
-            post = float(np.mean(f["MEAN_P_%s" % cls][:]))
-            out[cls] = (float(np.mean(prior_shares[cls])), post)
+            post_v = f["MEAN_P_%s" % cls][:]
+            prior_v = prior_shares[cls]
+            post = float(np.nanmean(post_v))
+            prior = float(np.nanmean(prior_v))
+            out[cls] = (prior, post, int(np.sum(~np.isnan(prior_v))), int(prior_v.size))
     return out
 
 
