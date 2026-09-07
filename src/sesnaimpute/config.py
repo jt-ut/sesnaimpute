@@ -16,7 +16,8 @@ from types import MappingProxyType
 
 from sesnaimpute import definitions
 
-_AREAS = ("sky/download", "sky/derived", "catalog", "granules", "bms")
+_AREAS = ("sky/download", "sky/derived", "catalog", "granules", "bms",
+          "population", "bmstp", "fittp")
 
 #: CODING_RULES.md 10a: cap joblib worker pools at 4 where root.cfg names
 #: no `[run] n_jobs`.
