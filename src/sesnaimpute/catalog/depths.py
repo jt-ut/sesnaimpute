@@ -57,6 +57,7 @@ from scipy.special import erfc
 
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
+from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute import tables as tables_module
 from sesnaimpute.build import run
@@ -309,53 +310,66 @@ def build(config, regions=None):
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
 
-    curated_paths = []
-    for region in regions:
-        p = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
-        if not os.path.exists(p):
-            raise FileNotFoundError(
-                f"catalog.depths.build: curated catalogue missing for region {region!r} "
-                f"at {p!r} -- run the curated-catalogue RUNBOOK line for it"
-            )
-        curated_paths.append(p)
+    with progress_module.Stage("catalog.depths") as st:
+        curated_paths = []
+        for region in regions:
+            p = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
+            if not os.path.exists(p):
+                raise FileNotFoundError(
+                    f"catalog.depths.build: curated catalogue missing for region {region!r} "
+                    f"at {p!r} -- run the curated-catalogue RUNBOOK line for it"
+                )
+            curated_paths.append(p)
 
-    results = Parallel(n_jobs=config.n_jobs, prefer="threads")(delayed(_region_depths)(p) for p in curated_paths)
-    delta_dex = np.array([r[0] for r in results])
-    sigma_delta_dex = np.array([r[1] for r in results])
-    w_mag = np.array([r[2] for r in results])
-    fit_residual = np.array([r[3] for r in results])
-    converged = np.array([r[4] for r in results])
-    f50_2mass = np.array([r[5] for r in results])
-    fit_residual_2mass = np.array([r[6] for r in results])
+        n_regions = len(curated_paths)
+        n_done = [0]
 
-    substituted = ~converged
-    for j in range(len(IRAC_MIPS_KEYS)):
-        if converged[:, j].any():
-            band_median = np.median(delta_dex[converged[:, j], j])
-        else:
-            band_median = np.nanmedian(delta_dex[:, j])
-        delta_dex[substituted[:, j], j] = band_median
+        def _one(p):
+            r = _region_depths(p)
+            n_done[0] += 1
+            st.tick(n_done[0], n_regions, "regions")
+            return r
 
-    band_keys = [b.key for b in definitions.BANDS]
-    substituted_full = np.zeros((len(regions), len(definitions.BANDS)), dtype=bool)
-    for j, key in enumerate(IRAC_MIPS_KEYS):
-        substituted_full[:, band_keys.index(key)] = substituted[:, j]
+        results = Parallel(n_jobs=config.n_jobs, prefer="threads")(delayed(_one)(p) for p in curated_paths)
+        delta_dex = np.array([r[0] for r in results])
+        sigma_delta_dex = np.array([r[1] for r in results])
+        w_mag = np.array([r[2] for r in results])
+        fit_residual = np.array([r[3] for r in results])
+        converged = np.array([r[4] for r in results])
+        f50_2mass = np.array([r[5] for r in results])
+        fit_residual_2mass = np.array([r[6] for r in results])
 
-    out_path = config_module.product_path(config, "catalog", "sesna", "depths", "region")
-    tables_module.update_rows(
-        out_path,
-        regions,
-        {
-            "DELTA_DEX": delta_dex,
-            "SIGMA_DELTA_DEX": sigma_delta_dex,
-            "W_MAG": w_mag,
-            "FIT_RESIDUAL": fit_residual,
-            "F50_2MASS_MJY": f50_2mass,
-            "FIT_RESIDUAL_2MASS": fit_residual_2mass,
-            "SUBSTITUTED": substituted_full,
-        },
-        granule="region",
-    )
+        substituted = ~converged
+        for j in range(len(IRAC_MIPS_KEYS)):
+            if converged[:, j].any():
+                band_median = np.median(delta_dex[converged[:, j], j])
+            else:
+                band_median = np.nanmedian(delta_dex[:, j])
+            delta_dex[substituted[:, j], j] = band_median
+
+        band_keys = [b.key for b in definitions.BANDS]
+        substituted_full = np.zeros((len(regions), len(definitions.BANDS)), dtype=bool)
+        for j, key in enumerate(IRAC_MIPS_KEYS):
+            substituted_full[:, band_keys.index(key)] = substituted[:, j]
+
+        out_path = config_module.product_path(config, "catalog", "sesna", "depths", "region")
+        tables_module.update_rows(
+            out_path,
+            regions,
+            {
+                "DELTA_DEX": delta_dex,
+                "SIGMA_DELTA_DEX": sigma_delta_dex,
+                "W_MAG": w_mag,
+                "FIT_RESIDUAL": fit_residual,
+                "F50_2MASS_MJY": f50_2mass,
+                "FIT_RESIDUAL_2MASS": fit_residual_2mass,
+                "SUBSTITUTED": substituted_full,
+            },
+            granule="region",
+        )
+        st.done(out_path, regions=len(regions),
+                substituted=int(substituted_full.sum()),
+                median_delta_dex=float(np.nanmedian(delta_dex)))
 
 
 if __name__ == "__main__":

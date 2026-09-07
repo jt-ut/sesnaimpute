@@ -45,6 +45,7 @@ import numpy as np
 from joblib import Parallel, delayed
 
 from sesnaimpute import config as config_module
+from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.sky.derived import planck_column
@@ -428,10 +429,28 @@ def build(config, regions=None):
         regions = [r.name for r in regions_module.REGIONS]
     cal = _load_planck_calibration(config)
     field_zp = _load_field_zeropoints(config)
-    Parallel(n_jobs=config.n_jobs)(
-        delayed(_build_one_region)(config, region, cal, field_zp=field_zp) for region in regions)
-    build_sightline(config)
-    build_column_check(config)
+    with progress_module.Stage("sky.derived.column") as st:
+        n_regions = len(regions)
+        n_done = [0]
+
+        def _one(region):
+            r = _build_one_region(config, region, cal, field_zp=field_zp)
+            n_done[0] += 1
+            st.tick(n_done[0], n_regions, "regions")
+            return r
+
+        results = Parallel(n_jobs=config.n_jobs)(delayed(_one)(region) for region in regions)
+        total_n = sum(r[1] for r in results)
+        total_herschel = sum(r[2] for r in results)
+        st.done(None, regions=n_regions, sources=total_n, herschel_sources=total_herschel)
+
+    with progress_module.Stage("sky.derived.column.sightline") as st:
+        out_path = build_sightline(config)
+        st.done(out_path)
+
+    with progress_module.Stage("sky.derived.column.column_check") as st:
+        out_path = build_column_check(config)
+        st.done(out_path)
 
 
 if __name__ == "__main__":

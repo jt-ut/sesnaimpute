@@ -36,6 +36,7 @@ import numpy as np
 from astropy.io import fits
 from joblib import Parallel, delayed
 
+from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute import tables as tables_module
 from sesnaimpute.config import product_path
@@ -645,18 +646,29 @@ def build(config, regions=None):
     names = regions or [r.name for r in regions_module.REGIONS]
     canon_by_name = regions_module.REGIONS_BY_NAME
     input_dir = _input_dir(config)
-    rows = Parallel(n_jobs=config.n_jobs)(
-        delayed(_build_one_region)(config, name, canon_by_name[name], input_dir) for name in names)
+    with progress_module.Stage("sky.derived.profile") as st:
+        n_regions = len(names)
+        n_done = [0]
 
-    depth_path = product_path(config, "sky/derived", "edenhofer", "depth", "region")
-    depth_rows = {
-        key: np.array([r[col] for r in rows], dtype=np.float64)
-        for key, col in (("D_R_PC", "d_r_pc"), ("SIGMA_D_PC", "sigma_d_pc"), ("D_PEAK_PC", "d_peak_pc"),
-                          ("D_LO_PC", "d_lo_pc"), ("D_HI_PC", "d_hi_pc"), ("SIGMA_DEPTH_PC", "sigma_depth_pc"),
-                          ("FWHM_PC", "fwhm_pc"))
-    }
-    depth_rows["DEPTH_OK"] = np.array([r["depth_ok"] for r in rows], dtype=bool)
-    tables_module.update_rows(depth_path, names, depth_rows, granule="region")
+        def _one(name):
+            r = _build_one_region(config, name, canon_by_name[name], input_dir)
+            n_done[0] += 1
+            st.tick(n_done[0], n_regions, "regions")
+            return r
+
+        rows = Parallel(n_jobs=config.n_jobs)(delayed(_one)(name) for name in names)
+
+        depth_path = product_path(config, "sky/derived", "edenhofer", "depth", "region")
+        depth_rows = {
+            key: np.array([r[col] for r in rows], dtype=np.float64)
+            for key, col in (("D_R_PC", "d_r_pc"), ("SIGMA_D_PC", "sigma_d_pc"), ("D_PEAK_PC", "d_peak_pc"),
+                              ("D_LO_PC", "d_lo_pc"), ("D_HI_PC", "d_hi_pc"), ("SIGMA_DEPTH_PC", "sigma_depth_pc"),
+                              ("FWHM_PC", "fwhm_pc"))
+        }
+        depth_rows["DEPTH_OK"] = np.array([r["depth_ok"] for r in rows], dtype=bool)
+        tables_module.update_rows(depth_path, names, depth_rows, granule="region")
+        st.done(depth_path, regions=n_regions, depth_ok=int(depth_rows["DEPTH_OK"].sum()),
+                median_d_peak_pc=float(np.nanmedian(depth_rows["D_PEAK_PC"])))
 
 
 # --- the reader -------------------------------------------------------

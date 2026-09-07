@@ -35,6 +35,7 @@ from scipy.spatial import cKDTree
 from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
+from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 
@@ -240,35 +241,37 @@ def build(config, regions=None):
     band_keys = [b.key for b in definitions.BANDS]
 
     for region in regions:
-        raw_path = _raw_catalog_path(config, region)
-        if not os.path.exists(raw_path):
-            raise FileNotFoundError(
-                f"catalog.curated.build: raw delivery missing for region {region!r} "
-                f"at {raw_path!r} -- run the '--- catalog ---' RUNBOOK line for it"
-            )
-        assembled = _assemble_region(config, region)
+        with progress_module.Stage("catalog.curated", region) as st:
+            raw_path = _raw_catalog_path(config, region)
+            if not os.path.exists(raw_path):
+                raise FileNotFoundError(
+                    f"catalog.curated.build: raw delivery missing for region {region!r} "
+                    f"at {raw_path!r} -- run the '--- catalog ---' RUNBOOK line for it"
+                )
+            assembled = _assemble_region(config, region)
 
-        out_path = config_module.product_path(
-            config, "catalog", "sesna", "sources", "source", region=region
-        )
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        name_bytes = assembled["name"].astype("S")
-        with h5py.File(out_path, "w") as f:
-            f.attrs["GRANULE"] = "source"
-            f.attrs["REGION"] = region
-            f.attrs["N_SOURCES"] = assembled["n"]
-            f.attrs["BANDS"] = band_keys
-            f.create_dataset("NAME", data=name_bytes)
-            f.create_dataset("RA_DEG", data=assembled["ra_deg"])
-            f.create_dataset("DEC_DEG", data=assembled["dec_deg"])
-            f.create_dataset("GAL_L_DEG", data=assembled["gal_l_deg"])
-            f.create_dataset("GAL_B_DEG", data=assembled["gal_b_deg"])
-            f.create_dataset("CLASS", data=assembled["class_"])
-            f.create_dataset("AK_SESNA", data=assembled["ak_sesna"])
-            f.create_dataset("FNU_MJY", data=assembled["fnu"])
-            f.create_dataset("SIGMA_FNU_MJY", data=assembled["sigma_fnu"])
-            f.create_dataset("DCOMP90_MJY", data=assembled["dcomp90"])
-            f.create_dataset("ORIGIN_FNU", data=assembled["origin"])
+            out_path = config_module.product_path(
+                config, "catalog", "sesna", "sources", "source", region=region
+            )
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            name_bytes = assembled["name"].astype("S")
+            with h5py.File(out_path, "w") as f:
+                f.attrs["GRANULE"] = "source"
+                f.attrs["REGION"] = region
+                f.attrs["N_SOURCES"] = assembled["n"]
+                f.attrs["BANDS"] = band_keys
+                f.create_dataset("NAME", data=name_bytes)
+                f.create_dataset("RA_DEG", data=assembled["ra_deg"])
+                f.create_dataset("DEC_DEG", data=assembled["dec_deg"])
+                f.create_dataset("GAL_L_DEG", data=assembled["gal_l_deg"])
+                f.create_dataset("GAL_B_DEG", data=assembled["gal_b_deg"])
+                f.create_dataset("CLASS", data=assembled["class_"])
+                f.create_dataset("AK_SESNA", data=assembled["ak_sesna"])
+                f.create_dataset("FNU_MJY", data=assembled["fnu"])
+                f.create_dataset("SIGMA_FNU_MJY", data=assembled["sigma_fnu"])
+                f.create_dataset("DCOMP90_MJY", data=assembled["dcomp90"])
+                f.create_dataset("ORIGIN_FNU", data=assembled["origin"])
+            st.done(out_path, sources=int(assembled["n"]))
 
 
 if __name__ == "__main__":
