@@ -66,6 +66,14 @@ def bin(x, log10_b, w, origin, sigma_b_min):
     total_weight = w.sum()
     with np.errstate(divide="ignore"):
         log10_x = np.log10(x)
+    # edge convention (sec. 2): a mark exactly on a `log10 x` cell edge
+    # belongs to the cell below it (`x = 1`, the whole column, must sit
+    # below `log10 x = 0`, never above). `np.histogram2d` bins are
+    # left-inclusive/right-exclusive, so nudging every mark down by one
+    # ULP (`np.nextafter`, negligible against the 1/32 dex cell width)
+    # moves an exact-edge mark into the cell whose upper edge it sat on,
+    # without moving any mark that is not on an edge.
+    log10_x = np.nextafter(log10_x, -np.inf)
     b_edges = log10_b_edges(origin)
     H, _, _ = np.histogram2d(
         log10_x, log10_b, bins=[LOG10_X_EDGES, b_edges], weights=w

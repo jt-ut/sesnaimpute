@@ -229,7 +229,11 @@ def build_gal(config):
         origin = float(log10_b[0]) - 3.0 * grid.D_LOG10_B
         h, mass_outside = grid.bin(x, log10_b, w, origin, 0.0)
         sum_check = abs(h.sum() - (1.0 - mass_outside))
-        density_gal = float(w.sum())
+        # `A_GAL`, sec. 5.4 "Sky density": `sample_gal.density` (the `ln
+        # 10` integral), the same function P1 (`bmstp.density`) and P6
+        # (`bmstp.atlas`) read -- NOT the shape weight `w.sum()`, short by
+        # `ln 10`.
+        density_gal = sample_gal.density(config)
 
         path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
         os.makedirs(os.path.dirname(path), exist_ok=True)

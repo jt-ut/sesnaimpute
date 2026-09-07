@@ -129,12 +129,12 @@ def _star_family_density_by_tile(config, region, tile_id_axis):
 
 
 def _gal_density(config):
-    """`A_GAL`, section 5.4: `integral phi(S) dS` over the counts law's
-    tabulated grid, one survey number -- the same Riemann sum
-    `bmstp.shapes.build_gal` forms from `bmstp.sample_gal.sample`'s
-    `w = phi(S) . S . d(log10 S)`."""
-    _, _, w = sample_gal.sample(config)
-    return float(np.sum(w, dtype=np.float64))
+    """`A_GAL`, section 5.4 "Sky density": `integral phi(S) dS = Sigma
+    phi(S) S ln10 Delta log10 S` over the counts law's tabulated grid,
+    one survey number -- `bmstp.sample_gal.density`, NOT the shape weight
+    `sample`'s `w = phi(S) . S . d(log10 S)` sums to (that sum is short by
+    `ln 10`, sec. 5.4)."""
+    return sample_gal.density(config)
 
 
 def build_region(config, region, st):

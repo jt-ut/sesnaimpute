@@ -16,18 +16,37 @@ import numpy as np
 from sesnaimpute import config as config_module
 
 
-def sample(config):
-    """`(x, log10_b, w)`, one point per counts-law node: `x = 1` (the
-    whole column, sec. 5.4 "Marks"), `log10_b = LOG10_S_GRID` (the node's
-    `log10 S`), `w = phi(S) * S * d(log10 S)` (sec. 5.4 "Weight"; the
-    node spacing is fixed by `population.gal.build_log10_s_grid`'s
-    `np.linspace`, so one scalar step serves every node)."""
+def _counts_law(config):
+    """`(log10_s, phi_s, d_log10_s)` off the tabulated counts-law grid
+    (`population.gal.build_counts_law`'s `LOG10_S_GRID`, `PHI_S`)."""
     path = config_module.product_path(config, "population", "gal", "counts", "survey")
     with h5py.File(path, "r") as f:
         log10_s = f["LOG10_S_GRID"][()].astype(np.float64)
         phi_s = f["PHI_S"][()].astype(np.float64)
     d_log10_s = float(log10_s[1] - log10_s[0])
+    return log10_s, phi_s, d_log10_s
+
+
+def sample(config):
+    """`(x, log10_b, w)`, one point per counts-law node: `x = 1` (the
+    whole column, sec. 5.4 "Marks"), `log10_b = LOG10_S_GRID` (the node's
+    `log10 S`), `w = phi(S) * S * d(log10 S)` (sec. 5.4 "Weight" -- the
+    SHAPE weight only, for the grid; not the sky density, `density`
+    below, sec. 5.4 "Sky density": the two are not interchangeable)."""
+    log10_s, phi_s, d_log10_s = _counts_law(config)
     s = 10.0 ** log10_s
     w = phi_s * s * d_log10_s
     x = np.ones_like(log10_s)
     return x, log10_s, w
+
+
+def density(config):
+    """`A_GAL = integral phi(S) dS`, sec. 5.4 "Sky density": `dS = S ln10
+    d(log10 S)`, so `A_GAL = Sigma_k phi(S_k) S_k ln10 Delta log10 S` over
+    the tabulated counts-law grid -- `sample`'s shape weight times `ln
+    10`, read by `bmstp.shapes.build_gal` (P4's `DENSITY_GAL`),
+    `bmstp.density` (P1's `DENSITY_GAL`) and `bmstp.atlas` (GAL's Monte
+    Carlo total)."""
+    log10_s, phi_s, d_log10_s = _counts_law(config)
+    s = 10.0 ** log10_s
+    return float(np.sum(phi_s * s * d_log10_s * np.log(10.0), dtype=np.float64))

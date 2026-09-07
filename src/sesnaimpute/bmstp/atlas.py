@@ -121,9 +121,14 @@ def _pixel_column(config, pix):
 
 
 def _pixel_tile(config, region, pix):
-    """`TILE_ID` at each admitted pixel (`population/anchors/tiles/
-    hpx512__R.hdf5`, the star-family tile definition), -1 where the pixel
-    carries no tile."""
+    """`(tile, n_filled)`: `TILE_ID` at each admitted pixel
+    (`population/anchors/tiles/hpx512__R.hdf5`, the star-family tile
+    definition, sec. 8: "a pixel outside every tile takes its
+    sightline's tile"). A pixel absent from the tile map takes its
+    nside-256 parent's tile, from any tiled sibling under that parent
+    (every admitted pixel is a child of a source-bearing nside-256
+    pixel, whose tiled children resolve it, sec. 8); the siblings are
+    asserted to agree, so no ambiguity and no NaN density remains."""
     path = config_module.product_path(config, "population", "anchors", "tiles", "hpx512", region=region)
     with h5py.File(path, "r") as f:
         t_pix_id = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
@@ -135,7 +140,29 @@ def _pixel_tile(config, region, pix):
     found = t_pix_id[hit] == pix
     tile = np.full(pix.size, -1, dtype=np.int64)
     tile[found] = t_tile_id[hit[found]]
-    return tile
+
+    missing = ~found
+    n_filled = int(np.count_nonzero(missing))
+    if n_filled:
+        parent_of_tiled = t_pix_id // 4
+        order_p = np.argsort(parent_of_tiled, kind="stable")
+        parent_sorted = parent_of_tiled[order_p]
+        tile_sorted = t_tile_id[order_p]
+        parent_missing = pix[missing] // 4
+        starts = np.searchsorted(parent_sorted, parent_missing, side="left")
+        ends = np.searchsorted(parent_sorted, parent_missing, side="right")
+        if np.any(starts == ends):
+            raise ValueError("bmstp.atlas: %d tile-less pixel(s) with no tiled "
+                              "nside-256 sibling" % int(np.sum(starts == ends)))
+        filled = np.empty(n_filled, dtype=np.int64)
+        for k in range(n_filled):
+            sibs = tile_sorted[starts[k]:ends[k]]
+            if np.unique(sibs).size != 1:
+                raise ValueError("bmstp.atlas: tile-less pixel's nside-256 "
+                                  "siblings disagree on tile")
+            filled[k] = sibs[0]
+        tile[missing] = filled
+    return tile, n_filled
 
 
 def _draw_members(rng, weight, n_mc):
@@ -495,7 +522,10 @@ def _gal_members(config, rng, n_mc):
     flux[:, i3] = s_draw * (_ZP_MJY["I3"] / _ZP_MJY["I2"]) * 10.0 ** (0.4 * c23[gal_row])
     flux[:, i4] = s_draw * (_ZP_MJY["I4"] / _ZP_MJY["I2"]) * 10.0 ** (0.4 * c24[gal_row])
     u = np.ones(n_mc, dtype=np.float64)
-    return flux, u, float(w_law.sum())
+    # `A_GAL`, sec. 5.4 "Sky density": the density the Monte Carlo total
+    # stands for is `sample_gal.density` (the `ln 10` integral), NOT the
+    # shape weight `w_law.sum()` the node-draw probabilities above use.
+    return flux, u, sample_gal.density(config)
 
 
 def build_region(config, region):
@@ -508,7 +538,7 @@ def build_region(config, region):
         n_pix = pix.size
         coverage = _coverage(config, region, pix)
         a_col, arm = _pixel_column(config, pix)
-        tile_of_pix = _pixel_tile(config, region, pix)
+        tile_of_pix, n_tile_filled = _pixel_tile(config, region, pix)
 
         n_cat = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
         mc_err = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
@@ -519,9 +549,9 @@ def build_region(config, region):
             tile_ids_present = sorted(int(k.split("_")[1]) for k in f.keys()
                                        if k.startswith("tile_"))
 
-        # only pixels with a tile enter the family draw; a pixel outside
-        # the star-family footprint keeps NaN there, reported, not filled
-        # (GAL, below, does not need a tile and runs on every pixel).
+        # every admitted pixel now carries a tile (`_pixel_tile` fills the
+        # tile-less ones from their nside-256 parent, sec. 8); `usable`
+        # stays as the guard against a tile absent from this star product.
         usable = tile_of_pix >= 0
         tiles_here = sorted(set(int(t) for t in tile_of_pix[usable]) & set(tile_ids_present))
 
@@ -594,13 +624,22 @@ def build_region(config, region):
         n_cat["H2S"] = density_h2s * frac_h2s_pix
 
         built = CLASSES
-        built_total = np.nansum([n_cat[c] for c in built], axis=0)
+        # every admitted pixel now has every class's `N_CAT` (finding 3
+        # above), so a plain sum replaces the `nansum` that used to treat
+        # a tile-less pixel's family densities as zero.
+        built_total = np.sum([n_cat[c] for c in built], axis=0)
         share = {c: n_cat[c] / built_total for c in built}
 
         n_source = access.region_slice(config, region)["n_sources"]
         area_deg2 = n_pix * _HPX512_PIXEL_DEG2
-        total_predicted_built = float(np.nansum(built_total) * _HPX512_PIXEL_DEG2)
-        ratio = {c: float(np.nansum(n_cat[c]) * _HPX512_PIXEL_DEG2) / n_source
+        # sec. 8's total-count check compares against sources actually
+        # catalogued, which only covered sky can catalogue: each pixel's
+        # predicted count is weighted by its own `COVERAGE` before the
+        # totals are formed (the surveyed area is `Sigma COVERAGE * area`,
+        # not the admitted grid's own `area_deg2`).
+        surveyed_area_deg2 = float(np.sum(coverage) * _HPX512_PIXEL_DEG2)
+        total_predicted_built = float(np.sum(built_total * coverage) * _HPX512_PIXEL_DEG2)
+        ratio = {c: float(np.sum(n_cat[c] * coverage) * _HPX512_PIXEL_DEG2) / n_source
                  if n_source else float("nan") for c in built}
         ratio_built = total_predicted_built / n_source if n_source else float("nan")
 
@@ -611,6 +650,8 @@ def build_region(config, region):
             f.attrs["N_MC"] = N_MC
             f.attrs["DENSITY_GAL"] = density_gal
             f.attrs["TOTAL_PREDICTED"] = total_predicted_built
+            f.attrs["SURVEYED_AREA_DEG2"] = surveyed_area_deg2
+            f.attrs["ADMITTED_AREA_DEG2"] = area_deg2
             f.attrs["TOTAL_OBSERVED"] = float(n_source)
             for c in built:
                 f.attrs[f"RATIO_{c}"] = ratio[c]
@@ -630,7 +671,9 @@ def build_region(config, region):
 
         max_mc_err = max((_max_mc_err(c) for c in built), default=0.0) if n_pix else 0.0
         st.done(path, n_pix=n_pix, n_tile=len(tiles_here), n_sightline=len(sls_here),
-                area_deg2=area_deg2, isochrone_top_msun=m_top,
+                n_tile_filled=n_tile_filled,
+                area_deg2=area_deg2, surveyed_area_deg2=surveyed_area_deg2,
+                isochrone_top_msun=m_top,
                 total_predicted_built=total_predicted_built, total_observed=n_source,
                 ratio_star=ratio["STAR"], ratio_agb=ratio["AGB"], ratio_pahc=ratio["PAHC"],
                 ratio_gal=ratio["GAL"], ratio_yso=ratio["YSO"], ratio_h2s=ratio["H2S"],
