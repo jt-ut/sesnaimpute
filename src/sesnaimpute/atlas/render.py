@@ -160,25 +160,32 @@ def _reproject(pix_sorted, values, grid_pix_flat, shape):
     return out
 
 
-def _add_panel(fig, gs, row, col, wcs, data, cmap, vmin=None, vmax=None, norm=None, title=""):
-    """One sky panel on the shared display WCS: RA/Dec tick marks and
-    tick labels (sec. 8's "shared sky frame with RA/Dec ticks"), no
-    repeated per-panel axis-name text -- fifteen copies of "pos.eq.ra"/
-    "pos.eq.dec" would only crowd the tick numbers they sit beside."""
-    ax = fig.add_subplot(gs[row, col], projection=wcs)
+def _add_panel(fig, spec, wcs, data, cmap, vmin=None, vmax=None, norm=None, title="",
+               show_dec=True, show_ra=True, title_size=8):
+    """One sky panel on the shared display WCS. `show_dec`/`show_ra`
+    gate the tick *labels* only (every panel keeps its ticks and grid,
+    since every panel is the same field, sec. 8's "shared sky frame") --
+    only the leftmost panel of a row and the figure's bottom row need
+    the numbers repeated. No colorbar is added here: `fig.colorbar`
+    creates a new axes appended after every existing one, so a colorbar
+    added panel-by-panel ends up drawn *underneath* a later column's
+    opaque background and its tail is painted over -- every colorbar in
+    this figure is added in one pass after all panels exist instead."""
+    ax = fig.add_subplot(spec, projection=wcs)
     im = ax.imshow(data, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax, norm=norm)
-    fig.colorbar(im, ax=ax, fraction=0.05, pad=0.16)
-    ax.set_title(title, fontsize=8)
+    ax.set_title(title, fontsize=title_size)
     for i in (0, 1):
         # `set_axislabel("")` alone is not enough: WCSAxes treats an
         # empty label as "unset" and redraws its own default
         # ("pos.eq.ra"/"pos.eq.dec") unless auto-labelling is off too.
         ax.coords[i].set_auto_axislabel(False)
         ax.coords[i].set_axislabel("")
-        ax.coords[i].set_ticklabel(size=6)
+        ax.coords[i].set_ticklabel(size=7)
         ax.coords[i].set_ticks(number=3)
+    ax.coords[1].set_ticklabel_visible(show_dec)
+    ax.coords[0].set_ticklabel_visible(show_ra)
     ax.coords.grid(color="white", alpha=0.3, linestyle="solid", linewidth=0.4)
-    return ax
+    return ax, im
 
 
 def _log_norm(grid):
@@ -220,53 +227,83 @@ def build_region(config, region, formats):
                                  for i in range(len(CLASSES))]
             nyso_grid = _reproject(posterior["pix"], posterior["n_yso_half"], grid_pix, shape)
 
-        # Row heights matched to the display grid's own aspect ratio
-        # (WCSAxes holds equal aspect on the sky): a row-1 panel spans
-        # 3 of the 6 regular columns, so it needs 3x a regular row's
-        # height to fill its box without letterboxing.
+        # Figure about 16 wide; height set from the display grid's own
+        # aspect ratio so a panel's box is close to square rather than
+        # letterboxed (every panel shares one equal-aspect WCS). One
+        # flat 9-column grid for the whole figure (row 1's two maps each
+        # span 3 of the 9 columns -- about a third of the figure width;
+        # rows 2-3's six class panels each take one of those columns, so
+        # a share panel and its posterior match in size), one colour bar
+        # per row of six sharing column 6 instead of six, and the
+        # N(P(YSO)>0.5) panel in column 7 at the same size as the six.
         n_rows = 3 if has_post else 2
         aspect = n_y / float(n_x)
         fig_w = 16.0
-        unit_w = fig_w / 6.7
-        height_ratios = [3, 1, 1] if has_post else [3, 1]
-        fig_h = unit_w * aspect * sum(height_ratios) + 2.5
+        col_widths = [1, 1, 1, 1, 1, 1, 0.35, 1, 0.35]
+        unit_w = fig_w / sum(col_widths)
+        row1_h = 3 * unit_w * aspect + 1.3
+        row23_h = unit_w * aspect + 0.9
+        height_ratios = [row1_h] + [row23_h] * (n_rows - 1)
+        fig_h = max(sum(height_ratios) + 1.0, 8.0)
         fig = plt.figure(figsize=(fig_w, fig_h))
-        gs = fig.add_gridspec(n_rows, 7, width_ratios=[1, 1, 1, 1, 1, 1, 0.7],
-                               height_ratios=height_ratios, hspace=0.55, wspace=0.95)
+        gs = fig.add_gridspec(n_rows, 9, width_ratios=col_widths, height_ratios=height_ratios,
+                               wspace=0.65, hspace=0.7)
 
-        _add_panel(fig, gs, 0, slice(0, 3), wcs, col_grid, "cividis",
-                   norm=_log_norm(col_grid), title="column $A_K$ (mag)")
-        ax_dens = _add_panel(fig, gs, 0, slice(3, 6), wcs, density_grid, "magma",
-                              norm=_log_norm(density_grid),
-                              title=r"$\Sigma_C N_{CAT,C}$ (deg$^{-2}$)")
-        low_coverage = (coverage_grid < 0.5) | ~np.isfinite(coverage_grid)
-        if np.any(low_coverage) and not np.all(low_coverage):
+        ax_col, im_col = _add_panel(fig, gs[0, 0:3], wcs, col_grid, "cividis",
+                                     norm=_log_norm(col_grid), title="column $A_K$ (mag)",
+                                     show_dec=True, show_ra=False, title_size=10)
+        ax_dens, im_dens = _add_panel(fig, gs[0, 3:6], wcs, density_grid, "magma",
+                                       norm=_log_norm(density_grid),
+                                       title=r"$\Sigma_C N_{CAT,C}$ (deg$^{-2}$)",
+                                       show_dec=False, show_ra=False, title_size=10)
+        # Hatch only where the admitted footprint itself is low-coverage:
+        # `coverage_grid` is already NaN outside the footprint (sec. 8's
+        # own reprojection mask), and a NaN comparison is False, so this
+        # never hatches the white area outside the admitted pixels.
+        low_coverage = coverage_grid < 0.5
+        if np.any(low_coverage):
             ax_dens.contourf(low_coverage.astype(float), levels=[0.5, 1.5],
                               hatches=["//"], colors="none")
 
+        share_row, post_row = 1, 2
+
+        share_im = None
         for i, cls in enumerate(CLASSES):
             ratio = float(prior["attrs"].get("RATIO_%s" % cls, np.nan))
-            _add_panel(fig, gs, 1, i, wcs, share_grids[i], "viridis", vmin=0.0, vmax=1.0,
-                       title="%s share (ratio %.3g)" % (cls, ratio))
+            _, share_im = _add_panel(fig, gs[share_row, i], wcs, share_grids[i], "viridis",
+                                      vmin=0.0, vmax=1.0, title="%s\nshare, ratio %.3g" % (cls, ratio),
+                                      show_dec=(i == 0), show_ra=(not has_post), title_size=9)
 
         if has_post:
+            post_im = None
             for i, cls in enumerate(CLASSES):
-                _add_panel(fig, gs, 2, i, wcs, post_share_grids[i], "viridis", vmin=0.0, vmax=1.0,
-                           title="%s posterior mean" % cls)
-            _add_panel(fig, gs, 2, 6, wcs, nyso_grid, "magma",
-                       title="N(P(YSO)>0.5)")
-            caption = ""
+                _, post_im = _add_panel(fig, gs[post_row, i], wcs, post_share_grids[i], "viridis",
+                                         vmin=0.0, vmax=1.0, title="%s\nposterior mean" % cls,
+                                         show_dec=(i == 0), show_ra=True, title_size=9)
+            ax_nyso, im_nyso = _add_panel(fig, gs[post_row, 7], wcs, nyso_grid, "magma",
+                                          title="N(P(YSO)>0.5)", show_dec=False, show_ra=True, title_size=9)
+            caption = None
         else:
             caption = "posterior atlas (P11) absent for this region -- prior atlas only"
+
+        # Every colorbar added last, after every panel axes exists:
+        # `fig.colorbar` appends a new axes on top of whatever already
+        # exists, so adding one between two image panels leaves it
+        # underneath (hence painted over by) any panel created after it.
+        fig.colorbar(im_col, ax=ax_col, fraction=0.046, pad=0.05)
+        fig.colorbar(im_dens, ax=ax_dens, fraction=0.046, pad=0.05)
+        fig.colorbar(share_im, cax=fig.add_subplot(gs[share_row, 6]))
+        if has_post:
+            fig.colorbar(post_im, cax=fig.add_subplot(gs[post_row, 6]))
+            fig.colorbar(im_nyso, ax=ax_nyso, fraction=0.046, pad=0.05)
 
         total_predicted = float(prior["attrs"].get("TOTAL_PREDICTED", np.nan))
         total_observed = float(prior["attrs"].get("TOTAL_OBSERVED", np.nan))
         surveyed_area = float(prior["attrs"].get("SURVEYED_AREA_DEG2", np.nan))
         ratio_po = total_predicted / total_observed if total_observed else float("nan")
-        title = ("%s -- predicted/observed = %.4g/%.4g = %.3f, surveyed area %.4g deg$^2$"
-                  % (region, total_predicted, total_observed, ratio_po, surveyed_area))
-        if caption:
-            title = title + "\n" + caption
+        title = ("%s -- predicted/observed = %.4g/%.4g = %.3f, surveyed area %.4g deg$^2$%s"
+                  % (region, total_predicted, total_observed, ratio_po, surveyed_area,
+                     "" if caption is None else " (%s)" % caption))
         fig.suptitle(title, fontsize=12)
 
         out_dir = os.path.join(config.data_root, "bmstp", "atlas", "figures")
@@ -274,7 +311,9 @@ def build_region(config, region, formats):
         paths = []
         for fmt in formats:
             path = os.path.join(out_dir, "prior-atlas_%s.%s" % (region, fmt))
-            fig.savefig(path, dpi=150, bbox_inches="tight")
+            # No `bbox_inches="tight"`: that re-crops to content and
+            # drifts the saved size away from the intended ~16x12in.
+            fig.savefig(path, dpi=150)
             paths.append(path)
         plt.close(fig)
 
