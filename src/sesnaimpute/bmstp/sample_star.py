@@ -48,19 +48,25 @@ def sample_agb(config, region, tile_id):
     """AGB's `(x, log10_b, w)` on tile `tile_id` (sec. 5.2 "Marks",
     "Weight"): the evolved subset only (`LOG10_B_AGB_*` is NaN elsewhere),
     each star's `x = U` placed twice -- once at its O-rich reference, once
-    at its C-rich reference -- weighted `w_AGB * (1 - F_C)` and `w_AGB *
-    F_C`, `F_C` the carbon fraction (Le Bertre+2003, band 0.18-0.47)
-    already recorded as the population product's own `F_C` attribute: the
-    "O and C blended by F_C" of IMPLEMENTATION_BMSTP_DRAFT.md sec. 1.2 P2."""
+    at its C-rich reference -- weighted by the DUSTY subset's carbon
+    share, `f_C F_dusty,C / (f_C F_dusty,C + (1 - f_C) F_dusty,O)` (sec.
+    5.2, not the bare carbon fraction `F_C`: `W_AGB` is already the dusty
+    subset, whose chemistry mix is `F_dusty` by chemistry, not `F_C`
+    itself), from the population product's own `F_C`/`F_DUSTY_C`/
+    `F_DUSTY_MEAN` attributes (`F_DUSTY_MEAN` is that same denominator,
+    `population.star_population`'s own `(1-F_C)*F_DUSTY_O + F_C*F_DUSTY_C`)."""
     with h5py.File(_path(config, region), "r") as f:
         f_c = float(f.attrs["F_C"])
+        f_dusty_c = float(f.attrs["F_DUSTY_C"])
+        f_dusty_mean = float(f.attrs["F_DUSTY_MEAN"])
         grp = f[f"tile_{tile_id}"]
         evolved = grp["IS_EVOLVED"][()].astype(bool)
         u = grp["U"][()].astype(np.float64)[evolved]
         log10_b_o = grp["LOG10_B_AGB_O"][()].astype(np.float64)[evolved]
         log10_b_c = grp["LOG10_B_AGB_C"][()].astype(np.float64)[evolved]
         w_agb = grp["W_AGB"][()].astype(np.float64)[evolved]
+    carbon_share = f_c * f_dusty_c / f_dusty_mean
     x = np.concatenate([u, u])
     log10_b = np.concatenate([log10_b_o, log10_b_c])
-    w = np.concatenate([w_agb * (1.0 - f_c), w_agb * f_c])
+    w = np.concatenate([w_agb * (1.0 - carbon_share), w_agb * carbon_share])
     return x, log10_b, w
