@@ -51,6 +51,7 @@ Feeds SPEC_PRIORS.md section 7 (H2S), via `sky.derived.knots`.
 
 import os
 
+from sesnaimpute import progress as progress_module
 from sesnaimpute.build import run
 from sesnaimpute.sky.download._fetch import fetch
 
@@ -82,14 +83,19 @@ _WALAWENDER_FILES = (
 )
 
 
-def _fetch_cds(dest_dir):
-    """Fetches every CDS catalogue's ReadMe and listed data files. Returns
-    the number of files fetched."""
+def _fetch_cds(dest_dir, st=None):
+    """Fetches every CDS catalogue's ReadMe and listed data files, ticking
+    `st` (a `progress.Stage`) per file if given. Returns the number of
+    files fetched."""
+    all_names = [(catalogue, name) for catalogue, (_, files) in _CDS_CATALOGUES.items() for name in files]
+    n_total = len(all_names)
     n_files = 0
-    for catalogue, (base_url, files) in _CDS_CATALOGUES.items():
-        for name in files:
-            fetch(f"{base_url}/{name}", f"{dest_dir}/vizier/{catalogue}/{name}")
-            n_files += 1
+    for catalogue, name in all_names:
+        base_url = _CDS_CATALOGUES[catalogue][0]
+        fetch(f"{base_url}/{name}", f"{dest_dir}/vizier/{catalogue}/{name}")
+        n_files += 1
+        if st is not None:
+            st.tick(n_files, n_total, "files")
     return n_files
 
 
@@ -116,10 +122,12 @@ def build(config, regions=None):
     survey-wide product.
     """
     dest_dir = f"{config.data_root}/sky/download/h2_knot_surveys"
-    n_fetched = _fetch_cds(dest_dir)
-    n_manual = _require_manual(dest_dir)
-    print(f"h2_knot_surveys build: {n_fetched} files fetched from CDS, "
-          f"{n_manual} hand-placed files present")
+    with progress_module.Stage("sky.download.h2_knot_surveys") as st:
+        n_fetched = _fetch_cds(dest_dir, st)
+        n_manual = _require_manual(dest_dir)
+        print(f"h2_knot_surveys build: {n_fetched} files fetched from CDS, "
+              f"{n_manual} hand-placed files present")
+        st.done(dest_dir, cds_files=n_fetched, manual_files=n_manual)
 
 
 if __name__ == "__main__":

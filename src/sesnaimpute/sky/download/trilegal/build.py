@@ -31,6 +31,7 @@ import urllib.request
 import healpy as hp
 import numpy as np
 
+from sesnaimpute import progress as progress_module
 from sesnaimpute.build import run
 from sesnaimpute.granules import access as granules_access
 
@@ -427,45 +428,57 @@ def build(config, regions=None, _limit=None):
     regions are queried (default: all 30 in `REGION_POINTINGS`); `_limit`
     is a rehearsal knob capping the number of parts queried per pointing.
     """
-    version, action_url, defaults = read_form()
-    print(f"trilegal build: form version {version!r}, POST target {action_url}")
+    with progress_module.Stage("sky.download.trilegal") as st:
+        version, action_url, defaults = read_form()
+        print(f"trilegal build: form version {version!r}, POST target {action_url}")
 
-    dest_dir = f"{config.data_root}/sky/download/trilegal"
-    names = sorted(REGION_POINTINGS) if regions is None else regions
+        dest_dir = f"{config.data_root}/sky/download/trilegal"
+        names = sorted(REGION_POINTINGS) if regions is None else regions
 
-    n_files = 0
-    n_bytes = 0
-    for region in names:
-        pointings = region_pointings(config, region)
-        n_pointings = len(pointings)
-        print(f"trilegal build: {region!r}: {n_pointings} pointing(s) on the "
-              f"{POINTING_GRID_DEG} deg grid")
-        for p_idx, pt in enumerate(pointings):
-            n_parts = pt["n_parts"]
-            area_per_part = pt["area_deg2"] / n_parts
-            if area_per_part > FORM_MAX_AREA_DEG2:
-                raise ValueError(
-                    f"trilegal build: {region!r} pointing {p_idx} needs area "
-                    f"{area_per_part} deg2 per part, above the form's "
-                    f"{FORM_MAX_AREA_DEG2} deg2 cap -- raise n_parts")
-            file_names = _file_names(region, n_pointings, p_idx, n_parts)
-            if _limit is not None:
-                file_names = file_names[:_limit]
+        # Plan every pointing/part's file name(s) first, so the tick below
+        # knows the total unit count before touching the network.
+        plan = []
+        for region in names:
+            pointings = region_pointings(config, region)
+            n_pointings = len(pointings)
+            print(f"trilegal build: {region!r}: {n_pointings} pointing(s) on the "
+                  f"{POINTING_GRID_DEG} deg grid")
+            for p_idx, pt in enumerate(pointings):
+                n_parts = pt["n_parts"]
+                area_per_part = pt["area_deg2"] / n_parts
+                if area_per_part > FORM_MAX_AREA_DEG2:
+                    raise ValueError(
+                        f"trilegal build: {region!r} pointing {p_idx} needs area "
+                        f"{area_per_part} deg2 per part, above the form's "
+                        f"{FORM_MAX_AREA_DEG2} deg2 cap -- raise n_parts")
+                file_names = _file_names(region, n_pointings, p_idx, n_parts)
+                if _limit is not None:
+                    file_names = file_names[:_limit]
+                plan.append((region, p_idx, pt, area_per_part, file_names))
+
+        n_total = sum(len(item[4]) for item in plan) or 1
+        n_files = 0
+        n_bytes = 0
+        n_done = 0
+        for region, p_idx, pt, area_per_part, file_names in plan:
             for name in file_names:
                 dest_path = f"{dest_dir}/{name}"
                 if os.path.exists(dest_path):
                     print(f"trilegal build: {dest_path} present, skipped "
                           f"(delete it to draw a new realisation)")
-                    continue
-                n_out, wall_time_s = fetch_region_part(
-                    pt["l_deg"], pt["b_deg"], area_per_part, dest_path, defaults, action_url)
-                n_files += 1
-                n_bytes += n_out
-                print(f"trilegal build: {region!r} pointing {p_idx} "
-                      f"(l={pt['l_deg']:.4f}, b={pt['b_deg']:.4f}) -> {dest_path} "
-                      f"({n_out} bytes, {wall_time_s:.0f}s)")
-    print(f"trilegal build: {n_files} files, {n_bytes} bytes total, "
-          f"{len(names)} regions")
+                else:
+                    n_out, wall_time_s = fetch_region_part(
+                        pt["l_deg"], pt["b_deg"], area_per_part, dest_path, defaults, action_url)
+                    n_files += 1
+                    n_bytes += n_out
+                    print(f"trilegal build: {region!r} pointing {p_idx} "
+                          f"(l={pt['l_deg']:.4f}, b={pt['b_deg']:.4f}) -> {dest_path} "
+                          f"({n_out} bytes, {wall_time_s:.0f}s)")
+                n_done += 1
+                st.tick(n_done, n_total, "files")
+        print(f"trilegal build: {n_files} files, {n_bytes} bytes total, "
+              f"{len(names)} regions")
+        st.done(dest_dir, regions=len(names), fetched=n_files, bytes=n_bytes)
 
 
 if __name__ == "__main__":

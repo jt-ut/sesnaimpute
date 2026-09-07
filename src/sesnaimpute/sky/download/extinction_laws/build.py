@@ -32,6 +32,7 @@ Feeds SPEC_PRIORS.md section 1.3 (the diffuse/dense-cloud law blend
 import os
 import shutil
 
+from sesnaimpute import progress as progress_module
 from sesnaimpute.build import run
 
 #: Pre-staged location this module copies from -- there is no reachable
@@ -58,21 +59,31 @@ def build(config, regions=None, _limit=None):
     `_limit` laws are copied.
     """
     laws = LAWS if _limit is None else LAWS[:_limit]
+    all_files = [(law, name) for law in laws for name in _files(law)]
+    n_total = len(all_files)
     n_files = 0
     n_bytes = 0
-    for law in laws:
-        dest_dir = f"{config.data_root}/sky/download/extinction_laws/{law}"
-        os.makedirs(dest_dir, exist_ok=True)
-        for name in _files(law):
+    n_skipped = 0
+    with progress_module.Stage("sky.download.extinction_laws") as st:
+        for i, (law, name) in enumerate(all_files):
+            dest_dir = f"{config.data_root}/sky/download/extinction_laws/{law}"
+            os.makedirs(dest_dir, exist_ok=True)
             src_path = f"{_STAGED_DIR}/{law}/{name}"
             dest_path = f"{dest_dir}/{name}"
-            shutil.copyfile(src_path, dest_path)
-            file_bytes = os.path.getsize(dest_path)
-            n_files += 1
-            n_bytes += file_bytes
-            print(f"extinction_laws build: {src_path} -> {dest_path} ({file_bytes} bytes)")
-    print(f"extinction_laws build: {n_files} files, {n_bytes} bytes total, "
-          f"{len(laws)} laws")
+            if os.path.exists(dest_path):
+                print(f"extinction_laws build: {dest_path} present, skipped")
+                n_skipped += 1
+            else:
+                shutil.copyfile(src_path, dest_path)
+                file_bytes = os.path.getsize(dest_path)
+                n_files += 1
+                n_bytes += file_bytes
+                print(f"extinction_laws build: {src_path} -> {dest_path} ({file_bytes} bytes)")
+            st.tick(i + 1, n_total, "files")
+        print(f"extinction_laws build: {n_files} files copied, {n_skipped} skipped, "
+              f"{n_bytes} bytes total, {len(laws)} laws")
+        st.done(f"{config.data_root}/sky/download/extinction_laws",
+                laws=len(laws), copied=n_files, skipped=n_skipped)
 
 
 if __name__ == "__main__":

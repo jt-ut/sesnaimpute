@@ -16,6 +16,7 @@ per-band 24/70/160um tables): `chandra_cat_f05` (CDFS), `elaisn1_cat_s05`,
 import os
 
 from sesnaimpute import build as build_module
+from sesnaimpute import progress as progress_module
 from sesnaimpute.sky.download import _tap
 
 # Field name -> IRSA TAP table for the SWIRE IRAC-band-merged catalogue.
@@ -50,11 +51,15 @@ def build(config, regions=None):
     """
     dest_dir = f"{config.data_root}/sky/download/swire"
     os.makedirs(dest_dir, exist_ok=True)
-    for field_name, table in FIELDS.items():
-        slug = field_name.lower().replace("-", "")
-        dest_path = f"{dest_dir}/swire_{slug}.csv"
-        n_rows, n_bytes = _tap.query_csv(table, COLUMNS, "cntr", dest_path)
-        print(f"swire build: {field_name} ({table}) -> {dest_path}: {n_rows} rows, {n_bytes} bytes")
+    fields = list(FIELDS.items())
+    with progress_module.Stage("sky.download.swire") as st:
+        for i, (field_name, table) in enumerate(fields):
+            slug = field_name.lower().replace("-", "")
+            dest_path = f"{dest_dir}/swire_{slug}.csv"
+            n_rows, n_bytes = _tap.query_csv(table, COLUMNS, "cntr", dest_path)
+            print(f"swire build: {field_name} ({table}) -> {dest_path}: {n_rows} rows, {n_bytes} bytes")
+            st.tick(i + 1, len(fields), "queries")
+        st.done(dest_dir, fields=len(fields))
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ Feeds SPEC_PRIORS.md section 1.1 (columns; the Herschel-covered branch of
 the adopted dust column, C6 "Herschel where covered").
 """
 
+from sesnaimpute import progress as progress_module
 from sesnaimpute.build import run
 from sesnaimpute.sky.download._fetch import fetch
 
@@ -55,8 +56,11 @@ def build(config, regions=None, _limit=None):
     names = list(_FILES)
     if _limit is not None:
         names = names[:_limit]
-    for name in names:
-        fetch(_FILES[name], f"{dest_dir}/{name}")
+    with progress_module.Stage("sky.download.herschel_hgbs") as st:
+        for i, name in enumerate(names):
+            fetch(_FILES[name], f"{dest_dir}/{name}")
+            st.tick(i + 1, len(names), "files")
+        st.done(dest_dir, files=len(names))
 
 
 if __name__ == "__main__":
