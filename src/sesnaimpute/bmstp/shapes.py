@@ -23,10 +23,6 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.bmstp import grid, sample_cloud, sample_gal, sample_star
 
-#: joblib worker cap for the grain loop (CODING_RULES_BMSTP.md rule 10a):
-#: `root.cfg`'s own `[run] n_jobs`, never more than four.
-_MAX_N_JOBS = 4
-
 
 def _sigma_b_min_star_family(region):
     """The region's distance uncertainty carried onto `-2 log10 d`
@@ -62,7 +58,9 @@ def build_star_family(config, region):
         n_tile = ids.size
         sigma_b_min = _sigma_b_min_star_family(region)
 
-        n_jobs = min(int(config.n_jobs), _MAX_N_JOBS)
+        # worker count is `root.cfg`'s own `[run] n_jobs` (CODING_RULES_BMSTP.md
+        # rule 10a): the owner sets it to what the machine's memory allows.
+        n_jobs = int(config.n_jobs)
         results = Parallel(n_jobs=n_jobs)(
             delayed(_build_one_tile)(config, region, int(t), sigma_b_min) for t in ids)
         for i in range(n_tile):
@@ -159,7 +157,9 @@ def build_cloud(config, region):
         n_sl = loaded["hpx_pix_256"].size
         sigma_b_min = _sigma_b_min_star_family(region)
 
-        n_jobs = min(int(config.n_jobs), _MAX_N_JOBS)
+        # worker count is `root.cfg`'s own `[run] n_jobs` (CODING_RULES_BMSTP.md
+        # rule 10a): the owner sets it to what the machine's memory allows.
+        n_jobs = int(config.n_jobs)
         results = Parallel(n_jobs=n_jobs)(
             delayed(_build_one_sightline)(loaded, row, sigma_b_min) for row in range(n_sl))
         for i in range(n_sl):

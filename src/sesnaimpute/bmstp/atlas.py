@@ -64,9 +64,6 @@ MC_SEED = 137
 #: the same constant `population.selection.MIN_BANDS` sets.
 MIN_BANDS_CLEAR = selection_module.MIN_BANDS
 
-#: joblib worker cap (CODING_RULES_BMSTP.md rule 10a).
-_MAX_N_JOBS = 4
-
 _HPX512_PIXEL_DEG2 = 41252.96 / (12 * 512 ** 2)
 
 
@@ -198,23 +195,23 @@ def _draw_members(rng, weight, n_mc):
 #: buffer rather than reusing one -- `_N_TEMP_ARRAYS` counts that many
 #: same-shape buffers live at once, generously, so the true peak (measured
 #: below) sits under the target with margin. `_build_one_tile` runs this
-#: inside up to `_MAX_N_JOBS` joblib workers at once (STAR/AGB/PAHC, one
-#: tile per worker), so the 512 MB is divided by that worker cap: the
-#: budget is per worker times n_jobs, not 512 MB again in every worker.
+#: inside `config.n_jobs` joblib workers at once (STAR/AGB/PAHC, one tile
+#: per worker), each held to this 512 MB working set on its own (rule
+#: 10b); the total across all workers is therefore `n_jobs * 512 MB`, not
+#: 512 MB in aggregate -- sizing `n_jobs` to the machine's memory is
+#: `root.cfg`'s job (rule 10a), not this batch size's.
 _PIXEL_BATCH_BUDGET_BYTES = 512 * 1024 * 1024
 _N_TEMP_ARRAYS = 12
 
 
 def _pixel_batch_size(n_mc):
     """Pixels per batch so `n_pixel_batch * N_MC * N_BANDS * 8 bytes
-    (float64) * _N_TEMP_ARRAYS` stays under `_PIXEL_BATCH_BUDGET_BYTES /
-    _MAX_N_JOBS` per worker, independent of how many pixels the caller (a
-    tile, a sightline, or GAL's whole region) holds -- CODING_RULES_BMSTP.md
-    rule 10b, with the worst case of `_MAX_N_JOBS` workers computing a
-    batch each at the same time held to the rule's 512 MB in aggregate."""
-    per_worker_budget = _PIXEL_BATCH_BUDGET_BYTES // _MAX_N_JOBS
+    (float64) * _N_TEMP_ARRAYS` stays under `_PIXEL_BATCH_BUDGET_BYTES`
+    per worker, independent of how many pixels the caller (a tile, a
+    sightline, or GAL's whole region) holds -- CODING_RULES_BMSTP.md rule
+    10b, one worker's own 512 MB working set."""
     row_bytes = n_mc * N_BANDS * 8 * _N_TEMP_ARRAYS
-    return max(1, per_worker_budget // row_bytes)
+    return max(1, _PIXEL_BATCH_BUDGET_BYTES // row_bytes)
 
 
 def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None):
@@ -641,7 +638,9 @@ def build_region(config, region):
         usable = tile_of_pix >= 0
         tiles_here = sorted(set(int(t) for t in tile_of_pix[usable]) & set(tile_ids_present))
 
-        n_jobs = min(int(config.n_jobs), _MAX_N_JOBS)
+        # worker count is `root.cfg`'s own `[run] n_jobs` (CODING_RULES_BMSTP.md
+        # rule 10a): the owner sets it to what the machine's memory allows.
+        n_jobs = int(config.n_jobs)
 
         def _one(tile_id):
             m = usable & (tile_of_pix == tile_id)

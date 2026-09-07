@@ -374,12 +374,13 @@ def build_galz(config):
         n_b = log10_b_centers.size
 
         # one (n_model x galaxy-batch) KDE block per node (sec 5.4); the
-        # 61 nodes are independent, so they run on threads, capped at 4
-        # workers (CODING_RULES.md rule 10a), each still batching its own
-        # galaxies under the 512 MB block (rule 10b).
+        # 61 nodes are independent, so they run on threads, worker count
+        # `root.cfg`'s own `[run] n_jobs` (CODING_RULES_BMSTP.md rule
+        # 10a), each still batching its own galaxies under the 512 MB
+        # block (rule 10b).
         node_gal = [(colour[finite & (node == k)], sigma[finite & (node == k)])
                     for k in range(n_node)]
-        n_jobs = min(4, config.n_jobs)
+        n_jobs = int(config.n_jobs)
         results = Parallel(n_jobs=n_jobs, backend="threading")(
             delayed(_node_kde)(colour_theta_f32, c_gal, s_gal) for c_gal, s_gal in node_gal)
         node_density = np.empty((n_node, n_model), dtype=np.float64)
