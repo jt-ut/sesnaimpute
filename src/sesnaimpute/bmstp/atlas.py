@@ -5,8 +5,8 @@ Per admitted nside-512 pixel, a fixed-seed Monte Carlo sample of each class's
 population, dimmed at the pixel's own column through the blended law
 (`population.selection.kappa_hybrid`), weighted by each member's probability of
 being catalogued (sec. 8, sec. 6.2): per band the completeness `C_i(f)` at the
-pixel's own median 50% limit (`catalog.depth_grid`'s `F_LIM_50_MED_MJY`) and the
-region-band roll-off width, and `P(>=2 of 8)` from the eight bands' independent
+pixel's own marginalised 50% limit (`catalog.depth_grid`'s `F_LIM_50_PIX_MJY`)
+and its own marginalised width (`W_DEX_PIX`), and `P(>=2 of 8)` from the eight bands' independent
 non-detection probabilities -- the same completeness model `fittp.likelihood`
 prices, never a step at the 50% limit. The selection appears here and nowhere
 else in the atlas (sec. 1.2): the prior itself is unthinned.
@@ -44,7 +44,6 @@ from sesnaimpute.bmstp import density as density_module
 from sesnaimpute.bmstp import sample_cloud
 from sesnaimpute.bmstp import sample_gal
 from sesnaimpute.fittp import likelihood as likelihood_module
-from sesnaimpute.fittp import sweep as sweep_module
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
@@ -71,13 +70,16 @@ _HPX512_PIXEL_DEG2 = 41252.96 / (12 * 512 ** 2)
 
 
 def _depth_grid(config, region):
-    """The admitted pixel axis and its median 50% limits (`catalog.depth_grid`,
-    sec. 3.3): `(pix, f_lim_50_med_mjy)`."""
+    """The admitted pixel axis and its marginalised 50% limit and width
+    (`catalog.depth_grid`, sec. 3.3, the fixed point of the per-pixel
+    `log10 DCOMP90` vs `log10 f` fit, not the brightness-biased median):
+    `(pix, f_lim_50_pix_mjy, w_dex_pix)`."""
     path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
     with h5py.File(path, "r") as f:
         pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
-        f_lim = np.asarray(f["F_LIM_50_MED_MJY"][:], dtype=np.float64)
-    return pix, f_lim
+        f_lim = np.asarray(f["F_LIM_50_PIX_MJY"][:], dtype=np.float64)
+        w_dex_pix = np.asarray(f["W_DEX_PIX"][:], dtype=np.float64)
+    return pix, f_lim, w_dex_pix
 
 
 def _coverage(config, region, pix):
@@ -220,9 +222,9 @@ def _pixel_batch_size(n_mc):
 def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None):
     """`(frac, mc_error)` per pixel: `flux0` (n_mc, 8) undimmed, `u` (n_mc,)
     the member's own placement fraction, `a_col` (n_pix,) the pixel's own
-    column, `f_lim` (n_pix, 8) the pixel's own median limits, `width_dex`
-    (8,) the region-band roll-off width (`catalog.depths`' `WIDTH_DEX`,
-    read once per region by `fittp.sweep._width_dex`). `a = a_col * u`
+    column, `f_lim` (n_pix, 8) the pixel's own marginalised limits,
+    `width_dex` (n_pix, 8) the pixel's own marginalised roll-off width
+    (`catalog.depth_grid`'s `W_DEX_PIX`, sec. 3.3). `a = a_col * u`
     (sec. 8's "its own extinction"), dimmed through the blended law
     (`population.selection.kappa_hybrid`). The two-of-eight step test is
     replaced by the member's probability of being catalogued
@@ -241,7 +243,7 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None):
 
     Processed in pixel batches of `_pixel_batch_size` (rule 10b): each
     batch is the same elementwise-per-pixel computation on a slice of
-    `a_col`/`f_lim`, so splitting the pixel axis changes no result -- the
+    `a_col`/`f_lim`/`width_dex`, so splitting the pixel axis changes no result -- the
     member draws (`u`, `flux0`) are unsliced and shared by every batch.
     Each batch's rows are written straight into the preallocated
     `frac`/`mc_error` outputs; `tick(done, total)` is called once per
@@ -258,6 +260,7 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None):
         stop = min(start + batch, n_pix)
         a_b = a_col[start:stop]
         f_lim_b = f_lim[start:stop]
+        width_dex_b = width_dex[start:stop]
         a = a_b[:, None] * u[None, :]  # (n_pix_batch, n_mc)
         w_ramp = selection_module.law_dense_weight(a)  # (n_pix_batch, n_mc)
         kappa = selection_module.kappa_hybrid(config, w_ramp)  # (n_pix_batch, n_mc, 8)
@@ -266,7 +269,7 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None):
         has_flux = flux0[None, :, :] > 0.0  # (1, n_mc, 8), broadcasts
         log10_f = np.log10(np.where(has_flux, flux, 1.0))
         z = ((log10_f - np.log10(f_lim_b)[:, None, :])
-             / (likelihood_module._SQRT2 * width_dex[None, None, :]))
+             / (likelihood_module._SQRT2 * width_dex_b[:, None, :]))
         p = np.where(has_flux, 1.0 - np.exp(likelihood_module._ln_one_minus_c(z)), 0.0)
         one_minus_p = 1.0 - p  # (n_pix_batch, n_mc, 8)
         prod_all = np.prod(one_minus_p, axis=2)
@@ -287,10 +290,14 @@ def _pahc_weight(limit8_grid, p_pahc, x):
     contrast, disclosed rather than resampled per pixel, since `P_PAHC`
     is tabulated on `LIMIT8_GRID_MJY`'s eight region-wide quantile nodes,
     not per pixel): vectorised over stars via `searchsorted`, no
-    per-star loop."""
+    per-star loop. `frac` is clamped to `[0, 1]` (no extrapolation past
+    the grid's own end nodes): `x` is now the tile's own pixels' marginalised
+    `F_LIM_50_PIX_MJY` mean (`catalog.depth_grid`, sec. 3.3), which a single
+    poorly-covered pixel can push past the region-wide grid's brightest
+    node, where `P_PAHC` itself is not defined."""
     j = np.clip(np.searchsorted(limit8_grid, x), 1, limit8_grid.size - 1)
     lo, hi = j - 1, j
-    frac = (x - limit8_grid[lo]) / (limit8_grid[hi] - limit8_grid[lo])
+    frac = np.clip((x - limit8_grid[lo]) / (limit8_grid[hi] - limit8_grid[lo]), 0.0, 1.0)
     return p_pahc[:, lo] + frac * (p_pahc[:, hi] - p_pahc[:, lo])
 
 
@@ -302,7 +309,9 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     group): STAR/AGB/PAHC all draw from the SAME TRILEGAL flux table
     (sec. 8's members list), each with its own weight column and its own
     Monte Carlo resample, so the three densities carry independent
-    binomial noise rather than the same draw reweighted after the fact."""
+    binomial noise rather than the same draw reweighted after the fact.
+    `width_dex` is this tile's own pixels' `W_DEX_PIX` (n_pix_in_tile, 8),
+    not one region-band constant (`catalog.depth_grid`, sec. 3.3)."""
     star_path = config_module.product_path(
         config, "population", "star", "population", "tile", region=region)
     field_path = config_module.product_path(
@@ -492,7 +501,9 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_i
     (`population.h2s.knot_ks_log10_flux`) and the four IRAC bands (a
     Giannini colour-ratio vector drawn per member; J, H, M1 unmeasured,
     zero flux, disclosed), at YSO's own `x`; H2S's own density (the
-    law-blurred field's pixel mean) is computed by the caller, not here."""
+    law-blurred field's pixel mean) is computed by the caller, not here.
+    `width_dex` is this sightline's own pixels' `W_DEX_PIX` (n_pix_in_sl, 8),
+    not one region-band constant."""
     rng = np.random.RandomState(seed)
 
     mass = _draw_chabrier_mass(rng, N_MC)
@@ -617,14 +628,14 @@ def build_region(config, region):
     and every class's `N_CAT_*`/`SHARE_*` from its own Monte Carlo
     selection above (module docstring)."""
     with progress.Stage("bmstp.atlas", region) as st:
-        pix, f_lim = _depth_grid(config, region)
+        # the pixel's own marginalised limit and roll-off width the
+        # detection probability reads (sec. 6.2, sec. 3.3's "the depth
+        # grid"), not the region-band constants `fittp.sweep` uses.
+        pix, f_lim, width_dex = _depth_grid(config, region)
         n_pix = pix.size
         coverage = _coverage(config, region, pix)
         a_col, arm = _pixel_column(config, pix)
         tile_of_pix, n_tile_filled = _pixel_tile(config, region, pix)
-        # the region-band completeness roll-off width the detection
-        # probability reads (sec. 6.2), the same read `fittp.sweep` uses.
-        width_dex = sweep_module._width_dex(config, region)
 
         n_cat = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
         mc_err = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
@@ -645,7 +656,8 @@ def build_region(config, region):
 
         def _one(tile_id):
             m = usable & (tile_of_pix == tile_id)
-            return tile_id, m, _build_one_tile(config, region, tile_id, pix[m], a_col[m], f_lim[m], width_dex)
+            return tile_id, m, _build_one_tile(
+                config, region, tile_id, pix[m], a_col[m], f_lim[m], width_dex[m])
 
         results = Parallel(n_jobs=n_jobs)(delayed(_one)(t) for t in tiles_here)
         for i, (tile_id, m, out) in enumerate(results):
@@ -694,7 +706,7 @@ def build_region(config, region):
             f_y, e_y, d_y, f_h, e_h = _build_one_sightline(
                 config, region, sl_row, a_col[m], arm[m], f_lim[m],
                 loaded_profile, mass_grid, abs_mag_grid, d_r_pc,
-                logsig_mean, logsig_std, giannini_ratios, width_dex,
+                logsig_mean, logsig_std, giannini_ratios, width_dex[m],
                 MC_SEED + 10_000 + sl_row)
             return m, f_y, e_y, d_y, f_h, e_h
 
@@ -748,7 +760,7 @@ def build_region(config, region):
             f.create_dataset("HPX_PIX_512", data=pix)
             f.create_dataset("A_COL_K", data=a_col.astype(np.float32))
             f.create_dataset("COVERAGE", data=coverage.astype(np.float32))
-            f.create_dataset("F_LIM_50_MED_MJY", data=f_lim.astype(np.float32))
+            f.create_dataset("F_LIM_50_PIX_MJY", data=f_lim.astype(np.float32))
             for c in CLASSES:
                 f.create_dataset(f"N_CAT_{c}", data=n_cat[c].astype(np.float32))
             for c in built:
