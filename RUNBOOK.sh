@@ -145,6 +145,10 @@ PY sesnaimpute.impute.posterior             # class/subclass posteriors, argmax-
 PY sesnaimpute.population.column_grid
 PY sesnaimpute.population.kernel
 PY sesnaimpute.population.field_stars
+PY sesnaimpute.population.yso
+PY sesnaimpute.population.yso_selection
+PY sesnaimpute.population.h2s
+PY sesnaimpute.population.gal
 
 # A --from that never matched any PY line above would otherwise leave
 # every stage silently skipped and the script exiting 0 having done
