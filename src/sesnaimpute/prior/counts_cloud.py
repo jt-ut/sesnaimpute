@@ -56,6 +56,7 @@ each source's own column, and read by both integrals.
 """
 
 import os
+import threading
 
 import h5py
 import healpy as hp
@@ -64,6 +65,7 @@ from joblib import Parallel, delayed
 
 from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
@@ -243,7 +245,7 @@ def _build_row_bytes(n_cell, n_x, n_sigma):
     return eps_row_bytes + closed_form_row_bytes
 
 
-def build_region(config, region):
+def build_region(config, region, st=None):
     """Computes and writes one region's `bms/table/counts-cloud_table_
     source` product (module docstring), end to end on the same source
     chunks throughout: every per-source array -- the adopted columns, the
@@ -314,6 +316,9 @@ def build_region(config, region):
 
         row_bytes = _build_row_bytes(n_cell, n_x, n_sigma)
         spans = list(batches_module.batches(n_src, row_bytes, BUILD_REGION_BUDGET_BYTES))
+        n_spans = len(spans)
+        _tick_lock = threading.Lock()
+        _done_count = [0]
 
         has_zp_sigma_k = "ZP_SIGMA_K" in fa
 
@@ -370,6 +375,11 @@ def build_region(config, region):
             for name, arr in values.items():
                 dsets[name][start:stop] = np.asarray(arr, dtype=np.float32)
 
+            if st is not None:
+                with _tick_lock:
+                    _done_count[0] += 1
+                    st.tick(_done_count[0], n_spans, "batches")
+
         Parallel(n_jobs=max(1, config.n_jobs), prefer="threads")(
             delayed(_one_batch)(start, stop) for start, stop in spans)
 
@@ -384,12 +394,13 @@ def build(config, regions=None):
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
     for region in region_names:
-        n_src, path = build_region(config, region)
-        n_law_total = law_area_check(config, region)
-        print("prior.counts_cloud: %s: %d sources, N_law region total=%.4g "
+        with progress.Stage("prior.counts_cloud", region) as st:
+            n_src, path = build_region(config, region, st)
+            n_law_total = law_area_check(config, region)
+            st.done(path, n_sources=n_src, n_law_total=n_law_total)
+        print("prior.counts_cloud: %s: N_law region total=%.4g "
               "young stars (section 6.4 item 1, against Pokhrel+2020's Table 2 "
-              "total per the S-D38 study record) -> %s"
-              % (region, n_src, n_law_total, path))
+              "total per the S-D38 study record)" % (region, n_law_total))
 
 
 if __name__ == "__main__":

@@ -65,6 +65,7 @@ from scipy.signal import fftconvolve
 from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
@@ -730,6 +731,7 @@ def build(config, regions=None):
     x1_idx = int(np.argmin(np.abs(X_LADDER - 1.0)))
 
     for region in region_names:
+        st = progress.Stage("prior.h2s", region)
         d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
         eta = eta_for_region(region)
 
@@ -762,6 +764,7 @@ def build(config, regions=None):
 
         (n_source, eps_a0, eps_x1, max_x_violation, max_sigma_violation,
          eps_x1_column) = report_source_selection(config, region, log10_sigma_grid, logsig_mean, x1_idx)
+        st.done(path_region, n_source=n_source, logsig_mean=logsig_mean, eta=float(eta))
         print(f"h2s: {region}: n_source={n_source} LOGSIG_MEAN={logsig_mean:.4f} "
               f"LOGSIG_STD={logsig_std:.4f} median_eps(x=0,Sigma=mean)={eps_a0:.4f} "
               f"median_eps(x=1,Sigma=mean)={eps_x1:.4f} max_x_violation={max_x_violation:.3e} "

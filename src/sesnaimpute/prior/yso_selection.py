@@ -77,6 +77,7 @@ from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
 from sesnaimpute import constants
 from sesnaimpute import definitions
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
@@ -387,10 +388,11 @@ def mass_limit_one_band(config, d_r_pc, log10_flim_i4, age_gyr=AGE_1MYR_GYR):
 # per-region build: one batched pass over sources
 # ---------------------------------------------------------------------
 
-def build_and_write_region(config, region):
+def build_and_write_region(config, region, st=None):
     """Computes and writes the region's exact per-source YSO mass
     selection, one batch of sources at a time so no batch's working
-    arrays exceed `BATCH_BUDGET_BYTES`.
+    arrays exceed `BATCH_BUDGET_BYTES`. `st`, when given, is ticked
+    once per batch of sources.
     """
     d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
     log10_lim = np.log10(limits_module.limits(config, region))
@@ -422,7 +424,9 @@ def build_and_write_region(config, region):
         ds_flim = f.create_dataset("IMF_FRAC_ABOVE_MLIM", shape=(n_source,), dtype="f4")
 
         row_bytes = _row_bytes(n_x, mass_grid.size)
-        for start, stop in batches_module.batches(n_source, row_bytes, budget_bytes=BATCH_BUDGET_BYTES):
+        spans = list(batches_module.batches(n_source, row_bytes, budget_bytes=BATCH_BUDGET_BYTES))
+        n_batches = len(spans)
+        for i_batch, (start, stop) in enumerate(spans, start=1):
             lim_b = np.ascontiguousarray(log10_lim[start:stop])
             a_b = a_col[start:stop]
             a_query_b = np.ascontiguousarray(x_ladder[None, :] * a_b[:, None])
@@ -436,17 +440,19 @@ def build_and_write_region(config, region):
             ds_mlim[start:stop] = m_lim_b.astype("f4")
             ds_flim[start:stop] = imf_fraction_above(m_lim_b).astype("f4")
 
+            if st is not None:
+                st.tick(i_batch, n_batches, "batches")
+
     return path, n_source
 
 
 def _build_one(config, region):
-    path, n_source = build_and_write_region(config, region)
-    with h5py.File(path, "r") as f:
-        m_lim_med = float(np.median(f["M_LIM_8UM_1MYR"][:]))
-        f_above_med = float(np.median(f["IMF_FRAC_ABOVE_MLIM"][:]))
-    print(f"yso_selection: {region}: n_source={n_source} "
-          f"median(M_LIM_8UM_1MYR)={m_lim_med:.4f} Msun "
-          f"median(f_IMF(>M_lim))={f_above_med:.4f} -> {path}")
+    with progress.Stage("prior.yso_selection", region) as st:
+        path, n_source = build_and_write_region(config, region, st)
+        with h5py.File(path, "r") as f:
+            m_lim_med = float(np.median(f["M_LIM_8UM_1MYR"][:]))
+            f_above_med = float(np.median(f["IMF_FRAC_ABOVE_MLIM"][:]))
+        st.done(path, n_source=n_source, median_m_lim_8um_1myr=m_lim_med, median_f_imf_above_mlim=f_above_med)
     return path
 
 

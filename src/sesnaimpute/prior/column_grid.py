@@ -17,6 +17,7 @@ import h5py
 import numpy as np
 
 from sesnaimpute import config as config_module
+from sesnaimpute import progress
 from sesnaimpute.build import run
 
 #: The ladder's floor, in A_K magnitudes -- fixed, not measured.
@@ -68,14 +69,16 @@ def build(config, regions=None):
     for readers that open the file directly, `A_NODES` only. `regions` is
     accepted for RUNBOOK compatibility and ignored -- the ladder is fixed
     and does not vary by region."""
-    node_arr = _fixed_nodes()
+    with progress.Stage("prior.column_grid") as st:
+        node_arr = _fixed_nodes()
 
-    out_path = config_module.product_path(config, "bms", "sesna", "column-grid", "survey")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with h5py.File(out_path, "w") as f:
-        f.attrs["GRANULE"] = "survey"
-        f.create_dataset("A_NODES", data=node_arr.astype(np.float64))
+        out_path = config_module.product_path(config, "bms", "sesna", "column-grid", "survey")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with h5py.File(out_path, "w") as f:
+            f.attrs["GRANULE"] = "survey"
+            f.create_dataset("A_NODES", data=node_arr.astype(np.float64))
 
+        st.done(out_path, n_nodes=int(node_arr.size), floor=float(node_arr[0]), cap=float(node_arr[-1]))
     print("column_grid: floor=%.6f cap=%.6f step=%g dex -> %d nodes -> %s"
           % (node_arr[0], node_arr[-1], DEX_STEP, node_arr.size, out_path),
           flush=True)

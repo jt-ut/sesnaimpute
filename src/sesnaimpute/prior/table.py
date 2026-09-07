@@ -31,6 +31,7 @@ import healpy as hp
 import numpy as np
 
 from sesnaimpute import config as config_module
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
@@ -488,6 +489,7 @@ def report(region, n_sources, wall_s, totals, area_deg2, checks):
 # ---------------------------------------------------------------------------
 
 def _build_one(config, region):
+    st = progress.Stage("prior.table", region)
     t0 = time.time()
     rs = access.region_slice(config, region)
     n_sources = rs["n_sources"]
@@ -525,11 +527,11 @@ def _build_one(config, region):
     totals, area_deg2 = _region_totals(config, region, n_sources, out)
     checks = _algebraic_check(region, out, adopted, star, cloud, level_factors)
     wall_s = time.time() - t0
+    st.done(out_path, n_sources=n_sources, area_deg2=area_deg2)
     for line in report(region, n_sources, wall_s, totals, area_deg2, checks):
         print(line, flush=True)
     print("prior.table: %s: wall split: build+write %.1fs, report-only checks %.1fs (of %.1fs total)"
           % (region, wall_build_s, wall_check_s, wall_s), flush=True)
-    print("prior.table: %s -> %s" % (region, out_path), flush=True)
     return out_path
 
 

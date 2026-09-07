@@ -62,6 +62,7 @@ from scipy.spatial import cKDTree
 from sesnaimpute import config as config_module
 from sesnaimpute import constants
 from sesnaimpute import definitions
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
@@ -196,7 +197,7 @@ def _read_trilegal_part(path):
     return df
 
 
-def read_region_trilegal(config, region):
+def read_region_trilegal(config, region, st=None):
     """The region's whole TRILEGAL population, every pointing's every part
     concatenated, each row's own `POINTING_INDEX` attached: `(df,
     area_deg2)`. The pointing grid, its file names, and each pointing's
@@ -221,6 +222,8 @@ def read_region_trilegal(config, region):
         df_p = pd.concat(parts, ignore_index=True)
         df_p["POINTING_INDEX"] = p_idx
         frames.append(df_p)
+        if st is not None:
+            st.tick(p_idx + 1, n_pointings, "pointings")
     df = pd.concat(frames, ignore_index=True)
     area_deg2 = n_pointings * float(pointings[0]["area_deg2"])
     return df, area_deg2
@@ -272,11 +275,11 @@ def passes_two_of_eight(flux, f_lim, min_bands=RETENTION_MIN_BANDS):
 # per-region build
 # ---------------------------------------------------------------------------
 
-def build_region(config, region, atmosphere):
+def build_region(config, region, atmosphere, st=None):
     """The region's matched, retained TRILEGAL table plus the raw group,
     as a dict of arrays ready for `write_region`.
     """
-    df, area_deg2 = read_region_trilegal(config, region)
+    df, area_deg2 = read_region_trilegal(config, region, st=st)
     n_raw = len(df)
 
     flux = intrinsic_fluxes_mjy(df)
@@ -379,12 +382,12 @@ def build(config, regions=None):
     register_path = f"{config.data_root}/sed_models/registers/sps_register.hdf5"
     atmosphere = load_atmosphere_grid(register_path)
     for region in region_names:
-        result = build_region(config, region, atmosphere)
-        path = config_module.product_path(config, "bms", "trilegal", "field-stars",
-                                            "region", region=region)
-        write_region(path, region, result)
-        print(f"field_stars: {region}: N_RAW={result['n_raw']} "
-              f"N_RETAINED={len(result['retained']['dist_pc'])} -> {path}")
+        with progress.Stage("prior.field_stars", region) as st:
+            result = build_region(config, region, atmosphere, st=st)
+            path = config_module.product_path(config, "bms", "trilegal", "field-stars",
+                                                "region", region=region)
+            write_region(path, region, result)
+            st.done(path, n_raw=result["n_raw"], n_retained=len(result["retained"]["dist_pc"]))
 
 
 if __name__ == "__main__":

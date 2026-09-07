@@ -105,6 +105,7 @@ from joblib import Parallel, delayed
 
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
@@ -457,22 +458,24 @@ def build(config, regions=None):
     """
     names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     for region in names:
-        result = build_region(config, region)
-        path = _write_product(config, region, result)
+        with progress.Stage("prior.young_stars", region) as st:
+            result = build_region(config, region)
+            path = _write_product(config, region, result)
 
-        hist_path = config_module.product_path(config, "bms", "anchors",
-                                                "histograms", "hpx512", region=region)
-        with h5py.File(hist_path, "r") as f:
-            n_ks_obs = np.asarray(f["N_KS_OBS"][:], dtype=np.float64).sum(axis=1)
+            hist_path = config_module.product_path(config, "bms", "anchors",
+                                                    "histograms", "hpx512", region=region)
+            with h5py.File(hist_path, "r") as f:
+                n_ks_obs = np.asarray(f["N_KS_OBS"][:], dtype=np.float64).sum(axis=1)
 
-        total_young = float(result["n_young_total"].sum())
-        total_source_mean = float(result["n_young_source_mean"].sum())
-        total_obs = float(n_ks_obs.sum())
-        ratio = total_young / total_obs if total_obs > 0 else float("nan")
-        area_over_source = (total_young / total_source_mean
-                             if total_source_mean > 0 else float("nan"))
-        share = np.where(n_ks_obs > 0, result["n_young_total"] / n_ks_obs, 0.0)
-        i_worst = int(np.argmax(share))
+            total_young = float(result["n_young_total"].sum())
+            total_source_mean = float(result["n_young_source_mean"].sum())
+            total_obs = float(n_ks_obs.sum())
+            ratio = total_young / total_obs if total_obs > 0 else float("nan")
+            area_over_source = (total_young / total_source_mean
+                                 if total_source_mean > 0 else float("nan"))
+            share = np.where(n_ks_obs > 0, result["n_young_total"] / n_ks_obs, 0.0)
+            i_worst = int(np.argmax(share))
+            st.done(path, n_young_total=total_young, ratio_to_2mass=ratio)
         print(
             "prior.young_stars: %s N_YOUNG_TOTAL=%.2f N_YOUNG_SOURCE_MEAN=%.2f "
             "(area/source-mean=%.3fx) 2MASS(Ks<14.3)=%.2f ratio=%.4f "

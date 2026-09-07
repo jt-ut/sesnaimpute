@@ -67,6 +67,7 @@ from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
 from sesnaimpute.prior import pahc_curve, selection, star_population
+from sesnaimpute import progress
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
@@ -457,10 +458,11 @@ def _row_bytes(n_x, n_b, n_pop_pahc=0):
             + 3 * n_pop_pahc * 8)
 
 
-def build_and_write_region(config, region):
+def build_and_write_region(config, region, st=None):
     """Computes and writes the region's exact per-source selection
     (module docstring), one batch of sources at a time so no batch's
-    working arrays exceed `BATCH_BUDGET_BYTES`."""
+    working arrays exceed `BATCH_BUDGET_BYTES`. `st`, when given, is
+    ticked once per batch of sources."""
     pop = region_population(config, region)
     classes = _class_populations(config, pop)
 
@@ -497,7 +499,9 @@ def build_and_write_region(config, region):
 
         fp = classes["star_pahc"]
         row_bytes = _row_bytes(n_x, n_b, fp.log10_q0.size)
-        for start, stop in batches_module.batches(n_source, row_bytes, budget_bytes=BATCH_BUDGET_BYTES):
+        batch_list = list(batches_module.batches(n_source, row_bytes, budget_bytes=BATCH_BUDGET_BYTES))
+        n_batches = len(batch_list)
+        for i_batch, (start, stop) in enumerate(batch_list, start=1):
             lim_b = np.ascontiguousarray(log10_lim[start:stop])
             a_b = a_col[start:stop]
             a_query_b = np.ascontiguousarray(x_ladder[None, :] * a_b[:, None])
@@ -532,6 +536,9 @@ def build_and_write_region(config, region):
             eps = selection.pass_curves(
                 lim_b, a_query_b, kappa_b, cp.log10_flux, cp.log10_b, cp.weight, cp.b_grid)
             ds_agb[start:stop] = eps.astype("f2")
+
+            if st is not None:
+                st.tick(i_batch, n_batches, "batches")
 
     return path, classes, n_source
 
@@ -593,7 +600,9 @@ def report(region, classes, n_source, path):
 # ---------------------------------------------------------------------------
 
 def _build_one(config, region):
-    path, classes, n_source = build_and_write_region(config, region)
+    with progress.Stage("prior.star_selection", region) as st:
+        path, classes, n_source = build_and_write_region(config, region, st)
+        st.done(path, n_source=n_source)
     for line in report(region, classes, n_source, path):
         print(line, flush=True)
     report_agb_photosphere_bound(config, region, classes)
