@@ -36,10 +36,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
-from sesnaimpute.prior import column_grid as column_grid_module
-from sesnaimpute.prior import counts_star_family as counts_star_family_module
 from sesnaimpute.prior import levels as levels_module
-from sesnaimpute.prior import star_shapes as star_shapes_module
 
 #: The fixed-seed row subset the re-read check (brief item 1) compares
 #: against every column's own source array -- small enough to check every
@@ -332,70 +329,6 @@ def _reread_check(region, out, name, f_lim_50_mjy, rs, adopted, star, cloud, lev
     return worst
 
 
-#: The AGB photospheric-ratio diagnostic (below) is report-only, so it is
-#: evaluated on a fixed-seed subsample rather than every source -- the
-#: same reasoning `prior.selection`'s own Monte Carlo subsample uses
-#: (IMPLEMENTATION.md section 4): measured at ~7 ms/source unsampled
-#: (bicubic shape evaluation per source, batched but still per-source
-#: work), which would run to hours at Cygnus X's 3.3M sources; capping
-#: the sample bounds the cost regardless of the region's own size (brief
-#: item 3's fix for the one part of this stage that scales with n_source).
-AGB_RATIO_SEED = 0
-AGB_RATIO_MAX_SOURCES = 10000
-
-
-def _agb_photospheric_ratio(config, region, adopted, star, n_sources):
-    """SPEC_PRIORS.md section 3's reported lower bound: on a fixed-seed
-    subsample of at most `AGB_RATIO_MAX_SOURCES` sources, the AGB count
-    recomputed with `prior.star_selection`'s `EPS_AGB_PHOTOSPHERE` (the
-    bare-photosphere selection) in place of the dusty `EPS_AGB`, as the
-    ratio to the dusty `N_AGB` this table actually carries over the SAME
-    subsample -- one printed number per region (brief item 2), never a
-    table column. Mirrors `prior.counts_star_family.family_counts`'s own
-    two-component-mixture quadrature exactly (the shape's stored tile
-    array at its two bracketing width nodes per component, the selection
-    read with the per-source, per-component kernel shift folded into ITS
-    query point instead of the density's, the two components combined by
-    the mixture weight `w`) -- with only the selection array swapped for
-    the photospheric one; not batched, since the subsample is already
-    capped."""
-    n_sample = min(AGB_RATIO_MAX_SOURCES, n_sources)
-    rows = np.sort(np.random.RandomState(AGB_RATIO_SEED).choice(n_sources, size=n_sample, replace=False))
-
-    shape = star_shapes_module.read(config, region, "agb")
-    sel_path = config_module.product_path(config, "bms", "star", "selection", "source", region=region)
-    with h5py.File(sel_path, "r") as f:
-        eps_photo = f["EPS_AGB_PHOTOSPHERE"][rows].astype(np.float64)
-        x_ladder = f["X_LADDER"][:].astype(np.float64)
-        b_grid = f["LOG10_B_GRID_AGB"][:].astype(np.float64)
-    wb = counts_star_family_module.selection_on_shape_grid(shape, x_ladder, b_grid)
-
-    a_col = adopted["A_COL_K"].astype(np.float64)[rows]
-    sigma_col = adopted["A_COL_SIG_K"].astype(np.float64)[rows]
-    map_class = np.asarray(adopted["A_COL_PROVENANCE"])[rows]
-    tile_id = star["TILE_ID"].astype(np.int64)[rows]
-    amp = counts_star_family_module.family_amplitude(config, region, "agb", {"tile_id": tile_id})
-
-    kern = shape.kern
-    w_mix, mu_mix, sigma_mix = kern.mixture(a_col, sigma_col, map_class)
-    log_shape_nodes = np.log(shape.shape_nodes)
-
-    z_photo = np.zeros(n_sample, dtype=np.float64)
-    for k in range(2):
-        i_lo, t_w = column_grid_module.bracket(np.log(sigma_mix[:, k]), log_shape_nodes)
-        i_hi = np.minimum(i_lo + 1, shape.shape_nodes.size - 1)
-        d_lo = shape.density_table[tile_id, i_lo]
-        d_hi = shape.density_table[tile_id, i_hi]
-        dens_k = (1.0 - t_w)[:, None, None] * d_lo + t_w[:, None, None] * d_hi
-        eps_grid_k = counts_star_family_module._shift_and_interp_eps(
-            eps_photo, x_ladder, wb, shape.x_centers, mu_mix[:, k])
-        weight_k = w_mix if k == 0 else (1.0 - w_mix)
-        z_photo += weight_k * (dens_k * eps_grid_k).sum(axis=(1, 2))
-
-    n_dusty_sample = float(np.sum(star["N_AGB"][rows]))
-    return float(np.sum(amp * z_photo)) / n_dusty_sample if n_dusty_sample > 0.0 else float("nan")
-
-
 def _assert_class_probabilities_identity(config, region, out, level_factors, n_sources):
     """The two identities SPEC_PRIORS.md section 0.2 states (the paragraph
     "The levels are normalised to the survey"), both recomputed directly
@@ -519,9 +452,6 @@ def _build_one(config, region):
     print("prior.table: %s: re-read check, %d fixed-seed rows, every column: worst abs diff=%.3g (bar 0)"
           % (region, rows.size, worst), flush=True)
 
-    agb_ratio = _agb_photospheric_ratio(config, region, adopted, star, n_sources)
-    print("prior.table: %s: AGB photospheric-selection lower bound: N_AGB(photosphere)/N_AGB(dusty) = %.4f"
-          % (region, agb_ratio), flush=True)
     wall_check_s = time.time() - t1
 
     totals, area_deg2 = _region_totals(config, region, n_sources, out)

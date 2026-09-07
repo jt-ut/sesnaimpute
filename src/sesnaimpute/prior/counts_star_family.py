@@ -917,8 +917,8 @@ def report_gal_check(config, region, cond, n_gal, fazio_model_params):
 def report_algebraic_checks(region, checks):
     lines = []
     for cls, (direct, approx, dev) in checks.items():
-        lines.append("counts_star_family: %s: algebraic check %s: direct=%.5f approx=%.5f "
-                     "dev=%.4f (bar 0.02, source 0)"
+        lines.append("counts_star_family: %s: N/amplitude vs Z (differ by the density's "
+                     "smoothing; not a bar) %s: direct=%.5f approx=%.5f dev=%.4f (source 0)"
                      % (region, cls, direct, approx, dev))
     return lines
 

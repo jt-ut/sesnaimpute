@@ -852,7 +852,10 @@ class _FixedKernel(object):
         a_col = np.asarray(a_col, dtype=np.float64)
         return np.zeros_like(a_col), np.full_like(a_col, self.sigma_val)
 
-    def mixture(self, a_col, sigma_col, map_class):
+    def mixture(self, a_col, sigma_col, map_class, zp_sigma_k=None):
+        # zp_sigma_k is accepted only so this stand-in's call matches
+        # the real Kernel.mixture's signature -- sigma is fixed at
+        # self.sigma_val regardless of what is passed here.
         a_col = np.asarray(a_col, dtype=np.float64)
         w = np.full(a_col.shape, 0.5)
         mu = np.zeros(a_col.shape + (2,))
