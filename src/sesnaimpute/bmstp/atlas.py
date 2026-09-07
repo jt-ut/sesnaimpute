@@ -3,10 +3,13 @@ sec. 1.2 P6, sec. 3 row 1.9).
 
 Per admitted nside-512 pixel, a fixed-seed Monte Carlo sample of each class's
 population, dimmed at the pixel's own column through the blended law
-(`population.selection.kappa_hybrid`), counted by the two-of-eight test at the
-pixel's own median 50% limits (`catalog.depth_grid`'s `F_LIM_50_MED_MJY`). The
-selection appears here and nowhere else in the atlas (sec. 1.2): the prior itself
-is unthinned.
+(`population.selection.kappa_hybrid`), weighted by each member's probability of
+being catalogued (sec. 8, sec. 6.2): per band the completeness `C_i(f)` at the
+pixel's own median 50% limit (`catalog.depth_grid`'s `F_LIM_50_MED_MJY`) and the
+region-band roll-off width, and `P(>=2 of 8)` from the eight bands' independent
+non-detection probabilities -- the same completeness model `fittp.likelihood`
+prices, never a step at the 50% limit. The selection appears here and nowhere
+else in the atlas (sec. 1.2): the prior itself is unthinned.
 
 This build writes STAR/AGB/PAHC (sec. 5.1-5.3, partitioning the field population:
 a star is a STAR or a PAHC member of the Monte Carlo, never both, weighted
@@ -40,6 +43,8 @@ from sesnaimpute.population.yso_mass import AGE_1MYR_GYR, _read_mist_1myr_track
 from sesnaimpute.bmstp import density as density_module
 from sesnaimpute.bmstp import sample_cloud
 from sesnaimpute.bmstp import sample_gal
+from sesnaimpute.fittp import likelihood as likelihood_module
+from sesnaimpute.fittp import sweep as sweep_module
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
@@ -181,24 +186,47 @@ def _draw_members(rng, weight, n_mc):
     return idx, total
 
 
-def _accepted_fraction(a_col, u, flux0, f_lim, config):
+def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config):
     """`(frac, mc_error)` per pixel: `flux0` (n_mc, 8) undimmed, `u` (n_mc,)
     the member's own placement fraction, `a_col` (n_pix,) the pixel's own
-    column, `f_lim` (n_pix, 8) the pixel's own median limits. `a = a_col *
-    u` (sec. 8's "its own extinction"), dimmed through the blended law
-    (`population.selection.kappa_hybrid`), counted where at least
-    `MIN_BANDS_CLEAR` of eight bands clear; `mc_error` is the binomial
-    standard error of the accepted fraction at `N_MC` draws."""
+    column, `f_lim` (n_pix, 8) the pixel's own median limits, `width_dex`
+    (8,) the region-band roll-off width (`catalog.depths`' `WIDTH_DEX`,
+    read once per region by `fittp.sweep._width_dex`). `a = a_col * u`
+    (sec. 8's "its own extinction"), dimmed through the blended law
+    (`population.selection.kappa_hybrid`). The two-of-eight step test is
+    replaced by the member's probability of being catalogued
+    (SPEC_BMSTP_DRAFT.md sec. 8, sec. 6.2): per band `p_i = C_i(f_i) =
+    1 - exp(ln[1-C_i])`, `ln[1-C_i]` from `fittp.likelihood`'s own
+    numerically stable erf kernel at `z_i = (log10 f_i - log10
+    F_lim,50,i) / (sqrt(2) w_{r,i})` -- the same completeness `fittp`
+    prices non-detection with -- zero where the member carries no flux in
+    that band (GAL's 2MASS/24um, H2S's J/H/24um); `P(>=2 of 8) =
+    1 - Prod_i(1-p_i) - Sum_i p_i Prod_{j!=i}(1-p_j)` (bands independent
+    given the fluxes). `mc_error` is the Monte Carlo standard error of the
+    mean catalogued probability at `N_MC` draws (the sample standard
+    deviation of `accepted_prob` over members, since each draw is now a
+    probability rather than a 0/1 outcome, unlike the retired step test's
+    Bernoulli `frac*(1-frac)` form)."""
+    assert MIN_BANDS_CLEAR == 2, "the closed form below is `P(>=2 of 8)` only"
     n_mc = u.size
     a = a_col[:, None] * u[None, :]  # (n_pix, n_mc)
     w_ramp = selection_module.law_dense_weight(a)  # (n_pix, n_mc)
     kappa = selection_module.kappa_hybrid(config, w_ramp)  # (n_pix, n_mc, 8)
     dimming = 0.4 * a[:, :, None] * kappa  # (n_pix, n_mc, 8)
     flux = flux0[None, :, :] * 10.0 ** (-dimming)  # (n_pix, n_mc, 8)
-    n_clear = np.sum(flux >= f_lim[:, None, :], axis=2)  # (n_pix, n_mc)
-    accepted = (n_clear >= MIN_BANDS_CLEAR).astype(np.float64)
-    frac = accepted.mean(axis=1)
-    mc_error = np.sqrt(np.clip(frac * (1.0 - frac), 0.0, None) / n_mc)
+    has_flux = flux0[None, :, :] > 0.0  # (1, n_mc, 8), broadcasts
+    log10_f = np.log10(np.where(has_flux, flux, 1.0))
+    z = ((log10_f - np.log10(f_lim)[:, None, :])
+         / (likelihood_module._SQRT2 * width_dex[None, None, :]))
+    p = np.where(has_flux, 1.0 - np.exp(likelihood_module._ln_one_minus_c(z)), 0.0)
+    one_minus_p = 1.0 - p  # (n_pix, n_mc, 8)
+    prod_all = np.prod(one_minus_p, axis=2)
+    sum_term = np.zeros_like(prod_all)
+    for i in range(N_BANDS):
+        sum_term += p[:, :, i] * np.prod(np.delete(one_minus_p, i, axis=2), axis=2)
+    accepted_prob = 1.0 - prod_all - sum_term
+    frac = accepted_prob.mean(axis=1)
+    mc_error = accepted_prob.std(axis=1) / np.sqrt(n_mc)
     return frac, mc_error
 
 
@@ -215,7 +243,7 @@ def _pahc_weight(limit8_grid, p_pahc, x):
     return p_pahc[:, lo] + frac * (p_pahc[:, hi] - p_pahc[:, lo])
 
 
-def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_in_tile):
+def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_in_tile, width_dex):
     """One tile's `(frac_star, frac_agb, frac_pahc, mc_star, mc_agb,
     mc_pahc, density_star, density_agb, density_pahc)`, over its own
     admitted pixels, from the star-family population's own retained
@@ -260,7 +288,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
             mc_error = np.zeros(pix_in_tile.size)
         else:
             frac, mc_error = _accepted_fraction(
-                a_col_in_tile, u[idx], flux0_all[idx], f_lim_in_tile, config)
+                a_col_in_tile, u[idx], flux0_all[idx], f_lim_in_tile, width_dex, config)
         out[cls] = (frac, mc_error, density)
     return out
 
@@ -396,7 +424,7 @@ def _yso_flux0(mass, mass_grid, abs_mag_grid, d_r_pc):
 
 def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_in_sl,
                           loaded_profile, mass_grid, abs_mag_grid, d_r_pc,
-                          logsig_mean, logsig_std, giannini_ratios, seed):
+                          logsig_mean, logsig_std, giannini_ratios, width_dex, seed):
     """One sightline's YSO and H2S Monte Carlo draws, shared by every
     admitted pixel it parents: `(frac_yso, mc_yso, density_yso, frac_h2s,
     mc_h2s)`. YSO (sec. 5.5): masses from the Chabrier IMF through the
@@ -417,7 +445,7 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_i
     x_nodes, _log10b_nodes, w_nodes = sample_cloud.sample_yso(loaded_profile, sl_row)
     p_nodes = w_nodes / w_nodes.sum()
     u_yso = x_nodes[rng.choice(x_nodes.size, size=N_MC, replace=True, p=p_nodes)]
-    frac_yso, mc_yso = _accepted_fraction(a_col_in_sl, u_yso, flux0_yso, f_lim_in_sl, config)
+    frac_yso, mc_yso = _accepted_fraction(a_col_in_sl, u_yso, flux0_yso, f_lim_in_sl, width_dex, config)
     density_yso = yso_module.law_count(config, region, a_col_in_sl, arm_in_sl)
 
     log10_sigma = rng.normal(logsig_mean, logsig_std, size=N_MC)
@@ -429,7 +457,7 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_i
         ratio_draw = table[rng.randint(0, table.size, size=N_MC)]
         flux0_h2s[:, BAND_KEYS.index(band)] = 10.0 ** (log10_f_ks + ratio_draw)
     u_h2s = x_nodes[rng.choice(x_nodes.size, size=N_MC, replace=True, p=p_nodes)]
-    frac_h2s, mc_h2s = _accepted_fraction(a_col_in_sl, u_h2s, flux0_h2s, f_lim_in_sl, config)
+    frac_h2s, mc_h2s = _accepted_fraction(a_col_in_sl, u_h2s, flux0_h2s, f_lim_in_sl, width_dex, config)
 
     return frac_yso, mc_yso, density_yso, frac_h2s, mc_h2s
 
@@ -539,6 +567,9 @@ def build_region(config, region):
         coverage = _coverage(config, region, pix)
         a_col, arm = _pixel_column(config, pix)
         tile_of_pix, n_tile_filled = _pixel_tile(config, region, pix)
+        # the region-band completeness roll-off width the detection
+        # probability reads (sec. 6.2), the same read `fittp.sweep` uses.
+        width_dex = sweep_module._width_dex(config, region)
 
         n_cat = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
         mc_err = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
@@ -559,7 +590,7 @@ def build_region(config, region):
 
         def _one(tile_id):
             m = usable & (tile_of_pix == tile_id)
-            return tile_id, m, _build_one_tile(config, region, tile_id, pix[m], a_col[m], f_lim[m])
+            return tile_id, m, _build_one_tile(config, region, tile_id, pix[m], a_col[m], f_lim[m], width_dex)
 
         results = Parallel(n_jobs=n_jobs)(delayed(_one)(t) for t in tiles_here)
         for i, (tile_id, m, out) in enumerate(results):
@@ -574,7 +605,7 @@ def build_region(config, region):
         # pixel's own column and limits with the shared `_accepted_fraction`.
         gal_rng = np.random.RandomState(MC_SEED)
         gal_flux, gal_u, density_gal = _gal_members(config, gal_rng, N_MC)
-        frac_gal, mc_gal = _accepted_fraction(a_col, gal_u, gal_flux, f_lim, config)
+        frac_gal, mc_gal = _accepted_fraction(a_col, gal_u, gal_flux, f_lim, width_dex, config)
         n_cat["GAL"] = density_gal * frac_gal
         mc_err["GAL"] = mc_gal
 
@@ -606,7 +637,8 @@ def build_region(config, region):
             f_y, e_y, d_y, f_h, e_h = _build_one_sightline(
                 config, region, sl_row, a_col[m], arm[m], f_lim[m],
                 loaded_profile, mass_grid, abs_mag_grid, d_r_pc,
-                logsig_mean, logsig_std, giannini_ratios, MC_SEED + 10_000 + sl_row)
+                logsig_mean, logsig_std, giannini_ratios, width_dex,
+                MC_SEED + 10_000 + sl_row)
             return m, f_y, e_y, d_y, f_h, e_h
 
         frac_h2s_pix = np.full(n_pix, np.nan, dtype=np.float64)
