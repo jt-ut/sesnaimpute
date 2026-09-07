@@ -68,6 +68,7 @@ from joblib import Parallel, delayed
 from scipy.optimize import minimize, minimize_scalar
 
 from sesnaimpute import config as config_module
+from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.granules import access as granule_access
@@ -454,7 +455,18 @@ def build(config, regions=None):
     joblib; every computation inside a region is vectorised over sources."""
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
-    Parallel(n_jobs=config.n_jobs)(delayed(_build_one_region)(config, region) for region in regions)
+    with progress_module.Stage("sky.derived.gaia_match") as st:
+        n_regions = len(regions)
+        n_done = [0]
+
+        def _one(region):
+            r = _build_one_region(config, region)
+            n_done[0] += 1
+            st.tick(n_done[0], n_regions, "regions")
+            return r
+
+        Parallel(n_jobs=config.n_jobs)(delayed(_one)(region) for region in regions)
+        st.done(None, regions=n_regions)
 
 
 if __name__ == "__main__":

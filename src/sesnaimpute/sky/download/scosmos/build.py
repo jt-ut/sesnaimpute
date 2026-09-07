@@ -13,6 +13,7 @@ Table name discovered against IRSA's TAP_SCHEMA: `scosmos_irac_0407`.
 import os
 
 from sesnaimpute import build as build_module
+from sesnaimpute import progress as progress_module
 from sesnaimpute.sky.download import _tap
 
 TABLE = "scosmos_irac_0407"
@@ -38,8 +39,11 @@ def build(config, regions=None):
     dest_dir = f"{config.data_root}/sky/download/scosmos"
     os.makedirs(dest_dir, exist_ok=True)
     dest_path = f"{dest_dir}/scosmos_irac.csv"
-    n_rows, n_bytes = _tap.query_csv(TABLE, COLUMNS, "cntr", dest_path)
-    print(f"scosmos build: {TABLE} -> {dest_path}: {n_rows} rows, {n_bytes} bytes")
+    with progress_module.Stage("sky.download.scosmos") as st:
+        st.tick(0, 1, "queries")
+        n_rows, n_bytes = _tap.query_csv(TABLE, COLUMNS, "cntr", dest_path)
+        print(f"scosmos build: {TABLE} -> {dest_path}: {n_rows} rows, {n_bytes} bytes")
+        st.done(dest_path, rows=n_rows, bytes=n_bytes)
 
 
 if __name__ == "__main__":

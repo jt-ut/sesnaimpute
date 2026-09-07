@@ -53,6 +53,7 @@ from joblib import Parallel, delayed
 from scipy.ndimage import gaussian_filter
 
 from sesnaimpute import build as build_module
+from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.config import product_path
 from sesnaimpute.sky.derived import herschel_column as sky_herschel_column
@@ -439,10 +440,12 @@ def build(config, regions=None):
     column. `regions` is accepted for interface uniformity and ignored:
     both products are survey-wide (SPEC_PRIORS.md 1.1's Planck arm covers
     the whole footprint, not just the Herschel-overlapping regions)."""
-    cal = build_calibration(config)
-    _write_calibration(config, cal)
-    build_column(config, cal["a_tau"], cal["sigma_within_s0"], cal["sigma_within_f"],
-                 cal["sigma_region_frac"], cal["n_beams_per_pixel"])
+    with progress_module.Stage("sky.derived.planck_column") as st:
+        cal = build_calibration(config)
+        _write_calibration(config, cal)
+        path, n_pix = build_column(config, cal["a_tau"], cal["sigma_within_s0"], cal["sigma_within_f"],
+                                    cal["sigma_region_frac"], cal["n_beams_per_pixel"])
+        st.done(path, pixels=n_pix, a_tau=float(cal["a_tau"]))
 
 
 if __name__ == "__main__":

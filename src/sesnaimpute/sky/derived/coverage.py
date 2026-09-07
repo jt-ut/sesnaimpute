@@ -23,6 +23,7 @@ from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
 from joblib import Parallel, delayed
 
+from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.config import product_path
@@ -219,7 +220,20 @@ def build(config, regions=None):
             "these are SESNA's own mosaics and are expected already staged in the "
             "data root; nothing acquires them" % masks_path)
     names = regions or [r.name for r in regions_module.REGIONS]
-    Parallel(n_jobs=config.n_jobs)(delayed(_build_one_region)(config, name, masks_path) for name in names)
+    with progress_module.Stage("sky.derived.coverage") as st:
+        n_regions = len(names)
+        n_done = [0]
+
+        def _one(name):
+            r = _build_one_region(config, name, masks_path)
+            n_done[0] += 1
+            st.tick(n_done[0], n_regions, "regions")
+            return r
+
+        rows = Parallel(n_jobs=config.n_jobs)(delayed(_one)(name) for name in names)
+        st.done(None, regions=n_regions,
+                sightline_pixels=sum(r["n_sightline"] for r in rows),
+                hpx512_pixels=sum(r["n_hpx512"] for r in rows))
 
 
 if __name__ == "__main__":

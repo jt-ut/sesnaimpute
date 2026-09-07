@@ -22,6 +22,7 @@ import numpy as np
 from joblib import Parallel, delayed
 
 from sesnaimpute import config as config_module
+from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 
@@ -155,13 +156,25 @@ def build(config, regions=None):
         regions = [r.name for r in regions_module.REGIONS]
     fits_path = _planck_map_path(config)
     cal = _load_planck_calibration(config)
-    # Threads, not processes: `_MAP_CACHE` is process-local, so a process
-    # pool would hold one 1.6 GB Planck map per worker (config.n_jobs
-    # copies at once); every per-region computation here is vectorised
-    # numpy/healpy array arithmetic, which releases the GIL, so threads
-    # cost nothing and keep the map to the one cached copy (CODING_RULES.md 10a).
-    Parallel(n_jobs=config.n_jobs, prefer="threads")(
-        delayed(_build_one_region)(config, region, fits_path, cal) for region in regions)
+    with progress_module.Stage("sky.derived.planck_source_column") as st:
+        n_regions = len(regions)
+        n_done = [0]
+
+        def _one(region):
+            r = _build_one_region(config, region, fits_path, cal)
+            n_done[0] += 1
+            st.tick(n_done[0], n_regions, "regions")
+            return r
+
+        # Threads, not processes: `_MAP_CACHE` is process-local, so a process
+        # pool would hold one 1.6 GB Planck map per worker (config.n_jobs
+        # copies at once); every per-region computation here is vectorised
+        # numpy/healpy array arithmetic, which releases the GIL, so threads
+        # cost nothing and keep the map to the one cached copy (CODING_RULES.md 10a).
+        results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
+            delayed(_one)(region) for region in regions)
+        st.done(None, regions=n_regions, sources=sum(r[1] for r in results),
+                median_a_k=float(np.median([r[2] for r in results])))
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ Feeds SPEC_PRIORS.md section 2.1 (STAR: cluster exclusion mask, ratio and
 catalogue test against the tidal radius `rt`).
 """
 
+from sesnaimpute import progress as progress_module
 from sesnaimpute.build import run
 from sesnaimpute.sky.download._fetch import fetch
 
@@ -23,8 +24,11 @@ def build(config, regions=None):
     wide product.
     """
     dest_dir = f"{config.data_root}/sky/download/hunt_reffert2023"
-    for name in _FILES:
-        fetch(f"{_BASE_URL}/{name}", f"{dest_dir}/{name}")
+    with progress_module.Stage("sky.download.hunt_reffert2023") as st:
+        for i, name in enumerate(_FILES):
+            fetch(f"{_BASE_URL}/{name}", f"{dest_dir}/{name}")
+            st.tick(i + 1, len(_FILES), "files")
+        st.done(dest_dir, files=len(_FILES))
 
 
 if __name__ == "__main__":
