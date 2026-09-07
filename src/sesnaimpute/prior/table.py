@@ -241,8 +241,12 @@ def _recompute_z_columns(config, region, out_path, n_sources):
         # not this EPS gather, which is small survey-wide -- module note
         # on `prepare`).
         prior.prepare(all_rows)
+        # one progress line per source chunk (owner report, 2026-09-06:
+        # this step ran 285 s on NGC 7129 with no progress line at all).
+        st = progress.Stage("prior.table.z.%s" % cls, region)
         z_by_class[cls] = callable_module._z_by_quadrature(
-            prior, cls, all_rows).astype(np.float32)
+            prior, cls, all_rows, stage=st).astype(np.float32)
+        st.done(n_sources=n_sources)
     with h5py.File(out_path, "r+") as f:
         for cls in callable_module.CLASSES:
             f["Z_%s" % cls.upper()][...] = z_by_class[cls]
