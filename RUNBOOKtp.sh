@@ -113,6 +113,7 @@ PY sesnaimpute.population.star_population
 
 # --- bmstp (the prior: shape grids per grain, the per-source density table, template weights, the atlas; writes bmstp/) ---
 # Lines are added here as each stage lands (IMPLEMENTATION_BMSTP sec 3).
+PY sesnaimpute.bmstp.shapes   # the star-family and galaxy shape grids, P2 and P4 (SPEC_BMSTP sec 4.1, 5.1-5.4)
 
 # --- fittp (the thinned-Poisson fitter, the classification, the cascade, the posterior atlas; writes fittp/) ---
 # Lines are added here as each stage lands (IMPLEMENTATION_BMSTP sec 4). The [fittp] knobs live in root.cfg.
