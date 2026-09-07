@@ -156,6 +156,7 @@ PY sesnaimpute.fittp.classify   # P(C|D) at [fit] beta, subclasses, MAP, imputed
 PY sesnaimpute.fittp.cascade   # re-run: fills the cascade's imputed half now that classify has written (SPEC_BMSTP sec 7.3)
 PY sesnaimpute.fittp.atlas   # the posterior atlas, P11: per-pixel mean P(C|D) and the P(YSO)>0.5 count (SPEC_BMSTP sec 8)
 PY sesnaimpute.fittp.check   # the spec sec 9 checks read from P1-P11, report only (IMPLEMENTATION_BMSTP sec 7)
+PY sesnaimpute.atlas.render   # the sky atlas figures from P6 and, where it exists, P11 -- renders both when both exist (SPEC_BMSTP sec 8)
 
 # A --from that never matched any PY line above would otherwise leave
 # every stage silently skipped and the script exiting 0 having done
