@@ -15,6 +15,7 @@ import os
 import h5py
 import numpy as np
 from joblib import Parallel, delayed
+from scipy.ndimage import gaussian_filter1d
 
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
@@ -120,20 +121,26 @@ def _build_one_sightline(loaded, row, sigma_b_min):
 
 def _yso_x_marginal_check(loaded, row, x_marginal):
     """On one sightline, the built `X_MARGINAL` (already blurred by one
-    cell along `log10 x`, `grid.bin`'s own minimum width) against the
-    profile's own `p(u) du` rebinned onto `LOG10_X_EDGES` (sec. 5.5's
-    acceptance): the cumulative mass of `p(u) du` on the profile's native
-    `log10 u` edges, linearly interpolated at the common grid's edges
-    (the "rebin"), compared cumulative-sum to cumulative-sum against
-    `X_MARGINAL`'s own cumulative sum -- a comparison up to the one-cell
-    smoothing, so cumulative sums, not cell values, per the brief.
-    Returns the max absolute difference of the two cumulative arrays."""
+    cell along `log10 x`, `mode="constant"`, `grid.bin`'s own minimum
+    width) against the profile's own `p(u) du` rebinned onto
+    `LOG10_X_EDGES` (sec. 5.5's acceptance): the cell masses redistributed
+    onto the common grid's bins by linear interpolation of the cumulative
+    mass on the profile's native `log10 u` edges (the "rebin"), then
+    smoothed by the SAME one-cell, zero-padded Gaussian `grid.bin` applies
+    -- so the reference carries the same edge treatment the built grid
+    does, not a bare unsmoothed rebin. Compared cumulative-sum to
+    cumulative-sum against `X_MARGINAL`'s own cumulative sum, per the
+    brief. Returns the max absolute difference of the two cumulative
+    arrays."""
     u_edges = loaded["u_edges"][row]
     p_u = loaded["p_u"][row]
     mass = p_u * np.diff(u_edges)
     log10u_edges = np.log10(np.maximum(u_edges, sample_cloud._X_FLOOR))
-    ref_cum = np.interp(grid.LOG10_X_EDGES, log10u_edges,
-                         np.concatenate([[0.0], np.cumsum(mass)]))
+    ref_cum_at_edges = np.interp(grid.LOG10_X_EDGES, log10u_edges,
+                                  np.concatenate([[0.0], np.cumsum(mass)]))
+    ref_bins = np.diff(ref_cum_at_edges)
+    ref_bins = gaussian_filter1d(ref_bins, sigma=1.0, mode="constant")
+    ref_cum = np.concatenate([[0.0], np.cumsum(ref_bins)])
     grid_cum = np.concatenate([[0.0], np.cumsum(x_marginal)])
     return float(np.max(np.abs(ref_cum - grid_cum)))
 
