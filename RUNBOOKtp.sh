@@ -45,6 +45,7 @@ PY() { local module="$1"; shift
 # sky/download/<source>/ -- external bytes, verbatim. Download never computes.
 PY sesnaimpute.sky.download.hunt_reffert2023.build
 PY sesnaimpute.sky.download.baraffe2015_bhac15.build
+PY sesnaimpute.sky.download.mist2016.build   # MIST v1.2 1 Myr isochrone, the mass-luminosity relation above BHAC15's 1.4 Msun top (SPEC_BMSTP sec 3.5)
 PY sesnaimpute.sky.download.riebel2012.build
 PY sesnaimpute.sky.download.swire.build
 PY sesnaimpute.sky.download.scosmos.build
