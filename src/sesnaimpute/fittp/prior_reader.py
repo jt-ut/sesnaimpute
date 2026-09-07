@@ -63,7 +63,7 @@ class Prior(object):
     calls over the class's batches (section 4)."""
 
     def __init__(self, a_col, a_col_sig, arm, zp_sig, grain, density, p1_columns,
-                 grid_all, x_edges, b_edges, model_name, c_theta, factors, kernel, has_weights):
+                 grid_all, x_edges, b_edges, model_name, c_theta, factors, kernel):
         self.a_col = a_col
         self.a_col_sig = a_col_sig
         self.arm = arm
@@ -81,16 +81,14 @@ class Prior(object):
         self.c_theta = c_theta
         self.factors = factors  # list of dict(W, C_F, D_F, normalised)
         self.kernel = kernel
-        self.has_weights = has_weights
 
 
 def load(config, region, cls):
     """`Prior` for `region`'s class `cls` (SPEC_BMSTP_DRAFT.md section 4.1):
     P1's rows, the class's shape grid(s), its weight table `C_THETA` and
-    factors (P5), the column kernel. If the class's P5 file is not yet
-    built the read proceeds with `C_THETA = 0` and no factors (uniform
-    weights), disclosed by `has_weights=False` -- the read's code path is
-    unchanged either way.
+    factors (P5), the column kernel. Rule 5b: a class's P5 file must
+    already exist -- a missing one fails with one sentence naming the
+    RUNBOOK line that builds it, never a silent uniform-weight read.
     """
     p1_path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
     with h5py.File(p1_path, "r") as f:
@@ -115,16 +113,21 @@ def load(config, region, cls):
         path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
         with h5py.File(path, "r") as f:
             x_edges = f["LOG10_X_EDGES"][:]
-            b_edges = f["LOG10_B_EDGES"][:]
             if cls == "YSO":
+                b_edges = f["LOG10_B_EDGES"][:]
                 grid_all = f["GRID_YSO"][:]
             else:
                 # H2S's grid, section 4.1 P3: the sightline's log10 x
                 # marginal of GRID_YSO times the region's knot-brightness
-                # Gaussian on the B axis, formed here (not stored).
+                # Gaussian, formed here (not stored) on H2S's OWN
+                # brightness axis (`LOG10_B_ORIGIN_H2S`, section 2's H2S
+                # row) -- never the file's `LOG10_B_EDGES`, which is
+                # YSO's template-unit axis.
                 x_marg = f["X_MARGINAL"][:].astype(np.float64)
                 logsig_mean = float(f.attrs["LOGSIG_MEAN"])
                 logsig_std = float(f.attrs["LOGSIG_STD"])
+                origin_h2s = float(f.attrs["LOG10_B_ORIGIN_H2S"])
+                b_edges = grid.log10_b_edges(origin_h2s)
                 b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
                 z = (b_centers - logsig_mean) / logsig_std
                 b_pdf = np.exp(-0.5 * z * z)
@@ -142,27 +145,27 @@ def load(config, region, cls):
     lib, granule = _LIB[cls]
     weight_path = config_module.product_path(
         config, "bmstp", "weights", lib, granule, region=(region if granule == "region" else None))
-    has_weights = os.path.exists(weight_path)
-    if has_weights:
-        with h5py.File(weight_path, "r") as f:
-            model_name = f["MODEL_NAME"][:]
-            c_theta = f["C_THETA"][:]
-            b_centers_w = f["LOG10_B_CENTERS"][:]
-            n_factor = sum(1 for k in f.keys() if k.startswith("factor_"))
-            factors = []
-            for k in range(n_factor):
-                grp = f["factor_%d" % k]
-                factors.append(dict(W=grp["W"][:].astype(np.float64), C_F=grp["C_F"][:],
-                                     D_F=grp.attrs.get("D_F", ""),
-                                     b_centers=b_centers_w))
-    else:
-        model_name = np.array([], dtype="S1")
-        c_theta = np.zeros(0)
+    if not os.path.exists(weight_path):
+        # rule 5b: the only existence check, one sentence naming the
+        # RUNBOOK line that makes it -- no silent uniform-weight fallback.
+        raise RuntimeError(
+            "fittp.prior_reader.load [%s/%s]: missing %s -- run RUNBOOKtp.sh's "
+            "'PY sesnaimpute.bmstp.template_weights' line first" % (region, cls, weight_path))
+    with h5py.File(weight_path, "r") as f:
+        model_name = f["MODEL_NAME"][:]
+        c_theta = f["C_THETA"][:]
+        b_centers_w = f["LOG10_B_CENTERS"][:]
+        n_factor = sum(1 for k in f.keys() if k.startswith("factor_"))
         factors = []
+        for k in range(n_factor):
+            grp = f["factor_%d" % k]
+            factors.append(dict(W=grp["W"][:].astype(np.float64), C_F=grp["C_F"][:],
+                                 D_F=grp.attrs.get("D_F", ""),
+                                 b_centers=b_centers_w))
 
     kernel = kernel_module.Kernel.read(config)
     return Prior(a_col, a_col_sig, arm, zp_sig, grain, density, p1_columns,
-                 grid_all, x_edges, b_edges, model_name, c_theta, factors, kernel, has_weights)
+                 grid_all, x_edges, b_edges, model_name, c_theta, factors, kernel)
 
 
 def prepare(reader, rows):
@@ -211,10 +214,11 @@ def _erf_np(x):
 
 def _factor_ln(reader, rows, a_hat, log10_b_hat, slope, sigma_a, model_index):
     """`Sum_f ln PI_f[theta](log10 B_hat_theta(a*) + C_F_f[theta] +
-    D_F_f[s])` (section 4.2), zero where the class's P5 product is not
-    yet built (`reader.has_weights` False, disclosed by the caller)."""
+    D_F_f[s])` (section 4.2); `reader.factors` is empty only for a class
+    with no factor tables of its own (never for a missing P5 file --
+    `load` fails on that, rule 5b)."""
     n, m = a_hat.shape
-    if not reader.has_weights or not reader.factors:
+    if not reader.factors:
         return np.zeros((n, m), dtype=np.float64)
     a_star = _truncated_mean(a_hat, sigma_a)
     b_star = log10_b_hat + slope[:, None] * (a_star - a_hat)
@@ -255,9 +259,13 @@ def _build_a_star_tables(a_col, x_edges, sigma_a, a_hat):
     template whose window is still wide because it sits near the grid's
     low-extinction end, where cells are far narrower than `sigma_a`),
     plus each `a'` bin's own cell window `i_lo, i_hi` from the grid's
-    geometric spacing. Returns padded float32 `(n, max_ap, n_x)` M and a*
-    tables, int32 `(n, max_ap)` window tables, float64 `(n,)` grid origins
-    and int32 `(n,)` real lengths.
+    geometric spacing. Returns flat float32 `(sum(n_ap), n_x)` M and a*
+    tables holding every source's rows back to back (no padding to the
+    block's widest range, finding 3: one narrow-`sigma_a` source no
+    longer sets the allocation for the whole block), flat int32
+    `(sum(n_ap),)` window tables, an int64 `(n,)` per-source offset into
+    those flat tables, float64 `(n,)` grid origins and int32 `(n,)` real
+    lengths.
     """
     from scipy.special import erf
     n = sigma_a.size
@@ -284,14 +292,18 @@ def _build_a_star_tables(a_col, x_edges, sigma_a, a_hat):
         n_ap[s] = int(np.ceil((amax - amin) / st)) + 1
         a_min[s] = amin
         edges_per_source[s] = a_col[s] * 10.0 ** x_edges
-    max_ap = int(n_ap.max()) if n else 0
-    m_tab = np.zeros((n, max_ap, n_x), dtype=np.float32)
-    a_tab = np.zeros((n, max_ap, n_x), dtype=np.float32)
-    ilo_tab = np.zeros((n, max_ap), dtype=np.int32)
-    ihi_tab = np.zeros((n, max_ap), dtype=np.int32)
+    offset = np.zeros(n, dtype=np.int64)
+    if n:
+        offset[1:] = np.cumsum(n_ap)[:-1]
+    total_ap = int(n_ap.sum())
+    m_tab = np.zeros((total_ap, n_x), dtype=np.float32)
+    a_tab = np.zeros((total_ap, n_x), dtype=np.float32)
+    ilo_tab = np.zeros(total_ap, dtype=np.int32)
+    ihi_tab = np.zeros(total_ap, dtype=np.int32)
     for s in range(n):
         if n_ap[s] == 0:
             continue
+        off = offset[s]
         ap = a_min[s] + step[s] * np.arange(n_ap[s])
         edges = edges_per_source[s]
         z = (edges[None, :] - ap[:, None]) / sigma_a[s]
@@ -306,8 +318,8 @@ def _build_a_star_tables(a_col, x_edges, sigma_a, a_hat):
         # far cells (mass_safe's 1e-300 floor dividing a near-zero
         # numerator swing) cannot overflow it.
         a_star = np.clip(a_star, -1e30, 1e30)
-        m_tab[s, :n_ap[s], :] = mass.astype(np.float32)
-        a_tab[s, :n_ap[s], :] = a_star.astype(np.float32)
+        m_tab[off:off + n_ap[s], :] = mass.astype(np.float32)
+        a_tab[off:off + n_ap[s], :] = a_star.astype(np.float32)
         log10_ak = math.log10(a_col[s])
         lo_a = ap - 5.0 * sigma_a[s]
         hi_a = ap + 5.0 * sigma_a[s]
@@ -315,9 +327,9 @@ def _build_a_star_tables(a_col, x_edges, sigma_a, a_hat):
         ihi = np.clip(np.floor((lx_hi - x0) / dlx), 0, n_x - 1).astype(np.int64)
         lx_lo = np.log10(np.maximum(lo_a, 1e-300)) - log10_ak
         ilo = np.where(lo_a > 0.0, np.clip(np.floor((lx_lo - x0) / dlx), 0, n_x - 1), 0.0).astype(np.int64)
-        ilo_tab[s, :n_ap[s]] = ilo.astype(np.int32)
-        ihi_tab[s, :n_ap[s]] = ihi.astype(np.int32)
-    return m_tab, a_tab, ilo_tab, ihi_tab, a_min, step, n_ap.astype(np.int32)
+        ilo_tab[off:off + n_ap[s]] = ilo.astype(np.int32)
+        ihi_tab[off:off + n_ap[s]] = ihi.astype(np.int32)
+    return m_tab, a_tab, ilo_tab, ihi_tab, a_min, step, n_ap.astype(np.int32), offset
 
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy")
@@ -361,7 +373,7 @@ def _ln_half_erfc(z):
 @numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
 def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               b_origin, dlb, dlx, a_edges_buf,
-              m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab):
+              m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab):
     """The cell sum of SPEC_BMSTP_DRAFT.md section 4.2, per source and
     template: the cell window `[i_lo, i_hi]` holding `a_hat +/- 5 sigma_a`
     found in O(1) from the grid's own geometric spacing (no scan of the
@@ -379,7 +391,9 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     -- no erf, no exp, no per-template log10 for that window's mass, only
     the one log10 pair that still decides which path a given template's
     window takes (measured negligible next to the erf/exp it replaces,
-    W6d report). The dot with `M` runs over cells
+    W6d report). `m_tab`/`a_tab`/`ilo_tab`/`ihi_tab` are flat, one
+    source's rows at `offset_tab[s] : offset_tab[s] + n_ap_tab[s]`, no
+    padding to the block's widest range (finding 3). The dot with `M` runs over cells
     above 1e-6. `A_COL_K` and `ln 10` in the Jacobian, common to every
     template at a source, are dropped. No `(n_source x n_model x cells)`
     intermediate. `a_edges_buf` is `(n, n_x+1)` scratch, one row per
@@ -407,6 +421,7 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
         n_ap = n_ap_tab[s]
         a_min = a_min_tab[s]
         a_step = step_tab[s]
+        off = offset_tab[s]
         for th in numba.prange(m):
             ah = a_hat[s, th]
             lo_a = ah - 5.0 * sig
@@ -435,12 +450,12 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     frac_k = 1.0
                 else:
                     frac_k = kpos - k0
-                t_lo = ilo_tab[s, k0]
-                t_hi = ihi_tab[s, k0]
+                t_lo = ilo_tab[off + k0]
+                t_hi = ihi_tab[off + k0]
                 for i in range(t_lo, t_hi + 1):
-                    mi = m_tab[s, k0, i] * (1.0 - frac_k) + m_tab[s, k0 + 1, i] * frac_k
+                    mi = m_tab[off + k0, i] * (1.0 - frac_k) + m_tab[off + k0 + 1, i] * frac_k
                     if mi >= 1e-6:
-                        a_star = a_tab[s, k0, i] * (1.0 - frac_k) + a_tab[s, k0 + 1, i] * frac_k
+                        a_star = a_tab[off + k0, i] * (1.0 - frac_k) + a_tab[off + k0 + 1, i] * frac_k
                         bval = lbh + sl * (a_star - ah) + ct
                         bpos = (bval - b_origin) / dlb - 0.5
                         j0 = int(math.floor(bpos))
@@ -528,13 +543,13 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index):
     a_edges_buf = np.empty((rows.size, n_x + 1), dtype=np.float64)
     sigma_a = np.asarray(sigma_a, dtype=np.float64)
     a_hat64 = np.asarray(a_hat, dtype=np.float64)
-    m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab = _build_a_star_tables(
+    m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab = _build_a_star_tables(
         a_col, reader.x_edges, sigma_a, a_hat64)
     core = _cell_sum(a_col, reader.x_edges, sigma_a,
                       a_hat64, np.asarray(log10_b_hat, dtype=np.float64),
                       np.asarray(slope, dtype=np.float64), np.asarray(c_theta, dtype=np.float64),
                       h, reader.b_origin, reader.dlb, reader.dlx, a_edges_buf,
-                      m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab)
+                      m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab)
     factor_term = _factor_ln(reader, rows, np.asarray(a_hat, dtype=np.float64),
                               np.asarray(log10_b_hat, dtype=np.float64),
                               np.asarray(slope, dtype=np.float64),
