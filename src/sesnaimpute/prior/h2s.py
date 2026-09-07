@@ -30,19 +30,23 @@ stored again (IMPLEMENTATION.md section 3, H2S row).
    combinations: each band's own exact clearing fraction against its
    whole table (`band_clear_fraction`, a `searchsorted`, no sampling
    error), combined algebraically over the 2^4 ways the four can clear.
-   `EPS[n, n_x, n_sigma]` is written directly on the shared scaled-
-   extinction ladder `X_LADDER`, at every source's own eight limits
-   (`catalog.limits.limits`) and own column -- no depth groups, no
-   common-mode shift. The persisted ratio arrays carry no shared
-   per-knot index back to Giannini's table, so the four IRAC bands are
-   treated as independent populations here, disclosed rather than
-   assumed away; pairing them by knot, were the index available, would
-   be the better form (it preserves the measured colour correlations).
-   Written per source, `bms/h2s/selection_h2s_source`.
+   `EPS[n, n_x, n_sigma]` is an ON-THE-FLY lookup (owner, 2026-09-06,
+   the same change `prior.gal` made for its own per-source galaxy
+   selection: no `bms/h2s/selection_h2s_source` product any more) on
+   the shared scaled-extinction ladder `X_LADDER`, at every source's own
+   eight limits (`catalog.limits.limits`) and own column -- no depth
+   groups, no common-mode shift. `source_selection` is the public entry
+   point; `prior.counts_cloud.build_region` calls it per source batch.
+   The tiny ratio tables carry no shared per-knot index back to
+   Giannini's table, so the four IRAC bands are treated as independent
+   populations here, disclosed rather than assumed away; pairing them
+   by knot, were the index available, would be the better form (it
+   preserves the measured colour correlations).
 
 The region product (`bms/h2s/prior_h2s_region`) keeps everything else:
 the law-blurred field, `eta_r`, `eps_ext`, and the region's own
-brightness lognormal.
+brightness lognormal (including the Sigma grid `source_selection` reads
+at call time).
 
 No library enters a count or a shape (C3): the h2shock template register
 supplies SED templates to the fitter only, never a selection average.
@@ -581,14 +585,50 @@ def _row_bytes(n_x, n_sigma):
     return 12 * n_x * n_sigma * 8 + N_BANDS * 8 + n_x * N_BANDS * 8
 
 
-def build_and_write_source_selection(config, region, log10_sigma_grid):
-    """Writes `bms/h2s/selection_h2s_source`: `EPS[n, n_x, n_sigma]` f2,
-    the exact per-source H2S selection on `X_LADDER` and the region's
-    Sigma grid (module docstring, point 3), batched under
-    `BATCH_BUDGET_BYTES`.
+def _region_sigma_grid_only(config, region):
+    """`LOG10_SIGMA_GRID` alone, from the region product `write_region`
+    already carries (module docstring) -- the one region-level input
+    `source_selection` needs beyond the shared, tiny Giannini tables."""
+    path = config_module.product_path(config, "bms", "h2s", "prior", "region", region=region)
+    with h5py.File(path, "r") as f:
+        return np.asarray(f["LOG10_SIGMA_GRID"][:], dtype=np.float64)
+
+
+def source_selection(config, region, log10_lim_8, a_query):
+    """`(n, n_x, n_sigma)` f8: the exact H2S knot selection, an ON-THE-FLY
+    lookup (owner, 2026-09-06: no more `bms/h2s/selection_h2s_source`
+    product, the same change `prior.gal` made for its own per-source
+    galaxy selection) -- the same closed-form `exact_source_selection`
+    the old per-source product batched to disk, now evaluated directly
+    from the caller's own per-source limits (`log10_lim_8`, (n, 8)) and
+    query extinctions (`a_query`, (n, n_x), already `X_LADDER . A_s`)
+    against the region's own Sigma grid (`prior_h2s_region`'s
+    `LOG10_SIGMA_GRID`) and the shared Giannini colour-ratio tables.
+    `prior.counts_cloud.build_region` is the one caller, one already-
+    loaded source batch at a time -- this function does no batching of
+    its own, only the small region-product and ratio-table reads (both
+    cheap enough to repeat every call).
     """
     sorted_ratios = _sorted_giannini_ratios(config)
+    log10_sigma_grid = _region_sigma_grid_only(config, region)
+    w_dense = selection_module.law_dense_weight(a_query)
+    kappa = selection_module.kappa_hybrid(config, w_dense)
+    return exact_source_selection(log10_lim_8, a_query, kappa, log10_sigma_grid, sorted_ratios)
 
+
+def report_source_selection(config, region, log10_sigma_grid, logsig_mean, x1_idx):
+    """Batched report-only pass over the whole region (SPEC_PRIORS.md
+    section 7 "Checks"), calling the same `source_selection` on-the-fly
+    lookup `counts_cloud` uses, never holding more than one batch's `(n_x,
+    n_sigma)` rows at once: the median `eps_s` at zero extinction and at
+    the source's own column, and the two monotonicity violations
+    (non-increasing in the ladder, non-decreasing in Sigma). Returns
+    `(n_source, eps_a0_median, eps_x1_median, max_x_violation,
+    max_sigma_violation, eps_x1_column)` -- `eps_x1_column` is `(n,
+    n_sigma)` at the ladder's `x=1` point, kept only for the Vela D
+    literature check below (small: one Sigma row per source, not the
+    full `(n, n_x, n_sigma)` table).
+    """
     log10_lim = np.log10(limits_module.limits(config, region))
     n_source = log10_lim.shape[0]
     adopted_path = config_module.product_path(
@@ -597,30 +637,33 @@ def build_and_write_source_selection(config, region, log10_sigma_grid):
         access.per_source(config, region, adopted_path, ["A_COL_K"])["A_COL_K"], dtype=np.float64)
 
     x_ladder = X_LADDER
-    n_x = x_ladder.size
-    n_sigma = log10_sigma_grid.size
+    n_x, n_sigma = x_ladder.size, log10_sigma_grid.size
+    j_mean = int(np.argmin(np.abs(log10_sigma_grid - logsig_mean)))
 
-    path = config_module.product_path(config, "bms", "h2s", "selection", "source", region=region)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with h5py.File(path, "w") as f:
-        f.attrs["GRANULE"] = "source"
-        f.create_dataset("X_LADDER", data=x_ladder.astype("f8"))
-        f.create_dataset("LOG10_SIGMA_GRID", data=log10_sigma_grid.astype("f8"))
-        ds_eps = f.create_dataset("EPS", shape=(n_source, n_x, n_sigma), dtype="f2")
+    max_x_violation, max_sigma_violation = 0.0, 0.0
+    eps_a0_parts, eps_x1_parts, eps_x1_col_parts = [], [], []
+    row_bytes = _row_bytes(n_x, n_sigma)
+    for start, stop in batches_module.batches(n_source, row_bytes, budget_bytes=BATCH_BUDGET_BYTES):
+        lim_b = np.ascontiguousarray(log10_lim[start:stop])
+        a_query_b = np.ascontiguousarray(x_ladder[None, :] * a_col[start:stop, None])
+        eps = source_selection(config, region, lim_b, a_query_b)
 
-        row_bytes = _row_bytes(n_x, n_sigma)
-        for start, stop in batches_module.batches(n_source, row_bytes, budget_bytes=BATCH_BUDGET_BYTES):
-            lim_b = np.ascontiguousarray(log10_lim[start:stop])
-            a_b = a_col[start:stop]
-            a_query_b = np.ascontiguousarray(x_ladder[None, :] * a_b[:, None])
-            w_dense_b = selection_module.law_dense_weight(a_query_b)
-            kappa_b = np.ascontiguousarray(selection_module.kappa_hybrid(config, w_dense_b))
+        d_x = np.diff(eps.astype(np.float64), axis=1)
+        d_sigma = np.diff(eps.astype(np.float64), axis=2)
+        if d_x.size:
+            max_x_violation = max(max_x_violation, float(np.max(np.clip(d_x, 0.0, None))))
+        if d_sigma.size:
+            max_sigma_violation = max(max_sigma_violation, float(np.max(np.clip(-d_sigma, 0.0, None))))
+        eps_a0_parts.append(eps[:, 0, j_mean])
+        eps_x1_parts.append(eps[:, x1_idx, j_mean])
+        eps_x1_col_parts.append(eps[:, x1_idx, :])
 
-            eps = exact_source_selection(lim_b, a_query_b, kappa_b, log10_sigma_grid, sorted_ratios)
-            ds_eps[start:stop] = eps.astype("f2")
-
-    bin_counts = np.ones(n_sigma, dtype=np.float64)
-    return path, n_source, bin_counts
+    eps_a0 = np.concatenate(eps_a0_parts) if eps_a0_parts else np.empty(0)
+    eps_x1 = np.concatenate(eps_x1_parts) if eps_x1_parts else np.empty(0)
+    eps_x1_column = (np.concatenate(eps_x1_col_parts, axis=0) if eps_x1_col_parts
+                     else np.empty((0, n_sigma)))
+    return (n_source, float(np.median(eps_a0)), float(np.median(eps_x1)),
+            max_x_violation, max_sigma_violation, eps_x1_column)
 
 
 def write_region(path, eta, eps_ext, lambda_pc, d_r_pc, logsig_mean, logsig_std,
@@ -665,20 +708,6 @@ def kernel_mass_conservation(n_law_source, n_law_blurred):
     total_in = float(np.sum(n_law_source))
     total_out = float(np.sum(n_law_blurred))
     return abs(total_out - total_in) / total_in if total_in > 0 else 0.0
-
-
-def eps_monotonicity_violations(eps, bin_counts):
-    """`(max_x_violation, max_sigma_violation)`: EPS must be non-increasing
-    along the extinction ladder `X_LADDER` (more extinction never helps)
-    and non-decreasing in `log10 Sigma` (a brighter knot never clears
-    fewer bands); both expected 0. `exact_source_selection` evaluates
-    every Sigma-grid point exactly, so the Sigma direction is graded
-    across the whole grid, no `bin_counts` gating needed; the argument
-    is kept for the call-site contract."""
-    d_x = np.diff(eps.astype(np.float64), axis=1)
-    d_sigma = np.diff(eps.astype(np.float64), axis=2)
-    sigma_violation = float(np.max(np.clip(-d_sigma, 0.0, None))) if d_sigma.size else 0.0
-    return float(np.max(np.clip(d_x, 0.0, None))), sigma_violation
 
 
 # ---------------------------------------------------------------------------
@@ -726,27 +755,21 @@ def build(config, regions=None):
               f"transition_width={transition_width:.4f} dex) lognormal one-sided tail "
               f"beyond old edge={tail_mass_beyond_old_edge:.3e}")
 
-        path_source, n_source, bin_counts = build_and_write_source_selection(
-            config, region, log10_sigma_grid)
-
         path_region = config_module.product_path(config, "bms", "h2s", "prior",
                                                   "region", region=region)
         write_region(path_region, eta, EPS_EXT, LAMBDA_PC, d_r_pc, logsig_mean, logsig_std,
                     n_knots_ref, log10_sigma_grid)
 
-        with h5py.File(path_source, "r") as f:
-            eps = f["EPS"][:]
-        max_x_violation, max_sigma_violation = eps_monotonicity_violations(eps, bin_counts)
-        j_mean = int(np.argmin(np.abs(log10_sigma_grid - logsig_mean)))
-        eps_a0 = float(np.median(eps[:, 0, j_mean]))
-        eps_x1 = float(np.median(eps[:, x1_idx, j_mean]))
+        (n_source, eps_a0, eps_x1, max_x_violation, max_sigma_violation,
+         eps_x1_column) = report_source_selection(config, region, log10_sigma_grid, logsig_mean, x1_idx)
         print(f"h2s: {region}: n_source={n_source} LOGSIG_MEAN={logsig_mean:.4f} "
               f"LOGSIG_STD={logsig_std:.4f} median_eps(x=0,Sigma=mean)={eps_a0:.4f} "
               f"median_eps(x=1,Sigma=mean)={eps_x1:.4f} max_x_violation={max_x_violation:.3e} "
-              f"max_sigma_violation={max_sigma_violation:.3e} -> {path_source} ; {path_region}")
+              f"max_sigma_violation={max_sigma_violation:.3e} (on-the-fly, no per-source "
+              f"product) -> {path_region}")
 
         if region == "Vela D":
-            eps_own_column = eps[:, x1_idx, :]
+            eps_own_column = eps_x1_column
             eps_s_source = source_pass_fraction(eps_own_column, log10_sigma_grid, logsig_mean, logsig_std)
             a_col_vela, prov_vela = _adopted_columns(config, region)
             n_law_vela = yso_module.law_count(config, region, a_col_vela, prov_vela)

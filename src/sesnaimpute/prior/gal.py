@@ -22,11 +22,13 @@ is therefore two survey machinery pieces, assembled into the shape
    -- `prior.counts_star_family.gal_counts`, `prior.callable`'s GAL path
    -- loads the CDF tables once (`read_cdf_tables`) and evaluates the
    lookup itself, per batch of sources or per query point. Two comparison
-   variants are kept at the region's own median 8-band limit, on the
-   column-grid nodes, in the region-level `prior/region` product:
-   `EPS_2BAND` requires *both* 3.6 and 4.5um -- the SEDS-era two-band
-   form; `EPS_NO_REMOVAL` is the four-band test with no star removal at
-   all (SPEC_PRIORS.md section 5, "Checks").
+   variants are computed at the region's own median 8-band limit, on the
+   column-grid nodes, and PRINTED, never written to a per-region product
+   (owner, 2026-09-06: nothing read the old `prior_gal_region__<region>`
+   file, so it is deleted rather than kept): `EPS_2BAND` requires *both*
+   3.6 and 4.5um -- the SEDS-era two-band form; `EPS_NO_REMOVAL` is the
+   four-band test with no star removal at all (SPEC_PRIORS.md section 5,
+   "Checks").
 
 The star-galaxy split itself is chosen once, survey-wide
 (`select_star_galaxy_split`): among the candidate rules that reproduce
@@ -863,25 +865,20 @@ def build_region_selection(a_nodes, kappa4_all, log10_flux_irac, finite_irac,
     return eps, eps_2band, bin_counts
 
 
-def write_region(path, a_nodes, log10_s_grid, eps_2band, eps_no_removal, median_limit_log10,
-                  split_label, split_row):
-    """The region-level comparison product: `EPS_2BAND` and
-    `EPS_NO_REMOVAL`, one row each on `a_nodes` by `log10_s_grid`, both
-    evaluated at the region's own median 8-band limit (no depth
-    grouping). The per-source `EPS` lives in the sibling `prior/
-    selection/source` product (`build_source_selection`).
+def report_region_comparison(region, eps_2band, eps_no_removal, log10_s_grid):
+    """Prints the region-median comparison variants (owner, 2026-09-06:
+    nothing reads a per-region product, so `EPS_2BAND`/`EPS_NO_REMOVAL`
+    are reported here rather than written to
+    `bms/gal/prior_gal_region__<region>.hdf5`, which is deleted): each
+    variant's own value at the survey's brightest and faintest tabulated
+    flux, column-grid node 0 (`a = 0`) -- the two ends of the flux axis a
+    reader would otherwise have opened the file to check.
     """
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with h5py.File(path, "w") as f:
-        f.attrs["GRANULE"] = "region"
-        f.attrs["SPLIT"] = split_label
-        f.attrs["SPLIT_CRITERION_S_MJY"] = np.array(SPLIT_CRITERION_S_MJY, dtype=np.float64)
-        f.attrs["SPLIT_RATIO_SWIRE_OVER_FAZIO"] = np.array(split_row["ratio"], dtype=np.float64)
-        f.create_dataset("A_NODES", data=a_nodes.astype(np.float64))
-        f.create_dataset("LOG10_S_GRID", data=log10_s_grid.astype(np.float64))
-        f.create_dataset("EPS_2BAND", data=eps_2band.astype(np.float32))
-        f.create_dataset("EPS_NO_REMOVAL", data=eps_no_removal.astype(np.float32))
-        f.create_dataset("MEDIAN_LOG10_FLIM", data=median_limit_log10.astype(np.float64))
+    j_faint, j_bright = 0, log10_s_grid.size - 1
+    print(f"gal: {region}: EPS_2BAND(a=node0) faint(S={10.0 ** log10_s_grid[j_faint]:.4g}mJy)="
+          f"{eps_2band[0, 0, j_faint]:.4f} bright(S={10.0 ** log10_s_grid[j_bright]:.4g}mJy)="
+          f"{eps_2band[0, 0, j_bright]:.4f}; EPS_NO_REMOVAL(a=node0) "
+          f"faint={eps_no_removal[0, 0, j_faint]:.4f} bright={eps_no_removal[0, 0, j_bright]:.4f}")
 
 
 # ---------------------------------------------------------------------------
@@ -1109,12 +1106,10 @@ def build(config, regions=None):
         fazio_at_median_limit = float(fit.cumulative(10.0 ** median_limit_log10[IRAC_BAND_IDX[
             IRAC_BAND_KEYS.index("I2")]]))
 
-        region_path = config_module.product_path(config, "bms", "gal", "prior", "region", region=region)
-        write_region(region_path, a_nodes, log10_s_grid, eps_2band[0], eps_no_removal[0], median_limit_log10,
-                     split_label, split_row)
         print(f"gal: {region}: N_GAL(a=0, median limit) adopted={n_gal_region:.1f} deg^-2 "
               f"no_removal={n_gal_region_nr:.1f} deg^-2 "
-              f"Fazio N(>region median I2 limit)={fazio_at_median_limit:.1f} deg^-2 -> {region_path}")
+              f"Fazio N(>region median I2 limit)={fazio_at_median_limit:.1f} deg^-2")
+        report_region_comparison(region, eps_2band, eps_no_removal, log10_s_grid)
 
     print(f"gal: acceptance: max(EPS_2BAND - EPS)={max_2band_violation:.6g} "
           f"(expect <= 0); max positive d(EPS)/d(node)={max_monotone_violation:.6g} (expect ~0)")
