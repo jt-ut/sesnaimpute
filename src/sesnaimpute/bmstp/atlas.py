@@ -8,12 +8,14 @@ pixel's own median 50% limits (`catalog.depth_grid`'s `F_LIM_50_MED_MJY`). The
 selection appears here and nowhere else in the atlas (sec. 1.2): the prior itself
 is unthinned.
 
-This build writes the STAR/AGB/PAHC family (sec. 5.1-5.3), the first and
-highest-value class the brief names. GAL, YSO and H2S (sec. 5.4-5.6) did not fit
-this unit's 15-minute budget on top of the family's own read chain (see the
-module docstring's "What did not run" in the delivery report); their `N_CAT_*`/
-`SHARE_*` columns are written as NaN and excluded from the total-count check,
-which is therefore reported for STAR+AGB+PAHC only, not the full six.
+This build writes STAR/AGB/PAHC (sec. 5.1-5.3, partitioning the field population:
+a star is a STAR or a PAHC member of the Monte Carlo, never both, weighted
+`W_STAR*(1-P_PAHC)`/`W_STAR*P_PAHC`) and GAL (sec. 5.4: SWIRE's four IRAC fluxes
+per galaxy, S from the counts law's own node, colours from a galaxy measured at
+that node, at `x=1`). YSO and H2S (sec. 5.5-5.6) did not fit this unit's budget on
+top of the other four classes' own read chains; their `N_CAT_*`/`SHARE_*` columns
+are written as NaN and excluded from the total-count check, which is therefore
+reported for STAR+AGB+PAHC+GAL only, not the full six.
 """
 
 import os
@@ -29,6 +31,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import selection as selection_module
+from sesnaimpute.bmstp import sample_gal
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
@@ -83,26 +86,30 @@ def _coverage(config, region, pix):
     return out
 
 
-def _pixel_column(config, region, pix):
-    """`A_COL_K` at each admitted pixel: `population.anchor_tiles`'s own
-    per-pixel column (`population/anchors/histograms/hpx512__R.hdf5`,
-    `A_PIX_K`), the same nside-512 pixel axis the star-family tile
-    definition (`.../anchors/tiles/hpx512__R.hdf5`) uses -- the "column map
-    at the pixel" the brief names, joined by pixel id (a pixel absent from
-    the anchor product, outside the star-family footprint, is dropped, not
-    zero-filled, since a column of zero is not a measurement)."""
-    path = config_module.product_path(config, "population", "anchors", "histograms", "hpx512", region=region)
+def _pixel_column(config, pix):
+    """The pixel's own column and arm, from the sightline it is a child of
+    (SPEC_BMSTP_DRAFT.md sec. 8: "placed at the pixel (its column, its
+    tile or sightline, its arm)"). Nested HEALPix, confirmed from
+    `granules.build`'s own `HPX_PIX_256 = HPX_PIX_512 // 4`: every
+    admitted nside-512 pixel's parent nside-256 sightline is `pix // 4`.
+    `sky/derived/adopted/column_adopted_sightline.hdf5` (survey-wide, no
+    region argument) carries `A_K`/`PROVENANCE` at that granule for every
+    source-bearing sightline, so every admitted pixel resolves -- no NaN."""
+    parent256 = pix // 4
+    path = config_module.product_path(config, "sky/derived", "adopted", "column", "sightline")
     with h5py.File(path, "r") as f:
-        a_pix_id = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
-        a_pix_k = np.asarray(f["A_PIX_K"][:], dtype=np.float64)
-    order = np.argsort(a_pix_id)
-    loc = np.searchsorted(a_pix_id[order], pix)
-    loc = np.minimum(loc, a_pix_id.size - 1)
+        sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
+        a_k = np.asarray(f["A_K"][:], dtype=np.float64)
+        prov = np.asarray(f["PROVENANCE"][:])
+    order = np.argsort(sl_pix)
+    loc = np.searchsorted(sl_pix[order], parent256)
+    loc = np.minimum(loc, sl_pix.size - 1)
     hit = order[loc]
-    found = a_pix_id[hit] == pix
-    a_col = np.full(pix.size, np.nan, dtype=np.float64)
-    a_col[found] = a_pix_k[hit[found]]
-    return a_col, found
+    found = sl_pix[hit] == parent256
+    if not np.all(found):
+        raise ValueError("bmstp.atlas: %d admitted pixel(s) have no sightline column in %s"
+                          % (int(np.sum(~found)), path))
+    return a_k[hit], prov[hit]
 
 
 def _pixel_tile(config, region, pix):
@@ -201,9 +208,16 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     tile_i4_limit = float(np.mean(f_lim_in_tile[:, IDX_I4])) if pix_in_tile.size else float(limit8_grid[len(limit8_grid) // 2])
     p_pahc = _pahc_weight(limit8_grid, p_pahc_grid, tile_i4_limit)
 
+    # STAR and PAHC partition the field population (spec sec. 5.1, 5.3;
+    # coordinator ruling): a star is EITHER a STAR member or a PAHC member
+    # of the Monte Carlo, weighted `W_STAR*(1-P_PAHC)` / `W_STAR*P_PAHC`,
+    # so `N_CAT_STAR + N_CAT_PAHC` never exceeds the field-star count.
+    w_star_only = w_star * (1.0 - p_pahc)
+    w_pahc_only = w_star * p_pahc
+
     rng = np.random.RandomState(MC_SEED + tile_id)
     out = {}
-    for cls, weight in (("STAR", w_star), ("AGB", w_agb), ("PAHC", p_pahc)):
+    for cls, weight in (("STAR", w_star_only), ("AGB", w_agb), ("PAHC", w_pahc_only)):
         idx, total = _draw_members(rng, weight, N_MC)
         density = total / omega_sim  # objects deg^-2, sec. 5.1/5.2's Omega_sim
         if idx is None:
@@ -216,6 +230,59 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     return out
 
 
+_ZP_MJY = {b.key: b.vega_zero_point_jy * 1000.0 for b in definitions.BANDS}
+
+
+def _gal_members(config, rng, n_mc):
+    """`(flux0, u)`, GAL's Monte Carlo sample (sec. 5.4): `S` drawn from
+    the counts law's own tabulated `log10 S` node
+    (`bmstp.sample_gal.sample`'s `phi(S).S` weight, the same law
+    `bmstp.shapes.build_gal` bins), the three IRAC colours from a galaxy
+    measured at that node (`sky/derived/swire/galaxies_swire_survey.hdf5`'s
+    finite-colour subset, its own `NODE` axis; a node with no measured
+    galaxy borrows its nearest node that has one) -- "draw S from the law
+    and colours from the node's galaxies" (coordinator ruling). The three
+    Vega-magnitude colours and `S` (already I2's own flux) give I1/I3/I4
+    through `definitions.BANDS`' own Vega zero points; J, H, Ks, M1 are
+    unmeasured for a galaxy and held at zero flux, so the two-of-eight
+    test runs on the four IRAC bands only (disclosed). `x = 1`: sec. 5.4's
+    "whole column"."""
+    x_law, log10_s_grid, w_law = sample_gal.sample(config)
+    node_draw = rng.choice(log10_s_grid.size, size=n_mc, replace=True, p=w_law / w_law.sum())
+    s_draw = 10.0 ** log10_s_grid[node_draw]
+
+    gal_path = config_module.product_path(config, "sky/derived", "swire", "galaxies", "survey")
+    with h5py.File(gal_path, "r") as f:
+        node = np.asarray(f["NODE"][:], dtype=np.int64)
+        c12 = np.asarray(f["COLOUR_I1I2"][:], dtype=np.float64)
+        c23 = np.asarray(f["COLOUR_I2I3"][:], dtype=np.float64)
+        c24 = np.asarray(f["COLOUR_I2I4"][:], dtype=np.float64)
+    finite = (node >= 0) & np.isfinite(c12) & np.isfinite(c23) & np.isfinite(c24)
+    node, c12, c23, c24 = node[finite], c12[finite], c23[finite], c24[finite]
+
+    order = np.argsort(node, kind="stable")
+    counts = np.bincount(node[order], minlength=log10_s_grid.size)
+    starts = np.concatenate([[0], np.cumsum(counts)])[:-1]
+    node_ids = np.arange(log10_s_grid.size)
+    has = counts > 0
+    nearest = node_ids.copy()
+    if not has.all():
+        have_idx = node_ids[has]
+        nearest[~has] = have_idx[np.argmin(np.abs(node_ids[~has, None] - have_idx[None, :]), axis=1)]
+    src_node = nearest[node_draw]
+    within = np.minimum((rng.random(n_mc) * counts[src_node]).astype(np.int64), counts[src_node] - 1)
+    gal_row = order[starts[src_node] + within]
+
+    flux = np.zeros((n_mc, N_BANDS), dtype=np.float64)
+    i1, i2, i3, i4 = (BAND_KEYS.index(k) for k in ("I1", "I2", "I3", "I4"))
+    flux[:, i2] = s_draw
+    flux[:, i1] = s_draw * (_ZP_MJY["I1"] / _ZP_MJY["I2"]) * 10.0 ** (-0.4 * c12[gal_row])
+    flux[:, i3] = s_draw * (_ZP_MJY["I3"] / _ZP_MJY["I2"]) * 10.0 ** (0.4 * c23[gal_row])
+    flux[:, i4] = s_draw * (_ZP_MJY["I4"] / _ZP_MJY["I2"]) * 10.0 ** (0.4 * c24[gal_row])
+    u = np.ones(n_mc, dtype=np.float64)
+    return flux, u, float(w_law.sum())
+
+
 def build_region(config, region):
     """Writes `bmstp/atlas/prior_atlas_hpx512__R.hdf5` for one region: the
     admitted pixel axis (`catalog.depth_grid`), its column and coverage,
@@ -225,7 +292,7 @@ def build_region(config, region):
         pix, f_lim = _depth_grid(config, region)
         n_pix = pix.size
         coverage = _coverage(config, region, pix)
-        a_col, has_col = _pixel_column(config, region, pix)
+        a_col, _arm = _pixel_column(config, pix)
         tile_of_pix = _pixel_tile(config, region, pix)
 
         n_cat = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
@@ -237,10 +304,10 @@ def build_region(config, region):
             tile_ids_present = sorted(int(k.split("_")[1]) for k in f.keys()
                                        if k.startswith("tile_"))
 
-        # only pixels with both a tile and a column enter the family draw
-        # (sec. 8's placement needs both); a pixel outside the star-family
-        # footprint keeps NaN, reported, not filled.
-        usable = has_col & (tile_of_pix >= 0)
+        # only pixels with a tile enter the family draw; a pixel outside
+        # the star-family footprint keeps NaN there, reported, not filled
+        # (GAL, below, does not need a tile and runs on every pixel).
+        usable = tile_of_pix >= 0
         tiles_here = sorted(set(int(t) for t in tile_of_pix[usable]) & set(tile_ids_present))
 
         n_jobs = min(int(config.n_jobs), _MAX_N_JOBS)
@@ -257,45 +324,58 @@ def build_region(config, region):
                 mc_err[cls][m] = mc_error
             st.tick(i + 1, len(tiles_here), "tiles")
 
-        family_total = np.nansum([n_cat["STAR"], n_cat["AGB"], n_cat["PAHC"]], axis=0)
-        share = {c: n_cat[c] / family_total for c in ("STAR", "AGB", "PAHC")}
+        # GAL, sec. 5.4: one region-wide Monte Carlo sample (fixed seed,
+        # not per tile -- GAL has no tile), evaluated at every admitted
+        # pixel's own column and limits with the shared `_accepted_fraction`.
+        gal_rng = np.random.RandomState(MC_SEED)
+        gal_flux, gal_u, density_gal = _gal_members(config, gal_rng, N_MC)
+        frac_gal, mc_gal = _accepted_fraction(a_col, gal_u, gal_flux, f_lim, config)
+        n_cat["GAL"] = density_gal * frac_gal
+        mc_err["GAL"] = mc_gal
+
+        built = ("STAR", "AGB", "PAHC", "GAL")
+        built_total = np.nansum([n_cat[c] for c in built], axis=0)
+        share = {c: n_cat[c] / built_total for c in built}
 
         n_source = access.region_slice(config, region)["n_sources"]
         area_deg2 = n_pix * _HPX512_PIXEL_DEG2
-        total_predicted_family = float(np.nansum(family_total) * _HPX512_PIXEL_DEG2)
+        total_predicted_built = float(np.nansum(built_total) * _HPX512_PIXEL_DEG2)
         ratio = {c: float(np.nansum(n_cat[c]) * _HPX512_PIXEL_DEG2) / n_source
-                 if n_source else float("nan") for c in ("STAR", "AGB", "PAHC")}
-        ratio_family = total_predicted_family / n_source if n_source else float("nan")
+                 if n_source else float("nan") for c in built}
+        ratio_built = total_predicted_built / n_source if n_source else float("nan")
 
         path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with h5py.File(path, "w") as f:
             f.attrs["GRANULE"] = "hpx512"
             f.attrs["N_MC"] = N_MC
-            f.attrs["TOTAL_PREDICTED"] = total_predicted_family
+            f.attrs["DENSITY_GAL"] = density_gal
+            f.attrs["TOTAL_PREDICTED"] = total_predicted_built
             f.attrs["TOTAL_OBSERVED"] = float(n_source)
-            for c in ("STAR", "AGB", "PAHC"):
+            for c in built:
                 f.attrs[f"RATIO_{c}"] = ratio[c]
-            f.attrs["RATIO_STAR_AGB_PAHC"] = ratio_family
+            f.attrs["RATIO_BUILT"] = ratio_built
             f.create_dataset("HPX_PIX_512", data=pix)
             f.create_dataset("A_COL_K", data=a_col.astype(np.float32))
             f.create_dataset("COVERAGE", data=coverage.astype(np.float32))
             f.create_dataset("F_LIM_50_MED_MJY", data=f_lim.astype(np.float32))
             for c in CLASSES:
                 f.create_dataset(f"N_CAT_{c}", data=n_cat[c].astype(np.float32))
-            for c in ("STAR", "AGB", "PAHC"):
+            for c in built:
                 f.create_dataset(f"SHARE_{c}", data=share[c].astype(np.float32))
-            for c in ("GAL", "YSO", "H2S"):
+            for c in ("YSO", "H2S"):
                 f.create_dataset(f"SHARE_{c}", data=np.full(n_pix, np.nan, dtype=np.float32))
 
-        max_mc_err = float(np.nanmax([mc_err[c][n_cat[c] / (family_total + 1e-300) > 0.1]
-                                       for c in ("STAR", "AGB", "PAHC")
-                                       if np.any(n_cat[c] / (family_total + 1e-300) > 0.1)] or [0.0])
-                            ) if n_pix else 0.0
+        def _max_mc_err(c):
+            frac_c = n_cat[c] / (built_total + 1e-300)
+            return float(np.nanmax(mc_err[c][frac_c > 0.1])) if np.any(frac_c > 0.1) else 0.0
+
+        max_mc_err = max((_max_mc_err(c) for c in built), default=0.0) if n_pix else 0.0
         st.done(path, n_pix=n_pix, n_tile=len(tiles_here), area_deg2=area_deg2,
-                total_predicted_family=total_predicted_family, total_observed=n_source,
+                total_predicted_built=total_predicted_built, total_observed=n_source,
                 ratio_star=ratio["STAR"], ratio_agb=ratio["AGB"], ratio_pahc=ratio["PAHC"],
-                ratio_family=ratio_family, mc_error_max_where_frac_gt_0p1=max_mc_err)
+                ratio_gal=ratio["GAL"], ratio_built=ratio_built,
+                density_gal_deg2=density_gal, mc_error_max_where_frac_gt_0p1=max_mc_err)
     return path
 
 
