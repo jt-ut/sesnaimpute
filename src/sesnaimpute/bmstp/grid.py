@@ -55,7 +55,11 @@ def bin(x, log10_b, w, origin, sigma_b_min):
     cells (the mass that fell outside the grid is not in `H`), then
     smoothed by one cell along `log10 x` and by
     `max(D_LOG10_B, sigma_b_min)` along `log10 B` (sec. 2, "minimum
-    widths"), then floored at `FLOOR * H.max()`."""
+    widths") with `mode="constant"` (zero beyond the edges) on both axes:
+    any mass the smoothing pushes past an edge is mass outside the grid
+    and is folded into `mass_outside`, so `H.sum() == 1 - mass_outside`
+    stays an exact identity before the floor. `H` is then floored at
+    `FLOOR * H.max()`."""
     x = np.asarray(x, dtype=float)
     log10_b = np.asarray(log10_b, dtype=float)
     w = np.asarray(w, dtype=float)
@@ -68,13 +72,20 @@ def bin(x, log10_b, w, origin, sigma_b_min):
     )
     mass_outside = float((total_weight - H.sum()) / total_weight)
     H = H / total_weight
-    # `mode="wrap"` is a circular convolution: no mass crosses the array
-    # boundary undetected, so the normalisation above is exactly
-    # preserved by the smoothing step (the sample is far from the grid's
-    # own edges by construction of the class populations, sec. 2).
-    H = gaussian_filter1d(H, sigma=1.0, axis=0, mode="wrap")
+    # `mode="constant"` (zero beyond the edges) on both axes: mass the
+    # minimum-width smoothing pushes past `log10 x = -3.0`/`+1.0`, or
+    # past the brightness axis's own edges, is mass outside the grid --
+    # folded into `mass_outside` below, not reappeared at the opposite
+    # edge (fixed defect: `mode="wrap"`, a circular convolution, used to
+    # wrap a foreground star's mass at the `x` floor around to the
+    # background edge, and likewise on `log10 B`).
+    mass_before = float(H.sum())
+    H = gaussian_filter1d(H, sigma=1.0, axis=0, mode="constant")
+    mass_outside += mass_before - float(H.sum())
     sigma_b_cells = max(D_LOG10_B, float(sigma_b_min)) / D_LOG10_B
-    H = gaussian_filter1d(H, sigma=sigma_b_cells, axis=1, mode="wrap")
+    mass_before = float(H.sum())
+    H = gaussian_filter1d(H, sigma=sigma_b_cells, axis=1, mode="constant")
+    mass_outside += mass_before - float(H.sum())
     H = np.maximum(H, FLOOR * H.max())
     return H.astype(np.float64), mass_outside
 
