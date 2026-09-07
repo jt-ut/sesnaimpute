@@ -709,15 +709,48 @@ def _a_cell_mass(kernel_obj, a_col, sigma_col, map_class_code, a_floor, a_hi, n_
     return centers, mass, pdf_center
 
 
+#: `_z_by_quadrature`'s own source-batch chunk (`CODING_RULES.md` 10a).
+#: Unchunked, a batch's own working set through the class's `shape`/
+#: `selection` read (STAR/AGB/PAHC's bicubic spline fit and evaluate,
+#: called once per unique (tile, node[, limit]) group but still holding
+#: `n_batch . _Z_QUAD_NA . nb` points' worth of query and intermediate
+#: arrays at once) scales with the WHOLE prepared batch, not the query
+#: axis alone -- the STAR/AGB blowup this fixes (measured: STAR peaked
+#: 7.7 GB, AGB killed at 8-10 GB, for one 2,643-source NGC 7129 batch;
+#: was 3.9 GB before this stage's `Z` quadrature existed). Bounded here
+#: at `_Z_QUAD_CHUNK_POINTS` = `_Z_QUAD_MEM_BUDGET_BYTES / (_Z_QUAD_
+#: ARRAYS_ALIVE * 8)` points (source chunk size x `_Z_QUAD_NA` x `nb`)
+#: per call into the read -- `_Z_QUAD_ARRAYS_ALIVE` is a round number
+#: calibrated to the measured STAR blowup (~950 bytes/point observed;
+#: 128 float64-array-equivalents/point, with margin for AGB, is the
+#: nearest round cover), the same "budget / bytes-per-point" discipline
+#: `_INTERP_CHUNK`/`_MARGINAL_CHUNK` already use elsewhere in this file.
+_Z_QUAD_MEM_BUDGET_BYTES = 512 * 1024 * 1024
+_Z_QUAD_ARRAYS_ALIVE = 128
+_Z_QUAD_CHUNK_POINTS = _Z_QUAD_MEM_BUDGET_BYTES // (_Z_QUAD_ARRAYS_ALIVE * 8)
+
+
+def _z_nb(prior, cls):
+    """The class's own `log10 B` axis length for `_z_by_quadrature`
+    (`_Z_QUAD_NB` for STAR/AGB/PAHC, the stored grid's own size for
+    GAL/H2S) -- needed before the read to size the source chunk."""
+    if cls in FAMILY_CLASSES:
+        return _Z_QUAD_NB
+    return prior.gal_log10_s_grid.size if cls == "gal" else prior.h2s_log10_sigma_grid.size
+
+
 def _z_by_quadrature(prior, cls, rows):
     """`(n,)`: `Z[s]`, exact where a closed form exists (YSO), a
     kernel-exact-cell-mass product quadrature otherwise (module note
-    above `_Z_QUAD_NA`). Reads `prior`'s own `shape`/`selection` objects
-    -- the exact arithmetic `log_density` composes -- so a source whose
-    selection is genuinely zero everywhere (no object of this class
-    could be catalogued at its own limits) returns `Z = 0`, the correct
-    statement that the class is impossible on this sightline, not a
-    defect (owner ruling, 2026-09-06)."""
+    above `_Z_QUAD_NA`), chunked over SOURCES at `_Z_QUAD_CHUNK_POINTS`
+    points/chunk (module note above `_Z_QUAD_MEM_BUDGET_BYTES`) so the
+    read's own working set stays bounded regardless of the batch's own
+    size. Reads `prior`'s own `shape`/`selection` objects -- the exact
+    arithmetic `log_density` composes -- so a source whose selection is
+    genuinely zero everywhere (no object of this class could be
+    catalogued at its own limits) returns `Z = 0`, the correct statement
+    that the class is impossible on this sightline, not a defect (owner
+    ruling, 2026-09-06)."""
     n = rows.shape[0]
     if cls == "yso":
         # `shape` is `marginal_exact` (integrates to 1 over `a` by
@@ -728,6 +761,21 @@ def _z_by_quadrature(prior, cls, rows):
         # 2026-09-06: do not quadrature what is already exact).
         return np.ones(n, dtype=np.float64)
 
+    points_per_source = _Z_QUAD_NA * _z_nb(prior, cls)
+    chunk_n = max(1, _Z_QUAD_CHUNK_POINTS // points_per_source)
+    if n > chunk_n:
+        out = np.empty(n, dtype=np.float64)
+        for start in range(0, n, chunk_n):
+            stop = min(start + chunk_n, n)
+            out[start:stop] = _z_by_quadrature_chunk(prior, cls, rows[start:stop])
+        return out
+    return _z_by_quadrature_chunk(prior, cls, rows)
+
+
+def _z_by_quadrature_chunk(prior, cls, rows):
+    """`(n,)`: one chunk's worth of `_z_by_quadrature`'s own GAL/H2S/
+    star-family arithmetic -- see that function for the method."""
+    n = rows.shape[0]
     obj = prior._classes[cls]
     a_col = prior.table["A_COL_K"][rows]
     sigma_col = prior.table["A_COL_SIG_K"][rows]
