@@ -46,18 +46,6 @@ CHABRIER_LOG_MC = np.log10(0.2)     # dex, the lognormal centre, Msun
 CHABRIER_SIGMA_DEX = 0.55           # dex, the lognormal width below 1 Msun
 CHABRIER_SLOPE = 1.35               # dN/dlog M ~ M^-CHABRIER_SLOPE above 1 Msun
 
-#: Statistical lifetimes for the five sub-grids (spec sec 5.5): Class 0
-#: 0.10 Myr and Class I (plus flat-spectrum) 0.54 Myr from Evans et al.
-#: (2009, ApJS 181, 321) Table 4; Class II 2.0 Myr, the Class II lifetime
-#: their sec 7 assumes; transition disc 0.45 Myr, their sec 7's timescale
-#: derived from the TD/II number ratio; Class III 2.0 Myr from the disc
-#: half-life (2-3 Myr, Haisch, Lada & Lada 2001, ApJL 553, L153) and
-#: Hernandez et al. (2008, ApJ 686, 1195), whose argument sets the
-#: diskless young population comparable to Class II over the survey's
-#: 1-3 Myr range -- disclosed as the least certain of the five. Fractions
-#: are each lifetime over the sum of all five.
-STAGE_LIFETIME_MYR = {"C0": 0.10, "CI": 0.54, "CII": 2.0, "CIII": 2.0, "TD": 0.45}
-
 #: A normalised factor's value in an empty cell, and the floor every
 #: normalised template-weight factor is renormalised against (spec sec 2,
 #: "the floor": no hypothesis at -inf from the prior); shared with
@@ -77,9 +65,10 @@ F_C = star_population.F_C
 _LOG10_B_ORIGIN_YSO = grid.LOG10_B_ORIGIN_TEMPLATE
 _LOG10_B_ORIGIN_STAR = grid.LOG10_B_ORIGIN_TEMPLATE
 
-#: The five YSO sub-grids in the pooled register's own row order
-#: (`yso_register.hdf5`'s `members/MEMBER_KEY`; matches
-#: `population.yso_mass`'s own `_SUBGRIDS`).
+#: The five YSO sub-grid directories under `sed_models/yso/` (different
+#: geometries, different parameter sets): read only to join each
+#: sub-grid's own `parameters.fits` (inclination) to the pooled
+#: register by `MODEL_NAME` -- a file lookup, not a weighting.
 YSO_SUBGRIDS = (("c0", "C0"), ("cI", "CI"), ("cII", "CII"),
                 ("cIII", "CIII"), ("td", "TD"))
 
@@ -91,26 +80,19 @@ _REGISTER_FILE = {key: "%s_register.hdf5" % key for key in definitions.CLASS_REG
 # ---------------------------------------------------------------------------
 
 def _read_register(config, cls):
-    """The register's `MODEL_NAME`, `RHO_KDE1` (`rho_C(theta)`, sec 3.5)
-    and reference fluxes in every band, in the register's own row order.
+    """The register's `MODEL_NAME`, `RHO_KDE1` (`rho_C(theta)`, sec 3.5),
+    `SUBCLASS` (report-only diagnostic label, sec 5.5's check) and
+    reference fluxes in every band, in the register's own row order.
     """
     path = f"{config.inputs['sed_models']}/registers/{_REGISTER_FILE[cls]}"
     with h5py.File(path, "r") as f:
         m = f["models"]
         names = np.char.decode(m["MODEL_NAME"][:].astype("S"), "utf-8")
         rho = m["RHO_KDE1"][:].astype(np.float64)
+        subclass = np.char.decode(m["SUBCLASS"][:].astype("S"), "utf-8")
         f_ref = {b: m[f"F_REF_{b}"][:].astype(np.float64)
                  for b in ("I1", "I2", "I3", "I4", "J", "H", "Ks", "M1")}
-        subclass_prob = None
-        if "subclass_prob" in f:
-            sp = f["subclass_prob"]
-            sp_names = np.char.decode(sp["MODEL_NAME"][:].astype("S"), "utf-8")
-            if not np.array_equal(sp_names, names):
-                raise ValueError(f"template_weights: {cls} subclass_prob row order "
-                                  "disagrees with models")
-            subclass_prob = {k: sp[k][:].astype(np.float64)
-                              for k in ("C0", "CI", "CII", "CIII", "TD")}
-    return dict(names=names, rho=rho, f_ref=f_ref, subclass_prob=subclass_prob)
+    return dict(names=names, rho=rho, f_ref=f_ref, subclass=subclass)
 
 
 def _log10_b_centers(origin):
@@ -155,16 +137,6 @@ def _floor_probability(p):
     of entries that sat at zero before the floor is also returned."""
     frac_zero = float(np.mean(p <= 0.0))
     return np.clip(p, FACTOR_FLOOR, PROB_CAP), frac_zero
-
-
-def _weighted_quartiles(values, weight):
-    """`(q25, q50, q75)` of `values` weighted by `weight` (report only,
-    brief item 7): the weighted-CDF inverse by linear interpolation."""
-    order = np.argsort(values)
-    v = values[order]
-    cw = np.cumsum(weight[order])
-    cw = cw / cw[-1]
-    return tuple(float(np.interp(q, cw, v)) for q in (0.25, 0.5, 0.75))
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +200,7 @@ def _pahc_contrast_row(config, n_b_centers):
 
 
 # ---------------------------------------------------------------------------
-# YSO: imf, stage, inclination (survey, sec 5.5)
+# YSO: imf, inclination (survey, sec 5.5)
 # ---------------------------------------------------------------------------
 
 def _read_yso_subgrid_inclination(config, subdir):
@@ -272,15 +244,13 @@ def build_yso(config):
                 f"template_weights.yso: mass table join n_matched={n_matched_mass} "
                 f"!= n_register={n_model}")
 
-        incl_names, incl_deg, incl_label = [], [], []
-        for subdir, label in YSO_SUBGRIDS:
+        incl_names, incl_deg = [], []
+        for subdir, _label in YSO_SUBGRIDS:
             n, i = _read_yso_subgrid_inclination(config, subdir)
             incl_names.append(n)
             incl_deg.append(i)
-            incl_label.append(np.full(n.size, label))
         incl_names = np.concatenate(incl_names)
         incl_deg = np.concatenate(incl_deg)
-        incl_label = np.concatenate(incl_label)
         n_matched_incl = int(np.sum(incl_names == names)) if incl_names.size == n_model else 0
         if n_matched_incl != n_model:
             raise ValueError(
@@ -289,70 +259,41 @@ def build_yso(config):
 
         log10_b_centers = _log10_b_centers(_LOG10_B_ORIGIN_YSO)
         n_b = log10_b_centers.size
-        subgrid_label = incl_label  # register-order label, verified above
 
-        # rho per sub-grid (spec sec 1.4): the register's rho is pooled
-        # over the five geometries; rescale it to integrate to one over
-        # each sub-grid's own templates, so 1/rho weights within a
-        # sub-grid and the stage factor alone sets the weight between
-        # sub-grids.
-        rho_sub = np.empty_like(rho)
-        for _subdir, label in YSO_SUBGRIDS:
-            m = (subgrid_label == label)
-            rho_sub[m] = rho[m] / rho[m].sum()
-
-        # imf, stage and inclination share the plain argument log10 B
-        # (no C_F, no D_F): one stored factor (spec sec 1.4, sec 5.5),
-        # not three separately-normalised factors whose product then
-        # misses Sigma_theta pi = 1.
-        psi = _chabrier_dn_dlogm(m_star)  # imf: dN/dlog10 M, Chabrier 2003
-        sp = reg["subclass_prob"]
-        stage_raw = sum(STAGE_LIFETIME_MYR[label] * sp[label] for _subdir, label in YSO_SUBGRIDS)
+        # imf and inclination share the plain argument log10 B (no C_F,
+        # no D_F): one stored factor, divided once by rho as the
+        # register stores it (spec sec 1.4: no sub-grid subdivides the
+        # library's own density here -- the subclass posterior is the
+        # only place the YSO set is subdivided, sec 5.5).
+        psi = _chabrier_dn_dlogm(m_star)         # imf: dN/dlog10 M, Chabrier 2003
         incl_raw = np.sin(np.radians(incl_deg))  # uniform in cos i (spec sec 5.5)
-        shape_raw = psi * stage_raw * incl_raw / rho_sub  # divided by rho once, sec 1.4
+        shape_raw = psi * incl_raw / rho
 
-        # the weight BETWEEN sub-grids is the stage fraction's job alone
-        # (spec sec 1.4): normalise the imf x stage x inclination shape
-        # to sum to one WITHIN each sub-grid first -- so the sub-grid's
-        # own template count and rho scale drop out of the between-
-        # sub-grid balance -- then scale by that sub-grid's Evans+2009
-        # lifetime fraction; the five scaled blocks concatenate to a
-        # factor that already sums to one over the whole class.
-        stage_total = sum(STAGE_LIFETIME_MYR.values())
-        population_template = np.empty(n_model)
-        subgrid_report = []
-        for _subdir, label in YSO_SUBGRIDS:
-            m = (subgrid_label == label)
-            within = shape_raw[m] / shape_raw[m].sum()
-            stage_fraction = STAGE_LIFETIME_MYR[label] / stage_total
-            population_template[m] = within * stage_fraction
-            q25, q50, q75 = _weighted_quartiles(m_star[m], within)
-            subgrid_report.append((label, stage_fraction, q25, q50, q75))
-
-        population_w = _broadcast(population_template, n_b)
+        population_w = _broadcast(shape_raw, n_b)
         population_w, frac_zero = _floor_normalised(population_w)
-        subgrid_report = [
-            (label, float(population_w[subgrid_label == label, 0].sum()), stage_fraction,
-             q25, q50, q75)
-            for label, stage_fraction, q25, q50, q75 in subgrid_report
-        ]
 
         factors = {
             "population": (population_w, np.zeros(n_model), "", True,
-                            "population.yso_mass Chabrier 2003; yso register subclass_prob "
-                            "Evans et al. 2009; yso sub-grid parameters.fits inclination"),
+                            "population.yso_mass Chabrier 2003; yso sub-grid "
+                            "parameters.fits inclination"),
         }
         c_theta = np.zeros(n_model)
         path = _write_library(config, "yso", "survey", names, c_theta, log10_b_centers, factors,
-                               extra_attrs={"COMPONENTS": "imf,stage,inclination"})
+                               extra_attrs={"COMPONENTS": "imf,inclination"})
         col_sum = population_w.sum(axis=0)
         print(f"template_weights.yso: factor=population max|colsum-1|="
               f"{float(np.max(np.abs(col_sum - 1.0))):.3g} floored_fraction={frac_zero:.4f}",
               flush=True)
-        for label, built_share, stage_fraction, q25, q50, q75 in subgrid_report:
-            print(f"template_weights.yso: sub-grid={label} built_weight_share={built_share:.4f} "
-                  f"stage_fraction={stage_fraction:.4f} mass_quartiles(Msun)="
-                  f"{q25:.3f}/{q50:.3f}/{q75:.3f}", flush=True)
+
+        # report only (spec sec 5.5's check): the share of the built
+        # weight held by each register SUBCLASS value, a diagnostic of
+        # the library's coverage, never used in the weight itself. The
+        # factor carries no brightness dependence, so the share is the
+        # same at every cell; reported once.
+        subclass = reg["subclass"]
+        for label in np.unique(subclass):
+            share = float(population_w[subclass == label, 0].sum())
+            print(f"template_weights.yso: subclass={label} weight_share={share:.4f}", flush=True)
         st.done(path, n_model=n_model, floored_fraction=frac_zero)
 
 
