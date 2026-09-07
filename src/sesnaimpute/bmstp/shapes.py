@@ -150,8 +150,10 @@ def build_cloud(config, region):
     and its `log10 x` marginal per sightline (sec. 5.5), `MASS_OUTSIDE_YSO`,
     and the region's H2S brightness Gaussian (`LOGSIG_MEAN`, `LOGSIG_STD`,
     sec. 5.6) read from `population/h2s/prior_h2s_region__R.hdf5` and
-    carried as attributes -- H2S has no grid of its own (sec. 5.6
-    "Marks": separable, `X_MARGINAL` times this Gaussian, formed at read)."""
+    carried as attributes, plus H2S's own brightness-axis origin
+    `LOG10_B_ORIGIN_H2S` (sec. 2's H2S row) -- H2S has no grid of its own
+    (sec. 5.6 "Marks": separable, `X_MARGINAL` times this Gaussian, formed
+    at read on H2S's own axis, never YSO's `LOG10_B_ORIGIN`)."""
     with progress.Stage("bmstp.shapes.cloud", region) as st:
         loaded = sample_cloud._region_profile(config, region)
         n_sl = loaded["hpx_pix_256"].size
@@ -172,6 +174,11 @@ def build_cloud(config, region):
         with h5py.File(h2s_path, "r") as f:
             logsig_mean = float(f["LOGSIG_MEAN"][()])
             logsig_std = float(f["LOGSIG_STD"][()])
+        # H2S's own brightness-axis origin (sec. 2's H2S row): the
+        # lognormal's 3-sigma faint edge, less the 3-cell (0.3 dex)
+        # margin so the minimum-width smoothing's own 3 sigma stays on
+        # the grid -- never YSO's template-unit origin.
+        log10_b_origin_h2s = logsig_mean - 3.0 * logsig_std - 3.0 * grid.D_LOG10_B
 
         # sec. 5.5's fixed-seed check: one sightline picked reproducibly,
         # its built `X_MARGINAL` against the profile's own `p(u) du`
@@ -188,6 +195,7 @@ def build_cloud(config, region):
             f.attrs["LOGSIG_MEAN"] = logsig_mean
             f.attrs["LOGSIG_STD"] = logsig_std
             f.attrs["LOG10_B_ORIGIN"] = grid.LOG10_B_ORIGIN_TEMPLATE
+            f.attrs["LOG10_B_ORIGIN_H2S"] = log10_b_origin_h2s
             f.create_dataset("LOG10_X_EDGES", data=grid.LOG10_X_EDGES)
             f.create_dataset("LOG10_B_EDGES", data=grid.log10_b_edges(grid.LOG10_B_ORIGIN_TEMPLATE))
             f.create_dataset("HPX_PIX_256", data=loaded["hpx_pix_256"])
