@@ -44,6 +44,17 @@ _LIB = {"STAR": ("sps", "region"), "AGB": ("agb", "region"), "PAHC": ("pahc", "r
 _SQRT2 = float(np.sqrt(2.0))
 _SQRT2PI = float(np.sqrt(2.0 * np.pi))
 
+#: SPEC_BMSTP_DRAFT.md section 4.2: a window at most this many cells wide
+#: is summed by exact per-cell erf differences; a wider one (sigma_a
+#: gtrsim 0.1 mag) reads the source's own a'-grid table instead (W6d item 2).
+N_EXACT = 8
+#: the a'-grid step, section 4.2 ("a fine grid of a_hat (0.01 mag)").
+A_STAR_TABLE_STEP = 0.01
+#: below this sigma_a the window is always narrow enough for the exact
+#: path (section 4.2's "sigma_a gtrsim 0.1 mag" for the table's <0.13%
+#: interpolation error), so no table is built for the source at all.
+A_STAR_SIGMA_MIN = 0.1
+
 
 class Prior(object):
     """One region/class's P1-P5 read, held for repeated `prepare`/`ln_prior`
@@ -227,6 +238,73 @@ def _factor_ln(reader, rows, a_hat, log10_b_hat, slope, sigma_a, model_index):
     return total
 
 
+def _build_a_star_tables(a_col, x_edges, sigma_a):
+    """The hybrid cell-mass table of SPEC_BMSTP_DRAFT.md section 4.2, one
+    per source with `sigma_a >= A_STAR_SIGMA_MIN`: on an `a'` grid of step
+    `A_STAR_TABLE_STEP` covering `[-5 sigma_a, A_COL_K * 10^x_max + 5
+    sigma_a]`, the cell mass `M_i(a')` and the cell's truncated-normal mean
+    `a*_i(a')` (both `(n_ap, n_x)`), by one vectorised `scipy.special.erf`
+    and `exp` pass over the whole grid (no erf/exp inside the per-template
+    kernel loop for these sources, W6d item 2), plus each `a'` bin's own
+    cell window `i_lo, i_hi` from the grid's geometric spacing. Sources
+    below `A_STAR_SIGMA_MIN` get `n_ap = 0` (the kernel's exact path
+    always). Returns padded float32 `(n, max_ap, n_x)` M and a* tables,
+    int32 `(n, max_ap)` window tables, float64 `(n,)` grid origins and
+    int32 `(n,)` real lengths.
+    """
+    from scipy.special import erf
+    n = sigma_a.size
+    n_x = x_edges.size - 1
+    x0 = float(x_edges[0])
+    dlx = float(x_edges[1] - x_edges[0])
+    x_max = float(x_edges[-1])
+    a_min = np.zeros(n, dtype=np.float64)
+    n_ap = np.zeros(n, dtype=np.int64)
+    edges_per_source = [None] * n
+    for s in range(n):
+        if sigma_a[s] < A_STAR_SIGMA_MIN or a_col[s] <= 0.0:
+            continue
+        amin = -5.0 * sigma_a[s]
+        amax = a_col[s] * 10.0 ** x_max + 5.0 * sigma_a[s]
+        n_ap[s] = int(np.ceil((amax - amin) / A_STAR_TABLE_STEP)) + 1
+        a_min[s] = amin
+        edges_per_source[s] = a_col[s] * 10.0 ** x_edges
+    max_ap = int(n_ap.max()) if n else 0
+    m_tab = np.zeros((n, max_ap, n_x), dtype=np.float32)
+    a_tab = np.zeros((n, max_ap, n_x), dtype=np.float32)
+    ilo_tab = np.zeros((n, max_ap), dtype=np.int32)
+    ihi_tab = np.zeros((n, max_ap), dtype=np.int32)
+    for s in range(n):
+        if n_ap[s] == 0:
+            continue
+        ap = a_min[s] + A_STAR_TABLE_STEP * np.arange(n_ap[s])
+        edges = edges_per_source[s]
+        z = (edges[None, :] - ap[:, None]) / sigma_a[s]
+        cdf = 0.5 * (1.0 + erf(z / _SQRT2))
+        phi = np.exp(-0.5 * z * z) / _SQRT2PI
+        mass = cdf[:, 1:] - cdf[:, :-1]
+        mass_safe = np.maximum(mass, 1e-300)
+        a_star = ap[:, None] + sigma_a[s] * (phi[:, :-1] - phi[:, 1:]) / mass_safe
+        # cells the window never reaches carry mass ~ 0 and an a* the
+        # kernel never gathers (its own window index selects only cells
+        # inside +/-5 sigma); clip before the float32 cast so those unused
+        # far cells (mass_safe's 1e-300 floor dividing a near-zero
+        # numerator swing) cannot overflow it.
+        a_star = np.clip(a_star, -1e30, 1e30)
+        m_tab[s, :n_ap[s], :] = mass.astype(np.float32)
+        a_tab[s, :n_ap[s], :] = a_star.astype(np.float32)
+        log10_ak = math.log10(a_col[s])
+        lo_a = ap - 5.0 * sigma_a[s]
+        hi_a = ap + 5.0 * sigma_a[s]
+        lx_hi = np.log10(np.maximum(hi_a, 1e-300)) - log10_ak
+        ihi = np.clip(np.floor((lx_hi - x0) / dlx), 0, n_x - 1).astype(np.int64)
+        lx_lo = np.log10(np.maximum(lo_a, 1e-300)) - log10_ak
+        ilo = np.where(lo_a > 0.0, np.clip(np.floor((lx_lo - x0) / dlx), 0, n_x - 1), 0.0).astype(np.int64)
+        ilo_tab[s, :n_ap[s]] = ilo.astype(np.int32)
+        ihi_tab[s, :n_ap[s]] = ihi.astype(np.int32)
+    return m_tab, a_tab, ilo_tab, ihi_tab, a_min, n_ap.astype(np.int32)
+
+
 @numba.njit(cache=True, fastmath=True, error_model="numpy")
 def _cell_index(a_val, log10_ak, x0, dlx, n_x):
     """The `log10 x` cell holding extinction `a_val` at this source's
@@ -245,28 +323,53 @@ def _cell_index(a_val, log10_ak, x0, dlx, n_x):
     return idx
 
 
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _ln_half_erfc(z):
+    """`ln[(1/2) erfc(z)]`, stable for large `z` (`fittp.likelihood`'s
+    `_ln_one_minus_c_kernel`'s own three branches, section 6.2's
+    asymptotic series for the scaled complementary error function): used
+    for the Gaussian's tail mass beyond the grid's first cell edge, so
+    that a template whose window never reaches positive extinction, or
+    whose cells all floor below `1e-6`, still reads a finite prior
+    (section 1.3: no hypothesis is ever at `-inf`)."""
+    ln_half = -0.6931471805599453
+    sqrt_pi = 1.7724538509055159
+    if z < 0.0:
+        return math.log1p(-0.5 * math.erfc(-z))
+    elif z < 5.0:
+        return ln_half + math.log(math.erfc(z))
+    else:
+        ln_erfcx = -math.log(z * sqrt_pi) - math.log(1.0 + 1.0 / (2.0 * z * z))
+        return ln_half + ln_erfcx - z * z
+
+
 @numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
 def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
-              b_origin, dlb, dlx, a_edges_buf):
+              b_origin, dlb, dlx, a_edges_buf,
+              m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, n_ap_tab):
     """The cell sum of SPEC_BMSTP_DRAFT.md section 4.2, per source and
     template: the cell window `[i_lo, i_hi]` holding `a_hat +/- 5 sigma_a`
-    found in O(1) from the grid's own geometric spacing (no table, no
-    scan of the other 125 cells); in each cell the Gaussian's mass `M_i`
-    by an erf difference and the brightness argument `a*_i`, the cell's
-    own truncated-normal mean `a_hat + sigma_a * (phi(alpha_i) -
-    phi(beta_i)) / M_i` with `alpha_i`, `beta_i` the cell's edges in
-    sigma units (section 4.2) -- `a_hat` itself for a narrow Gaussian,
-    the cell's midpoint for a wide one, so `h`'s gather and the Jacobian
-    `1 / a*_i` both sit at the mass's own mean within the cell, not the
-    cell's geometric center. The dot with `M` runs over cells above
-    1e-6. `A_COL_K` and `ln 10` in the Jacobian, common to every template
-    at a source, are dropped. No `(n_source x n_model x cells)`
+    found in O(1) from the grid's own geometric spacing (no scan of the
+    other 125 cells); in each cell the Gaussian's mass `M_i` and the
+    brightness argument `a*_i`, the cell's own truncated-normal mean --
+    `a_hat` itself for a narrow Gaussian, the cell's midpoint for a wide
+    one, so `h`'s gather and the Jacobian `1 / a*_i` both sit at the
+    mass's own mean within the cell. A window at most `N_EXACT` cells
+    wide (most sources: the well-measured case) still pays one erf and
+    one exp per cell exactly; a wider one (`sigma_a` well above
+    `A_STAR_SIGMA_MIN`) instead gathers `M_i`, `a*_i` from the source's
+    own `a'`-grid table (`_build_a_star_tables`, W6d item 2) by linear
+    interpolation in `a'` -- no erf, no exp, no per-template log10 for
+    that window's mass, only the one log10 pair that still decides which
+    path a given template's window takes (measured negligible next to the
+    erf/exp it replaces, W6d report). The dot with `M` runs over cells
+    above 1e-6. `A_COL_K` and `ln 10` in the Jacobian, common to every
+    template at a source, are dropped. No `(n_source x n_model x cells)`
     intermediate. `a_edges_buf` is `(n, n_x+1)` scratch, one row per
-    source: passed in rather than allocated per `prange` iteration, since
-    numba's auto-parallelisation can hoist a loop-invariant-shaped
-    `np.empty` out of the parallel loop and share one buffer across
-    threads -- a real race this reader hit at n > 1 sources, silently
-    wrong answers, not a crash."""
+    source. The outer source loop is plain and serial (the fitter's
+    harness calls this one source at a time); `prange` is the inner loop
+    over templates, so a single source's read still uses every core
+    (W6d item 3)."""
     n, m = a_hat.shape
     n_x = x_edges.size - 1
     n_b = h.shape[2]
@@ -274,7 +377,7 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     out = np.full((n, m), -np.inf, dtype=np.float32)
     sqrt2 = 1.4142135623730951
     sqrt2pi = 2.5066282746310002  # sqrt(2 pi), the normal density's normalisation
-    for s in numba.prange(n):
+    for s in range(n):
         AK = a_col[s]
         sig = sigma_a[s]
         if sig <= 0.0 or AK <= 0.0:
@@ -284,46 +387,105 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
         for i in range(n_x + 1):
             a_edges[i] = AK * 10.0 ** x_edges[i]
         inv_sig = 1.0 / sig
-        for th in range(m):
+        n_ap = n_ap_tab[s]
+        a_min = a_min_tab[s]
+        for th in numba.prange(m):
             ah = a_hat[s, th]
             lo_a = ah - 5.0 * sig
             hi_a = ah + 5.0 * sig
-            if hi_a <= 0.0:
-                continue  # the +/-5 sigma window never reaches positive extinction
-            i_lo = _cell_index(lo_a, log10_ak, x0, dlx, n_x)
-            i_hi = _cell_index(hi_a, log10_ak, x0, dlx, n_x)
             total = 0.0
             lbh = log10_b_hat[s, th]
             sl = slope[s]
             ct = c_theta[th]
-            z_prev = (a_edges[i_lo] - ah) * inv_sig
-            cdf_prev = 0.5 * (1.0 + math.erf(z_prev / sqrt2))
-            phi_prev = math.exp(-0.5 * z_prev * z_prev) / sqrt2pi
-            for i in range(i_lo, i_hi + 1):
-                z_next = (a_edges[i + 1] - ah) * inv_sig
-                cdf_next = 0.5 * (1.0 + math.erf(z_next / sqrt2))
-                phi_next = math.exp(-0.5 * z_next * z_next) / sqrt2pi
-                mi = cdf_next - cdf_prev
-                if mi >= 1e-6:
-                    # a*_i: the Gaussian's mean within cell i (section 4.2)
-                    a_star = ah + sig * (phi_prev - phi_next) / mi
-                    bval = lbh + sl * (a_star - ah) + ct
-                    bpos = (bval - b_origin) / dlb - 0.5
-                    j0 = int(math.floor(bpos))
-                    frac = bpos - j0
-                    if j0 < 0:
-                        j0 = 0
-                        frac = 0.0
-                    elif j0 >= n_b - 1:
-                        j0 = n_b - 2
-                        frac = 1.0
-                    dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
-                    total += dens * mi / a_star
-                cdf_prev = cdf_next
-                phi_prev = phi_next
-                z_prev = z_next
+            in_grid = hi_a > 0.0
+            i_lo = 0
+            i_hi = -1
+            if in_grid:
+                i_lo = _cell_index(lo_a, log10_ak, x0, dlx, n_x)
+                i_hi = _cell_index(hi_a, log10_ak, x0, dlx, n_x)
+            if not in_grid:
+                pass  # the +/-5 sigma window never reaches positive extinction
+            elif n_ap > 0 and (i_hi - i_lo + 1) > N_EXACT:
+                # the hybrid table path: M_i, a*_i by linear interpolation in a'
+                kpos = (ah - a_min) / A_STAR_TABLE_STEP
+                k0 = int(math.floor(kpos))
+                if k0 < 0:
+                    k0 = 0
+                    frac_k = 0.0
+                elif k0 >= n_ap - 1:
+                    k0 = n_ap - 2
+                    frac_k = 1.0
+                else:
+                    frac_k = kpos - k0
+                t_lo = ilo_tab[s, k0]
+                t_hi = ihi_tab[s, k0]
+                for i in range(t_lo, t_hi + 1):
+                    mi = m_tab[s, k0, i] * (1.0 - frac_k) + m_tab[s, k0 + 1, i] * frac_k
+                    if mi >= 1e-6:
+                        a_star = a_tab[s, k0, i] * (1.0 - frac_k) + a_tab[s, k0 + 1, i] * frac_k
+                        bval = lbh + sl * (a_star - ah) + ct
+                        bpos = (bval - b_origin) / dlb - 0.5
+                        j0 = int(math.floor(bpos))
+                        frac = bpos - j0
+                        if j0 < 0:
+                            j0 = 0
+                            frac = 0.0
+                        elif j0 >= n_b - 1:
+                            j0 = n_b - 2
+                            frac = 1.0
+                        dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
+                        total += dens * mi / a_star
+            else:
+                z_prev = (a_edges[i_lo] - ah) * inv_sig
+                cdf_prev = 0.5 * (1.0 + math.erf(z_prev / sqrt2))
+                phi_prev = math.exp(-0.5 * z_prev * z_prev) / sqrt2pi
+                for i in range(i_lo, i_hi + 1):
+                    z_next = (a_edges[i + 1] - ah) * inv_sig
+                    cdf_next = 0.5 * (1.0 + math.erf(z_next / sqrt2))
+                    phi_next = math.exp(-0.5 * z_next * z_next) / sqrt2pi
+                    mi = cdf_next - cdf_prev
+                    if mi >= 1e-6:
+                        # a*_i: the Gaussian's mean within cell i (section 4.2)
+                        a_star = ah + sig * (phi_prev - phi_next) / mi
+                        bval = lbh + sl * (a_star - ah) + ct
+                        bpos = (bval - b_origin) / dlb - 0.5
+                        j0 = int(math.floor(bpos))
+                        frac = bpos - j0
+                        if j0 < 0:
+                            j0 = 0
+                            frac = 0.0
+                        elif j0 >= n_b - 1:
+                            j0 = n_b - 2
+                            frac = 1.0
+                        dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
+                        total += dens * mi / a_star
+                    cdf_prev = cdf_next
+                    phi_prev = phi_next
+                    z_prev = z_next
             if total > 0.0:
                 out[s, th] = np.log(total)
+            else:
+                # section 1.3: no template's prior is -inf. Either the
+                # window never reached positive extinction or every cell
+                # in it floored below 1e-6: read the grid's first cell (i
+                # = 0) at a* = a_0, its own lower edge, times the
+                # Gaussian's tail mass beyond a_0.
+                a0 = a_edges[0]
+                z0 = (a0 - ah) * inv_sig
+                ln_tail = _ln_half_erfc(z0 / sqrt2)
+                bval = lbh + sl * (a0 - ah) + ct
+                bpos = (bval - b_origin) / dlb - 0.5
+                j0 = int(math.floor(bpos))
+                frac = bpos - j0
+                if j0 < 0:
+                    j0 = 0
+                    frac = 0.0
+                elif j0 >= n_b - 1:
+                    j0 = n_b - 2
+                    frac = 1.0
+                dens = (h[s, 0, j0] * (1.0 - frac) + h[s, 0, j0 + 1] * frac) / (dlx * dlb)
+                if dens > 0.0:
+                    out[s, th] = math.log(dens / a0) + ln_tail
     return out
 
 
@@ -346,10 +508,14 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index):
     n_x = reader.x_edges.size - 1
     c_theta = reader.c_theta[model_index] if reader.c_theta.size else np.zeros(m)
     a_edges_buf = np.empty((rows.size, n_x + 1), dtype=np.float64)
-    core = _cell_sum(a_col, reader.x_edges, np.asarray(sigma_a, dtype=np.float64),
+    sigma_a = np.asarray(sigma_a, dtype=np.float64)
+    m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, n_ap_tab = _build_a_star_tables(
+        a_col, reader.x_edges, sigma_a)
+    core = _cell_sum(a_col, reader.x_edges, sigma_a,
                       np.asarray(a_hat, dtype=np.float64), np.asarray(log10_b_hat, dtype=np.float64),
                       np.asarray(slope, dtype=np.float64), np.asarray(c_theta, dtype=np.float64),
-                      h, reader.b_origin, reader.dlb, reader.dlx, a_edges_buf)
+                      h, reader.b_origin, reader.dlb, reader.dlx, a_edges_buf,
+                      m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, n_ap_tab)
     factor_term = _factor_ln(reader, rows, np.asarray(a_hat, dtype=np.float64),
                               np.asarray(log10_b_hat, dtype=np.float64),
                               np.asarray(slope, dtype=np.float64),
