@@ -110,6 +110,7 @@ PY sesnaimpute.population.young_stars
 PY sesnaimpute.population.anchor_observed
 PY sesnaimpute.population.anchor_weights
 PY sesnaimpute.population.star_population
+PY sesnaimpute.population.check   # every population/ dataset against its bms/ twin, element for element (W0 identity)
 
 # --- bmstp (the prior: shape grids per grain, the per-source density table, template weights, the atlas; writes bmstp/) ---
 # Lines are added here as each stage lands (IMPLEMENTATION_BMSTP sec 3).
