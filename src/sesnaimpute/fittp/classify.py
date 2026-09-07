@@ -141,28 +141,20 @@ def _sensitivity_scale(run):
     raise ValueError("fittp.classify: unknown fixed-scale sensitivity run %r" % run)
 
 
-#: A numerical guard only, not a science floor: `AK_SESNA` is exactly 0.0
-#: at 81% of NGC 7129's sources (its own dust map's own floor at low
-#: column), where `ln(A_s)` is otherwise `-inf` and the shift below would
-#: be `+inf`. Floored here at this fraction of `A_MIN_YSO_LAW` so the
-#: shift stays a large, finite number instead of `inf`/`nan`; disclosed,
-#: since it still makes `yso_floor` a near-total MAP override at every
-#: `A_s = 0` source (see the module report).
-_AK_DENOM_EPS_FRAC = 1e-6
-
-
-def _yso_floor_shift(ak):
+def _yso_floor_shift(a_col_k):
     """`ln( max(A_s, A_MIN_YSO_LAW)^2 / A_s^2 )` per source (spec sec 7.2):
     the young-star law floored at low column, not rescaled -- zero at and
     above the floor, growing only as `A_s` falls below it; applied
     identically to YSO and H2S (sec 5.6: H2S's density rides on the same
-    law, never its own). The formula is undefined at `A_s = 0`
-    (`_AK_DENOM_EPS_FRAC`'s docstring).
+    law, never its own). `A_s` is `bmstp.density`'s own `A_COL_K` (P1) --
+    the adopted column the YSO sky density itself was built from, not the
+    catalogue's `AK_SESNA` (a source-derived quantity, spec sec 1.5, never
+    read in `fittp`); at NGC 7129 it runs 0.076-0.62 mag with no zeros, so
+    the ratio needs no numerical guard.
     """
-    ak = np.asarray(ak, dtype=np.float64)
-    ak_floored = np.maximum(ak, A_MIN_YSO_LAW)
-    ak_denom = np.maximum(ak, A_MIN_YSO_LAW * _AK_DENOM_EPS_FRAC)
-    return 2.0 * (np.log(ak_floored) - np.log(ak_denom))
+    a_col_k = np.asarray(a_col_k, dtype=np.float64)
+    a_col_k_floored = np.maximum(a_col_k, A_MIN_YSO_LAW)
+    return 2.0 * (np.log(a_col_k_floored) - np.log(a_col_k))
 
 
 def sensitivity_scaling_matrix():
@@ -401,14 +393,21 @@ def run_sensitivity_region(config, region, st, beta):
     no refit, batched with the classify build. Returns `n_source`,
     `frac_map_changed` (9,), `n_pyso_above_half` (10,, column 0 nominal),
     `yso_floor_mean_factor` (this region's mean over sources of
-    `exp(_yso_floor_shift(ak))`, for `SCALING`'s ninth row).
+    `exp(_yso_floor_shift(a_col_k))`, for `SCALING`'s ninth row).
     """
     _require_fit_files(config, region)
     class_files = {cls: h5py.File(_fit_path(config, region, cls), "r") for cls in CLASSES}
     names = class_files["STAR"]["NAME"][:]
     psi_file = h5py.File(_cascade_path(config, region), "r") if beta != 0.0 else None
 
-    cat_path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
+    # A_COL_K (P1, bmstp.density): the adopted column the YSO sky density
+    # was itself built from, never the catalogue's own AK_SESNA (spec sec
+    # 1.5: a source-derived quantity, not read anywhere in fittp).
+    density_path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
+    density_file = h5py.File(density_path, "r")
+    if not np.array_equal(density_file["NAME"][:], names):
+        raise ValueError("fittp.classify [%s]: bmstp.density's NAME does not row-align "
+                          "with the fit files' own" % region)
 
     n = names.shape[0]
     n_run = len(SENSITIVITY_RUNS)
@@ -420,9 +419,8 @@ def run_sensitivity_region(config, region, st, beta):
     bounds = list(batches(n, ROW_BYTES))
     for bi, (start, stop) in enumerate(bounds):
         m = stop - start
-        with h5py.File(cat_path, "r") as cf:
-            ak_block = np.asarray(cf["AK_SESNA"][start:stop], dtype=np.float64)
-        yso_floor_shift = _yso_floor_shift(ak_block)
+        a_col_k_block = np.asarray(density_file["A_COL_K"][start:stop], dtype=np.float64)
+        yso_floor_shift = _yso_floor_shift(a_col_k_block)
         yso_floor_factor_sum += float(np.sum(np.exp(yso_floor_shift)))
 
         ln_ev_nominal = _batch_ln_evidence(class_files, psi_file, beta, start, stop, m)
@@ -451,6 +449,7 @@ def run_sensitivity_region(config, region, st, beta):
         f.close()
     if psi_file is not None:
         psi_file.close()
+    density_file.close()
 
     return dict(n_source=n, frac_map_changed=(changed / n if n else changed.astype(np.float64)),
                 n_pyso_above_half=n_pyso,
@@ -509,8 +508,8 @@ def write_sensitivity(path, region, result):
         f.attrs["GRANULE"] = "region"
         f.attrs["SCALING_YSO_FLOOR_IS_PER_SOURCE"] = (
             "SCALING row %d (yso_floor) is each region's own mean over sources of "
-            "exp(ln(max(A,%.2g)^2/A^2)) (A = AK_SESNA), not a fixed literature-band "
-            "factor like the other eight rows" % (yso_floor_ri, A_MIN_YSO_LAW))
+            "exp(ln(max(A,%.2g)^2/A^2)) (A = bmstp.density's A_COL_K), not a fixed "
+            "literature-band factor like the other eight rows" % (yso_floor_ri, A_MIN_YSO_LAW))
 
 
 def build(config, regions=None, beta=0.0):
