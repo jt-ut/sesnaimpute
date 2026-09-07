@@ -330,4 +330,11 @@ class GaiaTerm:
         h = np.where(np.isnan(g0), 0.0, h)
 
         gamma = g_s * h * a_x + (1.0 - g_s) * (1.0 - h)
-        return np.log(gamma)
+        # gamma = 0 is a real zero-probability model under a Gaia
+        # counterpart's own detection/non-detection evidence (e.g. the
+        # source is seen but this model's H_h says it should not be, or
+        # vice versa) -- ln(0) = -inf is the ruled likelihood, not a
+        # defect, so the divide-by-zero warning is silenced, not the
+        # value.
+        with np.errstate(divide="ignore"):
+            return np.log(gamma)

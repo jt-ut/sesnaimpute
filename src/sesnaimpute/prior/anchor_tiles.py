@@ -105,9 +105,19 @@ _CANDIDATE_TILE_NSIDES = np.array([1 << k for k in range(10)], dtype=np.int64)
 
 def gaia_detection_weight(g_obs):
     """`p_G(G_obs)`, Cantat-Gaudin et al. 2023's published 50% limit and
-    roll-off width as a sigmoid (SPEC_PRIORS.md section 2.1)."""
+    roll-off width as a sigmoid (SPEC_PRIORS.md section 2.1).
+
+    A source far past the roll-off (very faint `g_obs`) drives the
+    sigmoid's own exponent to a large positive number; `exp` of that
+    overflows to `inf` before the reciprocal folds it back down to the
+    correct answer, 0. Clipping the exponent's argument at 700 (`exp`'s
+    own overflow threshold is just under 710) reaches the same double-
+    precision answer -- the sigmoid is already 0 to machine precision out
+    there -- without ever asking `exp` to overflow.
+    """
     g_obs = np.asarray(g_obs, dtype=np.float64)
-    return 1.0 / (1.0 + np.exp(-(GAIA_G_LIM_MAG - g_obs) / GAIA_G_ROLLOFF_MAG))
+    arg = -(GAIA_G_LIM_MAG - g_obs) / GAIA_G_ROLLOFF_MAG
+    return 1.0 / (1.0 + np.exp(np.minimum(arg, 700.0)))
 
 
 def magnitudes_at_extinction(a_local, g_proxy, ks_mag, k_g_diffuse, k_g_dense,
