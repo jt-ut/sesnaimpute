@@ -31,6 +31,7 @@ import os
 
 import h5py
 import numpy as np
+import threadpoolctl
 from scipy.special import logsumexp
 
 from sesnaimpute import config as config_module
@@ -324,15 +325,19 @@ def build_region_class(config, region, cls, st, limit=None):
     zero_ext_count = 0
     n_templates_checked = 0
 
-    for bi, (bstart, bstop) in enumerate(batch_bounds):
-        batch = _batch_result(config, region, cls, reader, gaia_term, template_log,
-                               subclass_idx, n_sub, width_dex, topk, block, bstart, bstop)
-        part_path = _part_path(path, bi)
-        _write_part(part_path, batch)
-        part_paths.append(part_path)
-        zero_ext_count += batch["zero_ext_count"]
-        n_templates_checked += batch["n_templates_checked"]
-        st.tick(bi + 1, len(batch_bounds), "batches")
+    # BLAS's own thread pool is capped to 1 for the fit's small (m,8)@(8,8)
+    # gemms (W9a: memory-bound, 1 thread ~10% faster than 4) while numba's
+    # separate erfc kernel keeps its own 4 threads (fittp.likelihood).
+    with threadpoolctl.threadpool_limits(1, user_api="blas"):
+        for bi, (bstart, bstop) in enumerate(batch_bounds):
+            batch = _batch_result(config, region, cls, reader, gaia_term, template_log,
+                                   subclass_idx, n_sub, width_dex, topk, block, bstart, bstop)
+            part_path = _part_path(path, bi)
+            _write_part(part_path, batch)
+            part_paths.append(part_path)
+            zero_ext_count += batch["zero_ext_count"]
+            n_templates_checked += batch["n_templates_checked"]
+            st.tick(bi + 1, len(batch_bounds), "batches")
 
     zero_ext_frac = zero_ext_count / n_templates_checked if n_templates_checked else float("nan")
     density_file = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)

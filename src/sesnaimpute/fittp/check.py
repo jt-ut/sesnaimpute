@@ -168,8 +168,8 @@ def _sensitivity(config, region):
     ri = region_names.index(region)
     rows = []
     for j, run_name in enumerate(runs):
-        ci = int(np.argmax(np.abs(scaling[j] - 1.0)))
-        rows.append((run_name, CLASSES[ci], float(scaling[j, ci]),
+        ci = int(np.argmax(np.abs(scaling[ri, j] - 1.0)))
+        rows.append((run_name, CLASSES[ci], float(scaling[ri, j, ci]),
                      float(frac[ri, j]), int(n_pyso[ri, j + 1])))
     return int(n_pyso[ri, 0]), rows
 
