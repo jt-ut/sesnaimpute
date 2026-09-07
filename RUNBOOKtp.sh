@@ -121,7 +121,12 @@ PY sesnaimpute.bmstp.density   # the per-source density table, P1: column, grain
 PY sesnaimpute.bmstp.atlas   # the prior atlas, P6: per-pixel Monte Carlo selection and the total-count check (SPEC_BMSTP sec 8)
 
 # --- fittp (the thinned-Poisson fitter, the classification, the cascade, the posterior atlas; writes fittp/) ---
-# Lines are added here as each stage lands (IMPLEMENTATION_BMSTP sec 4). The [fittp] knobs live in root.cfg.
+# Lines are added here as each stage lands (IMPLEMENTATION_BMSTP sec 4). The
+# [fit]/[fittp] knobs (config.py's [fit] section) live in root.cfg:
+# topk -> fit_topk (fittp.sweep's per-source top-K record size), batch_size
+# -> fit_batch_size (fittp.sweep's per-part-file source count), block_budget_mb
+# -> fit_block_budget_mb (fittp.sweep/likelihood.block_size's per-block memory
+# cap), beta -> fit_beta (fittp.classify's cascade-evidence blend weight).
 # cascade's measured half needs no fit, so it runs before the fit loop; its
 # imputed half (fittp.classify's FLUX_IMPUTED) is filled in by re-running this
 # same line after classify, once per region, once classify has written.
@@ -129,9 +134,9 @@ PY sesnaimpute.fittp.cascade   # the colour cascade on the measured fluxes, Psi 
 PY sesnaimpute.fittp.library_resolution   # SIGMA_LIB_DEX per library, the fit's per-band variance floor (SPEC_BMSTP sec 6.1)
 # One capped.sh process per class, so one class's peak resident is never summed with the class before it.
 for FIT_CLASS in STAR AGB PAHC GAL YSO H2S; do
-  PY sesnaimpute.fittp.sweep --classes "$FIT_CLASS"   # the class evidence sweep, P7, batched (SPEC_BMSTP sec 1.3; IMPLEMENTATION_BMSTP sec 4 row 2.4)
+  PY sesnaimpute.fittp.sweep --classes "$FIT_CLASS"   # the class evidence sweep, P7, batched at [fit] batch_size/block_budget_mb, K=[fit] topk (SPEC_BMSTP sec 1.3; IMPLEMENTATION_BMSTP sec 4 row 2.4)
 done
-PY sesnaimpute.fittp.classify   # P(C|D), subclasses, MAP, imputed flux (P8) and the literature-band sensitivity (P9) (SPEC_BMSTP sec 7.1, 7.2)
+PY sesnaimpute.fittp.classify   # P(C|D) at [fit] beta, subclasses, MAP, imputed flux (P8) and the literature-band sensitivity (P9) (SPEC_BMSTP sec 7.1, 7.2)
 PY sesnaimpute.fittp.cascade   # re-run: fills the cascade's imputed half now that classify has written (SPEC_BMSTP sec 7.3)
 PY sesnaimpute.fittp.atlas   # the posterior atlas, P11: per-pixel mean P(C|D) and the P(YSO)>0.5 count (SPEC_BMSTP sec 8)
 PY sesnaimpute.fittp.check   # the spec sec 9 checks read from P1-P11, report only (IMPLEMENTATION_BMSTP sec 7)
