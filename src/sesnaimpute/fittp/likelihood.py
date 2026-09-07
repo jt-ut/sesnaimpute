@@ -43,12 +43,17 @@ AV_CLAMP_MAX_AK = 75.0
 _SQRT2 = np.float32(np.sqrt(2.0))
 
 #: Per-block working set (rule 10b/10a), in float32-`(n_block, n_model, 8)`
-#: equivalents: the chi2 quadratic form's `R @ P` (1), and the
-#: non-detection term's `log10_fhat`/`z` (float32, 1 each) plus the numba
-#: kernel's float64 copy and output (2 float32-equivalents each, for the
-#: float64 precision the z=0 identity needs) -- 7 in all; `block_size`
-#: sizes a block so that many such arrays fit `budget_mb`.
-NONDET_BUFFERS = 7
+#: equivalents: `r` (float64, held across the chi2 and marks products, 2)
+#: plus `R @ P` (float64, transient during the chi2 product, 2) or, once
+#: freed, the non-detection term's `log10_fhat`/`z` (float32, 1 each), the
+#: numba kernel's own float64 output (2, for the float64 precision the
+#: z=0 identity needs -- the kernel casts each element to float64 inside
+#: the loop, so no separate float64 copy of the input `z` array is held)
+#: and its masked copy (2) -- 8 in all at the non-detection term's own
+#: peak (`r` still live, `log10_fhat` + `z` + kernel output + masked
+#: copy); `block_size` sizes a block so that many such arrays fit
+#: `budget_mb`.
+NONDET_BUFFERS = 8
 
 
 #: SPEC_BMSTP_DRAFT.md section 6.2 -- above this `z`, `_ln_one_minus_c_kernel`
@@ -70,12 +75,15 @@ def _ln_one_minus_c_kernel(z_flat, out):
     -ln(z sqrt(pi)) - ln(1 + 1/(2 z^2))`, avoids `erfc`'s eventual
     underflow (z ~ 27) with the leading-order tail term the spec's own
     "ten times the limit costs about 5 nats" case sits well inside.
+    `z_flat` is float32 (the block's own working dtype); each element is
+    cast to float64 here, per scalar, so the z=0 identity keeps double
+    precision without a separate float64 copy of the whole array.
     """
     n = z_flat.shape[0]
     ln_half = -0.6931471805599453
     sqrt_pi = 1.7724538509055159
     for i in numba.prange(n):
-        zi = z_flat[i]
+        zi = np.float64(z_flat[i])
         if zi < 0.0:
             out[i] = math.log1p(-0.5 * math.erfc(-zi))
         elif zi < _ERFC_DIRECT_MAX_Z:
@@ -89,13 +97,17 @@ def _ln_one_minus_c_kernel(z_flat, out):
 def _ln_one_minus_c(z):
     """`ln[1 - C(z)]`, section 6.2 (`_ln_one_minus_c_kernel`'s docstring for
     the three branches), on an array of any shape: at `z = 0` this is
-    `ln(1/2)` to float64 precision (`math.erfc(0.0) == 1.0` exactly), so the
-    identity check holds to 1e-10 with no float32 rounding in the way.
+    `ln(1/2)` to float64 precision (`math.erfc(0.0) == 1.0` exactly
+    regardless of `z`'s own dtype), so the identity check holds to 1e-10
+    with no float32 rounding in the way. `z` keeps its own dtype (float32
+    from the block's working set) into the kernel -- only the kernel's
+    per-element arithmetic and its output are float64, so no full-array
+    float64 copy of `z` is made here.
     """
-    z = np.asarray(z, dtype=np.float64)
+    z = np.asarray(z)
     shape = z.shape
     z_flat = np.ascontiguousarray(z.reshape(-1))
-    out = np.empty_like(z_flat)
+    out = np.empty(z_flat.shape, dtype=np.float64)
     _ln_one_minus_c_kernel(z_flat, out)
     return out.reshape(shape)
 
@@ -122,8 +134,12 @@ def _ln_nondet(batch, log10_f_ref, av_clamped32, sc_clamped32):
 class Batch:
     """The per-source quantities the closed form and the non-detection term
     need, computed once per block and reused for every template:
-    `log10_f_obs` and its weight, `P` and `M` (section 6.1), `sigma_a` and
-    the conditional slope (section 1.3), the extinction design column
+    `log10_f_obs` (float64, section 6.1) and its weight, `P` (n, 8, 8) and
+    `M` (n, 8, 2) -- both float64 (the projector `P` and the mark map `M`
+    are built from cancelling weight-scale terms and must stay at that
+    precision for identity (i), `fit()`'s docstring), `M` pre-transposed
+    so `fit()`'s `matmul(r, M)` needs no per-call transpose -- `sigma_a`
+    and the conditional slope (section 1.3), the extinction design column
     (`ext_col`) and the two scalars the clamp's re-solve uses (`s0`,
     `w_sum`), and the per-band `F_LIM_50` and roll-off width `WIDTH_DEX`
     (section 6.2).
@@ -236,8 +252,20 @@ def prepare(config, region, start, stop, flux, sigma, origin, ak_col, width_dex)
     # this only guards a non-finite F_LIM_50.
     nondet_mask = (~detected) & np.isfinite(f_lim50)
 
+    # P and M stay float64: both are built from cancellation of O(weight)
+    # (~1e3-1e4) terms -- P = W - WX(XtWX)^-1XtW is a projector that must
+    # annihilate the design X to the precision r^T P r needs, and a
+    # float32 P leaves P @ X ~1e-4 instead of ~0 (measured), which blows
+    # identity (i)'s chi2 check to ~24% relative error. `log10_f_obs`
+    # likewise stays float64 so `r` is not independently float32-rounded
+    # on top of the template register's own float32 quantisation of
+    # `log10_f_ref` (`fit()`'s docstring). `M` is pre-transposed to
+    # (n, 8, 2) so `fit()` calls `matmul(r, M)` directly with no
+    # per-call transpose (the matmul-vs-einsum win is dtype-independent).
     return Batch(log10_f_obs=log10_f_obs, weight=weight.astype(np.float32),
-                 P=p_mat, M=m_mat, ext_col=ext_col.astype(np.float32),
+                 P=p_mat,
+                 M=np.ascontiguousarray(m_mat.transpose(0, 2, 1)),
+                 ext_col=ext_col.astype(np.float32),
                  s0=s0, w_sum=w_sum,
                  sigma_a_ak=sigma_a_ak, slope_sc_av=slope_sc_av, ak_per_av=ak_per_av,
                  log10_f_lim50=log10_f_lim50.astype(np.float32),
@@ -251,8 +279,14 @@ def fit(batch, log10_f_ref):
     log10_f_ref`:
 
     - `chi2_min = r^T P r` and the UNCONSTRAINED `(Av_hat, SC_hat) = r^T
-      M^T` at every source, kept in float64 (`a_hat`, `log10_b_hat`) since
-      the prior read's own identity needs it; `chi2_min` is float32.
+      M^T` at every source, `r`/`P`/`M` kept float64 (`P` is a projector
+      built from cancelling O(weight) ~1e3-1e4 terms; a float32 `P` leaves
+      `P @ X` at ~1e-4 instead of ~0, which fails identity (i) -- measured):
+      `a_hat`, `log10_b_hat` float64; `chi2_min` float32. Both products are
+      now one batched matmul per source (`M` stored `(n, 8, 2)` so
+      `matmul(r, M)` needs no per-call transpose) rather than a general
+      three-index einsum -- a per-source BLAS gemm dispatch either way,
+      but einsum's own generic loop was markedly slower (measured).
     - The CLAMPED marks, `Av` restricted to `[0, 75/(A_K/A_V)_s]`: because
       the gray column is one constant in every band, the least-squares
       residual is orthogonal to both design columns, so re-solving `SC` at
@@ -273,15 +307,18 @@ def fit(batch, log10_f_ref):
     log10_f_ref = np.asarray(log10_f_ref, dtype=np.float32)
     r = batch.log10_f_obs[:, None, :] - log10_f_ref[None, :, :]     # (n, m, 8) float64
 
-    # r^T P r as two (m, 8) @ (8, 8) matmuls per source (P symmetric),
-    # batched over sources: faster than a single three-index einsum
-    # because it dispatches to a per-source BLAS gemm; kept in float64 so
-    # chi2_min matches the direct lstsq residual to the fit's own
-    # precision, not float32's.
+    # r^T P r as one (m, 8) @ (8, 8) matmul per source (P symmetric),
+    # batched over sources: dispatches to a per-source BLAS gemm; float64
+    # (see the docstring above) so chi2_min matches the direct lstsq
+    # residual to the fit's own precision.
     rp = np.matmul(r, batch.P)
     chi2_min = (r * rp).sum(axis=2).astype(np.float32)
 
-    marks = np.einsum("nmb,nkb->nmk", r, batch.M)
+    # (Av_hat, SC_hat) = r^T M^T as one batched (m, 8) @ (8, 2) matmul
+    # (`batch.M` is already stored (n, 8, 2)): a BLAS gemm dispatch per
+    # source -- markedly faster than the general three-index einsum it
+    # replaces, at the same float64 precision.
+    marks = np.matmul(r, batch.M)
     av_hat = marks[:, :, 0]
     sc_hat = marks[:, :, 1]
     a_hat = av_hat * batch.ak_per_av[:, None]
@@ -297,6 +334,9 @@ def fit(batch, log10_f_ref):
     log10_b_hat_clamped = (-2.0 * sc_clamped).astype(np.float32)
     frac_clamped = clamp_engaged.mean(axis=1).astype(np.float32)
 
+    # only the non-detection term's flux prediction needs float32 (its
+    # own (n, m, 8) working set, section 6.2) -- cast once here, not
+    # threaded back through the clamp above.
     av_clamped32 = av_clamped.astype(np.float32)
     sc_clamped32 = sc_clamped.astype(np.float32)
     ln_nondet = _ln_nondet(batch, log10_f_ref, av_clamped32, sc_clamped32)
