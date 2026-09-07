@@ -186,7 +186,33 @@ def _draw_members(rng, weight, n_mc):
     return idx, total
 
 
-def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config):
+#: rule 10b's 512 MB batch budget, for the (n_pixel_batch, N_MC, 8) arrays
+#: `_accepted_fraction` holds: `kappa`, `dimming`, `flux`, `log10_f`, `z`,
+#: `p`, `one_minus_p` and the per-band `np.delete` term in the closed-form
+#: loop are each that shape, and each expression above allocates its own
+#: buffer rather than reusing one -- `_N_TEMP_ARRAYS` counts that many
+#: same-shape buffers live at once, generously, so the true peak (measured
+#: below) sits under the target with margin. `_build_one_tile` runs this
+#: inside up to `_MAX_N_JOBS` joblib workers at once (STAR/AGB/PAHC, one
+#: tile per worker), so the 512 MB is divided by that worker cap: the
+#: budget is per worker times n_jobs, not 512 MB again in every worker.
+_PIXEL_BATCH_BUDGET_BYTES = 512 * 1024 * 1024
+_N_TEMP_ARRAYS = 12
+
+
+def _pixel_batch_size(n_mc):
+    """Pixels per batch so `n_pixel_batch * N_MC * N_BANDS * 8 bytes
+    (float64) * _N_TEMP_ARRAYS` stays under `_PIXEL_BATCH_BUDGET_BYTES /
+    _MAX_N_JOBS` per worker, independent of how many pixels the caller (a
+    tile, a sightline, or GAL's whole region) holds -- CODING_RULES_BMSTP.md
+    rule 10b, with the worst case of `_MAX_N_JOBS` workers computing a
+    batch each at the same time held to the rule's 512 MB in aggregate."""
+    per_worker_budget = _PIXEL_BATCH_BUDGET_BYTES // _MAX_N_JOBS
+    row_bytes = n_mc * N_BANDS * 8 * _N_TEMP_ARRAYS
+    return max(1, per_worker_budget // row_bytes)
+
+
+def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None):
     """`(frac, mc_error)` per pixel: `flux0` (n_mc, 8) undimmed, `u` (n_mc,)
     the member's own placement fraction, `a_col` (n_pix,) the pixel's own
     column, `f_lim` (n_pix, 8) the pixel's own median limits, `width_dex`
@@ -206,27 +232,47 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config):
     mean catalogued probability at `N_MC` draws (the sample standard
     deviation of `accepted_prob` over members, since each draw is now a
     probability rather than a 0/1 outcome, unlike the retired step test's
-    Bernoulli `frac*(1-frac)` form)."""
+    Bernoulli `frac*(1-frac)` form).
+
+    Processed in pixel batches of `_pixel_batch_size` (rule 10b): each
+    batch is the same elementwise-per-pixel computation on a slice of
+    `a_col`/`f_lim`, so splitting the pixel axis changes no result -- the
+    member draws (`u`, `flux0`) are unsliced and shared by every batch.
+    Each batch's rows are written straight into the preallocated
+    `frac`/`mc_error` outputs; `tick(done, total)` is called once per
+    batch when given (only GAL's region-wide call passes one -- a tile or
+    a sightline's own pixel count is already small)."""
     assert MIN_BANDS_CLEAR == 2, "the closed form below is `P(>=2 of 8)` only"
     n_mc = u.size
-    a = a_col[:, None] * u[None, :]  # (n_pix, n_mc)
-    w_ramp = selection_module.law_dense_weight(a)  # (n_pix, n_mc)
-    kappa = selection_module.kappa_hybrid(config, w_ramp)  # (n_pix, n_mc, 8)
-    dimming = 0.4 * a[:, :, None] * kappa  # (n_pix, n_mc, 8)
-    flux = flux0[None, :, :] * 10.0 ** (-dimming)  # (n_pix, n_mc, 8)
-    has_flux = flux0[None, :, :] > 0.0  # (1, n_mc, 8), broadcasts
-    log10_f = np.log10(np.where(has_flux, flux, 1.0))
-    z = ((log10_f - np.log10(f_lim)[:, None, :])
-         / (likelihood_module._SQRT2 * width_dex[None, None, :]))
-    p = np.where(has_flux, 1.0 - np.exp(likelihood_module._ln_one_minus_c(z)), 0.0)
-    one_minus_p = 1.0 - p  # (n_pix, n_mc, 8)
-    prod_all = np.prod(one_minus_p, axis=2)
-    sum_term = np.zeros_like(prod_all)
-    for i in range(N_BANDS):
-        sum_term += p[:, :, i] * np.prod(np.delete(one_minus_p, i, axis=2), axis=2)
-    accepted_prob = 1.0 - prod_all - sum_term
-    frac = accepted_prob.mean(axis=1)
-    mc_error = accepted_prob.std(axis=1) / np.sqrt(n_mc)
+    n_pix = a_col.size
+    frac = np.empty(n_pix, dtype=np.float64)
+    mc_error = np.empty(n_pix, dtype=np.float64)
+    batch = _pixel_batch_size(n_mc)
+    n_batches = (n_pix + batch - 1) // batch
+    for b, start in enumerate(range(0, n_pix, batch)):
+        stop = min(start + batch, n_pix)
+        a_b = a_col[start:stop]
+        f_lim_b = f_lim[start:stop]
+        a = a_b[:, None] * u[None, :]  # (n_pix_batch, n_mc)
+        w_ramp = selection_module.law_dense_weight(a)  # (n_pix_batch, n_mc)
+        kappa = selection_module.kappa_hybrid(config, w_ramp)  # (n_pix_batch, n_mc, 8)
+        dimming = 0.4 * a[:, :, None] * kappa  # (n_pix_batch, n_mc, 8)
+        flux = flux0[None, :, :] * 10.0 ** (-dimming)  # (n_pix_batch, n_mc, 8)
+        has_flux = flux0[None, :, :] > 0.0  # (1, n_mc, 8), broadcasts
+        log10_f = np.log10(np.where(has_flux, flux, 1.0))
+        z = ((log10_f - np.log10(f_lim_b)[:, None, :])
+             / (likelihood_module._SQRT2 * width_dex[None, None, :]))
+        p = np.where(has_flux, 1.0 - np.exp(likelihood_module._ln_one_minus_c(z)), 0.0)
+        one_minus_p = 1.0 - p  # (n_pix_batch, n_mc, 8)
+        prod_all = np.prod(one_minus_p, axis=2)
+        sum_term = np.zeros_like(prod_all)
+        for i in range(N_BANDS):
+            sum_term += p[:, :, i] * np.prod(np.delete(one_minus_p, i, axis=2), axis=2)
+        accepted_prob = 1.0 - prod_all - sum_term
+        frac[start:stop] = accepted_prob.mean(axis=1)
+        mc_error[start:stop] = accepted_prob.std(axis=1) / np.sqrt(n_mc)
+        if tick is not None:
+            tick(b + 1, n_batches)
     return frac, mc_error
 
 
@@ -609,7 +655,9 @@ def build_region(config, region):
         # pixel's own column and limits with the shared `_accepted_fraction`.
         gal_rng = np.random.RandomState(MC_SEED)
         gal_flux, gal_u, density_gal = _gal_members(config, gal_rng, N_MC)
-        frac_gal, mc_gal = _accepted_fraction(a_col, gal_u, gal_flux, f_lim, width_dex, config)
+        frac_gal, mc_gal = _accepted_fraction(
+            a_col, gal_u, gal_flux, f_lim, width_dex, config,
+            tick=lambda done, total: st.tick(done, total, "GAL pixel batches"))
         n_cat["GAL"] = density_gal * frac_gal
         mc_err["GAL"] = mc_gal
 
