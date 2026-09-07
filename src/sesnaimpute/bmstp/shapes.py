@@ -207,10 +207,18 @@ def build_gal(config):
     """Writes P4, `bmstp/shape/gal_shape_survey.hdf5`: the one
     survey-wide GAL grid (sec. 5.4 "Grain"). No region distance applies to
     a survey-wide flux axis, so the brightness-axis smoothing is the
-    one-cell floor only (`sigma_b_min = 0`, `grid.bin`'s own minimum)."""
+    one-cell floor only (`sigma_b_min = 0`, `grid.bin`'s own minimum).
+    `LOG10_B_ORIGIN` is `LOG10_S_GRID[0] - 3 * D_LOG10_B` (owner ruling): a
+    three-cell (0.3 dex) margin below the counts law's own faint edge, the
+    one-cell minimum-width smoothing's own 3 sigma, so the smoothed law's
+    faint end stays inside the grid instead of losing mass off the edge
+    (sec. 2 "minimum widths"; the 0.1% mass-outside bar, sec. 9). The
+    law's bright end sits 35 cells above the faint one on the 61-node
+    grid, so the 120-cell brightness axis has room for the margin."""
     with progress.Stage("bmstp.shapes.gal") as st:
         x, log10_b, w = sample_gal.sample(config)
-        origin = float(log10_b[0])
+        # LOG10_B_ORIGIN margin, see this function's own docstring.
+        origin = float(log10_b[0]) - 3.0 * grid.D_LOG10_B
         h, mass_outside = grid.bin(x, log10_b, w, origin, 0.0)
         sum_check = abs(h.sum() - (1.0 - mass_outside))
         density_gal = float(w.sum())
@@ -220,6 +228,8 @@ def build_gal(config):
         with h5py.File(path, "w") as f:
             f.attrs["GRANULE"] = "survey"
             f.attrs["FLOOR"] = grid.FLOOR
+            # LOG10_S_GRID[0] - 3*D_LOG10_B: the 3-cell margin build_gal's
+            # own docstring cites, not the counts law's bare faint edge.
             f.attrs["LOG10_B_ORIGIN"] = origin
             f.attrs["DENSITY_GAL"] = density_gal
             f.attrs["COSMIC_VARIANCE_DEX"] = _gal_cosmic_variance_dex(config)
