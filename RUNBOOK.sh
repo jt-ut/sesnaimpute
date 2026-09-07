@@ -11,9 +11,10 @@
 set -euo pipefail
 
 # Usage: RUNBOOK.sh [--from <module>] [--regions R1 R2 ...]
-#   --from     start at the line whose module is <module> (e.g. prior.yso) and run
-#              everything after it: a change to one stage rebuilds only its
-#              dependants. Lines before it are skipped.
+#   --from     start at the line whose module is <module> (fully qualified,
+#              e.g. sesnaimpute.prior.yso, matching the PY lines below
+#              verbatim) and run everything after it: a change to one stage
+#              rebuilds only its dependants. Lines before it are skipped.
 #   --regions  passed to every build; per-region products are rebuilt for those
 #              regions only, region-axis tables update those rows in place.
 FROM=""; REGIONS=()
@@ -28,7 +29,7 @@ CONFIG=/Users/jtaylor/Dropbox/Research/SESNA_Complete/config/root.cfg
 STARTED=0; [ -z "$FROM" ] && STARTED=1
 # Every stage runs through capped.sh (CODING_RULES 10a) with the region list.
 PY() { local module="$1"; shift
-  if [ $STARTED -eq 0 ]; then [ "$module" = "sesnaimpute.$FROM" ] && STARTED=1 || return 0; fi
+  if [ $STARTED -eq 0 ]; then [ "$module" = "$FROM" ] && STARTED=1 || return 0; fi
   echo "== $module ${REGIONS[*]:-}"
   "$(dirname "$0")/capped.sh" "$PYBIN" -m "$module" "$CONFIG" ${REGIONS[@]+--regions "${REGIONS[@]}"}
 }
@@ -121,3 +122,11 @@ PY sesnaimpute.fit.run                      # the class-posterior evidence sweep
 # --- impute ---
 # bms/ final impute decisions and diagnostics.
 PY sesnaimpute.impute.posterior             # class/subclass posteriors, argmax-commit flux imputation, entropies (10_POSTERIOR.md sec 1)
+
+# A --from that never matched any PY line above would otherwise leave
+# every stage silently skipped and the script exiting 0 having done
+# nothing -- fail loudly instead.
+if [ -n "$FROM" ] && [ $STARTED -eq 0 ]; then
+  echo "RUNBOOK.sh: --from $FROM matched no stage" >&2
+  exit 2
+fi
