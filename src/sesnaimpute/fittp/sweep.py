@@ -50,14 +50,16 @@ N_BANDS = len(BAND_KEYS)
 #: (IMPLEMENTATION_BMSTP_DRAFT.md section 1).
 CLASSES = tuple(c.code for c in definitions.CLASSES)
 
-#: `_block_result`'s `log10_flux`/`flux_theta` are two float32
-#: `(n_block, n_model, 8)` arrays -- 2 float32-equivalents (W9: both built
-#: from the fit's own float32 marks and the float32 register/design
-#: column, so no float64 upcast is needed here) -- not counted by
-#: `likelihood.block_size`'s own `NONDET_BUFFERS`; passed to `block_size`
-#: as `extra_buffers` so the block's real working set stays inside
-#: `[fit] block_budget_mb` (W7 review finding 6).
-SWEEP_EXTRA_BUFFERS = 2
+#: `_block_result`'s `log10_flux`/`flux_theta` are two float64
+#: `(n_block, n_model, 8)` arrays -- 4 float32-equivalents -- not counted
+#: by `likelihood.block_size`'s own `NONDET_BUFFERS`; passed to
+#: `block_size` as `extra_buffers` so the block's real working set stays
+#: inside `[fit] block_budget_mb` (W7 review finding 6). W9 tried building
+#: these in float32 (the register/design column/clamped marks that feed
+#: them are already float32); the STAR sweep's own FLUX_MEAN then missed
+#: the 1e-6 relative bar against the float64 product (7.7e-6, W9 phase 2
+#: acceptance run) -- reverted, float64 kept, no speed claimed here.
+SWEEP_EXTRA_BUFFERS = 4
 
 #: The datasets every P7 part file and the joined product carry, in write
 #: order.
@@ -198,15 +200,17 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
     # from the reported a_K mark (fit.a_hat_clamped = A_V_clamped *
     # ak_per_av, likelihood.fit's own docstring) -- algebraically the
     # same log10-flux likelihood.fit's own non-detection term evaluates.
-    # All four inputs are already float32 (the register, the design
-    # column, the fit's own clamped marks): no float64 temporary carries
-    # this value (W9 -- was an unneeded float64 upcast of a float32-exact
-    # quantity, doubling the block's largest working set).
-    av_clamped = fit.a_hat_clamped / batch.ak_per_av[:, None].astype(np.float32)
-    log10_flux = (template_log[None, :, :]
-                  + batch.ext_col[:, None, :] * av_clamped[:, :, None]
-                  + fit.log10_b_hat_clamped[:, :, None])
-    flux_theta = np.power(np.float32(10.0), log10_flux)  # (n_block, n_model, 8), float32
+    # float64 here (W9 phase 2: a float32 version of this exact expression
+    # measured 7.7e-6 relative on FLUX_MEAN against this float64 form, over
+    # the 1e-6 bar, so the float64 temporary is kept -- not the redundant
+    # pass the brief was aimed at).
+    a_clamped64 = fit.a_hat_clamped.astype(np.float64)
+    b_clamped64 = fit.log10_b_hat_clamped.astype(np.float64)
+    av_clamped = a_clamped64 / batch.ak_per_av[:, None]
+    log10_flux = (template_log[None, :, :].astype(np.float64)
+                  + batch.ext_col.astype(np.float64)[:, None, :] * av_clamped[:, :, None]
+                  + b_clamped64[:, :, None])
+    flux_theta = np.power(10.0, log10_flux)  # (n_block, n_model, 8), this block only
     timing["moments"] += time.perf_counter() - t
 
     t = time.perf_counter()
