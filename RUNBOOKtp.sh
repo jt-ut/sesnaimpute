@@ -122,6 +122,10 @@ PY sesnaimpute.bmstp.atlas   # the prior atlas, P6: per-pixel Monte Carlo select
 
 # --- fittp (the thinned-Poisson fitter, the classification, the cascade, the posterior atlas; writes fittp/) ---
 # Lines are added here as each stage lands (IMPLEMENTATION_BMSTP sec 4). The [fittp] knobs live in root.cfg.
+# One capped.sh process per class, so one class's peak resident is never summed with the class before it.
+for FIT_CLASS in STAR AGB PAHC GAL YSO H2S; do
+  PY sesnaimpute.fittp.sweep --classes "$FIT_CLASS"   # the class evidence sweep, P7, batched (SPEC_BMSTP sec 1.3; IMPLEMENTATION_BMSTP sec 4 row 2.4)
+done
 PY sesnaimpute.fittp.cascade   # the colour cascade on the measured fluxes, Psi per source (SPEC_BMSTP sec 6.5)
 
 # A --from that never matched any PY line above would otherwise leave
