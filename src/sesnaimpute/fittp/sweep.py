@@ -21,8 +21,10 @@ each batch in blocks of `~[fit] block_budget_mb` sources
 (`likelihood.block_size`): per block, the fit, the prior read, the
 per-source Gaia term, the fold to evidence, the evidence-weighted flux
 moments and the top-K record. Every block's own `(n_block, n_model, 8)`
-working set is discarded once its block's row of results is written; no
-batch or region ever holds an `(n, m, 8)` array.
+working set is discarded once its block's row of results is written.
+Each batch's own rows are written straight to their own part file
+(`<product>.partN`, rule 10b); no batch or region array, and no part
+file's read at join time, ever holds the whole region's P7 at once.
 """
 
 import os
@@ -45,6 +47,19 @@ N_BANDS = len(BAND_KEYS)
 #: the six classes, in the fitter's own class-axis order
 #: (IMPLEMENTATION_BMSTP_DRAFT.md section 1).
 CLASSES = tuple(c.code for c in definitions.CLASSES)
+
+#: `_block_result`'s `log10_flux`/`flux_theta` are two float64
+#: `(n_block, n_model, 8)` arrays -- 4 float32-equivalents -- not counted
+#: by `likelihood.block_size`'s own `NONDET_BUFFERS`; passed to
+#: `block_size` as `extra_buffers` so the block's real working set stays
+#: inside `[fit] block_budget_mb` (W7 review finding 6).
+SWEEP_EXTRA_BUFFERS = 4
+
+#: The datasets every P7 part file and the joined product carry, in write
+#: order.
+_PART_KEYS = ("NAME", "LN_EVIDENCE", "FLUX_MEAN", "FLUX_COV", "TOPK_MODEL", "TOPK_A_K",
+              "TOPK_LOG10_B", "TOPK_CHI2", "TOPK_LN_L", "TOPK_LN_PRIOR", "TOPK_FLUX",
+              "OCCAM_GAP", "FRAC_CLAMPED", "N_DETECTED")
 
 
 def _register(config, cls):
@@ -206,14 +221,86 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
     )
 
 
+def _part_path(path, bi):
+    return "%s.part%d" % (path, bi)
+
+
+def _batch_result(config, region, cls, reader, gaia_term, template_log, subclass_idx,
+                   n_sub, width_dex, topk, block, bstart, bstop):
+    """One batch's own P7 rows, `[bstart, bstop)`, folded block by block
+    (rule 10b): a batch-sized array, never a region-sized one.
+    """
+    m = bstop - bstart
+    ln_evidence = np.empty((m, n_sub), dtype=np.float32)
+    flux_mean = np.empty((m, N_BANDS), dtype=np.float32)
+    flux_cov = np.empty((m, N_BANDS, N_BANDS), dtype=np.float32)
+    topk_model = np.empty((m, topk), dtype=np.int32)
+    topk_a_k = np.empty((m, topk), dtype=np.float32)
+    topk_log10_b = np.empty((m, topk), dtype=np.float32)
+    topk_chi2 = np.empty((m, topk), dtype=np.float32)
+    topk_ln_l = np.empty((m, topk), dtype=np.float32)
+    topk_ln_prior = np.empty((m, topk), dtype=np.float32)
+    topk_flux = np.empty((m, topk, N_BANDS), dtype=np.float32)
+    occam_gap = np.empty(m, dtype=np.float32)
+    frac_clamped = np.empty(m, dtype=np.float32)
+    n_detected = np.empty(m, dtype=np.int8)
+
+    zero_ext_count = 0
+    n_templates_checked = 0
+    for start in range(bstart, bstop, block):
+        stop = min(start + block, bstop)
+        r = _block_result(config, region, cls, reader, gaia_term, template_log,
+                           subclass_idx, n_sub, width_dex, topk, start, stop)
+        sl = slice(start - bstart, stop - bstart)
+        ln_evidence[sl] = r["ln_evidence"]
+        flux_mean[sl] = r["flux_mean"]
+        flux_cov[sl] = r["flux_cov"]
+        topk_model[sl] = r["topk_model"]
+        topk_a_k[sl] = r["topk_a_k"]
+        topk_log10_b[sl] = r["topk_log10_b"]
+        topk_chi2[sl] = r["topk_chi2"]
+        topk_ln_l[sl] = r["topk_ln_l"]
+        topk_ln_prior[sl] = r["topk_ln_prior"]
+        topk_flux[sl] = r["topk_flux"]
+        occam_gap[sl] = r["occam_gap"]
+        frac_clamped[sl] = r["frac_clamped"]
+        n_detected[sl] = r["n_detected"]
+        zero_ext_count += r["zero_ext_count"]
+        n_templates_checked += r["n_templates_checked"]
+
+    with h5py.File(config_module.product_path(config, "catalog", "sesna", "sources", "source",
+                                               region=region), "r") as f:
+        name = f["NAME"][bstart:bstop]
+
+    return dict(
+        name=name, ln_evidence=ln_evidence, flux_mean=flux_mean, flux_cov=flux_cov,
+        topk_model=topk_model, topk_a_k=topk_a_k, topk_log10_b=topk_log10_b,
+        topk_chi2=topk_chi2, topk_ln_l=topk_ln_l, topk_ln_prior=topk_ln_prior,
+        topk_flux=topk_flux, occam_gap=occam_gap, frac_clamped=frac_clamped,
+        n_detected=n_detected, zero_ext_count=zero_ext_count,
+        n_templates_checked=n_templates_checked,
+    )
+
+
+def _write_part(part_path, batch):
+    with h5py.File(part_path, "w") as f:
+        for key, field in zip(_PART_KEYS,
+                               ("name", "ln_evidence", "flux_mean", "flux_cov", "topk_model",
+                                "topk_a_k", "topk_log10_b", "topk_chi2", "topk_ln_l",
+                                "topk_ln_prior", "topk_flux", "occam_gap", "frac_clamped",
+                                "n_detected")):
+            f.create_dataset(key, data=batch[field])
+
+
 def build_region_class(config, region, cls, st, limit=None):
     """Sweeps one {region, class}'s whole region (or, with `limit`, its
     first `limit` catalogue rows only -- a timing/acceptance device, never
     a default) in batches of `[fit] batch_size`, each batch in blocks of
-    `likelihood.block_size` sources, joined in catalogue-row order
-    (section 1.3; IMPLEMENTATION_BMSTP_DRAFT.md section 4 row 2.4).
-    Returns the P7 arrays for the rows swept plus the zero-extinction
-    fraction and the Occam-gap values, for the caller's report.
+    `likelihood.block_size` sources (section 1.3; IMPLEMENTATION_BMSTP_
+    DRAFT.md section 4 row 2.4). Each batch's own rows are written
+    straight to their own part file (rule 10b); the caller joins the
+    parts once every batch is done. Returns the part file list and the
+    summary numbers for the caller's join and report.
     """
     template_log, subclass_idx, n_sub = _register(config, cls)
     n_model = template_log.shape[0]
@@ -221,7 +308,8 @@ def build_region_class(config, region, cls, st, limit=None):
     gaia_term = GaiaTerm(config, region)
     width_dex = _width_dex(config, region)
     topk = config.fit_topk
-    block = likelihood.block_size(n_model, config.fit_block_budget_mb)
+    block = likelihood.block_size(n_model, config.fit_block_budget_mb,
+                                   extra_buffers=SWEEP_EXTRA_BUFFERS)
 
     n_source = _n_sources(config, region)
     if limit is not None:
@@ -229,48 +317,22 @@ def build_region_class(config, region, cls, st, limit=None):
     batch_size = config.fit_batch_size
     batch_bounds = [(s, min(s + batch_size, n_source)) for s in range(0, n_source, batch_size)]
 
-    ln_evidence = np.empty((n_source, n_sub), dtype=np.float32)
-    flux_mean = np.empty((n_source, N_BANDS), dtype=np.float32)
-    flux_cov = np.empty((n_source, N_BANDS, N_BANDS), dtype=np.float32)
-    topk_model = np.empty((n_source, topk), dtype=np.int32)
-    topk_a_k = np.empty((n_source, topk), dtype=np.float32)
-    topk_log10_b = np.empty((n_source, topk), dtype=np.float32)
-    topk_chi2 = np.empty((n_source, topk), dtype=np.float32)
-    topk_ln_l = np.empty((n_source, topk), dtype=np.float32)
-    topk_ln_prior = np.empty((n_source, topk), dtype=np.float32)
-    topk_flux = np.empty((n_source, topk, N_BANDS), dtype=np.float32)
-    occam_gap = np.empty(n_source, dtype=np.float32)
-    frac_clamped = np.empty(n_source, dtype=np.float32)
-    n_detected = np.empty(n_source, dtype=np.int8)
+    path = config_module.product_path(config, "fittp", "fit", cls, "source", region=region)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
 
+    part_paths = []
     zero_ext_count = 0
     n_templates_checked = 0
 
     for bi, (bstart, bstop) in enumerate(batch_bounds):
-        for start in range(bstart, bstop, block):
-            stop = min(start + block, bstop)
-            r = _block_result(config, region, cls, reader, gaia_term, template_log,
-                               subclass_idx, n_sub, width_dex, topk, start, stop)
-            ln_evidence[start:stop] = r["ln_evidence"]
-            flux_mean[start:stop] = r["flux_mean"]
-            flux_cov[start:stop] = r["flux_cov"]
-            topk_model[start:stop] = r["topk_model"]
-            topk_a_k[start:stop] = r["topk_a_k"]
-            topk_log10_b[start:stop] = r["topk_log10_b"]
-            topk_chi2[start:stop] = r["topk_chi2"]
-            topk_ln_l[start:stop] = r["topk_ln_l"]
-            topk_ln_prior[start:stop] = r["topk_ln_prior"]
-            topk_flux[start:stop] = r["topk_flux"]
-            occam_gap[start:stop] = r["occam_gap"]
-            frac_clamped[start:stop] = r["frac_clamped"]
-            n_detected[start:stop] = r["n_detected"]
-            zero_ext_count += r["zero_ext_count"]
-            n_templates_checked += r["n_templates_checked"]
+        batch = _batch_result(config, region, cls, reader, gaia_term, template_log,
+                               subclass_idx, n_sub, width_dex, topk, block, bstart, bstop)
+        part_path = _part_path(path, bi)
+        _write_part(part_path, batch)
+        part_paths.append(part_path)
+        zero_ext_count += batch["zero_ext_count"]
+        n_templates_checked += batch["n_templates_checked"]
         st.tick(bi + 1, len(batch_bounds), "batches")
-
-    with h5py.File(config_module.product_path(config, "catalog", "sesna", "sources", "source",
-                                               region=region), "r") as f:
-        name = f["NAME"][:n_source]
 
     zero_ext_frac = zero_ext_count / n_templates_checked if n_templates_checked else float("nan")
     density_file = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
@@ -280,41 +342,42 @@ def build_region_class(config, region, cls, st, limit=None):
     weights_file = config_module.product_path(
         config, "bmstp", "weights", lib, granule, region=(region if granule == "region" else None))
     return dict(
-        name=name, ln_evidence=ln_evidence, flux_mean=flux_mean, flux_cov=flux_cov,
-        topk_model=topk_model, topk_a_k=topk_a_k, topk_log10_b=topk_log10_b,
-        topk_chi2=topk_chi2, topk_ln_l=topk_ln_l, topk_ln_prior=topk_ln_prior,
-        topk_flux=topk_flux, occam_gap=occam_gap, frac_clamped=frac_clamped,
-        n_detected=n_detected, n_model=n_model, subclasses=definitions.SUBCLASSES_OF[cls],
-        library=definitions.CLASS_REGISTER[cls], zero_ext_frac=zero_ext_frac,
-        density_file=density_file, weights_file=weights_file,
+        path=path, part_paths=part_paths, n_source=n_source, n_model=n_model,
+        subclasses=definitions.SUBCLASSES_OF[cls], library=definitions.CLASS_REGISTER[cls],
+        zero_ext_frac=zero_ext_frac, density_file=density_file, weights_file=weights_file,
     )
 
 
-def write_region_class(path, result, cls, topk):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with h5py.File(path, "w") as f:
-        f.create_dataset("NAME", data=result["name"])
-        f.create_dataset("LN_EVIDENCE", data=result["ln_evidence"])
-        f.create_dataset("FLUX_MEAN", data=result["flux_mean"])
-        f.create_dataset("FLUX_COV", data=result["flux_cov"])
-        f.create_dataset("TOPK_MODEL", data=result["topk_model"])
-        f.create_dataset("TOPK_A_K", data=result["topk_a_k"])
-        f.create_dataset("TOPK_LOG10_B", data=result["topk_log10_b"])
-        f.create_dataset("TOPK_CHI2", data=result["topk_chi2"])
-        f.create_dataset("TOPK_LN_L", data=result["topk_ln_l"])
-        f.create_dataset("TOPK_LN_PRIOR", data=result["topk_ln_prior"])
-        f.create_dataset("TOPK_FLUX", data=result["topk_flux"])
-        f.create_dataset("OCCAM_GAP", data=result["occam_gap"])
-        f.create_dataset("FRAC_CLAMPED", data=result["frac_clamped"])
-        f.create_dataset("N_DETECTED", data=result["n_detected"])
-        f.attrs["GRANULE"] = "source"
-        f.attrs["CLASS"] = cls
-        f.attrs["SUBCLASSES"] = np.array(result["subclasses"], dtype="S8")
-        f.attrs["LIBRARY"] = result["library"]
-        f.attrs["N_MODEL"] = result["n_model"]
-        f.attrs["K"] = topk
-        f.attrs["WEIGHTS_FILE"] = result["weights_file"]
-        f.attrs["DENSITY_FILE"] = result["density_file"]
+def join_parts(summary, topk):
+    """Joins one {region, class}'s part files into the final P7 product,
+    one part's rows at a time, dataset by dataset (rule 10b: never a
+    region-sized array); removes the part files once written.
+    """
+    path = summary["path"]
+    n_source = summary["n_source"]
+    with h5py.File(path, "w") as out:
+        for key in _PART_KEYS:
+            with h5py.File(summary["part_paths"][0], "r") as pf0:
+                shape = (n_source,) + pf0[key].shape[1:]
+                dtype = pf0[key].dtype
+            out.create_dataset(key, shape=shape, dtype=dtype)
+        offset = 0
+        for part_path in summary["part_paths"]:
+            with h5py.File(part_path, "r") as pf:
+                m = pf["NAME"].shape[0]
+                for key in _PART_KEYS:
+                    out[key][offset:offset + m] = pf[key][:]
+            offset += m
+        out.attrs["GRANULE"] = "source"
+        out.attrs["CLASS"] = summary.get("cls")
+        out.attrs["SUBCLASSES"] = np.array(summary["subclasses"], dtype="S8")
+        out.attrs["LIBRARY"] = summary["library"]
+        out.attrs["N_MODEL"] = summary["n_model"]
+        out.attrs["K"] = topk
+        out.attrs["WEIGHTS_FILE"] = summary["weights_file"]
+        out.attrs["DENSITY_FILE"] = summary["density_file"]
+    for part_path in summary["part_paths"]:
+        os.remove(part_path)
 
 
 def build(config, regions=None, classes=None, limit=None):
@@ -330,13 +393,16 @@ def build(config, regions=None, classes=None, limit=None):
     for region in region_names:
         for cls in class_codes:
             with progress.Stage("fittp.sweep.%s" % cls, region) as st:
-                result = build_region_class(config, region, cls, st, limit=limit)
-                path = config_module.product_path(config, "fittp", "fit", cls, "source", region=region)
-                write_region_class(path, result, cls, config.fit_topk)
-                occam_finite = result["occam_gap"][np.isfinite(result["occam_gap"])]
+                summary = build_region_class(config, region, cls, st, limit=limit)
+                summary["cls"] = cls
+                join_parts(summary, config.fit_topk)
+                with h5py.File(summary["path"], "r") as f:
+                    occam = np.asarray(f["OCCAM_GAP"][:])
+                occam_finite = occam[np.isfinite(occam)]
                 occam_median = float(np.median(occam_finite)) if occam_finite.size else float("nan")
-                st.done(path, n=result["name"].shape[0], n_model=result["n_model"],
-                        zero_ext_frac=result["zero_ext_frac"], occam_gap_median=occam_median)
+                st.done(summary["path"], n=summary["n_source"], n_model=summary["n_model"],
+                        zero_ext_frac=summary["zero_ext_frac"], occam_gap_median=occam_median,
+                        n_batches=len(summary["part_paths"]))
 
 
 if __name__ == "__main__":

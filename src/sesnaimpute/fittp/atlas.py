@@ -7,11 +7,14 @@ The admitted pixel list is `catalog.depth_grid`'s own rows (P6) -- every
 nside-512 child of a region's source-bearing nside-256 pixels, not merely
 an occupied one. Each source's pixel is `bmstp.density`'s own `HPX_512`
 column (P1); the per-source `P_CLASS`/`P_YSO` come from `fittp.classify`
-(P8). A pandas groupby folds the source table to one row per occupied
-pixel (no loop over pixels); an admitted pixel with no sources of its own
-keeps `N_SOURCES = 0` and a NaN mean, not a borrowed neighbour's -- unlike
-the depth grid's `F_LIM`, a class probability has no meaning to borrow
-from a pixel with different sources.
+(P8), read in source batches (rule 10b) and folded straight into each
+admitted pixel's running sum and count -- P8's `CANDIDATE_FLUX` and
+`FLUX_IMPUTED_COV` are what make a region-sized read of it expensive
+(W7 review finding 6), so `P_CLASS`/`P_YSO` alone are read here, never
+the whole file. An admitted pixel with no sources of its own keeps
+`N_SOURCES = 0` and a NaN mean, not a borrowed neighbour's -- unlike the
+depth grid's `F_LIM`, a class probability has no meaning to borrow from a
+pixel with different sources.
 """
 
 import argparse
@@ -19,12 +22,16 @@ import os
 
 import h5py
 import numpy as np
-import pandas as pd
 
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.batches import batches
 from sesnaimpute.fittp.classify import CLASSES, YSO_INDEX
+
+#: Per-row working set for the batch loop (rule 10b): HPX_512 (int64) and
+#: P_CLASS (6 float64) / P_YSO (float64) reads, at a generous margin.
+ROW_BYTES = 256
 
 
 def _require(path, region, runbook_line):
@@ -39,50 +46,46 @@ def build_region(config, region, st):
         config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region),
         region, "PY sesnaimpute.catalog.depth_grid")
     with h5py.File(depth_path, "r") as f:
-        admitted = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
+        pix = np.sort(np.asarray(f["HPX_PIX_512"][:], dtype=np.int64))
+    n_pix = pix.size
 
     density_path = _require(
         config_module.product_path(config, "bmstp", "density", "table", "source", region=region),
         region, "PY sesnaimpute.bmstp.density")
-    with h5py.File(density_path, "r") as f:
-        hpx = np.asarray(f["HPX_512"][:], dtype=np.int64)
-
     post_path = _require(
         config_module.product_path(config, "fittp", "classification", "posterior", "source", region=region),
         region, "PY sesnaimpute.fittp.classify")
-    with h5py.File(post_path, "r") as f:
-        p_class = np.asarray(f["P_CLASS"][:], dtype=np.float64)
-        p_yso = np.asarray(f["P_YSO"][:], dtype=np.float64)
 
-    if hpx.shape[0] != p_class.shape[0]:
-        raise ValueError("fittp.atlas [%s]: bmstp.density's HPX_512 (%d rows) does not "
-                          "row-align with fittp.classify's P_CLASS (%d rows)"
-                          % (region, hpx.shape[0], p_class.shape[0]))
+    sum_p = np.zeros((n_pix, len(CLASSES)), dtype=np.float64)
+    count = np.zeros(n_pix, dtype=np.int64)
+    n_yso_half = np.zeros(n_pix, dtype=np.int64)
 
-    df = pd.DataFrame(p_class, columns=CLASSES)
-    df["HPX_PIX_512"] = hpx
-    df["YSO_HALF"] = p_yso > 0.5
-    grouped = df.groupby("HPX_PIX_512", sort=True)
-    occ_pix = grouped.size().index.to_numpy(dtype=np.int64)
-    occ_n = grouped.size().to_numpy(dtype=np.int32)
-    occ_mean_p = grouped[list(CLASSES)].mean().to_numpy(dtype=np.float32)
-    occ_n_yso = grouped["YSO_HALF"].sum().to_numpy(dtype=np.int32)
-    st.tick(1, 1, "pixels (grouped)")
+    with h5py.File(density_path, "r") as fd, h5py.File(post_path, "r") as fp:
+        n_total = fd["HPX_512"].shape[0]
+        if fp["P_CLASS"].shape[0] != n_total:
+            raise ValueError("fittp.atlas [%s]: bmstp.density's HPX_512 (%d rows) does not "
+                              "row-align with fittp.classify's P_CLASS (%d rows)"
+                              % (region, n_total, fp["P_CLASS"].shape[0]))
+        bounds = list(batches(n_total, ROW_BYTES))
+        for bi, (start, stop) in enumerate(bounds):
+            hpx_b = np.asarray(fd["HPX_512"][start:stop], dtype=np.int64)
+            p_class_b = np.asarray(fp["P_CLASS"][start:stop], dtype=np.float64)
+            p_yso_b = np.asarray(fp["P_YSO"][start:stop], dtype=np.float64)
 
-    pix = np.sort(admitted)
-    is_occ = np.isin(pix, occ_pix)
-    occ_order = np.argsort(occ_pix)
-    occ_row = occ_order[np.searchsorted(occ_pix[occ_order], pix[is_occ])]
+            idx = np.clip(np.searchsorted(pix, hpx_b), 0, n_pix - 1)
+            valid = pix[idx] == hpx_b
+            idx_v = idx[valid]
+            np.add.at(count, idx_v, 1)
+            np.add.at(sum_p, idx_v, p_class_b[valid])
+            np.add.at(n_yso_half, idx_v, (p_yso_b[valid] > 0.5).astype(np.int64))
+            st.tick(bi + 1, len(bounds), "batches")
 
-    n_sources = np.zeros(pix.size, dtype=np.int32)
-    mean_p = np.full((pix.size, len(CLASSES)), np.nan, dtype=np.float32)
-    n_yso_half = np.zeros(pix.size, dtype=np.int32)
-    n_sources[is_occ] = occ_n[occ_row]
-    mean_p[is_occ] = occ_mean_p[occ_row]
-    n_yso_half[is_occ] = occ_n_yso[occ_row]
+    mean_p = np.full((n_pix, len(CLASSES)), np.nan, dtype=np.float32)
+    has = count > 0
+    mean_p[has] = (sum_p[has] / count[has, None]).astype(np.float32)
 
-    return dict(pix=pix, n_sources=n_sources, mean_p=mean_p, n_yso_half=n_yso_half,
-                n_total_sources=p_class.shape[0])
+    return dict(pix=pix, n_sources=count.astype(np.int32), mean_p=mean_p,
+                n_yso_half=n_yso_half.astype(np.int32), n_total_sources=n_total)
 
 
 def write_region(path, result):

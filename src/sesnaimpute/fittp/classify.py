@@ -85,10 +85,12 @@ SENSITIVITY_RUNS = ("kappa_lo", "kappa_hi", "eta_lo", "eta_hi",
 
 #: kappa: the young-star law's own normalisation (spec sec 5.5's N_law,
 #: sec 10's kappa 14.5/18.7 pc^-2 mag^-2, exponent 2), band 0.36 dex,
-#: Pokhrel+2020's cloud-to-cloud scatter -- scales YSO's whole density.
+#: Pokhrel+2020's cloud-to-cloud scatter -- scales YSO's whole density,
+#: and H2S's with it (spec sec 5.6: `A_H2S = (N_law (x) K) eta eps`, so a
+#: kappa shift of `N_law` moves H2S by exactly the same factor).
 KAPPA_DEX = 0.36
 #: eta_r: H2S's knots-per-young-star rate (spec sec 5.6), band 0.45 dex,
-#: Froebrich+2015 (UWISH2) / Giannini+2013 -- scales H2S.
+#: Froebrich+2015 (UWISH2) / Giannini+2013 -- scales H2S alone.
 ETA_DEX = 0.45
 #: eps_ext: H2S's star-finder cataloguing fraction (spec sec 5.6), central
 #: 0.25 carried over [0.15, 0.35] from five knot-survey cross-matches --
@@ -99,47 +101,84 @@ EPS_EXT_CENTRAL, EPS_EXT_LO, EPS_EXT_HI = 0.25, 0.15, 0.35
 #: are used as the band's own low and high end relative to their mean,
 #: since no single-number uncertainty on F_dusty is cited; scales AGB.
 F_DUSTY_O, F_DUSTY_C = 0.24, 0.68
+#: A_min: the lowest column Pokhrel+2020's star-gas relation samples (spec
+#: sec 5.5, sec 7.2) -- below it the quadratic young-star law `N_law =
+#: kappa A^2` is an extrapolation, so `yso_floor` floors the law itself at
+#: `max(A_s, A_MIN_YSO_LAW)`, mag A_K, applied to YSO and to H2S (sec 5.6:
+#: H2S rides on the law).
+A_MIN_YSO_LAW = 0.3
+#: Psi floored at this fraction of its own row's maximum before
+#: `beta * ln Psi` enters a class's evidence (spec sec 6.5, sec 2: "no
+#: hypothesis is ever at -inf" -- the cascade may argue against a class,
+#: never veto it outright).
+PSI_FLOOR_FRAC = 1e-6
 
 
 def _sensitivity_scale(run):
-    """`(class, ln_scale)` for `run` -- the constant added to that class's
-    whole CLASSMAP subclass block. `yso_floor` is special: spec sec 7.2's
-    "floor added to the young-star law at low column" has no separate
-    cited magnitude, so it reuses kappa's own cited high-end band
-    (disclosed) applied only to sources at or below the region's median
-    column (`build_region`'s `low_column` mask), not every source --
-    the young-star law's low-column behaviour is exactly a low-column
-    subset question.
+    """`(classes, ln_scale)` for one of the eight fixed literature-band
+    runs -- the constant added to every one of `classes`'s whole CLASSMAP
+    subclass blocks. `kappa_lo`/`kappa_hi` name both YSO and H2S (module
+    docstring). `yso_floor` is not a fixed constant (`_yso_floor_shift`,
+    per source) and is not returned here.
     """
     ln10 = np.log(10.0)
     if run == "kappa_lo":
-        return "YSO", -KAPPA_DEX * ln10, None
+        return ("YSO", "H2S"), -KAPPA_DEX * ln10
     if run == "kappa_hi":
-        return "YSO", KAPPA_DEX * ln10, None
+        return ("YSO", "H2S"), KAPPA_DEX * ln10
     if run == "eta_lo":
-        return "H2S", -ETA_DEX * ln10, None
+        return ("H2S",), -ETA_DEX * ln10
     if run == "eta_hi":
-        return "H2S", ETA_DEX * ln10, None
+        return ("H2S",), ETA_DEX * ln10
     if run == "eps_ext_lo":
-        return "H2S", np.log(EPS_EXT_LO / EPS_EXT_CENTRAL), None
+        return ("H2S",), np.log(EPS_EXT_LO / EPS_EXT_CENTRAL)
     if run == "eps_ext_hi":
-        return "H2S", np.log(EPS_EXT_HI / EPS_EXT_CENTRAL), None
+        return ("H2S",), np.log(EPS_EXT_HI / EPS_EXT_CENTRAL)
     if run == "f_dusty_lo":
-        return "AGB", np.log(F_DUSTY_O / ((F_DUSTY_O + F_DUSTY_C) / 2.0)), None
+        return ("AGB",), np.log(F_DUSTY_O / ((F_DUSTY_O + F_DUSTY_C) / 2.0))
     if run == "f_dusty_hi":
-        return "AGB", np.log(F_DUSTY_C / ((F_DUSTY_O + F_DUSTY_C) / 2.0)), None
-    if run == "yso_floor":
-        return "YSO", KAPPA_DEX * ln10, "low_column"
-    raise ValueError("fittp.classify: unknown sensitivity run %r" % run)
+        return ("AGB",), np.log(F_DUSTY_C / ((F_DUSTY_O + F_DUSTY_C) / 2.0))
+    raise ValueError("fittp.classify: unknown fixed-scale sensitivity run %r" % run)
+
+
+#: A numerical guard only, not a science floor: `AK_SESNA` is exactly 0.0
+#: at 81% of NGC 7129's sources (its own dust map's own floor at low
+#: column), where `ln(A_s)` is otherwise `-inf` and the shift below would
+#: be `+inf`. Floored here at this fraction of `A_MIN_YSO_LAW` so the
+#: shift stays a large, finite number instead of `inf`/`nan`; disclosed,
+#: since it still makes `yso_floor` a near-total MAP override at every
+#: `A_s = 0` source (see the module report).
+_AK_DENOM_EPS_FRAC = 1e-6
+
+
+def _yso_floor_shift(ak):
+    """`ln( max(A_s, A_MIN_YSO_LAW)^2 / A_s^2 )` per source (spec sec 7.2):
+    the young-star law floored at low column, not rescaled -- zero at and
+    above the floor, growing only as `A_s` falls below it; applied
+    identically to YSO and H2S (sec 5.6: H2S's density rides on the same
+    law, never its own). The formula is undefined at `A_s = 0`
+    (`_AK_DENOM_EPS_FRAC`'s docstring).
+    """
+    ak = np.asarray(ak, dtype=np.float64)
+    ak_floored = np.maximum(ak, A_MIN_YSO_LAW)
+    ak_denom = np.maximum(ak, A_MIN_YSO_LAW * _AK_DENOM_EPS_FRAC)
+    return 2.0 * (np.log(ak_floored) - np.log(ak_denom))
 
 
 def sensitivity_scaling_matrix():
     """`(9, 6)` `SCALING`: the factor applied to each class's density in
-    each run (1.0 where a run does not touch that class)."""
+    each of the eight fixed literature-band runs (1.0 where a run does not
+    touch that class). The ninth row (`yso_floor`) is left at 1.0 here --
+    its factor is per-source and per-region, filled in at write time
+    (`write_sensitivity`) from the region's own mean.
+    """
     scaling = np.ones((len(SENSITIVITY_RUNS), len(CLASSES)), dtype=np.float32)
     for ri, run in enumerate(SENSITIVITY_RUNS):
-        cls, ln_scale, _mask = _sensitivity_scale(run)
-        scaling[ri, CLASSES.index(cls)] = np.exp(ln_scale)
+        if run == "yso_floor":
+            continue
+        classes, ln_scale = _sensitivity_scale(run)
+        for cls in classes:
+            scaling[ri, CLASSES.index(cls)] = np.exp(ln_scale)
     return scaling
 
 
@@ -166,16 +205,25 @@ def _cascade_path(config, region):
 def _batch_ln_evidence(class_files, psi_file, beta, start, stop, m):
     """One batch's global `(m, 25)` ln-evidence array: each class's own
     `LN_EVIDENCE` block, shifted by `beta * ln Psi_C(s)` when `beta != 0`
-    (spec sec 6.5's logsumexp-shift, see module docstring)."""
+    (spec sec 6.5's logsumexp-shift, see module docstring). `Psi_C` is
+    floored at `PSI_FLOOR_FRAC` of its own row's maximum before the log is
+    taken (sec 6.5, sec 2) -- read here at classification time only; the
+    cascade product on disk keeps its own unfloored numbers.
+    """
     ln_ev = np.full((m, N_SUBCLASS), -np.inf, dtype=np.float64)
+    ln_psi_by_class = None
+    if beta != 0.0:
+        psi_raw = np.asarray(psi_file["PSI_CLASS"][start:stop, :], dtype=np.float64)
+        psi_floor = PSI_FLOOR_FRAC * psi_raw.max(axis=1, keepdims=True)
+        psi_floored = np.maximum(psi_raw, psi_floor)
+        with np.errstate(divide="ignore"):
+            ln_psi_by_class = np.log(psi_floored)
     for ci, cls in enumerate(CLASSES):
         f = class_files[cls]
         lo, hi = CLASS_SLICES[cls]
         block = np.asarray(f["LN_EVIDENCE"][start:stop, :], dtype=np.float64)
         if beta != 0.0:
-            with np.errstate(divide="ignore"):
-                ln_psi = np.log(np.asarray(psi_file["PSI_CLASS"][start:stop, ci], dtype=np.float64))
-            block = block + beta * ln_psi[:, None]
+            block = block + beta * ln_psi_by_class[:, ci][:, None]
         ln_ev[:, lo:hi] = block
     return ln_ev
 
@@ -193,13 +241,83 @@ def _class_probs(ln_ev):
     return p_sub, p_cls
 
 
+def _part_path(path, bi):
+    return "%s.part%d" % (path, bi)
+
+
+#: The datasets every P8 part file and the joined product carry.
+_CLASSIFY_PART_KEYS = ("NAME", "P_CLASS", "P_SUBCLASS", "P_YSO", "MAP_CLASS", "N_DETECTED",
+                       "CANDIDATE_FLUX", "FLUX_IMPUTED", "FLUX_IMPUTED_COV",
+                       "ENTROPY_CLASS", "ENTROPY_SUBCLASS")
+
+
+def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
+    """One ROW_BYTES batch's own P8 rows (rule 10b): a batch-sized array
+    only, never a region-sized one."""
+    m = stop - start
+    flux_mean_stack = np.empty((len(CLASSES), m, N_BANDS), dtype=np.float64)
+    flux_cov_stack = np.empty((len(CLASSES), m, N_BANDS, N_BANDS), dtype=np.float64)
+    for ci, cls in enumerate(CLASSES):
+        f = class_files[cls]
+        flux_mean_stack[ci] = np.asarray(f["FLUX_MEAN"][start:stop, :], dtype=np.float64)
+        flux_cov_stack[ci] = np.asarray(f["FLUX_COV"][start:stop, :, :], dtype=np.float64)
+
+    ln_ev = _batch_ln_evidence(class_files, psi_file, beta, start, stop, m)
+    p_sub, p_cls = _class_probs(ln_ev)
+    map_c = np.argmax(p_cls, axis=1)
+
+    with h5py.File(cat_path, "r") as cf:
+        flux = np.asarray(cf["FNU_MJY"][start:stop], dtype=np.float64)
+        origin = np.asarray(cf["ORIGIN_FNU"][start:stop])
+    detected = origin == 1
+
+    cflux = np.transpose(flux_mean_stack, (1, 0, 2)).copy()  # (m, 6, 8)
+    mask = np.broadcast_to(detected[:, None, :], cflux.shape)
+    cflux = np.where(mask, flux[:, None, :], cflux)
+    row_idx = np.arange(m)
+    imputed = cflux[row_idx, map_c, :]
+    imputed_cov = flux_cov_stack[map_c, row_idx]
+    imputed_identity_err = float(np.max(np.abs(imputed[detected] - flux[detected]))) \
+        if detected.any() else 0.0
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ent_c = -np.sum(np.where(p_cls > 0, p_cls * np.log(p_cls), 0.0), axis=1)
+        ent_s = -np.sum(np.where(p_sub > 0, p_sub * np.log(p_sub), 0.0), axis=1)
+
+    return dict(
+        p_class=p_cls.astype(np.float32), p_subclass=p_sub.astype(np.float32),
+        map_class=map_c.astype(np.int8), n_detected=detected.sum(axis=1).astype(np.int8),
+        candidate_flux=cflux.astype(np.float32), flux_imputed=imputed.astype(np.float32),
+        flux_imputed_cov=imputed_cov.astype(np.float32),
+        entropy_class=ent_c.astype(np.float32), entropy_subclass=ent_s.astype(np.float32),
+        imputed_identity_err=imputed_identity_err,
+    )
+
+
+def _write_classify_part(part_path, batch):
+    with h5py.File(part_path, "w") as f:
+        f.create_dataset("NAME", data=batch["name"])
+        f.create_dataset("P_CLASS", data=batch["p_class"])
+        f.create_dataset("P_SUBCLASS", data=batch["p_subclass"])
+        f.create_dataset("P_YSO", data=batch["p_class"][:, YSO_INDEX])
+        f.create_dataset("MAP_CLASS", data=batch["map_class"])
+        f.create_dataset("N_DETECTED", data=batch["n_detected"])
+        f.create_dataset("CANDIDATE_FLUX", data=batch["candidate_flux"])
+        f.create_dataset("FLUX_IMPUTED", data=batch["flux_imputed"])
+        f.create_dataset("FLUX_IMPUTED_COV", data=batch["flux_imputed_cov"])
+        f.create_dataset("ENTROPY_CLASS", data=batch["entropy_class"])
+        f.create_dataset("ENTROPY_SUBCLASS", data=batch["entropy_subclass"])
+
+
 def build_region(config, region, st, beta):
-    """One region's P8 arrays, swept in source batches (rule 10b)."""
+    """One region's P8, written one `ROW_BYTES` batch's own part file at a
+    time (rule 10b: `CANDIDATE_FLUX` and `FLUX_IMPUTED_COV` are the two
+    region-sized arrays the W7 review found here); the caller joins the
+    parts once every batch is done."""
     _require_fit_files(config, region)
 
     class_files = {}
     names = None
-    n_sub_by_class = {}
     for cls in CLASSES:
         f = h5py.File(_fit_path(config, region, cls), "r")
         class_files[cls] = f
@@ -209,7 +327,6 @@ def build_region(config, region, st, beta):
         elif not np.array_equal(names, this_names):
             raise ValueError("fittp.classify [%s]: %s's NAME does not row-align with STAR's"
                               % (region, cls))
-        n_sub_by_class[cls] = f["LN_EVIDENCE"].shape[1]
 
     psi_file = None
     if beta != 0.0:
@@ -225,61 +342,20 @@ def build_region(config, region, st, beta):
     cat_path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
 
     n = names.shape[0]
-    p_class = np.empty((n, len(CLASSES)), dtype=np.float32)
-    p_subclass = np.empty((n, N_SUBCLASS), dtype=np.float32)
-    map_class = np.empty(n, dtype=np.int8)
-    n_detected = np.empty(n, dtype=np.int8)
-    candidate_flux = np.empty((n, len(CLASSES), N_BANDS), dtype=np.float32)
-    flux_imputed = np.empty((n, N_BANDS), dtype=np.float32)
-    flux_imputed_cov = np.empty((n, N_BANDS, N_BANDS), dtype=np.float32)
-    entropy_class = np.empty(n, dtype=np.float32)
-    entropy_subclass = np.empty(n, dtype=np.float32)
+    path = config_module.product_path(config, "fittp", "classification", "posterior",
+                                       "source", region=region)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
 
+    part_paths = []
     imputed_identity_err = 0.0
-
     bounds = list(batches(n, ROW_BYTES))
     for bi, (start, stop) in enumerate(bounds):
-        m = stop - start
-        flux_mean_stack = np.empty((len(CLASSES), m, N_BANDS), dtype=np.float64)
-        flux_cov_stack = np.empty((len(CLASSES), m, N_BANDS, N_BANDS), dtype=np.float64)
-        for ci, cls in enumerate(CLASSES):
-            f = class_files[cls]
-            flux_mean_stack[ci] = np.asarray(f["FLUX_MEAN"][start:stop, :], dtype=np.float64)
-            flux_cov_stack[ci] = np.asarray(f["FLUX_COV"][start:stop, :, :], dtype=np.float64)
-
-        ln_ev = _batch_ln_evidence(class_files, psi_file, beta, start, stop, m)
-        p_sub, p_cls = _class_probs(ln_ev)
-
-        map_c = np.argmax(p_cls, axis=1)
-
-        with h5py.File(cat_path, "r") as cf:
-            flux = np.asarray(cf["FNU_MJY"][start:stop], dtype=np.float64)
-            origin = np.asarray(cf["ORIGIN_FNU"][start:stop])
-        detected = origin == 1
-
-        cflux = np.transpose(flux_mean_stack, (1, 0, 2)).copy()  # (m, 6, 8)
-        mask = np.broadcast_to(detected[:, None, :], cflux.shape)
-        cflux = np.where(mask, flux[:, None, :], cflux)
-        row_idx = np.arange(m)
-        imputed = cflux[row_idx, map_c, :]
-        imputed_cov = flux_cov_stack[map_c, row_idx]
-        if detected.any():
-            imputed_identity_err = max(imputed_identity_err,
-                                        float(np.max(np.abs(imputed[detected] - flux[detected]))))
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ent_c = -np.sum(np.where(p_cls > 0, p_cls * np.log(p_cls), 0.0), axis=1)
-            ent_s = -np.sum(np.where(p_sub > 0, p_sub * np.log(p_sub), 0.0), axis=1)
-
-        p_class[start:stop] = p_cls.astype(np.float32)
-        p_subclass[start:stop] = p_sub.astype(np.float32)
-        map_class[start:stop] = map_c.astype(np.int8)
-        n_detected[start:stop] = detected.sum(axis=1).astype(np.int8)
-        candidate_flux[start:stop] = cflux.astype(np.float32)
-        flux_imputed[start:stop] = imputed.astype(np.float32)
-        flux_imputed_cov[start:stop] = imputed_cov.astype(np.float32)
-        entropy_class[start:stop] = ent_c.astype(np.float32)
-        entropy_subclass[start:stop] = ent_s.astype(np.float32)
+        batch = _classify_batch(class_files, psi_file, beta, cat_path, start, stop)
+        batch["name"] = names[start:stop]
+        part_path = _part_path(path, bi)
+        _write_classify_part(part_path, batch)
+        part_paths.append(part_path)
+        imputed_identity_err = max(imputed_identity_err, batch["imputed_identity_err"])
         st.tick(bi + 1, len(bounds), "batches")
 
     for f in class_files.values():
@@ -288,42 +364,44 @@ def build_region(config, region, st, beta):
         psi_file.close()
 
     fit_files = np.array([_fit_path(config, region, cls) for cls in CLASSES], dtype="S256")
-    return dict(name=names, p_class=p_class, p_subclass=p_subclass, map_class=map_class,
-                n_detected=n_detected, candidate_flux=candidate_flux, flux_imputed=flux_imputed,
-                flux_imputed_cov=flux_imputed_cov, entropy_class=entropy_class,
-                entropy_subclass=entropy_subclass, fit_files=fit_files,
+    return dict(path=path, part_paths=part_paths, n_source=n, fit_files=fit_files,
                 imputed_identity_err=imputed_identity_err)
 
 
-def write_region(path, result):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with h5py.File(path, "w") as f:
-        f.create_dataset("NAME", data=result["name"])
-        f.create_dataset("P_CLASS", data=result["p_class"])
-        f.create_dataset("P_SUBCLASS", data=result["p_subclass"])
-        f.create_dataset("P_YSO", data=result["p_class"][:, YSO_INDEX])
-        f.create_dataset("MAP_CLASS", data=result["map_class"])
-        f.create_dataset("N_DETECTED", data=result["n_detected"])
-        f.create_dataset("CANDIDATE_FLUX", data=result["candidate_flux"])
-        f.create_dataset("FLUX_IMPUTED", data=result["flux_imputed"])
-        f.create_dataset("FLUX_IMPUTED_COV", data=result["flux_imputed_cov"])
-        f.create_dataset("ENTROPY_CLASS", data=result["entropy_class"])
-        f.create_dataset("ENTROPY_SUBCLASS", data=result["entropy_subclass"])
-        f.attrs["GRANULE"] = "source"
-        f.attrs["CLASSES"] = np.array(CLASSES, dtype="S8")
-        f.attrs["SUBCLASSES"] = np.array(SUBCLASS_LABELS, dtype="S12")
-        f.attrs["FIT_FILES"] = result["fit_files"]
+def join_classify_parts(path, part_paths, n_source, fit_files):
+    """Joins one region's P8 part files, one part's rows at a time,
+    dataset by dataset (rule 10b: never a region-sized array); removes the
+    part files once written."""
+    with h5py.File(path, "w") as out:
+        with h5py.File(part_paths[0], "r") as pf0:
+            for key in _CLASSIFY_PART_KEYS:
+                shape = (n_source,) + pf0[key].shape[1:]
+                out.create_dataset(key, shape=shape, dtype=pf0[key].dtype)
+        offset = 0
+        for part_path in part_paths:
+            with h5py.File(part_path, "r") as pf:
+                m = pf["NAME"].shape[0]
+                for key in _CLASSIFY_PART_KEYS:
+                    out[key][offset:offset + m] = pf[key][:]
+            offset += m
+        out.attrs["GRANULE"] = "source"
+        out.attrs["CLASSES"] = np.array(CLASSES, dtype="S8")
+        out.attrs["SUBCLASSES"] = np.array(SUBCLASS_LABELS, dtype="S12")
+        out.attrs["FIT_FILES"] = fit_files
+    for part_path in part_paths:
+        os.remove(part_path)
 
 
 def run_sensitivity_region(config, region, st, beta):
     """One region's row of P9, the literature-band sensitivity (spec sec
     7.2): for each of `SENSITIVITY_RUNS`, `classify`'s own nominal
     classification (this same `beta`) re-run with one class's ln evidence
-    shifted by `ln(scale)` (`yso_floor`: only for sources at or below the
-    region's own median column, spec sec 5.5's low-column question) --
-    classification-time only, no refit, batched with the classify build.
-    Returns `n_source`, `frac_map_changed` (9,), `n_pyso_above_half`
-    (10,, column 0 nominal).
+    shifted by `ln(scale)`, or (`yso_floor`) YSO's and H2S's ln evidence
+    shifted per source by `_yso_floor_shift` -- classification-time only,
+    no refit, batched with the classify build. Returns `n_source`,
+    `frac_map_changed` (9,), `n_pyso_above_half` (10,, column 0 nominal),
+    `yso_floor_mean_factor` (this region's mean over sources of
+    `exp(_yso_floor_shift(ak))`, for `SCALING`'s ninth row).
     """
     _require_fit_files(config, region)
     class_files = {cls: h5py.File(_fit_path(config, region, cls), "r") for cls in CLASSES}
@@ -331,32 +409,38 @@ def run_sensitivity_region(config, region, st, beta):
     psi_file = h5py.File(_cascade_path(config, region), "r") if beta != 0.0 else None
 
     cat_path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
-    with h5py.File(cat_path, "r") as cf:
-        ak = np.asarray(cf["AK_SESNA"][:names.shape[0]], dtype=np.float64)
-    ak_median = float(np.median(ak))
 
     n = names.shape[0]
     n_run = len(SENSITIVITY_RUNS)
+    yso_floor_ri = SENSITIVITY_RUNS.index("yso_floor")
     changed = np.zeros(n_run, dtype=np.int64)
     n_pyso = np.zeros(n_run + 1, dtype=np.int64)
+    yso_floor_factor_sum = 0.0
 
     bounds = list(batches(n, ROW_BYTES))
     for bi, (start, stop) in enumerate(bounds):
         m = stop - start
+        with h5py.File(cat_path, "r") as cf:
+            ak_block = np.asarray(cf["AK_SESNA"][start:stop], dtype=np.float64)
+        yso_floor_shift = _yso_floor_shift(ak_block)
+        yso_floor_factor_sum += float(np.sum(np.exp(yso_floor_shift)))
+
         ln_ev_nominal = _batch_ln_evidence(class_files, psi_file, beta, start, stop, m)
         _, p_cls_nom = _class_probs(ln_ev_nominal)
         map_nom = np.argmax(p_cls_nom, axis=1)
         n_pyso[0] += int((p_cls_nom[:, YSO_INDEX] > 0.5).sum())
 
-        low_column = ak[start:stop] <= ak_median
         for ri, run in enumerate(SENSITIVITY_RUNS):
-            cls, ln_scale, mask_name = _sensitivity_scale(run)
-            lo, hi = CLASS_SLICES[cls]
             ln_ev_run = ln_ev_nominal.copy()
-            if mask_name == "low_column":
-                ln_ev_run[low_column, lo:hi] += ln_scale
+            if run == "yso_floor":
+                for cls in ("YSO", "H2S"):
+                    lo, hi = CLASS_SLICES[cls]
+                    ln_ev_run[:, lo:hi] += yso_floor_shift[:, None]
             else:
-                ln_ev_run[:, lo:hi] += ln_scale
+                classes, ln_scale = _sensitivity_scale(run)
+                for cls in classes:
+                    lo, hi = CLASS_SLICES[cls]
+                    ln_ev_run[:, lo:hi] += ln_scale
             _, p_cls_run = _class_probs(ln_ev_run)
             map_run = np.argmax(p_cls_run, axis=1)
             changed[ri] += int((map_run != map_nom).sum())
@@ -369,39 +453,64 @@ def run_sensitivity_region(config, region, st, beta):
         psi_file.close()
 
     return dict(n_source=n, frac_map_changed=(changed / n if n else changed.astype(np.float64)),
-                n_pyso_above_half=n_pyso)
+                n_pyso_above_half=n_pyso,
+                yso_floor_mean_factor=(yso_floor_factor_sum / n if n else float("nan")))
 
 
 def write_sensitivity(path, region, result):
     """Updates the region's own row of the (30-region) P9 product in
-    place, leaving every other region's row untouched (rule 5c)."""
+    place, leaving every other region's row untouched (rule 5c). `SCALING`
+    is per-region because `yso_floor`'s factor is (module docstring); its
+    other eight rows repeat the same fixed literature-band factor in every
+    region's slice.
+    """
     region_names = tuple(r.name for r in regions_module.REGIONS)
     n_region = len(region_names)
     n_run = len(SENSITIVITY_RUNS)
+    n_cls = len(CLASSES)
+    yso_floor_ri = SENSITIVITY_RUNS.index("yso_floor")
+    fixed = sensitivity_scaling_matrix()
     if os.path.exists(path):
         with h5py.File(path, "r") as f:
             frac_map_changed = np.asarray(f["FRAC_MAP_CHANGED"][:])
             n_pyso_above_half = np.asarray(f["N_PYSO_ABOVE_HALF"][:])
             n_sources = np.asarray(f["N_SOURCES"][:])
+            scaling_on_disk = np.asarray(f["SCALING"][:])
     else:
         frac_map_changed = np.full((n_region, n_run), np.nan, dtype=np.float32)
         n_pyso_above_half = np.full((n_region, n_run + 1), -1, dtype=np.int32)
         n_sources = np.zeros(n_region, dtype=np.int32)
+        scaling_on_disk = None
+    # SCALING is per-region (`yso_floor`'s factor varies by region, module
+    # docstring): a product written before this fix carries the old (n_run,
+    # n_cls) shape, which does not carry a per-region yso_floor factor, so
+    # it is rebuilt fresh rather than reshaped.
+    if scaling_on_disk is not None and scaling_on_disk.shape == (n_region, n_run, n_cls):
+        scaling = scaling_on_disk
+    else:
+        scaling = np.broadcast_to(fixed, (n_region, n_run, n_cls)).copy()
 
     ridx = region_names.index(region)
     frac_map_changed[ridx] = result["frac_map_changed"]
     n_pyso_above_half[ridx] = result["n_pyso_above_half"]
     n_sources[ridx] = result["n_source"]
+    scaling[ridx, yso_floor_ri, :] = 1.0
+    for cls in ("YSO", "H2S"):
+        scaling[ridx, yso_floor_ri, CLASSES.index(cls)] = result["yso_floor_mean_factor"]
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.create_dataset("REGION", data=np.array(region_names, dtype="S32"))
         f.create_dataset("RUN", data=np.array(SENSITIVITY_RUNS, dtype="S16"))
-        f.create_dataset("SCALING", data=sensitivity_scaling_matrix())
+        f.create_dataset("SCALING", data=scaling.astype(np.float32))
         f.create_dataset("FRAC_MAP_CHANGED", data=frac_map_changed.astype(np.float32))
         f.create_dataset("N_PYSO_ABOVE_HALF", data=n_pyso_above_half.astype(np.int32))
         f.create_dataset("N_SOURCES", data=n_sources.astype(np.int32))
         f.attrs["GRANULE"] = "region"
+        f.attrs["SCALING_YSO_FLOOR_IS_PER_SOURCE"] = (
+            "SCALING row %d (yso_floor) is each region's own mean over sources of "
+            "exp(ln(max(A,%.2g)^2/A^2)) (A = AK_SESNA), not a fixed literature-band "
+            "factor like the other eight rows" % (yso_floor_ri, A_MIN_YSO_LAW))
 
 
 def build(config, regions=None, beta=0.0):
@@ -415,22 +524,30 @@ def build(config, regions=None, beta=0.0):
     for region in region_names:
         with progress.Stage("fittp.classify", region) as st:
             result = build_region(config, region, st, beta)
-            path = config_module.product_path(config, "fittp", "classification", "posterior",
-                                               "source", region=region)
-            write_region(path, result)
+            join_classify_parts(result["path"], result["part_paths"],
+                                 result["n_source"], result["fit_files"])
 
-            p_class_err = float(np.max(np.abs(result["p_class"].sum(axis=1) - 1.0)))
-            sub_sum = np.zeros_like(result["p_class"])
+            # the joined file's own small columns (n, 6) and (n, 25) --
+            # not CANDIDATE_FLUX/FLUX_IMPUTED_COV, the two region-sized
+            # arrays rule 10b keeps out of memory (W7 review finding 6).
+            with h5py.File(result["path"], "r") as f:
+                p_class = np.asarray(f["P_CLASS"][:])
+                p_subclass = np.asarray(f["P_SUBCLASS"][:])
+                n_detected = np.asarray(f["N_DETECTED"][:])
+
+            p_class_err = float(np.max(np.abs(p_class.sum(axis=1) - 1.0)))
+            sub_sum = np.zeros_like(p_class)
             for ci, cls in enumerate(CLASSES):
                 lo, hi = CLASS_SLICES[cls]
-                sub_sum[:, ci] = result["p_subclass"][:, lo:hi].sum(axis=1)
-            subclass_err = float(np.max(np.abs(sub_sum - result["p_class"])))
-            n_pyso_half = int((result["p_class"][:, YSO_INDEX] > 0.5).sum())
-            two_band_frac = float((result["n_detected"] == 2).mean()) if result["n_detected"].size else float("nan")
-            st.done(path, n=result["name"].shape[0], beta=beta,
+                sub_sum[:, ci] = p_subclass[:, lo:hi].sum(axis=1)
+            subclass_err = float(np.max(np.abs(sub_sum - p_class)))
+            n_pyso_half = int((p_class[:, YSO_INDEX] > 0.5).sum())
+            two_band_frac = float((n_detected == 2).mean()) if n_detected.size else float("nan")
+            st.done(result["path"], n=result["n_source"], beta=beta,
                     p_class_sum_err=p_class_err, p_subclass_sum_err=subclass_err,
                     flux_imputed_identity_err=result["imputed_identity_err"],
-                    n_pyso_above_half=n_pyso_half, two_band_frac=two_band_frac)
+                    n_pyso_above_half=n_pyso_half, two_band_frac=two_band_frac,
+                    n_batches=len(result["part_paths"]))
 
         with progress.Stage("fittp.classify.sensitivity", region) as st:
             sens = run_sensitivity_region(config, region, st, beta)
