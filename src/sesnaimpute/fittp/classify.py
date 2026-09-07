@@ -74,6 +74,74 @@ SUBCLASS_LABELS = tuple("%s:%s" % (s.cls, s.name) for s in _SUBCLASS_NAMES)
 #: intermediates, at a generous margin.
 ROW_BYTES = 8192
 
+#: The literature-band sensitivity runs (spec sec 7.2, sec 10; P9's own
+#: RUN order). Each is a rescaling of one class's ln EV_C by ln(scale),
+#: a constant added to that class's whole CLASSMAP subclass block --
+#: the same logsumexp-shift trick beta uses -- so every run is
+#: classification-time only, no refit.
+SENSITIVITY_RUNS = ("kappa_lo", "kappa_hi", "eta_lo", "eta_hi",
+                     "eps_ext_lo", "eps_ext_hi", "f_dusty_lo", "f_dusty_hi",
+                     "yso_floor")
+
+#: kappa: the young-star law's own normalisation (spec sec 5.5's N_law,
+#: sec 10's kappa 14.5/18.7 pc^-2 mag^-2, exponent 2), band 0.36 dex,
+#: Pokhrel+2020's cloud-to-cloud scatter -- scales YSO's whole density.
+KAPPA_DEX = 0.36
+#: eta_r: H2S's knots-per-young-star rate (spec sec 5.6), band 0.45 dex,
+#: Froebrich+2015 (UWISH2) / Giannini+2013 -- scales H2S.
+ETA_DEX = 0.45
+#: eps_ext: H2S's star-finder cataloguing fraction (spec sec 5.6), central
+#: 0.25 carried over [0.15, 0.35] from five knot-survey cross-matches --
+#: scales H2S by the ratio of the band's end to its own central value.
+EPS_EXT_CENTRAL, EPS_EXT_LO, EPS_EXT_HI = 0.25, 0.15, 0.35
+#: F_dusty: the AGB/STAR dust-detection partition (spec sec 5.2, sec 10),
+#: Riebel+2012's two cited chemistry values -- O-rich 0.24, C-rich 0.68 --
+#: are used as the band's own low and high end relative to their mean,
+#: since no single-number uncertainty on F_dusty is cited; scales AGB.
+F_DUSTY_O, F_DUSTY_C = 0.24, 0.68
+
+
+def _sensitivity_scale(run):
+    """`(class, ln_scale)` for `run` -- the constant added to that class's
+    whole CLASSMAP subclass block. `yso_floor` is special: spec sec 7.2's
+    "floor added to the young-star law at low column" has no separate
+    cited magnitude, so it reuses kappa's own cited high-end band
+    (disclosed) applied only to sources at or below the region's median
+    column (`build_region`'s `low_column` mask), not every source --
+    the young-star law's low-column behaviour is exactly a low-column
+    subset question.
+    """
+    ln10 = np.log(10.0)
+    if run == "kappa_lo":
+        return "YSO", -KAPPA_DEX * ln10, None
+    if run == "kappa_hi":
+        return "YSO", KAPPA_DEX * ln10, None
+    if run == "eta_lo":
+        return "H2S", -ETA_DEX * ln10, None
+    if run == "eta_hi":
+        return "H2S", ETA_DEX * ln10, None
+    if run == "eps_ext_lo":
+        return "H2S", np.log(EPS_EXT_LO / EPS_EXT_CENTRAL), None
+    if run == "eps_ext_hi":
+        return "H2S", np.log(EPS_EXT_HI / EPS_EXT_CENTRAL), None
+    if run == "f_dusty_lo":
+        return "AGB", np.log(F_DUSTY_O / ((F_DUSTY_O + F_DUSTY_C) / 2.0)), None
+    if run == "f_dusty_hi":
+        return "AGB", np.log(F_DUSTY_C / ((F_DUSTY_O + F_DUSTY_C) / 2.0)), None
+    if run == "yso_floor":
+        return "YSO", KAPPA_DEX * ln10, "low_column"
+    raise ValueError("fittp.classify: unknown sensitivity run %r" % run)
+
+
+def sensitivity_scaling_matrix():
+    """`(9, 6)` `SCALING`: the factor applied to each class's density in
+    each run (1.0 where a run does not touch that class)."""
+    scaling = np.ones((len(SENSITIVITY_RUNS), len(CLASSES)), dtype=np.float32)
+    for ri, run in enumerate(SENSITIVITY_RUNS):
+        cls, ln_scale, _mask = _sensitivity_scale(run)
+        scaling[ri, CLASSES.index(cls)] = np.exp(ln_scale)
+    return scaling
+
 
 def _fit_path(config, region, cls):
     return config_module.product_path(config, "fittp", "fit", cls, "source", region=region)
@@ -93,6 +161,36 @@ def _require_fit_files(config, region):
 
 def _cascade_path(config, region):
     return config_module.product_path(config, "fittp", "classification", "cascade", "source", region=region)
+
+
+def _batch_ln_evidence(class_files, psi_file, beta, start, stop, m):
+    """One batch's global `(m, 25)` ln-evidence array: each class's own
+    `LN_EVIDENCE` block, shifted by `beta * ln Psi_C(s)` when `beta != 0`
+    (spec sec 6.5's logsumexp-shift, see module docstring)."""
+    ln_ev = np.full((m, N_SUBCLASS), -np.inf, dtype=np.float64)
+    for ci, cls in enumerate(CLASSES):
+        f = class_files[cls]
+        lo, hi = CLASS_SLICES[cls]
+        block = np.asarray(f["LN_EVIDENCE"][start:stop, :], dtype=np.float64)
+        if beta != 0.0:
+            with np.errstate(divide="ignore"):
+                ln_psi = np.log(np.asarray(psi_file["PSI_CLASS"][start:stop, ci], dtype=np.float64))
+            block = block + beta * ln_psi[:, None]
+        ln_ev[:, lo:hi] = block
+    return ln_ev
+
+
+def _class_probs(ln_ev):
+    """`(P_SUBCLASS, P_CLASS)` from a global `(m, 25)` ln-evidence array:
+    one softmax, then each class's column sum (module docstring)."""
+    row_max = ln_ev.max(axis=1, keepdims=True)
+    weights = np.exp(ln_ev - row_max)
+    p_sub = weights / weights.sum(axis=1, keepdims=True)
+    p_cls = np.zeros((ln_ev.shape[0], len(CLASSES)), dtype=np.float64)
+    for ci, cls in enumerate(CLASSES):
+        lo, hi = CLASS_SLICES[cls]
+        p_cls[:, ci] = p_sub[:, lo:hi].sum(axis=1)
+    return p_sub, p_cls
 
 
 def build_region(config, region, st, beta):
@@ -142,28 +240,15 @@ def build_region(config, region, st, beta):
     bounds = list(batches(n, ROW_BYTES))
     for bi, (start, stop) in enumerate(bounds):
         m = stop - start
-        ln_ev = np.full((m, N_SUBCLASS), -np.inf, dtype=np.float64)
         flux_mean_stack = np.empty((len(CLASSES), m, N_BANDS), dtype=np.float64)
         flux_cov_stack = np.empty((len(CLASSES), m, N_BANDS, N_BANDS), dtype=np.float64)
         for ci, cls in enumerate(CLASSES):
             f = class_files[cls]
-            lo, hi = CLASS_SLICES[cls]
-            block = np.asarray(f["LN_EVIDENCE"][start:stop, :], dtype=np.float64)
-            if beta != 0.0:
-                ln_psi = np.log(np.asarray(psi_file["PSI_CLASS"][start:stop, ci], dtype=np.float64))
-                block = block + beta * ln_psi[:, None]
-            ln_ev[:, lo:hi] = block
             flux_mean_stack[ci] = np.asarray(f["FLUX_MEAN"][start:stop, :], dtype=np.float64)
             flux_cov_stack[ci] = np.asarray(f["FLUX_COV"][start:stop, :, :], dtype=np.float64)
 
-        row_max = ln_ev.max(axis=1, keepdims=True)
-        weights = np.exp(ln_ev - row_max)
-        p_sub = weights / weights.sum(axis=1, keepdims=True)
-
-        p_cls = np.zeros((m, len(CLASSES)), dtype=np.float64)
-        for ci, cls in enumerate(CLASSES):
-            lo, hi = CLASS_SLICES[cls]
-            p_cls[:, ci] = p_sub[:, lo:hi].sum(axis=1)
+        ln_ev = _batch_ln_evidence(class_files, psi_file, beta, start, stop, m)
+        p_sub, p_cls = _class_probs(ln_ev)
 
         map_c = np.argmax(p_cls, axis=1)
 
@@ -182,7 +267,7 @@ def build_region(config, region, st, beta):
             imputed_identity_err = max(imputed_identity_err,
                                         float(np.max(np.abs(imputed[detected] - flux[detected]))))
 
-        with np.errstate(divide="ignore"):
+        with np.errstate(divide="ignore", invalid="ignore"):
             ent_c = -np.sum(np.where(p_cls > 0, p_cls * np.log(p_cls), 0.0), axis=1)
             ent_s = -np.sum(np.where(p_sub > 0, p_sub * np.log(p_sub), 0.0), axis=1)
 
@@ -230,6 +315,95 @@ def write_region(path, result):
         f.attrs["FIT_FILES"] = result["fit_files"]
 
 
+def run_sensitivity_region(config, region, st, beta):
+    """One region's row of P9, the literature-band sensitivity (spec sec
+    7.2): for each of `SENSITIVITY_RUNS`, `classify`'s own nominal
+    classification (this same `beta`) re-run with one class's ln evidence
+    shifted by `ln(scale)` (`yso_floor`: only for sources at or below the
+    region's own median column, spec sec 5.5's low-column question) --
+    classification-time only, no refit, batched with the classify build.
+    Returns `n_source`, `frac_map_changed` (9,), `n_pyso_above_half`
+    (10,, column 0 nominal).
+    """
+    _require_fit_files(config, region)
+    class_files = {cls: h5py.File(_fit_path(config, region, cls), "r") for cls in CLASSES}
+    names = class_files["STAR"]["NAME"][:]
+    psi_file = h5py.File(_cascade_path(config, region), "r") if beta != 0.0 else None
+
+    cat_path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
+    with h5py.File(cat_path, "r") as cf:
+        ak = np.asarray(cf["AK_SESNA"][:names.shape[0]], dtype=np.float64)
+    ak_median = float(np.median(ak))
+
+    n = names.shape[0]
+    n_run = len(SENSITIVITY_RUNS)
+    changed = np.zeros(n_run, dtype=np.int64)
+    n_pyso = np.zeros(n_run + 1, dtype=np.int64)
+
+    bounds = list(batches(n, ROW_BYTES))
+    for bi, (start, stop) in enumerate(bounds):
+        m = stop - start
+        ln_ev_nominal = _batch_ln_evidence(class_files, psi_file, beta, start, stop, m)
+        _, p_cls_nom = _class_probs(ln_ev_nominal)
+        map_nom = np.argmax(p_cls_nom, axis=1)
+        n_pyso[0] += int((p_cls_nom[:, YSO_INDEX] > 0.5).sum())
+
+        low_column = ak[start:stop] <= ak_median
+        for ri, run in enumerate(SENSITIVITY_RUNS):
+            cls, ln_scale, mask_name = _sensitivity_scale(run)
+            lo, hi = CLASS_SLICES[cls]
+            ln_ev_run = ln_ev_nominal.copy()
+            if mask_name == "low_column":
+                ln_ev_run[low_column, lo:hi] += ln_scale
+            else:
+                ln_ev_run[:, lo:hi] += ln_scale
+            _, p_cls_run = _class_probs(ln_ev_run)
+            map_run = np.argmax(p_cls_run, axis=1)
+            changed[ri] += int((map_run != map_nom).sum())
+            n_pyso[ri + 1] += int((p_cls_run[:, YSO_INDEX] > 0.5).sum())
+        st.tick(bi + 1, len(bounds), "batches")
+
+    for f in class_files.values():
+        f.close()
+    if psi_file is not None:
+        psi_file.close()
+
+    return dict(n_source=n, frac_map_changed=(changed / n if n else changed.astype(np.float64)),
+                n_pyso_above_half=n_pyso)
+
+
+def write_sensitivity(path, region, result):
+    """Updates the region's own row of the (30-region) P9 product in
+    place, leaving every other region's row untouched (rule 5c)."""
+    region_names = tuple(r.name for r in regions_module.REGIONS)
+    n_region = len(region_names)
+    n_run = len(SENSITIVITY_RUNS)
+    if os.path.exists(path):
+        with h5py.File(path, "r") as f:
+            frac_map_changed = np.asarray(f["FRAC_MAP_CHANGED"][:])
+            n_pyso_above_half = np.asarray(f["N_PYSO_ABOVE_HALF"][:])
+            n_sources = np.asarray(f["N_SOURCES"][:])
+    else:
+        frac_map_changed = np.full((n_region, n_run), np.nan, dtype=np.float32)
+        n_pyso_above_half = np.full((n_region, n_run + 1), -1, dtype=np.int32)
+        n_sources = np.zeros(n_region, dtype=np.int32)
+
+    ridx = region_names.index(region)
+    frac_map_changed[ridx] = result["frac_map_changed"]
+    n_pyso_above_half[ridx] = result["n_pyso_above_half"]
+    n_sources[ridx] = result["n_source"]
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with h5py.File(path, "w") as f:
+        f.create_dataset("REGION", data=np.array(region_names, dtype="S32"))
+        f.create_dataset("RUN", data=np.array(SENSITIVITY_RUNS, dtype="S16"))
+        f.create_dataset("SCALING", data=sensitivity_scaling_matrix())
+        f.create_dataset("FRAC_MAP_CHANGED", data=frac_map_changed.astype(np.float32))
+        f.create_dataset("N_PYSO_ABOVE_HALF", data=n_pyso_above_half.astype(np.int32))
+        f.create_dataset("N_SOURCES", data=n_sources.astype(np.int32))
+        f.attrs["GRANULE"] = "region"
+
+
 def build(config, regions=None, beta=0.0):
     """Writes `fittp/classification/posterior_classification_source__R.hdf5`
     for `regions` (default all thirty), one file per region
@@ -252,10 +426,20 @@ def build(config, regions=None, beta=0.0):
                 sub_sum[:, ci] = result["p_subclass"][:, lo:hi].sum(axis=1)
             subclass_err = float(np.max(np.abs(sub_sum - result["p_class"])))
             n_pyso_half = int((result["p_class"][:, YSO_INDEX] > 0.5).sum())
+            two_band_frac = float((result["n_detected"] == 2).mean()) if result["n_detected"].size else float("nan")
             st.done(path, n=result["name"].shape[0], beta=beta,
                     p_class_sum_err=p_class_err, p_subclass_sum_err=subclass_err,
                     flux_imputed_identity_err=result["imputed_identity_err"],
-                    n_pyso_above_half=n_pyso_half)
+                    n_pyso_above_half=n_pyso_half, two_band_frac=two_band_frac)
+
+        with progress.Stage("fittp.classify.sensitivity", region) as st:
+            sens = run_sensitivity_region(config, region, st, beta)
+            sens_path = config_module.product_path(config, "fittp", "classification", "sensitivity", "region")
+            write_sensitivity(sens_path, region, sens)
+            st.done(sens_path, n=sens["n_source"],
+                    frac_map_changed_range="%.4g-%.4g" % (sens["frac_map_changed"].min(),
+                                                           sens["frac_map_changed"].max()),
+                    n_pyso_nominal=int(sens["n_pyso_above_half"][0]))
 
 
 if __name__ == "__main__":

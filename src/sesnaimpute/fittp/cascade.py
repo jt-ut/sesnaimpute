@@ -15,6 +15,8 @@ Its eleven verdict probabilities (`crisp.LABELS` order) are grouped into a
 class score `PSI_C(s)` over the fitter's six classes.
 """
 
+import os
+
 import h5py
 import numpy as np
 
@@ -163,6 +165,88 @@ def write_region(path, result):
         f.attrs["CONFUSION_MEASURED"] = result["confusion"]
 
 
+def _classify_path(config, region):
+    return config_module.product_path(
+        config, "fittp", "classification", "posterior", "source", region=region)
+
+
+def build_region_imputed(config, region, st, name, n_detected):
+    """The imputed half (spec sec 6.5, 7.3; IMPLEMENTATION_BMSTP_DRAFT.md
+    row 2.5): the cascade run on `classify`'s `FLUX_IMPUTED` with
+    `valid = detected = all` -- every band usable, since the imputed SED
+    is the MAP class's own candidate, not a measurement, so it carries no
+    sigma of its own (`sigma = 0`, the crisp limit of `classify_prob`).
+    Runs only once `classify` has written the region (rule 5b: otherwise
+    None, the caller leaves the imputed half absent, not a failure --
+    the measured half stands on its own).
+    """
+    path = _classify_path(config, region)
+    if not os.path.exists(path):
+        print("fittp.cascade [%s]: no classify product yet (%s) -- run "
+              "'PY sesnaimpute.fittp.classify' after the fit loop, then "
+              "'PY sesnaimpute.fittp.cascade' again for the imputed half"
+              % (region, path))
+        return None
+
+    with h5py.File(path, "r") as f:
+        classify_name = f["NAME"][:]
+        map_class = f["MAP_CLASS"][:]
+        p_yso = f["P_YSO"][:]
+        n = f["FLUX_IMPUTED"].shape[0]
+    if not np.array_equal(classify_name, name):
+        raise ValueError("fittp.cascade [%s]: classify's NAME does not row-align "
+                          "with the cascade's own" % region)
+
+    p_verdict_imp = np.empty((n, len(crisp.LABELS)), dtype=np.float32)
+    all_true = None
+    bounds = list(batches(n, ROW_BYTES))
+    for i, (start, stop) in enumerate(bounds):
+        with h5py.File(path, "r") as f:
+            flux = np.asarray(f["FLUX_IMPUTED"][start:stop], dtype=float)
+        sigma = np.zeros_like(flux)
+        detected = np.ones(flux.shape, dtype=bool)
+        prob = gc_prob.classify_prob(flux, sigma, valid=detected, detected=detected).prob
+        p_verdict_imp[start:stop] = prob.astype(np.float32)
+        st.tick(i + 1, len(bounds), "batches (imputed)")
+
+    verdict_idx = np.argmax(p_verdict_imp, axis=1)
+    verdict_imp = crisp.CLASS_CODE[verdict_idx].astype(np.int16)
+    confusion_imputed = confusion_by_detected_count(verdict_idx, n_detected)
+
+    # verdict (imputed) vs MAP class -- spec sec 7.3's first confusion table.
+    confusion_verdict_map = np.zeros((len(crisp.LABELS), len(CLASSES)), dtype=np.int64)
+    for ci in range(len(CLASSES)):
+        sel = map_class == ci
+        if sel.any():
+            confusion_verdict_map[:, ci] = np.bincount(verdict_idx[sel], minlength=len(crisp.LABELS))
+
+    # cascade's YSO set vs P(YSO) > 0.5 -- spec sec 7.3's second table.
+    yso_label_idx = [crisp.LABEL_INDEX[lab] for lab in CONCORDANT_LABELS["YSO"]]
+    cascade_yso = np.isin(verdict_idx, yso_label_idx)
+    pyso_half = p_yso > 0.5
+    confusion_yso = np.array([
+        [int((~cascade_yso & ~pyso_half).sum()), int((~cascade_yso & pyso_half).sum())],
+        [int((cascade_yso & ~pyso_half).sum()), int((cascade_yso & pyso_half).sum())],
+    ], dtype=np.int64)
+
+    return dict(p_verdict=p_verdict_imp, verdict=verdict_imp,
+                confusion_imputed=confusion_imputed,
+                confusion_verdict_map=confusion_verdict_map,
+                confusion_yso=confusion_yso)
+
+
+def write_region_imputed(path, imputed):
+    with h5py.File(path, "a") as f:
+        for name in ("P_VERDICT_IMPUTED", "VERDICT_IMPUTED"):
+            if name in f:
+                del f[name]
+        f.create_dataset("P_VERDICT_IMPUTED", data=imputed["p_verdict"])
+        f.create_dataset("VERDICT_IMPUTED", data=imputed["verdict"])
+        f.attrs["CONFUSION_IMPUTED"] = imputed["confusion_imputed"]
+        f.attrs["CONFUSION_VERDICT_VS_MAP"] = imputed["confusion_verdict_map"]
+        f.attrs["CONFUSION_CASCADE_YSO_VS_PYSO"] = imputed["confusion_yso"]
+
+
 def build(config, regions=None):
     """Writes `fittp/classification/cascade_classification_source[__R].hdf5`
     for `regions` (default all thirty), one file per region
@@ -198,6 +282,18 @@ def build(config, regions=None):
                      unclassified_rows_uniform=uniform_ok)
             print(f"fittp.cascade {region}: verdict counts by detected-band count "
                   f"(rows=verdict in LABELS order, cols=2..8):\n{result['confusion']}")
+
+        with progress.Stage("fittp.cascade.imputed", region) as st:
+            imputed = build_region_imputed(config, region, st, result["name"], result["n_detected"])
+            if imputed is not None:
+                write_region_imputed(path, imputed)
+                st.done(path, n=imputed["p_verdict"].shape[0])
+                print(f"fittp.cascade {region}: imputed-vs-MAP confusion (rows=verdict, "
+                      f"cols=MAP class {CLASSES}):\n{imputed['confusion_verdict_map']}")
+                print(f"fittp.cascade {region}: cascade YSO set vs P(YSO)>0.5 "
+                      f"[[not-not, not-yso],[cascade-not, cascade-yso]]:\n{imputed['confusion_yso']}")
+            else:
+                st.done(None, n=0)
 
 
 if __name__ == "__main__":
