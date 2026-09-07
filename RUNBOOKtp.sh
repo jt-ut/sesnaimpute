@@ -10,6 +10,15 @@
 # step. A build whose input file is missing fails with one sentence
 # naming the RUNBOOK line that makes it -- that is the only existence
 # check in this pipeline.
+#
+# Every joblib-parallelised stage's worker count is `root.cfg`'s own
+# `[run] n_jobs`, with no separate module-level cap (CODING_RULES_BMSTP.md
+# rule 10a): the owner sets it to what the machine's memory allows.
+# `NUMBA_NUM_THREADS` governs the numba kernels in fittp's prior reader
+# (`fittp.prior_reader`) and its likelihood (`fittp.likelihood`)
+# separately from that worker count; the sweep (`fittp.sweep`) pins BLAS
+# to one thread for its small per-source gemms while those numba kernels
+# keep their own thread pool.
 set -euo pipefail
 
 # Usage: RUNBOOKtp.sh [--from <module>] [--to <module>] [--regions R1 R2 ...]
