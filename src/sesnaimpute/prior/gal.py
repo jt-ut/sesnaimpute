@@ -49,6 +49,7 @@ from scipy.optimize import least_squares
 from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
@@ -961,6 +962,7 @@ def build(config, regions=None):
     import numba
     numba.set_num_threads(max(1, int(config.n_jobs)))
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
+    st = progress.Stage("prior.gal")
 
     fazio_path = f"{config.data_root}/sky/download/fazio2004/fazio2004_table1_irac_counts.csv"
     if not os.path.exists(fazio_path):
@@ -1078,7 +1080,9 @@ def build(config, regions=None):
 
     max_2band_violation = 0.0
     max_monotone_violation = 0.0
-    for region in region_names:
+    n_regions = len(region_names)
+    for i_region, region in enumerate(region_names, start=1):
+        st.tick(i_region, n_regions, "regions")
         median_limit_log10 = region_median_irac_limit(config, region)
         limit_log10 = median_limit_log10[IRAC_BAND_IDX][None, :]
 
@@ -1111,6 +1115,8 @@ def build(config, regions=None):
               f"Fazio N(>region median I2 limit)={fazio_at_median_limit:.1f} deg^-2")
         report_region_comparison(region, eps_2band, eps_no_removal, log10_s_grid)
 
+    st.done(counts_path, n_regions=n_regions, rms_dex=stats["rms_dex"],
+            cosmic_variance_dex=counts_result["cosmic_variance_dex"])
     print(f"gal: acceptance: max(EPS_2BAND - EPS)={max_2band_violation:.6g} "
           f"(expect <= 0); max positive d(EPS)/d(node)={max_monotone_violation:.6g} (expect ~0)")
 

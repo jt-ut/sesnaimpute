@@ -73,6 +73,7 @@ import numpy as np
 import pandas as pd
 
 from sesnaimpute import config as config_module
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 
@@ -764,8 +765,10 @@ def build(config, regions=None):
            float(np.nanmin(w_pool_ks)), float(np.nanmax(w_pool_ks))))
 
     for region in region_names:
-        result = build_region(config, region, clusters, w_pool_g, w_pool_ks)
-        path = _write_product(config, region, result, w_pool_g, w_pool_ks, pool_skipped)
+        with progress.Stage("prior.anchor_weights", region) as st:
+            result = build_region(config, region, clusters, w_pool_g, w_pool_ks)
+            path = _write_product(config, region, result, w_pool_g, w_pool_ks, pool_skipped)
+            st.done(path, n_tile=result["n_tile"], max_identity_dev=result["max_identity_dev"])
 
         w_all = np.concatenate([result["w_g"].ravel(), result["w_ks"].ravel()])
         print(

@@ -58,6 +58,7 @@ import numpy as np
 from sesnaimpute import config as config_module
 from sesnaimpute import constants
 from sesnaimpute import definitions
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
@@ -259,18 +260,20 @@ def build(config, regions=None):
     """
     names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     for region in names:
-        result = build_region(config, region)
-        path = _write_product(config, region, result)
+        with progress.Stage("prior.anchor_observed", region) as st:
+            result = build_region(config, region)
+            path = _write_product(config, region, result)
 
-        any_floored = ((result["floored_g"] > 0) | (result["floored_ks"] > 0)
-                        | (result["floored_gk"] > 0))
-        frac_floored_pix = float(any_floored.mean()) if any_floored.size else float("nan")
+            any_floored = ((result["floored_g"] > 0) | (result["floored_ks"] > 0)
+                            | (result["floored_gk"] > 0))
+            frac_floored_pix = float(any_floored.mean()) if any_floored.size else float("nan")
 
-        total_g_obs, total_ks_obs = result["total_g_obs"], result["total_ks_obs"]
-        region_frac_g = ((total_g_obs - float(result["n_g_sub"].sum())) / total_g_obs
-                          if total_g_obs > 0 else float("nan"))
-        region_frac_ks = ((total_ks_obs - float(result["n_ks_sub"].sum())) / total_ks_obs
-                           if total_ks_obs > 0 else float("nan"))
+            total_g_obs, total_ks_obs = result["total_g_obs"], result["total_ks_obs"]
+            region_frac_g = ((total_g_obs - float(result["n_g_sub"].sum())) / total_g_obs
+                              if total_g_obs > 0 else float("nan"))
+            region_frac_ks = ((total_ks_obs - float(result["n_ks_sub"].sum())) / total_ks_obs
+                               if total_ks_obs > 0 else float("nan"))
+            st.done(path, n_entering=result["n_entering"], frac_pixels_floored=frac_floored_pix)
         print(
             "prior.anchor_observed: %s N_GK_OBS entering=%d G_S_sum=%.2f "
             "frac_pixels_floored=%.4f region_subtracted_frac G=%.4f Ks=%.4f -> %s"

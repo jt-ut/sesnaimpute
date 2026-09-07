@@ -43,6 +43,7 @@ import numpy as np
 from scipy.special import erf
 
 from sesnaimpute import config as config_module
+from sesnaimpute import progress
 from sesnaimpute.sky.derived.subbeam import HGBS_BEAM_ARCSEC, PLANCK_BEAM_ARCSEC
 
 #: How far past `A_s`, in sigma, consumers take the kernel's tail.
@@ -323,6 +324,7 @@ def build(config, regions=None):
     """
     from sesnaimpute.prior import column_grid
 
+    st = progress.Stage("prior.kernel")
     subbeam_path = config_module.product_path(config, "sky/derived", "herschel",
                                               "subbeam", "region")
     zp = _load_sigma_zp_herschel(config)
@@ -358,6 +360,7 @@ def build(config, regions=None):
         f.create_dataset("MAP_CLASS_CODES", data=codes)
         f.create_dataset("ZP_HERSCHEL_K", data=np.float64(zp))
 
+    st.done(out_path, n_arms=len(_ARM_ORDER), n_node=n_node, zp_herschel_k=float(zp))
     print("kernel: %d arms x %d nodes (mixture), zp_herschel_k=%.4f -> %s"
           % (len(_ARM_ORDER), n_node, zp, out_path), flush=True)
 

@@ -89,6 +89,7 @@ from scipy.stats import binned_statistic
 from sesnaimpute import config as config_module
 from sesnaimpute import constants
 from sesnaimpute import definitions
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
@@ -525,6 +526,7 @@ def build(config, regions=None):
     of the same region set. The regions are read in chunks of at most
     `config.n_jobs` at a time (CODING_RULES.md 10a)."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
+    st = progress.Stage("prior.pahc_curve")
 
     c12_star, c48_star = load_field_star_colours(config, region_names)
     colour_edges, colour_medians, colour_widths, colour_counts = colour_relation(c12_star, c48_star)
@@ -535,11 +537,13 @@ def build(config, regions=None):
           f"(width {COLOUR_BIN_WIDTH_MAG} mag), "
           f"[3.6]-[4.5] median={colour45_median:.4f} mag", flush=True)
 
+    chunks = list(_chunks(region_names, config.n_jobs))
     results = []
-    for chunk in _chunks(region_names, config.n_jobs):
+    for i_chunk, chunk in enumerate(chunks, start=1):
         results.extend(Parallel(n_jobs=config.n_jobs)(
             delayed(region_measurement)(config, region, knots, colour45_median)
             for region in chunk))
+        st.tick(i_chunk, len(chunks), "region chunks")
     q = np.concatenate([r[0] for r in results]) if results else np.empty(0)
     f2 = np.concatenate([r[1] for r in results]) if results else np.empty(0)
     f2_pred = np.concatenate([r[2] for r in results]) if results else np.empty(0)
@@ -585,6 +589,8 @@ def build(config, regions=None):
     write_curve(out_path, curve, colour_edges, colour_medians, colour_widths,
                 colour45_median, width48, width45)
 
+    st.done(out_path, n_shipped=curve["n_shipped"], n_disk_excess=curve["n_disk_excess"],
+            floor=curve["floor"])
     print(f"pahc_curve: shipped n={curve['n_shipped']} disk-excess n={curve['n_disk_excess']} "
           f"floor={curve['floor']:.6f} -> {out_path}", flush=True)
 

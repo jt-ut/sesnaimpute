@@ -87,6 +87,7 @@ import healpy as hp
 import numpy as np
 
 from sesnaimpute import config as config_module
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute import tables as tables_module
 from sesnaimpute.build import run
@@ -393,9 +394,10 @@ def build(config, regions=None):
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     path = _output_path(config)
     for region in region_names:
-        rows = _build_one(config, region)
-        tables_module.update_rows(path, [region], rows, granule="region")
-        print("prior.levels: %s -> %s" % (region, path), flush=True)
+        with progress.Stage("prior.levels", region) as st:
+            rows = _build_one(config, region)
+            tables_module.update_rows(path, [region], rows, granule="region")
+            st.done(path, f_region=rows["F_REGION"][0], n_pixels=int(rows["N_PIXELS"][0]))
 
 
 if __name__ == "__main__":

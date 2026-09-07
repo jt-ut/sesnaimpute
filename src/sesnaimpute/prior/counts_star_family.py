@@ -85,6 +85,7 @@ from sesnaimpute.granules import access
 from sesnaimpute.prior import column_grid, pahc_curve, selection, star_population, star_shapes
 from sesnaimpute.prior import star_selection as star_selection_module
 from sesnaimpute.prior import gal as gal_module
+from sesnaimpute import progress
 
 FAMILY_CLASSES = ("star", "agb", "pahc")
 
@@ -928,32 +929,39 @@ def report_algebraic_checks(region, checks):
 
 def _build_one(config, region):
     import time
-    t0 = time.time()
-    cond = source_conditioning(config, region)
+    with progress.Stage("prior.counts_star_family", region) as st:
+        cond = source_conditioning(config, region)
 
-    out = {}
-    checks = {}
-    tabulated_medians = {}
-    pop = star_shapes.read_population(config, region)
-    for cls in FAMILY_CLASSES:
-        # `family_counts` still supplies Z_C (the fitter's smoothed-shape
-        # normaliser, unchanged) and, as `n_c_tabulated`, the amplitude-
-        # times-tabulated-shape number the blessing page's "before" column
-        # reports; the shipped N_C is the population sum (owner ruling
-        # 2026-09-06, `direct_family_counts`).
-        n_c_tabulated, z_c, shape = family_counts(config, region, cls, cond)
-        n_c = direct_family_counts(config, region, cls, cond, pop, shape)
-        out["N_%s" % cls.upper()] = n_c
-        out["Z_%s" % cls.upper()] = z_c
-        tabulated_medians[cls] = float(np.median(n_c_tabulated[np.isfinite(n_c_tabulated)]))
-        checks[cls] = algebraic_check(config, region, cls, cond, pop, z_c, src_idx=0)
+        out = {}
+        checks = {}
+        tabulated_medians = {}
+        pop = star_shapes.read_population(config, region)
+        n_batches = len(FAMILY_CLASSES) + 1
+        for i_batch, cls in enumerate(FAMILY_CLASSES, start=1):
+            # `family_counts` still supplies Z_C (the fitter's smoothed-shape
+            # normaliser, unchanged) and, as `n_c_tabulated`, the amplitude-
+            # times-tabulated-shape number the blessing page's "before" column
+            # reports; the shipped N_C is the population sum (owner ruling
+            # 2026-09-06, `direct_family_counts`).
+            n_c_tabulated, z_c, shape = family_counts(config, region, cls, cond)
+            n_c = direct_family_counts(config, region, cls, cond, pop, shape)
+            out["N_%s" % cls.upper()] = n_c
+            out["Z_%s" % cls.upper()] = z_c
+            tabulated_medians[cls] = float(np.median(n_c_tabulated[np.isfinite(n_c_tabulated)]))
+            checks[cls] = algebraic_check(config, region, cls, cond, pop, z_c, src_idx=0)
+            st.tick(i_batch, n_batches, "family batches")
 
-    n_gal, z_gal, fazio_params = gal_counts(config, region, cond)
-    out["N_GAL"] = n_gal
-    out["Z_GAL"] = z_gal
+        n_gal, z_gal, fazio_params = gal_counts(config, region, cond)
+        out["N_GAL"] = n_gal
+        out["Z_GAL"] = z_gal
+        st.tick(n_batches, n_batches, "family batches")
 
-    path = _write(config, region, cond, out)
-    wall_s = time.time() - t0
+        path = _write(config, region, cond, out)
+        wall_s = time.time() - st.t0
+
+        n_source = cond["a_col"].size
+        st.done(path, n_source=n_source,
+                N_STAR=float(np.median(out["N_STAR"][np.isfinite(out["N_STAR"])])))
 
     for line in report(config, region, cond, out, wall_s, tabulated_medians=tabulated_medians):
         print(line, flush=True)
@@ -961,7 +969,6 @@ def _build_one(config, region):
         print(line, flush=True)
     for line in report_algebraic_checks(region, checks):
         print(line, flush=True)
-    print("counts_star_family: %s -> %s" % (region, path), flush=True)
     return path
 
 

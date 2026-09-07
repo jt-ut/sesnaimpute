@@ -118,6 +118,7 @@ module docstring above already describes for `U` itself.
 """
 
 import os
+import threading
 
 import h5py
 import healpy as hp
@@ -128,6 +129,7 @@ from joblib import Parallel, delayed
 
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
@@ -723,7 +725,7 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
 
 
 def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
-                  f_ref_sps, teff_node, ref_jhk, curve):
+                  f_ref_sps, teff_node, ref_jhk, curve, st=None):
     stars_raw, omega_sim_deg2, n_raw = _read_field_stars(config, region)
     r_diffuse = float(selection.ak_per_av(config, 0.0))
     r_dense = float(selection.ak_per_av(config, 1.0))
@@ -761,10 +763,21 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
     pointing_l = np.array([p["l_deg"] for p in pointings])
     pointing_b = np.array([p["b_deg"] for p in pointings])
 
-    results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
-        delayed(_build_one_tile)(config, t, geom, stars, weights, profile_obj, dist_grid, curve,
+    n_tile_total = tiles["n_tile"]
+    _tick_lock = threading.Lock()
+    _done_count = [0]
+
+    def _one_tile(t):
+        result = _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, curve,
                                   pointing_l, pointing_b, front_edge_pc)
-        for t in range(tiles["n_tile"]))
+        if st is not None:
+            with _tick_lock:
+                _done_count[0] += 1
+                st.tick(_done_count[0], n_tile_total, "tiles")
+        return result
+
+    results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
+        delayed(_one_tile)(t) for t in range(n_tile_total))
 
     # report-only (blessing check, owner ruling 2026-09-06): the pointing a
     # tile would have used under the OLD one-pointing-per-region scheme --
@@ -953,11 +966,14 @@ def build(config, regions=None):
         % (f_dusty_o, n_riebel_o, f_dusty_c, n_riebel_c, l_o_lsun, n_orich_models, F_C))
 
     for region in region_names:
-        result = build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
-                               f_ref_sps, teff_node, ref_jhk, curve)
-        path = write_region(config, region, result, f_dusty_o, f_dusty_c, l_o_lsun,
-                             n_riebel_o, n_riebel_c)
-        rep = _report(result)
+        with progress.Stage("prior.star_population", region) as st:
+            result = build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
+                                   f_ref_sps, teff_node, ref_jhk, curve, st=st)
+            path = write_region(config, region, result, f_dusty_o, f_dusty_c, l_o_lsun,
+                                 n_riebel_o, n_riebel_c)
+            rep = _report(result)
+            st.done(path, n_tile=rep["n_tile"], n_pointing=rep["n_pointing"],
+                    star_per_deg2=rep["star_per_deg2"])
         rule_str = " ".join("%d=%.3f" % (k, rep["rule_frac"][k]) for k in range(N_WEIGHT_RULES))
         print(
             "star_population: %s: n_tile=%d n_pointing=%d frac_pointing_changed=%.4f "

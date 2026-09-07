@@ -59,6 +59,7 @@ import numpy as np
 from joblib import Parallel, delayed
 
 from sesnaimpute import config as config_module
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
@@ -493,10 +494,13 @@ def build(config, regions=None):
     all thirty), one file pair per region."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     for region in region_names:
-        result = build_region(config, region)
-        write_tiles(config, region, result)
-        write_histograms(config, region, result)
-        tiles = result["tiles"]
+        with progress.Stage("prior.anchor_tiles", region) as st:
+            result = build_region(config, region)
+            write_tiles(config, region, result)
+            write_histograms(config, region, result)
+            tiles = result["tiles"]
+            path = config_module.product_path(config, "bms", "anchors", "tiles", "hpx512", region=region)
+            st.done(path, n_tiles=tiles["n_tiles"], l_star_deg=tiles["l_star_deg"])
         ratio_g = result["n_g_obs"].sum() / max(result["n_g_pred"].sum(), 1e-30)
         ratio_ks = result["n_ks_obs"].sum() / max(result["n_ks_pred"].sum(), 1e-30)
         print(f"anchor_tiles: {region}: {result['pixels'].size} pixels, "

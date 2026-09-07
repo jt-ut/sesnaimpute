@@ -59,6 +59,7 @@ from joblib import Parallel, delayed
 from scipy.special import erf
 
 from sesnaimpute import config as config_module
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute import tables as tables_module
 from sesnaimpute.build import run
@@ -899,9 +900,12 @@ def build(config, regions=None):
 
     law_rows = []
     for region in names:
-        path, _, _ = build_shape(config, region)
-        print("prior.yso: %s -> %s" % (region, path))
-        law_rows.append(_law_row(config, region))
+        with progress.Stage("prior.yso", region) as st:
+            path, u_median, ridge_resid_sigma = build_shape(config, region)
+            law_rows.append(_law_row(config, region))
+            st.done(path, n_sightline=np.asarray(u_median).size,
+                    median_u_median=float(np.median(u_median)),
+                    median_ridge_resid_sigma=float(np.median(ridge_resid_sigma)))
     _write_law_product(config, names, law_rows)
 
 

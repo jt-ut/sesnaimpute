@@ -70,6 +70,7 @@ from scipy.interpolate import RectBivariateSpline
 from scipy.special import ndtr
 
 from sesnaimpute import config as config_module
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
@@ -625,7 +626,7 @@ def _tile_class_densities(density_ds, t, pop, cls, width_ladder, x_edges, x_cent
 
 
 def _write_region_class_streaming(config, region, cls, pop, n_tile, map_classes, width_ladder,
-                                  x_edges, b_edges, tile_bw, n_jobs):
+                                  x_edges, b_edges, tile_bw, n_jobs, st=None):
     """The `DENSITY` dataset streamed one batch of tiles at a time
     (`config.n_jobs` tiles' own density arrays resident together, never
     all of `n_tile`); the tail scales and `MASS_OUTSIDE` are assembled as
@@ -678,6 +679,8 @@ def _write_region_class_streaming(config, region, cls, pop, n_tile, map_classes,
                 tail_x_lo[t], tail_x_hi[t], tail_b_lo[t], tail_b_hi[t], mass_outside[t] = (
                     sxlo, sxhi, slo, shi, mo)
             del batch_results
+            if st is not None:
+                st.tick(min(batch_start + n_jobs, n_tile), n_tile, "tiles")
 
         f.create_dataset("TAIL_X_LO_SCALE", data=tail_x_lo)
         f.create_dataset("TAIL_X_HI_SCALE", data=tail_x_hi)
@@ -773,7 +776,7 @@ def median_kernel_width(config, region):
     return float(np.median(sigma))
 
 
-def build_region_class(config, region, cls, shared, width_ladder):
+def build_region_class(config, region, cls, shared, width_ladder, st=None):
     """One region and class, end to end: the class's own grid
     (`_class_grid`) and per-tile Silverman bandwidths, the per-tile
     evaluation at every fixed width node in parallel
@@ -806,7 +809,7 @@ def build_region_class(config, region, cls, shared, width_ladder):
 
     path, tails, mass_outside = _write_region_class_streaming(
         config, region, cls, pop, n_tile, map_classes, width_ladder, x_edges, b_edges,
-        tile_bw, config.n_jobs)
+        tile_bw, config.n_jobs, st=st)
 
     with h5py.File(path, "r") as f:
         density0 = f["DENSITY"][0]
@@ -1245,8 +1248,10 @@ def build(config, regions=None):
                       median_kernel_width=median_kernel_width(config, region))
 
         for cls in CLASSES:
-            result = build_region_class(config, region, cls, shared, width_ladder)
-            path = result["path"]
+            with progress.Stage("prior.star_shapes", f"{region}/{cls}") as st:
+                result = build_region_class(config, region, cls, shared, width_ladder, st=st)
+                path = result["path"]
+                st.done(path, n_tile=n_tile, median_mass_outside=float(np.median(result["mass_outside"])))
             w_k, expected_growth, measured_growth, mean_dev = _mean_moment_check(
                 config, region, cls, result)
             exact_dev = _grid_centre_exact_check(result)
