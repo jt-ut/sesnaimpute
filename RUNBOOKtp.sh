@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# RUNBOOK.sh -- the only orchestration for sesnaimpute.
+# RUNBOOKtp.sh -- the orchestration for the thinned-Poisson design: the inputs,
+# the population summaries, the bmstp prior, the fittp fitter and posterior.
+# RUNBOOK.sh drives the earlier design; the input stages are shared verbatim.
 #
 # This file's line order IS the dependency order: each stage below reads
 # only the products of stages already listed above it. Each line
@@ -10,7 +12,7 @@
 # check in this pipeline.
 set -euo pipefail
 
-# Usage: RUNBOOK.sh [--from <module>] [--regions R1 R2 ...]
+# Usage: RUNBOOKtp.sh [--from <module>] [--regions R1 R2 ...]
 #   --from     start at the line whose module is <module> (fully qualified,
 #              e.g. sesnaimpute.prior.yso, matching the PY lines below
 #              verbatim) and run everything after it: a change to one stage
@@ -21,7 +23,7 @@ FROM=""; REGIONS=()
 while [ $# -gt 0 ]; do case "$1" in
   --from) FROM="$2"; shift 2 ;;
   --regions) shift; while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do REGIONS+=("$1"); shift; done ;;
-  *) echo "RUNBOOK.sh: unknown argument $1" >&2; exit 2 ;;
+  *) echo "RUNBOOKtp.sh: unknown argument $1" >&2; exit 2 ;;
 esac; done
 PYBIN=/usr/local/bin/python3.9
 export PYTHONPATH="$(cd "$(dirname "$0")" && pwd)/src"
@@ -61,6 +63,7 @@ PY sesnaimpute.sky.download.h2_knot_surveys.build
 # sigma model.
 PY sesnaimpute.catalog.curated
 PY sesnaimpute.catalog.depths
+PY sesnaimpute.catalog.depth_grid   # median 50 % limits per admitted hpx512 pixel, for the prior atlas (SPEC_BMSTP sec 3.3)
 # limits.py has no build: catalog.limits.limits(config, region) reads curated + depths.
 # Downloads keyed on SESNA positions run once the catalogue exists:
 PY sesnaimpute.sky.download.gaia_crossmatch.build
@@ -88,63 +91,37 @@ PY sesnaimpute.sky.derived.planck_column
 PY sesnaimpute.sky.derived.planck_source_column
 PY sesnaimpute.sky.derived.column
 PY sesnaimpute.sky.derived.profile
+PY sesnaimpute.sky.derived.swire_galaxies   # the star-split SWIRE galaxy sample, survey-wide (SPEC_BMSTP sec 3.2)
 
-# --- prior ---
-# bms/ prior products: the column grid (every class build reads its
-# nodes), the column kernel, the PAHC curve, depth groups, field stars,
-# anchor weights, the per-class priors and selection tables, the prior
-# table.
-PY sesnaimpute.prior.column_grid
-PY sesnaimpute.prior.field_stars
-PY sesnaimpute.prior.pahc_curve   # PAHC contamination P(q), survey-wide (SPEC_PRIORS.md sec 4)
-PY sesnaimpute.prior.anchor_tiles
-PY sesnaimpute.prior.kernel   # the log-normal column kernel: mu, sigma per arm on the column grid (SPEC_PRIORS.md sec 1.2)
-PY sesnaimpute.prior.yso   # YSO law count + per-sightline shape (SPEC_PRIORS.md sec 6.1, 6.3)
-PY sesnaimpute.prior.young_stars   # expected young stars per STAR anchor pixel/bin (SPEC_PRIORS.md sec 2.1)
-PY sesnaimpute.prior.anchor_observed   # observed STAR anchor joint histogram, young-star subtracted (SPEC_PRIORS.md sec 2.1)
-PY sesnaimpute.prior.anchor_weights   # per-tile STAR anchor weight W, cluster exclusion, faint-end trend (SPEC_PRIORS.md sec 2.1)
-PY sesnaimpute.prior.star_population   # per-tile field-star placement (u, a) and anchor weight W (SPEC_PRIORS.md sec 1.4, 1.5, 2.1, 2.2)
-PY sesnaimpute.prior.star_shapes   # per-tile STAR/AGB/PAHC shapes on a fixed 64x64 grid and fixed shape nodes, log-normal kernel shift+smoothing (SPEC_PRIORS.md sec 2.2, 3, 4; IMPLEMENTATION.md sec 3)
-PY sesnaimpute.prior.star_selection   # STAR/AGB/PAHC exact selection per source (SPEC_PRIORS.md sec 1.3)
-PY sesnaimpute.prior.yso_selection   # YSO IMF-mass selection, exact per source on X_LADDER (SPEC_PRIORS.md sec 1.3, 6.2)
-PY sesnaimpute.prior.h2s                    # H2S: law-blurred field, region lognormal, exact per-source knot-colour selection (SPEC_PRIORS.md sec 1.3, 7)
-PY sesnaimpute.prior.gal                    # GAL: Fazio counts law + survey-wide SWIRE colour-CDF tables, selection read on the fly, no per-source product (SPEC_PRIORS.md sec 1.3, 5)
-PY sesnaimpute.prior.counts_star_family     # STAR/AGB/PAHC/GAL per-source counts and normalisers, exact selection against the shape (SPEC_PRIORS.md sec 0.2, 2-5)
-PY sesnaimpute.prior.counts_cloud           # YSO/H2S per-source counts on the cloud law (SPEC_PRIORS.md sec 6.2, 7)
-PY sesnaimpute.prior.levels                 # the one scalar per region normalising the six counts to the catalogued source count (SPEC_PRIORS.md sec 0.2)
-PY sesnaimpute.prior.table                  # the prior table: the join, one row per catalogue source (IMPLEMENTATION.md sec 5)
 
-# --- fit ---
-# bms/ posterior fit of class and subclass probabilities from the prior
-# table. One job is one {region, class} (fit.run's own module docstring)
-# and the NGC 7129 dry run (owner ruling 2026-09-06) found resident
-# memory is NOT released between classes swept in one process (STAR 4.0
-# GB -> AGB 6.2 -> PAHC 6.7 -> GAL 7.8 -> YSO 7.8 -> H2S killed above the
-# 8 GB capped.sh ceiling) -- so this line runs the six classes as six
-# SEPARATE `capped.sh`-wrapped processes, in `fit.run.CLASSES`'s own
-# order (STAR AGB PAHC GAL YSO H2S), each capped and reported on its own:
-# one class's peak is then that class's process's own peak, never summed
-# with the class before it. `fit.run.build`'s in-process all-six-classes
-# path (its own `--classes` default) still exists for another caller --
-# e.g. a cluster's `bms/fit/jobs.sh` (below), already one job per line --
-# but this RUNBOOK always passes one `--classes` value, so that
-# in-process multi-class path never actually runs here.
-for FIT_CLASS in STAR AGB PAHC GAL YSO H2S; do
-  PY sesnaimpute.fit.run --classes "$FIT_CLASS"   # the class-posterior evidence sweep, batched (IMPLEMENTATION.md sec 5; 10_POSTERIOR.md sec 1)
-done
-# bms/fit/jobs.sh (one line per {region, class} job, for a cluster) is
-# not built by this RUNBOOK -- it targets a different machine than the
-# one running this script. Write/refresh it by hand with:
-#   $PYBIN -m sesnaimpute.fit.run $CONFIG --jobs
+# --- population (the model-driven summaries the bmstp prior ingests; writes population/) ---
+# Copies of the earlier design's stages, science unchanged (SPEC_PRIORS.md); only the area differs.
+PY sesnaimpute.population.column_grid
+PY sesnaimpute.population.field_stars
+PY sesnaimpute.population.yso_mass   # each YSO template's stellar mass through the 1 Myr isochrone (SPEC_BMSTP sec 3.5)
+PY sesnaimpute.population.pahc_curve
+PY sesnaimpute.population.anchor_tiles
+PY sesnaimpute.population.kernel
+PY sesnaimpute.population.yso
+PY sesnaimpute.population.yso_selection
+PY sesnaimpute.population.h2s
+PY sesnaimpute.population.gal
+PY sesnaimpute.population.young_stars
+PY sesnaimpute.population.anchor_observed
+PY sesnaimpute.population.anchor_weights
+PY sesnaimpute.population.star_population
 
-# --- impute ---
-# bms/ final impute decisions and diagnostics.
-PY sesnaimpute.impute.posterior             # class/subclass posteriors, argmax-commit flux imputation, entropies (10_POSTERIOR.md sec 1)
+# --- bmstp (the prior: shape grids per grain, the per-source density table, template weights, the atlas; writes bmstp/) ---
+# Lines are added here as each stage lands (IMPLEMENTATION_BMSTP sec 3).
+
+# --- fittp (the thinned-Poisson fitter, the classification, the cascade, the posterior atlas; writes fittp/) ---
+# Lines are added here as each stage lands (IMPLEMENTATION_BMSTP sec 4). The [fittp] knobs live in root.cfg.
+PY sesnaimpute.fittp.cascade   # the colour cascade on the measured fluxes, Psi per source (SPEC_BMSTP sec 6.5)
 
 # A --from that never matched any PY line above would otherwise leave
 # every stage silently skipped and the script exiting 0 having done
 # nothing -- fail loudly instead.
 if [ -n "$FROM" ] && [ $STARTED -eq 0 ]; then
-  echo "RUNBOOK.sh: --from $FROM matched no stage" >&2
+  echo "RUNBOOKtp.sh: --from $FROM matched no stage" >&2
   exit 2
 fi
