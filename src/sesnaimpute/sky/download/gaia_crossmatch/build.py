@@ -57,6 +57,7 @@ from astropy.table import Table
 from astroquery.xmatch import XMatch
 
 from sesnaimpute import config as config_module
+from sesnaimpute import progress as progress_module
 from sesnaimpute.build import run
 from sesnaimpute.regions import REGIONS
 
@@ -135,21 +136,24 @@ def build(config, regions=None):
         regions = [r.name for r in REGIONS]
     dest_dir = f"{config.data_root}/sky/download/gaia_crossmatch"
     os.makedirs(dest_dir, exist_ok=True)
-    for region in regions:
-        dest_path = f"{dest_dir}/candidates_gaia_source__{region}.csv"
-        if os.path.exists(dest_path):
-            print(f"gaia_crossmatch build: {dest_path} present, skipped")
-            continue
-        positions = _read_positions(config, region)
-        candidates = _pull_region(positions, region)
-        dest_path = f"{dest_dir}/candidates_gaia_source__{region}.csv"
-        candidates.to_csv(dest_path, index=False)
-        n_sources = len(positions)
-        n_candidates = len(candidates)
-        per_source = n_candidates / n_sources if n_sources else float("nan")
-        print(f"gaia_crossmatch build: {region} -> {dest_path}: "
-              f"{n_sources} sources uploaded, {n_candidates} candidates "
-              f"returned ({per_source:.3f} candidates/source)")
+    with progress_module.Stage("sky.download.gaia_crossmatch") as st:
+        n_regions = len(regions)
+        for i, region in enumerate(regions):
+            dest_path = f"{dest_dir}/candidates_gaia_source__{region}.csv"
+            if os.path.exists(dest_path):
+                print(f"gaia_crossmatch build: {dest_path} present, skipped")
+            else:
+                positions = _read_positions(config, region)
+                candidates = _pull_region(positions, region)
+                candidates.to_csv(dest_path, index=False)
+                n_sources = len(positions)
+                n_candidates = len(candidates)
+                per_source = n_candidates / n_sources if n_sources else float("nan")
+                print(f"gaia_crossmatch build: {region} -> {dest_path}: "
+                      f"{n_sources} sources uploaded, {n_candidates} candidates "
+                      f"returned ({per_source:.3f} candidates/source)")
+            st.tick(i + 1, n_regions, "regions")
+        st.done(dest_dir, regions=n_regions)
 
 
 if __name__ == "__main__":

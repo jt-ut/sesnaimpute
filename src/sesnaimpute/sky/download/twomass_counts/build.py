@@ -45,6 +45,7 @@ import healpy as hp
 import numpy as np
 
 from sesnaimpute import build as build_module
+from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.granules import access
 
@@ -151,22 +152,25 @@ def build(config, regions=None):
         regions = [r.name for r in regions_module.REGIONS]
     dest_dir = f"{config.data_root}/sky/download/twomass_counts"
     os.makedirs(dest_dir, exist_ok=True)
-    for region in regions:
-        dest_path = f"{dest_dir}/counts_twomass_hpx512__{region}.csv"
-        if os.path.exists(dest_path):
-            print(f"twomass_counts build: {dest_path} present, skipped")
-            continue
-        boxes = region_strip_boxes(config, region)
-        rows = []
-        for l0, l1, b0, b1 in boxes:
-            rows.extend(_strip_rows(config, region, l0, l1, b0, b1))
-        dest_path = f"{dest_dir}/counts_twomass_hpx512__{region}.csv"
-        with open(dest_path, "w") as f:
-            f.write(CSV_HEADER + "\n")
-            for line in rows:
-                f.write(line + "\n")
-        print(f"twomass_counts build: {region} -> {dest_path}: {len(rows)} rows "
-              f"({len(boxes)} strip(s))")
+    with progress_module.Stage("sky.download.twomass_counts") as st:
+        n_regions = len(regions)
+        for i, region in enumerate(regions):
+            dest_path = f"{dest_dir}/counts_twomass_hpx512__{region}.csv"
+            if os.path.exists(dest_path):
+                print(f"twomass_counts build: {dest_path} present, skipped")
+            else:
+                boxes = region_strip_boxes(config, region)
+                rows = []
+                for l0, l1, b0, b1 in boxes:
+                    rows.extend(_strip_rows(config, region, l0, l1, b0, b1))
+                with open(dest_path, "w") as f:
+                    f.write(CSV_HEADER + "\n")
+                    for line in rows:
+                        f.write(line + "\n")
+                print(f"twomass_counts build: {region} -> {dest_path}: {len(rows)} rows "
+                      f"({len(boxes)} strip(s))")
+            st.tick(i + 1, n_regions, "regions")
+        st.done(dest_dir, regions=n_regions)
 
 
 if __name__ == "__main__":
