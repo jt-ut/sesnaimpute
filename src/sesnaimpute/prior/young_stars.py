@@ -243,7 +243,7 @@ def law_count_per_pixel(config, region, pixels):
     this module now uses for `N_YOUNG_TOTAL`.
     """
     rs = access.region_slice(config, region)
-    a_col, provenance = yso._adopted_columns(config, region)
+    a_col, _, provenance = yso._adopted_columns(config, region)
     src_pix = rs["hpx_pix_512"]
     law_src = yso.law_count(config, region, a_col, provenance)
 
