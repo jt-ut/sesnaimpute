@@ -141,6 +141,11 @@ done
 # bms/ final impute decisions and diagnostics.
 PY sesnaimpute.impute.posterior             # class/subclass posteriors, argmax-commit flux imputation, entropies (10_POSTERIOR.md sec 1)
 
+# --- population (the model-driven summaries the bmstp prior ingests; writes population/) ---
+PY sesnaimpute.population.column_grid
+PY sesnaimpute.population.kernel
+PY sesnaimpute.population.field_stars
+
 # A --from that never matched any PY line above would otherwise leave
 # every stage silently skipped and the script exiting 0 having done
 # nothing -- fail loudly instead.
