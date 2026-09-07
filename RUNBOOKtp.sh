@@ -91,7 +91,7 @@ PY sesnaimpute.sky.derived.planck_column
 PY sesnaimpute.sky.derived.planck_source_column
 PY sesnaimpute.sky.derived.column
 PY sesnaimpute.sky.derived.profile
-PY sesnaimpute.sky.derived.swire_galaxies   # the star-split SWIRE galaxy sample, survey-wide (SPEC_BMSTP sec 3.2)
+PY sesnaimpute.sky.derived.swire_galaxies   # SWIRE galaxies after the adopted star-galaxy split, survey-wide (SPEC_BMSTP sec 3.2, 5.4)
 
 
 # --- population (the model-driven summaries the bmstp prior ingests; writes population/) ---
