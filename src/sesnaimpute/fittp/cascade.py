@@ -12,15 +12,14 @@ value in every undetected band, so no masking of the flux array itself is
 needed here; only the mask tells the cascade which bands to trust.
 
 Its eleven verdict probabilities (`crisp.LABELS` order) are grouped into a
-class posterior `PSI_C(s)` over the fitter's six classes.
+class score `PSI_C(s)` over the fitter's six classes.
 """
-
-import os
 
 import h5py
 import numpy as np
 
 from sesnaimpute import config as config_module
+from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.batches import batches
 from sesnaimpute.build import run
@@ -31,29 +30,34 @@ from sesnaimpute.gutcolors import prob as gc_prob
 #: uses (IMPLEMENTATION_BMSTP_DRAFT.md section 1).
 CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
 
-#: Which of Gutermuth's eleven verdict categories (`crisp.LABELS`) count
-#: toward each of the six classes (SPEC_BMSTP_DRAFT.md section 6.5, "the
-#: eleven labels are grouped by class"). AGB has no category of its own in
-#: Gutermuth's scheme -- a dusty evolved-star photosphere is not a case his
-#: cascade separates -- so it is assigned the UNCLASSIFIED verdict rather
-#: than an empty set: every one of the eleven labels is covered exactly
-#: once below, so `PSI_C(s)` sums to 1 by construction for a classified
-#: source. (This differs from `fit.psi.CONCORDANT_LABELS`, which leaves
-#: AGB's set empty and forces its per-model concordance to 1: that Psi is
-#: an independent per-class factor on a likelihood, not a distribution
-#: over classes, so it need not partition the eleven labels.)
+#: Each class's own verdict set (SPEC_BMSTP_DRAFT.md section 6.5): `PSI_C(s)`
+#: is the probability that the cascade's verdict on this source is one an
+#: object of class C would itself receive, so a class's set is the set of
+#: verdicts its own population receives from the colour cuts, and two
+#: classes' sets may overlap. A bare AGB photosphere reads as a diskless
+#: star under Gutermuth's cuts; a dusty AGB envelope reads as a disc
+#: source -- Gutermuth et al. 2009 (ApJS 184, 18) and Megeath et al. 2012
+#: (AJ 144, 192) both note dusty AGB stars as the principal Class II
+#: contaminant, so AGB's set spans all three and overlaps YSO's set in
+#: CLASS_II and TRANSITION_DISK.
 CONCORDANT_LABELS = {
     "STAR": ("DISKLESS_STAR",),
-    "AGB": ("UNCLASSIFIED",),
+    "AGB": ("DISKLESS_STAR", "CLASS_II", "TRANSITION_DISK"),
     "PAHC": ("PAH_APERTURE",),
     "GAL": ("AGN", "PAH_GALAXY", "GENERIC_GALAXY"),
     "YSO": ("DEEPLY_EMBEDDED", "CLASS_I", "CLASS_II", "TRANSITION_DISK"),
     "H2S": ("SHOCK_BLOB",),
 }
 
+#: One display string per class, for the `LABEL_SETS` attr.
+LABEL_SETS = tuple(",".join(CONCORDANT_LABELS[c]) for c in CLASSES)
+
 UNCLASSIFIED_INDEX = crisp.LABEL_INDEX["UNCLASSIFIED"]
 
-#: (11, 6) one-hot label-to-class grouping matrix.
+#: (11, 6) 0/1 label-to-class matrix. Columns need not be disjoint (AGB
+#: overlaps YSO in CLASS_II and TRANSITION_DISK) and need not cover every
+#: label (UNCLASSIFIED belongs to none), so a `PSI_CLASS` row does not in
+#: general sum to 1 -- see `psi_class`.
 GROUP_MATRIX = np.zeros((len(crisp.LABELS), len(CLASSES)), dtype=np.float64)
 for _cls, _labels in CONCORDANT_LABELS.items():
     for _lab in _labels:
@@ -61,12 +65,13 @@ for _cls, _labels in CONCORDANT_LABELS.items():
 
 
 def psi_class(prob):
-    """`PSI_C(s)`, `(n, 6)`: `prob` (n, 11) grouped by class through
-    `GROUP_MATRIX`. A source whose most probable verdict is itself
-    UNCLASSIFIED -- the detected bands allow no verdict at all
-    (SPEC_BMSTP_DRAFT.md section 6.5) -- gets a uniform row instead: the
-    cascade's silence there says nothing about any class, not just the
-    AGB slot the grouping above would otherwise hand it.
+    """`PSI_C(s)`, `(n, 6)`: column `c` is the summed probability of class
+    `c`'s own verdict set (`CONCORDANT_LABELS`) -- not a normalised
+    distribution, since the sets overlap and do not cover UNCLASSIFIED. A
+    source whose most probable verdict is itself UNCLASSIFIED -- the
+    detected bands allow no verdict at all (SPEC_BMSTP_DRAFT.md section
+    6.5) -- gets a uniform row instead: the cascade's silence there says
+    nothing about any class.
     """
     psi = prob @ GROUP_MATRIX
     no_verdict = np.argmax(prob, axis=1) == UNCLASSIFIED_INDEX
@@ -102,7 +107,7 @@ def confusion_by_detected_count(verdict_idx, n_detected):
 ROW_BYTES = 4096
 
 
-def build_region(config, region):
+def build_region(config, region, st):
     """Runs the cascade on `region`'s curated, measured photometry in
     source batches (CODING_RULES_BMSTP.md rule 10b), returning the P10
     MEASURED-half arrays for the whole region.
@@ -118,7 +123,8 @@ def build_region(config, region):
     verdict = np.empty(n, dtype=np.int16)
     n_detected = np.empty(n, dtype=np.int8)
 
-    for start, stop in batches(n, ROW_BYTES):
+    bounds = list(batches(n, ROW_BYTES))
+    for i, (start, stop) in enumerate(bounds):
         with h5py.File(path, "r") as f:
             flux = np.asarray(f["FNU_MJY"][start:stop], dtype=float)
             sigma = np.asarray(f["SIGMA_FNU_MJY"][start:stop], dtype=float)
@@ -131,6 +137,7 @@ def build_region(config, region):
         psi[start:stop] = psi_class(prob).astype(np.float32)
         verdict[start:stop] = verdict_code(prob)
         n_detected[start:stop] = detected.sum(axis=1).astype(np.int8)
+        st.tick(i + 1, len(bounds), "batches")
 
     verdict_idx = np.argmax(p_verdict, axis=1)
     confusion = confusion_by_detected_count(verdict_idx, n_detected)
@@ -143,7 +150,6 @@ def write_region(path, result):
     `VERDICT_IMPUTED`) is written later by the classify stage and is left
     absent here, not empty.
     """
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.create_dataset("NAME", data=result["name"])
         f.create_dataset("P_VERDICT_MEASURED", data=result["p_verdict"])
@@ -153,44 +159,45 @@ def write_region(path, result):
         f.attrs["GRANULE"] = "source"
         f.attrs["LABELS"] = np.array(crisp.LABELS, dtype="S20")
         f.attrs["CLASSES"] = np.array(CLASSES, dtype="S8")
+        f.attrs["LABEL_SETS"] = np.array(LABEL_SETS, dtype="S64")
         f.attrs["CONFUSION_MEASURED"] = result["confusion"]
 
 
 def build(config, regions=None):
-    """Writes `fittp/classification/cascade_fittp_source[__R].hdf5` for
-    `regions` (default all thirty), one file per region
-    (IMPLEMENTATION_BMSTP_DRAFT.md section 1.3, P10). The product's
-    directory ("classification") and its filename's source token
-    ("fittp", the subpackage's own name, not a data provenance) differ, as
-    P11's atlas product does too -- `config.product_path` assumes the two
-    are the same, so the path is built directly here instead.
+    """Writes `fittp/classification/cascade_classification_source[__R].hdf5`
+    for `regions` (default all thirty), one file per region
+    (IMPLEMENTATION_BMSTP_DRAFT.md section 1.3, P10).
     """
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     for region in region_names:
-        result = build_region(config, region)
-        stem = f"cascade_fittp_source__{region}"
-        path = f"{config.data_root}/fittp/classification/{stem}.hdf5"
-        write_region(path, result)
+        with progress.Stage("fittp.cascade", region) as st:
+            result = build_region(config, region, st)
+            path = config_module.product_path(
+                config, "fittp", "classification", "cascade", "source", region=region)
+            write_region(path, result)
 
-        n = result["name"].shape[0]
-        psi_sum_err = np.max(np.abs(result["psi"].sum(axis=1) - 1.0))
-        p_defined = result["verdict"] != -100
-        p_sum_err = np.max(np.abs(result["p_verdict"][p_defined].sum(axis=1) - 1.0)) \
-            if p_defined.any() else 0.0
-        argmax_class = np.argmax(result["psi"], axis=1)
-        argmax_verdict = np.argmax(result["p_verdict"], axis=1)
-        verdict_class = np.argmax(GROUP_MATRIX[argmax_verdict], axis=1)
-        n_defined = int(p_defined.sum())
-        n_match = int(np.sum(argmax_class[p_defined] == verdict_class[p_defined])) \
-            if n_defined else 0
-        uniform_ok = np.allclose(
-            result["psi"][~p_defined], 1.0 / len(CLASSES), atol=1e-6) if (~p_defined).any() else True
-        print(f"cascade {region}: n={n} PSI_CLASS max|sum-1|={psi_sum_err:.2e} "
-              f"P_VERDICT max|sum-1|={p_sum_err:.2e} "
-              f"argmax-class-matches-verdict={n_match}/{n_defined} "
-              f"unclassified-rows-uniform={uniform_ok}")
-        print(f"cascade {region}: verdict counts by detected-band count (rows=verdict, "
-              f"cols=2..8):\n{result['confusion']}")
+            n = result["name"].shape[0]
+            # each PSI_CLASS column is the sum of its own label set's
+            # P_VERDICT_MEASURED probabilities, by construction.
+            label_sum_err = 0.0
+            classified = result["verdict"] != -100
+            for c, labels in CONCORDANT_LABELS.items():
+                idx = [crisp.LABEL_INDEX[lab] for lab in labels]
+                expect = result["p_verdict"][:, idx].sum(axis=1)
+                err = np.max(np.abs(result["psi"][classified, CLASSES.index(c)]
+                                     - expect[classified])) if classified.any() else 0.0
+                label_sum_err = max(label_sum_err, float(err))
+            p_defined = classified
+            p_sum_err = float(np.max(np.abs(result["p_verdict"][p_defined].sum(axis=1) - 1.0))) \
+                if p_defined.any() else 0.0
+            uniform_ok = bool(np.allclose(
+                result["psi"][~p_defined], 1.0 / len(CLASSES), atol=1e-6)) if (~p_defined).any() else True
+
+            st.done(path, n=n, n_classified=int(p_defined.sum()),
+                     psi_column_err=label_sum_err, p_verdict_sum_err=p_sum_err,
+                     unclassified_rows_uniform=uniform_ok)
+            print(f"fittp.cascade {region}: verdict counts by detected-band count "
+                  f"(rows=verdict in LABELS order, cols=2..8):\n{result['confusion']}")
 
 
 if __name__ == "__main__":
