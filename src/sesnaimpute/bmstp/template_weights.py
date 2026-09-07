@@ -14,8 +14,11 @@ False if it is a probability carried as-is (`contrast`). `rho_C(theta)` is
 the register's own `RHO_KDE1` (`fit.terms.library_weights`'s own column,
 sec 3.5: "supplied with the library").
 
-Survey products (galz, yso, h2shock, pahc) are built once; region
-products (sps, agb) once per region named on the command line.
+Survey products (galz, yso, h2shock) are built once; region products
+(sps, agb, pahc) once per region named on the command line. PAHC is
+regional because its `type` factor borrows the region's own sps type
+histogram at each PAHC template's nearest sps atmosphere match (owner
+ruling: PAHC's library carries no atmosphere-type axis of its own).
 """
 
 import os
@@ -458,6 +461,20 @@ def _weighted_type_histogram(template_idx, weight, log10_b, n_model, origin):
     return h
 
 
+def _sps_raw_type_histogram(config, region):
+    """`(names, rho, h, weight)`: the sps register's own `MODEL_NAME`/
+    `RHO_KDE1` and the region's raw, weighted type histogram (the
+    population count per sps template per brightness cell, BEFORE the
+    `1/rho` division and the per-cell normalisation, spec sec 5.1) --
+    shared by `build_sps` (which normalises it) and `build_pahc` (which
+    reads it at each PAHC template's matched sps row, owner ruling)."""
+    reg = _read_register(config, "sps")
+    names, rho = reg["names"], reg["rho"]
+    template_idx, weight, log10_b = _region_star_stars(config, region)
+    h = _weighted_type_histogram(template_idx, weight, log10_b, names.size, _LOG10_B_ORIGIN_STAR)
+    return names, rho, h, weight
+
+
 def build_sps(config, region):
     with progress.Stage("bmstp.template_weights.sps", region) as st:
         reg = _read_register(config, "sps")
@@ -465,8 +482,7 @@ def build_sps(config, region):
         n_model = names.size
         log10_b_centers = _log10_b_centers(_LOG10_B_ORIGIN_STAR)
 
-        template_idx, weight, log10_b = _region_star_stars(config, region)
-        h = _weighted_type_histogram(template_idx, weight, log10_b, n_model, _LOG10_B_ORIGIN_STAR)
+        _names_check, _rho_check, h, weight = _sps_raw_type_histogram(config, region)
         type_w = _normalise_over_theta(h / rho[:, None])
 
         n_b_row = _pahc_contrast_row(config, log10_b_centers)
@@ -488,7 +504,7 @@ def build_sps(config, region):
         print(f"template_weights.sps [{region}]: retained weighted count={retained_weighted:.4f} "
               f"histogram sum={histogram_weighted:.4f} "
               f"max|colsum-1|={float(np.max(np.abs(col_sum - 1.0))):.3g}", flush=True)
-        st.done(path, n_model=n_model, n_star=template_idx.size,
+        st.done(path, n_model=n_model, n_star=weight.size,
                  retained_weighted=retained_weighted)
 
 
@@ -547,27 +563,88 @@ def build_agb(config, region):
 
 
 # ---------------------------------------------------------------------------
-# PAHC: contrast (survey, sec 5.3)
+# PAHC: type, contrast (per region, sec 5.3; the `type` match is an owner
+# ruling, PAHC's aperture library carrying no atmosphere axis of its own)
 # ---------------------------------------------------------------------------
 
-def build_pahc(config):
-    with progress.Stage("bmstp.template_weights.pahc") as st:
+def _read_teff_logg(path, logg_col):
+    with fits.open(path) as hdul:
+        d = hdul[1].data
+        names = np.char.strip(d["MODEL_NAME"].astype(str))
+        teff = d["T_EFF"].astype(np.float64)
+        logg = d[logg_col].astype(np.float64)
+    return names, teff, logg
+
+
+def _match_pahc_to_sps(config, sps_names):
+    """`(sps_index, distance)`, one row per PAHC register template, in
+    the PAHC register's own row order: the nearest sps atmosphere
+    template in `(log10 T_EFF, LOGG)` (Euclidean, `cKDTree`, both
+    libraries' own `parameters.fits`; owner ruling -- PAHC's SED shape
+    IS the star family's, spec sec 5.3, but its library has no
+    atmosphere-type axis, so its `type` weight borrows the nearest sps
+    template's). Row order is checked against each register's own
+    `MODEL_NAME`, not assumed."""
+    from scipy.spatial import cKDTree
+
+    sps_path = f"{config.inputs['sed_models']}/sps/parameters.fits"
+    pahc_path = f"{config.inputs['sed_models']}/pahc/parameters.fits"
+    sps_p_names, sps_teff, sps_logg = _read_teff_logg(sps_path, "LOG[G]")
+    pahc_p_names, pahc_teff, pahc_logg = _read_teff_logg(pahc_path, "LOGG")
+
+    reg_pahc_names = _read_register(config, "pahc")["names"]
+    if not (sps_p_names.size == sps_names.size and np.array_equal(sps_p_names, sps_names)):
+        raise ValueError("template_weights.pahc: sps parameters.fits row order disagrees "
+                          "with the sps register")
+    if not (pahc_p_names.size == reg_pahc_names.size
+            and np.array_equal(pahc_p_names, reg_pahc_names)):
+        raise ValueError("template_weights.pahc: pahc parameters.fits row order disagrees "
+                          "with the pahc register")
+
+    sps_points = np.column_stack([np.log10(sps_teff), sps_logg])
+    pahc_points = np.column_stack([np.log10(pahc_teff), pahc_logg])
+    dist, idx = cKDTree(sps_points).query(pahc_points)
+    return idx, dist
+
+
+def build_pahc(config, region):
+    with progress.Stage("bmstp.template_weights.pahc", region) as st:
         reg = _read_register(config, "pahc")
-        names = reg["names"]
+        names, rho = reg["names"], reg["rho"]
         n_model = names.size
         log10_b_centers = _log10_b_centers(_LOG10_B_ORIGIN_STAR)
+
+        sps_names, sps_rho, h_sps, _weight = _sps_raw_type_histogram(config, region)
+        sps_idx, dist = _match_pahc_to_sps(config, sps_names)
+        # the region's raw STAR type histogram (the population count, not
+        # yet divided by rho or normalised) at each PAHC template's
+        # matched sps row, then PAHC's own 1/rho and per-cell
+        # normalisation (owner ruling: a proper weight over the PAHC
+        # library, not a copy of the sps one).
+        raw_type = h_sps[sps_idx, :] / rho[:, None]
+        type_w = _normalise_over_theta(raw_type)
 
         row = _pahc_contrast_row(config, log10_b_centers)
         contrast_w = np.repeat(row[None, :], n_model, axis=0)
         c_f = np.log10(reg["f_ref"]["I4"])  # +log10 f_ref,8,theta (spec sec 5.3)
 
         factors = {
+            "type": (type_w, np.zeros(n_model), "", True,
+                     f"population.star_population {region} W_STAR/LOG10_B, "
+                     "nearest sps template in (log10 T_EFF, LOGG)"),
             "contrast": (contrast_w, c_f, "D_PAHC", False,
                          "population.pahc.curve_pahc_survey P_Q"),
         }
         c_theta = np.zeros(n_model)
-        path = _write_library(config, "pahc", "survey", names, c_theta, log10_b_centers, factors)
-        st.done(path, n_model=n_model)
+        path = _write_library(config, "pahc", "region", names, c_theta, log10_b_centers, factors,
+                               region=region)
+        col_sum = type_w.sum(axis=0)
+        n_matched_sps_used = int(np.unique(sps_idx).size)
+        print(f"template_weights.pahc [{region}]: match n=median {float(np.median(dist)):.4f} "
+              f"max {float(dist.max()):.4f} (log10 T_EFF, LOGG); "
+              f"{n_matched_sps_used}/{sps_names.size} sps templates ever matched; "
+              f"max|colsum-1|={float(np.max(np.abs(col_sum - 1.0))):.3g}", flush=True)
+        st.done(path, n_model=n_model, n_matched_sps_used=n_matched_sps_used)
 
 
 # ---------------------------------------------------------------------------
@@ -620,14 +697,14 @@ def build_h2shock(config):
 # ---------------------------------------------------------------------------
 
 def build(config, regions=None):
-    """Survey products once (galz, yso, h2shock, pahc); sps and agb once
+    """Survey products once (galz, yso, h2shock); sps, pahc and agb once
     per region in `regions` (default: all of `regions.REGIONS`, rule 5c).
-    """
+    PAHC is per region (not survey) because its `type` factor borrows the
+    region's own sps type histogram (owner ruling)."""
     region_list = regions if regions else [r.name for r in regions_module.REGIONS]
 
     frac_template, frac_chabrier = build_yso(config)
     build_galz(config)
-    build_pahc(config)
     build_h2shock(config)
     for region in region_list:
         field_path = config_module.product_path(
@@ -637,6 +714,7 @@ def build(config, regions=None):
                   f"({field_path})", flush=True)
             continue
         build_sps(config, region)
+        build_pahc(config, region)
         build_agb(config, region)
     print(f"template_weights: yso IMF-weighted fraction above 1 Msun={frac_template:.4f} "
           f"vs Chabrier's own analytic fraction={frac_chabrier:.4f}", flush=True)
