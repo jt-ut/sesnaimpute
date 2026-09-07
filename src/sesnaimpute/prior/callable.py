@@ -129,6 +129,7 @@ four IRAC limits) is already resident in the region table loaded once in
 per-batch tabulation for them.
 """
 
+import math
 import os
 import time
 
@@ -201,6 +202,95 @@ def _marginal_exact_chunked(yso_shape, a, sl_rows, a_col, sigma_col, map_class, 
     return out
 
 
+#: `sqrt(2)`, the standard-normal CDF's own argument scale (`erf(z /
+#: _SQRT2_MARGINAL)`), needed before `_SQRT2PI` is defined further down.
+_SQRT2_MARGINAL = float(np.sqrt(2.0))
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _lognormal_inv_moment_upto_scalar(t, m, s):
+    """`E[1/T ; T <= t]` for `ln T ~ Normal(m, s)`, `yso._lognormal_
+    inv_moment_upto`'s own scalar arithmetic (module docstring there):
+    `exp(-m + s^2/2) . Phi((ln t - m)/s + s)`. `t <= 0` gives 0 (matches
+    the numpy version's `errstate(divide="ignore")` -> `log(0) = -inf`
+    -> `Phi(-inf) = 0`, without numba raising on `log` of a
+    non-positive number)."""
+    if t <= 0.0:
+        return 0.0
+    z = (math.log(t) - m) / s + s
+    return math.exp(-m + 0.5 * s * s) * 0.5 * (1.0 + math.erf(z / _SQRT2_MARGINAL))
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _marginal_component_scalar(a, edges, p_u, n_cell, m, s):
+    """One mixture component's `_marginal_rows` sum over the sightline's
+    `n_cell` embedding cells (`yso.YsoShape._marginal_rows`'s own
+    arithmetic): `p(a|A_s) = sum_k p_u[k] . (E[1/T; a/edges[k]] -
+    E[1/T; a/edges[k+1]])`. `edges`/`p_u` are this ONE point's own
+    sightline row, already gathered by the caller."""
+    total = 0.0
+    for k in range(n_cell):
+        hi_k = a / edges[k]
+        lo_k = a / edges[k + 1]
+        total += p_u[k] * (_lognormal_inv_moment_upto_scalar(hi_k, m, s)
+                           - _lognormal_inv_moment_upto_scalar(lo_k, m, s))
+    return total
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _marginal_exact_numba(a, edges2d, p_u2d, a_col, w, mu0, sigma0, mu1, sigma1):
+    """`(n,)`: `YsoShape.marginal_exact`'s own arithmetic, one compiled
+    loop over the query batch -- `Kernel.mixture`'s `(w, mu, sigma)` is
+    still computed in numpy by the caller (already cheap, vectorised,
+    not the bottleneck); this loop is the 32-cell closed-form sum
+    itself, the part that was scipy's `erf` over a `(chunk, n_cell)`
+    broadcast array."""
+    n = a.shape[0]
+    n_cell = p_u2d.shape[1]
+    out = np.empty(n, dtype=np.float64)
+    ln10 = math.log(10.0)
+    for i in range(n):
+        ak = a[i]
+        if ak <= 0.0:
+            out[i] = 0.0
+            continue
+        log_a_col = math.log(a_col[i])
+        m0 = log_a_col + mu0[i] * ln10
+        s0 = sigma0[i] * ln10
+        m1v = log_a_col + mu1[i] * ln10
+        s1 = sigma1[i] * ln10
+        t0 = _marginal_component_scalar(ak, edges2d[i], p_u2d[i], n_cell, m0, s0)
+        t1 = _marginal_component_scalar(ak, edges2d[i], p_u2d[i], n_cell, m1v, s1)
+        val = w[i] * t0 + (1.0 - w[i]) * t1
+        out[i] = val if val > 0.0 else 0.0
+    return out
+
+
+def _marginal_exact_compiled(yso_shape, a, sl_rows, a_col, sigma_col, map_class, zp_sigma_k=None):
+    """`(n,)`: the compiled replacement for `_marginal_exact_chunked`,
+    same `_MARGINAL_CHUNK` chunking discipline (module docstring above
+    it, `CODING_RULES.md` 10a): `Kernel.mixture`'s own structural
+    interpolation stays in numpy per chunk (cheap, unchanged), but the
+    32-cell closed-form sum is `_marginal_exact_numba`'s compiled loop
+    instead of `YsoShape._marginal_rows`'s scipy-`erf` broadcast."""
+    n = a.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    for start in range(0, n, _MARGINAL_CHUNK):
+        stop = min(start + _MARGINAL_CHUNK, n)
+        zp_chunk = zp_sigma_k[start:stop] if zp_sigma_k is not None else None
+        a_c = a[start:stop]
+        acol_c = a_col[start:stop]
+        w, mu, sigma = yso_shape.kernel.mixture(
+            acol_c, sigma_col[start:stop], map_class[start:stop], zp_sigma_k=zp_chunk)
+        edges2d = np.ascontiguousarray(yso_shape.u_edges[sl_rows[start:stop]])
+        p_u2d = np.ascontiguousarray(yso_shape.p_u[sl_rows[start:stop]])
+        out[start:stop] = _marginal_exact_numba(
+            a_c, edges2d, p_u2d, acol_c, w,
+            np.ascontiguousarray(mu[:, 0]), np.ascontiguousarray(sigma[:, 0]),
+            np.ascontiguousarray(mu[:, 1]), np.ascontiguousarray(sigma[:, 1]))
+    return out
+
+
 def _read_zp_sigma_k(path, n):
     """`ZP_SIGMA_K` (mag) per source -- the Herschel field zero point's
     own uncertainty, 0 for a Planck-arm source (owner, 2026-09-06) -- if
@@ -232,28 +322,15 @@ def _interp_eps_2d(eps_batch, x_ladder, grid, x_query, val_query):
     scales with the caller's own batch."""
     n = x_query.shape[0]
     out = np.empty(n, dtype=np.float64)
-    n_x, n_v = x_ladder.size, grid.size
+    x_ladder64 = np.asarray(x_ladder, dtype=np.float64)
+    grid64 = np.asarray(grid, dtype=np.float64)
     for start in range(0, n, _INTERP_CHUNK):
         stop = min(start + _INTERP_CHUNK, n)
-        eps = eps_batch[start:stop]
-        x = np.clip(x_query[start:stop], x_ladder[0], x_ladder[-1])
-        ix = np.clip(np.searchsorted(x_ladder, x) - 1, 0, n_x - 2)
-        x_lo, x_hi = x_ladder[ix], x_ladder[ix + 1]
-        tx = np.where(x_hi > x_lo, (x - x_lo) / (x_hi - x_lo), 0.0)
-
-        v = np.clip(val_query[start:stop], grid[0], grid[-1])
-        iv = np.clip(np.searchsorted(grid, v) - 1, 0, n_v - 2)
-        v_lo, v_hi = grid[iv], grid[iv + 1]
-        tv = np.where(v_hi > v_lo, (v - v_lo) / (v_hi - v_lo), 0.0)
-
-        rows_i = np.arange(eps.shape[0])
-        e00 = eps[rows_i, ix, iv]
-        e01 = eps[rows_i, ix, iv + 1]
-        e10 = eps[rows_i, ix + 1, iv]
-        e11 = eps[rows_i, ix + 1, iv + 1]
-        e_lo = e00 + tv * (e01 - e00)
-        e_hi = e10 + tv * (e11 - e10)
-        out[start:stop] = e_lo + tx * (e_hi - e_lo)
+        eps = np.ascontiguousarray(eps_batch[start:stop], dtype=np.float64)
+        out[start:stop] = _interp_eps_2d_numba(
+            eps, x_ladder64, grid64,
+            np.ascontiguousarray(x_query[start:stop], dtype=np.float64),
+            np.ascontiguousarray(val_query[start:stop], dtype=np.float64))
     return out
 
 
@@ -283,6 +360,26 @@ def _bracket(grid, x):
     span = grid[lo + 1] - grid[lo]
     t = (xc - grid[lo]) / span if span > 0.0 else 0.0
     return lo, t
+
+
+@numba.njit(cache=True, fastmath=True)
+def _interp_eps_2d_numba(eps_batch, x_ladder, grid, x_query, val_query):
+    """`(n,)`: `_interp_eps_2d`'s own bilinear read, one compiled loop
+    (the "end bins held" convention is `_bracket`'s own clamp) instead
+    of the fancy-indexed `(chunk, ...)` broadcast."""
+    n = x_query.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        ix, tx = _bracket(x_ladder, x_query[i])
+        iv, tv = _bracket(grid, val_query[i])
+        e00 = eps_batch[i, ix, iv]
+        e01 = eps_batch[i, ix, iv + 1]
+        e10 = eps_batch[i, ix + 1, iv]
+        e11 = eps_batch[i, ix + 1, iv + 1]
+        e_lo = e00 + tv * (e01 - e00)
+        e_hi = e10 + tv * (e11 - e10)
+        out[i] = e_lo + tx * (e_hi - e_lo)
+    return out
 
 
 #: The hybrid extinction law's own ramp domain (`selection.LAW_RAMP_LO`/
@@ -586,7 +683,7 @@ class _YsoClass(object):
         sl_rows = p.table["HPX256_ROW"][rows_f]
         map_class = p.table["A_COL_PROVENANCE"][rows_f]
         zp_sigma_k = p._zp_sigma_k[rows_f]
-        p_a = _marginal_exact_chunked(p.yso_shape, a_f, sl_rows, a_col, sigma_col, map_class,
+        p_a = _marginal_exact_compiled(p.yso_shape, a_f, sl_rows, a_col, sigma_col, map_class,
                                       zp_sigma_k=zp_sigma_k)
         p_a = np.where(a_f > 0.0, p_a, 0.0)
 
@@ -624,7 +721,7 @@ class _H2sClass(object):
         sl_rows = p.table["HPX256_ROW"][rows_f]
         map_class = p.table["A_COL_PROVENANCE"][rows_f]
         zp_sigma_k = p._zp_sigma_k[rows_f]
-        p_a = _marginal_exact_chunked(p.yso_shape, a_f, sl_rows, a_col, sigma_col, map_class,
+        p_a = _marginal_exact_compiled(p.yso_shape, a_f, sl_rows, a_col, sigma_col, map_class,
                                       zp_sigma_k=zp_sigma_k)
         p_a = np.where(valid, p_a, 0.0)
 
