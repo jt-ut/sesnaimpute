@@ -166,14 +166,19 @@ Fit = namedtuple("Fit", (
 ))
 
 
-def block_size(n_model, budget_mb=512):
+def block_size(n_model, budget_mb=512, extra_buffers=0):
     """Sources per block a `budget_mb`-MB budget holds for a library of
     `n_model` templates (rule 10a): `NONDET_BUFFERS` float32
-    `(n_block, n_model, 8)` arrays are the block's real working set (the
+    `(n_block, n_model, 8)` arrays are this module's own working set (the
     chi2 quadratic form's `R @ P` and the non-detection term's `log10_fhat`,
     `z` and `term`), not the much smaller `(n_block, n_model)` outputs.
+    `extra_buffers` counts a caller's own float32-`(n_block, n_model, 8)`-
+    equivalent arrays that live for the same block (e.g. `fittp.sweep`'s
+    `log10_flux`/`flux_theta`, two float64 arrays = 4 such equivalents) so
+    the block's real total working set, not just this module's share,
+    stays inside `budget_mb`.
     """
-    row_bytes = n_model * N_BANDS * 4 * NONDET_BUFFERS
+    row_bytes = n_model * N_BANDS * 4 * (NONDET_BUFFERS + extra_buffers)
     return max(1, (budget_mb << 20) // max(1, row_bytes))
 
 

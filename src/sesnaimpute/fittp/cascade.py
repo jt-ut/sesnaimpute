@@ -152,6 +152,7 @@ def write_region(path, result):
     `VERDICT_IMPUTED`) is written later by the classify stage and is left
     absent here, not empty.
     """
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.create_dataset("NAME", data=result["name"])
         f.create_dataset("P_VERDICT_MEASURED", data=result["p_verdict"])
@@ -170,7 +171,7 @@ def _classify_path(config, region):
         config, "fittp", "classification", "posterior", "source", region=region)
 
 
-def build_region_imputed(config, region, st, name, n_detected):
+def build_region_imputed(config, region, st, name, n_detected, verdict_measured):
     """The imputed half (spec sec 6.5, 7.3; IMPLEMENTATION_BMSTP_DRAFT.md
     row 2.5): the cascade run on `classify`'s `FLUX_IMPUTED` with
     `valid = detected = all` -- every band usable, since the imputed SED
@@ -179,6 +180,15 @@ def build_region_imputed(config, region, st, name, n_detected):
     Runs only once `classify` has written the region (rule 5b: otherwise
     None, the caller leaves the imputed half absent, not a failure --
     the measured half stands on its own).
+
+    `confusion_yso` (spec sec 7.3's second table) is built from the
+    MEASURED verdict (`verdict_measured`, this region's own
+    `VERDICT_MEASURED`), not the imputed one: the imputed verdict is the
+    MAP class's own SED read back (module docstring, sec 6.5), so it
+    cannot serve as independent evidence against `P(YSO) > 0.5`.
+    `confusion_verdict_map` is the other sec 7.3 table and keeps the
+    imputed verdict, which is exactly what it checks -- the library's
+    idea of the class against the cascade's idea of the class.
     """
     path = _classify_path(config, region)
     if not os.path.exists(path):
@@ -220,19 +230,20 @@ def build_region_imputed(config, region, st, name, n_detected):
         if sel.any():
             confusion_verdict_map[:, ci] = np.bincount(verdict_idx[sel], minlength=len(crisp.LABELS))
 
-    # cascade's YSO set vs P(YSO) > 0.5 -- spec sec 7.3's second table.
+    # cascade's YSO set (MEASURED verdict) vs P(YSO) > 0.5 -- spec sec
+    # 7.3's second table, the honest colour-cut YSO set.
     yso_label_idx = [crisp.LABEL_INDEX[lab] for lab in CONCORDANT_LABELS["YSO"]]
-    cascade_yso = np.isin(verdict_idx, yso_label_idx)
+    cascade_yso = np.isin(verdict_measured, yso_label_idx)
     pyso_half = p_yso > 0.5
-    confusion_yso = np.array([
+    confusion_yso_measured = np.array([
         [int((~cascade_yso & ~pyso_half).sum()), int((~cascade_yso & pyso_half).sum())],
         [int((cascade_yso & ~pyso_half).sum()), int((cascade_yso & pyso_half).sum())],
     ], dtype=np.int64)
 
     return dict(p_verdict=p_verdict_imp, verdict=verdict_imp,
                 confusion_imputed=confusion_imputed,
-                confusion_verdict_map=confusion_verdict_map,
-                confusion_yso=confusion_yso)
+                confusion_verdict_imputed_vs_map=confusion_verdict_map,
+                confusion_cascade_yso_measured_vs_pyso=confusion_yso_measured)
 
 
 def write_region_imputed(path, imputed):
@@ -243,8 +254,10 @@ def write_region_imputed(path, imputed):
         f.create_dataset("P_VERDICT_IMPUTED", data=imputed["p_verdict"])
         f.create_dataset("VERDICT_IMPUTED", data=imputed["verdict"])
         f.attrs["CONFUSION_IMPUTED"] = imputed["confusion_imputed"]
-        f.attrs["CONFUSION_VERDICT_VS_MAP"] = imputed["confusion_verdict_map"]
-        f.attrs["CONFUSION_CASCADE_YSO_VS_PYSO"] = imputed["confusion_yso"]
+        # sec 7.3's first table: imputed verdict against the MAP class.
+        f.attrs["CONFUSION_VERDICT_IMPUTED_VS_MAP"] = imputed["confusion_verdict_imputed_vs_map"]
+        # sec 7.3's second table: MEASURED verdict's YSO set against P(YSO) > 0.5.
+        f.attrs["CONFUSION_CASCADE_YSO_MEASURED_VS_PYSO"] = imputed["confusion_cascade_yso_measured_vs_pyso"]
 
 
 def build(config, regions=None):
@@ -284,14 +297,16 @@ def build(config, regions=None):
                   f"(rows=verdict in LABELS order, cols=2..8):\n{result['confusion']}")
 
         with progress.Stage("fittp.cascade.imputed", region) as st:
-            imputed = build_region_imputed(config, region, st, result["name"], result["n_detected"])
+            imputed = build_region_imputed(config, region, st, result["name"],
+                                            result["n_detected"], result["verdict"])
             if imputed is not None:
                 write_region_imputed(path, imputed)
                 st.done(path, n=imputed["p_verdict"].shape[0])
-                print(f"fittp.cascade {region}: imputed-vs-MAP confusion (rows=verdict, "
-                      f"cols=MAP class {CLASSES}):\n{imputed['confusion_verdict_map']}")
-                print(f"fittp.cascade {region}: cascade YSO set vs P(YSO)>0.5 "
-                      f"[[not-not, not-yso],[cascade-not, cascade-yso]]:\n{imputed['confusion_yso']}")
+                print(f"fittp.cascade {region}: imputed-verdict-vs-MAP confusion (rows=verdict, "
+                      f"cols=MAP class {CLASSES}):\n{imputed['confusion_verdict_imputed_vs_map']}")
+                print(f"fittp.cascade {region}: MEASURED-verdict cascade YSO set vs P(YSO)>0.5 "
+                      f"[[not-not, not-yso],[cascade-not, cascade-yso]]:"
+                      f"\n{imputed['confusion_cascade_yso_measured_vs_pyso']}")
             else:
                 st.done(None, n=0)
 
