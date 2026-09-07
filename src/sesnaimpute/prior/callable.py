@@ -652,28 +652,29 @@ class _H2sClass(object):
         return eps_val.reshape(shp)
 
 
-#: `Z`'s own quadrature (owner ruling, 2026-09-06): `Z` is the
-#: normaliser of the density the fitter actually reads, computed here at
-#: `prepare` time by the SAME `shape`/`selection` read `log_density`
-#: composes, exact where a closed form exists and quadrature only where
-#: the read is a table. YSO's `Z = 1` analytically (below, no
-#: quadrature at all). GAL/H2S/STAR-family's `a` axis uses the class's
-#: own kernel mixture's EXACT per-cell mass (`Kernel.cdf` differences,
-#: `_a_cell_mass`) on `_Z_QUAD_NA` log-spaced cells from a floor of
-#: `_Z_QUAD_A_FLOOR_FRAC . A_s` to `_Z_QUAD_SIGMAS` kernel sigmas past
-#: the shifted mean, each cell's OTHER factor (shape/kernel_pdf .
-#: selection) sampled at the cell's own centre -- a product quadrature,
-#: exact in `a` for the part the kernel already models exactly (GAL's
-#: shape factors perfectly into `kernel_pdf(a) . phi_density(b)`; H2S's
-#: true `a` density is `marginal_exact`, not the kernel, so this is an
-#: approximation there, reported below) rather than a plain trapezoid
-#: sampling a possibly sharply-peaked density on 48 points. The `log10
-#: B` axis stays trapezoid: STAR/AGB/PAHC on `_Z_QUAD_NB` synthetic
-#: points over the tabulated box (module note: this axis is smooth, a
-#: synthetic grid is fine); GAL/H2S on their OWN STORED grid (`gal_
-#: log10_s_grid`, `h2s_log10_sigma_grid` -- 61/128 points respectively,
-#: not resampled) since that is where the selection read is itself
-#: exact only at those points.
+#: `Z`'s own quadrature (owner ruling, 2026-09-06, WITHDRAWN and
+#: narrowed 2026-09-06): `Z` is the normaliser of the density the
+#: fitter actually reads, exact where a closed form exists and
+#: quadrature only where the read is a table. YSO's `Z = 1` exactly
+#: (below, no grid at all). GAL's `a` axis uses the kernel mixture's
+#: EXACT per-cell mass (`Kernel.cdf` differences, `_a_cell_mass`) on
+#: `_Z_QUAD_NA` log-spaced cells, because GAL's `shape` factors
+#: PERFECTLY into `kernel_pdf(a) . phi_density(b)` -- the kernel's own
+#: cell mass carries the whole `a` integral there, exactly, and the
+#: measured identity is excellent (~0.05-0.1%). STAR/AGB/PAHC and H2S
+#: do NOT get this treatment any more: their true `a` density (the
+#: tabulated tile shape; `marginal_exact`) is NOT the kernel's simple
+#: two-Gaussian mixture, so weighting by the kernel's cell mass is an
+#: approximation that measurably REGRESSED their identity relative to a
+#: plain trapezoid (checked directly against a 4000x400 reference
+#: integral for one STAR source: cell-mass 4.3% off, plain trapezoid
+#: 0.5% off) -- so they use a plain trapezoid on `_Z_QUAD_NA` log-spaced
+#: POINTS (not cells) in `a`, same as before the cell-mass detour. The
+#: `log10 B` axis stays trapezoid throughout: STAR/AGB/PAHC on
+#: `_Z_QUAD_NB` synthetic points over the tabulated box (smooth enough
+#: for a synthetic grid); GAL/H2S on their OWN STORED grid (`gal_
+#: log10_s_grid`, `h2s_log10_sigma_grid`, not resampled) since that is
+#: where the selection read is itself exact only at those points.
 _Z_QUAD_NA = 48
 _Z_QUAD_NB = 64
 _Z_QUAD_SIGMAS = 6.0
@@ -774,7 +775,9 @@ def _z_by_quadrature(prior, cls, rows):
 
 def _z_by_quadrature_chunk(prior, cls, rows):
     """`(n,)`: one chunk's worth of `_z_by_quadrature`'s own GAL/H2S/
-    star-family arithmetic -- see that function for the method."""
+    star-family arithmetic -- see that function for the method. Only
+    GAL uses the kernel's exact per-cell mass; every other class here
+    uses a plain trapezoid on `_Z_QUAD_NA` log-spaced `a` points."""
     n = rows.shape[0]
     obj = prior._classes[cls]
     a_col = prior.table["A_COL_K"][rows]
@@ -802,11 +805,26 @@ def _z_by_quadrature_chunk(prior, cls, rows):
         b_row = s_grid - np.log10(fref0)  # the STORED grid, not resampled
         mi_grid = np.zeros((n, _Z_QUAD_NA * b_row.size), dtype=np.intp)
 
-    centers, mass, pdf_center = _a_cell_mass(
-        kernel_obj, a_col, sigma_col, map_class_code, a_floor, a_hi, _Z_QUAD_NA)
     nb = b_row.size
     b_grid = np.broadcast_to(b_row, (n, nb))
-    a_full = np.repeat(centers, nb, axis=1)
+
+    if cls == "gal":
+        # GAL only: the kernel's exact per-cell mass (module note above
+        # `_Z_QUAD_NA`) -- shape factors perfectly into kernel_pdf(a) .
+        # phi_density(b), so the kernel's own cell mass carries the `a`
+        # integral exactly and only the remaining factor is sampled at
+        # the cell centre.
+        a_grid, mass, pdf_center = _a_cell_mass(
+            kernel_obj, a_col, sigma_col, map_class_code, a_floor, a_hi, _Z_QUAD_NA)
+    else:
+        # STAR/AGB/PAHC/H2S: plain trapezoid -- the kernel mixture is
+        # not this class's true `a` density, so weighting by its cell
+        # mass is an approximation that measurably regressed the
+        # identity relative to sampling the read directly (module note).
+        a_grid = _quad_grid_log(a_floor, a_hi, _Z_QUAD_NA)
+        mass = pdf_center = None
+
+    a_full = np.repeat(a_grid, nb, axis=1)
     b_full = np.tile(b_grid, (1, _Z_QUAD_NA))
     rows2d = np.broadcast_to(rows[:, None], a_full.shape)
 
@@ -817,9 +835,11 @@ def _z_by_quadrature_chunk(prior, cls, rows):
     b_grid_3d = np.broadcast_to(b_grid[:, None, :], dens.shape)
     inner = np.trapz(dens, x=b_grid_3d, axis=2)  # (n, NA): trapz over log10 B only
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ratio = np.where(pdf_center > 0.0, inner / pdf_center, 0.0)
-    return np.sum(mass * ratio, axis=1)
+    if cls == "gal":
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(pdf_center > 0.0, inner / pdf_center, 0.0)
+        return np.sum(mass * ratio, axis=1)
+    return np.trapz(inner, x=a_grid, axis=1)
 
 
 class SourcePrior(object):
@@ -990,14 +1010,6 @@ class SourcePrior(object):
         self._prep_star_eps = star_eps
         self._prep_h2s_eps = h2s_eps
 
-        # `Z[s]` by quadrature (owner ruling, 2026-09-06): the normaliser
-        # of the density the fitter actually reads, computed where the
-        # read lives -- not `Z_<CLS>` off the table any more (module
-        # docstring above `_z_by_quadrature`). Needs `_prep_star_eps`/
-        # `_prep_h2s_eps` already set (just above): the family/H2S
-        # `selection` read gathers from them.
-        self._prep_z = {c: _z_by_quadrature(self, c, uniq_rows) for c in self._classes}
-
     def _prep_local_index(self, rows):
         """`(n,)`: `rows`'s own position in the last `prepare`d batch --
         every class's one gather into that batch's `EPS` arrays (rule 6:
@@ -1055,9 +1067,13 @@ class SourcePrior(object):
         (module docstring). ONE composition for all six classes (owner
         ruling, 2026-09-06): `ln shape + ln selection - ln Z[rows]`,
         where `shape`/`selection` are the class's own object (below) and
-        `Z` is `prepare`'s own quadrature (`_z_by_quadrature`), the
-        normaliser of THIS density, not `Z_<CLS>` off the table any
-        more. `Z = 0` (every object of this class is genuinely
+        `Z` is `Z_<CLS>` off the table -- `prior.table` now WRITES that
+        column from this same `_z_by_quadrature` (called once per class
+        per source at table-build time, not per batch here: owner
+        ruling, 2026-09-06's step C2a), so this is still the normaliser
+        of the density the fitter actually reads, just computed
+        upstream once for the whole survey instead of per `prepare`
+        batch. `Z = 0` (every object of this class is genuinely
         impossible at this source's own limits) correctly returns
         `-inf` for every template -- that is not a defect, `check`
         below counts such sources separately rather than folding them
@@ -1077,8 +1093,7 @@ class SourcePrior(object):
         shape_val = obj.shape(rows2d, a2, b2, model_index=mi2)
         sel_val = obj.selection(rows2d, a2, b2, model_index=mi2)
         numerator = shape_val * sel_val
-        local2d = self._prep_local_index(rows2d.ravel()).reshape(rows2d.shape)
-        z = self._prep_z[cls][local2d]
+        z = self.table["Z_%s" % cls.upper()][rows2d]
         with np.errstate(divide="ignore", invalid="ignore"):
             ln_val = np.log(numerator) - np.log(z)
         return np.where((numerator > 0.0) & (z > 0.0), ln_val, -np.inf)
@@ -1188,26 +1203,27 @@ def check(config, region, n_sources=50, seed=0):
     the numerical integral of `exp(log_density)` over a fine `(a, log10
     B)` grid against 1: within 0.02 for STAR/AGB/PAHC/GAL/H2S
     (`star_shapes.EPS_SHAPE`), within 1e-3 for YSO (analytic). A source
-    whose quadrature `Z` (`_z_by_quadrature`, `prepare`) is zero has no
-    object of this class catalogueable at its own limits -- every
-    template correctly reads `-inf` there, so its integral is correctly
-    zero, and it is counted separately (`n_zero`) rather than folded
-    into the identity's own typical/worst deviation (owner ruling,
-    2026-09-06). Reports typical (median) and worst deviation per class
-    over the sources where `Z > 0`, and the wall time of one source's
-    `log_density` call for one class at 4,066 models times 9 query
-    points, extrapolated linearly to the survey's 8.66e6 sources."""
+    whose `Z_<CLS>` (`prior.table`, `_z_by_quadrature` at build time) is
+    zero has no object of this class catalogueable at its own limits --
+    every template correctly reads `-inf` there, so its integral is
+    correctly zero, and it is counted separately (`n_zero`) rather than
+    folded into the identity's own typical/worst deviation (owner
+    ruling, 2026-09-06). Reports typical (median) and worst deviation
+    per class over the sources where `Z > 0`, and the wall time of one
+    source's `log_density` call for one class at 4,066 models times 9
+    query points, extrapolated linearly to the survey's 8.66e6
+    sources."""
     prior = SourcePrior(config, region)
     rng = np.random.default_rng(seed)
     n = min(int(n_sources), prior.n_source)
     rows = rng.choice(prior.n_source, size=n, replace=False)
     prior.prepare(rows)
 
-    # `Z`'s own cost, explicit and per class (ms/source): `prepare` just
-    # computed every class's `Z` once already (`self._prep_z`); this
-    # re-times each class's own `_z_by_quadrature` call in isolation
-    # purely to report the number -- the extra pass is one `check` run,
-    # never the fitter's own `prepare`.
+    # `Z`'s own cost, explicit and per class (ms/source): `Z` is now a
+    # table column (`prior.table`, C2a), computed once per class per
+    # source at BUILD time, not here -- this re-times `_z_by_quadrature`
+    # directly, on this run's own sources, purely to report the number
+    # `prior.table`'s build pays once per survey source.
     z_cost_ms = {}
     for cls in CLASSES:
         if cls not in prior._classes:
@@ -1220,10 +1236,9 @@ def check(config, region, n_sources=50, seed=0):
     n_zero = {cls: 0 for cls in CLASSES}
     for row in rows:
         a_col = float(prior.table["A_COL_K"][row])
-        local = int(prior._prep_local_index(np.array([row], dtype=np.intp))[0])
 
         for cls in FAMILY_CLASSES:
-            if prior._prep_z[cls][local] <= 0.0:
+            if prior.table["Z_%s" % cls.upper()][row] <= 0.0:
                 n_zero[cls] += 1
                 continue
             shape = prior.shapes[cls]
@@ -1234,14 +1249,14 @@ def check(config, region, n_sources=50, seed=0):
 
         a_grid_cloud = _extinction_grid(prior, row, a_col)
 
-        if prior._prep_z["gal"][local] <= 0.0:
+        if prior.table["Z_GAL"][row] <= 0.0:
             n_zero["gal"] += 1
         else:
             b_grid_gal = prior.gal_log10_s_grid - np.log10(prior.gal_fref[0])
             integral = _integrate(prior, "gal", row, a_grid_cloud, b_grid_gal, model_index=0)
             devs["gal"].append(abs(integral - 1.0))
 
-        if prior._prep_z["yso"][local] <= 0.0:
+        if prior.table["Z_YSO"][row] <= 0.0:
             n_zero["yso"] += 1
         else:
             integral = _integrate_yso(prior, row, a_grid_cloud)
@@ -1251,7 +1266,7 @@ def check(config, region, n_sources=50, seed=0):
         # interpolates on (module docstring's "end bins held" convention) --
         # a wider independent range double-counts the held edge value past
         # the real grid, the row-1222 callable/product mismatch this fixes.
-        if prior._prep_z["h2s"][local] <= 0.0:
+        if prior.table["Z_H2S"][row] <= 0.0:
             n_zero["h2s"] += 1
         else:
             log10_sigma_lo = prior.h2s_log10_sigma_grid[0]
