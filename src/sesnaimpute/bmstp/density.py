@@ -110,8 +110,11 @@ def _resolve_sightline_row(hpx_pix_256, sightline_axis):
 def _star_family_density_by_tile(config, region, tile_id_axis):
     """`A_STAR(s)`, `A_AGB(s)` per tile, section 5.1/5.2: the retained
     field-star sample's `W_STAR`/`W_AGB` summed over the tile's simulated
-    stars, divided by the simulation's own solid angle `Omega_sim`
-    (recorded on `population/star/population_star_tile__R.hdf5`)."""
+    stars, divided by the ONE TRILEGAL pointing that tile's sample is
+    drawn from, `OMEGA_POINTING_DEG2` (recorded per tile group on
+    `population/star/population_star_tile__R.hdf5`) -- not the region's
+    whole-simulation `OMEGA_SIM_DEG2`, which a multi-pointing region's
+    per-tile sample does not cover."""
     path = config_module.product_path(
         config, "population", "star", "population", "tile", region=region)
     star = np.empty(tile_id_axis.size, dtype=np.float64)
@@ -123,8 +126,9 @@ def _star_family_density_by_tile(config, region, tile_id_axis):
         f_c = float(f.attrs["F_C"])
         for i, tile_id in enumerate(tile_id_axis):
             grp = f[f"tile_{int(tile_id)}"]
-            star[i] = float(np.sum(grp["W_STAR"][()], dtype=np.float64)) / omega_sim
-            agb[i] = float(np.sum(grp["W_AGB"][()], dtype=np.float64)) / omega_sim
+            omega_t = float(grp.attrs["OMEGA_POINTING_DEG2"])
+            star[i] = float(np.sum(grp["W_STAR"][()], dtype=np.float64)) / omega_t
+            agb[i] = float(np.sum(grp["W_AGB"][()], dtype=np.float64)) / omega_t
     return star, agb, omega_sim, f_dusty_o, f_dusty_c, f_c
 
 

@@ -762,6 +762,11 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
     pointings = trilegal_download.region_pointings(config, region)
     pointing_l = np.array([p["l_deg"] for p in pointings])
     pointing_b = np.array([p["b_deg"] for p in pointings])
+    # each tile's own retained sample is drawn from ONE pointing (owner
+    # ruling 2026-09-06); the solid angle that sample covers is that
+    # pointing's own queried area, not the region-total OMEGA_SIM_DEG2
+    # (all pointings share one area today, `REGION_POINTINGS`).
+    pointing_area = np.array([p["area_deg2"] for p in pointings])
 
     n_tile_total = tiles["n_tile"]
     _tick_lock = threading.Lock()
@@ -796,6 +801,7 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
                 log10_b_agb_c=log10_b_agb_c, log10_b_agb_o=log10_b_agb_o,
                 limit_grid_mjy=limit_grid_mjy, f_dusty_mean=f_dusty_mean,
                 n_pointing=len(pointings), pointing_l=pointing_l, pointing_b=pointing_b,
+                pointing_area=pointing_area,
                 region_centre_pointing=region_centre_pointing)
 
 
@@ -816,11 +822,19 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c, l_o_lsun, n_riebe
         f.attrs["L_O_LSUN"] = l_o_lsun
         f.attrs["N_RIEBEL_O"] = n_riebel_o
         f.attrs["N_RIEBEL_C"] = n_riebel_c
+        # section 5.1's Omega_sim = n_pointings * Omega_pointing: the
+        # region-total solid angle stays the honest whole-simulation area
+        # (anchor_tiles' per-pixel prediction still divides by it); each
+        # tile group below carries the ONE pointing's own area instead,
+        # since that pointing's retained sample is all a tile draws from.
+        f.attrs["N_POINTINGS"] = int(result["n_pointing"])
         f.create_dataset("DIST_GRID", data=result["dist_grid"])
         f.create_dataset("LIMIT8_GRID_MJY", data=result["limit_grid_mjy"])
         for tile_result in result["tiles"]:
             grp = f.create_group("tile_%d" % tile_result["tile"])
             grp.attrs["N_SIGHTLINES"] = tile_result["n_sightlines"]
+            grp.attrs["POINTING_INDEX"] = int(tile_result["pointing_index"])
+            grp.attrs["OMEGA_POINTING_DEG2"] = float(result["pointing_area"][tile_result["pointing_index"]])
             grp.create_dataset("STAR_INDEX", data=tile_result["star_index"])
             grp.create_dataset("U", data=tile_result["u"])
             grp.create_dataset("W", data=tile_result["w"])

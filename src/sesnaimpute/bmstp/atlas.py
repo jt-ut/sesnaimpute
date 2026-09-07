@@ -175,9 +175,9 @@ def _draw_members(rng, weight, n_mc):
     arrays, drawn with replacement in proportion to `weight` -- the fixed-
     seed Monte Carlo sample of sec. 8. Each draw stands for `total / n_mc`
     objects, `total = sum(weight)`, so the accepted fraction over the draw
-    times `total / OMEGA_SIM_DEG2` recovers the class's own catalogued
-    density. `None` where the tile carries no weight at all (e.g. no
-    evolved star for AGB)."""
+    times `total / OMEGA_POINTING_DEG2` (the tile's own pointing) recovers
+    the class's own catalogued density. `None` where the tile carries no
+    weight at all (e.g. no evolved star for AGB)."""
     total = float(np.sum(weight, dtype=np.float64))
     if total <= 0.0 or weight.size == 0:
         return None, 0.0
@@ -257,9 +257,13 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     field_path = config_module.product_path(
         config, "population", "trilegal", "field-stars", "region", region=region)
     with h5py.File(star_path, "r") as f:
-        omega_sim = float(f.attrs["OMEGA_SIM_DEG2"])
         limit8_grid = np.asarray(f["LIMIT8_GRID_MJY"][()], dtype=np.float64)
         grp = f[f"tile_{tile_id}"]
+        # this tile's sample is drawn from ONE TRILEGAL pointing (owner
+        # ruling 2026-09-06); its own OMEGA_POINTING_DEG2, not the
+        # region's whole-simulation OMEGA_SIM_DEG2, is the solid angle it
+        # covers.
+        omega_t = float(grp.attrs["OMEGA_POINTING_DEG2"])
         star_index = np.asarray(grp["STAR_INDEX"][()], dtype=np.int64)
         u = np.asarray(grp["U"][()], dtype=np.float64)
         w_star = np.asarray(grp["W_STAR"][()], dtype=np.float64)
@@ -282,7 +286,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     out = {}
     for cls, weight in (("STAR", w_star_only), ("AGB", w_agb), ("PAHC", w_pahc_only)):
         idx, total = _draw_members(rng, weight, N_MC)
-        density = total / omega_sim  # objects deg^-2, sec. 5.1/5.2's Omega_sim
+        density = total / omega_t  # objects deg^-2, sec. 5.1/5.2's Omega_pointing
         if idx is None:
             frac = np.zeros(pix_in_tile.size)
             mc_error = np.zeros(pix_in_tile.size)
