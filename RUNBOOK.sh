@@ -145,6 +145,7 @@ PY sesnaimpute.impute.posterior             # class/subclass posteriors, argmax-
 PY sesnaimpute.population.column_grid
 PY sesnaimpute.population.kernel
 PY sesnaimpute.population.field_stars
+PY sesnaimpute.population.yso_mass
 PY sesnaimpute.population.yso
 PY sesnaimpute.population.yso_selection
 PY sesnaimpute.population.h2s
