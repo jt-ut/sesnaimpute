@@ -39,11 +39,13 @@ import numpy as np
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import regions as regions_module
+from sesnaimpute.fit import sweep as sweep_module
 from sesnaimpute.fit.psi import PsiTerm
 from sesnaimpute.fit.sweep import fit_batch
 from sesnaimpute.fit.terms import GaiaTerm
 from sesnaimpute.granules import access
 from sesnaimpute.prior.callable import SourcePrior
+from sesnaimpute.progress import Stage
 
 #: Sources per batch (module docstring): the SED fitter's own
 #: long-standing default -- a fallback only; `_fit_one` reads the live
@@ -106,6 +108,14 @@ def _fit_one(config, region, cls):
     sweep.fit_batch` (which does its own thread-parallel work inside);
     the batch files are then joined into one evidence file in catalogue
     row order.
+
+    Prints one status line at the start (region, class, register size,
+    batch size, block size, thread count -- owner ruling 2026-09-06:
+    this is the longest-running stage of all, hours per class on the
+    largest region), one `st.tick` per batch plus, inside a long batch,
+    one per block (both share the one `Stage`'s ten-second throttle),
+    and one `st.done` at the end naming the evidence path, the source
+    count, the seconds per source, and the peak resident memory.
     """
     n_sources = access.region_slice(config, region)["n_sources"]
     # SourcePrior's own class vocabulary is lower-case (`prior.callable.
@@ -118,6 +128,9 @@ def _fit_one(config, region, cls):
     native_flux = _library_native_flux(config, cls)
     gaia_cls = cls.lower()
     batch_size = config.fit_batch_size
+    n_model = native_flux.shape[0]
+    n_batches = max(1, -(-n_sources // batch_size))
+    block = sweep_module.block_size(n_model, config.fit_block_budget_mb)
 
     def gamma(row, model_index, a, log10_b):
         return gaia.ln_gamma(row, model_index, a, log10_b, gaia_cls)
@@ -125,18 +138,28 @@ def _fit_one(config, region, cls):
     def psi(row, model_index, a, log10_b):
         return psi_term.ln_psi(native_flux, model_index, a, log10_b)
 
+    st = Stage("fit.run.%s" % cls, region)
+    print("fit.run: %s/%s: register=%d models, %d sources, batch_size=%d "
+          "(%d batches), block_size~%d sources, n_jobs=%d threads"
+          % (region, cls, n_model, n_sources, batch_size, n_batches, block, config.n_jobs),
+          flush=True)
+
     batch_paths = []
     for i, start in enumerate(range(0, n_sources, batch_size)):
         rows = np.arange(start, min(start + batch_size, n_sources))
         prior.prepare(rows)
-        arrays = fit_batch(config, region, cls, rows, prior, gamma=gamma, psi=psi)
+        arrays = fit_batch(config, region, cls, rows, prior, gamma=gamma, psi=psi, stage=st)
         path = _batch_path(config, region, cls, i)
         _write_batch(path, arrays)
         batch_paths.append(path)
+        st.tick(i + 1, n_batches, "batches")
 
     joined = _join(config, region, cls, batch_paths, n_sources)
     for path in batch_paths:
         os.remove(path)
+    elapsed = time.time() - st.t0
+    sec_per_source = elapsed / n_sources if n_sources else float("nan")
+    st.done(joined, n_sources=n_sources, sec_per_source=sec_per_source)
     return joined
 
 
@@ -177,10 +200,7 @@ def build(config, regions=None, classes=None):
     class_codes = classes if classes is not None else list(CLASSES)
     for region in region_names:
         for cls in class_codes:
-            t0 = time.time()
-            out_path = _fit_one(config, region, cls)
-            print("fit.run: %s/%s -> %s (%.1fs)" % (region, cls, out_path, time.time() - t0),
-                  flush=True)
+            _fit_one(config, region, cls)
 
 
 def jobs(config):
@@ -206,7 +226,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("config")
     parser.add_argument("--regions", nargs="+", default=None)
-    parser.add_argument("--classes", nargs="+", default=None)
+    parser.add_argument("--classes", nargs="+", default=None,
+                        help="default: all six -- every {region, class} pair is fit")
+    parser.add_argument("--jobs", action="store_true",
+                         help="write bms/fit/jobs.sh (one line per {region, class} job "
+                              "for a cluster) instead of fitting anything here")
     args = parser.parse_args()
     cfg = config_module.load(args.config)
-    build(cfg, regions=args.regions, classes=args.classes)
+    if args.jobs:
+        print(jobs(cfg))
+    else:
+        build(cfg, regions=args.regions, classes=args.classes)

@@ -46,7 +46,6 @@ mixture is introduced anywhere in this module.
 """
 
 import os
-import time
 
 import h5py
 import numpy as np
@@ -57,6 +56,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.fit.run import CLASSES, evidence_path
 from sesnaimpute.fit.sweep import ORIGIN_DETECTED
 from sesnaimpute.prior import table as table_module
+from sesnaimpute.progress import Stage
 
 #: `CLASSMAP` in its own stored order: one row per subclass, the order
 #: `global_subclass_posterior`'s output columns follow.
@@ -225,12 +225,13 @@ def _committed_flux(committed, candidate_flux, flux_cov_stack):
 
 
 def _build_one(config, region, classes):
-    t0 = time.time()
+    class_list = list(classes)
+    st = Stage("impute.posterior", region)
+    print("impute.posterior: %s: classes used=%s" % (region, class_list), flush=True)
+
     prior = table_module.read(config, region)
     name = prior["NAME"]
     n_sources = name.shape[0]
-
-    class_list = list(classes)
     n_class = np.stack([prior["N_%s" % cls] for cls in class_list], axis=1).astype(np.float64)
     evidence = _read_evidence(config, region, class_list)
 
@@ -281,9 +282,14 @@ def _build_one(config, region, classes):
     out_path = _write(config, region, name, class_list, p_class, p_subclass, committed,
                       candidate_flux, flux_imputed, flux_imputed_cov,
                       entropy_class, entropy_subclass, n_detected)
-    wall_s = time.time() - t0
-    print("impute.posterior: %s: %d sources, classes used=%s, wall=%.1fs -> %s"
-         % (region, n_sources, class_list, wall_s, out_path), flush=True)
+
+    mean_p = p_class.mean(axis=0)
+    committed_counts = np.bincount(committed, minlength=len(class_list))
+    numbers = {"n_sources": n_sources}
+    for ci, cls in enumerate(class_list):
+        numbers["mean_P_%s" % cls] = float(mean_p[ci])
+        numbers["n_%s" % cls] = int(committed_counts[ci])
+    st.done(out_path, **numbers)
     return out_path
 
 
