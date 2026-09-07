@@ -11,10 +11,11 @@ integrates over, the CLAMPED marks for the reported record and the flux
 prediction, and the non-detection term at those clamped marks.
 """
 
+import math
 from collections import namedtuple
 
+import numba
 import numpy as np
-from scipy.special import log_ndtr
 
 from sesnaimpute import definitions
 from sesnaimpute.catalog import limits as catalog_limits
@@ -39,11 +40,83 @@ MIN_DETECTED_BANDS = 2
 #: by the source's own (A_K/A_V).
 AV_CLAMP_MAX_AK = 75.0
 
-#: Per-block working set (rule 10b/10a): a block's non-detection term and
-#: chi2 quadratic form each hold one (n_block, n_model, 8) float32 array
-#: (plus one more transiently); `block_size` sizes a block so four such
-#: arrays fit `budget_mb`.
-NONDET_BUFFERS = 4
+_SQRT2 = np.float32(np.sqrt(2.0))
+
+#: Per-block working set (rule 10b/10a), in float32-`(n_block, n_model, 8)`
+#: equivalents: the chi2 quadratic form's `R @ P` (1), and the
+#: non-detection term's `log10_fhat`/`z` (float32, 1 each) plus the numba
+#: kernel's float64 copy and output (2 float32-equivalents each, for the
+#: float64 precision the z=0 identity needs) -- 7 in all; `block_size`
+#: sizes a block so that many such arrays fit `budget_mb`.
+NONDET_BUFFERS = 7
+
+
+#: SPEC_BMSTP_DRAFT.md section 6.2 -- above this `z`, `_ln_one_minus_c_kernel`
+#: switches from the direct `ln erfc(z)` (exact, no underflow risk yet: erfc
+#: does not underflow to zero until z ~ 27) to the asymptotic series, so the
+#: switch is a speed/simplicity choice, not a stability one.
+_ERFC_DIRECT_MAX_Z = 5.0
+
+
+@numba.njit(parallel=True, cache=True)
+def _ln_one_minus_c_kernel(z_flat, out):
+    """`ln[1 - C(z)]` for every element of the flattened `z` (section 6.2's
+    erf roll-off, `z = (log10 f_hat - log10 F_lim50) / (sqrt(2) w)`),
+    `@njit(parallel=True)` over templates via `prange`: for `z < 0` (fainter
+    than the limit) `log1p(-0.5 erfc(-z))` has no cancellation to guard
+    against; for `0 <= z < 5`, `math.erfc` itself has not yet underflowed,
+    so `ln(1/2) + ln erfc(z)` is exact; beyond that, the scaled
+    complementary error function's own asymptotic series, `ln erfcx(z) ~=
+    -ln(z sqrt(pi)) - ln(1 + 1/(2 z^2))`, avoids `erfc`'s eventual
+    underflow (z ~ 27) with the leading-order tail term the spec's own
+    "ten times the limit costs about 5 nats" case sits well inside.
+    """
+    n = z_flat.shape[0]
+    ln_half = -0.6931471805599453
+    sqrt_pi = 1.7724538509055159
+    for i in numba.prange(n):
+        zi = z_flat[i]
+        if zi < 0.0:
+            out[i] = math.log1p(-0.5 * math.erfc(-zi))
+        elif zi < _ERFC_DIRECT_MAX_Z:
+            out[i] = ln_half + math.log(math.erfc(zi))
+        else:
+            ln_erfcx = -math.log(zi * sqrt_pi) - math.log(1.0 + 1.0 / (2.0 * zi * zi))
+            out[i] = ln_half + ln_erfcx - zi * zi
+    return out
+
+
+def _ln_one_minus_c(z):
+    """`ln[1 - C(z)]`, section 6.2 (`_ln_one_minus_c_kernel`'s docstring for
+    the three branches), on an array of any shape: at `z = 0` this is
+    `ln(1/2)` to float64 precision (`math.erfc(0.0) == 1.0` exactly), so the
+    identity check holds to 1e-10 with no float32 rounding in the way.
+    """
+    z = np.asarray(z, dtype=np.float64)
+    shape = z.shape
+    z_flat = np.ascontiguousarray(z.reshape(-1))
+    out = np.empty_like(z_flat)
+    _ln_one_minus_c_kernel(z_flat, out)
+    return out.reshape(shape)
+
+
+def _ln_nondet(batch, log10_f_ref, av_clamped32, sc_clamped32):
+    """The non-detection term of section 6.2 at the CLAMPED marks: the
+    predicted log-flux in every band (float32) for every source and
+    template at once, masked to each source's own undetected, limited
+    bands and summed. One batched call into `_ln_one_minus_c`'s numba
+    kernel beats gathering each source's own undetected-band slice and
+    calling it once per source (measured: ~2.5x slower for a 27-source,
+    200,000-template block -- the per-source Python-level overhead
+    dominates the kernel's own, embarrassingly parallel, per-element cost).
+    """
+    log10_fhat = (log10_f_ref[None, :, :]
+                  + batch.ext_col[:, None, :] * av_clamped32[:, :, None]
+                  + np.float32(GRAY_COLUMN) * sc_clamped32[:, :, None])
+    z = (log10_fhat - batch.log10_f_lim50[:, None, :]) / (_SQRT2 * batch.width_dex[:, None, :])
+    term = _ln_one_minus_c(z)
+    term = np.where(batch.nondet_mask[:, None, :], term, 0.0)
+    return term.sum(axis=2).astype(np.float32)
 
 
 class Batch:
@@ -188,12 +261,11 @@ def fit(batch, log10_f_ref):
       `S0 = sum_b W_b X_b0` (`prepare`'s `s0`). `FRAC_CLAMPED` is the
       fraction of `m` templates where the clamp engaged, per source.
     - The non-detection term of section 6.2 at the CLAMPED marks: the
-      template's model flux `f_hat_i` in every undetected band, compared to
-      the source's own `F_LIM_50,i` through the region-band roll-off width
-      `WIDTH_DEX`; `ln[1 - C_i(f_hat_i)] = log_ndtr((log10 F_lim50,i -
-      log10 f_hat_i) / w_r,i)` (`C_i` a normal CDF in log10 flux, so `1 -
-      C_i` is the complementary tail `log_ndtr` evaluates without
-      cancellation), summed over undetected, limited bands.
+      template's model flux `f_hat_i` in every undetected, limited band,
+      compared to the source's own `F_LIM_50,i` through the region-band
+      roll-off width `WIDTH_DEX`, `ln[1 - C_i(f_hat_i)]` via the scaled
+      complementary error function (`_ln_one_minus_c`), gathered per
+      source to only its own undetected bands (`_ln_nondet`).
 
     Rows flagged at `prepare` (fewer than two detected bands, or a singular
     `XtWX`) are NaN throughout.
@@ -227,12 +299,7 @@ def fit(batch, log10_f_ref):
 
     av_clamped32 = av_clamped.astype(np.float32)
     sc_clamped32 = sc_clamped.astype(np.float32)
-    log10_fhat = (log10_f_ref[None, :, :]
-                  + batch.ext_col[:, None, :] * av_clamped32[:, :, None]
-                  + np.float32(GRAY_COLUMN) * sc_clamped32[:, :, None])
-    z = (batch.log10_f_lim50[:, None, :] - log10_fhat) / batch.width_dex[:, None, :]
-    term = np.where(batch.nondet_mask[:, None, :], log_ndtr(z), np.float32(0.0))
-    ln_nondet = term.sum(axis=2).astype(np.float32)
+    ln_nondet = _ln_nondet(batch, log10_f_ref, av_clamped32, sc_clamped32)
 
     chi2_min[batch.flagged] = np.nan
     a_hat[batch.flagged] = np.nan
