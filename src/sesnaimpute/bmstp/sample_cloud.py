@@ -78,7 +78,10 @@ def sample_yso(loaded, row):
     p_u = loaded["p_u"][row]
     u_lo, u_hi = u_edges[:-1], u_edges[1:]
     d_lo, d_hi = d_edges[:-1], d_edges[1:]
-    mass = p_u * (u_hi - u_lo)  # (n_cell,)
+    # u is non-decreasing (sec. 5.5); the top cell's edges can differ from
+    # 1.0 by a float64 rounding residual (~1e-16) with the wrong sign, so
+    # the increment is clipped at zero rather than left to go negative.
+    mass = p_u * np.maximum(u_hi - u_lo, 0.0)  # (n_cell,)
 
     log10x_lo = np.log10(np.maximum(u_lo, _X_FLOOR))
     log10x_hi = np.log10(np.maximum(u_hi, _X_FLOOR))
