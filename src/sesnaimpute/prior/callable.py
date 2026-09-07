@@ -327,11 +327,15 @@ def _interp_marginal_curve(grid, curve, a_query):
     """`(n,)`: linear interpolation of `curve[i]` (already gathered to
     one row per query point, `(n, _MARGINAL_CURVE_N)`) at `a_query[i]`
     on `grid[i]` -- held at the nearest edge value outside the grid's
-    own range. Plain numpy (owner ruling, 2026-09-06, step C2c: a
-    compiled per-point loop over this same arithmetic measured SLOWER
-    than numpy's own vectorised bracket-and-blend, `_interp_eps_2d`'s
-    own finding), chunked at `_INTERP_CHUNK` so the per-block gather
-    never scales with the caller's own batch."""
+    own range. Plain numpy; NOT called in production any more (owner
+    ruling, 2026-09-06, step C2d: `_yso_shape_numba`/`_h2s_shape_numba`
+    replaced it once measured at the real fitter block size -- step
+    C2c's 36k-point probe made a compiled loop over this arithmetic
+    look slower, but numba's own per-call dispatch overhead was
+    amortised away at 520k points/call). Kept as the numpy reference
+    the compiled kernels were verified against, chunked at
+    `_INTERP_CHUNK` so the per-block gather never scales with the
+    caller's own batch."""
     n = a_query.shape[0]
     out = np.empty(n, dtype=np.float64)
     n_g = grid.shape[1]
@@ -346,6 +350,109 @@ def _interp_marginal_curve(grid, curve, a_query):
         c_lo, c_hi = c[rows_i, idx], c[rows_i, idx + 1]
         t = np.where(g_hi > g_lo, (a - g_lo) / (g_hi - g_lo), 0.0)
         out[start:stop] = c_lo + t * (c_hi - c_lo)
+    return out
+
+
+_INV_SQRT_2PI_NUMBA = 1.0 / math.sqrt(2.0 * math.pi)
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _yso_shape_numba(grid, curve, a, mean_b, width, b):
+    """`(n,)`: YSO's `shape` -- the per-source curve's linear
+    interpolation (module note above `_interp_marginal_curve`) times
+    the closed-form conditional Gaussian on the ridge -- as ONE
+    compiled loop over the `(n, m)` block (owner ruling, 2026-09-06,
+    step C2d: measured at the REAL fitter block size, 128 sources x
+    4,066 models = 520k points/call, not the 36k-point probe that made
+    a compiled bracket-and-blend look slower in step C2c -- numba's own
+    per-call dispatch overhead is amortised away at the real scale)."""
+    n = a.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    n_g = grid.shape[1]
+    for i in range(n):
+        ai = a[i]
+        if ai <= 0.0:
+            out[i] = 0.0
+            continue
+        ac = ai
+        if ac < grid[i, 0]:
+            ac = grid[i, 0]
+        elif ac > grid[i, n_g - 1]:
+            ac = grid[i, n_g - 1]
+        lo = 0
+        hi = n_g - 1
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if grid[i, mid] <= ac:
+                lo = mid
+            else:
+                hi = mid
+        span = grid[i, lo + 1] - grid[i, lo]
+        t = (ac - grid[i, lo]) / span if span > 0.0 else 0.0
+        p_a = curve[i, lo] + t * (curve[i, lo + 1] - curve[i, lo])
+
+        z = (b[i] - mean_b[i]) / width[i]
+        p_b = _INV_SQRT_2PI_NUMBA / width[i] * math.exp(-0.5 * z * z)
+        out[i] = p_a * p_b
+    return out
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _h2s_shape_numba(grid, curve, a, log10_sigma, logsig_mean, logsig_std):
+    """`(n,)`: H2S's `shape` -- the per-source curve's linear
+    interpolation times the region's `log10 Sigma` lognormal -- as ONE
+    compiled loop (owner ruling, 2026-09-06, step C2d; measured at the
+    real 520k-point/call fitter block size, not the 36k-point probe
+    that made a compiled bracket-and-blend look slower in step C2c)."""
+    n = a.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    n_g = grid.shape[1]
+    for i in range(n):
+        ai = a[i]
+        if ai <= 0.0:
+            out[i] = 0.0
+            continue
+        ac = ai
+        if ac < grid[i, 0]:
+            ac = grid[i, 0]
+        elif ac > grid[i, n_g - 1]:
+            ac = grid[i, n_g - 1]
+        lo = 0
+        hi = n_g - 1
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if grid[i, mid] <= ac:
+                lo = mid
+            else:
+                hi = mid
+        span = grid[i, lo + 1] - grid[i, lo]
+        t = (ac - grid[i, lo]) / span if span > 0.0 else 0.0
+        p_a = curve[i, lo] + t * (curve[i, lo + 1] - curve[i, lo])
+
+        zsig = (log10_sigma[i] - logsig_mean) / logsig_std
+        p_sigma = _INV_SQRT_2PI_NUMBA / logsig_std * math.exp(-0.5 * zsig * zsig)
+        out[i] = p_a * p_sigma
+    return out
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _h2s_selection_numba(x_ladder, sigma_grid, eps_batch, x_query, log10_sigma):
+    """`(n,)`: H2S's `selection` -- the bilinear read of the stored
+    `(x, Sigma)` selection array, one compiled loop (owner ruling,
+    2026-09-06, step C2d; same real-block-size measurement as `_h2s_
+    shape_numba`)."""
+    n = x_query.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        ix, tx = _bracket(x_ladder, x_query[i])
+        iv, tv = _bracket(sigma_grid, log10_sigma[i])
+        e00 = eps_batch[i, ix, iv]
+        e01 = eps_batch[i, ix, iv + 1]
+        e10 = eps_batch[i, ix + 1, iv]
+        e11 = eps_batch[i, ix + 1, iv + 1]
+        e_lo = e00 + tv * (e01 - e00)
+        e_hi = e10 + tv * (e11 - e10)
+        out[i] = e_lo + tx * (e_hi - e_lo)
     return out
 
 
@@ -735,16 +842,12 @@ class _YsoClass(object):
         rows_f, a_f, b_f = rows.ravel(), a.ravel(), log10_b.ravel()
 
         local = p._prep_local_index(rows_f)
-        grid_l = p._prep_marginal_grid[local]
-        curve_l = p._prep_marginal_curve[local]
-        p_a = _interp_marginal_curve(grid_l, curve_l, a_f)
-        p_a = np.where(a_f > 0.0, p_a, 0.0)
-
+        grid_l = np.ascontiguousarray(p._prep_marginal_grid[local])
+        curve_l = np.ascontiguousarray(p._prep_marginal_curve[local])
         mean_b = p.table["RIDGE_INTERCEPT"][rows_f] + p.table["RIDGE_SLOPE"][rows_f] * a_f
         width = p.table["RIDGE_WIDTH"][rows_f]
-        z_score = (b_f - mean_b) / width
-        p_b = _INV_SQRT_2PI / width * np.exp(-0.5 * z_score ** 2)
-        return (p_a * p_b).reshape(shp)
+        out = _yso_shape_numba(grid_l, curve_l, a_f, mean_b, width, b_f)
+        return out.reshape(shp)
 
     def selection(self, rows, a, log10_b, model_index=None):
         return np.ones_like(a, dtype=np.float64)
@@ -766,19 +869,15 @@ class _H2sClass(object):
         p = self._prior
         shp = a.shape
         rows_f, a_f, b_f = rows.ravel(), a.ravel(), log10_b.ravel()
-        valid = a_f > 0.0
 
         local = p._prep_local_index(rows_f)
-        grid_l = p._prep_marginal_grid[local]
-        curve_l = p._prep_marginal_curve[local]
-        p_a = _interp_marginal_curve(grid_l, curve_l, a_f)
-        p_a = np.where(valid, p_a, 0.0)
-
+        grid_l = np.ascontiguousarray(p._prep_marginal_grid[local])
+        curve_l = np.ascontiguousarray(p._prep_marginal_curve[local])
         mi_f = model_index.ravel()
         log10_sigma = b_f + np.log10(p.h2s_fref[mi_f])
-        z_score = (log10_sigma - p.h2s_logsig_mean) / p.h2s_logsig_std
-        p_sigma = _INV_SQRT_2PI / p.h2s_logsig_std * np.exp(-0.5 * z_score ** 2)
-        return (p_a * p_sigma).reshape(shp)
+        out = _h2s_shape_numba(grid_l, curve_l, a_f, log10_sigma,
+                              p.h2s_logsig_mean, p.h2s_logsig_std)
+        return out.reshape(shp)
 
     def selection(self, rows, a, log10_b, model_index=None):
         p = self._prior
@@ -793,37 +892,31 @@ class _H2sClass(object):
         x_query = np.where(valid, a_safe / a_col, 0.0)
 
         local = p._prep_local_index(rows_f)
-        eps_batch = p._prep_h2s_eps[local]
-        eps_val = _interp_eps_2d(eps_batch, p.h2s_x_ladder, p.h2s_log10_sigma_grid,
-                                 x_query, log10_sigma)
-        return eps_val.reshape(shp)
+        eps_batch = np.ascontiguousarray(p._prep_h2s_eps[local])
+        out = _h2s_selection_numba(p.h2s_x_ladder, p.h2s_log10_sigma_grid,
+                                   eps_batch, x_query, log10_sigma)
+        return out.reshape(shp)
 
 
-#: `Z`'s own quadrature (owner ruling, 2026-09-06, WITHDRAWN and
-#: narrowed 2026-09-06): `Z` is the normaliser of the density the
-#: fitter actually reads, exact where a closed form exists and
-#: quadrature only where the read is a table. YSO's `Z = 1` exactly
-#: (below, no grid at all). GAL's `a` axis uses the kernel mixture's
-#: EXACT per-cell mass (`Kernel.cdf` differences, `_a_cell_mass`) on
-#: `_Z_QUAD_NA` log-spaced cells, because GAL's `shape` factors
-#: PERFECTLY into `kernel_pdf(a) . phi_density(b)` -- the kernel's own
-#: cell mass carries the whole `a` integral there, exactly, and the
-#: measured identity is excellent (~0.05-0.1%). STAR/AGB/PAHC and H2S
-#: do NOT get this treatment any more: their true `a` density (the
-#: tabulated tile shape; `marginal_exact`) is NOT the kernel's simple
-#: two-Gaussian mixture, so weighting by the kernel's cell mass is an
-#: approximation that measurably REGRESSED their identity relative to a
-#: plain trapezoid (checked directly against a 4000x400 reference
-#: integral for one STAR source: cell-mass 4.3% off, plain trapezoid
-#: 0.5% off) -- so they use a plain trapezoid on `_Z_QUAD_NA` log-spaced
-#: POINTS (not cells) in `a`, same as before the cell-mass detour. The
-#: `log10 B` axis stays trapezoid throughout: STAR/AGB/PAHC on
-#: `_Z_QUAD_NB` synthetic points over the tabulated box (smooth enough
-#: for a synthetic grid); GAL/H2S on their OWN STORED grid (`gal_
-#: log10_s_grid`, `h2s_log10_sigma_grid`, not resampled) since that is
-#: where the selection read is itself exact only at those points.
+#: `Z`'s own quadrature -- GAL ONLY (owner ruling, 2026-09-06, step C2d,
+#: narrowed twice: step C1 tried the kernel's exact cell mass for every
+#: tabulated class and step C2a moved all six into this routine; both
+#: withdrawn except for GAL). `Z` is the normaliser of the density the
+#: fitter actually reads. GAL's shape factors PERFECTLY into `kernel_
+#: pdf(a) . phi_density(b)`, so the kernel's own EXACT per-cell mass
+#: (`Kernel.cdf` differences, `_a_cell_mass`) on `_Z_QUAD_NA` log-spaced
+#: cells carries the whole `a` integral exactly, and the measured
+#: identity is excellent (~0.05-0.1%) -- worth the live recompute. Every
+#: other class's `Z` is simpler and cheaper read straight off the
+#: table, computed once upstream by the stage that already owns the
+#: dot product: STAR/AGB/PAHC from `prior.counts_star_family.
+#: family_counts` (reconstruction error against the bicubic read
+#: ~1.5%, inside the 2% bar); H2S from `prior.counts_cloud`'s own exact
+#: marginal-ladder-cell-mass dot product (`Z_H2S = EPS_H2S`); YSO is 1
+#: by construction. `log10 B` on GAL's own STORED grid (`gal_log10_s_
+#: grid`, not resampled), since that is where the selection read is
+#: itself exact only at those points.
 _Z_QUAD_NA = 48
-_Z_QUAD_NB = 64
 _Z_QUAD_SIGMAS = 6.0
 _Z_QUAD_A_FLOOR_FRAC = 1.0e-3
 
@@ -878,109 +971,62 @@ _Z_QUAD_ARRAYS_ALIVE = 128
 _Z_QUAD_CHUNK_POINTS = _Z_QUAD_MEM_BUDGET_BYTES // (_Z_QUAD_ARRAYS_ALIVE * 8)
 
 
-def _z_nb(prior, cls):
-    """The class's own `log10 B` axis length for `_z_by_quadrature`
-    (`_Z_QUAD_NB` for STAR/AGB/PAHC, the stored grid's own size for
-    GAL/H2S) -- needed before the read to size the source chunk."""
-    if cls in FAMILY_CLASSES:
-        return _Z_QUAD_NB
-    return prior.gal_log10_s_grid.size if cls == "gal" else prior.h2s_log10_sigma_grid.size
-
-
 def _z_by_quadrature(prior, cls, rows, stage=None):
-    """`(n,)`: `Z[s]`, exact where a closed form exists (YSO), a
-    kernel-exact-cell-mass product quadrature otherwise (module note
-    above `_Z_QUAD_NA`), chunked over SOURCES at `_Z_QUAD_CHUNK_POINTS`
-    points/chunk (module note above `_Z_QUAD_MEM_BUDGET_BYTES`) so the
-    read's own working set stays bounded regardless of the batch's own
-    size. Reads `prior`'s own `shape`/`selection` objects -- the exact
-    arithmetic `log_density` composes -- so a source whose selection is
-    genuinely zero everywhere (no object of this class could be
-    catalogued at its own limits) returns `Z = 0`, the correct statement
-    that the class is impossible on this sightline, not a defect (owner
-    ruling, 2026-09-06). `stage`, a `progress.Stage` the caller already
-    opened (`prior.table`'s own build, owner report 2026-09-06: this
-    routine ran 285 s on NGC 7129 with no progress line at all), gets
-    one `.tick()` per source chunk; `None` (the default, every other
-    caller -- `check`'s own timing probe) prints nothing."""
+    """`(n,)`: `Z[s]` for GAL only (module note above `_Z_QUAD_NA`;
+    every other class's caller reads `Z` off the table instead -- see
+    `prior.table._recompute_z_columns`), chunked over SOURCES at
+    `_Z_QUAD_CHUNK_POINTS` points/chunk (module note above `_Z_QUAD_
+    MEM_BUDGET_BYTES`) so the read's own working set stays bounded
+    regardless of the batch's own size. Reads `prior`'s own `shape`/
+    `selection` objects -- the exact arithmetic `log_density` composes
+    -- so a source whose selection is genuinely zero everywhere (no
+    galaxy could be catalogued at its own limits) returns `Z = 0`, the
+    correct statement that the class is impossible on this sightline,
+    not a defect (owner ruling, 2026-09-06). `stage`, a `progress.Stage`
+    the caller already opened, gets one `.tick()` per source chunk;
+    `None` (the default) prints nothing."""
+    assert cls == "gal", "_z_by_quadrature: GAL only (owner ruling, 2026-09-06, step C2d)"
     n = rows.shape[0]
-    if cls == "yso":
-        # `shape` is `marginal_exact` (integrates to 1 over `a` by
-        # construction: the sightline's own embedding-cell sum is a
-        # normalised mixture) times a Gaussian in `log10 B` (integrates
-        # to 1 by construction); `selection` is 1 everywhere. `Z = 1`
-        # exactly -- no table, no quadrature, no grid (owner ruling,
-        # 2026-09-06: do not quadrature what is already exact).
-        if stage is not None:
-            stage.tick(n, n, "sources")
-        return np.ones(n, dtype=np.float64)
-
-    points_per_source = _Z_QUAD_NA * _z_nb(prior, cls)
-    chunk_n = max(1, _Z_QUAD_CHUNK_POINTS // points_per_source)
+    nb = prior.gal_log10_s_grid.size
+    chunk_n = max(1, _Z_QUAD_CHUNK_POINTS // (_Z_QUAD_NA * nb))
     if n > chunk_n:
         out = np.empty(n, dtype=np.float64)
         for start in range(0, n, chunk_n):
             stop = min(start + chunk_n, n)
-            out[start:stop] = _z_by_quadrature_chunk(prior, cls, rows[start:stop])
+            out[start:stop] = _z_by_quadrature_chunk(prior, rows[start:stop])
             if stage is not None:
                 stage.tick(stop, n, "sources")
         return out
-    out = _z_by_quadrature_chunk(prior, cls, rows)
+    out = _z_by_quadrature_chunk(prior, rows)
     if stage is not None:
         stage.tick(n, n, "sources")
     return out
 
 
-def _z_by_quadrature_chunk(prior, cls, rows):
-    """`(n,)`: one chunk's worth of `_z_by_quadrature`'s own GAL/H2S/
-    star-family arithmetic -- see that function for the method. Only
-    GAL uses the kernel's exact per-cell mass; every other class here
-    uses a plain trapezoid on `_Z_QUAD_NA` log-spaced `a` points."""
+def _z_by_quadrature_chunk(prior, rows):
+    """`(n,)`: one chunk's worth of GAL's own exact-cell-mass `Z`
+    quadrature -- see `_z_by_quadrature` for the method."""
     n = rows.shape[0]
-    obj = prior._classes[cls]
+    obj = prior._classes["gal"]
     a_col = prior.table["A_COL_K"][rows]
     sigma_col = prior.table["A_COL_SIG_K"][rows]
     map_class_code = prior.table["A_COL_PROVENANCE"][rows]
     a_floor = _Z_QUAD_A_FLOOR_FRAC * a_col
 
-    if cls in FAMILY_CLASSES:
-        shape_obj = prior.shapes[cls]
-        kernel_obj = shape_obj.kern
-        mu, sigma = kernel_obj.params(a_col, sigma_col, map_class_code)
-        a_hi = a_col * 10.0 ** (mu + _Z_QUAD_SIGMAS * sigma)
-        b_cell = float(np.mean(np.diff(shape_obj.b_edges)))
-        b_row = np.linspace(shape_obj.b_edges[0] - 6 * b_cell,
-                            shape_obj.b_edges[-1] + 6 * b_cell, _Z_QUAD_NB)
-        mi_grid = None
-    else:  # gal, h2s
-        kernel_obj = prior.yso_shape.kernel
-        mu, sigma = kernel_obj.params(a_col, sigma_col, map_class_code)
-        a_hi = a_col * 10.0 ** (mu + _Z_QUAD_SIGMAS * sigma)
-        if cls == "gal":
-            s_grid, fref0 = prior.gal_log10_s_grid, prior.gal_fref[0]
-        else:
-            s_grid, fref0 = prior.h2s_log10_sigma_grid, prior.h2s_fref[0]
-        b_row = s_grid - np.log10(fref0)  # the STORED grid, not resampled
-        mi_grid = np.zeros((n, _Z_QUAD_NA * b_row.size), dtype=np.intp)
-
+    kernel_obj = prior.yso_shape.kernel
+    mu, sigma = kernel_obj.params(a_col, sigma_col, map_class_code)
+    a_hi = a_col * 10.0 ** (mu + _Z_QUAD_SIGMAS * sigma)
+    b_row = prior.gal_log10_s_grid - np.log10(prior.gal_fref[0])  # the STORED grid
     nb = b_row.size
+    mi_grid = np.zeros((n, _Z_QUAD_NA * nb), dtype=np.intp)
     b_grid = np.broadcast_to(b_row, (n, nb))
 
-    if cls == "gal":
-        # GAL only: the kernel's exact per-cell mass (module note above
-        # `_Z_QUAD_NA`) -- shape factors perfectly into kernel_pdf(a) .
-        # phi_density(b), so the kernel's own cell mass carries the `a`
-        # integral exactly and only the remaining factor is sampled at
-        # the cell centre.
-        a_grid, mass, pdf_center = _a_cell_mass(
-            kernel_obj, a_col, sigma_col, map_class_code, a_floor, a_hi, _Z_QUAD_NA)
-    else:
-        # STAR/AGB/PAHC/H2S: plain trapezoid -- the kernel mixture is
-        # not this class's true `a` density, so weighting by its cell
-        # mass is an approximation that measurably regressed the
-        # identity relative to sampling the read directly (module note).
-        a_grid = _quad_grid_log(a_floor, a_hi, _Z_QUAD_NA)
-        mass = pdf_center = None
+    # the kernel's exact per-cell mass (module note above `_Z_QUAD_NA`)
+    # -- shape factors perfectly into kernel_pdf(a) . phi_density(b), so
+    # the kernel's own cell mass carries the `a` integral exactly and
+    # only the remaining factor is sampled at the cell centre.
+    a_grid, mass, pdf_center = _a_cell_mass(
+        kernel_obj, a_col, sigma_col, map_class_code, a_floor, a_hi, _Z_QUAD_NA)
 
     a_full = np.repeat(a_grid, nb, axis=1)
     b_full = np.tile(b_grid, (1, _Z_QUAD_NA))
@@ -993,11 +1039,9 @@ def _z_by_quadrature_chunk(prior, cls, rows):
     b_grid_3d = np.broadcast_to(b_grid[:, None, :], dens.shape)
     inner = np.trapz(dens, x=b_grid_3d, axis=2)  # (n, NA): trapz over log10 B only
 
-    if cls == "gal":
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ratio = np.where(pdf_center > 0.0, inner / pdf_center, 0.0)
-        return np.sum(mass * ratio, axis=1)
-    return np.trapz(inner, x=a_grid, axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(pdf_center > 0.0, inner / pdf_center, 0.0)
+    return np.sum(mass * ratio, axis=1)
 
 
 class SourcePrior(object):
@@ -1411,18 +1455,18 @@ def check(config, region, n_sources=50, seed=0):
     rows = rng.choice(prior.n_source, size=n, replace=False)
     prior.prepare(rows)
 
-    # `Z`'s own cost, explicit and per class (ms/source): `Z` is now a
-    # table column (`prior.table`, C2a), computed once per class per
-    # source at BUILD time, not here -- this re-times `_z_by_quadrature`
-    # directly, on this run's own sources, purely to report the number
-    # `prior.table`'s build pays once per survey source.
+    # `Z`'s own cost: GAL ONLY (owner ruling, 2026-09-06, step C2d) is
+    # still computed live, by `prior.table`'s build (`_recompute_z_
+    # columns`), not here -- this re-times `_z_by_quadrature` directly,
+    # on this run's own sources, purely to report the number the table
+    # build pays once per survey source. Every other class's `Z` is a
+    # plain table column now (`prior.counts_star_family`/`prior.
+    # counts_cloud`'s own dot product), nothing to time here.
     z_cost_ms = {}
-    for cls in CLASSES:
-        if cls not in prior._classes:
-            continue
+    if "gal" in prior._classes:
         t0 = time.time()
-        _z_by_quadrature(prior, cls, rows)
-        z_cost_ms[cls] = (time.time() - t0) / rows.size * 1000.0
+        _z_by_quadrature(prior, "gal", rows)
+        z_cost_ms["gal"] = (time.time() - t0) / rows.size * 1000.0
 
     devs = {cls: [] for cls in CLASSES}
     n_zero = {cls: 0 for cls in CLASSES}
