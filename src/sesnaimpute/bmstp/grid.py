@@ -14,6 +14,7 @@ the fit's own uncertainty in `log10 B_hat`.
 """
 
 import numpy as np
+from scipy.linalg import toeplitz
 from scipy.ndimage import gaussian_filter1d
 from scipy.special import erf
 
@@ -84,22 +85,32 @@ def _shift_kernel(mu, sigma):
     2): `K[i, j]` is the mass landing in destination cell `i` of a point
     at source cell `j`'s center shifted by `mu`, from the shifted
     Gaussian's CDF differenced over cell `i`'s edges -- exact for any
-    real-valued `mu`, not restricted to a whole number of cells."""
+    real-valued `mu`, not restricted to a whole number of cells. On the
+    uniform grid `K[i, j]` depends only on the offset `i - j`, so it is
+    Toeplitz: the CDF is evaluated once along the single offset axis
+    (`2 * _N_X` points, not the full `(129, 128)` edge-by-center table)
+    and the matrix is formed by `scipy.linalg.toeplitz`."""
     sigma_eff = max(float(sigma), _X_CELL_WIDTH)
-    centers = _X_CENTERS + mu
-    z = (LOG10_X_EDGES[:, np.newaxis] - centers[np.newaxis, :]) / (sigma_eff * _SQRT2)
-    cdf = 0.5 * (1.0 + erf(z))
-    return cdf[1:, :] - cdf[:-1, :]
+    c = -0.5 * _X_CELL_WIDTH - mu
+    d = np.arange(-(_N_X - 1), _N_X + 1)
+    cdf = 0.5 * (1.0 + erf((c + d * _X_CELL_WIDTH) / (sigma_eff * _SQRT2)))
+    offsets = cdf[1:] - cdf[:-1]  # offsets[m] = K[i, j] at i - j = m - (_N_X - 1)
+    mid = _N_X - 1
+    col = offsets[mid:mid + _N_X]  # i - j = 0 .. _N_X - 1
+    row = offsets[mid::-1]  # i - j = 0, -1, .. -(_N_X - 1)
+    return toeplitz(col, row)
 
 
 def blur(H, w, mu1, sig1, mu2, sig2):
     """`(H_s, mass_lost)`: one source's column kernel applied along the
-    `log10 x` axis (sec. 2, 4.2), `H_s = w * S(H; mu1, sig1) + (1 - w) *
-    S(H; mu2, sig2)`, `S` the shift-and-smooth of `_shift_kernel` as a
-    banded matrix product `K @ H`. `mass_lost` is the mass the shift
-    carries past the `log10 x` edges (`H.sum() - H_s.sum()`)."""
+    `log10 x` axis (sec. 2, 4.2), `H_s = (w * K1 + (1 - w) * K2) @ H`,
+    `K1`, `K2` the shift-and-smooth operators of `_shift_kernel` for the
+    mixture's two components, combined before the one matrix product.
+    `mass_lost` is the mass the shift carries past the `log10 x` edges
+    (`H.sum() - H_s.sum()`)."""
     K1 = _shift_kernel(mu1, sig1)
     K2 = _shift_kernel(mu2, sig2)
-    H_s = w * (K1 @ H) + (1.0 - w) * (K2 @ H)
+    K = w * K1 + (1.0 - w) * K2
+    H_s = K @ H
     mass_lost = float(H.sum() - H_s.sum())
     return H_s, mass_lost
