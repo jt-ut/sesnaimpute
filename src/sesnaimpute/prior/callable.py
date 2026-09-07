@@ -291,6 +291,64 @@ def _marginal_exact_compiled(yso_shape, a, sl_rows, a_col, sigma_col, map_class,
     return out
 
 
+#: The per-source extinction-marginal curve `prepare` builds once per
+#: batch (owner ruling, 2026-09-06, step C2c): the diagnosis was the
+#: erf count, and the fix follows from the fitter's own design ("the
+#: prior is read once before the loop") -- `marginal_exact` is a
+#: function of `a` ALONE per source (`YsoShape.marginal_exact` never
+#: depends on `log10 B`), so it need only be evaluated once per source,
+#: not once per (source, template) pair. `_MARGINAL_CURVE_N_LOG`
+#: log-spaced points from `1e-3 A_s` to `A_s` itself, then
+#: `_MARGINAL_CURVE_N_LIN` MORE points linear from `A_s` to the
+#: kernel's own `_MARGINAL_CURVE_SIGMAS`-sigma tail (the same generous
+#: bound `_a_cell_mass`/`_extinction_grid` use elsewhere) -- 400 points,
+#: `64` erf calls each (32 cells x 2 components) = ~26k erf calls per
+#: source, against ~200,000 templates x 64 calls direct: ~500x fewer.
+#: Every per-template read is then a linear interpolation on this
+#: curve, not a fresh closed-form evaluation.
+_MARGINAL_CURVE_N_LOG = 200
+_MARGINAL_CURVE_N_LIN = 200
+_MARGINAL_CURVE_N = _MARGINAL_CURVE_N_LOG + _MARGINAL_CURVE_N_LIN
+_MARGINAL_CURVE_A_FLOOR_FRAC = 1.0e-3
+_MARGINAL_CURVE_SIGMAS = 6.0
+
+
+def _marginal_curve_grid(a_col, a_hi):
+    """`(n, _MARGINAL_CURVE_N)`: one source's own `a` grid for the
+    extinction-marginal curve (module note above `_MARGINAL_CURVE_N`)."""
+    a_floor = _MARGINAL_CURVE_A_FLOOR_FRAC * a_col
+    log_part = _quad_grid_log(a_floor, a_col, _MARGINAL_CURVE_N_LOG)
+    t = np.linspace(0.0, 1.0, _MARGINAL_CURVE_N_LIN + 1)[1:]
+    lin_part = a_col[:, None] + t[None, :] * (a_hi - a_col)[:, None]
+    return np.concatenate([log_part, lin_part], axis=1)
+
+
+def _interp_marginal_curve(grid, curve, a_query):
+    """`(n,)`: linear interpolation of `curve[i]` (already gathered to
+    one row per query point, `(n, _MARGINAL_CURVE_N)`) at `a_query[i]`
+    on `grid[i]` -- held at the nearest edge value outside the grid's
+    own range. Plain numpy (owner ruling, 2026-09-06, step C2c: a
+    compiled per-point loop over this same arithmetic measured SLOWER
+    than numpy's own vectorised bracket-and-blend, `_interp_eps_2d`'s
+    own finding), chunked at `_INTERP_CHUNK` so the per-block gather
+    never scales with the caller's own batch."""
+    n = a_query.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    n_g = grid.shape[1]
+    for start in range(0, n, _INTERP_CHUNK):
+        stop = min(start + _INTERP_CHUNK, n)
+        g = grid[start:stop]
+        c = curve[start:stop]
+        a = np.clip(a_query[start:stop], g[:, 0], g[:, -1])
+        idx = np.clip(np.sum(a[:, None] >= g, axis=1) - 1, 0, n_g - 2)
+        rows_i = np.arange(g.shape[0])
+        g_lo, g_hi = g[rows_i, idx], g[rows_i, idx + 1]
+        c_lo, c_hi = c[rows_i, idx], c[rows_i, idx + 1]
+        t = np.where(g_hi > g_lo, (a - g_lo) / (g_hi - g_lo), 0.0)
+        out[start:stop] = c_lo + t * (c_hi - c_lo)
+    return out
+
+
 def _read_zp_sigma_k(path, n):
     """`ZP_SIGMA_K` (mag) per source -- the Herschel field zero point's
     own uncertainty, 0 for a Planck-arm source (owner, 2026-09-06) -- if
@@ -319,18 +377,36 @@ def _interp_eps_2d(eps_batch, x_ladder, grid, x_query, val_query):
     nearest edge value outside their own range (module docstring's "end
     bins held" convention). Processed in `_INTERP_CHUNK` blocks
     (`CODING_RULES.md` 10a) so the per-block fancy-index gather never
-    scales with the caller's own batch."""
+    scales with the caller's own batch. Plain numpy (owner ruling,
+    2026-09-06, step C2c): a compiled per-point loop over this same
+    arithmetic was measured SLOWER than this vectorised version (0.76
+    vs 0.36 us/point) -- bilinear interpolation is simple enough that
+    numpy's own vectorised clip/searchsorted/fancy-index already beats
+    a numba dispatch per point at realistic batch sizes."""
     n = x_query.shape[0]
     out = np.empty(n, dtype=np.float64)
-    x_ladder64 = np.asarray(x_ladder, dtype=np.float64)
-    grid64 = np.asarray(grid, dtype=np.float64)
+    n_x, n_v = x_ladder.size, grid.size
     for start in range(0, n, _INTERP_CHUNK):
         stop = min(start + _INTERP_CHUNK, n)
-        eps = np.ascontiguousarray(eps_batch[start:stop], dtype=np.float64)
-        out[start:stop] = _interp_eps_2d_numba(
-            eps, x_ladder64, grid64,
-            np.ascontiguousarray(x_query[start:stop], dtype=np.float64),
-            np.ascontiguousarray(val_query[start:stop], dtype=np.float64))
+        eps = eps_batch[start:stop]
+        x = np.clip(x_query[start:stop], x_ladder[0], x_ladder[-1])
+        ix = np.clip(np.searchsorted(x_ladder, x) - 1, 0, n_x - 2)
+        x_lo, x_hi = x_ladder[ix], x_ladder[ix + 1]
+        tx = np.where(x_hi > x_lo, (x - x_lo) / (x_hi - x_lo), 0.0)
+
+        v = np.clip(val_query[start:stop], grid[0], grid[-1])
+        iv = np.clip(np.searchsorted(grid, v) - 1, 0, n_v - 2)
+        v_lo, v_hi = grid[iv], grid[iv + 1]
+        tv = np.where(v_hi > v_lo, (v - v_lo) / (v_hi - v_lo), 0.0)
+
+        rows_i = np.arange(eps.shape[0])
+        e00 = eps[rows_i, ix, iv]
+        e01 = eps[rows_i, ix, iv + 1]
+        e10 = eps[rows_i, ix + 1, iv]
+        e11 = eps[rows_i, ix + 1, iv + 1]
+        e_lo = e00 + tv * (e01 - e00)
+        e_hi = e10 + tv * (e11 - e10)
+        out[start:stop] = e_lo + tx * (e_hi - e_lo)
     return out
 
 
@@ -360,26 +436,6 @@ def _bracket(grid, x):
     span = grid[lo + 1] - grid[lo]
     t = (xc - grid[lo]) / span if span > 0.0 else 0.0
     return lo, t
-
-
-@numba.njit(cache=True, fastmath=True)
-def _interp_eps_2d_numba(eps_batch, x_ladder, grid, x_query, val_query):
-    """`(n,)`: `_interp_eps_2d`'s own bilinear read, one compiled loop
-    (the "end bins held" convention is `_bracket`'s own clamp) instead
-    of the fancy-indexed `(chunk, ...)` broadcast."""
-    n = x_query.shape[0]
-    out = np.empty(n, dtype=np.float64)
-    for i in range(n):
-        ix, tx = _bracket(x_ladder, x_query[i])
-        iv, tv = _bracket(grid, val_query[i])
-        e00 = eps_batch[i, ix, iv]
-        e01 = eps_batch[i, ix, iv + 1]
-        e10 = eps_batch[i, ix + 1, iv]
-        e11 = eps_batch[i, ix + 1, iv + 1]
-        e_lo = e00 + tv * (e01 - e00)
-        e_hi = e10 + tv * (e11 - e10)
-        out[i] = e_lo + tx * (e_hi - e_lo)
-    return out
 
 
 #: The hybrid extinction law's own ramp domain (`selection.LAW_RAMP_LO`/
@@ -678,13 +734,10 @@ class _YsoClass(object):
         shp = a.shape
         rows_f, a_f, b_f = rows.ravel(), a.ravel(), log10_b.ravel()
 
-        a_col = p.table["A_COL_K"][rows_f]
-        sigma_col = p.table["A_COL_SIG_K"][rows_f]
-        sl_rows = p.table["HPX256_ROW"][rows_f]
-        map_class = p.table["A_COL_PROVENANCE"][rows_f]
-        zp_sigma_k = p._zp_sigma_k[rows_f]
-        p_a = _marginal_exact_compiled(p.yso_shape, a_f, sl_rows, a_col, sigma_col, map_class,
-                                      zp_sigma_k=zp_sigma_k)
+        local = p._prep_local_index(rows_f)
+        grid_l = p._prep_marginal_grid[local]
+        curve_l = p._prep_marginal_curve[local]
+        p_a = _interp_marginal_curve(grid_l, curve_l, a_f)
         p_a = np.where(a_f > 0.0, p_a, 0.0)
 
         mean_b = p.table["RIDGE_INTERCEPT"][rows_f] + p.table["RIDGE_SLOPE"][rows_f] * a_f
@@ -713,18 +766,15 @@ class _H2sClass(object):
         p = self._prior
         shp = a.shape
         rows_f, a_f, b_f = rows.ravel(), a.ravel(), log10_b.ravel()
-        mi_f = model_index.ravel()
         valid = a_f > 0.0
 
-        a_col = p.table["A_COL_K"][rows_f]
-        sigma_col = p.table["A_COL_SIG_K"][rows_f]
-        sl_rows = p.table["HPX256_ROW"][rows_f]
-        map_class = p.table["A_COL_PROVENANCE"][rows_f]
-        zp_sigma_k = p._zp_sigma_k[rows_f]
-        p_a = _marginal_exact_compiled(p.yso_shape, a_f, sl_rows, a_col, sigma_col, map_class,
-                                      zp_sigma_k=zp_sigma_k)
+        local = p._prep_local_index(rows_f)
+        grid_l = p._prep_marginal_grid[local]
+        curve_l = p._prep_marginal_curve[local]
+        p_a = _interp_marginal_curve(grid_l, curve_l, a_f)
         p_a = np.where(valid, p_a, 0.0)
 
+        mi_f = model_index.ravel()
         log10_sigma = b_f + np.log10(p.h2s_fref[mi_f])
         z_score = (log10_sigma - p.h2s_logsig_mean) / p.h2s_logsig_std
         p_sigma = _INV_SQRT_2PI / p.h2s_logsig_std * np.exp(-0.5 * z_score ** 2)
@@ -837,7 +887,7 @@ def _z_nb(prior, cls):
     return prior.gal_log10_s_grid.size if cls == "gal" else prior.h2s_log10_sigma_grid.size
 
 
-def _z_by_quadrature(prior, cls, rows):
+def _z_by_quadrature(prior, cls, rows, stage=None):
     """`(n,)`: `Z[s]`, exact where a closed form exists (YSO), a
     kernel-exact-cell-mass product quadrature otherwise (module note
     above `_Z_QUAD_NA`), chunked over SOURCES at `_Z_QUAD_CHUNK_POINTS`
@@ -848,7 +898,11 @@ def _z_by_quadrature(prior, cls, rows):
     genuinely zero everywhere (no object of this class could be
     catalogued at its own limits) returns `Z = 0`, the correct statement
     that the class is impossible on this sightline, not a defect (owner
-    ruling, 2026-09-06)."""
+    ruling, 2026-09-06). `stage`, a `progress.Stage` the caller already
+    opened (`prior.table`'s own build, owner report 2026-09-06: this
+    routine ran 285 s on NGC 7129 with no progress line at all), gets
+    one `.tick()` per source chunk; `None` (the default, every other
+    caller -- `check`'s own timing probe) prints nothing."""
     n = rows.shape[0]
     if cls == "yso":
         # `shape` is `marginal_exact` (integrates to 1 over `a` by
@@ -857,6 +911,8 @@ def _z_by_quadrature(prior, cls, rows):
         # to 1 by construction); `selection` is 1 everywhere. `Z = 1`
         # exactly -- no table, no quadrature, no grid (owner ruling,
         # 2026-09-06: do not quadrature what is already exact).
+        if stage is not None:
+            stage.tick(n, n, "sources")
         return np.ones(n, dtype=np.float64)
 
     points_per_source = _Z_QUAD_NA * _z_nb(prior, cls)
@@ -866,8 +922,13 @@ def _z_by_quadrature(prior, cls, rows):
         for start in range(0, n, chunk_n):
             stop = min(start + chunk_n, n)
             out[start:stop] = _z_by_quadrature_chunk(prior, cls, rows[start:stop])
+            if stage is not None:
+                stage.tick(stop, n, "sources")
         return out
-    return _z_by_quadrature_chunk(prior, cls, rows)
+    out = _z_by_quadrature_chunk(prior, cls, rows)
+    if stage is not None:
+        stage.tick(n, n, "sources")
+    return out
 
 
 def _z_by_quadrature_chunk(prior, cls, rows):
@@ -1062,6 +1123,8 @@ class SourcePrior(object):
         self._prep_rows = None
         self._prep_star_eps = None
         self._prep_h2s_eps = None
+        self._prep_marginal_grid = None
+        self._prep_marginal_curve = None
 
         # -- one object per class, the shape/selection protocol (owner
         # ruling, 2026-09-06): built only for the classes this instance
@@ -1086,7 +1149,16 @@ class SourcePrior(object):
         batch's own eight limits (`F_LIM_50_MJY`, already resident on
         the table) and query extinctions (`h2s_x_ladder . A_s`). GAL
         needs no gather at all: its compiled kernel reads the source's
-        own four IRAC limits straight off the region table."""
+        own four IRAC limits straight off the region table.
+
+        Also builds YSO/H2S's own extinction-marginal CURVE, once per
+        source (module note above `_MARGINAL_CURVE_N`, owner ruling,
+        2026-09-06, step C2c): `marginal_exact` depends on `a` alone, so
+        it is evaluated once per source on a fixed 400-point grid here,
+        and every per-template `log_density` read (`_YsoClass`/
+        `_H2sClass`) is a linear interpolation on it instead of a fresh
+        closed-form evaluation -- ~500x fewer erf calls than evaluating
+        directly at every template."""
         rows = np.asarray(rows, dtype=np.intp)
         uniq_rows = np.unique(rows)
 
@@ -1103,9 +1175,32 @@ class SourcePrior(object):
             h2s_eps = h2s_module.source_selection(
                 self.config, self.region, log10_lim_8, a_query).astype(np.float32)
 
+        marginal_grid = marginal_curve = None
+        if "yso" in self._classes or "h2s" in self._classes:
+            a_col_u = self.table["A_COL_K"][uniq_rows]
+            sigma_col_u = self.table["A_COL_SIG_K"][uniq_rows]
+            sl_rows_u = self.table["HPX256_ROW"][uniq_rows]
+            map_class_u = self.table["A_COL_PROVENANCE"][uniq_rows]
+            zp_u = self._zp_sigma_k[uniq_rows]
+            mu_b, sigma_b = self.yso_shape.kernel.params(
+                a_col_u, sigma_col_u, map_class_u, zp_sigma_k=zp_u)
+            a_hi_u = a_col_u * 10.0 ** (mu_b + _MARGINAL_CURVE_SIGMAS * sigma_b)
+            marginal_grid = _marginal_curve_grid(a_col_u, a_hi_u)
+            n_u = uniq_rows.size
+
+            def _rep(arr):
+                return np.repeat(arr, _MARGINAL_CURVE_N)
+
+            curve_flat = _marginal_exact_compiled(
+                self.yso_shape, marginal_grid.ravel(), _rep(sl_rows_u), _rep(a_col_u),
+                _rep(sigma_col_u), _rep(map_class_u), zp_sigma_k=_rep(zp_u))
+            marginal_curve = curve_flat.reshape(n_u, _MARGINAL_CURVE_N)
+
         self._prep_rows = uniq_rows
         self._prep_star_eps = star_eps
         self._prep_h2s_eps = h2s_eps
+        self._prep_marginal_grid = marginal_grid
+        self._prep_marginal_curve = marginal_curve
 
     def _prep_local_index(self, rows):
         """`(n,)`: `rows`'s own position in the last `prepare`d batch --
