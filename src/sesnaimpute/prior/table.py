@@ -213,6 +213,45 @@ def _write(config, region, name, f_lim_50_mjy, rs, adopted, star, cloud, region_
     return out_path
 
 
+def _recompute_z_columns(config, region, out_path, n_sources):
+    """Overwrites `Z_STAR` ... `Z_H2S` in the just-written table with
+    `prior.callable._z_by_quadrature`'s own value, called once per class
+    for every source in the region (owner ruling, 2026-09-06, step
+    C2a): `Z` is the normaliser of the density the fitter's callable
+    actually reads, so it is computed by that SAME routine, here, once
+    per survey source, rather than left as the counts stage's own
+    smoothed-density normaliser or recomputed per fitter batch. A local
+    import of `prior.callable` (not a module-level one): `callable`
+    itself imports this module to read the table it is completing, so a
+    top-level import here would be circular -- by the time this
+    function actually runs the table this class needs already exists
+    on disk (`_write`, just above in `_build_one`), because `SourcePrior.
+    __init__` reads it. `_z_by_quadrature` already chunks over sources
+    internally (`CODING_RULES.md` 10a), so the whole region's source
+    count is passed in one call per class. Returns `{cls: Z array}` so
+    the caller's re-read check compares against the SAME values written,
+    not a second recomputation."""
+    from sesnaimpute.prior import callable as callable_module
+
+    all_rows = np.arange(n_sources, dtype=np.intp)
+    z_by_class = {}
+    for cls in callable_module.CLASSES:
+        prior = callable_module.SourcePrior(config, region, cls)
+        # STAR/AGB/PAHC/H2S's own `selection` gathers from `prepare`'s
+        # batch tabulation (their EPS read); this is the whole region in
+        # one `prepare` call, not `_z_by_quadrature`'s own internal
+        # source-chunking (that only bounds the QUERY-point working set,
+        # not this EPS gather, which is small survey-wide -- module note
+        # on `prepare`).
+        prior.prepare(all_rows)
+        z_by_class[cls] = callable_module._z_by_quadrature(
+            prior, cls, all_rows).astype(np.float32)
+    with h5py.File(out_path, "r+") as f:
+        for cls in callable_module.CLASSES:
+            f["Z_%s" % cls.upper()][...] = z_by_class[cls]
+    return z_by_class
+
+
 def read(config, region):
     """Every dataset and per-region attribute of the region's prior table
     (IMPLEMENTATION.md section 5), as a plain dict keyed by dataset name
@@ -282,15 +321,21 @@ def _fixed_seed_rows(n_sources):
     return np.sort(np.random.RandomState(CHECK_SEED).choice(n_sources, size=n, replace=False))
 
 
-def _reread_check(region, out, name, f_lim_50_mjy, rs, adopted, star, cloud, level_factors, rows):
+def _reread_check(region, out, name, f_lim_50_mjy, rs, adopted, star, cloud, level_factors, rows,
+                  z_by_class):
     """Every column of the table re-read from its own source array at a
     fixed-seed subset of rows and compared against what the build wrote
     (brief item 2's check for this stage: the module docstring says the
     table does no science, only a join, so every column must reproduce
     its source exactly). The six counts are compared against the source
     value times the region's own `F_REGION`; every other column is the
-    source value through the same dtype cast `_write` applies. Returns
-    the worst absolute difference across every numeric column (bar 0)."""
+    source value through the same dtype cast `_write` applies. `Z_*` is
+    the one exception (step C2a): its source is no longer the counts
+    stage's own column but `_recompute_z_columns`'s own `z_by_class`, the
+    SAME array just written, not a second recomputation -- comparing the
+    table against a fresh quadrature call would only re-check floating
+    determinism, not the join. Returns the worst absolute difference
+    across every numeric column (bar 0)."""
     factor = level_factors["F_REGION"]
     expected = {
         "A_COL_K": adopted["A_COL_K"].astype(np.float32),
@@ -308,10 +353,8 @@ def _reread_check(region, out, name, f_lim_50_mjy, rs, adopted, star, cloud, lev
         expected[key] = (star[key].astype(np.float64) * factor).astype(np.float32)
     for key in ("N_YSO", "N_H2S"):
         expected[key] = (cloud[key].astype(np.float64) * factor).astype(np.float32)
-    for key in ("Z_STAR", "Z_AGB", "Z_PAHC", "Z_GAL"):
-        expected[key] = star[key].astype(np.float32)
-    for key in ("Z_YSO", "Z_H2S"):
-        expected[key] = cloud[key].astype(np.float32)
+    for key in NORMALISER_COLUMNS:
+        expected[key] = z_by_class[key[2:].lower()]
     for key in RIDGE_COLUMNS + YSO_DIAGNOSTIC_COLUMNS:
         expected[key] = cloud[key].astype(np.float32)
 
@@ -508,6 +551,17 @@ def _build_one(config, region):
 
     out_path = _write(config, region, name, f_lim_50_mjy, rs, adopted, star, cloud,
                       region_attrs, level_factors)
+
+    # `Z_STAR` ... `Z_H2S`: overwritten here with `prior.callable`'s own
+    # `_z_by_quadrature`, once per class for every source in the region
+    # (owner ruling, 2026-09-06, step C2a) -- `_write` above still puts
+    # the counts stage's own Z there first only because the column has
+    # to exist (and `SourcePrior.__init__`, which this needs, reads the
+    # table) before it can be overwritten in place.
+    t_z0 = time.time()
+    z_by_class = _recompute_z_columns(config, region, out_path, n_sources)
+    wall_z_s = time.time() - t_z0
+
     out = read(config, region)
     wall_build_s = time.time() - t0
 
@@ -515,9 +569,12 @@ def _build_one(config, region):
     _assert_class_probabilities_identity(config, region, out, level_factors, n_sources)
 
     rows = _fixed_seed_rows(n_sources)
-    worst = _reread_check(region, out, name, f_lim_50_mjy, rs, adopted, star, cloud, level_factors, rows)
+    worst = _reread_check(region, out, name, f_lim_50_mjy, rs, adopted, star, cloud, level_factors,
+                          rows, z_by_class)
     print("prior.table: %s: re-read check, %d fixed-seed rows, every column: worst abs diff=%.3g (bar 0)"
           % (region, rows.size, worst), flush=True)
+    print("prior.table: %s: Z recompute (prior.callable._z_by_quadrature, %d sources x 6 classes): "
+         "%.1fs" % (region, n_sources, wall_z_s), flush=True)
 
     agb_ratio = _agb_photospheric_ratio(config, region, adopted, star, n_sources)
     print("prior.table: %s: AGB photospheric-selection lower bound: N_AGB(photosphere)/N_AGB(dusty) = %.4f"
