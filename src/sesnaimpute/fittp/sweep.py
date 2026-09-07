@@ -28,6 +28,7 @@ file's read at join time, ever holds the whole region's P7 at once.
 """
 
 import os
+import time
 
 import h5py
 import numpy as np
@@ -53,7 +54,11 @@ CLASSES = tuple(c.code for c in definitions.CLASSES)
 #: `(n_block, n_model, 8)` arrays -- 4 float32-equivalents -- not counted
 #: by `likelihood.block_size`'s own `NONDET_BUFFERS`; passed to
 #: `block_size` as `extra_buffers` so the block's real working set stays
-#: inside `[fit] block_budget_mb` (W7 review finding 6).
+#: inside `[fit] block_budget_mb` (W7 review finding 6). W9 tried building
+#: these in float32 (the register/design column/clamped marks that feed
+#: them are already float32); the STAR sweep's own FLUX_MEAN then missed
+#: the 1e-6 relative bar against the float64 product (7.7e-6, W9 phase 2
+#: acceptance run) -- reverted, float64 kept, no speed claimed here.
 SWEEP_EXTRA_BUFFERS = 4
 
 #: The datasets every P7 part file and the joined product carry, in write
@@ -124,18 +129,25 @@ def _n_sources(config, region):
 
 
 def _block_result(config, region, cls, reader, gaia_term, template_log, subclass_idx,
-                   n_sub, width_dex, topk, start, stop):
+                   n_sub, width_dex, topk, start, stop, timing):
     """One block's own P7 rows (section 1.3): the fit, the prior read, the
     per-source Gaia term, the fold to `ln w_theta`, the evidence-weighted
     flux moments and the top-K record -- one `(n_block, n_model[, 8])`
-    working set, discarded on return.
+    working set, discarded on return. `timing` accumulates this block's
+    own wall time by stage (rule 17's per-{region, class} split).
     """
     n_model = template_log.shape[0]
+    t = time.perf_counter()
     flux, sigma, origin, ak = _catalog_block(config, region, start, stop)
     batch = likelihood.prepare(config, region, cls, start, stop, flux, sigma, origin, ak, width_dex)
+    timing["prepare"] += time.perf_counter() - t
+
+    t = time.perf_counter()
     fit = likelihood.fit(batch, template_log)
+    timing["fit"] += time.perf_counter() - t
 
     rows = np.arange(start, stop)
+    t = time.perf_counter()
     h = prior_reader.prepare(reader, rows)
     # d(log10 B)/d(a_K) from the fit's own d(SC)/d(A_V) (batch.slope_sc_av):
     # log10_B = -2*SC, a_K = ak_per_av * A_V, so d(log10_B)/d(a_K) =
@@ -144,28 +156,41 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
     ln_lambda = prior_reader.ln_prior(reader, rows, h, fit.a_hat, fit.log10_b_hat,
                                        slope_log10b_per_ak, batch.sigma_a_ak,
                                        np.arange(n_model))
+    timing["ln_prior"] += time.perf_counter() - t
 
     ln_l = -0.5 * fit.chi2_min.astype(np.float64) + fit.ln_nondet.astype(np.float64)
 
     n_block = stop - start
     model_index = np.arange(n_model)
-    ln_gamma = np.empty((n_block, n_model), dtype=np.float64)
-    a_clamped64 = fit.a_hat_clamped.astype(np.float64)
-    b_clamped64 = fit.log10_b_hat_clamped.astype(np.float64)
-    for i in range(n_block):
-        ln_gamma[i] = gaia_term.ln_gamma(start + i, model_index,
-                                          a_clamped64[i], b_clamped64[i], cls.lower())
+    # Gaia term, vectorised over the whole block at once (W9: no Python
+    # loop over sources -- CODING_RULES_BMSTP.md rule 8) -- the fit's own
+    # clamped marks are already float32 (likelihood.fit); gaia.ln_gamma
+    # upcasts internally where the astrometric algebra needs it.
+    t = time.perf_counter()
+    ln_gamma = gaia_term.ln_gamma(rows, model_index,
+                                   fit.a_hat_clamped, fit.log10_b_hat_clamped, cls.lower())
+    timing["ln_gamma"] += time.perf_counter() - t
 
     ln_w = ln_lambda.astype(np.float64) + ln_l + ln_gamma
     ln_w[batch.flagged] = -np.inf
 
-    ev_total = logsumexp(ln_w, axis=1)
-    ln_evidence = np.full((n_block, n_sub), -np.inf, dtype=np.float32)
+    # The fold: each model belongs to exactly one subclass (`_register`'s
+    # own check), so the per-subclass logsumexp values already partition
+    # every column ln w_theta touches; the region total is their own
+    # logsumexp rather than a second full (n_block, n_model) reduction
+    # over the same elements (W9 -- the two passes were the same sum,
+    # done twice).
+    t = time.perf_counter()
+    ln_evidence64 = np.full((n_block, n_sub), -np.inf, dtype=np.float64)
     for k in range(n_sub):
         mask = subclass_idx == k
         if mask.any():
-            ln_evidence[:, k] = logsumexp(ln_w[:, mask], axis=1).astype(np.float32)
+            ln_evidence64[:, k] = logsumexp(ln_w[:, mask], axis=1)
+    ln_evidence = ln_evidence64.astype(np.float32)
+    ev_total = logsumexp(ln_evidence64, axis=1)
+    timing["fold"] += time.perf_counter() - t
 
+    t = time.perf_counter()
     with np.errstate(invalid="ignore"):
         p_theta = np.exp(ln_w - ev_total[:, None])
     p_theta = np.where(np.isfinite(p_theta), p_theta, 0.0)
@@ -175,16 +200,26 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
     # from the reported a_K mark (fit.a_hat_clamped = A_V_clamped *
     # ak_per_av, likelihood.fit's own docstring) -- algebraically the
     # same log10-flux likelihood.fit's own non-detection term evaluates.
+    # float64 here (W9 phase 2: a float32 version of this exact expression
+    # measured 7.7e-6 relative on FLUX_MEAN against this float64 form, over
+    # the 1e-6 bar, so the float64 temporary is kept -- not the redundant
+    # pass the brief was aimed at).
+    a_clamped64 = fit.a_hat_clamped.astype(np.float64)
+    b_clamped64 = fit.log10_b_hat_clamped.astype(np.float64)
     av_clamped = a_clamped64 / batch.ak_per_av[:, None]
     log10_flux = (template_log[None, :, :].astype(np.float64)
                   + batch.ext_col.astype(np.float64)[:, None, :] * av_clamped[:, :, None]
                   + b_clamped64[:, :, None])
     flux_theta = np.power(10.0, log10_flux)  # (n_block, n_model, 8), this block only
+    timing["moments"] += time.perf_counter() - t
 
+    t = time.perf_counter()
     flux_mean = np.einsum("nm,nmb->nb", p_theta, flux_theta)
     flux_m2 = np.einsum("nm,nma,nmb->nab", p_theta, flux_theta, flux_theta)
     flux_cov = flux_m2 - flux_mean[:, :, None] * flux_mean[:, None, :]
+    timing["moments"] += time.perf_counter() - t
 
+    t = time.perf_counter()
     k_keep = min(topk, n_model)
     order = np.argpartition(-ln_w, k_keep - 1, axis=1)[:, :k_keep]
     row_idx = np.arange(n_block)[:, None]
@@ -209,6 +244,7 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
     topk_ln_prior[good, :k_keep] = ln_lambda[row_idx, order][good]
     topk_flux[good, :k_keep, :] = flux_theta[row_idx, order, :][good].astype(np.float32)
     occam_gap[~good] = np.nan
+    timing["topk"] += time.perf_counter() - t
 
     return dict(
         ln_evidence=ln_evidence,
@@ -227,9 +263,10 @@ def _part_path(path, bi):
 
 
 def _batch_result(config, region, cls, reader, gaia_term, template_log, subclass_idx,
-                   n_sub, width_dex, topk, block, bstart, bstop):
+                   n_sub, width_dex, topk, block, bstart, bstop, timing):
     """One batch's own P7 rows, `[bstart, bstop)`, folded block by block
-    (rule 10b): a batch-sized array, never a region-sized one.
+    (rule 10b): a batch-sized array, never a region-sized one. `timing`
+    accumulates this batch's wall time by stage.
     """
     m = bstop - bstart
     ln_evidence = np.empty((m, n_sub), dtype=np.float32)
@@ -251,7 +288,7 @@ def _batch_result(config, region, cls, reader, gaia_term, template_log, subclass
     for start in range(bstart, bstop, block):
         stop = min(start + block, bstop)
         r = _block_result(config, region, cls, reader, gaia_term, template_log,
-                           subclass_idx, n_sub, width_dex, topk, start, stop)
+                           subclass_idx, n_sub, width_dex, topk, start, stop, timing)
         sl = slice(start - bstart, stop - bstart)
         ln_evidence[sl] = r["ln_evidence"]
         flux_mean[sl] = r["flux_mean"]
@@ -324,6 +361,11 @@ def build_region_class(config, region, cls, st, limit=None):
     part_paths = []
     zero_ext_count = 0
     n_templates_checked = 0
+    # Per-{region, class} wall-time split (rule 17): the stages a batch
+    # passes through, plus the part-file write, each block/batch adds its
+    # own share into these totals.
+    timing = dict.fromkeys(
+        ("prepare", "fit", "ln_prior", "ln_gamma", "fold", "moments", "topk", "write"), 0.0)
 
     # BLAS's own thread pool is capped to 1 for the fit's small (m,8)@(8,8)
     # gemms (W9a: memory-bound, 1 thread ~10% faster than 4) while numba's
@@ -331,9 +373,12 @@ def build_region_class(config, region, cls, st, limit=None):
     with threadpoolctl.threadpool_limits(1, user_api="blas"):
         for bi, (bstart, bstop) in enumerate(batch_bounds):
             batch = _batch_result(config, region, cls, reader, gaia_term, template_log,
-                                   subclass_idx, n_sub, width_dex, topk, block, bstart, bstop)
+                                   subclass_idx, n_sub, width_dex, topk, block, bstart, bstop,
+                                   timing)
             part_path = _part_path(path, bi)
+            t = time.perf_counter()
             _write_part(part_path, batch)
+            timing["write"] += time.perf_counter() - t
             part_paths.append(part_path)
             zero_ext_count += batch["zero_ext_count"]
             n_templates_checked += batch["n_templates_checked"]
@@ -350,6 +395,7 @@ def build_region_class(config, region, cls, st, limit=None):
         path=path, part_paths=part_paths, n_source=n_source, n_model=n_model,
         subclasses=definitions.SUBCLASSES_OF[cls], library=definitions.CLASS_REGISTER[cls],
         zero_ext_frac=zero_ext_frac, density_file=density_file, weights_file=weights_file,
+        timing=timing,
     )
 
 
@@ -405,9 +451,13 @@ def build(config, regions=None, classes=None, limit=None):
                     occam = np.asarray(f["OCCAM_GAP"][:])
                 occam_finite = occam[np.isfinite(occam)]
                 occam_median = float(np.median(occam_finite)) if occam_finite.size else float("nan")
+                # Rule 17's per-{region, class} wall-time split (W9): where the
+                # sweep's own time goes, stage by stage, so a future pass reads
+                # the long pole straight off the done line instead of profiling.
+                split = " ".join("%s=%.1fs" % (k, v) for k, v in summary["timing"].items())
                 st.done(summary["path"], n=summary["n_source"], n_model=summary["n_model"],
                         zero_ext_frac=summary["zero_ext_frac"], occam_gap_median=occam_median,
-                        n_batches=len(summary["part_paths"]))
+                        n_batches=len(summary["part_paths"]), split=split)
 
 
 if __name__ == "__main__":

@@ -237,59 +237,62 @@ class GaiaTerm:
             self._star_marginals[cls] = cached
         return cached
 
-    def _g_s_and_a_x(self, row, cls):
-        """The source-and-class-level factors `ln_gamma` needs: `None` for
-        `g_s` if the source has no Gaia counterpart at all (the caller's
-        signal to return the neutral ln Gamma = 0 without touching a
-        model); else `(g_s, A_X)`, `A_X` by class (10_POSTERIOR.md T13):
-        `1` if the source is matched but carries no usable parallax
-        (`NO_PM`, a non-finite `PLX_MAS`, or a degenerate `sigma_eff`);
-        else the cloud-anchored Normal (depth added in quadrature), the
-        zero-parallax Normal (GAL), or the field-star marginal
-        (STAR/AGB/PAHC).
+    def _g_s_and_a_x_block(self, rows, cls):
+        """The source-and-class-level factors `ln_gamma` needs, vectorised
+        over the block's own sources (`rows`, `(n_block,)`): `matched`
+        (`(n_block,)` bool, `False` where the source has no Gaia
+        counterpart at all -- the caller's signal to return the neutral
+        ln Gamma = 0 for that row without touching a model), `g_s`
+        (`(n_block,)`, only meaningful where `matched`) and `A_X`
+        (`(n_block,)`, 10_POSTERIOR.md T13): `1` where the source is
+        matched but carries no usable parallax (`NO_PM`, a non-finite
+        `PLX_MAS`, or a degenerate `sigma_eff`); else the cloud-anchored
+        Normal (depth added in quadrature), the zero-parallax Normal
+        (GAL), or the field-star marginal (STAR/AGB/PAHC).
         """
-        if not self._gaia["matched"][row]:
-            return None, None
-        g_s = float(self._gaia["g_s"][row])
-        plx = float(self._gaia["plx_mas"][row])
-        if self._gaia["no_pm"][row] or not np.isfinite(plx):
-            return g_s, 1.0
-        sigma_eff = float(self._gaia["e_plx_mas"][row]) * max(1.0, float(self._gaia["ruwe"][row]))
-        if not np.isfinite(sigma_eff) or sigma_eff <= 0:
-            return g_s, 1.0
+        matched = self._gaia["matched"][rows]
+        g_s = self._gaia["g_s"][rows]
+        plx = self._gaia["plx_mas"][rows]
+        no_pm = self._gaia["no_pm"][rows]
+        sigma_eff = self._gaia["e_plx_mas"][rows] * np.maximum(1.0, self._gaia["ruwe"][rows])
+        no_solution = no_pm | ~np.isfinite(plx) | ~np.isfinite(sigma_eff) | (sigma_eff <= 0)
+        good = matched & ~no_solution
 
-        if cls in CLOUD_ANCHORED_CLASSES:
-            depth_term_mas = 1000.0 * self._depth_pc / self._d_r_pc ** 2
-            sigma_eff = float(np.hypot(sigma_eff, depth_term_mas))
-            a_x = float(_normal_pdf(plx, 1000.0 / self._d_r_pc, sigma_eff))
-        elif cls == "gal":
-            a_x = float(_normal_pdf(plx, 0.0, sigma_eff))
-        elif cls in STAR_MARGINAL_CLASSES:
-            bins_mas, p_bin = self._star_marginal(cls)
-            a_x = float(np.dot(p_bin, _normal_pdf(bins_mas, plx, sigma_eff)))
-        else:
-            raise ValueError(f"GaiaTerm: no A_X branch defined for class {cls!r}")
-        return g_s, a_x
+        a_x = np.ones(rows.shape[0], dtype=np.float64)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            if cls in CLOUD_ANCHORED_CLASSES:
+                depth_term_mas = 1000.0 * self._depth_pc / self._d_r_pc ** 2
+                sigma_hyp = np.hypot(sigma_eff, depth_term_mas)
+                a_x_good = _normal_pdf(plx, 1000.0 / self._d_r_pc, sigma_hyp)
+            elif cls == "gal":
+                a_x_good = _normal_pdf(plx, 0.0, sigma_eff)
+            elif cls in STAR_MARGINAL_CLASSES:
+                bins_mas, p_bin = self._star_marginal(cls)
+                z = (bins_mas[None, :] - plx[:, None]) / sigma_eff[:, None]
+                pdf = np.exp(-0.5 * z * z) / (sigma_eff[:, None] * _SQRT_2PI)
+                a_x_good = pdf @ p_bin
+            else:
+                raise ValueError(f"GaiaTerm: no A_X branch defined for class {cls!r}")
+        a_x[good] = a_x_good[good]
+        return matched, g_s, a_x
 
     def ln_gamma(self, rows, model_index, a, log10_b, cls):
-        """`ln Gamma_{s,h}` for one source (`rows`, its row index into this
-        region's own row-aligned products) over the models named by
-        `model_index` (row positions into `cls`'s own register),
-        vectorised over models: `a`/`log10_b`, shape `(n_model,)`, are
-        those models' own fitted A_K extinction and log10 brightness at
-        this source.
+        """`ln Gamma_{s,h}` for one block's own sources (`rows`, their row
+        indices into this region's own row-aligned products, `(n_block,)`)
+        over the models named by `model_index` (row positions into `cls`'s
+        own register), vectorised over both sources and models: `a`/
+        `log10_b`, shape `(n_block, n_model)`, are those models' own
+        fitted A_K extinction and log10 brightness at each source.
 
-        Returns an `(n_model,)` float64 array, one natural-log
-        multiplicative factor per model.
+        Returns an `(n_block, n_model)` float64 array, one natural-log
+        multiplicative factor per source and model (the identity this
+        replaces: the same numbers as the old per-source call, one row at
+        a time).
         """
-        g_s, a_x = self._g_s_and_a_x(rows, cls)
+        rows = np.asarray(rows)
         model_index = np.asarray(model_index)
         n_model = model_index.shape[0]
-        if g_s is None:
-            # No Gaia counterpart at all: no information, Gamma = 1 for
-            # every model, exactly (10_POSTERIOR.md's conditioning
-            # discipline -- absent data contributes nothing, not a guess).
-            return np.zeros(n_model, dtype=np.float64)
+        matched, g_s, a_x = self._g_s_and_a_x_block(rows, cls)
 
         reg = self._register(cls)
         g0 = reg["g0_flux"][model_index]
@@ -309,25 +312,27 @@ class GaiaTerm:
             w = selection.law_dense_weight(a)
         r_diffuse = float(selection.ak_per_av(self.config, 0.0))
         r_dense = float(selection.ak_per_av(self.config, 1.0))
-        kappa_g = (1.0 - w) * (kg_draine / r_diffuse) + w * (kg_whitney / r_dense)
+        kappa_g = (1.0 - w) * (kg_draine[None, :] / r_diffuse) + w * (kg_whitney[None, :] / r_dense)
         a_g = a * kappa_g
 
         b = 10.0 ** log10_b
         with np.errstate(divide="ignore", invalid="ignore"):
-            g_flux = g0 * b * 10.0 ** (-0.4 * a_g)
+            g_flux = g0[None, :] * b * 10.0 ** (-0.4 * a_g)
             gmag = -2.5 * np.log10(g_flux / constants.GAIA_G_VEGA_ZP_MJY)
         h = gaia_detection_weight(gmag)
         # G0_FLUX = NaN (no G-band coverage, not darkness) -> H = 0
         # exactly; a dark model's G0_FLUX = 0 already drives Gmag to +inf
         # and H to 0 through the sigmoid's own limit, no special case.
-        h = np.where(np.isnan(g0), 0.0, h)
+        h = np.where(np.isnan(g0)[None, :], 0.0, h)
 
-        gamma = g_s * h * a_x + (1.0 - g_s) * (1.0 - h)
+        gamma = g_s[:, None] * h * a_x[:, None] + (1.0 - g_s[:, None]) * (1.0 - h)
         # gamma = 0 is a real zero-probability model under a Gaia
         # counterpart's own detection/non-detection evidence (e.g. the
         # source is seen but this model's H_h says it should not be, or
         # vice versa) -- ln(0) = -inf is the ruled likelihood, not a
         # defect, so the divide-by-zero warning is silenced, not the
-        # value.
+        # value. Rows with no Gaia counterpart at all carry no
+        # information: ln Gamma = 0 for every model, exactly.
         with np.errstate(divide="ignore"):
-            return np.log(gamma)
+            ln_g = np.log(gamma)
+        return np.where(matched[:, None], ln_g, 0.0)

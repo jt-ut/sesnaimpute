@@ -17,6 +17,7 @@ BHAC15's covered range.
 import os
 import tarfile
 
+from sesnaimpute import progress
 from sesnaimpute.build import run
 from sesnaimpute.sky.download._fetch import fetch
 
@@ -31,19 +32,20 @@ def build(config, regions=None):
     and ignored: this is a survey-wide product. Skips the fetch and the
     unpack if the target file is already present (rule 5a).
     """
-    dest_dir = f"{config.data_root}/sky/download/mist2016"
-    dest_file = f"{dest_dir}/{_MEMBER}"
-    if os.path.exists(dest_file):
-        print(f"mist2016: {dest_file} present, skipped")
-        return
-    archive_path = f"{dest_dir}/{os.path.basename(_URL)}"
-    fetch(_URL, archive_path)
-    with tarfile.open(archive_path, "r:xz") as tf:
-        member = next(m for m in tf.getmembers() if os.path.basename(m.name) == _MEMBER)
-        member.name = os.path.basename(member.name)
-        tf.extract(member, path=dest_dir)
-    os.remove(archive_path)
-    print(f"mist2016: unpacked {_MEMBER} -> {dest_file}, tarball removed")
+    with progress.Stage("sky.download.mist2016") as st:
+        dest_dir = f"{config.data_root}/sky/download/mist2016"
+        dest_file = f"{dest_dir}/{_MEMBER}"
+        if os.path.exists(dest_file):
+            st.done(dest_file, skipped=1)
+            return
+        archive_path = f"{dest_dir}/{os.path.basename(_URL)}"
+        fetch(_URL, archive_path)
+        with tarfile.open(archive_path, "r:xz") as tf:
+            member = next(m for m in tf.getmembers() if os.path.basename(m.name) == _MEMBER)
+            member.name = os.path.basename(member.name)
+            tf.extract(member, path=dest_dir)
+        os.remove(archive_path)
+        st.done(dest_file, skipped=0)
 
 
 if __name__ == "__main__":
