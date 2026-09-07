@@ -13,6 +13,7 @@ Feeds SPEC_PRIORS.md section 2.1 (STAR: young-star subtraction) and
 section 6.2 (YSO: selection in the 2MASS bands).
 """
 
+from sesnaimpute import progress as progress_module
 from sesnaimpute.build import run
 from sesnaimpute.sky.download._fetch import fetch
 
@@ -26,8 +27,11 @@ def build(config, regions=None):
     survey-wide product.
     """
     dest_dir = f"{config.data_root}/sky/download/baraffe2015_bhac15"
-    for name in _FILES:
-        fetch(f"{_BASE_URL}/{name}", f"{dest_dir}/{name}")
+    with progress_module.Stage("sky.download.baraffe2015_bhac15") as st:
+        for i, name in enumerate(_FILES):
+            fetch(f"{_BASE_URL}/{name}", f"{dest_dir}/{name}")
+            st.tick(i + 1, len(_FILES), "files")
+        st.done(dest_dir, files=len(_FILES))
 
 
 if __name__ == "__main__":

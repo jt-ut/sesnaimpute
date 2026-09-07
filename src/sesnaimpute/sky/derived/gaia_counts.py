@@ -22,6 +22,7 @@ import numpy as np
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
+from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.granules import access
 
@@ -77,12 +78,18 @@ def build(config, regions=None):
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
     written = []
-    for region in regions:
-        pixels = _region_pixels(config, region)
-        n = _counts_matrix(pixels, _download_path(config, region))
-        _write_region(config, region, pixels, n)
-        written.append(region)
-        print(f"gaia_counts derive: {region}: {pixels.size} pixels, {int(n.sum())} total counts")
+    with progress_module.Stage("sky.derived.gaia_counts") as st:
+        n_regions = len(regions)
+        total_counts = 0
+        for i, region in enumerate(regions):
+            pixels = _region_pixels(config, region)
+            n = _counts_matrix(pixels, _download_path(config, region))
+            _write_region(config, region, pixels, n)
+            written.append(region)
+            total_counts += int(n.sum())
+            print(f"gaia_counts derive: {region}: {pixels.size} pixels, {int(n.sum())} total counts")
+            st.tick(i + 1, n_regions, "regions")
+        st.done(None, regions=n_regions, total_counts=total_counts)
     return dict(regions_written=written)
 
 

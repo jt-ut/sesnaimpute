@@ -53,6 +53,7 @@ import healpy as hp
 import numpy as np
 
 from sesnaimpute import build as build_module
+from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.granules import access
 
@@ -99,18 +100,25 @@ def build(config, regions=None):
         regions = [r.name for r in regions_module.REGIONS]
     dest_dir = f"{config.data_root}/sky/download/gaia_counts"
     os.makedirs(dest_dir, exist_ok=True)
-    for region in regions:
-        dest_path = f"{dest_dir}/counts_gaia_hpx512__{region}.csv"
-        if os.path.exists(dest_path):
-            print(f"gaia_counts build: {dest_path} present, skipped")
-            continue
-        query = region_query(config, region)
-        text = _tap_sync_csv(query)
-        dest_path = f"{dest_dir}/counts_gaia_hpx512__{region}.csv"
-        with open(dest_path, "w") as f:
-            f.write(text)
-        n_rows = max(0, text.count("\n") - 1)
-        print(f"gaia_counts build: {region} -> {dest_path}: {n_rows} rows")
+    with progress_module.Stage("sky.download.gaia_counts") as st:
+        n_regions = len(regions)
+        n_fetched = 0
+        n_skipped = 0
+        for i, region in enumerate(regions):
+            dest_path = f"{dest_dir}/counts_gaia_hpx512__{region}.csv"
+            if os.path.exists(dest_path):
+                print(f"sky.download.gaia_counts: {region}: {dest_path} already on disk, skipped", flush=True)
+                n_skipped += 1
+            else:
+                query = region_query(config, region)
+                text = _tap_sync_csv(query)
+                with open(dest_path, "w") as f:
+                    f.write(text)
+                n_rows = max(0, text.count("\n") - 1)
+                print(f"sky.download.gaia_counts: {region} -> {dest_path}: {n_rows} rows fetched", flush=True)
+                n_fetched += 1
+            st.tick(i + 1, n_regions, "regions")
+        st.done(dest_dir, regions=n_regions, fetched=n_fetched, skipped=n_skipped)
 
 
 if __name__ == "__main__":

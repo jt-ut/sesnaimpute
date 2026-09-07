@@ -56,6 +56,7 @@ import numpy as np
 import pandas as pd
 from bs4 import BeautifulSoup
 
+from sesnaimpute import progress as progress_module
 from sesnaimpute.build import run
 from sesnaimpute.config import product_path
 
@@ -447,29 +448,36 @@ def build(config, regions=None):
     table, SPEC_PRIORS.md section 7's `eps_ext`/`eps_s` do not vary the
     knot catalogue itself by region.
     """
-    raw_dir = _raw_dir(config)
-    giannini = _parse_giannini(raw_dir)
-    davis = _parse_davis(raw_dir)
-    walawender = _parse_walawender(raw_dir)
-    uwish2 = _parse_uwish2(raw_dir)
+    with progress_module.Stage("sky.derived.knots") as st:
+        raw_dir = _raw_dir(config)
+        giannini = _parse_giannini(raw_dir)
+        st.tick(1, 4, "surveys")
+        davis = _parse_davis(raw_dir)
+        st.tick(2, 4, "surveys")
+        walawender = _parse_walawender(raw_dir)
+        st.tick(3, 4, "surveys")
+        uwish2 = _parse_uwish2(raw_dir)
+        st.tick(4, 4, "surveys")
 
-    _write_survey(config, "giannini2013", giannini)
-    _write_survey(config, "davis2009", davis)
-    _write_survey(config, "walawender2005", walawender)
-    _write_survey(config, "uwish2", uwish2)
+        _write_survey(config, "giannini2013", giannini)
+        _write_survey(config, "davis2009", davis)
+        _write_survey(config, "walawender2005", walawender)
+        _write_survey(config, "uwish2", uwish2)
 
-    colours = _giannini_colours(giannini)
-    _write_colours(config, colours)
+        colours = _giannini_colours(giannini)
+        _write_colours(config, colours)
 
-    print(f"sky.derived.knots build: giannini2013 {len(giannini['RA_DEG'])} knots, "
-          f"davis2009 {len(davis['RA_DEG'])} knots, "
-          f"walawender2005 {len(walawender['RA_DEG'])} knots "
-          f"({int(walawender['H2_SELECTED'].sum())} H2-selected), "
-          f"uwish2 {len(uwish2['RA_DEG'])} features "
-          f"({int(uwish2['JET_CLASS'].sum())} jet-class)")
-    for band_key, stats in colours.items():
-        print(f"sky.derived.knots build: colours {band_key} N={stats['N']} "
-              f"median={stats['MEDIAN']:.3f} 16-84%=[{stats['P16']:.3f}, {stats['P84']:.3f}]")
+        print(f"sky.derived.knots build: giannini2013 {len(giannini['RA_DEG'])} knots, "
+              f"davis2009 {len(davis['RA_DEG'])} knots, "
+              f"walawender2005 {len(walawender['RA_DEG'])} knots "
+              f"({int(walawender['H2_SELECTED'].sum())} H2-selected), "
+              f"uwish2 {len(uwish2['RA_DEG'])} features "
+              f"({int(uwish2['JET_CLASS'].sum())} jet-class)")
+        for band_key, stats in colours.items():
+            print(f"sky.derived.knots build: colours {band_key} N={stats['N']} "
+                  f"median={stats['MEDIAN']:.3f} 16-84%=[{stats['P16']:.3f}, {stats['P84']:.3f}]")
+        st.done(None, knots=len(giannini["RA_DEG"]) + len(davis["RA_DEG"]) + len(walawender["RA_DEG"]),
+                features=len(uwish2["RA_DEG"]))
 
 
 if __name__ == "__main__":

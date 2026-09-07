@@ -9,6 +9,7 @@ Feeds SPEC_PRIORS.md section 1.1 (columns; the Planck-elsewhere branch of
 the adopted dust column where Herschel does not cover a sightline).
 """
 
+from sesnaimpute import progress as progress_module
 from sesnaimpute.build import run
 from sesnaimpute.sky.download._fetch import fetch
 
@@ -26,7 +27,10 @@ def build(config, regions=None, _limit=None):
     here since this source is already a single file.
     """
     dest_dir = f"{config.data_root}/sky/download/planck_r120"
-    fetch(_URL, f"{dest_dir}/{_FILENAME}")
+    with progress_module.Stage("sky.download.planck_r120") as st:
+        fetch(_URL, f"{dest_dir}/{_FILENAME}")
+        st.tick(1, 1, "files")
+        st.done(f"{dest_dir}/{_FILENAME}")
 
 
 if __name__ == "__main__":

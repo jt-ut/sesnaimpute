@@ -36,6 +36,7 @@ import numpy as np
 from joblib import Parallel, delayed
 
 from sesnaimpute import config as config_module
+from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.sky.download.herschel_hgbs.build import _FILES as HGBS_FILES
@@ -428,81 +429,85 @@ def build(config, regions=None):
     """`sigma`/`survey` (beam FWHM and the SIG_ZP/SIG_RAND model, fit over
     the whole map set regardless of `regions`) and `column`/`source`, one
     file per requested region. Maps parallelised with joblib."""
-    maps = _map_list(config)
-    header_by_name = {m["name"]: _map_header(m["path"]) for m in maps}
-    for m in maps:
-        m["bbox"] = header_by_name[m["name"]]["bbox"]
+    with progress_module.Stage("sky.derived.herschel_column") as st:
+        maps = _map_list(config)
+        header_by_name = {m["name"]: _map_header(m["path"]) for m in maps}
+        for m in maps:
+            m["bbox"] = header_by_name[m["name"]]["bbox"]
 
-    pair_jobs = [(maps[i]["name"], maps[i]["path"], maps[j]["name"], maps[j]["path"])
-                 for i in range(len(maps)) for j in range(i + 1, len(maps))
-                 if _boxes_overlap(maps[i]["bbox"], maps[j]["bbox"])]
-    t_sig0 = time.time()
-    pair_results = Parallel(n_jobs=min(config.n_jobs, PAIR_JOBS_MAX_CONCURRENT))(
-        delayed(_pair_native)(*p) for p in pair_jobs)
-    sig = _sig_model(pair_results)
-    sigma_wall_s = time.time() - t_sig0
-    _write_sigma_survey(config, maps, header_by_name, sig)
+        pair_jobs = [(maps[i]["name"], maps[i]["path"], maps[j]["name"], maps[j]["path"])
+                     for i in range(len(maps)) for j in range(i + 1, len(maps))
+                     if _boxes_overlap(maps[i]["bbox"], maps[j]["bbox"])]
+        t_sig0 = time.time()
+        pair_results = Parallel(n_jobs=min(config.n_jobs, PAIR_JOBS_MAX_CONCURRENT))(
+            delayed(_pair_native)(*p) for p in pair_jobs)
+        sig = _sig_model(pair_results)
+        sigma_wall_s = time.time() - t_sig0
+        _write_sigma_survey(config, maps, header_by_name, sig)
 
-    if regions is None:
-        regions = [r.name for r in regions_module.REGIONS]
+        if regions is None:
+            regions = [r.name for r in regions_module.REGIONS]
 
-    t_sample0 = time.time()
-    region_ra_dec = {r: _region_sources(config, r) for r in regions}
-    candidate_maps = _size_ordered_desc(
-        [m for m in maps if any(
-            ra.size and _boxes_overlap(
-                m["bbox"], (float(ra.min()), float(ra.max()), float(dec.min()), float(dec.max())), pad=0.05)
-            for ra, dec in region_ra_dec.values())])
-    sample_results = Parallel(n_jobs=config.n_jobs)(
-        delayed(_sample_map_job)(m, region_ra_dec) for m in candidate_maps)
-    per_map = dict(sample_results)
+        t_sample0 = time.time()
+        region_ra_dec = {r: _region_sources(config, r) for r in regions}
+        candidate_maps = _size_ordered_desc(
+            [m for m in maps if any(
+                ra.size and _boxes_overlap(
+                    m["bbox"], (float(ra.min()), float(ra.max()), float(dec.min()), float(dec.max())), pad=0.05)
+                for ra, dec in region_ra_dec.values())])
+        sample_results = Parallel(n_jobs=config.n_jobs)(
+            delayed(_sample_map_job)(m, region_ra_dec) for m in candidate_maps)
+        per_map = dict(sample_results)
 
-    written = []
-    for region in regions:
-        ra, dec = region_ra_dec[region]
-        n = ra.size
-        serving = [m for m in candidate_maps if region in per_map.get(m["name"], {})]
-        a_k = np.full(n, np.nan, dtype=np.float64)
-        map_id = np.full(n, -1, dtype=np.int32)
-        for mi, m in enumerate(serving):
-            idx, nh2 = per_map[m["name"]][region]
-            fill_mask = map_id[idx] < 0
-            if not fill_mask.any():
-                continue
-            sel = idx[fill_mask]
-            a_k[sel] = nh2[fill_mask] * NH2_TO_AK
-            map_id[sel] = mi
-        covered = map_id >= 0
-        sig_rand = np.where(covered, np.sqrt(sig["rand_c0"] ** 2 + (sig["rand_c1"] * a_k) ** 2), np.nan)
-        sig_zp = np.where(covered, sig["sig_zp_ak"], np.nan)
-        sig_a_k = np.sqrt(sig_rand ** 2 + sig_zp ** 2)
-        _write_region(config, region, a_k, sig_a_k, sig_rand, sig_zp, covered, map_id,
-                       [m["name"] for m in serving])
-        frac = float(covered.mean()) if n else float("nan")
-        med = float(np.median(a_k[covered])) if covered.any() else float("nan")
-        print("herschel_column REGION %-16s n=%6d covered=%.3f median_A_K=%.3f maps=%d"
-              % (region, n, frac, med, len(serving)), flush=True)
-        written.append(region)
-    sample_wall_s = time.time() - t_sample0
+        written = []
+        n_regions = len(regions)
+        for i, region in enumerate(regions):
+            ra, dec = region_ra_dec[region]
+            n = ra.size
+            serving = [m for m in candidate_maps if region in per_map.get(m["name"], {})]
+            a_k = np.full(n, np.nan, dtype=np.float64)
+            map_id = np.full(n, -1, dtype=np.int32)
+            for mi, m in enumerate(serving):
+                idx, nh2 = per_map[m["name"]][region]
+                fill_mask = map_id[idx] < 0
+                if not fill_mask.any():
+                    continue
+                sel = idx[fill_mask]
+                a_k[sel] = nh2[fill_mask] * NH2_TO_AK
+                map_id[sel] = mi
+            covered = map_id >= 0
+            sig_rand = np.where(covered, np.sqrt(sig["rand_c0"] ** 2 + (sig["rand_c1"] * a_k) ** 2), np.nan)
+            sig_zp = np.where(covered, sig["sig_zp_ak"], np.nan)
+            sig_a_k = np.sqrt(sig_rand ** 2 + sig_zp ** 2)
+            _write_region(config, region, a_k, sig_a_k, sig_rand, sig_zp, covered, map_id,
+                           [m["name"] for m in serving])
+            frac = float(covered.mean()) if n else float("nan")
+            med = float(np.median(a_k[covered])) if covered.any() else float("nan")
+            print("herschel_column REGION %-16s n=%6d covered=%.3f median_A_K=%.3f maps=%d"
+                  % (region, n, frac, med, len(serving)), flush=True)
+            written.append(region)
+            st.tick(i + 1, n_regions, "regions")
+        sample_wall_s = time.time() - t_sample0
 
-    print("herschel_column SIGMA sig_zp_ak=%.4f c0=%.4f c1=%.4f n_pairs=%d"
-          % (sig["sig_zp_ak"], sig["rand_c0"], sig["rand_c1"], sig["n_pairs"]), flush=True)
-    for m in maps:
-        h = header_by_name[m["name"]]
-        found = "%.2f" % h["beam_arcsec"] if h["beam_arcsec"] else "none"
-        print("herschel_column BEAM %-45s header=%s used=%.2f"
-              % (m["name"], found, h["beam_arcsec"] or HERSCHEL_STATED_FWHM_ARCSEC), flush=True)
+        print("herschel_column SIGMA sig_zp_ak=%.4f c0=%.4f c1=%.4f n_pairs=%d"
+              % (sig["sig_zp_ak"], sig["rand_c0"], sig["rand_c1"], sig["n_pairs"]), flush=True)
+        for m in maps:
+            h = header_by_name[m["name"]]
+            found = "%.2f" % h["beam_arcsec"] if h["beam_arcsec"] else "none"
+            print("herschel_column BEAM %-45s header=%s used=%.2f"
+                  % (m["name"], found, h["beam_arcsec"] or HERSCHEL_STATED_FWHM_ARCSEC), flush=True)
 
-    check_path = config_module.product_path(config, "sky/derived", "adopted", "column-check", "survey")
-    if os.path.exists(check_path):
-        write_field_zeropoint(config)
-    else:
-        print("herschel_column FIELD_ZP skipped: no column-check product yet at %s -- "
-              "SIGMA_ZP_K stays the two-pair constant until sky.derived.column.build_column_check "
-              "runs and herschel_column.write_field_zeropoint is called" % check_path, flush=True)
+        check_path = config_module.product_path(config, "sky/derived", "adopted", "column-check", "survey")
+        if os.path.exists(check_path):
+            write_field_zeropoint(config)
+        else:
+            print("herschel_column FIELD_ZP skipped: no column-check product yet at %s -- "
+                  "SIGMA_ZP_K stays the two-pair constant until sky.derived.column.build_column_check "
+                  "runs and herschel_column.write_field_zeropoint is called" % check_path, flush=True)
 
-    return dict(sigma_wall_s=sigma_wall_s, sample_wall_s=sample_wall_s,
-                regions_written=written, sig_model=sig)
+        st.done(None, regions=n_regions, sig_zp_ak=float(sig["sig_zp_ak"]))
+        return dict(sigma_wall_s=sigma_wall_s, sample_wall_s=sample_wall_s,
+                    regions_written=written, sig_model=sig)
 
 if __name__ == "__main__":
     run(build)

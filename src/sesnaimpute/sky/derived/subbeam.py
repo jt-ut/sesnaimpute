@@ -48,6 +48,7 @@ from scipy import optimize
 from scipy.special import ndtr
 
 from sesnaimpute import config as config_module
+from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.sky.derived.herschel_column import _map_header
 from sesnaimpute.sky.download.herschel_hgbs.build import _FILES as HGBS_FILES
@@ -595,58 +596,69 @@ def build(config, regions=None):
     inventory and which regions each map serves come from `_map_inventory`
     (the fetched file set and the Herschel column products), never a
     manifest."""
-    if regions is None:
-        regions = [r.name for r in regions_module.REGIONS]
-    regions = set(regions) & {r.name for r in regions_module.REGIONS}
+    with progress_module.Stage("sky.derived.subbeam") as st:
+        if regions is None:
+            regions = [r.name for r in regions_module.REGIONS]
+        regions = set(regions) & {r.name for r in regions_module.REGIONS}
 
-    jobs, cloud_regions = _map_inventory(config, regions)
-    print("subbeam: %d HGBS maps overlapping the requested regions" % len(jobs),
-          flush=True)
-    n_jobs = _pool_n_jobs(config, jobs)
-    results = Parallel(n_jobs=n_jobs)(delayed(process_map)(j) for j in jobs)
-    per_map = {cloud: payload for cloud, payload in results if payload is not None}
-    print("subbeam: %d/%d maps processed" % (len(per_map), len(jobs)), flush=True)
+        jobs, cloud_regions = _map_inventory(config, regions)
+        print("subbeam: %d HGBS maps overlapping the requested regions" % len(jobs),
+              flush=True)
+        n_jobs = _pool_n_jobs(config, jobs)
+        n_maps = len(jobs)
+        n_done = [0]
 
-    herschel_regions = sorted(regions)
-    scales, per_region = _region_join(per_map, cloud_regions, herschel_regions)
-    regs = list(per_region)
-    print("subbeam: %d/%d requested regions with Herschel coverage"
-          % (len(regs), len(regions)), flush=True)
+        def _one(j):
+            r = process_map(j)
+            n_done[0] += 1
+            st.tick(n_done[0], n_maps, "maps")
+            return r
 
-    out_path = config_module.product_path(config, "sky/derived", "herschel", "subbeam",
-                                          "region")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    scalar_cols = dict(BETA="beta", BETA_BOOT_P16="beta_p16", BETA_BOOT_P84="beta_p84",
-                       W_ABS_36P3="w_abs_ref", W_ABS_L108="w_abs_108",
-                       W_ABS_L302="w_abs_302", W_ABS_L821="w_abs_821",
-                       COMPLETION_L108="completion_108", COMPLETION_L302="completion_302",
-                       COMPLETION_L821="completion_821",
-                       RESCALE_EXPONENT="rescale_exponent",
-                       OFFSET_EXPONENT="offset_exponent", N_FIT="n_fit",
-                       N_PRED="n_pred", RMS_PRED_DEX="rms_pred_dex")
-    with h5py.File(out_path, "w") as fh:
-        fh.attrs["GRANULE"] = "region"
-        fh.create_dataset("REGION", data=np.array([r.encode("utf-8") for r in regs]))
-        fh.create_dataset("SCALES", data=scales)
-        fh.create_dataset("QS", data=np.array(QS))
-        for name, key in scalar_cols.items():
-            fh.create_dataset(name, data=np.array([per_region[r][key] for r in regs]))
-        fh.create_dataset("COND_QUANTILES",
-                          data=np.array([per_region[r]["quantiles"] for r in regs]))
-        # The column-conditional kernel `prior/kernel.py` evaluates: the
-        # 2-D KA (log column) x KD (log ratio) count histogram `kern`,
-        # summed over this region's maps, at each of the three tabulated
-        # beams. KA_EDGES/KD_EDGES are the shared axes (K_A_EDGES/K_D_EDGES
-        # above); K_A_EDGES is already in ln(column).
-        fh.create_dataset("KA_EDGES", data=K_A_EDGES)
-        fh.create_dataset("KD_EDGES", data=K_D_EDGES)
-        for lab in ("L108", "L302", "L821"):
-            fh.create_dataset("COND_KERNEL_%s" % lab,
-                              data=np.array([per_region[r]["kern_%s" % lab]
-                                            for r in regs]))
-    print("subbeam: wrote %s (%.2f MB)"
-          % (out_path, os.path.getsize(out_path) / 1e6), flush=True)
-    _write_mixture_datasets(out_path)
+        results = Parallel(n_jobs=n_jobs)(delayed(_one)(j) for j in jobs)
+        per_map = {cloud: payload for cloud, payload in results if payload is not None}
+        print("subbeam: %d/%d maps processed" % (len(per_map), len(jobs)), flush=True)
+
+        herschel_regions = sorted(regions)
+        scales, per_region = _region_join(per_map, cloud_regions, herschel_regions)
+        regs = list(per_region)
+        print("subbeam: %d/%d requested regions with Herschel coverage"
+              % (len(regs), len(regions)), flush=True)
+
+        out_path = config_module.product_path(config, "sky/derived", "herschel", "subbeam",
+                                              "region")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        scalar_cols = dict(BETA="beta", BETA_BOOT_P16="beta_p16", BETA_BOOT_P84="beta_p84",
+                           W_ABS_36P3="w_abs_ref", W_ABS_L108="w_abs_108",
+                           W_ABS_L302="w_abs_302", W_ABS_L821="w_abs_821",
+                           COMPLETION_L108="completion_108", COMPLETION_L302="completion_302",
+                           COMPLETION_L821="completion_821",
+                           RESCALE_EXPONENT="rescale_exponent",
+                           OFFSET_EXPONENT="offset_exponent", N_FIT="n_fit",
+                           N_PRED="n_pred", RMS_PRED_DEX="rms_pred_dex")
+        with h5py.File(out_path, "w") as fh:
+            fh.attrs["GRANULE"] = "region"
+            fh.create_dataset("REGION", data=np.array([r.encode("utf-8") for r in regs]))
+            fh.create_dataset("SCALES", data=scales)
+            fh.create_dataset("QS", data=np.array(QS))
+            for name, key in scalar_cols.items():
+                fh.create_dataset(name, data=np.array([per_region[r][key] for r in regs]))
+            fh.create_dataset("COND_QUANTILES",
+                              data=np.array([per_region[r]["quantiles"] for r in regs]))
+            # The column-conditional kernel `prior/kernel.py` evaluates: the
+            # 2-D KA (log column) x KD (log ratio) count histogram `kern`,
+            # summed over this region's maps, at each of the three tabulated
+            # beams. KA_EDGES/KD_EDGES are the shared axes (K_A_EDGES/K_D_EDGES
+            # above); K_A_EDGES is already in ln(column).
+            fh.create_dataset("KA_EDGES", data=K_A_EDGES)
+            fh.create_dataset("KD_EDGES", data=K_D_EDGES)
+            for lab in ("L108", "L302", "L821"):
+                fh.create_dataset("COND_KERNEL_%s" % lab,
+                                  data=np.array([per_region[r]["kern_%s" % lab]
+                                                for r in regs]))
+        print("subbeam: wrote %s (%.2f MB)"
+              % (out_path, os.path.getsize(out_path) / 1e6), flush=True)
+        _write_mixture_datasets(out_path)
+        st.done(out_path, regions=len(regs), maps=len(per_map))
 
 #: A (region, beam, KA) cell needs this many counts before a mixture is fit.
 MIX_MIN_COUNTS = 200
