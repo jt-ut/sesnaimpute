@@ -131,7 +131,7 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
     """
     n_model = template_log.shape[0]
     flux, sigma, origin, ak = _catalog_block(config, region, start, stop)
-    batch = likelihood.prepare(config, region, start, stop, flux, sigma, origin, ak, width_dex)
+    batch = likelihood.prepare(config, region, cls, start, stop, flux, sigma, origin, ak, width_dex)
     fit = likelihood.fit(batch, template_log)
 
     rows = np.arange(start, stop)

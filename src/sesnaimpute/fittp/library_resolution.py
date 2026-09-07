@@ -7,7 +7,10 @@ integrates only while neighbouring nodes sit, in the survey's own units,
 closer than the Gaussian kernel's own width -- the survey's photometric
 error. Report-only (rule 12): prints the numbers and writes one small
 survey product; no fit is run and no source's own fluxes are read, only
-the catalogue's error columns.
+the catalogue's error columns. The same product's `SIGMA_LIB_DEX`, one
+number per LIBRARY (sec 6.1), is `fittp.likelihood.prepare`'s own read of
+this measurement: the width the kernel sum over templates needs to resolve
+a source sitting midway between a library's two nearest neighbours.
 """
 
 import os
@@ -60,6 +63,14 @@ N_SOURCE_SAMPLE = 200_000
 RESOLUTION_TOL = 0.5
 #: The three tolerances the trade is reported at (brief item 4).
 TOLERANCES = (0.3, 0.5, 1.0)
+
+#: SPEC_BMSTP_DRAFT.md sec 6.1 -- sigma_lib,L converts a library's own
+#: median nearest-neighbour spacing d50 (measured in units of this check's
+#: own per-band whitening, SIGMA_FLOOR_DEX) back to a per-band dex offset:
+#: distributed over the 6-D shape space's dimensions (dividing by sqrt(6))
+#: and halved (a source midway between two neighbours sits at d50/2 from
+#: each).
+SIGMA_LIB_SCALE = SIGMA_FLOOR_DEX / (2.0 * np.sqrt(6.0))
 
 #: The YSO register's five sub-grid `SUBCLASS`/`SUBGRID` labels
 #: (`population.yso_mass`'s own `_SUBGRIDS`).
@@ -229,7 +240,7 @@ def _library_thickness(config, cls, sigma_i, kappa_prime):
 
 
 def _write(path, sigma_i, n_sample, n_total, groups, sizes_all, p50_all, p90_all,
-           deff_all, nstar_all, other):
+           deff_all, nstar_all, other, library_order, sigma_lib_dex):
     labels = list(groups)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
@@ -251,6 +262,9 @@ def _write(path, sigma_i, n_sample, n_total, groups, sizes_all, p50_all, p90_all
         f.create_dataset("OTHER_D50", data=np.array([o[2] for o in other]))
         f.create_dataset("OTHER_D90", data=np.array([o[3] for o in other]))
         f.create_dataset("OTHER_THICK_ENOUGH", data=np.array([int(o[4]) for o in other], dtype=np.int8))
+        f.create_dataset("LIBRARY", data=np.array(library_order, dtype="S6"))
+        f.create_dataset("SIGMA_LIB_DEX", data=np.array(
+            [sigma_lib_dex[c] for c in library_order]))
 
 
 def build(config, regions=None):
@@ -317,9 +331,20 @@ def build(config, regions=None):
             print("fittp.library_resolution: %-5s n=%6d d50=%.3f d90=%.3f -- %s"
                   % (cls, n_t, d50, d90, "thick enough" if thick else "too thin"))
 
+        # SPEC_BMSTP_DRAFT.md sec 6.1: sigma_lib,L, one number per LIBRARY --
+        # the YSO register pooled (its five sub-grids' own spacings above
+        # stay a diagnostic, the register being one set, sec 1.4) -- for the
+        # fitter's per-band variance floor.
+        library_order = list(definitions.CLASS_REGISTER)
+        d50_yso_pooled = p50_all["POOLED"][0]
+        sigma_lib_dex = {"YSO": d50_yso_pooled * SIGMA_LIB_SCALE}
+        sigma_lib_dex.update({cls: d50 * SIGMA_LIB_SCALE for cls, _, d50, _, _ in other})
+        print("fittp.library_resolution: sigma_lib (dex, per library) = %s"
+              % {c: round(sigma_lib_dex[c], 4) for c in library_order})
+
         out_path = config_module.product_path(config, "fittp", "check", "library-resolution", "survey")
         _write(out_path, sigma_i, n_sample, n_total, groups, sizes_all, p50_all, p90_all,
-               deff_all, nstar_all, other)
+               deff_all, nstar_all, other, library_order, sigma_lib_dex)
 
         st.done(out_path, n_yso=names.size, worst_subgrid=worst,
                 n_star_at_0p5=round(n_star_worst))

@@ -126,6 +126,7 @@ PY sesnaimpute.bmstp.atlas   # the prior atlas, P6: per-pixel Monte Carlo select
 # imputed half (fittp.classify's FLUX_IMPUTED) is filled in by re-running this
 # same line after classify, once per region, once classify has written.
 PY sesnaimpute.fittp.cascade   # the colour cascade on the measured fluxes, Psi per source (SPEC_BMSTP sec 6.5)
+PY sesnaimpute.fittp.library_resolution   # SIGMA_LIB_DEX per library, the fit's per-band variance floor (SPEC_BMSTP sec 6.1)
 # One capped.sh process per class, so one class's peak resident is never summed with the class before it.
 for FIT_CLASS in STAR AGB PAHC GAL YSO H2S; do
   PY sesnaimpute.fittp.sweep --classes "$FIT_CLASS"   # the class evidence sweep, P7, batched (SPEC_BMSTP sec 1.3; IMPLEMENTATION_BMSTP sec 4 row 2.4)

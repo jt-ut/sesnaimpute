@@ -3,20 +3,27 @@ non-detection term (section 6.2), for every template of a library against a
 block of sources at once. A library module: no `progress` use, no runbook
 line (IMPLEMENTATION_BMSTP_DRAFT.md section 4 row 2.2).
 
-`prepare` builds, once per block of sources, the per-source design `X`, its
-normal matrix and projector, and the numbers the prior read needs (section
-1.3: `sigma_a`, the conditional slope). `fit` then reduces every template to
-two matrix products per source for the UNCONSTRAINED optimum the prior read
-integrates over, the CLAMPED marks for the reported record and the flux
-prediction, and the non-detection term at those clamped marks.
+`prepare` builds, once per block of sources and the block's own class/
+library, the per-source design `X`, its normal matrix and projector at the
+per-band variance `sigma_i^2 = sigma_log,i^2 + sigma_cal,i^2 +
+sigma_lib,L^2` (section 6.1; `sigma_lib,L` read from `fittp.
+library_resolution`'s check product for the class named), and the numbers
+the prior read needs (section 1.3: `sigma_a`, the conditional slope). `fit`
+then reduces every template to two matrix products per source for the
+UNCONSTRAINED optimum the prior read integrates over, the CLAMPED marks for
+the reported record and the flux prediction, and the non-detection term
+(plus section 6.1's per-source normalisation) at those clamped marks.
 """
 
 import math
 from collections import namedtuple
+from functools import lru_cache
 
+import h5py
 import numba
 import numpy as np
 
+from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute.catalog import limits as catalog_limits
 from sesnaimpute.population import selection as population_selection
@@ -39,6 +46,15 @@ MIN_DETECTED_BANDS = 2
 #: magnitudes; the design's own A_V amplitude is clamped to this converted
 #: by the source's own (A_K/A_V).
 AV_CLAMP_MAX_AK = 75.0
+
+#: SPEC_BMSTP_DRAFT.md section 6.1 -- the absolute-calibration systematic
+#: per band, dex, added in quadrature to the statistical log-flux error;
+#: `BAND_KEYS`' own order (2MASS J, H, Ks; IRAC I1-I4; MIPS M1).
+SIGMA_CAL_DEX = np.array([
+    0.010, 0.010, 0.010,          # 2MASS -- Skrutskie et al. 2006, AJ 131, 1163
+    0.013, 0.013, 0.013, 0.013,   # IRAC -- Reach et al. 2005, astro-ph/0507139
+    0.017,                        # MIPS 24 um -- Engelbracht et al. 2007, PASP 119, 994
+], dtype=np.float64)
 
 _SQRT2 = np.float32(np.sqrt(2.0))
 
@@ -141,14 +157,15 @@ class Batch:
     so `fit()`'s `matmul(r, M)` needs no per-call transpose -- `sigma_a`
     and the conditional slope (section 1.3), the extinction design column
     (`ext_col`) and the two scalars the clamp's re-solve uses (`s0`,
-    `w_sum`), and the per-band `F_LIM_50` and roll-off width `WIDTH_DEX`
-    (section 6.2).
+    `w_sum`), the per-band `F_LIM_50` and roll-off width `WIDTH_DEX`
+    (section 6.2), and `ln_norm_term`, section 6.1's per-source Gaussian
+    normalisation `-1/2 Sum_i ln sigma_i^2` at this block's class/library.
     """
 
     __slots__ = ("log10_f_obs", "weight", "P", "M", "ext_col", "s0", "w_sum",
                  "sigma_a_ak", "slope_sc_av", "ak_per_av",
                  "log10_f_lim50", "width_dex", "nondet_mask",
-                 "n_detected", "flagged")
+                 "n_detected", "flagged", "ln_norm_term")
 
     def __init__(self, **kw):
         for key, value in kw.items():
@@ -162,8 +179,24 @@ Fit = namedtuple("Fit", (
     "a_hat_clamped",         # (n, m) f4 -- for the reported record and flux prediction
     "log10_b_hat_clamped",   # (n, m) f4
     "frac_clamped",          # (n,)   f4 -- FRAC_CLAMPED, fraction of templates clamped
-    "ln_nondet",             # (n, m) f4 -- section 6.2, at the clamped marks
+    "ln_nondet",             # (n, m) f4 -- section 6.2 (clamped marks) plus
+                             # section 6.1's per-source ln_norm_term, the one
+                             # sum `fittp.sweep` already adds unscaled into ln L_hat
 ))
+
+
+@lru_cache(maxsize=None)
+def _sigma_lib_by_class(path):
+    """`{class code: sigma_lib,L dex}`, section 6.1's one number per LIBRARY,
+    from `fittp.library_resolution`'s check product (its `LIBRARY`/
+    `SIGMA_LIB_DEX` datasets). Cached on the product's own path: the file
+    is tiny (six numbers) but `prepare` is called once per block, so an
+    open+read per block would otherwise repeat needlessly (rule 9).
+    """
+    with h5py.File(path, "r") as f:
+        libs = np.char.decode(f["LIBRARY"][:].astype("S"), "utf-8")
+        sigma = f["SIGMA_LIB_DEX"][:]
+    return dict(zip(libs.tolist(), sigma.tolist()))
 
 
 def block_size(n_model, budget_mb=512, extra_buffers=0):
@@ -182,7 +215,7 @@ def block_size(n_model, budget_mb=512, extra_buffers=0):
     return max(1, (budget_mb << 20) // max(1, row_bytes))
 
 
-def prepare(config, region, start, stop, flux, sigma, origin, ak_col, width_dex):
+def prepare(config, region, cls, start, stop, flux, sigma, origin, ak_col, width_dex):
     """Source batch preparation (SPEC_BMSTP_DRAFT.md section 6.1): from one
     block's curated rows -- fluxes, uncertainties and `ORIGIN_FNU`, the
     same read `fittp.cascade` uses, for source rows `[start, stop)` of
@@ -191,21 +224,39 @@ def prepare(config, region, start, stop, flux, sigma, origin, ak_col, width_dex)
     `catalog.depths`, read once per region by the caller), builds the
     per-source design, weight and projector every template's fit reuses.
     `F_LIM_50` is `catalog.limits.limits`'s own per-source, per-band value
-    (the package's one definition), sliced to this block's rows.
+    (the package's one definition), sliced to this block's rows. `cls`
+    (the class this block's library belongs to, e.g. "YSO") selects the
+    one `sigma_lib,L` number the class's library carries
+    (`fittp.library_resolution`'s check product; the YSO register is one
+    set, so every YSO subclass shares it, section 1.4).
     """
     flux = np.asarray(flux, dtype=np.float64)
     sigma = np.asarray(sigma, dtype=np.float64)
     detected = np.asarray(origin) == 1
     n = flux.shape[0]
 
-    # log10 f_obs with the small-error log transform and its weight
-    # (section 6.1): sigma_log = sigma_f / (f ln 10), weight 1/sigma_log^2
-    # for detected bands, zero elsewhere (undetected bands never enter the
-    # sum: see the zero row/column of P below).
+    # section 6.1: the per-band variance is the statistical log-flux error
+    # in quadrature with the band's absolute-calibration systematic
+    # (SIGMA_CAL_DEX) and the class's library resolution (sigma_lib,L,
+    # one number, the same in every band): sigma_log = sigma_f/(f ln 10),
+    # weight 1/sigma_i^2 for detected bands, zero elsewhere (undetected
+    # bands never enter the sum: see the zero row/column of P below).
+    lib_path = config_module.product_path(config, "fittp", "check", "library-resolution", "survey")
+    sigma_lib_l = _sigma_lib_by_class(lib_path)[cls]
     safe_flux = np.where(detected & (flux > 0), flux, 1.0)
     log10_f_obs = np.log10(safe_flux)
     sigma_log = sigma / (safe_flux * np.log(10.0))
-    weight = np.where(detected & (sigma_log > 0), 1.0 / sigma_log ** 2, 0.0)
+    sigma2 = sigma_log ** 2 + SIGMA_CAL_DEX[None, :] ** 2 + sigma_lib_l ** 2
+    weight = np.where(detected & (sigma_log > 0), 1.0 / sigma2, 0.0)
+
+    # section 6.1: "ln L_hat gains -1/2 Sum_{i detected} ln sigma_i^2 per
+    # source and class" -- the Gaussian normalisation no longer cancels
+    # between classes once sigma_i depends on the library, so it is kept
+    # here as a per-source constant (one sigma_lib per class/library, so
+    # the same value at every template of this block's fit) and folded
+    # into `fit()`'s `ln_nondet` output, the one term `fittp.sweep` already
+    # adds unscaled into ln L_hat.
+    ln_norm_term = -0.5 * np.where(detected, np.log(sigma2), 0.0).sum(axis=1)
 
     # the blended extinction law at the source's own column (section 2):
     # kappa_hybrid is K-normalised (kappa_Ks = 1); multiplying by the same
@@ -275,7 +326,8 @@ def prepare(config, region, start, stop, flux, sigma, origin, ak_col, width_dex)
                  sigma_a_ak=sigma_a_ak, slope_sc_av=slope_sc_av, ak_per_av=ak_per_av,
                  log10_f_lim50=log10_f_lim50.astype(np.float32),
                  width_dex=width.astype(np.float32), nondet_mask=nondet_mask,
-                 n_detected=n_detected.astype(np.int8), flagged=flagged)
+                 n_detected=n_detected.astype(np.int8), flagged=flagged,
+                 ln_norm_term=ln_norm_term)
 
 
 def fit(batch, log10_f_ref):
@@ -304,7 +356,13 @@ def fit(batch, log10_f_ref):
       compared to the source's own `F_LIM_50,i` through the region-band
       roll-off width `WIDTH_DEX`, `ln[1 - C_i(f_hat_i)]` via the scaled
       complementary error function (`_ln_one_minus_c`), gathered per
-      source to only its own undetected bands (`_ln_nondet`).
+      source to only its own undetected bands (`_ln_nondet`), plus
+      `batch.ln_norm_term` (section 6.1's `-1/2 Sum_i ln sigma_i^2`, one
+      number per source, the same at every template of this block's
+      class/library): `ln_nondet` is exactly the one field `fittp.sweep`
+      adds unscaled into `ln L_hat = -1/2 chi2_min + ln_nondet`, so both
+      section 6.2's term and section 6.1's normalisation ride in it
+      without any change to that formula.
 
     Rows flagged at `prepare` (fewer than two detected bands, or a singular
     `XtWX`) are NaN throughout.
@@ -345,6 +403,7 @@ def fit(batch, log10_f_ref):
     av_clamped32 = av_clamped.astype(np.float32)
     sc_clamped32 = sc_clamped.astype(np.float32)
     ln_nondet = _ln_nondet(batch, log10_f_ref, av_clamped32, sc_clamped32)
+    ln_nondet = ln_nondet + batch.ln_norm_term[:, None].astype(np.float32)
 
     chi2_min[batch.flagged] = np.nan
     a_hat[batch.flagged] = np.nan
