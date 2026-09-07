@@ -10,12 +10,15 @@ is unthinned.
 
 This build writes STAR/AGB/PAHC (sec. 5.1-5.3, partitioning the field population:
 a star is a STAR or a PAHC member of the Monte Carlo, never both, weighted
-`W_STAR*(1-P_PAHC)`/`W_STAR*P_PAHC`) and GAL (sec. 5.4: SWIRE's four IRAC fluxes
+`W_STAR*(1-P_PAHC)`/`W_STAR*P_PAHC`), GAL (sec. 5.4: SWIRE's four IRAC fluxes
 per galaxy, S from the counts law's own node, colours from a galaxy measured at
-that node, at `x=1`). YSO and H2S (sec. 5.5-5.6) did not fit this unit's budget on
-top of the other four classes' own read chains; their `N_CAT_*`/`SHARE_*` columns
-are written as NaN and excluded from the total-count check, which is therefore
-reported for STAR+AGB+PAHC+GAL only, not the full six.
+that node, at `x=1`), YSO (sec. 5.5: Chabrier 2003 IMF masses through the BHAC15
+1 Myr isochrone -- MIST's own basic isochrone above BHAC15's top mass carries no
+band magnitudes, so it supplies only `(L, Teff)` for a bare Rayleigh-Jeans
+extrapolation anchored at Ks, disclosed -- placed along the sightline's own
+`p(u)`, sec. 5.5 "Population"/"Marks") and H2S (sec. 5.6: the region's 2.12 um
+lognormal carried into the bands by the measured knot line-to-band ratios, at
+YSO's own `x`). All six classes enter the total-count check.
 """
 
 import os
@@ -30,7 +33,12 @@ from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
+from sesnaimpute.population import h2s as h2s_module
 from sesnaimpute.population import selection as selection_module
+from sesnaimpute.population import yso as yso_module
+from sesnaimpute.population.yso_mass import AGE_1MYR_GYR, _read_mist_1myr_track
+from sesnaimpute.bmstp import density as density_module
+from sesnaimpute.bmstp import sample_cloud
 from sesnaimpute.bmstp import sample_gal
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
@@ -231,6 +239,213 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
 
 
 _ZP_MJY = {b.key: b.vega_zero_point_jy * 1000.0 for b in definitions.BANDS}
+_ZP_MJY_ARR = np.array([_ZP_MJY[k] for k in BAND_KEYS])
+
+#: Chabrier 2003 system IMF (SPEC_BMSTP_DRAFT.md sec. 10 "IMF", sec. 5.5
+#: "Population"): lognormal in log10 mass below 1 Msun, a power law above,
+#: continuous at the join; sampled between 0.1 and 150 Msun.
+IMF_M_C_MSUN = 0.2
+IMF_SIGMA_DEX = 0.55
+IMF_SLOPE_HIGH = 1.35
+IMF_M_LO_MSUN = 0.1
+IMF_M_HI_MSUN = 150.0
+_IMF_LOG10M_GRID = np.linspace(np.log10(IMF_M_LO_MSUN), np.log10(IMF_M_HI_MSUN), 4001)
+
+
+def _chabrier_pdf_unnorm(log10m):
+    """The Chabrier 2003 system IMF's `dN/d(log10 M)`, unnormalised
+    (sec. 5.5 "Population"): a lognormal below 1 Msun (`M_c`, `sigma`),
+    a power law of index `-IMF_SLOPE_HIGH` above, matched to the
+    lognormal's own value at 1 Msun so the two pieces join continuously."""
+    below = np.exp(-(log10m - np.log10(IMF_M_C_MSUN)) ** 2 / (2.0 * IMF_SIGMA_DEX ** 2))
+    join = np.exp(-np.log10(IMF_M_C_MSUN) ** 2 / (2.0 * IMF_SIGMA_DEX ** 2))
+    above = join * 10.0 ** (-IMF_SLOPE_HIGH * log10m)
+    return np.where(log10m <= 0.0, below, above)
+
+
+_IMF_PDF = _chabrier_pdf_unnorm(_IMF_LOG10M_GRID)
+_IMF_CDF = np.concatenate(([0.0], np.cumsum(
+    0.5 * (_IMF_PDF[1:] + _IMF_PDF[:-1]) * np.diff(_IMF_LOG10M_GRID))))
+_IMF_CDF /= _IMF_CDF[-1]
+
+
+def _draw_chabrier_mass(rng, n):
+    """`n` stellar masses (Msun) drawn from the Chabrier 2003 system IMF
+    by inverse-CDF interpolation on a fixed log10-mass grid (sec. 5.5
+    "Population": "their masses from the Chabrier 2003 system IMF")."""
+    log10m = np.interp(rng.random(n), _IMF_CDF, _IMF_LOG10M_GRID)
+    return 10.0 ** log10m
+
+
+def _bhac15_1myr_block(path, n_expected_min_cols):
+    """Every column of the BHAC15 1 Myr age block of `path` (either
+    filter file), mass-sorted (sec. 3.5, sec. 10 "isochrone"): the
+    author's own `! t (Gyr) =` age headers bracket each block, `!`-comment
+    lines and blank lines skipped."""
+    rows = []
+    age = None
+    with open(path) as f:
+        for line in f:
+            if "t (Gyr)" in line:
+                age = float(line.split("=")[1])
+                continue
+            stripped = line.strip()
+            if not stripped or stripped.startswith("!"):
+                continue
+            if age is not None and abs(age - AGE_1MYR_GYR) < 1.0e-6:
+                vals = [float(x) for x in stripped.split()]
+                if len(vals) >= n_expected_min_cols:
+                    rows.append(vals)
+    if not rows:
+        raise ValueError(f"bmstp.atlas: no {AGE_1MYR_GYR} Gyr block found in {path}")
+    return np.array(sorted(rows, key=lambda r: r[0]), dtype=np.float64)
+
+
+def _isochrone_table(config):
+    """`(mass, abs_mag)`, the YSO member SED table (SPEC_BMSTP_DRAFT.md
+    sec. 5.5 "Population", sec. 10 "isochrone"): BHAC15's 1 Myr photosphere
+    up to its own top mass (2MASS `Mj/Mh/Mk` from `BHAC15_iso.2mass`,
+    IRAC1-4/MIPS24=M1 from `BHAC15_iso.SPITZER`, the same mass grid in both
+    files), extended above that top by a bare Rayleigh-Jeans law anchored
+    at Ks: MIST v1.2's basic isochrone carries `(L, Teff)` but no band
+    magnitudes there (disclosed), so `Mk(M) = Mk_top - 2.5 log10([L/Teff^3]
+    (M) / [L/Teff^3](M_top))` (Stefan-Boltzmann's `R^2 ~ L/Teff^4` folded
+    into the Rayleigh-Jeans `F_nu ~ T R^2`), and every other band's colour
+    against Ks is the wavelength-only Rayleigh-Jeans law `F_nu ~ nu^2`."""
+    twomass_path = f"{config.data_root}/sky/download/baraffe2015_bhac15/BHAC15_iso.2mass"
+    spitzer_path = f"{config.data_root}/sky/download/baraffe2015_bhac15/BHAC15_iso.SPITZER"
+    tm = _bhac15_1myr_block(twomass_path, 9)   # M Teff L g R Li Mj Mh Mk
+    sp = _bhac15_1myr_block(spitzer_path, 13)  # M Teff L g R Li I1 I2 I3 I4 IRSb IRSr MIPS24 ...
+    if tm.shape[0] != sp.shape[0] or not np.allclose(tm[:, 0], sp[:, 0]):
+        raise ValueError("bmstp.atlas: BHAC15 2MASS/Spitzer 1 Myr mass grids disagree")
+
+    mass_lo = tm[:, 0]
+    abs_mag_lo = np.empty((mass_lo.size, N_BANDS), dtype=np.float64)
+    abs_mag_lo[:, BAND_KEYS.index("J")] = tm[:, 6]
+    abs_mag_lo[:, BAND_KEYS.index("H")] = tm[:, 7]
+    abs_mag_lo[:, BAND_KEYS.index("Ks")] = tm[:, 8]
+    abs_mag_lo[:, BAND_KEYS.index("I1")] = sp[:, 6]
+    abs_mag_lo[:, BAND_KEYS.index("I2")] = sp[:, 7]
+    abs_mag_lo[:, BAND_KEYS.index("I3")] = sp[:, 8]
+    abs_mag_lo[:, BAND_KEYS.index("I4")] = sp[:, 9]
+    abs_mag_lo[:, BAND_KEYS.index("M1")] = sp[:, 12]
+
+    m_top = float(mass_lo[-1])
+    log10l_top = float(tm[-1, 2])
+    teff_top = float(tm[-1, 1])
+    mk_top = float(abs_mag_lo[-1, BAND_KEYS.index("Ks")])
+
+    mist_mass, mist_log_l, mist_log_teff = _read_mist_1myr_track(config)
+    hi = mist_mass > m_top
+    mass_hi = mist_mass[hi]
+    if mass_hi.size:
+        d_log_lt3 = ((mist_log_l[hi] - 3.0 * mist_log_teff[hi])
+                     - (log10l_top - 3.0 * np.log10(teff_top)))
+        mk_hi = mk_top - 2.5 * d_log_lt3
+        abs_mag_hi = np.empty((mass_hi.size, N_BANDS), dtype=np.float64)
+        ks_wvl = definitions.BANDS_BY_KEY["Ks"].wvl_um
+        ks_zp = definitions.BANDS_BY_KEY["Ks"].vega_zero_point_jy
+        for k, band in enumerate(definitions.BANDS):
+            wvl_ratio = band.wvl_um / ks_wvl
+            zp_ratio = band.vega_zero_point_jy / ks_zp
+            abs_mag_hi[:, k] = mk_hi + 5.0 * np.log10(wvl_ratio) + 2.5 * np.log10(zp_ratio)
+        mass = np.concatenate([mass_lo, mass_hi])
+        abs_mag = np.concatenate([abs_mag_lo, abs_mag_hi], axis=0)
+    else:
+        mass, abs_mag = mass_lo, abs_mag_lo
+    return mass, abs_mag, m_top
+
+
+def _yso_flux0(mass, mass_grid, abs_mag_grid, d_r_pc):
+    """`(n, 8)` apparent mJy flux at the region distance (sec. 5.5):
+    each band's isochrone absolute magnitude (`np.interp` on the mass
+    grid, no per-star loop), scaled by the inverse-square law from the
+    isochrone's own 10 pc to `d_r_pc`."""
+    abs_mag = np.empty((mass.size, N_BANDS), dtype=np.float64)
+    for k in range(N_BANDS):
+        abs_mag[:, k] = np.interp(mass, mass_grid, abs_mag_grid[:, k])
+    return _ZP_MJY_ARR[None, :] * 10.0 ** (-0.4 * abs_mag) * (10.0 / d_r_pc) ** 2
+
+
+def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_in_sl,
+                          loaded_profile, mass_grid, abs_mag_grid, d_r_pc,
+                          logsig_mean, logsig_std, giannini_ratios, seed):
+    """One sightline's YSO and H2S Monte Carlo draws, shared by every
+    admitted pixel it parents: `(frac_yso, mc_yso, density_yso, frac_h2s,
+    mc_h2s)`. YSO (sec. 5.5): masses from the Chabrier IMF through the
+    isochrone, placed along the sightline's own `p(u)`
+    (`bmstp.sample_cloud.sample_yso`'s `(x, log10_b, w)` nodes, resampled
+    by their own weight into `N_MC` member placements); density
+    `population.yso.law_count`'s `kappa_arm * A_pixel^2 * (d_r*pi/180)^2`.
+    H2S (sec. 5.6): 2.12 um surface brightness from the region's own
+    `LOGSIG_MEAN`/`LOGSIG_STD` lognormal, carried into Ks
+    (`population.h2s.knot_ks_log10_flux`) and the four IRAC bands (a
+    Giannini colour-ratio vector drawn per member; J, H, M1 unmeasured,
+    zero flux, disclosed), at YSO's own `x`; H2S's own density (the
+    law-blurred field's pixel mean) is computed by the caller, not here."""
+    rng = np.random.RandomState(seed)
+
+    mass = _draw_chabrier_mass(rng, N_MC)
+    flux0_yso = _yso_flux0(mass, mass_grid, abs_mag_grid, d_r_pc)
+    x_nodes, _log10b_nodes, w_nodes = sample_cloud.sample_yso(loaded_profile, sl_row)
+    p_nodes = w_nodes / w_nodes.sum()
+    u_yso = x_nodes[rng.choice(x_nodes.size, size=N_MC, replace=True, p=p_nodes)]
+    frac_yso, mc_yso = _accepted_fraction(a_col_in_sl, u_yso, flux0_yso, f_lim_in_sl, config)
+    density_yso = yso_module.law_count(config, region, a_col_in_sl, arm_in_sl)
+
+    log10_sigma = rng.normal(logsig_mean, logsig_std, size=N_MC)
+    log10_f_ks = h2s_module.knot_ks_log10_flux(log10_sigma)
+    flux0_h2s = np.zeros((N_MC, N_BANDS), dtype=np.float64)
+    flux0_h2s[:, BAND_KEYS.index("Ks")] = 10.0 ** log10_f_ks
+    for band in h2s_module.IRAC_RATIO_BAND_KEYS:
+        table = giannini_ratios[band]
+        ratio_draw = table[rng.randint(0, table.size, size=N_MC)]
+        flux0_h2s[:, BAND_KEYS.index(band)] = 10.0 ** (log10_f_ks + ratio_draw)
+    u_h2s = x_nodes[rng.choice(x_nodes.size, size=N_MC, replace=True, p=p_nodes)]
+    frac_h2s, mc_h2s = _accepted_fraction(a_col_in_sl, u_h2s, flux0_h2s, f_lim_in_sl, config)
+
+    return frac_yso, mc_yso, density_yso, frac_h2s, mc_h2s
+
+
+def _h2s_law_blurred_mean(config, region, pix):
+    """`(n_pix,)`: the mean, over each admitted pixel's own catalogued
+    sources, of `population.h2s`'s per-source `N_LAW_BLURRED_DEG2` (sec.
+    5.6's "H2S members ... density the mean over the pixel's sources");
+    a pixel with no source falls back to its own nside-256 sightline's
+    mean, NaN if even that sightline carries no source."""
+    rs = access.region_slice(config, region)
+    hpx512_src = np.asarray(rs["hpx_pix_512"], dtype=np.int64)
+    hpx256_src = np.asarray(rs["hpx_pix_256"], dtype=np.int64)
+    path = config_module.product_path(
+        config, "population", "h2s", "law-blurred", "source", region=region)
+    with h5py.File(path, "r") as f:
+        law_blurred = np.asarray(f["N_LAW_BLURRED_DEG2"][:], dtype=np.float64)
+
+    def _grouped_mean(key):
+        uniq, inv = np.unique(key, return_inverse=True)
+        total = np.bincount(inv, weights=law_blurred, minlength=uniq.size)
+        count = np.bincount(inv, minlength=uniq.size)
+        return uniq, total / count
+
+    uniq_pix, mean_pix = _grouped_mean(hpx512_src)
+    order = np.argsort(uniq_pix)
+    loc = np.minimum(np.searchsorted(uniq_pix[order], pix), uniq_pix.size - 1)
+    hit = order[loc]
+    found = uniq_pix[hit] == pix
+    out = np.full(pix.size, np.nan, dtype=np.float64)
+    out[found] = mean_pix[hit[found]]
+
+    missing = ~found
+    if np.any(missing):
+        uniq_sl, mean_sl = _grouped_mean(hpx256_src)
+        parent = pix[missing] // 4
+        order_sl = np.argsort(uniq_sl)
+        loc_sl = np.minimum(np.searchsorted(uniq_sl[order_sl], parent), uniq_sl.size - 1)
+        hit_sl = order_sl[loc_sl]
+        found_sl = uniq_sl[hit_sl] == parent
+        idx_missing = np.where(missing)[0]
+        out[idx_missing[found_sl]] = mean_sl[hit_sl[found_sl]]
+    return out
 
 
 def _gal_members(config, rng, n_mc):
@@ -286,17 +501,17 @@ def _gal_members(config, rng, n_mc):
 def build_region(config, region):
     """Writes `bmstp/atlas/prior_atlas_hpx512__R.hdf5` for one region: the
     admitted pixel axis (`catalog.depth_grid`), its column and coverage,
-    and STAR/AGB/PAHC's `N_CAT_*`/`SHARE_*` from the per-tile Monte Carlo
-    selection above. GAL/YSO/H2S columns are NaN (module docstring)."""
+    and every class's `N_CAT_*`/`SHARE_*` from its own Monte Carlo
+    selection above (module docstring)."""
     with progress.Stage("bmstp.atlas", region) as st:
         pix, f_lim = _depth_grid(config, region)
         n_pix = pix.size
         coverage = _coverage(config, region, pix)
-        a_col, _arm = _pixel_column(config, pix)
+        a_col, arm = _pixel_column(config, pix)
         tile_of_pix = _pixel_tile(config, region, pix)
 
         n_cat = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
-        mc_err = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in ("STAR", "AGB", "PAHC")}
+        mc_err = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
 
         star_path = config_module.product_path(
             config, "population", "star", "population", "tile", region=region)
@@ -333,7 +548,52 @@ def build_region(config, region):
         n_cat["GAL"] = density_gal * frac_gal
         mc_err["GAL"] = mc_gal
 
-        built = ("STAR", "AGB", "PAHC", "GAL")
+        # YSO/H2S, sec. 5.5-5.6: grouped by the pixel's own nside-256
+        # sightline (YSO's grain), one Monte Carlo draw per sightline
+        # shared by every admitted pixel it parents.
+        reg = regions_module.REGIONS_BY_NAME[region]
+        d_r_pc = float(reg.d_r_pc)
+        mass_grid, abs_mag_grid, m_top = _isochrone_table(config)
+        loaded_profile = sample_cloud._region_profile(config, region)
+        giannini_ratios = h2s_module._load_giannini_ratios(config)
+        h2s_region_path = config_module.product_path(
+            config, "population", "h2s", "prior", "region", region=region)
+        with h5py.File(h2s_region_path, "r") as f:
+            logsig_mean = float(f["LOGSIG_MEAN"][()])
+            logsig_std = float(f["LOGSIG_STD"][()])
+
+        sl_axis = loaded_profile["hpx_pix_256"]
+        order_sl = np.argsort(sl_axis)
+        sl_parent = pix // 4
+        loc_sl = np.minimum(np.searchsorted(sl_axis[order_sl], sl_parent), sl_axis.size - 1)
+        hit_sl = order_sl[loc_sl]
+        has_sl = sl_axis[hit_sl] == sl_parent
+        sl_row_of_pix = np.where(has_sl, hit_sl, -1)
+        sls_here = sorted(set(int(r) for r in sl_row_of_pix[has_sl]))
+
+        def _one_sl(sl_row):
+            m = sl_row_of_pix == sl_row
+            f_y, e_y, d_y, f_h, e_h = _build_one_sightline(
+                config, region, sl_row, a_col[m], arm[m], f_lim[m],
+                loaded_profile, mass_grid, abs_mag_grid, d_r_pc,
+                logsig_mean, logsig_std, giannini_ratios, MC_SEED + 10_000 + sl_row)
+            return m, f_y, e_y, d_y, f_h, e_h
+
+        frac_h2s_pix = np.full(n_pix, np.nan, dtype=np.float64)
+        results_sl = Parallel(n_jobs=n_jobs)(delayed(_one_sl)(r) for r in sls_here)
+        for i, (m, f_y, e_y, d_y, f_h, e_h) in enumerate(results_sl):
+            n_cat["YSO"][m] = d_y * f_y
+            mc_err["YSO"][m] = e_y
+            mc_err["H2S"][m] = e_h
+            frac_h2s_pix[m] = f_h
+            st.tick(i + 1, len(sls_here), "sightlines")
+
+        law_blurred_mean = _h2s_law_blurred_mean(config, region, pix)
+        eta_r = density_module.ETA.get(region, density_module.ETA_ELSEWHERE)
+        density_h2s = law_blurred_mean * eta_r * density_module.EPS_EXT
+        n_cat["H2S"] = density_h2s * frac_h2s_pix
+
+        built = CLASSES
         built_total = np.nansum([n_cat[c] for c in built], axis=0)
         share = {c: n_cat[c] / built_total for c in built}
 
@@ -363,19 +623,19 @@ def build_region(config, region):
                 f.create_dataset(f"N_CAT_{c}", data=n_cat[c].astype(np.float32))
             for c in built:
                 f.create_dataset(f"SHARE_{c}", data=share[c].astype(np.float32))
-            for c in ("YSO", "H2S"):
-                f.create_dataset(f"SHARE_{c}", data=np.full(n_pix, np.nan, dtype=np.float32))
 
         def _max_mc_err(c):
             frac_c = n_cat[c] / (built_total + 1e-300)
             return float(np.nanmax(mc_err[c][frac_c > 0.1])) if np.any(frac_c > 0.1) else 0.0
 
         max_mc_err = max((_max_mc_err(c) for c in built), default=0.0) if n_pix else 0.0
-        st.done(path, n_pix=n_pix, n_tile=len(tiles_here), area_deg2=area_deg2,
+        st.done(path, n_pix=n_pix, n_tile=len(tiles_here), n_sightline=len(sls_here),
+                area_deg2=area_deg2, isochrone_top_msun=m_top,
                 total_predicted_built=total_predicted_built, total_observed=n_source,
                 ratio_star=ratio["STAR"], ratio_agb=ratio["AGB"], ratio_pahc=ratio["PAHC"],
-                ratio_gal=ratio["GAL"], ratio_built=ratio_built,
-                density_gal_deg2=density_gal, mc_error_max_where_frac_gt_0p1=max_mc_err)
+                ratio_gal=ratio["GAL"], ratio_yso=ratio["YSO"], ratio_h2s=ratio["H2S"],
+                ratio_built=ratio_built, density_gal_deg2=density_gal,
+                mc_error_max_where_frac_gt_0p1=max_mc_err)
     return path
 
 
