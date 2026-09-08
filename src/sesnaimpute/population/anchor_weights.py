@@ -21,18 +21,31 @@ every usable bin partially pooled toward the region in the log by the
 closed-form two-level moment estimator `shrink_log_normal` (quarry
 `anchor_reweighting.shrink_log_normal`, lifted unchanged).
 
-Cluster exclusion (section 2.1, "cluster exclusion"; decision 4) is two
-label-free masks, evaluated per tile: (i) the tile's own counting-
+Cluster exclusion (SPEC_BMSTP_DRAFT.md section 5.1, "clusters" row) is
+now one label-free mask, evaluated per tile: the tile's own counting-
 weighted pooled observed-over-predicted ratio, over every populated bin
 on both anchors, departs from the region's MEDIAN of that same statistic
 by more than `CLUSTER_EXCLUSION_BAND_DEX` (quarry
-`anchor_reweighting.cluster_excluded_tiles`, lifted); (ii) the tile
-overlaps a Hunt & Reffert 2023 bound cluster (A&A 673, A114; VizieR
+`anchor_reweighting.cluster_excluded_tiles`, lifted). A tile overlapping
+a Hunt & Reffert 2023 bound cluster (A&A 673, A114; VizieR
 J/A+A/673/A114, `sky/download/hunt_reffert2023/clusters.dat.gz`; their
 `Type` "o" open or "g" globular, not the unbound moving groups "m")
 within its own half-member radius `r50` (the measured radius holding
-half its members, where it is dense enough to distort a tile's count;
-SPEC_PRIORS.md 2.1) plus half the tile's own side (`L_STAR_DEG/2`).
+half its members, where it is dense enough to distort a tile's count)
+plus half the tile's own side (`L_STAR_DEG/2`) is NO LONGER excluded on
+that account: `population.anchor_observed` subtracts the cluster's own
+Gaia members from the tile's observed histogram, bin by bin, before this
+module ever forms a ratio, so the tile keeps its own (now
+cluster-cleaned) weights instead of losing its evidence outright.
+`cluster_excluded_tiles` (below) keeps computing the same geometric test
+-- `population.anchor_observed` calls it to decide which clusters'
+members are candidates for a region's subtraction, and this module still
+calls it too, only to report how many tiles it WOULD have excluded under
+the old rule, never to exclude them. Excluding whole tiles for any
+catalogued cluster had removed 58% of the survey's tiles and every tile
+of 14 regions (`studies/star_galaxy_level.md`), each of which fell back
+to the survey-pooled weight even where its own anchors disagreed with it
+by a factor of ~2.
 
 Faint end (decision 5): the tables stop at `G_EDGES`/`KS_EDGES`' own
 faint edges (the anchors' own limits); the log10 trend of the region-
@@ -90,8 +103,6 @@ FAINT_TREND_N_BINS = 3
 
 EXCLUSION_NONE = 0
 EXCLUSION_RATIO = 1
-EXCLUSION_CATALOGUE = 2
-EXCLUSION_BOTH = 3
 
 #: Hunt & Reffert 2023 (A&A 673, A114) `clusters.dat.gz`'s own byte
 #: layout (its ReadMe, "Byte-by-byte Description of file: clusters.dat"):
@@ -278,14 +289,20 @@ def _angular_sep_deg(l1_deg, b1_deg, l2_deg, b2_deg):
 
 
 def cluster_excluded_tiles(tile_l_deg, tile_b_deg, l_star_deg, clusters):
-    """Decision 4(ii): a tile whose centre sits within a Hunt & Reffert
-    2023 bound cluster's own half-member radius `r50` PLUS half the
-    tile's own side (`l_star_deg / 2`, this region's tile grid resolution
-    -- module docstring's "tile centre within r50 plus half the tile's
-    own extent"). `clusters` already carries only `Type` "o"/"g" entries
-    (`_read_hunt_reffert_clusters`). Returns the exclusion mask and, per
-    tile, the name of the nearest satisfying cluster (empty string where
-    none).
+    """The geometric overlap test (SPEC_BMSTP_DRAFT.md 5.1 "clusters"
+    row): a tile whose centre sits within a Hunt & Reffert 2023 bound
+    cluster's own half-member radius `r50` PLUS half the tile's own side
+    (`l_star_deg / 2`, this region's tile grid resolution -- "tile centre
+    within r50 plus half the tile's own extent"). `clusters` already
+    carries only `Type` "o"/"g" entries (`_read_hunt_reffert_clusters`).
+    Returns the overlap mask and, per tile, the name of the nearest
+    satisfying cluster (empty string where none).
+
+    This module no longer excludes a flagged tile (module docstring):
+    the mask is used here only to report how many tiles would have been
+    excluded under the old rule, and by `population.anchor_observed` to
+    pick which clusters' own members are candidates for a region's
+    subtraction.
     """
     n_t = tile_l_deg.size
     half_extent = 0.5 * float(l_star_deg)
@@ -306,20 +323,22 @@ def cluster_excluded_tiles(tile_l_deg, tile_b_deg, l_star_deg, clusters):
 # the per-axis and joint weight fit
 # ---------------------------------------------------------------------------
 
-def fit_tile_weights(n_obs, n_pred, cluster_excluded, min_counts=MIN_COUNTS,
+def fit_tile_weights(n_obs, n_pred, excluded, min_counts=MIN_COUNTS,
                       w_pool=None):
     """The per-tile, per-bin reweighting factor on one axis (`(n_tile,
     n_bin)`, the marginal `G`/`Ks` grid or the joint grid flattened to
     one bin axis): the sky's own count over the model's, shrunk toward
     the region-pooled value in the log by `shrink_log_normal`. A bin
-    below `min_counts` on either side, or a cluster-excluded tile, is
-    masked into the pooled fit for that bin -- not deleted, only pooled
-    (reading note 04B's `fit_tile_weights`) -- so its own stored weight
-    IS the region-pooled value with no separate override, and its
-    evidence never enters the pool other tiles shrink toward.
+    below `min_counts` on either side, or a ratio-excluded tile
+    (`cluster_excluded_by_ratio`; cluster overlap no longer excludes a
+    tile, module docstring), is masked into the pooled fit for that bin
+    -- not deleted, only pooled (reading note 04B's `fit_tile_weights`)
+    -- so its own stored weight IS the region-pooled value with no
+    separate override, and its evidence never enters the pool other
+    tiles shrink toward.
 
     Owner ruling 2026-09-06, item 1: a bin with NO unmasked tile at all
-    (every tile in the region is below the counting floor or cluster-
+    (every tile in the region is below the counting floor or ratio-
     excluded) no longer stays at unity. It takes `w_pool[k]`, the
     SURVEY-POOLED ratio for this bin (`survey_pooled_weights`, summed
     over every region's own populated tiles) -- never 1.0, the
@@ -348,7 +367,7 @@ def fit_tile_weights(n_obs, n_pred, cluster_excluded, min_counts=MIN_COUNTS,
     populated = np.zeros(n_bin, dtype=bool)
     pooled = np.zeros(n_bin, dtype=bool)
     for k in range(n_bin):
-        mask_k = low_counts[:, k] | unmeasured[:, k] | cluster_excluded
+        mask_k = low_counts[:, k] | unmeasured[:, k] | excluded
         if np.all(mask_k):
             # no tile in THIS region carries a usable count in this bin:
             # no region evidence to reweight or pool by, so fall back to
@@ -409,13 +428,15 @@ def region_tile_counts(config, region, clusters, min_counts=MIN_COUNTS):
 
     ratio_mask = cluster_excluded_by_ratio(n_obs_g, n_pred_g, n_obs_ks, n_pred_ks)
     excluded_ratio = ratio_mask["excluded"]
+    # the catalogue overlap test no longer excludes a tile (module
+    # docstring): population.anchor_observed has already subtracted
+    # those clusters' own members from n_obs_g/n_obs_ks/n_obs_joint
+    # above. `excluded_catalog` is kept only to report, per region, how
+    # many tiles the old rule would have thrown away.
     excluded_catalog, nearest_cluster = cluster_excluded_tiles(
         tiles["tile_l_deg"], tiles["tile_b_deg"], tiles["l_star_deg"], clusters)
-    excluded = excluded_ratio | excluded_catalog
-    reason = np.full(n_tile, EXCLUSION_NONE, dtype=np.int64)
-    reason[excluded_ratio & ~excluded_catalog] = EXCLUSION_RATIO
-    reason[~excluded_ratio & excluded_catalog] = EXCLUSION_CATALOGUE
-    reason[excluded_ratio & excluded_catalog] = EXCLUSION_BOTH
+    excluded = excluded_ratio
+    reason = np.where(excluded_ratio, EXCLUSION_RATIO, EXCLUSION_NONE).astype(np.int64)
 
     return dict(
         region=region, n_tile=n_tile, tiles=tiles, hist=hist, obs=obs,
@@ -677,9 +698,11 @@ def build_region(config, region, clusters, w_pool_g, w_pool_ks):
         n_obs_joint=n_obs_joint, n_pred_joint=n_pred_joint, w_joint=w_joint,
         w_region_joint=w_region_joint, use_joint=use_joint,
         excluded=excluded, reason=reason, nearest_cluster=nearest_cluster,
-        n_excluded_ratio=int(np.count_nonzero(excluded_ratio & ~excluded_catalog)),
-        n_excluded_catalog=int(np.count_nonzero(~excluded_ratio & excluded_catalog)),
-        n_excluded_both=int(np.count_nonzero(excluded_ratio & excluded_catalog)),
+        n_excluded_ratio=int(np.count_nonzero(excluded_ratio)),
+        # the old rule's tile count, for the report only (module
+        # docstring): no longer subtracted into `excluded`.
+        n_previously_catalog_excluded=int(np.count_nonzero(excluded_catalog)),
+        n_freed_by_subtraction=int(np.count_nonzero(excluded_catalog & ~excluded_ratio)),
         clusters_hit=sorted(set(nearest_cluster[excluded_catalog].tolist())),
         faint_trend_g=faint_g, faint_trend_ks=faint_ks,
         max_identity_dev=max_identity_dev, n_identity_checked=int(np.count_nonzero(check_mask)),
@@ -745,13 +768,15 @@ def build(config, regions=None):
 
         w_all = np.concatenate([result["w_g"].ravel(), result["w_ks"].ravel()])
         print(
-            "prior.anchor_weights: %s tiles=%d excluded(ratio=%d catalog=%d both=%d) "
-            "clusters=%s W_region_G=[%.3f,%.3f] W_region_Ks=[%.3f,%.3f] W_range=[%.3f,%.3f] "
+            "prior.anchor_weights: %s tiles=%d excluded(ratio=%d) "
+            "previously_catalog_excluded=%d freed_by_subtraction=%d clusters=%s "
+            "W_region_G=[%.3f,%.3f] W_region_Ks=[%.3f,%.3f] W_range=[%.3f,%.3f] "
             "faint_slope_G=%.3f faint_slope_Ks=%.3f identity_max_dev=%.2e (n=%d) "
             "region_pooled_max_reldev=%.4f scatter_obs=%.3f scatter_expected=%.3f "
             "gaia_2mass_disagree_frac=%.3f -> %s"
-            % (region, result["n_tile"], result["n_excluded_ratio"], result["n_excluded_catalog"],
-               result["n_excluded_both"], result["clusters_hit"] or "[]",
+            % (region, result["n_tile"], result["n_excluded_ratio"],
+               result["n_previously_catalog_excluded"], result["n_freed_by_subtraction"],
+               result["clusters_hit"] or "[]",
                float(result["w_region_g"].min()), float(result["w_region_g"].max()),
                float(result["w_region_ks"].min()), float(result["w_region_ks"].max()),
                float(w_all.min()), float(w_all.max()),

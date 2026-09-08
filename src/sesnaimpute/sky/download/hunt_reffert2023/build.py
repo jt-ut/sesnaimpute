@@ -2,12 +2,20 @@
 
 Hunt E.L., Reffert S. 2023, "Improving the open cluster census. II. An
 all-sky cluster catalogue with Gaia DR3", A&A 673, A114. VizieR
-J/A+A/673/A114. Fetches the ReadMe and the main cluster table
+J/A+A/673/A114. Fetches the ReadMe, the main cluster table
 (`clusters.dat.gz`, one row per cluster, carrying RAdeg, DEdeg, r50, rc,
-rt, rtot) verbatim, byte-for-byte, gzipped as distributed.
+rt, rtot), and the member-star table (`members.dat`, one row per member
+star of a catalogued cluster, carrying the cluster Name, Gaia DR3 source
+id, membership probability `Prob`, RA/Dec, GLON/GLAT, and G/BP/RP
+photometry -- the ReadMe's "Byte-by-byte Description of file:
+members.dat"), each verbatim, byte-for-byte, in whatever compression the
+archive currently serves it in (`clusters.dat.gz` gzipped; `members.dat`
+plain -- the archive does not gzip it, unlike the cluster table).
 
 Feeds SPEC_PRIORS.md section 2.1 (STAR: cluster exclusion mask, ratio and
-catalogue test against the tidal radius `rt`).
+catalogue test against the tidal radius `rt`) and SPEC_BMSTP_DRAFT.md
+section 5.1's "clusters" row (STAR: cluster-member subtraction from the
+observed anchor histogram, `population.anchor_observed`).
 """
 
 from sesnaimpute import progress as progress_module
@@ -15,7 +23,7 @@ from sesnaimpute.build import run
 from sesnaimpute.sky.download._fetch import fetch
 
 _BASE_URL = "https://cdsarc.cds.unistra.fr/ftp/J/A+A/673/A114"
-_FILES = ("ReadMe", "clusters.dat.gz")
+_FILES = ("ReadMe", "clusters.dat.gz", "members.dat")
 
 
 def build(config, regions=None):
