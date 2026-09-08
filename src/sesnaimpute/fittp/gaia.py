@@ -33,7 +33,10 @@ limit") then summing per star over tiles is a second join this term does
 not carry -- disclosed, not silently guessed (brief's own fallback).
 """
 
+import math
+
 import h5py
+import numba
 import numpy as np
 
 from sesnaimpute import config as config_module
@@ -89,6 +92,23 @@ STAR_MARGINAL_CLASSES = ("star", "agb", "pahc")
 STAR_MARGINAL_BIN_WIDTH_MAS = 0.0125
 
 _SQRT_2PI = np.sqrt(2.0 * np.pi)
+
+
+@numba.njit(parallel=True, cache=True)
+def _gaia_h_kernel(gmag_flat, out):
+    """`H_h = sigmoid((G_LIM - Gmag_h) / TAU_G)` for every (source,
+    template) pair, flattened (`population.anchor_tiles.
+    gaia_detection_weight`'s own algebra, one `exp` per pair -- the
+    floor), `@njit(parallel=True)` over the block's own pairs via
+    `prange` rather than numpy's single-threaded `exp` (W9c: `ln_gamma`'s
+    hot loop, 10_POSTERIOR.md T13).
+    """
+    n = gmag_flat.shape[0]
+    for i in numba.prange(n):
+        arg = -(GAIA_G_LIM_MAG - gmag_flat[i]) / GAIA_G_ROLLOFF_MAG
+        if arg > 700.0:
+            arg = 700.0
+        out[i] = 1.0 / (1.0 + math.exp(arg))
 
 
 def _normal_pdf(x, mean, sigma):
@@ -222,8 +242,19 @@ class GaiaTerm:
             path = f"{self.config.inputs['sed_models']}/registers/{_REGISTER_FILE[cls]}"
             with h5py.File(path, "r") as f:
                 m = f["models"]
+                g0_flux = m["G0_FLUX"][:].astype(np.float64)
+                # G0MAG: the template's own unextincted, unscaled Gaia G
+                # magnitude, from G0_FLUX once per template at construction
+                # (W9c) -- `ln_gamma`'s per-pair Gmag_h is then the additive
+                # G0MAG - 2.5 log10_b + A_G, so no per-pair log10/power
+                # round trip through flux space is needed. NaN (no G-band
+                # coverage) and 0 (dark model, log10(0) = -inf) both pass
+                # through quietly, exactly as G0_FLUX itself does.
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    g0_mag = -2.5 * np.log10(g0_flux / constants.GAIA_G_VEGA_ZP_MJY)
                 cached = dict(
-                    g0_flux=m["G0_FLUX"][:].astype(np.float64),
+                    g0_flux=g0_flux,
+                    g0_mag=g0_mag,
                     kg_draine=m["KG_DRAINE"][:].astype(np.float64),
                     kg_whitney=m["KG_WHITNEY"][:].astype(np.float64),
                 )
@@ -296,6 +327,7 @@ class GaiaTerm:
 
         reg = self._register(cls)
         g0 = reg["g0_flux"][model_index]
+        g0_mag = reg["g0_mag"][model_index]
         kg_draine = reg["kg_draine"][model_index]
         kg_whitney = reg["kg_whitney"][model_index]
 
@@ -315,11 +347,15 @@ class GaiaTerm:
         kappa_g = (1.0 - w) * (kg_draine[None, :] / r_diffuse) + w * (kg_whitney[None, :] / r_dense)
         a_g = a * kappa_g
 
-        b = 10.0 ** log10_b
-        with np.errstate(divide="ignore", invalid="ignore"):
-            g_flux = g0[None, :] * b * 10.0 ** (-0.4 * a_g)
-            gmag = -2.5 * np.log10(g_flux / constants.GAIA_G_VEGA_ZP_MJY)
-        h = gaia_detection_weight(gmag)
+        # Gmag_h = G0MAG - 2.5 log10_b + A_G (W9c: the same magnitude the
+        # old flux-space round trip computed -- g_flux = G0_FLUX * B_hat *
+        # 10^(-0.4 A_G), Gmag = -2.5 log10(g_flux/ZP) -- reached without a
+        # per-pair log10 or power call over the (n_block, n_model) array;
+        # only G0MAG (once per template, at register construction) ever
+        # takes a log10).
+        gmag = g0_mag[None, :] - 2.5 * log10_b + a_g
+        h = np.empty(gmag.shape, dtype=np.float64)
+        _gaia_h_kernel(np.ascontiguousarray(gmag.ravel()), h.ravel())
         # G0_FLUX = NaN (no G-band coverage, not darkness) -> H = 0
         # exactly; a dark model's G0_FLUX = 0 already drives Gmag to +inf
         # and H to 0 through the sigmoid's own limit, no special case.

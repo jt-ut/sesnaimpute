@@ -214,8 +214,15 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
     timing["moments"] += time.perf_counter() - t
 
     t = time.perf_counter()
-    flux_mean = np.einsum("nm,nmb->nb", p_theta, flux_theta)
-    flux_m2 = np.einsum("nm,nma,nmb->nab", p_theta, flux_theta, flux_theta)
+    # the posterior mean and second moment of the model-space flux, as
+    # two two-operand matmuls rather than the three-operand einsum (W9c:
+    # the einsum's optimizer built an (n_block, n_model, 8, 8) outer-
+    # product intermediate to reach the same contraction a batched gemm
+    # does directly). flux_mean is p_theta contracted against flux_theta's
+    # model axis; flux_m2's (n_block, 8, 8) band-band matrix is
+    # (p_theta-weighted flux_theta)^T @ flux_theta per source.
+    flux_mean = np.matmul(p_theta[:, None, :], flux_theta)[:, 0, :]
+    flux_m2 = np.matmul((p_theta[:, :, None] * flux_theta).transpose(0, 2, 1), flux_theta)
     flux_cov = flux_m2 - flux_mean[:, :, None] * flux_mean[:, None, :]
     timing["moments"] += time.perf_counter() - t
 
