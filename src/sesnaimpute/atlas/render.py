@@ -523,10 +523,16 @@ def build_prior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAG
         total_observed = float(prior["attrs"].get("TOTAL_OBSERVED", np.nan))
         surveyed_area = float(prior["attrs"].get("SURVEYED_AREA_DEG2", np.nan))
         ratio_po = total_predicted / total_observed if total_observed else float("nan")
+        # sec. 9's bright-end check: the same total-count ratio above
+        # 3x/10x the pixel's own I2 50% limit, where completeness is 1 on
+        # both the catalog and the model side (`bmstp.atlas`).
+        bright3 = float(prior["attrs"].get("RATIO_BRIGHT3", np.nan))
+        bright10 = float(prior["attrs"].get("RATIO_BRIGHT10", np.nan))
         ratio_line = "total-count ratio: " + ", ".join(
             "%s %.3g" % (cls, ratio) for cls, ratio in ratios)
-        title = ("%s -- predicted/observed = %.4g/%.4g = %.3f, surveyed area %.4g deg$^2$"
-                  % (region, total_predicted, total_observed, ratio_po, surveyed_area))
+        title = ("%s -- predicted/observed = %.4g/%.4g = %.3f, surveyed area %.4g deg$^2$, "
+                  "bright3 = %.3f, bright10 = %.3f"
+                  % (region, total_predicted, total_observed, ratio_po, surveyed_area, bright3, bright10))
         fig.suptitle(title + "\n" + ratio_line, fontsize=11, y=1.0 - 0.10 / page_h)
 
         out_dir = os.path.join(config.data_root, "bmstp", "atlas", "figures")
