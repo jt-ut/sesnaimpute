@@ -91,19 +91,23 @@ def _depth_grid(config, region):
 
 
 def _coverage(config, region, pix):
-    """The IRAC coverage fraction at each admitted pixel (sec. 3.3's
-    "coverage", sec. 8's catalogue definition): the union of the four IRAC
-    bands' fraction from `sky.derived.coverage`'s five-band `FRAC` at
-    `hpx512` granule (MIPS-24 excluded; it covers far more sky than IRAC
-    and the catalogue is IRAC-defined), 0 where a pixel is absent from
-    that product (never observed in any Spitzer band). `FRAC` stores each
-    band's fraction separately rather than the union itself, so the
-    per-band max is the union's lower bound (0.1072 of 0.1076 deg^2 at
-    NGC 7129, 5.111 of 5.113 deg^2 at Perseus)."""
-    path = config_module.product_path(config, "sky/derived", "spitzer", "coverage", "hpx512", region=region)
+    """The catalogue's own IRAC footprint at each admitted pixel (sec.
+    3.3's "coverage", sec. 8's catalogue definition): `catalog.coverage`'s
+    `FRAC`, the fraction of the pixel's 16 nside-2048 children holding a
+    catalogued source with a measured IRAC flux -- replaces
+    `sky.derived.coverage`'s Spitzer field-mask union, whose native masks
+    are missing mosaics outright for Pipe and Auriga-California
+    (`studies/count_discrepancy.md`, cause 1). `catalog.coverage` writes
+    one row per admitted pixel, the same axis as `pix` (`catalog.
+    depth_grid`'s own), so this is a direct read, not a join."""
+    path = config_module.product_path(config, "catalog", "sesna", "coverage", "hpx512", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "bmstp.atlas: no catalogue coverage for %s at %s -- run the "
+            "'catalog.coverage' RUNBOOKtp.sh line first" % (region, path))
     with h5py.File(path, "r") as f:
         cov_pix = np.asarray(f["HPX_PIX"][:], dtype=np.int64)
-        frac = np.asarray(f["FRAC"][:], dtype=np.float64)[:, :4].max(axis=1)
+        frac = np.asarray(f["FRAC"][:], dtype=np.float64)
     order = np.argsort(cov_pix)
     loc = np.searchsorted(cov_pix[order], pix)
     loc = np.minimum(loc, cov_pix.size - 1)
