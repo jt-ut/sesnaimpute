@@ -27,6 +27,7 @@ YSO's own `x`). All six classes enter the total-count check.
 import os
 
 import h5py
+import healpy as hp
 import numpy as np
 from joblib import Parallel, delayed
 
@@ -41,6 +42,7 @@ from sesnaimpute.population import selection as selection_module
 from sesnaimpute.population import yso as yso_module
 from sesnaimpute.population.yso_mass import AGE_1MYR_GYR, _read_mist_1myr_track
 from sesnaimpute.bmstp import density as density_module
+from sesnaimpute.bmstp import knot_field
 from sesnaimpute.bmstp import sample_cloud
 from sesnaimpute.bmstp import sample_gal
 from sesnaimpute.fittp import likelihood as likelihood_module
@@ -689,12 +691,31 @@ def build_region(config, region):
             density_yso_pix[m] = d_y
             st.tick(i + 1, len(sls_here), "sightlines")
 
-        # H2S, sec. 5.6 "Sky density": `A_H2S = A_YSO . eta_r . eps_ext`
-        # at the pixel's own column -- the same young-star law density
-        # `density_yso_pix` above, no spatial kernel.
+        # H2S, sec. 5.6 "Sky density": `A_H2S = L . eta_r . eps_ext`. `L` is
+        # the young-star law at the pixel's own column (`density_yso_pix`
+        # above) EXCEPT on the Herschel arm, where it is the region's
+        # convolved law map (`bmstp.knot_field.convolved_law`) averaged
+        # over the pixel's own area (item 3: the mean of L over the
+        # pixel, not a single nearest sample -- a pixel is much larger
+        # than the map's own downsampled grid); a Planck pixel, or a
+        # Herschel pixel the convolved map does not reach, keeps the law
+        # at its own column.
         eta_r = density_module.ETA.get(region, density_module.ETA_ELSEWHERE)
-        density_h2s = density_yso_pix * eta_r * density_module.EPS_EXT
+        law_map, law_wcs, knot_meta = knot_field.convolved_law(config, region)
+        l_of_pix = density_yso_pix.copy()
+        herschel_pix = arm == yso_module.PROVENANCE_HERSCHEL
+        if law_map is not None and herschel_pix.any():
+            gl_pix, gb_pix = hp.pix2ang(512, pix[herschel_pix], nest=True, lonlat=True)
+            width_deg = float(np.sqrt(_HPX512_PIXEL_DEG2))
+            l_convolved = knot_field.mean_over_area(law_map, law_wcs, gl_pix, gb_pix,
+                                                      width_deg, frame="galactic")
+            finite = np.isfinite(l_convolved)
+            idx = np.flatnonzero(herschel_pix)
+            l_of_pix[idx[finite]] = l_convolved[finite]
+        density_h2s_before = density_yso_pix * eta_r * density_module.EPS_EXT
+        density_h2s = l_of_pix * eta_r * density_module.EPS_EXT
         n_cat["H2S"] = density_h2s * frac_h2s_pix
+        n_cat_h2s_before = density_h2s_before * frac_h2s_pix
 
         built = CLASSES
         # every admitted pixel now has every class's `N_CAT` (finding 3
@@ -715,6 +736,15 @@ def build_region(config, region):
         ratio = {c: float(np.sum(n_cat[c] * coverage) * _HPX512_PIXEL_DEG2) / n_source
                  if n_source else float("nan") for c in built}
         ratio_built = total_predicted_built / n_source if n_source else float("nan")
+
+        # sec. 5.6's brief report: RATIO_H2S before (the pre-W5k law at the
+        # pixel's own column, no kernel) and after (this unit's convolved
+        # law on the Herschel arm) -- the same total-count ratio the other
+        # classes get, sec. 8.
+        ratio_h2s_before = (float(np.sum(n_cat_h2s_before * coverage) * _HPX512_PIXEL_DEG2) / n_source
+                             if n_source else float("nan"))
+        print(f"bmstp.atlas {region}: RATIO_H2S before={ratio_h2s_before:.6g} "
+              f"after={ratio['H2S']:.6g} (sec. 5.6's convolution vs. the law at the pixel's own column)")
 
         path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
         os.makedirs(os.path.dirname(path), exist_ok=True)
