@@ -475,30 +475,13 @@ def build_curve(q, excess8, excess45, region_idx, n_region, n_bins=N_Q_BINS):
 # 4. write, read
 # ---------------------------------------------------------------------------
 
-def write_curve(path, curve, colour_edges, colour_medians, colour_widths,
-                 colour45_median, residual_width_mag, residual_width_45_mag):
+def write_curve(path, curve):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "survey"
         f.create_dataset("LOG10_Q_EDGES", data=curve["edges"].astype(np.float64))
         f.create_dataset("P_Q", data=curve["p_a"].astype(np.float64))
-        f.create_dataset("P_Q_RAW", data=curve["p_a_raw"].astype(np.float64))
-        f.create_dataset("FLOOR", data=np.float64(curve["floor"]))
         f.create_dataset("N_PER_BIN", data=curve["n_a"].astype(np.int64))
-        f.create_dataset("P_Q_DISK_EXCESS", data=curve["p_b_raw"].astype(np.float64))
-        f.create_dataset("P_Q_REGION", data=curve["p_region"].astype(np.float64))
-        f.create_dataset("N_PER_BIN_REGION", data=curve["n_region_bin"].astype(np.int64))
-
-        cr = f.create_group("COLOUR_RELATION")
-        cr.create_dataset("EDGES", data=colour_edges.astype(np.float64))
-        cr.create_dataset("MEDIANS", data=colour_medians.astype(np.float64))
-        cr.create_dataset("WIDTHS", data=colour_widths.astype(np.float64))
-
-        f.create_dataset("COLOUR_45_MEDIAN", data=np.float64(colour45_median))
-        # the shelf population's own robust residual widths, final
-        # iteration (SPEC_PRIORS.md section 4, module docstring)
-        f.create_dataset("RESIDUAL_WIDTH_MAG", data=np.float64(residual_width_mag))
-        f.create_dataset("RESIDUAL_WIDTH_45_MAG", data=np.float64(residual_width_45_mag))
 
 
 def read(config):
@@ -610,8 +593,7 @@ def build(config, regions=None):
     curve = build_curve(q, excess8, excess45, region_idx, len(region_names))
 
     out_path = config_module.product_path(config, "population", "pahc", "curve", "survey")
-    write_curve(out_path, curve, colour_edges, colour_medians, colour_widths,
-                colour45_median, width48, width45)
+    write_curve(out_path, curve)
 
     st.done(out_path, n_shipped=curve["n_shipped"], n_disk_excess=curve["n_disk_excess"],
             floor=curve["floor"])
