@@ -85,7 +85,12 @@ def _equal_dataset(a, b):
 
 def _compare_file(pop_path, bms_path, label, module):
     _require(pop_path, module)
-    _require(bms_path, module)
+    if not os.path.exists(bms_path):
+        # the identity is against what the old design built; only the
+        # regions the old design finished (NGC 7129, Perseus) have a full
+        # `bms/` twin, so a missing one is not a build failure here.
+        print(f"population.check: {label}: no bms/ twin", flush=True)
+        return True
     with h5py.File(pop_path, "r") as fp, h5py.File(bms_path, "r") as fb:
         names = sorted(set(fp.keys()) | set(fb.keys()))
         # descend into groups (e.g. star_population's per-tile groups)

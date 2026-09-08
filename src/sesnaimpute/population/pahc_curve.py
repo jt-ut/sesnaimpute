@@ -182,6 +182,16 @@ def _chunks(seq, size):
     return [seq[i:i + size] for i in range(0, len(seq), size)]
 
 
+def _field_star_path(config, region):
+    path = config_module.product_path(
+        config, "population", "trilegal", "field-stars", "region", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"prior.pahc_curve: field-star product missing for region {region!r} "
+            f"at {path!r} -- run the 'prior.field_stars' RUNBOOK line first")
+    return path
+
+
 def load_field_star_colours(config, region_names):
     """Reads the retained TRILEGAL population's own intrinsic fluxes
     (`population.field_stars`) for every region in `region_names`, pooled with
@@ -189,26 +199,40 @@ def load_field_star_colours(config, region_names):
     `[4.5]-[8.0]`, Vega mag, on this project's own zero points
     (`constants.VEGA_ZERO_POINT_MJY`) -- the same zero points SESNA's own
     magnitudes below are read on.
+
+    Each region's own 8-band flux array is read and reduced to its two
+    colours inside the worker that reads it (`_one_region`), so only the
+    two `(n_region,)` colour columns -- not the full flux array -- ever
+    cross back to this process; those columns are written straight into
+    two arrays preallocated to the survey total (CODING_RULES.md 10a),
+    never pooled through a growing list and `np.concatenate` (no region's
+    flux array, and no other region's colours, are held at once beyond one
+    `n_jobs`-wide chunk).
     """
     def _one_region(region):
-        path = config_module.product_path(
-            config, "population", "trilegal", "field-stars", "region", region=region)
-        if not os.path.exists(path):
-            raise FileNotFoundError(
-                f"prior.pahc_curve: field-star product missing for region {region!r} "
-                f"at {path!r} -- run the 'prior.field_stars' RUNBOOK line first")
-        with h5py.File(path, "r") as f:
-            return f["FNU_MJY"][:]
+        with h5py.File(_field_star_path(config, region), "r") as f:
+            fnu = f["FNU_MJY"][:]
+        mag = -2.5 * np.log10(fnu / ZERO_POINT_MJY[None, :])
+        return mag[:, IDX_I1] - mag[:, IDX_I2], mag[:, IDX_I2] - mag[:, IDX_I4]
 
-    parts = []
+    def _n_star(region):
+        with h5py.File(_field_star_path(config, region), "r") as f:
+            return f["FNU_MJY"].shape[0]
+
+    counts = [_n_star(r) for r in region_names]
+    c12_all = np.empty(sum(counts), dtype=np.float64)
+    c48_all = np.empty(sum(counts), dtype=np.float64)
+
+    cursor = 0
     for chunk in _chunks(region_names, config.n_jobs):
-        parts.extend(Parallel(n_jobs=config.n_jobs)(delayed(_one_region)(r) for r in chunk))
-    fnu = np.concatenate(parts, axis=0)
-    mag = -2.5 * np.log10(fnu / ZERO_POINT_MJY[None, :])
-    c12 = mag[:, IDX_I1] - mag[:, IDX_I2]
-    c48 = mag[:, IDX_I2] - mag[:, IDX_I4]
-    finite = np.isfinite(c12) & np.isfinite(c48)
-    return c12[finite], c48[finite]
+        for c12, c48 in Parallel(n_jobs=config.n_jobs)(delayed(_one_region)(r) for r in chunk):
+            n = c12.size
+            c12_all[cursor:cursor + n] = c12
+            c48_all[cursor:cursor + n] = c48
+            cursor += n
+
+    finite = np.isfinite(c12_all) & np.isfinite(c48_all)
+    return c12_all[finite], c48_all[finite]
 
 
 def colour_relation(c12, c48, bin_width=COLOUR_BIN_WIDTH_MAG,
