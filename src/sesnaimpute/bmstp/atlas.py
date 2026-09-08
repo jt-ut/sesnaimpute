@@ -497,8 +497,11 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_i
     `LOGSIG_MEAN`/`LOGSIG_STD` lognormal, carried into Ks
     (`population.h2s.knot_ks_log10_flux`) and the four IRAC bands (a
     Giannini colour-ratio vector drawn per member; J, H, M1 unmeasured,
-    zero flux, disclosed), at YSO's own `x`; H2S's own density (the
-    law-blurred field's pixel mean) is computed by the caller, not here.
+    zero flux, disclosed), at YSO's own `x`; H2S's own density is
+    `density_yso * eta_r * eps_ext` (sec. 5.6 "Sky density", the same
+    young-star law density scaled by the region's knot rate and
+    extraction fraction), computed by the caller from this same
+    `density_yso`, not here.
     `width_dex` is this sightline's own pixels' `W_DEX_PIX` (n_pix_in_sl, 8),
     not one region-band constant."""
     rng = np.random.RandomState(seed)
@@ -523,47 +526,6 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_i
     frac_h2s, mc_h2s = _accepted_fraction(a_col_in_sl, u_h2s, flux0_h2s, f_lim_in_sl, width_dex, config)
 
     return frac_yso, mc_yso, density_yso, frac_h2s, mc_h2s
-
-
-def _h2s_law_blurred_mean(config, region, pix):
-    """`(n_pix,)`: the mean, over each admitted pixel's own catalogued
-    sources, of `population.h2s`'s per-source `N_LAW_BLURRED_DEG2` (sec.
-    5.6's "H2S members ... density the mean over the pixel's sources");
-    a pixel with no source falls back to its own nside-256 sightline's
-    mean, NaN if even that sightline carries no source."""
-    rs = access.region_slice(config, region)
-    hpx512_src = np.asarray(rs["hpx_pix_512"], dtype=np.int64)
-    hpx256_src = np.asarray(rs["hpx_pix_256"], dtype=np.int64)
-    path = config_module.product_path(
-        config, "population", "h2s", "law-blurred", "source", region=region)
-    with h5py.File(path, "r") as f:
-        law_blurred = np.asarray(f["N_LAW_BLURRED_DEG2"][:], dtype=np.float64)
-
-    def _grouped_mean(key):
-        uniq, inv = np.unique(key, return_inverse=True)
-        total = np.bincount(inv, weights=law_blurred, minlength=uniq.size)
-        count = np.bincount(inv, minlength=uniq.size)
-        return uniq, total / count
-
-    uniq_pix, mean_pix = _grouped_mean(hpx512_src)
-    order = np.argsort(uniq_pix)
-    loc = np.minimum(np.searchsorted(uniq_pix[order], pix), uniq_pix.size - 1)
-    hit = order[loc]
-    found = uniq_pix[hit] == pix
-    out = np.full(pix.size, np.nan, dtype=np.float64)
-    out[found] = mean_pix[hit[found]]
-
-    missing = ~found
-    if np.any(missing):
-        uniq_sl, mean_sl = _grouped_mean(hpx256_src)
-        parent = pix[missing] // 4
-        order_sl = np.argsort(uniq_sl)
-        loc_sl = np.minimum(np.searchsorted(uniq_sl[order_sl], parent), uniq_sl.size - 1)
-        hit_sl = order_sl[loc_sl]
-        found_sl = uniq_sl[hit_sl] == parent
-        idx_missing = np.where(missing)[0]
-        out[idx_missing[found_sl]] = mean_sl[hit_sl[found_sl]]
-    return out
 
 
 def _gal_members(config, rng, n_mc):
@@ -685,11 +647,15 @@ def build_region(config, region):
         mass_grid, abs_mag_grid, m_top = _isochrone_table(config)
         loaded_profile = sample_cloud._region_profile(config, region)
         giannini_ratios = h2s_module._load_giannini_ratios(config)
-        h2s_region_path = config_module.product_path(
-            config, "population", "h2s", "prior", "region", region=region)
-        with h5py.File(h2s_region_path, "r") as f:
-            logsig_mean = float(f["LOGSIG_MEAN"][()])
-            logsig_std = float(f["LOGSIG_STD"][()])
+        # H2S's brightness lognormal (sec. 5.6 "Marks") is P3's own
+        # attribute (`bmstp.shapes.build_cloud`, sec. 4.1's shape grids):
+        # no population/h2s region product to read, that stage no longer
+        # runs (RUNBOOKtp.sh).
+        p3_path = config_module.product_path(
+            config, "bmstp", "shape", "cloud", "sightline", region=region)
+        with h5py.File(p3_path, "r") as f:
+            logsig_mean = float(f.attrs["LOGSIG_MEAN"])
+            logsig_std = float(f.attrs["LOGSIG_STD"])
 
         sl_axis = loaded_profile["hpx_pix_256"]
         order_sl = np.argsort(sl_axis)
@@ -710,17 +676,21 @@ def build_region(config, region):
             return m, f_y, e_y, d_y, f_h, e_h
 
         frac_h2s_pix = np.full(n_pix, np.nan, dtype=np.float64)
+        density_yso_pix = np.full(n_pix, np.nan, dtype=np.float64)
         results_sl = Parallel(n_jobs=n_jobs)(delayed(_one_sl)(r) for r in sls_here)
         for i, (m, f_y, e_y, d_y, f_h, e_h) in enumerate(results_sl):
             n_cat["YSO"][m] = d_y * f_y
             mc_err["YSO"][m] = e_y
             mc_err["H2S"][m] = e_h
             frac_h2s_pix[m] = f_h
+            density_yso_pix[m] = d_y
             st.tick(i + 1, len(sls_here), "sightlines")
 
-        law_blurred_mean = _h2s_law_blurred_mean(config, region, pix)
+        # H2S, sec. 5.6 "Sky density": `A_H2S = A_YSO . eta_r . eps_ext`
+        # at the pixel's own column -- the same young-star law density
+        # `density_yso_pix` above, no spatial kernel.
         eta_r = density_module.ETA.get(region, density_module.ETA_ELSEWHERE)
-        density_h2s = law_blurred_mean * eta_r * density_module.EPS_EXT
+        density_h2s = density_yso_pix * eta_r * density_module.EPS_EXT
         n_cat["H2S"] = density_h2s * frac_h2s_pix
 
         built = CLASSES

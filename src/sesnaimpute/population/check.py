@@ -8,7 +8,12 @@ files is missing, naming the RUNBOOK line that builds it.
 Two products the earlier design stopped writing (`prior/gal.py`'s
 per-region comparison file and `prior/h2s.py`'s per-source selection file,
 both retired in favour of an on-the-fly lookup) are not compared: neither
-`bms/` nor `population/` ever builds them.
+`bms/` nor `population/` ever builds them. `population.h2s`'s own
+law-blurred and region products are not compared either: `bmstp.density`
+forms H2S's sky density from the young-star law directly (no spatial
+kernel) and `bmstp.shapes` forms its brightness lognormal from the knot
+survey directly (SPEC_BMSTP_DRAFT.md sec 5.6), so neither `population/`
+product is built.
 """
 
 import os
@@ -33,8 +38,6 @@ PRODUCTS = [
     ("sesna", "kernel", "survey", False, "sesnaimpute.population.kernel"),
     ("yso", "law", "region", False, "sesnaimpute.population.yso"),
     ("yso", "prior", "sightline", True, "sesnaimpute.population.yso"),
-    ("h2s", "law-blurred", "source", True, "sesnaimpute.population.h2s"),
-    ("h2s", "prior", "region", True, "sesnaimpute.population.h2s"),
     ("gal", "counts", "survey", False, "sesnaimpute.population.gal"),
     ("anchors", "young-stars", "hpx512", True, "sesnaimpute.population.young_stars"),
     ("anchors", "observed", "hpx512", True, "sesnaimpute.population.anchor_observed"),

@@ -120,7 +120,6 @@ PY sesnaimpute.population.pahc_curve
 PY sesnaimpute.population.anchor_tiles
 PY sesnaimpute.population.kernel
 PY sesnaimpute.population.yso
-PY sesnaimpute.population.h2s
 PY sesnaimpute.population.gal
 PY sesnaimpute.population.young_stars
 PY sesnaimpute.population.anchor_observed

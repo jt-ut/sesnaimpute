@@ -22,6 +22,7 @@ from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.bmstp import grid, sample_cloud, sample_gal, sample_star
+from sesnaimpute.population import h2s as h2s_module
 
 
 def _sigma_b_min_star_family(region):
@@ -147,7 +148,11 @@ def build_cloud(config, region):
     """Writes P3, `bmstp/shape/cloud_shape_sightline__R.hdf5`: `GRID_YSO`
     and its `log10 x` marginal per sightline (sec. 5.5), `MASS_OUTSIDE_YSO`,
     and the region's H2S brightness Gaussian (`LOGSIG_MEAN`, `LOGSIG_STD`,
-    sec. 5.6) read from `population/h2s/prior_h2s_region__R.hdf5` and
+    sec. 5.6) computed here by transporting the UWISH2 knot survey's
+    surface-brightness sample to the region's own distance
+    (`population.h2s.transport_log10_sigma`,
+    `population.h2s.region_sigma_lognormal`, the same pure functions and
+    arithmetic `population.h2s.build` uses for its own region product) and
     carried as attributes, plus H2S's own brightness-axis origin
     `LOG10_B_ORIGIN_H2S` (sec. 2's H2S row) -- H2S has no grid of its own
     (sec. 5.6 "Marks": separable, `X_MARGINAL` times this Gaussian, formed
@@ -170,10 +175,16 @@ def build_cloud(config, region):
         max_sum_check = max((r[2] for r in results), default=0.0)
         x_marginal = grid_yso.sum(axis=2).astype(np.float32)
 
-        h2s_path = config_module.product_path(config, "population", "h2s", "prior", "region", region=region)
-        with h5py.File(h2s_path, "r") as f:
-            logsig_mean = float(f["LOGSIG_MEAN"][()])
-            logsig_std = float(f["LOGSIG_STD"][()])
+        # H2S's brightness lognormal (sec. 5.6 "Marks"): the UWISH2 knot
+        # survey's reference sample, transported from each knot's own
+        # field distance to THIS region's distance (`transport_log10_sigma`),
+        # then its mean and standard deviation (`region_sigma_lognormal`)
+        # -- exactly the two calls `population.h2s.build` makes for its
+        # own region product.
+        log10_sb_native, area_pc2 = h2s_module.uwish2_reference_knots(config)
+        d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
+        log10_sigma = h2s_module.transport_log10_sigma(log10_sb_native, area_pc2, d_r_pc)
+        logsig_mean, logsig_std = h2s_module.region_sigma_lognormal(log10_sigma)
         # H2S's own brightness-axis origin (sec. 2's H2S row): the
         # lognormal's 3-sigma faint edge, less the 3-cell (0.3 dex)
         # margin so the minimum-width smoothing's own 3 sigma stays on
