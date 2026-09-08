@@ -13,10 +13,21 @@ approximation.
 Top row: the column `A_K` (log scale) and the total predicted catalogued
 density `Sigma_C N_CAT_C` (deg^-2), hatched where the surveyed
 (IRAC-coverage) fraction is below 0.5. Middle row: the prior share
-`SHARE_C` per class, in class order, 0-1, titled with the region's
-total-count ratio (`RATIO_<CLS>`). Bottom row, when the posterior atlas
-(P11) exists: the posterior share `MEAN_P_C` per class on the same 0-1
-scale, plus a seventh small panel, `N_YSO_ABOVE_HALF`.
+`SHARE_C` per class, in class order, each on its own colour scale (a
+shared 0-1 bar hides the spatial variation of the low-share classes,
+YSO first among them); the region's total-count ratio (`RATIO_<CLS>`)
+moves to the figure's caption line rather than the panel title. Bottom
+row, when the posterior atlas (P11) exists: the posterior mean `MEAN_P_C`
+per class, likewise each on its own scale, plus a seventh small panel,
+`N_YSO_ABOVE_HALF`.
+
+Colour maps and scales follow the convention the earlier package's own
+sky-atlas figure used (`sesnacomplete.bms_prior.validation.sky_atlas`):
+the measured dust column on `magma`, every class quantity (share,
+posterior mean, raw density) on `viridis`, and a panel's colour bar
+inset into the panel itself rather than beside it, since an inset bar
+costs the layout nothing while a row of six side-by-side bars would
+eat the space the maps need.
 """
 
 import argparse
@@ -33,6 +44,7 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
 from matplotlib.colors import LogNorm
+from matplotlib.ticker import FuncFormatter, MaxNLocator
 from scipy.ndimage import gaussian_filter
 
 from sesnaimpute import config as config_module
@@ -198,6 +210,33 @@ def _log_norm(grid):
     return LogNorm(vmin=float(finite.min()), vmax=float(finite.max()))
 
 
+def _inset_colorbar(fig, ax, im):
+    """A colour bar inset into the panel itself, ticks on its left so
+    the labels stay inside the panel's own box rather than spilling
+    into the next column -- the earlier package's sky-atlas convention
+    (`sesnacomplete.bms_prior.validation.sky_atlas._inset_colorbar`): a
+    bar drawn beside a panel costs its width from every column on the
+    page, so a row of six narrow class panels has no room for six
+    side-by-side bars, but an inset bar costs the layout nothing. A
+    white translucent backing keeps the bar and its ticks legible over
+    the panel's own image; `%.2g` keeps a tick's own exponent (for a
+    share as small as YSO's) inside the tick label itself, rather than
+    a separate offset annotation that has nowhere narrow to sit."""
+    x, y, w, h = 0.58, 0.08, 0.06, 0.34
+    ax.add_patch(plt.Rectangle((x - 0.30, y - 0.05), w + 0.33, h + 0.10,
+                                transform=ax.transAxes, facecolor="white",
+                                alpha=0.78, edgecolor="none", zorder=4))
+    cax = ax.inset_axes([x, y, w, h], zorder=5)
+    cbar = fig.colorbar(im, cax=cax)
+    cbar.ax.yaxis.set_ticks_position("left")
+    cbar.locator = MaxNLocator(nbins=2)
+    cbar.formatter = FuncFormatter(lambda v, _pos: "%.2g" % v)
+    cbar.update_ticks()
+    cbar.ax.tick_params(labelsize=5.5, length=2, pad=1.0)
+    cbar.outline.set_linewidth(0.5)
+    return cbar
+
+
 def build_region(config, region, formats):
     prior_path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
     if not os.path.exists(prior_path):
@@ -234,9 +273,10 @@ def build_region(config, region, formats):
         # flat 9-column grid for the whole figure (row 1's two maps each
         # span 3 of the 9 columns -- about a third of the figure width;
         # rows 2-3's six class panels each take one of those columns, so
-        # a share panel and its posterior match in size), one colour bar
-        # per row of six sharing column 6 instead of six, and the
-        # N(P(YSO)>0.5) panel in column 7 at the same size as the six.
+        # a share panel and its posterior match in size); each class
+        # panel's colour bar sits inset inside the panel itself (column 6
+        # is unused spacing), and the N(P(YSO)>0.5) panel sits in column
+        # 7 at the same size as the six, with column 8 for its own bar.
         n_rows = 3 if has_post else 2
         aspect = n_y / float(n_x)
         fig_w = 16.0
@@ -256,12 +296,12 @@ def build_region(config, region, formats):
         gs = fig.add_gridspec(n_rows, 9, width_ratios=col_widths, height_ratios=height_ratios,
                                wspace=0.65, hspace=0.7)
 
-        ax_col, im_col = _add_panel(fig, gs[0, 0:3], wcs, col_grid, "cividis",
-                                     norm=_log_norm(col_grid), title="column $A_K$ (mag)",
+        ax_col, im_col = _add_panel(fig, gs[0, 0:3], wcs, col_grid, "magma",
+                                     norm=_log_norm(col_grid), title="column A_K (mag)",
                                      show_dec=True, show_ra=False, title_size=10)
-        ax_dens, im_dens = _add_panel(fig, gs[0, 3:6], wcs, density_grid, "magma",
+        ax_dens, im_dens = _add_panel(fig, gs[0, 3:6], wcs, density_grid, "viridis",
                                        norm=_log_norm(density_grid),
-                                       title=r"$\Sigma_C N_{CAT,C}$ (deg$^{-2}$)",
+                                       title="predicted catalogued sources (deg$^{-2}$)",
                                        show_dec=False, show_ra=False, title_size=10)
         # Hatch only where the admitted footprint itself is low-coverage:
         # `coverage_grid` is already NaN outside the footprint (sec. 8's
@@ -274,19 +314,24 @@ def build_region(config, region, formats):
 
         share_row, post_row = 1, 2
 
-        share_im = None
+        # Every class quantity (share, posterior mean) on its own colour
+        # scale, inset into its own panel: a shared 0-1 bar hides the
+        # spatial variation of the low-share classes (YSO first among
+        # them), which is exactly what a reader needs to see here.
+        ratios = []
         for i, cls in enumerate(CLASSES):
-            ratio = float(prior["attrs"].get("RATIO_%s" % cls, np.nan))
-            _, share_im = _add_panel(fig, gs[share_row, i], wcs, share_grids[i], "viridis",
-                                      vmin=0.0, vmax=1.0, title="%s\nshare, ratio %.3g" % (cls, ratio),
-                                      show_dec=(i == 0), show_ra=(not has_post), title_size=9)
+            ratios.append((cls, float(prior["attrs"].get("RATIO_%s" % cls, np.nan))))
+            ax, im = _add_panel(fig, gs[share_row, i], wcs, share_grids[i], "viridis",
+                                 title="%s\nprior share" % cls,
+                                 show_dec=(i == 0), show_ra=(not has_post), title_size=9)
+            _inset_colorbar(fig, ax, im)
 
         if has_post:
-            post_im = None
             for i, cls in enumerate(CLASSES):
-                _, post_im = _add_panel(fig, gs[post_row, i], wcs, post_share_grids[i], "viridis",
-                                         vmin=0.0, vmax=1.0, title="%s\nposterior mean" % cls,
-                                         show_dec=(i == 0), show_ra=True, title_size=9)
+                ax, im = _add_panel(fig, gs[post_row, i], wcs, post_share_grids[i], "viridis",
+                                     title="%s\nposterior mean P" % cls,
+                                     show_dec=(i == 0), show_ra=True, title_size=9)
+                _inset_colorbar(fig, ax, im)
             ax_nyso, im_nyso = _add_panel(fig, gs[post_row, 7], wcs, nyso_grid, "magma",
                                           title="N(P(YSO)>0.5)", show_dec=False, show_ra=True, title_size=9)
             caption = None
@@ -297,21 +342,24 @@ def build_region(config, region, formats):
         # `fig.colorbar` appends a new axes on top of whatever already
         # exists, so adding one between two image panels leaves it
         # underneath (hence painted over by) any panel created after it.
+        # (Columns 6 and 8 of the grid, once the shared row bars' and
+        # N(P(YSO)>0.5)'s home, are left as plain spacing now that every
+        # class panel carries its own inset bar.)
         fig.colorbar(im_col, ax=ax_col, fraction=0.046, pad=0.05)
         fig.colorbar(im_dens, ax=ax_dens, fraction=0.046, pad=0.05)
-        fig.colorbar(share_im, cax=fig.add_subplot(gs[share_row, 6]))
         if has_post:
-            fig.colorbar(post_im, cax=fig.add_subplot(gs[post_row, 6]))
             fig.colorbar(im_nyso, ax=ax_nyso, fraction=0.046, pad=0.05)
 
         total_predicted = float(prior["attrs"].get("TOTAL_PREDICTED", np.nan))
         total_observed = float(prior["attrs"].get("TOTAL_OBSERVED", np.nan))
         surveyed_area = float(prior["attrs"].get("SURVEYED_AREA_DEG2", np.nan))
         ratio_po = total_predicted / total_observed if total_observed else float("nan")
+        ratio_line = "total-count ratio: " + ", ".join(
+            "%s %.3g" % (cls, ratio) for cls, ratio in ratios)
         title = ("%s -- predicted/observed = %.4g/%.4g = %.3f, surveyed area %.4g deg$^2$%s"
                   % (region, total_predicted, total_observed, ratio_po, surveyed_area,
                      "" if caption is None else " (%s)" % caption))
-        fig.suptitle(title, fontsize=12)
+        fig.suptitle(title + "\n" + ratio_line, fontsize=12)
 
         out_dir = os.path.join(config.data_root, "bmstp", "atlas", "figures")
         os.makedirs(out_dir, exist_ok=True)
