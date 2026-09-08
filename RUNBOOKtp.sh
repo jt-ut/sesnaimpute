@@ -60,6 +60,7 @@ PY() { local module="$1"; shift
 # --- downloads ---
 # sky/download/<source>/ -- external bytes, verbatim. Download never computes.
 PY sesnaimpute.sky.download.hunt_reffert2023.build
+PY sesnaimpute.sky.download.hops.build   # HOPS/eHOPS Herschel-confirmed protostars, report-only overlay for the protostar check (SPEC_BMSTP sec 5.5, sec 9)
 PY sesnaimpute.sky.download.baraffe2015_bhac15.build
 PY sesnaimpute.sky.download.mist2016.build   # MIST v1.2 1 Myr isochrone, the mass-luminosity relation above BHAC15's 1.4 Msun top (SPEC_BMSTP sec 3.5)
 PY sesnaimpute.sky.download.riebel2012.build
@@ -109,6 +110,7 @@ PY sesnaimpute.sky.derived.planck_source_column
 PY sesnaimpute.sky.derived.column   # the adopted column per source and sightline (its survey-wide disagreement check is not run: an (n_source) array over 8.7 M sources, the earlier design's)
 PY sesnaimpute.sky.derived.profile
 PY sesnaimpute.sky.derived.swire_galaxies   # SWIRE galaxies after the adopted star-galaxy split, survey-wide (SPEC_BMSTP sec 3.2, 5.4)
+PY sesnaimpute.sky.derived.protostars   # HOPS + eHOPS pooled in one schema, report-only overlay for the protostar check (SPEC_BMSTP sec 5.5, sec 9)
 
 
 # --- population (the model-driven summaries the bmstp prior ingests; writes population/) ---
@@ -134,6 +136,7 @@ PY sesnaimpute.bmstp.template_weights   # the P5 template-weight tables per libr
 PY sesnaimpute.bmstp.density   # the per-source density table, P1: column, grain indices, F_LIM_50, D_PAHC, the six sky densities (SPEC_BMSTP sec 4.1, 5.1-5.6)
 PY sesnaimpute.bmstp.atlas   # the prior atlas, P6: per-pixel Monte Carlo selection and the total-count check (SPEC_BMSTP sec 8)
 PY sesnaimpute.atlas.render   # the sky atlas figures from P6 (the prior rows; the posterior row is added by the same line at the fitter block's end once P11 exists)
+PY sesnaimpute.atlas.protostars   # the protostar check figure per region with HOPS/eHOPS coverage (report-only, SPEC_BMSTP sec 9)
 
 # --- fittp (the thinned-Poisson fitter, the classification, the cascade, the posterior atlas; writes fittp/) ---
 # Lines are added here as each stage lands (IMPLEMENTATION_BMSTP sec 4). The
