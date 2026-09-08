@@ -11,7 +11,10 @@ pooled star-gas relation on Herschel columns: 14.5 young stars pc^-2 per
 mag^2 of A_K at the Herschel arm's 36.3" beam, transferred to the Planck
 arm's 5.03' by the measured beam ratio, 1.29, giving 18.7. `build` writes
 one 30-row product with the region distance and the pc^2/deg^2 factor it
-multiplies.
+multiplies. `law_area_integral` (section 2.1) is the same law integrated
+over an anchor pixel's own area rather than sampled at its catalogued
+sources, so `population.young_stars` can subtract the model's own young-
+star expectation before fitting the anchor weight `W`.
 
 The shape (section 6.3): a young star sits at a depth drawn from the
 cloud's own gas density, `p(u) ~ rho_gas(d(u))^(1/2)` where
@@ -19,30 +22,13 @@ cloud's own gas density, `p(u) ~ rho_gas(d(u))^(1/2)` where
 Sigma_YSO ~ Sigma_gas^2 surface law), on the profile's own piecewise-linear
 cells; the far-field tail past the 3-D map's edge (section 1.4) is one
 further cell carrying the residual column, so `u` reaches 1 on every
-sightline. The brightness axis is the same placement read on distance:
-`log10 B = -2 log10(d / 1 kpc)`, Gaussian in `log10 B` about a
-rho_gas^(3/2)-weighted ridge fitted along the same ray, width the ridge's
-own conditional residual.
-
-The `a`-marginal is the exact expectation of the embedding density's CDF
-`F_u` under the log-normal column kernel (section 1.2), `P(a<=a0|A_s) =
-E_T[F_u(a0/T)]`, `T` a source's own true column, `log10 T ~ Normal(log10
-A_s + mu, sigma)`. `F_u` is piecewise linear on `u_edges`, so this splits
-over its cells into closed-form terms of the normal CDF `Phi` at the
-cell's own `T`-range boundaries and the log-normal's partial inverse
-moment `E[1/T; T in (lo, hi)]`, no quadrature and no `a`-grid: `YsoShape.
-_cdf_rows`/`_marginal_rows` evaluate it exactly at any `a`, for one
-log-normal component. The column kernel is a two-component mixture
-(`population.kernel.Kernel.mixture`), so the exact marginal/cdf is the
-weight-averaged sum of that one-component form evaluated at each
-component's own `(mu, sigma)` -- an expectation is linear in a mixture,
-so no other part of the derivation changes. `build` writes one product
-per region, sightline granule: `U_EDGES`/`P_U` (the shape itself),
-`RIDGE_*` (the closed-form conditional brightness density), and
-`IS_HERSCHEL` (each sightline's own map class). `YsoShape.read` loads
-these plus the survey's column kernel, and evaluates the marginal/cdf
-batched over sources at each source's own exact column and measurement
-uncertainty (`marginal_exact`, `cdf_exact`).
+sightline. `embedding_and_ridge` returns this density (`u_edges`/`p_u`)
+at the profile's own full resolution -- `bmstp.sample_cloud` calls it
+directly to place the star family's members along the sightline's own
+`(u, d)` segments. `build` writes one product per region, sightline
+granule: `HPX_PIX_256`, `U_EDGES`/`P_U`, the same density coarsened to
+`N_PROFILE_CELLS` equal-mass cells for storage -- `population.young_stars`
+reads this coarsened form for the anchor pixels' own placement.
 
 No selection (section 6.2) and no library enter either product (C3):
 neither reads a template register or an IMF.
@@ -56,7 +42,6 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 import astropy.units as u
 from joblib import Parallel, delayed
-from scipy.special import erf
 
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
@@ -94,7 +79,6 @@ PROVENANCE_PLANCK = 1
 _ADOPTED_COLUMN_CACHE = {}
 
 _LN10 = float(np.log(10.0))
-_SQRT2 = float(np.sqrt(2.0))
 
 
 def pc2_per_deg2(d_r_pc):
@@ -186,8 +170,8 @@ def _write_law_product(config, regions, rows):
 # biased-low sample of the pixel's own column field. Section 6.4 item 1's
 # per-cloud check needs the same integral, so it is served once here.
 
-#: The anchor histograms' own HEALPix resolution (`prior.anchor_tiles`,
-#: `prior.young_stars`): the nside this integral is evaluated at.
+#: The anchor histograms' own HEALPix resolution (`population.anchor_tiles`,
+#: `population.young_stars`): the nside this integral is evaluated at.
 NSIDE_ANCHOR = 512
 
 _KERNEL_CACHE = {}
@@ -372,8 +356,8 @@ def _planck_parent_column(config, parent256):
                                        "column", "sightline")
     if not os.path.exists(path):
         raise FileNotFoundError(
-            "prior.yso: Planck sightline column missing at %s -- run the "
-            "'sky.derived.planck_column' RUNBOOK line first" % path)
+            "population.yso: Planck sightline column missing at %s -- run "
+            "the 'sky.derived.planck_column' RUNBOOK line first" % path)
     with h5py.File(path, "r") as f:
         sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
         a_k = np.asarray(f["A_K"][:], dtype=np.float64)
@@ -384,7 +368,7 @@ def _planck_parent_column(config, parent256):
     matched = (sl_pix_sorted.size > 0) & (sl_pix_sorted[capped] == parent256)
     if not np.all(matched):
         raise ValueError(
-            "prior.yso: an anchor pixel's parent nside-256 sightline is "
+            "population.yso: an anchor pixel's parent nside-256 sightline is "
             "absent from the Planck column product")
     return a_k_sorted[capped]
 
@@ -444,13 +428,13 @@ def law_area_integral(config, region, hpx_pix_512):
 
 
 # ====================================================================
-# 6.3 -- the shape: embedding density, ridge, kernel-convolved marginal
+# 6.3 -- the shape: embedding density
 # ====================================================================
 
 #: `rho_YSO ~ rho_gas^alpha` (Parmentier & Pfalzner 2013, A&A 549, A132):
 #: the 3-D exponent behind the observed Sigma_YSO ~ Sigma_gas^2 surface
-#: law. The embedding density per unit `u` is `rho_gas^(alpha-1)`; the
-#: ridge weight is `rho_gas^alpha` (SPEC_PRIORS.md section 6.3).
+#: law. The embedding density per unit `u` is `rho_gas^(alpha-1)`
+#: (SPEC_PRIORS.md section 6.3).
 ALPHA_YSO = 1.5
 
 #: The brightness axis's reference distance (SPEC_PRIORS.md section 6.3):
@@ -477,8 +461,8 @@ def _load_profile_arrays(config, region):
     path = _profile_path(config, region)
     if not os.path.exists(path):
         raise FileNotFoundError(
-            "prior.yso: sightline profile missing for region %r at %s -- "
-            "run the 'sky.derived.profile' RUNBOOK line first" % (region, path))
+            "population.yso: sightline profile missing for region %r at %s "
+            "-- run the 'sky.derived.profile' RUNBOOK line first" % (region, path))
     with h5py.File(path, "r") as f:
         return dict(
             hpx_pix_256=np.asarray(f["HPX_PIX_256"][:], dtype=np.int64),
@@ -492,9 +476,11 @@ def _load_profile_arrays(config, region):
 
 
 def embedding_and_ridge(profile):
-    """The whole region's `u` edges, embedding density, and a-B ridge in
-    one vectorised pass -- no Python loop over sightlines, cells or nodes
-    (SPEC_PRIORS.md section 6.3).
+    """The whole region's `u` edges and embedding density in one
+    vectorised pass -- no Python loop over sightlines or cells
+    (SPEC_PRIORS.md section 6.3). `bmstp.sample_cloud` calls this
+    directly, at the profile's own full resolution, to place a star
+    family's members along a sightline's own `(u, d)` segments.
 
     The 3-D map's own cells (`RHO_K_PER_PC`, `n_d-1` of them) are joined
     by one more cell carrying the far-field tail's residual column, so
@@ -507,9 +493,8 @@ def embedding_and_ridge(profile):
     second placement law.
 
     Returns a dict of `(n_sl, ...)` arrays: `u_edges` (n_sl, n_cell+1),
-    `p_u` (n_sl, n_cell) normalised over u in [0, 1], `u_median` (report,
-    section 6.3's "spread of the per-sightline u medians"), and the ridge
-    `intercept`/`slope`/`resid_sigma`/`corr` (n_sl,).
+    `p_u` (n_sl, n_cell) normalised over u in [0, 1], and `u_median`
+    (report, section 6.3's "spread of the per-sightline u medians").
     """
     dist_pc = profile["dist_pc"]
     a_cum = profile["a_cum_k"]
@@ -518,13 +503,9 @@ def embedding_and_ridge(profile):
     tail_efold = profile["tail_efold_pc"]
     n_sl, n_d = a_cum.shape
 
-    d_widths = np.diff(dist_pc)                                   # (n_d-1,)
     rho_map = np.maximum(profile["rho_k_per_pc"], _RHO_FLOOR)      # (n_sl, n_d-1)
     rho_tail = np.maximum(tail_residual / tail_efold, _RHO_FLOOR)  # (n_sl,)
     rho_full = np.concatenate([rho_map, rho_tail[:, None]], axis=1)   # (n_sl, n_d)
-    width_full = np.concatenate(
-        [np.broadcast_to(d_widths, (n_sl, n_d - 1)), tail_efold[:, None]],
-        axis=1)                                                    # (n_sl, n_d)
 
     # u = A(d)/A(inf) (section 1.4): the map's own cumulative edges,
     # followed by the sightline's total column at u = 1 exactly, so the
@@ -533,14 +514,6 @@ def embedding_and_ridge(profile):
     u_edges = a_edges / a_inf[:, None]
     u_edges[:, -1] = 1.0
     u_widths = np.diff(u_edges, axis=1)                            # (n_sl, n_d)
-    a_rep = 0.5 * (a_edges[:, :-1] + a_edges[:, 1:])                # (n_sl, n_d)
-
-    d_mid_map = 0.5 * (dist_pc[:-1] + dist_pc[1:])                  # (n_d-1,)
-    d_mid_tail = dist_pc[-1] + tail_efold                           # (n_sl,)
-    d_mid = np.concatenate(
-        [np.broadcast_to(d_mid_map, (n_sl, n_d - 1)), d_mid_tail[:, None]],
-        axis=1)                                                    # (n_sl, n_d)
-    log10_b = -2.0 * np.log10(d_mid / D_REF_PC)
 
     # the embedding density per unit u (section 6.3): rho_gas^(alpha-1).
     density_raw = rho_full ** (ALPHA_YSO - 1.0)
@@ -561,35 +534,17 @@ def embedding_and_ridge(profile):
                      (0.5 - cdf_lo) / np.maximum(cdf_hi - cdf_lo, 1e-300), 0.0)
     u_median = u_lo + frac * (u_hi - u_lo)
 
-    # the ridge (section 6.3): the rho^alpha-weighted least-squares line
-    # of log10 B on a -- the same population weight the embedding density
-    # is built from, so the two are one placement read on two axes.
-    w = rho_full ** ALPHA_YSO * width_full
-    wn = w / np.sum(w, axis=1, keepdims=True)
-    mean_a = np.sum(wn * a_rep, axis=1)
-    mean_b = np.sum(wn * log10_b, axis=1)
-    var_a = np.sum(wn * (a_rep - mean_a[:, None]) ** 2, axis=1)
-    var_b = np.sum(wn * (log10_b - mean_b[:, None]) ** 2, axis=1)
-    cov = np.sum(wn * (a_rep - mean_a[:, None]) * (log10_b - mean_b[:, None]), axis=1)
-    slope = cov / var_a
-    intercept = mean_b - slope * mean_a
-    resid_var = np.maximum(var_b - slope * cov, 0.0)
-    corr = np.where(var_b > 0, cov / np.sqrt(var_a * var_b), np.nan)
-
-    return dict(u_edges=u_edges, p_u=p_u, u_median=u_median,
-                ridge_intercept=intercept, ridge_slope=slope,
-                ridge_resid_sigma=np.sqrt(resid_var), ridge_corr=corr)
+    return dict(u_edges=u_edges, p_u=p_u, u_median=u_median)
 
 
 #: The stored embedding profile's own cell count (SPEC_PRIORS.md section
 #: 6.3): the 3-D map's ~600 distance cells carry no information the
 #: profile's own one-degree resolution and the cloud's real few-cell
 #: structure along the ray support, so `build_shape` coarsens to this
-#: many equal-mass cells once at build; `cdf_exact`/`marginal_exact` then
-#: sum this many closed-form terms per query, not the map's own cell
-#: count. 16 failed the 0.02 check bar (200 fixed-seed NGC 7129 sources,
-#: worst density relative L1 0.027); 32 is the smallest power of two that
-#: passes (worst CDF 0.0026, worst density relative L1 0.0055).
+#: many equal-mass cells once at build. 16 failed the 0.02 check bar (200
+#: fixed-seed NGC 7129 sources, worst density relative L1 0.027); 32 is
+#: the smallest power of two that passes (worst CDF 0.0026, worst density
+#: relative L1 0.0055).
 N_PROFILE_CELLS = 32
 
 
@@ -625,287 +580,49 @@ def coarsen_profile(u_edges, p_u, n_out):
     return new_edges, new_p_u
 
 
-def _majority_map_class(config, region, sl_pix):
-    """Per sightline, the map class (`herschel`/`planck`) of the majority
-    of its own sources' adopted-column arm (SPEC_PRIORS.md section 6.3's
-    tabulation, "map class from the sightline's majority arm"). A
-    sightline the granule map admits by Spitzer coverage alone, with no
-    catalogued source of its own, has no arm to poll and falls back to
-    Planck, the all-sky arm (section 1.1)."""
-    src_pix = access.region_slice(config, region)["hpx_pix_256"]
-    _, _, provenance = _adopted_columns(config, region)
-    loc = np.searchsorted(sl_pix, src_pix)
-    capped = np.minimum(loc, max(sl_pix.size - 1, 0))
-    if src_pix.size and not np.all(sl_pix[capped] == src_pix):
-        raise ValueError(
-            "prior.yso: %r has a source whose own pixel is absent from its "
-            "region's sightline profile" % region)
-    is_herschel = (provenance == PROVENANCE_HERSCHEL).astype(float)
-    n_herschel = np.bincount(loc, weights=is_herschel, minlength=sl_pix.size)
-    n_total = np.bincount(loc, minlength=sl_pix.size)
-    majority_herschel = (n_total > 0) & (n_herschel * 2 > n_total)
-    return np.where(majority_herschel, "herschel", "planck")
-
-
-def _normal_cdf(z):
-    """Standard normal CDF `Phi(z)`, `z` any shape, `+/-inf` allowed."""
-    return 0.5 * (1.0 + erf(z / _SQRT2))
-
-
-def _lognormal_cdf(t, m, s):
-    """`P(T <= t)`, `ln T ~ Normal(m, s)`; `t = 0` and `t = inf` both
-    give the correct limits (0 and 1) through `Phi(+/-inf)`."""
-    with np.errstate(divide="ignore", invalid="ignore"):
-        z = (np.log(t) - m) / s
-    return _normal_cdf(z)
-
-
-def _lognormal_inv_moment_upto(t, m, s):
-    """`E[1/T ; T <= t]` for `ln T ~ Normal(m, s)`: the log-normal's
-    partial inverse moment, `exp(-m + s^2/2) * Phi((ln t - m)/s + s)`
-    (SPEC_PRIORS.md section 6.3's derivation: `e^{-X}` tilts `X ~
-    Normal(m, s^2)` to `Normal(m - s^2, s^2)`, so the truncation CDF's
-    own argument is `(ln t - (m - s^2))/s = (ln t - m)/s + s`). `t = 0`
-    gives 0, `t = inf` gives the total `E[1/T] = exp(-m + s^2/2)`."""
-    with np.errstate(divide="ignore", invalid="ignore"):
-        z = (np.log(t) - m) / s + s
-    return np.exp(-m + 0.5 * s * s) * _normal_cdf(z)
-
-
-class YsoShape(object):
-    """One region's YSO shape, read once and evaluated exactly
-    (SPEC_PRIORS.md section 6.3): the per-sightline embedding density
-    (`U_EDGES`/`P_U`, a step function on `u`) and the survey's two-
-    component log-normal-mixture column kernel (`population.kernel.Kernel`).
-    The marginal
-
-        P(a <= a0 | A_s) = E_T[F_u(a0 / T)]
-
-    is the exact expectation of the embedding CDF under `T`'s distribution
-    given `A_s`: `F_u` is piecewise linear, so for one log-normal
-    component this splits over its cells into closed-form terms of the
-    normal CDF and the log-normal's partial inverse moment (module
-    docstring), evaluated at the exact query `a`, never on a fixed grid;
-    the density `p(a0|A_s)` is the matching closed form for `F_u`'s own
-    derivative, `p_u`. `T`'s kernel is a two-component mixture
-    (`Kernel.mixture`), and expectation is linear in a mixture, so the
-    marginal/cdf under the mixture is the weight-averaged sum of that one-
-    component closed form evaluated at each component's own `(mu, sigma)`.
-
-    `marginal_exact`/`cdf_exact` take the source's own exact adopted
-    column and measurement uncertainty.
-    """
-
-    def __init__(self, u_edges, p_u, is_herschel, kernel,
-                 hpx_pix_256, sightline_id):
-        self.u_edges = u_edges                      # (n_sl, n_cell+1)
-        self.p_u = p_u                               # (n_sl, n_cell)
-        self.is_herschel = is_herschel               # (n_sl,) bool
-        self.kernel = kernel                         # prior.kernel.Kernel
-        self.hpx_pix_256 = hpx_pix_256
-        self.sightline_id = sightline_id
-        # the embedding density's own cumulative mass at every u edge --
-        # the exact integral of a step function is piecewise linear
-        # (SPEC_PRIORS.md section 6.3); CUM_U[:, -1] = 1 by p_u's own
-        # normalisation (`embedding_and_ridge`).
-        widths = np.diff(u_edges, axis=1)
-        self.cum_u = np.concatenate(
-            [np.zeros((u_edges.shape[0], 1)), np.cumsum(p_u * widths, axis=1)],
-            axis=1)
-
-    @classmethod
-    def read(cls, config, region):
-        """Reads one region's `bms/yso/prior_yso_sightline` product
-        (`build_shape`'s own output) plus the survey's column kernel,
-        shared across every region."""
-        path = config_module.product_path(config, "population", "yso", "prior",
-                                           "sightline", region=region)
-        if not os.path.exists(path):
-            raise FileNotFoundError(
-                "prior.yso.YsoShape: no shape product for region %r at %s "
-                "-- run the 'prior.yso' RUNBOOK line first" % (region, path))
-        with h5py.File(path, "r") as f:
-            u_edges = np.asarray(f["U_EDGES"][:], dtype=np.float64)
-            p_u = np.asarray(f["P_U"][:], dtype=np.float64)
-            is_herschel = np.asarray(f["IS_HERSCHEL"][:]).astype(bool)
-            hpx_pix_256 = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
-            sightline_id = np.asarray(f["SIGHTLINE_ID"][:], dtype=np.int64)
-        kernel = kernel_module.Kernel.read(config)
-        return cls(u_edges, p_u, is_herschel, kernel,
-                   hpx_pix_256, sightline_id)
-
-    # -- the closed-form extinction marginal, given per-source (A_s, mu,
-    # sigma) already matched to the query rows' own sightlines ---------
-    def _cdf_rows(self, a, rows, a_col, mu, sigma):
-        """`P(a' <= a | A_s) = E_T[F_u(a/T)]`, closed form (module
-        docstring): the `T <= a` bulk (`F_u = 1` there) plus, cell by
-        cell of the embedding step function, the normal-CDF mass and the
-        log-normal partial inverse moment of `T` in that cell's own
-        `a`-implied range. Broadcast over every (row, cell) pair at once --
-        the profile's own cell count runs into the hundreds, so a Python
-        loop over cells costs far more in interpreter overhead than the
-        arithmetic itself; this evaluates every cell in one vectorised
-        pass instead."""
-        a = np.asarray(a, dtype=float)
-        m = np.log(a_col) + mu * _LN10
-        s = sigma * _LN10
-        a_safe = np.where(a > 0.0, a, 1.0)
-        edges = self.u_edges[rows]
-        cum_u = self.cum_u[rows]
-        p_u = self.p_u[rows]
-        m2, s2, a2 = m[:, None], s[:, None], a_safe[:, None]
-        e_lo, e_hi = edges[:, :-1], edges[:, 1:]
-        with np.errstate(divide="ignore"):
-            hi_k = a2 / e_lo
-        lo_k = a2 / e_hi
-        d_cdf = _lognormal_cdf(hi_k, m2, s2) - _lognormal_cdf(lo_k, m2, s2)
-        d_inv = (_lognormal_inv_moment_upto(hi_k, m2, s2)
-                 - _lognormal_inv_moment_upto(lo_k, m2, s2))
-        cells = cum_u[:, :-1] * d_cdf + p_u * (a2 * d_inv - e_lo * d_cdf)
-        total = _lognormal_cdf(a_safe, m, s) + cells.sum(axis=1)
-        return np.where(a > 0.0, np.clip(total, 0.0, 1.0), 0.0)
-
-    def _marginal_rows(self, a, rows, a_col, mu, sigma):
-        """`p(a | A_s) = sum_k p_k * E[1/T; a/T in cell k]`, closed form
-        (module docstring), matching `_cdf_rows`'s own cells -- the same
-        one-vectorised-pass evaluation over every cell."""
-        a = np.asarray(a, dtype=float)
-        m = np.log(a_col) + mu * _LN10
-        s = sigma * _LN10
-        a_safe = np.where(a > 0.0, a, 1.0)
-        edges = self.u_edges[rows]
-        p_u = self.p_u[rows]
-        m2, s2, a2 = m[:, None], s[:, None], a_safe[:, None]
-        e_lo, e_hi = edges[:, :-1], edges[:, 1:]
-        with np.errstate(divide="ignore"):
-            hi_k = a2 / e_lo
-        lo_k = a2 / e_hi
-        d_inv = (_lognormal_inv_moment_upto(hi_k, m2, s2)
-                 - _lognormal_inv_moment_upto(lo_k, m2, s2))
-        total = (p_u * d_inv).sum(axis=1)
-        return np.where(a > 0.0, np.maximum(total, 0.0), 0.0)
-
-    def _map_class(self, rows):
-        """The SIGHTLINE's own majority arm (`IS_HERSCHEL`, a block-
-        average majority vote over the sightline's sources, `build_shape`/
-        `_majority_map_class`) -- correct ONLY where no source exists to
-        have its own provenance, e.g. a sightline-granule ("atlas") read.
-        `marginal_exact`/`cdf_exact` do NOT use this any more (fixed
-        defect, owner 2026-09-06): a catalogued source's arm is its own
-        `A_COL_PROVENANCE`, never its sightline's block-averaged one --
-        43% of Perseus's Herschel-arm sources sit on a sightline whose own
-        majority is Planck, and were getting the wrong kernel arm."""
-        return np.where(self.is_herschel[rows], "herschel", "planck")
-
-    # -- public: each source's own exact column and measurement error --
-    def marginal_exact(self, a, rows, a_col, sigma_col, map_class, zp_sigma_k=None):
-        """`p(a | A_s)` at a batch of sources, each at its own exact
-        adopted column and measurement uncertainty (SPEC_PRIORS.md
-        section 1.2/6.3): no approximation. The column kernel is a two-
-        component mixture (`Kernel.mixture`); the marginal under a
-        mixture is the weighted sum of the one-component marginal at each
-        component's own `(mu, sigma)` (class docstring). `map_class` is
-        the SOURCE's own arm (`A_COL_PROVENANCE`, read by the caller from
-        the adopted column product) -- required, not `self._map_class
-        (rows)`'s sightline majority (fixed defect, owner 2026-09-06):
-        `rows` indexes the sightline only for the embedding profile's own
-        cells, never the arm. `zp_sigma_k`, one per source (mag, 0 for
-        Planck-arm), is the source's own Herschel field zero-point
-        uncertainty; omitting it falls back to the survey-wide RMS."""
-        w, mu, sigma = self.kernel.mixture(a_col, sigma_col, map_class,
-                                           zp_sigma_k=zp_sigma_k)
-        m1 = self._marginal_rows(a, rows, a_col, mu[:, 0], sigma[:, 0])
-        m2 = self._marginal_rows(a, rows, a_col, mu[:, 1], sigma[:, 1])
-        return w * m1 + (1.0 - w) * m2
-
-    def cdf_exact(self, a, rows, a_col, sigma_col, map_class, zp_sigma_k=None):
-        """`cdf` at each source's own exact column and measurement
-        uncertainty, matching `marginal_exact`: the weighted sum of the
-        one-component cdf at each mixture component's own `(mu,
-        sigma)`. `map_class` is the same required source-own-provenance
-        array `marginal_exact` takes; `zp_sigma_k` is its same optional
-        per-source zero-point uncertainty."""
-        w, mu, sigma = self.kernel.mixture(a_col, sigma_col, map_class,
-                                           zp_sigma_k=zp_sigma_k)
-        c1 = self._cdf_rows(a, rows, a_col, mu[:, 0], sigma[:, 0])
-        c2 = self._cdf_rows(a, rows, a_col, mu[:, 1], sigma[:, 1])
-        return w * c1 + (1.0 - w) * c2
-
-
-def _write_shape_product(path, hpx_pix_256, sightline_id, embed, is_herschel):
+def _write_shape_product(path, hpx_pix_256, embed):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "sightline"
         f.create_dataset("HPX_PIX_256", data=hpx_pix_256)
-        f.create_dataset("SIGHTLINE_ID", data=sightline_id)
         f.create_dataset("U_EDGES", data=embed["u_edges"])
         f.create_dataset("P_U", data=embed["p_u"])
-        f.create_dataset("U_MEDIAN", data=embed["u_median"])
-        f.create_dataset("RIDGE_INTERCEPT", data=embed["ridge_intercept"])
-        f.create_dataset("RIDGE_SLOPE", data=embed["ridge_slope"])
-        f.create_dataset("RIDGE_WIDTH", data=embed["ridge_resid_sigma"])
-        f.create_dataset("RIDGE_CORR", data=embed["ridge_corr"])
-        f.create_dataset("IS_HERSCHEL", data=is_herschel.astype(np.int8))
-
-
-def _sightline_id_lookup(config, region, sl_pix):
-    """`SIGHTLINE_ID` per profile row, matched against the granule map's
-    own per-source column (IMPLEMENTATION.md section 1). A row the
-    granule map admits by coverage alone, with no catalogued source
-    sitting in it, carries no survey-wide sightline id at all and is
-    marked -1 -- informational only; the prior table joins every product
-    through `HPX_PIX_256` (`granules.access.per_source`), never through
-    this id."""
-    rs = access.region_slice(config, region)
-    src_pix, src_sid = rs["hpx_pix_256"], rs["sightline_id"]
-    order = np.argsort(src_pix)
-    src_pix_sorted, src_sid_sorted = src_pix[order], src_sid[order]
-    loc = np.searchsorted(src_pix_sorted, sl_pix)
-    capped = np.minimum(loc, max(src_pix_sorted.size - 1, 0))
-    matched = (src_pix_sorted.size > 0) & (src_pix_sorted[capped] == sl_pix)
-    return np.where(matched, src_sid_sorted[capped], -1).astype(np.int64)
 
 
 def build_shape(config, region):
-    """Writes one region's `prior/yso/prior_yso_sightline` product
-    (SPEC_PRIORS.md section 6.3): the embedding shape and a-B ridge for
-    every occupied sightline and its own map class -- the exact
-    ingredients `YsoShape` evaluates the closed-form a-marginal from
-    (with the survey's column kernel, read once at `YsoShape.read`), at
-    any `a`, with no tabulation. The stored `u_edges`/`p_u` are the
-    embedding density coarsened to `N_PROFILE_CELLS` equal-mass cells
-    (`coarsen_profile`); the reported median and the ridge are still read
-    off the full-resolution profile, unaffected.
+    """Writes one region's `population/yso/prior_yso_sightline` product
+    (SPEC_PRIORS.md section 6.3): the embedding shape for every occupied
+    sightline. The stored `u_edges`/`p_u` are the embedding density
+    coarsened to `N_PROFILE_CELLS` equal-mass cells (`coarsen_profile`);
+    the reported median is still read off the full-resolution profile,
+    unaffected.
     """
     profile = _load_profile_arrays(config, region)
     sl_pix = profile["hpx_pix_256"]
     embed = embedding_and_ridge(profile)
     coarse_edges, coarse_p_u = coarsen_profile(embed["u_edges"], embed["p_u"], N_PROFILE_CELLS)
+    u_median = embed["u_median"]
     embed = dict(embed, u_edges=coarse_edges, p_u=coarse_p_u)
-    map_class = _majority_map_class(config, region, sl_pix)
-    is_herschel = map_class == "herschel"
-    sightline_id = _sightline_id_lookup(config, region, sl_pix)
 
     path = config_module.product_path(config, "population", "yso", "prior",
                                        "sightline", region=region)
-    _write_shape_product(path, sl_pix, sightline_id, embed, is_herschel)
-    return path, embed["u_median"], embed["ridge_resid_sigma"]
+    _write_shape_product(path, sl_pix, embed)
+    return path, u_median
 
 
 def build(config, regions=None):
     """Writes, per region, the YSO shape product (section 6.3) -- the
-    embedding density and its map class -- and one 30-row (or subset)
-    law product (section 6.1) over `regions` (default: all thirty)."""
+    embedding density -- and one 30-row (or subset) law product (section
+    6.1) over `regions` (default: all thirty)."""
     names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
     law_rows = []
     for region in names:
-        with progress.Stage("prior.yso", region) as st:
-            path, u_median, ridge_resid_sigma = build_shape(config, region)
+        with progress.Stage("population.yso", region) as st:
+            path, u_median = build_shape(config, region)
             law_rows.append(_law_row(config, region))
             st.done(path, n_sightline=np.asarray(u_median).size,
-                    median_u_median=float(np.median(u_median)),
-                    median_ridge_resid_sigma=float(np.median(ridge_resid_sigma)))
+                    median_u_median=float(np.median(u_median)))
     _write_law_product(config, names, law_rows)
 
 
