@@ -50,7 +50,16 @@ from sesnaimpute.fittp import likelihood as likelihood_module
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
 IDX_I4 = BAND_KEYS.index("I4")
+IDX_I2 = BAND_KEYS.index("I2")
 CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
+
+#: The bright-end count check's two multiples of the pixel's own 4.5 um
+#: 50% limit (SPEC_BMSTP_DRAFT.md sec. 9 "the bright-end count ratio"):
+#: brighter than these, completeness is 1 on both the catalog and the
+#: model side and the counts lie inside the range Gaia and 2MASS
+#: calibrate, so the ratio there separates a wrong overall level from a
+#: wrong faint extrapolation.
+BRIGHT_MULT_3, BRIGHT_MULT_10 = 3.0, 10.0
 
 #: Monte Carlo draw size per pixel and class -- SPEC_BMSTP_DRAFT.md sec. 8:
 #: "A sample of 1e4 per class holds the Monte Carlo error under 1%."
@@ -219,7 +228,7 @@ def _pixel_batch_size(n_mc):
 
 
 def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None):
-    """`(frac, mc_error)` per pixel: `flux0` (n_mc, 8) undimmed, `u` (n_mc,)
+    """`(frac, mc_error, frac_bright3, frac_bright10)` per pixel: `flux0` (n_mc, 8) undimmed, `u` (n_mc,)
     the member's own placement fraction, `a_col` (n_pix,) the pixel's own
     column, `f_lim` (n_pix, 8) the pixel's own marginalised limits,
     `width_dex` (n_pix, 8) the pixel's own marginalised roll-off width
@@ -240,6 +249,12 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None):
     probability rather than a 0/1 outcome, unlike the retired step test's
     Bernoulli `frac*(1-frac)` form).
 
+    `frac_bright3`/`frac_bright10` (sec. 9 "the bright-end count ratio"):
+    the same `accepted_prob` restricted to the members whose dimmed I2
+    (4.5 um) flux exceeds 3x/10x the pixel's own `F_LIM_50_PIX_MJY[:,
+    IDX_I2]` -- no new draws, the same batch's dimmed `flux` array the
+    two-of-eight test already holds.
+
     Processed in pixel batches of `_pixel_batch_size` (rule 10b): each
     batch is the same elementwise-per-pixel computation on a slice of
     `a_col`/`f_lim`/`width_dex`, so splitting the pixel axis changes no result -- the
@@ -253,6 +268,8 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None):
     n_pix = a_col.size
     frac = np.empty(n_pix, dtype=np.float64)
     mc_error = np.empty(n_pix, dtype=np.float64)
+    frac_bright3 = np.empty(n_pix, dtype=np.float64)
+    frac_bright10 = np.empty(n_pix, dtype=np.float64)
     batch = _pixel_batch_size(n_mc)
     n_batches = (n_pix + batch - 1) // batch
     for b, start in enumerate(range(0, n_pix, batch)):
@@ -278,9 +295,22 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None):
         accepted_prob = 1.0 - prod_all - sum_term
         frac[start:stop] = accepted_prob.mean(axis=1)
         mc_error[start:stop] = accepted_prob.std(axis=1) / np.sqrt(n_mc)
+
+        # the bright-end check (sec. 9): the same `accepted_prob`,
+        # restricted to draws whose dimmed I2 flux clears 3x/10x this
+        # pixel's own I2 50% limit -- brighter than that, completeness is
+        # 1 on both sides, so this isolates the level from the faint
+        # extrapolation.
+        i2_lim_b = f_lim_b[:, IDX_I2:IDX_I2 + 1]  # (n_pix_batch, 1)
+        flux_i2 = flux[:, :, IDX_I2]  # (n_pix_batch, n_mc)
+        bright3 = flux_i2 > BRIGHT_MULT_3 * i2_lim_b
+        bright10 = flux_i2 > BRIGHT_MULT_10 * i2_lim_b
+        frac_bright3[start:stop] = (accepted_prob * bright3).mean(axis=1)
+        frac_bright10[start:stop] = (accepted_prob * bright10).mean(axis=1)
+
         if tick is not None:
             tick(b + 1, n_batches)
-    return frac, mc_error
+    return frac, mc_error, frac_bright3, frac_bright10
 
 
 def _pahc_weight(limit8_grid, p_pahc, x):
@@ -301,8 +331,8 @@ def _pahc_weight(limit8_grid, p_pahc, x):
 
 
 def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_in_tile, width_dex):
-    """One tile's `(frac_star, frac_agb, frac_pahc, mc_star, mc_agb,
-    mc_pahc, density_star, density_agb, density_pahc)`, over its own
+    """One tile's `{cls: (frac, mc_error, density, frac_bright3,
+    frac_bright10)}` for STAR/AGB/PAHC, over its own
     admitted pixels, from the star-family population's own retained
     sample (`population/star/population_star_tile__R.hdf5`'s `tile_<id>`
     group): STAR/AGB/PAHC all draw from the SAME TRILEGAL flux table
@@ -349,10 +379,12 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         if idx is None:
             frac = np.zeros(pix_in_tile.size)
             mc_error = np.zeros(pix_in_tile.size)
+            frac_bright3 = np.zeros(pix_in_tile.size)
+            frac_bright10 = np.zeros(pix_in_tile.size)
         else:
-            frac, mc_error = _accepted_fraction(
+            frac, mc_error, frac_bright3, frac_bright10 = _accepted_fraction(
                 a_col_in_tile, u[idx], flux0_all[idx], f_lim_in_tile, width_dex, config)
-        out[cls] = (frac, mc_error, density)
+        out[cls] = (frac, mc_error, density, frac_bright3, frac_bright10)
     return out
 
 
@@ -490,7 +522,8 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_i
                           logsig_mean, logsig_std, giannini_ratios, width_dex, seed):
     """One sightline's YSO and H2S Monte Carlo draws, shared by every
     admitted pixel it parents: `(frac_yso, mc_yso, density_yso, frac_h2s,
-    mc_h2s)`. YSO (sec. 5.5): masses from the Chabrier IMF through the
+    mc_h2s, frac_yso_bright3, frac_yso_bright10, frac_h2s_bright3,
+    frac_h2s_bright10)` (sec. 9's bright-end check, same draws). YSO (sec. 5.5): masses from the Chabrier IMF through the
     isochrone, placed along the sightline's own `p(u)`
     (`bmstp.sample_cloud.sample_yso`'s `(x, log10_b, w)` nodes, resampled
     by their own weight into `N_MC` member placements); density
@@ -513,7 +546,8 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_i
     x_nodes, _log10b_nodes, w_nodes = sample_cloud.sample_yso(loaded_profile, sl_row)
     p_nodes = w_nodes / w_nodes.sum()
     u_yso = x_nodes[rng.choice(x_nodes.size, size=N_MC, replace=True, p=p_nodes)]
-    frac_yso, mc_yso = _accepted_fraction(a_col_in_sl, u_yso, flux0_yso, f_lim_in_sl, width_dex, config)
+    frac_yso, mc_yso, frac_yso_bright3, frac_yso_bright10 = _accepted_fraction(
+        a_col_in_sl, u_yso, flux0_yso, f_lim_in_sl, width_dex, config)
     density_yso = yso_module.law_count(config, region, a_col_in_sl, arm_in_sl)
 
     log10_sigma = rng.normal(logsig_mean, logsig_std, size=N_MC)
@@ -525,9 +559,11 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_i
         ratio_draw = table[rng.randint(0, table.size, size=N_MC)]
         flux0_h2s[:, BAND_KEYS.index(band)] = 10.0 ** (log10_f_ks + ratio_draw)
     u_h2s = x_nodes[rng.choice(x_nodes.size, size=N_MC, replace=True, p=p_nodes)]
-    frac_h2s, mc_h2s = _accepted_fraction(a_col_in_sl, u_h2s, flux0_h2s, f_lim_in_sl, width_dex, config)
+    frac_h2s, mc_h2s, frac_h2s_bright3, frac_h2s_bright10 = _accepted_fraction(
+        a_col_in_sl, u_h2s, flux0_h2s, f_lim_in_sl, width_dex, config)
 
-    return frac_yso, mc_yso, density_yso, frac_h2s, mc_h2s
+    return (frac_yso, mc_yso, density_yso, frac_h2s, mc_h2s,
+            frac_yso_bright3, frac_yso_bright10, frac_h2s_bright3, frac_h2s_bright10)
 
 
 def _gal_members(config, rng, n_mc):
@@ -586,6 +622,42 @@ def _gal_members(config, rng, n_mc):
     return flux, u, sample_gal.density(config)
 
 
+def _observed_bright_counts(config, region, pix, f_lim):
+    """`(n_obs, n_obs_bright3, n_obs_bright10)`, int32 (n_pix,): the
+    catalogue's own counterpart to the bright-end check (SPEC_BMSTP_DRAFT.md
+    sec. 9 "the bright-end count ratio"). Every SESNA source's own
+    nside-512 pixel (`catalog.curated`'s `GAL_L_DEG`/`GAL_B_DEG`, nested,
+    `healpy.ang2pix`) is binned against the admitted pixel axis `pix`;
+    `n_obs` counts every source there, `n_obs_bright3`/`n_obs_bright10`
+    only those with a measured (`ORIGIN_FNU[:, I2] == 1`) I2 flux above
+    3x/10x that pixel's own `F_LIM_50_PIX_MJY[:, I2]` -- the same
+    threshold `_accepted_fraction` applies to the model's own draws."""
+    path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
+    with h5py.File(path, "r") as f:
+        gl = np.asarray(f["GAL_L_DEG"][:], dtype=np.float64)
+        gb = np.asarray(f["GAL_B_DEG"][:], dtype=np.float64)
+        flux_i2 = np.asarray(f["FNU_MJY"][:, IDX_I2], dtype=np.float64)
+        measured_i2 = np.asarray(f["ORIGIN_FNU"][:, IDX_I2]) == 1
+    src_pix = hp.ang2pix(512, gl, gb, nest=True, lonlat=True)
+
+    order = np.argsort(pix)
+    pix_sorted = pix[order]
+    loc = np.minimum(np.searchsorted(pix_sorted, src_pix), pix_sorted.size - 1)
+    found = pix_sorted[loc] == src_pix
+    idx_pix = order[loc[found]]  # index into the caller's own `pix` order
+
+    n_obs = np.bincount(idx_pix, minlength=pix.size).astype(np.int32)
+
+    lim_i2_at_src = f_lim[idx_pix, IDX_I2]
+    flux_i2_v = flux_i2[found]
+    measured_v = measured_i2[found]
+    bright3 = measured_v & (flux_i2_v > BRIGHT_MULT_3 * lim_i2_at_src)
+    bright10 = measured_v & (flux_i2_v > BRIGHT_MULT_10 * lim_i2_at_src)
+    n_obs_bright3 = np.bincount(idx_pix[bright3], minlength=pix.size).astype(np.int32)
+    n_obs_bright10 = np.bincount(idx_pix[bright10], minlength=pix.size).astype(np.int32)
+    return n_obs, n_obs_bright3, n_obs_bright10
+
+
 def build_region(config, region):
     """Writes `bmstp/atlas/prior_atlas_hpx512__R.hdf5` for one region: the
     admitted pixel axis (`catalog.depth_grid`), its column and coverage,
@@ -603,6 +675,11 @@ def build_region(config, region):
 
         n_cat = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
         mc_err = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
+        # sec. 9's bright-end check: the same per-class densities as
+        # `n_cat`, restricted to the Monte Carlo members whose dimmed I2
+        # flux clears 3x/10x the pixel's own I2 50% limit.
+        n_cat_bright3 = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
+        n_cat_bright10 = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
 
         star_path = config_module.product_path(
             config, "population", "star", "population", "tile", region=region)
@@ -628,9 +705,11 @@ def build_region(config, region):
         results = Parallel(n_jobs=n_jobs)(delayed(_one)(t) for t in tiles_here)
         for i, (tile_id, m, out) in enumerate(results):
             for cls in ("STAR", "AGB", "PAHC"):
-                frac, mc_error, density = out[cls]
+                frac, mc_error, density, frac_bright3, frac_bright10 = out[cls]
                 n_cat[cls][m] = density * frac
                 mc_err[cls][m] = mc_error
+                n_cat_bright3[cls][m] = density * frac_bright3
+                n_cat_bright10[cls][m] = density * frac_bright10
             st.tick(i + 1, len(tiles_here), "tiles")
 
         # GAL, sec. 5.4: one region-wide Monte Carlo sample (fixed seed,
@@ -638,11 +717,13 @@ def build_region(config, region):
         # pixel's own column and limits with the shared `_accepted_fraction`.
         gal_rng = np.random.RandomState(MC_SEED)
         gal_flux, gal_u, density_gal = _gal_members(config, gal_rng, N_MC)
-        frac_gal, mc_gal = _accepted_fraction(
+        frac_gal, mc_gal, frac_gal_bright3, frac_gal_bright10 = _accepted_fraction(
             a_col, gal_u, gal_flux, f_lim, width_dex, config,
             tick=lambda done, total: st.tick(done, total, "GAL pixel batches"))
         n_cat["GAL"] = density_gal * frac_gal
         mc_err["GAL"] = mc_gal
+        n_cat_bright3["GAL"] = density_gal * frac_gal_bright3
+        n_cat_bright10["GAL"] = density_gal * frac_gal_bright10
 
         # YSO/H2S, sec. 5.5-5.6: grouped by the pixel's own nside-256
         # sightline (YSO's grain), one Monte Carlo draw per sightline
@@ -673,22 +754,29 @@ def build_region(config, region):
 
         def _one_sl(sl_row):
             m = sl_row_of_pix == sl_row
-            f_y, e_y, d_y, f_h, e_h = _build_one_sightline(
+            (f_y, e_y, d_y, f_h, e_h,
+             fb3_y, fb10_y, fb3_h, fb10_h) = _build_one_sightline(
                 config, region, sl_row, a_col[m], arm[m], f_lim[m],
                 loaded_profile, mass_grid, abs_mag_grid, d_r_pc,
                 logsig_mean, logsig_std, giannini_ratios, width_dex[m],
                 MC_SEED + 10_000 + sl_row)
-            return m, f_y, e_y, d_y, f_h, e_h
+            return m, f_y, e_y, d_y, f_h, e_h, fb3_y, fb10_y, fb3_h, fb10_h
 
         frac_h2s_pix = np.full(n_pix, np.nan, dtype=np.float64)
+        frac_h2s_bright3_pix = np.full(n_pix, np.nan, dtype=np.float64)
+        frac_h2s_bright10_pix = np.full(n_pix, np.nan, dtype=np.float64)
         density_yso_pix = np.full(n_pix, np.nan, dtype=np.float64)
         results_sl = Parallel(n_jobs=n_jobs)(delayed(_one_sl)(r) for r in sls_here)
-        for i, (m, f_y, e_y, d_y, f_h, e_h) in enumerate(results_sl):
+        for i, (m, f_y, e_y, d_y, f_h, e_h, fb3_y, fb10_y, fb3_h, fb10_h) in enumerate(results_sl):
             n_cat["YSO"][m] = d_y * f_y
             mc_err["YSO"][m] = e_y
             mc_err["H2S"][m] = e_h
             frac_h2s_pix[m] = f_h
             density_yso_pix[m] = d_y
+            n_cat_bright3["YSO"][m] = d_y * fb3_y
+            n_cat_bright10["YSO"][m] = d_y * fb10_y
+            frac_h2s_bright3_pix[m] = fb3_h
+            frac_h2s_bright10_pix[m] = fb10_h
             st.tick(i + 1, len(sls_here), "sightlines")
 
         # H2S, sec. 5.6 "Sky density": `A_H2S = L . eta_r . eps_ext`. `L` is
@@ -716,6 +804,8 @@ def build_region(config, region):
         density_h2s = l_of_pix * eta_r * density_module.EPS_EXT
         n_cat["H2S"] = density_h2s * frac_h2s_pix
         n_cat_h2s_before = density_h2s_before * frac_h2s_pix
+        n_cat_bright3["H2S"] = density_h2s * frac_h2s_bright3_pix
+        n_cat_bright10["H2S"] = density_h2s * frac_h2s_bright10_pix
 
         built = CLASSES
         # every admitted pixel now has every class's `N_CAT` (finding 3
@@ -737,6 +827,35 @@ def build_region(config, region):
                  if n_source else float("nan") for c in built}
         ratio_built = total_predicted_built / n_source if n_source else float("nan")
 
+        # sec. 9's bright-end check: the catalogue's own bright
+        # counterpart per admitted pixel, and the same coverage/area
+        # weighting the total-count check applies above, denominator
+        # swapped for the observed bright total.
+        n_obs, n_obs_bright3, n_obs_bright10 = _observed_bright_counts(config, region, pix, f_lim)
+        sum_n_obs_bright3 = float(np.sum(n_obs_bright3))
+        sum_n_obs_bright10 = float(np.sum(n_obs_bright10))
+        ratio_bright3 = {c: float(np.sum(n_cat_bright3[c] * coverage) * _HPX512_PIXEL_DEG2) / sum_n_obs_bright3
+                          if sum_n_obs_bright3 else float("nan") for c in built}
+        ratio_bright10 = {c: float(np.sum(n_cat_bright10[c] * coverage) * _HPX512_PIXEL_DEG2) / sum_n_obs_bright10
+                           if sum_n_obs_bright10 else float("nan") for c in built}
+        ratio_bright3_total = sum(ratio_bright3.values())
+        ratio_bright10_total = sum(ratio_bright10.values())
+
+        # the fixed-seed reproducibility check the run asks for: the
+        # region's pre-existing `RATIO_BUILT` header, read before this
+        # build overwrites it.
+        path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
+        old_ratio_built = None
+        if os.path.exists(path):
+            with h5py.File(path, "r") as fold:
+                old_ratio_built = float(fold.attrs["RATIO_BUILT"]) if "RATIO_BUILT" in fold.attrs else None
+        print(f"bmstp.atlas {region}: RATIO_BUILT reproduction old={old_ratio_built} new={ratio_built:.6g}")
+
+        print(f"bmstp.atlas: {region} ratio_all={ratio_built:.4g} ratio_bright3={ratio_bright3_total:.4g} "
+              f"ratio_bright10={ratio_bright10_total:.4g} "
+              f"(STAR {ratio_bright3['STAR']:.4g}, GAL {ratio_bright3['GAL']:.4g}) "
+              f"n_obs_bright3={sum_n_obs_bright3:.6g} n_obs_bright10={sum_n_obs_bright10:.6g}")
+
         # sec. 5.6's brief report: RATIO_H2S before (the pre-W5k law at the
         # pixel's own column, no kernel) and after (this unit's convolved
         # law on the Herschel arm) -- the same total-count ratio the other
@@ -746,7 +865,6 @@ def build_region(config, region):
         print(f"bmstp.atlas {region}: RATIO_H2S before={ratio_h2s_before:.6g} "
               f"after={ratio['H2S']:.6g} (sec. 5.6's convolution vs. the law at the pixel's own column)")
 
-        path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with h5py.File(path, "w") as f:
             f.attrs["GRANULE"] = "hpx512"
@@ -759,14 +877,26 @@ def build_region(config, region):
             for c in built:
                 f.attrs[f"RATIO_{c}"] = ratio[c]
             f.attrs["RATIO_BUILT"] = ratio_built
+            # sec. 9's bright-end check: the same catalogued/observed
+            # ratio, above 3x/10x the pixel's own I2 50% limit, where
+            # completeness is 1 on both sides.
+            f.attrs["RATIO_BRIGHT3"] = ratio_bright3_total
+            f.attrs["RATIO_BRIGHT10"] = ratio_bright10_total
+            for c in built:
+                f.attrs[f"RATIO_BRIGHT3_{c}"] = ratio_bright3[c]
             f.create_dataset("HPX_PIX_512", data=pix)
             f.create_dataset("A_COL_K", data=a_col.astype(np.float32))
             f.create_dataset("COVERAGE", data=coverage.astype(np.float32))
             f.create_dataset("F_LIM_50_PIX_MJY", data=f_lim.astype(np.float32))
             for c in CLASSES:
                 f.create_dataset(f"N_CAT_{c}", data=n_cat[c].astype(np.float32))
+                f.create_dataset(f"N_CAT_BRIGHT3_{c}", data=n_cat_bright3[c].astype(np.float32))
+                f.create_dataset(f"N_CAT_BRIGHT10_{c}", data=n_cat_bright10[c].astype(np.float32))
             for c in built:
                 f.create_dataset(f"SHARE_{c}", data=share[c].astype(np.float32))
+            f.create_dataset("N_OBS", data=n_obs.astype(np.int32))
+            f.create_dataset("N_OBS_BRIGHT3", data=n_obs_bright3.astype(np.int32))
+            f.create_dataset("N_OBS_BRIGHT10", data=n_obs_bright10.astype(np.int32))
 
         def _max_mc_err(c):
             frac_c = n_cat[c] / (built_total + 1e-300)
@@ -781,7 +911,9 @@ def build_region(config, region):
                 ratio_star=ratio["STAR"], ratio_agb=ratio["AGB"], ratio_pahc=ratio["PAHC"],
                 ratio_gal=ratio["GAL"], ratio_yso=ratio["YSO"], ratio_h2s=ratio["H2S"],
                 ratio_built=ratio_built, density_gal_deg2=density_gal,
-                mc_error_max_where_frac_gt_0p1=max_mc_err)
+                mc_error_max_where_frac_gt_0p1=max_mc_err,
+                ratio_bright3=ratio_bright3_total, ratio_bright10=ratio_bright10_total,
+                n_obs_bright3=int(sum_n_obs_bright3), n_obs_bright10=int(sum_n_obs_bright10))
     return path
 
 
