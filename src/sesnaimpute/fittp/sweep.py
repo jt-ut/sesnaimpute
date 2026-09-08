@@ -31,6 +31,7 @@ import os
 import time
 
 import h5py
+import numba
 import numpy as np
 import threadpoolctl
 from scipy.special import logsumexp
@@ -50,16 +51,20 @@ N_BANDS = len(BAND_KEYS)
 #: (IMPLEMENTATION_BMSTP_DRAFT.md section 1).
 CLASSES = tuple(c.code for c in definitions.CLASSES)
 
-#: `_block_result`'s `log10_flux`/`flux_theta` are two float64
-#: `(n_block, n_model, 8)` arrays -- 4 float32-equivalents -- not counted
-#: by `likelihood.block_size`'s own `NONDET_BUFFERS`; passed to
-#: `block_size` as `extra_buffers` so the block's real working set stays
-#: inside `[fit] block_budget_mb` (W7 review finding 6). W9 tried building
-#: these in float32 (the register/design column/clamped marks that feed
-#: them are already float32); the STAR sweep's own FLUX_MEAN then missed
-#: the 1e-6 relative bar against the float64 product (7.7e-6, W9 phase 2
-#: acceptance run) -- reverted, float64 kept, no speed claimed here.
-SWEEP_EXTRA_BUFFERS = 4
+#: `_block_result`'s `log10_flux` is the one float64 `(n_block, n_model, 8)`
+#: array left -- 2 float32-equivalents -- not counted by `likelihood.
+#: block_size`'s own `NONDET_BUFFERS`; passed to `block_size` as
+#: `extra_buffers` so the block's real working set stays inside `[fit]
+#: block_budget_mb` (W7 review finding 6). W9 tried building it in float32
+#: (the register/design column/clamped marks that feed it are already
+#: float32); the STAR sweep's own FLUX_MEAN then missed the 1e-6 relative
+#: bar against the float64 product (7.7e-6, W9 phase 2 acceptance run) --
+#: reverted, float64 kept, no speed claimed here. W9d's `flux_theta =
+#: 10**log10_flux` companion array (also float64, 2 more equivalents) is
+#: gone -- `_flux_moments_topk_kernel` builds each template's 8-band flux
+#: once, in a per-source buffer, and never materialises it over the whole
+#: model axis.
+SWEEP_EXTRA_BUFFERS = 2
 
 #: The datasets every P7 part file and the joined product carry, in write
 #: order.
@@ -128,6 +133,58 @@ def _n_sources(config, region):
         return f["NAME"].shape[0]
 
 
+@numba.njit(parallel=True, cache=True)
+def _flux_moments_topk_kernel(log10_flux, p_theta, sorted_order, rank_position,
+                               good, out_mean, out_m2, out_topk_flux):
+    """The evidence-weighted flux moments (section 1.3's posterior mean and
+    second moment in flux, `E[F]` and `E[F F^T]`) and the top-K flux record,
+    one pass over every (source, template) pair, per source via `prange`:
+    for each template `t` the linear flux `f = 10**log10_flux[s, t, :]` (8
+    float64 values, held in a small per-source buffer, never written to a
+    `(n_block, n_model, 8)` array) is folded into `mean += p_theta*f` and
+    `m2 += p_theta*f f^T`, and, for the templates already chosen by the
+    argpartition/argsort on `ln_w` before this kernel runs (`_block_result`,
+    unchanged), copied into `out_topk_flux` at that template's rank.
+    `sorted_order` is each source's own top-K template indices sorted
+    ascending, and `rank_position` maps each ascending slot back to its
+    position in the ln_w-descending top-K list, so the O(1) pointer walk
+    below (advancing only when `t` reaches the next sorted index) lands each
+    flux in the same slot `topk_model`/`topk_a_k`/etc. use for that
+    template. `good[s]` false (a flagged source, `batch.flagged`) skips the
+    top-K write only -- `out_topk_flux` was pre-filled with NaN by the
+    caller -- while the moments still accumulate over every source, matching
+    the unmasked `flux_mean`/`flux_cov` of the array form this replaces.
+    """
+    n_block = log10_flux.shape[0]
+    n_model = log10_flux.shape[1]
+    n_bands = log10_flux.shape[2]
+    k_keep = sorted_order.shape[1]
+    for s in numba.prange(n_block):
+        mean = np.zeros(n_bands)
+        m2 = np.zeros((n_bands, n_bands))
+        f = np.empty(n_bands)
+        ptr = 0
+        row_good = good[s]
+        for t in range(n_model):
+            for b in range(n_bands):
+                f[b] = 10.0 ** log10_flux[s, t, b]
+            p = p_theta[s, t]
+            for a in range(n_bands):
+                pa = p * f[a]
+                mean[a] += pa
+                for b in range(n_bands):
+                    m2[a, b] += pa * f[b]
+            if row_good and ptr < k_keep and t == sorted_order[s, ptr]:
+                r = rank_position[s, ptr]
+                for b in range(n_bands):
+                    out_topk_flux[s, r, b] = f[b]
+                ptr += 1
+        for a in range(n_bands):
+            out_mean[s, a] = mean[a]
+            for b in range(n_bands):
+                out_m2[s, a, b] = m2[a, b]
+
+
 def _block_result(config, region, cls, reader, gaia_term, template_log, subclass_idx,
                    n_sub, width_dex, topk, start, stop, timing):
     """One block's own P7 rows (section 1.3): the fit, the prior read, the
@@ -194,7 +251,24 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
     with np.errstate(invalid="ignore"):
         p_theta = np.exp(ln_w - ev_total[:, None])
     p_theta = np.where(np.isfinite(p_theta), p_theta, 0.0)
+    timing["moments"] += time.perf_counter() - t
 
+    # the top-K template indices, from `ln_w` alone -- computed before the
+    # moments kernel below so its per-source pointer walk knows, for each
+    # template it visits in order, which rank (if any) to write the flux
+    # into; unchanged from the array form (argpartition then an argsort of
+    # just the K survivors).
+    t = time.perf_counter()
+    k_keep = min(topk, n_model)
+    order = np.argpartition(-ln_w, k_keep - 1, axis=1)[:, :k_keep]
+    row_idx = np.arange(n_block)[:, None]
+    order = order[row_idx, np.argsort(-ln_w[row_idx, order], axis=1)]
+    occam_gap = (ev_total - ln_w.max(axis=1)).astype(np.float32)
+    timing["topk"] += time.perf_counter() - t
+
+    good = ~batch.flagged
+
+    t = time.perf_counter()
     # the template's fitted flux at its clamped marks: recovering the
     # A_V-unit extinction the design column (batch.ext_col) was built in
     # from the reported a_K mark (fit.a_hat_clamped = A_V_clamped *
@@ -203,53 +277,50 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
     # float64 here (W9 phase 2: a float32 version of this exact expression
     # measured 7.7e-6 relative on FLUX_MEAN against this float64 form, over
     # the 1e-6 bar, so the float64 temporary is kept -- not the redundant
-    # pass the brief was aimed at).
+    # pass the brief was aimed at). log10_flux stays a full (n_block,
+    # n_model, 8) array (the fit's own output); the linear flux
+    # 10**log10_flux is never materialised over the whole model axis --
+    # `_flux_moments_topk_kernel` builds each template's 8-band flux once,
+    # in a per-source buffer, and folds it straight into the posterior
+    # mean/second moment and, for the top-K templates chosen above, the
+    # top-K flux record (W9d).
     a_clamped64 = fit.a_hat_clamped.astype(np.float64)
     b_clamped64 = fit.log10_b_hat_clamped.astype(np.float64)
     av_clamped = a_clamped64 / batch.ak_per_av[:, None]
     log10_flux = (template_log[None, :, :].astype(np.float64)
                   + batch.ext_col.astype(np.float64)[:, None, :] * av_clamped[:, :, None]
                   + b_clamped64[:, :, None])
-    flux_theta = np.power(10.0, log10_flux)  # (n_block, n_model, 8), this block only
-    timing["moments"] += time.perf_counter() - t
 
-    t = time.perf_counter()
-    # the posterior mean and second moment of the model-space flux, as
-    # two two-operand matmuls rather than the three-operand einsum (W9c:
-    # the einsum's optimizer built an (n_block, n_model, 8, 8) outer-
-    # product intermediate to reach the same contraction a batched gemm
-    # does directly). flux_mean is p_theta contracted against flux_theta's
-    # model axis; flux_m2's (n_block, 8, 8) band-band matrix is
-    # (p_theta-weighted flux_theta)^T @ flux_theta per source.
-    flux_mean = np.matmul(p_theta[:, None, :], flux_theta)[:, 0, :]
-    flux_m2 = np.matmul((p_theta[:, :, None] * flux_theta).transpose(0, 2, 1), flux_theta)
+    # templates sorted ascending per source, for the kernel's O(1) pointer
+    # walk against the increasing template index `t`; rank_position maps
+    # each sorted slot back to its ln_w-descending rank in `order`, so
+    # topk_flux lands in the same slot topk_model/topk_a_k/etc. use.
+    sort_idx = np.argsort(order, axis=1)
+    sorted_order = np.take_along_axis(order, sort_idx, axis=1).astype(np.int64)
+    rank_position = sort_idx.astype(np.int64)
+
+    flux_mean = np.empty((n_block, N_BANDS), dtype=np.float64)
+    flux_m2 = np.empty((n_block, N_BANDS, N_BANDS), dtype=np.float64)
+    topk_flux = np.full((n_block, topk, N_BANDS), np.nan, dtype=np.float32)
+    _flux_moments_topk_kernel(log10_flux, p_theta, sorted_order, rank_position,
+                               good, flux_mean, flux_m2, topk_flux)
     flux_cov = flux_m2 - flux_mean[:, :, None] * flux_mean[:, None, :]
     timing["moments"] += time.perf_counter() - t
 
     t = time.perf_counter()
-    k_keep = min(topk, n_model)
-    order = np.argpartition(-ln_w, k_keep - 1, axis=1)[:, :k_keep]
-    row_idx = np.arange(n_block)[:, None]
-    order = order[row_idx, np.argsort(-ln_w[row_idx, order], axis=1)]
-
-    occam_gap = (ev_total - ln_w.max(axis=1)).astype(np.float32)
-
     topk_model = np.full((n_block, topk), -1, dtype=np.int32)
     topk_a_k = np.full((n_block, topk), np.nan, dtype=np.float32)
     topk_log10_b = np.full((n_block, topk), np.nan, dtype=np.float32)
     topk_chi2 = np.full((n_block, topk), np.nan, dtype=np.float32)
     topk_ln_l = np.full((n_block, topk), np.nan, dtype=np.float32)
     topk_ln_prior = np.full((n_block, topk), np.nan, dtype=np.float32)
-    topk_flux = np.full((n_block, topk, N_BANDS), np.nan, dtype=np.float32)
 
-    good = ~batch.flagged
     topk_model[good, :k_keep] = order[good].astype(np.int32)
     topk_a_k[good, :k_keep] = fit.a_hat_clamped[row_idx, order][good]
     topk_log10_b[good, :k_keep] = fit.log10_b_hat_clamped[row_idx, order][good]
     topk_chi2[good, :k_keep] = fit.chi2_min[row_idx, order][good]
     topk_ln_l[good, :k_keep] = ln_l[row_idx, order][good].astype(np.float32)
     topk_ln_prior[good, :k_keep] = ln_lambda[row_idx, order][good]
-    topk_flux[good, :k_keep, :] = flux_theta[row_idx, order, :][good].astype(np.float32)
     occam_gap[~good] = np.nan
     timing["topk"] += time.perf_counter() - t
 
