@@ -471,9 +471,6 @@ def build(config, regions=None):
         out_path = build_sightline(config, stage=st)
         st.done(out_path)
 
-    with progress_module.Stage("sky.derived.column.column_check") as st:
-        out_path = build_column_check(config, stage=st)
-        st.done(out_path)
 
 
 if __name__ == "__main__":
