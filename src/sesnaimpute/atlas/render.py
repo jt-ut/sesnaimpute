@@ -1,25 +1,36 @@
 """The sky atlas figures (SPEC_BMSTP_DRAFT.md sec. 8; IMPLEMENTATION_
-BMSTP_DRAFT.md sec. 1.2 P6, sec. 1.3 P11). Per region, one figure
-reprojecting the admitted nside-512 pixels onto a tangent-plane display
-grid of 1' pixels centred on the region: the pixel's nearest nside-512
-value (healpy `ang2pix`), then a Gaussian smoothing of one nside-512
-pixel width (6.9') so pixel edges do not show. Nothing at display
-resolution is stored -- the figure is rendered at plot time only. The
-granule map's own frame is galactic (`granules/build.py`'s `ang2pix(...,
-gl, gb, ...)`); the display grid and its RA/Dec ticks are equatorial, so
-every lookup crosses frames once through astropy, never through a local
-approximation.
+BMSTP_DRAFT.md sec. 1.2 P6, sec. 1.3 P11). Two figures per region, the
+prior atlas's (`bmstp/atlas/figures/prior-atlas_<R>`, from P6) and the
+posterior atlas's (`fittp/atlas/figures/posterior-atlas_<R>`, from P11),
+each reprojecting the SAME footprint -- `catalog.depth_grid`'s admitted
+nside-512 pixels (P6 and P11 are themselves both built on that axis) --
+onto its own tangent-plane display grid of 1' pixels centred on the
+region: the pixel's nearest nside-512 value (healpy `ang2pix`), then a
+Gaussian smoothing of one nside-512 pixel width (6.9') so pixel edges do
+not show. Nothing at display resolution is stored -- the figures are
+rendered at plot time only. The granule map's own frame is galactic
+(`granules/build.py`'s `ang2pix(..., gl, gb, ...)`); the display grid and
+its RA/Dec ticks are equatorial, so every lookup crosses frames once
+through astropy, never through a local approximation. Reading the same
+depth-grid footprint for both figures (rather than each atlas's own
+axis) makes their display grids identical pixel for pixel.
 
-Every panel is drawn at the same size and shares the region's own
-display-grid aspect: the column `A_K` (log scale), the total predicted
-catalogued density `Sigma_C N_CAT_C` (deg^-2, hatched where the surveyed
-IRAC-coverage fraction is below 0.5), the prior share `SHARE_C` per
-class in class order, and -- when the posterior atlas (P11) exists --
-the posterior mean `MEAN_P_C` per class plus `N_YSO_ABOVE_HALF`: 15
-panels with a posterior, 8 without. Panels fill row-major, in that
-order, into the grid `page_geometry` picks (sec. below); the region's
-total-count ratio (`RATIO_<CLS>`) sits in the figure's caption line
-rather than any panel title.
+Every panel of a figure is drawn at the same size and shares the
+region's own display-grid aspect. The prior figure: the column `A_K`
+(log scale), the total predicted catalogued density `Sigma_C N_CAT_C`
+(deg^-2, hatched where the surveyed IRAC-coverage fraction is below
+0.5), and the prior share `SHARE_C` per class in class order -- 8
+panels. The posterior figure: the same column `A_K`, the posterior mean
+`MEAN_P_C` per class in class order, and `N_YSO_ABOVE_HALF` -- 8 panels.
+An admitted pixel with no sources of its own (P11's `N_SOURCES == 0`, or
+a pixel P11 omits) is painted flat neutral grey on every posterior-
+derived panel, masked out before the Gaussian smoothing so it never
+bleeds into an occupied neighbour's own value, rather than dropped as
+transparent; the posterior figure's caption says so. Panels fill
+row-major, in that order, into the grid `page_geometry` picks (sec.
+below); the prior figure's total-count ratio (`RATIO_<CLS>`) and the
+posterior figure's `N(P(YSO)>0.5)` count and two-band fraction sit in
+each figure's own caption line rather than any panel title.
 
 Colour maps and scales follow the convention the earlier package's own
 sky-atlas figure used (`sesnacomplete.bms_prior.validation.sky_atlas`):
@@ -216,13 +227,77 @@ def _read_prior(path):
 
 
 def _read_posterior(path):
-    """The posterior atlas (P11), sorted by pixel."""
+    """The posterior atlas (P11), sorted by pixel; `n_sources` is the
+    per-pixel count a source-less pixel (grey on the figure) reads as 0."""
     with h5py.File(path, "r") as f:
         pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
+        n_sources = np.asarray(f["N_SOURCES"][:], dtype=np.int64)
         mean_p = np.stack([np.asarray(f["MEAN_P_%s" % c][:], dtype=np.float64) for c in CLASSES], axis=1)
         n_yso_half = np.asarray(f["N_YSO_ABOVE_HALF"][:], dtype=np.float64)
     order = np.argsort(pix)
-    return dict(pix=pix[order], mean_p=mean_p[order], n_yso_half=n_yso_half[order])
+    return dict(pix=pix[order], n_sources=n_sources[order],
+                mean_p=mean_p[order], n_yso_half=n_yso_half[order])
+
+
+def _read_depth_grid(config, region):
+    """The admitted-pixel footprint (`catalog.depth_grid`, sec. 3.3) --
+    the SAME footprint P6 and P11 are themselves built on (sec. 8), read
+    here directly so the prior and posterior figures share it exactly,
+    sorted by pixel."""
+    path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
+    with h5py.File(path, "r") as f:
+        pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
+    return np.sort(pix)
+
+
+def _align(footprint_pix, src_pix, values, fill):
+    """`values` (aligned to the sorted `src_pix`) reindexed onto the
+    sorted `footprint_pix`, `fill` where `footprint_pix` holds a pixel
+    `src_pix` lacks -- so every panel of a figure reads the identical
+    admitted-pixel axis regardless of which product supplied the data."""
+    loc = np.minimum(np.searchsorted(src_pix, footprint_pix), src_pix.size - 1)
+    found = src_pix[loc] == footprint_pix
+    out = np.full((footprint_pix.size,) + values.shape[1:], fill,
+                  dtype=np.result_type(values, fill))
+    out[found] = values[loc[found]]
+    return out
+
+
+def _footprint_geometry(pix):
+    """The display WCS, grid-pixel lookup and shape for the admitted
+    footprint `pix` -- computed once from the depth grid and shared by
+    every panel of both figures, so their display grids coincide."""
+    ra0, dec0 = _region_centre_icrs(pix)
+    n_x, n_y = _grid_size(ra0, dec0, pix)
+    wcs = _display_wcs(ra0, dec0, n_x, n_y)
+    grid_pix = _grid_pixels(wcs, n_x, n_y)
+    return dict(n_x=n_x, n_y=n_y, wcs=wcs, grid_pix=grid_pix, shape=(n_y, n_x))
+
+
+def _gap_grid(pix_sorted, gap_1d, grid_pix_flat, shape):
+    """Per display cell, whether its nearest admitted pixel (the same
+    nearest lookup `_reproject` makes) is source-less (`gap_1d`, aligned
+    to `pix_sorted`) -- computed before any smoothing, so a source-less
+    pixel's own cells are painted flat grey rather than shown as
+    whatever a smoothed occupied neighbour bleeds into them (sec. 8,
+    "mask before smoothing ... paint the mask grey")."""
+    loc = np.minimum(np.searchsorted(pix_sorted, grid_pix_flat), pix_sorted.size - 1)
+    found = pix_sorted[loc] == grid_pix_flat
+    return (found & gap_1d[loc]).reshape(shape)
+
+
+def _two_band_fraction(config, region):
+    """The fraction of the region's classified sources detected in
+    exactly two of the eight bands (P8's `N_DETECTED`; SPEC_BMSTP_DRAFT.md
+    "the two-band population", reported beside every YSO count). P8
+    carries no such attribute (`fittp.classify`'s own `st.done` line
+    computes it the same way, then prints it, without storing it), so it
+    is read here as a direct count over that one small column, never
+    P8's large per-source arrays (`CANDIDATE_FLUX`, `FLUX_IMPUTED_COV`)."""
+    path = config_module.product_path(config, "fittp", "classification", "posterior", "source", region=region)
+    with h5py.File(path, "r") as f:
+        n_detected = np.asarray(f["N_DETECTED"][:])
+    return float(np.mean(n_detected == 2)) if n_detected.size else float("nan")
 
 
 def _region_centre_icrs(pix):
@@ -305,15 +380,22 @@ def _reproject(pix_sorted, values, grid_pix_flat, shape):
 
 
 def _add_panel(fig, rect, page_w, page_h, wcs, data, cmap, norm=None, title="",
-               show_dec=True, show_ra=True, title_size=9):
+               show_dec=True, show_ra=True, title_size=9, grey_grid=None):
     """One sky panel at `rect` (inches, lower-left origin), on the
     shared display WCS. `show_dec`/`show_ra` gate the tick *labels*
     only (every panel keeps its ticks and grid, since every panel is
     the same field, sec. 8's "shared sky frame") -- only the grid's
     left column and each column's own bottom-most panel need the
-    numbers repeated."""
+    numbers repeated. `grey_grid`, where given, paints those display
+    cells flat neutral grey over the panel's own smoothed value (sec.
+    8: a source-less admitted pixel, never dropped as transparent)."""
     ax = fig.add_axes(_frac(rect, page_w, page_h), projection=wcs)
     im = ax.imshow(data, origin="lower", cmap=cmap, norm=norm)
+    if grey_grid is not None and np.any(grey_grid):
+        overlay = np.zeros(grey_grid.shape + (4,))
+        overlay[..., :3] = 0.65
+        overlay[..., 3] = grey_grid.astype(float)
+        ax.imshow(overlay, origin="lower")
     ax.set_title(title, fontsize=title_size, pad=4)
     for i in (0, 1):
         # `set_axislabel("")` alone is not enough: WCSAxes treats an
@@ -354,39 +436,47 @@ def _colorbar(fig, im, rect, page_w, page_h):
     return cbar
 
 
-def build_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAGE_HEIGHT_IN):
+def _require_depth_grid(config, region):
+    """The depth-grid footprint, or `None` with a skip message -- both
+    figures need it (sec. 8), P6 and P11 are each built on it already."""
+    depth_path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
+    if not os.path.exists(depth_path):
+        print("atlas.render [%s]: no depth grid -- run RUNBOOKtp.sh's "
+              "'PY sesnaimpute.catalog.depth_grid' line first, skipped" % region, flush=True)
+        return None
+    return _read_depth_grid(config, region)
+
+
+def build_prior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAGE_HEIGHT_IN):
+    """Writes the prior-atlas figure (P6, 8 panels: column, predicted
+    count, the six prior shares) under `bmstp/atlas/figures/`."""
     prior_path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
     if not os.path.exists(prior_path):
         print("atlas.render [%s]: no prior atlas -- run RUNBOOKtp.sh's "
               "'PY sesnaimpute.bmstp.atlas' line first, skipped" % region, flush=True)
         return None
+    footprint_pix = _require_depth_grid(config, region)
+    if footprint_pix is None:
+        return None
     prior = _read_prior(prior_path)
 
-    post_path = config_module.product_path(config, "fittp", "atlas", "posterior", "hpx512", region=region)
-    posterior = _read_posterior(post_path) if os.path.exists(post_path) else None
+    with progress.Stage("atlas.render.prior", region) as st:
+        geom_grid = _footprint_geometry(footprint_pix)
+        wcs, grid_pix, shape = geom_grid["wcs"], geom_grid["grid_pix"], geom_grid["shape"]
 
-    with progress.Stage("atlas.render", region) as st:
-        ra0, dec0 = _region_centre_icrs(prior["pix"])
-        n_x, n_y = _grid_size(ra0, dec0, prior["pix"])
-        wcs = _display_wcs(ra0, dec0, n_x, n_y)
-        grid_pix = _grid_pixels(wcs, n_x, n_y)
-        shape = (n_y, n_x)
+        a_k = _align(footprint_pix, prior["pix"], prior["a_k"], np.nan)
+        coverage = _align(footprint_pix, prior["pix"], prior["coverage"], np.nan)
+        n_cat_total = _align(footprint_pix, prior["pix"], prior["n_cat"].sum(axis=1), np.nan)
+        share = _align(footprint_pix, prior["pix"], prior["share"], np.nan)
 
-        col_grid = _reproject(prior["pix"], prior["a_k"], grid_pix, shape)
-        density_grid = _reproject(prior["pix"], prior["n_cat"].sum(axis=1), grid_pix, shape)
-        coverage_grid = _reproject(prior["pix"], prior["coverage"], grid_pix, shape)
-        share_grids = [_reproject(prior["pix"], prior["share"][:, i], grid_pix, shape)
+        col_grid = _reproject(footprint_pix, a_k, grid_pix, shape)
+        density_grid = _reproject(footprint_pix, n_cat_total, grid_pix, shape)
+        coverage_grid = _reproject(footprint_pix, coverage, grid_pix, shape)
+        share_grids = [_reproject(footprint_pix, share[:, i], grid_pix, shape)
                        for i in range(len(CLASSES))]
 
-        has_post = posterior is not None
-        if has_post:
-            post_share_grids = [_reproject(posterior["pix"], posterior["mean_p"][:, i], grid_pix, shape)
-                                 for i in range(len(CLASSES))]
-            nyso_grid = _reproject(posterior["pix"], posterior["n_yso_half"], grid_pix, shape)
-
-        # The panels, row-major fill order: column, predicted count,
-        # the six prior shares, the six posterior means (if present),
-        # the YSO count -- 15 panels with a posterior, 8 without.
+        # The panels, row-major fill order: column, predicted count, the
+        # six prior shares -- 8 panels.
         ratios = [(cls, float(prior["attrs"].get("RATIO_%s" % cls, np.nan))) for cls in CLASSES]
         low_coverage = coverage_grid < 0.5
         panels = [
@@ -399,19 +489,13 @@ def build_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAGE_HEIG
         panels += [dict(data=share_grids[i], cmap="viridis", norm=None,
                         title="%s\nprior share" % cls, hatch=None)
                    for i, cls in enumerate(CLASSES)]
-        if has_post:
-            panels += [dict(data=post_share_grids[i], cmap="viridis", norm=None,
-                            title="%s\nposterior mean P" % cls, hatch=None)
-                       for i, cls in enumerate(CLASSES)]
-            panels.append(dict(data=nyso_grid, cmap="magma", norm=None,
-                               title="N($P$(YSO)$>$0.5)", hatch=None))
         n_panels = len(panels)
 
         # `page_geometry` (ported and generalised from the earlier
         # package's `sesnacomplete.bms_prior.validation.sky_atlas`) picks
         # the column/row split that gives the largest common panel size
         # on the fixed page.
-        aspect = n_x / float(n_y)
+        aspect = geom_grid["n_x"] / float(geom_grid["n_y"])
         geom = page_geometry(aspect, n_panels, page_w, page_h)
         cols = geom["cols"]
         last_row_of_col = _outer_rows(n_panels, cols)
@@ -419,15 +503,12 @@ def build_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAGE_HEIG
         plot_style.apply_style()
         fig = plot_style.new_sized_figure(page_w, page_h)
 
-        axes_ims = []
         for i, p in enumerate(panels):
             row, col = divmod(i, cols)
             rect = _panel_rect(geom, i, page_w, page_h)
-            show_dec = col == 0
-            show_ra = row == last_row_of_col[col]
             ax, im = _add_panel(fig, rect, page_w, page_h, wcs, p["data"], p["cmap"],
                                  norm=p["norm"], title=p["title"],
-                                 show_dec=show_dec, show_ra=show_ra)
+                                 show_dec=col == 0, show_ra=row == last_row_of_col[col])
             if p["hatch"] is not None:
                 # Hatch only where the admitted footprint itself is
                 # low-coverage: `coverage_grid` is already NaN outside
@@ -437,10 +518,6 @@ def build_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAGE_HEIG
                 ax.contourf(p["hatch"].astype(float), levels=[0.5, 1.5],
                             hatches=["//"], colors="none")
             _colorbar(fig, im, _bar_rect(rect, geom), page_w, page_h)
-            axes_ims.append((ax, im))
-
-        caption = None if has_post else \
-            "posterior atlas (P11) absent for this region -- prior atlas only"
 
         total_predicted = float(prior["attrs"].get("TOTAL_PREDICTED", np.nan))
         total_observed = float(prior["attrs"].get("TOTAL_OBSERVED", np.nan))
@@ -448,9 +525,8 @@ def build_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAGE_HEIG
         ratio_po = total_predicted / total_observed if total_observed else float("nan")
         ratio_line = "total-count ratio: " + ", ".join(
             "%s %.3g" % (cls, ratio) for cls, ratio in ratios)
-        title = ("%s -- predicted/observed = %.4g/%.4g = %.3f, surveyed area %.4g deg$^2$%s"
-                  % (region, total_predicted, total_observed, ratio_po, surveyed_area,
-                     "" if caption is None else " (%s)" % caption))
+        title = ("%s -- predicted/observed = %.4g/%.4g = %.3f, surveyed area %.4g deg$^2$"
+                  % (region, total_predicted, total_observed, ratio_po, surveyed_area))
         fig.suptitle(title + "\n" + ratio_line, fontsize=11, y=1.0 - 0.10 / page_h)
 
         out_dir = os.path.join(config.data_root, "bmstp", "atlas", "figures")
@@ -464,19 +540,113 @@ def build_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAGE_HEIG
             paths.append(path)
         plt.close(fig)
 
-        st.done(paths[0], n_x=n_x, n_y=n_y, has_posterior=int(has_post),
+        st.done(paths[0], n_x=geom_grid["n_x"], n_y=geom_grid["n_y"], n_admitted=footprint_pix.size,
                 cols=geom["cols"], rows=geom["rows"], panel_scale_in=geom["panel_h"])
     return paths
 
 
+def build_posterior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAGE_HEIGHT_IN):
+    """Writes the posterior-atlas figure (P11, 8 panels: column, the six
+    posterior means, `N(P(YSO)>0.5)`) under `fittp/atlas/figures/`, on
+    the SAME footprint as the prior figure's own (`catalog.depth_grid`).
+    The column panel reuses P6's own `A_COL_K` (P11 carries no column),
+    so this figure needs the prior atlas too."""
+    post_path = config_module.product_path(config, "fittp", "atlas", "posterior", "hpx512", region=region)
+    if not os.path.exists(post_path):
+        print("atlas.render [%s]: no posterior atlas -- run RUNBOOKtp.sh's "
+              "'PY sesnaimpute.fittp.atlas' line first, skipped" % region, flush=True)
+        return None
+    prior_path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
+    if not os.path.exists(prior_path):
+        print("atlas.render [%s]: posterior atlas present but no prior atlas for its "
+              "column panel -- run RUNBOOKtp.sh's 'PY sesnaimpute.bmstp.atlas' line first, skipped"
+              % region, flush=True)
+        return None
+    footprint_pix = _require_depth_grid(config, region)
+    if footprint_pix is None:
+        return None
+    posterior = _read_posterior(post_path)
+    prior = _read_prior(prior_path)
+
+    with progress.Stage("atlas.render.posterior", region) as st:
+        geom_grid = _footprint_geometry(footprint_pix)
+        wcs, grid_pix, shape = geom_grid["wcs"], geom_grid["grid_pix"], geom_grid["shape"]
+
+        a_k = _align(footprint_pix, prior["pix"], prior["a_k"], np.nan)
+        n_sources = _align(footprint_pix, posterior["pix"], posterior["n_sources"], 0)
+        gap_1d = n_sources == 0
+        mean_p = _align(footprint_pix, posterior["pix"], posterior["mean_p"], np.nan)
+        n_yso_half = _align(footprint_pix, posterior["pix"],
+                             posterior["n_yso_half"].astype(np.float64), 0.0)
+
+        col_grid = _reproject(footprint_pix, a_k, grid_pix, shape)
+        mean_grids = [_reproject(footprint_pix, mean_p[:, i], grid_pix, shape)
+                      for i in range(len(CLASSES))]
+        nyso_grid = _reproject(footprint_pix, n_yso_half, grid_pix, shape)
+        gap_grid = _gap_grid(footprint_pix, gap_1d, grid_pix, shape)
+
+        # The panels, row-major fill order: column, the six posterior
+        # means, the YSO count -- 8 panels. Every posterior-derived
+        # panel (not the column, which P6 defines for every admitted
+        # pixel regardless of source count) is painted grey at a
+        # source-less pixel.
+        panels = [dict(data=col_grid, cmap="magma", norm=_log_norm(col_grid),
+                       title="column $A_K$ (mag)", grey=None)]
+        panels += [dict(data=mean_grids[i], cmap="viridis", norm=None,
+                        title="%s\nposterior mean P" % cls, grey=gap_grid)
+                   for i, cls in enumerate(CLASSES)]
+        panels.append(dict(data=nyso_grid, cmap="magma", norm=None,
+                           title="N($P$(YSO)$>$0.5)", grey=gap_grid))
+        n_panels = len(panels)
+
+        aspect = geom_grid["n_x"] / float(geom_grid["n_y"])
+        geom = page_geometry(aspect, n_panels, page_w, page_h)
+        cols = geom["cols"]
+        last_row_of_col = _outer_rows(n_panels, cols)
+
+        plot_style.apply_style()
+        fig = plot_style.new_sized_figure(page_w, page_h)
+
+        for i, p in enumerate(panels):
+            row, col = divmod(i, cols)
+            rect = _panel_rect(geom, i, page_w, page_h)
+            ax, im = _add_panel(fig, rect, page_w, page_h, wcs, p["data"], p["cmap"],
+                                 norm=p["norm"], title=p["title"],
+                                 show_dec=col == 0, show_ra=row == last_row_of_col[col],
+                                 grey_grid=p["grey"])
+            _colorbar(fig, im, _bar_rect(rect, geom), page_w, page_h)
+
+        n_yso_total = int(posterior["n_yso_half"].sum())
+        two_band_frac = _two_band_fraction(config, region)
+        title = ("%s -- posterior atlas: N($P$(YSO)$>$0.5) = %d, two-band fraction = %.3f"
+                  % (region, n_yso_total, two_band_frac))
+        fig.suptitle(title + "\ngrey: no sources in pixel", fontsize=11, y=1.0 - 0.10 / page_h)
+
+        out_dir = os.path.join(config.data_root, "fittp", "atlas", "figures")
+        os.makedirs(out_dir, exist_ok=True)
+        paths = []
+        for fmt in formats:
+            path = os.path.join(out_dir, "posterior-atlas_%s.%s" % (region, fmt))
+            fig.savefig(path, dpi=150)
+            paths.append(path)
+        plt.close(fig)
+
+        st.done(paths[0], n_x=geom_grid["n_x"], n_y=geom_grid["n_y"], n_admitted=footprint_pix.size,
+                n_gap=int(gap_1d.sum()), cols=geom["cols"], rows=geom["rows"],
+                panel_scale_in=geom["panel_h"])
+    return paths
+
+
 def build(config, regions=None, formats=("png", "pdf"), page=(PAGE_WIDTH_IN, PAGE_HEIGHT_IN)):
-    """Per region, one prior-atlas figure (and its posterior row where
-    P11 exists) written under `bmstp/atlas/figures/` -- rendering, not a
-    build (no product is stored at display resolution), so a region
-    without a prior atlas yet is skipped rather than failed."""
+    """Per region, the prior-atlas figure (`bmstp/atlas/figures/`, when
+    P6 exists) and the posterior-atlas figure (`fittp/atlas/figures/`,
+    when P11 exists), on the same depth-grid footprint -- rendering, not
+    a build (no product is stored at display resolution), so a region
+    missing an input is skipped rather than failed."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     for region in region_names:
-        build_region(config, region, formats, page_w=page[0], page_h=page[1])
+        build_prior_region(config, region, formats, page_w=page[0], page_h=page[1])
+        build_posterior_region(config, region, formats, page_w=page[0], page_h=page[1])
 
 
 def _parse_page(text):
