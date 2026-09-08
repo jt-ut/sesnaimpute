@@ -61,6 +61,7 @@ from joblib import Parallel, delayed
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.batches import batches
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import selection
@@ -374,26 +375,39 @@ def _predicted_histograms(config, profile_obj, parent256, a_pix, raw, g_edges, k
     `N_GK_PRED` (n_pix, n_G_bin, n_Ks_bin) is the same population, same
     Gaia-weight, digitised jointly on `(G_obs, Ks_obs)` onto the same two
     edge arrays (SPEC_PRIORS.md section 2.1, "joint and marginal bins").
-    Vectorised over the whole raw population per pixel; the Python loop
-    is over pixels only, run in threads (profile evaluation and
+    Vectorised over a batch of the raw population per pixel; the Python
+    loop is over pixels, run in threads (profile evaluation and
     histogramming are numpy/C and release the GIL, and the raw
     population and profile are shared read-only rather than repickled
-    per pixel).
+    per pixel), and, inside each pixel, over batches of the raw-star axis
+    (`sesnaimpute.batches.batches`): the three histogram outputs are each
+    additive over disjoint star batches, so accumulating them with `+=`
+    across batches is exact and bounds one pixel's own temporaries
+    regardless of `n_raw`, independent of the `n_jobs` pixel-threads
+    running concurrently.
     """
     dist_pc = raw["dist_pc"]
     g_proxy = raw["g_proxy"]
     ks_mag = raw["ks_mag"]
     k_g_diffuse = raw["k_g_diffuse"]
     k_g_dense = raw["k_g_dense"]
+    n_raw = dist_pc.size
+    n_bin_g = g_edges.size - 1
+    n_bin_ks = ks_edges.size - 1
 
     def _one_pixel(parent, a_p):
-        g_obs, ks_obs = anchor_observables(
-            dist_pc, g_proxy, ks_mag, k_g_diffuse, k_g_dense,
-            profile_obj, int(parent), float(a_p), r_diffuse, r_dense)
-        p_g = gaia_detection_weight(g_obs)
-        n_g = np.histogram(g_obs, bins=g_edges, weights=p_g)[0]
-        n_ks = np.histogram(ks_obs, bins=ks_edges)[0]
-        n_gk = np.histogram2d(g_obs, ks_obs, bins=[g_edges, ks_edges], weights=p_g)[0]
+        n_g = np.zeros(n_bin_g, dtype=np.float64)
+        n_ks = np.zeros(n_bin_ks, dtype=np.float64)
+        n_gk = np.zeros((n_bin_g, n_bin_ks), dtype=np.float64)
+        for lo, hi in batches(n_raw, row_bytes=72 * config.n_jobs):
+            g_obs, ks_obs = anchor_observables(
+                dist_pc[lo:hi], g_proxy[lo:hi], ks_mag[lo:hi],
+                k_g_diffuse[lo:hi], k_g_dense[lo:hi],
+                profile_obj, int(parent), float(a_p), r_diffuse, r_dense)
+            p_g = gaia_detection_weight(g_obs)
+            n_g += np.histogram(g_obs, bins=g_edges, weights=p_g)[0]
+            n_ks += np.histogram(ks_obs, bins=ks_edges)[0]
+            n_gk += np.histogram2d(g_obs, ks_obs, bins=[g_edges, ks_edges], weights=p_g)[0]
         return n_g, n_ks, n_gk
 
     results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
