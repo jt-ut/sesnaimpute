@@ -10,15 +10,17 @@ colour grid are formed here: SPEC_BMSTP sec 5.4's GAL template weights form
 a kernel density from these rows, per flux node, at read time.
 
 The star-galaxy split reproduces the one `prior.gal.select_star_galaxy_split`
-adopted for `bms/gal/counts_gal_survey.hdf5`: none of that module's split
-candidates reproduces Fazio et al. 2004's star-subtracted counts within the
-fitted cosmic-variance band, so the smallest-max-deviation candidate is the
-one actually adopted -- IRAC 3.6um stellarity (SExtractor CLASS_STAR, Bertin
-& Arnouts 1996, A&AS 117, 393) at or above `STELLARITY_STAR_MIN`, not the
+adopted for `bms/gal/counts_gal_survey.hdf5`: the candidate whose own
+removed-star count, summed across the six SWIRE fields, comes closest to
+Fazio et al. 2004's own star columns transported to each field's own
+latitude (studies/swire_vs_fazio.md sec 4, not the earlier residual-galaxy
+criterion, which is unreachable once the IRAC point-source retention
+p(S) < 1) -- IRAC 3.6um stellarity (SExtractor CLASS_STAR, Bertin &
+Arnouts 1996, A&AS 117, 393) at or above `STELLARITY_STAR_MIN`, not the
 per-band extended-flag rule (`prior.gal.classify_galaxy_extended_flag`,
-which scored worse against Fazio's counts). Verified directly against
-`bms/gal/counts_gal_survey.hdf5`'s own fit and cosmic-variance band before
-adoption here.
+which scored worse against the expected star count). Verified directly
+against `bms/gal/counts_gal_survey.hdf5`'s own selection before adoption
+here.
 
 Each IRAC colour is stored as `prior.gal`'s own internal convention,
 log10(flux_a) - log10(flux_b), dex -- not a magnitude scaled by -2.5 --
@@ -72,8 +74,11 @@ SWIRE_FLUX_ERR_COLUMNS = ("uncf_ap2_36", "uncf_ap2_45", "uncf_ap2_58", "uncf_ap2
 #: The adopted star-galaxy split (module docstring): IRAC 3.6um stellarity
 #: (`prior.gal`'s `stell_36` column) at or above this threshold is a star.
 #: An unmeasured stellarity is kept as a galaxy, `prior.gal.
-#: classify_galaxy_stellarity`'s own conservative default.
-STELLARITY_STAR_MIN = 0.95
+#: classify_galaxy_stellarity`'s own conservative default. Raised from
+#: 0.95: at S < 0.16mJy the 0.95 rule removed 1.1-1.9x the expected star
+#: count (studies/swire_vs_fazio.md sec 4/6), and 0.98 restores it while
+#: changing nothing at 0.1-0.5mJy, where 0.95 was already right to 1%.
+STELLARITY_STAR_MIN = 0.98
 
 #: The 61-node flux grid every GAL product is tabulated on (SPEC_BMSTP_DRAFT
 #: sec 3.2; `prior.gal.build_log10_s_grid`): SWIRE's own I2 5-sigma depth
