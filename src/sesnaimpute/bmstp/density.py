@@ -12,9 +12,13 @@ the counts law integrated over its tabulated grid. YSO (section 5.5) is
 the quadratic column law, `kappa` selected by which arm reached the
 source (`ARM`, from the adopted column's own provenance flag). H2S
 (section 5.6) rides on that same young-star law density, scaled by the
-region's `eta` and the universal `eps_ext`: the knot-driver displacement
-kernel is not applied as a spatial operation (its scale sits well inside
-the class's own disclosed factor-of-three, section 5.6 "Sky density").
+region's `eta` and the universal `eps_ext`, but on the Herschel arm the
+law itself is the knot-driver kernel's convolution of the region's HGBS
+map (`bmstp.knot_field.convolved_law`), sampled at the source's own
+position -- a map operation, once per region, never a per-source
+convolution; a Herschel-arm source whose position falls outside the
+convolved map, and every Planck-arm source (the kernel is sub-beam at
+Planck's 5.03' beam), takes the law at its own column instead.
 """
 
 import os
@@ -31,7 +35,8 @@ from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.population import field_stars
-from sesnaimpute.population.yso import pc2_per_deg2
+from sesnaimpute.population.yso import PROVENANCE_HERSCHEL, pc2_per_deg2
+from sesnaimpute.bmstp import knot_field
 from sesnaimpute.bmstp import sample_gal
 
 #: Not yet in constants.py -- added here per CODING_RULES_BMSTP.md rule 3,
@@ -152,6 +157,8 @@ def build_region(config, region, st):
         config, "catalog", "sesna", "sources", "source", region=region)
     with h5py.File(cat_path, "r") as f:
         name = f["NAME"][:]
+        ra_deg = np.asarray(f["RA_DEG"][:], dtype=np.float64)
+        dec_deg = np.asarray(f["DEC_DEG"][:], dtype=np.float64)
     if name.shape[0] != n:
         raise ValueError("bmstp.density: %s has %d rows, region has %d catalogued sources"
                          % (cat_path, name.shape[0], n))
@@ -207,11 +214,36 @@ def build_region(config, region, st):
     yso_law_err = max(abs(KAPPA_HERSCHEL - file_kappa_h), abs(KAPPA_PLANCK - file_kappa_p),
                       abs(pc2 - file_pc2) / file_pc2)
 
-    # H2S, sec. 5.6 "Sky density": `A_H2S(s) = N_law(s) . eta_r . eps_ext`,
-    # the young-star law density at the source's own column, arm and
-    # region distance -- the same per-source scalar YSO's is, sec. 4.1.
+    # H2S, sec. 5.6 "Sky density": `A_H2S(s) = L(s) . eta_r . eps_ext`.
+    # `L(s)` is the young-star law at the source's own column/arm/region
+    # distance -- `density_yso` above, already that quantity -- EXCEPT for
+    # a Herschel-arm source whose position the region's convolved law map
+    # (`bmstp.knot_field.convolved_law`) reaches, where `L(s)` is that
+    # convolution sampled at the source instead (a map operation, once
+    # per region). An edge Herschel-arm source (outside the convolved
+    # map) falls back to `density_yso`, counted below.
     eta_r = ETA.get(region, ETA_ELSEWHERE)
-    density_h2s = density_yso * eta_r * EPS_EXT
+    law_map, law_wcs, knot_meta = knot_field.convolved_law(config, region)
+    herschel_mask = arm == PROVENANCE_HERSCHEL
+    l_of_s = density_yso.copy()
+    n_herschel = int(np.count_nonzero(herschel_mask))
+    n_edge = 0
+    knot_ratio_median = knot_ratio_p90 = float("nan")
+    if law_map is not None and n_herschel:
+        l_convolved = knot_field.sample_at(law_map, law_wcs, ra_deg[herschel_mask], dec_deg[herschel_mask])
+        finite = np.isfinite(l_convolved)
+        n_edge = int(np.count_nonzero(~finite))
+        idx = np.flatnonzero(herschel_mask)
+        l_of_s[idx[finite]] = l_convolved[finite]
+        # sec. 5.6's report: the kernel's own effect on Herschel-arm
+        # sources, `L(s) / (kappa_Herschel A_s^2 . pc2/deg2)` -- the
+        # ratio of the convolved to the unconvolved law at the same
+        # source, `density_yso` being exactly that unconvolved value.
+        ratio = l_convolved[finite] / density_yso[idx[finite]]
+        if ratio.size:
+            knot_ratio_median = float(np.median(ratio))
+            knot_ratio_p90 = float(np.percentile(ratio, 90))
+    density_h2s = l_of_s * eta_r * EPS_EXT
     st.tick(4, 4, "batches")
 
     retention_limits = field_stars.deepest_limits(config, region).astype(np.float64)
@@ -224,7 +256,8 @@ def build_region(config, region, st):
         density_gal=density_gal, density_yso=density_yso, density_h2s=density_h2s,
         omega_sim=omega_sim, f_dusty_o=f_dusty_o, f_dusty_c=f_dusty_c, f_c=f_c,
         eta_r=eta_r, retention_limits=retention_limits, yso_law_err=yso_law_err,
-        d_r_pc=d_r_pc, n=n)
+        d_r_pc=d_r_pc, n=n, knot_meta=knot_meta, n_herschel=n_herschel, n_edge=n_edge,
+        knot_ratio_median=knot_ratio_median, knot_ratio_p90=knot_ratio_p90)
 
 
 def write_region(path, result):
@@ -287,6 +320,32 @@ def build(config, regions=None):
             ratio = total_sum / n if n else float("nan")
             n_unresolved = int(np.count_nonzero(result["tile"] < 0) +
                               np.count_nonzero(result["sightline_row"] < 0))
+
+            # sec. 5.6's brief report: the knot-driver convolution's own
+            # numbers, once per region -- the map operation `knot_field.
+            # convolved_law` ran (or "no HGBS map" if the region is all
+            # Planck arm, e.g. NGC 7129).
+            km = result["knot_meta"]
+            if km is None:
+                print(f"bmstp.density {region}: H2S convolution skipped, no HGBS map serves "
+                      f"this region (n_herschel_arm={result['n_herschel']})")
+            else:
+                print(f"bmstp.density {region}: H2S convolution map={km['map_name']} "
+                      f"native={km['shape_native']} downsample_factor={km['downsample_factor']} "
+                      f"downsampled={km['shape_ds']} kernel_radius_px={km['kernel_radius_px']} "
+                      f"kernel_width_px={km['kernel_width_px']:.2f} wall_s={km['wall_s']:.4g}")
+                print(f"bmstp.density {region}: H2S conservation total_before={km['total_before']:.6g} "
+                      f"total_after={km['total_after']:.6g} rel_err={km['conservation_rel_err']:.3e} "
+                      f"(sec. 5.6: kernel conserves the law's total)")
+                print(f"bmstp.density {region}: H2S n_herschel_arm={result['n_herschel']} "
+                      f"n_edge_own_column={result['n_edge']} "
+                      f"L(s)/(kappa A_s^2) median={result['knot_ratio_median']:.4g} "
+                      f"p90={result['knot_ratio_p90']:.4g}")
+            density_h2s_before = float(np.mean(result["density_yso"] * result["eta_r"] * EPS_EXT))
+            density_h2s_after = float(np.mean(result["density_h2s"]))
+            print(f"bmstp.density {region}: RATIO_H2S (mean density, deg^-2) "
+                  f"before={density_h2s_before:.6g} after={density_h2s_after:.6g} "
+                  f"ratio_after/before={density_h2s_after / density_h2s_before if density_h2s_before else float('nan'):.4g}")
 
             st.done(path, n=n, tile_sightline_unresolved=n_unresolved,
                      yso_law_identity_err=result["yso_law_err"],
