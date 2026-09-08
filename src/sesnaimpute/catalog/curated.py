@@ -67,6 +67,16 @@ UPPER_LIMIT_SIGMA = 0.99
 # its own, in an IRAC/MIPS band.
 DEFAULT_NN_K = 5
 
+# The delivery's own 2MASS zero points (Vega system, Jy), measured from
+# its FNU_J/H/KS columns against its MAG_J/H/KS columns: J 1669, H 980,
+# Ks 620 (FNU / 10**(-0.4*MAG) is this constant per band to 1 Jy scatter
+# over 18,000-77,000 rows in Perseus and Lupus, `studies/star_colour_
+# offset.md`). They differ from `definitions.BANDS`'s Cohen, Wheaton &
+# Megeath 2003 zero points (J 1594, H 1024, Ks 666.7 Jy) that every model
+# flux in the package is on, so the curated J/H/Ks flux is formed here
+# from the delivered magnitude with `definitions.BANDS`'s zero point
+# directly, never from the delivered FNU_J/H/KS.
+
 _DTYPE_MAPPER = {"CHAR": str, "DOUBLE": float, "FLOAT": float, "INT": "Int64"}
 
 
@@ -148,7 +158,10 @@ def _assemble_region(config, region):
     bands = definitions.BANDS
     select_columns = ["SESNA_NAME", "ra", "dec", "L", "B", "CLASS", "AK"]
     for b in bands:
-        select_columns += [f"FNU_{_RAW_SUFFIX[b.key]}", f"SIGMA_FNU_{_RAW_SUFFIX[b.key]}"]
+        if b.survey == "2MASS":
+            select_columns += [f"MAG_{_RAW_SUFFIX[b.key]}", f"SIGMA_MAG_{_RAW_SUFFIX[b.key]}"]
+        else:
+            select_columns += [f"FNU_{_RAW_SUFFIX[b.key]}", f"SIGMA_FNU_{_RAW_SUFFIX[b.key]}"]
     for b in bands:
         if b.survey in ("IRAC", "MIPS"):
             select_columns.append(f"DCOMP90_FNU_{_RAW_SUFFIX[b.key]}")
@@ -176,18 +189,30 @@ def _assemble_region(config, region):
 
     for j, b in enumerate(bands):
         suffix = _RAW_SUFFIX[b.key]
+
+        if b.survey == "2MASS":
+            # F = F0 * 10**(-0.4*m), sigma_F = 0.4*ln(10)*F*sigma_m, with
+            # F0 = definitions.BANDS's own zero point (mJy), not the
+            # delivery's (constants-block comment above).
+            raw_mag = df[f"MAG_{suffix}"].to_numpy(dtype=np.float64)
+            raw_sigma_mag = df[f"SIGMA_MAG_{suffix}"].to_numpy(dtype=np.float64)
+            mag_naval = navals[f"MAG_{suffix}"]
+            isna_flux = raw_mag == mag_naval
+            f0_mjy = b.vega_zero_point_jy * 1000.0
+            conv_fnu = f0_mjy * 10.0 ** (-0.4 * raw_mag)
+            conv_sigma = 0.4 * np.log(10.0) * conv_fnu * raw_sigma_mag
+
+            bound = UB_2MASS_MJY[b.key]
+            fnu[:, j] = np.where(isna_flux, bound, conv_fnu)
+            sigma_fnu[:, j] = np.where(isna_flux, UPPER_LIMIT_SIGMA, conv_sigma)
+            origin[isna_flux, j] = 2
+            dcomp90[:, j] = bound
+            continue
+
         raw_fnu = df[f"FNU_{suffix}"].to_numpy(dtype=np.float64)
         raw_sigma = df[f"SIGMA_FNU_{suffix}"].to_numpy(dtype=np.float64)
         fnu_naval = navals[f"FNU_{suffix}"]
         isna_flux = raw_fnu == fnu_naval
-
-        if b.survey == "2MASS":
-            bound = UB_2MASS_MJY[b.key]
-            fnu[:, j] = np.where(isna_flux, bound, raw_fnu)
-            sigma_fnu[:, j] = np.where(isna_flux, UPPER_LIMIT_SIGMA, raw_sigma)
-            origin[isna_flux, j] = 2
-            dcomp90[:, j] = bound
-            continue
 
         dcomp_col = f"DCOMP90_FNU_{suffix}"
         raw_dcomp = df[dcomp_col].to_numpy(dtype=np.float64)
