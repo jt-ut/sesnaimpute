@@ -133,6 +133,7 @@ PY sesnaimpute.bmstp.shapes   # the star-family, cloud-class and galaxy shape gr
 PY sesnaimpute.bmstp.template_weights   # the P5 template-weight tables per library (SPEC_BMSTP sec 1.4, 4.1, 4.2, 5.1-5.6)
 PY sesnaimpute.bmstp.density   # the per-source density table, P1: column, grain indices, F_LIM_50, D_PAHC, the six sky densities (SPEC_BMSTP sec 4.1, 5.1-5.6)
 PY sesnaimpute.bmstp.atlas   # the prior atlas, P6: per-pixel Monte Carlo selection and the total-count check (SPEC_BMSTP sec 8)
+PY sesnaimpute.atlas.render   # the sky atlas figures from P6 (the prior rows; the posterior row is added by the same line at the fitter block's end once P11 exists)
 
 # --- fittp (the thinned-Poisson fitter, the classification, the cascade, the posterior atlas; writes fittp/) ---
 # Lines are added here as each stage lands (IMPLEMENTATION_BMSTP sec 4). The
