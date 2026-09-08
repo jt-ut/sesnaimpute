@@ -200,33 +200,69 @@ def _read_trilegal_part(path):
 def read_region_trilegal(config, region, st=None):
     """The region's whole TRILEGAL population, every pointing's every part
     concatenated, each row's own `POINTING_INDEX` attached: `(df,
-    area_deg2)`. The pointing grid, its file names, and each pointing's
-    galactic (l, b) and simulated solid angle come from
-    `sky.download.trilegal.build.region_pointings`, the one place this
-    project's TRILEGAL acquisition is described. Area convention (owner
-    ruling 2026-09-06, SPEC_PRIORS.md section 1.5): every pointing draws
-    the SAME area the region used to draw as a whole
+    area_deg2, n_pointings_grid, n_pointings_on_disk)`. The pointing grid,
+    its file names, and each pointing's galactic (l, b) and simulated
+    solid angle come from `sky.download.trilegal.build.region_pointings`,
+    the one place this project's TRILEGAL acquisition is described. Area
+    convention (owner ruling 2026-09-06, SPEC_PRIORS.md section 1.5):
+    every pointing draws the SAME area the region used to draw as a whole
     (`REGION_POINTINGS[region]["area_deg2"]`), so the region's total
     simulated area is `n_pointings * area_deg2`, not a share of it.
+
+    A region whose grid needs more than one cell but whose disk carries
+    only the historical single pointing (`<Region>[_part<n>].dat`, no
+    `_pt` files -- no re-download, rule 6) is read as that ONE pointing
+    instead: every star gets `POINTING_INDEX` 0 and the simulated area is
+    the single pointing's own area (`REGION_POINTINGS[region]["area_deg2"]`,
+    the same per-pointing area the grid convention above uses), not the
+    grid's cell count times that area. `n_pointings_grid` and
+    `n_pointings_on_disk` say which case ran; neither set of files
+    present is the only failure.
     """
     if region not in trilegal_download.REGION_POINTINGS:
         raise ValueError(f"field_stars: {region!r} is not in "
                           f"sky.download.trilegal.build.REGION_POINTINGS")
     pointings = trilegal_download.region_pointings(config, region)
-    n_pointings = len(pointings)
+    n_pointings_grid = len(pointings)
     trilegal_dir = f"{config.data_root}/sky/download/trilegal"
-    frames = []
-    for p_idx, pt in enumerate(pointings):
-        file_names = trilegal_download._file_names(region, n_pointings, p_idx, pt["n_parts"])
-        parts = [_read_trilegal_part(f"{trilegal_dir}/{name}") for name in file_names]
-        df_p = pd.concat(parts, ignore_index=True)
-        df_p["POINTING_INDEX"] = p_idx
-        frames.append(df_p)
+
+    def _present(names):
+        return all(os.path.exists(f"{trilegal_dir}/{name}") for name in names)
+
+    grid_file_names = [trilegal_download._file_names(region, n_pointings_grid, p_idx, pt["n_parts"])
+                        for p_idx, pt in enumerate(pointings)]
+    info = trilegal_download.REGION_POINTINGS[region]
+    single_file_names = trilegal_download._file_names(region, 1, 0, info["n_parts"])
+
+    if all(_present(names) for names in grid_file_names):
+        n_pointings_on_disk = n_pointings_grid
+        frames = []
+        for p_idx, (pt, file_names) in enumerate(zip(pointings, grid_file_names)):
+            parts = [_read_trilegal_part(f"{trilegal_dir}/{name}") for name in file_names]
+            df_p = pd.concat(parts, ignore_index=True)
+            df_p["POINTING_INDEX"] = p_idx
+            frames.append(df_p)
+            if st is not None:
+                st.tick(p_idx + 1, n_pointings_grid, "pointings")
+        df = pd.concat(frames, ignore_index=True)
+        area_deg2 = n_pointings_grid * float(pointings[0]["area_deg2"])
+    elif _present(single_file_names):
+        n_pointings_on_disk = 1
+        print(f"field_stars: {region!r}: the {n_pointings_grid}-cell pointing grid is "
+              f"not on disk; reading the single historical pointing {single_file_names} "
+              f"as one pointing (index 0), area {info['area_deg2']} deg2")
+        parts = [_read_trilegal_part(f"{trilegal_dir}/{name}") for name in single_file_names]
+        df = pd.concat(parts, ignore_index=True)
+        df["POINTING_INDEX"] = 0
         if st is not None:
-            st.tick(p_idx + 1, n_pointings, "pointings")
-    df = pd.concat(frames, ignore_index=True)
-    area_deg2 = n_pointings * float(pointings[0]["area_deg2"])
-    return df, area_deg2
+            st.tick(1, 1, "pointings")
+        area_deg2 = float(info["area_deg2"])
+    else:
+        raise FileNotFoundError(
+            f"field_stars: {region!r}: neither the pointing grid's files nor the single "
+            f"historical pointing's files are on disk under {trilegal_dir!r} -- run "
+            f"sesnaimpute.sky.download.trilegal.build for this region")
+    return df, area_deg2, n_pointings_grid, n_pointings_on_disk
 
 
 def intrinsic_fluxes_mjy(df):
@@ -279,7 +315,7 @@ def build_region(config, region, atmosphere, st=None):
     """The region's matched, retained TRILEGAL table plus the raw group,
     as a dict of arrays ready for `write_region`.
     """
-    df, area_deg2 = read_region_trilegal(config, region, st=st)
+    df, area_deg2, n_pointings_grid, n_pointings_on_disk = read_region_trilegal(config, region, st=st)
     n_raw = len(df)
 
     flux = intrinsic_fluxes_mjy(df)
@@ -307,6 +343,8 @@ def build_region(config, region, atmosphere, st=None):
     return dict(
         n_raw=n_raw,
         area_deg2=area_deg2,
+        n_pointings_grid=n_pointings_grid,
+        n_pointings_on_disk=n_pointings_on_disk,
         raw=dict(
             g_proxy=g_proxy,
             ks_mag=ks_mag,
@@ -372,6 +410,12 @@ def write_region(path, region, result):
         f.attrs["GRANULE"] = "region"
         f.attrs["OMEGA_SIM_DEG2"] = float(result["area_deg2"])
         f.attrs["N_RAW"] = int(result["n_raw"])
+        # the pointing grid this region would use (SPEC_PRIORS.md section
+        # 1.5) vs. how many pointings are actually on disk today -- 1 when
+        # only the historical single pointing has been fetched, making a
+        # multi-cell region's fallback visible on the product itself.
+        f.attrs["N_POINTINGS_GRID"] = int(result["n_pointings_grid"])
+        f.attrs["N_POINTINGS_ON_DISK"] = int(result["n_pointings_on_disk"])
 
 
 def build(config, regions=None):
@@ -387,7 +431,9 @@ def build(config, regions=None):
             path = config_module.product_path(config, "population", "trilegal", "field-stars",
                                                 "region", region=region)
             write_region(path, region, result)
-            st.done(path, n_raw=result["n_raw"], n_retained=len(result["retained"]["dist_pc"]))
+            st.done(path, n_raw=result["n_raw"], n_retained=len(result["retained"]["dist_pc"]),
+                    n_pointings_grid=result["n_pointings_grid"],
+                    n_pointings_on_disk=result["n_pointings_on_disk"])
 
 
 if __name__ == "__main__":
