@@ -33,7 +33,6 @@ PRODUCTS = [
     ("sesna", "kernel", "survey", False, "sesnaimpute.population.kernel"),
     ("yso", "law", "region", False, "sesnaimpute.population.yso"),
     ("yso", "prior", "sightline", True, "sesnaimpute.population.yso"),
-    ("yso", "selection", "source", True, "sesnaimpute.population.yso_selection"),
     ("h2s", "law-blurred", "source", True, "sesnaimpute.population.h2s"),
     ("h2s", "prior", "region", True, "sesnaimpute.population.h2s"),
     ("gal", "counts", "survey", False, "sesnaimpute.population.gal"),
