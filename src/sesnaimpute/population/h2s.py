@@ -617,7 +617,8 @@ def source_selection(config, region, log10_lim_8, a_query):
     return exact_source_selection(log10_lim_8, a_query, kappa, log10_sigma_grid, sorted_ratios)
 
 
-def report_source_selection(config, region, log10_sigma_grid, logsig_mean, x1_idx):
+def report_source_selection(config, region, log10_sigma_grid, logsig_mean, x1_idx,
+                             keep_eps_x1_column=False):
     """Batched report-only pass over the whole region (SPEC_PRIORS.md
     section 7 "Checks"), calling the same `source_selection` on-the-fly
     lookup `counts_cloud` uses, never holding more than one batch's `(n_x,
@@ -626,9 +627,12 @@ def report_source_selection(config, region, log10_sigma_grid, logsig_mean, x1_id
     (non-increasing in the ladder, non-decreasing in Sigma). Returns
     `(n_source, eps_a0_median, eps_x1_median, max_x_violation,
     max_sigma_violation, eps_x1_column)` -- `eps_x1_column` is `(n,
-    n_sigma)` at the ladder's `x=1` point, kept only for the Vela D
-    literature check below (small: one Sigma row per source, not the
-    full `(n, n_x, n_sigma)` table).
+    n_sigma)` at the ladder's `x=1` point, joined across batches only
+    when `keep_eps_x1_column` (the caller passes this for Vela D alone,
+    the one region the literature check below reads it for): an
+    `(n_source, n_sigma)` array is never joined for a million-source
+    region (CODING_RULES_BMSTP.md 10a), so elsewhere this returns an
+    empty array and the per-batch slice is never taken.
     """
     log10_lim = np.log10(limits_module.limits(config, region))
     n_source = log10_lim.shape[0]
@@ -657,7 +661,8 @@ def report_source_selection(config, region, log10_sigma_grid, logsig_mean, x1_id
             max_sigma_violation = max(max_sigma_violation, float(np.max(np.clip(-d_sigma, 0.0, None))))
         eps_a0_parts.append(eps[:, 0, j_mean])
         eps_x1_parts.append(eps[:, x1_idx, j_mean])
-        eps_x1_col_parts.append(eps[:, x1_idx, :])
+        if keep_eps_x1_column:
+            eps_x1_col_parts.append(eps[:, x1_idx, :])
 
     eps_a0 = np.concatenate(eps_a0_parts) if eps_a0_parts else np.empty(0)
     eps_x1 = np.concatenate(eps_x1_parts) if eps_x1_parts else np.empty(0)
@@ -763,7 +768,9 @@ def build(config, regions=None):
                     n_knots_ref, log10_sigma_grid)
 
         (n_source, eps_a0, eps_x1, max_x_violation, max_sigma_violation,
-         eps_x1_column) = report_source_selection(config, region, log10_sigma_grid, logsig_mean, x1_idx)
+         eps_x1_column) = report_source_selection(
+            config, region, log10_sigma_grid, logsig_mean, x1_idx,
+            keep_eps_x1_column=(region == "Vela D"))
         st.done(path_region, n_source=n_source, logsig_mean=logsig_mean, eta=float(eta))
         print(f"h2s: {region}: n_source={n_source} LOGSIG_MEAN={logsig_mean:.4f} "
               f"LOGSIG_STD={logsig_std:.4f} median_eps(x=0,Sigma=mean)={eps_a0:.4f} "
