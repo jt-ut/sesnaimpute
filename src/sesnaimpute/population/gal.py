@@ -5,16 +5,21 @@ background-galaxy prior that a consumer reads: `phi(S)`, the intrinsic
 4.5um galaxy number-counts law (Fazio et al. 2004, ApJS 154, 39, Table
 1) -- one smooth broken power law in cumulative counts N(>S), fitted
 once (`build_counts_law`) and written to the `counts_gal_survey`
-product's `LOG10_S_GRID`/`PHI_S` (read by `bmstp.sample_gal`,
-`bmstp.density`, `bmstp.template_weights`). The full selection shape
-`r(a, log10 S) = phi(S) . S . eps(a, S)` assembles this law with the
-extinction/selection term elsewhere; this module never evaluates `eps`.
+product's `LOG10_S_GRID`/`PHI_S`, alongside `PHI_S_POINT = PHI_S *
+P_POINT`, the IRAC point-source retention `p(S)` measured in
+studies/swire_vs_fazio.md against Fazio's own star counts (`bmstp.
+sample_gal`, `bmstp.density` and `bmstp.template_weights` read the
+point-source-corrected law). The full selection shape `r(a, log10 S) =
+phi(S) . S . eps(a, S)` assembles this law with the extinction/selection
+term elsewhere; this module never evaluates `eps`.
 
 The star-galaxy split itself is chosen once, survey-wide
-(`select_star_galaxy_split`): among the candidate rules that reproduce
-Fazio's star-subtracted counts at 0.1-1mJy within the fitted
-cosmic-variance spread, the one removing the fewest SWIRE (Surace et
-al. 2005 DR2 release) rows. The split and the counts law are
+(`select_star_galaxy_split`): among the candidate rules, the one whose
+own removed-star count, summed across the six SWIRE (Surace et al. 2005
+DR2 release) fields, is closest to Fazio's own star columns transported
+to each field's latitude (studies/swire_vs_fazio.md sec 4) -- not the
+earlier criterion (surviving galaxy count against Fazio's galaxy law),
+which is unreachable once `p(S) < 1`. The split and the counts law are
 cross-checked against the star-subtracted SWIRE and S-COSMOS (Sanders
 et al. 2007, ApJS 172, 86) counts at fixed fluxes and printed; neither
 the split nor these checks are written to the product.
@@ -68,11 +73,24 @@ N_BRIGHT_TAIL_FIT = 4
 #: the external galaxy population.
 SWIRE_5SIGMA_UJY = {"I1": 4.0, "I2": 6.0, "I3": 48.0, "I4": 40.0}
 
-#: The six SWIRE fields' combined sky area, deg^2 (Lonsdale et al. 2003,
-#: PASP 115, 897; Surace et al. 2005 DR2 release -- "six blank fields,
-#: 49 deg^2", SPEC_PRIORS.md section 5.1), for turning a raw SWIRE galaxy
-#: count into a surface density for the report-only counts-law check.
-SWIRE_AREA_DEG2 = 49.0
+#: The six SWIRE fields' combined two-band (3.6+4.5um) footprint, deg^2,
+#: measured from the catalogue's own occupied 1-arcmin sky cells --
+#: not the nominal "49 deg^2" of the release announcement, which is 9%
+#: too large for the area every row here actually carries (Surace et al.
+#: 2005 DR2 release; studies/swire_vs_fazio.md sec 1 "Footprint").
+SWIRE_AREA_DEG2 = 44.8
+
+#: The same six fields' own individual areas, deg^2, SWIRE_FIELD_FILES
+#: order -- ELAIS-N1, ELAIS-N2, ELAIS-S1, Lockman, XMM-LSS, CDFS
+#: (studies/swire_vs_fazio.md sec 3), summing to SWIRE_AREA_DEG2. Used
+#: only to weight the per-field expected star count in
+#: `expected_star_count` below.
+SWIRE_FIELD_AREA_DEG2 = (8.84, 3.80, 6.11, 10.36, 8.37, 7.29)
+
+#: The same six fields' own |galactic latitude|, deg, SWIRE_FIELD_FILES
+#: order (field centres; studies/swire_vs_fazio.md sec 3) -- the target
+#: latitudes the Fazio star-count law is transported to.
+SWIRE_FIELD_ABS_B_DEG = (44.6, 42.1, 73.1, 52.2, 58.8, 54.6)
 
 #: S-COSMOS's own field area, deg^2 (Sanders et al. 2007, ApJS 172, 86;
 #: SPEC_PRIORS.md section 5.1), for the same purpose.
@@ -113,7 +131,7 @@ STELLARITY_STAR_MIN = 0.9
 #: images themselves) and the per-band extended flag -- so the "optical
 #: preferred" branch never fires here; the stellarity candidate below
 #: reads IRAC 3.6um, the best-PSF-sampled band, instead.
-SPLIT_STELLARITY_GRID = tuple(np.round(np.arange(0.50, 0.951, 0.05), 2))
+SPLIT_STELLARITY_GRID = tuple(np.round(np.arange(0.50, 0.981, 0.02), 2))
 
 #: The three fluxes SPEC_PRIORS.md 5.1 names for the split criterion,
 #: 4.5um, mJy.
@@ -123,6 +141,42 @@ SPLIT_CRITERION_S_MJY = (0.1, 0.3, 1.0)
 #: The shared flux grid PHI_S is tabulated on: 61 points, SWIRE's I2 depth
 #: to Fazio's bright end (IMPLEMENTATION.md section 3).
 N_S_GRID = 61
+
+#: IRAC point-source retention p(S) = min(1, (S/S0)^-q): the fraction of
+#: the intrinsic galaxy law PHI_S an IRAC point-source catalogue actually
+#: detects, measured against Fazio+2004's own star counts transported to
+#: each SWIRE field's latitude (studies/swire_vs_fazio.md sec 5), rms
+#: 0.051 dex over 0.05-0.32mJy; held at 1 below SWIRE's own 90%
+#: completeness (0.026mJy), where the galaxy angular-size distribution has
+#: already crossed the IRAC PSF and has no mechanism to turn back down.
+POINT_RETENTION_S0_MJY = 0.0703
+POINT_RETENTION_Q = 0.83
+POINT_RETENTION_RMS_DEX = 0.051
+
+#: Fazio et al. 2004's own three fields' |galactic latitude|, deg, in
+#: FIELD_COLUMNS/STAR_FIELD_COLUMNS order (studies/swire_vs_fazio.md sec
+#: "Expected stars") -- the anchor points the star-count latitude
+#: gradient below is measured between.
+FAZIO_FIELD_ABS_B_DEG = (67.4, 60.0, 33.6)
+
+#: The star-count latitude gradient those three fields themselves define
+#: (studies/swire_vs_fazio.md sec "Expected stars": -0.0072 to -0.0144
+#: dex/deg per magnitude across the three fields, mean below), used to
+#: transport Fazio's pooled star counts to a SWIRE field's own latitude
+#: where no TRILEGAL pointing exists (|b| > 40).
+STAR_COUNT_LATITUDE_GRADIENT_DEX_PER_DEG = -0.0115
+
+#: Fazio Table 1's star columns, star-subtracted counts' complement --
+#: same table, same rows as FIELD_COLUMNS, the *_stars columns instead of
+#: *_galaxies.
+STAR_FIELD_COLUMNS = ("bootes_stars", "egs_stars", "qso1700_stars")
+
+#: The flux points the star-galaxy split is graded at, mJy -- the faint
+#: range where the threshold actually matters (studies/swire_vs_fazio.md
+#: sec 4: brighter than ~0.25mJy no threshold restores the expected star
+#: count, because the point-source deficit dominates there, not the
+#: split).
+SPLIT_CRITERION_STAR_S_MJY = (0.045, 0.071, 0.113, 0.179)
 
 
 # ---------------------------------------------------------------------------
@@ -199,16 +253,18 @@ class BrokenPowerLaw:
         return (self.cumulative(S) / S) * self.local_slope(np.log10(S))
 
 
-def read_fazio_table(path, band_um=COORD_BAND_UM):
+def read_fazio_table(path, band_um=COORD_BAND_UM, columns=FIELD_COLUMNS):
     """One band's block of the Fazio et al. 2004 Table 1 CSV: `(mag,
-    {field: log10 differential galaxy counts})`, the table's own 0.5-mag
-    bins, absent field/magnitude combinations left NaN.
+    {column: log10 differential counts})`, the table's own 0.5-mag bins,
+    absent field/magnitude combinations left NaN. `columns` defaults to
+    the star-subtracted galaxy columns (FIELD_COLUMNS); pass
+    STAR_FIELD_COLUMNS for the table's own star columns instead.
     """
     df = pd.read_csv(path)
     blk = df[df["band_um"] == band_um].sort_values("mag")
     if blk.empty:
         raise ValueError(f"gal: no rows for band_um={band_um!r} in {path!r}")
-    return blk["mag"].to_numpy(dtype=float), {c: blk[c].to_numpy(dtype=float) for c in FIELD_COLUMNS}
+    return blk["mag"].to_numpy(dtype=float), {c: blk[c].to_numpy(dtype=float) for c in columns}
 
 
 def cumulative_from_differential(mag, log10_n, band_um=COORD_BAND_UM,
@@ -370,16 +426,29 @@ def build_log10_s_grid(fazio_path):
     return np.linspace(lo, hi, N_S_GRID)
 
 
+def point_source_retention(s_mjy, s0=POINT_RETENTION_S0_MJY, q=POINT_RETENTION_Q):
+    """p(S) = min(1, (S/S0)^-q), the IRAC point-source retention of the
+    intrinsic galaxy law (module docstring; studies/swire_vs_fazio.md sec
+    5, rms POINT_RETENTION_RMS_DEX dex over 0.05-0.32mJy)."""
+    s = np.asarray(s_mjy, dtype=float)
+    return np.minimum(1.0, (s / s0) ** (-q))
+
+
 def build_counts_law(fazio_path):
-    """The pooled fit, its cosmic-variance band, and PHI_S on
-    LOG10_S_GRID. Returns a dict ready for `write_counts`."""
+    """The pooled fit, its cosmic-variance band, PHI_S on LOG10_S_GRID,
+    and the point-source-corrected PHI_S_POINT = PHI_S * p(S)
+    (studies/swire_vs_fazio.md sec 6, fix 1). Returns a dict ready for
+    `write_counts`."""
     variants = fit_all_variants(fazio_path)
     fit, stats, _ = variants["mean"]
     cv_dex = cosmic_variance_dex(variants)
     log10_s_grid = build_log10_s_grid(fazio_path)
     phi_s = fit.differential(10.0 ** log10_s_grid)
+    p_point = point_source_retention(10.0 ** log10_s_grid)
+    phi_s_point = phi_s * p_point
     return dict(fit=fit, stats=stats, cosmic_variance_dex=cv_dex,
-                log10_s_grid=log10_s_grid, phi_s=phi_s, variants=variants)
+                log10_s_grid=log10_s_grid, phi_s=phi_s, p_point=p_point,
+                phi_s_point=phi_s_point, variants=variants)
 
 
 def write_counts(path, result):
@@ -391,6 +460,8 @@ def write_counts(path, result):
             f.create_dataset(name.upper(), data=np.float64(val))
         f.create_dataset("LOG10_S_GRID", data=result["log10_s_grid"].astype(np.float64))
         f.create_dataset("PHI_S", data=result["phi_s"].astype(np.float64))
+        f.create_dataset("P_POINT", data=result["p_point"].astype(np.float64))
+        f.create_dataset("PHI_S_POINT", data=result["phi_s_point"].astype(np.float64))
         f.create_dataset("COSMIC_VARIANCE_DEX", data=np.float64(result["cosmic_variance_dex"]))
         f.create_dataset("FIT_LOG10_S_MIN", data=np.float64(fit.log_range[0]))
         f.create_dataset("FIT_LOG10_S_MAX", data=np.float64(fit.log_range[1]))
@@ -402,25 +473,31 @@ def write_counts(path, result):
 # ---------------------------------------------------------------------------
 
 def read_swire_catalogue(config):
-    """The six SWIRE fields concatenated: `(flux_mjy, stell, ext_fl)`, each
-    `(n, 4)` in `IRAC_BAND_KEYS` order. Fluxes converted from SWIRE's own
-    aperture-2 uJy to this project's mJy convention.
+    """The six SWIRE fields concatenated: `(flux_mjy, stell, ext_fl,
+    field)`, the first three `(n, 4)` in `IRAC_BAND_KEYS` order, `field`
+    `(n,)` the row's index into `SWIRE_FIELD_FILES`/`SWIRE_FIELD_AREA_DEG2`/
+    `SWIRE_FIELD_ABS_B_DEG` (`select_star_galaxy_split`'s per-field star
+    count needs it). Fluxes converted from SWIRE's own aperture-2 uJy to
+    this project's mJy convention.
     """
     dest_dir = f"{config.data_root}/sky/download/swire"
     cols = list(SWIRE_FLUX_COLUMNS) + list(SWIRE_STELL_COLUMNS) + list(SWIRE_EXT_FL_COLUMNS)
-    frames = []
-    for name in SWIRE_FIELD_FILES:
+    frames, field_idx = [], []
+    for i, name in enumerate(SWIRE_FIELD_FILES):
         path = f"{dest_dir}/{name}"
         if not os.path.exists(path):
             raise FileNotFoundError(
                 f"gal: no SWIRE field catalogue at {path!r} -- run the "
                 f"'sesnaimpute.sky.download.swire.build' RUNBOOK line")
-        frames.append(pd.read_csv(path, usecols=cols))
+        df_i = pd.read_csv(path, usecols=cols)
+        frames.append(df_i)
+        field_idx.append(np.full(len(df_i), i, dtype=np.int8))
     df = pd.concat(frames, ignore_index=True)
     flux_mjy = df[list(SWIRE_FLUX_COLUMNS)].to_numpy(dtype=float) / 1000.0
     stell = df[list(SWIRE_STELL_COLUMNS)].to_numpy(dtype=float)
     ext_fl = df[list(SWIRE_EXT_FL_COLUMNS)].to_numpy(dtype=float)
-    return flux_mjy, stell, ext_fl
+    field = np.concatenate(field_idx)
+    return flux_mjy, stell, ext_fl, field
 
 
 def classify_galaxy_extended_flag(stell, ext_fl):
@@ -481,42 +558,99 @@ def candidate_star_galaxy_splits(stell, ext_fl):
     return out
 
 
-def select_star_galaxy_split(flux_mjy_i2, stell, ext_fl, fit, cosmic_variance_dex,
-                              s_values=SPLIT_CRITERION_S_MJY):
-    """Grades every `candidate_star_galaxy_splits` candidate against the
-    Fazio fit's own `N(>S)` at `s_values` (SPEC_PRIORS.md 5.1's
-    criterion): each candidate's ratio of its own SWIRE galaxy count to
-    the Fazio target at each flux, in dex. A candidate "passes" if every
-    one of those `|dex|` is within `cosmic_variance_dex`. The adopted
-    split is the passing candidate removing the fewest SWIRE rows (the
-    least intervention that meets the standard); if none passes, the
-    candidate with the smallest maximum `|dex|`, flagged as such.
+def fazio_pooled_star_counts(fazio_path):
+    """`(log10_S, log10_N)`, Fazio's pooled (mean-of-three-fields) star
+    `N(>S)`, the star-count analogue of `fit_all_variants`'s "mean"
+    galaxy variant: mean of `log10` over `STAR_FIELD_COLUMNS`'s populated
+    rows, cumulated the same way (`cumulative_from_differential`). The
+    anchor `expected_star_count` transports to each SWIRE field's own
+    latitude.
+    """
+    mag, cols = read_fazio_table(fazio_path, columns=STAR_FIELD_COLUMNS)
+    stack = np.vstack([cols[c] for c in STAR_FIELD_COLUMNS])
+    with np.errstate(invalid="ignore"):
+        mean_log = np.nanmean(stack, axis=0)
+    log10_S, log10_N, _tail = cumulative_from_differential(mag, mean_log)
+    return log10_S, log10_N
+
+
+def expected_star_count(fazio_path, s_mjy):
+    """The total expected star COUNT (not density) above `s_mjy` summed
+    across the six SWIRE fields: Fazio's pooled star `N(>S)`
+    (`fazio_pooled_star_counts`) transported to each field's own
+    |b| (`SWIRE_FIELD_ABS_B_DEG`) from the three Fazio fields' own mean
+    |b| by `STAR_COUNT_LATITUDE_GRADIENT_DEX_PER_DEG`, times that field's
+    own area (`SWIRE_FIELD_AREA_DEG2`) -- the "expected stars" of
+    studies/swire_vs_fazio.md sec 2-3, summed rather than reported per
+    field, since a raw count, not a fraction, is the quantity the split
+    actually controls (sec 4).
+    """
+    log10_S, log10_N = fazio_pooled_star_counts(fazio_path)
+    # cumulative_from_differential runs bright-to-faint (decreasing log10_S,
+    # the table's own row order); np.interp needs its x-coordinate
+    # increasing, so read it faint-to-bright here.
+    order = np.argsort(log10_S)
+    log10_n0_deg2 = float(np.interp(np.log10(s_mjy), log10_S[order], log10_N[order]))
+    b_fazio_mean = float(np.mean(FAZIO_FIELD_ABS_B_DEG))
+    b_field = np.asarray(SWIRE_FIELD_ABS_B_DEG, dtype=float)
+    area_field = np.asarray(SWIRE_FIELD_AREA_DEG2, dtype=float)
+    shift = STAR_COUNT_LATITUDE_GRADIENT_DEX_PER_DEG * (b_field - b_fazio_mean)
+    density_field = 10.0 ** (log10_n0_deg2 + shift)
+    return float(np.sum(density_field * area_field))
+
+
+def select_star_galaxy_split(flux_mjy_i2, stell, ext_fl, fazio_path, tolerance_dex,
+                              s_values=SPLIT_CRITERION_STAR_S_MJY):
+    """Grades every `candidate_star_galaxy_splits` candidate on absolute
+    star counts (studies/swire_vs_fazio.md sec 4, fix 4): each
+    candidate's own removed-star count, summed across all six SWIRE
+    fields, against `expected_star_count` -- Fazio's own star columns
+    transported to each field's own latitude -- at `s_values`, in dex.
+    Not the earlier criterion (the candidate's surviving GALAXY count
+    against the Fazio galaxy law): that is unachievable once the
+    point-source retention p(S) < 1, which is why the earlier search
+    always landed on the stellarity grid's own edge.
+
+    A candidate "passes" if every one of those `|dex|` is within
+    `tolerance_dex`. The adopted split is the passing candidate whose
+    counts are closest to the expectation (smallest mean `|dex|` -- the
+    split that most nearly "restores the expected star count", not the
+    least intervention); if none passes, the candidate with the smallest
+    maximum `|dex|`, flagged as such.
 
     Returns `(adopted_label, is_galaxy_adopted, rows, none_passed)`,
     `rows` a list of dicts (`label`, `n_removed`, `ratio` per `s_values`,
     `dex` per `s_values`, `max_abs_dex`, `passed`), one per candidate, in
     `candidate_star_galaxy_splits` order.
     """
-    fazio_n = np.array([fit.cumulative(s) for s in s_values])
+    exp_n = np.array([expected_star_count(fazio_path, s) for s in s_values])
     candidates = candidate_star_galaxy_splits(stell, ext_fl)
 
     rows = []
     for label, is_galaxy in candidates.items():
-        swire_n = np.array([swire_band_cumulative(flux_mjy_i2, is_galaxy, s) for s in s_values])
-        dex = np.log10(swire_n) - np.log10(fazio_n)
+        is_star = ~is_galaxy
+        obs_n = np.array([
+            float(np.sum(is_star & np.isfinite(flux_mjy_i2) & (flux_mjy_i2 >= s)))
+            for s in s_values
+        ])
+        obs_n_safe = np.where(obs_n > 0, obs_n, np.nan)
+        dex = np.log10(obs_n_safe) - np.log10(exp_n)
+        # a candidate with zero observed stars at every s_value (e.g.
+        # "no_removal") cannot be graded -- infinite deviation, not NaN
+        # (a NaN key breaks min()'s ordering: nan compares False against
+        # everything, so the first-seen candidate would wrongly "win").
+        abs_dex_filled = np.where(np.isfinite(dex), np.abs(dex), np.inf)
         rows.append(dict(
-            label=label, n_removed=int((~is_galaxy).sum()),
-            ratio=(swire_n / fazio_n).tolist(), dex=dex.tolist(),
-            max_abs_dex=float(np.max(np.abs(dex))),
-            passed=bool(np.all(np.abs(dex) <= cosmic_variance_dex)),
+            label=label, n_removed=int(is_star.sum()),
+            ratio=(obs_n / exp_n).tolist(), dex=abs_dex_filled.tolist(),
+            max_abs_dex=float(np.max(abs_dex_filled)),
+            passed=bool(np.all(abs_dex_filled <= tolerance_dex)),
         ))
 
     passing = [r for r in rows if r["passed"]]
     none_passed = len(passing) == 0
-    if not none_passed:
-        best = min(passing, key=lambda r: r["n_removed"])
-    else:
-        best = min(rows, key=lambda r: r["max_abs_dex"])
+    pool = passing if not none_passed else rows
+    best = min(pool, key=lambda r: r["max_abs_dex"])
     return best["label"], candidates[best["label"]], rows, none_passed
 
 
@@ -530,6 +664,28 @@ def swire_band_cumulative(flux_mjy_band, is_galaxy, threshold_mjy):
     grading criterion `select_star_galaxy_split` uses."""
     good = is_galaxy & np.isfinite(flux_mjy_band) & (flux_mjy_band >= threshold_mjy)
     return float(np.sum(good)) / SWIRE_AREA_DEG2
+
+
+def star_ratio_per_field(flux_mjy_i2, is_star, field, fazio_path, s_mjy):
+    """Report-only (studies/swire_vs_fazio.md sec 3's "star/exp" column,
+    per SWIRE field, at N(>`s_mjy`)): the adopted split's own star count
+    in each field against `expected_star_count`'s own per-field term
+    (not its cross-field sum). Returns a list of `(field_name, obs, exp,
+    ratio)`, `SWIRE_FIELD_FILES` order.
+    """
+    log10_S, log10_N = fazio_pooled_star_counts(fazio_path)
+    order = np.argsort(log10_S)
+    log10_n0 = float(np.interp(np.log10(s_mjy), log10_S[order], log10_N[order]))
+    b_fazio_mean = float(np.mean(FAZIO_FIELD_ABS_B_DEG))
+    rows = []
+    for i, name in enumerate(SWIRE_FIELD_FILES):
+        in_field = field == i
+        obs = float(np.sum(is_star[in_field] & np.isfinite(flux_mjy_i2[in_field])
+                            & (flux_mjy_i2[in_field] >= s_mjy)))
+        shift = STAR_COUNT_LATITUDE_GRADIENT_DEX_PER_DEG * (SWIRE_FIELD_ABS_B_DEG[i] - b_fazio_mean)
+        exp = (10.0 ** (log10_n0 + shift)) * SWIRE_FIELD_AREA_DEG2[i]
+        rows.append((name, obs, exp, obs / exp if exp > 0 else float("nan")))
+    return rows
 
 
 def scosmos_8um_cumulative(config, threshold_mjy):
@@ -593,29 +749,54 @@ def build(config, regions=None):
           "the law is extrapolated at that edge's own running slope, held fixed -- "
           "not the smooth formula's further curvature past data it was never fit to")
 
-    flux_mjy_all, stell_all, ext_fl_all = read_swire_catalogue(config)
+    flux_mjy_all, stell_all, ext_fl_all, field_all = read_swire_catalogue(config)
     print("gal: SWIRE pull carries no optical stellarity column (sky.download.swire.build.COLUMNS); "
           "the stellarity split candidate reads IRAC 3.6um in its place")
 
     split_label, is_galaxy_all, split_rows, none_passed = select_star_galaxy_split(
         flux_mjy_all[:, IRAC_BAND_KEYS.index("I2")], stell_all, ext_fl_all,
-        fit, counts_result["cosmic_variance_dex"])
-    print("gal: star-galaxy split candidates (Fazio N(>S) reproduction at "
-          f"S={SPLIT_CRITERION_S_MJY} mJy, cosmic-variance band ="
+        fazio_path, counts_result["cosmic_variance_dex"])
+    print("gal: star-galaxy split candidates (absolute star count against Fazio+2004's own star "
+          f"columns, latitude-transported, at S={SPLIT_CRITERION_STAR_S_MJY} mJy, tolerance ="
           f" {counts_result['cosmic_variance_dex']:.4f} dex):")
     for r in split_rows:
-        ratio_str = ", ".join(f"{s}mJy={ratio:.3f}" for s, ratio in zip(SPLIT_CRITERION_S_MJY, r["ratio"]))
-        print(f"gal:   {r['label']}: n_removed={r['n_removed']} ratio(swire/fazio) [{ratio_str}] "
+        ratio_str = ", ".join(f"{s}mJy={ratio:.3f}" for s, ratio in zip(SPLIT_CRITERION_STAR_S_MJY, r["ratio"]))
+        print(f"gal:   {r['label']}: n_removed={r['n_removed']} ratio(swire_star/fazio_exp*) [{ratio_str}] "
               f"max|dex|={r['max_abs_dex']:.4f} passed={r['passed']}")
     if none_passed:
-        print(f"gal: no split candidate reproduces Fazio's counts within the cosmic-variance band; "
+        print(f"gal: no split candidate restores Fazio's expected star count within tolerance; "
               f"adopting the smallest max|dex| candidate: {split_label}")
     else:
-        print(f"gal: adopted split: {split_label} (least intervention among candidates meeting the standard)")
+        print(f"gal: adopted split: {split_label} (closest to the expected star count among candidates "
+              "meeting the standard)")
 
     n_star = int((~is_galaxy_all).sum())
     print(f"gal: SWIRE: {flux_mjy_all.shape[0]} rows, {is_galaxy_all.sum()} classed galaxy under "
           f"{split_label}, {n_star} classed star")
+
+    field_rows = star_ratio_per_field(flux_mjy_all[:, IRAC_BAND_KEYS.index("I2")], ~is_galaxy_all,
+                                       field_all, fazio_path, min(SPLIT_CRITERION_STAR_S_MJY))
+    pooled_obs = sum(r[1] for r in field_rows)
+    pooled_exp = sum(r[2] for r in field_rows)
+    print(f"gal: adopted split star/exp* at S>{min(SPLIT_CRITERION_STAR_S_MJY)}mJy per field: " +
+          ", ".join(f"{name}={ratio:.2f}" for name, obs, exp, ratio in field_rows) +
+          f"; pooled={pooled_obs / pooled_exp:.2f}")
+
+    p_at = np.array([0.03, 0.07, 0.1, 0.3, 1.0])
+    p_vals = point_source_retention(p_at)
+    print("gal: point-source retention p(S) = min(1, (S/{:.4f})^-{:.2f}) at S={} mJy: p={}".format(
+        POINT_RETENTION_S0_MJY, POINT_RETENTION_Q, p_at.tolist(), np.round(p_vals, 4).tolist()))
+    below_s0 = 10.0 ** counts_result["log10_s_grid"] <= POINT_RETENTION_S0_MJY
+    print(f"gal: PHI_S_POINT <= PHI_S everywhere: "
+          f"{bool(np.all(counts_result['phi_s_point'] <= counts_result['phi_s']))}; "
+          f"equal below {POINT_RETENTION_S0_MJY}mJy: "
+          f"{bool(np.allclose(counts_result['phi_s_point'][below_s0], counts_result['phi_s'][below_s0]))}")
+
+    s_grid = 10.0 ** counts_result["log10_s_grid"]
+    d_log10_s = float(counts_result["log10_s_grid"][1] - counts_result["log10_s_grid"][0])
+    a_gal_before = float(np.sum(counts_result["phi_s"] * s_grid * d_log10_s * np.log(10.0)))
+    a_gal_after = float(np.sum(counts_result["phi_s_point"] * s_grid * d_log10_s * np.log(10.0)))
+    print(f"gal: A_GAL (sum phi(S) S dS, deg^-2): before p(S)={a_gal_before:.1f}, after={a_gal_after:.1f}")
 
     swire_45_01 = swire_band_cumulative(flux_mjy_all[:, IRAC_BAND_KEYS.index("I2")], is_galaxy_all, 0.1)
     swire_45_1 = swire_band_cumulative(flux_mjy_all[:, IRAC_BAND_KEYS.index("I2")], is_galaxy_all, 1.0)
