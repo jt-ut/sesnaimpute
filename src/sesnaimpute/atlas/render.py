@@ -24,10 +24,11 @@ per class, likewise each on its own scale, plus a seventh small panel,
 Colour maps and scales follow the convention the earlier package's own
 sky-atlas figure used (`sesnacomplete.bms_prior.validation.sky_atlas`):
 the measured dust column on `magma`, every class quantity (share,
-posterior mean, raw density) on `viridis`, and a panel's colour bar
-inset into the panel itself rather than beside it, since an inset bar
-costs the layout nothing while a row of six side-by-side bars would
-eat the space the maps need.
+posterior mean, raw density) on `viridis`. That earlier figure insets
+its colour bar into the panel itself when the footprint leaves it clear
+space to sit in; the class panels here (as narrow as ~2" for a compact
+region like NGC 7129) do not, so each one's bar is a thin strip
+immediately outside its own axes on the right instead.
 """
 
 import argparse
@@ -210,29 +211,20 @@ def _log_norm(grid):
     return LogNorm(vmin=float(finite.min()), vmax=float(finite.max()))
 
 
-def _inset_colorbar(fig, ax, im):
-    """A colour bar inset into the panel itself, ticks on its left so
-    the labels stay inside the panel's own box rather than spilling
-    into the next column -- the earlier package's sky-atlas convention
-    (`sesnacomplete.bms_prior.validation.sky_atlas._inset_colorbar`): a
-    bar drawn beside a panel costs its width from every column on the
-    page, so a row of six narrow class panels has no room for six
-    side-by-side bars, but an inset bar costs the layout nothing. A
-    white translucent backing keeps the bar and its ticks legible over
-    the panel's own image; `%.2g` keeps a tick's own exponent (for a
-    share as small as YSO's) inside the tick label itself, rather than
-    a separate offset annotation that has nowhere narrow to sit."""
-    x, y, w, h = 0.58, 0.08, 0.06, 0.34
-    ax.add_patch(plt.Rectangle((x - 0.30, y - 0.05), w + 0.33, h + 0.10,
-                                transform=ax.transAxes, facecolor="white",
-                                alpha=0.78, edgecolor="none", zorder=4))
-    cax = ax.inset_axes([x, y, w, h], zorder=5)
+def _side_colorbar(fig, ax, im):
+    """A thin colour bar immediately to the right of `ax`, outside its
+    own axes box, scaled to that panel's own data range. The earlier
+    package's sky-atlas figure insets its bar into the panel when the
+    footprint leaves clear space for one; a compact region's class
+    panel here (as narrow as ~2") does not, so the bar sits beside the
+    panel instead, in the column gap the grid already carries rather
+    than a column of its own."""
+    cax = ax.inset_axes([1.04, 0.0, 0.07, 1.0], transform=ax.transAxes)
     cbar = fig.colorbar(im, cax=cax)
-    cbar.ax.yaxis.set_ticks_position("left")
-    cbar.locator = MaxNLocator(nbins=2)
+    cbar.locator = MaxNLocator(nbins=3)
     cbar.formatter = FuncFormatter(lambda v, _pos: "%.2g" % v)
     cbar.update_ticks()
-    cbar.ax.tick_params(labelsize=5.5, length=2, pad=1.0)
+    cbar.ax.tick_params(labelsize=7, length=2, pad=1.0)
     cbar.outline.set_linewidth(0.5)
     return cbar
 
@@ -274,18 +266,30 @@ def build_region(config, region, formats):
         # span 3 of the 9 columns -- about a third of the figure width;
         # rows 2-3's six class panels each take one of those columns, so
         # a share panel and its posterior match in size); each class
-        # panel's colour bar sits inset inside the panel itself (column 6
-        # is unused spacing), and the N(P(YSO)>0.5) panel sits in column
-        # 7 at the same size as the six, with column 8 for its own bar.
+        # panel's colour bar is a thin strip beside its own axes (column
+        # 6 is unused spacing), and the N(P(YSO)>0.5) panel sits in
+        # column 7 at the same size as the six, with column 8 for its
+        # own bar. Row heights are the aspect-driven map/panel height
+        # ALONE -- padding a row's own height_ratio (rather than the
+        # inter-row `hspace`, or the figure's own top/bottom margin) was
+        # what left every row's equal-aspect panel floating inside a box
+        # taller than its image, since an equal-aspect axes centres its
+        # image in whatever box it is given rather than filling it.
+        # `TOP_MARGIN_IN`/`BOTTOM_MARGIN_IN` instead reserve the figure's
+        # own top (the two-line suptitle plus row 1's title) and bottom
+        # (the last row's RA tick labels) margins directly, so the grid
+        # itself holds only content.
         n_rows = 3 if has_post else 2
         aspect = n_y / float(n_x)
         fig_w = 16.0
         col_widths = [1, 1, 1, 1, 1, 1, 0.35, 1, 0.35]
         unit_w = fig_w / sum(col_widths)
-        row1_h = 3 * unit_w * aspect + 1.3
-        row23_h = unit_w * aspect + 0.9
+        row1_h = 3 * unit_w * aspect
+        row23_h = unit_w * aspect
         height_ratios = [row1_h] + [row23_h] * (n_rows - 1)
-        fig_h = max(sum(height_ratios) + 1.0, 8.0)
+        content_h = sum(height_ratios)
+        TOP_MARGIN_IN, BOTTOM_MARGIN_IN = 0.85, 0.35
+        fig_h = content_h + TOP_MARGIN_IN + BOTTOM_MARGIN_IN
         # The package house style (`sesnaimpute.plot_style`) before any
         # panel is drawn, so titles/labels come out bold in its font;
         # `new_sized_figure` is the module's own exception for a page
@@ -294,7 +298,8 @@ def build_region(config, region, formats):
         plot_style.apply_style()
         fig = plot_style.new_sized_figure(fig_w, fig_h)
         gs = fig.add_gridspec(n_rows, 9, width_ratios=col_widths, height_ratios=height_ratios,
-                               wspace=0.65, hspace=0.7)
+                               wspace=0.65, hspace=0.35,
+                               top=1.0 - TOP_MARGIN_IN / fig_h, bottom=BOTTOM_MARGIN_IN / fig_h)
 
         ax_col, im_col = _add_panel(fig, gs[0, 0:3], wcs, col_grid, "magma",
                                      norm=_log_norm(col_grid), title="column A_K (mag)",
@@ -324,14 +329,14 @@ def build_region(config, region, formats):
             ax, im = _add_panel(fig, gs[share_row, i], wcs, share_grids[i], "viridis",
                                  title="%s\nprior share" % cls,
                                  show_dec=(i == 0), show_ra=(not has_post), title_size=9)
-            _inset_colorbar(fig, ax, im)
+            _side_colorbar(fig, ax, im)
 
         if has_post:
             for i, cls in enumerate(CLASSES):
                 ax, im = _add_panel(fig, gs[post_row, i], wcs, post_share_grids[i], "viridis",
                                      title="%s\nposterior mean P" % cls,
                                      show_dec=(i == 0), show_ra=True, title_size=9)
-                _inset_colorbar(fig, ax, im)
+                _side_colorbar(fig, ax, im)
             ax_nyso, im_nyso = _add_panel(fig, gs[post_row, 7], wcs, nyso_grid, "magma",
                                           title="N(P(YSO)>0.5)", show_dec=False, show_ra=True, title_size=9)
             caption = None
