@@ -197,15 +197,16 @@ def _read_trilegal_part(path):
     return df
 
 
-def read_region_trilegal(config, region, st=None):
-    """The region's whole TRILEGAL population, every pointing's every part
-    concatenated, each row's own `POINTING_INDEX` attached: `(df,
-    area_deg2, n_pointings_grid, n_pointings_on_disk)`. The pointing grid,
-    its file names, and each pointing's galactic (l, b) and simulated
-    solid angle come from `sky.download.trilegal.build.region_pointings`,
-    the one place this project's TRILEGAL acquisition is described. Area
-    convention (owner ruling 2026-09-06, SPEC_PRIORS.md section 1.5):
-    every pointing draws the SAME area the region used to draw as a whole
+def _region_pointing_plan(config, region):
+    """Which pointing(s) to read for `region` and their file names, without
+    reading any of their data: `(pointing_specs, area_deg2,
+    n_pointings_grid, n_pointings_on_disk)`, `pointing_specs` a list of
+    `(p_idx, file_names)`. The pointing grid, its file names, and each
+    pointing's galactic (l, b) and simulated solid angle come from
+    `sky.download.trilegal.build.region_pointings`, the one place this
+    project's TRILEGAL acquisition is described. Area convention (owner
+    ruling 2026-09-06, SPEC_PRIORS.md section 1.5): every pointing draws
+    the SAME area the region used to draw as a whole
     (`REGION_POINTINGS[region]["area_deg2"]`), so the region's total
     simulated area is `n_pointings * area_deg2`, not a share of it.
 
@@ -236,33 +237,31 @@ def read_region_trilegal(config, region, st=None):
 
     if all(_present(names) for names in grid_file_names):
         n_pointings_on_disk = n_pointings_grid
-        frames = []
-        for p_idx, (pt, file_names) in enumerate(zip(pointings, grid_file_names)):
-            parts = [_read_trilegal_part(f"{trilegal_dir}/{name}") for name in file_names]
-            df_p = pd.concat(parts, ignore_index=True)
-            df_p["POINTING_INDEX"] = p_idx
-            frames.append(df_p)
-            if st is not None:
-                st.tick(p_idx + 1, n_pointings_grid, "pointings")
-        df = pd.concat(frames, ignore_index=True)
+        specs = list(enumerate(grid_file_names))
         area_deg2 = n_pointings_grid * float(pointings[0]["area_deg2"])
     elif _present(single_file_names):
         n_pointings_on_disk = 1
         print(f"field_stars: {region!r}: the {n_pointings_grid}-cell pointing grid is "
               f"not on disk; reading the single historical pointing {single_file_names} "
               f"as one pointing (index 0), area {info['area_deg2']} deg2")
-        parts = [_read_trilegal_part(f"{trilegal_dir}/{name}") for name in single_file_names]
-        df = pd.concat(parts, ignore_index=True)
-        df["POINTING_INDEX"] = 0
-        if st is not None:
-            st.tick(1, 1, "pointings")
+        specs = [(0, single_file_names)]
         area_deg2 = float(info["area_deg2"])
     else:
         raise FileNotFoundError(
             f"field_stars: {region!r}: neither the pointing grid's files nor the single "
             f"historical pointing's files are on disk under {trilegal_dir!r} -- run "
             f"sesnaimpute.sky.download.trilegal.build for this region")
-    return df, area_deg2, n_pointings_grid, n_pointings_on_disk
+    return specs, area_deg2, n_pointings_grid, n_pointings_on_disk
+
+
+def _read_pointing(trilegal_dir, file_names, p_idx):
+    """One pointing's TRILEGAL parts, concatenated, `POINTING_INDEX`
+    attached -- the one ascii frame `build_region`'s loop holds at a
+    time."""
+    parts = [_read_trilegal_part(f"{trilegal_dir}/{name}") for name in file_names]
+    df_p = pd.concat(parts, ignore_index=True)
+    df_p["POINTING_INDEX"] = p_idx
+    return df_p
 
 
 def intrinsic_fluxes_mjy(df):
@@ -313,61 +312,71 @@ def passes_two_of_eight(flux, f_lim, min_bands=RETENTION_MIN_BANDS):
 
 def build_region(config, region, atmosphere, st=None):
     """The region's matched, retained TRILEGAL table plus the raw group,
-    as a dict of arrays ready for `write_region`.
+    as a dict of arrays ready for `write_region`. Streamed one pointing at
+    a time (CODING_RULES.md 10a): each pointing's own ascii frame is read,
+    reduced to its flux/distance/template-match/retention columns, and
+    dropped before the next pointing is read, so nothing holds more than
+    one pointing's raw TRILEGAL frame at once. The per-pointing columns
+    are additive (each star's own derivation reads no other star), so
+    concatenating them once at the end reproduces exactly what deriving
+    them from the whole-region frame in one pass would give.
     """
-    df, area_deg2, n_pointings_grid, n_pointings_on_disk = read_region_trilegal(config, region, st=st)
-    n_raw = len(df)
-
-    flux = intrinsic_fluxes_mjy(df)
-    dist_pc = distance_pc(df)
-    log_teff = df["logTe"].to_numpy(dtype=np.float64)
-    logg = df["logg"].to_numpy(dtype=np.float64)
-    mh = df["[M/H]"].to_numpy(dtype=np.float64)
-    log_l = df["logL"].to_numpy(dtype=np.float64)
-    ks_mag = df["Ks"].to_numpy(dtype=np.float64)
-
-    idx, match_dist = match_templates(10.0 ** log_teff, logg, mh, atmosphere["grid"])
-    g_proxy = ks_mag + atmosphere["g_minus_ks"][idx]
-    kg_diffuse = atmosphere["kg_diffuse"][idx]
-    kg_dense = atmosphere["kg_dense"][idx]
-
-    # each row's own pointing (`sky.download.trilegal.build.region_pointings`,
-    # SPEC_PRIORS.md section 1.5's "pointings every 1-2 degrees"): a region
-    # whose admitted footprint needs only one grid cell (NGC 7129) still has
-    # every row at pointing index 0, unchanged.
-    pointing_index = df["POINTING_INDEX"].to_numpy(dtype=np.int16)
-
+    specs, area_deg2, n_pointings_grid, n_pointings_on_disk = _region_pointing_plan(config, region)
+    trilegal_dir = f"{config.data_root}/sky/download/trilegal"
     f_lim_deep = deepest_limits(config, region)
-    keep = passes_two_of_eight(flux, f_lim_deep)
+
+    raw_parts, ret_parts = [], []
+    n_raw = 0
+    for i, (p_idx, file_names) in enumerate(specs):
+        df_p = _read_pointing(trilegal_dir, file_names, p_idx)
+        n_raw += len(df_p)
+
+        flux = intrinsic_fluxes_mjy(df_p)
+        dist_pc = distance_pc(df_p)
+        log_teff = df_p["logTe"].to_numpy(dtype=np.float64)
+        logg = df_p["logg"].to_numpy(dtype=np.float64)
+        mh = df_p["[M/H]"].to_numpy(dtype=np.float64)
+        log_l = df_p["logL"].to_numpy(dtype=np.float64)
+        ks_mag = df_p["Ks"].to_numpy(dtype=np.float64)
+        # each row's own pointing (`sky.download.trilegal.build.region_pointings`,
+        # SPEC_PRIORS.md section 1.5's "pointings every 1-2 degrees"): a region
+        # whose admitted footprint needs only one grid cell (NGC 7129) still has
+        # every row at pointing index 0, unchanged.
+        pointing_index = df_p["POINTING_INDEX"].to_numpy(dtype=np.int16)
+        del df_p  # the ascii frame is not needed past this pointing's own columns
+
+        idx, match_dist = match_templates(10.0 ** log_teff, logg, mh, atmosphere["grid"])
+        g_proxy = ks_mag + atmosphere["g_minus_ks"][idx]
+        kg_diffuse = atmosphere["kg_diffuse"][idx]
+        kg_dense = atmosphere["kg_dense"][idx]
+        keep = passes_two_of_eight(flux, f_lim_deep)
+
+        raw_parts.append(dict(
+            g_proxy=g_proxy, ks_mag=ks_mag, dist_pc=dist_pc,
+            pointing_index=pointing_index, k_g_diffuse=kg_diffuse, k_g_dense=kg_dense,
+        ))
+        ret_parts.append(dict(
+            dist_pc=dist_pc[keep], log_teff=log_teff[keep], log_g=logg[keep], mh=mh[keep],
+            log_l=log_l[keep], fnu_mjy=flux[keep], g_proxy=g_proxy[keep], ks_mag=ks_mag[keep],
+            k_g_diffuse=kg_diffuse[keep], k_g_dense=kg_dense[keep], template_index=idx[keep],
+            match_dist=match_dist[keep], pointing_index=pointing_index[keep],
+        ))
+        if st is not None:
+            st.tick(i + 1, len(specs), "pointings")
+
+    def _stack(parts, key):
+        return np.concatenate([p[key] for p in parts])
+
+    raw = {key: _stack(raw_parts, key) for key in raw_parts[0]}
+    retained = {key: _stack(ret_parts, key) for key in ret_parts[0]}
 
     return dict(
         n_raw=n_raw,
         area_deg2=area_deg2,
         n_pointings_grid=n_pointings_grid,
         n_pointings_on_disk=n_pointings_on_disk,
-        raw=dict(
-            g_proxy=g_proxy,
-            ks_mag=ks_mag,
-            dist_pc=dist_pc,
-            pointing_index=pointing_index,
-            k_g_diffuse=kg_diffuse,
-            k_g_dense=kg_dense,
-        ),
-        retained=dict(
-            dist_pc=dist_pc[keep],
-            log_teff=log_teff[keep],
-            log_g=logg[keep],
-            mh=mh[keep],
-            log_l=log_l[keep],
-            fnu_mjy=flux[keep],
-            g_proxy=g_proxy[keep],
-            ks_mag=ks_mag[keep],
-            k_g_diffuse=kg_diffuse[keep],
-            k_g_dense=kg_dense[keep],
-            template_index=idx[keep],
-            match_dist=match_dist[keep],
-            pointing_index=pointing_index[keep],
-        ),
+        raw=raw,
+        retained=retained,
     )
 
 
