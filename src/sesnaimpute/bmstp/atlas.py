@@ -536,12 +536,15 @@ def _gal_members(config, rng, n_mc):
     measured at that node (`sky/derived/swire/galaxies_swire_survey.hdf5`'s
     finite-colour subset, its own `NODE` axis; a node with no measured
     galaxy borrows its nearest node that has one) -- "draw S from the law
-    and colours from the node's galaxies" (coordinator ruling). The three
-    Vega-magnitude colours and `S` (already I2's own flux) give I1/I3/I4
-    through `definitions.BANDS`' own Vega zero points; J, H, Ks, M1 are
-    unmeasured for a galaxy and held at zero flux, so the two-of-eight
-    test runs on the four IRAC bands only (disclosed). `x = 1`: sec. 5.4's
-    "whole column"."""
+    and colours from the node's galaxies" (coordinator ruling). The SWIRE
+    colours are dex flux ratios, `COLOUR_AB = log10 F_A - log10 F_B`
+    (`sky/derived/swire/galaxies_swire_survey.hdf5`'s own `DEFINITION`
+    attr), not Vega magnitudes -- I1/I3/I4 come from `S` (already I2's
+    own flux) by `F_A = S . 10**c` for `COLOUR_I1I2` and `F_B = S .
+    10**(-c)` for `COLOUR_I2I3`/`COLOUR_I2I4`, no zero point and no
+    `-0.4` factor. J, H, Ks, M1 are unmeasured for a galaxy and held at
+    zero flux, so the two-of-eight test runs on the four IRAC bands only
+    (disclosed). `x = 1`: sec. 5.4's "whole column"."""
     x_law, log10_s_grid, w_law = sample_gal.sample(config)
     node_draw = rng.choice(log10_s_grid.size, size=n_mc, replace=True, p=w_law / w_law.sum())
     s_draw = 10.0 ** log10_s_grid[node_draw]
@@ -571,9 +574,9 @@ def _gal_members(config, rng, n_mc):
     flux = np.zeros((n_mc, N_BANDS), dtype=np.float64)
     i1, i2, i3, i4 = (BAND_KEYS.index(k) for k in ("I1", "I2", "I3", "I4"))
     flux[:, i2] = s_draw
-    flux[:, i1] = s_draw * (_ZP_MJY["I1"] / _ZP_MJY["I2"]) * 10.0 ** (-0.4 * c12[gal_row])
-    flux[:, i3] = s_draw * (_ZP_MJY["I3"] / _ZP_MJY["I2"]) * 10.0 ** (0.4 * c23[gal_row])
-    flux[:, i4] = s_draw * (_ZP_MJY["I4"] / _ZP_MJY["I2"]) * 10.0 ** (0.4 * c24[gal_row])
+    flux[:, i1] = s_draw * 10.0 ** c12[gal_row]
+    flux[:, i3] = s_draw * 10.0 ** (-c23[gal_row])
+    flux[:, i4] = s_draw * 10.0 ** (-c24[gal_row])
     u = np.ones(n_mc, dtype=np.float64)
     # `A_GAL`, sec. 5.4 "Sky density": the density the Monte Carlo total
     # stands for is `sample_gal.density` (the `ln 10` integral), NOT the
