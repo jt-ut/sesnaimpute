@@ -11,9 +11,10 @@ retained field-star sample, gathered to sources by tile; PAHC (section
 the counts law integrated over its tabulated grid. YSO (section 5.5) is
 the quadratic column law, `kappa` selected by which arm reached the
 source (`ARM`, from the adopted column's own provenance flag). H2S
-(section 5.6) is the population's knot-driver law, already blurred by the
-displacement kernel, scaled by the region's `eta` and the universal
-`eps_ext`.
+(section 5.6) rides on that same young-star law density, scaled by the
+region's `eta` and the universal `eps_ext`: the knot-driver displacement
+kernel is not applied as a spatial operation (its scale sits well inside
+the class's own disclosed factor-of-three, section 5.6 "Sky density").
 """
 
 import os
@@ -206,15 +207,11 @@ def build_region(config, region, st):
     yso_law_err = max(abs(KAPPA_HERSCHEL - file_kappa_h), abs(KAPPA_PLANCK - file_kappa_p),
                       abs(pc2 - file_pc2) / file_pc2)
 
-    h2s_path = config_module.product_path(
-        config, "population", "h2s", "law-blurred", "source", region=region)
-    with h5py.File(h2s_path, "r") as f:
-        law_blurred = np.asarray(f["N_LAW_BLURRED_DEG2"][:], dtype=np.float64)
-    if law_blurred.shape[0] != n:
-        raise ValueError("bmstp.density: %s has %d rows, region has %d catalogued sources"
-                         % (h2s_path, law_blurred.shape[0], n))
+    # H2S, sec. 5.6 "Sky density": `A_H2S(s) = N_law(s) . eta_r . eps_ext`,
+    # the young-star law density at the source's own column, arm and
+    # region distance -- the same per-source scalar YSO's is, sec. 4.1.
     eta_r = ETA.get(region, ETA_ELSEWHERE)
-    density_h2s = law_blurred * eta_r * EPS_EXT
+    density_h2s = density_yso * eta_r * EPS_EXT
     st.tick(4, 4, "batches")
 
     retention_limits = field_stars.deepest_limits(config, region).astype(np.float64)
