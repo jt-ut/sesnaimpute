@@ -41,29 +41,21 @@ some tile actually measured) is fit by least squares and stored as a
 root attribute, the disclosed uncertainty on the faint-end extrapolation.
 
 Product, per region, `bms/anchors/weights_anchors_tile__<Region>.hdf5`:
-`TILE_ID` (n_tile, this product's own row index, `arange(n_tile)`),
-`W_JOINT`/`USE_JOINT`/`N_OBS_JOINT`/`N_PRED_JOINT` (n_tile, n_G, n_Ks),
-`W_G`/`N_OBS_G`/`N_PRED_G`/`SHRINK_B_G` (n_tile, n_G), `W_KS`/`N_OBS_KS`/
-`N_PRED_KS`/`SHRINK_B_KS` (n_tile, n_Ks), `W_REGION_JOINT` (n_G, n_Ks),
-`W_REGION_G` (n_G), `W_REGION_KS` (n_Ks), `EXCLUDED` (n_tile, bool),
-`EXCLUSION_REASON` (n_tile, 0 none/1 ratio/2 catalogue/3 both),
-`G_EDGES`, `KS_EDGES`; root attrs `GRANULE="tile"`,
-`FAINT_TREND_G_DEX_PER_MAG`, `FAINT_TREND_KS_DEX_PER_MAG`.
+`W_JOINT`/`USE_JOINT` (n_tile, n_G, n_Ks), `W_G` (n_tile, n_G), `W_KS`
+(n_tile, n_Ks), `W_REGION_JOINT` (n_G, n_Ks), `W_REGION_G` (n_G),
+`W_REGION_KS` (n_Ks), `EXCLUDED` (n_tile, bool), `G_EDGES`, `KS_EDGES`;
+root attrs `GRANULE="tile"`, `FAINT_TREND_G_DEX_PER_MAG`,
+`FAINT_TREND_KS_DEX_PER_MAG`.
 
-Owner ruling 2026-09-06. `W_POOL_G`/`W_POOL_KS` (n_G/n_Ks): the SURVEY-
-POOLED weight (`survey_pooled_weights`), the ratio of observed to
-predicted counts summed over every region's own populated tiles,
-computed once over all thirty regions and written identically into every
-region's file (item 1). `POPULATED_G`/`POPULATED_KS` (n_G/n_Ks, bool):
-this region had at least one of its own unmasked tiles in this bin --
-the explicit flag `faint_trend_dex_per_mag` and `star_population` now
-read, replacing the old `w_region != 1.0` sentinel (item 3). `POOLED_G`/
-`POOLED_KS` (n_G/n_Ks, bool): this region had NO usable tile of its own
-in this bin and took `W_POOL_*` instead of unity (item 1's fallback,
-never triggered on the joint grid, which has no survey-pooled
-counterpart). Root attr `POOL_SKIPPED_REGIONS`: comma-joined names of
-any region left out of the pool sum because its `G_EDGES`/`KS_EDGES`
-disagreed with the first region read.
+Owner ruling 2026-09-06. The survey-pooled weight (`survey_pooled_weights`,
+item 1: the ratio of observed to predicted counts summed over every
+region's own populated tiles, computed once over all thirty regions) is
+folded into `W_G`/`W_KS`/`W_REGION_G`/`W_REGION_KS` as the fallback for a
+bin no tile of this region measures, never written separately.
+`POPULATED_G`/`POPULATED_KS` (n_G/n_Ks, bool): this region had at least
+one of its own unmasked tiles in this bin -- the explicit flag
+`faint_trend_dex_per_mag` and `star_population` read, replacing the old
+`w_region != 1.0` sentinel (item 3).
 """
 
 import os
@@ -697,47 +689,28 @@ def build_region(config, region, clusters, w_pool_g, w_pool_ks):
     )
 
 
-def _write_product(config, region, result, w_pool_g, w_pool_ks, pool_skipped):
+def _write_product(config, region, result):
     path = config_module.product_path(config, "population", "anchors", "weights", "tile", region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "tile"
         f.attrs["FAINT_TREND_G_DEX_PER_MAG"] = result["faint_trend_g"]
         f.attrs["FAINT_TREND_KS_DEX_PER_MAG"] = result["faint_trend_ks"]
-        # owner ruling 2026-09-06, item 1: the survey-pooled fallback --
-        # the SAME array in every region's own file, the ratio of
-        # observed to predicted counts summed over every region's own
-        # populated tiles, computed once by `survey_pooled_weights`.
-        f.attrs["POOL_SKIPPED_REGIONS"] = ",".join(pool_skipped)
-        f.create_dataset("TILE_ID", data=np.arange(result["n_tile"], dtype=np.int64))
         f.create_dataset("G_EDGES", data=result["g_edges"])
         f.create_dataset("KS_EDGES", data=result["ks_edges"])
-        f.create_dataset("N_OBS_G", data=result["n_obs_g"])
-        f.create_dataset("N_PRED_G", data=result["n_pred_g"])
         f.create_dataset("W_G", data=result["w_g"])
-        f.create_dataset("SHRINK_B_G", data=result["b_g"])
         f.create_dataset("W_REGION_G", data=result["w_region_g"])
-        f.create_dataset("W_POOL_G", data=w_pool_g)
         # item 3: the explicit per-bin flag, replacing the `w_region !=
-        # 1.0` sentinel -- POPULATED (this region's own tile evidence)
-        # and POOLED (fell back to the survey-pooled value; item 1).
+        # 1.0` sentinel -- this region's own tile evidence, whether or
+        # not the bin fell back to the survey-pooled value (item 1).
         f.create_dataset("POPULATED_G", data=result["populated_g"])
-        f.create_dataset("POOLED_G", data=result["pooled_g"])
-        f.create_dataset("N_OBS_KS", data=result["n_obs_ks"])
-        f.create_dataset("N_PRED_KS", data=result["n_pred_ks"])
         f.create_dataset("W_KS", data=result["w_ks"])
-        f.create_dataset("SHRINK_B_KS", data=result["b_ks"])
         f.create_dataset("W_REGION_KS", data=result["w_region_ks"])
-        f.create_dataset("W_POOL_KS", data=w_pool_ks)
         f.create_dataset("POPULATED_KS", data=result["populated_ks"])
-        f.create_dataset("POOLED_KS", data=result["pooled_ks"])
-        f.create_dataset("N_OBS_JOINT", data=result["n_obs_joint"])
-        f.create_dataset("N_PRED_JOINT", data=result["n_pred_joint"])
         f.create_dataset("W_JOINT", data=result["w_joint"])
         f.create_dataset("USE_JOINT", data=result["use_joint"])
         f.create_dataset("W_REGION_JOINT", data=result["w_region_joint"])
         f.create_dataset("EXCLUDED", data=result["excluded"])
-        f.create_dataset("EXCLUSION_REASON", data=result["reason"])
     return path
 
 
@@ -767,7 +740,7 @@ def build(config, regions=None):
     for region in region_names:
         with progress.Stage("prior.anchor_weights", region) as st:
             result = build_region(config, region, clusters, w_pool_g, w_pool_ks)
-            path = _write_product(config, region, result, w_pool_g, w_pool_ks, pool_skipped)
+            path = _write_product(config, region, result)
             st.done(path, n_tile=result["n_tile"], max_identity_dev=result["max_identity_dev"])
 
         w_all = np.concatenate([result["w_g"].ravel(), result["w_ks"].ravel()])

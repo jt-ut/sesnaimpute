@@ -27,7 +27,7 @@ and a measured systematic left unapplied is an error of its own size: the
 column stage (`sky.derived.column.merge_region`) now subtracts the
 field's own offset from a Herschel-arm source's `A_COL_K` and writes the
 offset's uncertainty as that source's own `ZP_SIGMA_K` (0 for a
-Planck-arm source). `Kernel.mixture`/`.params`/`.pdf`/`.cdf` take that
+Planck-arm source). `Kernel.mixture`/`.params` take that
 same per-source `ZP_SIGMA_K` directly (mag, already resolved to the
 source's field, or 0) rather than a field name -- simpler than having the
 kernel carry its own field lookup, since the column product has already
@@ -40,35 +40,20 @@ import os
 
 import h5py
 import numpy as np
-from scipy.special import erf
 
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
-from sesnaimpute.sky.derived.subbeam import HGBS_BEAM_ARCSEC, PLANCK_BEAM_ARCSEC
-
-#: How far past `A_s`, in sigma, consumers take the kernel's tail.
-X_TAIL_SIGMAS = 3.0
 
 #: The beam the sub-beam mixture table is pooled from for the Planck arm
 #: (index into the sub-beam product's beam axis, order L108/L302/L821).
-_POOL_BEAM_LABEL = "L302"
 _POOL_BEAM_INDEX = 1
 
 #: The two beams the kernel is ever evaluated at (spec 1.2), and the fixed
-#: order/codes the tabulated product's arm axis uses. Both numbers are
-#: `sky.derived.subbeam`'s own constants, defined there once (the
-#: sub-beam stage's ladder and completion factor are tabulated at the
-#: same beams) and imported here, never redefined -- see
-#: `subbeam.PLANCK_BEAM_ARCSEC`'s docstring for which value this is and
-#: why (the R1.20 product's own measured beam, not the nominal
-#: 2015-release scan-beam FWHM).
-STATED_BEAM_ARCSEC = {"herschel": HGBS_BEAM_ARCSEC, "planck": PLANCK_BEAM_ARCSEC}
+#: order/codes the tabulated product's arm axis uses.
 _ARM_ORDER = ("herschel", "planck")
 _ARM_CODE = {"herschel": 0, "planck": 1}
 
 _LN10 = float(np.log(10.0))
-_SQRT2 = float(np.sqrt(2.0))
-_SQRT2PI = float(np.sqrt(2.0 * np.pi))
 
 
 def _load_sigma_zp_herschel(config):
@@ -176,23 +161,6 @@ class Kernel(object):
                                         - self._sigma[arm_idx, i, :]))
         return w, mu, sigma
 
-    def width_dex(self, a_col, map_class):
-        """The structural mixture's own standard deviation in log10 T at
-        `a_col`, no per-source term -- the shapes' per-node smoothing
-        width."""
-        a_col = np.asarray(a_col, dtype=float)
-        w, mu, sigma = self._structural(a_col, self._arm_index(map_class))
-        _, var = _mixture_mean_var(w, mu[:, 0], sigma[:, 0], mu[:, 1], sigma[:, 1])
-        return np.sqrt(np.maximum(var, 0.0))
-
-    def shift_dex(self, a_col, map_class):
-        """The structural mixture's own mean in log10 T at `a_col`, no
-        per-source term."""
-        a_col = np.asarray(a_col, dtype=float)
-        w, mu, sigma = self._structural(a_col, self._arm_index(map_class))
-        mean, _ = _mixture_mean_var(w, mu[:, 0], sigma[:, 0], mu[:, 1], sigma[:, 1])
-        return mean
-
     def _zp_herschel_dex(self, a_col, arm_idx, zp_sigma_k):
         """The zero-point term folded into a Herschel-arm source's width,
         in dex at `a_col`: the source's own `ZP_SIGMA_K` (mag, already
@@ -241,44 +209,6 @@ class Kernel(object):
         mean, var = _mixture_mean_var(w, mu[:, 0], sigma[:, 0], mu[:, 1], sigma[:, 1])
         return mean, np.sqrt(np.maximum(var, 0.0))
 
-    def _broadcast_t(self, t, n):
-        t = np.asarray(t, dtype=float)
-        if t.ndim == 1:
-            t = np.broadcast_to(t[np.newaxis, :], (n, t.shape[0]))
-        return t
-
-    def pdf(self, t, a_col, sigma_col, map_class, zp_sigma_k=None):
-        """`p(t | a_col)` in `T` (per unit `A_K`): `(n, m)`, `t` broadcast
-        against the `n` sources; the mixture density. `zp_sigma_k` is
-        `mixture`'s same optional per-source zero-point uncertainty."""
-        a_col = np.asarray(a_col, dtype=float)
-        w, mu, sigma = self.mixture(a_col, sigma_col, map_class, zp_sigma_k=zp_sigma_k)
-        tt = self._broadcast_t(t, a_col.size)
-        log10t = np.log10(tt)
-        dens = np.zeros_like(log10t)
-        wk = (w, 1.0 - w)
-        for k, wc in enumerate(wk):
-            loc = np.log10(a_col) + mu[:, k]
-            z = (log10t - loc[:, np.newaxis]) / sigma[:, k][:, np.newaxis]
-            dens += (wc[:, np.newaxis] * np.exp(-0.5 * z * z)
-                     / (sigma[:, k][:, np.newaxis] * _SQRT2PI))
-        return dens / (tt * _LN10)
-
-    def cdf(self, t, a_col, sigma_col, map_class, zp_sigma_k=None):
-        """`P(T <= t | a_col)`: `(n, m)`, same broadcasting as `pdf`; the
-        mixture CDF. `zp_sigma_k` is `mixture`'s same optional per-source
-        zero-point uncertainty."""
-        a_col = np.asarray(a_col, dtype=float)
-        w, mu, sigma = self.mixture(a_col, sigma_col, map_class, zp_sigma_k=zp_sigma_k)
-        tt = self._broadcast_t(t, a_col.size)
-        log10t = np.log10(tt)
-        out = np.zeros_like(log10t)
-        wk = (w, 1.0 - w)
-        for k, wc in enumerate(wk):
-            loc = np.log10(a_col) + mu[:, k]
-            z = (log10t - loc[:, np.newaxis]) / sigma[:, k][:, np.newaxis]
-            out += wc[:, np.newaxis] * 0.5 * (1.0 + erf(z / _SQRT2))
-        return out
 
 
 def _pool_planck_mixture(subbeam_path, a_nodes):
@@ -348,8 +278,6 @@ def build(config, regions=None):
     SIGMA[i_p, :, 0] = sig1_p / _LN10
     SIGMA[i_p, :, 1] = sig2_p / _LN10
 
-    codes = np.array([_ARM_CODE[arm] for arm in _ARM_ORDER], dtype=np.int64)
-
     out_path = config_module.product_path(config, "population", "sesna", "kernel", "survey")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
@@ -357,7 +285,6 @@ def build(config, regions=None):
         f.create_dataset("MIX_W", data=W.astype(np.float64))
         f.create_dataset("MIX_MU", data=MU.astype(np.float64))
         f.create_dataset("MIX_SIGMA", data=SIGMA.astype(np.float64))
-        f.create_dataset("MAP_CLASS_CODES", data=codes)
         f.create_dataset("ZP_HERSCHEL_K", data=np.float64(zp))
 
     st.done(out_path, n_arms=len(_ARM_ORDER), n_node=n_node, zp_herschel_k=float(zp))

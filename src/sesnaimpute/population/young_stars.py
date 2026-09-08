@@ -74,15 +74,12 @@ clusters.
 
 Products, per region, `bms/anchors/young-stars_anchors_hpx512__<Region>
 .hdf5`: `HPX_PIX_512`; `N_G_YOUNG` (n_pix, n_G_bins), Gaia-weighted;
-`N_KS_YOUNG` (n_pix, n_Ks_bins), the 1 Myr isochrone; `N_KS_YOUNG_3MYR`
-(n_pix, n_Ks_bins), the same construction at 3 Myr for the section 6.2
-age band; `N_YOUNG_TOTAL` (n_pix), the area-integrated count above;
-`N_YOUNG_SOURCE_MEAN` (n_pix), the source-sampled count beside it so the
-area-integration gap is visible; `N_BRIGHT` (n_pix), the disclosed
->1.4 Msun share of `N_YOUNG_TOTAL`, never binned; `G_EDGES`, `KS_EDGES`
-(copied from the histograms product so a consumer never has to
-cross-open it); root attrs `GRANULE="hpx512"`, `N_YOUNG_TOTAL_REGION` and
-`N_YOUNG_SOURCE_MEAN_REGION` (the region sums of the two counts above).
+`N_KS_YOUNG` (n_pix, n_Ks_bins), the 1 Myr isochrone; `N_YOUNG_TOTAL`
+(n_pix), the area-integrated count above; root attr `GRANULE="hpx512"`.
+`N_YOUNG_SOURCE_MEAN` (the source-sampled count beside `N_YOUNG_TOTAL`
+so the area-integration gap is visible) and `N_BRIGHT` (the disclosed
+>1.4 Msun share of `N_YOUNG_TOTAL`, never binned) are computed and
+reported at build, not stored.
 
 Algebraic acceptance (reported at build, per pixel, to 1e-9): the 1 Myr
 Ks histogram's own bins, plus whatever of the binned (0.1-1.4 Msun)
@@ -529,11 +526,11 @@ def _weighted_hist(values, weights, edges):
 
 
 def _pixel_block(config, a_pix_blk, u_edges_blk, p_u_blk, n_young_blk,
-                  mass_grid, mass_weight, ks_abs_1myr, ks_abs_3myr, g_abs_1myr,
+                  mass_grid, mass_weight, ks_abs_1myr, g_abs_1myr,
                   mu, g_edges, ks_edges):
-    """One block's `(N_G_YOUNG, N_KS_YOUNG, N_KS_YOUNG_3MYR)` and the
-    1 Myr Ks acceptance pieces, vectorised over every mass and every
-    `u`-cell of every pixel in the block at once.
+    """One block's `(N_G_YOUNG, N_KS_YOUNG)` and the 1 Myr Ks acceptance
+    pieces, vectorised over every mass and every `u`-cell of every pixel
+    in the block at once.
     """
     u_mid = 0.5 * (u_edges_blk[:, :-1] + u_edges_blk[:, 1:])      # (n_blk, n_u)
     u_width = np.diff(u_edges_blk, axis=1)                        # (n_blk, n_u)
@@ -546,19 +543,16 @@ def _pixel_block(config, a_pix_blk, u_edges_blk, p_u_blk, n_young_blk,
               * u_mass[:, None, :])                                # (n_blk, n_mass, n_u)
 
     ks_app_1myr = ks_abs_1myr + mu
-    ks_app_3myr = ks_abs_3myr + mu
     g_app_1myr = g_abs_1myr + mu
 
     ks_obs_1myr = ks_app_1myr[None, :, None] + a_rep[:, None, :]
-    ks_obs_3myr = ks_app_3myr[None, :, None] + a_rep[:, None, :]
     g_obs = g_app_1myr[None, :, None] + g_dimming[:, None, :]
 
     p_g = anchor_tiles.gaia_detection_weight(g_obs)
     n_g, _, _ = _weighted_hist(g_obs, weight * p_g, g_edges)
     n_ks, ks_faint, ks_bright = _weighted_hist(ks_obs_1myr, weight, ks_edges)
-    n_ks_3myr, _, _ = _weighted_hist(ks_obs_3myr, weight, ks_edges)
 
-    return n_g, n_ks, n_ks_3myr, ks_faint, ks_bright
+    return n_g, n_ks, ks_faint, ks_bright
 
 
 # ---------------------------------------------------------------------
@@ -591,8 +585,6 @@ def build_region(config, region):
     mass_grid, mass_weight = mass_grid_and_weight()
     ks_abs_1myr = abs_mag_grid(
         config, AGE_1MYR_GYR, mass_grid)[:, BAND_KEYS.index("Ks")]
-    ks_abs_3myr = abs_mag_grid(
-        config, AGE_3MYR_GYR, mass_grid)[:, BAND_KEYS.index("Ks")]
     g_abs_1myr = gaia_abs_mag_grid(config, AGE_1MYR_GYR, mass_grid)
 
     n_pix = pixels.size
@@ -601,7 +593,7 @@ def build_region(config, region):
         delayed(_pixel_block)(
             config, a_pix[s:s + PIXEL_BLOCK], u_edges[s:s + PIXEL_BLOCK],
             p_u[s:s + PIXEL_BLOCK], n_young_total[s:s + PIXEL_BLOCK],
-            mass_grid, mass_weight, ks_abs_1myr, ks_abs_3myr, g_abs_1myr,
+            mass_grid, mass_weight, ks_abs_1myr, g_abs_1myr,
             mu, g_edges, ks_edges)
         for s in starts)
 
@@ -609,10 +601,8 @@ def build_region(config, region):
         np.empty((0, g_edges.size - 1))
     n_ks_young = np.concatenate([b[1] for b in blocks], axis=0) if blocks else \
         np.empty((0, ks_edges.size - 1))
-    n_ks_young_3myr = np.concatenate([b[2] for b in blocks], axis=0) if blocks else \
-        np.empty((0, ks_edges.size - 1))
-    ks_faint = np.concatenate([b[3] for b in blocks]) if blocks else np.empty(0)
-    ks_bright = np.concatenate([b[4] for b in blocks]) if blocks else np.empty(0)
+    ks_faint = np.concatenate([b[2] for b in blocks]) if blocks else np.empty(0)
+    ks_bright = np.concatenate([b[3] for b in blocks]) if blocks else np.empty(0)
 
     n_bright = n_young_total * IMF_FRAC_ABOVE_1P4
 
@@ -628,7 +618,7 @@ def build_region(config, region):
 
     return dict(
         pixels=pixels, a_pix=a_pix, n_g_young=n_g_young, n_ks_young=n_ks_young,
-        n_ks_young_3myr=n_ks_young_3myr, n_young_total=n_young_total,
+        n_young_total=n_young_total,
         n_young_source_mean=n_young_source_mean,
         n_bright=n_bright, g_edges=g_edges, ks_edges=ks_edges,
         ks_faint_overflow=ks_faint, ks_bright_overflow=ks_bright,
@@ -642,17 +632,10 @@ def _write_product(config, region, result):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "hpx512"
-        f.attrs["N_YOUNG_TOTAL_REGION"] = float(result["n_young_total"].sum())
-        f.attrs["N_YOUNG_SOURCE_MEAN_REGION"] = float(result["n_young_source_mean"].sum())
         f.create_dataset("HPX_PIX_512", data=result["pixels"].astype(np.int64))
         f.create_dataset("N_G_YOUNG", data=result["n_g_young"].astype(np.float32))
         f.create_dataset("N_KS_YOUNG", data=result["n_ks_young"].astype(np.float32))
-        f.create_dataset("N_KS_YOUNG_3MYR", data=result["n_ks_young_3myr"].astype(np.float32))
         f.create_dataset("N_YOUNG_TOTAL", data=result["n_young_total"].astype(np.float64))
-        f.create_dataset("N_YOUNG_SOURCE_MEAN", data=result["n_young_source_mean"].astype(np.float64))
-        f.create_dataset("N_BRIGHT", data=result["n_bright"].astype(np.float64))
-        f.create_dataset("G_EDGES", data=result["g_edges"])
-        f.create_dataset("KS_EDGES", data=result["ks_edges"])
     return path
 
 

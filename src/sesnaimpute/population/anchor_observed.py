@@ -43,11 +43,9 @@ N_SUB.sum()) / N_OBS.sum()` (zero where the pixel has no observed
 counts at all).
 
 Product, per region, `bms/anchors/observed_anchors_hpx512__<Region>
-.hdf5`: `HPX_PIX_512`, `G_EDGES`, `KS_EDGES`, `N_GK_OBS`, `N_G_SUB`,
-`N_KS_SUB`, `N_GK_SUB` (n_pix, n_G_bin, n_Ks_bin` for the joint arrays,
-`(n_pix, n_bin)` for the marginal), `FLOORED_G`, `FLOORED_KS`,
-`FLOORED_GK`, `SUBTRACTED_FRAC_G`, `SUBTRACTED_FRAC_KS`; root attr
-`GRANULE="hpx512"`.
+.hdf5`: `HPX_PIX_512`, `G_EDGES`, `KS_EDGES`, `N_G_SUB`, `N_KS_SUB`,
+`N_GK_SUB` (n_pix, n_G_bin, n_Ks_bin` for the joint array, `(n_pix,
+n_bin)` for the marginals); root attr `GRANULE="hpx512"`.
 """
 
 import os
@@ -239,15 +237,9 @@ def _write_product(config, region, result):
         f.create_dataset("HPX_PIX_512", data=result["pixels"].astype(np.int64))
         f.create_dataset("G_EDGES", data=result["g_edges"])
         f.create_dataset("KS_EDGES", data=result["ks_edges"])
-        f.create_dataset("N_GK_OBS", data=result["n_gk_obs"].astype(np.float32))
         f.create_dataset("N_G_SUB", data=result["n_g_sub"].astype(np.float32))
         f.create_dataset("N_KS_SUB", data=result["n_ks_sub"].astype(np.float32))
         f.create_dataset("N_GK_SUB", data=result["n_gk_sub"].astype(np.float32))
-        f.create_dataset("FLOORED_G", data=result["floored_g"])
-        f.create_dataset("FLOORED_KS", data=result["floored_ks"])
-        f.create_dataset("FLOORED_GK", data=result["floored_gk"])
-        f.create_dataset("SUBTRACTED_FRAC_G", data=result["subtracted_frac_g"].astype(np.float32))
-        f.create_dataset("SUBTRACTED_FRAC_KS", data=result["subtracted_frac_ks"].astype(np.float32))
     return path
 
 

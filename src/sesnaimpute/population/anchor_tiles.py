@@ -39,8 +39,8 @@ Products, per region:
 
   `tiles_anchors_hpx512__<Region>.hdf5` -- `HPX_PIX_512`, `TILE_ID`
   (one row per occupied pixel) and, one row per tile, `TILE_L_DEG`,
-  `TILE_B_DEG`, `TILE_N_PIX`, `TILE_OMEGA_DEG2`; root attrs
-  `GRANULE="hpx512"`, `L_STAR_DEG`.
+  `TILE_B_DEG`, `TILE_OMEGA_DEG2`; root attrs `GRANULE="hpx512"`,
+  `L_STAR_DEG`.
 
   `histograms_anchors_hpx512__<Region>.hdf5` -- `HPX_PIX_512`,
   `A_PIX_K`, `OMEGA_PIX_DEG2`, `G_EDGES`, `KS_EDGES`, `N_G_OBS`,
@@ -48,7 +48,7 @@ Products, per region:
   (n_pix, n_G_bins, n_Ks_bins) -- the same raw stars, same weights and
   Gaia detection weight as `N_G_PRED`, 2-D digitised on `(G_obs, Ks_obs)`
   onto `G_EDGES`/`KS_EDGES` (SPEC_PRIORS.md section 2.1, "joint and
-  marginal bins") -- `RATIO_PASS1`; root attr `GRANULE="hpx512"`.
+  marginal bins"); root attr `GRANULE="hpx512"`.
 """
 
 import os
@@ -490,7 +490,6 @@ def write_tiles(config, region, result):
         f.create_dataset("TILE_ID", data=tiles["tile_of_pix"].astype(np.int64))
         f.create_dataset("TILE_L_DEG", data=tiles["tile_l_deg"])
         f.create_dataset("TILE_B_DEG", data=tiles["tile_b_deg"])
-        f.create_dataset("TILE_N_PIX", data=tiles["tile_n_pix"])
         f.create_dataset("TILE_OMEGA_DEG2", data=tiles["tile_omega_deg2"])
 
 
@@ -510,7 +509,6 @@ def write_histograms(config, region, result):
         f.create_dataset("N_KS_OBS", data=result["n_ks_obs"])
         f.create_dataset("N_KS_PRED", data=result["n_ks_pred"])
         f.create_dataset("N_GK_PRED", data=result["n_gk_pred"])
-        f.create_dataset("RATIO_PASS1", data=result["ratio_pass1"])
 
 
 def build(config, regions=None):

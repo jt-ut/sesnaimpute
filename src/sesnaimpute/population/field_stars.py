@@ -44,7 +44,7 @@ bookkeeping the science does not need.
 
 Writes one product per region: `field-stars_trilegal_region.hdf5`, root
 datasets the retained sample (one row per star clearing retention), plus
-a `RAW` group carrying the pre-retention population's own six columns
+a `RAW` group carrying the pre-retention population's own five columns
 (position, magnitude, and the per-star Gaia dimming coefficients) --
 what SPEC_PRIORS.md section 2.1's anchor prediction needs, since
 retention itself biases that prediction (reading note 04, section A,
@@ -345,7 +345,7 @@ def build_region(config, region, atmosphere, st=None):
         pointing_index = df_p["POINTING_INDEX"].to_numpy(dtype=np.int16)
         del df_p  # the ascii frame is not needed past this pointing's own columns
 
-        idx, match_dist = match_templates(10.0 ** log_teff, logg, mh, atmosphere["grid"])
+        idx, _ = match_templates(10.0 ** log_teff, logg, mh, atmosphere["grid"])
         g_proxy = ks_mag + atmosphere["g_minus_ks"][idx]
         kg_diffuse = atmosphere["kg_diffuse"][idx]
         kg_dense = atmosphere["kg_dense"][idx]
@@ -353,13 +353,13 @@ def build_region(config, region, atmosphere, st=None):
 
         raw_parts.append(dict(
             g_proxy=g_proxy, ks_mag=ks_mag, dist_pc=dist_pc,
-            pointing_index=pointing_index, k_g_diffuse=kg_diffuse, k_g_dense=kg_dense,
+            k_g_diffuse=kg_diffuse, k_g_dense=kg_dense,
         ))
         ret_parts.append(dict(
-            dist_pc=dist_pc[keep], log_teff=log_teff[keep], log_g=logg[keep], mh=mh[keep],
+            dist_pc=dist_pc[keep], log_teff=log_teff[keep], log_g=logg[keep],
             log_l=log_l[keep], fnu_mjy=flux[keep], g_proxy=g_proxy[keep], ks_mag=ks_mag[keep],
             k_g_diffuse=kg_diffuse[keep], k_g_dense=kg_dense[keep], template_index=idx[keep],
-            match_dist=match_dist[keep], pointing_index=pointing_index[keep],
+            pointing_index=pointing_index[keep],
         ))
         if st is not None:
             st.tick(i + 1, len(specs), "pointings")
@@ -392,7 +392,6 @@ def write_region(path, region, result):
         f.create_dataset("DIST_PC", data=ret["dist_pc"].astype(np.float32))
         f.create_dataset("LOG_TEFF", data=ret["log_teff"].astype(np.float32))
         f.create_dataset("LOG_G", data=ret["log_g"].astype(np.float32))
-        f.create_dataset("MH", data=ret["mh"].astype(np.float32))
         f.create_dataset("LOG_L", data=ret["log_l"].astype(np.float32))
         f.create_dataset("FNU_MJY", data=ret["fnu_mjy"].astype(np.float32))
         f.create_dataset("G_PROXY", data=ret["g_proxy"].astype(np.float32))
@@ -400,14 +399,12 @@ def write_region(path, region, result):
         f.create_dataset("K_G_DIFFUSE", data=ret["k_g_diffuse"].astype(np.float32))
         f.create_dataset("K_G_DENSE", data=ret["k_g_dense"].astype(np.float32))
         f.create_dataset("TEMPLATE_INDEX", data=ret["template_index"].astype(np.int32))
-        f.create_dataset("MATCH_DIST", data=ret["match_dist"].astype(np.float32))
         f.create_dataset("POINTING_INDEX", data=ret["pointing_index"].astype(np.int16))
 
         raw_group = f.create_group("RAW")
         raw_group.create_dataset("G_PROXY", data=raw["g_proxy"].astype(np.float32))
         raw_group.create_dataset("KS_MAG", data=raw["ks_mag"].astype(np.float32))
         raw_group.create_dataset("DIST_PC", data=raw["dist_pc"].astype(np.float32))
-        raw_group.create_dataset("POINTING_INDEX", data=raw["pointing_index"].astype(np.int16))
         # the anchor prediction (SPEC_PRIORS.md section 2.1, "N^{model->obs}")
         # dims every raw row in G through its own diffuse/dense Gaia
         # coefficient, blended by the section 1.3 ramp at the star's own
@@ -419,12 +416,6 @@ def write_region(path, region, result):
         f.attrs["GRANULE"] = "region"
         f.attrs["OMEGA_SIM_DEG2"] = float(result["area_deg2"])
         f.attrs["N_RAW"] = int(result["n_raw"])
-        # the pointing grid this region would use (SPEC_PRIORS.md section
-        # 1.5) vs. how many pointings are actually on disk today -- 1 when
-        # only the historical single pointing has been fetched, making a
-        # multi-cell region's fallback visible on the product itself.
-        f.attrs["N_POINTINGS_GRID"] = int(result["n_pointings_grid"])
-        f.attrs["N_POINTINGS_ON_DISK"] = int(result["n_pointings_on_disk"])
 
 
 def build(config, regions=None):

@@ -98,15 +98,12 @@ extinction)`, `P_PAHC = P(q)` from the measured curve
 
 Writes, per region, `bms/star/population_star_tile__<Region>.hdf5`: root
 attrs `GRANULE="tile"`, `OMEGA_SIM_DEG2`, `F_DUSTY_O`, `F_DUSTY_C`,
-`F_DUSTY_MEAN`, `F_C`, `L_O_LSUN`, `N_RIEBEL_O`, `N_RIEBEL_C`; a
-`DIST_GRID` dataset, the common distance grid every tile's mean profile
-and every star's `U` were read off; a `LIMIT8_GRID_MJY` (8,) dataset, the
-region's PAHC limit grid; one HDF5 group `tile_<id>` per tile with
-datasets `STAR_INDEX` (row into `population.field_stars`' retained group),
-`U`, `W`, `WEIGHT_RULE`, `W_STAR`, `W_AGB`, `IS_EVOLVED`, `LOG10_B`,
-`LOG10_B_PAHC`, `LOG10_B_AGB_C`, `LOG10_B_AGB_O`, `P_PAHC` (n_star, 8),
-`LOG10_Q0` (the star's own 8um contrast at unit limit, `population.star_shapes`'
-PAHC shape axis), and attr `N_SIGHTLINES`. The population stores each
+`F_DUSTY_MEAN`, `F_C`; a `LIMIT8_GRID_MJY` (8,) dataset, the region's PAHC
+limit grid; one HDF5 group `tile_<id>` per tile, attr
+`OMEGA_POINTING_DEG2`, with datasets `STAR_INDEX` (row into
+`population.field_stars`' retained group), `U`, `W`, `W_STAR`, `W_AGB`,
+`IS_EVOLVED`, `LOG10_B`, `LOG10_B_PAHC`, `LOG10_B_AGB_C`, `LOG10_B_AGB_O`,
+`P_PAHC` (n_star, 8). The population stores each
 star's placement fraction `U` alone (owner, 2026-09-06): a star's own
 extinction is `A_s * U`, `A_s` a real source's own adopted column, formed
 at read time by the consumer that has a source to apply it to; this
@@ -517,19 +514,14 @@ def pahc_limit_grid_mjy(config, region):
 
 
 def pahc_contamination_weight(fnu_8um, a_i, limit_grid_mjy, config, curve):
-    """`(P_PAHC, LOG10_Q0)` (spec section 4; `population.star_shapes`'s own
-    `q_0,i = 1 / (F_i(8um)` dimmed by the star's own tile extinction`)`,
-    the contrast a limit of 1 mJy would see): per star and per grid limit,
-    `q = F_lim,8 / (F_i(8um)` dimmed`)`, `P(q)` read off the measured
-    curve (`population.pahc_curve.read`); `LOG10_Q0` is the same dimmed flux's
-    own reciprocal, limit-independent, so `population.star_shapes` can apply
-    any source's own limit at read time without a limit grid."""
+    """`P_PAHC` (spec section 4): per star and per grid limit,
+    `q = F_lim,8 / (F_i(8um)` dimmed by the star's own tile extinction`)`,
+    `P(q)` read off the measured curve (`population.pahc_curve.read`)."""
     w_dense = selection.law_dense_weight(a_i)
     kappa_8 = selection.kappa_hybrid(config, w_dense)[:, IDX_I4]
     dimmed_flux_8 = fnu_8um * 10.0 ** (-0.4 * a_i * kappa_8)
     q = limit_grid_mjy[None, :] / dimmed_flux_8[:, None]
-    log10_q0 = -np.log10(dimmed_flux_8)
-    return curve(np.log10(q)), log10_q0
+    return curve(np.log10(q))
 
 
 # ---------------------------------------------------------------------------
@@ -708,7 +700,7 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
 
     # PAHC's own weight (spec section 4): the star's own tile extinction
     # `a_i` dims its intrinsic 8um flux before the contrast `q` is formed.
-    p_pahc, log10_q0 = pahc_contamination_weight(
+    p_pahc = pahc_contamination_weight(
         stars["fnu_mjy"][star_index][:, IDX_I4], a_i, stars["limit_grid_mjy"], config, curve)
 
     return dict(
@@ -718,7 +710,7 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
         u=u_i.astype(np.float32), u_front=u_front_tile,
         w=w.astype(np.float32), rule=rule,
         w_star=w_star.astype(np.float32), w_agb=w_agb.astype(np.float32),
-        p_pahc=p_pahc.astype(np.float32), log10_q0=log10_q0.astype(np.float32),
+        p_pahc=p_pahc.astype(np.float32),
         mean_u=mean_u, use_joint_any=bool(weights["use_joint"][t].any()),
         w_g=w_g, w_ks=w_ks, bin_g=bin_g, bin_ks=bin_ks,
     )
@@ -809,7 +801,7 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
 # write
 # ---------------------------------------------------------------------------
 
-def write_region(config, region, result, f_dusty_o, f_dusty_c, l_o_lsun, n_riebel_o, n_riebel_c):
+def write_region(config, region, result, f_dusty_o, f_dusty_c):
     path = config_module.product_path(config, "population", "star", "population", "tile", region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
@@ -819,26 +811,18 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c, l_o_lsun, n_riebe
         f.attrs["F_DUSTY_C"] = f_dusty_c
         f.attrs["F_DUSTY_MEAN"] = result["f_dusty_mean"]
         f.attrs["F_C"] = F_C
-        f.attrs["L_O_LSUN"] = l_o_lsun
-        f.attrs["N_RIEBEL_O"] = n_riebel_o
-        f.attrs["N_RIEBEL_C"] = n_riebel_c
-        # section 5.1's Omega_sim = n_pointings * Omega_pointing: the
-        # region-total solid angle stays the honest whole-simulation area
-        # (anchor_tiles' per-pixel prediction still divides by it); each
-        # tile group below carries the ONE pointing's own area instead,
-        # since that pointing's retained sample is all a tile draws from.
-        f.attrs["N_POINTINGS"] = int(result["n_pointing"])
-        f.create_dataset("DIST_GRID", data=result["dist_grid"])
         f.create_dataset("LIMIT8_GRID_MJY", data=result["limit_grid_mjy"])
         for tile_result in result["tiles"]:
             grp = f.create_group("tile_%d" % tile_result["tile"])
-            grp.attrs["N_SIGHTLINES"] = tile_result["n_sightlines"]
-            grp.attrs["POINTING_INDEX"] = int(tile_result["pointing_index"])
+            # section 5.1's Omega_sim = n_pointings * Omega_pointing: the
+            # region-total solid angle stays the honest whole-simulation area
+            # (anchor_tiles' per-pixel prediction still divides by it); each
+            # tile group below carries the ONE pointing's own area instead,
+            # since that pointing's retained sample is all a tile draws from.
             grp.attrs["OMEGA_POINTING_DEG2"] = float(result["pointing_area"][tile_result["pointing_index"]])
             grp.create_dataset("STAR_INDEX", data=tile_result["star_index"])
             grp.create_dataset("U", data=tile_result["u"])
             grp.create_dataset("W", data=tile_result["w"])
-            grp.create_dataset("WEIGHT_RULE", data=tile_result["rule"])
             grp.create_dataset("W_STAR", data=tile_result["w_star"])
             grp.create_dataset("W_AGB", data=tile_result["w_agb"])
             si = tile_result["star_index"]
@@ -848,7 +832,6 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c, l_o_lsun, n_riebe
             grp.create_dataset("LOG10_B_AGB_C", data=result["log10_b_agb_c"][si].astype(np.float32))
             grp.create_dataset("LOG10_B_AGB_O", data=result["log10_b_agb_o"][si].astype(np.float32))
             grp.create_dataset("P_PAHC", data=tile_result["p_pahc"])
-            grp.create_dataset("LOG10_Q0", data=tile_result["log10_q0"])
     return path
 
 
@@ -983,8 +966,7 @@ def build(config, regions=None):
         with progress.Stage("prior.star_population", region) as st:
             result = build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
                                    f_ref_sps, teff_node, ref_jhk, curve, st=st)
-            path = write_region(config, region, result, f_dusty_o, f_dusty_c, l_o_lsun,
-                                 n_riebel_o, n_riebel_c)
+            path = write_region(config, region, result, f_dusty_o, f_dusty_c)
             rep = _report(result)
             st.done(path, n_tile=rep["n_tile"], n_pointing=rep["n_pointing"],
                     star_per_deg2=rep["star_per_deg2"])
