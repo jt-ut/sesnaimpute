@@ -36,6 +36,7 @@ from matplotlib.colors import LogNorm
 from scipy.ndimage import gaussian_filter
 
 from sesnaimpute import config as config_module
+from sesnaimpute import plot_style
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 
@@ -245,7 +246,13 @@ def build_region(config, region, formats):
         row23_h = unit_w * aspect + 0.9
         height_ratios = [row1_h] + [row23_h] * (n_rows - 1)
         fig_h = max(sum(height_ratios) + 1.0, 8.0)
-        fig = plt.figure(figsize=(fig_w, fig_h))
+        # The package house style (`sesnaimpute.plot_style`) before any
+        # panel is drawn, so titles/labels come out bold in its font;
+        # `new_sized_figure` is the module's own exception for a page
+        # size set by the data (here, the region's footprint aspect)
+        # rather than a fixed choice from `FIGURE_SIZES`.
+        plot_style.apply_style()
+        fig = plot_style.new_sized_figure(fig_w, fig_h)
         gs = fig.add_gridspec(n_rows, 9, width_ratios=col_widths, height_ratios=height_ratios,
                                wspace=0.65, hspace=0.7)
 
