@@ -652,14 +652,24 @@ def nearest_pointing(tile_l, tile_b, pointing_l, pointing_b):
 
 
 def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, curve,
-                     pointing_l, pointing_b, front_edge_pc):
+                     pointing_l, pointing_b, present_pointings, front_edge_pc):
     """One tile's placement, weight, partition and brightness units, built
     from ONE pointing's simulated stars only (owner ruling 2026-09-06:
     each tile is assigned to its nearest pointing by tile centre; spec
     section 2.2's "Per tile" population is that pointing's retained
     stars, not the whole region's). Returns the tile's own datasets plus
     its mean-profile array and a few report-only diagnostics (not written
-    to the product)."""
+    to the product).
+
+    The nearest pointing is chosen only AMONG `present_pointings` (owner
+    ruling: a tile takes its nearest pointing among the pointings actually
+    present in the field-stars product, never from the region's full grid)
+    -- `population.field_stars`' own W0f single-pointing fallback stores
+    every star at `POINTING_INDEX` 0 even when the region's grid has more
+    cells, so a tile assigned to an absent grid cell would draw an empty
+    sample and every downstream quantity here would be built from zero
+    stars. With every grid cell on disk, `present_pointings` is the whole
+    grid and the mapping is unchanged."""
     in_tile = geom["tile"] == t
     pix256_t = geom["pix256"][in_tile]
     a_col_t = geom["a_col"][in_tile]
@@ -674,7 +684,8 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     u_front_tile = float(np.interp(front_edge_pc, dist_grid, mean_u))
 
     tile_l, tile_b = tile_centre_lb(pix256_t)
-    p_idx = nearest_pointing(tile_l, tile_b, pointing_l, pointing_b)
+    p_local = nearest_pointing(tile_l, tile_b, pointing_l[present_pointings], pointing_b[present_pointings])
+    p_idx = int(present_pointings[p_local])
     star_index = np.flatnonzero(stars["pointing_index"] == p_idx).astype(np.int32)
 
     u_i = np.interp(stars["dist_pc"][star_index], dist_grid, mean_u)
@@ -759,6 +770,11 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
     # pointing's own queried area, not the region-total OMEGA_SIM_DEG2
     # (all pointings share one area today, `REGION_POINTINGS`).
     pointing_area = np.array([p["area_deg2"] for p in pointings])
+    # owner ruling: a tile's nearest pointing is chosen only among the
+    # pointings actually on disk (this region's own `POINTING_INDEX`
+    # values), never the full grid -- `field_stars`' W0f fallback can
+    # leave every star at index 0 while the grid still names every cell.
+    present_pointings = np.unique(stars["pointing_index"])
 
     n_tile_total = tiles["n_tile"]
     _tick_lock = threading.Lock()
@@ -766,7 +782,7 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
 
     def _one_tile(t):
         result = _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, curve,
-                                  pointing_l, pointing_b, front_edge_pc)
+                                  pointing_l, pointing_b, present_pointings, front_edge_pc)
         if st is not None:
             with _tick_lock:
                 _done_count[0] += 1
