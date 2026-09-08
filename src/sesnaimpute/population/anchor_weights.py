@@ -56,9 +56,21 @@ root attribute, the disclosed uncertainty on the faint-end extrapolation.
 Product, per region, `bms/anchors/weights_anchors_tile__<Region>.hdf5`:
 `W_JOINT`/`USE_JOINT` (n_tile, n_G, n_Ks), `W_G` (n_tile, n_G), `W_KS`
 (n_tile, n_Ks), `W_REGION_JOINT` (n_G, n_Ks), `W_REGION_G` (n_G),
-`W_REGION_KS` (n_Ks), `EXCLUDED` (n_tile, bool), `G_EDGES`, `KS_EDGES`;
-root attrs `GRANULE="tile"`, `FAINT_TREND_G_DEX_PER_MAG`,
-`FAINT_TREND_KS_DEX_PER_MAG`.
+`W_REGION_KS` (n_Ks), `EXCLUDED` (n_tile, bool), `G_EDGES`, `KS_EDGES`,
+`P_KS` (n_tile, n_Ks), `KS_M50`/`KS_SCALE` (n_tile); root attrs
+`GRANULE="tile"`, `FAINT_TREND_G_DEX_PER_MAG`, `FAINT_TREND_KS_DEX_PER_MAG`.
+
+W13 (SPEC_BMSTP_DRAFT.md 5.1's "N^{model->obs}" row): 2MASS's raw
+predicted count `n_pred_ks`/the Ks axis of `n_pred_joint` is NOT treated
+as complete to `KS_CUT_MAG` -- it is scored by `P_KS`, the same sigmoid
+`anchor_tiles.gaia_detection_weight` uses for Gaia, but with per-tile
+free parameters `(m50_t, s_t)` fit by Poisson maximum likelihood to the
+tile's OWN observed-over-predicted counts (`fit_ks_completeness`), since
+2MASS's roll-off in a confused field is confusion-driven and has no
+published per-field limit. This makes `W_KS` the level alone, so the
+faint-end rule extrapolates a level rather than a falling completeness
+curve. The Gaia axis (`n_pred_g`, already scored by
+`gaia_detection_weight`) is untouched.
 
 Owner ruling 2026-09-06. The survey-pooled weight (`survey_pooled_weights`,
 item 1: the ratio of observed to predicted counts summed over every
@@ -76,6 +88,7 @@ import os
 import h5py
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize
 
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
@@ -116,6 +129,27 @@ _CLUSTER_NAMES = ["NAME", "TYPE", "GLON", "GLAT", "R50_DEG"]
 #: decision 4(ii): only bound clusters count as a mask; Hunt & Reffert's
 #: unbound moving groups ("m") are not clusters an anchor star avoids.
 _CLUSTER_TYPES_KEPT = ("o", "g")
+
+#: W13 (brief): the per-tile 2MASS completeness sigmoid's `m50` bounds.
+#: 17 is "complete" -- at the scale floor below, p(14.3; 17, 0.102) =
+#: 1 - 3.2e-11, past 1 - 1e-11.
+KS_M50_LO_MAG = 11.0
+KS_M50_HI_MAG = 17.0
+
+#: studies/2mass_rolloff_width.md: the 2MASS PSC's own intrinsic Ks
+#: roll-off, 0.074 dex (from the ExSup's Table 2 99% point and Figures
+#: 3-5's digitised 50% point of the calibration-field completeness
+#: curve), converted mag = 2.5 dex (a magnitude is -2.5 log10 flux) to a
+#: Gaussian sigma of 0.185 mag, then to this module's logistic scale by
+#: matching variances (`pi^2 s^2/3 = sigma^2`, so `s = sigma*sqrt(3)/pi`)
+#: -- a tile's own fit cannot be sharper than the instrument.
+KS_ROLLOFF_DEX = 0.074
+KS_SCALE_FLOOR_MAG = 2.5 * KS_ROLLOFF_DEX * np.sqrt(3.0) / np.pi
+
+#: brief W13: a tile needs this many bins clearing MIN_COUNTS on both
+#: the observed and predicted side to carry its own completeness fit;
+#: fewer, and it takes the region-summed fit.
+KS_COMPLETENESS_MIN_BINS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +422,71 @@ def fit_tile_weights(n_obs, n_pred, excluded, min_counts=MIN_COUNTS,
 
 
 # ---------------------------------------------------------------------------
+# W13: the 2MASS anchor's own per-tile completeness, fit from the tile's
+# own counts against the model's shape (SPEC_BMSTP_DRAFT.md 5.1)
+# ---------------------------------------------------------------------------
+
+def ks_completeness_weight(m, m50, s):
+    """`p(m; m50, s)`, `anchor_tiles.gaia_detection_weight`'s sigmoid
+    with per-tile free parameters in place of Cantat-Gaudin's fixed
+    ones -- the 2MASS PSC's own completeness curve, replacing the
+    "complete to Ks=14.3" assumption (module docstring, "W13")."""
+    m = np.asarray(m, dtype=np.float64)
+    arg = (m - m50) / s
+    return 1.0 / (1.0 + np.exp(np.minimum(arg, 700.0)))
+
+
+def _ks_completeness_nll(params, n_obs, n_pred, m_centers):
+    """Poisson negative log likelihood of `N_obs ~ L*p(m;m50,s)*N_pred`
+    (brief W13); `L` and `s` are optimised in log so the unconstrained
+    step stays positive."""
+    log_l, m50, log_s = params
+    p = ks_completeness_weight(m_centers, m50, np.exp(log_s))
+    mu = np.maximum(np.exp(log_l) * p * n_pred, 1e-300)
+    return float(np.sum(mu - n_obs * np.log(mu)))
+
+
+def _fit_ks_completeness_one(n_obs, n_pred, m_centers):
+    """One tile's (or the region-summed) `(m50, s)` by Poisson maximum
+    likelihood, `scipy.optimize.minimize` bounded at `KS_M50_LO_MAG` /
+    `KS_M50_HI_MAG` and `KS_SCALE_FLOOR_MAG` (brief W13); `L` is fit and
+    discarded, the level being `W`'s job. Started from "complete"
+    (`m50=KS_M50_HI_MAG`, a moderate width) rather than the sharpest
+    allowed roll-off: the tile's own counts pull `m50` down only where
+    they carry that evidence, rather than the optimiser settling into
+    the narrow-width branch's own local optimum, near-degenerate with
+    the flat one in the Poisson likelihood, that a floor-width start
+    lands in."""
+    x0 = np.array([0.0, KS_M50_HI_MAG, np.log(1.0)])
+    bounds = [(-20.0, 20.0), (KS_M50_LO_MAG, KS_M50_HI_MAG),
+              (np.log(KS_SCALE_FLOOR_MAG), np.log(5.0))]
+    res = minimize(_ks_completeness_nll, x0, args=(n_obs, n_pred, m_centers),
+                    method="L-BFGS-B", bounds=bounds)
+    return float(res.x[1]), float(np.exp(res.x[2]))
+
+
+def fit_ks_completeness(n_obs_ks, n_pred_ks, ks_edges):
+    """Per tile `(m50_t, s_t)` (brief W13): a tile with at least
+    `KS_COMPLETENESS_MIN_BINS` bins clearing `MIN_COUNTS` on both the
+    observed and the predicted side fits its own counts; otherwise it
+    takes the region-summed fit (the same model on the region's pooled
+    histograms). Returns `(m50, scale, own_fit)`, each `(n_tile,)` except
+    `own_fit` (bool, `(n_tile,)`)."""
+    m_centers = 0.5 * (ks_edges[:-1] + ks_edges[1:])
+    n_tile = n_obs_ks.shape[0]
+    clears = (n_obs_ks >= MIN_COUNTS) & (n_pred_ks >= MIN_COUNTS)
+    own_fit = clears.sum(axis=1) >= KS_COMPLETENESS_MIN_BINS
+
+    m50_region, s_region = _fit_ks_completeness_one(
+        n_obs_ks.sum(axis=0), n_pred_ks.sum(axis=0), m_centers)
+    m50 = np.full(n_tile, m50_region, dtype=np.float64)
+    scale = np.full(n_tile, s_region, dtype=np.float64)
+    for t in np.flatnonzero(own_fit):
+        m50[t], scale[t] = _fit_ks_completeness_one(n_obs_ks[t], n_pred_ks[t], m_centers)
+    return m50, scale, own_fit
+
+
+# ---------------------------------------------------------------------------
 # owner ruling 2026-09-06, item 1: the survey-pooled fallback weight
 # ---------------------------------------------------------------------------
 
@@ -426,6 +525,17 @@ def region_tile_counts(config, region, clusters, min_counts=MIN_COUNTS):
     n_obs_ks = _aggregate_to_tiles(obs["n_ks_sub"], tile_of_pix, n_tile)
     n_obs_joint = _aggregate_to_tiles(obs["n_gk_sub"], tile_of_pix, n_tile)
 
+    # W13: the 2MASS anchor's own per-tile completeness (module docstring)
+    # -- n_pred_ks/the Ks axis of n_pred_joint stop being "complete to
+    # KS_CUT_MAG" and become the model's count times this tile's own
+    # fitted sigmoid, BEFORE the ratio-exclusion test and every fit below
+    # reads them. The Gaia axis (n_pred_g) is untouched.
+    ks_m50, ks_scale, ks_own_fit = fit_ks_completeness(n_obs_ks, n_pred_ks, hist["ks_edges"])
+    ks_centers = 0.5 * (hist["ks_edges"][:-1] + hist["ks_edges"][1:])
+    p_ks = ks_completeness_weight(ks_centers[None, :], ks_m50[:, None], ks_scale[:, None])
+    n_pred_ks = n_pred_ks * p_ks
+    n_pred_joint = n_pred_joint * p_ks[:, None, :]
+
     ratio_mask = cluster_excluded_by_ratio(n_obs_g, n_pred_g, n_obs_ks, n_pred_ks)
     excluded_ratio = ratio_mask["excluded"]
     # the catalogue overlap test no longer excludes a tile (module
@@ -444,7 +554,8 @@ def region_tile_counts(config, region, clusters, min_counts=MIN_COUNTS):
         n_obs_g=n_obs_g, n_obs_ks=n_obs_ks, n_obs_joint=n_obs_joint,
         excluded=excluded, reason=reason, nearest_cluster=nearest_cluster,
         ratio_mask=ratio_mask, excluded_ratio=excluded_ratio,
-        excluded_catalog=excluded_catalog)
+        excluded_catalog=excluded_catalog,
+        ks_m50=ks_m50, ks_scale=ks_scale, ks_own_fit=ks_own_fit, p_ks=p_ks)
 
 
 def survey_pooled_weights(config, region_names, clusters, min_counts=MIN_COUNTS):
@@ -645,6 +756,7 @@ def build_region(config, region, clusters, w_pool_g, w_pool_ks):
     excluded, reason, nearest_cluster = rc["excluded"], rc["reason"], rc["nearest_cluster"]
     ratio_mask = rc["ratio_mask"]
     excluded_ratio, excluded_catalog = rc["excluded_ratio"], rc["excluded_catalog"]
+    ks_m50, ks_scale, ks_own_fit, p_ks = rc["ks_m50"], rc["ks_scale"], rc["ks_own_fit"], rc["p_ks"]
 
     fit_g = fit_tile_weights(n_obs_g, n_pred_g, excluded, w_pool=w_pool_g)
     fit_ks = fit_tile_weights(n_obs_ks, n_pred_ks, excluded, w_pool=w_pool_ks)
@@ -709,6 +821,7 @@ def build_region(config, region, clusters, w_pool_g, w_pool_ks):
         max_region_pooled_dev=max_region_pooled_dev,
         scatter_observed=scatter_obs, scatter_expected=scatter_expected,
         frac_disagree_2sigma=frac_disagree_2sigma,
+        ks_m50=ks_m50, ks_scale=ks_scale, ks_own_fit=ks_own_fit, p_ks=p_ks,
     )
 
 
@@ -734,6 +847,10 @@ def _write_product(config, region, result):
         f.create_dataset("USE_JOINT", data=result["use_joint"])
         f.create_dataset("W_REGION_JOINT", data=result["w_region_joint"])
         f.create_dataset("EXCLUDED", data=result["excluded"])
+        # W13: the 2MASS anchor's own per-tile completeness sigmoid.
+        f.create_dataset("P_KS", data=result["p_ks"])
+        f.create_dataset("KS_M50", data=result["ks_m50"])
+        f.create_dataset("KS_SCALE", data=result["ks_scale"])
     return path
 
 
@@ -784,6 +901,14 @@ def build(config, regions=None):
                result["max_identity_dev"], result["n_identity_checked"],
                result["max_region_pooled_dev"], result["scatter_observed"],
                result["scatter_expected"], result["frac_disagree_2sigma"], path))
+        n_at_bound = int(np.count_nonzero(
+            np.isclose(result["ks_m50"], KS_M50_HI_MAG, atol=1e-6)))
+        print(
+            "anchor_weights: %s ks_m50 median=%.3f range=%.3f-%.3f "
+            "ks_scale median=%.4f tiles_at_complete_bound=%d/%d"
+            % (region, float(np.median(result["ks_m50"])),
+               float(result["ks_m50"].min()), float(result["ks_m50"].max()),
+               float(np.median(result["ks_scale"])), n_at_bound, result["n_tile"]))
 
 
 if __name__ == "__main__":
