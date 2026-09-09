@@ -378,13 +378,15 @@ def _region_pixel_columns(config, region):
 
 def _ks_split_mag(ks_edges_2mass, n_ks_obs_2mass, ukidss_edges, n_ukidss_obs):
     """W38 item 1: the magnitude the Ks axis switches from 2MASS to
-    UKIDSS at -- the faintest of 2MASS's own regular half-magnitude
-    bins (width exactly 0.5 mag, so the odd trailing 14.0-14.3 bin is
-    never a candidate) at or above `KS_SPLIT_MIN_MAG` whose
-    region-summed UKIDSS count already meets or beats 2MASS's own in
-    that same bin -- UKIDSS saturates brighter (`KS_SPLIT_MIN_MAG`'s
-    citation), so this is the deepest point the shallow survey is still
-    trusted to before the deep one takes over for the rest of the axis.
+    UKIDSS at -- the lower edge of the BRIGHTEST of 2MASS's own regular
+    half-magnitude bins (width exactly 0.5 mag, so the odd trailing
+    14.0-14.3 bin is never a candidate) at or above `KS_SPLIT_MIN_MAG`
+    whose region-summed UKIDSS count, on the pixels it covers, meets or
+    beats 2MASS's own in that same bin. UKIDSS saturates brighter
+    (`KS_SPLIT_MIN_MAG`'s citation); from the first bin where it
+    resolves at least as many stars as 2MASS it counts the stars 2MASS's
+    beam merges (SPEC_BMSTP_DRAFT.md section 5.1, "anchors"), so it
+    serves every bin from there to the deep cut.
     `NaN` (no split; the axis stays 2MASS's own to `KS_CUT_MAG`) where
     the UKIDSS product carries no coverage for this region at all, or
     UKIDSS never catches up to 2MASS within that candidate range.
@@ -410,7 +412,7 @@ def _ks_split_mag(ks_edges_2mass, n_ks_obs_2mass, ukidss_edges, n_ukidss_obs):
     ok = candidate & has_match & (ukidss_at >= obs_2mass_sum)
     if not np.any(ok):
         return float("nan")
-    return float(ks_edges_2mass[1:][np.flatnonzero(ok)[-1]])
+    return float(ks_edges_2mass[:-1][np.flatnonzero(ok)[0]])
 
 
 def _combine_ks_axis(ks_edges_2mass, n_ks_obs_2mass, ukidss_edges, n_ukidss_obs, ks_split_mag):
