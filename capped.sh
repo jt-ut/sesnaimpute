@@ -8,6 +8,11 @@ CEILING_KB=${CAPPED_CEILING_KB:-8388608}
 orphans() { for p in $(ps -eo pid,ppid,command | awk '$2==1 && /joblib.externals.loky/ {print $1}'); do kill -9 "$p" 2>/dev/null; done; }
 "$@" &
 ROOT=$!
+# a background child of a script ignores the terminal's Ctrl-C (bash sets
+# SIGINT to ignored for asynchronous commands), so the wrapper would die and
+# leave the command running under launchd: forward the signal to the whole
+# tree instead.
+trap 'echo "capped: interrupted -- stopping the command" >&2; pkill -TERM -P "$ROOT" 2>/dev/null; kill -TERM "$ROOT" 2>/dev/null; sleep 1; pkill -KILL -P "$ROOT" 2>/dev/null; kill -KILL "$ROOT" 2>/dev/null; orphans; exit 130' INT TERM HUP
 peak=0
 while kill -0 "$ROOT" 2>/dev/null; do
   total=$(ps -o pid=,ppid=,rss= -ax | awk -v root="$ROOT" '
