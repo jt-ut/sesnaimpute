@@ -13,16 +13,20 @@ returned "ORA-00904: IVO_HEALPIX_INDEX: invalid identifier" -- checked
 before this module was written; the table also carries no precomputed
 HEALPix column, only an HTM-20 index, `htm20`, on an unrelated
 tessellation). So this module fetches verbatim per-source rows -- clean
-photometry only, `Ks` and Galactic position -- and the nside-512 binning
-that pairs it with the Gaia module's product happens in
-`sesnaimpute.sky.derived.twomass_counts`, the one `derive` step in this
-pair that legitimately computes.
+photometry only, `J`, `H`, `Ks`, the per-band quality flag and Galactic
+position -- and the nside-512 binning that pairs it with the Gaia
+module's product happens in `sesnaimpute.sky.derived.twomass_counts`, the
+one `derive` step in this pair that legitimately computes. `j_m`/`h_m`/
+`ph_qual` feed a second, independent view,
+`sesnaimpute.sky.derived.twomass_column_scale` (SPEC_BMSTP_DRAFT.md
+3.1): the near-infrared colour of the same clean background stars, at
+the map's own nside-512 pixels.
 
 Query, per region (the exact text sent, `{l0}`/`{l1}`/`{b0}`/`{b1}` a
 padded Galactic bounding box around the region's occupied nside-512
 pixels, from the granule map)::
 
-    SELECT glon, glat, k_m FROM fp_psc
+    SELECT glon, glat, j_m, h_m, k_m, ph_qual FROM fp_psc
     WHERE k_m IS NOT NULL AND k_m < 15.5 AND cc_flg = '000'
       AND glon BETWEEN {l0} AND {l1} AND glat BETWEEN {b0} AND {b1}
 
@@ -31,9 +35,15 @@ half-magnitude histogram (9.0-15.5); `cc_flg = '000'` is 2MASS's own
 clean-photometry flag, the spec's "clean photometry flag" clause, applied
 here rather than downstream since it is a selection on 2MASS's own
 external population, not a SESNA measurement. `glon`/`glat` are fp_psc's
-native Galactic coordinates -- no frame conversion, so the derive step's
+native Galactic coordinates -- no frame conversion, so a derive step's
 `healpy.ang2pix(512, glon, glat, nest=True, lonlat=True)` lands on this
-project's own Galactic nside-512 grid directly.
+project's own Galactic nside-512 grid directly. `j_m`/`h_m`/`ph_qual` are
+carried verbatim alongside `k_m`, unfiltered here -- the query's `WHERE`
+is unchanged -- and selected on downstream.
+
+A file already on disk whose header lacks `j_m` predates this widened
+query and is refetched; a file whose header already carries it is
+skipped, as before.
 """
 
 import os
@@ -60,7 +70,7 @@ BOX_PAD_DEG = 0.1  # more than half an hpx512 pixel's ~6.9' diagonal
 #: full-box query timed out server-side -- is large enough for IRSA's
 #: synchronous query limit to reject or truncate it.
 BOX_STRIP_DEG = 1.0
-CSV_HEADER = "glon,glat,k_m"
+CSV_HEADER = "glon,glat,j_m,h_m,k_m,ph_qual"
 
 
 def _lb_bounding_box(config, region, pad_deg=BOX_PAD_DEG):
@@ -102,7 +112,7 @@ def _glon_clause(l0, l1):
 def strip_query(l0, l1, b0, b1):
     """The exact ADQL text for one (l0, l1, b0, b1) query box."""
     return (
-        "SELECT glon, glat, k_m FROM "
+        "SELECT glon, glat, j_m, h_m, k_m, ph_qual FROM "
         f"{TABLE} WHERE k_m IS NOT NULL AND k_m < {KS_HIST_LIMIT:.1f} "
         f"AND cc_flg = '{CLEAN_CC_FLAG}' "
         f"AND {_glon_clause(l0, l1)} AND glat BETWEEN {b0:.6f} AND {b1:.6f}"
@@ -142,12 +152,27 @@ def _strip_rows(config, region, l0, l1, b0, b1):
     return lines[1:]
 
 
+def _header_line(path):
+    with open(path, "r") as f:
+        return f.readline().strip()
+
+
+def _needs_refetch(dest_path):
+    """A file predates the widened query (SPEC_BMSTP_DRAFT.md 3.1) when
+    its own header lacks `j_m` -- the one column the old query never
+    carried. No stamp, no version: the file's own header is the only
+    thing consulted."""
+    return not os.path.exists(dest_path) or "j_m" not in _header_line(dest_path).split(",")
+
+
 def build(config, regions=None):
     """Writes `sky/download/twomass_counts/counts_twomass_hpx512__<Region>.csv`
     for each requested region (default: all thirty): one clean-photometry
     row query per Galactic-latitude strip of the region's box (see
     `region_strip_boxes`), concatenated under one header (see module
-    docstring for why this is per-source rows, not per-pixel counts)."""
+    docstring for why this is per-source rows, not per-pixel counts). A
+    file already present whose header carries `j_m` is skipped; one
+    lacking it (predating the widened query) is refetched."""
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
     dest_dir = f"{config.data_root}/sky/download/twomass_counts"
@@ -156,9 +181,11 @@ def build(config, regions=None):
         n_regions = len(regions)
         for i, region in enumerate(regions):
             dest_path = f"{dest_dir}/counts_twomass_hpx512__{region}.csv"
-            if os.path.exists(dest_path):
+            if not _needs_refetch(dest_path):
                 print(f"twomass_counts build: {dest_path} present, skipped")
             else:
+                if os.path.exists(dest_path):
+                    print(f"twomass_counts build: {region} header lacks j_m, refetching")
                 boxes = region_strip_boxes(config, region)
                 rows = []
                 for l0, l1, b0, b1 in boxes:
