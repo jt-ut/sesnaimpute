@@ -353,7 +353,7 @@ def build_region(config, region, atmosphere, st=None):
 
         raw_parts.append(dict(
             g_proxy=g_proxy, ks_mag=ks_mag, dist_pc=dist_pc,
-            k_g_diffuse=kg_diffuse, k_g_dense=kg_dense,
+            k_g_diffuse=kg_diffuse, k_g_dense=kg_dense, pointing_index=pointing_index,
         ))
         ret_parts.append(dict(
             dist_pc=dist_pc[keep], log_teff=log_teff[keep], log_g=logg[keep],
@@ -412,6 +412,10 @@ def write_region(path, region, result):
         # the atmosphere register.
         raw_group.create_dataset("K_G_DIFFUSE", data=raw["k_g_diffuse"].astype(np.float32))
         raw_group.create_dataset("K_G_DENSE", data=raw["k_g_dense"].astype(np.float32))
+        # each raw row's own pointing, the same per-row column the retained
+        # group carries (`population.anchor_tiles`: a pixel's predicted
+        # counts come from its nearest pointing's own raw stars only).
+        raw_group.create_dataset("POINTING_INDEX", data=raw["pointing_index"].astype(np.int16))
 
         f.attrs["GRANULE"] = "region"
         f.attrs["OMEGA_SIM_DEG2"] = float(result["area_deg2"])
