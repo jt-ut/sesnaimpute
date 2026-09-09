@@ -36,8 +36,8 @@ def _mass_outside_grid(config, region):
     grain and its mass-outside is not stored (spec section 8's GRID is
     the only P4 dataset), so it is recomputed here by the same two calls
     `bmstp.shapes.build_gal` makes -- `sample_gal.sample` (a deterministic
-    read of the counts law, no randomness) and `grid.bin` at the stored
-    `LOG10_B_ORIGIN` -- rather than adding a dataset to P4 for one number."""
+    read of the counts law, no randomness) and `grid.bin` on the common
+    grid -- rather than adding a dataset to P4 for one number."""
     out = {}
     p2 = config_module.product_path(config, "bmstp", "shape", "star", "tile", region=region)
     _require(p2, "sesnaimpute.bmstp.shapes")
@@ -50,10 +50,8 @@ def _mass_outside_grid(config, region):
         out["YSO"] = float(np.max(f["MASS_OUTSIDE_YSO"][:])) if f["MASS_OUTSIDE_YSO"].shape[0] else 0.0
     p4 = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
     _require(p4, "sesnaimpute.bmstp.shapes")
-    with h5py.File(p4, "r") as f:
-        origin = float(f.attrs["LOG10_B_ORIGIN"])
-    x, log10_b, w = sample_gal.sample(config)
-    _, mass_outside_gal = grid.bin(x, log10_b, w, origin, 0.0)
+    x, log10_f45, w = sample_gal.sample(config)
+    _, mass_outside_gal = grid.bin(x, log10_f45, w)
     out["GAL"] = float(mass_outside_gal)
     return out
 
