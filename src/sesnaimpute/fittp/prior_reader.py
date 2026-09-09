@@ -103,10 +103,12 @@ def load(config, region, cls):
 
     shape_src, dset = _SHAPE[cls]
     if shape_src == "star":
+        # STAR/AGB: the common axis (section 2), read straight off P2 --
+        # one origin, one width, shared with every other class.
         path = config_module.product_path(config, "bmstp", "shape", "star", "tile", region=region)
         with h5py.File(path, "r") as f:
             x_edges = f["LOG10_X_EDGES"][:]
-            b_edges = f["LOG10_B_EDGES"][:]
+            b_edges = f["LOG10_F45_EDGES"][:]
             grid_all = f[dset][:]
         grain = tile
     elif shape_src == "cloud":
@@ -114,31 +116,36 @@ def load(config, region, cls):
         with h5py.File(path, "r") as f:
             x_edges = f["LOG10_X_EDGES"][:]
             if cls == "YSO":
-                b_edges = f["LOG10_B_EDGES"][:]
+                # the common axis again -- P3's `GRID_YSO` is already on it.
+                b_edges = f["LOG10_F45_EDGES"][:]
                 grid_all = f["GRID_YSO"][:]
             else:
-                # H2S's grid, section 4.1 P3: the sightline's log10 x
-                # marginal of GRID_YSO times the region's knot-brightness
-                # Gaussian, formed here (not stored) on H2S's OWN
-                # brightness axis (`LOG10_B_ORIGIN_H2S`, section 2's H2S
-                # row) -- never the file's `LOG10_B_EDGES`, which is
-                # YSO's template-unit axis.
+                # H2S's grid, section 4.1 P3, section 5.6: the sightline's
+                # log10 x marginal of GRID_YSO times the region's
+                # knot-brightness Gaussian, formed here (not stored) on
+                # H2S's OWN axis -- 110 cells of 0.1 dex from origin
+                # `LOGSIG_MEAN - 3 LOGSIG_STD - 0.3`, private to this
+                # reader; the read point is `log10 B_hat + C_THETA[theta]`
+                # with `C_THETA = log10 Sigma_ref,theta` (P5), the
+                # template's implied line brightness -- exact against the
+                # common-axis statement (section 4.1, 5.6), never the
+                # file's `LOG10_F45_EDGES`, which is YSO's brightness axis.
                 x_marg = f["X_MARGINAL"][:].astype(np.float64)
                 logsig_mean = float(f.attrs["LOGSIG_MEAN"])
                 logsig_std = float(f.attrs["LOGSIG_STD"])
-                origin_h2s = float(f.attrs["LOG10_B_ORIGIN_H2S"])
-                b_edges = grid.log10_b_edges(origin_h2s)
+                origin_h2s = logsig_mean - 3.0 * logsig_std - 0.3
+                b_edges = origin_h2s + 0.1 * np.arange(111)
                 b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
                 z = (b_centers - logsig_mean) / logsig_std
                 b_pdf = np.exp(-0.5 * z * z)
                 b_pdf /= b_pdf.sum()
                 grid_all = (x_marg[:, :, None] * b_pdf[None, None, :]).astype(np.float32)
         grain = sightline
-    else:  # gal: one survey-wide grid, no grain axis
+    else:  # gal: one survey-wide grid, no grain axis, on the common axis too
         path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
         with h5py.File(path, "r") as f:
             x_edges = f["LOG10_X_EDGES"][:]
-            b_edges = f["LOG10_B_EDGES"][:]
+            b_edges = f["LOG10_F45_EDGES"][:]
             grid_all = f["GRID"][:][None, :, :]
         grain = np.zeros(a_col.shape[0], dtype=np.int64)
 
@@ -154,7 +161,8 @@ def load(config, region, cls):
     with h5py.File(weight_path, "r") as f:
         model_name = f["MODEL_NAME"][:]
         c_theta = f["C_THETA"][:]
-        b_centers_w = f["LOG10_B_CENTERS"][:]
+        # the factor tables' cell axis is the common one (P5, section 4.1).
+        b_centers_w = f["LOG10_F45_CENTERS"][:]
         n_factor = sum(1 for k in f.keys() if k.startswith("factor_"))
         factors = []
         for k in range(n_factor):
