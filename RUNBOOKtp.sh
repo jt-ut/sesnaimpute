@@ -74,6 +74,7 @@ PY sesnaimpute.sky.download.edenhofer2023.build
 # service serves no bytes for this DOI (10.1086/422843) -- acquire by hand
 # and place verbatim at sky/download/fazio2004/.
 PY sesnaimpute.sky.download.trilegal.build
+PY sesnaimpute.sky.download.trilegal.colour   # one query, Gaia+2MASS photometric system at Perseus's centre pointing -- TRILEGAL's own G-Ks colour relation for the STAR proxy (SPEC_BMSTP_DRAFT.md sec 5.1, W42)
 PY sesnaimpute.sky.download.h2_knot_surveys.build
 # --- catalog ---
 # catalog/ -- reads only SESNA: curated catalogues, survey depths, the
@@ -114,6 +115,7 @@ PY sesnaimpute.sky.derived.column   # the adopted column per source and sightlin
 PY sesnaimpute.sky.derived.profile
 PY sesnaimpute.sky.derived.swire_galaxies   # SWIRE galaxies after the adopted star-galaxy split, survey-wide (SPEC_BMSTP sec 3.2, 5.4)
 PY sesnaimpute.sky.derived.protostars   # HOPS + eHOPS pooled in one schema, report-only overlay for the protostar check (SPEC_BMSTP sec 5.5, sec 9)
+PY sesnaimpute.sky.derived.trilegal_colour   # median G-Ks per (log Teff, log g, [M/H]) cell from the one colour query, read by population.field_stars.G_PROXY (SPEC_BMSTP_DRAFT.md sec 5.1, W42)
 
 
 # --- population (the model-driven summaries the bmstp prior ingests; writes population/) ---
