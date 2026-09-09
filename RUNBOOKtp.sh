@@ -82,7 +82,6 @@ PY sesnaimpute.sky.download.h2_knot_surveys.build
 # sigma model.
 PY sesnaimpute.catalog.curated
 PY sesnaimpute.catalog.depths
-PY sesnaimpute.catalog.depth_grid   # median and marginalised 50 % limits + width per admitted hpx512 pixel, for the prior atlas (SPEC_BMSTP sec 3.3)
 PY sesnaimpute.catalog.coverage   # the atlas's coverage: fraction of each admitted hpx512 pixel with a measured IRAC detection, the catalogue's own footprint (SPEC_BMSTP sec 3.3, sec 8)
 # limits.py has no build: catalog.limits.limits(config, region) reads curated + depths.
 # Downloads keyed on SESNA positions run once the catalogue exists:
@@ -117,6 +116,7 @@ PY sesnaimpute.sky.derived.juvela_extinction   # NICEST star-colour A_K per sour
 PY sesnaimpute.sky.derived.twomass_column_scale   # report-only, read by nothing: each arm's map column against the reddening of Ks 11-13 stars per region; a magnitude-limited window loses reddened background stars behind dense pixels, so the number is not a calibration (briefs/reports/W35.md)
 PY sesnaimpute.sky.derived.column   # the adopted (gas) column per source and sightline, and the extinction column beside it -- the adopted column scaled to the Juvela & Montillaud 2016 NICEST map's own beam factor (its survey-wide disagreement check is not run: an (n_source) array over 8.7 M sources, the earlier design's)
 PY sesnaimpute.sky.derived.profile
+PY sesnaimpute.catalog.depth_grid   # after the extinction column and the coverage it reads: median and marginalised 50 % limits + width per admitted hpx512 pixel, for the prior atlas (SPEC_BMSTP sec 3.3)
 PY sesnaimpute.sky.derived.swire_galaxies   # SWIRE galaxies after the adopted star-galaxy split, survey-wide (SPEC_BMSTP sec 3.2, 5.4)
 PY sesnaimpute.sky.derived.protostars   # HOPS + eHOPS pooled in one schema, report-only overlay for the protostar check (SPEC_BMSTP sec 5.5, sec 9)
 PY sesnaimpute.sky.derived.trilegal_colour   # median G-Ks per (log Teff, log g, [M/H]) cell from the one colour query, read by population.field_stars.G_PROXY (SPEC_BMSTP_DRAFT.md sec 5.1)
