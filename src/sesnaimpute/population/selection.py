@@ -26,7 +26,7 @@ MIN_BANDS = 2
 #: `draine_rv3.1` is Weingartner & Draine (2001) / Draine (2003), R_V = 3.1.
 #: `chapman2009_dense` is the KMH94 R_V = 5.5 curve (`whitney.r550`) with
 #: its 1-30 um opacity replaced by a dense-cloud measurement -- Chapman
-#: et al. (2009, ApJ 690, 496), Table 3, the A_Ks > 1 rows, for [3.6]-[24];
+#: et al. (2009, ApJ 690, 496), Table 3, the 1 < A_Ks <= 2 row, for [3.6]-[24];
 #: J and H are the host curve's own value, the paper carrying no near-IR
 #: columns (see the law's own `.info`).
 LAW_DIFFUSE = "draine_rv3.1"
