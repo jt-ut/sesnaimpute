@@ -84,7 +84,7 @@ Owner ruling 2026-09-06. The survey-pooled weight (`survey_pooled_weights`,
 item 1: the ratio of observed to predicted counts summed over every
 region's own populated tiles, computed once over all thirty regions) is
 folded into `W_G`/`W_KS`/`W_REGION_G`/`W_REGION_KS` as the fallback for a
-bin no tile of this region measures, never written separately. W48: the
+bin no tile of this region measures, never written separately. The
 Ks pool sums each bin by its own (lower, upper) edge over exactly the
 regions that carry it (the union of the short 2MASS-only and long
 UKIDSS-reaching axes, W46), not by array position, so no region's Ks
@@ -141,7 +141,7 @@ _CLUSTER_NAMES = ["NAME", "TYPE", "GLON", "GLAT", "R50_DEG"]
 #: unbound moving groups ("m") are not clusters an anchor star avoids.
 _CLUSTER_TYPES_KEPT = ("o", "g")
 
-#: W13/W38 (coordinator's refit, 2026-09-09): the per-tile 2MASS
+#: The per-tile 2MASS
 #: completeness sigmoid's `m50` bounds. 17 is "complete" -- at the fixed
 #: scale below, p(14.3; 17, 0.102) = 1 - 3.2e-11, past 1 - 1e-11. 8 is a
 #: numerical guard only (a tile with no evidence at all pins `m50` at a
