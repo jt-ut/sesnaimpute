@@ -36,6 +36,16 @@ motivates: on every Herschel-covered sightline pixel, the Herschel value,
 the Planck value, and the 3-D map's own cumulative extinction at its
 edge (`profile.py`'s inner/outer/splice/measure chain, called before any
 rescaling), binned by quartile of the Herschel column and by region.
+
+`_build_one_extinction_region`/`build_extinction_sightline` write the
+second column, the one a star's light passes through (W49.md, "The
+rule"): the emission-based adopted column, source by source, scaled up
+in each nside-1024 cell (the reference map's own 3' beam) by the factor
+that cell's Juvela & Montillaud 2016 NICEST star-colour map (a whole-
+sightline 2MASS reddening measurement, `sky.derived.juvela_extinction`)
+exceeds it by, floored at 1 -- a star-colour map can run short of
+background stars and read low, but it cannot invent dust the emission
+map already shows.
 """
 
 import os
@@ -168,6 +178,148 @@ def _build_one_region(config, region, cal, field_zp=None):
         f.create_dataset("MAP_NAME", data=name_bytes)
         f.create_dataset("ZP_SIGMA_K", data=d["zp_sigma_k"].astype(np.float32))
     return region, d["n"], d["n_herschel"]
+
+
+def _load_juvela_source_view(config, region):
+    """W49a's per-source NICEST view: `A_K` (2MASS star-colour extinction,
+    the adopted law's own `A_J/A_K`) and each source's nside-1024 cell,
+    in the adopted source product's own row order."""
+    path = config_module.product_path(config, "sky/derived", "juvela", "extinction", "source", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"sky.derived.column.build: NICEST source view missing for region {region!r} at "
+            f"{path!r} -- run the sesnaimpute.sky.derived.juvela_extinction RUNBOOK line for it"
+        )
+    with h5py.File(path, "r") as f:
+        return np.asarray(f["A_K"][:], dtype=np.float64), np.asarray(f["HPX_PIX_1024"][:], dtype=np.int64)
+
+
+def _cell_factor(a_nicest, a_adopted, cell_pix):
+    """`f = max(1, mean A_K(NICEST) / mean A_COL_K)` in each nside-1024
+    cell, broadcast to every source of the cell (W49.md, "The rule"): the
+    star map sets the beam-scale factor, the emission map keeps the
+    structure inside the beam."""
+    uniq, inv, counts = np.unique(cell_pix, return_inverse=True, return_counts=True)
+    mean_nicest = np.bincount(inv, weights=a_nicest, minlength=uniq.size) / counts
+    mean_adopted = np.bincount(inv, weights=a_adopted, minlength=uniq.size) / counts
+    cell_f = np.maximum(1.0, mean_nicest / mean_adopted)
+    return cell_f[inv]
+
+
+def _build_one_extinction_region(config, region, cal, field_zp=None):
+    """Writes this region's extinction source product: the adopted column
+    (re-merged from the same two arms `merge_region` reads) times its
+    source's cell factor, plus `F_EXTINCTION` itself."""
+    d = merge_region(config, region, cal, field_zp=field_zp)
+    a_nicest, cell_pix = _load_juvela_source_view(config, region)
+    if a_nicest.size != d["n"]:
+        raise ValueError(f"sky.derived.column.build: {region!r} NICEST view has {a_nicest.size} "
+                         f"source(s), the adopted column has {d['n']}")
+    factor = _cell_factor(a_nicest, d["a_col"], cell_pix)
+
+    out_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "source", region=region)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    name_bytes = np.array([(x if isinstance(x, bytes) else str(x).encode("utf-8")) for x in d["map_names"]])
+    with h5py.File(out_path, "w") as f:
+        f.attrs["GRANULE"] = "source"
+        f.create_dataset("A_COL_K", data=(d["a_col"] * factor).astype(np.float32))
+        f.create_dataset("A_COL_SIG_K", data=(d["sig_col"] * factor).astype(np.float32))
+        f.create_dataset("A_COL_PROVENANCE", data=d["prov"])
+        f.create_dataset("A_COL_FWHM_ARCSEC", data=d["fwhm"])
+        f.create_dataset("HERSCHEL_MAP_ID", data=d["map_id"])
+        f.create_dataset("MAP_NAME", data=name_bytes)
+        f.create_dataset("ZP_SIGMA_K", data=d["zp_sigma_k"].astype(np.float32))
+        f.create_dataset("F_EXTINCTION", data=factor.astype(np.float32))
+    return region, d["n"], float(np.median(factor))
+
+
+def _extinction_row_one_region(config, region, region_code, adopted_prov_pix, adopted_prov):
+    """One region's extinction sightline row: the sightline mean of its
+    sources' per-source extinction column, sigma and factor (W49.md);
+    `PROVENANCE`/`REGION_CODE` carried from the adopted sightline column
+    product, whose Herschel/Planck choice this column does not change."""
+    ext_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "source", region=region)
+    if not os.path.exists(ext_path):
+        raise FileNotFoundError(
+            f"sky.derived.column.build_extinction_sightline: extinction source product missing for region "
+            f"{region!r} at {ext_path!r} -- run the sesnaimpute.sky.derived.column RUNBOOK line for it"
+        )
+    with h5py.File(ext_path, "r") as f:
+        a_ext = np.asarray(f["A_COL_K"][:], dtype=np.float64)
+        sig_ext = np.asarray(f["A_COL_SIG_K"][:], dtype=np.float64)
+        factor = np.asarray(f["F_EXTINCTION"][:], dtype=np.float64)
+    _, cell_pix = _load_juvela_source_view(config, region)
+    pix256 = cell_pix >> 4  # nside 1024 -> 256: two NESTED quad-tree levels
+
+    admitted_pix, _ = profile_module._admitted_sightlines(config, region)
+    uniq, inv, counts = np.unique(pix256, return_inverse=True, return_counts=True)
+    if uniq.size != admitted_pix.size or np.any(uniq != admitted_pix):
+        raise ValueError(f"sky.derived.column.build_extinction_sightline: {region!r} source cells do "
+                         "not tile its admitted sightlines one-to-one")
+    mean_a = np.bincount(inv, weights=a_ext, minlength=uniq.size) / counts
+    mean_sig = np.bincount(inv, weights=sig_ext, minlength=uniq.size) / counts
+    mean_f = np.bincount(inv, weights=factor, minlength=uniq.size) / counts
+
+    loc = np.searchsorted(adopted_prov_pix, admitted_pix)
+    capped = np.minimum(loc, adopted_prov_pix.size - 1) if adopted_prov_pix.size else loc
+    ok = adopted_prov_pix.size and np.all(adopted_prov_pix[capped] == admitted_pix)
+    if not ok:
+        raise ValueError(f"sky.derived.column.build_extinction_sightline: {region!r} missing from the "
+                         "adopted sightline column product")
+
+    return dict(pix=admitted_pix, region_code=np.full(admitted_pix.size, region_code, dtype=np.int16),
+               a_k=mean_a, sig_a_k=mean_sig, f=mean_f, prov=adopted_prov[capped])
+
+
+def build_extinction_sightline(config, stage=None):
+    """Writes the extinction sightline column (W49.md, "The rule"): one
+    row per admitted nside-256 pixel of every region, each the sightline
+    mean of its sources' per-source extinction column -- the quantity a
+    star's light passes through, distinct from the gas column
+    `build_sightline` writes. Survey-wide regardless of any `regions`
+    list a caller passed to `build`, mirroring `build_sightline`."""
+    regions = [r.name for r in regions_module.REGIONS]
+    codes = _region_codes(config, regions)
+    adopted_path = config_module.product_path(config, "sky/derived", "adopted", "column", "sightline")
+    with h5py.File(adopted_path, "r") as f:
+        prov_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
+        prov = np.asarray(f["PROVENANCE"][:])
+    order = np.argsort(prov_pix)
+    prov_pix, prov = prov_pix[order], prov[order]
+
+    n_regions = len(regions)
+    chunk = max(1, config.n_jobs)
+    rows = []
+    for start in range(0, n_regions, chunk):
+        part = regions[start:start + chunk]
+        rows.extend(Parallel(n_jobs=config.n_jobs)(
+            delayed(_extinction_row_one_region)(config, region, codes[region], prov_pix, prov)
+            for region in part))
+        if stage is not None:
+            stage.tick(min(start + chunk, n_regions), n_regions, "regions")
+
+    pix = np.concatenate([r["pix"] for r in rows])
+    region_code = np.concatenate([r["region_code"] for r in rows])
+    a_k = np.concatenate([r["a_k"] for r in rows])
+    sig = np.concatenate([r["sig_a_k"] for r in rows])
+    f = np.concatenate([r["f"] for r in rows])
+    prov_out = np.concatenate([r["prov"] for r in rows])
+
+    out_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "sightline")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with h5py.File(out_path, "w") as fh:
+        fh.attrs["GRANULE"] = "sightline"
+        fh.create_dataset("HPX_PIX_256", data=pix)
+        fh.create_dataset("REGION_CODE", data=region_code)
+        fh.create_dataset("A_K", data=a_k.astype(np.float32))
+        fh.create_dataset("SIGMA_A_K", data=sig.astype(np.float32))
+        fh.create_dataset("F_EXTINCTION", data=f.astype(np.float32))
+        fh.create_dataset("PROVENANCE", data=prov_out)
+
+    n = int(pix.size)
+    print("column.build_extinction_sightline: %d sightline rows, %d regions, median f=%.3f"
+          % (n, len(regions), float(np.median(f)) if n else float("nan")), flush=True)
+    return out_path
 
 
 def _region_codes(config, regions):
@@ -467,10 +619,26 @@ def build(config, regions=None):
         total_herschel = sum(r[2] for r in results)
         st.done(None, regions=n_regions, sources=total_n, herschel_sources=total_herschel)
 
+    with progress_module.Stage("sky.derived.column.extinction") as st:
+        n_done_ext = [0]
+
+        def _one_ext(region):
+            r = _build_one_extinction_region(config, region, cal, field_zp=field_zp)
+            n_done_ext[0] += 1
+            st.tick(n_done_ext[0], n_regions, "regions")
+            return r
+
+        ext_results = Parallel(n_jobs=config.n_jobs)(delayed(_one_ext)(region) for region in regions)
+        st.done(None, regions=n_regions, sources=sum(r[1] for r in ext_results),
+                median_factor=float(np.median([r[2] for r in ext_results])) if ext_results else float("nan"))
+
     with progress_module.Stage("sky.derived.column.sightline") as st:
         out_path = build_sightline(config, stage=st)
         st.done(out_path)
 
+    with progress_module.Stage("sky.derived.column.extinction_sightline") as st:
+        out_path = build_extinction_sightline(config, stage=st)
+        st.done(out_path)
 
 
 if __name__ == "__main__":
