@@ -107,6 +107,7 @@ PY sesnaimpute.sky.derived.herschel_column
 PY sesnaimpute.sky.derived.subbeam
 PY sesnaimpute.sky.derived.planck_column
 PY sesnaimpute.sky.derived.planck_source_column
+PY sesnaimpute.sky.derived.twomass_column_scale   # each arm's column scale per region from the reddening of its Ks 11-13 background stars (SPEC_BMSTP sec 3.1)
 PY sesnaimpute.sky.derived.column   # the adopted column per source and sightline (its survey-wide disagreement check is not run: an (n_source) array over 8.7 M sources, the earlier design's)
 PY sesnaimpute.sky.derived.profile
 PY sesnaimpute.sky.derived.swire_galaxies   # SWIRE galaxies after the adopted star-galaxy split, survey-wide (SPEC_BMSTP sec 3.2, 5.4)
