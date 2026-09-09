@@ -2,17 +2,21 @@
 5.1-5.6; IMPLEMENTATION_BMSTP_DRAFT.md sec 1.2 P5, sec 3 row 1.7):
 `pi_C(theta, B) = p_C(shape of theta | B) / rho_C(theta)`, one factor per
 population statement over a library's own templates, stored per band cell
-on the common brightness axis so the fitter's read (sec 4.2) is a per-
-template gather along one row.
+on the common brightness axis `bmstp.grid.LOG10_F45_EDGES` (110 cells,
+W24/W24b) so the fitter's read (sec 4.2) is a per-template gather along
+one row.
 
 Each factor function returns `(W, C_F, D_F, normalised, source)`: `W`
-`(n_model, 120)` float32 on `LOG10_B_CENTERS`; `C_F` `(n_model,)` f8, the
+`(n_model, 110)` float32 on `LOG10_F45_CENTERS`; `C_F` `(n_model,)` f8, the
 factor's own per-template offset; `D_F` the density-table column name a
 per-source offset comes from at read time, or `""`; `normalised` True if
 the factor sums to 1 over templates at every cell (a shape statement),
 False if it is a probability carried as-is (`contrast`). `rho_C(theta)` is
 the register's own `RHO_KDE1` (`fit.terms.library_weights`'s own column,
-sec 3.5: "supplied with the library").
+sec 3.5: "supplied with the library"). `C_THETA[theta]` is the template's
+offset onto the read axis, `log10 f_ref,4.5,theta` (floored at the
+register's own `FLOOR_LINEAR` before the log, sec 4.1, W24) for every
+library except h2shock, whose own line-brightness offset is unchanged.
 
 Survey products (galz, yso, h2shock) are built once; region products
 (sps, agb, pahc) once per region named on the command line. PAHC is
@@ -32,7 +36,7 @@ from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
-from sesnaimpute.bmstp import grid
+from sesnaimpute.bmstp import grid, sample_star
 from sesnaimpute.build import run
 from sesnaimpute.population import star_population
 
@@ -62,9 +66,6 @@ PROB_CAP = 1.0 - FACTOR_FLOOR
 #: chemistries' Riebel tau distributions.
 F_C = star_population.F_C
 
-_LOG10_B_ORIGIN_YSO = grid.LOG10_B_ORIGIN_TEMPLATE
-_LOG10_B_ORIGIN_STAR = grid.LOG10_B_ORIGIN_TEMPLATE
-
 #: The five YSO sub-grid directories under `sed_models/yso/` (different
 #: geometries, different parameter sets): read only to join each
 #: sub-grid's own `parameters.fits` (inclination) to the pooled
@@ -81,8 +82,11 @@ _REGISTER_FILE = {key: "%s_register.hdf5" % key for key in definitions.CLASS_REG
 
 def _read_register(config, cls):
     """The register's `MODEL_NAME`, `RHO_KDE1` (`rho_C(theta)`, sec 3.5),
-    `SUBCLASS` (report-only diagnostic label, sec 5.5's check) and
-    reference fluxes in every band, in the register's own row order.
+    `SUBCLASS` (report-only diagnostic label, sec 5.5's check), `FLOOR_LINEAR`
+    (the register's own raw-flux floor, sec 3.5's FREFRAW convention: a
+    reference flux can be exactly zero at an edge-on/embedded geometry and
+    must be floored before a log, `briefs/reports/W24.md`) and reference
+    fluxes in every band, in the register's own row order.
     """
     path = f"{config.inputs['sed_models']}/registers/{_REGISTER_FILE[cls]}"
     with h5py.File(path, "r") as f:
@@ -90,14 +94,35 @@ def _read_register(config, cls):
         names = np.char.decode(m["MODEL_NAME"][:].astype("S"), "utf-8")
         rho = m["RHO_KDE1"][:].astype(np.float64)
         subclass = np.char.decode(m["SUBCLASS"][:].astype("S"), "utf-8")
+        floor_linear = m["FLOOR_LINEAR"][:].astype(np.float64)
         f_ref = {b: m[f"F_REF_{b}"][:].astype(np.float64)
                  for b in ("I1", "I2", "I3", "I4", "J", "H", "Ks", "M1")}
-    return dict(names=names, rho=rho, f_ref=f_ref, subclass=subclass)
+    return dict(names=names, rho=rho, f_ref=f_ref, subclass=subclass, floor_linear=floor_linear)
 
 
-def _log10_b_centers(origin):
-    edges = grid.log10_b_edges(origin)
+def _log10_f45_centers():
+    """`LOG10_F45_CENTERS` (110), the one common brightness axis every
+    library's `C_THETA` and factor rows are stored on (sec 2, sec 4.1)."""
+    edges = grid.LOG10_F45_EDGES
     return 0.5 * (edges[:-1] + edges[1:])
+
+
+def _c_theta(reg):
+    """`C_THETA[theta] = log10 f_ref,4.5,theta` (sec 4.1), the register's
+    own `F_REF_I2` floored at `FLOOR_LINEAR` before the log (sec 3.5,
+    W24): every library but h2shock, whose own line-brightness offset is
+    unchanged."""
+    return np.log10(np.maximum(reg["f_ref"]["I2"], reg["floor_linear"]))
+
+
+def _c_f_contrast(reg):
+    """`C_F[theta] = log10 f_ref,8,theta - log10 f_ref,4.5,theta` (sec
+    5.3, REWRITTEN for the common `F_4.5` axis, W25): with `B = F_4.5 /
+    f_ref,4.5,theta`, `-log10 q = log10 B + log10 f_ref,8,theta -
+    log10 F_lim,8(s) = log10 F_4.5 + C_F[theta] + D_PAHC[s]`. Both
+    reference fluxes floored at the register's own `FLOOR_LINEAR`."""
+    f_ref_i4 = np.log10(np.maximum(reg["f_ref"]["I4"], reg["floor_linear"]))
+    return f_ref_i4 - _c_theta(reg)
 
 
 def _normalise_over_theta(w):
@@ -143,10 +168,10 @@ def _floor_probability(p):
 # P5 writer
 # ---------------------------------------------------------------------------
 
-def _write_library(config, lib, granule, names, c_theta, log10_b_centers, factors,
+def _write_library(config, lib, granule, names, c_theta, log10_f45_centers, factors,
                     region=None, extra_attrs=None):
     """One `bmstp/weights/<lib>_weights_<granule>[__R].hdf5` file (P5):
-    `MODEL_NAME`, `C_THETA`, `LOG10_B_CENTERS`, one `factor_<k>/` group per
+    `MODEL_NAME`, `C_THETA`, `LOG10_F45_CENTERS`, one `factor_<k>/` group per
     entry of `factors` (`name -> (W, C_F, D_F, normalised, source)`)."""
     path = config_module.product_path(config, "bmstp", "weights", lib, granule, region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -156,7 +181,7 @@ def _write_library(config, lib, granule, names, c_theta, log10_b_centers, factor
             f.attrs[k] = v
         f.create_dataset("MODEL_NAME", data=np.char.encode(names, "utf-8"))
         f.create_dataset("C_THETA", data=c_theta.astype(np.float64))
-        f.create_dataset("LOG10_B_CENTERS", data=log10_b_centers.astype(np.float64))
+        f.create_dataset("LOG10_F45_CENTERS", data=log10_f45_centers.astype(np.float64))
         for i, (name, (w, c_f, d_f, normalised, source)) in enumerate(factors.items()):
             grp = f.create_group(f"factor_{i}")
             grp.create_dataset("W", data=w.astype(np.float32))
@@ -193,7 +218,7 @@ def _p_at_neg_log10_q(neg_log10_q_query, centers, p_q):
 
 
 def _pahc_contrast_row(config, n_b_centers):
-    """The one row `P(-log10 q = LOG10_B_CENTERS[k])`, the same for every
+    """The one row `P(-log10 q = LOG10_F45_CENTERS[k])`, the same for every
     template (spec sec 5.3: template enters only through `C_F`)."""
     centers, p_q = _read_pahc_curve(config)
     return _p_at_neg_log10_q(n_b_centers, centers, p_q)
@@ -257,14 +282,16 @@ def build_yso(config):
                 f"template_weights.yso: inclination join n_matched={n_matched_incl} "
                 f"!= n_register={n_model}")
 
-        log10_b_centers = _log10_b_centers(_LOG10_B_ORIGIN_YSO)
-        n_b = log10_b_centers.size
+        log10_f45_centers = _log10_f45_centers()
+        n_b = log10_f45_centers.size
 
-        # imf and inclination share the plain argument log10 B (no C_F,
-        # no D_F): one stored factor, divided once by rho as the
-        # register stores it (spec sec 1.4: no sub-grid subdivides the
-        # library's own density here -- the subclass posterior is the
-        # only place the YSO set is subdivided, sec 5.5).
+        # imf and inclination are brightness-independent (sec 1.4's
+        # "population is survey-wide": the joint (F_4.5, theta) lives in
+        # the shape's own p(F_4.5), sec 5.5, not repeated here): one
+        # stored factor, divided once by rho as the register stores it
+        # (spec sec 1.4: no sub-grid subdivides the library's own density
+        # here -- the subclass posterior is the only place the YSO set is
+        # subdivided, sec 5.5).
         psi = _chabrier_dn_dlogm(m_star)         # imf: dN/dlog10 M, Chabrier 2003
         incl_raw = np.sin(np.radians(incl_deg))  # uniform in cos i (spec sec 5.5)
         shape_raw = psi * incl_raw / rho
@@ -277,13 +304,14 @@ def build_yso(config):
                             "population.yso_mass Chabrier 2003; yso sub-grid "
                             "parameters.fits inclination"),
         }
-        c_theta = np.zeros(n_model)
-        path = _write_library(config, "yso", "survey", names, c_theta, log10_b_centers, factors,
+        c_theta = _c_theta(reg)
+        path = _write_library(config, "yso", "survey", names, c_theta, log10_f45_centers, factors,
                                extra_attrs={"COMPONENTS": "imf,inclination"})
         col_sum = population_w.sum(axis=0)
         print(f"template_weights.yso: factor=population max|colsum-1|="
-              f"{float(np.max(np.abs(col_sum - 1.0))):.3g} floored_fraction={frac_zero:.4f}",
-              flush=True)
+              f"{float(np.max(np.abs(col_sum - 1.0))):.3g} floored_fraction={frac_zero:.4f} "
+              f"C_THETA range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
+              f"max={c_theta.max():.4f}", flush=True)
 
         # report only (spec sec 5.5's check): the share of the built
         # weight held by each register SUBCLASS value, a diagnostic of
@@ -302,17 +330,6 @@ def build_yso(config):
 # ---------------------------------------------------------------------------
 
 _SQRT_2PI = np.sqrt(2.0 * np.pi)
-
-
-def _gal_b_origin(config):
-    shape_path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
-    if os.path.isfile(shape_path):
-        with h5py.File(shape_path, "r") as f:
-            return float(f.attrs["LOG10_B_ORIGIN"]), "bmstp/shape/gal_shape_survey.hdf5"
-    counts_path = config_module.product_path(config, "population", "gal", "counts", "survey")
-    with h5py.File(counts_path, "r") as f:
-        origin = float(f["LOG10_S_GRID"][0])
-    return origin, "population/gal/counts_gal_survey.hdf5 LOG10_S_GRID[0] (gal_shape_survey absent)"
 
 
 def _node_kde(colour_theta_f32, c_gal, s_gal):
@@ -358,7 +375,7 @@ def build_galz(config):
         n_model = names.size
         colour_theta = np.log10(reg["f_ref"]["I1"]) - np.log10(reg["f_ref"]["I2"])
         colour_theta_f32 = colour_theta.astype(np.float32)
-        c_theta = np.log10(reg["f_ref"]["I2"])
+        c_theta = _c_theta(reg)
 
         swire_path = config_module.product_path(config, "sky/derived", "swire", "galaxies", "survey")
         with h5py.File(swire_path, "r") as f:
@@ -369,9 +386,11 @@ def build_galz(config):
         n_node = log10_s_grid.size
         finite = np.isfinite(colour) & np.isfinite(sigma) & (sigma > 0)
 
-        origin, origin_source = _gal_b_origin(config)
-        log10_b_centers = _log10_b_centers(origin)
-        n_b = log10_b_centers.size
+        # the common F_4.5 axis IS the absolute galaxy flux S (sec 5.4
+        # "Marks"): no per-shape origin lookup is needed any more (W25),
+        # unlike the pre-4.5B gray-factor axis this replaced.
+        log10_f45_centers = _log10_f45_centers()
+        n_b = log10_f45_centers.size
 
         # one (n_model x galaxy-batch) KDE block per node (sec 5.4); the
         # 61 nodes are independent, so they run on threads, worker count
@@ -393,14 +412,13 @@ def build_galz(config):
         node_w = _normalise_over_theta((node_density / rho[None, :]).T).T  # (n_node, n_model)
 
         # interpolate the per-node, per-template normalised density onto
-        # log10_b_centers (already origin + 0.1(k+1/2), sec 2 -- no
-        # second origin add), vectorised over every template at once: a
-        # linear combination of the two bracketing nodes' own
-        # theta-normalised vectors, clamped at the node edges (which
-        # keeps the per-cell sum at 1, sec 5.4's "normalised over theta
-        # at each S": a convex combination of two vectors that each
-        # already sum to 1 sums to 1 too).
-        s_query = np.clip(log10_b_centers, log10_s_grid[0], log10_s_grid[-1])
+        # log10_f45_centers (the common, absolute-flux axis, sec 2),
+        # vectorised over every template at once: a linear combination of
+        # the two bracketing nodes' own theta-normalised vectors, clamped
+        # at the node edges (which keeps the per-cell sum at 1, sec 5.4's
+        # "normalised over theta at each S": a convex combination of two
+        # vectors that each already sum to 1 sums to 1 too).
+        s_query = np.clip(log10_f45_centers, log10_s_grid[0], log10_s_grid[-1])
         hi = np.clip(np.searchsorted(log10_s_grid, s_query), 1, n_node - 1)
         lo = hi - 1
         frac = (s_query - log10_s_grid[lo]) / (log10_s_grid[hi] - log10_s_grid[lo])
@@ -421,11 +439,13 @@ def build_galz(config):
             "colour": (w, c_theta, "", True,
                        "sky/derived/swire/galaxies_swire_survey.hdf5 COLOUR_I1I2 KDE"),
         }
-        path = _write_library(config, "galz", "survey", names, c_theta, log10_b_centers, factors)
+        path = _write_library(config, "galz", "survey", names, c_theta, log10_f45_centers, factors)
         col_sum = w.sum(axis=0)
-        print(f"template_weights.galz: origin={origin:.4f} ({origin_source}); "
-              f"max|colsum-1|={float(np.max(np.abs(col_sum - 1.0))):.3g}; "
+        print(f"template_weights.galz: max|colsum-1|="
+              f"{float(np.max(np.abs(col_sum - 1.0))):.3g}; "
               f"floored_fraction={frac_zero:.4f}; varying cells={varying_range[0]}-{varying_range[1]}; "
+              f"C_THETA range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
+              f"max={c_theta.max():.4f}; "
               "beyond-3-bandwidths fraction per node: "
               + ",".join(f"{v:.3f}" for v in beyond3_fraction), flush=True)
         st.done(path, n_model=n_model, n_node=n_node,
@@ -438,50 +458,69 @@ def build_galz(config):
 # ---------------------------------------------------------------------------
 
 def _region_star_stars(config, region):
-    """`(template_index, weight, log10_b)` over every retained field star
-    of `region`'s tiles (`population.star_population`'s `W_STAR`, `LOG10_B`
-    per tile; `population.field_stars`'s `TEMPLATE_INDEX` per retained
-    star, joined by `STAR_INDEX`)."""
+    """`(template_index, weight, log10_f45, log10_b_old)` over every
+    retained field star of `region`'s tiles: `population.field_stars`'s
+    own `TEMPLATE_INDEX` per retained star, joined by each tile's
+    `STAR_INDEX`, paired with the SAME `(F_4.5, w)` per star
+    `sample_star.sample_star` reads (brief W25: import it, never
+    re-derive the flux). `log10_b_old` is the tile's own pre-4.5B
+    `LOG10_B` mark (untouched by this brief, W24), carried ONLY for the
+    acceptance check's own reference rebinning below -- never used in
+    the weight itself."""
     field_path = config_module.product_path(
         config, "population", "trilegal", "field-stars", "region", region=region)
-    tile_path = config_module.product_path(
-        config, "population", "star", "population", "tile", region=region)
     with h5py.File(field_path, "r") as f:
         template_index = f["TEMPLATE_INDEX"][:]
-    template_idx_all, weight_all, log10_b_all = [], [], []
+    tile_path = config_module.product_path(
+        config, "population", "star", "population", "tile", region=region)
+    template_idx_all, weight_all, log10_f45_all, log10_b_old_all = [], [], [], []
     with h5py.File(tile_path, "r") as f:
-        for key in f:
-            if not key.startswith("tile_"):
-                continue
-            grp = f[key]
-            si = grp["STAR_INDEX"][:]
-            template_idx_all.append(template_index[si])
-            weight_all.append(grp["W_STAR"][:].astype(np.float64))
-            log10_b_all.append(grp["LOG10_B"][:].astype(np.float64))
+        tile_ids = sorted(int(k.split("_")[1]) for k in f.keys() if k.startswith("tile_"))
+        for tile_id in tile_ids:
+            grp = f[f"tile_{tile_id}"]
+            star_index = grp["STAR_INDEX"][()].astype(np.int64)
+            template_idx_all.append(template_index[star_index])
+            log10_b_old_all.append(grp["LOG10_B"][()].astype(np.float64))
+            _x, log10_f45, w = sample_star.sample_star(config, region, tile_id)
+            weight_all.append(w)
+            log10_f45_all.append(log10_f45)
     return (np.concatenate(template_idx_all), np.concatenate(weight_all),
-            np.concatenate(log10_b_all))
+            np.concatenate(log10_f45_all), np.concatenate(log10_b_old_all))
 
 
-def _weighted_type_histogram(template_idx, weight, log10_b, n_model, origin):
-    edges = grid.log10_b_edges(origin)
-    idx_b = np.clip(np.digitize(log10_b, edges) - 1, 0, edges.size - 2)
+def _weighted_type_histogram(template_idx, weight, mark, edges, n_model):
+    """The weighted histogram of matched atmosphere template per cell of
+    `edges` (sec 5.1); a generic weighted-histogram-by-edges step so the
+    same code bins both the new `log10 F_4.5` mark and the acceptance
+    check's own pre-4.5B `log10_b_old` mark."""
+    idx_b = np.clip(np.digitize(mark, edges) - 1, 0, edges.size - 2)
     h = np.zeros((n_model, edges.size - 1), dtype=np.float64)
     np.add.at(h, (template_idx, idx_b), weight)
     return h
 
 
 def _sps_raw_type_histogram(config, region):
-    """`(names, rho, h, weight)`: the sps register's own `MODEL_NAME`/
-    `RHO_KDE1` and the region's raw, weighted type histogram (the
-    population count per sps template per brightness cell, BEFORE the
-    `1/rho` division and the per-cell normalisation, spec sec 5.1) --
-    shared by `build_sps` (which normalises it) and `build_pahc` (which
-    reads it at each PAHC template's matched sps row, owner ruling)."""
+    """`(names, rho, h, weight, h_old)`: the sps register's own
+    `MODEL_NAME`/`RHO_KDE1`, the region's raw, weighted type histogram on
+    the common `LOG10_F45_EDGES` (the population count per sps template
+    per brightness cell, BEFORE the `1/rho` division and the per-cell
+    normalisation, spec sec 5.1) -- shared by `build_sps` (which
+    normalises it) and `build_pahc` (which reads it at each PAHC
+    template's matched sps row, owner ruling) -- and `h_old`, the SAME
+    (template, weight) pairs rebinned on the pre-4.5B `LOG10_B` mark and
+    its own edges (`grid`'s legacy `LOG10_B_ORIGIN_TEMPLATE`/
+    `log10_b_edges`, kept for exactly this comparison, W24): the
+    acceptance check's own reference, spec sec 9 ("the same stars,
+    rebinned") -- `h.sum(axis=1)` is the total weighted star count
+    matched to each template, which a rebinning by a different mark
+    cannot change except by whatever a grid's own edges drop."""
     reg = _read_register(config, "sps")
     names, rho = reg["names"], reg["rho"]
-    template_idx, weight, log10_b = _region_star_stars(config, region)
-    h = _weighted_type_histogram(template_idx, weight, log10_b, names.size, _LOG10_B_ORIGIN_STAR)
-    return names, rho, h, weight
+    template_idx, weight, log10_f45, log10_b_old = _region_star_stars(config, region)
+    h = _weighted_type_histogram(template_idx, weight, log10_f45, grid.LOG10_F45_EDGES, names.size)
+    old_edges = grid.log10_b_edges(grid.LOG10_B_ORIGIN_TEMPLATE)
+    h_old = _weighted_type_histogram(template_idx, weight, log10_b_old, old_edges, names.size)
+    return names, rho, h, weight, h_old
 
 
 def build_sps(config, region):
@@ -489,25 +528,36 @@ def build_sps(config, region):
         reg = _read_register(config, "sps")
         names, rho = reg["names"], reg["rho"]
         n_model = names.size
-        log10_b_centers = _log10_b_centers(_LOG10_B_ORIGIN_STAR)
+        log10_f45_centers = _log10_f45_centers()
 
-        _names_check, _rho_check, h, weight = _sps_raw_type_histogram(config, region)
+        _names_check, _rho_check, h, weight, h_old = _sps_raw_type_histogram(config, region)
         type_w = _normalise_over_theta(h / rho[:, None])
         type_w, frac_zero_type = _floor_normalised(type_w)
 
-        n_b_row = _pahc_contrast_row(config, log10_b_centers)
+        # acceptance (brief W25, spec sec 9): "the sps type factor's
+        # marginal over cells equals the current product's marginal over
+        # its old cells" -- the raw (pre-rho, pre-normalisation) matched-
+        # template histogram's marginal over cells, per template, is the
+        # total weighted star count that template holds; the SAME
+        # (template, weight) pairs rebinned by the pre-4.5B LOG10_B mark
+        # (h_old) must give the same total, up to whatever either grid's
+        # own edges drop.
+        marginal_dev = float(np.max(np.abs(h.sum(axis=1) - h_old.sum(axis=1))))
+
+        n_b_row = _pahc_contrast_row(config, log10_f45_centers)
         unc_raw = 1.0 - np.repeat(n_b_row[None, :], n_model, axis=0)  # 1 - P(q), sec 5.1
         unc_raw, frac_zero_unc = _floor_probability(unc_raw)
-        c_f_unc = np.log10(reg["f_ref"]["I4"])  # the sps template's own 8um photosphere
+        c_f_unc = _c_f_contrast(reg)  # log10 f_ref,8,theta - log10 f_ref,4.5,theta
 
         factors = {
             "type": (type_w, np.zeros(n_model), "", True,
-                     f"population.star_population {region} W_STAR/LOG10_B"),
+                     f"population.star_population {region} W_STAR, "
+                     "sample_star.sample_star F_4.5"),
             "uncontaminated": (unc_raw, c_f_unc, "D_PAHC", False,
                                 "population.pahc.curve_pahc_survey P_Q (1 - P(q))"),
         }
-        c_theta = np.zeros(n_model)
-        path = _write_library(config, "sps", "region", names, c_theta, log10_b_centers, factors,
+        c_theta = _c_theta(reg)
+        path = _write_library(config, "sps", "region", names, c_theta, log10_f45_centers, factors,
                                region=region)
         retained_weighted = float(weight.sum())
         histogram_weighted = float(h.sum())
@@ -518,10 +568,14 @@ def build_sps(config, region):
               f"max|colsum-1|={float(np.max(np.abs(col_sum - 1.0))):.3g} "
               f"floored_fraction type={frac_zero_type:.4f} uncontaminated={frac_zero_unc:.4f}; "
               f"P(q) at axis ends={float(n_b_row[0]):.4f}/{float(n_b_row[-1]):.4f} "
-              f"vs curve end bins={float(curve_p_q[0]):.4f}/{float(curve_p_q[-1]):.4f}",
+              f"vs curve end bins={float(curve_p_q[0]):.4f}/{float(curve_p_q[-1]):.4f}; "
+              f"type histogram marginal-over-cells max abs dev, new axis vs pre-4.5B "
+              f"LOG10_B axis (same stars, rebinned)={marginal_dev:.3g}; "
+              f"C_THETA range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
+              f"max={c_theta.max():.4f}",
               flush=True)
         st.done(path, n_model=n_model, n_star=weight.size,
-                 retained_weighted=retained_weighted)
+                 retained_weighted=retained_weighted, marginal_dev=marginal_dev)
 
 
 # ---------------------------------------------------------------------------
@@ -559,8 +613,8 @@ def build_agb(config, region):
         p_c = np.interp(log10_tau_theta, centers, h_c, left=0.0, right=0.0)
         p_mix = np.where(chem == "O", (1.0 - F_C) * p_o, F_C * p_c)
 
-        log10_b_centers = _log10_b_centers(_LOG10_B_ORIGIN_STAR)
-        n_b = log10_b_centers.size
+        log10_f45_centers = _log10_f45_centers()
+        n_b = log10_f45_centers.size
         tau_raw = p_mix / rho
         tau_w = _normalise_over_theta(_broadcast(tau_raw, n_b))
         tau_w, frac_zero = _floor_normalised(tau_w)
@@ -569,13 +623,15 @@ def build_agb(config, region):
             "tau": (tau_w, np.zeros(n_model), "", True,
                     "sky.download.riebel2012 table3.dat.gz TAU by CHEM"),
         }
-        c_theta = np.zeros(n_model)
-        path = _write_library(config, "agb", "region", names, c_theta, log10_b_centers, factors,
+        c_theta = _c_theta(reg)
+        path = _write_library(config, "agb", "region", names, c_theta, log10_f45_centers, factors,
                                region=region)
         col_sum = tau_w.sum(axis=0)
         print(f"template_weights.agb [{region}]: n_riebel_o={log10_tau_o.size} "
               f"n_riebel_c={log10_tau_c.size} max|colsum-1|="
-              f"{float(np.max(np.abs(col_sum - 1.0))):.3g} floored_fraction={frac_zero:.4f}",
+              f"{float(np.max(np.abs(col_sum - 1.0))):.3g} floored_fraction={frac_zero:.4f} "
+              f"C_THETA range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
+              f"max={c_theta.max():.4f}",
               flush=True)
         st.done(path, n_model=n_model, floored_fraction=frac_zero)
 
@@ -630,9 +686,9 @@ def build_pahc(config, region):
         reg = _read_register(config, "pahc")
         names, rho = reg["names"], reg["rho"]
         n_model = names.size
-        log10_b_centers = _log10_b_centers(_LOG10_B_ORIGIN_STAR)
+        log10_f45_centers = _log10_f45_centers()
 
-        sps_names, sps_rho, h_sps, _weight = _sps_raw_type_histogram(config, region)
+        sps_names, sps_rho, h_sps, _weight, _h_sps_old = _sps_raw_type_histogram(config, region)
         sps_idx, dist = _match_pahc_to_sps(config, sps_names)
         # the region's raw STAR type histogram (the population count, not
         # yet divided by rho or normalised) at each PAHC template's
@@ -643,20 +699,20 @@ def build_pahc(config, region):
         type_w = _normalise_over_theta(raw_type)
         type_w, frac_zero_type = _floor_normalised(type_w)
 
-        row = _pahc_contrast_row(config, log10_b_centers)
+        row = _pahc_contrast_row(config, log10_f45_centers)
         contrast_w = np.repeat(row[None, :], n_model, axis=0)
         contrast_w, frac_zero_contrast = _floor_probability(contrast_w)
-        c_f = np.log10(reg["f_ref"]["I4"])  # +log10 f_ref,8,theta (spec sec 5.3)
+        c_f = _c_f_contrast(reg)  # log10 f_ref,8,theta - log10 f_ref,4.5,theta
 
         factors = {
             "type": (type_w, np.zeros(n_model), "", True,
-                     f"population.star_population {region} W_STAR/LOG10_B, "
+                     f"population.star_population {region} W_STAR, "
                      "nearest sps template in (log10 T_EFF, LOGG)"),
             "contrast": (contrast_w, c_f, "D_PAHC", False,
                          "population.pahc.curve_pahc_survey P_Q"),
         }
-        c_theta = np.zeros(n_model)
-        path = _write_library(config, "pahc", "region", names, c_theta, log10_b_centers, factors,
+        c_theta = _c_theta(reg)
+        path = _write_library(config, "pahc", "region", names, c_theta, log10_f45_centers, factors,
                                region=region)
         col_sum = type_w.sum(axis=0)
         n_matched_sps_used = int(np.unique(sps_idx).size)
@@ -667,7 +723,9 @@ def build_pahc(config, region):
               f"max|colsum-1|={float(np.max(np.abs(col_sum - 1.0))):.3g} "
               f"floored_fraction type={frac_zero_type:.4f} contrast={frac_zero_contrast:.4f}; "
               f"contrast at axis ends={float(row[0]):.4f}/{float(row[-1]):.4f} "
-              f"vs curve end bins={float(curve_p_q[0]):.4f}/{float(curve_p_q[-1]):.4f}", flush=True)
+              f"vs curve end bins={float(curve_p_q[0]):.4f}/{float(curve_p_q[-1]):.4f}; "
+              f"C_THETA range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
+              f"max={c_theta.max():.4f}", flush=True)
         st.done(path, n_model=n_model, n_matched_sps_used=n_matched_sps_used)
 
 
@@ -680,7 +738,7 @@ def build_h2shock(config):
         reg = _read_register(config, "h2shock")
         names = reg["names"]
         n_model = names.size
-        log10_b_centers = _log10_b_centers(_LOG10_B_ORIGIN_STAR)
+        log10_f45_centers = _log10_f45_centers()
 
         grid_path = f"{config.inputs['sed_models']}/h2shock/parameters.fits"
         with fits.open(grid_path) as hdul:
@@ -702,13 +760,13 @@ def build_h2shock(config):
             raise ValueError(f"template_weights.h2shock: join n_matched={n_matched} "
                               f"!= n_register={n_model}")
 
-        w = np.full((n_model, log10_b_centers.size), 1.0 / n_model, dtype=np.float64)
-        c_theta = np.log10(i_ref)
+        w = np.full((n_model, log10_f45_centers.size), 1.0 / n_model, dtype=np.float64)
+        c_theta = np.log10(i_ref)  # the line brightness Sigma_ref,theta, unchanged (sec 4.1, W27)
 
         factors = {
             "uniform": (w, np.zeros(n_model), "", True, "no external distribution (spec sec 5.6)"),
         }
-        path = _write_library(config, "h2shock", "survey", names, c_theta, log10_b_centers, factors,
+        path = _write_library(config, "h2shock", "survey", names, c_theta, log10_f45_centers, factors,
                                extra_attrs={"C_THETA_SOURCE": c_theta_source})
         st.done(path, n_model=n_model)
         print(f"template_weights.h2shock: C_THETA_SOURCE={c_theta_source} "
