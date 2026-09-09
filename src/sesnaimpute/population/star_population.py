@@ -200,6 +200,17 @@ TAU_FLOOR_C = 0.02
 PAHC_LIMIT_QUANTILES = (5.0, 20.0, 35.0, 50.0, 65.0, 80.0, 95.0, 99.0)
 PAHC_LIMIT_MEDIAN_INDEX = PAHC_LIMIT_QUANTILES.index(50.0)
 
+#: SPEC_BMSTP_DRAFT.md section 5.1, "faint end" row: below an anchor's
+#: faint edge a star's weight extrapolates the region's own measured
+#: faint-end trend (`population.anchor_weights.faint_trend_dex_per_mag`'s
+#: `FAINT_TREND_G_DEX_PER_MAG`/`FAINT_TREND_KS_DEX_PER_MAG`) rather than
+#: holding the faintest populated bin's weight flat; no floor and no
+#: cap, since the trend is itself the measured correction to TRILEGAL's
+#: slope. A region whose three faintest populated bins are flat measures
+#: a trend of zero and this reduces exactly to the flat rule; a trend
+#: with too few populated bins to fit (`nan`) is read as zero for the
+#: same reason -- no evidence to extrapolate is not evidence of a trend.
+
 
 # ---------------------------------------------------------------------------
 # the shared distance grid and a tile's own mean profile
@@ -249,7 +260,8 @@ def _populated_edge_indices(populated, n_bin):
 
 
 def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
-                  w_g, w_ks, populated_g, populated_ks, u_star, u_front):
+                  w_g, w_ks, populated_g, populated_ks, u_star, u_front,
+                  trend_g=0.0, trend_ks=0.0):
     """Per star, `(W, WEIGHT_RULE)` (module docstring). `w_joint`/`w_g`/
     `w_ks` are the tables this tile actually reads from -- its own, or
     (an excluded tile) the region-pooled `W_REGION_*`, chosen by the
@@ -261,7 +273,10 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
     is that SAME mean profile's own value at the cloud's measured near
     edge (`profile.cloud_front_edge_pc`, `_build_one_tile`'s
     `u_front_tile`) -- the front/behind boundary a star's own placement is
-    compared against.
+    compared against. `trend_g`/`trend_ks` are this region's own faint-end
+    slopes (`FAINT_TREND_G_DEX_PER_MAG`/`FAINT_TREND_KS_DEX_PER_MAG`,
+    SPEC_BMSTP_DRAFT.md section 5.1's "faint end" row, module docstring's
+    faint-end constant).
 
     Owner ruling 2026-09-06, item 2: where both marginals are in range
     but the joint bin is not populated, the geometric mean is replaced by
@@ -272,6 +287,14 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
     pool (`populated_*` false AND the stored weight itself is not
     finite -- `population.anchor_weights`' pool fallback already fills most of
     these), it takes the OTHER anchor's weight instead.
+
+    Faint end (SPEC_BMSTP_DRAFT.md section 5.1): a star past an axis's
+    own faint edge no longer reads that axis's faintest populated bin
+    flat -- it extrapolates from it, `W(faint bin) * 10**(trend * (m -
+    m_faint))`, `m` the star's own observed magnitude on that axis and
+    `m_faint` the centre of the faintest populated bin. The bright end,
+    the joint table, and every in-range star read their bin exactly as
+    before (identity: W23's acceptance).
     """
     n_g, n_ks = w_g.size, w_ks.size
     bin_g_raw = np.digitize(g_obs, g_edges) - 1
@@ -293,8 +316,21 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
     both_faint = out_g_faint & out_ks_faint
     both_bright = out_g_bright & out_ks_bright
     both_in_range = in_range_g & in_range_ks
-    g_val = w_g[bin_g]
-    ks_val = w_ks[bin_ks]
+
+    # the faint-end extrapolation (section 5.1): only where THIS axis is
+    # past ITS OWN faint edge does its marginal value leave the flat
+    # `w_g[bin_g]`/`w_ks[bin_ks]` it already reads everywhere else --
+    # in range, or clamped at the bright edge, `bin_g`/`bin_ks` already
+    # index the same bin the flat rule always did, so those stars' values
+    # are the same expression, bit for bit, as before this brief.
+    trend_g = trend_g if np.isfinite(trend_g) else 0.0
+    trend_ks = trend_ks if np.isfinite(trend_ks) else 0.0
+    g_centers = 0.5 * (np.asarray(g_edges[:-1]) + np.asarray(g_edges[1:]))
+    ks_centers = 0.5 * (np.asarray(ks_edges[:-1]) + np.asarray(ks_edges[1:]))
+    g_faint_extrap = w_g[g_faint_idx] * 10.0 ** (trend_g * (np.asarray(g_obs, float) - g_centers[g_faint_idx]))
+    ks_faint_extrap = w_ks[ks_faint_idx] * 10.0 ** (trend_ks * (np.asarray(ks_obs, float) - ks_centers[ks_faint_idx]))
+    g_val = np.where(out_g_faint, g_faint_extrap, w_g[bin_g])
+    ks_val = np.where(out_ks_faint, ks_faint_extrap, w_ks[bin_ks])
     joint_val = w_joint[bin_g, bin_ks]
 
     # placement-selected marginal (item 2): front of the cloud reads
@@ -587,6 +623,11 @@ def _read_weights(config, region):
             excluded=np.asarray(f["EXCLUDED"][:], dtype=bool),
             g_edges=np.asarray(f["G_EDGES"][:], dtype=np.float64),
             ks_edges=np.asarray(f["KS_EDGES"][:], dtype=np.float64),
+            # section 5.1's "faint end" row: the region's own faint-slope
+            # trend, the extrapolation `star_weights` now applies past
+            # each axis's own faint edge.
+            trend_g=float(f.attrs["FAINT_TREND_G_DEX_PER_MAG"]),
+            trend_ks=float(f.attrs["FAINT_TREND_KS_DEX_PER_MAG"]),
         )
 
 
@@ -703,7 +744,8 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     w, rule, bin_g, bin_ks = star_weights(
         g_obs, ks_obs, weights["g_edges"], weights["ks_edges"],
         w_joint, weights["use_joint"][t], w_g, w_ks,
-        weights["populated_g"], weights["populated_ks"], u_i, u_front_tile)
+        weights["populated_g"], weights["populated_ks"], u_i, u_front_tile,
+        trend_g=weights["trend_g"], trend_ks=weights["trend_ks"])
 
     # the partition (spec section 3): a REWEIGHTING of this tile's own W,
     # never a filter -- w_star + w_agb == w row by row.
