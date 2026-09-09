@@ -100,8 +100,10 @@ PY sesnaimpute.granules.build
 # block.
 PY sesnaimpute.sky.download.gaia_counts.build
 PY sesnaimpute.sky.download.twomass_counts.build
+PY sesnaimpute.sky.download.ukidss_gps.build   # UKIDSS GPS clean-photometry rows, K < 17.5, per region (SPEC_BMSTP_DRAFT.md sec 5.1 STAR anchor, deep K extension, W37)
 PY sesnaimpute.sky.derived.gaia_counts
 PY sesnaimpute.sky.derived.twomass_counts
+PY sesnaimpute.sky.derived.ukidss_counts   # UKIDSS GPS counts per nside-512 pixel per half-mag bin, 9.0-17.0 (SPEC_BMSTP_DRAFT.md sec 5.1 STAR anchor, W37)
 PY sesnaimpute.sky.derived.gaia_match
 PY sesnaimpute.sky.derived.herschel_column
 PY sesnaimpute.sky.derived.subbeam
