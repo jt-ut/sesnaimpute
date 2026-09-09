@@ -295,7 +295,7 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
     docstring's faint-end constant): past both faint edges, the
     placement axis decides (front reads Gaia, behind reads 2MASS); past
     one faint edge alone, that axis decides. The bright end and every
-    in-range star are untouched (the joint-or-placement rule as now).
+    in-range star are untouched (the joint-or-placement rule).
     """
     n_g, n_ks = w_g.size, w_ks.size
     bin_g_raw = np.digitize(g_obs, g_edges) - 1
