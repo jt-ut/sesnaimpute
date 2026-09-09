@@ -364,13 +364,16 @@ def _region_pixel_columns(config, region):
     """The region's occupied nside-512 pixels (the granule map's own
     set, sorted unique), each pixel's parent nside-256 sightline (its
     member sources' own `HPX_PIX_256`, which is single-valued per
-    nside-512 pixel by construction), and each pixel's mean adopted
-    column `A_PIX_K` over its own SESNA sources.
+    nside-512 pixel by construction), and each pixel's mean extinction
+    column `A_PIX_K` over its own SESNA sources. The model stars' own
+    dimming is what a star's light passes through, not the gas column
+    the young-star law was measured on (W49), so this reads the
+    extinction column.
     """
     rs = access.region_slice(config, region)
     pix512_src = np.asarray(rs["hpx_pix_512"], dtype=np.int64)
     pix256_src = np.asarray(rs["hpx_pix_256"], dtype=np.int64)
-    adopted_path = config_module.product_path(config, "sky/derived", "adopted", "column", "source", region=region)
+    adopted_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "source", region=region)
     a_col_src = access.per_source(config, region, adopted_path, ["A_COL_K"])["A_COL_K"].astype(np.float64)
 
     pixels, first_idx, inverse = np.unique(pix512_src, return_index=True, return_inverse=True)

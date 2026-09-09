@@ -180,13 +180,19 @@ def _pixel_coverage(config, region, pix):
 
 
 def _pixel_column(config, pix):
-    """Each admitted pixel's own adopted column, from the nside-256
+    """Each admitted pixel's own extinction column, from the nside-256
     sightline it is a child of (survey-wide product, no region argument;
     `granules/build.py`'s own `HPX_PIX_256 = HPX_PIX_512 // 4`) -- the same
-    join `bmstp.atlas._pixel_column` performs.
+    join `bmstp.atlas._pixel_column` performs. The depth grid's low-column
+    selection is a starlight (IRAC) selection, so it reads the extinction
+    column, not the gas column the young-star law was measured on (W49).
     """
     parent256 = pix // 4
-    path = config_module.product_path(config, "sky/derived", "adopted", "column", "sightline")
+    path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "sightline")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "catalog.depth_grid: no extinction sightline column at %s -- run the "
+            "'sesnaimpute.sky.derived.column' RUNBOOKtp.sh line first" % path)
     with h5py.File(path, "r") as f:
         sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
         a_k = np.asarray(f["A_K"][:], dtype=np.float64)

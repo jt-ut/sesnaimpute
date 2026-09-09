@@ -623,14 +623,17 @@ def _read_anchor_ratio(config, region):
 
 
 def _region_source_geometry(config, region, tiles):
-    """Per-source `HPX_PIX_256`, adopted column, and tile assignment
+    """Per-source `HPX_PIX_256`, extinction column, and tile assignment
     (module docstring's Inputs): the tiles product's own `HPX_PIX_512 ->
     TILE_ID` map is the only place tile membership lives (no survey-wide
-    tile-membership product exists yet)."""
+    tile-membership product exists yet). The model stars' own dimming
+    (`N^{model->obs}`, sec. 5.1) is what their light passes through, so
+    this reads the extinction column, not the gas column the young-star
+    law was measured on (W49)."""
     rs = access.region_slice(config, region)
     pix512 = np.asarray(rs["hpx_pix_512"], dtype=np.int64)
     pix256 = np.asarray(rs["hpx_pix_256"], dtype=np.int64)
-    adopted_path = config_module.product_path(config, "sky/derived", "adopted", "column", "source", region=region)
+    adopted_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "source", region=region)
     a_col = access.per_source(config, region, adopted_path, ["A_COL_K"])["A_COL_K"].astype(np.float64)
 
     order = np.argsort(tiles["pix512"])

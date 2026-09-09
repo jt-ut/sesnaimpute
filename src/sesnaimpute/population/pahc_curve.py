@@ -340,10 +340,13 @@ def region_measurement(config, region, colour_knots, colour45_median):
     sigma4 = sigma[eligible, IDX_I4]
     zp1, zp2, zp4 = ZERO_POINT_MJY[IDX_I1], ZERO_POINT_MJY[IDX_I2], ZERO_POINT_MJY[IDX_I4]
 
-    # the source's own adopted column and its per-band dimming ratio
-    # (SPEC_PRIORS.md section 1.3, "kappa_i(a)"), catalogue order
+    # the source's own extinction column and its per-band dimming ratio
+    # (SPEC_PRIORS.md section 1.3, "kappa_i(a)"), catalogue order --
+    # extinction, not the gas column the young-star law was measured
+    # on, since this is what the source's own starlight passes through
+    # (W49)
     a_col_path = config_module.product_path(
-        config, "sky/derived", "adopted", "column", "source", region=region)
+        config, "sky/derived", "adopted", "extinction", "source", region=region)
     a_col_all = access.per_source(config, region, a_col_path, ["A_COL_K"])["A_COL_K"]
     a_col = np.asarray(a_col_all, dtype=np.float64)[eligible]
     kappa = selection_module.kappa_hybrid(config, selection_module.law_dense_weight(a_col))
