@@ -24,10 +24,12 @@ the map's reach, so the tail cell's midpoint distance matches
 `population.yso`'s exactly.
 
 `p(F_4.5)`, per region (the SAME shape at every sightline of the region):
-the YSO register's own templates, weighted `IMF(M_theta) * cos-i factor /
-rho(theta)` exactly as `bmstp.template_weights.build_yso` forms it -- its
-own private construction, called directly here rather than re-derived --
-each at `log10 F_4.5 = log10 F_REF_I2,theta - 2 log10(d_r / 1 kpc)`,
+the YSO register's own templates, weighted by
+`template_weights.yso_population_weight` (the IMF x inclination weight
+divided by the library's density of templates in log10 mass, times the
+evolutionary-class census, sec. 1.4, owner's ruling 2026-09-09) -- called
+directly here rather than re-derived, the one place that weight is formed
+-- each at `log10 F_4.5 = log10 F_REF_I2,theta - 2 log10(d_r / 1 kpc)`,
 widened by the cloud's own depth and the region's distance uncertainty as a
 Gaussian in `log10 F_4.5`.
 """
@@ -205,20 +207,21 @@ def restrict_old_x_marginal(loaded, row, old_x_marginal, d_front, d_back):
 def sample_f45(config, region, d_r_pc, sigma_d_pc, d_front, d_back):
     """YSO's own brightness mark, `p(F_4.5)` (sec. 5.5 "Marks"), the same
     shape at every sightline of the region: the YSO register's templates,
-    weighted `IMF(M_theta) * cos-i factor / rho(theta)` exactly as
-    `bmstp.template_weights.build_yso` forms it (its private register,
-    mass-table and inclination reads called directly -- the construction
-    is imported, not re-derived), each at `log10 F_4.5 = log10
-    F_REF_I2,theta - 2 log10(d_r / 1 kpc)`, widened as a Gaussian in
-    `log10 F_4.5` by the cloud's own depth and the region's distance
-    uncertainty together, `2 log10(d_back/d_front) + 2 sigma_d/(d_r ln
-    10)` (sec. 5.5 "Marks", using the DOUBLED cloud interval, W24b).
-    Returns `(p_f45, mass_outside, width_dex, mass_above_top)`:
-    `mass_above_top` is the raw (pre-widening) register weight above the
-    grid's own top edge (sec. 9's 0.1% bar)."""
+    weighted by `template_weights.yso_population_weight` (the IMF x
+    inclination weight divided by the library's density of templates in
+    log10 mass, times the evolutionary-class census, sec. 1.4, owner's
+    ruling 2026-09-09) -- called directly rather than re-derived, so the
+    weight formula lives in exactly one place for `build_yso`, this
+    function and `bmstp.atlas._yso_register` alike. Each template placed
+    at `log10 F_4.5 = log10 F_REF_I2,theta - 2 log10(d_r / 1 kpc)`,
+    widened as a Gaussian in `log10 F_4.5` by the cloud's own depth and
+    the region's distance uncertainty together, `2 log10(d_back/d_front)
+    + 2 sigma_d/(d_r ln 10)` (sec. 5.5 "Marks", using the DOUBLED cloud
+    interval, W24b). Returns `(p_f45, mass_outside, width_dex,
+    mass_above_top)`: `mass_above_top` is the raw (pre-widening) weight
+    above the grid's own top edge (sec. 9's 0.1% bar)."""
     reg = template_weights._read_register(config, "yso")
-    names, rho, f_ref_i2 = reg["names"], reg["rho"], reg["f_ref"]["I2"]
-    n_model = names.size
+    names, f_ref_i2 = reg["names"], reg["f_ref"]["I2"]
 
     # the register's own FREFRAW convention (sec. 3.5): F_REF is raw and
     # must be floored at FLOOR_LINEAR before a log, the same rule
@@ -229,30 +232,11 @@ def sample_f45(config, region, d_r_pc, sigma_d_pc, d_front, d_back):
     with h5py.File(register_path, "r") as f:
         floor_linear = f["models/FLOOR_LINEAR"][:].astype(np.float64)
 
-    mass_path = config_module.product_path(config, "population", "yso", "mass", "survey")
-    with h5py.File(mass_path, "r") as f:
-        mass_names = np.char.decode(f["MODEL_NAME"][:].astype("S"), "utf-8")
-        m_star = f["M_STAR"][:].astype(np.float64)
-    if mass_names.size != n_model or not np.all(mass_names == names):
+    names_w, weight = template_weights.yso_population_weight(config)
+    if names_w.size != names.size or not np.all(names_w == names):
         raise ValueError(
-            "sample_cloud.sample_f45: yso mass table (%s) is not in the "
-            "yso register's own row order" % mass_path)
-
-    incl_names, incl_deg = [], []
-    for subdir, _label in template_weights.YSO_SUBGRIDS:
-        n, i = template_weights._read_yso_subgrid_inclination(config, subdir)
-        incl_names.append(n)
-        incl_deg.append(i)
-    incl_names = np.concatenate(incl_names)
-    incl_deg = np.concatenate(incl_deg)
-    if incl_names.size != n_model or not np.all(incl_names == names):
-        raise ValueError(
-            "sample_cloud.sample_f45: yso sub-grid inclination join is "
-            "not in the yso register's own row order")
-
-    psi = template_weights._chabrier_dn_dlogm(m_star)         # imf: dN/dlog10 M
-    incl_raw = np.sin(np.radians(incl_deg))                    # uniform in cos i
-    weight = psi * incl_raw / rho
+            "sample_cloud.sample_f45: yso_population_weight's row order "
+            "disagrees with the yso register")
 
     log10_f45_theta = (np.log10(np.maximum(f_ref_i2, floor_linear))
                         - 2.0 * np.log10(float(d_r_pc) / 1000.0))

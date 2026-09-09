@@ -16,9 +16,11 @@ a star is a STAR or a PAHC member of the Monte Carlo, never both, weighted
 `W_STAR*(1-P_PAHC)`/`W_STAR*P_PAHC`), GAL (sec. 5.4: SWIRE's four IRAC fluxes
 per galaxy, S from the counts law's own node, colours from a galaxy measured at
 that node, at `x=1`), YSO (sec. 5.5: the region's own fixed-seed draw of
-`N_MC` YSO library templates by the population weight -- IMF x inclination /
-rho, the same construction `bmstp.template_weights.build_yso`'s `population`
-factor and `bmstp.sample_cloud.sample_f45` use, sec 5.5 "Template weights" --
+`N_MC` YSO library templates by the population weight --
+`template_weights.yso_population_weight`'s IMF x inclination weight divided
+by the library's density of templates in log10 mass, times the
+evolutionary-class census (sec 1.4, owner's ruling 2026-09-09), the same
+construction `build_yso` and `bmstp.sample_cloud.sample_f45` use --
 each template's own eight `F_REF` scaled by `(1 kpc / d_r)^2`, placed along the
 sightline's own `p(x)` on the cloud interval, `bmstp.sample_cloud.sample_x`'s
 binned return) and H2S (sec. 5.6: the region's 2.12 um lognormal carried into
@@ -35,7 +37,6 @@ import os
 import h5py
 import healpy as hp
 import numpy as np
-from astropy.io import fits
 from joblib import Parallel, delayed
 
 from sesnaimpute import config as config_module
@@ -46,7 +47,6 @@ from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import h2s as h2s_module
 from sesnaimpute.population import selection as selection_module
-from sesnaimpute.population import star_population
 from sesnaimpute.population import yso as yso_module
 from sesnaimpute.bmstp import density as density_module
 from sesnaimpute.bmstp import grid
@@ -446,85 +446,48 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
 
 def _agb_shell_pool(config):
     """`{"O": {...}, "C": {...}}`, the AGB library's own shell-template
-    pool by chemistry (sec. 5.2, `bmstp.template_weights.build_agb`'s
-    `tau` factor construction: Riebel+2012's fitted optical-depth
-    distribution by chemistry, read directly against the GRAMS register's
-    own `TAU`/`CHEM` -- reads called directly, not re-derived, matching
-    `bmstp.sample_cloud.sample_f45`'s own pattern for YSO's `population`
-    factor). Each chemistry's own `weight` (`p_chem(tau) / rho`, WITHOUT
-    the carbon-fraction admixture: `sample_star.sample_agb` already
-    resolves which chemistry a given draw is, so only the WITHIN-chemistry
-    template distribution is needed here) plus that chemistry's own
-    templates' eight `F_REF` and `FLOOR_LINEAR` (sec. 3.5's FREFRAW
-    convention). Survey-wide, independent of region -- the caller computes
-    this once and reuses it, rather than this function caching on an
-    unhashable `Config` (its `inputs` mapping)."""
+    pool by chemistry (sec. 5.2, sec 1.4, owner's ruling 2026-09-09):
+    `template_weights.agb_tau_ratio`'s `p_chem(tau) / n_chem(tau)`
+    WITHOUT the carbon-fraction admixture (`sample_star.sample_agb`
+    already resolves which chemistry a given draw is, so only the
+    WITHIN-chemistry template distribution is needed here) -- called
+    directly rather than re-derived, the one place the Riebel fit and the
+    density-of-templates-in-tau construction live -- plus that
+    chemistry's own templates' eight `F_REF` and `FLOOR_LINEAR` (sec.
+    3.5's FREFRAW convention). Survey-wide, independent of region -- the
+    caller computes this once and reuses it, rather than this function
+    caching on an unhashable `Config` (its `inputs` mapping)."""
     reg = template_weights._read_register(config, "agb")
-    names, rho, f_ref, floor_linear = reg["names"], reg["rho"], reg["f_ref"], reg["floor_linear"]
-    params_path = f"{config.inputs['sed_models']}/agb/parameters.fits"
-    with fits.open(params_path) as hdul:
-        d = hdul[1].data
-        grid_names = np.char.strip(np.asarray(d["MODEL_NAME"]).astype(str))
-        tau = np.asarray(d["TAU"], dtype=np.float64)
-        chem = np.char.strip(np.asarray(d["CHEM"]).astype(str))
-    if grid_names.size != names.size or not np.all(grid_names == names):
-        raise ValueError("bmstp.atlas: agb parameters.fits is not in the "
-                          "agb register's own row order")
-
-    gcl, riebel_tau = star_population.read_riebel_optical_depths(config)
-    log10_tau_o = np.log10(riebel_tau[gcl == "o"])
-    log10_tau_c = np.log10(riebel_tau[gcl == "c"])
-    edges = np.linspace(-3.0, 2.0, 61)
-    h_o, _ = np.histogram(log10_tau_o, bins=edges, density=True)
-    h_c, _ = np.histogram(log10_tau_c, bins=edges, density=True)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    log10_tau_theta = np.log10(tau)
-    p_o = np.interp(log10_tau_theta, centers, h_o, left=0.0, right=0.0)
-    p_c = np.interp(log10_tau_theta, centers, h_c, left=0.0, right=0.0)
+    f_ref, floor_linear = reg["f_ref"], reg["floor_linear"]
+    names_r, chem, _log10_tau, ratio = template_weights.agb_tau_ratio(config)
+    if names_r.size != reg["names"].size or not np.all(names_r == reg["names"]):
+        raise ValueError("bmstp.atlas: agb_tau_ratio's row order disagrees "
+                          "with the agb register")
 
     pools = {}
-    for label, p in (("O", p_o), ("C", p_c)):
+    for label in ("O", "C"):
         sel = chem == label
         pools[label] = dict(
             f_ref={k: v[sel] for k, v in f_ref.items()},
             floor_linear=floor_linear[sel],
-            weight=(p[sel] / rho[sel]))
+            weight=ratio[sel])
     return pools
 
 
 def _yso_register(config):
-    """The YSO register's own `population` weight (IMF x inclination /
-    rho, sec. 5.5 "Template weights") and eight `F_REF`, in the register's
-    own row order -- the SAME construction `bmstp.template_weights.
-    build_yso`'s `population` factor and `bmstp.sample_cloud.sample_f45`
-    use (reads called directly, not re-derived). Survey-wide, independent
-    of region; the caller computes this once and reuses it."""
+    """The YSO register's own `population` weight
+    (`template_weights.yso_population_weight`, sec. 5.5 "Template
+    weights", sec. 1.4, owner's ruling 2026-09-09) and eight `F_REF`, in
+    the register's own row order -- called directly rather than
+    re-derived, the SAME construction `build_yso` and
+    `bmstp.sample_cloud.sample_f45` use. Survey-wide, independent of
+    region; the caller computes this once and reuses it."""
     reg = template_weights._read_register(config, "yso")
-    names, rho, f_ref, floor_linear = reg["names"], reg["rho"], reg["f_ref"], reg["floor_linear"]
-    n_model = names.size
-
-    mass_path = config_module.product_path(config, "population", "yso", "mass", "survey")
-    with h5py.File(mass_path, "r") as f:
-        mass_names = np.char.decode(f["MODEL_NAME"][:].astype("S"), "utf-8")
-        m_star = f["M_STAR"][:].astype(np.float64)
-    if mass_names.size != n_model or not np.all(mass_names == names):
-        raise ValueError("bmstp.atlas: yso mass table is not in the "
-                          "yso register's own row order")
-
-    incl_names, incl_deg = [], []
-    for subdir, _label in template_weights.YSO_SUBGRIDS:
-        n, i = template_weights._read_yso_subgrid_inclination(config, subdir)
-        incl_names.append(n)
-        incl_deg.append(i)
-    incl_names = np.concatenate(incl_names)
-    incl_deg = np.concatenate(incl_deg)
-    if incl_names.size != n_model or not np.all(incl_names == names):
-        raise ValueError("bmstp.atlas: yso sub-grid inclination join is "
-                          "not in the register's own row order")
-
-    psi = template_weights._chabrier_dn_dlogm(m_star)
-    incl_raw = np.sin(np.radians(incl_deg))
-    weight = psi * incl_raw / rho
+    f_ref, floor_linear = reg["f_ref"], reg["floor_linear"]
+    names_w, weight = template_weights.yso_population_weight(config)
+    if names_w.size != reg["names"].size or not np.all(names_w == reg["names"]):
+        raise ValueError("bmstp.atlas: yso_population_weight's row order "
+                          "disagrees with the yso register")
     return dict(weight=weight, f_ref=f_ref, floor_linear=floor_linear)
 
 
@@ -887,6 +850,21 @@ def build_region(config, region):
                  if n_source else float("nan") for c in built}
         ratio_built = total_predicted_built / n_source if n_source else float("nan")
 
+        # the YSO population's catalogable fraction (spec sec 5.5, sec
+        # 8): the region's own MC-and-detection-weighted accepted share
+        # of the intrinsic young-star density, `Sigma(n_cat[YSO] *
+        # coverage) / Sigma(density_yso_pix * coverage)` -- the same
+        # coverage weighting the total-count check above applies, but
+        # normalised against the class's own intrinsic density rather
+        # than the survey's observed source count (never the library's
+        # eight-band density, sec 1.4).
+        density_yso_total = float(np.sum(density_yso_pix * coverage) * _HPX512_PIXEL_DEG2)
+        n_cat_yso_total = float(np.sum(n_cat["YSO"] * coverage) * _HPX512_PIXEL_DEG2)
+        catalogable_fraction_yso = (n_cat_yso_total / density_yso_total
+                                     if density_yso_total > 0 else float("nan"))
+        print(f"bmstp.atlas {region}: YSO catalogable fraction={catalogable_fraction_yso:.4f} "
+              f"(n_cat={n_cat_yso_total:.6g} / intrinsic={density_yso_total:.6g})")
+
         # sec. 9's bright-end check: the catalogue's own bright
         # counterpart per admitted pixel, and the same coverage/area
         # weighting the total-count check applies above, denominator
@@ -937,6 +915,10 @@ def build_region(config, region):
             for c in built:
                 f.attrs[f"RATIO_{c}"] = ratio[c]
             f.attrs["RATIO_BUILT"] = ratio_built
+            # the YSO population's catalogable fraction (sec 5.5, sec 8):
+            # accepted / intrinsic density, never the survey's observed
+            # source count.
+            f.attrs["CATALOGABLE_FRACTION_YSO"] = catalogable_fraction_yso
             # sec. 9's bright-end check: the same catalogued/observed
             # ratio, above 3x/10x the pixel's own I2 50% limit, where
             # completeness is 1 on both sides.
