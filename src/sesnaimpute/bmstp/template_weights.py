@@ -1,22 +1,31 @@
 """The template-weight tables P5 (SPEC_BMSTP_DRAFT.md sec 1.4, 4.1, 4.2,
 5.1-5.6; IMPLEMENTATION_BMSTP_DRAFT.md sec 1.2 P5, sec 3 row 1.7):
-`pi_C(theta, B) = p_C(shape of theta | B) / rho_C(theta)`, one factor per
+`pi_C(theta, F) = p_C(q_theta | F) / n_C(q_theta)`, one factor per
 population statement over a library's own templates, stored per band cell
 on the common brightness axis `bmstp.grid.LOG10_F45_EDGES` (110 cells,
 W24/W24b) so the fitter's read (sec 4.2) is a per-template gather along
-one row.
+one row. `q_theta` is the template's values of the quantities THAT
+CLASS'S OWN EXTERNAL DATA CONSTRAIN and `n_C` the library's density of
+templates in them -- never the library's density in eight-band SED space
+(`RHO_KDE1`, a space no class's data constrain: owner's ruling 2026-09-09,
+`briefs/reports/W29_review.md`, `briefs/W31.md`). sps/pahc `type` divide
+by nothing (a matched-star count is already a weight per template); agb
+`tau` and yso `population` divide by a 1-D histogram of the library's own
+templates in the constrained quantity (tau by chemistry; log10 stellar
+mass), bins wide enough to hold the floor count, linearly interpolated;
+galz `colour` divides by a Gaussian KDE of the library's own templates in
+colour, the same bandwidth as the galaxy KDE.
 
 Each factor function returns `(W, C_F, D_F, normalised, source)`: `W`
 `(n_model, 110)` float32 on `LOG10_F45_CENTERS`; `C_F` `(n_model,)` f8, the
 factor's own per-template offset; `D_F` the density-table column name a
 per-source offset comes from at read time, or `""`; `normalised` True if
 the factor sums to 1 over templates at every cell (a shape statement),
-False if it is a probability carried as-is (`contrast`). `rho_C(theta)` is
-the register's own `RHO_KDE1` (`fit.terms.library_weights`'s own column,
-sec 3.5: "supplied with the library"). `C_THETA[theta]` is the template's
-offset onto the read axis, `log10 f_ref,4.5,theta` (floored at the
-register's own `FLOOR_LINEAR` before the log, sec 4.1, W24) for every
-library except h2shock, whose own line-brightness offset is unchanged.
+False if it is a probability carried as-is (`contrast`). `C_THETA[theta]`
+is the template's offset onto the read axis, `log10 f_ref,4.5,theta`
+(floored at the register's own `FLOOR_LINEAR` before the log, sec 4.1,
+W24) for every library except h2shock, whose own line-brightness offset
+is unchanged.
 
 Survey products (galz, h2shock) are built once; region products (yso, sps,
 agb, pahc) once per region named on the command line. PAHC is regional
@@ -81,7 +90,90 @@ F_C = star_population.F_C
 YSO_SUBGRIDS = (("c0", "C0"), ("cI", "CI"), ("cII", "CII"),
                 ("cIII", "CIII"), ("td", "TD"))
 
+#: The evolutionary-class census (spec sec 5.5, Dunham et al. 2014's
+#: Class 0+I+flat fraction over the c2d and Gould Belt clouds, owner's
+#: ruling 2026-09-09): Class 0 and Class I together carry this share of
+#: the YSO population.
+YSO_PROTOSTAR_SHARE = 0.27
+#: Class II and transition disk together carry this share (Dunham+2014);
+#: Class III (a bare photosphere) carries none and leaves the population.
+YSO_DISK_SHARE = 0.73
+YSO_CENSUS_GROUPS = (({"C0", "CI"}, YSO_PROTOSTAR_SHARE),
+                      ({"CII", "TD"}, YSO_DISK_SHARE))
+
+#: The floor every 1-D library-density histogram (agb `tau` by chemistry,
+#: yso `population`'s log10 mass) holds per bin before it is trusted as a
+#: density (spec sec 1.4: "bins wide enough to hold >= 20 templates" /
+#: "floored at 20 templates").
+LIBRARY_DENSITY_MIN_COUNT = 20
+
+#: yso `population`'s mass histogram's nominal bin width (spec sec 1.4:
+#: "bins of 0.1 dex"), coarsened where a bin falls short of the floor.
+YSO_MASS_BIN_DEX = 0.1
+
+#: galz `colour`'s template KDE bandwidth, the same as the galaxy KDE's
+#: own (spec sec 5.4: "the colour error, ~0.04 dex"; sec 1.4).
+GALZ_COLOUR_BANDWIDTH_DEX = 0.04
+
 _REGISTER_FILE = {key: "%s_register.hdf5" % key for key in definitions.CLASS_REGISTER.values()}
+
+
+def _fixed_width_binned_density(x, bin_width, min_count):
+    """The library's density of templates in `x` (spec sec 1.4): fixed-
+    width bins of `bin_width` covering `x`'s own range, each short bin
+    merged into its neighbour until it holds >= `min_count` templates (a
+    trailing short bin merges into the one before it), density = count /
+    bin width, linearly interpolated at each of `x`'s own values (constant
+    beyond the outermost bin centre)."""
+    lo, hi = float(np.min(x)), float(np.max(x))
+    n_edges = max(2, int(np.ceil((hi - lo) / bin_width)) + 1)
+    edges = lo + bin_width * np.arange(n_edges)
+    edges[-1] = max(edges[-1], hi)
+    counts, edges = np.histogram(x, bins=edges)
+    merged_edges = [edges[0]]
+    merged_counts = []
+    acc = 0
+    for i, c in enumerate(counts):
+        acc += c
+        if acc >= min_count or i == counts.size - 1:
+            merged_edges.append(edges[i + 1])
+            merged_counts.append(acc)
+            acc = 0
+    if len(merged_counts) > 1 and merged_counts[-1] < min_count:
+        merged_counts[-2] += merged_counts[-1]
+        merged_counts.pop()
+        merged_edges.pop(-2)
+    merged_edges = np.asarray(merged_edges, dtype=np.float64)
+    merged_counts = np.asarray(merged_counts, dtype=np.float64)
+    widths = np.diff(merged_edges)
+    density = merged_counts / widths
+    centers = 0.5 * (merged_edges[:-1] + merged_edges[1:])
+    return np.interp(x, centers, density, left=density[0], right=density[-1])
+
+
+def _equal_count_binned_density(x, min_count):
+    """The library's density of templates in `x` (spec sec 1.4): bins as
+    wide as needed to hold `min_count` templates each (equal-count bins
+    from `x`'s own sorted values, the trailing remainder folded into the
+    last full bin), density = count / bin width, linearly interpolated at
+    each of `x`'s own values (constant beyond the outermost bin centre)."""
+    n = x.size
+    order = np.argsort(x)
+    xs = x[order]
+    n_bins = max(1, n // min_count)
+    groups = np.array_split(np.arange(n), n_bins)
+    edges = [xs[0]]
+    counts = []
+    for grp in groups:
+        counts.append(grp.size)
+        edges.append(xs[grp[-1]])
+    edges = np.asarray(edges, dtype=np.float64)
+    counts = np.asarray(counts, dtype=np.float64)
+    widths = np.diff(edges)
+    widths = np.where(widths > 0, widths, np.finfo(np.float64).eps)
+    density = counts / widths
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    return np.interp(x, centers, density, left=density[0], right=density[-1])
 
 
 # ---------------------------------------------------------------------------
@@ -89,23 +181,25 @@ _REGISTER_FILE = {key: "%s_register.hdf5" % key for key in definitions.CLASS_REG
 # ---------------------------------------------------------------------------
 
 def _read_register(config, cls):
-    """The register's `MODEL_NAME`, `RHO_KDE1` (`rho_C(theta)`, sec 3.5),
-    `SUBCLASS` (report-only diagnostic label, sec 5.5's check), `FLOOR_LINEAR`
-    (the register's own raw-flux floor, sec 3.5's FREFRAW convention: a
+    """The register's `MODEL_NAME`, `SUBCLASS` (yso: C0/CI/CII/CIII/TD, the
+    evolutionary-class census's own label, sec 5.5), `FLOOR_LINEAR` (the
+    register's own raw-flux floor, sec 3.5's FREFRAW convention: a
     reference flux can be exactly zero at an edge-on/embedded geometry and
     must be floored before a log, `briefs/reports/W24.md`) and reference
-    fluxes in every band, in the register's own row order.
+    fluxes in every band, in the register's own row order. `RHO_KDE1` (the
+    library's density in eight-band SED space) is never read here: no
+    class's template weight divides by it (sec 1.4, owner's ruling
+    2026-09-09).
     """
     path = f"{config.inputs['sed_models']}/registers/{_REGISTER_FILE[cls]}"
     with h5py.File(path, "r") as f:
         m = f["models"]
         names = np.char.decode(m["MODEL_NAME"][:].astype("S"), "utf-8")
-        rho = m["RHO_KDE1"][:].astype(np.float64)
         subclass = np.char.decode(m["SUBCLASS"][:].astype("S"), "utf-8")
         floor_linear = m["FLOOR_LINEAR"][:].astype(np.float64)
         f_ref = {b: m[f"F_REF_{b}"][:].astype(np.float64)
                  for b in ("I1", "I2", "I3", "I4", "J", "H", "Ks", "M1")}
-    return dict(names=names, rho=rho, f_ref=f_ref, subclass=subclass, floor_linear=floor_linear)
+    return dict(names=names, f_ref=f_ref, subclass=subclass, floor_linear=floor_linear)
 
 
 def _log10_f45_centers():
@@ -256,60 +350,95 @@ def _chabrier_dn_dlogm(m_star):
     return np.where(m_star <= 1.0, lognormal, powerlaw)
 
 
+def yso_population_weight(config):
+    """The YSO `population` weight `w_theta` (spec sec 5.5 "Template
+    weights", owner's ruling 2026-09-09): three population statements and
+    one division, shared verbatim by `build_yso` below,
+    `sample_cloud.sample_f45` and `bmstp.atlas._yso_register` -- called by
+    all three rather than re-derived, so the class census and the mass
+    density live in exactly one place. (i) The Chabrier 2003 IMF over
+    each template's own stellar mass, divided by the library's density of
+    templates in log10 M (`_fixed_width_binned_density`, 0.1 dex bins
+    floored at `LIBRARY_DENSITY_MIN_COUNT`, never `RHO_KDE1`). (ii) The
+    viewing angle, uniform in cos i (the existing sin i factor). (iii) The
+    evolutionary-class census: Class 0 + Class I together carry
+    `YSO_PROTOSTAR_SHARE`, Class II + transition disk together
+    `YSO_DISK_SHARE` (Dunham et al. 2014), Class III none; the split
+    within a pair is the templates' own (i)x(ii) weight. `Sigma w_theta`
+    is exactly 1 (the two shares sum to 1) by construction. Returns
+    `(names, w_theta)` in the register's own row order."""
+    reg = _read_register(config, "yso")
+    names, subclass = reg["names"], reg["subclass"]
+    n_model = names.size
+
+    mass_path = config_module.product_path(config, "population", "yso", "mass", "survey")
+    if not os.path.isfile(mass_path):
+        raise FileNotFoundError(
+            f"template_weights.yso_population_weight: missing {mass_path}; run "
+            "sesnaimpute.population.yso_mass first")
+    with h5py.File(mass_path, "r") as f:
+        mass_names = np.char.decode(f["MODEL_NAME"][:].astype("S"), "utf-8")
+        m_star = f["M_STAR"][:].astype(np.float64)
+    n_matched_mass = int(np.sum(mass_names == names)) if mass_names.size == n_model else 0
+    if n_matched_mass != n_model:
+        raise ValueError(
+            f"template_weights.yso_population_weight: mass table join "
+            f"n_matched={n_matched_mass} != n_register={n_model}")
+
+    incl_names, incl_deg = [], []
+    for subdir, _label in YSO_SUBGRIDS:
+        n, i = _read_yso_subgrid_inclination(config, subdir)
+        incl_names.append(n)
+        incl_deg.append(i)
+    incl_names = np.concatenate(incl_names)
+    incl_deg = np.concatenate(incl_deg)
+    n_matched_incl = int(np.sum(incl_names == names)) if incl_names.size == n_model else 0
+    if n_matched_incl != n_model:
+        raise ValueError(
+            f"template_weights.yso_population_weight: inclination join "
+            f"n_matched={n_matched_incl} != n_register={n_model}")
+
+    psi = _chabrier_dn_dlogm(m_star)                          # imf: dN/dlog10 M, Chabrier 2003
+    incl_raw = np.sin(np.radians(incl_deg))                    # uniform in cos i (spec sec 5.5)
+    n_mass = _fixed_width_binned_density(np.log10(m_star), YSO_MASS_BIN_DEX,
+                                          LIBRARY_DENSITY_MIN_COUNT)
+    w_pre_census = psi * incl_raw / n_mass                     # (i) x (ii), sec 1.4's division
+
+    # (iii) the evolutionary-class census: within each pair the split is
+    # w_pre_census's own share; Class III's templates are left at zero
+    # (not in the YSO population, spec sec 5.5).
+    w_theta = np.zeros(n_model, dtype=np.float64)
+    for labels, share in YSO_CENSUS_GROUPS:
+        sel = np.isin(subclass, list(labels))
+        group_sum = w_pre_census[sel].sum()
+        if group_sum > 0:
+            w_theta[sel] = share * w_pre_census[sel] / group_sum
+    return names, w_theta
+
+
 def build_yso(config, region):
     """P5's YSO table, one per region (spec sec 5.5 "Template weights",
-    REWRITTEN W25b): `PI[theta, k] = w_theta N(F_k; F_theta(d_r), sigma_F)
-    / p(F_k)`, `w_theta` the IMF x inclination / rho weight (survey-wide,
-    unchanged), `F_theta(d_r)` and `sigma_F` the region's own placement of
-    the template at the cloud distance and its widening
+    REWRITTEN W25b, W31): `PI[theta, k] = w_theta N(F_k; F_theta(d_r),
+    sigma_F) / p(F_k)`, `w_theta` `yso_population_weight`'s survey-wide
+    census weight, `F_theta(d_r)` and `sigma_F` the region's own placement
+    of the template at the cloud distance and its widening
     (`bmstp.sample_cloud.cloud_interval_pc`, imported not re-derived, and
     the widening formula sec 5.5 "Marks" states directly). A brightness-
     independent table multiplies the shape's own `p(F_4.5)` in twice (sec
     4.1); the conditional divides it back out."""
     with progress.Stage("bmstp.template_weights.yso", region) as st:
         reg = _read_register(config, "yso")
-        names, rho = reg["names"], reg["rho"]
+        names = reg["names"]
         n_model = names.size
-
-        mass_path = config_module.product_path(config, "population", "yso", "mass", "survey")
-        if not os.path.isfile(mass_path):
-            raise FileNotFoundError(
-                f"template_weights.yso: missing {mass_path}; run "
-                "sesnaimpute.population.yso_mass first")
-        with h5py.File(mass_path, "r") as f:
-            mass_names = np.char.decode(f["MODEL_NAME"][:].astype("S"), "utf-8")
-            m_star = f["M_STAR"][:].astype(np.float64)
-        n_matched_mass = int(np.sum(mass_names == names)) if mass_names.size == n_model else 0
-        if n_matched_mass != n_model:
-            raise ValueError(
-                f"template_weights.yso: mass table join n_matched={n_matched_mass} "
-                f"!= n_register={n_model}")
-
-        incl_names, incl_deg = [], []
-        for subdir, _label in YSO_SUBGRIDS:
-            n, i = _read_yso_subgrid_inclination(config, subdir)
-            incl_names.append(n)
-            incl_deg.append(i)
-        incl_names = np.concatenate(incl_names)
-        incl_deg = np.concatenate(incl_deg)
-        n_matched_incl = int(np.sum(incl_names == names)) if incl_names.size == n_model else 0
-        if n_matched_incl != n_model:
-            raise ValueError(
-                f"template_weights.yso: inclination join n_matched={n_matched_incl} "
-                f"!= n_register={n_model}")
 
         log10_f45_centers = _log10_f45_centers()
         n_b = log10_f45_centers.size
         c_theta = _c_theta(reg)
 
-        # the IMF x inclination / rho weight (sec 5.5, survey-wide: no
-        # sub-grid subdivides the library's own density here, sec 1.4;
-        # the subclass posterior is the only place the YSO set is
-        # subdivided). Unnormalised: it seeds the Gaussian below rather
-        # than being stored on its own (W25b).
-        psi = _chabrier_dn_dlogm(m_star)         # imf: dN/dlog10 M, Chabrier 2003
-        incl_raw = np.sin(np.radians(incl_deg))  # uniform in cos i (spec sec 5.5)
-        w_theta = psi * incl_raw / rho
+        names_w, w_theta = yso_population_weight(config)
+        if not (names_w.size == n_model and np.array_equal(names_w, names)):
+            raise ValueError("template_weights.yso: yso_population_weight's row "
+                              "order disagrees with the yso register")
 
         # the region's own placement of every template on the brightness
         # axis (sec 5.5 "Marks"): `F_theta(d_r) = f_ref,4.5,theta at 1 kpc
@@ -374,7 +503,8 @@ def build_yso(config, region):
         factors = {
             "population": (population_w, c_theta, "", True,
                             "population.yso_mass Chabrier 2003; yso sub-grid "
-                            "parameters.fits inclination; sample_cloud.cloud_interval_pc "
+                            "parameters.fits inclination; Dunham et al. 2014 class census; "
+                            "sample_cloud.cloud_interval_pc "
                             f"placement at d_r={r.d_r_pc:.1f} pc"),
         }
         path = _write_library(config, "yso", "region", names, c_theta, log10_f45_centers, factors,
@@ -387,15 +517,15 @@ def build_yso(config, region):
         # conditional back against the raw (pre-floor) p(F_k) it was
         # built from and recover the population's own template marginal.
         # `retained` is each template's own on-grid share, Sigma_k
-        # contribution[theta, k]; most of the IMF-weighted register sits
-        # below the grid's low edge once placed at the region distance
-        # (61-78% here, consistent with W24's 62-82%), so a template
-        # entirely off-grid contributes zero to `retained` and to the
-        # marginal by construction -- the identity is reported against
-        # BOTH denominators: the on-grid retained sum (what the table can
-        # represent) and the full register sum (what an off-grid template
-        # cannot appear in at all, by the grid's own construction, sec
-        # 4.1's "on-grid fraction").
+        # contribution[theta, k]; most of the census-weighted register
+        # sits below the grid's low edge once placed at the region
+        # distance, so a template entirely off-grid contributes zero to
+        # `retained` and to the marginal by construction -- the identity
+        # is reported against BOTH denominators: the on-grid retained sum
+        # (what the table can represent) and the full register sum
+        # (`Sigma w_theta = 1` exactly, sec 5.5's census: what an
+        # off-grid template cannot appear in at all, by the grid's own
+        # construction, sec 4.1's "on-grid fraction").
         retained = contribution.sum(axis=1)                 # un-normalised, per template
         p_f_retained = contribution.sum(axis=0) / retained.sum()
         marginal = (p_f_retained[None, :] * population_w).sum(axis=1)
@@ -415,14 +545,21 @@ def build_yso(config, region):
               f"C_THETA range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
               f"max={c_theta.max():.4f}", flush=True)
 
-        # report only (spec sec 5.5's check): the share of the raw
-        # (pre-floor, pre-placement) IMF x inclination weight held by
-        # each register SUBCLASS value, a diagnostic of the library's
-        # coverage, never used in the weight itself.
+        # report only (spec sec 5.5's check, sec 5.5 census): the census
+        # share held by each register SUBCLASS value (survey-wide, same
+        # in every region by construction -- the expected check figure)
+        # against the same class's share of the ON-GRID retained weight
+        # AT THIS REGION's distance (post-placement, what the built table
+        # can actually represent), a diagnostic never used in the weight
+        # itself.
         subclass = reg["subclass"]
         for label in np.unique(subclass):
-            share = float(w_theta[subclass == label].sum() / w_theta.sum())
-            print(f"template_weights.yso [{region}]: subclass={label} weight_share={share:.4f}", flush=True)
+            sel = subclass == label
+            census_share = float(w_theta[sel].sum())
+            retained_share = float(retained[sel].sum() / retained.sum())
+            print(f"template_weights.yso [{region}]: subclass={label} "
+                  f"census_share={census_share:.4f} on_grid_retained_share={retained_share:.4f}",
+                  flush=True)
         st.done(path, n_model=n_model, floored_fraction=frac_zero,
                 marginal_dev_retained=marginal_dev_retained, retained_frac=retained_frac)
 
@@ -442,7 +579,10 @@ def _node_kde(colour_theta_f32, c_gal, s_gal):
     report). float32 throughout (a density, not a stored science number);
     one `(n_model, galaxy batch)` block at a time, batch sized to keep
     that block under 512 MB with its one same-shaped working array
-    (rule 10b)."""
+    (rule 10b). Generic in its second argument: `build_galz` also calls
+    this with the templates' own colours in place of `c_gal` (a fixed
+    bandwidth `s_gal`) to form `n(c_theta)`, the library's density of
+    templates in colour that the `colour` factor divides by (sec 1.4)."""
     n_model = colour_theta_f32.size
     n_gal = c_gal.size
     if n_gal == 0:
@@ -473,11 +613,20 @@ def _node_kde(colour_theta_f32, c_gal, s_gal):
 def build_galz(config):
     with progress.Stage("bmstp.template_weights.galz") as st:
         reg = _read_register(config, "galz")
-        names, rho = reg["names"], reg["rho"]
+        names = reg["names"]
         n_model = names.size
         colour_theta = np.log10(reg["f_ref"]["I1"]) - np.log10(reg["f_ref"]["I2"])
         colour_theta_f32 = colour_theta.astype(np.float32)
         c_theta = _c_theta(reg)
+
+        # the library's density of templates in colour (sec 1.4, sec 5.4:
+        # "a kernel density of the templates' colours at the same
+        # bandwidth"): the SAME `_node_kde` Gaussian-KDE construction the
+        # galaxy nodes use below, run once on the templates against
+        # themselves at the fixed bandwidth the galaxy KDE uses -- never
+        # `RHO_KDE1`.
+        template_bandwidth = np.full(n_model, GALZ_COLOUR_BANDWIDTH_DEX, dtype=np.float32)
+        template_density, _ = _node_kde(colour_theta_f32, colour_theta_f32, template_bandwidth)
 
         swire_path = config_module.product_path(config, "sky/derived", "swire", "galaxies", "survey")
         with h5py.File(swire_path, "r") as f:
@@ -511,7 +660,7 @@ def build_galz(config):
             beyond3_fraction[k] = 1.0 if node_gal[k][0].size == 0 else float(np.mean(min_z > 3.0))
             st.tick(k + 1, n_node, "S nodes")
 
-        node_w = _normalise_over_theta((node_density / rho[None, :]).T).T  # (n_node, n_model)
+        node_w = _normalise_over_theta((node_density / template_density[None, :]).T).T  # (n_node, n_model)
 
         # interpolate the per-node, per-template normalised density onto
         # log10_f45_centers (the common, absolute-flux axis, sec 2),
@@ -539,7 +688,9 @@ def build_galz(config):
 
         factors = {
             "colour": (w, c_theta, "", True,
-                       "sky/derived/swire/galaxies_swire_survey.hdf5 COLOUR_I1I2 KDE"),
+                       "sky/derived/swire/galaxies_swire_survey.hdf5 COLOUR_I1I2 KDE "
+                       "/ library colour KDE, bandwidth "
+                       f"{GALZ_COLOUR_BANDWIDTH_DEX:.2f} dex"),
         }
         path = _write_library(config, "galz", "survey", names, c_theta, log10_f45_centers, factors)
         col_sum = w.sum(axis=0)
@@ -596,29 +747,32 @@ def _weighted_type_histogram(template_idx, weight, mark, edges, n_model):
 
 
 def _sps_raw_type_histogram(config, region):
-    """`(names, rho, h, weight)`: the sps register's own
-    `MODEL_NAME`/`RHO_KDE1`, and the region's raw, weighted type
-    histogram on the common `LOG10_F45_EDGES` (the population count per
-    sps template per brightness cell, BEFORE the `1/rho` division and
+    """`(names, h, weight)`: the sps register's own `MODEL_NAME`, and the
+    region's raw, weighted type histogram on the common `LOG10_F45_EDGES`
+    (the population count per sps template per brightness cell, BEFORE
     the per-cell normalisation, spec sec 5.1) -- shared by `build_sps`
-    (which normalises it) and `build_pahc` (which reads it at each PAHC
-    template's matched sps row, owner ruling)."""
+    (which normalises it directly: a matched-star count is already a
+    weight per template, sec 1.4, nothing divides it) and `build_pahc`
+    (which reads it at each PAHC template's matched sps row, owner
+    ruling)."""
     reg = _read_register(config, "sps")
-    names, rho = reg["names"], reg["rho"]
+    names = reg["names"]
     template_idx, weight, log10_f45 = _region_star_stars(config, region)
     h = _weighted_type_histogram(template_idx, weight, log10_f45, grid.LOG10_F45_EDGES, names.size)
-    return names, rho, h, weight
+    return names, h, weight
 
 
 def build_sps(config, region):
     with progress.Stage("bmstp.template_weights.sps", region) as st:
         reg = _read_register(config, "sps")
-        names, rho = reg["names"], reg["rho"]
+        names = reg["names"]
         n_model = names.size
         log10_f45_centers = _log10_f45_centers()
 
-        _names_check, _rho_check, h, weight = _sps_raw_type_histogram(config, region)
-        type_w = _normalise_over_theta(h / rho[:, None])
+        _names_check, h, weight = _sps_raw_type_histogram(config, region)
+        # a matched-star count per template is already a weight per
+        # template (spec sec 1.4): nothing divides the histogram.
+        type_w = _normalise_over_theta(h)
         type_w, frac_zero_type = _floor_normalised(type_w)
 
         n_b_row = _pahc_contrast_row(config, log10_f45_centers)
@@ -658,40 +812,76 @@ def build_sps(config, region):
 # 5.2: "the same weight at every B cell")
 # ---------------------------------------------------------------------------
 
+def agb_tau_ratio(config):
+    """`(names, chem, log10_tau, ratio)` in the agb register's own row
+    order (spec sec 1.4, sec 5.2, owner's ruling 2026-09-09): Riebel et
+    al. 2012's distribution of fitted optical depth BY CHEMISTRY,
+    `p_chem(tau)`, evaluated at each template's own `tau`, divided by the
+    library's density of templates in `tau` FOR THAT CHEMISTRY
+    (`_equal_count_binned_density`, bins wide enough to hold
+    `LIBRARY_DENSITY_MIN_COUNT` templates, never `RHO_KDE1`). `ratio`
+    carries no carbon-fraction admixture: `build_agb`'s `tau` factor
+    applies `F_C`/`1-F_C` on top of it (the class-wide statement, mixing
+    both chemistries into one factor); `bmstp.atlas._agb_shell_pool`'s
+    per-chemistry Monte Carlo pool does not, since `sample_star.
+    sample_agb` has already resolved which chemistry a given draw is.
+    Shared by both rather than re-derived, so the Riebel fit and the
+    density construction live in exactly one place."""
+    reg = _read_register(config, "agb")
+    names = reg["names"]
+    n_model = names.size
+
+    grid_path = f"{config.inputs['sed_models']}/agb/parameters.fits"
+    with fits.open(grid_path) as hdul:
+        d = hdul[1].data
+        grid_names = np.char.strip(d["MODEL_NAME"].astype(str))
+        tau = d["TAU"].astype(np.float64)
+        chem = np.char.strip(d["CHEM"].astype(str))
+    n_matched = int(np.sum(grid_names == names)) if grid_names.size == n_model else 0
+    if n_matched != n_model:
+        raise ValueError(f"template_weights.agb_tau_ratio: join n_matched={n_matched} "
+                          f"!= n_register={n_model}")
+
+    gcl, riebel_tau = star_population.read_riebel_optical_depths(config)
+    log10_tau = np.log10(tau)
+    edges = np.linspace(-3.0, 2.0, 61)
+    ratio = np.zeros(n_model, dtype=np.float64)
+    for label, riebel_key in (("O", "o"), ("C", "c")):
+        sel = chem == label
+        if not np.any(sel):
+            continue
+        log10_tau_riebel = np.log10(riebel_tau[gcl == riebel_key])
+        h, _ = np.histogram(log10_tau_riebel, bins=edges, density=True)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        p_chem = np.interp(log10_tau[sel], centers, h, left=0.0, right=0.0)
+        n_chem = _equal_count_binned_density(log10_tau[sel], LIBRARY_DENSITY_MIN_COUNT)
+        ratio[sel] = p_chem / n_chem
+    return names, chem, log10_tau, ratio
+
+
 def build_agb(config, region):
     with progress.Stage("bmstp.template_weights.agb", region) as st:
         reg = _read_register(config, "agb")
-        names, rho = reg["names"], reg["rho"]
+        names = reg["names"]
         n_model = names.size
 
-        grid_path = f"{config.inputs['sed_models']}/agb/parameters.fits"
-        with fits.open(grid_path) as hdul:
-            d = hdul[1].data
-            grid_names = np.char.strip(d["MODEL_NAME"].astype(str))
-            tau = d["TAU"].astype(np.float64)
-            chem = np.char.strip(d["CHEM"].astype(str))
-        n_matched = int(np.sum(grid_names == names)) if grid_names.size == n_model else 0
-        if n_matched != n_model:
-            raise ValueError(f"template_weights.agb: join n_matched={n_matched} "
-                              f"!= n_register={n_model}")
-
-        gcl, riebel_tau = star_population.read_riebel_optical_depths(config)
-        log10_tau_o = np.log10(riebel_tau[gcl == "o"])
-        log10_tau_c = np.log10(riebel_tau[gcl == "c"])
-        edges = np.linspace(-3.0, 2.0, 61)
-        h_o, _ = np.histogram(log10_tau_o, bins=edges, density=True)
-        h_c, _ = np.histogram(log10_tau_c, bins=edges, density=True)
-        centers = 0.5 * (edges[:-1] + edges[1:])
-
-        log10_tau_theta = np.log10(tau)
-        p_o = np.interp(log10_tau_theta, centers, h_o, left=0.0, right=0.0)
-        p_c = np.interp(log10_tau_theta, centers, h_c, left=0.0, right=0.0)
-        p_mix = np.where(chem == "O", (1.0 - F_C) * p_o, F_C * p_c)
+        names_r, chem, _log10_tau_theta, ratio = agb_tau_ratio(config)
+        if not (names_r.size == n_model and np.array_equal(names_r, names)):
+            raise ValueError("template_weights.agb: agb_tau_ratio's row order "
+                              "disagrees with the agb register")
+        # the class-wide `tau` factor mixes both chemistries by their
+        # carbon fraction (spec sec 5.2): F_C * ratio for carbon-rich,
+        # (1-F_C) * ratio for oxygen-rich.
+        p_mix = np.where(chem == "O", (1.0 - F_C) * ratio, F_C * ratio)
+        n_template_o = int(np.sum(chem == "O"))
+        n_template_c = int(np.sum(chem == "C"))
+        gcl, _riebel_tau = star_population.read_riebel_optical_depths(config)
+        n_riebel_o = int(np.sum(gcl == "o"))
+        n_riebel_c = int(np.sum(gcl == "c"))
 
         log10_f45_centers = _log10_f45_centers()
         n_b = log10_f45_centers.size
-        tau_raw = p_mix / rho
-        tau_w = _normalise_over_theta(_broadcast(tau_raw, n_b))
+        tau_w = _normalise_over_theta(_broadcast(p_mix, n_b))
         tau_w, frac_zero = _floor_normalised(tau_w)
 
         factors = {
@@ -702,8 +892,8 @@ def build_agb(config, region):
         path = _write_library(config, "agb", "region", names, c_theta, log10_f45_centers, factors,
                                region=region)
         col_sum = tau_w.sum(axis=0)
-        print(f"template_weights.agb [{region}]: n_riebel_o={log10_tau_o.size} "
-              f"n_riebel_c={log10_tau_c.size} max|colsum-1|="
+        print(f"template_weights.agb [{region}]: n_riebel_o={n_riebel_o} n_riebel_c={n_riebel_c} "
+              f"n_template_o={n_template_o} n_template_c={n_template_c} max|colsum-1|="
               f"{float(np.max(np.abs(col_sum - 1.0))):.3g} floored_fraction={frac_zero:.4f} "
               f"C_THETA range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
               f"max={c_theta.max():.4f}",
@@ -759,18 +949,19 @@ def _match_pahc_to_sps(config, sps_names):
 def build_pahc(config, region):
     with progress.Stage("bmstp.template_weights.pahc", region) as st:
         reg = _read_register(config, "pahc")
-        names, rho = reg["names"], reg["rho"]
+        names = reg["names"]
         n_model = names.size
         log10_f45_centers = _log10_f45_centers()
 
-        sps_names, sps_rho, h_sps, _weight = _sps_raw_type_histogram(config, region)
+        sps_names, h_sps, _weight = _sps_raw_type_histogram(config, region)
         sps_idx, dist = _match_pahc_to_sps(config, sps_names)
         # the region's raw STAR type histogram (the population count, not
-        # yet divided by rho or normalised) at each PAHC template's
-        # matched sps row, then PAHC's own 1/rho and per-cell
-        # normalisation (owner ruling: a proper weight over the PAHC
-        # library, not a copy of the sps one).
-        raw_type = h_sps[sps_idx, :] / rho[:, None]
+        # yet normalised) at each PAHC template's matched sps row, then
+        # PAHC's own per-cell normalisation (owner ruling: a proper
+        # weight over the PAHC library, not a copy of the sps one). A
+        # matched-star count is already a weight per template (sec 1.4):
+        # nothing divides it.
+        raw_type = h_sps[sps_idx, :]
         type_w = _normalise_over_theta(raw_type)
         type_w, frac_zero_type = _floor_normalised(type_w)
 
