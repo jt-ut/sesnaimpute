@@ -790,7 +790,8 @@ def build_region(config, region):
         # (`bmstp.density._cloud_column_fraction`, W26): the intrinsic
         # YSO/H2S density below is the law applied to `a_cloud`, not the
         # sightline's whole adopted column.
-        cloud_frac_by_sl, d_front, d_back, _d_edge = density_module._cloud_column_fraction(config, region)
+        cloud_frac_by_sl, d_front = density_module._cloud_column_fraction(config, region)
+        _d_front, d_back = sample_cloud.cloud_interval_pc(config, region)
         giannini_ratios = h2s_module._load_giannini_ratios(config)
         # H2S's brightness lognormal (sec. 5.6 "Marks") is P3's own
         # attribute (`bmstp.shapes.build_cloud`, sec. 4.1's shape grids):
