@@ -1,16 +1,19 @@
-"""The common grid every class's shape lives on (SPEC_BMSTP_DRAFT.md sec. 2),
-the weighted binning of a population sample onto it, and the per-source
-column-kernel blur along the `log10 x` axis (sec. 2, 4.2).
+"""The common grid every class's shape lives on (SPEC_BMSTP_DRAFT.md sec. 2,
+"the common grid"), the weighted binning of a population sample onto it, and
+the per-source column-kernel blur along the `log10 x` axis (sec. 2, 4.2).
 
-`log10 x = log10(a / A_s)` runs -3.0 to +1.0 in 128 cells of 1/32 dex, one
-axis shared by every class; the brightness axis is 120 cells of 0.1 dex,
-its origin a per-shape attribute. A shape's mass outside its grid is the
-`mass_outside` `bin` reports; its value in an empty or off-grid cell is
-`FLOOR` of its peak cell (sec. 2, "the floor"). At bin time every shape is
-smoothed by one cell along `log10 x` and, along the brightness axis, by
-the larger of one cell and the region's distance uncertainty in
-`-2 log10 d` (sec. 2, "minimum widths"): no shape is a delta narrower than
-the fit's own uncertainty in `log10 B_hat`.
+`log10 x = log10(a / A_s)` runs -3.0 to +1.0 in 128 cells of 1/32 dex; the
+brightness axis, `log10 F_4.5` (the object's dereddened 4.5 micron flux in
+mJy, "4.5B", the owner's ruling 2026-09-08), runs -4.0 to +6.0 in 100 cells
+of 0.1 dex -- ONE origin, the same for every class (sec. 2's "brightness"
+and "the common grid" rows: no per-shape brightness origin, and no region-
+distance widening here -- YSO's own distance-uncertainty widening is a
+Gaussian formed in `bmstp.sample_cloud`, not a `bin`-time floor). A shape's
+mass outside its grid is the `mass_outside` `bin` reports; its value in an
+empty or off-grid cell is `FLOOR` of its peak cell (sec. 2, "the floor"). At
+bin time every shape is smoothed by exactly one cell along EACH axis (sec.
+2, "minimum widths"): no shape is a delta narrower than the fit's own
+uncertainty in `log10 B_hat` (0.04-0.1 dex on a two-band source).
 """
 
 import numpy as np
@@ -24,13 +27,13 @@ _N_X = LOG10_X_EDGES.size - 1
 _X_CELL_WIDTH = (LOG10_X_EDGES[-1] - LOG10_X_EDGES[0]) / _N_X
 _X_CENTERS = LOG10_X_EDGES[:-1] + 0.5 * _X_CELL_WIDTH
 
-#: The brightness axis: 120 cells of 0.1 dex, origin per shape (sec. 2).
-N_B = 120
-D_LOG10_B = 0.1
-
-#: The template-unit brightness origin for the star family and YSO
-#: (`log10 B` from -6.0 to +6.0 over 120 cells of 0.1 dex, sec. 2).
-LOG10_B_ORIGIN_TEMPLATE = -6.0
+#: `log10 F_4.5` cell edges, -4.0 to +6.0 in 100 cells of 0.1 dex (sec. 2,
+#: "the common grid"): one axis and one origin for STAR, AGB, PAHC, GAL and
+#: YSO alike.
+LOG10_F45_EDGES = np.linspace(-4.0, 6.0, 101)
+_N_B = LOG10_F45_EDGES.size - 1
+D_LOG10_F45 = (LOG10_F45_EDGES[-1] - LOG10_F45_EDGES[0]) / _N_B
+_B_CENTERS = LOG10_F45_EDGES[:-1] + 0.5 * D_LOG10_F45
 
 #: A shape's value in an empty or off-grid cell, as a fraction of its
 #: peak cell (sec. 2, "the floor").
@@ -38,30 +41,36 @@ FLOOR = 1e-6
 
 _SQRT2 = float(np.sqrt(2.0))
 
+#: Legacy per-shape brightness origin and edge builder, kept ONLY so the
+#: sibling modules this unit's brief does not touch (`bmstp.template_weights`,
+#: `bmstp.atlas`, `fittp.prior_reader`) still IMPORT -- their own P5/P6
+#: builds against the pre-4.5B schema are expected to break at run time
+#: until W25-W28 rewire them onto `LOG10_F45_EDGES`/`bin()` above, per the
+#: brief; this is not read by anything in this module.
+LOG10_B_ORIGIN_TEMPLATE = -6.0
+N_B = 120
+D_LOG10_B = 0.1
+
 
 def log10_b_edges(origin):
-    """The `(N_B + 1,)` brightness-axis cell edges for a shape whose
-    origin is `origin` (sec. 2): `N_B` cells of `D_LOG10_B` dex."""
+    """Legacy per-shape brightness-axis edges (see the constants above):
+    `N_B` cells of `D_LOG10_B` dex from `origin`."""
     return origin + D_LOG10_B * np.arange(N_B + 1)
 
 
-def bin(x, log10_b, w, origin, sigma_b_min):
+def bin(x, log10_f45, w):
     """The weighted 2-D histogram `(H, mass_outside)` of a population
     sample on the common grid (sec. 2): `x` the sample's scaled
-    extinction, `log10_b` its brightness, `w` its weight, `origin` the
-    shape's brightness-axis origin, `sigma_b_min` the region's distance
-    uncertainty in `-2 log10 d` (dex) that floors the brightness-axis
-    smoothing width. `H` is normalised to sum to `1 - mass_outside` over
+    extinction, `log10_f45` its dereddened 4.5 micron flux (log10 mJy),
+    `w` its weight. `H` is normalised to sum to `1 - mass_outside` over
     cells (the mass that fell outside the grid is not in `H`), then
-    smoothed by one cell along `log10 x` and by
-    `max(D_LOG10_B, sigma_b_min)` along `log10 B` (sec. 2, "minimum
-    widths") with `mode="constant"` (zero beyond the edges) on both axes:
-    any mass the smoothing pushes past an edge is mass outside the grid
-    and is folded into `mass_outside`, so `H.sum() == 1 - mass_outside`
-    stays an exact identity before the floor. `H` is then floored at
-    `FLOOR * H.max()`."""
+    smoothed by exactly one cell along EACH axis (sec. 2, "minimum
+    widths") with `mode="constant"` (zero beyond the edges): any mass the
+    smoothing pushes past an edge is mass outside the grid and is folded
+    into `mass_outside`, so `H.sum() == 1 - mass_outside` stays an exact
+    identity before the floor. `H` is then floored at `FLOOR * H.max()`."""
     x = np.asarray(x, dtype=float)
-    log10_b = np.asarray(log10_b, dtype=float)
+    log10_f45 = np.asarray(log10_f45, dtype=float)
     w = np.asarray(w, dtype=float)
     total_weight = w.sum()
     with np.errstate(divide="ignore"):
@@ -74,25 +83,18 @@ def bin(x, log10_b, w, origin, sigma_b_min):
     # moves an exact-edge mark into the cell whose upper edge it sat on,
     # without moving any mark that is not on an edge.
     log10_x = np.nextafter(log10_x, -np.inf)
-    b_edges = log10_b_edges(origin)
     H, _, _ = np.histogram2d(
-        log10_x, log10_b, bins=[LOG10_X_EDGES, b_edges], weights=w
+        log10_x, log10_f45, bins=[LOG10_X_EDGES, LOG10_F45_EDGES], weights=w
     )
     mass_outside = float((total_weight - H.sum()) / total_weight)
     H = H / total_weight
     # `mode="constant"` (zero beyond the edges) on both axes: mass the
-    # minimum-width smoothing pushes past `log10 x = -3.0`/`+1.0`, or
-    # past the brightness axis's own edges, is mass outside the grid --
-    # folded into `mass_outside` below, not reappeared at the opposite
-    # edge (fixed defect: `mode="wrap"`, a circular convolution, used to
-    # wrap a foreground star's mass at the `x` floor around to the
-    # background edge, and likewise on `log10 B`).
+    # one-cell smoothing pushes past `log10 x = -3.0`/`+1.0`, or past
+    # `log10 F_4.5 = -4.0`/`+6.0`, is mass outside the grid -- folded into
+    # `mass_outside` below, not reappeared at the opposite edge.
     mass_before = float(H.sum())
     H = gaussian_filter1d(H, sigma=1.0, axis=0, mode="constant")
-    mass_outside += mass_before - float(H.sum())
-    sigma_b_cells = max(D_LOG10_B, float(sigma_b_min)) / D_LOG10_B
-    mass_before = float(H.sum())
-    H = gaussian_filter1d(H, sigma=sigma_b_cells, axis=1, mode="constant")
+    H = gaussian_filter1d(H, sigma=1.0, axis=1, mode="constant")
     mass_outside += mass_before - float(H.sum())
     H = np.maximum(H, FLOOR * H.max())
     return H.astype(np.float64), mass_outside
