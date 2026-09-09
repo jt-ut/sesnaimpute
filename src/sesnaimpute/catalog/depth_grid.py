@@ -185,7 +185,7 @@ def _pixel_column(config, pix):
     `granules/build.py`'s own `HPX_PIX_256 = HPX_PIX_512 // 4`) -- the same
     join `bmstp.atlas._pixel_column` performs. The depth grid's low-column
     selection is a starlight (IRAC) selection, so it reads the extinction
-    column, not the gas column the young-star law was measured on (W49).
+    column, not the gas column the young-star law was measured on.
     """
     parent256 = pix // 4
     path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "sightline")

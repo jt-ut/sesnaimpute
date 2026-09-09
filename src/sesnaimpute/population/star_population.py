@@ -629,7 +629,7 @@ def _region_source_geometry(config, region, tiles):
     tile-membership product exists yet). The model stars' own dimming
     (`N^{model->obs}`, sec. 5.1) is what their light passes through, so
     this reads the extinction column, not the gas column the young-star
-    law was measured on (W49)."""
+    law was measured on."""
     rs = access.region_slice(config, region)
     pix512 = np.asarray(rs["hpx_pix_512"], dtype=np.int64)
     pix256 = np.asarray(rs["hpx_pix_256"], dtype=np.int64)

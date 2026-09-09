@@ -367,7 +367,7 @@ def _region_pixel_columns(config, region):
     nside-512 pixel by construction), and each pixel's mean extinction
     column `A_PIX_K` over its own SESNA sources. The model stars' own
     dimming is what a star's light passes through, not the gas column
-    the young-star law was measured on (W49), so this reads the
+    the young-star law was measured on, so this reads the
     extinction column.
     """
     rs = access.region_slice(config, region)

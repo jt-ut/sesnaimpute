@@ -49,7 +49,7 @@ def _serving_map_name(config, region):
     by another map there is an edge case (its position falls outside
     this map's own footprint) and is handled as such by the caller. Reads
     the gas column product: the knot field convolves the young-star law,
-    which was measured on the gas column, not extinction (W49)."""
+    which was measured on the gas column, not extinction."""
     path = config_module.product_path(config, "sky/derived", "adopted", "column", "source", region=region)
     with h5py.File(path, "r") as f:
         names = [n.decode("utf-8") if isinstance(n, bytes) else str(n) for n in f["MAP_NAME"][:]]

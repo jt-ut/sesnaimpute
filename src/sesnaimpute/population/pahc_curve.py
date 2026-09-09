@@ -344,7 +344,7 @@ def region_measurement(config, region, colour_knots, colour45_median):
     # (SPEC_PRIORS.md section 1.3, "kappa_i(a)"), catalogue order --
     # extinction, not the gas column the young-star law was measured
     # on, since this is what the source's own starlight passes through
-    # (W49)
+    #
     a_col_path = config_module.product_path(
         config, "sky/derived", "adopted", "extinction", "source", region=region)
     a_col_all = access.per_source(config, region, a_col_path, ["A_COL_K"])["A_COL_K"]

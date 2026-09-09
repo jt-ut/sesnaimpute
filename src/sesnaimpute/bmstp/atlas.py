@@ -139,7 +139,7 @@ def _pixel_column(config, pix):
     every source-bearing sightline, so every admitted pixel resolves --
     no NaN. The atlas's own column is what a source's light passes
     through, so it reads extinction here; its YSO density instead comes
-    from `bmstp.density`'s product, which keeps the gas column (W49)."""
+    from `bmstp.density`'s product, which keeps the gas column."""
     parent256 = pix // 4
     path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "sightline")
     if not os.path.exists(path):

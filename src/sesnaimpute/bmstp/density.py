@@ -217,7 +217,7 @@ def build_region(config, region, st):
     # A_s, the prior's depth axis x = a/A_s (SPEC_BMSTP_DRAFT.md sec.
     # 4.1): what a source's own light passes through, so this is the
     # extinction column, not the gas column the young-star law is
-    # measured on (W49)
+    # measured on
     col_path = config_module.product_path(
         config, "sky/derived", "adopted", "extinction", "source", region=region)
     if not os.path.exists(col_path):
@@ -234,7 +234,7 @@ def build_region(config, region, st):
 
     # A_cloud, the young-star law's own input (sec. 5.5): the gas
     # column exactly as adopted, not extinction -- Pokhrel's law was
-    # measured on this quantity (W49)
+    # measured on this quantity
     gas_path = config_module.product_path(
         config, "sky/derived", "adopted", "column", "source", region=region)
     with h5py.File(gas_path, "r") as f:

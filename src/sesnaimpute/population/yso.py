@@ -355,7 +355,7 @@ def _planck_parent_column(config, parent256):
     (SPEC_BMSTP_DRAFT.md sec 3.1) -- the fallback arm's own column, for
     pixels the Herschel maps do not reach. The anchors' own observed
     young-star count is a starlight quantity, so it reads extinction
-    here, not the gas column `law_count` was calibrated on (W49)."""
+    here, not the gas column `law_count` was calibrated on."""
     path = config_module.product_path(config, "sky/derived", "adopted",
                                        "extinction", "sightline")
     if not os.path.exists(path):
