@@ -1,21 +1,23 @@
-"""2MASS PSC anchor counts per nside-512 HEALPix pixel (SPEC_PRIORS.md
-section 2.1: "2MASS PSC at Ks < 14.3, clean photometry flag ...
-Half-magnitude histograms per nside-512 pixel", read against
-`04_star_family.md` section B's `read_anchor_counts` row). The grid runs
-half-magnitude bins from 9.0 to the spec cut at 14.3 -- ten whole bins
-(9.0-14.0) plus one partial closing bin (14.0-14.3) that carries the
-anchor exactly to the cut, rather than a full magnitude past it.
+"""2MASS PSC anchor counts per nside-512 HEALPix pixel (SPEC_BMSTP_DRAFT.md
+section 5.1's anchor row: 2MASS PSC from 9.0 in half-magnitude bins,
+read against the STAR weight's `N^obs` row). The grid runs half-magnitude
+bins from 9.0 to 14.3 -- ten whole bins (9.0-14.0) plus one partial
+closing bin (14.0-14.3) that carries the anchor exactly to the cut,
+rather than a full magnitude past it.
 
 Derive never fetches, but this is the one computing half of the 2MASS
 pair: `sky.download.twomass_counts.build` could not get IRSA to bin by
 nside-512 pixel server-side (no HEALPix ADQL function there -- see that
-module's docstring), so it wrote verbatim clean-photometry rows
-(`glon`, `glat`, `k_m`), and this module does the binning the Gaia
-sibling's TAP query did for itself: `healpy.ang2pix(512, glon, glat,
-nest=True, lonlat=True)` -- no frame conversion, since `fp_psc`'s
-`glon`/`glat` are already this project's own Galactic nside-512 grid --
-then a half-magnitude histogram per pixel, restricted to the region's
-own occupied pixel set from the granule map.
+module's docstring), so it wrote verbatim rows of 2MASS's own real Ks
+point sources (`glon`, `glat`, `k_m`, `cc_flg`, `rd_flg`, `ph_qual`,
+`j_m`, `h_m`), and this module does the binning the Gaia sibling's TAP
+query did for itself: `healpy.ang2pix(512, glon, glat, nest=True,
+lonlat=True)` -- no frame conversion, since `fp_psc`'s `glon`/`glat` are
+already this project's own Galactic nside-512 grid -- then a half-
+magnitude histogram per pixel, restricted to the region's own occupied
+pixel set from the granule map. Alongside the histogram it reports, per
+region, what fraction of the counted sources carry a `cc_flg` confusion
+code (`CONFUSION_CC_CODES`) -- report only, not written to the product.
 """
 
 import os
@@ -44,6 +46,13 @@ ROW_BATCH_BUDGET_BYTES = 512 << 20
 #: Ten half-mag bins (9.0-14.0) plus the closing partial bin to the spec
 #: cut (SPEC_PRIORS.md section 2.1, "2MASS PSC ... Ks < 14.3").
 MAG_EDGES = np.append(np.arange(9.0, 14.0001, 0.5), 14.3)
+#: `cc_flg`'s five non-zero codes -- the download module's own constants
+#: block and docstring quote the Explanatory Supplement establishing
+#: that every one marks a real, retained source, not an artifact; this
+#: view reports what fraction of the counted (real-detection) sources
+#: carry each, so the confusion the old clean-photometry cut used to
+#: discard is on record.
+CONFUSION_CC_CODES = ("p", "c", "d", "s", "b")
 
 
 def _download_path(config, region):
@@ -72,13 +81,16 @@ def _csv_row_batch_size(csv_path, budget_bytes=ROW_BATCH_BUDGET_BYTES):
 
 
 def _counts_matrix(pixels, csv_path):
-    """`(n_pix, n_bins)` int64: each downloaded clean-photometry row
-    placed at its own Galactic nside-512 pixel and Ks half-mag bin,
-    restricted to `pixels` (the region's own occupied set). Read in row
-    batches (rule 10b): the histogram this accumulates into is exact and
-    order-independent, so no batching changes any count."""
+    """`(n_pix, n_bins)` int64: each downloaded row placed at its own
+    Galactic nside-512 pixel and Ks half-mag bin, restricted to `pixels`
+    (the region's own occupied set). Read in row batches (rule 10b): the
+    histogram this accumulates into is exact and order-independent, so
+    no batching changes any count. Alongside it, the counted rows' own
+    `cc_flg` Ks character is tallied per `CONFUSION_CC_CODES` -- report
+    only, read by nothing, so it cannot change the histogram above."""
     n_pix, n_bins = pixels.size, MAG_EDGES.size - 1
     n = np.zeros((n_pix, n_bins), dtype=np.int64)
+    code_counts = {c: 0 for c in CONFUSION_CC_CODES}
     if not os.path.exists(csv_path):
         raise FileNotFoundError(
             f"twomass_counts derive: no download CSV at {csv_path} -- run the "
@@ -97,7 +109,10 @@ def _counts_matrix(pixels, csv_path):
         in_bin = (bin_idx >= 0) & (bin_idx < n_bins)
         keep = in_set & in_bin
         np.add.at(n, (loc[keep], bin_idx[keep]), 1)
-    return n
+        cc_ks_kept = chunk["cc_flg"].str[2].to_numpy()[keep]
+        for code in CONFUSION_CC_CODES:
+            code_counts[code] += int((cc_ks_kept == code).sum())
+    return n, code_counts
 
 
 def _write_region(config, region, pixels, n):
@@ -112,7 +127,10 @@ def _write_region(config, region, pixels, n):
 
 def build(config, regions=None):
     """Writes `sky/derived/twomass/counts_twomass_hpx512__<Region>.hdf5`
-    for each requested region (default: all thirty)."""
+    for each requested region (default: all thirty). Reports, per
+    region, the fraction of the counted (real-Ks-detection) sources
+    carrying a `cc_flg` confusion code -- the population the old clean-
+    photometry cut used to exclude (SPEC_BMSTP_DRAFT.md 5.1)."""
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
     written = []
@@ -121,11 +139,17 @@ def build(config, regions=None):
         total_counts = 0
         for i, region in enumerate(regions):
             pixels = _region_pixels(config, region)
-            n = _counts_matrix(pixels, _download_path(config, region))
+            n, code_counts = _counts_matrix(pixels, _download_path(config, region))
             _write_region(config, region, pixels, n)
             written.append(region)
-            total_counts += int(n.sum())
-            print(f"twomass_counts derive: {region}: {pixels.size} pixels, {int(n.sum())} total counts")
+            n_total = int(n.sum())
+            total_counts += n_total
+            n_confused = sum(code_counts.values())
+            frac = n_confused / n_total if n_total else 0.0
+            by_code = ", ".join(f"{c}={code_counts[c]/n_total:.4f}" if n_total else f"{c}=0.0000"
+                                 for c in CONFUSION_CC_CODES)
+            print(f"twomass_counts derive: {region}: {pixels.size} pixels, {n_total} total counts, "
+                  f"{frac:.4f} confusion-flagged ({by_code})")
             st.tick(i + 1, n_regions, "regions")
         st.done(None, regions=n_regions, total_counts=total_counts)
     return dict(regions_written=written)
