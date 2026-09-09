@@ -9,16 +9,25 @@ STAR/AGB (section 5.1, 5.2) are per-tile aggregates of the population's
 retained field-star sample, gathered to sources by tile; PAHC (section
 5.3) is STAR's density verbatim. GAL (section 5.4) is one survey number,
 the counts law integrated over its tabulated grid. YSO (section 5.5) is
-the quadratic column law, `kappa` selected by which arm reached the
-source (`ARM`, from the adopted column's own provenance flag). H2S
-(section 5.6) rides on that same young-star law density, scaled by the
+the quadratic law applied to the CLOUD's own share of the column,
+`A_cloud` (the foreground and the measured background inside the
+Edenhofer map's reach deducted from the source's whole adopted column,
+`bmstp.sample_cloud`'s own doubled cloud interval), `kappa` selected by
+which arm reached the source (`ARM`, from the adopted column's own
+provenance flag). H2S (section 5.6) rides on that same INTRINSIC
+young-star law density (before the grid's own on-grid fraction is
+applied, section 4.1: H2S's own on-grid fraction is 1), scaled by the
 region's `eta` and the universal `eps_ext`, but on the Herschel arm the
 law itself is the knot-driver kernel's convolution of the region's HGBS
 map (`bmstp.knot_field.convolved_law`), sampled at the source's own
 position -- a map operation, once per region, never a per-source
 convolution; a Herschel-arm source whose position falls outside the
 convolved map, and every Planck-arm source (the kernel is sub-beam at
-Planck's 5.03' beam), takes the law at its own column instead.
+Planck's 5.03' beam), takes the law at its own column instead. Every
+density is a RETAINED density (section 4.1): the intrinsic count times
+the population's on-grid fraction at the source's own grain -- STAR/AGB
+by tile, YSO by sightline, GAL the one survey-wide attr, PAHC reading
+STAR's own fraction, H2S's own fraction fixed at 1 (section 5.5, 5.6).
 """
 
 import os
@@ -35,8 +44,10 @@ from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.population import field_stars
-from sesnaimpute.population.yso import PROVENANCE_HERSCHEL, pc2_per_deg2
+from sesnaimpute.population.yso import PROVENANCE_HERSCHEL, law_count, pc2_per_deg2
+from sesnaimpute.bmstp import grid
 from sesnaimpute.bmstp import knot_field
+from sesnaimpute.bmstp import sample_cloud
 from sesnaimpute.bmstp import sample_gal
 
 #: Not yet in constants.py -- added here per CODING_RULES_BMSTP.md rule 3,
@@ -147,6 +158,45 @@ def _gal_density(config):
     return sample_gal.density(config)
 
 
+def _cloud_column_fraction(config, region):
+    """`A_cloud(sightline) / A_s`, section 5.5 "Sky density": the CLOUD's
+    own share of the sightline's column, `1 - u(d_front) - [u(d_edge) -
+    u(d_back)]`, `u(d) = A_CUM_K / A_INF_K` (the profile product,
+    `sky/derived/edenhofer/profile_edenhofer_sightline__R.hdf5`)
+    interpolated linearly in distance on its own `DIST_PC` axis, at the
+    region's cloud interval `[d_front, d_back]` (`bmstp.sample_cloud`'s
+    own doubled-interval rule, W24b -- imported, not re-derived) and the
+    map's own last cell edge `d_edge = DIST_PC[-1]`: the foreground and
+    the measured background inside the map's reach are deducted, but the
+    disc tail beyond `d_edge` stays with the cloud (the adopted column's
+    residual against the map's own edge, not measured background), so the
+    background term drops to zero once `d_back` itself reaches `d_edge`.
+    Returns the per-sightline fraction, one value per row of the profile
+    product's own `HPX_PIX_256` axis -- the SAME axis, in the SAME order,
+    P3's `HPX_PIX_256` is built from (`bmstp.shapes.build_cloud` writes it
+    straight from `sample_cloud._region_profile`'s own read of this
+    product), so a source's `sightline_row` into P3 indexes it directly."""
+    path = config_module.product_path(
+        config, "sky/derived", "edenhofer", "profile", "sightline", region=region)
+    with h5py.File(path, "r") as f:
+        dist_pc = np.asarray(f["DIST_PC"][:], dtype=np.float64)
+        a_cum_k = np.asarray(f["A_CUM_K"][:], dtype=np.float64)
+        a_inf_k = np.asarray(f["A_INF_K"][:], dtype=np.float64)
+    u = a_cum_k / a_inf_k[:, None]  # (n_sl, n_d): u(DIST_PC[j]) per sightline
+    d_edge = float(dist_pc[-1])
+
+    def _u_at(d):
+        j = int(np.clip(np.searchsorted(dist_pc, d), 1, dist_pc.size - 1))
+        d0, d1 = dist_pc[j - 1], dist_pc[j]
+        frac = (d - d0) / (d1 - d0) if d1 > d0 else 0.0
+        return u[:, j - 1] + frac * (u[:, j] - u[:, j - 1])  # (n_sl,)
+
+    d_front, d_back = sample_cloud.cloud_interval_pc(config, region)
+    u_front = _u_at(d_front)
+    background = np.zeros_like(u_front) if d_back >= d_edge else (u[:, -1] - _u_at(d_back))
+    return 1.0 - u_front - background, d_front, d_back, d_edge
+
+
 def build_region(config, region, st):
     rs = access.region_slice(config, region)
     n = rs["n_sources"]
@@ -179,29 +229,54 @@ def build_region(config, region, st):
     p2_path = config_module.product_path(config, "bmstp", "shape", "star", "tile", region=region)
     with h5py.File(p2_path, "r") as f:
         tile_id_axis = np.asarray(f["TILE_ID"][:], dtype=np.int64)
+        on_grid_star_by_tile = np.asarray(f["ON_GRID_STAR"][:], dtype=np.float64)
+        on_grid_agb_by_tile = np.asarray(f["ON_GRID_AGB"][:], dtype=np.float64)
     p3_path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
     with h5py.File(p3_path, "r") as f:
         sightline_axis = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
+        on_grid_yso_by_sightline = np.asarray(f["ON_GRID_YSO"][:], dtype=np.float64)
+    p4_path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
+    with h5py.File(p4_path, "r") as f:
+        on_grid_gal = float(f.attrs["ON_GRID_GAL"])
 
     tile_row = _resolve_tile_row(config, region, hpx512, tile_id_axis)
     sightline_row = _resolve_sightline_row(hpx256, sightline_axis)
+    on_grid_star = on_grid_star_by_tile[tile_row]
+    on_grid_agb = on_grid_agb_by_tile[tile_row]
+    on_grid_yso = on_grid_yso_by_sightline[sightline_row]
     st.tick(1, 4, "batches")
 
     star_by_tile, agb_by_tile, omega_sim, f_dusty_o, f_dusty_c, f_c = \
         _star_family_density_by_tile(config, region, tile_id_axis)
-    density_star = star_by_tile[tile_row]
-    density_agb = agb_by_tile[tile_row]
-    density_pahc = density_star.copy()
+    density_star_raw = star_by_tile[tile_row]
+    density_agb_raw = agb_by_tile[tile_row]
+    density_pahc_raw = density_star_raw.copy()
+    # section 4.1: every density is a RETAINED density, the intrinsic
+    # count times the population's on-grid fraction at the source's own
+    # grain -- STAR/AGB by tile (PAHC reads STAR's own grid, W26).
+    density_star = density_star_raw * on_grid_star
+    density_agb = density_agb_raw * on_grid_agb
+    density_pahc = density_pahc_raw * on_grid_star
     st.tick(2, 4, "batches")
 
     density_gal_value = _gal_density(config)
-    density_gal = np.full(n, density_gal_value, dtype=np.float64)
+    density_gal_raw = np.full(n, density_gal_value, dtype=np.float64)
+    density_gal = density_gal_raw * on_grid_gal
 
     reg = regions_module.REGIONS_BY_NAME[region]
     d_r_pc = float(reg.d_r_pc)
     pc2 = float(pc2_per_deg2(d_r_pc))
-    kappa = np.where(arm == 0, KAPPA_HERSCHEL, KAPPA_PLANCK)
-    density_yso = kappa * pc2 * (a_col ** 2)
+    # sec. 5.5 "Sky density": the law is applied to the CLOUD's own share
+    # of the column, `A_cloud = A_s . [1 - u(d_front) - (u(d_edge) -
+    # u(d_back))]`, not the source's whole adopted column -- the
+    # foreground and the measured background inside the map's reach are
+    # deducted; the disc tail past the map's own edge stays with the
+    # cloud (W26).
+    cloud_frac_by_sightline, d_front, d_back, d_edge = _cloud_column_fraction(config, region)
+    cloud_frac = cloud_frac_by_sightline[sightline_row]
+    a_cloud = a_col * cloud_frac
+    density_yso_intrinsic = law_count(config, region, a_cloud, arm)
+    density_yso = density_yso_intrinsic * on_grid_yso
     st.tick(3, 4, "batches")
 
     law_path = config_module.product_path(config, "population", "yso", "law", "region")
@@ -215,17 +290,20 @@ def build_region(config, region, st):
                       abs(pc2 - file_pc2) / file_pc2)
 
     # H2S, sec. 5.6 "Sky density": `A_H2S(s) = L(s) . eta_r . eps_ext`.
-    # `L(s)` is the young-star law at the source's own column/arm/region
-    # distance -- `density_yso` above, already that quantity -- EXCEPT for
-    # a Herschel-arm source whose position the region's convolved law map
+    # `L(s)` is the INTRINSIC young-star law at the source's own
+    # column/arm/region distance -- `density_yso_intrinsic` above, before
+    # the grid's own on-grid fraction is applied (sec. 4.1: H2S's own
+    # on-grid fraction is 1, its shape being a lognormal on its own axis,
+    # formed at read, not this grid's YSO retention, W26) -- EXCEPT for a
+    # Herschel-arm source whose position the region's convolved law map
     # (`bmstp.knot_field.convolved_law`) reaches, where `L(s)` is that
     # convolution sampled at the source instead (a map operation, once
     # per region). An edge Herschel-arm source (outside the convolved
-    # map) falls back to `density_yso`, counted below.
+    # map) falls back to `density_yso_intrinsic`, counted below.
     eta_r = ETA.get(region, ETA_ELSEWHERE)
     law_map, law_wcs, knot_meta = knot_field.convolved_law(config, region)
     herschel_mask = arm == PROVENANCE_HERSCHEL
-    l_of_s = density_yso.copy()
+    l_of_s = density_yso_intrinsic.copy()
     n_herschel = int(np.count_nonzero(herschel_mask))
     n_edge = 0
     knot_ratio_median = knot_ratio_p90 = float("nan")
@@ -238,8 +316,9 @@ def build_region(config, region, st):
         # sec. 5.6's report: the kernel's own effect on Herschel-arm
         # sources, `L(s) / (kappa_Herschel A_s^2 . pc2/deg2)` -- the
         # ratio of the convolved to the unconvolved law at the same
-        # source, `density_yso` being exactly that unconvolved value.
-        ratio = l_convolved[finite] / density_yso[idx[finite]]
+        # source, `density_yso_intrinsic` being exactly that unconvolved
+        # value.
+        ratio = l_convolved[finite] / density_yso_intrinsic[idx[finite]]
         if ratio.size:
             knot_ratio_median = float(np.median(ratio))
             knot_ratio_p90 = float(np.percentile(ratio, 90))
@@ -251,9 +330,13 @@ def build_region(config, region, st):
     return dict(
         name=name, a_col=a_col.astype(np.float32), a_col_sig=a_col_sig, arm=arm, zp_sig=zp_sig,
         tile=tile_row, sightline_row=sightline_row, hpx512=hpx512.astype(np.int64),
-        f_lim=f_lim, d_pahc=d_pahc,
+        f_lim=f_lim, d_pahc=d_pahc, a_cloud=a_cloud.astype(np.float32), cloud_frac=cloud_frac,
         density_star=density_star, density_agb=density_agb, density_pahc=density_pahc,
         density_gal=density_gal, density_yso=density_yso, density_h2s=density_h2s,
+        density_star_raw=density_star_raw, density_agb_raw=density_agb_raw,
+        density_gal_raw=density_gal_raw, density_yso_intrinsic=density_yso_intrinsic,
+        on_grid_star=on_grid_star, on_grid_agb=on_grid_agb, on_grid_yso=on_grid_yso,
+        on_grid_gal=on_grid_gal, d_front=d_front, d_back=d_back, d_edge=d_edge,
         omega_sim=omega_sim, f_dusty_o=f_dusty_o, f_dusty_c=f_dusty_c, f_c=f_c,
         eta_r=eta_r, retention_limits=retention_limits, yso_law_err=yso_law_err,
         d_r_pc=d_r_pc, n=n, knot_meta=knot_meta, n_herschel=n_herschel, n_edge=n_edge,
@@ -274,6 +357,7 @@ def write_region(path, result):
         f.create_dataset("HPX_512", data=result["hpx512"])
         f.create_dataset("F_LIM_50_MJY", data=result["f_lim"])
         f.create_dataset("D_PAHC", data=result["d_pahc"])
+        f.create_dataset("A_CLOUD_K", data=result["a_cloud"])
         f.create_dataset("DENSITY_STAR", data=result["density_star"].astype(np.float64))
         f.create_dataset("DENSITY_AGB", data=result["density_agb"].astype(np.float64))
         f.create_dataset("DENSITY_PAHC", data=result["density_pahc"].astype(np.float64))
@@ -289,6 +373,10 @@ def write_region(path, result):
         f.attrs["F_C"] = result["f_c"]
         f.attrs["OMEGA_SIM_DEG2"] = result["omega_sim"]
         f.attrs["RETENTION_LIMITS_MJY"] = result["retention_limits"]
+        # sec. 4.1/4.2: the grid's own lower edge -- every class's
+        # retention limit, `F_4.5 >= 0.1 uJy` dereddened -- recorded
+        # beside the six retained densities (W26).
+        f.attrs["RETENTION_LOG10_F45"] = float(grid.LOG10_F45_EDGES[0])
 
 
 def build(config, regions=None):
@@ -297,9 +385,87 @@ def build(config, regions=None):
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     for region in region_names:
         with progress.Stage("bmstp.density", region) as st:
-            result = build_region(config, region, st)
             path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
+            # rule: read the CURRENT product's own DENSITY_* before this
+            # build overwrites it -- the sec. 9 identity (STAR/GAL before
+            # retention bit-identical to the current, pre-W26 product)
+            # and the YSO before/after report both need it.
+            old = None
+            if os.path.exists(path):
+                with h5py.File(path, "r") as f:
+                    old = dict(
+                        density_star=np.asarray(f["DENSITY_STAR"][:], dtype=np.float64),
+                        density_gal=np.asarray(f["DENSITY_GAL"][:], dtype=np.float64),
+                        density_yso=np.asarray(f["DENSITY_YSO"][:], dtype=np.float64),
+                    )
+
+            result = build_region(config, region, st)
             write_region(path, result)
+
+            if old is not None and old["density_star"].shape == result["density_star_raw"].shape:
+                star_dev = float(np.max(np.abs(old["density_star"] - result["density_star_raw"])))
+                gal_dev = float(np.max(np.abs(old["density_gal"] - result["density_gal_raw"])))
+                yso_sum_before = float(np.sum(old["density_yso"]))
+            else:
+                star_dev = gal_dev = float("nan")
+                yso_sum_before = float("nan")
+            yso_sum_after = float(np.sum(result["density_yso"]))
+            print(f"bmstp.density {region}: identity DENSITY_STAR before-retention max abs dev "
+                  f"vs current product={star_dev:.3e}, DENSITY_GAL before-retention max abs dev "
+                  f"vs current product={gal_dev:.3e} (sec. 9: bit-identical, W26 adds only the "
+                  f"multiplicative retention step)")
+            print(f"bmstp.density {region}: DENSITY_YSO sum over sources before={yso_sum_before:.6g} "
+                  f"after={yso_sum_after:.6g} deg^-2 (before: law_count(A_s), no retention; after: "
+                  f"law_count(A_cloud) x ON_GRID_YSO, W26)")
+
+            cloud_frac = result["cloud_frac"]
+            cf_med, cf_16, cf_84 = np.percentile(cloud_frac, [50, 16, 84])
+            print(f"bmstp.density {region}: A_cloud/A_s median={cf_med:.6g} "
+                  f"16-84%=[{cf_16:.6g}, {cf_84:.6g}] (cloud interval d_front={result['d_front']:.6g} "
+                  f"d_back={result['d_back']:.6g} d_edge={result['d_edge']:.6g} pc)")
+            for cls, og in (("STAR", result["on_grid_star"]), ("AGB", result["on_grid_agb"]),
+                            ("YSO", result["on_grid_yso"])):
+                print(f"bmstp.density {region}: on-grid fraction {cls} median={np.median(og):.6g}")
+            print(f"bmstp.density {region}: on-grid fraction GAL={result['on_grid_gal']:.6g} "
+                  f"(survey-wide attr; PAHC uses STAR's own on-grid fraction, sec. 4.1)")
+
+            # sec. 9-style acceptance: DENSITY_YSO on the first ten sources,
+            # recomputed BY HAND straight off the adopted-column and
+            # profile products (full float64, independent of `a_col`'s
+            # float32 storage cast and of `_cloud_column_fraction`'s own
+            # code path) -- `law_count(A_cloud) x ON_GRID_YSO`, bar 1e-9.
+            n_check = min(10, result["n"])
+            if n_check:
+                col_path_h = config_module.product_path(
+                    config, "sky/derived", "adopted", "column", "source", region=region)
+                with h5py.File(col_path_h, "r") as f:
+                    a_col_h = np.asarray(f["A_COL_K"][:n_check], dtype=np.float64)
+                profile_path_h = config_module.product_path(
+                    config, "sky/derived", "edenhofer", "profile", "sightline", region=region)
+                rows_h = result["sightline_row"][:n_check]
+                with h5py.File(profile_path_h, "r") as f:
+                    dist_pc_h = np.asarray(f["DIST_PC"][:], dtype=np.float64)
+                    # h5py fancy indexing needs increasing order; the
+                    # ten sources' own sightline rows are not sorted, so
+                    # the full arrays are read once (report-only, ten
+                    # sources) and indexed in numpy instead.
+                    a_cum_h = np.asarray(f["A_CUM_K"][:], dtype=np.float64)[rows_h, :]
+                    a_inf_h = np.asarray(f["A_INF_K"][:], dtype=np.float64)[rows_h]
+                d_front_h, d_back_h, d_edge_h = result["d_front"], result["d_back"], float(dist_pc_h[-1])
+                kappa_h = np.where(result["arm"][:n_check] == PROVENANCE_HERSCHEL, KAPPA_HERSCHEL, KAPPA_PLANCK)
+                pc2_h = float(pc2_per_deg2(result["d_r_pc"]))
+                hand_yso = np.empty(n_check, dtype=np.float64)
+                for k in range(n_check):
+                    u_row = a_cum_h[k] / a_inf_h[k]
+                    u_front_h = np.interp(d_front_h, dist_pc_h, u_row)
+                    background_h = 0.0 if d_back_h >= d_edge_h else (u_row[-1] - np.interp(d_back_h, dist_pc_h, u_row))
+                    a_cloud_h = a_col_h[k] * (1.0 - u_front_h - background_h)
+                    hand_yso[k] = kappa_h[k] * pc2_h * a_cloud_h ** 2 * result["on_grid_yso"][k]
+                hand_dev = float(np.max(np.abs(hand_yso - result["density_yso"][:n_check])))
+            else:
+                hand_dev = float("nan")
+            print(f"bmstp.density {region}: DENSITY_YSO hand check on {n_check} sources, "
+                  f"max abs dev={hand_dev:.3e} (bar 1e-9)")
 
             n = result["n"]
             n_pix = int(np.unique(result["hpx512"]).size)
@@ -341,7 +507,7 @@ def build(config, regions=None):
                       f"n_edge_own_column={result['n_edge']} "
                       f"L(s)/(kappa A_s^2) median={result['knot_ratio_median']:.4g} "
                       f"p90={result['knot_ratio_p90']:.4g}")
-            density_h2s_before = float(np.mean(result["density_yso"] * result["eta_r"] * EPS_EXT))
+            density_h2s_before = float(np.mean(result["density_yso_intrinsic"] * result["eta_r"] * EPS_EXT))
             density_h2s_after = float(np.mean(result["density_h2s"]))
             print(f"bmstp.density {region}: RATIO_H2S (mean density, deg^-2) "
                   f"before={density_h2s_before:.6g} after={density_h2s_after:.6g} "
