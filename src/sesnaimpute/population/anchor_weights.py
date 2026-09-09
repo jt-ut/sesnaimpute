@@ -580,6 +580,13 @@ def region_tile_counts(config, region, clusters, min_counts=MIN_COUNTS):
     # tile's own fitted sigmoid ON THE 2MASS-SERVED BINS (p_ks = 1 on
     # the deep, UKIDSS-served bins), BEFORE the ratio-exclusion test and
     # every fit below reads them. The Gaia axis (n_pred_g) is untouched.
+    # a tile MEASURES a Ks bin only where the model has stars in it: on
+    # the deep, UKIDSS-served bins that is exactly the tiles the deep
+    # survey covers (`anchor_tiles` drops the predicted counts elsewhere),
+    # so a tile without deep coverage ends its own Ks axis at the 2MASS
+    # cut and never reads a deep-bin weight, pooled or not
+    # (`star_population` takes its faint edge from this flag).
+    measured_ks = n_pred_ks > 0.0
     served_mask = ks_served_mask(hist["ks_edges"], hist["ks_split_mag"])
     ks_m50, p_ks, ks_own_fit = fit_ks_completeness(n_obs_ks, n_pred_ks, hist["ks_edges"], served_mask)
     n_pred_ks = n_pred_ks * p_ks
@@ -865,7 +872,7 @@ def build_region(config, region, clusters, w_pool_g, w_pool_ks):
         n_obs_g=n_obs_g, n_pred_g=n_pred_g, w_g=fit_g["w"], b_g=fit_g["b"], w_region_g=fit_g["w_region"],
         populated_g=fit_g["populated"], pooled_g=fit_g["pooled"],
         n_obs_ks=n_obs_ks, n_pred_ks=n_pred_ks, w_ks=fit_ks["w"], b_ks=fit_ks["b"], w_region_ks=fit_ks["w_region"],
-        populated_ks=fit_ks["populated"], pooled_ks=fit_ks["pooled"],
+        populated_ks=fit_ks["populated"], pooled_ks=fit_ks["pooled"], measured_ks=measured_ks,
         n_obs_joint=n_obs_joint, n_pred_joint=n_pred_joint, w_joint=w_joint,
         w_region_joint=w_region_joint, use_joint=use_joint,
         excluded=excluded, reason=reason, nearest_cluster=nearest_cluster,
@@ -902,6 +909,7 @@ def _write_product(config, region, result):
         f.create_dataset("W_KS", data=result["w_ks"])
         f.create_dataset("W_REGION_KS", data=result["w_region_ks"])
         f.create_dataset("POPULATED_KS", data=result["populated_ks"])
+        f.create_dataset("MEASURED_KS", data=result["measured_ks"].astype(np.bool_))
         f.create_dataset("W_JOINT", data=result["w_joint"])
         f.create_dataset("USE_JOINT", data=result["use_joint"])
         f.create_dataset("W_REGION_JOINT", data=result["w_region_joint"])

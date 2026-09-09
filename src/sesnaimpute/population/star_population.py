@@ -599,6 +599,10 @@ def _read_weights(config, region):
             # rather than re-derived from a `!= 1` sentinel here.
             populated_g=np.asarray(f["POPULATED_G"][:], dtype=bool),
             populated_ks=np.asarray(f["POPULATED_KS"][:], dtype=bool),
+            # (n_tile, n_Ks): the bins THIS tile has model stars in -- the
+            # deep survey's bins only where it covers the tile -- so a
+            # tile's own Ks axis ends where its evidence ends.
+            measured_ks=np.asarray(f["MEASURED_KS"][:], dtype=bool),
             excluded=np.asarray(f["EXCLUDED"][:], dtype=bool),
             g_edges=np.asarray(f["G_EDGES"][:], dtype=np.float64),
             ks_edges=np.asarray(f["KS_EDGES"][:], dtype=np.float64),
@@ -710,7 +714,7 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     w, rule, bin_g, bin_ks = star_weights(
         g_obs, ks_obs, weights["g_edges"], weights["ks_edges"],
         w_joint, weights["use_joint"][t], w_g, w_ks,
-        weights["populated_g"], weights["populated_ks"], u_i, u_front_tile)
+        weights["populated_g"], weights["populated_ks"] & weights["measured_ks"][t], u_i, u_front_tile)
 
     # the partition (spec section 3): a REWEIGHTING of this tile's own W,
     # never a filter -- w_star + w_agb == w row by row.
