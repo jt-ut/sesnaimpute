@@ -23,11 +23,24 @@ BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 MIN_BANDS = 2
 
 #: SPEC_PRIORS.md 1.3 -- the two named laws the ramp blends between.
+#: `draine_rv3.1` is Weingartner & Draine (2001) / Draine (2003), R_V = 3.1.
+#: `whitney.r550` is cited as Indebetouw et al. (2005, ApJ 619, 931)'s
+#: IRAC-adjusted Kim, Martin & Hendry (1994) model via Robitaille; the
+#: packaged file's 4.5 um A_lambda/A_K is 0.260, not the ~0.43 the
+#: citation implies, and no ascii file matching the citation is reachable
+#: from the sedfitter docs, the sedfitter or hyperion-rt/paper-2017-sed-models
+#: GitHub repositories, or the Robitaille models_r06 FTP release (the
+#: repositories carry only this same file and the un-adjusted KMH94
+#: curve, 0.269 at 4.5 um; the FTP release bundles a law file only inside
+#: a 5.3 GB model tarball). The mismatch stands uncorrected.
 LAW_DIFFUSE = "draine_rv3.1"
 LAW_DENSE = "whitney.r550"
 
 #: The ramp's domain, A_K magnitudes: 0 (diffuse law only) at and below
-#: LAW_RAMP_LO, 1 (dense law only) at and above LAW_RAMP_HI.
+#: LAW_RAMP_LO, 1 (dense law only) at and above LAW_RAMP_HI. No literature
+#: source for these two numbers is found in SPEC_PRIORS.md, the bms_review
+#: docs, or the predecessor packages; none is cited here because none
+#: exists in the searched material.
 LAW_RAMP_LO = 0.5
 LAW_RAMP_HI = 1.0
 
@@ -55,25 +68,28 @@ def _parse_info(text):
     return fields
 
 
-def _load_law_curve(config, law):
+#: The two laws ship as package data, not a downloaded product -- the
+#: extinction curve is used for more than A_K (owner, 2026-09-08), so it
+#: belongs with the code that reads it.
+_LAW_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "extinction_laws")
+
+
+def _load_law_curve(law):
     """`(wave_um, opacity_cm2_per_g)`, sorted ascending in wavelength,
-    read from `<data_root>/sky/download/extinction_laws/<law>/<law>.par`
+    read from the package's own `data/extinction_laws/<law>/<law>.par`
     at the columns named in the sibling `<law>.info` file -- the same
     file pair and column convention the SED fitter's own law loader
-    reads. Fails with one sentence naming the RUNBOOK line that makes
-    the input (`sky.download.extinction_laws.build`) when either file
-    is missing.
+    reads. Fails with one sentence when either file is missing.
     """
-    cache_key = (config.data_root, law)
-    if cache_key in _LAW_CACHE:
-        return _LAW_CACHE[cache_key]
-    law_dir = f"{config.data_root}/sky/download/extinction_laws/{law}"
+    if law in _LAW_CACHE:
+        return _LAW_CACHE[law]
+    law_dir = os.path.join(_LAW_DATA_DIR, law)
     info_path = os.path.join(law_dir, f"{law}.info")
     par_path = os.path.join(law_dir, f"{law}.par")
     if not os.path.isfile(info_path) or not os.path.isfile(par_path):
         raise ValueError(
-            f"prior.selection: no extinction law {law!r} at {law_dir!r} "
-            f"-- run RUNBOOK.sh's sesnaimpute.sky.download.extinction_laws.build line")
+            f"population.selection: no extinction law {law!r} packaged at {law_dir!r} "
+            f"-- reinstall sesnaimpute")
     with open(info_path) as f:
         info = _parse_info(f.read())
     colidx_wav = int(info["colidx_wav"])
@@ -81,21 +97,21 @@ def _load_law_curve(config, law):
     raw = np.loadtxt(par_path, usecols=(colidx_wav, colidx_extinction))
     order = np.argsort(raw[:, 0])
     wave_um, opacity = raw[order, 0], raw[order, 1]
-    _LAW_CACHE[cache_key] = (wave_um, opacity)
-    return _LAW_CACHE[cache_key]
+    _LAW_CACHE[law] = (wave_um, opacity)
+    return _LAW_CACHE[law]
 
 
 def extinction_k(config, law):
     """`k_i = chi(lambda_i) / chi(0.55um)` for the 8 census bands, from
     the law's own tabulated curve, linear interpolation in wavelength.
+    `config` is unused -- the law is package data, not a data-root product.
     """
-    cache_key = (config.data_root, law)
-    if cache_key not in _K_CACHE:
-        wave_um, opacity = _load_law_curve(config, law)
+    if law not in _K_CACHE:
+        wave_um, opacity = _load_law_curve(law)
         wav = np.array([b.wvl_um for b in definitions.BANDS])
-        _K_CACHE[cache_key] = (np.interp(wav, wave_um, opacity)
-                               / np.interp(_V_BAND_UM, wave_um, opacity))
-    return _K_CACHE[cache_key].copy()
+        _K_CACHE[law] = (np.interp(wav, wave_um, opacity)
+                        / np.interp(_V_BAND_UM, wave_um, opacity))
+    return _K_CACHE[law].copy()
 
 
 def kappa_ak(config, law):

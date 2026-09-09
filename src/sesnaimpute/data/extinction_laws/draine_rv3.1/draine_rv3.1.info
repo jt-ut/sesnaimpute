@@ -1,0 +1,12 @@
+## Extinction law info file.
+## This specifies certain properties about the extinction law that are used during SED fitting and saving of results
+
+## The short-hand name of the law, that will be stored in the results table
+name  DraineRV31
+
+## The column indices of the wavelength and opacity columns in the sibling .par file
+colidx_wav   0
+colidx_extinction   1
+
+## The ratio of AV / AK in this law
+AV_over_AK  8.516044
