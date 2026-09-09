@@ -625,7 +625,7 @@ def region_tile_counts(config, region, clusters, min_counts=MIN_COUNTS):
 
 def _pool_bins_by_edge(lower_list, upper_list, value_lists):
     """The union bin set over a survey of regions whose own axes may
-    differ in length (W48): every distinct `(lower, upper)` bin any
+    differ in length: every distinct `(lower, upper)` bin any
     region carries, summed from `value_lists` (one `(n_bin_r,)` array
     per region per entry, same region order as `lower_list`/`upper_list`)
     over exactly the regions whose own axis carries that bin, returned
@@ -899,7 +899,7 @@ def build_region(config, region, clusters, w_pool_g, w_pool_ks, ks_pool_lower, k
     measured_ks = rc["measured_ks"]
 
     # the pool's own Ks axis is the union over all thirty regions' bins
-    # (W48); this region's bins take the pool by (lower, upper) edge, not
+    #; this region's bins take the pool by (lower, upper) edge, not
     # array position, before the fit ever sees it.
     w_pool_ks_region = _pool_at_region_bins(w_pool_ks, ks_pool_lower, ks_pool_upper, hist["ks_edges"])
 
