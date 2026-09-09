@@ -24,17 +24,13 @@ MIN_BANDS = 2
 
 #: SPEC_PRIORS.md 1.3 -- the two named laws the ramp blends between.
 #: `draine_rv3.1` is Weingartner & Draine (2001) / Draine (2003), R_V = 3.1.
-#: `whitney.r550` is cited as Indebetouw et al. (2005, ApJ 619, 931)'s
-#: IRAC-adjusted Kim, Martin & Hendry (1994) model via Robitaille; the
-#: packaged file's 4.5 um A_lambda/A_K is 0.260, not the ~0.43 the
-#: citation implies, and no ascii file matching the citation is reachable
-#: from the sedfitter docs, the sedfitter or hyperion-rt/paper-2017-sed-models
-#: GitHub repositories, or the Robitaille models_r06 FTP release (the
-#: repositories carry only this same file and the un-adjusted KMH94
-#: curve, 0.269 at 4.5 um; the FTP release bundles a law file only inside
-#: a 5.3 GB model tarball). The mismatch stands uncorrected.
+#: `kmh94_indebetouw2005` is the KMH94 R_V = 5.5 curve (`whitney.r550`) with
+#: its 1-30 um opacity replaced by the measured points the spec cites --
+#: Indebetouw et al. (2005, ApJ 619, 931), Table 1, for J-[8.0], and
+#: Flaherty et al. (2007, ApJ 663, 1069), section 4.2, for [24] -- scaled
+#: to the curve's own Ks opacity (see the law's own `.info`).
 LAW_DIFFUSE = "draine_rv3.1"
-LAW_DENSE = "whitney.r550"
+LAW_DENSE = "kmh94_indebetouw2005"
 
 #: The ramp's domain, A_K magnitudes: 0 (diffuse law only) at and below
 #: LAW_RAMP_LO, 1 (dense law only) at and above LAW_RAMP_HI. No literature
