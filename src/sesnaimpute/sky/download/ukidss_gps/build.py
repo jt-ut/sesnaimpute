@@ -32,9 +32,9 @@ Query, per Galactic-latitude strip (`{l0}`/`{l1}`/`{b0}`/`{b1}` from
     SELECT l, b, k_1AperMag3, k_1ppErrBits, mergedClass FROM gpsSource
     WHERE {l clause} AND b BETWEEN {b0} AND {b1}
       AND k_1AperMag3 > 0 AND k_1AperMag3 < 17.5
-      AND k_1ppErrBits < 256 AND mergedClass IN (-1, -2)
+      AND k_1ppErrBits < 256 AND mergedClass IN (-1, -2) AND priOrSec <= 0
 
-`k_1AperMag3 > 0` drops the WFCAM null-value sentinel (measured
+`priOrSec <= 0` keeps one row per source where WFCAM frame sets overlap (the archive's own primary-detection flag; the secondaries were 7 % of the rows in the probe's Cygnus X box); `k_1AperMag3 > 0` drops the WFCAM null-value sentinel (measured
 -999999.5, W34 section 2b: 14.7% of an unfiltered test box). `< 17.5`
 gives the derive step's last half-mag bin edge (17.0) a half-bin of
 headroom, as `twomass_counts` does against its own 14.3 cut. The quality
@@ -107,7 +107,7 @@ def strip_query(l0, l1, b0, b1):
         "SELECT l, b, k_1AperMag3, k_1ppErrBits, mergedClass FROM "
         f"{TABLE} WHERE {_l_clause(l0, l1)} AND b BETWEEN {b0:.6f} AND {b1:.6f} "
         f"AND k_1AperMag3 > {K_FLOOR:.1f} AND k_1AperMag3 < {K_CEILING:.1f} "
-        f"AND k_1ppErrBits < {ERR_BITS_MAX} AND mergedClass IN "
+        f"AND priOrSec <= 0 AND k_1ppErrBits < {ERR_BITS_MAX} AND mergedClass IN "
         f"({', '.join(str(v) for v in MERGED_CLASS_VALUES)})"
     )
 
