@@ -200,16 +200,18 @@ TAU_FLOOR_C = 0.02
 PAHC_LIMIT_QUANTILES = (5.0, 20.0, 35.0, 50.0, 65.0, 80.0, 95.0, 99.0)
 PAHC_LIMIT_MEDIAN_INDEX = PAHC_LIMIT_QUANTILES.index(50.0)
 
-#: SPEC_BMSTP_DRAFT.md section 5.1, "faint end" row: below an anchor's
-#: faint edge a star's weight extrapolates the region's own measured
-#: faint-end trend (`population.anchor_weights.faint_trend_dex_per_mag`'s
-#: `FAINT_TREND_G_DEX_PER_MAG`/`FAINT_TREND_KS_DEX_PER_MAG`) rather than
-#: holding the faintest populated bin's weight flat; no floor and no
-#: cap, since the trend is itself the measured correction to TRILEGAL's
-#: slope. A region whose three faintest populated bins are flat measures
-#: a trend of zero and this reduces exactly to the flat rule; a trend
-#: with too few populated bins to fit (`nan`) is read as zero for the
-#: same reason -- no evidence to extrapolate is not evidence of a trend.
+#: SPEC_BMSTP_DRAFT.md section 5.1, "faint end" row: past a faint edge
+#: (joint corner or marginal alike) a star's flat weight extrapolates the
+#: region's own measured faint-end trend (`population.anchor_weights.
+#: faint_trend_dex_per_mag`'s `FAINT_TREND_G_DEX_PER_MAG`/
+#: `FAINT_TREND_KS_DEX_PER_MAG`) on the ONE axis the placement rule would
+#: have picked, rather than holding that flat weight unextrapolated; no
+#: floor and no cap, since the trend is itself the measured correction to
+#: TRILEGAL's slope. A region whose three faintest populated bins are
+#: flat measures a trend of zero and this reduces exactly to the flat
+#: rule; a trend with too few populated bins to fit (`nan`) is read as
+#: zero for the same reason -- no evidence to extrapolate is not evidence
+#: of a trend.
 
 
 # ---------------------------------------------------------------------------
@@ -288,13 +290,19 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
     finite -- `population.anchor_weights`' pool fallback already fills most of
     these), it takes the OTHER anchor's weight instead.
 
-    Faint end (SPEC_BMSTP_DRAFT.md section 5.1): a star past an axis's
-    own faint edge no longer reads that axis's faintest populated bin
-    flat -- it extrapolates from it, `W(faint bin) * 10**(trend * (m -
-    m_faint))`, `m` the star's own observed magnitude on that axis and
-    `m_faint` the centre of the faintest populated bin. The bright end,
-    the joint table, and every in-range star read their bin exactly as
-    before (identity: W23's acceptance).
+    Faint end (SPEC_BMSTP_DRAFT.md section 5.1): a star past a faint edge
+    (`WEIGHT_RULE_FAINT_END`, whether the flat weight it reads comes from
+    the joint corner or a marginal) has that ENTIRE flat weight
+    multiplied by `10**(trend * (m - m_faint))` on ONE axis, chosen the
+    same way the placement rule below already chooses an anchor: behind
+    the cloud takes the Ks trend at the star's own Ks magnitude, in front
+    takes the G trend at its own G magnitude; where only one axis is past
+    its own faint edge (the rare mixed faint/bright remainder), that axis
+    decides regardless of placement. Never both trends at once -- the two
+    anchors measure the same faint-end correction twice, and where they
+    disagree in sign (Mon OB1: `+0.048` G, `-0.086` Ks) summing them
+    would cancel real evidence rather than apply it. The bright end and
+    every in-range star are untouched (identity: W23's acceptance).
     """
     n_g, n_ks = w_g.size, w_ks.size
     bin_g_raw = np.digitize(g_obs, g_edges) - 1
@@ -316,21 +324,8 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
     both_faint = out_g_faint & out_ks_faint
     both_bright = out_g_bright & out_ks_bright
     both_in_range = in_range_g & in_range_ks
-
-    # the faint-end extrapolation (section 5.1): only where THIS axis is
-    # past ITS OWN faint edge does its marginal value leave the flat
-    # `w_g[bin_g]`/`w_ks[bin_ks]` it already reads everywhere else --
-    # in range, or clamped at the bright edge, `bin_g`/`bin_ks` already
-    # index the same bin the flat rule always did, so those stars' values
-    # are the same expression, bit for bit, as before this brief.
-    trend_g = trend_g if np.isfinite(trend_g) else 0.0
-    trend_ks = trend_ks if np.isfinite(trend_ks) else 0.0
-    g_centers = 0.5 * (np.asarray(g_edges[:-1]) + np.asarray(g_edges[1:]))
-    ks_centers = 0.5 * (np.asarray(ks_edges[:-1]) + np.asarray(ks_edges[1:]))
-    g_faint_extrap = w_g[g_faint_idx] * 10.0 ** (trend_g * (np.asarray(g_obs, float) - g_centers[g_faint_idx]))
-    ks_faint_extrap = w_ks[ks_faint_idx] * 10.0 ** (trend_ks * (np.asarray(ks_obs, float) - ks_centers[ks_faint_idx]))
-    g_val = np.where(out_g_faint, g_faint_extrap, w_g[bin_g])
-    ks_val = np.where(out_ks_faint, ks_faint_extrap, w_ks[bin_ks])
+    g_val = w_g[bin_g]
+    ks_val = w_ks[bin_ks]
     joint_val = w_joint[bin_g, bin_ks]
 
     # placement-selected marginal (item 2): front of the cloud reads
@@ -369,8 +364,31 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
          rule == WEIGHT_RULE_KS_MARGINAL, rule == WEIGHT_RULE_BOTH_MARGINAL],
         [joint_val, g_val, ks_val, placement_val],
         # faint end / bright end: the same joint-or-placement rule, at the
-        # clamped populated edge bin.
+        # clamped populated edge bin -- FAINT_END's flat value here is
+        # extrapolated below, whichever table it came from.
         default=np.where(joint_here, joint_val, placement_val))
+
+    # the faint-end extrapolation itself (section 5.1): ONE axis's trend,
+    # on the flat value every FAINT_END star already has, never both. The
+    # axis is whichever the placement rule above would have picked
+    # (front->G, behind->Ks) when both anchors are past their faint edge;
+    # where only one axis is past its own edge (the mixed remainder), that
+    # axis decides regardless of placement -- there is no trend to apply
+    # on the other axis, since it never left its own populated range.
+    trend_g = trend_g if np.isfinite(trend_g) else 0.0
+    trend_ks = trend_ks if np.isfinite(trend_ks) else 0.0
+    g_centers = 0.5 * (np.asarray(g_edges[:-1]) + np.asarray(g_edges[1:]))
+    ks_centers = 0.5 * (np.asarray(ks_edges[:-1]) + np.asarray(ks_edges[1:]))
+    use_g_trend = (both_faint & front) | (out_g_faint & ~out_ks_faint)
+    use_ks_trend = (both_faint & ~front) | (out_ks_faint & ~out_g_faint)
+    trend_factor = np.where(
+        use_g_trend,
+        10.0 ** (trend_g * (np.asarray(g_obs, float) - g_centers[g_faint_idx])),
+        np.where(
+            use_ks_trend,
+            10.0 ** (trend_ks * (np.asarray(ks_obs, float) - ks_centers[ks_faint_idx])),
+            1.0))
+    weight = np.where(rule == WEIGHT_RULE_FAINT_END, weight * trend_factor, weight)
     return weight, rule, bin_g, bin_ks
 
 
