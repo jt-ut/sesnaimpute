@@ -14,12 +14,14 @@ density construction (`_load_profile_arrays`, `embedding_and_ridge`) at its
 FULL resolution -- the profile product it points at, sec. 5.5's "the
 profile's cells" -- restricted to the cells whose distance range overlaps
 the region's cloud interval `[d_front, d_back]` (sec. 2's "region distance
-and depth", the region depth product's `D_LO_PC`/`D_HI_PC`); a cell partly
-inside counts its own inside fraction. The matching distance edges are
-formed the same way `population.yso`'s own tail cell is (`d_mid_tail =
-dist_pc[-1] + tail_efold`, sec. 6.3 there): the map's own `DIST_PC` points,
-plus one more edge `dist_pc[-1] + 2 * tail_efold` past the map's reach, so
-the tail cell's midpoint distance matches `population.yso`'s exactly.
+and depth", REWRITTEN after W24: `cloud_interval_pc` DOUBLES the region
+depth product's own `D_LO_PC`/`D_HI_PC` half-widths about `D_PEAK_PC`,
+W24b); a cell partly inside counts its own inside fraction. The matching
+distance edges are formed the same way `population.yso`'s own tail cell is
+(`d_mid_tail = dist_pc[-1] + tail_efold`, sec. 6.3 there): the map's own
+`DIST_PC` points, plus one more edge `dist_pc[-1] + 2 * tail_efold` past
+the map's reach, so the tail cell's midpoint distance matches
+`population.yso`'s exactly.
 
 `p(F_4.5)`, per region (the SAME shape at every sightline of the region):
 the YSO register's own templates, weighted `IMF(M_theta) * cos-i factor /
@@ -37,7 +39,6 @@ from scipy.ndimage import gaussian_filter1d
 from sesnaimpute import config as config_module
 from sesnaimpute.bmstp import grid, template_weights
 from sesnaimpute.population import yso as yso_module
-from sesnaimpute.sky.derived import profile as profile_module
 
 #: Sub-samples per profile cell, laid evenly along the cell's own segment
 #: in `log10 x` (sec. 5.5 "Marks": "in practice, a fixed number of
@@ -74,11 +75,42 @@ def sightline_count(config, region):
 
 
 def cloud_interval_pc(config, region):
-    """`(d_front, d_back)`, the region's cloud interval (sec. 2 "region
-    distance and depth"): the region depth product's `D_LO_PC`/`D_HI_PC`,
-    through `sky.derived.profile.read`'s own depth lookup."""
-    prof = profile_module.read(config, region)
-    return prof.cloud_front_edge_pc(), prof.cloud_back_edge_pc()
+    """`(d_front, d_back)`, the region's CLOUD INTERVAL (sec. 2 "region
+    distance and depth", REWRITTEN after W24, W24b): the dust structure's
+    peak distance minus TWICE its lower half-width, to its peak plus TWICE
+    its upper half-width -- `d_front = D_PEAK - 2 (D_PEAK - D_LO)`, `d_back
+    = D_PEAK + 2 (D_HI - D_PEAK)` -- read directly off the region depth
+    product's own `D_PEAK_PC`/`D_LO_PC`/`D_HI_PC` (the bare 16-84 interval
+    alone held only two thirds of the structure's own dust by construction
+    and cut 19-84% of the YSO placement's mass, W24; the doubled interval
+    holds ~95% of it). Floored at the profile's own first cell
+    (`DIST_PC[0]`, 0 pc) and capped at its own last reachable edge (the
+    map's own edge plus twice the SMALLEST sightline's tail e-folding
+    scale -- the same construction `_region_profile` uses to close every
+    sightline's own support), so the interval never reaches past what
+    every sightline of the region can represent."""
+    depth_path = config_module.product_path(config, "sky/derived", "edenhofer", "depth", "region")
+    with h5py.File(depth_path, "r") as f:
+        names = [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in f["REGION"][:]]
+        if region not in names:
+            raise ValueError("sample_cloud.cloud_interval_pc: region %r has no row in %s"
+                              % (region, depth_path))
+        i = names.index(region)
+        d_peak = float(f["D_PEAK_PC"][i])
+        d_lo = float(f["D_LO_PC"][i])
+        d_hi = float(f["D_HI_PC"][i])
+    d_front = d_peak - 2.0 * (d_peak - d_lo)
+    d_back = d_peak + 2.0 * (d_hi - d_peak)
+
+    profile_path = config_module.product_path(
+        config, "sky/derived", "edenhofer", "profile", "sightline", region=region)
+    with h5py.File(profile_path, "r") as f:
+        dist_first = float(f["DIST_PC"][0])
+        dist_last = float(f["DIST_PC"][-1])
+        tail_efold_min = float(np.min(f["TAIL_EFOLD_PC"][:]))
+    d_front = max(d_front, dist_first)
+    d_back = min(d_back, dist_last + 2.0 * tail_efold_min)
+    return d_front, d_back
 
 
 def _bin1d(values, w, edges, sigma_cells):
@@ -180,7 +212,10 @@ def sample_f45(config, region, d_r_pc, sigma_d_pc, d_front, d_back):
     F_REF_I2,theta - 2 log10(d_r / 1 kpc)`, widened as a Gaussian in
     `log10 F_4.5` by the cloud's own depth and the region's distance
     uncertainty together, `2 log10(d_back/d_front) + 2 sigma_d/(d_r ln
-    10)` (sec. 5.5 "Marks"). Returns `(p_f45, mass_outside, width_dex)`."""
+    10)` (sec. 5.5 "Marks", using the DOUBLED cloud interval, W24b).
+    Returns `(p_f45, mass_outside, width_dex, mass_above_top)`:
+    `mass_above_top` is the raw (pre-widening) register weight above the
+    grid's own top edge (sec. 9's 0.1% bar)."""
     reg = template_weights._read_register(config, "yso")
     names, rho, f_ref_i2 = reg["names"], reg["rho"], reg["f_ref"]["I2"]
     n_model = names.size
@@ -227,4 +262,5 @@ def sample_f45(config, region, d_r_pc, sigma_d_pc, d_front, d_back):
     sigma_cells = max(1.0, width_dex / grid.D_LOG10_F45)
 
     p_f45, mass_outside = _bin1d(log10_f45_theta, weight, grid.LOG10_F45_EDGES, sigma_cells)
-    return p_f45, mass_outside, float(width_dex)
+    above_top = grid.mass_above_top(log10_f45_theta, weight)
+    return p_f45, mass_outside, float(width_dex), above_top
