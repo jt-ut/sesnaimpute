@@ -22,6 +22,7 @@ STAR, AGB and PAHC share it).
 
 import html.parser
 import os
+import re
 import ssl
 import time
 import urllib.error
@@ -292,6 +293,18 @@ def _post_form(action_url, fields):
     return text, reply_url, parser.fields
 
 
+#: The service's own refusal page when its job queue is full, and its own
+#: instruction on it: "Please wait a few minutes and try again."
+BUSY_MARKER = "TRILEGAL is too busy"
+BUSY_WAIT_S = 180
+BUSY_RETRIES = 20
+
+
+def _reply_text(html_text):
+    """The reply page's visible text, tags stripped, for an error message."""
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html_text)).strip()
+
+
 def submit_query(action_url, fields):
     """POSTs one query (`fields`, the form's own defaults with this
     query's overrides) and returns `(output_url, status_fields,
@@ -301,12 +314,20 @@ def submit_query(action_url, fields):
     `submitstatus`), which the service asks the client to echo back to
     poll the job's status.
     """
-    text, reply_url, fields_out = _post_form(action_url, fields)
-    outurl = fields_out.get("outurl")
-    if not outurl:
-        raise RuntimeError(f"trilegal submit_query: no 'outurl' field in the reply from {action_url}")
-    submitted_at = time.time()
-    return urllib.parse.urljoin(reply_url, outurl), fields_out, submitted_at
+    for attempt in range(BUSY_RETRIES + 1):
+        text, reply_url, fields_out = _post_form(action_url, fields)
+        outurl = fields_out.get("outurl")
+        if outurl:
+            submitted_at = time.time()
+            return urllib.parse.urljoin(reply_url, outurl), fields_out, submitted_at
+        if BUSY_MARKER in text and attempt < BUSY_RETRIES:
+            print(f"trilegal submit_query: the server says {BUSY_MARKER!r} -- "
+                  f"waiting {BUSY_WAIT_S} s and resubmitting ({attempt + 1}/{BUSY_RETRIES})")
+            time.sleep(BUSY_WAIT_S)
+            continue
+        raise RuntimeError(
+            f"trilegal submit_query: no 'outurl' field in the reply from {action_url}: "
+            f"{_reply_text(text)[:300]!r}")
 
 
 def wait_until_finished(action_url, status_fields, timeout_s=POLL_TIMEOUT_S, interval_s=POLL_INTERVAL_S):
