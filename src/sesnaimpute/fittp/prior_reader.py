@@ -39,7 +39,7 @@ _SHAPE = {
     "GAL": ("gal", "GRID"),
 }
 _LIB = {"STAR": ("sps", "region"), "AGB": ("agb", "region"), "PAHC": ("pahc", "region"),
-        "YSO": ("yso", "survey"), "H2S": ("h2shock", "survey"), "GAL": ("galz", "survey")}
+        "YSO": ("yso", "region"), "H2S": ("h2shock", "survey"), "GAL": ("galz", "survey")}
 
 _SQRT2 = float(np.sqrt(2.0))
 _SQRT2PI = float(np.sqrt(2.0 * np.pi))
