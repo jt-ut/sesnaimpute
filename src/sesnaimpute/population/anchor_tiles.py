@@ -48,10 +48,11 @@ Products, per region:
   (n_pix, n_G_bins, n_Ks_bins) -- the same raw stars, same weights and
   Gaia detection weight as `N_G_PRED`, 2-D digitised on `(G_obs, Ks_obs)`
   onto `G_EDGES`/`KS_EDGES` (SPEC_PRIORS.md section 2.1, "joint and
-  marginal bins"); root attrs `GRANULE="hpx512"`, `KS_SPLIT_MAG` (W38:
-  the magnitude the Ks axis switches from 2MASS to UKIDSS counts at,
-  `NaN` where the region carries no deep survey and the axis is
-  2MASS's own to `KS_CUT_MAG`).
+  marginal bins"); `KS_SOURCE` (n_ks_bin, W46: which survey each Ks bin
+  takes on this region's shared 9.0-14.0 grid, 0=2MASS/1=UKIDSS -- 1 on
+  every bin past 14.0, where UKIDSS's own bins are the only ones there;
+  all 0 where the region carries no deep survey and the axis is
+  2MASS's own to `KS_CUT_MAG`); root attr `GRANULE="hpx512"`.
 """
 
 import os
@@ -89,13 +90,16 @@ GAIA_G_ROLLOFF_MAG = 0.5
 
 #: SPEC_PRIORS.md section 2.1, anchor-counts row: "2MASS PSC at
 #: Ks < 14.3" -- must equal `sky.derived.twomass_counts.MAG_EDGES[-1]`.
-#: Where no deep survey serves a region (`_ks_split_mag` below returns
-#: `NaN`) the Ks axis stays 2MASS's own, ending here.
+#: Where the region carries no deep survey at all the Ks axis stays
+#: 2MASS's own, ending here.
 KS_CUT_MAG = 14.3
 
-#: W38: UKIDSS saturates brighter than this (W34's footprint probe,
-#: W37's own build), so no split is ever sought brighter than it.
-KS_SPLIT_MIN_MAG = 12.0
+#: W46: the last edge the two surveys' half-magnitude grids share --
+#: 2MASS's own regular bins run 9.0-14.0 (`KS_CUT_MAG`'s trailing
+#: 14.0-14.3 bin is the odd one out, never a candidate for either
+#: survey's count); UKIDSS's own bins take over here through
+#: `KS_DEEP_CUT_MAG`.
+KS_SHARED_END_MAG = 14.0
 
 #: W38: one magnitude inside the UKIDSS GPS 5-sigma depth (Lucas et al.
 #: 2008, MNRAS 391, 136) -- the Ks axis's own deep edge wherever a
@@ -376,64 +380,50 @@ def _region_pixel_columns(config, region):
     return pixels, parent256, a_pix
 
 
-def _ks_split_mag(ks_edges_2mass, n_ks_obs_2mass, ukidss_edges, n_ukidss_obs):
-    """W38 item 1: the magnitude the Ks axis switches from 2MASS to
-    UKIDSS at -- the lower edge of the BRIGHTEST of 2MASS's own regular
-    half-magnitude bins (width exactly 0.5 mag, so the odd trailing
-    14.0-14.3 bin is never a candidate) at or above `KS_SPLIT_MIN_MAG`
-    whose region-summed UKIDSS count, on the pixels it covers, meets or
-    beats 2MASS's own in that same bin. UKIDSS saturates brighter
-    (`KS_SPLIT_MIN_MAG`'s citation); from the first bin where it
-    resolves at least as many stars as 2MASS it counts the stars 2MASS's
-    beam merges (SPEC_BMSTP_DRAFT.md section 5.1, "anchors"), so it
-    serves every bin from there to the deep cut.
-    `NaN` (no split; the axis stays 2MASS's own to `KS_CUT_MAG`) where
-    the UKIDSS product carries no coverage for this region at all, or
-    UKIDSS never catches up to 2MASS within that candidate range.
+def _combine_ks_axis(ks_edges_2mass, n_ks_obs_2mass, ukidss_edges, n_ukidss_obs, deep_covered):
+    """W46: no split magnitude. On the shared grid 9.0-`KS_SHARED_END_MAG`
+    (2MASS's own regular half-magnitude bins; the odd trailing 14.0-14.3
+    bin is dropped, replaced by UKIDSS's own 14.0-14.5 bin) each bin
+    takes, for every pixel, whichever survey's region-summed count over
+    the deep-covered pixels alone is larger; a UKIDSS-chosen bin falls
+    back to 2MASS's own count on a pixel the deep survey does not cover.
+    From `KS_SHARED_END_MAG` to `KS_DEEP_CUT_MAG` the axis is UKIDSS's
+    own bins, zero (unmeasured, not measured-and-empty) on pixels it
+    does not cover. Returns `(ks_edges, n_ks_obs, ks_source)`, `ks_source`
+    0=2MASS/1=UKIDSS per returned bin; the 2MASS axis unchanged, source
+    all 0, where UKIDSS carries no coverage for this region at all.
     """
     if not np.any(n_ukidss_obs):
-        return float("nan")
-    # only the pixels the deep survey covers can vote: elsewhere its
-    # count is zero by absence, not by measurement (`deep_covered`)
-    covered = n_ukidss_obs.sum(axis=1) > 0
-    n_ks_obs_2mass = n_ks_obs_2mass[covered]
-    n_ukidss_obs = n_ukidss_obs[covered]
-    widths = np.diff(ks_edges_2mass)
-    lowers = ks_edges_2mass[:-1]
-    candidate = np.isclose(widths, 0.5) & (lowers >= KS_SPLIT_MIN_MAG - 1e-9)
-    if not np.any(candidate):
-        return float("nan")
-    obs_2mass_sum = n_ks_obs_2mass.sum(axis=0)
-    ukidss_sum = n_ukidss_obs.sum(axis=0)
+        return ks_edges_2mass, n_ks_obs_2mass, np.zeros(n_ks_obs_2mass.shape[1], dtype=np.int8)
+
+    n_shared = n_ks_obs_2mass.shape[1] - 1  # drop 2MASS's own odd 14.0-14.3 bin
+    shared_edges = ks_edges_2mass[: n_shared + 1]
+    n_2mass_shared = n_ks_obs_2mass[:, :n_shared]
+
     ukidss_lower = ukidss_edges[:-1]
-    match = np.isclose(lowers[:, None], ukidss_lower[None, :], atol=1e-6)
-    has_match = match.any(axis=1)
-    ukidss_at = np.where(has_match, ukidss_sum[np.argmax(match, axis=1)], -np.inf)
-    ok = candidate & has_match & (ukidss_at >= obs_2mass_sum)
-    if not np.any(ok):
-        return float("nan")
-    return float(ks_edges_2mass[:-1][np.flatnonzero(ok)[0]])
-
-
-def _combine_ks_axis(ks_edges_2mass, n_ks_obs_2mass, ukidss_edges, n_ukidss_obs, ks_split_mag):
-    """W38 item 1: below `ks_split_mag`, 2MASS's own edges and counts;
-    at and above, UKIDSS's, running to `KS_DEEP_CUT_MAG` -- both grids
-    share the same 0.5-mag steps from 9.0, so the two halves join at an
-    edge each already carries. `NaN` `ks_split_mag` returns the 2MASS
-    axis unchanged (no deep survey for this region)."""
-    if not np.isfinite(ks_split_mag):
-        return ks_edges_2mass, n_ks_obs_2mass
-    j2 = int(np.argmin(np.abs(ks_edges_2mass - ks_split_mag)))
-    ju = int(np.argmin(np.abs(ukidss_edges - ks_split_mag)))
-    if (abs(float(ks_edges_2mass[j2]) - ks_split_mag) > 1e-6
-            or abs(float(ukidss_edges[ju]) - ks_split_mag) > 1e-6):
+    shared_lower = shared_edges[:-1]
+    match = np.isclose(shared_lower[:, None], ukidss_lower[None, :], atol=1e-6)
+    if not np.all(match.any(axis=1)):
         raise ValueError(
-            f"anchor_tiles: KS_SPLIT_MAG={ks_split_mag!r} does not land on an edge of "
-            "both the 2MASS and UKIDSS Ks grids -- the two products' MAG_EDGES have "
-            "drifted apart")
-    edges = np.concatenate([ks_edges_2mass[: j2 + 1], ukidss_edges[ju + 1:]])
-    n_ks = np.concatenate([n_ks_obs_2mass[:, :j2], n_ukidss_obs[:, ju:]], axis=1)
-    return edges, n_ks
+            "anchor_tiles: the shared 9.0-%.1f Ks grid does not land on UKIDSS's own "
+            "bin edges -- the two products' MAG_EDGES have drifted apart" % KS_SHARED_END_MAG)
+    n_ukidss_shared = n_ukidss_obs[:, np.argmax(match, axis=1)]
+
+    sum_2mass = n_2mass_shared[deep_covered].sum(axis=0)
+    sum_ukidss = n_ukidss_shared[deep_covered].sum(axis=0)
+    ks_source_shared = (sum_ukidss > sum_2mass).astype(np.int8)
+
+    take_ukidss = ks_source_shared[None, :].astype(bool)
+    n_shared_out = np.where(
+        take_ukidss, np.where(deep_covered[:, None], n_ukidss_shared, n_2mass_shared),
+        n_2mass_shared)
+
+    is_deep = ukidss_lower >= shared_edges[-1] - 1e-9
+    n_deep = n_ukidss_obs[:, is_deep]
+    edges = np.concatenate([shared_edges, ukidss_edges[1:][is_deep]])
+    n_ks = np.concatenate([n_shared_out, n_deep], axis=1)
+    ks_source = np.concatenate([ks_source_shared, np.ones(n_deep.shape[1], dtype=np.int8)])
+    return edges, n_ks, ks_source
 
 
 def _read_anchor_counts(config, region, pixels):
@@ -441,7 +431,7 @@ def _read_anchor_counts(config, region, pixels):
     module's magnitude cuts: Gaia's bins with upper edge <= 19
     (`GAIA_G_CUT_MAG`), 2MASS's whole grid (already built to close at
     `KS_CUT_MAG`) extended by UKIDSS's deep counts where a region has
-    them (W38 item 1: `_ks_split_mag`, `_combine_ks_axis`). Fails if any
+    them (W46: `_combine_ks_axis`'s per-bin selection). Fails if any
     product's own pixel set disagrees with the granule map's
     (`_region_pixel_columns`) -- the join every later array in this
     module assumes.
@@ -483,17 +473,17 @@ def _read_anchor_counts(config, region, pixels):
     g_edges = gaia_edges_full[:n_g_edges]
     n_g_obs = gaia_n[:, : n_g_edges - 1]
 
-    ks_split_mag = _ks_split_mag(ks_edges_2mass, ks_n_2mass, ukidss_edges, ukidss_n)
-    ks_edges, ks_n = _combine_ks_axis(ks_edges_2mass, ks_n_2mass, ukidss_edges, ukidss_n, ks_split_mag)
     # a pixel the deep survey covers holds at least one of its sources;
     # where it holds none the deep bins are unmeasured, not empty, and
     # the predicted counts there are dropped to match (`build_region`)
-    deep_covered = ukidss_n.sum(axis=1) > 0 if np.isfinite(ks_split_mag) else np.zeros(pixels.size, dtype=bool)
-    if abs(float(ks_edges[-1]) - (KS_DEEP_CUT_MAG if np.isfinite(ks_split_mag) else KS_CUT_MAG)) > 1e-6:
+    deep_covered = ukidss_n.sum(axis=1) > 0
+    ks_edges, ks_n, ks_source = _combine_ks_axis(ks_edges_2mass, ks_n_2mass, ukidss_edges, ukidss_n, deep_covered)
+    has_deep = abs(float(ks_edges[-1]) - KS_DEEP_CUT_MAG) < 1e-6
+    if not has_deep and abs(float(ks_edges[-1]) - KS_CUT_MAG) > 1e-6:
         raise ValueError(
             f"anchor_tiles: {region!r}'s combined Ks edges end at {ks_edges[-1]!r}, "
-            f"not {KS_DEEP_CUT_MAG} (split) or {KS_CUT_MAG} (no split)")
-    return g_edges, n_g_obs, ks_edges, ks_n, ks_split_mag, deep_covered
+            f"not {KS_DEEP_CUT_MAG} (deep) or {KS_CUT_MAG} (no deep survey)")
+    return g_edges, n_g_obs, ks_edges, ks_n, ks_source, deep_covered
 
 
 def _pointing_bounds(sorted_pointing_index, present_pointings):
@@ -592,7 +582,7 @@ def _acceptance_check_one_pixel(profile_obj, parent256, a_pix, raw, g_edges, r_d
 def build_region(config, region):
     raw, omega_sim_deg2 = _read_field_stars_raw(config, region)
     pixels, parent256, a_pix = _region_pixel_columns(config, region)
-    g_edges, n_g_obs, ks_edges, n_ks_obs, ks_split_mag, deep_covered = _read_anchor_counts(config, region, pixels)
+    g_edges, n_g_obs, ks_edges, n_ks_obs, ks_source, deep_covered = _read_anchor_counts(config, region, pixels)
 
     profile_obj = profile_module.read(config, region)
     r_diffuse = float(selection.ak_per_av(config, 0.0))
@@ -624,12 +614,17 @@ def build_region(config, region):
     n_g_pred, n_ks_pred, n_gk_pred = _predicted_histograms(
         config, profile_obj, parent256, a_pix, raw, g_edges, ks_edges, r_diffuse, r_dense,
         pixel_pointing, pointing_bounds, weight_pix)
-    # the deep bins are measured only where the deep survey covers the
-    # pixel: elsewhere both sides are dropped, so a tile's deep-bin ratio
-    # is formed over its covered pixels alone and a tile with none
-    # leaves those bins unpopulated (`anchor_weights` pools them).
-    if np.isfinite(ks_split_mag):
-        deep_bin = ks_edges[:-1] >= ks_split_mag - 1e-9
+    # the deep bins (14.0 and past, W46: KS_SHARED_END_MAG) are measured
+    # only where the deep survey covers the pixel: elsewhere both sides
+    # are dropped, so a tile's deep-bin ratio is formed over its covered
+    # pixels alone and a tile with none leaves those bins unpopulated
+    # (`anchor_weights` pools them). A shared bin the region gives to
+    # UKIDSS never needs this: its own count already fell back to
+    # 2MASS's on an uncovered pixel (`_combine_ks_axis`), so the
+    # predicted side stays comparable to real observed evidence there.
+    has_deep = abs(float(ks_edges[-1]) - KS_DEEP_CUT_MAG) < 1e-6
+    if has_deep:
+        deep_bin = ks_edges[:-1] >= KS_SHARED_END_MAG - 1e-9
         drop = ~deep_covered[:, None] & deep_bin[None, :]
         n_ks_pred = np.where(drop, 0.0, n_ks_pred)
         n_gk_pred = np.where(drop[:, None, :], 0.0, n_gk_pred)
@@ -658,7 +653,7 @@ def build_region(config, region):
         sigma_obs_deg2=sigma_obs_deg2, gradient=grad,
         n_raw=raw["dist_pc"].size, omega_sim_deg2=omega_sim_deg2,
         acceptance_rel_dev=rel_dev, acceptance_n_below_g10=n_below_g10,
-        pixel_pointing=pixel_pointing, ks_split_mag=ks_split_mag, deep_covered=deep_covered,
+        pixel_pointing=pixel_pointing, ks_source=ks_source, deep_covered=deep_covered,
     )
 
 
@@ -682,9 +677,6 @@ def write_histograms(config, region, result):
     n_pix = result["pixels"].size
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "hpx512"
-        # W38 item 1: the one number downstream (`anchor_weights`) needs
-        # to know where the Ks axis switches from 2MASS to UKIDSS.
-        f.attrs["KS_SPLIT_MAG"] = result["ks_split_mag"]
         f.create_dataset("HPX_PIX_512", data=result["pixels"].astype(np.int64))
         f.create_dataset("A_PIX_K", data=result["a_pix"].astype(np.float32))
         f.create_dataset("OMEGA_PIX_DEG2", data=np.full(n_pix, result["omega_pix_deg2"], dtype=np.float64))
@@ -696,6 +688,10 @@ def write_histograms(config, region, result):
         f.create_dataset("N_KS_PRED", data=result["n_ks_pred"])
         f.create_dataset("N_GK_PRED", data=result["n_gk_pred"])
         f.create_dataset("DEEP_COVERED", data=result["deep_covered"].astype(np.bool_))
+        # W46: which survey each Ks bin takes (0=2MASS/1=UKIDSS),
+        # replacing the single KS_SPLIT_MAG attr -- downstream
+        # (`anchor_weights.ks_served_mask`) reads this per bin.
+        f.create_dataset("KS_SOURCE", data=result["ks_source"].astype(np.int8))
 
 
 def build(config, regions=None):
@@ -712,13 +708,14 @@ def build(config, regions=None):
             st.done(path, n_tiles=tiles["n_tiles"], l_star_deg=tiles["l_star_deg"], n_raw=result["n_raw"])
         ratio_g = result["n_g_obs"].sum() / max(result["n_g_pred"].sum(), 1e-30)
         ratio_ks = result["n_ks_obs"].sum() / max(result["n_ks_pred"].sum(), 1e-30)
+        ks_source = result["ks_source"]
         print(f"anchor_tiles: {region}: {result['pixels'].size} pixels, "
               f"L*={tiles['l_star_deg']:.4f} deg (optimum {tiles['l_star_optimum_deg']:.4f}), "
               f"{tiles['n_tiles']} tiles, gradient g={result['gradient']['g']:.4f}/deg, "
               f"obs/pred Gaia={ratio_g:.3f} 2MASS={ratio_ks:.3f}, "
               f"acceptance rel.dev={result['acceptance_rel_dev']:.2e} "
               f"({result['acceptance_n_below_g10']} raw stars brighter than G={result['g_edges'][0]}), "
-              f"KS_SPLIT_MAG={result['ks_split_mag']:.2f} KS_EDGES_end={result['ks_edges'][-1]:.2f} "
+              f"KS_SOURCE={ks_source.tolist()} KS_EDGES_end={result['ks_edges'][-1]:.2f} "
               f"deep_covered={int(result['deep_covered'].sum())}/{result['deep_covered'].size}")
 
 
