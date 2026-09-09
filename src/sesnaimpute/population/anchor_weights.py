@@ -61,12 +61,12 @@ Product, per region, `bms/anchors/weights_anchors_tile__<Region>.hdf5`:
 fixed instrument width every tile fits with, W38); root attrs
 `GRANULE="tile"`, `FAINT_TREND_G_DEX_PER_MAG`, `FAINT_TREND_KS_DEX_PER_MAG`.
 
-W13 (SPEC_BMSTP_DRAFT.md 5.1's "N^{model->obs}" row), extended by W38:
-2MASS's raw predicted count `n_pred_ks`/the Ks axis of `n_pred_joint` is
-NOT treated as complete to `KS_CUT_MAG` on the 2MASS-served bins (upper
-edge <= this region's own `KS_SPLIT_MAG`, `anchor_tiles.write_histograms`'
-own root attr; every bin where the region carries no deep survey at
-all) -- it is scored there by `P_KS`, the same sigmoid
+W13 (SPEC_BMSTP_DRAFT.md 5.1's "N^{model->obs}" row), extended by W38 and
+W46: 2MASS's raw predicted count `n_pred_ks`/the Ks axis of `n_pred_joint`
+is NOT treated as complete to `KS_CUT_MAG` on the 2MASS-served bins
+(`KS_SOURCE == 0`, `anchor_tiles.write_histograms`'s own per-bin dataset;
+every bin where the region carries no deep survey at all) -- it is
+scored there by `P_KS`, the same sigmoid
 `anchor_tiles.gaia_detection_weight` uses for Gaia, but with a per-tile
 free level `L` and centre `m50_t` fit by Poisson maximum likelihood to
 the tile's OWN observed-over-predicted counts (`fit_ks_completeness`),
@@ -492,9 +492,9 @@ def _fit_ks_completeness_batch(n_obs, n_pred, m_centers):
 
 def fit_ks_completeness(n_obs_ks, n_pred_ks, ks_edges, served_mask):
     """Per tile `m50_t` (brief W13/W38), fit only on `served_mask` --
-    the 2MASS-served bins (upper edge <= this region's own
-    `KS_SPLIT_MAG`; every bin where the region carries no deep survey
-    at all, since then the whole axis is 2MASS's). A tile with at least
+    the 2MASS-served bins (`KS_SOURCE == 0`; every bin where the region
+    carries no deep survey at all, since then the whole axis is
+    2MASS's). A tile with at least
     `KS_COMPLETENESS_MIN_BINS` served bins clearing `MIN_COUNTS` on
     both the observed and the predicted side fits its own counts;
     otherwise it takes the region-summed fit (the same model on the
@@ -524,15 +524,12 @@ def fit_ks_completeness(n_obs_ks, n_pred_ks, ks_edges, served_mask):
     return m50, p_ks, own_fit
 
 
-def ks_served_mask(ks_edges, ks_split_mag):
-    """`(n_bin,)` bool: this region's own 2MASS-served bins (W38 item
-    2) -- every bin where `ks_split_mag` is `NaN` (no deep survey; the
-    whole axis is 2MASS's), else the bins whose upper edge does not
-    exceed it. The complement is the deep, UKIDSS-served bins the
-    completeness fit above never touches."""
-    if not np.isfinite(ks_split_mag):
-        return np.ones(ks_edges.size - 1, dtype=bool)
-    return ks_edges[1:] <= ks_split_mag + 1e-9
+def ks_served_mask(ks_source):
+    """`(n_bin,)` bool: this region's own 2MASS-served bins (W46 item 2)
+    -- the bins `anchor_tiles`' own per-bin `KS_SOURCE` marks 2MASS-
+    chosen (0). The complement is the UKIDSS-chosen bins, shared or
+    deep, the completeness fit above never touches."""
+    return np.asarray(ks_source) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -587,7 +584,7 @@ def region_tile_counts(config, region, clusters, min_counts=MIN_COUNTS):
     # cut and never reads a deep-bin weight, pooled or not
     # (`star_population` takes its faint edge from this flag).
     measured_ks = n_pred_ks > 0.0
-    served_mask = ks_served_mask(hist["ks_edges"], hist["ks_split_mag"])
+    served_mask = ks_served_mask(hist["ks_source"])
     ks_m50, p_ks, ks_own_fit = fit_ks_completeness(n_obs_ks, n_pred_ks, hist["ks_edges"], served_mask)
     n_pred_ks = n_pred_ks * p_ks
     n_pred_joint = n_pred_joint * p_ks[:, None, :]
@@ -618,8 +615,8 @@ def region_tile_counts(config, region, clusters, min_counts=MIN_COUNTS):
         n_obs_g=n_obs_g, n_obs_ks=n_obs_ks, n_obs_joint=n_obs_joint,
         excluded=excluded, reason=reason, nearest_cluster=nearest_cluster,
         ratio_mask=ratio_mask, excluded_ratio=excluded_ratio,
-        excluded_catalog=excluded_catalog, ks_split_mag=hist["ks_split_mag"],
-        ks_m50=ks_m50, ks_own_fit=ks_own_fit, p_ks=p_ks)
+        excluded_catalog=excluded_catalog, ks_source=hist["ks_source"],
+        ks_m50=ks_m50, ks_own_fit=ks_own_fit, p_ks=p_ks, measured_ks=measured_ks)
 
 
 def survey_pooled_weights(config, region_names, clusters, min_counts=MIN_COUNTS):
@@ -748,7 +745,7 @@ def _read_histograms(config, region):
             pixels=np.asarray(f["HPX_PIX_512"][:], dtype=np.int64),
             g_edges=np.asarray(f["G_EDGES"][:], dtype=np.float64),
             ks_edges=np.asarray(f["KS_EDGES"][:], dtype=np.float64),
-            ks_split_mag=float(f.attrs["KS_SPLIT_MAG"]),
+            ks_source=np.asarray(f["KS_SOURCE"][:], dtype=np.int64),
             n_g_pred=np.asarray(f["N_G_PRED"][:], dtype=np.float64),
             n_ks_pred=np.asarray(f["N_KS_PRED"][:], dtype=np.float64),
             n_gk_pred=np.asarray(f["N_GK_PRED"][:], dtype=np.float64),
@@ -822,7 +819,8 @@ def build_region(config, region, clusters, w_pool_g, w_pool_ks):
     ratio_mask = rc["ratio_mask"]
     excluded_ratio, excluded_catalog = rc["excluded_ratio"], rc["excluded_catalog"]
     ks_m50, ks_own_fit, p_ks = rc["ks_m50"], rc["ks_own_fit"], rc["p_ks"]
-    ks_split_mag = rc["ks_split_mag"]
+    ks_source = rc["ks_source"]
+    measured_ks = rc["measured_ks"]
 
     fit_g = fit_tile_weights(n_obs_g, n_pred_g, excluded, w_pool=w_pool_g)
     fit_ks = fit_tile_weights(n_obs_ks, n_pred_ks, excluded, w_pool=w_pool_ks)
@@ -887,7 +885,7 @@ def build_region(config, region, clusters, w_pool_g, w_pool_ks):
         max_region_pooled_dev=max_region_pooled_dev,
         scatter_observed=scatter_obs, scatter_expected=scatter_expected,
         frac_disagree_2sigma=frac_disagree_2sigma,
-        ks_m50=ks_m50, ks_own_fit=ks_own_fit, p_ks=p_ks, ks_split_mag=ks_split_mag,
+        ks_m50=ks_m50, ks_own_fit=ks_own_fit, p_ks=p_ks, ks_source=ks_source,
     )
 
 
@@ -971,11 +969,11 @@ def build(config, regions=None):
                result["scatter_expected"], result["frac_disagree_2sigma"], path))
         n_at_bound = int(np.count_nonzero(
             np.isclose(result["ks_m50"], KS_M50_HI_MAG, atol=1e-6)))
-        split = result["ks_split_mag"]
+        ks_source = result["ks_source"]
         print(
-            "anchor_weights: %s KS_SPLIT_MAG=%s ks_m50 median=%.3f range=%.3f-%.3f "
-            "ks_scale(fixed)=%.4f tiles_at_complete_bound=%d/%d"
-            % (region, ("%.2f" % split) if np.isfinite(split) else "nan (no deep survey)",
+            "anchor_weights: %s KS_SOURCE=%s (%d/%d bins UKIDSS) ks_m50 median=%.3f "
+            "range=%.3f-%.3f ks_scale(fixed)=%.4f tiles_at_complete_bound=%d/%d"
+            % (region, ks_source.tolist(), int(ks_source.sum()), ks_source.size,
                float(np.median(result["ks_m50"])),
                float(result["ks_m50"].min()), float(result["ks_m50"].max()),
                KS_SCALE_MAG, n_at_bound, result["n_tile"]))
