@@ -84,7 +84,11 @@ Owner ruling 2026-09-06. The survey-pooled weight (`survey_pooled_weights`,
 item 1: the ratio of observed to predicted counts summed over every
 region's own populated tiles, computed once over all thirty regions) is
 folded into `W_G`/`W_KS`/`W_REGION_G`/`W_REGION_KS` as the fallback for a
-bin no tile of this region measures, never written separately.
+bin no tile of this region measures, never written separately. W48: the
+Ks pool sums each bin by its own (lower, upper) edge over exactly the
+regions that carry it (the union of the short 2MASS-only and long
+UKIDSS-reaching axes, W46), not by array position, so no region's Ks
+axis length ever drops it from the pool.
 `POPULATED_G`/`POPULATED_KS` (n_G/n_Ks, bool): this region had at least
 one of its own unmasked tiles in this bin -- the explicit flag
 `faint_trend_dex_per_mag` and `star_population` read, replacing the old
@@ -619,21 +623,69 @@ def region_tile_counts(config, region, clusters, min_counts=MIN_COUNTS):
         ks_m50=ks_m50, ks_own_fit=ks_own_fit, p_ks=p_ks, measured_ks=measured_ks)
 
 
+def _pool_bins_by_edge(lower_list, upper_list, value_lists):
+    """The union bin set over a survey of regions whose own axes may
+    differ in length (W48): every distinct `(lower, upper)` bin any
+    region carries, summed from `value_lists` (one `(n_bin_r,)` array
+    per region per entry, same region order as `lower_list`/`upper_list`)
+    over exactly the regions whose own axis carries that bin, returned
+    ordered by lower edge (ties, the one branch point where the short
+    2MASS-only axis's last bin and the long axis's first deep bin both
+    start at the same lower edge, broken by upper edge). No Python loop
+    over bins: each region's own small bin set is scattered into the
+    union axis by one vectorised `searchsorted`/`np.add.at` per region.
+
+    Returns `(lower, upper, n_regions, [summed value arrays])`.
+    """
+    key_list = [np.round(lo, 4) * 1000.0 + np.round(up, 4)
+                for lo, up in zip(lower_list, upper_list)]
+    all_keys = np.concatenate(key_list)
+    all_lower = np.concatenate([np.round(lo, 4) for lo in lower_list])
+    all_upper = np.concatenate([np.round(up, 4) for up in upper_list])
+    key_sorted, first_idx = np.unique(all_keys, return_index=True)
+    lower_by_key = all_lower[first_idx]
+    upper_by_key = all_upper[first_idx]
+    n_bin = key_sorted.size
+
+    sums = [np.zeros(n_bin) for _ in value_lists]
+    n_regions = np.zeros(n_bin, dtype=np.int64)
+    for r, key_r in enumerate(key_list):
+        idx = np.searchsorted(key_sorted, key_r)
+        for s, values in zip(sums, value_lists):
+            np.add.at(s, idx, values[r])
+        np.add.at(n_regions, idx, 1)
+
+    order = np.lexsort((upper_by_key, lower_by_key))
+    lower_out = lower_by_key[order]
+    upper_out = upper_by_key[order]
+    n_regions = n_regions[order]
+    sums = [s[order] for s in sums]
+    return lower_out, upper_out, n_regions, sums
+
+
 def survey_pooled_weights(config, region_names, clusters, min_counts=MIN_COUNTS):
     """The SURVEY-POOLED weight per magnitude bin, on the `G` and `Ks`
     marginals (owner ruling 2026-09-06, item 1): sum the observed and
     the predicted counts over EVERY region's own populated tiles (not
     cluster-excluded, both counts clearing `min_counts`) and take one
     ratio per bin -- computed once over all thirty regions' stored
-    anchor products, never per region. Regions whose `G_EDGES`/`KS_EDGES`
-    disagree with the first region read are skipped from the sum (their
-    on-disk bin grid cannot be added bin-for-bin) and reported, not
-    silently dropped.
+    anchor products, never per region.
 
-    Returns `(w_pool_g, w_pool_ks, g_edges, ks_edges, skipped)`.
+    The Gaia axis is shared by every region (one `G_EDGES` grid) and
+    pools by array position. The Ks axis is not (W46: fifteen regions
+    reach 17.0, fifteen reach 2MASS's own 14.3) -- each Ks bin is keyed
+    by its own `(lower, upper)` edge and summed over exactly the regions
+    whose axis carries it (`_pool_bins_by_edge`), never by array
+    position, so no region is skipped for its Ks axis length. `skipped`
+    now names only a region whose upstream anchor product is missing.
+
+    Returns `(w_pool_g, w_pool_ks, g_edges, ks_lower, ks_upper, skipped,
+    n_pool_ks)`, `n_pool_ks` the count of regions carrying each returned
+    Ks bin.
     """
-    sum_obs_g = sum_pred_g = sum_obs_ks = sum_pred_ks = None
-    g_edges = ks_edges = None
+    sum_obs_g = sum_pred_g = None
+    g_edges = None
+    ks_lower_list, ks_upper_list, ks_obs_list, ks_pred_list = [], [], [], []
     skipped = []
     for region in region_names:
         try:
@@ -649,29 +701,53 @@ def survey_pooled_weights(config, region_names, clusters, min_counts=MIN_COUNTS)
             continue
         if g_edges is None:
             g_edges = rc["hist"]["g_edges"]
-            ks_edges = rc["hist"]["ks_edges"]
-        elif not (np.array_equal(g_edges, rc["hist"]["g_edges"])
-                  and np.array_equal(ks_edges, rc["hist"]["ks_edges"])):
-            skipped.append(region)
-            continue
         usable_g = (~rc["excluded"])[:, None] & (rc["n_obs_g"] >= min_counts) \
             & (rc["n_pred_g"] >= min_counts)
-        usable_ks = (~rc["excluded"])[:, None] & (rc["n_obs_ks"] >= min_counts) \
-            & (rc["n_pred_ks"] >= min_counts)
         og = np.where(usable_g, rc["n_obs_g"], 0.0).sum(axis=0)
         pg = np.where(usable_g, rc["n_pred_g"], 0.0).sum(axis=0)
-        ok = np.where(usable_ks, rc["n_obs_ks"], 0.0).sum(axis=0)
-        pk = np.where(usable_ks, rc["n_pred_ks"], 0.0).sum(axis=0)
         sum_obs_g = og if sum_obs_g is None else sum_obs_g + og
         sum_pred_g = pg if sum_pred_g is None else sum_pred_g + pg
-        sum_obs_ks = ok if sum_obs_ks is None else sum_obs_ks + ok
-        sum_pred_ks = pk if sum_pred_ks is None else sum_pred_ks + pk
+
+        ks_edges_r = rc["hist"]["ks_edges"]
+        usable_ks = (~rc["excluded"])[:, None] & (rc["n_obs_ks"] >= min_counts) \
+            & (rc["n_pred_ks"] >= min_counts)
+        ks_lower_list.append(ks_edges_r[:-1])
+        ks_upper_list.append(ks_edges_r[1:])
+        ks_obs_list.append(np.where(usable_ks, rc["n_obs_ks"], 0.0).sum(axis=0))
+        ks_pred_list.append(np.where(usable_ks, rc["n_pred_ks"], 0.0).sum(axis=0))
+
     with np.errstate(divide="ignore", invalid="ignore"):
         w_pool_g = np.where(sum_pred_g > 0,
                              sum_obs_g / np.where(sum_pred_g > 0, sum_pred_g, 1.0), np.nan)
+
+    ks_lower, ks_upper, n_pool_ks, (sum_obs_ks, sum_pred_ks) = _pool_bins_by_edge(
+        ks_lower_list, ks_upper_list, [ks_obs_list, ks_pred_list])
+    with np.errstate(divide="ignore", invalid="ignore"):
         w_pool_ks = np.where(sum_pred_ks > 0,
                               sum_obs_ks / np.where(sum_pred_ks > 0, sum_pred_ks, 1.0), np.nan)
-    return w_pool_g, w_pool_ks, g_edges, ks_edges, skipped
+    return w_pool_g, w_pool_ks, g_edges, ks_lower, ks_upper, skipped, n_pool_ks
+
+
+def _pool_at_region_bins(pool_w, pool_lower, pool_upper, region_edges):
+    """`(n_bin,)`: `survey_pooled_weights`' own Ks ratio for each of this
+    region's own bins, matched by `(lower, upper)` edge -- not array
+    position, since the pool's own axis is the union over all thirty
+    regions' bins and one lower edge (14.0) names two different bins
+    there (the short axis's 14.0-14.3 and the long axis's first deep
+    bin, 14.0-14.5). `nan` where the pool carries no matching bin, so
+    `fit_tile_weights`'s existing no-pool path applies.
+    """
+    region_edges = np.asarray(region_edges, dtype=np.float64)
+    r_key = np.round(region_edges[:-1], 4) * 1000.0 + np.round(region_edges[1:], 4)
+    p_key = np.round(np.asarray(pool_lower), 4) * 1000.0 + np.round(np.asarray(pool_upper), 4)
+    order = np.argsort(p_key)
+    p_key_sorted = p_key[order]
+    w_sorted = np.asarray(pool_w)[order]
+    idx = np.clip(np.searchsorted(p_key_sorted, r_key), 0, p_key_sorted.size - 1)
+    matched = np.isclose(p_key_sorted[idx], r_key)
+    out = np.full(r_key.size, np.nan)
+    out[matched] = w_sorted[idx[matched]]
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -808,7 +884,7 @@ def check_gaia_vs_2mass(n_obs_g, n_pred_g, n_obs_ks, n_pred_ks):
 # per-region build
 # ---------------------------------------------------------------------------
 
-def build_region(config, region, clusters, w_pool_g, w_pool_ks):
+def build_region(config, region, clusters, w_pool_g, w_pool_ks, ks_pool_lower, ks_pool_upper):
     rc = region_tile_counts(config, region, clusters)
     tiles, hist = rc["tiles"], rc["hist"]
     n_tile = rc["n_tile"]
@@ -822,8 +898,13 @@ def build_region(config, region, clusters, w_pool_g, w_pool_ks):
     ks_source = rc["ks_source"]
     measured_ks = rc["measured_ks"]
 
+    # the pool's own Ks axis is the union over all thirty regions' bins
+    # (W48); this region's bins take the pool by (lower, upper) edge, not
+    # array position, before the fit ever sees it.
+    w_pool_ks_region = _pool_at_region_bins(w_pool_ks, ks_pool_lower, ks_pool_upper, hist["ks_edges"])
+
     fit_g = fit_tile_weights(n_obs_g, n_pred_g, excluded, w_pool=w_pool_g)
-    fit_ks = fit_tile_weights(n_obs_ks, n_pred_ks, excluded, w_pool=w_pool_ks)
+    fit_ks = fit_tile_weights(n_obs_ks, n_pred_ks, excluded, w_pool=w_pool_ks_region)
 
     n_obs_joint_flat = n_obs_joint.reshape(n_tile, n_g * n_ks)
     n_pred_joint_flat = n_pred_joint.reshape(n_tile, n_g * n_ks)
@@ -934,18 +1015,21 @@ def build(config, regions=None):
     # before any per-region fit -- every region (even one being rebuilt
     # alone) needs the same pooled fallback, not a pool of itself.
     all_region_names = [r.name for r in regions_module.REGIONS]
-    w_pool_g, w_pool_ks, pool_g_edges, pool_ks_edges, pool_skipped = \
+    w_pool_g, w_pool_ks, pool_g_edges, ks_pool_lower, ks_pool_upper, pool_skipped, n_pool_ks = \
         survey_pooled_weights(config, all_region_names, clusters)
     print(
         "prior.anchor_weights: survey pool over %d regions (skipped %s): "
-        "W_POOL_G=[%.3f,%.3f] W_POOL_KS=[%.3f,%.3f]"
+        "W_POOL_G=[%.3f,%.3f] W_POOL_KS=[%.3f,%.3f] "
+        "ks_bins(lower)=%s n_regions_per_ks_bin=%s"
         % (len(all_region_names) - len(pool_skipped), pool_skipped or "[]",
            float(np.nanmin(w_pool_g)), float(np.nanmax(w_pool_g)),
-           float(np.nanmin(w_pool_ks)), float(np.nanmax(w_pool_ks))))
+           float(np.nanmin(w_pool_ks)), float(np.nanmax(w_pool_ks)),
+           ks_pool_lower.tolist(), n_pool_ks.tolist()))
 
     for region in region_names:
         with progress.Stage("prior.anchor_weights", region) as st:
-            result = build_region(config, region, clusters, w_pool_g, w_pool_ks)
+            result = build_region(config, region, clusters, w_pool_g, w_pool_ks,
+                                   ks_pool_lower, ks_pool_upper)
             path = _write_product(config, region, result)
             st.done(path, n_tile=result["n_tile"], max_identity_dev=result["max_identity_dev"])
 
