@@ -619,7 +619,7 @@ def region_tile_counts(config, region, clusters, min_counts=MIN_COUNTS):
         excluded=excluded, reason=reason, nearest_cluster=nearest_cluster,
         ratio_mask=ratio_mask, excluded_ratio=excluded_ratio,
         excluded_catalog=excluded_catalog, ks_split_mag=hist["ks_split_mag"],
-        ks_m50=ks_m50, ks_own_fit=ks_own_fit, p_ks=p_ks)
+        ks_m50=ks_m50, ks_own_fit=ks_own_fit, p_ks=p_ks, measured_ks=measured_ks)
 
 
 def survey_pooled_weights(config, region_names, clusters, min_counts=MIN_COUNTS):
@@ -823,6 +823,7 @@ def build_region(config, region, clusters, w_pool_g, w_pool_ks):
     excluded_ratio, excluded_catalog = rc["excluded_ratio"], rc["excluded_catalog"]
     ks_m50, ks_own_fit, p_ks = rc["ks_m50"], rc["ks_own_fit"], rc["p_ks"]
     ks_split_mag = rc["ks_split_mag"]
+    measured_ks = rc["measured_ks"]
 
     fit_g = fit_tile_weights(n_obs_g, n_pred_g, excluded, w_pool=w_pool_g)
     fit_ks = fit_tile_weights(n_obs_ks, n_pred_ks, excluded, w_pool=w_pool_ks)
