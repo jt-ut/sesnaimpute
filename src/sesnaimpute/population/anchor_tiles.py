@@ -391,6 +391,11 @@ def _ks_split_mag(ks_edges_2mass, n_ks_obs_2mass, ukidss_edges, n_ukidss_obs):
     """
     if not np.any(n_ukidss_obs):
         return float("nan")
+    # only the pixels the deep survey covers can vote: elsewhere its
+    # count is zero by absence, not by measurement (`deep_covered`)
+    covered = n_ukidss_obs.sum(axis=1) > 0
+    n_ks_obs_2mass = n_ks_obs_2mass[covered]
+    n_ukidss_obs = n_ukidss_obs[covered]
     widths = np.diff(ks_edges_2mass)
     lowers = ks_edges_2mass[:-1]
     candidate = np.isclose(widths, 0.5) & (lowers >= KS_SPLIT_MIN_MAG - 1e-9)
@@ -478,11 +483,15 @@ def _read_anchor_counts(config, region, pixels):
 
     ks_split_mag = _ks_split_mag(ks_edges_2mass, ks_n_2mass, ukidss_edges, ukidss_n)
     ks_edges, ks_n = _combine_ks_axis(ks_edges_2mass, ks_n_2mass, ukidss_edges, ukidss_n, ks_split_mag)
+    # a pixel the deep survey covers holds at least one of its sources;
+    # where it holds none the deep bins are unmeasured, not empty, and
+    # the predicted counts there are dropped to match (`build_region`)
+    deep_covered = ukidss_n.sum(axis=1) > 0 if np.isfinite(ks_split_mag) else np.zeros(pixels.size, dtype=bool)
     if abs(float(ks_edges[-1]) - (KS_DEEP_CUT_MAG if np.isfinite(ks_split_mag) else KS_CUT_MAG)) > 1e-6:
         raise ValueError(
             f"anchor_tiles: {region!r}'s combined Ks edges end at {ks_edges[-1]!r}, "
             f"not {KS_DEEP_CUT_MAG} (split) or {KS_CUT_MAG} (no split)")
-    return g_edges, n_g_obs, ks_edges, ks_n, ks_split_mag
+    return g_edges, n_g_obs, ks_edges, ks_n, ks_split_mag, deep_covered
 
 
 def _pointing_bounds(sorted_pointing_index, present_pointings):
@@ -581,7 +590,7 @@ def _acceptance_check_one_pixel(profile_obj, parent256, a_pix, raw, g_edges, r_d
 def build_region(config, region):
     raw, omega_sim_deg2 = _read_field_stars_raw(config, region)
     pixels, parent256, a_pix = _region_pixel_columns(config, region)
-    g_edges, n_g_obs, ks_edges, n_ks_obs, ks_split_mag = _read_anchor_counts(config, region, pixels)
+    g_edges, n_g_obs, ks_edges, n_ks_obs, ks_split_mag, deep_covered = _read_anchor_counts(config, region, pixels)
 
     profile_obj = profile_module.read(config, region)
     r_diffuse = float(selection.ak_per_av(config, 0.0))
@@ -613,6 +622,15 @@ def build_region(config, region):
     n_g_pred, n_ks_pred, n_gk_pred = _predicted_histograms(
         config, profile_obj, parent256, a_pix, raw, g_edges, ks_edges, r_diffuse, r_dense,
         pixel_pointing, pointing_bounds, weight_pix)
+    # the deep bins are measured only where the deep survey covers the
+    # pixel: elsewhere both sides are dropped, so a tile's deep-bin ratio
+    # is formed over its covered pixels alone and a tile with none
+    # leaves those bins unpopulated (`anchor_weights` pools them).
+    if np.isfinite(ks_split_mag):
+        deep_bin = ks_edges[:-1] >= ks_split_mag - 1e-9
+        drop = ~deep_covered[:, None] & deep_bin[None, :]
+        n_ks_pred = np.where(drop, 0.0, n_ks_pred)
+        n_gk_pred = np.where(drop[:, None, :], 0.0, n_gk_pred)
 
     rel_dev, n_below_g10 = _acceptance_check_one_pixel(
         profile_obj, parent256, a_pix, raw, g_edges, r_diffuse, r_dense,
@@ -638,7 +656,7 @@ def build_region(config, region):
         sigma_obs_deg2=sigma_obs_deg2, gradient=grad,
         n_raw=raw["dist_pc"].size, omega_sim_deg2=omega_sim_deg2,
         acceptance_rel_dev=rel_dev, acceptance_n_below_g10=n_below_g10,
-        pixel_pointing=pixel_pointing, ks_split_mag=ks_split_mag,
+        pixel_pointing=pixel_pointing, ks_split_mag=ks_split_mag, deep_covered=deep_covered,
     )
 
 
@@ -675,6 +693,7 @@ def write_histograms(config, region, result):
         f.create_dataset("N_KS_OBS", data=result["n_ks_obs"])
         f.create_dataset("N_KS_PRED", data=result["n_ks_pred"])
         f.create_dataset("N_GK_PRED", data=result["n_gk_pred"])
+        f.create_dataset("DEEP_COVERED", data=result["deep_covered"].astype(np.bool_))
 
 
 def build(config, regions=None):
@@ -697,7 +716,8 @@ def build(config, regions=None):
               f"obs/pred Gaia={ratio_g:.3f} 2MASS={ratio_ks:.3f}, "
               f"acceptance rel.dev={result['acceptance_rel_dev']:.2e} "
               f"({result['acceptance_n_below_g10']} raw stars brighter than G={result['g_edges'][0]}), "
-              f"KS_SPLIT_MAG={result['ks_split_mag']:.2f} KS_EDGES_end={result['ks_edges'][-1]:.2f}")
+              f"KS_SPLIT_MAG={result['ks_split_mag']:.2f} KS_EDGES_end={result['ks_edges'][-1]:.2f} "
+              f"deep_covered={int(result['deep_covered'].sum())}/{result['deep_covered'].size}")
 
 
 if __name__ == "__main__":
