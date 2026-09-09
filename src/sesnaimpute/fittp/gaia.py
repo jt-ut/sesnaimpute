@@ -1,4 +1,4 @@
-"""The Gaia congruence `Gamma_{s,h}` and the library-sampling weight `w_h`
+"""The Gaia congruence `Gamma_{s,h}`
 (10_POSTERIOR.md card T13, the `Gamma_{s,h}` row of its factor table;
 reading/06_fitter_and_impute.md section A's `Gamma_{s,h}` row).
 
@@ -8,7 +8,6 @@ sigma_plx^2 + (1000*depth_r/d_r^2)^2`.
 
     H_h      = sigmoid((G_LIM - Gmag_h) / TAU_G)     -- population.anchor_tiles.gaia_detection_weight
     Gamma_h  = G_s * H_h * A_X  +  (1 - G_s) * (1 - H_h)
-    ln w_h  ~  -alpha_rho * ln(RHO_KDE1), normalised to sum to 1 within the register
 
 `Gmag_h` is the model's own predicted Gaia G magnitude at its fitted
 extinction and brightness (the register's `G0_FLUX`, dimmed by `KG_DRAINE`/
@@ -48,7 +47,7 @@ from sesnaimpute.population import star_population
 from sesnaimpute.population.anchor_tiles import (
     GAIA_G_LIM_MAG, GAIA_G_ROLLOFF_MAG, gaia_detection_weight)
 
-__all__ = ["GaiaTerm", "library_weights", "GAIA_G_LIM_MAG", "GAIA_G_ROLLOFF_MAG"]
+__all__ = ["GaiaTerm", "GAIA_G_LIM_MAG", "GAIA_G_ROLLOFF_MAG"]
 
 
 # ---------------------------------------------------------------------------
@@ -66,12 +65,6 @@ __all__ = ["GaiaTerm", "library_weights", "GAIA_G_LIM_MAG", "GAIA_G_ROLLOFF_MAG"
 #: cover -- STAR, AGB, PAHC, GAL, YSO, H2S -- resolves to a file here.
 _REGISTER_FILE = {cls.lower(): "%s_register.hdf5" % key
                    for cls, key in definitions.CLASS_REGISTER.items()}
-
-#: alpha_rho: the exponent on the register's own sampling density
-#: (`RHO_KDE1`) that turns it into a quadrature weight. The production
-#: value: the full 1/rho correction, safe because the fixed-bandwidth
-#: RHO_KDE1 estimator bounds outlier weight.
-LIBRARY_ALPHA_RHO = 1.0
 
 #: Classes whose A_X anchors on the cloud's own distance, with the depth
 #: term (10_POSTERIOR.md card T4; "cloud classes").
@@ -114,24 +107,6 @@ def _gaia_h_kernel(gmag_flat, out):
 def _normal_pdf(x, mean, sigma):
     z = (np.asarray(x, dtype=np.float64) - mean) / sigma
     return np.exp(-0.5 * z * z) / (sigma * _SQRT_2PI)
-
-
-# ---------------------------------------------------------------------------
-# w_h: the library-sampling weight
-# ---------------------------------------------------------------------------
-
-def library_weights(config, cls):
-    """`ln w_h` for every model in `cls`'s own register, in the register's
-    own row order (10_POSTERIOR.md's `w_h` row: "a quadrature weight; sums
-    to 1 within a library"): `w_h ~ RHO_KDE1^(-LIBRARY_ALPHA_RHO)`,
-    normalised within this one register file.
-    """
-    path = f"{config.inputs['sed_models']}/registers/{_REGISTER_FILE[cls]}"
-    with h5py.File(path, "r") as f:
-        rho = f["models"]["RHO_KDE1"][:].astype(np.float64)
-    w = rho ** (-LIBRARY_ALPHA_RHO)
-    w = w / w.sum()
-    return np.log(w)
 
 
 # ---------------------------------------------------------------------------
