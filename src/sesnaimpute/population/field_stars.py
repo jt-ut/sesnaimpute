@@ -178,7 +178,7 @@ def match_templates(teff_k, logg, mh, grid):
 
 
 # ---------------------------------------------------------------------------
-# the Gaia proxy colour: TRILEGAL's own G - Ks (sky.derived.trilegal_colour, W42)
+# the Gaia proxy colour: TRILEGAL's own G - Ks (sky.derived.trilegal_colour)
 # ---------------------------------------------------------------------------
 
 #: A star's colour is read from the table's own cell if it has one, else
