@@ -43,15 +43,19 @@ bin carries no finite weight at all -- unmeasured even after
 `population.anchor_weights`' survey-pooled fallback -- the star takes the
 OTHER anchor's weight instead. Recorded under its own `WEIGHT_RULE` code,
 5, beyond the five the brief names, so the per-rule star counts this
-module reports add up honestly. A star beyond both anchors' faint (or
-both anchors' bright) edges reads its own tile's faintest (brightest)
-POPULATED bin -- populated in the EXPLICIT per-bin sense
-(`POPULATED_G`/`POPULATED_KS`, `population.anchor_weights.fit_tile_weights`'
-own evidence flag, item 3) -- under the same joint-or-placement rule;
-where the two axes disagree (one out on the faint side, the other on the
-bright side -- a physically rare, intrinsically very red or very blue
-star), the star is reported faint-end by priority, but each axis still
-reads its own out-of-range direction's populated edge bin. A cluster-
+module reports add up honestly. A star beyond both anchors' bright edges
+reads its own tile's brightest POPULATED bin -- populated in the
+EXPLICIT per-bin sense (`POPULATED_G`/`POPULATED_KS`,
+`population.anchor_weights.fit_tile_weights`' own evidence flag, item 3)
+-- under the same joint-or-placement rule. A star beyond a faint edge
+(SPEC_BMSTP_DRAFT.md section 5.1) never reads the joint table: the joint
+corner is a colour-selected cell, the most biased one when the model's
+own colour is off, where the marginals are not; it reads its faint
+AXIS's own marginal at that axis's faintest populated bin instead --
+past both faint edges, the placement axis decides (front of the cloud
+reads Gaia, behind reads 2MASS); past one faint edge alone (the other
+axis out on the bright side -- a physically rare, intrinsically very red
+or very blue star), that one faint axis decides. A cluster-
 excluded tile (`EXCLUDED`) reads its weight from the region-pooled table
 (`W_REGION_*`) rather than its own tile row; `population.anchor_weights`' own
 shrinkage already collapses an excluded tile's stored row to exactly this
@@ -200,11 +204,13 @@ TAU_FLOOR_C = 0.02
 PAHC_LIMIT_QUANTILES = (5.0, 20.0, 35.0, 50.0, 65.0, 80.0, 95.0, 99.0)
 PAHC_LIMIT_MEDIAN_INDEX = PAHC_LIMIT_QUANTILES.index(50.0)
 
-#: SPEC_BMSTP_DRAFT.md section 5.1, "faint end" row: past a faint edge
-#: (joint corner or marginal alike) a star reads its tile's faintest
-#: POPULATED bin's weight, flat, with no slope extrapolated -- the
-#: anchors' three faintest populated bins do not determine one
-#: (`population.anchor_weights.faint_trend_dex_per_mag`'s own measured
+#: SPEC_BMSTP_DRAFT.md section 5.1, "faint end" row: past a faint edge a
+#: star never reads a joint cell -- the joint corner is a colour-selected
+#: bin, the most biased one when the model's own colour is off, where a
+#: marginal is not -- it reads its own faint axis's MARGINAL at that
+#: axis's faintest populated bin, flat, with no slope extrapolated (the
+#: anchors' three faintest populated bins do not determine one;
+#: `population.anchor_weights.faint_trend_dex_per_mag`'s own measured
 #: trend is disclosed as an uncertainty on this flat value, not applied
 #: to it).
 
@@ -282,10 +288,14 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
     these), it takes the OTHER anchor's weight instead.
 
     Faint end (SPEC_BMSTP_DRAFT.md section 5.1): a star past a faint edge
-    (`WEIGHT_RULE_FAINT_END`) reads the same joint-or-placement rule at
-    its tile's faintest POPULATED bin, flat -- no slope extrapolated
-    (module docstring's faint-end constant). The bright end and every
-    in-range star are untouched.
+    (`WEIGHT_RULE_FAINT_END`) never reads a joint cell -- the joint
+    corner is the most colour-biased cell in the table when the model's
+    colour is off, where a marginal is not -- it reads its faint AXIS's
+    own marginal at that axis's faintest populated bin, flat (module
+    docstring's faint-end constant): past both faint edges, the
+    placement axis decides (front reads Gaia, behind reads 2MASS); past
+    one faint edge alone, that axis decides. The bright end and every
+    in-range star are untouched (the joint-or-placement rule as now).
     """
     n_g, n_ks = w_g.size, w_ks.size
     bin_g_raw = np.digitize(g_obs, g_edges) - 1
@@ -342,13 +352,20 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
         default=np.where(out_g_faint | out_ks_faint,
                           WEIGHT_RULE_FAINT_END, WEIGHT_RULE_BRIGHT_END)).astype(np.int8)
 
+    # faint end (SPEC_BMSTP_DRAFT.md section 5.1): never the joint table --
+    # the star's faint axis (both axes faint: the placement axis, front
+    # reads G, behind reads Ks; one axis faint: that axis) takes its own
+    # marginal at its faintest populated bin.
+    faint_axis_is_g = np.where(both_faint, front, out_g_faint)
+    faint_val = np.where(faint_axis_is_g, g_val, ks_val)
+
     weight = np.select(
         [rule == WEIGHT_RULE_JOINT, rule == WEIGHT_RULE_G_MARGINAL,
-         rule == WEIGHT_RULE_KS_MARGINAL, rule == WEIGHT_RULE_BOTH_MARGINAL],
-        [joint_val, g_val, ks_val, placement_val],
-        # faint end / bright end: the same joint-or-placement rule, at the
-        # clamped populated edge bin -- FAINT_END's flat value here is
-        # extrapolated below, whichever table it came from.
+         rule == WEIGHT_RULE_KS_MARGINAL, rule == WEIGHT_RULE_BOTH_MARGINAL,
+         rule == WEIGHT_RULE_FAINT_END],
+        [joint_val, g_val, ks_val, placement_val, faint_val],
+        # bright end only: the same joint-or-placement rule, at the
+        # clamped populated bright-edge bin.
         default=np.where(joint_here, joint_val, placement_val))
     return weight, rule, bin_g, bin_ks
 
