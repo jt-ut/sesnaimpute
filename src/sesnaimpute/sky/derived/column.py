@@ -104,15 +104,59 @@ def _load_field_zeropoints(config):
     return {n: (float(z), float(s)) for n, z, s in zip(names, zp, zp_sigma)}
 
 
-def merge_region(config, region, cal, field_zp=None):
+def _load_column_scales(config):
+    """`{region: {arm: (scale, scale_sigma)}}` from `twomass_column_scale`'s
+    product (SPEC_BMSTP_DRAFT.md sec 3.1): the ratio of the extinction the
+    region's Ks 11-13 background stars carry to the arm's own map column,
+    one pair per region x arm (`herschel`, `planck`), NaN where the arm is
+    absent. Loaded once by `build()`; a merge call loads it itself if not
+    given one."""
+    path = config_module.product_path(config, "sky/derived", "twomass", "column-scale", "region")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"sky.derived.column: column scale missing at {path!r} -- run the "
+            "sesnaimpute.sky.derived.twomass_column_scale RUNBOOK line for it"
+        )
+    with h5py.File(path, "r") as f:
+        regions = [_dec(x) for x in f["REGION"][:]]
+        arms = [_dec(x) for x in f["ARM"][:]]
+        scale = np.asarray(f["SCALE"][:], dtype=np.float64)
+        scale_sigma = np.asarray(f["SCALE_SIGMA"][:], dtype=np.float64)
+    return {r: {a: (float(scale[i, j]), float(scale_sigma[i, j])) for j, a in enumerate(arms)}
+            for i, r in enumerate(regions)}
+
+
+def _arm_scale(region_scales, arm, region, used):
+    """The region's measured scale for `arm`, or a raised error naming the
+    region and arm if the region uses `arm` (`used.any()`) and the scale is
+    NaN -- a NaN scale never falls back to a silent 1 (owner ruling
+    2026-09-09)."""
+    scale, _ = region_scales.get(arm, (np.nan, np.nan))
+    if np.any(used) and not np.isfinite(scale):
+        raise ValueError(
+            f"sky.derived.column: {region!r} has no measured column scale for its "
+            f"{arm} arm -- run the sesnaimpute.sky.derived.twomass_column_scale "
+            "RUNBOOK line for it"
+        )
+    return scale
+
+
+def merge_region(config, region, cal, field_zp=None, scales=None):
     """Reads this region's two arms and merges them: Herschel where
     covered, finite and positive (its own field's zero point subtracted,
-    the offset's uncertainty carried as `ZP_SIGMA_K`); else Planck.
-    Returns the merged arrays. `field_zp` is `_load_field_zeropoints`'s
-    dict, loaded once by `build()`; `merge_region(config, region, cal)`
-    still works standalone, loading it itself."""
+    the offset's uncertainty carried as `ZP_SIGMA_K`); else Planck. Each
+    arm's column is multiplied by its own measured 2MASS scale before the
+    merge, everywhere, at the measured value, with no threshold
+    (SPEC_BMSTP_DRAFT.md sec 3.1). Returns the merged arrays. `field_zp`
+    is `_load_field_zeropoints`'s dict and `scales` is
+    `_load_column_scales`'s dict, both loaded once by `build()`;
+    `merge_region(config, region, cal)` still works standalone, loading
+    them itself."""
     if field_zp is None:
         field_zp = _load_field_zeropoints(config)
+    if scales is None:
+        scales = _load_column_scales(config)
+    region_scales = scales.get(region, {})
     planck_path = config_module.product_path(config, "sky/derived", "planck", "column", "source", region=region)
     if not os.path.exists(planck_path):
         raise FileNotFoundError(
@@ -134,6 +178,16 @@ def merge_region(config, region, cal, field_zp=None):
     zp_offset, zp_sigma = field_zp.get(region, (0.0, 0.0))
     a_h = a_h_raw - zp_offset
     use_h = covered & np.isfinite(a_h) & (a_h > 0)
+
+    s_p = _arm_scale(region_scales, "planck", region, ~use_h)
+    s_h = _arm_scale(region_scales, "herschel", region, use_h)
+    a_col = a_col * s_p
+    sig_col = sig_col * s_p
+    if np.any(use_h):
+        a_h = a_h * s_h
+        sig_rand = sig_rand * s_h
+        zp_sigma = zp_sigma * s_h
+
     a_col[use_h] = a_h[use_h]
     sig_col[use_h] = np.sqrt(sig_rand[use_h] ** 2 + zp_sigma ** 2)
     zp_sigma_k[use_h] = zp_sigma
@@ -153,8 +207,8 @@ def merge_region(config, region, cal, field_zp=None):
                zp_sigma_k=zp_sigma_k, n_herschel=int(np.count_nonzero(prov == PROV_HERSCHEL)), n=n)
 
 
-def _build_one_region(config, region, cal, field_zp=None):
-    d = merge_region(config, region, cal, field_zp=field_zp)
+def _build_one_region(config, region, cal, field_zp=None, scales=None):
+    d = merge_region(config, region, cal, field_zp=field_zp, scales=scales)
     out_path = config_module.product_path(config, "sky/derived", "adopted", "column", "source", region=region)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     name_bytes = np.array([(x if isinstance(x, bytes) else str(x).encode("utf-8")) for x in d["map_names"]])
@@ -228,9 +282,12 @@ def _herschel_on_admitted(admitted_pix, herschel_region):
 
 
 def _sightline_row_one_region(config, region, region_code, herschel, planck_pix, planck_ak, planck_sig,
-                              sig_zp, c0, c1):
+                              sig_zp, c0, c1, region_scales):
     """One region's sightline rows: Planck everywhere admitted, Herschel
-    substituted where the pixel is covered (SPEC_PRIORS.md 1.1)."""
+    substituted where the pixel is covered (SPEC_PRIORS.md 1.1), each arm's
+    column and sigma multiplied by its own measured 2MASS scale
+    (SPEC_BMSTP_DRAFT.md sec 3.1) -- the same per-region scales
+    `merge_region` applies to the same two arms."""
     admitted_pix, _ = profile_module._admitted_sightlines(config, region)
     n = admitted_pix.size
     loc = np.searchsorted(planck_pix, admitted_pix)
@@ -240,14 +297,20 @@ def _sightline_row_one_region(config, region, region_code, herschel, planck_pix,
         missing = admitted_pix[planck_pix[capped] != admitted_pix][:5] if planck_pix.size else admitted_pix[:5]
         raise ValueError("sky.derived.column.build_sightline: region %r has no Planck sightline "
                          "column for pixel(s) %s" % (region, missing.tolist()))
-    a_col = planck_ak[capped].copy()
-    sig_col = planck_sig[capped].copy()
     prov = np.full(n, PROV_PLANCK, dtype=np.uint8)
-
     idx, _, a_h = _herschel_on_admitted(admitted_pix, herschel.get(region))
+    use_p = np.ones(n, dtype=bool)
+    use_p[idx] = False
+
+    s_p = _arm_scale(region_scales, "planck", region, use_p)
+    s_h = _arm_scale(region_scales, "herschel", region, idx.size > 0)
+    a_col = planck_ak[capped] * s_p
+    sig_col = planck_sig[capped] * s_p
+
     if idx.size:
-        a_col[idx] = a_h
-        sig_col[idx] = np.sqrt(sig_zp ** 2 + c0 ** 2 + (c1 * a_h) ** 2)
+        sig_h = np.sqrt(sig_zp ** 2 + c0 ** 2 + (c1 * a_h) ** 2)
+        a_col[idx] = a_h * s_h
+        sig_col[idx] = sig_h * s_h
         prov[idx] = PROV_HERSCHEL
 
     return dict(pix=admitted_pix, region_code=np.full(n, region_code, dtype=np.int16),
@@ -257,10 +320,11 @@ def _sightline_row_one_region(config, region, region_code, herschel, planck_pix,
 def build_sightline(config, stage=None):
     """Writes the adopted sightline column (SPEC_PRIORS.md 1.1, 1.4): one
     row per admitted nside-256 pixel of every region, Herschel where
-    covered, else Planck. Survey-wide regardless of any `regions` list a
-    caller passed to `build` -- `profile.py` looks up whatever pixel it is
-    currently building, of whatever region, so the product cannot be
-    partial.
+    covered, else Planck, each arm's column and sigma multiplied by its
+    own measured 2MASS scale (SPEC_BMSTP_DRAFT.md sec 3.1). Survey-wide
+    regardless of any `regions` list a caller passed to `build` --
+    `profile.py` looks up whatever pixel it is currently building, of
+    whatever region, so the product cannot be partial.
 
     `stage`, if given, is the caller's own `progress.Stage`: regions are
     dispatched in chunks (still `config.n_jobs`-wide within a chunk) so
@@ -272,6 +336,7 @@ def build_sightline(config, stage=None):
     sig_zp, c0, c1 = _herschel_sigma_model(config)
     planck_pix, planck_ak, planck_sig = _load_planck_sightline(config)
     codes = _region_codes(config, regions)
+    scales = _load_column_scales(config)
 
     n_regions = len(regions)
     chunk = max(1, config.n_jobs)
@@ -280,7 +345,8 @@ def build_sightline(config, stage=None):
         part = regions[start:start + chunk]
         rows.extend(Parallel(n_jobs=config.n_jobs)(
             delayed(_sightline_row_one_region)(
-                config, region, codes[region], herschel, planck_pix, planck_ak, planck_sig, sig_zp, c0, c1)
+                config, region, codes[region], herschel, planck_pix, planck_ak, planck_sig, sig_zp, c0, c1,
+                scales.get(region, {}))
             for region in part))
         if stage is not None:
             stage.tick(min(start + chunk, n_regions), n_regions, "regions")
@@ -402,6 +468,14 @@ def build_column_check(config, stage=None):
     reg_map_med, reg_map_lo, reg_map_hi = _binned_stats(ratio_map, region_pos, region_code_axis.size)
     reg_planck_med, reg_planck_lo, reg_planck_hi = _binned_stats(ratio_planck, region_pos, region_code_axis.size)
 
+    # the same two measured 2MASS scales the adoption applies to these arms
+    # (SPEC_BMSTP_DRAFT.md sec 3.1), carried here for reference only
+    scales = _load_column_scales(config)
+    reg_scale_herschel = np.array(
+        [scales.get(_dec(r), {}).get("herschel", (np.nan, np.nan))[0] for r in region_names])
+    reg_scale_planck = np.array(
+        [scales.get(_dec(r), {}).get("planck", (np.nan, np.nan))[0] for r in region_names])
+
     print("column.build_column_check: %d Herschel-covered sightline pixels over %d regions"
           % (pix.size, region_code_axis.size), flush=True)
     for g in range(4):
@@ -439,6 +513,8 @@ def build_column_check(config, stage=None):
         f.create_dataset("REGION_PLANCK_RATIO_MEDIAN", data=reg_planck_med)
         f.create_dataset("REGION_PLANCK_RATIO_P16", data=reg_planck_lo)
         f.create_dataset("REGION_PLANCK_RATIO_P84", data=reg_planck_hi)
+        f.create_dataset("REGION_SCALE_HERSCHEL", data=reg_scale_herschel)
+        f.create_dataset("REGION_SCALE_PLANCK", data=reg_scale_planck)
     return out_path
 
 
@@ -452,12 +528,13 @@ def build(config, regions=None):
         regions = [r.name for r in regions_module.REGIONS]
     cal = _load_planck_calibration(config)
     field_zp = _load_field_zeropoints(config)
+    scales = _load_column_scales(config)
     with progress_module.Stage("sky.derived.column") as st:
         n_regions = len(regions)
         n_done = [0]
 
         def _one(region):
-            r = _build_one_region(config, region, cal, field_zp=field_zp)
+            r = _build_one_region(config, region, cal, field_zp=field_zp, scales=scales)
             n_done[0] += 1
             st.tick(n_done[0], n_regions, "regions")
             return r

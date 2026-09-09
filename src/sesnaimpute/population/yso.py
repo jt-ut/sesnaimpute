@@ -349,15 +349,16 @@ def _herschel_pixel_stats(config, pix_sorted):
 
 def _planck_parent_column(config, parent256):
     """`A_K` of every requested nside-256 pixel (`parent256`), from the
-    survey-wide Planck sightline product
-    (`sky.derived.planck_column.build_column`) -- the fallback arm's own
-    column, for pixels the Herschel maps do not reach."""
-    path = config_module.product_path(config, "sky/derived", "planck",
+    adopted sightline column (`sky.derived.column.build_sightline`) --
+    Herschel where covered, else Planck, each arm already carrying its
+    own measured 2MASS scale (SPEC_BMSTP_DRAFT.md sec 3.1) -- the fallback
+    arm's own column, for pixels the Herschel maps do not reach."""
+    path = config_module.product_path(config, "sky/derived", "adopted",
                                        "column", "sightline")
     if not os.path.exists(path):
         raise FileNotFoundError(
-            "population.yso: Planck sightline column missing at %s -- run "
-            "the 'sky.derived.planck_column' RUNBOOK line first" % path)
+            "population.yso: adopted sightline column missing at %s -- run "
+            "the 'sesnaimpute.sky.derived.column' RUNBOOK line first" % path)
     with h5py.File(path, "r") as f:
         sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
         a_k = np.asarray(f["A_K"][:], dtype=np.float64)
