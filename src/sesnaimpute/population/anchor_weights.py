@@ -584,6 +584,14 @@ def region_tile_counts(config, region, clusters, min_counts=MIN_COUNTS):
     ks_m50, p_ks, ks_own_fit = fit_ks_completeness(n_obs_ks, n_pred_ks, hist["ks_edges"], served_mask)
     n_pred_ks = n_pred_ks * p_ks
     n_pred_joint = n_pred_joint * p_ks[:, None, :]
+    # the joint table's observed Ks is each survey source's own 2MASS
+    # measurement (`population.anchor_observed`), complete only on the
+    # 2MASS-served bins: on the deep bins an observed joint count would
+    # set an incomplete detection set against a complete prediction, so
+    # those joint bins carry no evidence and fall to the marginals
+    # (`USE_JOINT` False there), exactly as they did when the axis ended
+    # at the 2MASS cut.
+    n_obs_joint = np.where(served_mask[None, None, :], n_obs_joint, 0.0)
 
     ratio_mask = cluster_excluded_by_ratio(n_obs_g, n_pred_g, n_obs_ks, n_pred_ks)
     excluded_ratio = ratio_mask["excluded"]
