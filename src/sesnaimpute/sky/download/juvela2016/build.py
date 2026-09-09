@@ -4,7 +4,7 @@ nested NSIDE=2048, Galactic coordinates. Fetches the one FITS file
 verbatim from the author distribution
 (http://www.interstellarmedium.org/Extinction/data/).
 
-Feeds W49's extinction column (`sesnaimpute.sky.derived.juvela_extinction`):
+Feeds the extinction column (`sesnaimpute.sky.derived.juvela_extinction`):
 a star-colour map of the whole sightline, read against the adopted
 (gas) column's beam to set the scale where the emission map runs low.
 """

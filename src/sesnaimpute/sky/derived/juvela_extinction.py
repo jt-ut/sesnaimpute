@@ -1,5 +1,5 @@
 """The NICEST star-colour extinction column, per source and per
-sightline (W49's rule: the extinction column is formed at the reference
+sightline (the extinction column is formed at the reference
 map's own resolution, its 3' beam, not coarser).
 
 Juvela & Montillaud (2016, A&A 585, A38) built `NICEST_AJ_M1_FWHM3.0.fits`
@@ -8,13 +8,13 @@ M1, 3.0' FWHM), HEALPix nested NSIDE=2048, Galactic `A_J`. `A_K` here is
 that `A_J` over the adopted diffuse law's own `A_J/A_K`
 (`population.selection.extinction_k` at `LAW_DIFFUSE`) -- the same
 K-currency every other adopted-column product uses, so a per-nside-1024-
-cell factor against the emission column (W49b) needs no further
+cell factor against the emission column needs no further
 conversion.
 
 Per source: `A_K` is the map value at the source's own nside-2048
 nested pixel (its Galactic position, `catalog/sesna/sources_sesna_source`'s
 `GAL_L_DEG`/`GAL_B_DEG`), and `HPX_PIX_1024` is the source's nside-1024
-nested pixel -- the 3.4' beam cell W49b's factor is formed on. Per
+nested pixel -- the 3.4' beam cell the extinction column's factor is formed on. Per
 sightline: `A_K` is the mean of the map's own nside-2048 pixels over
 *every* child of the sightline's nside-256 pixel (64 of them, the whole
 map footprint under the beam), not only the ones holding a catalogued
@@ -82,7 +82,7 @@ def _admitted_sightlines_by_region(config):
     of every region -- the adopted (gas) column's own sightline product,
     which admits a pixel by coverage, not by whether a source happens to
     fall in it, so it runs wider than a region's catalogued-source pixel
-    set. That is the "admitted sightline" set W49 asks for."""
+    set. That is the "admitted sightline" set."""
     adopted_path = config_module.product_path(config, "sky/derived", "adopted", "column", "sightline")
     if not os.path.exists(adopted_path):
         raise FileNotFoundError(
