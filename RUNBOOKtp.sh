@@ -74,7 +74,6 @@ PY sesnaimpute.sky.download.edenhofer2023.build
 # service serves no bytes for this DOI (10.1086/422843) -- acquire by hand
 # and place verbatim at sky/download/fazio2004/.
 PY sesnaimpute.sky.download.trilegal.build
-PY sesnaimpute.sky.download.extinction_laws.build
 PY sesnaimpute.sky.download.h2_knot_surveys.build
 # --- catalog ---
 # catalog/ -- reads only SESNA: curated catalogues, survey depths, the

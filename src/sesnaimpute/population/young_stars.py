@@ -401,7 +401,7 @@ def kappa_g(config, a):
     w = selection.law_dense_weight(a)
 
     def _kappa_g_law(law):
-        wave_um, opacity = selection._load_law_curve(config, law)
+        wave_um, opacity = selection._load_law_curve(law)
         chi_g = np.interp(GAIA_G_PIVOT_UM, wave_um, opacity)
         chi_ks = np.interp(ks_wvl, wave_um, opacity)
         return float(chi_g / chi_ks)
