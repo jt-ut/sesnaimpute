@@ -10,11 +10,13 @@ retained field-star sample, gathered to sources by tile; PAHC (section
 5.3) is STAR's density verbatim. GAL (section 5.4) is one survey number,
 the counts law integrated over its tabulated grid. YSO (section 5.5) is
 the quadratic law applied to the CLOUD's own share of the column,
-`A_cloud` (the foreground and the measured background inside the
-Edenhofer map's reach deducted from the source's whole adopted column,
-`bmstp.sample_cloud`'s own doubled cloud interval), `kappa` selected by
-which arm reached the source (`ARM`, from the adopted column's own
-provenance flag). H2S (section 5.6) rides on that same INTRINSIC
+`A_cloud` (only the sightline's FOREGROUND deducted from the source's
+whole adopted column, at the front edge of `bmstp.sample_cloud`'s own
+cloud interval: the 3-D map cannot partition the column reliably behind
+a cloud at a kiloparsec, so nothing behind the front edge is deducted),
+`kappa` selected by which arm reached the source (`ARM`, from the
+adopted column's own provenance flag). H2S (section 5.6) rides on that
+same INTRINSIC
 young-star law density (before the grid's own on-grid fraction is
 applied, section 4.1: H2S's own on-grid fraction is 1), scaled by the
 region's `eta` and the universal `eps_ext`, but on the Herschel arm the
@@ -160,22 +162,23 @@ def _gal_density(config):
 
 def _cloud_column_fraction(config, region):
     """`A_cloud(sightline) / A_s`, section 5.5 "Sky density": the CLOUD's
-    own share of the sightline's column, `1 - u(d_front) - [u(d_edge) -
-    u(d_back)]`, `u(d) = A_CUM_K / A_INF_K` (the profile product,
+    own share of the sightline's column, `1 - u(d_front)`, `u(d) =
+    A_CUM_K / A_INF_K` (the profile product,
     `sky/derived/edenhofer/profile_edenhofer_sightline__R.hdf5`)
     interpolated linearly in distance on its own `DIST_PC` axis, at the
-    region's cloud interval `[d_front, d_back]` (`bmstp.sample_cloud`'s
-    own doubled-interval rule, W24b -- imported, not re-derived) and the
-    map's own last cell edge `d_edge = DIST_PC[-1]`: the foreground and
-    the measured background inside the map's reach are deducted, but the
-    disc tail beyond `d_edge` stays with the cloud (the adopted column's
-    residual against the map's own edge, not measured background), so the
-    background term drops to zero once `d_back` itself reaches `d_edge`.
-    Returns the per-sightline fraction, one value per row of the profile
-    product's own `HPX_PIX_256` axis -- the SAME axis, in the SAME order,
-    P3's `HPX_PIX_256` is built from (`bmstp.shapes.build_cloud` writes it
-    straight from `sample_cloud._region_profile`'s own read of this
-    product), so a source's `sightline_row` into P3 indexes it directly."""
+    front edge of the region's cloud interval, `d_front`
+    (`bmstp.sample_cloud`'s own interval rule, W24b -- imported, not
+    re-derived). Only the FOREGROUND is deducted: the 3-D dust map
+    partitions a sightline's column reliably in front of a cloud and not
+    behind it at a kiloparsec (toward NGC 7129 it spreads the cloud over
+    500-2000 pc), so nothing behind `d_front` is deducted -- the in-map
+    background and the disc tail past the map's own reach both stay with
+    the cloud. Returns the per-sightline fraction, one value per row of
+    the profile product's own `HPX_PIX_256` axis -- the SAME axis, in the
+    SAME order, P3's `HPX_PIX_256` is built from (`bmstp.shapes.build_cloud`
+    writes it straight from `sample_cloud._region_profile`'s own read of
+    this product), so a source's `sightline_row` into P3 indexes it
+    directly."""
     path = config_module.product_path(
         config, "sky/derived", "edenhofer", "profile", "sightline", region=region)
     with h5py.File(path, "r") as f:
@@ -183,7 +186,6 @@ def _cloud_column_fraction(config, region):
         a_cum_k = np.asarray(f["A_CUM_K"][:], dtype=np.float64)
         a_inf_k = np.asarray(f["A_INF_K"][:], dtype=np.float64)
     u = a_cum_k / a_inf_k[:, None]  # (n_sl, n_d): u(DIST_PC[j]) per sightline
-    d_edge = float(dist_pc[-1])
 
     def _u_at(d):
         j = int(np.clip(np.searchsorted(dist_pc, d), 1, dist_pc.size - 1))
@@ -191,10 +193,9 @@ def _cloud_column_fraction(config, region):
         frac = (d - d0) / (d1 - d0) if d1 > d0 else 0.0
         return u[:, j - 1] + frac * (u[:, j] - u[:, j - 1])  # (n_sl,)
 
-    d_front, d_back = sample_cloud.cloud_interval_pc(config, region)
+    d_front, _d_back = sample_cloud.cloud_interval_pc(config, region)
     u_front = _u_at(d_front)
-    background = np.zeros_like(u_front) if d_back >= d_edge else (u[:, -1] - _u_at(d_back))
-    return 1.0 - u_front - background, d_front, d_back, d_edge
+    return 1.0 - u_front, d_front
 
 
 def build_region(config, region, st):
@@ -267,12 +268,11 @@ def build_region(config, region, st):
     d_r_pc = float(reg.d_r_pc)
     pc2 = float(pc2_per_deg2(d_r_pc))
     # sec. 5.5 "Sky density": the law is applied to the CLOUD's own share
-    # of the column, `A_cloud = A_s . [1 - u(d_front) - (u(d_edge) -
-    # u(d_back))]`, not the source's whole adopted column -- the
-    # foreground and the measured background inside the map's reach are
-    # deducted; the disc tail past the map's own edge stays with the
-    # cloud (W26).
-    cloud_frac_by_sightline, d_front, d_back, d_edge = _cloud_column_fraction(config, region)
+    # of the column, `A_cloud = A_s . [1 - u(d_front)]`, not the source's
+    # whole adopted column -- only the FOREGROUND is deducted; the 3-D
+    # map cannot partition the column behind a cloud at a kiloparsec, so
+    # nothing behind the front edge is deducted (W26b).
+    cloud_frac_by_sightline, d_front = _cloud_column_fraction(config, region)
     cloud_frac = cloud_frac_by_sightline[sightline_row]
     a_cloud = a_col * cloud_frac
     density_yso_intrinsic = law_count(config, region, a_cloud, arm)
@@ -336,7 +336,7 @@ def build_region(config, region, st):
         density_star_raw=density_star_raw, density_agb_raw=density_agb_raw,
         density_gal_raw=density_gal_raw, density_yso_intrinsic=density_yso_intrinsic,
         on_grid_star=on_grid_star, on_grid_agb=on_grid_agb, on_grid_yso=on_grid_yso,
-        on_grid_gal=on_grid_gal, d_front=d_front, d_back=d_back, d_edge=d_edge,
+        on_grid_gal=on_grid_gal, d_front=d_front,
         omega_sim=omega_sim, f_dusty_o=f_dusty_o, f_dusty_c=f_dusty_c, f_c=f_c,
         eta_r=eta_r, retention_limits=retention_limits, yso_law_err=yso_law_err,
         d_r_pc=d_r_pc, n=n, knot_meta=knot_meta, n_herschel=n_herschel, n_edge=n_edge,
@@ -421,8 +421,8 @@ def build(config, regions=None):
             cloud_frac = result["cloud_frac"]
             cf_med, cf_16, cf_84 = np.percentile(cloud_frac, [50, 16, 84])
             print(f"bmstp.density {region}: A_cloud/A_s median={cf_med:.6g} "
-                  f"16-84%=[{cf_16:.6g}, {cf_84:.6g}] (cloud interval d_front={result['d_front']:.6g} "
-                  f"d_back={result['d_back']:.6g} d_edge={result['d_edge']:.6g} pc)")
+                  f"16-84%=[{cf_16:.6g}, {cf_84:.6g}] (cloud interval front edge "
+                  f"d_front={result['d_front']:.6g} pc)")
             for cls, og in (("STAR", result["on_grid_star"]), ("AGB", result["on_grid_agb"]),
                             ("YSO", result["on_grid_yso"])):
                 print(f"bmstp.density {region}: on-grid fraction {cls} median={np.median(og):.6g}")
@@ -451,15 +451,14 @@ def build(config, regions=None):
                     # sources) and indexed in numpy instead.
                     a_cum_h = np.asarray(f["A_CUM_K"][:], dtype=np.float64)[rows_h, :]
                     a_inf_h = np.asarray(f["A_INF_K"][:], dtype=np.float64)[rows_h]
-                d_front_h, d_back_h, d_edge_h = result["d_front"], result["d_back"], float(dist_pc_h[-1])
+                d_front_h = result["d_front"]
                 kappa_h = np.where(result["arm"][:n_check] == PROVENANCE_HERSCHEL, KAPPA_HERSCHEL, KAPPA_PLANCK)
                 pc2_h = float(pc2_per_deg2(result["d_r_pc"]))
                 hand_yso = np.empty(n_check, dtype=np.float64)
                 for k in range(n_check):
                     u_row = a_cum_h[k] / a_inf_h[k]
                     u_front_h = np.interp(d_front_h, dist_pc_h, u_row)
-                    background_h = 0.0 if d_back_h >= d_edge_h else (u_row[-1] - np.interp(d_back_h, dist_pc_h, u_row))
-                    a_cloud_h = a_col_h[k] * (1.0 - u_front_h - background_h)
+                    a_cloud_h = a_col_h[k] * (1.0 - u_front_h)
                     hand_yso[k] = kappa_h[k] * pc2_h * a_cloud_h ** 2 * result["on_grid_yso"][k]
                 hand_dev = float(np.max(np.abs(hand_yso - result["density_yso"][:n_check])))
             else:
