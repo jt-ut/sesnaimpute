@@ -1,24 +1,35 @@
 """The prior at a source: the six shapes and levels, one page per region
-(SPEC_BMSTP_DRAFT.md sec. 1.1's factorisation, sec. 4.1-4.2, sec. 5.1-5.6;
-W18). Nothing shows what the prior actually says at one source on the
-axes the fitter multiplies -- this is that page's replacement for the new
-design, after the earlier `bms_backup/prior/validation/atlas/atlas_*.pdf`.
-Report-only: nothing written here is read by the fitter or by any other
-`bmstp`/`fittp` stage.
+(SPEC_BMSTP_DRAFT.md sec. 1.1's factorisation, sec. 2's common grid, sec.
+4.1-4.2, sec. 5.1-5.6; W18, REWRITTEN for 4.5B, W28). Nothing shows what
+the prior actually says at one source on the axes the fitter multiplies --
+this is that page's replacement for the new design, after the earlier
+`bms_backup/prior/validation/atlas/atlas_*.pdf`. Report-only: nothing
+written here is read by the fitter or by any other `bmstp`/`fittp` stage.
 
 Per region, two sources from the density table: the one at the region's
 median `A_COL_K` and the one at its 99th percentile. For each, six panels
-of the shape `h_C(x, log10 B)` the fitter reads for that source --
+of the shape `h_C(x, log10 F_4.5)` the fitter reads for that source --
 `fittp.prior_reader.load`/`prepare`, which blurs the class's stored grain
 shape by the source's own column kernel (sec. 4.2) -- in the old page's
-order (GAL, YSO, H2S, STAR, PAHC, AGB), plus a bar of the six `DENSITY_<C>`
-at the source (`A_C(s)`, sec. 1.1). The page keeps shape and level apart
+order (GAL, YSO, H2S, STAR, PAHC, AGB), sharing ONE pair of axes, `log10 x`
+and `log10 F_4.5` in mJy (sec. 2: one common brightness axis for every
+class but H2S), and one colour scale; the y-axis label appears once per
+row, outside the panels, rather than once per panel (the previous page's
+per-panel labels overlapped their neighbours). H2S alone keeps its own
+private `log10 Sigma` axis (sec. 5.6), stated in its own panel's title.
+Each panel also carries the panel's own on-grid fraction (`ON_GRID_*`,
+sec. 2's ON-GRID FRACTION, the grain's raw population weight the grid
+retains at all) beside the post-blur mass (`prepare`'s own renormalised
+sum, sec. 9's "shape normalisation after blur" identity) -- two distinct
+checks, not one. A bar of the six `DENSITY_<C>` at the source (`A_C(s)`,
+sec. 1.1) sits beside the six panels. The page keeps shape and level apart
 because that is how the spec states the intensity and how a defect (a
 collapsed class, an off-grid peak, a wrong-unit brightness axis) is
 located.
 """
 
 import argparse
+import os
 
 import h5py
 import numpy as np
@@ -32,8 +43,6 @@ from sesnaimpute import config as config_module
 from sesnaimpute import plot_style
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
-from sesnaimpute.bmstp import grid as bmstp_grid
-from sesnaimpute.bmstp import sample_gal
 from sesnaimpute.fittp import prior_reader
 
 PAGE_W_IN, PAGE_H_IN = 16.0, 9.0
@@ -41,15 +50,10 @@ PAGE_W_IN, PAGE_H_IN = 16.0, 9.0
 #: The old page's panel order (W18's brief).
 CLASS_ORDER = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
 
-#: STAR/AGB/PAHC/YSO share the template-unit brightness axis (sec. 2):
-#: `log10 B = 0` is the template at 1 kpc, `B = 1`.
-TEMPLATE_UNIT_CLASSES = ("STAR", "AGB", "PAHC", "YSO")
-
-_Y_LABEL = {
-    "STAR": "log10 B  [template units]", "AGB": "log10 B  [template units]",
-    "PAHC": "log10 B  [template units]", "YSO": "log10 B  [template units]",
-    "GAL": "log10 S  [mJy]", "H2S": "log10 Σ  [erg s⁻¹ cm⁻² sr⁻¹]",
-}
+#: Every class but H2S reads the one common brightness axis (sec. 2):
+#: `log10 F_4.5` in mJy, `bmstp.grid.LOG10_F45_EDGES` -- the row's one
+#: outside y-axis label below.
+_SHARED_Y_LABEL = "log10 F_4.5  [mJy]"
 
 _ARM_NAME = {0: "Herschel", 1: "Planck"}
 
@@ -81,81 +85,88 @@ def _read_density_table(config, region):
     return d
 
 
-def _mass_outside_star(config, region):
-    """`(MASS_OUTSIDE_STAR, MASS_OUTSIDE_AGB)` per tile (P2), the grid's
-    own build-time identity (sec. 2's 0.1% bar) -- PAHC reads STAR's
-    (sec. 5.3 "Grain": the shape IS STAR's)."""
+def _on_grid_star(config, region):
+    """`(ON_GRID_STAR, ON_GRID_AGB)` per tile (P2, sec. 2's ON-GRID
+    FRACTION, W26): PAHC reads STAR's own (sec. 5.3 "Grain": the shape IS
+    STAR's)."""
     path = config_module.product_path(config, "bmstp", "shape", "star", "tile", region=region)
     with h5py.File(path, "r") as f:
-        return f["MASS_OUTSIDE_STAR"][:].astype(np.float64), f["MASS_OUTSIDE_AGB"][:].astype(np.float64)
+        return f["ON_GRID_STAR"][:].astype(np.float64), f["ON_GRID_AGB"][:].astype(np.float64)
 
 
-def _mass_outside_yso(config, region):
-    """`MASS_OUTSIDE_YSO` per sightline (P3) -- H2S reads it too (its own
-    grid is YSO's `x` marginal times an exact, always-normalised Gaussian
-    on `log10 Sigma`, sec. 5.6 "Marks": no mass is lost on that axis)."""
+def _on_grid_yso(config, region):
+    """`ON_GRID_YSO` per sightline (P3, W26)."""
     path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
     with h5py.File(path, "r") as f:
-        return f["MASS_OUTSIDE_YSO"][:].astype(np.float64)
+        return f["ON_GRID_YSO"][:].astype(np.float64)
 
 
-def _gal_mass_outside(config):
-    """GAL's survey-wide `mass_outside` (P4), recomputed by the same
-    `grid.bin` call `bmstp.shapes.build_gal` makes (not stored on the
-    product itself, sec. 4.1 P4) -- cheap: one 61-node sample."""
+def _on_grid_gal(config):
+    """`ON_GRID_GAL`, the one survey-wide attr (P4, W26): read directly,
+    not recomputed -- `bmstp.shapes.build_gal` is this number's own build."""
     path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
     with h5py.File(path, "r") as f:
-        origin = float(f.attrs["LOG10_B_ORIGIN"])
-    x, log10_b, w = sample_gal.sample(config)
-    _, mass_outside = bmstp_grid.bin(x, log10_b, w, origin, 0.0)
-    return mass_outside
+        return float(f.attrs["ON_GRID_GAL"])
 
 
-def _class_mass_outside(cls, dtab, mass_star, mass_agb, mass_yso, mass_gal, src_idx):
+#: H2S rides on YSO's `x` marginal and its own always-normalised region
+#: Gaussian on `log10 Sigma` (sec. 5.6 "Marks"): no mass is lost on either
+#: axis, so its own on-grid fraction is fixed at 1 (sec. 4.1, W26).
+H2S_ON_GRID = 1.0
+
+
+def _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_gal, src_idx):
     if cls in ("STAR", "PAHC"):
-        return float(mass_star[dtab["tile"][src_idx]])
+        return float(on_grid_star[dtab["tile"][src_idx]])
     if cls == "AGB":
-        return float(mass_agb[dtab["tile"][src_idx]])
-    if cls in ("YSO", "H2S"):
-        return float(mass_yso[dtab["sightline"][src_idx]])
-    return float(mass_gal)  # GAL
+        return float(on_grid_agb[dtab["tile"][src_idx]])
+    if cls == "YSO":
+        return float(on_grid_yso[dtab["sightline"][src_idx]])
+    if cls == "H2S":
+        return H2S_ON_GRID
+    return float(on_grid_gal)  # GAL
 
 
 def _panel_arrays(config, region, cls, rows):
-    """`(density, x_edges, b_edges)`: the shape `h_C` the fitter reads
-    for each of `rows`' sources -- `fittp.prior_reader.load`/`prepare`,
-    which blurs the class's stored grain shape by the source's own
-    column kernel (sec. 4.2) and floors/renormalises it -- converted from
-    a per-cell mass to a density per mag·dex (`/ (dlx * dlb)`, sec. 4.1's
-    "the page plots h_C, a pdf ... per mag·dex")."""
+    """`(density, x_edges, b_edges, mass)`: the shape `h_C` the fitter
+    reads for each of `rows`' sources -- `fittp.prior_reader.load`/
+    `prepare`, which blurs the class's stored grain shape by the source's
+    own column kernel (sec. 4.2), floors it and renormalises it to sum to
+    one -- converted from a per-cell mass to a density per mag·dex
+    (`/ (dlx * dlb)`, sec. 4.1's "the page plots h_C, a pdf ... per
+    mag·dex"). `mass` is `prepare`'s own post-blur sum (sec. 9's "shape
+    normalisation after blur", 1 +/- 1e-3 by construction -- a DIFFERENT
+    check from the panel's own on-grid fraction, which is the grain's raw
+    (pre-blur) population weight the grid ever admitted)."""
     reader = prior_reader.load(config, region, cls)
     h = prior_reader.prepare(reader, np.asarray(rows))
     density = h.astype(np.float64) / (reader.dlx * reader.dlb)
-    return density, reader.x_edges, reader.b_edges
+    mass = density.sum(axis=(1, 2)) * reader.dlx * reader.dlb
+    return density, reader.x_edges, reader.b_edges, mass
 
 
 def _build_region_data(config, region):
     dtab = _read_density_table(config, region)
     idx_median, idx_p99 = _select_sources(dtab["a_col"])
     rows = np.array([idx_median, idx_p99])
-    mass_star, mass_agb = _mass_outside_star(config, region)
-    mass_yso = _mass_outside_yso(config, region)
-    mass_gal = _gal_mass_outside(config)
+    on_grid_star, on_grid_agb = _on_grid_star(config, region)
+    on_grid_yso = _on_grid_yso(config, region)
+    on_grid_gal = _on_grid_gal(config)
 
     panels = {}
     for cls in CLASS_ORDER:
-        density2, x_edges, b_edges = _panel_arrays(config, region, cls, rows)
+        density2, x_edges, b_edges, mass2 = _panel_arrays(config, region, cls, rows)
         x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
         b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
         for i, src_idx in enumerate(rows):
             d = density2[i]
             pi, pj = np.unravel_index(int(np.argmax(d)), d.shape)
-            mass = 1.0 - _class_mass_outside(cls, dtab, mass_star, mass_agb, mass_yso, mass_gal, src_idx)
+            on_grid = _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_gal, src_idx)
             panels[(i, cls)] = dict(
                 density=d, x_edges=x_edges, b_edges=b_edges,
-                x_centers=x_centers, b_centers=b_centers, mass=mass,
-                peak_x=float(x_centers[pi]), peak_b=float(b_centers[pj]),
-                b_at_1=0.0 if cls in TEMPLATE_UNIT_CLASSES else None)
+                x_centers=x_centers, b_centers=b_centers,
+                mass=float(mass2[i]), on_grid=on_grid,
+                peak_x=float(x_centers[pi]), peak_b=float(b_centers[pj]))
     return dtab, rows, panels
 
 
@@ -167,9 +178,8 @@ def _print_numbers(region, dtab, rows, panels):
               % (region, label, name, dtab["a_col"][src_idx], _ARM_NAME[int(dtab["arm"][src_idx])]))
         for cls in CLASS_ORDER:
             p = panels[(i, cls)]
-            b1 = ("%.4g" % p["b_at_1"]) if p["b_at_1"] is not None else "n/a"
-            print("atlas.shapes [%s] %s/%s: mass=%.6f peak_log10x=%.4g peak_log10B=%.4g log10B_at_B1=%s"
-                  % (region, label, cls, p["mass"], p["peak_x"], p["peak_b"], b1))
+            print("atlas.shapes [%s] %s/%s: mass=%.6f on_grid=%.6f peak_log10x=%.4g peak_log10F45=%.4g"
+                  % (region, label, cls, p["mass"], p["on_grid"], p["peak_x"], p["peak_b"]))
 
 
 def _draw_figure(config, region, dtab, rows, panels):
@@ -199,11 +209,13 @@ def _draw_figure(config, region, dtab, rows, panels):
             im = ax.imshow(np.log10(p["density"]).T, origin="lower", aspect="auto",
                             extent=[p["x_edges"][0], p["x_edges"][-1], p["b_edges"][0], p["b_edges"][-1]],
                             cmap=cmap, norm=norm)
-            if p["b_at_1"] is not None:
-                ax.axhline(0.0, color="white", lw=0.6, ls="--", alpha=0.8)
-            ax.text(0.02, 0.03, "mass=%.4f\npeak=(%.2f, %.2f)" % (p["mass"], p["peak_x"], p["peak_b"]),
+            ax.text(0.02, 0.03, "mass=%.4f\non_grid=%.4f\npeak=(%.2f, %.2f)"
+                    % (p["mass"], p["on_grid"], p["peak_x"], p["peak_b"]),
                     transform=ax.transAxes, fontsize=5.5, color="white", va="bottom")
-            ax.set_ylabel(_Y_LABEL[cls], fontsize=6.5)
+            # the y-axis label is set ONCE per row, outside the panels
+            # (below), not per panel -- the previous page's six repeated
+            # labels overlapped their neighbours. Every panel still shows
+            # its own numeric y-ticks (the values, not the label text).
             ax.set_xlabel("log10 x", fontsize=6.5)
             ax.tick_params(labelsize=6)
             xt = np.array([-3.0, -1.0, 1.0])
@@ -215,7 +227,15 @@ def _draw_figure(config, region, dtab, rows, panels):
             ax2.tick_params(length=2, pad=1, labelsize=5)
             if c == 0:
                 ax2.set_xlabel("a  [A_K mag]", fontsize=5.5, labelpad=1)
-            ax.set_title(cls, fontsize=9, weight="bold", pad=16)
+            # H2S is the one class the reader keeps on its own private
+            # brightness axis (sec. 5.6): every other panel shares the
+            # row's one outside `log10 F_4.5` [mJy] label, so H2S's own
+            # title carries the disclosure instead.
+            title = "H2S (log10 Σ axis)" if cls == "H2S" else cls
+            ax.set_title(title, fontsize=9, weight="bold", pad=16)
+            if c == 0:
+                fig.text(x0 / PAGE_W_IN - 0.30 / PAGE_W_IN, (y0 + 0.5 * row_h) / PAGE_H_IN,
+                          _SHARED_Y_LABEL, rotation=90, va="center", ha="center", fontsize=7)
 
         # the bar: the six DENSITY_<C> at this row's source, per deg^2.
         x_bar = margin_l + 6 * (shape_w + col_gap)
@@ -251,7 +271,6 @@ def _draw_figure(config, region, dtab, rows, panels):
     fig.suptitle(caption, fontsize=9.5, y=1.0 - 0.15 / PAGE_H_IN)
 
     out_dir = f"{config.data_root}/bmstp/atlas/figures"
-    import os
     os.makedirs(out_dir, exist_ok=True)
     paths = []
     for fmt in ("png", "pdf"):
@@ -269,7 +288,10 @@ def build_region(config, region):
         paths = _draw_figure(config, region, dtab, rows, panels)
         mass_min = min(p["mass"] for p in panels.values())
         mass_max = max(p["mass"] for p in panels.values())
-        st.done(paths[0], n_panel=len(panels), mass_min=mass_min, mass_max=mass_max)
+        on_grid_min = min(p["on_grid"] for p in panels.values())
+        on_grid_max = max(p["on_grid"] for p in panels.values())
+        st.done(paths[0], n_panel=len(panels), mass_min=mass_min, mass_max=mass_max,
+                on_grid_min=on_grid_min, on_grid_max=on_grid_max)
     return paths
 
 

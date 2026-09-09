@@ -15,13 +15,19 @@ This build writes STAR/AGB/PAHC (sec. 5.1-5.3, partitioning the field population
 a star is a STAR or a PAHC member of the Monte Carlo, never both, weighted
 `W_STAR*(1-P_PAHC)`/`W_STAR*P_PAHC`), GAL (sec. 5.4: SWIRE's four IRAC fluxes
 per galaxy, S from the counts law's own node, colours from a galaxy measured at
-that node, at `x=1`), YSO (sec. 5.5: Chabrier 2003 IMF masses through the BHAC15
-1 Myr isochrone -- MIST's own basic isochrone above BHAC15's top mass carries no
-band magnitudes, so it supplies only `(L, Teff)` for a bare Rayleigh-Jeans
-extrapolation anchored at Ks, disclosed -- placed along the sightline's own
-`p(u)`, sec. 5.5 "Population"/"Marks") and H2S (sec. 5.6: the region's 2.12 um
-lognormal carried into the bands by the measured knot line-to-band ratios, at
-YSO's own `x`). All six classes enter the total-count check.
+that node, at `x=1`), YSO (sec. 5.5: the region's own fixed-seed draw of
+`N_MC` YSO library templates by the population weight -- IMF x inclination /
+rho, the same construction `bmstp.template_weights.build_yso`'s `population`
+factor and `bmstp.sample_cloud.sample_f45` use, sec 5.5 "Template weights" --
+each template's own eight `F_REF` scaled by `(1 kpc / d_r)^2`, placed along the
+sightline's own `p(x)` on the cloud interval, `bmstp.sample_cloud.sample_x`'s
+binned return) and H2S (sec. 5.6: the region's 2.12 um lognormal carried into
+the bands by the measured knot line-to-band ratios, at YSO's own `x`). AGB's
+members are the star-family sampler's own evolved stars (`bmstp.sample_star.
+sample_agb`), each carrying one shell template of its own drawn chemistry
+(Riebel+2012's optical-depth distribution, `bmstp.template_weights.build_agb`'s
+`tau` factor construction) whose eight `F_REF` are scaled so its own 4.5 um
+flux equals the star's `F_4.5`. All six classes enter the total-count check.
 """
 
 import os
@@ -29,6 +35,7 @@ import os
 import h5py
 import healpy as hp
 import numpy as np
+from astropy.io import fits
 from joblib import Parallel, delayed
 
 from sesnaimpute import config as config_module
@@ -39,12 +46,15 @@ from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import h2s as h2s_module
 from sesnaimpute.population import selection as selection_module
+from sesnaimpute.population import star_population
 from sesnaimpute.population import yso as yso_module
-from sesnaimpute.population.yso_mass import AGE_1MYR_GYR, _read_mist_1myr_track
 from sesnaimpute.bmstp import density as density_module
+from sesnaimpute.bmstp import grid
 from sesnaimpute.bmstp import knot_field
 from sesnaimpute.bmstp import sample_cloud
 from sesnaimpute.bmstp import sample_gal
+from sesnaimpute.bmstp import sample_star
+from sesnaimpute.bmstp import template_weights
 from sesnaimpute.fittp import likelihood as likelihood_module
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
@@ -334,17 +344,24 @@ def _pahc_weight(limit8_grid, p_pahc, x):
     return p_pahc[:, lo] + frac * (p_pahc[:, hi] - p_pahc[:, lo])
 
 
-def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_in_tile, width_dex):
+def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_in_tile, width_dex, agb_pool):
     """One tile's `{cls: (frac, mc_error, density, frac_bright3,
     frac_bright10)}` for STAR/AGB/PAHC, over its own
     admitted pixels, from the star-family population's own retained
     sample (`population/star/population_star_tile__R.hdf5`'s `tile_<id>`
-    group): STAR/AGB/PAHC all draw from the SAME TRILEGAL flux table
-    (sec. 8's members list), each with its own weight column and its own
-    Monte Carlo resample, so the three densities carry independent
-    binomial noise rather than the same draw reweighted after the fact.
-    `width_dex` is this tile's own pixels' `W_DEX_PIX` (n_pix_in_tile, 8),
-    not one region-band constant (`catalog.depth_grid`, sec. 3.3)."""
+    group): STAR/PAHC draw from the SAME TRILEGAL flux table (sec. 8's
+    members list), each with its own weight column and its own Monte
+    Carlo resample, so the two densities carry independent binomial noise
+    rather than the same draw reweighted after the fact. AGB draws from
+    `sample_star.sample_agb`'s own evolved-star sample instead (sec. 5.2:
+    the star's own `F_4.5` is the shell flux, not TRILEGAL's photosphere)
+    -- each drawn star's own shell chemistry (already resolved by
+    `sample_agb`'s carbon-share split, `x`'s first/second half) picks one
+    AGB library template from `agb_pool`'s own tau-factor weight within
+    that chemistry, whose eight `F_REF` are rescaled so its own 4.5 um
+    reference flux equals the star's `F_4.5`. `width_dex` is this tile's
+    own pixels' `W_DEX_PIX` (n_pix_in_tile, 8), not one region-band
+    constant (`catalog.depth_grid`, sec. 3.3)."""
     star_path = config_module.product_path(
         config, "population", "star", "population", "tile", region=region)
     field_path = config_module.product_path(
@@ -360,7 +377,6 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         star_index = np.asarray(grp["STAR_INDEX"][()], dtype=np.int64)
         u = np.asarray(grp["U"][()], dtype=np.float64)
         w_star = np.asarray(grp["W_STAR"][()], dtype=np.float64)
-        w_agb = np.asarray(grp["W_AGB"][()], dtype=np.float64)
         p_pahc_grid = np.asarray(grp["P_PAHC"][()], dtype=np.float64)  # (n_star, 8)
     with h5py.File(field_path, "r") as f:
         flux0_all = np.asarray(f["FNU_MJY"][star_index], dtype=np.float64)  # (n_star, 8)
@@ -377,7 +393,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
 
     rng = np.random.RandomState(MC_SEED + tile_id)
     out = {}
-    for cls, weight in (("STAR", w_star_only), ("AGB", w_agb), ("PAHC", w_pahc_only)):
+    for cls, weight in (("STAR", w_star_only), ("PAHC", w_pahc_only)):
         idx, total = _draw_members(rng, weight, N_MC)
         density = total / omega_t  # objects deg^-2, sec. 5.1/5.2's Omega_pointing
         if idx is None:
@@ -389,170 +405,197 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
             frac, mc_error, frac_bright3, frac_bright10 = _accepted_fraction(
                 a_col_in_tile, u[idx], flux0_all[idx], f_lim_in_tile, width_dex, config)
         out[cls] = (frac, mc_error, density, frac_bright3, frac_bright10)
+
+    # AGB (sec. 5.2): the SAME sampler `bmstp.shapes` bins its own shape
+    # from -- `x_a` is `concatenate([u, u])` over the tile's evolved
+    # stars, `f45_a` each star's own shell `log10 F_4.5` in its assigned
+    # chemistry, `w_a` the carbon-share-split weight -- so drawing from
+    # `w_a` reproduces the O/C admixture exactly as the shape's own draw
+    # does; the first half of the concatenation is O-rich, the second C-rich.
+    x_a, f45_a, w_a = sample_star.sample_agb(config, region, tile_id)
+    idx_agb, total_agb = _draw_members(rng, w_a, N_MC)
+    density_agb = total_agb / omega_t
+    if idx_agb is None:
+        frac_agb = np.zeros(pix_in_tile.size)
+        mc_agb = np.zeros(pix_in_tile.size)
+        frac_agb_bright3 = np.zeros(pix_in_tile.size)
+        frac_agb_bright10 = np.zeros(pix_in_tile.size)
+    else:
+        n_evolved = x_a.size // 2
+        is_c = idx_agb >= n_evolved
+        u_agb = x_a[idx_agb]
+        f45_target = 10.0 ** f45_a[idx_agb]  # the star's own shell F_4.5 (mJy)
+        flux0_agb = np.empty((idx_agb.size, N_BANDS), dtype=np.float64)
+        for label, mask in (("O", ~is_c), ("C", is_c)):
+            n_sel = int(np.count_nonzero(mask))
+            if n_sel == 0:
+                continue
+            pool = agb_pool[label]
+            shell = rng.choice(pool["weight"].size, size=n_sel, replace=True,
+                                p=pool["weight"] / pool["weight"].sum())
+            f_ref_i2 = np.maximum(pool["f_ref"]["I2"][shell], pool["floor_linear"][shell])
+            scale = f45_target[mask] / f_ref_i2  # rescales the WHOLE shell SED
+            for k, key in enumerate(BAND_KEYS):
+                f_band = np.maximum(pool["f_ref"][key][shell], pool["floor_linear"][shell])
+                flux0_agb[mask, k] = f_band * scale
+        frac_agb, mc_agb, frac_agb_bright3, frac_agb_bright10 = _accepted_fraction(
+            a_col_in_tile, u_agb, flux0_agb, f_lim_in_tile, width_dex, config)
+    out["AGB"] = (frac_agb, mc_agb, density_agb, frac_agb_bright3, frac_agb_bright10)
     return out
 
 
-_ZP_MJY = {b.key: b.vega_zero_point_jy * 1000.0 for b in definitions.BANDS}
-_ZP_MJY_ARR = np.array([_ZP_MJY[k] for k in BAND_KEYS])
+def _agb_shell_pool(config):
+    """`{"O": {...}, "C": {...}}`, the AGB library's own shell-template
+    pool by chemistry (sec. 5.2, `bmstp.template_weights.build_agb`'s
+    `tau` factor construction: Riebel+2012's fitted optical-depth
+    distribution by chemistry, read directly against the GRAMS register's
+    own `TAU`/`CHEM` -- reads called directly, not re-derived, matching
+    `bmstp.sample_cloud.sample_f45`'s own pattern for YSO's `population`
+    factor). Each chemistry's own `weight` (`p_chem(tau) / rho`, WITHOUT
+    the carbon-fraction admixture: `sample_star.sample_agb` already
+    resolves which chemistry a given draw is, so only the WITHIN-chemistry
+    template distribution is needed here) plus that chemistry's own
+    templates' eight `F_REF` and `FLOOR_LINEAR` (sec. 3.5's FREFRAW
+    convention). Survey-wide, independent of region -- the caller computes
+    this once and reuses it, rather than this function caching on an
+    unhashable `Config` (its `inputs` mapping)."""
+    reg = template_weights._read_register(config, "agb")
+    names, rho, f_ref, floor_linear = reg["names"], reg["rho"], reg["f_ref"], reg["floor_linear"]
+    params_path = f"{config.inputs['sed_models']}/agb/parameters.fits"
+    with fits.open(params_path) as hdul:
+        d = hdul[1].data
+        grid_names = np.char.strip(np.asarray(d["MODEL_NAME"]).astype(str))
+        tau = np.asarray(d["TAU"], dtype=np.float64)
+        chem = np.char.strip(np.asarray(d["CHEM"]).astype(str))
+    if grid_names.size != names.size or not np.all(grid_names == names):
+        raise ValueError("bmstp.atlas: agb parameters.fits is not in the "
+                          "agb register's own row order")
 
-#: Chabrier 2003 system IMF (SPEC_BMSTP_DRAFT.md sec. 10 "IMF", sec. 5.5
-#: "Population"): lognormal in log10 mass below 1 Msun, a power law above,
-#: continuous at the join; sampled between 0.1 and 150 Msun.
-IMF_M_C_MSUN = 0.2
-IMF_SIGMA_DEX = 0.55
-IMF_SLOPE_HIGH = 1.35
-IMF_M_LO_MSUN = 0.1
-IMF_M_HI_MSUN = 150.0
-_IMF_LOG10M_GRID = np.linspace(np.log10(IMF_M_LO_MSUN), np.log10(IMF_M_HI_MSUN), 4001)
+    gcl, riebel_tau = star_population.read_riebel_optical_depths(config)
+    log10_tau_o = np.log10(riebel_tau[gcl == "o"])
+    log10_tau_c = np.log10(riebel_tau[gcl == "c"])
+    edges = np.linspace(-3.0, 2.0, 61)
+    h_o, _ = np.histogram(log10_tau_o, bins=edges, density=True)
+    h_c, _ = np.histogram(log10_tau_c, bins=edges, density=True)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    log10_tau_theta = np.log10(tau)
+    p_o = np.interp(log10_tau_theta, centers, h_o, left=0.0, right=0.0)
+    p_c = np.interp(log10_tau_theta, centers, h_c, left=0.0, right=0.0)
 
-
-def _chabrier_pdf_unnorm(log10m):
-    """The Chabrier 2003 system IMF's `dN/d(log10 M)`, unnormalised
-    (sec. 5.5 "Population"): a lognormal below 1 Msun (`M_c`, `sigma`),
-    a power law of index `-IMF_SLOPE_HIGH` above, matched to the
-    lognormal's own value at 1 Msun so the two pieces join continuously."""
-    below = np.exp(-(log10m - np.log10(IMF_M_C_MSUN)) ** 2 / (2.0 * IMF_SIGMA_DEX ** 2))
-    join = np.exp(-np.log10(IMF_M_C_MSUN) ** 2 / (2.0 * IMF_SIGMA_DEX ** 2))
-    above = join * 10.0 ** (-IMF_SLOPE_HIGH * log10m)
-    return np.where(log10m <= 0.0, below, above)
-
-
-_IMF_PDF = _chabrier_pdf_unnorm(_IMF_LOG10M_GRID)
-_IMF_CDF = np.concatenate(([0.0], np.cumsum(
-    0.5 * (_IMF_PDF[1:] + _IMF_PDF[:-1]) * np.diff(_IMF_LOG10M_GRID))))
-_IMF_CDF /= _IMF_CDF[-1]
-
-
-def _draw_chabrier_mass(rng, n):
-    """`n` stellar masses (Msun) drawn from the Chabrier 2003 system IMF
-    by inverse-CDF interpolation on a fixed log10-mass grid (sec. 5.5
-    "Population": "their masses from the Chabrier 2003 system IMF")."""
-    log10m = np.interp(rng.random(n), _IMF_CDF, _IMF_LOG10M_GRID)
-    return 10.0 ** log10m
-
-
-def _bhac15_1myr_block(path, n_expected_min_cols):
-    """Every column of the BHAC15 1 Myr age block of `path` (either
-    filter file), mass-sorted (sec. 3.5, sec. 10 "isochrone"): the
-    author's own `! t (Gyr) =` age headers bracket each block, `!`-comment
-    lines and blank lines skipped."""
-    rows = []
-    age = None
-    with open(path) as f:
-        for line in f:
-            if "t (Gyr)" in line:
-                age = float(line.split("=")[1])
-                continue
-            stripped = line.strip()
-            if not stripped or stripped.startswith("!"):
-                continue
-            if age is not None and abs(age - AGE_1MYR_GYR) < 1.0e-6:
-                vals = [float(x) for x in stripped.split()]
-                if len(vals) >= n_expected_min_cols:
-                    rows.append(vals)
-    if not rows:
-        raise ValueError(f"bmstp.atlas: no {AGE_1MYR_GYR} Gyr block found in {path}")
-    return np.array(sorted(rows, key=lambda r: r[0]), dtype=np.float64)
+    pools = {}
+    for label, p in (("O", p_o), ("C", p_c)):
+        sel = chem == label
+        pools[label] = dict(
+            f_ref={k: v[sel] for k, v in f_ref.items()},
+            floor_linear=floor_linear[sel],
+            weight=(p[sel] / rho[sel]))
+    return pools
 
 
-def _isochrone_table(config):
-    """`(mass, abs_mag)`, the YSO member SED table (SPEC_BMSTP_DRAFT.md
-    sec. 5.5 "Population", sec. 10 "isochrone"): BHAC15's 1 Myr photosphere
-    up to its own top mass (2MASS `Mj/Mh/Mk` from `BHAC15_iso.2mass`,
-    IRAC1-4/MIPS24=M1 from `BHAC15_iso.SPITZER`, the same mass grid in both
-    files), extended above that top by a bare Rayleigh-Jeans law anchored
-    at Ks: MIST v1.2's basic isochrone carries `(L, Teff)` but no band
-    magnitudes there (disclosed), so `Mk(M) = Mk_top - 2.5 log10([L/Teff^3]
-    (M) / [L/Teff^3](M_top))` (Stefan-Boltzmann's `R^2 ~ L/Teff^4` folded
-    into the Rayleigh-Jeans `F_nu ~ T R^2`), and every other band's colour
-    against Ks is the wavelength-only Rayleigh-Jeans law `F_nu ~ nu^2`."""
-    twomass_path = f"{config.data_root}/sky/download/baraffe2015_bhac15/BHAC15_iso.2mass"
-    spitzer_path = f"{config.data_root}/sky/download/baraffe2015_bhac15/BHAC15_iso.SPITZER"
-    tm = _bhac15_1myr_block(twomass_path, 9)   # M Teff L g R Li Mj Mh Mk
-    sp = _bhac15_1myr_block(spitzer_path, 13)  # M Teff L g R Li I1 I2 I3 I4 IRSb IRSr MIPS24 ...
-    if tm.shape[0] != sp.shape[0] or not np.allclose(tm[:, 0], sp[:, 0]):
-        raise ValueError("bmstp.atlas: BHAC15 2MASS/Spitzer 1 Myr mass grids disagree")
+def _yso_register(config):
+    """The YSO register's own `population` weight (IMF x inclination /
+    rho, sec. 5.5 "Template weights") and eight `F_REF`, in the register's
+    own row order -- the SAME construction `bmstp.template_weights.
+    build_yso`'s `population` factor and `bmstp.sample_cloud.sample_f45`
+    use (reads called directly, not re-derived). Survey-wide, independent
+    of region; the caller computes this once and reuses it."""
+    reg = template_weights._read_register(config, "yso")
+    names, rho, f_ref, floor_linear = reg["names"], reg["rho"], reg["f_ref"], reg["floor_linear"]
+    n_model = names.size
 
-    mass_lo = tm[:, 0]
-    abs_mag_lo = np.empty((mass_lo.size, N_BANDS), dtype=np.float64)
-    abs_mag_lo[:, BAND_KEYS.index("J")] = tm[:, 6]
-    abs_mag_lo[:, BAND_KEYS.index("H")] = tm[:, 7]
-    abs_mag_lo[:, BAND_KEYS.index("Ks")] = tm[:, 8]
-    abs_mag_lo[:, BAND_KEYS.index("I1")] = sp[:, 6]
-    abs_mag_lo[:, BAND_KEYS.index("I2")] = sp[:, 7]
-    abs_mag_lo[:, BAND_KEYS.index("I3")] = sp[:, 8]
-    abs_mag_lo[:, BAND_KEYS.index("I4")] = sp[:, 9]
-    abs_mag_lo[:, BAND_KEYS.index("M1")] = sp[:, 12]
+    mass_path = config_module.product_path(config, "population", "yso", "mass", "survey")
+    with h5py.File(mass_path, "r") as f:
+        mass_names = np.char.decode(f["MODEL_NAME"][:].astype("S"), "utf-8")
+        m_star = f["M_STAR"][:].astype(np.float64)
+    if mass_names.size != n_model or not np.all(mass_names == names):
+        raise ValueError("bmstp.atlas: yso mass table is not in the "
+                          "yso register's own row order")
 
-    m_top = float(mass_lo[-1])
-    log10l_top = float(tm[-1, 2])
-    teff_top = float(tm[-1, 1])
-    mk_top = float(abs_mag_lo[-1, BAND_KEYS.index("Ks")])
+    incl_names, incl_deg = [], []
+    for subdir, _label in template_weights.YSO_SUBGRIDS:
+        n, i = template_weights._read_yso_subgrid_inclination(config, subdir)
+        incl_names.append(n)
+        incl_deg.append(i)
+    incl_names = np.concatenate(incl_names)
+    incl_deg = np.concatenate(incl_deg)
+    if incl_names.size != n_model or not np.all(incl_names == names):
+        raise ValueError("bmstp.atlas: yso sub-grid inclination join is "
+                          "not in the register's own row order")
 
-    mist_mass, mist_log_l, mist_log_teff = _read_mist_1myr_track(config)
-    hi = mist_mass > m_top
-    mass_hi = mist_mass[hi]
-    if mass_hi.size:
-        d_log_lt3 = ((mist_log_l[hi] - 3.0 * mist_log_teff[hi])
-                     - (log10l_top - 3.0 * np.log10(teff_top)))
-        mk_hi = mk_top - 2.5 * d_log_lt3
-        abs_mag_hi = np.empty((mass_hi.size, N_BANDS), dtype=np.float64)
-        ks_wvl = definitions.BANDS_BY_KEY["Ks"].wvl_um
-        ks_zp = definitions.BANDS_BY_KEY["Ks"].vega_zero_point_jy
-        for k, band in enumerate(definitions.BANDS):
-            wvl_ratio = band.wvl_um / ks_wvl
-            zp_ratio = band.vega_zero_point_jy / ks_zp
-            abs_mag_hi[:, k] = mk_hi + 5.0 * np.log10(wvl_ratio) + 2.5 * np.log10(zp_ratio)
-        mass = np.concatenate([mass_lo, mass_hi])
-        abs_mag = np.concatenate([abs_mag_lo, abs_mag_hi], axis=0)
-    else:
-        mass, abs_mag = mass_lo, abs_mag_lo
-    return mass, abs_mag, m_top
+    psi = template_weights._chabrier_dn_dlogm(m_star)
+    incl_raw = np.sin(np.radians(incl_deg))
+    weight = psi * incl_raw / rho
+    return dict(weight=weight, f_ref=f_ref, floor_linear=floor_linear)
 
 
-def _yso_flux0(mass, mass_grid, abs_mag_grid, d_r_pc):
-    """`(n, 8)` apparent mJy flux at the region distance (sec. 5.5):
-    each band's isochrone absolute magnitude (`np.interp` on the mass
-    grid, no per-star loop), scaled by the inverse-square law from the
-    isochrone's own 10 pc to `d_r_pc`."""
-    abs_mag = np.empty((mass.size, N_BANDS), dtype=np.float64)
-    for k in range(N_BANDS):
-        abs_mag[:, k] = np.interp(mass, mass_grid, abs_mag_grid[:, k])
-    return _ZP_MJY_ARR[None, :] * 10.0 ** (-0.4 * abs_mag) * (10.0 / d_r_pc) ** 2
+def _yso_template_pool(config, d_r_pc, n_mc, seed):
+    """`(n_mc, 8)` mJy: `n_mc` YSO library templates drawn by the
+    population weight (sec. 5.5 "Template weights"), one fixed-seed draw
+    per region (shared by every sightline), each template's own eight
+    `F_REF` (floored at the register's own `FLOOR_LINEAR`) scaled by
+    `(1 kpc / d_r)^2` (sec. 5.5 "Marks")."""
+    reg = _yso_register(config)
+    weight, f_ref, floor_linear = reg["weight"], reg["f_ref"], reg["floor_linear"]
+    rng = np.random.RandomState(seed)
+    idx = rng.choice(weight.size, size=n_mc, replace=True, p=weight / weight.sum())
+    scale = (1000.0 / float(d_r_pc)) ** 2
+    flux0 = np.empty((n_mc, N_BANDS), dtype=np.float64)
+    for k, key in enumerate(BAND_KEYS):
+        flux0[:, k] = np.maximum(f_ref[key][idx], floor_linear[idx]) * scale
+    return flux0
+
+
+def _draw_x(rng, p_x, n):
+    """`n` `x` draws from a sightline's own `p(x)` (sec. 5.5 "Marks",
+    `sample_cloud.sample_x`'s binned return on `grid.LOG10_X_EDGES`): a
+    grid cell drawn by its own probability, then a uniform position
+    within that cell's own `log10 x` width -- the shape's own one-cell
+    resolution, no finer information is on offer."""
+    p = p_x / p_x.sum()
+    cell = rng.choice(p_x.size, size=n, replace=True, p=p)
+    lo = grid.LOG10_X_EDGES[cell]
+    hi = grid.LOG10_X_EDGES[cell + 1]
+    log10_u = lo + rng.random(n) * (hi - lo)
+    return 10.0 ** log10_u
 
 
 def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_in_sl,
-                          loaded_profile, mass_grid, abs_mag_grid, d_r_pc,
+                          loaded_profile, flux0_yso, cloud_frac_sl, d_front, d_back,
                           logsig_mean, logsig_std, giannini_ratios, width_dex, seed):
     """One sightline's YSO and H2S Monte Carlo draws, shared by every
     admitted pixel it parents: `(frac_yso, mc_yso, density_yso, frac_h2s,
     mc_h2s, frac_yso_bright3, frac_yso_bright10, frac_h2s_bright3,
-    frac_h2s_bright10)` (sec. 9's bright-end check, same draws). YSO (sec. 5.5): masses from the Chabrier IMF through the
-    isochrone, placed along the sightline's own `p(u)`
-    (`bmstp.sample_cloud.sample_yso`'s `(x, log10_b, w)` nodes, resampled
-    by their own weight into `N_MC` member placements); density
-    `population.yso.law_count`'s `kappa_arm * A_pixel^2 * (d_r*pi/180)^2`.
+    frac_h2s_bright10)` (sec. 9's bright-end check, same draws). YSO (sec.
+    5.5): `flux0_yso` is the region's own fixed-seed draw of library
+    templates by the population weight, IDENTICAL at every sightline
+    (`_yso_template_pool`, computed once by the caller); only the
+    placement `x` is drawn here, per sightline, from this sightline's own
+    `p(x)` on the cloud interval (`bmstp.sample_cloud.sample_x`'s binned
+    return, `_draw_x`); density `population.yso.law_count` on the CLOUD'S
+    own share of the column, `a_col_in_sl * cloud_frac_sl`
+    (`bmstp.density._cloud_column_fraction`, W26) -- the count check
+    compares intrinsic members through the pixel's own completeness
+    below, so no on-grid factor enters here (a member below the grid's
+    retention edge is simply never accepted, sec. 8).
     H2S (sec. 5.6): 2.12 um surface brightness from the region's own
     `LOGSIG_MEAN`/`LOGSIG_STD` lognormal, carried into Ks
     (`population.h2s.knot_ks_log10_flux`) and the four IRAC bands (a
     Giannini colour-ratio vector drawn per member; J, H, M1 unmeasured,
-    zero flux, disclosed), at YSO's own `x`; H2S's own density is
-    `density_yso * eta_r * eps_ext` (sec. 5.6 "Sky density", the same
-    young-star law density scaled by the region's knot rate and
-    extraction fraction), computed by the caller from this same
-    `density_yso`, not here.
+    zero flux, disclosed), at YSO's own `x` (the same `p(x)`, an
+    independent draw); H2S's own density is `density_yso * eta_r *
+    eps_ext` (sec. 5.6 "Sky density", the same young-star law density
+    scaled by the region's knot rate and extraction fraction), computed
+    by the caller from this same `density_yso`, not here.
     `width_dex` is this sightline's own pixels' `W_DEX_PIX` (n_pix_in_sl, 8),
     not one region-band constant."""
     rng = np.random.RandomState(seed)
 
-    mass = _draw_chabrier_mass(rng, N_MC)
-    flux0_yso = _yso_flux0(mass, mass_grid, abs_mag_grid, d_r_pc)
-    x_nodes, _log10b_nodes, w_nodes = sample_cloud.sample_yso(loaded_profile, sl_row)
-    p_nodes = w_nodes / w_nodes.sum()
-    u_yso = x_nodes[rng.choice(x_nodes.size, size=N_MC, replace=True, p=p_nodes)]
+    p_x, _mo_x, _removed_frac = sample_cloud.sample_x(loaded_profile, sl_row, d_front, d_back)
+    u_yso = _draw_x(rng, p_x, N_MC)
     frac_yso, mc_yso, frac_yso_bright3, frac_yso_bright10 = _accepted_fraction(
         a_col_in_sl, u_yso, flux0_yso, f_lim_in_sl, width_dex, config)
-    density_yso = yso_module.law_count(config, region, a_col_in_sl, arm_in_sl)
+    a_cloud_in_sl = a_col_in_sl * cloud_frac_sl
+    density_yso = yso_module.law_count(config, region, a_cloud_in_sl, arm_in_sl)
 
     log10_sigma = rng.normal(logsig_mean, logsig_std, size=N_MC)
     log10_f_ks = h2s_module.knot_ks_log10_flux(log10_sigma)
@@ -562,7 +605,7 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_i
         table = giannini_ratios[band]
         ratio_draw = table[rng.randint(0, table.size, size=N_MC)]
         flux0_h2s[:, BAND_KEYS.index(band)] = 10.0 ** (log10_f_ks + ratio_draw)
-    u_h2s = x_nodes[rng.choice(x_nodes.size, size=N_MC, replace=True, p=p_nodes)]
+    u_h2s = _draw_x(rng, p_x, N_MC)
     frac_h2s, mc_h2s, frac_h2s_bright3, frac_h2s_bright10 = _accepted_fraction(
         a_col_in_sl, u_h2s, flux0_h2s, f_lim_in_sl, width_dex, config)
 
@@ -701,10 +744,14 @@ def build_region(config, region):
         # rule 10a): the owner sets it to what the machine's memory allows.
         n_jobs = int(config.n_jobs)
 
+        # AGB's own shell-template pool (sec. 5.2): survey-wide, computed
+        # once here rather than per tile.
+        agb_pool = _agb_shell_pool(config)
+
         def _one(tile_id):
             m = usable & (tile_of_pix == tile_id)
             return tile_id, m, _build_one_tile(
-                config, region, tile_id, pix[m], a_col[m], f_lim[m], width_dex[m])
+                config, region, tile_id, pix[m], a_col[m], f_lim[m], width_dex[m], agb_pool)
 
         results = Parallel(n_jobs=n_jobs)(delayed(_one)(t) for t in tiles_here)
         for i, (tile_id, m, out) in enumerate(results):
@@ -734,8 +781,16 @@ def build_region(config, region):
         # shared by every admitted pixel it parents.
         reg = regions_module.REGIONS_BY_NAME[region]
         d_r_pc = float(reg.d_r_pc)
-        mass_grid, abs_mag_grid, m_top = _isochrone_table(config)
         loaded_profile = sample_cloud._region_profile(config, region)
+        # YSO's members: one fixed-seed draw of N_MC library templates by
+        # the population weight, shared by every sightline of the region
+        # (sec. 5.5 "Template weights").
+        flux0_yso = _yso_template_pool(config, d_r_pc, N_MC, MC_SEED + 50_000)
+        # the cloud's own share of the column, per sightline
+        # (`bmstp.density._cloud_column_fraction`, W26): the intrinsic
+        # YSO/H2S density below is the law applied to `a_cloud`, not the
+        # sightline's whole adopted column.
+        cloud_frac_by_sl, d_front, d_back, _d_edge = density_module._cloud_column_fraction(config, region)
         giannini_ratios = h2s_module._load_giannini_ratios(config)
         # H2S's brightness lognormal (sec. 5.6 "Marks") is P3's own
         # attribute (`bmstp.shapes.build_cloud`, sec. 4.1's shape grids):
@@ -761,7 +816,7 @@ def build_region(config, region):
             (f_y, e_y, d_y, f_h, e_h,
              fb3_y, fb10_y, fb3_h, fb10_h) = _build_one_sightline(
                 config, region, sl_row, a_col[m], arm[m], f_lim[m],
-                loaded_profile, mass_grid, abs_mag_grid, d_r_pc,
+                loaded_profile, flux0_yso, float(cloud_frac_by_sl[sl_row]), d_front, d_back,
                 logsig_mean, logsig_std, giannini_ratios, width_dex[m],
                 MC_SEED + 10_000 + sl_row)
             return m, f_y, e_y, d_y, f_h, e_h, fb3_y, fb10_y, fb3_h, fb10_h
@@ -910,7 +965,7 @@ def build_region(config, region):
         st.done(path, n_pix=n_pix, n_tile=len(tiles_here), n_sightline=len(sls_here),
                 n_tile_filled=n_tile_filled,
                 area_deg2=area_deg2, surveyed_area_deg2=surveyed_area_deg2,
-                isochrone_top_msun=m_top,
+                d_front_pc=d_front, d_back_pc=d_back,
                 total_predicted_built=total_predicted_built, total_observed=n_source,
                 ratio_star=ratio["STAR"], ratio_agb=ratio["AGB"], ratio_pahc=ratio["PAHC"],
                 ratio_gal=ratio["GAL"], ratio_yso=ratio["YSO"], ratio_h2s=ratio["H2S"],
