@@ -12,17 +12,19 @@ against a template's reference fluxes.
 
 Each star is matched to its nearest atmosphere template in scaled
 (log T_eff, log g, [M/H]) (`sed_models/registers/sps_register.hdf5`,
-`MODEL_NAME`'s `kt<Teff>g<logg>z<[M/H]>` grammar). The match supplies two
-things, both already computed at the register's own build time from the
-matched template's own SED:
+`MODEL_NAME`'s `kt<Teff>g<logg>z<[M/H]>` grammar). The match supplies the
+per-star Gaia extinction coefficient `k_G = A_G / A_V`, under both the
+diffuse-ISM and the dense-cloud law (Danielski et al. 2018, A&A 614,
+A19, their polynomial in intrinsic colour and A_V), so a later stage can
+blend the two by SPEC_PRIORS.md section 1.3's ramp per star, per column.
 
-  - a Gaia G proxy, `G = Ks + (G - Ks)_template`, since the frozen
-    TRILEGAL runs were never queried with a Gaia band;
-  - the per-star Gaia extinction coefficient `k_G = A_G / A_V`, under
-    both the diffuse-ISM and the dense-cloud law (Danielski et al. 2018,
-    A&A 614, A19, their polynomial in intrinsic colour and A_V), so a
-    later stage can blend the two by SPEC_PRIORS.md section 1.3's ramp
-    per star, per column.
+The Gaia G proxy, `G = Ks + (G - Ks)`, is read at the star's own
+(log T_eff, log g, [M/H]) from `sky.derived.trilegal_colour`'s table --
+TRILEGAL's own Gaia+2MASS colour relation, one query in the same
+synthesis as the star's own Ks and [4.5] -- at the nearest populated
+cell within one step on every axis; only where no such cell exists does
+the star fall back to the atmosphere template's own `G - Ks`. The
+proxy's colour is TRILEGAL's own.
 
 Retention keeps every star clearing SESNA's own two-of-eight-band cut
 undimmed, at the region's DEEPEST limits (the 1st percentile, per band,
@@ -176,6 +178,66 @@ def match_templates(teff_k, logg, mh, grid):
 
 
 # ---------------------------------------------------------------------------
+# the Gaia proxy colour: TRILEGAL's own G - Ks (sky.derived.trilegal_colour)
+# ---------------------------------------------------------------------------
+
+#: A star's colour is read from the table's own cell if it has one, else
+#: from the nearest POPULATED cell -- but only if that cell is within
+#: this many bin steps on every one of the three axes (the brief's own
+#: rule); further than that, the atmosphere template's `G - Ks` is used
+#: instead (module docstring).
+COLOUR_TABLE_MAX_STEP = 1
+
+
+def load_colour_table(config):
+    """TRILEGAL's own Gaia G - 2MASS Ks colour table
+    (`sky.derived.trilegal_colour`): bin edges on the three axes, and a
+    k-d tree over the table's own POPULATED cells (their integer grid
+    index, so a query's distance is measured in bin steps) for the
+    nearest-populated-cell lookup `lookup_colour` does per star.
+    """
+    path = config_module.product_path(config, "sky/derived", "trilegal", "colour", "survey")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"field_stars: no TRILEGAL colour table at {path} -- run the "
+            "'sesnaimpute.sky.derived.trilegal_colour' RUNBOOK line first")
+    with h5py.File(path, "r") as f:
+        edges = (f["LOG_TEFF_EDGES"][:].astype(np.float64),
+                  f["LOG_G_EDGES"][:].astype(np.float64),
+                  f["MH_EDGES"][:].astype(np.float64))
+        median = f["G_MINUS_KS_MEDIAN"][:].astype(np.float64)
+    populated_idx = np.argwhere(np.isfinite(median))
+    values = median[tuple(populated_idx.T)]
+    tree = cKDTree(populated_idx.astype(np.float64))
+    return dict(edges=edges, tree=tree, populated_idx=populated_idx, values=values)
+
+
+def lookup_colour(log_teff, log_g, mh, table):
+    """`(g_minus_ks, matched)`, both `(n,)`: TRILEGAL's own `G - Ks` at
+    each star's own `(log T_eff, log g, [M/H])`, from the colour table's
+    nearest populated cell; `matched` is False where that nearest cell is
+    more than `COLOUR_TABLE_MAX_STEP` bins away on any one of the three
+    axes -- the fallback the caller resolves with the atmosphere
+    template's own colour.
+    """
+    # NOT clipped to the table's own range: a star well outside the
+    # queried domain (a temperature/gravity/metallicity the one Perseus
+    # pointing never populated) must measure as many steps from the
+    # nearest populated cell as it truly is, so it falls back rather than
+    # reading the table's edge cell as if it were nearby.
+    e_teff, e_g, e_mh = table["edges"]
+    i_teff = np.searchsorted(e_teff, log_teff, side="right") - 1
+    i_g = np.searchsorted(e_g, log_g, side="right") - 1
+    i_mh = np.searchsorted(e_mh, mh, side="right") - 1
+    star_idx = np.column_stack([i_teff, i_g, i_mh]).astype(np.float64)
+    _, nearest = table["tree"].query(star_idx, k=1)
+    nearest_idx = table["populated_idx"][nearest]
+    step = np.max(np.abs(star_idx - nearest_idx), axis=1)
+    matched = step <= COLOUR_TABLE_MAX_STEP
+    return table["values"][nearest], matched
+
+
+# ---------------------------------------------------------------------------
 # the region's TRILEGAL population
 # ---------------------------------------------------------------------------
 
@@ -310,7 +372,7 @@ def passes_two_of_eight(flux, f_lim, min_bands=RETENTION_MIN_BANDS):
 # per-region build
 # ---------------------------------------------------------------------------
 
-def build_region(config, region, atmosphere, st=None):
+def build_region(config, region, atmosphere, colour_table, st=None):
     """The region's matched, retained TRILEGAL table plus the raw group,
     as a dict of arrays ready for `write_region`. Streamed one pointing at
     a time (CODING_RULES.md 10a): each pointing's own ascii frame is read,
@@ -327,6 +389,7 @@ def build_region(config, region, atmosphere, st=None):
 
     raw_parts, ret_parts = [], []
     n_raw = 0
+    n_colour_fallback = 0
     for i, (p_idx, file_names) in enumerate(specs):
         df_p = _read_pointing(trilegal_dir, file_names, p_idx)
         n_raw += len(df_p)
@@ -346,9 +409,16 @@ def build_region(config, region, atmosphere, st=None):
         del df_p  # the ascii frame is not needed past this pointing's own columns
 
         idx, _ = match_templates(10.0 ** log_teff, logg, mh, atmosphere["grid"])
-        g_proxy = ks_mag + atmosphere["g_minus_ks"][idx]
         kg_diffuse = atmosphere["kg_diffuse"][idx]
         kg_dense = atmosphere["kg_dense"][idx]
+        # the proxy's colour is TRILEGAL's own: G - Ks from the survey-wide
+        # colour table at this star's own atmosphere, falling back to the
+        # fitter's atmosphere-library template only where no cell within
+        # COLOUR_TABLE_MAX_STEP steps exists (W42).
+        g_minus_ks_table, colour_matched = lookup_colour(log_teff, logg, mh, colour_table)
+        g_minus_ks = np.where(colour_matched, g_minus_ks_table, atmosphere["g_minus_ks"][idx])
+        n_colour_fallback += int((~colour_matched).sum())
+        g_proxy = ks_mag + g_minus_ks
         keep = passes_two_of_eight(flux, f_lim_deep)
 
         raw_parts.append(dict(
@@ -375,6 +445,7 @@ def build_region(config, region, atmosphere, st=None):
         area_deg2=area_deg2,
         n_pointings_grid=n_pointings_grid,
         n_pointings_on_disk=n_pointings_on_disk,
+        n_colour_fallback=n_colour_fallback,
         raw=raw,
         retained=retained,
     )
@@ -420,6 +491,12 @@ def write_region(path, region, result):
         f.attrs["GRANULE"] = "region"
         f.attrs["OMEGA_SIM_DEG2"] = float(result["area_deg2"])
         f.attrs["N_RAW"] = int(result["n_raw"])
+        # the count of raw stars whose proxy colour fell back to the
+        # atmosphere template because no populated colour-table cell was
+        # within one step of their own atmosphere (W42, disclosed here so
+        # a reader of the product sees the fraction without rereading the
+        # colour table).
+        f.attrs["N_COLOUR_FALLBACK"] = int(result["n_colour_fallback"])
 
 
 def build(config, regions=None):
@@ -429,13 +506,15 @@ def build(config, regions=None):
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     register_path = f"{config.data_root}/sed_models/registers/sps_register.hdf5"
     atmosphere = load_atmosphere_grid(register_path)
+    colour_table = load_colour_table(config)
     for region in region_names:
         with progress.Stage("prior.field_stars", region) as st:
-            result = build_region(config, region, atmosphere, st=st)
+            result = build_region(config, region, atmosphere, colour_table, st=st)
             path = config_module.product_path(config, "population", "trilegal", "field-stars",
                                                 "region", region=region)
             write_region(path, region, result)
             st.done(path, n_raw=result["n_raw"], n_retained=len(result["retained"]["dist_pc"]),
+                    colour_fallback_frac=result["n_colour_fallback"] / result["n_raw"],
                     n_pointings_grid=result["n_pointings_grid"],
                     n_pointings_on_disk=result["n_pointings_on_disk"])
 
