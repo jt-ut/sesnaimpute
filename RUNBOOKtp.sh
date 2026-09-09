@@ -100,10 +100,12 @@ PY sesnaimpute.granules.build
 # sit here, after their dependency, rather than in the '--- downloads ---'
 # block.
 PY sesnaimpute.sky.download.gaia_counts.build
+PY sesnaimpute.sky.download.gaia_twomass_counts.build   # Gaia archive's own Gaia-2MASS crossmatch, per pixel x G bin x Ks bin (SPEC_BMSTP_DRAFT.md sec 5.1 STAR anchor, joint table, W45)
 PY sesnaimpute.sky.download.twomass_counts.build
 PY sesnaimpute.sky.download.ukidss_gps.build   # UKIDSS GPS clean-photometry rows, K < 17.5, per region (SPEC_BMSTP_DRAFT.md sec 5.1 STAR anchor, deep K extension, W37)
 PY sesnaimpute.sky.derived.gaia_counts
 PY sesnaimpute.sky.derived.twomass_counts
+PY sesnaimpute.sky.derived.gaia_twomass_counts   # the joint (G, Ks) anchor's own external, whole-pixel view (SPEC_BMSTP_DRAFT.md sec 5.1, W45)
 PY sesnaimpute.sky.derived.ukidss_counts   # UKIDSS GPS counts per nside-512 pixel per half-mag bin, 9.0-17.0 (SPEC_BMSTP_DRAFT.md sec 5.1 STAR anchor, W37)
 PY sesnaimpute.sky.derived.gaia_match
 PY sesnaimpute.sky.derived.herschel_column
