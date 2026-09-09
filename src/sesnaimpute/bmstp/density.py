@@ -214,8 +214,16 @@ def build_region(config, region, st):
         raise ValueError("bmstp.density: %s has %d rows, region has %d catalogued sources"
                          % (cat_path, name.shape[0], n))
 
+    # A_s, the prior's depth axis x = a/A_s (SPEC_BMSTP_DRAFT.md sec.
+    # 4.1): what a source's own light passes through, so this is the
+    # extinction column, not the gas column the young-star law is
+    # measured on (W49)
     col_path = config_module.product_path(
-        config, "sky/derived", "adopted", "column", "source", region=region)
+        config, "sky/derived", "adopted", "extinction", "source", region=region)
+    if not os.path.exists(col_path):
+        raise FileNotFoundError(
+            "bmstp.density: no extinction column for %s at %s -- run the "
+            "'sesnaimpute.sky.derived.column' RUNBOOKtp.sh line first" % (region, col_path))
     with h5py.File(col_path, "r") as f:
         a_col = np.asarray(f["A_COL_K"][:], dtype=np.float64)
         a_col_sig = np.asarray(f["A_COL_SIG_K"][:], dtype=np.float32)
@@ -223,6 +231,16 @@ def build_region(config, region, st):
         zp_sig = np.asarray(f["ZP_SIGMA_K"][:], dtype=np.float32)
     if a_col.shape[0] != n:
         raise ValueError("bmstp.density: %s row count disagrees with the catalogue" % col_path)
+
+    # A_cloud, the young-star law's own input (sec. 5.5): the gas
+    # column exactly as adopted, not extinction -- Pokhrel's law was
+    # measured on this quantity (W49)
+    gas_path = config_module.product_path(
+        config, "sky/derived", "adopted", "column", "source", region=region)
+    with h5py.File(gas_path, "r") as f:
+        a_col_gas = np.asarray(f["A_COL_K"][:], dtype=np.float64)
+    if a_col_gas.shape[0] != n:
+        raise ValueError("bmstp.density: %s row count disagrees with the catalogue" % gas_path)
 
     f_lim = limits_module.limits(config, region).astype(np.float32)
     d_pahc = (-np.log10(f_lim[:, _I4_INDEX])).astype(np.float32)
@@ -274,7 +292,7 @@ def build_region(config, region, st):
     # nothing behind the front edge is deducted (W26b).
     cloud_frac_by_sightline, d_front = _cloud_column_fraction(config, region)
     cloud_frac = cloud_frac_by_sightline[sightline_row]
-    a_cloud = a_col * cloud_frac
+    a_cloud = a_col_gas * cloud_frac
     density_yso_intrinsic = law_count(config, region, a_cloud, arm)
     density_yso = density_yso_intrinsic * on_grid_yso
     st.tick(3, 4, "batches")

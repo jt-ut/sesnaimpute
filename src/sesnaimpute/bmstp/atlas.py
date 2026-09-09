@@ -129,16 +129,23 @@ def _coverage(config, region, pix):
 
 
 def _pixel_column(config, pix):
-    """The pixel's own column and arm, from the sightline it is a child of
-    (SPEC_BMSTP_DRAFT.md sec. 8: "placed at the pixel (its column, its
-    tile or sightline, its arm)"). Nested HEALPix, confirmed from
-    `granules.build`'s own `HPX_PIX_256 = HPX_PIX_512 // 4`: every
+    """The pixel's own extinction column and arm, from the sightline it is
+    a child of (SPEC_BMSTP_DRAFT.md sec. 8: "placed at the pixel (its
+    column, its tile or sightline, its arm)"). Nested HEALPix, confirmed
+    from `granules.build`'s own `HPX_PIX_256 = HPX_PIX_512 // 4`: every
     admitted nside-512 pixel's parent nside-256 sightline is `pix // 4`.
-    `sky/derived/adopted/column_adopted_sightline.hdf5` (survey-wide, no
-    region argument) carries `A_K`/`PROVENANCE` at that granule for every
-    source-bearing sightline, so every admitted pixel resolves -- no NaN."""
+    `sky/derived/adopted/extinction_adopted_sightline.hdf5` (survey-wide,
+    no region argument) carries `A_K`/`PROVENANCE` at that granule for
+    every source-bearing sightline, so every admitted pixel resolves --
+    no NaN. The atlas's own column is what a source's light passes
+    through, so it reads extinction here; its YSO density instead comes
+    from `bmstp.density`'s product, which keeps the gas column (W49)."""
     parent256 = pix // 4
-    path = config_module.product_path(config, "sky/derived", "adopted", "column", "sightline")
+    path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "sightline")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "bmstp.atlas: no extinction sightline column at %s -- run the "
+            "'sesnaimpute.sky.derived.column' RUNBOOKtp.sh line first" % path)
     with h5py.File(path, "r") as f:
         sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
         a_k = np.asarray(f["A_K"][:], dtype=np.float64)

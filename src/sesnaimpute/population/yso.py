@@ -349,15 +349,18 @@ def _herschel_pixel_stats(config, pix_sorted):
 
 def _planck_parent_column(config, parent256):
     """`A_K` of every requested nside-256 pixel (`parent256`), from the
-    adopted sightline column (`sky.derived.column.build_sightline`) --
-    Herschel where covered, else Planck, each arm already carrying its
-    own measured 2MASS scale (SPEC_BMSTP_DRAFT.md sec 3.1) -- the fallback
-    arm's own column, for pixels the Herschel maps do not reach."""
+    extinction sightline column (`sky.derived.column`'s adopted product
+    times the reference map's own factor `f`) -- Herschel where covered,
+    else Planck, each arm already carrying its own measured 2MASS scale
+    (SPEC_BMSTP_DRAFT.md sec 3.1) -- the fallback arm's own column, for
+    pixels the Herschel maps do not reach. The anchors' own observed
+    young-star count is a starlight quantity, so it reads extinction
+    here, not the gas column `law_count` was calibrated on (W49)."""
     path = config_module.product_path(config, "sky/derived", "adopted",
-                                       "column", "sightline")
+                                       "extinction", "sightline")
     if not os.path.exists(path):
         raise FileNotFoundError(
-            "population.yso: adopted sightline column missing at %s -- run "
+            "population.yso: extinction sightline column missing at %s -- run "
             "the 'sesnaimpute.sky.derived.column' RUNBOOK line first" % path)
     with h5py.File(path, "r") as f:
         sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
