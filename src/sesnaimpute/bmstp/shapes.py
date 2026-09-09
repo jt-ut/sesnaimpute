@@ -352,10 +352,10 @@ def build_gal(config):
     old = None
     if os.path.exists(path):
         # the current product is already on the common `LOG10_F45_EDGES`
-        # schema (`bmstp-45b` has W24 merged; the pre-4.5B `LOG10_B_EDGES`
-        # migration path is superseded and gone) -- only its own top edge
-        # moved since (W24b), so the conservative regrid below still
-        # applies, just no longer across a per-shape-origin phase shift.
+        # schema -- there is no pre-4.5B `LOG10_B_EDGES` product to
+        # migrate -- so the conservative regrid below only ever runs
+        # across the grid's own top-edge move, never a per-shape-origin
+        # phase shift.
         with h5py.File(path, "r") as f:
             old = dict(grid=f["GRID"][()], log10_f45_edges=f["LOG10_F45_EDGES"][()])
 

@@ -124,13 +124,12 @@ def _c_theta(reg):
 
 
 def _c_f_contrast(reg):
-    """`C_F[theta] = log10 f_ref,8,theta - log10 f_ref,4.5,theta` (sec
-    5.3, REWRITTEN for the common `F_4.5` axis, W25): with `B = F_4.5 /
-    f_ref,4.5,theta`, `-log10 q = log10 B + log10 f_ref,8,theta -
-    log10 F_lim,8(s) = log10 F_4.5 + C_F[theta] + D_PAHC[s]`. Both
-    reference fluxes floored at the register's own `FLOOR_LINEAR`."""
-    f_ref_i4 = np.log10(np.maximum(reg["f_ref"]["I4"], reg["floor_linear"]))
-    return f_ref_i4 - _c_theta(reg)
+    """`C_F[theta] = log10 f_ref,8,theta` (sec 5.3): the read argument is
+    `log10 F_4.5 = log10 B_hat + C_F[theta] + D_PAHC[s]`, with
+    `-log10 q = log10 B_hat + log10 f_ref,8,theta - log10 F_lim,8(s)`, so
+    `C_F[theta]` is the 8 micron reference flux alone (floored at the
+    register's own `FLOOR_LINEAR`), not offset against `C_THETA`."""
+    return np.log10(np.maximum(reg["f_ref"]["I4"], reg["floor_linear"]))
 
 
 def _normalise_over_theta(w):
@@ -373,7 +372,7 @@ def build_yso(config, region):
         population_w, frac_zero = _floor_normalised(contribution)
 
         factors = {
-            "population": (population_w, np.zeros(n_model), "", True,
+            "population": (population_w, c_theta, "", True,
                             "population.yso_mass Chabrier 2003; yso sub-grid "
                             "parameters.fits inclination; sample_cloud.cloud_interval_pc "
                             f"placement at d_r={r.d_r_pc:.1f} pc"),
@@ -561,41 +560,35 @@ def build_galz(config):
 # ---------------------------------------------------------------------------
 
 def _region_star_stars(config, region):
-    """`(template_index, weight, log10_f45, log10_b_old)` over every
-    retained field star of `region`'s tiles: `population.field_stars`'s
-    own `TEMPLATE_INDEX` per retained star, joined by each tile's
+    """`(template_index, weight, log10_f45)` over every retained field
+    star of `region`'s tiles: `population.field_stars`'s own
+    `TEMPLATE_INDEX` per retained star, joined by each tile's
     `STAR_INDEX`, paired with the SAME `(F_4.5, w)` per star
     `sample_star.sample_star` reads (brief W25: import it, never
-    re-derive the flux). `log10_b_old` is the tile's own pre-4.5B
-    `LOG10_B` mark (untouched by this brief, W24), carried ONLY for the
-    acceptance check's own reference rebinning below -- never used in
-    the weight itself."""
+    re-derive the flux)."""
     field_path = config_module.product_path(
         config, "population", "trilegal", "field-stars", "region", region=region)
     with h5py.File(field_path, "r") as f:
         template_index = f["TEMPLATE_INDEX"][:]
     tile_path = config_module.product_path(
         config, "population", "star", "population", "tile", region=region)
-    template_idx_all, weight_all, log10_f45_all, log10_b_old_all = [], [], [], []
+    template_idx_all, weight_all, log10_f45_all = [], [], []
     with h5py.File(tile_path, "r") as f:
         tile_ids = sorted(int(k.split("_")[1]) for k in f.keys() if k.startswith("tile_"))
         for tile_id in tile_ids:
             grp = f[f"tile_{tile_id}"]
             star_index = grp["STAR_INDEX"][()].astype(np.int64)
             template_idx_all.append(template_index[star_index])
-            log10_b_old_all.append(grp["LOG10_B"][()].astype(np.float64))
             _x, log10_f45, w = sample_star.sample_star(config, region, tile_id)
             weight_all.append(w)
             log10_f45_all.append(log10_f45)
     return (np.concatenate(template_idx_all), np.concatenate(weight_all),
-            np.concatenate(log10_f45_all), np.concatenate(log10_b_old_all))
+            np.concatenate(log10_f45_all))
 
 
 def _weighted_type_histogram(template_idx, weight, mark, edges, n_model):
     """The weighted histogram of matched atmosphere template per cell of
-    `edges` (sec 5.1); a generic weighted-histogram-by-edges step so the
-    same code bins both the new `log10 F_4.5` mark and the acceptance
-    check's own pre-4.5B `log10_b_old` mark."""
+    `edges` (sec 5.1)."""
     idx_b = np.clip(np.digitize(mark, edges) - 1, 0, edges.size - 2)
     h = np.zeros((n_model, edges.size - 1), dtype=np.float64)
     np.add.at(h, (template_idx, idx_b), weight)
@@ -603,27 +596,18 @@ def _weighted_type_histogram(template_idx, weight, mark, edges, n_model):
 
 
 def _sps_raw_type_histogram(config, region):
-    """`(names, rho, h, weight, h_old)`: the sps register's own
-    `MODEL_NAME`/`RHO_KDE1`, the region's raw, weighted type histogram on
-    the common `LOG10_F45_EDGES` (the population count per sps template
-    per brightness cell, BEFORE the `1/rho` division and the per-cell
-    normalisation, spec sec 5.1) -- shared by `build_sps` (which
-    normalises it) and `build_pahc` (which reads it at each PAHC
-    template's matched sps row, owner ruling) -- and `h_old`, the SAME
-    (template, weight) pairs rebinned on the pre-4.5B `LOG10_B` mark and
-    its own edges (`grid`'s legacy `LOG10_B_ORIGIN_TEMPLATE`/
-    `log10_b_edges`, kept for exactly this comparison, W24): the
-    acceptance check's own reference, spec sec 9 ("the same stars,
-    rebinned") -- `h.sum(axis=1)` is the total weighted star count
-    matched to each template, which a rebinning by a different mark
-    cannot change except by whatever a grid's own edges drop."""
+    """`(names, rho, h, weight)`: the sps register's own
+    `MODEL_NAME`/`RHO_KDE1`, and the region's raw, weighted type
+    histogram on the common `LOG10_F45_EDGES` (the population count per
+    sps template per brightness cell, BEFORE the `1/rho` division and
+    the per-cell normalisation, spec sec 5.1) -- shared by `build_sps`
+    (which normalises it) and `build_pahc` (which reads it at each PAHC
+    template's matched sps row, owner ruling)."""
     reg = _read_register(config, "sps")
     names, rho = reg["names"], reg["rho"]
-    template_idx, weight, log10_f45, log10_b_old = _region_star_stars(config, region)
+    template_idx, weight, log10_f45 = _region_star_stars(config, region)
     h = _weighted_type_histogram(template_idx, weight, log10_f45, grid.LOG10_F45_EDGES, names.size)
-    old_edges = grid.log10_b_edges(grid.LOG10_B_ORIGIN_TEMPLATE)
-    h_old = _weighted_type_histogram(template_idx, weight, log10_b_old, old_edges, names.size)
-    return names, rho, h, weight, h_old
+    return names, rho, h, weight
 
 
 def build_sps(config, region):
@@ -633,33 +617,23 @@ def build_sps(config, region):
         n_model = names.size
         log10_f45_centers = _log10_f45_centers()
 
-        _names_check, _rho_check, h, weight, h_old = _sps_raw_type_histogram(config, region)
+        _names_check, _rho_check, h, weight = _sps_raw_type_histogram(config, region)
         type_w = _normalise_over_theta(h / rho[:, None])
         type_w, frac_zero_type = _floor_normalised(type_w)
-
-        # acceptance (brief W25, spec sec 9): "the sps type factor's
-        # marginal over cells equals the current product's marginal over
-        # its old cells" -- the raw (pre-rho, pre-normalisation) matched-
-        # template histogram's marginal over cells, per template, is the
-        # total weighted star count that template holds; the SAME
-        # (template, weight) pairs rebinned by the pre-4.5B LOG10_B mark
-        # (h_old) must give the same total, up to whatever either grid's
-        # own edges drop.
-        marginal_dev = float(np.max(np.abs(h.sum(axis=1) - h_old.sum(axis=1))))
 
         n_b_row = _pahc_contrast_row(config, log10_f45_centers)
         unc_raw = 1.0 - np.repeat(n_b_row[None, :], n_model, axis=0)  # 1 - P(q), sec 5.1
         unc_raw, frac_zero_unc = _floor_probability(unc_raw)
-        c_f_unc = _c_f_contrast(reg)  # log10 f_ref,8,theta - log10 f_ref,4.5,theta
+        c_theta = _c_theta(reg)
+        c_f_unc = _c_f_contrast(reg)  # log10 f_ref,8,theta (sec 5.3)
 
         factors = {
-            "type": (type_w, np.zeros(n_model), "", True,
+            "type": (type_w, c_theta, "", True,
                      f"population.star_population {region} W_STAR, "
                      "sample_star.sample_star F_4.5"),
             "uncontaminated": (unc_raw, c_f_unc, "D_PAHC", False,
                                 "population.pahc.curve_pahc_survey P_Q (1 - P(q))"),
         }
-        c_theta = _c_theta(reg)
         path = _write_library(config, "sps", "region", names, c_theta, log10_f45_centers, factors,
                                region=region)
         retained_weighted = float(weight.sum())
@@ -672,13 +646,11 @@ def build_sps(config, region):
               f"floored_fraction type={frac_zero_type:.4f} uncontaminated={frac_zero_unc:.4f}; "
               f"P(q) at axis ends={float(n_b_row[0]):.4f}/{float(n_b_row[-1]):.4f} "
               f"vs curve end bins={float(curve_p_q[0]):.4f}/{float(curve_p_q[-1]):.4f}; "
-              f"type histogram marginal-over-cells max abs dev, new axis vs pre-4.5B "
-              f"LOG10_B axis (same stars, rebinned)={marginal_dev:.3g}; "
               f"C_THETA range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
               f"max={c_theta.max():.4f}",
               flush=True)
         st.done(path, n_model=n_model, n_star=weight.size,
-                 retained_weighted=retained_weighted, marginal_dev=marginal_dev)
+                 retained_weighted=retained_weighted)
 
 
 # ---------------------------------------------------------------------------
@@ -791,7 +763,7 @@ def build_pahc(config, region):
         n_model = names.size
         log10_f45_centers = _log10_f45_centers()
 
-        sps_names, sps_rho, h_sps, _weight, _h_sps_old = _sps_raw_type_histogram(config, region)
+        sps_names, sps_rho, h_sps, _weight = _sps_raw_type_histogram(config, region)
         sps_idx, dist = _match_pahc_to_sps(config, sps_names)
         # the region's raw STAR type histogram (the population count, not
         # yet divided by rho or normalised) at each PAHC template's
@@ -805,16 +777,16 @@ def build_pahc(config, region):
         row = _pahc_contrast_row(config, log10_f45_centers)
         contrast_w = np.repeat(row[None, :], n_model, axis=0)
         contrast_w, frac_zero_contrast = _floor_probability(contrast_w)
-        c_f = _c_f_contrast(reg)  # log10 f_ref,8,theta - log10 f_ref,4.5,theta
+        c_theta = _c_theta(reg)
+        c_f = _c_f_contrast(reg)  # log10 f_ref,8,theta (sec 5.3)
 
         factors = {
-            "type": (type_w, np.zeros(n_model), "", True,
+            "type": (type_w, c_theta, "", True,
                      f"population.star_population {region} W_STAR, "
                      "nearest sps template in (log10 T_EFF, LOGG)"),
             "contrast": (contrast_w, c_f, "D_PAHC", False,
                          "population.pahc.curve_pahc_survey P_Q"),
         }
-        c_theta = _c_theta(reg)
         path = _write_library(config, "pahc", "region", names, c_theta, log10_f45_centers, factors,
                                region=region)
         col_sum = type_w.sum(axis=0)
