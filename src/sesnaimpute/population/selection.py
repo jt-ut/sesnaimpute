@@ -24,13 +24,13 @@ MIN_BANDS = 2
 
 #: SPEC_PRIORS.md 1.3 -- the two named laws the ramp blends between.
 #: `draine_rv3.1` is Weingartner & Draine (2001) / Draine (2003), R_V = 3.1.
-#: `kmh94_indebetouw2005` is the KMH94 R_V = 5.5 curve (`whitney.r550`) with
-#: its 1-30 um opacity replaced by the measured points the spec cites --
-#: Indebetouw et al. (2005, ApJ 619, 931), Table 1, for J-[8.0], and
-#: Flaherty et al. (2007, ApJ 663, 1069), section 4.2, for [24] -- scaled
-#: to the curve's own Ks opacity (see the law's own `.info`).
+#: `chapman2009_dense` is the KMH94 R_V = 5.5 curve (`whitney.r550`) with
+#: its 1-30 um opacity replaced by a dense-cloud measurement -- Chapman
+#: et al. (2009, ApJ 690, 496), Table 3, the 1 < A_Ks <= 2 row, for [3.6]-[24];
+#: J and H are the host curve's own value, the paper carrying no near-IR
+#: columns (see the law's own `.info`).
 LAW_DIFFUSE = "draine_rv3.1"
-LAW_DENSE = "kmh94_indebetouw2005"
+LAW_DENSE = "chapman2009_dense"
 
 #: The ramp's domain, A_K magnitudes: 0 (diffuse law only) at and below
 #: LAW_RAMP_LO, 1 (dense law only) at and above LAW_RAMP_HI. No literature
