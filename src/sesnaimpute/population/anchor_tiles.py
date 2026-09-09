@@ -509,7 +509,11 @@ def build_region(config, region):
     pointing_area_deg2 = np.array([p["area_deg2"] for p in pointings])
     present_pointings = np.unique(raw["pointing_index"])
     l_deg, b_deg = hp.pix2ang(NSIDE, pixels, nest=True, lonlat=True)
-    pixel_local = nearest_pointing(l_deg, b_deg, pointing_l_grid[present_pointings],
+    # longitude unwrapped through 180 deg, the grid planner's own convention
+    # (`region_pointings`; `star_population.tile_centre_lb` does the same),
+    # so a pixel just past l = 0 is not 360 deg from a node just before it.
+    l_unwrapped = np.where(l_deg > 180.0, l_deg - 360.0, l_deg)
+    pixel_local = nearest_pointing(l_unwrapped, b_deg, pointing_l_grid[present_pointings],
                                     pointing_b_grid[present_pointings])
     pixel_pointing = present_pointings[pixel_local]
     pointing_bounds = _pointing_bounds(raw["pointing_index"], present_pointings)
