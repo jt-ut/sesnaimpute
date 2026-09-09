@@ -129,8 +129,7 @@ def _load_column_scales(config):
 def _arm_scale(region_scales, arm, region, used):
     """The region's measured scale for `arm`, or a raised error naming the
     region and arm if the region uses `arm` (`used.any()`) and the scale is
-    NaN -- a NaN scale never falls back to a silent 1 (owner ruling
-    2026-09-09)."""
+    NaN -- a NaN scale never falls back to a silent 1."""
     scale, _ = region_scales.get(arm, (np.nan, np.nan))
     if np.any(used) and not np.isfinite(scale):
         raise ValueError(
