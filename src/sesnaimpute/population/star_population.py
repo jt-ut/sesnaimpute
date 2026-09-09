@@ -701,15 +701,6 @@ def tile_centre_lb(pix256_t):
     return float(np.mean(l)), float(np.mean(b))
 
 
-def nearest_pointing(tile_l, tile_b, pointing_l, pointing_b):
-    """Index into `pointing_l`/`pointing_b` of the pointing nearest this
-    tile's own centre, plain Euclidean in (l, b) degrees -- pointings are
-    1.5 deg apart, far coarser than the angular distortion `cos(b)` would
-    correct for."""
-    d2 = (pointing_l - tile_l) ** 2 + (pointing_b - tile_b) ** 2
-    return int(np.argmin(d2))
-
-
 def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, curve,
                      pointing_l, pointing_b, present_pointings, front_edge_pc):
     """One tile's placement, weight, partition and brightness units, built
@@ -743,7 +734,8 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     u_front_tile = float(np.interp(front_edge_pc, dist_grid, mean_u))
 
     tile_l, tile_b = tile_centre_lb(pix256_t)
-    p_local = nearest_pointing(tile_l, tile_b, pointing_l[present_pointings], pointing_b[present_pointings])
+    p_local = anchor_tiles.nearest_pointing(
+        tile_l, tile_b, pointing_l[present_pointings], pointing_b[present_pointings])
     p_idx = int(present_pointings[p_local])
     star_index = np.flatnonzero(stars["pointing_index"] == p_idx).astype(np.int32)
 
@@ -857,7 +849,7 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
     # nearest to the region's own historical centre -- against the one it
     # actually got, so `_report` can state what fraction of tiles moved.
     old_info = trilegal_download.REGION_POINTINGS[region]
-    region_centre_pointing = nearest_pointing(
+    region_centre_pointing = anchor_tiles.nearest_pointing(
         old_info["l_deg"], old_info["b_deg"], pointing_l, pointing_b)
 
     return dict(region=region, n_star=stars["dist_pc"].size, n_raw=n_raw,
