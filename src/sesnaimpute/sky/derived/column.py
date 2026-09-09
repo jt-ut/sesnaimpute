@@ -38,7 +38,7 @@ edge (`profile.py`'s inner/outer/splice/measure chain, called before any
 rescaling), binned by quartile of the Herschel column and by region.
 
 `_build_one_extinction_region`/`build_extinction_sightline` write the
-second column, the one a star's light passes through (W49.md, "The
+second column, the one a star's light passes through (the
 rule"): the emission-based adopted column, source by source, scaled up
 in each nside-1024 cell (the reference map's own 3' beam) by the factor
 that cell's Juvela & Montillaud 2016 NICEST star-colour map (a whole-
@@ -181,7 +181,7 @@ def _build_one_region(config, region, cal, field_zp=None):
 
 
 def _load_juvela_source_view(config, region):
-    """W49a's per-source NICEST view: `A_K` (2MASS star-colour extinction,
+    """The per-source NICEST view: `A_K` (2MASS star-colour extinction,
     the adopted law's own `A_J/A_K`) and each source's nside-1024 cell,
     in the adopted source product's own row order."""
     path = config_module.product_path(config, "sky/derived", "juvela", "extinction", "source", region=region)
@@ -196,7 +196,7 @@ def _load_juvela_source_view(config, region):
 
 def _cell_factor(a_nicest, a_adopted, cell_pix):
     """`f = max(1, mean A_K(NICEST) / mean A_COL_K)` in each nside-1024
-    cell, broadcast to every source of the cell (W49.md, "The rule"): the
+    cell, broadcast to every source of the cell: the
     star map sets the beam-scale factor, the emission map keeps the
     structure inside the beam."""
     uniq, inv, counts = np.unique(cell_pix, return_inverse=True, return_counts=True)
@@ -236,7 +236,7 @@ def _build_one_extinction_region(config, region, cal, field_zp=None):
 def _extinction_row_one_region(config, region, region_code, adopted_pix, adopted_a_k, adopted_sig, adopted_prov):
     """One region's extinction sightline row: the adopted sightline column
     (`build_sightline`'s own Herschel/Planck value, unchanged -- "no new
-    machinery", W49.md) times `F_EXTINCTION`, the sightline mean of its
+    machinery) times `F_EXTINCTION`, the sightline mean of its
     sources' per-source factor. A sightline the granule map admits but
     that carries no catalogued source has no factor to average, so it
     takes 1 and the adopted value passes through unscaled. This is also
@@ -278,7 +278,7 @@ def _extinction_row_one_region(config, region, region_code, adopted_pix, adopted
 
 
 def build_extinction_sightline(config, stage=None):
-    """Writes the extinction sightline column (W49.md, "The rule"): one
+    """Writes the extinction sightline column: one
     row per admitted nside-256 pixel of every region, the adopted
     sightline column scaled by that sightline's mean source factor --
     the quantity a star's light passes through, distinct from the gas

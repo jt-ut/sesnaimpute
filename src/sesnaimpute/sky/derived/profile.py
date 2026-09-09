@@ -538,7 +538,7 @@ def _admitted_sightlines(config, region):
 
 def _join_total_column(config, region, admitted_pix):
     """The sightline's total column to infinity, A_K, from the adopted
-    extinction sightline product (W49.md, "The rule": the emission column
+    extinction sightline product(the emission column
     scaled to the NICEST star-colour map's own beam-scale factor, so
     `u(d)` runs to the extinction total, not the bare gas column)."""
     path = product_path(config, "sky/derived", "adopted", "extinction", "sightline")
