@@ -51,22 +51,6 @@ FLOOR = 1e-6
 
 _SQRT2 = float(np.sqrt(2.0))
 
-#: Legacy per-shape brightness origin and edge builder, kept ONLY so the
-#: sibling modules this unit's brief does not touch (`bmstp.template_weights`,
-#: `bmstp.atlas`, `fittp.prior_reader`) still IMPORT -- their own P5/P6
-#: builds against the pre-4.5B schema are expected to break at run time
-#: until W25-W28 rewire them onto `LOG10_F45_EDGES`/`bin()` above, per the
-#: brief; this is not read by anything in this module.
-LOG10_B_ORIGIN_TEMPLATE = -6.0
-N_B = 120
-D_LOG10_B = 0.1
-
-
-def log10_b_edges(origin):
-    """Legacy per-shape brightness-axis edges (see the constants above):
-    `N_B` cells of `D_LOG10_B` dex from `origin`."""
-    return origin + D_LOG10_B * np.arange(N_B + 1)
-
 
 def bin(x, log10_f45, w):
     """The weighted 2-D histogram `(H, mass_outside)` of a population
