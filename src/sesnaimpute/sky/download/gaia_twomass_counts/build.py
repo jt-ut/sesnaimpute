@@ -34,8 +34,7 @@ the matching `GROUP BY` reference)::
     JOIN gaiadr3.tmass_psc_xsc_best_neighbour AS x ON g.source_id = x.source_id
     JOIN gaiadr1.tmass_original_valid AS t ON t.designation = x.original_ext_source_id
     WHERE x.number_of_neighbours = 1
-      AND (t.ph_qual LIKE '__A' OR t.ph_qual LIKE '__B'
-           OR t.ph_qual LIKE '__C' OR t.ph_qual LIKE '__D')
+      AND NOT (t.ph_qual LIKE '__U' OR t.ph_qual LIKE '__X')
       AND g.phot_g_mean_mag IS NOT NULL AND g.phot_g_mean_mag < 19.0
       AND t.ks_m IS NOT NULL AND t.ks_m < 14.3
       AND g.l BETWEEN {l0} AND {l1} AND g.b BETWEEN {b0} AND {b1}
@@ -110,15 +109,17 @@ G_LIMIT = 19.0  # SPEC_BMSTP_DRAFT.md 5.1 "joint and marginal bins": G < 19
 KS_LIMIT = 14.3  # ... Ks < 14.3, sky.derived.twomass_counts.MAG_EDGES[-1]
 #: the archive's own "unambiguous match" cut (module docstring).
 NUMBER_OF_NEIGHBOURS_MAX = 1
-#: the nearest available proxy to the marginal's `cc_flg = '000'`, since
-#: this table carries no `cc_flg` (module docstring): the Ks-band
-#: character of `ph_qual` in the archive's own "valid measurement" set.
-CLEAN_PH_QUAL_KS_CHARS = ("A", "B", "C", "D")
+#: A real Ks detection, the same rule the 2MASS marginal applies through
+#: its read code (`sky.download.twomass_counts`): this table carries
+#: `ph_qual` but no read or confusion flag, and 2MASS's `ph_qual` marks an
+#: upper limit as U and a source with no valid brightness as X; every
+#: other code is a measured star.
+NOT_DETECTED_PH_QUAL_KS_CHARS = ("U", "X")
 CSV_HEADER = "hpx_pix_512,g_bin_lo,ks_bin_lo,n"
 
 
 def _ph_qual_clause():
-    return "(" + " OR ".join("t.ph_qual LIKE '__%s'" % c for c in CLEAN_PH_QUAL_KS_CHARS) + ")"
+    return "NOT (" + " OR ".join("t.ph_qual LIKE '__%s'" % c for c in NOT_DETECTED_PH_QUAL_KS_CHARS) + ")"
 
 
 def _l_clause(l0, l1):
