@@ -115,7 +115,7 @@ PY sesnaimpute.sky.derived.planck_column
 PY sesnaimpute.sky.derived.planck_source_column
 PY sesnaimpute.sky.derived.juvela_extinction   # NICEST star-colour A_K per source and per sightline, the whole-sightline reference the extinction column's per-cell factor is formed against (W49a, SPEC_BMSTP sec 3.2)
 PY sesnaimpute.sky.derived.twomass_column_scale   # report-only, read by nothing: each arm's map column against the reddening of Ks 11-13 stars per region; a magnitude-limited window loses reddened background stars behind dense pixels, so the number is not a calibration (briefs/reports/W35.md)
-PY sesnaimpute.sky.derived.column   # the adopted column per source and sightline (its survey-wide disagreement check is not run: an (n_source) array over 8.7 M sources, the earlier design's)
+PY sesnaimpute.sky.derived.column   # the adopted (gas) column per source and sightline, and the extinction column beside it -- the adopted column scaled to the Juvela & Montillaud 2016 NICEST map's own beam factor (its survey-wide disagreement check is not run: an (n_source) array over 8.7 M sources, the earlier design's)
 PY sesnaimpute.sky.derived.profile
 PY sesnaimpute.sky.derived.swire_galaxies   # SWIRE galaxies after the adopted star-galaxy split, survey-wide (SPEC_BMSTP sec 3.2, 5.4)
 PY sesnaimpute.sky.derived.protostars   # HOPS + eHOPS pooled in one schema, report-only overlay for the protostar check (SPEC_BMSTP sec 5.5, sec 9)

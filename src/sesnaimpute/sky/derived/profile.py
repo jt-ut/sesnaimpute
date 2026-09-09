@@ -538,12 +538,13 @@ def _admitted_sightlines(config, region):
 
 def _join_total_column(config, region, admitted_pix):
     """The sightline's total column to infinity, A_K, from the adopted
-    sightline column product (SPEC_PRIORS.md 1.1: Herschel where covered,
-    Planck elsewhere)."""
-    path = product_path(config, "sky/derived", "adopted", "column", "sightline")
+    extinction sightline product (W49.md, "The rule": the emission column
+    scaled to the NICEST star-colour map's own beam-scale factor, so
+    `u(d)` runs to the extinction total, not the bare gas column)."""
+    path = product_path(config, "sky/derived", "adopted", "extinction", "sightline")
     if not os.path.exists(path):
         raise FileNotFoundError(
-            "profile.build: adopted sightline column product missing at %s -- run the "
+            "profile.build: adopted extinction sightline product missing at %s -- run the "
             "sesnaimpute.sky.derived.column RUNBOOK line for it" % path)
     with h5py.File(path, "r") as f:
         hpx = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
