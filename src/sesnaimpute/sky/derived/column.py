@@ -233,11 +233,17 @@ def _build_one_extinction_region(config, region, cal, field_zp=None):
     return region, d["n"], float(np.median(factor))
 
 
-def _extinction_row_one_region(config, region, region_code, adopted_prov_pix, adopted_prov):
-    """One region's extinction sightline row: the sightline mean of its
-    sources' per-source extinction column, sigma and factor (W49.md);
-    `PROVENANCE`/`REGION_CODE` carried from the adopted sightline column
-    product, whose Herschel/Planck choice this column does not change."""
+def _extinction_row_one_region(config, region, region_code, adopted_pix, adopted_a_k, adopted_sig, adopted_prov):
+    """One region's extinction sightline row: the adopted sightline column
+    (`build_sightline`'s own Herschel/Planck value, unchanged -- "no new
+    machinery", W49.md) times `F_EXTINCTION`, the sightline mean of its
+    sources' per-source factor. A sightline the granule map admits but
+    that carries no catalogued source has no factor to average, so it
+    takes 1 and the adopted value passes through unscaled. This is also
+    the identity check: `f` forced to 1 everywhere makes `F_EXTINCTION`
+    1 everywhere, and this column reproduces the adopted sightline
+    column bit for bit. `PROVENANCE`/`REGION_CODE` are carried from the
+    adopted sightline column product."""
     ext_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "source", region=region)
     if not os.path.exists(ext_path):
         raise FileNotFoundError(
@@ -245,47 +251,51 @@ def _extinction_row_one_region(config, region, region_code, adopted_prov_pix, ad
             f"{region!r} at {ext_path!r} -- run the sesnaimpute.sky.derived.column RUNBOOK line for it"
         )
     with h5py.File(ext_path, "r") as f:
-        a_ext = np.asarray(f["A_COL_K"][:], dtype=np.float64)
-        sig_ext = np.asarray(f["A_COL_SIG_K"][:], dtype=np.float64)
         factor = np.asarray(f["F_EXTINCTION"][:], dtype=np.float64)
     _, cell_pix = _load_juvela_source_view(config, region)
     pix256 = cell_pix >> 4  # nside 1024 -> 256: two NESTED quad-tree levels
 
     admitted_pix, _ = profile_module._admitted_sightlines(config, region)
     uniq, inv, counts = np.unique(pix256, return_inverse=True, return_counts=True)
-    if uniq.size != admitted_pix.size or np.any(uniq != admitted_pix):
-        raise ValueError(f"sky.derived.column.build_extinction_sightline: {region!r} source cells do "
-                         "not tile its admitted sightlines one-to-one")
-    mean_a = np.bincount(inv, weights=a_ext, minlength=uniq.size) / counts
-    mean_sig = np.bincount(inv, weights=sig_ext, minlength=uniq.size) / counts
+    if np.any(~np.isin(uniq, admitted_pix)):
+        raise ValueError(f"sky.derived.column.build_extinction_sightline: {region!r} has a source cell "
+                         "outside its admitted sightlines")
     mean_f = np.bincount(inv, weights=factor, minlength=uniq.size) / counts
 
-    loc = np.searchsorted(adopted_prov_pix, admitted_pix)
-    capped = np.minimum(loc, adopted_prov_pix.size - 1) if adopted_prov_pix.size else loc
-    ok = adopted_prov_pix.size and np.all(adopted_prov_pix[capped] == admitted_pix)
+    f_ext = np.ones(admitted_pix.size)
+    f_ext[np.searchsorted(admitted_pix, uniq)] = mean_f
+
+    loc = np.searchsorted(adopted_pix, admitted_pix)
+    capped = np.minimum(loc, adopted_pix.size - 1) if adopted_pix.size else loc
+    ok = adopted_pix.size and np.all(adopted_pix[capped] == admitted_pix)
     if not ok:
         raise ValueError(f"sky.derived.column.build_extinction_sightline: {region!r} missing from the "
                          "adopted sightline column product")
 
     return dict(pix=admitted_pix, region_code=np.full(admitted_pix.size, region_code, dtype=np.int16),
-               a_k=mean_a, sig_a_k=mean_sig, f=mean_f, prov=adopted_prov[capped])
+               a_k=adopted_a_k[capped] * f_ext, sig_a_k=adopted_sig[capped] * f_ext,
+               f=f_ext, prov=adopted_prov[capped])
 
 
 def build_extinction_sightline(config, stage=None):
     """Writes the extinction sightline column (W49.md, "The rule"): one
-    row per admitted nside-256 pixel of every region, each the sightline
-    mean of its sources' per-source extinction column -- the quantity a
-    star's light passes through, distinct from the gas column
-    `build_sightline` writes. Survey-wide regardless of any `regions`
-    list a caller passed to `build`, mirroring `build_sightline`."""
+    row per admitted nside-256 pixel of every region, the adopted
+    sightline column scaled by that sightline's mean source factor --
+    the quantity a star's light passes through, distinct from the gas
+    column `build_sightline` writes. Survey-wide regardless of any
+    `regions` list a caller passed to `build`, mirroring
+    `build_sightline`."""
     regions = [r.name for r in regions_module.REGIONS]
     codes = _region_codes(config, regions)
     adopted_path = config_module.product_path(config, "sky/derived", "adopted", "column", "sightline")
     with h5py.File(adopted_path, "r") as f:
-        prov_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
-        prov = np.asarray(f["PROVENANCE"][:])
-    order = np.argsort(prov_pix)
-    prov_pix, prov = prov_pix[order], prov[order]
+        adopted_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
+        adopted_prov = np.asarray(f["PROVENANCE"][:])
+        adopted_a_k = np.asarray(f["A_K"][:], dtype=np.float64)
+        adopted_sig = np.asarray(f["SIGMA_A_K"][:], dtype=np.float64)
+    order = np.argsort(adopted_pix)
+    adopted_pix, adopted_prov = adopted_pix[order], adopted_prov[order]
+    adopted_a_k, adopted_sig = adopted_a_k[order], adopted_sig[order]
 
     n_regions = len(regions)
     chunk = max(1, config.n_jobs)
@@ -293,7 +303,8 @@ def build_extinction_sightline(config, stage=None):
     for start in range(0, n_regions, chunk):
         part = regions[start:start + chunk]
         rows.extend(Parallel(n_jobs=config.n_jobs)(
-            delayed(_extinction_row_one_region)(config, region, codes[region], prov_pix, prov)
+            delayed(_extinction_row_one_region)(config, region, codes[region],
+                                                adopted_pix, adopted_a_k, adopted_sig, adopted_prov)
             for region in part))
         if stage is not None:
             stage.tick(min(start + chunk, n_regions), n_regions, "regions")
