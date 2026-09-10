@@ -96,11 +96,14 @@ ETA_DEX = 0.45
 #: 0.25 carried over [0.15, 0.35] from five knot-survey cross-matches --
 #: scales H2S by the ratio of the band's end to its own central value.
 EPS_EXT_CENTRAL, EPS_EXT_LO, EPS_EXT_HI = 0.25, 0.15, 0.35
-#: F_dusty: the AGB/STAR dust-detection partition (spec sec 5.2, sec 10),
-#: Riebel+2012's two cited chemistry values -- O-rich 0.24, C-rich 0.68 --
-#: are used as the band's own low and high end relative to their mean,
-#: since no single-number uncertainty on F_dusty is cited; scales AGB.
-F_DUSTY_O, F_DUSTY_C = 0.24, 0.68
+#: F_dusty: the AGB/STAR dust-detection partition (spec sec 5.2, sec 7.2,
+#: sec 10). Riebel+2012's two cited chemistry values (O-rich, C-rich) are
+#: read from `bmstp.density`'s own product (F_DUSTY_O, F_DUSTY_C, F_C
+#: attrs, `run_sensitivity_region`) rather than duplicated as literals
+#: here, and used as the low/high ends of the band relative to the
+#: density's own carbon-weighted centre `(1-F_C)*F_DUSTY_O + F_C*F_DUSTY_C`
+#: -- the mixture the classification actually ran with -- not their
+#: unweighted 50/50 mean (R3 D3).
 #: A_min: the lowest column Pokhrel+2020's star-gas relation samples (spec
 #: sec 5.5, sec 7.2) -- below it the quadratic young-star law `N_law =
 #: kappa A^2` is an extrapolation, so `yso_floor` floors the law itself at
@@ -114,12 +117,13 @@ A_MIN_YSO_LAW = 0.3
 PSI_FLOOR_FRAC = 1e-6
 
 
-def _sensitivity_scale(run):
+def _sensitivity_scale(run, f_dusty_o=None, f_dusty_c=None, f_c=None):
     """`(classes, ln_scale)` for one of the eight fixed literature-band
     runs -- the constant added to every one of `classes`'s whole CLASSMAP
     subclass blocks. `kappa_lo`/`kappa_hi` name both YSO and H2S (module
     docstring). `yso_floor` is not a fixed constant (`_yso_floor_shift`,
-    per source) and is not returned here.
+    per source) and is not returned here. `f_dusty_lo`/`f_dusty_hi` need
+    the region's own `f_dusty_o`, `f_dusty_c`, `f_c` (module docstring).
     """
     ln10 = np.log(10.0)
     if run == "kappa_lo":
@@ -135,9 +139,11 @@ def _sensitivity_scale(run):
     if run == "eps_ext_hi":
         return ("H2S",), np.log(EPS_EXT_HI / EPS_EXT_CENTRAL)
     if run == "f_dusty_lo":
-        return ("AGB",), np.log(F_DUSTY_O / ((F_DUSTY_O + F_DUSTY_C) / 2.0))
+        nominal = (1.0 - f_c) * f_dusty_o + f_c * f_dusty_c
+        return ("AGB",), np.log(f_dusty_o / nominal)
     if run == "f_dusty_hi":
-        return ("AGB",), np.log(F_DUSTY_C / ((F_DUSTY_O + F_DUSTY_C) / 2.0))
+        nominal = (1.0 - f_c) * f_dusty_o + f_c * f_dusty_c
+        return ("AGB",), np.log(f_dusty_c / nominal)
     raise ValueError("fittp.classify: unknown fixed-scale sensitivity run %r" % run)
 
 
@@ -157,7 +163,7 @@ def _yso_floor_shift(a_col_k):
     return 2.0 * (np.log(a_col_k_floored) - np.log(a_col_k))
 
 
-def sensitivity_scaling_matrix():
+def sensitivity_scaling_matrix(f_dusty_o, f_dusty_c, f_c):
     """`(9, 6)` `SCALING`: the factor applied to each class's density in
     each of the eight fixed literature-band runs (1.0 where a run does not
     touch that class). The ninth row (`yso_floor`) is left at 1.0 here --
@@ -168,7 +174,7 @@ def sensitivity_scaling_matrix():
     for ri, run in enumerate(SENSITIVITY_RUNS):
         if run == "yso_floor":
             continue
-        classes, ln_scale = _sensitivity_scale(run)
+        classes, ln_scale = _sensitivity_scale(run, f_dusty_o, f_dusty_c, f_c)
         for cls in classes:
             scaling[ri, CLASSES.index(cls)] = np.exp(ln_scale)
     return scaling
@@ -255,8 +261,14 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
         flux_cov_stack[ci] = np.asarray(f["FLUX_COV"][start:stop, :, :], dtype=np.float64)
 
     ln_ev = _batch_ln_evidence(class_files, psi_file, beta, start, stop, m)
+    # A flagged source's fit is undefined at every template of every class
+    # (sweep.py sets ln_w to -inf there), so its whole (25,) evidence row
+    # is -inf and the identities below must stop testing it, not turn it
+    # into a fabricated STAR verdict (R3 U1).
+    flagged = ~np.isfinite(ln_ev).any(axis=1)
     p_sub, p_cls = _class_probs(ln_ev)
     map_c = np.argmax(p_cls, axis=1)
+    map_c = np.where(flagged, -1, map_c)
 
     with h5py.File(cat_path, "r") as cf:
         flux = np.asarray(cf["FNU_MJY"][start:stop], dtype=np.float64)
@@ -267,10 +279,16 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
     mask = np.broadcast_to(detected[:, None, :], cflux.shape)
     cflux = np.where(mask, flux[:, None, :], cflux)
     row_idx = np.arange(m)
-    imputed = cflux[row_idx, map_c, :]
-    imputed_cov = flux_cov_stack[map_c, row_idx]
-    imputed_identity_err = float(np.max(np.abs(imputed[detected] - flux[detected]))) \
-        if detected.any() else 0.0
+    # a safe (in-range) class index for the gather below; the flagged rows
+    # it touches are overwritten with NaN immediately after, never read.
+    map_c_safe = np.where(flagged, 0, map_c)
+    imputed = cflux[row_idx, map_c_safe, :]
+    imputed_cov = flux_cov_stack[map_c_safe, row_idx]
+    imputed[flagged] = np.nan
+    imputed_cov[flagged] = np.nan
+    detected_ok = detected & ~flagged[:, None]
+    imputed_identity_err = float(np.max(np.abs(imputed[detected_ok] - flux[detected_ok]))) \
+        if detected_ok.any() else 0.0
 
     with np.errstate(divide="ignore", invalid="ignore"):
         ent_c = -np.sum(np.where(p_cls > 0, p_cls * np.log(p_cls), 0.0), axis=1)
@@ -282,7 +300,7 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
         candidate_flux=cflux.astype(np.float32), flux_imputed=imputed.astype(np.float32),
         flux_imputed_cov=imputed_cov.astype(np.float32),
         entropy_class=ent_c.astype(np.float32), entropy_subclass=ent_s.astype(np.float32),
-        imputed_identity_err=imputed_identity_err,
+        imputed_identity_err=imputed_identity_err, n_flagged=int(flagged.sum()),
     )
 
 
@@ -340,6 +358,7 @@ def build_region(config, region, st, beta):
 
     part_paths = []
     imputed_identity_err = 0.0
+    n_flagged = 0
     bounds = list(batches(n, ROW_BYTES))
     for bi, (start, stop) in enumerate(bounds):
         batch = _classify_batch(class_files, psi_file, beta, cat_path, start, stop)
@@ -348,6 +367,7 @@ def build_region(config, region, st, beta):
         _write_classify_part(part_path, batch)
         part_paths.append(part_path)
         imputed_identity_err = max(imputed_identity_err, batch["imputed_identity_err"])
+        n_flagged += batch["n_flagged"]
         st.tick(bi + 1, len(bounds), "batches")
 
     for f in class_files.values():
@@ -357,10 +377,10 @@ def build_region(config, region, st, beta):
 
     fit_files = np.array([_fit_path(config, region, cls) for cls in CLASSES], dtype="S256")
     return dict(path=path, part_paths=part_paths, n_source=n, fit_files=fit_files,
-                imputed_identity_err=imputed_identity_err)
+                imputed_identity_err=imputed_identity_err, n_flagged=n_flagged)
 
 
-def join_classify_parts(path, part_paths, n_source, fit_files):
+def join_classify_parts(path, part_paths, n_source, fit_files, n_flagged):
     """Joins one region's P8 part files, one part's rows at a time,
     dataset by dataset (rule 10b: never a region-sized array); removes the
     part files once written."""
@@ -380,6 +400,11 @@ def join_classify_parts(path, part_paths, n_source, fit_files):
         out.attrs["CLASSES"] = np.array(CLASSES, dtype="S8")
         out.attrs["SUBCLASSES"] = np.array(SUBCLASS_LABELS, dtype="S12")
         out.attrs["FIT_FILES"] = fit_files
+        # sources flagged by the fit (n_detected < 2, or a singular design
+        # matrix): MAP_CLASS is -1 for these, never STAR, and P_CLASS/
+        # P_SUBCLASS/P_YSO/FLUX_IMPUTED are NaN (R3 U1, U2) -- recorded
+        # once here rather than recomputed by every consumer.
+        out.attrs["N_FLAGGED"] = n_flagged
     for part_path in part_paths:
         os.remove(part_path)
 
@@ -408,6 +433,9 @@ def run_sensitivity_region(config, region, st, beta):
     if not np.array_equal(density_file["NAME"][:], names):
         raise ValueError("fittp.classify [%s]: bmstp.density's NAME does not row-align "
                           "with the fit files' own" % region)
+    f_dusty_o = float(density_file.attrs["F_DUSTY_O"])
+    f_dusty_c = float(density_file.attrs["F_DUSTY_C"])
+    f_c = float(density_file.attrs["F_C"])
 
     n = names.shape[0]
     n_run = len(SENSITIVITY_RUNS)
@@ -435,7 +463,7 @@ def run_sensitivity_region(config, region, st, beta):
                     lo, hi = CLASS_SLICES[cls]
                     ln_ev_run[:, lo:hi] += yso_floor_shift[:, None]
             else:
-                classes, ln_scale = _sensitivity_scale(run)
+                classes, ln_scale = _sensitivity_scale(run, f_dusty_o, f_dusty_c, f_c)
                 for cls in classes:
                     lo, hi = CLASS_SLICES[cls]
                     ln_ev_run[:, lo:hi] += ln_scale
@@ -453,22 +481,24 @@ def run_sensitivity_region(config, region, st, beta):
 
     return dict(n_source=n, frac_map_changed=(changed / n if n else changed.astype(np.float64)),
                 n_pyso_above_half=n_pyso,
-                yso_floor_mean_factor=(yso_floor_factor_sum / n if n else float("nan")))
+                yso_floor_mean_factor=(yso_floor_factor_sum / n if n else float("nan")),
+                f_dusty_o=f_dusty_o, f_dusty_c=f_dusty_c, f_c=f_c)
 
 
 def write_sensitivity(path, region, result):
     """Updates the region's own row of the (30-region) P9 product in
     place, leaving every other region's row untouched (rule 5c). `SCALING`
-    is per-region because `yso_floor`'s factor is (module docstring); its
-    other eight rows repeat the same fixed literature-band factor in every
-    region's slice.
+    is per-region because `yso_floor`'s factor is (module docstring), and
+    now so is `f_dusty_lo`/`f_dusty_hi`'s (read off `bmstp.density`'s own
+    product, `run_sensitivity_region`); its other six rows repeat the same
+    fixed literature-band factor in every region's slice.
     """
     region_names = tuple(r.name for r in regions_module.REGIONS)
     n_region = len(region_names)
     n_run = len(SENSITIVITY_RUNS)
     n_cls = len(CLASSES)
     yso_floor_ri = SENSITIVITY_RUNS.index("yso_floor")
-    fixed = sensitivity_scaling_matrix()
+    fixed = sensitivity_scaling_matrix(result["f_dusty_o"], result["f_dusty_c"], result["f_c"])
     if os.path.exists(path):
         with h5py.File(path, "r") as f:
             frac_map_changed = np.asarray(f["FRAC_MAP_CHANGED"][:])
@@ -524,7 +554,7 @@ def build(config, regions=None, beta=0.0):
         with progress.Stage("fittp.classify", region) as st:
             result = build_region(config, region, st, beta)
             join_classify_parts(result["path"], result["part_paths"],
-                                 result["n_source"], result["fit_files"])
+                                 result["n_source"], result["fit_files"], result["n_flagged"])
 
             # the joined file's own small columns (n, 6) and (n, 25) --
             # not CANDIDATE_FLUX/FLUX_IMPUTED_COV, the two region-sized
@@ -533,20 +563,26 @@ def build(config, regions=None, beta=0.0):
                 p_class = np.asarray(f["P_CLASS"][:])
                 p_subclass = np.asarray(f["P_SUBCLASS"][:])
                 n_detected = np.asarray(f["N_DETECTED"][:])
+                map_class = np.asarray(f["MAP_CLASS"][:])
 
-            p_class_err = float(np.max(np.abs(p_class.sum(axis=1) - 1.0)))
+            # a flagged source (MAP_CLASS == -1) carries a NaN P_CLASS/
+            # P_SUBCLASS row by construction (R3 U1); both acceptance
+            # identities are tested only on the sources the fit actually
+            # resolved, so one flagged source no longer stops either check.
+            ok = map_class != -1
+            p_class_err = float(np.max(np.abs(p_class[ok].sum(axis=1) - 1.0))) if ok.any() else 0.0
             sub_sum = np.zeros_like(p_class)
             for ci, cls in enumerate(CLASSES):
                 lo, hi = CLASS_SLICES[cls]
                 sub_sum[:, ci] = p_subclass[:, lo:hi].sum(axis=1)
-            subclass_err = float(np.max(np.abs(sub_sum - p_class)))
+            subclass_err = float(np.max(np.abs(sub_sum[ok] - p_class[ok]))) if ok.any() else 0.0
             n_pyso_half = int((p_class[:, YSO_INDEX] > 0.5).sum())
             two_band_frac = float((n_detected == 2).mean()) if n_detected.size else float("nan")
             st.done(result["path"], n=result["n_source"], beta=beta,
                     p_class_sum_err=p_class_err, p_subclass_sum_err=subclass_err,
                     flux_imputed_identity_err=result["imputed_identity_err"],
                     n_pyso_above_half=n_pyso_half, two_band_frac=two_band_frac,
-                    n_batches=len(result["part_paths"]))
+                    n_flagged=result["n_flagged"], n_batches=len(result["part_paths"]))
 
         with progress.Stage("fittp.classify.sensitivity", region) as st:
             sens = run_sensitivity_region(config, region, st, beta)

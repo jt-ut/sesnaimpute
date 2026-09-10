@@ -103,6 +103,35 @@ def confusion_by_detected_count(verdict_idx, n_detected):
     return table
 
 
+def confusion_verdict_map_by_count(verdict_idx, map_class, n_detected, n_classes):
+    """`(7, 11, n_classes)`: sec 7.3's imputed-verdict-vs-MAP table, one
+    slice per detected-band count 2..8, so the two axes can still be
+    crossed with the count after the fact instead of only their region
+    total (R3 D4 -- the summed-over-count table hides exactly the split
+    sec 6.5 says matters, the cascade abstaining on every two-band source)."""
+    table = np.zeros((7, len(crisp.LABELS), n_classes), dtype=np.int64)
+    for k in range(2, 9):
+        sel_k = n_detected == k
+        for ci in range(n_classes):
+            sel = sel_k & (map_class == ci)
+            if sel.any():
+                table[k - 2, :, ci] = np.bincount(verdict_idx[sel], minlength=len(crisp.LABELS))
+    return table
+
+
+def confusion_yso_by_count(cascade_yso, pyso_half, n_detected):
+    """`(7, 2, 2)`: sec 7.3's cascade-YSO-set-vs-`P(YSO)>0.5` table, one
+    2x2 slice per detected-band count 2..8, rows/cols `[not, yso]` (R3 D4)."""
+    table = np.zeros((7, 2, 2), dtype=np.int64)
+    for k in range(2, 9):
+        sel = n_detected == k
+        table[k - 2, 0, 0] = int((sel & ~cascade_yso & ~pyso_half).sum())
+        table[k - 2, 0, 1] = int((sel & ~cascade_yso & pyso_half).sum())
+        table[k - 2, 1, 0] = int((sel & cascade_yso & ~pyso_half).sum())
+        table[k - 2, 1, 1] = int((sel & cascade_yso & pyso_half).sum())
+    return table
+
+
 #: Per-source working-set estimate for the batch loop (rule 10b): the raw
 #: flux and sigma reads, (8,) float64 each, plus the cascade's own row-level
 #: intermediates (feature dict, 45-column gate table) at a generous margin.
@@ -223,22 +252,24 @@ def build_region_imputed(config, region, st, name, n_detected, verdict_measured)
     verdict_imp = crisp.CLASS_CODE[verdict_idx].astype(np.int16)
     confusion_imputed = confusion_by_detected_count(verdict_idx, n_detected)
 
-    # verdict (imputed) vs MAP class -- spec sec 7.3's first confusion table.
-    confusion_verdict_map = np.zeros((len(crisp.LABELS), len(CLASSES)), dtype=np.int64)
-    for ci in range(len(CLASSES)):
-        sel = map_class == ci
-        if sel.any():
-            confusion_verdict_map[:, ci] = np.bincount(verdict_idx[sel], minlength=len(crisp.LABELS))
+    # verdict (imputed) vs MAP class -- spec sec 7.3's first confusion
+    # table, per detected-band count (R3 D4).
+    confusion_verdict_map = confusion_verdict_map_by_count(
+        verdict_idx, map_class, n_detected, len(CLASSES))
 
     # cascade's YSO set (MEASURED verdict) vs P(YSO) > 0.5 -- spec sec
-    # 7.3's second table, the honest colour-cut YSO set.
+    # 7.3's second table, the honest colour-cut YSO set, per detected-band
+    # count (R3 D4). `verdict_measured` is SESNA's own CLASS code
+    # (`crisp.CLASS_CODE`); `CONCORDANT_LABELS["YSO"]` names `crisp.LABELS`
+    # indices, so the comparison goes through `CLASS_CODE` explicitly
+    # rather than relying on the two vocabularies' rows coinciding by
+    # construction (module note; any reordering of `constants.
+    # GUTERMUTH_LABELS` would otherwise break this silently).
     yso_label_idx = [crisp.LABEL_INDEX[lab] for lab in CONCORDANT_LABELS["YSO"]]
-    cascade_yso = np.isin(verdict_measured, yso_label_idx)
+    yso_class_codes = crisp.CLASS_CODE[yso_label_idx]
+    cascade_yso = np.isin(verdict_measured, yso_class_codes)
     pyso_half = p_yso > 0.5
-    confusion_yso_measured = np.array([
-        [int((~cascade_yso & ~pyso_half).sum()), int((~cascade_yso & pyso_half).sum())],
-        [int((cascade_yso & ~pyso_half).sum()), int((cascade_yso & pyso_half).sum())],
-    ], dtype=np.int64)
+    confusion_yso_measured = confusion_yso_by_count(cascade_yso, pyso_half, n_detected)
 
     return dict(p_verdict=p_verdict_imp, verdict=verdict_imp,
                 confusion_imputed=confusion_imputed,

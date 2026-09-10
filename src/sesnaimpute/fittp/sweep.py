@@ -25,6 +25,20 @@ working set is discarded once its block's row of results is written.
 Each batch's own rows are written straight to their own part file
 (`<product>.partN`, rule 10b); no batch or region array, and no part
 file's read at join time, ever holds the whole region's P7 at once.
+
+Three of section 1.3's own numbers are pinned to one reading each, since a
+second reading of the same physical quantity is a second, silently
+different answer: the non-detection roll-off width is the per-source
+limits product's own region-band `W_DEX` (the same fit the retention floor
+and the atlas's acceptance fraction already read, not `catalog.depths`'
+differently-fit `WIDTH_DEX`); Gamma and the prior read the fit's one
+unclamped optimum `(a_hat, log10_b_hat)`, never a mix of clamped and
+unclamped marks for the two factors of the same evidence; and section 9's
+Occam gap subtracts `max_theta ln(Lambda L_hat)` alone, excluding Gamma's
+own per-template penalty from the maximum it is compared against. A
+flagged source's `FLUX_MEAN`/`FLUX_COV` are written `NaN`, not the zero a
+`p_theta` of zero everywhere would otherwise silently accumulate, since a
+flagged fit has no posterior to report a flux moment of.
 """
 
 import os
@@ -105,13 +119,18 @@ def _register(config, cls):
 
 
 def _width_dex(config, region):
-    """The region's own non-detection roll-off width, all eight bands
-    (`catalog.depths`' `WIDTH_DEX`, section 6.2), read once per region."""
-    path = config_module.product_path(config, "catalog", "sesna", "depths", "region")
+    """The region's own non-detection roll-off width, all eight bands: the
+    per-source limits product's own `W_DEX` (`catalog.depth_grid`'s region
+    counts fit for the five Spitzer bands, `catalog.depths`' fitted width
+    for the three 2MASS bands, `catalog/depth_grid.py`'s module docstring)
+    -- the same width the retention floor and the atlas's acceptance
+    fraction already read (`population.field_stars._region_width_dex`,
+    `bmstp.atlas._depth_grid`), so the likelihood's non-detection term
+    prices the same roll-off as the rest of the completeness chain instead
+    of a second, differently-fit width off `catalog.depths` (audit A row 1)."""
+    path = config_module.product_path(config, "catalog", "sesna", "limits", "source", region=region)
     with h5py.File(path, "r") as f:
-        region_names = [r.decode() if isinstance(r, bytes) else r for r in f["REGION"][:]]
-        ridx = region_names.index(region)
-        return np.asarray(f["WIDTH_DEX"][ridx, :], dtype=np.float64)
+        return np.asarray(f["W_DEX"][:], dtype=np.float64)
 
 
 def _catalog_block(config, region, start, stop):
@@ -220,12 +239,14 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
     n_block = stop - start
     model_index = np.arange(n_model)
     # Gaia term, vectorised over the whole block at once (W9: no Python
-    # loop over sources -- CODING_RULES_BMSTP.md rule 8) -- the fit's own
-    # clamped marks are already float32 (likelihood.fit); gaia.ln_gamma
-    # upcasts internally where the astrometric algebra needs it.
+    # loop over sources -- CODING_RULES_BMSTP.md rule 8). Gamma reads the
+    # same unclamped optimum a_hat/log10_b_hat the prior read above takes
+    # (one set of marks for the two class-evidence factors, section 6.4;
+    # the clamped marks stay for the reported marks, the top-K record and
+    # the flux prediction only, section 6.1).
     t = time.perf_counter()
     ln_gamma = gaia_term.ln_gamma(rows, model_index,
-                                   fit.a_hat_clamped, fit.log10_b_hat_clamped, cls.lower())
+                                   fit.a_hat, fit.log10_b_hat, cls.lower())
     timing["ln_gamma"] += time.perf_counter() - t
 
     ln_w = ln_lambda.astype(np.float64) + ln_l + ln_gamma
@@ -263,7 +284,11 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
     order = np.argpartition(-ln_w, k_keep - 1, axis=1)[:, :k_keep]
     row_idx = np.arange(n_block)[:, None]
     order = order[row_idx, np.argsort(-ln_w[row_idx, order], axis=1)]
-    occam_gap = (ev_total - ln_w.max(axis=1)).astype(np.float32)
+    # section 9's Occam gap is `ln EV_C - max_theta ln(Lambda L_hat)`: the
+    # per-template Gamma factor already folded into `ln_w` is excluded from
+    # the subtracted maximum, so the gap measures the library-volume
+    # penalty alone, not Gamma's own penalty at the best template.
+    occam_gap = (ev_total - (ln_lambda.astype(np.float64) + ln_l).max(axis=1)).astype(np.float32)
     timing["topk"] += time.perf_counter() - t
 
     good = ~batch.flagged
@@ -305,6 +330,13 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
     _flux_moments_topk_kernel(log10_flux, p_theta, sorted_order, rank_position,
                                good, flux_mean, flux_m2, topk_flux)
     flux_cov = flux_m2 - flux_mean[:, :, None] * flux_mean[:, None, :]
+    # A flagged source's posterior weight is undefined (ln_w is -inf at
+    # every template, section 1.6), not a zero-flux measurement: the
+    # moments kernel above accumulates p_theta=0 for these rows (its
+    # p_theta was replaced from NaN), so overwrite them here rather than
+    # report a fabricated zero flux and covariance (R3 U2).
+    flux_mean[~good] = np.nan
+    flux_cov[~good] = np.nan
     timing["moments"] += time.perf_counter() - t
 
     t = time.perf_counter()
