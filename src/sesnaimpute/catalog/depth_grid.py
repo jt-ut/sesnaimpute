@@ -138,7 +138,7 @@ MIN_LOW_COLUMN_SOURCES = 500
 RECOVERY_FLOOR_FRACTION = 0.9
 
 
-def _admitted_pixels_512(config, region):
+def admitted_pixels_512(config, region):
     """Every nside-512 child of the region's own source-bearing nside-256
     pixels -- the granule map's admission rule (`granules/build.py`): a
     pixel/region association, not a per-source column, so read directly
@@ -509,7 +509,7 @@ def build(config, regions=None):
         for region in regions:
             rs = access_module.region_slice(config, region)
             hpx_pix_512 = rs["hpx_pix_512"]
-            admitted = _admitted_pixels_512(config, region)
+            admitted = admitted_pixels_512(config, region)
 
             # the marginalised limit (module docstring, Part A): the
             # region-band counts fit on the complete low-column pixels'

@@ -35,6 +35,7 @@ from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
+from sesnaimpute.catalog import depth_grid as depth_grid_module
 
 NSIDE_512 = 512
 NSIDE_2048 = 2048
@@ -54,15 +55,12 @@ _ROW_BYTES = 8 + 8 + 4
 
 def _admitted_pixels(config, region):
     """The region's admitted nside-512 pixels, sorted ascending -- the
-    depth grid's own axis (`catalog.depth_grid`'s `HPX_PIX_512`, sec.
-    3.3), so the atlas reads the same pixel set from both products."""
-    path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "catalog.coverage: no depth grid for %s at %s -- run the "
-            "'catalog.depth_grid' RUNBOOKtp.sh line first" % (region, path))
-    with h5py.File(path, "r") as f:
-        return np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
+    granule map's own admission rule (every nside-512 child of the
+    region's source-bearing nside-256 pixels), computed by
+    `catalog.depth_grid.admitted_pixels_512` and imported rather than
+    re-derived, so coverage does not need the depth grid's product (which
+    itself now reads coverage's own `FRAC`, sec. 3.3)."""
+    return depth_grid_module.admitted_pixels_512(config, region)
 
 
 def _child_occupancy(config, region, pix):
