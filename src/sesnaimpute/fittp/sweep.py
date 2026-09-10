@@ -84,7 +84,7 @@ SWEEP_EXTRA_BUFFERS = 2
 #: order.
 _PART_KEYS = ("NAME", "LN_EVIDENCE", "FLUX_MEAN", "FLUX_COV", "TOPK_MODEL", "TOPK_A_K",
               "TOPK_LOG10_B", "TOPK_CHI2", "TOPK_LN_L", "TOPK_LN_PRIOR", "TOPK_FLUX",
-              "OCCAM_GAP", "FRAC_CLAMPED", "N_DETECTED")
+              "OCCAM_GAP", "FRAC_CLAMPED", "N_DETECTED", "N_LAW_ITER")
 
 
 def _register(config, cls):
@@ -134,16 +134,14 @@ def _width_dex(config, region):
 
 
 def _catalog_block(config, region, start, stop):
-    """One block's own curated rows: fluxes, uncertainties, `ORIGIN_FNU`
-    and the source's own column `AK_SESNA` (the same read `likelihood.
-    prepare` and `fittp.cascade` both use)."""
+    """One block's own curated rows: fluxes, uncertainties and
+    `ORIGIN_FNU` (the same read `fittp.cascade` uses)."""
     path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
     with h5py.File(path, "r") as f:
         flux = f["FNU_MJY"][start:stop]
         sigma = f["SIGMA_FNU_MJY"][start:stop]
         origin = f["ORIGIN_FNU"][start:stop]
-        ak = f["AK_SESNA"][start:stop]
-    return flux, sigma, origin, ak
+    return flux, sigma, origin
 
 
 def _n_sources(config, region):
@@ -214,8 +212,8 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
     """
     n_model = template_log.shape[0]
     t = time.perf_counter()
-    flux, sigma, origin, ak = _catalog_block(config, region, start, stop)
-    batch = likelihood.prepare(config, region, cls, start, stop, flux, sigma, origin, ak, width_dex)
+    flux, sigma, origin = _catalog_block(config, region, start, stop)
+    batch = likelihood.prepare(config, region, cls, start, stop, flux, sigma, origin, width_dex)
     timing["prepare"] += time.perf_counter() - t
 
     t = time.perf_counter()
@@ -363,6 +361,7 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
         topk_chi2=topk_chi2, topk_ln_l=topk_ln_l, topk_ln_prior=topk_ln_prior,
         topk_flux=topk_flux, occam_gap=occam_gap,
         frac_clamped=fit.frac_clamped, n_detected=batch.n_detected,
+        n_law_iter=fit.n_law_iter,
         zero_ext_count=int((fit.a_hat[good] < 0.0).sum()) if good.any() else 0,
         n_templates_checked=int(good.sum()) * n_model,
     )
@@ -392,6 +391,7 @@ def _batch_result(config, region, cls, reader, gaia_term, template_log, subclass
     occam_gap = np.empty(m, dtype=np.float32)
     frac_clamped = np.empty(m, dtype=np.float32)
     n_detected = np.empty(m, dtype=np.int8)
+    n_law_iter = np.empty(m, dtype=np.int8)
 
     zero_ext_count = 0
     n_templates_checked = 0
@@ -413,6 +413,7 @@ def _batch_result(config, region, cls, reader, gaia_term, template_log, subclass
         occam_gap[sl] = r["occam_gap"]
         frac_clamped[sl] = r["frac_clamped"]
         n_detected[sl] = r["n_detected"]
+        n_law_iter[sl] = r["n_law_iter"]
         zero_ext_count += r["zero_ext_count"]
         n_templates_checked += r["n_templates_checked"]
 
@@ -425,7 +426,7 @@ def _batch_result(config, region, cls, reader, gaia_term, template_log, subclass
         topk_model=topk_model, topk_a_k=topk_a_k, topk_log10_b=topk_log10_b,
         topk_chi2=topk_chi2, topk_ln_l=topk_ln_l, topk_ln_prior=topk_ln_prior,
         topk_flux=topk_flux, occam_gap=occam_gap, frac_clamped=frac_clamped,
-        n_detected=n_detected, zero_ext_count=zero_ext_count,
+        n_detected=n_detected, n_law_iter=n_law_iter, zero_ext_count=zero_ext_count,
         n_templates_checked=n_templates_checked,
     )
 
@@ -436,7 +437,7 @@ def _write_part(part_path, batch):
                                ("name", "ln_evidence", "flux_mean", "flux_cov", "topk_model",
                                 "topk_a_k", "topk_log10_b", "topk_chi2", "topk_ln_l",
                                 "topk_ln_prior", "topk_flux", "occam_gap", "frac_clamped",
-                                "n_detected")):
+                                "n_detected", "n_law_iter")):
             f.create_dataset(key, data=batch[field])
 
 
