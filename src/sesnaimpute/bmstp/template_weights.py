@@ -1173,8 +1173,8 @@ def build_h2shock(config, region):
         st.done(path, n_model=n_model, floored_fraction=frac_zero, max_colsum_dev=max_colsum_dev)
         print(f"template_weights.h2shock [{region}]: table C_THETA (log10 f_ref,4.5,theta) "
               f"range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
-              f"max={c_theta.max():.4f}; old table C_THETA (Sigma->F conversion, now internal-"
-              f"only) median={np.median(c_theta_conversion):.4f}; "
+              f"max={c_theta.max():.4f}; Sigma-to-4.5-micron conversion "
+              f"median={np.median(c_theta_conversion):.4f}; "
               f"LOGSIG_MEAN={logsig_mean:.4f} LOGSIG_STD={logsig_std:.4f}", flush=True)
 
 
