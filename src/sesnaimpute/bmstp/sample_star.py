@@ -25,6 +25,8 @@ from astropy.io import fits
 
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
+from sesnaimpute.bmstp import grid
+from sesnaimpute.sky.derived import profile as profile_module
 
 _SKIP_KEYS = ("DIST_GRID", "LIMIT8_GRID_MJY")
 
@@ -72,6 +74,109 @@ def sample_star(config, region, tile_id):
         fnu_i2 = f["FNU_MJY"][:, IDX_I2].astype(np.float64)
     log10_f45 = np.log10(fnu_i2[star_index])
     return x, log10_f45, w
+
+
+
+# ---------------------------------------------------------------------------
+# W61: the field-star depth mark's own width -- the map's propagated
+# column sigma at the star's distance, quantised to N_WIDTH_CLASSES
+# geometric classes between the one-cell floor and the tile's own
+# cloud-interval-span cap (SPEC_BMSTP_DRAFT.md sec. 2, sec. 5.1 "Marks").
+# A TRILEGAL field star carries a distance but no sky position of its own
+# (module docstring), so the tile's own centre stands in for one: every
+# star of a tile reads the SAME representative sightline (the region's
+# admitted profile sightline nearest the tile's centre).
+# ---------------------------------------------------------------------------
+
+_PROFILE_CACHE = {}
+
+
+def _cached_profile(config, region):
+    """The region's profile object, cached per `(data_root, region)` so a
+    per-tile call (`bmstp.shapes`' `Parallel` dispatches many tiles to
+    each worker) does not reopen and re-parse the whole sightline product
+    per tile."""
+    key = (config.data_root, region)
+    if key not in _PROFILE_CACHE:
+        _PROFILE_CACHE[key] = profile_module.read(config, region)
+    return _PROFILE_CACHE[key]
+
+
+def _tile_centre_lb(config, region, tile_id):
+    """The STAR anchor tile's own centre, `(l_deg, b_deg)`
+    (`population.anchor_tiles`'s `TILE_L_DEG`/`TILE_B_DEG`)."""
+    path = config_module.product_path(config, "population", "anchors", "tiles", "hpx512", region=region)
+    with h5py.File(path, "r") as f:
+        return float(f["TILE_L_DEG"][tile_id]), float(f["TILE_B_DEG"][tile_id])
+
+
+def tile_width_classes(config, region, tile_id):
+    """`(row, sigma_classes_dex)` (W61 "the rule"): the tile's own
+    representative sightline (`_RegionProfile.row_of_lb` at the tile's
+    own centre) and its `grid.N_WIDTH_CLASSES` geometric width classes in
+    `log10 x`, floored at one grid cell (`grid._X_CELL_WIDTH`) and capped
+    at that sightline's own cloud-interval span, `log10 u(d_back) -
+    log10 u(d_front)` (`sample_cloud.cloud_interval_pc`'s region-level
+    front/back distances, read against the sightline's own total column
+    `A_INF_K` so a `d_back` past the map's own edge -- the doubled cloud
+    interval routinely reaches it, sec. 2 -- still sees the analytic
+    far-field tail rather than a flat extrapolation)."""
+    from sesnaimpute.bmstp import sample_cloud  # deferred: sample_cloud
+    # imports template_weights, which imports this module -- a module-load
+    # cycle a top-level import here would create.
+    profile_obj = _cached_profile(config, region)
+    tile_l, tile_b = _tile_centre_lb(config, region, tile_id)
+    row, pix = profile_obj.row_of_lb(tile_l, tile_b)
+    d_front, d_back = sample_cloud.cloud_interval_pc(config, region)
+    a_inf_row = float(profile_obj.a_inf[row])
+    u_front = float(profile_obj.u(d_front, hpx_pix=pix, total_column_ak=a_inf_row))
+    u_back = float(profile_obj.u(d_back, hpx_pix=pix, total_column_ak=a_inf_row))
+    floor_dex = float(grid._X_CELL_WIDTH)
+    cap_dex = max(floor_dex, np.log10(max(u_back, 1e-300)) - np.log10(max(u_front, 1e-300)))
+    sigma_classes_dex = np.geomspace(floor_dex, cap_dex, grid.N_WIDTH_CLASSES)
+    return row, sigma_classes_dex
+
+
+def star_width_class(config, region, dist_pc, row, sigma_classes_dex):
+    """Per star, the width-class index (0..N_WIDTH_CLASSES-1) nearest its
+    own `sigma_x` (W61 "the rule"): `sigma_A(d) / (A(d) ln 10)`, `A(d)`
+    and `sigma_A(d)` the tile's representative sightline's own
+    `A_CUM_K`/`SIGMA_COR_K` (`_RegionProfile.column_and_sigma`) at the
+    star's own distance, clipped to the class range before the
+    nearest-class lookup (in log space, since the classes are
+    geometric)."""
+    profile_obj = _cached_profile(config, region)
+    a_d, sigma_a_d = profile_obj.column_and_sigma(np.asarray(dist_pc, dtype=np.float64), row)
+    sigma_x = sigma_a_d / (np.maximum(a_d, 1e-12) * np.log(10.0))
+    sigma_x = np.clip(sigma_x, sigma_classes_dex[0], sigma_classes_dex[-1])
+    idx = np.argmin(np.abs(np.log(sigma_x)[:, None] - np.log(sigma_classes_dex)[None, :]), axis=1)
+    return idx.astype(np.int64)
+
+
+def star_distances(config, region, tile_id):
+    """Each retained field star's own TRILEGAL distance (W61's `d_i`):
+    `STAR_INDEX` into the field-stars product's own `DIST_PC`, the SAME
+    join `sample_star` uses for `F_4.5`."""
+    with h5py.File(_tile_path(config, region), "r") as f:
+        star_index = f[f"tile_{tile_id}"]["STAR_INDEX"][()].astype(np.int64)
+    with h5py.File(_field_stars_path(config, region), "r") as f:
+        dist_pc = f["DIST_PC"][:].astype(np.float64)
+    return dist_pc[star_index]
+
+
+def agb_star_distances(config, region, tile_id):
+    """AGB's own distance array (W61), row-aligned with `sample_agb`'s
+    `(x, log10_f45, w)`: the evolved subset's own distance, duplicated
+    (O-rich draw, then C-rich) the same way `sample_agb` duplicates `u`
+    (AGB follows STAR, sec. 5.2)."""
+    with h5py.File(_tile_path(config, region), "r") as f:
+        grp = f[f"tile_{tile_id}"]
+        evolved = grp["IS_EVOLVED"][()].astype(bool)
+        star_index = grp["STAR_INDEX"][()].astype(np.int64)[evolved]
+    with h5py.File(_field_stars_path(config, region), "r") as f:
+        dist_pc_all = f["DIST_PC"][:].astype(np.float64)
+    d = dist_pc_all[star_index]
+    return np.concatenate([d, d])
 
 
 @functools.lru_cache(maxsize=None)
