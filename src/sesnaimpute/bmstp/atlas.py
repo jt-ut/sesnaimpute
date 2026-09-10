@@ -82,6 +82,16 @@ N_MC = 10_000
 #: tile id, so two runs draw the same members.
 MC_SEED = 137
 
+#: Disjoint offsets for the four independent draw streams that share
+#: `MC_SEED` (sec. 8's "a fixed-seed sample"): a tile id, a sightline row,
+#: the region-wide YSO template pool, and GAL. Each offset is far larger
+#: than any real tile id or nside-256 sightline row (nside 256 has under
+#: 800,000 pixels total), so no stream's range can reach into another's.
+_SEED_OFFSET_TILE = 0
+_SEED_OFFSET_SIGHTLINE = 100_000_000
+_SEED_OFFSET_YSO_POOL = 200_000_000
+_SEED_OFFSET_GAL = 300_000_000
+
 #: Two of eight bands clear -- the survey's own catalogue rule (sec. 1.2),
 #: the same constant `population.selection.MIN_BANDS` sets.
 MIN_BANDS_CLEAR = selection_module.MIN_BANDS
@@ -250,12 +260,15 @@ def _pixel_batch_size(n_mc):
     return max(1, _PIXEL_BATCH_BUDGET_BYTES // row_bytes)
 
 
-def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None):
-    """`(frac, mc_error, frac_bright3, frac_bright10)` per pixel: `flux0` (n_mc, 8) undimmed, `u` (n_mc,)
+def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None, weight_pix=None):
+    """`(frac, mc_error, frac_bright3, frac_bright10, block_total, block_total_se)`
+    per pixel: `flux0` (n_mc, 8) undimmed, `u` (n_mc,)
     the member's own placement fraction, `a_col` (n_pix,) the pixel's own
     column, `f_lim` (n_pix, 8) the pixel's own marginalised limits,
-    `width_dex` (n_pix, 8) the pixel's own marginalised roll-off width
-    (`catalog.depth_grid`'s `W_DEX_PIX`, sec. 3.3). `a = a_col * u`
+    `width_dex` (n_pix, 8) `catalog.depth_grid`'s `W_DEX_PIX` (sec. 3.3):
+    one value per band for the region, broadcast across the pixel axis
+    passed in here -- unlike `f_lim`, it does not vary pixel to pixel.
+    `a = a_col * u`
     (sec. 8's "its own extinction"), dimmed through the blended law
     (`population.selection.kappa_hybrid`). The two-of-eight step test is
     replaced by the member's probability of being catalogued
@@ -266,17 +279,34 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None):
     prices non-detection with -- zero where the member carries no flux in
     that band (GAL's 2MASS/24um, H2S's J/H/24um); `P(>=2 of 8) =
     1 - Prod_i(1-p_i) - Sum_i p_i Prod_{j!=i}(1-p_j)` (bands independent
-    given the fluxes). `mc_error` is the Monte Carlo standard error of the
-    mean catalogued probability at `N_MC` draws (the sample standard
-    deviation of `accepted_prob` over members, since each draw is now a
-    probability rather than a 0/1 outcome, unlike the retired step test's
-    Bernoulli `frac*(1-frac)` form).
+    given the fluxes). `mc_error` is the Monte Carlo standard error of
+    THIS PIXEL'S OWN mean catalogued probability at `N_MC` draws (the
+    sample standard deviation of `accepted_prob` over members). The same
+    `N_MC` members are the caller's one draw for the whole tile,
+    sightline or region, so `mc_error` at different pixels of one call is
+    not independent -- it does not shrink by summing pixels, and does not
+    describe the error on a REGION TOTAL; `weight_pix`/`block_total`/
+    `block_total_se` below are what a region total's own error needs.
 
     `frac_bright3`/`frac_bright10` (sec. 9 "the bright-end count ratio"):
-    the same `accepted_prob` restricted to the members whose dimmed I2
-    (4.5 um) flux exceeds 3x/10x the pixel's own `F_LIM_50_PIX_MJY[:,
-    IDX_I2]` -- no new draws, the same batch's dimmed `flux` array the
-    two-of-eight test already holds.
+    each member's own I2-band clearance probability `p[:, :, IDX_I2]`
+    (not the two-of-eight `accepted_prob`), restricted to draws whose
+    dimmed I2 (4.5 um) flux exceeds 3x/10x the pixel's own
+    `F_LIM_50_PIX_MJY[:, IDX_I2]` -- a member counts as bright only if I2
+    itself is accepted, matching the catalogue side's own requirement
+    that I2 be a measured band (`ORIGIN_FNU[:, I2] == 1`), not merely any
+    two-of-eight combination that leaves I2 unmeasured.
+
+    `weight_pix` (n_pix,), optional: this pixel's own coefficient (e.g.
+    density x coverage x pixel area) by which its `frac` is summed into
+    some larger total. When given, `block_total`/`block_total_se` are the
+    mean and Monte Carlo standard error of `sum_pix weight_pix *
+    accepted_prob`, i.e. of the weighted total THIS CALL'S SHARED DRAW
+    OF MEMBERS stands for -- the correct error for a total built from
+    this one draw, since it is computed from the N_MC replicate totals
+    before they are averaged down to `frac`, rather than from the
+    per-pixel `mc_error` values (`None`, `None` when `weight_pix` is not
+    given).
 
     Processed in pixel batches of `_pixel_batch_size` (rule 10b): each
     batch is the same elementwise-per-pixel computation on a slice of
@@ -293,6 +323,7 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None):
     mc_error = np.empty(n_pix, dtype=np.float64)
     frac_bright3 = np.empty(n_pix, dtype=np.float64)
     frac_bright10 = np.empty(n_pix, dtype=np.float64)
+    block_sum = np.zeros(n_mc, dtype=np.float64) if weight_pix is not None else None
     batch = _pixel_batch_size(n_mc)
     n_batches = (n_pix + batch - 1) // batch
     for b, start in enumerate(range(0, n_pix, batch)):
@@ -318,22 +349,30 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None):
         accepted_prob = 1.0 - prod_all - sum_term
         frac[start:stop] = accepted_prob.mean(axis=1)
         mc_error[start:stop] = accepted_prob.std(axis=1) / np.sqrt(n_mc)
+        if block_sum is not None:
+            block_sum += weight_pix[start:stop] @ accepted_prob
 
-        # the bright-end check (sec. 9): the same `accepted_prob`,
-        # restricted to draws whose dimmed I2 flux clears 3x/10x this
-        # pixel's own I2 50% limit -- brighter than that, completeness is
-        # 1 on both sides, so this isolates the level from the faint
-        # extrapolation.
+        # the bright-end check (sec. 9): a member's own I2-band clearance
+        # probability, restricted to draws whose dimmed I2 flux clears
+        # 3x/10x this pixel's own I2 50% limit -- brighter than that,
+        # completeness is 1 on both sides, so this isolates the level
+        # from the faint extrapolation.
         i2_lim_b = f_lim_b[:, IDX_I2:IDX_I2 + 1]  # (n_pix_batch, 1)
         flux_i2 = flux[:, :, IDX_I2]  # (n_pix_batch, n_mc)
+        p_i2 = p[:, :, IDX_I2]  # (n_pix_batch, n_mc)
         bright3 = flux_i2 > BRIGHT_MULT_3 * i2_lim_b
         bright10 = flux_i2 > BRIGHT_MULT_10 * i2_lim_b
-        frac_bright3[start:stop] = (accepted_prob * bright3).mean(axis=1)
-        frac_bright10[start:stop] = (accepted_prob * bright10).mean(axis=1)
+        frac_bright3[start:stop] = (p_i2 * bright3).mean(axis=1)
+        frac_bright10[start:stop] = (p_i2 * bright10).mean(axis=1)
 
         if tick is not None:
             tick(b + 1, n_batches)
-    return frac, mc_error, frac_bright3, frac_bright10
+    if block_sum is not None:
+        block_total = float(block_sum.mean())
+        block_total_se = float(block_sum.std() / np.sqrt(n_mc))
+    else:
+        block_total, block_total_se = None, None
+    return frac, mc_error, frac_bright3, frac_bright10, block_total, block_total_se
 
 
 def _pahc_weight(limit8_grid, p_pahc, x):
@@ -353,9 +392,10 @@ def _pahc_weight(limit8_grid, p_pahc, x):
     return p_pahc[:, lo] + frac * (p_pahc[:, hi] - p_pahc[:, lo])
 
 
-def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_in_tile, width_dex, agb_pool):
+def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_in_tile, width_dex,
+                     agb_pool, coverage_in_tile):
     """One tile's `{cls: (frac, mc_error, density, frac_bright3,
-    frac_bright10)}` for STAR/AGB/PAHC, over its own
+    frac_bright10, total_se)}` for STAR/AGB/PAHC, over its own
     admitted pixels, from the star-family population's own retained
     sample (`population/star/population_star_tile__R.hdf5`'s `tile_<id>`
     group): STAR/PAHC draw from the SAME TRILEGAL flux table (sec. 8's
@@ -368,9 +408,15 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     `sample_agb`'s carbon-share split, `x`'s first/second half) picks one
     AGB library template from `agb_pool`'s own tau-factor weight within
     that chemistry, whose eight `F_REF` are rescaled so its own 4.5 um
-    reference flux equals the star's `F_4.5`. `width_dex` is this tile's
-    own pixels' `W_DEX_PIX` (n_pix_in_tile, 8), not one region-band
-    constant (`catalog.depth_grid`, sec. 3.3)."""
+    reference flux equals the star's `F_4.5`. `width_dex` is `catalog.
+    depth_grid`'s `W_DEX_PIX` (sec. 3.3): one value per band for the
+    region, broadcast to this tile's own pixels (n_pix_in_tile, 8), not a
+    per-pixel fit. `total_se` is the Monte Carlo standard error of this
+    class's own contribution to the region total (`density` times this
+    ONE shared tile draw's weighted total, `coverage_in_tile * pixel
+    area`), the error a region total actually carries -- every pixel of
+    the tile shares this one draw, so it is not the sum of the per-pixel
+    `mc_error` values above."""
     star_path = config_module.product_path(
         config, "population", "star", "population", "tile", region=region)
     field_path = config_module.product_path(
@@ -400,7 +446,12 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     w_star_only = w_star * (1.0 - p_pahc)
     w_pahc_only = w_star * p_pahc
 
-    rng = np.random.RandomState(MC_SEED + tile_id)
+    # this tile's one shared draw's own weight for the region-total error
+    # (module docstring's `total_se`): density multiplies afterward,
+    # since it is a fixed number, not itself drawn.
+    weight_pix = coverage_in_tile * _HPX512_PIXEL_DEG2
+
+    rng = np.random.RandomState(MC_SEED + _SEED_OFFSET_TILE + tile_id)
     out = {}
     for cls, weight in (("STAR", w_star_only), ("PAHC", w_pahc_only)):
         idx, total = _draw_members(rng, weight, N_MC)
@@ -410,10 +461,13 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
             mc_error = np.zeros(pix_in_tile.size)
             frac_bright3 = np.zeros(pix_in_tile.size)
             frac_bright10 = np.zeros(pix_in_tile.size)
+            total_se = 0.0
         else:
-            frac, mc_error, frac_bright3, frac_bright10 = _accepted_fraction(
-                a_col_in_tile, u[idx], flux0_all[idx], f_lim_in_tile, width_dex, config)
-        out[cls] = (frac, mc_error, density, frac_bright3, frac_bright10)
+            frac, mc_error, frac_bright3, frac_bright10, _block_total, block_total_se = _accepted_fraction(
+                a_col_in_tile, u[idx], flux0_all[idx], f_lim_in_tile, width_dex, config,
+                weight_pix=weight_pix)
+            total_se = density * block_total_se
+        out[cls] = (frac, mc_error, density, frac_bright3, frac_bright10, total_se)
 
     # AGB (sec. 5.2): the SAME sampler `bmstp.shapes` bins its own shape
     # from -- `x_a` is `concatenate([u, u])` over the tile's evolved
@@ -429,6 +483,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         mc_agb = np.zeros(pix_in_tile.size)
         frac_agb_bright3 = np.zeros(pix_in_tile.size)
         frac_agb_bright10 = np.zeros(pix_in_tile.size)
+        total_se_agb = 0.0
     else:
         n_evolved = x_a.size // 2
         is_c = idx_agb >= n_evolved
@@ -447,9 +502,11 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
             for k, key in enumerate(BAND_KEYS):
                 f_band = np.maximum(pool["f_ref"][key][shell], pool["floor_linear"][shell])
                 flux0_agb[mask, k] = f_band * scale
-        frac_agb, mc_agb, frac_agb_bright3, frac_agb_bright10 = _accepted_fraction(
-            a_col_in_tile, u_agb, flux0_agb, f_lim_in_tile, width_dex, config)
-    out["AGB"] = (frac_agb, mc_agb, density_agb, frac_agb_bright3, frac_agb_bright10)
+        frac_agb, mc_agb, frac_agb_bright3, frac_agb_bright10, _block_agb, block_se_agb = _accepted_fraction(
+            a_col_in_tile, u_agb, flux0_agb, f_lim_in_tile, width_dex, config,
+            weight_pix=weight_pix)
+        total_se_agb = density_agb * block_se_agb
+    out["AGB"] = (frac_agb, mc_agb, density_agb, frac_agb_bright3, frac_agb_bright10, total_se_agb)
     return out
 
 
@@ -540,11 +597,13 @@ def _draw_x(rng, p_x, n):
 
 def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_in_sl,
                           loaded_profile, flux0_yso, cloud_frac_sl, d_front, d_back,
-                          logsig_mean, logsig_std, giannini_ratios, width_dex, seed):
+                          logsig_mean, logsig_std, giannini_ratios, width_dex, seed,
+                          weight_pix, eta_r):
     """One sightline's YSO and H2S Monte Carlo draws, shared by every
     admitted pixel it parents: `(frac_yso, mc_yso, density_yso, frac_h2s,
     mc_h2s, frac_yso_bright3, frac_yso_bright10, frac_h2s_bright3,
-    frac_h2s_bright10)` (sec. 9's bright-end check, same draws). YSO (sec.
+    frac_h2s_bright10, total_se_yso, total_se_h2s)` (sec. 9's bright-end
+    check, same draws). YSO (sec.
     5.5): `flux0_yso` is the region's own fixed-seed draw of library
     templates by the population weight, IDENTICAL at every sightline
     (`_yso_template_pool`, computed once by the caller); only the
@@ -565,16 +624,30 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_i
     eps_ext` (sec. 5.6 "Sky density", the same young-star law density
     scaled by the region's knot rate and extraction fraction), computed
     by the caller from this same `density_yso`, not here.
-    `width_dex` is this sightline's own pixels' `W_DEX_PIX` (n_pix_in_sl, 8),
-    not one region-band constant."""
+    `width_dex` is `catalog.depth_grid`'s `W_DEX_PIX` (sec. 3.3): one
+    value per band for the region, broadcast to this sightline's own
+    pixels (n_pix_in_sl, 8), not a per-pixel fit.
+
+    `weight_pix` (n_pix_in_sl,) is this sightline's own pixels' coverage
+    times pixel area, the coefficient the caller sums a class's `density
+    * frac` by to build the region total; `total_se_yso`/`total_se_h2s`
+    are the resulting Monte Carlo standard error this ONE sightline draw
+    contributes to that total (`_accepted_fraction`'s `block_total_se`,
+    weighted by `density_yso` and, for H2S, `eta_r * eps_ext` also --
+    the region's own knot-driver convolution of the Herschel arm, a
+    deterministic rescaling applied by the caller after every
+    sightline's draw is in, changes H2S's mean level but not materially
+    the width of this shared draw's own noise, so it is not needed here)."""
     rng = np.random.RandomState(seed)
 
     p_x, _mo_x, _removed_frac = sample_cloud.sample_x(loaded_profile, sl_row, d_front, d_back)
-    u_yso = _draw_x(rng, p_x, N_MC)
-    frac_yso, mc_yso, frac_yso_bright3, frac_yso_bright10 = _accepted_fraction(
-        a_col_in_sl, u_yso, flux0_yso, f_lim_in_sl, width_dex, config)
     a_cloud_in_sl = a_col_in_sl * cloud_frac_sl
     density_yso = yso_module.law_count(config, region, a_cloud_in_sl, arm_in_sl)
+
+    u_yso = _draw_x(rng, p_x, N_MC)
+    frac_yso, mc_yso, frac_yso_bright3, frac_yso_bright10, _blk_yso, total_se_yso = _accepted_fraction(
+        a_col_in_sl, u_yso, flux0_yso, f_lim_in_sl, width_dex, config,
+        weight_pix=density_yso * weight_pix)
 
     log10_sigma = rng.normal(logsig_mean, logsig_std, size=N_MC)
     log10_f_ks = h2s_module.knot_ks_log10_flux(log10_sigma)
@@ -585,11 +658,13 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_i
         ratio_draw = table[rng.randint(0, table.size, size=N_MC)]
         flux0_h2s[:, BAND_KEYS.index(band)] = 10.0 ** (log10_f_ks + ratio_draw)
     u_h2s = _draw_x(rng, p_x, N_MC)
-    frac_h2s, mc_h2s, frac_h2s_bright3, frac_h2s_bright10 = _accepted_fraction(
-        a_col_in_sl, u_h2s, flux0_h2s, f_lim_in_sl, width_dex, config)
+    weight_h2s = density_yso * eta_r * density_module.EPS_EXT * weight_pix
+    frac_h2s, mc_h2s, frac_h2s_bright3, frac_h2s_bright10, _blk_h2s, total_se_h2s = _accepted_fraction(
+        a_col_in_sl, u_h2s, flux0_h2s, f_lim_in_sl, width_dex, config, weight_pix=weight_h2s)
 
     return (frac_yso, mc_yso, density_yso, frac_h2s, mc_h2s,
-            frac_yso_bright3, frac_yso_bright10, frac_h2s_bright3, frac_h2s_bright10)
+            frac_yso_bright3, frac_yso_bright10, frac_h2s_bright3, frac_h2s_bright10,
+            total_se_yso, total_se_h2s)
 
 
 def _gal_members(config, rng, n_mc):
@@ -690,9 +765,13 @@ def build_region(config, region):
     and every class's `N_CAT_*`/`SHARE_*` from its own Monte Carlo
     selection above (module docstring)."""
     with progress.Stage("bmstp.atlas", region) as st:
-        # the pixel's own marginalised limit and roll-off width the
-        # detection probability reads (sec. 6.2, sec. 3.3's "the depth
-        # grid"), not the region-band constants `fittp.sweep` uses.
+        # the detection probability (sec. 6.2, sec. 3.3's "the depth
+        # grid") reads the pixel's own marginalised limit
+        # (`F_LIM_50_PIX_MJY`, which does vary pixel to pixel) and the
+        # region's own marginalised roll-off width (`W_DEX_PIX`: one
+        # value per band for the whole region, stored at every admitted
+        # pixel) -- a second, different region-band fit from the one
+        # `fittp.sweep` uses.
         pix, f_lim, width_dex = _depth_grid(config, region)
         n_pix = pix.size
         coverage = _coverage(config, region, pix)
@@ -714,10 +793,18 @@ def build_region(config, region):
                                        if k.startswith("tile_"))
 
         # every admitted pixel now carries a tile (`_pixel_tile` fills the
-        # tile-less ones from their nside-256 parent, sec. 8); `usable`
-        # stays as the guard against a tile absent from this star product.
+        # tile-less ones from their nside-256 parent, sec. 8); a tile
+        # absent from this star product would otherwise leave that
+        # pixel's STAR/AGB/PAHC as a silent NaN that turns every
+        # SHARE_*/RATIO_* NaN for the whole region (sec. 8's total-count
+        # check), so it is checked here instead.
         usable = tile_of_pix >= 0
-        tiles_here = sorted(set(int(t) for t in tile_of_pix[usable]) & set(tile_ids_present))
+        missing_tile = usable & ~np.isin(tile_of_pix, np.asarray(tile_ids_present, dtype=np.int64))
+        if np.any(missing_tile):
+            bad = int(np.flatnonzero(missing_tile)[0])
+            raise ValueError("bmstp.atlas: pixel %d's tile %d is absent from the star "
+                              "population product %s" % (int(pix[bad]), int(tile_of_pix[bad]), star_path))
+        tiles_here = sorted(set(int(t) for t in tile_of_pix[usable]))
 
         # worker count is `root.cfg`'s own `[run] n_jobs` (CODING_RULES_BMSTP.md
         # rule 10a): the owner sets it to what the machine's memory allows.
@@ -727,33 +814,45 @@ def build_region(config, region):
         # once here rather than per tile.
         agb_pool = _agb_shell_pool(config)
 
+        # the region total's own Monte Carlo error (sec. 8), accumulated
+        # as a sum of independent-block variances -- the draw is shared
+        # within a tile/sightline/region, not per pixel (`_accepted_
+        # fraction`'s own docstring), so a total's error is the sum of
+        # each independent draw's own contribution's variance, never a
+        # sum over pixels.
+        total_var = 0.0
+
         def _one(tile_id):
             m = usable & (tile_of_pix == tile_id)
             return tile_id, m, _build_one_tile(
-                config, region, tile_id, pix[m], a_col[m], f_lim[m], width_dex[m], agb_pool)
+                config, region, tile_id, pix[m], a_col[m], f_lim[m], width_dex[m], agb_pool,
+                coverage[m])
 
         results = Parallel(n_jobs=n_jobs)(delayed(_one)(t) for t in tiles_here)
         for i, (tile_id, m, out) in enumerate(results):
             for cls in ("STAR", "AGB", "PAHC"):
-                frac, mc_error, density, frac_bright3, frac_bright10 = out[cls]
+                frac, mc_error, density, frac_bright3, frac_bright10, total_se = out[cls]
                 n_cat[cls][m] = density * frac
                 mc_err[cls][m] = mc_error
                 n_cat_bright3[cls][m] = density * frac_bright3
                 n_cat_bright10[cls][m] = density * frac_bright10
+                total_var += total_se ** 2
             st.tick(i + 1, len(tiles_here), "tiles")
 
         # GAL, sec. 5.4: one region-wide Monte Carlo sample (fixed seed,
         # not per tile -- GAL has no tile), evaluated at every admitted
         # pixel's own column and limits with the shared `_accepted_fraction`.
-        gal_rng = np.random.RandomState(MC_SEED)
+        gal_rng = np.random.RandomState(MC_SEED + _SEED_OFFSET_GAL)
         gal_flux, gal_u, density_gal = _gal_members(config, gal_rng, N_MC)
-        frac_gal, mc_gal, frac_gal_bright3, frac_gal_bright10 = _accepted_fraction(
+        frac_gal, mc_gal, frac_gal_bright3, frac_gal_bright10, _blk_gal, se_gal = _accepted_fraction(
             a_col, gal_u, gal_flux, f_lim, width_dex, config,
-            tick=lambda done, total: st.tick(done, total, "GAL pixel batches"))
+            tick=lambda done, total: st.tick(done, total, "GAL pixel batches"),
+            weight_pix=coverage * _HPX512_PIXEL_DEG2)
         n_cat["GAL"] = density_gal * frac_gal
         mc_err["GAL"] = mc_gal
         n_cat_bright3["GAL"] = density_gal * frac_gal_bright3
         n_cat_bright10["GAL"] = density_gal * frac_gal_bright10
+        total_var += (density_gal * se_gal) ** 2
 
         # YSO/H2S, sec. 5.5-5.6: grouped by the pixel's own nside-256
         # sightline (YSO's grain), one Monte Carlo draw per sightline
@@ -771,7 +870,8 @@ def build_region(config, region):
         # the population weight and the region's own shift kernel (sec.
         # 5.5 "Template weights"), shared by every sightline
         # of the region.
-        flux0_yso = _yso_template_pool(config, region, d_front, d_back, N_MC, MC_SEED + 50_000)
+        flux0_yso = _yso_template_pool(config, region, d_front, d_back, N_MC,
+                                        MC_SEED + _SEED_OFFSET_YSO_POOL)
         giannini_ratios = h2s_module._load_giannini_ratios(config)
         # H2S's brightness lognormal (sec. 5.6 "Marks") is P3's own
         # attribute (`bmstp.shapes.build_cloud`, sec. 4.1's shape grids):
@@ -782,6 +882,8 @@ def build_region(config, region):
         with h5py.File(p3_path, "r") as f:
             logsig_mean = float(f.attrs["LOGSIG_MEAN"])
             logsig_std = float(f.attrs["LOGSIG_STD"])
+            p3_sl_axis = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
+            on_grid_yso_p3 = np.asarray(f["ON_GRID_YSO"][:], dtype=np.float64)
 
         sl_axis = loaded_profile["hpx_pix_256"]
         order_sl = np.argsort(sl_axis)
@@ -789,25 +891,60 @@ def build_region(config, region):
         loc_sl = np.minimum(np.searchsorted(sl_axis[order_sl], sl_parent), sl_axis.size - 1)
         hit_sl = order_sl[loc_sl]
         has_sl = sl_axis[hit_sl] == sl_parent
-        sl_row_of_pix = np.where(has_sl, hit_sl, -1)
-        sls_here = sorted(set(int(r) for r in sl_row_of_pix[has_sl]))
+        if not np.all(has_sl):
+            bad = int(np.flatnonzero(~has_sl)[0])
+            raise ValueError("bmstp.atlas: pixel %d's nside-256 parent %d is absent from the "
+                              "cloud profile's sightline axis" % (int(pix[bad]), int(sl_parent[bad])))
+        sl_row_of_pix = hit_sl
+        sls_here = sorted(set(int(r) for r in sl_row_of_pix))
+
+        # every class's density is the retained density everywhere (sec.
+        # 4.1): P1 (`bmstp.density`) multiplies its own YSO law by
+        # `ON_GRID_YSO` (P3's per-sightline retention on the common
+        # depth axis); the atlas's own YSO density below is that SAME
+        # law with no retention (it needs the untouched intrinsic to
+        # weight H2S, sec. 5.6), so `CATALOGABLE_FRACTION_YSO`'s
+        # denominator applies `ON_GRID_YSO` here instead, to be
+        # normalised against the same retained density P1 reports as
+        # `DENSITY_YSO`.
+        loc_p3 = np.searchsorted(p3_sl_axis, sl_axis)
+        loc_p3 = np.minimum(loc_p3, p3_sl_axis.size - 1)
+        found_p3 = p3_sl_axis[loc_p3] == sl_axis
+        if not np.all(found_p3[sl_row_of_pix]):
+            bad = int(np.flatnonzero(~found_p3[sl_row_of_pix])[0])
+            raise ValueError("bmstp.atlas: sightline pixel %d is absent from P3's ON_GRID_YSO "
+                              "axis %s" % (int(sl_axis[sl_row_of_pix[bad]]), p3_path))
+        on_grid_yso_by_sl_row = on_grid_yso_p3[loc_p3]
+
+        # H2S, sec. 5.6 "Sky density": `A_H2S = L . eta_r . eps_ext`. `L` is
+        # the young-star law at the pixel's own column EXCEPT on the
+        # Herschel arm, where it is the region's convolved law map
+        # (`bmstp.knot_field.convolved_law`) averaged over the pixel's
+        # own area (item 3: the mean of L over the pixel, not a single
+        # nearest sample -- a pixel is much larger than the map's own
+        # downsampled grid); a Planck pixel, or a Herschel pixel the
+        # convolved map does not reach, keeps the law at its own column.
+        # Needed here, before the sightline draw, to weight each
+        # sightline's own contribution to H2S's total Monte Carlo error.
+        eta_r = density_module.ETA.get(region, density_module.ETA_ELSEWHERE)
 
         def _one_sl(sl_row):
             m = sl_row_of_pix == sl_row
             (f_y, e_y, d_y, f_h, e_h,
-             fb3_y, fb10_y, fb3_h, fb10_h) = _build_one_sightline(
+             fb3_y, fb10_y, fb3_h, fb10_h, se_y, se_h) = _build_one_sightline(
                 config, region, sl_row, a_col[m], arm[m], f_lim[m],
                 loaded_profile, flux0_yso, float(cloud_frac_by_sl[sl_row]), d_front, d_back,
                 logsig_mean, logsig_std, giannini_ratios, width_dex[m],
-                MC_SEED + 10_000 + sl_row)
-            return m, f_y, e_y, d_y, f_h, e_h, fb3_y, fb10_y, fb3_h, fb10_h
+                MC_SEED + _SEED_OFFSET_SIGHTLINE + sl_row,
+                coverage[m] * _HPX512_PIXEL_DEG2, eta_r)
+            return m, f_y, e_y, d_y, f_h, e_h, fb3_y, fb10_y, fb3_h, fb10_h, se_y, se_h
 
         frac_h2s_pix = np.full(n_pix, np.nan, dtype=np.float64)
         frac_h2s_bright3_pix = np.full(n_pix, np.nan, dtype=np.float64)
         frac_h2s_bright10_pix = np.full(n_pix, np.nan, dtype=np.float64)
         density_yso_pix = np.full(n_pix, np.nan, dtype=np.float64)
         results_sl = Parallel(n_jobs=n_jobs)(delayed(_one_sl)(r) for r in sls_here)
-        for i, (m, f_y, e_y, d_y, f_h, e_h, fb3_y, fb10_y, fb3_h, fb10_h) in enumerate(results_sl):
+        for i, (m, f_y, e_y, d_y, f_h, e_h, fb3_y, fb10_y, fb3_h, fb10_h, se_y, se_h) in enumerate(results_sl):
             n_cat["YSO"][m] = d_y * f_y
             mc_err["YSO"][m] = e_y
             mc_err["H2S"][m] = e_h
@@ -817,18 +954,14 @@ def build_region(config, region):
             n_cat_bright10["YSO"][m] = d_y * fb10_y
             frac_h2s_bright3_pix[m] = fb3_h
             frac_h2s_bright10_pix[m] = fb10_h
+            total_var += se_y ** 2 + se_h ** 2
             st.tick(i + 1, len(sls_here), "sightlines")
 
-        # H2S, sec. 5.6 "Sky density": `A_H2S = L . eta_r . eps_ext`. `L` is
-        # the young-star law at the pixel's own column (`density_yso_pix`
-        # above) EXCEPT on the Herschel arm, where it is the region's
-        # convolved law map (`bmstp.knot_field.convolved_law`) averaged
-        # over the pixel's own area (item 3: the mean of L over the
-        # pixel, not a single nearest sample -- a pixel is much larger
-        # than the map's own downsampled grid); a Planck pixel, or a
-        # Herschel pixel the convolved map does not reach, keeps the law
-        # at its own column.
-        eta_r = density_module.ETA.get(region, density_module.ETA_ELSEWHERE)
+        # this atlas's own INTRINSIC YSO density (before retention),
+        # multiplied by P3's own `ON_GRID_YSO` at the pixel's sightline:
+        # the SAME retained density P1 reports as `DENSITY_YSO`.
+        density_yso_retained_pix = density_yso_pix * on_grid_yso_by_sl_row[sl_row_of_pix]
+
         law_map, law_wcs, knot_meta = knot_field.convolved_law(config, region)
         l_of_pix = density_yso_pix.copy()
         herschel_pix = arm == yso_module.PROVENANCE_HERSCHEL
@@ -869,13 +1002,14 @@ def build_region(config, region):
 
         # the YSO population's catalogable fraction (spec sec 5.5, sec
         # 8): the region's own MC-and-detection-weighted accepted share
-        # of the intrinsic young-star density, `Sigma(n_cat[YSO] *
-        # coverage) / Sigma(density_yso_pix * coverage)` -- the same
-        # coverage weighting the total-count check above applies, but
-        # normalised against the class's own intrinsic density rather
-        # than the survey's observed source count (never the library's
-        # eight-band density, sec 1.4).
-        density_yso_total = float(np.sum(density_yso_pix * coverage) * _HPX512_PIXEL_DEG2)
+        # of the RETAINED young-star density, `Sigma(n_cat[YSO] *
+        # coverage) / Sigma(density_yso_retained_pix * coverage)` -- the
+        # same coverage weighting the total-count check above applies,
+        # normalised against the same retained density P1 reports as
+        # `DENSITY_YSO` (`ON_GRID_YSO` applied, sec. 4.1), not the raw
+        # law with no retention, and never the library's eight-band
+        # density (sec 1.4).
+        density_yso_total = float(np.sum(density_yso_retained_pix * coverage) * _HPX512_PIXEL_DEG2)
         n_cat_yso_total = float(np.sum(n_cat["YSO"] * coverage) * _HPX512_PIXEL_DEG2)
         catalogable_fraction_yso = (n_cat_yso_total / density_yso_total
                                      if density_yso_total > 0 else float("nan"))
@@ -920,6 +1054,18 @@ def build_region(config, region):
         print(f"bmstp.atlas {region}: RATIO_H2S before={ratio_h2s_before:.6g} "
               f"after={ratio['H2S']:.6g} (sec. 5.6's convolution vs. the law at the pixel's own column)")
 
+        # the region total's own Monte Carlo error (sec. 8): every class's
+        # draw is shared by a whole tile, sightline, or the region (GAL),
+        # not drawn per pixel, so the correct error on `TOTAL_PREDICTED`/
+        # `RATIO_BUILT` is the sum of each of those independent draws'
+        # own contribution's variance (`total_var`, accumulated above as
+        # each block finishes), never a sum over pixels.
+        total_predicted_se = float(np.sqrt(total_var))
+        ratio_built_se = total_predicted_se / n_source if n_source else float("nan")
+        print(f"bmstp.atlas {region}: TOTAL_PREDICTED={total_predicted_built:.6g} "
+              f"+/- {total_predicted_se:.6g} (RATIO_BUILT {ratio_built:.6g} +/- {ratio_built_se:.6g}), "
+              f"the shared-draw Monte Carlo error on the region total")
+
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with h5py.File(path, "w") as f:
             f.attrs["GRANULE"] = "hpx512"
@@ -932,6 +1078,13 @@ def build_region(config, region):
             for c in built:
                 f.attrs[f"RATIO_{c}"] = ratio[c]
             f.attrs["RATIO_BUILT"] = ratio_built
+            # sec. 8's total-count check: the shared-draw Monte Carlo
+            # error on the two numbers above, summed as independent
+            # per-tile/per-sightline/region-wide block variances, not
+            # read off any per-pixel `mc_error` (those do not describe a
+            # region total, module docstring).
+            f.attrs["TOTAL_PREDICTED_MC_ERROR"] = total_predicted_se
+            f.attrs["RATIO_BUILT_MC_ERROR"] = ratio_built_se
             # the YSO population's catalogable fraction (sec 5.5, sec 8):
             # accepted / intrinsic density, never the survey's observed
             # source count.
@@ -958,6 +1111,10 @@ def build_region(config, region):
             f.create_dataset("N_OBS_BRIGHT10", data=n_obs_bright10.astype(np.int32))
 
         def _max_mc_err(c):
+            # a single pixel's own standard error (this pixel's share of
+            # its tile/sightline/region's one shared draw), not a region
+            # total's error -- `total_predicted_se`/`ratio_built_se`
+            # above are that.
             frac_c = n_cat[c] / (built_total + 1e-300)
             return float(np.nanmax(mc_err[c][frac_c > 0.1])) if np.any(frac_c > 0.1) else 0.0
 
@@ -971,6 +1128,7 @@ def build_region(config, region):
                 ratio_gal=ratio["GAL"], ratio_yso=ratio["YSO"], ratio_h2s=ratio["H2S"],
                 ratio_built=ratio_built, density_gal_deg2=density_gal,
                 mc_error_max_where_frac_gt_0p1=max_mc_err,
+                total_predicted_mc_error=total_predicted_se, ratio_built_mc_error=ratio_built_se,
                 ratio_bright3=ratio_bright3_total, ratio_bright10=ratio_bright10_total,
                 n_obs_bright3=int(sum_n_obs_bright3), n_obs_bright10=int(sum_n_obs_bright10))
     return path
