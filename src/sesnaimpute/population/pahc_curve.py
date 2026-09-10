@@ -6,10 +6,20 @@ probability `P(q)`, `q = F_lim,8(s) / F_8,pred(s)` -- the source's own 8
 micron completeness limit over its predicted photospheric 8 micron flux,
 so `q` is large where the local field is faint relative to the star (a
 nebulous, shallow position) and small where it is bright. `P(q)` is
-measured once, survey-wide, directly from SESNA photometry: for every
-source with measured 3.6, 4.5 and 8.0 micron photometry, an object counts
-toward the curve if its own 8 micron flux exceeds its predicted
-photospheric 8 micron flux by more than 3 sigma.
+measured once, survey-wide, directly from SESNA photometry, over every
+source with measured (`ORIGIN_FNU == 1`) 3.6 and 4.5 micron photometry --
+the denominator the curve is later applied against (the atlas partitions
+every such star into STAR or PAHC). A source counts toward the numerator
+only if it additionally has a measured 8 micron flux that exceeds its
+predicted photospheric 8 micron flux by more than 3 sigma; a source with
+no 8 micron measurement (98-99% of the faint-end population, where the
+8 micron limit is close to the survey's 4.5 micron one) still contributes
+its own `q` to the denominator and can never register an excess, since an
+unmeasured flux cannot exceed anything. Restricting the denominator to
+the rarer 8-micron-detected sources, as an earlier build did, measures
+`P(q)` on a population increasingly unlike the one it is applied to as
+`q` grows, and overstates the contaminated fraction there by roughly the
+inverse of the 8 micron detection rate.
 
 Two pieces are external to SESNA, both from the region's own TRILEGAL
 retained field-star population (`population.field_stars`), which carries
@@ -172,11 +182,15 @@ MIN_PLATEAU_BIN_COUNT = 25
 #: value it holds beyond the last well-measured bin.
 PLATEAU_LOG10_Q_MIN = np.log10(15.0)
 
-#: SESNA's own eligibility test for this measurement (SPEC_PRIORS.md
-#: section 4, "the 1.64 M sources with 3.6, 4.5 and 8.0 micron
-#: photometry"): a measured (`ORIGIN_FNU == 1`), finite, positive flux in
-#: all three of I1, I2, I4.
-ELIGIBLE_BAND_IDX = (IDX_I1, IDX_I2, IDX_I4)
+#: The curve's own denominator, the population it is later applied to
+#: (module docstring): a measured (`ORIGIN_FNU == 1`), finite, positive
+#: flux in I1 and I2. The 4.5 micron excess test, the shelf, both
+#: residual widths and `Q_MIN` are all defined on this same population.
+ELIGIBLE_BAND_IDX = (IDX_I1, IDX_I2)
+
+#: The numerator's own extra requirement (module docstring): a measured,
+#: finite, positive flux in I4 as well, tested in `region_measurement`.
+EXCESS_BAND_IDX = IDX_I4
 
 #: The robust, Gaussian-equivalent scaling of the median absolute
 #: deviation (`1 / Phi^-1(0.75)`, the standard estimator) -- turns the
@@ -324,13 +338,18 @@ def _reddened(f0, a_col, kappa):
 
 
 def region_measurement(config, region, colour_knots, colour45_median):
-    """One region's eligible sources (SPEC_PRIORS.md section 4): `q` and
-    the six arrays the survey-wide excess tests are built from --
-    `(q, f2, f2_pred, f4, f4_pred, sigma2, sigma4)`, `(m,)` each, `m` the
+    """One region's eligible sources (module docstring: every I1+I2
+    measured source, the curve's own denominator): `q` and the seven
+    arrays the survey-wide excess tests are built from -- `(q, f2,
+    f2_pred, f4, f4_pred, sigma2, sigma4, have_8um)`, `(m,)` each, `m` the
     region's own eligible count -- vectorised over the region's sources,
-    no Python loop. The excess flags themselves are not computed here:
-    their sigma is a survey-wide constant (module docstring) not known
-    until every region's residuals are pooled.
+    no Python loop. `have_8um` flags the subset with a measured I4 flux as
+    well (`EXCESS_BAND_IDX`); `f4`/`sigma4` hold the catalogue's own
+    substitute (a completeness-limit flux, `catalog.curated`'s own
+    docstring) where it is False, read by no excess test. The excess
+    flags themselves are not computed here: their sigma is a survey-wide
+    constant (module docstring) not known until every region's residuals
+    are pooled.
     """
     src_path = config_module.product_path(
         config, "catalog", "sesna", "sources", "source", region=region)
@@ -344,13 +363,18 @@ def region_measurement(config, region, colour_knots, colour45_median):
         origin = f["ORIGIN_FNU"][:]
 
     measured = np.all(origin[:, ELIGIBLE_BAND_IDX] == 1, axis=1)
-    flux3 = fnu[:, ELIGIBLE_BAND_IDX]
-    finite = np.all(np.isfinite(flux3) & (flux3 > 0), axis=1)
+    flux2 = fnu[:, ELIGIBLE_BAND_IDX]
+    finite = np.all(np.isfinite(flux2) & (flux2 > 0), axis=1)
     eligible = measured & finite
     n_eligible = int(eligible.sum())
     empty = np.empty(0, dtype=np.float64)
+    empty_bool = np.empty(0, dtype=bool)
     if n_eligible == 0:
-        return empty, empty, empty, empty, empty, empty, empty
+        return empty, empty, empty, empty, empty, empty, empty, empty_bool
+
+    have_8um_all = ((origin[:, EXCESS_BAND_IDX] == 1)
+                    & np.isfinite(fnu[:, EXCESS_BAND_IDX]) & (fnu[:, EXCESS_BAND_IDX] > 0))
+    have_8um = have_8um_all[eligible]
 
     f1 = fnu[eligible, IDX_I1]
     f2 = fnu[eligible, IDX_I2]
@@ -393,10 +417,14 @@ def region_measurement(config, region, colour_knots, colour45_median):
     f2_pred_0 = _predicted_flux(f1_0, colour45_median, zp1, zp2)
     f2_pred = _reddened(f2_pred_0, a_col, kappa2)
 
+    # q reads the predicted photospheric 8 micron flux, never the
+    # observed one (module docstring; the atlas factor tables read it the
+    # same way), so every eligible source has a q whether or not it has
+    # an 8 micron measurement
     f_lim8 = limits_module.limits(config, region)[eligible, IDX_I4]
     q = f_lim8 / f4_pred
 
-    return q, f2, f2_pred, f4, f4_pred, sigma2, sigma4
+    return q, f2, f2_pred, f4, f4_pred, sigma2, sigma4, have_8um
 
 
 # ---------------------------------------------------------------------------
@@ -617,36 +645,48 @@ def build(config, regions=None):
     f4_pred = np.concatenate([r[4] for r in results]) if results else np.empty(0)
     sigma2 = np.concatenate([r[5] for r in results]) if results else np.empty(0)
     sigma4 = np.concatenate([r[6] for r in results]) if results else np.empty(0)
+    have_8um = np.concatenate([r[7] for r in results]) if results else np.empty(0, dtype=bool)
     region_idx = np.concatenate([
         np.full(r[0].size, i, dtype=np.int64) for i, r in enumerate(results)]) if results else np.empty(0, dtype=np.int64)
     n_eligible_total = q.size
-    print(f"pahc_curve: {n_eligible_total} eligible sources "
-          f"(measured I1, I2, I4 in {len(region_names)} regions)", flush=True)
+    n_have_8um = int(have_8um.sum())
+    print(f"pahc_curve: {n_eligible_total} eligible sources (measured I1, I2 in "
+          f"{len(region_names)} regions), {n_have_8um} ({n_have_8um / max(n_eligible_total, 1):.4%}) "
+          f"also measured I4", flush=True)
 
     # the survey-wide relation width and the excess flags it feeds
     # (module docstring, "Sigma on each excess test"): the shelf that
     # defines the width is itself the 4.5 micron test's own no-excess
     # subsample, so the width is measured twice -- once with no 4.5
     # micron cut, to get a first sigma for that test; once more on the
-    # cut shelf, shipped
+    # cut shelf, shipped. The 4.5 micron test and its own shelf/width need
+    # no 8 micron measurement and so run over the full eligible
+    # population (`valid`); the 8 micron width and `excess8` can only be
+    # measured where an 8 micron flux exists (`valid & have_8um`) -- the
+    # same population, restricted by what a residual needs to exist at
+    # all, not by a further choice.
     valid = np.isfinite(q) & (q > 0) & np.isfinite(f2_pred) & (f2_pred > 0) & np.isfinite(f4_pred) & (f4_pred > 0)
-    resid48 = np.where(valid, mag_residual(f4, f4_pred), np.nan)
+    valid8 = valid & have_8um
+    resid48 = np.where(valid8, mag_residual(f4, f4_pred), np.nan)
     resid45 = np.where(valid, mag_residual(f2, f2_pred), np.nan)
     shelf_q = valid & (q >= FLOOR_Q_LO) & (q <= FLOOR_Q_HI)
+    shelf_q_8 = shelf_q & have_8um
 
-    width48_pass0 = robust_width_mag(resid48, shelf_q)
+    width48_pass0 = robust_width_mag(resid48, shelf_q_8)
     width45_pass0 = robust_width_mag(resid45, shelf_q)
     excess45_pass0 = excess_flags(f2, f2_pred, sigma2, width45_pass0, valid)
 
     shelf_final = shelf_q & ~excess45_pass0
-    width48 = robust_width_mag(resid48, shelf_final)
+    width48 = robust_width_mag(resid48, shelf_final & have_8um)
     width45 = robust_width_mag(resid45, shelf_final)
     excess45 = excess_flags(f2, f2_pred, sigma2, width45, valid)
-    excess8 = excess_flags(f4, f4_pred, sigma4, width48, valid)
+    excess8 = excess_flags(f4, f4_pred, sigma4, width48, valid8)
 
-    print(f"pahc_curve: residual width pass 0 (no 4.5um cut, n={int(shelf_q.sum())}) "
+    print(f"pahc_curve: residual width pass 0 (no 4.5um cut, n={int(shelf_q.sum())}, "
+          f"n_8um={int(shelf_q_8.sum())}) "
           f"[4.5]-[8.0]={width48_pass0:.4f} [3.6]-[4.5]={width45_pass0:.4f} mag; "
-          f"pass 1 (4.5um cut applied, shipped, n={int(shelf_final.sum())}) "
+          f"pass 1 (4.5um cut applied, shipped, n={int(shelf_final.sum())}, "
+          f"n_8um={int((shelf_final & have_8um).sum())}) "
           f"[4.5]-[8.0]={width48:.4f} [3.6]-[4.5]={width45:.4f} mag", flush=True)
 
     curve = build_curve(q, excess8, excess45, region_idx, len(region_names))
