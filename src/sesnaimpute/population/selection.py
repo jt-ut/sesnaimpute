@@ -130,10 +130,10 @@ def law_dense_weight(a):
     hybrid law, 0 at and below `LAW_RAMP_LO`, 1 at and above
     `LAW_RAMP_HI`, evaluated in log column (SPEC_PRIORS.md 1.3).
     """
-    a = np.asarray(a, dtype=float)
-    # a == 0 is the ruled Z = 0 case (callable.py): log(0) = -inf, clipped
-    # to 0.0 two lines down, so let it through quietly instead of the
-    # spurious "divide by zero" RuntimeWarning.
+    a = np.maximum(np.asarray(a, dtype=float), 0.0)
+    # An extinction at or below zero (the ruled Z = 0 case, or an
+    # unclamped fitted a_hat below zero) is the diffuse law: log(0) = -inf
+    # clips to weight 0 two lines down, so let it through quietly.
     with np.errstate(divide="ignore"):
         x = np.log(a / LAW_RAMP_LO) / np.log(LAW_RAMP_HI / LAW_RAMP_LO)
     x = np.clip(x, 0.0, 1.0)
