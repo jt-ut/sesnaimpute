@@ -11,8 +11,9 @@ templates in them -- never the library's density in eight-band SED space
 `briefs/reports/W29_review.md`, `briefs/W31.md`). sps/pahc `type` divide
 by nothing (a matched-star count is already a weight per template); agb
 `tau` and yso `population` divide by a 1-D histogram of the library's own
-templates in the constrained quantity (tau by chemistry; log10 stellar
-mass), bins wide enough to hold the floor count, linearly interpolated;
+templates in the constrained quantity (tau by chemistry; `log10
+f_ref,4.5,theta`, W54), bins wide enough to hold the floor count, linearly
+interpolated;
 galz `colour` divides by a Gaussian KDE of the library's own templates in
 colour, the same bandwidth as the galaxy KDE.
 
@@ -26,6 +27,14 @@ is the template's offset onto the read axis, `log10 f_ref,4.5,theta`
 (floored at the register's own `FLOOR_LINEAR` before the log, sec 4.1,
 W24) for every library except h2shock, whose own line-brightness offset
 is unchanged.
+
+yso's `population` factor divides by a 1-D histogram of the library's own
+templates in the constrained quantity `log10 f_ref,4.5,theta` (`c_theta`),
+not `log10` stellar mass (W54, owner's ruling 2026-09-09): a template's
+4.5 micron flux is a disc-and-envelope quantity the IMF over photospheric
+mass does not constrain, so the numerator is Dunham et al. 2015's own
+census density in the same quantity, not the IMF (sec 1.4's "which
+quantities are constrained is set by the data, not by choice").
 
 Survey products (galz, h2shock) are built once; region products (yso, sps,
 agb, pahc) once per region named on the command line. PAHC is regional
@@ -61,11 +70,15 @@ from sesnaimpute.population import star_population
 # constants block -- every number cited
 # ---------------------------------------------------------------------------
 
-#: Chabrier (2003, PASP 115, 763, eq. 17-18) system IMF: lognormal in
-#: log10 M below 1 Msun, power law above (spec sec 5.5, sec 10 item 1).
-CHABRIER_LOG_MC = np.log10(0.2)     # dex, the lognormal centre, Msun
-CHABRIER_SIGMA_DEX = 0.55           # dex, the lognormal width below 1 Msun
-CHABRIER_SLOPE = 1.35               # dN/dlog M ~ M^-CHABRIER_SLOPE above 1 Msun
+#: Dunham et al. 2015 (ApJS 220, 11) Gould Belt YSO catalogue, the census
+#: of the excess-selected population the YSO class counts (W54, owner's
+#: ruling 2026-09-09): the source of statement (i)'s numerator,
+#: `p_census(log10 F_ref)`, replacing the Chabrier IMF over stellar mass
+#: (a disc-and-envelope flux the IMF over photospheric mass does not
+#: constrain, spec sec 1.4/5.5 "Template weights"). The view built at
+#: W53 (`sky.derived.dunham_yso`): area/source/quantity/granule for
+#: `config_module.product_path`.
+DUNHAM2015_CENSUS_PATH_ARGS = ("sky/derived", "dunham2015", "yso", "survey")
 
 #: A normalised factor's value in an empty cell, and the floor every
 #: normalised template-weight factor is renormalised against (spec sec 2,
@@ -102,14 +115,16 @@ YSO_CENSUS_GROUPS = (({"C0", "CI"}, YSO_PROTOSTAR_SHARE),
                       ({"CII", "TD"}, YSO_DISK_SHARE))
 
 #: The floor every 1-D library-density histogram (agb `tau` by chemistry,
-#: yso `population`'s log10 mass) holds per bin before it is trusted as a
-#: density (spec sec 1.4: "bins wide enough to hold >= 20 templates" /
-#: "floored at 20 templates").
+#: yso `population`'s `log10 f_ref,4.5,theta`) holds per bin before it is
+#: trusted as a density (spec sec 1.4: "bins wide enough to hold >= 20
+#: templates" / "floored at 20 templates").
 LIBRARY_DENSITY_MIN_COUNT = 20
 
-#: yso `population`'s mass histogram's nominal bin width (spec sec 1.4:
-#: "bins of 0.1 dex"), coarsened where a bin falls short of the floor.
-YSO_MASS_BIN_DEX = 0.1
+#: yso `population`'s census and library brightness histograms' nominal
+#: bin width, the grid's own `LOG10_F45_EDGES` spacing (spec sec 1.4/5.5,
+#: W54: "binned in 0.1 dex on the grid's own brightness axis"),
+#: coarsened for the library side where a bin falls short of the floor.
+YSO_F45_BIN_DEX = 0.1
 
 #: galz `colour`'s template KDE bandwidth, the same as the galaxy KDE's
 #: own (spec sec 5.4: "the colour error, ~0.04 dex"; sec 1.4).
@@ -250,11 +265,20 @@ def _floor_normalised(w):
     maximum and renormalised (spec sec 2, "the floor"): the fraction of
     cells x templates that sat at zero before the floor is also
     returned, float64 throughout (the cast to float32 is the writer's
-    job, spec sec 9's bar applies here)."""
+    job, spec sec 9's bar applies here). A cell no template reaches at
+    all (`cell_max <= 0`, possible since W54: a swath of the census's own
+    zero bins can leave a grid cell with no placed template) is set
+    uniform, the same "empty cells" convention `_normalise_over_theta`
+    already applies (spec sec 5.1)."""
     cell_max = w.max(axis=0, keepdims=True)
     frac_zero = float(np.mean(w <= 0.0))
+    empty = (cell_max[0] <= 0.0)
     floored = np.maximum(w, FACTOR_FLOOR * cell_max)
-    return floored / floored.sum(axis=0, keepdims=True), frac_zero
+    out = np.divide(floored, floored.sum(axis=0, keepdims=True),
+                     out=np.zeros_like(floored), where=~empty[None, :])
+    if empty.any():
+        out[:, empty] = 1.0 / w.shape[0]
+    return out, frac_zero
 
 
 def _floor_probability(p):
@@ -338,30 +362,46 @@ def _read_yso_subgrid_inclination(config, subdir):
     return names, incl_deg
 
 
-def _chabrier_dn_dlogm(m_star):
-    """`dN/dlog10 M` (unnormalised: the per-template weight only needs to
-    be proportional, since every consumer normalises over templates,
-    sec 5.5, sec 10 item 1): the Chabrier 2003 lognormal below 1 Msun,
-    continuous onto the `M^-CHABRIER_SLOPE` power law above it."""
-    log_m = np.log10(m_star)
-    lognormal = np.exp(-(log_m - CHABRIER_LOG_MC) ** 2 / (2.0 * CHABRIER_SIGMA_DEX ** 2))
-    c_join = np.exp(-(0.0 - CHABRIER_LOG_MC) ** 2 / (2.0 * CHABRIER_SIGMA_DEX ** 2))
-    powerlaw = c_join * np.power(m_star, -CHABRIER_SLOPE)
-    return np.where(m_star <= 1.0, lognormal, powerlaw)
+def _dunham_census_brightness_histogram(config):
+    """Dunham et al. 2015's own brightness marginal, `p_census(log10
+    F_ref)` (spec sec 5.5 "Template weights", W54, owner's ruling
+    2026-09-09): the view's own `LOG10_F45_REF` (already the dereddened
+    4.5 micron flux at 1 kpc, the register's own convention, W53 -- no
+    unit conversion against `C_THETA` below) over every one of the
+    catalogue's 2,966 rows with a finite 4.5 micron flux (every row is an
+    excess-selected YSO, the law's own definition; no class cut), binned
+    on the grid's own `LOG10_F45_EDGES` (110 cells of `YSO_F45_BIN_DEX`)
+    and normalised to sum 1. Returns `(p_census, n_finite)`."""
+    path = config_module.product_path(config, *DUNHAM2015_CENSUS_PATH_ARGS)
+    with h5py.File(path, "r") as f:
+        log10_f45_ref = f["LOG10_F45_REF"][:].astype(np.float64)
+    finite = np.isfinite(log10_f45_ref)
+    counts, _ = np.histogram(log10_f45_ref[finite], bins=grid.LOG10_F45_EDGES)
+    n_finite = int(finite.sum())
+    p_census = counts.astype(np.float64) / n_finite if n_finite > 0 else counts.astype(np.float64)
+    return p_census, n_finite
 
 
 def yso_population_weight(config):
     """The YSO `population` weight `w_theta` (spec sec 5.5 "Template
-    weights", owner's ruling 2026-09-09): three population statements and
-    one division, shared verbatim by `build_yso` below,
+    weights", W54, owner's ruling 2026-09-09): three population
+    statements and one division, shared verbatim by `build_yso` below,
     `sample_cloud.sample_f45` and `bmstp.atlas._yso_register` -- called by
-    all three rather than re-derived, so the class census and the mass
-    density live in exactly one place. (i) The Chabrier 2003 IMF over
-    each template's own stellar mass, divided by the library's density of
-    templates in log10 M (`_fixed_width_binned_density`, 0.1 dex bins
-    floored at `LIBRARY_DENSITY_MIN_COUNT`, never `RHO_KDE1`). (ii) The
-    viewing angle, uniform in cos i (the existing sin i factor). (iii) The
-    evolutionary-class census: Class 0 + Class I together carry
+    all three rather than re-derived, so the class census and the
+    brightness density live in exactly one place. (i) Dunham et al.
+    2015's own census density at each template's `log10 f_ref,4.5,theta`
+    (`C_THETA`, floored as `sample_cloud.sample_f45` floors it),
+    `_dunham_census_brightness_histogram`'s per-cell value -- zero where
+    the census does not populate the cell, the census being complete
+    there -- divided by the library's density of templates in the SAME
+    quantity (`_fixed_width_binned_density`, `YSO_F45_BIN_DEX` bins
+    floored at `LIBRARY_DENSITY_MIN_COUNT`, Class III templates excluded,
+    never `RHO_KDE1`): a disc-and-envelope flux the IMF over photospheric
+    mass does not constrain, so the IMF-over-mass statement this replaces
+    (`population.yso_mass` is no longer read here; its product and stage
+    stay in place for sec 3.5's mass table and the protostar check).
+    (ii) The viewing angle, uniform in cos i (the existing sin i factor).
+    (iii) The evolutionary-class census: Class 0 + Class I together carry
     `YSO_PROTOSTAR_SHARE`, Class II + transition disk together
     `YSO_DISK_SHARE` (Dunham et al. 2014), Class III none; the split
     within a pair is the templates' own (i)x(ii) weight. `Sigma w_theta`
@@ -370,20 +410,7 @@ def yso_population_weight(config):
     reg = _read_register(config, "yso")
     names, subclass = reg["names"], reg["subclass"]
     n_model = names.size
-
-    mass_path = config_module.product_path(config, "population", "yso", "mass", "survey")
-    if not os.path.isfile(mass_path):
-        raise FileNotFoundError(
-            f"template_weights.yso_population_weight: missing {mass_path}; run "
-            "sesnaimpute.population.yso_mass first")
-    with h5py.File(mass_path, "r") as f:
-        mass_names = np.char.decode(f["MODEL_NAME"][:].astype("S"), "utf-8")
-        m_star = f["M_STAR"][:].astype(np.float64)
-    n_matched_mass = int(np.sum(mass_names == names)) if mass_names.size == n_model else 0
-    if n_matched_mass != n_model:
-        raise ValueError(
-            f"template_weights.yso_population_weight: mass table join "
-            f"n_matched={n_matched_mass} != n_register={n_model}")
+    c_theta = _c_theta(reg)  # log10 f_ref,4.5,theta, floored (sec 4.1)
 
     incl_names, incl_deg = [], []
     for subdir, _label in YSO_SUBGRIDS:
@@ -398,11 +425,24 @@ def yso_population_weight(config):
             f"template_weights.yso_population_weight: inclination join "
             f"n_matched={n_matched_incl} != n_register={n_model}")
 
-    psi = _chabrier_dn_dlogm(m_star)                          # imf: dN/dlog10 M, Chabrier 2003
     incl_raw = np.sin(np.radians(incl_deg))                    # uniform in cos i (spec sec 5.5)
-    n_mass = _fixed_width_binned_density(np.log10(m_star), YSO_MASS_BIN_DEX,
-                                          LIBRARY_DENSITY_MIN_COUNT)
-    w_pre_census = psi * incl_raw / n_mass                     # (i) x (ii), sec 1.4's division
+
+    # (i) the census density over the constrained quantity, log10 F_ref
+    # (spec sec 5.5 "Template weights", W54): the library's density is
+    # measured on the population templates only (Class III excluded, a
+    # bare photosphere is not in the YSO population, spec sec 5.5).
+    p_census, _n_census = _dunham_census_brightness_histogram(config)
+    bin_idx = np.digitize(c_theta, grid.LOG10_F45_EDGES) - 1
+    in_range = (bin_idx >= 0) & (bin_idx < p_census.size)
+    p_at_theta = np.zeros(n_model, dtype=np.float64)
+    p_at_theta[in_range] = p_census[np.clip(bin_idx[in_range], 0, p_census.size - 1)]
+
+    not_ciii = subclass != "CIII"
+    n_lib_not_ciii = _fixed_width_binned_density(c_theta[not_ciii], YSO_F45_BIN_DEX,
+                                                  LIBRARY_DENSITY_MIN_COUNT)
+    w_pre_census = np.zeros(n_model, dtype=np.float64)
+    w_pre_census[not_ciii] = (p_at_theta[not_ciii] * incl_raw[not_ciii]
+                               / n_lib_not_ciii)                # (i) x (ii), sec 1.4's division
 
     # (iii) the evolutionary-class census: within each pair the split is
     # w_pre_census's own share; Class III's templates are left at zero
@@ -502,9 +542,9 @@ def build_yso(config, region):
 
         factors = {
             "population": (population_w, c_theta, "", True,
-                            "population.yso_mass Chabrier 2003; yso sub-grid "
-                            "parameters.fits inclination; Dunham et al. 2014 class census; "
-                            "sample_cloud.cloud_interval_pc "
+                            "sky/derived/dunham2015/yso_dunham2015_survey.hdf5 LOG10_F45_REF "
+                            "census; yso sub-grid parameters.fits inclination; "
+                            "Dunham et al. 2014 class census; sample_cloud.cloud_interval_pc "
                             f"placement at d_r={r.d_r_pc:.1f} pc"),
         }
         path = _write_library(config, "yso", "region", names, c_theta, log10_f45_centers, factors,
