@@ -26,16 +26,20 @@ the colour mapping, and so the pixels, match the prior page's exactly).
 Row 2, the class share: for each class and grid cell,
 `S_C(x, F) = A_C(s) h_C(x, F) f_C(F; s) / Sum_C' A_C'(s) h_C'(x, F) f_C'(F; s)`
 (sec. 1.1's product the fitter actually compares between classes at a
-source's own depth and brightness, sec. 1.4's template weights), on a
-LINEAR 0-1 colour scale, cells masked blank where every class's own
-SHAPE sits at its stored floor there (`h_C(x, F) <= bmstp.grid.FLOOR *
-max(h_C)` for every class in the sum, sec. 2's floor, 1e-6 of the
-class's own peak) -- a total-sized mask never fires, since GAL's own
-`A_C(s)` is the largest of the six and its floored shape is not
-negligible next to the grid's overall maximum, so it would read as
-GAL share 1 everywhere no other class has real density; masking on the
-shape's own floor is what "at least one class has real density here"
-means. `f_C` is 1 for every class whose weight-table factors
+source's own depth and brightness, sec. 1.4's template weights), computed
+in EVERY cell, floors included, on a LINEAR 0-1 colour scale: the drawn
+quantity is this share SMOOTHED by the evidence behind its own cell's
+winner (owner's ruling 2026-09-10) -- the class with the largest `S_C`
+there carries `N` effective members in that cell (`bmstp.grid.n_eff`'s
+Kish count, read off the shape product's own `N_EFF_<C>` dataset beside
+the grid it was built from, GAL's `n_eff_analytic` giving +inf on its own
+support), and every class's share is replaced by the smoothed share
+`S_smooth_C = (N . S_C + 1/6) / (N + 1)`, one pseudo-member spread evenly
+over the six classes: a cell with no member behind its winner draws flat
+at one sixth for every class, a cell with ten members' worth of evidence
+reads within a tenth of a member's worth of the raw share, and GAL's
+infinite-evidence cells draw the share as is -- a count of evidence
+standing in for the floor test, never a threshold or a cut. `f_C` is 1 for every class whose weight-table factors
 are all normalised over theta (GAL's `colour`, YSO's `population`, AGB's
 `tau`, H2S's `uniform` sec 1.4: `Sum_theta pi_C(theta, F) = 1` at every F
 by construction, so multiplying it in and summing over theta is exactly 1)
@@ -48,8 +52,8 @@ already the sec. 1.4 axis, `Sum_theta pi_C(theta, F) = 1` at every F) and
 `P` read exactly as `fittp.prior_reader._factor_ln` reads it, `arg =
 b_star + C_F + D_PAHC(s)` with `b_star = F - C_THETA[theta]` (sec. 2's
 `log10 F_4.5 = log10 Bhat + C_THETA` line, solved for `log10 Bhat` at the
-query brightness `F`) -- `bmstp.template_weights._read_pahc_curve`/
-`_p_at_neg_log10_q`, imported not re-derived. H2S's own `f_C` is 1 (its
+query brightness `F`) -- `population.pahc_curve.read`, the same accessor
+`template_weights._pahc_contrast_row` reads, imported not re-derived. H2S's own `f_C` is 1 (its
 `uniform` factor is normalised over theta, sec 5.6), the same STAR/PAHC
 carve-out above does not apply to it, so it is included in row 2's
 denominator sum like every other class
@@ -74,6 +78,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.fittp import prior_reader
 from sesnaimpute.bmstp import grid
 from sesnaimpute.bmstp import template_weights
+from sesnaimpute.population import pahc_curve
 
 PAGE_W_IN, PAGE_H_IN = 16.0, 9.0
 
@@ -156,6 +161,40 @@ def _on_grid_gal(config):
         return float(f.attrs["ON_GRID_GAL"])
 
 
+def _n_eff_star(config, region):
+    """`(N_EFF_STAR, N_EFF_AGB)` per tile, read off the same P2 file
+    `_on_grid_star` already opens (W66e) -- PAHC reads STAR's own (sec.
+    5.3 "Grain")."""
+    path = config_module.product_path(config, "bmstp", "shape", "star", "tile", region=region)
+    with h5py.File(path, "r") as f:
+        return f["N_EFF_STAR"][:].astype(np.float64), f["N_EFF_AGB"][:].astype(np.float64)
+
+
+def _n_eff_yso(config, region):
+    """`N_EFF_YSO` per sightline, off the same P3 file `_on_grid_yso`
+    opens (W66e)."""
+    path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
+    with h5py.File(path, "r") as f:
+        return f["N_EFF_YSO"][:].astype(np.float64)
+
+
+def _n_eff_h2s(config, region):
+    """`N_EFF_H2S`, one brightness-only vector for the whole region (P3,
+    W66e): H2S carries no `x`-axis evidence of its own (module
+    docstring), so every sightline and every `x` column share it."""
+    path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
+    with h5py.File(path, "r") as f:
+        return f["N_EFF_H2S"][:].astype(np.float64)
+
+
+def _n_eff_gal(config):
+    """`N_EFF_GAL`, the one survey-wide `(x, F)` grid (P4, W66e): +inf on
+    the law's own raw support, 0 off it."""
+    path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
+    with h5py.File(path, "r") as f:
+        return f["N_EFF_GAL"][:].astype(np.float64)
+
+
 def _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2s, on_grid_gal, src_idx):
     if cls in ("STAR", "PAHC"):
         return float(on_grid_star[dtab["tile"][src_idx]])
@@ -208,17 +247,16 @@ def _factor_marginal(panel_b_centers, reader, cls, d_pahc_s, curve):
     _factor_ln` reads any factor, `arg = b_star + C_F + D_PAHC(s)`, with
     `b_star = F - C_THETA[theta]` (the same line solved for `log10 Bhat`
     at the query brightness `F`, since row 2 has no fitted `a_hat`/slope
-    to place a* away from F) -- `template_weights._read_pahc_curve`/
-    `_p_at_neg_log10_q`, imported not re-derived, not the stored/floored
+    to place a* away from F) -- `population.pahc_curve.read`, imported
+    not re-derived, not the stored/floored
     P5 table (which fixes the argument at F, sec. 1.4, wrong for the
     per-template shift row 2 needs)."""
     type_factor, contrast_factor = reader.factors[0], reader.factors[1]
     pi_theta_f = type_factor["W"]          # (n_model, n_b), sum_theta = 1 at every F
     c_theta = reader.c_theta               # (n_model,)
     c_f = contrast_factor["C_F"]           # (n_model,)
-    centers, p_q = curve
     arg = panel_b_centers[None, :] - c_theta[:, None] + c_f[:, None] + d_pahc_s
-    p_val = template_weights._p_at_neg_log10_q(arg, centers, p_q)
+    p_val = curve(-arg)                    # curve's own x-axis is log10 q, arg is -log10 q
     term = (1.0 - p_val) if cls == "STAR" else p_val
     return (pi_theta_f * term).sum(axis=0)
 
@@ -236,6 +274,10 @@ def _build_region_data(config, region):
     on_grid_yso = _on_grid_yso(config, region)
     on_grid_h2s = _on_grid_h2s(config, region)
     on_grid_gal = _on_grid_gal(config)
+    n_eff_star, n_eff_agb = _n_eff_star(config, region)
+    n_eff_yso = _n_eff_yso(config, region)
+    n_eff_h2s_f = _n_eff_h2s(config, region)
+    n_eff_gal = _n_eff_gal(config)
 
     panels = {}
     readers = {}
@@ -258,20 +300,14 @@ def _build_region_data(config, region):
 
     # Row 2, the class share at the median source (module docstring, sec.
     # 1.1/1.4): Lambda_C(x, F) = A_C(s) h_C(x, F) f_C(F; s) for every
-    # class (H2S included, its shape on the common grid),
-    # summed to the total and divided back into each --
-    # the SAME product the fitter's evidence sum compares between classes
-    # (sec. 4.2), not the shape alone. A cell is blanked where every
-    # class's own SHAPE sits at its stored floor there (sec. 2, `bmstp.
-    # grid.FLOOR`), never by the total's own size: the total is never
-    # small in absolute terms (GAL's own A_C(s) times its floored shape
-    # is not negligible next to the grid's overall maximum, since GAL's
-    # peak is the largest of the six), so a total-sized mask never fires
-    # and every off-support cell reads as GAL share 1 -- masking on the
-    # shape's own floor is what "at least one class has real density
-    # here" actually means.
+    # class (H2S included, its shape on the common grid), summed to the
+    # total and divided back into each -- the SAME product the fitter's
+    # evidence sum compares between classes (sec. 4.2), not the shape
+    # alone. Computed in every cell now, floors included (owner's ruling
+    # 2026-09-10): `at_floor` below is kept only to report row 2's old
+    # floor-excluded mean share for comparison, never to blank a cell.
     d_pahc_s = float(dtab["d_pahc"][idx_median])
-    curve = template_weights._read_pahc_curve(config)
+    curve = pahc_curve.read(config)
     lam = {}
     at_floor = None
     for cls in _SHARE_CLASSES:
@@ -282,27 +318,43 @@ def _build_region_data(config, region):
         else:
             f_c = np.ones(h_c.shape[1], dtype=np.float64)
         lam[cls] = p["intensity"] * h_c * f_c[None, :]
-        # "no real density": a class counts as absent from a cell where
-        # its shape is within one decade of its own floor (sec. 2's
-        # FLOOR, 1e-6 of the peak). The one-cell blur's far tails and the
-        # float32 store leave cells a little above the exact floor with
-        # no support behind them; exactly-at-floor masking then never
-        # fires and GAL's own A_C(s) times its floor colours every empty
-        # cell as GAL share 1. A decade above the floor is still five
-        # decades below the class's own peak: nothing the fitter would
-        # count as support.
         floor_c = h_c <= (10.0 * grid.FLOOR * h_c.max())
         at_floor = floor_c if at_floor is None else (at_floor & floor_c)
     total = sum(lam.values())
-    masked = at_floor
-    share = {}
-    for cls in _SHARE_CLASSES:
-        s = np.divide(lam[cls], total, out=np.full_like(total, np.nan), where=~masked)
-        share[cls] = s
-    return dtab, idx_median, panels, share, masked
+    share = {cls: lam[cls] / total for cls in _SHARE_CLASSES}
+
+    # The smoothed share (module docstring, owner's ruling 2026-09-10):
+    # each cell's winner (largest raw `S_C` there) lends its own per-cell
+    # effective member count `N` (`bmstp.grid.n_eff`/`n_eff_analytic`,
+    # W66e's `N_EFF_<C>`, read off the SAME grain -- tile for STAR/PAHC,
+    # tile for AGB, sightline for YSO -- the source's own row 1 panel
+    # already read); H2S has no `x`-axis evidence of its own so its one
+    # brightness vector is shared by every `x` column, and GAL's single
+    # survey-wide grid needs no grain index at all.
+    tile_med, sl_med = int(dtab["tile"][idx_median]), int(dtab["sightline"][idx_median])
+    n_x, n_b = share["GAL"].shape
+    n_eff_map = {
+        "STAR": n_eff_star[tile_med], "PAHC": n_eff_star[tile_med],
+        "AGB": n_eff_agb[tile_med], "YSO": n_eff_yso[sl_med],
+        "H2S": np.broadcast_to(n_eff_h2s_f[None, :], (n_x, n_b)),
+        "GAL": n_eff_gal,
+    }
+    share_stack = np.stack([share[cls] for cls in _SHARE_CLASSES])
+    n_eff_stack = np.stack([n_eff_map[cls] for cls in _SHARE_CLASSES])
+    winner_idx = np.argmax(share_stack, axis=0)
+    n_winner = np.take_along_axis(n_eff_stack, winner_idx[None, :, :], axis=0)[0]
+    # `S_smooth_C = (N.S_C + 1/6)/(N+1)`: GAL's +inf cells take the limit
+    # N -> infinity of that ratio, which is `S_C` itself, computed
+    # directly rather than through an infinity-over-infinity division.
+    finite = np.isfinite(n_winner)
+    n_safe = np.where(finite, n_winner, 0.0)
+    smoothed_stack = (n_safe[None, :, :] * share_stack + 1.0 / 6.0) / (n_safe[None, :, :] + 1.0)
+    smoothed_stack = np.where(finite[None, :, :], smoothed_stack, share_stack)
+    share_smooth = {cls: smoothed_stack[k] for k, cls in enumerate(_SHARE_CLASSES)}
+    return dtab, idx_median, panels, share, share_smooth, at_floor, winner_idx, n_winner
 
 
-def _print_numbers(region, dtab, idx_median, panels, share, masked):
+def _print_numbers(region, dtab, idx_median, panels, share, share_smooth, at_floor, winner_idx, n_winner):
     name = dtab["name"][idx_median].decode("utf-8")
     print("atlas.shapes [%s] median source %s: A_COL_K=%.4g mag arm=%s"
           % (region, name, dtab["a_col"][idx_median], _ARM_NAME[int(dtab["arm"][idx_median])]))
@@ -310,17 +362,18 @@ def _print_numbers(region, dtab, idx_median, panels, share, masked):
         p = panels[(0, cls)]
         print("atlas.shapes [%s] row1/%s: mass=%.6f on_grid=%.6f peak_log10x=%.4g peak_log10F45=%.4g "
               "A_C(s)=%.4g deg^-2" % (region, cls, p["mass"], p["on_grid"], p["peak_x"], p["peak_b"], p["intensity"]))
-    valid = ~masked
-    print("atlas.shapes [%s] row2: masked fraction=%.4f (every class's own shape at its stored floor "
-          "there, H2S included in the sum, module docstring)" % (region, float(np.mean(masked))))
-    for cls in _SHARE_CLASSES:
-        s = share[cls]
-        smax = float(np.nanmax(s)) if valid.any() else float("nan")
-        smean = float(np.nanmean(s)) if valid.any() else float("nan")
-        print("atlas.shapes [%s] row2/%s: share max=%.4f mean(valid cells)=%.4f" % (region, cls, smax, smean))
+    valid = ~at_floor
+    for k, cls in enumerate(_SHARE_CLASSES):
+        s, s_smooth = share[cls], share_smooth[cls]
+        mean_before = float(np.mean(s[valid])) if valid.any() else float("nan")
+        mean_after = float(np.mean(s_smooth))
+        wins = winner_idx == k
+        wins_evidenced = float(np.mean(wins & (n_winner >= 1.0)))
+        print("atlas.shapes [%s] row2/%s: share mean(old floor-excluded)=%.4f mean_smoothed(every cell)=%.4f "
+              "wins_with_N>=1_frac=%.4f" % (region, cls, mean_before, mean_after, wins_evidenced))
 
 
-def _draw_figure(config, region, dtab, idx_median, panels, share, masked):
+def _draw_figure(config, region, dtab, idx_median, panels, share_smooth):
     plot_style.apply_style()
     fig = plt.figure(figsize=(PAGE_W_IN, PAGE_H_IN))
 
@@ -337,8 +390,7 @@ def _draw_figure(config, region, dtab, idx_median, panels, share, masked):
     all_log = np.concatenate([np.log10(p["density"]).ravel() for p in panels.values()])
     norm1 = Normalize(vmin=float(all_log.min()), vmax=float(all_log.max()))
     cmap1 = plt.get_cmap("viridis")
-    cmap2 = plt.get_cmap("viridis").copy()
-    cmap2.set_bad(color=(0.0, 0.0, 0.0, 0.0))  # masked cells left blank
+    cmap2 = plt.get_cmap("viridis")
     norm2 = Normalize(vmin=0.0, vmax=1.0)
     im1 = im2 = None
 
@@ -358,8 +410,8 @@ def _draw_figure(config, region, dtab, idx_median, panels, share, masked):
                         % (p["mass"], p["on_grid"], p["peak_x"], p["peak_b"]),
                         transform=ax.transAxes, fontsize=5.5, color="white", va="bottom")
             else:
-                s = share[cls]
-                im2 = ax.imshow(np.ma.masked_invalid(s).T, origin="lower", aspect="auto",
+                s = share_smooth[cls]
+                im2 = ax.imshow(s.T, origin="lower", aspect="auto",
                                  extent=[p["x_edges"][0], p["x_edges"][-1], p["b_edges"][0], p["b_edges"][-1]],
                                  cmap=cmap2, norm=norm2)
             # the y-axis label is set ONCE per row, outside the panels
@@ -380,7 +432,7 @@ def _draw_figure(config, region, dtab, idx_median, panels, share, masked):
             if i == 0:
                 title = "%s  A_C(s) = %.3g deg$^{-2}$" % (cls, p["intensity"])
             else:
-                title = "%s share" % cls
+                title = "%s smoothed share" % cls
             ax.set_title(title, fontsize=8.5 if i == 0 else 9, weight="bold", pad=16)
             if c == 0:
                 fig.text(x0 / PAGE_W_IN - 0.30 / PAGE_W_IN, (y0 + 0.5 * row_h) / PAGE_H_IN,
@@ -394,7 +446,7 @@ def _draw_figure(config, region, dtab, idx_median, panels, share, masked):
     cax2_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / PAGE_W_IN,
                  margin_b / PAGE_H_IN, 0.22 / PAGE_W_IN, row_h / PAGE_H_IN]
     cax2 = fig.add_axes(cax2_rect)
-    fig.colorbar(im2, cax=cax2, label="class share of the prior at (x, F_4.5)")
+    fig.colorbar(im2, cax=cax2, label="smoothed class share of the prior at (x, F_4.5)")
 
     r = regions_module.REGIONS_BY_NAME[region]
     name_med = dtab["name"][idx_median].decode("utf-8")
@@ -420,9 +472,10 @@ def _draw_figure(config, region, dtab, idx_median, panels, share, masked):
 
 def build_region(config, region):
     with progress.Stage("atlas.shapes", region) as st:
-        dtab, idx_median, panels, share, masked = _build_region_data(config, region)
-        _print_numbers(region, dtab, idx_median, panels, share, masked)
-        paths = _draw_figure(config, region, dtab, idx_median, panels, share, masked)
+        dtab, idx_median, panels, share, share_smooth, at_floor, winner_idx, n_winner = \
+            _build_region_data(config, region)
+        _print_numbers(region, dtab, idx_median, panels, share, share_smooth, at_floor, winner_idx, n_winner)
+        paths = _draw_figure(config, region, dtab, idx_median, panels, share_smooth)
         row1_panels = [p for (i, _c), p in panels.items() if i == 0]
         mass_min = min(p["mass"] for p in row1_panels)
         mass_max = max(p["mass"] for p in row1_panels)
@@ -430,7 +483,7 @@ def build_region(config, region):
         on_grid_max = max(p["on_grid"] for p in row1_panels)
         st.done(paths[0], n_panel=len(row1_panels), mass_min=mass_min, mass_max=mass_max,
                 on_grid_min=on_grid_min, on_grid_max=on_grid_max,
-                masked_fraction=float(np.mean(masked)))
+                old_floor_cell_fraction=float(np.mean(at_floor)))
     return paths
 
 
