@@ -15,7 +15,11 @@ templates in the constrained quantity (tau by chemistry; `log10
 f_ref,4.5,theta`), bins wide enough to hold the floor count, linearly
 interpolated;
 galz `colour` divides by a Gaussian KDE of the library's own templates in
-colour, the same bandwidth as the galaxy KDE.
+colour, the same bandwidth as the galaxy KDE. h2shock's `uniform` factor
+(sec 5.6, W58's rule) divides by nothing (no external distribution): the
+conditional is the region's own knot lognormal convolved with the
+templates' conversions, `PI[theta, k] = w_theta L_Sigma(F_k - c_theta) /
+p(F_k)`.
 
 Each factor function returns `(W, C_F, D_F, normalised, source)`: `W`
 `(n_model, 110)` float32 on `LOG10_F45_CENTERS`; `C_F` `(n_model,)` f8, the
@@ -25,8 +29,9 @@ the factor sums to 1 over templates at every cell (a shape statement),
 False if it is a probability carried as-is (`contrast`). `C_THETA[theta]`
 is the template's offset onto the read axis, `log10 f_ref,4.5,theta`
 (floored at the register's own `FLOOR_LINEAR` before the log, sec 4.1,
-W24) for every library except h2shock, whose own line-brightness offset
-is unchanged.
+W24) for every library except h2shock, whose own offset is `log10
+(f_ref,4.5,theta / Sigma_ref,theta)` (sec 5.6, W58's rule), the template's
+conversion from the UWISH2 knot line brightness to 4.5 micron flux.
 
 yso's `population` factor divides by a 1-D histogram of the library's own
 templates in the constrained quantity `log10 f_ref,4.5,theta` (`c_theta`),
@@ -36,8 +41,11 @@ mass does not constrain, so the numerator is Dunham et al. 2015's own
 census density in the same quantity, not the IMF (sec 1.4's "which
 quantities are constrained is set by the data, not by choice").
 
-Survey products (galz, h2shock) are built once; region products (yso, sps,
-agb, pahc) once per region named on the command line. PAHC is regional
+Survey products (galz) are built once; region products (yso, sps, agb,
+pahc, h2shock) once per region named on the command line. H2S is regional
+since W58: its table is the conditional at each brightness under the
+region's own knot lognormal (sec 5.6), the same reason YSO is regional.
+PAHC is regional
 because its `type` factor borrows the region's own sps type histogram at
 each PAHC template's nearest sps atmosphere match (owner ruling: PAHC's
 library carries no atmosphere-type axis of its own). YSO is regional: sec 5.5 "Template weights" is the CONDITIONAL at each
@@ -1023,45 +1031,101 @@ def build_pahc(config, region):
 # H2SHOCK: uniform (survey, sec 5.6)
 # ---------------------------------------------------------------------------
 
-def build_h2shock(config):
-    with progress.Stage("bmstp.template_weights.h2shock") as st:
-        reg = _read_register(config, "h2shock")
-        names = reg["names"]
+def h2shock_conversion(config):
+    """`(names, c_theta)`: `c_theta[theta] = log10(f_ref,4.5,theta /
+    Sigma_ref,theta)` (sec 5.6, W58's rule), the template's own conversion
+    from the UWISH2 knot line surface brightness (`I_H2_1_0_S1`,
+    `parameters.fits`) to its 4.5 micron reference flux (register
+    `F_REF_I2`, floored at `FLOOR_LINEAR`, the same floor `_c_theta` uses
+    for every other library): a knot of line brightness Sigma under
+    template theta sits at `log10 F_4.5 = log10 Sigma + c_theta`. Shared
+    by `build_h2shock`'s `C_THETA` and `bmstp.shapes.build_cloud`'s `K_c`,
+    the distribution of these conversions under the h2shock weights."""
+    reg = _read_register(config, "h2shock")
+    names = reg["names"]
+    n_model = names.size
+    grid_path = f"{config.inputs['sed_models']}/h2shock/parameters.fits"
+    with fits.open(grid_path) as hdul:
+        cols = hdul[1].columns.names
+        d = hdul[1].data
+        grid_names = np.char.strip(d["MODEL_NAME"].astype(str))
+        if "I_H2_1_0_S1" not in cols:
+            raise ValueError(
+                "template_weights.h2shock_conversion: I_H2_1_0_S1 column missing from "
+                f"{grid_path} -- the H2 1-0 S(1) surface brightness the conversion needs "
+                "(sec 5.6, W58)")
+        i_ref = d["I_H2_1_0_S1"].astype(np.float64)
+    n_matched = int(np.sum(grid_names == names)) if grid_names.size == n_model else 0
+    if n_matched != n_model:
+        raise ValueError(f"template_weights.h2shock_conversion: join n_matched={n_matched} "
+                          f"!= n_register={n_model}")
+    f_ref_45 = np.maximum(reg["f_ref"]["I2"], reg["floor_linear"])
+    c_theta = np.log10(f_ref_45) - np.log10(i_ref)
+    return names, c_theta
+
+
+def build_h2shock(config, region):
+    """P5's H2S table, one per region (sec 5.6, W58's rule -- REWRITTEN
+    from the survey-wide table): `PI[theta, k] = w_theta L_Sigma(F_k -
+    c_theta) / p(F_k)`, `w_theta` uniform over the register (no external
+    distribution, sec 5.6), `c_theta` `h2shock_conversion`'s own
+    Sigma-to-4.5-micron offset, `L_Sigma` the region's own knot
+    log10-Sigma lognormal (`population.h2s.transport_log10_sigma`/
+    `region_sigma_lognormal`, recomputed here -- not read from P3, so this
+    table does not depend on `bmstp.shapes` having already run for the
+    region) placed as an EXACT Gaussian kernel (`sample_cloud.
+    exact_gaussian_kernel`, floored at one grid cell, sec 2's "minimum
+    widths") around each template's own `log10 Sigma_mean + c_theta`, the
+    same sparse kernel-placement accumulation `build_yso` uses for its own
+    shift kernel. The region enters because the lognormal is the region's
+    own (sec 5.6): granule `region`, like yso's."""
+    from sesnaimpute.bmstp import sample_cloud
+    from sesnaimpute.population import h2s as h2s_module
+    with progress.Stage("bmstp.template_weights.h2shock", region) as st:
+        names, c_theta = h2shock_conversion(config)
         n_model = names.size
         log10_f45_centers = _log10_f45_centers()
+        n_b = log10_f45_centers.size
 
-        grid_path = f"{config.inputs['sed_models']}/h2shock/parameters.fits"
-        with fits.open(grid_path) as hdul:
-            cols = hdul[1].columns.names
-            d = hdul[1].data
-            grid_names = np.char.strip(d["MODEL_NAME"].astype(str))
-            if "I_H2_1_0_S1" in cols:
-                # the H2 1-0 S(1) surface brightness, erg/s/cm2/sr, joined
-                # on MODEL_NAME (spec sec 3.5, sec 5.6): the Ks stand-in
-                # is dropped now that the shock grid carries this column.
-                i_ref = d["I_H2_1_0_S1"].astype(np.float64)
-                c_theta_source = "I_H2_1_0_S1, parameters.fits"
-                n_matched = int(np.sum(grid_names == names)) if grid_names.size == n_model else 0
-            else:
-                i_ref = reg["f_ref"]["Ks"]  # stand-in until the line column exists (spec sec 3.5)
-                c_theta_source = "Ks reference flux (stand-in)"
-                n_matched = n_model  # no per-template join needed for this branch
-        if n_matched != n_model:
-            raise ValueError(f"template_weights.h2shock: join n_matched={n_matched} "
-                              f"!= n_register={n_model}")
+        r = regions_module.REGIONS_BY_NAME[region]
+        log10_sb_native, area_pc2 = h2s_module.uwish2_reference_knots(config)
+        log10_sigma = h2s_module.transport_log10_sigma(log10_sb_native, area_pc2, r.d_r_pc)
+        logsig_mean, logsig_std = h2s_module.region_sigma_lognormal(log10_sigma)
 
-        w = np.full((n_model, log10_f45_centers.size), 1.0 / n_model, dtype=np.float64)
-        c_theta = np.log10(i_ref)  # the line brightness Sigma_ref,theta, unchanged (sec 4.1, W27)
+        w_theta = np.full(n_model, 1.0 / n_model, dtype=np.float64)
+        kernel = sample_cloud.exact_gaussian_kernel(logsig_std)
+        half_width = (kernel.size - 1) // 2
+        idx_center = np.round(
+            (logsig_mean + c_theta - log10_f45_centers[0]) / grid.D_LOG10_F45).astype(np.int64)
+        theta_idx = np.arange(n_model)
+        contribution = np.zeros((n_model, n_b), dtype=np.float64)
+        for m_i in range(kernel.size):
+            m = m_i - half_width
+            cell_idx = idx_center + m
+            valid = (cell_idx >= 0) & (cell_idx < n_b)
+            if not np.any(valid):
+                continue
+            np.add.at(contribution, (theta_idx[valid], cell_idx[valid]),
+                      w_theta[valid] * kernel[m_i])
+
+        population_w, frac_zero = _floor_normalised(contribution)
 
         factors = {
-            "uniform": (w, np.zeros(n_model), "", True, "no external distribution (spec sec 5.6)"),
+            "uniform": (population_w, c_theta, "", True,
+                        "no external distribution (sec 5.6); knot lognormal "
+                        f"LOGSIG_MEAN={logsig_mean:.4f} LOGSIG_STD={logsig_std:.4f} "
+                        f"at d_r={r.d_r_pc:.1f} pc"),
         }
-        path = _write_library(config, "h2shock", "survey", names, c_theta, log10_f45_centers, factors,
-                               extra_attrs={"C_THETA_SOURCE": c_theta_source})
-        st.done(path, n_model=n_model)
-        print(f"template_weights.h2shock: C_THETA_SOURCE={c_theta_source} "
-              f"log10(I_H2_1_0_S1) range min={c_theta.min():.4f} "
-              f"median={np.median(c_theta):.4f} max={c_theta.max():.4f}", flush=True)
+        path = _write_library(config, "h2shock", "region", names, c_theta, log10_f45_centers, factors,
+                               region=region,
+                               extra_attrs={"C_THETA_SOURCE": "log10(F_REF_I2 / I_H2_1_0_S1)",
+                                             "LOGSIG_MEAN": logsig_mean, "LOGSIG_STD": logsig_std})
+        col_sum = population_w.sum(axis=0)
+        max_colsum_dev = float(np.max(np.abs(col_sum - 1.0)))
+        st.done(path, n_model=n_model, floored_fraction=frac_zero, max_colsum_dev=max_colsum_dev)
+        print(f"template_weights.h2shock [{region}]: C_THETA range min={c_theta.min():.4f} "
+              f"median={np.median(c_theta):.4f} max={c_theta.max():.4f} "
+              f"LOGSIG_MEAN={logsig_mean:.4f} LOGSIG_STD={logsig_std:.4f}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1078,8 +1142,8 @@ def build(config, regions=None):
     region_list = regions if regions else [r.name for r in regions_module.REGIONS]
 
     build_galz(config)
-    build_h2shock(config)
     for region in region_list:
+        build_h2shock(config, region)
         build_yso(config, region)
         field_path = config_module.product_path(
             config, "population", "trilegal", "field-stars", "region", region=region)

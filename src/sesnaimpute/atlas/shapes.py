@@ -10,10 +10,10 @@ median `A_COL_K` (`_select_sources`'s first choice; the 99th-percentile
 source is not drawn: the normalised shapes differ between
 sightlines only through the profile, and the fitter's actual class
 decision needs the levels the old page's per-source bar chart kept apart
-from the shapes it plotted). Six panels per row (GAL, YSO, H2S on its own
-`log10 Sigma` axis, STAR, PAHC, AGB), sharing ONE pair of axes, `log10 x`
-and `log10 F_4.5` in mJy (sec. 2: one common brightness axis for every
-class but H2S).
+from the shapes it plotted). Six panels per row (GAL, YSO, H2S, STAR,
+PAHC, AGB), sharing ONE pair of axes, `log10 x` and `log10 F_4.5` in mJy
+(sec. 2: one common brightness axis for every class, H2S included since
+W58's rule -- its template conversion folded in at the shape stage).
 
 Row 1, unchanged in content and pixel output from the previous page's own
 median-source row: the normalised shape `h_C(x, F_4.5)` the fitter reads
@@ -49,11 +49,11 @@ already the sec. 1.4 axis, `Sum_theta pi_C(theta, F) = 1` at every F) and
 b_star + C_F + D_PAHC(s)` with `b_star = F - C_THETA[theta]` (sec. 2's
 `log10 F_4.5 = log10 Bhat + C_THETA` line, solved for `log10 Bhat` at the
 query brightness `F`) -- `bmstp.template_weights._read_pahc_curve`/
-`_p_at_neg_log10_q`, imported not re-derived. H2S is excluded from both
-its own row-2 panel and the denominator sum (disclosed, `briefs/reports/W57.md`): its shape is not on the common grid at read time (sec. 4.1's P3
-"formed at the read"), and placing it there for this page was not
-available in the time this unit had; its row-2 panel is left blank, title
-disclosing why.
+`_p_at_neg_log10_q`, imported not re-derived. H2S's own `f_C` is 1 (its
+`uniform` factor is normalised over theta, sec 5.6), the same STAR/PAHC
+carve-out above does not apply to it, so it is included in row 2's
+denominator sum like every other class since W58's rule
+(`briefs/reports/W57.md` disclosed the earlier exclusion; removed here).
 """
 
 import argparse
@@ -80,9 +80,9 @@ PAGE_W_IN, PAGE_H_IN = 16.0, 9.0
 #: The old page's panel order (W18's brief).
 CLASS_ORDER = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
 
-#: Every class but H2S reads the one common brightness axis (sec. 2):
-#: `log10 F_4.5` in mJy, `bmstp.grid.LOG10_F45_EDGES` -- the row's one
-#: outside y-axis label below.
+#: Every class reads the one common brightness axis (sec. 2, H2S included
+#: since W58): `log10 F_4.5` in mJy, `bmstp.grid.LOG10_F45_EDGES` -- the
+#: row's one outside y-axis label below.
 _SHARED_Y_LABEL = "log10 F_4.5   [mJy]"
 
 #: The one shared caption below the page, the spec's own term for `x`
@@ -140,6 +140,14 @@ def _on_grid_yso(config, region):
         return f["ON_GRID_YSO"][:].astype(np.float64)
 
 
+def _on_grid_h2s(config, region):
+    """`ON_GRID_H2S` per sightline (P3, W58: `GRID_H2S` is on the common
+    grid now, so its own on-grid fraction is measured, not fixed at 1)."""
+    path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
+    with h5py.File(path, "r") as f:
+        return f["ON_GRID_H2S"][:].astype(np.float64)
+
+
 def _on_grid_gal(config):
     """`ON_GRID_GAL`, the one survey-wide attr (P4, W26): read directly,
     not recomputed -- `bmstp.shapes.build_gal` is this number's own build."""
@@ -148,13 +156,7 @@ def _on_grid_gal(config):
         return float(f.attrs["ON_GRID_GAL"])
 
 
-#: H2S rides on YSO's `x` marginal and its own always-normalised region
-#: Gaussian on `log10 Sigma` (sec. 5.6 "Marks"): no mass is lost on either
-#: axis, so its own on-grid fraction is fixed at 1 (sec. 4.1, W26).
-H2S_ON_GRID = 1.0
-
-
-def _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_gal, src_idx):
+def _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2s, on_grid_gal, src_idx):
     if cls in ("STAR", "PAHC"):
         return float(on_grid_star[dtab["tile"][src_idx]])
     if cls == "AGB":
@@ -162,7 +164,9 @@ def _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_ga
     if cls == "YSO":
         return float(on_grid_yso[dtab["sightline"][src_idx]])
     if cls == "H2S":
-        return H2S_ON_GRID
+        # W58: GRID_H2S is on the common grid now, its own on-grid
+        # fraction measured per sightline (sec. 4.1), same as YSO's.
+        return float(on_grid_h2s[dtab["sightline"][src_idx]])
     return float(on_grid_gal)  # GAL
 
 
@@ -186,11 +190,10 @@ def _panel_arrays(config, region, cls, rows):
     return density, reader.x_edges, reader.b_edges, mass, reader
 
 
-#: Row 2's denominator classes: every class but H2S, which is not on the
-#: common grid at read time (sec. 4.1's P3 "formed at the read") -- left
-#: out of the share's total, disclosed (module docstring, `briefs/reports/
-#:.md`).
-_SHARE_CLASSES = ("GAL", "YSO", "STAR", "PAHC", "AGB")
+#: Row 2's denominator classes (sec. 1.1/1.4): every class, since W58 --
+#: H2S is on the common grid at read time now (P3's `GRID_H2S`, sec. 4.1),
+#: so it is no longer left out of the share's total.
+_SHARE_CLASSES = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
 
 
 def _factor_marginal(panel_b_centers, reader, cls, d_pahc_s, curve):
@@ -231,6 +234,7 @@ def _build_region_data(config, region):
     rows = np.array([idx_median, idx_p99])
     on_grid_star, on_grid_agb = _on_grid_star(config, region)
     on_grid_yso = _on_grid_yso(config, region)
+    on_grid_h2s = _on_grid_h2s(config, region)
     on_grid_gal = _on_grid_gal(config)
 
     panels = {}
@@ -243,7 +247,8 @@ def _build_region_data(config, region):
         for i, src_idx in enumerate(rows):
             d = density2[i]
             pi, pj = np.unravel_index(int(np.argmax(d)), d.shape)
-            on_grid = _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_gal, src_idx)
+            on_grid = _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2s,
+                                      on_grid_gal, src_idx)
             panels[(i, cls)] = dict(
                 density=d, x_edges=x_edges, b_edges=b_edges,
                 x_centers=x_centers, b_centers=b_centers,
@@ -253,7 +258,8 @@ def _build_region_data(config, region):
 
     # Row 2, the class share at the median source (module docstring, sec.
     # 1.1/1.4): Lambda_C(x, F) = A_C(s) h_C(x, F) f_C(F; s) for every
-    # class but H2S, summed to the total and divided back into each --
+    # class (H2S included since W58, its shape on the common grid now),
+    # summed to the total and divided back into each --
     # the SAME product the fitter's evidence sum compares between classes
     # (sec. 4.2), not the shape alone. A cell is blanked where every
     # class's own SHAPE sits at its stored floor there (sec. 2, `bmstp.
@@ -306,7 +312,7 @@ def _print_numbers(region, dtab, idx_median, panels, share, masked):
               "A_C(s)=%.4g deg^-2" % (region, cls, p["mass"], p["on_grid"], p["peak_x"], p["peak_b"], p["intensity"]))
     valid = ~masked
     print("atlas.shapes [%s] row2: masked fraction=%.4f (every class's own shape at its stored floor "
-          "there, H2S excluded from the sum, module docstring)" % (region, float(np.mean(masked))))
+          "there, H2S included in the sum since W58, module docstring)" % (region, float(np.mean(masked))))
     for cls in _SHARE_CLASSES:
         s = share[cls]
         smax = float(np.nanmax(s)) if valid.any() else float("nan")
@@ -351,13 +357,6 @@ def _draw_figure(config, region, dtab, idx_median, panels, share, masked):
                 ax.text(0.02, 0.03, "mass=%.4f\non_grid=%.4f\npeak=(%.2f, %.2f)"
                         % (p["mass"], p["on_grid"], p["peak_x"], p["peak_b"]),
                         transform=ax.transAxes, fontsize=5.5, color="white", va="bottom")
-            elif cls == "H2S":
-                # sec. 4.1's P3 "formed at the read": H2S's shape is not
-                # on the common grid at this figure stage (module
-                # docstring, disclosed, `briefs/reports/W57.md`).
-                ax.set_facecolor("none")
-                ax.text(0.5, 0.5, "not computed\n(Sigma-to-F_4.5\nplacement not\navailable)",
-                        transform=ax.transAxes, ha="center", va="center", fontsize=6.5)
             else:
                 s = share[cls]
                 im2 = ax.imshow(np.ma.masked_invalid(s).T, origin="lower", aspect="auto",
@@ -378,14 +377,10 @@ def _draw_figure(config, region, dtab, idx_median, panels, share, masked):
             ax2.tick_params(length=2, pad=1, labelsize=5)
             if c == 0:
                 ax2.set_xlabel("a  [A_K mag]", fontsize=5.5, labelpad=1)
-            # H2S is the one class the reader keeps on its own private
-            # brightness axis (sec. 5.6) in row 1; row 2's title carries
-            # the "not computed" disclosure instead of a title repeat.
             if i == 0:
-                label = "H2S (log10 Σ axis)" if cls == "H2S" else cls
-                title = "%s  A_C(s) = %.3g deg$^{-2}$" % (label, p["intensity"])
+                title = "%s  A_C(s) = %.3g deg$^{-2}$" % (cls, p["intensity"])
             else:
-                title = "H2S row 2: not computed" if cls == "H2S" else "%s share" % cls
+                title = "%s share" % cls
             ax.set_title(title, fontsize=8.5 if i == 0 else 9, weight="bold", pad=16)
             if c == 0:
                 fig.text(x0 / PAGE_W_IN - 0.30 / PAGE_W_IN, (y0 + 0.5 * row_h) / PAGE_H_IN,
