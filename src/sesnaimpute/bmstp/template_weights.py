@@ -18,7 +18,8 @@ galz `colour` divides by a Gaussian KDE of the library's own templates in
 colour, the same bandwidth as the galaxy KDE. h2shock's `uniform` factor
 (sec 5.6's rule) divides by nothing (no external distribution): the
 conditional is the region's own knot lognormal convolved with the
-templates' conversions, `PI[theta, k] = w_theta L_Sigma(F_k - c_theta) /
+templates' Sigma-to-flux conversions and placed on the common axis at
+grid-build time, `PI[theta, k] = w_theta L_Sigma(F_k - c_conversion) /
 p(F_k)`.
 
 Each factor function returns `(W, C_F, D_F, normalised, source)`: `W`
@@ -29,9 +30,15 @@ the factor sums to 1 over templates at every cell (a shape statement),
 False if it is a probability carried as-is (`contrast`). `C_THETA[theta]`
 is the template's offset onto the read axis, `log10 f_ref,4.5,theta`
 (floored at the register's own `FLOOR_LINEAR` before the log, sec 4.1,
-W24) for every library except h2shock, whose own offset is `log10
-(f_ref,4.5,theta / Sigma_ref,theta)` (sec 5.6's rule), the template's
-conversion from the UWISH2 knot line brightness to 4.5 micron flux.
+W24) for EVERY library including h2shock: `fittp.prior_reader` reads
+`log10 B_hat + C_THETA` on the common axis for every class alike, so the
+one library whose grid is built from a different native quantity (h2shock,
+built from the UWISH2 knot line surface brightness Sigma, not a flux)
+still writes the same kind of offset to the table -- its own
+Sigma-to-4.5-micron conversion is used once, internally, to place that
+grid on the common axis at build time (`h2shock_conversion`,
+`bmstp.shapes.build_cloud`'s `K_c`), and is not the quantity stored in
+`C_THETA` or added again at read.
 
 yso's `population` factor divides by a 1-D histogram of the library's own
 templates in the constrained quantity `log10 f_ref,4.5,theta` (`c_theta`),
@@ -72,6 +79,7 @@ from sesnaimpute.bmstp import grid, sample_star
 from sesnaimpute.build import run
 from sesnaimpute.population import star_population
 from sesnaimpute.population import h2s as h2s_module
+from sesnaimpute.population import pahc_curve
 
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
@@ -98,10 +106,6 @@ FACTOR_FLOOR = grid.FLOOR
 #: reason (spec sec 2).
 PROB_CAP = 1.0 - FACTOR_FLOOR
 
-#: Carbon fraction f_C (spec sec 5.2, Le Bertre et al. 2003), also on the
-#: star_population product's own attrs; used here to mix the two
-#: chemistries' Riebel tau distributions.
-F_C = star_population.F_C
 
 #: The five YSO sub-grid directories under `sed_models/yso/` (different
 #: geometries, different parameter sets): read only to join each
@@ -326,11 +330,22 @@ def _write_library(config, lib, granule, names, c_theta, log10_f45_centers, fact
 
 
 # ---------------------------------------------------------------------------
-# the contamination curve reader, shared by pahc `contrast` and sps
-# `uncontaminated` (spec sec 5.1, sec 5.3: "read exactly as ... below")
+# the contamination curve, shared by pahc `contrast` and sps
+# `uncontaminated` (spec sec 5.1, sec 5.3): read through
+# `population.pahc_curve.read`, the one accessor every consumer of the
+# shipped curve uses, so the sparse-bin plateau correction it applies
+# (bins beyond the last well-measured one folded into the curve's own
+# flat high-q shelf, `population/pahc_curve.py:read`) is part of what
+# "the shipped curve" means here too -- not re-derived as a second,
+# uncorrected reader (audit B: this module used to open the file
+# directly and `np.interp` the raw, individually sparse bins).
 # ---------------------------------------------------------------------------
 
-def _read_pahc_curve(config):
+def _pahc_curve_raw_bins(config):
+    """The curve's raw on-disk `P_Q` bin centers and values, read for the
+    build's own diagnostic report only (how much the plateau correction
+    below moves the curve's tabulated ends) -- `_pahc_contrast_row` reads
+    the curve through the accessor, not this."""
     path = config_module.product_path(config, "population", "pahc", "curve", "survey")
     with h5py.File(path, "r") as f:
         edges = f["LOG10_Q_EDGES"][:].astype(np.float64)
@@ -338,22 +353,12 @@ def _read_pahc_curve(config):
     return 0.5 * (edges[:-1] + edges[1:]), p_q
 
 
-def _p_at_neg_log10_q(neg_log10_q_query, centers, p_q):
-    """`P(q)` at `-log10 q = neg_log10_q_query` (spec sec 5.3): linear
-    interpolation on the curve's own bin centers; outside the tabulated
-    `log10 q` range `np.interp`'s own clamping holds the nearest
-    measured bin's value at each end (constant extrapolation, never the
-    shelf -- the shelf subtraction is the curve product's own business,
-    not repeated here)."""
-    log10_q = -neg_log10_q_query
-    return np.interp(log10_q, centers, p_q)
-
-
 def _pahc_contrast_row(config, n_b_centers):
     """The one row `P(-log10 q = LOG10_F45_CENTERS[k])`, the same for every
-    template (spec sec 5.3: template enters only through `C_F`)."""
-    centers, p_q = _read_pahc_curve(config)
-    return _p_at_neg_log10_q(n_b_centers, centers, p_q)
+    template (spec sec 5.3: template enters only through `C_F`), from
+    `population.pahc_curve.read`'s plateau-corrected callable."""
+    curve = pahc_curve.read(config)
+    return curve(-n_b_centers)
 
 
 # ---------------------------------------------------------------------------
@@ -826,7 +831,7 @@ def build_sps(config, region):
         retained_weighted = float(weight.sum())
         histogram_weighted = float(h.sum())
         col_sum = type_w.sum(axis=0)
-        _curve_centers, curve_p_q = _read_pahc_curve(config)
+        _curve_centers, curve_p_q = _pahc_curve_raw_bins(config)
         print(f"template_weights.sps [{region}]: retained weighted count={retained_weighted:.4f} "
               f"histogram sum={histogram_weighted:.4f} "
               f"max|colsum-1|={float(np.max(np.abs(col_sum - 1.0))):.3g} "
@@ -853,9 +858,12 @@ def agb_tau_ratio(config):
     library's density of templates in `tau` FOR THAT CHEMISTRY
     (`_equal_count_binned_density`, bins wide enough to hold
     `LIBRARY_DENSITY_MIN_COUNT` templates, never `RHO_KDE1`). `ratio`
-    carries no carbon-fraction admixture: `build_agb`'s `tau` factor
-    applies `F_C`/`1-F_C` on top of it (the class-wide statement, mixing
-    both chemistries into one factor); `bmstp.atlas._agb_shell_pool`'s
+    carries no chemistry-mix admixture: `build_agb`'s `tau` factor
+    applies `(1-F_C) f_dusty,O` / `F_C f_dusty,C` on top of it (the
+    class-wide statement, mixing both chemistries into one factor, the
+    same O:C weight the shape/density/atlas stages put on the population,
+    `population.star_population`/`bmstp.sample_star`);
+    `bmstp.atlas._agb_shell_pool`'s
     per-chemistry Monte Carlo pool does not, since `sample_star.
     sample_agb` has already resolved which chemistry a given draw is.
     Shared by both rather than re-derived, so the Riebel fit and the
@@ -892,6 +900,19 @@ def agb_tau_ratio(config):
     return names, chem, log10_tau, ratio
 
 
+def _agb_dusty_shares(config, region):
+    """`(f_c, f_dusty_o, f_dusty_c)`, the root attributes of the per-region
+    star population product (`population/star/population/tile`) --
+    `bmstp.sample_star.sample_agb` reads the same three off the same file
+    to split its own O/C draw. Read here, not recomputed, so the fitter's
+    AGB chemistry mix is built from the identical numbers the density and
+    the atlas already used."""
+    path = config_module.product_path(config, "population", "star", "population", "tile",
+                                       region=region)
+    with h5py.File(path, "r") as f:
+        return float(f.attrs["F_C"]), float(f.attrs["F_DUSTY_O"]), float(f.attrs["F_DUSTY_C"])
+
+
 def build_agb(config, region):
     with progress.Stage("bmstp.template_weights.agb", region) as st:
         reg = _read_register(config, "agb")
@@ -902,10 +923,14 @@ def build_agb(config, region):
         if not (names_r.size == n_model and np.array_equal(names_r, names)):
             raise ValueError("template_weights.agb: agb_tau_ratio's row order "
                               "disagrees with the agb register")
-        # the class-wide `tau` factor mixes both chemistries by their
-        # carbon fraction (spec sec 5.2): F_C * ratio for carbon-rich,
-        # (1-F_C) * ratio for oxygen-rich.
-        p_mix = np.where(chem == "O", (1.0 - F_C) * ratio, F_C * ratio)
+        f_c, f_dusty_o, f_dusty_c = _agb_dusty_shares(config, region)
+        # the class-wide `tau` factor mixes both chemistries by the same
+        # O:C weight the shape/density/atlas stages put on the population
+        # (spec sec 5.2): (1-F_C) f_dusty,O for oxygen-rich, F_C f_dusty,C
+        # for carbon-rich -- not the bare carbon fraction alone, since
+        # each chemistry's own dusty share is unequal (Riebel+2012, two
+        # different fitted floors).
+        p_mix = np.where(chem == "O", (1.0 - f_c) * f_dusty_o * ratio, f_c * f_dusty_c * ratio)
         n_template_o = int(np.sum(chem == "O"))
         n_template_c = int(np.sum(chem == "C"))
         gcl, _riebel_tau = star_population.read_riebel_optical_depths(config)
@@ -925,9 +950,13 @@ def build_agb(config, region):
         path = _write_library(config, "agb", "region", names, c_theta, log10_f45_centers, factors,
                                region=region)
         col_sum = tau_w.sum(axis=0)
+        oc_mix_new = ((1.0 - f_c) * f_dusty_o) / (f_c * f_dusty_c)
+        oc_mix_old = (1.0 - f_c) / f_c
         print(f"template_weights.agb [{region}]: n_riebel_o={n_riebel_o} n_riebel_c={n_riebel_c} "
               f"n_template_o={n_template_o} n_template_c={n_template_c} max|colsum-1|="
               f"{float(np.max(np.abs(col_sum - 1.0))):.3g} floored_fraction={frac_zero:.4f} "
+              f"F_C={f_c:.4f} F_DUSTY_O={f_dusty_o:.4f} F_DUSTY_C={f_dusty_c:.4f} "
+              f"O:C mix ratio old(F_C only)={oc_mix_old:.4f} new(with dusty shares)={oc_mix_new:.4f} "
               f"C_THETA range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
               f"max={c_theta.max():.4f}",
               flush=True)
@@ -1015,7 +1044,7 @@ def build_pahc(config, region):
                                region=region)
         col_sum = type_w.sum(axis=0)
         n_matched_sps_used = int(np.unique(sps_idx).size)
-        _curve_centers, curve_p_q = _read_pahc_curve(config)
+        _curve_centers, curve_p_q = _pahc_curve_raw_bins(config)
         print(f"template_weights.pahc [{region}]: match n=median {float(np.median(dist)):.4f} "
               f"max {float(dist.max()):.4f} (log10 T_EFF, LOGG); "
               f"{n_matched_sps_used}/{sps_names.size} sps templates ever matched; "
@@ -1075,21 +1104,31 @@ def h2shock_conversion(config):
 def build_h2shock(config, region):
     """P5's H2S table, one per region (sec 5.6's rule -- REWRITTEN
     from the survey-wide table): `PI[theta, k] = w_theta L_Sigma(F_k -
-    c_theta) / p(F_k)`, `w_theta` uniform over the register (no external
-    distribution, sec 5.6), `c_theta` `h2shock_conversion`'s own
-    Sigma-to-4.5-micron offset, `L_Sigma` the region's own knot
-    log10-Sigma lognormal (`population.h2s.transport_log10_sigma`/
+    c_theta_conversion) / p(F_k)`, `w_theta` uniform over the register (no
+    external distribution, sec 5.6), `c_theta_conversion`
+    `h2shock_conversion`'s own Sigma-to-4.5-micron offset used ONLY to
+    place each template's knot lognormal onto the shape grid's common
+    `log10 F_4.5` axis, `L_Sigma` the region's own knot log10-Sigma
+    lognormal (`population.h2s.transport_log10_sigma`/
     `region_sigma_lognormal`, recomputed here -- not read from P3, so this
     table does not depend on `bmstp.shapes` having already run for the
     region) placed as an EXACT Gaussian kernel (`sample_cloud.
     exact_gaussian_kernel`, floored at one grid cell, sec 2's "minimum
-    widths") around each template's own `log10 Sigma_mean + c_theta`, the
-    same sparse kernel-placement accumulation `build_yso` uses for its own
-    shift kernel. The region enters because the lognormal is the region's
-    own (sec 5.6): granule `region`, like yso's."""
+    widths") around each template's own `log10 Sigma_mean +
+    c_theta_conversion`, the same sparse kernel-placement accumulation
+    `build_yso` uses for its own shift kernel. The GRID_H2S contribution
+    this writes is already on the common axis, so the table's own
+    `C_THETA` column is `log10 f_ref,4.5,theta` (`_c_theta`, the register's
+    own `F_REF_I2`), read at `log10 B_hat + log10 f_ref,4.5,theta` exactly
+    as every other library (sec 4.1 P3): the Sigma-to-flux conversion is
+    the shape's own business, done once at placement, and is not added a
+    second time at read. The region enters because the lognormal is the
+    region's own (sec 5.6): granule `region`, like yso's."""
     from sesnaimpute.bmstp import sample_cloud
     with progress.Stage("bmstp.template_weights.h2shock", region) as st:
-        names, c_theta = h2shock_conversion(config)
+        reg = _read_register(config, "h2shock")
+        names, c_theta_conversion = h2shock_conversion(config)
+        c_theta = _c_theta(reg)
         n_model = names.size
         log10_f45_centers = _log10_f45_centers()
         n_b = log10_f45_centers.size
@@ -1103,7 +1142,8 @@ def build_h2shock(config, region):
         kernel = sample_cloud.exact_gaussian_kernel(logsig_std)
         half_width = (kernel.size - 1) // 2
         idx_center = np.round(
-            (logsig_mean + c_theta - log10_f45_centers[0]) / grid.D_LOG10_F45).astype(np.int64)
+            (logsig_mean + c_theta_conversion - log10_f45_centers[0])
+            / grid.D_LOG10_F45).astype(np.int64)
         theta_idx = np.arange(n_model)
         contribution = np.zeros((n_model, n_b), dtype=np.float64)
         for m_i in range(kernel.size):
@@ -1125,13 +1165,16 @@ def build_h2shock(config, region):
         }
         path = _write_library(config, "h2shock", "region", names, c_theta, log10_f45_centers, factors,
                                region=region,
-                               extra_attrs={"C_THETA_SOURCE": "log10(F_REF_I2 / I_H2_1_0_S1)",
+                               extra_attrs={"C_THETA_SOURCE": "log10(F_REF_I2), floored "
+                                             "(sec 4.1 P3, as every other library)",
                                              "LOGSIG_MEAN": logsig_mean, "LOGSIG_STD": logsig_std})
         col_sum = population_w.sum(axis=0)
         max_colsum_dev = float(np.max(np.abs(col_sum - 1.0)))
         st.done(path, n_model=n_model, floored_fraction=frac_zero, max_colsum_dev=max_colsum_dev)
-        print(f"template_weights.h2shock [{region}]: C_THETA range min={c_theta.min():.4f} "
-              f"median={np.median(c_theta):.4f} max={c_theta.max():.4f} "
+        print(f"template_weights.h2shock [{region}]: table C_THETA (log10 f_ref,4.5,theta) "
+              f"range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
+              f"max={c_theta.max():.4f}; old table C_THETA (Sigma->F conversion, now internal-"
+              f"only) median={np.median(c_theta_conversion):.4f}; "
               f"LOGSIG_MEAN={logsig_mean:.4f} LOGSIG_STD={logsig_std:.4f}", flush=True)
 
 
