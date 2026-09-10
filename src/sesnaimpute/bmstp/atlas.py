@@ -23,7 +23,7 @@ templates in the same quantity, times inclination uniform in cos i and the
 evolutionary-class census (sec 1.4, owner's ruling 2026-09-09), the same
 construction `build_yso` uses -- each template's own eight `F_REF` scaled
 by `10^delta`, `delta` drawn per member from the region's own shift kernel
-(`bmstp.sample_cloud.shift_kernel`, W56), placed along the
+(`bmstp.sample_cloud.shift_kernel`), placed along the
 sightline's own `p(x)` on the cloud interval, `bmstp.sample_cloud.sample_x`'s
 binned return) and H2S (sec. 5.6: the region's 2.12 um lognormal carried into
 the bands by the measured knot line-to-band ratios, at YSO's own `x`). AGB's
@@ -505,7 +505,7 @@ def _yso_template_pool(config, region, d_front, d_back, n_mc, seed):
     per region (shared by every sightline), each template's own eight
     `F_REF` (floored at the register's own `FLOOR_LINEAR`) scaled by
     `10^delta`, `delta` drawn independently per member from the region's
-    own shift kernel `K` (`bmstp.sample_cloud.shift_kernel`, W56 ruling 4:
+    own shift kernel `K` (`bmstp.sample_cloud.shift_kernel`:
     a `rng.choice` over `K`'s own cells, jittered uniformly within the
     cell) -- the SAME kernel `template_weights.build_yso`'s conditional
     table reads, so a member's distance placement and the cloud's own
@@ -769,7 +769,7 @@ def build_region(config, region):
         _d_front, d_back = sample_cloud.cloud_interval_pc(config, region)
         # YSO's members: one fixed-seed draw of N_MC library templates by
         # the population weight and the region's own shift kernel (sec.
-        # 5.5 "Template weights", W56 ruling 4), shared by every sightline
+        # 5.5 "Template weights"), shared by every sightline
         # of the region.
         flux0_yso = _yso_template_pool(config, region, d_front, d_back, N_MC, MC_SEED + 50_000)
         giannini_ratios = h2s_module._load_giannini_ratios(config)

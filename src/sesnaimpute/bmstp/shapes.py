@@ -208,7 +208,7 @@ def _field_star_f45_range(config, region):
 
 def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     """One sightline's `(GRID_YSO, X_MARGINAL, MASS_OUTSIDE_YSO,
-    removed_frac)` (sec. 5.5 "Marks", W56 ruling 2): every depth
+    removed_frac)` (sec. 5.5 "Marks"): every depth
     sub-sample (`sample_cloud._cell_subsamples`, weight `w_k,sub`, depth
     `x_k,sub`, distance `d_k,sub`) adds its own shifted-and-smoothed copy
     of `p_ref` to its own `log10 x` row -- grouped by row first (linear
@@ -230,7 +230,7 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     on_x = (x_idx >= 0) & (x_idx < n_x)
     delta = -2.0 * np.log10(d_sub / 1000.0)
     # the row's own raw (unsmoothed) weighted delta histogram (sec. 5.5,
-    # W56 ruling 1's K, restricted to this one row's own sub-samples):
+    # the shift kernel K, restricted to this one row's own sub-samples):
     # a single 2-D histogram call over every kept sub-sample at once.
     k_row, _, _ = np.histogram2d(
         x_idx[on_x], delta[on_x], bins=[np.arange(n_x + 1), grid.LOG10_F45_EDGES],
@@ -240,7 +240,7 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     # one vectorised row-wise convolution for every x row at once.
     k_row = ndimage.convolve1d(k_row, weights=kernel_1d, axis=1, mode="constant")
 
-    # the row's own convolution with p_ref (sec. 5.5, W56 ruling 2): both
+    # the row's own convolution with p_ref (sec. 5.5): both
     # are histograms on the SAME 0.1 dex grid sharing the same origin, so
     # `np.convolve`'s left-edge index convention adds their bin indices
     # directly -- the full convolution's own index n = j + m corresponds
@@ -266,7 +266,7 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
 
 def build_cloud(config, region):
     """Writes P3, `bmstp/shape/cloud_shape_sightline__R.hdf5`: `GRID_YSO`
-    (sec. 5.5, W56 ruling 2 -- each depth sub-sample's own shifted copy of
+    (sec. 5.5, the shift-kernel rule -- each depth sub-sample's own shifted copy of
     `P_ref`, `bmstp.sample_cloud.p_ref_f45`, summed by `log10 x` row, NOT
     an outer product) and its `log10 x` marginal per sightline,
     `MASS_OUTSIDE_YSO`, `ON_GRID_YSO` (`1 - mass_outside_yso` per
@@ -292,7 +292,7 @@ def build_cloud(config, region):
         d_front, d_back = sample_cloud.cloud_interval_pc(config, region)
         r = regions_module.REGIONS_BY_NAME[region]
 
-        # P_ref (sec. 5.5, W56 ruling 2), survey-wide, unplaced -- built
+        # P_ref (sec. 5.5), survey-wide, unplaced -- built
         # once, not per sightline or region; every sub-sample's own row
         # convolves it with that row's own shift kernel below.
         p_ref = sample_cloud.p_ref_f45(config)
@@ -356,7 +356,7 @@ def build_cloud(config, region):
             f.create_dataset("ON_GRID_YSO", data=on_grid_yso)
 
         # the region's own brightness marginal (sec. 9's report): P_ref
-        # convolved with the region's own shift kernel K (sec. 5.5, W56
+        # convolved with the region's own shift kernel K (sec. 5.5
         # ruling 1, `shift_kernel` -- the SAME K `template_weights
         # .build_yso` reads for its conditional table), peak and 16-84%.
         k_region, mo_k = sample_cloud.shift_kernel(config, region, d_front, d_back)
@@ -369,7 +369,7 @@ def build_cloud(config, region):
         p16_f45, p84_f45 = (float(np.interp(q, cdf, b_centers)) for q in (0.16, 0.84))
 
         # the joint's own depth-brightness correlation (sec. 9's report,
-        # W56 acceptance): 0 before (a strict outer product), negative
+        # the shift-kernel rule acceptance): 0 before (a strict outer product), negative
         # after (deeper is fainter) -- the Pearson correlation of `log10
         # x` and `log10 F_4.5` over one sightline's own on-grid joint mass.
         def _joint_corr(h2d):

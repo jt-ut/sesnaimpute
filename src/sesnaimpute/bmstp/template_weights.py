@@ -45,7 +45,7 @@ brightness, `PI[theta, k] = w_theta K(F_k - c_theta) / p(F_k)`, normalised
 over theta at each cell, `K` the region's own shift kernel
 (`bmstp.sample_cloud.shift_kernel`, imported not re-derived) carrying the
 template's placement at the region's distance and the cloud interval's
-own depth together (W56) -- a brightness-independent table double-counts
+own depth together -- a brightness-independent table double-counts
 the population's own density at the source's flux (sec 4.1).
 """
 
@@ -456,11 +456,11 @@ def yso_population_weight(config):
 
 def build_yso(config, region):
     """P5's YSO table, one per region (spec sec 5.5 "Template weights",
-    REWRITTEN W56): `PI[theta, k] = w_theta K(F_k - c_theta) / p(F_k)`,
+    REWRITTEN the shift-kernel rule): `PI[theta, k] = w_theta K(F_k - c_theta) / p(F_k)`,
     `w_theta` `yso_population_weight`'s survey-wide census weight,
     `c_theta` the template's own flux at the library's 1 kpc reference
     distance (`template_weights._c_theta`, unplaced), `K` the region's own
-    shift kernel (`bmstp.sample_cloud.shift_kernel`, W56 ruling 1: the
+    shift kernel (`bmstp.sample_cloud.shift_kernel`: the
     fallback sightline's own depth draw turned into the distribution of
     `delta = -2 log10(d / 1 kpc)`, carrying the OLD region-distance
     placement and cloud-depth widening together, so neither is applied a
@@ -483,7 +483,7 @@ def build_yso(config, region):
             raise ValueError("template_weights.yso: yso_population_weight's row "
                               "order disagrees with the yso register")
 
-        # the region's own shift kernel (sec 5.5 "Template weights", W56
+        # the region's own shift kernel (sec 5.5 "Template weights"
         # ruling 1 and 3): `K` carries the region-distance placement AND
         # the cloud-depth-and-distance-uncertainty widening together, so
         # `c_theta` (the template's own unplaced 1 kpc flux) is used
@@ -499,7 +499,7 @@ def build_yso(config, region):
 
         # PI[theta, k] = w_theta * K[F_k - c_theta], each template's own
         # copy of the tabulated kernel written only to K's own support
-        # cells (sec 5.5, W56 ruling 3, in place of W25b's Gaussian CDF
+        # cells (sec 5.5, the shift-kernel rule, in place of W25b's Gaussian CDF
         # difference): a sparse accumulation over templates, never a
         # dense (n_model x n_b) evaluation (CODING_RULES_BMSTP.md rule
         # 10a). `idx_center[theta] + m` lands the kernel's own cell `m`

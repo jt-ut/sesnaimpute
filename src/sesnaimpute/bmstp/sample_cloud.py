@@ -7,7 +7,7 @@ and the region's `(LOGSIG_MEAN, LOGSIG_STD)` rather than sampling anything.
 
 A young star's depth and brightness are both functions of its distance
 along the sightline, so `h_YSO(x, F_4.5)` is NOT an outer product (sec.
-5.5 "Marks", W56): `GRID_YSO[x, F] = Sigma_k,sub w_k,sub * 1[x = x_k,sub]
+5.5 "Marks"): `GRID_YSO[x, F] = Sigma_k,sub w_k,sub * 1[x = x_k,sub]
 * P_ref(F - delta_k,sub) (x) N(sigma_d)` -- each depth sub-sample adds one
 shifted-and-smoothed copy of the survey-wide template marginal `P_ref`
 (`p_ref_f45`, at the library's own 1 kpc reference distance, unplaced) to
@@ -35,7 +35,7 @@ the map's reach, so the tail cell's midpoint distance matches
 one level down: the raw, unbinned sub-samples (weight, depth, distance)
 `p(x)`, `shift_kernel` and `GRID_YSO`'s row-by-row construction all share.
 
-`shift_kernel`'s `K(delta)`, per region (sec. 5.5, W56 ruling 1): the
+`shift_kernel`'s `K(delta)`, per region (sec. 5.5): the
 region's FALLBACK sightline's own depth draw turned into the distribution
 of the brightness shift every template rides, `K` independent of the
 template -- every template's brightness is `c_theta + delta` -- and
@@ -155,7 +155,7 @@ def _bin1d(values, w, edges, sigma_cells):
 def _cell_subsamples(loaded, row, d_front, d_back):
     """The raw, unbinned sub-samples a sightline track's own cells
     (restricted to `[d_front, d_back]`, a cell partly inside counting its
-    inside fraction) supply (sec. 5.5 "Marks", W56's shift kernel): `N_SUB`
+    inside fraction) supply (sec. 5.5 "Marks", the shift kernel): `N_SUB`
     equally-weighted sub-samples laid along each surviving cell's own
     `log10 x` segment, mass `p_k * du_k` split `N_SUB` ways as before, each
     sub-sample's own distance `d_k,sub` interpolated LINEARLY in `d` along
@@ -245,7 +245,7 @@ def restrict_old_x_marginal(loaded, row, old_x_marginal, d_front, d_back):
 def p_ref_f45(config):
     """`P_ref`, the census-weighted YSO template marginal AT THE
     LIBRARY'S OWN 1 kpc REFERENCE DISTANCE (sec. 5.5 "Joint shape",
-    W56 ruling 2): `Sigma_theta w_theta delta(F - c_theta)` binned ONCE
+    the shift-kernel rule): `Sigma_theta w_theta delta(F - c_theta)` binned ONCE
     on the common `LOG10_F45` grid -- unplaced at any region's distance,
     unwidened by any cloud depth. `w_theta` is
     `template_weights.yso_population_weight`'s survey-wide census weight
@@ -298,7 +298,7 @@ def _fallback_profile(config, region):
 
 def sigma_d_dex(region):
     """The region's own distance-uncertainty width in `log10 F_4.5`
-    (sec. 5.5 "Marks", W56 ruling 1): `sigma_d = 2 sigma_d,pc / (d_r ln
+    (sec. 5.5 "Marks"): `sigma_d = 2 sigma_d,pc / (d_r ln
     10)` -- the one formula `shift_kernel` and `bmstp.shapes.build_cloud`
     (the per-row Gaussian smoothing `GRID_YSO`'s construction applies, the
     SAME width `shift_kernel` convolves `K` with) share, so it lives in
@@ -311,7 +311,7 @@ def exact_gaussian_kernel(sigma_dex):
     of width `sigma_dex` (floored at one common-grid cell, sec. 2's
     "minimum widths"), each entry the Gaussian's own CDF difference
     across a destination cell offset from the source cell's own center
-    (`build_yso`'s pre-W56 construction, generalised to a fixed kernel
+    (`build_yso`'s Gaussian construction, generalised to a fixed kernel
     since every cell of a uniform grid sees the SAME offset-only
     dependence) -- truncated at +-4 sigma, same as before. NEVER
     `scipy.ndimage.gaussian_filter1d`, whose own discrete kernel is not
@@ -329,7 +329,7 @@ def exact_gaussian_kernel(sigma_dex):
 
 
 def shift_kernel(config, region, d_front, d_back):
-    """`K(delta)`, W56's shift kernel (sec. 5.5, ruling 1): the region's
+    """`K(delta)`, the shift kernel (sec. 5.5, ruling 1): the region's
     FALLBACK sightline's own depth draw (`_fallback_profile`,
     `_cell_subsamples`, the SAME cloud interval every sightline uses --
     ruling: no source counts from P1 enter here) turned into the
