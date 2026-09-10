@@ -84,7 +84,7 @@ PY sesnaimpute.sky.download.h2_knot_surveys.build
 PY sesnaimpute.catalog.curated
 PY sesnaimpute.catalog.depths
 PY sesnaimpute.catalog.coverage   # the atlas's coverage: fraction of each admitted hpx512 pixel with a measured IRAC detection, the catalogue's own footprint (SPEC_BMSTP sec 3.3, sec 8)
-# limits.py has no build: catalog.limits.limits(config, region) reads curated + depths.
+# limits.py has no build: catalog.limits.limits(config, region) reads catalog.depth_grid's per-source product.
 # Downloads keyed on SESNA positions run once the catalogue exists:
 PY sesnaimpute.sky.download.gaia_crossmatch.build
 

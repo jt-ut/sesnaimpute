@@ -28,10 +28,19 @@ proxy's colour is TRILEGAL's own.
 
 Retention keeps every star clearing SESNA's own two-of-eight-band cut
 undimmed, at the region's DEEPEST limits (the 1st percentile, per band,
-of the real catalogue's own per-source 50%-completeness limits): the
+of the real catalogue's own per-source 50%-completeness limits) lowered
+by `ROLL_OFF_WIDTHS` roll-off widths in each band (`10**(-ROLL_OFF_WIDTHS
+* W_DEX[b])` times the deepest limit, `W_DEX` the region's own effective
+roll-off width per band, `catalog.depth_grid`'s per-source limits
+product): the catalogue holds sources to well below its own 50%
+completeness point, and the retention must not truncate the population
+there (coordinator's ruling 2026-09-10) -- three widths is the roll-off's
+own scale where the completeness model's acceptance is already below 1%,
+so nothing the catalogue could plausibly hold is cut by this floor. The
 stored sample must serve every source's own limits, including the
-region's deepest ones, or a source deeper than some coarser reference
-would be missing stars its own depth admits (reading note 04, section A).
+region's deepest ones lowered this way, or a source deeper than some
+coarser reference would be missing stars its own depth admits (reading
+note 04, section A).
 
 What this module does NOT do (IMPLEMENTATION.md section 6, stage 5;
 reading note 04, section A). No placement on the region's extinction
@@ -112,6 +121,15 @@ RETENTION_MIN_BANDS = MIN_BANDS
 #: limits that stands in for "the region's deepest limits"
 #: (SPEC_PRIORS.md section 1.5).
 DEEPEST_LIMIT_PERCENTILE = 1.0
+
+#: How many roll-off widths below the region's deepest per-source limit
+#: the retention floor sits (coordinator's ruling 2026-09-10, module
+#: docstring): the completeness model's own acceptance is already under
+#: 1% this far below the 50% point, so lowering the floor this much
+#: costs nothing the catalogue could plausibly hold while guaranteeing
+#: the retained sample is not truncated above where the real catalogue
+#: still carries sources.
+ROLL_OFF_WIDTHS = 3.0
 
 
 # ---------------------------------------------------------------------------
@@ -348,15 +366,29 @@ def distance_pc(df):
 # retention: the region's deepest limits, two of eight undimmed
 # ---------------------------------------------------------------------------
 
+def _region_width_dex(config, region):
+    """`(8,)`: the region's own effective roll-off width per band
+    (`catalog.depth_grid`'s per-source limits product, `W_DEX` -- the
+    region counts fit's width for the five Spitzer bands, `catalog.depths`'
+    fitted width for the three 2MASS bands, module docstring)."""
+    path = config_module.product_path(config, "catalog", "sesna", "limits", "source", region=region)
+    with h5py.File(path, "r") as f:
+        return np.asarray(f["W_DEX"][:], dtype=np.float64)
+
+
 def deepest_limits(config, region):
     """`(8,)` mJy: the region's deepest per-source 50%-completeness limit
     in each band, the `DEEPEST_LIMIT_PERCENTILE`-th percentile over the
-    real catalogue's own sources (SPEC_PRIORS.md section 1.5) -- so the
+    real catalogue's own sources (SPEC_PRIORS.md section 1.5), lowered by
+    `ROLL_OFF_WIDTHS` roll-off widths (module docstring) -- so the
     retained sample serves every source's own limits, not only a typical
-    one.
+    one, and is not truncated at the catalogue's own 50% point where the
+    real catalogue still holds sources well below it.
     """
     f_lim = limits_module.limits(config, region)
-    return np.percentile(f_lim, DEEPEST_LIMIT_PERCENTILE, axis=0)
+    deepest = np.percentile(f_lim, DEEPEST_LIMIT_PERCENTILE, axis=0)
+    w_dex = _region_width_dex(config, region)
+    return deepest * 10.0 ** (-ROLL_OFF_WIDTHS * w_dex)
 
 
 def passes_two_of_eight(flux, f_lim, min_bands=RETENTION_MIN_BANDS):

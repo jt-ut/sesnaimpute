@@ -23,9 +23,9 @@ per-source map value `DCOMP90` rises with the source's own flux, so the
 median tracks the pixel's median source flux rather than the survey's own
 turnover.
 
-The atlas instead reads two more columns, fitted the marginalised way (spec
-section 3.3): per region and Spitzer band, on the sources of "complete
-low-column" admitted pixels -- IRAC-union coverage above 0.9
+The counts fit, per region and Spitzer band, is the one limit every reader
+now shares (SPEC_BMSTP_DRAFT.md sec. 1.2, 3.3, 6.2): on the sources of
+"complete low-column" admitted pixels -- IRAC-union coverage above 0.9
 (`sky.derived.coverage`) and adopted column below the 25th percentile of
 that well-covered set's own column (`sky/derived/adopted/column`), the
 selection `studies/star_galaxy_level.md` section 1 uses; a region with
@@ -37,17 +37,62 @@ reused rather than re-derived: `y = -log10(f)` plays the role of that
 module's map-relative magnitude `m`, so its `_bin_histogram`/`_fit_free`
 give back a region's bright-end slope `ALPHA_REGION`, 50%-turnover flux
 `F_50_REGION_MJY` and roll-off width `W_REGION_DEX` directly in dex, with no
-unit conversion. Per admitted pixel, `F_LIM_50_PIX_MJY` is the region's
-fitted 50% flux shifted by the positional offset of the pixel's own
-sources' median `log10 DCOMP90` from the region selection's median (every
-one of the pixel's own sources, not detections only -- `DCOMP90` is a map
-value every source carries): `F_LIM_50_PIX_MJY = F_50_REGION_MJY *
-10**(median_pix - median_region)`. `W_DEX_PIX` is the region's own fitted
-width, broadcast to every pixel: no per-source scatter term. A pixel with
-no sources of its own takes its nearest occupied pixel's shift, the same
-fill `F_LIM_50_MED_MJY` uses. The three 2MASS bands carry no per-source map
+unit conversion.
+
+A band's own counts are a valid 50%-turnover fit only where that band's
+own recovery is what cuts them off. Detection is per band (Gutermuth
+2009): a source too faint in one band leaves the SESNA catalogue by the
+two-band rule before its flux in any OTHER band is ever histogrammed, so a
+band whose faint end is set by a DIFFERENT band's requirement reports that
+other band's cutoff as its own 50% limit -- and does so as a CLEAN
+roll-off, since a histogram already cut off by another band's requirement
+is itself well fit by the same power-law-times-erf form the fit assumes
+(the cut-off projected through the catalogue's own colour). The fitted
+model's own expected-vs-observed count below its 50% point therefore
+cannot detect this: the fit reproduces whatever shape it was handed. A
+REPORT-ONLY diagnostic instead reads the recovery curve itself
+(`_recovery_curve`): for band `b`, the band `r` most often measured
+alongside it supplies a median colour on the doubly-detected sources,
+which predicts `b`'s flux for every source with `r` measured; the
+fraction of those predicted fluxes that actually carry `b`'s own
+detection, binned in 0.1 dex, is `b`'s recovery curve as the catalogue
+demonstrates it. A genuine roll-off gives 0.5 at its own fitted `F_50` by
+definition; a band whose recovery curve is still at or above
+`RECOVERY_FLOOR_FRACTION` (90%) there is measured for nearly all of `r`'s
+own catalogued sources at the flux its own fit calls "50% complete",
+flagged `LIMIT_KIND = "bound"` (`"fit"` otherwise) -- but the limit
+itself is NOT substituted (coordinator's ruling 2026-09-10): for a pair
+the two-band rule makes mutually required at the faint end (3.6 and 4.5
+um for field stars), a catalogued source carries both by construction,
+so the measured fraction of EITHER band among catalogued sources is near
+1 whatever its true recovery -- the estimator is a tautology for that
+pair and cannot bound either band's recovery. The pair's inclusion is
+measured only jointly, and the counts fit of each band is that joint
+inclusion projected onto the band; `F_50_REGION_MJY` stays the counts
+fit for every band, truncated or not, and `LIMIT_KIND`/the recovery
+fraction at `F_50` are carried in the per-source product as a diagnostic
+for a later, joint treatment of a coupled pair.
+
+Per source, `F_LIM_50_MJY` is `F_50_REGION_MJY` (the counts fit, unmodified by Part B)
+shifted by the offset of the source's own `log10 DCOMP90` from the region
+selection's median (every one of the region's sources, not detections
+only -- `DCOMP90` is a map value every source carries): `F_LIM_50_MJY =
+F_50_REGION_MJY * 10**(log10 DCOMP90 - median_sel log10 DCOMP90)` -- the
+recovery map supplies only the spatial pattern, normalised on the same
+selection the fit used. This is written as the per-source product
+`catalog/sesna/limits_sesna_source__<Region>.hdf5`
+(`F_LIM_50_MJY` (n, 8), `W_DEX` (8,), `F_50_REGION_MJY`, `ALPHA_REGION`,
+`DCOMP90_REF_LOG10` (8,), `LIMIT_KIND` (8,)), the one product
+`catalog.limits.limits` reads. Per admitted pixel, `F_LIM_50_PIX_MJY` is
+the pixel median of these per-source limits (a pandas groupby, no loop
+over pixels); `F_LIM_50_MED_MJY`, formerly a separate brightness-biased
+median of the OLD per-source rule, is now the identical array -- the two
+readers' 0.14-0.64 dex drift (`studies/star_galaxy_level.md`) is closed
+by construction. `W_DEX_PIX` is `W_DEX` broadcast to every pixel. A pixel
+with no sources of its own takes its nearest occupied pixel's row, the
+same fill both columns use. The three 2MASS bands carry no per-source map
 and keep the region's constant `F50_2MASS_MJY`/`WIDTH_DEX`
-(`catalog.depths`), unchanged.
+(`catalog.depths`), unchanged, for both products.
 """
 
 import os
@@ -57,7 +102,6 @@ import healpy as hp
 import numpy as np
 import pandas as pd
 
-from sesnaimpute import batches as batches_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import progress as progress_module
@@ -68,12 +112,6 @@ from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access as access_module
 
 NSIDE_512 = 512
-
-# Row-batch memory budget for the per-source limits array before its
-# grouping by pixel (CODING_RULES.md rule 10b); at 8 bands of float32
-# plus one int64 pixel id this admits far more than any region's source
-# count in one batch.
-ROW_BATCH_BUDGET_BYTES = 512 << 20
 
 # Ten pixels for the fixed-seed identity check the brief asks for.
 CHECK_SEED = 20260907
@@ -90,6 +128,13 @@ COLUMN_PERCENTILE = 25.0
 # falls back to every one of the region's own sources (flagged in the
 # product's LOW_COLUMN_FALLBACK attribute).
 MIN_LOW_COLUMN_SOURCES = 500
+
+# The recovery curve's own fraction at the band's fitted F_50: a genuine
+# roll-off gives 0.5 there by definition, so a curve still at or above
+# this fraction there has not thinned on its own account at all -- the
+# band is flagged as coupled to its limiting band's requirement, report-
+# only (module docstring, Part B).
+RECOVERY_FLOOR_FRACTION = 0.9
 
 
 def _admitted_pixels_512(config, region):
@@ -267,30 +312,129 @@ def _region_band_counts_fit(fnu, origin, curated_bands, selected_mask):
     return alpha, f50, w
 
 
-def _pixel_dcomp_shift(admitted, hpx_pix_512, dcomp90, curated_bands, selected_mask, f50_region_mjy):
-    """Every admitted pixel's `F_LIM_50_PIX_MJY` (5 Spitzer bands, module
-    docstring): the region's fitted 50% flux shifted by the positional
-    offset of the pixel's own sources' median `log10 DCOMP90` from the
-    region selection's own median, both over every source (not detections
-    only -- `DCOMP90` is a map value every source carries). The empty-pixel
-    fill is `_fill_unoccupied`'s nearest-occupied rule.
+def _source_limits(dcomp90, curated_bands, selected_mask, f50_region_mjy, f50_2mass):
+    """Every catalogued source's own `F_LIM_50_MJY` (8 bands, module
+    docstring, Part A): the region's fitted 50% flux (the counts fit,
+    unmodified by Part B) shifted by the source's own `log10 DCOMP90` offset from the region
+    selection's own median, for the five Spitzer bands -- the recovery
+    map's spatial pattern only, normalised on the same selection the
+    counts fit used. The three 2MASS bands carry no per-source map and
+    take the region's constant `F50_2MASS_MJY` alike for every source.
+    Returns `(f_lim_50_mjy (n, 8), dcomp90_ref_log10 (8,), NaN for 2MASS)`.
     """
-    spitzer_cols = [curated_bands.index(k) for k in limits_module.IRAC_MIPS_KEYS]
-    log_dcomp = np.log10(dcomp90[:, spitzer_cols])
-    median_region = np.median(log_dcomp[selected_mask], axis=0)
+    band_keys = [b.key for b in definitions.BANDS]
+    n = dcomp90.shape[0]
+    f_lim = np.empty((n, len(band_keys)), dtype=np.float64)
+    ref_log10 = np.full(len(band_keys), np.nan)
+    for jk, key in enumerate(limits_module.IRAC_MIPS_KEYS):
+        cb = curated_bands.index(key)
+        j = band_keys.index(key)
+        log_dcomp = np.log10(dcomp90[:, cb])
+        median_sel = float(np.median(log_dcomp[selected_mask]))
+        ref_log10[j] = median_sel
+        f_lim[:, j] = f50_region_mjy[jk] * 10.0 ** (log_dcomp - median_sel)
+    for tk, key in enumerate(limits_module.TWOMASS_KEYS):
+        j = band_keys.index(key)
+        f_lim[:, j] = f50_2mass[tk]
+    return f_lim, ref_log10
 
-    df = pd.DataFrame(log_dcomp, columns=list(limits_module.IRAC_MIPS_KEYS))
-    df["HPX_PIX_512"] = hpx_pix_512
-    grouped = df.groupby("HPX_PIX_512", sort=True)
-    occ_n = grouped.size().to_numpy(dtype=np.int32)
-    occ_med = grouped[list(limits_module.IRAC_MIPS_KEYS)].median()
-    occupied = occ_med.index.to_numpy(dtype=np.int64)
-    occupied_medians = occ_med.to_numpy(dtype=np.float64)
 
-    pix, _, filled_medians, n_filled = _fill_unoccupied(admitted, occupied, occ_n, occupied_medians)
-    shift = filled_medians - median_region[None, :]
-    f_lim = f50_region_mjy[None, :] * 10.0 ** shift
-    return pix, f_lim, shift, n_filled
+def _limiting_band(origin, curated_bands, selected_mask, band_key):
+    """The other band most often measured alongside `band_key` within the
+    region's own low-column selection (module docstring, Part B): the
+    pairing the catalogue affords for a truncated band's recovery curve.
+    """
+    band_keys = [b.key for b in definitions.BANDS]
+    cb = curated_bands.index(band_key)
+    best_key, best_n = None, -1
+    for key in band_keys:
+        if key == band_key:
+            continue
+        cr = curated_bands.index(key)
+        n_both = int(np.count_nonzero(selected_mask & (origin[:, cb] == 1) & (origin[:, cr] == 1)))
+        if n_both > best_n:
+            best_n, best_key = n_both, key
+    return best_key
+
+
+def _recovery_curve(fnu, origin, curated_bands, selected_mask, band_key, ref_key):
+    """The catalogue's own demonstrated recovery curve of `band_key`
+    (module docstring, Part B): the median colour `log10(F_b/F_r)` on
+    sources with both `band_key` and the limiting band `ref_key` measured
+    predicts `F_b` for every source with `ref_key` measured; the fraction
+    of those predictions that carry `band_key`'s own detection, binned in
+    0.1 dex of the predicted flux, is `band_key`'s recovery curve -- the
+    diagnostic a truncated band's OWN counts fit cannot supply, since a
+    histogram cut off by another band's requirement is itself well fit by
+    a roll-off (the cut-off projected through the catalogue's own
+    colour). Returns `(centers_y, frac, n_total)` sorted bright to faint
+    (`y = -log10 F`), or `(None, None, None)` if `band_key` and `ref_key`
+    are never doubly detected.
+    """
+    cb = curated_bands.index(band_key)
+    cr = curated_bands.index(ref_key)
+    both = selected_mask & (origin[:, cb] == 1) & (origin[:, cr] == 1)
+    if not np.any(both):
+        return None, None, None
+    colour = float(np.median(np.log10(fnu[both, cb]) - np.log10(fnu[both, cr])))
+    has_r = selected_mask & (origin[:, cr] == 1)
+    f_b_pred = fnu[has_r, cr] * 10.0 ** colour
+    b_measured = origin[has_r, cb] == 1
+
+    y = -np.log10(f_b_pred)
+    centers, _ = depths_module._bin_histogram(y)
+    edges = (centers[0] - 0.5 * depths_module.MAG_BIN
+             + depths_module.MAG_BIN * np.arange(centers.size + 1))
+    idx = np.clip(np.searchsorted(edges, y, side="right") - 1, 0, centers.size - 1)
+    n_total = np.bincount(idx, minlength=centers.size).astype(float)
+    n_meas = np.bincount(idx[b_measured], minlength=centers.size).astype(float)
+    occ = n_total > 0
+    c, frac, nt = centers[occ], n_meas[occ] / n_total[occ], n_total[occ]
+    order = np.argsort(c)
+    return c[order], frac[order], nt[order]
+
+
+def _recovery_fraction_at(c, frac, y_query):
+    """The recovery curve's own fraction at `y_query` (`y = -log10 F`,
+    linear interpolation, module docstring, Part B's diagnostic): a
+    genuine roll-off gives 0.5 at its own fitted 50% point by definition,
+    so this is what the diagnostic reads at `F_50,b`. Clipped to the
+    curve's own bright/faint endpoints; `NaN` if there is no curve.
+    """
+    if c is None or c.size == 0:
+        return np.nan
+    return float(np.interp(y_query, c, frac))
+
+
+def _truncation_test(fnu, origin, curated_bands, selected_mask, f50):
+    """Per Spitzer band, the catalogue's own recovery curve (`_recovery_
+    curve`) evaluated at the band's own fitted `F_50` (module docstring,
+    Part B, REPORT-ONLY): a genuine roll-off gives 0.5 there by
+    definition, since the fit's `F_50` IS the flux at which the band's
+    own detections thin to half; a band still measured for
+    `RECOVERY_FLOOR_FRACTION` (90%) or more of the catalogued sources at
+    that same flux is not thinning on its own account there at all --
+    its faint end is coupled to the limiting band `r`'s requirement, not
+    to its own recovery. (The expected-vs-observed-count-below-F50 form
+    of this test cannot see the effect: a histogram already cut off by
+    another band is itself well fit by a roll-off, so the fit's own
+    model reproduces the cut-off it was handed.) Returns `(truncated
+    (5,) bool, recovery_at_f50 (5,), limiting_band (5,) str)`.
+    """
+    n = len(limits_module.IRAC_MIPS_KEYS)
+    truncated = np.zeros(n, dtype=bool)
+    recovery_at_f50 = np.full(n, np.nan)
+    limiting_band = [None] * n
+    for jk, key in enumerate(limits_module.IRAC_MIPS_KEYS):
+        if not np.isfinite(f50[jk]):
+            continue
+        r_key = _limiting_band(origin, curated_bands, selected_mask, key)
+        c, frac, _nt = _recovery_curve(fnu, origin, curated_bands, selected_mask, key, r_key)
+        limiting_band[jk] = r_key
+        rec = _recovery_fraction_at(c, frac, -np.log10(f50[jk]))
+        recovery_at_f50[jk] = rec
+        truncated[jk] = np.isfinite(rec) and rec >= RECOVERY_FLOOR_FRACTION
+    return truncated, recovery_at_f50, limiting_band
 
 
 def _fill_unoccupied(admitted, occupied, occupied_n_sources, occupied_medians):
@@ -344,42 +488,25 @@ def _check_identity(hpx_pix_512, source_limits, occupied, occupied_medians,
 
 
 def build(config, regions=None):
-    """Builds the per-region depth-grid product for the given regions
-    (default: every region in `regions.REGIONS`).
+    """Builds the per-region depth-grid product and the per-source limits
+    product it is built from (default: every region in `regions.REGIONS`).
     """
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
 
+    band_keys = [b.key for b in definitions.BANDS]
     with progress_module.Stage("catalog.depth_grid") as st:
         n_done = 0
         out_paths = []
         n_admitted_total = n_occupied_total = n_filled_total = 0
         for region in regions:
             rs = access_module.region_slice(config, region)
-            source_limits = limits_module.limits(config, region)
-
-            hpx_pix_512_parts, limits_parts = [], []
-            row_bytes = 8 + 8 * 4
-            for start, stop in batches_module.batches(
-                rs["n_sources"], row_bytes, budget_bytes=ROW_BATCH_BUDGET_BYTES
-            ):
-                hpx_pix_512_parts.append(rs["hpx_pix_512"][start:stop])
-                limits_parts.append(source_limits[start:stop])
-            hpx_pix_512 = np.concatenate(hpx_pix_512_parts)
-            all_limits = np.concatenate(limits_parts)
-
-            occupied, occupied_n_sources, occupied_medians = _pixel_medians(hpx_pix_512, all_limits)
+            hpx_pix_512 = rs["hpx_pix_512"]
             admitted = _admitted_pixels_512(config, region)
-            pix, n_sources, f_lim_50_med_mjy, n_filled = _fill_unoccupied(
-                admitted, occupied, occupied_n_sources, occupied_medians
-            )
-            _check_identity(hpx_pix_512, all_limits, occupied, occupied_medians,
-                             admitted.size, n_filled, region)
 
-            # the marginalised limit and width (module docstring, spec
-            # section 3.3): the region-band counts fit on the complete
-            # low-column pixels' own sources, never on `limits()`'s
-            # already-rescaled `F_lim,50`.
+            # the marginalised limit (module docstring, Part A): the
+            # region-band counts fit on the complete low-column pixels'
+            # own detected sources, in absolute flux.
             fnu, dcomp90, origin, curated_bands = _raw_source_arrays(config, region)
             width_dex, f50_2mass = _depth_fit_params(config, region)
             selected_mask, n_low_column, fallback = _low_column_selection(
@@ -388,41 +515,79 @@ def build(config, regions=None):
             alpha_region, f50_region_mjy, w_region_dex = _region_band_counts_fit(
                 fnu, origin, curated_bands, selected_mask
             )
-            _, f_lim_spitzer, shift, n_filled_shift = _pixel_dcomp_shift(
-                admitted, hpx_pix_512, dcomp90, curated_bands, selected_mask, f50_region_mjy
-            )
 
-            band_keys = [b.key for b in definitions.BANDS]
-            f_lim_50_pix_mjy = np.empty((pix.size, len(band_keys)), dtype=np.float64)
-            w_dex_pix = np.empty((pix.size, len(band_keys)), dtype=np.float64)
+            # the recovery curve's own fraction at each band's fitted
+            # F_50 is a REPORT-ONLY diagnostic and flag (module
+            # docstring, Part B): for a pair the two-band rule makes
+            # mutually required at the faint end, a catalogued source
+            # carries both by construction, so this estimator is a
+            # tautology for that pair and cannot bound either band's
+            # recovery -- the limit itself stays at the counts fit.
+            truncated, recovery_at_f50, limiting_band = _truncation_test(
+                fnu, origin, curated_bands, selected_mask, f50_region_mjy
+            )
+            limit_kind = ["fit"] * len(limits_module.IRAC_MIPS_KEYS)
             for jk, key in enumerate(limits_module.IRAC_MIPS_KEYS):
-                j = band_keys.index(key)
-                f_lim_50_pix_mjy[:, j] = f_lim_spitzer[:, jk]
-                w_dex_pix[:, j] = w_region_dex[jk]
-            for tk, key in enumerate(limits_module.TWOMASS_KEYS):
-                j = band_keys.index(key)
-                f_lim_50_pix_mjy[:, j] = f50_2mass[tk]
-                w_dex_pix[:, j] = width_dex[j]
+                if truncated[jk]:
+                    limit_kind[jk] = "bound"
+                print("catalog.depth_grid: %s %s in %s (recovery at fitted F_50=%.3f, limiting band %s)"
+                      % (key, "coupled" if truncated[jk] else "not coupled", region,
+                         recovery_at_f50[jk], limiting_band[jk]))
+
+            # every catalogued source's own limit (module docstring, Part
+            # A) -- the one array `catalog.limits.limits` reads.
+            f_lim_50_mjy, dcomp90_ref_log10 = _source_limits(
+                dcomp90, curated_bands, selected_mask, f50_region_mjy, f50_2mass
+            )
 
             alpha_full = np.full(len(band_keys), np.nan)
             f50_full = np.full(len(band_keys), np.nan)
-            w_full = np.full(len(band_keys), np.nan)
+            w_full = np.full(len(band_keys), np.nan)          # Spitzer-only, diagnostic
+            w_dex_full = np.full(len(band_keys), np.nan)      # effective width, all 8 bands
+            limit_kind_full = np.array(["fit"] * len(band_keys), dtype="S8")
             for jk, key in enumerate(limits_module.IRAC_MIPS_KEYS):
                 j = band_keys.index(key)
                 alpha_full[j] = alpha_region[jk]
                 f50_full[j] = f50_region_mjy[jk]
                 w_full[j] = w_region_dex[jk]
+                w_dex_full[j] = w_region_dex[jk]
+                limit_kind_full[j] = limit_kind[jk].encode()
+            for key in limits_module.TWOMASS_KEYS:
+                j = band_keys.index(key)
+                w_dex_full[j] = width_dex[j]
 
-            spitzer_cols = [band_keys.index(k) for k in limits_module.IRAC_MIPS_KEYS]
-            shift_med = float(np.median(np.log10(
-                f_lim_50_pix_mjy[:, spitzer_cols] / f_lim_50_med_mjy[:, spitzer_cols]
-            )))
+            source_out_path = config_module.product_path(
+                config, "catalog", "sesna", "limits", "source", region=region
+            )
+            os.makedirs(os.path.dirname(source_out_path), exist_ok=True)
+            with h5py.File(source_out_path, "w") as f:
+                f.attrs["GRANULE"] = "source"
+                f.create_dataset("F_LIM_50_MJY", data=f_lim_50_mjy.astype(np.float32))
+                f.create_dataset("W_DEX", data=w_dex_full)
+                f.create_dataset("F_50_REGION_MJY", data=f50_full)
+                f.create_dataset("ALPHA_REGION", data=alpha_full)
+                f.create_dataset("DCOMP90_REF_LOG10", data=dcomp90_ref_log10)
+                f.create_dataset("LIMIT_KIND", data=limit_kind_full)
+
+            # the pixel grid (module docstring, Part A): F_LIM_50_PIX_MJY
+            # and F_LIM_50_MED_MJY are now the same pixel median of the
+            # corrected per-source limits, closing the two readers' drift.
+            occupied, occupied_n_sources, occupied_medians = _pixel_medians(
+                hpx_pix_512, f_lim_50_mjy.astype(np.float32)
+            )
+            pix, n_sources, f_lim_50_pix_mjy, n_filled = _fill_unoccupied(
+                admitted, occupied, occupied_n_sources, occupied_medians
+            )
+            _check_identity(hpx_pix_512, f_lim_50_mjy.astype(np.float32), occupied, occupied_medians,
+                             admitted.size, n_filled, region)
+            w_dex_pix = np.broadcast_to(w_dex_full[None, :], (pix.size, len(band_keys))).astype(np.float32)
+
             print("depth_grid fit, %s: low_column_sources=%d fallback=%s"
                   % (region, n_low_column, fallback))
             print("  ALPHA_REGION=%s" % np.round(alpha_full, 3).tolist())
-            print("  F_50_REGION_MJY=%s" % np.round(f50_full, 4).tolist())
-            print("  W_REGION_DEX=%s" % np.round(w_full, 3).tolist())
-            print("  median log10(F_LIM_50_PIX/F_LIM_50_MED), Spitzer bands=%.3f" % shift_med)
+            print("  F_50_REGION_MJY=%s (Part B does not substitute; LIMIT_KIND is report-only)"
+                  % np.round(f50_region_mjy, 4).tolist())
+            print("  W_REGION_DEX=%s LIMIT_KIND=%s" % (np.round(w_full, 3).tolist(), limit_kind))
 
             out_path = config_module.product_path(
                 config, "catalog", "sesna", "depth-grid", "hpx512", region=region
@@ -435,11 +600,12 @@ def build(config, regions=None):
                 f.attrs["W_REGION_DEX"] = w_full
                 f.attrs["LOW_COLUMN_N_SOURCES"] = n_low_column
                 f.attrs["LOW_COLUMN_FALLBACK"] = fallback
+                f.attrs["LIMIT_KIND"] = limit_kind_full
                 f.create_dataset("HPX_PIX_512", data=pix)
                 f.create_dataset("N_SOURCES", data=n_sources)
-                f.create_dataset("F_LIM_50_MED_MJY", data=f_lim_50_med_mjy)
+                f.create_dataset("F_LIM_50_MED_MJY", data=f_lim_50_pix_mjy.astype(np.float32))
                 f.create_dataset("F_LIM_50_PIX_MJY", data=f_lim_50_pix_mjy.astype(np.float32))
-                f.create_dataset("W_DEX_PIX", data=w_dex_pix.astype(np.float32))
+                f.create_dataset("W_DEX_PIX", data=w_dex_pix)
 
             out_paths.append(out_path)
             n_admitted_total += int(admitted.size)
