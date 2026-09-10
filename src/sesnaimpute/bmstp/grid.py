@@ -49,7 +49,7 @@ _B_CENTERS = LOG10_F45_EDGES[:-1] + 0.5 * D_LOG10_F45
 #: peak cell (sec. 2, "the floor").
 FLOOR = 1e-6
 
-#: W61 (sec. 2 "minimum widths", sec. 5.1 "Marks"): the number of
+#: (sec. 2 "minimum widths", sec. 5.1 "Marks"): the number of
 #: geometric depth-uncertainty width classes a field star's own `sigma_x`
 #: (the map's propagated column sigma at the star's distance, in `log10
 #: x`) is quantised to, between the one-cell floor and a tile's own
@@ -102,7 +102,7 @@ def bin(x, log10_f45, w):
 
 
 def bin_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
-    """STAR/AGB's own per-class depth-uncertainty smoothing (W61, sec. 2
+    """STAR/AGB's own per-class depth-uncertainty smoothing (sec. 2
     "minimum widths", sec. 5.1 "Marks"): like `bin`, but the `log10 x`
     axis is smoothed by each star's OWN width class instead of the fixed
     one-cell floor -- the field-star depth mark carries the map's own

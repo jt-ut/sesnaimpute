@@ -727,7 +727,7 @@ class _RegionProfile:
         with h5py.File(profile_path, "r") as f:
             self.dist = f["DIST_PC"][:].astype(float)
             self.a_cum = f["A_CUM_K"][:].astype(float)
-            # W61 (sec 2 "minimum widths", sec 5.1 "Marks"): the map's own
+            # (sec 2 "minimum widths", sec 5.1 "Marks"): the map's own
             # correlated cumulative-column sigma and each sightline's total
             # column, read alongside A_CUM_K for the field-star depth
             # mark's own uncertainty width.
@@ -816,7 +816,7 @@ class _RegionProfile:
         return a / np.asarray(total_column_ak, dtype=float)
 
     def column_and_sigma(self, d_pc, row):
-        """`(A(d), sigma_A(d))` at profile row `row` (W61, sec 2 "minimum
+        """`(A(d), sigma_A(d))` at profile row `row` (sec 2 "minimum
         widths", sec 5.1 "Marks"): `A_CUM_K`/`SIGMA_COR_K` interpolated
         directly on `DIST_PC`, flat beyond the map's own edge -- no
         far-field tail here, since a caller forming the ratio
@@ -831,7 +831,7 @@ class _RegionProfile:
 
     def row_of_lb(self, l_deg, b_deg):
         """`(row, hpx_pix)`: the admitted sightline nearest `(l_deg,
-        b_deg)` (W61), plain angular-separation argmax over this
+        b_deg)`, plain angular-separation argmax over this
         profile's own admitted sightlines -- stands in for a population
         member's own sky position where it has none (a TRILEGAL field
         star, `population.star_population`'s module docstring: "a field

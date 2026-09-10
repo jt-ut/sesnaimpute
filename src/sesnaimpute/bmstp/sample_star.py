@@ -78,7 +78,7 @@ def sample_star(config, region, tile_id):
 
 
 # ---------------------------------------------------------------------------
-# W61: the field-star depth mark's own width -- the map's propagated
+# the field-star depth mark's own width -- the map's propagated
 # column sigma at the star's distance, quantised to N_WIDTH_CLASSES
 # geometric classes between the one-cell floor and the tile's own
 # cloud-interval-span cap (SPEC_BMSTP_DRAFT.md sec. 2, sec. 5.1 "Marks").
@@ -111,7 +111,7 @@ def _tile_centre_lb(config, region, tile_id):
 
 
 def tile_width_classes(config, region, tile_id):
-    """`(row, sigma_classes_dex)` (W61 "the rule"): the tile's own
+    """`(row, sigma_classes_dex)` (the depth-width rule): the tile's own
     representative sightline (`_RegionProfile.row_of_lb` at the tile's
     own centre) and its `grid.N_WIDTH_CLASSES` geometric width classes in
     `log10 x`, floored at one grid cell (`grid._X_CELL_WIDTH`) and capped
@@ -139,7 +139,7 @@ def tile_width_classes(config, region, tile_id):
 
 def star_width_class(config, region, dist_pc, row, sigma_classes_dex):
     """Per star, the width-class index (0..N_WIDTH_CLASSES-1) nearest its
-    own `sigma_x` (W61 "the rule"): `sigma_A(d) / (A(d) ln 10)`, `A(d)`
+    own `sigma_x` (the depth-width rule): `sigma_A(d) / (A(d) ln 10)`, `A(d)`
     and `sigma_A(d)` the tile's representative sightline's own
     `A_CUM_K`/`SIGMA_COR_K` (`_RegionProfile.column_and_sigma`) at the
     star's own distance, clipped to the class range before the
@@ -154,7 +154,7 @@ def star_width_class(config, region, dist_pc, row, sigma_classes_dex):
 
 
 def star_distances(config, region, tile_id):
-    """Each retained field star's own TRILEGAL distance (W61's `d_i`):
+    """Each retained field star's own TRILEGAL distance (`d_i`, sec. 5.1 "Marks"):
     `STAR_INDEX` into the field-stars product's own `DIST_PC`, the SAME
     join `sample_star` uses for `F_4.5`."""
     with h5py.File(_tile_path(config, region), "r") as f:
@@ -165,7 +165,7 @@ def star_distances(config, region, tile_id):
 
 
 def agb_star_distances(config, region, tile_id):
-    """AGB's own distance array (W61), row-aligned with `sample_agb`'s
+    """AGB's own distance array row-aligned with `sample_agb`'s
     `(x, log10_f45, w)`: the evolved subset's own distance, duplicated
     (O-rich draw, then C-rich) the same way `sample_agb` duplicates `u`
     (AGB follows STAR, sec. 5.2)."""

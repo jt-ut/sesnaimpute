@@ -57,7 +57,7 @@ def _build_one_tile(config, region, tile_id):
     x_s, f45_s, w_s = sample_star.sample_star(config, region, tile_id)
     x_a, f45_a, w_a = sample_star.sample_agb(config, region, tile_id)
 
-    # W61 (sec. 2 "minimum widths", sec. 5.1 "Marks"): the field-star
+    # (sec. 2 "minimum widths", sec. 5.1 "Marks"): the field-star
     # depth mark's own width is the map's propagated column sigma at the
     # star's distance, not a fixed one cell -- AGB follows STAR (the same
     # stars, sec. 5.2), so both read the SAME tile width classes.
