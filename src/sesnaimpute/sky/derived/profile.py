@@ -495,12 +495,12 @@ def _far_field_residual(a_edge_raw, a_inf, rho_edge, efold):
     implies through the sightline's own tail shape, `A_tail,map =
     rho_edge * efold`: at high latitude the map under-resolves dense
     cloud that the star-colour column already sees (median share of the
-    column the uncapped rule puts beyond the map's 2 kpc edge: 0.43
+    column that `max(0, A_inf - A_edge)` alone puts beyond the map's 2 kpc edge: 0.43
     Ophiuchus, 0.37 Aquila, 0.29 Pipe, 0.14 Orion A, 0.08 Perseus,
     against the map's own edge-density share 0.000 / 0.014 / 0.21 /
     0.013 / 0.000 -- so that column belongs inside the cloud instead.
     `residual = min(max(0, A_inf - A_edge), A_tail,map)`: never more
-    than today's residual, never more than the map itself implies. The
+    than the raw excess, never more than the map itself implies. The
     remainder of the excess is spread inside the map in the map's own
     shape by scaling the in-map profile (and its density) by `s =
     (A_inf - residual)/A_edge >= 1`. The existing rescale-DOWN case (the
