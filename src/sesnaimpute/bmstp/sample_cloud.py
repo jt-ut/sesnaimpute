@@ -5,9 +5,19 @@ its own: sec. 5.6 "Marks" says its `x` is YSO's and its brightness is a
 separable region Gaussian, so `bmstp.shapes` reads YSO's own `X_MARGINAL`
 and the region's `(LOGSIG_MEAN, LOGSIG_STD)` rather than sampling anything.
 
-`h_YSO(x, F_4.5) = p(x) * p(F_4.5)` is a strict outer product (sec. 5.5
-"Marks"): the two marks are independent, so each is built as its own 1-D
-shape and the joint grid is formed by `np.outer` at write time.
+A young star's depth and brightness are both functions of its distance
+along the sightline, so `h_YSO(x, F_4.5)` is NOT an outer product (sec.
+5.5 "Marks", W56): `GRID_YSO[x, F] = Sigma_k,sub w_k,sub * 1[x = x_k,sub]
+* P_ref(F - delta_k,sub) (x) N(sigma_d)` -- each depth sub-sample adds one
+shifted-and-smoothed copy of the survey-wide template marginal `P_ref`
+(`p_ref_f45`, at the library's own 1 kpc reference distance, unplaced) to
+its own row of the grid, `delta_k,sub = -2 log10(d_k,sub / 1 kpc)` the
+brightness shift that sub-sample's own distance implies. `bmstp.shapes`
+forms this per sightline by grouping sub-samples into their own `log10 x`
+row first (mathematically identical, since the shift-then-smooth
+convolution is linear and additive over sub-samples in the same row) and
+convolving that row's own binned-and-smoothed shift distribution with
+`P_ref` in one pass. `X_MARGINAL` (`p(x)` below) is unchanged in value.
 
 `p(x)`, per sightline: reuses `population.yso`'s own vetted embedding-
 density construction (`_load_profile_arrays`, `embedding_and_ridge`) at its
@@ -21,25 +31,28 @@ distance edges are formed the same way `population.yso`'s own tail cell is
 (`d_mid_tail = dist_pc[-1] + tail_efold`, sec. 6.3 there): the map's own
 `DIST_PC` points, plus one more edge `dist_pc[-1] + 2 * tail_efold` past
 the map's reach, so the tail cell's midpoint distance matches
-`population.yso`'s exactly.
+`population.yso`'s exactly. `_cell_subsamples` is `p(x)`'s own machinery
+one level down: the raw, unbinned sub-samples (weight, depth, distance)
+`p(x)`, `shift_kernel` and `GRID_YSO`'s row-by-row construction all share.
 
-`p(F_4.5)`, per region (the SAME shape at every sightline of the region):
-the YSO register's own templates, weighted by
-`template_weights.yso_population_weight` (Dunham et al. 2015's own census
-density over each template's `log10 f_ref,4.5,theta` divided by the
-library's density of templates in the same quantity, times inclination
-uniform in cos i and the evolutionary-class census, sec. 1.4, owner's
-ruling 2026-09-09) -- called directly here rather than re-derived, the one
-place that weight is formed -- each at `log10 F_4.5 = log10
-F_REF_I2,theta - 2 log10(d_r / 1 kpc)`, widened by the cloud's own depth
-and the region's distance uncertainty as a Gaussian in `log10 F_4.5`.
+`shift_kernel`'s `K(delta)`, per region (sec. 5.5, W56 ruling 1): the
+region's FALLBACK sightline's own depth draw turned into the distribution
+of the brightness shift every template rides, `K` independent of the
+template -- every template's brightness is `c_theta + delta` -- and
+carrying the old cloud-depth-and-distance-uncertainty widening term
+itself, so that term is never applied a second time. `template_weights
+.build_yso` reads `K` for its own conditional table (sec. 5.5 "Template
+weights"); `bmstp.atlas._yso_register`'s Monte Carlo draws `delta` from
+the same `K`.
 """
 
 import h5py
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
+from scipy.special import ndtr
 
 from sesnaimpute import config as config_module
+from sesnaimpute import regions as regions_module
 from sesnaimpute.bmstp import grid, template_weights
 from sesnaimpute.population import yso as yso_module
 
@@ -139,18 +152,19 @@ def _bin1d(values, w, edges, sigma_cells):
     return h, mass_outside
 
 
-def sample_x(loaded, row, d_front, d_back):
-    """YSO's own-sightline depth mark, `p(x)` (sec. 5.5 "Marks"): the
-    profile's native cells restricted to those whose distance range
-    overlaps `[d_front, d_back]` -- a cell partly inside counts its
-    inside fraction -- `x = u(d)` over the surviving cells, mass `p_k *
-    du_k` as before, laid in `N_SUB` equally-weighted sub-samples along
-    each cell's own `log10 x` segment before the common grid's one-cell
-    smoothing (sec. 5.5, sec. 2 "minimum widths"). Returns `(p_x,
-    mass_outside, removed_frac)`: `removed_frac` is the fraction of the
-    sightline's own (pre-restriction) mass the cloud-interval restriction
-    removed, report-only (sec. 5.5's "1-9 percent median, up to 84
-    percent")."""
+def _cell_subsamples(loaded, row, d_front, d_back):
+    """The raw, unbinned sub-samples a sightline track's own cells
+    (restricted to `[d_front, d_back]`, a cell partly inside counting its
+    inside fraction) supply (sec. 5.5 "Marks", W56's shift kernel): `N_SUB`
+    equally-weighted sub-samples laid along each surviving cell's own
+    `log10 x` segment, mass `p_k * du_k` split `N_SUB` ways as before, each
+    sub-sample's own distance `d_k,sub` interpolated LINEARLY in `d` along
+    the same cell at the same fractional position (the cell's own `(u, d)`
+    segment is monotonic in both). Returns `(log10x_nudged, w, d_sub,
+    removed_frac)`, all `(n_cell_kept * N_SUB,)` flat except the scalar
+    `removed_frac` -- `sample_x` bins `log10x_nudged` into `p_x`;
+    `shift_kernel` and `bmstp.shapes._build_one_sightline` turn `d_sub`
+    into the brightness shift `delta = -2 log10(d_sub / 1 kpc)`."""
     u_edges = loaded["u_edges"][row]
     d_edges = loaded["d_edges"][row]
     p_u = loaded["p_u"][row]
@@ -170,14 +184,37 @@ def sample_x(loaded, row, d_front, d_back):
     mass_k = (mass * inside_frac)[keep]
     log10x_lo = np.log10(np.maximum(u_lo[keep], _X_FLOOR))
     log10x_hi = np.log10(np.maximum(u_hi[keep], _X_FLOOR))
+    # a cell straddling an interval edge keeps only its own inside
+    # fraction's worth of mass (above) but, without this clip, would
+    # still spread its sub-samples' own DISTANCE across the cell's full
+    # (unrestricted) span -- clipped to `[d_front, d_back]` so every
+    # sub-sample's `d_k,sub` (and the brightness shift it implies) stays
+    # inside the cloud interval the weight already restricts it to.
+    d_lo_k = np.clip(d_lo[keep], d_front, d_back)
+    d_hi_k = np.clip(d_hi[keep], d_front, d_back)
 
     log10x = log10x_lo[:, None] + _SUB_T[None, :] * (log10x_hi - log10x_lo)[:, None]
+    d_sub = d_lo_k[:, None] + _SUB_T[None, :] * (d_hi_k - d_lo_k)[:, None]
     w = np.broadcast_to((mass_k / N_SUB)[:, None], log10x.shape)
     # edge convention (sec. 2): a mark exactly on a cell edge belongs to
     # the cell below it (`bmstp.grid.bin`'s own nudge, repeated here since
     # this is a standalone 1-D bin, not a call to `grid.bin`).
     log10x_nudged = np.nextafter(log10x.ravel(), -np.inf)
-    p_x, mass_outside = _bin1d(log10x_nudged, w.ravel(), grid.LOG10_X_EDGES, sigma_cells=1.0)
+    return log10x_nudged, w.ravel(), d_sub.ravel(), removed_frac
+
+
+def sample_x(loaded, row, d_front, d_back):
+    """YSO's own-sightline depth mark, `p(x)` (sec. 5.5 "Marks"): the
+    profile's native cells restricted to those whose distance range
+    overlaps `[d_front, d_back]`, laid in `N_SUB` sub-samples per cell
+    (`_cell_subsamples`) and binned on the common `log10 x` grid with the
+    usual one-cell smoothing (sec. 2 "minimum widths"). Returns `(p_x,
+    mass_outside, removed_frac)`: `removed_frac` is the fraction of the
+    sightline's own (pre-restriction) mass the cloud-interval restriction
+    removed, report-only (sec. 5.5's "1-9 percent median, up to 84
+    percent")."""
+    log10x_nudged, w, _d_sub, removed_frac = _cell_subsamples(loaded, row, d_front, d_back)
+    p_x, mass_outside = _bin1d(log10x_nudged, w, grid.LOG10_X_EDGES, sigma_cells=1.0)
     return p_x, mass_outside, removed_frac
 
 
@@ -205,49 +242,124 @@ def restrict_old_x_marginal(loaded, row, old_x_marginal, d_front, d_back):
     return restricted / total if total > 0 else restricted
 
 
-def sample_f45(config, region, d_r_pc, sigma_d_pc, d_front, d_back):
-    """YSO's own brightness mark, `p(F_4.5)` (sec. 5.5 "Marks"), the same
-    shape at every sightline of the region: the YSO register's templates,
-    weighted by `template_weights.yso_population_weight` (Dunham et al.
-    2015's own census density over each template's `log10
+def p_ref_f45(config):
+    """`P_ref`, the census-weighted YSO template marginal AT THE
+    LIBRARY'S OWN 1 kpc REFERENCE DISTANCE (sec. 5.5 "Joint shape",
+    W56 ruling 2): `Sigma_theta w_theta delta(F - c_theta)` binned ONCE
+    on the common `LOG10_F45` grid -- unplaced at any region's distance,
+    unwidened by any cloud depth. `w_theta` is
+    `template_weights.yso_population_weight`'s survey-wide census weight
+    (Dunham et al. 2015's own census density over each template's `log10
     f_ref,4.5,theta` divided by the library's density of templates in the
     same quantity, times inclination uniform in cos i and the
-    evolutionary-class census, sec. 1.4, owner's ruling 2026-09-09)
-    -- called directly rather than re-derived, so the
-    weight formula lives in exactly one place for `build_yso`, this
-    function and `bmstp.atlas._yso_register` alike. Each template placed
-    at `log10 F_4.5 = log10 F_REF_I2,theta - 2 log10(d_r / 1 kpc)`,
-    widened as a Gaussian in `log10 F_4.5` by the cloud's own depth and
-    the region's distance uncertainty together, `2 log10(d_back/d_front)
-    + 2 sigma_d/(d_r ln 10)` (sec. 5.5 "Marks", using the DOUBLED cloud
-    interval, W24b). Returns `(p_f45, mass_outside, width_dex,
-    mass_above_top)`: `mass_above_top` is the raw (pre-widening) weight
-    above the grid's own top edge (sec. 9's 0.1% bar)."""
+    evolutionary-class census, sec. 1.4, owner's ruling 2026-09-09),
+    `c_theta` `template_weights._c_theta`'s own `log10 F_REF_I2,theta`
+    (floored at the register's `FLOOR_LINEAR`, sec. 3.5). Every region's
+    own distance and every sightline's own cloud depth enter only through
+    `shift_kernel`'s convolution kernel, never here: survey-wide,
+    independent of region. Returns `p_ref`, summing to the survey's own
+    on-grid census share (`Sigma w_theta = 1` by construction, sec. 5.5;
+    what falls outside the grid at `c_theta` alone is off by construction,
+    before any placement)."""
     reg = template_weights._read_register(config, "yso")
-    names, f_ref_i2 = reg["names"], reg["f_ref"]["I2"]
+    c_theta = template_weights._c_theta(reg)
+    _names_w, w_theta = template_weights.yso_population_weight(config)
+    h, _ = np.histogram(c_theta, bins=grid.LOG10_F45_EDGES, weights=w_theta)
+    return h
 
-    # the register's own FREFRAW convention (sec. 3.5): F_REF is raw and
-    # must be floored at FLOOR_LINEAR before a log, the same rule
-    # `fittp.sweep._register` applies -- 703 of 200,000 YSO templates
-    # carry an I2 reference flux of exactly zero (an edge-on disc's own
-    # 4.5 micron flux driven to numerical zero), never `-inf` from here.
-    register_path = f"{config.inputs['sed_models']}/registers/yso_register.hdf5"
-    with h5py.File(register_path, "r") as f:
-        floor_linear = f["models/FLOOR_LINEAR"][:].astype(np.float64)
 
-    names_w, weight = template_weights.yso_population_weight(config)
-    if names_w.size != names.size or not np.all(names_w == names):
-        raise ValueError(
-            "sample_cloud.sample_f45: yso_population_weight's row order "
-            "disagrees with the yso register")
+def _fallback_profile(config, region):
+    """The `sky.derived.profile` product's own `fallback` group -- the
+    region's source-weighted mean direction, sec. 1.4 there -- read into
+    the SAME one-sightline shape `_load_profile_arrays` returns for an
+    ordinary sightline, so `embedding_and_ridge` (unmodified) can be
+    reused directly. `A_INF_K` has no fallback twin: `A_COL_SIGHTLINE_K`
+    IS that quantity, already source-weighted (`w @ a_inf` at build, the
+    profile module's own `fallback` dict); likewise `RESIDUAL_K` stands
+    in for `TAIL_RESIDUAL_K` and the fallback's own scalar `TAIL_EFOLD_PC`
+    for the per-sightline array. `RHO_K_PER_PC` is rebuilt off the
+    fallback's own `A_CUM_K`/`DIST_PC`, the same finite-difference the
+    profile build itself uses (sec. 1.4, `rho_k_per_pc = diff(A_CUM_K) /
+    diff(DIST_PC)`)."""
+    path = config_module.product_path(
+        config, "sky/derived", "edenhofer", "profile", "sightline", region=region)
+    with h5py.File(path, "r") as f:
+        fb = f["fallback"]
+        dist_pc = np.asarray(fb["DIST_PC"][:], dtype=np.float64)
+        a_cum_k = np.asarray(fb["A_CUM_K"][:], dtype=np.float64)
+        a_inf_k = np.array([float(fb["A_COL_SIGHTLINE_K"][()])], dtype=np.float64)
+        tail_residual_k = np.array([float(fb["RESIDUAL_K"][()])], dtype=np.float64)
+        tail_efold_pc = np.array([float(fb["TAIL_EFOLD_PC"][()])], dtype=np.float64)
+    rho_k_per_pc = (np.diff(a_cum_k) / np.diff(dist_pc))[None, :]
+    return dict(hpx_pix_256=np.array([-1], dtype=np.int64), dist_pc=dist_pc,
+                a_cum_k=a_cum_k[None, :], a_inf_k=a_inf_k, rho_k_per_pc=rho_k_per_pc,
+                tail_residual_k=tail_residual_k, tail_efold_pc=tail_efold_pc)
 
-    log10_f45_theta = (np.log10(np.maximum(f_ref_i2, floor_linear))
-                        - 2.0 * np.log10(float(d_r_pc) / 1000.0))
 
-    width_dex = (2.0 * np.log10(float(d_back) / float(d_front))
-                 + 2.0 * float(sigma_d_pc) / (float(d_r_pc) * np.log(10.0)))
-    sigma_cells = max(1.0, width_dex / grid.D_LOG10_F45)
+def sigma_d_dex(region):
+    """The region's own distance-uncertainty width in `log10 F_4.5`
+    (sec. 5.5 "Marks", W56 ruling 1): `sigma_d = 2 sigma_d,pc / (d_r ln
+    10)` -- the one formula `shift_kernel` and `bmstp.shapes.build_cloud`
+    (the per-row Gaussian smoothing `GRID_YSO`'s construction applies, the
+    SAME width `shift_kernel` convolves `K` with) share, so it lives in
+    exactly one place."""
+    return 2.0 * float(region.sigma_pc) / (float(region.d_r_pc) * np.log(10.0))
 
-    p_f45, mass_outside = _bin1d(log10_f45_theta, weight, grid.LOG10_F45_EDGES, sigma_cells)
-    above_top = grid.mass_above_top(log10_f45_theta, weight)
-    return p_f45, mass_outside, float(width_dex), above_top
+
+def exact_gaussian_kernel(sigma_dex):
+    """The `(2*half_width+1,)` EXACT discrete Gaussian smoothing kernel
+    of width `sigma_dex` (floored at one common-grid cell, sec. 2's
+    "minimum widths"), each entry the Gaussian's own CDF difference
+    across a destination cell offset from the source cell's own center
+    (`build_yso`'s pre-W56 construction, generalised to a fixed kernel
+    since every cell of a uniform grid sees the SAME offset-only
+    dependence) -- truncated at +-4 sigma, same as before. NEVER
+    `scipy.ndimage.gaussian_filter1d`, whose own discrete kernel is not
+    exact enough for the acceptance identity (sec. 9, ruling 11): summed
+    against a one-hot spike it differs from the exact CDF by ~0.016 at
+    one cell's width, far past float rounding."""
+    D = grid.D_LOG10_F45
+    sigma = max(float(sigma_dex), D)
+    sigma_cells = sigma / D
+    half_width = int(np.ceil(4.0 * sigma_cells))
+    offsets = np.arange(-half_width, half_width + 1, dtype=np.float64)
+    z_lo = (offsets - 0.5) * D / sigma
+    z_hi = (offsets + 0.5) * D / sigma
+    return ndtr(z_hi) - ndtr(z_lo)
+
+
+def shift_kernel(config, region, d_front, d_back):
+    """`K(delta)`, W56's shift kernel (sec. 5.5, ruling 1): the region's
+    FALLBACK sightline's own depth draw (`_fallback_profile`,
+    `_cell_subsamples`, the SAME cloud interval every sightline uses --
+    ruling: no source counts from P1 enter here) turned into the
+    distribution of the brightness shift `delta = -2 log10(d / 1 kpc)`
+    each sub-sample implies, weight `w_k,sub` carried through, binned RAW
+    on the common `LOG10_F45` grid's 0.1 dex cells (`np.histogram`, no
+    smoothing) then convolved EXACTLY (`exact_gaussian_kernel`) by the
+    region's own distance uncertainty `sigma_d = 2 sigma_d,pc / (d_r ln
+    10)` (floored at one cell, sec. 2's "minimum widths"). `K` is
+    independent of the template: every template's brightness is `c_theta
+    + delta`, so it carries the OLD cloud-depth widening term itself --
+    that term must not be applied again downstream. Returns `(K,
+    mass_outside)`."""
+    r = regions_module.REGIONS_BY_NAME[region]
+    fb_profile = _fallback_profile(config, region)
+    embed = yso_module.embedding_and_ridge(fb_profile)
+    dist_pc = fb_profile["dist_pc"]
+    n_d = dist_pc.size
+    d_edges = np.empty((1, n_d + 1), dtype=np.float64)
+    d_edges[:, :n_d] = dist_pc[None, :]
+    d_edges[:, n_d] = dist_pc[-1] + 2.0 * fb_profile["tail_efold_pc"][0]
+    loaded_fb = dict(u_edges=embed["u_edges"], p_u=embed["p_u"], d_edges=d_edges)
+
+    _log10x, w, d_sub, _removed = _cell_subsamples(loaded_fb, 0, d_front, d_back)
+    delta = -2.0 * np.log10(d_sub / 1000.0)
+    sigma_d = sigma_d_dex(r)
+    total_weight = float(w.sum())
+    raw, _ = np.histogram(delta, bins=grid.LOG10_F45_EDGES, weights=w)
+    kernel = exact_gaussian_kernel(sigma_d)
+    K = np.convolve(raw, kernel, mode="same")
+    mass_outside = float(1.0 - K.sum() / total_weight) if total_weight > 0 else 1.0
+    K = K / total_weight if total_weight > 0 else K
+    return K, mass_outside

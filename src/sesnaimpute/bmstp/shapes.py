@@ -21,6 +21,9 @@ import os
 import h5py
 import numpy as np
 from joblib import Parallel, delayed
+from scipy import ndimage
+from scipy.ndimage import gaussian_filter1d
+from scipy.signal import fftconvolve
 
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
@@ -203,22 +206,71 @@ def _field_star_f45_range(config, region):
 # P3 -- the cloud-class grid, per sightline (sec. 5.5)
 # ---------------------------------------------------------------------------
 
-def _build_one_sightline(loaded, row, p_f45, d_front, d_back):
+def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     """One sightline's `(GRID_YSO, X_MARGINAL, MASS_OUTSIDE_YSO,
-    removed_frac)`: `h_YSO = p(x) (x) p(F_4.5)` (sec. 5.5 "Marks"), a
-    strict outer product; `MASS_OUTSIDE_YSO` is the combined off-grid
-    fraction of the product measure, `mo_x + mo_f45 - mo_x * mo_f45`."""
-    p_x, mo_x, removed_frac = sample_cloud.sample_x(loaded, row, d_front, d_back)
-    grid_yso = np.outer(p_x, p_f45)
-    return grid_yso.astype(np.float32), p_x.astype(np.float32), mo_x, removed_frac
+    removed_frac)` (sec. 5.5 "Marks", W56 ruling 2): every depth
+    sub-sample (`sample_cloud._cell_subsamples`, weight `w_k,sub`, depth
+    `x_k,sub`, distance `d_k,sub`) adds its own shifted-and-smoothed copy
+    of `p_ref` to its own `log10 x` row -- grouped by row first (linear
+    in the sub-samples, so summing the row's own raw weighted `delta =
+    -2 log10(d_k,sub / 1 kpc)` histogram before the ONE EXACT Gaussian
+    smoothing (`kernel_1d`, `sample_cloud.exact_gaussian_kernel`) and the
+    ONE convolution with `p_ref` reproduces the per-sub-sample sum
+    exactly). `X_MARGINAL` (`p_x`) is unchanged in value
+    (`sample_cloud.sample_x`, its own one-cell-smoothed bin).
+    `MASS_OUTSIDE_YSO` is the combined shortfall of `GRID_YSO`'s own
+    total against the sightline's intended mass, `sum(w_k,sub) *
+    p_ref.sum()`."""
+    p_x, _mo_x, removed_frac = sample_cloud.sample_x(loaded, row, d_front, d_back)
+    log10x_nudged, w_sub, d_sub, _removed = sample_cloud._cell_subsamples(loaded, row, d_front, d_back)
+    n_x = grid.LOG10_X_EDGES.size - 1
+    n_b = grid.LOG10_F45_EDGES.size - 1
+
+    x_idx = np.digitize(log10x_nudged, grid.LOG10_X_EDGES) - 1
+    on_x = (x_idx >= 0) & (x_idx < n_x)
+    delta = -2.0 * np.log10(d_sub / 1000.0)
+    # the row's own raw (unsmoothed) weighted delta histogram (sec. 5.5,
+    # W56 ruling 1's K, restricted to this one row's own sub-samples):
+    # a single 2-D histogram call over every kept sub-sample at once.
+    k_row, _, _ = np.histogram2d(
+        x_idx[on_x], delta[on_x], bins=[np.arange(n_x + 1), grid.LOG10_F45_EDGES],
+        weights=w_sub[on_x])
+    # the EXACT Gaussian smoothing (never `gaussian_filter1d`, sec. 9's
+    # ruling 11 identity: see `exact_gaussian_kernel`'s own docstring),
+    # one vectorised row-wise convolution for every x row at once.
+    k_row = ndimage.convolve1d(k_row, weights=kernel_1d, axis=1, mode="constant")
+
+    # the row's own convolution with p_ref (sec. 5.5, W56 ruling 2): both
+    # are histograms on the SAME 0.1 dex grid sharing the same origin, so
+    # `np.convolve`'s left-edge index convention adds their bin indices
+    # directly -- the full convolution's own index n = j + m corresponds
+    # to the common grid's index n + LOG10_F45_EDGES[0]/D_LOG10_F45 (an
+    # exact integer, the grid runs from -4.0 in steps of 0.1).
+    conv = fftconvolve(k_row, p_ref[None, :], mode="full", axes=1)
+    start = int(round(-grid.LOG10_F45_EDGES[0] / grid.D_LOG10_F45))
+    grid_yso = np.maximum(conv[:, start:start + n_b], 0.0)
+    # the one-cell smoothing along x (sec. 2 "minimum widths") applies as
+    # now: `sample_x`'s own p_x already carries it; GRID_YSO gets its own
+    # pass here since its x-axis rows were built from the raw (unsmoothed)
+    # sub-sample scatter above, not from p_x.
+    grid_yso = gaussian_filter1d(grid_yso, sigma=1.0, axis=0, mode="constant")
+
+    total_intended = float(w_sub.sum()) * float(p_ref.sum())
+    total_actual = float(grid_yso.sum())
+    mass_outside_yso = (0.0 if total_intended <= 0.0
+                         else float(np.clip(1.0 - total_actual / total_intended, 0.0, 1.0)))
+    peak = grid_yso.max()
+    grid_yso = np.maximum(grid_yso, grid.FLOOR * peak) if peak > 0 else np.full_like(grid_yso, grid.FLOOR)
+    return grid_yso.astype(np.float32), p_x.astype(np.float32), mass_outside_yso, removed_frac
 
 
 def build_cloud(config, region):
     """Writes P3, `bmstp/shape/cloud_shape_sightline__R.hdf5`: `GRID_YSO`
-    (the outer product of the depth mark `p(x)` and the region's own
-    brightness mark `p(F_4.5)`, sec. 5.5) and its `log10 x` marginal per
-    sightline, `MASS_OUTSIDE_YSO`, `ON_GRID_YSO` (`1 - mass_outside_yso`
-    per sightline, sec. 2's ON-GRID FRACTION, W26's own read), the cloud
+    (sec. 5.5, W56 ruling 2 -- each depth sub-sample's own shifted copy of
+    `P_ref`, `bmstp.sample_cloud.p_ref_f45`, summed by `log10 x` row, NOT
+    an outer product) and its `log10 x` marginal per sightline,
+    `MASS_OUTSIDE_YSO`, `ON_GRID_YSO` (`1 - mass_outside_yso` per
+    sightline, sec. 2's ON-GRID FRACTION, W26's own read), the cloud
     interval `D_FRONT_PC`/`D_BACK_PC` (DOUBLED about the region's own peak
     distance, W24b), and the region's H2S brightness Gaussian (`LOGSIG_MEAN`,
     `LOGSIG_STD`, sec. 5.6) computed here by transporting the UWISH2 knot
@@ -240,16 +292,18 @@ def build_cloud(config, region):
         d_front, d_back = sample_cloud.cloud_interval_pc(config, region)
         r = regions_module.REGIONS_BY_NAME[region]
 
-        # p(F_4.5) is the SAME shape at every sightline of the region
-        # (sec. 5.5): built once, not per sightline.
-        p_f45, mo_f45, width_dex, above_top_yso = sample_cloud.sample_f45(
-            config, region, r.d_r_pc, r.sigma_pc, d_front, d_back)
+        # P_ref (sec. 5.5, W56 ruling 2), survey-wide, unplaced -- built
+        # once, not per sightline or region; every sub-sample's own row
+        # convolves it with that row's own shift kernel below.
+        p_ref = sample_cloud.p_ref_f45(config)
+        sigma_d = sample_cloud.sigma_d_dex(r)
+        kernel_1d = sample_cloud.exact_gaussian_kernel(sigma_d)
 
         # worker count is `root.cfg`'s own `[run] n_jobs` (CODING_RULES_BMSTP.md
         # rule 10a): the owner sets it to what the machine's memory allows.
         n_jobs = int(config.n_jobs)
         results = Parallel(n_jobs=n_jobs)(
-            delayed(_build_one_sightline)(loaded, row, p_f45, d_front, d_back)
+            delayed(_build_one_sightline)(loaded, row, p_ref, kernel_1d, d_front, d_back)
             for row in range(n_sl))
         for i in range(n_sl):
             st.tick(i + 1, n_sl, "sightlines")
@@ -260,9 +314,9 @@ def build_cloud(config, region):
                     else np.zeros((0, n_x, n_b), dtype=np.float32))
         x_marginal = (np.stack([r_[1] for r_ in results]) if n_sl
                       else np.zeros((0, n_x), dtype=np.float32))
-        mo_x = np.array([r_[2] for r_ in results], dtype=np.float64)
+        mass_outside_yso = (np.array([r_[2] for r_ in results], dtype=np.float64)
+                             if n_sl else np.zeros((0,))).astype(np.float32)
         removed_frac = np.array([r_[3] for r_ in results], dtype=np.float64)
-        mass_outside_yso = (mo_x + mo_f45 - mo_x * mo_f45).astype(np.float32)
         on_grid_yso = (1.0 - mass_outside_yso).astype(np.float32)
 
         # H2S's brightness lognormal (sec. 5.6 "Marks"): the UWISH2 knot
@@ -301,12 +355,40 @@ def build_cloud(config, region):
             f.create_dataset("MASS_OUTSIDE_YSO", data=mass_outside_yso)
             f.create_dataset("ON_GRID_YSO", data=on_grid_yso)
 
-        # p(F_4.5)'s own peak and 16-84% range (sec. 9's report), off the
-        # normalised shape built above.
+        # the region's own brightness marginal (sec. 9's report): P_ref
+        # convolved with the region's own shift kernel K (sec. 5.5, W56
+        # ruling 1, `shift_kernel` -- the SAME K `template_weights
+        # .build_yso` reads for its conditional table), peak and 16-84%.
+        k_region, mo_k = sample_cloud.shift_kernel(config, region, d_front, d_back)
+        conv_region = np.convolve(p_ref, k_region, mode="full")
+        start = int(round(-grid.LOG10_F45_EDGES[0] / grid.D_LOG10_F45))
+        p_region_marginal = np.maximum(conv_region[start:start + n_b], 0.0)
         b_centers = grid._B_CENTERS
-        peak_f45 = float(b_centers[int(np.argmax(p_f45))])
-        cdf = np.cumsum(p_f45) / np.sum(p_f45)
+        peak_f45 = float(b_centers[int(np.argmax(p_region_marginal))])
+        cdf = np.cumsum(p_region_marginal) / np.sum(p_region_marginal)
         p16_f45, p84_f45 = (float(np.interp(q, cdf, b_centers)) for q in (0.16, 0.84))
+
+        # the joint's own depth-brightness correlation (sec. 9's report,
+        # W56 acceptance): 0 before (a strict outer product), negative
+        # after (deeper is fainter) -- the Pearson correlation of `log10
+        # x` and `log10 F_4.5` over one sightline's own on-grid joint mass.
+        def _joint_corr(h2d):
+            mass = h2d.astype(np.float64)
+            total = mass.sum()
+            if total <= 0:
+                return float("nan")
+            x_c, f_c = grid._X_CENTERS, grid._B_CENTERS
+            px = mass.sum(axis=1) / total
+            pf = mass.sum(axis=0) / total
+            mx, mf = float(np.sum(px * x_c)), float(np.sum(pf * f_c))
+            vx = float(np.sum(px * (x_c - mx) ** 2))
+            vf = float(np.sum(pf * (f_c - mf) ** 2))
+            cov = float(np.sum(mass / total * (x_c[:, None] - mx) * (f_c[None, :] - mf)))
+            return cov / np.sqrt(vx * vf) if vx > 0 and vf > 0 else float("nan")
+
+        row46_corr = _joint_corr(grid_yso[46]) if n_sl > 46 else float("nan")
+        med_col = int(np.argsort(x_marginal.sum(axis=1))[n_sl // 2]) if n_sl else -1
+        med_corr = _joint_corr(grid_yso[med_col]) if n_sl else float("nan")
 
         st.done(path, n_sightline=int(n_sl),
                 mass_outside_yso_max=float(mass_outside_yso.max()) if n_sl else 0.0,
@@ -315,10 +397,11 @@ def build_cloud(config, region):
                 removed_frac_max=float(removed_frac.max()) if n_sl else 0.0,
                 x_marginal_max_dev=max_x_marginal_dev,
                 f45_peak=peak_f45, f45_p16=p16_f45, f45_p84=p84_f45,
-                f45_width_dex=width_dex, mass_above_top_yso=float(above_top_yso),
+                sigma_d_dex=sigma_d, mass_outside_k=float(mo_k),
+                row46_corr=row46_corr, median_col_corr=med_corr,
                 d_front_pc=float(d_front), d_back_pc=float(d_back))
     return (path, n_sl, mass_outside_yso, removed_frac, max_x_marginal_dev,
-            (peak_f45, p16_f45, p84_f45), above_top_yso, on_grid_yso, (d_front, d_back))
+            (peak_f45, p16_f45, p84_f45), on_grid_yso, (d_front, d_back))
 
 
 # ---------------------------------------------------------------------------
