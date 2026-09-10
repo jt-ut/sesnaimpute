@@ -44,23 +44,31 @@ own recovery is what cuts them off. Detection is per band (Gutermuth
 2009): a source too faint in one band leaves the SESNA catalogue by the
 two-band rule before its flux in any OTHER band is ever histogrammed, so a
 band whose faint end is set by a DIFFERENT band's requirement reports that
-other band's cutoff as its own 50% limit. Per Spitzer band, the fitted
-model's own expected fraction of sources fainter than its 50% point is
-checked against the histogram's observed fraction there; a band with
-observed more than `TRUNCATION_RATIO` times expected is flagged
-`LIMIT_KIND = "bound"` and its `F_50_REGION_MJY` is replaced by the
-catalogue's own demonstrated recovery: the band `r` most often measured
-alongside it supplies a median colour on the doubly-detected sources,
-which predicts that band's flux for every source with `r` measured; the
-fraction of those predicted fluxes that actually carry the truncated
-band's own detection, binned in 0.1 dex, is that band's recovery curve as
-the catalogue demonstrates it, and its 50% crossing is the corrected
-`F_50_REGION_MJY` (or, where the curve never falls below 90% down to its
-faintest adequately populated bin, that bin's own flux, disclosing that
-the catalogue holds nothing fainter to say more). The fitted width is kept
-for a truncated band (disclosed, not re-derived): only the truncated
-count's floor, not its shape, is unreliable. A non-truncated band keeps
-the fit outright, `LIMIT_KIND = "fit"`.
+other band's cutoff as its own 50% limit -- and does so as a CLEAN
+roll-off, since a histogram already cut off by another band's requirement
+is itself well fit by the same power-law-times-erf form the fit assumes
+(the cut-off projected through the catalogue's own colour). The fitted
+model's own expected-vs-observed count below its 50% point therefore
+cannot detect this: the fit reproduces whatever shape it was handed. The
+diagnostic instead is the recovery curve itself (`_recovery_curve`): for
+band `b`, the band `r` most often measured alongside it supplies a median
+colour on the doubly-detected sources, which predicts `b`'s flux for
+every source with `r` measured; the fraction of those predicted fluxes
+that actually carry `b`'s own detection, binned in 0.1 dex, is `b`'s
+recovery curve as the catalogue demonstrates it, independent of `b`'s own
+counts fit. A genuine roll-off gives 0.5 at its own fitted `F_50` by
+definition; a band whose recovery curve is still at or above
+`RECOVERY_FLOOR_FRACTION` (90%) there is measured for nearly all of `r`'s
+own catalogued sources at the flux its own fit calls "50% complete" --
+not limited by its own recovery but truncated by `r`'s requirement --
+flagged `LIMIT_KIND = "bound"`, and its `F_50_REGION_MJY` is replaced by
+the recovery curve's own 50% crossing (or, where the curve never falls
+below 90% down to its faintest adequately populated bin, that bin's own
+flux, disclosing that the catalogue holds nothing fainter to say more).
+The fitted width is kept for a truncated band (disclosed, not
+re-derived): only the truncated count's floor, not its shape, is
+unreliable. A non-truncated band keeps the fit outright, `LIMIT_KIND =
+"fit"`.
 
 Per source, `F_LIM_50_MJY` is `F_50_REGION_MJY` (post-truncation-fix)
 shifted by the offset of the source's own `log10 DCOMP90` from the region
@@ -118,20 +126,18 @@ COLUMN_PERCENTILE = 25.0
 # product's LOW_COLUMN_FALLBACK attribute).
 MIN_LOW_COLUMN_SOURCES = 500
 
-# A band's observed fraction fainter than its own fitted 50% point more
-# than this multiple of the fitted model's own expected fraction there
-# flags the band as truncated by another band's requirement, not its own
-# recovery (module docstring, Part B).
-TRUNCATION_RATIO = 2.0
-
 # A truncated band's recovery curve (module docstring) needs at least this
 # many sources in a bin before that bin's fraction is trusted as a floor.
 MIN_RECOVERY_BIN_SOURCES = 100
 
-# A recovery curve still at or above this fraction at its faintest
-# adequately populated bin has not been shown to fall through 50%: the
+# The recovery curve's own fraction at the band's fitted F_50: a genuine
+# roll-off gives 0.5 there by definition, so a curve still at or above
+# this fraction there has not thinned on its own account at all -- the
+# band is truncated by its limiting band's requirement (module docstring,
+# Part B). The same threshold, reused, also marks a curve that never
+# falls through 50% down to its faintest adequately populated bin: the
 # catalogue holds nothing fainter to say more, so that bin's own flux is
-# the disclosed floor (module docstring, Part B).
+# the disclosed floor.
 RECOVERY_FLOOR_FRACTION = 0.9
 
 
@@ -337,45 +343,6 @@ def _source_limits(dcomp90, curated_bands, selected_mask, f50_region_mjy, f50_2m
     return f_lim, ref_log10
 
 
-def _truncation_test(fnu, origin, curated_bands, selected_mask, alpha, f50, w):
-    """Per Spitzer band, the fitted model's own expected fraction of
-    sources fainter than its 50% point against the histogram's observed
-    fraction there (module docstring, Part B): a band with observed more
-    than `TRUNCATION_RATIO` times expected has its faint end set by
-    another band's requirement, not its own recovery. Returns
-    `(truncated (5,) bool, expected_frac (5,), observed_frac (5,))`.
-    """
-    n = len(limits_module.IRAC_MIPS_KEYS)
-    truncated = np.zeros(n, dtype=bool)
-    expected_frac = np.full(n, np.nan)
-    observed_frac = np.full(n, np.nan)
-    for jk, key in enumerate(limits_module.IRAC_MIPS_KEYS):
-        if not np.isfinite(f50[jk]) or not np.isfinite(alpha[jk]) or not np.isfinite(w[jk]):
-            continue
-        cb = curated_bands.index(key)
-        detected = selected_mask & (origin[:, cb] == 1)
-        flux = fnu[detected, cb]
-        if flux.size == 0:
-            continue
-        y = -np.log10(flux)
-        centers, counts = depths_module._bin_histogram(y)
-        y50 = -np.log10(f50[jk])
-        model = depths_module._model_free(centers, alpha[jk], y50, w[jk])
-        _, amplitude = depths_module._poisson_nll_and_amplitude(model, counts)
-        model_counts = amplitude * model
-        fainter = centers >= y50
-        exp_total = float(model_counts.sum())
-        obs_total = float(counts.sum())
-        if not (exp_total > 0 and obs_total > 0):
-            continue
-        exp_f = float(model_counts[fainter].sum() / exp_total)
-        obs_f = float(counts[fainter].sum() / obs_total)
-        expected_frac[jk] = exp_f
-        observed_frac[jk] = obs_f
-        truncated[jk] = obs_f > TRUNCATION_RATIO * exp_f
-    return truncated, expected_frac, observed_frac
-
-
 def _limiting_band(origin, curated_bands, selected_mask, band_key):
     """The other band most often measured alongside `band_key` within the
     region's own low-column selection (module docstring, Part B): the
@@ -394,25 +361,25 @@ def _limiting_band(origin, curated_bands, selected_mask, band_key):
     return best_key
 
 
-def _recovery_curve_f50(fnu, origin, curated_bands, selected_mask, band_key, ref_key):
-    """The catalogue's own demonstrated recovery of a truncated band
+def _recovery_curve(fnu, origin, curated_bands, selected_mask, band_key, ref_key):
+    """The catalogue's own demonstrated recovery curve of `band_key`
     (module docstring, Part B): the median colour `log10(F_b/F_r)` on
     sources with both `band_key` and the limiting band `ref_key` measured
     predicts `F_b` for every source with `ref_key` measured; the fraction
     of those predictions that carry `band_key`'s own detection, binned in
-    0.1 dex of the predicted flux, is `band_key`'s recovery curve. Its 50%
-    crossing (linear in `log10 F`) is the corrected `F_50_REGION_MJY`; a
-    curve that never falls to 50% down to its faintest bin with at least
-    `MIN_RECOVERY_BIN_SOURCES` sources, while still at or above
-    `RECOVERY_FLOOR_FRACTION` there, instead takes that bin's own flux --
-    recovery demonstrated at least this deep, the catalogue holding
-    nothing fainter to say more. Returns `(f50_mjy, note)`.
+    0.1 dex of the predicted flux, is `band_key`'s recovery curve -- the
+    diagnostic a truncated band's OWN counts fit cannot supply, since a
+    histogram cut off by another band's requirement is itself well fit by
+    a roll-off (the cut-off projected through the catalogue's own
+    colour). Returns `(centers_y, frac, n_total)` sorted bright to faint
+    (`y = -log10 F`), or `(None, None, None)` if `band_key` and `ref_key`
+    are never doubly detected.
     """
     cb = curated_bands.index(band_key)
     cr = curated_bands.index(ref_key)
     both = selected_mask & (origin[:, cb] == 1) & (origin[:, cr] == 1)
     if not np.any(both):
-        return np.nan, "no doubly-detected sources"
+        return None, None, None
     colour = float(np.median(np.log10(fnu[both, cb]) - np.log10(fnu[both, cr])))
     has_r = selected_mask & (origin[:, cr] == 1)
     f_b_pred = fnu[has_r, cr] * 10.0 ** colour
@@ -426,25 +393,89 @@ def _recovery_curve_f50(fnu, origin, curated_bands, selected_mask, band_key, ref
     n_total = np.bincount(idx, minlength=centers.size).astype(float)
     n_meas = np.bincount(idx[b_measured], minlength=centers.size).astype(float)
     occ = n_total > 0
-    c = centers[occ]
-    frac = (n_meas[occ] / n_total[occ])
-    nt = n_total[occ]
+    c, frac, nt = centers[occ], n_meas[occ] / n_total[occ], n_total[occ]
     order = np.argsort(c)
-    c, frac, nt = c[order], frac[order], nt[order]
+    return c[order], frac[order], nt[order]
 
+
+def _recovery_fraction_at(c, frac, y_query):
+    """The recovery curve's own fraction at `y_query` (`y = -log10 F`,
+    linear interpolation, module docstring, Part B's diagnostic): a
+    genuine roll-off gives 0.5 at its own fitted 50% point by definition,
+    so this is what the diagnostic reads at `F_50,b`. Clipped to the
+    curve's own bright/faint endpoints; `NaN` if there is no curve.
+    """
+    if c is None or c.size == 0:
+        return np.nan
+    return float(np.interp(y_query, c, frac))
+
+
+def _recovery_crossing(c, frac, nt):
+    """The recovery curve's 50% crossing (linear in `log10 F`), the
+    corrected `F_50_REGION_MJY` for a truncated band (module docstring,
+    Part B's substitution). The crossing search, like the floor fallback,
+    is restricted to bins with at least `MIN_RECOVERY_BIN_SOURCES`
+    sources: the predicted-flux bins are sparsest at the bright end
+    (`_recovery_curve`'s counts fall off sharply away from the doubly-
+    detected sources' own colour), and a one-or-two-source bin's fraction
+    is pure sampling noise, not a demonstrated roll-off. A curve that
+    never falls to 50% among the adequately populated bins, while still
+    at or above `RECOVERY_FLOOR_FRACTION` at the faintest of them, instead
+    takes that bin's own flux -- recovery demonstrated at least this
+    deep, the catalogue holding nothing fainter to say more. Returns
+    `(f50_mjy, note)`.
+    """
+    if c is None or c.size == 0:
+        return np.nan, "no doubly-detected sources"
+    adequate = nt >= MIN_RECOVERY_BIN_SOURCES
+    if not adequate.any():
+        return np.nan, "no adequately populated bin"
+    c, frac = c[adequate], frac[adequate]
     below = np.flatnonzero(frac <= 0.5)
     if below.size == 0:
-        adequate = np.flatnonzero(nt >= MIN_RECOVERY_BIN_SOURCES)
-        if adequate.size and frac[adequate[-1]] >= RECOVERY_FLOOR_FRACTION:
-            return float(10.0 ** (-c[adequate[-1]])), "floor at faintest adequate bin"
+        if frac[-1] >= RECOVERY_FLOOR_FRACTION:
+            return float(10.0 ** (-c[-1])), "floor at faintest adequate bin"
         return np.nan, "no crossing and no adequate floor"
     i = int(below[0])
     if i == 0:
-        return float(10.0 ** (-c[0])), "crossing at brightest bin"
+        return float(10.0 ** (-c[0])), "crossing at brightest adequate bin"
     y0, y1, f0, f1 = c[i - 1], c[i], frac[i - 1], frac[i]
     t = (0.5 - f0) / (f1 - f0) if f1 != f0 else 0.5
     y50 = y0 + t * (y1 - y0)
     return float(10.0 ** (-y50)), "crossing"
+
+
+def _truncation_test(fnu, origin, curated_bands, selected_mask, f50):
+    """Per Spitzer band, the catalogue's own recovery curve (`_recovery_
+    curve`) evaluated at the band's own fitted `F_50` (module docstring,
+    Part B): a genuine roll-off gives 0.5 there by definition, since the
+    fit's `F_50` IS the flux at which the band's own detections thin to
+    half; a band still measured for `RECOVERY_FLOOR_FRACTION` (90%) or
+    more of the catalogued sources at that same flux is not thinning on
+    its own account there at all -- its faint end is truncated by the
+    limiting band `r`'s requirement, not by its own recovery. (The
+    expected-vs-observed-count-below-F50 form of this test cannot see
+    the effect: a histogram already cut off by another band is itself
+    well fit by a roll-off, so the fit's own model reproduces the cut-off
+    it was handed.) Returns `(truncated (5,) bool, recovery_at_f50 (5,),
+    limiting_band (5,) str, curves (5,) of (centers_y, frac, n_total))`.
+    """
+    n = len(limits_module.IRAC_MIPS_KEYS)
+    truncated = np.zeros(n, dtype=bool)
+    recovery_at_f50 = np.full(n, np.nan)
+    limiting_band = [None] * n
+    curves = [None] * n
+    for jk, key in enumerate(limits_module.IRAC_MIPS_KEYS):
+        if not np.isfinite(f50[jk]):
+            continue
+        r_key = _limiting_band(origin, curated_bands, selected_mask, key)
+        c, frac, nt = _recovery_curve(fnu, origin, curated_bands, selected_mask, key, r_key)
+        limiting_band[jk] = r_key
+        curves[jk] = (c, frac, nt)
+        rec = _recovery_fraction_at(c, frac, -np.log10(f50[jk]))
+        recovery_at_f50[jk] = rec
+        truncated[jk] = np.isfinite(rec) and rec >= RECOVERY_FLOOR_FRACTION
+    return truncated, recovery_at_f50, limiting_band, curves
 
 
 def _fill_unoccupied(admitted, occupied, occupied_n_sources, occupied_medians):
@@ -528,24 +559,28 @@ def build(config, regions=None):
 
             # a band cut off by another band's requirement takes its
             # limit from the catalogue's own demonstrated recovery, not
-            # from the truncated fit (module docstring, Part B).
+            # from the truncated fit (module docstring, Part B): the
+            # recovery curve's own fraction at the band's fitted F_50 is
+            # the diagnostic (a genuine roll-off gives 0.5 there).
             f50_before = f50_region_mjy.copy()
-            truncated, expected_frac, observed_frac = _truncation_test(
-                fnu, origin, curated_bands, selected_mask, alpha_region, f50_region_mjy, w_region_dex
+            truncated, recovery_at_f50, limiting_band, curves = _truncation_test(
+                fnu, origin, curated_bands, selected_mask, f50_region_mjy
             )
             limit_kind = ["fit"] * len(limits_module.IRAC_MIPS_KEYS)
             for jk, key in enumerate(limits_module.IRAC_MIPS_KEYS):
                 if not truncated[jk]:
+                    print("catalog.depth_grid: %s not truncated in %s (recovery at fitted F_50=%.3f)"
+                          % (key, region, recovery_at_f50[jk]))
                     continue
                 limit_kind[jk] = "bound"
-                r_key = _limiting_band(origin, curated_bands, selected_mask, key)
-                f50_new, note = _recovery_curve_f50(fnu, origin, curated_bands, selected_mask, key, r_key)
+                c, frac, nt = curves[jk]
+                f50_new, note = _recovery_crossing(c, frac, nt)
                 if np.isfinite(f50_new):
                     f50_region_mjy[jk] = f50_new
-                print("catalog.depth_grid: %s truncated in %s (expected=%.3f observed=%.3f) "
-                      "F_50_REGION %.4f -> %.4f mJy via %s (%s)"
-                      % (key, region, expected_frac[jk], observed_frac[jk],
-                         f50_before[jk], f50_region_mjy[jk], r_key, note))
+                print("catalog.depth_grid: %s truncated in %s (recovery at fitted F_50=%.3f >= %.2f, "
+                      "limiting band %s) F_50_REGION %.4f -> %.4f mJy (%s)"
+                      % (key, region, recovery_at_f50[jk], RECOVERY_FLOOR_FRACTION, limiting_band[jk],
+                         f50_before[jk], f50_region_mjy[jk], note))
 
             # every catalogued source's own limit (module docstring, Part
             # A) -- the one array `catalog.limits.limits` reads.
