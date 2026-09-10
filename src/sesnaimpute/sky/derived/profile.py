@@ -439,13 +439,13 @@ def _weighted_quantile(x, w, q):
     return float(x[o][min(int(np.searchsorted(cw, q)), x.size - 1)])
 
 
-def _far_field_for_region(hpx, gl, gb, a_edge, a_inf, nsrc, d_edge):
-    """Per-sightline tail parameters and the region's fallback sightline
-    (the source-weighted mean direction): `residual = max(0, A_inf -
-    A_edge)`, the vertical branch `1-exp(-(d-d_edge)/L)` with `L =
-    h_z/|sin b|`, or the in-plane disc quadrature where `L` would exceed
-    `TAIL_LVERT_MAX_PC`. Returns `(tail, fallback)`."""
-    res = np.maximum(0.0, a_inf - a_edge)
+def _tail_geometry(gl, gb, nsrc, d_edge):
+    """Per-sightline tail geometry and the region's fallback sightline
+    (the source-weighted mean direction): geometry only (mode, scale,
+    e-fold length), independent of any column value. The vertical branch
+    is `1-exp(-(d-d_edge)/L)` with `L = h_z/|sin b|`; the in-plane branch
+    (where `L` would exceed `TAIL_LVERT_MAX_PC`) is the disc quadrature's
+    own e-fold. Returns `(mode, scale, efold, ref)`."""
     sinb = np.abs(np.sin(np.radians(gb)))
     with np.errstate(divide="ignore"):
         lvert = np.where(sinb > 0, H_Z_PC / np.maximum(sinb, 1e-300), np.inf)
@@ -463,9 +463,6 @@ def _far_field_for_region(hpx, gl, gb, a_edge, a_inf, nsrc, d_edge):
     vz = np.sum(w * np.sin(br))
     l_ref = float(np.degrees(np.arctan2(vy, vx)) % 360.0)
     b_ref = float(np.degrees(np.arctan2(vz, np.hypot(vx, vy))))
-    a_edge_ref = float(np.sum(w * a_edge))
-    a_inf_ref = float(np.sum(w * a_inf))
-    res_ref = float(np.sum(w * res))
     lv_ref = H_Z_PC / max(abs(np.sin(np.radians(b_ref))), 1e-300)
     if lv_ref > TAIL_LVERT_MAX_PC:
         mode_ref = MODE_DISC
@@ -474,11 +471,49 @@ def _far_field_for_region(hpx, gl, gb, a_edge, a_inf, nsrc, d_edge):
     else:
         mode_ref, sc_ref, ef_ref = MODE_VERTICAL, lv_ref, lv_ref
 
-    tail = dict(residual=res, mode=mode, scale=scale, efold=efold)
-    fallback = dict(a_edge_ref_k=a_edge_ref, a_col_sightline_ref_k=a_inf_ref,
-                    residual_ref_k=res_ref, gal_l_ref_deg=l_ref, gal_b_ref_deg=b_ref,
-                    tail_mode_ref=mode_ref, tail_scale_ref_pc=sc_ref, tail_efold_ref_pc=ef_ref)
-    return tail, fallback
+    ref = dict(l_ref=l_ref, b_ref=b_ref, mode_ref=mode_ref, scale_ref=sc_ref, efold_ref=ef_ref)
+    return mode, scale, efold, ref
+
+
+def _edge_density(a_out, dist_new, h_z_pc):
+    """The map's own mean density, A_K/pc, over the last `h_z_pc` of its
+    distance axis (spec 1.4): `(A_edge - A(d_edge - h_z_pc)) / h_z_pc`,
+    read off the map's own (unscaled) cumulative profile `a_out`."""
+    d_edge = float(dist_new[-1])
+    d_ref = d_edge - h_z_pc
+    idx = int(np.clip(np.searchsorted(dist_new, d_ref), 1, dist_new.size - 1))
+    d0, d1 = dist_new[idx - 1], dist_new[idx]
+    frac = (d_ref - d0) / (d1 - d0)
+    a_ref = a_out[:, idx - 1] + frac * (a_out[:, idx] - a_out[:, idx - 1])
+    return (a_out[:, -1] - a_ref) / h_z_pc
+
+
+def _far_field_residual(a_edge_raw, a_inf, rho_edge, efold):
+    """The column beyond the map's own edge, and the scale that spreads
+    the remainder inside the map (spec 1.4, last paragraph). The excess
+    `A_inf - A_edge` is capped at what the map's own edge density
+    implies through the sightline's own tail shape, `A_tail,map =
+    rho_edge * efold`: at high latitude the map under-resolves dense
+    cloud that the star-colour column already sees (median share of the
+    column the uncapped rule puts beyond the map's 2 kpc edge: 0.43
+    Ophiuchus, 0.37 Aquila, 0.29 Pipe, 0.14 Orion A, 0.08 Perseus,
+    against the map's own edge-density share 0.000 / 0.014 / 0.21 /
+    0.013 / 0.000 -- so that column belongs inside the cloud instead.
+    `residual = min(max(0, A_inf - A_edge), A_tail,map)`: never more
+    than today's residual, never more than the map itself implies. The
+    remainder of the excess is spread inside the map in the map's own
+    shape by scaling the in-map profile (and its density) by `s =
+    (A_inf - residual)/A_edge >= 1`. The existing rescale-DOWN case (the
+    map's own edge already exceeds the total column, residual 0) is the
+    same formula with `s <= 1`; both are one scaling on `s` here."""
+    raw_excess = np.maximum(0.0, a_inf - a_edge_raw)
+    a_tail_map = rho_edge * efold
+    capped = raw_excess > a_tail_map
+    residual = np.where(capped, a_tail_map, raw_excess)
+    down = a_edge_raw > a_inf
+    denom = np.where(a_edge_raw > 0, a_edge_raw, 1.0)
+    s = np.where(down, a_inf / denom, np.where(capped, (a_inf - residual) / denom, 1.0))
+    return residual, s, capped
 
 
 def region_weight(n_src):
@@ -581,21 +616,30 @@ def _build_one_region(config, region, canon, input_dir):
     measured = measure_region(canon.d_r_pc, inner, splice, dist_new, rho_dist_new, weight)
     a_out, sig_u, sig_c, depth = measured["a_out"], measured["sig_u"], measured["sig_c"], measured["depth"]
 
-    a_edge = a_out[:, -1]
-    # spec 1.4, last paragraph: where the map's own cumulative extinction
-    # at its edge already exceeds the sightline's total column, the map
-    # supplies only the shape -- scale the in-map profile by A_inf/A_edge
-    # so u = A(d)/A(inf) <= 1 holds inside the map too; the tail residual
-    # (below) is already max(0, A_inf - A_edge), zero in this regime.
-    rescaled = a_edge > a_inf
-    scale = np.where(rescaled, a_inf / np.where(a_edge > 0, a_edge, 1.0), 1.0)
-    a_out = a_out * scale[:, np.newaxis]
+    d_edge = dist_new[-1]
+    a_edge_raw = a_out[:, -1]
+    mode, scale_geom, efold, ref = _tail_geometry(gl, gb, nsrc, d_edge)
+
+    # spec 1.4, last paragraph: the column beyond the map's own edge is
+    # bounded by what the map's own edge density implies through the
+    # sightline's own tail shape (_far_field_residual); the remainder of
+    # the excess is spread inside the map by scaling the in-map profile
+    # (and its density) by s -- see that docstring for the rule and why.
+    rho_edge = _edge_density(a_out, dist_new, H_Z_PC)
+    residual, s, capped = _far_field_residual(a_edge_raw, a_inf, rho_edge, efold)
+    rescaled = s != 1.0
+    a_out = a_out * s[:, np.newaxis]
     a_edge = a_out[:, -1]
     rescaled_frac = float(np.mean(rescaled))
-    print("profile.build: %s: %d/%d sightlines rescaled (%.1f%%)"
-          % (region, int(np.count_nonzero(rescaled)), rescaled.size, 100.0 * rescaled_frac))
+    print("profile.build: %s: %d/%d sightlines rescaled (%.1f%%), %d/%d far-field capped to the map's edge density"
+          % (region, int(np.count_nonzero(rescaled)), rescaled.size, 100.0 * rescaled_frac,
+             int(np.count_nonzero(capped)), capped.size))
 
-    tail, fallback = _far_field_for_region(admitted_pix, gl, gb, a_edge, a_inf, nsrc, dist_new[-1])
+    w = nsrc / nsrc.sum()
+    fallback = dict(a_edge_ref_k=float(np.sum(w * a_edge)), a_col_sightline_ref_k=float(np.sum(w * a_inf)),
+                    residual_ref_k=float(np.sum(w * residual)), gal_l_ref_deg=ref["l_ref"], gal_b_ref_deg=ref["b_ref"],
+                    tail_mode_ref=ref["mode_ref"], tail_scale_ref_pc=ref["scale_ref"], tail_efold_ref_pc=ref["efold_ref"])
+    tail = dict(residual=residual, mode=mode, scale=scale_geom, efold=efold)
 
     dist_pc = np.concatenate([[0.0], dist_new])
     a_cum_k = np.concatenate([np.zeros((admitted_pix.size, 1)), a_out], axis=1)
