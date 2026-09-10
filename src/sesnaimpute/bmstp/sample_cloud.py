@@ -25,13 +25,14 @@ the map's reach, so the tail cell's midpoint distance matches
 
 `p(F_4.5)`, per region (the SAME shape at every sightline of the region):
 the YSO register's own templates, weighted by
-`template_weights.yso_population_weight` (the IMF x inclination weight
-divided by the library's density of templates in log10 mass, times the
-evolutionary-class census, sec. 1.4, owner's ruling 2026-09-09) -- called
-directly here rather than re-derived, the one place that weight is formed
--- each at `log10 F_4.5 = log10 F_REF_I2,theta - 2 log10(d_r / 1 kpc)`,
-widened by the cloud's own depth and the region's distance uncertainty as a
-Gaussian in `log10 F_4.5`.
+`template_weights.yso_population_weight` (Dunham et al. 2015's own census
+density over each template's `log10 f_ref,4.5,theta` divided by the
+library's density of templates in the same quantity, times inclination
+uniform in cos i and the evolutionary-class census, sec. 1.4, W54, owner's
+ruling 2026-09-09) -- called directly here rather than re-derived, the one
+place that weight is formed -- each at `log10 F_4.5 = log10
+F_REF_I2,theta - 2 log10(d_r / 1 kpc)`, widened by the cloud's own depth
+and the region's distance uncertainty as a Gaussian in `log10 F_4.5`.
 """
 
 import h5py
@@ -207,10 +208,12 @@ def restrict_old_x_marginal(loaded, row, old_x_marginal, d_front, d_back):
 def sample_f45(config, region, d_r_pc, sigma_d_pc, d_front, d_back):
     """YSO's own brightness mark, `p(F_4.5)` (sec. 5.5 "Marks"), the same
     shape at every sightline of the region: the YSO register's templates,
-    weighted by `template_weights.yso_population_weight` (the IMF x
-    inclination weight divided by the library's density of templates in
-    log10 mass, times the evolutionary-class census, sec. 1.4, owner's
-    ruling 2026-09-09) -- called directly rather than re-derived, so the
+    weighted by `template_weights.yso_population_weight` (Dunham et al.
+    2015's own census density over each template's `log10
+    f_ref,4.5,theta` divided by the library's density of templates in the
+    same quantity, times inclination uniform in cos i and the
+    evolutionary-class census, sec. 1.4, W54, owner's ruling 2026-09-09)
+    -- called directly rather than re-derived, so the
     weight formula lives in exactly one place for `build_yso`, this
     function and `bmstp.atlas._yso_register` alike. Each template placed
     at `log10 F_4.5 = log10 F_REF_I2,theta - 2 log10(d_r / 1 kpc)`,
