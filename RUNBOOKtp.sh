@@ -70,7 +70,7 @@ PY sesnaimpute.sky.download.planck_r120.build
 PY sesnaimpute.sky.download.herschel_hgbs.build
 PY sesnaimpute.sky.download.edenhofer2023.build
 PY sesnaimpute.sky.download.juvela2016.build   # NICEST 2MASS star-colour extinction map, all-sky, the extinction column's reference (W49a)
-PY sesnaimpute.sky.download.dunham2015.build   # Dunham et al. 2015 Spitzer c2d + Gould Belt YSO census, 2,966 YSOs in 18 clouds, the young-star law's own matched census (W53)
+PY sesnaimpute.sky.download.dunham2015.build   # Dunham et al. 2015 Spitzer c2d + Gould Belt YSO census, 2,966 YSOs in 18 clouds, the young-star law's own matched census (SPEC_BMSTP sec 1.4, 5.5)
 # fazio2004 (Fazio et al. 2004, ApJS 154, 39, Table 1, IRAC galaxy source
 # counts): no CDS/VizieR entry and IOPscience's machine-readable-table
 # service serves no bytes for this DOI (10.1086/422843) -- acquire by hand
