@@ -1,13 +1,13 @@
 """The prior at a source: its shape and, beneath it, the class share of the
 prior at each grid cell, one page per region (SPEC_BMSTP_DRAFT.md sec.
 1.1's factorisation, sec. 1.4's template weights, sec. 2's common grid,
-sec. 4.1-4.2, sec. 5.1-5.6; W18, REWRITTEN for 4.5B W28, REWRITTEN W57).
+sec. 4.1-4.2, sec. 5.1-5.6).
 Report-only: nothing written here is read by the fitter or by any other
 `bmstp`/`fittp` stage.
 
 Per region, ONE source from the density table -- the one at the region's
 median `A_COL_K` (`_select_sources`'s first choice; the 99th-percentile
-source is no longer drawn, W57: the normalised shapes differ between
+source is not drawn: the normalised shapes differ between
 sightlines only through the profile, and the fitter's actual class
 decision needs the levels the old page's per-source bar chart kept apart
 from the shapes it plotted). Six panels per row (GAL, YSO, H2S on its own
@@ -50,8 +50,7 @@ b_star + C_F + D_PAHC(s)` with `b_star = F - C_THETA[theta]` (sec. 2's
 `log10 F_4.5 = log10 Bhat + C_THETA` line, solved for `log10 Bhat` at the
 query brightness `F`) -- `bmstp.template_weights._read_pahc_curve`/
 `_p_at_neg_log10_q`, imported not re-derived. H2S is excluded from both
-its own row-2 panel and the denominator sum (disclosed, `briefs/reports/
-W57.md`): its shape is not on the common grid at read time (sec. 4.1's P3
+its own row-2 panel and the denominator sum (disclosed, `briefs/reports/W57.md`): its shape is not on the common grid at read time (sec. 4.1's P3
 "formed at the read"), and placing it there for this page was not
 available in the time this unit had; its row-2 panel is left blank, title
 disclosing why.
@@ -190,7 +189,7 @@ def _panel_arrays(config, region, cls, rows):
 #: Row 2's denominator classes: every class but H2S, which is not on the
 #: common grid at read time (sec. 4.1's P3 "formed at the read") -- left
 #: out of the share's total, disclosed (module docstring, `briefs/reports/
-#: W57.md`).
+#:.md`).
 _SHARE_CLASSES = ("GAL", "YSO", "STAR", "PAHC", "AGB")
 
 
@@ -227,7 +226,7 @@ def _build_region_data(config, region):
     # (the 99th-percentile source) is still computed here, alongside the
     # first, purely so row 1's colour norm below spans the SAME two-source
     # panel set the previous page's norm did -- its own row is not drawn
-    # (module docstring, W57).
+    # (module docstring).
     idx_median, idx_p99 = _select_sources(dtab["a_col"])
     rows = np.array([idx_median, idx_p99])
     on_grid_star, on_grid_agb = _on_grid_star(config, region)
