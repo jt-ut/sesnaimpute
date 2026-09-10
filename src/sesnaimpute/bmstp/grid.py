@@ -147,6 +147,53 @@ def bin_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
     return H.astype(np.float64), mass_outside
 
 
+def n_eff(x, log10_f45, w):
+    """The per-cell EFFECTIVE COUNT of members backing a shape's density
+    at that cell (repair list row 7, owner's ruling 2026-09-10): a cell's
+    density alone does not say whether it was set by one heavy member or
+    by many, so the atlas figure standardises a class's share by this
+    count instead of a threshold. `S1`, the raw (unnormalised) sum of
+    member weights `w` landing in the cell, and `S2`, the same cell's sum
+    of SQUARED member weights -- Kish's effective-sample-size identity,
+    `N_EFF = S1**2 / S2` -- computed directly off the unbinned member
+    marks (`x`, `log10_f45`) BEFORE any smoothing, since smoothing spreads
+    density but manufactures no new evidence; 0 where no member's weight
+    fell in the cell (`S2 == 0`). Shared by every class whose members are
+    discrete population draws (STAR, AGB): the star-width-class binning
+    (`bin_star_widths`) only changes each member's own smoothing sigma,
+    never which raw cell it falls in, so summing `S1`/`S2` per class and
+    then over classes is the same as this one combined histogram."""
+    x = np.asarray(x, dtype=np.float64)
+    log10_f45 = np.asarray(log10_f45, dtype=np.float64)
+    w = np.asarray(w, dtype=np.float64)
+    with np.errstate(divide="ignore"):
+        log10_x = np.nextafter(np.log10(x), -np.inf)
+    s1, _, _ = np.histogram2d(
+        log10_x, log10_f45, bins=[LOG10_X_EDGES, LOG10_F45_EDGES], weights=w)
+    s2, _, _ = np.histogram2d(
+        log10_x, log10_f45, bins=[LOG10_X_EDGES, LOG10_F45_EDGES], weights=w ** 2)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(s2 > 0, s1 ** 2 / s2, 0.0)
+
+
+def n_eff_analytic(x, log10_f45, w):
+    """GAL's own `N_EFF` (repair list row 7): GAL's shape is an analytic
+    counts law, not a finite draw of members whose count could run short,
+    so the sampling-uncertainty identity above does not apply -- every
+    cell the law's own raw (pre-smoothing) mass touches carries INFINITE
+    effective evidence (the law's disclosed systematic band, not a sample
+    size, is its uncertainty, sec. 5.4), and every other cell carries
+    none."""
+    x = np.asarray(x, dtype=np.float64)
+    log10_f45 = np.asarray(log10_f45, dtype=np.float64)
+    w = np.asarray(w, dtype=np.float64)
+    with np.errstate(divide="ignore"):
+        log10_x = np.nextafter(np.log10(x), -np.inf)
+    raw, _, _ = np.histogram2d(
+        log10_x, log10_f45, bins=[LOG10_X_EDGES, LOG10_F45_EDGES], weights=w)
+    return np.where(raw > 0, np.inf, 0.0)
+
+
 def mass_above_top(log10_f45, w):
     """The fraction of a population sample's own weight whose brightness
     mark lies above the grid's TOP edge (sec. 2, "the common grid": the
