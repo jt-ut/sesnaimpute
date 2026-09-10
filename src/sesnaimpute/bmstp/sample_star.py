@@ -18,6 +18,7 @@ ratio, per chemistry (sec. 5.2).
 """
 
 import functools
+import os
 
 import h5py
 import numpy as np
@@ -137,16 +138,56 @@ def tile_width_classes(config, region, tile_id):
     return row, sigma_classes_dex
 
 
+_SIGMA_SAMPLES_CACHE = {}
+
+
+def _sigma_samples_product(config, region):
+    """The region's `SIGMA_SAMPLES_K` product: the 12 released Edenhofer
+    posterior samples' own standard deviation of `A(d)`, read in place
+    of the profile's fully correlated `SIGMA_COR_K` sum -- an upper
+    bound absent a stated correlation length
+    (`bms_review/studies/edenhofer_kernel.md`). No fallback: a region
+    without this product fails here by name rather than silently reading
+    the bound."""
+    key = (config.data_root, region)
+    if key not in _SIGMA_SAMPLES_CACHE:
+        path = config_module.product_path(config, "sky/derived", "edenhofer", "profile-sigma-samples",
+                                           "sightline", region=region)
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                "sample_star.star_width_class: %s missing -- run the "
+                "sesnaimpute.sky.derived.edenhofer_samples RUNBOOK line for it" % path)
+        with h5py.File(path, "r") as f:
+            _SIGMA_SAMPLES_CACHE[key] = (f["HPX_PIX_256"][:].astype(np.int64),
+                                          f["DIST_PC"][:].astype(np.float64),
+                                          f["SIGMA_SAMPLES_K"][:].astype(np.float64))
+    return _SIGMA_SAMPLES_CACHE[key]
+
+
+def _sigma_samples_at(config, region, hpx_pix, dist_pc):
+    """`sigma_A(d)` from `SIGMA_SAMPLES_K`, interpolated on that
+    product's own distance axis, at sightline `hpx_pix`."""
+    hpx, dist, sigma = _sigma_samples_product(config, region)
+    order = np.argsort(hpx)
+    j = order[np.searchsorted(hpx[order], hpx_pix)]
+    if hpx[j] != hpx_pix:
+        raise ValueError("sample_star.star_width_class: hpx_pix %d has no row in %s's SIGMA_SAMPLES_K"
+                          % (hpx_pix, region))
+    return np.interp(dist_pc, dist, sigma[j])
+
+
 def star_width_class(config, region, dist_pc, row, sigma_classes_dex):
     """Per star, the width-class index (0..N_WIDTH_CLASSES-1) nearest its
-    own `sigma_x` (the depth-width rule): `sigma_A(d) / (A(d) ln 10)`, `A(d)`
-    and `sigma_A(d)` the tile's representative sightline's own
-    `A_CUM_K`/`SIGMA_COR_K` (`_RegionProfile.column_and_sigma`) at the
-    star's own distance, clipped to the class range before the
-    nearest-class lookup (in log space, since the classes are
+    own `sigma_x` (the depth-width rule): `sigma_A(d) / (A(d) ln 10)`,
+    `A(d)` the tile's representative sightline's own `A_CUM_K` and
+    `sigma_A(d)` its `SIGMA_SAMPLES_K` (no fallback to a correlated-sum
+    bound), both at the star's own distance, clipped to the class range
+    before the nearest-class lookup (in log space, since the classes are
     geometric)."""
     profile_obj = _cached_profile(config, region)
-    a_d, sigma_a_d = profile_obj.column_and_sigma(np.asarray(dist_pc, dtype=np.float64), row)
+    dist_pc = np.asarray(dist_pc, dtype=np.float64)
+    a_d = np.interp(dist_pc, profile_obj.dist, profile_obj.a_cum[row])
+    sigma_a_d = _sigma_samples_at(config, region, int(profile_obj.hpx[row]), dist_pc)
     sigma_x = sigma_a_d / (np.maximum(a_d, 1e-12) * np.log(10.0))
     sigma_x = np.clip(sigma_x, sigma_classes_dex[0], sigma_classes_dex[-1])
     idx = np.argmin(np.abs(np.log(sigma_x)[:, None] - np.log(sigma_classes_dex)[None, :]), axis=1)

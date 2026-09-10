@@ -9,7 +9,10 @@ against (Zenodo 10.5281/zenodo.7692680). Fetches both FITS cubes and the
 curve ascii file verbatim.
 
 Feeds SPEC_PRIORS.md section 1.4 (profiles; region distance, depth and
-pedestal from the emission-anchored extinction profile).
+pedestal from the emission-anchored extinction profile). The much larger
+posterior-samples cubes `sky.derived.edenhofer_samples` reads are a
+manual one-off acquisition, not fetched here -- see the comment above
+that stage's own RUNBOOKtp.sh line.
 """
 
 from sesnaimpute import progress as progress_module

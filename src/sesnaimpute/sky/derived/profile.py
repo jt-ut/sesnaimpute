@@ -727,11 +727,6 @@ class _RegionProfile:
         with h5py.File(profile_path, "r") as f:
             self.dist = f["DIST_PC"][:].astype(float)
             self.a_cum = f["A_CUM_K"][:].astype(float)
-            # (sec 2 "minimum widths", sec 5.1 "Marks"): the map's own
-            # correlated cumulative-column sigma and each sightline's total
-            # column, read alongside A_CUM_K for the field-star depth
-            # mark's own uncertainty width.
-            self.sigma_cor = f["SIGMA_COR_K"][:].astype(float)
             self.a_inf = f["A_INF_K"][:].astype(float)
             self.hpx = f["HPX_PIX_256"][:].astype(np.int64)
             self.gl = f["GAL_L_DEG"][:].astype(float)
@@ -814,20 +809,6 @@ class _RegionProfile:
         here by construction."""
         a = self.a_of_d(d_pc, hpx_pix, total_column_ak=total_column_ak)
         return a / np.asarray(total_column_ak, dtype=float)
-
-    def column_and_sigma(self, d_pc, row):
-        """`(A(d), sigma_A(d))` at profile row `row` (sec 2 "minimum
-        widths", sec 5.1 "Marks"): `A_CUM_K`/`SIGMA_COR_K` interpolated
-        directly on `DIST_PC`, flat beyond the map's own edge -- no
-        far-field tail here, since a caller forming the ratio
-        `sigma_A(d)/A(d)` (the depth mark's own uncertainty in `log10 x`)
-        is unaffected by the constant per-sightline rescale
-        `_far_field_residual` already folds into `A_CUM_K`: that factor
-        cancels in the ratio."""
-        d = np.asarray(d_pc, dtype=float)
-        a_d = np.interp(d, self.dist, self.a_cum[row])
-        sigma_d = np.interp(d, self.dist, self.sigma_cor[row])
-        return a_d, sigma_d
 
     def row_of_lb(self, l_deg, b_deg):
         """`(row, hpx_pix)`: the admitted sightline nearest `(l_deg,
