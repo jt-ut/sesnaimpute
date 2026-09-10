@@ -15,11 +15,12 @@ the outer file's pass starts at the shell holding the inner map's own
 edge, never earlier. From the union columns, each region's cumulative
 extinction `A_s(d)` is formed per sample -- the same conversion and
 splice `sky.derived.profile` uses for the mean -- and `SIGMA_SAMPLES_K`
-is their standard deviation. The map's pre-69-pc "integrated inner"
-contribution has no per-sample release (only its mean and std): it is
-one constant per sightline, shared by construction across every sample
-here, so its own released std is added back in quadrature rather than
-lost. Where the outer samples file is absent from disk, the spliced part
+is their standard deviation, every term in it sampled: the map's
+pre-69-pc "integrated inner" contribution is itself released per sample
+(the `INTEGRATED INNER 68.8 PC` HDU, one column per sample), gathered
+for the union pixels in the same pass and used as each sample's own
+starting value, never a value shared across samples. Where the outer
+samples file is absent from disk, the spliced part
 is the outer map's `SIGMA_COR_K` scaled by the region's own median
 `SIGMA_SAMPLES_K / SIGMA_COR_K` behind the cloud on the inner map
 (`RATIO_SPLICED`, one line printed); any other disagreement between a
@@ -43,6 +44,10 @@ from sesnaimpute.sky.derived import profile as profile_module
 SAMPLES_INNER_NAME = "samples_healpix.fits"
 SAMPLES_OUTER_NAME = "validation_with_less_data_but_2kpc_samples_healpix.fits"
 SAMPLES_HDU_NAME = "SAMPLES"
+#: The pre-69-pc integrated layer's own per-sample HDU (inner map only --
+#: the outer map's analogous baseline is never read, since its increment
+#: is anchored to the inner map's own edge, not to its own baseline).
+INNER_BASELINE_HDU_NAME = "INTEGRATED INNER 68.8 PC"
 N_SAMPLES = 12
 N_PIX = hp.nside2npix(profile_module.NSIDE)
 
@@ -96,36 +101,38 @@ def _read_samples_union(path, n_shell_expected, union_pixels, shell_lo=0, shell_
     return out
 
 
-def _inner_baselines(inner_mean_path, union_pixels):
-    """`(baseline_ak, base_cor_ak)` for the union pixels: the mean map's
-    own pre-69-pc integrated MEAN and STD, converted to A_K -- the one
-    term this stage does not sample (module docstring)."""
-    mean_e = std_e = None
-    with fits.open(inner_mean_path, mode="readonly", memmap=True) as hdul:
-        for hdu in hdul:
-            name = hdu.name.lower()
-            if name.startswith(("mean of integrated inner", "integrated inner")):
-                mean_e = np.asarray(hdu.data, dtype=np.float64)[union_pixels]
-            elif name.startswith("std. of integrated inner"):
-                std_e = np.asarray(hdu.data, dtype=np.float64)[union_pixels]
-    if mean_e is None or std_e is None:
-        raise ValueError("edenhofer_samples: no integrated-inner MEAN/STD. HDU in %s" % inner_mean_path)
-    return mean_e * profile_module.ZGR23_R_KS, std_e * profile_module.ZGR23_R_KS
+def _read_baseline_union(path, hdu_name, union_pixels):
+    """The samples file's own per-sample pre-69-pc integrated layer,
+    gathered for the union pixels: `(N_SAMPLES, n_union_pix)`, native
+    (E) units. Fixed layout (numpy shape `(12, 786432)`), asserted, never
+    discovered; a missing HDU or a shape disagreement fails with one
+    sentence."""
+    with fits.open(path, mode="readonly", memmap=True) as hdul:
+        if hdu_name not in hdul:
+            raise ValueError("edenhofer_samples: no %r HDU in %s" % (hdu_name, path))
+        hdu = hdul[hdu_name]
+        if hdu.shape != (N_SAMPLES, N_PIX):
+            raise ValueError("edenhofer_samples: %s's %r HDU has shape %r, expected (%d, %d)"
+                              % (path, hdu_name, hdu.shape, N_SAMPLES, N_PIX))
+        block = np.asarray(hdu.data[:, union_pixels], dtype=np.float64)
+    return block
 
 
 # --- per-region cumulative extinction and width, from the union arrays ----
 
 
-def cumulative_inner(union_inner, bounds1, baseline_ak):
+def cumulative_inner(union_inner, bounds1, baseline_per_sample_e):
     """`(N_SAMPLES, n_shell+1, n_pix)` per-sample cumulative A_K on the
-    inner map's own grid, from raw (native-unit) density columns already
-    gathered for these pixels; shares `baseline_ak` across every sample."""
+    inner map's own grid, from raw (native-unit) density columns and
+    each sample's own pre-69-pc integrated value, `baseline_per_sample_e`
+    `(N_SAMPLES, n_pix)` (module docstring: every term here is sampled)."""
     widths = np.diff(bounds1)[None, :, None]
     rho = union_inner.astype(np.float64) * profile_module.ZGR23_R_KS
+    baseline_ak = baseline_per_sample_e * profile_module.ZGR23_R_KS
     out = np.empty((N_SAMPLES, bounds1.size, union_inner.shape[-1]), dtype=np.float64)
     out[:, 0, :] = baseline_ak
     np.cumsum(rho * widths, axis=1, out=out[:, 1:, :])
-    out[:, 1:, :] += baseline_ak[None, None, :]
+    out[:, 1:, :] += baseline_ak[:, None, :]
     return out
 
 
@@ -139,25 +146,22 @@ def cumulative_outer_increment(union_outer, bnd2, k):
     return np.cumsum(rho2 * widths2, axis=1)
 
 
-def sigma_samples_of(a_full, base_cor_ak):
+def sigma_samples_of(a_full):
     """`SIGMA_SAMPLES_K`, `(n_pix, n_dist)`: the across-sample std of
-    `A(d)`, with the pre-69-pc layer's own released std added in
-    quadrature at every distance from 69 pc onward (module docstring);
-    zero at the leading `d=0` point, where every sample is 0 by
-    construction."""
-    std = a_full.std(axis=0, ddof=0)  # (n_dist, n_pix)
-    out = std.copy()
-    out[1:, :] = np.sqrt(std[1:, :] ** 2 + base_cor_ak[None, :] ** 2)
-    return out.T
+    `A(d)` -- every term, including the pre-69-pc baseline, comes from
+    the samples themselves (module docstring), so no correction term is
+    added here; zero at the leading `d=0` point, where every sample is 0
+    by construction."""
+    return a_full.std(axis=0, ddof=0).T
 
 
-def region_a_full(union_inner_region, bounds1, centers1, baseline_ak_region,
+def region_a_full(union_inner_region, bounds1, centers1, baseline_per_sample_e_region,
                    union_outer_region=None, bnd2=None, cen2=None, k=None):
     """`(dist_pc, a_full)`: one region's per-sample cumulative A_K,
     `sky.derived.profile`'s own distance grid (a leading `0.0`, then the
     inner map's boundaries, then -- if the outer samples are present --
     the outer map's past the splice point, via `profile.splice_axes`)."""
-    a_inner = cumulative_inner(union_inner_region, bounds1, baseline_ak_region)
+    a_inner = cumulative_inner(union_inner_region, bounds1, baseline_per_sample_e_region)
     if union_outer_region is not None:
         increment = cumulative_outer_increment(union_outer_region, bnd2, k)
         a_outer = a_inner[:, -1:, :] + increment
@@ -190,13 +194,13 @@ def region_ratio_medians(sigma_samples, sigma_cor, sigma_unc, dist_pc, d_hi_pc):
 
 
 def _build_one_region(config, region, region_pixels, union_pixels, union_inner, bounds1, centers1,
-                       baseline_ak, base_cor_ak, union_outer, bnd2, cen2, k, outer_present,
+                       baseline_per_sample_e, union_outer, bnd2, cen2, k, outer_present,
                        inner_mean_path, outer_mean_path):
     idx = _local_index(union_pixels, region_pixels)
     union_outer_region = union_outer[:, :, idx] if outer_present else None
-    dist_pc, a_full = region_a_full(union_inner[:, :, idx], bounds1, centers1, baseline_ak[idx],
+    dist_pc, a_full = region_a_full(union_inner[:, :, idx], bounds1, centers1, baseline_per_sample_e[:, idx],
                                      union_outer_region, bnd2, cen2, k)
-    sigma_samples = sigma_samples_of(a_full, base_cor_ak[idx])
+    sigma_samples = sigma_samples_of(a_full)
     mean_a = a_full.mean(axis=0)
 
     profile_path = product_path(config, "sky/derived", "edenhofer", "profile", "sightline", region=region)
@@ -289,7 +293,7 @@ def build(config, regions=None):
 
     with progress_module.Stage("sky.derived.edenhofer_samples") as st:
         union_pixels, pix_by_region = _admitted_by_region(config, names)
-        baseline_ak, base_cor_ak = _inner_baselines(inner_mean_path, union_pixels)
+        baseline_per_sample_e = _read_baseline_union(inner_samples_path, INNER_BASELINE_HDU_NAME, union_pixels)
 
         union_inner = _read_samples_union(inner_samples_path, bounds1.size - 1, union_pixels)
         st.tick(1, 3, "inner samples read (%d union pixels)" % union_pixels.size)
@@ -303,7 +307,7 @@ def build(config, regions=None):
         st.tick(2, 3, "outer samples read" if outer_present else "outer samples absent")
 
         rows = [_build_one_region(config, name, pix_by_region[name], union_pixels, union_inner, bounds1, centers1,
-                                   baseline_ak, base_cor_ak, union_outer, bnd2, cen2, k, outer_present,
+                                   baseline_per_sample_e, union_outer, bnd2, cen2, k, outer_present,
                                    inner_mean_path, outer_mean_path)
                 for name in names]
         st.tick(3, 3, "regions written")
