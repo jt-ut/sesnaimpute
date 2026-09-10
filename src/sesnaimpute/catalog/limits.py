@@ -1,24 +1,28 @@
 """The per-source 50%-completeness detection limits (SPEC_PRIORS.md
-section 1.3).
+section 1.3; SPEC_BMSTP_DRAFT.md section 3.3).
 
 `limits(config, region)` is the only limits reader in the package: every
-consumer of a source's detection limit -- the selection test, the depth
-groups, every class build -- calls this function, never `DCOMP90_MJY` or
-`depths.py`'s products directly, so a single rescaling reaches every
+consumer of a source's detection limit -- the likelihood's non-detection
+terms, the field-star retention, the depth groups, every class build --
+calls this function, never `DCOMP90_MJY`, `depths.py`'s products or
+`depth_grid.py`'s products directly, so a single fit reaches every
 consumer identically.
 
-For the five Spitzer bands (I1, I2, I3, I4, M1), the limit is the
-source's own `DCOMP90` rescaled by its region-band offset:
-`F_lim,50 = DCOMP90 * 10**(-Delta)`. For the three 2MASS bands (J, H, Ks),
-which carry no per-source completeness map, the limit is the region's
-`F_50` flux directly, alike for every source in the region.
+The values come from `catalog.depth_grid`'s per-source product
+(`limits_sesna_source__<Region>.hdf5`, `F_LIM_50_MJY`): the region's
+counts-based turnover, fit on the catalogued sources' own absolute
+fluxes rather than on each source's map value, shifted to each source's
+own `DCOMP90` for the five Spitzer bands, and the region's constant 2MASS
+50% flux for the three 2MASS bands (`catalog/depth_grid.py`'s module
+docstring). This is the same fit `bmstp.atlas` reads for the pixel grid,
+so the likelihood, the retention and the atlas price the same
+completeness (`depths.py`'s per-source `DELTA_DEX` rule is report-only).
 """
 
 import numpy as np
 import h5py
 
 from sesnaimpute import config as config_module
-from sesnaimpute import definitions
 
 IRAC_MIPS_KEYS = ("I1", "I2", "I3", "I4", "M1")
 TWOMASS_KEYS = ("J", "H", "Ks")
@@ -26,34 +30,9 @@ TWOMASS_KEYS = ("J", "H", "Ks")
 
 def limits(config, region):
     """Returns `(n, 8)` mJy detection limits for every source in
-    `region`, in `definitions.BANDS` order, reading the curated catalogue
-    (`curated.build`) and the survey-depths product (`depths.build`).
+    `region`, in `definitions.BANDS` order, reading `catalog.depth_grid`'s
+    per-source limits product (`depth_grid.build`).
     """
-    band_keys = [b.key for b in definitions.BANDS]
-
-    curated_path = config_module.product_path(
-        config, "catalog", "sesna", "sources", "source", region=region
-    )
-    with h5py.File(curated_path, "r") as f:
-        dcomp90 = f["DCOMP90_MJY"][:]
-        curated_bands = [b.decode() if isinstance(b, bytes) else b for b in f.attrs["BANDS"]]
-
-    depths_path = config_module.product_path(config, "catalog", "sesna", "depths", "region")
-    with h5py.File(depths_path, "r") as f:
-        depth_regions = [r.decode() if isinstance(r, bytes) else r for r in f["REGION"][:]]
-        if region not in depth_regions:
-            raise ValueError(f"catalog.limits: {region!r} not in {depths_path!r}:/REGION")
-        ridx = depth_regions.index(region)
-        delta_dex = f["DELTA_DEX"][ridx, :]
-        f50_2mass = f["F50_2MASS_MJY"][ridx, :]
-
-    n = dcomp90.shape[0]
-    out = np.empty((n, len(band_keys)), dtype=np.float64)
-    for j, key in enumerate(band_keys):
-        cb = curated_bands.index(key)
-        if key in TWOMASS_KEYS:
-            out[:, j] = f50_2mass[TWOMASS_KEYS.index(key)]
-        else:
-            delta = delta_dex[IRAC_MIPS_KEYS.index(key)]
-            out[:, j] = dcomp90[:, cb] * 10.0 ** (-delta)
-    return out
+    path = config_module.product_path(config, "catalog", "sesna", "limits", "source", region=region)
+    with h5py.File(path, "r") as f:
+        return np.asarray(f["F_LIM_50_MJY"][:], dtype=np.float64)

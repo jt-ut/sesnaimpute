@@ -61,6 +61,18 @@ same resampling loop as `SIGMA_DELTA_DEX` for the five Spitzer bands; the
 `NaN`. A non-converged Spitzer band's width and sigma are substituted by
 the band median, the same rule as Delta, so the width stays finite
 wherever Delta does; 2MASS has no convergence check and no substitution.
+For the five Spitzer bands, `DELTA_DEX` (and the per-source limit it
+would imply, `DCOMP90 * 10**(-Delta)`) is report-only: this fit's counts
+are the catalogue's detections in one band alone, which a band's own
+recovery only bounds where that band's own requirement is what removed
+the fainter sources from the catalogue -- not guaranteed, since the
+survey's two-band rule can drop a source for a DIFFERENT band's
+non-detection first. `catalog.limits.limits` reads the region's
+counts-based turnover instead (`catalog/depth_grid.py`), fit directly on
+absolute flux and shifted to each source's own `DCOMP90`. 2MASS's `F50`
+is unaffected -- 2MASS carries no per-source map to rescale by, so
+`limits.limits` reads its constant flux from this product still.
+
 Each fitted 2MASS width is reported (not enforced) against the 2MASS
 Point Source Catalog's own intrinsic roll-off width -- `(m50 - m99) /
 2.326` from the Point Source Catalog's completeness curve, 0.095 / 0.10 /
