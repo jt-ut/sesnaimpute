@@ -35,11 +35,11 @@ _SHAPE = {
     "AGB": ("star", "GRID_AGB"),
     "PAHC": ("star", "GRID_STAR"),
     "YSO": ("cloud", "GRID_YSO"),
-    "H2S": ("cloud", None),  # formed at load, section 4.1 P3
+    "H2S": ("cloud", "GRID_H2S"),  # on the common grid since W58, section 4.1 P3
     "GAL": ("gal", "GRID"),
 }
 _LIB = {"STAR": ("sps", "region"), "AGB": ("agb", "region"), "PAHC": ("pahc", "region"),
-        "YSO": ("yso", "region"), "H2S": ("h2shock", "survey"), "GAL": ("galz", "survey")}
+        "YSO": ("yso", "region"), "H2S": ("h2shock", "region"), "GAL": ("galz", "survey")}
 
 _SQRT2 = float(np.sqrt(2.0))
 _SQRT2PI = float(np.sqrt(2.0 * np.pi))
@@ -114,32 +114,14 @@ def load(config, region, cls):
     elif shape_src == "cloud":
         path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
         with h5py.File(path, "r") as f:
+            # the common axis for both cloud classes since W58: P3's
+            # `GRID_YSO`/`GRID_H2S` are already on it (section 4.1, 5.6),
+            # the H2S template's Sigma-to-4.5-micron conversion `C_THETA`
+            # (P5, `bmstp.template_weights.h2shock_conversion`) folded in
+            # at the shape stage, not at this read -- no private axis.
             x_edges = f["LOG10_X_EDGES"][:]
-            if cls == "YSO":
-                # the common axis again -- P3's `GRID_YSO` is already on it.
-                b_edges = f["LOG10_F45_EDGES"][:]
-                grid_all = f["GRID_YSO"][:]
-            else:
-                # H2S's grid, section 4.1 P3, section 5.6: the sightline's
-                # log10 x marginal of GRID_YSO times the region's
-                # knot-brightness Gaussian, formed here (not stored) on
-                # H2S's OWN axis -- 110 cells of 0.1 dex from origin
-                # `LOGSIG_MEAN - 3 LOGSIG_STD - 0.3`, private to this
-                # reader; the read point is `log10 B_hat + C_THETA[theta]`
-                # with `C_THETA = log10 Sigma_ref,theta` (P5), the
-                # template's implied line brightness -- exact against the
-                # common-axis statement (section 4.1, 5.6), never the
-                # file's `LOG10_F45_EDGES`, which is YSO's brightness axis.
-                x_marg = f["X_MARGINAL"][:].astype(np.float64)
-                logsig_mean = float(f.attrs["LOGSIG_MEAN"])
-                logsig_std = float(f.attrs["LOGSIG_STD"])
-                origin_h2s = logsig_mean - 3.0 * logsig_std - 0.3
-                b_edges = origin_h2s + 0.1 * np.arange(111)
-                b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
-                z = (b_centers - logsig_mean) / logsig_std
-                b_pdf = np.exp(-0.5 * z * z)
-                b_pdf /= b_pdf.sum()
-                grid_all = (x_marg[:, :, None] * b_pdf[None, None, :]).astype(np.float32)
+            b_edges = f["LOG10_F45_EDGES"][:]
+            grid_all = f[dset][:]
         grain = sightline
     else:  # gal: one survey-wide grid, no grain axis, on the common axis too
         path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")

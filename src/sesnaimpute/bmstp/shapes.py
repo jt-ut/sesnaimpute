@@ -4,11 +4,16 @@ shape-grid products of IMPLEMENTATION_BMSTP_DRAFT.md sec. 1.2
 (SPEC_BMSTP_DRAFT.md sec. 2, sec. 4.1's "shape grids", sec. 5.1-5.6).
 
 Writes P2 (the star-family grids, per tile), P3 (the cloud-class grid,
-per sightline: YSO's `GRID_YSO`/`X_MARGINAL`, plus the region's H2S
-Gaussian carried as two numbers, sec. 5.6 "Marks" -- H2S's own grid is
-the outer product of `X_MARGINAL` and that Gaussian, formed at read, not
-stored), and P4 (the galaxy grid, survey-wide). Every brightness axis is
-the one common `LOG10_F45_EDGES` (sec. 2): no per-shape origin.
+per sightline: YSO's `GRID_YSO`/`X_MARGINAL`, and, since W58, H2S's own
+`GRID_H2S` on the SAME common grid -- `GRID_H2S[x, F] = p_x(x) . [L_Sigma
+(*) K_c](F)`, `p_x` the sightline's own `X_MARGINAL`, `L_Sigma` the
+region's knot lognormal (`LOGSIG_MEAN`/`LOGSIG_STD`, kept as attributes),
+`K_c` the distribution of the h2shock templates' own Sigma-to-4.5-micron
+conversions under their (uniform) weights -- one convolution, survey-wide
+in its template content, computed once per region and broadcast over
+sightlines through `p_x` alone, sec. 5.6 "Marks"), and P4 (the galaxy
+grid, survey-wide). Every brightness axis is the one common
+`LOG10_F45_EDGES` (sec. 2): no per-shape origin, not even H2S's.
 
 Before each product is overwritten, this module reads whatever the SAME
 path already holds (rule: acceptance is read before the write that would
@@ -29,7 +34,7 @@ from sesnaimpute import config as config_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
-from sesnaimpute.bmstp import grid, sample_cloud, sample_gal, sample_star
+from sesnaimpute.bmstp import grid, sample_cloud, sample_gal, sample_star, template_weights
 from sesnaimpute.population import h2s as h2s_module
 
 
@@ -326,6 +331,52 @@ def build_cloud(config, region):
         log10_sigma = h2s_module.transport_log10_sigma(log10_sb_native, area_pc2, r.d_r_pc)
         logsig_mean, logsig_std = h2s_module.region_sigma_lognormal(log10_sigma)
 
+        # GRID_H2S (W58's rule, sec. 5.6 "Marks"): GRID_H2S[x, F] = p_x(x)
+        # . [L_Sigma (*) K_c](F), one marginal per region (the template
+        # content and the region's own lognormal are both region-wide, not
+        # per-sightline), broadcast over sightlines through X_MARGINAL
+        # alone below. `log10 Sigma` itself is never placed on the common
+        # grid (its own scale, ~-8 dex here, sits nowhere near the grid's
+        # `log10 F_4.5` range) -- only `log10 Sigma + c_theta` is a
+        # brightness, so `[L_Sigma (*) K_c](F)` is built the SAME way
+        # `template_weights.build_h2shock`'s own `p(F_k) = Sum_theta
+        # w_theta L_Sigma(F_k - c_theta)` is: each template's own EXACT
+        # Gaussian kernel (`exact_gaussian_kernel(LOGSIG_STD)`, floored at
+        # one cell, sec. 2's "minimum widths") placed at its own `log10
+        # Sigma_mean + c_theta` nearest cell and summed with the (uniform,
+        # sec. 5.6, disclosed) template weight -- the SAME formula, so this
+        # marginal and P5's own conditional table agree by construction.
+        names_h2s, c_theta_h2s = template_weights.h2shock_conversion(config)
+        n_model_h2s = names_h2s.size
+        w_uniform_h2s = np.full(n_model_h2s, 1.0 / n_model_h2s, dtype=np.float64)
+        sigma_kernel = sample_cloud.exact_gaussian_kernel(logsig_std)
+        half_width_sigma = (sigma_kernel.size - 1) // 2
+        idx_center_h2s = np.round(
+            (logsig_mean + c_theta_h2s - grid.LOG10_F45_EDGES[0]) / grid.D_LOG10_F45).astype(np.int64)
+        f45_marginal_h2s = np.zeros(n_b, dtype=np.float64)
+        for m_i in range(sigma_kernel.size):
+            m = m_i - half_width_sigma
+            cell_idx = idx_center_h2s + m
+            valid = (cell_idx >= 0) & (cell_idx < n_b)
+            if not np.any(valid):
+                continue
+            np.add.at(f45_marginal_h2s, cell_idx[valid], w_uniform_h2s[valid] * sigma_kernel[m_i])
+
+        # K_c (report/identity only, below): the templates' own conversions
+        # under the uniform weights, a point-mass histogram on the common
+        # grid's 0.1 dex cells -- not used to build f45_marginal_h2s above
+        # (the per-template placement already sums it in exactly), only to
+        # convolve against the OLD reader's construction for rule 11's
+        # identity.
+        c_hist, _ = np.histogram(c_theta_h2s, bins=grid.LOG10_F45_EDGES, weights=w_uniform_h2s)
+
+        grid_h2s = (x_marginal[:, :, None] * f45_marginal_h2s[None, None, :]).astype(np.float32)
+        on_grid_frac_h2s = float(f45_marginal_h2s.sum())
+        mass_outside_h2s = (np.clip(1.0 - x_marginal.astype(np.float64).sum(axis=1) * on_grid_frac_h2s,
+                                     0.0, 1.0).astype(np.float32)
+                             if n_sl else np.zeros((0,), dtype=np.float32))
+        on_grid_h2s = (1.0 - mass_outside_h2s).astype(np.float32)
+
         # sec. 5.5's acceptance identity: the current (pre-overwrite)
         # X_MARGINAL restricted to the cloud interval and renormalised,
         # against the freshly built one -- both read above/built above,
@@ -354,6 +405,9 @@ def build_cloud(config, region):
             f.create_dataset("X_MARGINAL", data=x_marginal)
             f.create_dataset("MASS_OUTSIDE_YSO", data=mass_outside_yso)
             f.create_dataset("ON_GRID_YSO", data=on_grid_yso)
+            f.create_dataset("GRID_H2S", data=grid_h2s)
+            f.create_dataset("MASS_OUTSIDE_H2S", data=mass_outside_h2s)
+            f.create_dataset("ON_GRID_H2S", data=on_grid_h2s)
 
         # the region's own brightness marginal (sec. 9's report): P_ref
         # convolved with the region's own shift kernel K (sec. 5.5
@@ -390,6 +444,42 @@ def build_cloud(config, region):
         med_col = int(np.argsort(x_marginal.sum(axis=1))[n_sl // 2]) if n_sl else -1
         med_corr = _joint_corr(grid_yso[med_col]) if n_sl else float("nan")
 
+        # rule 11's H2S identity (W58): the median sightline's stored
+        # GRID_H2S brightness marginal (summed over x, normalised) against
+        # the reader's REMOVED private-axis construction -- a point-
+        # evaluated lognormal on its own origin (LOGSIG_MEAN - 3
+        # LOGSIG_STD - 0.3, the exact formula `fittp.prior_reader`'s H2S
+        # branch used, from X_MARGINAL and the two attributes only) --
+        # convolved with the SAME K_c above and rebinned onto the common
+        # grid (`_rebin_conservative`, the same conservative rebinning
+        # this module already uses for X_MARGINAL's own native-profile
+        # check) for a cell-by-cell comparison.
+        h2s_max_rel_dev = float("nan")
+        if n_sl:
+            origin_old = logsig_mean - 3.0 * logsig_std - 0.3
+            old_b_edges = origin_old + grid.D_LOG10_F45 * np.arange(111)
+            old_b_centers = 0.5 * (old_b_edges[:-1] + old_b_edges[1:])
+            z_old = (old_b_centers - logsig_mean) / logsig_std
+            old_b_pdf = np.exp(-0.5 * z_old * z_old)
+            old_b_pdf /= old_b_pdf.sum()
+            old_conv = np.convolve(old_b_pdf, c_hist, mode="full")
+            old_conv_origin = origin_old + grid.LOG10_F45_EDGES[0]
+            old_conv_edges = old_conv_origin + grid.D_LOG10_F45 * np.arange(old_conv.size + 1)
+            old_on_common = _rebin_conservative(old_conv_edges, old_conv, grid.LOG10_F45_EDGES)
+            old_norm = old_on_common / max(float(old_on_common.sum()), 1e-300)
+            new_marginal = grid_h2s[med_col].sum(axis=0).astype(np.float64)
+            new_norm = new_marginal / max(float(new_marginal.sum()), 1e-300)
+            h2s_max_rel_dev = float(np.max(np.abs(new_norm - old_norm)
+                                            / np.maximum(old_norm, 1e-8)))
+
+        # the knots' own 16-84% range in log10 F_4.5 (sec. 9's report,
+        # W58's effect number): the region-wide K_c (*) L_Sigma marginal,
+        # the same for every sightline (only p_x varies by row).
+        h2s_p16_f45 = h2s_p84_f45 = float("nan")
+        if float(f45_marginal_h2s.sum()) > 0:
+            cdf_h2s = np.cumsum(f45_marginal_h2s) / np.sum(f45_marginal_h2s)
+            h2s_p16_f45, h2s_p84_f45 = (float(np.interp(q, cdf_h2s, b_centers)) for q in (0.16, 0.84))
+
         st.done(path, n_sightline=int(n_sl),
                 mass_outside_yso_max=float(mass_outside_yso.max()) if n_sl else 0.0,
                 on_grid_yso_range=(float(on_grid_yso.min()), float(on_grid_yso.max())) if n_sl else (0.0, 0.0),
@@ -399,7 +489,10 @@ def build_cloud(config, region):
                 f45_peak=peak_f45, f45_p16=p16_f45, f45_p84=p84_f45,
                 sigma_d_dex=sigma_d, mass_outside_k=float(mo_k),
                 row46_corr=row46_corr, median_col_corr=med_corr,
-                d_front_pc=float(d_front), d_back_pc=float(d_back))
+                d_front_pc=float(d_front), d_back_pc=float(d_back),
+                on_grid_h2s_range=(float(on_grid_h2s.min()), float(on_grid_h2s.max())) if n_sl else (0.0, 0.0),
+                h2s_f45_p16=h2s_p16_f45, h2s_f45_p84=h2s_p84_f45,
+                h2s_identity_max_rel_dev=h2s_max_rel_dev, h2s_median_sightline=med_col)
     return (path, n_sl, mass_outside_yso, removed_frac, max_x_marginal_dev,
             (peak_f45, p16_f45, p84_f45), on_grid_yso, (d_front, d_back))
 
