@@ -9,7 +9,7 @@ distribution into `sky/download/dunham2015/`.
 Feeds the YSO brightness reference (`sesnaimpute.sky.derived.dunham_yso`):
 the matched census the young-star law was fit to (Pokhrel et al. 2020),
 so its dereddened 4.5 micron flux is the population density over
-brightness `bmstp/sample_cloud.py`'s `sample_f45` predicts (W53, sec 1.4).
+brightness `bmstp/sample_cloud.py`'s `sample_f45` predicts (sec 1.4).
 """
 
 from sesnaimpute import progress as progress_module
