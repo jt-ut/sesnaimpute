@@ -76,6 +76,25 @@ Reads SESNA photometry (the curated catalogues, their own detection
 limits and adopted column) and the external TRILEGAL population -- never
 a classification label (rule 7). Writes one survey-wide product,
 `bms/pahc/curve_pahc_survey.hdf5`.
+
+The bright end of q (log10 q from about -2.5 to -1.5, q 30-1000: sources
+far brighter than their own 8 micron limit) holds no possible nebular-
+light excess. Contamination adds nebular light of order the source's own
+8 micron limit, `F_lim,8`, to the aperture -- an excess of order `q` in
+flux-fraction units -- but the per-source 1 sigma near a bright star's
+own photospheric prediction is set by the shelf's own residual scatter,
+`s = 10**(0.4*RESIDUAL_WIDTH_MAG) - 1` (the flux-fraction equivalent of
+the shelf's robust magnitude width), and a bright enough star's sigma
+exceeds any excess nebular light alone could add. A 3 sigma excess from
+nebular light therefore requires `q >= Q_MIN = EXCESS_SIGMA * s`; below
+that, an observed 3 sigma 8 micron excess with no 4.5 micron excess is
+circumstellar (a dusty evolved star, or a disc with an inner hole), not
+contamination. Every `P_Q` bin whose upper edge in q lies below `Q_MIN`
+is set to exactly zero (bins at or above `Q_MIN` are unchanged, floor and
+all); each such bin's own measured, unfloored excess fraction is kept
+instead in `P_Q_BRIGHT_EXCESS`, with its own `N_PER_BIN_BRIGHT_EXCESS` --
+the fraction of bright field stars carrying circumstellar 8 micron
+emission with no 4.5 micron excess.
 """
 
 import os
@@ -434,6 +453,39 @@ def binned_fraction(log10_q, excess, edges):
     return fraction, counts
 
 
+def q_min_bright_excess(width_mag, excess_sigma=EXCESS_SIGMA):
+    """`Q_MIN` (module docstring, "the bright end of q"): the smallest q a
+    3 sigma nebular-light excess can produce, given the shelf's own
+    residual width. `s = 10**(0.4*width_mag) - 1` turns the shelf's
+    robust magnitude width into a flux fraction -- the per-source 1 sigma
+    at bright flux -- and `Q_MIN = excess_sigma * s` since nebular light
+    of order `F_lim,8` (i.e. `q` in these units) must clear that sigma
+    `excess_sigma` times over to register as a 3 sigma excess."""
+    s = 10.0 ** (0.4 * width_mag) - 1.0
+    return excess_sigma * s
+
+
+def apply_bright_end_rule(curve, q_min):
+    """Zeros every `P_Q` bin whose upper edge in q lies below `q_min`
+    (module docstring): nebular light cannot produce a 3 sigma excess
+    there, so the bin's measured excess fraction is not contamination.
+    Those bins' own unfloored excess fraction and count move to
+    `p_bright_excess`/`n_bright_excess` instead; bins at or above `q_min`
+    are untouched (identity, brief W59 rule 11)."""
+    upper_q = 10.0 ** curve["edges"][1:]
+    zeroed = upper_q < q_min
+    p_a = curve["p_a"].copy()
+    p_bright_excess = np.zeros_like(p_a)
+    n_bright_excess = np.zeros_like(curve["n_a"])
+    p_bright_excess[zeroed] = curve["p_a_raw"][zeroed]
+    n_bright_excess[zeroed] = curve["n_a"][zeroed]
+    p_a[zeroed] = 0.0
+    curve = dict(curve)
+    curve.update(p_a=p_a, p_bright_excess=p_bright_excess,
+                 n_bright_excess=n_bright_excess, zeroed=zeroed, q_min=q_min)
+    return curve
+
+
 def build_curve(q, excess8, excess45, region_idx, n_region, n_bins=N_Q_BINS):
     """Assembles the 40-bin log10 q curve family: the shipped curve (no
     4.5 micron excess, floor-subtracted and raw), the disk-excess curve
@@ -478,13 +530,17 @@ def build_curve(q, excess8, excess45, region_idx, n_region, n_bins=N_Q_BINS):
 # 4. write, read
 # ---------------------------------------------------------------------------
 
-def write_curve(path, curve):
+def write_curve(path, curve, q_min, residual_width_mag):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "survey"
+        f.attrs["Q_MIN"] = float(q_min)
+        f.attrs["RESIDUAL_WIDTH_MAG"] = float(residual_width_mag)
         f.create_dataset("LOG10_Q_EDGES", data=curve["edges"].astype(np.float64))
         f.create_dataset("P_Q", data=curve["p_a"].astype(np.float64))
         f.create_dataset("N_PER_BIN", data=curve["n_a"].astype(np.int64))
+        f.create_dataset("P_Q_BRIGHT_EXCESS", data=curve["p_bright_excess"].astype(np.float64))
+        f.create_dataset("N_PER_BIN_BRIGHT_EXCESS", data=curve["n_bright_excess"].astype(np.int64))
 
 
 def read(config):
@@ -595,13 +651,23 @@ def build(config, regions=None):
 
     curve = build_curve(q, excess8, excess45, region_idx, len(region_names))
 
+    # the bright end of q: below Q_MIN a 3 sigma excess cannot be
+    # nebular light, so P_Q is zeroed there and the measured fraction
+    # moves to P_Q_BRIGHT_EXCESS (module docstring)
+    q_min = q_min_bright_excess(width48)
+    curve = apply_bright_end_rule(curve, q_min)
+    n_zeroed = int(curve["zeroed"].sum())
+    frac_eligible_zeroed = float(curve["n_a"][curve["zeroed"]].sum()) / curve["n_eligible"]
+
     out_path = config_module.product_path(config, "population", "pahc", "curve", "survey")
-    write_curve(out_path, curve)
+    write_curve(out_path, curve, q_min, width48)
 
     st.done(out_path, n_shipped=curve["n_shipped"], n_disk_excess=curve["n_disk_excess"],
-            floor=curve["floor"])
+            floor=curve["floor"], q_min=q_min, n_zeroed=n_zeroed)
     print(f"pahc_curve: shipped n={curve['n_shipped']} disk-excess n={curve['n_disk_excess']} "
-          f"floor={curve['floor']:.6f} -> {out_path}", flush=True)
+          f"floor={curve['floor']:.6f} Q_MIN={q_min:.4f} bins_zeroed={n_zeroed}/{N_Q_BINS} "
+          f"({frac_eligible_zeroed:.4%} of the eligible, no-4.5um-excess population) "
+          f"-> {out_path}", flush=True)
 
 
 if __name__ == "__main__":
