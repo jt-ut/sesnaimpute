@@ -27,8 +27,15 @@ Row 2, the class share: for each class and grid cell,
 `S_C(x, F) = A_C(s) h_C(x, F) f_C(F; s) / Sum_C' A_C'(s) h_C'(x, F) f_C'(F; s)`
 (sec. 1.1's product the fitter actually compares between classes at a
 source's own depth and brightness, sec. 1.4's template weights), on a
-LINEAR 0-1 colour scale, cells masked blank where the total is below 1e-6
-of its grid maximum. `f_C` is 1 for every class whose weight-table factors
+LINEAR 0-1 colour scale, cells masked blank where every class's own
+SHAPE sits at its stored floor there (`h_C(x, F) <= bmstp.grid.FLOOR *
+max(h_C)` for every class in the sum, sec. 2's floor, 1e-6 of the
+class's own peak) -- a total-sized mask never fires, since GAL's own
+`A_C(s)` is the largest of the six and its floored shape is not
+negligible next to the grid's overall maximum, so it would read as
+GAL share 1 everywhere no other class has real density; masking on the
+shape's own floor is what "at least one class has real density here"
+means. `f_C` is 1 for every class whose weight-table factors
 are all normalised over theta (GAL's `colour`, YSO's `population`, AGB's
 `tau`, H2S's `uniform` sec 1.4: `Sum_theta pi_C(theta, F) = 1` at every F
 by construction, so multiplying it in and summing over theta is exactly 1)
@@ -66,6 +73,7 @@ from sesnaimpute import plot_style
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.fittp import prior_reader
+from sesnaimpute.bmstp import grid
 from sesnaimpute.bmstp import template_weights
 
 PAGE_W_IN, PAGE_H_IN = 16.0, 9.0
@@ -248,10 +256,19 @@ def _build_region_data(config, region):
     # 1.1/1.4): Lambda_C(x, F) = A_C(s) h_C(x, F) f_C(F; s) for every
     # class but H2S, summed to the total and divided back into each --
     # the SAME product the fitter's evidence sum compares between classes
-    # (sec. 4.2), not the shape alone.
+    # (sec. 4.2), not the shape alone. A cell is blanked where every
+    # class's own SHAPE sits at its stored floor there (sec. 2, `bmstp.
+    # grid.FLOOR`), never by the total's own size: the total is never
+    # small in absolute terms (GAL's own A_C(s) times its floored shape
+    # is not negligible next to the grid's overall maximum, since GAL's
+    # peak is the largest of the six), so a total-sized mask never fires
+    # and every off-support cell reads as GAL share 1 -- masking on the
+    # shape's own floor is what "at least one class has real density
+    # here" actually means.
     d_pahc_s = float(dtab["d_pahc"][idx_median])
     curve = template_weights._read_pahc_curve(config)
     lam = {}
+    at_floor = None
     for cls in _SHARE_CLASSES:
         p = panels[(0, cls)]
         h_c = p["density"]
@@ -260,8 +277,17 @@ def _build_region_data(config, region):
         else:
             f_c = np.ones(h_c.shape[1], dtype=np.float64)
         lam[cls] = p["intensity"] * h_c * f_c[None, :]
+        # a cell `prepare`'s own `np.maximum(H_s, FLOOR*H_s.max())` set to
+        # the floor reads back a few parts in 1e8 off `FLOOR*h_c.max()`
+        # here (the float32 store and the float64->float32->float64
+        # round trip through `_panel_arrays`, not the same rounding as
+        # `prepare`'s own float64 max): a relative tolerance well above
+        # that (1e-4) and well below every class's real gap above its
+        # floor (>= 15%, measured) separates the two cleanly.
+        floor_c = h_c <= (grid.FLOOR * h_c.max() * 1.0001)
+        at_floor = floor_c if at_floor is None else (at_floor & floor_c)
     total = sum(lam.values())
-    masked = total < (1e-6 * total.max())
+    masked = at_floor
     share = {}
     for cls in _SHARE_CLASSES:
         s = np.divide(lam[cls], total, out=np.full_like(total, np.nan), where=~masked)
@@ -278,8 +304,8 @@ def _print_numbers(region, dtab, idx_median, panels, share, masked):
         print("atlas.shapes [%s] row1/%s: mass=%.6f on_grid=%.6f peak_log10x=%.4g peak_log10F45=%.4g "
               "A_C(s)=%.4g deg^-2" % (region, cls, p["mass"], p["on_grid"], p["peak_x"], p["peak_b"], p["intensity"]))
     valid = ~masked
-    print("atlas.shapes [%s] row2: masked fraction=%.4f (total Lambda_C < 1e-6 of grid max, H2S excluded "
-          "from the total, module docstring)" % (region, float(np.mean(masked))))
+    print("atlas.shapes [%s] row2: masked fraction=%.4f (every class's own shape at its stored floor "
+          "there, H2S excluded from the sum, module docstring)" % (region, float(np.mean(masked))))
     for cls in _SHARE_CLASSES:
         s = share[cls]
         smax = float(np.nanmax(s)) if valid.any() else float("nan")
