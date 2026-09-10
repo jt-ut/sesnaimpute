@@ -118,7 +118,14 @@ PY sesnaimpute.sky.derived.dunham_yso   # the Dunham et al. 2015 YSO census at t
 PY sesnaimpute.sky.derived.twomass_column_scale   # report-only, read by nothing: each arm's map column against the reddening of Ks 11-13 stars per region; a magnitude-limited window loses reddened background stars behind dense pixels, so the number is not a calibration (briefs/reports/W35.md)
 PY sesnaimpute.sky.derived.column   # the adopted (gas) column per source and sightline, and the extinction column beside it -- the adopted column scaled to the Juvela & Montillaud 2016 NICEST map's own beam factor (its survey-wide disagreement check is not run: an (n_source) array over 8.7 M sources, the earlier design's)
 PY sesnaimpute.sky.derived.profile
-PY sesnaimpute.sky.derived.edenhofer_samples   # the samples-based sightline width SIGMA_SAMPLES_K, in place of the correlated-sum bound SIGMA_COR_K (repair-list row 8)
+# Edenhofer et al. 2024's 12 posterior samples (19.5/24.7 GB, no bytes
+# sesnaimpute.sky.download.edenhofer2023.build fetches): acquire by hand into
+# sky/download/edenhofer2023/ as samples_healpix.fits and
+# validation_with_less_data_but_2kpc_samples_healpix.fits, then delete once
+# the next line's product exists for every region.
+#   https://zenodo.org/api/records/8187943/files/samples_healpix.fits/content
+#   https://zenodo.org/api/records/8187943/files/validation_with_less_data_but_2kpc_samples_healpix.fits/content
+PY sesnaimpute.sky.derived.edenhofer_samples   # the samples-based sightline width SIGMA_SAMPLES_K, in place of the correlated-sum bound SIGMA_COR_K
 PY sesnaimpute.catalog.depth_grid   # after the extinction column and the coverage it reads: median and marginalised 50 % limits + width per admitted hpx512 pixel, for the prior atlas (SPEC_BMSTP sec 3.3)
 PY sesnaimpute.sky.derived.swire_galaxies   # SWIRE galaxies after the adopted star-galaxy split, survey-wide (SPEC_BMSTP sec 3.2, 5.4)
 PY sesnaimpute.sky.derived.protostars   # HOPS + eHOPS pooled in one schema, report-only overlay for the protostar check (SPEC_BMSTP sec 5.5, sec 9)

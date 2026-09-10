@@ -142,10 +142,10 @@ _SIGMA_SAMPLES_CACHE = {}
 
 
 def _sigma_samples_product(config, region):
-    """The region's `SIGMA_SAMPLES_K` product (repair-list row 8): the
-    12 released Edenhofer posterior samples' own standard deviation of
-    `A(d)`, read in place of the profile's fully correlated `SIGMA_COR_K`
-    sum -- an upper bound absent a stated correlation length
+    """The region's `SIGMA_SAMPLES_K` product: the 12 released Edenhofer
+    posterior samples' own standard deviation of `A(d)`, read in place
+    of the profile's fully correlated `SIGMA_COR_K` sum -- an upper
+    bound absent a stated correlation length
     (`bms_review/studies/edenhofer_kernel.md`). No fallback: a region
     without this product fails here by name rather than silently reading
     the bound."""
@@ -180,10 +180,10 @@ def star_width_class(config, region, dist_pc, row, sigma_classes_dex):
     """Per star, the width-class index (0..N_WIDTH_CLASSES-1) nearest its
     own `sigma_x` (the depth-width rule): `sigma_A(d) / (A(d) ln 10)`,
     `A(d)` the tile's representative sightline's own `A_CUM_K` and
-    `sigma_A(d)` its `SIGMA_SAMPLES_K` (repair-list row 8; no fallback to
-    `SIGMA_COR_K`), both at the star's own distance, clipped to the class
-    range before the nearest-class lookup (in log space, since the
-    classes are geometric)."""
+    `sigma_A(d)` its `SIGMA_SAMPLES_K` (no fallback to a correlated-sum
+    bound), both at the star's own distance, clipped to the class range
+    before the nearest-class lookup (in log space, since the classes are
+    geometric)."""
     profile_obj = _cached_profile(config, region)
     dist_pc = np.asarray(dist_pc, dtype=np.float64)
     a_d = np.interp(dist_pc, profile_obj.dist, profile_obj.a_cum[row])
