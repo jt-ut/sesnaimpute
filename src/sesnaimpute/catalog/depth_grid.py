@@ -25,8 +25,9 @@ turnover.
 
 The counts fit, per region and Spitzer band, is the one limit every reader
 now shares (SPEC_BMSTP_DRAFT.md sec. 1.2, 3.3, 6.2): on the sources of
-"complete low-column" admitted pixels -- IRAC-union coverage above 0.9
-(`sky.derived.coverage`) and adopted column below the 25th percentile of
+"complete low-column" admitted pixels -- catalogue coverage above 0.9
+(`catalog.coverage`, the same product and read the atlas's own admission
+uses) and adopted column below the 25th percentile of
 that well-covered set's own column (`sky/derived/adopted/column`), the
 selection `studies/star_galaxy_level.md` section 1 uses; a region with
 fewer than `MIN_LOW_COLUMN_SOURCES` such sources uses every one of its
@@ -205,16 +206,22 @@ def _depth_fit_params(config, region):
 
 
 def _pixel_coverage(config, region, pix):
-    """Each admitted pixel's IRAC-union coverage fraction
-    (`sky.derived.coverage`'s five-band `FRAC` at `hpx512`, MIPS-24
-    excluded): the per-band max as the union's lower bound, the same read
-    `bmstp.atlas._coverage` performs (not imported here: `catalog` sits
-    below `bmstp`), 0 where a pixel is absent (never observed).
+    """Each admitted pixel's catalogue coverage fraction: `catalog.
+    coverage`'s `FRAC`, the fraction of the pixel's nside-2048 children
+    holding a catalogued source with a measured IRAC flux -- the same
+    product and read `bmstp.atlas._coverage` performs, not `sky.derived.
+    coverage`'s Spitzer field-mask union, whose native masks are missing
+    mosaics outright for Pipe and Auriga-California (`catalog.coverage`'s
+    own module docstring), 0 where a pixel is absent (never observed).
     """
-    path = config_module.product_path(config, "sky/derived", "spitzer", "coverage", "hpx512", region=region)
+    path = config_module.product_path(config, "catalog", "sesna", "coverage", "hpx512", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "catalog.depth_grid: no catalogue coverage for %s at %s -- run the "
+            "'catalog.coverage' RUNBOOKtp.sh line first" % (region, path))
     with h5py.File(path, "r") as f:
         cov_pix = np.asarray(f["HPX_PIX"][:], dtype=np.int64)
-        frac = np.asarray(f["FRAC"][:], dtype=np.float64)[:, :4].max(axis=1)
+        frac = np.asarray(f["FRAC"][:], dtype=np.float64)
     order = np.argsort(cov_pix)
     loc = np.minimum(np.searchsorted(cov_pix[order], pix), max(cov_pix.size - 1, 0))
     hit = order[loc]
