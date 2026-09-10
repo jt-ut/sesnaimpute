@@ -2,9 +2,16 @@
 (10_POSTERIOR.md card T13, the `Gamma_{s,h}` row of its factor table;
 reading/06_fitter_and_impute.md section A's `Gamma_{s,h}` row).
 
-The cloud classes' (YSO, H2S) astrometric likelihood carries the cloud's own
-line-of-sight depth in quadrature with the Gaia parallax error, `sigma^2 =
-sigma_plx^2 + (1000*depth_r/d_r^2)^2`.
+The cloud classes' (YSO, H2S) astrometric likelihood is centred on the dust
+structure's own peak distance, not the region's literature distance, with
+the structure's own line-of-sight depth in quadrature with the Gaia
+parallax error (SPEC_BMSTP_DRAFT.md sec. 6.4): `mu = 1000/D_PEAK`, `sigma^2
+= sigma_plx^2 + (1000*half_width_pc/D_PEAK^2)^2`, `half_width_pc` half the
+region's own cloud interval (`bmstp.sample_cloud.cloud_interval_pc`, the
+doubled 16-84% interval about `D_PEAK`). Centring on the literature
+distance while sizing the width off the structure peaked elsewhere puts
+the Normal's mass in the wrong tail wherever the two distances disagree
+(R4 D2); using the same peak for both keeps the statement single-sourced.
 
     H_h      = sigmoid((G_LIM - Gmag_h) / TAU_G)     -- population.anchor_tiles.gaia_detection_weight
     Gamma_h  = G_s * H_h * A_X  +  (1 - G_s) * (1 - H_h)
@@ -22,14 +29,20 @@ ln Gamma = 0, every model); a matched source with no usable astrometric
 solution degrades to A_X = 1, the "toward no information, never a cliff"
 rule for the no-parallax branch.
 
-PAHC's marginal is STAR's own field-star `1/D` marginal, unweighted: the
-per-star PAHC contamination weight the population carries
-(`population/star/population_star_tile__<R>.hdf5`'s `P_PAHC`, per simulated
-star per tile, at a grid of 8 micron limit values) is keyed by `STAR_INDEX`
-within each tile, not by the row order `population.field_stars`' pooled,
-region-wide population uses, and picking one grid column ("the median
-limit") then summing per star over tiles is a second join this term does
-not carry -- disclosed, not silently guessed (brief's own fallback).
+The field-star classes' marginal is the same per-star reweighting every
+other reader of the population applies (`population.star_population.
+partition_weights`'s `W_STAR`/`W_AGB`, stored per tile in the tile
+population product and keyed back to the pooled field-star row by
+`STAR_INDEX`), not an unweighted count of retained rows: STAR's marginal
+is `W_STAR`-weighted, AGB's is `W_AGB`-weighted, and PAHC shares STAR's
+marginal (`SPEC_PRIORS.md` section 4: PAHC's parent population is the
+whole field-star population, the same one STAR draws its own marginal
+from) -- an unweighted count scores against a distribution the prior
+never placed the class at (R4 D3). PAHC's own per-star contamination
+weight (`P_PAHC`, at a grid of 8 micron limit values, keyed by
+`STAR_INDEX` within each tile against a grid column a pooled read cannot
+select) is a second, separate reweighting this term still does not carry
+-- disclosed, not silently guessed (brief's own fallback).
 """
 
 import math
@@ -41,9 +54,8 @@ import numpy as np
 from sesnaimpute import config as config_module
 from sesnaimpute import constants
 from sesnaimpute import definitions
-from sesnaimpute import regions as regions_module
+from sesnaimpute.bmstp import sample_cloud
 from sesnaimpute.population import selection
-from sesnaimpute.population import star_population
 from sesnaimpute.population.anchor_tiles import (
     GAIA_G_LIM_MAG, GAIA_G_ROLLOFF_MAG, gaia_detection_weight)
 
@@ -73,10 +85,14 @@ CLOUD_ANCHORED_CLASSES = ("yso", "h2s")
 #: Classes whose A_X is the region's simulated field-star population's own
 #: parallax marginal. PAHC's parent population (`SPEC_PRIORS.md` section 4)
 #: is the whole field-star population, the same one STAR draws its own
-#: marginal from, so `_build_star_marginal`'s "else" branch (the
-#: non-evolved complement, `cls != "agb"`) already gives PAHC STAR's own
-#: marginal with no further branching.
+#: marginal from, so `_build_star_marginal`'s STAR branch (`cls != "agb"`)
+#: already gives PAHC STAR's own marginal with no further branching.
 STAR_MARGINAL_CLASSES = ("star", "agb", "pahc")
+
+#: Per-tile weight column `_build_star_marginal` reads for a class
+#: (`population.star_population.partition_weights`): AGB's own dusty share,
+#: STAR's for STAR and PAHC alike (STAR_MARGINAL_CLASSES' comment).
+_MARGINAL_WEIGHT_KEY = {"star": "W_STAR", "pahc": "W_STAR", "agb": "W_AGB"}
 
 #: Bin width for the field-star parallax marginal, mas: narrow enough that
 #: the midpoint rule's discretisation error stays small even at the
@@ -113,15 +129,23 @@ def _normal_pdf(x, mean, sigma):
 # per-region inputs the term reads once, never per source
 # ---------------------------------------------------------------------------
 
-def _region_depth_pc(config, region):
-    """`SIGMA_DEPTH_PC` for `region` -- the cloud's own line-of-sight
-    depth (10_POSTERIOR.md card T4), read once from the survey-wide
-    Edenhofer depth table."""
-    path = config_module.product_path(config, "sky/derived", "edenhofer", "depth", "region")
-    with h5py.File(path, "r") as f:
+def _cloud_normal_params_mas(config, region):
+    """`(centre_mas, half_width_mas)`, the cloud-anchored Normal's own
+    parameters (SPEC_BMSTP_DRAFT.md sec. 6.4): centred at `1000/D_PEAK`,
+    with `half_width_mas` the linearised parallax half-width of the
+    region's own cloud interval (`sample_cloud.cloud_interval_pc`, the
+    doubled 16-84% interval about `D_PEAK`) -- both drawn from `D_PEAK`
+    alone, so the centre and the width the depth term uses come from the
+    one statement rather than the width being sized about a peak the
+    centre does not use (R4 D2)."""
+    depth_path = config_module.product_path(config, "sky/derived", "edenhofer", "depth", "region")
+    with h5py.File(depth_path, "r") as f:
         names = [n.decode("utf-8") for n in f["REGION"][:]]
         row = names.index(region)
-        return float(f["SIGMA_DEPTH_PC"][row])
+        d_peak_pc = float(f["D_PEAK_PC"][row])
+    d_front_pc, d_back_pc = sample_cloud.cloud_interval_pc(config, region)
+    half_width_pc = 0.5 * (d_back_pc - d_front_pc)
+    return 1000.0 / d_peak_pc, 1000.0 * half_width_pc / d_peak_pc ** 2
 
 
 def _load_gaia_match(config, region):
@@ -149,37 +173,46 @@ def _build_star_marginal(config, region, cls, bin_width_mas=STAR_MARGINAL_BIN_WI
     """`(bin_centres_mas, p_bin)`: STAR/AGB/PAHC's binned parallax marginal
     off the region's simulated field-star population (10_POSTERIOR.md's
     STAR/AGB row; `SPEC_PRIORS.md` section 4's PAHC row, same parent
-    population as STAR) -- `1000/DIST_PC` for the class's own retained
-    stars, uniform weight (every retained field star already carries
-    `w_trilegal = 1`, `population.field_stars`). AGB keeps the evolved
-    subset (`star_population.evolved_selector`'s mask) uniformly, matching
-    the "evolved partition directly, uniform weight" branch; STAR and PAHC
-    both keep the non-evolved complement, unweighted by PAHC's own
-    per-star contamination probability (this term's own module docstring:
-    that weight's per-tile `STAR_INDEX` keying is a second join not
-    carried here). This omits the small dusty remainder
-    `partition_weights` would move from the evolved rows into STAR's own
-    marginal (that split needs `f_dusty_by_chemistry`, out of scope for
-    this term -- see the task report).
+    population as STAR) -- `1000/DIST_PC` for every retained field star,
+    weighted by the same per-tile reweighting every other reader of this
+    population applies (`population.star_population.partition_weights`'s
+    `W_STAR`/`W_AGB`, `_MARGINAL_WEIGHT_KEY`), not an unweighted count
+    partitioned by `evolved_selector` (R4 D3): a star's weight already
+    carries its class partition (`W_AGB` is zero off the evolved rows,
+    `W_STAR` is the non-evolved complement plus the evolved rows' own
+    non-dusty remainder), summed by `STAR_INDEX` over every tile a
+    retained star's row falls in.
     """
-    path = config_module.product_path(config, "population", "trilegal", "field-stars", "region", region=region)
-    with h5py.File(path, "r") as f:
+    field_stars_path = config_module.product_path(
+        config, "population", "trilegal", "field-stars", "region", region=region)
+    with h5py.File(field_stars_path, "r") as f:
+        n_pool = f["DIST_PC"].shape[0]
         dist_pc = f["DIST_PC"][:].astype(np.float64)
-        log_g = f["LOG_G"][:].astype(np.float64)
-        log_teff = f["LOG_TEFF"][:].astype(np.float64)
-        log_l = f["LOG_L"][:].astype(np.float64)
-    evolved = star_population.evolved_selector(log_g, log_teff, log_l)
-    dist_pc = dist_pc[evolved] if cls == "agb" else dist_pc[~evolved]
+
+    weight_key = _MARGINAL_WEIGHT_KEY[cls]
+    w_pooled = np.zeros(n_pool, dtype=np.float64)
+    tile_path = config_module.product_path(config, "population", "star", "population", "tile", region=region)
+    with h5py.File(tile_path, "r") as f:
+        for name in f.keys():
+            if not name.startswith("tile_"):
+                continue
+            grp = f[name]
+            star_index = grp["STAR_INDEX"][()].astype(np.int64)
+            np.add.at(w_pooled, star_index, grp[weight_key][()].astype(np.float64))
+
+    keep = w_pooled > 0.0
+    dist_pc = dist_pc[keep]
+    w_pooled = w_pooled[keep]
     if dist_pc.size == 0:
-        raise ValueError(f"GaiaTerm: zero {cls!r} rows in {region!r}'s field-star population")
+        raise ValueError(f"GaiaTerm: zero {cls!r} weight in {region!r}'s field-star population")
 
     plx_mas = 1000.0 / dist_pc
     lo = np.floor(plx_mas.min() / bin_width_mas) * bin_width_mas
     hi = np.ceil(plx_mas.max() / bin_width_mas) * bin_width_mas
     n_bins = max(1, int(round((hi - lo) / bin_width_mas)))
     edges = lo + bin_width_mas * np.arange(n_bins + 1)
-    counts, _ = np.histogram(plx_mas, bins=edges)
-    p_bin = counts / float(dist_pc.size)
+    counts, _ = np.histogram(plx_mas, bins=edges, weights=w_pooled)
+    p_bin = counts / w_pooled.sum()
     centres = 0.5 * (edges[:-1] + edges[1:])
     keep = p_bin > 0
     return centres[keep], p_bin[keep]
@@ -193,8 +226,8 @@ class GaiaTerm:
     """One region's Gaia-congruence term: `ln_gamma` per source, vectorised
     over one class's models.
 
-    Everything region-wide (the Gaia crossmatch, the cloud's canon
-    distance and depth) is read once at construction; a class's own model
+    Everything region-wide (the Gaia crossmatch, the cloud Normal's own
+    centre and width) is read once at construction; a class's own model
     register (`G0_FLUX`, `KG_DRAINE`, `KG_WHITNEY`) and its field-star
     parallax marginal (STAR/AGB only) are read the first time that class
     is asked for and cached thereafter -- nothing here re-reads a register
@@ -205,8 +238,7 @@ class GaiaTerm:
     def __init__(self, config, region):
         self.config = config
         self.region = region
-        self._d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
-        self._depth_pc = _region_depth_pc(config, region)
+        self._cloud_centre_mas, self._cloud_depth_term_mas = _cloud_normal_params_mas(config, region)
         self._gaia = _load_gaia_match(config, region)
         self._registers = {}
         self._star_marginals = {}
@@ -267,9 +299,8 @@ class GaiaTerm:
         a_x = np.ones(rows.shape[0], dtype=np.float64)
         with np.errstate(divide="ignore", invalid="ignore"):
             if cls in CLOUD_ANCHORED_CLASSES:
-                depth_term_mas = 1000.0 * self._depth_pc / self._d_r_pc ** 2
-                sigma_hyp = np.hypot(sigma_eff, depth_term_mas)
-                a_x_good = _normal_pdf(plx, 1000.0 / self._d_r_pc, sigma_hyp)
+                sigma_hyp = np.hypot(sigma_eff, self._cloud_depth_term_mas)
+                a_x_good = _normal_pdf(plx, self._cloud_centre_mas, sigma_hyp)
             elif cls == "gal":
                 a_x_good = _normal_pdf(plx, 0.0, sigma_eff)
             elif cls in STAR_MARGINAL_CLASSES:
