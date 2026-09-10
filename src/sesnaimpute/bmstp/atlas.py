@@ -21,8 +21,9 @@ that node, at `x=1`), YSO (sec. 5.5: the region's own fixed-seed draw of
 density over `log10 f_ref,4.5,theta` divided by the library's density of
 templates in the same quantity, times inclination uniform in cos i and the
 evolutionary-class census (sec 1.4, owner's ruling 2026-09-09), the same
-construction `build_yso` and `bmstp.sample_cloud.sample_f45` use --
-each template's own eight `F_REF` scaled by `(1 kpc / d_r)^2`, placed along the
+construction `build_yso` uses -- each template's own eight `F_REF` scaled
+by `10^delta`, `delta` drawn per member from the region's own shift kernel
+(`bmstp.sample_cloud.shift_kernel`, W56), placed along the
 sightline's own `p(x)` on the cloud interval, `bmstp.sample_cloud.sample_x`'s
 binned return) and H2S (sec. 5.6: the region's 2.12 um lognormal carried into
 the bands by the measured knot line-to-band ratios, at YSO's own `x`). AGB's
@@ -487,9 +488,8 @@ def _yso_register(config):
     (`template_weights.yso_population_weight`, sec. 5.5 "Template
     weights", sec. 1.4, owner's ruling 2026-09-09) and eight `F_REF`, in
     the register's own row order -- called directly rather than
-    re-derived, the SAME construction `build_yso` and
-    `bmstp.sample_cloud.sample_f45` use. Survey-wide, independent of
-    region; the caller computes this once and reuses it."""
+    re-derived, the SAME construction `build_yso` uses. Survey-wide,
+    independent of region; the caller computes this once and reuses it."""
     reg = template_weights._read_register(config, "yso")
     f_ref, floor_linear = reg["f_ref"], reg["floor_linear"]
     names_w, weight = template_weights.yso_population_weight(config)
@@ -499,17 +499,25 @@ def _yso_register(config):
     return dict(weight=weight, f_ref=f_ref, floor_linear=floor_linear)
 
 
-def _yso_template_pool(config, d_r_pc, n_mc, seed):
+def _yso_template_pool(config, region, d_front, d_back, n_mc, seed):
     """`(n_mc, 8)` mJy: `n_mc` YSO library templates drawn by the
     population weight (sec. 5.5 "Template weights"), one fixed-seed draw
     per region (shared by every sightline), each template's own eight
     `F_REF` (floored at the register's own `FLOOR_LINEAR`) scaled by
-    `(1 kpc / d_r)^2` (sec. 5.5 "Marks")."""
+    `10^delta`, `delta` drawn independently per member from the region's
+    own shift kernel `K` (`bmstp.sample_cloud.shift_kernel`, W56 ruling 4:
+    a `rng.choice` over `K`'s own cells, jittered uniformly within the
+    cell) -- the SAME kernel `template_weights.build_yso`'s conditional
+    table reads, so a member's distance placement and the cloud's own
+    depth are drawn together, never a single fixed `d_r` scale."""
     reg = _yso_register(config)
     weight, f_ref, floor_linear = reg["weight"], reg["f_ref"], reg["floor_linear"]
     rng = np.random.RandomState(seed)
     idx = rng.choice(weight.size, size=n_mc, replace=True, p=weight / weight.sum())
-    scale = (1000.0 / float(d_r_pc)) ** 2
+    kernel, _mo_k = sample_cloud.shift_kernel(config, region, d_front, d_back)
+    cell = rng.choice(kernel.size, size=n_mc, replace=True, p=kernel / kernel.sum())
+    delta = grid.LOG10_F45_EDGES[cell] + rng.random(n_mc) * grid.D_LOG10_F45
+    scale = 10.0 ** delta
     flux0 = np.empty((n_mc, N_BANDS), dtype=np.float64)
     for k, key in enumerate(BAND_KEYS):
         flux0[:, k] = np.maximum(f_ref[key][idx], floor_linear[idx]) * scale
@@ -753,16 +761,17 @@ def build_region(config, region):
         reg = regions_module.REGIONS_BY_NAME[region]
         d_r_pc = float(reg.d_r_pc)
         loaded_profile = sample_cloud._region_profile(config, region)
-        # YSO's members: one fixed-seed draw of N_MC library templates by
-        # the population weight, shared by every sightline of the region
-        # (sec. 5.5 "Template weights").
-        flux0_yso = _yso_template_pool(config, d_r_pc, N_MC, MC_SEED + 50_000)
         # the cloud's own share of the column, per sightline
         # (`bmstp.density._cloud_column_fraction`, W26): the intrinsic
         # YSO/H2S density below is the law applied to `a_cloud`, not the
         # sightline's whole adopted column.
         cloud_frac_by_sl, d_front = density_module._cloud_column_fraction(config, region)
         _d_front, d_back = sample_cloud.cloud_interval_pc(config, region)
+        # YSO's members: one fixed-seed draw of N_MC library templates by
+        # the population weight and the region's own shift kernel (sec.
+        # 5.5 "Template weights", W56 ruling 4), shared by every sightline
+        # of the region.
+        flux0_yso = _yso_template_pool(config, region, d_front, d_back, N_MC, MC_SEED + 50_000)
         giannini_ratios = h2s_module._load_giannini_ratios(config)
         # H2S's brightness lognormal (sec. 5.6 "Marks") is P3's own
         # attribute (`bmstp.shapes.build_cloud`, sec. 4.1's shape grids):

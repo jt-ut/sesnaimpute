@@ -40,14 +40,13 @@ Survey products (galz, h2shock) are built once; region products (yso, sps,
 agb, pahc) once per region named on the command line. PAHC is regional
 because its `type` factor borrows the region's own sps type histogram at
 each PAHC template's nearest sps atmosphere match (owner ruling: PAHC's
-library carries no atmosphere-type axis of its own). YSO became regional
-in W25b: sec 5.5 "Template weights" rewritten as the CONDITIONAL at each
-brightness, `PI[theta, k] = w_theta N(F_k; F_theta(d_r), sigma_F) /
-p(F_k)`, normalised over theta at each cell, using the region's own
-placement of every template at its distance and the cloud interval's own
-widening (`bmstp.sample_cloud.cloud_interval_pc`, imported not
-re-derived) -- a brightness-independent table double-counts the
-population's own density at the source's flux (sec 4.1, W25b's "Why").
+library carries no atmosphere-type axis of its own). YSO is regional: sec 5.5 "Template weights" is the CONDITIONAL at each
+brightness, `PI[theta, k] = w_theta K(F_k - c_theta) / p(F_k)`, normalised
+over theta at each cell, `K` the region's own shift kernel
+(`bmstp.sample_cloud.shift_kernel`, imported not re-derived) carrying the
+template's placement at the region's distance and the cloud interval's
+own depth together (W56) -- a brightness-independent table double-counts
+the population's own density at the source's flux (sec 4.1).
 """
 
 import os
@@ -56,7 +55,6 @@ import h5py
 import numpy as np
 from astropy.io import fits
 from joblib import Parallel, delayed
-from scipy.special import ndtr
 
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
@@ -386,11 +384,11 @@ def yso_population_weight(config):
     """The YSO `population` weight `w_theta` (spec sec 5.5 "Template
     weights", owner's ruling 2026-09-09): three population
     statements and one division, shared verbatim by `build_yso` below,
-    `sample_cloud.sample_f45` and `bmstp.atlas._yso_register` -- called by
+    `sample_cloud.p_ref_f45` and `bmstp.atlas._yso_register` -- called by
     all three rather than re-derived, so the class census and the
     brightness density live in exactly one place. (i) Dunham et al.
     2015's own census density at each template's `log10 f_ref,4.5,theta`
-    (`C_THETA`, floored as `sample_cloud.sample_f45` floors it),
+    (`C_THETA`, floored the same way `_c_theta` floors it),
     `_dunham_census_brightness_histogram`'s per-cell value -- zero where
     the census does not populate the cell, the census being complete
     there -- divided by the library's density of templates in the SAME
@@ -458,14 +456,19 @@ def yso_population_weight(config):
 
 def build_yso(config, region):
     """P5's YSO table, one per region (spec sec 5.5 "Template weights",
-    REWRITTEN W25b, W31): `PI[theta, k] = w_theta N(F_k; F_theta(d_r),
-    sigma_F) / p(F_k)`, `w_theta` `yso_population_weight`'s survey-wide
-    census weight, `F_theta(d_r)` and `sigma_F` the region's own placement
-    of the template at the cloud distance and its widening
-    (`bmstp.sample_cloud.cloud_interval_pc`, imported not re-derived, and
-    the widening formula sec 5.5 "Marks" states directly). A brightness-
-    independent table multiplies the shape's own `p(F_4.5)` in twice (sec
-    4.1); the conditional divides it back out."""
+    REWRITTEN W56): `PI[theta, k] = w_theta K(F_k - c_theta) / p(F_k)`,
+    `w_theta` `yso_population_weight`'s survey-wide census weight,
+    `c_theta` the template's own flux at the library's 1 kpc reference
+    distance (`template_weights._c_theta`, unplaced), `K` the region's own
+    shift kernel (`bmstp.sample_cloud.shift_kernel`, W56 ruling 1: the
+    fallback sightline's own depth draw turned into the distribution of
+    `delta = -2 log10(d / 1 kpc)`, carrying the OLD region-distance
+    placement and cloud-depth widening together, so neither is applied a
+    second time here) and `p(F_k)` that same track's own brightness
+    marginal, `Sigma_theta w_theta K(F_k - c_theta)`, from the SAME
+    accumulation this function performs below. A brightness-independent
+    table multiplies the shape's own `p(F_4.5)` in twice (sec 4.1); the
+    conditional divides it back out."""
     with progress.Stage("bmstp.template_weights.yso", region) as st:
         reg = _read_register(config, "yso")
         names = reg["names"]
@@ -480,63 +483,45 @@ def build_yso(config, region):
             raise ValueError("template_weights.yso: yso_population_weight's row "
                               "order disagrees with the yso register")
 
-        # the region's own placement of every template on the brightness
-        # axis (sec 5.5 "Marks"): `F_theta(d_r) = f_ref,4.5,theta at 1 kpc
-        # / (d_r/1kpc)^2`, i.e. `C_THETA - 2 log10(d_r/1kpc)`, widened by
-        # the cloud interval's own depth and the region's distance
-        # uncertainty, `2 log10(d_back/d_front) + 2 sigma_d/(d_r ln 10)`.
-        # `cloud_interval_pc` is `sample_cloud`'s own construction of the
-        # doubled cloud interval, imported here rather than re-derived
-        # (local import: `sample_cloud` itself imports this module for
-        # the register/mass/inclination joins above).
+        # the region's own shift kernel (sec 5.5 "Template weights", W56
+        # ruling 1 and 3): `K` carries the region-distance placement AND
+        # the cloud-depth-and-distance-uncertainty widening together, so
+        # `c_theta` (the template's own unplaced 1 kpc flux) is used
+        # directly, never offset by `d_r` here. `cloud_interval_pc` is
+        # `sample_cloud`'s own construction of the doubled cloud interval,
+        # imported here rather than re-derived (local import:
+        # `sample_cloud` itself imports this module for the
+        # register/mass/inclination joins above).
         from sesnaimpute.bmstp import sample_cloud
         r = regions_module.REGIONS_BY_NAME[region]
         d_front, d_back = sample_cloud.cloud_interval_pc(config, region)
-        log10_f45_theta = c_theta - 2.0 * np.log10(r.d_r_pc / 1000.0)
-        sigma_f = (2.0 * np.log10(d_back / d_front)
-                   + 2.0 * r.sigma_pc / (r.d_r_pc * np.log(10.0)))
+        kernel, mass_outside_k = sample_cloud.shift_kernel(config, region, d_front, d_back)
 
-        # PI[theta, k] = w_theta * N(F_k; F_theta, sigma_F), each
-        # template's Gaussian written only to the cells within +-4
-        # sigma_F of its own placement (sec 5.5, W25b): a sparse
-        # accumulation over templates, never a dense (n_model x n_b)
-        # Gaussian evaluation (CODING_RULES_BMSTP.md rule 10a). Every
-        # cell's contribution is the Gaussian's EXACT mass in that cell
-        # (the CDF difference across the cell's own edges, the same `M_i`
-        # construction sec 4.2 uses for the read's column kernel), not a
-        # point density, so a template fully on-grid sums to (near) 1
-        # across the cells it touches; a point-density evaluation would
-        # need an extra factor of the cell width to mean the same thing
-        # and was found to overstate on-grid templates several-fold
-        # relative to off-grid ones (W25b). The column sum below, BEFORE
-        # the floor, is the population's own `p(F_4.5)` up to
-        # normalisation -- the same shape `sample_cloud` bins into
-        # `GRID_YSO`'s brightness marginal, from the SAME draws (sec
+        # PI[theta, k] = w_theta * K[F_k - c_theta], each template's own
+        # copy of the tabulated kernel written only to K's own support
+        # cells (sec 5.5, W56 ruling 3, in place of W25b's Gaussian CDF
+        # difference): a sparse accumulation over templates, never a
+        # dense (n_model x n_b) evaluation (CODING_RULES_BMSTP.md rule
+        # 10a). `idx_center[theta] + m` lands the kernel's own cell `m`
+        # (its value K[m] already the mass of `delta` landing there) at
+        # `c_theta`'s own nearest cell plus `m` cells -- exact since both
+        # `idx_center` and `m` share the SAME grid origin. The column sum
+        # below, BEFORE the floor, is the population's own `p(F_4.5)` up
+        # to normalisation -- the same shape `sample_cloud` sums into
+        # `GRID_YSO`'s brightness marginal, from the SAME kernel (sec
         # 4.1's "joint over (x, F_4.5, theta) preserved").
-        sigma_cells = sigma_f / grid.D_LOG10_F45
-        half_width = int(np.ceil(4.0 * sigma_cells))
+        support = np.nonzero(kernel > 1e-6 * kernel.max())[0]
         idx_center = np.round(
-            (log10_f45_theta - log10_f45_centers[0]) / grid.D_LOG10_F45).astype(np.int64)
+            (c_theta - log10_f45_centers[0]) / grid.D_LOG10_F45).astype(np.int64)
         theta_idx = np.arange(n_model)
         contribution = np.zeros((n_model, n_b), dtype=np.float64)
-        edges = grid.LOG10_F45_EDGES
-        for offset in range(-half_width, half_width + 1):
-            cell_idx = idx_center + offset
+        for m in support:
+            cell_idx = idx_center + int(m)
             valid = (cell_idx >= 0) & (cell_idx < n_b)
             if not np.any(valid):
                 continue
-            z_lo = (edges[cell_idx[valid]] - log10_f45_theta[valid]) / sigma_f
-            z_hi = (edges[cell_idx[valid] + 1] - log10_f45_theta[valid]) / sigma_f
-            cell_mass = ndtr(z_hi) - ndtr(z_lo)
-            np.add.at(contribution, (theta_idx[valid], cell_idx[valid]), w_theta[valid] * cell_mass)
-
-        # acceptance (brief W25b): every cell the loop above ever wrote to
-        # lies within +-half_width cells of that row's own idx_center by
-        # construction; check it holds exactly on the raw (pre-floor)
-        # table.
-        cell_grid = np.arange(n_b)[None, :]
-        outside = np.abs(cell_grid - idx_center[:, None]) > half_width
-        mass_outside_window = float(contribution[outside].sum())
+            np.add.at(contribution, (theta_idx[valid], cell_idx[valid]),
+                      w_theta[valid] * kernel[m])
 
         population_w, frac_zero = _floor_normalised(contribution)
 
@@ -544,8 +529,8 @@ def build_yso(config, region):
             "population": (population_w, c_theta, "", True,
                             "sky/derived/dunham2015/yso_dunham2015_survey.hdf5 LOG10_F45_REF "
                             "census; yso sub-grid parameters.fits inclination; "
-                            "Dunham et al. 2014 class census; sample_cloud.cloud_interval_pc "
-                            f"placement at d_r={r.d_r_pc:.1f} pc"),
+                            "Dunham et al. 2014 class census; sample_cloud.shift_kernel "
+                            f"at d_r={r.d_r_pc:.1f} pc"),
         }
         path = _write_library(config, "yso", "region", names, c_theta, log10_f45_centers, factors,
                                region=region, extra_attrs={"COMPONENTS": "imf,inclination"})
@@ -577,8 +562,7 @@ def build_yso(config, region):
 
         print(f"template_weights.yso [{region}]: factor=population max|colsum-1|="
               f"{max_colsum_dev:.3g} floored_fraction={frac_zero:.4f} "
-              f"sigma_F={sigma_f:.4f} dex half_width={half_width} cells "
-              f"mass beyond window (raw)={mass_outside_window:.3g} "
+              f"kernel support cells={support.size} mass_outside_kernel={mass_outside_k:.3g} "
               f"on-grid retained share of Sigma w={retained_frac:.4f} "
               f"factorisation max|dev| vs on-grid Sigma w={marginal_dev_retained:.3g} "
               f"vs full-register Sigma w={marginal_dev_full:.3g} "
