@@ -71,6 +71,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.bmstp import grid, sample_star
 from sesnaimpute.build import run
 from sesnaimpute.population import star_population
+from sesnaimpute.population import h2s as h2s_module
 
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
@@ -1060,7 +1061,14 @@ def h2shock_conversion(config):
         raise ValueError(f"template_weights.h2shock_conversion: join n_matched={n_matched} "
                           f"!= n_register={n_model}")
     f_ref_45 = np.maximum(reg["f_ref"]["I2"], reg["floor_linear"])
-    c_theta = np.log10(f_ref_45) - np.log10(i_ref)
+    # units: `I_H2_1_0_S1` is erg/s/cm^2/sr (parameters.fits TUNIT23);
+    # the knot lognormal it is applied to (`population.h2s`: `log10
+    # Sigma`, UWISH2's native W/m^2/sr) is in W/m^2/sr, 1 W/m^2 = 1e3
+    # erg/s/cm^2 (`h2s.W_M2_TO_ERG_S_CM2`). The conversion is stated in
+    # the lognormal's units so that `log10 Sigma + c_theta` is a 4.5 um
+    # flux: without this factor every knot sits three decades too faint.
+    i_ref_w_m2_sr = i_ref / h2s_module.W_M2_TO_ERG_S_CM2
+    c_theta = np.log10(f_ref_45) - np.log10(i_ref_w_m2_sr)
     return names, c_theta
 
 
@@ -1080,7 +1088,6 @@ def build_h2shock(config, region):
     shift kernel. The region enters because the lognormal is the region's
     own (sec 5.6): granule `region`, like yso's."""
     from sesnaimpute.bmstp import sample_cloud
-    from sesnaimpute.population import h2s as h2s_module
     with progress.Stage("bmstp.template_weights.h2shock", region) as st:
         names, c_theta = h2shock_conversion(config)
         n_model = names.size
