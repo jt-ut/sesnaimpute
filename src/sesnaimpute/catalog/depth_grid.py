@@ -85,7 +85,7 @@ selection the fit used. This is written as the per-source product
 `DCOMP90_REF_LOG10` (8,), `LIMIT_KIND` (8,)), the one product
 `catalog.limits.limits` reads. Per admitted pixel, `F_LIM_50_PIX_MJY` is
 the pixel median of these per-source limits (a pandas groupby, no loop
-over pixels); `F_LIM_50_MED_MJY`, formerly a separate brightness-biased
+over pixels); `F_LIM_50_MED_MJY`, once a separate brightness-biased
 median of the OLD per-source rule, is now the identical array -- the two
 readers' 0.14-0.64 dex drift (`studies/star_galaxy_level.md`) is closed
 by construction. `W_DEX_PIX` is `W_DEX` broadcast to every pixel. A pixel
