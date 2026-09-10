@@ -471,7 +471,7 @@ def apply_bright_end_rule(curve, q_min):
     there, so the bin's measured excess fraction is not contamination.
     Those bins' own unfloored excess fraction and count move to
     `p_bright_excess`/`n_bright_excess` instead; bins at or above `q_min`
-    are untouched (identity, brief W59 rule 11)."""
+    are untouched (identity, rule 11)."""
     upper_q = 10.0 ** curve["edges"][1:]
     zeroed = upper_q < q_min
     p_a = curve["p_a"].copy()
