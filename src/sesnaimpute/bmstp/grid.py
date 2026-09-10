@@ -49,6 +49,13 @@ _B_CENTERS = LOG10_F45_EDGES[:-1] + 0.5 * D_LOG10_F45
 #: peak cell (sec. 2, "the floor").
 FLOOR = 1e-6
 
+#: W61 (sec. 2 "minimum widths", sec. 5.1 "Marks"): the number of
+#: geometric depth-uncertainty width classes a field star's own `sigma_x`
+#: (the map's propagated column sigma at the star's distance, in `log10
+#: x`) is quantised to, between the one-cell floor and a tile's own
+#: cloud-interval-span cap.
+N_WIDTH_CLASSES = 8
+
 _SQRT2 = float(np.sqrt(2.0))
 
 
@@ -91,6 +98,52 @@ def bin(x, log10_f45, w):
     H = gaussian_filter1d(H, sigma=1.0, axis=1, mode="constant")
     mass_outside += mass_before - float(H.sum())
     H = np.maximum(H, FLOOR * H.max())
+    return H.astype(np.float64), mass_outside
+
+
+def bin_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
+    """STAR/AGB's own per-class depth-uncertainty smoothing (W61, sec. 2
+    "minimum widths", sec. 5.1 "Marks"): like `bin`, but the `log10 x`
+    axis is smoothed by each star's OWN width class instead of the fixed
+    one-cell floor -- the field-star depth mark carries the map's own
+    propagated uncertainty of the cumulative column at the star's
+    distance (`sky.derived.profile.propagate`'s `SIGMA_COR_K`), not a
+    delta narrower than the map itself resolves. `sigma_classes_cells`
+    (`N_WIDTH_CLASSES`,), in grid cells (>= 1.0, the floor, geometric to
+    the sightline's own cloud-interval-span cap, `sample_star
+    .tile_width_classes`); `width_class` (n_star,) each star's own class
+    index, nearest its `sigma_x` in log space. One weighted histogram and
+    smoothing pass per POPULATED class, summed before the floor -- up to
+    `N_WIDTH_CLASSES` histograms and smoothings of the tile's grid in
+    place of one, no per-star kernel, nothing at the read (AGB reuses the
+    same stars' classes, sec. 5.2). The `log10 F_4.5` axis keeps the
+    ordinary one-cell smoothing (sec. 2) in every pass. `H.sum() == 1 -
+    mass_outside` stays exact before the floor, the same identity `bin`
+    reports, since every star belongs to exactly one class."""
+    x = np.asarray(x, dtype=float)
+    log10_f45 = np.asarray(log10_f45, dtype=float)
+    w = np.asarray(w, dtype=float)
+    width_class = np.asarray(width_class, dtype=np.int64)
+    total_weight = w.sum()
+    if total_weight <= 0:
+        return np.full((_N_X, _N_B), FLOOR), 1.0
+    with np.errstate(divide="ignore"):
+        log10_x = np.log10(x)
+    # edge convention (sec. 2), the same nudge `bin` applies.
+    log10_x = np.nextafter(log10_x, -np.inf)
+    H = np.zeros((_N_X, _N_B), dtype=np.float64)
+    for k in range(len(sigma_classes_cells)):
+        sel = width_class == k
+        if not np.any(sel):
+            continue
+        Hk, _, _ = np.histogram2d(
+            log10_x[sel], log10_f45[sel], bins=[LOG10_X_EDGES, LOG10_F45_EDGES], weights=w[sel])
+        Hk = Hk / total_weight
+        Hk = gaussian_filter1d(Hk, sigma=float(sigma_classes_cells[k]), axis=0, mode="constant")
+        Hk = gaussian_filter1d(Hk, sigma=1.0, axis=1, mode="constant")
+        H += Hk
+    mass_outside = float(1.0 - H.sum())
+    H = np.maximum(H, FLOOR * H.max()) if H.max() > 0 else np.full_like(H, FLOOR)
     return H.astype(np.float64), mass_outside
 
 

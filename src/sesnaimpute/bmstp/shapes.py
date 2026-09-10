@@ -55,9 +55,21 @@ def _build_one_tile(config, region, tile_id):
     `MASS_OUTSIDE_*`, which also counts the mass the retention limit
     drops at the bottom edge)."""
     x_s, f45_s, w_s = sample_star.sample_star(config, region, tile_id)
-    h_star, mo_star = grid.bin(x_s, f45_s, w_s)
     x_a, f45_a, w_a = sample_star.sample_agb(config, region, tile_id)
-    h_agb, mo_agb = grid.bin(x_a, f45_a, w_a)
+
+    # W61 (sec. 2 "minimum widths", sec. 5.1 "Marks"): the field-star
+    # depth mark's own width is the map's propagated column sigma at the
+    # star's distance, not a fixed one cell -- AGB follows STAR (the same
+    # stars, sec. 5.2), so both read the SAME tile width classes.
+    row, sigma_classes_dex = sample_star.tile_width_classes(config, region, tile_id)
+    sigma_classes_cells = sigma_classes_dex / grid._X_CELL_WIDTH
+    class_s = sample_star.star_width_class(
+        config, region, sample_star.star_distances(config, region, tile_id), row, sigma_classes_dex)
+    class_a = sample_star.star_width_class(
+        config, region, sample_star.agb_star_distances(config, region, tile_id), row, sigma_classes_dex)
+
+    h_star, mo_star = grid.bin_star_widths(x_s, f45_s, w_s, class_s, sigma_classes_cells)
+    h_agb, mo_agb = grid.bin_star_widths(x_a, f45_a, w_a, class_a, sigma_classes_cells)
     sum_check = max(abs(h_star.sum() - (1.0 - mo_star)), abs(h_agb.sum() - (1.0 - mo_agb)))
     above_star_w = float(w_s[f45_s > grid.LOG10_F45_EDGES[-1]].sum())
     above_agb_w = float(w_a[f45_a > grid.LOG10_F45_EDGES[-1]].sum())

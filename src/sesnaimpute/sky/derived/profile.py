@@ -727,6 +727,12 @@ class _RegionProfile:
         with h5py.File(profile_path, "r") as f:
             self.dist = f["DIST_PC"][:].astype(float)
             self.a_cum = f["A_CUM_K"][:].astype(float)
+            # W61 (sec 2 "minimum widths", sec 5.1 "Marks"): the map's own
+            # correlated cumulative-column sigma and each sightline's total
+            # column, read alongside A_CUM_K for the field-star depth
+            # mark's own uncertainty width.
+            self.sigma_cor = f["SIGMA_COR_K"][:].astype(float)
+            self.a_inf = f["A_INF_K"][:].astype(float)
             self.hpx = f["HPX_PIX_256"][:].astype(np.int64)
             self.gl = f["GAL_L_DEG"][:].astype(float)
             self.gb = f["GAL_B_DEG"][:].astype(float)
@@ -808,6 +814,33 @@ class _RegionProfile:
         here by construction."""
         a = self.a_of_d(d_pc, hpx_pix, total_column_ak=total_column_ak)
         return a / np.asarray(total_column_ak, dtype=float)
+
+    def column_and_sigma(self, d_pc, row):
+        """`(A(d), sigma_A(d))` at profile row `row` (W61, sec 2 "minimum
+        widths", sec 5.1 "Marks"): `A_CUM_K`/`SIGMA_COR_K` interpolated
+        directly on `DIST_PC`, flat beyond the map's own edge -- no
+        far-field tail here, since a caller forming the ratio
+        `sigma_A(d)/A(d)` (the depth mark's own uncertainty in `log10 x`)
+        is unaffected by the constant per-sightline rescale
+        `_far_field_residual` already folds into `A_CUM_K`: that factor
+        cancels in the ratio."""
+        d = np.asarray(d_pc, dtype=float)
+        a_d = np.interp(d, self.dist, self.a_cum[row])
+        sigma_d = np.interp(d, self.dist, self.sigma_cor[row])
+        return a_d, sigma_d
+
+    def row_of_lb(self, l_deg, b_deg):
+        """`(row, hpx_pix)`: the admitted sightline nearest `(l_deg,
+        b_deg)` (W61), plain angular-separation argmax over this
+        profile's own admitted sightlines -- stands in for a population
+        member's own sky position where it has none (a TRILEGAL field
+        star, `population.star_population`'s module docstring: "a field
+        star carries a distance but no sky position of its own")."""
+        l1, b1 = np.radians(float(l_deg)), np.radians(float(b_deg))
+        l2, b2 = np.radians(self.gl), np.radians(self.gb)
+        cos_sep = np.sin(b1) * np.sin(b2) + np.cos(b1) * np.cos(b2) * np.cos(l1 - l2)
+        row = int(np.argmax(cos_sep))
+        return row, int(self.hpx[row])
 
     def distance_knots_pc(self):
         """The reconstruction's own spliced radial shell boundaries, pc."""
