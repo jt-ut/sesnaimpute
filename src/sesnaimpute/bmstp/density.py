@@ -16,20 +16,23 @@ cloud interval: the 3-D map cannot partition the column reliably behind
 a cloud at a kiloparsec, so nothing behind the front edge is deducted),
 `kappa` selected by which arm reached the source (`ARM`, from the
 adopted column's own provenance flag). H2S (section 5.6) rides on that
-same INTRINSIC
-young-star law density (before the grid's own on-grid fraction is
-applied, section 4.1: H2S's own on-grid fraction is 1), scaled by the
-region's `eta` and the universal `eps_ext`, but on the Herschel arm the
-law itself is the knot-driver kernel's convolution of the region's HGBS
-map (`bmstp.knot_field.convolved_law`), sampled at the source's own
+same INTRINSIC young-star law density, scaled by the region's `eta` and
+the universal `eps_ext`, but on the Herschel arm the law itself is the
+knot-driver kernel's convolution of the region's HGBS map
+(`bmstp.knot_field.convolved_law`), sampled at the source's own
 position -- a map operation, once per region, never a per-source
 convolution; a Herschel-arm source whose position falls outside the
 convolved map, and every Planck-arm source (the kernel is sub-beam at
 Planck's 5.03' beam), takes the law at its own column instead. Every
 density is a RETAINED density (section 4.1): the intrinsic count times
 the population's on-grid fraction at the source's own grain -- STAR/AGB
-by tile, YSO by sightline, GAL the one survey-wide attr, PAHC reading
-STAR's own fraction, H2S's own fraction fixed at 1 (section 5.5, 5.6).
+by tile, YSO and H2S by sightline (both read from P3, the cloud shape
+product), GAL the one survey-wide attr, PAHC reading STAR's own
+fraction (section 5.5, 5.6): `ON_GRID_H2S` is a real, stored per-sightline
+retained fraction on the same common depth axis `ON_GRID_YSO` uses, not
+an assumed 1, since the knots' brightness axis moved onto that common
+grid, so it is applied exactly like every other class's on-grid
+fraction rather than treated as formed at read time.
 """
 
 import os
@@ -254,6 +257,7 @@ def build_region(config, region, st):
     with h5py.File(p3_path, "r") as f:
         sightline_axis = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
         on_grid_yso_by_sightline = np.asarray(f["ON_GRID_YSO"][:], dtype=np.float64)
+        on_grid_h2s_by_sightline = np.asarray(f["ON_GRID_H2S"][:], dtype=np.float64)
     p4_path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
     with h5py.File(p4_path, "r") as f:
         on_grid_gal = float(f.attrs["ON_GRID_GAL"])
@@ -263,6 +267,7 @@ def build_region(config, region, st):
     on_grid_star = on_grid_star_by_tile[tile_row]
     on_grid_agb = on_grid_agb_by_tile[tile_row]
     on_grid_yso = on_grid_yso_by_sightline[sightline_row]
+    on_grid_h2s = on_grid_h2s_by_sightline[sightline_row]
     st.tick(1, 4, "batches")
 
     star_by_tile, agb_by_tile, omega_sim, f_dusty_o, f_dusty_c, f_c = \
@@ -307,13 +312,11 @@ def build_region(config, region, st):
     yso_law_err = max(abs(KAPPA_HERSCHEL - file_kappa_h), abs(KAPPA_PLANCK - file_kappa_p),
                       abs(pc2 - file_pc2) / file_pc2)
 
-    # H2S, sec. 5.6 "Sky density": `A_H2S(s) = L(s) . eta_r . eps_ext`.
-    # `L(s)` is the INTRINSIC young-star law at the source's own
-    # column/arm/region distance -- `density_yso_intrinsic` above, before
-    # the grid's own on-grid fraction is applied (sec. 4.1: H2S's own
-    # on-grid fraction is 1, its shape being a lognormal on its own axis,
-    # formed at read, not this grid's YSO retention, W26) -- EXCEPT for a
-    # Herschel-arm source whose position the region's convolved law map
+    # H2S, sec. 5.6 "Sky density": `A_H2S(s) = L(s) . eta_r . eps_ext .
+    # ON_GRID_H2S(s)`. `L(s)` is the INTRINSIC young-star law at the
+    # source's own column/arm/region distance -- `density_yso_intrinsic`
+    # above -- EXCEPT for a Herschel-arm source whose position the
+    # region's convolved law map
     # (`bmstp.knot_field.convolved_law`) reaches, where `L(s)` is that
     # convolution sampled at the source instead (a map operation, once
     # per region). An edge Herschel-arm source (outside the convolved
@@ -340,7 +343,12 @@ def build_region(config, region, st):
         if ratio.size:
             knot_ratio_median = float(np.median(ratio))
             knot_ratio_p90 = float(np.percentile(ratio, 90))
-    density_h2s = l_of_s * eta_r * EPS_EXT
+    # every class's density is the retained density (sec. 4.1): H2S
+    # multiplies in `ON_GRID_H2S`, its own per-sightline retained
+    # fraction on the common depth axis, read from P3 exactly as
+    # `ON_GRID_YSO` is -- it is stored there, not "formed at read", since
+    # the knots' brightness axis moved onto that common grid.
+    density_h2s = l_of_s * eta_r * EPS_EXT * on_grid_h2s
     st.tick(4, 4, "batches")
 
     retention_limits = field_stars.deepest_limits(config, region).astype(np.float64)
@@ -354,7 +362,7 @@ def build_region(config, region, st):
         density_star_raw=density_star_raw, density_agb_raw=density_agb_raw,
         density_gal_raw=density_gal_raw, density_yso_intrinsic=density_yso_intrinsic,
         on_grid_star=on_grid_star, on_grid_agb=on_grid_agb, on_grid_yso=on_grid_yso,
-        on_grid_gal=on_grid_gal, d_front=d_front,
+        on_grid_h2s=on_grid_h2s, on_grid_gal=on_grid_gal, d_front=d_front,
         omega_sim=omega_sim, f_dusty_o=f_dusty_o, f_dusty_c=f_dusty_c, f_c=f_c,
         eta_r=eta_r, retention_limits=retention_limits, yso_law_err=yso_law_err,
         d_r_pc=d_r_pc, n=n, knot_meta=knot_meta, n_herschel=n_herschel, n_edge=n_edge,
@@ -415,6 +423,7 @@ def build(config, regions=None):
                         density_star=np.asarray(f["DENSITY_STAR"][:], dtype=np.float64),
                         density_gal=np.asarray(f["DENSITY_GAL"][:], dtype=np.float64),
                         density_yso=np.asarray(f["DENSITY_YSO"][:], dtype=np.float64),
+                        density_h2s=np.asarray(f["DENSITY_H2S"][:], dtype=np.float64),
                     )
 
             result = build_region(config, region, st)
@@ -442,10 +451,25 @@ def build(config, regions=None):
                   f"16-84%=[{cf_16:.6g}, {cf_84:.6g}] (cloud interval front edge "
                   f"d_front={result['d_front']:.6g} pc)")
             for cls, og in (("STAR", result["on_grid_star"]), ("AGB", result["on_grid_agb"]),
-                            ("YSO", result["on_grid_yso"])):
+                            ("YSO", result["on_grid_yso"]), ("H2S", result["on_grid_h2s"])):
                 print(f"bmstp.density {region}: on-grid fraction {cls} median={np.median(og):.6g}")
             print(f"bmstp.density {region}: on-grid fraction GAL={result['on_grid_gal']:.6g} "
                   f"(survey-wide attr; PAHC uses STAR's own on-grid fraction, sec. 4.1)")
+
+            # every dataset but DENSITY_H2S is unaffected by this change:
+            # a bit-identical check against the current product for each,
+            # and DENSITY_H2S's own before/after median ratio, which is
+            # exactly ON_GRID_H2S since nothing else in its computation
+            # moved.
+            if old is not None and old["density_h2s"].shape == result["density_h2s"].shape:
+                for cls, key in (("STAR", "density_star"), ("GAL", "density_gal"),
+                                  ("YSO", "density_yso")):
+                    dev = float(np.max(np.abs(old[key] - result[key])))
+                    print(f"bmstp.density {region}: identity {key.upper()} vs current "
+                          f"product max abs dev={dev:.3e}")
+                h2s_ratio = result["density_h2s"] / old["density_h2s"]
+                print(f"bmstp.density {region}: DENSITY_H2S before/after median ratio="
+                      f"{np.median(h2s_ratio):.6g} (should equal ON_GRID_H2S's own median)")
 
             # sec. 9-style acceptance: DENSITY_YSO on the first ten sources,
             # recomputed BY HAND straight off the adopted-column and
