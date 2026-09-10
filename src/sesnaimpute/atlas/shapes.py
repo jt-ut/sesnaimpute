@@ -277,14 +277,16 @@ def _build_region_data(config, region):
         else:
             f_c = np.ones(h_c.shape[1], dtype=np.float64)
         lam[cls] = p["intensity"] * h_c * f_c[None, :]
-        # a cell `prepare`'s own `np.maximum(H_s, FLOOR*H_s.max())` set to
-        # the floor reads back a few parts in 1e8 off `FLOOR*h_c.max()`
-        # here (the float32 store and the float64->float32->float64
-        # round trip through `_panel_arrays`, not the same rounding as
-        # `prepare`'s own float64 max): a relative tolerance well above
-        # that (1e-4) and well below every class's real gap above its
-        # floor (>= 15%, measured) separates the two cleanly.
-        floor_c = h_c <= (grid.FLOOR * h_c.max() * 1.0001)
+        # "no real density": a class counts as absent from a cell where
+        # its shape is within one decade of its own floor (sec. 2's
+        # FLOOR, 1e-6 of the peak). The one-cell blur's far tails and the
+        # float32 store leave cells a little above the exact floor with
+        # no support behind them; exactly-at-floor masking then never
+        # fires and GAL's own A_C(s) times its floor colours every empty
+        # cell as GAL share 1. A decade above the floor is still five
+        # decades below the class's own peak: nothing the fitter would
+        # count as support.
+        floor_c = h_c <= (10.0 * grid.FLOOR * h_c.max())
         at_floor = floor_c if at_floor is None else (at_floor & floor_c)
     total = sum(lam.values())
     masked = at_floor
