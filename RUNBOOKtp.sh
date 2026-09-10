@@ -70,6 +70,7 @@ PY sesnaimpute.sky.download.planck_r120.build
 PY sesnaimpute.sky.download.herschel_hgbs.build
 PY sesnaimpute.sky.download.edenhofer2023.build
 PY sesnaimpute.sky.download.juvela2016.build   # NICEST 2MASS star-colour extinction map, all-sky, the extinction column's reference (W49a)
+PY sesnaimpute.sky.download.dunham2015.build   # Dunham et al. 2015 Spitzer c2d + Gould Belt YSO census, 2,966 YSOs in 18 clouds, the young-star law's own matched census (W53)
 # fazio2004 (Fazio et al. 2004, ApJS 154, 39, Table 1, IRAC galaxy source
 # counts): no CDS/VizieR entry and IOPscience's machine-readable-table
 # service serves no bytes for this DOI (10.1086/422843) -- acquire by hand
@@ -113,6 +114,7 @@ PY sesnaimpute.sky.derived.subbeam
 PY sesnaimpute.sky.derived.planck_column
 PY sesnaimpute.sky.derived.planck_source_column
 PY sesnaimpute.sky.derived.juvela_extinction   # NICEST star-colour A_K per source and per sightline, the whole-sightline reference the extinction column's per-cell factor is formed against (W49a, SPEC_BMSTP sec 3.2)
+PY sesnaimpute.sky.derived.dunham_yso   # the Dunham et al. 2015 YSO census at the survey granule, dereddened 4.5 micron flux scaled to 1 kpc -- the population density over brightness W54 constrains the template weights with (SPEC_BMSTP sec 1.4)
 PY sesnaimpute.sky.derived.twomass_column_scale   # report-only, read by nothing: each arm's map column against the reddening of Ks 11-13 stars per region; a magnitude-limited window loses reddened background stars behind dense pixels, so the number is not a calibration (briefs/reports/W35.md)
 PY sesnaimpute.sky.derived.column   # the adopted (gas) column per source and sightline, and the extinction column beside it -- the adopted column scaled to the Juvela & Montillaud 2016 NICEST map's own beam factor (its survey-wide disagreement check is not run: an (n_source) array over 8.7 M sources, the earlier design's)
 PY sesnaimpute.sky.derived.profile
