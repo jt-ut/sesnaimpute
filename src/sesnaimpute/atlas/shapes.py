@@ -13,7 +13,7 @@ decision needs the levels the old page's per-source bar chart kept apart
 from the shapes it plotted). Six panels per row (GAL, YSO, H2S, STAR,
 PAHC, AGB), sharing ONE pair of axes, `log10 x` and `log10 F_4.5` in mJy
 (sec. 2: one common brightness axis for every class, H2S included since
-W58's rule -- its template conversion folded in at the shape stage).
+its template conversion folded in at the shape stage).
 
 Row 1, unchanged in content and pixel output from the previous page's own
 median-source row: the normalised shape `h_C(x, F_4.5)` the fitter reads
@@ -52,7 +52,7 @@ query brightness `F`) -- `bmstp.template_weights._read_pahc_curve`/
 `_p_at_neg_log10_q`, imported not re-derived. H2S's own `f_C` is 1 (its
 `uniform` factor is normalised over theta, sec 5.6), the same STAR/PAHC
 carve-out above does not apply to it, so it is included in row 2's
-denominator sum like every other class since W58's rule
+denominator sum like every other class
 (`briefs/reports/W57.md` disclosed the earlier exclusion; removed here).
 """
 
@@ -81,7 +81,7 @@ PAGE_W_IN, PAGE_H_IN = 16.0, 9.0
 CLASS_ORDER = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
 
 #: Every class reads the one common brightness axis (sec. 2, H2S included
-#: since W58): `log10 F_4.5` in mJy, `bmstp.grid.LOG10_F45_EDGES` -- the
+#: ): `log10 F_4.5` in mJy, `bmstp.grid.LOG10_F45_EDGES` -- the
 #: row's one outside y-axis label below.
 _SHARED_Y_LABEL = "log10 F_4.5   [mJy]"
 
@@ -141,7 +141,7 @@ def _on_grid_yso(config, region):
 
 
 def _on_grid_h2s(config, region):
-    """`ON_GRID_H2S` per sightline (P3, W58: `GRID_H2S` is on the common
+    """`ON_GRID_H2S` per sightline (P3: `GRID_H2S` is on the common
     grid now, so its own on-grid fraction is measured, not fixed at 1)."""
     path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
     with h5py.File(path, "r") as f:
@@ -164,7 +164,7 @@ def _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2
     if cls == "YSO":
         return float(on_grid_yso[dtab["sightline"][src_idx]])
     if cls == "H2S":
-        # W58: GRID_H2S is on the common grid now, its own on-grid
+        # GRID_H2S is on the common grid, its own on-grid
         # fraction measured per sightline (sec. 4.1), same as YSO's.
         return float(on_grid_h2s[dtab["sightline"][src_idx]])
     return float(on_grid_gal)  # GAL
@@ -190,9 +190,9 @@ def _panel_arrays(config, region, cls, rows):
     return density, reader.x_edges, reader.b_edges, mass, reader
 
 
-#: Row 2's denominator classes (sec. 1.1/1.4): every class, since W58 --
+#: Row 2's denominator classes (sec. 1.1/1.4): every class --
 #: H2S is on the common grid at read time now (P3's `GRID_H2S`, sec. 4.1),
-#: so it is no longer left out of the share's total.
+#: so it is in the share's total.
 _SHARE_CLASSES = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
 
 
@@ -258,7 +258,7 @@ def _build_region_data(config, region):
 
     # Row 2, the class share at the median source (module docstring, sec.
     # 1.1/1.4): Lambda_C(x, F) = A_C(s) h_C(x, F) f_C(F; s) for every
-    # class (H2S included since W58, its shape on the common grid now),
+    # class (H2S included, its shape on the common grid),
     # summed to the total and divided back into each --
     # the SAME product the fitter's evidence sum compares between classes
     # (sec. 4.2), not the shape alone. A cell is blanked where every
@@ -312,7 +312,7 @@ def _print_numbers(region, dtab, idx_median, panels, share, masked):
               "A_C(s)=%.4g deg^-2" % (region, cls, p["mass"], p["on_grid"], p["peak_x"], p["peak_b"], p["intensity"]))
     valid = ~masked
     print("atlas.shapes [%s] row2: masked fraction=%.4f (every class's own shape at its stored floor "
-          "there, H2S included in the sum since W58, module docstring)" % (region, float(np.mean(masked))))
+          "there, H2S included in the sum, module docstring)" % (region, float(np.mean(masked))))
     for cls in _SHARE_CLASSES:
         s = share[cls]
         smax = float(np.nanmax(s)) if valid.any() else float("nan")

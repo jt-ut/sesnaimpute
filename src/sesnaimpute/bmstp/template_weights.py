@@ -16,7 +16,7 @@ f_ref,4.5,theta`), bins wide enough to hold the floor count, linearly
 interpolated;
 galz `colour` divides by a Gaussian KDE of the library's own templates in
 colour, the same bandwidth as the galaxy KDE. h2shock's `uniform` factor
-(sec 5.6, W58's rule) divides by nothing (no external distribution): the
+(sec 5.6's rule) divides by nothing (no external distribution): the
 conditional is the region's own knot lognormal convolved with the
 templates' conversions, `PI[theta, k] = w_theta L_Sigma(F_k - c_theta) /
 p(F_k)`.
@@ -30,7 +30,7 @@ False if it is a probability carried as-is (`contrast`). `C_THETA[theta]`
 is the template's offset onto the read axis, `log10 f_ref,4.5,theta`
 (floored at the register's own `FLOOR_LINEAR` before the log, sec 4.1,
 W24) for every library except h2shock, whose own offset is `log10
-(f_ref,4.5,theta / Sigma_ref,theta)` (sec 5.6, W58's rule), the template's
+(f_ref,4.5,theta / Sigma_ref,theta)` (sec 5.6's rule), the template's
 conversion from the UWISH2 knot line brightness to 4.5 micron flux.
 
 yso's `population` factor divides by a 1-D histogram of the library's own
@@ -43,7 +43,7 @@ quantities are constrained is set by the data, not by choice").
 
 Survey products (galz) are built once; region products (yso, sps, agb,
 pahc, h2shock) once per region named on the command line. H2S is regional
-since W58: its table is the conditional at each brightness under the
+since the common-axis rule: its table is the conditional at each brightness under the
 region's own knot lognormal (sec 5.6), the same reason YSO is regional.
 PAHC is regional
 because its `type` factor borrows the region's own sps type histogram at
@@ -1033,7 +1033,7 @@ def build_pahc(config, region):
 
 def h2shock_conversion(config):
     """`(names, c_theta)`: `c_theta[theta] = log10(f_ref,4.5,theta /
-    Sigma_ref,theta)` (sec 5.6, W58's rule), the template's own conversion
+    Sigma_ref,theta)` (sec 5.6's rule), the template's own conversion
     from the UWISH2 knot line surface brightness (`I_H2_1_0_S1`,
     `parameters.fits`) to its 4.5 micron reference flux (register
     `F_REF_I2`, floored at `FLOOR_LINEAR`, the same floor `_c_theta` uses
@@ -1053,7 +1053,7 @@ def h2shock_conversion(config):
             raise ValueError(
                 "template_weights.h2shock_conversion: I_H2_1_0_S1 column missing from "
                 f"{grid_path} -- the H2 1-0 S(1) surface brightness the conversion needs "
-                "(sec 5.6, W58)")
+                "(sec 5.6)")
         i_ref = d["I_H2_1_0_S1"].astype(np.float64)
     n_matched = int(np.sum(grid_names == names)) if grid_names.size == n_model else 0
     if n_matched != n_model:
@@ -1065,7 +1065,7 @@ def h2shock_conversion(config):
 
 
 def build_h2shock(config, region):
-    """P5's H2S table, one per region (sec 5.6, W58's rule -- REWRITTEN
+    """P5's H2S table, one per region (sec 5.6's rule -- REWRITTEN
     from the survey-wide table): `PI[theta, k] = w_theta L_Sigma(F_k -
     c_theta) / p(F_k)`, `w_theta` uniform over the register (no external
     distribution, sec 5.6), `c_theta` `h2shock_conversion`'s own

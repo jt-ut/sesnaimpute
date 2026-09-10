@@ -4,7 +4,7 @@ shape-grid products of IMPLEMENTATION_BMSTP_DRAFT.md sec. 1.2
 (SPEC_BMSTP_DRAFT.md sec. 2, sec. 4.1's "shape grids", sec. 5.1-5.6).
 
 Writes P2 (the star-family grids, per tile), P3 (the cloud-class grid,
-per sightline: YSO's `GRID_YSO`/`X_MARGINAL`, and, since W58, H2S's own
+per sightline: YSO's `GRID_YSO`/`X_MARGINAL`, and H2S's own
 `GRID_H2S` on the SAME common grid -- `GRID_H2S[x, F] = p_x(x) . [L_Sigma
 (*) K_c](F)`, `p_x` the sightline's own `X_MARGINAL`, `L_Sigma` the
 region's knot lognormal (`LOGSIG_MEAN`/`LOGSIG_STD`, kept as attributes),
@@ -331,7 +331,7 @@ def build_cloud(config, region):
         log10_sigma = h2s_module.transport_log10_sigma(log10_sb_native, area_pc2, r.d_r_pc)
         logsig_mean, logsig_std = h2s_module.region_sigma_lognormal(log10_sigma)
 
-        # GRID_H2S (W58's rule, sec. 5.6 "Marks"): GRID_H2S[x, F] = p_x(x)
+        # GRID_H2S (sec. 5.6 "Marks"): GRID_H2S[x, F] = p_x(x)
         # . [L_Sigma (*) K_c](F), one marginal per region (the template
         # content and the region's own lognormal are both region-wide, not
         # per-sightline), broadcast over sightlines through X_MARGINAL
@@ -444,7 +444,7 @@ def build_cloud(config, region):
         med_col = int(np.argsort(x_marginal.sum(axis=1))[n_sl // 2]) if n_sl else -1
         med_corr = _joint_corr(grid_yso[med_col]) if n_sl else float("nan")
 
-        # rule 11's H2S identity (W58): the median sightline's stored
+        # rule 11's H2S identity : the median sightline's stored
         # GRID_H2S brightness marginal (summed over x, normalised) against
         # the reader's REMOVED private-axis construction -- a point-
         # evaluated lognormal on its own origin (LOGSIG_MEAN - 3
@@ -473,7 +473,7 @@ def build_cloud(config, region):
                                             / np.maximum(old_norm, 1e-8)))
 
         # the knots' own 16-84% range in log10 F_4.5 (sec. 9's report,
-        # W58's effect number): the region-wide K_c (*) L_Sigma marginal,
+        # the common-axis rule's effect number): the region-wide K_c (*) L_Sigma marginal,
         # the same for every sightline (only p_x varies by row).
         h2s_p16_f45 = h2s_p84_f45 = float("nan")
         if float(f45_marginal_h2s.sum()) > 0:

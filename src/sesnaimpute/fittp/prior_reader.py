@@ -35,7 +35,7 @@ _SHAPE = {
     "AGB": ("star", "GRID_AGB"),
     "PAHC": ("star", "GRID_STAR"),
     "YSO": ("cloud", "GRID_YSO"),
-    "H2S": ("cloud", "GRID_H2S"),  # on the common grid since W58, section 4.1 P3
+    "H2S": ("cloud", "GRID_H2S"),  # on the common grid since the common-axis rule, section 4.1 P3
     "GAL": ("gal", "GRID"),
 }
 _LIB = {"STAR": ("sps", "region"), "AGB": ("agb", "region"), "PAHC": ("pahc", "region"),
@@ -114,7 +114,7 @@ def load(config, region, cls):
     elif shape_src == "cloud":
         path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
         with h5py.File(path, "r") as f:
-            # the common axis for both cloud classes since W58: P3's
+            # the common axis for both cloud classes since the common-axis rule: P3's
             # `GRID_YSO`/`GRID_H2S` are already on it (section 4.1, 5.6),
             # the H2S template's Sigma-to-4.5-micron conversion `C_THETA`
             # (P5, `bmstp.template_weights.h2shock_conversion`) folded in
