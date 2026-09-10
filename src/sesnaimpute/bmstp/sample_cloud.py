@@ -28,7 +28,7 @@ the YSO register's own templates, weighted by
 `template_weights.yso_population_weight` (Dunham et al. 2015's own census
 density over each template's `log10 f_ref,4.5,theta` divided by the
 library's density of templates in the same quantity, times inclination
-uniform in cos i and the evolutionary-class census, sec. 1.4, W54, owner's
+uniform in cos i and the evolutionary-class census, sec. 1.4, owner's
 ruling 2026-09-09) -- called directly here rather than re-derived, the one
 place that weight is formed -- each at `log10 F_4.5 = log10
 F_REF_I2,theta - 2 log10(d_r / 1 kpc)`, widened by the cloud's own depth
@@ -212,7 +212,7 @@ def sample_f45(config, region, d_r_pc, sigma_d_pc, d_front, d_back):
     2015's own census density over each template's `log10
     f_ref,4.5,theta` divided by the library's density of templates in the
     same quantity, times inclination uniform in cos i and the
-    evolutionary-class census, sec. 1.4, W54, owner's ruling 2026-09-09)
+    evolutionary-class census, sec. 1.4, owner's ruling 2026-09-09)
     -- called directly rather than re-derived, so the
     weight formula lives in exactly one place for `build_yso`, this
     function and `bmstp.atlas._yso_register` alike. Each template placed

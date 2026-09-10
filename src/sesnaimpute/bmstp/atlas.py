@@ -20,7 +20,7 @@ that node, at `x=1`), YSO (sec. 5.5: the region's own fixed-seed draw of
 `template_weights.yso_population_weight`'s Dunham et al. 2015 census
 density over `log10 f_ref,4.5,theta` divided by the library's density of
 templates in the same quantity, times inclination uniform in cos i and the
-evolutionary-class census (sec 1.4, W54, owner's ruling 2026-09-09), the same
+evolutionary-class census (sec 1.4, owner's ruling 2026-09-09), the same
 construction `build_yso` and `bmstp.sample_cloud.sample_f45` use --
 each template's own eight `F_REF` scaled by `(1 kpc / d_r)^2`, placed along the
 sightline's own `p(x)` on the cloud interval, `bmstp.sample_cloud.sample_x`'s

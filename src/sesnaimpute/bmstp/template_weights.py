@@ -12,7 +12,7 @@ templates in them -- never the library's density in eight-band SED space
 by nothing (a matched-star count is already a weight per template); agb
 `tau` and yso `population` divide by a 1-D histogram of the library's own
 templates in the constrained quantity (tau by chemistry; `log10
-f_ref,4.5,theta`, W54), bins wide enough to hold the floor count, linearly
+f_ref,4.5,theta`), bins wide enough to hold the floor count, linearly
 interpolated;
 galz `colour` divides by a Gaussian KDE of the library's own templates in
 colour, the same bandwidth as the galaxy KDE.
@@ -30,7 +30,7 @@ is unchanged.
 
 yso's `population` factor divides by a 1-D histogram of the library's own
 templates in the constrained quantity `log10 f_ref,4.5,theta` (`c_theta`),
-not `log10` stellar mass (W54, owner's ruling 2026-09-09): a template's
+not `log10` stellar mass (owner's ruling 2026-09-09): a template's
 4.5 micron flux is a disc-and-envelope quantity the IMF over photospheric
 mass does not constrain, so the numerator is Dunham et al. 2015's own
 census density in the same quantity, not the IMF (sec 1.4's "which
@@ -71,12 +71,12 @@ from sesnaimpute.population import star_population
 # ---------------------------------------------------------------------------
 
 #: Dunham et al. 2015 (ApJS 220, 11) Gould Belt YSO catalogue, the census
-#: of the excess-selected population the YSO class counts (W54, owner's
+#: of the excess-selected population the YSO class counts (owner's
 #: ruling 2026-09-09): the source of statement (i)'s numerator,
-#: `p_census(log10 F_ref)`, replacing the Chabrier IMF over stellar mass
+#: `p_census(log10 F_ref)`
 #: (a disc-and-envelope flux the IMF over photospheric mass does not
 #: constrain, spec sec 1.4/5.5 "Template weights"). The view built at
-#: W53 (`sky.derived.dunham_yso`): area/source/quantity/granule for
+#: `sky.derived.dunham_yso`: area/source/quantity/granule for
 #: `config_module.product_path`.
 DUNHAM2015_CENSUS_PATH_ARGS = ("sky/derived", "dunham2015", "yso", "survey")
 
@@ -122,7 +122,7 @@ LIBRARY_DENSITY_MIN_COUNT = 20
 
 #: yso `population`'s census and library brightness histograms' nominal
 #: bin width, the grid's own `LOG10_F45_EDGES` spacing (spec sec 1.4/5.5,
-#: W54: "binned in 0.1 dex on the grid's own brightness axis"),
+#: "binned in 0.1 dex on the grid's own brightness axis"),
 #: coarsened for the library side where a bin falls short of the floor.
 YSO_F45_BIN_DEX = 0.1
 
@@ -266,7 +266,7 @@ def _floor_normalised(w):
     cells x templates that sat at zero before the floor is also
     returned, float64 throughout (the cast to float32 is the writer's
     job, spec sec 9's bar applies here). A cell no template reaches at
-    all (`cell_max <= 0`, possible since W54: a swath of the census's own
+    all (`cell_max <= 0`, a swath of the census's own
     zero bins can leave a grid cell with no placed template) is set
     uniform, the same "empty cells" convention `_normalise_over_theta`
     already applies (spec sec 5.1)."""
@@ -364,9 +364,9 @@ def _read_yso_subgrid_inclination(config, subdir):
 
 def _dunham_census_brightness_histogram(config):
     """Dunham et al. 2015's own brightness marginal, `p_census(log10
-    F_ref)` (spec sec 5.5 "Template weights", W54, owner's ruling
+    F_ref)` (spec sec 5.5 "Template weights", owner's ruling
     2026-09-09): the view's own `LOG10_F45_REF` (already the dereddened
-    4.5 micron flux at 1 kpc, the register's own convention, W53 -- no
+    4.5 micron flux at 1 kpc, the register's own convention, no
     unit conversion against `C_THETA` below) over every one of the
     catalogue's 2,966 rows with a finite 4.5 micron flux (every row is an
     excess-selected YSO, the law's own definition; no class cut), binned
@@ -384,7 +384,7 @@ def _dunham_census_brightness_histogram(config):
 
 def yso_population_weight(config):
     """The YSO `population` weight `w_theta` (spec sec 5.5 "Template
-    weights", W54, owner's ruling 2026-09-09): three population
+    weights", owner's ruling 2026-09-09): three population
     statements and one division, shared verbatim by `build_yso` below,
     `sample_cloud.sample_f45` and `bmstp.atlas._yso_register` -- called by
     all three rather than re-derived, so the class census and the
@@ -397,8 +397,8 @@ def yso_population_weight(config):
     quantity (`_fixed_width_binned_density`, `YSO_F45_BIN_DEX` bins
     floored at `LIBRARY_DENSITY_MIN_COUNT`, Class III templates excluded,
     never `RHO_KDE1`): a disc-and-envelope flux the IMF over photospheric
-    mass does not constrain, so the IMF-over-mass statement this replaces
-    (`population.yso_mass` is no longer read here; its product and stage
+    mass does not constrain, so no IMF over mass enters
+    (`population.yso_mass` is not read here; its product and stage
     stay in place for sec 3.5's mass table and the protostar check).
     (ii) The viewing angle, uniform in cos i (the existing sin i factor).
     (iii) The evolutionary-class census: Class 0 + Class I together carry
@@ -428,7 +428,7 @@ def yso_population_weight(config):
     incl_raw = np.sin(np.radians(incl_deg))                    # uniform in cos i (spec sec 5.5)
 
     # (i) the census density over the constrained quantity, log10 F_ref
-    # (spec sec 5.5 "Template weights", W54): the library's density is
+    # (spec sec 5.5 "Template weights"): the library's density is
     # measured on the population templates only (Class III excluded, a
     # bare photosphere is not in the YSO population, spec sec 5.5).
     p_census, _n_census = _dunham_census_brightness_histogram(config)
