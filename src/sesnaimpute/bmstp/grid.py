@@ -24,10 +24,22 @@ dex on a two-band source).
 Two more statements beside sec. 2's own: THE SUPPORT. `x = a / A_s <= 1`
 by definition, so a cell with `log10 x > 0` is never part of the prior's
 support even though the array keeps that extent (`N_X_SUPPORT`, below)
-for the kernels' own padding: `bin` and `bin_star_widths` fold whatever
-mass a smoothing pass pushes past `log10 x = 0` into `mass_outside` and
-hold those cells at EXACT zero, never the floor, and
-`ON_GRID_*`/`MASS_OUTSIDE_*` are measured over the support alone. THE
+for the kernels' own padding, and `ON_GRID_*`/`MASS_OUTSIDE_*` are
+measured over the support alone. THE WALL. `log10 x = 0` is a physical
+wall, not a grid edge: no population member is ever above it, so no
+placement or smoothing along `x` may carry mass past it and drop that
+mass as outside the prior -- `bin`, `bin_star_widths`, `blur`'s
+shift-and-smooth, `sample_cloud._bin1d` and the YSO shift-kernel
+placement in `bmstp.shapes` instead REFLECT: whatever mass a kernel
+would place at `log10 x > 0` is folded back onto its mirror cell below
+the wall (`fold_wall`, below), conserving the kernel's own mass on the
+support exactly, so a population sitting AT the wall (every galaxy, most
+background stars) reads `ON_GRID = 1` to float precision instead of
+losing half its mass to a phantom edge. The array's own low and top
+`log10 x` edges (`-3.0`, `+1.0`) keep the ordinary edge rule -- mass a
+kernel pushes past THOSE is truly outside and is counted in
+`mass_outside`, since `+1.0` is padding sized for the wall's own
+reflection, one dex, never reached by the kernels this design uses. THE
 FLOOR IS COMMON. `FLOOR` is one absolute value on the read prior density,
 common to every class at a source, applied where the prior is read
 (`fittp.prior_reader`), not a per-class, per-shape constant baked in
@@ -83,6 +95,22 @@ N_WIDTH_CLASSES = 8
 _SQRT2 = float(np.sqrt(2.0))
 
 
+def fold_wall(H):
+    """THE WALL (module docstring): mirror-reflects whatever mass sits in
+    the padding above the support (`H[N_X_SUPPORT:]`, axis 0) back onto
+    the support about `log10 x = 0`, and holds the padding at exact zero.
+    Cell `N_X_SUPPORT + k`'s mass lands in cell `N_X_SUPPORT - 1 - k`, its
+    mirror image across the wall on the uniform grid -- the mapping every
+    `x`-direction placement or smoothing step in this module uses so a
+    kernel's mass is conserved on the support rather than dropped.
+    Operates along axis 0 in place and returns `H`, whatever its trailing
+    shape (a bare `(n_x,)` marginal or an `(n_x, n_b)` joint grid)."""
+    n_pad = _N_X - N_X_SUPPORT
+    H[N_X_SUPPORT - n_pad:N_X_SUPPORT] += H[N_X_SUPPORT:][::-1]
+    H[N_X_SUPPORT:] = 0.0
+    return H
+
+
 def bin(x, log10_f45, w):
     """The weighted 2-D histogram `(H, mass_outside)` of a population
     sample on the common grid (sec. 2): `x` the sample's scaled
@@ -90,13 +118,14 @@ def bin(x, log10_f45, w):
     `w` its weight. `H` is normalised to sum to `1 - mass_outside` over
     cells (the mass that fell outside the grid is not in `H`), then
     smoothed by exactly one cell along EACH axis (sec. 2, "minimum
-    widths") with `mode="constant"` (zero beyond the edges): any mass the
-    smoothing pushes past an edge is mass outside the grid and is folded
-    into `mass_outside`. The support rule (module docstring) then folds
-    whatever of that smoothed mass sits at `log10 x > 0` into
-    `mass_outside` too and holds those cells at exact zero, so `H.sum()
-    == 1 - mass_outside` stays an exact identity over the support alone.
-    `H` carries its own true zeros: the floor is read, not stored."""
+    widths") with `mode="constant"` (zero beyond the array's own edges):
+    any mass the smoothing pushes past the array's true `log10 x`/`log10
+    F_4.5` edges is mass outside the grid and is folded into
+    `mass_outside`. THE WALL (module docstring) then reflects whatever of
+    that smoothed mass sits at `log10 x > 0` back onto the support
+    (`fold_wall`) instead of dropping it, so `H.sum() == 1 - mass_outside`
+    stays an exact identity over the support alone. `H` carries its own
+    true zeros: the floor is read, not stored."""
     x = np.asarray(x, dtype=float)
     log10_f45 = np.asarray(log10_f45, dtype=float)
     w = np.asarray(w, dtype=float)
@@ -124,10 +153,10 @@ def bin(x, log10_f45, w):
     H = gaussian_filter1d(H, sigma=1.0, axis=0, mode="constant")
     H = gaussian_filter1d(H, sigma=1.0, axis=1, mode="constant")
     mass_outside += mass_before - float(H.sum())
-    # the support rule: `log10 x > 0` is outside the prior even
-    # though the array keeps it for the kernels' padding.
-    mass_outside += float(H[N_X_SUPPORT:].sum())
-    H[N_X_SUPPORT:] = 0.0
+    # THE WALL: `log10 x = 0` reflects, it does not drop -- the one-cell
+    # x smoothing's own mass above it is folded back onto the support,
+    # never counted in `mass_outside`.
+    H = fold_wall(H)
     return H.astype(np.float64), mass_outside
 
 
@@ -143,15 +172,16 @@ def bin_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
     the sightline's own cloud-interval-span cap, `sample_star
     .tile_width_classes`); `width_class` (n_star,) each star's own class
     index, nearest its `sigma_x` in log space. One weighted histogram and
-    smoothing pass per POPULATED class, summed before the support rule --
+    smoothing pass per POPULATED class, summed before THE WALL fold --
     up to `N_WIDTH_CLASSES` histograms and smoothings of the tile's grid
     in place of one, no per-star kernel, nothing at the read (AGB reuses
     the same stars' classes, sec. 5.2). The `log10 F_4.5` axis keeps the
     ordinary one-cell smoothing (sec. 2) in every pass. `H.sum() == 1 -
     mass_outside` stays exact over the support, the same identity `bin`
-    reports, since every star belongs to exactly one class; `H` carries
-    its own true zeros, including the exact zero the support rule holds
-    at `log10 x > 0`."""
+    reports, since every star belongs to exactly one class and the wall
+    reflects (`fold_wall`) rather than drops what a wide width class
+    carries past it; `H` carries its own true zeros, including the exact
+    zero the wall holds in the padding above it."""
     x = np.asarray(x, dtype=float)
     log10_f45 = np.asarray(log10_f45, dtype=float)
     w = np.asarray(w, dtype=float)
@@ -174,10 +204,10 @@ def bin_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
         Hk = gaussian_filter1d(Hk, sigma=float(sigma_classes_cells[k]), axis=0, mode="constant")
         Hk = gaussian_filter1d(Hk, sigma=1.0, axis=1, mode="constant")
         H += Hk
-    # the support rule: fold whatever mass the width-class
-    # smoothing pushed past `log10 x = 0` into `mass_outside` and hold
-    # those cells at exact zero before the identity is read off `H.sum()`.
-    H[N_X_SUPPORT:] = 0.0
+    # THE WALL: fold whatever mass a width class's own smoothing carried
+    # past `log10 x = 0` back onto the support, before the identity is
+    # read off `H.sum()` -- reflected, never dropped.
+    H = fold_wall(H)
     mass_outside = float(1.0 - H.sum())
     return H.astype(np.float64), mass_outside
 
@@ -224,12 +254,20 @@ def blur(H, w, mu1, sig1, mu2, sig2):
     """`(H_s, mass_lost)`: one source's column kernel applied along the
     `log10 x` axis (sec. 2, 4.2), `H_s = (w * K1 + (1 - w) * K2) @ H`,
     `K1`, `K2` the shift-and-smooth operators of `_shift_kernel` for the
-    mixture's two components, combined before the one matrix product.
-    `mass_lost` is the mass the shift carries past the `log10 x` edges
-    (`H.sum() - H_s.sum()`)."""
+    mixture's two components, combined before the one matrix product. THE
+    WALL (module docstring): `K` is built as if `log10 x` ran unbounded
+    across the array, so `H_s` can carry mass into the padding above
+    `N_X_SUPPORT` -- `fold_wall` reflects it back onto the support before
+    `mass_lost` is read, so a background source's own kernel, centred at
+    or past the wall, still conserves its mass on the support instead of
+    losing half of it. `mass_lost` (`H.sum() - H_s.sum()`) is then only
+    the mass the shift carries past the array's true `log10 x` edges
+    (`-3.0`, `+1.0`), one dex of padding above the wall being what the
+    kernels this design uses need and no more."""
     K1 = _shift_kernel(mu1, sig1)
     K2 = _shift_kernel(mu2, sig2)
     K = w * K1 + (1.0 - w) * K2
     H_s = K @ H
+    H_s = fold_wall(H_s)
     mass_lost = float(H.sum() - H_s.sum())
     return H_s, mass_lost

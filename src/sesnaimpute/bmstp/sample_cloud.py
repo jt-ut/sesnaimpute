@@ -133,13 +133,13 @@ def _bin1d(values, w, edges, sigma_cells):
     """One axis of `bmstp.grid.bin`, alone: the weighted 1-D histogram of
     `values` on `edges` (always `grid.LOG10_X_EDGES`, `sample_x`'s only
     caller below), normalised to `1 - mass_outside`, Gaussian-smoothed by
-    `sigma_cells` cells (`mode="constant"`: mass pushed past an edge is
-    mass outside the grid, never wrapped). The support rule (`bmstp.grid`
-    module docstring) then folds whatever of that smoothed mass sits at
-    `log10 x > 0` into `mass_outside` too and holds those cells at exact
-    zero -- the same treatment `grid.bin` gives every other class's
-    `log10 x` axis. `h` carries its own true zeros: no per-shape floor is
-    baked in here."""
+    `sigma_cells` cells (`mode="constant"`: mass pushed past the array's
+    true `log10 x` edges is mass outside the grid, never wrapped). THE
+    WALL (`bmstp.grid` module docstring) then reflects whatever of that
+    smoothed mass sits at `log10 x > 0` back onto the support
+    (`grid.fold_wall`) instead of dropping it -- the same treatment
+    `grid.bin` gives every other class's `log10 x` axis. `h` carries its
+    own true zeros: no per-shape floor is baked in here."""
     values = np.asarray(values, dtype=np.float64)
     w = np.asarray(w, dtype=np.float64)
     total_weight = w.sum()
@@ -151,8 +151,7 @@ def _bin1d(values, w, edges, sigma_cells):
     mass_before = float(h.sum())
     h = gaussian_filter1d(h, sigma=sigma_cells, mode="constant")
     mass_outside += mass_before - float(h.sum())
-    mass_outside += float(h[grid.N_X_SUPPORT:].sum())
-    h[grid.N_X_SUPPORT:] = 0.0
+    h = grid.fold_wall(h)
     return h.astype(np.float64), mass_outside
 
 
