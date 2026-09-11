@@ -33,16 +33,28 @@ import sys
 
 from joblib import register_parallel_backend
 from joblib._parallel_backends import LokyBackend
+from joblib.externals.loky import process_executor as _loky_workers
 
 from sesnaimpute import config as config_module
 
 
+def _keep_worker():
+    """Runs once in every worker the stage pool starts: a worker's memory
+    grows by design (it holds the pools of the region it works on), and
+    loky would otherwise read that growth as a leak, retire the worker
+    after 300 MB and spawn a replacement -- a fresh spawn is the one
+    event this machine's loader does not survive. The retirement rule is
+    loky's own module constant, read in the worker at each check, so it is
+    raised here, in the worker, to a size no task reaches."""
+    _loky_workers._MAX_MEMORY_LEAK_SIZE = sys.maxsize
+
+
 class _StagePoolLoky(LokyBackend):
     def configure(self, n_jobs=1, parallel=None, prefer=None, require=None,
-                  idle_worker_timeout=86400, **backend_args):
+                  idle_worker_timeout=86400, initializer=_keep_worker, **backend_args):
         return super().configure(n_jobs=n_jobs, parallel=parallel, prefer=prefer,
                                   require=require, idle_worker_timeout=idle_worker_timeout,
-                                  **backend_args)
+                                  initializer=initializer, **backend_args)
 
 
 register_parallel_backend("stage_pool", _StagePoolLoky, make_default=True)
