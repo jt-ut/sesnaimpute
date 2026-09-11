@@ -131,6 +131,23 @@ DEEPEST_LIMIT_PERCENTILE = 1.0
 #: still carries sources.
 ROLL_OFF_WIDTHS = 3.0
 
+#: TRILEGAL's distance-modulus output step, 0.1 mag (Girardi et al. 2005,
+#: A&A 436, 895): the service places every synthetic star on this fixed
+#: grid, not the anonymous form's own query field (the form carries no
+#: such override, so this is the tool's own default, fixed here from its
+#: documented grid rather than read from a request field). `distance_pc`
+#: below turns a star's grid value into a continuous one.
+TRILEGAL_DISTANCE_MODULUS_STEP_MAG = 0.1
+
+#: Half of `TRILEGAL_DISTANCE_MODULUS_STEP_MAG`, expressed in log10 d
+#: (`d = 10**(0.2*(m-M0)+1)` pc, so a step `s` in `m-M0` is a step `0.2*s`
+#: in log10 d; half of that is this bin's own half-width).
+DISTANCE_LOG10_HALF_WIDTH = 0.1 * TRILEGAL_DISTANCE_MODULUS_STEP_MAG
+
+#: Fixed seed for the within-bin distance draw (`distance_pc`), so the
+#: retained sample is reproducible.
+DISTANCE_JITTER_SEED = 66
+
 
 # ---------------------------------------------------------------------------
 # the atmosphere register: nearest-template match, the two unit changes
@@ -358,8 +375,21 @@ def intrinsic_fluxes_mjy(df):
 def distance_pc(df):
     """`d = 10**(0.2*(m-M0) + 1)` pc, from TRILEGAL's true distance
     modulus (`m-M0`, dust-free by the query's own `internal_extinction_kind
-    = 0`, SPEC_PRIORS.md section 1.5)."""
-    return 10.0 ** (0.2 * df["m-M0"].to_numpy() + 1.0)
+    = 0`, SPEC_PRIORS.md section 1.5). A TRILEGAL distance modulus is a
+    bin on the service's own output grid, not a star's true position: read
+    verbatim, every star at one of a few hundred `m-M0` values would leave
+    every reader that forms a function of distance (`u = u(d)` in
+    `star_population.py`, the AGB brightness there, the parallax marginal
+    in `fittp.gaia`, every reader of this product's `DIST_PC`) with a comb
+    of that grid's stripes instead of a continuous population. Each star's
+    `log10 d` is therefore jittered by a fixed-seed draw uniform across
+    half the grid step on either side (`DISTANCE_LOG10_HALF_WIDTH`), so
+    the stored distance is a continuous position drawn from within its own
+    TRILEGAL bin."""
+    log10_d = 0.2 * df["m-M0"].to_numpy(dtype=np.float64) + 1.0
+    rng = np.random.default_rng(DISTANCE_JITTER_SEED)
+    delta = rng.uniform(-DISTANCE_LOG10_HALF_WIDTH, DISTANCE_LOG10_HALF_WIDTH, size=log10_d.shape)
+    return 10.0 ** (log10_d + delta)
 
 
 # ---------------------------------------------------------------------------
