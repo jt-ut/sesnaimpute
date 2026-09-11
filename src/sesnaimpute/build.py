@@ -46,6 +46,9 @@ def _keep_worker():
     event this machine's loader does not survive. The retirement rule is
     loky's own module constant, read in the worker at each check, so it is
     raised here, in the worker, to a size no task reaches."""
+    if not hasattr(_loky_workers, "_MAX_MEMORY_LEAK_SIZE"):
+        raise AttributeError("sesnaimpute.build: this joblib's loky has no _MAX_MEMORY_LEAK_SIZE; "
+                             "find its worker-retirement rule and raise it here")
     _loky_workers._MAX_MEMORY_LEAK_SIZE = sys.maxsize
 
 
