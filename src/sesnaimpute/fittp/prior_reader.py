@@ -310,22 +310,23 @@ def _build_a_star_tables(a_col, x_edges, sigma_a, a_hat):
         z = (edges[None, :] - ap[:, None]) / sigma_a[s]
         cdf = 0.5 * (1.0 + erf(z / _SQRT2))
         phi = np.exp(-0.5 * z * z) / _SQRT2PI
-        # the grid's low edge is not a truncation boundary of its own --
-        # whatever Gaussian mass lies below it belongs to the lowest cell
-        # (SPEC_BMSTP_DRAFT.md 4.2's low-edge statement): M_0 is read as
-        # if integrated from -infinity. a*_0, though, is READ AS THAT
-        # CELL -- the mean of the kernel truncated to the cell's own
-        # bounds [a_edge_lo, a_1], never below the grid -- so keep the
-        # true edge-0 cdf/phi before zeroing them for the mass integral.
-        cdf_edge0 = cdf[:, 0].copy()
-        phi_edge0 = phi[:, 0].copy()
-        cdf[:, 0] = 0.0
-        phi[:, 0] = 0.0
         mass = cdf[:, 1:] - cdf[:, :-1]
         mass_safe = np.maximum(mass, 1e-300)
         a_star = ap[:, None] + sigma_a[s] * (phi[:, :-1] - phi[:, 1:]) / mass_safe
-        cell0_mass_safe = np.maximum(cdf[:, 1] - cdf_edge0, 1e-300)
-        a_star[:, 0] = ap + sigma_a[s] * (phi_edge0 - phi[:, 1]) / cell0_mass_safe
+        # the grid's low edge is not a truncation boundary of its own:
+        # the kernel's mass below it, M_below (= cdf at the true edge,
+        # `cdf[:, 0]`, since that cdf already integrates from -infinity),
+        # is placed in the lowest cell (SPEC_BMSTP_DRAFT.md 4.2's
+        # low-edge statement) and READ AT THAT CELL -- its own geometric
+        # centre a_c0 = sqrt(a_edge_lo * a_1), not the cell's own
+        # truncated mean a*_in (mass[:, 0]/a_star[:, 0] above, computed
+        # exactly as every other cell). Folding `M_below / a_c0` into the
+        # stored (mass, a*) pair at a*_in -- mass_eff = M_in + M_below *
+        # a*_in / a_c0 -- makes the same `dens * mass / a*` gather every
+        # other cell uses reproduce `dens0 * (M_in / a*_in + M_below /
+        # a_c0)` for cell 0 too.
+        a_c0 = math.sqrt(edges[0] * edges[1])
+        mass[:, 0] = mass[:, 0] + cdf[:, 0] * (a_star[:, 0] / a_c0)
         # cells the window never reaches carry mass ~ 0 and an a* the
         # kernel never gathers (its own window index selects only cells
         # inside +/-5 sigma); clip before the float32 cast so those unused
@@ -416,12 +417,15 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     over templates, so a single source's read still uses every core
     (W6d item 3).
 
-    Cell 0 is always read at the cell's OWN mean, never the -infinity
-    one: `M_0` (its mass) integrates from -infinity, since the grid's low
-    edge is not itself a truncation boundary and whatever Gaussian mass
-    lies below it belongs to the lowest cell, but `a*_0` is the mean of
-    the kernel truncated to the cell's own bounds `[a_edges[0],
-    a_edges[1]]`, never below the grid -- the table path
+    Cell 0's own mass `M_0` and mean `a*_0` are formed exactly as every
+    other cell's, over its own bounds `[a_edges[0], a_edges[1]]` -- the
+    grid's low edge is not itself a truncation boundary, but that does
+    not move cell 0's own mean below it. The kernel's mass below that
+    edge, `M_below`, does not vanish (section 4.2's low-edge statement:
+    it is placed in the lowest cell) but it is READ AT THAT CELL, at its
+    own geometric centre `a_c0 = sqrt(a_edges[0] * a_edges[1])`, not at
+    `a*_0`: cell 0's term is `dens_0 * (M_0 / a*_0 + M_below / a_c0)`,
+    `dens_0` gathered once at `a*_0`. The table path
     (`_build_a_star_tables`) and this exact path agree on this.
 
     Two edge cases never see a cleared cell and are read as a single
@@ -506,43 +510,33 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
                         total += dens * mi / a_star
             else:
-                cdf_edge0 = 0.0
-                phi_edge0 = 0.0
-                if i_lo == 0:
-                    # the grid's low edge is not a truncation boundary of
-                    # its own: whatever Gaussian mass lies below it
-                    # belongs to the lowest cell (section 4.2's low-edge
-                    # statement, the same rule the fallback below applies
-                    # when no cell clears the skip) -- M_0 integrates the
-                    # lowest cell from -infinity, not from a_edges[0]. But
-                    # a*_0 is READ AS THAT CELL: the mean of the kernel
-                    # truncated to the cell's own bounds [a_edges[0],
-                    # a_edges[1]], never below the grid -- so keep the
-                    # true edge-0 cdf/phi (cdf_edge0/phi_edge0) alongside
-                    # the -infinity ones the mass sum uses.
-                    cdf_prev = 0.0
-                    phi_prev = 0.0
-                    z_edge0 = (a_edges[0] - ah) * inv_sig
-                    cdf_edge0 = 0.5 * (1.0 + math.erf(z_edge0 / sqrt2))
-                    phi_edge0 = math.exp(-0.5 * z_edge0 * z_edge0) / sqrt2pi
-                else:
-                    z_prev = (a_edges[i_lo] - ah) * inv_sig
-                    cdf_prev = 0.5 * (1.0 + math.erf(z_prev / sqrt2))
-                    phi_prev = math.exp(-0.5 * z_prev * z_prev) / sqrt2pi
+                z_prev = (a_edges[i_lo] - ah) * inv_sig
+                cdf_prev = 0.5 * (1.0 + math.erf(z_prev / sqrt2))
+                phi_prev = math.exp(-0.5 * z_prev * z_prev) / sqrt2pi
                 for i in range(i_lo, i_hi + 1):
                     z_next = (a_edges[i + 1] - ah) * inv_sig
                     cdf_next = 0.5 * (1.0 + math.erf(z_next / sqrt2))
                     phi_next = math.exp(-0.5 * z_next * z_next) / sqrt2pi
+                    # M_i, a*_i: this cell's own mass and truncated-normal
+                    # mean within its own bounds (section 4.2), cell 0
+                    # included -- the grid's low edge is not itself a
+                    # truncation boundary, so cell 0's own bounds are
+                    # [a_edges[0], a_edges[1]] like any other cell.
                     mi = cdf_next - cdf_prev
                     if mi >= 1e-6:
+                        a_star = ah + sig * (phi_prev - phi_next) / mi
                         if i == 0:
-                            # a*_0: the cell's own truncated-normal mean,
-                            # never the -infinity read M_0 uses.
-                            mass0 = max(cdf_next - cdf_edge0, 1e-300)
-                            a_star = ah + sig * (phi_edge0 - phi_next) / mass0
-                        else:
-                            # a*_i: the Gaussian's mean within cell i (section 4.2)
-                            a_star = ah + sig * (phi_prev - phi_next) / mi
+                            # the kernel's mass below the grid's low edge,
+                            # M_below = cdf_prev (it already integrates
+                            # from -infinity), is placed in the lowest
+                            # cell (section 4.2's low-edge statement) and
+                            # READ AT THAT CELL -- its own geometric
+                            # centre a_c0 = sqrt(a_edges[0]*a_edges[1]),
+                            # not a*_i. Folding M_below/a_c0 into the
+                            # (mi, a_star) pair at a_star=a*_i reproduces
+                            # dens0 * (M_i/a*_i + M_below/a_c0) below.
+                            a_c0 = math.sqrt(a_edges[0] * a_edges[1])
+                            mi = mi + cdf_prev * (a_star / a_c0)
                         bval = lbh + sl * (a_star - ah) + ct
                         bpos = (bval - b_origin) / dlb - 0.5
                         j0 = int(math.floor(bpos))
