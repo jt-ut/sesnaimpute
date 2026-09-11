@@ -51,10 +51,11 @@ Colour maps and scales follow the convention the earlier package's own
 sky-atlas figure used (`sesnacomplete.bms_prior.validation.sky_atlas`):
 the measured column on `magma`, every class quantity (share, posterior
 mean) on `viridis`. A prior page's six class panels draw a PROBABILITY,
-of order one where a class holds the pixel, so they share one LINEAR
-0-1 colour bar ticked every 0.2 (`_prob_norm`, `CLASS_PROB_TICKS`): a
-log bar from 10^-4 would paint 0.6 and 1 the same colour, and the
-classes it would separate are negligible as probabilities. The column
+of order one where a class holds the pixel, but each panel gets its OWN
+LINEAR colour bar spanning its own finite range, ticked automatically
+(`_panel_norm`): a shared 0-1 bar paints a rare class's whole spatial
+structure in one flat colour near the bottom of the scale, hiding the
+very structure the panel exists to show. The column
 and density panels keep their own log scale. That earlier figure's own `page_geometry` insets a colour bar
 into the panel when the footprint leaves clear room for one and sizes a
 3x2 class block plus one wide dust panel to fill a page that grows to
@@ -92,10 +93,6 @@ from sesnaimpute.atlas import captions
 
 NSIDE = 512
 CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
-
-#: The class panels' colour-bar ticks: the panels draw a probability on
-#: a linear 0-1 scale, read off at five equal steps.
-CLASS_PROB_TICKS = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
 
 #: Panel titles and colourbar labels at a size a reader sees on a slide;
 #: tick labels smaller -- the two atlas pages' own convention;
@@ -435,8 +432,10 @@ def _panel_colorbar(fig, ax, im, label=None, log=False, ticks=None):
     """The panel's own colour bar, inset into its own right edge and
     spanning exactly its height -- axes coordinates work for WCSAxes, so
     no free-floating bar rectangle is needed for either atlas page.
-    `ticks`, for a panel on a fixed scale (a class panel's linear 0-1
-    probability, `CLASS_PROB_TICKS`), labels exactly those values.
+    `ticks`, for a panel on a fixed scale shared with other panels,
+    labels exactly those values; a panel on its own auto-ranged scale
+    (e.g. a prior page's class panels, `_panel_norm`) passes `None` and
+    gets the automatic linear ticks below.
     `log`, for a `LogNorm`-scaled panel, ticks DECADES ONLY when at
     least two decade ticks fall in the mappable's own range: a linear
     `%.2g` formatter left the log axis's own automatic
@@ -525,14 +524,25 @@ CAPTION_BOTTOM_PAD_IN = 0.25
 CAPTION_CHARS_PER_IN = 15.0
 
 
-def _prob_norm():
-    """A fixed LINEAR scale, 0 to 1, for a class panel's `P(C | ...)`
-    colour bar, the same on the intrinsic and the selection page: the
-    panel draws a probability, so the whole of its range is 0 to 1 and
-    nothing is clipped, and the six class panels of both pages compare
-    directly rather than each auto-ranging to its own pixel's max
-    share."""
-    return Normalize(vmin=0.0, vmax=1.0)
+def _panel_norm(grid):
+    """A LINEAR scale for one class panel's `P(C | ...)` colour bar,
+    spanning that panel's OWN finite range (`vmin`/`vmax` at the grid's
+    own nanmin/nanmax; `vmin` to `vmin + 1e-6` where the range is
+    degenerate, so `Normalize` never divides by zero) rather than the
+    shared 0-1 scale the two prior pages used to fix on every class
+    panel: a rare class's whole probability range can sit within one
+    tenth of that shared scale, painting its spatial structure in a
+    single flat colour, so each panel is left to find its own range and
+    its own automatic ticks, at the cost of the six panels no longer
+    being directly comparable to each other."""
+    finite = grid[np.isfinite(grid)]
+    if finite.size == 0:
+        return Normalize(vmin=0.0, vmax=1e-6)
+    vmin = float(finite.min())
+    vmax = float(finite.max())
+    if vmax <= vmin:
+        vmax = vmin + 1e-6
+    return Normalize(vmin=vmin, vmax=vmax)
 
 
 #: The two prior pages differ only in which stored quantity feeds the
@@ -642,17 +652,18 @@ def _build_prior_page(config, region, formats, view):
         # view's density, C = GAL, D = STAR, E = PAHC, F = AGB, G = YSO,
         # H = H2S. Row-major fill into a 4-column grid puts the top row
         # at [A, C, E, G] and the bottom row at [B, D, F, H], which is
-        # exactly this column pairing. Class panels share the fixed
-        # linear 0-1 probability scale (`_prob_norm`), not their own
-        # pixel's max, so the six panels compare directly.
+        # exactly this column pairing. Each class panel draws on its OWN
+        # linear scale, spanning its own pixel's range (`_panel_norm`),
+        # not a scale shared across the six, so a rare class's spatial
+        # structure is visible rather than flattened to one colour.
         def _class_panel(cls):
             idx = CLASSES.index(cls)
-            # The share as computed, on the linear 0-1 scale: every
-            # probability is already inside it, so nothing is clipped
-            # and a zero share paints the scale's bottom colour.
-            return dict(data=share_grids[idx], cmap="viridis", norm=_prob_norm(), title=cls,
+            # The share as computed, on that panel's own linear scale:
+            # nothing is clipped, and the colour bar's automatic ticks
+            # read off whatever range this class actually spans.
+            return dict(data=share_grids[idx], cmap="viridis", norm=_panel_norm(share_grids[idx]), title=cls,
                         cbar_label=plot_style.label(spec["class_cbar_label"], None), hatch=None,
-                        cbar_ticks=CLASS_PROB_TICKS)
+                        cbar_ticks=None)
 
         col_panel = dict(data=col_grid, cmap="magma", norm=_log_norm(col_grid),
                           title=plot_style.label("Column $A_K$", "mag"), cbar_label=None, hatch=None,
