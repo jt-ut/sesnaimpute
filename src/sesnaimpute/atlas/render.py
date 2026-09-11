@@ -95,14 +95,12 @@ PAD_DISPLAY_PIXELS = 6
 # page geometry -- both atlas figures share one fixed 4x2 panel grid,
 # sized to its own content (`_atlas_page_size`) so the panels fill the
 # page at every region's own aspect, each panel's own colour bar inset
-# into its own right edge (`_panel_colorbar`); `_colorbar`'s older
-# free-floating-rectangle path, generalising the earlier package's own
-# `sesnacomplete.bms_prior.validation.sky_atlas.page_geometry`, is kept
-# only for `atlas.protostars`'s own layout.
+# into its own right edge (`_panel_colorbar`); `_colorbar`'s
+# free-floating-rectangle path serves `atlas.protostars`'s own layout.
 # ---------------------------------------------------------------------------
 
-#: The page a region's figure is drawn on, inches -- a slide by default;
-#: `--page WxH` overrides both numbers together.
+#: The page `atlas.protostars` draws on, inches; the two atlas pages size
+#: themselves to their content (`_atlas_page_size`).
 PAGE_WIDTH_IN, PAGE_HEIGHT_IN = 16.0, 9.0
 
 #: Page furniture, inches: room outside the panel grid for the left
@@ -374,9 +372,9 @@ def _log_norm(grid):
 
 def _colorbar(fig, im, rect, page_w, page_h):
     """A thin colour bar in its own free-floating reserved strip at
-    `rect` (inches), scaled to that panel's own data range. Superseded
-    in both atlas pages by `_panel_colorbar`'s own inset bar; kept only
-    for `atlas.protostars`'s own layout, which computes its own `rect`."""
+    `rect` (inches), scaled to that panel's own data range, for
+    `atlas.protostars`'s own layout, which computes its own `rect`; the
+    two atlas pages use `_panel_colorbar`'s inset bar."""
     cax = fig.add_axes(_frac(rect, page_w, page_h))
     cbar = fig.colorbar(im, cax=cax)
     cbar.locator = MaxNLocator(nbins=3)
@@ -394,7 +392,7 @@ def _panel_colorbar(fig, ax, im, label=None, log=False):
     `log`, for a `LogNorm`-scaled panel, ticks DECADES ONLY:
     a linear `%.2g` formatter left the log axis's own automatic
     scientific-notation MINOR ticks in place, one of which ran off the
-    bar (owner's ruling 2026-09-10)."""
+    bar."""
     cax = ax.inset_axes([1.02, 0.0, 0.04, 1.0])
     cbar = fig.colorbar(im, cax=cax)
     if log:
@@ -416,8 +414,7 @@ def _panel_colorbar(fig, ax, im, label=None, log=False):
 #: fixed four-column, two-stacked-panel layout (below), shared by the
 #: prior and the posterior figure alike: the page itself is sized to
 #: this content, not the other way around, so the panels always fill
-#: the page regardless of a region's own footprint aspect (owner's
-#: ruling 2026-09-10).
+#: the page regardless of a region's own footprint aspect.
 ATLAS_PANEL_HEIGHT_IN = 3.0
 
 
@@ -452,7 +449,7 @@ def _require_depth_grid(config, region):
     return _read_depth_grid(config, region)
 
 
-def build_prior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAGE_HEIGHT_IN):
+def build_prior_region(config, region, formats):
     """Writes the prior-atlas figure (P6, 8 panels: column, predicted
     count, the six prior shares) under `bmstp/atlas/figures/`."""
     prior_path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
@@ -480,7 +477,7 @@ def build_prior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAG
         share_grids = [_reproject(footprint_pix, share[:, i], grid_pix, shape)
                        for i in range(len(CLASSES))]
 
-        # Fixed layout (owner's ruling 2026-09-10): four columns of two
+        # Fixed layout: four columns of two
         # stacked panels, A/B | C/D | E/F | G/H -- A = column, B = prior
         # source density, C = GAL, D = STAR, E = PAHC, F = AGB, G = YSO,
         # H = H2S. Row-major fill into a 4-column grid puts the top row
@@ -503,10 +500,6 @@ def build_prior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAG
         n_panels = len(panels)
 
         # The page ITSELF is sized to the fixed 4x2 layout's content (not
-        # the other way around) -- `page_w`/`page_h` from the caller are
-        # ignored here, since the page's whole point is to fill exactly
-        # this content, at every aspect, with no letterboxing (owner's
-        # ruling 2026-09-10).
         aspect = geom_grid["n_x"] / float(geom_grid["n_y"])
         page_w, page_h, geom = _atlas_page_size(aspect)
         cols = geom["cols"]
@@ -525,7 +518,7 @@ def build_prior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAG
             if p["hatch"] is not None:
                 # The surveyed-coverage floor, drawn on the density panel
                 # only, as one thin contour line outlining the
-                # well-covered footprint (owner's ruling 2026-09-10) --
+                # well-covered footprint --
                 # `coverage_grid` is already NaN outside the admitted
                 # footprint (sec. 8's own reprojection mask), so the line
                 # never crosses into the white area outside it.
@@ -567,7 +560,7 @@ def build_prior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAG
     return paths
 
 
-def build_posterior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAGE_HEIGHT_IN):
+def build_posterior_region(config, region, formats):
     """Writes the posterior-atlas figure (P11, 8 panels: column, the six
     posterior means, the posterior YSO count) under `fittp/atlas/figures/`,
     on the SAME footprint as the prior figure's own (`catalog.depth_grid`)
@@ -600,7 +593,7 @@ def build_posterior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h
         gap_1d = n_sources == 0
         mean_p = _align(footprint_pix, posterior["pix"], posterior["mean_p"], np.nan)
         n_yso_half = _align(footprint_pix, posterior["pix"],
-                             posterior["n_yso_half"].astype(np.float64), 0.0)
+                             posterior["n_yso_half"].astype(np.float64), np.nan)
 
         col_grid = _reproject(footprint_pix, a_k, grid_pix, shape)
         mean_grids = [_reproject(footprint_pix, mean_p[:, i], grid_pix, shape)
@@ -608,7 +601,7 @@ def build_posterior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h
         nyso_grid = _reproject(footprint_pix, n_yso_half, grid_pix, shape)
         gap_grid = _gap_grid(footprint_pix, gap_1d, grid_pix, shape)
 
-        # Fixed layout (owner's ruling 2026-09-10), the same one the
+        # Fixed layout, the same one the
         # prior figure uses: four columns of two stacked panels, A/B |
         # C/D | E/F | G/H -- A = column, B = the posterior YSO count in
         # the prior figure's "density" slot, C = GAL, D = STAR, E =
@@ -627,7 +620,7 @@ def build_posterior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h
         # N_YSO_ABOVE_HALF (P11) is a raw per-pixel COUNT of P(YSO)>0.5
         # sources, never divided by the pixel's own solid angle -- unlike
         # N_CAT_C (deg^-2 already), so this title carries no unit rather
-        # than a false "deg^-2" (owner's ruling 2026-09-10: label the
+        # than a false "deg^-2" (the
         # nearest true description of what the panel draws).
         nyso_panel = dict(data=nyso_grid, cmap="magma", norm=None,
                            title=plot_style.label("Posterior YSO Count", None),
@@ -637,9 +630,6 @@ def build_posterior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h
         n_panels = len(panels)
 
         # The page ITSELF is sized to the fixed 4x2 layout's content,
-        # the same helper the prior figure uses -- `page_w`/`page_h`
-        # from the caller are ignored here for the same reason (owner's
-        # ruling 2026-09-10).
         aspect = geom_grid["n_x"] / float(geom_grid["n_y"])
         page_w, page_h, geom = _atlas_page_size(aspect)
         cols = geom["cols"]
@@ -678,7 +668,7 @@ def build_posterior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h
     return paths
 
 
-def build(config, regions=None, formats=("png", "pdf"), page=(PAGE_WIDTH_IN, PAGE_HEIGHT_IN)):
+def build(config, regions=None, formats=("png", "pdf")):
     """Per region, the prior-atlas figure (`bmstp/atlas/figures/`, when
     P6 exists) and the posterior-atlas figure (`fittp/atlas/figures/`,
     when P11 exists), on the same depth-grid footprint -- rendering, not
@@ -686,13 +676,8 @@ def build(config, regions=None, formats=("png", "pdf"), page=(PAGE_WIDTH_IN, PAG
     missing an input is skipped rather than failed."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     for region in region_names:
-        build_prior_region(config, region, formats, page_w=page[0], page_h=page[1])
-        build_posterior_region(config, region, formats, page_w=page[0], page_h=page[1])
-
-
-def _parse_page(text):
-    w, _, h = text.lower().partition("x")
-    return float(w), float(h)
+        build_prior_region(config, region, formats)
+        build_posterior_region(config, region, formats)
 
 
 def _main():
@@ -700,12 +685,10 @@ def _main():
     parser.add_argument("config")
     parser.add_argument("--regions", nargs="+", default=None)
     parser.add_argument("--formats", default="png,pdf")
-    parser.add_argument("--page", default="%gx%g" % (PAGE_WIDTH_IN, PAGE_HEIGHT_IN),
-                        help="page size in inches, WxH (default: a 16x9 slide)")
     args = parser.parse_args()
     config = config_module.load(args.config)
     formats = tuple(s.strip() for s in args.formats.split(",") if s.strip())
-    build(config, regions=args.regions, formats=formats, page=_parse_page(args.page))
+    build(config, regions=args.regions, formats=formats)
 
 
 if __name__ == "__main__":
