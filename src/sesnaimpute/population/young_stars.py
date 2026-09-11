@@ -65,13 +65,15 @@ the region's cloud interval `[d_front, d_back]` and renormalised
 (`population.yso.restrict_and_renormalize`, `sightline_lookup`) -- a
 young star in the anchor's own count is a member of the region's cloud,
 the SAME restricted population the YSO prior and `bmstp.sample_cloud`
-place, never the whole sightline's foreground-to-background span. `Ks_obs = Ks + a`;
-`G_obs = G + a * kappa_G(a)`, `kappa_G` read off the SAME law curves
-every other band's kappa comes from (`population.selection._load_law_curve`,
-`law_dense_weight`), just at Gaia G's own pivot wavelength (0.64 um)
-instead of one of the eight survey bands -- blended by the section 1.3
-ramp exactly like every other band, not a new Gaia-specific curve.
-Gaia's own detection sigmoid (`population.anchor_tiles.gaia_detection_
+place, never the whole sightline's foreground-to-background span.
+`(G_obs, Ks_obs)` come from `population.anchor_tiles.magnitudes_at_
+extinction` -- the ONE function that turns a local column into the two
+anchor magnitudes, at the register's own band-integrated Gaia dimming
+coefficients (`_register_kg_medians`, `KG_DRAINE`/`KG_WHITNEY` median
+over the SPS template library, since a young star has no per-template
+match), never a monochromatic law-curve ratio: the deduction and
+`anchor_tiles`'s own predicted histogram dim G by the SAME law (read
+audit R6 item 1). Gaia's own detection sigmoid (`population.anchor_tiles.gaia_detection_
 weight`, reused) weights `N_G_YOUNG`; `N_KS_YOUNG` carries none (2MASS
 is treated complete to `KS_CUT_MAG`, the anchor histograms' own
 convention).
@@ -135,11 +137,6 @@ _GAIA_ROW_COLUMNS = (
     "F67", "F75", "F78", "F82", "F82B", "F89",
     "G_RSV", "G", "G_BP", "G_RP",
 )
-
-#: Gaia G's own mean/pivot wavelength (Gaia DR3 documentation, an
-#: unreddened source): where `kappa_g` reads the law curves, in place of
-#: one of `definitions.BANDS`'s own wavelengths.
-GAIA_G_PIVOT_UM = 0.64
 
 #: This module's own mass-quadrature resolution (module docstring's IMF
 #: x u vectorisation).
@@ -399,26 +396,30 @@ def gaia_abs_mag_grid(config, age_gyr, mass_grid):
                       np.log10(masses[order]), g_mag[order])
 
 
-def kappa_g(config, a):
-    """`kappa_G(a) = chi(0.64um) / chi(Ks)`, blended by the section 1.3
-    ramp exactly as `population.selection.kappa_hybrid` blends the eight
-    survey bands -- the SAME law curves (`population.selection.
-    _load_law_curve`), read at Gaia G's own pivot wavelength instead of
-    one of `definitions.BANDS`'s own.
+_REGISTER_KG_CACHE = {}
+
+
+def _register_kg_medians(config):
+    """The register's own band-integrated Gaia coefficients
+    (`KG_DRAINE`/`KG_WHITNEY`, Danielski et al. 2018's `A_G/A_V` per SPS
+    template, `sed_models/registers/sps_register.hdf5`), one median over
+    the template library -- the same register `population.anchor_tiles`
+    reads a per-matched-template value from for a TRILEGAL field star; a
+    young star has no such template match, so this module's own deducted
+    population uses the register's survey-wide median in
+    `anchor_tiles.magnitudes_at_extinction`, never a monochromatic
+    law-curve ratio: one Gaia dimming law for the deduction and for the
+    anchors it is subtracted from (read audit R6 item 1).
     """
-    a = np.asarray(a, dtype=float)
-    ks_wvl = definitions.BANDS_BY_KEY["Ks"].wvl_um
-    w = selection.law_dense_weight(a)
-
-    def _kappa_g_law(law):
-        wave_um, opacity = selection._load_law_curve(law)
-        chi_g = np.interp(GAIA_G_PIVOT_UM, wave_um, opacity)
-        chi_ks = np.interp(ks_wvl, wave_um, opacity)
-        return float(chi_g / chi_ks)
-
-    kd = _kappa_g_law(selection.LAW_DIFFUSE)
-    kw = _kappa_g_law(selection.LAW_DENSE)
-    return (1.0 - w) * kd + w * kw
+    key = config.data_root
+    if key not in _REGISTER_KG_CACHE:
+        path = f"{config.data_root}/sed_models/registers/sps_register.hdf5"
+        with h5py.File(path, "r") as f:
+            models = f["models"]
+            kg_diffuse = float(np.median(np.asarray(models["KG_DRAINE"], dtype=np.float64)))
+            kg_dense = float(np.median(np.asarray(models["KG_WHITNEY"], dtype=np.float64)))
+        _REGISTER_KG_CACHE[key] = (kg_diffuse, kg_dense)
+    return _REGISTER_KG_CACHE[key]
 
 
 # ---------------------------------------------------------------------
@@ -569,7 +570,7 @@ def _weighted_hist(values, weights, edges):
 
 def _pixel_block(config, a_pix_blk, u_edges_blk, mass_blk, n_young_blk,
                   mass_grid, mass_weight, ks_abs_1myr, g_abs_1myr,
-                  mu, g_edges, ks_edges):
+                  mu, g_edges, ks_edges, k_g_diffuse, k_g_dense, r_diffuse, r_dense):
     """One block's `(N_G_YOUNG, N_KS_YOUNG)` and the 1 Myr Ks acceptance
     pieces, vectorised over every mass and every `u`-cell of every pixel
     in the block at once.
@@ -578,7 +579,6 @@ def _pixel_block(config, a_pix_blk, u_edges_blk, mass_blk, n_young_blk,
     u_mass = mass_blk                                             # sums to 1 per row (cloud-restricted)
 
     a_rep = a_pix_blk[:, None] * u_mid                            # (n_blk, n_u)
-    g_dimming = a_rep * kappa_g(config, a_rep)                    # (n_blk, n_u)
 
     weight = (n_young_blk[:, None, None] * mass_weight[None, :, None]
               * u_mass[:, None, :])                                # (n_blk, n_mass, n_u)
@@ -586,8 +586,13 @@ def _pixel_block(config, a_pix_blk, u_edges_blk, mass_blk, n_young_blk,
     ks_app_1myr = ks_abs_1myr + mu
     g_app_1myr = g_abs_1myr + mu
 
-    ks_obs_1myr = ks_app_1myr[None, :, None] + a_rep[:, None, :]
-    g_obs = g_app_1myr[None, :, None] + g_dimming[:, None, :]
+    # the ONE Gaia dimming law (module docstring, read audit R6 item 1):
+    # `anchor_tiles.magnitudes_at_extinction`, the same function and the
+    # same register coefficients the anchors' own predicted histogram
+    # uses, not a re-derived monochromatic ratio.
+    g_obs, ks_obs_1myr = anchor_tiles.magnitudes_at_extinction(
+        a_rep[:, None, :], g_app_1myr[None, :, None], ks_app_1myr[None, :, None],
+        k_g_diffuse, k_g_dense, r_diffuse, r_dense)
 
     p_g = anchor_tiles.gaia_detection_weight(g_obs)
     n_g, _, _ = _weighted_hist(g_obs, weight * p_g, g_edges)
@@ -639,6 +644,13 @@ def build_region(config, region):
         config, AGE_1MYR_GYR, mass_grid)[:, BAND_KEYS.index("Ks")]
     g_abs_1myr = gaia_abs_mag_grid(config, AGE_1MYR_GYR, mass_grid)
 
+    # the one Gaia dimming law (module docstring): the register's own
+    # band-integrated coefficients, the SAME `r_diffuse`/`r_dense`
+    # (A_K/A_V) construction `anchor_tiles.build` uses.
+    k_g_diffuse, k_g_dense = _register_kg_medians(config)
+    r_diffuse = float(selection.ak_per_av(config, 0.0))
+    r_dense = float(selection.ak_per_av(config, 1.0))
+
     n_pix = pixels.size
     starts = list(range(0, n_pix, PIXEL_BLOCK))
     blocks = Parallel(n_jobs=config.n_jobs)(
@@ -646,7 +658,7 @@ def build_region(config, region):
             config, a_pix[s:s + PIXEL_BLOCK], u_edges[s:s + PIXEL_BLOCK],
             mass[s:s + PIXEL_BLOCK], n_young_total[s:s + PIXEL_BLOCK],
             mass_grid, mass_weight, ks_abs_1myr, g_abs_1myr,
-            mu, g_edges, ks_edges)
+            mu, g_edges, ks_edges, k_g_diffuse, k_g_dense, r_diffuse, r_dense)
         for s in starts)
 
     n_g_young = np.concatenate([b[0] for b in blocks], axis=0) if blocks else \
