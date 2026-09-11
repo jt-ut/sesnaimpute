@@ -125,10 +125,10 @@ YSO_DISK_SHARE = 0.73
 YSO_CENSUS_GROUPS = (({"C0", "CI"}, YSO_PROTOSTAR_SHARE),
                       ({"CII", "TD"}, YSO_DISK_SHARE))
 
-#: The floor every 1-D library-density histogram (agb `tau` by chemistry,
-#: yso `population`'s `log10 f_ref,4.5,theta`) holds per bin before it is
-#: trusted as a density (spec sec 1.4: "bins wide enough to hold >= 20
-#: templates" / "floored at 20 templates").
+#: The floor yso `population`'s library-density histogram of
+#: `log10 f_ref,4.5,theta` holds per bin before it is trusted as a density
+#: (spec sec 1.4: "floored at 20 templates"). agb `tau` no longer uses
+#: this: its library is a grid, not a sample (see `agb_tau_ratio`).
 LIBRARY_DENSITY_MIN_COUNT = 20
 
 #: yso `population`'s census and library brightness histograms' nominal
@@ -174,31 +174,6 @@ def _fixed_width_binned_density(x, bin_width, min_count):
     widths = np.diff(merged_edges)
     density = merged_counts / widths
     centers = 0.5 * (merged_edges[:-1] + merged_edges[1:])
-    return np.interp(x, centers, density, left=density[0], right=density[-1])
-
-
-def _equal_count_binned_density(x, min_count):
-    """The library's density of templates in `x` (spec sec 1.4): bins as
-    wide as needed to hold `min_count` templates each (equal-count bins
-    from `x`'s own sorted values, the trailing remainder folded into the
-    last full bin), density = count / bin width, linearly interpolated at
-    each of `x`'s own values (constant beyond the outermost bin centre)."""
-    n = x.size
-    order = np.argsort(x)
-    xs = x[order]
-    n_bins = max(1, n // min_count)
-    groups = np.array_split(np.arange(n), n_bins)
-    edges = [xs[0]]
-    counts = []
-    for grp in groups:
-        counts.append(grp.size)
-        edges.append(xs[grp[-1]])
-    edges = np.asarray(edges, dtype=np.float64)
-    counts = np.asarray(counts, dtype=np.float64)
-    widths = np.diff(edges)
-    widths = np.where(widths > 0, widths, np.finfo(np.float64).eps)
-    density = counts / widths
-    centers = 0.5 * (edges[:-1] + edges[1:])
     return np.interp(x, centers, density, left=density[0], right=density[-1])
 
 
@@ -852,22 +827,36 @@ def build_sps(config, region):
 
 def agb_tau_ratio(config):
     """`(names, chem, log10_tau, ratio)` in the agb register's own row
-    order (spec sec 1.4, sec 5.2, owner's ruling 2026-09-09): Riebel et
-    al. 2012's distribution of fitted optical depth BY CHEMISTRY,
-    `p_chem(tau)`, evaluated at each template's own `tau`, divided by the
-    library's density of templates in `tau` FOR THAT CHEMISTRY
-    (`_equal_count_binned_density`, bins wide enough to hold
-    `LIBRARY_DENSITY_MIN_COUNT` templates, never `RHO_KDE1`). `ratio`
-    carries no chemistry-mix admixture: `build_agb`'s `tau` factor
-    applies `(1-F_C) f_dusty,O` / `F_C f_dusty,C` on top of it (the
-    class-wide statement, mixing both chemistries into one factor, the
-    same O:C weight the shape/density/atlas stages put on the population,
-    `population.star_population`/`bmstp.sample_star`);
-    `bmstp.atlas._agb_shell_pool`'s
-    per-chemistry Monte Carlo pool does not, since `sample_star.
-    sample_agb` has already resolved which chemistry a given draw is.
-    Shared by both rather than re-derived, so the Riebel fit and the
-    density construction live in exactly one place."""
+    order (spec sec 1.4, sec 5.2, owner's ruling 2026-09-09).
+
+    The library's `tau` is a GRID (32 distinct values over the 925
+    O-rich templates, 20 over the 1055 C-rich), not a sample, so it is
+    treated as one: per chemistry, the library's own distinct `log10 tau`
+    values partition the axis into cells (the midpoints between
+    neighbouring distinct values; the two end cells stop at the
+    library's own range edges, never extrapolated past them), and
+    Riebel et al. 2012's OBSERVED distribution of fitted optical depth --
+    its per-star fits taken as the prior, with no density model fitted
+    to them -- is integrated over each cell: the fraction of that
+    chemistry's Riebel fits whose `tau` falls in it. A cell past
+    Riebel's own observed range carries none of that mass, by
+    construction (its distinct `tau` is outside what was ever observed);
+    an equal-count density estimator on this same discrete grid instead
+    put 15 of 46 O-rich and 33 of 52 C-rich bins at zero width, collapsing
+    the weight onto a handful of templates (`read_audit_R10.md` B5). Each
+    cell's mass is shared equally among the templates sitting at its
+    distinct `tau` (spec sec 1.4's `p_C(q)` divided by the count of
+    templates at that `q`, in place of a continuous density). `ratio` is
+    then normalised WITHIN EACH CHEMISTRY to sum to 1, so that
+    `build_agb`'s per-chemistry mix weights land on a clean pool of unit
+    mass each and the class-wide O:C mix they realise is the one the
+    attributes state, by construction, rather than `S_O/S_C`-distorted
+    (`read_audit_R10.md` B5's discrepancy 1, a factor 0.520 off).
+    `bmstp.atlas._agb_shell_pool`'s per-chemistry Monte Carlo pool does
+    not use this: `sample_star.sample_agb` has already resolved which
+    chemistry a given draw is. Shared by both rather than re-derived, so
+    the Riebel fit and the density construction live in exactly one
+    place."""
     reg = _read_register(config, "agb")
     names = reg["names"]
     n_model = names.size
@@ -885,18 +874,20 @@ def agb_tau_ratio(config):
 
     gcl, riebel_tau = star_population.read_riebel_optical_depths(config)
     log10_tau = np.log10(tau)
-    edges = np.linspace(-3.0, 2.0, 61)
     ratio = np.zeros(n_model, dtype=np.float64)
     for label, riebel_key in (("O", "o"), ("C", "c")):
         sel = chem == label
         if not np.any(sel):
             continue
+        tau_u, inverse, counts = np.unique(log10_tau[sel], return_inverse=True,
+                                            return_counts=True)
+        cell_mids = 0.5 * (tau_u[:-1] + tau_u[1:])
+        cell_edges = np.concatenate(([tau_u[0]], cell_mids, [tau_u[-1]]))
         log10_tau_riebel = np.log10(riebel_tau[gcl == riebel_key])
-        h, _ = np.histogram(log10_tau_riebel, bins=edges, density=True)
-        centers = 0.5 * (edges[:-1] + edges[1:])
-        p_chem = np.interp(log10_tau[sel], centers, h, left=0.0, right=0.0)
-        n_chem = _equal_count_binned_density(log10_tau[sel], LIBRARY_DENSITY_MIN_COUNT)
-        ratio[sel] = p_chem / n_chem
+        cell_mass = (np.histogram(log10_tau_riebel, bins=cell_edges)[0]
+                     / log10_tau_riebel.size)
+        ratio_at_tau = cell_mass / counts
+        ratio[sel] = ratio_at_tau[inverse] / np.sum(ratio_at_tau[inverse])
     return names, chem, log10_tau, ratio
 
 
@@ -930,9 +921,14 @@ def build_agb(config, region):
         # for carbon-rich -- not the bare carbon fraction alone, since
         # each chemistry's own dusty share is unequal (Riebel+2012, two
         # different fitted floors).
+        is_o, is_c = chem == "O", chem == "C"
+        pool_sum_o = float(ratio[is_o].sum())
+        pool_sum_c = float(ratio[is_c].sum())
+        n_nonzero_o = int(np.sum(ratio[is_o] > 0.0))
+        n_nonzero_c = int(np.sum(ratio[is_c] > 0.0))
         p_mix = np.where(chem == "O", (1.0 - f_c) * f_dusty_o * ratio, f_c * f_dusty_c * ratio)
-        n_template_o = int(np.sum(chem == "O"))
-        n_template_c = int(np.sum(chem == "C"))
+        n_template_o = int(np.sum(is_o))
+        n_template_c = int(np.sum(is_c))
         gcl, _riebel_tau = star_population.read_riebel_optical_depths(config)
         n_riebel_o = int(np.sum(gcl == "o"))
         n_riebel_c = int(np.sum(gcl == "c"))
@@ -950,13 +946,20 @@ def build_agb(config, region):
         path = _write_library(config, "agb", "region", names, c_theta, log10_f45_centers, factors,
                                region=region)
         col_sum = tau_w.sum(axis=0)
-        oc_mix_new = ((1.0 - f_c) * f_dusty_o) / (f_c * f_dusty_c)
-        oc_mix_old = (1.0 - f_c) / f_c
+        # the check the spec's rule asks for: the mix REALISED by the
+        # finished table (post-floor, from the written factor itself)
+        # against the mix the attributes state.
+        realised_co = float(tau_w[is_c, 0].sum() / tau_w[is_o, 0].sum())
+        attrs_co = (f_c * f_dusty_c) / ((1.0 - f_c) * f_dusty_o)
         print(f"template_weights.agb [{region}]: n_riebel_o={n_riebel_o} n_riebel_c={n_riebel_c} "
-              f"n_template_o={n_template_o} n_template_c={n_template_c} max|colsum-1|="
-              f"{float(np.max(np.abs(col_sum - 1.0))):.3g} floored_fraction={frac_zero:.4f} "
+              f"n_template_o={n_template_o} n_template_c={n_template_c} "
+              f"nonzero_o={n_nonzero_o}/{n_template_o} nonzero_c={n_nonzero_c}/{n_template_c} "
+              f"pool_sum_o(post-normalisation)={pool_sum_o:.6f} pool_sum_c={pool_sum_c:.6f} "
+              f"max|colsum-1|={float(np.max(np.abs(col_sum - 1.0))):.3g} "
+              f"floored_fraction={frac_zero:.4f} "
               f"F_C={f_c:.4f} F_DUSTY_O={f_dusty_o:.4f} F_DUSTY_C={f_dusty_c:.4f} "
-              f"O:C mix ratio old(F_C only)={oc_mix_old:.4f} new(with dusty shares)={oc_mix_new:.4f} "
+              f"C:O mix realised(from finished table)={realised_co:.4f} "
+              f"vs attributes' F_C*F_DUSTY_C/((1-F_C)*F_DUSTY_O)={attrs_co:.4f} "
               f"C_THETA range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
               f"max={c_theta.max():.4f}",
               flush=True)
