@@ -54,7 +54,8 @@ SHAPES_ROW2 = (
 ATLAS_INTRINSIC_CLASS = (
     "Class panels: P(C | sky pixel) = A_C(pixel) / sum over classes of "
     "A(pixel) -- the prior probability that a source in this sky pixel is of "
-    "class C, before the survey's selection.")
+    "class C, before the survey's selection, drawn on a log scale from 10^-4 "
+    "to 1.")
 ATLAS_INTRINSIC_TOTAL = (
     "Density panel: sum over classes of A_C(pixel), per square degree -- the "
     "prior's sky density of sources, before the survey's selection.")
@@ -62,7 +63,7 @@ ATLAS_SELECTION_CLASS = (
     "Class panels: P(C | sky pixel, catalogued) = N_C(pixel) / sum over classes "
     "of N(pixel), with N_C the prior's density of catalogued sources of class C "
     "-- the prior probability that a catalogued source in this sky pixel is of "
-    "class C.")
+    "class C, drawn on a log scale from 10^-4 to 1.")
 ATLAS_SELECTION_TOTAL = (
     "Density panel: sum over classes of N_C(pixel), per square degree -- the "
     "prior's sky density of catalogued sources.")

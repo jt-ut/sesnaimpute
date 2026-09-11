@@ -76,7 +76,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
-from matplotlib.colors import LogNorm, Normalize
+from matplotlib.colors import LogNorm
 from matplotlib.ticker import FuncFormatter, LogLocator, MaxNLocator, NullFormatter
 from scipy.ndimage import gaussian_filter
 
@@ -88,6 +88,14 @@ from sesnaimpute.atlas import captions
 
 NSIDE = 512
 CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
+
+#: The floor of the class panels' shared log colour scale: a class
+#: probability spans decades on the sky (Orion A's intrinsic view has
+#: YSO running 1e-5 to 0.03 while GAL sits at 0.7), so a linear 0-1 bar
+#: shows nothing of the low-share classes; every value at or below this
+#: floor is clipped to it before the log norm is applied, painting it
+#: the scale's bottom colour rather than masking it as non-positive.
+CLASS_PROB_FLOOR = 1.0e-4
 
 #: The display grid's own pixel size (sec. 8: "the 1' grid of the
 #: current atlas").
@@ -481,11 +489,12 @@ CAPTION_CHARS_PER_IN = 15.0
 
 
 def _prob_norm():
-    """A fixed linear 0-1 scale for a class panel's `P(C | ...)` colour
-    bar (the rules' "linear 0-1 scale"), the same on the intrinsic and
-    the selection page, so the two pages' class panels read on one scale
-    rather than each auto-ranging to its own pixel's max share."""
-    return Normalize(vmin=0.0, vmax=1.0)
+    """A fixed logarithmic scale, `CLASS_PROB_FLOOR` to 1, for a class
+    panel's `P(C | ...)` colour bar, the same on the intrinsic and the
+    selection page, so the six class panels of both pages compare
+    directly rather than each auto-ranging to its own pixel's max
+    share."""
+    return LogNorm(vmin=CLASS_PROB_FLOOR, vmax=1.0)
 
 
 #: The two prior pages differ only in which stored quantity feeds the
@@ -603,7 +612,13 @@ def _build_prior_page(config, region, formats, view):
         # pixel's max, so the six panels compare directly.
         def _class_panel(cls):
             idx = CLASSES.index(cls)
-            return dict(data=share_grids[idx], cmap="viridis", norm=_prob_norm(), title=cls,
+            # Clipped to the log scale's own floor (`CLASS_PROB_FLOOR`)
+            # rather than passed raw: a zero or sub-floor share is
+            # non-positive or off the LogNorm's range and would
+            # otherwise be masked as invalid instead of painted the
+            # scale's bottom colour.
+            data = np.clip(share_grids[idx], CLASS_PROB_FLOOR, 1.0)
+            return dict(data=data, cmap="viridis", norm=_prob_norm(), title=cls,
                         cbar_label=plot_style.label(spec["class_cbar_label"], None), hatch=None)
 
         col_panel = dict(data=col_grid, cmap="magma", norm=_log_norm(col_grid),
@@ -618,18 +633,37 @@ def _build_prior_page(config, region, formats, view):
                   density_panel, _class_panel("STAR"), _class_panel("AGB"), _class_panel("H2S")]
         n_panels = len(panels)
 
-        # The selection page's one Monte Carlo error line: the atlas's
-        # `N_CAT_C`/`TOTAL_PREDICTED` come from a Monte Carlo sample, so
-        # the product carries `TOTAL_PREDICTED_MC_ERROR` beside it; the
-        # intrinsic page carries no such line, since `INTENSITY_C` is a
-        # deterministic sum with no sampling error.
-        mc_line = None
+        # The selection page's own caption lines, in addition to the
+        # shared class/total statements: the Monte Carlo error on the
+        # region total (`N_CAT_C`/`TOTAL_PREDICTED` come from a Monte
+        # Carlo sample, so the intrinsic page's deterministic
+        # `INTENSITY_C` carries no such line), the predicted/observed
+        # ratio, the surveyed area, the bright-end ratio (sec. 9's check
+        # above 3x/10x the pixel's own I2 50% limit) and the per-class
+        # total-count ratio -- each its own line here rather than in the
+        # suptitle, which has no room for them on a narrow region.
+        extra_lines = []
         if view == "selection":
             total_predicted = float(prior["attrs"].get("TOTAL_PREDICTED", np.nan))
+            total_observed = float(prior["attrs"].get("TOTAL_OBSERVED", np.nan))
+            surveyed_area = float(prior["attrs"].get("SURVEYED_AREA_DEG2", np.nan))
             mc_error = float(prior["attrs"].get("TOTAL_PREDICTED_MC_ERROR", np.nan))
             mc_pct = 100.0 * mc_error / total_predicted if total_predicted else float("nan")
-            mc_line = ("Monte Carlo error on the region total: +/- %.4g (%.2f%%)"
-                       % (mc_error, mc_pct))
+            ratio_po = total_predicted / total_observed if total_observed else float("nan")
+            bright3 = float(prior["attrs"].get("RATIO_BRIGHT3", np.nan))
+            bright10 = float(prior["attrs"].get("RATIO_BRIGHT10", np.nan))
+            ratios = [(cls, float(prior["attrs"].get("RATIO_%s" % cls, np.nan))) for cls in CLASSES]
+            area_label = plot_style.label("surveyed area", "deg$^{2}$")
+            extra_lines.append("Monte Carlo error on the region total: +/- %.4g (%.2f%%)"
+                                % (mc_error, mc_pct))
+            extra_lines.append("Predicted/observed = %.4g/%.4g = %.3f"
+                                % (total_predicted, total_observed, ratio_po))
+            extra_lines.append("%s = %.4g" % (area_label, surveyed_area))
+            extra_lines.append("Bright-end total-count ratio: bright3 = %.3f, bright10 = %.3f"
+                                % (bright3, bright10))
+            extra_lines.append("Per-class total-count ratio: " + ", ".join(
+                "%s %.3g" % (cls, ratio) for cls, ratio in ratios)
+                + "; white contour: surveyed IRAC coverage = 0.5")
 
         # The panel grid is sized to the fixed 4x2 layout's content
         # first; the caption block (below the grid) then grows the
@@ -637,7 +671,8 @@ def _build_prior_page(config, region, formats, view):
         # never shrinks to make room.
         aspect = geom_grid["n_x"] / float(geom_grid["n_y"])
         page_w, page_h, geom = _atlas_page_size(aspect)
-        caption_text, caption_h = _caption_layout(_caption_block(view, extra_line=mc_line), page_w)
+        extra_block = "\n".join(extra_lines) if extra_lines else None
+        caption_text, caption_h = _caption_layout(_caption_block(view, extra_line=extra_block), page_w)
         page_h_total = page_h + caption_h
         cols = geom["cols"]
         last_row_of_col = _outer_rows(n_panels, cols)
@@ -665,31 +700,11 @@ def _build_prior_page(config, region, formats, view):
         fig.text(MARGIN_LEFT_IN / page_w, (caption_h - CAPTION_TOP_PAD_IN) / page_h_total,
                   caption_text, fontsize=CAPTION_FONT_SIZE, va="top", ha="left")
 
-        # The predicted/observed ratio and the bright-source ratios
-        # describe the survey's selection, so they sit only on the
-        # selection page's caption line; the intrinsic page's suptitle
-        # names the region alone.
-        if view == "selection":
-            total_observed = float(prior["attrs"].get("TOTAL_OBSERVED", np.nan))
-            surveyed_area = float(prior["attrs"].get("SURVEYED_AREA_DEG2", np.nan))
-            ratio_po = total_predicted / total_observed if total_observed else float("nan")
-            # sec. 9's bright-end check: the same total-count ratio above
-            # 3x/10x the pixel's own I2 50% limit, where completeness is
-            # 1 on both the catalog and the model side (`bmstp.atlas`).
-            bright3 = float(prior["attrs"].get("RATIO_BRIGHT3", np.nan))
-            bright10 = float(prior["attrs"].get("RATIO_BRIGHT10", np.nan))
-            ratios = [(cls, float(prior["attrs"].get("RATIO_%s" % cls, np.nan))) for cls in CLASSES]
-            ratio_line = ("total-count ratio: " + ", ".join(
-                "%s %.3g" % (cls, ratio) for cls, ratio in ratios)
-                + "; white contour: surveyed IRAC coverage = 0.5")
-            area_label = plot_style.label("surveyed area", "deg$^{2}$")
-            title = ("%s -- predicted/observed = %.4g/%.4g = %.3f, %s = %.4g, "
-                      "bright3 = %.3f, bright10 = %.3f"
-                      % (region, total_predicted, total_observed, ratio_po, area_label, surveyed_area,
-                         bright3, bright10))
-            title = title + "\n" + ratio_line
-        else:
-            title = "%s -- prior atlas, intrinsic view" % region
+        # The suptitle carries only the region and the view: it has no
+        # room on a narrow region's own aspect for the region-scale
+        # numbers above, which is why those now live in the caption
+        # block instead.
+        title = "%s -- prior atlas, %s view" % (region, view)
         fig.suptitle(title, fontsize=11, y=1.0 - 0.10 / page_h_total)
 
         out_dir = os.path.join(config.data_root, "bmstp", "atlas", "figures")
