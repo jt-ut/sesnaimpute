@@ -10,7 +10,7 @@ import textwrap
 #: (term, definition); the pages print them as one block.
 VOCABULARY = (
     ("source position s",
-     "a catalogued source's sky position, with its own sightline column A_s "
+     "a cataloged source's sky position, with its own sightline column A_s "
      "(the extinction through the whole sightline, in A_K magnitudes) and its "
      "own detection limits"),
     ("scaled extinction x",
@@ -23,6 +23,10 @@ VOCABULARY = (
      "1/32 dex in log10 x by 0.1 dex in log10 $F_{4.5}$; every cell has the same area"),
     ("sky pixel",
      "one HEALPix nside-512 pixel of the atlas (6.9 arcmin on a side)"),
+    ("IRAC footprint",
+     "the fraction of a sky pixel's area the IRAC catalog covers (COVERAGE: "
+     "the fraction of its sixteen nside-2048 sub-pixels holding a cataloged "
+     "source with an IRAC detection)"),
     ("class C",
      "one of STAR, AGB, PAHC, YSO, H2S, GAL"),
     ("intensity A_C(s)",
@@ -34,11 +38,11 @@ VOCABULARY = (
      "interval of log10 x is a dex whether or not x carries a unit)"),
     ("weight factor f_C($F_{4.5}$; s)",
      "the template-weight factor of class C at that flux (1 for a class whose "
-     "factors are normalised over its templates)"),
+     "factors are normalized over its templates)"),
     ("prior density Lambda_C",
      "Lambda_C(x, $F_{4.5}$; s) = A_C(s) h_C(x, $F_{4.5}$) f_C($F_{4.5}$; s), "
      "the density the fitter compares between classes"),
-    ("catalogued",
+    ("cataloged",
      "passing the survey's selection at the sky pixel: two of the eight bands "
      "measured above the pixel's limits"),
 )
@@ -47,7 +51,7 @@ VOCABULARY = (
 SHAPES_ROW1 = (
     "Row 1, per class: P(C, cell | s) = Lambda_C(cell) / sum over classes and "
     "cells of Lambda(cell) -- the prior probability that a source at s is of "
-    "class C AND lies in the parameter cell at (x, F_4.5). One log colour "
+    "class C AND lies in the parameter cell at (x, F_4.5). One log color "
     "scale for all six panels, so the panels compare cell by cell.")
 SHAPES_ROW2 = (
     "Row 2, per class: P(C | cell, s) = Lambda_C(cell) / sum over classes of "
@@ -68,13 +72,14 @@ ATLAS_INTRINSIC_TOTAL = (
     "sky pixel's own 50% completeness limit (the depth grid, from the "
     "sources' own IRAC limits).")
 ATLAS_SELECTION_CLASS = (
-    "Class panels: P(C | sky pixel, catalogued) = N_C(pixel) / sum over classes "
-    "of N(pixel), with N_C the prior's density of catalogued sources of class C "
-    "-- the prior probability that a catalogued source in this sky pixel is of "
+    "Class panels: P(C | sky pixel, cataloged) = N_C(pixel) / sum over classes "
+    "of N(pixel), with N_C the prior's density of cataloged sources of class C "
+    "-- the prior probability that a cataloged source in this sky pixel is of "
     "class C, drawn on a log scale from 10^-4 to 1.")
 ATLAS_SELECTION_TOTAL = (
     "Density panel: sum over classes of N_C(pixel), per square degree -- the "
-    "prior's sky density of catalogued sources.")
+    "prior's sky density of cataloged sources; the white outline marks the "
+    "IRAC footprint at one half.")
 
 
 def vocabulary_block():

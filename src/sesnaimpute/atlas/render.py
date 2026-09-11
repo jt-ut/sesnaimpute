@@ -433,16 +433,32 @@ def _panel_colorbar(fig, ax, im, label=None, log=False):
     """The panel's own colour bar, inset into its own right edge and
     spanning exactly its height -- axes coordinates work for WCSAxes, so
     no free-floating bar rectangle is needed for either atlas page.
-    `log`, for a `LogNorm`-scaled panel, ticks DECADES ONLY:
-    a linear `%.2g` formatter left the log axis's own automatic
+    `log`, for a `LogNorm`-scaled panel, ticks DECADES ONLY when at
+    least two decade ticks fall in the mappable's own range: a linear
+    `%.2g` formatter left the log axis's own automatic
     scientific-notation MINOR ticks in place, one of which ran off the
-    bar."""
+    bar. A panel whose range spans less than a decade would otherwise
+    show no labelled tick at all (a class held in one narrow decade,
+    e.g. an intrinsic YSO share); there, intermediate (non-base) ticks
+    are labelled too, so every colour bar carries at least two labelled
+    values (owner's ruling 2026-09-11, second addendum item 1)."""
     cax = ax.inset_axes([1.02, 0.0, 0.04, 1.0])
     cbar = fig.colorbar(im, cax=cax)
     if log:
-        cbar.locator = LogLocator(base=10.0)
-        cbar.ax.yaxis.set_minor_formatter(NullFormatter())
-        cbar.ax.tick_params(which="minor", length=0)
+        vmin, vmax = im.norm.vmin, im.norm.vmax
+        # `LogLocator.tick_values` pads its candidates to the decades
+        # bracketing the range, so most are clipped off the bar at draw
+        # time -- only those actually inside [vmin, vmax] are what the
+        # reader sees.
+        candidates = LogLocator(base=10.0).tick_values(vmin, vmax) if vmin and vmax else np.array([])
+        n_decade_ticks = int(np.sum((candidates >= vmin) & (candidates <= vmax))) if candidates.size else 0
+        if n_decade_ticks >= 2:
+            cbar.locator = LogLocator(base=10.0)
+            cbar.ax.yaxis.set_minor_formatter(NullFormatter())
+            cbar.ax.tick_params(which="minor", length=0)
+        else:
+            cbar.locator = LogLocator(base=10.0, subs=np.arange(1, 10))
+            cbar.formatter = FuncFormatter(lambda v, _pos: "%.2g" % v)
     else:
         cbar.locator = MaxNLocator(nbins=3)
         cbar.formatter = FuncFormatter(lambda v, _pos: "%.2g" % v)
@@ -523,7 +539,7 @@ VIEWS = {
     ),
     "selection": dict(
         density_label="Prior Selection Density",
-        class_cbar_label="P(C | pixel, catalogued)",
+        class_cbar_label="P(C | pixel, cataloged)",
         class_caption=captions.ATLAS_SELECTION_CLASS,
         total_caption=captions.ATLAS_SELECTION_TOTAL,
         coverage_outline=True,
@@ -646,11 +662,12 @@ def _build_prior_page(config, region, formats, view):
         # shared class/total statements: the Monte Carlo error on the
         # region total (`N_CAT_C`/`TOTAL_PREDICTED` come from a Monte
         # Carlo sample, so the intrinsic page's deterministic
-        # `N_ABOVE_C` carries no such line), the predicted/observed
-        # ratio, the surveyed area, the bright-end ratio (sec. 9's check
-        # above 3x/10x the pixel's own I2 50% limit) and the per-class
-        # total-count ratio -- each its own line here rather than in the
-        # suptitle, which has no room for them on a narrow region.
+        # `N_ABOVE_C` carries no such line), the total-count check, the
+        # surveyed area and the per-class total-count ratio -- each its
+        # own line here rather than in the suptitle, which has no room
+        # for them on a narrow region. `bright3`/`bright10` stay in the
+        # product and the stage's own log, off this page (owner's
+        # ruling 2026-09-11, second addendum item 4).
         extra_lines = []
         if view == "selection":
             total_predicted = float(prior["attrs"].get("TOTAL_PREDICTED", np.nan))
@@ -659,20 +676,22 @@ def _build_prior_page(config, region, formats, view):
             mc_error = float(prior["attrs"].get("TOTAL_PREDICTED_MC_ERROR", np.nan))
             mc_pct = 100.0 * mc_error / total_predicted if total_predicted else float("nan")
             ratio_po = total_predicted / total_observed if total_observed else float("nan")
-            bright3 = float(prior["attrs"].get("RATIO_BRIGHT3", np.nan))
-            bright10 = float(prior["attrs"].get("RATIO_BRIGHT10", np.nan))
             ratios = [(cls, float(prior["attrs"].get("RATIO_%s" % cls, np.nan))) for cls in CLASSES]
             area_label = plot_style.label("surveyed area", "deg$^{2}$")
             extra_lines.append("Monte Carlo error on the region total: +/- %.4g (%.2f%%)"
                                 % (mc_error, mc_pct))
-            extra_lines.append("Predicted/observed = %.4g/%.4g = %.3f"
-                                % (total_predicted, total_observed, ratio_po))
+            # The total-count check (sec. 8, sec. 9): the prior's own
+            # normalization against the survey's count, notated exactly
+            # as the owner's ruling states (second addendum item 5).
+            extra_lines.append(
+                "$N_{prior} / N_{catalog}$ = %.3f: the prior's expected number of cataloged "
+                "sources in the region (the selection densities summed over the sky pixels, "
+                "times the surveyed area) against the number of sources in the catalog -- the "
+                "check that the prior's normalization reproduces the survey's count; the "
+                "observations enter here only as that check." % ratio_po)
             extra_lines.append("%s = %.4g" % (area_label, surveyed_area))
-            extra_lines.append("Bright-end total-count ratio: bright3 = %.3f, bright10 = %.3f"
-                                % (bright3, bright10))
             extra_lines.append("Per-class total-count ratio: " + ", ".join(
-                "%s %.3g" % (cls, ratio) for cls, ratio in ratios)
-                + "; white contour: surveyed IRAC coverage = 0.5")
+                "%s %.3g" % (cls, ratio) for cls, ratio in ratios))
 
         # The panel grid is sized to the fixed 4x2 layout's content
         # first; the caption block (below the grid) then grows the
@@ -839,7 +858,7 @@ def build_posterior_region(config, region, formats):
         two_band_frac = _two_band_fraction(config, region)
         title = ("%s -- posterior atlas: N($P$(YSO)$>$0.5) = %d, two-band fraction = %.3f"
                   % (region, n_yso_total, two_band_frac))
-        fig.suptitle(title + "\ngrey: no sources in pixel", fontsize=11, y=1.0 - 0.10 / page_h)
+        fig.suptitle(title + "\ngray: no sources in pixel", fontsize=11, y=1.0 - 0.10 / page_h)
 
         out_dir = os.path.join(config.data_root, "fittp", "atlas", "figures")
         os.makedirs(out_dir, exist_ok=True)
