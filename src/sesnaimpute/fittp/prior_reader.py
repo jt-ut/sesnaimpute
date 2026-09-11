@@ -198,15 +198,45 @@ def prepare(reader, rows):
     return h
 
 
-def peak_density(reader, rows, h):
-    """This class's own `A_C(s) * max_cell h_s(cell) / (dlx * dlb)`
+def grain_peaks(reader):
+    """`(n_grain,)`: this class's own raw, UNBLURRED shape's peak cell over
+    the support (`grid.N_X_SUPPORT`), one per grain (tile, sightline, or
+    the single GAL row) -- `reader.grid_all` is already whole in memory
+    (`load`'s own read), so this is one array max, no second file read and
+    no per-source blur. `peak_density`/`common_floor` below use it as the
+    stored, cheap stand-in for the per-source blurred peak (blurring only
+    ever spreads a cell's mass thinner, so this is a safe, if slightly
+    conservative, upper bound on it)."""
+    return reader.grid_all[:, :grid.N_X_SUPPORT, :].reshape(
+        reader.grid_all.shape[0], -1).max(axis=1).astype(np.float64)
+
+
+def factor_peak(reader):
+    """The scalar `max` over every `(theta, k, F)` of this class's own
+    template-weight factor tables (P5's `PI_f`, section 4.1) -- `1.0`
+    where a class carries none (`f_C` identically 1). One of the three
+    per-class terms `Lambda_C(cell; s) = A_C(s) h_C f_C` factors into
+    (ruling 2), off `reader.factors`, already whole in memory."""
+    peak = 1.0
+    for f in reader.factors:
+        peak = max(peak, float(f["W"].max()))
+    return peak
+
+
+def peak_density(reader, rows, peaks=None, peak_f=None):
+    """This class's own `A_C(s) * grain_peak * factor_peak / (dlx * dlb)`
     (`n,`): the per-source, per-class peak cell density `common_floor`
-    maxes over classes to form `Lambda_floor(s)` (ruling 2) -- `h` is
-    `prepare`'s own blurred, support-zeroed, sum-to-one grid for the same
-    rows in the same order."""
-    density = reader.density[np.asarray(rows)]
-    peak_h = h.reshape(h.shape[0], -1).max(axis=1).astype(np.float64)
-    return density * (peak_h / (reader.dlx * reader.dlb))
+    maxes over classes to form `Lambda_floor(s)` (ruling 2). `peaks`
+    (`grain_peaks(reader)`) and `peak_f` (`factor_peak(reader)`) are
+    accepted pre-computed so a caller forming this for every class up
+    front (`fittp.sweep`'s first pass) pays for each class's grid and
+    factor tables once, not once per batch."""
+    rows = np.asarray(rows)
+    density = reader.density[rows]
+    peaks = grain_peaks(reader) if peaks is None else peaks
+    peak_f = factor_peak(reader) if peak_f is None else peak_f
+    grain_peak = peaks[reader.grain[rows]]
+    return density * grain_peak * peak_f / (reader.dlx * reader.dlb)
 
 
 def common_floor(peaks):

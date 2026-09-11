@@ -203,13 +203,16 @@ def _flux_moments_topk_kernel(log10_flux, p_theta, sorted_order, rank_position,
 
 
 def _block_result(config, region, cls, reader, gaia_term, template_log, subclass_idx,
-                   n_sub, width_dex, topk, start, stop, timing):
+                   n_sub, width_dex, topk, start, stop, timing, lambda_floor):
     """One block's own P7 rows (section 1.3): the fit, the prior read, the
     per-source Gaia term, the fold to `ln w_theta`, the evidence-weighted
     flux moments and the top-K record -- one `(n_block, n_model[, 8])`
     working set, discarded on return. `timing` accumulates this block's
     own wall time by stage (rule 17's per-{region, class} split).
-    """
+    `lambda_floor` is the REGION's own `Lambda_floor(s)` (owner's ruling
+    2026-09-11, `build`'s first pass, common to every class), sliced here
+    to this block's rows -- this class's read floors at its own share of
+    it, never a floor of its own."""
     n_model = template_log.shape[0]
     t = time.perf_counter()
     flux, sigma, origin = _catalog_block(config, region, start, stop)
@@ -229,7 +232,7 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
     slope_log10b_per_ak = -2.0 * batch.slope_sc_av / batch.ak_per_av
     ln_lambda = prior_reader.ln_prior(reader, rows, h, fit.a_hat, fit.log10_b_hat,
                                        slope_log10b_per_ak, batch.sigma_a_ak,
-                                       np.arange(n_model))
+                                       np.arange(n_model), lambda_floor[start:stop])
     timing["ln_prior"] += time.perf_counter() - t
 
     ln_l = -0.5 * fit.chi2_min.astype(np.float64) + fit.ln_nondet.astype(np.float64)
@@ -372,11 +375,12 @@ def _part_path(path, bi):
 
 
 def _batch_result(config, region, cls, reader, gaia_term, template_log, subclass_idx,
-                   n_sub, width_dex, topk, block, bstart, bstop, timing):
+                   n_sub, width_dex, topk, block, bstart, bstop, timing, lambda_floor):
     """One batch's own P7 rows, `[bstart, bstop)`, folded block by block
     (rule 10b): a batch-sized array, never a region-sized one. `timing`
-    accumulates this batch's wall time by stage.
-    """
+    accumulates this batch's wall time by stage. `lambda_floor` is the
+    region's own common floor (`build`'s first pass), passed through to
+    each block's read."""
     m = bstop - bstart
     ln_evidence = np.empty((m, n_sub), dtype=np.float32)
     flux_mean = np.empty((m, N_BANDS), dtype=np.float32)
@@ -398,7 +402,8 @@ def _batch_result(config, region, cls, reader, gaia_term, template_log, subclass
     for start in range(bstart, bstop, block):
         stop = min(start + block, bstop)
         r = _block_result(config, region, cls, reader, gaia_term, template_log,
-                           subclass_idx, n_sub, width_dex, topk, start, stop, timing)
+                           subclass_idx, n_sub, width_dex, topk, start, stop, timing,
+                           lambda_floor)
         sl = slice(start - bstart, stop - bstart)
         ln_evidence[sl] = r["ln_evidence"]
         flux_mean[sl] = r["flux_mean"]
@@ -441,7 +446,30 @@ def _write_part(part_path, batch):
             f.create_dataset(key, data=batch[field])
 
 
-def build_region_class(config, region, cls, st, limit=None):
+def region_lambda_floor(config, region):
+    """`(readers, lambda_floor)`, the FIRST PASS `build` runs once per
+    region, before any class's own read (owner's ruling 2026-09-11):
+    `readers[cls] = prior_reader.load(config, region, cls)` for every one
+    of the six classes -- ALWAYS all six, regardless of which classes this
+    run will actually sweep, since `Lambda_floor(s)` is a max over all of
+    them -- and `lambda_floor = prior_reader.common_floor(peaks)`,
+    `peaks[cls] = prior_reader.peak_density(readers[cls], arange(n_source))`
+    off each reader's own already-loaded, unblurred grid and factor
+    tables (`grain_peaks`/`factor_peak`), common by construction to every
+    class at a source. `readers` is returned so `build` hands the SAME
+    loaded `Prior` to `build_region_class` below: the grids are read
+    exactly once per class, never a second time for the floor and again
+    for the class's own sweep."""
+    peaks = []
+    readers = {}
+    for cls in CLASSES:
+        reader = prior_reader.load(config, region, cls)
+        readers[cls] = reader
+        peaks.append(prior_reader.peak_density(reader, np.arange(reader.density.size)))
+    return readers, prior_reader.common_floor(peaks)
+
+
+def build_region_class(config, region, cls, st, reader, lambda_floor, limit=None):
     """Sweeps one {region, class}'s whole region (or, with `limit`, its
     first `limit` catalogue rows only -- a timing/acceptance device, never
     a default) in batches of `[fit] batch_size`, each batch in blocks of
@@ -449,11 +477,13 @@ def build_region_class(config, region, cls, st, limit=None):
     DRAFT.md section 4 row 2.4). Each batch's own rows are written
     straight to their own part file (rule 10b); the caller joins the
     parts once every batch is done. Returns the part file list and the
-    summary numbers for the caller's join and report.
+    summary numbers for the caller's join and report. `reader` is this
+    class's own `Prior`, and `lambda_floor` the region's own common floor
+    (owner's ruling 2026-09-11) -- both `build`'s `region_lambda_floor`
+    first pass, so this call reads no grid a second time.
     """
     template_log, subclass_idx, n_sub = _register(config, cls)
     n_model = template_log.shape[0]
-    reader = prior_reader.load(config, region, cls)
     gaia_term = GaiaTerm(config, region)
     width_dex = _width_dex(config, region)
     topk = config.fit_topk
@@ -485,7 +515,7 @@ def build_region_class(config, region, cls, st, limit=None):
         for bi, (bstart, bstop) in enumerate(batch_bounds):
             batch = _batch_result(config, region, cls, reader, gaia_term, template_log,
                                    subclass_idx, n_sub, width_dex, topk, block, bstart, bstop,
-                                   timing)
+                                   timing, lambda_floor)
             part_path = _part_path(path, bi)
             t = time.perf_counter()
             _write_part(part_path, batch)
@@ -548,14 +578,21 @@ def build(config, regions=None, classes=None, limit=None):
     1.3, IMPLEMENTATION_BMSTP_DRAFT.md P7). `limit` restricts every
     region to its first `limit` catalogue rows -- a timing/acceptance
     device for a class whose prior read does not fit the run budget on
-    the whole region, never a default.
+    the whole region, never a default. Per region, `region_lambda_floor`
+    is the first pass (owner's ruling 2026-09-11): it loads all SIX
+    classes' `Prior` and forms `Lambda_floor(s)` once, common by
+    construction to every class this region sweeps, before any class's
+    own read -- `classes` here only selects which of the six this call
+    WRITES P7 for, never which ones the floor maxes over.
     """
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     class_codes = classes if classes is not None else list(CLASSES)
     for region in region_names:
+        readers, lambda_floor = region_lambda_floor(config, region)
         for cls in class_codes:
             with progress.Stage("fittp.sweep.%s" % cls, region) as st:
-                summary = build_region_class(config, region, cls, st, limit=limit)
+                summary = build_region_class(config, region, cls, st, readers[cls],
+                                              lambda_floor, limit=limit)
                 summary["cls"] = cls
                 join_parts(summary, config.fit_topk)
                 with h5py.File(summary["path"], "r") as f:
