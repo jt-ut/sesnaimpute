@@ -17,7 +17,7 @@ depth-grid footprint for both figures (rather than each atlas's own
 axis) makes their display grids identical pixel for pixel.
 
 Every panel of a figure is drawn at the same size and shares the
-region's own display-grid aspect. The prior atlas is now TWO pages per
+region's own display-grid aspect. The prior atlas is two pages per
 region, one code path (`_build_prior_page`) parameterised by `view`:
 `prior-atlas-intrinsic_<R>` reads the product's `INTENSITY_C` (its sky
 density before the survey's selection) for the column-B density panel
@@ -27,7 +27,7 @@ selection_<R>` reads `N_CAT_C` (catalogued density) for the same slots,
 below 0.5. `atlas.captions` states which probability each class panel
 draws and the shared vocabulary; both are printed below the panel grid,
 the page growing taller to hold them rather than shrinking the type.
-The posterior figure is unchanged: the same column `A_K`, the posterior
+The posterior figure carries the column `A_K`, the posterior
 mean `MEAN_P_C` per class in class order, and `N_YSO_ABOVE_HALF` -- 8
 panels. An admitted pixel with no sources of its own (P11's
 `N_SOURCES == 0`, or a pixel P11 omits) is painted flat neutral grey on
@@ -175,11 +175,11 @@ def _outer_rows(n_panels, cols):
 def _read_prior(path, region, require_intensity):
     """The prior atlas (P6), sorted by pixel for the reprojection's
     `searchsorted` lookup. `INTENSITY_<C>` (the intrinsic view's own
-    per-pixel density, W66af) is required only for the intrinsic page
+    per-pixel density) is required only for the intrinsic page
     (`require_intensity`; the posterior page and the selection page read
-    this product only for `A_COL_K`/`N_CAT_C`) -- a product built before
-    that rule fails here, by name, rather than the intrinsic page
-    silently falling back to some other quantity."""
+    this product only for `A_COL_K`/`N_CAT_C`) -- a product that lacks it
+    fails here, by name, rather than the intrinsic page silently falling
+    back to some other quantity."""
     with h5py.File(path, "r") as f:
         pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
         a_k = np.asarray(f["A_COL_K"][:], dtype=np.float64)
@@ -467,7 +467,7 @@ def _atlas_page_size(aspect, cols=4, rows=2, panel_h=ATLAS_PANEL_HEIGHT_IN):
 #: The caption block's own type size and line pitch, inches -- chosen
 #: small enough that `atlas.captions.vocabulary_block()`'s eleven terms
 #: plus the two panel statements read as body text, not a footnote, at
-#: the wrap width `_caption_wrap_chars` derives from the page.
+#: the wrap width `_caption_layout` derives from the page.
 CAPTION_FONT_SIZE = 8.0
 CAPTION_LINE_HEIGHT_IN = 0.145
 CAPTION_TOP_PAD_IN = 0.12
@@ -513,10 +513,8 @@ VIEWS = {
 def _caption_block(view, extra_line=None):
     """The text a prior page prints below its panel grid: the view's own
     two `atlas.captions` statements, then `extra_line` if given (the
-    selection page's one Monte Carlo error line, the atlas's Monte Carlo
-    build not yet retired -- owner's amendment 2026-09-11 to this
-    brief), then the shared vocabulary in full -- imported, never
-    restated, per the rules."""
+    selection page's one Monte Carlo error line), then the shared
+    vocabulary in full -- imported, never restated, per the rules."""
     spec = VIEWS[view]
     parts = [spec["class_caption"], spec["total_caption"]]
     if extra_line:
@@ -525,15 +523,20 @@ def _caption_block(view, extra_line=None):
     return "\n\n".join(parts)
 
 
-def _caption_height_in(text, page_w):
-    """The caption block's own height, inches, so the page can grow to
-    hold it (rules: "the page growing to fit") rather than clipping or
-    shrinking the type -- counts the wrapped line total at the page's
-    own content width, `CAPTION_CHARS_PER_IN` standing in for an exact
-    font metric matplotlib does not expose ahead of the draw."""
+def _caption_layout(text, page_w):
+    """`(wrapped_text, height_in)`: `text` hard-wrapped at the page's own
+    content width -- matplotlib draws `fig.text` as given, wrapping
+    nothing on its own, so an unwrapped paragraph runs off the page's
+    right edge on a narrow region -- and the height, inches, the page
+    must grow by to hold exactly that wrapped text (rules: "the page
+    growing to fit"), so the drawn block and the reserved strip always
+    agree because both come from the one wrap."""
     wrap_chars = max(int((page_w - MARGIN_LEFT_IN - MARGIN_RIGHT_IN) * CAPTION_CHARS_PER_IN), 20)
-    n_lines = sum(len(textwrap.wrap(line, wrap_chars)) or 1 for line in text.split("\n"))
-    return CAPTION_TOP_PAD_IN + n_lines * CAPTION_LINE_HEIGHT_IN + CAPTION_BOTTOM_PAD_IN
+    wrapped = "\n".join("\n".join(textwrap.wrap(line, wrap_chars)) if line else ""
+                         for line in text.split("\n"))
+    n_lines = wrapped.count("\n") + 1
+    height = CAPTION_TOP_PAD_IN + n_lines * CAPTION_LINE_HEIGHT_IN + CAPTION_BOTTOM_PAD_IN
+    return wrapped, height
 
 
 def _require_depth_grid(config, region):
@@ -615,12 +618,11 @@ def _build_prior_page(config, region, formats, view):
                   density_panel, _class_panel("STAR"), _class_panel("AGB"), _class_panel("H2S")]
         n_panels = len(panels)
 
-        # The selection page's one Monte Carlo error line (the atlas's
-        # Monte Carlo build stays for now, owner's amendment 2026-09-11:
-        # the deterministic rewrite this brief originally assumed is
-        # deferred, so the product still carries `TOTAL_PREDICTED_MC_
-        # ERROR`) -- the intrinsic page carries no such line, since
-        # `INTENSITY_C` is a deterministic sum with no sampling error.
+        # The selection page's one Monte Carlo error line: the atlas's
+        # `N_CAT_C`/`TOTAL_PREDICTED` come from a Monte Carlo sample, so
+        # the product carries `TOTAL_PREDICTED_MC_ERROR` beside it; the
+        # intrinsic page carries no such line, since `INTENSITY_C` is a
+        # deterministic sum with no sampling error.
         mc_line = None
         if view == "selection":
             total_predicted = float(prior["attrs"].get("TOTAL_PREDICTED", np.nan))
@@ -635,8 +637,7 @@ def _build_prior_page(config, region, formats, view):
         # never shrinks to make room.
         aspect = geom_grid["n_x"] / float(geom_grid["n_y"])
         page_w, page_h, geom = _atlas_page_size(aspect)
-        caption_text = _caption_block(view, extra_line=mc_line)
-        caption_h = _caption_height_in(caption_text, page_w)
+        caption_text, caption_h = _caption_layout(_caption_block(view, extra_line=mc_line), page_w)
         page_h_total = page_h + caption_h
         cols = geom["cols"]
         last_row_of_col = _outer_rows(n_panels, cols)
@@ -666,8 +667,8 @@ def _build_prior_page(config, region, formats, view):
 
         # The predicted/observed ratio and the bright-source ratios
         # describe the survey's selection, so they sit only on the
-        # selection page's caption line (owner's ruling 2026-09-11); the
-        # intrinsic page's suptitle names the region alone.
+        # selection page's caption line; the intrinsic page's suptitle
+        # names the region alone.
         if view == "selection":
             total_observed = float(prior["attrs"].get("TOTAL_OBSERVED", np.nan))
             surveyed_area = float(prior["attrs"].get("SURVEYED_AREA_DEG2", np.nan))
