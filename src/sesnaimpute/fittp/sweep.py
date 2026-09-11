@@ -209,10 +209,10 @@ def _block_result(config, region, cls, reader, gaia_term, template_log, subclass
     flux moments and the top-K record -- one `(n_block, n_model[, 8])`
     working set, discarded on return. `timing` accumulates this block's
     own wall time by stage (rule 17's per-{region, class} split).
-    `lambda_floor` is the REGION's own `Lambda_floor(s)` (owner's ruling
-    2026-09-11, `build`'s first pass, common to every class), sliced here
-    to this block's rows -- this class's read floors at its own share of
-    it, never a floor of its own."""
+    `lambda_floor` is the region's own `Lambda_floor(s)` (`build`'s first
+    pass, common to every class), sliced here to this block's rows --
+    this class's read floors at its own share of it, never a floor of its
+    own."""
     n_model = template_log.shape[0]
     t = time.perf_counter()
     flux, sigma, origin = _catalog_block(config, region, start, stop)
@@ -448,18 +448,20 @@ def _write_part(part_path, batch):
 
 def region_lambda_floor(config, region):
     """`(readers, lambda_floor)`, the FIRST PASS `build` runs once per
-    region, before any class's own read (owner's ruling 2026-09-11):
+    region, before any class's own read:
     `readers[cls] = prior_reader.load(config, region, cls)` for every one
     of the six classes -- ALWAYS all six, regardless of which classes this
     run will actually sweep, since `Lambda_floor(s)` is a max over all of
-    them -- and `lambda_floor = prior_reader.common_floor(peaks)`,
+    them and so is common by construction only if every class's own P2-P5
+    products (its shape grid and its template-weight table) exist and are
+    read here, whether or not this run writes that class's own P7 -- and
+    `lambda_floor = prior_reader.common_floor(peaks)`,
     `peaks[cls] = prior_reader.peak_density(readers[cls], arange(n_source))`
     off each reader's own already-loaded, unblurred grid and factor
-    tables (`grain_peaks`/`factor_peak`), common by construction to every
-    class at a source. `readers` is returned so `build` hands the SAME
-    loaded `Prior` to `build_region_class` below: the grids are read
-    exactly once per class, never a second time for the floor and again
-    for the class's own sweep."""
+    tables (`grain_peaks`/`factor_peak`). `readers` is returned so `build`
+    hands the SAME loaded `Prior` to `build_region_class` below: the grids
+    are read exactly once per class, never a second time for the floor
+    and again for the class's own sweep."""
     peaks = []
     readers = {}
     for cls in CLASSES:
@@ -479,7 +481,7 @@ def build_region_class(config, region, cls, st, reader, lambda_floor, limit=None
     parts once every batch is done. Returns the part file list and the
     summary numbers for the caller's join and report. `reader` is this
     class's own `Prior`, and `lambda_floor` the region's own common floor
-    (owner's ruling 2026-09-11) -- both `build`'s `region_lambda_floor`
+     -- both `build`'s `region_lambda_floor`
     first pass, so this call reads no grid a second time.
     """
     template_log, subclass_idx, n_sub = _register(config, cls)
@@ -579,11 +581,14 @@ def build(config, regions=None, classes=None, limit=None):
     region to its first `limit` catalogue rows -- a timing/acceptance
     device for a class whose prior read does not fit the run budget on
     the whole region, never a default. Per region, `region_lambda_floor`
-    is the first pass (owner's ruling 2026-09-11): it loads all SIX
-    classes' `Prior` and forms `Lambda_floor(s)` once, common by
-    construction to every class this region sweeps, before any class's
-    own read -- `classes` here only selects which of the six this call
-    WRITES P7 for, never which ones the floor maxes over.
+    is the first pass: it loads all SIX classes' `Prior` and forms
+    `Lambda_floor(s)` once, common by construction to every class this
+    region sweeps, before any class's own read. `classes` here only
+    selects which of the six this call WRITES P7 for -- a run restricted
+    to a subset still reads every one of the six classes' own P2-P5
+    products (its shape grid, its template-weight table), since the
+    floor is common by construction only if it maxes over all six, never
+    the run's own subset.
     """
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     class_codes = classes if classes is not None else list(CLASSES)

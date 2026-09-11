@@ -135,11 +135,11 @@ def _bin1d(values, w, edges, sigma_cells):
     caller below), normalised to `1 - mass_outside`, Gaussian-smoothed by
     `sigma_cells` cells (`mode="constant"`: mass pushed past an edge is
     mass outside the grid, never wrapped). The support rule (`bmstp.grid`
-    module docstring, ruling 1) then folds whatever of that smoothed mass
-    sits at `log10 x > 0` into `mass_outside` too and holds those cells at
-    exact zero -- the same treatment `grid.bin` gives every other class's
-    `log10 x` axis. `h` carries its own true zeros (ruling 2): no
-    per-shape floor is baked in here any more."""
+    module docstring) then folds whatever of that smoothed mass sits at
+    `log10 x > 0` into `mass_outside` too and holds those cells at exact
+    zero -- the same treatment `grid.bin` gives every other class's
+    `log10 x` axis. `h` carries its own true zeros: no per-shape floor is
+    baked in here."""
     values = np.asarray(values, dtype=np.float64)
     w = np.asarray(w, dtype=np.float64)
     total_weight = w.sum()

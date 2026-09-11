@@ -102,8 +102,8 @@ def build_star_family(config, region):
     per-chemistry flux-to-luminosity ratio spread (`F45_PER_L_SPREAD_DEX_O/C`,
     sec. 5.2). PAHC has no grid of its own: a reader loads `GRID_STAR` for
     it (sec. 5.3 "Grain"). `GRID_STAR`/`GRID_AGB` carry no `N_EFF` dataset
-    and no `FLOOR` attribute: the owner's ruling 2026-09-11 retires both
-    from every shape product (`bmstp.grid`'s module docstring)."""
+    and no `FLOOR` attribute, like every shape product (`bmstp.grid`'s
+    module docstring)."""
     path = config_module.product_path(config, "bmstp", "shape", "star", "tile", region=region)
     old = _read_old_star_product(path)
 
@@ -255,12 +255,12 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     `MASS_OUTSIDE_YSO` is the combined shortfall of `GRID_YSO`'s own
     total against the sightline's intended mass, `sum(w_k,sub) *
     p_ref.sum()`, PLUS whatever the support rule (`bmstp.grid`'s module
-    docstring, ruling 1) folds in: `x <= 1` by definition, so the one dex
-    of `log10 x > 0` this custom histogram keeps only for `_yso_kernel_
-    placement`'s own convolution padding is zeroed and counted as outside
-    after the one-cell smoothing, exactly as `grid.bin` does for every
-    other class. `GRID_YSO` carries its own true zeros (ruling 2): no
-    per-shape floor is baked in here any more."""
+    docstring) folds in: `x <= 1` by definition, so the one dex of `log10
+    x > 0` this custom histogram keeps only for `_yso_kernel_placement`'s
+    own convolution padding is zeroed and counted as outside after the
+    one-cell smoothing, exactly as `grid.bin` does for every other class.
+    `GRID_YSO` carries its own true zeros: no per-shape floor is baked in
+    here."""
     p_x, _mo_x, removed_frac = sample_cloud.sample_x(loaded, row, d_front, d_back)
     log10x_nudged, w_sub, d_sub, _removed = sample_cloud._cell_subsamples(loaded, row, d_front, d_back)
     n_x = grid.LOG10_X_EDGES.size - 1
@@ -281,7 +281,7 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     grid_yso = gaussian_filter1d(grid_yso, sigma=1.0, axis=0, mode="constant")
 
     total_intended = float(w_sub.sum()) * float(p_ref.sum())
-    # the support rule (ruling 1): `log10 x > 0` is outside the prior even
+    # the support rule: `log10 x > 0` is outside the prior even
     # though the array keeps that dex as the shift-kernel convolution's own
     # padding -- those rows are held at exact zero, so `mass_outside_yso`
     # (read off the reduced total below) already counts them as shortfall.
@@ -308,9 +308,7 @@ def build_cloud(config, region):
     (sec. 5.6 "Marks": separable, `X_MARGINAL` times this Gaussian, formed
     at read on the common `LOG10_F45_EDGES` through the template's own
     `C_THETA` offset, never a class-specific origin). Neither grid carries
-    an `N_EFF` dataset or a `FLOOR` attribute: the owner's ruling
-    2026-09-11 retires both from every shape product (`bmstp.grid`'s
-    module docstring)."""
+    an `N_EFF` dataset or a `FLOOR` attribute, per `bmstp.grid`'s module docstring."""
     p3_path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
     old_x_marginal = None
     if os.path.exists(p3_path):
@@ -520,11 +518,10 @@ def build_gal(config):
     "Grain"): a delta at `log10 x = 0` (the whole column) times the
     counts law directly in `F_4.5 = S` -- the law's own tabulated range
     (-2.2 to +1.3 dex) sits well inside the common grid, so no per-shape
-    margin is needed any more -- plus the attr `ON_GRID_GAL` (`1 -
+    margin is needed -- plus the attr `ON_GRID_GAL` (`1 -
     mass_outside`, sec. 2's ON-GRID FRACTION, W26's own read). No `N_EFF`
-    dataset and no `FLOOR` attribute: the owner's ruling 2026-09-11
-    retires both from every shape product (`bmstp.grid`'s module
-    docstring)."""
+    dataset and no `FLOOR` attribute, like every shape product
+    (`bmstp.grid`'s module docstring)."""
     path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
     old = None
     if os.path.exists(path):

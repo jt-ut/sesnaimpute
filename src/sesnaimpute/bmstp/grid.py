@@ -21,21 +21,20 @@ exactly one cell along EACH axis (sec. 2, "minimum widths"): no shape is a
 delta narrower than the fit's own uncertainty in `log10 B_hat` (0.04-0.1
 dex on a two-band source).
 
-Two rulings of the owner (2026-09-11), beside sec. 2's own statement:
-(1) SUPPORT. `x = a / A_s <= 1` by definition, so a cell with `log10 x >
-0` is never part of the prior's support even though the array keeps that
-extent (`N_X_SUPPORT`, below) for the kernels' own padding: `bin` and
-`bin_star_widths` fold whatever mass a smoothing pass pushes past `log10
-x = 0` into `mass_outside` and hold those cells at EXACT zero, never the
-floor, and `ON_GRID_*`/`MASS_OUTSIDE_*` are then measured over the
-support alone. (2) ONE COMMON FLOOR. The floor is no longer a per-class,
-per-shape constant baked in here: a stored shape now carries its own true
-zeros, `FLOOR` becomes one absolute value on the read prior density,
+Two more statements beside sec. 2's own: THE SUPPORT. `x = a / A_s <= 1`
+by definition, so a cell with `log10 x > 0` is never part of the prior's
+support even though the array keeps that extent (`N_X_SUPPORT`, below)
+for the kernels' own padding: `bin` and `bin_star_widths` fold whatever
+mass a smoothing pass pushes past `log10 x = 0` into `mass_outside` and
+hold those cells at EXACT zero, never the floor, and
+`ON_GRID_*`/`MASS_OUTSIDE_*` are measured over the support alone. THE
+FLOOR IS COMMON. `FLOOR` is one absolute value on the read prior density,
 common to every class at a source, applied where the prior is read
-(`fittp.prior_reader`) so that an empty cell no longer decides the class
-comparison by intensity alone -- the six classes read equal there and the
-likelihood decides. `blur`'s own shift-and-smooth is unchanged; only the
-floor step its caller used to apply is gone.
+(`fittp.prior_reader`), not a per-class, per-shape constant baked in
+here: a stored shape carries its own true zeros, so an empty cell reads
+equal across the six classes and the likelihood alone decides it.
+`blur`'s own shift-and-smooth carries no floor step; its caller applies
+the common one, at the read.
 """
 
 import numpy as np
@@ -50,8 +49,8 @@ _N_X = LOG10_X_EDGES.size - 1
 _X_CELL_WIDTH = (LOG10_X_EDGES[-1] - LOG10_X_EDGES[0]) / _N_X
 _X_CENTERS = LOG10_X_EDGES[:-1] + 0.5 * _X_CELL_WIDTH
 
-#: the support rule (module docstring, ruling 1): `x <= 1` by definition,
-#: so only the cells whose upper edge is at or below `log10 x = 0` are the
+#: the support rule (module docstring): `x <= 1` by definition, so only
+#: the cells whose upper edge is at or below `log10 x = 0` are the
 #: prior's support -- the one dex above it (cells `N_X_SUPPORT` to
 #: `_N_X - 1`) is kept in every array purely as the kernels' own padding
 #: and is never part of a shape's stored mass or a reader's sum.
@@ -67,9 +66,9 @@ _N_B = LOG10_F45_EDGES.size - 1
 D_LOG10_F45 = (LOG10_F45_EDGES[-1] - LOG10_F45_EDGES[0]) / _N_B
 _B_CENTERS = LOG10_F45_EDGES[:-1] + 0.5 * D_LOG10_F45
 
-#: The floor fraction (sec. 2, "the floor"; module docstring ruling 2):
-#: no longer baked into a stored shape, which carries its own true zeros
-#: -- read alone, as one value common to every class at a source,
+#: The floor fraction (sec. 2, "the floor"; module docstring's common-floor
+#: statement): not baked into a stored shape, which carries its own true
+#: zeros -- read alone, as one value common to every class at a source,
 #: `FLOOR` times the largest cell density any of the six classes reaches
 #: there (`fittp.prior_reader.common_floor`).
 FLOOR = 1e-6
@@ -93,12 +92,11 @@ def bin(x, log10_f45, w):
     smoothed by exactly one cell along EACH axis (sec. 2, "minimum
     widths") with `mode="constant"` (zero beyond the edges): any mass the
     smoothing pushes past an edge is mass outside the grid and is folded
-    into `mass_outside`. The support rule (module docstring, ruling 1)
-    then folds whatever of that smoothed mass sits at `log10 x > 0` into
+    into `mass_outside`. The support rule (module docstring) then folds
+    whatever of that smoothed mass sits at `log10 x > 0` into
     `mass_outside` too and holds those cells at exact zero, so `H.sum()
     == 1 - mass_outside` stays an exact identity over the support alone.
-    `H` carries its own true zeros: the floor is read, not stored (ruling
-    2)."""
+    `H` carries its own true zeros: the floor is read, not stored."""
     x = np.asarray(x, dtype=float)
     log10_f45 = np.asarray(log10_f45, dtype=float)
     w = np.asarray(w, dtype=float)
@@ -126,7 +124,7 @@ def bin(x, log10_f45, w):
     H = gaussian_filter1d(H, sigma=1.0, axis=0, mode="constant")
     H = gaussian_filter1d(H, sigma=1.0, axis=1, mode="constant")
     mass_outside += mass_before - float(H.sum())
-    # the support rule (ruling 1): `log10 x > 0` is outside the prior even
+    # the support rule: `log10 x > 0` is outside the prior even
     # though the array keeps it for the kernels' padding.
     mass_outside += float(H[N_X_SUPPORT:].sum())
     H[N_X_SUPPORT:] = 0.0
@@ -152,8 +150,8 @@ def bin_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
     ordinary one-cell smoothing (sec. 2) in every pass. `H.sum() == 1 -
     mass_outside` stays exact over the support, the same identity `bin`
     reports, since every star belongs to exactly one class; `H` carries
-    its own true zeros (ruling 2), including the exact zero the support
-    rule (ruling 1) holds at `log10 x > 0`."""
+    its own true zeros, including the exact zero the support rule holds
+    at `log10 x > 0`."""
     x = np.asarray(x, dtype=float)
     log10_f45 = np.asarray(log10_f45, dtype=float)
     w = np.asarray(w, dtype=float)
@@ -176,7 +174,7 @@ def bin_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
         Hk = gaussian_filter1d(Hk, sigma=float(sigma_classes_cells[k]), axis=0, mode="constant")
         Hk = gaussian_filter1d(Hk, sigma=1.0, axis=1, mode="constant")
         H += Hk
-    # the support rule (ruling 1): fold whatever mass the width-class
+    # the support rule: fold whatever mass the width-class
     # smoothing pushed past `log10 x = 0` into `mass_outside` and hold
     # those cells at exact zero before the identity is read off `H.sum()`.
     H[N_X_SUPPORT:] = 0.0
