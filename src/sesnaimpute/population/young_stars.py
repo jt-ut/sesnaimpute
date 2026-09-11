@@ -68,12 +68,15 @@ the SAME restricted population the YSO prior and `bmstp.sample_cloud`
 place, never the whole sightline's foreground-to-background span.
 `(G_obs, Ks_obs)` come from `population.anchor_tiles.magnitudes_at_
 extinction` -- the ONE function that turns a local column into the two
-anchor magnitudes, at the register's own band-integrated Gaia dimming
-coefficients (`_register_kg_medians`, `KG_DRAINE`/`KG_WHITNEY` median
-over the SPS template library, since a young star has no per-template
-match), never a monochromatic law-curve ratio: the deduction and
-`anchor_tiles`'s own predicted histogram dim G by the SAME law (read
-audit R6 item 1). Gaia's own detection sigmoid (`population.anchor_tiles.gaia_detection_
+anchor magnitudes, `field_stars` and `anchor_tiles` unchanged, at each
+mass point's own `KG_DRAINE`/`KG_WHITNEY` (`_young_star_kg_by_mass`),
+never a register-wide median (read audit R12 B9): a young star's G
+magnitude is read straight off the BHAC15 isochrone
+(`gaia_abs_mag_grid`), not synthesized against any sps atmosphere, so
+there is no per-star (T_eff, log g, [M/H]) triple to match the way
+`field_stars.match_templates` matches a TRILEGAL field star -- only the
+isochrone's own T_eff places each mass on the register's template grid,
+nearest in log10(T_eff). Gaia's own detection sigmoid (`population.anchor_tiles.gaia_detection_
 weight`, reused) weights `N_G_YOUNG`; `N_KS_YOUNG` carries none (2MASS
 is treated complete to `KS_CUT_MAG`, the anchor histograms' own
 convention).
@@ -121,6 +124,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import anchor_tiles
+from sesnaimpute.population import field_stars
 from sesnaimpute.population import selection
 from sesnaimpute.population import yso
 
@@ -396,30 +400,40 @@ def gaia_abs_mag_grid(config, age_gyr, mass_grid):
                       np.log10(masses[order]), g_mag[order])
 
 
-_REGISTER_KG_CACHE = {}
-
-
-def _register_kg_medians(config):
-    """The register's own band-integrated Gaia coefficients
-    (`KG_DRAINE`/`KG_WHITNEY`, Danielski et al. 2018's `A_G/A_V` per SPS
-    template, `sed_models/registers/sps_register.hdf5`), one median over
-    the template library -- the same register `population.anchor_tiles`
-    reads a per-matched-template value from for a TRILEGAL field star; a
-    young star has no such template match, so this module's own deducted
-    population uses the register's survey-wide median in
-    `anchor_tiles.magnitudes_at_extinction`, never a monochromatic
-    law-curve ratio: one Gaia dimming law for the deduction and for the
-    anchors it is subtracted from (read audit R6 item 1).
+def _young_star_kg_by_mass(config, mass_grid):
+    """`(kg_diffuse, kg_dense)`, each `(n_mass,)`: the sps atmosphere
+    register's `KG_DRAINE`/`KG_WHITNEY` (Danielski et al. 2018's
+    `A_G/A_V` per template, `sed_models/registers/sps_register.hdf5`,
+    `field_stars.load_atmosphere_grid`), one PER MASS POINT rather than
+    one median over the whole O-T library (read audit R12 B9: that
+    median is a ~13 000 K value, 8.539/6.879, against ~6.69 for the
+    late-type templates a deducted young-star population actually
+    resembles). A young star's G magnitude is placed straight off the
+    BHAC15 1 Myr isochrone (`gaia_abs_mag_grid`), not synthesized
+    against any sps atmosphere, so it carries no (log g, [M/H]) to match
+    the way `field_stars.match_templates` matches a TRILEGAL field
+    star's own atmosphere; only the isochrone's own T_eff (interpolated
+    in log10(mass) exactly as `gaia_abs_mag_grid` interpolates G) places
+    each mass point on the register's template grid, nearest in
+    log10(T_eff).
     """
-    key = config.data_root
-    if key not in _REGISTER_KG_CACHE:
-        path = f"{config.data_root}/sed_models/registers/sps_register.hdf5"
-        with h5py.File(path, "r") as f:
-            models = f["models"]
-            kg_diffuse = float(np.median(np.asarray(models["KG_DRAINE"], dtype=np.float64)))
-            kg_dense = float(np.median(np.asarray(models["KG_WHITNEY"], dtype=np.float64)))
-        _REGISTER_KG_CACHE[key] = (kg_diffuse, kg_dense)
-    return _REGISTER_KG_CACHE[key]
+    table = _load_gaia_table(config)
+    mask = np.isclose(table[:, 0], AGE_1MYR_GYR, atol=1e-6)
+    if not np.any(mask):
+        raise ValueError(
+            f"prior.young_stars: no t={AGE_1MYR_GYR:.4f} Gyr block in BHAC15_iso.GAIA")
+    masses = table[mask, 1]
+    teff_col = 1 + _GAIA_ROW_COLUMNS.index("TEFF_K")
+    teff = table[mask, teff_col]
+    order = np.argsort(masses)
+    log_teff = np.interp(np.log10(np.asarray(mass_grid, dtype=np.float64)),
+                          np.log10(masses[order]), np.log10(teff[order]))
+
+    register_path = f"{config.data_root}/sed_models/registers/sps_register.hdf5"
+    atmosphere = field_stars.load_atmosphere_grid(register_path)
+    log_teff_grid = np.log10(atmosphere["grid"][:, 0])
+    idx = np.argmin(np.abs(log_teff_grid[None, :] - log_teff[:, None]), axis=1)
+    return atmosphere["kg_diffuse"][idx], atmosphere["kg_dense"][idx]
 
 
 # ---------------------------------------------------------------------
@@ -573,7 +587,9 @@ def _pixel_block(config, a_pix_blk, u_edges_blk, mass_blk, n_young_blk,
                   mu, g_edges, ks_edges, k_g_diffuse, k_g_dense, r_diffuse, r_dense):
     """One block's `(N_G_YOUNG, N_KS_YOUNG)` and the 1 Myr Ks acceptance
     pieces, vectorised over every mass and every `u`-cell of every pixel
-    in the block at once.
+    in the block at once. `k_g_diffuse`/`k_g_dense` are `(n_mass,)`,
+    each mass point's own register-template coefficient
+    (`_young_star_kg_by_mass`), not a scalar.
     """
     u_mid = 0.5 * (u_edges_blk[:, :-1] + u_edges_blk[:, 1:])      # (n_blk, n_u)
     u_mass = mass_blk                                             # sums to 1 per row (cloud-restricted)
@@ -586,13 +602,14 @@ def _pixel_block(config, a_pix_blk, u_edges_blk, mass_blk, n_young_blk,
     ks_app_1myr = ks_abs_1myr + mu
     g_app_1myr = g_abs_1myr + mu
 
-    # the ONE Gaia dimming law (module docstring, read audit R6 item 1):
-    # `anchor_tiles.magnitudes_at_extinction`, the same function and the
-    # same register coefficients the anchors' own predicted histogram
-    # uses, not a re-derived monochromatic ratio.
+    # the ONE Gaia dimming law (module docstring, read audit R12 B9):
+    # `anchor_tiles.magnitudes_at_extinction`, the same function
+    # `field_stars`'s own per-matched-template anchors use, at each mass
+    # point's own template coefficient (`k_g_diffuse`/`k_g_dense`,
+    # `(n_mass,)`), not a register-wide median.
     g_obs, ks_obs_1myr = anchor_tiles.magnitudes_at_extinction(
         a_rep[:, None, :], g_app_1myr[None, :, None], ks_app_1myr[None, :, None],
-        k_g_diffuse, k_g_dense, r_diffuse, r_dense)
+        k_g_diffuse[None, :, None], k_g_dense[None, :, None], r_diffuse, r_dense)
 
     p_g = anchor_tiles.gaia_detection_weight(g_obs)
     n_g, _, _ = _weighted_hist(g_obs, weight * p_g, g_edges)
@@ -644,10 +661,11 @@ def build_region(config, region):
         config, AGE_1MYR_GYR, mass_grid)[:, BAND_KEYS.index("Ks")]
     g_abs_1myr = gaia_abs_mag_grid(config, AGE_1MYR_GYR, mass_grid)
 
-    # the one Gaia dimming law (module docstring): the register's own
-    # band-integrated coefficients, the SAME `r_diffuse`/`r_dense`
-    # (A_K/A_V) construction `anchor_tiles.build` uses.
-    k_g_diffuse, k_g_dense = _register_kg_medians(config)
+    # the one Gaia dimming law (module docstring, read audit R12 B9):
+    # each mass point's own nearest-template register coefficient, the
+    # SAME `r_diffuse`/`r_dense` (A_K/A_V) construction `anchor_tiles.
+    # build` uses.
+    k_g_diffuse, k_g_dense = _young_star_kg_by_mass(config, mass_grid)
     r_diffuse = float(selection.ak_per_av(config, 0.0))
     r_dense = float(selection.ak_per_av(config, 1.0))
 
