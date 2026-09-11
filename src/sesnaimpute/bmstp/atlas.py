@@ -937,7 +937,7 @@ def build_region(config, region):
     own intrinsic sky density at that pixel -- the quantity the
     catalogued-density sum (`N_CAT_<C> = INTENSITY_<C> * accepted
     fraction`) starts from before the pixel's own completeness is applied
-    (SPEC_BMSTP_DRAFT.md sec. 8, owner's ruling 2026-09-11): the star-
+    (SPEC_BMSTP_DRAFT.md sec. 8): the star-
     family tile's own field-star/evolved-star total per its own
     `OMEGA_POINTING_DEG2` for STAR/AGB/PAHC, the young-star law
     (Herschel-convolved where it reaches) and its H2S-scaled density for
@@ -961,7 +961,7 @@ def build_region(config, region):
         tile_of_pix, n_tile_filled = _pixel_tile(config, region, pix)
 
         n_cat = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
-        # sec. 8, owner's ruling 2026-09-11: each class's own intrinsic
+        # sec. 8: each class's own intrinsic
         # sky density at the pixel, `build_region`'s own docstring
         # paragraph above.
         intensity = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
