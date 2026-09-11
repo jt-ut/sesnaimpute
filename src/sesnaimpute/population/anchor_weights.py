@@ -10,8 +10,12 @@ histograms, and the young-star-subtracted observed anchor histograms
 fitted separately on the Gaia `G` marginal, the 2MASS `Ks` marginal, and
 the joint `(G, Ks)` grid where the SESNA-Gaia crossmatch supplies both
 magnitudes for a source (section 2.1, "joint and marginal bins" -- a
-joint bin with a nonzero observed count is populated and used; elsewhere
-the marginal weight applies). Each axis is fitted the SAME way: the
+joint `(G, Ks)` cell is used only where the region's pooled count across
+its own tiles reaches `MIN_COUNTS` and the cell was therefore actually
+fitted (`USE_JOINT` means fitted, not merely a nonzero observed count in
+one tile); every other star takes the marginal weight, which by the same
+ruling is never left at the uncalibrated 1.0 either (no star ever carries
+that unfitted TRILEGAL-level weight). Each axis is fitted the SAME way: the
 sky's own per-tile, per-bin counts (aggregated from `population.anchor_tiles`'
 per-pixel `N_G_PRED`/`N_KS_PRED`/`N_GK_PRED` and `population.anchor_observed`'s
 young-star-subtracted `N_G_SUB`/`N_KS_SUB`/`N_GK_SUB`) over the model's
@@ -909,14 +913,19 @@ def build_region(config, region, clusters, w_pool_g, w_pool_ks, ks_pool_lower, k
     n_obs_joint_flat = n_obs_joint.reshape(n_tile, n_g * n_ks)
     n_pred_joint_flat = n_pred_joint.reshape(n_tile, n_g * n_ks)
     # the joint grid has no survey-pooled counterpart (item 1 asks for the
-    # G/Ks marginals only); an all-masked joint bin stays at unity, as
-    # before -- the marginal weights are what a star actually falls back
-    # to (star_population.star_weights), the joint table is a refinement
-    # only where a real crossmatch populates it.
+    # G/Ks marginals only); an all-masked joint bin stays at unity, but
+    # `use_joint` below never selects it -- the marginal weights are what
+    # a star actually falls back to (star_population.star_weights), the
+    # joint table is a refinement only where the region's own crossmatch
+    # cleared MIN_COUNTS and the cell was fitted.
     fit_joint = fit_tile_weights(n_obs_joint_flat, n_pred_joint_flat, excluded)
     w_joint = fit_joint["w"].reshape(n_tile, n_g, n_ks)
     w_region_joint = fit_joint["w_region"].reshape(n_g, n_ks)
-    use_joint = n_obs_joint > 0.0  # decision 3: the joint bin is populated
+    joint_fitted = fit_joint["populated"].reshape(n_g, n_ks)
+    # decision 3: the joint cell is used only where it was fitted -- a
+    # nonzero observed count alone is not enough, since 1-24 crossmatched
+    # sources leave the cell unfitted and `w_joint` at the uncalibrated 1.0.
+    use_joint = (n_obs_joint > 0.0) & joint_fitted[None, :, :]
 
     faint_g = faint_trend_dex_per_mag(fit_g["w_region"], hist["g_edges"], fit_g["populated"])
     faint_ks = faint_trend_dex_per_mag(fit_ks["w_region"], hist["ks_edges"], fit_ks["populated"])
