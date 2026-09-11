@@ -131,25 +131,29 @@ def cloud_interval_pc(config, region):
 
 def _bin1d(values, w, edges, sigma_cells):
     """One axis of `bmstp.grid.bin`, alone: the weighted 1-D histogram of
-    `values` on `edges`, normalised to `1 - mass_outside`, Gaussian-
-    smoothed by `sigma_cells` cells (`mode="constant"`: mass pushed past
-    an edge is mass outside the grid, never wrapped), then floored at
-    `grid.FLOOR` of its own peak (sec. 2 "minimum widths", "the floor") --
-    the two independent pieces of YSO's separable shape are each built
-    this way, once per axis."""
+    `values` on `edges` (always `grid.LOG10_X_EDGES`, `sample_x`'s only
+    caller below), normalised to `1 - mass_outside`, Gaussian-smoothed by
+    `sigma_cells` cells (`mode="constant"`: mass pushed past an edge is
+    mass outside the grid, never wrapped). The support rule (`bmstp.grid`
+    module docstring) then folds whatever of that smoothed mass sits at
+    `log10 x > 0` into `mass_outside` too and holds those cells at exact
+    zero -- the same treatment `grid.bin` gives every other class's
+    `log10 x` axis. `h` carries its own true zeros: no per-shape floor is
+    baked in here."""
     values = np.asarray(values, dtype=np.float64)
     w = np.asarray(w, dtype=np.float64)
     total_weight = w.sum()
     h, _ = np.histogram(values, bins=edges, weights=w)
     if total_weight <= 0:
-        return np.full(h.shape, grid.FLOOR), 1.0
+        return np.zeros(h.shape, dtype=np.float64), 1.0
     mass_outside = float((total_weight - h.sum()) / total_weight)
     h = h / total_weight
     mass_before = float(h.sum())
     h = gaussian_filter1d(h, sigma=sigma_cells, mode="constant")
     mass_outside += mass_before - float(h.sum())
-    h = np.maximum(h, grid.FLOOR * h.max())
-    return h, mass_outside
+    mass_outside += float(h[grid.N_X_SUPPORT:].sum())
+    h[grid.N_X_SUPPORT:] = 0.0
+    return h.astype(np.float64), mass_outside
 
 
 def _cell_subsamples(loaded, row, d_front, d_back):
