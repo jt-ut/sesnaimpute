@@ -40,6 +40,8 @@ import h5py
 import healpy as hp
 import numpy as np
 from astropy.coordinates import SkyCoord
+from astropy.io import fits
+from astropy.wcs import WCS
 import astropy.units as u
 from joblib import Parallel, delayed
 
@@ -225,8 +227,6 @@ def _map_window(path, rbox, pad_deg=0.1):
     read, never the block-reduced result, bit-identical to reading the
     whole mosaic (the generous padding means a block actually used by the
     region's anchor pixels is never split across the cutout edge)."""
-    from astropy.io import fits
-    from astropy.wcs import WCS
     with fits.open(path, memmap=True) as hd:
         chosen = next(c for c in hd if c.header.get("NAXIS", 0) >= 2)
         hdr = chosen.header
@@ -259,7 +259,6 @@ def _map_block_a_k(path, window):
     x0, x1, y0, y1 = window["x0"], window["x1"], window["y0"], window["y1"]
     if x1 <= x0 or y1 <= y0:
         return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
-    from astropy.io import fits
     with fits.open(path, memmap=True) as hd:
         chosen = next(c for c in hd if c.header.get("NAXIS", 0) >= 2)
         raw = np.asarray(chosen.data[..., y0:y1, x0:x1])

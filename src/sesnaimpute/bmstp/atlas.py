@@ -32,6 +32,20 @@ sample_agb`), each carrying one shell template of its own drawn chemistry
 (Riebel+2012's optical-depth distribution, `bmstp.template_weights.build_agb`'s
 `tau` factor construction) whose eight `F_REF` are scaled so its own 4.5 um
 flux equals the star's `F_4.5`. All six classes enter the total-count check.
+
+Every module on this atlas's worker path (this module, `knot_field`,
+`sample_gal`, `sample_star`, `sample_cloud`, `grid`, `density`,
+`template_weights`, `sky.derived.profile`, `fittp.likelihood`,
+`population.yso`, `population.selection`, `sky.derived.herschel_column`, and
+whatever they import) carries every import of a module holding a compiled
+extension (`astropy.*`, `scipy.*`, `healpy`, `h5py`, `numba`) at module top
+level, never inside a function: a loky worker imports a task's module, and
+everything that module imports at top level, only when it unpickles that
+worker's first task -- so a native extension deferred to a function runs its
+first `dlopen` at whatever moment that function is later called, which on
+this path is after the tile phase has already started numba's `workqueue`
+thread pool in that worker, and dyld's loader is not safe to enter again
+once numba's threads are live.
 """
 
 import os

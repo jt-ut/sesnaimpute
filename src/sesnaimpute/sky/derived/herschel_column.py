@@ -31,9 +31,14 @@ import os
 import re
 import time
 
+import astropy.units as u
 import h5py
 import numpy as np
+from astropy.coordinates import SkyCoord
+from astropy.io import fits
+from astropy.wcs import WCS
 from joblib import Parallel, delayed
+from scipy.ndimage import binary_erosion
 
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
@@ -85,8 +90,6 @@ def _map_header(path):
     """The map's WCS footprint bbox, pixel scale and beam FWHM (arcsec,
     `None` if unstated), without loading pixel data -- shape and WCS come
     from header keywords alone."""
-    from astropy.io import fits
-    from astropy.wcs import WCS
     with fits.open(path, memmap=False) as hd:
         chosen = next(c for c in hd if c.header.get("NAXIS", 0) >= 2)
         hdr = chosen.header.copy()
@@ -116,8 +119,6 @@ def _beam_from_header(hdr):
 def _open_hgbs_map(path):
     """One HGBS FITS map: 2-D float32 N(H2) data, its celestial WCS, and
     its pixel scale in arcsec."""
-    from astropy.io import fits
-    from astropy.wcs import WCS
     with fits.open(path, memmap=False) as hd:
         chosen = next(c for c in hd if c.header.get("NAXIS", 0) >= 2)
         data = np.squeeze(np.asarray(chosen.data))
@@ -170,8 +171,6 @@ def _pair_native(name_a, path_a, name_b, path_b):
     """The map-to-map SIG_ZP/SIG_RAND replicate: matched native-resolution
     samples of two overlapping HGBS reductions, eroded from each map's
     edge by twice the stated beam to their common, fully-sampled interior."""
-    from astropy.coordinates import SkyCoord
-    from scipy.ndimage import binary_erosion
     t0 = time.time()
     A, wa, pxa = _open_hgbs_map(path_a)
     B, wb, pxb = _open_hgbs_map(path_b)
@@ -380,8 +379,6 @@ def _sample_map_job(map_entry, region_sources):
     source of every requested region the map reaches -- this sampling is
     what decides which regions the map serves. `region_sources` is
     {region: (ra_deg, dec_deg)}, bbox-screened per region first."""
-    from astropy.coordinates import SkyCoord
-    import astropy.units as u
     data, wcs, _px = _open_hgbs_map(map_entry["path"])
     ny, nx = data.shape
     box = _bbox_of(wcs, data.shape)
