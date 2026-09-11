@@ -81,6 +81,15 @@ ATLAS_SELECTION_TOTAL = (
     "prior's sky density of cataloged sources; the white outline marks the "
     "IRAC footprint at one half.")
 
+#: The total-count check (sec. 8, sec. 9), the selection page's caption
+#: line: `{value}` is the region's own N_prior / N_catalog ratio.
+TOTAL_COUNT_CHECK = (
+    r"$N_{{prior}} / N_{{catalog}}$ = {value:.3f}: the prior's expected number "
+    "of cataloged sources in the region (the selection densities summed over "
+    "the sky pixels, times the surveyed area) against the number of sources "
+    "in the catalog -- the check that the prior's normalization reproduces "
+    "the survey's count; the observations enter here only as that check.")
+
 
 def vocabulary_block():
     """The vocabulary as one string, one term per line, for a page's caption."""

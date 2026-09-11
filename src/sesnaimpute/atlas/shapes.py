@@ -1,4 +1,4 @@
-"""The prior at a source, one page per region (SPEC_BMSTP_DRAFT.md sec.
+r"""The prior at a source, one page per region (SPEC_BMSTP_DRAFT.md sec.
 1.1's factorisation, sec. 1.4's template weights, sec. 2's common grid,
 sec. 4.1-4.2, sec. 5.1-5.6). Report-only: nothing written here is read
 by the fitter or by any other `bmstp`/`fittp` stage. The vocabulary and
@@ -57,7 +57,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import Normalize
+from matplotlib.colors import LogNorm, Normalize
 
 from sesnaimpute import config as config_module
 from sesnaimpute import plot_style
@@ -75,25 +75,26 @@ PAGE_W_IN = 16.0
 CLASS_ORDER = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
 
 #: Every class reads the one common brightness axis (sec. 2, H2S included
-#: ): `log10 F_4.5` in mJy, `bmstp.grid.LOG10_F45_EDGES` -- the
-#: row's one outside y-axis label below, real mathtext subscripts
-#: throughout (owner's ruling 2026-09-11 addendum), bold by
-#: `plot_style.apply_style`'s own `axes.labelweight` since it is set as
-#: the axes' own ylabel, not a plain figure text.
+#: ): `log10 F_4.5` in mJy, `bmstp.grid.LOG10_F45_EDGES` -- the row's one
+#: outside y-axis label below, real mathtext subscripts throughout, bold
+#: by `plot_style.apply_style`'s own `axes.labelweight` since it is set
+#: as the axes' own ylabel, not a plain figure text.
 _SHARED_Y_LABEL = plot_style.label(r"$\log_{10} F_{4.5}$", "mJy")
 _X_LABEL = r"$\log_{10} x$"
 
 _ARM_NAME = {0: "Herschel", 1: "Planck"}
 
 #: Panel titles, axis labels and colourbar labels at a size a reader
-#: sees on a slide; tick labels smaller (owner's ruling 2026-09-11
-#: addendum, item 8); the vocabulary block stays at its own small size
-#: (`_CAPTION_FONTSIZE` below).
+#: sees on a slide; tick labels smaller; the vocabulary block stays at
+#: its own small size (`_CAPTION_FONTSIZE` below).
 _LABEL_FONTSIZE = 13
 _TICK_FONTSIZE = 10
 
-#: The wall (`x = a / A_s <= 1`, sec. 2): nothing is drawn past it
-#: (owner's ruling 2026-09-11 addendum, item 4).
+#: The secondary (twiny) decade axis, a supporting readout of `a` in
+#: magnitudes rather than a primary axis label: never below 8 pt.
+_SECONDARY_FONTSIZE = 8
+
+#: The wall (`x = a / A_s <= 1`, sec. 2): nothing is drawn past it.
 _LOG10_X_MIN, _LOG10_X_MAX = -3.0, 0.0
 
 #: The caption block's own type size and wrap width, chosen so the
@@ -110,7 +111,7 @@ _CAPTION_TOP_PAD_IN = 0.20
 _CAPTION_BOTTOM_PAD_IN = 0.15
 
 #: Room, inches, for row 2's own x-axis tick labels and "log10 x" label
-#: below its panels, ahead of the caption strip (W66al rule 3).
+#: below its panels, ahead of the caption strip.
 AXIS_LABEL_MARGIN_IN = 0.35
 
 
@@ -312,9 +313,8 @@ def _draw_figure(config, region, data):
     x_edges, b_edges, support = data["x_edges"], data["b_edges"], data["support"]
     joint, share = data["joint"], data["share"]
 
-    # The source's own name, sightline column, arm and distance (owner's
-    # ruling 2026-09-11 addendum, item 1): moved out of the title into
-    # the caption block, `KAPPA_*` dropped entirely.
+    # The source's own name, sightline column, arm and distance move out
+    # of the title into the caption block; `KAPPA_*` is dropped entirely.
     r = regions_module.REGIONS_BY_NAME[region]
     name_med = dtab["name"][idx_median].decode("utf-8")
     arm_med = _ARM_NAME[int(dtab["arm"][idx_median])]
@@ -331,11 +331,11 @@ def _draw_figure(config, region, data):
     row_h = 3.2
     # Row 2's own x-axis tick labels and "log10 x" label draw BELOW its
     # axes at a fixed offset matplotlib chooses, not inside `row_h` --
-    # without this margin the caption strip's own top edge sat exactly at
-    # row 2's bottom edge and those labels overlapped the caption text
-    # (owner's ruling 2026-09-11, W66al rule 3). Reserved the same way
-    # `atlas.render`'s own `MARGIN_BOTTOM_IN` reserves room for its
-    # bottom row's tick labels, ahead of its own caption strip.
+    # without this margin the caption strip's own top edge would sit
+    # exactly at row 2's bottom edge and those labels would overlap the
+    # caption text. Reserved the same way `atlas.render`'s own
+    # `MARGIN_BOTTOM_IN` reserves room for its bottom row's tick labels,
+    # ahead of its own caption strip.
     page_h = margin_t + 2 * row_h + row_gap + AXIS_LABEL_MARGIN_IN + caption_block_h
     page_w = PAGE_W_IN
     usable_w = page_w - margin_l - margin_r
@@ -343,15 +343,17 @@ def _draw_figure(config, region, data):
 
     fig = plot_style.new_sized_figure(page_w, page_h)
 
-    # Row 1's colour scale (module docstring): one log norm over the
-    # joint `P(C, cell | s)`, spanning all six classes and every SUPPORT
+    # Row 1's colour scale (module docstring): a LogNorm over the joint
+    # `P(C, cell | s)` ITSELF, spanning all six classes and every SUPPORT
     # cell (the excluded cells never enter the norm, since they carry no
-    # probability). Row 2's colour scale is fixed, linear 0-1 (module
-    # docstring: the class share is a probability, not a density).
-    log_joint = {cls: np.where(support[:, None], np.log10(np.where(support[:, None], joint[cls], 1.0)), np.nan)
-                 for cls in CLASS_ORDER}
-    all_log = np.concatenate([log_joint[cls][support, :].ravel() for cls in CLASS_ORDER])
-    norm1 = Normalize(vmin=float(all_log.min()), vmax=float(all_log.max()))
+    # probability) -- the bar's own ticks then read as probabilities
+    # (e.g. 1e-8 .. 1e-2), matching its label `$P(C, x, F_{4.5} \mid s)$`
+    # rather than that quantity's log10. Row 2's colour scale is fixed,
+    # linear 0-1 (module docstring: the class share is a probability,
+    # not a density).
+    joint_masked = {cls: np.where(support[:, None], joint[cls], np.nan) for cls in CLASS_ORDER}
+    all_vals = np.concatenate([joint_masked[cls][support, :].ravel() for cls in CLASS_ORDER])
+    norm1 = LogNorm(vmin=float(all_vals.min()), vmax=float(all_vals.max()))
     norm2 = Normalize(vmin=0.0, vmax=1.0)
     cmap1 = plt.get_cmap("viridis").copy()
     cmap1.set_bad("white")
@@ -367,7 +369,7 @@ def _draw_figure(config, region, data):
             ax = fig.add_axes([x0 / page_w, y0 / page_h, shape_w / page_w, row_h / page_h])
             extent = [x_edges[0], x_edges[-1], b_edges[0], b_edges[-1]]
             if i == 0:
-                im1 = ax.imshow(log_joint[cls].T, origin="lower", aspect="auto",
+                im1 = ax.imshow(joint_masked[cls].T, origin="lower", aspect="auto",
                                  extent=extent, cmap=cmap1, norm=norm1)
             else:
                 im2 = ax.imshow(share_masked[cls].T, origin="lower", aspect="auto",
@@ -375,8 +377,7 @@ def _draw_figure(config, region, data):
             # The support boundary, `log10 x = 0` (`x = 1`), marked on
             # every panel of both rows.
             ax.axvline(0.0, color="white", lw=0.7, linestyle="--", alpha=0.85)
-            # The wall: nothing beyond `log10 x = 0` is drawn (owner's
-            # ruling 2026-09-11 addendum, item 4).
+            # The wall: nothing beyond `log10 x = 0` is drawn.
             ax.set_xlim(_LOG10_X_MIN, _LOG10_X_MAX)
             ax.set_xlabel(_X_LABEL, fontsize=_LABEL_FONTSIZE)
             ax.tick_params(labelsize=_TICK_FONTSIZE)
@@ -389,16 +390,16 @@ def _draw_figure(config, region, data):
             k_hi = int(np.floor(xlim[1] + log_a_col))
             decades = np.arange(k_lo, k_hi + 1)
             ax2.set_xticks(decades - log_a_col)
-            ax2.set_xticklabels(["$10^{%d}$" % k for k in decades], fontsize=5)
-            ax2.tick_params(length=2, pad=1, labelsize=5)
+            ax2.set_xticklabels(["$10^{%d}$" % k for k in decades], fontsize=_SECONDARY_FONTSIZE)
+            ax2.tick_params(length=2, pad=1, labelsize=_SECONDARY_FONTSIZE)
             if c == 0:
                 ax2.text(1.0, 1.05, plot_style.label("a", "mag"), transform=ax2.transAxes,
-                         fontsize=5.5, ha="right", va="bottom")
+                         fontsize=_SECONDARY_FONTSIZE, ha="right", va="bottom")
             ax.set_title(cls, fontsize=_LABEL_FONTSIZE, pad=18)
             if c == 0:
                 # Bold as `plot_style.apply_style`'s own `axes.labelweight`
                 # requires -- set as the axes' own ylabel, never a plain
-                # figure text (owner's ruling 2026-09-11 addendum, item 3).
+                # figure text.
                 ax.set_ylabel(_SHARED_Y_LABEL, fontsize=_LABEL_FONTSIZE)
 
     cax1_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / page_w,
@@ -409,15 +410,14 @@ def _draw_figure(config, region, data):
     cbar1.ax.tick_params(labelsize=_TICK_FONTSIZE)
 
     cax2_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / page_w,
-                 (caption_block_h) / page_h, 0.22 / page_w, row_h / page_h]
+                 (AXIS_LABEL_MARGIN_IN + caption_block_h) / page_h, 0.22 / page_w, row_h / page_h]
     cax2 = fig.add_axes(cax2_rect)
     cbar2 = fig.colorbar(im2, cax=cax2)
     cbar2.set_label(r"$P(C \mid x, F_{4.5}, s)$", fontsize=_LABEL_FONTSIZE)
     cbar2.ax.tick_params(labelsize=_TICK_FONTSIZE)
 
-    # The title carries only the region and what the page is (owner's
-    # ruling 2026-09-11 addendum, item 1); the median source's own
-    # details are the caption block's `source_line` above.
+    # The title carries only the region and what the page is; the median
+    # source's own details are the caption block's `source_line` above.
     fig.suptitle("%s -- the prior at its median source" % region,
                  fontsize=_LABEL_FONTSIZE, y=1.0 - 0.15 / page_h)
 

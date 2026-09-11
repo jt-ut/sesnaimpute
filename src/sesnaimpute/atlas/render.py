@@ -98,9 +98,9 @@ CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
 CLASS_PROB_FLOOR = 1.0e-4
 
 #: Panel titles and colourbar labels at a size a reader sees on a slide;
-#: tick labels smaller (owner's ruling 2026-09-11 addendum, item 8, the
-#: two atlas pages' own convention -- `atlas.protostars`'s own
-#: `_colorbar` path is unaffected, it is not one of these two pages).
+#: tick labels smaller -- the two atlas pages' own convention;
+#: `atlas.protostars`'s own `_colorbar` path is unaffected, it is not
+#: one of these two pages.
 LABEL_FONTSIZE = 13
 TICK_FONTSIZE = 10
 
@@ -132,7 +132,10 @@ PAGE_WIDTH_IN, PAGE_HEIGHT_IN = 16.0, 9.0
 #: Page furniture, inches: room outside the panel grid for the left
 #: column's Dec tick labels, the bottom row's RA tick labels, and the
 #: two-line suptitle above.
-MARGIN_LEFT_IN, MARGIN_RIGHT_IN = 0.55, 0.15
+#: Widened over its earlier 0.55 in for the 13 pt panel titles/labels at
+#: a narrow region's own aspect, whose Dec tick labels otherwise overhang
+#: the left edge by 0.03-0.17 in.
+MARGIN_LEFT_IN, MARGIN_RIGHT_IN = 0.75, 0.15
 MARGIN_TOP_IN, MARGIN_BOTTOM_IN = 0.62, 0.55
 GAP_X_IN, GAP_Y_IN = 0.10, 0.12
 
@@ -141,8 +144,7 @@ GAP_X_IN, GAP_Y_IN = 0.10, 0.12
 #: the earlier module's inset bar, they cost more page space on a
 #: bigger panel but never crowd a small one. Sized for a thin bar plus
 #: three two/three-character ticks and a two-line class-name title at
-#: `LABEL_FONTSIZE` (the page grows to fit, owner's ruling 2026-09-11
-#: addendum, item 8).
+#: `LABEL_FONTSIZE` (the page grows to fit).
 BAR_WIDTH_FRACTION = 0.30
 TITLE_HEIGHT_FRACTION = 0.20
 
@@ -441,7 +443,7 @@ def _panel_colorbar(fig, ax, im, label=None, log=False):
     show no labelled tick at all (a class held in one narrow decade,
     e.g. an intrinsic YSO share); there, intermediate (non-base) ticks
     are labelled too, so every colour bar carries at least two labelled
-    values (owner's ruling 2026-09-11, second addendum item 1)."""
+    values."""
     cax = ax.inset_axes([1.02, 0.0, 0.04, 1.0])
     cbar = fig.colorbar(im, cax=cax)
     if log:
@@ -459,12 +461,14 @@ def _panel_colorbar(fig, ax, im, label=None, log=False):
         else:
             cbar.locator = LogLocator(base=10.0, subs=np.arange(1, 10))
             cbar.formatter = FuncFormatter(lambda v, _pos: "%.2g" % v)
+            cbar.ax.yaxis.set_minor_formatter(NullFormatter())
+            cbar.ax.tick_params(which="minor", length=0)
     else:
         cbar.locator = MaxNLocator(nbins=3)
         cbar.formatter = FuncFormatter(lambda v, _pos: "%.2g" % v)
     cbar.update_ticks()
-    # Tick and label sizes a reader sees on a slide (owner's ruling
-    # 2026-09-11 addendum, item 8; the two atlas pages' own convention).
+    # Tick and label sizes a reader sees on a slide, the two atlas
+    # pages' own convention.
     cbar.ax.tick_params(labelsize=TICK_FONTSIZE, length=2, pad=1.0)
     cbar.outline.set_linewidth(0.5)
     if label:
@@ -666,8 +670,7 @@ def _build_prior_page(config, region, formats, view):
         # surveyed area and the per-class total-count ratio -- each its
         # own line here rather than in the suptitle, which has no room
         # for them on a narrow region. `bright3`/`bright10` stay in the
-        # product and the stage's own log, off this page (owner's
-        # ruling 2026-09-11, second addendum item 4).
+        # product and the stage's own log, off this page.
         extra_lines = []
         if view == "selection":
             total_predicted = float(prior["attrs"].get("TOTAL_PREDICTED", np.nan))
@@ -681,14 +684,9 @@ def _build_prior_page(config, region, formats, view):
             extra_lines.append("Monte Carlo error on the region total: +/- %.4g (%.2f%%)"
                                 % (mc_error, mc_pct))
             # The total-count check (sec. 8, sec. 9): the prior's own
-            # normalization against the survey's count, notated exactly
-            # as the owner's ruling states (second addendum item 5).
-            extra_lines.append(
-                "$N_{prior} / N_{catalog}$ = %.3f: the prior's expected number of cataloged "
-                "sources in the region (the selection densities summed over the sky pixels, "
-                "times the surveyed area) against the number of sources in the catalog -- the "
-                "check that the prior's normalization reproduces the survey's count; the "
-                "observations enter here only as that check." % ratio_po)
+            # normalization against the survey's count, the statement
+            # `captions.TOTAL_COUNT_CHECK`'s, never restated here.
+            extra_lines.append(captions.TOTAL_COUNT_CHECK.format(value=ratio_po))
             extra_lines.append("%s = %.4g" % (area_label, surveyed_area))
             extra_lines.append("Per-class total-count ratio: " + ", ".join(
                 "%s %.3g" % (cls, ratio) for cls, ratio in ratios))
@@ -733,7 +731,7 @@ def _build_prior_page(config, region, formats, view):
         # numbers above, which is why those now live in the caption
         # block instead.
         title = "%s -- prior atlas, %s view" % (region, view)
-        fig.suptitle(title, fontsize=11, y=1.0 - 0.10 / page_h_total)
+        fig.suptitle(title, fontsize=LABEL_FONTSIZE, y=1.0 - 0.10 / page_h_total)
 
         out_dir = os.path.join(config.data_root, "bmstp", "atlas", "figures")
         os.makedirs(out_dir, exist_ok=True)
@@ -858,7 +856,7 @@ def build_posterior_region(config, region, formats):
         two_band_frac = _two_band_fraction(config, region)
         title = ("%s -- posterior atlas: N($P$(YSO)$>$0.5) = %d, two-band fraction = %.3f"
                   % (region, n_yso_total, two_band_frac))
-        fig.suptitle(title + "\ngray: no sources in pixel", fontsize=11, y=1.0 - 0.10 / page_h)
+        fig.suptitle(title + "\ngray: no sources in pixel", fontsize=LABEL_FONTSIZE, y=1.0 - 0.10 / page_h)
 
         out_dir = os.path.join(config.data_root, "fittp", "atlas", "figures")
         os.makedirs(out_dir, exist_ok=True)

@@ -938,6 +938,13 @@ def _observed_bright_counts(config, region, pix, f_lim):
 _ABOVE_BATCH_BUDGET_BYTES = 512 * 1024 * 1024
 _N_ABOVE_TEMP_ARRAYS = 6
 
+#: STAR/PAHC's own template-weight factor (`_factor_marginal`) has an
+#: (n_pixel_batch, n_model, n_b) working set instead -- the register's
+#: model count can run to several hundred, far larger than the shape
+#: grid's own n_x (128), so it is its own bound (`arg`, `p_val`, `term`
+#: and the `pi_theta_f * term` product).
+_N_FACTOR_TEMP_ARRAYS = 4
+
 
 def _above_batch_size(n_x, n_b):
     """Pixels per batch so `n_pixel_batch * n_x * n_b * 8 bytes *
@@ -947,12 +954,19 @@ def _above_batch_size(n_x, n_b):
     return max(1, _ABOVE_BATCH_BUDGET_BYTES // row_bytes)
 
 
+def _above_factor_batch_size(n_model, n_b):
+    """Pixels per batch for STAR/PAHC's own `_factor_marginal` working
+    set, the same 512 MB budget (rule 10b) applied to its `(n_pixel_batch,
+    n_model, n_b)` shape rather than the shape grid's `(n_x, n_b)`."""
+    row_bytes = n_model * n_b * 8 * _N_FACTOR_TEMP_ARRAYS
+    return max(1, _ABOVE_BATCH_BUDGET_BYTES // row_bytes)
+
+
 def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve):
-    """The owner's ruling 2026-09-11 (briefs/W66al.md rule 1): per
-    admitted pixel, the deterministic sum `Sum_cells h_C(cell; grain) *
+    """Per admitted pixel, the deterministic sum `Sum_cells h_C(cell; grain) *
     f_C(F_j; pixel) * 1[F_obs(cell) > F_0]` that `N_ABOVE_C(pixel) =
-    A_C(pixel) *` this sum multiplies (SPEC_BMSTP_DRAFT.md sec. 8's
-    intrinsic-view addendum). `h_C` is the class's own RAW stored grain
+    A_C(pixel) *` this sum multiplies (SPEC_BMSTP_DRAFT.md sec. 8). `h_C`
+    is the class's own RAW stored grain
     shape (`reader.grid_all[grain]`, unit mass on the support -- no
     per-source column-kernel blur: this is a pixel-level sum, not a
     source's own read). `f_C` is 1 for GAL/YSO/AGB/H2S and, for STAR/PAHC,
@@ -965,9 +979,14 @@ def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve)
     class-specific case is needed here), `kappa_4.5` the I2 entry of the
     blended law at that extinction (`population.selection.kappa_hybrid`/
     `law_dense_weight`); `F_0 = f0[pixel]`, the pixel's own 4.5 um 50%
-    completeness limit. Batched over the pixel axis (`_above_batch_size`,
-    rule 10b): each batch holds one `(n_pixel_batch, n_x, n_b)` working
-    set, never the whole admitted-pixel grid at once."""
+    completeness limit. Batched over the pixel axis: each batch holds one
+    `(n_pixel_batch, n_x, n_b)` working set (`_above_batch_size`) and, for
+    STAR/PAHC, one `(n_pixel_batch, n_model, n_b)` working set for
+    `_factor_marginal` (`_above_factor_batch_size`) -- evaluated for the
+    BATCH's own pixels only, never the whole admitted-pixel axis at once
+    (a per-source-style call over every pixel at once ran 8.6 GB, Orion A
+    PAHC, to 27 GB, Cygnus X, since the model axis can run to several
+    hundred templates)."""
     x_centers = 0.5 * (reader.x_edges[:-1] + reader.x_edges[1:])  # log10 x
     b_centers = 0.5 * (reader.b_edges[:-1] + reader.b_edges[1:])  # log10 F_4.5
     x_lin = 10.0 ** x_centers
@@ -976,14 +995,10 @@ def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve)
     n_pix = a_col.size
     out = np.empty(n_pix, dtype=np.float64)
 
-    # STAR/PAHC's own template-weight factor at every pixel's own 8 um
-    # limit -- one call over the whole pixel axis, `d_pahc` reshaped to
-    # `(n_pix, 1, 1)` so `_factor_marginal`'s broadcast adds the pixel
-    # axis in front of its own `(n_model, n_b)` term (its own docstring).
-    f_c_pixel = (template_weights._factor_marginal(b_centers, reader, cls, d_pahc[:, None, None], curve)
-                 if cls in ("STAR", "PAHC") else None)  # (n_pix, n_b) or None (f_C == 1)
-
+    is_factor_cls = cls in ("STAR", "PAHC")
     batch = _above_batch_size(n_x, n_b)
+    if is_factor_cls:
+        batch = min(batch, _above_factor_batch_size(reader.c_theta.size, n_b))
     for start in range(0, n_pix, batch):
         stop = min(start + batch, n_pix)
         h_b = reader.grid_all[grain_of_pix[start:stop]].astype(np.float64)  # (n_p, n_x, n_b)
@@ -993,8 +1008,14 @@ def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve)
         f_min = f0[start:stop, None] * 10.0 ** (0.4 * kappa45 * a)  # (n_p, n_x): F_j needed to clear F_0
         above = f_j[None, None, :] > f_min[:, :, None]  # (n_p, n_x, n_b)
         term = h_b * above
-        if f_c_pixel is not None:
-            term = term * f_c_pixel[start:stop, None, :]
+        if is_factor_cls:
+            # STAR/PAHC's own template-weight factor at this batch's own
+            # pixels' 8 um limits only, `d_pahc` reshaped to
+            # `(n_p, 1, 1)` so `_factor_marginal`'s broadcast adds the
+            # pixel axis in front of its own `(n_model, n_b)` term.
+            f_c_batch = template_weights._factor_marginal(
+                b_centers, reader, cls, d_pahc[start:stop, None, None], curve)  # (n_p, n_b)
+            term = term * f_c_batch[:, None, :]
         out[start:stop] = term.sum(axis=(1, 2))
     return out
 
@@ -1015,7 +1036,7 @@ def build_region(config, region):
     (Herschel-convolved where it reaches) and its H2S-scaled density for
     YSO/H2S, and the counts law's single survey-wide density for GAL. It
     carries no selection and no error attribute of its own, and no page
-    draws its own ratio (owner's ruling 2026-09-11): `N_ABOVE_<C>` (deg^-2)
+    draws its own ratio: `N_ABOVE_<C>` (deg^-2)
     is `INTENSITY_<C>` times the deterministic (no draw) fraction of the
     class's own stored grain shape brighter, once dimmed by the pixel's
     own extinction column, than the pixel's own 4.5 um 50% completeness
@@ -1278,14 +1299,13 @@ def build_region(config, region):
         n_cat_bright3["H2S"] = density_h2s * frac_h2s_bright3_pix
         n_cat_bright10["H2S"] = density_h2s * frac_h2s_bright10_pix
 
-        # rule 1 (owner's ruling 2026-09-11, briefs/W66al.md): the
-        # intrinsic view above a fixed flux, deterministic, no draw.
+        # The intrinsic view above a fixed flux, deterministic, no draw.
         # `N_ABOVE_C(pixel) = A_C(pixel) * _above_fraction(...)`
         # (`_above_fraction`'s own docstring paragraph), read straight off
         # each class's own stored grain shape (`fittp.prior_reader.load`)
         # rather than the Monte Carlo members above -- the atlas's
         # intrinsic page draws this, not `INTENSITY_C`'s own ratio
-        # (SPEC_BMSTP_DRAFT.md sec. 8's addendum).
+        # (SPEC_BMSTP_DRAFT.md sec. 8).
         f0_pix = f_lim[:, IDX_I2]
         d_pahc_pix = -np.log10(f_lim[:, IDX_I4])
         curve = pahc_curve.read(config)
