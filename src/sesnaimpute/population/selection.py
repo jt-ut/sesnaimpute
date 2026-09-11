@@ -33,10 +33,10 @@ LAW_DIFFUSE = "draine_rv3.1"
 LAW_DENSE = "chapman2009_dense"
 
 #: The ramp's domain, A_K magnitudes: 0 (diffuse law only) at and below
-#: LAW_RAMP_LO, 1 (dense law only) at and above LAW_RAMP_HI. No literature
-#: source for these two numbers is found in SPEC_PRIORS.md, the bms_review
-#: docs, or the predecessor packages; none is cited here because none
-#: exists in the searched material.
+#: LAW_RAMP_LO, 1 (dense law only) at and above LAW_RAMP_HI -- the column
+#: regimes of Chapman et al. (2009, ApJ 690, 496): their lowest bin
+#: (A_Ks < 0.5) matches the diffuse curve, their 1 < A_Ks <= 2 bin is the
+#: dense curve, and the blend spans the bin between (SPEC_BMSTP sec 2).
 LAW_RAMP_LO = 0.5
 LAW_RAMP_HI = 1.0
 
