@@ -334,13 +334,17 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None, wei
     `block_total_se` below are what a region total's own error needs.
 
     `frac_bright3`/`frac_bright10` (sec. 9 "the bright-end count ratio"):
-    each member's own I2-band clearance probability `p[:, :, IDX_I2]`
-    (not the two-of-eight `accepted_prob`), restricted to draws whose
-    dimmed I2 (4.5 um) flux exceeds 3x/10x the pixel's own
-    `F_LIM_50_PIX_MJY[:, IDX_I2]` -- a member counts as bright only if I2
-    itself is accepted, matching the catalogue side's own requirement
-    that I2 be a measured band (`ORIGIN_FNU[:, I2] == 1`), not merely any
-    two-of-eight combination that leaves I2 unmeasured.
+    each member's own two-of-eight catalogued probability `accepted_prob`
+    (the SAME quantity `frac` averages), restricted to draws whose dimmed
+    I2 (4.5 um) flux exceeds 3x/10x the pixel's own
+    `F_LIM_50_PIX_MJY[:, IDX_I2]` -- a member counts as bright only if it
+    would be catalogued at all AND is bright on its own dimmed I2, the
+    exact condition the catalogue side applies (a catalogued source,
+    `ORIGIN_FNU[:, I2] == 1`, bright above the same multiple,
+    `_observed_bright_counts`): one bright test, stated once, so the two
+    sides of the ratio are the same population. I2 clearance alone would
+    admit members that never clear a second band and so could never be
+    catalogued, biasing the ratio high.
 
     `weight_pix` (n_pix,), optional: this pixel's own coefficient (e.g.
     density x coverage x pixel area) by which its `frac` is summed into
@@ -408,18 +412,21 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None, wei
         if block_sum is not None:
             block_sum += weight_pix[start:stop] @ accepted_prob
 
-        # the bright-end check (sec. 9): a member's own I2-band clearance
-        # probability, restricted to draws whose dimmed I2 flux clears
-        # 3x/10x this pixel's own I2 50% limit -- brighter than that,
-        # completeness is 1 on both sides, so this isolates the level
-        # from the faint extrapolation.
+        # the bright-end check (sec. 9): a member counts as bright only if
+        # it would be CATALOGUED (`accepted_prob`, the two-of-eight
+        # probability already computed above) AND its own dimmed I2 flux
+        # clears 3x/10x this pixel's own I2 50% limit -- brighter than
+        # that, completeness is 1 on both sides, so this isolates the
+        # level from the faint extrapolation. This is the catalogue
+        # side's exact condition (a catalogued, i.e. two-of-eight-accepted,
+        # source with `ORIGIN_FNU[:, I2] == 1` and bright I2 flux), not
+        # I2's own clearance alone.
         i2_lim_b = f_lim_b[:, IDX_I2:IDX_I2 + 1]  # (n_pix_batch, 1)
         flux_i2 = flux[:, :, IDX_I2]  # (n_pix_batch, n_mc)
-        p_i2 = p[:, :, IDX_I2]  # (n_pix_batch, n_mc)
         bright3 = flux_i2 > BRIGHT_MULT_3 * i2_lim_b
         bright10 = flux_i2 > BRIGHT_MULT_10 * i2_lim_b
-        frac_bright3[start:stop] = (p_i2 * bright3).mean(axis=1)
-        frac_bright10[start:stop] = (p_i2 * bright10).mean(axis=1)
+        frac_bright3[start:stop] = (accepted_prob * bright3).mean(axis=1)
+        frac_bright10[start:stop] = (accepted_prob * bright10).mean(axis=1)
 
         if tick is not None:
             tick(b + 1, n_batches)
@@ -654,7 +661,7 @@ def _draw_x(rng, p_x, n):
 def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, arm_in_sl, f_lim_in_sl,
                           loaded_profile, flux0_yso, cloud_frac_sl, d_front, d_back,
                           logsig_mean, logsig_std, giannini_ratios, width_dex, seed,
-                          weight_pix, eta_r):
+                          weight_pix, eta_r, l_of_pix_in_sl):
     """One sightline's YSO and H2S Monte Carlo draws, shared by every
     admitted pixel it parents: `(frac_yso, mc_yso, density_yso, frac_h2s,
     mc_h2s, frac_yso_bright3, frac_yso_bright10, frac_h2s_bright3,
@@ -691,11 +698,19 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
     * frac` by to build the region total; `total_se_yso`/`total_se_h2s`
     are the resulting Monte Carlo standard error this ONE sightline draw
     contributes to that total (`_accepted_fraction`'s `block_total_se`,
-    weighted by `density_yso` and, for H2S, `eta_r * eps_ext` also --
-    the region's own knot-driver convolution of the Herschel arm, a
-    deterministic rescaling applied by the caller after every
-    sightline's draw is in, changes H2S's mean level but not materially
-    the width of this shared draw's own noise, so it is not needed here)."""
+    weighted by `density_yso` for YSO). H2S's own weight is
+    `l_of_pix_in_sl * eta_r * eps_ext`: `l_of_pix_in_sl` is the SAME young-star
+    law `n_cat["H2S"]` is built from (sec. 5.6) -- the region's Herschel-arm
+    convolution where it reaches, `density_yso` (the point law) elsewhere --
+    not the point law `density_yso` itself; the standard error scales with
+    the mean it is a fraction of, so the weight the caller convolves must
+    be the one the density line uses, never the pre-convolution law.
+
+    `flux0_yso` is one region-wide fixed-seed draw, IDENTICAL at every
+    sightline: the YSO Monte Carlo error it contributes to a region total is
+    correlated across every sightline that shares it, not independent of the
+    other sightlines' own draws (`build_region`'s own docstring paragraph
+    states how the caller sums this)."""
     rng = np.random.RandomState(seed)
 
     p_x, _mo_x, _removed_frac = sample_cloud.sample_x(loaded_profile, sl_row, d_front, d_back)
@@ -716,13 +731,38 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
         ratio_draw = table[rng.randint(0, table.size, size=N_MC)]
         flux0_h2s[:, BAND_KEYS.index(band)] = 10.0 ** (log10_f_ks + ratio_draw)
     u_h2s = _draw_x(rng, p_x, N_MC)
-    weight_h2s = density_yso * eta_r * density_module.EPS_EXT * weight_pix
+    weight_h2s = l_of_pix_in_sl * eta_r * density_module.EPS_EXT * weight_pix
     frac_h2s, mc_h2s, frac_h2s_bright3, frac_h2s_bright10, _blk_h2s, total_se_h2s = _accepted_fraction(
         a_col_in_sl, u_h2s, flux0_h2s, f_lim_in_sl, width_dex, config, weight_pix=weight_h2s)
 
     return (frac_yso, mc_yso, density_yso, frac_h2s, mc_h2s,
             frac_yso_bright3, frac_yso_bright10, frac_h2s_bright3, frac_h2s_bright10,
             total_se_yso, total_se_h2s)
+
+
+def _herschel_convolved_law(config, region, pix, arm, density_yso_pix):
+    """H2S's sky density (sec. 5.6) is the young-star law convolved by the
+    knot-driver kernel on the Herschel arm, the region's convolved-law map
+    sampled at each pixel's own mean position (`knot_field.convolved_law`,
+    `mean_over_area`); a Planck pixel, or a Herschel pixel the map does not
+    reach, keeps the point law `density_yso_pix` already carries. Two
+    callers read this from the SAME deterministic `density_yso_pix`
+    (`population.yso.law_count`, no randomness): `build_region`'s own H2S
+    error weight, before the sightline Monte Carlo runs, and its H2S mean
+    density, after -- one function so the two agree exactly, never a
+    pre-convolution weight beside a convolved mean."""
+    law_map, law_wcs, knot_meta = knot_field.convolved_law(config, region)
+    l_of_pix = density_yso_pix.copy()
+    herschel_pix = arm == yso_module.PROVENANCE_HERSCHEL
+    if law_map is not None and herschel_pix.any():
+        gl_pix, gb_pix = hp.pix2ang(512, pix[herschel_pix], nest=True, lonlat=True)
+        width_deg = float(np.sqrt(_HPX512_PIXEL_DEG2))
+        l_convolved = knot_field.mean_over_area(law_map, law_wcs, gl_pix, gb_pix,
+                                                  width_deg, frame="galactic")
+        finite = np.isfinite(l_convolved)
+        idx = np.flatnonzero(herschel_pix)
+        l_of_pix[idx[finite]] = l_convolved[finite]
+    return l_of_pix
 
 
 def _gal_members(config, rng, n_mc):
@@ -873,12 +913,21 @@ def build_region(config, region):
         # once here rather than per tile.
         agb_pool = _agb_shell_pool(config)
 
-        # the region total's own Monte Carlo error (sec. 8), accumulated
-        # as a sum of independent-block variances -- the draw is shared
-        # within a tile/sightline/region, not per pixel (`_accepted_
-        # fraction`'s own docstring), so a total's error is the sum of
-        # each independent draw's own contribution's variance, never a
-        # sum over pixels.
+        # the region total's own Monte Carlo error (sec. 8): each block's
+        # draw is shared within its own tile/sightline/region, not per
+        # pixel (`_accepted_fraction`'s own docstring). STAR/AGB/PAHC draw
+        # independently PER TILE (each tile resamples its own star-family
+        # population fresh) and GAL is one single region-wide block, so
+        # both add in quadrature, `total_var += se**2`, as they always
+        # have. YSO's `flux0_yso` and H2S's own density weight are instead
+        # ONE region-wide, deterministic construction shared by every
+        # sightline (`_yso_template_pool`, `_herschel_convolved_law`), so a
+        # sightline's own fluctuation about that shared construction is
+        # correlated, not independent, with every other sightline's -- the
+        # YSO block's per-sightline standard errors are summed LINEARLY
+        # over all sightlines, and H2S's likewise, each block's linear sum
+        # squared once into `total_var` after the sightline loop, never
+        # added sightline by sightline in quadrature.
         total_var = 0.0
 
         def _one(tile_id):
@@ -983,9 +1032,16 @@ def build_region(config, region):
         # nearest sample -- a pixel is much larger than the map's own
         # downsampled grid); a Planck pixel, or a Herschel pixel the
         # convolved map does not reach, keeps the law at its own column.
-        # Needed here, before the sightline draw, to weight each
-        # sightline's own contribution to H2S's total Monte Carlo error.
+        # `L` is entirely deterministic (`population.yso.law_count`, no
+        # random draw), so it is built here, before the sightline Monte
+        # Carlo, from the same `a_col_gas * cloud_frac` every sightline
+        # itself computes (`_build_one_sightline`'s own `density_yso`) --
+        # `_herschel_convolved_law` is the one function both this weight
+        # and H2S's mean density below read, so they never disagree.
         eta_r = density_module.ETA.get(region, density_module.ETA_ELSEWHERE)
+        density_yso_pix_law = yso_module.law_count(
+            config, region, a_col_gas * cloud_frac_by_sl[sl_row_of_pix], arm)
+        l_of_pix_for_weight = _herschel_convolved_law(config, region, pix, arm, density_yso_pix_law)
 
         def _one_sl(sl_row):
             m = sl_row_of_pix == sl_row
@@ -995,7 +1051,7 @@ def build_region(config, region):
                 loaded_profile, flux0_yso, float(cloud_frac_by_sl[sl_row]), d_front, d_back,
                 logsig_mean, logsig_std, giannini_ratios, width_dex[m],
                 MC_SEED + _SEED_OFFSET_SIGHTLINE + sl_row,
-                coverage[m] * _HPX512_PIXEL_DEG2, eta_r)
+                coverage[m] * _HPX512_PIXEL_DEG2, eta_r, l_of_pix_for_weight[m])
             return m, f_y, e_y, d_y, f_h, e_h, fb3_y, fb10_y, fb3_h, fb10_h, se_y, se_h
 
         frac_h2s_pix = np.full(n_pix, np.nan, dtype=np.float64)
@@ -1003,6 +1059,16 @@ def build_region(config, region):
         frac_h2s_bright10_pix = np.full(n_pix, np.nan, dtype=np.float64)
         density_yso_pix = np.full(n_pix, np.nan, dtype=np.float64)
         results_sl = Parallel(n_jobs=n_jobs)(delayed(_one_sl)(r) for r in sls_here)
+        # rule (1): YSO's `flux0_yso` and H2S's own weight (above) are each
+        # ONE region-wide, deterministic construction shared by every
+        # sightline, so the Monte Carlo noise about that shared
+        # construction is correlated across sightlines, not independent --
+        # each block's per-sightline standard errors are summed LINEARLY
+        # here and squared once, below, into the region total's variance
+        # (never sightline-by-sightline in quadrature, which is only
+        # correct for independent draws, e.g. the tile-drawn star families).
+        se_yso_sum = 0.0
+        se_h2s_sum = 0.0
         for i, (m, f_y, e_y, d_y, f_h, e_h, fb3_y, fb10_y, fb3_h, fb10_h, se_y, se_h) in enumerate(results_sl):
             n_cat["YSO"][m] = d_y * f_y
             mc_err["YSO"][m] = e_y
@@ -1013,25 +1079,17 @@ def build_region(config, region):
             n_cat_bright10["YSO"][m] = d_y * fb10_y
             frac_h2s_bright3_pix[m] = fb3_h
             frac_h2s_bright10_pix[m] = fb10_h
-            total_var += se_y ** 2 + se_h ** 2
+            se_yso_sum += se_y
+            se_h2s_sum += se_h
             st.tick(i + 1, len(sls_here), "sightlines")
+        total_var += se_yso_sum ** 2 + se_h2s_sum ** 2
 
         # this atlas's own INTRINSIC YSO density (before retention),
         # multiplied by P3's own `ON_GRID_YSO` at the pixel's sightline:
         # the SAME retained density P1 reports as `DENSITY_YSO`.
         density_yso_retained_pix = density_yso_pix * on_grid_yso_by_sl_row[sl_row_of_pix]
 
-        law_map, law_wcs, knot_meta = knot_field.convolved_law(config, region)
-        l_of_pix = density_yso_pix.copy()
-        herschel_pix = arm == yso_module.PROVENANCE_HERSCHEL
-        if law_map is not None and herschel_pix.any():
-            gl_pix, gb_pix = hp.pix2ang(512, pix[herschel_pix], nest=True, lonlat=True)
-            width_deg = float(np.sqrt(_HPX512_PIXEL_DEG2))
-            l_convolved = knot_field.mean_over_area(law_map, law_wcs, gl_pix, gb_pix,
-                                                      width_deg, frame="galactic")
-            finite = np.isfinite(l_convolved)
-            idx = np.flatnonzero(herschel_pix)
-            l_of_pix[idx[finite]] = l_convolved[finite]
+        l_of_pix = _herschel_convolved_law(config, region, pix, arm, density_yso_pix)
         density_h2s_before = density_yso_pix * eta_r * density_module.EPS_EXT
         density_h2s = l_of_pix * eta_r * density_module.EPS_EXT
         n_cat["H2S"] = density_h2s * frac_h2s_pix
