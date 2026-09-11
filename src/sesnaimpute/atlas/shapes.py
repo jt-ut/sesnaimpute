@@ -33,9 +33,9 @@ DENSITY `Lambda_C`, common to every class at the source rather than
 per class: `Lambda_floor(s) = grid.FLOOR * max over classes and cells of
 Lambda_C(cell; s)` (support cells only); where every class was below it
 the six classes read exactly equal, one sixth apiece, and the likelihood
-is left to decide. Both the support predicate and the common floor are
-defined here, locally, for now; they belong in `bmstp/grid.py` and
-`fittp/prior_reader.py`, read from there once those carry them.
+is left to decide. The support is `bmstp.grid.N_X_SUPPORT`, the floor
+`fittp.prior_reader.common_floor` -- the same two definitions the fitter's
+read uses, imported, never restated.
 
 The colourbars carry `plot_style.label`; the page prints, below the
 rows, `captions.SHAPES_ROW1`, `captions.SHAPES_ROW2` and
@@ -238,23 +238,21 @@ def _build_region_data(config, region):
         on_grid_c[cls] = _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2s,
                                          on_grid_gal, idx_median)
 
-    # The support: `x = a / A_s <= 1` by definition, so a cell whose LEFT
-    # edge already sits at or past `log10 x = 0` is entirely outside the
-    # prior (the edge convention that places a mark exactly at `x = 1`
-    # in the cell below it, `bmstp.grid.bin`, leaves cell 95 -- the last
-    # cell below the edge -- as the last cell IN the support). Both rows
-    # below sum over `support` only; the excluded cells are drawn blank
-    # (`_draw_figure`).
-    outside = x_edges[:-1] >= 0.0
-    support = ~outside
+    # The support: `x = a / A_s <= 1` by definition; the grid's own
+    # `N_X_SUPPORT` is the count of cells inside it (`bmstp.grid`). Both
+    # rows below sum over `support` only; the excluded cells are drawn
+    # blank (`_draw_figure`).
+    support = np.zeros(x_edges.size - 1, dtype=bool)
+    support[:grid.N_X_SUPPORT] = True
 
-    # The one common floor, formed locally (module docstring):
-    # `Lambda_floor(s) = grid.FLOOR * max` over classes and SUPPORT
-    # cells of the raw `Lambda_C`, then every class's `Lambda_C` is
-    # floored at this one shared value -- a cell where every class was
-    # below it now reads exactly equal across classes.
+    # The one common floor, the fitter's own rule (`prior_reader.
+    # common_floor`): `Lambda_floor(s)` from the six classes' peaks over
+    # the SUPPORT cells of the raw `Lambda_C`; every class's `Lambda_C`
+    # is floored at this one shared value, so a cell where every class
+    # is below it reads exactly equal across classes.
     lambda_stack = np.stack([lam[cls] for cls in CLASS_ORDER])
-    lambda_floor = float(grid.FLOOR * lambda_stack[:, support, :].max())
+    peaks = [lambda_stack[k, support, :].max(keepdims=False) * np.ones(1) for k in range(len(CLASS_ORDER))]
+    lambda_floor = float(prior_reader.common_floor(peaks)[0])
     lam_floored = {cls: np.where(support[:, None], np.maximum(lam[cls], lambda_floor), 0.0)
                    for cls in CLASS_ORDER}
     all_below_floor = np.all(lambda_stack <= lambda_floor, axis=0) & support[:, None]
