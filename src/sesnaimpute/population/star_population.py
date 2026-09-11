@@ -263,7 +263,7 @@ def _populated_edge_indices(populated, n_bin):
 
 
 def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
-                  w_g, w_ks, populated_g, populated_ks, u_star, u_front):
+                  w_g, w_ks, populated_g, populated_ks, u_star, u_front, region):
     """Per star, `(W, WEIGHT_RULE)` (module docstring). `w_joint`/`w_g`/
     `w_ks` are the tables this tile actually reads from -- its own, or
     (an excluded tile) the region-pooled `W_REGION_*`, chosen by the
@@ -367,6 +367,20 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
         # bright end only: the same joint-or-placement rule, at the
         # clamped populated bright-edge bin.
         default=np.where(joint_here, joint_val, placement_val))
+
+    # no silent NaN (CODING_RULES 5/5b): the survey pool exists so every
+    # marginal bin has a weight, so a star reaching here with neither
+    # anchor finite (both bins uncalibrated even after the pool) is an
+    # upstream defect, never a value to carry through the product.
+    non_finite = ~np.isfinite(weight)
+    if np.any(non_finite):
+        bad = np.flatnonzero(non_finite)
+        bins = sorted({(round(float(g_edges[bin_g[i]]), 3), round(float(g_edges[bin_g[i] + 1]), 3),
+                        round(float(ks_edges[bin_ks[i]]), 3), round(float(ks_edges[bin_ks[i] + 1]), 3))
+                       for i in bad})
+        raise ValueError(
+            "population.star_population.star_weights: region %r has %d star(s) with "
+            "a non-finite selected weight, in (G edge, Ks edge) bins %s" % (region, bad.size, bins))
     return weight, rule, bin_g, bin_ks
 
 
@@ -682,7 +696,7 @@ def tile_centre_lb(pix256_t):
 
 
 def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, curve,
-                     pointing_l, pointing_b, present_pointings, front_edge_pc):
+                     pointing_l, pointing_b, present_pointings, front_edge_pc, region):
     """One tile's placement, weight, partition and brightness units, built
     from ONE pointing's simulated stars only (owner ruling 2026-09-06:
     each tile is assigned to its nearest pointing by tile centre; spec
@@ -734,7 +748,8 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     w, rule, bin_g, bin_ks = star_weights(
         g_obs, ks_obs, weights["g_edges"], weights["ks_edges"],
         w_joint, weights["use_joint"][t], w_g, w_ks,
-        weights["populated_g"], weights["populated_ks"] & weights["measured_ks"][t], u_i, u_front_tile)
+        weights["populated_g"], weights["populated_ks"] & weights["measured_ks"][t], u_i, u_front_tile,
+        region)
 
     # the partition (spec section 3): a REWEIGHTING of this tile's own W,
     # never a filter -- w_star + w_agb == w row by row.
@@ -813,7 +828,7 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
 
     def _one_tile(t):
         result = _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, curve,
-                                  pointing_l, pointing_b, present_pointings, front_edge_pc)
+                                  pointing_l, pointing_b, present_pointings, front_edge_pc, region)
         if st is not None:
             with _tick_lock:
                 _done_count[0] += 1
