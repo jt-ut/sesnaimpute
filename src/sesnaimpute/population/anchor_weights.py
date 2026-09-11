@@ -398,10 +398,17 @@ def fit_tile_weights(n_obs, n_pred, excluded, min_counts=MIN_COUNTS,
     excluded) no longer stays at unity. It takes `w_pool[k]`, the
     SURVEY-POOLED ratio for this bin (`survey_pooled_weights`, summed
     over every region's own populated tiles) -- never 1.0, the
-    uncalibrated TRILEGAL level. `w_pool` is `None` only when a caller
-    is computing the pool itself and has none yet to fall back on; in
-    that one case the bin is dropped from the pool sum (see
-    `survey_pooled_weights`), not set to unity.
+    uncalibrated TRILEGAL level. Where the pool itself carries no usable
+    value for this bin either -- `w_pool` is `None` (the caller is
+    computing the pool and has none yet), or `w_pool[k]` is itself not
+    finite (`survey_pooled_weights` leaves a bin with zero summed
+    predicted counts at NaN) or not positive, or the bin has no matching
+    edge in the pool's own axis (`_pool_at_region_bins`) -- the bin is
+    left NOT FINITE (`w[:, k] = w_region[k] = nan`), never at the
+    initialised 1.0: a finite-but-uncalibrated weight would be invisible
+    to the `isfinite` marginal-fallback test `star_population.star_weights`
+    runs on it, and the ruling is "never 1.0", not "never 1.0 except when
+    unmeasured."
 
     Returns `populated` (bin had at least one unmasked tile of its OWN
     region -- the explicit flag item 3 asks for, replacing the `w_region
@@ -433,6 +440,17 @@ def fit_tile_weights(n_obs, n_pred, excluded, min_counts=MIN_COUNTS,
                 w[:, k] = w_pool[k]
                 w_region[k] = w_pool[k]
                 pooled[k] = True
+            else:
+                # neither this region nor the survey pool (absent, or
+                # itself NaN where the pool's own sum_pred is zero, or
+                # unmatched by `_pool_at_region_bins`) has evidence for
+                # this bin: leave it NOT FINITE rather than at the
+                # initialised 1.0, so a downstream `isfinite` test (the
+                # marginal fallback in `star_population.star_weights`)
+                # reads it as unmeasured instead of as a calibrated
+                # weight; no star is ever handed this uncalibrated level.
+                w[:, k] = np.nan
+                w_region[k] = np.nan
             continue
         populated[k] = True
         pooled_fit = shrink_log_normal(ratio[:, k], sigma[:, k], mask=mask_k)
@@ -913,18 +931,19 @@ def build_region(config, region, clusters, w_pool_g, w_pool_ks, ks_pool_lower, k
     n_obs_joint_flat = n_obs_joint.reshape(n_tile, n_g * n_ks)
     n_pred_joint_flat = n_pred_joint.reshape(n_tile, n_g * n_ks)
     # the joint grid has no survey-pooled counterpart (item 1 asks for the
-    # G/Ks marginals only); an all-masked joint bin stays at unity, but
-    # `use_joint` below never selects it -- the marginal weights are what
-    # a star actually falls back to (star_population.star_weights), the
-    # joint table is a refinement only where the region's own crossmatch
-    # cleared MIN_COUNTS and the cell was fitted.
+    # G/Ks marginals only); an all-masked joint bin is left NOT FINITE
+    # (`fit_tile_weights`' no-pool branch), and `use_joint` below never
+    # selects it anyway -- the marginal weights are what a star actually
+    # falls back to (star_population.star_weights), the joint table is a
+    # refinement only where the region's own crossmatch cleared
+    # MIN_COUNTS and the cell was fitted.
     fit_joint = fit_tile_weights(n_obs_joint_flat, n_pred_joint_flat, excluded)
     w_joint = fit_joint["w"].reshape(n_tile, n_g, n_ks)
     w_region_joint = fit_joint["w_region"].reshape(n_g, n_ks)
     joint_fitted = fit_joint["populated"].reshape(n_g, n_ks)
     # decision 3: the joint cell is used only where it was fitted -- a
     # nonzero observed count alone is not enough, since 1-24 crossmatched
-    # sources leave the cell unfitted and `w_joint` at the uncalibrated 1.0.
+    # sources, or n_pred < MIN_COUNTS, leave the cell unfitted.
     use_joint = (n_obs_joint > 0.0) & joint_fitted[None, :, :]
 
     faint_g = faint_trend_dex_per_mag(fit_g["w_region"], hist["g_edges"], fit_g["populated"])
