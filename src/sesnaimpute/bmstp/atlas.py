@@ -160,9 +160,13 @@ def _pixel_column(config, pix):
     `sky/derived/adopted/extinction_adopted_sightline.hdf5` (survey-wide,
     no region argument) carries `A_K`/`PROVENANCE` at that granule for
     every source-bearing sightline, so every admitted pixel resolves --
-    no NaN. The atlas's own column is what a source's light passes
-    through, so it reads extinction here; its YSO density instead comes
-    from `bmstp.density`'s product, which keeps the gas column."""
+    no NaN. This is the column a member's own light passes through, so
+    it dims every class here; the young-star law and the knot density
+    instead read `_pixel_gas_column`'s gas column below, the quantity
+    Pokhrel's law was measured on (SPEC_BMSTP_DRAFT.md sec. 0 "column",
+    sec. 5.5, the same read `bmstp.density` uses) -- the two differ by
+    `F_EXTINCTION >= 1` (`sky/derived/column.py`), so using this one for
+    the law would inflate it by `F_EXTINCTION**2`."""
     parent256 = pix // 4
     path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "sightline")
     if not os.path.exists(path):
@@ -182,6 +186,36 @@ def _pixel_column(config, pix):
         raise ValueError("bmstp.atlas: %d admitted pixel(s) have no sightline column in %s"
                           % (int(np.sum(~found)), path))
     return a_k[hit], prov[hit]
+
+
+def _pixel_gas_column(config, pix):
+    """The pixel's own GAS column, from the sightline it is a child of --
+    the same nesting `_pixel_column` uses (`pix // 4` into the nside-256
+    parent). `sky/derived/adopted/column_adopted_sightline.hdf5`
+    (survey-wide, no region argument) carries `A_K` at that granule, the
+    quantity the young-star law and the knot density are evaluated on
+    (SPEC_BMSTP_DRAFT.md sec. 5.5): starlight suffers the extinction
+    column `_pixel_column` returns, but Pokhrel's star-gas law was
+    measured against the gas column, not against extinction inflated by
+    `F_EXTINCTION`."""
+    parent256 = pix // 4
+    path = config_module.product_path(config, "sky/derived", "adopted", "column", "sightline")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "bmstp.atlas: no gas sightline column at %s -- run the "
+            "'sesnaimpute.sky.derived.column' RUNBOOKtp.sh line first" % path)
+    with h5py.File(path, "r") as f:
+        sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
+        a_k = np.asarray(f["A_K"][:], dtype=np.float64)
+    order = np.argsort(sl_pix)
+    loc = np.searchsorted(sl_pix[order], parent256)
+    loc = np.minimum(loc, sl_pix.size - 1)
+    hit = order[loc]
+    found = sl_pix[hit] == parent256
+    if not np.all(found):
+        raise ValueError("bmstp.atlas: %d admitted pixel(s) have no gas sightline column in %s"
+                          % (int(np.sum(~found)), path))
+    return a_k[hit]
 
 
 def _pixel_tile(config, region, pix):
@@ -617,7 +651,7 @@ def _draw_x(rng, p_x, n):
     return 10.0 ** log10_u
 
 
-def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_in_sl,
+def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, arm_in_sl, f_lim_in_sl,
                           loaded_profile, flux0_yso, cloud_frac_sl, d_front, d_back,
                           logsig_mean, logsig_std, giannini_ratios, width_dex, seed,
                           weight_pix, eta_r):
@@ -632,11 +666,13 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_i
     placement `x` is drawn here, per sightline, from this sightline's own
     `p(x)` on the cloud interval (`bmstp.sample_cloud.sample_x`'s binned
     return, `_draw_x`); density `population.yso.law_count` on the CLOUD'S
-    own share of the column, `a_col_in_sl * cloud_frac_sl`
-    (`bmstp.density._cloud_column_fraction`, W26) -- the count check
-    compares intrinsic members through the pixel's own completeness
-    below, so no on-grid factor enters here (a member below the grid's
-    retention edge is simply never accepted, sec. 8).
+    own share of the GAS column, `a_col_gas_in_sl * cloud_frac_sl`
+    (`bmstp.density._cloud_column_fraction`, W26; `a_col_in_sl`, the
+    extinction column, is kept for the members' own dimming below,
+    never for the law) -- the count check compares intrinsic members
+    through the pixel's own completeness below, so no on-grid factor
+    enters here (a member below the grid's retention edge is simply
+    never accepted, sec. 8).
     H2S (sec. 5.6): 2.12 um surface brightness from the region's own
     `LOGSIG_MEAN`/`LOGSIG_STD` lognormal, carried into Ks
     (`population.h2s.knot_ks_log10_flux`) and the four IRAC bands (a
@@ -663,7 +699,7 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, arm_in_sl, f_lim_i
     rng = np.random.RandomState(seed)
 
     p_x, _mo_x, _removed_frac = sample_cloud.sample_x(loaded_profile, sl_row, d_front, d_back)
-    a_cloud_in_sl = a_col_in_sl * cloud_frac_sl
+    a_cloud_in_sl = a_col_gas_in_sl * cloud_frac_sl
     density_yso = yso_module.law_count(config, region, a_cloud_in_sl, arm_in_sl)
 
     u_yso = _draw_x(rng, p_x, N_MC)
@@ -798,6 +834,7 @@ def build_region(config, region):
         n_pix = pix.size
         coverage = _coverage(config, region, pix)
         a_col, arm = _pixel_column(config, pix)
+        a_col_gas = _pixel_gas_column(config, pix)
         tile_of_pix, n_tile_filled = _pixel_tile(config, region, pix)
 
         n_cat = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
@@ -954,7 +991,7 @@ def build_region(config, region):
             m = sl_row_of_pix == sl_row
             (f_y, e_y, d_y, f_h, e_h,
              fb3_y, fb10_y, fb3_h, fb10_h, se_y, se_h) = _build_one_sightline(
-                config, region, sl_row, a_col[m], arm[m], f_lim[m],
+                config, region, sl_row, a_col[m], a_col_gas[m], arm[m], f_lim[m],
                 loaded_profile, flux0_yso, float(cloud_frac_by_sl[sl_row]), d_front, d_back,
                 logsig_mean, logsig_std, giannini_ratios, width_dex[m],
                 MC_SEED + _SEED_OFFSET_SIGHTLINE + sl_row,
