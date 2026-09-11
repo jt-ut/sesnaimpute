@@ -88,7 +88,7 @@ CLASS_ORDER = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
 #: Every class reads the one common brightness axis (sec. 2, H2S included
 #: ): `log10 F_4.5` in mJy, `bmstp.grid.LOG10_F45_EDGES` -- the
 #: row's one outside y-axis label below.
-_SHARED_Y_LABEL = "log10 F_4.5   [mJy]"
+_SHARED_Y_LABEL = plot_style.label("log10 F_4.5", "mJy")
 
 #: The one shared caption below the page, the spec's own term for `x`
 #: (sec. 0 vocabulary): every panel's short per-panel `log10 x` xlabel
@@ -406,8 +406,13 @@ def _draw_figure(config, region, dtab, idx_median, panels, share_smooth):
                 im1 = ax.imshow(np.log10(p["density"]).T, origin="lower", aspect="auto",
                                  extent=[p["x_edges"][0], p["x_edges"][-1], p["b_edges"][0], p["b_edges"][-1]],
                                  cmap=cmap1, norm=norm1)
-                ax.text(0.02, 0.03, "mass=%.4f\non_grid=%.4f\npeak=(%.2f, %.2f)"
-                        % (p["mass"], p["on_grid"], p["peak_x"], p["peak_b"]),
+                # `A_C(s)` moves into this corner text (spelled "area
+                # density" here, never `A_C`) because the symbol collides
+                # with the top axis's extinction `A` (owner's ruling
+                # 2026-09-10); the row-1 title above carries the class
+                # name alone.
+                ax.text(0.02, 0.03, "mass=%.4f\non_grid=%.4f\npeak=(%.2f, %.2f)\narea density = %.3g deg^-2"
+                        % (p["mass"], p["on_grid"], p["peak_x"], p["peak_b"], p["intensity"]),
                         transform=ax.transAxes, fontsize=5.5, color="white", va="bottom")
             else:
                 s = share_smooth[cls]
@@ -424,16 +429,23 @@ def _draw_figure(config, region, dtab, idx_median, panels, share_smooth):
             ax.set_xticks(xt)
             ax2 = ax.twiny()
             ax2.set_xlim(ax.get_xlim())
-            ax2.set_xticks(xt)
-            ax2.set_xticklabels(["%.3g" % (a_col_src * 10.0 ** v) for v in xt], fontsize=5)
+            # The top axis ticks at DECADES OF `a` itself (not of `x`,
+            # which under a non-power-of-ten `A_s` lands off-decade and
+            # prints overlapping labels like 0.000313/3.13): pick the
+            # integer powers of ten within the panel's own `log10 x`
+            # range, place them at `log10 x = k - log10(A_s)`, and label
+            # them as powers of ten so no label overruns its own panel.
+            log_a_col = np.log10(a_col_src)
+            xlim = ax.get_xlim()
+            k_lo = int(np.ceil(xlim[0] + log_a_col))
+            k_hi = int(np.floor(xlim[1] + log_a_col))
+            decades = np.arange(k_lo, k_hi + 1)
+            ax2.set_xticks(decades - log_a_col)
+            ax2.set_xticklabels(["$10^{%d}$" % k for k in decades], fontsize=5)
             ax2.tick_params(length=2, pad=1, labelsize=5)
             if c == 0:
-                ax2.set_xlabel("a  [A_K mag]", fontsize=5.5, labelpad=1)
-            if i == 0:
-                title = "%s  A_C(s) = %.3g deg$^{-2}$" % (cls, p["intensity"])
-            else:
-                title = "%s smoothed share" % cls
-            ax.set_title(title, fontsize=8.5 if i == 0 else 9, weight="bold", pad=16)
+                ax2.set_xlabel(plot_style.label("a", "mag"), fontsize=5.5, labelpad=1)
+            ax.set_title(cls, fontsize=8.5 if i == 0 else 9, pad=16)
             if c == 0:
                 fig.text(x0 / PAGE_W_IN - 0.30 / PAGE_W_IN, (y0 + 0.5 * row_h) / PAGE_H_IN,
                           _SHARED_Y_LABEL, rotation=90, va="center", ha="center", fontsize=7)
@@ -441,12 +453,12 @@ def _draw_figure(config, region, dtab, idx_median, panels, share_smooth):
     cax1_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / PAGE_W_IN,
                  (margin_b + row_h + row_gap) / PAGE_H_IN, 0.22 / PAGE_W_IN, row_h / PAGE_H_IN]
     cax1 = fig.add_axes(cax1_rect)
-    fig.colorbar(im1, cax=cax1, label="log10 h_C(x, F_4.5)   prior shape density [dex$^{-2}$]")
+    fig.colorbar(im1, cax=cax1, label=plot_style.label("Prior Shape Density", "log10 dex$^{-2}$"))
 
     cax2_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / PAGE_W_IN,
                  margin_b / PAGE_H_IN, 0.22 / PAGE_W_IN, row_h / PAGE_H_IN]
     cax2 = fig.add_axes(cax2_rect)
-    fig.colorbar(im2, cax=cax2, label="smoothed class share of the prior at (x, F_4.5)")
+    fig.colorbar(im2, cax=cax2, label=plot_style.label("Prior Fractional Share", None))
 
     r = regions_module.REGIONS_BY_NAME[region]
     name_med = dtab["name"][idx_median].decode("utf-8")

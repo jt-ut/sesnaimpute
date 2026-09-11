@@ -26,11 +26,14 @@ An admitted pixel with no sources of its own (P11's `N_SOURCES == 0`, or
 a pixel P11 omits) is painted flat neutral grey on every posterior-
 derived panel, masked out before the Gaussian smoothing so it never
 bleeds into an occupied neighbour's own value, rather than dropped as
-transparent; the posterior figure's caption says so. Panels fill
-row-major, in that order, into the grid `page_geometry` picks (sec.
-below); the prior figure's total-count ratio (`RATIO_<CLS>`) and the
-posterior figure's `N(P(YSO)>0.5)` count and two-band fraction sit in
-each figure's own caption line rather than any panel title.
+transparent; the posterior figure's caption says so. The prior figure's
+8 panels fill a FIXED four-column, two-stacked-panel grid (A/B | C/D |
+E/F | G/H: A = column, B = prior source density, C..H the six classes),
+its own panel scale still derived from the region's aspect; the
+posterior figure's 8 panels fill row-major into the grid `page_geometry`
+picks (sec. below). The prior figure's total-count ratio (`RATIO_<CLS>`)
+and the posterior figure's `N(P(YSO)>0.5)` count and two-band fraction
+sit in each figure's own caption line rather than any panel title.
 
 Colour maps and scales follow the convention the earlier package's own
 sky-atlas figure used (`sesnacomplete.bms_prior.validation.sky_atlas`):
@@ -436,6 +439,37 @@ def _colorbar(fig, im, rect, page_w, page_h):
     return cbar
 
 
+def _panel_colorbar(fig, ax, im, label=None):
+    """The panel's own colour bar, inset into its own right edge and
+    spanning exactly its height -- axes coordinates work for WCSAxes, so
+    no free-floating bar rectangle (`_bar_rect`) is needed for the prior
+    atlas page."""
+    cax = ax.inset_axes([1.02, 0.0, 0.04, 1.0])
+    cbar = fig.colorbar(im, cax=cax)
+    cbar.locator = MaxNLocator(nbins=3)
+    cbar.formatter = FuncFormatter(lambda v, _pos: "%.2g" % v)
+    cbar.update_ticks()
+    cbar.ax.tick_params(labelsize=7, length=2, pad=1.0)
+    cbar.outline.set_linewidth(0.5)
+    if label:
+        cbar.set_label(label, fontsize=7)
+    return cbar
+
+
+def _fixed_geometry(aspect, cols, rows, page_w, page_h):
+    """The `(panel_w, panel_h, bar_w, title_h)` geometry `page_geometry`
+    would compute for a FIXED `cols`x`rows` grid, rather than searching
+    over column counts -- the prior atlas page's layout (four columns of
+    two stacked panels) is a fixed shape, not chosen for the region's own
+    aspect."""
+    usable_w = page_w - MARGIN_LEFT_IN - MARGIN_RIGHT_IN - (cols - 1) * GAP_X_IN
+    usable_h = page_h - MARGIN_TOP_IN - MARGIN_BOTTOM_IN - (rows - 1) * GAP_Y_IN
+    s = min(usable_w / (cols * (aspect + BAR_WIDTH_FRACTION)),
+            usable_h / (rows * (1.0 + TITLE_HEIGHT_FRACTION)))
+    return dict(cols=cols, rows=rows, panel_w=s * aspect, panel_h=s,
+                bar_w=s * BAR_WIDTH_FRACTION, title_h=s * TITLE_HEIGHT_FRACTION)
+
+
 def _require_depth_grid(config, region):
     """The depth-grid footprint, or `None` with a skip message -- both
     figures need it (sec. 8), P6 and P11 are each built on it already."""
@@ -475,34 +509,40 @@ def build_prior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAG
         share_grids = [_reproject(footprint_pix, share[:, i], grid_pix, shape)
                        for i in range(len(CLASSES))]
 
-        # The panels, row-major fill order: column, predicted count, the
-        # six prior shares -- 8 panels.
-        ratios = [(cls, float(prior["attrs"].get("RATIO_%s" % cls, np.nan))) for cls in CLASSES]
+        # Fixed layout (owner's ruling 2026-09-10): four columns of two
+        # stacked panels, A/B | C/D | E/F | G/H -- A = column, B = prior
+        # source density, C = GAL, D = STAR, E = PAHC, F = AGB, G = YSO,
+        # H = H2S. Row-major fill into a 4-column grid puts the top row
+        # at [A, C, E, G] and the bottom row at [B, D, F, H], which is
+        # exactly this column pairing.
+        def _class_panel(cls):
+            idx = CLASSES.index(cls)
+            return dict(data=share_grids[idx], cmap="viridis", norm=None, title=cls,
+                        cbar_label=plot_style.label("Prior Fractional Share", None), hatch=None)
+
         low_coverage = coverage_grid < 0.5
-        panels = [
-            dict(data=col_grid, cmap="magma", norm=_log_norm(col_grid),
-                 title="column $A_K$ (mag)", hatch=None),
-            dict(data=density_grid, cmap="viridis", norm=_log_norm(density_grid),
-                 title="predicted catalogued\nsources (deg$^{-2}$)",
-                 hatch=low_coverage if np.any(low_coverage) else None),
-        ]
-        panels += [dict(data=share_grids[i], cmap="viridis", norm=None,
-                        title="%s\nprior share" % cls, hatch=None)
-                   for i, cls in enumerate(CLASSES)]
+        col_panel = dict(data=col_grid, cmap="magma", norm=_log_norm(col_grid),
+                          title=plot_style.label("Column $A_K$", "mag"), cbar_label=None, hatch=None)
+        density_title = plot_style.label("Prior Source Density", "deg$^{-2}$").replace(" [", "\n[")
+        density_panel = dict(data=density_grid, cmap="viridis", norm=_log_norm(density_grid),
+                              title=density_title, cbar_label=None,
+                              hatch=coverage_grid if np.any(low_coverage) else None)
+        panels = [col_panel, _class_panel("GAL"), _class_panel("PAHC"), _class_panel("YSO"),
+                  density_panel, _class_panel("STAR"), _class_panel("AGB"), _class_panel("H2S")]
         n_panels = len(panels)
 
-        # `page_geometry` (ported and generalised from the earlier
-        # package's `sesnacomplete.bms_prior.validation.sky_atlas`) picks
-        # the column/row split that gives the largest common panel size
-        # on the fixed page.
+        # A fixed 4x2 grid, not `page_geometry`'s own column search --
+        # the prior page's layout is a fixed shape (above), only the
+        # common panel scale is derived from the region's own aspect.
         aspect = geom_grid["n_x"] / float(geom_grid["n_y"])
-        geom = page_geometry(aspect, n_panels, page_w, page_h)
+        geom = _fixed_geometry(aspect, 4, 2, page_w, page_h)
         cols = geom["cols"]
         last_row_of_col = _outer_rows(n_panels, cols)
 
         plot_style.apply_style()
         fig = plot_style.new_sized_figure(page_w, page_h)
 
+        ratios = [(cls, float(prior["attrs"].get("RATIO_%s" % cls, np.nan))) for cls in CLASSES]
         for i, p in enumerate(panels):
             row, col = divmod(i, cols)
             rect = _panel_rect(geom, i, page_w, page_h)
@@ -510,14 +550,14 @@ def build_prior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAG
                                  norm=p["norm"], title=p["title"],
                                  show_dec=col == 0, show_ra=row == last_row_of_col[col])
             if p["hatch"] is not None:
-                # Hatch only where the admitted footprint itself is
-                # low-coverage: `coverage_grid` is already NaN outside
-                # the footprint (sec. 8's own reprojection mask), and a
-                # NaN comparison is False, so this never hatches the
-                # white area outside the admitted pixels.
-                ax.contourf(p["hatch"].astype(float), levels=[0.5, 1.5],
-                            hatches=["//"], colors="none")
-            _colorbar(fig, im, _bar_rect(rect, geom), page_w, page_h)
+                # The surveyed-coverage floor, drawn on the density panel
+                # only, as one thin contour line outlining the
+                # well-covered footprint (owner's ruling 2026-09-10) --
+                # `coverage_grid` is already NaN outside the admitted
+                # footprint (sec. 8's own reprojection mask), so the line
+                # never crosses into the white area outside it.
+                ax.contour(p["hatch"], levels=[0.5], colors="white", linewidths=0.8)
+            _panel_colorbar(fig, ax, im, label=p["cbar_label"])
 
         total_predicted = float(prior["attrs"].get("TOTAL_PREDICTED", np.nan))
         total_observed = float(prior["attrs"].get("TOTAL_OBSERVED", np.nan))
@@ -528,11 +568,14 @@ def build_prior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAG
         # both the catalog and the model side (`bmstp.atlas`).
         bright3 = float(prior["attrs"].get("RATIO_BRIGHT3", np.nan))
         bright10 = float(prior["attrs"].get("RATIO_BRIGHT10", np.nan))
-        ratio_line = "total-count ratio: " + ", ".join(
+        ratio_line = ("total-count ratio: " + ", ".join(
             "%s %.3g" % (cls, ratio) for cls, ratio in ratios)
-        title = ("%s -- predicted/observed = %.4g/%.4g = %.3f, surveyed area %.4g deg$^2$, "
+            + "; white contour: surveyed IRAC coverage = 0.5")
+        area_label = plot_style.label("surveyed area", "deg$^{2}$")
+        title = ("%s -- predicted/observed = %.4g/%.4g = %.3f, %s = %.4g, "
                   "bright3 = %.3f, bright10 = %.3f"
-                  % (region, total_predicted, total_observed, ratio_po, surveyed_area, bright3, bright10))
+                  % (region, total_predicted, total_observed, ratio_po, area_label, surveyed_area,
+                     bright3, bright10))
         fig.suptitle(title + "\n" + ratio_line, fontsize=11, y=1.0 - 0.10 / page_h)
 
         out_dir = os.path.join(config.data_root, "bmstp", "atlas", "figures")
