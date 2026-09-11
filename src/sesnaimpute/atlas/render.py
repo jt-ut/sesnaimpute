@@ -26,14 +26,16 @@ An admitted pixel with no sources of its own (P11's `N_SOURCES == 0`, or
 a pixel P11 omits) is painted flat neutral grey on every posterior-
 derived panel, masked out before the Gaussian smoothing so it never
 bleeds into an occupied neighbour's own value, rather than dropped as
-transparent; the posterior figure's caption says so. The prior figure's
-8 panels fill a FIXED four-column, two-stacked-panel grid (A/B | C/D |
-E/F | G/H: A = column, B = prior source density, C..H the six classes),
-its own panel scale still derived from the region's aspect; the
-posterior figure's 8 panels fill row-major into the grid `page_geometry`
-picks (sec. below). The prior figure's total-count ratio (`RATIO_<CLS>`)
-and the posterior figure's `N(P(YSO)>0.5)` count and two-band fraction
-sit in each figure's own caption line rather than any panel title.
+transparent; the posterior figure's caption says so. Both figures' 8
+panels fill the SAME fixed four-column, two-stacked-panel grid (A/B |
+C/D | E/F | G/H: A = column, B = the row-1 counterpart -- prior source
+density for the prior figure, the posterior YSO count for the
+posterior figure -- C..H the six classes in the same column pairing),
+each figure's own panel scale derived from its region's aspect
+(`_atlas_page_size` below). The prior figure's total-count ratio
+(`RATIO_<CLS>`) and the posterior figure's `N(P(YSO)>0.5)` count and
+two-band fraction sit in each figure's own caption line rather than any
+panel title.
 
 Colour maps and scales follow the convention the earlier package's own
 sky-atlas figure used (`sesnacomplete.bms_prior.validation.sky_atlas`):
@@ -43,14 +45,12 @@ hides the spatial variation of the low-share classes, YSO first among
 them). That earlier figure's own `page_geometry` insets a colour bar
 into the panel when the footprint leaves clear room for one and sizes a
 3x2 class block plus one wide dust panel to fill a page that grows to
-fit its content; here every panel is an equal member of one grid with
-its own colour-bar strip (no panel is large enough to inset one), so
-`page_geometry` below generalises that rule to N equal panels on a
-FIXED page (a slide, 16x9in by default, `--page WxH` to override): for
-columns `c = 1..N` (rows `r = ceil(N/c)`), it picks the `c` that
-maximises the common panel scale the page allows, exactly as the
-earlier module picked the class block's shape from a short list of
-candidates.
+fit its content; here every panel of both figures is an equal member of
+the same fixed 4x2 grid, its own colour-bar strip inset into its own
+right edge (`_panel_colorbar`) rather than a free-floating rectangle,
+and the page itself (`_atlas_page_size`) is sized to that grid's own
+content at the region's own aspect, so the panels always fill the page
+with no letterboxing.
 """
 
 import argparse
@@ -92,9 +92,13 @@ SMOOTH_ARCMIN = float(np.sqrt(hp.nside2pixarea(NSIDE, degrees=True)) * 60.0)
 PAD_DISPLAY_PIXELS = 6
 
 # ---------------------------------------------------------------------------
-# page geometry -- every panel the same size, as large as a fixed page
-# allows, generalising the earlier package's own
-# `sesnacomplete.bms_prior.validation.sky_atlas.page_geometry`.
+# page geometry -- both atlas figures share one fixed 4x2 panel grid,
+# sized to its own content (`_atlas_page_size`) so the panels fill the
+# page at every region's own aspect, each panel's own colour bar inset
+# into its own right edge (`_panel_colorbar`); `_colorbar`'s older
+# free-floating-rectangle path, generalising the earlier package's own
+# `sesnacomplete.bms_prior.validation.sky_atlas.page_geometry`, is kept
+# only for `atlas.protostars`'s own layout.
 # ---------------------------------------------------------------------------
 
 #: The page a region's figure is drawn on, inches -- a slide by default;
@@ -116,59 +120,12 @@ GAP_X_IN, GAP_Y_IN = 0.10, 0.12
 BAR_WIDTH_FRACTION = 0.30
 TITLE_HEIGHT_FRACTION = 0.15
 
-#: Selection ties (within this fraction of the best scale found) go to
-#: the wider grid, which reads better than a tall stack -- the same
-#: rule the earlier module used to break ties between its own two
-#: candidate class-block shapes.
-GRID_TIE_FRACTION = 0.02
-
-
-def page_geometry(aspect, n_panels, page_w=PAGE_WIDTH_IN, page_h=PAGE_HEIGHT_IN):
-    """The `(cols, rows, panel_w, panel_h, bar_w, title_h)` that lays
-    `n_panels` equal panels of display-grid aspect `aspect` (width over
-    height) as large as the fixed `page_w` x `page_h` page allows, all
-    in inches.
-
-    For every candidate column count `c` (1..n_panels; rows `r =
-    ceil(n_panels / c)`), the common panel height `s` is capped by the
-    page width split `c` ways (each column costs a panel width `s *
-    aspect` plus its own colour-bar strip `s * BAR_WIDTH_FRACTION`) and
-    by the page height split `r` ways (each row costs a panel height
-    `s` plus its own title strip `s * TITLE_HEIGHT_FRACTION`); the `c`
-    that maximises `s` is picked, ties going to the wider grid.
-    """
-    candidates = []
-    for cols in range(1, n_panels + 1):
-        rows = -(-n_panels // cols)  # ceil
-        usable_w = page_w - MARGIN_LEFT_IN - MARGIN_RIGHT_IN - (cols - 1) * GAP_X_IN
-        usable_h = page_h - MARGIN_TOP_IN - MARGIN_BOTTOM_IN - (rows - 1) * GAP_Y_IN
-        if usable_w <= 0.0 or usable_h <= 0.0:
-            continue
-        s = min(usable_w / (cols * (aspect + BAR_WIDTH_FRACTION)),
-                usable_h / (rows * (1.0 + TITLE_HEIGHT_FRACTION)))
-        if s > 0.0:
-            candidates.append((cols, rows, s))
-    if not candidates:
-        raise ValueError(
-            "page_geometry: no arrangement of %d panels fits a %.3gx%.3gin "
-            "page at aspect %.3g" % (n_panels, page_w, page_h, aspect))
-    s_max = max(s for _, _, s in candidates)
-    cols, rows, s = max(
-        (c for c in candidates if c[2] >= s_max * (1.0 - GRID_TIE_FRACTION)),
-        key=lambda c: c[0])
-    panel_h = s
-    panel_w = s * aspect
-    bar_w = s * BAR_WIDTH_FRACTION
-    title_h = s * TITLE_HEIGHT_FRACTION
-    return dict(cols=cols, rows=rows, panel_w=panel_w, panel_h=panel_h,
-                bar_w=bar_w, title_h=title_h)
-
 
 def _panel_rect(geom, index, page_w, page_h):
     """The panel axes' `(x, y, w, h)` in inches from the page's lower
-    left, for panel `index` filled row-major into `geom`'s grid, and the
-    grid's own occupied width/height (for centring the grid on the
-    page when one dimension of `page_geometry` does not bind)."""
+    left, for panel `index` filled row-major into `geom`'s grid (as
+    `_atlas_page_size` lays it out), and the grid's own occupied width/
+    height (for centring the grid on the page)."""
     cols, rows = geom["cols"], geom["rows"]
     panel_w, panel_h = geom["panel_w"], geom["panel_h"]
     bar_w, title_h = geom["bar_w"], geom["title_h"]
@@ -182,14 +139,6 @@ def _panel_rect(geom, index, page_w, page_h):
     x = origin_x + col * (panel_w + bar_w + GAP_X_IN)
     y = origin_y + (rows - 1 - row) * (panel_h + title_h + GAP_Y_IN)
     return x, y, panel_w, panel_h
-
-
-def _bar_rect(panel_rect, geom):
-    """The colour-bar strip's `(x, y, w, h)` in inches, immediately to
-    the right of `panel_rect` inside the panel's own reserved `bar_w`."""
-    x, y, w, h = panel_rect
-    bar_w = geom["bar_w"]
-    return x + w + 0.22 * bar_w, y + 0.05 * h, 0.24 * bar_w, 0.90 * h
 
 
 def _frac(rect, page_w, page_h):
@@ -424,11 +373,10 @@ def _log_norm(grid):
 
 
 def _colorbar(fig, im, rect, page_w, page_h):
-    """A thin colour bar in its own reserved strip at `rect` (inches),
-    scaled to that panel's own data range -- every panel's bar is the
-    same width relative to its panel, sized by `page_geometry`'s own
-    `bar_w`, rather than a bar that costs a fixed share of a fixed-size
-    panel."""
+    """A thin colour bar in its own free-floating reserved strip at
+    `rect` (inches), scaled to that panel's own data range. Superseded
+    in both atlas pages by `_panel_colorbar`'s own inset bar; kept only
+    for `atlas.protostars`'s own layout, which computes its own `rect`."""
     cax = fig.add_axes(_frac(rect, page_w, page_h))
     cbar = fig.colorbar(im, cax=cax)
     cbar.locator = MaxNLocator(nbins=3)
@@ -442,8 +390,8 @@ def _colorbar(fig, im, rect, page_w, page_h):
 def _panel_colorbar(fig, ax, im, label=None, log=False):
     """The panel's own colour bar, inset into its own right edge and
     spanning exactly its height -- axes coordinates work for WCSAxes, so
-    no free-floating bar rectangle (`_bar_rect`) is needed for the prior
-    atlas page. `log`, for a `LogNorm`-scaled panel, ticks DECADES ONLY:
+    no free-floating bar rectangle is needed for either atlas page.
+    `log`, for a `LogNorm`-scaled panel, ticks DECADES ONLY:
     a linear `%.2g` formatter left the log axis's own automatic
     scientific-notation MINOR ticks in place, one of which ran off the
     bar (owner's ruling 2026-09-10)."""
@@ -464,16 +412,18 @@ def _panel_colorbar(fig, ax, im, label=None, log=False):
     return cbar
 
 
-#: The prior atlas page's own panel height, inches -- the one free scale
-#: of its fixed four-column, two-stacked-panel layout (below): the page
-#: itself is sized to this content, not the other way around, so the
-#: panels always fill the page regardless of a region's own footprint
-#: aspect (owner's ruling 2026-09-10).
-PRIOR_PANEL_HEIGHT_IN = 3.0
+#: An atlas page's own panel height, inches -- the one free scale of its
+#: fixed four-column, two-stacked-panel layout (below), shared by the
+#: prior and the posterior figure alike: the page itself is sized to
+#: this content, not the other way around, so the panels always fill
+#: the page regardless of a region's own footprint aspect (owner's
+#: ruling 2026-09-10).
+ATLAS_PANEL_HEIGHT_IN = 3.0
 
 
-def _prior_page_size(aspect, cols=4, rows=2, panel_h=PRIOR_PANEL_HEIGHT_IN):
-    """`(page_w, page_h, geom)` for the prior atlas page: `cols`x`rows`
+def _atlas_page_size(aspect, cols=4, rows=2, panel_h=ATLAS_PANEL_HEIGHT_IN):
+    """`(page_w, page_h, geom)` for an atlas page (the prior figure or
+    the posterior figure, both fixed `cols`x`rows` grids): `cols`x`rows`
     equal panels at the region's own `aspect`, each `panel_h` tall plus
     its own colour-bar strip and title strip, the page margins (left/
     right Dec and RA tick room, top suptitle room, bottom RA-label room)
@@ -553,13 +503,12 @@ def build_prior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAG
         n_panels = len(panels)
 
         # The page ITSELF is sized to the fixed 4x2 layout's content (not
-        # the other way around, unlike `page_geometry`'s search over a
-        # fixed page) -- `page_w`/`page_h` from the caller are ignored
-        # here, since the page's whole point is to fill exactly this
-        # content, at every aspect, with no letterboxing (owner's ruling
-        # 2026-09-10).
+        # the other way around) -- `page_w`/`page_h` from the caller are
+        # ignored here, since the page's whole point is to fill exactly
+        # this content, at every aspect, with no letterboxing (owner's
+        # ruling 2026-09-10).
         aspect = geom_grid["n_x"] / float(geom_grid["n_y"])
-        page_w, page_h, geom = _prior_page_size(aspect)
+        page_w, page_h, geom = _atlas_page_size(aspect)
         cols = geom["cols"]
         last_row_of_col = _outer_rows(n_panels, cols)
 
@@ -620,10 +569,11 @@ def build_prior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAG
 
 def build_posterior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAGE_HEIGHT_IN):
     """Writes the posterior-atlas figure (P11, 8 panels: column, the six
-    posterior means, `N(P(YSO)>0.5)`) under `fittp/atlas/figures/`, on
-    the SAME footprint as the prior figure's own (`catalog.depth_grid`).
-    The column panel reuses P6's own `A_COL_K` (P11 carries no column),
-    so this figure needs the prior atlas too."""
+    posterior means, the posterior YSO count) under `fittp/atlas/figures/`,
+    on the SAME footprint as the prior figure's own (`catalog.depth_grid`)
+    and the SAME fixed 4x2 layout the prior figure uses, so the two
+    pages read as one pair. The column panel reuses P6's own `A_COL_K`
+    (P11 carries no column), so this figure needs the prior atlas too."""
     post_path = config_module.product_path(config, "fittp", "atlas", "posterior", "hpx512", region=region)
     if not os.path.exists(post_path):
         print("atlas.render [%s]: no posterior atlas -- run RUNBOOKtp.sh's "
@@ -658,22 +608,40 @@ def build_posterior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h
         nyso_grid = _reproject(footprint_pix, n_yso_half, grid_pix, shape)
         gap_grid = _gap_grid(footprint_pix, gap_1d, grid_pix, shape)
 
-        # The panels, row-major fill order: column, the six posterior
-        # means, the YSO count -- 8 panels. Every posterior-derived
-        # panel (not the column, which P6 defines for every admitted
-        # pixel regardless of source count) is painted grey at a
-        # source-less pixel.
-        panels = [dict(data=col_grid, cmap="magma", norm=_log_norm(col_grid),
-                       title="column $A_K$ (mag)", grey=None)]
-        panels += [dict(data=mean_grids[i], cmap="viridis", norm=None,
-                        title="%s\nposterior mean P" % cls, grey=gap_grid)
-                   for i, cls in enumerate(CLASSES)]
-        panels.append(dict(data=nyso_grid, cmap="magma", norm=None,
-                           title="N($P$(YSO)$>$0.5)", grey=gap_grid))
+        # Fixed layout (owner's ruling 2026-09-10), the same one the
+        # prior figure uses: four columns of two stacked panels, A/B |
+        # C/D | E/F | G/H -- A = column, B = the posterior YSO count in
+        # the prior figure's "density" slot, C = GAL, D = STAR, E =
+        # PAHC, F = AGB, G = YSO, H = H2S. Every posterior-derived panel
+        # (not the column, which P6 defines for every admitted pixel
+        # regardless of source count) is painted grey at a source-less
+        # pixel.
+        def _class_panel(cls):
+            idx = CLASSES.index(cls)
+            return dict(data=mean_grids[idx], cmap="viridis", norm=None, title=cls,
+                        cbar_label=plot_style.label("Posterior Fractional Share", None),
+                        grey=gap_grid)
+
+        col_panel = dict(data=col_grid, cmap="magma", norm=_log_norm(col_grid),
+                          title=plot_style.label("Column $A_K$", "mag"), cbar_label=None, grey=None)
+        # N_YSO_ABOVE_HALF (P11) is a raw per-pixel COUNT of P(YSO)>0.5
+        # sources, never divided by the pixel's own solid angle -- unlike
+        # N_CAT_C (deg^-2 already), so this title carries no unit rather
+        # than a false "deg^-2" (owner's ruling 2026-09-10: label the
+        # nearest true description of what the panel draws).
+        nyso_panel = dict(data=nyso_grid, cmap="magma", norm=None,
+                           title=plot_style.label("Posterior YSO Count", None),
+                           cbar_label=None, grey=gap_grid)
+        panels = [col_panel, _class_panel("GAL"), _class_panel("PAHC"), _class_panel("YSO"),
+                  nyso_panel, _class_panel("STAR"), _class_panel("AGB"), _class_panel("H2S")]
         n_panels = len(panels)
 
+        # The page ITSELF is sized to the fixed 4x2 layout's content,
+        # the same helper the prior figure uses -- `page_w`/`page_h`
+        # from the caller are ignored here for the same reason (owner's
+        # ruling 2026-09-10).
         aspect = geom_grid["n_x"] / float(geom_grid["n_y"])
-        geom = page_geometry(aspect, n_panels, page_w, page_h)
+        page_w, page_h, geom = _atlas_page_size(aspect)
         cols = geom["cols"]
         last_row_of_col = _outer_rows(n_panels, cols)
 
@@ -687,7 +655,7 @@ def build_posterior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h
                                  norm=p["norm"], title=p["title"],
                                  show_dec=col == 0, show_ra=row == last_row_of_col[col],
                                  grey_grid=p["grey"])
-            _colorbar(fig, im, _bar_rect(rect, geom), page_w, page_h)
+            _panel_colorbar(fig, ax, im, label=p["cbar_label"], log=isinstance(p["norm"], LogNorm))
 
         n_yso_total = int(posterior["n_yso_half"].sum())
         two_band_frac = _two_band_fraction(config, region)
