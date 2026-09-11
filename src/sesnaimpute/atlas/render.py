@@ -1,8 +1,9 @@
 """The sky atlas figures (SPEC_BMSTP_DRAFT.md sec. 8; IMPLEMENTATION_
-BMSTP_DRAFT.md sec. 1.2 P6, sec. 1.3 P11). Two figures per region, the
-prior atlas's (`bmstp/atlas/figures/prior-atlas_<R>`, from P6) and the
-posterior atlas's (`fittp/atlas/figures/posterior-atlas_<R>`, from P11),
-each reprojecting the SAME footprint -- `catalog.depth_grid`'s admitted
+BMSTP_DRAFT.md sec. 1.2 P6, sec. 1.3 P11). Three figures per region: the
+prior atlas's two pages (`bmstp/atlas/figures/prior-atlas-intrinsic_<R>`
+and `prior-atlas-selection_<R>`, from P6) and the posterior atlas's one
+(`fittp/atlas/figures/posterior-atlas_<R>`, from P11), each reprojecting
+the SAME footprint -- `catalog.depth_grid`'s admitted
 nside-512 pixels (P6 and P11 are themselves both built on that axis) --
 onto its own tangent-plane display grid of 1' pixels centred on the
 region: the pixel's nearest nside-512 value (healpy `ang2pix`), then a
@@ -16,26 +17,34 @@ depth-grid footprint for both figures (rather than each atlas's own
 axis) makes their display grids identical pixel for pixel.
 
 Every panel of a figure is drawn at the same size and shares the
-region's own display-grid aspect. The prior figure: the column `A_K`
-(log scale), the total predicted catalogued density `Sigma_C N_CAT_C`
-(deg^-2, hatched where the surveyed IRAC-coverage fraction is below
-0.5), and the prior share `SHARE_C` per class in class order -- 8
-panels. The posterior figure: the same column `A_K`, the posterior mean
-`MEAN_P_C` per class in class order, and `N_YSO_ABOVE_HALF` -- 8 panels.
-An admitted pixel with no sources of its own (P11's `N_SOURCES == 0`, or
-a pixel P11 omits) is painted flat neutral grey on every posterior-
-derived panel, masked out before the Gaussian smoothing so it never
-bleeds into an occupied neighbour's own value, rather than dropped as
-transparent; the posterior figure's caption says so. Both figures' 8
-panels fill the SAME fixed four-column, two-stacked-panel grid (A/B |
-C/D | E/F | G/H: A = column, B = the row-1 counterpart -- prior source
-density for the prior figure, the posterior YSO count for the
-posterior figure -- C..H the six classes in the same column pairing),
-each figure's own panel scale derived from its region's aspect
-(`_atlas_page_size` below). The prior figure's total-count ratio
-(`RATIO_<CLS>`) and the posterior figure's `N(P(YSO)>0.5)` count and
-two-band fraction sit in each figure's own caption line rather than any
-panel title.
+region's own display-grid aspect. The prior atlas is two pages per
+region, one code path (`_build_prior_page`) parameterised by `view`:
+`prior-atlas-intrinsic_<R>` reads the product's `INTENSITY_C` (its sky
+density before the survey's selection) for the column-B density panel
+`Sigma_C A_C` and the six class panels `A_C / Sigma A`; `prior-atlas-
+selection_<R>` reads `N_CAT_C` (catalogued density) for the same slots,
+`Sigma_C N_CAT_C` hatched where the surveyed IRAC-coverage fraction is
+below 0.5. `atlas.captions` states which probability each class panel
+draws and the shared vocabulary; both are printed below the panel grid,
+the page growing taller to hold them rather than shrinking the type.
+The posterior figure carries the column `A_K`, the posterior
+mean `MEAN_P_C` per class in class order, and `N_YSO_ABOVE_HALF` -- 8
+panels. An admitted pixel with no sources of its own (P11's
+`N_SOURCES == 0`, or a pixel P11 omits) is painted flat neutral grey on
+every posterior-derived panel, masked out before the Gaussian smoothing
+so it never bleeds into an occupied neighbour's own value, rather than
+dropped as transparent; the posterior figure's caption says so. All
+three pages' 8 panels fill the SAME fixed four-column, two-stacked-panel
+grid (A/B | C/D | E/F | G/H: A = column, B = the row-1 counterpart --
+the density panel for a prior page, the posterior YSO count for the
+posterior page -- C..H the six classes in the same column pairing),
+each page's own panel scale derived from its region's aspect
+(`_atlas_page_size` below). The prior selection page's predicted/
+observed ratio and bright-source ratios, and the posterior figure's
+`N(P(YSO)>0.5)` count and two-band fraction, sit in each page's own
+caption line rather than any panel title; the intrinsic page's caption
+names the region only, since none of those selection-side numbers
+describe it.
 
 Colour maps and scales follow the convention the earlier package's own
 sky-atlas figure used (`sesnacomplete.bms_prior.validation.sky_atlas`):
@@ -55,6 +64,7 @@ with no letterboxing.
 
 import argparse
 import os
+import textwrap
 
 import astropy.units as u
 import h5py
@@ -66,7 +76,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LogNorm, Normalize
 from matplotlib.ticker import FuncFormatter, LogLocator, MaxNLocator, NullFormatter
 from scipy.ndimage import gaussian_filter
 
@@ -74,6 +84,7 @@ from sesnaimpute import config as config_module
 from sesnaimpute import plot_style
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.atlas import captions
 
 NSIDE = 512
 CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
@@ -161,19 +172,34 @@ def _outer_rows(n_panels, cols):
 # reading, reprojection, rendering
 # ---------------------------------------------------------------------------
 
-def _read_prior(path):
+def _read_prior(path, region, require_intensity):
     """The prior atlas (P6), sorted by pixel for the reprojection's
-    `searchsorted` lookup."""
+    `searchsorted` lookup. `INTENSITY_<C>` (the intrinsic view's own
+    per-pixel density) is required only for the intrinsic page
+    (`require_intensity`; the posterior page and the selection page read
+    this product only for `A_COL_K`/`N_CAT_C`) -- a product that lacks it
+    fails here, by name, rather than the intrinsic page silently falling
+    back to some other quantity."""
     with h5py.File(path, "r") as f:
         pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
         a_k = np.asarray(f["A_COL_K"][:], dtype=np.float64)
         coverage = np.asarray(f["COVERAGE"][:], dtype=np.float64)
         n_cat = np.stack([np.asarray(f["N_CAT_%s" % c][:], dtype=np.float64) for c in CLASSES], axis=1)
-        share = np.stack([np.asarray(f["SHARE_%s" % c][:], dtype=np.float64) for c in CLASSES], axis=1)
+        intensity = None
+        if require_intensity:
+            missing = [c for c in CLASSES if ("INTENSITY_%s" % c) not in f]
+            if missing:
+                raise KeyError(
+                    "atlas.render [%s]: prior atlas carries no INTENSITY_%s -- run "
+                    "RUNBOOKtp.sh's 'PY sesnaimpute.bmstp.atlas' line to rebuild it"
+                    % (region, missing[0]))
+            intensity = np.stack([np.asarray(f["INTENSITY_%s" % c][:], dtype=np.float64) for c in CLASSES], axis=1)
         attrs = dict(f.attrs)
     order = np.argsort(pix)
     return dict(pix=pix[order], a_k=a_k[order], coverage=coverage[order],
-                n_cat=n_cat[order], share=share[order], attrs=attrs)
+                n_cat=n_cat[order],
+                intensity=intensity[order] if intensity is not None else None,
+                attrs=attrs)
 
 
 def _read_posterior(path):
@@ -438,6 +464,81 @@ def _atlas_page_size(aspect, cols=4, rows=2, panel_h=ATLAS_PANEL_HEIGHT_IN):
     return page_w, page_h, geom
 
 
+#: The caption block's own type size and line pitch, inches -- chosen
+#: small enough that `atlas.captions.vocabulary_block()`'s eleven terms
+#: plus the two panel statements read as body text, not a footnote, at
+#: the wrap width `_caption_layout` derives from the page.
+CAPTION_FONT_SIZE = 8.0
+CAPTION_LINE_HEIGHT_IN = 0.145
+CAPTION_TOP_PAD_IN = 0.12
+CAPTION_BOTTOM_PAD_IN = 0.10
+
+#: Rough characters-per-inch for `CAPTION_FONT_SIZE` DejaVu Sans -- used
+#: only to size the page's own caption strip, not to typeset it exactly
+#: (matplotlib wraps nothing on its own), so the page grows enough that
+#: the caption never overruns the bottom margin.
+CAPTION_CHARS_PER_IN = 15.0
+
+
+def _prob_norm():
+    """A fixed linear 0-1 scale for a class panel's `P(C | ...)` colour
+    bar (the rules' "linear 0-1 scale"), the same on the intrinsic and
+    the selection page, so the two pages' class panels read on one scale
+    rather than each auto-ranging to its own pixel's max share."""
+    return Normalize(vmin=0.0, vmax=1.0)
+
+
+#: The two prior pages differ only in which stored quantity feeds the
+#: density and class panels, and in what the caption says about it
+#: (`atlas.captions`, never restated here) -- everything else in
+#: `_build_prior_page` is the one shared code path the rules ask for.
+VIEWS = {
+    "intrinsic": dict(
+        density_label="Prior Intrinsic Density",
+        class_cbar_label="P(C | pixel)",
+        class_caption=captions.ATLAS_INTRINSIC_CLASS,
+        total_caption=captions.ATLAS_INTRINSIC_TOTAL,
+        coverage_outline=False,
+    ),
+    "selection": dict(
+        density_label="Prior Selection Density",
+        class_cbar_label="P(C | pixel, catalogued)",
+        class_caption=captions.ATLAS_SELECTION_CLASS,
+        total_caption=captions.ATLAS_SELECTION_TOTAL,
+        coverage_outline=True,
+    ),
+}
+
+
+def _caption_block(view, extra_line=None):
+    """The text a prior page prints below its panel grid: the view's own
+    two `atlas.captions` statements, then `extra_line` if given (the
+    selection page's one Monte Carlo error line), then the shared
+    vocabulary in full -- imported, never restated, per the rules."""
+    spec = VIEWS[view]
+    parts = [spec["class_caption"], spec["total_caption"]]
+    if extra_line:
+        parts.append(extra_line)
+    parts.append("Vocabulary:\n" + captions.vocabulary_block())
+    return "\n\n".join(parts)
+
+
+def _caption_layout(text, page_w):
+    """`(wrapped_text, height_in)`: `text` hard-wrapped at the page's own
+    content width -- matplotlib draws `fig.text` as given, wrapping
+    nothing on its own, so an unwrapped paragraph runs off the page's
+    right edge on a narrow region -- and the height, inches, the page
+    must grow by to hold exactly that wrapped text (rules: "the page
+    growing to fit"), so the drawn block and the reserved strip always
+    agree because both come from the one wrap."""
+    wrap_chars = max(int((page_w - MARGIN_LEFT_IN - MARGIN_RIGHT_IN) * CAPTION_CHARS_PER_IN), 20)
+    wrapped = "\n".join("\n".join(textwrap.wrap(line, wrap_chars)) if line else ""
+                         for line in text.split("\n"))
+    n_lines = wrapped.count("\n") + 1
+    height = CAPTION_TOP_PAD_IN + n_lines * CAPTION_LINE_HEIGHT_IN + CAPTION_BOTTOM_PAD_IN
+    return wrapped, height
+
+
 def _require_depth_grid(config, region):
     """The depth-grid footprint, or `None` with a skip message -- both
     figures need it (sec. 8), P6 and P11 are each built on it already."""
@@ -449,9 +550,15 @@ def _require_depth_grid(config, region):
     return _read_depth_grid(config, region)
 
 
-def build_prior_region(config, region, formats):
-    """Writes the prior-atlas figure (P6, 8 panels: column, predicted
-    count, the six prior shares) under `bmstp/atlas/figures/`."""
+def _build_prior_page(config, region, formats, view):
+    """Writes one prior-atlas page (8 panels: column, the class-summed
+    density, the six class panels) under `bmstp/atlas/figures/` --
+    `prior-atlas-intrinsic_<R>` (`A_C`, before the survey's selection) or
+    `prior-atlas-selection_<R>` (`N_CAT_C`, after it), `view` selecting
+    which stored quantity feeds the density and class panels (`VIEWS`)
+    so the two pages are one code path rather than two copies that could
+    drift apart."""
+    spec = VIEWS[view]
     prior_path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
     if not os.path.exists(prior_path):
         print("atlas.render [%s]: no prior atlas -- run RUNBOOKtp.sh's "
@@ -460,95 +567,136 @@ def build_prior_region(config, region, formats):
     footprint_pix = _require_depth_grid(config, region)
     if footprint_pix is None:
         return None
-    prior = _read_prior(prior_path)
+    prior = _read_prior(prior_path, region, require_intensity=(view == "intrinsic"))
 
-    with progress.Stage("atlas.render.prior", region) as st:
+    with progress.Stage("atlas.render.prior.%s" % view, region) as st:
         geom_grid = _footprint_geometry(footprint_pix)
         wcs, grid_pix, shape = geom_grid["wcs"], geom_grid["grid_pix"], geom_grid["shape"]
 
         a_k = _align(footprint_pix, prior["pix"], prior["a_k"], np.nan)
         coverage = _align(footprint_pix, prior["pix"], prior["coverage"], np.nan)
-        n_cat_total = _align(footprint_pix, prior["pix"], prior["n_cat"].sum(axis=1), np.nan)
-        share = _align(footprint_pix, prior["pix"], prior["share"], np.nan)
+        # The view's own per-class quantity (A_C or N_CAT_C) and its
+        # class-summed total, from which BOTH the density panel and the
+        # class panels' P(C | ...) = class / total are drawn (sec. 8,
+        # `atlas.captions.ATLAS_INTRINSIC_*`/`ATLAS_SELECTION_*`).
+        class_values = prior["intensity"] if view == "intrinsic" else prior["n_cat"]
+        total = class_values.sum(axis=1)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            share = np.where(total[:, None] > 0, class_values / total[:, None], np.nan)
+        total_aligned = _align(footprint_pix, prior["pix"], total, np.nan)
+        share_aligned = _align(footprint_pix, prior["pix"], share, np.nan)
 
         col_grid = _reproject(footprint_pix, a_k, grid_pix, shape)
-        density_grid = _reproject(footprint_pix, n_cat_total, grid_pix, shape)
-        coverage_grid = _reproject(footprint_pix, coverage, grid_pix, shape)
-        share_grids = [_reproject(footprint_pix, share[:, i], grid_pix, shape)
+        density_grid = _reproject(footprint_pix, total_aligned, grid_pix, shape)
+        coverage_grid = (_reproject(footprint_pix, coverage, grid_pix, shape)
+                          if spec["coverage_outline"] else None)
+        share_grids = [_reproject(footprint_pix, share_aligned[:, i], grid_pix, shape)
                        for i in range(len(CLASSES))]
 
         # Fixed layout: four columns of two
-        # stacked panels, A/B | C/D | E/F | G/H -- A = column, B = prior
-        # source density, C = GAL, D = STAR, E = PAHC, F = AGB, G = YSO,
+        # stacked panels, A/B | C/D | E/F | G/H -- A = column, B = the
+        # view's density, C = GAL, D = STAR, E = PAHC, F = AGB, G = YSO,
         # H = H2S. Row-major fill into a 4-column grid puts the top row
         # at [A, C, E, G] and the bottom row at [B, D, F, H], which is
-        # exactly this column pairing.
+        # exactly this column pairing. Class panels share the fixed
+        # linear 0-1 probability scale (`_prob_norm`), not their own
+        # pixel's max, so the six panels compare directly.
         def _class_panel(cls):
             idx = CLASSES.index(cls)
-            return dict(data=share_grids[idx], cmap="viridis", norm=None, title=cls,
-                        cbar_label=plot_style.label("Prior Fractional Share", None), hatch=None)
+            return dict(data=share_grids[idx], cmap="viridis", norm=_prob_norm(), title=cls,
+                        cbar_label=plot_style.label(spec["class_cbar_label"], None), hatch=None)
 
-        low_coverage = coverage_grid < 0.5
         col_panel = dict(data=col_grid, cmap="magma", norm=_log_norm(col_grid),
                           title=plot_style.label("Column $A_K$", "mag"), cbar_label=None, hatch=None)
-        density_title = plot_style.label("Prior Source Density", "deg$^{-2}$").replace(" [", "\n[")
+        density_title = plot_style.label(spec["density_label"], "deg$^{-2}$").replace(" [", "\n[")
+        hatch = None
+        if coverage_grid is not None and np.any(coverage_grid < 0.5):
+            hatch = coverage_grid
         density_panel = dict(data=density_grid, cmap="viridis", norm=_log_norm(density_grid),
-                              title=density_title, cbar_label=None,
-                              hatch=coverage_grid if np.any(low_coverage) else None)
+                              title=density_title, cbar_label=None, hatch=hatch)
         panels = [col_panel, _class_panel("GAL"), _class_panel("PAHC"), _class_panel("YSO"),
                   density_panel, _class_panel("STAR"), _class_panel("AGB"), _class_panel("H2S")]
         n_panels = len(panels)
 
-        # The page ITSELF is sized to the fixed 4x2 layout's content (not
+        # The selection page's one Monte Carlo error line: the atlas's
+        # `N_CAT_C`/`TOTAL_PREDICTED` come from a Monte Carlo sample, so
+        # the product carries `TOTAL_PREDICTED_MC_ERROR` beside it; the
+        # intrinsic page carries no such line, since `INTENSITY_C` is a
+        # deterministic sum with no sampling error.
+        mc_line = None
+        if view == "selection":
+            total_predicted = float(prior["attrs"].get("TOTAL_PREDICTED", np.nan))
+            mc_error = float(prior["attrs"].get("TOTAL_PREDICTED_MC_ERROR", np.nan))
+            mc_pct = 100.0 * mc_error / total_predicted if total_predicted else float("nan")
+            mc_line = ("Monte Carlo error on the region total: +/- %.4g (%.2f%%)"
+                       % (mc_error, mc_pct))
+
+        # The panel grid is sized to the fixed 4x2 layout's content
+        # first; the caption block (below the grid) then grows the
+        # page's OWN height by exactly what it needs, so the grid itself
+        # never shrinks to make room.
         aspect = geom_grid["n_x"] / float(geom_grid["n_y"])
         page_w, page_h, geom = _atlas_page_size(aspect)
+        caption_text, caption_h = _caption_layout(_caption_block(view, extra_line=mc_line), page_w)
+        page_h_total = page_h + caption_h
         cols = geom["cols"]
         last_row_of_col = _outer_rows(n_panels, cols)
 
         plot_style.apply_style()
-        fig = plot_style.new_sized_figure(page_w, page_h)
+        fig = plot_style.new_sized_figure(page_w, page_h_total)
 
-        ratios = [(cls, float(prior["attrs"].get("RATIO_%s" % cls, np.nan))) for cls in CLASSES]
         for i, p in enumerate(panels):
             row, col = divmod(i, cols)
-            rect = _panel_rect(geom, i, page_w, page_h)
-            ax, im = _add_panel(fig, rect, page_w, page_h, wcs, p["data"], p["cmap"],
+            x, y, w, h = _panel_rect(geom, i, page_w, page_h)
+            rect = (x, y + caption_h, w, h)  # shifted up to clear the caption strip
+            ax, im = _add_panel(fig, rect, page_w, page_h_total, wcs, p["data"], p["cmap"],
                                  norm=p["norm"], title=p["title"],
                                  show_dec=col == 0, show_ra=row == last_row_of_col[col])
             if p["hatch"] is not None:
-                # The surveyed-coverage floor, drawn on the density panel
-                # only, as one thin contour line outlining the
-                # well-covered footprint --
-                # `coverage_grid` is already NaN outside the admitted
-                # footprint (sec. 8's own reprojection mask), so the line
-                # never crosses into the white area outside it.
+                # The surveyed-coverage floor, drawn on the selection
+                # page's density panel only, as one thin contour line
+                # outlining the well-covered footprint -- `coverage_grid`
+                # is already NaN outside the admitted footprint (sec. 8's
+                # own reprojection mask), so the line never crosses into
+                # the white area outside it.
                 ax.contour(p["hatch"], levels=[0.5], colors="white", linewidths=0.8)
             _panel_colorbar(fig, ax, im, label=p["cbar_label"], log=isinstance(p["norm"], LogNorm))
 
-        total_predicted = float(prior["attrs"].get("TOTAL_PREDICTED", np.nan))
-        total_observed = float(prior["attrs"].get("TOTAL_OBSERVED", np.nan))
-        surveyed_area = float(prior["attrs"].get("SURVEYED_AREA_DEG2", np.nan))
-        ratio_po = total_predicted / total_observed if total_observed else float("nan")
-        # sec. 9's bright-end check: the same total-count ratio above
-        # 3x/10x the pixel's own I2 50% limit, where completeness is 1 on
-        # both the catalog and the model side (`bmstp.atlas`).
-        bright3 = float(prior["attrs"].get("RATIO_BRIGHT3", np.nan))
-        bright10 = float(prior["attrs"].get("RATIO_BRIGHT10", np.nan))
-        ratio_line = ("total-count ratio: " + ", ".join(
-            "%s %.3g" % (cls, ratio) for cls, ratio in ratios)
-            + "; white contour: surveyed IRAC coverage = 0.5")
-        area_label = plot_style.label("surveyed area", "deg$^{2}$")
-        title = ("%s -- predicted/observed = %.4g/%.4g = %.3f, %s = %.4g, "
-                  "bright3 = %.3f, bright10 = %.3f"
-                  % (region, total_predicted, total_observed, ratio_po, area_label, surveyed_area,
-                     bright3, bright10))
-        fig.suptitle(title + "\n" + ratio_line, fontsize=11, y=1.0 - 0.10 / page_h)
+        fig.text(MARGIN_LEFT_IN / page_w, (caption_h - CAPTION_TOP_PAD_IN) / page_h_total,
+                  caption_text, fontsize=CAPTION_FONT_SIZE, va="top", ha="left")
+
+        # The predicted/observed ratio and the bright-source ratios
+        # describe the survey's selection, so they sit only on the
+        # selection page's caption line; the intrinsic page's suptitle
+        # names the region alone.
+        if view == "selection":
+            total_observed = float(prior["attrs"].get("TOTAL_OBSERVED", np.nan))
+            surveyed_area = float(prior["attrs"].get("SURVEYED_AREA_DEG2", np.nan))
+            ratio_po = total_predicted / total_observed if total_observed else float("nan")
+            # sec. 9's bright-end check: the same total-count ratio above
+            # 3x/10x the pixel's own I2 50% limit, where completeness is
+            # 1 on both the catalog and the model side (`bmstp.atlas`).
+            bright3 = float(prior["attrs"].get("RATIO_BRIGHT3", np.nan))
+            bright10 = float(prior["attrs"].get("RATIO_BRIGHT10", np.nan))
+            ratios = [(cls, float(prior["attrs"].get("RATIO_%s" % cls, np.nan))) for cls in CLASSES]
+            ratio_line = ("total-count ratio: " + ", ".join(
+                "%s %.3g" % (cls, ratio) for cls, ratio in ratios)
+                + "; white contour: surveyed IRAC coverage = 0.5")
+            area_label = plot_style.label("surveyed area", "deg$^{2}$")
+            title = ("%s -- predicted/observed = %.4g/%.4g = %.3f, %s = %.4g, "
+                      "bright3 = %.3f, bright10 = %.3f"
+                      % (region, total_predicted, total_observed, ratio_po, area_label, surveyed_area,
+                         bright3, bright10))
+            title = title + "\n" + ratio_line
+        else:
+            title = "%s -- prior atlas, intrinsic view" % region
+        fig.suptitle(title, fontsize=11, y=1.0 - 0.10 / page_h_total)
 
         out_dir = os.path.join(config.data_root, "bmstp", "atlas", "figures")
         os.makedirs(out_dir, exist_ok=True)
         paths = []
         for fmt in formats:
-            path = os.path.join(out_dir, "prior-atlas_%s.%s" % (region, fmt))
+            path = os.path.join(out_dir, "prior-atlas-%s_%s.%s" % (view, region, fmt))
             # No `bbox_inches="tight"`: that re-crops to content and
             # drifts the saved size away from the requested page size.
             fig.savefig(path, dpi=150)
@@ -558,6 +706,22 @@ def build_prior_region(config, region, formats):
         st.done(paths[0], n_x=geom_grid["n_x"], n_y=geom_grid["n_y"], n_admitted=footprint_pix.size,
                 cols=geom["cols"], rows=geom["rows"], panel_scale_in=geom["panel_h"])
     return paths
+
+
+def build_prior_intrinsic_region(config, region, formats):
+    """The prior atlas's intrinsic page (`_build_prior_page`, view
+    "intrinsic"): the sky density and class shares before the survey's
+    selection, `A_C` from the product's own `INTENSITY_C`."""
+    return _build_prior_page(config, region, formats, "intrinsic")
+
+
+def build_prior_selection_region(config, region, formats):
+    """The prior atlas's selection page (`_build_prior_page`, view
+    "selection"): the same layout after the survey's selection, `N_C`
+    from the product's own `N_CAT_C`, plus the coverage outline and the
+    predicted/observed and bright-source ratios the selection alone
+    determines."""
+    return _build_prior_page(config, region, formats, "selection")
 
 
 def build_posterior_region(config, region, formats):
@@ -582,7 +746,7 @@ def build_posterior_region(config, region, formats):
     if footprint_pix is None:
         return None
     posterior = _read_posterior(post_path)
-    prior = _read_prior(prior_path)
+    prior = _read_prior(prior_path, region, require_intensity=False)
 
     with progress.Stage("atlas.render.posterior", region) as st:
         geom_grid = _footprint_geometry(footprint_pix)
@@ -669,14 +833,16 @@ def build_posterior_region(config, region, formats):
 
 
 def build(config, regions=None, formats=("png", "pdf")):
-    """Per region, the prior-atlas figure (`bmstp/atlas/figures/`, when
-    P6 exists) and the posterior-atlas figure (`fittp/atlas/figures/`,
-    when P11 exists), on the same depth-grid footprint -- rendering, not
-    a build (no product is stored at display resolution), so a region
-    missing an input is skipped rather than failed."""
+    """Per region, the prior atlas's two pages (`bmstp/atlas/figures/`,
+    when P6 exists: intrinsic then selection) and the posterior-atlas
+    figure (`fittp/atlas/figures/`, when P11 exists), on the same
+    depth-grid footprint -- rendering, not a build (no product is stored
+    at display resolution), so a region missing an input is skipped
+    rather than failed."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     for region in region_names:
-        build_prior_region(config, region, formats)
+        build_prior_intrinsic_region(config, region, formats)
+        build_prior_selection_region(config, region, formats)
         build_posterior_region(config, region, formats)
 
 
