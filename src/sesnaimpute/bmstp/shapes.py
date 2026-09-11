@@ -252,13 +252,13 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     ONE convolution with `p_ref` reproduces the per-sub-sample sum
     exactly). `X_MARGINAL` (`p_x`) is unchanged in value
     (`sample_cloud.sample_x`, its own one-cell-smoothed bin).
-    `MASS_OUTSIDE_YSO` is the combined shortfall of `GRID_YSO`'s own
-    total against the sightline's intended mass, `sum(w_k,sub) *
-    p_ref.sum()`, PLUS whatever the support rule (`bmstp.grid`'s module
-    docstring) folds in: `x <= 1` by definition, so the one dex of `log10
-    x > 0` this custom histogram keeps only for `_yso_kernel_placement`'s
-    own convolution padding is zeroed and counted as outside after the
-    one-cell smoothing, exactly as `grid.bin` does for every other class.
+    `MASS_OUTSIDE_YSO` is the shortfall of `GRID_YSO`'s own total against
+    the sightline's intended mass, `sum(w_k,sub) * p_ref.sum()`: THE WALL
+    (`bmstp.grid`'s module docstring) reflects whatever of the one-cell
+    `x` smoothing's own mass reaches `log10 x > 0` back onto the support
+    (`grid.fold_wall`) rather than dropping it, exactly as `grid.bin` does
+    for every other class, so only mass a sub-sample's own smoothing
+    carries past the array's true `log10 x` edges is ever shortfall.
     `GRID_YSO` carries its own true zeros: no per-shape floor is baked in
     here."""
     p_x, _mo_x, removed_frac = sample_cloud.sample_x(loaded, row, d_front, d_back)
@@ -281,11 +281,11 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     grid_yso = gaussian_filter1d(grid_yso, sigma=1.0, axis=0, mode="constant")
 
     total_intended = float(w_sub.sum()) * float(p_ref.sum())
-    # the support rule: `log10 x > 0` is outside the prior even
-    # though the array keeps that dex as the shift-kernel convolution's own
-    # padding -- those rows are held at exact zero, so `mass_outside_yso`
-    # (read off the reduced total below) already counts them as shortfall.
-    grid_yso[grid.N_X_SUPPORT:] = 0.0
+    # THE WALL: `log10 x = 0` reflects -- the shift-kernel convolution's
+    # own padding dex is folded back onto the support (`grid.fold_wall`)
+    # rather than dropped, so `mass_outside_yso` below counts only what
+    # the smoothing carries past the array's true `log10 x` edges.
+    grid_yso = grid.fold_wall(grid_yso)
     total_actual = float(grid_yso.sum())
     mass_outside_yso = (0.0 if total_intended <= 0.0
                          else float(np.clip(1.0 - total_actual / total_intended, 0.0, 1.0)))

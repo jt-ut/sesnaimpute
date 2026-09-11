@@ -168,15 +168,18 @@ def load(config, region, cls):
 def prepare(reader, rows):
     """`h (n_block, 128, 120)` float32 (SPEC_BMSTP_DRAFT.md section 4.2,
     9): each of `rows`' sources, its grain's shape blurred along
-    `log10 x` by its own column kernel (`grid.blur`, unchanged), then
-    renormalised to sum to one over the support -- a block of ~50
-    sources, never a whole batch (the 600 MB per-batch footprint of the
-    unblurred grid held at once, IMPLEMENTATION_BMSTP_DRAFT.md section 9).
-    The support rule  holds the blurred `log10
-    x > 0` cells at exact zero before the sum-to-one division, so no
-    leaked mass there dilutes the support's own density; the per-shape
-    floor `bin` once baked in is gone (the common-floor rule) -- the common floor is
-    applied once, at the read, by `common_floor`/`ln_prior` below."""
+    `log10 x` by its own column kernel (`grid.blur`, which itself reflects
+    THE WALL, `bmstp.grid`'s module docstring), then renormalised to sum
+    to one over the support -- a block of ~50 sources, never a whole
+    batch (the 600 MB per-batch footprint of the unblurred grid held at
+    once, IMPLEMENTATION_BMSTP_DRAFT.md section 9). `grid.blur` already
+    holds `log10 x > 0` at exact zero (its own wall fold), so the line
+    below is a no-op kept for the reader, not a second fold; the
+    sum-to-one division below is over the support alone, unaffected by
+    the wall since no mass sits above it to dilute. The per-shape floor
+    `bin` once baked in is gone (the common-floor rule) -- the common
+    floor is applied once, at the read, by `common_floor`/`ln_prior`
+    below."""
     rows = np.asarray(rows)
     a_col = reader.a_col[rows]
     a_col_sig = reader.a_col_sig[rows]
@@ -191,6 +194,9 @@ def prepare(reader, rows):
         H = reader.grid_all[grain[k]].astype(np.float64)
         H_s, _ = grid.blur(H, float(w[k]), float(mu[k, 0]), float(sigma[k, 0]),
                             float(mu[k, 1]), float(sigma[k, 1]))
+        # THE WALL: `grid.blur` already reflects `log10 x > 0` onto the
+        # support, so this is a no-op against the wall now, kept as the
+        # reader's own guard, not a second fold.
         H_s[N_X_SUPPORT:, :] = 0.0
         total = H_s.sum()
         h[k] = (H_s / total if total > 0.0 else H_s).astype(np.float32)
