@@ -73,12 +73,13 @@ def _build_one_tile(config, region, tile_id):
     sum_check = max(abs(h_star.sum() - (1.0 - mo_star)), abs(h_agb.sum() - (1.0 - mo_agb)))
     above_star_w = float(w_s[f45_s > grid.LOG10_F45_EDGES[-1]].sum())
     above_agb_w = float(w_a[f45_a > grid.LOG10_F45_EDGES[-1]].sum())
-    # the tile's own per-cell effective member count (repair list row 7):
-    # the retained stars' own weights back GRID_STAR, the retained AGB
-    # stars' own weights back GRID_AGB -- computed on the raw marks, never
-    # on the width-class-smoothed grid above.
-    n_eff_star = grid.n_eff(x_s, f45_s, w_s)
-    n_eff_agb = grid.n_eff(x_a, f45_a, w_a)
+    # the tile's own per-cell effective member count (repair list row 7,
+    # coordinator's addendum): the retained stars' own weights sent
+    # through the SAME width-class-and-one-cell smoothing chain
+    # `bin_star_widths` used to build `h_star`/`h_agb` above, each kernel
+    # squared for the denominator.
+    n_eff_star = grid.n_eff_star_widths(x_s, f45_s, w_s, class_s, sigma_classes_cells)
+    n_eff_agb = grid.n_eff_star_widths(x_a, f45_a, w_a, class_a, sigma_classes_cells)
     return (h_star.astype(np.float32), mo_star, h_agb.astype(np.float32), mo_agb, sum_check,
             above_star_w, float(w_s.sum()), above_agb_w, float(w_a.sum()),
             n_eff_star.astype(np.float32), n_eff_agb.astype(np.float32))
@@ -106,9 +107,11 @@ def build_star_family(config, region):
     `MASS_OUTSIDE_STAR`/`_AGB`, `ON_GRID_STAR`/`_AGB` (`1 - mass_outside`
     per tile, sec. 2's ON-GRID FRACTION for the density stage to scale by,
     W26), `N_EFF_STAR`/`_AGB` (the per-cell effective count of retained
-    stars behind that cell, `S1**2/S2` over their own weights, repair list
-    row 7 -- an evidence count, not a density, so no threshold and no
-    smoothing changes it), the grid edges, the star-count-per-tile attribute, and AGB's own
+    stars behind that cell's DENSITY, `S1**2/S2` with `S1`/`S2` run through
+    EXACTLY `GRID_STAR`/`_AGB`'s own width-class-and-one-cell smoothing
+    chain, `S2`'s every kernel squared elementwise and not renormalised --
+    repair list row 7, coordinator's addendum 2026-09-10 19:45), the grid
+    edges, the star-count-per-tile attribute, and AGB's own
     per-chemistry flux-to-luminosity ratio spread (`F45_PER_L_SPREAD_DEX_O/C`,
     sec. 5.2). PAHC has no grid of its own: a reader loads `GRID_STAR` for
     it (sec. 5.3 "Grain")."""
@@ -243,10 +246,12 @@ def _yso_kernel_placement(x_idx, delta, weights, on_x, n_x, kernel_1d, p_ref, n_
     weighted `(x, delta)` histogram, the ONE EXACT Gaussian smoothing
     (`kernel_1d`) and the ONE convolution with `p_ref`, BEFORE the
     common grid's own one-cell `x`-axis smoothing (sec. 2 "minimum
-    widths") -- shared by `GRID_YSO` itself (`weights = w_k,sub`) and by
-    its effective-count numerator/denominator (repair list row 7,
-    `weights = w_k,sub` or `w_k,sub**2`), since a member's own kernel-cell
-    mass is the SAME convolution whatever weight rides through it."""
+    widths") -- shared by `GRID_YSO` itself (`weights = w_k,sub`,
+    `kernel_1d`, `p_ref` as built) and by its effective-count numerator/
+    denominator (repair list row 7, coordinator's addendum: `weights =
+    w_k,sub**2`, `kernel_1d**2`, `p_ref**2`, each squared kernel NOT
+    renormalised, for `S2`), since the function is the SAME density-
+    placement chain whatever arrays ride through it."""
     k_row, _, _ = np.histogram2d(
         x_idx[on_x], delta[on_x], bins=[np.arange(n_x + 1), grid.LOG10_F45_EDGES],
         weights=weights[on_x])
@@ -270,14 +275,17 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     (`sample_cloud.sample_x`, its own one-cell-smoothed bin).
     `MASS_OUTSIDE_YSO` is the combined shortfall of `GRID_YSO`'s own
     total against the sightline's intended mass, `sum(w_k,sub) *
-    p_ref.sum()`. `N_EFF_YSO` (repair list row 7): each census sub-sample
-    is a KERNEL-PLACED member -- its own weight lands in every cell the
-    `_yso_kernel_placement` convolution above spreads it to, so the
-    natural per-cell estimator reruns that SAME convolution once on the
-    sub-samples' raw weights (`S1`, reused as `GRID_YSO` itself before its
-    final smoothing) and once on their SQUARED weights (`S2`, the same
-    kernel-cell masses, sec. 5.5's ruling), `N_EFF = S1**2 / S2` before
-    the common grid's own one-cell smoothing (which does not change it)."""
+    p_ref.sum()`. `N_EFF_YSO` (repair list row 7, coordinator's addendum
+    2026-09-10 19:45): each census sub-sample is placed through EXACTLY
+    `GRID_YSO`'s own chain -- the shift-kernel placement
+    (`_yso_kernel_placement`, `kernel_1d` then `p_ref`) and then the
+    common grid's own one-cell `x`-smoothing -- so `S1` reruns that whole
+    chain on the sub-samples' raw weights (reusing `grid_yso` itself,
+    before its floor) and `S2` reruns the SAME chain with every kernel
+    (`kernel_1d`, `p_ref`, the one-cell `x` kernel) replaced by its own
+    elementwise square, NOT renormalised, and the sub-samples' weights
+    squared -- a squared Gaussian is narrower and smaller, so `S2` is not
+    just `S1` again. `N_EFF = S1**2 / S2`, 0 where `S2 = 0`."""
     p_x, _mo_x, removed_frac = sample_cloud.sample_x(loaded, row, d_front, d_back)
     log10x_nudged, w_sub, d_sub, _removed = sample_cloud._cell_subsamples(loaded, row, d_front, d_back)
     n_x = grid.LOG10_X_EDGES.size - 1
@@ -290,19 +298,24 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     # placement -- identically what `GRID_YSO` is, before its own
     # one-cell `x`-smoothing (sec. 2 "minimum widths").
     s1_raw = _yso_kernel_placement(x_idx, delta, w_sub, on_x, n_x, kernel_1d, p_ref, n_b)
-    # S2: the SAME placement, run on each sub-sample's SQUARED weight
-    # (repair list row 7's kernel-placed-member estimator).
-    s2_raw = _yso_kernel_placement(x_idx, delta, w_sub ** 2, on_x, n_x, kernel_1d, p_ref, n_b)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        n_eff_yso = np.where(s2_raw > 0, s1_raw ** 2 / s2_raw, 0.0)
+    # S2: the SAME placement chain, with every kernel squared elementwise
+    # (NOT renormalised) and the sub-samples' weights squared (repair list
+    # row 7's coordinator's addendum).
+    s2_raw = _yso_kernel_placement(
+        x_idx, delta, w_sub ** 2, on_x, n_x, kernel_1d ** 2, p_ref ** 2, n_b)
 
     grid_yso = s1_raw
     # the one-cell smoothing along x (sec. 2 "minimum widths") applies as
     # now: `sample_x`'s own p_x already carries it; GRID_YSO gets its own
     # pass here since its x-axis rows were built from the raw (unsmoothed)
-    # sub-sample scatter above, not from p_x. `N_EFF_YSO` above is left
-    # unsmoothed (smoothing does not change a count of evidence).
+    # sub-sample scatter above, not from p_x. `S2` gets the SAME one-cell
+    # smoothing but with the explicit kernel squared and not renormalised
+    # (coordinator's addendum: smoothing IS part of the evidence chain now).
     grid_yso = gaussian_filter1d(grid_yso, sigma=1.0, axis=0, mode="constant")
+    x_kernel_sq = grid._explicit_gaussian_kernel1d(1.0) ** 2
+    s2_final = ndimage.convolve1d(s2_raw, weights=x_kernel_sq, axis=0, mode="constant")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        n_eff_yso = np.where(s2_final > 0, grid_yso ** 2 / s2_final, 0.0)
 
     total_intended = float(w_sub.sum()) * float(p_ref.sum())
     total_actual = float(grid_yso.sum())
@@ -330,11 +343,15 @@ def build_cloud(config, region):
     (sec. 5.6 "Marks": separable, `X_MARGINAL` times this Gaussian, formed
     at read on the common `LOG10_F45_EDGES` through the template's own
     `C_THETA` offset, never a class-specific origin), and each class's own
-    `N_EFF_YSO`/`N_EFF_H2S` (repair list row 7): the per-cell effective
-    count of members backing that cell, `S1**2/S2` over the sub-samples
-    (YSO) or UWISH2-knot/template pairs (H2S) a member's own weight is
-    spread to by its class's own kernel placement -- an evidence count,
-    not a density, so no threshold and no smoothing changes it."""
+    `N_EFF_YSO`/`N_EFF_H2S` (repair list row 7, coordinator's addendum
+    2026-09-10 19:45): the per-cell effective count of members backing
+    that cell's DENSITY, `S1**2/S2` with `S1`/`S2` run through EXACTLY the
+    density's own placement-and-smoothing chain (the shift kernel and the
+    one-cell `x` smoothing for YSO's sub-samples, the lognormal placement
+    for H2S's knot/template pairs), `S2`'s every kernel squared elementwise
+    and not renormalised -- a cell whose density comes entirely from
+    smoothed-in neighbours now reads that borrowed evidence too, rather
+    than reading as unbacked."""
     p3_path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
     old_x_marginal = None
     if os.path.exists(p3_path):
@@ -402,27 +419,6 @@ def build_cloud(config, region):
         n_model_h2s = names_h2s.size
         w_uniform_h2s = np.full(n_model_h2s, 1.0 / n_model_h2s, dtype=np.float64)
 
-        # N_EFF_H2S (repair list row 7): H2S's own members are the UWISH2
-        # knots that set the region's brightness lognormal (`log10_sigma`
-        # above), each a kernel-placed member THROUGH the templates' own
-        # (uniform) conversion `c_theta_h2s` -- the survey-wide spread
-        # `K_c` plays `p_ref`'s role for YSO. Every knot-template pair's
-        # raw mark `log10_sigma_i + c_theta_theta`, weight `(1/n_knot) *
-        # w_theta`, is binned directly on the common grid (no further
-        # smoothing: this raw placement already carries all the width
-        # `L_Sigma` supplies at bin time, sec. 5.6), one cell along `F`
-        # only -- H2S borrows YSO's own `X_MARGINAL` rather than sampling
-        # its own depth (module docstring), so it carries no `x`-axis
-        # evidence of its own.
-        n_knot = log10_sigma.size
-        w_knot = np.full(n_knot, 1.0 / n_knot, dtype=np.float64)
-        marks_h2s = (log10_sigma[:, None] + c_theta_h2s[None, :]).ravel()
-        pair_w_h2s = (w_knot[:, None] * w_uniform_h2s[None, :]).ravel()
-        s1_h2s_f, _ = np.histogram(marks_h2s, bins=grid.LOG10_F45_EDGES, weights=pair_w_h2s)
-        s2_h2s_f, _ = np.histogram(marks_h2s, bins=grid.LOG10_F45_EDGES, weights=pair_w_h2s ** 2)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            n_eff_h2s_f45 = np.where(s2_h2s_f > 0, s1_h2s_f ** 2 / s2_h2s_f, 0.0)
-
         sigma_kernel = sample_cloud.exact_gaussian_kernel(logsig_std)
         half_width_sigma = (sigma_kernel.size - 1) // 2
         idx_center_h2s = np.round(
@@ -435,6 +431,38 @@ def build_cloud(config, region):
             if not np.any(valid):
                 continue
             np.add.at(f45_marginal_h2s, cell_idx[valid], w_uniform_h2s[valid] * sigma_kernel[m_i])
+
+        # N_EFF_H2S (repair list row 7, coordinator's addendum 2026-09-10
+        # 19:45): H2S's own members are the UWISH2 knots that set the
+        # region's brightness lognormal (`log10_sigma` above), each sent
+        # through EXACTLY the lognormal placement (`sigma_kernel`, the
+        # SAME per-offset loop `f45_marginal_h2s` is built from above) at
+        # its own knot-template mark `log10_sigma_i + c_theta_theta`,
+        # weight `(1/n_knot) * w_theta`. `S1` reruns that loop on the
+        # pairs' own weights; `S2` reruns it with the pairs' weights
+        # squared and `sigma_kernel` squared elementwise, NOT
+        # renormalised. H2S borrows YSO's own `X_MARGINAL` rather than
+        # sampling its own depth (module docstring), so `N_EFF_H2S`
+        # carries no `x`-axis evidence of its own.
+        n_knot = log10_sigma.size
+        w_knot = np.full(n_knot, 1.0 / n_knot, dtype=np.float64)
+        marks_h2s = (log10_sigma[:, None] + c_theta_h2s[None, :]).ravel()
+        pair_w_h2s = (w_knot[:, None] * w_uniform_h2s[None, :]).ravel()
+        idx_center_pairs = np.round(
+            (marks_h2s - grid.LOG10_F45_EDGES[0]) / grid.D_LOG10_F45).astype(np.int64)
+        sigma_kernel_sq = sigma_kernel ** 2
+        s1_h2s_f = np.zeros(n_b, dtype=np.float64)
+        s2_h2s_f = np.zeros(n_b, dtype=np.float64)
+        for m_i in range(sigma_kernel.size):
+            m = m_i - half_width_sigma
+            cell_idx = idx_center_pairs + m
+            valid = (cell_idx >= 0) & (cell_idx < n_b)
+            if not np.any(valid):
+                continue
+            np.add.at(s1_h2s_f, cell_idx[valid], pair_w_h2s[valid] * sigma_kernel[m_i])
+            np.add.at(s2_h2s_f, cell_idx[valid], (pair_w_h2s[valid] ** 2) * sigma_kernel_sq[m_i])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            n_eff_h2s_f45 = np.where(s2_h2s_f > 0, s1_h2s_f ** 2 / s2_h2s_f, 0.0)
 
         # K_c (report/identity only, below): the templates' own conversions
         # under the uniform weights, a point-mass histogram on the common
