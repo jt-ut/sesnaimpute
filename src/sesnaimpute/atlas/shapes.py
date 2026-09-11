@@ -444,7 +444,15 @@ def _draw_figure(config, region, dtab, idx_median, panels, share_smooth):
             ax2.set_xticklabels(["$10^{%d}$" % k for k in decades], fontsize=5)
             ax2.tick_params(length=2, pad=1, labelsize=5)
             if c == 0:
-                ax2.set_xlabel(plot_style.label("a", "mag"), fontsize=5.5, labelpad=1)
+                # A plain text annotation, not `set_xlabel` -- an actual
+                # twin-axis xlabel makes matplotlib's own title-placement
+                # (`_update_title_position`) push THAT panel's title
+                # higher than its five neighbours to clear it (owner's
+                # ruling 2026-09-10); a right-aligned annotation at the
+                # top axis's own right end carries the same information
+                # without registering as an axis label.
+                ax2.text(1.0, 1.05, plot_style.label("a", "mag"), transform=ax2.transAxes,
+                         fontsize=5.5, ha="right", va="bottom")
             ax.set_title(cls, fontsize=8.5 if i == 0 else 9, pad=16)
             if c == 0:
                 fig.text(x0 / PAGE_W_IN - 0.30 / PAGE_W_IN, (y0 + 0.5 * row_h) / PAGE_H_IN,

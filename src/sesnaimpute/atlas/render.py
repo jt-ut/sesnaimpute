@@ -67,7 +67,7 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
 from matplotlib.colors import LogNorm
-from matplotlib.ticker import FuncFormatter, MaxNLocator
+from matplotlib.ticker import FuncFormatter, LogLocator, MaxNLocator, NullFormatter
 from scipy.ndimage import gaussian_filter
 
 from sesnaimpute import config as config_module
@@ -105,7 +105,7 @@ PAGE_WIDTH_IN, PAGE_HEIGHT_IN = 16.0, 9.0
 #: column's Dec tick labels, the bottom row's RA tick labels, and the
 #: two-line suptitle above.
 MARGIN_LEFT_IN, MARGIN_RIGHT_IN = 0.55, 0.15
-MARGIN_TOP_IN, MARGIN_BOTTOM_IN = 0.95, 0.55
+MARGIN_TOP_IN, MARGIN_BOTTOM_IN = 0.62, 0.55
 GAP_X_IN, GAP_Y_IN = 0.10, 0.12
 
 #: A panel's own colour-bar strip (with its tick labels) and title
@@ -439,15 +439,23 @@ def _colorbar(fig, im, rect, page_w, page_h):
     return cbar
 
 
-def _panel_colorbar(fig, ax, im, label=None):
+def _panel_colorbar(fig, ax, im, label=None, log=False):
     """The panel's own colour bar, inset into its own right edge and
     spanning exactly its height -- axes coordinates work for WCSAxes, so
     no free-floating bar rectangle (`_bar_rect`) is needed for the prior
-    atlas page."""
+    atlas page. `log`, for a `LogNorm`-scaled panel, ticks DECADES ONLY:
+    a linear `%.2g` formatter left the log axis's own automatic
+    scientific-notation MINOR ticks in place, one of which ran off the
+    bar (owner's ruling 2026-09-10)."""
     cax = ax.inset_axes([1.02, 0.0, 0.04, 1.0])
     cbar = fig.colorbar(im, cax=cax)
-    cbar.locator = MaxNLocator(nbins=3)
-    cbar.formatter = FuncFormatter(lambda v, _pos: "%.2g" % v)
+    if log:
+        cbar.locator = LogLocator(base=10.0)
+        cbar.ax.yaxis.set_minor_formatter(NullFormatter())
+        cbar.ax.tick_params(which="minor", length=0)
+    else:
+        cbar.locator = MaxNLocator(nbins=3)
+        cbar.formatter = FuncFormatter(lambda v, _pos: "%.2g" % v)
     cbar.update_ticks()
     cbar.ax.tick_params(labelsize=7, length=2, pad=1.0)
     cbar.outline.set_linewidth(0.5)
@@ -456,18 +464,31 @@ def _panel_colorbar(fig, ax, im, label=None):
     return cbar
 
 
-def _fixed_geometry(aspect, cols, rows, page_w, page_h):
-    """The `(panel_w, panel_h, bar_w, title_h)` geometry `page_geometry`
-    would compute for a FIXED `cols`x`rows` grid, rather than searching
-    over column counts -- the prior atlas page's layout (four columns of
-    two stacked panels) is a fixed shape, not chosen for the region's own
-    aspect."""
-    usable_w = page_w - MARGIN_LEFT_IN - MARGIN_RIGHT_IN - (cols - 1) * GAP_X_IN
-    usable_h = page_h - MARGIN_TOP_IN - MARGIN_BOTTOM_IN - (rows - 1) * GAP_Y_IN
-    s = min(usable_w / (cols * (aspect + BAR_WIDTH_FRACTION)),
-            usable_h / (rows * (1.0 + TITLE_HEIGHT_FRACTION)))
-    return dict(cols=cols, rows=rows, panel_w=s * aspect, panel_h=s,
-                bar_w=s * BAR_WIDTH_FRACTION, title_h=s * TITLE_HEIGHT_FRACTION)
+#: The prior atlas page's own panel height, inches -- the one free scale
+#: of its fixed four-column, two-stacked-panel layout (below): the page
+#: itself is sized to this content, not the other way around, so the
+#: panels always fill the page regardless of a region's own footprint
+#: aspect (owner's ruling 2026-09-10).
+PRIOR_PANEL_HEIGHT_IN = 3.0
+
+
+def _prior_page_size(aspect, cols=4, rows=2, panel_h=PRIOR_PANEL_HEIGHT_IN):
+    """`(page_w, page_h, geom)` for the prior atlas page: `cols`x`rows`
+    equal panels at the region's own `aspect`, each `panel_h` tall plus
+    its own colour-bar strip and title strip, the page margins (left/
+    right Dec and RA tick room, top suptitle room, bottom RA-label room)
+    added once around that content -- so the panel grid always fills the
+    page exactly, with no letterboxing in either dimension."""
+    panel_w = panel_h * aspect
+    bar_w = panel_h * BAR_WIDTH_FRACTION
+    title_h = panel_h * TITLE_HEIGHT_FRACTION
+    content_w = cols * (panel_w + bar_w) + (cols - 1) * GAP_X_IN
+    content_h = rows * (panel_h + title_h) + (rows - 1) * GAP_Y_IN
+    page_w = MARGIN_LEFT_IN + MARGIN_RIGHT_IN + content_w
+    page_h = MARGIN_TOP_IN + MARGIN_BOTTOM_IN + content_h
+    geom = dict(cols=cols, rows=rows, panel_w=panel_w, panel_h=panel_h,
+                bar_w=bar_w, title_h=title_h)
+    return page_w, page_h, geom
 
 
 def _require_depth_grid(config, region):
@@ -531,11 +552,14 @@ def build_prior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAG
                   density_panel, _class_panel("STAR"), _class_panel("AGB"), _class_panel("H2S")]
         n_panels = len(panels)
 
-        # A fixed 4x2 grid, not `page_geometry`'s own column search --
-        # the prior page's layout is a fixed shape (above), only the
-        # common panel scale is derived from the region's own aspect.
+        # The page ITSELF is sized to the fixed 4x2 layout's content (not
+        # the other way around, unlike `page_geometry`'s search over a
+        # fixed page) -- `page_w`/`page_h` from the caller are ignored
+        # here, since the page's whole point is to fill exactly this
+        # content, at every aspect, with no letterboxing (owner's ruling
+        # 2026-09-10).
         aspect = geom_grid["n_x"] / float(geom_grid["n_y"])
-        geom = _fixed_geometry(aspect, 4, 2, page_w, page_h)
+        page_w, page_h, geom = _prior_page_size(aspect)
         cols = geom["cols"]
         last_row_of_col = _outer_rows(n_panels, cols)
 
@@ -557,7 +581,7 @@ def build_prior_region(config, region, formats, page_w=PAGE_WIDTH_IN, page_h=PAG
                 # footprint (sec. 8's own reprojection mask), so the line
                 # never crosses into the white area outside it.
                 ax.contour(p["hatch"], levels=[0.5], colors="white", linewidths=0.8)
-            _panel_colorbar(fig, ax, im, label=p["cbar_label"])
+            _panel_colorbar(fig, ax, im, label=p["cbar_label"], log=isinstance(p["norm"], LogNorm))
 
         total_predicted = float(prior["attrs"].get("TOTAL_PREDICTED", np.nan))
         total_observed = float(prior["attrs"].get("TOTAL_OBSERVED", np.nan))
