@@ -15,8 +15,10 @@ Planck's 5.03' resolution, so it takes the law at its own column instead
 import time
 import warnings
 
+import astropy.units as u
 import h5py
 import numpy as np
+from astropy.coordinates import SkyCoord
 from scipy.signal import fftconvolve
 
 from sesnaimpute import config as config_module
@@ -186,8 +188,6 @@ def sample_at(law_map, wcs, lon_deg, lat_deg, frame="icrs"):
     transforms it into the map's own WCS frame); NaN wherever a position
     falls outside the map's own pixel grid -- an edge case, sec. 5.6's
     brief ("a Herschel-arm source falling outside the convolved map")."""
-    from astropy.coordinates import SkyCoord
-    import astropy.units as u
     lon_deg = np.asarray(lon_deg, dtype=np.float64)
     lat_deg = np.asarray(lat_deg, dtype=np.float64)
     out = np.full(lon_deg.shape, np.nan, dtype=np.float64)

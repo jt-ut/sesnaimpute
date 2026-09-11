@@ -70,6 +70,7 @@ import h5py
 import numpy as np
 from astropy.io import fits
 from joblib import Parallel, delayed
+from scipy.spatial import cKDTree
 
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
@@ -986,8 +987,6 @@ def _match_pahc_to_sps(config, sps_names):
     atmosphere-type axis, so its `type` weight borrows the nearest sps
     template's). Row order is checked against each register's own
     `MODEL_NAME`, not assumed."""
-    from scipy.spatial import cKDTree
-
     sps_path = f"{config.inputs['sed_models']}/sps/parameters.fits"
     pahc_path = f"{config.inputs['sed_models']}/pahc/parameters.fits"
     sps_p_names, sps_teff, sps_logg = _read_teff_logg(sps_path, "LOG[G]")
