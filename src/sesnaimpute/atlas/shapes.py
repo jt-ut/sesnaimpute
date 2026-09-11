@@ -13,37 +13,32 @@ conversion folded in at the shape stage).
 
 Row 1 draws `P(C, cell | s) = Lambda_C(cell) / sum over classes and cells
 of Lambda(cell)`, the joint probability that the source is of class C
-AND lies in that cell, on ONE log colour scale shared by all six panels
-(owner's ruling 2026-09-11): the class's intensity `A_C(s)` and template
-weight `f_C` are multiplied into the shape before the panels are
-compared, since a shape alone (unit mass) cannot be compared across
-classes whose intensities differ by orders of magnitude.
+AND lies in that cell, on ONE log colour scale shared by all six panels:
+the class's intensity `A_C(s)` and template weight `f_C` are multiplied
+into the shape before the panels are compared, since a shape alone (unit
+mass) cannot be compared across classes whose intensities differ by
+orders of magnitude.
 
 Row 2 draws `P(C | cell, s) = Lambda_C(cell) / sum over classes of
 Lambda(cell)`, the class share of the prior at that cell, on the LINEAR
 0-1 scale, in EVERY cell, with no smoothing, no evidence count and no
-footprint: the effective-count machinery (`N_EFF`, the smoothed share,
-the per-cell winner) that used to stand in for a floor test is gone, in
-favour of the one common floor below deciding what an empty cell means.
+footprint: the one common floor below is what decides what an empty
+cell means.
 
-Both rows apply W66ae's rules at the read: (1) support -- `x = a/A_s <=
-1` by definition, so a cell with `log10 x > 0` is outside the prior,
-drawn blank (masked out of the colour scale) with the `x = 1` line
-marked, and excluded from both rows' sums; `grid.py` does not yet expose
-this support restriction as a reader-side rule (W66ae is being coded in
-parallel), so it is applied here directly on the cell edges. (2) the
-common floor -- today's stored shape is floored at `grid.FLOOR` of its
-OWN peak, so an empty cell is decided by intensity alone; this page
-instead floors the prior DENSITY `Lambda_C` at one value common to every
-class, `Lambda_floor(s) = grid.FLOOR * max over classes and cells of
-Lambda_C(cell; s)` (support cells only), computed locally here for the
-same reason -- `grid.py` does not yet expose it either. Where every
-class was below this common floor the six classes are now exactly
-equal, one sixth apiece, and the likelihood is left to decide.
+Both rows apply two rules at the read. (1) Support -- `x = a/A_s <= 1`
+by definition, so a cell with `log10 x > 0` is outside the prior, drawn
+blank (masked out of the colour scale) with the `x = 1` line marked, and
+excluded from both rows' sums. (2) One common floor on the prior
+DENSITY `Lambda_C`, common to every class at the source rather than
+per class: `Lambda_floor(s) = grid.FLOOR * max over classes and cells of
+Lambda_C(cell; s)` (support cells only); where every class was below it
+the six classes read exactly equal, one sixth apiece, and the likelihood
+is left to decide. Both the support predicate and the common floor are
+defined here, locally, for now; they belong in `bmstp/grid.py` and
+`fittp/prior_reader.py`, read from there once those carry them.
 
-The colourbars keep W66p's labels through `plot_style.label`, updated to
-the rows' new quantities; the page prints, below the rows,
-`captions.SHAPES_ROW1`, `captions.SHAPES_ROW2` and
+The colourbars carry `plot_style.label`; the page prints, below the
+rows, `captions.SHAPES_ROW1`, `captions.SHAPES_ROW2` and
 `captions.vocabulary_block()` in full, wrapped to the page width, with
 the page grown to fit them.
 """
@@ -71,7 +66,7 @@ from sesnaimpute.atlas import captions
 
 PAGE_W_IN = 16.0
 
-#: The old page's panel order (W18's brief).
+#: The page's panel order.
 CLASS_ORDER = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
 
 #: Every class reads the one common brightness axis (sec. 2, H2S included
@@ -170,13 +165,12 @@ def _panel_shape(config, region, cls, idx_median):
     """`(density, mass, reader)`: the shape `h_C` the fitter reads for
     the median source -- `fittp.prior_reader.load`/`prepare`, which
     blurs the class's stored grain shape by the source's own column
-    kernel (sec. 4.2), floors it at its OWN peak (the per-class floor
-    the common floor below replaces at the read) and renormalises it to
-    sum to one -- converted from a per-cell mass to a density per dex^2
-    (`/ (dlx * dlb)`, both axes `log10`, sec. 2). `mass` is `prepare`'s
-    own post-blur sum over the WHOLE grid (sec. 9's "shape normalisation
-    after blur", 1 +/- 1e-3 by construction): a blur-identity check,
-    distinct from the support restriction the read below applies."""
+    kernel (sec. 4.2) and renormalises it to sum to one -- converted
+    from a per-cell mass to a density per dex^2 (`/ (dlx * dlb)`, both
+    axes `log10`, sec. 2). `mass` is `prepare`'s own post-blur sum over
+    the WHOLE grid (sec. 9's "shape normalisation after blur", 1 +/-
+    1e-3 by construction): a blur-identity check, distinct from the
+    support restriction the read below applies."""
     reader = prior_reader.load(config, region, cls)
     h = prior_reader.prepare(reader, np.array([idx_median]))[0]
     density = h.astype(np.float64) / (reader.dlx * reader.dlb)
@@ -213,8 +207,8 @@ def _factor_marginal(panel_b_centers, reader, cls, d_pahc_s, curve):
 def _build_region_data(config, region):
     """Reads the median source's per-class shapes, forms `Lambda_C =
     A_C(s) h_C f_C(F; s)` for every class (sec. 1.1/1.4, module
-    docstring), applies W66ae's support rule and common floor at the
-    read, and returns the two rows' probabilities plus the row-1 corner
+    docstring), applies the support rule and common floor at the read,
+    and returns the two rows' probabilities plus the row-1 corner
     numbers."""
     dtab = _read_density_table(config, region)
     idx_median = _select_source(dtab["a_col"])
@@ -244,21 +238,21 @@ def _build_region_data(config, region):
         on_grid_c[cls] = _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2s,
                                          on_grid_gal, idx_median)
 
-    # W66ae rule 1, the support: `x = a / A_s <= 1` by definition, so a
-    # cell whose LEFT edge already sits at or past `log10 x = 0` is
-    # entirely outside the prior (the edge convention that places a mark
-    # exactly at `x = 1` in the cell below it, `bmstp.grid.bin`, leaves
-    # cell 95 -- the last cell below the edge -- as the last cell IN the
-    # support). Both rows below sum over `support` only; the excluded
-    # cells are drawn blank (`_draw_figure`).
+    # The support: `x = a / A_s <= 1` by definition, so a cell whose LEFT
+    # edge already sits at or past `log10 x = 0` is entirely outside the
+    # prior (the edge convention that places a mark exactly at `x = 1`
+    # in the cell below it, `bmstp.grid.bin`, leaves cell 95 -- the last
+    # cell below the edge -- as the last cell IN the support). Both rows
+    # below sum over `support` only; the excluded cells are drawn blank
+    # (`_draw_figure`).
     outside = x_edges[:-1] >= 0.0
     support = ~outside
 
-    # W66ae rule 2, the one common floor, formed locally (module
-    # docstring): `Lambda_floor(s) = grid.FLOOR * max` over classes and
-    # SUPPORT cells of the raw `Lambda_C`, then every class's `Lambda_C`
-    # is floored at this one shared value -- a cell where every class
-    # was below it now reads exactly equal across classes.
+    # The one common floor, formed locally (module docstring):
+    # `Lambda_floor(s) = grid.FLOOR * max` over classes and SUPPORT
+    # cells of the raw `Lambda_C`, then every class's `Lambda_C` is
+    # floored at this one shared value -- a cell where every class was
+    # below it now reads exactly equal across classes.
     lambda_stack = np.stack([lam[cls] for cls in CLASS_ORDER])
     lambda_floor = float(grid.FLOOR * lambda_stack[:, support, :].max())
     lam_floored = {cls: np.where(support[:, None], np.maximum(lam[cls], lambda_floor), 0.0)
@@ -380,8 +374,8 @@ def _draw_figure(config, region, data):
             else:
                 im2 = ax.imshow(share_masked[cls].T, origin="lower", aspect="auto",
                                  extent=extent, cmap=cmap2, norm=norm2)
-            # W66ae's support boundary, `log10 x = 0` (`x = 1`), marked
-            # on every panel of both rows.
+            # The support boundary, `log10 x = 0` (`x = 1`), marked on
+            # every panel of both rows.
             ax.axvline(0.0, color="white", lw=0.7, linestyle="--", alpha=0.85)
             ax.set_xlabel("log10 x", fontsize=6.5)
             ax.tick_params(labelsize=6)
