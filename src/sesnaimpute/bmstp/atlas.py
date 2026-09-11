@@ -865,15 +865,11 @@ def _gal_accepted_fraction(config, rng, a_col, f_lim, width_dex, coverage, tick)
     `@njit(parallel=True)` kernel (`_ln_one_minus_c_kernel`, via
     `_ln_one_minus_c`) -- the atlas's only numba call -- and numba's
     thread pool is not fork-safe: a process that has itself started that
-    pool poisons every child a later `os.fork()` creates from it. GAL was
-    the one place `build_region`'s parent ran that kernel itself, between
-    the tile-phase `Parallel` (workers forked before any numba pool
-    existed in the parent, so safe) and the sightline-phase `Parallel`
-    (whose idle-worker respawn forks the now-poisoned parent, crashing
-    with no Python traceback on a region whose GAL phase outlasts joblib's
-    idle timeout -- studies/atlas_crash_2026-09-11.md). Dispatching this
-    call through `Parallel` instead means the kernel only ever runs inside
-    a worker, so the parent never starts numba's pool at all."""
+    pool poisons every child a later `os.fork()` creates from it -- and
+    joblib respawns idle-expired workers by forking the parent between
+    phases. Dispatching this call through `Parallel` means the kernel
+    only ever runs inside a worker, so the parent never starts numba's
+    pool at all."""
     gal_flux, gal_u, density_gal = _gal_members(config, rng, N_MC)
     frac, mc_error, frac_bright3, frac_bright10, _block_total, se = _accepted_fraction(
         a_col, gal_u, gal_flux, f_lim, width_dex, config, tick=tick,
@@ -1016,9 +1012,9 @@ def build_region(config, region):
         # numba thread pool.
         gal_rng = np.random.RandomState(MC_SEED + _SEED_OFFSET_GAL)
         [(frac_gal, mc_gal, frac_gal_bright3, frac_gal_bright10, se_gal, density_gal)] = Parallel(
-            n_jobs=n_jobs)(delayed(_gal_accepted_fraction)(
+            n_jobs=n_jobs)([delayed(_gal_accepted_fraction)(
                 config, gal_rng, a_col, f_lim, width_dex, coverage,
-                lambda done, total: st.tick(done, total, "GAL pixel batches")))
+                lambda done, total: st.tick(done, total, "GAL pixel batches"))])
         n_cat["GAL"] = density_gal * frac_gal
         mc_err["GAL"] = mc_gal
         n_cat_bright3["GAL"] = density_gal * frac_gal_bright3
