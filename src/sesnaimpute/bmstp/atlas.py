@@ -103,12 +103,23 @@ def _depth_grid(config, region):
     """The admitted pixel axis and its marginalised 50% limit and width
     (`catalog.depth_grid`, sec. 3.3, the fixed point of the per-pixel
     `log10 DCOMP90` vs `log10 f` fit, not the brightness-biased median):
-    `(pix, f_lim_50_pix_mjy, w_dex_pix)`."""
+    `(pix, f_lim_50_pix_mjy, w_dex_pix)`. A band the region's own counts
+    fit cannot solve is unsurveyed there and carries `+inf`/`0` (never
+    `NaN`, `catalog.depth_grid`'s own rule); a `NaN` here means that rule
+    was not kept upstream, and every reader downstream would silently
+    turn it into a NaN region total (module docstring), so it raises here
+    instead, exactly as `_pixel_column` raises on a missing sightline."""
     path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
     with h5py.File(path, "r") as f:
         pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
         f_lim = np.asarray(f["F_LIM_50_PIX_MJY"][:], dtype=np.float64)
         w_dex_pix = np.asarray(f["W_DEX_PIX"][:], dtype=np.float64)
+    bad = np.isnan(f_lim) | np.isnan(w_dex_pix)
+    if bad.any():
+        p_idx, b_idx = np.unravel_index(int(np.argmax(bad)), bad.shape)
+        raise ValueError("bmstp.atlas: pixel %d's %s limit or width is NaN in %s -- an "
+                          "unsurveyed band must be +inf/0, never NaN (catalog.depth_grid)"
+                          % (int(pix[p_idx]), BAND_KEYS[b_idx], path))
     return pix, f_lim, w_dex_pix
 
 
@@ -307,6 +318,17 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None, wei
     before they are averaged down to `frac`, rather than from the
     per-pixel `mc_error` values (`None`, `None` when `weight_pix` is not
     given).
+
+    An unsurveyed band's `f_lim` is `+inf` and its `width_dex` is 0
+    (`catalog.depth_grid`'s rule): `log10(f_lim) = +inf`, so `z`'s
+    numerator is `-inf` for every finite member flux regardless of the
+    zero width in its denominator (`-inf / 0 = -inf`, never `0 * inf` --
+    the numerator is never zero because a member's flux is never
+    infinite), and `_ln_one_minus_c(-inf) = 0` (`erfc(+inf) = 0`
+    exactly), so `p_i = 0`: the member is never detected in that band,
+    with no NaN at any step. `has_flux`'s own `np.where` keeps a
+    band with no flux at all out of this path already, so the two guards
+    do not interact.
 
     Processed in pixel batches of `_pixel_batch_size` (rule 10b): each
     batch is the same elementwise-per-pixel computation on a slice of

@@ -74,6 +74,19 @@ fit for every band, truncated or not, and `LIMIT_KIND`/the recovery
 fraction at `F_50` are carried in the per-source product as a diagnostic
 for a later, joint treatment of a coupled pair.
 
+A band can also fail to fit at all: too few detections in the region's
+own low-column selection, too sparse a histogram, or a fit that does not
+converge. That band is UNSURVEYED in this region, not merely noisy --
+the region has not sampled its roll-off, which is a different thing from
+the fit failing to see one -- so it never gets a second fit on the full
+source set (the low-column selection exists precisely to avoid a
+full-set fit; one fit or unsurveyed). `F_50_REGION_MJY` is `+inf`,
+`W_REGION_DEX` is 0, `LIMIT_KIND` is `unsurveyed`, and every source's and
+pixel's own limit in that band is `+inf` too -- never `NaN`, so that a
+downstream reader's `inf * 0` (the recovery map's spatial shift applied
+to an infinite limit) cannot silently turn one unsurveyed band's flag
+into a NaN that erases every other band's finite count for the region.
+
 Per source, `F_LIM_50_MJY` is `F_50_REGION_MJY` (the counts fit, unmodified by Part B)
 shifted by the offset of the source's own `log10 DCOMP90` from the region
 selection's median (every one of the region's sources, not detections
@@ -291,32 +304,44 @@ def _region_band_counts_fit(fnu, origin, curated_bands, selected_mask):
     spec section 3.3): `catalog.depths`' Poisson-profiled
     power-law-times-erf estimator (`_bin_histogram`, `_fit_free`) reused
     directly on `y = -log10(f)` in place of that module's map-relative
-    magnitude, in 0.1-dex bins.
+    magnitude, in 0.1-dex bins. A band with no detections to histogram,
+    too sparse a histogram, or a fit that does not converge has no
+    solution on this region's own low-column set: it is UNSURVEYED here
+    (module docstring), `f50 = +inf`, `w = 0`, flagged in the returned
+    `unsurveyed` mask -- never a second fit on the full source set.
     """
     n = len(limits_module.IRAC_MIPS_KEYS)
     alpha = np.full(n, np.nan)
     f50 = np.full(n, np.nan)
     w = np.full(n, np.nan)
+    unsurveyed = np.zeros(n, dtype=bool)
     for jk, key in enumerate(limits_module.IRAC_MIPS_KEYS):
         cb = curated_bands.index(key)
         detected = selected_mask & (origin[:, cb] == 1)
         flux = fnu[detected, cb]
         if flux.size == 0:
+            print("catalog.depth_grid: %s has no detections in the region's low-column "
+                  "selection -- unsurveyed" % key)
+            f50[jk], w[jk], unsurveyed[jk] = np.inf, 0.0, True
             continue
         y = -np.log10(flux)
         centers, counts = depths_module._bin_histogram(y)
         if np.count_nonzero(counts > 0) < depths_module.MIN_POPULATED_BINS:
-            print("catalog.depth_grid: %s region counts histogram too sparse to fit" % key)
+            print("catalog.depth_grid: %s region counts histogram too sparse to fit "
+                  "-- unsurveyed" % key)
+            f50[jk], w[jk], unsurveyed[jk] = np.inf, 0.0, True
             continue
         res = depths_module._fit_free(centers, counts)
         if not res.success:
-            print("catalog.depth_grid: %s region counts fit did not converge" % key)
+            print("catalog.depth_grid: %s region counts fit did not converge "
+                  "-- unsurveyed" % key)
+            f50[jk], w[jk], unsurveyed[jk] = np.inf, 0.0, True
             continue
         alpha_hat, y50_hat, w_hat = res.x
         alpha[jk] = float(alpha_hat)
         f50[jk] = float(10.0 ** (-y50_hat))
         w[jk] = float(w_hat)
-    return alpha, f50, w
+    return alpha, f50, w, unsurveyed
 
 
 def _source_limits(dcomp90, curated_bands, selected_mask, f50_region_mjy, f50_2mass):
@@ -328,6 +353,10 @@ def _source_limits(dcomp90, curated_bands, selected_mask, f50_region_mjy, f50_2m
     counts fit used. The three 2MASS bands carry no per-source map and
     take the region's constant `F50_2MASS_MJY` alike for every source.
     Returns `(f_lim_50_mjy (n, 8), dcomp90_ref_log10 (8,), NaN for 2MASS)`.
+    An unsurveyed band's `f50_region_mjy` is `+inf` (module docstring):
+    every source's own limit in that band is set to `+inf` directly,
+    bypassing the shift multiplication, so an extreme `DCOMP90` cannot
+    turn `+inf * 0` into a `NaN`.
     """
     band_keys = [b.key for b in definitions.BANDS]
     n = dcomp90.shape[0]
@@ -339,7 +368,10 @@ def _source_limits(dcomp90, curated_bands, selected_mask, f50_region_mjy, f50_2m
         log_dcomp = np.log10(dcomp90[:, cb])
         median_sel = float(np.median(log_dcomp[selected_mask]))
         ref_log10[j] = median_sel
-        f_lim[:, j] = f50_region_mjy[jk] * 10.0 ** (log_dcomp - median_sel)
+        if np.isinf(f50_region_mjy[jk]):
+            f_lim[:, j] = np.inf
+        else:
+            f_lim[:, j] = f50_region_mjy[jk] * 10.0 ** (log_dcomp - median_sel)
     for tk, key in enumerate(limits_module.TWOMASS_KEYS):
         j = band_keys.index(key)
         f_lim[:, j] = f50_2mass[tk]
@@ -519,7 +551,7 @@ def build(config, regions=None):
             selected_mask, n_low_column, fallback = _low_column_selection(
                 config, region, hpx_pix_512, admitted
             )
-            alpha_region, f50_region_mjy, w_region_dex = _region_band_counts_fit(
+            alpha_region, f50_region_mjy, w_region_dex, unsurveyed = _region_band_counts_fit(
                 fnu, origin, curated_bands, selected_mask
             )
 
@@ -529,16 +561,21 @@ def build(config, regions=None):
             # mutually required at the faint end, a catalogued source
             # carries both by construction, so this estimator is a
             # tautology for that pair and cannot bound either band's
-            # recovery -- the limit itself stays at the counts fit.
+            # recovery -- the limit itself stays at the counts fit. An
+            # unsurveyed band has no finite F_50 to test, so it is never
+            # marked "bound" (`_truncation_test` skips a non-finite F_50).
             truncated, recovery_at_f50, limiting_band = _truncation_test(
                 fnu, origin, curated_bands, selected_mask, f50_region_mjy
             )
             limit_kind = ["fit"] * len(limits_module.IRAC_MIPS_KEYS)
             for jk, key in enumerate(limits_module.IRAC_MIPS_KEYS):
-                if truncated[jk]:
+                if unsurveyed[jk]:
+                    limit_kind[jk] = "unsurveyed"
+                elif truncated[jk]:
                     limit_kind[jk] = "bound"
                 print("catalog.depth_grid: %s %s in %s (recovery at fitted F_50=%.3f, limiting band %s)"
-                      % (key, "coupled" if truncated[jk] else "not coupled", region,
+                      % (key, "unsurveyed" if unsurveyed[jk] else
+                         ("coupled" if truncated[jk] else "not coupled"), region,
                          recovery_at_f50[jk], limiting_band[jk]))
 
             # every catalogued source's own limit (module docstring, Part
@@ -551,7 +588,7 @@ def build(config, regions=None):
             f50_full = np.full(len(band_keys), np.nan)
             w_full = np.full(len(band_keys), np.nan)          # Spitzer-only, diagnostic
             w_dex_full = np.full(len(band_keys), np.nan)      # effective width, all 8 bands
-            limit_kind_full = np.array(["fit"] * len(band_keys), dtype="S8")
+            limit_kind_full = np.array(["fit"] * len(band_keys), dtype="S10")  # widest value: "unsurveyed"
             for jk, key in enumerate(limits_module.IRAC_MIPS_KEYS):
                 j = band_keys.index(key)
                 alpha_full[j] = alpha_region[jk]
