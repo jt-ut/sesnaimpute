@@ -127,8 +127,8 @@ YSO_CENSUS_GROUPS = (({"C0", "CI"}, YSO_PROTOSTAR_SHARE),
 
 #: The floor yso `population`'s library-density histogram of
 #: `log10 f_ref,4.5,theta` holds per bin before it is trusted as a density
-#: (spec sec 1.4: "floored at 20 templates"). agb `tau` no longer uses
-#: this: its library is a grid, not a sample (see `agb_tau_ratio`).
+#: (spec sec 1.4: "floored at 20 templates"); agb `tau` is a grid, not
+#: a sample, and takes its own rule (see `agb_tau_ratio`).
 LIBRARY_DENSITY_MIN_COUNT = 20
 
 #: yso `population`'s census and library brightness histograms' nominal
@@ -840,18 +840,15 @@ def agb_tau_ratio(config):
     to them -- is integrated over each cell: the fraction of that
     chemistry's Riebel fits whose `tau` falls in it. A cell past
     Riebel's own observed range carries none of that mass, by
-    construction (its distinct `tau` is outside what was ever observed);
-    an equal-count density estimator on this same discrete grid instead
-    put 15 of 46 O-rich and 33 of 52 C-rich bins at zero width, collapsing
-    the weight onto a handful of templates (`read_audit_R10.md` B5). Each
+    construction (its distinct `tau` is outside what was ever observed).
+    Each
     cell's mass is shared equally among the templates sitting at its
     distinct `tau` (spec sec 1.4's `p_C(q)` divided by the count of
     templates at that `q`, in place of a continuous density). `ratio` is
     then normalised WITHIN EACH CHEMISTRY to sum to 1, so that
     `build_agb`'s per-chemistry mix weights land on a clean pool of unit
     mass each and the class-wide O:C mix they realise is the one the
-    attributes state, by construction, rather than `S_O/S_C`-distorted
-    (`read_audit_R10.md` B5's discrepancy 1, a factor 0.520 off).
+    attributes state, by construction.
     `bmstp.atlas._agb_shell_pool`'s per-chemistry Monte Carlo pool does
     not use this: `sample_star.sample_agb` has already resolved which
     chemistry a given draw is. Shared by both rather than re-derived, so
