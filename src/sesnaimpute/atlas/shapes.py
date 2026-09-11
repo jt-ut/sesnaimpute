@@ -1,67 +1,51 @@
-"""The prior at a source: its shape and, beneath it, the class share of the
-prior at each grid cell, one page per region (SPEC_BMSTP_DRAFT.md sec.
+"""The prior at a source, one page per region (SPEC_BMSTP_DRAFT.md sec.
 1.1's factorisation, sec. 1.4's template weights, sec. 2's common grid,
-sec. 4.1-4.2, sec. 5.1-5.6).
-Report-only: nothing written here is read by the fitter or by any other
-`bmstp`/`fittp` stage.
+sec. 4.1-4.2, sec. 5.1-5.6). Report-only: nothing written here is read
+by the fitter or by any other `bmstp`/`fittp` stage. The vocabulary and
+the two rows' probability statements are `atlas.captions`'s, imported
+and printed on the page, never restated here.
 
-Per region, ONE source from the density table -- the one at the region's
-median `A_COL_K` (`_select_sources`'s first choice; the 99th-percentile
-source is not drawn: the normalised shapes differ between
-sightlines only through the profile, and the fitter's actual class
-decision needs the levels the old page's per-source bar chart kept apart
-from the shapes it plotted). Six panels per row (GAL, YSO, H2S, STAR,
-PAHC, AGB), sharing ONE pair of axes, `log10 x` and `log10 F_4.5` in mJy
-(sec. 2: one common brightness axis for every class, H2S included since
-its template conversion folded in at the shape stage).
+Per region, ONE source: the one at the region's median `A_COL_K`
+(`_select_source`). Six panels per row (GAL, YSO, H2S, STAR, PAHC, AGB),
+sharing ONE pair of axes, `log10 x` and `log10 F_4.5` in mJy (sec. 2: one
+common brightness axis for every class, H2S included since its template
+conversion folded in at the shape stage).
 
-Row 1, unchanged in content and pixel output from the previous page's own
-median-source row: the normalised shape `h_C(x, F_4.5)` the fitter reads
-for that source -- `fittp.prior_reader.load`/`prepare`, which blurs the
-class's stored grain shape by the source's own column kernel (sec. 4.2) --
-`log10`, one common colour scale (its own norm is still taken over BOTH
-the median and the (no-longer-drawn) 99th-percentile source's panels, so
-the colour mapping, and so the pixels, match the prior page's exactly).
+Row 1 draws `P(C, cell | s) = Lambda_C(cell) / sum over classes and cells
+of Lambda(cell)`, the joint probability that the source is of class C
+AND lies in that cell, on ONE log colour scale shared by all six panels:
+the class's intensity `A_C(s)` and template weight `f_C` are multiplied
+into the shape before the panels are compared, since a shape alone (unit
+mass) cannot be compared across classes whose intensities differ by
+orders of magnitude.
 
-Row 2, the class share: for each class and grid cell,
-`S_C(x, F) = A_C(s) h_C(x, F) f_C(F; s) / Sum_C' A_C'(s) h_C'(x, F) f_C'(F; s)`
-(sec. 1.1's product the fitter actually compares between classes at a
-source's own depth and brightness, sec. 1.4's template weights), computed
-in EVERY cell, floors included, on a LINEAR 0-1 colour scale: the drawn
-quantity is this share SMOOTHED by the evidence behind its own cell's
-winner (owner's ruling 2026-09-10) -- the class with the largest `S_C`
-there carries `N` effective members in that cell (`bmstp.grid.n_eff`'s
-Kish count, read off the shape product's own `N_EFF_<C>` dataset beside
-the grid it was built from, GAL's `n_eff_analytic` giving +inf on its own
-support), and every class's share is replaced by the smoothed share
-`S_smooth_C = (N . S_C + 1/6) / (N + 1)`, one pseudo-member spread evenly
-over the six classes: a cell with no member behind its winner draws flat
-at one sixth for every class, a cell with ten members' worth of evidence
-reads within a tenth of a member's worth of the raw share, and GAL's
-infinite-evidence cells draw the share as is -- a count of evidence
-standing in for the floor test, never a threshold or a cut. `f_C` is 1 for every class whose weight-table factors
-are all normalised over theta (GAL's `colour`, YSO's `population`, AGB's
-`tau`, H2S's `uniform` sec 1.4: `Sum_theta pi_C(theta, F) = 1` at every F
-by construction, so multiplying it in and summing over theta is exactly 1)
-except STAR and PAHC, whose second factor (`uncontaminated`/`contrast`,
-sec. 5.1/5.3) is a probability, not normalised:
-`f_STAR(F; s) = Sum_theta pi_STAR(theta|F) [1 - P(q_s,theta)]`,
-`f_PAHC(F; s) = Sum_theta pi_PAHC(theta|F) P(q_s,theta)`, `pi_C(theta|F)`
-read directly off the class's own `type` factor table (P5 factor 0,
-already the sec. 1.4 axis, `Sum_theta pi_C(theta, F) = 1` at every F) and
-`P` read exactly as `fittp.prior_reader._factor_ln` reads it, `arg =
-b_star + C_F + D_PAHC(s)` with `b_star = F - C_THETA[theta]` (sec. 2's
-`log10 F_4.5 = log10 Bhat + C_THETA` line, solved for `log10 Bhat` at the
-query brightness `F`) -- `population.pahc_curve.read`, the same accessor
-`template_weights._pahc_contrast_row` reads, imported not re-derived. H2S's own `f_C` is 1 (its
-`uniform` factor is normalised over theta, sec 5.6), the same STAR/PAHC
-carve-out above does not apply to it, so it is included in row 2's
-denominator sum like every other class
-(`briefs/reports/W57.md` disclosed the earlier exclusion; removed here).
+Row 2 draws `P(C | cell, s) = Lambda_C(cell) / sum over classes of
+Lambda(cell)`, the class share of the prior at that cell, on the LINEAR
+0-1 scale, in EVERY cell, with no smoothing, no evidence count and no
+footprint: the one common floor below is what decides what an empty
+cell means.
+
+Both rows apply two rules at the read. (1) Support -- `x = a/A_s <= 1`
+by definition, so a cell with `log10 x > 0` is outside the prior, drawn
+blank (masked out of the colour scale) with the `x = 1` line marked, and
+excluded from both rows' sums. (2) One common floor on the prior
+DENSITY `Lambda_C`, common to every class at the source rather than
+per class: `Lambda_floor(s) = grid.FLOOR * max over classes and cells of
+Lambda_C(cell; s)` (support cells only); where every class was below it
+the six classes read exactly equal, one sixth apiece, and the likelihood
+is left to decide. Both the support predicate and the common floor are
+defined here, locally, for now; they belong in `bmstp/grid.py` and
+`fittp/prior_reader.py`, read from there once those carry them.
+
+The colourbars carry `plot_style.label`; the page prints, below the
+rows, `captions.SHAPES_ROW1`, `captions.SHAPES_ROW2` and
+`captions.vocabulary_block()` in full, wrapped to the page width, with
+the page grown to fit them.
 """
 
 import argparse
 import os
+import textwrap
 
 import h5py
 import numpy as np
@@ -77,12 +61,12 @@ from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.fittp import prior_reader
 from sesnaimpute.bmstp import grid
-from sesnaimpute.bmstp import template_weights
 from sesnaimpute.population import pahc_curve
+from sesnaimpute.atlas import captions
 
-PAGE_W_IN, PAGE_H_IN = 16.0, 9.0
+PAGE_W_IN = 16.0
 
-#: The old page's panel order (W18's brief).
+#: The page's panel order.
 CLASS_ORDER = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
 
 #: Every class reads the one common brightness axis (sec. 2, H2S included
@@ -90,27 +74,31 @@ CLASS_ORDER = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
 #: row's one outside y-axis label below.
 _SHARED_Y_LABEL = plot_style.label("log10 F_4.5", "mJy")
 
-#: The one shared caption below the page, the spec's own term for `x`
-#: (sec. 0 vocabulary): every panel's short per-panel `log10 x` xlabel
-#: stays as it was (row 1 pixel-identical), this is the figure-level
-#: definition instead.
-_X_CAPTION = ("log10 x   (scaled extinction x = a / A_s: the extinction "
-              "in front of the object as a fraction of the sightline's column)")
-
 _ARM_NAME = {0: "Herschel", 1: "Planck"}
 
+#: The caption block's own type size and wrap width, chosen so the
+#: wrapped lines stay well inside the page's usable width at this font
+#: (a generous under-estimate of the page's own character capacity, so
+#: the block never overruns the page horizontally) -- the page instead
+#: grows in the one free dimension, its height, to fit the line count
+#: this font and width produce.
+_CAPTION_FONTSIZE = 7.5
+_CAPTION_LINESPACING = 1.3
+_CAPTION_CHARS_PER_LINE = 160
+_CAPTION_LINE_HEIGHT_IN = _CAPTION_FONTSIZE * _CAPTION_LINESPACING / 72.0
+_CAPTION_TOP_PAD_IN = 0.20
+_CAPTION_BOTTOM_PAD_IN = 0.15
 
-def _select_sources(a_col):
-    """`(idx_median, idx_p99)`: the catalogued source closest to the
-    region's median `A_COL_K` and closest to its 99th percentile."""
-    idx_median = int(np.argmin(np.abs(a_col - np.median(a_col))))
-    idx_p99 = int(np.argmin(np.abs(a_col - np.percentile(a_col, 99.0))))
-    return idx_median, idx_p99
+
+def _select_source(a_col):
+    """The catalogued source closest to the region's median `A_COL_K`
+    -- the one source this page draws (module docstring)."""
+    return int(np.argmin(np.abs(a_col - np.median(a_col))))
 
 
 def _read_density_table(config, region):
     """P1's per-source rows this page needs: `NAME`, `A_COL_K`, `ARM`,
-    the star-family/cloud grain indices, `D_PAHC` (sec. 4.1, row 2's
+    the star-family/cloud grain indices, `D_PAHC` (sec. 4.1, row 1's
     `f_STAR`/`f_PAHC` read point), the six `DENSITY_<C>` (sec.
     4.1), and the file's `KAPPA_HERSCHEL`/`KAPPA_PLANCK` attributes
     (sec. 5.5's law, the caption line)."""
@@ -161,40 +149,6 @@ def _on_grid_gal(config):
         return float(f.attrs["ON_GRID_GAL"])
 
 
-def _n_eff_star(config, region):
-    """`(N_EFF_STAR, N_EFF_AGB)` per tile, read off the same P2 file
-    `_on_grid_star` already opens (W66e) -- PAHC reads STAR's own (sec.
-    5.3 "Grain")."""
-    path = config_module.product_path(config, "bmstp", "shape", "star", "tile", region=region)
-    with h5py.File(path, "r") as f:
-        return f["N_EFF_STAR"][:].astype(np.float64), f["N_EFF_AGB"][:].astype(np.float64)
-
-
-def _n_eff_yso(config, region):
-    """`N_EFF_YSO` per sightline, off the same P3 file `_on_grid_yso`
-    opens (W66e)."""
-    path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
-    with h5py.File(path, "r") as f:
-        return f["N_EFF_YSO"][:].astype(np.float64)
-
-
-def _n_eff_h2s(config, region):
-    """`N_EFF_H2S`, one brightness-only vector for the whole region (P3,
-    W66e): H2S carries no `x`-axis evidence of its own (module
-    docstring), so every sightline and every `x` column share it."""
-    path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
-    with h5py.File(path, "r") as f:
-        return f["N_EFF_H2S"][:].astype(np.float64)
-
-
-def _n_eff_gal(config):
-    """`N_EFF_GAL`, the one survey-wide `(x, F)` grid (P4, W66e): +inf on
-    the law's own raw support, 0 off it."""
-    path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
-    with h5py.File(path, "r") as f:
-        return f["N_EFF_GAL"][:].astype(np.float64)
-
-
 def _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2s, on_grid_gal, src_idx):
     if cls in ("STAR", "PAHC"):
         return float(on_grid_star[dtab["tile"][src_idx]])
@@ -203,36 +157,25 @@ def _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2
     if cls == "YSO":
         return float(on_grid_yso[dtab["sightline"][src_idx]])
     if cls == "H2S":
-        # GRID_H2S is on the common grid, its own on-grid
-        # fraction measured per sightline (sec. 4.1), same as YSO's.
         return float(on_grid_h2s[dtab["sightline"][src_idx]])
     return float(on_grid_gal)  # GAL
 
 
-def _panel_arrays(config, region, cls, rows):
-    """`(density, x_edges, b_edges, mass, reader)`: the shape `h_C` the
-    fitter reads for each of `rows`' sources -- `fittp.prior_reader.load`/
-    `prepare`, which blurs the class's stored grain shape by the source's
-    own column kernel (sec. 4.2), floors it and renormalises it to sum to
-    one -- converted from a per-cell mass to a density per dex² (`/ (dlx *
-    dlb)`, both axes `log10`, sec. 2). `mass` is `prepare`'s own post-blur
-    sum (sec. 9's "shape normalisation after blur", 1 +/- 1e-3 by
-    construction -- a DIFFERENT check from the panel's own on-grid
-    fraction, which is the grain's raw (pre-blur) population weight the
-    grid ever admitted). `reader` is returned too -- row 2's `f_STAR`/
-    `f_PAHC` (sec. 1.4) read the SAME P5 weight table this call already
-    opened, never a second `load`."""
+def _panel_shape(config, region, cls, idx_median):
+    """`(density, mass, reader)`: the shape `h_C` the fitter reads for
+    the median source -- `fittp.prior_reader.load`/`prepare`, which
+    blurs the class's stored grain shape by the source's own column
+    kernel (sec. 4.2) and renormalises it to sum to one -- converted
+    from a per-cell mass to a density per dex^2 (`/ (dlx * dlb)`, both
+    axes `log10`, sec. 2). `mass` is `prepare`'s own post-blur sum over
+    the WHOLE grid (sec. 9's "shape normalisation after blur", 1 +/-
+    1e-3 by construction): a blur-identity check, distinct from the
+    support restriction the read below applies."""
     reader = prior_reader.load(config, region, cls)
-    h = prior_reader.prepare(reader, np.asarray(rows))
+    h = prior_reader.prepare(reader, np.array([idx_median]))[0]
     density = h.astype(np.float64) / (reader.dlx * reader.dlb)
-    mass = density.sum(axis=(1, 2)) * reader.dlx * reader.dlb
-    return density, reader.x_edges, reader.b_edges, mass, reader
-
-
-#: Row 2's denominator classes (sec. 1.1/1.4): every class --
-#: H2S is on the common grid at read time now (P3's `GRID_H2S`, sec. 4.1),
-#: so it is in the share's total.
-_SHARE_CLASSES = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
+    mass = float(density.sum() * reader.dlx * reader.dlb)
+    return density, mass, reader
 
 
 def _factor_marginal(panel_b_centers, reader, cls, d_pahc_s, curve):
@@ -246,11 +189,11 @@ def _factor_marginal(panel_b_centers, reader, cls, d_pahc_s, curve):
     `contrast`)'s own curve, read exactly as `fittp.prior_reader.
     _factor_ln` reads any factor, `arg = b_star + C_F + D_PAHC(s)`, with
     `b_star = F - C_THETA[theta]` (the same line solved for `log10 Bhat`
-    at the query brightness `F`, since row 2 has no fitted `a_hat`/slope
-    to place a* away from F) -- `population.pahc_curve.read`, imported
-    not re-derived, not the stored/floored
-    P5 table (which fixes the argument at F, sec. 1.4, wrong for the
-    per-template shift row 2 needs)."""
+    at the query brightness `F`, since this page has no fitted `a_hat`/
+    slope to place a* away from F) -- `population.pahc_curve.read`,
+    imported not re-derived, not the stored/floored P5 table (which
+    fixes the argument at F, sec. 1.4, wrong for the per-template shift
+    this needs)."""
     type_factor, contrast_factor = reader.factors[0], reader.factors[1]
     pi_theta_f = type_factor["W"]          # (n_model, n_b), sum_theta = 1 at every F
     c_theta = reader.c_theta               # (n_model,)
@@ -262,179 +205,183 @@ def _factor_marginal(panel_b_centers, reader, cls, d_pahc_s, curve):
 
 
 def _build_region_data(config, region):
+    """Reads the median source's per-class shapes, forms `Lambda_C =
+    A_C(s) h_C f_C(F; s)` for every class (sec. 1.1/1.4, module
+    docstring), applies the support rule and common floor at the read,
+    and returns the two rows' probabilities plus the row-1 corner
+    numbers."""
     dtab = _read_density_table(config, region)
-    # sec. "row 1 pixel-identical": `_select_sources`'s SECOND choice
-    # (the 99th-percentile source) is still computed here, alongside the
-    # first, purely so row 1's colour norm below spans the SAME two-source
-    # panel set the previous page's norm did -- its own row is not drawn
-    # (module docstring).
-    idx_median, idx_p99 = _select_sources(dtab["a_col"])
-    rows = np.array([idx_median, idx_p99])
+    idx_median = _select_source(dtab["a_col"])
     on_grid_star, on_grid_agb = _on_grid_star(config, region)
     on_grid_yso = _on_grid_yso(config, region)
     on_grid_h2s = _on_grid_h2s(config, region)
     on_grid_gal = _on_grid_gal(config)
-    n_eff_star, n_eff_agb = _n_eff_star(config, region)
-    n_eff_yso = _n_eff_yso(config, region)
-    n_eff_h2s_f = _n_eff_h2s(config, region)
-    n_eff_gal = _n_eff_gal(config)
-
-    panels = {}
-    readers = {}
-    for cls in CLASS_ORDER:
-        density2, x_edges, b_edges, mass2, reader = _panel_arrays(config, region, cls, rows)
-        readers[cls] = reader
-        x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
-        b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
-        for i, src_idx in enumerate(rows):
-            d = density2[i]
-            pi, pj = np.unravel_index(int(np.argmax(d)), d.shape)
-            on_grid = _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2s,
-                                      on_grid_gal, src_idx)
-            panels[(i, cls)] = dict(
-                density=d, x_edges=x_edges, b_edges=b_edges,
-                x_centers=x_centers, b_centers=b_centers,
-                mass=float(mass2[i]), on_grid=on_grid,
-                peak_x=float(x_centers[pi]), peak_b=float(b_centers[pj]),
-                intensity=float(dtab[cls][src_idx]))
-
-    # Row 2, the class share at the median source (module docstring, sec.
-    # 1.1/1.4): Lambda_C(x, F) = A_C(s) h_C(x, F) f_C(F; s) for every
-    # class (H2S included, its shape on the common grid), summed to the
-    # total and divided back into each -- the SAME product the fitter's
-    # evidence sum compares between classes (sec. 4.2), not the shape
-    # alone. Computed in every cell now, floors included (owner's ruling
-    # 2026-09-10): `at_floor` below is kept only to report row 2's old
-    # floor-excluded mean share for comparison, never to blank a cell.
     d_pahc_s = float(dtab["d_pahc"][idx_median])
     curve = pahc_curve.read(config)
+
     lam = {}
-    at_floor = None
-    for cls in _SHARE_CLASSES:
-        p = panels[(0, cls)]
-        h_c = p["density"]
-        if cls in ("STAR", "PAHC"):
-            f_c = _factor_marginal(p["b_centers"], readers[cls], cls, d_pahc_s, curve)
-        else:
-            f_c = np.ones(h_c.shape[1], dtype=np.float64)
-        lam[cls] = p["intensity"] * h_c * f_c[None, :]
-        floor_c = h_c <= (10.0 * grid.FLOOR * h_c.max())
-        at_floor = floor_c if at_floor is None else (at_floor & floor_c)
-    total = sum(lam.values())
-    share = {cls: lam[cls] / total for cls in _SHARE_CLASSES}
-
-    # The smoothed share (module docstring, owner's ruling 2026-09-10):
-    # each cell's winner (largest raw `S_C` there) lends its own per-cell
-    # effective member count `N` (`bmstp.grid.n_eff`/`n_eff_analytic`,
-    # W66e's `N_EFF_<C>`, read off the SAME grain -- tile for STAR/PAHC,
-    # tile for AGB, sightline for YSO -- the source's own row 1 panel
-    # already read); H2S has no `x`-axis evidence of its own so its one
-    # brightness vector is shared by every `x` column, and GAL's single
-    # survey-wide grid needs no grain index at all.
-    tile_med, sl_med = int(dtab["tile"][idx_median]), int(dtab["sightline"][idx_median])
-    n_x, n_b = share["GAL"].shape
-    n_eff_map = {
-        "STAR": n_eff_star[tile_med], "PAHC": n_eff_star[tile_med],
-        "AGB": n_eff_agb[tile_med], "YSO": n_eff_yso[sl_med],
-        "H2S": np.broadcast_to(n_eff_h2s_f[None, :], (n_x, n_b)),
-        "GAL": n_eff_gal,
-    }
-    share_stack = np.stack([share[cls] for cls in _SHARE_CLASSES])
-    n_eff_stack = np.stack([n_eff_map[cls] for cls in _SHARE_CLASSES])
-    winner_idx = np.argmax(share_stack, axis=0)
-    n_winner = np.take_along_axis(n_eff_stack, winner_idx[None, :, :], axis=0)[0]
-    # `S_smooth_C = (N.S_C + 1/6)/(N+1)`: GAL's +inf cells take the limit
-    # N -> infinity of that ratio, which is `S_C` itself, computed
-    # directly rather than through an infinity-over-infinity division.
-    finite = np.isfinite(n_winner)
-    n_safe = np.where(finite, n_winner, 0.0)
-    smoothed_stack = (n_safe[None, :, :] * share_stack + 1.0 / 6.0) / (n_safe[None, :, :] + 1.0)
-    smoothed_stack = np.where(finite[None, :, :], smoothed_stack, share_stack)
-    share_smooth = {cls: smoothed_stack[k] for k, cls in enumerate(_SHARE_CLASSES)}
-    return dtab, idx_median, panels, share, share_smooth, at_floor, winner_idx, n_winner
-
-
-def _print_numbers(region, dtab, idx_median, panels, share, share_smooth, at_floor, winner_idx, n_winner):
-    name = dtab["name"][idx_median].decode("utf-8")
-    print("atlas.shapes [%s] median source %s: A_COL_K=%.4g mag arm=%s"
-          % (region, name, dtab["a_col"][idx_median], _ARM_NAME[int(dtab["arm"][idx_median])]))
+    mass_c = {}
+    on_grid_c = {}
+    intensity_c = {}
+    x_edges = b_edges = None
     for cls in CLASS_ORDER:
-        p = panels[(0, cls)]
-        print("atlas.shapes [%s] row1/%s: mass=%.6f on_grid=%.6f peak_log10x=%.4g peak_log10F45=%.4g "
-              "A_C(s)=%.4g deg^-2" % (region, cls, p["mass"], p["on_grid"], p["peak_x"], p["peak_b"], p["intensity"]))
-    valid = ~at_floor
-    for k, cls in enumerate(_SHARE_CLASSES):
-        s, s_smooth = share[cls], share_smooth[cls]
-        mean_before = float(np.mean(s[valid])) if valid.any() else float("nan")
-        mean_after = float(np.mean(s_smooth))
-        wins = winner_idx == k
-        wins_evidenced = float(np.mean(wins & (n_winner >= 1.0)))
-        print("atlas.shapes [%s] row2/%s: share mean(old floor-excluded)=%.4f mean_smoothed(every cell)=%.4f "
-              "wins_with_N>=1_frac=%.4f" % (region, cls, mean_before, mean_after, wins_evidenced))
+        density, mass, reader = _panel_shape(config, region, cls, idx_median)
+        x_edges, b_edges = reader.x_edges, reader.b_edges
+        b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
+        if cls in ("STAR", "PAHC"):
+            f_c = _factor_marginal(b_centers, reader, cls, d_pahc_s, curve)
+        else:
+            f_c = np.ones(density.shape[1], dtype=np.float64)
+        intensity_c[cls] = float(dtab[cls][idx_median])
+        lam[cls] = intensity_c[cls] * density * f_c[None, :]
+        mass_c[cls] = mass
+        on_grid_c[cls] = _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2s,
+                                         on_grid_gal, idx_median)
+
+    # The support: `x = a / A_s <= 1` by definition, so a cell whose LEFT
+    # edge already sits at or past `log10 x = 0` is entirely outside the
+    # prior (the edge convention that places a mark exactly at `x = 1`
+    # in the cell below it, `bmstp.grid.bin`, leaves cell 95 -- the last
+    # cell below the edge -- as the last cell IN the support). Both rows
+    # below sum over `support` only; the excluded cells are drawn blank
+    # (`_draw_figure`).
+    outside = x_edges[:-1] >= 0.0
+    support = ~outside
+
+    # The one common floor, formed locally (module docstring):
+    # `Lambda_floor(s) = grid.FLOOR * max` over classes and SUPPORT
+    # cells of the raw `Lambda_C`, then every class's `Lambda_C` is
+    # floored at this one shared value -- a cell where every class was
+    # below it now reads exactly equal across classes.
+    lambda_stack = np.stack([lam[cls] for cls in CLASS_ORDER])
+    lambda_floor = float(grid.FLOOR * lambda_stack[:, support, :].max())
+    lam_floored = {cls: np.where(support[:, None], np.maximum(lam[cls], lambda_floor), 0.0)
+                   for cls in CLASS_ORDER}
+    all_below_floor = np.all(lambda_stack <= lambda_floor, axis=0) & support[:, None]
+    floor_fraction = float(all_below_floor.sum()) / float(support.sum() * lambda_stack.shape[2])
+
+    # Row 1 (module docstring): `P(C, cell | s)`, the joint over all six
+    # classes and every support cell, summing to 1 over that whole set.
+    total_lambda = sum(lam_floored[cls] for cls in CLASS_ORDER)
+    grand_total = float(total_lambda[support, :].sum())
+    joint = {cls: lam_floored[cls] / grand_total for cls in CLASS_ORDER}
+
+    # Row 2 (module docstring): `P(C | cell, s)`, the class share of
+    # `Lambda` at each cell -- `denom` is never zero on the support,
+    # since every class there is floored at `lambda_floor > 0`.
+    denom = np.where(support[:, None], total_lambda, 1.0)
+    share = {cls: lam_floored[cls] / denom for cls in CLASS_ORDER}
+
+    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
+    p_total = {}
+    peak = {}
+    for cls in CLASS_ORDER:
+        p_total[cls] = float(joint[cls][support, :].sum())
+        masked = np.where(support[:, None], joint[cls], -np.inf)
+        pi, pj = np.unravel_index(int(np.argmax(masked)), masked.shape)
+        peak[cls] = (float(x_centers[pi]), float(b_centers[pj]))
+
+    return dict(dtab=dtab, idx_median=idx_median, x_edges=x_edges, b_edges=b_edges,
+                support=support, joint=joint, share=share, mass_c=mass_c, on_grid_c=on_grid_c,
+                intensity_c=intensity_c, p_total=p_total, peak=peak,
+                lambda_floor=lambda_floor, floor_fraction=floor_fraction)
 
 
-def _draw_figure(config, region, dtab, idx_median, panels, share_smooth):
+def _print_numbers(region, data):
+    dtab, idx_median = data["dtab"], data["idx_median"]
+    name = dtab["name"][idx_median].decode("utf-8")
+    print("atlas.shapes [%s] median source %s: A_COL_K=%.4g mag arm=%s Lambda_floor(s)=%.4g "
+          "floor_cell_fraction=%.4f"
+          % (region, name, dtab["a_col"][idx_median], _ARM_NAME[int(dtab["arm"][idx_median])],
+             data["lambda_floor"], data["floor_fraction"]))
+    for cls in CLASS_ORDER:
+        px, pb = data["peak"][cls]
+        print("atlas.shapes [%s] %s: mass=%.6f on_grid=%.6f A_C(s)=%.4g deg^-2 "
+              "P(C|s)=%.6f peak_log10x=%.4g peak_log10F45=%.4g"
+              % (region, cls, data["mass_c"][cls], data["on_grid_c"][cls], data["intensity_c"][cls],
+                 data["p_total"][cls], px, pb))
+
+
+def _caption_block():
+    """The page's caption, wrapped to `_CAPTION_CHARS_PER_LINE`: the two
+    rows' probability statements and the shared vocabulary, read from
+    `captions` and never restated here (CODING_RULES_BMSTP.md rule 4).
+    Returns `(text, n_lines)` -- `n_lines` is what `_draw_figure` grows
+    the page's height by, so the block never overlaps the rows above it."""
+    sections = [textwrap.wrap(captions.SHAPES_ROW1, width=_CAPTION_CHARS_PER_LINE),
+                textwrap.wrap(captions.SHAPES_ROW2, width=_CAPTION_CHARS_PER_LINE)]
+    vocab_lines = []
+    for line in captions.vocabulary_block().split("\n"):
+        vocab_lines.extend(textwrap.wrap(line, width=_CAPTION_CHARS_PER_LINE) or [""])
+    sections.append(vocab_lines)
+    text = "\n\n".join("\n".join(sec) for sec in sections)
+    n_lines = sum(len(sec) for sec in sections) + 2 * (len(sections) - 1)
+    return text, n_lines
+
+
+def _draw_figure(config, region, data):
     plot_style.apply_style()
-    fig = plt.figure(figsize=(PAGE_W_IN, PAGE_H_IN))
+    dtab, idx_median = data["dtab"], data["idx_median"]
+    x_edges, b_edges, support = data["x_edges"], data["b_edges"], data["support"]
+    joint, share = data["joint"], data["share"]
 
-    margin_l, margin_r, margin_t, margin_b = 0.55, 1.05, 0.85, 0.55
+    caption_text, caption_lines = _caption_block()
+    caption_block_h = (caption_lines * _CAPTION_LINE_HEIGHT_IN
+                        + _CAPTION_TOP_PAD_IN + _CAPTION_BOTTOM_PAD_IN)
+
+    margin_l, margin_r, margin_t = 0.55, 1.05, 0.85
     row_gap, col_gap = 0.90, 0.14
-    usable_w = PAGE_W_IN - margin_l - margin_r
+    row_h = 3.2
+    page_h = margin_t + 2 * row_h + row_gap + caption_block_h
+    page_w = PAGE_W_IN
+    usable_w = page_w - margin_l - margin_r
     shape_w = (usable_w - 5 * col_gap) / 6.0
-    row_h = (PAGE_H_IN - margin_t - margin_b - row_gap) / 2.0
 
-    # row 1's colour norm spans BOTH sources' panels `_build_region_data`
-    # computed (median and the no-longer-drawn 99th-percentile one) --
-    # the SAME set the previous page's own norm spanned, so row 1's
-    # pixels match it exactly (module docstring, "row 1 pixel-identical").
-    all_log = np.concatenate([np.log10(p["density"]).ravel() for p in panels.values()])
+    fig = plot_style.new_sized_figure(page_w, page_h)
+
+    # Row 1's colour scale (module docstring): one log norm over the
+    # joint `P(C, cell | s)`, spanning all six classes and every SUPPORT
+    # cell (the excluded cells never enter the norm, since they carry no
+    # probability). Row 2's colour scale is fixed, linear 0-1 (module
+    # docstring: the class share is a probability, not a density).
+    log_joint = {cls: np.where(support[:, None], np.log10(np.where(support[:, None], joint[cls], 1.0)), np.nan)
+                 for cls in CLASS_ORDER}
+    all_log = np.concatenate([log_joint[cls][support, :].ravel() for cls in CLASS_ORDER])
     norm1 = Normalize(vmin=float(all_log.min()), vmax=float(all_log.max()))
-    cmap1 = plt.get_cmap("viridis")
-    cmap2 = plt.get_cmap("viridis")
     norm2 = Normalize(vmin=0.0, vmax=1.0)
+    cmap1 = plt.get_cmap("viridis").copy()
+    cmap1.set_bad("white")
+    cmap2 = plt.get_cmap("viridis").copy()
+    cmap2.set_bad("white")
+    share_masked = {cls: np.where(support[:, None], share[cls], np.nan) for cls in CLASS_ORDER}
     im1 = im2 = None
 
     src_idx = idx_median
     a_col_src = dtab["a_col"][src_idx]
     for i in range(2):
-        y0 = margin_b + (1 - i) * (row_h + row_gap)
+        y0 = page_h - margin_t - (i + 1) * row_h - i * row_gap
         for c, cls in enumerate(CLASS_ORDER):
             x0 = margin_l + c * (shape_w + col_gap)
-            ax = fig.add_axes([x0 / PAGE_W_IN, y0 / PAGE_H_IN, shape_w / PAGE_W_IN, row_h / PAGE_H_IN])
-            p = panels[(0, cls)]
+            ax = fig.add_axes([x0 / page_w, y0 / page_h, shape_w / page_w, row_h / page_h])
+            extent = [x_edges[0], x_edges[-1], b_edges[0], b_edges[-1]]
             if i == 0:
-                im1 = ax.imshow(np.log10(p["density"]).T, origin="lower", aspect="auto",
-                                 extent=[p["x_edges"][0], p["x_edges"][-1], p["b_edges"][0], p["b_edges"][-1]],
-                                 cmap=cmap1, norm=norm1)
-                # `A_C(s)` moves into this corner text (spelled "area
-                # density" here, never `A_C`) because the symbol collides
-                # with the top axis's extinction `A` (owner's ruling
-                # 2026-09-10); the row-1 title above carries the class
-                # name alone.
-                ax.text(0.02, 0.03, "mass=%.4f\non_grid=%.4f\npeak=(%.2f, %.2f)\narea density = %.3g deg^-2"
-                        % (p["mass"], p["on_grid"], p["peak_x"], p["peak_b"], p["intensity"]),
+                im1 = ax.imshow(log_joint[cls].T, origin="lower", aspect="auto",
+                                 extent=extent, cmap=cmap1, norm=norm1)
+                ax.text(0.02, 0.03, "mass=%.4f\non_grid=%.4f\narea density = %.3g deg^-2"
+                        % (data["mass_c"][cls], data["on_grid_c"][cls], data["intensity_c"][cls]),
                         transform=ax.transAxes, fontsize=5.5, color="white", va="bottom")
             else:
-                s = share_smooth[cls]
-                im2 = ax.imshow(s.T, origin="lower", aspect="auto",
-                                 extent=[p["x_edges"][0], p["x_edges"][-1], p["b_edges"][0], p["b_edges"][-1]],
-                                 cmap=cmap2, norm=norm2)
-            # the y-axis label is set ONCE per row, outside the panels
-            # (below), not per panel -- the previous page's six repeated
-            # labels overlapped their neighbours. Every panel still shows
-            # its own numeric y-ticks (the values, not the label text).
+                im2 = ax.imshow(share_masked[cls].T, origin="lower", aspect="auto",
+                                 extent=extent, cmap=cmap2, norm=norm2)
+            # The support boundary, `log10 x = 0` (`x = 1`), marked on
+            # every panel of both rows.
+            ax.axvline(0.0, color="white", lw=0.7, linestyle="--", alpha=0.85)
             ax.set_xlabel("log10 x", fontsize=6.5)
             ax.tick_params(labelsize=6)
-            xt = np.array([-3.0, -1.0, 1.0])
-            ax.set_xticks(xt)
+            ax.set_xticks(np.array([-3.0, -1.0, 1.0]))
             ax2 = ax.twiny()
             ax2.set_xlim(ax.get_xlim())
-            # The top axis ticks at DECADES OF `a` itself (not of `x`,
-            # which under a non-power-of-ten `A_s` lands off-decade and
-            # prints overlapping labels like 0.000313/3.13): pick the
-            # integer powers of ten within the panel's own `log10 x`
-            # range, place them at `log10 x = k - log10(A_s)`, and label
-            # them as powers of ten so no label overruns its own panel.
             log_a_col = np.log10(a_col_src)
             xlim = ax.get_xlim()
             k_lo = int(np.ceil(xlim[0] + log_a_col))
@@ -444,66 +391,62 @@ def _draw_figure(config, region, dtab, idx_median, panels, share_smooth):
             ax2.set_xticklabels(["$10^{%d}$" % k for k in decades], fontsize=5)
             ax2.tick_params(length=2, pad=1, labelsize=5)
             if c == 0:
-                # A plain text annotation, not `set_xlabel` -- an actual
-                # twin-axis xlabel makes matplotlib's own title-placement
-                # (`_update_title_position`) push THAT panel's title
-                # higher than its five neighbours to clear it (owner's
-                # ruling 2026-09-10); a right-aligned annotation at the
-                # top axis's own right end carries the same information
-                # without registering as an axis label.
                 ax2.text(1.0, 1.05, plot_style.label("a", "mag"), transform=ax2.transAxes,
                          fontsize=5.5, ha="right", va="bottom")
             ax.set_title(cls, fontsize=8.5 if i == 0 else 9, pad=16)
             if c == 0:
-                fig.text(x0 / PAGE_W_IN - 0.30 / PAGE_W_IN, (y0 + 0.5 * row_h) / PAGE_H_IN,
+                fig.text(x0 / page_w - 0.30 / page_w, (y0 + 0.5 * row_h) / page_h,
                           _SHARED_Y_LABEL, rotation=90, va="center", ha="center", fontsize=7)
 
-    cax1_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / PAGE_W_IN,
-                 (margin_b + row_h + row_gap) / PAGE_H_IN, 0.22 / PAGE_W_IN, row_h / PAGE_H_IN]
+    cax1_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / page_w,
+                 (page_h - margin_t - row_h) / page_h, 0.22 / page_w, row_h / page_h]
     cax1 = fig.add_axes(cax1_rect)
-    fig.colorbar(im1, cax=cax1, label=plot_style.label("Prior Shape Density", "log10 dex$^{-2}$"))
+    fig.colorbar(im1, cax=cax1, label=plot_style.label("P(C, cell | s)", None))
 
-    cax2_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / PAGE_W_IN,
-                 margin_b / PAGE_H_IN, 0.22 / PAGE_W_IN, row_h / PAGE_H_IN]
+    cax2_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / page_w,
+                 (caption_block_h) / page_h, 0.22 / page_w, row_h / page_h]
     cax2 = fig.add_axes(cax2_rect)
-    fig.colorbar(im2, cax=cax2, label=plot_style.label("Prior Fractional Share", None))
+    fig.colorbar(im2, cax=cax2, label=plot_style.label("P(C | cell, s)", None))
 
     r = regions_module.REGIONS_BY_NAME[region]
     name_med = dtab["name"][idx_median].decode("utf-8")
     arm_med = _ARM_NAME[int(dtab["arm"][idx_median])]
     caption = (
         "%s -- median source %s (A_COL_K=%.3g mag, %s arm); "
-        "d_r=%.0f±%.0f pc; KAPPA_HERSCHEL=%.1f, KAPPA_PLANCK=%.1f"
+        "d_r=%.0f+/-%.0f pc; KAPPA_HERSCHEL=%.1f, KAPPA_PLANCK=%.1f"
         % (region, name_med, dtab["a_col"][idx_median], arm_med,
            r.d_r_pc, r.sigma_pc, dtab["kappa_herschel"], dtab["kappa_planck"]))
-    fig.suptitle(caption, fontsize=9.5, y=1.0 - 0.15 / PAGE_H_IN)
-    fig.text(margin_l / PAGE_W_IN, 0.10 / PAGE_H_IN, _X_CAPTION, fontsize=6.5, ha="left")
+    fig.suptitle(caption, fontsize=9.5, y=1.0 - 0.15 / page_h)
+
+    # The page's own vocabulary and row statements (module docstring),
+    # anchored so their top line sits just below the rows -- the page
+    # was grown, above, by exactly the height this block needs.
+    fig.text(margin_l / page_w, (caption_block_h - _CAPTION_TOP_PAD_IN) / page_h, caption_text,
+              fontsize=_CAPTION_FONTSIZE, va="top", ha="left", linespacing=_CAPTION_LINESPACING)
 
     out_dir = f"{config.data_root}/bmstp/atlas/figures"
-    os.makedirs(out_dir, exist_ok=True)
     paths = []
     for fmt in ("png", "pdf"):
-        path = f"{out_dir}/prior-shapes_{region}.{fmt}"
-        fig.savefig(path, dpi=150)
-        paths.append(path)
-    plt.close(fig)
-    return paths
+        paths.append(f"{out_dir}/prior-shapes_{region}.{fmt}")
+    return fig, paths
 
 
 def build_region(config, region):
     with progress.Stage("atlas.shapes", region) as st:
-        dtab, idx_median, panels, share, share_smooth, at_floor, winner_idx, n_winner = \
-            _build_region_data(config, region)
-        _print_numbers(region, dtab, idx_median, panels, share, share_smooth, at_floor, winner_idx, n_winner)
-        paths = _draw_figure(config, region, dtab, idx_median, panels, share_smooth)
-        row1_panels = [p for (i, _c), p in panels.items() if i == 0]
-        mass_min = min(p["mass"] for p in row1_panels)
-        mass_max = max(p["mass"] for p in row1_panels)
-        on_grid_min = min(p["on_grid"] for p in row1_panels)
-        on_grid_max = max(p["on_grid"] for p in row1_panels)
-        st.done(paths[0], n_panel=len(row1_panels), mass_min=mass_min, mass_max=mass_max,
+        data = _build_region_data(config, region)
+        _print_numbers(region, data)
+        fig, paths = _draw_figure(config, region, data)
+        os.makedirs(f"{config.data_root}/bmstp/atlas/figures", exist_ok=True)
+        for path in paths:
+            fig.savefig(path, dpi=150)
+        plt.close(fig)
+        mass_min = min(data["mass_c"].values())
+        mass_max = max(data["mass_c"].values())
+        on_grid_min = min(data["on_grid_c"].values())
+        on_grid_max = max(data["on_grid_c"].values())
+        st.done(paths[0], n_panel=len(CLASS_ORDER), mass_min=mass_min, mass_max=mass_max,
                 on_grid_min=on_grid_min, on_grid_max=on_grid_max,
-                old_floor_cell_fraction=float(np.mean(at_floor)))
+                lambda_floor=data["lambda_floor"], floor_cell_fraction=data["floor_fraction"])
     return paths
 
 
