@@ -931,7 +931,20 @@ def build_region(config, region):
     """Writes `bmstp/atlas/prior_atlas_hpx512__R.hdf5` for one region: the
     admitted pixel axis (`catalog.depth_grid`), its column and coverage,
     and every class's `N_CAT_*`/`SHARE_*` from its own Monte Carlo
-    selection above (module docstring)."""
+    selection above (module docstring).
+
+    `INTENSITY_<C>` (deg^-2, one value per admitted pixel) is the class's
+    own intrinsic sky density at that pixel -- the quantity the
+    catalogued-density sum (`N_CAT_<C> = INTENSITY_<C> * accepted
+    fraction`) starts from before the pixel's own completeness is applied
+    (SPEC_BMSTP_DRAFT.md sec. 8, owner's ruling 2026-09-11): the star-
+    family tile's own field-star/evolved-star total per its own
+    `OMEGA_POINTING_DEG2` for STAR/AGB/PAHC, the young-star law
+    (Herschel-convolved where it reaches) and its H2S-scaled density for
+    YSO/H2S, and the counts law's single survey-wide density for GAL. It
+    carries no selection and no error attribute of its own, so a reader
+    can form `P(C | pixel) = INTENSITY_C / sum(INTENSITY)` without
+    re-reading the tile or sightline products this build already read."""
     with progress.Stage("bmstp.atlas", region) as st:
         # the detection probability (sec. 6.2, sec. 3.3's "the depth
         # grid") reads the pixel's own marginalised limit
@@ -948,6 +961,10 @@ def build_region(config, region):
         tile_of_pix, n_tile_filled = _pixel_tile(config, region, pix)
 
         n_cat = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
+        # sec. 8, owner's ruling 2026-09-11: each class's own intrinsic
+        # sky density at the pixel, `build_region`'s own docstring
+        # paragraph above.
+        intensity = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
         mc_err = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
         # sec. 9's bright-end check: the same per-class densities as
         # `n_cat`, restricted to the Monte Carlo members whose dimmed I2
@@ -1011,6 +1028,7 @@ def build_region(config, region):
             for cls in ("STAR", "AGB", "PAHC"):
                 frac, mc_error, density, frac_bright3, frac_bright10, total_se = out[cls]
                 n_cat[cls][m] = density * frac
+                intensity[cls][m] = density
                 mc_err[cls][m] = mc_error
                 n_cat_bright3[cls][m] = density * frac_bright3
                 n_cat_bright10[cls][m] = density * frac_bright10
@@ -1030,6 +1048,9 @@ def build_region(config, region):
                 config, gal_rng, a_col, f_lim, width_dex, coverage,
                 lambda done, total: st.tick(done, total, "GAL pixel batches"))])
         n_cat["GAL"] = density_gal * frac_gal
+        # sec. 5.4's own density is one survey-wide constant, so GAL's
+        # intensity is that same scalar broadcast to every admitted pixel.
+        intensity["GAL"] = np.full(n_pix, density_gal, dtype=np.float64)
         mc_err["GAL"] = mc_gal
         n_cat_bright3["GAL"] = density_gal * frac_gal_bright3
         n_cat_bright10["GAL"] = density_gal * frac_gal_bright10
@@ -1149,6 +1170,7 @@ def build_region(config, region):
         se_yso_sum = 0.0
         for i, (m, f_y, e_y, d_y, f_h, e_h, fb3_y, fb10_y, fb3_h, fb10_h, se_y, se_h) in enumerate(results_sl):
             n_cat["YSO"][m] = d_y * f_y
+            intensity["YSO"][m] = d_y
             mc_err["YSO"][m] = e_y
             mc_err["H2S"][m] = e_h
             frac_h2s_pix[m] = f_h
@@ -1174,6 +1196,7 @@ def build_region(config, region):
         density_h2s_before = density_yso_pix * eta_r * density_module.EPS_EXT
         density_h2s = l_of_pix * eta_r * density_module.EPS_EXT
         n_cat["H2S"] = density_h2s * frac_h2s_pix
+        intensity["H2S"] = density_h2s
         n_cat_h2s_before = density_h2s_before * frac_h2s_pix
         n_cat_bright3["H2S"] = density_h2s * frac_h2s_bright3_pix
         n_cat_bright10["H2S"] = density_h2s * frac_h2s_bright10_pix
@@ -1298,6 +1321,7 @@ def build_region(config, region):
             f.create_dataset("F_LIM_50_PIX_MJY", data=f_lim.astype(np.float32))
             for c in CLASSES:
                 f.create_dataset(f"N_CAT_{c}", data=n_cat[c].astype(np.float32))
+                f.create_dataset(f"INTENSITY_{c}", data=intensity[c].astype(np.float32))
                 f.create_dataset(f"N_CAT_BRIGHT3_{c}", data=n_cat_bright3[c].astype(np.float32))
                 f.create_dataset(f"N_CAT_BRIGHT10_{c}", data=n_cat_bright10[c].astype(np.float32))
             for c in built:
