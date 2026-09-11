@@ -769,19 +769,24 @@ def _gal_members(config, rng, n_mc):
     """`(flux0, u)`, GAL's Monte Carlo sample (sec. 5.4): `S` drawn from
     the counts law's own tabulated `log10 S` node
     (`bmstp.sample_gal.sample`'s `phi(S).S` weight, the same law
-    `bmstp.shapes.build_gal` bins), the three IRAC colours from a galaxy
-    measured at that node (`sky/derived/swire/galaxies_swire_survey.hdf5`'s
-    finite-colour subset, its own `NODE` axis; a node with no measured
-    galaxy borrows its nearest node that has one) -- "draw S from the law
-    and colours from the node's galaxies" (coordinator ruling). The SWIRE
-    colours are dex flux ratios, `COLOUR_AB = log10 F_A - log10 F_B`
-    (`sky/derived/swire/galaxies_swire_survey.hdf5`'s own `DEFINITION`
-    attr), not Vega magnitudes -- I1/I3/I4 come from `S` (already I2's
-    own flux) by `F_A = S . 10**c` for `COLOUR_I1I2` and `F_B = S .
-    10**(-c)` for `COLOUR_I2I3`/`COLOUR_I2I4`, no zero point and no
-    `-0.4` factor. J, H, Ks, M1 are unmeasured for a galaxy and held at
-    zero flux, so the two-of-eight test runs on the four IRAC bands only
-    (disclosed). `x = 1`: sec. 5.4's "whole column"."""
+    `bmstp.shapes.build_gal` bins). The atlas's member and the fitter's GAL
+    template are ONE population by construction (read audit R13 item 3):
+    the SWIRE galaxy this draw's colour comes from is selected exactly as
+    `template_weights.build_galz` selects its own colour population --
+    `isfinite(COLOUR_I1I2) & isfinite(SIGMA_COLOUR_I1I2) & SIGMA_COLOUR_I1I2
+    > 0` (`sky/derived/swire/galaxies_swire_survey.hdf5`'s own `NODE` axis;
+    a node with no such galaxy borrows its nearest node that has one),
+    never SWIRE's own I3/I4-detected subset (7.9% of the sample, 0.19 dex
+    bluer in I1-I2 at the nodes that carry most of the draws -- the
+    discrepancy this replaces). The member's eight-band SED is then the
+    "galz" register's own template nearest that drawn `COLOUR_I1I2` in
+    `log10 F_REF,I1 - log10 F_REF,I2` (the SAME register and colour axis
+    `build_galz` weights the fitter's GAL templates on), scaled so its own
+    `F_REF,I2` equals the drawn `S` (already I2's own flux) -- the template
+    the fitter would evaluate for that colour, never a flux built from
+    SWIRE's own I2I3/I2I4 ratios. J, H, Ks, M1 are unmeasured for a galaxy
+    and held at zero flux, so the two-of-eight test runs on the four IRAC
+    bands only (disclosed). `x = 1`: sec. 5.4's "whole column"."""
     x_law, log10_s_grid, w_law = sample_gal.sample(config)
     node_draw = rng.choice(log10_s_grid.size, size=n_mc, replace=True, p=w_law / w_law.sum())
     s_draw = 10.0 ** log10_s_grid[node_draw]
@@ -790,10 +795,11 @@ def _gal_members(config, rng, n_mc):
     with h5py.File(gal_path, "r") as f:
         node = np.asarray(f["NODE"][:], dtype=np.int64)
         c12 = np.asarray(f["COLOUR_I1I2"][:], dtype=np.float64)
-        c23 = np.asarray(f["COLOUR_I2I3"][:], dtype=np.float64)
-        c24 = np.asarray(f["COLOUR_I2I4"][:], dtype=np.float64)
-    finite = (node >= 0) & np.isfinite(c12) & np.isfinite(c23) & np.isfinite(c24)
-    node, c12, c23, c24 = node[finite], c12[finite], c23[finite], c24[finite]
+        sigma_c12 = np.asarray(f["SIGMA_COLOUR_I1I2"][:], dtype=np.float64)
+    # the SAME selection `template_weights.build_galz` applies to the
+    # colour population it weights the fitter's GAL templates on.
+    finite = (node >= 0) & np.isfinite(c12) & np.isfinite(sigma_c12) & (sigma_c12 > 0)
+    node, c12 = node[finite], c12[finite]
 
     order = np.argsort(node, kind="stable")
     counts = np.bincount(node[order], minlength=log10_s_grid.size)
@@ -807,13 +813,28 @@ def _gal_members(config, rng, n_mc):
     src_node = nearest[node_draw]
     within = np.minimum((rng.random(n_mc) * counts[src_node]).astype(np.int64), counts[src_node] - 1)
     gal_row = order[starts[src_node] + within]
+    colour_draw = c12[gal_row]
+
+    # the "galz" register template nearest this draw's own colour
+    # (`template_weights.build_galz`'s SAME `colour_theta`), vectorised by
+    # `searchsorted` on the sorted register axis, no per-member loop.
+    reg = template_weights._read_register(config, "galz")
+    f_ref, floor_linear = reg["f_ref"], reg["floor_linear"]
+    colour_theta = np.log10(f_ref["I1"]) - np.log10(f_ref["I2"])
+    reg_order = np.argsort(colour_theta)
+    sorted_colour = colour_theta[reg_order]
+    j = np.clip(np.searchsorted(sorted_colour, colour_draw), 1, sorted_colour.size - 1)
+    lo, hi = j - 1, j
+    pick_hi = np.abs(sorted_colour[hi] - colour_draw) < np.abs(colour_draw - sorted_colour[lo])
+    tmpl = reg_order[np.where(pick_hi, hi, lo)]
 
     flux = np.zeros((n_mc, N_BANDS), dtype=np.float64)
     i1, i2, i3, i4 = (BAND_KEYS.index(k) for k in ("I1", "I2", "I3", "I4"))
+    scale = s_draw / np.maximum(f_ref["I2"][tmpl], floor_linear[tmpl])
+    flux[:, i1] = f_ref["I1"][tmpl] * scale
     flux[:, i2] = s_draw
-    flux[:, i1] = s_draw * 10.0 ** c12[gal_row]
-    flux[:, i3] = s_draw * 10.0 ** (-c23[gal_row])
-    flux[:, i4] = s_draw * 10.0 ** (-c24[gal_row])
+    flux[:, i3] = f_ref["I3"][tmpl] * scale
+    flux[:, i4] = f_ref["I4"][tmpl] * scale
     u = np.ones(n_mc, dtype=np.float64)
     # `A_GAL`, sec. 5.4 "Sky density": the density the Monte Carlo total
     # stands for is `sample_gal.density` (the `ln 10` integral), NOT the
