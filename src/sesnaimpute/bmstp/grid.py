@@ -25,6 +25,7 @@ shape is a delta narrower than the fit's own uncertainty in `log10 B_hat`
 """
 
 import numpy as np
+from scipy import ndimage
 from scipy.linalg import toeplitz
 from scipy.ndimage import gaussian_filter1d
 from scipy.special import erf
@@ -147,31 +148,62 @@ def bin_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
     return H.astype(np.float64), mass_outside
 
 
-def n_eff(x, log10_f45, w):
-    """The per-cell EFFECTIVE COUNT of members backing a shape's density
-    at that cell (repair list row 7, owner's ruling 2026-09-10): a cell's
-    density alone does not say whether it was set by one heavy member or
-    by many, so the atlas figure standardises a class's share by this
-    count instead of a threshold. `S1`, the raw (unnormalised) sum of
-    member weights `w` landing in the cell, and `S2`, the same cell's sum
-    of SQUARED member weights -- Kish's effective-sample-size identity,
-    `N_EFF = S1**2 / S2` -- computed directly off the unbinned member
-    marks (`x`, `log10_f45`) BEFORE any smoothing, since smoothing spreads
-    density but manufactures no new evidence; 0 where no member's weight
-    fell in the cell (`S2 == 0`). Shared by every class whose members are
-    discrete population draws (STAR, AGB): the star-width-class binning
-    (`bin_star_widths`) only changes each member's own smoothing sigma,
-    never which raw cell it falls in, so summing `S1`/`S2` per class and
-    then over classes is the same as this one combined histogram."""
+def _explicit_gaussian_kernel1d(sigma, truncate=4.0):
+    """The exact discrete kernel `scipy.ndimage.gaussian_filter1d` applies
+    for `sigma` (its own default truncation, order 0), built explicitly so
+    a caller can SQUARE it (repair list row 7, coordinator's addendum
+    2026-09-10 19:45: `N_EFF`'s `S2` runs the squared-weight sum through
+    every kernel the density's own chain uses, squared elementwise and NOT
+    renormalised -- `gaussian_filter1d` itself always renormalises, so it
+    cannot be reused for `S2`)."""
+    sigma = float(sigma)
+    radius = int(truncate * sigma + 0.5)
+    offsets = np.arange(-radius, radius + 1, dtype=np.float64)
+    phi = np.exp(-0.5 * (offsets / sigma) ** 2)
+    return phi / phi.sum()
+
+
+def n_eff_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
+    """The per-cell EFFECTIVE COUNT of retained stars behind `bin_star_
+    widths`'s own density at that cell (repair list row 7, coordinator's
+    addendum 2026-09-10 19:45): a cell's density is `Sum_i w_i K_i(c)`,
+    each star `i` placed through its own width class's Gaussian (`log10
+    x` axis) and the grid's one-cell smoothing (`log10 F_4.5` axis); the
+    evidence behind it is the SAME stars through the SAME two kernels, so
+    `S1 = Sum_i w_i K_i(c)` is `bin_star_widths`'s own construction exactly
+    (summed over classes, before the floor), and `S2 = Sum_i w_i**2
+    K_i(c)**2` reruns it with each star's weight squared and BOTH kernels
+    replaced by their own elementwise square, NOT renormalised (a squared
+    Gaussian is narrower and smaller: it may not integrate to 1).  `N_EFF =
+    S1**2 / S2`, 0 where no star's weight reaches the cell (`S2 == 0`).
+    Invariant to any overall weight scale, so the `total_weight` division
+    `bin_star_widths` applies to its own density does not matter here."""
     x = np.asarray(x, dtype=np.float64)
     log10_f45 = np.asarray(log10_f45, dtype=np.float64)
     w = np.asarray(w, dtype=np.float64)
+    width_class = np.asarray(width_class, dtype=np.int64)
     with np.errstate(divide="ignore"):
         log10_x = np.nextafter(np.log10(x), -np.inf)
-    s1, _, _ = np.histogram2d(
-        log10_x, log10_f45, bins=[LOG10_X_EDGES, LOG10_F45_EDGES], weights=w)
-    s2, _, _ = np.histogram2d(
-        log10_x, log10_f45, bins=[LOG10_X_EDGES, LOG10_F45_EDGES], weights=w ** 2)
+    f_kernel = _explicit_gaussian_kernel1d(1.0)
+    f_kernel_sq = f_kernel ** 2
+    s1 = np.zeros((_N_X, _N_B), dtype=np.float64)
+    s2 = np.zeros((_N_X, _N_B), dtype=np.float64)
+    for k in range(len(sigma_classes_cells)):
+        sel = width_class == k
+        if not np.any(sel):
+            continue
+        h1, _, _ = np.histogram2d(
+            log10_x[sel], log10_f45[sel], bins=[LOG10_X_EDGES, LOG10_F45_EDGES], weights=w[sel])
+        h2, _, _ = np.histogram2d(
+            log10_x[sel], log10_f45[sel], bins=[LOG10_X_EDGES, LOG10_F45_EDGES], weights=w[sel] ** 2)
+        x_kernel = _explicit_gaussian_kernel1d(float(sigma_classes_cells[k]))
+        x_kernel_sq = x_kernel ** 2
+        h1 = ndimage.convolve1d(h1, weights=x_kernel, axis=0, mode="constant")
+        h1 = ndimage.convolve1d(h1, weights=f_kernel, axis=1, mode="constant")
+        h2 = ndimage.convolve1d(h2, weights=x_kernel_sq, axis=0, mode="constant")
+        h2 = ndimage.convolve1d(h2, weights=f_kernel_sq, axis=1, mode="constant")
+        s1 += h1
+        s2 += h2
     with np.errstate(divide="ignore", invalid="ignore"):
         return np.where(s2 > 0, s1 ** 2 / s2, 0.0)
 
