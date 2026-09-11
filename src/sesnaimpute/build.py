@@ -10,22 +10,28 @@ config, and calls `build_fn(config, regions=None or the given list)`. The
 command line defaults to all thirty regions; per-region products are one
 file per region, so a subset run never touches the others.
 
-`run` also holds the stage's worker pool alive for the stage's whole
+This module also holds a stage's worker pool alive for the stage's whole
 duration. joblib's loky backend retires a worker idle for 300 s
 (`joblib/_parallel_backends.py:531`, hardcoded); on this machine a freshly
 spawned worker's startup imports die intermittently in dyld, so a mid-stage
 respawn is a crash risk, not just a cost. `_StagePoolLoky` raises that
-default to a day and is registered once; `build_fn` runs inside one
-`parallel_config(backend="stage_pool")` set before it starts and never
-changed inside it, so every `Parallel` call the stage makes, at any nesting
-depth or phase, draws from the one pool created for its first call instead
-of tearing one down and respawning between phases or between regions.
+default to a day and is registered as joblib's *default* backend
+(`make_default=True`) at import time, not set through `parallel_config` —
+a call site that leaves `backend` unspecified (every plain
+`Parallel(n_jobs=...)` in the package) then resolves to this pool with
+joblib's own default-backend path, which is what preserves the
+`prefer="threads"` fallback several call sites rely on for shared-memory
+work; a `parallel_config(backend=...)` context instead marks the backend
+"explicit" and turns that fallback off package-wide, which is the wrong
+trade for one hardening fix. The net effect is the same pool serving every
+`Parallel` call in the stage instead of one torn down and respawned
+between phases or between regions.
 """
 
 import argparse
 import sys
 
-from joblib import parallel_config, register_parallel_backend
+from joblib import register_parallel_backend
 from joblib._parallel_backends import LokyBackend
 
 from sesnaimpute import config as config_module
@@ -39,7 +45,7 @@ class _StagePoolLoky(LokyBackend):
                                   **backend_args)
 
 
-register_parallel_backend("stage_pool", _StagePoolLoky)
+register_parallel_backend("stage_pool", _StagePoolLoky, make_default=True)
 
 
 def run(build_fn):
@@ -48,5 +54,4 @@ def run(build_fn):
     parser.add_argument("--regions", nargs="+", default=None)
     args = parser.parse_args(sys.argv[1:])
     config = config_module.load(args.config)
-    with parallel_config(backend="stage_pool"):
-        build_fn(config, regions=args.regions)
+    build_fn(config, regions=args.regions)
