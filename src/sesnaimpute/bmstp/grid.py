@@ -16,12 +16,26 @@ shape, and `1 - mass_outside` (the ON-GRID FRACTION) is what a consumer
 stores beside the shape to scale the intrinsic density by (W26); the 0.1%
 acceptance bar (sec. 9) applies to `mass_above_top` alone -- the
 population's own raw weight above the grid's TOP edge, not to how much of
-it sits below the retention limit. A shape's mass outside its grid is the
-`mass_outside` `bin` reports; its value in an empty or off-grid cell is
-`FLOOR` of its peak cell (sec. 2, "the floor"). At bin time every shape is
-smoothed by exactly one cell along EACH axis (sec. 2, "minimum widths"): no
-shape is a delta narrower than the fit's own uncertainty in `log10 B_hat`
-(0.04-0.1 dex on a two-band source).
+it sits below the retention limit. At bin time every shape is smoothed by
+exactly one cell along EACH axis (sec. 2, "minimum widths"): no shape is a
+delta narrower than the fit's own uncertainty in `log10 B_hat` (0.04-0.1
+dex on a two-band source).
+
+Two rulings of the owner (2026-09-11), beside sec. 2's own statement:
+(1) SUPPORT. `x = a / A_s <= 1` by definition, so a cell with `log10 x >
+0` is never part of the prior's support even though the array keeps that
+extent (`N_X_SUPPORT`, below) for the kernels' own padding: `bin` and
+`bin_star_widths` fold whatever mass a smoothing pass pushes past `log10
+x = 0` into `mass_outside` and hold those cells at EXACT zero, never the
+floor, and `ON_GRID_*`/`MASS_OUTSIDE_*` are then measured over the
+support alone. (2) ONE COMMON FLOOR. The floor is no longer a per-class,
+per-shape constant baked in here: a stored shape now carries its own true
+zeros, `FLOOR` becomes one absolute value on the read prior density,
+common to every class at a source, applied where the prior is read
+(`fittp.prior_reader`) so that an empty cell no longer decides the class
+comparison by intensity alone -- the six classes read equal there and the
+likelihood decides. `blur`'s own shift-and-smooth is unchanged; only the
+floor step its caller used to apply is gone.
 """
 
 import numpy as np
@@ -36,6 +50,13 @@ _N_X = LOG10_X_EDGES.size - 1
 _X_CELL_WIDTH = (LOG10_X_EDGES[-1] - LOG10_X_EDGES[0]) / _N_X
 _X_CENTERS = LOG10_X_EDGES[:-1] + 0.5 * _X_CELL_WIDTH
 
+#: the support rule (module docstring, ruling 1): `x <= 1` by definition,
+#: so only the cells whose upper edge is at or below `log10 x = 0` are the
+#: prior's support -- the one dex above it (cells `N_X_SUPPORT` to
+#: `_N_X - 1`) is kept in every array purely as the kernels' own padding
+#: and is never part of a shape's stored mass or a reader's sum.
+N_X_SUPPORT = int(np.searchsorted(LOG10_X_EDGES, 0.0))
+
 #: `log10 F_4.5` cell edges, -4.0 to +7.0 in 110 cells of 0.1 dex (sec. 2,
 #: "the common grid", REWRITTEN after W24, W24b): one axis and one origin
 #: for STAR, AGB, PAHC, GAL and YSO alike. The top moved from +6.0 to +7.0
@@ -46,8 +67,11 @@ _N_B = LOG10_F45_EDGES.size - 1
 D_LOG10_F45 = (LOG10_F45_EDGES[-1] - LOG10_F45_EDGES[0]) / _N_B
 _B_CENTERS = LOG10_F45_EDGES[:-1] + 0.5 * D_LOG10_F45
 
-#: A shape's value in an empty or off-grid cell, as a fraction of its
-#: peak cell (sec. 2, "the floor").
+#: The floor fraction (sec. 2, "the floor"; module docstring ruling 2):
+#: no longer baked into a stored shape, which carries its own true zeros
+#: -- read alone, as one value common to every class at a source,
+#: `FLOOR` times the largest cell density any of the six classes reaches
+#: there (`fittp.prior_reader.common_floor`).
 FLOOR = 1e-6
 
 #: (sec. 2 "minimum widths", sec. 5.1 "Marks"): the number of
@@ -69,8 +93,12 @@ def bin(x, log10_f45, w):
     smoothed by exactly one cell along EACH axis (sec. 2, "minimum
     widths") with `mode="constant"` (zero beyond the edges): any mass the
     smoothing pushes past an edge is mass outside the grid and is folded
-    into `mass_outside`, so `H.sum() == 1 - mass_outside` stays an exact
-    identity before the floor. `H` is then floored at `FLOOR * H.max()`."""
+    into `mass_outside`. The support rule (module docstring, ruling 1)
+    then folds whatever of that smoothed mass sits at `log10 x > 0` into
+    `mass_outside` too and holds those cells at exact zero, so `H.sum()
+    == 1 - mass_outside` stays an exact identity over the support alone.
+    `H` carries its own true zeros: the floor is read, not stored (ruling
+    2)."""
     x = np.asarray(x, dtype=float)
     log10_f45 = np.asarray(log10_f45, dtype=float)
     w = np.asarray(w, dtype=float)
@@ -98,7 +126,10 @@ def bin(x, log10_f45, w):
     H = gaussian_filter1d(H, sigma=1.0, axis=0, mode="constant")
     H = gaussian_filter1d(H, sigma=1.0, axis=1, mode="constant")
     mass_outside += mass_before - float(H.sum())
-    H = np.maximum(H, FLOOR * H.max())
+    # the support rule (ruling 1): `log10 x > 0` is outside the prior even
+    # though the array keeps it for the kernels' padding.
+    mass_outside += float(H[N_X_SUPPORT:].sum())
+    H[N_X_SUPPORT:] = 0.0
     return H.astype(np.float64), mass_outside
 
 
@@ -114,20 +145,22 @@ def bin_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
     the sightline's own cloud-interval-span cap, `sample_star
     .tile_width_classes`); `width_class` (n_star,) each star's own class
     index, nearest its `sigma_x` in log space. One weighted histogram and
-    smoothing pass per POPULATED class, summed before the floor -- up to
-    `N_WIDTH_CLASSES` histograms and smoothings of the tile's grid in
-    place of one, no per-star kernel, nothing at the read (AGB reuses the
-    same stars' classes, sec. 5.2). The `log10 F_4.5` axis keeps the
+    smoothing pass per POPULATED class, summed before the support rule --
+    up to `N_WIDTH_CLASSES` histograms and smoothings of the tile's grid
+    in place of one, no per-star kernel, nothing at the read (AGB reuses
+    the same stars' classes, sec. 5.2). The `log10 F_4.5` axis keeps the
     ordinary one-cell smoothing (sec. 2) in every pass. `H.sum() == 1 -
-    mass_outside` stays exact before the floor, the same identity `bin`
-    reports, since every star belongs to exactly one class."""
+    mass_outside` stays exact over the support, the same identity `bin`
+    reports, since every star belongs to exactly one class; `H` carries
+    its own true zeros (ruling 2), including the exact zero the support
+    rule (ruling 1) holds at `log10 x > 0`."""
     x = np.asarray(x, dtype=float)
     log10_f45 = np.asarray(log10_f45, dtype=float)
     w = np.asarray(w, dtype=float)
     width_class = np.asarray(width_class, dtype=np.int64)
     total_weight = w.sum()
     if total_weight <= 0:
-        return np.full((_N_X, _N_B), FLOOR), 1.0
+        return np.zeros((_N_X, _N_B), dtype=np.float64), 1.0
     with np.errstate(divide="ignore"):
         log10_x = np.log10(x)
     # edge convention (sec. 2), the same nudge `bin` applies.
@@ -143,87 +176,12 @@ def bin_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
         Hk = gaussian_filter1d(Hk, sigma=float(sigma_classes_cells[k]), axis=0, mode="constant")
         Hk = gaussian_filter1d(Hk, sigma=1.0, axis=1, mode="constant")
         H += Hk
+    # the support rule (ruling 1): fold whatever mass the width-class
+    # smoothing pushed past `log10 x = 0` into `mass_outside` and hold
+    # those cells at exact zero before the identity is read off `H.sum()`.
+    H[N_X_SUPPORT:] = 0.0
     mass_outside = float(1.0 - H.sum())
-    H = np.maximum(H, FLOOR * H.max()) if H.max() > 0 else np.full_like(H, FLOOR)
     return H.astype(np.float64), mass_outside
-
-
-def _explicit_gaussian_kernel1d(sigma, truncate=4.0):
-    """The exact discrete kernel `scipy.ndimage.gaussian_filter1d` applies
-    for `sigma` (its own default truncation, order 0), built explicitly so
-    a caller can SQUARE it (repair list row 7, coordinator's addendum
-    2026-09-10 19:45: `N_EFF`'s `S2` runs the squared-weight sum through
-    every kernel the density's own chain uses, squared elementwise and NOT
-    renormalised -- `gaussian_filter1d` itself always renormalises, so it
-    cannot be reused for `S2`)."""
-    sigma = float(sigma)
-    radius = int(truncate * sigma + 0.5)
-    offsets = np.arange(-radius, radius + 1, dtype=np.float64)
-    phi = np.exp(-0.5 * (offsets / sigma) ** 2)
-    return phi / phi.sum()
-
-
-def n_eff_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
-    """The per-cell EFFECTIVE COUNT of retained stars behind `bin_star_
-    widths`'s own density at that cell (repair list row 7, coordinator's
-    addendum 2026-09-10 19:45): a cell's density is `Sum_i w_i K_i(c)`,
-    each star `i` placed through its own width class's Gaussian (`log10
-    x` axis) and the grid's one-cell smoothing (`log10 F_4.5` axis); the
-    evidence behind it is the SAME stars through the SAME two kernels, so
-    `S1 = Sum_i w_i K_i(c)` is `bin_star_widths`'s own construction exactly
-    (summed over classes, before the floor), and `S2 = Sum_i w_i**2
-    K_i(c)**2` reruns it with each star's weight squared and BOTH kernels
-    replaced by their own elementwise square, NOT renormalised (a squared
-    Gaussian is narrower and smaller: it may not integrate to 1).  `N_EFF =
-    S1**2 / S2`, 0 where no star's weight reaches the cell (`S2 == 0`).
-    Invariant to any overall weight scale, so the `total_weight` division
-    `bin_star_widths` applies to its own density does not matter here."""
-    x = np.asarray(x, dtype=np.float64)
-    log10_f45 = np.asarray(log10_f45, dtype=np.float64)
-    w = np.asarray(w, dtype=np.float64)
-    width_class = np.asarray(width_class, dtype=np.int64)
-    with np.errstate(divide="ignore"):
-        log10_x = np.nextafter(np.log10(x), -np.inf)
-    f_kernel = _explicit_gaussian_kernel1d(1.0)
-    f_kernel_sq = f_kernel ** 2
-    s1 = np.zeros((_N_X, _N_B), dtype=np.float64)
-    s2 = np.zeros((_N_X, _N_B), dtype=np.float64)
-    for k in range(len(sigma_classes_cells)):
-        sel = width_class == k
-        if not np.any(sel):
-            continue
-        h1, _, _ = np.histogram2d(
-            log10_x[sel], log10_f45[sel], bins=[LOG10_X_EDGES, LOG10_F45_EDGES], weights=w[sel])
-        h2, _, _ = np.histogram2d(
-            log10_x[sel], log10_f45[sel], bins=[LOG10_X_EDGES, LOG10_F45_EDGES], weights=w[sel] ** 2)
-        x_kernel = _explicit_gaussian_kernel1d(float(sigma_classes_cells[k]))
-        x_kernel_sq = x_kernel ** 2
-        h1 = ndimage.convolve1d(h1, weights=x_kernel, axis=0, mode="constant")
-        h1 = ndimage.convolve1d(h1, weights=f_kernel, axis=1, mode="constant")
-        h2 = ndimage.convolve1d(h2, weights=x_kernel_sq, axis=0, mode="constant")
-        h2 = ndimage.convolve1d(h2, weights=f_kernel_sq, axis=1, mode="constant")
-        s1 += h1
-        s2 += h2
-    with np.errstate(divide="ignore", invalid="ignore"):
-        return np.where(s2 > 0, s1 ** 2 / s2, 0.0)
-
-
-def n_eff_analytic(x, log10_f45, w):
-    """GAL's own `N_EFF` (repair list row 7): GAL's shape is an analytic
-    counts law, not a finite draw of members whose count could run short,
-    so the sampling-uncertainty identity above does not apply -- every
-    cell the law's own raw (pre-smoothing) mass touches carries INFINITE
-    effective evidence (the law's disclosed systematic band, not a sample
-    size, is its uncertainty, sec. 5.4), and every other cell carries
-    none."""
-    x = np.asarray(x, dtype=np.float64)
-    log10_f45 = np.asarray(log10_f45, dtype=np.float64)
-    w = np.asarray(w, dtype=np.float64)
-    with np.errstate(divide="ignore"):
-        log10_x = np.nextafter(np.log10(x), -np.inf)
-    raw, _, _ = np.histogram2d(
-        log10_x, log10_f45, bins=[LOG10_X_EDGES, LOG10_F45_EDGES], weights=w)
-    return np.where(raw > 0, np.inf, 0.0)
 
 
 def mass_above_top(log10_f45, w):
