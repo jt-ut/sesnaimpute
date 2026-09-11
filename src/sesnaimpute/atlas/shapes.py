@@ -7,9 +7,13 @@ and printed on the page, never restated here.
 
 Per region, ONE source: the one at the region's median `A_COL_K`
 (`_select_source`). Six panels per row (GAL, YSO, H2S, STAR, PAHC, AGB),
-sharing ONE pair of axes, `log10 x` and `log10 F_4.5` in mJy (sec. 2: one
-common brightness axis for every class, H2S included since its template
-conversion folded in at the shape stage).
+sharing ONE pair of axes, `log10 x` (limited to the wall, `[-3, 0]`,
+sec. 2) and `log10 F_4.5` in mJy (sec. 2: one common brightness axis for
+every class, H2S included since its template conversion folded in at
+the shape stage), the bold y-axis label set as the axes' own ylabel. The
+title is the region and what the page is; the median source's own name,
+sightline column `A_s`, arm and distance sit in the caption block
+instead.
 
 Row 1 draws `P(C, cell | s) = Lambda_C(cell) / sum over classes and cells
 of Lambda(cell)`, the joint probability that the source is of class C
@@ -37,15 +41,15 @@ is left to decide. The support is `bmstp.grid.N_X_SUPPORT`, the floor
 `fittp.prior_reader.common_floor` -- the same two definitions the fitter's
 read uses, imported, never restated.
 
-The colourbars carry `plot_style.label`; the page prints, below the
-rows, `captions.SHAPES_ROW1`, `captions.SHAPES_ROW2` and
+The colourbars read `$P(C, x, F_{4.5} \mid s)$` (row 1) and `$P(C \mid x,
+F_{4.5}, s)$` (row 2); the page prints, below the rows, the source's own
+detail line, then `captions.SHAPES_ROW1`, `captions.SHAPES_ROW2` and
 `captions.vocabulary_block()` in full, wrapped to the page width, with
 the page grown to fit them.
 """
 
 import argparse
 import os
-import textwrap
 
 import h5py
 import numpy as np
@@ -61,6 +65,7 @@ from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.fittp import prior_reader
 from sesnaimpute.bmstp import grid
+from sesnaimpute.bmstp import template_weights
 from sesnaimpute.population import pahc_curve
 from sesnaimpute.atlas import captions
 
@@ -71,10 +76,25 @@ CLASS_ORDER = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
 
 #: Every class reads the one common brightness axis (sec. 2, H2S included
 #: ): `log10 F_4.5` in mJy, `bmstp.grid.LOG10_F45_EDGES` -- the
-#: row's one outside y-axis label below.
-_SHARED_Y_LABEL = plot_style.label("log10 F_4.5", "mJy")
+#: row's one outside y-axis label below, real mathtext subscripts
+#: throughout (owner's ruling 2026-09-11 addendum), bold by
+#: `plot_style.apply_style`'s own `axes.labelweight` since it is set as
+#: the axes' own ylabel, not a plain figure text.
+_SHARED_Y_LABEL = plot_style.label(r"$\log_{10} F_{4.5}$", "mJy")
+_X_LABEL = r"$\log_{10} x$"
 
 _ARM_NAME = {0: "Herschel", 1: "Planck"}
+
+#: Panel titles, axis labels and colourbar labels at a size a reader
+#: sees on a slide; tick labels smaller (owner's ruling 2026-09-11
+#: addendum, item 8); the vocabulary block stays at its own small size
+#: (`_CAPTION_FONTSIZE` below).
+_LABEL_FONTSIZE = 13
+_TICK_FONTSIZE = 10
+
+#: The wall (`x = a / A_s <= 1`, sec. 2): nothing is drawn past it
+#: (owner's ruling 2026-09-11 addendum, item 4).
+_LOG10_X_MIN, _LOG10_X_MAX = -3.0, 0.0
 
 #: The caption block's own type size and wrap width, chosen so the
 #: wrapped lines stay well inside the page's usable width at this font
@@ -82,12 +102,16 @@ _ARM_NAME = {0: "Herschel", 1: "Planck"}
 #: the block never overruns the page horizontally) -- the page instead
 #: grows in the one free dimension, its height, to fit the line count
 #: this font and width produce.
-_CAPTION_FONTSIZE = 7.5
+_CAPTION_FONTSIZE = 8.0
 _CAPTION_LINESPACING = 1.3
 _CAPTION_CHARS_PER_LINE = 160
 _CAPTION_LINE_HEIGHT_IN = _CAPTION_FONTSIZE * _CAPTION_LINESPACING / 72.0
 _CAPTION_TOP_PAD_IN = 0.20
 _CAPTION_BOTTOM_PAD_IN = 0.15
+
+#: Room, inches, for row 2's own x-axis tick labels and "log10 x" label
+#: below its panels, ahead of the caption strip (W66al rule 3).
+AXIS_LABEL_MARGIN_IN = 0.35
 
 
 def _select_source(a_col):
@@ -97,11 +121,10 @@ def _select_source(a_col):
 
 
 def _read_density_table(config, region):
-    """P1's per-source rows this page needs: `NAME`, `A_COL_K`, `ARM`,
-    the star-family/cloud grain indices, `D_PAHC` (sec. 4.1, row 1's
-    `f_STAR`/`f_PAHC` read point), the six `DENSITY_<C>` (sec.
-    4.1), and the file's `KAPPA_HERSCHEL`/`KAPPA_PLANCK` attributes
-    (sec. 5.5's law, the caption line)."""
+    """P1's per-source rows this page needs: `NAME`, `A_COL_K` (the
+    source's own sightline column `A_s`), `ARM`, the star-family/cloud
+    grain indices, `D_PAHC` (sec. 4.1, row 1's `f_STAR`/`f_PAHC` read
+    point), and the six `DENSITY_<C>` (sec. 4.1)."""
     path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
     with h5py.File(path, "r") as f:
         d = dict(
@@ -109,8 +132,6 @@ def _read_density_table(config, region):
             arm=f["ARM"][:].astype(np.int64), tile=f["TILE"][:].astype(np.int64),
             sightline=f["SIGHTLINE_ROW"][:].astype(np.int64),
             d_pahc=f["D_PAHC"][:].astype(np.float64),
-            kappa_herschel=float(f.attrs["KAPPA_HERSCHEL"]),
-            kappa_planck=float(f.attrs["KAPPA_PLANCK"]),
         )
         for c in ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S"):
             d[c] = f["DENSITY_%s" % c][:].astype(np.float64)
@@ -178,32 +199,6 @@ def _panel_shape(config, region, cls, idx_median):
     return density, mass, reader
 
 
-def _factor_marginal(panel_b_centers, reader, cls, d_pahc_s, curve):
-    """`f_C(F; s)` for STAR/PAHC (module docstring, sec. 1.4, 5.1, 5.3):
-    `Sum_theta pi_C(theta|F) x {1-P, P}(-log10 q)`. `pi_C(theta|F)` is P5
-    factor 0 (`type`, `template_weights.build_sps`/`build_pahc`'s own
-    dict order), already normalised over theta at every `F` cell (sec.
-    1.4), read directly off its `F` axis -- no per-template offset, since
-    `type`'s own `C_F = C_THETA` cancels sec. 2's `log10 F_4.5 = log10
-    Bhat + C_THETA` line exactly. `P` is factor 1 (`uncontaminated`/
-    `contrast`)'s own curve, read exactly as `fittp.prior_reader.
-    _factor_ln` reads any factor, `arg = b_star + C_F + D_PAHC(s)`, with
-    `b_star = F - C_THETA[theta]` (the same line solved for `log10 Bhat`
-    at the query brightness `F`, since this page has no fitted `a_hat`/
-    slope to place a* away from F) -- `population.pahc_curve.read`,
-    imported not re-derived, not the stored/floored P5 table (which
-    fixes the argument at F, sec. 1.4, wrong for the per-template shift
-    this needs)."""
-    type_factor, contrast_factor = reader.factors[0], reader.factors[1]
-    pi_theta_f = type_factor["W"]          # (n_model, n_b), sum_theta = 1 at every F
-    c_theta = reader.c_theta               # (n_model,)
-    c_f = contrast_factor["C_F"]           # (n_model,)
-    arg = panel_b_centers[None, :] - c_theta[:, None] + c_f[:, None] + d_pahc_s
-    p_val = curve(-arg)                    # curve's own x-axis is log10 q, arg is -log10 q
-    term = (1.0 - p_val) if cls == "STAR" else p_val
-    return (pi_theta_f * term).sum(axis=0)
-
-
 def _build_region_data(config, region):
     """Reads the median source's per-class shapes, forms `Lambda_C =
     A_C(s) h_C f_C(F; s)` for every class (sec. 1.1/1.4, module
@@ -229,7 +224,7 @@ def _build_region_data(config, region):
         x_edges, b_edges = reader.x_edges, reader.b_edges
         b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
         if cls in ("STAR", "PAHC"):
-            f_c = _factor_marginal(b_centers, reader, cls, d_pahc_s, curve)
+            f_c = template_weights._factor_marginal(b_centers, reader, cls, d_pahc_s, curve)
         else:
             f_c = np.ones(density.shape[1], dtype=np.float64)
         intensity_c[cls] = float(dtab[cls][idx_median])
@@ -302,20 +297,13 @@ def _print_numbers(region, data):
 
 
 def _caption_block():
-    """The page's caption, wrapped to `_CAPTION_CHARS_PER_LINE`: the two
-    rows' probability statements and the shared vocabulary, read from
-    `captions` and never restated here (CODING_RULES_BMSTP.md rule 4).
-    Returns `(text, n_lines)` -- `n_lines` is what `_draw_figure` grows
-    the page's height by, so the block never overlaps the rows above it."""
-    sections = [textwrap.wrap(captions.SHAPES_ROW1, width=_CAPTION_CHARS_PER_LINE),
-                textwrap.wrap(captions.SHAPES_ROW2, width=_CAPTION_CHARS_PER_LINE)]
-    vocab_lines = []
-    for line in captions.vocabulary_block().split("\n"):
-        vocab_lines.extend(textwrap.wrap(line, width=_CAPTION_CHARS_PER_LINE) or [""])
-    sections.append(vocab_lines)
-    text = "\n\n".join("\n".join(sec) for sec in sections)
-    n_lines = sum(len(sec) for sec in sections) + 2 * (len(sections) - 1)
-    return text, n_lines
+    """The page's raw (unwrapped) caption: the two rows' probability
+    statements and the shared vocabulary, read from `captions` and never
+    restated here (CODING_RULES_BMSTP.md rule 4). Wrapping and the
+    height it needs are `captions.caption_layout`'s, the one definition
+    this page and `atlas.render`'s own caption strip both call."""
+    return "\n\n".join([captions.SHAPES_ROW1, captions.SHAPES_ROW2,
+                         "Vocabulary:\n" + captions.vocabulary_block()])
 
 
 def _draw_figure(config, region, data):
@@ -324,14 +312,31 @@ def _draw_figure(config, region, data):
     x_edges, b_edges, support = data["x_edges"], data["b_edges"], data["support"]
     joint, share = data["joint"], data["share"]
 
-    caption_text, caption_lines = _caption_block()
-    caption_block_h = (caption_lines * _CAPTION_LINE_HEIGHT_IN
-                        + _CAPTION_TOP_PAD_IN + _CAPTION_BOTTOM_PAD_IN)
+    # The source's own name, sightline column, arm and distance (owner's
+    # ruling 2026-09-11 addendum, item 1): moved out of the title into
+    # the caption block, `KAPPA_*` dropped entirely.
+    r = regions_module.REGIONS_BY_NAME[region]
+    name_med = dtab["name"][idx_median].decode("utf-8")
+    arm_med = _ARM_NAME[int(dtab["arm"][idx_median])]
+    source_line = (
+        "median source %s (sightline column $A_s$=%.3g mag, %s arm); "
+        "$d_r$=%.0f+/-%.0f pc"
+        % (name_med, dtab["a_col"][idx_median], arm_med, r.d_r_pc, r.sigma_pc))
+    caption_text, caption_block_h = captions.caption_layout(
+        "\n\n".join([source_line, _caption_block()]), _CAPTION_CHARS_PER_LINE,
+        _CAPTION_LINE_HEIGHT_IN, _CAPTION_TOP_PAD_IN, _CAPTION_BOTTOM_PAD_IN)
 
-    margin_l, margin_r, margin_t = 0.55, 1.05, 0.85
+    margin_l, margin_r, margin_t = 0.75, 1.05, 0.95
     row_gap, col_gap = 0.90, 0.14
     row_h = 3.2
-    page_h = margin_t + 2 * row_h + row_gap + caption_block_h
+    # Row 2's own x-axis tick labels and "log10 x" label draw BELOW its
+    # axes at a fixed offset matplotlib chooses, not inside `row_h` --
+    # without this margin the caption strip's own top edge sat exactly at
+    # row 2's bottom edge and those labels overlapped the caption text
+    # (owner's ruling 2026-09-11, W66al rule 3). Reserved the same way
+    # `atlas.render`'s own `MARGIN_BOTTOM_IN` reserves room for its
+    # bottom row's tick labels, ahead of its own caption strip.
+    page_h = margin_t + 2 * row_h + row_gap + AXIS_LABEL_MARGIN_IN + caption_block_h
     page_w = PAGE_W_IN
     usable_w = page_w - margin_l - margin_r
     shape_w = (usable_w - 5 * col_gap) / 6.0
@@ -355,8 +360,6 @@ def _draw_figure(config, region, data):
     share_masked = {cls: np.where(support[:, None], share[cls], np.nan) for cls in CLASS_ORDER}
     im1 = im2 = None
 
-    src_idx = idx_median
-    a_col_src = dtab["a_col"][src_idx]
     for i in range(2):
         y0 = page_h - margin_t - (i + 1) * row_h - i * row_gap
         for c, cls in enumerate(CLASS_ORDER):
@@ -366,21 +369,21 @@ def _draw_figure(config, region, data):
             if i == 0:
                 im1 = ax.imshow(log_joint[cls].T, origin="lower", aspect="auto",
                                  extent=extent, cmap=cmap1, norm=norm1)
-                ax.text(0.02, 0.03, "mass=%.4f\non_grid=%.4f\narea density = %.3g deg^-2"
-                        % (data["mass_c"][cls], data["on_grid_c"][cls], data["intensity_c"][cls]),
-                        transform=ax.transAxes, fontsize=5.5, color="white", va="bottom")
             else:
                 im2 = ax.imshow(share_masked[cls].T, origin="lower", aspect="auto",
                                  extent=extent, cmap=cmap2, norm=norm2)
             # The support boundary, `log10 x = 0` (`x = 1`), marked on
             # every panel of both rows.
             ax.axvline(0.0, color="white", lw=0.7, linestyle="--", alpha=0.85)
-            ax.set_xlabel("log10 x", fontsize=6.5)
-            ax.tick_params(labelsize=6)
-            ax.set_xticks(np.array([-3.0, -1.0, 1.0]))
+            # The wall: nothing beyond `log10 x = 0` is drawn (owner's
+            # ruling 2026-09-11 addendum, item 4).
+            ax.set_xlim(_LOG10_X_MIN, _LOG10_X_MAX)
+            ax.set_xlabel(_X_LABEL, fontsize=_LABEL_FONTSIZE)
+            ax.tick_params(labelsize=_TICK_FONTSIZE)
+            ax.set_xticks(np.array([-3.0, -2.0, -1.0, 0.0]))
             ax2 = ax.twiny()
             ax2.set_xlim(ax.get_xlim())
-            log_a_col = np.log10(a_col_src)
+            log_a_col = np.log10(dtab["a_col"][idx_median])
             xlim = ax.get_xlim()
             k_lo = int(np.ceil(xlim[0] + log_a_col))
             k_hi = int(np.floor(xlim[1] + log_a_col))
@@ -391,30 +394,32 @@ def _draw_figure(config, region, data):
             if c == 0:
                 ax2.text(1.0, 1.05, plot_style.label("a", "mag"), transform=ax2.transAxes,
                          fontsize=5.5, ha="right", va="bottom")
-            ax.set_title(cls, fontsize=8.5 if i == 0 else 9, pad=16)
+            ax.set_title(cls, fontsize=_LABEL_FONTSIZE, pad=18)
             if c == 0:
-                fig.text(x0 / page_w - 0.30 / page_w, (y0 + 0.5 * row_h) / page_h,
-                          _SHARED_Y_LABEL, rotation=90, va="center", ha="center", fontsize=7)
+                # Bold as `plot_style.apply_style`'s own `axes.labelweight`
+                # requires -- set as the axes' own ylabel, never a plain
+                # figure text (owner's ruling 2026-09-11 addendum, item 3).
+                ax.set_ylabel(_SHARED_Y_LABEL, fontsize=_LABEL_FONTSIZE)
 
     cax1_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / page_w,
                  (page_h - margin_t - row_h) / page_h, 0.22 / page_w, row_h / page_h]
     cax1 = fig.add_axes(cax1_rect)
-    fig.colorbar(im1, cax=cax1, label=plot_style.label("P(C, cell | s)", None))
+    cbar1 = fig.colorbar(im1, cax=cax1)
+    cbar1.set_label(r"$P(C, x, F_{4.5} \mid s)$", fontsize=_LABEL_FONTSIZE)
+    cbar1.ax.tick_params(labelsize=_TICK_FONTSIZE)
 
     cax2_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / page_w,
                  (caption_block_h) / page_h, 0.22 / page_w, row_h / page_h]
     cax2 = fig.add_axes(cax2_rect)
-    fig.colorbar(im2, cax=cax2, label=plot_style.label("P(C | cell, s)", None))
+    cbar2 = fig.colorbar(im2, cax=cax2)
+    cbar2.set_label(r"$P(C \mid x, F_{4.5}, s)$", fontsize=_LABEL_FONTSIZE)
+    cbar2.ax.tick_params(labelsize=_TICK_FONTSIZE)
 
-    r = regions_module.REGIONS_BY_NAME[region]
-    name_med = dtab["name"][idx_median].decode("utf-8")
-    arm_med = _ARM_NAME[int(dtab["arm"][idx_median])]
-    caption = (
-        "%s -- median source %s (A_COL_K=%.3g mag, %s arm); "
-        "d_r=%.0f+/-%.0f pc; KAPPA_HERSCHEL=%.1f, KAPPA_PLANCK=%.1f"
-        % (region, name_med, dtab["a_col"][idx_median], arm_med,
-           r.d_r_pc, r.sigma_pc, dtab["kappa_herschel"], dtab["kappa_planck"]))
-    fig.suptitle(caption, fontsize=9.5, y=1.0 - 0.15 / page_h)
+    # The title carries only the region and what the page is (owner's
+    # ruling 2026-09-11 addendum, item 1); the median source's own
+    # details are the caption block's `source_line` above.
+    fig.suptitle("%s -- the prior at its median source" % region,
+                 fontsize=_LABEL_FONTSIZE, y=1.0 - 0.15 / page_h)
 
     # The page's own vocabulary and row statements (module docstring),
     # anchored so their top line sits just below the rows -- the page

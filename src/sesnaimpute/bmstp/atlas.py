@@ -62,6 +62,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import h2s as h2s_module
+from sesnaimpute.population import pahc_curve
 from sesnaimpute.population import selection as selection_module
 from sesnaimpute.population import yso as yso_module
 from sesnaimpute.bmstp import density as density_module
@@ -72,6 +73,7 @@ from sesnaimpute.bmstp import sample_gal
 from sesnaimpute.bmstp import sample_star
 from sesnaimpute.bmstp import template_weights
 from sesnaimpute.fittp import likelihood as likelihood_module
+from sesnaimpute.fittp import prior_reader
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
@@ -927,6 +929,76 @@ def _observed_bright_counts(config, region, pix, f_lim):
     return n_obs, n_obs_bright3, n_obs_bright10
 
 
+#: rule 10b's 512 MB batch budget for `_above_fraction`'s own
+#: (n_pixel_batch, n_x, n_b) working set: the gathered grain shape, the
+#: extinction column outer product, the blended law's I2 entry, the
+#: brightness threshold and the boolean "above the limit" array are each
+#: that shape (float64), so this counts that many same-shape buffers,
+#: generously.
+_ABOVE_BATCH_BUDGET_BYTES = 512 * 1024 * 1024
+_N_ABOVE_TEMP_ARRAYS = 6
+
+
+def _above_batch_size(n_x, n_b):
+    """Pixels per batch so `n_pixel_batch * n_x * n_b * 8 bytes *
+    _N_ABOVE_TEMP_ARRAYS` stays under `_ABOVE_BATCH_BUDGET_BYTES`
+    (CODING_RULES_BMSTP.md rule 10b)."""
+    row_bytes = n_x * n_b * 8 * _N_ABOVE_TEMP_ARRAYS
+    return max(1, _ABOVE_BATCH_BUDGET_BYTES // row_bytes)
+
+
+def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve):
+    """The owner's ruling 2026-09-11 (briefs/W66al.md rule 1): per
+    admitted pixel, the deterministic sum `Sum_cells h_C(cell; grain) *
+    f_C(F_j; pixel) * 1[F_obs(cell) > F_0]` that `N_ABOVE_C(pixel) =
+    A_C(pixel) *` this sum multiplies (SPEC_BMSTP_DRAFT.md sec. 8's
+    intrinsic-view addendum). `h_C` is the class's own RAW stored grain
+    shape (`reader.grid_all[grain]`, unit mass on the support -- no
+    per-source column-kernel blur: this is a pixel-level sum, not a
+    source's own read). `f_C` is 1 for GAL/YSO/AGB/H2S and, for STAR/PAHC,
+    the type-times-contamination marginal at the pixel's own 8 um limit
+    (`bmstp.template_weights._factor_marginal`, moved out of
+    `atlas.shapes` so the atlas and the shapes page share one
+    definition). `F_obs(cell) = F_j * 10^(-0.4 kappa_4.5(a) a)`, `a = x_i
+    * a_col[pixel]` (the pixel's own extinction column, `_pixel_column`;
+    GAL's grid already carries its whole-column delta at `x = 1`, so no
+    class-specific case is needed here), `kappa_4.5` the I2 entry of the
+    blended law at that extinction (`population.selection.kappa_hybrid`/
+    `law_dense_weight`); `F_0 = f0[pixel]`, the pixel's own 4.5 um 50%
+    completeness limit. Batched over the pixel axis (`_above_batch_size`,
+    rule 10b): each batch holds one `(n_pixel_batch, n_x, n_b)` working
+    set, never the whole admitted-pixel grid at once."""
+    x_centers = 0.5 * (reader.x_edges[:-1] + reader.x_edges[1:])  # log10 x
+    b_centers = 0.5 * (reader.b_edges[:-1] + reader.b_edges[1:])  # log10 F_4.5
+    x_lin = 10.0 ** x_centers
+    f_j = 10.0 ** b_centers  # mJy
+    n_x, n_b = x_centers.size, b_centers.size
+    n_pix = a_col.size
+    out = np.empty(n_pix, dtype=np.float64)
+
+    # STAR/PAHC's own template-weight factor at every pixel's own 8 um
+    # limit -- one call over the whole pixel axis, `d_pahc` reshaped to
+    # `(n_pix, 1, 1)` so `_factor_marginal`'s broadcast adds the pixel
+    # axis in front of its own `(n_model, n_b)` term (its own docstring).
+    f_c_pixel = (template_weights._factor_marginal(b_centers, reader, cls, d_pahc[:, None, None], curve)
+                 if cls in ("STAR", "PAHC") else None)  # (n_pix, n_b) or None (f_C == 1)
+
+    batch = _above_batch_size(n_x, n_b)
+    for start in range(0, n_pix, batch):
+        stop = min(start + batch, n_pix)
+        h_b = reader.grid_all[grain_of_pix[start:stop]].astype(np.float64)  # (n_p, n_x, n_b)
+        a = x_lin[None, :] * a_col[start:stop, None]  # (n_p, n_x)
+        w_ramp = selection_module.law_dense_weight(a)
+        kappa45 = selection_module.kappa_hybrid(config, w_ramp)[..., IDX_I2]  # (n_p, n_x)
+        f_min = f0[start:stop, None] * 10.0 ** (0.4 * kappa45 * a)  # (n_p, n_x): F_j needed to clear F_0
+        above = f_j[None, None, :] > f_min[:, :, None]  # (n_p, n_x, n_b)
+        term = h_b * above
+        if f_c_pixel is not None:
+            term = term * f_c_pixel[start:stop, None, :]
+        out[start:stop] = term.sum(axis=(1, 2))
+    return out
+
+
 def build_region(config, region):
     """Writes `bmstp/atlas/prior_atlas_hpx512__R.hdf5` for one region: the
     admitted pixel axis (`catalog.depth_grid`), its column and coverage,
@@ -942,9 +1014,14 @@ def build_region(config, region):
     `OMEGA_POINTING_DEG2` for STAR/AGB/PAHC, the young-star law
     (Herschel-convolved where it reaches) and its H2S-scaled density for
     YSO/H2S, and the counts law's single survey-wide density for GAL. It
-    carries no selection and no error attribute of its own, so a reader
-    can form `P(C | pixel) = INTENSITY_C / sum(INTENSITY)` without
-    re-reading the tile or sightline products this build already read."""
+    carries no selection and no error attribute of its own, and no page
+    draws its own ratio (owner's ruling 2026-09-11): `N_ABOVE_<C>` (deg^-2)
+    is `INTENSITY_<C>` times the deterministic (no draw) fraction of the
+    class's own stored grain shape brighter, once dimmed by the pixel's
+    own extinction column, than the pixel's own 4.5 um 50% completeness
+    limit (`_above_fraction`'s own docstring paragraph); the atlas's
+    intrinsic page draws `P(C | pixel, above the limit) = N_ABOVE_C /
+    sum(N_ABOVE)`, never `INTENSITY_C`'s own ratio."""
     with progress.Stage("bmstp.atlas", region) as st:
         # the detection probability (sec. 6.2, sec. 3.3's "the depth
         # grid") reads the pixel's own marginalised limit
@@ -1201,6 +1278,37 @@ def build_region(config, region):
         n_cat_bright3["H2S"] = density_h2s * frac_h2s_bright3_pix
         n_cat_bright10["H2S"] = density_h2s * frac_h2s_bright10_pix
 
+        # rule 1 (owner's ruling 2026-09-11, briefs/W66al.md): the
+        # intrinsic view above a fixed flux, deterministic, no draw.
+        # `N_ABOVE_C(pixel) = A_C(pixel) * _above_fraction(...)`
+        # (`_above_fraction`'s own docstring paragraph), read straight off
+        # each class's own stored grain shape (`fittp.prior_reader.load`)
+        # rather than the Monte Carlo members above -- the atlas's
+        # intrinsic page draws this, not `INTENSITY_C`'s own ratio
+        # (SPEC_BMSTP_DRAFT.md sec. 8's addendum).
+        f0_pix = f_lim[:, IDX_I2]
+        d_pahc_pix = -np.log10(f_lim[:, IDX_I4])
+        curve = pahc_curve.read(config)
+        # `fittp.prior_reader.load`'s `GRID_YSO`/`GRID_H2S` are P3's own
+        # array, in P3's own `HPX_PIX_256` row order -- NOT the cloud
+        # profile's own order `sl_row_of_pix` indexes (the two sightline
+        # axes can differ, which is exactly why `loc_p3` above resolves
+        # `on_grid_yso_by_sl_row` the same way): `loc_p3[sl_row_of_pix]`
+        # is the pixel's row in P3's own order, the correct grain index
+        # into `reader.grid_all` for YSO/H2S.
+        p3_row_of_pix = loc_p3[sl_row_of_pix]
+        n_above = {}
+        for cls in CLASSES:
+            reader = prior_reader.load(config, region, cls)
+            if cls in ("STAR", "AGB", "PAHC"):
+                grain_of_pix = tile_of_pix  # P2's TILE_ID is dense 0..n_tile-1, tile id == array position
+            elif cls in ("YSO", "H2S"):
+                grain_of_pix = p3_row_of_pix
+            else:  # GAL: one survey-wide grain (`prior_reader.load`'s own convention)
+                grain_of_pix = np.zeros(n_pix, dtype=np.int64)
+            frac_above = _above_fraction(config, reader, cls, grain_of_pix, a_col, f0_pix, d_pahc_pix, curve)
+            n_above[cls] = intensity[cls] * frac_above
+
         built = CLASSES
         # every admitted pixel now has every class's `N_CAT` (finding 3
         # above), so a plain sum replaces the `nansum` that used to treat
@@ -1322,6 +1430,7 @@ def build_region(config, region):
             for c in CLASSES:
                 f.create_dataset(f"N_CAT_{c}", data=n_cat[c].astype(np.float32))
                 f.create_dataset(f"INTENSITY_{c}", data=intensity[c].astype(np.float32))
+                f.create_dataset(f"N_ABOVE_{c}", data=n_above[c].astype(np.float32))
                 f.create_dataset(f"N_CAT_BRIGHT3_{c}", data=n_cat_bright3[c].astype(np.float32))
                 f.create_dataset(f"N_CAT_BRIGHT10_{c}", data=n_cat_bright10[c].astype(np.float32))
             for c in built:
