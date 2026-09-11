@@ -196,8 +196,10 @@ def _truncated_mean(a_hat, sigma_a, a_floor):
     `a_hat` itself -- a large negative extinction -- instead of the
     truncated normal's own asymptotic mean, which tends to the truncation
     point as `a_hat -> -infinity`: where both underflow, `a*` is read at
-    `a_floor` (the grid's own low edge, the same point `_cell_sum`'s
-    low-edge fallback reads these templates at) instead."""
+    `a_floor` (the grid's own low edge) instead -- unlike `_cell_sum`'s
+    own low-edge fallback, which reads its substitute cell at the lowest
+    cell's own geometric centre, never at the edge itself, since the
+    Jacobian `1 / a` would misprice a point that close to zero."""
     z = a_hat / sigma_a[:, None]
     phi = np.exp(-0.5 * z * z) / _SQRT2PI
     big_phi_raw = 0.5 * (1.0 + _erf_np(z / _SQRT2))
@@ -472,9 +474,12 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 k0 = int(math.floor(kpos))
                 if k0 < 0:
                     k0 = 0
-                    frac_k = 0.0
-                else:
-                    frac_k = kpos - k0
+                elif k0 > n_ap - 2:
+                    # the coincidence a_hat == amax (R11 SS B7 row 2.2):
+                    # keep off + k0 + 1 inside this source's own table,
+                    # never the next source's first row.
+                    k0 = n_ap - 2
+                frac_k = min(max(kpos - k0, 0.0), 1.0)
                 t_lo = ilo_tab[off + k0]
                 t_hi = ihi_tab[off + k0]
                 for i in range(t_lo, t_hi + 1):
@@ -557,13 +562,13 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 # No mass on the grid at all: the window lies entirely
                 # below a_edges[0], kernel mass there being outside the
                 # prior's support (section 2) same as above the top edge.
-                # Read the lowest cell's floored density at its own
-                # geometric centre a_c0 = sqrt(a_edges[0]*a_edges[1]) --
-                # never at a_edges[0] itself, which the Jacobian 1/a would
-                # misprice by orders of magnitude -- mirroring the
-                # top-edge fallback above, point for point.
+                # The tail mass is the Gaussian's mass beyond the grid's
+                # true low edge a_edges[0]; it is READ at the lowest
+                # cell's own geometric centre a_c0 = sqrt(a_edges[0] *
+                # a_edges[1]) -- never at a_edges[0] itself, which the
+                # Jacobian 1/a would misprice by orders of magnitude.
                 a_c0 = math.sqrt(a_edges[0] * a_edges[1])
-                z0 = (a_c0 - ah) * inv_sig
+                z0 = (a_edges[0] - ah) * inv_sig
                 ln_tail = _ln_half_erfc(z0 / sqrt2)
                 bval = lbh + sl * (a_c0 - ah) + ct
                 bpos = (bval - b_origin) / dlb - 0.5
