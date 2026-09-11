@@ -584,6 +584,80 @@ def coarsen_profile(u_edges, p_u, n_out):
     return new_edges, new_p_u
 
 
+# ====================================================================
+# 5.5 -- the cloud interval and its restriction of p_u (SPEC_BMSTP_
+# DRAFT.md sec. 5.5, sec. 2 "region distance and depth"): the YSO class
+# is members of the region's CLOUD, not the whole sightline, so both the
+# `bmstp` atlas/shape builder and the field-star deduction below must
+# place and count young stars from the SAME restricted population --
+# one definition of where the young stars are and how many there are.
+# ====================================================================
+
+def cloud_interval_pc(config, region):
+    """`(d_front, d_back)`, the region's CLOUD INTERVAL (sec. 2, W24b):
+    the dust structure's peak distance minus TWICE its lower half-width,
+    to its peak plus TWICE its upper half-width, off the region depth
+    product's own `D_PEAK_PC`/`D_LO_PC`/`D_HI_PC`, floored and capped at
+    the profile's own reach. Duplicated verbatim from `bmstp.sample_
+    cloud.cloud_interval_pc` rather than imported: population may not
+    import bmstp (bmstp imports population), and `population.young_
+    stars` needs the identical interval `bmstp` places young stars in to
+    deduct the identical population."""
+    depth_path = config_module.product_path(
+        config, "sky/derived", "edenhofer", "depth", "region")
+    with h5py.File(depth_path, "r") as f:
+        names = [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in f["REGION"][:]]
+        if region not in names:
+            raise ValueError("population.yso.cloud_interval_pc: region %r has no row in %s"
+                              % (region, depth_path))
+        i = names.index(region)
+        d_peak = float(f["D_PEAK_PC"][i])
+        d_lo = float(f["D_LO_PC"][i])
+        d_hi = float(f["D_HI_PC"][i])
+    d_front = d_peak - 2.0 * (d_peak - d_lo)
+    d_back = d_peak + 2.0 * (d_hi - d_peak)
+
+    profile_path = _profile_path(config, region)
+    with h5py.File(profile_path, "r") as f:
+        dist_first = float(f["DIST_PC"][0])
+        dist_last = float(f["DIST_PC"][-1])
+        tail_efold_min = float(np.min(f["TAIL_EFOLD_PC"][:]))
+    d_front = max(d_front, dist_first)
+    d_back = min(d_back, dist_last + 2.0 * tail_efold_min)
+    return d_front, d_back
+
+
+def restrict_and_renormalize(p_u, u_lo, u_hi, d_lo, d_hi, d_front, d_back):
+    """The cloud-interval restriction of a sightline's embedding density
+    (sec. 5.5 "Population"): each cell's own mass `p_u * du` counts only
+    its own fraction of overlap with `[d_front, d_back]` (a cell
+    straddling an edge keeps its own inside fraction) -- the SAME
+    restriction `bmstp.sample_cloud._cell_subsamples` applies before
+    placing a YSO's depth mark, moved here (population may not import
+    bmstp) so `population.young_stars` draws its deducted young star's
+    extinction from the identical restricted population, not the whole
+    sightline. Renormalising the restricted mass back to 1 over the
+    interval is one division by `(1 - removed_frac)`, left to the
+    caller: `bmstp.sample_cloud` defers that division to its own binning
+    step (dividing the histogram, not the raw mass) so the prior-side
+    product comes out bit-for-bit unchanged by this move; `population.
+    young_stars`, which bins nothing downstream, divides directly.
+    Vectorised: every array may carry a leading batch axis (sightline or
+    pixel) with the last axis the sightline's own cells, or none (a
+    single sightline), `axis=-1` reducing whichever is present.
+
+    Returns `(mass, inside_frac, removed_frac)`: `mass` is `p_u * du`
+    before restriction, `inside_frac` each cell's own overlap fraction,
+    `removed_frac` the fraction of the sightline's own pre-restriction
+    mass the interval removes (report-only)."""
+    mass = p_u * np.maximum(u_hi - u_lo, 0.0)
+    overlap = np.clip(np.minimum(d_hi, d_back) - np.maximum(d_lo, d_front), 0.0, None)
+    width = np.maximum(d_hi - d_lo, 1e-300)
+    inside_frac = overlap / width
+    removed_frac = 1.0 - np.sum(mass * inside_frac, axis=-1)
+    return mass, inside_frac, removed_frac
+
+
 def _write_shape_product(path, hpx_pix_256, embed):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:

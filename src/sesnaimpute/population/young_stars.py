@@ -14,9 +14,16 @@ column MAP inside the pixel, `population.yso.law_area_integral` (section 6.1's
 area form: Herschel-covered pixels integrate the HGBS map's own cells at
 their native beam scale; elsewhere the Planck sightline column carries
 the kernel's sub-beam variance), times the pixel's own solid angle
-(`OMEGA_PIX_DEG2`):
+(`OMEGA_PIX_DEG2`), evaluated at the CLOUD's own share of the column
+(SPEC_BMSTP_DRAFT.md section 5.5 "Sky density"): the law is quadratic in
+column, so the pixel's parent sightline `cloud_frac = 1 - u(d_front)`
+(`population.yso.cloud_interval_pc`, `sightline_lookup`) enters squared,
+exactly as `bmstp.density` forms `DENSITY_YSO` at `A_cloud = A_gas *
+cloud_frac` -- the young stars this module deducts from the field-star
+population are members of the region's cloud, the same class the YSO
+prior and the fitter carry, not the whole sightline's worth:
 
-    N_YOUNG_TOTAL(pix) = law_area_integral(pix) * Omega_pix
+    N_YOUNG_TOTAL(pix) = law_area_integral(pix) * Omega_pix * cloud_frac(pix)**2
 
 `N_law` is convex (squared) in column, so the MEAN of the pixel's own
 SOURCE-level law counts (`population.yso.law_count` at each source's own
@@ -52,10 +59,13 @@ bands read the region's own distance `d_r_pc` (section 2.1: "at the
 region distance"), never a per-source distance.
 
 Extinction is drawn from the pixel's own embedding density: `a = A_pix *
-u`, `u` on the parent nside-256 sightline's own `U_EDGES`/`P_U`
-(`population.yso.build_shape`'s product, section 6.3, read unmodified -- a
-young star in the anchor's own count is the same embedded population the
-YSO prior places, so it sits on the same ray). `Ks_obs = Ks + a`;
+u`, `u` on the parent nside-256 sightline's own full-resolution
+`U_EDGES`/`P_U` (`population.yso.embedding_and_ridge`), RESTRICTED to
+the region's cloud interval `[d_front, d_back]` and renormalised
+(`population.yso.restrict_and_renormalize`, `sightline_lookup`) -- a
+young star in the anchor's own count is a member of the region's cloud,
+the SAME restricted population the YSO prior and `bmstp.sample_cloud`
+place, never the whole sightline's foreground-to-background span. `Ks_obs = Ks + a`;
 `G_obs = G + a * kappa_G(a)`, `kappa_G` read off the SAME law curves
 every other band's kappa comes from (`population.selection._load_law_curve`,
 `law_dense_weight`), just at Gaia G's own pivot wavelength (0.64 um)
@@ -462,23 +472,55 @@ def law_count_per_pixel(config, region, pixels):
     return sum_law / n_src
 
 
-def sightline_lookup(config, region, pixels):
-    """`(u_edges, p_u)` gathered per anchor pixel from its own parent
-    nside-256 sightline's `population.yso` shape product (section 6.3). The
-    parent is the HEALPix NESTED ancestor, `pixels >> 2` -- no per-
-    source lookup needed, since an anchor pixel's own sources are the
-    same sources that put its parent sightline in that product.
+def sightline_lookup(config, region, pixels, d_front, d_back):
+    """Per anchor pixel, its own parent nside-256 sightline's embedding
+    density AT THE PROFILE'S OWN FULL RESOLUTION (`population.yso.
+    embedding_and_ridge`), restricted to the region's cloud interval
+    `[d_front, d_back]` and renormalised (`population.yso.restrict_and_
+    renormalize`) -- never the stored 32-cell coarsened product (which
+    carries no distance per cell to restrict by) and never the whole
+    sightline: a deducted young star sits on the SAME cloud population
+    `bmstp.sample_cloud` places (sec. 5.5), recomputed in memory at the
+    same full resolution `bmstp` uses rather than read off the coarsened
+    disk form. The parent is the HEALPix NESTED ancestor, `pixels >> 2`.
+
+    Returns `(u_edges, mass, cloud_frac, removed_frac_report)`: `u_edges`
+    (n_pix, n_cell+1) and `mass` (n_pix, n_cell, summing to 1 per row)
+    are the restricted, renormalised placement; `cloud_frac` (n_pix,) is
+    `1 - u(d_front)`, the cloud's own share of each pixel's column (sec.
+    5.5 "Sky density", the SAME quantity `bmstp.density._cloud_column_
+    fraction` forms, duplicated here for the same import-direction
+    reason `cloud_interval_pc` is); `removed_frac_report` is the median
+    fraction of pre-restriction mass the interval removed, across the
+    region's occupied sightlines.
     """
-    path = config_module.product_path(config, "population", "yso", "prior",
-                                       "sightline", region=region)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "prior.young_stars: YSO shape product missing for region %r at "
-            "%s -- run the 'prior.yso' RUNBOOK line first" % (region, path))
-    with h5py.File(path, "r") as f:
-        sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
-        u_edges = np.asarray(f["U_EDGES"][:], dtype=np.float64)
-        p_u = np.asarray(f["P_U"][:], dtype=np.float64)
+    profile = yso._load_profile_arrays(config, region)
+    embed = yso.embedding_and_ridge(profile)
+    dist_pc = profile["dist_pc"]
+    n_d = dist_pc.size
+    sl_pix = profile["hpx_pix_256"]
+    n_sl = sl_pix.size
+    d_edges = np.empty((n_sl, n_d + 1), dtype=np.float64)
+    d_edges[:, :n_d] = dist_pc[None, :]
+    d_edges[:, n_d] = dist_pc[-1] + 2.0 * profile["tail_efold_pc"]
+    u_edges = embed["u_edges"]
+    p_u = embed["p_u"]
+
+    u_lo, u_hi = u_edges[:, :-1], u_edges[:, 1:]
+    d_lo, d_hi = d_edges[:, :-1], d_edges[:, 1:]
+    mass, inside_frac, removed_frac = yso.restrict_and_renormalize(
+        p_u, u_lo, u_hi, d_lo, d_hi, d_front, d_back)
+    mass_restricted = (mass * inside_frac) / np.maximum(1.0 - removed_frac, 1e-300)[:, None]
+
+    # the cloud's own share of the column, `1 - u(d_front)` (sec. 5.5
+    # "Sky density"): the map's own DIST_PC knots are common to every
+    # sightline, so the bracketing edge is found once, not per row.
+    j = int(np.clip(np.searchsorted(dist_pc, d_front), 1, n_d - 1))
+    d0, d1 = dist_pc[j - 1], dist_pc[j]
+    frac = (d_front - d0) / (d1 - d0) if d1 > d0 else 0.0
+    u_front = u_edges[:, j - 1] + frac * (u_edges[:, j] - u_edges[:, j - 1])
+    cloud_frac = 1.0 - u_front
+
     order = np.argsort(sl_pix)
     sl_pix_sorted = sl_pix[order]
     parent256 = pixels >> 2
@@ -488,10 +530,10 @@ def sightline_lookup(config, region, pixels):
     if not np.all(matched):
         raise ValueError(
             "prior.young_stars: %r has an anchor pixel whose parent "
-            "nside-256 sightline is absent from its own prior.yso "
+            "nside-256 sightline is absent from its own sky.derived.profile "
             "product" % region)
     idx = order[capped]
-    return u_edges[idx], p_u[idx]
+    return u_edges[idx], mass_restricted[idx], cloud_frac[idx], float(np.median(removed_frac))
 
 
 # ---------------------------------------------------------------------
@@ -525,7 +567,7 @@ def _weighted_hist(values, weights, edges):
     return counts, faint_overflow, bright_overflow
 
 
-def _pixel_block(config, a_pix_blk, u_edges_blk, p_u_blk, n_young_blk,
+def _pixel_block(config, a_pix_blk, u_edges_blk, mass_blk, n_young_blk,
                   mass_grid, mass_weight, ks_abs_1myr, g_abs_1myr,
                   mu, g_edges, ks_edges):
     """One block's `(N_G_YOUNG, N_KS_YOUNG)` and the 1 Myr Ks acceptance
@@ -533,8 +575,7 @@ def _pixel_block(config, a_pix_blk, u_edges_blk, p_u_blk, n_young_blk,
     in the block at once.
     """
     u_mid = 0.5 * (u_edges_blk[:, :-1] + u_edges_blk[:, 1:])      # (n_blk, n_u)
-    u_width = np.diff(u_edges_blk, axis=1)                        # (n_blk, n_u)
-    u_mass = p_u_blk * u_width                                    # sums to 1 per row
+    u_mass = mass_blk                                             # sums to 1 per row (cloud-restricted)
 
     a_rep = a_pix_blk[:, None] * u_mid                            # (n_blk, n_u)
     g_dimming = a_rep * kappa_g(config, a_rep)                    # (n_blk, n_u)
@@ -578,9 +619,20 @@ def build_region(config, region):
         g_edges = np.asarray(f["G_EDGES"][:], dtype=np.float64)
         ks_edges = np.asarray(f["KS_EDGES"][:], dtype=np.float64)
 
+    d_front, d_back = yso.cloud_interval_pc(config, region)
     n_young_source_mean = law_count_per_pixel(config, region, pixels) * omega_pix_deg2
-    n_young_total = yso.law_area_integral(config, region, pixels) * omega_pix_deg2
-    u_edges, p_u = sightline_lookup(config, region, pixels)
+    u_edges, mass, cloud_frac, removed_frac_report = sightline_lookup(
+        config, region, pixels, d_front, d_back)
+    # the model's own young-star density (sec. 5.5 "Sky density"): the
+    # law is quadratic in column, so evaluating it at the CLOUD's own
+    # share of the column, `A_cloud = A_gas * cloud_frac`, is the whole-
+    # column integral times `cloud_frac**2` -- exactly how `bmstp.
+    # density` forms `DENSITY_YSO` (`a_cloud = a_col_gas * cloud_frac`,
+    # then squared inside the law), imported rather than re-derived: the
+    # class this module deducts is the SAME young-star population by
+    # construction, foreground-only deducted, never the whole sightline.
+    n_young_total_whole_column = yso.law_area_integral(config, region, pixels) * omega_pix_deg2
+    n_young_total = n_young_total_whole_column * cloud_frac ** 2
 
     mass_grid, mass_weight = mass_grid_and_weight()
     ks_abs_1myr = abs_mag_grid(
@@ -592,7 +644,7 @@ def build_region(config, region):
     blocks = Parallel(n_jobs=config.n_jobs)(
         delayed(_pixel_block)(
             config, a_pix[s:s + PIXEL_BLOCK], u_edges[s:s + PIXEL_BLOCK],
-            p_u[s:s + PIXEL_BLOCK], n_young_total[s:s + PIXEL_BLOCK],
+            mass[s:s + PIXEL_BLOCK], n_young_total[s:s + PIXEL_BLOCK],
             mass_grid, mass_weight, ks_abs_1myr, g_abs_1myr,
             mu, g_edges, ks_edges)
         for s in starts)
@@ -619,10 +671,11 @@ def build_region(config, region):
     return dict(
         pixels=pixels, a_pix=a_pix, n_g_young=n_g_young, n_ks_young=n_ks_young,
         n_young_total=n_young_total,
+        n_young_total_whole_column=n_young_total_whole_column,
         n_young_source_mean=n_young_source_mean,
         n_bright=n_bright, g_edges=g_edges, ks_edges=ks_edges,
         ks_faint_overflow=ks_faint, ks_bright_overflow=ks_bright,
-        max_rel_dev=max_rel_dev,
+        max_rel_dev=max_rel_dev, removed_frac_report=removed_frac_report,
     )
 
 
@@ -658,6 +711,7 @@ def build(config, regions=None):
                 n_ks_obs = np.asarray(f["N_KS_OBS"][:], dtype=np.float64).sum(axis=1)
 
             total_young = float(result["n_young_total"].sum())
+            total_young_whole_column = float(result["n_young_total_whole_column"].sum())
             total_source_mean = float(result["n_young_source_mean"].sum())
             total_obs = float(n_ks_obs.sum())
             ratio = total_young / total_obs if total_obs > 0 else float("nan")
@@ -667,13 +721,18 @@ def build(config, regions=None):
             i_worst = int(np.argmax(share))
             st.done(path, n_young_total=total_young, ratio_to_2mass=ratio)
         print(
-            "prior.young_stars: %s N_YOUNG_TOTAL=%.2f N_YOUNG_SOURCE_MEAN=%.2f "
+            "prior.young_stars: %s N_YOUNG_TOTAL=%.2f (whole-column, pre-cloud-"
+            "restriction, was %.2f, x%.4f) N_YOUNG_SOURCE_MEAN=%.2f "
             "(area/source-mean=%.3fx) 2MASS(Ks<14.3)=%.2f ratio=%.4f "
             "worst-pixel young/2MASS share=%.4f at A_PIX_K=%.3f "
+            "median cloud-interval-restriction removed_frac=%.4f "
             "max_rel_dev=%.3e -> %s"
-            % (region, total_young, total_source_mean, area_over_source,
+            % (region, total_young, total_young_whole_column,
+               total_young / total_young_whole_column if total_young_whole_column > 0 else float("nan"),
+               total_source_mean, area_over_source,
                total_obs, ratio, share[i_worst],
-               result["a_pix"][i_worst], result["max_rel_dev"], path))
+               result["a_pix"][i_worst], result["removed_frac_report"],
+               result["max_rel_dev"], path))
 
 
 if __name__ == "__main__":

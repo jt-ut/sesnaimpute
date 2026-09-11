@@ -172,13 +172,14 @@ def _cell_subsamples(loaded, row, d_front, d_back):
     d_lo, d_hi = d_edges[:-1], d_edges[1:]
     # u is non-decreasing (sec. 5.5); the top cell's edges can differ from
     # 1.0 by a float64 rounding residual (~1e-16) with the wrong sign, so
-    # the increment is clipped at zero rather than left to go negative.
-    mass = p_u * np.maximum(u_hi - u_lo, 0.0)  # (n_cell,)
-
-    overlap = np.clip(np.minimum(d_hi, d_back) - np.maximum(d_lo, d_front), 0.0, None)
-    width = np.maximum(d_hi - d_lo, 1e-300)
-    inside_frac = overlap / width
-    removed_frac = float(1.0 - np.sum(mass * inside_frac))
+    # the restriction below clips the increment at zero rather than
+    # leaving it to go negative -- `population.yso.restrict_and_
+    # renormalize` (moved from here, unchanged, so this product's own
+    # numbers do not move): the interval's own restriction of `p_u`,
+    # renormalised later by `_bin1d`'s own division, not here.
+    mass, inside_frac, removed_frac = yso_module.restrict_and_renormalize(
+        p_u, u_lo, u_hi, d_lo, d_hi, d_front, d_back)
+    removed_frac = float(removed_frac)
 
     keep = inside_frac > 0.0
     mass_k = (mass * inside_frac)[keep]
