@@ -64,8 +64,7 @@ ATLAS_INTRINSIC_CLASS = (
     "pixel's own 50% completeness limit (the depth grid, from the sources' "
     "own IRAC limits)) = N_ABOVE_C(pixel) / sum over classes of "
     "N_ABOVE(pixel) -- the prior probability that a source in this sky "
-    "pixel, above that limit, is of class C, drawn on a log scale from "
-    "10^-4 to 1.")
+    "pixel, above that limit, is of class C.")
 ATLAS_INTRINSIC_TOTAL = (
     "Density panel: sum over classes of N_ABOVE_C(pixel), per square degree "
     "-- the prior's sky density of sources brighter at 4.5 micron than the "
@@ -75,7 +74,7 @@ ATLAS_SELECTION_CLASS = (
     "Class panels: P(C | sky pixel, cataloged) = N_C(pixel) / sum over classes "
     "of N(pixel), with N_C the prior's density of cataloged sources of class C "
     "-- the prior probability that a cataloged source in this sky pixel is of "
-    "class C, drawn on a log scale from 10^-4 to 1.")
+    "class C.")
 ATLAS_SELECTION_TOTAL = (
     "Density panel: sum over classes of N_C(pixel), per square degree -- the "
     "prior's sky density of cataloged sources; the white outline marks the "

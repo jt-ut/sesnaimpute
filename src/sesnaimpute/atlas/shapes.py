@@ -10,7 +10,11 @@ Per region, ONE source: the one at the region's median `A_COL_K`
 sharing ONE pair of axes, `log10 x` (limited to the wall, `[-3, 0]`,
 sec. 2) and `log10 F_4.5` in mJy (sec. 2: one common brightness axis for
 every class, H2S included since its template conversion folded in at
-the shape stage), the bold y-axis label set as the axes' own ylabel. The
+the shape stage), the bold y-axis label set as the axes' own ylabel.
+Because the six panels of a row share that one brightness axis, only the
+row's LEFTMOST panel carries y tick labels: a repeated set overhangs the
+narrow column gap and reads as stray small numbers inside the panel to
+its left. The
 title is the region and what the page is; the median source's own name,
 sightline column `A_s`, arm and distance sit in the caption block
 instead.
@@ -44,8 +48,12 @@ read uses, imported, never restated.
 The colourbars read `$P(C, x, F_{4.5} \mid s)$` (row 1) and `$P(C \mid x,
 F_{4.5}, s)$` (row 2); the page prints, below the rows, the source's own
 detail line, then `captions.SHAPES_ROW1`, `captions.SHAPES_ROW2` and
-`captions.vocabulary_block()` in full, wrapped to the page width, with
-the page grown to fit them.
+`captions.vocabulary_block()` in full, wrapped to the page width. The
+page's height grows by that block at the line pitch matplotlib actually
+sets for it (`_CAPTION_LINE_HEIGHT_IN`, above the nominal
+fontsize * linespacing because of the mathtext lines) plus a top and a
+bottom margin, so its last line sits inside the page rather than under
+the bottom edge.
 """
 
 import argparse
@@ -106,9 +114,14 @@ _LOG10_X_MIN, _LOG10_X_MAX = -3.0, 0.0
 _CAPTION_FONTSIZE = 8.0
 _CAPTION_LINESPACING = 1.3
 _CAPTION_CHARS_PER_LINE = 160
-_CAPTION_LINE_HEIGHT_IN = _CAPTION_FONTSIZE * _CAPTION_LINESPACING / 72.0
+#: The pitch matplotlib actually sets for these lines, inches, measured
+#: from the rendered block: more than `fontsize * linespacing / 72`,
+#: because a line carrying mathtext ($F_{4.5}$) is taller than a plain
+#: one and matplotlib leads the next line from that taller extent.
+_CAPTION_LINE_HEIGHT_IN = 0.156
 _CAPTION_TOP_PAD_IN = 0.20
-_CAPTION_BOTTOM_PAD_IN = 0.15
+#: The page's bottom margin: clear white below the block's last line.
+_CAPTION_BOTTOM_PAD_IN = 0.25
 
 #: Room, inches, for row 2's own x-axis tick labels and "log10 x" label
 #: below its panels, ahead of the caption strip.
@@ -380,7 +393,10 @@ def _draw_figure(config, region, data):
             # The wall: nothing beyond `log10 x = 0` is drawn.
             ax.set_xlim(_LOG10_X_MIN, _LOG10_X_MAX)
             ax.set_xlabel(_X_LABEL, fontsize=_LABEL_FONTSIZE)
-            ax.tick_params(labelsize=_TICK_FONTSIZE)
+            # The six panels of a row share one brightness axis, so only
+            # the leftmost carries its numbers; repeated on every panel
+            # they overhang the column gap into the panel to the left.
+            ax.tick_params(labelsize=_TICK_FONTSIZE, labelleft=(c == 0))
             ax.set_xticks(np.array([-3.0, -2.0, -1.0, 0.0]))
             ax2 = ax.twiny()
             ax2.set_xlim(ax.get_xlim())

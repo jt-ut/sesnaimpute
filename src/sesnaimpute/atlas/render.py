@@ -50,9 +50,12 @@ describe it.
 Colour maps and scales follow the convention the earlier package's own
 sky-atlas figure used (`sesnacomplete.bms_prior.validation.sky_atlas`):
 the measured column on `magma`, every class quantity (share, posterior
-mean) on `viridis`, its own colour scale per panel (a shared 0-1 bar
-hides the spatial variation of the low-share classes, YSO first among
-them). That earlier figure's own `page_geometry` insets a colour bar
+mean) on `viridis`. A prior page's six class panels draw a PROBABILITY,
+of order one where a class holds the pixel, so they share one LINEAR
+0-1 colour bar ticked every 0.2 (`_prob_norm`, `CLASS_PROB_TICKS`): a
+log bar from 10^-4 would paint 0.6 and 1 the same colour, and the
+classes it would separate are negligible as probabilities. The column
+and density panels keep their own log scale. That earlier figure's own `page_geometry` insets a colour bar
 into the panel when the footprint leaves clear room for one and sizes a
 3x2 class block plus one wide dust panel to fill a page that grows to
 fit its content; here every panel of both figures is an equal member of
@@ -76,8 +79,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
-from matplotlib.colors import LogNorm
-from matplotlib.ticker import FuncFormatter, LogLocator, MaxNLocator, NullFormatter
+from matplotlib.colors import LogNorm, Normalize
+from matplotlib.ticker import (FixedLocator, FuncFormatter, LogLocator, MaxNLocator,
+                                NullFormatter)
 from scipy.ndimage import gaussian_filter
 
 from sesnaimpute import config as config_module
@@ -89,13 +93,9 @@ from sesnaimpute.atlas import captions
 NSIDE = 512
 CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
 
-#: The floor of the class panels' shared log colour scale: a class
-#: probability spans decades on the sky (Orion A's intrinsic view has
-#: YSO running 1e-5 to 0.03 while GAL sits at 0.7), so a linear 0-1 bar
-#: shows nothing of the low-share classes; every value at or below this
-#: floor is clipped to it before the log norm is applied, painting it
-#: the scale's bottom colour rather than masking it as non-positive.
-CLASS_PROB_FLOOR = 1.0e-4
+#: The class panels' colour-bar ticks: the panels draw a probability on
+#: a linear 0-1 scale, read off at five equal steps.
+CLASS_PROB_TICKS = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
 
 #: Panel titles and colourbar labels at a size a reader sees on a slide;
 #: tick labels smaller -- the two atlas pages' own convention;
@@ -431,10 +431,12 @@ def _colorbar(fig, im, rect, page_w, page_h):
     return cbar
 
 
-def _panel_colorbar(fig, ax, im, label=None, log=False):
+def _panel_colorbar(fig, ax, im, label=None, log=False, ticks=None):
     """The panel's own colour bar, inset into its own right edge and
     spanning exactly its height -- axes coordinates work for WCSAxes, so
     no free-floating bar rectangle is needed for either atlas page.
+    `ticks`, for a panel on a fixed scale (a class panel's linear 0-1
+    probability, `CLASS_PROB_TICKS`), labels exactly those values.
     `log`, for a `LogNorm`-scaled panel, ticks DECADES ONLY when at
     least two decade ticks fall in the mappable's own range: a linear
     `%.2g` formatter left the log axis's own automatic
@@ -446,7 +448,10 @@ def _panel_colorbar(fig, ax, im, label=None, log=False):
     values."""
     cax = ax.inset_axes([1.02, 0.0, 0.04, 1.0])
     cbar = fig.colorbar(im, cax=cax)
-    if log:
+    if ticks is not None:
+        cbar.locator = FixedLocator(list(ticks))
+        cbar.formatter = FuncFormatter(lambda v, _pos: "%g" % v)
+    elif log:
         vmin, vmax = im.norm.vmin, im.norm.vmax
         # `LogLocator.tick_values` pads its candidates to the decades
         # bracketing the range, so most are clipped off the bar at draw
@@ -509,9 +514,9 @@ def _atlas_page_size(aspect, cols=4, rows=2, panel_h=ATLAS_PANEL_HEIGHT_IN):
 #: plus the two panel statements read as body text, not a footnote, at
 #: the wrap width `_caption_layout` derives from the page.
 CAPTION_FONT_SIZE = 8.0
-CAPTION_LINE_HEIGHT_IN = 0.145
+CAPTION_LINE_HEIGHT_IN = 0.16
 CAPTION_TOP_PAD_IN = 0.12
-CAPTION_BOTTOM_PAD_IN = 0.10
+CAPTION_BOTTOM_PAD_IN = 0.25
 
 #: Rough characters-per-inch for `CAPTION_FONT_SIZE` DejaVu Sans -- used
 #: only to size the page's own caption strip, not to typeset it exactly
@@ -521,12 +526,13 @@ CAPTION_CHARS_PER_IN = 15.0
 
 
 def _prob_norm():
-    """A fixed logarithmic scale, `CLASS_PROB_FLOOR` to 1, for a class
-    panel's `P(C | ...)` colour bar, the same on the intrinsic and the
-    selection page, so the six class panels of both pages compare
+    """A fixed LINEAR scale, 0 to 1, for a class panel's `P(C | ...)`
+    colour bar, the same on the intrinsic and the selection page: the
+    panel draws a probability, so the whole of its range is 0 to 1 and
+    nothing is clipped, and the six class panels of both pages compare
     directly rather than each auto-ranging to its own pixel's max
     share."""
-    return LogNorm(vmin=CLASS_PROB_FLOOR, vmax=1.0)
+    return Normalize(vmin=0.0, vmax=1.0)
 
 
 #: The two prior pages differ only in which stored quantity feeds the
@@ -641,23 +647,22 @@ def _build_prior_page(config, region, formats, view):
         # pixel's max, so the six panels compare directly.
         def _class_panel(cls):
             idx = CLASSES.index(cls)
-            # Clipped to the log scale's own floor (`CLASS_PROB_FLOOR`)
-            # rather than passed raw: a zero or sub-floor share is
-            # non-positive or off the LogNorm's range and would
-            # otherwise be masked as invalid instead of painted the
-            # scale's bottom colour.
-            data = np.clip(share_grids[idx], CLASS_PROB_FLOOR, 1.0)
-            return dict(data=data, cmap="viridis", norm=_prob_norm(), title=cls,
-                        cbar_label=plot_style.label(spec["class_cbar_label"], None), hatch=None)
+            # The share as computed, on the linear 0-1 scale: every
+            # probability is already inside it, so nothing is clipped
+            # and a zero share paints the scale's bottom colour.
+            return dict(data=share_grids[idx], cmap="viridis", norm=_prob_norm(), title=cls,
+                        cbar_label=plot_style.label(spec["class_cbar_label"], None), hatch=None,
+                        cbar_ticks=CLASS_PROB_TICKS)
 
         col_panel = dict(data=col_grid, cmap="magma", norm=_log_norm(col_grid),
-                          title=plot_style.label("Column $A_K$", "mag"), cbar_label=None, hatch=None)
+                          title=plot_style.label("Column $A_K$", "mag"), cbar_label=None, hatch=None,
+                          cbar_ticks=None)
         density_title = plot_style.label(spec["density_label"], "deg$^{-2}$").replace(" [", "\n[")
         hatch = None
         if coverage_grid is not None and np.any(coverage_grid < 0.5):
             hatch = coverage_grid
         density_panel = dict(data=density_grid, cmap="viridis", norm=_log_norm(density_grid),
-                              title=density_title, cbar_label=None, hatch=hatch)
+                              title=density_title, cbar_label=None, hatch=hatch, cbar_ticks=None)
         panels = [col_panel, _class_panel("GAL"), _class_panel("PAHC"), _class_panel("YSO"),
                   density_panel, _class_panel("STAR"), _class_panel("AGB"), _class_panel("H2S")]
         n_panels = len(panels)
@@ -721,7 +726,8 @@ def _build_prior_page(config, region, formats, view):
                 # own reprojection mask), so the line never crosses into
                 # the white area outside it.
                 ax.contour(p["hatch"], levels=[0.5], colors="white", linewidths=0.8)
-            _panel_colorbar(fig, ax, im, label=p["cbar_label"], log=isinstance(p["norm"], LogNorm))
+            _panel_colorbar(fig, ax, im, label=p["cbar_label"],
+                             log=isinstance(p["norm"], LogNorm), ticks=p["cbar_ticks"])
 
         fig.text(MARGIN_LEFT_IN / page_w, (caption_h - CAPTION_TOP_PAD_IN) / page_h_total,
                   caption_text, fontsize=CAPTION_FONT_SIZE, va="top", ha="left")
