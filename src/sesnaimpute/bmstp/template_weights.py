@@ -1178,6 +1178,43 @@ def build_h2shock(config, region):
 
 
 # ---------------------------------------------------------------------------
+# the STAR/PAHC template-weight factor at a query brightness, shared by
+# the atlas (`bmstp.atlas`'s N_ABOVE sum) and the shapes page
+# (`atlas.shapes`)
+# ---------------------------------------------------------------------------
+
+def _factor_marginal(b_centers, reader, cls, d_pahc, curve):
+    """`f_C(F; s)` for STAR/PAHC (SPEC_BMSTP_DRAFT.md sec. 1.4, 5.1, 5.3):
+    `Sum_theta pi_C(theta|F) x {1-P, P}(-log10 q)`. `pi_C(theta|F)` is P5
+    factor 0 (`type`, `build_sps`/`build_pahc`'s own dict order), already
+    normalised over theta at every `F` cell (sec. 1.4), read directly off
+    its `F` axis -- no per-template offset, since `type`'s own `C_F =
+    C_THETA` cancels sec. 2's `log10 F_4.5 = log10 Bhat + C_THETA` line
+    exactly. `P` is factor 1 (`uncontaminated`/`contrast`)'s own curve,
+    read exactly as `fittp.prior_reader._factor_ln` reads any factor,
+    `arg = b_star + C_F + D_PAHC`, with `b_star = F - C_THETA[theta]` (the
+    same line solved for `log10 Bhat` at the query brightness `F`, since
+    neither caller has a fitted `a_hat`/slope to place `a*` away from `F`)
+    -- `population.pahc_curve.read`, imported not re-derived, not the
+    stored/floored P5 table (which fixes the argument at F, sec. 1.4,
+    wrong for the per-template shift this needs). `d_pahc` is `-log10
+    F_lim,8` at the query point -- a scalar (one source, `atlas.shapes`)
+    or an `(n_query, 1, 1)` array (one row per sky pixel, `bmstp.atlas`'s
+    N_ABOVE sum): broadcasting `d_pahc` against the `(n_model, n_b)` term
+    below adds the query axis in front, so the model-axis sum is taken at
+    `axis=-2` rather than a hardcoded `0`, serving both callers with one
+    definition."""
+    type_factor, contrast_factor = reader.factors[0], reader.factors[1]
+    pi_theta_f = type_factor["W"]          # (n_model, n_b), sum_theta = 1 at every F
+    c_theta = reader.c_theta               # (n_model,)
+    c_f = contrast_factor["C_F"]           # (n_model,)
+    arg = b_centers[None, :] - c_theta[:, None] + c_f[:, None] + d_pahc
+    p_val = curve(-arg)                    # curve's own x-axis is log10 q, arg is -log10 q
+    term = (1.0 - p_val) if cls == "STAR" else p_val
+    return (pi_theta_f * term).sum(axis=-2)
+
+
+# ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
 

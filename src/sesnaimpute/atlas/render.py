@@ -19,9 +19,10 @@ axis) makes their display grids identical pixel for pixel.
 Every panel of a figure is drawn at the same size and shares the
 region's own display-grid aspect. The prior atlas is two pages per
 region, one code path (`_build_prior_page`) parameterised by `view`:
-`prior-atlas-intrinsic_<R>` reads the product's `INTENSITY_C` (its sky
-density before the survey's selection) for the column-B density panel
-`Sigma_C A_C` and the six class panels `A_C / Sigma A`; `prior-atlas-
+`prior-atlas-intrinsic_<R>` reads the product's `N_ABOVE_C` (the density
+above the pixel's own 4.5 um 50% completeness limit, SPEC_BMSTP_DRAFT.md
+sec. 8) for the column-B density panel `Sigma_C N_ABOVE_C` and the six
+class panels `N_ABOVE_C / Sigma N_ABOVE`; `prior-atlas-
 selection_<R>` reads `N_CAT_C` (catalogued density) for the same slots,
 `Sigma_C N_CAT_C` hatched where the surveyed IRAC-coverage fraction is
 below 0.5. `atlas.captions` states which probability each class panel
@@ -64,7 +65,6 @@ with no letterboxing.
 
 import argparse
 import os
-import textwrap
 
 import astropy.units as u
 import h5py
@@ -97,6 +97,13 @@ CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
 #: the scale's bottom colour rather than masking it as non-positive.
 CLASS_PROB_FLOOR = 1.0e-4
 
+#: Panel titles and colourbar labels at a size a reader sees on a slide;
+#: tick labels smaller -- the two atlas pages' own convention;
+#: `atlas.protostars`'s own `_colorbar` path is unaffected, it is not
+#: one of these two pages.
+LABEL_FONTSIZE = 13
+TICK_FONTSIZE = 10
+
 #: The display grid's own pixel size (sec. 8: "the 1' grid of the
 #: current atlas").
 PIXEL_ARCMIN = 1.0
@@ -125,7 +132,10 @@ PAGE_WIDTH_IN, PAGE_HEIGHT_IN = 16.0, 9.0
 #: Page furniture, inches: room outside the panel grid for the left
 #: column's Dec tick labels, the bottom row's RA tick labels, and the
 #: two-line suptitle above.
-MARGIN_LEFT_IN, MARGIN_RIGHT_IN = 0.55, 0.15
+#: Widened over its earlier 0.55 in for the 13 pt panel titles/labels at
+#: a narrow region's own aspect, whose Dec tick labels otherwise overhang
+#: the left edge by 0.03-0.17 in.
+MARGIN_LEFT_IN, MARGIN_RIGHT_IN = 0.75, 0.15
 MARGIN_TOP_IN, MARGIN_BOTTOM_IN = 0.62, 0.55
 GAP_X_IN, GAP_Y_IN = 0.10, 0.12
 
@@ -133,9 +143,10 @@ GAP_X_IN, GAP_Y_IN = 0.10, 0.12
 #: strip, each as a fraction of the panel's own height `s` -- so, like
 #: the earlier module's inset bar, they cost more page space on a
 #: bigger panel but never crowd a small one. Sized for a thin bar plus
-#: three two/three-character ticks and a two-line class-name title.
+#: three two/three-character ticks and a two-line class-name title at
+#: `LABEL_FONTSIZE` (the page grows to fit).
 BAR_WIDTH_FRACTION = 0.30
-TITLE_HEIGHT_FRACTION = 0.15
+TITLE_HEIGHT_FRACTION = 0.20
 
 
 def _panel_rect(geom, index, page_w, page_h):
@@ -180,11 +191,12 @@ def _outer_rows(n_panels, cols):
 # reading, reprojection, rendering
 # ---------------------------------------------------------------------------
 
-def _read_prior(path, region, require_intensity):
+def _read_prior(path, region, require_above):
     """The prior atlas (P6), sorted by pixel for the reprojection's
-    `searchsorted` lookup. `INTENSITY_<C>` (the intrinsic view's own
-    per-pixel density) is required only for the intrinsic page
-    (`require_intensity`; the posterior page and the selection page read
+    `searchsorted` lookup. `N_ABOVE_<C>` (the intrinsic view's own
+    per-pixel density above the pixel's own 4.5 um 50% completeness limit,
+    SPEC_BMSTP_DRAFT.md sec. 8's rule) is required only for the intrinsic
+    page (`require_above`; the posterior page and the selection page read
     this product only for `A_COL_K`/`N_CAT_C`) -- a product that lacks it
     fails here, by name, rather than the intrinsic page silently falling
     back to some other quantity."""
@@ -193,20 +205,20 @@ def _read_prior(path, region, require_intensity):
         a_k = np.asarray(f["A_COL_K"][:], dtype=np.float64)
         coverage = np.asarray(f["COVERAGE"][:], dtype=np.float64)
         n_cat = np.stack([np.asarray(f["N_CAT_%s" % c][:], dtype=np.float64) for c in CLASSES], axis=1)
-        intensity = None
-        if require_intensity:
-            missing = [c for c in CLASSES if ("INTENSITY_%s" % c) not in f]
+        above = None
+        if require_above:
+            missing = [c for c in CLASSES if ("N_ABOVE_%s" % c) not in f]
             if missing:
                 raise KeyError(
-                    "atlas.render [%s]: prior atlas carries no INTENSITY_%s -- run "
+                    "atlas.render [%s]: prior atlas carries no N_ABOVE_%s -- run "
                     "RUNBOOKtp.sh's 'PY sesnaimpute.bmstp.atlas' line to rebuild it"
                     % (region, missing[0]))
-            intensity = np.stack([np.asarray(f["INTENSITY_%s" % c][:], dtype=np.float64) for c in CLASSES], axis=1)
+            above = np.stack([np.asarray(f["N_ABOVE_%s" % c][:], dtype=np.float64) for c in CLASSES], axis=1)
         attrs = dict(f.attrs)
     order = np.argsort(pix)
     return dict(pix=pix[order], a_k=a_k[order], coverage=coverage[order],
                 n_cat=n_cat[order],
-                intensity=intensity[order] if intensity is not None else None,
+                above=above[order] if above is not None else None,
                 attrs=attrs)
 
 
@@ -364,7 +376,7 @@ def _reproject(pix_sorted, values, grid_pix_flat, shape):
 
 
 def _add_panel(fig, rect, page_w, page_h, wcs, data, cmap, norm=None, title="",
-               show_dec=True, show_ra=True, title_size=9, grey_grid=None):
+               show_dec=True, show_ra=True, title_size=LABEL_FONTSIZE, grey_grid=None):
     """One sky panel at `rect` (inches, lower-left origin), on the
     shared display WCS. `show_dec`/`show_ra` gate the tick *labels*
     only (every panel keeps its ticks and grid, since every panel is
@@ -387,7 +399,7 @@ def _add_panel(fig, rect, page_w, page_h, wcs, data, cmap, norm=None, title="",
         # ("pos.eq.ra"/"pos.eq.dec") unless auto-labelling is off too.
         ax.coords[i].set_auto_axislabel(False)
         ax.coords[i].set_axislabel("")
-        ax.coords[i].set_ticklabel(size=7)
+        ax.coords[i].set_ticklabel(size=TICK_FONTSIZE)
         ax.coords[i].set_ticks(number=3)
     ax.coords[1].set_ticklabel_visible(show_dec)
     ax.coords[0].set_ticklabel_visible(show_ra)
@@ -423,24 +435,44 @@ def _panel_colorbar(fig, ax, im, label=None, log=False):
     """The panel's own colour bar, inset into its own right edge and
     spanning exactly its height -- axes coordinates work for WCSAxes, so
     no free-floating bar rectangle is needed for either atlas page.
-    `log`, for a `LogNorm`-scaled panel, ticks DECADES ONLY:
-    a linear `%.2g` formatter left the log axis's own automatic
+    `log`, for a `LogNorm`-scaled panel, ticks DECADES ONLY when at
+    least two decade ticks fall in the mappable's own range: a linear
+    `%.2g` formatter left the log axis's own automatic
     scientific-notation MINOR ticks in place, one of which ran off the
-    bar."""
+    bar. A panel whose range spans less than a decade would otherwise
+    show no labelled tick at all (a class held in one narrow decade,
+    e.g. an intrinsic YSO share); there, intermediate (non-base) ticks
+    are labelled too, so every colour bar carries at least two labelled
+    values."""
     cax = ax.inset_axes([1.02, 0.0, 0.04, 1.0])
     cbar = fig.colorbar(im, cax=cax)
     if log:
-        cbar.locator = LogLocator(base=10.0)
-        cbar.ax.yaxis.set_minor_formatter(NullFormatter())
-        cbar.ax.tick_params(which="minor", length=0)
+        vmin, vmax = im.norm.vmin, im.norm.vmax
+        # `LogLocator.tick_values` pads its candidates to the decades
+        # bracketing the range, so most are clipped off the bar at draw
+        # time -- only those actually inside [vmin, vmax] are what the
+        # reader sees.
+        candidates = LogLocator(base=10.0).tick_values(vmin, vmax) if vmin and vmax else np.array([])
+        n_decade_ticks = int(np.sum((candidates >= vmin) & (candidates <= vmax))) if candidates.size else 0
+        if n_decade_ticks >= 2:
+            cbar.locator = LogLocator(base=10.0)
+            cbar.ax.yaxis.set_minor_formatter(NullFormatter())
+            cbar.ax.tick_params(which="minor", length=0)
+        else:
+            cbar.locator = LogLocator(base=10.0, subs=np.arange(1, 10))
+            cbar.formatter = FuncFormatter(lambda v, _pos: "%.2g" % v)
+            cbar.ax.yaxis.set_minor_formatter(NullFormatter())
+            cbar.ax.tick_params(which="minor", length=0)
     else:
         cbar.locator = MaxNLocator(nbins=3)
         cbar.formatter = FuncFormatter(lambda v, _pos: "%.2g" % v)
     cbar.update_ticks()
-    cbar.ax.tick_params(labelsize=7, length=2, pad=1.0)
+    # Tick and label sizes a reader sees on a slide, the two atlas
+    # pages' own convention.
+    cbar.ax.tick_params(labelsize=TICK_FONTSIZE, length=2, pad=1.0)
     cbar.outline.set_linewidth(0.5)
     if label:
-        cbar.set_label(label, fontsize=7)
+        cbar.set_label(label, fontsize=LABEL_FONTSIZE)
     return cbar
 
 
@@ -511,7 +543,7 @@ VIEWS = {
     ),
     "selection": dict(
         density_label="Prior Selection Density",
-        class_cbar_label="P(C | pixel, catalogued)",
+        class_cbar_label="P(C | pixel, cataloged)",
         class_caption=captions.ATLAS_SELECTION_CLASS,
         total_caption=captions.ATLAS_SELECTION_TOTAL,
         coverage_outline=True,
@@ -534,18 +566,15 @@ def _caption_block(view, extra_line=None):
 
 def _caption_layout(text, page_w):
     """`(wrapped_text, height_in)`: `text` hard-wrapped at the page's own
-    content width -- matplotlib draws `fig.text` as given, wrapping
-    nothing on its own, so an unwrapped paragraph runs off the page's
-    right edge on a narrow region -- and the height, inches, the page
-    must grow by to hold exactly that wrapped text (rules: "the page
-    growing to fit"), so the drawn block and the reserved strip always
-    agree because both come from the one wrap."""
+    content width (an unwrapped paragraph would run off the page's right
+    edge on a narrow region), and the height, inches, the page must grow
+    by to hold exactly that wrapped text (rules: "the page growing to
+    fit") -- `captions.caption_layout`, the one definition this page and
+    `atlas.shapes`'s own caption strip both call, so the drawn block and
+    the reserved strip always agree because both come from the one wrap."""
     wrap_chars = max(int((page_w - MARGIN_LEFT_IN - MARGIN_RIGHT_IN) * CAPTION_CHARS_PER_IN), 20)
-    wrapped = "\n".join("\n".join(textwrap.wrap(line, wrap_chars)) if line else ""
-                         for line in text.split("\n"))
-    n_lines = wrapped.count("\n") + 1
-    height = CAPTION_TOP_PAD_IN + n_lines * CAPTION_LINE_HEIGHT_IN + CAPTION_BOTTOM_PAD_IN
-    return wrapped, height
+    return captions.caption_layout(text, wrap_chars, CAPTION_LINE_HEIGHT_IN,
+                                    CAPTION_TOP_PAD_IN, CAPTION_BOTTOM_PAD_IN)
 
 
 def _require_depth_grid(config, region):
@@ -576,7 +605,7 @@ def _build_prior_page(config, region, formats, view):
     footprint_pix = _require_depth_grid(config, region)
     if footprint_pix is None:
         return None
-    prior = _read_prior(prior_path, region, require_intensity=(view == "intrinsic"))
+    prior = _read_prior(prior_path, region, require_above=(view == "intrinsic"))
 
     with progress.Stage("atlas.render.prior.%s" % view, region) as st:
         geom_grid = _footprint_geometry(footprint_pix)
@@ -588,7 +617,7 @@ def _build_prior_page(config, region, formats, view):
         # class-summed total, from which BOTH the density panel and the
         # class panels' P(C | ...) = class / total are drawn (sec. 8,
         # `atlas.captions.ATLAS_INTRINSIC_*`/`ATLAS_SELECTION_*`).
-        class_values = prior["intensity"] if view == "intrinsic" else prior["n_cat"]
+        class_values = prior["above"] if view == "intrinsic" else prior["n_cat"]
         total = class_values.sum(axis=1)
         with np.errstate(invalid="ignore", divide="ignore"):
             share = np.where(total[:, None] > 0, class_values / total[:, None], np.nan)
@@ -637,11 +666,11 @@ def _build_prior_page(config, region, formats, view):
         # shared class/total statements: the Monte Carlo error on the
         # region total (`N_CAT_C`/`TOTAL_PREDICTED` come from a Monte
         # Carlo sample, so the intrinsic page's deterministic
-        # `INTENSITY_C` carries no such line), the predicted/observed
-        # ratio, the surveyed area, the bright-end ratio (sec. 9's check
-        # above 3x/10x the pixel's own I2 50% limit) and the per-class
-        # total-count ratio -- each its own line here rather than in the
-        # suptitle, which has no room for them on a narrow region.
+        # `N_ABOVE_C` carries no such line), the total-count check, the
+        # surveyed area and the per-class total-count ratio -- each its
+        # own line here rather than in the suptitle, which has no room
+        # for them on a narrow region. `bright3`/`bright10` stay in the
+        # product and the stage's own log, off this page.
         extra_lines = []
         if view == "selection":
             total_predicted = float(prior["attrs"].get("TOTAL_PREDICTED", np.nan))
@@ -650,20 +679,17 @@ def _build_prior_page(config, region, formats, view):
             mc_error = float(prior["attrs"].get("TOTAL_PREDICTED_MC_ERROR", np.nan))
             mc_pct = 100.0 * mc_error / total_predicted if total_predicted else float("nan")
             ratio_po = total_predicted / total_observed if total_observed else float("nan")
-            bright3 = float(prior["attrs"].get("RATIO_BRIGHT3", np.nan))
-            bright10 = float(prior["attrs"].get("RATIO_BRIGHT10", np.nan))
             ratios = [(cls, float(prior["attrs"].get("RATIO_%s" % cls, np.nan))) for cls in CLASSES]
             area_label = plot_style.label("surveyed area", "deg$^{2}$")
             extra_lines.append("Monte Carlo error on the region total: +/- %.4g (%.2f%%)"
                                 % (mc_error, mc_pct))
-            extra_lines.append("Predicted/observed = %.4g/%.4g = %.3f"
-                                % (total_predicted, total_observed, ratio_po))
+            # The total-count check (sec. 8, sec. 9): the prior's own
+            # normalization against the survey's count, the statement
+            # `captions.TOTAL_COUNT_CHECK`'s, never restated here.
+            extra_lines.append(captions.TOTAL_COUNT_CHECK.format(value=ratio_po))
             extra_lines.append("%s = %.4g" % (area_label, surveyed_area))
-            extra_lines.append("Bright-end total-count ratio: bright3 = %.3f, bright10 = %.3f"
-                                % (bright3, bright10))
             extra_lines.append("Per-class total-count ratio: " + ", ".join(
-                "%s %.3g" % (cls, ratio) for cls, ratio in ratios)
-                + "; white contour: surveyed IRAC coverage = 0.5")
+                "%s %.3g" % (cls, ratio) for cls, ratio in ratios))
 
         # The panel grid is sized to the fixed 4x2 layout's content
         # first; the caption block (below the grid) then grows the
@@ -705,7 +731,7 @@ def _build_prior_page(config, region, formats, view):
         # numbers above, which is why those now live in the caption
         # block instead.
         title = "%s -- prior atlas, %s view" % (region, view)
-        fig.suptitle(title, fontsize=11, y=1.0 - 0.10 / page_h_total)
+        fig.suptitle(title, fontsize=LABEL_FONTSIZE, y=1.0 - 0.10 / page_h_total)
 
         out_dir = os.path.join(config.data_root, "bmstp", "atlas", "figures")
         os.makedirs(out_dir, exist_ok=True)
@@ -726,7 +752,7 @@ def _build_prior_page(config, region, formats, view):
 def build_prior_intrinsic_region(config, region, formats):
     """The prior atlas's intrinsic page (`_build_prior_page`, view
     "intrinsic"): the sky density and class shares before the survey's
-    selection, `A_C` from the product's own `INTENSITY_C`."""
+    selection, `A_C` from the product's own `N_CAT_C`."""
     return _build_prior_page(config, region, formats, "intrinsic")
 
 
@@ -761,7 +787,7 @@ def build_posterior_region(config, region, formats):
     if footprint_pix is None:
         return None
     posterior = _read_posterior(post_path)
-    prior = _read_prior(prior_path, region, require_intensity=False)
+    prior = _read_prior(prior_path, region, require_above=False)
 
     with progress.Stage("atlas.render.posterior", region) as st:
         geom_grid = _footprint_geometry(footprint_pix)
@@ -830,7 +856,7 @@ def build_posterior_region(config, region, formats):
         two_band_frac = _two_band_fraction(config, region)
         title = ("%s -- posterior atlas: N($P$(YSO)$>$0.5) = %d, two-band fraction = %.3f"
                   % (region, n_yso_total, two_band_frac))
-        fig.suptitle(title + "\ngrey: no sources in pixel", fontsize=11, y=1.0 - 0.10 / page_h)
+        fig.suptitle(title + "\ngray: no sources in pixel", fontsize=LABEL_FONTSIZE, y=1.0 - 0.10 / page_h)
 
         out_dir = os.path.join(config.data_root, "fittp", "atlas", "figures")
         os.makedirs(out_dir, exist_ok=True)
