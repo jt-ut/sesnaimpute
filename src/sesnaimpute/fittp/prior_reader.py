@@ -312,14 +312,20 @@ def _build_a_star_tables(a_col, x_edges, sigma_a, a_hat):
         phi = np.exp(-0.5 * z * z) / _SQRT2PI
         # the grid's low edge is not a truncation boundary of its own --
         # whatever Gaussian mass lies below it belongs to the lowest cell
-        # (SPEC_BMSTP_DRAFT.md 4.2's low-edge statement), the same rule
-        # the fallback below applies when no cell clears the skip at all:
-        # read the lowest cell's CDF/phi as if integrated from -infinity.
+        # (SPEC_BMSTP_DRAFT.md 4.2's low-edge statement): M_0 is read as
+        # if integrated from -infinity. a*_0, though, is READ AS THAT
+        # CELL -- the mean of the kernel truncated to the cell's own
+        # bounds [a_edge_lo, a_1], never below the grid -- so keep the
+        # true edge-0 cdf/phi before zeroing them for the mass integral.
+        cdf_edge0 = cdf[:, 0].copy()
+        phi_edge0 = phi[:, 0].copy()
         cdf[:, 0] = 0.0
         phi[:, 0] = 0.0
         mass = cdf[:, 1:] - cdf[:, :-1]
         mass_safe = np.maximum(mass, 1e-300)
         a_star = ap[:, None] + sigma_a[s] * (phi[:, :-1] - phi[:, 1:]) / mass_safe
+        cell0_mass_safe = np.maximum(cdf[:, 1] - cdf_edge0, 1e-300)
+        a_star[:, 0] = ap + sigma_a[s] * (phi_edge0 - phi[:, 1]) / cell0_mass_safe
         # cells the window never reaches carry mass ~ 0 and an a* the
         # kernel never gathers (its own window index selects only cells
         # inside +/-5 sigma); clip before the float32 cast so those unused
@@ -410,7 +416,15 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     over templates, so a single source's read still uses every core
     (W6d item 3).
 
-    Three edge cases never see a cleared cell and are read as a single
+    Cell 0 is always read at the cell's OWN mean, never the -infinity
+    one: `M_0` (its mass) integrates from -infinity, since the grid's low
+    edge is not itself a truncation boundary and whatever Gaussian mass
+    lies below it belongs to the lowest cell, but `a*_0` is the mean of
+    the kernel truncated to the cell's own bounds `[a_edges[0],
+    a_edges[1]]`, never below the grid -- the table path
+    (`_build_a_star_tables`) and this exact path agree on this.
+
+    Two edge cases never see a cleared cell and are read as a single
     substitute cell instead, so no template's prior is ever `-inf`
     (section 1.3): a window whose own low bound never reaches positive
     extinction, or whose cells all floor below the skip while its low
@@ -425,12 +439,7 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     its own upper edge, `a*` there, times the tail mass beyond that edge
     -- because mass above the grid is mass outside and is never wrapped
     onto the grid's low end (section 2); reading it at `a_0` instead
-    misprices the Jacobian `1 / a*` by the ratio of the two edges. A
-    straddling window wide enough to take the table path is read from
-    the table only where the template's own `a_hat` falls inside the
-    table's built range; one that reaches beyond it -- the block's
-    widest window set that range, not this template's own `a_hat` -- is
-    read by the exact per-cell sum instead, at its own `a_hat`."""
+    misprices the Jacobian `1 / a*` by the ratio of the two edges."""
     n, m = a_hat.shape
     n_x = x_edges.size - 1
     n_b = h.shape[2]
@@ -467,15 +476,7 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 i_lo = _cell_index(lo_a, log10_ak, x0, dlx, n_x)
                 i_hi = _cell_index(hi_a, log10_ak, x0, dlx, n_x)
             kpos = (ah - a_min) / a_step if n_ap > 0 else 0.0
-            # the table is built to the block's own hi_bound
-            # (_build_a_star_tables), which for a straddling template can
-            # sit below this template's own a_hat: use it only where this
-            # template's a_hat is inside the table's built range, so a
-            # template whose window reaches beyond that range is read from
-            # its OWN a_hat by the exact per-cell sum below, not from the
-            # table's clamped last node (the block's largest on-grid
-            # a_hat, SPEC_BMSTP_DRAFT.md 4.2).
-            use_table = n_ap > 0 and (i_hi - i_lo + 1) > N_EXACT and kpos < (n_ap - 1)
+            use_table = n_ap > 0 and (i_hi - i_lo + 1) > N_EXACT
             if not in_grid:
                 pass  # the +/-5 sigma window never reaches positive extinction
             elif use_table:
@@ -505,15 +506,25 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
                         total += dens * mi / a_star
             else:
+                cdf_edge0 = 0.0
+                phi_edge0 = 0.0
                 if i_lo == 0:
                     # the grid's low edge is not a truncation boundary of
                     # its own: whatever Gaussian mass lies below it
                     # belongs to the lowest cell (section 4.2's low-edge
                     # statement, the same rule the fallback below applies
-                    # when no cell clears the skip) -- integrate the
-                    # lowest cell from -infinity, not from a_edges[0].
+                    # when no cell clears the skip) -- M_0 integrates the
+                    # lowest cell from -infinity, not from a_edges[0]. But
+                    # a*_0 is READ AS THAT CELL: the mean of the kernel
+                    # truncated to the cell's own bounds [a_edges[0],
+                    # a_edges[1]], never below the grid -- so keep the
+                    # true edge-0 cdf/phi (cdf_edge0/phi_edge0) alongside
+                    # the -infinity ones the mass sum uses.
                     cdf_prev = 0.0
                     phi_prev = 0.0
+                    z_edge0 = (a_edges[0] - ah) * inv_sig
+                    cdf_edge0 = 0.5 * (1.0 + math.erf(z_edge0 / sqrt2))
+                    phi_edge0 = math.exp(-0.5 * z_edge0 * z_edge0) / sqrt2pi
                 else:
                     z_prev = (a_edges[i_lo] - ah) * inv_sig
                     cdf_prev = 0.5 * (1.0 + math.erf(z_prev / sqrt2))
@@ -524,8 +535,14 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     phi_next = math.exp(-0.5 * z_next * z_next) / sqrt2pi
                     mi = cdf_next - cdf_prev
                     if mi >= 1e-6:
-                        # a*_i: the Gaussian's mean within cell i (section 4.2)
-                        a_star = ah + sig * (phi_prev - phi_next) / mi
+                        if i == 0:
+                            # a*_0: the cell's own truncated-normal mean,
+                            # never the -infinity read M_0 uses.
+                            mass0 = max(cdf_next - cdf_edge0, 1e-300)
+                            a_star = ah + sig * (phi_edge0 - phi_next) / mass0
+                        else:
+                            # a*_i: the Gaussian's mean within cell i (section 4.2)
+                            a_star = ah + sig * (phi_prev - phi_next) / mi
                         bval = lbh + sl * (a_star - ah) + ct
                         bpos = (bval - b_origin) / dlb - 0.5
                         j0 = int(math.floor(bpos))
