@@ -816,6 +816,16 @@ def _gal_members(config, rng, n_mc):
         have_idx = node_ids[has]
         nearest[~has] = have_idx[np.argmin(np.abs(node_ids[~has, None] - have_idx[None, :]), axis=1)]
     src_node = nearest[node_draw]
+    # `counts[src_node]` must be positive by the borrowing above (`nearest`
+    # only ever points at a node with `has[node] == True`); if it is ever
+    # zero regardless, `(rng.random(n_mc) * 0).astype(np.int64) - 1 == -1`
+    # would otherwise index `starts[src_node] - 1`, the PRECEDING node's own
+    # galaxy block, silently drawing a member with the wrong colour rather
+    # than failing (CODING_RULES_BMSTP.md rule 6's "no silent fallbacks").
+    # Fail loud instead, naming the empty node (rule 5b).
+    if np.any(counts[src_node] == 0):
+        bad = int(src_node[counts[src_node] == 0][0])
+        raise ValueError("bmstp.atlas: colour node %d has no galaxies to draw from" % bad)
     within = np.minimum((rng.random(n_mc) * counts[src_node]).astype(np.int64), counts[src_node] - 1)
     gal_row = order[starts[src_node] + within]
     colour_draw = c12[gal_row]
@@ -845,6 +855,30 @@ def _gal_members(config, rng, n_mc):
     # stands for is `sample_gal.density` (the `ln 10` integral), NOT the
     # shape weight `w_law.sum()` the node-draw probabilities above use.
     return flux, u, sample_gal.density(config)
+
+
+def _gal_accepted_fraction(config, rng, a_col, f_lim, width_dex, coverage, tick):
+    """`(frac, mc_error, frac_bright3, frac_bright10, se, density)` for GAL's
+    one region-wide Monte Carlo block, run as a single joblib task
+    (`build_region` below) rather than called directly by `build_region`'s
+    own parent frame. `_accepted_fraction` reaches `fittp.likelihood`'s one
+    `@njit(parallel=True)` kernel (`_ln_one_minus_c_kernel`, via
+    `_ln_one_minus_c`) -- the atlas's only numba call -- and numba's
+    thread pool is not fork-safe: a process that has itself started that
+    pool poisons every child a later `os.fork()` creates from it. GAL was
+    the one place `build_region`'s parent ran that kernel itself, between
+    the tile-phase `Parallel` (workers forked before any numba pool
+    existed in the parent, so safe) and the sightline-phase `Parallel`
+    (whose idle-worker respawn forks the now-poisoned parent, crashing
+    with no Python traceback on a region whose GAL phase outlasts joblib's
+    idle timeout -- studies/atlas_crash_2026-09-11.md). Dispatching this
+    call through `Parallel` instead means the kernel only ever runs inside
+    a worker, so the parent never starts numba's pool at all."""
+    gal_flux, gal_u, density_gal = _gal_members(config, rng, N_MC)
+    frac, mc_error, frac_bright3, frac_bright10, _block_total, se = _accepted_fraction(
+        a_col, gal_u, gal_flux, f_lim, width_dex, config, tick=tick,
+        weight_pix=coverage * _HPX512_PIXEL_DEG2)
+    return frac, mc_error, frac_bright3, frac_bright10, se, density_gal
 
 
 def _observed_bright_counts(config, region, pix, f_lim):
@@ -976,12 +1010,15 @@ def build_region(config, region):
         # GAL, sec. 5.4: one region-wide Monte Carlo sample (fixed seed,
         # not per tile -- GAL has no tile), evaluated at every admitted
         # pixel's own column and limits with the shared `_accepted_fraction`.
+        # Dispatched through `Parallel` as one task (`_gal_accepted_fraction`'s
+        # own docstring): `build_region`'s parent process never runs a numba
+        # kernel itself, so no child it forks afterwards can inherit a live
+        # numba thread pool.
         gal_rng = np.random.RandomState(MC_SEED + _SEED_OFFSET_GAL)
-        gal_flux, gal_u, density_gal = _gal_members(config, gal_rng, N_MC)
-        frac_gal, mc_gal, frac_gal_bright3, frac_gal_bright10, _blk_gal, se_gal = _accepted_fraction(
-            a_col, gal_u, gal_flux, f_lim, width_dex, config,
-            tick=lambda done, total: st.tick(done, total, "GAL pixel batches"),
-            weight_pix=coverage * _HPX512_PIXEL_DEG2)
+        [(frac_gal, mc_gal, frac_gal_bright3, frac_gal_bright10, se_gal, density_gal)] = Parallel(
+            n_jobs=n_jobs)(delayed(_gal_accepted_fraction)(
+                config, gal_rng, a_col, f_lim, width_dex, coverage,
+                lambda done, total: st.tick(done, total, "GAL pixel batches")))
         n_cat["GAL"] = density_gal * frac_gal
         mc_err["GAL"] = mc_gal
         n_cat_bright3["GAL"] = density_gal * frac_gal_bright3
