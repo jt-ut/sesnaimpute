@@ -213,39 +213,101 @@ def _panel_shape(config, region, cls, idx_median):
     return density, mass, reader
 
 
+#: `_factor_marginal`'s own (n_query, n_model, n_b) working set for
+#: STAR/PAHC (arg, p_val, term, the `pi_theta_f * term` product) -- the
+#: same 512 MB budget and array count `bmstp.atlas._above_factor_batch_size`
+#: applies to the identical call, so many rows at once (rule 10b) rather
+#: than the whole `rows` axis, which for a template register of several
+#: thousand can otherwise exceed the machine's ceiling (`briefs/reports/
+#: W68a.md`).
+_LAMBDA_BATCH_BUDGET_BYTES = 512 * 1024 * 1024
+_N_FACTOR_TEMP_ARRAYS = 4
+
+
+def _lambda_batch_size(n_model, n_b):
+    row_bytes = max(1, n_model) * n_b * 8 * _N_FACTOR_TEMP_ARRAYS
+    return max(1, _LAMBDA_BATCH_BUDGET_BYTES // row_bytes)
+
+
+def lambda_grids(config, region, rows):
+    """`(Lambda (n_rows, 6, n_x, n_b) float64, lambda_floor (n_rows,),
+    class_order)`: every row's own six-class prior density `Lambda_C(cell;
+    s) = A_C(s) h_C(cell; s) f_C(F; s)` (sec. 1.1/1.4), floored at the one
+    common floor per row (`prior_reader.common_floor`, the common-floor
+    rule) -- the construction `_build_region_data` used inline for the
+    page's one median source, lifted here so a caller can form it for many
+    rows at once (`prior_reader.prepare` already batches over rows, rule
+    8: no python loop over sources, only over the six classes and, for
+    STAR/PAHC, over row BATCHES sized to `_lambda_batch_size`, rule 10b)."""
+    rows = np.asarray(rows)
+    n_rows = rows.size
+    dtab = _read_density_table(config, region)
+    d_pahc_rows = dtab["d_pahc"][rows].astype(np.float64).reshape(-1, 1, 1)
+    curve = pahc_curve.read(config)
+
+    lam = {}
+    for cls in CLASS_ORDER:
+        reader = prior_reader.load(config, region, cls)
+        b_centers = 0.5 * (reader.b_edges[:-1] + reader.b_edges[1:])
+        if cls in ("STAR", "PAHC"):
+            batch = _lambda_batch_size(reader.c_theta.size, b_centers.size)
+        else:
+            batch = n_rows if n_rows else 1
+        intensity = dtab[cls][rows].astype(np.float64)
+        parts = []
+        for start in range(0, n_rows, batch):
+            sl = slice(start, start + batch)
+            h = prior_reader.prepare(reader, rows[sl])
+            density = h.astype(np.float64) / (reader.dlx * reader.dlb)  # (n_batch, n_x, n_b)
+            if cls in ("STAR", "PAHC"):
+                f_c = template_weights._factor_marginal(b_centers, reader, cls, d_pahc_rows[sl], curve)
+            else:
+                f_c = np.ones((density.shape[0], density.shape[-1]), dtype=np.float64)
+            parts.append(intensity[sl, None, None] * density * f_c[:, None, :])
+        lam[cls] = np.concatenate(parts, axis=0) if parts else np.empty((0,) + density.shape[1:])
+
+    support = np.zeros(grid.LOG10_X_EDGES.size - 1, dtype=bool)
+    support[:grid.N_X_SUPPORT] = True
+
+    # The one common floor, the fitter's own rule (`prior_reader.
+    # common_floor`): `Lambda_floor(s)` per row from the six classes' own
+    # peaks over the SUPPORT cells of the raw `Lambda_C`.
+    peaks = [lam[cls][:, support, :].reshape(n_rows, -1).max(axis=1) for cls in CLASS_ORDER]
+    lambda_floor = prior_reader.common_floor(peaks)  # (n_rows,)
+    lambda_all = np.stack(
+        [np.where(support[None, :, None], np.maximum(lam[cls], lambda_floor[:, None, None]), 0.0)
+         for cls in CLASS_ORDER], axis=1)  # (n_rows, 6, n_x, n_b)
+    return lambda_all, lambda_floor, CLASS_ORDER
+
+
 def _build_region_data(config, region):
     """Reads the median source's per-class shapes, forms `Lambda_C =
     A_C(s) h_C f_C(F; s)` for every class (sec. 1.1/1.4, module
-    docstring), applies the support rule and common floor at the read,
-    and returns the two rows' probabilities plus the row-1 corner
-    numbers."""
+    docstring) through `lambda_grids`, applies the support rule and common
+    floor at the read, and returns the two rows' probabilities plus the
+    row-1 corner numbers."""
     dtab = _read_density_table(config, region)
     idx_median = _select_source(dtab["a_col"])
     on_grid_star, on_grid_agb = _on_grid_star(config, region)
     on_grid_yso = _on_grid_yso(config, region)
     on_grid_h2s = _on_grid_h2s(config, region)
     on_grid_gal = _on_grid_gal(config)
-    d_pahc_s = float(dtab["d_pahc"][idx_median])
-    curve = pahc_curve.read(config)
 
-    lam = {}
     mass_c = {}
     on_grid_c = {}
     intensity_c = {}
     x_edges = b_edges = None
     for cls in CLASS_ORDER:
-        density, mass, reader = _panel_shape(config, region, cls, idx_median)
+        _, mass, reader = _panel_shape(config, region, cls, idx_median)
         x_edges, b_edges = reader.x_edges, reader.b_edges
-        b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
-        if cls in ("STAR", "PAHC"):
-            f_c = template_weights._factor_marginal(b_centers, reader, cls, d_pahc_s, curve)
-        else:
-            f_c = np.ones(density.shape[1], dtype=np.float64)
         intensity_c[cls] = float(dtab[cls][idx_median])
-        lam[cls] = intensity_c[cls] * density * f_c[None, :]
         mass_c[cls] = mass
         on_grid_c[cls] = _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2s,
                                          on_grid_gal, idx_median)
+
+    lambda_all, lambda_floor_rows, class_order = lambda_grids(config, region, np.array([idx_median]))
+    lambda_floor = float(lambda_floor_rows[0])
+    lam_floored = {cls: lambda_all[0, i] for i, cls in enumerate(class_order)}
 
     # The support: `x = a / A_s <= 1` by definition; the grid's own
     # `N_X_SUPPORT` is the count of cells inside it (`bmstp.grid`). Both
@@ -254,18 +316,12 @@ def _build_region_data(config, region):
     support = np.zeros(x_edges.size - 1, dtype=bool)
     support[:grid.N_X_SUPPORT] = True
 
-    # The one common floor, the fitter's own rule (`prior_reader.
-    # common_floor`): `Lambda_floor(s)` from the six classes' peaks over
-    # the SUPPORT cells of the raw `Lambda_C`; every class's `Lambda_C`
-    # is floored at this one shared value, so a cell where every class
-    # is below it reads exactly equal across classes.
-    lambda_stack = np.stack([lam[cls] for cls in CLASS_ORDER])
-    peaks = [lambda_stack[k, support, :].max(keepdims=False) * np.ones(1) for k in range(len(CLASS_ORDER))]
-    lambda_floor = float(prior_reader.common_floor(peaks)[0])
-    lam_floored = {cls: np.where(support[:, None], np.maximum(lam[cls], lambda_floor), 0.0)
-                   for cls in CLASS_ORDER}
-    all_below_floor = np.all(lambda_stack <= lambda_floor, axis=0) & support[:, None]
-    floor_fraction = float(all_below_floor.sum()) / float(support.sum() * lambda_stack.shape[2])
+    # A cell is at the common floor for every class exactly where
+    # `lambda_grids` clamped it there (`np.maximum` returns the floor
+    # itself, bit for bit, whenever the raw density was at or below it).
+    all_below_floor = np.all(
+        np.stack([lam_floored[cls] for cls in CLASS_ORDER]) == lambda_floor, axis=0) & support[:, None]
+    floor_fraction = float(all_below_floor.sum()) / float(support.sum() * lam_floored[CLASS_ORDER[0]].shape[1])
 
     # Row 1 (module docstring): `P(C, cell | s)`, the joint over all six
     # classes and every support cell, summing to 1 over that whole set.

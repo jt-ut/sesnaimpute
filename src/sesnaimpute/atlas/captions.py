@@ -89,6 +89,38 @@ TOTAL_COUNT_CHECK = (
     "in the catalog -- the check that the prior's normalization reproduces "
     "the survey's count; the observations enter here only as that check.")
 
+#: The protostar check's own words (`atlas.protostars`, SPEC_BMSTP_DRAFT.md
+#: sec. 5.5 "Check (report only)", sec. 9's protostar row), rule 7a.
+PROTOSTAR_STATEMENT = (
+    "For each Herschel-confirmed protostar, assumed a SESNA source with its "
+    "own 4.5 micron datum: at its own point of the nuisance plane (scaled "
+    "extinction x, its dereddened $F_{4.5}$), P(C | x, datum, s) reads the "
+    "prior density Lambda_C at that point against the one likelihood factor "
+    "the datum implies -- a Gaussian in log10 F for a measurement, the "
+    "survey's own non-detection probability below the pixel's limit "
+    "otherwise -- normalized over the six classes; nothing here feeds the "
+    "prior or a fit.")
+
+PROTOSTAR_POSITION = (
+    "position: at the protostars' own sky pixels the prior's cataloged YSO "
+    "share has median {median_proto:.3f}, against {median_source:.3f} at "
+    "every cataloged source's own pixel.")
+
+PROTOSTAR_DEPTH = (
+    "depth: {n_wall} of {n_used} protostars' own foreground column exceeds "
+    "their sightline's own column and sit at the wall (x capped at 1, log10 "
+    "x = 0) -- a sightline's column is the beam's average along the whole "
+    "line of sight, while a protostar's own fitted foreground reads its own "
+    "envelope, so a protostar can sit past the wall by construction, not by "
+    "a match error.")
+
+PROTOSTAR_TIERS = (
+    "of {n_used} protostars used: {n_measured} with a measured 4.5 micron "
+    "flux, {n_not_measured} without one; {n_direct} matched a cataloged "
+    "source within 2 arcsec, {n_standin} took the nearest cataloged source "
+    "in their own sky pixel as a sightline stand-in, {n_excluded} had no "
+    "cataloged source in their own pixel and are excluded.")
+
 
 def vocabulary_block():
     """The vocabulary as one string, one term per line, for a page's caption."""
