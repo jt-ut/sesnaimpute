@@ -612,7 +612,19 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     on the class's own members at their own `x`/`log10 F_4.5`, weighted
     by each member's own expected catalogued count (`density * (w /
     w.sum()) * s_member`, `s_member` `catalogued_fraction`'s exact
-    pixel-area-weighted catalogued probability per member)."""
+    pixel-area-weighted catalogued probability per member).
+
+    The returned dict also carries `"_FIELD_STAR_DENSITY"`, the tile's
+    own UNSPLIT field-star level `w_star.sum() / omega_t` (`density.
+    density_star_raw`'s own quantity, before the STAR/PAHC retention
+    split): sec. 5.3's `A_PAHC(s) = A_STAR(s)`, the field-star intensity
+    both classes' intrinsic path (`build_region`'s `INTENSITY_STAR`/
+    `INTENSITY_PAHC`) shares, the split itself carried only by the
+    template weight factor `_above_fraction` applies (sec. 5.1's
+    `1 - P(q)`/`P(q)`), never by `INTENSITY_<C>` again. `STAR`'s and
+    `PAHC`'s own `density` (this function's per-class split density,
+    `w_star_only.sum()`/`w_pahc_only.sum()` over `omega_t`) still feeds
+    `N_CAT_<C>` and the members path exactly as before -- untouched."""
     star_path = config_module.product_path(
         config, "population", "star", "population", "tile", region=region)
     field_path = config_module.product_path(
@@ -728,6 +740,12 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         c_m_agb = density_agb * (w_agb_member / w_sum_agb) * s_member_agb
         n_cat_cell_agb = _safe_cell_bin(u_agb, f45_agb_member, c_m_agb)
     out["AGB"] = (frac_agb, density_agb, frac_agb_bright3, frac_agb_bright10, n_cat_cell_agb)
+    # sec. 5.3's shared field-star intensity (`build_one_tile`'s own
+    # docstring paragraph): the UNSPLIT field-star level, before the
+    # STAR/PAHC retention split above -- `density.density_star_raw`'s
+    # own quantity, `w_star.sum()` (not `w_star_only`/`w_pahc_only`)
+    # over this tile's own `omega_t`.
+    out["_FIELD_STAR_DENSITY"] = float(w_star.sum()) / omega_t
     return out
 
 
@@ -1399,13 +1417,23 @@ def build_region(config, region):
     own intrinsic sky density at that pixel -- the quantity the
     catalogued-density sum (`N_CAT_<C> = INTENSITY_<C> * accepted
     fraction`) starts from before the pixel's own completeness is applied
-    (SPEC_BMSTP_DRAFT.md sec. 8): the star-
-    family tile's own field-star/evolved-star total per its own
-    `OMEGA_POINTING_DEG2` for STAR/AGB/PAHC, the young-star law
-    (Herschel-convolved where it reaches) and its H2S-scaled density for
-    YSO/H2S, and the counts law's single survey-wide density for GAL. It
-    carries no selection and no error attribute of its own, and no page
-    draws its own ratio: `N_ABOVE_<C>` (deg^-2)
+    (SPEC_BMSTP_DRAFT.md sec. 8): the young-star law (Herschel-convolved
+    where it reaches) and its H2S-scaled density for YSO/H2S, the
+    star-family tile's own evolved-star total per its own
+    `OMEGA_POINTING_DEG2` for AGB, and the counts law's single
+    survey-wide density for GAL -- each an `INTENSITY_<C> * accepted
+    fraction` relation exactly. STAR and PAHC are the one exception
+    (sec. 5.3: `A_PAHC(s) = A_STAR(s)`): `INTENSITY_STAR` and
+    `INTENSITY_PAHC` are both the star-family tile's own UNSPLIT
+    field-star total per its own `OMEGA_POINTING_DEG2`, identical for
+    the two classes pixel by pixel, with the STAR/PAHC split carried
+    only by the template weight factor (`_above_fraction`'s own
+    `f_C`, sec. 5.1's `1 - P(q)`/`P(q)`) that scales `N_ABOVE_<C>` and
+    `N_CELL_<C>` below -- `N_CAT_STAR`/`N_CAT_PAHC` keep their OWN split
+    density from the members path above (`_build_one_tile`'s per-class
+    `density`) and are therefore NOT `INTENSITY_<C> * accepted fraction`.
+    `INTENSITY_<C>` carries no selection and no error attribute of its
+    own, and no page draws its own ratio: `N_ABOVE_<C>` (deg^-2)
     is `INTENSITY_<C>` times the deterministic (no draw) fraction of the
     class's own stored grain shape brighter, once dimmed by the pixel's
     own extinction column, than the pixel's own 4.5 um 50% completeness
@@ -1481,10 +1509,15 @@ def build_region(config, region):
 
         results = Parallel(n_jobs=n_jobs)(delayed(_one)(t) for t in tiles_here)
         for i, (tile_id, m, out) in enumerate(results):
+            # sec. 5.3: `A_PAHC(s) = A_STAR(s)`, the field-star level
+            # shared by both classes -- the STAR/PAHC split lives only in
+            # `_above_fraction`'s own weight factor (sec. 5.1's `1 -
+            # P(q)`/`P(q)`), never in `INTENSITY_<C>` again.
+            field_star_density = out["_FIELD_STAR_DENSITY"]
             for cls in ("STAR", "AGB", "PAHC"):
                 frac, density, frac_bright3, frac_bright10, n_cat_cell_tile = out[cls]
                 n_cat[cls][m] = density * frac
-                intensity[cls][m] = density
+                intensity[cls][m] = field_star_density if cls in ("STAR", "PAHC") else density
                 n_cat_bright3[cls][m] = density * frac_bright3
                 n_cat_bright10[cls][m] = density * frac_bright10
                 n_cat_cell[cls] += n_cat_cell_tile
