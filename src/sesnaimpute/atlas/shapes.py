@@ -854,14 +854,16 @@ def _draw_region_figure(config, region, data):
             ax.set_xlabel(_X_LABEL, fontsize=_LABEL_FONTSIZE)
             ax.tick_params(labelsize=_TICK_FONTSIZE, labelleft=(c == 0))
             ax.set_xticks(np.array([-3.0, -2.0, -1.0, 0.0]))
-            # the panel's own peak in its title: rows 1 and 3 share one scale
-            # per row, floored at grid.FLOOR of the row's peak, so a class whose
-            # peak sits below that floor draws white -- the title says why
+            # the panel's own peak, printed inside the panel: rows 1 and 3
+            # share one scale per row, floored at grid.FLOOR of the row's peak,
+            # so a class whose peak sits below that floor draws white -- the
+            # corner label says why
             if i == 0:
-                ax.set_title("%s\npeak %.2g / cell" % (cls, float(n_cat_cell[cls].max())),
-                             fontsize=_TICK_FONTSIZE, pad=14)
-            elif i == 2:
-                ax.set_title("peak %.2g / cell" % float(n_cell[cls].max()), fontsize=_TICK_FONTSIZE, pad=4)
+                ax.set_title(cls, fontsize=_LABEL_FONTSIZE, pad=18)
+            if i in (0, 2):
+                peak = float((n_cat_cell if i == 0 else n_cell)[cls].max())
+                ax.text(0.03, 0.97, "peak %.2g / cell" % peak, transform=ax.transAxes,
+                        fontsize=_TICK_FONTSIZE, ha="left", va="top")
             if c == 0:
                 ax.set_ylabel(_SHARED_Y_LABEL, fontsize=_LABEL_FONTSIZE)
 
