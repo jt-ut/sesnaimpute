@@ -38,7 +38,7 @@ cell means.
 Both rows apply two rules at the read. (1) Support -- `x = a/A_s <= 1` by
 definition, so a cell with `log10 x > 0` is outside the prior's SUPPORT
 and excluded from both rows' SUMS (the normalisation, the floor search,
-the printed peaks); it is no longer drawn blank, since the read
+the printed peaks); it is drawn, since the read
 (`fittp.prior_reader`'s own change of variables, `lambda_grids`'s
 `blur=True`) carries a real, non-zero density there -- a pencil column
 above the beam mean, in the measured coordinate's one-dex padding, never
@@ -490,9 +490,8 @@ def _draw_figure(config, region, data):
 
     # Row 1's colour scale (module docstring): a LogNorm set from the
     # joint `P(C, cell | s)` over the SUPPORT cells alone (the printed
-    # peaks' own range) -- both rows now DRAW the whole read's extent
-    # (this brief's item 1: a class's mass past the wall is real under
-    # the blur, so it is no longer masked to white), the colour scale
+    # peaks' own range) -- both rows DRAW the whole read's extent
+    # (a class's mass past the wall is real under the blur), the colour scale
     # itself unchanged, so a padding cell simply reads on the same bar.
     all_vals = np.concatenate([joint[cls][support, :].ravel() for cls in CLASS_ORDER])
     norm1 = LogNorm(vmin=float(all_vals.min()), vmax=float(all_vals.max()))
