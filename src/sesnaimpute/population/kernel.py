@@ -121,7 +121,7 @@ def _norm_cdf(z):
 
 
 def _cloud_single_component(sigma_cloud, n):
-    """R4 (revised): the cloud-class Herschel structural term is ONE
+    """The cloud-class Herschel structural term is ONE
     lognormal component of width `sigma_cloud` dex, the same at every
     column -- not the sub-beam stage's two-component mixture rescaled.
     Scaling both of that mixture's components by one factor is
@@ -159,7 +159,7 @@ class Kernel(object):
         #: fallback for a Herschel source whose call site does not yet
         #: pass its own `ZP_SIGMA_K` (owner, 2026-09-06).
         self.zp_herschel_k = float(zp_herschel_k)
-        #: R4: the Herschel arm's cloud-class (`exponent > 0`) structural
+        #: the Herschel arm's cloud-class (`exponent > 0`) structural
         #: width, dex, calibrated in `build` on the HOPS/eHOPS protostars.
         self.cloud_sigma_herschel_dex = float(cloud_sigma_herschel_dex)
 
@@ -274,7 +274,7 @@ class Kernel(object):
         are already part of the same lognormal by then). `exponent = 0.0`
         (the default) recovers the unweighted kernel exactly.
 
-        R4: for `exponent != 0.0`, the Herschel arm's structural term is
+        For `exponent != 0.0`, the Herschel arm's structural term is
         replaced entirely (`_cloud_single_component`) by ONE lognormal
         component of width `self.cloud_sigma_herschel_dex` dex, the same
         at every column, recentred to mean one -- before the measurement/
@@ -622,7 +622,7 @@ def _cloud_cells_for_pixels(config, yso_module, region, pix256):
 
 
 def _fit_cloud_sigma_herschel(config, zp_herschel_k):
-    """R4: `CLOUD_SIGMA_HERSCHEL_DEX`, one survey-pooled number for the
+    """`CLOUD_SIGMA_HERSCHEL_DEX`, one survey-pooled number for the
     cloud classes' Herschel structural term (`Kernel.mixture`'s
     `exponent > 0`), calibrated on the HOPS (Orion A) + eHOPS (Aquila)
     Class 0/I/flat protostars (`_match_protostars_to_beam`) with this
@@ -822,7 +822,7 @@ def build(config, regions=None):
     SIGMA[i_p, :, 0] = sig1_p / _LN10
     SIGMA[i_p, :, 1] = sig2_p / _LN10
 
-    # R5: the Planck arm recentred exactly as the Herschel arm is above --
+    # the Planck arm recentred exactly as the Herschel arm is above --
     # the same uniform per-node dex shift on both components' means, so
     # `E[T / A_beam] = 1` in linear units at every node there too; the
     # Planck arm's sigma's and the two means' relative offset untouched.
@@ -834,7 +834,7 @@ def build(config, regions=None):
     e_check_p = (W[i_p] * 10.0 ** (MU[i_p, :, 0] + SIGMA[i_p, :, 0] ** 2 * _LN10 / 2.0)
                  + (1.0 - W[i_p]) * 10.0 ** (MU[i_p, :, 1] + SIGMA[i_p, :, 1] ** 2 * _LN10 / 2.0))
 
-    # R4: the cloud-class (`exponent > 0`) Herschel structural width,
+    # the cloud-class (`exponent > 0`) Herschel structural width,
     # calibrated on the HOPS/eHOPS protostars (Orion A, Aquila) rather
     # than extrapolated from the sub-beam stage's own core-biased lower
     # bound.
@@ -863,17 +863,17 @@ def build(config, regions=None):
           % (len(_ARM_ORDER), n_node, zp, herschel_factor, out_path), flush=True)
     print("kernel: Planck arm recentred, max |E[T/A_beam] - 1| = %.3e"
           % float(np.max(np.abs(e_check_p - 1.0))), flush=True)
-    print("kernel: R4 cloud_sigma_herschel_dex = %.3f dex (68%% interval %.3f-%.3f dex), "
+    print("kernel: cloud_sigma_herschel_dex = %.3f dex (68%% interval %.3f-%.3f dex), "
           "N_PROTOSTARS_FIT = %d, A_beam dataset = %s"
           % (fit["sigma_cloud"], fit["p16"], fit["p84"], fit["n_protostars"], fit["a_beam_dataset"]),
           flush=True)
-    print("kernel: R4 log-likelihood near the maximum (sigma_cloud dex: loglike) = %s"
+    print("kernel: log-likelihood near the maximum (sigma_cloud dex: loglike) = %s"
           % ", ".join("%.3f: %.4f" % (g, v) for g, v in sorted(fit["neighbourhood"].items())),
           flush=True)
-    print("kernel: R4 protostars dropped -- no Herschel arm: %d, no finite A_V: %d, "
+    print("kernel: protostars dropped -- no Herschel arm: %d, no finite A_V: %d, "
           "no SESNA catalogue match: %d" % (fit["n_dropped_no_herschel_arm"], fit["n_dropped_no_av"],
                                              fit["n_dropped_no_sightline"]), flush=True)
-    print("kernel: R4 check -- predicted/empirical median log10 r = %.4f/%.4f, "
+    print("kernel: check -- predicted/empirical median log10 r = %.4f/%.4f, "
           "predicted/empirical p84 log10 r = %.4f/%.4f, frac P(T>=a_p)<0.01 = %.4f"
           % (fit["pred_median"], fit["emp_median"], fit["pred_p84"], fit["emp_p84"],
              fit["frac_below_reach"]), flush=True)
