@@ -424,14 +424,22 @@ def _pool_herschel_ref_mixture(subbeam_path, a_nodes):
 def _match_protostars_to_beam(config):
     """R4's sample: every HOPS/eHOPS (`sky.derived.protostars`) Class 0,
     I or flat protostar with a finite positive `AV_FOREGROUND_MAG`,
-    matched to its own nside-256 sightline's adopted column
-    (`sky.derived.column.build_sightline`'s survey-wide product, `A_K`
-    the EXTINCTION column at that granule, SPEC section 3.2) -- kept only
-    where that sightline is on the Herschel arm (`PROVENANCE` 0, the same
-    code `_ARM_CODE['herschel']` uses). Returns a dict of aligned arrays
-    (`region`, `av_mag`, `a_beam`, `sigma_beam`, `pix256`) and the three
-    drop counts this brief's report prints, in the order checked: no
-    finite positive `A_V`, no sightline row at that pixel at all, no
+    matched to its own nside-256 sightline's adopted EXTINCTION column --
+    `sky.derived.column.build_extinction_sightline`'s survey-wide
+    product's `A_K` (SPEC section 3.2), the gas column
+    (`build_sightline`'s own `A_K`) times that sightline's mean source
+    factor `F_EXTINCTION`, the column a star's light actually passes
+    through -- the reader's own beam column (verified identical to
+    `sky.derived.adopted.extinction_source`'s own `A_COL_K`, and a median
+    1.56x the gas column in Orion A): the quantity `a_p` is compared to
+    (`r_p = a_p / A_beam`) must be the same column the reader elsewhere
+    divides by, not the gas column the Herschel/Planck arms are pooled
+    on. Kept only where that sightline is on the Herschel arm
+    (`PROVENANCE` 0, the same code `_ARM_CODE['herschel']` uses, carried
+    through from the gas column unchanged). Returns a dict of aligned
+    arrays (`region`, `av_mag`, `a_beam`, `sigma_beam`, `pix256`) and the
+    three drop counts this brief's report prints, in the order checked:
+    no finite positive `A_V`, no sightline row at that pixel at all, no
     Herschel arm there (a Planck-arm pixel, or a region/pixel the
     protostar view assigns no SESNA footprint to).
     """
@@ -452,7 +460,7 @@ def _match_protostars_to_beam(config):
     gal = SkyCoord(ra=ra_deg[idx] * u.deg, dec=dec_deg[idx] * u.deg, frame="icrs").galactic
     pix256 = hp.ang2pix(256, gal.l.deg, gal.b.deg, nest=True, lonlat=True)
 
-    sl_path = config_module.product_path(config, "sky/derived", "adopted", "column", "sightline")
+    sl_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "sightline")
     with h5py.File(sl_path, "r") as f:
         sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
         sl_a_k = np.asarray(f["A_K"][:], dtype=np.float64)
@@ -538,10 +546,14 @@ def _fit_cloud_sigma_herschel(config, zp_herschel_k):
     (`_cloud_single_component`: one lognormal of width `sigma_cloud` dex,
     the same at every column, recentred to mean one) -- not the sub-beam
     stage's own two-component mixture rescaled, which is ill-conditioned
-    wherever its two components are nearly degenerate. For a cloud
-    member on a protostar's own sightline, `log10 r_p = log10 x + y`: `x`
-    from that sightline's own cloud-interval `p(u)`
-    (`_cloud_cells_for_pixels`), `y` from the one-component structural
+    wherever its two components are nearly degenerate. `A_beam`
+    (`_match_protostars_to_beam`) is the EXTINCTION column, the reader's
+    own beam column, not the gas column the two arms are pooled on --
+    the ratio `r_p = a_p / A_beam` must divide by the same column a
+    consumer elsewhere divides by. For a cloud member on a protostar's
+    own sightline, `log10 r_p = log10 x + y`: `x` from that sightline's
+    own cloud-interval `p(u)` (`_cloud_cells_for_pixels`), `y` from the
+    one-component structural
     term at a trial `sigma_cloud`, the source's own measurement term
     (`SIGMA_A_K`) and the survey zero point folded in, reweighted by
     `T**2` (`Kernel.mixture`'s own exponent, SPEC_BMSTP_DRAFT.md 5.5) --
@@ -659,7 +671,7 @@ def _fit_cloud_sigma_herschel(config, zp_herschel_k):
     return dict(
         sigma_cloud=sigma_cloud_best, p16=p16, p84=p84, grid=grid, loglike=loglike,
         neighbourhood=neighbourhood,
-        n_protostars=n_proto, a_beam_dataset="sky/derived/adopted/column/sightline: A_K",
+        n_protostars=n_proto, a_beam_dataset="sky/derived/adopted/extinction/sightline: A_K",
         n_dropped_no_herschel_arm=match["n_dropped_no_herschel_arm"],
         n_dropped_no_av=match["n_dropped_no_av"],
         n_dropped_no_sightline=match["n_dropped_no_sightline"],
