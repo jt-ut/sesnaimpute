@@ -320,7 +320,7 @@ def lambda_grids(config, region, rows, blur=True):
     support[:grid.N_X_SUPPORT] = True
     peaks = [lam[cls][:, support, :].reshape(n_rows, -1).max(axis=1) for cls in CLASS_ORDER]
     lambda_floor = prior_reader.common_floor(peaks)  # (n_rows,)
-    # The floor now applies over the WHOLE array (this brief's item 1):
+    # The floor now applies over the WHOLE array:
     # the padding past the wall is real mass under `blur=True` and is
     # drawn, not zeroed; only the unblurred read is genuinely zero there,
     # so flooring it simply reproduces the common floor.
@@ -517,7 +517,7 @@ def _draw_figure(config, region, data):
             # THE WALL, `log10 x = 0` (`x = 1`), marked on every panel of
             # both rows -- grey, not white, since the panel's own axis
             # extends past it into the padding, where the read now draws
-            # real mass (this brief's item 1) and a white line would be
+            # real mass and a white line would be
             # lost against a bright cell there.
             ax.axvline(_LOG10_X_WALL, color="0.35", lw=0.9, linestyle="--", alpha=0.9)
             # The panel's own axis: never less than the wall, extended to
