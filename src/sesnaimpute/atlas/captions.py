@@ -174,7 +174,11 @@ PROTOSTAR_TIERS = (
     "flux, {n_not_measured} without one; {n_direct} matched a cataloged "
     "source within 2 arcsec, {n_standin} took the nearest cataloged source "
     "in their own sky pixel as a sightline stand-in, {n_excluded} had no "
-    "cataloged source in their own pixel and are excluded.")
+    "cataloged source in their own pixel and are excluded; {n_no_foreground} "
+    "have AV_FOREGROUND_MAG <= 0, an unconstrained foreground rather than a "
+    "measurement -- no fitted position, drawn at the median x of the "
+    "in-reach YSO placement with a hollow-square marker and no interval, "
+    "their own verdict the depth-marginalised P(C | datum, s).")
 
 
 def vocabulary_block():
