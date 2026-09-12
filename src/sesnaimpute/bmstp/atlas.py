@@ -160,12 +160,14 @@ N_RATIO_NODES = 3
 
 #: H2S's surface-brightness quadrature (sec. 5.6 "Marks"): equally spaced
 #: quantile nodes of the region's own lognormal itself (`scipy.special.
-#: ndtri`'s exact inverse CDF), in place of the cell-integrated grid
-#: this replaced (that grid's finer resolution held the 0.005 bar on its
-#: own; crossed with the coarse ratio and depth quadratures below, this
-#: fixed node count does not -- `reports/W67e.md`'s convergence table
-#: reports the resulting relative difference at the median sightline).
-N_SIGMA_NODES = 8
+#: ndtri`'s exact inverse CDF), in place of the cell-integrated grid this
+#: replaced. 48 is the best of {20, 32, 48} at the region's median-column
+#: sightline against the fine reference -- none of the three clears the
+#: 0.005 bar there (48 itself: 0.0108); the dominant remaining source is
+#: `N_RATIO_NODES`'s own coarseness (3 nodes/band, 81 joint), not this
+#: count (`reports/W67e.md`'s convergence table is that check's
+#: evidence, and its own diagnostic isolating the two factors).
+N_SIGMA_NODES = 48
 
 _HPX512_PIXEL_DEG2 = 41252.96 / (12 * 512 ** 2)
 
@@ -700,8 +702,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
             frac, frac_bright3, frac_bright10, s_member = catalogued_fraction(
                 a_col_in_tile, u[m], flux0_all[m], w, f_lim_in_tile, width_dex, config, weight_pix)
             c_m = density * (w / w.sum()) * s_member
-            H, _outside = grid.bin(u[m], np.log10(flux0_all[m, IDX_I2]), c_m)
-            n_cat_cell_tile = H * float(c_m.sum())
+            n_cat_cell_tile = _safe_cell_bin(u[m], np.log10(flux0_all[m, IDX_I2]), c_m)
         out[cls] = (frac, density, frac_bright3, frac_bright10, n_cat_cell_tile)
 
     # AGB (sec. 5.2): every evolved star with positive weight
@@ -758,8 +759,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
             a_col_in_tile, u_agb, flux0_agb, w_agb_member, f_lim_in_tile, width_dex, config, weight_pix)
         w_sum_agb = float(w_agb_member.sum())
         c_m_agb = density_agb * (w_agb_member / w_sum_agb) * s_member_agb
-        H_agb, _outside_agb = grid.bin(u_agb, f45_agb_member, c_m_agb)
-        n_cat_cell_agb = H_agb * float(c_m_agb.sum())
+        n_cat_cell_agb = _safe_cell_bin(u_agb, f45_agb_member, c_m_agb)
     out["AGB"] = (frac_agb, density_agb, frac_agb_bright3, frac_agb_bright10, n_cat_cell_agb)
     return out
 
