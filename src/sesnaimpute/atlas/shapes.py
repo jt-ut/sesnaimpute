@@ -77,13 +77,16 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm, Normalize
 
 from sesnaimpute import config as config_module
+from sesnaimpute import definitions
 from sesnaimpute import plot_style
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.fittp import prior_reader
 from sesnaimpute.bmstp import grid
+from sesnaimpute.bmstp import sample_cloud
 from sesnaimpute.bmstp import template_weights
 from sesnaimpute.population import pahc_curve
+from sesnaimpute.population import yso as yso_module
 from sesnaimpute.atlas import captions
 
 PAGE_W_IN = 16.0
@@ -607,13 +610,318 @@ def build(config, regions=None):
         build_region(config, region)
 
 
+# ====================================================================
+# The region page (owner's design, 2026-09-12): where in the nuisance
+# plane the prior puts mass the survey can catalogue, and what class
+# favours it there. Six class panels per row, `bmstp.atlas` P6's own
+# per-cell region grids read verbatim (rule 5: no recomputation of the
+# sums the product carries) -- `N_CAT_CELL_<C>` (row 1, the catalogued
+# density), the class share among catalogued objects (row 2), `N_CELL_
+# <C>` (row 3, the intrinsic, selection-free density). Never read by
+# `bmstp`/`fittp` (module docstring's own rule, unchanged for this page).
+# ====================================================================
+
+#: I2 (4.5 micron)'s index into `catalog.depth_grid`'s own band axis --
+#: the same construction `bmstp.atlas.IDX_I2` uses.
+_BAND_KEYS = tuple(b.key for b in definitions.BANDS)
+_IDX_I2 = _BAND_KEYS.index("I2")
+
+_REGION_ROW_TITLES = (
+    "Row 1 -- N_CAT_CELL: the catalogued count per cell",
+    "Row 2 -- the class share among catalogued objects",
+    "Row 3 -- N_CELL: the intrinsic prior density (selection-free)",
+)
+
+
+def _read_prior_atlas(config, region):
+    """P6's per-cell region grids and totals this page needs:
+    `N_CAT_CELL_<C>`, `N_CELL_<C>` (both `(128, 110)` on `grid.
+    LOG10_X_EDGES` by `grid.LOG10_F45_EDGES`, `bmstp.atlas`'s module
+    docstring), `RATIO_<C>` and `TOTAL_OBSERVED` (the region's own
+    total-count check, sec. 9) -- read as the product stores them, no
+    recomputation of the sums it already carries (rule 5)."""
+    path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
+    with h5py.File(path, "r") as f:
+        n_cat_cell = {c: f["N_CAT_CELL_%s" % c][:].astype(np.float64) for c in CLASS_ORDER}
+        n_cell = {c: f["N_CELL_%s" % c][:].astype(np.float64) for c in CLASS_ORDER}
+        ratio = {c: float(f.attrs["RATIO_%s" % c]) for c in CLASS_ORDER}
+        total_observed = float(f.attrs["TOTAL_OBSERVED"])
+    return n_cat_cell, n_cell, ratio, total_observed
+
+
+def _region_f_lim_i2_mjy(config, region):
+    """The region's median 4.5 micron 50% limit (I2), `catalog.
+    depth_grid`'s own per-pixel `F_LIM_50_MED_MJY` (rule 5: read, not
+    rebuilt) -- the horizontal line every panel of this page marks."""
+    path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
+    with h5py.File(path, "r") as f:
+        f_lim = f["F_LIM_50_MED_MJY"][:, _IDX_I2].astype(np.float64)
+    return float(np.median(f_lim))
+
+
+def _region_cloud_x_range(config, region):
+    """`(log10_x_front, log10_x_back)`: the region's cloud interval
+    (`population.yso.cloud_interval_pc`) mapped to the scaled extinction
+    `u = a/A_s` (`population.yso.embedding_and_ridge`'s own coordinate,
+    the vocabulary's `x`) through the region's median-sightline profile --
+    the SAME median source `_select_source` already picks for the
+    per-source page, its own sightline row (`sample_cloud._region_
+    profile`'s `d_edges`/`u_edges`), so the two pages name one sightline,
+    not two (rule 5)."""
+    dtab = _read_density_table(config, region)
+    idx_median = _select_source(dtab["a_col"])
+    sightline_row = int(dtab["sightline"][idx_median])
+    prof = sample_cloud._region_profile(config, region)
+    d_edges_row = prof["d_edges"][sightline_row]
+    u_edges_row = prof["u_edges"][sightline_row]
+    d_front_pc, d_back_pc = yso_module.cloud_interval_pc(config, region)
+    u_front = float(np.interp(d_front_pc, d_edges_row, u_edges_row))
+    u_back = float(np.interp(d_back_pc, d_edges_row, u_edges_row))
+    x_floor = 10.0 ** _LOG10_X_MIN
+    return (float(np.log10(max(u_front, x_floor))), float(np.log10(max(u_back, x_floor))))
+
+
+def _hdr_levels(density_cell):
+    """`(level_50, level_99)`: the two density thresholds enclosing 50%
+    and 99% of `density_cell`'s own total mass -- a deterministic
+    highest-density-region contour of the density itself (this page's row
+    2), never a mask: cells sorted by density, descending, the threshold
+    is the density at which the running sum first reaches that fraction
+    of the total."""
+    vals = density_cell.ravel()
+    order = np.argsort(vals)[::-1]
+    sorted_vals = vals[order]
+    cum = np.cumsum(sorted_vals)
+    total = float(cum[-1]) if cum.size else 0.0
+    levels = []
+    for frac in (0.50, 0.99):
+        if total <= 0.0:
+            levels.append(0.0)
+            continue
+        k = min(int(np.searchsorted(cum, frac * total)), sorted_vals.size - 1)
+        levels.append(float(sorted_vals[k]))
+    return levels[0], levels[1]
+
+
+def _populated_x_range(cell, x_edges):
+    """The `log10 x` range where `cell`'s own row mass (summed over
+    brightness) exceeds `grid.FLOOR` of its own peak row -- the same
+    relative floor `_panel_x_max` applies at the per-source page."""
+    row_mass = cell.sum(axis=1)
+    peak = float(row_mass.max())
+    if peak <= 0.0:
+        return float("nan"), float("nan")
+    above = np.nonzero(row_mass > grid.FLOOR * peak)[0]
+    if not above.size:
+        return float("nan"), float("nan")
+    return float(x_edges[above[0]]), float(x_edges[above[-1] + 1])
+
+
+def _build_region_prior_data(config, region):
+    """P6's per-cell region grids and totals, the overlays (the cloud
+    interval, the region's I2 50% limit) and row 2's contour levels --
+    everything `_draw_region_figure`/`_print_region_numbers` need, read
+    once."""
+    n_cat_cell, n_cell, ratio, total_observed = _read_prior_atlas(config, region)
+    x_edges, b_edges = grid.LOG10_X_EDGES, grid.LOG10_F45_EDGES
+
+    n_cat_total = {c: float(n_cat_cell[c].sum()) for c in CLASS_ORDER}
+    n_cell_total = {c: float(n_cell[c].sum()) for c in CLASS_ORDER}
+    catalogable_fraction = {
+        c: (n_cat_total[c] / n_cell_total[c] if n_cell_total[c] > 0 else float("nan"))
+        for c in CLASS_ORDER}
+
+    denom = sum(n_cat_cell[c] for c in CLASS_ORDER)
+    safe_denom = np.where(denom > 0.0, denom, 1.0)
+    share = {c: np.where(denom > 0.0, n_cat_cell[c] / safe_denom, np.nan) for c in CLASS_ORDER}
+    contour_levels = {c: _hdr_levels(n_cat_cell[c]) for c in CLASS_ORDER}
+    populated_x = {c: _populated_x_range(n_cat_cell[c], x_edges) for c in CLASS_ORDER}
+
+    log10_x_front, log10_x_back = _region_cloud_x_range(config, region)
+    log10_f_lim_med = float(np.log10(_region_f_lim_i2_mjy(config, region)))
+
+    return dict(n_cat_cell=n_cat_cell, n_cell=n_cell, ratio=ratio, total_observed=total_observed,
+                n_cat_total=n_cat_total, n_cell_total=n_cell_total,
+                catalogable_fraction=catalogable_fraction, share=share,
+                contour_levels=contour_levels, populated_x=populated_x,
+                x_edges=x_edges, b_edges=b_edges,
+                log10_x_front=log10_x_front, log10_x_back=log10_x_back,
+                log10_f_lim_med=log10_f_lim_med)
+
+
+def _print_region_numbers(region, data):
+    for c in CLASS_ORDER:
+        print("atlas.shapes.region [%s] %s: N_cat=%.6g RATIO=%.6f (RATIO*TOTAL_OBSERVED=%.6g) "
+              "N_cell=%.6g catalogable_fraction=%.6f contour_p50=%.6g contour_p99=%.6g "
+              "populated_log10x=[%.4g, %.4g]"
+              % (region, c, data["n_cat_total"][c], data["ratio"][c],
+                 data["ratio"][c] * data["total_observed"], data["n_cell_total"][c],
+                 data["catalogable_fraction"][c], data["contour_levels"][c][0],
+                 data["contour_levels"][c][1], data["populated_x"][c][0], data["populated_x"][c][1]))
+    print("atlas.shapes.region [%s] cloud interval log10 x = [%.4g, %.4g]; I2 50%% limit log10 F45 = %.4g"
+          % (region, data["log10_x_front"], data["log10_x_back"], data["log10_f_lim_med"]))
+
+
+def _draw_region_figure(config, region, data):
+    plot_style.apply_style()
+    x_edges, b_edges = data["x_edges"], data["b_edges"]
+    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
+    n_cat_cell, n_cell, share = data["n_cat_cell"], data["n_cell"], data["share"]
+
+    totals_lines = [captions.SHAPES_REGION_TOTALS.format(
+        cls=c, n_cat=data["n_cat_total"][c], n_cell=data["n_cell_total"][c],
+        ratio=data["catalogable_fraction"][c]) for c in CLASS_ORDER]
+    caption_text, caption_block_h = captions.caption_layout(
+        "\n\n".join([captions.SHAPES_REGION_ROW1, captions.SHAPES_REGION_ROW2,
+                     captions.SHAPES_REGION_ROW3, "Region totals:\n" + "\n".join(totals_lines),
+                     "Vocabulary:\n" + captions.vocabulary_block()]),
+        _CAPTION_CHARS_PER_LINE, _CAPTION_LINE_HEIGHT_IN, _CAPTION_TOP_PAD_IN, _CAPTION_BOTTOM_PAD_IN)
+
+    # `margin_t` reserves room for the suptitle, THEN row 0's own banner
+    # (`_ROW_BANNER_OFFSET_IN`), THEN row 0's class-name titles (`pad=18`
+    # points): more than the per-source page's own `margin_t` (0.95in,
+    # one line: suptitle and class titles alone), since this page stacks
+    # a row banner above those titles too.
+    margin_l, margin_r, margin_t = 0.75, 1.05, 1.35
+    row_gap, col_gap = 0.90, 0.14
+    row_h = 3.2
+    n_rows = 3
+    page_h = margin_t + n_rows * row_h + (n_rows - 1) * row_gap + AXIS_LABEL_MARGIN_IN + caption_block_h
+    page_w = PAGE_W_IN
+    usable_w = page_w - margin_l - margin_r
+    shape_w = (usable_w - 5 * col_gap) / 6.0
+
+    fig = plot_style.new_sized_figure(page_w, page_h)
+
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad("white")
+
+    # ONE shared log scale per row (module docstring), floored at
+    # `grid.FLOOR` of the row's own peak cell -- the same relative floor
+    # the per-source page applies to its own prior density (`Lambda_
+    # floor`), here keeping the numerical dust below a class's true
+    # support from stretching the scale over decades no panel actually
+    # populates; a cell below the floor is masked (drawn white), not
+    # coloured at the floor, since row 1/3 are counts, not a probability
+    # a fitter reads at every cell.
+    all_cat = np.concatenate([n_cat_cell[c].ravel() for c in CLASS_ORDER])
+    cat_peak = float(all_cat.max())
+    cat_floor = grid.FLOOR * cat_peak
+    norm1 = LogNorm(vmin=cat_floor, vmax=cat_peak)
+    norm2 = Normalize(vmin=0.0, vmax=1.0)
+    all_cell = np.concatenate([n_cell[c].ravel() for c in CLASS_ORDER])
+    cell_peak = float(all_cell.max())
+    cell_floor = grid.FLOOR * cell_peak
+    norm3 = LogNorm(vmin=cell_floor, vmax=cell_peak)
+
+    ims = [None, None, None]
+    # Row 0's banner clears the class-name titles (`pad=18` points, drawn
+    # only on row 0, below); rows 1/2 have no title there and sit lower,
+    # inside the same row_gap their own row's axis-label margin leaves free.
+    _ROW_BANNER_OFFSET_IN = (0.55, 0.15, 0.15)
+    for i in range(n_rows):
+        y0 = page_h - margin_t - (i + 1) * row_h - i * row_gap
+        fig.text((margin_l + usable_w / 2.0) / page_w,
+                  (y0 + row_h + _ROW_BANNER_OFFSET_IN[i]) / page_h,
+                  _REGION_ROW_TITLES[i], fontsize=_LABEL_FONTSIZE, ha="center", va="bottom")
+        for c, cls in enumerate(CLASS_ORDER):
+            x0 = margin_l + c * (shape_w + col_gap)
+            ax = fig.add_axes([x0 / page_w, y0 / page_h, shape_w / page_w, row_h / page_h])
+            extent = [x_edges[0], x_edges[-1], b_edges[0], b_edges[-1]]
+            if i == 0:
+                arr = np.ma.masked_less(n_cat_cell[cls], cat_floor)
+                ims[0] = ax.imshow(arr.T, origin="lower", aspect="auto", extent=extent, cmap=cmap, norm=norm1)
+            elif i == 1:
+                arr = np.ma.masked_invalid(share[cls])
+                ims[1] = ax.imshow(arr.T, origin="lower", aspect="auto", extent=extent, cmap=cmap, norm=norm2)
+                lo, hi = data["contour_levels"][cls]
+                levels = sorted(set(v for v in (lo, hi) if v > 0.0))
+                if levels:
+                    ax.contour(x_centers, b_centers, n_cat_cell[cls].T, levels=levels,
+                               colors="0.15", linewidths=0.8)
+            else:
+                arr = np.ma.masked_less(n_cell[cls], cell_floor)
+                ims[2] = ax.imshow(arr.T, origin="lower", aspect="auto", extent=extent, cmap=cmap, norm=norm3)
+
+            # THE WALL, drawn on every panel of every row (module
+            # docstring): the region grids are zero above it (no
+            # per-source blur padding at this population level), so the
+            # panel's own axis runs only to the wall.
+            ax.axvline(_LOG10_X_WALL, color="0.35", lw=0.9, linestyle="--", alpha=0.9)
+            if cls in ("YSO", "H2S"):
+                ax.axvspan(data["log10_x_front"], data["log10_x_back"], color="0.6", alpha=0.18, lw=0)
+            ax.axhline(data["log10_f_lim_med"], color="0.25", lw=0.8, linestyle=":", alpha=0.9)
+
+            ax.set_xlim(_LOG10_X_MIN, _LOG10_X_WALL)
+            ax.set_xlabel(_X_LABEL, fontsize=_LABEL_FONTSIZE)
+            ax.tick_params(labelsize=_TICK_FONTSIZE, labelleft=(c == 0))
+            ax.set_xticks(np.array([-3.0, -2.0, -1.0, 0.0]))
+            if i == 0:
+                ax.set_title(cls, fontsize=_LABEL_FONTSIZE, pad=18)
+            if c == 0:
+                ax.set_ylabel(_SHARED_Y_LABEL, fontsize=_LABEL_FONTSIZE)
+
+    cbar_specs = (
+        (0, "objects / cell"),
+        (1, r"$N_{CAT\,CELL,C} / \sum_{C'} N_{CAT\,CELL,C'}$"),
+        (2, "objects / cell"),
+    )
+    for i, label in cbar_specs:
+        y0 = page_h - margin_t - (i + 1) * row_h - i * row_gap
+        cax_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / page_w,
+                    y0 / page_h, 0.22 / page_w, row_h / page_h]
+        cax = fig.add_axes(cax_rect)
+        cbar = fig.colorbar(ims[i], cax=cax)
+        cbar.set_label(label, fontsize=_LABEL_FONTSIZE)
+        cbar.ax.tick_params(labelsize=_TICK_FONTSIZE)
+
+    fig.suptitle("%s -- the prior's mass in the nuisance plane, selection included"
+                 % region, fontsize=_LABEL_FONTSIZE, y=1.0 - 0.15 / page_h)
+
+    fig.text(margin_l / page_w, (caption_block_h - _CAPTION_TOP_PAD_IN) / page_h, caption_text,
+              fontsize=_CAPTION_FONTSIZE, va="top", ha="left", linespacing=_CAPTION_LINESPACING)
+
+    out_dir = f"{config.data_root}/bmstp/atlas/figures"
+    paths = []
+    for fmt in ("png", "pdf"):
+        paths.append(f"{out_dir}/prior-shapes-region_{region}.{fmt}")
+    return fig, paths
+
+
+def build_region_prior_one(config, region):
+    with progress.Stage("atlas.shapes.region", region) as st:
+        data = _build_region_prior_data(config, region)
+        _print_region_numbers(region, data)
+        fig, paths = _draw_region_figure(config, region, data)
+        os.makedirs(f"{config.data_root}/bmstp/atlas/figures", exist_ok=True)
+        for path in paths:
+            fig.savefig(path, dpi=150)
+        plt.close(fig)
+        st.done(paths[0], n_panel=len(CLASS_ORDER))
+    return paths
+
+
+def build_region_prior(config, regions=None):
+    region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
+    for region in region_names:
+        build_region_prior_one(config, region)
+
+
 def _main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config")
     parser.add_argument("--regions", nargs="+", default=None)
+    parser.add_argument("--page", choices=("source", "region"), default="source",
+                         help="'source' (default): the per-source shapes page; "
+                              "'region': the region's prior mass in the nuisance "
+                              "plane, selection included")
     args = parser.parse_args()
     config = config_module.load(args.config)
-    build(config, regions=args.regions)
+    if args.page == "region":
+        build_region_prior(config, regions=args.regions)
+    else:
+        build(config, regions=args.regions)
 
 
 if __name__ == "__main__":

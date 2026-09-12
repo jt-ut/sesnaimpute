@@ -156,6 +156,7 @@ PY sesnaimpute.bmstp.density   # the per-source density table, P1: column, grain
 PY sesnaimpute.bmstp.atlas   # the prior atlas, P6: per-pixel Monte Carlo selection and the total-count check (SPEC_BMSTP sec 8)
 PY sesnaimpute.atlas.render   # the sky atlas figures from P6 (the prior rows; the posterior row is added by the same line at the fitter block's end once P11 exists)
 PY sesnaimpute.atlas.shapes   # the prior at a source: h_C(x, log10 B) per class and A_C(s), two sources per region (report-only, SPEC_BMSTP sec 4.1-4.2, 5.1-5.6)
+PY sesnaimpute.atlas.shapes --page region   # the prior's mass in the nuisance plane, selection included: N_CAT_CELL_<C>/N_CELL_<C> per class, one page per region (report-only, SPEC_BMSTP sec 8)
 PY sesnaimpute.atlas.protostars   # the protostar check figure per region with HOPS/eHOPS coverage (report-only, SPEC_BMSTP sec 9)
 
 # --- fittp (the thinned-Poisson fitter, the classification, the cascade, the posterior atlas; writes fittp/) ---
