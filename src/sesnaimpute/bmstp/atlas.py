@@ -1,22 +1,23 @@
 """P6, the prior atlas (SPEC_BMSTP_DRAFT.md sec. 8; IMPLEMENTATION_BMSTP_DRAFT.md
 sec. 1.2 P6, sec. 3 row 1.9).
 
-Per admitted nside-512 pixel, a fixed-seed Monte Carlo sample of each class's
-population, dimmed at the pixel's own column through the blended law
-(`population.selection.kappa_hybrid`), weighted by each member's probability of
-being catalogued (sec. 8, sec. 6.2): per band the completeness `C_i(f)` at the
-pixel's own marginalised 50% limit (`catalog.depth_grid`'s `F_LIM_50_PIX_MJY`)
-and its own marginalised width (`W_DEX_PIX`), and `P(>=2 of 8)` from the eight bands' independent
+Per admitted nside-512 pixel, a deterministic weighted quadrature over each
+class's own population, dimmed at the pixel's own column through the blended
+law (`population.selection.kappa_hybrid`), weighted by each member's
+probability of being catalogued (sec. 8, sec. 6.2): per band the
+completeness `C_i(f)` at the pixel's own marginalised 50% limit
+(`catalog.depth_grid`'s `F_LIM_50_PIX_MJY`) and its own marginalised width
+(`W_DEX_PIX`), and `P(>=2 of 8)` from the eight bands' independent
 non-detection probabilities -- the same completeness model `fittp.likelihood`
 prices, never a step at the 50% limit. The selection appears here and nowhere
 else in the atlas (sec. 1.2): the prior itself is unthinned.
 
 This build writes STAR/AGB/PAHC (sec. 5.1-5.3, partitioning the field population:
-a star is a STAR or a PAHC member of the Monte Carlo, never both, weighted
+a star is a STAR or a PAHC member of the population, never both, weighted
 `W_STAR*(1-P_PAHC)`/`W_STAR*P_PAHC`), GAL (sec. 5.4: SWIRE's four IRAC fluxes
 per galaxy, S from the counts law's own node, colours from a galaxy measured at
-that node, at `x=1`), YSO (sec. 5.5: a weighted quadrature over the population, no
-draw -- `N_YSO_NODES` quantile nodes of the register's own census weight
+that node, at `x=1`), YSO (sec. 5.5: a weighted quadrature over the population --
+`N_YSO_NODES` quantile nodes of the register's own census weight
 (`template_weights.yso_population_weight`'s Dunham et al. 2015 census
 density over `log10 f_ref,4.5,theta` divided by the library's density of
 templates in the same quantity, times inclination uniform in cos i and the
@@ -34,11 +35,16 @@ sample_agb`), each carrying one shell template of its own drawn chemistry
 `tau` factor construction) whose eight `F_REF` are scaled so its own 4.5 um
 flux equals the star's `F_4.5`. All six classes enter the total-count check.
 
-GAL, YSO and H2S's catalogued densities are each a weighted quadrature over their
-own whole population, no Monte Carlo draw (sec. 8): alongside them this build
-writes `N_CAT_CELL_<C>` (128, 110, `grid.LOG10_X_EDGES` by `grid.LOG10_F45_EDGES`)
-for GAL, YSO and H2S, each class's own expected number of catalogued objects per
-parameter cell, summing over cells to `RATIO_<C> * N_source`.
+Every class's catalogued density is a weighted quadrature over its own whole
+population (sec. 8): alongside it this build writes `N_CAT_CELL_<C>` (128, 110,
+`grid.LOG10_X_EDGES` by `grid.LOG10_F45_EDGES`) for all six classes, each
+class's own expected number of catalogued objects per parameter cell, summing
+over cells to `RATIO_<C> * N_source`; and `N_CELL_<C>` (same axes, sec. 8's
+intrinsic population), the class's UNTHINNED population per cell -- no flux
+cut, no dimming -- `Sum_pix coverage * pixel area * A_C(pixel) * h_C(cell;
+pixel) * f_C(cell; pixel)`, the same per-pixel grain shape and weight factor
+the intrinsic view's `_above_fraction` reads, gathered over every cell rather
+than collapsed above one flux limit.
 
 Every module on this atlas's worker path (this module, `knot_field`,
 `sample_gal`, `sample_star`, `sample_cloud`, `grid`, `density`,
@@ -97,27 +103,6 @@ CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
 #: wrong faint extrapolation.
 BRIGHT_MULT_3, BRIGHT_MULT_10 = 3.0, 10.0
 
-#: Monte Carlo draw size per pixel and class -- SPEC_BMSTP_DRAFT.md sec. 8:
-#: "A sample of 1e4 per class holds the Monte Carlo error under 1%."
-N_MC = 10_000
-
-#: A fixed seed for the per-tile resample (reproducible, not a science
-#: constant): one `RandomState` per tile, seeded by this value plus the
-#: tile id, so two runs draw the same members.
-MC_SEED = 137
-
-#: Disjoint offsets for the three independent draw streams that share
-#: `MC_SEED` (sec. 8's "a fixed-seed sample"): a tile id, a sightline row,
-#: and the region-wide YSO template pool. Each offset is far larger than
-#: any real tile id or nside-256 sightline row (nside 256 has under
-#: 800,000 pixels total), so no stream's range can reach into another's.
-#: GAL has no draw (sec. 8): its members are the deterministic quadrature
-#: `_gal_members` forms directly from the counts law and the SWIRE
-#: population, with no Monte Carlo sample and so no seed of its own.
-_SEED_OFFSET_TILE = 0
-_SEED_OFFSET_SIGHTLINE = 100_000_000
-_SEED_OFFSET_YSO_POOL = 200_000_000
-
 #: Two of eight bands clear -- the survey's own catalogue rule (sec. 1.2),
 #: the same constant `population.selection.MIN_BANDS` sets.
 MIN_BANDS_CLEAR = selection_module.MIN_BANDS
@@ -131,46 +116,42 @@ MIN_BANDS_CLEAR = selection_module.MIN_BANDS
 GAL_COLOUR_CELL_DEX = 0.05
 
 #: YSO's template quadrature (sec. 5.5 "Marks"): equally spaced quantile
-#: nodes of the register's own census weight, replacing the region-wide
-#: fixed-seed draw. 500 is the smallest of {250, 500, 1000, 2000} whose
-#: per-pixel `frac` at the region's median-column sightline is within the
-#: 0.005 bar of the fine (4000-node, full shift/depth-cell) reference --
-#: 250 misses the bar (0.0056), 500 clears it (0.0004);
-#: `reports/W67e.md`'s convergence table is that check's evidence.
+#: nodes of the register's own census weight. 500 is the smallest of
+#: {250, 500, 1000, 2000} whose per-pixel `frac` at the region's
+#: median-column sightline is within the 0.005 bar of the fine
+#: (4000-node, full shift/depth-cell) reference -- 250 misses the bar
+#: (0.0056), 500 clears it (0.0004).
 N_YSO_NODES = 500
 
 #: YSO's distance-shift quadrature (sec. 5.5 "Marks"): equally spaced
-#: quantile nodes of the region's own shift kernel (in place of every
-#: kernel cell with nonzero mass, which made the member set too large --
-#: `reports/W67e.md`), each node the kernel's own cell centre at that
-#: quantile, weight `1/N_YSO_SHIFT_NODES`.
+#: quantile nodes of the region's own shift kernel, each node the
+#: kernel's own cell centre at that quantile, weight
+#: `1/N_YSO_SHIFT_NODES` -- every kernel cell with nonzero mass makes the
+#: member set too large for a per-sightline build.
 N_YSO_SHIFT_NODES = 5
 
 #: YSO and H2S's shared depth quadrature (sec. 5.5/5.6 "Marks"): equally
-#: spaced quantile nodes of the sightline's own `p(x)` (in place of every
-#: `p(x)` cell with nonzero mass), each node the cell centre at that
-#: quantile, weight `1/N_DEPTH_NODES`.
+#: spaced quantile nodes of the sightline's own `p(x)`, each node the
+#: cell centre at that quantile, weight `1/N_DEPTH_NODES` -- every `p(x)`
+#: cell with nonzero mass makes the member set too large for a
+#: per-sightline build.
 N_DEPTH_NODES = 8
 
 #: H2S's colour-ratio quadrature (sec. 5.6 "Marks"): equally spaced
 #: quantile nodes of each IRAC band's own Giannini table, one band
 #: independent of the others so the joint is their product (5**4 = 625
-#: nodes). 3 nodes/band (81 joint) was tried first and is the dominant
-#: source of H2S's own convergence miss (isolated at a converged sigma
-#: count: N_RATIO_NODES=3 alone gives 0.0102 relative to the fine
-#: reference at the region's median-column sightline, N_RATIO_NODES=5
-#: gives 0.0012) -- `reports/W67e.md`'s convergence table is that check's
-#: evidence.
+#: nodes). 3 nodes/band (81 joint) is the dominant source of H2S's own
+#: convergence miss (isolated at a converged sigma count: N_RATIO_NODES=3
+#: alone gives 0.0102 relative to the fine reference at the region's
+#: median-column sightline, N_RATIO_NODES=5 gives 0.0012).
 N_RATIO_NODES = 5
 
 #: H2S's surface-brightness quadrature (sec. 5.6 "Marks"): equally spaced
 #: quantile nodes of the region's own lognormal itself (`scipy.special.
-#: ndtri`'s exact inverse CDF), in place of the cell-integrated grid this
-#: replaced. 20 clears the 0.005 bar at the region's median-column
-#: sightline against the fine reference once N_RATIO_NODES is 5 (0.0033;
-#: the sigma count was never the dominant source -- see N_RATIO_NODES's
-#: own comment); `reports/W67e.md`'s convergence table is that check's
-#: evidence.
+#: ndtri`'s exact inverse CDF). 20 clears the 0.005 bar at the region's
+#: median-column sightline against the fine reference once N_RATIO_NODES
+#: is 5 (0.0033; the sigma count is not the dominant source -- see
+#: N_RATIO_NODES's own comment).
 N_SIGMA_NODES = 20
 
 _HPX512_PIXEL_DEG2 = 41252.96 / (12 * 512 ** 2)
@@ -340,54 +321,38 @@ def _pixel_tile(config, region, pix):
     return tile, n_filled
 
 
-def _draw_members(rng, weight, n_mc):
-    """`(idx, total)`: `n_mc` indices into the tile's retained field-star
-    arrays, drawn with replacement in proportion to `weight` -- the fixed-
-    seed Monte Carlo sample of sec. 8. Each draw stands for `total / n_mc`
-    objects, `total = sum(weight)`, so the accepted fraction over the draw
-    times `total / OMEGA_POINTING_DEG2` (the tile's own pointing) recovers
-    the class's own catalogued density. `None` where the tile carries no
-    weight at all (e.g. no evolved star for AGB)."""
-    total = float(np.sum(weight, dtype=np.float64))
-    if total <= 0.0 or weight.size == 0:
-        return None, 0.0
-    p = weight / total
-    idx = rng.choice(weight.size, size=n_mc, replace=True, p=p)
-    return idx, total
-
-
-#: rule 10b's 512 MB batch budget, for the (n_pixel_batch, N_MC, 8) arrays
-#: `_accepted_fraction` holds: `kappa`, `dimming`, `flux`, `log10_f`, `z`,
-#: `p`, `one_minus_p` and the per-band `np.delete` term in the closed-form
-#: loop are each that shape, and each expression above allocates its own
-#: buffer rather than reusing one -- `_N_TEMP_ARRAYS` counts that many
-#: same-shape buffers live at once, generously, so the true peak (measured
-#: below) sits under the target with margin. `_build_one_tile` runs this
-#: inside `config.n_jobs` joblib workers at once (STAR/AGB/PAHC, one tile
-#: per worker), each held to this 512 MB working set on its own (rule
-#: 10b); the total across all workers is therefore `n_jobs * 512 MB`, not
-#: 512 MB in aggregate -- sizing `n_jobs` to the machine's memory is
-#: `root.cfg`'s job (rule 10a), not this batch size's.
+#: rule 10b's 512 MB batch budget, for the (n_pixel_batch, n_mem, 8) arrays
+#: `catalogued_fraction` holds via `catalogued_probability`: `kappa`,
+#: `dimming`, `flux`, `log10_f`, `z`, `p`, `one_minus_p` and the per-band
+#: `np.delete` term in the closed-form loop are each that shape, and each
+#: expression above allocates its own buffer rather than reusing one --
+#: `_N_TEMP_ARRAYS` counts that many same-shape buffers live at once,
+#: generously, so the true peak (measured below) sits under the target
+#: with margin. `_build_one_tile` runs this inside `config.n_jobs` joblib
+#: workers at once (STAR/AGB/PAHC, one tile per worker), each held to
+#: this 512 MB working set on its own (rule 10b); the total across all
+#: workers is therefore `n_jobs * 512 MB`, not 512 MB in aggregate --
+#: sizing `n_jobs` to the machine's memory is `root.cfg`'s job (rule
+#: 10a), not this batch size's.
 _PIXEL_BATCH_BUDGET_BYTES = 512 * 1024 * 1024
 _N_TEMP_ARRAYS = 12
 
 
-def _pixel_batch_size(n_mc):
-    """Pixels per batch so `n_pixel_batch * N_MC * N_BANDS * 8 bytes
+def _pixel_batch_size(n_mem):
+    """Pixels per batch so `n_pixel_batch * n_mem * N_BANDS * 8 bytes
     (float64) * _N_TEMP_ARRAYS` stays under `_PIXEL_BATCH_BUDGET_BYTES`
     per worker, independent of how many pixels the caller (a tile, a
     sightline, or GAL's whole region) holds -- CODING_RULES_BMSTP.md rule
     10b, one worker's own 512 MB working set."""
-    row_bytes = n_mc * N_BANDS * 8 * _N_TEMP_ARRAYS
+    row_bytes = n_mem * N_BANDS * 8 * _N_TEMP_ARRAYS
     return max(1, _PIXEL_BATCH_BUDGET_BYTES // row_bytes)
 
 
 def catalogued_probability(a_col, u, flux0, f_lim, width_dex, config):
     """`(p_cat, p_cat_i2, flux_i2)` for ONE pixel batch: the closed-form
     probability that a member is catalogued (SPEC_BMSTP_DRAFT.md sec. 8,
-    sec. 6.2), with no Monte Carlo bookkeeping in it -- `_accepted_fraction`
-    forms the Monte Carlo means and standard errors from these three
-    arrays, batch by batch.
+    sec. 6.2) -- `catalogued_fraction` forms the weighted means over these
+    three arrays, batch by batch.
 
     `a_col` (n_pix,) the pixel's own column, `u` (n_mem,) the member's own
     placement fraction, `flux0` (n_mem, 8) undimmed member fluxes (zero
@@ -429,8 +394,8 @@ def catalogued_probability(a_col, u, flux0, f_lim, width_dex, config):
     band with no flux at all out of this path already, so the two guards
     do not interact.
 
-    No batching inside: the caller (`_accepted_fraction`/`catalogued_fraction`,
-    rule 10b) passes one pixel batch and its own slice of
+    No batching inside: the caller (`catalogued_fraction`, rule 10b) passes
+    one pixel batch and its own slice of
     `a_col`/`f_lim`/`width_dex`; `u` and `flux0` are the caller's whole
     (unsliced) member draw."""
     assert MIN_BANDS_CLEAR == 2, "the closed form below is `P(>=2 of 8)` only"
@@ -462,109 +427,29 @@ def catalogued_probability(a_col, u, flux0, f_lim, width_dex, config):
     return p_cat, p_cat_i2, flux_i2
 
 
-def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None, weight_pix=None):
-    """`(frac, mc_error, frac_bright3, frac_bright10, block_total, block_total_se)`
-    per pixel, the Monte Carlo statistics over the shared member draw
-    `u`/`flux0` -- the catalogued-probability arrays themselves come from
-    `catalogued_probability` (this function calls it once per pixel
-    batch and owns only the mean/standard-error/bright-test bookkeeping
-    below). `mc_error` is the Monte Carlo standard error of THIS PIXEL'S
-    OWN mean catalogued probability at `N_MC` draws (the sample standard
-    deviation of `p_cat` over members). The same `N_MC` members are the
-    caller's one draw for the whole tile, sightline or region, so
-    `mc_error` at different pixels of one call is not independent -- it
-    does not shrink by summing pixels, and does not describe the error on
-    a REGION TOTAL; `weight_pix`/`block_total`/`block_total_se` below are
-    what a region total's own error needs.
-
-    `frac_bright3`/`frac_bright10` (sec. 9 "the bright-end count ratio"):
-    `p_cat_i2` restricted to draws whose dimmed I2 (4.5 um) flux exceeds
-    3x/10x the pixel's own `F_LIM_50_PIX_MJY[:, IDX_I2]` -- the exact
-    condition the catalogue side applies to a catalogued source
-    (`ORIGIN_FNU[:, I2] == 1`, bright above the same multiple,
-    `_observed_bright_counts`): one bright test, stated once, so the two
-    sides of the ratio are the same population.
-
-    `weight_pix` (n_pix,), optional: this pixel's own coefficient (e.g.
-    density x coverage x pixel area) by which its `frac` is summed into
-    some larger total. When given, `block_total`/`block_total_se` are the
-    mean and Monte Carlo standard error of `sum_pix weight_pix * p_cat`,
-    i.e. of the weighted total THIS CALL'S SHARED DRAW OF MEMBERS stands
-    for -- the correct error for a total built from this one draw, since
-    it is computed from the N_MC replicate totals before they are
-    averaged down to `frac`, rather than from the per-pixel `mc_error`
-    values (`None`, `None` when `weight_pix` is not given).
-
-    Processed in pixel batches of `_pixel_batch_size` (rule 10b): each
-    batch is the same elementwise-per-pixel computation on a slice of
-    `a_col`/`f_lim`/`width_dex`, so splitting the pixel axis changes no result -- the
-    member draws (`u`, `flux0`) are unsliced and shared by every batch.
-    Each batch's rows are written straight into the preallocated
-    `frac`/`mc_error` outputs; `tick(done, total)` is called once per
-    batch when given (only GAL's region-wide call passes one -- a tile or
-    a sightline's own pixel count is already small)."""
-    n_mc = u.size
-    n_pix = a_col.size
-    frac = np.empty(n_pix, dtype=np.float64)
-    mc_error = np.empty(n_pix, dtype=np.float64)
-    frac_bright3 = np.empty(n_pix, dtype=np.float64)
-    frac_bright10 = np.empty(n_pix, dtype=np.float64)
-    block_sum = np.zeros(n_mc, dtype=np.float64) if weight_pix is not None else None
-    batch = _pixel_batch_size(n_mc)
-    n_batches = (n_pix + batch - 1) // batch
-    for b, start in enumerate(range(0, n_pix, batch)):
-        stop = min(start + batch, n_pix)
-        a_b = a_col[start:stop]
-        f_lim_b = f_lim[start:stop]
-        width_dex_b = width_dex[start:stop]
-        accepted_prob, catalogued_i2_measured, flux_i2 = catalogued_probability(
-            a_b, u, flux0, f_lim_b, width_dex_b, config)
-        frac[start:stop] = accepted_prob.mean(axis=1)
-        mc_error[start:stop] = accepted_prob.std(axis=1) / np.sqrt(n_mc)
-        if block_sum is not None:
-            block_sum += weight_pix[start:stop] @ accepted_prob
-
-        i2_lim_b = f_lim_b[:, IDX_I2:IDX_I2 + 1]  # (n_pix_batch, 1)
-        bright3 = flux_i2 > BRIGHT_MULT_3 * i2_lim_b
-        bright10 = flux_i2 > BRIGHT_MULT_10 * i2_lim_b
-        frac_bright3[start:stop] = (catalogued_i2_measured * bright3).mean(axis=1)
-        frac_bright10[start:stop] = (catalogued_i2_measured * bright10).mean(axis=1)
-
-        if tick is not None:
-            tick(b + 1, n_batches)
-    if block_sum is not None:
-        block_total = float(block_sum.mean())
-        block_total_se = float(block_sum.std() / np.sqrt(n_mc))
-    else:
-        block_total, block_total_se = None, None
-    return frac, mc_error, frac_bright3, frac_bright10, block_total, block_total_se
-
-
 def catalogued_fraction(a_col, u, flux0, w, f_lim, width_dex, config, weight_pix, tick=None):
     """`(frac, frac_bright3, frac_bright10, s_member)`: the weighted, deterministic
-    quadrature over a class's WHOLE population (SPEC_BMSTP_DRAFT.md sec. 8), no draw
-    -- exact up to the population's own binning, for every class whose members are
-    enumerated rather than Monte Carlo sampled (GAL first, sec. 5.4). `w` (n_mem,) is
-    each member's own population weight, on any positive scale; every mean below
-    normalises by `w.sum()`. `catalogued_probability` still supplies the per-pixel,
-    per-member catalogued probability (`p_cat`) and the I2-measured probability and
-    dimmed I2 flux for the bright tests (sec. 9); this function only forms the
-    weighted sums `_accepted_fraction`'s Monte Carlo mean/std would otherwise form.
+    quadrature over a class's WHOLE population (SPEC_BMSTP_DRAFT.md sec. 8) -- exact
+    up to the population's own binning, for every class (GAL first, sec. 5.4). `w`
+    (n_mem,) is each member's own population weight, on any positive scale; every
+    mean below normalises by `w.sum()`. `catalogued_probability` supplies the
+    per-pixel, per-member catalogued probability (`p_cat`) and the I2-measured
+    probability and dimmed I2 flux for the bright tests (sec. 9); this function forms
+    the weighted sums over the class's whole population.
 
     `frac` (n_pix,) = `(p_cat @ w) / w.sum()`; `frac_bright3`/`frac_bright10` (sec. 9
     "the bright-end count ratio") the same weighted mean restricted to members whose
     dimmed I2 flux exceeds 3x/10x the pixel's own I2 50% limit -- the exact condition
     the catalogue side applies to a catalogued source. `s_member` (n_mem,) =
     `sum_pix weight_pix[pix] * p_cat[pix, m]`, the pixel-area-weighted catalogued
-    probability of that member over the whole region -- what `_accepted_fraction`'s
-    `block_sum` is per Monte Carlo draw, here exact per member (a region total built
-    from `density * (w / w.sum()) @ s_member` needs no further error term: there is
-    no draw left to have one).
+    probability of that member over the whole region, exact per member (a region
+    total built from `density * (w / w.sum()) @ s_member` needs no further error
+    term: the quadrature is exact, not a draw).
 
-    Processed in pixel batches of `_pixel_batch_size` (rule 10b), exactly as
-    `_accepted_fraction`: each batch is the same elementwise-per-pixel computation on
-    a slice of `a_col`/`f_lim`/`width_dex`, so splitting the pixel axis changes no
-    result. Within one pixel batch the member axis is ALSO chunked, in
+    Processed in pixel batches of `_pixel_batch_size` (rule 10b): each batch is the
+    same elementwise-per-pixel computation on a slice of `a_col`/`f_lim`/`width_dex`,
+    so splitting the pixel axis changes no result. Within one pixel batch the member
+    axis is ALSO chunked, in
     `n_mem_chunk = _PIXEL_BATCH_BUDGET_BYTES // (N_BANDS * 8 * _N_TEMP_ARRAYS *
     n_pix_batch)` members at a time (AGB's cross-product population, sec. 5.2, can
     reach ~1e6 members per tile: a `(1, 1e6, 8)` working set at one pixel per batch
@@ -621,7 +506,7 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, width_dex, config, weight_pix
 def _pahc_weight(limit8_grid, p_pahc, x):
     """`P_PAHC` interpolated to the flux limit `x` (a scalar mJy, the
     tile's own mean I4 limit -- an approximation of sec. 4's per-pixel
-    contrast, disclosed rather than resampled per pixel, since `P_PAHC`
+    contrast, disclosed rather than refit per pixel, since `P_PAHC`
     is tabulated on `LIMIT8_GRID_MJY`'s eight region-wide quantile nodes,
     not per pixel): vectorised over stars via `searchsorted`, no
     per-star loop. `frac` is clamped to `[0, 1]` (no extrapolation past
@@ -814,45 +699,6 @@ def _yso_register(config):
     return dict(weight=weight, f_ref=f_ref, floor_linear=floor_linear)
 
 
-def _yso_template_pool(config, region, d_front, d_back, n_mc, seed):
-    """`(n_mc, 8)` mJy: `n_mc` YSO library templates drawn by the
-    population weight (sec. 5.5 "Template weights"), one fixed-seed draw
-    per region (shared by every sightline), each template's own eight
-    `F_REF` (floored at the register's own `FLOOR_LINEAR`) scaled by
-    `10^delta`, `delta` drawn independently per member from the region's
-    own shift kernel `K` (`bmstp.sample_cloud.shift_kernel`:
-    a `rng.choice` over `K`'s own cells, jittered uniformly within the
-    cell) -- the SAME kernel `template_weights.build_yso`'s conditional
-    table reads, so a member's distance placement and the cloud's own
-    depth are drawn together, never a single fixed `d_r` scale."""
-    reg = _yso_register(config)
-    weight, f_ref, floor_linear = reg["weight"], reg["f_ref"], reg["floor_linear"]
-    rng = np.random.RandomState(seed)
-    idx = rng.choice(weight.size, size=n_mc, replace=True, p=weight / weight.sum())
-    kernel, _mo_k = sample_cloud.shift_kernel(config, region, d_front, d_back)
-    cell = rng.choice(kernel.size, size=n_mc, replace=True, p=kernel / kernel.sum())
-    delta = grid.LOG10_F45_EDGES[cell] + rng.random(n_mc) * grid.D_LOG10_F45
-    scale = 10.0 ** delta
-    flux0 = np.empty((n_mc, N_BANDS), dtype=np.float64)
-    for k, key in enumerate(BAND_KEYS):
-        flux0[:, k] = np.maximum(f_ref[key][idx], floor_linear[idx]) * scale
-    return flux0
-
-
-def _draw_x(rng, p_x, n):
-    """`n` `x` draws from a sightline's own `p(x)` (sec. 5.5 "Marks",
-    `sample_cloud.sample_x`'s binned return on `grid.LOG10_X_EDGES`): a
-    grid cell drawn by its own probability, then a uniform position
-    within that cell's own `log10 x` width -- the shape's own one-cell
-    resolution, no finer information is on offer."""
-    p = p_x / p_x.sum()
-    cell = rng.choice(p_x.size, size=n, replace=True, p=p)
-    lo = grid.LOG10_X_EDGES[cell]
-    hi = grid.LOG10_X_EDGES[cell + 1]
-    log10_u = lo + rng.random(n) * (hi - lo)
-    return 10.0 ** log10_u
-
-
 def _quantile_nodes_from_weight(values, weight, n):
     """`n` equally spaced quantile nodes `(i+0.5)/n` of `values` weighted
     by `weight` (any positive scale, need not be pre-sorted): `values`
@@ -879,8 +725,8 @@ def _yso_region_nodes(config, region, d_front, d_back):
     own shift kernel (`sample_cloud.shift_kernel`), each a node at its
     own cell centre on `grid.LOG10_F45_EDGES` (`_quantile_nodes_from_weight`),
     weight `1/N_YSO_SHIFT_NODES` -- every kernel cell with nonzero mass
-    made the member set too large (`reports/W67e.md`). The product set
-    (`np.repeat`/`np.tile`, no Python loop over nodes): `flux0_ts[i,:] =
+    makes the member set too large for a per-sightline build. The product
+    set (`np.repeat`/`np.tile`, no Python loop over nodes): `flux0_ts[i,:] =
     flux0_template * 10**delta`, `w_ts = w_template * w_shift`."""
     reg = _yso_register(config)
     weight_t, f_ref, floor_linear = reg["weight"], reg["f_ref"], reg["floor_linear"]
@@ -959,8 +805,8 @@ def _depth_nodes(loaded_profile, sl_row, d_front, d_back):
     the sightline's own `p(x)` (`sample_cloud.sample_x`'s binned return
     on `grid.LOG10_X_EDGES`), each node at its own cell centre
     (`_quantile_nodes_from_weight`), weight `1/N_DEPTH_NODES` -- every
-    `p(x)` cell with nonzero mass made the member set too large
-    (`reports/W67e.md`); shared by YSO and H2S (sec. 5.5/5.6, the same
+    `p(x)` cell with nonzero mass makes the member set too large for a
+    per-sightline build; shared by YSO and H2S (sec. 5.5/5.6, the same
     `p(x)`, no second depth quadrature)."""
     p_x, _mo_x, _removed_frac = sample_cloud.sample_x(loaded_profile, sl_row, d_front, d_back)
     mask = p_x > 0
@@ -1043,11 +889,9 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
     `l_of_pix_in_sl * eta_r * eps_ext`, so `s_member` in both cases is
     already density-weighted and no second multiply is needed;
     `grid.bin(u, log10 F_4.5, c_m) * c_m.sum()` with `log10 F_4.5` the
-    member's own undimmed `log10 flux0[:, IDX_I2]`. No `rng`, no `seed`,
-    no `_draw_x`: every factor here is a deterministic quadrature, so
-    this call induces no Monte Carlo error and no correlation between
-    sightlines -- the caller supplies zero to the error bookkeeping that
-    remains."""
+    member's own undimmed `log10 flux0[:, IDX_I2]`. No `rng`, no `seed`:
+    every factor here is a deterministic quadrature, so this call induces
+    no correlation between sightlines and no error term of its own."""
     a_cloud_in_sl = a_col_gas_in_sl * cloud_frac_sl
     density_yso = yso_module.law_count(config, region, a_cloud_in_sl, arm_in_sl)
 
@@ -1082,10 +926,10 @@ def _herschel_convolved_law(law_map, law_wcs, pix, arm, density_yso_pix):
     pixel the map does not reach, keeps the point law `density_yso_pix`
     already carries. Two callers read this from the SAME deterministic
     `density_yso_pix` (`population.yso.law_count`, no randomness):
-    `build_region`'s own H2S error weight, before the sightline Monte
-    Carlo runs, and its H2S mean density, after -- one function, one
-    convolved map, so the two agree exactly, never a pre-convolution
-    weight beside a convolved mean."""
+    `build_region`'s own H2S error weight, before the sightline quadrature
+    runs, and its H2S mean density, after -- one function, one convolved
+    map, so the two agree exactly, never a pre-convolution weight beside
+    a convolved mean."""
     l_of_pix = density_yso_pix.copy()
     herschel_pix = arm == yso_module.PROVENANCE_HERSCHEL
     if law_map is not None and herschel_pix.any():
@@ -1259,7 +1103,7 @@ def _gal_members(config):
             n_members_before, n_members_after)
 
 
-def _gal_accepted_fraction(config, a_col, f_lim, width_dex, coverage, tick):
+def _gal_catalogued_fraction(config, a_col, f_lim, width_dex, coverage, tick):
     """`(frac, frac_bright3, frac_bright10, n_cat_cell, density, n_members_before,
     n_members_after)` for GAL's one region-wide DETERMINISTIC quadrature (sec. 8).
     `catalogued_probability` reaches `fittp.likelihood`'s one `@njit(parallel=True)`
@@ -1286,11 +1130,11 @@ def _gal_accepted_fraction(config, a_col, f_lim, width_dex, coverage, tick):
     share one convention. Each member's own expected catalogued count in the region
     is `c_m = density * (w_m / w.sum()) * s_member[m]` (the population's own weight
     share times its pixel-area-weighted catalogued probability over the region,
-    `catalogued_fraction`'s `s_member`); `H, outside = grid.bin(u, log10_s, c_m)`
-    and `n_cat_cell = H * c_m.sum()` (`grid.bin` normalises `H` to sum to `1 -
-    outside`, so multiplying back by `c_m.sum()` restores the count scale); the
-    mass `outside * c_m.sum()` the grid's own edges drop is not stored (expected
-    ~= 0 for GAL, sec. 5.4's population sitting well inside the grid).
+    `catalogued_fraction`'s `s_member`); `_safe_cell_bin(u, log10_s, c_m)` guards
+    the `c_m.sum() == 0` case the same way as every other class's own cell grid
+    (`_safe_cell_bin`'s own docstring). The mass `grid.bin`'s own edges drop is not
+    stored (expected ~= 0 for GAL, sec. 5.4's population sitting well inside the
+    grid).
 
     `n_members_before`/`n_members_after` (`_gal_members`'s own return, passed
     through unchanged) are the region's `(node, template)` and `(node, colour
@@ -1319,8 +1163,7 @@ def _gal_accepted_fraction(config, a_col, f_lim, width_dex, coverage, tick):
 
     w_sum = float(w.sum())
     c_m = density * (w / w_sum) * s_member
-    H, _outside = grid.bin(u, log10_s, c_m)
-    n_cat_cell = H * float(c_m.sum())
+    n_cat_cell = _safe_cell_bin(u, log10_s, c_m)
     return (frac, frac_bright3, frac_bright10, n_cat_cell, density,
             n_members_before, n_members_after)
 
@@ -1334,7 +1177,7 @@ def _observed_bright_counts(config, region, pix, f_lim):
     `n_obs` counts every source there, `n_obs_bright3`/`n_obs_bright10`
     only those with a measured (`ORIGIN_FNU[:, I2] == 1`) I2 flux above
     3x/10x that pixel's own `F_LIM_50_PIX_MJY[:, I2]` -- the same
-    threshold `_accepted_fraction` applies to the model's own draws."""
+    threshold `catalogued_fraction` applies to the model's own members."""
     path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
     with h5py.File(path, "r") as f:
         gl = np.asarray(f["GAL_L_DEG"][:], dtype=np.float64)
@@ -1394,11 +1237,11 @@ def _above_factor_batch_size(n_model, n_b):
     return max(1, _ABOVE_BATCH_BUDGET_BYTES // row_bytes)
 
 
-def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve):
-    """Per admitted pixel, the deterministic sum `Sum_cells h_C(cell; grain) *
-    f_C(F_j; pixel) * 1[F_obs(cell) > F_0]` that `N_ABOVE_C(pixel) =
-    A_C(pixel) *` this sum multiplies (SPEC_BMSTP_DRAFT.md sec. 8). `h_C`
-    is the class's own RAW stored grain
+def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve, cell_weight):
+    """`(out, n_cell)`. Per admitted pixel, the deterministic sum
+    `Sum_cells h_C(cell; grain) * f_C(F_j; pixel) * 1[F_obs(cell) > F_0]`
+    that `N_ABOVE_C(pixel) = A_C(pixel) *` this sum multiplies
+    (SPEC_BMSTP_DRAFT.md sec. 8). `h_C` is the class's own RAW stored grain
     shape (`reader.grid_all[grain]`, unit mass on the support -- no
     per-source column-kernel blur: this is a pixel-level sum, not a
     source's own read). `f_C` is 1 for GAL/YSO/AGB/H2S and, for STAR/PAHC,
@@ -1418,7 +1261,18 @@ def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve)
     BATCH's own pixels only, never the whole admitted-pixel axis at once
     (a per-source-style call over every pixel at once ran 8.6 GB, Orion A
     PAHC, to 27 GB, Cygnus X, since the model axis can run to several
-    hundred templates)."""
+    hundred templates).
+
+    `n_cell` (n_x, n_b): the region's UNTHINNED population per cell
+    (sec. 8's intrinsic population, `N_CELL_<C>`) -- `Sum_pix cell_weight[pix]
+    * h_C(cell; pixel) * f_C(cell; pixel)`, no flux cut and no dimming (the
+    `above`/`a`/`kappa45` terms above never enter it): the same `h_C`/`f_C`
+    this function already gathers for `out`, summed over every cell of the
+    grid rather than collapsed above one flux limit. `cell_weight[pix]` is
+    the caller's own `coverage * pixel area * INTENSITY_C(pixel)`, so
+    `n_cell.sum() == Sum_pix cell_weight[pix] * out[pix]` if `out` were
+    computed with `f0 = -inf` (no cut) -- one extra weighted sum per pixel
+    batch, no new loop over pixels or cells."""
     x_centers = 0.5 * (reader.x_edges[:-1] + reader.x_edges[1:])  # log10 x
     b_centers = 0.5 * (reader.b_edges[:-1] + reader.b_edges[1:])  # log10 F_4.5
     x_lin = 10.0 ** x_centers
@@ -1426,6 +1280,7 @@ def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve)
     n_x, n_b = x_centers.size, b_centers.size
     n_pix = a_col.size
     out = np.empty(n_pix, dtype=np.float64)
+    n_cell = np.zeros((n_x, n_b), dtype=np.float64)
 
     is_factor_cls = cls in ("STAR", "PAHC")
     batch = _above_batch_size(n_x, n_b)
@@ -1439,7 +1294,6 @@ def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve)
         kappa45 = selection_module.kappa_hybrid(config, w_ramp)[..., IDX_I2]  # (n_p, n_x)
         f_min = f0[start:stop, None] * 10.0 ** (0.4 * kappa45 * a)  # (n_p, n_x): F_j needed to clear F_0
         above = f_j[None, None, :] > f_min[:, :, None]  # (n_p, n_x, n_b)
-        term = h_b * above
         if is_factor_cls:
             # STAR/PAHC's own template-weight factor at this batch's own
             # pixels' 8 um limits only, `d_pahc` reshaped to
@@ -1447,16 +1301,21 @@ def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve)
             # pixel axis in front of its own `(n_model, n_b)` term.
             f_c_batch = template_weights._factor_marginal(
                 b_centers, reader, cls, d_pahc[start:stop, None, None], curve)  # (n_p, n_b)
-            term = term * f_c_batch[:, None, :]
+            term_cell = h_b * f_c_batch[:, None, :]  # no flux cut, no dimming
+            term = term_cell * above
+        else:
+            term_cell = h_b
+            term = term_cell * above
         out[start:stop] = term.sum(axis=(1, 2))
-    return out
+        n_cell += np.tensordot(cell_weight[start:stop], term_cell, axes=(0, 0))
+    return out, n_cell
 
 
 def build_region(config, region):
     """Writes `bmstp/atlas/prior_atlas_hpx512__R.hdf5` for one region: the
     admitted pixel axis (`catalog.depth_grid`), its column and coverage,
-    and every class's `N_CAT_*`/`SHARE_*` from its own Monte Carlo
-    selection above (module docstring).
+    and every class's `N_CAT_*`/`SHARE_*` from its own deterministic
+    quadrature above (module docstring).
 
     `INTENSITY_<C>` (deg^-2, one value per admitted pixel) is the class's
     own intrinsic sky density at that pixel -- the quantity the
@@ -1495,10 +1354,9 @@ def build_region(config, region):
         # sky density at the pixel, `build_region`'s own docstring
         # paragraph above.
         intensity = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
-        mc_err = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
         # sec. 9's bright-end check: the same per-class densities as
-        # `n_cat`, restricted to the Monte Carlo members whose dimmed I2
-        # flux clears 3x/10x the pixel's own I2 50% limit.
+        # `n_cat`, restricted to the members whose dimmed I2 flux clears
+        # 3x/10x the pixel's own I2 50% limit.
         n_cat_bright3 = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
         n_cat_bright10 = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
 
@@ -1530,27 +1388,10 @@ def build_region(config, region):
         # once here rather than per tile.
         agb_pool = _agb_shell_pool(config)
 
-        # the region total's own Monte Carlo error (sec. 8): each block's
-        # draw is shared within its own tile/sightline/region, not per
-        # pixel (`_accepted_fraction`'s own docstring). STAR/AGB/PAHC (per
-        # tile) and H2S (per sightline) each resample their own random
-        # quantities fresh at every block, with only a DETERMINISTIC
-        # weight (no rng) shared across blocks, so their errors are
-        # independent and add in quadrature, `total_var += se**2`. GAL is
-        # one single region-wide block, likewise one quadrature term. YSO
-        # is the one class whose members' own SEDs (`flux0_yso`,
-        # `_yso_template_pool`) are ONE random draw shared by every
-        # sightline, so its per-sightline standard errors are summed
-        # LINEARLY over all sightlines and squared once, below -- the
-        # fully-correlated Cauchy-Schwarz upper bound on that shared
-        # component, since `u_yso`'s own placement is still drawn per
-        # sightline (`_build_one_sightline`'s own docstring paragraph).
-        total_var = 0.0
-
-        # every class is now a deterministic quadrature (sec. 8): none of
-        # the six carries a Monte Carlo error of its own -- `total_var`
-        # stays zero throughout, kept only so the region total's write
-        # block below still has a (zero) error to report.
+        # every class is a deterministic quadrature (sec. 8): the region's
+        # own catalogued-count-per-cell grid, accumulated tile by tile
+        # (STAR/AGB/PAHC), sightline by sightline (YSO/H2S) and once for
+        # GAL, below.
         n_cat_cell = {c: np.zeros((grid.LOG10_X_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1))
                       for c in ("STAR", "PAHC", "AGB", "YSO", "H2S")}
 
@@ -1566,47 +1407,38 @@ def build_region(config, region):
                 frac, density, frac_bright3, frac_bright10, n_cat_cell_tile = out[cls]
                 n_cat[cls][m] = density * frac
                 intensity[cls][m] = density
-                mc_err[cls][m] = 0.0
                 n_cat_bright3[cls][m] = density * frac_bright3
                 n_cat_bright10[cls][m] = density * frac_bright10
                 n_cat_cell[cls] += n_cat_cell_tile
-                total_se = 0.0
-                total_var += total_se ** 2
             st.tick(i + 1, len(tiles_here), "tiles")
 
         # GAL, sec. 5.4: one region-wide DETERMINISTIC quadrature (no draw,
-        # no seed -- GAL has no tile and no Monte Carlo sample), evaluated
+        # no seed -- GAL has no tile and no population sample), evaluated
         # at every admitted pixel's own column and limits with the shared
-        # `catalogued_fraction`. Called directly (`_gal_accepted_fraction`'s
+        # `catalogued_fraction`. Called directly (`_gal_catalogued_fraction`'s
         # own docstring): it splits the pixel axis into `config.n_jobs`
         # chunks and dispatches each chunk's `catalogued_fraction` call
         # through `Parallel` itself, so `build_region`'s parent process
         # still never runs a numba kernel, and no child a later fork
         # spawns can inherit a live numba thread pool.
         (frac_gal, frac_gal_bright3, frac_gal_bright10, n_cat_cell_gal, density_gal,
-         n_gal_members_before, n_gal_members_after) = _gal_accepted_fraction(
+         n_gal_members_before, n_gal_members_after) = _gal_catalogued_fraction(
             config, a_col, f_lim, width_dex, coverage,
             lambda done, total: st.tick(done, total, "GAL pixel chunks"))
         n_cat["GAL"] = density_gal * frac_gal
         # sec. 5.4's own density is one survey-wide constant, so GAL's
         # intensity is that same scalar broadcast to every admitted pixel.
         intensity["GAL"] = np.full(n_pix, density_gal, dtype=np.float64)
-        # GAL is now an exact quadrature, no draw: its own Monte Carlo
-        # error is zero (the region-total bookkeeping below stays, for the
-        # classes not yet deterministic).
-        mc_err["GAL"] = np.zeros(n_pix, dtype=np.float64)
         n_cat_bright3["GAL"] = density_gal * frac_gal_bright3
         n_cat_bright10["GAL"] = density_gal * frac_gal_bright10
-        se_gal = 0.0
-        total_var += se_gal ** 2
         # the region's expected number of catalogued objects per parameter
         # cell (module docstring): STAR/PAHC/AGB already accumulated
         # theirs, tile by tile, above.
         n_cat_cell["GAL"] = n_cat_cell_gal
 
         # YSO/H2S, sec. 5.5-5.6: grouped by the pixel's own nside-256
-        # sightline (YSO's grain), one Monte Carlo draw per sightline
-        # shared by every admitted pixel it parents.
+        # sightline (YSO's grain), one deterministic quadrature per
+        # sightline shared by every admitted pixel it parents.
         reg = regions_module.REGIONS_BY_NAME[region]
         d_r_pc = float(reg.d_r_pc)
         loaded_profile = sample_cloud._region_profile(config, region)
@@ -1678,9 +1510,10 @@ def build_region(config, region):
         # downsampled grid); a Planck pixel, or a Herschel pixel the
         # convolved map does not reach, keeps the law at its own column.
         # `L` is entirely deterministic (`population.yso.law_count`, no
-        # random draw), so it is built here, before the sightline Monte
-        # Carlo, from the same `a_col_gas * cloud_frac` every sightline
-        # itself computes (`_build_one_sightline`'s own `density_yso`) --
+        # random draw), so it is built here, before the sightline
+        # quadrature, from the same `a_col_gas * cloud_frac` every
+        # sightline itself computes (`_build_one_sightline`'s own
+        # `density_yso`) --
         # `_herschel_convolved_law` is the one function both this weight
         # and H2S's mean density below read, so they never disagree. The
         # map itself is convolved ONCE here (sec. 5.6 "a map operation,
@@ -1706,17 +1539,14 @@ def build_region(config, region):
         frac_h2s_bright10_pix = np.full(n_pix, np.nan, dtype=np.float64)
         density_yso_pix = np.full(n_pix, np.nan, dtype=np.float64)
         results_sl = Parallel(n_jobs=n_jobs)(delayed(_one_sl)(r) for r in sls_here)
-        # every sightline's own quadrature is deterministic (no `rng`, no
-        # shared draw): unlike the old Monte Carlo path, YSO's shared
-        # region-wide template x shift table is a fixed number, not a
-        # random sample, so it induces no covariance between sightlines
-        # and no error term of its own.
+        # every sightline's own quadrature is deterministic (no `rng`):
+        # YSO's shared region-wide template x shift table is a fixed
+        # number, not a random sample, so it induces no covariance
+        # between sightlines and no error term of its own.
         n_members_yso_list, n_members_h2s_list = [], []
         for i, (m, f_y, d_y, fb3_y, fb10_y, ncc_y, f_h, fb3_h, fb10_h, ncc_h, n_mem_y, n_mem_h) in enumerate(results_sl):
             n_cat["YSO"][m] = d_y * f_y
             intensity["YSO"][m] = d_y
-            mc_err["YSO"][m] = 0.0
-            mc_err["H2S"][m] = 0.0
             frac_h2s_pix[m] = f_h
             density_yso_pix[m] = d_y
             n_cat_bright3["YSO"][m] = d_y * fb3_y
@@ -1750,9 +1580,9 @@ def build_region(config, region):
         # `N_ABOVE_C(pixel) = A_C(pixel) * _above_fraction(...)`
         # (`_above_fraction`'s own docstring paragraph), read straight off
         # each class's own stored grain shape (`fittp.prior_reader.load`)
-        # rather than the Monte Carlo members above -- the atlas's
-        # intrinsic page draws this, not `INTENSITY_C`'s own ratio
-        # (SPEC_BMSTP_DRAFT.md sec. 8).
+        # rather than the catalogued-fraction members above -- the
+        # atlas's intrinsic page draws this, not `INTENSITY_C`'s own
+        # ratio (SPEC_BMSTP_DRAFT.md sec. 8).
         f0_pix = f_lim[:, IDX_I2]
         d_pahc_pix = -np.log10(f_lim[:, IDX_I4])
         curve = pahc_curve.read(config)
@@ -1765,6 +1595,12 @@ def build_region(config, region):
         # into `reader.grid_all` for YSO/H2S.
         p3_row_of_pix = loc_p3[sl_row_of_pix]
         n_above = {}
+        # sec. 8's intrinsic population per cell (`N_CELL_<C>`, module
+        # docstring): `coverage * pixel area * A_C(pixel)`, the same
+        # per-pixel coefficient `N_ABOVE_C` itself scales `frac_above` by
+        # below, gathered into cells instead of collapsed above one flux
+        # limit (`_above_fraction`'s own docstring paragraph).
+        n_cell = {}
         for cls in CLASSES:
             reader = prior_reader.load(config, region, cls)
             if cls in ("STAR", "AGB", "PAHC"):
@@ -1773,7 +1609,9 @@ def build_region(config, region):
                 grain_of_pix = p3_row_of_pix
             else:  # GAL: one survey-wide grain (`prior_reader.load`'s own convention)
                 grain_of_pix = np.zeros(n_pix, dtype=np.int64)
-            frac_above = _above_fraction(config, reader, cls, grain_of_pix, a_col, f0_pix, d_pahc_pix, curve)
+            cell_weight = coverage * _HPX512_PIXEL_DEG2 * intensity[cls]
+            frac_above, n_cell[cls] = _above_fraction(
+                config, reader, cls, grain_of_pix, a_col, f0_pix, d_pahc_pix, curve, cell_weight)
             n_above[cls] = intensity[cls] * frac_above
 
         built = CLASSES
@@ -1797,8 +1635,8 @@ def build_region(config, region):
         ratio_built = total_predicted_built / n_source if n_source else float("nan")
 
         # the YSO population's catalogable fraction (spec sec 5.5, sec
-        # 8): the region's own MC-and-detection-weighted accepted share
-        # of the RETAINED young-star density, `Sigma(n_cat[YSO] *
+        # 8): the region's own detection-weighted accepted share of the
+        # RETAINED young-star density, `Sigma(n_cat[YSO] *
         # coverage) / Sigma(density_yso_retained_pix * coverage)` -- the
         # same coverage weighting the total-count check above applies,
         # normalised against the same retained density P1 reports as
@@ -1850,21 +1688,9 @@ def build_region(config, region):
         print(f"bmstp.atlas {region}: RATIO_H2S before={ratio_h2s_before:.6g} "
               f"after={ratio['H2S']:.6g} (sec. 5.6's convolution vs. the law at the pixel's own column)")
 
-        # the region total's own Monte Carlo error (sec. 8), `total_var`
-        # (`total_var = 0.0`'s own paragraph above states the per-class
-        # split): a sum of independent block variances for every class but
-        # YSO, plus YSO's own fully-correlated upper-bound term, never a
-        # sum over pixels.
-        total_predicted_se = float(np.sqrt(total_var))
-        ratio_built_se = total_predicted_se / n_source if n_source else float("nan")
-        print(f"bmstp.atlas {region}: TOTAL_PREDICTED={total_predicted_built:.6g} "
-              f"+/- {total_predicted_se:.6g} (RATIO_BUILT {ratio_built:.6g} +/- {ratio_built_se:.6g}), "
-              f"the shared-draw Monte Carlo error on the region total")
-
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with h5py.File(path, "w") as f:
             f.attrs["GRANULE"] = "hpx512"
-            f.attrs["N_MC"] = N_MC
             f.attrs["DENSITY_GAL"] = density_gal
             f.attrs["TOTAL_PREDICTED"] = total_predicted_built
             f.attrs["SURVEYED_AREA_DEG2"] = surveyed_area_deg2
@@ -1873,12 +1699,6 @@ def build_region(config, region):
             for c in built:
                 f.attrs[f"RATIO_{c}"] = ratio[c]
             f.attrs["RATIO_BUILT"] = ratio_built
-            # sec. 8's total-count check: the shared-draw Monte Carlo
-            # error on the two numbers above (`total_var`'s own comment
-            # above), not read off any per-pixel `mc_error` (those do not
-            # describe a region total, module docstring).
-            f.attrs["TOTAL_PREDICTED_MC_ERROR"] = total_predicted_se
-            f.attrs["RATIO_BUILT_MC_ERROR"] = ratio_built_se
             # the YSO population's catalogable fraction (sec 5.5, sec 8):
             # accepted / intrinsic density, never the survey's observed
             # source count.
@@ -1910,21 +1730,17 @@ def build_region(config, region):
             f.create_dataset("N_CAT_CELL_AGB", data=n_cat_cell["AGB"].astype(np.float32))
             f.create_dataset("N_CAT_CELL_YSO", data=n_cat_cell["YSO"].astype(np.float32))
             f.create_dataset("N_CAT_CELL_H2S", data=n_cat_cell["H2S"].astype(np.float32))
+            # the region's UNTHINNED intrinsic population per parameter
+            # cell (module docstring, sec. 8): no flux cut, no dimming --
+            # `_above_fraction`'s own `n_cell` return, same axes.
+            for c in CLASSES:
+                f.create_dataset(f"N_CELL_{c}", data=n_cell[c].astype(np.float32))
             for c in built:
                 f.create_dataset(f"SHARE_{c}", data=share[c].astype(np.float32))
             f.create_dataset("N_OBS", data=n_obs.astype(np.int32))
             f.create_dataset("N_OBS_BRIGHT3", data=n_obs_bright3.astype(np.int32))
             f.create_dataset("N_OBS_BRIGHT10", data=n_obs_bright10.astype(np.int32))
 
-        def _max_mc_err(c):
-            # a single pixel's own standard error (this pixel's share of
-            # its tile/sightline/region's one shared draw), not a region
-            # total's error -- `total_predicted_se`/`ratio_built_se`
-            # above are that.
-            frac_c = n_cat[c] / (built_total + 1e-300)
-            return float(np.nanmax(mc_err[c][frac_c > 0.1])) if np.any(frac_c > 0.1) else 0.0
-
-        max_mc_err = max((_max_mc_err(c) for c in built), default=0.0) if n_pix else 0.0
         st.done(path, n_pix=n_pix, n_tile=len(tiles_here), n_sightline=len(sls_here),
                 n_tile_filled=n_tile_filled,
                 area_deg2=area_deg2, surveyed_area_deg2=surveyed_area_deg2,
@@ -1934,8 +1750,6 @@ def build_region(config, region):
                 ratio_gal=ratio["GAL"], ratio_yso=ratio["YSO"], ratio_h2s=ratio["H2S"],
                 ratio_built=ratio_built, density_gal_deg2=density_gal,
                 n_gal_members_before=n_gal_members_before, n_gal_members_after=n_gal_members_after,
-                mc_error_max_where_frac_gt_0p1=max_mc_err,
-                total_predicted_mc_error=total_predicted_se, ratio_built_mc_error=ratio_built_se,
                 ratio_bright3=ratio_bright3_total, ratio_bright10=ratio_bright10_total,
                 n_obs_bright3=int(sum_n_obs_bright3), n_obs_bright10=int(sum_n_obs_bright10))
     return path

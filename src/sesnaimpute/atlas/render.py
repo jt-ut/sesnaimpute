@@ -570,7 +570,7 @@ VIEWS = {
 def _caption_block(view, extra_line=None):
     """The text a prior page prints below its panel grid: the view's own
     two `atlas.captions` statements, then `extra_line` if given (the
-    selection page's one Monte Carlo error line), then the shared
+    selection page's own total-count-check lines), then the shared
     vocabulary in full -- imported, never restated, per the rules."""
     spec = VIEWS[view]
     parts = [spec["class_caption"], spec["total_caption"]]
@@ -679,10 +679,7 @@ def _build_prior_page(config, region, formats, view):
         n_panels = len(panels)
 
         # The selection page's own caption lines, in addition to the
-        # shared class/total statements: the Monte Carlo error on the
-        # region total (`N_CAT_C`/`TOTAL_PREDICTED` come from a Monte
-        # Carlo sample, so the intrinsic page's deterministic
-        # `N_ABOVE_C` carries no such line), the total-count check, the
+        # shared class/total statements: the total-count check, the
         # surveyed area and the per-class total-count ratio -- each its
         # own line here rather than in the suptitle, which has no room
         # for them on a narrow region. `bright3`/`bright10` stay in the
@@ -692,13 +689,9 @@ def _build_prior_page(config, region, formats, view):
             total_predicted = float(prior["attrs"].get("TOTAL_PREDICTED", np.nan))
             total_observed = float(prior["attrs"].get("TOTAL_OBSERVED", np.nan))
             surveyed_area = float(prior["attrs"].get("SURVEYED_AREA_DEG2", np.nan))
-            mc_error = float(prior["attrs"].get("TOTAL_PREDICTED_MC_ERROR", np.nan))
-            mc_pct = 100.0 * mc_error / total_predicted if total_predicted else float("nan")
             ratio_po = total_predicted / total_observed if total_observed else float("nan")
             ratios = [(cls, float(prior["attrs"].get("RATIO_%s" % cls, np.nan))) for cls in CLASSES]
             area_label = plot_style.label("surveyed area", "deg$^{2}$")
-            extra_lines.append("Monte Carlo error on the region total: +/- %.4g (%.2f%%)"
-                                % (mc_error, mc_pct))
             # The total-count check (sec. 8, sec. 9): the prior's own
             # normalization against the survey's count, the statement
             # `captions.TOTAL_COUNT_CHECK`'s, never restated here.
