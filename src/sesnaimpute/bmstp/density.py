@@ -49,6 +49,7 @@ from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.population import field_stars
+from sesnaimpute.population import yso as yso_module
 from sesnaimpute.population.yso import KAPPA_HERSCHEL, PROVENANCE_HERSCHEL, law_count, pc2_per_deg2
 from sesnaimpute.bmstp import grid
 from sesnaimpute.bmstp import knot_field
@@ -483,14 +484,20 @@ def build(config, regions=None):
                     a_cum_h = np.asarray(f["A_CUM_K"][:], dtype=np.float64)[rows_h, :]
                     a_inf_h = np.asarray(f["A_INF_K"][:], dtype=np.float64)[rows_h]
                 d_front_h = result["d_front"]
-                kappa_h = np.where(result["arm"][:n_check] == PROVENANCE_HERSCHEL, KAPPA_HERSCHEL, KAPPA_PLANCK)
                 pc2_h = float(pc2_per_deg2(result["d_r_pc"]))
                 hand_yso = np.empty(n_check, dtype=np.float64)
                 for k in range(n_check):
                     u_row = a_cum_h[k] / a_inf_h[k]
                     u_front_h = np.interp(d_front_h, dist_pc_h, u_row)
                     a_cloud_h = a_col_h[k] * (1.0 - u_front_h)
-                    hand_yso[k] = kappa_h[k] * pc2_h * a_cloud_h ** 2 * result["on_grid_yso"][k]
+                    # the law at one resolution on both arms (population.yso):
+                    # the column squared on the Herschel arm, the kernel's
+                    # second moment of the 36 arcsec column on the Planck arm
+                    if result["arm"][k] == PROVENANCE_HERSCHEL:
+                        a_sq = a_cloud_h ** 2
+                    else:
+                        a_sq = float(yso_module._kernel_second_moment_planck(config, np.array([a_cloud_h]))[0])
+                    hand_yso[k] = KAPPA_HERSCHEL * pc2_h * a_sq * result["on_grid_yso"][k]
                 hand_dev = float(np.max(np.abs(hand_yso - result["density_yso"][:n_check])))
             else:
                 hand_dev = float("nan")
