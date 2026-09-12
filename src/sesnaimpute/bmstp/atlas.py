@@ -115,6 +115,16 @@ MIN_BANDS_CLEAR = selection_module.MIN_BANDS
 #: result by much less than the roll-off itself resolves.
 GAL_COLOUR_CELL_DEX = 0.05
 
+#: STAR/PAHC member colour-collapse cell (`_build_one_tile`, `_collapse_star_members`,
+#: rule 9): the width, in dex, within which two field stars' seven log flux
+#: ratios to I2 (J, H, Ks, I1, I3, I4, M1 -- every band a member enters
+#: `catalogued_probability` through, besides `u` and `F_4.5` itself) are
+#: treated as the same member. Set far below the completeness roll-off
+#: width (`W_DEX` ~= 0.1-0.3 dex, `catalog.depth_grid`), so the collapse
+#: moves `catalogued_fraction`'s result by much less than the roll-off
+#: itself resolves.
+STAR_COLOUR_CELL_DEX = 0.1
+
 #: YSO's template quadrature (sec. 5.5 "Marks"): equally spaced quantile
 #: nodes of the register's own census weight. 500 is the smallest of
 #: {250, 500, 1000, 2000} whose per-pixel `frac` at the region's
@@ -520,6 +530,62 @@ def _pahc_weight(limit8_grid, p_pahc, x):
     return p_pahc[:, lo] + frac * (p_pahc[:, hi] - p_pahc[:, lo])
 
 
+def _collapse_star_members(u, flux0, w_star, w_star_only, w_pahc_only):
+    """Collapse the tile's field-star members into cells before
+    `catalogued_fraction` (`_build_one_tile`, rule 9): a member enters
+    `catalogued_probability` only through its placement fraction `u`, its
+    4.5 um flux `F_4.5 = flux0[:, IDX_I2]`, and its seven flux ratios to
+    I2 (every other band). Two stars that agree in those nine quantities
+    to within a cell width far below the completeness roll-off
+    (`W_DEX` ~= 0.1-0.3 dex, `catalog.depth_grid`) are one member:
+    `log10 u` and `log10 F_4.5` at the cell grid's OWN bin widths
+    (`grid.LOG10_X_EDGES`' 1/32 dex, `grid.D_LOG10_F45`'s 0.1 dex -- the
+    collapse can never blur two stars the cell grid would itself
+    resolve), each of the seven log ratios at `STAR_COLOUR_CELL_DEX`.
+
+    The nine per-star cell indices (one floor-divide array expression
+    each, rule 8) are grouped with one `np.unique(..., axis=0,
+    return_inverse=True)` call -- a vector generalisation of
+    `_gal_members`'s single packed 64-bit integer key: nine independent
+    dex-scale axes do not fit one 64-bit key with a safe margin against
+    every realistic star (a silent overflow would merge unrelated cells,
+    rule 6's "no silent fallbacks"), so the row of nine indices is the
+    key itself, still one vectorised grouping with no Python loop over
+    stars.
+
+    Returns the cell's `u`/`flux0` (the ORIGINAL per-star weight
+    `w_star`-weighted mean within the cell -- each star's own population
+    weight, before the STAR/PAHC split) and the cell's summed STAR-only
+    and PAHC-only weights (the SAME cell grouping serves both classes,
+    sec. 5.1/5.3, since a star's placement/colour does not depend on
+    which class it falls in), plus the member counts before/after for
+    the build's own report."""
+    n_before = int(u.size)
+    tiny = np.finfo(np.float64).tiny
+    log10_u = np.log10(np.maximum(u, tiny))
+    log10_f45 = np.log10(np.maximum(flux0[:, IDX_I2], tiny))
+    x_width = grid.LOG10_X_EDGES[1] - grid.LOG10_X_EDGES[0]
+    cell_u = np.floor(log10_u / x_width).astype(np.int64)
+    cell_f45 = np.floor(log10_f45 / grid.D_LOG10_F45).astype(np.int64)
+    ratio_bands = [k for k in range(N_BANDS) if k != IDX_I2]
+    ratio_cells = [
+        np.floor((np.log10(np.maximum(flux0[:, k], tiny)) - log10_f45) / STAR_COLOUR_CELL_DEX).astype(np.int64)
+        for k in ratio_bands]
+    key = np.column_stack([cell_u, cell_f45] + ratio_cells)
+    _, inverse = np.unique(key, axis=0, return_inverse=True)
+    n_after = int(inverse.max()) + 1 if inverse.size else 0
+
+    w_cell = np.bincount(inverse, weights=w_star, minlength=n_after)
+    w_cell_star_only = np.bincount(inverse, weights=w_star_only, minlength=n_after)
+    w_cell_pahc_only = np.bincount(inverse, weights=w_pahc_only, minlength=n_after)
+    safe_w = np.where(w_cell > 0, w_cell, 1.0)
+    u_cell = np.bincount(inverse, weights=w_star * u, minlength=n_after) / safe_w
+    flux0_cell = np.empty((n_after, N_BANDS), dtype=np.float64)
+    for k in range(N_BANDS):
+        flux0_cell[:, k] = np.bincount(inverse, weights=w_star * flux0[:, k], minlength=n_after) / safe_w
+    return u_cell, flux0_cell, w_cell_star_only, w_cell_pahc_only, n_before, n_after
+
+
 def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_in_tile, width_dex,
                      agb_pool, coverage_in_tile):
     """One tile's `{cls: (frac, density, frac_bright3, frac_bright10,
@@ -527,7 +593,12 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     from the star-family population's own retained sample (`population/
     star/population_star_tile__R.hdf5`'s `tile_<id>` group): each class's
     catalogued fraction is the WEIGHTED SUM over every one of its own
-    members (`catalogued_fraction`, sec. 8), no draw. AGB's members are
+    members (`catalogued_fraction`, sec. 8), no draw. STAR's and PAHC's
+    members collapse into cells first (`_collapse_star_members`, rule 9:
+    `log10 u` and `log10 F_4.5` at the cell grid's own bin widths, each of
+    the seven flux ratios to I2 at `STAR_COLOUR_CELL_DEX` -- all far below
+    the completeness roll-off, so the collapse moves `catalogued_fraction`
+    by much less than the roll-off itself resolves). AGB's members are
     the cross product of `sample_star.sample_agb`'s own evolved stars
     with every shell template of THEIR OWN chemistry (sec. 5.2: the
     star's own `F_4.5` is the shell flux, not TRILEGAL's photosphere),
@@ -577,11 +648,18 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     weight_pix = coverage_in_tile * _HPX512_PIXEL_DEG2
     n_x, n_b = grid.LOG10_X_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1
 
+    # STAR's and PAHC's members collapse into cells BEFORE `catalogued_fraction`
+    # (`_collapse_star_members`, rule 9): the SAME collapsed cells serve both
+    # classes, since a star's placement/colour does not depend on which class
+    # it falls in, only its STAR-only/PAHC-only weight does.
+    u_c, flux0_c, w_star_c, w_pahc_c, n_members_before, n_members_after = (
+        _collapse_star_members(u, flux0_all, w_star, w_star_only, w_pahc_only))
+
     out = {}
-    for cls, weight in (("STAR", w_star_only), ("PAHC", w_pahc_only)):
-        m = weight > 0
-        w = weight[m]
-        density = float(weight.sum()) / omega_t  # objects deg^-2, sec. 5.1/5.2's Omega_pointing
+    for cls, weight_full, weight_c in (("STAR", w_star_only, w_star_c), ("PAHC", w_pahc_only, w_pahc_c)):
+        m = weight_c > 0
+        w = weight_c[m]
+        density = float(weight_full.sum()) / omega_t  # objects deg^-2, sec. 5.1/5.2's Omega_pointing
         if w.size == 0:
             frac = np.zeros(pix_in_tile.size)
             frac_bright3 = np.zeros(pix_in_tile.size)
@@ -589,9 +667,9 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
             n_cat_cell_tile = np.zeros((n_x, n_b))
         else:
             frac, frac_bright3, frac_bright10, s_member = catalogued_fraction(
-                a_col_in_tile, u[m], flux0_all[m], w, f_lim_in_tile, width_dex, config, weight_pix)
+                a_col_in_tile, u_c[m], flux0_c[m], w, f_lim_in_tile, width_dex, config, weight_pix)
             c_m = density * (w / w.sum()) * s_member
-            n_cat_cell_tile = _safe_cell_bin(u[m], np.log10(flux0_all[m, IDX_I2]), c_m)
+            n_cat_cell_tile = _safe_cell_bin(u_c[m], np.log10(flux0_c[m, IDX_I2]), c_m)
         out[cls] = (frac, density, frac_bright3, frac_bright10, n_cat_cell_tile)
 
     # AGB (sec. 5.2): every evolved star with positive weight
