@@ -28,9 +28,11 @@ measured coordinate, where mass above `log10 x = 0` is REAL -- a pencil
 column above the beam mean -- and is read wherever a fitted source's own
 ratio lands, into the one-dex padding above the wall the grid already
 carries, never folded back. The kernel is class-conditional: the cloud
-classes (YSO, H2S) read it reweighted by `T ** 2`, the star-gas law's own
-exponent (section 5.5); every other class reads it plain
-(`KERNEL_EXPONENT`, below).
+classes (YSO, H2S) read it reweighted by `T ** gamma`, the fitted
+within-beam tilt (`population.kernel.Kernel.cloud_gamma_herschel`, a 2-D
+joint fit against the sub-beam width on the HOPS/eHOPS protostars --
+the published star-gas law exponent is measured at the maps' resolution,
+not within a beam); every other class reads it plain (`CLOUD`, below).
 """
 
 import math
@@ -71,13 +73,19 @@ _SQRT2PI = float(np.sqrt(2.0 * np.pi))
 #: compile-time constant inside `_cell_sum`.
 N_X_SUPPORT = grid.N_X_SUPPORT
 
-#: the column kernel's class-conditional reweighting (the ruling,
-#: SPEC_BMSTP_DRAFT.md section 5.5, "the law"): the cloud classes' young
-#: stars and shocked H2 knots both follow the gas column squared (Pokhrel
-#: +2020; Lada+2013, section 10's `kappa` row, exponent 2), so their own
-#: read reweights the kernel by `T ** 2`; every other class reads it
-#: plain, exponent 0.
-KERNEL_EXPONENT = {"STAR": 0.0, "AGB": 0.0, "PAHC": 0.0, "GAL": 0.0, "YSO": 2.0, "H2S": 2.0}
+#: the column kernel's class-conditional reweighting (SPEC_BMSTP_DRAFT.md
+#: section 5.5): the cloud classes' young stars and shocked H2 knots both
+#: form within a beam in proportion to a power of the column, so their
+#: own read reweights the kernel by `T ** gamma`; every other class reads
+#: it plain (`exponent = 0`). The published star-gas law exponent
+#: (Pokhrel+2020 1.8-2.3, Lada+2013 2.04 +/- 0.01) is measured AT THE
+#: MAPS' RESOLUTION, and applying it within a beam is an extrapolation
+#: with no published support (owner, 2026-09-12 evening ruling 1), so
+#: this constant is a per-class FLAG, not a literal exponent: `True`
+#: reads the fitted `Kernel.cloud_gamma_herschel` (`population.kernel`'s
+#: own 2-D joint fit on the HOPS/eHOPS protostars, zero if that fit's own
+#: 68% interval for gamma includes 0), `False` reads `exponent = 0.0`.
+CLOUD = {"STAR": False, "AGB": False, "PAHC": False, "GAL": False, "YSO": True, "H2S": True}
 
 
 #: SPEC_BMSTP_DRAFT.md section 4.2: a window at most this many cells wide
@@ -200,8 +208,8 @@ def prepare(reader, rows):
     9): each of `rows`' sources, its grain's shape carried from the
     DISTANCE coordinate it is stored in to the MEASURED coordinate this
     reader evaluates, by its own column kernel (`grid.blur`), the cloud
-    classes' kernel reweighted by `T ** 2` (`KERNEL_EXPONENT`, the
-    star-gas law's own exponent, section 5.5) and every other class's
+    classes' kernel reweighted by `T ** gamma` (`CLOUD`, the fitted
+    within-beam tilt `Kernel.cloud_gamma_herschel`) and every other class's
     plain. The result is renormalised to sum to one over the WHOLE
     array -- a block of ~50 sources, never a whole batch (the 600 MB
     per-batch footprint of the unblurred grid held at once,
@@ -217,8 +225,9 @@ def prepare(reader, rows):
     zp_sig = reader.zp_sig[rows]
     arm = reader.arm[rows]
     grain = reader.grain[rows]
+    exponent = reader.kernel.cloud_gamma_herschel if CLOUD[reader.cls] else 0.0
     w, mu, sigma = reader.kernel.mixture(a_col, a_col_sig, arm, zp_sigma_k=zp_sig,
-                                         exponent=KERNEL_EXPONENT[reader.cls])
+                                         exponent=exponent)
     n = rows.size
     n_x, n_b = reader.grid_all.shape[1], reader.grid_all.shape[2]
     h = np.empty((n, n_x, n_b), dtype=np.float32)

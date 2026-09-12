@@ -30,7 +30,20 @@ The kernel is also class-conditional: `Kernel.mixture`'s `exponent`
 keyword reweights the mixture by `T ** exponent`, the star-gas law's own
 column exponent (SPEC_BMSTP_DRAFT.md section 5.5) -- where members of a
 class form in proportion to a power of the column, that class's own
-member sits off the beam mean by that same power, within the beam.
+member sits off the beam mean by that same power, within the beam. For
+the cloud classes (YSO, H2S) that exponent is `CLOUD_GAMMA_HERSCHEL`
+(owner, 2026-09-12 evening ruling 1): the star-gas law's own exponent
+(Pokhrel+2020 1.8-2.3, Lada+2013 2.04 +/- 0.01) is measured at the maps'
+resolution, and applying it WITHIN a beam is an extrapolation with no
+published support, so `gamma` is instead measured jointly with the
+cloud-class structural width `CLOUD_SIGMA_HERSCHEL_DEX` by a 2-D
+maximum-likelihood fit on the same HOPS/eHOPS protostars
+(`_fit_cloud_gamma_sigma_herschel`, `build`) -- `gamma = 0` (no beam
+tilt at all) if the fit's own 68% interval for `gamma` includes 0
+(parsimony), else the fitted `gamma`. A caller passes this per-source
+column's own class exponent -- `0.0` for every other class, the
+product's `cloud_gamma_herschel` for YSO/H2S (`fittp.prior_reader`'s
+`CLOUD` flag, `atlas.protostars._verdict`) -- never a literal `2.0`.
 
 The zero point is one systematic per field (owner, 2026-09-06;
 `sky.derived.herschel_column.field_zeropoints`), not one survey constant,
@@ -80,8 +93,24 @@ _CLOUD_SIGMA_GRID_STEP = 0.01
 
 #: The half-drop in log-likelihood (a chi-square difference of 1 for one
 #: profiled parameter) that bounds `CLOUD_SIGMA_HERSCHEL_DEX`'s own 68%
-#: interval.
+#: interval when it is refit ALONE, `gamma` fixed at 0 (the parsimony
+#: branch of `_fit_cloud_gamma_sigma_herschel`).
 _CLOUD_SIGMA_DLOGLIKE = 0.5
+
+#: the calibration grid for `CLOUD_GAMMA_HERSCHEL`, the within-beam
+#: tilt exponent (owner, 2026-09-12 evening ruling 1): 0.0 to 3.0 in
+#: 0.1 steps, fit jointly with `sigma_cloud` on the same 2-D grid.
+_CLOUD_GAMMA_GRID_LO = 0.0
+_CLOUD_GAMMA_GRID_HI = 3.0
+_CLOUD_GAMMA_GRID_STEP = 0.1
+
+#: The half-drop in log-likelihood bounding the JOINT 2-D 68% region for
+#: `(gamma, sigma_cloud)` -- a chi-square difference of 2.30 for two
+#: fitted parameters, halved. `CLOUD_GAMMA_HERSCHEL`'s own 68% interval
+#: is this joint region's projection onto the gamma axis (the maximum
+#: over `sigma_cloud` at each `gamma`, "the marginal over the other"),
+#: not a separate one-parameter profile.
+_CLOUD_JOINT_DLOGLIKE = 1.15
 
 #: The two regions with a Herschel arm whose Class 0/I/flat protostars
 #: calibrate the cloud-class structural width: HOPS's own Orion A,
@@ -149,7 +178,8 @@ class Kernel(object):
     Built by `build(config)`, loaded by `read(config)`.
     """
 
-    def __init__(self, a_nodes, w, mu, sigma, zp_herschel_k, cloud_sigma_herschel_dex):
+    def __init__(self, a_nodes, w, mu, sigma, zp_herschel_k, cloud_sigma_herschel_dex,
+                 cloud_gamma_herschel):
         self._a_nodes = np.asarray(a_nodes, dtype=float)
         self._ln_nodes = np.log(self._a_nodes)
         self._w = np.asarray(w, dtype=float)          # (n_arm, n_node)
@@ -160,8 +190,18 @@ class Kernel(object):
         #: pass its own `ZP_SIGMA_K` (owner, 2026-09-06).
         self.zp_herschel_k = float(zp_herschel_k)
         #: the Herschel arm's cloud-class (`exponent > 0`) structural
-        #: width, dex, calibrated in `build` on the HOPS/eHOPS protostars.
+        #: width, dex, calibrated in `build` (`_fit_cloud_gamma_sigma_
+        #: herschel`) jointly with `cloud_gamma_herschel` on the
+        #: HOPS/eHOPS protostars.
         self.cloud_sigma_herschel_dex = float(cloud_sigma_herschel_dex)
+        #: the star-gas law's own within-beam tilt exponent for the cloud
+        #: classes (YSO, H2S), fit jointly with `cloud_sigma_herschel_dex`
+        #: on the same protostars (owner, 2026-09-12 evening ruling 1;
+        #: `_fit_cloud_gamma_sigma_herschel`) -- 0 if that fit's own 68%
+        #: interval for gamma includes 0 (parsimony), else the fitted
+        #: value. A caller passing `exponent` to `mixture` for a cloud
+        #: class reads this, never a literal `2.0`.
+        self.cloud_gamma_herschel = float(cloud_gamma_herschel)
 
     @classmethod
     def read(cls, config):
@@ -173,7 +213,8 @@ class Kernel(object):
         with h5py.File(path, "r") as f:
             return cls(f["A_NODES"][:], f["MIX_W"][:], f["MIX_MU"][:],
                        f["MIX_SIGMA"][:], float(f["ZP_HERSCHEL_K"][()]),
-                       float(f["CLOUD_SIGMA_HERSCHEL_DEX"][()]))
+                       float(f["CLOUD_SIGMA_HERSCHEL_DEX"][()]),
+                       float(f["CLOUD_GAMMA_HERSCHEL"][()]))
 
     def _interp_idx(self, a_col):
         """`(i, t)`: the node bracket and fractional position in `log A` for
@@ -283,15 +324,20 @@ class Kernel(object):
         not the cloud classes' own scale) rescaled: scaling both of that
         mixture's components by one factor is ill-conditioned wherever
         they are nearly degenerate, so a single fixed-width component
-        replaces it outright instead. `cloud_sigma_herschel_dex` is fit
-        in `build` (`_fit_cloud_sigma_herschel`) with this same one-
-        component construction on the HOPS (Orion A) and eHOPS (Aquila)
-        Class 0/I/flat protostars: each protostar's own foreground `A_V`,
+        replaces it outright instead. `cloud_sigma_herschel_dex` and the
+        caller's own `exponent` (`cloud_gamma_herschel` for a cloud
+        class) are fit JOINTLY in `build`
+        (`_fit_cloud_gamma_sigma_herschel`) with this same one-component
+        construction on the HOPS (Orion A) and eHOPS (Aquila) Class
+        0/I/flat protostars: each protostar's own foreground `A_V`,
         converted to `A_K`, against its matched SESNA source's own
         adopted extinction column (the reader's own beam column, not the
-        nside-256 sightline mean), profiled against the region's own
-        cloud-interval placement of a member star. SESNA's own YSO fits
-        validate or replace this number per region once they exist.
+        nside-256 sightline mean), profiled on a 2-D grid against the
+        region's own cloud-interval placement of a member star. The
+        published star-gas law exponent (Pokhrel+2020, Lada+2013) is
+        measured at the maps' resolution, not within a beam, so `gamma`
+        is measured here rather than assumed; SESNA's own YSO fits
+        validate or replace both numbers per region once they exist.
         `exponent = 0.0` and the Planck arm are untouched by this."""
         a_col = np.asarray(a_col, dtype=float)
         sigma_col = np.asarray(sigma_col, dtype=float)
@@ -621,12 +667,17 @@ def _cloud_cells_for_pixels(config, yso_module, region, pix256):
     return log10x_mid[rows], mass_restricted[rows]
 
 
-def _fit_cloud_sigma_herschel(config, zp_herschel_k):
-    """`CLOUD_SIGMA_HERSCHEL_DEX`, one survey-pooled number for the
-    cloud classes' Herschel structural term (`Kernel.mixture`'s
-    `exponent > 0`), calibrated on the HOPS (Orion A) + eHOPS (Aquila)
-    Class 0/I/flat protostars (`_match_protostars_to_beam`) with this
-    SAME one-component construction the fit and `Kernel.mixture` share
+def _fit_cloud_gamma_sigma_herschel(config, zp_herschel_k):
+    """`(CLOUD_GAMMA_HERSCHEL, CLOUD_SIGMA_HERSCHEL_DEX)`, one
+    survey-pooled pair for the cloud classes' within-beam tilt and
+    Herschel structural term (`Kernel.mixture`'s `exponent`, `sigma0`),
+    calibrated JOINTLY on the HOPS (Orion A) + eHOPS (Aquila) Class
+    0/I/flat protostars (`_match_protostars_to_beam`) -- owner, 2026-09-
+    12 evening ruling 1: the published star-gas law exponent (Pokhrel+2020
+    1.8-2.3, Lada+2013 2.04 +/- 0.01) is measured AT THE MAPS' RESOLUTION;
+    applying it WITHIN a beam is an extrapolation with no published
+    support, so `gamma` is measured here, not assumed. This same
+    one-component construction the fit and `Kernel.mixture` share
     (`_cloud_single_component`: one lognormal of width `sigma_cloud` dex,
     the same at every column, recentred to mean one) -- not the sub-beam
     stage's own two-component mixture rescaled, which is ill-conditioned
@@ -642,14 +693,22 @@ def _fit_cloud_sigma_herschel(config, zp_herschel_k):
     (`_cloud_cells_for_pixels`), `y` from the one-component structural
     term at a trial `sigma_cloud`, the source's own measurement term
     (`A_COL_SIG_K`) and the survey zero point folded in, reweighted by
-    `T**2` (`Kernel.mixture`'s own exponent, SPEC_BMSTP_DRAFT.md 5.5) --
+    `T**gamma` (`Kernel.mixture`'s own tilt, SPEC_BMSTP_DRAFT.md 5.5) --
     the same arithmetic `mixture` performs, inlined here since no
     `Kernel` exists yet inside `build`. The sample log-likelihood --
     protostars independent, `p(u)`'s cells summed in closed form
-    (Gaussian in `log10 r`) -- is profiled over a fixed `sigma_cloud`
-    grid; the maximiser is `CLOUD_SIGMA_HERSCHEL_DEX`, its 68% interval
-    where the log-likelihood is within 0.5 of the maximum (one profiled
-    parameter).
+    (Gaussian in `log10 r`) -- is profiled on a 2-D grid, `sigma_cloud`
+    x `gamma` (module constants); the joint maximiser is the fitted pair.
+    PARSIMONY RULE (owner): `gamma`'s own 68% interval -- the joint
+    region's projection onto the gamma axis, `Delta loglike <=
+    _CLOUD_JOINT_DLOGLIKE` maximised over `sigma_cloud` at each `gamma`
+    -- is checked first; if it includes 0, `gamma` is fixed at 0 and
+    `sigma_cloud` is REFIT alone (one profiled parameter, `Delta loglike
+    <= _CLOUD_SIGMA_DLOGLIKE`) rather than read off the joint grid's own
+    gamma=0 row, so the adopted width is the best one-parameter fit at
+    the adopted (zero) tilt, not a slice of the two-parameter surface.
+    Otherwise both the joint maximum-likelihood `gamma` and `sigma_cloud`
+    are adopted.
     """
     from sesnaimpute.population import selection as selection_module
     from sesnaimpute.population import yso as yso_module
@@ -685,49 +744,78 @@ def _fit_cloud_sigma_herschel(config, zp_herschel_k):
         log10x[rows[:, None], np.arange(n_u)[None, :]] = log10x_r
         mass[rows[:, None], np.arange(n_u)[None, :]] = mass_r
 
-    n_grid = int(round((_CLOUD_SIGMA_GRID_HI - _CLOUD_SIGMA_GRID_LO) / _CLOUD_SIGMA_GRID_STEP)) + 1
-    grid = _CLOUD_SIGMA_GRID_LO + _CLOUD_SIGMA_GRID_STEP * np.arange(n_grid, dtype=np.float64)
-    loglike = np.empty(n_grid, dtype=np.float64)
-    exponent = 2.0
-    c = exponent * _LN10
+    n_sigma = int(round((_CLOUD_SIGMA_GRID_HI - _CLOUD_SIGMA_GRID_LO) / _CLOUD_SIGMA_GRID_STEP)) + 1
+    sigma_grid = _CLOUD_SIGMA_GRID_LO + _CLOUD_SIGMA_GRID_STEP * np.arange(n_sigma, dtype=np.float64)
+    n_gamma = int(round((_CLOUD_GAMMA_GRID_HI - _CLOUD_GAMMA_GRID_LO) / _CLOUD_GAMMA_GRID_STEP)) + 1
+    gamma_grid = _CLOUD_GAMMA_GRID_LO + _CLOUD_GAMMA_GRID_STEP * np.arange(n_gamma, dtype=np.float64)
 
-    def _tilted(sigma_cloud):
-        w0, mu0, sigma0 = _cloud_single_component(sigma_cloud, n_proto)
-        sigma_tot = np.sqrt(sigma0 ** 2 + extra_var[:, None])
-        mu_tilt = mu0 + c * sigma_tot * sigma_tot
-        log_wt = c * mu0 + (c * sigma_tot) ** 2 / 2.0
-        log_wt -= log_wt.max(axis=1, keepdims=True)
-        wt = np.stack([w0, 1.0 - w0], axis=1) * np.exp(log_wt)
-        w_tilt = wt[:, 0] / wt.sum(axis=1)
-        return w_tilt, mu_tilt, sigma_tot
+    # The one-component construction's second "component" carries weight
+    # exactly 0 (`_cloud_single_component`'s own `w = 1`), so the tilt's
+    # renormalised weight is exactly 1 too, at every (sigma, gamma): the
+    # cloud-class kernel really is a single lognormal, `mu' = mu0 + gamma
+    # ln10 sigma_tot**2`, `sigma' = sigma_tot` unchanged -- this fit reads
+    # that single Gaussian directly rather than carrying the (always-zero)
+    # second component through the grid. `sigma_tot` and `mu0` do not
+    # depend on `gamma`, so they are formed once for the whole sigma grid;
+    # only the python loop over `gamma` (31 points) remains, each an array
+    # pass over (n_sigma, n_proto, n_u).
+    sigma_tot_grid = np.sqrt(sigma_grid[:, None] ** 2 + extra_var[None, :])  # (n_sigma, n_proto)
+    mu0_grid = -0.5 * sigma_grid * sigma_grid * _LN10  # (n_sigma,)
 
-    def _density(sigma_cloud):
-        w_tilt, mu_tilt, sigma_tot = _tilted(sigma_cloud)
-        off0 = (log10_r_p[:, None] - log10x - mu_tilt[:, 0:1]) / sigma_tot[:, 0:1]
-        off1 = (log10_r_p[:, None] - log10x - mu_tilt[:, 1:2]) / sigma_tot[:, 1:2]
-        dens_cell = (w_tilt[:, None] * np.exp(-0.5 * off0 * off0) / (sigma_tot[:, 0:1] * _SQRT2PI)
-                     + (1.0 - w_tilt[:, None]) * np.exp(-0.5 * off1 * off1)
-                     / (sigma_tot[:, 1:2] * _SQRT2PI))
-        return np.sum(mass * dens_cell, axis=1)
+    loglike2d = np.empty((n_gamma, n_sigma), dtype=np.float64)
+    for gi, gamma in enumerate(gamma_grid):
+        c = gamma * _LN10
+        mu_tilt = mu0_grid[:, None] + c * sigma_tot_grid ** 2  # (n_sigma, n_proto)
+        off = ((log10_r_p[None, :, None] - log10x[None, :, :] - mu_tilt[:, :, None])
+               / sigma_tot_grid[:, :, None])
+        dens_cell = np.exp(-0.5 * off * off) / (sigma_tot_grid[:, :, None] * _SQRT2PI)
+        density_p = np.sum(mass[None, :, :] * dens_cell, axis=2)  # (n_sigma, n_proto)
+        loglike2d[gi, :] = np.sum(np.log(np.maximum(density_p, 1e-300)), axis=1)
 
-    for g, sigma_cloud in enumerate(grid):
-        density_p = _density(sigma_cloud)
-        loglike[g] = float(np.sum(np.log(np.maximum(density_p, 1e-300))))
+    flat_max = int(np.argmax(loglike2d))
+    gi_max, si_max = np.unravel_index(flat_max, loglike2d.shape)
+    gamma_mle, sigma_mle = float(gamma_grid[gi_max]), float(sigma_grid[si_max])
+    loglike_max = float(loglike2d[gi_max, si_max])
 
-    i_max = int(np.argmax(loglike))
-    sigma_cloud_best = float(grid[i_max])
-    within_1sigma = grid[loglike >= loglike[i_max] - _CLOUD_SIGMA_DLOGLIKE]
-    p16, p84 = float(within_1sigma.min()), float(within_1sigma.max())
-    # the curvature around the maximum, for the report, in case the 68%
-    # interval collapses to the single maximising grid point (the fit
-    # sharper than the grid's own 0.01-dex step).
-    i_lo2 = max(i_max - 2, 0)
-    i_hi2 = min(i_max + 2, n_grid - 1)
-    neighbourhood = dict(zip(
-        (float(g) for g in grid[i_lo2:i_hi2 + 1]), (float(v) for v in loglike[i_lo2:i_hi2 + 1])))
+    gamma_profile = loglike2d.max(axis=1)  # (n_gamma,): best sigma at each gamma
+    within_gamma = gamma_grid[gamma_profile >= loglike_max - _CLOUD_JOINT_DLOGLIKE]
+    gamma_p16, gamma_p84 = float(within_gamma.min()), float(within_gamma.max())
+    sigma_profile = loglike2d.max(axis=0)  # (n_sigma,): best gamma at each sigma
+    within_sigma = sigma_grid[sigma_profile >= loglike_max - _CLOUD_JOINT_DLOGLIKE]
+    sigma_p16_joint, sigma_p84_joint = float(within_sigma.min()), float(within_sigma.max())
 
-    # Item 3(c)/3(d)'s own report numbers, all at the fitted width.
-    w_tilt, mu_tilt, sigma_tot = _tilted(sigma_cloud_best)
+    loglike_at = {}
+    for g_report in (0.0, 1.0, 2.0):
+        gi_report = int(round((g_report - _CLOUD_GAMMA_GRID_LO) / _CLOUD_GAMMA_GRID_STEP))
+        loglike_at[g_report] = float(gamma_profile[gi_report])
+
+    parsimony_zero = gamma_p16 <= 0.0 <= gamma_p84
+    if parsimony_zero:
+        gamma_adopted = 0.0
+        loglike_zero = loglike2d[0, :]  # gamma_grid[0] == 0.0 exactly
+        si_zero = int(np.argmax(loglike_zero))
+        sigma_adopted = float(sigma_grid[si_zero])
+        loglike_zero_max = float(loglike_zero[si_zero])
+        within_zero = sigma_grid[loglike_zero >= loglike_zero_max - _CLOUD_SIGMA_DLOGLIKE]
+        sigma_p16, sigma_p84 = float(within_zero.min()), float(within_zero.max())
+        loglike_adopted = loglike_zero_max
+    else:
+        gamma_adopted, sigma_adopted = gamma_mle, sigma_mle
+        sigma_p16, sigma_p84 = sigma_p16_joint, sigma_p84_joint
+        loglike_adopted = loglike_max
+
+    # The report's own numbers, all at the adopted (gamma, sigma) -- the
+    # scalar two-component machinery (`_cloud_single_component`) so this
+    # matches `Kernel.mixture`'s own arithmetic exactly.
+    c_adopted = gamma_adopted * _LN10
+    w0, mu0, sigma0 = _cloud_single_component(sigma_adopted, n_proto)
+    sigma_tot = np.sqrt(sigma0 ** 2 + extra_var[:, None])
+    mu_tilt = mu0 + c_adopted * sigma_tot * sigma_tot
+    log_wt = c_adopted * mu0 + (c_adopted * sigma_tot) ** 2 / 2.0
+    log_wt -= log_wt.max(axis=1, keepdims=True)
+    wt = np.stack([w0, 1.0 - w0], axis=1) * np.exp(log_wt)
+    w_tilt = wt[:, 0] / wt.sum(axis=1)
+
     mean0 = log10_r_p - mu_tilt[:, 0]
     mean1 = log10_r_p - mu_tilt[:, 1]
     p_reach = (w_tilt * _norm_cdf(-mean0 / sigma_tot[:, 0])
@@ -755,8 +843,11 @@ def _fit_cloud_sigma_herschel(config, zp_herschel_k):
     emp_p84 = float(np.percentile(log10_r_p, 84.0)) if n_proto else float("nan")
 
     return dict(
-        sigma_cloud=sigma_cloud_best, p16=p16, p84=p84, grid=grid, loglike=loglike,
-        neighbourhood=neighbourhood,
+        gamma=gamma_adopted, gamma_mle=gamma_mle, gamma_p16=gamma_p16, gamma_p84=gamma_p84,
+        parsimony_zero=parsimony_zero,
+        sigma_cloud=sigma_adopted, sigma_mle=sigma_mle, p16=sigma_p16, p84=sigma_p84,
+        gamma_grid=gamma_grid, sigma_grid=sigma_grid, loglike2d=loglike2d,
+        loglike_max=loglike_max, loglike_adopted=loglike_adopted, loglike_at=loglike_at,
         n_protostars=n_proto, a_beam_dataset="sky/derived/adopted/extinction/source: A_COL_K",
         n_dropped_no_herschel_arm=match["n_dropped_no_herschel_arm"],
         n_dropped_no_av=match["n_dropped_no_av"],
@@ -834,11 +925,11 @@ def build(config, regions=None):
     e_check_p = (W[i_p] * 10.0 ** (MU[i_p, :, 0] + SIGMA[i_p, :, 0] ** 2 * _LN10 / 2.0)
                  + (1.0 - W[i_p]) * 10.0 ** (MU[i_p, :, 1] + SIGMA[i_p, :, 1] ** 2 * _LN10 / 2.0))
 
-    # the cloud-class (`exponent > 0`) Herschel structural width,
-    # calibrated on the HOPS/eHOPS protostars (Orion A, Aquila) rather
-    # than extrapolated from the sub-beam stage's own core-biased lower
-    # bound.
-    fit = _fit_cloud_sigma_herschel(config, zp)
+    # the cloud-class within-beam tilt (`gamma`) and Herschel structural
+    # width (`sigma_cloud`), fit JOINTLY on the HOPS/eHOPS protostars
+    # (Orion A, Aquila) rather than assuming the published star-gas law's
+    # own exponent within a beam (owner, 2026-09-12 evening ruling 1).
+    fit = _fit_cloud_gamma_sigma_herschel(config, zp)
 
     out_path = config_module.product_path(config, "population", "sesna", "kernel", "survey")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -851,29 +942,36 @@ def build(config, regions=None):
         f.create_dataset("CLOUD_SIGMA_HERSCHEL_DEX", data=np.float64(fit["sigma_cloud"]))
         f.create_dataset("CLOUD_SIGMA_HERSCHEL_P16", data=np.float64(fit["p16"]))
         f.create_dataset("CLOUD_SIGMA_HERSCHEL_P84", data=np.float64(fit["p84"]))
-        f.create_dataset("CLOUD_SIGMA_GRID_DEX", data=fit["grid"].astype(np.float64))
-        f.create_dataset("CLOUD_SIGMA_LOGLIKE", data=fit["loglike"].astype(np.float64))
+        f.create_dataset("CLOUD_GAMMA_HERSCHEL", data=np.float64(fit["gamma"]))
+        f.create_dataset("CLOUD_GAMMA_HERSCHEL_P16", data=np.float64(fit["gamma_p16"]))
+        f.create_dataset("CLOUD_GAMMA_HERSCHEL_P84", data=np.float64(fit["gamma_p84"]))
+        f.create_dataset("CLOUD_SIGMA_GRID_DEX", data=fit["sigma_grid"].astype(np.float64))
+        f.create_dataset("CLOUD_GAMMA_GRID", data=fit["gamma_grid"].astype(np.float64))
+        f.create_dataset("CLOUD_GAMMA_SIGMA_LOGLIKE", data=fit["loglike2d"].astype(np.float64))
         f.create_dataset("N_PROTOSTARS_FIT", data=np.int64(fit["n_protostars"]))
 
     st.done(out_path, n_arms=len(_ARM_ORDER), n_node=n_node, zp_herschel_k=float(zp),
             herschel_stretch=herschel_factor, cloud_sigma_herschel_dex=fit["sigma_cloud"],
-            n_protostars_fit=fit["n_protostars"])
+            cloud_gamma_herschel=fit["gamma"], n_protostars_fit=fit["n_protostars"])
     print("kernel: %d arms x %d nodes (mixture), zp_herschel_k=%.4f, "
           "herschel_stretch=%.4f -> %s"
           % (len(_ARM_ORDER), n_node, zp, herschel_factor, out_path), flush=True)
     print("kernel: Planck arm recentred, max |E[T/A_beam] - 1| = %.3e"
           % float(np.max(np.abs(e_check_p - 1.0))), flush=True)
-    print("kernel: cloud_sigma_herschel_dex = %.3f dex (68%% interval %.3f-%.3f dex), "
-          "N_PROTOSTARS_FIT = %d, A_beam dataset = %s"
-          % (fit["sigma_cloud"], fit["p16"], fit["p84"], fit["n_protostars"], fit["a_beam_dataset"]),
-          flush=True)
-    print("kernel: log-likelihood near the maximum (sigma_cloud dex: loglike) = %s"
-          % ", ".join("%.3f: %.4f" % (g, v) for g, v in sorted(fit["neighbourhood"].items())),
-          flush=True)
+    print("kernel: joint fit -- gamma_mle=%.2f (68%% interval %.2f-%.2f), "
+          "sigma_mle=%.3f dex; parsimony_zero=%s -> adopted gamma=%.2f, sigma=%.3f dex "
+          "(68%% interval %.3f-%.3f dex), N_PROTOSTARS_FIT=%d, A_beam dataset=%s"
+          % (fit["gamma_mle"], fit["gamma_p16"], fit["gamma_p84"], fit["sigma_mle"],
+             fit["parsimony_zero"], fit["gamma"], fit["sigma_cloud"], fit["p16"], fit["p84"],
+             fit["n_protostars"], fit["a_beam_dataset"]), flush=True)
+    print("kernel: log-likelihood at the joint maximum = %.4f; profiled over sigma at "
+          "gamma = 0, 1, 2: %.4f, %.4f, %.4f; at the adopted (gamma, sigma) = %.4f"
+          % (fit["loglike_max"], fit["loglike_at"][0.0], fit["loglike_at"][1.0],
+             fit["loglike_at"][2.0], fit["loglike_adopted"]), flush=True)
     print("kernel: protostars dropped -- no Herschel arm: %d, no finite A_V: %d, "
           "no SESNA catalogue match: %d" % (fit["n_dropped_no_herschel_arm"], fit["n_dropped_no_av"],
                                              fit["n_dropped_no_sightline"]), flush=True)
-    print("kernel: check -- predicted/empirical median log10 r = %.4f/%.4f, "
+    print("kernel: check (adopted gamma, sigma) -- predicted/empirical median log10 r = %.4f/%.4f, "
           "predicted/empirical p84 log10 r = %.4f/%.4f, frac P(T>=a_p)<0.01 = %.4f"
           % (fit["pred_median"], fit["emp_median"], fit["pred_p84"], fit["emp_p84"],
              fit["frac_below_reach"]), flush=True)
