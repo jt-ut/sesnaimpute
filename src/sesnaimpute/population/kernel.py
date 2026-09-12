@@ -49,8 +49,12 @@ the pre-fix behaviour.
 
 import os
 
+import astropy.units as u
 import h5py
+import healpy as hp
 import numpy as np
+from astropy.coordinates import SkyCoord
+from scipy.special import erf
 
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
@@ -65,6 +69,30 @@ _ARM_ORDER = ("herschel", "planck")
 _ARM_CODE = {"herschel": 0, "planck": 1}
 
 _LN10 = float(np.log(10.0))
+_SQRT2 = float(np.sqrt(2.0))
+_SQRT2PI = float(np.sqrt(2.0 * np.pi))
+
+#: R4's calibration grid for `CLOUD_SIGMA_HERSCHEL_DEX` (this brief): 0.03
+#: to 0.80 dex in 0.01-dex steps, the profile likelihood's own domain.
+_CLOUD_SIGMA_GRID_LO = 0.03
+_CLOUD_SIGMA_GRID_HI = 0.80
+_CLOUD_SIGMA_GRID_STEP = 0.01
+
+#: The half-drop in log-likelihood (a chi-square difference of 1 for one
+#: profiled parameter) that bounds `CLOUD_SIGMA_HERSCHEL_DEX`'s own 68%
+#: interval (this brief, R4).
+_CLOUD_SIGMA_DLOGLIKE = 0.5
+
+#: The two regions with a Herschel arm whose Class 0/I/flat protostars
+#: calibrate the cloud-class structural width (R4): HOPS's own Orion A,
+#: eHOPS's own Aquila (`sky.derived.protostars`).
+_PROTOSTAR_REGIONS = ("Orion A", "Aquila")
+_PROTOSTAR_CLASSES = (b"0", b"I", b"flat")
+
+#: A numerical floor on `u` before `log10` (the sightline's own inner
+#: edge, `u = 0` at `d = 0`) -- a guard against `log10(0)`, not a
+#: physical constant.
+_U_LOG_FLOOR = 1.0e-6
 
 
 def _load_sigma_zp_herschel(config):
@@ -87,13 +115,60 @@ def _mixture_mean_var(w, mu1, sigma1, mu2, sigma2):
     return mean, var
 
 
+def _norm_cdf(z):
+    """`Phi(z)`, the standard normal CDF, off the exact `erf`."""
+    return 0.5 * (1.0 + erf(z / _SQRT2))
+
+
+def _rescale_structural_to_sigma_cloud(w, mu, sigma0, sigma_cloud):
+    """R4: the two-component structural mixture (`mu`, `sigma0`, last axis
+    size 2; `w` the same leading shape), with both components' sigma
+    scaled by ONE factor so the mixture's own structural width (the
+    mean-subtracted second moment `_mixture_mean_var` gives from the
+    UNSCALED `mu`/`sigma0`) equals `sigma_cloud` -- `sigma_cloud`
+    broadcasts against `w` (a scalar per source, or a trial grid the
+    caller has already shaped to broadcast against `w`'s own axis, e.g.
+    `(n_grid, 1)` against `w`'s `(n_proto,)`). Scaling leaves the
+    component MEANS untouched, so the between-component spread `d0`,
+    `d1` (mean differences) is exactly what it was before scaling; only
+    the within-component variance needs the scale factor `k`:
+
+        sigma_cloud**2 = k**2 * (w*sigma0_0**2 + (1-w)*sigma0_1**2)
+                          + (w*d0**2 + (1-w)*d1**2)
+
+    `k` clipped at 0 where `sigma_cloud` cannot be reached by scaling
+    alone (the between-component spread already exceeds it) -- a
+    degenerate (zero-width) component there, not a failure: the
+    measurement and zero-point terms `mixture` adds next keep the total
+    width positive. Recentred to mean one afterward (the build's own
+    Herschel recentring, generalised to whatever shape `w` carries): a
+    lognormal component's width sets its own linear mean, so scaling
+    sigma without re-centring would leave `E[T/A_beam] != 1`. Returns
+    `(mu_new, sigma_new)`, the same trailing shape as `mu`/`sigma0`.
+    """
+    mu0, mu1 = mu[..., 0], mu[..., 1]
+    s0, s1 = sigma0[..., 0], sigma0[..., 1]
+    mean0 = w * mu0 + (1.0 - w) * mu1
+    d0, d1 = mu0 - mean0, mu1 - mean0
+    between = w * d0 * d0 + (1.0 - w) * d1 * d1
+    within = w * s0 * s0 + (1.0 - w) * s1 * s1
+    k = np.sqrt(np.clip((sigma_cloud * sigma_cloud - between) / within, 0.0, None))
+    s0n, s1n = s0 * k, s1 * k
+    lin_mean = (w * 10.0 ** (mu0 + s0n * s0n * _LN10 / 2.0)
+                + (1.0 - w) * 10.0 ** (mu1 + s1n * s1n * _LN10 / 2.0))
+    offset = -np.log10(lin_mean)
+    mu_new = np.stack([mu0 + offset, mu1 + offset], axis=-1)
+    sigma_new = np.stack([s0n, s1n], axis=-1)
+    return mu_new, sigma_new
+
+
 class Kernel(object):
     """The column kernel: a two-component log-normal mixture in `log10 T`
     per arm, tabulated on the column grid (SPEC_PRIORS.md section 1.2).
     Built by `build(config)`, loaded by `read(config)`.
     """
 
-    def __init__(self, a_nodes, w, mu, sigma, zp_herschel_k):
+    def __init__(self, a_nodes, w, mu, sigma, zp_herschel_k, cloud_sigma_herschel_dex):
         self._a_nodes = np.asarray(a_nodes, dtype=float)
         self._ln_nodes = np.log(self._a_nodes)
         self._w = np.asarray(w, dtype=float)          # (n_arm, n_node)
@@ -103,6 +178,9 @@ class Kernel(object):
         #: fallback for a Herschel source whose call site does not yet
         #: pass its own `ZP_SIGMA_K` (owner, 2026-09-06).
         self.zp_herschel_k = float(zp_herschel_k)
+        #: R4: the Herschel arm's cloud-class (`exponent > 0`) structural
+        #: width, dex, calibrated in `build` on the HOPS/eHOPS protostars.
+        self.cloud_sigma_herschel_dex = float(cloud_sigma_herschel_dex)
 
     @classmethod
     def read(cls, config):
@@ -113,7 +191,8 @@ class Kernel(object):
                 "'prior.kernel' RUNBOOK line first" % path)
         with h5py.File(path, "r") as f:
             return cls(f["A_NODES"][:], f["MIX_W"][:], f["MIX_MU"][:],
-                       f["MIX_SIGMA"][:], float(f["ZP_HERSCHEL_K"][()]))
+                       f["MIX_SIGMA"][:], float(f["ZP_HERSCHEL_K"][()]),
+                       float(f["CLOUD_SIGMA_HERSCHEL_DEX"][()]))
 
     def _interp_idx(self, a_col):
         """`(i, t)`: the node bracket and fractional position in `log A` for
@@ -212,11 +291,32 @@ class Kernel(object):
         renormalised over the two components. Applied after the
         measurement and zero-point terms are folded into `sigma` (they
         are already part of the same lognormal by then). `exponent = 0.0`
-        (the default) recovers the unweighted kernel exactly."""
+        (the default) recovers the unweighted kernel exactly.
+
+        R4: for `exponent != 0.0`, the Herschel arm's structural width is
+        first replaced (`_rescale_structural_to_sigma_cloud`) by the
+        protostar-calibrated `self.cloud_sigma_herschel_dex`, before the
+        measurement/zero-point terms below or this tilt -- the sub-beam
+        stage's own structural width is a lower bound toward cores, not
+        the cloud classes' own scale. `cloud_sigma_herschel_dex` is fit in
+        `build` (`_fit_cloud_sigma_herschel`) on the HOPS (Orion A) and
+        eHOPS (Aquila) Class 0/I/flat protostars: each protostar's own
+        foreground `A_V`, converted to `A_K`, against its own nside-256
+        sightline's beam column, profiled against the region's own
+        cloud-interval placement of a member star. SESNA's own YSO fits
+        validate or replace this number per region once they exist.
+        `exponent = 0.0` and the Planck arm are untouched by this."""
         a_col = np.asarray(a_col, dtype=float)
         sigma_col = np.asarray(sigma_col, dtype=float)
         arm_idx = self._arm_index(map_class)
         w, mu, sigma0 = self._structural(a_col, arm_idx)
+        if exponent != 0.0:
+            is_h = arm_idx == _ARM_CODE["herschel"]
+            if np.any(is_h):
+                mu = mu.copy()
+                sigma0 = sigma0.copy()
+                mu[is_h], sigma0[is_h] = _rescale_structural_to_sigma_cloud(
+                    w[is_h], mu[is_h], sigma0[is_h], self.cloud_sigma_herschel_dex)
         sigma_col_dex = sigma_col / (a_col * _LN10)
         # the same arm index `_arm_index` already resolved, not a second,
         # independently-typed string comparison against `map_class`
@@ -333,6 +433,258 @@ def _pool_herschel_ref_mixture(subbeam_path, a_nodes):
     return w, mu1 * factor, mu2 * factor, sig1 * factor, sig2 * factor, factor
 
 
+def _interp_structural(a_nodes, ln_nodes, w_arm, mu_arm, sigma_arm, a_col):
+    """`(w, mu, sigma)` at `a_col`: linear interpolation in `log A` of one
+    arm's own tabulated structural mixture (`w_arm` `(n_node,)`, `mu_arm`/
+    `sigma_arm` `(n_node, 2)`), clamped at the grid ends -- the same
+    interpolation `Kernel._structural` applies per source, shared here so
+    R4's fit (run inside `build`, before a `Kernel` exists to read) and
+    `Kernel._structural` agree exactly."""
+    ln_a = np.log(np.clip(a_col, a_nodes[0], a_nodes[-1]))
+    i = np.clip(np.searchsorted(ln_nodes, ln_a) - 1, 0, ln_nodes.size - 2)
+    span = ln_nodes[i + 1] - ln_nodes[i]
+    t = (ln_a - ln_nodes[i]) / span
+    w = w_arm[i] + t * (w_arm[i + 1] - w_arm[i])
+    mu = mu_arm[i, :] + t[:, np.newaxis] * (mu_arm[i + 1, :] - mu_arm[i, :])
+    sigma = sigma_arm[i, :] + t[:, np.newaxis] * (sigma_arm[i + 1, :] - sigma_arm[i, :])
+    return w, mu, sigma
+
+
+def _match_protostars_to_beam(config):
+    """R4's sample: every HOPS/eHOPS (`sky.derived.protostars`) Class 0,
+    I or flat protostar with a finite positive `AV_FOREGROUND_MAG`,
+    matched to its own nside-256 sightline's adopted column
+    (`sky.derived.column.build_sightline`'s survey-wide product, `A_K`
+    the EXTINCTION column at that granule, SPEC section 3.2) -- kept only
+    where that sightline is on the Herschel arm (`PROVENANCE` 0, the same
+    code `_ARM_CODE['herschel']` uses). Returns a dict of aligned arrays
+    (`region`, `av_mag`, `a_beam`, `sigma_beam`, `pix256`) and the three
+    drop counts this brief's report prints, in the order checked: no
+    finite positive `A_V`, no sightline row at that pixel at all, no
+    Herschel arm there (a Planck-arm pixel, or a region/pixel the
+    protostar view assigns no SESNA footprint to).
+    """
+    proto_path = f"{config.data_root}/sky/derived/protostars/protostars_survey.hdf5"
+    with h5py.File(proto_path, "r") as f:
+        region = f["REGION"][:]
+        cls = f["CLASS"][:]
+        ra_deg = np.asarray(f["RA_DEG"][:], dtype=np.float64)
+        dec_deg = np.asarray(f["DEC_DEG"][:], dtype=np.float64)
+        av_mag = np.asarray(f["AV_FOREGROUND_MAG"][:], dtype=np.float64)
+
+    class_ok = np.isin(cls, np.array(_PROTOSTAR_CLASSES))
+    av_ok = np.isfinite(av_mag) & (av_mag > 0.0)
+    n_dropped_no_av = int(np.count_nonzero(class_ok & ~av_ok))
+    keep = class_ok & av_ok
+
+    idx = np.where(keep)[0]
+    gal = SkyCoord(ra=ra_deg[idx] * u.deg, dec=dec_deg[idx] * u.deg, frame="icrs").galactic
+    pix256 = hp.ang2pix(256, gal.l.deg, gal.b.deg, nest=True, lonlat=True)
+
+    sl_path = config_module.product_path(config, "sky/derived", "adopted", "column", "sightline")
+    with h5py.File(sl_path, "r") as f:
+        sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
+        sl_a_k = np.asarray(f["A_K"][:], dtype=np.float64)
+        sl_sigma = np.asarray(f["SIGMA_A_K"][:], dtype=np.float64)
+        sl_prov = np.asarray(f["PROVENANCE"][:])
+
+    order = np.argsort(sl_pix)
+    sl_pix_sorted = sl_pix[order]
+    loc = np.searchsorted(sl_pix_sorted, pix256)
+    capped = np.minimum(loc, max(sl_pix_sorted.size - 1, 0))
+    found = (sl_pix_sorted.size > 0) & (sl_pix_sorted[capped] == pix256)
+    n_dropped_no_sightline = int(np.count_nonzero(~found))
+
+    is_h = np.zeros(pix256.shape, dtype=bool)
+    is_h[found] = sl_prov[order[capped[found]]] == _ARM_CODE["herschel"]
+    region_ok = np.isin(region[idx], np.array([r.encode("utf-8") for r in _PROTOSTAR_REGIONS]))
+    n_dropped_no_herschel_arm = int(np.count_nonzero(found & (~is_h | ~region_ok)))
+
+    keep2 = found & is_h & region_ok
+    rows = order[capped[keep2]]
+    return dict(
+        region=region[idx][keep2], av_mag=av_mag[idx][keep2],
+        a_beam=sl_a_k[rows], sigma_beam=sl_sigma[rows], pix256=pix256[keep2],
+        n_dropped_no_av=n_dropped_no_av,
+        n_dropped_no_sightline=n_dropped_no_sightline,
+        n_dropped_no_herschel_arm=n_dropped_no_herschel_arm,
+    )
+
+
+def _cloud_cells_for_pixels(config, yso_module, region, pix256):
+    """`(log10x_mid, mass)`, each `(len(pix256), n_cell)`: the region's
+    cloud-interval-restricted embedding density (`population.yso.
+    embedding_and_ridge`/`restrict_and_renormalize`/`cloud_interval_pc`,
+    full profile resolution -- the same restriction `population.
+    young_stars.sightline_lookup` applies for the field-star deduction),
+    read off at each of `pix256`'s own nside-256 sightline row. `mass`
+    sums to 1 per row (cells outside the cloud interval carry zero);
+    `log10x_mid` is each cell's own `log10 u` at the midpoint of its
+    (floored) `u` span -- `x = u = A(d)/A(inf)`, the fraction of the
+    sightline's total column in front of a member at that depth.
+    """
+    profile = yso_module._load_profile_arrays(config, region)
+    embed = yso_module.embedding_and_ridge(profile)
+    dist_pc = profile["dist_pc"]
+    n_d = dist_pc.size
+    n_sl = embed["u_edges"].shape[0]
+    d_edges = np.empty((n_sl, n_d + 1), dtype=np.float64)
+    d_edges[:, :n_d] = dist_pc[None, :]
+    d_edges[:, n_d] = dist_pc[-1] + 2.0 * profile["tail_efold_pc"]
+    u_edges = embed["u_edges"]
+    p_u = embed["p_u"]
+    u_lo, u_hi = u_edges[:, :-1], u_edges[:, 1:]
+    d_lo, d_hi = d_edges[:, :-1], d_edges[:, 1:]
+
+    d_front, d_back = yso_module.cloud_interval_pc(config, region)
+    mass, inside_frac, removed_frac = yso_module.restrict_and_renormalize(
+        p_u, u_lo, u_hi, d_lo, d_hi, d_front, d_back)
+    mass_restricted = (mass * inside_frac) / np.maximum(1.0 - removed_frac, 1e-300)[:, None]
+    log10x_mid = 0.5 * (np.log10(np.maximum(u_lo, _U_LOG_FLOOR))
+                         + np.log10(np.maximum(u_hi, _U_LOG_FLOOR)))
+
+    sl_pix = profile["hpx_pix_256"]
+    order = np.argsort(sl_pix)
+    sl_pix_sorted = sl_pix[order]
+    loc = np.searchsorted(sl_pix_sorted, pix256)
+    capped = np.minimum(loc, max(sl_pix_sorted.size - 1, 0))
+    matched = (sl_pix_sorted.size > 0) & (sl_pix_sorted[capped] == pix256)
+    if not np.all(matched):
+        raise ValueError(
+            "population.kernel: %d of %d protostar sightlines of region %r have no "
+            "row in the embedding profile -- run the 'population.yso' RUNBOOK line"
+            % (int(np.count_nonzero(~matched)), pix256.size, region))
+    rows = order[capped]
+    return log10x_mid[rows], mass_restricted[rows]
+
+
+def _fit_cloud_sigma_herschel(config, a_nodes, w_h, mu_h, sigma_h, zp_herschel_k):
+    """R4: `CLOUD_SIGMA_HERSCHEL_DEX`, one survey-pooled number replacing
+    the sub-beam stage's own (core-biased) extrapolated structural width
+    for the cloud classes (`Kernel.mixture`'s `exponent > 0`), calibrated
+    on the HOPS (Orion A) + eHOPS (Aquila) Class 0/I/flat protostars
+    (`_match_protostars_to_beam`). For a cloud member on a protostar's own
+    sightline, `log10 r_p = log10 x + y`: `x` from that sightline's own
+    cloud-interval `p(u)` (`_cloud_cells_for_pixels`), `y` from the
+    Herschel structural mixture with both components' sigma scaled to a
+    trial `sigma_cloud` (`_rescale_structural_to_sigma_cloud`), the
+    source's own measurement term (`SIGMA_A_K`) and the survey zero point
+    folded in, reweighted by `T**2` (`Kernel.mixture`'s own exponent,
+    SPEC_BMSTP_DRAFT.md 5.5) -- the same arithmetic `mixture` performs,
+    inlined here since no `Kernel` exists yet inside `build`. The sample
+    log-likelihood -- protostars independent, `p(u)`'s cells and the
+    kernel's two components summed in closed form (Gaussian in
+    `log10 r`) -- is profiled over a fixed `sigma_cloud` grid; the
+    maximiser is `CLOUD_SIGMA_HERSCHEL_DEX`, its 68% interval where the
+    log-likelihood is within 0.5 of the maximum (one profiled parameter).
+    """
+    from sesnaimpute.population import selection as selection_module
+    from sesnaimpute.population import yso as yso_module
+
+    match = _match_protostars_to_beam(config)
+    a_beam = match["a_beam"]
+    n_proto = a_beam.size
+    ln_nodes = np.log(a_nodes)
+
+    a_p = match["av_mag"] * selection_module.ak_per_av(
+        config, selection_module.law_dense_weight(a_beam))
+    log10_r_p = np.log10(a_p / a_beam)
+
+    w0, mu0, sigma0 = _interp_structural(a_nodes, ln_nodes, w_h, mu_h, sigma_h, a_beam)
+    # the source's measurement term and the survey zero point, in quadrature,
+    # converted to dex at a_beam -- exactly `Kernel.mixture`'s own combination
+    # (`sigma_col_dex**2 + zp_dex**2`), every matched protostar the Herschel
+    # arm by construction (`_match_protostars_to_beam`).
+    extra_var = ((match["sigma_beam"] / (a_beam * _LN10)) ** 2
+                 + (zp_herschel_k / (a_beam * _LN10)) ** 2)
+
+    log10x_parts, mass_parts = [], []
+    for region in _PROTOSTAR_REGIONS:
+        sel = match["region"] == region.encode("utf-8")
+        if not np.any(sel):
+            continue
+        log10x_r, mass_r = _cloud_cells_for_pixels(config, yso_module, region, match["pix256"][sel])
+        log10x_parts.append((sel, log10x_r, mass_r))
+    n_u_max = max(p[1].shape[1] for p in log10x_parts)
+    log10x = np.zeros((n_proto, n_u_max))
+    mass = np.zeros((n_proto, n_u_max))
+    for sel, log10x_r, mass_r in log10x_parts:
+        n_u = log10x_r.shape[1]
+        rows = np.where(sel)[0]
+        log10x[rows[:, None], np.arange(n_u)[None, :]] = log10x_r
+        mass[rows[:, None], np.arange(n_u)[None, :]] = mass_r
+
+    n_grid = int(round((_CLOUD_SIGMA_GRID_HI - _CLOUD_SIGMA_GRID_LO) / _CLOUD_SIGMA_GRID_STEP)) + 1
+    grid = _CLOUD_SIGMA_GRID_LO + _CLOUD_SIGMA_GRID_STEP * np.arange(n_grid, dtype=np.float64)
+    loglike = np.empty(n_grid, dtype=np.float64)
+    exponent = 2.0
+    c = exponent * _LN10
+
+    def _tilted(mu_resc, sigma_resc):
+        sigma_tot = np.sqrt(sigma_resc ** 2 + extra_var[:, None])
+        mu_tilt = mu_resc + c * sigma_tot * sigma_tot
+        log_wt = c * mu_resc + (c * sigma_tot) ** 2 / 2.0
+        log_wt -= log_wt.max(axis=1, keepdims=True)
+        wt = np.stack([w0, 1.0 - w0], axis=1) * np.exp(log_wt)
+        w_tilt = wt[:, 0] / wt.sum(axis=1)
+        return w_tilt, mu_tilt, sigma_tot
+
+    for g, sigma_cloud in enumerate(grid):
+        mu_resc, sigma_resc = _rescale_structural_to_sigma_cloud(w0, mu0, sigma0, sigma_cloud)
+        w_tilt, mu_tilt, sigma_tot = _tilted(mu_resc, sigma_resc)
+        off0 = (log10_r_p[:, None] - log10x - mu_tilt[:, 0:1]) / sigma_tot[:, 0:1]
+        off1 = (log10_r_p[:, None] - log10x - mu_tilt[:, 1:2]) / sigma_tot[:, 1:2]
+        dens_cell = (w_tilt[:, None] * np.exp(-0.5 * off0 * off0) / (sigma_tot[:, 0:1] * _SQRT2PI)
+                     + (1.0 - w_tilt[:, None]) * np.exp(-0.5 * off1 * off1)
+                     / (sigma_tot[:, 1:2] * _SQRT2PI))
+        density_p = np.sum(mass * dens_cell, axis=1)
+        loglike[g] = float(np.sum(np.log(np.maximum(density_p, 1e-300))))
+
+    i_max = int(np.argmax(loglike))
+    sigma_cloud_best = float(grid[i_max])
+    within_1sigma = grid[loglike >= loglike[i_max] - _CLOUD_SIGMA_DLOGLIKE]
+    p16, p84 = float(within_1sigma.min()), float(within_1sigma.max())
+
+    # Item 3(c)/3(d)'s own report numbers, all at the fitted width.
+    mu_resc, sigma_resc = _rescale_structural_to_sigma_cloud(w0, mu0, sigma0, sigma_cloud_best)
+    w_tilt, mu_tilt, sigma_tot = _tilted(mu_resc, sigma_resc)
+    mean0 = log10_r_p - mu_tilt[:, 0]
+    mean1 = log10_r_p - mu_tilt[:, 1]
+    p_reach = (w_tilt * _norm_cdf(-mean0 / sigma_tot[:, 0])
+               + (1.0 - w_tilt) * _norm_cdf(-mean1 / sigma_tot[:, 1]))
+    frac_below_reach = float(np.mean(p_reach < 0.01)) if n_proto else float("nan")
+
+    def _pooled_cdf(z):
+        off0 = (z - log10x - mu_tilt[:, 0:1]) / sigma_tot[:, 0:1]
+        off1 = (z - log10x - mu_tilt[:, 1:2]) / sigma_tot[:, 1:2]
+        cdf_cell = w_tilt[:, None] * _norm_cdf(off0) + (1.0 - w_tilt[:, None]) * _norm_cdf(off1)
+        return float(np.mean(np.sum(mass * cdf_cell, axis=1)))
+
+    def _solve(target, lo=-6.0, hi=3.0, iters=60):
+        for _ in range(iters):
+            mid = 0.5 * (lo + hi)
+            if _pooled_cdf(mid) < target:
+                lo = mid
+            else:
+                hi = mid
+        return 0.5 * (lo + hi)
+
+    pred_median = _solve(0.5) if n_proto else float("nan")
+    pred_p84 = _solve(0.84) if n_proto else float("nan")
+    emp_median = float(np.median(log10_r_p)) if n_proto else float("nan")
+    emp_p84 = float(np.percentile(log10_r_p, 84.0)) if n_proto else float("nan")
+
+    return dict(
+        sigma_cloud=sigma_cloud_best, p16=p16, p84=p84, grid=grid, loglike=loglike,
+        n_protostars=n_proto, a_beam_dataset="sky/derived/adopted/column/sightline: A_K",
+        n_dropped_no_herschel_arm=match["n_dropped_no_herschel_arm"],
+        n_dropped_no_av=match["n_dropped_no_av"],
+        n_dropped_no_sightline=match["n_dropped_no_sightline"],
+        pred_median=pred_median, pred_p84=pred_p84,
+        emp_median=emp_median, emp_p84=emp_p84, frac_below_reach=frac_below_reach,
+    )
+
+
 def build(config, regions=None):
     """Tabulates the pooled two-component log-normal mixture (weight, the
     two means, the two widths, all in log10 T) on every node of the
@@ -389,6 +741,24 @@ def build(config, regions=None):
     SIGMA[i_p, :, 0] = sig1_p / _LN10
     SIGMA[i_p, :, 1] = sig2_p / _LN10
 
+    # R5: the Planck arm recentred exactly as the Herschel arm is above --
+    # the same uniform per-node dex shift on both components' means, so
+    # `E[T / A_beam] = 1` in linear units at every node there too; the
+    # Planck arm's sigma's and the two means' relative offset untouched.
+    e_raw_p = (W[i_p] * 10.0 ** (MU[i_p, :, 0] + SIGMA[i_p, :, 0] ** 2 * _LN10 / 2.0)
+               + (1.0 - W[i_p]) * 10.0 ** (MU[i_p, :, 1] + SIGMA[i_p, :, 1] ** 2 * _LN10 / 2.0))
+    planck_offset = -np.log10(e_raw_p)
+    MU[i_p, :, 0] += planck_offset
+    MU[i_p, :, 1] += planck_offset
+    e_check_p = (W[i_p] * 10.0 ** (MU[i_p, :, 0] + SIGMA[i_p, :, 0] ** 2 * _LN10 / 2.0)
+                 + (1.0 - W[i_p]) * 10.0 ** (MU[i_p, :, 1] + SIGMA[i_p, :, 1] ** 2 * _LN10 / 2.0))
+
+    # R4: the cloud-class (`exponent > 0`) Herschel structural width,
+    # calibrated on the HOPS/eHOPS protostars (Orion A, Aquila) rather
+    # than extrapolated from the sub-beam stage's own core-biased lower
+    # bound.
+    fit = _fit_cloud_sigma_herschel(config, a_nodes, W[i_h], MU[i_h], SIGMA[i_h], zp)
+
     out_path = config_module.product_path(config, "population", "sesna", "kernel", "survey")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
@@ -397,12 +767,32 @@ def build(config, regions=None):
         f.create_dataset("MIX_MU", data=MU.astype(np.float64))
         f.create_dataset("MIX_SIGMA", data=SIGMA.astype(np.float64))
         f.create_dataset("ZP_HERSCHEL_K", data=np.float64(zp))
+        f.create_dataset("CLOUD_SIGMA_HERSCHEL_DEX", data=np.float64(fit["sigma_cloud"]))
+        f.create_dataset("CLOUD_SIGMA_HERSCHEL_P16", data=np.float64(fit["p16"]))
+        f.create_dataset("CLOUD_SIGMA_HERSCHEL_P84", data=np.float64(fit["p84"]))
+        f.create_dataset("CLOUD_SIGMA_GRID_DEX", data=fit["grid"].astype(np.float64))
+        f.create_dataset("CLOUD_SIGMA_LOGLIKE", data=fit["loglike"].astype(np.float64))
+        f.create_dataset("N_PROTOSTARS_FIT", data=np.int64(fit["n_protostars"]))
 
     st.done(out_path, n_arms=len(_ARM_ORDER), n_node=n_node, zp_herschel_k=float(zp),
-            herschel_stretch=herschel_factor)
+            herschel_stretch=herschel_factor, cloud_sigma_herschel_dex=fit["sigma_cloud"],
+            n_protostars_fit=fit["n_protostars"])
     print("kernel: %d arms x %d nodes (mixture), zp_herschel_k=%.4f, "
           "herschel_stretch=%.4f -> %s"
           % (len(_ARM_ORDER), n_node, zp, herschel_factor, out_path), flush=True)
+    print("kernel: Planck arm recentred, max |E[T/A_beam] - 1| = %.3e"
+          % float(np.max(np.abs(e_check_p - 1.0))), flush=True)
+    print("kernel: R4 cloud_sigma_herschel_dex = %.3f dex (68%% interval %.3f-%.3f dex), "
+          "N_PROTOSTARS_FIT = %d, A_beam dataset = %s"
+          % (fit["sigma_cloud"], fit["p16"], fit["p84"], fit["n_protostars"], fit["a_beam_dataset"]),
+          flush=True)
+    print("kernel: R4 protostars dropped -- no Herschel arm: %d, no finite A_V: %d, "
+          "no sightline: %d" % (fit["n_dropped_no_herschel_arm"], fit["n_dropped_no_av"],
+                                 fit["n_dropped_no_sightline"]), flush=True)
+    print("kernel: R4 check -- predicted/empirical median log10 r = %.4f/%.4f, "
+          "predicted/empirical p84 log10 r = %.4f/%.4f, frac P(T>=a_p)<0.01 = %.4f"
+          % (fit["pred_median"], fit["emp_median"], fit["pred_p84"], fit["emp_p84"],
+             fit["frac_below_reach"]), flush=True)
 
 
 if __name__ == "__main__":
