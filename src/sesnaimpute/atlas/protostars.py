@@ -348,7 +348,7 @@ def _verdict(config, region, protostars, used, density_row, idx_median):
 def _position_line(config, region, protostars_pix, atlas_pix, share_yso, density_hpx512):
     """The caption's position line (ii): the prior's cataloged YSO share's
     median at the protostars' own pixels against every cataloged source's
-    own pixel (the prior design's own Panel A, now a caption line)."""
+    own pixel."""
     share_proto, found = _join(atlas_pix, share_yso, protostars_pix)
     share_proto = share_proto[found]
     share_source, found_src = _join(atlas_pix, share_yso, density_hpx512)

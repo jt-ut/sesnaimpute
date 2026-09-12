@@ -218,8 +218,7 @@ def _panel_shape(config, region, cls, idx_median):
 #: same 512 MB budget and array count `bmstp.atlas._above_factor_batch_size`
 #: applies to the identical call, so many rows at once (rule 10b) rather
 #: than the whole `rows` axis, which for a template register of several
-#: thousand can otherwise exceed the machine's ceiling (`briefs/reports/
-#: W68a.md`).
+#: thousand can otherwise exceed the machine's ceiling.
 _LAMBDA_BATCH_BUDGET_BYTES = 512 * 1024 * 1024
 _N_FACTOR_TEMP_ARRAYS = 4
 
