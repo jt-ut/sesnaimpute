@@ -15,8 +15,25 @@ tabulated `a_hat` grid, the Gaussian's mass `M_i` there by an erf
 difference, the gather along the conditional brightness line and the dot
 product with `M`, the Jacobian, then the weight factors and the log sky
 density (section 1.3, 1.4, 4.2).
+
+The stored shapes live in the DISTANCE coordinate `x = a / A_s`, the
+object's foreground extinction over the true column along its own pencil
+beam (support `[0, 1]`; `log10 x = 0` the wall, `bmstp.shapes`,
+`sample_cloud`, `grid.bin` and `grid.fold_wall` all reflecting mass there
+onto that support). This reader measures a different coordinate, `a_hat /
+A_beam`, the distance coordinate times the pencil-over-beam ratio `T /
+A_beam` whose distribution is the column kernel: `prepare` changes
+variables through that kernel (`grid.blur`), carrying a shape into the
+measured coordinate, where mass above `log10 x = 0` is REAL -- a pencil
+column above the beam mean -- and is read wherever a fitted source's own
+ratio lands, into the one-dex padding above the wall the grid already
+carries, never folded back. The kernel is class-conditional: the cloud
+classes (YSO, H2S) read it reweighted by `T ** 2`, the star-gas law's own
+exponent (section 5.5); every other class reads it plain
+(`KERNEL_EXPONENT`, below).
 """
 
+import inspect
 import math
 import os
 
@@ -44,12 +61,30 @@ _LIB = {"STAR": ("sps", "region"), "AGB": ("agb", "region"), "PAHC": ("pahc", "r
 _SQRT2 = float(np.sqrt(2.0))
 _SQRT2PI = float(np.sqrt(2.0 * np.pi))
 
-#: the support rule (`bmstp.grid`'s module docstring): `x = a / A_s <= 1` by definition, so the cell window and
-#: every "top of grid" fallback below stop at the support's own edge,
-#: `log10 x = 0` -- never the array's own top edge, kept only for the
-#: kernels' padding. A bare module global (like `N_EXACT` below) so numba
-#: freezes it as a compile-time constant inside `_cell_sum`.
+#: the stored shape's own support edge (`bmstp.grid`'s module docstring):
+#: `x = a / A_s <= 1` there, `log10 x = 0` the wall. The read
+#: (`_cell_sum`, `_build_a_star_tables`) evaluates a fitted source in the
+#: measured coordinate, which the column kernel carries past that wall
+#: into real mass, so the window and the "top of grid" fallback below run
+#: to the array's own top edge, not this one; `N_X_SUPPORT` remains the
+#: bound `_build_a_star_tables` clips its window's LOW index to. A bare
+#: module global (like `N_EXACT` below) so numba freezes it as a
+#: compile-time constant inside `_cell_sum`.
 N_X_SUPPORT = grid.N_X_SUPPORT
+
+#: the column kernel's class-conditional reweighting (the ruling,
+#: SPEC_BMSTP_DRAFT.md section 5.5, "the law"): the cloud classes' young
+#: stars and shocked H2 knots both follow the gas column squared (Pokhrel
+#: +2020; Lada+2013, section 10's `kappa` row, exponent 2), so their own
+#: read reweights the kernel by `T ** 2`; every other class reads it
+#: plain, exponent 0.
+KERNEL_EXPONENT = {"STAR": 0.0, "AGB": 0.0, "PAHC": 0.0, "GAL": 0.0, "YSO": 2.0, "H2S": 2.0}
+
+#: whether the installed `Kernel.mixture` accepts the class-conditional
+#: `exponent` keyword (unit W69a's contract): checked once so `prepare`
+#: calls with it where it exists and without it otherwise, ahead of that
+#: unit's own merge.
+_MIXTURE_HAS_EXPONENT = "exponent" in inspect.signature(kernel_module.Kernel.mixture).parameters
 
 #: SPEC_BMSTP_DRAFT.md section 4.2: a window at most this many cells wide
 #: is summed by exact per-cell erf differences; a wider one reads the
@@ -69,8 +104,9 @@ class Prior(object):
     """One region/class's P1-P5 read, held for repeated `prepare`/`ln_prior`
     calls over the class's batches (section 4)."""
 
-    def __init__(self, a_col, a_col_sig, arm, zp_sig, grain, density, p1_columns,
+    def __init__(self, cls, a_col, a_col_sig, arm, zp_sig, grain, density, p1_columns,
                  grid_all, x_edges, b_edges, model_name, c_theta, factors, kernel):
+        self.cls = cls
         self.a_col = a_col
         self.a_col_sig = a_col_sig
         self.arm = arm
@@ -161,32 +197,36 @@ def load(config, region, cls):
                                  b_centers=b_centers_w))
 
     kernel = kernel_module.Kernel.read(config)
-    return Prior(a_col, a_col_sig, arm, zp_sig, grain, density, p1_columns,
+    return Prior(cls, a_col, a_col_sig, arm, zp_sig, grain, density, p1_columns,
                  grid_all, x_edges, b_edges, model_name, c_theta, factors, kernel)
 
 
 def prepare(reader, rows):
     """`h (n_block, 128, 120)` float32 (SPEC_BMSTP_DRAFT.md section 4.2,
-    9): each of `rows`' sources, its grain's shape blurred along
-    `log10 x` by its own column kernel (`grid.blur`, which itself reflects
-    THE WALL, `bmstp.grid`'s module docstring), then renormalised to sum
-    to one over the support -- a block of ~50 sources, never a whole
-    batch (the 600 MB per-batch footprint of the unblurred grid held at
-    once, IMPLEMENTATION_BMSTP_DRAFT.md section 9). `grid.blur` already
-    holds `log10 x > 0` at exact zero (its own wall fold), so the line
-    below is a no-op kept for the reader, not a second fold; the
-    sum-to-one division below is over the support alone, unaffected by
-    the wall since no mass sits above it to dilute. The per-shape floor
-    `bin` once baked in is gone (the common-floor rule) -- the common
-    floor is applied once, at the read, by `common_floor`/`ln_prior`
-    below."""
+    9): each of `rows`' sources, its grain's shape carried from the
+    DISTANCE coordinate it is stored in to the MEASURED coordinate this
+    reader evaluates, by its own column kernel (`grid.blur`), the cloud
+    classes' kernel reweighted by `T ** 2` (`KERNEL_EXPONENT`, the
+    star-gas law's own exponent, section 5.5) and every other class's
+    plain -- `_MIXTURE_HAS_EXPONENT` calls `Kernel.mixture` with the
+    keyword where it is accepted (W69a's contract) and without it
+    otherwise. The result is renormalised to sum to one over the WHOLE
+    array -- a block of ~50 sources, never a whole batch (the 600 MB
+    per-batch footprint of the unblurred grid held at once,
+    IMPLEMENTATION_BMSTP_DRAFT.md section 9). Mass `grid.blur` carries
+    past `log10 x = 0` is a real pencil column above the beam mean in the
+    measured coordinate and stays in the sum, in the one-dex padding the
+    array already carries above the wall. The per-shape floor `bin` once
+    baked in is gone (the common-floor rule) -- the common floor is
+    applied once, at the read, by `common_floor`/`ln_prior` below."""
     rows = np.asarray(rows)
     a_col = reader.a_col[rows]
     a_col_sig = reader.a_col_sig[rows]
     zp_sig = reader.zp_sig[rows]
     arm = reader.arm[rows]
     grain = reader.grain[rows]
-    w, mu, sigma = reader.kernel.mixture(a_col, a_col_sig, arm, zp_sigma_k=zp_sig)
+    exponent_kwargs = {"exponent": KERNEL_EXPONENT[reader.cls]} if _MIXTURE_HAS_EXPONENT else {}
+    w, mu, sigma = reader.kernel.mixture(a_col, a_col_sig, arm, zp_sigma_k=zp_sig, **exponent_kwargs)
     n = rows.size
     n_x, n_b = reader.grid_all.shape[1], reader.grid_all.shape[2]
     h = np.empty((n, n_x, n_b), dtype=np.float32)
@@ -194,10 +234,6 @@ def prepare(reader, rows):
         H = reader.grid_all[grain[k]].astype(np.float64)
         H_s, _ = grid.blur(H, float(w[k]), float(mu[k, 0]), float(sigma[k, 0]),
                             float(mu[k, 1]), float(sigma[k, 1]))
-        # THE WALL: `grid.blur` already reflects `log10 x > 0` onto the
-        # support, so this is a no-op against the wall now, kept as the
-        # reader's own guard, not a second fold.
-        H_s[N_X_SUPPORT:, :] = 0.0
         total = H_s.sum()
         h[k] = (H_s / total if total > 0.0 else H_s).astype(np.float32)
     return h
@@ -205,14 +241,14 @@ def prepare(reader, rows):
 
 def grain_peaks(reader):
     """`(n_grain,)`: this class's own raw, UNBLURRED shape's peak cell over
-    the support (`grid.N_X_SUPPORT`), one per grain (tile, sightline, or
-    the single GAL row) -- `reader.grid_all` is already whole in memory
-    (`load`'s own read), so this is one array max, no second file read and
-    no per-source blur. `peak_density`/`common_floor` below use it as the
-    stored, cheap stand-in for the per-source blurred peak (blurring only
-    ever spreads a cell's mass thinner, so this is a safe, if slightly
-    conservative, upper bound on it)."""
-    return reader.grid_all[:, :grid.N_X_SUPPORT, :].reshape(
+    the measured coordinate's full extent, one per grain (tile,
+    sightline, or the single GAL row) -- `reader.grid_all` is already
+    whole in memory (`load`'s own read), so this is one array max, no
+    second file read and no per-source blur. `peak_density`/`common_floor`
+    below use it as the stored, cheap stand-in for the per-source blurred
+    peak (blurring only ever spreads a cell's mass thinner, so this is a
+    safe, if slightly conservative, upper bound on it)."""
+    return reader.grid_all.reshape(
         reader.grid_all.shape[0], -1).max(axis=1).astype(np.float64)
 
 
@@ -400,13 +436,13 @@ def _build_a_star_tables(a_col, x_edges, sigma_a, a_hat):
         log10_ak = math.log10(a_col[s])
         lo_a = ap - 5.0 * sigma_a[s]
         hi_a = ap + 5.0 * sigma_a[s]
-        # the support rule : the window never
-        # reaches past `log10 x = 0` (`N_X_SUPPORT - 1`), never the
-        # array's own top cell (`n_x - 1`), kept only for the kernels'
-        # padding -- a cell there is outside the prior (section 2's own
-        # top-edge treatment, moved to the support's edge).
+        # the read's own coordinate (section 4.2): a fitted source's
+        # window runs to the array's own top cell (`n_x - 1`), the
+        # measured coordinate's full extent -- mass the kernel carries
+        # past `log10 x = 0` is a real pencil column above the beam mean
+        # and is read where it lands, not folded back onto the support.
         lx_hi = np.log10(np.maximum(hi_a, 1e-300)) - log10_ak
-        ihi = np.clip(np.floor((lx_hi - x0) / dlx), 0, N_X_SUPPORT - 1).astype(np.int64)
+        ihi = np.clip(np.floor((lx_hi - x0) / dlx), 0, n_x - 1).astype(np.int64)
         lx_lo = np.log10(np.maximum(lo_a, 1e-300)) - log10_ak
         ilo = np.where(lo_a > 0.0, np.clip(np.floor((lx_lo - x0) / dlx), 0, N_X_SUPPORT - 1), 0.0).astype(np.int64)
         ilo_tab[off:off + n_ap[s]] = ilo.astype(np.int32)
@@ -485,12 +521,13 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     over templates, so a single source's read still uses every core
     (W6d item 3).
 
-    The support rule: `x = a / A_s <= 1` by definition, so the window and
-    both fallbacks below stop at `N_X_SUPPORT` (`x_edges`' own `log10 x =
-    0` cell), never at the array's `n_x`, which the shape grids keep only
-    as the kernels' padding -- a cell there is outside the prior exactly
-    as one above the array's literal top edge used to read (section 2's
-    edge treatment, moved to the support's own edge). The common floor:
+    The measured coordinate: the stored shape's own support ends at the
+    wall, `x = a / A_s <= 1`, but this read evaluates a fitted source in
+    `a_hat / A_beam`, which the column kernel (`grid.blur`, `prepare`)
+    carries past that wall into real mass -- a pencil column above the
+    beam mean -- so the window and both fallbacks below run to the
+    array's own top edge, `n_x`, the measured coordinate's full extent,
+    not to the wall. The common floor:
     `h`'s stored density is an exact zero in an empty cell (no per-shape
     floor is baked in), so every `dens` this function reads is floored at
     `floor_over_density[s, th]`, this (source, template)'s own share of
@@ -503,8 +540,8 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     reads the SAME `Lambda_C = Lambda_floor(s)` for every class and the
     likelihood alone decides it.
 
-    Kernel mass outside the grid is outside the prior's support, at
-    either edge (section 2): cell 0's own mass `M_0` and mean `a*_0` are
+    Kernel mass outside the grid is outside the prior, at either edge
+    (section 2): cell 0's own mass `M_0` and mean `a*_0` are
     its own cdf difference and truncated-normal mean over its own bounds
     `[a_edges[0], a_edges[1]]`, exactly like every other cell -- the mass
     below `a_edges[0]` contributes nothing, the same as the mass above
@@ -557,8 +594,8 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
             i_lo = 0
             i_hi = -1
             if in_grid:
-                i_lo = _cell_index(lo_a, log10_ak, x0, dlx, N_X_SUPPORT)
-                i_hi = _cell_index(hi_a, log10_ak, x0, dlx, N_X_SUPPORT)
+                i_lo = _cell_index(lo_a, log10_ak, x0, dlx, n_x)
+                i_hi = _cell_index(hi_a, log10_ak, x0, dlx, n_x)
             kpos = (ah - a_min) / a_step if n_ap > 0 else 0.0
             use_table = n_ap > 0 and (i_hi - i_lo + 1) > N_EXACT
             if not in_grid:
@@ -630,19 +667,18 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     z_prev = z_next
             if total > 0.0:
                 out[s, th] = np.log(total)
-            elif in_grid and lo_a >= a_edges[N_X_SUPPORT]:
+            elif in_grid and lo_a >= a_edges[n_x]:
                 # section 1.3: no template's prior is -inf. The window's
-                # own low bound already clears the SUPPORT's own top edge
-                # (`x = 1`, never the array's
-                # `n_x`, kept only for the kernels' padding): mass above
-                # the support is mass outside, never wrapped back onto it
-                # (section 2), so this reads as the top SUPPORT cell's own
-                # density at its own upper edge, times the Gaussian's tail
-                # mass beyond that edge -- the mirror of the low-edge
-                # fallback below, not that fallback's a_0 and cell 0
-                # (which would misprice the Jacobian by the ratio of the
-                # two edges).
-                a_top = a_edges[N_X_SUPPORT]
+                # own low bound already clears the array's own top edge
+                # (the measured coordinate's full extent, not the stored
+                # shape's wall at `x = 1`): mass above it is mass outside
+                # the prior, never wrapped back (section 2), so this reads
+                # as the top cell's own density at its own upper edge,
+                # times the Gaussian's tail mass beyond that edge -- the
+                # mirror of the low-edge fallback below, not that
+                # fallback's a_0 and cell 0 (which would misprice the
+                # Jacobian by the ratio of the two edges).
+                a_top = a_edges[n_x]
                 z_top = (a_top - ah) * inv_sig
                 ln_tail = _ln_half_erfc(z_top / sqrt2)
                 bval = lbh + sl * (a_top - ah) + ct
@@ -655,7 +691,7 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 elif j0 >= n_b - 1:
                     j0 = n_b - 2
                     frac = 1.0
-                dens = (h[s, N_X_SUPPORT - 1, j0] * (1.0 - frac) + h[s, N_X_SUPPORT - 1, j0 + 1] * frac) / (dlx * dlb)
+                dens = (h[s, n_x - 1, j0] * (1.0 - frac) + h[s, n_x - 1, j0 + 1] * frac) / (dlx * dlb)
                 if dens < fd:
                     dens = fd
                 if dens > 0.0:
@@ -663,7 +699,7 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
             else:
                 # No mass on the grid at all: the window lies entirely
                 # below a_edges[0], kernel mass there being outside the
-                # prior's support (section 2) same as above the top edge.
+                # prior (section 2) same as above the top edge.
                 # The tail mass is the Gaussian's mass beyond the grid's
                 # true low edge a_edges[0]; it is READ at the lowest
                 # cell's own geometric centre a_c0 = sqrt(a_edges[0] *

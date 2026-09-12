@@ -251,23 +251,25 @@ def _shift_kernel(mu, sigma):
 
 
 def blur(H, w, mu1, sig1, mu2, sig2):
-    """`(H_s, mass_lost)`: one source's column kernel applied along the
-    `log10 x` axis (sec. 2, 4.2), `H_s = (w * K1 + (1 - w) * K2) @ H`,
-    `K1`, `K2` the shift-and-smooth operators of `_shift_kernel` for the
-    mixture's two components, combined before the one matrix product. THE
-    WALL (module docstring): `K` is built as if `log10 x` ran unbounded
-    across the array, so `H_s` can carry mass into the padding above
-    `N_X_SUPPORT` -- `fold_wall` reflects it back onto the support before
-    `mass_lost` is read, so a background source's own kernel, centred at
-    or past the wall, still conserves its mass on the support instead of
-    losing half of it. `mass_lost` (`H.sum() - H_s.sum()`) is then only
-    the mass the shift carries past the array's true `log10 x` edges
-    (`-3.0`, `+1.0`), one dex of padding above the wall being what the
-    kernels this design uses need and no more."""
+    """`(H_s, mass_lost)`: the source's column kernel applied along the
+    `log10 x` axis (sec. 2, 4.2), carrying a stored shape from the
+    DISTANCE coordinate it is built in, `x = a / A_s` (support `[0, 1]`,
+    the wall at `log10 x = 0` its boundary condition, where `H` still
+    reflects), into the fitter's MEASURED coordinate, `a_hat / A_beam`
+    (the distance coordinate times the pencil-over-beam ratio the column
+    kernel distributes), whose support is not bounded at the wall: `H_s =
+    (w * K1 + (1 - w) * K2) @ H`, `K1`, `K2` the shift-and-smooth
+    operators of `_shift_kernel` for the mixture's two components,
+    combined before the one matrix product. Mass the kernel carries past
+    `log10 x = 0` is a real pencil column above the beam mean in the
+    measured coordinate, kept where it lands, in the one dex of padding
+    the array already carries above the wall -- not folded back onto the
+    support. `mass_lost` (`H.sum() - H_s.sum()`) is only the mass the
+    shift carries past the array's own `log10 x` edges (`-3.0`, `+1.0`),
+    which `K`'s finite extent already excludes from `H_s`."""
     K1 = _shift_kernel(mu1, sig1)
     K2 = _shift_kernel(mu2, sig2)
     K = w * K1 + (1.0 - w) * K2
     H_s = K @ H
-    H_s = fold_wall(H_s)
     mass_lost = float(H.sum() - H_s.sum())
     return H_s, mass_lost
