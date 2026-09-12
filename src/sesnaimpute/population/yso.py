@@ -5,14 +5,19 @@ Two products, independent of each other and of the mass-based selection
 (section 6.2, built elsewhere):
 
 `law_count` (section 6.1): disk-bearing young stars form in proportion to
-the square of the cloud's own column, `N_law = kappa * (d_r*pi/180)^2 *
-A_s^2`, the source's whole adopted column, with `kappa` Pokhrel+2020's
-pooled star-gas relation on Herschel columns: 14.5 young stars pc^-2 per
-mag^2 of A_K at the Herschel arm's 36.3" beam, transferred to the Planck
-arm's 5.03' by the measured beam ratio, 1.29, giving 18.7. `build` writes
-one 30-row product with the region distance and the pc^2/deg^2 factor it
-multiplies. `law_area_integral` (section 2.1) is the same law integrated
-over an anchor pixel's own area rather than sampled at its catalogued
+the square of the cloud's own column, one coefficient at every arm's own
+36" resolution: `N_law = KAPPA_HERSCHEL * (d_r*pi/180)^2 * A_s^2` on the
+Herschel arm, the source's whole adopted column; on the Planck arm the
+column term is `E[T^2|A_s]`, the kernel's own second moment giving the
+expected 36"-resolution `A_K^2` behind the coarser Planck column, since
+that column already carries the Planck beam's own smoothing of `A^2` and
+a second, beam-transferred coefficient would double it. `KAPPA_HERSCHEL`
+is Pokhrel+2020's pooled star-gas relation on Herschel columns: 14.5
+young stars pc^-2 per mag^2 of A_K at the Herschel arm's 36.3" beam.
+`build` writes one 30-row product with the region distance and the
+pc^2/deg^2 factor it multiplies. `law_area_integral` (section 2.1) is the
+same law integrated over an anchor pixel's own area rather than sampled
+at its catalogued
 sources, so `population.young_stars` can subtract the model's own young-
 star expectation before fitting the anchor weight `W`.
 
@@ -64,10 +69,6 @@ from sesnaimpute.sky.derived import planck_column as sky_planck_column
 #: (SPEC_PRIORS.md section 6.1).
 KAPPA_HERSCHEL = 14.5
 
-#: The Herschel level transferred to the Planck arm's 5.03' beam by the
-#: same measured beam ratio (1.29) used before (SPEC_PRIORS.md section 6.1).
-KAPPA_PLANCK = 18.7
-
 #: Pokhrel+2020's cloud-to-cloud scatter of the normalisation: the
 #: uncertainty on any one region's law level, reported and never
 #: marginalised (SPEC_PRIORS.md section 6.1).
@@ -111,18 +112,25 @@ def _adopted_columns(config, region):
 
 def law_count(config, region, a_col, provenance):
     """`N_law`, young stars deg^-2, for arrays of adopted column and arm
-    (SPEC_PRIORS.md section 6.1):
+    (SPEC_PRIORS.md section 6.1): one coefficient, `KAPPA_HERSCHEL`, at
+    every arm's own 36" resolution.
 
-        N_law = kappa_arm * (d_r*pi/180)^2 * a_col^2
+        N_law = KAPPA_HERSCHEL * (d_r*pi/180)^2 * a_col^2          (Herschel)
+        N_law = KAPPA_HERSCHEL * (d_r*pi/180)^2 * E[T^2 | a_col]   (Planck)
 
-    the source's whole adopted column, no pedestal.
+    the source's whole adopted column, no pedestal; the Planck arm reads
+    the kernel's own second moment (`_kernel_second_moment_planck`), the
+    expected 36"-resolution `A_K^2` behind the coarser Planck column,
+    never the raw column squared, since the Planck beam already hides
+    that sub-beam structure.
     """
     a_col = np.asarray(a_col, dtype=float)
     provenance = np.asarray(provenance)
     d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
-    kappa = np.where(provenance == PROVENANCE_HERSCHEL,
-                      KAPPA_HERSCHEL, KAPPA_PLANCK)
-    return kappa * pc2_per_deg2(d_r_pc) * a_col ** 2
+    pc2 = pc2_per_deg2(d_r_pc)
+    herschel_value = KAPPA_HERSCHEL * pc2 * a_col ** 2
+    planck_value = KAPPA_HERSCHEL * pc2 * _kernel_second_moment_planck(config, a_col)
+    return np.where(provenance == PROVENANCE_HERSCHEL, herschel_value, planck_value)
 
 
 def _law_row(config, region):
@@ -135,10 +143,10 @@ def _law_row(config, region):
 
 def _write_law_product(config, regions, rows):
     """Writes the 30-row law product, in place for `regions`
-    (CODING_RULES.md 5c), plus the three region-independent constants
-    (`KAPPA_HERSCHEL`, `KAPPA_PLANCK`, `LAW_BAND_DEX`) as the same
-    root-level scalar datasets every build has always written -- created
-    once, since their value never depends on which regions ran."""
+    (CODING_RULES.md 5c), plus the two region-independent constants
+    (`KAPPA_HERSCHEL`, `LAW_BAND_DEX`) as the same root-level scalar
+    datasets every build has always written -- created once, since their
+    value never depends on which regions ran."""
     path = config_module.product_path(config, "population", "yso", "law", "region")
     tables_module.update_rows(
         path, regions,
@@ -149,7 +157,6 @@ def _write_law_product(config, regions, rows):
         granule="region")
     with tables_module.open_product(path, granule="region") as f:
         for name, value in (("KAPPA_HERSCHEL", KAPPA_HERSCHEL),
-                             ("KAPPA_PLANCK", KAPPA_PLANCK),
                              ("LAW_BAND_DEX", LAW_BAND_DEX)):
             if name in f:
                 del f[name]
@@ -402,10 +409,12 @@ def law_area_integral(config, region, hpx_pix_512):
 
     Elsewhere, the Planck sightline column `A_P` of the parent nside-256
     pixel, with the log-normal kernel's own closed-form second raw
-    moment (the true-column dispersion the Planck beam hides,
-    SPEC_PRIORS.md section 1.2):
+    moment (the 36" structure the Planck beam hides, SPEC_PRIORS.md
+    section 1.2), the same coefficient as the Herschel branch: `E[T^2 |
+    A_P]` already carries the Planck beam's own smoothing of `A^2`, so a
+    second, beam-transferred coefficient would double it.
 
-        kappa_P * E[T^2 | A_P]
+        kappa_H * E[T^2 | A_P]
     """
     hpx_pix_512 = np.asarray(hpx_pix_512, dtype=np.int64)
     order = np.argsort(hpx_pix_512)
@@ -414,7 +423,6 @@ def law_area_integral(config, region, hpx_pix_512):
     d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
     pc2 = pc2_per_deg2(d_r_pc)
     kappa_h_full = KAPPA_HERSCHEL * pc2
-    kappa_p_full = KAPPA_PLANCK * pc2
 
     sum_sq, count = _herschel_pixel_stats(config, pix_sorted)
     herschel_covered = count > 0
@@ -422,7 +430,7 @@ def law_area_integral(config, region, hpx_pix_512):
         sum_sq, count, out=np.zeros_like(sum_sq), where=herschel_covered)
 
     a_p = _planck_parent_column(config, pix_sorted >> 2)
-    planck_value = kappa_p_full * _kernel_second_moment_planck(config, a_p)
+    planck_value = kappa_h_full * _kernel_second_moment_planck(config, a_p)
 
     value_sorted = np.where(herschel_covered, herschel_value, planck_value)
     out = np.empty_like(value_sorted)
