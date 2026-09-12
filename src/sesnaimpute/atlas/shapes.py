@@ -35,17 +35,24 @@ Lambda(cell)`, the class share of the prior at that cell, on the LINEAR
 footprint: the one common floor below is what decides what an empty
 cell means.
 
-Both rows apply two rules at the read. (1) Support -- `x = a/A_s <= 1`
-by definition, so a cell with `log10 x > 0` is outside the prior, drawn
-blank (masked out of the colour scale) with the `x = 1` line marked, and
-excluded from both rows' sums. (2) One common floor on the prior
-DENSITY `Lambda_C`, common to every class at the source rather than
-per class: `Lambda_floor(s) = grid.FLOOR * max over classes and cells of
-Lambda_C(cell; s)` (support cells only); where every class was below it
-the six classes read exactly equal, one sixth apiece, and the likelihood
-is left to decide. The support is `bmstp.grid.N_X_SUPPORT`, the floor
-`fittp.prior_reader.common_floor` -- the same two definitions the fitter's
-read uses, imported, never restated.
+Both rows apply two rules at the read. (1) Support -- `x = a/A_s <= 1` by
+definition, so a cell with `log10 x > 0` is outside the prior's SUPPORT
+and excluded from both rows' SUMS (the normalisation, the floor search,
+the printed peaks); it is no longer drawn blank, since the read
+(`fittp.prior_reader`'s own change of variables, `lambda_grids`'s
+`blur=True`) carries a real, non-zero density there -- a pencil column
+above the beam mean, in the measured coordinate's one-dex padding, never
+folded back -- so both rows draw it, past the `x = 1` line marked on
+every panel. (2) One common floor on the prior DENSITY `Lambda_C`,
+common to every class at the source rather than per class:
+`Lambda_floor(s) = grid.FLOOR * max over classes and SUPPORT cells of
+Lambda_C(cell; s)`; where every class was below it the six classes read
+exactly equal, one sixth apiece, and the likelihood is left to decide --
+applied over the WHOLE array, support and padding alike, so an empty
+padding cell reads the same floor too. The support is
+`bmstp.grid.N_X_SUPPORT`, the floor `fittp.prior_reader.common_floor` --
+the same two definitions the fitter's read uses, imported, never
+restated.
 
 The colourbars read `$P(C, x, F_{4.5} \mid s)$` (row 1) and `$P(C \mid x,
 F_{4.5}, s)$` (row 2); the page prints, below the rows, the source's own
@@ -237,7 +244,23 @@ def _lambda_batch_size(n_model, n_b):
     return max(1, _LAMBDA_BATCH_BUDGET_BYTES // row_bytes)
 
 
-def lambda_grids(config, region, rows):
+def _prepare_unblurred(reader, rows):
+    """`h (n_block, n_x, n_b)` float32: the same construction as
+    `prior_reader.prepare` with no column-kernel blur -- each row's own
+    raw, STORED grain shape (the DISTANCE coordinate, `x = a / A_s`, zero
+    above the wall by construction, `bmstp.grid`'s module docstring)
+    renormalised to sum to one over the whole array, exactly as
+    `prepare` renormalises its own blurred result (`blur=False`, this
+    brief's item 1)."""
+    grain = reader.grain[rows]
+    raw = reader.grid_all[grain].astype(np.float64)
+    totals = raw.reshape(raw.shape[0], -1).sum(axis=1)
+    safe = np.where(totals > 0.0, totals, 1.0)
+    h = np.where(totals[:, None, None] > 0.0, raw / safe[:, None, None], raw)
+    return h.astype(np.float32)
+
+
+def lambda_grids(config, region, rows, blur=True):
     """`(Lambda (n_rows, 6, n_x, n_b) float64, lambda_floor (n_rows,),
     class_order)`: every row's own six-class prior density `Lambda_C(cell;
     s) = A_C(s) h_C(cell; s) f_C(F; s)` (sec. 1.1/1.4), floored at the one
@@ -246,7 +269,19 @@ def lambda_grids(config, region, rows):
     page's one median source, lifted here so a caller can form it for many
     rows at once (`prior_reader.prepare` already batches over rows, rule
     8: no python loop over sources, only over the six classes and, for
-    STAR/PAHC, over row BATCHES sized to `_lambda_batch_size`, rule 10b)."""
+    STAR/PAHC, over row BATCHES sized to `_lambda_batch_size`, rule 10b).
+
+    `blur=True` (default) reads `h_C` through `prior_reader.prepare`, the
+    fitter's own column-kernel blur into the MEASURED coordinate, where a
+    class's mass past `log10 x = 0` is real (a pencil column above the
+    beam mean, `fittp.prior_reader` module docstring) and stays in the
+    returned array, over its WHOLE extent, not folded back or dropped.
+    `blur=False` reads the UNBLURRED stored shape instead
+    (`_prepare_unblurred`): the DISTANCE coordinate, zero above the wall
+    by construction, no read-side change of variables. Either way the one
+    common floor (below) is applied over the whole array, so an empty
+    cell reads the same floor for every class whether or not it sits past
+    the wall."""
     rows = np.asarray(rows)
     n_rows = rows.size
     dtab = _read_density_table(config, region)
@@ -265,7 +300,7 @@ def lambda_grids(config, region, rows):
         parts = []
         for start in range(0, n_rows, batch):
             sl = slice(start, start + batch)
-            h = prior_reader.prepare(reader, rows[sl])
+            h = prior_reader.prepare(reader, rows[sl]) if blur else _prepare_unblurred(reader, rows[sl])
             density = h.astype(np.float64) / (reader.dlx * reader.dlb)  # (n_batch, n_x, n_b)
             if cls in ("STAR", "PAHC"):
                 f_c = template_weights._factor_marginal(b_centers, reader, cls, d_pahc_rows[sl], curve)
@@ -274,17 +309,24 @@ def lambda_grids(config, region, rows):
             parts.append(intensity[sl, None, None] * density * f_c[:, None, :])
         lam[cls] = np.concatenate(parts, axis=0) if parts else np.empty((0,) + density.shape[1:])
 
-    support = np.zeros(grid.LOG10_X_EDGES.size - 1, dtype=bool)
-    support[:grid.N_X_SUPPORT] = True
-
     # The one common floor, the fitter's own rule (`prior_reader.
     # common_floor`): `Lambda_floor(s)` per row from the six classes' own
-    # peaks over the SUPPORT cells of the raw `Lambda_C`.
+    # peaks over the SUPPORT cells of the raw `Lambda_C` -- the search
+    # stays support-only regardless of `blur` (the unblurred read is zero
+    # in the padding by construction, so widening the search there would
+    # cost nothing but would break comparability with the fitter's own
+    # floor definition).
+    support = np.zeros(grid.LOG10_X_EDGES.size - 1, dtype=bool)
+    support[:grid.N_X_SUPPORT] = True
     peaks = [lam[cls][:, support, :].reshape(n_rows, -1).max(axis=1) for cls in CLASS_ORDER]
     lambda_floor = prior_reader.common_floor(peaks)  # (n_rows,)
+    # The floor now applies over the WHOLE array (this brief's item 1):
+    # the padding past the wall is real mass under `blur=True` and is
+    # drawn, not zeroed; only the unblurred read is genuinely zero there,
+    # so flooring it simply reproduces the common floor.
     lambda_all = np.stack(
-        [np.where(support[None, :, None], np.maximum(lam[cls], lambda_floor[:, None, None]), 0.0)
-         for cls in CLASS_ORDER], axis=1)  # (n_rows, 6, n_x, n_b)
+        [np.maximum(lam[cls], lambda_floor[:, None, None]) for cls in CLASS_ORDER],
+        axis=1)  # (n_rows, 6, n_x, n_b)
     return lambda_all, lambda_floor, CLASS_ORDER
 
 
@@ -362,9 +404,10 @@ def _build_region_data(config, region):
     joint = {cls: lam_floored[cls] / grand_total for cls in CLASS_ORDER}
 
     # Row 2 (module docstring): `P(C | cell, s)`, the class share of
-    # `Lambda` at each cell -- `denom` is never zero on the support,
-    # since every class there is floored at `lambda_floor > 0`.
-    denom = np.where(support[:, None], total_lambda, 1.0)
+    # `Lambda` at each cell, over the WHOLE array now (padding included,
+    # this brief's item 1) -- `denom` is never zero anywhere, since every
+    # class at every cell is floored at `lambda_floor > 0`.
+    denom = np.where(total_lambda > 0.0, total_lambda, 1.0)
     share = {cls: lam_floored[cls] / denom for cls in CLASS_ORDER}
 
     x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
@@ -445,23 +488,19 @@ def _draw_figure(config, region, data):
 
     fig = plot_style.new_sized_figure(page_w, page_h)
 
-    # Row 1's colour scale (module docstring): a LogNorm over the joint
-    # `P(C, cell | s)` ITSELF, spanning all six classes and every SUPPORT
-    # cell (the excluded cells never enter the norm, since they carry no
-    # probability) -- the bar's own ticks then read as probabilities
-    # (e.g. 1e-8 .. 1e-2), matching its label `$P(C, x, F_{4.5} \mid s)$`
-    # rather than that quantity's log10. Row 2's colour scale is fixed,
-    # linear 0-1 (module docstring: the class share is a probability,
-    # not a density).
-    joint_masked = {cls: np.where(support[:, None], joint[cls], np.nan) for cls in CLASS_ORDER}
-    all_vals = np.concatenate([joint_masked[cls][support, :].ravel() for cls in CLASS_ORDER])
+    # Row 1's colour scale (module docstring): a LogNorm set from the
+    # joint `P(C, cell | s)` over the SUPPORT cells alone (the printed
+    # peaks' own range) -- both rows now DRAW the whole read's extent
+    # (this brief's item 1: a class's mass past the wall is real under
+    # the blur, so it is no longer masked to white), the colour scale
+    # itself unchanged, so a padding cell simply reads on the same bar.
+    all_vals = np.concatenate([joint[cls][support, :].ravel() for cls in CLASS_ORDER])
     norm1 = LogNorm(vmin=float(all_vals.min()), vmax=float(all_vals.max()))
     norm2 = Normalize(vmin=0.0, vmax=1.0)
     cmap1 = plt.get_cmap("viridis").copy()
     cmap1.set_bad("white")
     cmap2 = plt.get_cmap("viridis").copy()
     cmap2.set_bad("white")
-    share_masked = {cls: np.where(support[:, None], share[cls], np.nan) for cls in CLASS_ORDER}
     im1 = im2 = None
 
     for i in range(2):
@@ -471,15 +510,16 @@ def _draw_figure(config, region, data):
             ax = fig.add_axes([x0 / page_w, y0 / page_h, shape_w / page_w, row_h / page_h])
             extent = [x_edges[0], x_edges[-1], b_edges[0], b_edges[-1]]
             if i == 0:
-                im1 = ax.imshow(joint_masked[cls].T, origin="lower", aspect="auto",
+                im1 = ax.imshow(joint[cls].T, origin="lower", aspect="auto",
                                  extent=extent, cmap=cmap1, norm=norm1)
             else:
-                im2 = ax.imshow(share_masked[cls].T, origin="lower", aspect="auto",
+                im2 = ax.imshow(share[cls].T, origin="lower", aspect="auto",
                                  extent=extent, cmap=cmap2, norm=norm2)
             # THE WALL, `log10 x = 0` (`x = 1`), marked on every panel of
-            # both rows -- grey, not white, since the panel's own axis now
-            # extends past it into the masked (white) padding, where a
-            # white line would vanish against that background.
+            # both rows -- grey, not white, since the panel's own axis
+            # extends past it into the padding, where the read now draws
+            # real mass (this brief's item 1) and a white line would be
+            # lost against a bright cell there.
             ax.axvline(_LOG10_X_WALL, color="0.35", lw=0.9, linestyle="--", alpha=0.9)
             # The panel's own axis: never less than the wall, extended to
             # the median source's own blurred read's last populated cell
