@@ -167,22 +167,22 @@ def _norm_cdf(z):
     return 0.5 * (1.0 + erf(z / _SQRT2))
 
 
-def _grid_quantile(grid_x, cdf, p):
-    """`z_p` per row: linear interpolation of `grid_x` against `cdf` (n,
-    n_grid), monotonic non-decreasing along axis 1 -- vectorised (rule 8:
-    one count and one `take_along_axis` pair, no python loop over rows)."""
-    idx = np.clip(np.sum(cdf < p, axis=1), 1, cdf.shape[1] - 1)
-    lo = np.take_along_axis(cdf, (idx - 1)[:, None], axis=1)[:, 0]
-    hi = np.take_along_axis(cdf, idx[:, None], axis=1)[:, 0]
-    x_lo = grid_x[idx - 1]
-    x_hi = grid_x[idx]
-    span = np.where(hi > lo, hi - lo, 1.0)
-    frac = np.where(hi > lo, (p - lo) / span, 0.0)
-    return x_lo + frac * (x_hi - x_lo)
+#: Bisection iterations `_position_distribution` runs to invert the
+#: analytic mixture CDF: each halves the bracket, so 60 of them narrow
+#: any bracket to float64 precision (2^-60 of its own width) -- cheap,
+#: since every iteration is one vectorised pass over all protostars, no
+#: python loop over sources (rule 8).
+_BISECT_ITERS = 60
 
 
-def _position_distribution(log10_r_p, w, mu, sigma, grid_step=_GRID_STEP_DEX,
-                            log10_x_min=grid.LOG10_X_EDGES[0]):
+def _mixture_cdf(z, w, mean0, mean1, sigma0, sigma1):
+    """`P(log10 x <= z)`, the untruncated two-component mixture CDF, in
+    closed form (`_norm_cdf`, exact `erf`) -- never a grid integral of the
+    pdf (see `_position_distribution`'s own docstring for why that broke)."""
+    return w * _norm_cdf((z - mean0) / sigma0) + (1.0 - w) * _norm_cdf((z - mean1) / sigma1)
+
+
+def _position_distribution(log10_r_p, w, mu, sigma):
     """`(median, lo16, hi84, p_reach, beyond_reach)`: the read's own
     picture of a protostar's position in the DISTANCE coordinate (this
     brief's item 2). `log10 x = log10 r_p - y`, `y` the two-component
@@ -191,30 +191,43 @@ def _position_distribution(log10_r_p, w, mu, sigma, grid_step=_GRID_STEP_DEX,
     law's own exponent) -- a mixture of Gaussians in `log10 x` itself,
     mean `log10 r_p - mu_i`, the same `sigma_i`, weight `w_i` / `1 - w_i`.
     `p_reach = P(log10 x <= 0)` (`T >= a_p`) is the kernel's own
-    UNTRUNCATED mass there, read off the closed-form `erf`, never the
-    grid; `median`/`lo16`/`hi84` are the TRUNCATED mixture's own 50%/16%/
-    84% points, read off one shared fine grid (rule 8: an (n_proto,
-    n_grid) array, no python loop over protostars). `beyond_reach` marks
-    `p_reach` below this brief's own 0.01 bar."""
+    UNTRUNCATED mass there; `median`/`lo16`/`hi84` are the TRUNCATED
+    mixture's own 50%/16%/84% points, `CDF(z) = target * p_reach` INVERTED
+    by bisection on the exact closed-form CDF (rule 8: every iteration is
+    one array pass over all protostars, no python loop over sources) --
+    not a fixed-grid trapezoidal pdf integral: a protostar whose floored
+    `log10 r_p` sits at the array's own low edge can have BOTH kernel
+    components' means at or below a finite grid's own edge (a component's
+    mean can itself be more negative than `log10 r_p` when its own `mu` is
+    positive), so a grid starting there silently integrates less than the
+    component's own mass and its cumulative sum never reaches `p_reach` --
+    the bisection here has no edge, so it cannot lose mass that way.
+    `beyond_reach` marks `p_reach` below this brief's own 0.01 bar."""
     log10_r_p = np.asarray(log10_r_p, dtype=np.float64)
-    n = log10_r_p.shape[0]
-    grid_x = np.arange(log10_x_min, 1e-9, grid_step)  # (n_grid,), up to the wall
     mean0 = log10_r_p - mu[:, 0]
     mean1 = log10_r_p - mu[:, 1]
-    p_reach = w * _norm_cdf(-mean0 / sigma[:, 0]) + (1.0 - w) * _norm_cdf(-mean1 / sigma[:, 1])
+    sigma0, sigma1 = sigma[:, 0], sigma[:, 1]
+    p_reach = w * _norm_cdf(-mean0 / sigma0) + (1.0 - w) * _norm_cdf(-mean1 / sigma1)
 
-    z0 = (grid_x[None, :] - mean0[:, None]) / sigma[:, 0][:, None]
-    z1 = (grid_x[None, :] - mean1[:, None]) / sigma[:, 1][:, None]
-    pdf = (w[:, None] * np.exp(-0.5 * z0 * z0) / (sigma[:, 0][:, None] * _SQRT2PI)
-           + (1.0 - w[:, None]) * np.exp(-0.5 * z1 * z1) / (sigma[:, 1][:, None] * _SQRT2PI))
-    cdf = np.concatenate(
-        [np.zeros((n, 1)), np.cumsum(0.5 * (pdf[:, 1:] + pdf[:, :-1]) * grid_step, axis=1)], axis=1)
-    safe_p_reach = np.where(p_reach > 0.0, p_reach, 1.0)
-    cdf_trunc = np.clip(cdf / safe_p_reach[:, None], 0.0, 1.0)
+    # A bracket guaranteed to hold every root: comfortably below both
+    # component means (`CDF` there is ~0) up to the wall itself (`CDF(0)
+    # = p_reach`, at or above every target below).
+    span = 20.0 * np.maximum(sigma0, sigma1)
+    lo_bracket = np.minimum(mean0, mean1) - span
 
-    median = _grid_quantile(grid_x, cdf_trunc, 0.5)
-    lo16 = _grid_quantile(grid_x, cdf_trunc, 0.16)
-    hi84 = _grid_quantile(grid_x, cdf_trunc, 0.84)
+    def _solve(target):
+        lo = lo_bracket.copy()
+        hi = np.zeros_like(lo_bracket)
+        for _ in range(_BISECT_ITERS):
+            mid = 0.5 * (lo + hi)
+            go_right = _mixture_cdf(mid, w, mean0, mean1, sigma0, sigma1) < target
+            lo = np.where(go_right, mid, lo)
+            hi = np.where(go_right, hi, mid)
+        return 0.5 * (lo + hi)
+
+    median = _solve(0.5 * p_reach)
+    lo16 = _solve(0.16 * p_reach)
+    hi84 = _solve(0.84 * p_reach)
     beyond_reach = p_reach < _BEYOND_REACH_P
     return median, lo16, hi84, p_reach, beyond_reach
 
