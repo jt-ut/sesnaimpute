@@ -72,7 +72,7 @@ _LN10 = float(np.log(10.0))
 _SQRT2 = float(np.sqrt(2.0))
 _SQRT2PI = float(np.sqrt(2.0 * np.pi))
 
-#: R4's calibration grid for `CLOUD_SIGMA_HERSCHEL_DEX` (this brief): 0.03
+#: the calibration grid for `CLOUD_SIGMA_HERSCHEL_DEX`: 0.03
 #: to 0.80 dex in 0.01-dex steps, the profile likelihood's own domain.
 _CLOUD_SIGMA_GRID_LO = 0.03
 _CLOUD_SIGMA_GRID_HI = 0.80
@@ -80,11 +80,11 @@ _CLOUD_SIGMA_GRID_STEP = 0.01
 
 #: The half-drop in log-likelihood (a chi-square difference of 1 for one
 #: profiled parameter) that bounds `CLOUD_SIGMA_HERSCHEL_DEX`'s own 68%
-#: interval (this brief, R4).
+#: interval.
 _CLOUD_SIGMA_DLOGLIKE = 0.5
 
 #: The two regions with a Herschel arm whose Class 0/I/flat protostars
-#: calibrate the cloud-class structural width (R4): HOPS's own Orion A,
+#: calibrate the cloud-class structural width: HOPS's own Orion A,
 #: eHOPS's own Aquila (`sky.derived.protostars`).
 _PROTOSTAR_REGIONS = ("Orion A", "Aquila")
 _PROTOSTAR_CLASSES = (b"0", b"I", b"flat")
@@ -509,7 +509,7 @@ def _match_one_region_to_catalogue(config, region, ra_deg, dec_deg):
 
 
 def _match_protostars_to_beam(config):
-    """R4's sample: every HOPS/eHOPS (`sky.derived.protostars`) Class 0,
+    """The calibration sample: every HOPS/eHOPS (`sky.derived.protostars`) Class 0,
     I or flat protostar with a finite positive `AV_FOREGROUND_MAG`,
     matched (`_match_one_region_to_catalogue`) to its own SESNA source in
     its region. `A_beam` is that SOURCE's own adopted EXTINCTION column,
@@ -522,7 +522,7 @@ def _match_protostars_to_beam(config):
     source is on the Herschel arm (`A_COL_PROVENANCE` 0, the same code
     `_ARM_CODE['herschel']` uses). Returns a dict of aligned arrays
     (`region`, `av_mag`, `a_beam`, `sigma_beam`, `pix256`) and the three
-    drop counts this brief's report prints, in the order checked: no
+    drop counts the stage prints, in the order checked: no
     finite positive `A_V`, no SESNA source match in its own region (or a
     region/pixel the protostar view assigns no SESNA footprint to), no
     Herschel arm at the matched source (a Planck-arm source).
