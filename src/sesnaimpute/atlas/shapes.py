@@ -611,14 +611,14 @@ def build(config, regions=None):
 
 
 # ====================================================================
-# The region page (owner's design, 2026-09-12): where in the nuisance
+# The region page: where in the nuisance
 # plane the prior puts mass the survey can catalogue, and what class
 # favours it there. Six class panels per row, `bmstp.atlas` P6's own
 # per-cell region grids read verbatim (rule 5: no recomputation of the
 # sums the product carries) -- `N_CAT_CELL_<C>` (row 1, the catalogued
 # density), the class share among catalogued objects (row 2), `N_CELL_
 # <C>` (row 3, the intrinsic, selection-free density). Never read by
-# `bmstp`/`fittp` (module docstring's own rule, unchanged for this page).
+# `bmstp`/`fittp` (module docstring's own rule).
 # ====================================================================
 
 #: I2 (4.5 micron)'s index into `catalog.depth_grid`'s own band axis --
@@ -626,11 +626,6 @@ def build(config, regions=None):
 _BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 _IDX_I2 = _BAND_KEYS.index("I2")
 
-_REGION_ROW_TITLES = (
-    "Row 1 -- N_CAT_CELL: the catalogued count per cell",
-    "Row 2 -- the class share among catalogued objects",
-    "Row 3 -- N_CELL: the intrinsic prior density (selection-free)",
-)
 
 
 def _read_prior_atlas(config, region):
@@ -784,7 +779,7 @@ def _draw_region_figure(config, region, data):
     # one line: suptitle and class titles alone), since this page stacks
     # a row banner above those titles too.
     margin_l, margin_r, margin_t = 0.75, 1.05, 1.35
-    row_gap, col_gap = 0.90, 0.14
+    row_gap, col_gap = 0.90, 0.30
     row_h = 3.2
     n_rows = 3
     page_h = margin_t + n_rows * row_h + (n_rows - 1) * row_gap + AXIS_LABEL_MARGIN_IN + caption_block_h
@@ -824,7 +819,7 @@ def _draw_region_figure(config, region, data):
         y0 = page_h - margin_t - (i + 1) * row_h - i * row_gap
         fig.text((margin_l + usable_w / 2.0) / page_w,
                   (y0 + row_h + _ROW_BANNER_OFFSET_IN[i]) / page_h,
-                  _REGION_ROW_TITLES[i], fontsize=_LABEL_FONTSIZE, ha="center", va="bottom")
+                  captions.SHAPES_REGION_ROW_TITLES[i], fontsize=_LABEL_FONTSIZE, ha="center", va="bottom")
         for c, cls in enumerate(CLASS_ORDER):
             x0 = margin_l + c * (shape_w + col_gap)
             ax = fig.add_axes([x0 / page_w, y0 / page_h, shape_w / page_w, row_h / page_h])
@@ -853,12 +848,20 @@ def _draw_region_figure(config, region, data):
                 ax.axvspan(data["log10_x_front"], data["log10_x_back"], color="0.6", alpha=0.18, lw=0)
             ax.axhline(data["log10_f_lim_med"], color="0.25", lw=0.8, linestyle=":", alpha=0.9)
 
-            ax.set_xlim(_LOG10_X_MIN, _LOG10_X_WALL)
+            # a hair past the wall, so the wall's own line is drawn inside the
+            # axes rather than on its spine; the grids are zero beyond it
+            ax.set_xlim(_LOG10_X_MIN, _LOG10_X_WALL + 0.08)
             ax.set_xlabel(_X_LABEL, fontsize=_LABEL_FONTSIZE)
             ax.tick_params(labelsize=_TICK_FONTSIZE, labelleft=(c == 0))
             ax.set_xticks(np.array([-3.0, -2.0, -1.0, 0.0]))
+            # the panel's own peak in its title: rows 1 and 3 share one scale
+            # per row, floored at grid.FLOOR of the row's peak, so a class whose
+            # peak sits below that floor draws white -- the title says why
             if i == 0:
-                ax.set_title(cls, fontsize=_LABEL_FONTSIZE, pad=18)
+                ax.set_title("%s\npeak %.2g / cell" % (cls, float(n_cat_cell[cls].max())),
+                             fontsize=_TICK_FONTSIZE, pad=14)
+            elif i == 2:
+                ax.set_title("peak %.2g / cell" % float(n_cell[cls].max()), fontsize=_TICK_FONTSIZE, pad=4)
             if c == 0:
                 ax.set_ylabel(_SHARED_Y_LABEL, fontsize=_LABEL_FONTSIZE)
 
@@ -912,16 +915,8 @@ def _main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config")
     parser.add_argument("--regions", nargs="+", default=None)
-    parser.add_argument("--page", choices=("source", "region"), default="source",
-                         help="'source' (default): the per-source shapes page; "
-                              "'region': the region's prior mass in the nuisance "
-                              "plane, selection included")
     args = parser.parse_args()
-    config = config_module.load(args.config)
-    if args.page == "region":
-        build_region_prior(config, regions=args.regions)
-    else:
-        build(config, regions=args.regions)
+    build(config_module.load(args.config), regions=args.regions)
 
 
 if __name__ == "__main__":

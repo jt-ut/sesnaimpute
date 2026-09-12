@@ -49,7 +49,8 @@ VOCABULARY = (
      "the fitted foreground over the sightline's own BEAM-averaged column, rather than "
      "x's own true pencil column; the column kernel carries a class's shape past the wall "
      "(log10 r > 0, the array's one-dex padding) into real mass there -- a pencil column "
-     "above the beam mean, never folded back -- so both rows draw it past the x = 1 line"),
+     "above the beam mean, never folded back -- so the source page draws it past the x = 1 line; "
+     "the region page's grids are in x itself and end at the wall"),
 )
 
 #: The probability each panel draws, one statement per panel kind.
@@ -88,11 +89,19 @@ ATLAS_SELECTION_TOTAL = (
 #: The region shapes page's three rows (`atlas.shapes.build_region_prior`,
 #: SPEC_BMSTP_DRAFT.md sec. 8): P6's own per-cell region grids, read and
 #: never recomputed (rule 5).
+SHAPES_REGION_ROW_TITLES = (
+    "Row 1 -- N_CAT_CELL: the cataloged count per cell",
+    "Row 2 -- the class share among cataloged objects",
+    "Row 3 -- N_CELL: the intrinsic prior density (selection-free)",
+)
 SHAPES_REGION_ROW1 = (
     "Row 1, per class: N_CAT_CELL_C(cell) -- the region's expected number "
     "of cataloged objects of class C per parameter cell (bmstp.atlas P6, "
     "sec. 8), summing over cells to RATIO_C * TOTAL_OBSERVED. One log "
-    "color scale for all six panels, so the panels compare cell by cell.")
+    "color scale for all six panels, so the panels compare cell by cell; "
+    "a cell below one millionth of the row's peak is white, and each panel's "
+    "title carries that class's own peak, so a class whose whole count sits "
+    "below that floor draws white by that rule and not for want of mass.")
 SHAPES_REGION_ROW2 = (
     "Row 2, per class: N_CAT_CELL_C(cell) / sum over classes of "
     "N_CAT_CELL(cell) -- the class share of the region's cataloged "
@@ -104,7 +113,8 @@ SHAPES_REGION_ROW3 = (
     "Row 3, per class: N_CELL_C(cell) -- the region's UNTHINNED intrinsic "
     "population of class C per parameter cell (bmstp.atlas P6, sec. 8), "
     "before the survey's selection: no flux cut, no dimming. One log "
-    "color scale for all six panels, the same convention as row 1.")
+    "color scale for all six panels, the same floor and the same peak-in-title "
+    "convention as row 1.")
 #: The region totals line, one per class (rule 7a): `{n_cat}` = sum
 #: N_CAT_CELL_C = the class's cataloged count, `{n_cell}` = sum N_CELL_C =
 #: its intrinsic count, `{ratio}` their ratio = the class's catalogable
