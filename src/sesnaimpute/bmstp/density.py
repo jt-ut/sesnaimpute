@@ -49,20 +49,12 @@ from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.population import field_stars
-from sesnaimpute.population.yso import PROVENANCE_HERSCHEL, law_count, pc2_per_deg2
+from sesnaimpute.population.yso import KAPPA_HERSCHEL, PROVENANCE_HERSCHEL, law_count, pc2_per_deg2
 from sesnaimpute.bmstp import grid
 from sesnaimpute.bmstp import knot_field
 from sesnaimpute.bmstp import sample_cloud
 from sesnaimpute.bmstp import sample_gal
 
-#: Not yet in constants.py -- added here per CODING_RULES_BMSTP.md rule 3,
-#: SPEC_BMSTP_DRAFT.md section 10.
-#: Young-star law amplitude at the Herschel beam, pc^-2 mag^-2 -- Pokhrel
-#: et al. 2020's pooled star-gas relation.
-KAPPA_HERSCHEL = 14.5
-#: The same law at Planck's beam -- Pokhrel+2020 times Lada et al. 2013's
-#: 1.29 beam-ratio correction.
-KAPPA_PLANCK = 18.7
 #: Knots per law-predicted young star, depth-corrected, by region --
 #: Froebrich et al. 2015 (UWISH2), Giannini et al. 2013.
 ETA = {
@@ -307,10 +299,8 @@ def build_region(config, region, st):
         law_region_names = [v.decode("utf-8") for v in f["REGION"][:]]
         i_law = law_region_names.index(region)
         file_kappa_h = float(f["KAPPA_HERSCHEL"][()])
-        file_kappa_p = float(f["KAPPA_PLANCK"][()])
         file_pc2 = float(f["PC2_PER_DEG2"][i_law])
-    yso_law_err = max(abs(KAPPA_HERSCHEL - file_kappa_h), abs(KAPPA_PLANCK - file_kappa_p),
-                      abs(pc2 - file_pc2) / file_pc2)
+    yso_law_err = max(abs(KAPPA_HERSCHEL - file_kappa_h), abs(pc2 - file_pc2) / file_pc2)
 
     # H2S, sec. 5.6 "Sky density": `A_H2S(s) = L(s) . eta_r . eps_ext .
     # ON_GRID_H2S(s)`. `L(s)` is the INTRINSIC young-star law at the
@@ -391,7 +381,6 @@ def write_region(path, result):
         f.create_dataset("DENSITY_YSO", data=result["density_yso"].astype(np.float64))
         f.create_dataset("DENSITY_H2S", data=result["density_h2s"].astype(np.float64))
         f.attrs["KAPPA_HERSCHEL"] = KAPPA_HERSCHEL
-        f.attrs["KAPPA_PLANCK"] = KAPPA_PLANCK
         f.attrs["ETA"] = result["eta_r"]
         f.attrs["EPS_EXT"] = EPS_EXT
         f.attrs["F_DUSTY_O"] = result["f_dusty_o"]
