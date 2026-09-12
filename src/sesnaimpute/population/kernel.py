@@ -287,11 +287,12 @@ class Kernel(object):
         in `build` (`_fit_cloud_sigma_herschel`) with this same one-
         component construction on the HOPS (Orion A) and eHOPS (Aquila)
         Class 0/I/flat protostars: each protostar's own foreground `A_V`,
-        converted to `A_K`, against its own nside-256 sightline's beam
-        column, profiled against the region's own cloud-interval
-        placement of a member star. SESNA's own YSO fits validate or
-        replace this number per region once they exist. `exponent = 0.0`
-        and the Planck arm are untouched by this."""
+        converted to `A_K`, against its matched SESNA source's own
+        adopted extinction column (the reader's own beam column, not the
+        nside-256 sightline mean), profiled against the region's own
+        cloud-interval placement of a member star. SESNA's own YSO fits
+        validate or replace this number per region once they exist.
+        `exponent = 0.0` and the Planck arm are untouched by this."""
         a_col = np.asarray(a_col, dtype=float)
         sigma_col = np.asarray(sigma_col, dtype=float)
         arm_idx = self._arm_index(map_class)
@@ -421,27 +422,110 @@ def _pool_herschel_ref_mixture(subbeam_path, a_nodes):
     return w, mu1 * factor, mu2 * factor, sig1 * factor, sig2 * factor, factor
 
 
+#: The nearest-neighbour match radius to the curated catalogue, this
+#: brief -- exactly `atlas.protostars.MATCH_RADIUS_ARCSEC`: inside it a
+#: protostar takes that source as its SESNA counterpart.
+_MATCH_RADIUS_ARCSEC = 2.0
+
+
+def _pix512_galactic(ra_deg, dec_deg):
+    """Each position's nside-512 galactic NESTED pixel -- the granule
+    map's own pixelisation, the same one `atlas.protostars._pix512_
+    galactic` uses for its own catalogue-match standin (reproduced here,
+    not imported: `population` may not import `atlas`)."""
+    gal = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs").galactic
+    return hp.ang2pix(512, gal.l.deg, gal.b.deg, nest=True, lonlat=True)
+
+
+def _match_one_region_to_catalogue(config, region, ra_deg, dec_deg):
+    """Each protostar's own SESNA source in `region` -- the SAME rule
+    `atlas.protostars._match_to_catalogue` applies (nearest within
+    `_MATCH_RADIUS_ARCSEC`; failing that, the nearest catalogued source
+    sharing the protostar's own nside-512 pixel; failing that, excluded),
+    reproduced here rather than imported (`population` may not import
+    `atlas`) -- but reading `sky.derived.adopted.extinction.source`'s own
+    `A_COL_K`/`A_COL_SIG_K`/`A_COL_PROVENANCE` at the matched source's
+    row (`granules.access.per_source`'s own `source`-granule join: one
+    row per catalogued source of `region`, in catalogue-row order, so no
+    separate name-alignment check is needed the way `atlas.protostars`
+    needs one against a later `bmstp` product), not `atlas.protostars`'s
+    own `bmstp.density.table.source` -- this fit runs inside
+    `population`, before any `bmstp` product exists.
+
+    Returns `(a_col, a_col_sig, prov, matched)`, each `(len(ra_deg),)`;
+    `matched` False where no catalogued source of `region` is within
+    reach (`a_col`/`a_col_sig`/`prov` undefined there).
+    """
+    from sesnaimpute.granules import access
+
+    cat_path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
+    with h5py.File(cat_path, "r") as f:
+        ra_cat = np.asarray(f["RA_DEG"][:], dtype=np.float64)
+        dec_cat = np.asarray(f["DEC_DEG"][:], dtype=np.float64)
+
+    ext_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "source", region=region)
+    cols = access.per_source(config, region, ext_path, ["A_COL_K", "A_COL_SIG_K", "A_COL_PROVENANCE"])
+    a_col_cat = np.asarray(cols["A_COL_K"], dtype=np.float64)
+    a_col_sig_cat = np.asarray(cols["A_COL_SIG_K"], dtype=np.float64)
+    prov_cat = np.asarray(cols["A_COL_PROVENANCE"])
+
+    coord_proto = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs")
+    coord_cat = SkyCoord(ra=ra_cat * u.deg, dec=dec_cat * u.deg, frame="icrs")
+    idx_nn, sep2d, _ = coord_proto.match_to_catalog_sky(coord_cat)
+    direct = sep2d.arcsec <= _MATCH_RADIUS_ARCSEC
+
+    cat_row = np.full(ra_deg.size, -1, dtype=np.int64)
+    cat_row[direct] = idx_nn[direct]
+
+    # The sightline stand-in (`atlas.protostars._match_to_catalogue`,
+    # unchanged rule): the loop below is over the DISTINCT nside-512
+    # pixels among the protostars a direct match missed (typically a
+    # handful), each iteration itself vectorised over its own candidates.
+    need_standin = ~direct
+    if np.any(need_standin):
+        pix_proto = _pix512_galactic(ra_deg, dec_deg)
+        pix_cat = _pix512_galactic(ra_cat, dec_cat)
+        order = np.argsort(pix_cat)
+        pix_cat_sorted = pix_cat[order]
+        for p in np.unique(pix_proto[need_standin]):
+            lo = np.searchsorted(pix_cat_sorted, p, side="left")
+            hi = np.searchsorted(pix_cat_sorted, p, side="right")
+            if hi == lo:
+                continue  # no catalogued source shares this pixel: stays excluded
+            cand = order[lo:hi]
+            rows_in_pix = np.where(need_standin & (pix_proto == p))[0]
+            sep = coord_cat[cand][:, None].separation(coord_proto[rows_in_pix][None, :]).arcsec
+            nearest = cand[np.argmin(sep, axis=0)]
+            cat_row[rows_in_pix] = nearest
+
+    matched = cat_row >= 0
+    a_col = np.full(ra_deg.size, np.nan, dtype=np.float64)
+    a_col_sig = np.full(ra_deg.size, np.nan, dtype=np.float64)
+    prov = np.full(ra_deg.size, -1, dtype=np.int64)
+    a_col[matched] = a_col_cat[cat_row[matched]]
+    a_col_sig[matched] = a_col_sig_cat[cat_row[matched]]
+    prov[matched] = prov_cat[cat_row[matched]].astype(np.int64)
+    return a_col, a_col_sig, prov, matched
+
+
 def _match_protostars_to_beam(config):
     """R4's sample: every HOPS/eHOPS (`sky.derived.protostars`) Class 0,
     I or flat protostar with a finite positive `AV_FOREGROUND_MAG`,
-    matched to its own nside-256 sightline's adopted EXTINCTION column --
-    `sky.derived.column.build_extinction_sightline`'s survey-wide
-    product's `A_K` (SPEC section 3.2), the gas column
-    (`build_sightline`'s own `A_K`) times that sightline's mean source
-    factor `F_EXTINCTION`, the column a star's light actually passes
-    through -- the reader's own beam column (verified identical to
-    `sky.derived.adopted.extinction_source`'s own `A_COL_K`, and a median
-    1.56x the gas column in Orion A): the quantity `a_p` is compared to
-    (`r_p = a_p / A_beam`) must be the same column the reader elsewhere
-    divides by, not the gas column the Herschel/Planck arms are pooled
-    on. Kept only where that sightline is on the Herschel arm
-    (`PROVENANCE` 0, the same code `_ARM_CODE['herschel']` uses, carried
-    through from the gas column unchanged). Returns a dict of aligned
-    arrays (`region`, `av_mag`, `a_beam`, `sigma_beam`, `pix256`) and the
-    three drop counts this brief's report prints, in the order checked:
-    no finite positive `A_V`, no sightline row at that pixel at all, no
-    Herschel arm there (a Planck-arm pixel, or a region/pixel the
-    protostar view assigns no SESNA footprint to).
+    matched (`_match_one_region_to_catalogue`) to its own SESNA source in
+    its region. `A_beam` is that SOURCE's own adopted EXTINCTION column,
+    `A_COL_K` from `sky.derived.adopted.extinction.source` (SPEC section
+    3.2) -- the reader's own beam column, the 36 arcsec-map value at the
+    SOURCE's position, not the nside-256 sightline mean the two arms are
+    pooled on (they differ by ~0.3 dex at a protostar): the quantity
+    `a_p` is compared to (`r_p = a_p / A_beam`) must divide by the same
+    column a consumer elsewhere divides by. Kept only where the matched
+    source is on the Herschel arm (`A_COL_PROVENANCE` 0, the same code
+    `_ARM_CODE['herschel']` uses). Returns a dict of aligned arrays
+    (`region`, `av_mag`, `a_beam`, `sigma_beam`, `pix256`) and the three
+    drop counts this brief's report prints, in the order checked: no
+    finite positive `A_V`, no SESNA source match in its own region (or a
+    region/pixel the protostar view assigns no SESNA footprint to), no
+    Herschel arm at the matched source (a Planck-arm source).
     """
     proto_path = f"{config.data_root}/sky/derived/protostars/protostars_survey.hdf5"
     with h5py.File(proto_path, "r") as f:
@@ -457,35 +541,35 @@ def _match_protostars_to_beam(config):
     keep = class_ok & av_ok
 
     idx = np.where(keep)[0]
-    gal = SkyCoord(ra=ra_deg[idx] * u.deg, dec=dec_deg[idx] * u.deg, frame="icrs").galactic
+    region_k = region[idx]
+    ra_k, dec_k = ra_deg[idx], dec_deg[idx]
+    region_ok = np.isin(region_k, np.array([r.encode("utf-8") for r in _PROTOSTAR_REGIONS]))
+
+    a_col = np.full(idx.size, np.nan, dtype=np.float64)
+    a_col_sig = np.full(idx.size, np.nan, dtype=np.float64)
+    prov = np.full(idx.size, -1, dtype=np.int64)
+    matched = np.zeros(idx.size, dtype=bool)
+    for r in _PROTOSTAR_REGIONS:
+        sel = region_ok & (region_k == r.encode("utf-8"))
+        if not np.any(sel):
+            continue
+        a_col_r, a_col_sig_r, prov_r, matched_r = _match_one_region_to_catalogue(
+            config, r, ra_k[sel], dec_k[sel])
+        rows = np.where(sel)[0]
+        a_col[rows], a_col_sig[rows], prov[rows], matched[rows] = a_col_r, a_col_sig_r, prov_r, matched_r
+
+    n_dropped_no_catalogue_match = int(np.count_nonzero(region_ok & ~matched))
+    is_h = matched & (prov == _ARM_CODE["herschel"])
+    n_dropped_no_herschel_arm = int(np.count_nonzero(~region_ok | (region_ok & matched & ~is_h)))
+
+    keep2 = region_ok & matched & is_h
+    gal = SkyCoord(ra=ra_k[keep2] * u.deg, dec=dec_k[keep2] * u.deg, frame="icrs").galactic
     pix256 = hp.ang2pix(256, gal.l.deg, gal.b.deg, nest=True, lonlat=True)
-
-    sl_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "sightline")
-    with h5py.File(sl_path, "r") as f:
-        sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
-        sl_a_k = np.asarray(f["A_K"][:], dtype=np.float64)
-        sl_sigma = np.asarray(f["SIGMA_A_K"][:], dtype=np.float64)
-        sl_prov = np.asarray(f["PROVENANCE"][:])
-
-    order = np.argsort(sl_pix)
-    sl_pix_sorted = sl_pix[order]
-    loc = np.searchsorted(sl_pix_sorted, pix256)
-    capped = np.minimum(loc, max(sl_pix_sorted.size - 1, 0))
-    found = (sl_pix_sorted.size > 0) & (sl_pix_sorted[capped] == pix256)
-    n_dropped_no_sightline = int(np.count_nonzero(~found))
-
-    is_h = np.zeros(pix256.shape, dtype=bool)
-    is_h[found] = sl_prov[order[capped[found]]] == _ARM_CODE["herschel"]
-    region_ok = np.isin(region[idx], np.array([r.encode("utf-8") for r in _PROTOSTAR_REGIONS]))
-    n_dropped_no_herschel_arm = int(np.count_nonzero(found & (~is_h | ~region_ok)))
-
-    keep2 = found & is_h & region_ok
-    rows = order[capped[keep2]]
     return dict(
-        region=region[idx][keep2], av_mag=av_mag[idx][keep2],
-        a_beam=sl_a_k[rows], sigma_beam=sl_sigma[rows], pix256=pix256[keep2],
+        region=region_k[keep2], av_mag=av_mag[idx][keep2],
+        a_beam=a_col[keep2], sigma_beam=a_col_sig[keep2], pix256=pix256,
         n_dropped_no_av=n_dropped_no_av,
-        n_dropped_no_sightline=n_dropped_no_sightline,
+        n_dropped_no_sightline=n_dropped_no_catalogue_match,
         n_dropped_no_herschel_arm=n_dropped_no_herschel_arm,
     )
 
@@ -547,15 +631,17 @@ def _fit_cloud_sigma_herschel(config, zp_herschel_k):
     the same at every column, recentred to mean one) -- not the sub-beam
     stage's own two-component mixture rescaled, which is ill-conditioned
     wherever its two components are nearly degenerate. `A_beam`
-    (`_match_protostars_to_beam`) is the EXTINCTION column, the reader's
-    own beam column, not the gas column the two arms are pooled on --
-    the ratio `r_p = a_p / A_beam` must divide by the same column a
-    consumer elsewhere divides by. For a cloud member on a protostar's
-    own sightline, `log10 r_p = log10 x + y`: `x` from that sightline's
-    own cloud-interval `p(u)` (`_cloud_cells_for_pixels`), `y` from the
-    one-component structural
+    (`_match_protostars_to_beam`) is the matched SESNA SOURCE's own
+    adopted extinction column, `A_COL_K` from `sky.derived.adopted.
+    extinction.source` -- the reader's own beam column, the 36 arcsec-map
+    value at the source's position -- not the nside-256 sightline mean
+    (they differ by ~0.3 dex at a protostar): the ratio `r_p = a_p /
+    A_beam` must divide by the same column a consumer elsewhere divides
+    by. For a cloud member on a protostar's own sightline, `log10 r_p =
+    log10 x + y`: `x` from that sightline's own cloud-interval `p(u)`
+    (`_cloud_cells_for_pixels`), `y` from the one-component structural
     term at a trial `sigma_cloud`, the source's own measurement term
-    (`SIGMA_A_K`) and the survey zero point folded in, reweighted by
+    (`A_COL_SIG_K`) and the survey zero point folded in, reweighted by
     `T**2` (`Kernel.mixture`'s own exponent, SPEC_BMSTP_DRAFT.md 5.5) --
     the same arithmetic `mixture` performs, inlined here since no
     `Kernel` exists yet inside `build`. The sample log-likelihood --
@@ -671,7 +757,7 @@ def _fit_cloud_sigma_herschel(config, zp_herschel_k):
     return dict(
         sigma_cloud=sigma_cloud_best, p16=p16, p84=p84, grid=grid, loglike=loglike,
         neighbourhood=neighbourhood,
-        n_protostars=n_proto, a_beam_dataset="sky/derived/adopted/extinction/sightline: A_K",
+        n_protostars=n_proto, a_beam_dataset="sky/derived/adopted/extinction/source: A_COL_K",
         n_dropped_no_herschel_arm=match["n_dropped_no_herschel_arm"],
         n_dropped_no_av=match["n_dropped_no_av"],
         n_dropped_no_sightline=match["n_dropped_no_sightline"],
@@ -785,8 +871,8 @@ def build(config, regions=None):
           % ", ".join("%.3f: %.4f" % (g, v) for g, v in sorted(fit["neighbourhood"].items())),
           flush=True)
     print("kernel: R4 protostars dropped -- no Herschel arm: %d, no finite A_V: %d, "
-          "no sightline: %d" % (fit["n_dropped_no_herschel_arm"], fit["n_dropped_no_av"],
-                                 fit["n_dropped_no_sightline"]), flush=True)
+          "no SESNA catalogue match: %d" % (fit["n_dropped_no_herschel_arm"], fit["n_dropped_no_av"],
+                                             fit["n_dropped_no_sightline"]), flush=True)
     print("kernel: R4 check -- predicted/empirical median log10 r = %.4f/%.4f, "
           "predicted/empirical p84 log10 r = %.4f/%.4f, frac P(T>=a_p)<0.01 = %.4f"
           % (fit["pred_median"], fit["emp_median"], fit["pred_p84"], fit["emp_p84"],
