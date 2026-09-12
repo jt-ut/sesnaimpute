@@ -15,29 +15,30 @@ This build writes STAR/AGB/PAHC (sec. 5.1-5.3, partitioning the field population
 a star is a STAR or a PAHC member of the Monte Carlo, never both, weighted
 `W_STAR*(1-P_PAHC)`/`W_STAR*P_PAHC`), GAL (sec. 5.4: SWIRE's four IRAC fluxes
 per galaxy, S from the counts law's own node, colours from a galaxy measured at
-that node, at `x=1`), YSO (sec. 5.5: the region's own fixed-seed draw of
-`N_MC` YSO library templates by the population weight --
-`template_weights.yso_population_weight`'s Dunham et al. 2015 census
+that node, at `x=1`), YSO (sec. 5.5: a weighted quadrature over the population, no
+draw -- `N_YSO_NODES` quantile nodes of the register's own census weight
+(`template_weights.yso_population_weight`'s Dunham et al. 2015 census
 density over `log10 f_ref,4.5,theta` divided by the library's density of
 templates in the same quantity, times inclination uniform in cos i and the
-evolutionary-class census (sec 1.4, owner's ruling 2026-09-09), the same
-construction `build_yso` uses -- each template's own eight `F_REF` scaled
-by `10^delta`, `delta` drawn per member from the region's own shift kernel
-(`bmstp.sample_cloud.shift_kernel`), placed along the
-sightline's own `p(x)` on the cloud interval, `bmstp.sample_cloud.sample_x`'s
-binned return) and H2S (sec. 5.6: the region's 2.12 um lognormal carried into
-the bands by the measured knot line-to-band ratios, at YSO's own `x`). AGB's
+evolutionary-class census, sec 1.4, owner's ruling 2026-09-09) crossed with the
+region's own shift-kernel cells (`bmstp.sample_cloud.shift_kernel`) and the
+sightline's own `p(x)` cells on the cloud interval (`bmstp.sample_cloud.
+sample_x`'s binned return) -- each template's own eight `F_REF` scaled by
+`10^delta` at the shift cell's own centre) and H2S (sec. 5.6: a weighted
+quadrature over the region's 2.12 um lognormal cells crossed with each IRAC
+band's own `N_RATIO_NODES`-quantile colour-ratio cells and YSO's own depth
+cells, the bands carried by the measured knot line-to-band ratios). AGB's
 members are the star-family sampler's own evolved stars (`bmstp.sample_star.
 sample_agb`), each carrying one shell template of its own drawn chemistry
 (Riebel+2012's optical-depth distribution, `bmstp.template_weights.build_agb`'s
 `tau` factor construction) whose eight `F_REF` are scaled so its own 4.5 um
 flux equals the star's `F_4.5`. All six classes enter the total-count check.
 
-GAL's catalogued density is a weighted quadrature over its whole population, no
-Monte Carlo draw (sec. 8): alongside it this build writes `N_CAT_CELL_GAL` (128,
-110, `grid.LOG10_X_EDGES` by `grid.LOG10_F45_EDGES`), the region's expected number
-of catalogued GAL objects per parameter cell, summing over cells to `RATIO_GAL *
-N_source`.
+GAL, YSO and H2S's catalogued densities are each a weighted quadrature over their
+own whole population, no Monte Carlo draw (sec. 8): alongside them this build
+writes `N_CAT_CELL_<C>` (128, 110, `grid.LOG10_X_EDGES` by `grid.LOG10_F45_EDGES`)
+for GAL, YSO and H2S, each class's own expected number of catalogued objects per
+parameter cell, summing over cells to `RATIO_<C> * N_source`.
 
 Every module on this atlas's worker path (this module, `knot_field`,
 `sample_gal`, `sample_star`, `sample_cloud`, `grid`, `density`,
@@ -60,6 +61,7 @@ import h5py
 import healpy as hp
 import numpy as np
 from joblib import Parallel, delayed
+from scipy.special import ndtri
 
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
@@ -127,6 +129,43 @@ MIN_BANDS_CLEAR = selection_module.MIN_BANDS
 #: `catalog.depth_grid`), so the collapse moves `catalogued_probability`'s
 #: result by much less than the roll-off itself resolves.
 GAL_COLOUR_CELL_DEX = 0.05
+
+#: YSO's template quadrature (sec. 5.5 "Marks"): equally spaced quantile
+#: nodes of the register's own census weight, replacing the region-wide
+#: fixed-seed draw. 500 is the smallest of {250, 500, 1000, 2000} whose
+#: per-pixel `frac` at the region's median-column sightline is within the
+#: 0.005 bar of the fine (4000-node, full shift/depth-cell) reference --
+#: 250 misses the bar (0.0056), 500 clears it (0.0004);
+#: `reports/W67e.md`'s convergence table is that check's evidence.
+N_YSO_NODES = 500
+
+#: YSO's distance-shift quadrature (sec. 5.5 "Marks"): equally spaced
+#: quantile nodes of the region's own shift kernel (in place of every
+#: kernel cell with nonzero mass, which made the member set too large --
+#: `reports/W67e.md`), each node the kernel's own cell centre at that
+#: quantile, weight `1/N_YSO_SHIFT_NODES`.
+N_YSO_SHIFT_NODES = 5
+
+#: YSO and H2S's shared depth quadrature (sec. 5.5/5.6 "Marks"): equally
+#: spaced quantile nodes of the sightline's own `p(x)` (in place of every
+#: `p(x)` cell with nonzero mass), each node the cell centre at that
+#: quantile, weight `1/N_DEPTH_NODES`.
+N_DEPTH_NODES = 8
+
+#: H2S's colour-ratio quadrature (sec. 5.6 "Marks"): equally spaced
+#: quantile nodes of each IRAC band's own Giannini table, one band
+#: independent of the others so the joint is their product (3**4 = 81
+#: nodes).
+N_RATIO_NODES = 3
+
+#: H2S's surface-brightness quadrature (sec. 5.6 "Marks"): equally spaced
+#: quantile nodes of the region's own lognormal itself (`scipy.special.
+#: ndtri`'s exact inverse CDF), in place of the cell-integrated grid
+#: this replaced (that grid's finer resolution held the 0.005 bar on its
+#: own; crossed with the coarse ratio and depth quadratures below, this
+#: fixed node count does not -- `reports/W67e.md`'s convergence table
+#: reports the resulting relative difference at the median sightline).
+N_SIGMA_NODES = 8
 
 _HPX512_PIXEL_DEG2 = 41252.96 / (12 * 512 ** 2)
 
@@ -810,93 +849,224 @@ def _draw_x(rng, p_x, n):
     return 10.0 ** log10_u
 
 
+def _quantile_nodes_from_weight(values, weight, n):
+    """`n` equally spaced quantile nodes `(i+0.5)/n` of `values` weighted
+    by `weight` (any positive scale, need not be pre-sorted): `values`
+    sorted, the weight's cumulative sum normalised, `np.searchsorted` at
+    each quantile -- the same construction the template register's own
+    quantile nodes use, generalised to an arbitrary (values, weight)
+    pair (`shift_quantile_nodes`, `_depth_nodes`)."""
+    order = np.argsort(values)
+    v_sorted, w_sorted = values[order], weight[order]
+    csum = np.cumsum(w_sorted) / w_sorted.sum()
+    q = (np.arange(n) + 0.5) / n
+    idx = np.clip(np.searchsorted(csum, q), 0, v_sorted.size - 1)
+    return v_sorted[idx]
+
+
+def _yso_region_nodes(config, region, d_front, d_back):
+    """`(flux0_ts, w_ts)`, region-wide, built once (sec. 5.5 "Marks"):
+    the product of two independent quadratures, each a set of nodes with
+    weights summing to one. Templates: `N_YSO_NODES` equally spaced
+    quantiles of the register's own census weight (`_yso_register`'s
+    `weight`), each carrying weight `1/N_YSO_NODES`, its own eight
+    `F_REF` floored at the register's own `FLOOR_LINEAR`. Distance
+    shift: `N_YSO_SHIFT_NODES` equally spaced quantiles of the region's
+    own shift kernel (`sample_cloud.shift_kernel`), each a node at its
+    own cell centre on `grid.LOG10_F45_EDGES` (`_quantile_nodes_from_weight`),
+    weight `1/N_YSO_SHIFT_NODES` -- every kernel cell with nonzero mass
+    made the member set too large (`reports/W67e.md`). The product set
+    (`np.repeat`/`np.tile`, no Python loop over nodes): `flux0_ts[i,:] =
+    flux0_template * 10**delta`, `w_ts = w_template * w_shift`."""
+    reg = _yso_register(config)
+    weight_t, f_ref, floor_linear = reg["weight"], reg["f_ref"], reg["floor_linear"]
+    csum = np.cumsum(weight_t) / weight_t.sum()
+    q = (np.arange(N_YSO_NODES) + 0.5) / N_YSO_NODES
+    idx_t = np.clip(np.searchsorted(csum, q), 0, weight_t.size - 1)
+    flux0_t = np.empty((N_YSO_NODES, N_BANDS), dtype=np.float64)
+    for k, key in enumerate(BAND_KEYS):
+        flux0_t[:, k] = np.maximum(f_ref[key][idx_t], floor_linear[idx_t])
+    w_t = np.full(N_YSO_NODES, 1.0 / N_YSO_NODES)
+
+    kernel, _mo_k = sample_cloud.shift_kernel(config, region, d_front, d_back)
+    mask_s = kernel > 0
+    all_centers = grid.LOG10_F45_EDGES[:-1] + 0.5 * grid.D_LOG10_F45
+    shift_centers = _quantile_nodes_from_weight(all_centers[mask_s], kernel[mask_s], N_YSO_SHIFT_NODES)
+    scale_s = 10.0 ** shift_centers
+    n_s = N_YSO_SHIFT_NODES
+    w_s = np.full(n_s, 1.0 / n_s)
+
+    flux0_ts = np.repeat(flux0_t, n_s, axis=0) * np.tile(scale_s, N_YSO_NODES)[:, None]
+    w_ts = np.repeat(w_t, n_s) * np.tile(w_s, N_YSO_NODES)
+    return flux0_ts, w_ts
+
+
+def _h2s_sigma_nodes(logsig_mean, logsig_std):
+    """`(centers, weight)`, `N_SIGMA_NODES` equally spaced quantiles
+    `(i+0.5)/N_SIGMA_NODES` of the region's own lognormal itself (sec.
+    5.6 "Marks"): `scipy.special.ndtri`'s exact inverse standard-normal
+    CDF at each quantile, scaled by `logsig_std` and shifted by
+    `logsig_mean` -- each node weight `1/N_SIGMA_NODES`."""
+    q = (np.arange(N_SIGMA_NODES) + 0.5) / N_SIGMA_NODES
+    centers = logsig_mean + logsig_std * ndtri(q)
+    return centers, np.full(N_SIGMA_NODES, 1.0 / N_SIGMA_NODES)
+
+
+def _h2s_region_nodes(logsig_mean, logsig_std, giannini_ratios):
+    """`(flux0_br, w_br)`, region-wide, built once (sec. 5.6 "Marks"):
+    the product of the brightness lognormal's own cells
+    (`_h2s_sigma_nodes`) and the four IRAC bands' own colour-ratio
+    quadrature. Each band's ratio is drawn from its own Giannini table
+    independently today, so the joint is a product measure: the sorted
+    table sampled at `N_RATIO_NODES` equally spaced quantiles
+    `(i+0.5)/N_RATIO_NODES`, weight `1/N_RATIO_NODES` each, the four
+    bands' nodes crossed (`N_RATIO_NODES**4` joint nodes, weight the
+    product). `flux0_br` from `knot_ks_log10_flux` and the ratios exactly
+    as before (J, H, M1 zero)."""
+    sigma_centers, w_sigma = _h2s_sigma_nodes(logsig_mean, logsig_std)
+    n_sig = sigma_centers.size
+
+    band_nodes = {}
+    for band in h2s_module.IRAC_RATIO_BAND_KEYS:
+        table = np.sort(np.asarray(giannini_ratios[band], dtype=np.float64))
+        n_tab = table.size
+        qidx = np.clip(np.floor((np.arange(N_RATIO_NODES) + 0.5) / N_RATIO_NODES * n_tab).astype(np.int64),
+                        0, n_tab - 1)
+        band_nodes[band] = table[qidx]
+
+    mesh = np.meshgrid(*[band_nodes[b] for b in h2s_module.IRAC_RATIO_BAND_KEYS], indexing="ij")
+    ratio_joint = {b: mesh[i].ravel() for i, b in enumerate(h2s_module.IRAC_RATIO_BAND_KEYS)}
+    n_ratio = ratio_joint[h2s_module.IRAC_RATIO_BAND_KEYS[0]].size
+    w_ratio = np.full(n_ratio, 1.0 / n_ratio)
+
+    sigma_full = np.repeat(sigma_centers, n_ratio)
+    w_br = np.repeat(w_sigma, n_ratio) * np.tile(w_ratio, n_sig)
+    log10_f_ks = h2s_module.knot_ks_log10_flux(sigma_full)
+    flux0_br = np.zeros((sigma_full.size, N_BANDS), dtype=np.float64)
+    flux0_br[:, BAND_KEYS.index("Ks")] = 10.0 ** log10_f_ks
+    for band in h2s_module.IRAC_RATIO_BAND_KEYS:
+        ratio_full_b = np.tile(ratio_joint[band], n_sig)
+        flux0_br[:, BAND_KEYS.index(band)] = 10.0 ** (log10_f_ks + ratio_full_b)
+    return flux0_br, w_br
+
+
+def _depth_nodes(loaded_profile, sl_row, d_front, d_back):
+    """`(x_centers, weight)`: `N_DEPTH_NODES` equally spaced quantiles of
+    the sightline's own `p(x)` (`sample_cloud.sample_x`'s binned return
+    on `grid.LOG10_X_EDGES`), each node at its own cell centre
+    (`_quantile_nodes_from_weight`), weight `1/N_DEPTH_NODES` -- every
+    `p(x)` cell with nonzero mass made the member set too large
+    (`reports/W67e.md`); shared by YSO and H2S (sec. 5.5/5.6, the same
+    `p(x)`, no second depth quadrature)."""
+    p_x, _mo_x, _removed_frac = sample_cloud.sample_x(loaded_profile, sl_row, d_front, d_back)
+    mask = p_x > 0
+    width = grid.LOG10_X_EDGES[1] - grid.LOG10_X_EDGES[0]
+    centers = grid.LOG10_X_EDGES[:-1] + 0.5 * width
+    log10x_nodes = _quantile_nodes_from_weight(centers[mask], p_x[mask], N_DEPTH_NODES)
+    x_centers = 10.0 ** log10x_nodes
+    return x_centers, np.full(N_DEPTH_NODES, 1.0 / N_DEPTH_NODES)
+
+
+def _combine_with_depth(flux0_pre, w_pre, x_centers, w_depth):
+    """The product set of a region-wide (template x shift, or brightness
+    x ratio) node table with one sightline's own depth nodes:
+    `(u, flux0, w)`, built with `np.tile`/`np.repeat`, no Python loop over
+    nodes."""
+    n_pre = flux0_pre.shape[0]
+    n_d = x_centers.size
+    flux0_full = np.tile(flux0_pre, (n_d, 1))
+    w_full = np.tile(w_pre, n_d) * np.repeat(w_depth, n_pre)
+    u_full = np.repeat(x_centers, n_pre)
+    return u_full, flux0_full, w_full
+
+
+def _safe_cell_bin(u, log10_f45, c_m):
+    """`grid.bin(u, log10_f45, c_m) * c_m.sum()`, guarded against a
+    sightline with zero total catalogued weight (`c_m.sum() == 0`, e.g.
+    a sightline with essentially no catalogued members at all): `grid.
+    bin`'s own `H = H / total_weight` step is `0/0` there, which would
+    poison the region-wide accumulator (`n_cat_cell["YSO"] += ...`) with
+    NaN for every sightline summed after it -- returns an all-zero
+    (128, 110) cell grid instead, the same convention `_build_one_tile`'s
+    own empty-population branch already uses."""
+    total = float(c_m.sum())
+    if total <= 0.0:
+        return np.zeros((grid.LOG10_X_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1), dtype=np.float64)
+    H, _out = grid.bin(u, log10_f45, c_m)
+    return H * total
+
+
 def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, arm_in_sl, f_lim_in_sl,
-                          loaded_profile, flux0_yso, cloud_frac_sl, d_front, d_back,
-                          logsig_mean, logsig_std, giannini_ratios, width_dex, seed,
+                          loaded_profile, flux0_ts, w_ts, cloud_frac_sl, d_front, d_back,
+                          flux0_br, w_br, width_dex,
                           weight_pix, eta_r, l_of_pix_in_sl):
-    """One sightline's YSO and H2S Monte Carlo draws, shared by every
-    admitted pixel it parents: `(frac_yso, mc_yso, density_yso, frac_h2s,
-    mc_h2s, frac_yso_bright3, frac_yso_bright10, frac_h2s_bright3,
-    frac_h2s_bright10, total_se_yso, total_se_h2s)` (sec. 9's bright-end
-    check, same draws). YSO (sec.
-    5.5): `flux0_yso` is the region's own fixed-seed draw of library
-    templates by the population weight, IDENTICAL at every sightline
-    (`_yso_template_pool`, computed once by the caller); only the
-    placement `x` is drawn here, per sightline, from this sightline's own
-    `p(x)` on the cloud interval (`bmstp.sample_cloud.sample_x`'s binned
-    return, `_draw_x`); density `population.yso.law_count` on the CLOUD'S
-    own share of the GAS column, `a_col_gas_in_sl * cloud_frac_sl`
-    (`bmstp.density._cloud_column_fraction`, W26; `a_col_in_sl`, the
-    extinction column, is kept for the members' own dimming below,
-    never for the law) -- the count check compares intrinsic members
-    through the pixel's own completeness below, so no on-grid factor
-    enters here (a member below the grid's retention edge is simply
-    never accepted, sec. 8).
-    H2S (sec. 5.6): 2.12 um surface brightness from the region's own
-    `LOGSIG_MEAN`/`LOGSIG_STD` lognormal, carried into Ks
-    (`population.h2s.knot_ks_log10_flux`) and the four IRAC bands (a
-    Giannini colour-ratio vector drawn per member; J, H, M1 unmeasured,
-    zero flux, disclosed), at YSO's own `x` (the same `p(x)`, an
-    independent draw); H2S's own density is `density_yso * eta_r *
-    eps_ext` (sec. 5.6 "Sky density", the same young-star law density
-    scaled by the region's knot rate and extraction fraction), computed
-    by the caller from this same `density_yso`, not here.
+    """One sightline's YSO and H2S quadratures over the population, no
+    draw, shared by every admitted pixel it parents: `(frac_yso,
+    density_yso, frac_yso_bright3, frac_yso_bright10, n_cat_cell_yso,
+    frac_h2s, frac_h2s_bright3, frac_h2s_bright10, n_cat_cell_h2s,
+    n_members_yso, n_members_h2s)` (sec. 9's bright-end check, same
+    members).
+
+    YSO (sec. 5.5): `flux0_ts`/`w_ts` are the region's own template x
+    shift product (`_yso_region_nodes`, computed once by the caller),
+    IDENTICAL at every sightline; only the depth factor (`_depth_nodes`,
+    this sightline's own `p(x)`) is formed here, crossed with the shared
+    table (`_combine_with_depth`). Density `population.yso.law_count` on
+    the CLOUD'S own share of the GAS column, `a_col_gas_in_sl *
+    cloud_frac_sl` (`bmstp.density._cloud_column_fraction`, W26;
+    `a_col_in_sl`, the extinction column, is kept for the members' own
+    dimming below, never for the law).
+
+    H2S (sec. 5.6): `flux0_br`/`w_br` are the region's own brightness x
+    colour-ratio product (`_h2s_region_nodes`, computed once by the
+    caller), crossed with YSO's own depth nodes (the same `p(x)`, no
+    second depth quadrature). H2S's own density is `l_of_pix_in_sl *
+    eta_r * eps_ext` (sec. 5.6 "Sky density"), folded directly into the
+    `weight_pix` `catalogued_fraction` receives, so its own `s_member`
+    already carries the density factor.
+
     `width_dex` is `catalog.depth_grid`'s `W_DEX_PIX` (sec. 3.3): one
     value per band for the region, broadcast to this sightline's own
-    pixels (n_pix_in_sl, 8), not a per-pixel fit.
+    pixels. `weight_pix` (n_pix_in_sl,) is this sightline's own pixels'
+    coverage times pixel area.
 
-    `weight_pix` (n_pix_in_sl,) is this sightline's own pixels' coverage
-    times pixel area, the coefficient the caller sums a class's `density
-    * frac` by to build the region total; `total_se_yso`/`total_se_h2s`
-    are the resulting Monte Carlo standard error this ONE sightline draw
-    contributes to that total (`_accepted_fraction`'s `block_total_se`,
-    weighted by `density_yso` for YSO). H2S's own weight is
-    `l_of_pix_in_sl * eta_r * eps_ext`: `l_of_pix_in_sl` is the SAME young-star
-    law `n_cat["H2S"]` is built from (sec. 5.6) -- the region's Herschel-arm
-    convolution where it reaches, `density_yso` (the point law) elsewhere --
-    not the point law `density_yso` itself; the standard error scales with
-    the mean it is a fraction of, so the weight the caller convolves must
-    be the one the density line uses, never the pre-convolution law. This
-    weight is deterministic (no rng draw), so it induces no covariance
-    between sightlines: `total_se_h2s` at different sightlines is
-    independent (`build_region` sums these in quadrature).
-
-    `flux0_yso` is one region-wide fixed-seed draw, IDENTICAL at every
-    sightline, unlike H2S's own per-sightline `log10_sigma`/Giannini-ratio/
-    `u_h2s` draws (all fresh from this call's own `rng`): the YSO Monte
-    Carlo fluctuation this shared draw induces is correlated across every
-    sightline that shares it (`u_yso`'s own placement remains independent
-    per sightline, so the correlation is partial, not total) --
-    `build_region`'s own docstring paragraph sums `total_se_yso` linearly
-    across sightlines as the fully-correlated upper bound on that shared
-    component, never claiming it as the error itself."""
-    rng = np.random.RandomState(seed)
-
-    p_x, _mo_x, _removed_frac = sample_cloud.sample_x(loaded_profile, sl_row, d_front, d_back)
+    Cell grids (W67c's own construction): `c_m = (w_m/w.sum()) *
+    s_member[m]`, `s_member` `catalogued_fraction`'s own pixel-area-
+    weighted catalogued probability per member -- for YSO the `weight_pix`
+    argument passed to `catalogued_fraction` already carries
+    `density_yso` (per pixel, since the young-star law varies pixel to
+    pixel even within one sightline), and for H2S it already carries
+    `l_of_pix_in_sl * eta_r * eps_ext`, so `s_member` in both cases is
+    already density-weighted and no second multiply is needed;
+    `grid.bin(u, log10 F_4.5, c_m) * c_m.sum()` with `log10 F_4.5` the
+    member's own undimmed `log10 flux0[:, IDX_I2]`. No `rng`, no `seed`,
+    no `_draw_x`: every factor here is a deterministic quadrature, so
+    this call induces no Monte Carlo error and no correlation between
+    sightlines -- the caller supplies zero to the error bookkeeping that
+    remains."""
     a_cloud_in_sl = a_col_gas_in_sl * cloud_frac_sl
     density_yso = yso_module.law_count(config, region, a_cloud_in_sl, arm_in_sl)
 
-    u_yso = _draw_x(rng, p_x, N_MC)
-    frac_yso, mc_yso, frac_yso_bright3, frac_yso_bright10, _blk_yso, total_se_yso = _accepted_fraction(
-        a_col_in_sl, u_yso, flux0_yso, f_lim_in_sl, width_dex, config,
+    x_centers, w_depth = _depth_nodes(loaded_profile, sl_row, d_front, d_back)
+
+    u_yso, flux0_yso_full, w_yso_full = _combine_with_depth(flux0_ts, w_ts, x_centers, w_depth)
+    frac_yso, frac_yso_bright3, frac_yso_bright10, s_member_yso = catalogued_fraction(
+        a_col_in_sl, u_yso, flux0_yso_full, w_yso_full, f_lim_in_sl, width_dex, config,
         weight_pix=density_yso * weight_pix)
+    c_m_yso = (w_yso_full / w_yso_full.sum()) * s_member_yso
+    n_cat_cell_yso = _safe_cell_bin(u_yso, np.log10(flux0_yso_full[:, IDX_I2]), c_m_yso)
 
-    log10_sigma = rng.normal(logsig_mean, logsig_std, size=N_MC)
-    log10_f_ks = h2s_module.knot_ks_log10_flux(log10_sigma)
-    flux0_h2s = np.zeros((N_MC, N_BANDS), dtype=np.float64)
-    flux0_h2s[:, BAND_KEYS.index("Ks")] = 10.0 ** log10_f_ks
-    for band in h2s_module.IRAC_RATIO_BAND_KEYS:
-        table = giannini_ratios[band]
-        ratio_draw = table[rng.randint(0, table.size, size=N_MC)]
-        flux0_h2s[:, BAND_KEYS.index(band)] = 10.0 ** (log10_f_ks + ratio_draw)
-    u_h2s = _draw_x(rng, p_x, N_MC)
+    u_h2s, flux0_h2s_full, w_h2s_full = _combine_with_depth(flux0_br, w_br, x_centers, w_depth)
     weight_h2s = l_of_pix_in_sl * eta_r * density_module.EPS_EXT * weight_pix
-    frac_h2s, mc_h2s, frac_h2s_bright3, frac_h2s_bright10, _blk_h2s, total_se_h2s = _accepted_fraction(
-        a_col_in_sl, u_h2s, flux0_h2s, f_lim_in_sl, width_dex, config, weight_pix=weight_h2s)
+    frac_h2s, frac_h2s_bright3, frac_h2s_bright10, s_member_h2s = catalogued_fraction(
+        a_col_in_sl, u_h2s, flux0_h2s_full, w_h2s_full, f_lim_in_sl, width_dex, config,
+        weight_pix=weight_h2s)
+    c_m_h2s = (w_h2s_full / w_h2s_full.sum()) * s_member_h2s
+    n_cat_cell_h2s = _safe_cell_bin(u_h2s, np.log10(flux0_h2s_full[:, IDX_I2]), c_m_h2s)
 
-    return (frac_yso, mc_yso, density_yso, frac_h2s, mc_h2s,
-            frac_yso_bright3, frac_yso_bright10, frac_h2s_bright3, frac_h2s_bright10,
-            total_se_yso, total_se_h2s)
+    return (frac_yso, density_yso, frac_yso_bright3, frac_yso_bright10, n_cat_cell_yso,
+            frac_h2s, frac_h2s_bright3, frac_h2s_bright10, n_cat_cell_h2s,
+            int(u_yso.size), int(u_h2s.size))
 
 
 def _herschel_convolved_law(law_map, law_wcs, pix, arm, density_yso_pix):
@@ -1373,13 +1543,12 @@ def build_region(config, region):
         # sightline (`_build_one_sightline`'s own docstring paragraph).
         total_var = 0.0
 
-        # STAR/PAHC/AGB (sec. 5.1-5.2): each class's own catalogued
-        # weighted sum over its whole population is exact (`_build_one_
-        # tile`'s own docstring), so it carries no Monte Carlo error of
-        # its own -- `total_var`'s bookkeeping above (still summed for
-        # GAL/H2S/YSO below) takes zero from these three.
+        # every class is now a deterministic quadrature (sec. 8): none of
+        # the six carries a Monte Carlo error of its own -- `total_var`
+        # stays zero throughout, kept only so the region total's write
+        # block below still has a (zero) error to report.
         n_cat_cell = {c: np.zeros((grid.LOG10_X_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1))
-                      for c in ("STAR", "PAHC", "AGB")}
+                      for c in ("STAR", "PAHC", "AGB", "YSO", "H2S")}
 
         def _one(tile_id):
             m = usable & (tile_of_pix == tile_id)
@@ -1443,12 +1612,11 @@ def build_region(config, region):
         # sightline's whole adopted column.
         cloud_frac_by_sl, d_front = density_module._cloud_column_fraction(config, region)
         _d_front, d_back = sample_cloud.cloud_interval_pc(config, region)
-        # YSO's members: one fixed-seed draw of N_MC library templates by
-        # the population weight and the region's own shift kernel (sec.
-        # 5.5 "Template weights"), shared by every sightline
-        # of the region.
-        flux0_yso = _yso_template_pool(config, region, d_front, d_back, N_MC,
-                                        MC_SEED + _SEED_OFFSET_YSO_POOL)
+        # YSO's members: the region-wide template x shift-kernel
+        # quadrature (sec. 5.5 "Template weights"), built once, shared by
+        # every sightline of the region -- only the depth factor differs
+        # per sightline (`_build_one_sightline`).
+        flux0_ts, w_ts = _yso_region_nodes(config, region, d_front, d_back)
         giannini_ratios = h2s_module._load_giannini_ratios(config)
         # H2S's brightness lognormal (sec. 5.6 "Marks") is P3's own
         # attribute (`bmstp.shapes.build_cloud`, sec. 4.1's shape grids):
@@ -1461,6 +1629,10 @@ def build_region(config, region):
             logsig_std = float(f.attrs["LOGSIG_STD"])
             p3_sl_axis = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
             on_grid_yso_p3 = np.asarray(f["ON_GRID_YSO"][:], dtype=np.float64)
+        # H2S's own brightness x colour-ratio quadrature (sec. 5.6
+        # "Marks"), region-wide, built once, crossed with YSO's own depth
+        # nodes per sightline (`_build_one_sightline`).
+        flux0_br, w_br = _h2s_region_nodes(logsig_mean, logsig_std, giannini_ratios)
 
         sl_axis = loaded_profile["hpx_pix_256"]
         order_sl = np.argsort(sl_axis)
@@ -1517,50 +1689,44 @@ def build_region(config, region):
 
         def _one_sl(sl_row):
             m = sl_row_of_pix == sl_row
-            (f_y, e_y, d_y, f_h, e_h,
-             fb3_y, fb10_y, fb3_h, fb10_h, se_y, se_h) = _build_one_sightline(
+            (f_y, d_y, fb3_y, fb10_y, ncc_y,
+             f_h, fb3_h, fb10_h, ncc_h, n_mem_y, n_mem_h) = _build_one_sightline(
                 config, region, sl_row, a_col[m], a_col_gas[m], arm[m], f_lim[m],
-                loaded_profile, flux0_yso, float(cloud_frac_by_sl[sl_row]), d_front, d_back,
-                logsig_mean, logsig_std, giannini_ratios, width_dex[m],
-                MC_SEED + _SEED_OFFSET_SIGHTLINE + sl_row,
+                loaded_profile, flux0_ts, w_ts, float(cloud_frac_by_sl[sl_row]), d_front, d_back,
+                flux0_br, w_br, width_dex[m],
                 coverage[m] * _HPX512_PIXEL_DEG2, eta_r, l_of_pix_for_weight[m])
-            return m, f_y, e_y, d_y, f_h, e_h, fb3_y, fb10_y, fb3_h, fb10_h, se_y, se_h
+            return m, f_y, d_y, fb3_y, fb10_y, ncc_y, f_h, fb3_h, fb10_h, ncc_h, n_mem_y, n_mem_h
 
         frac_h2s_pix = np.full(n_pix, np.nan, dtype=np.float64)
         frac_h2s_bright3_pix = np.full(n_pix, np.nan, dtype=np.float64)
         frac_h2s_bright10_pix = np.full(n_pix, np.nan, dtype=np.float64)
         density_yso_pix = np.full(n_pix, np.nan, dtype=np.float64)
         results_sl = Parallel(n_jobs=n_jobs)(delayed(_one_sl)(r) for r in sls_here)
-        # rule (1): `flux0_yso` (`_yso_template_pool`) is the ONLY randomly
-        # drawn quantity shared by every sightline -- H2S's own draws
-        # (`log10_sigma`, its Giannini ratio, `u_h2s`) are each generated
-        # fresh from that sightline's own `RandomState`, so H2S's
-        # per-sightline errors are independent and add in quadrature, same
-        # as the tile-drawn star families. YSO's shared `flux0_yso` makes
-        # every sightline's own fluctuation correlated with every other's
-        # in that one component; summing `se_y` linearly is the fully-
-        # correlated case, an UPPER BOUND on the true (partially
-        # correlated, since `u_yso` is still drawn per sightline) error,
-        # squared once, below, into the region total's variance.
-        se_yso_sum = 0.0
-        for i, (m, f_y, e_y, d_y, f_h, e_h, fb3_y, fb10_y, fb3_h, fb10_h, se_y, se_h) in enumerate(results_sl):
+        # every sightline's own quadrature is deterministic (no `rng`, no
+        # shared draw): unlike the old Monte Carlo path, YSO's shared
+        # region-wide template x shift table is a fixed number, not a
+        # random sample, so it induces no covariance between sightlines
+        # and no error term of its own.
+        n_members_yso_list, n_members_h2s_list = [], []
+        for i, (m, f_y, d_y, fb3_y, fb10_y, ncc_y, f_h, fb3_h, fb10_h, ncc_h, n_mem_y, n_mem_h) in enumerate(results_sl):
             n_cat["YSO"][m] = d_y * f_y
             intensity["YSO"][m] = d_y
-            mc_err["YSO"][m] = e_y
-            mc_err["H2S"][m] = e_h
+            mc_err["YSO"][m] = 0.0
+            mc_err["H2S"][m] = 0.0
             frac_h2s_pix[m] = f_h
             density_yso_pix[m] = d_y
             n_cat_bright3["YSO"][m] = d_y * fb3_y
             n_cat_bright10["YSO"][m] = d_y * fb10_y
             frac_h2s_bright3_pix[m] = fb3_h
             frac_h2s_bright10_pix[m] = fb10_h
-            se_yso_sum += se_y
-            total_var += se_h ** 2
+            n_cat_cell["YSO"] += ncc_y
+            n_cat_cell["H2S"] += ncc_h
+            n_members_yso_list.append(n_mem_y)
+            n_members_h2s_list.append(n_mem_h)
             st.tick(i + 1, len(sls_here), "sightlines")
-        # the Cauchy-Schwarz upper bound on YSO's shared-draw contribution
-        # (comment above): `(sum se)^2 >= sum se^2`, so this never
-        # understates the correlated component.
-        total_var += se_yso_sum ** 2
+        print(f"bmstp.atlas {region}: YSO members/sightline median={int(np.median(n_members_yso_list))} "
+              f"max={int(np.max(n_members_yso_list))}; H2S members/sightline "
+              f"median={int(np.median(n_members_h2s_list))} max={int(np.max(n_members_h2s_list))}")
 
         # this atlas's own INTRINSIC YSO density (before retention),
         # multiplied by P3's own `ON_GRID_YSO` at the pixel's sightline:
@@ -1738,6 +1904,8 @@ def build_region(config, region):
             f.create_dataset("N_CAT_CELL_STAR", data=n_cat_cell["STAR"].astype(np.float32))
             f.create_dataset("N_CAT_CELL_PAHC", data=n_cat_cell["PAHC"].astype(np.float32))
             f.create_dataset("N_CAT_CELL_AGB", data=n_cat_cell["AGB"].astype(np.float32))
+            f.create_dataset("N_CAT_CELL_YSO", data=n_cat_cell["YSO"].astype(np.float32))
+            f.create_dataset("N_CAT_CELL_H2S", data=n_cat_cell["H2S"].astype(np.float32))
             for c in built:
                 f.create_dataset(f"SHARE_{c}", data=share[c].astype(np.float32))
             f.create_dataset("N_OBS", data=n_obs.astype(np.int32))
