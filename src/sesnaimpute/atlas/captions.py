@@ -45,6 +45,11 @@ VOCABULARY = (
     ("cataloged",
      "passing the survey's selection at the sky pixel: two of the eight bands "
      "measured above the pixel's limits"),
+    ("measured coordinate r = a_hat / A_beam",
+     "the fitted foreground over the sightline's own BEAM-averaged column, rather than "
+     "x's own true pencil column; the column kernel carries a class's shape past the wall "
+     "(log10 r > 0, the array's one-dex padding) into real mass there -- a pencil column "
+     "above the beam mean, never folded back -- so both rows draw it past the x = 1 line"),
 )
 
 #: The probability each panel draws, one statement per panel kind.
@@ -107,12 +112,24 @@ PROTOSTAR_POSITION = (
     "every cataloged source's own pixel.")
 
 PROTOSTAR_DEPTH = (
-    "depth: {n_wall} of {n_used} protostars' own foreground column exceeds "
-    "their sightline's own column and sit at the wall (x capped at 1, log10 "
-    "x = 0) -- a sightline's column is the beam's average along the whole "
-    "line of sight, while a protostar's own fitted foreground reads its own "
-    "envelope, so a protostar can sit past the wall by construction, not by "
-    "a match error.")
+    "depth: {n_past_wall} of {n_used} protostars' own foreground column exceeds "
+    "their sightline's own BEAM column $A_\\mathrm{{beam}}$ (the extinction column of "
+    "sec. 3.2's own A_COL_K) and read past the wall in the measured coordinate "
+    "(log10 r_p > 0) -- a beam column is the average along the whole line of sight, "
+    "while a protostar's own fitted foreground reads its own envelope, so a protostar "
+    "can sit past the wall by construction, not by a match error; {n_beyond_reach} of "
+    "{n_used} lie beyond the kernel's reach (P(T >= a_p) < 0.01) and are drawn at the "
+    "wall with an open marker and no interval.")
+
+PROTOSTAR_KERNEL_CHECK = (
+    "kernel check: this compares the column kernel's own 36 arcsec-beam width, "
+    "extrapolated to a cloud member's own beam ratio log10 r_p = log10 x_member + y "
+    "(x_member from the region's median-sightline YSO x marginal, y from each "
+    "protostar's own class kernel at its column), against the sample's own ratio "
+    "distribution -- empirical log10 r_p has median {emp_median:.3f}, 84th percentile "
+    "{emp_p84:.3f} over {n_used} protostars; the kernel predicts median {pred_median:.3f}, "
+    "84th percentile {pred_p84:.3f}; {frac_beyond:.3f} of protostars lie beyond the "
+    "kernel's reach.")
 
 PROTOSTAR_TIERS = (
     "of {n_used} protostars used: {n_measured} with a measured 4.5 micron "
