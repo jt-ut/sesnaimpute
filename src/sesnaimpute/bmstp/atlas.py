@@ -33,6 +33,12 @@ sample_agb`), each carrying one shell template of its own drawn chemistry
 `tau` factor construction) whose eight `F_REF` are scaled so its own 4.5 um
 flux equals the star's `F_4.5`. All six classes enter the total-count check.
 
+GAL's catalogued density is a weighted quadrature over its whole population, no
+Monte Carlo draw (sec. 8): alongside it this build writes `N_CAT_CELL_GAL` (128,
+110, `grid.LOG10_X_EDGES` by `grid.LOG10_F45_EDGES`), the region's expected number
+of catalogued GAL objects per parameter cell, summing over cells to `RATIO_GAL *
+N_source`.
+
 Every module on this atlas's worker path (this module, `knot_field`,
 `sample_gal`, `sample_star`, `sample_cloud`, `grid`, `density`,
 `template_weights`, `sky.derived.profile`, `fittp.likelihood`,
@@ -98,15 +104,17 @@ N_MC = 10_000
 #: tile id, so two runs draw the same members.
 MC_SEED = 137
 
-#: Disjoint offsets for the four independent draw streams that share
+#: Disjoint offsets for the three independent draw streams that share
 #: `MC_SEED` (sec. 8's "a fixed-seed sample"): a tile id, a sightline row,
-#: the region-wide YSO template pool, and GAL. Each offset is far larger
-#: than any real tile id or nside-256 sightline row (nside 256 has under
+#: and the region-wide YSO template pool. Each offset is far larger than
+#: any real tile id or nside-256 sightline row (nside 256 has under
 #: 800,000 pixels total), so no stream's range can reach into another's.
+#: GAL has no draw (sec. 8): its members are the deterministic quadrature
+#: `_gal_members` forms directly from the counts law and the SWIRE
+#: population, with no Monte Carlo sample and so no seed of its own.
 _SEED_OFFSET_TILE = 0
 _SEED_OFFSET_SIGHTLINE = 100_000_000
 _SEED_OFFSET_YSO_POOL = 200_000_000
-_SEED_OFFSET_GAL = 300_000_000
 
 #: Two of eight bands clear -- the survey's own catalogue rule (sec. 1.2),
 #: the same constant `population.selection.MIN_BANDS` sets.
@@ -368,9 +376,11 @@ def catalogued_probability(a_col, u, flux0, f_lim, width_dex, config):
     band with no flux at all out of this path already, so the two guards
     do not interact.
 
-    No batching inside: the caller (`_accepted_fraction`, rule 10b) passes
-    one pixel batch and its own slice of `a_col`/`f_lim`/`width_dex`; `u`
-    and `flux0` are the caller's whole (unsliced) member draw."""
+    No batching inside: the caller (`_accepted_fraction`/`catalogued_fraction`,
+    rule 10b) passes one pixel batch and its own slice of
+    `a_col`/`f_lim`/`width_dex`; `u` and `flux0` are the caller's whole
+    (unsliced) member draw."""
+    assert MIN_BANDS_CLEAR == 2, "the closed form below is `P(>=2 of 8)` only"
     a = a_col[:, None] * u[None, :]  # (n_pix, n_mem)
     w_ramp = selection_module.law_dense_weight(a)  # (n_pix, n_mem)
     kappa = selection_module.kappa_hybrid(config, w_ramp)  # (n_pix, n_mem, 8)
@@ -440,7 +450,6 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None, wei
     `frac`/`mc_error` outputs; `tick(done, total)` is called once per
     batch when given (only GAL's region-wide call passes one -- a tile or
     a sightline's own pixel count is already small)."""
-    assert MIN_BANDS_CLEAR == 2, "the closed form below is `P(>=2 of 8)` only"
     n_mc = u.size
     n_pix = a_col.size
     frac = np.empty(n_pix, dtype=np.float64)
@@ -476,6 +485,60 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None, wei
     else:
         block_total, block_total_se = None, None
     return frac, mc_error, frac_bright3, frac_bright10, block_total, block_total_se
+
+
+def catalogued_fraction(a_col, u, flux0, w, f_lim, width_dex, config, weight_pix, tick=None):
+    """`(frac, frac_bright3, frac_bright10, s_member)`: the weighted, deterministic
+    quadrature over a class's WHOLE population (SPEC_BMSTP_DRAFT.md sec. 8), no draw
+    -- exact up to the population's own binning, for every class whose members are
+    enumerated rather than Monte Carlo sampled (GAL first, sec. 5.4). `w` (n_mem,) is
+    each member's own population weight, on any positive scale; every mean below
+    normalises by `w.sum()`. `catalogued_probability` still supplies the per-pixel,
+    per-member catalogued probability (`p_cat`) and the I2-measured probability and
+    dimmed I2 flux for the bright tests (sec. 9); this function only forms the
+    weighted sums `_accepted_fraction`'s Monte Carlo mean/std would otherwise form.
+
+    `frac` (n_pix,) = `(p_cat @ w) / w.sum()`; `frac_bright3`/`frac_bright10` (sec. 9
+    "the bright-end count ratio") the same weighted mean restricted to members whose
+    dimmed I2 flux exceeds 3x/10x the pixel's own I2 50% limit -- the exact condition
+    the catalogue side applies to a catalogued source. `s_member` (n_mem,) =
+    `sum_pix weight_pix[pix] * p_cat[pix, m]`, the pixel-area-weighted catalogued
+    probability of that member over the whole region -- what `_accepted_fraction`'s
+    `block_sum` is per Monte Carlo draw, here exact per member (a region total built
+    from `density * (w / w.sum()) @ s_member` needs no further error term: there is
+    no draw left to have one).
+
+    Processed in pixel batches of `_pixel_batch_size` (rule 10b), exactly as
+    `_accepted_fraction`: each batch is the same elementwise-per-pixel computation on
+    a slice of `a_col`/`f_lim`/`width_dex`, so splitting the pixel axis changes no
+    result; `u`/`flux0`/`w` are the caller's whole (unsliced) population."""
+    n_mem = u.size
+    n_pix = a_col.size
+    w_sum = float(w.sum())
+    frac = np.empty(n_pix, dtype=np.float64)
+    frac_bright3 = np.empty(n_pix, dtype=np.float64)
+    frac_bright10 = np.empty(n_pix, dtype=np.float64)
+    s_member = np.zeros(n_mem, dtype=np.float64)
+    batch = _pixel_batch_size(n_mem)
+    n_batches = (n_pix + batch - 1) // batch
+    for b, start in enumerate(range(0, n_pix, batch)):
+        stop = min(start + batch, n_pix)
+        f_lim_b = f_lim[start:stop]
+        width_dex_b = width_dex[start:stop]
+        p_cat, catalogued_i2_measured, flux_i2 = catalogued_probability(
+            a_col[start:stop], u, flux0, f_lim_b, width_dex_b, config)
+        frac[start:stop] = (p_cat @ w) / w_sum
+
+        i2_lim_b = f_lim_b[:, IDX_I2:IDX_I2 + 1]  # (n_pix_batch, 1)
+        bright3 = flux_i2 > BRIGHT_MULT_3 * i2_lim_b
+        bright10 = flux_i2 > BRIGHT_MULT_10 * i2_lim_b
+        frac_bright3[start:stop] = ((catalogued_i2_measured * bright3) @ w) / w_sum
+        frac_bright10[start:stop] = ((catalogued_i2_measured * bright10) @ w) / w_sum
+
+        s_member += weight_pix[start:stop] @ p_cat
+        if tick is not None:
+            tick(b + 1, n_batches)
+    return frac, frac_bright3, frac_bright10, s_member
 
 
 def _pahc_weight(limit8_grid, p_pahc, x):
@@ -813,30 +876,40 @@ def _herschel_convolved_law(law_map, law_wcs, pix, arm, density_yso_pix):
     return l_of_pix
 
 
-def _gal_members(config, rng, n_mc):
-    """`(flux0, u)`, GAL's Monte Carlo sample (sec. 5.4): `S` drawn from
-    the counts law's own tabulated `log10 S` node
-    (`bmstp.sample_gal.sample`'s `phi(S).S` weight, the same law
-    `bmstp.shapes.build_gal` bins). The atlas's member and the fitter's GAL
-    template are ONE population by construction: the SWIRE galaxy this
-    draw's colour comes from is selected exactly as
-    `template_weights.build_galz` selects its own colour population --
-    `isfinite(COLOUR_I1I2) & isfinite(SIGMA_COLOUR_I1I2) & SIGMA_COLOUR_I1I2
-    > 0` (`sky/derived/swire/galaxies_swire_survey.hdf5`'s own `NODE` axis;
-    a node with no such galaxy borrows its nearest node that has one),
-    never SWIRE's own I3/I4-detected subset. The member's eight-band SED
-    is then the "galz" register's own template nearest that drawn
-    `COLOUR_I1I2` in
-    `log10 F_REF,I1 - log10 F_REF,I2` (the SAME register and colour axis
-    `build_galz` weights the fitter's GAL templates on), scaled so its own
-    `F_REF,I2` equals the drawn `S` (already I2's own flux) -- the template
-    the fitter would evaluate for that colour, never a flux built from
-    SWIRE's own I2I3/I2I4 ratios. J, H, Ks, M1 are unmeasured for a galaxy
-    and held at zero flux, so the two-of-eight test runs on the four IRAC
-    bands only (disclosed). `x = 1`: sec. 5.4's "whole column"."""
-    x_law, log10_s_grid, w_law = sample_gal.sample(config)
-    node_draw = rng.choice(log10_s_grid.size, size=n_mc, replace=True, p=w_law / w_law.sum())
-    s_draw = 10.0 ** log10_s_grid[node_draw]
+def _gal_members(config):
+    """`(flux0, u, w, log10_s, density)`, GAL's members, DETERMINISTIC (sec. 5.4): the
+    weighted sum over every member of the population, no draw -- exact up to the
+    population's own binning. One member per distinct `(counts-law node, galz
+    template)` pair actually realised in the SWIRE sample: at each of the counts
+    law's tabulated `log10 S` nodes (`bmstp.sample_gal.sample`'s `phi(S).S` weight
+    `w_law`, the same law `bmstp.shapes.build_gal` bins), the SWIRE galaxies AT THAT
+    NODE under the SAME selection `template_weights.build_galz` applies to its own
+    colour population -- `isfinite(COLOUR_I1I2) & isfinite(SIGMA_COLOUR_I1I2) &
+    SIGMA_COLOUR_I1I2 > 0` (`sky/derived/swire/galaxies_swire_survey.hdf5`'s own
+    `NODE` axis; a node with none borrows its nearest node that has one, exactly as
+    the retired Monte Carlo draw did) -- each mapped to its nearest "galz" register
+    template in `log10 F_REF,I1 - log10 F_REF,I2` (the SAME register and colour axis
+    `build_galz` weights the fitter's GAL templates on), vectorised by `searchsorted`
+    over every selected galaxy at once, no per-galaxy loop (rule 8).
+
+    The distinct `(node, template)` pairs collapse from a `(n_node, n_template)`
+    bincount of the packed key `node * n_template + template` (rule 8: a bincount on
+    a packed key, not a loop over nodes or galaxies), gathered per counts-law node
+    through its own borrowed source node: `weight_grid[k, t] = (w_law[k] /
+    w_law.sum()) * (galaxies at node k's source mapping to template t) / (galaxies
+    at node k's source)`, so `weight_grid[k, :].sum() == w_law[k] / w_law.sum()` and
+    `w.sum() == 1` over every member. The pairs with nonzero weight (`np.nonzero`,
+    again no loop) are the members: `flux0`'s `F_REF,I2` scaled so it equals the
+    node's own `S_k` (as the retired draw did; never a flux built from SWIRE's own
+    I2I3/I2I4 ratios), `u = 1` (sec. 5.4's "whole column"), and `log10_s = log10
+    S_k` per member, for the cell grid's brightness axis (`F_4.5 = S`, sec. 5.4). J,
+    H, Ks, M1 are unmeasured for a galaxy and held at zero flux, so the two-of-eight
+    test runs on the four IRAC bands only (disclosed). `density` is
+    `sample_gal.density(config)` (sec. 5.4 "Sky density"), unchanged: the population's
+    own sky density is one survey number, independent of how its members are
+    enumerated."""
+    _, log10_s_grid, w_law = sample_gal.sample(config)
+    n_node = log10_s_grid.size
 
     gal_path = config_module.product_path(config, "sky/derived", "swire", "galaxies", "survey")
     with h5py.File(gal_path, "r") as f:
@@ -848,75 +921,99 @@ def _gal_members(config, rng, n_mc):
     finite = (node >= 0) & np.isfinite(c12) & np.isfinite(sigma_c12) & (sigma_c12 > 0)
     node, c12 = node[finite], c12[finite]
 
-    order = np.argsort(node, kind="stable")
-    counts = np.bincount(node[order], minlength=log10_s_grid.size)
-    starts = np.concatenate([[0], np.cumsum(counts)])[:-1]
-    node_ids = np.arange(log10_s_grid.size)
+    counts = np.bincount(node, minlength=n_node)
+    node_ids = np.arange(n_node)
     has = counts > 0
     nearest = node_ids.copy()
     if not has.all():
         have_idx = node_ids[has]
         nearest[~has] = have_idx[np.argmin(np.abs(node_ids[~has, None] - have_idx[None, :]), axis=1)]
-    src_node = nearest[node_draw]
-    # `counts[src_node]` must be positive by the borrowing above (`nearest`
-    # only ever points at a node with `has[node] == True`); if it is ever
-    # zero regardless, `(rng.random(n_mc) * 0).astype(np.int64) - 1 == -1`
-    # would otherwise index `starts[src_node] - 1`, the PRECEDING node's own
-    # galaxy block, silently drawing a member with the wrong colour rather
-    # than failing (CODING_RULES_BMSTP.md rule 6's "no silent fallbacks").
-    # Fail loud instead, naming the empty node (rule 5b).
-    if np.any(counts[src_node] == 0):
-        bad = int(src_node[counts[src_node] == 0][0])
+    # `counts[nearest]` must be positive everywhere by the borrowing above
+    # (`nearest` only ever points at a node with `has[node] == True`); if it
+    # is ever zero regardless, fail loud naming the empty node (rule 5b, rule 6's
+    # "no silent fallbacks") rather than dividing by a zero count below.
+    if np.any(counts[nearest] == 0):
+        bad = int(nearest[counts[nearest] == 0][0])
         raise ValueError("bmstp.atlas: colour node %d has no galaxies to draw from" % bad)
-    within = np.minimum((rng.random(n_mc) * counts[src_node]).astype(np.int64), counts[src_node] - 1)
-    gal_row = order[starts[src_node] + within]
-    colour_draw = c12[gal_row]
 
-    # the "galz" register template nearest this draw's own colour
+    # the "galz" register template nearest EACH SELECTED GALAXY'S OWN colour
     # (`template_weights.build_galz`'s SAME `colour_theta`), vectorised by
-    # `searchsorted` on the sorted register axis, no per-member loop.
+    # `searchsorted` over the whole selection at once, no per-galaxy loop.
     reg = template_weights._read_register(config, "galz")
     f_ref, floor_linear = reg["f_ref"], reg["floor_linear"]
     colour_theta = np.log10(f_ref["I1"]) - np.log10(f_ref["I2"])
+    n_tmpl = colour_theta.size
     reg_order = np.argsort(colour_theta)
     sorted_colour = colour_theta[reg_order]
-    j = np.clip(np.searchsorted(sorted_colour, colour_draw), 1, sorted_colour.size - 1)
+    j = np.clip(np.searchsorted(sorted_colour, c12), 1, sorted_colour.size - 1)
     lo, hi = j - 1, j
-    pick_hi = np.abs(sorted_colour[hi] - colour_draw) < np.abs(colour_draw - sorted_colour[lo])
-    tmpl = reg_order[np.where(pick_hi, hi, lo)]
+    pick_hi = np.abs(sorted_colour[hi] - c12) < np.abs(c12 - sorted_colour[lo])
+    template = reg_order[np.where(pick_hi, hi, lo)]
 
-    flux = np.zeros((n_mc, N_BANDS), dtype=np.float64)
+    # the (raw node, template) counts, a bincount on a packed key -- no
+    # per-galaxy or per-node loop (rule 8).
+    packed = node * n_tmpl + template
+    counts_pair = np.bincount(packed, minlength=n_node * n_tmpl).reshape(n_node, n_tmpl)
+
+    # each counts-law node `k` borrows `nearest[k]`'s own galaxy/template
+    # counts (a fancy-index gather, not a loop); the distinct `(k, template)`
+    # members are that gathered grid's non-zero cells (`np.nonzero`, again no
+    # per-node loop).
+    gathered = counts_pair[nearest]  # (n_node, n_tmpl)
+    denom = counts[nearest].astype(np.float64)  # (n_node,)
+    weight_grid = (w_law / w_law.sum())[:, None] * gathered / denom[:, None]
+    k_idx, t_idx = np.nonzero(weight_grid)
+    w = weight_grid[k_idx, t_idx]
+
+    s_member = 10.0 ** log10_s_grid[k_idx]
+    scale = s_member / np.maximum(f_ref["I2"][t_idx], floor_linear[t_idx])
+    flux0 = np.zeros((k_idx.size, N_BANDS), dtype=np.float64)
     i1, i2, i3, i4 = (BAND_KEYS.index(k) for k in ("I1", "I2", "I3", "I4"))
-    scale = s_draw / np.maximum(f_ref["I2"][tmpl], floor_linear[tmpl])
-    flux[:, i1] = f_ref["I1"][tmpl] * scale
-    flux[:, i2] = s_draw
-    flux[:, i3] = f_ref["I3"][tmpl] * scale
-    flux[:, i4] = f_ref["I4"][tmpl] * scale
-    u = np.ones(n_mc, dtype=np.float64)
-    # `A_GAL`, sec. 5.4 "Sky density": the density the Monte Carlo total
-    # stands for is `sample_gal.density` (the `ln 10` integral), NOT the
-    # shape weight `w_law.sum()` the node-draw probabilities above use.
-    return flux, u, sample_gal.density(config)
+    flux0[:, i1] = f_ref["I1"][t_idx] * scale
+    flux0[:, i2] = s_member
+    flux0[:, i3] = f_ref["I3"][t_idx] * scale
+    flux0[:, i4] = f_ref["I4"][t_idx] * scale
+    u = np.ones(k_idx.size, dtype=np.float64)
+    log10_s = log10_s_grid[k_idx]
+    # `A_GAL`, sec. 5.4 "Sky density": the density the quadrature stands
+    # for is `sample_gal.density` (the `ln 10` integral), NOT the shape
+    # weight `w_law.sum()` the node weights above use.
+    return flux0, u, w, log10_s, sample_gal.density(config)
 
 
-def _gal_accepted_fraction(config, rng, a_col, f_lim, width_dex, coverage, tick):
-    """`(frac, mc_error, frac_bright3, frac_bright10, se, density)` for GAL's
-    one region-wide Monte Carlo block, run as a single joblib task
-    (`build_region` below) rather than called directly by `build_region`'s
-    own parent frame. `_accepted_fraction` reaches `fittp.likelihood`'s one
+def _gal_accepted_fraction(config, a_col, f_lim, width_dex, coverage, tick):
+    """`(frac, frac_bright3, frac_bright10, n_cat_cell, density)` for GAL's one
+    region-wide DETERMINISTIC quadrature (sec. 8), run as a single joblib task
+    (`build_region` below) rather than called directly by `build_region`'s own
+    parent frame. `catalogued_probability` reaches `fittp.likelihood`'s one
     `@njit(parallel=True)` kernel (`_ln_one_minus_c_kernel`, via
-    `_ln_one_minus_c`) -- the atlas's only numba call -- and numba's
-    thread pool is not fork-safe: a process that has itself started that
-    pool poisons every child a later `os.fork()` creates from it -- and
-    joblib respawns idle-expired workers by forking the parent between
-    phases. Dispatching this call through `Parallel` means the kernel
-    only ever runs inside a worker, so the parent never starts numba's
-    pool at all."""
-    gal_flux, gal_u, density_gal = _gal_members(config, rng, N_MC)
-    frac, mc_error, frac_bright3, frac_bright10, _block_total, se = _accepted_fraction(
-        a_col, gal_u, gal_flux, f_lim, width_dex, config, tick=tick,
-        weight_pix=coverage * _HPX512_PIXEL_DEG2)
-    return frac, mc_error, frac_bright3, frac_bright10, se, density_gal
+    `_ln_one_minus_c`) -- the atlas's only numba call -- and numba's thread pool is
+    not fork-safe: a process that has itself started that pool poisons every child
+    a later `os.fork()` creates from it -- and joblib respawns idle-expired workers
+    by forking the parent between phases. Dispatching this call through `Parallel`
+    means the kernel only ever runs inside a worker, so the parent never starts
+    numba's pool at all.
+
+    `n_cat_cell` (128, 110): the region's expected number of catalogued GAL objects
+    per parameter cell (module docstring), the same one-cell smoothing and wall
+    fold every stored shape carries (`grid.bin`), so the region grid and the shapes
+    share one convention. Each member's own expected catalogued count in the region
+    is `c_m = density * (w_m / w.sum()) * s_member[m]` (the population's own weight
+    share times its pixel-area-weighted catalogued probability over the region,
+    `catalogued_fraction`'s `s_member`); `H, outside = grid.bin(u, log10_s, c_m)`
+    and `n_cat_cell = H * c_m.sum()` (`grid.bin` normalises `H` to sum to `1 -
+    outside`, so multiplying back by `c_m.sum()` restores the count scale); the
+    mass `outside * c_m.sum()` the grid's own edges drop is not stored (expected
+    ~= 0 for GAL, sec. 5.4's population sitting well inside the grid)."""
+    flux0, u, w, log10_s, density = _gal_members(config)
+    frac, frac_bright3, frac_bright10, s_member = catalogued_fraction(
+        a_col, u, flux0, w, f_lim, width_dex, config,
+        weight_pix=coverage * _HPX512_PIXEL_DEG2, tick=tick)
+    w_sum = float(w.sum())
+    c_m = density * (w / w_sum) * s_member
+    H, _outside = grid.bin(u, log10_s, c_m)
+    n_cat_cell = H * float(c_m.sum())
+    return frac, frac_bright3, frac_bright10, n_cat_cell, density
 
 
 def _observed_bright_counts(config, region, pix, f_lim):
@@ -1159,26 +1256,33 @@ def build_region(config, region):
                 total_var += total_se ** 2
             st.tick(i + 1, len(tiles_here), "tiles")
 
-        # GAL, sec. 5.4: one region-wide Monte Carlo sample (fixed seed,
-        # not per tile -- GAL has no tile), evaluated at every admitted
-        # pixel's own column and limits with the shared `_accepted_fraction`.
-        # Dispatched through `Parallel` as one task (`_gal_accepted_fraction`'s
-        # own docstring): `build_region`'s parent process never runs a numba
-        # kernel itself, so no child it forks afterwards can inherit a live
-        # numba thread pool.
-        gal_rng = np.random.RandomState(MC_SEED + _SEED_OFFSET_GAL)
-        [(frac_gal, mc_gal, frac_gal_bright3, frac_gal_bright10, se_gal, density_gal)] = Parallel(
+        # GAL, sec. 5.4: one region-wide DETERMINISTIC quadrature (no draw,
+        # no seed -- GAL has no tile and no Monte Carlo sample), evaluated
+        # at every admitted pixel's own column and limits with the shared
+        # `catalogued_fraction`. Dispatched through `Parallel` as one task
+        # (`_gal_accepted_fraction`'s own docstring): `build_region`'s
+        # parent process never runs a numba kernel itself, so no child it
+        # forks afterwards can inherit a live numba thread pool.
+        [(frac_gal, frac_gal_bright3, frac_gal_bright10, n_cat_cell_gal, density_gal)] = Parallel(
             n_jobs=n_jobs)([delayed(_gal_accepted_fraction)(
-                config, gal_rng, a_col, f_lim, width_dex, coverage,
+                config, a_col, f_lim, width_dex, coverage,
                 lambda done, total: st.tick(done, total, "GAL pixel batches"))])
         n_cat["GAL"] = density_gal * frac_gal
         # sec. 5.4's own density is one survey-wide constant, so GAL's
         # intensity is that same scalar broadcast to every admitted pixel.
         intensity["GAL"] = np.full(n_pix, density_gal, dtype=np.float64)
-        mc_err["GAL"] = mc_gal
+        # GAL is now an exact quadrature, no draw: its own Monte Carlo
+        # error is zero (the region-total bookkeeping below stays, for the
+        # classes not yet deterministic).
+        mc_err["GAL"] = np.zeros(n_pix, dtype=np.float64)
         n_cat_bright3["GAL"] = density_gal * frac_gal_bright3
         n_cat_bright10["GAL"] = density_gal * frac_gal_bright10
-        total_var += (density_gal * se_gal) ** 2
+        se_gal = 0.0
+        total_var += se_gal ** 2
+        # the region's expected number of catalogued objects per parameter
+        # cell (module docstring): GAL is the first of the six classes to
+        # store one.
+        n_cat_cell = {"GAL": n_cat_cell_gal}
 
         # YSO/H2S, sec. 5.5-5.6: grouped by the pixel's own nside-256
         # sightline (YSO's grain), one Monte Carlo draw per sightline
@@ -1479,6 +1583,11 @@ def build_region(config, region):
                 f.create_dataset(f"N_ABOVE_{c}", data=n_above[c].astype(np.float32))
                 f.create_dataset(f"N_CAT_BRIGHT3_{c}", data=n_cat_bright3[c].astype(np.float32))
                 f.create_dataset(f"N_CAT_BRIGHT10_{c}", data=n_cat_bright10[c].astype(np.float32))
+            # the region's expected number of catalogued GAL objects per
+            # parameter cell (module docstring), summing to `RATIO_GAL *
+            # N_source`; `(128, 110)` on `grid.LOG10_X_EDGES` x
+            # `grid.LOG10_F45_EDGES`, the shapes' own axes.
+            f.create_dataset("N_CAT_CELL_GAL", data=n_cat_cell["GAL"].astype(np.float32))
             for c in built:
                 f.create_dataset(f"SHARE_{c}", data=share[c].astype(np.float32))
             f.create_dataset("N_OBS", data=n_obs.astype(np.int32))
