@@ -155,6 +155,33 @@ def sigma_samples_of(a_full):
     return a_full.std(axis=0, ddof=0).T
 
 
+def sigma_ratio_samples_of(a_full, a_edge_prof, a_inf_prof):
+    """`SIGMA_RATIO_SAMPLES`, `(n_pix, n_dist)`: the across-sample std of
+    the depth mark's own ratio `ratio_s(d) = A_s(d) / A_inf,s`, the width
+    the star placement reads (`x = u(d) = A(d) / A_inf`, sec. 5.1 "Marks")
+    in place of the numerator's spread over the mean, `SIGMA_SAMPLES_K`: near the far
+    end numerator and denominator move together and the ratio's spread is
+    smaller, while at the near end the two agree and the two widths
+    coincide.
+
+    `A_inf,s`, the sample's own far-end column, is its value at the last
+    distance of the samples' grid (`a_full[s, -1]`) plus the profile's
+    own deterministic tail beyond that same edge, `A_INF_K - A(edge)`
+    (`a_inf_prof`, `a_edge_prof`, the region's built profile product) --
+    one tail, shared by every sample, since the far field beyond the map
+    carries no posterior of its own. The tail is likewise added to the
+    numerator at that one grid point (the samples grid's own terminal
+    point, standing for the column at infinity): every sample's ratio is
+    then exactly 1 there, by construction, and the two widths coincide at
+    `d=0` (every sample is 0 there) as well."""
+    tail = a_inf_prof - a_edge_prof  # (n_pix,)
+    a_inf_s = a_full[:, -1, :] + tail[None, :]  # (n_samples, n_pix)
+    numerator = a_full.copy()
+    numerator[:, -1, :] = a_inf_s
+    ratio = numerator / a_inf_s[:, None, :]
+    return ratio.std(axis=0, ddof=0).T
+
+
 def region_a_full(union_inner_region, bounds1, centers1, baseline_per_sample_e_region,
                    union_outer_region=None, bnd2=None, cen2=None, k=None):
     """`(dist_pc, a_full)`: one region's per-sample cumulative A_K,
@@ -202,6 +229,7 @@ def _build_one_region(config, region, region_pixels, union_pixels, union_inner, 
                                      union_outer_region, bnd2, cen2, k)
     sigma_samples = sigma_samples_of(a_full)
     mean_a = a_full.mean(axis=0)
+    n_dist_samples = a_full.shape[1]
 
     profile_path = product_path(config, "sky/derived", "edenhofer", "profile", "sightline", region=region)
     depth_path = product_path(config, "sky/derived", "edenhofer", "depth", "region")
@@ -210,12 +238,24 @@ def _build_one_region(config, region, region_pixels, union_pixels, union_inner, 
         prof_dist = f["DIST_PC"][:]
         sigma_cor = f["SIGMA_COR_K"][:]
         sigma_unc = f["SIGMA_UNC_K"][:]
+        a_cum_prof = f["A_CUM_K"][:]
+        a_inf_prof = f["A_INF_K"][:]
     order = np.argsort(prof_hpx)
     pos = order[np.searchsorted(prof_hpx[order], region_pixels)]
     sigma_cor, sigma_unc = sigma_cor[pos], sigma_unc[pos]
+    a_cum_prof, a_inf_prof = a_cum_prof[pos].astype(np.float64), a_inf_prof[pos].astype(np.float64)
     with h5py.File(depth_path, "r") as f:
         names_all = [v.decode() if isinstance(v, bytes) else str(v) for v in f["REGION"][:]]
         d_hi_pc = float(f["D_HI_PC"][names_all.index(region)])
+
+    # the ratio's own far-end column (module docstring, `sigma_ratio_samples_of`):
+    # `A(edge)` is the built profile's own value at the samples' own last
+    # grid distance -- the inner map's edge where the outer samples are
+    # absent, the full spliced edge otherwise (`n_dist_samples` is that
+    # position either way, since the outer-absent branch below asserts
+    # the samples' grid agrees with the profile's own leading part).
+    a_edge_prof = a_cum_prof[:, n_dist_samples - 1]
+    sigma_ratio_samples = sigma_ratio_samples_of(a_full, a_edge_prof, a_inf_prof)
 
     ratio_splice = None
     if outer_present:
@@ -234,6 +274,12 @@ def _build_one_region(config, region, region_pixels, union_pixels, union_inner, 
         ratio_splice = float(np.nanmedian(ratio)) if ratio.size else 1.0
         pad = sigma_cor[:, n_inner:] * ratio_splice
         sigma_samples = np.concatenate([sigma_samples, pad], axis=1)
+        # the ratio's own terminal grid point already stands for the
+        # column at infinity (`sigma_ratio_samples_of`'s docstring), so
+        # its width has nothing left to grow past the inner edge: zero,
+        # not the correlated-sum-scaled pad `SIGMA_SAMPLES_K` takes.
+        sigma_ratio_samples = np.concatenate(
+            [sigma_ratio_samples, np.zeros((region_pixels.size, pad.shape[1]))], axis=1)
         dist_pc = prof_dist
         print("edenhofer_samples.build: %s: outer samples absent -- RATIO_SPLICED=%.3g applied to %d cells "
               "past the inner edge" % (region, ratio_splice, pad.shape[1]))
@@ -251,9 +297,14 @@ def _build_one_region(config, region, region_pixels, union_pixels, union_inner, 
     max_rel_diff = float(np.nanmax(np.abs(mean_a.T - a_ref) / np.maximum(np.abs(a_ref), 1e-12)))
 
     med_cor, med_unc = region_ratio_medians(sigma_samples, sigma_cor, sigma_unc, dist_pc, d_hi_pc)
+    behind = dist_pc > d_hi_pc
+    old_width = sigma_samples[:, behind] / np.maximum(a_cum_prof[:, behind], 1e-300)
+    narrow = sigma_ratio_samples[:, behind] / np.maximum(old_width, 1e-300)
+    med_narrow = float(np.nanmedian(narrow)) if narrow.size else np.nan
     print("edenhofer_samples.build: %s: max rel. diff of the sample mean against the unscaled profile=%.3g, "
-          "median SIGMA_SAMPLES_K/SIGMA_COR_K=%.3g, /SIGMA_UNC_K=%.3g behind the cloud"
-          % (region, max_rel_diff, med_cor, med_unc))
+          "median SIGMA_SAMPLES_K/SIGMA_COR_K=%.3g, /SIGMA_UNC_K=%.3g behind the cloud, "
+          "median SIGMA_RATIO_SAMPLES/(SIGMA_SAMPLES_K/A)=%.3g behind the cloud"
+          % (region, max_rel_diff, med_cor, med_unc, med_narrow))
 
     out_path = product_path(config, "sky/derived", "edenhofer", "profile-sigma-samples", "sightline", region=region)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -264,8 +315,9 @@ def _build_one_region(config, region, region_pixels, union_pixels, union_inner, 
         f.create_dataset("HPX_PIX_256", data=region_pixels)
         f.create_dataset("DIST_PC", data=dist_pc)
         f.create_dataset("SIGMA_SAMPLES_K", data=sigma_samples)
+        f.create_dataset("SIGMA_RATIO_SAMPLES", data=sigma_ratio_samples.astype(np.float32))
 
-    return dict(region=region, max_rel_diff=max_rel_diff, med_cor=med_cor, med_unc=med_unc)
+    return dict(region=region, max_rel_diff=max_rel_diff, med_cor=med_cor, med_unc=med_unc, med_narrow=med_narrow)
 
 
 def build(config, regions=None):
