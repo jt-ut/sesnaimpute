@@ -7,8 +7,10 @@ and printed on the page, never restated here.
 
 Per region, ONE source: the one at the region's median `A_COL_K`
 (`_select_source`). Six panels per row (GAL, YSO, H2S, STAR, PAHC, AGB),
-sharing ONE pair of axes, `log10 x` (limited to the wall, `[-3, 0]`,
-sec. 2) and `log10 F_4.5` in mJy (sec. 2: one common brightness axis for
+sharing ONE pair of axes, `log10 x` (from -3.0 to the median source's own
+blurred read's last populated cell, never less than the wall at
+`log10 x = 0`, drawn dashed on every panel, sec. 2, 4.2) and
+`log10 F_4.5` in mJy (sec. 2: one common brightness axis for
 every class, H2S included since its template conversion folded in at
 the shape stage), the bold y-axis label set as the axes' own ylabel.
 Because the six panels of a row share that one brightness axis, only the
@@ -102,8 +104,15 @@ _TICK_FONTSIZE = 10
 #: magnitudes rather than a primary axis label: never below 8 pt.
 _SECONDARY_FONTSIZE = 8
 
-#: The wall (`x = a / A_s <= 1`, sec. 2): nothing is drawn past it.
-_LOG10_X_MIN, _LOG10_X_MAX = -3.0, 0.0
+#: The array's own low edge (sec. 2): the panel axis never extends
+#: further left than this.
+_LOG10_X_MIN = -3.0
+#: THE WALL (sec. 2, 4.2): drawn dashed on every panel. The panel's own
+#: `log10 x` axis extends at least this far right, and further where the
+#: median source's own blurred read still carries a non-negligible share
+#: of some class's mass past it -- a pencil column above the beam mean,
+#: real in the measured coordinate and never folded back (`_panel_x_max`).
+_LOG10_X_WALL = 0.0
 
 #: The caption block's own type size and wrap width, chosen so the
 #: wrapped lines stay well inside the page's usable width at this font
@@ -279,6 +288,27 @@ def lambda_grids(config, region, rows):
     return lambda_all, lambda_floor, CLASS_ORDER
 
 
+def _panel_x_max(x_edges, densities):
+    """The panels' own `log10 x` upper limit (module docstring): never
+    less than THE WALL (`_LOG10_X_WALL`), and no further right than the
+    last cell, across the six classes' own blurred reads (`_panel_shape`),
+    that still carries a non-negligible share of that class's own mass --
+    `grid.FLOOR` of its own peak row, the same relative floor the read
+    applies everywhere else."""
+    last_idx = -1
+    for density in densities:
+        row_mass = density.sum(axis=1)
+        peak = float(row_mass.max())
+        if peak <= 0.0:
+            continue
+        above = np.nonzero(row_mass > grid.FLOOR * peak)[0]
+        if above.size:
+            last_idx = max(last_idx, int(above[-1]))
+    if last_idx < 0:
+        return _LOG10_X_WALL
+    return max(_LOG10_X_WALL, float(x_edges[last_idx + 1]))
+
+
 def _build_region_data(config, region):
     """Reads the median source's per-class shapes, forms `Lambda_C =
     A_C(s) h_C f_C(F; s)` for every class (sec. 1.1/1.4, module
@@ -295,14 +325,17 @@ def _build_region_data(config, region):
     mass_c = {}
     on_grid_c = {}
     intensity_c = {}
+    densities = []
     x_edges = b_edges = None
     for cls in CLASS_ORDER:
-        _, mass, reader = _panel_shape(config, region, cls, idx_median)
+        density, mass, reader = _panel_shape(config, region, cls, idx_median)
+        densities.append(density)
         x_edges, b_edges = reader.x_edges, reader.b_edges
         intensity_c[cls] = float(dtab[cls][idx_median])
         mass_c[cls] = mass
         on_grid_c[cls] = _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2s,
                                          on_grid_gal, idx_median)
+    log10_x_max = _panel_x_max(x_edges, densities)
 
     lambda_all, lambda_floor_rows, class_order = lambda_grids(config, region, np.array([idx_median]))
     lambda_floor = float(lambda_floor_rows[0])
@@ -347,7 +380,7 @@ def _build_region_data(config, region):
     return dict(dtab=dtab, idx_median=idx_median, x_edges=x_edges, b_edges=b_edges,
                 support=support, joint=joint, share=share, mass_c=mass_c, on_grid_c=on_grid_c,
                 intensity_c=intensity_c, p_total=p_total, peak=peak,
-                lambda_floor=lambda_floor, floor_fraction=floor_fraction)
+                lambda_floor=lambda_floor, floor_fraction=floor_fraction, log10_x_max=log10_x_max)
 
 
 def _print_numbers(region, data):
@@ -380,6 +413,7 @@ def _draw_figure(config, region, data):
     dtab, idx_median = data["dtab"], data["idx_median"]
     x_edges, b_edges, support = data["x_edges"], data["b_edges"], data["support"]
     joint, share = data["joint"], data["share"]
+    log10_x_max = data["log10_x_max"]
 
     # The source's own name, sightline column, arm and distance move out
     # of the title into the caption block; `KAPPA_*` is dropped entirely.
@@ -442,11 +476,15 @@ def _draw_figure(config, region, data):
             else:
                 im2 = ax.imshow(share_masked[cls].T, origin="lower", aspect="auto",
                                  extent=extent, cmap=cmap2, norm=norm2)
-            # The support boundary, `log10 x = 0` (`x = 1`), marked on
-            # every panel of both rows.
-            ax.axvline(0.0, color="white", lw=0.7, linestyle="--", alpha=0.85)
-            # The wall: nothing beyond `log10 x = 0` is drawn.
-            ax.set_xlim(_LOG10_X_MIN, _LOG10_X_MAX)
+            # THE WALL, `log10 x = 0` (`x = 1`), marked on every panel of
+            # both rows -- grey, not white, since the panel's own axis now
+            # extends past it into the masked (white) padding, where a
+            # white line would vanish against that background.
+            ax.axvline(_LOG10_X_WALL, color="0.35", lw=0.9, linestyle="--", alpha=0.9)
+            # The panel's own axis: never less than the wall, extended to
+            # the median source's own blurred read's last populated cell
+            # where the column kernel carries mass past it (`_panel_x_max`).
+            ax.set_xlim(_LOG10_X_MIN, log10_x_max)
             ax.set_xlabel(_X_LABEL, fontsize=_LABEL_FONTSIZE)
             # The six panels of a row share one brightness axis, so only
             # the leftmost carries its numbers; repeated on every panel
