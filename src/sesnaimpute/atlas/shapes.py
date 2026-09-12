@@ -404,8 +404,8 @@ def _build_region_data(config, region):
     joint = {cls: lam_floored[cls] / grand_total for cls in CLASS_ORDER}
 
     # Row 2 (module docstring): `P(C | cell, s)`, the class share of
-    # `Lambda` at each cell, over the WHOLE array now (padding included,
-    # this brief's item 1) -- `denom` is never zero anywhere, since every
+    # `Lambda` at each cell, over the WHOLE array (padding included) --
+    # `denom` is never zero anywhere, since every
     # class at every cell is floored at `lambda_floor > 0`.
     denom = np.where(total_lambda > 0.0, total_lambda, 1.0)
     share = {cls: lam_floored[cls] / denom for cls in CLASS_ORDER}
