@@ -2,7 +2,7 @@
 "the common grid"), the weighted binning of a population sample onto it, and
 the per-source column-kernel blur along the `log10 x` axis (sec. 2, 4.2).
 
-`log10 x = log10(a / A_s)` runs -3.0 to +1.0 in 128 cells of 1/32 dex; the
+`log10 x = log10(a / T)` (the distance coordinate: the object's foreground over the true column along its own pencil beam) runs -3.0 to +1.0 in 128 cells of 1/32 dex; the
 brightness axis, `log10 F_4.5` (the object's dereddened 4.5 micron flux in
 mJy, "4.5B", the owner's ruling 2026-09-08), runs -4.0 to +7.0 in 110 cells
 of 0.1 dex -- ONE origin, the same for every class (sec. 2's "brightness"
@@ -21,7 +21,7 @@ exactly one cell along EACH axis (sec. 2, "minimum widths"): no shape is a
 delta narrower than the fit's own uncertainty in `log10 B_hat` (0.04-0.1
 dex on a two-band source).
 
-Two more statements beside sec. 2's own: THE SUPPORT. `x = a / A_s <= 1`
+Two more statements beside sec. 2's own: THE SUPPORT. `x = a / T <= 1`
 by definition, so a cell with `log10 x > 0` is never part of the prior's
 support even though the array keeps that extent (`N_X_SUPPORT`, below)
 for the kernels' own padding, and `ON_GRID_*`/`MASS_OUTSIDE_*` are
@@ -254,7 +254,7 @@ def _shift_kernel(mu, sigma):
 def blur(H, w, mu1, sig1, mu2, sig2):
     """`(H_s, mass_lost)`: the source's column kernel applied along the
     `log10 x` axis (sec. 2, 4.2), carrying a stored shape from the
-    DISTANCE coordinate it is built in, `x = a / A_s` (support `[0, 1]`,
+    DISTANCE coordinate it is built in, `x = a / T` (support `[0, 1]`,
     the wall at `log10 x = 0` its boundary condition, where `H` still
     reflects), into the fitter's MEASURED coordinate, `a_hat / A_beam`
     (the distance coordinate times the pencil-over-beam ratio the column

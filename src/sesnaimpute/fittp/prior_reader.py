@@ -16,7 +16,7 @@ difference, the gather along the conditional brightness line and the dot
 product with `M`, the Jacobian, then the weight factors and the log sky
 density (section 1.3, 1.4, 4.2).
 
-The stored shapes live in the DISTANCE coordinate `x = a / A_s`, the
+The stored shapes live in the DISTANCE coordinate `x = a / T`, the
 object's foreground extinction over the true column along its own pencil
 beam (support `[0, 1]`; `log10 x = 0` the wall, `bmstp.shapes`,
 `sample_cloud`, `grid.bin` and `grid.fold_wall` all reflecting mass there
@@ -61,7 +61,7 @@ _SQRT2 = float(np.sqrt(2.0))
 _SQRT2PI = float(np.sqrt(2.0 * np.pi))
 
 #: the stored shape's own support edge (`bmstp.grid`'s module docstring):
-#: `x = a / A_s <= 1` there, `log10 x = 0` the wall. The read
+#: `x = a / T <= 1` there, `log10 x = 0` the wall. The read
 #: (`_cell_sum`, `_build_a_star_tables`) evaluates a fitted source in the
 #: measured coordinate, which the column kernel carries past that wall
 #: into real mass, so the window and the "top of grid" fallback below run
@@ -514,7 +514,7 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     (W6d item 3).
 
     The measured coordinate: the stored shape's own support ends at the
-    wall, `x = a / A_s <= 1`, but this read evaluates a fitted source in
+    wall, `x = a / T <= 1`, but this read evaluates a fitted source in
     `a_hat / A_beam`, which the column kernel (`grid.blur`, `prepare`)
     carries past that wall into real mass -- a pencil column above the
     beam mean -- so the window and both fallbacks below run to the
