@@ -14,12 +14,23 @@ count-weighted pooled noise level) -- not an average of the regions'
 separately-fitted parameters, which is not the pooled distribution.
 Planck is used only where no Herschel map covers a source, so one
 survey-wide pooled fit, not a per-region one, is the right object for it.
-The Herschel arm's own stated beam (36.3 arcsec) is the finest map there
-is -- no sub-beam data exists below it -- so its structural term is a
-point mass at `T = A_s` (zero width, zero shift): its kernel is the
-per-source measurement uncertainty and the field zero point alone, not
-an extrapolation. Both are added to each component's sigma in quadrature,
-at the source's own column, converted to dex.
+The Herschel arm carries its own structural term at its own stated beam,
+36.3 arcsec (`W_ABS_36P3`): the sub-beam stage tabulates a two-scale
+mixture only at 108/302/821 arcsec, none of them the Herschel arm's own
+beam, so its 36.3 arcsec mixture is the 108 arcsec pooled mixture's own
+shape, stretched by the stage's own completion factor and the region's
+own absolute-width ratio between the two beams, then recentred so
+`E[T / A_beam] = 1` in linear units at every node -- the beam column is
+the mean of its own pencils (`_pool_herschel_ref_mixture`). The
+per-source measurement uncertainty and the field zero point are added to
+each component's sigma in quadrature, at the source's own column,
+converted to dex, for both arms alike.
+
+The kernel is also class-conditional: `Kernel.mixture`'s `exponent`
+keyword reweights the mixture by `T ** exponent`, the star-gas law's own
+column exponent (SPEC_BMSTP_DRAFT.md section 5.5) -- where members of a
+class form in proportion to a power of the column, that class's own
+member sits off the beam mean by that same power, within the beam.
 
 The zero point is one systematic per field (owner, 2026-09-06;
 `sky.derived.herschel_column.field_zeropoints`), not one survey constant,
@@ -176,7 +187,7 @@ class Kernel(object):
             zp_ak = np.where(is_h, np.asarray(zp_sigma_k, dtype=float), 0.0)
         return zp_ak / (a_col * _LN10)
 
-    def mixture(self, a_col, sigma_col, map_class, zp_sigma_k=None):
+    def mixture(self, a_col, sigma_col, map_class, zp_sigma_k=None, exponent=0.0):
         """`(w, mu, sigma)`: `w (n,)`, `mu (n, 2)`, `sigma (n, 2)` -- the
         pooled structural mixture at `a_col`, with the source's own
         measurement uncertainty and, for Herschel, the zero point's own
@@ -184,7 +195,24 @@ class Kernel(object):
         converted to dex at `a_col`. `zp_sigma_k`, one per source (mag,
         0 for Planck-arm), is optional; omitting it (every call site not
         yet wired) uses the survey-wide zero point for every Herschel
-        source, as before the per-field fix."""
+        source, as before the per-field fix.
+
+        `exponent` is the star-gas law's own column exponent, `gamma` in
+        `p(T | A_beam, C) propto T**gamma * p(T | A_beam)`
+        (SPEC_BMSTP_DRAFT.md section 5.5): a class whose members form in
+        proportion to `A**gamma` of the column sits, within the beam, in
+        the pencils that carry `T**gamma` more of that class's members,
+        not at the beam's own mean pencil. For one component,
+        `log10 T = log10 A + y`, `y ~ N(mu, sigma**2)` in dex, weighting
+        by `T**gamma` is an exponential tilt of `y` by `gamma * ln 10`,
+        exact in closed form: `sigma' = sigma` (a tilted Gaussian is a
+        Gaussian of the same width), `mu' = mu + gamma * sigma**2 * ln 10`,
+        and the component keeps its normalising mass, `w' propto
+        w * exp(gamma * ln10 * mu + (gamma * ln10 * sigma)**2 / 2)`,
+        renormalised over the two components. Applied after the
+        measurement and zero-point terms are folded into `sigma` (they
+        are already part of the same lognormal by then). `exponent = 0.0`
+        (the default) recovers the unweighted kernel exactly."""
         a_col = np.asarray(a_col, dtype=float)
         sigma_col = np.asarray(sigma_col, dtype=float)
         arm_idx = self._arm_index(map_class)
@@ -197,14 +225,23 @@ class Kernel(object):
         zp_dex = self._zp_herschel_dex(a_col, arm_idx, zp_sigma_k)
         extra_var = sigma_col_dex * sigma_col_dex + zp_dex * zp_dex
         sigma = np.sqrt(sigma0 * sigma0 + extra_var[:, np.newaxis])
-        return w, mu, sigma
+        if exponent == 0.0:
+            return w, mu, sigma
+        c = exponent * _LN10
+        mu_tilt = mu + c * sigma * sigma
+        log_wt = c * mu + (c * sigma) ** 2 / 2.0
+        log_wt -= log_wt.max(axis=1, keepdims=True)
+        wt = np.stack([w, 1.0 - w], axis=1) * np.exp(log_wt)
+        w_tilt = wt[:, 0] / wt.sum(axis=1)
+        return w_tilt, mu_tilt, sigma
 
     def params(self, a_col, sigma_col, map_class, zp_sigma_k=None):
         """`(mu, sigma)`, each `(n,)`: the mixture's exact overall mean and
         standard deviation in log10 T at `a_col`, per-source terms
         included -- what a consumer that treats the kernel as a single
         Gaussian needs. `zp_sigma_k` is the same optional per-source
-        zero-point uncertainty `mixture` takes."""
+        zero-point uncertainty `mixture` takes. Always the unweighted
+        kernel (`mixture`'s `exponent = 0.0`), its own meaning kept."""
         w, mu, sigma = self.mixture(a_col, sigma_col, map_class, zp_sigma_k=zp_sigma_k)
         mean, var = _mixture_mean_var(w, mu[:, 0], sigma[:, 0], mu[:, 1], sigma[:, 1])
         return mean, np.sqrt(np.maximum(var, 0.0))
@@ -239,6 +276,63 @@ def _pool_planck_mixture(subbeam_path, a_nodes):
     return tuple(np.interp(ln_nodes, ln_ka, p[finite]) for p in pooled)
 
 
+#: The sub-beam stage's own ladder beam nearest the Herschel arm's own
+#: 36.3 arcsec beam (index into the sub-beam product's beam axis, order
+#: L108/L302/L821) -- the two-scale mixture SHAPE the Herschel arm's own
+#: reference-beam term is stretched from.
+_REF_SHAPE_BEAM_INDEX = 0
+
+
+def _pool_herschel_ref_mixture(subbeam_path, a_nodes):
+    """Forms the Herschel arm's own survey-pooled two-lognormal structural
+    mixture at its stated 36.3 arcsec beam.
+
+    The sub-beam stage tabulates a two-scale mixture only at 108, 302 and
+    821 arcsec (`MIX_POOLED_*`), none of them the Herschel arm's own beam,
+    and stores no pooled mixture at the reference scale, so this mixture
+    is formed from the per-region fits by the stage's own rule: the 108
+    arcsec pooled mixture's own SHAPE (`MIX_POOLED_*` at
+    `_REF_SHAPE_BEAM_INDEX`, the nearest tabulated beam) is stretched by
+    one region-independent factor, `W_ABS_36P3 / (W_ABS_L108 /
+    COMPLETION_L108)` -- the region's own absolute pencil-to-36.3-beam
+    width divided by its own two-scale sigma at 108 arcsec, the stage's
+    own `completion factor` (module docstring) chained with the beams'
+    own absolute-width ratio -- pooled across regions count-weighted by
+    each region's own counts in the 108 arcsec conditional histogram, the
+    same weighting the stage's own survey pool uses. One factor for every
+    node: a power-law spectrum stretches the whole log-column
+    distribution by one factor across column, per the stage's own model,
+    not a per-node one.
+
+    Returns `(w, mu1, mu2, sigma1, sigma2, factor)`: the first five each
+    `(len(a_nodes),)`, in natural-log units of `s = ln(T / A)` (converted
+    to log10 by the caller, and NOT yet recentred to `E[T / A] = 1`);
+    `factor` the pooled stretch, for the report.
+    """
+    with h5py.File(subbeam_path, "r") as f:
+        w_r = f["MIX_POOLED_W"][_REF_SHAPE_BEAM_INDEX, :]
+        mu1_r = f["MIX_POOLED_MU1"][_REF_SHAPE_BEAM_INDEX, :]
+        mu2_r = f["MIX_POOLED_MU2"][_REF_SHAPE_BEAM_INDEX, :]
+        sig1_r = f["MIX_POOLED_SIG1"][_REF_SHAPE_BEAM_INDEX, :]
+        sig2_r = f["MIX_POOLED_SIG2"][_REF_SHAPE_BEAM_INDEX, :]
+        ka_cent = f["MIX_KA_CENTRES"][:]
+        w_abs_ref = f["W_ABS_36P3"][:]
+        w_abs_108 = f["W_ABS_L108"][:]
+        completion_108 = f["COMPLETION_L108"][:]
+        counts_108 = f["COND_KERNEL_L108"][:].sum(axis=(1, 2)).astype(np.float64)
+
+    stretch = completion_108 * (w_abs_ref / w_abs_108)
+    ok = np.isfinite(stretch) & (counts_108 > 0)
+    factor = float(np.sum(counts_108[ok] * stretch[ok]) / np.sum(counts_108[ok]))
+
+    pooled = (w_r, mu1_r, mu2_r, sig1_r, sig2_r)
+    finite = np.isfinite(pooled[0])
+    ln_ka = ka_cent[finite]
+    ln_nodes = np.log(a_nodes)
+    w, mu1, mu2, sig1, sig2 = (np.interp(ln_nodes, ln_ka, p[finite]) for p in pooled)
+    return w, mu1 * factor, mu2 * factor, sig1 * factor, sig2 * factor, factor
+
+
 def build(config, regions=None):
     """Tabulates the pooled two-component log-normal mixture (weight, the
     two means, the two widths, all in log10 T) on every node of the
@@ -246,11 +340,12 @@ def build(config, regions=None):
     `bms/sesna/kernel_sesna_survey.hdf5`. The Planck arm reads the sub-beam
     stage's own survey-pooled 302 arcsec mixture fit (`_pool_planck_mixture`,
     `MIX_POOLED_*` -- the regions' histograms summed and refit, not their
-    fitted parameters averaged); the Herschel arm has no sub-beam data at
-    its own 36.3 arcsec beam, so
-    its structural term is a point mass (`w = 0.5`, both means and both
-    widths zero) -- disclosed, not extrapolated (SPEC_PRIORS.md section
-    1.2). Survey-wide; `regions` is accepted and ignored.
+    fitted parameters averaged); the Herschel arm reads its own 36.3 arcsec
+    mixture (`_pool_herschel_ref_mixture`), then recentred so
+    `E[T / A_beam] = 1` in linear units at every node -- the beam column is
+    the mean of its own pencils -- by one uniform per-node shift on both
+    components' means (SPEC_BMSTP_DRAFT.md section 2). Survey-wide;
+    `regions` is accepted and ignored.
     """
     from sesnaimpute.population import column_grid
 
@@ -262,15 +357,31 @@ def build(config, regions=None):
     n_node = a_nodes.size
 
     w_p, mu1_p, mu2_p, sig1_p, sig2_p = _pool_planck_mixture(subbeam_path, a_nodes)
+    w_h, mu1_h, mu2_h, sig1_h, sig2_h, herschel_factor = _pool_herschel_ref_mixture(
+        subbeam_path, a_nodes)
 
     W = np.empty((len(_ARM_ORDER), n_node))
     MU = np.empty((len(_ARM_ORDER), n_node, 2))
     SIGMA = np.empty((len(_ARM_ORDER), n_node, 2))
 
     i_h, i_p = _ARM_CODE["herschel"], _ARM_CODE["planck"]
-    W[i_h] = 0.5
-    MU[i_h] = 0.0
-    SIGMA[i_h] = 0.0
+    W[i_h] = w_h
+    MU[i_h, :, 0] = mu1_h / _LN10
+    MU[i_h, :, 1] = mu2_h / _LN10
+    SIGMA[i_h, :, 0] = sig1_h / _LN10
+    SIGMA[i_h, :, 1] = sig2_h / _LN10
+
+    # E[T / A_beam] = 1 (the beam column is the mean of its own pencils):
+    # one uniform dex shift per node on both components' means, solved so
+    # the mixture's own linear-space mean is exactly one (a lognormal
+    # component's own linear mean is `10 ** (mu + sigma**2 * ln10 / 2)`;
+    # shifting both means by the same amount scales both components, and
+    # so the whole mixture, by the same factor).
+    e_raw = (W[i_h] * 10.0 ** (MU[i_h, :, 0] + SIGMA[i_h, :, 0] ** 2 * _LN10 / 2.0)
+             + (1.0 - W[i_h]) * 10.0 ** (MU[i_h, :, 1] + SIGMA[i_h, :, 1] ** 2 * _LN10 / 2.0))
+    herschel_offset = -np.log10(e_raw)
+    MU[i_h, :, 0] += herschel_offset
+    MU[i_h, :, 1] += herschel_offset
 
     W[i_p] = w_p
     MU[i_p, :, 0] = mu1_p / _LN10
@@ -287,9 +398,11 @@ def build(config, regions=None):
         f.create_dataset("MIX_SIGMA", data=SIGMA.astype(np.float64))
         f.create_dataset("ZP_HERSCHEL_K", data=np.float64(zp))
 
-    st.done(out_path, n_arms=len(_ARM_ORDER), n_node=n_node, zp_herschel_k=float(zp))
-    print("kernel: %d arms x %d nodes (mixture), zp_herschel_k=%.4f -> %s"
-          % (len(_ARM_ORDER), n_node, zp, out_path), flush=True)
+    st.done(out_path, n_arms=len(_ARM_ORDER), n_node=n_node, zp_herschel_k=float(zp),
+            herschel_stretch=herschel_factor)
+    print("kernel: %d arms x %d nodes (mixture), zp_herschel_k=%.4f, "
+          "herschel_stretch=%.4f -> %s"
+          % (len(_ARM_ORDER), n_node, zp, herschel_factor, out_path), flush=True)
 
 
 if __name__ == "__main__":
