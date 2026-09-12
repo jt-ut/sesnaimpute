@@ -33,7 +33,6 @@ exponent (section 5.5); every other class reads it plain
 (`KERNEL_EXPONENT`, below).
 """
 
-import inspect
 import math
 import os
 
@@ -80,11 +79,6 @@ N_X_SUPPORT = grid.N_X_SUPPORT
 #: plain, exponent 0.
 KERNEL_EXPONENT = {"STAR": 0.0, "AGB": 0.0, "PAHC": 0.0, "GAL": 0.0, "YSO": 2.0, "H2S": 2.0}
 
-#: whether the installed `Kernel.mixture` accepts the class-conditional
-#: `exponent` keyword (unit W69a's contract): checked once so `prepare`
-#: calls with it where it exists and without it otherwise, ahead of that
-#: unit's own merge.
-_MIXTURE_HAS_EXPONENT = "exponent" in inspect.signature(kernel_module.Kernel.mixture).parameters
 
 #: SPEC_BMSTP_DRAFT.md section 4.2: a window at most this many cells wide
 #: is summed by exact per-cell erf differences; a wider one reads the
@@ -208,9 +202,7 @@ def prepare(reader, rows):
     reader evaluates, by its own column kernel (`grid.blur`), the cloud
     classes' kernel reweighted by `T ** 2` (`KERNEL_EXPONENT`, the
     star-gas law's own exponent, section 5.5) and every other class's
-    plain -- `_MIXTURE_HAS_EXPONENT` calls `Kernel.mixture` with the
-    keyword where it is accepted (W69a's contract) and without it
-    otherwise. The result is renormalised to sum to one over the WHOLE
+    plain. The result is renormalised to sum to one over the WHOLE
     array -- a block of ~50 sources, never a whole batch (the 600 MB
     per-batch footprint of the unblurred grid held at once,
     IMPLEMENTATION_BMSTP_DRAFT.md section 9). Mass `grid.blur` carries
@@ -225,8 +217,8 @@ def prepare(reader, rows):
     zp_sig = reader.zp_sig[rows]
     arm = reader.arm[rows]
     grain = reader.grain[rows]
-    exponent_kwargs = {"exponent": KERNEL_EXPONENT[reader.cls]} if _MIXTURE_HAS_EXPONENT else {}
-    w, mu, sigma = reader.kernel.mixture(a_col, a_col_sig, arm, zp_sigma_k=zp_sig, **exponent_kwargs)
+    w, mu, sigma = reader.kernel.mixture(a_col, a_col_sig, arm, zp_sigma_k=zp_sig,
+                                         exponent=KERNEL_EXPONENT[reader.cls])
     n = rows.size
     n_x, n_b = reader.grid_all.shape[1], reader.grid_all.shape[2]
     h = np.empty((n, n_x, n_b), dtype=np.float32)

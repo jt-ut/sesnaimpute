@@ -28,9 +28,10 @@ for the kernels' own padding, and `ON_GRID_*`/`MASS_OUTSIDE_*` are
 measured over the support alone. THE WALL. `log10 x = 0` is a physical
 wall, not a grid edge: no population member is ever above it, so no
 placement or smoothing along `x` may carry mass past it and drop that
-mass as outside the prior -- `bin`, `bin_star_widths`, `blur`'s
-shift-and-smooth, `sample_cloud._bin1d` and the YSO shift-kernel
-placement in `bmstp.shapes` instead REFLECT: whatever mass a kernel
+mass as outside the prior -- `bin`, `bin_star_widths`,
+`sample_cloud._bin1d` and the YSO shift-kernel placement in
+`bmstp.shapes` instead REFLECT (`blur`, the read's change of variables
+into the measured coordinate, does not: see its own docstring): whatever mass a kernel
 would place at `log10 x > 0` is folded back onto its mirror cell below
 the wall (`fold_wall`, below), conserving the kernel's own mass on the
 support exactly, so a population sitting AT the wall (every galaxy, most
