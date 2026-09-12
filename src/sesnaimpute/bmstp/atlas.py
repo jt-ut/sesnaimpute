@@ -511,7 +511,15 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, width_dex, config, weight_pix
     Processed in pixel batches of `_pixel_batch_size` (rule 10b), exactly as
     `_accepted_fraction`: each batch is the same elementwise-per-pixel computation on
     a slice of `a_col`/`f_lim`/`width_dex`, so splitting the pixel axis changes no
-    result; `u`/`flux0`/`w` are the caller's whole (unsliced) population."""
+    result. Within one pixel batch the member axis is ALSO chunked, in
+    `n_mem_chunk = _PIXEL_BATCH_BUDGET_BYTES // (N_BANDS * 8 * _N_TEMP_ARRAYS *
+    n_pix_batch)` members at a time (AGB's cross-product population, sec. 5.2, can
+    reach ~1e6 members per tile: a `(1, 1e6, 8)` working set at one pixel per batch
+    would still exceed the 512 MB budget even at the smallest pixel batch, so the
+    member axis is chunked too, sized to the batch's own pixel count). Each chunk's
+    weighted sum accumulates into `frac`/`frac_bright3`/`frac_bright10` (a sum over
+    disjoint member chunks is exact, no result changes for a member set that fit
+    before) and fills its own slice of `s_member` directly."""
     n_mem = u.size
     n_pix = a_col.size
     w_sum = float(w.sum())
@@ -523,19 +531,35 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, width_dex, config, weight_pix
     n_batches = (n_pix + batch - 1) // batch
     for b, start in enumerate(range(0, n_pix, batch)):
         stop = min(start + batch, n_pix)
+        n_pix_batch = stop - start
         f_lim_b = f_lim[start:stop]
         width_dex_b = width_dex[start:stop]
-        p_cat, catalogued_i2_measured, flux_i2 = catalogued_probability(
-            a_col[start:stop], u, flux0, f_lim_b, width_dex_b, config)
-        frac[start:stop] = (p_cat @ w) / w_sum
-
+        a_col_b = a_col[start:stop]
         i2_lim_b = f_lim_b[:, IDX_I2:IDX_I2 + 1]  # (n_pix_batch, 1)
-        bright3 = flux_i2 > BRIGHT_MULT_3 * i2_lim_b
-        bright10 = flux_i2 > BRIGHT_MULT_10 * i2_lim_b
-        frac_bright3[start:stop] = ((catalogued_i2_measured * bright3) @ w) / w_sum
-        frac_bright10[start:stop] = ((catalogued_i2_measured * bright10) @ w) / w_sum
 
-        s_member += weight_pix[start:stop] @ p_cat
+        weighted_sum = np.zeros(n_pix_batch, dtype=np.float64)
+        weighted_bright3 = np.zeros(n_pix_batch, dtype=np.float64)
+        weighted_bright10 = np.zeros(n_pix_batch, dtype=np.float64)
+        n_mem_chunk = max(1, _PIXEL_BATCH_BUDGET_BYTES
+                           // (N_BANDS * 8 * _N_TEMP_ARRAYS * n_pix_batch))
+        for mstart in range(0, n_mem, n_mem_chunk):
+            mstop = min(mstart + n_mem_chunk, n_mem)
+            u_c = u[mstart:mstop]
+            flux0_c = flux0[mstart:mstop]
+            w_c = w[mstart:mstop]
+            p_cat, catalogued_i2_measured, flux_i2 = catalogued_probability(
+                a_col_b, u_c, flux0_c, f_lim_b, width_dex_b, config)
+            weighted_sum += p_cat @ w_c
+
+            bright3 = flux_i2 > BRIGHT_MULT_3 * i2_lim_b
+            bright10 = flux_i2 > BRIGHT_MULT_10 * i2_lim_b
+            weighted_bright3 += (catalogued_i2_measured * bright3) @ w_c
+            weighted_bright10 += (catalogued_i2_measured * bright10) @ w_c
+
+            s_member[mstart:mstop] += weight_pix[start:stop] @ p_cat
+        frac[start:stop] = weighted_sum / w_sum
+        frac_bright3[start:stop] = weighted_bright3 / w_sum
+        frac_bright10[start:stop] = weighted_bright10 / w_sum
         if tick is not None:
             tick(b + 1, n_batches)
     return frac, frac_bright3, frac_bright10, s_member
@@ -560,29 +584,26 @@ def _pahc_weight(limit8_grid, p_pahc, x):
 
 def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_in_tile, width_dex,
                      agb_pool, coverage_in_tile):
-    """One tile's `{cls: (frac, mc_error, density, frac_bright3,
-    frac_bright10, total_se)}` for STAR/AGB/PAHC, over its own
-    admitted pixels, from the star-family population's own retained
-    sample (`population/star/population_star_tile__R.hdf5`'s `tile_<id>`
-    group): STAR/PAHC draw from the SAME TRILEGAL flux table (sec. 8's
-    members list), each with its own weight column and its own Monte
-    Carlo resample, so the two densities carry independent binomial noise
-    rather than the same draw reweighted after the fact. AGB draws from
-    `sample_star.sample_agb`'s own evolved-star sample instead (sec. 5.2:
-    the star's own `F_4.5` is the shell flux, not TRILEGAL's photosphere)
-    -- each drawn star's own shell chemistry (already resolved by
-    `sample_agb`'s carbon-share split, `x`'s first/second half) picks one
-    AGB library template from `agb_pool`'s own tau-factor weight within
-    that chemistry, whose eight `F_REF` are rescaled so its own 4.5 um
-    reference flux equals the star's `F_4.5`. `width_dex` is `catalog.
-    depth_grid`'s `W_DEX_PIX` (sec. 3.3): one value per band for the
-    region, broadcast to this tile's own pixels (n_pix_in_tile, 8), not a
-    per-pixel fit. `total_se` is the Monte Carlo standard error of this
-    class's own contribution to the region total (`density` times this
-    ONE shared tile draw's weighted total, `coverage_in_tile * pixel
-    area`), the error a region total actually carries -- every pixel of
-    the tile shares this one draw, so it is not the sum of the per-pixel
-    `mc_error` values above."""
+    """One tile's `{cls: (frac, density, frac_bright3, frac_bright10,
+    n_cat_cell_tile)}` for STAR/AGB/PAHC, over its own admitted pixels,
+    from the star-family population's own retained sample (`population/
+    star/population_star_tile__R.hdf5`'s `tile_<id>` group): each class's
+    catalogued fraction is the WEIGHTED SUM over every one of its own
+    members (`catalogued_fraction`, sec. 8), no draw. AGB's members are
+    the cross product of `sample_star.sample_agb`'s own evolved stars
+    with every shell template of THEIR OWN chemistry (sec. 5.2: the
+    star's own `F_4.5` is the shell flux, not TRILEGAL's photosphere),
+    each template's eight `F_REF` rescaled so its own 4.5 um reference
+    flux equals the star's `F_4.5`. `width_dex` is `catalog.depth_grid`'s
+    `W_DEX_PIX` (sec. 3.3): one value per band for the region, broadcast
+    to this tile's own pixels (n_pix_in_tile, 8), not a per-pixel fit.
+    `n_cat_cell_tile` (128, 110) is this tile's own contribution to the
+    region's expected catalogued count per parameter cell (module
+    docstring's `N_CAT_CELL_GAL`, the same construction here): `grid.bin`
+    on the class's own members at their own `x`/`log10 F_4.5`, weighted
+    by each member's own expected catalogued count (`density * (w /
+    w.sum()) * s_member`, `s_member` `catalogued_fraction`'s exact
+    pixel-area-weighted catalogued probability per member)."""
     star_path = config_module.product_path(
         config, "population", "star", "population", "tile", region=region)
     field_path = config_module.product_path(
@@ -606,73 +627,93 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     p_pahc = _pahc_weight(limit8_grid, p_pahc_grid, tile_i4_limit)
 
     # STAR and PAHC partition the field population (spec sec. 5.1, 5.3;
-    # coordinator ruling): a star is EITHER a STAR member or a PAHC member
-    # of the Monte Carlo, weighted `W_STAR*(1-P_PAHC)` / `W_STAR*P_PAHC`,
-    # so `N_CAT_STAR + N_CAT_PAHC` never exceeds the field-star count.
+    # coordinator ruling): a star is EITHER a STAR member or a PAHC member,
+    # weighted `W_STAR*(1-P_PAHC)` / `W_STAR*P_PAHC`, so `N_CAT_STAR +
+    # N_CAT_PAHC` never exceeds the field-star count.
     w_star_only = w_star * (1.0 - p_pahc)
     w_pahc_only = w_star * p_pahc
 
-    # this tile's one shared draw's own weight for the region-total error
-    # (module docstring's `total_se`): density multiplies afterward,
-    # since it is a fixed number, not itself drawn.
+    # each pixel's own share of the tile's admitted area (sec. 8): the
+    # coefficient `catalogued_fraction`'s `s_member` and the cell grid's
+    # own catalogued count per member are built from.
     weight_pix = coverage_in_tile * _HPX512_PIXEL_DEG2
+    n_x, n_b = grid.LOG10_X_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1
 
-    rng = np.random.RandomState(MC_SEED + _SEED_OFFSET_TILE + tile_id)
     out = {}
     for cls, weight in (("STAR", w_star_only), ("PAHC", w_pahc_only)):
-        idx, total = _draw_members(rng, weight, N_MC)
-        density = total / omega_t  # objects deg^-2, sec. 5.1/5.2's Omega_pointing
-        if idx is None:
+        m = weight > 0
+        w = weight[m]
+        density = float(weight.sum()) / omega_t  # objects deg^-2, sec. 5.1/5.2's Omega_pointing
+        if w.size == 0:
             frac = np.zeros(pix_in_tile.size)
-            mc_error = np.zeros(pix_in_tile.size)
             frac_bright3 = np.zeros(pix_in_tile.size)
             frac_bright10 = np.zeros(pix_in_tile.size)
-            total_se = 0.0
+            n_cat_cell_tile = np.zeros((n_x, n_b))
         else:
-            frac, mc_error, frac_bright3, frac_bright10, _block_total, block_total_se = _accepted_fraction(
-                a_col_in_tile, u[idx], flux0_all[idx], f_lim_in_tile, width_dex, config,
-                weight_pix=weight_pix)
-            total_se = density * block_total_se
-        out[cls] = (frac, mc_error, density, frac_bright3, frac_bright10, total_se)
+            frac, frac_bright3, frac_bright10, s_member = catalogued_fraction(
+                a_col_in_tile, u[m], flux0_all[m], w, f_lim_in_tile, width_dex, config, weight_pix)
+            c_m = density * (w / w.sum()) * s_member
+            H, _outside = grid.bin(u[m], np.log10(flux0_all[m, IDX_I2]), c_m)
+            n_cat_cell_tile = H * float(c_m.sum())
+        out[cls] = (frac, density, frac_bright3, frac_bright10, n_cat_cell_tile)
 
-    # AGB (sec. 5.2): the SAME sampler `bmstp.shapes` bins its own shape
-    # from -- `x_a` is `concatenate([u, u])` over the tile's evolved
-    # stars, `f45_a` each star's own shell `log10 F_4.5` in its assigned
-    # chemistry, `w_a` the carbon-share-split weight -- so drawing from
-    # `w_a` reproduces the O/C admixture exactly as the shape's own draw
-    # does; the first half of the concatenation is O-rich, the second C-rich.
+    # AGB (sec. 5.2): every evolved star with positive weight
+    # (`sample_star.sample_agb`'s `w_a`; `x_a`'s first half O-rich,
+    # second half C-rich) crossed with every shell template of ITS OWN
+    # chemistry (`agb_pool[label]`), the cross product built with
+    # `np.repeat`/`np.tile` (rule 8: no Python loop over stars). A
+    # member's own weight is `w_a[star] * pool["weight"][template] /
+    # pool["weight"].sum()` (the within-chemistry template distribution,
+    # sec. 5.2's template-weights paragraph); summed over one star's own
+    # templates this recovers `w_a[star]` exactly, so `density_agb` still
+    # reads the star population's own `w_a.sum()`.
     x_a, f45_a, w_a = sample_star.sample_agb(config, region, tile_id)
-    idx_agb, total_agb = _draw_members(rng, w_a, N_MC)
-    density_agb = total_agb / omega_t
-    if idx_agb is None:
+    n_evolved = x_a.size // 2
+    is_c = np.arange(x_a.size) >= n_evolved
+    density_agb = float(w_a.sum()) / omega_t
+    u_parts, flux0_parts, w_parts, f45_parts = [], [], [], []
+    for label, chem_mask in (("O", ~is_c), ("C", is_c)):
+        star_idx = np.flatnonzero(chem_mask & (w_a > 0))
+        if star_idx.size == 0:
+            continue
+        pool = agb_pool[label]
+        n_tmpl = pool["weight"].size
+        pool_weight_sum = float(pool["weight"].sum())
+        star_rep = np.repeat(star_idx, n_tmpl)
+        tmpl_rep = np.tile(np.arange(n_tmpl), star_idx.size)
+
+        u_m = x_a[star_rep]
+        f45_m = f45_a[star_rep]  # already log10 F_4.5 (mJy)
+        f_ref_i2 = np.maximum(pool["f_ref"]["I2"][tmpl_rep], pool["floor_linear"][tmpl_rep])
+        scale = (10.0 ** f45_m) / f_ref_i2  # rescales the WHOLE shell SED
+        flux0_m = np.empty((star_rep.size, N_BANDS), dtype=np.float64)
+        for k, key in enumerate(BAND_KEYS):
+            f_band = np.maximum(pool["f_ref"][key][tmpl_rep], pool["floor_linear"][tmpl_rep])
+            flux0_m[:, k] = f_band * scale
+        w_m = w_a[star_rep] * pool["weight"][tmpl_rep] / pool_weight_sum
+
+        u_parts.append(u_m)
+        flux0_parts.append(flux0_m)
+        w_parts.append(w_m)
+        f45_parts.append(f45_m)
+
+    if not u_parts:
         frac_agb = np.zeros(pix_in_tile.size)
-        mc_agb = np.zeros(pix_in_tile.size)
         frac_agb_bright3 = np.zeros(pix_in_tile.size)
         frac_agb_bright10 = np.zeros(pix_in_tile.size)
-        total_se_agb = 0.0
+        n_cat_cell_agb = np.zeros((n_x, n_b))
     else:
-        n_evolved = x_a.size // 2
-        is_c = idx_agb >= n_evolved
-        u_agb = x_a[idx_agb]
-        f45_target = 10.0 ** f45_a[idx_agb]  # the star's own shell F_4.5 (mJy)
-        flux0_agb = np.empty((idx_agb.size, N_BANDS), dtype=np.float64)
-        for label, mask in (("O", ~is_c), ("C", is_c)):
-            n_sel = int(np.count_nonzero(mask))
-            if n_sel == 0:
-                continue
-            pool = agb_pool[label]
-            shell = rng.choice(pool["weight"].size, size=n_sel, replace=True,
-                                p=pool["weight"] / pool["weight"].sum())
-            f_ref_i2 = np.maximum(pool["f_ref"]["I2"][shell], pool["floor_linear"][shell])
-            scale = f45_target[mask] / f_ref_i2  # rescales the WHOLE shell SED
-            for k, key in enumerate(BAND_KEYS):
-                f_band = np.maximum(pool["f_ref"][key][shell], pool["floor_linear"][shell])
-                flux0_agb[mask, k] = f_band * scale
-        frac_agb, mc_agb, frac_agb_bright3, frac_agb_bright10, _block_agb, block_se_agb = _accepted_fraction(
-            a_col_in_tile, u_agb, flux0_agb, f_lim_in_tile, width_dex, config,
-            weight_pix=weight_pix)
-        total_se_agb = density_agb * block_se_agb
-    out["AGB"] = (frac_agb, mc_agb, density_agb, frac_agb_bright3, frac_agb_bright10, total_se_agb)
+        u_agb = np.concatenate(u_parts)
+        flux0_agb = np.concatenate(flux0_parts, axis=0)
+        w_agb_member = np.concatenate(w_parts)
+        f45_agb_member = np.concatenate(f45_parts)
+        frac_agb, frac_agb_bright3, frac_agb_bright10, s_member_agb = catalogued_fraction(
+            a_col_in_tile, u_agb, flux0_agb, w_agb_member, f_lim_in_tile, width_dex, config, weight_pix)
+        w_sum_agb = float(w_agb_member.sum())
+        c_m_agb = density_agb * (w_agb_member / w_sum_agb) * s_member_agb
+        H_agb, _outside_agb = grid.bin(u_agb, f45_agb_member, c_m_agb)
+        n_cat_cell_agb = H_agb * float(c_m_agb.sum())
+    out["AGB"] = (frac_agb, density_agb, frac_agb_bright3, frac_agb_bright10, n_cat_cell_agb)
     return out
 
 
@@ -1238,6 +1279,14 @@ def build_region(config, region):
         # sightline (`_build_one_sightline`'s own docstring paragraph).
         total_var = 0.0
 
+        # STAR/PAHC/AGB (sec. 5.1-5.2): each class's own catalogued
+        # weighted sum over its whole population is exact (`_build_one_
+        # tile`'s own docstring), so it carries no Monte Carlo error of
+        # its own -- `total_var`'s bookkeeping above (still summed for
+        # GAL/H2S/YSO below) takes zero from these three.
+        n_cat_cell = {c: np.zeros((grid.LOG10_X_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1))
+                      for c in ("STAR", "PAHC", "AGB")}
+
         def _one(tile_id):
             m = usable & (tile_of_pix == tile_id)
             return tile_id, m, _build_one_tile(
@@ -1247,12 +1296,14 @@ def build_region(config, region):
         results = Parallel(n_jobs=n_jobs)(delayed(_one)(t) for t in tiles_here)
         for i, (tile_id, m, out) in enumerate(results):
             for cls in ("STAR", "AGB", "PAHC"):
-                frac, mc_error, density, frac_bright3, frac_bright10, total_se = out[cls]
+                frac, density, frac_bright3, frac_bright10, n_cat_cell_tile = out[cls]
                 n_cat[cls][m] = density * frac
                 intensity[cls][m] = density
-                mc_err[cls][m] = mc_error
+                mc_err[cls][m] = 0.0
                 n_cat_bright3[cls][m] = density * frac_bright3
                 n_cat_bright10[cls][m] = density * frac_bright10
+                n_cat_cell[cls] += n_cat_cell_tile
+                total_se = 0.0
                 total_var += total_se ** 2
             st.tick(i + 1, len(tiles_here), "tiles")
 
@@ -1280,9 +1331,9 @@ def build_region(config, region):
         se_gal = 0.0
         total_var += se_gal ** 2
         # the region's expected number of catalogued objects per parameter
-        # cell (module docstring): GAL is the first of the six classes to
-        # store one.
-        n_cat_cell = {"GAL": n_cat_cell_gal}
+        # cell (module docstring): STAR/PAHC/AGB already accumulated
+        # theirs, tile by tile, above.
+        n_cat_cell["GAL"] = n_cat_cell_gal
 
         # YSO/H2S, sec. 5.5-5.6: grouped by the pixel's own nside-256
         # sightline (YSO's grain), one Monte Carlo draw per sightline
@@ -1583,11 +1634,14 @@ def build_region(config, region):
                 f.create_dataset(f"N_ABOVE_{c}", data=n_above[c].astype(np.float32))
                 f.create_dataset(f"N_CAT_BRIGHT3_{c}", data=n_cat_bright3[c].astype(np.float32))
                 f.create_dataset(f"N_CAT_BRIGHT10_{c}", data=n_cat_bright10[c].astype(np.float32))
-            # the region's expected number of catalogued GAL objects per
-            # parameter cell (module docstring), summing to `RATIO_GAL *
+            # the region's expected number of catalogued objects per
+            # parameter cell (module docstring), summing to `RATIO_<C> *
             # N_source`; `(128, 110)` on `grid.LOG10_X_EDGES` x
             # `grid.LOG10_F45_EDGES`, the shapes' own axes.
             f.create_dataset("N_CAT_CELL_GAL", data=n_cat_cell["GAL"].astype(np.float32))
+            f.create_dataset("N_CAT_CELL_STAR", data=n_cat_cell["STAR"].astype(np.float32))
+            f.create_dataset("N_CAT_CELL_PAHC", data=n_cat_cell["PAHC"].astype(np.float32))
+            f.create_dataset("N_CAT_CELL_AGB", data=n_cat_cell["AGB"].astype(np.float32))
             for c in built:
                 f.create_dataset(f"SHARE_{c}", data=share[c].astype(np.float32))
             f.create_dataset("N_OBS", data=n_obs.astype(np.int32))
