@@ -154,20 +154,24 @@ N_DEPTH_NODES = 8
 
 #: H2S's colour-ratio quadrature (sec. 5.6 "Marks"): equally spaced
 #: quantile nodes of each IRAC band's own Giannini table, one band
-#: independent of the others so the joint is their product (3**4 = 81
-#: nodes).
-N_RATIO_NODES = 3
+#: independent of the others so the joint is their product (5**4 = 625
+#: nodes). 3 nodes/band (81 joint) was tried first and is the dominant
+#: source of H2S's own convergence miss (isolated at a converged sigma
+#: count: N_RATIO_NODES=3 alone gives 0.0102 relative to the fine
+#: reference at the region's median-column sightline, N_RATIO_NODES=5
+#: gives 0.0012) -- `reports/W67e.md`'s convergence table is that check's
+#: evidence.
+N_RATIO_NODES = 5
 
 #: H2S's surface-brightness quadrature (sec. 5.6 "Marks"): equally spaced
 #: quantile nodes of the region's own lognormal itself (`scipy.special.
 #: ndtri`'s exact inverse CDF), in place of the cell-integrated grid this
-#: replaced. 48 is the best of {20, 32, 48} at the region's median-column
-#: sightline against the fine reference -- none of the three clears the
-#: 0.005 bar there (48 itself: 0.0108); the dominant remaining source is
-#: `N_RATIO_NODES`'s own coarseness (3 nodes/band, 81 joint), not this
-#: count (`reports/W67e.md`'s convergence table is that check's
-#: evidence, and its own diagnostic isolating the two factors).
-N_SIGMA_NODES = 48
+#: replaced. 20 clears the 0.005 bar at the region's median-column
+#: sightline against the fine reference once N_RATIO_NODES is 5 (0.0033;
+#: the sigma count was never the dominant source -- see N_RATIO_NODES's
+#: own comment); `reports/W67e.md`'s convergence table is that check's
+#: evidence.
+N_SIGMA_NODES = 20
 
 _HPX512_PIXEL_DEG2 = 41252.96 / (12 * 512 ** 2)
 
