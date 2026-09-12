@@ -321,53 +321,41 @@ def _pixel_batch_size(n_mc):
     return max(1, _PIXEL_BATCH_BUDGET_BYTES // row_bytes)
 
 
-def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None, weight_pix=None):
-    """`(frac, mc_error, frac_bright3, frac_bright10, block_total, block_total_se)`
-    per pixel: `flux0` (n_mc, 8) undimmed, `u` (n_mc,)
-    the member's own placement fraction, `a_col` (n_pix,) the pixel's own
-    column, `f_lim` (n_pix, 8) the pixel's own marginalised limits,
-    `width_dex` (n_pix, 8) `catalog.depth_grid`'s `W_DEX_PIX` (sec. 3.3):
-    one value per band for the region, broadcast across the pixel axis
-    passed in here -- unlike `f_lim`, it does not vary pixel to pixel.
-    `a = a_col * u`
-    (sec. 8's "its own extinction"), dimmed through the blended law
+def catalogued_probability(a_col, u, flux0, f_lim, width_dex, config):
+    """`(p_cat, p_cat_i2, flux_i2)` for ONE pixel batch: the closed-form
+    probability that a member is catalogued (SPEC_BMSTP_DRAFT.md sec. 8,
+    sec. 6.2), with no Monte Carlo bookkeeping in it -- `_accepted_fraction`
+    forms the Monte Carlo means and standard errors from these three
+    arrays, batch by batch.
+
+    `a_col` (n_pix,) the pixel's own column, `u` (n_mem,) the member's own
+    placement fraction, `flux0` (n_mem, 8) undimmed member fluxes (zero
+    where the member carries no flux in a band), `f_lim` (n_pix, 8) the
+    pixel's own marginalised limits, `width_dex` (n_pix, 8)
+    `catalog.depth_grid`'s `W_DEX_PIX` (sec. 3.3): one value per band for
+    the region, broadcast across the pixel axis passed in here -- unlike
+    `f_lim`, it does not vary pixel to pixel. `a = a_col * u` (sec. 8's
+    "its own extinction"), dimmed through the blended law
     (`population.selection.kappa_hybrid`). The two-of-eight step test is
-    replaced by the member's probability of being catalogued
-    (SPEC_BMSTP_DRAFT.md sec. 8, sec. 6.2): per band `p_i = C_i(f_i) =
-    1 - exp(ln[1-C_i])`, `ln[1-C_i]` from `fittp.likelihood`'s own
-    numerically stable erf kernel at `z_i = (log10 f_i - log10
-    F_lim,50,i) / (sqrt(2) w_{r,i})` -- the same completeness `fittp`
-    prices non-detection with -- zero where the member carries no flux in
-    that band (GAL's 2MASS/24um, H2S's J/H/24um); `P(>=2 of 8) =
-    1 - Prod_i(1-p_i) - Sum_i p_i Prod_{j!=i}(1-p_j)` (bands independent
-    given the fluxes). `mc_error` is the Monte Carlo standard error of
-    THIS PIXEL'S OWN mean catalogued probability at `N_MC` draws (the
-    sample standard deviation of `accepted_prob` over members). The same
-    `N_MC` members are the caller's one draw for the whole tile,
-    sightline or region, so `mc_error` at different pixels of one call is
-    not independent -- it does not shrink by summing pixels, and does not
-    describe the error on a REGION TOTAL; `weight_pix`/`block_total`/
-    `block_total_se` below are what a region total's own error needs.
+    replaced by the member's probability of being catalogued: per band
+    `p_i = C_i(f_i) = 1 - exp(ln[1-C_i])`, `ln[1-C_i]` from
+    `fittp.likelihood`'s own numerically stable erf kernel at
+    `z_i = (log10 f_i - log10 F_lim,50,i) / (sqrt(2) w_{r,i})` -- the same
+    completeness `fittp` prices non-detection with -- zero where the
+    member carries no flux in that band (GAL's 2MASS/24um, H2S's
+    J/H/24um).
 
-    `frac_bright3`/`frac_bright10` (sec. 9 "the bright-end count ratio"):
-    each member's own probability of being catalogued WITH I2 ITSELF
-    MEASURED, `p_I2 * (1 - prod_{i!=I2}(1-p_i))`, restricted to draws
-    whose dimmed I2 (4.5 um) flux exceeds 3x/10x the pixel's own
-    `F_LIM_50_PIX_MJY[:, IDX_I2]` -- the exact condition the catalogue
-    side applies to a catalogued source (`ORIGIN_FNU[:, I2] == 1`, bright
-    above the same multiple, `_observed_bright_counts`): one bright test,
-    stated once, so the two sides of the ratio are the same population.
+    `p_cat` (n_pix, n_mem): `P(>=2 of 8) = 1 - Prod_i(1-p_i)
+    - Sum_i p_i Prod_{j!=i}(1-p_j)` (bands independent given the fluxes).
 
-    `weight_pix` (n_pix,), optional: this pixel's own coefficient (e.g.
-    density x coverage x pixel area) by which its `frac` is summed into
-    some larger total. When given, `block_total`/`block_total_se` are the
-    mean and Monte Carlo standard error of `sum_pix weight_pix *
-    accepted_prob`, i.e. of the weighted total THIS CALL'S SHARED DRAW
-    OF MEMBERS stands for -- the correct error for a total built from
-    this one draw, since it is computed from the N_MC replicate totals
-    before they are averaged down to `frac`, rather than from the
-    per-pixel `mc_error` values (`None`, `None` when `weight_pix` is not
-    given).
+    `p_cat_i2` (n_pix, n_mem) (sec. 9 "the bright-end count ratio"): each
+    member's own probability of being catalogued WITH I2 (4.5 um) ITSELF
+    MEASURED, `p_I2 * (1 - prod_{i!=I2}(1-p_i))` -- the exact condition
+    the catalogue side applies to a catalogued source (`ORIGIN_FNU[:, I2]
+    == 1`, `_observed_bright_counts`).
+
+    `flux_i2` (n_pix, n_mem): the dimmed I2 flux, for the bright tests
+    (compared there to 3x/10x the pixel's own I2 50% limit).
 
     An unsurveyed band's `f_lim` is `+inf` and its `width_dex` is 0
     (`catalog.depth_grid`'s rule): `log10(f_lim) = +inf`, so `z`'s
@@ -379,6 +367,70 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None, wei
     with no NaN at any step. `has_flux`'s own `np.where` keeps a
     band with no flux at all out of this path already, so the two guards
     do not interact.
+
+    No batching inside: the caller (`_accepted_fraction`, rule 10b) passes
+    one pixel batch and its own slice of `a_col`/`f_lim`/`width_dex`; `u`
+    and `flux0` are the caller's whole (unsliced) member draw."""
+    a = a_col[:, None] * u[None, :]  # (n_pix, n_mem)
+    w_ramp = selection_module.law_dense_weight(a)  # (n_pix, n_mem)
+    kappa = selection_module.kappa_hybrid(config, w_ramp)  # (n_pix, n_mem, 8)
+    dimming = 0.4 * a[:, :, None] * kappa  # (n_pix, n_mem, 8)
+    flux = flux0[None, :, :] * 10.0 ** (-dimming)  # (n_pix, n_mem, 8)
+    has_flux = flux0[None, :, :] > 0.0  # (1, n_mem, 8), broadcasts
+    log10_f = np.log10(np.where(has_flux, flux, 1.0))
+    z = ((log10_f - np.log10(f_lim)[:, None, :])
+         / (likelihood_module._SQRT2 * width_dex[:, None, :]))
+    p = np.where(has_flux, 1.0 - np.exp(likelihood_module._ln_one_minus_c(z)), 0.0)
+    one_minus_p = 1.0 - p  # (n_pix, n_mem, 8)
+    prod_all = np.prod(one_minus_p, axis=2)
+    sum_term = np.zeros_like(prod_all)
+    for i in range(N_BANDS):
+        sum_term += p[:, :, i] * np.prod(np.delete(one_minus_p, i, axis=2), axis=2)
+    p_cat = 1.0 - prod_all - sum_term
+
+    # the bright-end check (sec. 9): a member counts as bright only if it
+    # would be CATALOGUED WITH I2 ITSELF MEASURED (its own I2 cleared,
+    # `p[:,:,IDX_I2]`, AND at least one of the other seven also clears,
+    # `1 - prod_{i!=I2}(1-p_i)`); flux_i2 lets the caller apply the 3x/10x
+    # test against this pixel's own I2 50% limit.
+    prob_other_detect = 1.0 - np.prod(np.delete(one_minus_p, IDX_I2, axis=2), axis=2)
+    p_cat_i2 = p[:, :, IDX_I2] * prob_other_detect
+    flux_i2 = flux[:, :, IDX_I2]  # (n_pix, n_mem)
+    return p_cat, p_cat_i2, flux_i2
+
+
+def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None, weight_pix=None):
+    """`(frac, mc_error, frac_bright3, frac_bright10, block_total, block_total_se)`
+    per pixel, the Monte Carlo statistics over the shared member draw
+    `u`/`flux0` -- the catalogued-probability arrays themselves come from
+    `catalogued_probability` (this function calls it once per pixel
+    batch and owns only the mean/standard-error/bright-test bookkeeping
+    below). `mc_error` is the Monte Carlo standard error of THIS PIXEL'S
+    OWN mean catalogued probability at `N_MC` draws (the sample standard
+    deviation of `p_cat` over members). The same `N_MC` members are the
+    caller's one draw for the whole tile, sightline or region, so
+    `mc_error` at different pixels of one call is not independent -- it
+    does not shrink by summing pixels, and does not describe the error on
+    a REGION TOTAL; `weight_pix`/`block_total`/`block_total_se` below are
+    what a region total's own error needs.
+
+    `frac_bright3`/`frac_bright10` (sec. 9 "the bright-end count ratio"):
+    `p_cat_i2` restricted to draws whose dimmed I2 (4.5 um) flux exceeds
+    3x/10x the pixel's own `F_LIM_50_PIX_MJY[:, IDX_I2]` -- the exact
+    condition the catalogue side applies to a catalogued source
+    (`ORIGIN_FNU[:, I2] == 1`, bright above the same multiple,
+    `_observed_bright_counts`): one bright test, stated once, so the two
+    sides of the ratio are the same population.
+
+    `weight_pix` (n_pix,), optional: this pixel's own coefficient (e.g.
+    density x coverage x pixel area) by which its `frac` is summed into
+    some larger total. When given, `block_total`/`block_total_se` are the
+    mean and Monte Carlo standard error of `sum_pix weight_pix * p_cat`,
+    i.e. of the weighted total THIS CALL'S SHARED DRAW OF MEMBERS stands
+    for -- the correct error for a total built from this one draw, since
+    it is computed from the N_MC replicate totals before they are
+    averaged down to `frac`, rather than from the per-pixel `mc_error`
+    values (`None`, `None` when `weight_pix` is not given).
 
     Processed in pixel batches of `_pixel_batch_size` (rule 10b): each
     batch is the same elementwise-per-pixel computation on a slice of
@@ -403,40 +455,14 @@ def _accepted_fraction(a_col, u, flux0, f_lim, width_dex, config, tick=None, wei
         a_b = a_col[start:stop]
         f_lim_b = f_lim[start:stop]
         width_dex_b = width_dex[start:stop]
-        a = a_b[:, None] * u[None, :]  # (n_pix_batch, n_mc)
-        w_ramp = selection_module.law_dense_weight(a)  # (n_pix_batch, n_mc)
-        kappa = selection_module.kappa_hybrid(config, w_ramp)  # (n_pix_batch, n_mc, 8)
-        dimming = 0.4 * a[:, :, None] * kappa  # (n_pix_batch, n_mc, 8)
-        flux = flux0[None, :, :] * 10.0 ** (-dimming)  # (n_pix_batch, n_mc, 8)
-        has_flux = flux0[None, :, :] > 0.0  # (1, n_mc, 8), broadcasts
-        log10_f = np.log10(np.where(has_flux, flux, 1.0))
-        z = ((log10_f - np.log10(f_lim_b)[:, None, :])
-             / (likelihood_module._SQRT2 * width_dex_b[:, None, :]))
-        p = np.where(has_flux, 1.0 - np.exp(likelihood_module._ln_one_minus_c(z)), 0.0)
-        one_minus_p = 1.0 - p  # (n_pix_batch, n_mc, 8)
-        prod_all = np.prod(one_minus_p, axis=2)
-        sum_term = np.zeros_like(prod_all)
-        for i in range(N_BANDS):
-            sum_term += p[:, :, i] * np.prod(np.delete(one_minus_p, i, axis=2), axis=2)
-        accepted_prob = 1.0 - prod_all - sum_term
+        accepted_prob, catalogued_i2_measured, flux_i2 = catalogued_probability(
+            a_b, u, flux0, f_lim_b, width_dex_b, config)
         frac[start:stop] = accepted_prob.mean(axis=1)
         mc_error[start:stop] = accepted_prob.std(axis=1) / np.sqrt(n_mc)
         if block_sum is not None:
             block_sum += weight_pix[start:stop] @ accepted_prob
 
-        # the bright-end check (sec. 9): a member counts as bright only if
-        # it would be CATALOGUED WITH I2 ITSELF MEASURED (its own I2
-        # cleared, `p[:,:,IDX_I2]`, AND at least one of the other seven
-        # also clears, `1 - prod_{i!=I2}(1-p_i)`) AND its own dimmed I2
-        # flux clears 3x/10x this pixel's own I2 50% limit -- brighter
-        # than that, completeness is 1 on both sides, so this isolates the
-        # level from the faint extrapolation. This is the catalogue
-        # side's exact condition, `ORIGIN_FNU[:, I2] == 1` on a catalogued
-        # source with bright I2 flux (`_observed_bright_counts`).
-        prob_other_detect = 1.0 - np.prod(np.delete(one_minus_p, IDX_I2, axis=2), axis=2)
-        catalogued_i2_measured = p[:, :, IDX_I2] * prob_other_detect
         i2_lim_b = f_lim_b[:, IDX_I2:IDX_I2 + 1]  # (n_pix_batch, 1)
-        flux_i2 = flux[:, :, IDX_I2]  # (n_pix_batch, n_mc)
         bright3 = flux_i2 > BRIGHT_MULT_3 * i2_lim_b
         bright10 = flux_i2 > BRIGHT_MULT_10 * i2_lim_b
         frac_bright3[start:stop] = (catalogued_i2_measured * bright3).mean(axis=1)
