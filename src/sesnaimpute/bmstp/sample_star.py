@@ -6,7 +6,7 @@ Reads `population.star_population`'s per-tile product
 (`population/star/population_star_tile__R.hdf5`): one root group per tile,
 `tile_<id>`, holding `STAR_INDEX` (the row into the region's retained
 field-star sample, `population.field_stars`'s `field-stars_trilegal_region`
-product), `U` (scaled extinction), `W_STAR`/`W_AGB` (the reweighting of sec.
+product), `U` (the depth fraction ξ, stored under that name), `W_STAR`/`W_AGB` (the reweighting of sec.
 5.2) and `IS_EVOLVED`. PAHC has no sampler of its own: it reads STAR's grid
 (`GRID_STAR`) unchanged.
 
