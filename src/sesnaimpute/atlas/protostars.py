@@ -40,14 +40,21 @@ from sesnaimpute import plot_style
 from sesnaimpute import progress
 from sesnaimpute.atlas import captions
 from sesnaimpute.atlas import shapes as shapes_module
-from sesnaimpute.atlas.render import _add_panel, _align, _colorbar, _footprint_geometry, _log_norm, _reproject
+from sesnaimpute.atlas.render import (
+    LABEL_FONTSIZE, _add_panel, _align, _footprint_geometry, _log_norm, _panel_colorbar, _reproject)
 from sesnaimpute.bmstp import grid
 from sesnaimpute.fittp import likelihood as likelihood_module
 from sesnaimpute.population import kernel as kernel_module
 from sesnaimpute.population import selection as population_selection
 
 NSIDE_512 = 512
-PAGE_W_IN, PAGE_H_IN = 16.0, 9.0
+PAGE_W_IN = 16.0
+
+#: The page title and its one-line subtitle (owner's ruling 2026-09-13):
+#: bigger than the panel titles, since a reader meets the page here first
+#: -- the two atlas pages' own convention (`atlas.shapes`).
+_TITLE_FONTSIZE = 18
+_SUBTITLE_FONTSIZE = 15
 
 #: The three catalogue classes the check uses (SPEC_BMSTP_DRAFT.md sec.
 #: 5.5's Class 0/I/flat protostellar population); the catalogue's own
@@ -72,20 +79,25 @@ IDX_I2 = BAND_KEYS.index("I2")
 _SQRT2 = float(np.sqrt(2.0))
 _SQRT2PI = float(np.sqrt(2.0 * np.pi))
 
-#: Panel 1's marker SHAPE per class (colour is reserved for P(YSO | ...));
-#: a not-measured protostar overrides this with a downward triangle
-#: regardless of class (the brief's own "at its dereddened limit").
+#: Panel 1's marker SHAPE per class (colour is reserved for P(young star |
+#: ...)); a not-measured protostar overrides this with a downward triangle
+#: regardless of class (drawn at its own detection limit).
 _CLASS_MARKER = {b"0": "o", b"I": "s", b"flat": "^"}
 _NOT_MEASURED_MARKER = "v"
-#: Panel 1's own open marker for a protostar beyond the kernel's reach
-#: (this brief's item 2).
+#: Panel 1's own open marker for a protostar whose fitted foreground
+#: extinction sits far above its sightline's own column.
 _BEYOND_REACH_MARKER = "o"
 #: Panel 1's own open marker for a protostar with an unconstrained
 #: foreground, `AV_FOREGROUND_MAG <= 0` (owner, 2026-09-12 evening ruling
 #: 2) -- distinct from `_BEYOND_REACH_MARKER` since it is a different
-#: reason to draw with no position/interval (no fitted depth at all,
-#: never a kernel reach test).
+#: reason to draw with no measured depth fraction of its own.
 _NO_FOREGROUND_MARKER = "s"
+
+#: The legend's own words per class (owner's 2026-09-13 ruling, item 4):
+#: every panel's class legend reads "Class 0"/"Class I"/"flat" (never
+#: "flat" as "Class flat"); the map panel's own legend also carries the
+#: catalogue's Class II rows, counted there but never fed to the verdict.
+_CLASS_LABEL = {b"0": "Class 0", b"I": "Class I", b"flat": "flat", b"II": "Class II"}
 
 #: The fine grid this brief's item 2 reads the truncated-mixture median
 #: and interval off (dex, in log10 x or log10 r_p): 0.005 dex, this
@@ -120,6 +132,7 @@ def _read_protostars(config, region):
         return dict(
             ra_deg=f["RA_DEG"][:][mask], dec_deg=f["DEC_DEG"][:][mask],
             cls=f["CLASS"][:][mask], av_mag=f["AV_FOREGROUND_MAG"][:][mask],
+            survey=f["SURVEY"][:][mask],
             f45_mjy=f["F45_MJY"][:][mask].astype(np.float64),
             e_f45_mjy=f["E_F45_MJY"][:][mask].astype(np.float64),
             f45_measured=f["F45_MEASURED"][:][mask])
@@ -402,40 +415,29 @@ def _likelihood_factor(f45_mjy, e_f45_mjy, measured, a_p, kappa_i2, f_lim_i2, w_
     return np.where(measured[:, None], l_measured, l_not_measured)
 
 
-def _share_yso(lambda_row, class_order):
-    """`P(YSO | cell, s)` over the whole grid for one row's own `Lambda`
-    (n_class, n_x, n_b) -- row 2's own share (`atlas.shapes`), masked to
-    NaN outside the support so it draws blank there."""
-    idx_yso = class_order.index("YSO")
-    support = np.zeros(lambda_row.shape[1], dtype=bool)
-    support[:grid.N_X_SUPPORT] = True
-    total = lambda_row.sum(axis=0)
-    denom = np.where(support[:, None], total, 1.0)
-    share = lambda_row[idx_yso] / denom
-    return np.where(support[:, None], share, np.nan)
-
-
 def _verdict(config, region, protostars, used, density_row, idx_median):
     """Section 3's "The verdict": `P(C | r_p, datum, s)` for the six
     classes at every used protostar's own matched row, read at the
-    MEASURED cell `log10 r_p` from the blurred grids (`blur=True`, this
-    brief's items 2-3) -- the position bar drawn instead in the DISTANCE
-    coordinate, `p(log10 x | r_p, cloud kernel)` truncated at the wall
-    (`_position_distribution`). The background (panel 1's map) is the
-    region's median source's own UNBLURRED read (`blur=False`), so the
-    bars and the field share one coordinate (item 3): a second
-    `lambda_grids` call, since the two need different `blur` settings.
+    MEASURED cell `log10 r_p` from the blurred grids (`blur=True`). Also
+    returns each protostar's own measured depth fraction `log10 r_p`
+    itself (`log10_xi_hat`, item 4 of the 2026-09-13 owner ruling), the
+    page's own x coordinate; `p(log10 x | r_p, cloud kernel)`'s own
+    reach test (`_position_distribution`'s `p_reach`) still marks which
+    protostars sit beyond the kernel's reach, but its median/interval no
+    longer feed the page (nothing there is drawn from the truncated
+    mixture any more).
 
     A protostar with `AV_FOREGROUND_MAG <= 0` (owner, 2026-09-12 evening
     ruling 2) is an UNCONSTRAINED foreground, the fit's own lowest grid
-    point, not a measurement: it has no position in `x` at all. Its
-    verdict is instead the DEPTH-MARGINALISED one, `P(C | datum, s)` with
-    `Lambda_C` summed over the `x` cells inside the support (the same
-    blurred read, marginalised over `x`) against the same 4.5 micron
-    likelihood factor `L(b)`; it is drawn at the median `x` of the
-    (in-reach) YSO placement, a distinct hollow-square marker, no
-    interval, and is excluded from the kernel check's own empirical/
-    predicted comparison (it carries no fitted `log10 r_p` to check)."""
+    point, not a measurement: it has no depth fraction of its own at
+    all. Its verdict is instead the DEPTH-MARGINALISED one, `P(C |
+    datum, s)` with `Lambda_C` summed over the `x` cells inside the
+    support (the same blurred read, marginalised over `x`) against the
+    same 4.5 micron likelihood factor `L(b)`; the page places it at the
+    median `log10_xi_hat` of the protostars that do have a fitted
+    foreground (`_draw_figure`, not here), and it is excluded from the
+    kernel check's own empirical/predicted comparison (it carries no
+    fitted `log10 r_p` to check)."""
     ra_u = protostars["ra_deg"][used]
     av_u = protostars["av_mag"][used]
     f45_u = protostars["f45_mjy"][used]
@@ -456,9 +458,9 @@ def _verdict(config, region, protostars, used, density_row, idx_median):
     r_p = a_p / a_col_row
     # Floored at the array's own low edge (`grid.LOG10_X_EDGES[0]`) purely
     # as a numerical guard against `log10(0)` for a `no_fg` row -- that
-    # row's own `log10_x_p`/interval are overwritten below (it has no
-    # fitted position at all, ruling 2) and its `log10_r_p` never enters
-    # the kernel check.
+    # row's own `log10_xi_hat` is never drawn at its own value (ruling 2,
+    # the page places it at the median of the rows that do have one) and
+    # its `log10_r_p` never enters the kernel check.
     r_p = np.maximum(r_p, 10.0 ** grid.LOG10_X_EDGES[0])
     log10_r_p = np.log10(r_p)
     n_past_wall = int(np.count_nonzero(r_p[~no_fg] > 1.0))
@@ -473,19 +475,11 @@ def _verdict(config, region, protostars, used, density_row, idx_median):
     w_mix, mu_mix, sigma_mix = kernel.mixture(
         a_col_row, a_col_sig_dens[rows_u], arm_dens[rows_u], zp_sigma_k=zp_sig_dens[rows_u],
         exponent=kernel.cloud_gamma_herschel)
-    (log10_x_med, log10_x_lo, log10_x_hi, p_reach, beyond_reach) = _position_distribution(
-        log10_r_p, w_mix, mu_mix, sigma_mix)
+    (_, _, _, p_reach, beyond_reach) = _position_distribution(log10_r_p, w_mix, mu_mix, sigma_mix)
     # `no_fg` rows carry no fitted position at all (ruling 2, not merely
-    # a "beyond reach" one) and are drawn instead at the median `x` of
-    # the in-reach YSO placement, no interval.
+    # a "beyond reach" one) and take their own category on the page, drawn
+    # at a placement `_draw_figure` computes from `log10_xi_hat` directly.
     beyond_reach = beyond_reach & ~no_fg
-    if np.any(no_fg):
-        in_reach_fg = ~no_fg & ~beyond_reach
-        median_x_yso = (float(np.median(log10_x_med[in_reach_fg])) if np.any(in_reach_fg)
-                         else float(grid.LOG10_X_EDGES[0]))
-        log10_x_med = np.where(no_fg, median_x_yso, log10_x_med)
-        log10_x_lo = np.where(no_fg, median_x_yso, log10_x_lo)
-        log10_x_hi = np.where(no_fg, median_x_yso, log10_x_hi)
 
     # The verdict's own cell: the MEASURED coordinate `log10 r_p`, which
     # may sit above the wall in the padding -- clipped only at the
@@ -529,13 +523,6 @@ def _verdict(config, region, protostars, used, density_row, idx_median):
     log10_f45_dered = np.log10(np.where(measured_u, f45_u, 1.0)) + 0.4 * a_p * kappa_i2
     y_plot = np.where(measured_u, log10_f45_dered, y_dered_limit)
 
-    # Panel 1's background: the median source's own YSO conditional in
-    # the DISTANCE coordinate (`blur=False`, item 3), never the measured
-    # one the verdict itself reads.
-    lambda_background, _, background_class_order = shapes_module.lambda_grids(
-        config, region, np.array([idx_median]), blur=False)
-    share_yso_median = _share_yso(lambda_background[0], background_class_order)
-
     # The kernel validation (item 5): the region's median-sightline YSO x
     # marginal against each protostar's own column kernel, pooled --
     # `no_fg` rows carry no fitted `log10 r_p` (ruling 2) and are excluded
@@ -547,12 +534,11 @@ def _verdict(config, region, protostars, used, density_row, idx_median):
         log10_r_p[fg], w_mix[fg], mu_mix[fg], sigma_mix[fg], x_marginal, x_centers, beyond_reach[fg])
 
     return dict(
-        log10_x_p=log10_x_med, log10_x_lo=log10_x_lo, log10_x_hi=log10_x_hi,
+        log10_xi_hat=log10_r_p,
         p_reach=p_reach, beyond_reach=beyond_reach, no_foreground=no_fg,
         y_plot=y_plot, p_yso=p_yso,
         leading_is_yso=leading_is_yso, measured=measured_u, n_past_wall=n_past_wall,
         n_top_clipped=n_top_clipped, class_order=class_order, rows_u=rows_u,
-        share_yso_median=share_yso_median,
         n_beyond_reach=int(np.count_nonzero(beyond_reach)),
         n_no_foreground=int(np.count_nonzero(no_fg)),
         emp_median=emp_median, emp_p84=emp_p84, pred_median=pred_median, pred_p84=pred_p84,
@@ -573,9 +559,10 @@ def _verdict(config, region, protostars, used, density_row, idx_median):
 
 
 def _position_line(config, region, protostars_pix, atlas_pix, share_yso, density_hpx512):
-    """The caption's position line (ii): the prior's cataloged YSO share's
-    median at the protostars' own pixels against every cataloged source's
-    own pixel."""
+    """The stage's own printed position line: the prior's cataloged YSO
+    share's median at the protostars' own pixels against every cataloged
+    source's own pixel (off the page, item 6 of the 2026-09-13 owner
+    ruling)."""
     share_proto, found = _join(atlas_pix, share_yso, protostars_pix)
     share_proto = share_proto[found]
     share_source, found_src = _join(atlas_pix, share_yso, density_hpx512)
@@ -602,6 +589,20 @@ def _panel_c(footprint_pix, density_hpx512, density_yso, n_proto_footprint):
     geom = _footprint_geometry(footprint_pix)
     grid_ = _reproject(footprint_pix, aligned, geom["grid_pix"], geom["shape"])
     return dict(geom=geom, grid=grid_, n_yso_prior=n_yso_prior, ratio=ratio)
+
+
+def _catalogue_word(region, survey_used):
+    """The subtitle's own catalogue word (owner's ruling 2026-09-13, item
+    1): the region's own matched protostars' `SURVEY` value where it is
+    unique and not "HOPS" (Aquila's own eHOPS); "HOPS" for Orion A, the
+    default page; "Herschel" wherever the matched sample's own name would
+    otherwise read "HOPS" on a page that is not Orion A's (Orion B, whose
+    own matched protostars are HOPS survey rows too)."""
+    uniq = np.unique(survey_used)
+    name = uniq[0].decode("utf-8") if uniq.size == 1 else "HOPS"
+    if name == "HOPS" and region != "Orion A":
+        return "Herschel"
+    return name
 
 
 def build_region(config, region, formats=("png", "pdf")):
@@ -646,7 +647,7 @@ def build_region(config, region, formats=("png", "pdf")):
 
         n_proto_footprint = pix_u.size - n_dropped_pos
         c = _panel_c(atlas_pix, density_hpx512, density_yso, n_proto_footprint)
-        share_yso_median = verdict["share_yso_median"]
+        catalogue_word = _catalogue_word(region, protostars["survey"][used][~excluded])
 
         print(f"atlas.protostars [{region}]: n_class_ii_excluded={n_class_ii} "
               f"n_used={n_used} name_mismatch={name_mismatch}")
@@ -679,66 +680,54 @@ def build_region(config, region, formats=("png", "pdf")):
               f"N_YSO_prior={c['n_yso_prior']:.4g} ratio={c['ratio']:.4g} "
               f"Dunham+2014 Class0+I+flat/all={DUNHAM2014_PROTOSTELLAR_FRACTION:g}")
 
-        paths = _draw_figure(config, region, protostars, used, density_row, excluded, verdict,
-                              share_yso_median, n_proto_footprint, n_direct, n_standin, n_excluded,
-                              median_proto, median_source, c, formats)
+        paths = _draw_figure(config, region, protostars, used, excluded, verdict,
+                              n_used, n_not_measured, catalogue_word, c, formats)
         st.done(paths[0], n_used=n_used, n_measured=n_measured,
                 frac_yso_leads=verdict["frac_yso_leads"], median_p_yso=verdict["median_p_yso"],
                 n_yso_prior=c["n_yso_prior"], protostellar_fraction=c["ratio"])
     return paths
 
 
-def _draw_figure(config, region, protostars, used, density_row, excluded, verdict, share_yso_median,
-                  n_proto_footprint, n_direct, n_standin, n_excluded, median_proto, median_source,
-                  c, formats):
+def _draw_figure(config, region, protostars, used, excluded, verdict, n_used, n_not_measured,
+                  catalogue_word, c, formats):
     plot_style.apply_style()
-    fig = plot_style.new_sized_figure(PAGE_W_IN, PAGE_H_IN)
 
+    n_lead = int(np.count_nonzero(verdict["leading_is_yso"]))
+    n_far = verdict["n_beyond_reach"]
+    far_clause = f"; {n_far} of these far above it." if n_far > 0 else "."
     caption_text, caption_h = captions.caption_layout(
         "\n\n".join([
-            captions.PROTOSTAR_STATEMENT,
-            captions.PROTOSTAR_POSITION.format(median_proto=median_proto, median_source=median_source),
-            captions.PROTOSTAR_DEPTH.format(
-                n_past_wall=verdict["n_past_wall"], n_beyond_reach=verdict["n_beyond_reach"],
-                n_used=verdict["measured"].size),
-            captions.PROTOSTAR_KERNEL_CHECK.format(
-                emp_median=verdict["emp_median"], emp_p84=verdict["emp_p84"],
-                pred_median=verdict["pred_median"], pred_p84=verdict["pred_p84"],
-                frac_beyond=verdict["frac_beyond_reach"], n_used=verdict["measured"].size),
-            captions.PROTOSTAR_TIERS.format(
-                n_used=verdict["measured"].size,
-                n_measured=int(np.count_nonzero(verdict["measured"])),
-                n_not_measured=int(np.count_nonzero(~verdict["measured"])),
-                n_direct=n_direct, n_standin=n_standin, n_excluded=n_excluded,
-                n_no_foreground=verdict["n_no_foreground"])]),
+            captions.PROTOSTAR_PLANE,
+            captions.PROTOSTAR_VERDICT.format(n_lead=n_lead, n=n_used, median=verdict["median_p_yso"]),
+            captions.PROTOSTAR_CASES.format(
+                n_past=verdict["n_past_wall"], n=n_used, far_clause=far_clause,
+                n_nofg=verdict["n_no_foreground"], n_noflux=n_not_measured),
+            captions.PROTOSTAR_RATIO.format(
+                ratio=c["ratio"], dunham=DUNHAM2014_PROTOSTELLAR_FRACTION)]),
         160, 0.156, 0.20, 0.25)
 
-    margin_l, margin_r, margin_t, gap = 0.85, 0.75, 0.75, 0.6
+    margin_l, margin_r, margin_t, gap = 0.85, 0.75, 1.35, 0.6
     # Room, inches, for each panel's own x-axis tick labels and label
     # below its axes, ahead of the caption strip (`atlas.shapes`'s own
     # `AXIS_LABEL_MARGIN_IN`: without it those labels draw past the axes'
     # bottom edge, into the caption text).
     axis_label_margin = 0.5
-    usable_w = PAGE_W_IN - margin_l - margin_r
+    panel_h = 6.0
+    page_w = PAGE_W_IN
+    panel_bottom = caption_h + axis_label_margin
+    page_h = margin_t + panel_h + panel_bottom
+    usable_w = page_w - margin_l - margin_r
     slot1_w = 0.60 * (usable_w - gap)
     slot2_w = usable_w - gap - slot1_w
-    panel_bottom = caption_h + axis_label_margin
-    panel_h = PAGE_H_IN - margin_t - panel_bottom
 
-    # Panel 1 -- the verdict's own picture in the DISTANCE coordinate: the
-    # protostars at (log10 x, log10 F45_dered), the point at
-    # `p(log10 x | r_p, cloud kernel)`'s own truncated median with a
-    # horizontal bar over its 16%-84% interval, coloured by the MEASURED
-    # verdict P(YSO | r_p, datum, s); the region's median source's own
-    # UNBLURRED P(YSO | cell, s) as the background, so bars and field
-    # share one coordinate (this brief's item 2-3) -- nothing to draw
-    # above the wall here, so the axis stops at it.
-    ax1 = fig.add_axes([margin_l / PAGE_W_IN, panel_bottom / PAGE_H_IN, slot1_w / PAGE_W_IN, panel_h / PAGE_H_IN])
-    extent = [grid.LOG10_X_EDGES[0], grid.LOG10_X_EDGES[-1], grid.LOG10_F45_EDGES[0], grid.LOG10_F45_EDGES[-1]]
-    cmap_bg = plt.get_cmap("Greys").copy()
-    cmap_bg.set_bad("white")
-    ax1.imshow(share_yso_median.T, origin="lower", aspect="auto", extent=extent,
-               cmap=cmap_bg, norm=Normalize(0.0, 1.0))
+    fig = plot_style.new_sized_figure(page_w, page_h)
+
+    # Panel 1 -- every matched protostar at its own measured depth
+    # fraction and its dereddened 4.5 micron flux, coloured by the
+    # prior's own probability that a source there is a young star; no
+    # background field, no interval -- one point per protostar (owner's
+    # 2026-09-13 ruling).
+    ax1 = fig.add_axes([margin_l / page_w, panel_bottom / page_h, slot1_w / page_w, panel_h / page_h])
     ax1.axvline(0.0, color="black", lw=0.8, linestyle="--", alpha=0.7)
 
     cmap_pt = plt.get_cmap("viridis")
@@ -747,93 +736,98 @@ def _draw_figure(config, region, protostars, used, density_row, excluded, verdic
     # (non-excluded) protostars, so `cls_matched` must be narrowed the
     # same way to stay aligned with them.
     cls_matched = protostars["cls"][used][~excluded]
-    in_reach = ~verdict["beyond_reach"] & ~verdict["no_foreground"]
+    log10_xi = verdict["log10_xi_hat"]
+    y_plot = verdict["y_plot"]
+    p_yso = verdict["p_yso"]
+    measured = verdict["measured"]
+    beyond = verdict["beyond_reach"]
+    no_fg_mask = verdict["no_foreground"]
+    in_reach = ~beyond & ~no_fg_mask
+
+    handles = []
     sc = None
     for cls_val, marker in _CLASS_MARKER.items():
-        m_cls = (cls_matched == cls_val) & in_reach
-        m_meas = m_cls & verdict["measured"]
-        m_not = m_cls & ~verdict["measured"]
-        for mask, mk, size in ((m_meas, marker, 22), (m_not, _NOT_MEASURED_MARKER, 26)):
-            if np.any(mask):
-                ax1.errorbar(
-                    verdict["log10_x_p"][mask], verdict["y_plot"][mask],
-                    xerr=[verdict["log10_x_p"][mask] - verdict["log10_x_lo"][mask],
-                          verdict["log10_x_hi"][mask] - verdict["log10_x_p"][mask]],
-                    fmt="none", ecolor="0.4", elinewidth=0.6, capsize=1.5, zorder=4)
-                sc = ax1.scatter(verdict["log10_x_p"][mask], verdict["y_plot"][mask],
-                                  c=verdict["p_yso"][mask], cmap=cmap_pt, norm=norm_pt,
-                                  marker=mk, s=size, edgecolor="black", linewidths=0.3, zorder=5)
-    # BEYOND THE KERNEL'S REACH (item 2): drawn at the wall, an open
-    # marker, no interval -- still coloured by the verdict (the edge, its
-    # face left empty).
-    beyond = verdict["beyond_reach"]
+        m_cls_meas = (cls_matched == cls_val) & in_reach & measured
+        if np.any(m_cls_meas):
+            sc = ax1.scatter(log10_xi[m_cls_meas], y_plot[m_cls_meas], c=p_yso[m_cls_meas],
+                              cmap=cmap_pt, norm=norm_pt, marker=marker, s=22,
+                              edgecolor="black", linewidths=0.3, zorder=5)
+            handles.append(plt.Line2D([0], [0], marker=marker, color="w", markerfacecolor="grey",
+                                       markeredgecolor="black", markersize=7, label=_CLASS_LABEL[cls_val]))
+    m_not_meas = in_reach & ~measured
+    if np.any(m_not_meas):
+        sc = ax1.scatter(log10_xi[m_not_meas], y_plot[m_not_meas], c=p_yso[m_not_meas],
+                          cmap=cmap_pt, norm=norm_pt, marker=_NOT_MEASURED_MARKER, s=26,
+                          edgecolor="black", linewidths=0.3, zorder=5)
+        handles.append(plt.Line2D([0], [0], marker=_NOT_MEASURED_MARKER, color="w", markerfacecolor="grey",
+                                   markeredgecolor="black", markersize=7, label="no 4.5 µm flux"))
+    # Foreground extinction far above the sightline's column: drawn at its
+    # OWN measured depth fraction, an open marker, still coloured by the
+    # verdict (the edge, its face left empty).
     if np.any(beyond):
-        edge_colors = cmap_pt(norm_pt(verdict["p_yso"][beyond]))
+        edge_colors = cmap_pt(norm_pt(p_yso[beyond]))
         sc_open = ax1.scatter(
-            np.zeros(int(np.count_nonzero(beyond))), verdict["y_plot"][beyond],
-            marker=_BEYOND_REACH_MARKER, s=32, facecolors="none", edgecolors=edge_colors,
-            linewidths=1.3, zorder=6)
+            log10_xi[beyond], y_plot[beyond], marker=_BEYOND_REACH_MARKER, s=32,
+            facecolors="none", edgecolors=edge_colors, linewidths=1.3, zorder=6)
         sc = sc if sc is not None else sc_open
-    # NO FITTED FOREGROUND (ruling 2): drawn at the median x of the
-    # in-reach YSO placement, a distinct hollow-square marker, no
-    # interval -- still coloured by the depth-marginalised verdict.
-    no_fg_mask = verdict["no_foreground"]
+        handles.append(plt.Line2D(
+            [0], [0], marker=_BEYOND_REACH_MARKER, color="w", markerfacecolor="none",
+            markeredgecolor="black", markersize=7,
+            label="foreground extinction far above the sightline's column"))
+    # No fitted foreground: drawn at the median measured depth fraction of
+    # the protostars that have one, a distinct hollow-square marker,
+    # coloured by the depth-marginalised verdict.
     if np.any(no_fg_mask):
-        edge_colors_nofg = cmap_pt(norm_pt(verdict["p_yso"][no_fg_mask]))
+        fg = ~no_fg_mask
+        median_xi_fg = float(np.median(log10_xi[fg])) if np.any(fg) else float(np.min(log10_xi))
+        edge_colors_nofg = cmap_pt(norm_pt(p_yso[no_fg_mask]))
+        x_nofg = np.full(int(np.count_nonzero(no_fg_mask)), median_xi_fg)
         sc_nofg = ax1.scatter(
-            verdict["log10_x_p"][no_fg_mask], verdict["y_plot"][no_fg_mask],
-            marker=_NO_FOREGROUND_MARKER, s=32, facecolors="none", edgecolors=edge_colors_nofg,
-            linewidths=1.3, zorder=6)
+            x_nofg, y_plot[no_fg_mask], marker=_NO_FOREGROUND_MARKER, s=32,
+            facecolors="none", edgecolors=edge_colors_nofg, linewidths=1.3, zorder=6)
         sc = sc if sc is not None else sc_nofg
-    ax1.set_xlim(grid.LOG10_X_EDGES[0], 0.0)
-    ax1.set_xlabel(plot_style.label(r"$\log_{10} x_p$"))
-    ax1.set_ylabel(plot_style.label(r"$\log_{10} F_{4.5}$", "mJy"))
-    ax1.set_title("verdict: P(YSO | r_p, datum, s); position: p(log10 x | r_p, kernel)", fontsize=10)
-    handles = [plt.Line2D([0], [0], marker=marker, color="w", markerfacecolor="grey",
-                           markeredgecolor="black", markersize=7, label=cls_val.decode())
-               for cls_val, marker in _CLASS_MARKER.items()]
-    handles.append(plt.Line2D([0], [0], marker=_NOT_MEASURED_MARKER, color="w", markerfacecolor="grey",
-                               markeredgecolor="black", markersize=7, label="not measured"))
-    handles.append(plt.Line2D([0], [0], marker=_BEYOND_REACH_MARKER, color="w", markerfacecolor="none",
-                               markeredgecolor="black", markersize=7, label="beyond the kernel's reach"))
-    handles.append(plt.Line2D([0], [0], marker=_NO_FOREGROUND_MARKER, color="w", markerfacecolor="none",
-                               markeredgecolor="black", markersize=7, label="no fitted foreground"))
+        handles.append(plt.Line2D([0], [0], marker=_NO_FOREGROUND_MARKER, color="w", markerfacecolor="none",
+                                   markeredgecolor="black", markersize=7, label="no fitted foreground"))
+
+    x_max = min(1.0, max(0.08, float(np.max(log10_xi)) if log10_xi.size else 0.08))
+    ax1.set_xlim(-3.0, x_max)
+    ax1.set_xlabel(plot_style.label(r"$\mathbf{log_{10}\,\hat{\xi}}$"), fontsize=LABEL_FONTSIZE)
+    ax1.set_ylabel(plot_style.label(r"$\mathbf{log_{10}\,F_{4.5}}$", "mJy"), fontsize=LABEL_FONTSIZE)
     ax1.legend(handles=handles, fontsize=7, loc="upper left")
     if sc is not None:
-        cax1 = fig.add_axes([(margin_l + slot1_w + 0.05) / PAGE_W_IN, panel_bottom / PAGE_H_IN,
-                              0.15 / PAGE_W_IN, panel_h / PAGE_H_IN])
-        cbar1 = fig.colorbar(sc, cax=cax1)
-        cbar1.set_label(r"$P(\mathrm{YSO} \mid x, \mathrm{datum}, s)$", fontsize=10)
+        cbar1 = _panel_colorbar(fig, ax1, sc, label="P(young star)")
+        cbar1.ax.yaxis.label.set_fontweight("bold")
 
-    # Panel 2 -- the map (unchanged).
+    # Panel 2 -- the prior's own intrinsic young-star density map, the
+    # protostars overplotted by class (unchanged data, `_panel_c`).
     wcs = c["geom"]["wcs"]
     rect2 = (margin_l + slot1_w + gap + 0.35, panel_bottom, slot2_w - 0.75, panel_h)
-    ax2, im2 = _add_panel(fig, rect2, PAGE_W_IN, PAGE_H_IN, wcs, c["grid"], "viridis",
-                           norm=_log_norm(c["grid"]), title="count (deg$^{-2}$)")
+    ax2, im2 = _add_panel(fig, rect2, page_w, page_h, wcs, c["grid"], "viridis",
+                           norm=_log_norm(c["grid"]), title="Prior Young-Star Density")
     class_colors = {b"0": "white", b"I": "gold", b"flat": "orange", b"II": "red"}
     for cls_val, color in class_colors.items():
         m = protostars["cls"] == cls_val
         if np.any(m):
             ax2.scatter(protostars["ra_deg"][m], protostars["dec_deg"][m],
                         transform=ax2.get_transform("world"), s=6, color=color,
-                        edgecolor="black", linewidths=0.2, label=cls_val.decode(), zorder=5)
+                        edgecolor="black", linewidths=0.2, label=_CLASS_LABEL[cls_val], zorder=5)
     ax2.legend(fontsize=6, loc="upper right", markerscale=1.5)
-    bar_rect = (rect2[0] + rect2[2] + 0.12, rect2[1] + 0.05 * rect2[3], 0.35, 0.9 * rect2[3])
-    _colorbar(fig, im2, bar_rect, PAGE_W_IN, PAGE_H_IN)
+    cbar2 = _panel_colorbar(fig, ax2, im2, label="deg$^{-2}$", log=True)
+    cbar2.ax.yaxis.label.set_fontweight("bold")
 
-    title = (f"{region} -- protostar check: N_proto={n_proto_footprint}, "
-             f"YSO leads the prior for {int(np.count_nonzero(verdict['leading_is_yso']))} of "
-             f"{verdict['leading_is_yso'].size}, median P(YSO)={verdict['median_p_yso']:.3f}; "
-             f"N_YSO_prior={c['n_yso_prior']:.4g}, ratio={c['ratio']:.3f} "
-             f"(Dunham+2014 {DUNHAM2014_PROTOSTELLAR_FRACTION:g}); "
-             f"beyond the kernel's reach: {verdict['n_beyond_reach']} of {verdict['measured'].size}; "
-             f"no fitted foreground: {verdict['n_no_foreground']} of {verdict['measured'].size}")
-    # `fontsize` 9: the title carries two trailing clauses past the base
-    # statement and would run past the page's own 16-inch width at a
-    # larger size.
-    fig.suptitle(title, fontsize=9, y=1.0 - 0.12 / PAGE_H_IN)
+    # The title names the page; the sample size and catalogue and the
+    # prior's own verdict count are the subtitle below it (`figure.
+    # titleweight` bolds the suptitle already; the subtitle, a plain
+    # `fig.text`, is bolded explicitly) -- the two atlas pages' own
+    # convention (`atlas.shapes`).
+    fig.suptitle(f"{region} Prior Verdict on Herschel Protostars",
+                 fontsize=_TITLE_FONTSIZE, y=1.0 - 0.15 / page_h)
+    subtitle_text = (f"{n_used} {catalogue_word} protostars (Class 0, I, flat): the prior "
+                      f"favours a young star for {n_lead}")
+    fig.text(0.5, 1.0 - 0.50 / page_h, subtitle_text, fontsize=_SUBTITLE_FONTSIZE,
+              fontweight="bold", ha="center", va="top")
 
-    fig.text(margin_l / PAGE_W_IN, (caption_h - 0.20) / PAGE_H_IN, caption_text,
+    fig.text(margin_l / page_w, (caption_h - 0.20) / page_h, caption_text,
               fontsize=8.0, va="top", ha="left", linespacing=1.3)
 
     out_dir = os.path.join(config.data_root, "bmstp", "atlas", "figures")
