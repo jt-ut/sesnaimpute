@@ -5,11 +5,12 @@ and where the simulated field stars along that sightline sit.
 Three panels share one distance axis. Top: `A_CUM_K`, the median
 source's sightline row of the 3-D dust map's cumulative extinction
 profile (`sky.derived.profile`/`profile_edenhofer_sightline`),
-against `DIST_PC`. Middle: the depth fraction ``xi(d) = A_CUM_K / A_s``,
-`A_s` the same source's own catalogued column (`A_COL_K`,
-`bmstp.density`/`table_density_source`) -- not the profile's own
-`A_INF_K`, which is the WHOLE sightline's asymptote, not this source's
-own column. Both panels shade the region's cloud interval
+against `DIST_PC`. Middle: the depth fraction ``xi(d) = A_CUM_K /
+A_INF_K``, the fraction of the sightline's whole column (the profile's
+own far end, `A_INF_K`) that lies in front of distance `d` -- the same
+normalisation `population.yso.embedding_and_ridge` gives the cloud
+embedding, so `xi` reaches exactly 1 once every layer of the sightline
+is behind the point. Both panels shade the region's cloud interval
 (`sky.derived.profile`/`depth_edenhofer_region`'s `D_LO_PC`-
 `D_HI_PC`) grey. Bottom: a histogram of the simulated field stars'
 distances (`population.field_stars`/`field-stars_trilegal_region`,
@@ -86,7 +87,8 @@ def _read_sightline_profile(config, region, row):
     with h5py.File(path, "r") as f:
         dist_pc = f["DIST_PC"][:].astype(np.float64)
         a_cum_k = f["A_CUM_K"][row, :].astype(np.float64)
-    return dist_pc, a_cum_k
+        a_inf_k = float(f["A_INF_K"][row])
+    return dist_pc, a_cum_k, a_inf_k
 
 
 def _read_cloud_interval(config, region):
@@ -142,8 +144,8 @@ def build_region(config, region):
     a_s = float(src["a_col"][idx_median])
     row = int(src["sightline_row"][idx_median])
 
-    dist_pc, a_cum_k = _read_sightline_profile(config, region, row)
-    xi = a_cum_k / a_s
+    dist_pc, a_cum_k, a_inf_k = _read_sightline_profile(config, region, row)
+    xi = a_cum_k / a_inf_k
     d_lo, d_hi = _read_cloud_interval(config, region)
     field_dist_pc = _read_field_star_distances(config, region)
     stretches = _flat_stretches(dist_pc, a_cum_k, xi)
@@ -178,7 +180,7 @@ def build_region(config, region):
     fig.suptitle("%s Sightline" % region, fontsize=_TITLE_FONTSIZE, y=0.98)
 
     line1 = ("Extinction along the region's median sightline from the 3-D dust map of "
-             "Edenhofer et al. 2023 (top), the depth fraction ξ = A(d) / A_s it")
+             "Edenhofer et al. 2023 (top), the depth fraction ξ = A(d) / A(∞) it")
     line2 = ("implies (middle), and the distances of the field stars a model of the "
              "Milky Way (TRILEGAL) places along it (bottom); the grey band is the cloud.")
     fig.text(0.5, 0.045, line1, fontsize=_STATEMENT_FONTSIZE, ha="center", va="bottom")
@@ -192,7 +194,7 @@ def build_region(config, region):
         fig.savefig(path, dpi=150)
     plt.close(fig)
 
-    print("figure_sightline %s: median source %s, A_s = %.4f mag" % (region, name, a_s))
+    print("figure_sightline %s: median source %s, A_s = %.4f mag, sightline A(inf) = %.4f mag" % (region, name, a_s, a_inf_k))
     print("figure_sightline %s: cloud interval D_LO_PC = %.1f, D_HI_PC = %.1f pc" % (region, d_lo, d_hi))
     if stretches:
         print("figure_sightline %s: dust-free stretches (> %d pc, dA/dd < %.0e mag/pc):"
