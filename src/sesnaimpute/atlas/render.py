@@ -94,10 +94,9 @@ from sesnaimpute.atlas import captions
 NSIDE = 512
 CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
 
-#: Panel titles and colourbar labels at a size a reader sees on a slide;
-#: tick labels smaller -- the two atlas pages' own convention;
-#: `atlas.protostars`'s own `_colorbar` path is unaffected, it is not
-#: one of these two pages.
+#: Panel titles, axis labels and colourbar labels at a size a reader
+#: sees on a slide; tick labels smaller -- the convention of every atlas
+#: page (`atlas.protostars` imports it too).
 LABEL_FONTSIZE = 13
 TICK_FONTSIZE = 10
 
@@ -435,21 +434,6 @@ def _log_norm(grid):
     if finite.size == 0:
         return LogNorm(vmin=1e-6, vmax=1.0)
     return LogNorm(vmin=float(finite.min()), vmax=float(finite.max()))
-
-
-def _colorbar(fig, im, rect, page_w, page_h):
-    """A thin colour bar in its own free-floating reserved strip at
-    `rect` (inches), scaled to that panel's own data range, for
-    `atlas.protostars`'s own layout, which computes its own `rect`; the
-    two atlas pages use `_panel_colorbar`'s inset bar."""
-    cax = fig.add_axes(_frac(rect, page_w, page_h))
-    cbar = fig.colorbar(im, cax=cax)
-    cbar.locator = MaxNLocator(nbins=3)
-    cbar.formatter = FuncFormatter(lambda v, _pos: "%.2g" % v)
-    cbar.update_ticks()
-    cbar.ax.tick_params(labelsize=7, length=2, pad=1.0)
-    cbar.outline.set_linewidth(0.5)
-    return cbar
 
 
 def _log_tick_values(vmin, vmax):

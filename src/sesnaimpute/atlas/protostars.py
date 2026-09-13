@@ -41,7 +41,7 @@ from sesnaimpute import progress
 from sesnaimpute.atlas import captions
 from sesnaimpute.atlas import shapes as shapes_module
 from sesnaimpute.atlas.render import (
-    _add_panel, _align, _footprint_geometry, _log_norm, _panel_colorbar, _reproject)
+    LABEL_FONTSIZE, _add_panel, _align, _footprint_geometry, _log_norm, _panel_colorbar, _reproject)
 from sesnaimpute.bmstp import grid
 from sesnaimpute.fittp import likelihood as likelihood_module
 from sesnaimpute.population import kernel as kernel_module
@@ -791,8 +791,8 @@ def _draw_figure(config, region, protostars, used, excluded, verdict, n_used, n_
 
     x_max = min(1.0, max(0.08, float(np.max(log10_xi)) if log10_xi.size else 0.08))
     ax1.set_xlim(-3.0, x_max)
-    ax1.set_xlabel(plot_style.label(r"$\mathbf{log_{10}\,\hat{\xi}}$"))
-    ax1.set_ylabel(plot_style.label(r"$\mathbf{log_{10}\,F_{4.5}}$", "mJy"))
+    ax1.set_xlabel(plot_style.label(r"$\mathbf{log_{10}\,\hat{\xi}}$"), fontsize=LABEL_FONTSIZE)
+    ax1.set_ylabel(plot_style.label(r"$\mathbf{log_{10}\,F_{4.5}}$", "mJy"), fontsize=LABEL_FONTSIZE)
     ax1.legend(handles=handles, fontsize=7, loc="upper left")
     if sc is not None:
         cbar1 = _panel_colorbar(fig, ax1, sc, label="P(young star)")
