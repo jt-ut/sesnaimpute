@@ -99,8 +99,14 @@ CLASS_ORDER = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
 #: outside y-axis label below, real mathtext subscripts throughout, bold
 #: by `plot_style.apply_style`'s own `axes.labelweight` since it is set
 #: as the axes' own ylabel, not a plain figure text.
-_SHARED_Y_LABEL = plot_style.label(r"$\log_{10} F_{4.5}$", "mJy")
-_X_LABEL = r"$\log_{10} x$"
+#: `axes.labelweight` (`plot_style.apply_style`) bolds a `set_xlabel`/
+#: `set_ylabel` Text artist whole, but not the mathtext runs inside it
+#: (matplotlib does not carry a font-weight rcParam into mathtext), so
+#: the math itself is wrapped in `\mathbf{...}` here to read bold too --
+#: the plain unit suffix (e.g. `[mJy]`) still gets its bold from the
+#: rcParam alone.
+_SHARED_Y_LABEL = plot_style.label(r"$\mathbf{\log_{10} F_{4.5}}$", "mJy")
+_X_LABEL = r"$\mathbf{\log_{10} x}$"
 
 _ARM_NAME = {0: "Herschel", 1: "Planck"}
 
@@ -109,6 +115,11 @@ _ARM_NAME = {0: "Herschel", 1: "Planck"}
 #: its own small size (`_CAPTION_FONTSIZE` below).
 _LABEL_FONTSIZE = 13
 _TICK_FONTSIZE = 10
+
+#: The page title and its one-line subtitle (owner's list): bigger than
+#: the panel titles, since a reader meets the page here first.
+_TITLE_FONTSIZE = 18
+_SUBTITLE_FONTSIZE = 15
 
 #: The secondary (twiny) decade axis, a supporting readout of `a` in
 #: magnitudes rather than a primary axis label: never below 8 pt.
@@ -444,14 +455,16 @@ def _print_numbers(region, data):
                  data["p_total"][cls], px, pb))
 
 
-def _caption_block():
+def _caption_block(d_r_pc, sigma_pc):
     """The page's raw (unwrapped) caption: the two rows' probability
-    statements and the shared vocabulary, read from `captions` and never
-    restated here (CODING_RULES_BMSTP.md rule 4). Wrapping and the
+    statements, read from `captions` and never restated here
+    (CODING_RULES_BMSTP.md rule 4), plus one distance line -- the
+    median source's name/column/arm moved to the subtitle, and the
+    vocabulary off the page entirely (owner's list). Wrapping and the
     height it needs are `captions.caption_layout`'s, the one definition
     this page and `atlas.render`'s own caption strip both call."""
-    return "\n\n".join([captions.SHAPES_ROW1, captions.SHAPES_ROW2,
-                         "Vocabulary:\n" + captions.vocabulary_block()])
+    distance_line = r"region distance $d_r$ = %.0f ± %.0f pc" % (d_r_pc, sigma_pc)
+    return "\n\n".join([captions.SHAPES_ROW1, captions.SHAPES_ROW2, distance_line])
 
 
 def _draw_figure(config, region, data):
@@ -461,20 +474,23 @@ def _draw_figure(config, region, data):
     joint, share = data["joint"], data["share"]
     log10_x_max = data["log10_x_max"]
 
-    # The source's own name, sightline column, arm and distance move out
-    # of the title into the caption block; `KAPPA_*` is dropped entirely.
+    # The source's own name, sightline column and arm move out of the
+    # title into the subtitle below it; the distance is the caption
+    # block's one line instead; `KAPPA_*` is dropped entirely.
     r = regions_module.REGIONS_BY_NAME[region]
     name_med = dtab["name"][idx_median].decode("utf-8")
     arm_med = _ARM_NAME[int(dtab["arm"][idx_median])]
-    source_line = (
-        "median source %s (sightline column $A_s$=%.3g mag, %s arm); "
-        "$d_r$=%.0f+/-%.0f pc"
-        % (name_med, dtab["a_col"][idx_median], arm_med, r.d_r_pc, r.sigma_pc))
+    subtitle_text = r"Source: %s ($A_s$ = %.3g mag, %s)" % (name_med, dtab["a_col"][idx_median], arm_med)
     caption_text, caption_block_h = captions.caption_layout(
-        "\n\n".join([source_line, _caption_block()]), _CAPTION_CHARS_PER_LINE,
+        _caption_block(r.d_r_pc, r.sigma_pc), _CAPTION_CHARS_PER_LINE,
         _CAPTION_LINE_HEIGHT_IN, _CAPTION_TOP_PAD_IN, _CAPTION_BOTTOM_PAD_IN)
 
-    margin_l, margin_r, margin_t = 0.75, 1.05, 0.95
+    # `margin_t` clears, in order from the page's top edge: the title
+    # (`_TITLE_FONTSIZE`), the one-line subtitle (`_SUBTITLE_FONTSIZE`),
+    # then row 1's own panel titles (`_LABEL_FONTSIZE`, `pad=18` points)
+    # -- more than the panel-titles-only margin this page used before
+    # the subtitle existed.
+    margin_l, margin_r, margin_t = 0.75, 1.05, 1.35
     row_gap, col_gap = 0.90, 0.14
     row_h = 3.2
     # Row 2's own x-axis tick labels and "log10 x" label draw BELOW its
@@ -544,8 +560,11 @@ def _draw_figure(config, region, data):
             ax2.set_xticklabels(["$10^{%d}$" % k for k in decades], fontsize=_SECONDARY_FONTSIZE)
             ax2.tick_params(length=2, pad=1, labelsize=_SECONDARY_FONTSIZE)
             if c == 0:
+                # Plain text, not mathtext, and drawn with `ax.text` --
+                # `axes.labelweight` bolds only a `set_xlabel`/`set_ylabel`
+                # Text artist, so the bold here is explicit.
                 ax2.text(1.0, 1.05, plot_style.label("a", "mag"), transform=ax2.transAxes,
-                         fontsize=_SECONDARY_FONTSIZE, ha="right", va="bottom")
+                         fontsize=_SECONDARY_FONTSIZE, fontweight="bold", ha="right", va="bottom")
             ax.set_title(cls, fontsize=_LABEL_FONTSIZE, pad=18)
             if c == 0:
                 # Bold as `plot_style.apply_style`'s own `axes.labelweight`
@@ -557,20 +576,24 @@ def _draw_figure(config, region, data):
                  (page_h - margin_t - row_h) / page_h, 0.22 / page_w, row_h / page_h]
     cax1 = fig.add_axes(cax1_rect)
     cbar1 = fig.colorbar(im1, cax=cax1)
-    cbar1.set_label(r"$P(C, x, F_{4.5} \mid s)$", fontsize=_LABEL_FONTSIZE)
+    cbar1.set_label(r"$\mathbf{P(C, x, F_{4.5} \mid s)}$", fontsize=_LABEL_FONTSIZE)
     cbar1.ax.tick_params(labelsize=_TICK_FONTSIZE)
 
     cax2_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / page_w,
                  (AXIS_LABEL_MARGIN_IN + caption_block_h) / page_h, 0.22 / page_w, row_h / page_h]
     cax2 = fig.add_axes(cax2_rect)
     cbar2 = fig.colorbar(im2, cax=cax2)
-    cbar2.set_label(r"$P(C \mid x, F_{4.5}, s)$", fontsize=_LABEL_FONTSIZE)
+    cbar2.set_label(r"$\mathbf{P(C \mid x, F_{4.5}, s)}$", fontsize=_LABEL_FONTSIZE)
     cbar2.ax.tick_params(labelsize=_TICK_FONTSIZE)
 
-    # The title carries only the region and what the page is; the median
-    # source's own details are the caption block's `source_line` above.
-    fig.suptitle("%s -- the prior at its median source" % region,
-                 fontsize=_LABEL_FONTSIZE, y=1.0 - 0.15 / page_h)
+    # The title names the page; the median source's own name, column and
+    # arm are the subtitle below it (`figure.titleweight` bolds the
+    # suptitle already; the subtitle, a plain `fig.text`, is bolded
+    # explicitly).
+    fig.suptitle("%s Prior Parameter Plane" % region,
+                 fontsize=_TITLE_FONTSIZE, y=1.0 - 0.15 / page_h)
+    fig.text(0.5, 1.0 - 0.50 / page_h, subtitle_text,
+              fontsize=_SUBTITLE_FONTSIZE, fontweight="bold", ha="center", va="top")
 
     # The page's own vocabulary and row statements (module docstring),
     # anchored so their top line sits just below the rows -- the page
