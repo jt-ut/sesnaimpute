@@ -121,52 +121,31 @@ TOTAL_COUNT_CHECK = (
     "the survey's count; the observations enter here only as that check.")
 
 #: The protostar check's own words (`atlas.protostars`, SPEC_BMSTP_DRAFT.md
-#: sec. 5.5 "Check (report only)", sec. 9's protostar row), rule 7a.
-PROTOSTAR_STATEMENT = (
-    "For each Herschel-confirmed protostar, assumed a SESNA source with its "
-    "own 4.5 micron datum: at its own point of the nuisance plane (scaled "
-    "extinction x, its dereddened $F_{4.5}$), P(C | x, datum, s) reads the "
-    "prior density Lambda_C at that point against the one likelihood factor "
-    "the datum implies -- a Gaussian in log10 F for a measurement, the "
-    "survey's own non-detection probability below the pixel's limit "
-    "otherwise -- normalized over the six classes; nothing here feeds the "
-    "prior or a fit.")
+#: sec. 5.5 "Check (report only)", sec. 9's protostar row; rewritten to the
+#: owner's 2026-09-13 ruling, plain words only, four short parts).
+PROTOSTAR_PLANE = (
+    r"Each protostar at its measured depth fraction $\hat{\xi}$ = â / A_s "
+    "(its fitted foreground extinction over its sightline's column) and its "
+    "dereddened 4.5 µm flux, coloured by the prior's probability that a "
+    "source with that flux at that position is a young star.")
 
-PROTOSTAR_POSITION = (
-    "position: at the protostars' own sky pixels the prior's cataloged YSO "
-    "share has median {median_proto:.3f}, against {median_source:.3f} at "
-    "every cataloged source's own pixel.")
+PROTOSTAR_VERDICT = (
+    "The prior favours a young star for {n_lead} of {n}; median P(young "
+    "star) = {median:.3f}.")
 
-PROTOSTAR_DEPTH = (
-    "depth: {n_past_wall} of {n_used} protostars' own foreground column exceeds "
-    "their sightline's own BEAM column $A_\\mathrm{{beam}}$ (the extinction column of "
-    "sec. 3.2's own A_COL_K) and read past the wall in the measured coordinate "
-    "(log10 r_p > 0) -- a beam column is the average along the whole line of sight, "
-    "while a protostar's own fitted foreground reads its own envelope, so a protostar "
-    "can sit past the wall by construction, not by a match error; {n_beyond_reach} of "
-    "{n_used} lie beyond the kernel's reach (P(T >= a_p) < 0.01) and are drawn at the "
-    "wall with an open marker and no interval.")
+#: `{far_clause}` is `; {n_far} of these far above it.` when `n_far > 0`,
+#: else `.` (the sentence's own close) -- built by the caller, never a
+#: second template, so the clause only appears when there is one to name.
+PROTOSTAR_CASES = (
+    r"{n_past} of {n} have a fitted foreground extinction above their "
+    r"sightline's column (past $\hat{{\xi}}$ = 1){far_clause} {n_nofg} have "
+    "no fitted foreground and take the verdict averaged over depth. "
+    "{n_noflux} have no 4.5 µm flux and are drawn at their detection "
+    "limit.")
 
-PROTOSTAR_KERNEL_CHECK = (
-    "kernel check: this compares the column kernel's own 36 arcsec-beam width, "
-    "extrapolated to a cloud member's own beam ratio log10 r_p = log10 x_member + y "
-    "(x_member from the region's median-sightline YSO x marginal, y from each "
-    "protostar's own class kernel at its column), against the sample's own ratio "
-    "distribution -- empirical log10 r_p has median {emp_median:.3f}, 84th percentile "
-    "{emp_p84:.3f} over {n_used} protostars; the kernel predicts median {pred_median:.3f}, "
-    "84th percentile {pred_p84:.3f}; {frac_beyond:.3f} of protostars lie beyond the "
-    "kernel's reach.")
-
-PROTOSTAR_TIERS = (
-    "of {n_used} protostars used: {n_measured} with a measured 4.5 micron "
-    "flux, {n_not_measured} without one; {n_direct} matched a cataloged "
-    "source within 2 arcsec, {n_standin} took the nearest cataloged source "
-    "in their own sky pixel as a sightline stand-in, {n_excluded} had no "
-    "cataloged source in their own pixel and are excluded; {n_no_foreground} "
-    "have AV_FOREGROUND_MAG <= 0, an unconstrained foreground rather than a "
-    "measurement -- no fitted position, drawn at the median x of the "
-    "in-reach YSO placement with a hollow-square marker and no interval, "
-    "their own verdict the depth-marginalised P(C | datum, s).")
+PROTOSTAR_RATIO = (
+    "Protostars per young star the prior expects in the footprint: "
+    "{ratio:.3f} (Dunham et al. 2014: {dunham:g}).")
 
 
 def vocabulary_block():
