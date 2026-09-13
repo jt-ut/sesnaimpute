@@ -121,18 +121,21 @@ def build(config, regions=None):
     census = _read_census(config)
     library = _read_library(config)
 
-    # ---- left panel: the law ----
-    d_r_pc = law["d_r_pc"]
+    # ---- left panel: the law itself, young stars per pc^2 against the dust column ----
     kappa = law["kappa_herschel"]
     band_dex = law["law_band_dex"]
-    n_law_region = kappa * law["pc2_per_deg2"] * A_K_REFERENCE ** 2
-
-    d_line = np.logspace(np.log10(d_r_pc.min() * 0.9), np.log10(d_r_pc.max() * 1.1), 200)
-    n_line = kappa * (d_line * np.pi / 180.0) ** 2 * A_K_REFERENCE ** 2
+    a_line = np.logspace(np.log10(0.05), np.log10(5.0), 200)
+    n_line = kappa * a_line ** 2
     band_lo = n_line * 10.0 ** (-band_dex)
     band_hi = n_line * 10.0 ** (band_dex)
-
-    orion_idx = np.where(law["region"] == "Orion A")[0]
+    # Orion A's own columns: the 16th to 84th percentile of its sources' sightline columns
+    region_mark = (regions[0] if regions else "Orion A")
+    orion_idx = np.where(law["region"] == region_mark)[0]
+    dens_path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region_mark)
+    with h5py.File(dens_path, "r") as f:
+        a_col = np.asarray(f["A_COL_K"][:], dtype=np.float64)
+    a_lo, a_hi = np.percentile(a_col[np.isfinite(a_col) & (a_col > 0)], [16, 84])
+    pc2_per_deg2_mark = float(law["pc2_per_deg2"][orion_idx[0]]) if orion_idx.size else float("nan")
 
     # ---- right panel: census vs. library, and their ratio ----
     centers = library["log10_f45_centers"]
@@ -166,26 +169,23 @@ def build(config, regions=None):
     ax_ratio = fig.add_subplot(gs[1, 1], sharex=ax_hist)
 
     # left: the law
-    ax_law.fill_between(d_line, band_lo, band_hi, color="0.55", alpha=0.25, lw=0,
+    ax_law.fill_between(a_line, band_lo, band_hi, color="0.55", alpha=0.25, lw=0,
                          zorder=1, label=f"cloud-to-cloud band (±{band_dex:.2f} dex)")
-    ax_law.plot(d_line, n_line, color="0.35", lw=2.2, zorder=2, label="the law")
-    ax_law.scatter(d_r_pc, n_law_region, s=48, facecolor="#1b9e77", edgecolor="black",
-                    linewidth=0.7, zorder=3, label="regions")
-    if orion_idx.size:
-        i = int(orion_idx[0])
-        ax_law.annotate("Orion A", (d_r_pc[i], n_law_region[i]),
-                         xytext=(9, 9), textcoords="offset points",
-                         fontsize=10, fontweight="bold")
+    ax_law.plot(a_line, n_line, color="0.35", lw=2.2, zorder=2, label=r"the law, $N = \kappa A_K^2$")
+    ax_law.axvspan(a_lo, a_hi, color="#1b9e77", alpha=0.18, lw=0, zorder=0,
+                   label=f"{region_mark}'s sightline columns (16th to 84th percentile)")
     ax_law.set_xscale("log")
     ax_law.set_yscale("log")
+    ax_law.set_xlim(0.05, 5.0)
     ax_law.xaxis.set_major_formatter(_plain_number_formatter())
     ax_law.yaxis.set_major_formatter(_plain_number_formatter())
     ax_law.xaxis.set_minor_formatter(NullFormatter())
     ax_law.yaxis.set_minor_formatter(NullFormatter())
-    ax_law.set_xlabel(plot_style.label("Distance", "pc"))
-    ax_law.set_ylabel(plot_style.label(
-        r"$\mathbf{N_{YSO}}$" + f"($A_K$={A_K_REFERENCE:g} mag)", r"deg$^{-2}$"))
+    ax_law.set_xlabel(plot_style.label(r"dust column $\mathbf{A_K}$", "mag"))
+    ax_law.set_ylabel(plot_style.label("young stars", r"pc$^{-2}$"))
     ax_law.set_title("Star-Gas Law", fontsize=13)
+    ax_law.text(0.03, 0.03, f"at {region_mark}'s distance, 1 deg² = {pc2_per_deg2_mark:.0f} pc²",
+                transform=ax_law.transAxes, fontsize=9, ha="left", va="bottom", color="0.25")
     leg = ax_law.legend(loc="upper left", fontsize=9, frameon=False)
 
     # right, top: the two histograms
@@ -211,7 +211,7 @@ def build(config, regions=None):
     fig.suptitle("Young-Star Law and Census", fontsize=18, fontweight="bold")
 
     statement = ("Left: the star–gas law of Pokhrel et al. 2020, young stars per unit "
-                 "area rising as the square of the dust column, evaluated for each region; "
+                 "area rising as the square of the dust column, with the range of columns Orion A's sources sit under; "
                  "right: the 4.5 µm brightness of the young stars in a Spitzer census "
                  "of nearby clouds (Dunham et al. 2015) against the model library's, whose "
                  "ratio weights the library's templates.")
