@@ -592,17 +592,11 @@ def _panel_c(footprint_pix, density_hpx512, density_yso, n_proto_footprint):
 
 
 def _catalogue_word(region, survey_used):
-    """The subtitle's own catalogue word (owner's ruling 2026-09-13, item
-    1): the region's own matched protostars' `SURVEY` value where it is
-    unique and not "HOPS" (Aquila's own eHOPS); "HOPS" for Orion A, the
-    default page; "Herschel" wherever the matched sample's own name would
-    otherwise read "HOPS" on a page that is not Orion A's (Orion B, whose
-    own matched protostars are HOPS survey rows too)."""
+    """The subtitle's own catalogue word: the matched protostars' own
+    `SURVEY` value (HOPS for Orion A and Orion B, eHOPS for Aquila);
+    where a region's matched sample mixes surveys, "Herschel"."""
     uniq = np.unique(survey_used)
-    name = uniq[0].decode("utf-8") if uniq.size == 1 else "HOPS"
-    if name == "HOPS" and region != "Orion A":
-        return "Herschel"
-    return name
+    return uniq[0].decode("utf-8") if uniq.size == 1 else "Herschel"
 
 
 def build_region(config, region, formats=("png", "pdf")):
@@ -795,7 +789,7 @@ def _draw_figure(config, region, protostars, used, excluded, verdict, n_used, n_
     ax1.set_ylabel(plot_style.label(r"$\mathbf{log_{10}\,F_{4.5}}$", "mJy"), fontsize=LABEL_FONTSIZE)
     ax1.legend(handles=handles, fontsize=7, loc="upper left")
     if sc is not None:
-        cbar1 = _panel_colorbar(fig, ax1, sc, label="P(young star)")
+        cbar1 = _panel_colorbar(fig, ax1, sc, label="P(YSO)")
         cbar1.ax.yaxis.label.set_fontweight("bold")
 
     # Panel 2 -- the prior's own intrinsic young-star density map, the
@@ -803,7 +797,7 @@ def _draw_figure(config, region, protostars, used, excluded, verdict, n_used, n_
     wcs = c["geom"]["wcs"]
     rect2 = (margin_l + slot1_w + gap + 0.35, panel_bottom, slot2_w - 0.75, panel_h)
     ax2, im2 = _add_panel(fig, rect2, page_w, page_h, wcs, c["grid"], "viridis",
-                           norm=_log_norm(c["grid"]), title="Prior Young-Star Density")
+                           norm=_log_norm(c["grid"]), title="Prior YSO Density")
     class_colors = {b"0": "white", b"I": "gold", b"flat": "orange", b"II": "red"}
     for cls_val, color in class_colors.items():
         m = protostars["cls"] == cls_val
@@ -822,8 +816,7 @@ def _draw_figure(config, region, protostars, used, excluded, verdict, n_used, n_
     # convention (`atlas.shapes`).
     fig.suptitle(f"{region} Prior Verdict on Herschel Protostars",
                  fontsize=_TITLE_FONTSIZE, y=1.0 - 0.15 / page_h)
-    subtitle_text = (f"{n_used} {catalogue_word} protostars (Class 0, I, flat): the prior "
-                      f"favours a young star for {n_lead}")
+    subtitle_text = f"Prior favors YSO for {n_lead} / {n_used} {catalogue_word} protostars"
     fig.text(0.5, 1.0 - 0.50 / page_h, subtitle_text, fontsize=_SUBTITLE_FONTSIZE,
               fontweight="bold", ha="center", va="top")
 

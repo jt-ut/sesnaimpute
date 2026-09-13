@@ -99,7 +99,7 @@ ATLAS_SELECTION_TOTAL = (
 SHAPES_REGION_ROW1 = (
     "Each panel: N_C(cell), the number of selected objects of class C the "
     "prior expects in the region per parameter cell (ξ, F_4.5), summed "
-    "over the region's sources; one log colour scale for the six panels, "
+    "over the region's sources; one log color scale for the six panels, "
     "white at one millionth of the row's peak. The dotted line is the "
     "region's median 4.5 µm 50 % completeness limit; the dashed line "
     "is ξ = 1.")
@@ -126,12 +126,11 @@ TOTAL_COUNT_CHECK = (
 PROTOSTAR_PLANE = (
     r"Each protostar at its measured depth fraction $\hat{\xi}$ = â / A_s "
     "(its fitted foreground extinction over its sightline's column) and its "
-    "dereddened 4.5 µm flux, coloured by the prior's probability that a "
-    "source with that flux at that position is a young star.")
+    "dereddened 4.5 µm flux, colored by the prior's probability that a "
+    "source with that flux at that position is a YSO.")
 
 PROTOSTAR_VERDICT = (
-    "The prior favours a young star for {n_lead} of {n}; median P(young "
-    "star) = {median:.3f}.")
+    "The prior favors YSO for {n_lead} of {n}; median P(YSO) = {median:.3f}.")
 
 #: `{far_clause}` is `; {n_far} of these far above it.` when `n_far > 0`,
 #: else `.` (the sentence's own close) -- built by the caller, never a
@@ -144,7 +143,7 @@ PROTOSTAR_CASES = (
     "limit.")
 
 PROTOSTAR_RATIO = (
-    "Protostars per young star the prior expects in the footprint: "
+    "Protostars per YSO the prior expects in the footprint: "
     "{ratio:.3f} (Dunham et al. 2014: {dunham:g}).")
 
 
