@@ -224,15 +224,15 @@ def _draw(config, fit, sample, emp_median, emp_p84, pred_median, pred_p84):
     dloglike = float(np.max(loglike2d)) - loglike2d
     # The grid spans a wide sigma/gamma range (this brief's own domain,
     # 0.03-0.80 dex, 0-3.0), so most of it sits thousands of log-
-    # likelihood units below the maximum -- capping the color scale a
-    # few contour levels past the outer one keeps that gradient visible
-    # near the adopted point instead of one saturated color there and
-    # the interesting region indistinguishable from the rest of the map.
-    vmax = 3.0 * max(_DLOGLIKE_LEVELS)
-    mesh = ax2.pcolormesh(sigma_grid, gamma_grid, dloglike, cmap="viridis",
-                           vmin=0.0, vmax=vmax, shading="auto")
-    cbar = fig.colorbar(mesh, ax=ax2)
+    # likelihood units below the maximum -- filled contours at levels
+    # spaced by factors of about three keep the valley near the adopted
+    # point readable and the far plateau a single pale tone.
+    fill_levels = [0.0, 1.15, 3.0, 10.0, 30.0, 100.0, 300.0, 1000.0, 3000.0, 10000.0]
+    mesh = ax2.contourf(sigma_grid, gamma_grid, np.minimum(dloglike, fill_levels[-1] - 1.0),
+                         levels=fill_levels, cmap="viridis", extend="neither")
+    cbar = fig.colorbar(mesh, ax=ax2, ticks=fill_levels[1:])
     cbar.set_label(plot_style.label(r"$\mathbf{\Delta\,log\,L}$"), fontsize=_LABEL_FONTSIZE)
+    cbar.set_ticklabels(["%g" % v for v in fill_levels[1:]])
     cbar.ax.tick_params(labelsize=10)
     contours = ax2.contour(sigma_grid, gamma_grid, dloglike, levels=list(_DLOGLIKE_LEVELS),
                             colors="white", linewidths=1.3)
