@@ -81,8 +81,8 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
 from matplotlib.colors import LogNorm, Normalize
-from matplotlib.ticker import (FixedLocator, FuncFormatter, LogLocator, MaxNLocator,
-                                NullFormatter)
+from matplotlib.lines import Line2D
+from matplotlib.ticker import FixedLocator, FuncFormatter, MaxNLocator, NullFormatter
 from scipy.ndimage import gaussian_filter
 
 from sesnaimpute import config as config_module
@@ -100,6 +100,10 @@ CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
 #: one of these two pages.
 LABEL_FONTSIZE = 13
 TICK_FONTSIZE = 10
+
+#: The two prior pages' own page title, bold, larger than a panel title
+#: so the page's own subject reads first.
+TITLE_FONTSIZE = 18
 
 #: The display grid's own pixel size (sec. 8: "the 1' grid of the
 #: current atlas").
@@ -128,21 +132,37 @@ PAGE_WIDTH_IN, PAGE_HEIGHT_IN = 16.0, 9.0
 
 #: Page furniture, inches: room outside the panel grid for the left
 #: column's Dec tick labels, the bottom row's RA tick labels, and the
-#: two-line suptitle above.
+#: page title plus the group heading above the panel titles.
 #: Widened over its earlier 0.55 in for the 13 pt panel titles/labels at
 #: a narrow region's own aspect, whose Dec tick labels otherwise overhang
 #: the left edge by 0.03-0.17 in.
 MARGIN_LEFT_IN, MARGIN_RIGHT_IN = 0.75, 0.15
-MARGIN_TOP_IN, MARGIN_BOTTOM_IN = 0.62, 0.55
+MARGIN_TOP_IN, MARGIN_BOTTOM_IN = 0.85, 0.55
 GAP_X_IN, GAP_Y_IN = 0.10, 0.12
+
+#: `MARGIN_TOP_IN`'s own budget for the prior page's title (top pad,
+#: then the `TITLE_FONTSIZE` line, measured down from the page's own
+#: top edge, `va="top"`); the group heading sits just above the panel
+#: grid's own top edge (`HEADING_ABOVE_GRID_IN`, `va="bottom"`), so it
+#: reads as the heading of the three class columns beneath it. The
+#: posterior figure's own suptitle is unaffected, since it draws by its
+#: own fraction of the page height rather than from these pads.
+TITLE_TOP_PAD_IN = 0.14
+HEADING_ABOVE_GRID_IN = 0.06
+
+#: The left column (the column and density panels) meets the three
+#: class columns at this gap rather than `GAP_X_IN`, so the rule drawn
+#: through it (`_build_prior_page`) has room; the other two inter-
+#: column gaps keep `GAP_X_IN`.
+SEPARATOR_GAP_IN = 0.35
 
 #: A panel's own colour-bar strip (with its tick labels) and title
 #: strip, each as a fraction of the panel's own height `s` -- so, like
 #: the earlier module's inset bar, they cost more page space on a
 #: bigger panel but never crowd a small one. Sized for a thin bar plus
-#: three two/three-character ticks and a two-line class-name title at
-#: `LABEL_FONTSIZE` (the page grows to fit).
-BAR_WIDTH_FRACTION = 0.30
+#: three two/three-character ticks and, where a panel's colour bar
+#: carries one, a single rotated word of label text.
+BAR_WIDTH_FRACTION = 0.18
 TITLE_HEIGHT_FRACTION = 0.20
 
 
@@ -150,18 +170,22 @@ def _panel_rect(geom, index, page_w, page_h):
     """The panel axes' `(x, y, w, h)` in inches from the page's lower
     left, for panel `index` filled row-major into `geom`'s grid (as
     `_atlas_page_size` lays it out), and the grid's own occupied width/
-    height (for centring the grid on the page)."""
+    height (for centring the grid on the page). `geom["col_gaps"]`
+    holds the `cols - 1` inter-column gaps in order (the prior page's
+    own first gap is `SEPARATOR_GAP_IN`, wider than the rest, for the
+    separator rule; the posterior figure's are all `GAP_X_IN`)."""
     cols, rows = geom["cols"], geom["rows"]
     panel_w, panel_h = geom["panel_w"], geom["panel_h"]
     bar_w, title_h = geom["bar_w"], geom["title_h"]
-    content_w = cols * (panel_w + bar_w) + (cols - 1) * GAP_X_IN
+    col_gaps = geom["col_gaps"]
+    content_w = cols * (panel_w + bar_w) + sum(col_gaps)
     content_h = rows * (panel_h + title_h) + (rows - 1) * GAP_Y_IN
     usable_w = page_w - MARGIN_LEFT_IN - MARGIN_RIGHT_IN
     usable_h = page_h - MARGIN_TOP_IN - MARGIN_BOTTOM_IN
     origin_x = MARGIN_LEFT_IN + 0.5 * (usable_w - content_w)
     origin_y = MARGIN_BOTTOM_IN + 0.5 * (usable_h - content_h)
     row, col = divmod(index, cols)
-    x = origin_x + col * (panel_w + bar_w + GAP_X_IN)
+    x = origin_x + col * (panel_w + bar_w) + sum(col_gaps[:col])
     y = origin_y + (rows - 1 - row) * (panel_h + title_h + GAP_Y_IN)
     return x, y, panel_w, panel_h
 
@@ -428,6 +452,40 @@ def _colorbar(fig, im, rect, page_w, page_h):
     return cbar
 
 
+def _log_tick_values(vmin, vmax):
+    """Candidate tick values at 1, 2, 5 x 10^k inside `[vmin, vmax]`:
+    the 2s dropped once there are more than four candidates, then every
+    non-decade value dropped too if still more than four -- so a log
+    bar never carries more ticks than a reader can place, and a panel
+    whose range spans less than a decade still gets at least one
+    intermediate value alongside its two ends."""
+    if not (vmin and vmax and vmax > vmin > 0):
+        return [v for v in (vmin, vmax) if v]
+    k_min = int(np.floor(np.log10(vmin)))
+    k_max = int(np.ceil(np.log10(vmax)))
+    tol_lo, tol_hi = vmin * (1 - 1e-9), vmax * (1 + 1e-9)
+    candidates = [(m, m * 10.0 ** k) for k in range(k_min, k_max + 1) for m in (1, 2, 5)]
+    candidates = [(m, v) for m, v in candidates if tol_lo <= v <= tol_hi]
+    if len(candidates) > 4:
+        candidates = [(m, v) for m, v in candidates if m != 2]
+    if len(candidates) > 4:
+        candidates = [(m, v) for m, v in candidates if m == 1]
+    values = sorted(v for _, v in candidates)
+    return values if values else [vmin, vmax]
+
+
+def _format_log_tick(v):
+    """One log-bar tick label with no exponent notation: an integer
+    value prints as an integer (`5000`, not `5e+03`), a fraction prints
+    with the digits it needs (`0.1`, not `1e-01`)."""
+    if v == 0:
+        return "0"
+    rounded = round(v)
+    if abs(v - rounded) <= 1e-6 * abs(v) and rounded != 0:
+        return "%d" % rounded
+    return ("%f" % v).rstrip("0").rstrip(".")
+
+
 def _panel_colorbar(fig, ax, im, label=None, log=False, ticks=None):
     """The panel's own colour bar, inset into its own right edge and
     spanning exactly its height -- axes coordinates work for WCSAxes, so
@@ -435,42 +493,42 @@ def _panel_colorbar(fig, ax, im, label=None, log=False, ticks=None):
     `ticks`, for a panel on a fixed scale shared with other panels,
     labels exactly those values; a panel on its own auto-ranged scale
     (e.g. a prior page's class panels, `_panel_norm`) passes `None` and
-    gets the automatic linear ticks below.
-    `log`, for a `LogNorm`-scaled panel, ticks DECADES ONLY when at
-    least two decade ticks fall in the mappable's own range: a linear
-    `%.2g` formatter left the log axis's own automatic
-    scientific-notation MINOR ticks in place, one of which ran off the
-    bar. A panel whose range spans less than a decade would otherwise
-    show no labelled tick at all (a class held in one narrow decade,
-    e.g. an intrinsic YSO share); there, intermediate (non-base) ticks
-    are labelled too, so every colour bar carries at least two labelled
-    values."""
+    gets the automatic ticks below.
+
+    `log`, for a `LogNorm`-scaled panel, ticks at `_log_tick_values`'s
+    1/2/5-per-decade candidates, minor ticks unlabelled and of zero
+    length, every label plain (`_format_log_tick`, no exponent
+    notation).  A linear panel ticks on `MaxNLocator(nbins=3, steps=[1,
+    2, 2.5, 5, 10])`; where its range's top sits below 0.01, the ticks
+    are labelled in units of one power of ten (`1 2 3`, say) and that
+    multiplier is printed once above the bar, so no tick label reads
+    like `2e-04`."""
     cax = ax.inset_axes([1.02, 0.0, 0.04, 1.0])
     cbar = fig.colorbar(im, cax=cax)
+    multiplier_text = None
     if ticks is not None:
         cbar.locator = FixedLocator(list(ticks))
         cbar.formatter = FuncFormatter(lambda v, _pos: "%g" % v)
     elif log:
         vmin, vmax = im.norm.vmin, im.norm.vmax
-        # `LogLocator.tick_values` pads its candidates to the decades
-        # bracketing the range, so most are clipped off the bar at draw
-        # time -- only those actually inside [vmin, vmax] are what the
-        # reader sees.
-        candidates = LogLocator(base=10.0).tick_values(vmin, vmax) if vmin and vmax else np.array([])
-        n_decade_ticks = int(np.sum((candidates >= vmin) & (candidates <= vmax))) if candidates.size else 0
-        if n_decade_ticks >= 2:
-            cbar.locator = LogLocator(base=10.0)
-            cbar.ax.yaxis.set_minor_formatter(NullFormatter())
-            cbar.ax.tick_params(which="minor", length=0)
-        else:
-            cbar.locator = LogLocator(base=10.0, subs=np.arange(1, 10))
-            cbar.formatter = FuncFormatter(lambda v, _pos: "%.2g" % v)
-            cbar.ax.yaxis.set_minor_formatter(NullFormatter())
-            cbar.ax.tick_params(which="minor", length=0)
+        cbar.locator = FixedLocator(_log_tick_values(vmin, vmax))
+        cbar.formatter = FuncFormatter(lambda v, _pos: _format_log_tick(v))
+        cbar.ax.yaxis.set_minor_formatter(NullFormatter())
+        cbar.ax.tick_params(which="minor", length=0)
     else:
-        cbar.locator = MaxNLocator(nbins=3)
-        cbar.formatter = FuncFormatter(lambda v, _pos: "%.2g" % v)
+        vmax = im.norm.vmax
+        cbar.locator = MaxNLocator(nbins=3, steps=[1, 2, 2.5, 5, 10])
+        if vmax and vmax > 0 and vmax < 0.01:
+            k = int(np.floor(np.log10(vmax)))
+            scale = 10.0 ** k
+            cbar.formatter = FuncFormatter(lambda v, _pos, _scale=scale: "%g" % (v / _scale))
+            multiplier_text = r"$\times 10^{%d}$" % k
+        else:
+            cbar.formatter = FuncFormatter(lambda v, _pos: "%g" % v)
     cbar.update_ticks()
+    if multiplier_text is not None:
+        cbar.ax.text(0.5, 1.04, multiplier_text, transform=cbar.ax.transAxes,
+                      ha="center", va="bottom", fontsize=TICK_FONTSIZE)
     # Tick and label sizes a reader sees on a slide, the two atlas
     # pages' own convention.
     cbar.ax.tick_params(labelsize=TICK_FONTSIZE, length=2, pad=1.0)
@@ -488,23 +546,28 @@ def _panel_colorbar(fig, ax, im, label=None, log=False, ticks=None):
 ATLAS_PANEL_HEIGHT_IN = 3.0
 
 
-def _atlas_page_size(aspect, cols=4, rows=2, panel_h=ATLAS_PANEL_HEIGHT_IN):
+def _atlas_page_size(aspect, cols=4, rows=2, panel_h=ATLAS_PANEL_HEIGHT_IN, col_gaps=None):
     """`(page_w, page_h, geom)` for an atlas page (the prior figure or
     the posterior figure, both fixed `cols`x`rows` grids): `cols`x`rows`
     equal panels at the region's own `aspect`, each `panel_h` tall plus
     its own colour-bar strip and title strip, the page margins (left/
-    right Dec and RA tick room, top suptitle room, bottom RA-label room)
+    right Dec and RA tick room, top title room, bottom RA-label room)
     added once around that content -- so the panel grid always fills the
-    page exactly, with no letterboxing in either dimension."""
+    page exactly, with no letterboxing in either dimension. `col_gaps`,
+    the `cols - 1` inter-column gaps in order, defaults to `GAP_X_IN`
+    throughout (the posterior figure's own uniform grid); the prior
+    page passes its own wider first gap for the separator rule."""
+    if col_gaps is None:
+        col_gaps = [GAP_X_IN] * (cols - 1)
     panel_w = panel_h * aspect
     bar_w = panel_h * BAR_WIDTH_FRACTION
     title_h = panel_h * TITLE_HEIGHT_FRACTION
-    content_w = cols * (panel_w + bar_w) + (cols - 1) * GAP_X_IN
+    content_w = cols * (panel_w + bar_w) + sum(col_gaps)
     content_h = rows * (panel_h + title_h) + (rows - 1) * GAP_Y_IN
     page_w = MARGIN_LEFT_IN + MARGIN_RIGHT_IN + content_w
     page_h = MARGIN_TOP_IN + MARGIN_BOTTOM_IN + content_h
     geom = dict(cols=cols, rows=rows, panel_w=panel_w, panel_h=panel_h,
-                bar_w=bar_w, title_h=title_h)
+                bar_w=bar_w, title_h=title_h, col_gaps=col_gaps)
     return page_w, page_h, geom
 
 
@@ -551,15 +614,17 @@ def _panel_norm(grid):
 #: `_build_prior_page` is the one shared code path the rules ask for.
 VIEWS = {
     "intrinsic": dict(
-        density_label="Prior Intrinsic Density",
-        class_cbar_label="P(C | pixel)",
+        density_label="Prior Density",
+        page_title="%s Prior Atlas (Intrinsic)",
+        group_heading="P(class | pixel, above the 4.5 µm limit)",
         class_caption=captions.ATLAS_INTRINSIC_CLASS,
         total_caption=captions.ATLAS_INTRINSIC_TOTAL,
         coverage_outline=False,
     ),
     "selection": dict(
-        density_label="Prior Selection Density",
-        class_cbar_label="P(C | pixel, cataloged)",
+        density_label="Prior Density",
+        page_title="%s Prior Atlas",
+        group_heading="P(class | pixel, selected)",
         class_caption=captions.ATLAS_SELECTION_CLASS,
         total_caption=captions.ATLAS_SELECTION_TOTAL,
         coverage_outline=True,
@@ -570,13 +635,13 @@ VIEWS = {
 def _caption_block(view, extra_line=None):
     """The text a prior page prints below its panel grid: the view's own
     two `atlas.captions` statements, then `extra_line` if given (the
-    selection page's own total-count-check lines), then the shared
-    vocabulary in full -- imported, never restated, per the rules."""
+    selection page's own total-count-check lines). The shared
+    vocabulary itself is not printed here -- `captions.write_vocabulary`
+    writes it once to its own file alongside the figures."""
     spec = VIEWS[view]
     parts = [spec["class_caption"], spec["total_caption"]]
     if extra_line:
         parts.append(extra_line)
-    parts.append("Vocabulary:\n" + captions.vocabulary_block())
     return "\n\n".join(parts)
 
 
@@ -661,12 +726,15 @@ def _build_prior_page(config, region, formats, view):
             # The share as computed, on that panel's own linear scale:
             # nothing is clipped, and the colour bar's automatic ticks
             # read off whatever range this class actually spans.
+            # No per-panel colour-bar label: the probability the six
+            # class panels draw is stated once, in the group heading
+            # above them (`spec["group_heading"]`), not repeated six
+            # times beside each bar.
             return dict(data=share_grids[idx], cmap="viridis", norm=_panel_norm(share_grids[idx]), title=cls,
-                        cbar_label=plot_style.label(spec["class_cbar_label"], None), hatch=None,
-                        cbar_ticks=None)
+                        cbar_label=None, hatch=None, cbar_ticks=None)
 
         col_panel = dict(data=col_grid, cmap="magma", norm=_log_norm(col_grid),
-                          title=plot_style.label("Column $A_K$", "mag"), cbar_label=None, hatch=None,
+                          title=plot_style.label(r"Column $\mathbf{A_K}$", "mag"), cbar_label=None, hatch=None,
                           cbar_ticks=None)
         density_title = plot_style.label(spec["density_label"], "deg$^{-2}$").replace(" [", "\n[")
         hatch = None
@@ -705,7 +773,8 @@ def _build_prior_page(config, region, formats, view):
         # page's OWN height by exactly what it needs, so the grid itself
         # never shrinks to make room.
         aspect = geom_grid["n_x"] / float(geom_grid["n_y"])
-        page_w, page_h, geom = _atlas_page_size(aspect)
+        page_w, page_h, geom = _atlas_page_size(
+            aspect, col_gaps=[SEPARATOR_GAP_IN, GAP_X_IN, GAP_X_IN])
         extra_block = "\n".join(extra_lines) if extra_lines else None
         caption_text, caption_h = _caption_layout(_caption_block(view, extra_line=extra_block), page_w)
         page_h_total = page_h + caption_h
@@ -736,15 +805,42 @@ def _build_prior_page(config, region, formats, view):
         fig.text(MARGIN_LEFT_IN / page_w, (caption_h - CAPTION_TOP_PAD_IN) / page_h_total,
                   caption_text, fontsize=CAPTION_FONT_SIZE, va="top", ha="left")
 
-        # The suptitle carries only the region and the view: it has no
-        # room on a narrow region's own aspect for the region-scale
-        # numbers above, which is why those now live in the caption
-        # block instead.
-        title = "%s -- prior atlas, %s view" % (region, view)
-        fig.suptitle(title, fontsize=LABEL_FONTSIZE, y=1.0 - 0.10 / page_h_total)
+        # The separator rule, between the left column (col_panel/
+        # density_panel, index 0) and the three class columns (indices
+        # 1-3): one thin vertical line centred in `SEPARATOR_GAP_IN`,
+        # from the bottom of the lower panel to the top of the upper
+        # panel's title strip -- both rows share that span regardless of
+        # column, since every panel in the grid is the same height.
+        left_rect = _panel_rect(geom, 0, page_w, page_h)
+        col1_rect = _panel_rect(geom, 1, page_w, page_h)
+        col3_rect = _panel_rect(geom, 3, page_w, page_h)
+        bottom_rect = _panel_rect(geom, 4, page_w, page_h)
+        content_h = geom["rows"] * (geom["panel_h"] + geom["title_h"]) + (geom["rows"] - 1) * GAP_Y_IN
+        sep_x_in = left_rect[0] + geom["panel_w"] + geom["bar_w"] + SEPARATOR_GAP_IN / 2.0
+        sep_y0_in = bottom_rect[1] + caption_h
+        sep_y1_in = bottom_rect[1] + content_h + caption_h
+        fig.add_artist(Line2D([sep_x_in / page_w, sep_x_in / page_w],
+                               [sep_y0_in / page_h_total, sep_y1_in / page_h_total],
+                               transform=fig.transFigure, color="0.6", linewidth=0.8))
+
+        # The page title at the top of the page and the group heading
+        # centred over the three class columns, just above the panel
+        # grid's own top edge -- both bold, independent of the region's
+        # own aspect.
+        heading_x_in = 0.5 * (col1_rect[0] + col3_rect[0] + geom["panel_w"] + geom["bar_w"])
+        fig.text(0.5, (page_h_total - TITLE_TOP_PAD_IN) / page_h_total,
+                  spec["page_title"] % region, fontsize=TITLE_FONTSIZE, fontweight="bold",
+                  va="top", ha="center")
+        fig.text(heading_x_in / page_w, (sep_y1_in + HEADING_ABOVE_GRID_IN) / page_h_total,
+                  spec["group_heading"], fontsize=LABEL_FONTSIZE, fontweight="bold",
+                  va="bottom", ha="center")
 
         out_dir = os.path.join(config.data_root, "bmstp", "atlas", "figures")
         os.makedirs(out_dir, exist_ok=True)
+        # The shared vocabulary, off both pages' own caption and onto
+        # its own file -- one write per page built, an idempotent
+        # overwrite of the same file.
+        captions.write_vocabulary(out_dir)
         paths = []
         for fmt in formats:
             path = os.path.join(out_dir, "prior-atlas-%s_%s.%s" % (view, region, fmt))
@@ -831,7 +927,7 @@ def build_posterior_region(config, region, formats):
                         grey=gap_grid)
 
         col_panel = dict(data=col_grid, cmap="magma", norm=_log_norm(col_grid),
-                          title=plot_style.label("Column $A_K$", "mag"), cbar_label=None, grey=None)
+                          title=plot_style.label(r"Column $\mathbf{A_K}$", "mag"), cbar_label=None, grey=None)
         # N_YSO_ABOVE_HALF (P11) is a raw per-pixel COUNT of P(YSO)>0.5
         # sources, never divided by the pixel's own solid angle -- unlike
         # N_CAT_C (deg^-2 already), so this title carries no unit rather
