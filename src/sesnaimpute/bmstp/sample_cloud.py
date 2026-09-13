@@ -13,7 +13,7 @@ shifted-and-smoothed copy of the survey-wide template marginal `P_ref`
 (`p_ref_f45`, at the library's own 1 kpc reference distance, unplaced) to
 its own row of the grid, `delta_k,sub = -2 log10(d_k,sub / 1 kpc)` the
 brightness shift that sub-sample's own distance implies. `bmstp.shapes`
-forms this per sightline by grouping sub-samples into their own `log10 x`
+forms this per sightline by grouping sub-samples into their own `log10 ξ`
 row first (mathematically identical, since the shift-then-smooth
 convolution is linear and additive over sub-samples in the same row) and
 convolving that row's own binned-and-smoothed shift distribution with
@@ -57,13 +57,13 @@ from sesnaimpute.bmstp import grid, template_weights
 from sesnaimpute.population import yso as yso_module
 
 #: Sub-samples per profile cell, laid evenly along the cell's own segment
-#: in `log10 x` (sec. 5.5 "Marks": "in practice, a fixed number of
+#: in `log10 ξ` (sec. 5.5 "Marks": "in practice, a fixed number of
 #: sub-samples per cell").
 N_SUB = 16
 
-#: The common grid's own `log10 x` floor (sec. 2), guarding `log10(0)` at
+#: The common grid's own `log10 ξ` floor (sec. 2), guarding `log10(0)` at
 #: a sightline's nearest cell edge (`u = 0` at `d = 0`).
-_X_FLOOR = 10.0 ** grid.LOG10_X_EDGES[0]
+_X_FLOOR = 10.0 ** grid.LOG10_XI_EDGES[0]
 
 _SUB_T = (np.arange(N_SUB, dtype=np.float64) + 0.5) / N_SUB  # (N_SUB,)
 
@@ -71,17 +71,17 @@ _SUB_T = (np.arange(N_SUB, dtype=np.float64) + 0.5) / N_SUB  # (N_SUB,)
 def _region_profile(config, region):
     """The region's full-resolution embedding density and matching
     distance edges, one vectorised call over every sightline
-    (`embedding_and_ridge`, unmodified): `u_edges`/`d_edges` (n_sl,
+    (`embedding_and_ridge`, unmodified): `xi_edges`/`d_edges` (n_sl,
     n_d+1), `p_u` (n_sl, n_d), `hpx_pix_256` (n_sl,)."""
     profile = yso_module._load_profile_arrays(config, region)
     embed = yso_module.embedding_and_ridge(profile)
     dist_pc = profile["dist_pc"]
     n_d = dist_pc.size
-    n_sl = embed["u_edges"].shape[0]
+    n_sl = embed["xi_edges"].shape[0]
     d_edges = np.empty((n_sl, n_d + 1), dtype=np.float64)
     d_edges[:, :n_d] = dist_pc[None, :]
     d_edges[:, n_d] = dist_pc[-1] + 2.0 * profile["tail_efold_pc"]
-    return dict(u_edges=embed["u_edges"], p_u=embed["p_u"], d_edges=d_edges,
+    return dict(xi_edges=embed["xi_edges"], p_u=embed["p_u"], d_edges=d_edges,
                 hpx_pix_256=profile["hpx_pix_256"])
 
 
@@ -131,14 +131,14 @@ def cloud_interval_pc(config, region):
 
 def _bin1d(values, w, edges, sigma_cells):
     """One axis of `bmstp.grid.bin`, alone: the weighted 1-D histogram of
-    `values` on `edges` (always `grid.LOG10_X_EDGES`, `sample_x`'s only
+    `values` on `edges` (always `grid.LOG10_XI_EDGES`, `sample_x`'s only
     caller below), normalised to `1 - mass_outside`, Gaussian-smoothed by
     `sigma_cells` cells (`mode="constant"`: mass pushed past the array's
-    true `log10 x` edges is mass outside the grid, never wrapped). THE
+    true `log10 ξ` edges is mass outside the grid, never wrapped). THE
     WALL (`bmstp.grid` module docstring) then reflects whatever of that
-    smoothed mass sits at `log10 x > 0` back onto the support
+    smoothed mass sits at `log10 ξ > 0` back onto the support
     (`grid.fold_wall`) instead of dropping it -- the same treatment
-    `grid.bin` gives every other class's `log10 x` axis. `h` carries its
+    `grid.bin` gives every other class's `log10 ξ` axis. `h` carries its
     own true zeros: no per-shape floor is baked in here."""
     values = np.asarray(values, dtype=np.float64)
     w = np.asarray(w, dtype=np.float64)
@@ -160,7 +160,7 @@ def _cell_subsamples(loaded, row, d_front, d_back):
     (restricted to `[d_front, d_back]`, a cell partly inside counting its
     inside fraction) supply (sec. 5.5 "Marks", the shift kernel): `N_SUB`
     equally-weighted sub-samples laid along each surviving cell's own
-    `log10 x` segment, mass `p_k * du_k` split `N_SUB` ways as before, each
+    `log10 ξ` segment, mass `p_k * du_k` split `N_SUB` ways as before, each
     sub-sample's own distance `d_k,sub` interpolated LINEARLY in `d` along
     the same cell at the same fractional position (the cell's own `(u, d)`
     segment is monotonic in both). Returns `(log10x_nudged, w, d_sub,
@@ -168,10 +168,10 @@ def _cell_subsamples(loaded, row, d_front, d_back):
     `removed_frac` -- `sample_x` bins `log10x_nudged` into `p_x`;
     `shift_kernel` and `bmstp.shapes._build_one_sightline` turn `d_sub`
     into the brightness shift `delta = -2 log10(d_sub / 1 kpc)`."""
-    u_edges = loaded["u_edges"][row]
+    xi_edges = loaded["xi_edges"][row]
     d_edges = loaded["d_edges"][row]
     p_u = loaded["p_u"][row]
-    u_lo, u_hi = u_edges[:-1], u_edges[1:]
+    u_lo, u_hi = xi_edges[:-1], xi_edges[1:]
     d_lo, d_hi = d_edges[:-1], d_edges[1:]
     # u is non-decreasing (sec. 5.5); the top cell's edges can differ from
     # 1.0 by a float64 rounding residual (~1e-16) with the wrong sign, so
@@ -211,37 +211,37 @@ def sample_x(loaded, row, d_front, d_back):
     """YSO's own-sightline depth mark, `p(x)` (sec. 5.5 "Marks"): the
     profile's native cells restricted to those whose distance range
     overlaps `[d_front, d_back]`, laid in `N_SUB` sub-samples per cell
-    (`_cell_subsamples`) and binned on the common `log10 x` grid with the
+    (`_cell_subsamples`) and binned on the common `log10 ξ` grid with the
     usual one-cell smoothing (sec. 2 "minimum widths"). Returns `(p_x,
     mass_outside, removed_frac)`: `removed_frac` is the fraction of the
     sightline's own (pre-restriction) mass the cloud-interval restriction
     removed, report-only (sec. 5.5's "1-9 percent median, up to 84
     percent")."""
     log10x_nudged, w, _d_sub, removed_frac = _cell_subsamples(loaded, row, d_front, d_back)
-    p_x, mass_outside = _bin1d(log10x_nudged, w, grid.LOG10_X_EDGES, sigma_cells=1.0)
+    p_x, mass_outside = _bin1d(log10x_nudged, w, grid.LOG10_XI_EDGES, sigma_cells=1.0)
     return p_x, mass_outside, removed_frac
 
 
-def restrict_old_x_marginal(loaded, row, old_x_marginal, d_front, d_back):
+def restrict_old_xi_marginal(loaded, row, old_xi_marginal, d_front, d_back):
     """The acceptance check's own reference: the OLD (pre-4.5B)
     `X_MARGINAL`, read off disk before this build overwrites it,
     restricted to the cloud interval and renormalised. Each of the common
-    grid's 128 `log10 x` cells' own distance range is approximated by
-    inverting the sightline's native `u(d)` mapping (`loaded`'s
-    `u_edges`/`d_edges`, both monotonic) at the grid's own edges, then the
+    grid's 128 `log10 ξ` cells' own distance range is approximated by
+    inverting the sightline's native `ξ(d)` mapping (`loaded`'s
+    `xi_edges`/`d_edges`, both monotonic) at the grid's own edges, then the
     same inside-fraction rule `sample_x` applies at native resolution.
     Report-only: the two constructions restrict at different resolutions
     (native profile cells there, the common grid's own cells here), so
     exact agreement is not expected."""
-    u_edges_native = loaded["u_edges"][row]
+    xi_edges_native = loaded["xi_edges"][row]
     d_edges_native = loaded["d_edges"][row]
-    grid_x_edges = 10.0 ** grid.LOG10_X_EDGES
-    d_at_grid_edges = np.interp(grid_x_edges, u_edges_native, d_edges_native)
+    grid_xi_edges = 10.0 ** grid.LOG10_XI_EDGES
+    d_at_grid_edges = np.interp(grid_xi_edges, xi_edges_native, d_edges_native)
     d_lo, d_hi = d_at_grid_edges[:-1], d_at_grid_edges[1:]
     overlap = np.clip(np.minimum(d_hi, d_back) - np.maximum(d_lo, d_front), 0.0, None)
     width = np.maximum(d_hi - d_lo, 1e-300)
     inside_frac = overlap / width
-    restricted = np.asarray(old_x_marginal, dtype=np.float64) * inside_frac
+    restricted = np.asarray(old_xi_marginal, dtype=np.float64) * inside_frac
     total = float(restricted.sum())
     return restricted / total if total > 0 else restricted
 
@@ -355,7 +355,7 @@ def shift_kernel(config, region, d_front, d_back):
     d_edges = np.empty((1, n_d + 1), dtype=np.float64)
     d_edges[:, :n_d] = dist_pc[None, :]
     d_edges[:, n_d] = dist_pc[-1] + 2.0 * fb_profile["tail_efold_pc"][0]
-    loaded_fb = dict(u_edges=embed["u_edges"], p_u=embed["p_u"], d_edges=d_edges)
+    loaded_fb = dict(xi_edges=embed["xi_edges"], p_u=embed["p_u"], d_edges=d_edges)
 
     _log10x, w, d_sub, _removed = _cell_subsamples(loaded_fb, 0, d_front, d_back)
     delta = -2.0 * np.log10(d_sub / 1000.0)

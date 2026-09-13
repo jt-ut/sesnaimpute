@@ -1,5 +1,5 @@
 """The shape-grid builder: bins each class's population sample onto the
-common `(log10 x, log10 F_4.5)` grid (`bmstp.grid`) and writes the
+common `(log10 ξ, log10 F_4.5)` grid (`bmstp.grid`) and writes the
 shape-grid products of IMPLEMENTATION_BMSTP_DRAFT.md sec. 1.2
 (SPEC_BMSTP_DRAFT.md sec. 2, sec. 4.1's "shape grids", sec. 5.1-5.6).
 
@@ -88,9 +88,9 @@ def _read_old_star_product(path):
         return None
     with h5py.File(path, "r") as f:
         tile_id = f["TILE_ID"][()].astype(np.int64)
-        x_marginal_star = f["GRID_STAR"][()].sum(axis=2)
-        x_marginal_agb = f["GRID_AGB"][()].sum(axis=2)
-    return dict(tile_id=tile_id, x_marginal_star=x_marginal_star, x_marginal_agb=x_marginal_agb)
+        xi_marginal_star = f["GRID_STAR"][()].sum(axis=2)
+        xi_marginal_agb = f["GRID_AGB"][()].sum(axis=2)
+    return dict(tile_id=tile_id, xi_marginal_star=xi_marginal_star, xi_marginal_agb=xi_marginal_agb)
 
 
 def build_star_family(config, region):
@@ -153,7 +153,7 @@ def build_star_family(config, region):
             f.attrs["N_STARS_PER_TILE"] = n_stars_per_tile
             f.attrs["F45_PER_L_SPREAD_DEX_O"] = agb_ratio["O"]["spread_dex"]
             f.attrs["F45_PER_L_SPREAD_DEX_C"] = agb_ratio["C"]["spread_dex"]
-            f.create_dataset("LOG10_X_EDGES", data=grid.LOG10_X_EDGES)
+            f.create_dataset("LOG10_X_EDGES", data=grid.LOG10_XI_EDGES)  # stored as LOG10_X_EDGES; the depth fraction ξ grid edges
             f.create_dataset("LOG10_F45_EDGES", data=grid.LOG10_F45_EDGES)
             f.create_dataset("TILE_ID", data=ids.astype(np.int32))
             f.create_dataset("GRID_STAR", data=grid_star)
@@ -165,11 +165,11 @@ def build_star_family(config, region):
 
         # STAR's acceptance identity (sec. 9): the new `x`-marginal against
         # the OLD product's own, read above before the overwrite.
-        max_x_marginal_dev = float("nan")
+        max_xi_marginal_dev = float("nan")
         if old is not None and np.array_equal(old["tile_id"], ids):
-            new_x_marginal_star = grid_star.sum(axis=2)
-            max_x_marginal_dev = float(
-                np.max(np.abs(old["x_marginal_star"] - new_x_marginal_star)))
+            new_xi_marginal_star = grid_star.sum(axis=2)
+            max_xi_marginal_dev = float(
+                np.max(np.abs(old["xi_marginal_star"] - new_xi_marginal_star)))
 
         # STAR's own F_4.5 range against the field-stars product's own
         # flux column (sec. 9's "must agree, since it is the same
@@ -189,13 +189,13 @@ def build_star_family(config, region):
                 mass_outside_star_max=float(mass_outside_star.max()) if n_tile else 0.0,
                 mass_outside_agb_max=float(mass_outside_agb.max()) if n_tile else 0.0,
                 sum_check_max=float(max_sum_check),
-                x_marginal_max_dev=max_x_marginal_dev,
+                xi_marginal_max_dev=max_xi_marginal_dev,
                 f45_range_field_stars=(f45_lo, f45_hi),
                 mass_above_top_star=float(above_top_star),
                 mass_above_top_agb=float(above_top_agb),
                 on_grid_star_range=(float(on_grid_star.min()), float(on_grid_star.max())) if n_tile else (0.0, 0.0),
                 on_grid_agb_range=(float(on_grid_agb.min()), float(on_grid_agb.max())) if n_tile else (0.0, 0.0))
-    return (path, n_tile, mass_outside_star, mass_outside_agb, max_sum_check, max_x_marginal_dev,
+    return (path, n_tile, mass_outside_star, mass_outside_agb, max_sum_check, max_xi_marginal_dev,
             above_top_star, above_top_agb, on_grid_star, on_grid_agb)
 
 
@@ -245,7 +245,7 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     removed_frac)` (sec. 5.5 "Marks"): every depth sub-sample
     (`sample_cloud._cell_subsamples`, weight `w_k,sub`, depth `x_k,sub`,
     distance `d_k,sub`) adds its own shifted-and-smoothed copy of `p_ref`
-    to its own `log10 x` row -- grouped by row first (linear in the
+    to its own `log10 ξ` row -- grouped by row first (linear in the
     sub-samples, so summing the row's own raw weighted `delta = -2
     log10(d_k,sub / 1 kpc)` histogram before the ONE EXACT Gaussian
     smoothing (`kernel_1d`, `sample_cloud.exact_gaussian_kernel`) and the
@@ -253,20 +253,20 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     exactly). `X_MARGINAL` (`p_x`) is unchanged in value
     (`sample_cloud.sample_x`, its own one-cell-smoothed bin).
     `MASS_OUTSIDE_YSO` is the shortfall of `GRID_YSO`'s own total against
-    the sightline's intended mass, `sum(w_k,sub) * p_ref.sum()`: THE WALL
+    the sightline's intended mass, `sum(w_k,sub) * p_ref.sum()`: THE EDGE ξ = 1
     (`bmstp.grid`'s module docstring) reflects whatever of the one-cell
-    `x` smoothing's own mass reaches `log10 x > 0` back onto the support
+    `x` smoothing's own mass reaches `log10 ξ > 0` back onto the support
     (`grid.fold_wall`) rather than dropping it, exactly as `grid.bin` does
     for every other class, so only mass a sub-sample's own smoothing
-    carries past the array's true `log10 x` edges is ever shortfall.
+    carries past the array's true `log10 ξ` edges is ever shortfall.
     `GRID_YSO` carries its own true zeros: no per-shape floor is baked in
     here."""
     p_x, _mo_x, removed_frac = sample_cloud.sample_x(loaded, row, d_front, d_back)
     log10x_nudged, w_sub, d_sub, _removed = sample_cloud._cell_subsamples(loaded, row, d_front, d_back)
-    n_x = grid.LOG10_X_EDGES.size - 1
+    n_x = grid.LOG10_XI_EDGES.size - 1
     n_b = grid.LOG10_F45_EDGES.size - 1
 
-    x_idx = np.digitize(log10x_nudged, grid.LOG10_X_EDGES) - 1
+    x_idx = np.digitize(log10x_nudged, grid.LOG10_XI_EDGES) - 1
     on_x = (x_idx >= 0) & (x_idx < n_x)
     delta = -2.0 * np.log10(d_sub / 1000.0)
     # the sub-samples' own raw weights through the shift-kernel placement
@@ -281,10 +281,10 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     grid_yso = gaussian_filter1d(grid_yso, sigma=1.0, axis=0, mode="constant")
 
     total_intended = float(w_sub.sum()) * float(p_ref.sum())
-    # THE WALL: `log10 x = 0` reflects -- the shift-kernel convolution's
+    # THE EDGE ξ = 1: `log10 ξ = 0` reflects -- the shift-kernel convolution's
     # own padding dex is folded back onto the support (`grid.fold_wall`)
     # rather than dropped, so `mass_outside_yso` below counts only what
-    # the smoothing carries past the array's true `log10 x` edges.
+    # the smoothing carries past the array's true `log10 ξ` edges.
     grid_yso = grid.fold_wall(grid_yso)
     total_actual = float(grid_yso.sum())
     mass_outside_yso = (0.0 if total_intended <= 0.0
@@ -295,8 +295,8 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
 def build_cloud(config, region):
     """Writes P3, `bmstp/shape/cloud_shape_sightline__R.hdf5`: `GRID_YSO`
     (sec. 5.5, the shift-kernel rule -- each depth sub-sample's own shifted copy of
-    `P_ref`, `bmstp.sample_cloud.p_ref_f45`, summed by `log10 x` row, NOT
-    an outer product) and its `log10 x` marginal per sightline,
+    `P_ref`, `bmstp.sample_cloud.p_ref_f45`, summed by `log10 ξ` row, NOT
+    an outer product) and its `log10 ξ` marginal per sightline,
     `MASS_OUTSIDE_YSO`, `ON_GRID_YSO` (`1 - mass_outside_yso` per
     sightline, sec. 2's ON-GRID FRACTION, W26's own read), the cloud
     interval `D_FRONT_PC`/`D_BACK_PC` (DOUBLED about the region's own peak
@@ -310,10 +310,10 @@ def build_cloud(config, region):
     `C_THETA` offset, never a class-specific origin). Neither grid carries
     an `N_EFF` dataset or a `FLOOR` attribute, per `bmstp.grid`'s module docstring."""
     p3_path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
-    old_x_marginal = None
+    old_xi_marginal = None
     if os.path.exists(p3_path):
         with h5py.File(p3_path, "r") as f:
-            old_x_marginal = f["X_MARGINAL"][()]
+            old_xi_marginal = f["X_MARGINAL"][()]  # stored as X_MARGINAL; the depth fraction ξ's marginal
 
     with progress.Stage("bmstp.shapes.cloud", region) as st:
         loaded = sample_cloud._region_profile(config, region)
@@ -338,10 +338,10 @@ def build_cloud(config, region):
             st.tick(i + 1, n_sl, "sightlines")
 
         n_b = grid.LOG10_F45_EDGES.size - 1
-        n_x = grid.LOG10_X_EDGES.size - 1
+        n_x = grid.LOG10_XI_EDGES.size - 1
         grid_yso = (np.stack([r_[0] for r_ in results]) if n_sl
                     else np.zeros((0, n_x, n_b), dtype=np.float32))
-        x_marginal = (np.stack([r_[1] for r_ in results]) if n_sl
+        xi_marginal = (np.stack([r_[1] for r_ in results]) if n_sl
                       else np.zeros((0, n_x), dtype=np.float32))
         mass_outside_yso = (np.array([r_[2] for r_ in results], dtype=np.float64)
                              if n_sl else np.zeros((0,))).astype(np.float32)
@@ -395,9 +395,9 @@ def build_cloud(config, region):
         # identity.
         c_hist, _ = np.histogram(c_theta_h2s, bins=grid.LOG10_F45_EDGES, weights=w_uniform_h2s)
 
-        grid_h2s = (x_marginal[:, :, None] * f45_marginal_h2s[None, None, :]).astype(np.float32)
+        grid_h2s = (xi_marginal[:, :, None] * f45_marginal_h2s[None, None, :]).astype(np.float32)
         on_grid_frac_h2s = float(f45_marginal_h2s.sum())
-        mass_outside_h2s = (np.clip(1.0 - x_marginal.astype(np.float64).sum(axis=1) * on_grid_frac_h2s,
+        mass_outside_h2s = (np.clip(1.0 - xi_marginal.astype(np.float64).sum(axis=1) * on_grid_frac_h2s,
                                      0.0, 1.0).astype(np.float32)
                              if n_sl else np.zeros((0,), dtype=np.float32))
         on_grid_h2s = (1.0 - mass_outside_h2s).astype(np.float32)
@@ -406,12 +406,12 @@ def build_cloud(config, region):
         # X_MARGINAL restricted to the cloud interval and renormalised,
         # against the freshly built one -- both read above/built above,
         # compared per sightline.
-        max_x_marginal_dev = float("nan")
-        if old_x_marginal is not None and old_x_marginal.shape[0] == n_sl:
+        max_xi_marginal_dev = float("nan")
+        if old_xi_marginal is not None and old_xi_marginal.shape[0] == n_sl:
             ref = np.stack([
-                sample_cloud.restrict_old_x_marginal(loaded, row, old_x_marginal[row], d_front, d_back)
+                sample_cloud.restrict_old_xi_marginal(loaded, row, old_xi_marginal[row], d_front, d_back)
                 for row in range(n_sl)]) if n_sl else np.zeros((0, n_x))
-            max_x_marginal_dev = float(np.max(np.abs(ref - x_marginal))) if n_sl else 0.0
+            max_xi_marginal_dev = float(np.max(np.abs(ref - xi_marginal))) if n_sl else 0.0
 
         path = p3_path
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -422,11 +422,11 @@ def build_cloud(config, region):
             f.attrs["LOGSIG_STD"] = logsig_std
             f.attrs["D_FRONT_PC"] = float(d_front)
             f.attrs["D_BACK_PC"] = float(d_back)
-            f.create_dataset("LOG10_X_EDGES", data=grid.LOG10_X_EDGES)
+            f.create_dataset("LOG10_X_EDGES", data=grid.LOG10_XI_EDGES)  # stored as LOG10_X_EDGES; the depth fraction ξ grid edges
             f.create_dataset("LOG10_F45_EDGES", data=grid.LOG10_F45_EDGES)
             f.create_dataset("HPX_PIX_256", data=loaded["hpx_pix_256"])
             f.create_dataset("GRID_YSO", data=grid_yso)
-            f.create_dataset("X_MARGINAL", data=x_marginal)
+            f.create_dataset("X_MARGINAL", data=xi_marginal)  # stored as X_MARGINAL; the depth fraction ξ's marginal
             f.create_dataset("MASS_OUTSIDE_YSO", data=mass_outside_yso)
             f.create_dataset("ON_GRID_YSO", data=on_grid_yso)
             f.create_dataset("GRID_H2S", data=grid_h2s)
@@ -465,7 +465,7 @@ def build_cloud(config, region):
             return cov / np.sqrt(vx * vf) if vx > 0 and vf > 0 else float("nan")
 
         row46_corr = _joint_corr(grid_yso[46]) if n_sl > 46 else float("nan")
-        med_col = int(np.argsort(x_marginal.sum(axis=1))[n_sl // 2]) if n_sl else -1
+        med_col = int(np.argsort(xi_marginal.sum(axis=1))[n_sl // 2]) if n_sl else -1
         med_corr = _joint_corr(grid_yso[med_col]) if n_sl else float("nan")
 
 
@@ -482,14 +482,14 @@ def build_cloud(config, region):
                 on_grid_yso_range=(float(on_grid_yso.min()), float(on_grid_yso.max())) if n_sl else (0.0, 0.0),
                 removed_frac_median=float(np.median(removed_frac)) if n_sl else 0.0,
                 removed_frac_max=float(removed_frac.max()) if n_sl else 0.0,
-                x_marginal_max_dev=max_x_marginal_dev,
+                xi_marginal_max_dev=max_xi_marginal_dev,
                 f45_peak=peak_f45, f45_p16=p16_f45, f45_p84=p84_f45,
                 sigma_d_dex=sigma_d, mass_outside_k=float(mo_k),
                 row46_corr=row46_corr, median_col_corr=med_corr,
                 d_front_pc=float(d_front), d_back_pc=float(d_back),
                 on_grid_h2s_range=(float(on_grid_h2s.min()), float(on_grid_h2s.max())) if n_sl else (0.0, 0.0),
                 h2s_f45_p16=h2s_p16_f45, h2s_f45_p84=h2s_p84_f45)
-    return (path, n_sl, mass_outside_yso, removed_frac, max_x_marginal_dev,
+    return (path, n_sl, mass_outside_yso, removed_frac, max_xi_marginal_dev,
             (peak_f45, p16_f45, p84_f45), on_grid_yso, (d_front, d_back))
 
 
@@ -515,7 +515,7 @@ def _rebin_conservative(old_edges, values, new_edges):
 def build_gal(config):
     """Writes P4, `bmstp/shape/gal_shape_survey.hdf5`: the one
     survey-wide GAL grid on the common `LOG10_F45_EDGES` (sec. 5.4
-    "Grain"): a delta at `log10 x = 0` (the whole column) times the
+    "Grain"): a delta at `log10 ξ = 0` (the whole column) times the
     counts law directly in `F_4.5 = S` -- the law's own tabulated range
     (-2.2 to +1.3 dex) sits well inside the common grid, so no per-shape
     margin is needed -- plus the attr `ON_GRID_GAL` (`1 -
@@ -551,7 +551,7 @@ def build_gal(config):
             f.attrs["DENSITY_GAL"] = density_gal
             f.attrs["COSMIC_VARIANCE_DEX"] = _gal_cosmic_variance_dex(config)
             f.attrs["ON_GRID_GAL"] = float(on_grid_gal)
-            f.create_dataset("LOG10_X_EDGES", data=grid.LOG10_X_EDGES)
+            f.create_dataset("LOG10_X_EDGES", data=grid.LOG10_XI_EDGES)  # stored as LOG10_X_EDGES; the depth fraction ξ grid edges
             f.create_dataset("LOG10_F45_EDGES", data=grid.LOG10_F45_EDGES)
             f.create_dataset("GRID", data=h.astype(np.float32))
 

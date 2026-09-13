@@ -27,7 +27,7 @@ cloud's own gas density, `p(u) ~ rho_gas(d(u))^(1/2)` where
 Sigma_YSO ~ Sigma_gas^2 surface law), on the profile's own piecewise-linear
 cells; the far-field tail past the 3-D map's edge (section 1.4) is one
 further cell carrying the residual column, so `u` reaches 1 on every
-sightline. `embedding_and_ridge` returns this density (`u_edges`/`p_u`)
+sightline. `embedding_and_ridge` returns this density (`xi_edges`/`p_u`)
 at the profile's own full resolution -- `bmstp.sample_cloud` calls it
 directly to place the star family's members along the sightline's own
 `(u, d)` segments. `build` writes one product per region, sightline
@@ -503,7 +503,7 @@ def embedding_and_ridge(profile):
     that same scale length -- an analytic stand-in disclosed here, not a
     second placement law.
 
-    Returns a dict of `(n_sl, ...)` arrays: `u_edges` (n_sl, n_cell+1),
+    Returns a dict of `(n_sl, ...)` arrays: `xi_edges` (n_sl, n_cell+1),
     `p_u` (n_sl, n_cell) normalised over u in [0, 1], and `u_median`
     (report, section 6.3's "spread of the per-sightline u medians").
     """
@@ -522,9 +522,9 @@ def embedding_and_ridge(profile):
     # followed by the sightline's total column at u = 1 exactly, so the
     # residual cell closes the support.
     a_edges = np.concatenate([a_cum, a_inf[:, None]], axis=1)      # (n_sl, n_d+1)
-    u_edges = a_edges / a_inf[:, None]
-    u_edges[:, -1] = 1.0
-    u_widths = np.diff(u_edges, axis=1)                            # (n_sl, n_d)
+    xi_edges = a_edges / a_inf[:, None]
+    xi_edges[:, -1] = 1.0
+    u_widths = np.diff(xi_edges, axis=1)                            # (n_sl, n_d)
 
     # the embedding density per unit u (section 6.3): rho_gas^(alpha-1).
     density_raw = rho_full ** (ALPHA_YSO - 1.0)
@@ -539,13 +539,13 @@ def embedding_and_ridge(profile):
     idx = np.clip(np.sum(cdf <= 0.5, axis=1) - 1, 0, n_d - 1)
     cdf_lo = np.take_along_axis(cdf, idx[:, None], axis=1)[:, 0]
     cdf_hi = np.take_along_axis(cdf, (idx + 1)[:, None], axis=1)[:, 0]
-    u_lo = np.take_along_axis(u_edges, idx[:, None], axis=1)[:, 0]
-    u_hi = np.take_along_axis(u_edges, (idx + 1)[:, None], axis=1)[:, 0]
+    u_lo = np.take_along_axis(xi_edges, idx[:, None], axis=1)[:, 0]
+    u_hi = np.take_along_axis(xi_edges, (idx + 1)[:, None], axis=1)[:, 0]
     frac = np.where(cdf_hi > cdf_lo,
                      (0.5 - cdf_lo) / np.maximum(cdf_hi - cdf_lo, 1e-300), 0.0)
     u_median = u_lo + frac * (u_hi - u_lo)
 
-    return dict(u_edges=u_edges, p_u=p_u, u_median=u_median)
+    return dict(xi_edges=xi_edges, p_u=p_u, u_median=u_median)
 
 
 #: The stored embedding profile's own cell count (SPEC_PRIORS.md section
@@ -559,8 +559,8 @@ def embedding_and_ridge(profile):
 N_PROFILE_CELLS = 32
 
 
-def coarsen_profile(u_edges, p_u, n_out):
-    """`(u_edges, p_u)` re-cut to `n_out` equal-mass cells: the new edges
+def coarsen_profile(xi_edges, p_u, n_out):
+    """`(xi_edges, p_u)` re-cut to `n_out` equal-mass cells: the new edges
     are the embedding CDF's own mass quantiles (`i / n_out`), read off the
     piecewise-linear CDF by exact inversion (the same interpolation
     `embedding_and_ridge` uses for the reported median, generalised to
@@ -569,20 +569,20 @@ def coarsen_profile(u_edges, p_u, n_out):
     fixed mass over the new cell's own width -- mass-preserving by
     construction, not a re-fit."""
     n_sl, n_cell = p_u.shape
-    widths = np.diff(u_edges, axis=1)
+    widths = np.diff(xi_edges, axis=1)
     cum = np.concatenate(
         [np.zeros((n_sl, 1)), np.cumsum(p_u * widths, axis=1)], axis=1)
     cum[:, -1] = 1.0
     new_edges = np.empty((n_sl, n_out + 1))
-    new_edges[:, 0] = u_edges[:, 0]
-    new_edges[:, -1] = u_edges[:, -1]
+    new_edges[:, 0] = xi_edges[:, 0]
+    new_edges[:, -1] = xi_edges[:, -1]
     for i in range(1, n_out):
         t = i / n_out
         idx = np.clip(np.sum(cum <= t, axis=1) - 1, 0, n_cell - 1)
         cum_lo = np.take_along_axis(cum, idx[:, None], axis=1)[:, 0]
         cum_hi = np.take_along_axis(cum, (idx + 1)[:, None], axis=1)[:, 0]
-        u_lo = np.take_along_axis(u_edges, idx[:, None], axis=1)[:, 0]
-        u_hi = np.take_along_axis(u_edges, (idx + 1)[:, None], axis=1)[:, 0]
+        u_lo = np.take_along_axis(xi_edges, idx[:, None], axis=1)[:, 0]
+        u_hi = np.take_along_axis(xi_edges, (idx + 1)[:, None], axis=1)[:, 0]
         frac = np.where(cum_hi > cum_lo,
                         (t - cum_lo) / np.maximum(cum_hi - cum_lo, 1e-300), 0.0)
         new_edges[:, i] = u_lo + frac * (u_hi - u_lo)
@@ -670,14 +670,14 @@ def _write_shape_product(path, hpx_pix_256, embed):
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "sightline"
         f.create_dataset("HPX_PIX_256", data=hpx_pix_256)
-        f.create_dataset("U_EDGES", data=embed["u_edges"])
-        f.create_dataset("P_U", data=embed["p_u"])
+        f.create_dataset("U_EDGES", data=embed["xi_edges"])  # stored as U_EDGES; the depth fraction ξ's profile edges
+        f.create_dataset("P_U", data=embed["p_u"])  # stored as P_U; the depth fraction ξ's profile density
 
 
 def build_shape(config, region):
     """Writes one region's `population/yso/prior_yso_sightline` product
     (SPEC_PRIORS.md section 6.3): the embedding shape for every occupied
-    sightline. The stored `u_edges`/`p_u` are the embedding density
+    sightline. The stored `xi_edges`/`p_u` are the embedding density
     coarsened to `N_PROFILE_CELLS` equal-mass cells (`coarsen_profile`);
     the reported median is still read off the full-resolution profile,
     unaffected.
@@ -685,9 +685,9 @@ def build_shape(config, region):
     profile = _load_profile_arrays(config, region)
     sl_pix = profile["hpx_pix_256"]
     embed = embedding_and_ridge(profile)
-    coarse_edges, coarse_p_u = coarsen_profile(embed["u_edges"], embed["p_u"], N_PROFILE_CELLS)
+    coarse_edges, coarse_p_u = coarsen_profile(embed["xi_edges"], embed["p_u"], N_PROFILE_CELLS)
     u_median = embed["u_median"]
-    embed = dict(embed, u_edges=coarse_edges, p_u=coarse_p_u)
+    embed = dict(embed, xi_edges=coarse_edges, p_u=coarse_p_u)
 
     path = config_module.product_path(config, "population", "yso", "prior",
                                        "sightline", region=region)

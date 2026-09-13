@@ -14,14 +14,14 @@ VOCABULARY = (
      "a cataloged source's sky position, with its own sightline column A_s "
      "(the extinction through the whole sightline, in A_K magnitudes) and its "
      "own detection limits"),
-    ("scaled extinction x",
+    ("depth fraction ξ",
      "a / A_s, the extinction in front of an object as a fraction of its "
-     "sightline's column; x <= 1 by definition"),
+     "sightline's column; ξ <= 1 by definition"),
     ("$F_{4.5}$",
      "the object's 4.5 micron flux density, in mJy"),
     ("parameter cell",
-     "one bin of the prior's common grid over (log10 x, log10 $F_{4.5}$): "
-     "1/32 dex in log10 x by 0.1 dex in log10 $F_{4.5}$; every cell has the same area"),
+     "one bin of the prior's common grid over (log10 ξ, log10 $F_{4.5}$): "
+     "1/32 dex in log10 ξ by 0.1 dex in log10 $F_{4.5}$; every cell has the same area"),
     ("sky pixel",
      "one HEALPix nside-512 pixel of the atlas (6.9 arcmin on a side)"),
     ("IRAC footprint",
@@ -33,26 +33,26 @@ VOCABULARY = (
     ("intensity A_C(s)",
      "the prior's sky density of class C at s, per square degree, before the "
      "survey's selection"),
-    ("shape h_C(x, $F_{4.5}$)",
+    ("shape h_C(ξ, $F_{4.5}$)",
      "the prior's density of class C over the parameter plane at s, of unit "
-     "mass, per unit log10 x per unit log10 $F_{4.5}$, that is per dex^2 (an "
-     "interval of log10 x is a dex whether or not x carries a unit)"),
+     "mass, per unit log10 ξ per unit log10 $F_{4.5}$, that is per dex^2 (an "
+     "interval of log10 ξ is a dex whether or not ξ carries a unit)"),
     ("weight factor f_C($F_{4.5}$; s)",
      "the template-weight factor of class C at that flux (1 for a class whose "
      "factors are normalized over its templates)"),
     ("prior density Lambda_C",
-     "Lambda_C(x, $F_{4.5}$; s) = A_C(s) h_C(x, $F_{4.5}$) f_C($F_{4.5}$; s), "
+     "Lambda_C(ξ, $F_{4.5}$; s) = A_C(s) h_C(ξ, $F_{4.5}$) f_C($F_{4.5}$; s), "
      "the density the fitter compares between classes"),
     ("selected",
      "passing the survey's selection at the sky pixel: two of the eight bands "
      "measured above the pixel's limits (the catalog's own condition; also "
      "called cataloged)"),
-    ("measured coordinate r = a_hat / A_beam",
+    ("measured depth fraction ξ̂ = â_s / A_s",
      "the fitted foreground over the sightline's own BEAM-averaged column, rather than "
-     "x's own true pencil column; the column kernel carries a class's shape past the wall "
-     "(log10 r > 0, the array's one-dex padding) into real mass there -- a pencil column "
-     "above the beam mean, never folded back -- so the source page draws it past the x = 1 line; "
-     "the region page's grids are in x itself and end at the wall"),
+     "ξ's own true pencil column; the column kernel carries a class's shape past the edge ξ = 1 "
+     "(log10 ξ̂ > 0, the array's one-dex padding) into real mass there -- a pencil column "
+     "above the beam mean, never folded back -- so the source page draws it past the ξ = 1 line; "
+     "the region page's grids are in ξ itself and end at the edge ξ = 1"),
 )
 
 #: The probability each panel draws, one statement per panel kind.

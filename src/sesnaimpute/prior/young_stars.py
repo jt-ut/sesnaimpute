@@ -259,7 +259,7 @@ def law_count_per_pixel(config, region, pixels):
 
 
 def sightline_lookup(config, region, pixels):
-    """`(u_edges, p_u)` gathered per anchor pixel from its own parent
+    """`(xi_edges, p_u)` gathered per anchor pixel from its own parent
     nside-256 sightline's `prior.yso` shape product (section 6.3). The
     parent is the HEALPix NESTED ancestor, `pixels >> 2` -- no per-
     source lookup needed, since an anchor pixel's own sources are the
@@ -273,8 +273,8 @@ def sightline_lookup(config, region, pixels):
             "%s -- run the 'prior.yso' RUNBOOK line first" % (region, path))
     with h5py.File(path, "r") as f:
         sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
-        u_edges = np.asarray(f["U_EDGES"][:], dtype=np.float64)
-        p_u = np.asarray(f["P_U"][:], dtype=np.float64)
+        xi_edges = np.asarray(f["U_EDGES"][:], dtype=np.float64)  # stored as U_EDGES; the depth fraction ξ's profile edges
+        p_u = np.asarray(f["P_U"][:], dtype=np.float64)  # stored as P_U; the depth fraction ξ's profile density
     order = np.argsort(sl_pix)
     sl_pix_sorted = sl_pix[order]
     parent256 = pixels >> 2
@@ -287,7 +287,7 @@ def sightline_lookup(config, region, pixels):
             "nside-256 sightline is absent from its own prior.yso "
             "product" % region)
     idx = order[capped]
-    return u_edges[idx], p_u[idx]
+    return xi_edges[idx], p_u[idx]
 
 
 # ---------------------------------------------------------------------
@@ -321,15 +321,15 @@ def _weighted_hist(values, weights, edges):
     return counts, faint_overflow, bright_overflow
 
 
-def _pixel_block(config, a_pix_blk, u_edges_blk, p_u_blk, n_young_blk,
+def _pixel_block(config, a_pix_blk, xi_edges_blk, p_u_blk, n_young_blk,
                   mass_grid, mass_weight, ks_abs_1myr, ks_abs_3myr, g_abs_1myr,
                   mu, g_edges, ks_edges):
     """One block's `(N_G_YOUNG, N_KS_YOUNG, N_KS_YOUNG_3MYR)` and the
     1 Myr Ks acceptance pieces, vectorised over every mass and every
     `u`-cell of every pixel in the block at once.
     """
-    u_mid = 0.5 * (u_edges_blk[:, :-1] + u_edges_blk[:, 1:])      # (n_blk, n_u)
-    u_width = np.diff(u_edges_blk, axis=1)                        # (n_blk, n_u)
+    u_mid = 0.5 * (xi_edges_blk[:, :-1] + xi_edges_blk[:, 1:])      # (n_blk, n_u)
+    u_width = np.diff(xi_edges_blk, axis=1)                        # (n_blk, n_u)
     u_mass = p_u_blk * u_width                                    # sums to 1 per row
 
     a_rep = a_pix_blk[:, None] * u_mid                            # (n_blk, n_u)
@@ -379,7 +379,7 @@ def build_region(config, region):
 
     n_young_source_mean = law_count_per_pixel(config, region, pixels) * omega_pix_deg2
     n_young_total = yso.law_area_integral(config, region, pixels) * omega_pix_deg2
-    u_edges, p_u = sightline_lookup(config, region, pixels)
+    xi_edges, p_u = sightline_lookup(config, region, pixels)
 
     mass_grid, mass_weight = mass_grid_and_weight()
     ks_abs_1myr = yso_selection.abs_mag_grid(
@@ -392,7 +392,7 @@ def build_region(config, region):
     starts = list(range(0, n_pix, PIXEL_BLOCK))
     blocks = Parallel(n_jobs=config.n_jobs)(
         delayed(_pixel_block)(
-            config, a_pix[s:s + PIXEL_BLOCK], u_edges[s:s + PIXEL_BLOCK],
+            config, a_pix[s:s + PIXEL_BLOCK], xi_edges[s:s + PIXEL_BLOCK],
             p_u[s:s + PIXEL_BLOCK], n_young_total[s:s + PIXEL_BLOCK],
             mass_grid, mass_weight, ks_abs_1myr, ks_abs_3myr, g_abs_1myr,
             mu, g_edges, ks_edges)

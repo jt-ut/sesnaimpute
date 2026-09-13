@@ -3,8 +3,8 @@ shape", section 3's AGB blend, section 4's PAHC shape; `IMPLEMENTATION.md`
 section 3, the STAR/AGB and PAHC storage rows).
 
 The population is `prior.star_population`'s per-tile point cloud: every
-retained field star carries `U` (the scaled extinction `x = a/A` -- at
-column `A` the star sits at `a = A*U`, so `x = U` exactly) and a class
+retained field star carries `U` (the depth fraction `ξ = a/A` -- at
+column `A` the star sits at `a = A*U`, so `ξ = U` exactly) and a class
 weight (`W_STAR`, `W_AGB`, or the whole `W` for PAHC). The class deposits
 its own weighted `(log10 U, log10 B)` point cloud per tile onto a fixed
 64 x 64 grid (`N_CELLS`), smoothed on `log10 B` at the tile's own
@@ -13,7 +13,7 @@ Silverman bandwidth (Silverman 1986, `h = sigma * n**(-1/6)`,
 
 Shape nodes are a fixed ladder of KERNEL WIDTHS (`SHAPE_WIDTH_LADDER`,
 log-spaced dex values), not columns: node `k` is the same tile's
-`log10 U` histogram smoothed along `log10 x` by `sqrt(h_x**2 + w_k**2)`,
+`log10 U` histogram smoothed along `log10 ξ` by `sqrt(h_x**2 + w_k**2)`,
 NO shift -- the per-source shift and the per-source total width (the
 sub-beam width composed in quadrature with the source's own measurement
 uncertainty and, for Herschel, the field zero point, `Kernel.params`) are
@@ -130,7 +130,7 @@ WIDEN_SIGMAS = 3.0
 _PLANCK_PROVENANCE_CODE = 1
 
 #: The floor `u` (and `x`) values are clipped to before taking `log10`
-#: (a star at exactly zero scaled extinction has no `log10 x`; it falls
+#: (a star at exactly zero depth fraction has no `log10 ξ`; it falls
 #: below the tabulated box and reads as the declared low-`x` tail).
 _LOG_FLOOR = 1.0e-300
 
@@ -249,11 +249,11 @@ def _cic_hist(values_per_axis, weight, centers_per_axis):
 
 
 # ---------------------------------------------------------------------------
-# the class's own raw histogram, per tile -- on log10 x
+# the class's own raw histogram, per tile -- on log10 ξ
 # ---------------------------------------------------------------------------
 
-def class_raw_hist(pop, tile_idx, cls, log_x_centers, b_centers):
-    """The class's one CIC-deposited, unit-mass `(log10 x, log10 B)`
+def class_raw_hist(pop, tile_idx, cls, log_xi_centers, b_centers):
+    """The class's one CIC-deposited, unit-mass `(log10 ξ, log10 B)`
     histogram for one tile (spec sections 2.2/3/4). AGB normalises the
     O-rich and C-rich shapes SEPARATELY on the evolved subset before
     blending by `f_C` (spec section 3), so the blended object -- not
@@ -265,21 +265,21 @@ def class_raw_hist(pop, tile_idx, cls, log_x_centers, b_centers):
     tile = pop["tiles"][tile_idx]
     if cls == "star":
         h = _cic_hist([tile["log10_u"], tile["log10_b"]], tile["w_star"],
-                     [log_x_centers, b_centers])
+                     [log_xi_centers, b_centers])
         total = float(tile["w_star"].sum())
         return h / total if total > 0.0 else h
     if cls == "pahc":
         h = _cic_hist([tile["log10_u"], tile["log10_b_pahc"]], tile["w"],
-                     [log_x_centers, b_centers])
+                     [log_xi_centers, b_centers])
         total = float(tile["w"].sum())
         return h / total if total > 0.0 else h
     if cls == "agb":
         ev = tile["is_evolved"]
         w_ev = tile["w_agb"][ev]
         h_o = _cic_hist([tile["log10_u"][ev], tile["log10_b_agb_o"][ev]], w_ev,
-                       [log_x_centers, b_centers])
+                       [log_xi_centers, b_centers])
         h_c = _cic_hist([tile["log10_u"][ev], tile["log10_b_agb_c"][ev]], w_ev,
-                       [log_x_centers, b_centers])
+                       [log_xi_centers, b_centers])
         t_o, t_c = float(h_o.sum()), float(h_c.sum())
         h_o = h_o / t_o if t_o > 0.0 else h_o
         h_c = h_c / t_c if t_c > 0.0 else h_c
@@ -326,7 +326,7 @@ def class_u_range(pop, cls):
 
 def class_x_b_samples(pop, tile, cls):
     """`(log_u, x_weight, log_b, b_weight)`: the per-star `log10 u` (this
-    class's `log10 x` before any node smoothing) and `log10 B` samples
+    class's `log10 ξ` before any node smoothing) and `log10 B` samples
     and weights the Silverman bandwidth measures for one tile and class
     -- the same population and weights `class_raw_hist` deposits, so the
     bandwidth describes exactly what is smoothed. AGB pools its O-rich
@@ -386,7 +386,7 @@ def tile_class_bandwidths(pop, cls):
     """Per tile: `dict(h_x=..., h_b=..., n_eff=...)` -- Silverman's rule
     applied to the tile's own `log10 u` and `log10 B` samples at the
     class's own weight (`class_x_b_samples`). `n_eff` is measured on the
-    `log10 x` axis's own weight (STAR/PAHC: the one weight column; AGB:
+    `log10 ξ` axis's own weight (STAR/PAHC: the one weight column; AGB:
     the evolved weight before the chemistry split, the tile's own
     effective star count, not the doubled pooled-`B` sample's)."""
     out = []
@@ -398,8 +398,8 @@ def tile_class_bandwidths(pop, cls):
     return out
 
 
-def pahc_raw_hist_for_limit(tile, limit_idx, log_x_centers, b_centers):
-    """PAHC's one CIC-deposited, unit-mass `(log10 x, log10 B)` histogram
+def pahc_raw_hist_for_limit(tile, limit_idx, log_xi_centers, b_centers):
+    """PAHC's one CIC-deposited, unit-mass `(log10 ξ, log10 B)` histogram
     for one tile at one of the population product's eight 8 micron
     completeness-limit grid values: the same whole-population `(log10 u,
     LOG10_B_PAHC)` point cloud `class_raw_hist`'s "pahc" branch deposits,
@@ -407,7 +407,7 @@ def pahc_raw_hist_for_limit(tile, limit_idx, log_x_centers, b_centers):
     probability, `W * P_PAHC[:, limit_idx]` (spec section 4) -- exact per
     limit, no conditional approximation of the per-star weight."""
     w = tile["w"] * tile["p_pahc"][:, limit_idx]
-    h = _cic_hist([tile["log10_u"], tile["log10_b_pahc"]], w, [log_x_centers, b_centers])
+    h = _cic_hist([tile["log10_u"], tile["log10_b_pahc"]], w, [log_xi_centers, b_centers])
     total = float(w.sum())
     return h / total if total > 0.0 else h
 
@@ -424,12 +424,12 @@ def _rel_l1(reference, candidate):
 
 
 def _class_grid(pop, cls, tile_bw, width_ladder):
-    """`(x_edges, b_edges)`: the fixed `N_CELLS`-cell grid per region and
+    """`(xi_edges, b_edges)`: the fixed `N_CELLS`-cell grid per region and
     class (`IMPLEMENTATION.md` section 3) -- the region-wide 0.1-99.9th
     percentile range on `log10 u` and `log10 B` (`class_u_range`,
     `class_b_range`), each widened by `WIDEN_SIGMAS` times the largest
     smoothing width seen on that axis: the ladder's own top entry
-    combined with the largest per-tile Silverman `h_x` for `log10 x`,
+    combined with the largest per-tile Silverman `h_x` for `log10 ξ`,
     the largest per-tile `h_b` alone for `log10 B`."""
     u_lo, u_hi = class_u_range(pop, cls)
     b_lo, b_hi = class_b_range(pop, cls)
@@ -438,13 +438,13 @@ def _class_grid(pop, cls, tile_bw, width_ladder):
     width_x_max = float(np.sqrt(h_x_max ** 2 + float(width_ladder.max()) ** 2))
     x_pad = WIDEN_SIGMAS * width_x_max
     b_pad = WIDEN_SIGMAS * h_b_max
-    x_edges = np.linspace(u_lo - x_pad, u_hi + x_pad, N_CELLS + 1)
+    xi_edges = np.linspace(u_lo - x_pad, u_hi + x_pad, N_CELLS + 1)
     b_edges = np.linspace(b_lo - b_pad, b_hi + b_pad, N_CELLS + 1)
-    return x_edges, b_edges
+    return xi_edges, b_edges
 
 
 # ---------------------------------------------------------------------------
-# the two smoothing operators: log10 B (tile-only) and log10 x (per width
+# the two smoothing operators: log10 B (tile-only) and log10 ξ (per width
 # node, no shift), each one dense (N_CELLS, N_CELLS) matrix.
 # ---------------------------------------------------------------------------
 
@@ -465,7 +465,7 @@ def gaussian_smoothing_matrix(edges, sigma):
 def apply_b_smoothing(m_b, raw):
     """`m_b` applied along the `log10 B` axis (axis 1) of `raw`, `(n_x,
     n_b)`: `log10 B` smoothing does not depend on the shape node, so it
-    is applied once per tile, before the per-node `log10 x` operator
+    is applied once per tile, before the per-node `log10 ξ` operator
     sees the histogram."""
     moved = np.moveaxis(raw, 1, 0)
     shape = moved.shape
@@ -473,20 +473,20 @@ def apply_b_smoothing(m_b, raw):
     return np.moveaxis(out, 0, 1)
 
 
-def _bicubic_reconstruct(coarse, coarse_x_centers, coarse_b_centers,
-                         fine_x_centers, fine_b_centers):
-    """The coarse `(log10 x, log10 B)` density read back at every fine
+def _bicubic_reconstruct(coarse, coarse_xi_centers, coarse_b_centers,
+                         fine_xi_centers, fine_b_centers):
+    """The coarse `(log10 ξ, log10 B)` density read back at every fine
     grid centre by a BICUBIC spline (`scipy.interpolate.RectBivariateSpline`,
     `kx = ky = BICUBIC_DEGREE`) -- the same interpolation `ClassShape`
     evaluates a source at (`_eval_interior`), so the residual report
     measures exactly what a consumer would see."""
-    spline = RectBivariateSpline(coarse_x_centers, coarse_b_centers, coarse,
+    spline = RectBivariateSpline(coarse_xi_centers, coarse_b_centers, coarse,
                                  kx=BICUBIC_DEGREE, ky=BICUBIC_DEGREE)
-    return spline(fine_x_centers, fine_b_centers)
+    return spline(fine_xi_centers, fine_b_centers)
 
 
 # ---------------------------------------------------------------------------
-# analytic tails beyond the tabulated box, two-sided on log10 x as well as
+# analytic tails beyond the tabulated box, two-sided on log10 ξ as well as
 # log10 B
 # ---------------------------------------------------------------------------
 
@@ -556,19 +556,19 @@ def _edge_tail(marginal, grid, cell, side):
     return slope, float(mass)
 
 
-def finalise_node_shape(conv, x_centers, b_centers):
+def finalise_node_shape(conv, xi_centers, b_centers):
     """The stored per-(tile, node[, limit]) product: declares the
-    analytic tail from the convolved array's own `(log10 x, log10 B)`
-    edge marginals, two-sided on `log10 x` as well as `log10 B`, then
+    analytic tail from the convolved array's own `(log10 ξ, log10 B)`
+    edge marginals, two-sided on `log10 ξ` as well as `log10 B`, then
     rescales the interior array so interior mass plus declared tail mass
     sums to exactly one (algebraic acceptance: `DENSITY.sum() == 1 -
     MASS_OUTSIDE`)."""
-    x_cell = float(x_centers[1] - x_centers[0])
+    x_cell = float(xi_centers[1] - xi_centers[0])
     b_cell = float(b_centers[1] - b_centers[0])
     x_marg = conv.sum(axis=1)
     b_marg = conv.sum(axis=0)
-    x_lo_slope, x_lo_mass = _edge_tail(x_marg, x_centers, x_cell, "lo")
-    x_hi_slope, x_hi_mass = _edge_tail(x_marg, x_centers, x_cell, "hi")
+    x_lo_slope, x_lo_mass = _edge_tail(x_marg, xi_centers, x_cell, "lo")
+    x_hi_slope, x_hi_mass = _edge_tail(x_marg, xi_centers, x_cell, "hi")
     b_lo_slope, b_lo_mass = _edge_tail(b_marg, b_centers, b_cell, "lo")
     b_hi_slope, b_hi_mass = _edge_tail(b_marg, b_centers, b_cell, "hi")
     tail_mass = x_lo_mass + x_hi_mass + b_lo_mass + b_hi_mass
@@ -583,42 +583,42 @@ def finalise_node_shape(conv, x_centers, b_centers):
 # one region and class, end to end
 # ---------------------------------------------------------------------------
 
-def _tile_class_densities(density_ds, t, pop, cls, width_ladder, x_edges, x_centers, b_centers,
+def _tile_class_densities(density_ds, t, pop, cls, width_ladder, xi_edges, xi_centers, b_centers,
                           b_edges, h_x, h_b):
     """One tile's own finalised density at every fixed width node (PAHC:
     every width and limit), written straight into the pre-sized HDF5
     dataset one slice at a time. No shift or map-class dependence: every
     node is the tile's own histogram smoothed by `sqrt(h_x**2 + w_k**2)`
-    along `log10 x`."""
+    along `log10 ξ`."""
     m_b = gaussian_smoothing_matrix(b_edges, h_b)
     n_node = width_ladder.size
 
     if cls == "pahc":
         tile = pop["tiles"][t]
         n_limit = pop["limit8_grid_mjy"].size
-        raws = [apply_b_smoothing(m_b, pahc_raw_hist_for_limit(tile, k, x_centers, b_centers))
+        raws = [apply_b_smoothing(m_b, pahc_raw_hist_for_limit(tile, k, xi_centers, b_centers))
                for k in range(n_limit)]
         tail_x_lo, tail_x_hi, tail_b_lo, tail_b_hi, mass_outside = (
             np.empty((n_node, n_limit)) for _ in range(5))
         for j, w_k in enumerate(width_ladder):
             sigma = float(np.sqrt(h_x ** 2 + w_k ** 2))
-            mx = gaussian_smoothing_matrix(x_edges, sigma)
+            mx = gaussian_smoothing_matrix(xi_edges, sigma)
             for k in range(n_limit):
                 conv = mx.dot(raws[k])
-                d, sxlo, sxhi, slo, shi, mo = finalise_node_shape(conv, x_centers, b_centers)
+                d, sxlo, sxhi, slo, shi, mo = finalise_node_shape(conv, xi_centers, b_centers)
                 density_ds[t, j, k] = d
                 tail_x_lo[j, k], tail_x_hi[j, k], tail_b_lo[j, k], tail_b_hi[j, k], \
                     mass_outside[j, k] = sxlo, sxhi, slo, shi, mo
         return tail_x_lo, tail_x_hi, tail_b_lo, tail_b_hi, mass_outside
 
-    raw = apply_b_smoothing(m_b, class_raw_hist(pop, t, cls, x_centers, b_centers))
+    raw = apply_b_smoothing(m_b, class_raw_hist(pop, t, cls, xi_centers, b_centers))
     tail_x_lo, tail_x_hi, tail_b_lo, tail_b_hi, mass_outside = (
         np.empty(n_node) for _ in range(5))
     for j, w_k in enumerate(width_ladder):
         sigma = float(np.sqrt(h_x ** 2 + w_k ** 2))
-        mx = gaussian_smoothing_matrix(x_edges, sigma)
+        mx = gaussian_smoothing_matrix(xi_edges, sigma)
         conv = mx.dot(raw)
-        d, sxlo, sxhi, slo, shi, mo = finalise_node_shape(conv, x_centers, b_centers)
+        d, sxlo, sxhi, slo, shi, mo = finalise_node_shape(conv, xi_centers, b_centers)
         density_ds[t, j] = d
         tail_x_lo[j], tail_x_hi[j], tail_b_lo[j], tail_b_hi[j], mass_outside[j] = (
             sxlo, sxhi, slo, shi, mo)
@@ -626,15 +626,15 @@ def _tile_class_densities(density_ds, t, pop, cls, width_ladder, x_edges, x_cent
 
 
 def _write_region_class_streaming(config, region, cls, pop, n_tile, map_classes, width_ladder,
-                                  x_edges, b_edges, tile_bw, n_jobs, st=None):
+                                  xi_edges, b_edges, tile_bw, n_jobs, st=None):
     """The `DENSITY` dataset streamed one batch of tiles at a time
     (`config.n_jobs` tiles' own density arrays resident together, never
     all of `n_tile`); the tail scales and `MASS_OUTSIDE` are assembled as
     ordinary in-memory arrays, negligible next to `DENSITY`."""
     n_node = width_ladder.size
-    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    xi_centers = 0.5 * (xi_edges[:-1] + xi_edges[1:])
     b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
-    grid_shape = (x_centers.size, b_centers.size)
+    grid_shape = (xi_centers.size, b_centers.size)
     path = config_module.product_path(config, "bms", cls, "shape", "tile", region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
@@ -653,7 +653,7 @@ def _write_region_class_streaming(config, region, cls, pop, n_tile, map_classes,
         if cls == "agb":
             f.attrs["F_C"] = pop["f_c"]
         f.create_dataset("SHAPE_NODES", data=width_ladder.astype(np.float64))
-        f.create_dataset("LOG10_X_EDGES", data=x_edges.astype(np.float64))
+        f.create_dataset("LOG10_X_EDGES", data=xi_edges.astype(np.float64))  # stored as LOG10_X_EDGES; the depth fraction ξ grid edges
         f.create_dataset("LOG10_B_EDGES", data=b_edges.astype(np.float64))
         f.create_dataset("TILE_ID", data=np.arange(n_tile, dtype=np.int64))
         f.create_dataset("MAP_CLASS", data=np.array(map_classes, dtype="S8"))
@@ -672,7 +672,7 @@ def _write_region_class_streaming(config, region, cls, pop, n_tile, map_classes,
             batch = range(batch_start, min(batch_start + n_jobs, n_tile))
             batch_results = Parallel(n_jobs=n_jobs, prefer="threads")(
                 delayed(_tile_class_densities)(
-                    density_ds, t, pop, cls, width_ladder, x_edges, x_centers, b_centers,
+                    density_ds, t, pop, cls, width_ladder, xi_edges, xi_centers, b_centers,
                     b_edges, tile_bw[t]["h_x"], tile_bw[t]["h_b"])
                 for t in batch)
             for t, (sxlo, sxhi, slo, shi, mo) in zip(batch, batch_results):
@@ -691,55 +691,55 @@ def _write_region_class_streaming(config, region, cls, pop, n_tile, map_classes,
     return path, (tail_x_lo, tail_x_hi, tail_b_lo, tail_b_hi), mass_outside
 
 
-def _build_width_density(pop, cls, tile_idx, h_x, h_b, w_k, x_edges, b_edges, pahc_limit_idx=0):
-    """One (tile, width)'s convolved, un-finalised `(log10 x, log10 B)`
+def _build_width_density(pop, cls, tile_idx, h_x, h_b, w_k, xi_edges, b_edges, pahc_limit_idx=0):
+    """One (tile, width)'s convolved, un-finalised `(log10 ξ, log10 B)`
     array, built directly at `w_k` on the given grid -- what
     `_tile_class_densities` builds, exposed for the residual reports
     below at an arbitrary width and resolution."""
-    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    xi_centers = 0.5 * (xi_edges[:-1] + xi_edges[1:])
     b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
     if cls == "pahc":
-        raw = pahc_raw_hist_for_limit(pop["tiles"][tile_idx], pahc_limit_idx, x_centers, b_centers)
+        raw = pahc_raw_hist_for_limit(pop["tiles"][tile_idx], pahc_limit_idx, xi_centers, b_centers)
     else:
-        raw = class_raw_hist(pop, tile_idx, cls, x_centers, b_centers)
+        raw = class_raw_hist(pop, tile_idx, cls, xi_centers, b_centers)
     m_b = gaussian_smoothing_matrix(b_edges, h_b)
     raw = apply_b_smoothing(m_b, raw)
     sigma = float(np.sqrt(h_x ** 2 + w_k ** 2))
-    mx = gaussian_smoothing_matrix(x_edges, sigma)
+    mx = gaussian_smoothing_matrix(xi_edges, sigma)
     return mx.dot(raw)
 
 
-def _bicubic_residual_report(pop, cls, tile0_bw, widths, x_edges, b_edges):
+def _bicubic_residual_report(pop, cls, tile0_bw, widths, xi_edges, b_edges):
     """Tile 0's density at each of `widths`, built directly on both the
     region's own `N_CELLS` grid and an `N_CELLS_CHECK` grid spanning the
     same range; the relative L1 error of a bicubic reconstruction of the
     fine grid from the coarse one, one number per width
     (`IMPLEMENTATION.md` section 3, report only, never searched)."""
-    x_edges_fine = np.linspace(x_edges[0], x_edges[-1], N_CELLS_CHECK + 1)
+    xi_edges_fine = np.linspace(xi_edges[0], xi_edges[-1], N_CELLS_CHECK + 1)
     b_edges_fine = np.linspace(b_edges[0], b_edges[-1], N_CELLS_CHECK + 1)
-    x_c = 0.5 * (x_edges[:-1] + x_edges[1:])
+    x_c = 0.5 * (xi_edges[:-1] + xi_edges[1:])
     b_c = 0.5 * (b_edges[:-1] + b_edges[1:])
-    x_c_fine = 0.5 * (x_edges_fine[:-1] + x_edges_fine[1:])
+    x_c_fine = 0.5 * (xi_edges_fine[:-1] + xi_edges_fine[1:])
     b_c_fine = 0.5 * (b_edges_fine[:-1] + b_edges_fine[1:])
     group = N_CELLS_CHECK // N_CELLS
     out = []
     for w in widths:
         coarse = _build_width_density(pop, cls, 0, tile0_bw["h_x"], tile0_bw["h_b"], w,
-                                      x_edges, b_edges)
+                                      xi_edges, b_edges)
         fine = _build_width_density(pop, cls, 0, tile0_bw["h_x"], tile0_bw["h_b"], w,
-                                    x_edges_fine, b_edges_fine)
+                                    xi_edges_fine, b_edges_fine)
         recon = _bicubic_reconstruct(coarse / (group * group), x_c, b_c, x_c_fine, b_c_fine)
         out.append(_rel_l1(fine, recon))
     return out
 
 
-def _width_interp_residual_report(pop, cls, tile0_bw, width_ladder, x_edges, b_edges, density0,
+def _width_interp_residual_report(pop, cls, tile0_bw, width_ladder, xi_edges, b_edges, density0,
                                   widths):
     """The relative L1 between the width blend (`ClassShape.density`'s
     own bracket-and-blend rule) and a direct build, at each of `widths`
     (bracketed in the ladder the same way a read would), tile 0
     (`IMPLEMENTATION.md` section 3, report only, never searched)."""
-    x_c = 0.5 * (x_edges[:-1] + x_edges[1:])
+    x_c = 0.5 * (xi_edges[:-1] + xi_edges[1:])
     b_c = 0.5 * (b_edges[:-1] + b_edges[1:])
     log_widths = np.log(width_ladder)
     out = []
@@ -748,7 +748,7 @@ def _width_interp_residual_report(pop, cls, tile0_bw, width_ladder, x_edges, b_e
         i_lo, t = int(i_lo_arr[0]), float(t_arr[0])
         i_hi = min(i_lo + 1, width_ladder.size - 1)
         direct = _build_width_density(pop, cls, 0, tile0_bw["h_x"], tile0_bw["h_b"], w,
-                                      x_edges, b_edges)
+                                      xi_edges, b_edges)
         direct_density = finalise_node_shape(direct, x_c, b_c)[0].astype(np.float64)
         if cls == "pahc":
             blended = ((1.0 - t) * density0[i_lo, 0].astype(np.float64)
@@ -786,7 +786,7 @@ def build_region_class(config, region, cls, shared, width_ladder, st=None):
     map_classes = shared["map_classes"]
 
     tile_bw = tile_class_bandwidths(pop, cls)
-    x_edges, b_edges = _class_grid(pop, cls, tile_bw, width_ladder)
+    xi_edges, b_edges = _class_grid(pop, cls, tile_bw, width_ladder)
 
     node_idx_moment = int(width_ladder.size // 2)
     node_idx_exact = 0
@@ -808,19 +808,19 @@ def build_region_class(config, region, cls, shared, width_ladder, st=None):
         limit_hi_idx = min(limit_lo_idx + 1, limit_grid.size - 1)
 
     path, tails, mass_outside = _write_region_class_streaming(
-        config, region, cls, pop, n_tile, map_classes, width_ladder, x_edges, b_edges,
+        config, region, cls, pop, n_tile, map_classes, width_ladder, xi_edges, b_edges,
         tile_bw, config.n_jobs, st=st)
 
     with h5py.File(path, "r") as f:
         density0 = f["DENSITY"][0]
 
     report_widths = [float(width_ladder[0]), shared["median_kernel_width"], float(width_ladder[-1])]
-    bicubic_rel_l1 = _bicubic_residual_report(pop, cls, tile_bw[0], report_widths, x_edges, b_edges)
+    bicubic_rel_l1 = _bicubic_residual_report(pop, cls, tile_bw[0], report_widths, xi_edges, b_edges)
     width_interp_rel_l1 = _width_interp_residual_report(
-        pop, cls, tile_bw[0], width_ladder, x_edges, b_edges, density0, report_widths)
+        pop, cls, tile_bw[0], width_ladder, xi_edges, b_edges, density0, report_widths)
 
     return dict(
-        region=region, cls=cls, shape_nodes=width_ladder, x_edges=x_edges, b_edges=b_edges,
+        region=region, cls=cls, shape_nodes=width_ladder, xi_edges=xi_edges, b_edges=b_edges,
         density0=density0, node_idx_moment=node_idx_moment, node_idx_exact=node_idx_exact,
         tail_x_lo=tails[0], tail_x_hi=tails[1], tail_b_lo=tails[2], tail_b_hi=tails[3],
         mass_outside=mass_outside, map_classes=map_classes, n_tile=n_tile,
@@ -871,20 +871,20 @@ class ClassShape(object):
     * D_1 + (1 - w) * D_2`. Each component's own `sigma` is bracketed in
     the width ladder and blended, BICUBIC in `(log10(a/a_col) - mu, log10
     B)` inside the grid, the analytic tail outside on either axis, `a < 0`
-    (or `a == 0`, which has no `log10 x`) mapped to the low-`x` tail or
+    (or `a == 0`, which has no `log10 ξ`) mapped to the low-`x` tail or
     zero. PAHC additionally carries a limit grid (`limit_grid_mjy`): a
     source's own 8 micron limit brackets two of the eight stored limit
     grids and blends between them linearly in `log10` limit -- the four
     (width, limit) corners are evaluated and bilinearly combined, per
     mixture component. Vectorised over sources."""
 
-    def __init__(self, cls, shape_nodes, x_edges, b_edges, density, tail_x_lo, tail_x_hi,
+    def __init__(self, cls, shape_nodes, xi_edges, b_edges, density, tail_x_lo, tail_x_hi,
                  tail_b_lo, tail_b_hi, mass_outside, kern, limit_grid_mjy=None):
         self.cls = cls
         self.shape_nodes = np.asarray(shape_nodes, dtype=np.float64)  # the width ladder
-        self.x_edges = np.asarray(x_edges, dtype=np.float64)  # log10 x
+        self.xi_edges = np.asarray(xi_edges, dtype=np.float64)  # log10 ξ
         self.b_edges = np.asarray(b_edges, dtype=np.float64)  # log10 B
-        self.x_centers = 0.5 * (self.x_edges[:-1] + self.x_edges[1:])
+        self.xi_centers = 0.5 * (self.xi_edges[:-1] + self.xi_edges[1:])
         self.b_centers = 0.5 * (self.b_edges[:-1] + self.b_edges[1:])
         self.density_table = np.asarray(density, dtype=np.float64)
         self.tail_x_lo = np.asarray(tail_x_lo, dtype=np.float64)
@@ -903,7 +903,7 @@ class ClassShape(object):
         self.n_clamp_hi = 0
 
     def _slab(self, tile_idx, node_idx, limit_idx):
-        """The stored `(log10 x, log10 B)` array at one (tile, width[,
+        """The stored `(log10 ξ, log10 B)` array at one (tile, width[,
         limit]) -- `limit_idx` is `None` for STAR/AGB, an integer index
         into the limit grid for PAHC."""
         if limit_idx is None:
@@ -926,7 +926,7 @@ class ClassShape(object):
             n_i = int(node_idx[sel][0])
             l_i = int(limit_idx[sel][0]) if limit_idx is not None else None
             slab = self._slab(t_i, n_i, l_i)
-            spline = RectBivariateSpline(self.x_centers, self.b_centers, slab,
+            spline = RectBivariateSpline(self.xi_centers, self.b_centers, slab,
                                          kx=BICUBIC_DEGREE, ky=BICUBIC_DEGREE)
             out[sel] = spline.ev(log_x[sel], logb[sel])
         # a density cannot be negative; a cubic spline can ring slightly
@@ -937,7 +937,7 @@ class ClassShape(object):
     def _eval_node(self, tile_ids, node_idx, log_x, logb, limit_idx):
         """One width node's (PAHC: one width-and-limit-grid's) value,
         blending the interior bicubic read with the declared analytic
-        tail beyond either `log10 x` edge or either `log10 B` edge
+        tail beyond either `log10 ξ` edge or either `log10 B` edge
         (`finalise_node_shape`). The tail amplitude is read at the
         tabulated grid's own outermost bin CENTRE -- never extrapolated
         past the bicubic fit's own support -- and the exponent is
@@ -946,8 +946,8 @@ class ClassShape(object):
         integrated is the mass `finalise_node_shape` declared as `MASS_
         OUTSIDE`."""
         interior = self._eval_interior(tile_ids, node_idx, log_x, logb, limit_idx)
-        x_lo = log_x < self.x_edges[0]
-        x_hi = log_x > self.x_edges[-1]
+        x_lo = log_x < self.xi_edges[0]
+        x_hi = log_x > self.xi_edges[-1]
         b_lo = logb < self.b_edges[0]
         b_hi = logb > self.b_edges[-1]
         if not (x_lo.any() or x_hi.any() or b_lo.any() or b_hi.any()):
@@ -958,10 +958,10 @@ class ClassShape(object):
         # one-axis-at-a-time tail declarations) -- the OTHER axis's own
         # query value, clipped into the box, is what that axis's
         # amplitude is read at.
-        centre_x = np.where(x_lo, self.x_centers[0], np.where(x_hi, self.x_centers[-1], log_x))
+        centre_x = np.where(x_lo, self.xi_centers[0], np.where(x_hi, self.xi_centers[-1], log_x))
         centre_b = np.where(b_lo, self.b_centers[0], np.where(b_hi, self.b_centers[-1], logb))
         clip_b = np.clip(logb, self.b_edges[0], self.b_edges[-1])
-        clip_x = np.clip(log_x, self.x_edges[0], self.x_edges[-1])
+        clip_x = np.clip(log_x, self.xi_edges[0], self.xi_edges[-1])
         amp_x = self._eval_interior(tile_ids, node_idx, centre_x, clip_b, limit_idx)
         amp_b = self._eval_interior(tile_ids, node_idx, clip_x, centre_b, limit_idx)
         if limit_idx is None:
@@ -982,9 +982,9 @@ class ClassShape(object):
         # in-mask evaluation untouched and makes every discarded one
         # `exp(<=0) <= 1`, finite and harmless.
         out = np.where(x_lo, amp_x * np.exp(np.minimum(
-            txlo * (log_x - self.x_centers[0]), 0.0)), out)
+            txlo * (log_x - self.xi_centers[0]), 0.0)), out)
         out = np.where(x_hi & ~x_lo, amp_x * np.exp(np.minimum(
-            txhi * (log_x - self.x_centers[-1]), 0.0)), out)
+            txhi * (log_x - self.xi_centers[-1]), 0.0)), out)
         out = np.where(b_lo & ~x_lo & ~x_hi, amp_b * np.exp(np.minimum(
             tblo * (logb - self.b_centers[0]), 0.0)), out)
         out = np.where(b_hi & ~x_lo & ~x_hi, amp_b * np.exp(np.minimum(
@@ -1037,7 +1037,7 @@ class ClassShape(object):
         2026-09-06). Each component is read separately
         (`_component_density`: its own shift and width-ladder bracket)
         and the two combined `w * D_1 + (1 - w) * D_2`. `a < 0` mapped to
-        zero (`a == 0`, having no `log10 x`, reads as the declared
+        zero (`a == 0`, having no `log10 ξ`, reads as the declared
         low-`x` tail's own limit)."""
         a = np.asarray(a, dtype=np.float64)
         log10_b = np.asarray(log10_b, dtype=np.float64)
@@ -1046,11 +1046,11 @@ class ClassShape(object):
         ok = a >= 0.0
         x_lin = np.zeros_like(a)
         x_lin[ok] = a[ok] / a_col[ok]
-        # a sentinel far below any tabulated x_edges[0] -- exp() of the
+        # a sentinel far below any tabulated xi_edges[0] -- exp() of the
         # (positive) low-side tail slope times this offset underflows to
         # 0.0 harmlessly, mapping a == 0 to "below x_min".
         log_x_raw = np.where(x_lin > 0.0, np.log10(np.clip(x_lin, _LOG_FLOOR, None)),
-                             self.x_edges[0] - 1.0e3)
+                             self.xi_edges[0] - 1.0e3)
 
         w, mu, sigma = self.kern.mixture(a_col, sigma_col, map_class, zp_sigma_k=zp_sigma_k)
         val_1 = self._component_density(log_x_raw, log10_b, tile_ids, mu[:, 0], sigma[:, 0], f_lim8)
@@ -1060,14 +1060,14 @@ class ClassShape(object):
         return out
 
 
-def _precompute_bicubic_splines(density_table, x_centers, b_centers):
+def _precompute_bicubic_splines(density_table, xi_centers, b_centers):
     """`(tx, ty, coef)`: `RectBivariateSpline` fit ONCE per (tile, rung[,
     limit]) group, here at load time, not per query (`_eval_interior`'s
     old per-call re-fit) -- `prior.callable`'s De Boor kernel needs only
     the knots and coefficients, not scipy's own fitting machinery, at
     read time (owner ruling, 2026-09-06, step C2e). `tx`/`ty` are the
     ONE knot vector every group of this class shares -- a not-a-knot
-    cubic spline's own knots depend only on `x_centers`/`b_centers`'s
+    cubic spline's own knots depend only on `xi_centers`/`b_centers`'s
     positions, never the group's own data (verified: every group of
     STAR, and of PAHC, shares bit-identical knots with every other group
     of the SAME class). `coef` is `(*group_shape, n_cx, n_cy)` float32,
@@ -1079,7 +1079,7 @@ def _precompute_bicubic_splines(density_table, x_centers, b_centers):
     tx = ty = None
     coefs = np.empty((flat.shape[0], n_x, n_b), dtype=np.float32)
     for g in range(flat.shape[0]):
-        sp = RectBivariateSpline(x_centers, b_centers, flat[g],
+        sp = RectBivariateSpline(xi_centers, b_centers, flat[g],
                                  kx=BICUBIC_DEGREE, ky=BICUBIC_DEGREE)
         gtx, gty = sp.get_knots()
         if tx is None:
@@ -1111,7 +1111,7 @@ def read(config, region, cls):
             "run the 'prior.star_shapes' RUNBOOK line first" % (cls, region, path))
     with h5py.File(path, "r") as f:
         shape_nodes = f["SHAPE_NODES"][:]
-        x_edges = f["LOG10_X_EDGES"][:]
+        xi_edges = f["LOG10_X_EDGES"][:]  # stored as LOG10_X_EDGES; the depth fraction ξ grid edges
         b_edges = f["LOG10_B_EDGES"][:]
         density = f["DENSITY"][:]
         tail_x_lo = f["TAIL_X_LO_SCALE"][:]
@@ -1121,10 +1121,10 @@ def read(config, region, cls):
         mass_outside = f["MASS_OUTSIDE"][:]
         limit_grid_mjy = f["LIMIT8_GRID_MJY"][:] if "LIMIT8_GRID_MJY" in f else None
     kern = Kernel.read(config)
-    shape = ClassShape(cls, shape_nodes, x_edges, b_edges, density, tail_x_lo, tail_x_hi,
+    shape = ClassShape(cls, shape_nodes, xi_edges, b_edges, density, tail_x_lo, tail_x_hi,
                        tail_b_lo, tail_b_hi, mass_outside, kern, limit_grid_mjy=limit_grid_mjy)
     shape.spline_tx, shape.spline_ty, shape.spline_coef = _precompute_bicubic_splines(
-        density, shape.x_centers, shape.b_centers)
+        density, shape.xi_centers, shape.b_centers)
     return shape
 
 
@@ -1159,9 +1159,9 @@ def _mean_moment_check(config, region, cls, result):
         density = result["density0"][node_idx, limit_idx]
 
     raw_mean, raw_std = _weighted_mean_std(log_u, w)
-    x_centers = 0.5 * (result["x_edges"][:-1] + result["x_edges"][1:])
+    xi_centers = 0.5 * (result["xi_edges"][:-1] + result["xi_edges"][1:])
     x_marg = density.astype(np.float64).sum(axis=1)
-    node_mean, node_std = _weighted_mean_std(x_centers, x_marg)
+    node_mean, node_std = _weighted_mean_std(xi_centers, x_marg)
 
     mean_dev = abs(node_mean - raw_mean)
     expected_var_growth = h_x0 ** 2 + w_k ** 2
@@ -1178,7 +1178,7 @@ def _grid_centre_exact_check(result):
     duplicated dummy limit) gives `column_grid.bracket` a valid span; the
     query sits exactly on the first of each pair, so the duplicate's
     interpolation weight is always zero."""
-    shape_nodes, x_edges, b_edges = result["shape_nodes"], result["x_edges"], result["b_edges"]
+    shape_nodes, xi_edges, b_edges = result["shape_nodes"], result["xi_edges"], result["b_edges"]
     node_idx = result["node_idx_exact"]
     is_pahc = result["cls"] == "pahc"
     w_k = float(shape_nodes[node_idx])
@@ -1206,12 +1206,12 @@ def _grid_centre_exact_check(result):
         tb_hi = np.full((1, 2), result["tail_b_hi"][0, node_idx])
         mo = np.full((1, 2), result["mass_outside"][0, node_idx])
 
-    shape = ClassShape(result["cls"], shape_nodes_pair, x_edges, b_edges, density_pair,
+    shape = ClassShape(result["cls"], shape_nodes_pair, xi_edges, b_edges, density_pair,
                        tx_lo, tx_hi, tb_lo, tb_hi, mo, _FixedKernel(w_k),
                        limit_grid_mjy=limit_grid_pair)
-    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    xi_centers = 0.5 * (xi_edges[:-1] + xi_edges[1:])
     b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
-    a_query = w_k * (10.0 ** x_centers)
+    a_query = w_k * (10.0 ** xi_centers)
     tile_ids = np.zeros(a_query.size, dtype=np.int64)
     a_col = np.full(a_query.size, w_k)
     sigma_col = np.zeros(a_query.size)
@@ -1235,7 +1235,7 @@ def _pahc_between_check(config, region, result):
     d_lo = result["density0"][node_idx, i_lo]
     d_hi = result["density0"][node_idx, i_hi]
 
-    shape_nodes, x_edges, b_edges = result["shape_nodes"], result["x_edges"], result["b_edges"]
+    shape_nodes, xi_edges, b_edges = result["shape_nodes"], result["xi_edges"], result["b_edges"]
     w_k = float(shape_nodes[node_idx])
     shape_nodes_pair = np.array([w_k, w_k * (1.0 + 1.0e-9)])
     limit_grid_pair = np.array([float(limit_grid[i_lo]), float(limit_grid[i_hi])])
@@ -1253,12 +1253,12 @@ def _pahc_between_check(config, region, result):
     mo = np.stack([np.full((1, 2), result["mass_outside"][0, node_idx, i_lo]),
                    np.full((1, 2), result["mass_outside"][0, node_idx, i_hi])], axis=-1)
 
-    shape = ClassShape("pahc", shape_nodes_pair, x_edges, b_edges, density_pair,
+    shape = ClassShape("pahc", shape_nodes_pair, xi_edges, b_edges, density_pair,
                        tx_lo, tx_hi, tb_lo, tb_hi, mo, _FixedKernel(w_k),
                        limit_grid_mjy=limit_grid_pair)
-    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    xi_centers = 0.5 * (xi_edges[:-1] + xi_edges[1:])
     b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
-    a_query = w_k * (10.0 ** x_centers)
+    a_query = w_k * (10.0 ** xi_centers)
     tile_ids = np.zeros(a_query.size, dtype=np.int64)
     a_col = np.full(a_query.size, w_k)
     sigma_col = np.zeros(a_query.size)
@@ -1309,7 +1309,7 @@ def build(config, regions=None):
                     "t=%.3f, max_violation=%.2e)"
                     % (between["f_lim8_median"], between["limit_lo_mjy"],
                        between["limit_hi_mjy"], between["t_limit"], between["max_violation"]))
-            n_x = result["x_edges"].size - 1
+            n_x = result["xi_edges"].size - 1
             n_b = result["b_edges"].size - 1
             width_labels = ("floor", "median_kernel", "top")
             residual_line = " ".join(

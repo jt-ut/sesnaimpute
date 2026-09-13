@@ -100,12 +100,12 @@ _NO_FOREGROUND_MARKER = "s"
 _CLASS_LABEL = {b"0": "Class 0", b"I": "Class I", b"flat": "flat", b"II": "Class II"}
 
 #: The fine grid this brief's item 2 reads the truncated-mixture median
-#: and interval off (dex, in log10 x or log10 r_p): 0.005 dex, this
+#: and interval off (dex, in log10 ξ or log10 ξi_hat): 0.005 dex, this
 #: brief's own choice.
 _GRID_STEP_DEX = 0.005
-#: `P(T >= a_p)` below this bar: too far past the wall for the kernel to
+#: `P(T >= a_p)` below this bar: too far past the edge ξ = 1 for the kernel to
 #: place credible mass there -- BEYOND THE KERNEL'S REACH (this brief's
-#: item 2), drawn at the wall with an open marker and no interval.
+#: item 2), drawn at the edge ξ = 1 with an open marker and no interval.
 _BEYOND_REACH_P = 0.01
 
 
@@ -170,12 +170,13 @@ def _read_density_rows(config, region):
     return name, a_col, f_lim_50_mjy, a_col_sig, arm, zp_sig, sightline
 
 
-def _read_x_marginal(config, region, sightline_row):
+def _read_xi_marginal(config, region, sightline_row):
     """The median source's own `X_MARGINAL` row (P3, `bmstp.shapes`): the
     YSO `x` marginal at its sightline -- this brief's item 5, the kernel
     validation's own `x_member` distribution."""
     path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
     with h5py.File(path, "r") as f:
+        # stored as X_MARGINAL; the depth fraction ξ's marginal
         return np.asarray(f["X_MARGINAL"][int(sightline_row)], dtype=np.float64)
 
 
@@ -194,41 +195,41 @@ _BISECT_ITERS = 60
 
 
 def _mixture_cdf(z, w, mean0, mean1, sigma0, sigma1):
-    """`P(log10 x <= z)`, the untruncated two-component mixture CDF, in
+    """`P(log10 ξ <= z)`, the untruncated two-component mixture CDF, in
     closed form (`_norm_cdf`, exact `erf`) -- never a grid integral of the
     pdf (see `_position_distribution`'s own docstring for why that broke)."""
     return w * _norm_cdf((z - mean0) / sigma0) + (1.0 - w) * _norm_cdf((z - mean1) / sigma1)
 
 
-def _position_distribution(log10_r_p, w, mu, sigma):
+def _position_distribution(log10_xi_hat, w, mu, sigma):
     """`(median, lo16, hi84, p_reach, beyond_reach)`: the read's own
     picture of a protostar's position in the DISTANCE coordinate (this
-    brief's item 2). `log10 x = log10 r_p - y`, `y` the two-component
+    brief's item 2). `log10 ξ = log10 ξi_hat - y`, `y` the two-component
     cloud-class column kernel mixture in dex (`w`, `mu` (n, 2), `sigma`
     (n, 2), `Kernel.mixture`'s own `exponent=2` reweighting, the star-gas
-    law's own exponent) -- a mixture of Gaussians in `log10 x` itself,
-    mean `log10 r_p - mu_i`, the same `sigma_i`, weight `w_i` / `1 - w_i`.
-    `p_reach = P(log10 x <= 0)` (`T >= a_p`) is the kernel's own
+    law's own exponent) -- a mixture of Gaussians in `log10 ξ` itself,
+    mean `log10 ξi_hat - mu_i`, the same `sigma_i`, weight `w_i` / `1 - w_i`.
+    `p_reach = P(log10 ξ <= 0)` (`T >= a_p`) is the kernel's own
     UNTRUNCATED mass there; `median`/`lo16`/`hi84` are the TRUNCATED
     mixture's own 50%/16%/84% points, `CDF(z) = target * p_reach` INVERTED
     by bisection on the exact closed-form CDF (rule 8: every iteration is
     one array pass over all protostars, no python loop over sources) --
     not a fixed-grid trapezoidal pdf integral: a protostar whose floored
-    `log10 r_p` sits at the array's own low edge can have BOTH kernel
+    `log10 ξi_hat` sits at the array's own low edge can have BOTH kernel
     components' means at or below a finite grid's own edge (a component's
-    mean can itself be more negative than `log10 r_p` when its own `mu` is
+    mean can itself be more negative than `log10 ξi_hat` when its own `mu` is
     positive), so a grid starting there silently integrates less than the
     component's own mass and its cumulative sum never reaches `p_reach` --
     the bisection here has no edge, so it cannot lose mass that way.
     `beyond_reach` marks `p_reach` below this brief's own 0.01 bar."""
-    log10_r_p = np.asarray(log10_r_p, dtype=np.float64)
-    mean0 = log10_r_p - mu[:, 0]
-    mean1 = log10_r_p - mu[:, 1]
+    log10_xi_hat = np.asarray(log10_xi_hat, dtype=np.float64)
+    mean0 = log10_xi_hat - mu[:, 0]
+    mean1 = log10_xi_hat - mu[:, 1]
     sigma0, sigma1 = sigma[:, 0], sigma[:, 1]
     p_reach = w * _norm_cdf(-mean0 / sigma0) + (1.0 - w) * _norm_cdf(-mean1 / sigma1)
 
     # A bracket guaranteed to hold every root: comfortably below both
-    # component means (`CDF` there is ~0) up to the wall itself (`CDF(0)
+    # component means (`CDF` there is ~0) up to the edge ξ = 1 itself (`CDF(0)
     # = p_reach`, at or above every target below).
     span = 20.0 * np.maximum(sigma0, sigma1)
     lo_bracket = np.minimum(mean0, mean1) - span
@@ -250,36 +251,36 @@ def _position_distribution(log10_r_p, w, mu, sigma):
     return median, lo16, hi84, p_reach, beyond_reach
 
 
-def _kernel_validation(log10_r_p, w, mu, sigma, x_marginal, x_centers, beyond_reach):
+def _kernel_validation(log10_xi_hat, w, mu, sigma, xi_marginal, xi_centers, beyond_reach):
     """`(emp_median, emp_p84, pred_median, pred_p84, frac_beyond)`: this
     brief's item 5, the kernel's own prediction for a cloud member's beam
-    ratio -- `log10 r_p = log10 x_member + y`, `x_member` from the
+    ratio -- `log10 ξi_hat = log10 ξ_member + y`, `x_member` from the
     region's median-sightline YSO `x` marginal (`X_MARGINAL`, shared
     across protostars), `y` from each protostar's OWN class kernel (`w`,
-    `mu`, `sigma`) -- against the sample's own empirical `log10 r_p`. The
+    `mu`, `sigma`) -- against the sample's own empirical `log10 ξi_hat`. The
     predicted CDF pools each protostar's own kernel CDF into ONE shared
     function `G` first (rule 8: an (n_proto, n_u) array, averaged over
     protostars), then convolves that one function with the shared
-    `x_marginal` (an (n_z, n_x_centers) array) -- never the full
-    (n_proto, n_x_centers, n_grid) product."""
+    `xi_marginal` (an (n_z, n_xi_centers) array) -- never the full
+    (n_proto, n_xi_centers, n_grid) product."""
     u_grid = np.arange(-3.0, 3.0 + 1e-9, _GRID_STEP_DEX)
     z0 = (u_grid[None, :] - mu[:, 0][:, None]) / sigma[:, 0][:, None]
     z1 = (u_grid[None, :] - mu[:, 1][:, None]) / sigma[:, 1][:, None]
     cdf_y = w[:, None] * _norm_cdf(z0) + (1.0 - w[:, None]) * _norm_cdf(z1)
     g_pooled = cdf_y.mean(axis=0)  # (n_u,): the ensemble-pooled kernel CDF
 
-    total = float(x_marginal.sum())
-    x_marg = x_marginal / total if total > 0.0 else x_marginal
+    total = float(xi_marginal.sum())
+    x_marg = xi_marginal / total if total > 0.0 else xi_marginal
     z_grid = np.arange(-4.0, 2.0 + 1e-9, _GRID_STEP_DEX)
-    offsets = z_grid[:, None] - x_centers[None, :]
+    offsets = z_grid[:, None] - xi_centers[None, :]
     g_vals = np.interp(offsets.ravel(), u_grid, g_pooled, left=0.0, right=1.0).reshape(offsets.shape)
     cdf_pooled = (g_vals * x_marg[None, :]).sum(axis=1)
 
     pred_median = float(np.interp(0.5, cdf_pooled, z_grid))
     pred_p84 = float(np.interp(0.84, cdf_pooled, z_grid))
-    n = log10_r_p.shape[0]
-    emp_median = float(np.median(log10_r_p)) if n else float("nan")
-    emp_p84 = float(np.percentile(log10_r_p, 84.0)) if n else float("nan")
+    n = log10_xi_hat.shape[0]
+    emp_median = float(np.median(log10_xi_hat)) if n else float("nan")
+    emp_p84 = float(np.percentile(log10_xi_hat, 84.0)) if n else float("nan")
     frac_beyond = float(np.mean(beyond_reach)) if beyond_reach.size else float("nan")
     return emp_median, emp_p84, pred_median, pred_p84, frac_beyond
 
@@ -416,12 +417,12 @@ def _likelihood_factor(f45_mjy, e_f45_mjy, measured, a_p, kappa_i2, f_lim_i2, w_
 
 
 def _verdict(config, region, protostars, used, density_row, idx_median):
-    """Section 3's "The verdict": `P(C | r_p, datum, s)` for the six
+    """Section 3's "The verdict": `P(C | xi_hat, datum, s)` for the six
     classes at every used protostar's own matched row, read at the
-    MEASURED cell `log10 r_p` from the blurred grids (`blur=True`). Also
-    returns each protostar's own measured depth fraction `log10 r_p`
-    itself (`log10_xi_hat`, item 4 of the 2026-09-13 owner ruling), the
-    page's own x coordinate; `p(log10 x | r_p, cloud kernel)`'s own
+    MEASURED cell `log10 ξi_hat` from the blurred grids (`blur=True`). Also
+    returns each protostar's own measured depth fraction `log10 ξi_hat`
+    itself (`log10_xii_hat`, item 4 of the 2026-09-13 owner ruling), the
+    page's own x coordinate; `p(log10 ξ | xi_hat, cloud kernel)`'s own
     reach test (`_position_distribution`'s `p_reach`) still marks which
     protostars sit beyond the kernel's reach, but its median/interval no
     longer feed the page (nothing there is drawn from the truncated
@@ -434,10 +435,10 @@ def _verdict(config, region, protostars, used, density_row, idx_median):
     datum, s)` with `Lambda_C` summed over the `x` cells inside the
     support (the same blurred read, marginalised over `x`) against the
     same 4.5 micron likelihood factor `L(b)`; the page places it at the
-    median `log10_xi_hat` of the protostars that do have a fitted
+    median `log10_xii_hat` of the protostars that do have a fitted
     foreground (`_draw_figure`, not here), and it is excluded from the
     kernel check's own empirical/predicted comparison (it carries no
-    fitted `log10 r_p` to check)."""
+    fitted `log10 ξi_hat` to check)."""
     ra_u = protostars["ra_deg"][used]
     av_u = protostars["av_mag"][used]
     f45_u = protostars["f45_mjy"][used]
@@ -450,20 +451,20 @@ def _verdict(config, region, protostars, used, density_row, idx_median):
      sightline_dens) = _read_density_rows(config, region)
     w_i2 = _read_w_dex_i2(config, region)
 
-    # A_beam, sec. 3.2's own extinction column (A_COL_K): r_p = a_p / A_beam.
+    # A_beam, sec. 3.2's own extinction column (A_COL_K): xi_hat = a_p / A_beam.
     a_col_row = a_col_dens[rows_u]
     w_ramp_col = population_selection.law_dense_weight(a_col_row)
     ak_per_av_col = population_selection.ak_per_av(config, w_ramp_col)
     a_p = av_u * ak_per_av_col
-    r_p = a_p / a_col_row
-    # Floored at the array's own low edge (`grid.LOG10_X_EDGES[0]`) purely
+    xi_hat = a_p / a_col_row
+    # Floored at the array's own low edge (`grid.LOG10_XI_EDGES[0]`) purely
     # as a numerical guard against `log10(0)` for a `no_fg` row -- that
-    # row's own `log10_xi_hat` is never drawn at its own value (ruling 2,
+    # row's own `log10_xii_hat` is never drawn at its own value (ruling 2,
     # the page places it at the median of the rows that do have one) and
-    # its `log10_r_p` never enters the kernel check.
-    r_p = np.maximum(r_p, 10.0 ** grid.LOG10_X_EDGES[0])
-    log10_r_p = np.log10(r_p)
-    n_past_wall = int(np.count_nonzero(r_p[~no_fg] > 1.0))
+    # its `log10_xi_hat` never enters the kernel check.
+    xi_hat = np.maximum(xi_hat, 10.0 ** grid.LOG10_XI_EDGES[0])
+    log10_xi_hat = np.log10(xi_hat)
+    n_past_wall = int(np.count_nonzero(xi_hat[~no_fg] > 1.0))
 
     # The cloud-class column kernel at each protostar's own matched row
     # (`Kernel.mixture`'s own fitted within-beam tilt, `Kernel.
@@ -475,21 +476,21 @@ def _verdict(config, region, protostars, used, density_row, idx_median):
     w_mix, mu_mix, sigma_mix = kernel.mixture(
         a_col_row, a_col_sig_dens[rows_u], arm_dens[rows_u], zp_sigma_k=zp_sig_dens[rows_u],
         exponent=kernel.cloud_gamma_herschel)
-    (_, _, _, p_reach, beyond_reach) = _position_distribution(log10_r_p, w_mix, mu_mix, sigma_mix)
+    (_, _, _, p_reach, beyond_reach) = _position_distribution(log10_xi_hat, w_mix, mu_mix, sigma_mix)
     # `no_fg` rows carry no fitted position at all (ruling 2, not merely
     # a "beyond reach" one) and take their own category on the page, drawn
-    # at a placement `_draw_figure` computes from `log10_xi_hat` directly.
+    # at a placement `_draw_figure` computes from `log10_xii_hat` directly.
     beyond_reach = beyond_reach & ~no_fg
 
-    # The verdict's own cell: the MEASURED coordinate `log10 r_p`, which
-    # may sit above the wall in the padding -- clipped only at the
-    # array's own TOP edge (`grid.LOG10_X_EDGES[-1]`, +1.0 dex), never at
-    # the wall (item 3): this is what the fitter reads. `no_fg` rows are
+    # The verdict's own cell: the MEASURED coordinate `log10 ξi_hat`, which
+    # may sit above the edge ξ = 1 in the padding -- clipped only at the
+    # array's own TOP edge (`grid.LOG10_XI_EDGES[-1]`, +1.0 dex), never at
+    # the edge ξ = 1 (item 3): this is what the fitter reads. `no_fg` rows are
     # excluded below (their own P(C|datum,s) is depth-marginalised, not
     # read at this cell), so their cell index is unused, not counted.
-    n_x_full = grid.LOG10_X_EDGES.size - 1
-    cell_x = np.clip(np.searchsorted(grid.LOG10_X_EDGES, log10_r_p, side="right") - 1, 0, n_x_full - 1)
-    n_top_clipped = int(np.count_nonzero(log10_r_p[~no_fg] > grid.LOG10_X_EDGES[-1]))
+    n_x_full = grid.LOG10_XI_EDGES.size - 1
+    cell_x = np.clip(np.searchsorted(grid.LOG10_XI_EDGES, log10_xi_hat, side="right") - 1, 0, n_x_full - 1)
+    n_top_clipped = int(np.count_nonzero(log10_xi_hat[~no_fg] > grid.LOG10_XI_EDGES[-1]))
 
     w_ramp_p = population_selection.law_dense_weight(a_p)
     kappa_i2 = population_selection.kappa_hybrid(config, w_ramp_p)[:, IDX_I2]
@@ -508,7 +509,7 @@ def _verdict(config, region, protostars, used, density_row, idx_median):
         # The DEPTH-MARGINALISED verdict (ruling 2): Lambda_C summed over
         # the x cells inside the support (the same blurred read), never
         # read at one measured cell, since `no_fg` carries no fitted `x`.
-        lambda_support = lambda_verdict[no_fg][:, :, :grid.N_X_SUPPORT, :].sum(axis=2)  # (n_no_fg, 6, n_b)
+        lambda_support = lambda_verdict[no_fg][:, :, :grid.N_XI_SUPPORT, :].sum(axis=2)  # (n_no_fg, 6, n_b)
         numerator_nofg = (lambda_support * l_b[no_fg][:, None, :]).sum(axis=2)  # (n_no_fg, 6)
         denom_nofg = numerator_nofg.sum(axis=1)
         p_c = p_c.copy()
@@ -525,16 +526,16 @@ def _verdict(config, region, protostars, used, density_row, idx_median):
 
     # The kernel validation (item 5): the region's median-sightline YSO x
     # marginal against each protostar's own column kernel, pooled --
-    # `no_fg` rows carry no fitted `log10 r_p` (ruling 2) and are excluded
+    # `no_fg` rows carry no fitted `log10 ξi_hat` (ruling 2) and are excluded
     # from both sides of this check.
-    x_marginal = _read_x_marginal(config, region, sightline_dens[idx_median])
-    x_centers = 0.5 * (grid.LOG10_X_EDGES[:-1] + grid.LOG10_X_EDGES[1:])
+    xi_marginal = _read_xi_marginal(config, region, sightline_dens[idx_median])
+    xi_centers = 0.5 * (grid.LOG10_XI_EDGES[:-1] + grid.LOG10_XI_EDGES[1:])
     fg = ~no_fg
     emp_median, emp_p84, pred_median, pred_p84, frac_beyond = _kernel_validation(
-        log10_r_p[fg], w_mix[fg], mu_mix[fg], sigma_mix[fg], x_marginal, x_centers, beyond_reach[fg])
+        log10_xi_hat[fg], w_mix[fg], mu_mix[fg], sigma_mix[fg], xi_marginal, xi_centers, beyond_reach[fg])
 
     return dict(
-        log10_xi_hat=log10_r_p,
+        log10_xii_hat=log10_xi_hat,
         p_reach=p_reach, beyond_reach=beyond_reach, no_foreground=no_fg,
         y_plot=y_plot, p_yso=p_yso,
         leading_is_yso=leading_is_yso, measured=measured_u, n_past_wall=n_past_wall,
@@ -649,13 +650,13 @@ def build_region(config, region, formats=("png", "pdf")):
               f"n_excluded={n_excluded}")
         print(f"atlas.protostars [{region}] datum: n_measured={n_measured} "
               f"n_not_measured={n_not_measured}")
-        print(f"atlas.protostars [{region}] depth: n_past_wall(r_p>1)={verdict['n_past_wall']} of "
+        print(f"atlas.protostars [{region}] depth: n_past_wall(xi_hat>1)={verdict['n_past_wall']} of "
               f"{n_used} n_beyond_reach={verdict['n_beyond_reach']} A_beam=A_COL_K (sec. 3.2) "
-              f"n_top_clipped(log10 r_p>+1.0)={verdict['n_top_clipped']}")
+              f"n_top_clipped(log10 ξi_hat>+1.0)={verdict['n_top_clipped']}")
         print(f"atlas.protostars [{region}] no fitted foreground (AV_FOREGROUND_MAG<=0): "
               f"n_no_foreground={verdict['n_no_foreground']} of {n_used} "
               f"frac_yso_leads={verdict['frac_yso_leads_no_foreground']:.4g}")
-        print(f"atlas.protostars [{region}] kernel check: empirical log10_r_p "
+        print(f"atlas.protostars [{region}] kernel check: empirical log10_xi_hat "
               f"median={verdict['emp_median']:.4g} p84={verdict['emp_p84']:.4g}; predicted "
               f"median={verdict['pred_median']:.4g} p84={verdict['pred_p84']:.4g}; "
               f"frac_beyond_reach={verdict['frac_beyond_reach']:.4g}")
@@ -730,7 +731,7 @@ def _draw_figure(config, region, protostars, used, excluded, verdict, n_used, n_
     # (non-excluded) protostars, so `cls_matched` must be narrowed the
     # same way to stay aligned with them.
     cls_matched = protostars["cls"][used][~excluded]
-    log10_xi = verdict["log10_xi_hat"]
+    log10_xii = verdict["log10_xii_hat"]
     y_plot = verdict["y_plot"]
     p_yso = verdict["p_yso"]
     measured = verdict["measured"]
@@ -743,14 +744,14 @@ def _draw_figure(config, region, protostars, used, excluded, verdict, n_used, n_
     for cls_val, marker in _CLASS_MARKER.items():
         m_cls_meas = (cls_matched == cls_val) & in_reach & measured
         if np.any(m_cls_meas):
-            sc = ax1.scatter(log10_xi[m_cls_meas], y_plot[m_cls_meas], c=p_yso[m_cls_meas],
+            sc = ax1.scatter(log10_xii[m_cls_meas], y_plot[m_cls_meas], c=p_yso[m_cls_meas],
                               cmap=cmap_pt, norm=norm_pt, marker=marker, s=22,
                               edgecolor="black", linewidths=0.3, zorder=5)
             handles.append(plt.Line2D([0], [0], marker=marker, color="w", markerfacecolor="grey",
                                        markeredgecolor="black", markersize=7, label=_CLASS_LABEL[cls_val]))
     m_not_meas = in_reach & ~measured
     if np.any(m_not_meas):
-        sc = ax1.scatter(log10_xi[m_not_meas], y_plot[m_not_meas], c=p_yso[m_not_meas],
+        sc = ax1.scatter(log10_xii[m_not_meas], y_plot[m_not_meas], c=p_yso[m_not_meas],
                           cmap=cmap_pt, norm=norm_pt, marker=_NOT_MEASURED_MARKER, s=26,
                           edgecolor="black", linewidths=0.3, zorder=5)
         handles.append(plt.Line2D([0], [0], marker=_NOT_MEASURED_MARKER, color="w", markerfacecolor="grey",
@@ -761,7 +762,7 @@ def _draw_figure(config, region, protostars, used, excluded, verdict, n_used, n_
     if np.any(beyond):
         edge_colors = cmap_pt(norm_pt(p_yso[beyond]))
         sc_open = ax1.scatter(
-            log10_xi[beyond], y_plot[beyond], marker=_BEYOND_REACH_MARKER, s=32,
+            log10_xii[beyond], y_plot[beyond], marker=_BEYOND_REACH_MARKER, s=32,
             facecolors="none", edgecolors=edge_colors, linewidths=1.3, zorder=6)
         sc = sc if sc is not None else sc_open
         handles.append(plt.Line2D(
@@ -773,7 +774,7 @@ def _draw_figure(config, region, protostars, used, excluded, verdict, n_used, n_
     # coloured by the depth-marginalised verdict.
     if np.any(no_fg_mask):
         fg = ~no_fg_mask
-        median_xi_fg = float(np.median(log10_xi[fg])) if np.any(fg) else float(np.min(log10_xi))
+        median_xi_fg = float(np.median(log10_xii[fg])) if np.any(fg) else float(np.min(log10_xii))
         edge_colors_nofg = cmap_pt(norm_pt(p_yso[no_fg_mask]))
         x_nofg = np.full(int(np.count_nonzero(no_fg_mask)), median_xi_fg)
         sc_nofg = ax1.scatter(
@@ -783,7 +784,7 @@ def _draw_figure(config, region, protostars, used, excluded, verdict, n_used, n_
         handles.append(plt.Line2D([0], [0], marker=_NO_FOREGROUND_MARKER, color="w", markerfacecolor="none",
                                    markeredgecolor="black", markersize=7, label="no fitted foreground"))
 
-    x_max = min(1.0, max(0.08, float(np.max(log10_xi)) if log10_xi.size else 0.08))
+    x_max = min(1.0, max(0.08, float(np.max(log10_xii)) if log10_xii.size else 0.08))
     ax1.set_xlim(-3.0, x_max)
     ax1.set_xlabel(plot_style.label(r"$\mathbf{log_{10}\,\hat{\xi}}$"), fontsize=LABEL_FONTSIZE)
     ax1.set_ylabel(plot_style.label(r"$\mathbf{log_{10}\,F_{4.5}}$", "mJy"), fontsize=LABEL_FONTSIZE)
