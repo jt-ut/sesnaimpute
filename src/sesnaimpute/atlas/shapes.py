@@ -6,8 +6,10 @@ the two rows' probability statements are `atlas.captions`'s, imported
 and printed on the page, never restated here.
 
 Per region, ONE source: the one at the region's median `A_COL_K`
-(`_select_source`). Six panels per row (GAL, YSO, H2S, STAR, PAHC, AGB),
-sharing ONE pair of axes, `log10 x` (from -3.0 to the median source's own
+(`_select_source`). Row 2 carries the six class panels (GAL, YSO, H2S,
+STAR, PAHC, AGB); row 1 carries ONE panel, the total over classes, in
+the first column, the other five slots empty. Every panel shares ONE
+pair of axes, `log10 x` (from -3.0 to the median source's own
 blurred read's last populated cell, never less than the wall at
 `log10 x = 0`, drawn dashed on every panel, sec. 2, 4.2) and
 `log10 F_4.5` in mJy (sec. 2: one common brightness axis for
@@ -21,19 +23,24 @@ title is the region and what the page is; the median source's own name,
 sightline column `A_s`, arm and distance sit in the caption block
 instead.
 
-Row 1 draws `P(C, cell | s) = Lambda_C(cell) / sum over classes and cells
-of Lambda(cell)`, the joint probability that the source is of class C
-AND lies in that cell, on ONE log colour scale shared by all six panels:
-the class's intensity `A_C(s)` and template weight `f_C` are multiplied
-into the shape before the panels are compared, since a shape alone (unit
-mass) cannot be compared across classes whose intensities differ by
-orders of magnitude.
+Row 1 draws `P(cell | s) = sum over classes of Lambda_C(cell) / sum over
+classes and cells of Lambda(cell)`, the probability that the source lies
+in that cell AT ALL, summed over the six classes -- where the prior
+expects a source at this position -- on the same log colour scale the
+six class panels below would otherwise share: each class's intensity
+`A_C(s)` and template weight `f_C` are multiplied into its shape before
+the classes are summed, since a shape alone (unit mass) cannot be
+compared, or added, across classes whose intensities differ by orders of
+magnitude.
 
 Row 2 draws `P(C | cell, s) = Lambda_C(cell) / sum over classes of
 Lambda(cell)`, the class share of the prior at that cell, on the LINEAR
 0-1 scale, in EVERY cell, with no smoothing, no evidence count and no
 footprint: the one common floor below is what decides what an empty
-cell means.
+cell means. Each class panel is drawn at that share's own colour and an
+opacity set by the six shares' entropy -- solid where the prior decides
+the class, faded to white (the axes' own background) where it is blind,
+every class at the common floor and the six shares equal.
 
 Both rows apply two rules at the read. (1) Support -- `x = a/A_s <= 1` by
 definition, so a cell with `log10 x > 0` is outside the prior's SUPPORT
@@ -54,10 +61,18 @@ padding cell reads the same floor too. The support is
 the same two definitions the fitter's read uses, imported, never
 restated.
 
-The colourbars read `$P(C, x, F_{4.5} \mid s)$` (row 1) and `$P(C \mid x,
-F_{4.5}, s)$` (row 2); the page prints, below the rows, the source's own
-detail line, then `captions.SHAPES_ROW1`, `captions.SHAPES_ROW2` and
-`captions.vocabulary_block()` in full, wrapped to the page width. The
+This page draws the MEASURED depth fraction, the fitter's own
+$\hat\xi$ (owner's ruling): its x-axis title reads `$log_{10}\,\hat\xi$`
+(row 2 only -- row 1's one panel carries no x-axis title) and its
+colourbars read `$P(\hat\xi, F_{4.5} \mid s)$` (row 1, inset at its own
+panel's right edge) and `$P(C \mid \hat\xi, F_{4.5}, s)$` (row 2, its
+scale and position unchanged). `_X_LABEL` and its own colourbar wording
+stay the region page's, in the true depth fraction `x`, until a
+package-wide rename. The page prints, below the rows, in order,
+`captions.SHAPES_ROW1` (the top panel), `captions.SHAPES_ROW2` (the
+class share, its fade rule folded in), `captions.SHAPES_MEASURED` (what
+$\hat\xi$ is and why mass can lie past 1) and the source's own distance
+line -- no vocabulary block. The
 page's height grows by that block at the line pitch matplotlib actually
 sets for it (`_CAPTION_LINE_HEIGHT_IN`, above the nominal
 fontsize * linespacing because of the mathtext lines) plus a top and a
@@ -74,6 +89,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.cm import ScalarMappable
 from matplotlib.colors import LogNorm, Normalize
 
 from sesnaimpute import config as config_module
@@ -107,6 +123,11 @@ CLASS_ORDER = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
 #: rcParam alone.
 _SHARED_Y_LABEL = plot_style.label(r"$\mathbf{log_{10}\,F_{4.5}}$", "mJy")
 _X_LABEL = r"$\mathbf{log_{10}\,x}$"
+#: This page's own x-axis title (owner's ruling, item 3): the page draws
+#: the MEASURED depth fraction the fitter reads, $\hat\xi$, distinct from
+#: `_X_LABEL` above, the region page's true depth fraction -- untouched
+#: until the package-wide rename.
+_X_LABEL_MEASURED = r"$\mathbf{log_{10}\,\hat{\xi}}$"
 
 _ARM_NAME = {0: "Herschel", 1: "Planck"}
 
@@ -120,10 +141,6 @@ _TICK_FONTSIZE = 10
 #: the panel titles, since a reader meets the page here first.
 _TITLE_FONTSIZE = 18
 _SUBTITLE_FONTSIZE = 15
-
-#: The secondary (twiny) decade axis, a supporting readout of `a` in
-#: magnitudes rather than a primary axis label: never below 8 pt.
-_SECONDARY_FONTSIZE = 8
 
 #: The array's own low edge (sec. 2): the panel axis never extends
 #: further left than this.
@@ -369,8 +386,9 @@ def _build_region_data(config, region):
     """Reads the median source's per-class shapes, forms `Lambda_C =
     A_C(s) h_C f_C(F; s)` for every class (sec. 1.1/1.4, module
     docstring) through `lambda_grids`, applies the support rule and common
-    floor at the read, and returns the two rows' probabilities plus the
-    row-1 corner numbers."""
+    floor at the read, and returns the two rows' probabilities, row 1's
+    one total-over-classes panel, row 2's fade opacity, plus the row-1
+    corner numbers."""
     dtab = _read_density_table(config, region)
     idx_median = _select_source(dtab["a_col"])
     on_grid_star, on_grid_agb = _on_grid_star(config, region)
@@ -424,6 +442,21 @@ def _build_region_data(config, region):
     denom = np.where(total_lambda > 0.0, total_lambda, 1.0)
     share = {cls: lam_floored[cls] / denom for cls in CLASS_ORDER}
 
+    # Row 1's one panel (item 1): the total over classes -- exactly the
+    # six `joint` arrays summed, since `P(cell | s) = sum over classes of
+    # Lambda_C(cell) / sum over classes and cells of Lambda(cell)`.
+    joint_total = sum(joint[cls] for cls in CLASS_ORDER)
+
+    # Row 2's fade (item 2): per cell, over the WHOLE array (padding
+    # included), the entropy of the six shares `p_C` and the opacity it
+    # sets -- 1 where one class takes all, 0 where the six shares are
+    # equal (every class at the common floor, the prior blind there).
+    share_stack = np.stack([share[cls] for cls in CLASS_ORDER])  # (6, n_x, n_b)
+    log_share = np.where(share_stack > 0.0, np.log(share_stack), 0.0)
+    entropy = -(share_stack * log_share).sum(axis=0)
+    alpha = 1.0 - entropy / np.log(6.0)
+    alpha_low_fraction = float((alpha[support, :] < 0.05).sum()) / float(support.sum() * alpha.shape[1])
+
     x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
     b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
     p_total = {}
@@ -435,7 +468,8 @@ def _build_region_data(config, region):
         peak[cls] = (float(x_centers[pi]), float(b_centers[pj]))
 
     return dict(dtab=dtab, idx_median=idx_median, x_edges=x_edges, b_edges=b_edges,
-                support=support, joint=joint, share=share, mass_c=mass_c, on_grid_c=on_grid_c,
+                support=support, joint=joint, share=share, joint_total=joint_total, alpha=alpha,
+                alpha_low_fraction=alpha_low_fraction, mass_c=mass_c, on_grid_c=on_grid_c,
                 intensity_c=intensity_c, p_total=p_total, peak=peak,
                 lambda_floor=lambda_floor, floor_fraction=floor_fraction, log10_x_max=log10_x_max)
 
@@ -456,15 +490,18 @@ def _print_numbers(region, data):
 
 
 def _caption_block(d_r_pc, sigma_pc):
-    """The page's raw (unwrapped) caption: the two rows' probability
-    statements, read from `captions` and never restated here
-    (CODING_RULES_BMSTP.md rule 4), plus one distance line -- the
-    median source's name/column/arm moved to the subtitle, and the
-    vocabulary off the page entirely (owner's list). Wrapping and the
-    height it needs are `captions.caption_layout`'s, the one definition
-    this page and `atlas.render`'s own caption strip both call."""
+    """The page's raw (unwrapped) caption, in order: the top-panel
+    statement, the class-share statement (its own fade rule folded in),
+    the measured-depth-fraction line and one distance line -- read from
+    `captions` and never restated here (CODING_RULES_BMSTP.md rule 4)
+    apart from the distance line itself. The median source's name/
+    column/arm sit in the subtitle instead, and the vocabulary is off
+    the page entirely (owner's list). Wrapping and the height it needs
+    are `captions.caption_layout`'s, the one definition this page and
+    `atlas.render`'s own caption strip both call."""
     distance_line = r"region distance $d_r$ = %.0f ± %.0f pc" % (d_r_pc, sigma_pc)
-    return "\n\n".join([captions.SHAPES_ROW1, captions.SHAPES_ROW2, distance_line])
+    return "\n\n".join([captions.SHAPES_ROW1, captions.SHAPES_ROW2, captions.SHAPES_MEASURED,
+                         distance_line])
 
 
 def _draw_figure(config, region, data):
@@ -472,6 +509,7 @@ def _draw_figure(config, region, data):
     dtab, idx_median = data["dtab"], data["idx_median"]
     x_edges, b_edges, support = data["x_edges"], data["b_edges"], data["support"]
     joint, share = data["joint"], data["share"]
+    joint_total, alpha = data["joint_total"], data["alpha"]
     log10_x_max = data["log10_x_max"]
 
     # The source's own name, sightline column and arm move out of the
@@ -511,7 +549,9 @@ def _draw_figure(config, region, data):
     # joint `P(C, cell | s)` over the SUPPORT cells alone (the printed
     # peaks' own range) -- both rows DRAW the whole read's extent
     # (a class's mass past the wall is real under the blur), the colour scale
-    # itself unchanged, so a padding cell simply reads on the same bar.
+    # itself unchanged, so a padding cell simply reads on the same bar. The
+    # one total panel below reads on this same scale, unchanged by the sum
+    # (owner's ruling): a cell whose classes sum past `vmax` simply clips.
     all_vals = np.concatenate([joint[cls][support, :].ravel() for cls in CLASS_ORDER])
     norm1 = LogNorm(vmin=float(all_vals.min()), vmax=float(all_vals.max()))
     norm2 = Normalize(vmin=0.0, vmax=1.0)
@@ -519,71 +559,81 @@ def _draw_figure(config, region, data):
     cmap1.set_bad("white")
     cmap2 = plt.get_cmap("viridis").copy()
     cmap2.set_bad("white")
-    im1 = im2 = None
+    # Row 2's colourbar reads off this `ScalarMappable`, not a drawn image
+    # -- every class panel below is its own RGBA composite (colour AND a
+    # per-cell alpha), not a single `cmap`/`norm` image a colorbar can key
+    # off directly.
+    sm2 = ScalarMappable(norm=norm2, cmap=cmap2)
+    extent = [x_edges[0], x_edges[-1], b_edges[0], b_edges[-1]]
 
-    for i in range(2):
-        y0 = page_h - margin_t - (i + 1) * row_h - i * row_gap
-        for c, cls in enumerate(CLASS_ORDER):
-            x0 = margin_l + c * (shape_w + col_gap)
-            ax = fig.add_axes([x0 / page_w, y0 / page_h, shape_w / page_w, row_h / page_h])
-            extent = [x_edges[0], x_edges[-1], b_edges[0], b_edges[-1]]
-            if i == 0:
-                im1 = ax.imshow(joint[cls].T, origin="lower", aspect="auto",
-                                 extent=extent, cmap=cmap1, norm=norm1)
-            else:
-                im2 = ax.imshow(share[cls].T, origin="lower", aspect="auto",
-                                 extent=extent, cmap=cmap2, norm=norm2)
-            # THE WALL, `log10 x = 0` (`x = 1`), marked on every panel of
-            # both rows -- grey, not white, since the panel's own axis
-            # extends past it into the padding, where the read now draws
-            # real mass and a white line would be
-            # lost against a bright cell there.
-            ax.axvline(_LOG10_X_WALL, color="0.35", lw=0.9, linestyle="--", alpha=0.9)
-            # The panel's own axis: never less than the wall, extended to
-            # the median source's own blurred read's last populated cell
-            # where the column kernel carries mass past it (`_panel_x_max`).
-            ax.set_xlim(_LOG10_X_MIN, log10_x_max)
-            ax.set_xlabel(_X_LABEL, fontsize=_LABEL_FONTSIZE)
-            # The six panels of a row share one brightness axis, so only
-            # the leftmost carries its numbers; repeated on every panel
-            # they overhang the column gap into the panel to the left.
-            ax.tick_params(labelsize=_TICK_FONTSIZE, labelleft=(c == 0))
-            ax.set_xticks(np.array([-3.0, -2.0, -1.0, 0.0]))
-            ax2 = ax.twiny()
-            ax2.set_xlim(ax.get_xlim())
-            log_a_col = np.log10(dtab["a_col"][idx_median])
-            xlim = ax.get_xlim()
-            k_lo = int(np.ceil(xlim[0] + log_a_col))
-            k_hi = int(np.floor(xlim[1] + log_a_col))
-            decades = np.arange(k_lo, k_hi + 1)
-            ax2.set_xticks(decades - log_a_col)
-            ax2.set_xticklabels(["$10^{%d}$" % k for k in decades], fontsize=_SECONDARY_FONTSIZE)
-            ax2.tick_params(length=2, pad=1, labelsize=_SECONDARY_FONTSIZE)
-            if c == 0:
-                # Plain text, not mathtext, and drawn with `ax.text` --
-                # `axes.labelweight` bolds only a `set_xlabel`/`set_ylabel`
-                # Text artist, so the bold here is explicit.
-                ax2.text(1.0, 1.05, plot_style.label("a", "mag"), transform=ax2.transAxes,
-                         fontsize=_SECONDARY_FONTSIZE, fontweight="bold", ha="right", va="bottom")
-            ax.set_title(cls, fontsize=_LABEL_FONTSIZE, pad=18)
-            if c == 0:
-                # Bold as `plot_style.apply_style`'s own `axes.labelweight`
-                # requires -- set as the axes' own ylabel, never a plain
-                # figure text.
-                ax.set_ylabel(_SHARED_Y_LABEL, fontsize=_LABEL_FONTSIZE)
+    # Row 1: ONE panel, column 0 -- the total over classes, where the
+    # prior expects a source at this position (item 1). The other five
+    # slots of the row are empty.
+    y0_row1 = page_h - margin_t - row_h
+    ax1 = fig.add_axes([margin_l / page_w, y0_row1 / page_h, shape_w / page_w, row_h / page_h])
+    im1 = ax1.imshow(joint_total.T, origin="lower", aspect="auto", extent=extent, cmap=cmap1, norm=norm1)
+    ax1.axvline(_LOG10_X_WALL, color="0.35", lw=0.9, linestyle="--", alpha=0.9)
+    ax1.set_xlim(_LOG10_X_MIN, log10_x_max)
+    # No x-axis title on row 1 -- row 2 below carries it; the tick marks
+    # and tick labels, and the y axis, stay.
+    ax1.tick_params(labelsize=_TICK_FONTSIZE, labelleft=True)
+    ax1.set_xticks(np.array([-3.0, -2.0, -1.0, 0.0]))
+    # Left-anchored at the panel's own left edge, not centred over it --
+    # centred, the title (wider than the one narrow panel) would hang off
+    # the page's left edge; left-anchored it runs rightward into the
+    # row's five empty slots instead, where nothing else is drawn.
+    ax1.set_title("where the prior expects a source at this position",
+                  fontsize=_LABEL_FONTSIZE, fontweight="bold", pad=18, loc="left")
+    ax1.set_ylabel(_SHARED_Y_LABEL, fontsize=_LABEL_FONTSIZE)
 
-    cax1_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / page_w,
-                 (page_h - margin_t - row_h) / page_h, 0.22 / page_w, row_h / page_h]
+    # Row 2: the six class panels, each an RGBA composite over the axes'
+    # white background -- colour = viridis at `norm2` of that class's own
+    # share, alpha = the fade `alpha` the six shares' entropy sets (item 2):
+    # solid where the prior decides the class, faded to white where it is
+    # blind (every class at the common floor, the six shares equal).
+    y0_row2 = page_h - margin_t - 2 * row_h - row_gap
+    for c, cls in enumerate(CLASS_ORDER):
+        x0 = margin_l + c * (shape_w + col_gap)
+        ax = fig.add_axes([x0 / page_w, y0_row2 / page_h, shape_w / page_w, row_h / page_h])
+        ax.set_facecolor("white")
+        rgba = cmap2(norm2(share[cls].T))
+        rgba[..., 3] = alpha.T
+        ax.imshow(rgba, origin="lower", aspect="auto", extent=extent)
+        # THE WALL, `log10 x = 0` (`x = 1`), marked on every panel -- grey,
+        # not white, since the panel's own axis extends past it into the
+        # padding, where the read now draws real mass and a white line
+        # would be lost against a bright cell there.
+        ax.axvline(_LOG10_X_WALL, color="0.35", lw=0.9, linestyle="--", alpha=0.9)
+        # The panel's own axis: never less than the wall, extended to
+        # the median source's own blurred read's last populated cell
+        # where the column kernel carries mass past it (`_panel_x_max`).
+        ax.set_xlim(_LOG10_X_MIN, log10_x_max)
+        ax.set_xlabel(_X_LABEL_MEASURED, fontsize=_LABEL_FONTSIZE)
+        # The six panels of a row share one brightness axis, so only
+        # the leftmost carries its numbers; repeated on every panel
+        # they overhang the column gap into the panel to the left.
+        ax.tick_params(labelsize=_TICK_FONTSIZE, labelleft=(c == 0))
+        ax.set_xticks(np.array([-3.0, -2.0, -1.0, 0.0]))
+        ax.set_title(cls, fontsize=_LABEL_FONTSIZE, pad=18)
+        if c == 0:
+            # Bold as `plot_style.apply_style`'s own `axes.labelweight`
+            # requires -- set as the axes' own ylabel, never a plain
+            # figure text.
+            ax.set_ylabel(_SHARED_Y_LABEL, fontsize=_LABEL_FONTSIZE)
+
+    # Row 1's colour bar, inset at its own panel's right edge (item 1),
+    # rather than out past the row's five empty slots.
+    cax1_rect = [(margin_l + shape_w + 0.15) / page_w, y0_row1 / page_h, 0.22 / page_w, row_h / page_h]
     cax1 = fig.add_axes(cax1_rect)
     cbar1 = fig.colorbar(im1, cax=cax1)
-    cbar1.set_label(r"$\mathbf{P(C, x, F_{4.5} \mid s)}$", fontsize=_LABEL_FONTSIZE)
+    cbar1.set_label(r"$\mathbf{P(\hat{\xi}, F_{4.5} \mid s)}$", fontsize=_LABEL_FONTSIZE)
     cbar1.ax.tick_params(labelsize=_TICK_FONTSIZE)
 
     cax2_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / page_w,
                  (AXIS_LABEL_MARGIN_IN + caption_block_h) / page_h, 0.22 / page_w, row_h / page_h]
     cax2 = fig.add_axes(cax2_rect)
-    cbar2 = fig.colorbar(im2, cax=cax2)
-    cbar2.set_label(r"$\mathbf{P(C \mid x, F_{4.5}, s)}$", fontsize=_LABEL_FONTSIZE)
+    cbar2 = fig.colorbar(sm2, cax=cax2)
+    cbar2.set_label(r"$\mathbf{P(C \mid \hat{\xi}, F_{4.5}, s)}$", fontsize=_LABEL_FONTSIZE)
     cbar2.ax.tick_params(labelsize=_TICK_FONTSIZE)
 
     # The title names the page; the median source's own name, column and
@@ -623,7 +673,8 @@ def build_region(config, region):
         on_grid_max = max(data["on_grid_c"].values())
         st.done(paths[0], n_panel=len(CLASS_ORDER), mass_min=mass_min, mass_max=mass_max,
                 on_grid_min=on_grid_min, on_grid_max=on_grid_max,
-                lambda_floor=data["lambda_floor"], floor_cell_fraction=data["floor_fraction"])
+                lambda_floor=data["lambda_floor"], floor_cell_fraction=data["floor_fraction"],
+                alpha_low_fraction=data["alpha_low_fraction"])
     return paths
 
 
