@@ -57,16 +57,21 @@ VOCABULARY = (
 
 #: The probability each panel draws, one statement per panel kind.
 SHAPES_ROW1 = (
-    "Row 1, per class: P(C, cell | s) = Lambda_C(cell) / sum over classes and "
-    "cells of Lambda(cell) -- the prior probability that a source at s is of "
-    "class C AND lies in the parameter cell at (x, F_4.5). One log color "
-    "scale for all six panels, so the panels compare cell by cell.")
+    "Top panel: P(ξ̂, F_4.5 | s) = Σ_C Λ_C(cell) / Σ_C Σ_cells "
+    "Λ_C(cell) -- the prior probability that a source at s lies in the cell, summed "
+    "over the six classes: where the prior expects a source at this position.")
 SHAPES_ROW2 = (
     "Row 2, per class: P(C | cell, s) = Lambda_C(cell) / sum over classes of "
     "Lambda(cell) -- the prior probability that a source at s known to lie in "
-    "the parameter cell at (x, F_4.5) is of class C. Where every class is at "
+    "the parameter cell at (ξ̂, F_4.5) is of class C. Where every class is at "
     "the common floor the six shares are equal: the prior places no source "
-    "there.")
+    "there. Each cell is drawn at opacity 1 − H / ln 6, H the entropy of the six "
+    "shares: solid where the prior decides the class, faded to white where it is "
+    "blind (every class at the common floor, the six shares equal).")
+SHAPES_MEASURED = (
+    "ξ̂ = â_s / A_s, the fitted foreground extinction as a fraction of the "
+    "sightline's column; the shapes are drawn as the fitter reads them, blurred by "
+    "the measured ratio's scatter, which is why mass can lie past ξ̂ = 1.")
 ATLAS_INTRINSIC_CLASS = (
     "Class panels: P(C | sky pixel, brighter at 4.5 micron than the sky "
     "pixel's own 50% completeness limit (the depth grid, from the sources' "
