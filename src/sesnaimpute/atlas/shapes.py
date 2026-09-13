@@ -105,8 +105,8 @@ CLASS_ORDER = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
 #: the math itself is wrapped in `\mathbf{...}` here to read bold too --
 #: the plain unit suffix (e.g. `[mJy]`) still gets its bold from the
 #: rcParam alone.
-_SHARED_Y_LABEL = plot_style.label(r"$\mathbf{\log_{10} F_{4.5}}$", "mJy")
-_X_LABEL = r"$\mathbf{\log_{10} x}$"
+_SHARED_Y_LABEL = plot_style.label(r"$\mathbf{log_{10}\,F_{4.5}}$", "mJy")
+_X_LABEL = r"$\mathbf{log_{10}\,x}$"
 
 _ARM_NAME = {0: "Herschel", 1: "Planck"}
 
@@ -480,7 +480,7 @@ def _draw_figure(config, region, data):
     r = regions_module.REGIONS_BY_NAME[region]
     name_med = dtab["name"][idx_median].decode("utf-8")
     arm_med = _ARM_NAME[int(dtab["arm"][idx_median])]
-    subtitle_text = r"Source: %s ($A_s$ = %.3g mag, %s)" % (name_med, dtab["a_col"][idx_median], arm_med)
+    subtitle_text = r"Source: %s ($\mathbf{A_s}$ = %.3g mag, %s)" % (name_med, dtab["a_col"][idx_median], arm_med)
     caption_text, caption_block_h = captions.caption_layout(
         _caption_block(r.d_r_pc, r.sigma_pc), _CAPTION_CHARS_PER_LINE,
         _CAPTION_LINE_HEIGHT_IN, _CAPTION_TOP_PAD_IN, _CAPTION_BOTTOM_PAD_IN)
