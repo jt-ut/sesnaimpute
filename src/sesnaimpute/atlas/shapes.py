@@ -9,9 +9,9 @@ Per region, ONE source: the one at the region's median `A_COL_K`
 (`_select_source`). Row 2 carries the six class panels (GAL, YSO, H2S,
 STAR, PAHC, AGB); row 1 carries ONE panel, the total over classes, in
 the first column, the other five slots empty. Every panel shares ONE
-pair of axes, `log10 x` (from -3.0 to the median source's own
-blurred read's last populated cell, never less than the wall at
-`log10 x = 0`, drawn dashed on every panel, sec. 2, 4.2) and
+pair of axes, `log10 ξ` (from -3.0 to the median source's own
+blurred read's last populated cell, never less than the edge ξ = 1 at
+`log10 ξ = 0`, drawn dashed on every panel, sec. 2, 4.2) and
 `log10 F_4.5` in mJy (sec. 2: one common brightness axis for
 every class, H2S included since its template conversion folded in at
 the shape stage), the bold y-axis label set as the axes' own ylabel.
@@ -43,7 +43,7 @@ the class, faded to white (the axes' own background) where it is blind,
 every class at the common floor and the six shares equal.
 
 Both rows apply two rules at the read. (1) Support -- `x = a/A_s <= 1` by
-definition, so a cell with `log10 x > 0` is outside the prior's SUPPORT
+definition, so a cell with `log10 ξ > 0` is outside the prior's SUPPORT
 and excluded from both rows' SUMS (the normalisation, the floor search,
 the printed peaks); it is drawn, since the read
 (`fittp.prior_reader`'s own change of variables, `lambda_grids`'s
@@ -57,7 +57,7 @@ Lambda_C(cell; s)`; where every class was below it the six classes read
 exactly equal, one sixth apiece, and the likelihood is left to decide --
 applied over the WHOLE array, support and padding alike, so an empty
 padding cell reads the same floor too. The support is
-`bmstp.grid.N_X_SUPPORT`, the floor `fittp.prior_reader.common_floor` --
+`bmstp.grid.N_XI_SUPPORT`, the floor `fittp.prior_reader.common_floor` --
 the same two definitions the fitter's read uses, imported, never
 restated.
 
@@ -66,7 +66,7 @@ $\hat\xi$ (owner's ruling): its x-axis title reads `$log_{10}\,\hat\xi$`
 (row 2 only -- row 1's one panel carries no x-axis title) and its
 colourbars read `$P(\hat\xi, F_{4.5} \mid s)$` (row 1, inset at its own
 panel's right edge) and `$P(C \mid \hat\xi, F_{4.5}, s)$` (row 2, its
-scale and position unchanged). `_X_LABEL` and its own colourbar wording
+scale and position unchanged). `_XI_LABEL` and its own colourbar wording
 stay the region page's, in the true depth fraction `x`, until a
 package-wide rename. The page prints, below the rows, in order,
 `captions.SHAPES_ROW1` (the top panel), `captions.SHAPES_ROW2` (the
@@ -120,12 +120,12 @@ CLASS_ORDER = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
 #: the plain unit suffix (e.g. `[mJy]`) still gets its bold from the
 #: rcParam alone.
 _SHARED_Y_LABEL = plot_style.label(r"$\mathbf{log_{10}\,F_{4.5}}$", "mJy")
-_X_LABEL = r"$\mathbf{log_{10}\,\xi}$"
+_XI_LABEL = r"$\mathbf{log_{10}\,\xi}$"
 #: This page's own x-axis title (owner's ruling, item 3): the page draws
 #: the MEASURED depth fraction the fitter reads, $\hat\xi$, distinct from
-#: `_X_LABEL` above, the region page's true depth fraction -- untouched
+#: `_XI_LABEL` above, the region page's true depth fraction -- untouched
 #: until the package-wide rename.
-_X_LABEL_MEASURED = r"$\mathbf{log_{10}\,\hat{\xi}}$"
+_XI_LABEL_MEASURED = r"$\mathbf{log_{10}\,\hat{\xi}}$"
 
 _ARM_NAME = {0: "Herschel", 1: "Planck"}
 
@@ -142,13 +142,13 @@ _SUBTITLE_FONTSIZE = 15
 
 #: The array's own low edge (sec. 2): the panel axis never extends
 #: further left than this.
-_LOG10_X_MIN = -3.0
-#: THE WALL (sec. 2, 4.2): drawn dashed on every panel. The panel's own
-#: `log10 x` axis extends at least this far right, and further where the
+_LOG10_XI_MIN = -3.0
+#: THE EDGE ξ = 1 (sec. 2, 4.2): drawn dashed on every panel. The panel's own
+#: `log10 ξ` axis extends at least this far right, and further where the
 #: median source's own blurred read still carries a non-negligible share
 #: of some class's mass past it -- a pencil column above the beam mean,
-#: real in the measured coordinate and never folded back (`_panel_x_max`).
-_LOG10_X_WALL = 0.0
+#: real in the measured coordinate and never folded back (`_panel_xi_max`).
+_LOG10_XI_EDGE = 0.0
 
 #: The caption block's own type size and wrap width, chosen so the
 #: wrapped lines stay well inside the page's usable width at this font
@@ -168,7 +168,7 @@ _CAPTION_TOP_PAD_IN = 0.20
 #: The page's bottom margin: clear white below the block's last line.
 _CAPTION_BOTTOM_PAD_IN = 0.25
 
-#: Room, inches, for row 2's own x-axis tick labels and "log10 x" label
+#: Room, inches, for row 2's own x-axis tick labels and "log10 ξ" label
 #: below its panels, ahead of the caption strip.
 AXIS_LABEL_MARGIN_IN = 0.35
 
@@ -277,7 +277,7 @@ def _prepare_unblurred(reader, rows):
     """`h (n_block, n_x, n_b)` float32: the same construction as
     `prior_reader.prepare` with no column-kernel blur -- each row's own
     raw, STORED grain shape (the DISTANCE coordinate, `x = a / A_s`, zero
-    above the wall by construction, `bmstp.grid`'s module docstring)
+    above the edge ξ = 1 by construction, `bmstp.grid`'s module docstring)
     renormalised to sum to one over the whole array, exactly as
     `prepare` renormalises its own blurred result (`blur=False`, this
     brief's item 1)."""
@@ -302,15 +302,15 @@ def lambda_grids(config, region, rows, blur=True):
 
     `blur=True` (default) reads `h_C` through `prior_reader.prepare`, the
     fitter's own column-kernel blur into the MEASURED coordinate, where a
-    class's mass past `log10 x = 0` is real (a pencil column above the
+    class's mass past `log10 ξ = 0` is real (a pencil column above the
     beam mean, `fittp.prior_reader` module docstring) and stays in the
     returned array, over its WHOLE extent, not folded back or dropped.
     `blur=False` reads the UNBLURRED stored shape instead
-    (`_prepare_unblurred`): the DISTANCE coordinate, zero above the wall
+    (`_prepare_unblurred`): the DISTANCE coordinate, zero above the edge ξ = 1
     by construction, no read-side change of variables. Either way the one
     common floor (below) is applied over the whole array, so an empty
     cell reads the same floor for every class whether or not it sits past
-    the wall."""
+    the edge ξ = 1."""
     rows = np.asarray(rows)
     n_rows = rows.size
     dtab = _read_density_table(config, region)
@@ -345,12 +345,12 @@ def lambda_grids(config, region, rows, blur=True):
     # in the padding by construction, so widening the search there would
     # cost nothing but would break comparability with the fitter's own
     # floor definition).
-    support = np.zeros(grid.LOG10_X_EDGES.size - 1, dtype=bool)
-    support[:grid.N_X_SUPPORT] = True
+    support = np.zeros(grid.LOG10_XI_EDGES.size - 1, dtype=bool)
+    support[:grid.N_XI_SUPPORT] = True
     peaks = [lam[cls][:, support, :].reshape(n_rows, -1).max(axis=1) for cls in CLASS_ORDER]
     lambda_floor = prior_reader.common_floor(peaks)  # (n_rows,)
     # The floor now applies over the WHOLE array:
-    # the padding past the wall is real mass under `blur=True` and is
+    # the padding past the edge ξ = 1 is real mass under `blur=True` and is
     # drawn, not zeroed; only the unblurred read is genuinely zero there,
     # so flooring it simply reproduces the common floor.
     lambda_all = np.stack(
@@ -359,9 +359,9 @@ def lambda_grids(config, region, rows, blur=True):
     return lambda_all, lambda_floor, CLASS_ORDER
 
 
-def _panel_x_max(x_edges, densities):
-    """The panels' own `log10 x` upper limit (module docstring): never
-    less than THE WALL (`_LOG10_X_WALL`), and no further right than the
+def _panel_xi_max(xi_edges, densities):
+    """The panels' own `log10 ξ` upper limit (module docstring): never
+    less than THE EDGE ξ = 1 (`_LOG10_XI_EDGE`), and no further right than the
     last cell, across the six classes' own blurred reads (`_panel_shape`),
     that still carries a non-negligible share of that class's own mass --
     `grid.FLOOR` of its own peak row, the same relative floor the read
@@ -376,8 +376,8 @@ def _panel_x_max(x_edges, densities):
         if above.size:
             last_idx = max(last_idx, int(above[-1]))
     if last_idx < 0:
-        return _LOG10_X_WALL
-    return max(_LOG10_X_WALL, float(x_edges[last_idx + 1]))
+        return _LOG10_XI_EDGE
+    return max(_LOG10_XI_EDGE, float(xi_edges[last_idx + 1]))
 
 
 def _build_region_data(config, region):
@@ -398,27 +398,27 @@ def _build_region_data(config, region):
     on_grid_c = {}
     intensity_c = {}
     densities = []
-    x_edges = b_edges = None
+    xi_edges = b_edges = None
     for cls in CLASS_ORDER:
         density, mass, reader = _panel_shape(config, region, cls, idx_median)
         densities.append(density)
-        x_edges, b_edges = reader.x_edges, reader.b_edges
+        xi_edges, b_edges = reader.xi_edges, reader.b_edges
         intensity_c[cls] = float(dtab[cls][idx_median])
         mass_c[cls] = mass
         on_grid_c[cls] = _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2s,
                                          on_grid_gal, idx_median)
-    log10_x_max = _panel_x_max(x_edges, densities)
+    log10_xi_max = _panel_xi_max(xi_edges, densities)
 
     lambda_all, lambda_floor_rows, class_order = lambda_grids(config, region, np.array([idx_median]))
     lambda_floor = float(lambda_floor_rows[0])
     lam_floored = {cls: lambda_all[0, i] for i, cls in enumerate(class_order)}
 
     # The support: `x = a / A_s <= 1` by definition; the grid's own
-    # `N_X_SUPPORT` is the count of cells inside it (`bmstp.grid`). Both
+    # `N_XI_SUPPORT` is the count of cells inside it (`bmstp.grid`). Both
     # rows below sum over `support` only; the excluded cells are drawn
     # blank (`_draw_figure`).
-    support = np.zeros(x_edges.size - 1, dtype=bool)
-    support[:grid.N_X_SUPPORT] = True
+    support = np.zeros(xi_edges.size - 1, dtype=bool)
+    support[:grid.N_XI_SUPPORT] = True
 
     # A cell is at the common floor for every class exactly where
     # `lambda_grids` clamped it there (`np.maximum` returns the floor
@@ -455,7 +455,7 @@ def _build_region_data(config, region):
     alpha = 1.0 - entropy / np.log(6.0)
     alpha_low_fraction = float((alpha[support, :] < 0.05).sum()) / float(support.sum() * alpha.shape[1])
 
-    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    xi_centers = 0.5 * (xi_edges[:-1] + xi_edges[1:])
     b_centers = 0.5 * (b_edges[:-1] + b_edges[1:])
     p_total = {}
     peak = {}
@@ -463,13 +463,13 @@ def _build_region_data(config, region):
         p_total[cls] = float(joint[cls][support, :].sum())
         masked = np.where(support[:, None], joint[cls], -np.inf)
         pi, pj = np.unravel_index(int(np.argmax(masked)), masked.shape)
-        peak[cls] = (float(x_centers[pi]), float(b_centers[pj]))
+        peak[cls] = (float(xi_centers[pi]), float(b_centers[pj]))
 
-    return dict(dtab=dtab, idx_median=idx_median, x_edges=x_edges, b_edges=b_edges,
+    return dict(dtab=dtab, idx_median=idx_median, xi_edges=xi_edges, b_edges=b_edges,
                 support=support, joint=joint, share=share, joint_total=joint_total, alpha=alpha,
                 alpha_low_fraction=alpha_low_fraction, mass_c=mass_c, on_grid_c=on_grid_c,
                 intensity_c=intensity_c, p_total=p_total, peak=peak,
-                lambda_floor=lambda_floor, floor_fraction=floor_fraction, log10_x_max=log10_x_max)
+                lambda_floor=lambda_floor, floor_fraction=floor_fraction, log10_xi_max=log10_xi_max)
 
 
 def _print_numbers(region, data):
@@ -505,10 +505,10 @@ def _caption_block(d_r_pc, sigma_pc):
 def _draw_figure(config, region, data):
     plot_style.apply_style()
     dtab, idx_median = data["dtab"], data["idx_median"]
-    x_edges, b_edges, support = data["x_edges"], data["b_edges"], data["support"]
+    xi_edges, b_edges, support = data["xi_edges"], data["b_edges"], data["support"]
     joint, share = data["joint"], data["share"]
     joint_total, alpha = data["joint_total"], data["alpha"]
-    log10_x_max = data["log10_x_max"]
+    log10_xi_max = data["log10_xi_max"]
 
     # The source's own name, sightline column and arm move out of the
     # title into the subtitle below it; the distance is the caption
@@ -529,7 +529,7 @@ def _draw_figure(config, region, data):
     margin_l, margin_r, margin_t = 0.75, 1.05, 1.35
     row_gap, col_gap = 0.90, 0.14
     row_h = 3.2
-    # Row 2's own x-axis tick labels and "log10 x" label draw BELOW its
+    # Row 2's own x-axis tick labels and "log10 ξ" label draw BELOW its
     # axes at a fixed offset matplotlib chooses, not inside `row_h` --
     # without this margin the caption strip's own top edge would sit
     # exactly at row 2's bottom edge and those labels would overlap the
@@ -546,7 +546,7 @@ def _draw_figure(config, region, data):
     # Row 1's colour scale (module docstring): a LogNorm set from the
     # joint `P(C, cell | s)` over the SUPPORT cells alone (the printed
     # peaks' own range) -- both rows DRAW the whole read's extent
-    # (a class's mass past the wall is real under the blur), the colour scale
+    # (a class's mass past the edge ξ = 1 is real under the blur), the colour scale
     # itself unchanged, so a padding cell simply reads on the same bar. The
     # one total panel below reads on this same scale, unchanged by the sum
     # (owner's ruling): a cell whose classes sum past `vmax` simply clips.
@@ -562,7 +562,7 @@ def _draw_figure(config, region, data):
     # per-cell alpha), not a single `cmap`/`norm` image a colorbar can key
     # off directly.
     sm2 = ScalarMappable(norm=norm2, cmap=cmap2)
-    extent = [x_edges[0], x_edges[-1], b_edges[0], b_edges[-1]]
+    extent = [xi_edges[0], xi_edges[-1], b_edges[0], b_edges[-1]]
 
     # Row 1: ONE panel, column 0 -- the total over classes, where the
     # prior expects a source at this position (item 1). The other five
@@ -570,8 +570,8 @@ def _draw_figure(config, region, data):
     y0_row1 = page_h - margin_t - row_h
     ax1 = fig.add_axes([margin_l / page_w, y0_row1 / page_h, shape_w / page_w, row_h / page_h])
     im1 = ax1.imshow(joint_total.T, origin="lower", aspect="auto", extent=extent, cmap=cmap1, norm=norm1)
-    ax1.axvline(_LOG10_X_WALL, color="0.35", lw=0.9, linestyle="--", alpha=0.9)
-    ax1.set_xlim(_LOG10_X_MIN, log10_x_max)
+    ax1.axvline(_LOG10_XI_EDGE, color="0.35", lw=0.9, linestyle="--", alpha=0.9)
+    ax1.set_xlim(_LOG10_XI_MIN, log10_xi_max)
     # No x-axis title on row 1 -- row 2 below carries it; the tick marks
     # and tick labels, and the y axis, stay.
     ax1.tick_params(labelsize=_TICK_FONTSIZE, labelleft=True)
@@ -597,16 +597,16 @@ def _draw_figure(config, region, data):
         rgba = cmap2(norm2(share[cls].T))
         rgba[..., 3] = alpha.T
         ax.imshow(rgba, origin="lower", aspect="auto", extent=extent)
-        # THE WALL, `log10 x = 0` (`x = 1`), marked on every panel -- grey,
+        # THE EDGE ξ = 1, `log10 ξ = 0` (`x = 1`), marked on every panel -- grey,
         # not white, since the panel's own axis extends past it into the
         # padding, where the read now draws real mass and a white line
         # would be lost against a bright cell there.
-        ax.axvline(_LOG10_X_WALL, color="0.35", lw=0.9, linestyle="--", alpha=0.9)
-        # The panel's own axis: never less than the wall, extended to
+        ax.axvline(_LOG10_XI_EDGE, color="0.35", lw=0.9, linestyle="--", alpha=0.9)
+        # The panel's own axis: never less than the edge ξ = 1, extended to
         # the median source's own blurred read's last populated cell
-        # where the column kernel carries mass past it (`_panel_x_max`).
-        ax.set_xlim(_LOG10_X_MIN, log10_x_max)
-        ax.set_xlabel(_X_LABEL_MEASURED, fontsize=_LABEL_FONTSIZE)
+        # where the column kernel carries mass past it (`_panel_xi_max`).
+        ax.set_xlim(_LOG10_XI_MIN, log10_xi_max)
+        ax.set_xlabel(_XI_LABEL_MEASURED, fontsize=_LABEL_FONTSIZE)
         # The six panels of a row share one brightness axis, so only
         # the leftmost carries its numbers; repeated on every panel
         # they overhang the column gap into the panel to the left.
@@ -705,7 +705,7 @@ _IDX_I2 = _BAND_KEYS.index("I2")
 def _read_prior_atlas(config, region):
     """P6's per-cell region grids and totals this page needs:
     `N_CAT_CELL_<C>`, `N_CELL_<C>` (both `(128, 110)` on `grid.
-    LOG10_X_EDGES` by `grid.LOG10_F45_EDGES`, `bmstp.atlas`'s module
+    LOG10_XI_EDGES` by `grid.LOG10_F45_EDGES`, `bmstp.atlas`'s module
     docstring), `RATIO_<C>` and `TOTAL_OBSERVED` (the region's own
     total-count check, sec. 9) -- read as the product stores them, no
     recomputation of the sums it already carries (rule 5)."""
@@ -728,10 +728,10 @@ def _region_f_lim_i2_mjy(config, region):
     return float(np.median(f_lim))
 
 
-def _populated_x_range(cell, x_edges):
-    """The `log10 x` range where `cell`'s own row mass (summed over
+def _populated_xi_range(cell, xi_edges):
+    """The `log10 ξ` range where `cell`'s own row mass (summed over
     brightness) exceeds `grid.FLOOR` of its own peak row -- the same
-    relative floor `_panel_x_max` applies at the per-source page."""
+    relative floor `_panel_xi_max` applies at the per-source page."""
     row_mass = cell.sum(axis=1)
     peak = float(row_mass.max())
     if peak <= 0.0:
@@ -739,7 +739,7 @@ def _populated_x_range(cell, x_edges):
     above = np.nonzero(row_mass > grid.FLOOR * peak)[0]
     if not above.size:
         return float("nan"), float("nan")
-    return float(x_edges[above[0]]), float(x_edges[above[-1] + 1])
+    return float(xi_edges[above[0]]), float(xi_edges[above[-1] + 1])
 
 
 def _build_region_prior_data(config, region):
@@ -747,7 +747,7 @@ def _build_region_prior_data(config, region):
     limit -- everything `_draw_region_figure`/`_print_region_numbers`
     need, read once."""
     n_cat_cell, n_cell, ratio, total_observed = _read_prior_atlas(config, region)
-    x_edges, b_edges = grid.LOG10_X_EDGES, grid.LOG10_F45_EDGES
+    xi_edges, b_edges = grid.LOG10_XI_EDGES, grid.LOG10_F45_EDGES
 
     n_cat_total = {c: float(n_cat_cell[c].sum()) for c in CLASS_ORDER}
     n_cell_total = {c: float(n_cell[c].sum()) for c in CLASS_ORDER}
@@ -755,14 +755,14 @@ def _build_region_prior_data(config, region):
         c: (n_cat_total[c] / n_cell_total[c] if n_cell_total[c] > 0 else float("nan"))
         for c in CLASS_ORDER}
 
-    populated_x = {c: _populated_x_range(n_cat_cell[c], x_edges) for c in CLASS_ORDER}
+    populated_x = {c: _populated_xi_range(n_cat_cell[c], xi_edges) for c in CLASS_ORDER}
 
     log10_f_lim_med = float(np.log10(_region_f_lim_i2_mjy(config, region)))
 
     return dict(n_cat_cell=n_cat_cell, n_cell=n_cell, ratio=ratio, total_observed=total_observed,
                 n_cat_total=n_cat_total, n_cell_total=n_cell_total,
                 catalogable_fraction=catalogable_fraction, populated_x=populated_x,
-                x_edges=x_edges, b_edges=b_edges, log10_f_lim_med=log10_f_lim_med)
+                xi_edges=xi_edges, b_edges=b_edges, log10_f_lim_med=log10_f_lim_med)
 
 
 def _print_region_numbers(region, data):
@@ -778,7 +778,7 @@ def _print_region_numbers(region, data):
 
 def _draw_region_figure(config, region, data):
     plot_style.apply_style()
-    x_edges, b_edges = data["x_edges"], data["b_edges"]
+    xi_edges, b_edges = data["xi_edges"], data["b_edges"]
     n_cat_cell = data["n_cat_cell"]
 
     totals_lines = [captions.SHAPES_REGION_TOTALS.format(
@@ -815,7 +815,7 @@ def _draw_region_figure(config, region, data):
     cmap = plt.get_cmap("YlGnBu").copy()
     cmap.set_bad("white")
 
-    extent = [x_edges[0], x_edges[-1], b_edges[0], b_edges[-1]]
+    extent = [xi_edges[0], xi_edges[-1], b_edges[0], b_edges[-1]]
     y0 = page_h - margin_t - row_h
     im = None
     for c, cls in enumerate(CLASS_ORDER):
@@ -824,17 +824,17 @@ def _draw_region_figure(config, region, data):
         arr = np.ma.masked_less_equal(n_cat_cell[cls], 0.0)
         im = ax.imshow(arr.T, origin="lower", aspect="auto", extent=extent, cmap=cmap, norm=norm)
 
-        # THE WALL, drawn on every panel (module docstring): the region
+        # THE EDGE ξ = 1, drawn on every panel (module docstring): the region
         # grid is zero above it (no per-source blur padding at this
         # population level), so the panel's own axis runs only to the
         # wall. The dotted line is the region's median I2 50% limit.
-        ax.axvline(_LOG10_X_WALL, color="0.35", lw=0.9, linestyle="--", alpha=0.9)
+        ax.axvline(_LOG10_XI_EDGE, color="0.35", lw=0.9, linestyle="--", alpha=0.9)
         ax.axhline(data["log10_f_lim_med"], color="0.25", lw=0.8, linestyle=":", alpha=0.9)
 
-        # a hair past the wall, so the wall's own line is drawn inside the
+        # a hair past the edge ξ = 1, so the edge ξ = 1's own line is drawn inside the
         # axes rather than on its spine; the grid is zero beyond it
-        ax.set_xlim(_LOG10_X_MIN, _LOG10_X_WALL + 0.08)
-        ax.set_xlabel(_X_LABEL, fontsize=_LABEL_FONTSIZE)
+        ax.set_xlim(_LOG10_XI_MIN, _LOG10_XI_EDGE + 0.08)
+        ax.set_xlabel(_XI_LABEL, fontsize=_LABEL_FONTSIZE)
         ax.tick_params(labelsize=_TICK_FONTSIZE, labelleft=(c == 0))
         ax.set_xticks(np.array([-3.0, -2.0, -1.0, 0.0]))
         ax.set_title(cls, fontsize=_LABEL_FONTSIZE, pad=18)

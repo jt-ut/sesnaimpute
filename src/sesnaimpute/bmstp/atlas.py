@@ -37,7 +37,7 @@ flux equals the star's `F_4.5`. All six classes enter the total-count check.
 
 Every class's catalogued density is a weighted quadrature over its own whole
 population (sec. 8): alongside it this build writes `N_CAT_CELL_<C>` (128, 110,
-`grid.LOG10_X_EDGES` by `grid.LOG10_F45_EDGES`) for all six classes, each
+`grid.LOG10_XI_EDGES` by `grid.LOG10_F45_EDGES`) for all six classes, each
 class's own expected number of catalogued objects per parameter cell, summing
 over cells to `RATIO_<C> * N_source`; and `N_CELL_<C>` (same axes, sec. 8's
 intrinsic population), the class's UNTHINNED population per cell -- no flux
@@ -539,7 +539,7 @@ def _collapse_star_members(u, flux0, w_star, w_star_only, w_pahc_only):
     to within a cell width far below the completeness roll-off
     (`W_DEX` ~= 0.1-0.3 dex, `catalog.depth_grid`) are one member:
     `log10 u` and `log10 F_4.5` at the cell grid's OWN bin widths
-    (`grid.LOG10_X_EDGES`' 1/32 dex, `grid.D_LOG10_F45`'s 0.1 dex -- the
+    (`grid.LOG10_XI_EDGES`' 1/32 dex, `grid.D_LOG10_F45`'s 0.1 dex -- the
     collapse can never blur two stars the cell grid would itself
     resolve), each of the seven log ratios at `STAR_COLOUR_CELL_DEX`.
 
@@ -564,7 +564,7 @@ def _collapse_star_members(u, flux0, w_star, w_star_only, w_pahc_only):
     tiny = np.finfo(np.float64).tiny
     log10_u = np.log10(np.maximum(u, tiny))
     log10_f45 = np.log10(np.maximum(flux0[:, IDX_I2], tiny))
-    x_width = grid.LOG10_X_EDGES[1] - grid.LOG10_X_EDGES[0]
+    x_width = grid.LOG10_XI_EDGES[1] - grid.LOG10_XI_EDGES[0]
     cell_u = np.floor(log10_u / x_width).astype(np.int64)
     cell_f45 = np.floor(log10_f45 / grid.D_LOG10_F45).astype(np.int64)
     ratio_bands = [k for k in range(N_BANDS) if k != IDX_I2]
@@ -658,7 +658,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     # coefficient `catalogued_fraction`'s `s_member` and the cell grid's
     # own catalogued count per member are built from.
     weight_pix = coverage_in_tile * _HPX512_PIXEL_DEG2
-    n_x, n_b = grid.LOG10_X_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1
+    n_x, n_b = grid.LOG10_XI_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1
 
     # STAR's and PAHC's members collapse into cells BEFORE `catalogued_fraction`
     # (`_collapse_star_members`, rule 9): the SAME collapsed cells serve both
@@ -897,32 +897,32 @@ def _h2s_region_nodes(logsig_mean, logsig_std, giannini_ratios):
 
 
 def _depth_nodes(loaded_profile, sl_row, d_front, d_back):
-    """`(x_centers, weight)`: `N_DEPTH_NODES` equally spaced quantiles of
+    """`(xi_centers, weight)`: `N_DEPTH_NODES` equally spaced quantiles of
     the sightline's own `p(x)` (`sample_cloud.sample_x`'s binned return
-    on `grid.LOG10_X_EDGES`), each node at its own cell centre
+    on `grid.LOG10_XI_EDGES`), each node at its own cell centre
     (`_quantile_nodes_from_weight`), weight `1/N_DEPTH_NODES` -- every
     `p(x)` cell with nonzero mass makes the member set too large for a
     per-sightline build; shared by YSO and H2S (sec. 5.5/5.6, the same
     `p(x)`, no second depth quadrature)."""
     p_x, _mo_x, _removed_frac = sample_cloud.sample_x(loaded_profile, sl_row, d_front, d_back)
     mask = p_x > 0
-    width = grid.LOG10_X_EDGES[1] - grid.LOG10_X_EDGES[0]
-    centers = grid.LOG10_X_EDGES[:-1] + 0.5 * width
+    width = grid.LOG10_XI_EDGES[1] - grid.LOG10_XI_EDGES[0]
+    centers = grid.LOG10_XI_EDGES[:-1] + 0.5 * width
     log10x_nodes = _quantile_nodes_from_weight(centers[mask], p_x[mask], N_DEPTH_NODES)
-    x_centers = 10.0 ** log10x_nodes
-    return x_centers, np.full(N_DEPTH_NODES, 1.0 / N_DEPTH_NODES)
+    xi_centers = 10.0 ** log10x_nodes
+    return xi_centers, np.full(N_DEPTH_NODES, 1.0 / N_DEPTH_NODES)
 
 
-def _combine_with_depth(flux0_pre, w_pre, x_centers, w_depth):
+def _combine_with_depth(flux0_pre, w_pre, xi_centers, w_depth):
     """The product set of a region-wide (template x shift, or brightness
     x ratio) node table with one sightline's own depth nodes:
     `(u, flux0, w)`, built with `np.tile`/`np.repeat`, no Python loop over
     nodes."""
     n_pre = flux0_pre.shape[0]
-    n_d = x_centers.size
+    n_d = xi_centers.size
     flux0_full = np.tile(flux0_pre, (n_d, 1))
     w_full = np.tile(w_pre, n_d) * np.repeat(w_depth, n_pre)
-    u_full = np.repeat(x_centers, n_pre)
+    u_full = np.repeat(xi_centers, n_pre)
     return u_full, flux0_full, w_full
 
 
@@ -937,7 +937,7 @@ def _safe_cell_bin(u, log10_f45, c_m):
     own empty-population branch already uses."""
     total = float(c_m.sum())
     if total <= 0.0:
-        return np.zeros((grid.LOG10_X_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1), dtype=np.float64)
+        return np.zeros((grid.LOG10_XI_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1), dtype=np.float64)
     H, _out = grid.bin(u, log10_f45, c_m)
     return H * total
 
@@ -991,16 +991,16 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
     a_cloud_in_sl = a_col_gas_in_sl * cloud_frac_sl
     density_yso = yso_module.law_count(config, region, a_cloud_in_sl, arm_in_sl)
 
-    x_centers, w_depth = _depth_nodes(loaded_profile, sl_row, d_front, d_back)
+    xi_centers, w_depth = _depth_nodes(loaded_profile, sl_row, d_front, d_back)
 
-    u_yso, flux0_yso_full, w_yso_full = _combine_with_depth(flux0_ts, w_ts, x_centers, w_depth)
+    u_yso, flux0_yso_full, w_yso_full = _combine_with_depth(flux0_ts, w_ts, xi_centers, w_depth)
     frac_yso, frac_yso_bright3, frac_yso_bright10, s_member_yso = catalogued_fraction(
         a_col_in_sl, u_yso, flux0_yso_full, w_yso_full, f_lim_in_sl, width_dex, config,
         weight_pix=density_yso * weight_pix)
     c_m_yso = (w_yso_full / w_yso_full.sum()) * s_member_yso
     n_cat_cell_yso = _safe_cell_bin(u_yso, np.log10(flux0_yso_full[:, IDX_I2]), c_m_yso)
 
-    u_h2s, flux0_h2s_full, w_h2s_full = _combine_with_depth(flux0_br, w_br, x_centers, w_depth)
+    u_h2s, flux0_h2s_full, w_h2s_full = _combine_with_depth(flux0_br, w_br, xi_centers, w_depth)
     weight_h2s = l_of_pix_in_sl * eta_r * density_module.EPS_EXT * weight_pix
     frac_h2s, frac_h2s_bright3, frac_h2s_bright10, s_member_h2s = catalogued_fraction(
         a_col_in_sl, u_h2s, flux0_h2s_full, w_h2s_full, f_lim_in_sl, width_dex, config,
@@ -1369,11 +1369,11 @@ def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve,
     `n_cell.sum() == Sum_pix cell_weight[pix] * out[pix]` if `out` were
     computed with `f0 = -inf` (no cut) -- one extra weighted sum per pixel
     batch, no new loop over pixels or cells."""
-    x_centers = 0.5 * (reader.x_edges[:-1] + reader.x_edges[1:])  # log10 x
+    xi_centers = 0.5 * (reader.xi_edges[:-1] + reader.xi_edges[1:])  # log10 ξ
     b_centers = 0.5 * (reader.b_edges[:-1] + reader.b_edges[1:])  # log10 F_4.5
-    x_lin = 10.0 ** x_centers
+    x_lin = 10.0 ** xi_centers
     f_j = 10.0 ** b_centers  # mJy
-    n_x, n_b = x_centers.size, b_centers.size
+    n_x, n_b = xi_centers.size, b_centers.size
     n_pix = a_col.size
     out = np.empty(n_pix, dtype=np.float64)
     n_cell = np.zeros((n_x, n_b), dtype=np.float64)
@@ -1498,7 +1498,7 @@ def build_region(config, region):
         # own catalogued-count-per-cell grid, accumulated tile by tile
         # (STAR/AGB/PAHC), sightline by sightline (YSO/H2S) and once for
         # GAL, below.
-        n_cat_cell = {c: np.zeros((grid.LOG10_X_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1))
+        n_cat_cell = {c: np.zeros((grid.LOG10_XI_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1))
                       for c in ("STAR", "PAHC", "AGB", "YSO", "H2S")}
 
         def _one(tile_id):
@@ -1833,7 +1833,7 @@ def build_region(config, region):
                 f.create_dataset(f"N_CAT_BRIGHT10_{c}", data=n_cat_bright10[c].astype(np.float32))
             # the region's expected number of catalogued objects per
             # parameter cell (module docstring), summing to `RATIO_<C> *
-            # N_source`; `(128, 110)` on `grid.LOG10_X_EDGES` x
+            # N_source`; `(128, 110)` on `grid.LOG10_XI_EDGES` x
             # `grid.LOG10_F45_EDGES`, the shapes' own axes.
             f.create_dataset("N_CAT_CELL_GAL", data=n_cat_cell["GAL"].astype(np.float32))
             f.create_dataset("N_CAT_CELL_STAR", data=n_cat_cell["STAR"].astype(np.float32))

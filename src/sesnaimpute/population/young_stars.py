@@ -498,7 +498,7 @@ def sightline_lookup(config, region, pixels, d_front, d_back):
     same full resolution `bmstp` uses rather than read off the coarsened
     disk form. The parent is the HEALPix NESTED ancestor, `pixels >> 2`.
 
-    Returns `(u_edges, mass, cloud_frac, removed_frac_report)`: `u_edges`
+    Returns `(xi_edges, mass, cloud_frac, removed_frac_report)`: `xi_edges`
     (n_pix, n_cell+1) and `mass` (n_pix, n_cell, summing to 1 per row)
     are the restricted, renormalised placement; `cloud_frac` (n_pix,) is
     `1 - u(d_front)`, the cloud's own share of each pixel's column (sec.
@@ -517,10 +517,10 @@ def sightline_lookup(config, region, pixels, d_front, d_back):
     d_edges = np.empty((n_sl, n_d + 1), dtype=np.float64)
     d_edges[:, :n_d] = dist_pc[None, :]
     d_edges[:, n_d] = dist_pc[-1] + 2.0 * profile["tail_efold_pc"]
-    u_edges = embed["u_edges"]
+    xi_edges = embed["xi_edges"]
     p_u = embed["p_u"]
 
-    u_lo, u_hi = u_edges[:, :-1], u_edges[:, 1:]
+    u_lo, u_hi = xi_edges[:, :-1], xi_edges[:, 1:]
     d_lo, d_hi = d_edges[:, :-1], d_edges[:, 1:]
     mass, inside_frac, removed_frac = yso.restrict_and_renormalize(
         p_u, u_lo, u_hi, d_lo, d_hi, d_front, d_back)
@@ -532,7 +532,7 @@ def sightline_lookup(config, region, pixels, d_front, d_back):
     j = int(np.clip(np.searchsorted(dist_pc, d_front), 1, n_d - 1))
     d0, d1 = dist_pc[j - 1], dist_pc[j]
     frac = (d_front - d0) / (d1 - d0) if d1 > d0 else 0.0
-    u_front = u_edges[:, j - 1] + frac * (u_edges[:, j] - u_edges[:, j - 1])
+    u_front = xi_edges[:, j - 1] + frac * (xi_edges[:, j] - xi_edges[:, j - 1])
     cloud_frac = 1.0 - u_front
 
     order = np.argsort(sl_pix)
@@ -547,7 +547,7 @@ def sightline_lookup(config, region, pixels, d_front, d_back):
             "nside-256 sightline is absent from its own sky.derived.profile "
             "product" % region)
     idx = order[capped]
-    return u_edges[idx], mass_restricted[idx], cloud_frac[idx], float(np.median(removed_frac))
+    return xi_edges[idx], mass_restricted[idx], cloud_frac[idx], float(np.median(removed_frac))
 
 
 # ---------------------------------------------------------------------
@@ -581,7 +581,7 @@ def _weighted_hist(values, weights, edges):
     return counts, faint_overflow, bright_overflow
 
 
-def _pixel_block(config, a_pix_blk, u_edges_blk, mass_blk, n_young_blk,
+def _pixel_block(config, a_pix_blk, xi_edges_blk, mass_blk, n_young_blk,
                   mass_grid, mass_weight, ks_abs_1myr, g_abs_1myr,
                   mu, g_edges, ks_edges, k_g_diffuse, k_g_dense, r_diffuse, r_dense):
     """One block's `(N_G_YOUNG, N_KS_YOUNG)` and the 1 Myr Ks acceptance
@@ -590,7 +590,7 @@ def _pixel_block(config, a_pix_blk, u_edges_blk, mass_blk, n_young_blk,
     each mass point's own register-template coefficient
     (`_young_star_kg_by_mass`).
     """
-    u_mid = 0.5 * (u_edges_blk[:, :-1] + u_edges_blk[:, 1:])      # (n_blk, n_u)
+    u_mid = 0.5 * (xi_edges_blk[:, :-1] + xi_edges_blk[:, 1:])      # (n_blk, n_u)
     u_mass = mass_blk                                             # sums to 1 per row (cloud-restricted)
 
     a_rep = a_pix_blk[:, None] * u_mid                            # (n_blk, n_u)
@@ -641,7 +641,7 @@ def build_region(config, region):
 
     d_front, d_back = yso.cloud_interval_pc(config, region)
     n_young_source_mean = law_count_per_pixel(config, region, pixels) * omega_pix_deg2
-    u_edges, mass, cloud_frac, removed_frac_report = sightline_lookup(
+    xi_edges, mass, cloud_frac, removed_frac_report = sightline_lookup(
         config, region, pixels, d_front, d_back)
     # the model's own young-star density (sec. 5.5 "Sky density"): the
     # law is quadratic in column, so evaluating it at the CLOUD's own
@@ -670,7 +670,7 @@ def build_region(config, region):
     starts = list(range(0, n_pix, PIXEL_BLOCK))
     blocks = Parallel(n_jobs=config.n_jobs)(
         delayed(_pixel_block)(
-            config, a_pix[s:s + PIXEL_BLOCK], u_edges[s:s + PIXEL_BLOCK],
+            config, a_pix[s:s + PIXEL_BLOCK], xi_edges[s:s + PIXEL_BLOCK],
             mass[s:s + PIXEL_BLOCK], n_young_total[s:s + PIXEL_BLOCK],
             mass_grid, mass_weight, ks_abs_1myr, g_abs_1myr,
             mu, g_edges, ks_edges, k_g_diffuse, k_g_dense, r_diffuse, r_dense)

@@ -39,7 +39,7 @@ The selected fraction
 
     Z_C(s) = Sum_{x,b in shape's own grid} shape(a = A_s . x, log10 B | s) . eps_s(x, b)
 
-is evaluated on the shape's OWN tabulation grid (its ``x_centers`` /
+is evaluated on the shape's OWN tabulation grid (its ``xi_centers`` /
 ``b_centers``, the resolution its density estimate actually carries):
 because the grid point's physical extinction is built as ``A_s . x``
 BY CONSTRUCTION, the ladder coordinate at that grid point is exactly the
@@ -237,7 +237,7 @@ def selection_on_shape_grid(shape, x_ladder, b_grid):
     return _lin_interp_matrix(b_grid, shape.b_centers)
 
 
-def _shift_and_interp_eps(eps_batch, x_ladder, wb, x_centers, mu_shift):
+def _shift_and_interp_eps(eps_batch, x_ladder, wb, xi_centers, mu_shift):
     """`(nb, n_x_shape, n_b_shape)`: a batch's own small selection array
     read onto the shape's grid with the class shape's per-source, per-
     mixture-component shift applied to the SELECTION's query point
@@ -245,12 +245,12 @@ def _shift_and_interp_eps(eps_batch, x_ladder, wb, x_centers, mu_shift):
     eps(x)` and `Sum_x shape(x) . eps(x - mu)` are the same integral
     (a plain relabelling of which factor carries the shift), and only the
     second needs no per-source density read: `x` (linear) is queried at
-    `10**(x_centers - mu_shift)` per source, clamped at the ladder's own
+    `10**(xi_centers - mu_shift)` per source, clamped at the ladder's own
     ends, and interpolated by the SAME two-point linear rule the fixed
     build-time matrix used, now evaluated per source since the query
     point now depends on the source; `log10 B` uses the fixed `wb`
     unchanged (no shift on that axis)."""
-    query_log_x = x_centers[np.newaxis, :] - mu_shift[:, np.newaxis]     # (nb, n_x_shape)
+    query_log_x = xi_centers[np.newaxis, :] - mu_shift[:, np.newaxis]     # (nb, n_x_shape)
     query_x = np.clip(10.0 ** query_log_x, x_ladder[0], x_ladder[-1])
     idx = np.clip(np.searchsorted(x_ladder, query_x) - 1, 0, x_ladder.size - 2)
     span = x_ladder[idx + 1] - x_ladder[idx]
@@ -273,7 +273,7 @@ def _shift_and_interp_eps(eps_batch, x_ladder, wb, x_centers, mu_shift):
 def family_counts(config, region, cls, cond):
     """`(n_c, z_c, shape)`: the count and normaliser for one family class
     at every source. `Z_C(s)` is the dot product, on the shape's own
-    `(x_centers, b_centers)` grid, of the shape's own stored tile array
+    `(xi_centers, b_centers)` grid, of the shape's own stored tile array
     (read exactly at its two bracketing width-ladder nodes and linearly
     blended -- no bicubic) with the source's own small selection array
     (interpolated onto the grid, its query point carrying the per-source
@@ -288,7 +288,7 @@ def family_counts(config, region, cls, cond):
     eps, x_ladder, b_grid = read_family_selection(config, region, cls)
     wb = selection_on_shape_grid(shape, x_ladder, b_grid)
 
-    n_x, n_b = shape.x_centers.size, shape.b_centers.size
+    n_x, n_b = shape.xi_centers.size, shape.b_centers.size
     n_source = cond["n_source"]
     a_col, tile_id = cond["a_col"], cond["tile_id"]
     sigma_col, map_class = cond["sigma_col"], cond["map_class"]
@@ -329,7 +329,7 @@ def family_counts(config, region, cls, cond):
                 d_hi = shape.density_table[tile_b, i_hi]
             dens_k = (1.0 - t_w)[:, None, None] * d_lo + t_w[:, None, None] * d_hi
 
-            eps_grid_k = _shift_and_interp_eps(eps_batch, x_ladder, wb, shape.x_centers, mu_k)
+            eps_grid_k = _shift_and_interp_eps(eps_batch, x_ladder, wb, shape.xi_centers, mu_k)
             weight_k = w_mix[start:stop] if k == 0 else (1.0 - w_mix[start:stop])
             comp_sum += weight_k * (dens_k * eps_grid_k).sum(axis=(1, 2))
         return start, stop, comp_sum

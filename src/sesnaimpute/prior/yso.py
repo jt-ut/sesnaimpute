@@ -27,7 +27,7 @@ own conditional residual.
 The `a`-marginal is the exact expectation of the embedding density's CDF
 `F_u` under the log-normal column kernel (section 1.2), `P(a<=a0|A_s) =
 E_T[F_u(a0/T)]`, `T` a source's own true column, `log10 T ~ Normal(log10
-A_s + mu, sigma)`. `F_u` is piecewise linear on `u_edges`, so this splits
+A_s + mu, sigma)`. `F_u` is piecewise linear on `xi_edges`, so this splits
 over its cells into closed-form terms of the normal CDF `Phi` at the
 cell's own `T`-range boundaries and the log-normal's partial inverse
 moment `E[1/T; T in (lo, hi)]`, no quadrature and no `a`-grid: `YsoShape.
@@ -506,7 +506,7 @@ def embedding_and_ridge(profile):
     that same scale length -- an analytic stand-in disclosed here, not a
     second placement law.
 
-    Returns a dict of `(n_sl, ...)` arrays: `u_edges` (n_sl, n_cell+1),
+    Returns a dict of `(n_sl, ...)` arrays: `xi_edges` (n_sl, n_cell+1),
     `p_u` (n_sl, n_cell) normalised over u in [0, 1], `u_median` (report,
     section 6.3's "spread of the per-sightline u medians"), and the ridge
     `intercept`/`slope`/`resid_sigma`/`corr` (n_sl,).
@@ -530,9 +530,9 @@ def embedding_and_ridge(profile):
     # followed by the sightline's total column at u = 1 exactly, so the
     # residual cell closes the support.
     a_edges = np.concatenate([a_cum, a_inf[:, None]], axis=1)      # (n_sl, n_d+1)
-    u_edges = a_edges / a_inf[:, None]
-    u_edges[:, -1] = 1.0
-    u_widths = np.diff(u_edges, axis=1)                            # (n_sl, n_d)
+    xi_edges = a_edges / a_inf[:, None]
+    xi_edges[:, -1] = 1.0
+    u_widths = np.diff(xi_edges, axis=1)                            # (n_sl, n_d)
     a_rep = 0.5 * (a_edges[:, :-1] + a_edges[:, 1:])                # (n_sl, n_d)
 
     d_mid_map = 0.5 * (dist_pc[:-1] + dist_pc[1:])                  # (n_d-1,)
@@ -555,8 +555,8 @@ def embedding_and_ridge(profile):
     idx = np.clip(np.sum(cdf <= 0.5, axis=1) - 1, 0, n_d - 1)
     cdf_lo = np.take_along_axis(cdf, idx[:, None], axis=1)[:, 0]
     cdf_hi = np.take_along_axis(cdf, (idx + 1)[:, None], axis=1)[:, 0]
-    u_lo = np.take_along_axis(u_edges, idx[:, None], axis=1)[:, 0]
-    u_hi = np.take_along_axis(u_edges, (idx + 1)[:, None], axis=1)[:, 0]
+    u_lo = np.take_along_axis(xi_edges, idx[:, None], axis=1)[:, 0]
+    u_hi = np.take_along_axis(xi_edges, (idx + 1)[:, None], axis=1)[:, 0]
     frac = np.where(cdf_hi > cdf_lo,
                      (0.5 - cdf_lo) / np.maximum(cdf_hi - cdf_lo, 1e-300), 0.0)
     u_median = u_lo + frac * (u_hi - u_lo)
@@ -576,7 +576,7 @@ def embedding_and_ridge(profile):
     resid_var = np.maximum(var_b - slope * cov, 0.0)
     corr = np.where(var_b > 0, cov / np.sqrt(var_a * var_b), np.nan)
 
-    return dict(u_edges=u_edges, p_u=p_u, u_median=u_median,
+    return dict(xi_edges=xi_edges, p_u=p_u, u_median=u_median,
                 ridge_intercept=intercept, ridge_slope=slope,
                 ridge_resid_sigma=np.sqrt(resid_var), ridge_corr=corr)
 
@@ -593,8 +593,8 @@ def embedding_and_ridge(profile):
 N_PROFILE_CELLS = 32
 
 
-def coarsen_profile(u_edges, p_u, n_out):
-    """`(u_edges, p_u)` re-cut to `n_out` equal-mass cells: the new edges
+def coarsen_profile(xi_edges, p_u, n_out):
+    """`(xi_edges, p_u)` re-cut to `n_out` equal-mass cells: the new edges
     are the embedding CDF's own mass quantiles (`i / n_out`), read off the
     piecewise-linear CDF by exact inversion (the same interpolation
     `embedding_and_ridge` uses for the reported median, generalised to
@@ -603,20 +603,20 @@ def coarsen_profile(u_edges, p_u, n_out):
     fixed mass over the new cell's own width -- mass-preserving by
     construction, not a re-fit."""
     n_sl, n_cell = p_u.shape
-    widths = np.diff(u_edges, axis=1)
+    widths = np.diff(xi_edges, axis=1)
     cum = np.concatenate(
         [np.zeros((n_sl, 1)), np.cumsum(p_u * widths, axis=1)], axis=1)
     cum[:, -1] = 1.0
     new_edges = np.empty((n_sl, n_out + 1))
-    new_edges[:, 0] = u_edges[:, 0]
-    new_edges[:, -1] = u_edges[:, -1]
+    new_edges[:, 0] = xi_edges[:, 0]
+    new_edges[:, -1] = xi_edges[:, -1]
     for i in range(1, n_out):
         t = i / n_out
         idx = np.clip(np.sum(cum <= t, axis=1) - 1, 0, n_cell - 1)
         cum_lo = np.take_along_axis(cum, idx[:, None], axis=1)[:, 0]
         cum_hi = np.take_along_axis(cum, (idx + 1)[:, None], axis=1)[:, 0]
-        u_lo = np.take_along_axis(u_edges, idx[:, None], axis=1)[:, 0]
-        u_hi = np.take_along_axis(u_edges, (idx + 1)[:, None], axis=1)[:, 0]
+        u_lo = np.take_along_axis(xi_edges, idx[:, None], axis=1)[:, 0]
+        u_hi = np.take_along_axis(xi_edges, (idx + 1)[:, None], axis=1)[:, 0]
         frac = np.where(cum_hi > cum_lo,
                         (t - cum_lo) / np.maximum(cum_hi - cum_lo, 1e-300), 0.0)
         new_edges[:, i] = u_lo + frac * (u_hi - u_lo)
@@ -696,9 +696,9 @@ class YsoShape(object):
     column and measurement uncertainty.
     """
 
-    def __init__(self, u_edges, p_u, is_herschel, kernel,
+    def __init__(self, xi_edges, p_u, is_herschel, kernel,
                  hpx_pix_256, sightline_id):
-        self.u_edges = u_edges                      # (n_sl, n_cell+1)
+        self.xi_edges = xi_edges                      # (n_sl, n_cell+1)
         self.p_u = p_u                               # (n_sl, n_cell)
         self.is_herschel = is_herschel               # (n_sl,) bool
         self.kernel = kernel                         # prior.kernel.Kernel
@@ -708,9 +708,9 @@ class YsoShape(object):
         # the exact integral of a step function is piecewise linear
         # (SPEC_PRIORS.md section 6.3); CUM_U[:, -1] = 1 by p_u's own
         # normalisation (`embedding_and_ridge`).
-        widths = np.diff(u_edges, axis=1)
+        widths = np.diff(xi_edges, axis=1)
         self.cum_u = np.concatenate(
-            [np.zeros((u_edges.shape[0], 1)), np.cumsum(p_u * widths, axis=1)],
+            [np.zeros((xi_edges.shape[0], 1)), np.cumsum(p_u * widths, axis=1)],
             axis=1)
 
     @classmethod
@@ -725,13 +725,13 @@ class YsoShape(object):
                 "prior.yso.YsoShape: no shape product for region %r at %s "
                 "-- run the 'prior.yso' RUNBOOK line first" % (region, path))
         with h5py.File(path, "r") as f:
-            u_edges = np.asarray(f["U_EDGES"][:], dtype=np.float64)
-            p_u = np.asarray(f["P_U"][:], dtype=np.float64)
+            xi_edges = np.asarray(f["U_EDGES"][:], dtype=np.float64)  # stored as U_EDGES; the depth fraction ξ's profile edges
+            p_u = np.asarray(f["P_U"][:], dtype=np.float64)  # stored as P_U; the depth fraction ξ's profile density
             is_herschel = np.asarray(f["IS_HERSCHEL"][:]).astype(bool)
             hpx_pix_256 = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
             sightline_id = np.asarray(f["SIGHTLINE_ID"][:], dtype=np.int64)
         kernel = kernel_module.Kernel.read(config)
-        return cls(u_edges, p_u, is_herschel, kernel,
+        return cls(xi_edges, p_u, is_herschel, kernel,
                    hpx_pix_256, sightline_id)
 
     # -- the closed-form extinction marginal, given per-source (A_s, mu,
@@ -750,7 +750,7 @@ class YsoShape(object):
         m = np.log(a_col) + mu * _LN10
         s = sigma * _LN10
         a_safe = np.where(a > 0.0, a, 1.0)
-        edges = self.u_edges[rows]
+        edges = self.xi_edges[rows]
         cum_u = self.cum_u[rows]
         p_u = self.p_u[rows]
         m2, s2, a2 = m[:, None], s[:, None], a_safe[:, None]
@@ -773,7 +773,7 @@ class YsoShape(object):
         m = np.log(a_col) + mu * _LN10
         s = sigma * _LN10
         a_safe = np.where(a > 0.0, a, 1.0)
-        edges = self.u_edges[rows]
+        edges = self.xi_edges[rows]
         p_u = self.p_u[rows]
         m2, s2, a2 = m[:, None], s[:, None], a_safe[:, None]
         e_lo, e_hi = edges[:, :-1], edges[:, 1:]
@@ -838,8 +838,8 @@ def _write_shape_product(path, hpx_pix_256, sightline_id, embed, is_herschel):
         f.attrs["GRANULE"] = "sightline"
         f.create_dataset("HPX_PIX_256", data=hpx_pix_256)
         f.create_dataset("SIGHTLINE_ID", data=sightline_id)
-        f.create_dataset("U_EDGES", data=embed["u_edges"])
-        f.create_dataset("P_U", data=embed["p_u"])
+        f.create_dataset("U_EDGES", data=embed["xi_edges"])  # stored as U_EDGES; the depth fraction ξ's profile edges
+        f.create_dataset("P_U", data=embed["p_u"])  # stored as P_U; the depth fraction ξ's profile density
         f.create_dataset("U_MEDIAN", data=embed["u_median"])
         f.create_dataset("RIDGE_INTERCEPT", data=embed["ridge_intercept"])
         f.create_dataset("RIDGE_SLOPE", data=embed["ridge_slope"])
@@ -872,7 +872,7 @@ def build_shape(config, region):
     every occupied sightline and its own map class -- the exact
     ingredients `YsoShape` evaluates the closed-form a-marginal from
     (with the survey's column kernel, read once at `YsoShape.read`), at
-    any `a`, with no tabulation. The stored `u_edges`/`p_u` are the
+    any `a`, with no tabulation. The stored `xi_edges`/`p_u` are the
     embedding density coarsened to `N_PROFILE_CELLS` equal-mass cells
     (`coarsen_profile`); the reported median and the ridge are still read
     off the full-resolution profile, unaffected.
@@ -880,8 +880,8 @@ def build_shape(config, region):
     profile = _load_profile_arrays(config, region)
     sl_pix = profile["hpx_pix_256"]
     embed = embedding_and_ridge(profile)
-    coarse_edges, coarse_p_u = coarsen_profile(embed["u_edges"], embed["p_u"], N_PROFILE_CELLS)
-    embed = dict(embed, u_edges=coarse_edges, p_u=coarse_p_u)
+    coarse_edges, coarse_p_u = coarsen_profile(embed["xi_edges"], embed["p_u"], N_PROFILE_CELLS)
+    embed = dict(embed, xi_edges=coarse_edges, p_u=coarse_p_u)
     map_class = _majority_map_class(config, region, sl_pix)
     is_herschel = map_class == "herschel"
     sightline_id = _sightline_id_lookup(config, region, sl_pix)

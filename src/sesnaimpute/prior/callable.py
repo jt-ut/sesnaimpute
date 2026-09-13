@@ -36,11 +36,11 @@ STAR, AGB, PAHC
     ClassShape.density(a, log10_b, tile_id, A_s, sigma_col, map_class[,
     f_lim8])` itself: the shape's own two-component kernel mixture
     (`Kernel.mixture`), each component read at its own shift and width
-    (bracketed in the width ladder, bicubic in `(log10 x, log10 B)`,
+    (bracketed in the width ladder, bicubic in `(log10 ξ, log10 B)`,
     PAHC additionally blended over its own 8 micron limit grid) and the
     two combined by the mixture weight `w`. Its MASS-per-cell output is
     converted to a density in `(a, log10 B)` here by the grid's fixed
-    cell area and the `d(log10 x)/da = 1/(a ln10)` Jacobian.
+    cell area and the `d(log10 ξ)/da = 1/(a ln10)` Jacobian.
 
     `eps_s(a, log10 B)` is this source's own `EPS_STAR`/`EPS_AGB`/
     `EPS_PAHC[s]`, an `(n_x, n_b)` curve on `X_LADDER` x
@@ -146,7 +146,7 @@ from sesnaimpute.prior import star_shapes
 from sesnaimpute.prior import table as table_module
 from sesnaimpute.prior import yso as yso_module
 
-#: `ln(10)`: the `d(log10 x)/da = 1/(a ln10)` and `d(log10 S)/dS = 1/(S
+#: `ln(10)`: the `d(log10 ξ)/da = 1/(a ln10)` and `d(log10 S)/dS = 1/(S
 #: ln10)` Jacobians every class but YSO/H2S needs once (module docstring).
 LN10 = float(np.log(10.0))
 
@@ -282,7 +282,7 @@ def _marginal_exact_compiled(yso_shape, a, sl_rows, a_col, sigma_col, map_class,
         acol_c = a_col[start:stop]
         w, mu, sigma = yso_shape.kernel.mixture(
             acol_c, sigma_col[start:stop], map_class[start:stop], zp_sigma_k=zp_chunk)
-        edges2d = np.ascontiguousarray(yso_shape.u_edges[sl_rows[start:stop]])
+        edges2d = np.ascontiguousarray(yso_shape.xi_edges[sl_rows[start:stop]])
         p_u2d = np.ascontiguousarray(yso_shape.p_u[sl_rows[start:stop]])
         out[start:stop] = _marginal_exact_numba(
             a_c, edges2d, p_u2d, acol_c, w,
@@ -783,11 +783,11 @@ def _bicubic_eval_scalar(tx, ty, coef, x, y):
     `(x, y)`: de Boor in `y` for each of the 4 rows the `x`-span needs,
     then de Boor in `x` on those 4 results (verified against scipy
     `RectBivariateSpline.ev()` to 1e-15). `x`/`y` are clamped to the
-    spline's own fitted domain (`tx[3]..tx[n_cx]` = `x_centers[0]
-    ..x_centers[-1]`, `ty` likewise) before evaluating -- scipy's `.ev()`
+    spline's own fitted domain (`tx[3]..tx[n_cx]` = `xi_centers[0]
+    ..xi_centers[-1]`, `ty` likewise) before evaluating -- scipy's `.ev()`
     does the same for an out-of-domain query (clamps to the boundary
     value, does NOT extrapolate the boundary polynomial); the caller's
-    own edge-based in/out-of-box test (`x_edges`/`b_edges`) is looser
+    own edge-based in/out-of-box test (`xi_edges`/`b_edges`) is looser
     than the spline's own CENTRES-based domain by half a cell on each
     side, so a point can be "interior" by that test yet still need this
     clamp (a real bug this fixed: an unclamped point there silently
@@ -877,7 +877,7 @@ def _eval_node_scalar(coef_g, tx, ty, x_e0, x_eN, b_e0, b_eN, xc0, xcN, bc0, bcN
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy")
 def _family_shape_numba(a, logb, tile_ids, a_col, w, mu0, sigma0, mu1, sigma1,
-                        coef, tx, ty, x_edges, b_edges, x_centers, b_centers,
+                        coef, tx, ty, xi_edges, b_edges, xi_centers, b_centers,
                         tail_xlo, tail_xhi, tail_blo, tail_bhi, shape_nodes_log):
     """`(n,)`: STAR/AGB's `ClassShape.density` -- two mixture components,
     each its own width-ladder bracket (`_bracket`, shared with GAL) and
@@ -886,9 +886,9 @@ def _family_shape_numba(a, logb, tile_ids, a_col, w, mu0, sigma0, mu1, sigma1,
     n = a.shape[0]
     out = np.empty(n, dtype=np.float64)
     n_nodes = shape_nodes_log.shape[0]
-    x_e0, x_eN = x_edges[0], x_edges[x_edges.shape[0] - 1]
+    x_e0, x_eN = xi_edges[0], xi_edges[xi_edges.shape[0] - 1]
     b_e0, b_eN = b_edges[0], b_edges[b_edges.shape[0] - 1]
-    xc0, xcN = x_centers[0], x_centers[x_centers.shape[0] - 1]
+    xc0, xcN = xi_centers[0], xi_centers[xi_centers.shape[0] - 1]
     bc0, bcN = b_centers[0], b_centers[b_centers.shape[0] - 1]
     for k in range(n):
         ak = a[k]
@@ -926,7 +926,7 @@ def _family_shape_numba(a, logb, tile_ids, a_col, w, mu0, sigma0, mu1, sigma1,
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy")
 def _family_shape_numba_pahc(a, logb, tile_ids, a_col, w, mu0, sigma0, mu1, sigma1, log_f_lim8,
-                             coef, tx, ty, x_edges, b_edges, x_centers, b_centers,
+                             coef, tx, ty, xi_edges, b_edges, xi_centers, b_centers,
                              tail_xlo, tail_xhi, tail_blo, tail_bhi, shape_nodes_log, limit_log):
     """`(n,)`: PAHC's `ClassShape.density` -- `_family_shape_numba`'s
     same two-component/width-ladder logic, each component ALSO
@@ -936,9 +936,9 @@ def _family_shape_numba_pahc(a, logb, tile_ids, a_col, w, mu0, sigma0, mu1, sigm
     out = np.empty(n, dtype=np.float64)
     n_nodes = shape_nodes_log.shape[0]
     n_limit = limit_log.shape[0]
-    x_e0, x_eN = x_edges[0], x_edges[x_edges.shape[0] - 1]
+    x_e0, x_eN = xi_edges[0], xi_edges[xi_edges.shape[0] - 1]
     b_e0, b_eN = b_edges[0], b_edges[b_edges.shape[0] - 1]
-    xc0, xcN = x_centers[0], x_centers[x_centers.shape[0] - 1]
+    xc0, xcN = xi_centers[0], xi_centers[xi_centers.shape[0] - 1]
     bc0, bcN = b_centers[0], b_centers[b_centers.shape[0] - 1]
     for k in range(n):
         ak = a[k]
@@ -992,7 +992,7 @@ def _family_shape_numba_pahc(a, logb, tile_ids, a_col, w, mu0, sigma0, mu1, sigm
 class _FamilyClass(object):
     """STAR/AGB/PAHC's `shape`/`selection` pair (owner ruling, 2026-09-06):
     `shape` is `ClassShape.density` converted to a density in `(a, log10
-    B)` by the fixed cell area and the `d(log10 x)/da` Jacobian;
+    B)` by the fixed cell area and the `d(log10 ξ)/da` Jacobian;
     `selection` is this source's own tabulated `EPS_<cls>`, bilinear on
     `(x = a/A_s, log10 B)`. Both take the SAME `(rows, a, log10_b)`
     block every class's pair takes; `Z_%s` is read by the shared
@@ -1033,14 +1033,14 @@ class _FamilyClass(object):
             mass = _family_shape_numba_pahc(
                 a_f, b_f, tile_id, a_col, w, mu[:, 0], sigma[:, 0], mu[:, 1], sigma[:, 1],
                 log_f_lim8, shape_obj.spline_coef, shape_obj.spline_tx, shape_obj.spline_ty,
-                shape_obj.x_edges, shape_obj.b_edges, shape_obj.x_centers, shape_obj.b_centers,
+                shape_obj.xi_edges, shape_obj.b_edges, shape_obj.xi_centers, shape_obj.b_centers,
                 shape_obj.tail_x_lo, shape_obj.tail_x_hi, shape_obj.tail_b_lo,
                 shape_obj.tail_b_hi, shape_nodes_log, shape_obj.limit_log)
         else:
             mass = _family_shape_numba(
                 a_f, b_f, tile_id, a_col, w, mu[:, 0], sigma[:, 0], mu[:, 1], sigma[:, 1],
                 shape_obj.spline_coef, shape_obj.spline_tx, shape_obj.spline_ty,
-                shape_obj.x_edges, shape_obj.b_edges, shape_obj.x_centers, shape_obj.b_centers,
+                shape_obj.xi_edges, shape_obj.b_edges, shape_obj.xi_centers, shape_obj.b_centers,
                 shape_obj.tail_x_lo, shape_obj.tail_x_hi, shape_obj.tail_b_lo,
                 shape_obj.tail_b_hi, shape_nodes_log)
         p_ab = np.where(valid, mass / (a_safe * LN10 * fg["dx"] * fg["db"]), 0.0)
@@ -1378,7 +1378,7 @@ class SourcePrior(object):
                 x_ladder = f["X_LADDER"][:].astype(np.float64)
                 for c in family_wanted:
                     shape = star_shapes.read(config, region, c)
-                    dx = float(np.mean(np.diff(shape.x_edges)))
+                    dx = float(np.mean(np.diff(shape.xi_edges)))
                     db = float(np.mean(np.diff(shape.b_edges)))
                     self.shapes[c] = shape
                     self.family_grids[c] = dict(
@@ -1656,9 +1656,9 @@ def _family_grid(shape, a_col):
     """`(a_grid, b_grid)`: a fine grid covering STAR/AGB/PAHC's tabulated
     box plus six cells of the declared analytic tail on every edge --
     `check`'s own normalisation grid."""
-    x_lo, x_hi = shape.x_edges[0], shape.x_edges[-1]
+    x_lo, x_hi = shape.xi_edges[0], shape.xi_edges[-1]
     b_lo, b_hi = shape.b_edges[0], shape.b_edges[-1]
-    x_cell = float(np.mean(np.diff(shape.x_edges)))
+    x_cell = float(np.mean(np.diff(shape.xi_edges)))
     b_cell = float(np.mean(np.diff(shape.b_edges)))
     log_x = np.linspace(x_lo - 6 * x_cell, x_hi + 6 * x_cell, _CHECK_GRID_N)
     b_grid = np.linspace(b_lo - 6 * b_cell, b_hi + 6 * b_cell, _CHECK_GRID_N)
@@ -1708,7 +1708,7 @@ def _extinction_grid(prior, row, a_col):
     sigmas past `a_col`, at this source's own arm: the exact extinction
     marginal every class but the family shapes reads is sharply peaked
     toward `a_col`, so log-spacing (the same fix `star_shapes` uses for
-    its own `log10 x` axis) is needed to resolve the peak. `map_class` is
+    its own `log10 ξ` axis) is needed to resolve the peak. `map_class` is
     the source's own `A_COL_PROVENANCE` (fixed defect, owner 2026-09-06:
     was `YsoShape._map_class`'s sightline majority)."""
     sigma_col = float(prior.table["A_COL_SIG_K"][row])

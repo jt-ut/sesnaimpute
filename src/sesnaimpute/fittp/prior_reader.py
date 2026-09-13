@@ -18,15 +18,15 @@ density (section 1.3, 1.4, 4.2).
 
 The stored shapes live in the DISTANCE coordinate `x = a / T`, the
 object's foreground extinction over the true column along its own pencil
-beam (support `[0, 1]`; `log10 x = 0` the wall, `bmstp.shapes`,
+beam (support `[0, 1]`; `log10 ξ = 0` the edge ξ = 1, `bmstp.shapes`,
 `sample_cloud`, `grid.bin` and `grid.fold_wall` all reflecting mass there
 onto that support). This reader measures a different coordinate, `a_hat /
 A_beam`, the distance coordinate times the pencil-over-beam ratio `T /
 A_beam` whose distribution is the column kernel: `prepare` changes
 variables through that kernel (`grid.blur`), carrying a shape into the
-measured coordinate, where mass above `log10 x = 0` is REAL -- a pencil
+measured coordinate, where mass above `log10 ξ = 0` is REAL -- a pencil
 column above the beam mean -- and is read wherever a fitted source's own
-ratio lands, into the one-dex padding above the wall the grid already
+ratio lands, into the one-dex padding above the edge ξ = 1 the grid already
 carries, never folded back. The kernel is class-conditional: the cloud
 classes (YSO, H2S) read it reweighted by `T ** gamma`, the fitted
 within-beam tilt (`population.kernel.Kernel.cloud_gamma_herschel`, a 2-D
@@ -63,15 +63,15 @@ _SQRT2 = float(np.sqrt(2.0))
 _SQRT2PI = float(np.sqrt(2.0 * np.pi))
 
 #: the stored shape's own support edge (`bmstp.grid`'s module docstring):
-#: `x = a / T <= 1` there, `log10 x = 0` the wall. The read
+#: `x = a / T <= 1` there, `log10 ξ = 0` the edge ξ = 1. The read
 #: (`_cell_sum`, `_build_a_star_tables`) evaluates a fitted source in the
 #: measured coordinate, which the column kernel carries past that wall
 #: into real mass, so the window and the "top of grid" fallback below run
-#: to the array's own top edge, not this one; `N_X_SUPPORT` remains the
+#: to the array's own top edge, not this one; `N_XI_SUPPORT` remains the
 #: bound `_build_a_star_tables` clips its window's LOW index to. A bare
 #: module global (like `N_EXACT` below) so numba freezes it as a
 #: compile-time constant inside `_cell_sum`.
-N_X_SUPPORT = grid.N_X_SUPPORT
+N_XI_SUPPORT = grid.N_XI_SUPPORT
 
 #: the column kernel's class-conditional reweighting (SPEC_BMSTP_DRAFT.md
 #: section 5.5): the cloud classes' young stars and shocked H2 knots both
@@ -107,7 +107,7 @@ class Prior(object):
     calls over the class's batches (section 4)."""
 
     def __init__(self, cls, a_col, a_col_sig, arm, zp_sig, grain, density, p1_columns,
-                 grid_all, x_edges, b_edges, model_name, c_theta, factors, kernel):
+                 grid_all, xi_edges, b_edges, model_name, c_theta, factors, kernel):
         self.cls = cls
         self.a_col = a_col
         self.a_col_sig = a_col_sig
@@ -117,8 +117,8 @@ class Prior(object):
         self.density = density
         self.p1_columns = p1_columns
         self.grid_all = grid_all
-        self.x_edges = x_edges
-        self.dlx = float(x_edges[1] - x_edges[0])
+        self.xi_edges = xi_edges
+        self.dlx = float(xi_edges[1] - xi_edges[0])
         self.b_edges = b_edges
         self.b_origin = float(b_edges[0])
         self.dlb = float(b_edges[1] - b_edges[0])
@@ -152,7 +152,7 @@ def load(config, region, cls):
         # one origin, one width, shared with every other class.
         path = config_module.product_path(config, "bmstp", "shape", "star", "tile", region=region)
         with h5py.File(path, "r") as f:
-            x_edges = f["LOG10_X_EDGES"][:]
+            xi_edges = f["LOG10_X_EDGES"][:]  # stored as LOG10_X_EDGES; the depth fraction ξ grid edges
             b_edges = f["LOG10_F45_EDGES"][:]
             grid_all = f[dset][:]
         grain = tile
@@ -164,14 +164,14 @@ def load(config, region, cls):
             # the H2S template's Sigma-to-4.5-micron conversion `C_THETA`
             # (P5, `bmstp.template_weights.h2shock_conversion`) folded in
             # at the shape stage, not at this read -- no private axis.
-            x_edges = f["LOG10_X_EDGES"][:]
+            xi_edges = f["LOG10_X_EDGES"][:]  # stored as LOG10_X_EDGES; the depth fraction ξ grid edges
             b_edges = f["LOG10_F45_EDGES"][:]
             grid_all = f[dset][:]
         grain = sightline
     else:  # gal: one survey-wide grid, no grain axis, on the common axis too
         path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
         with h5py.File(path, "r") as f:
-            x_edges = f["LOG10_X_EDGES"][:]
+            xi_edges = f["LOG10_X_EDGES"][:]  # stored as LOG10_X_EDGES; the depth fraction ξ grid edges
             b_edges = f["LOG10_F45_EDGES"][:]
             grid_all = f["GRID"][:][None, :, :]
         grain = np.zeros(a_col.shape[0], dtype=np.int64)
@@ -200,7 +200,7 @@ def load(config, region, cls):
 
     kernel = kernel_module.Kernel.read(config)
     return Prior(cls, a_col, a_col_sig, arm, zp_sig, grain, density, p1_columns,
-                 grid_all, x_edges, b_edges, model_name, c_theta, factors, kernel)
+                 grid_all, xi_edges, b_edges, model_name, c_theta, factors, kernel)
 
 
 def prepare(reader, rows):
@@ -214,9 +214,9 @@ def prepare(reader, rows):
     array -- a block of ~50 sources, never a whole batch (the 600 MB
     per-batch footprint of the unblurred grid held at once,
     IMPLEMENTATION_BMSTP_DRAFT.md section 9). Mass `grid.blur` carries
-    past `log10 x = 0` is a real pencil column above the beam mean in the
+    past `log10 ξ = 0` is a real pencil column above the beam mean in the
     measured coordinate and stays in the sum, in the one-dex padding the
-    array already carries above the wall. The per-shape floor `bin` once
+    array already carries above the edge ξ = 1. The per-shape floor `bin` once
     baked in is gone (the common-floor rule) -- the common floor is
     applied once, at the read, by `common_floor`/`ln_prior` below."""
     rows = np.asarray(rows)
@@ -328,7 +328,7 @@ def _factor_ln(reader, rows, a_hat, log10_b_hat, slope, sigma_a, model_index):
     n, m = a_hat.shape
     if not reader.factors:
         return np.zeros((n, m), dtype=np.float64)
-    a_floor = reader.a_col[rows][:, None] * (10.0 ** reader.x_edges[0])
+    a_floor = reader.a_col[rows][:, None] * (10.0 ** reader.xi_edges[0])
     a_star = _truncated_mean(a_hat, sigma_a, a_floor)
     b_star = log10_b_hat + slope[:, None] * (a_star - a_hat)
     total = np.zeros((n, m), dtype=np.float64)
@@ -353,7 +353,7 @@ def _factor_ln(reader, rows, a_hat, log10_b_hat, slope, sigma_a, model_index):
     return total
 
 
-def _build_a_star_tables(a_col, x_edges, sigma_a, a_hat):
+def _build_a_star_tables(a_col, xi_edges, sigma_a, a_hat):
     """The hybrid cell-mass table of SPEC_BMSTP_DRAFT.md section 4.2, one
     per source: on an `a'` grid of step `min(A_STAR_TABLE_STEP_MAX, sigma_a
     / 10)` covering this block's templates' `a_hat` range (`(n,)` `a_hat`
@@ -378,10 +378,10 @@ def _build_a_star_tables(a_col, x_edges, sigma_a, a_hat):
     """
     from scipy.special import erf
     n = sigma_a.size
-    n_x = x_edges.size - 1
-    x0 = float(x_edges[0])
-    dlx = float(x_edges[1] - x_edges[0])
-    x_max = float(x_edges[-1])
+    n_x = xi_edges.size - 1
+    x0 = float(xi_edges[0])
+    dlx = float(xi_edges[1] - xi_edges[0])
+    x_max = float(xi_edges[-1])
     a_min = np.zeros(n, dtype=np.float64)
     step = np.zeros(n, dtype=np.float64)
     n_ap = np.zeros(n, dtype=np.int64)
@@ -400,7 +400,7 @@ def _build_a_star_tables(a_col, x_edges, sigma_a, a_hat):
         step[s] = st
         n_ap[s] = int(np.ceil((amax - amin) / st)) + 1
         a_min[s] = amin
-        edges_per_source[s] = a_col[s] * 10.0 ** x_edges
+        edges_per_source[s] = a_col[s] * 10.0 ** xi_edges
     offset = np.zeros(n, dtype=np.int64)
     if n:
         offset[1:] = np.cumsum(n_ap)[:-1]
@@ -440,12 +440,12 @@ def _build_a_star_tables(a_col, x_edges, sigma_a, a_hat):
         # the read's own coordinate (section 4.2): a fitted source's
         # window runs to the array's own top cell (`n_x - 1`), the
         # measured coordinate's full extent -- mass the kernel carries
-        # past `log10 x = 0` is a real pencil column above the beam mean
+        # past `log10 ξ = 0` is a real pencil column above the beam mean
         # and is read where it lands, not folded back onto the support.
         lx_hi = np.log10(np.maximum(hi_a, 1e-300)) - log10_ak
         ihi = np.clip(np.floor((lx_hi - x0) / dlx), 0, n_x - 1).astype(np.int64)
         lx_lo = np.log10(np.maximum(lo_a, 1e-300)) - log10_ak
-        ilo = np.where(lo_a > 0.0, np.clip(np.floor((lx_lo - x0) / dlx), 0, N_X_SUPPORT - 1), 0.0).astype(np.int64)
+        ilo = np.where(lo_a > 0.0, np.clip(np.floor((lx_lo - x0) / dlx), 0, N_XI_SUPPORT - 1), 0.0).astype(np.int64)
         ilo_tab[off:off + n_ap[s]] = ilo.astype(np.int32)
         ihi_tab[off:off + n_ap[s]] = ihi.astype(np.int32)
     return m_tab, a_tab, ilo_tab, ihi_tab, a_min, step, n_ap.astype(np.int32), offset
@@ -453,9 +453,9 @@ def _build_a_star_tables(a_col, x_edges, sigma_a, a_hat):
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy")
 def _cell_index(a_val, log10_ak, x0, dlx, n_x):
-    """The `log10 x` cell holding extinction `a_val` at this source's
+    """The `log10 ξ` cell holding extinction `a_val` at this source's
     `A_COL_K` (its column an O(1) inverse of the grid's own geometric
-    spacing, `log10 x_i = x0 + i * dlx`): clamped to `[0, n_x - 1]`, and to
+    spacing, `log10 ξ_i = x0 + i * dlx`): clamped to `[0, n_x - 1]`, and to
     0 for `a_val <= 0` (the grid's cells start above `x = 0`, so anything
     at or below zero extinction sits at the grid's own low edge)."""
     if a_val <= 0.0:
@@ -490,7 +490,7 @@ def _ln_half_erfc(z):
 
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
-def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
+def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               b_origin, dlb, dlx, a_edges_buf,
               m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
               floor_over_density):
@@ -528,7 +528,7 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     carries past that wall into real mass -- a pencil column above the
     beam mean -- so the window and both fallbacks below run to the
     array's own top edge, `n_x`, the measured coordinate's full extent,
-    not to the wall. The common floor:
+    not to the edge ξ = 1. The common floor:
     `h`'s stored density is an exact zero in an empty cell (no per-shape
     floor is baked in), so every `dens` this function reads is floored at
     `floor_over_density[s, th]`, this (source, template)'s own share of
@@ -562,9 +562,9 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     above the grid is mass outside and is never wrapped onto the grid's
     low end (section 2)."""
     n, m = a_hat.shape
-    n_x = x_edges.size - 1
+    n_x = xi_edges.size - 1
     n_b = h.shape[2]
-    x0 = x_edges[0]
+    x0 = xi_edges[0]
     out = np.full((n, m), -np.inf, dtype=np.float32)
     sqrt2 = 1.4142135623730951
     sqrt2pi = 2.5066282746310002  # sqrt(2 pi), the normal density's normalisation
@@ -576,7 +576,7 @@ def _cell_sum(a_col, x_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
         log10_ak = math.log10(AK)
         a_edges = a_edges_buf[s]
         for i in range(n_x + 1):
-            a_edges[i] = AK * 10.0 ** x_edges[i]
+            a_edges[i] = AK * 10.0 ** xi_edges[i]
         inv_sig = 1.0 / sig
         n_ap = n_ap_tab[s]
         a_min = a_min_tab[s]
@@ -752,7 +752,7 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, l
     density = reader.density[rows]
     model_index = np.asarray(model_index)
     m = a_hat.shape[1]
-    n_x = reader.x_edges.size - 1
+    n_x = reader.xi_edges.size - 1
     c_theta = reader.c_theta[model_index] if reader.c_theta.size else np.zeros(m)
     a_edges_buf = np.empty((rows.size, n_x + 1), dtype=np.float64)
     sigma_a = np.asarray(sigma_a, dtype=np.float64)
@@ -763,8 +763,8 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, l
     floor_over_density = (np.asarray(lambda_floor, dtype=np.float64)[:, None]
                            / (density[:, None] * np.exp(factor_term)))
     m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab = _build_a_star_tables(
-        a_col, reader.x_edges, sigma_a, a_hat64)
-    core = _cell_sum(a_col, reader.x_edges, sigma_a,
+        a_col, reader.xi_edges, sigma_a, a_hat64)
+    core = _cell_sum(a_col, reader.xi_edges, sigma_a,
                       a_hat64, np.asarray(log10_b_hat, dtype=np.float64),
                       np.asarray(slope, dtype=np.float64), np.asarray(c_theta, dtype=np.float64),
                       h, reader.b_origin, reader.dlb, reader.dlx, a_edges_buf,

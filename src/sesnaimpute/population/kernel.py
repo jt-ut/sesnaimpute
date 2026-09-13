@@ -563,7 +563,7 @@ def _match_protostars_to_beam(config):
     3.2) -- the reader's own beam column, the 36 arcsec-map value at the
     SOURCE's position, not the nside-256 sightline mean the two arms are
     pooled on (they differ by ~0.3 dex at a protostar): the quantity
-    `a_p` is compared to (`r_p = a_p / A_beam`) must divide by the same
+    `a_p` is compared to (`xi_hat = a_p / A_beam`) must divide by the same
     column a consumer elsewhere divides by. Kept only where the matched
     source is on the Herschel arm (`A_COL_PROVENANCE` 0, the same code
     `_ARM_CODE['herschel']` uses). Returns a dict of aligned arrays
@@ -636,13 +636,13 @@ def _cloud_cells_for_pixels(config, yso_module, region, pix256):
     embed = yso_module.embedding_and_ridge(profile)
     dist_pc = profile["dist_pc"]
     n_d = dist_pc.size
-    n_sl = embed["u_edges"].shape[0]
+    n_sl = embed["xi_edges"].shape[0]
     d_edges = np.empty((n_sl, n_d + 1), dtype=np.float64)
     d_edges[:, :n_d] = dist_pc[None, :]
     d_edges[:, n_d] = dist_pc[-1] + 2.0 * profile["tail_efold_pc"]
-    u_edges = embed["u_edges"]
+    xi_edges = embed["xi_edges"]
     p_u = embed["p_u"]
-    u_lo, u_hi = u_edges[:, :-1], u_edges[:, 1:]
+    u_lo, u_hi = xi_edges[:, :-1], xi_edges[:, 1:]
     d_lo, d_hi = d_edges[:, :-1], d_edges[:, 1:]
 
     d_front, d_back = yso_module.cloud_interval_pc(config, region)
@@ -686,10 +686,10 @@ def _fit_cloud_gamma_sigma_herschel(config, zp_herschel_k):
     adopted extinction column, `A_COL_K` from `sky.derived.adopted.
     extinction.source` -- the reader's own beam column, the 36 arcsec-map
     value at the source's position -- not the nside-256 sightline mean
-    (they differ by ~0.3 dex at a protostar): the ratio `r_p = a_p /
+    (they differ by ~0.3 dex at a protostar): the ratio `xi_hat = a_p /
     A_beam` must divide by the same column a consumer elsewhere divides
-    by. For a cloud member on a protostar's own sightline, `log10 r_p =
-    log10 x + y`: `x` from that sightline's own cloud-interval `p(u)`
+    by. For a cloud member on a protostar's own sightline, `log10 ξi_hat =
+    log10 ξ + y`: `x` from that sightline's own cloud-interval `p(u)`
     (`_cloud_cells_for_pixels`), `y` from the one-component structural
     term at a trial `sigma_cloud`, the source's own measurement term
     (`A_COL_SIG_K`) and the survey zero point folded in, reweighted by
@@ -719,7 +719,7 @@ def _fit_cloud_gamma_sigma_herschel(config, zp_herschel_k):
 
     a_p = match["av_mag"] * selection_module.ak_per_av(
         config, selection_module.law_dense_weight(a_beam))
-    log10_r_p = np.log10(a_p / a_beam)
+    log10_xi_hat = np.log10(a_p / a_beam)
 
     # the source's measurement term and the survey zero point, in quadrature,
     # converted to dex at a_beam -- exactly `Kernel.mixture`'s own combination
@@ -766,7 +766,7 @@ def _fit_cloud_gamma_sigma_herschel(config, zp_herschel_k):
     for gi, gamma in enumerate(gamma_grid):
         c = gamma * _LN10
         mu_tilt = mu0_grid[:, None] + c * sigma_tot_grid ** 2  # (n_sigma, n_proto)
-        off = ((log10_r_p[None, :, None] - log10x[None, :, :] - mu_tilt[:, :, None])
+        off = ((log10_xi_hat[None, :, None] - log10x[None, :, :] - mu_tilt[:, :, None])
                / sigma_tot_grid[:, :, None])
         dens_cell = np.exp(-0.5 * off * off) / (sigma_tot_grid[:, :, None] * _SQRT2PI)
         density_p = np.sum(mass[None, :, :] * dens_cell, axis=2)  # (n_sigma, n_proto)
@@ -816,8 +816,8 @@ def _fit_cloud_gamma_sigma_herschel(config, zp_herschel_k):
     wt = np.stack([w0, 1.0 - w0], axis=1) * np.exp(log_wt)
     w_tilt = wt[:, 0] / wt.sum(axis=1)
 
-    mean0 = log10_r_p - mu_tilt[:, 0]
-    mean1 = log10_r_p - mu_tilt[:, 1]
+    mean0 = log10_xi_hat - mu_tilt[:, 0]
+    mean1 = log10_xi_hat - mu_tilt[:, 1]
     p_reach = (w_tilt * _norm_cdf(-mean0 / sigma_tot[:, 0])
                + (1.0 - w_tilt) * _norm_cdf(-mean1 / sigma_tot[:, 1]))
     frac_below_reach = float(np.mean(p_reach < 0.01)) if n_proto else float("nan")
@@ -839,8 +839,8 @@ def _fit_cloud_gamma_sigma_herschel(config, zp_herschel_k):
 
     pred_median = _solve(0.5) if n_proto else float("nan")
     pred_p84 = _solve(0.84) if n_proto else float("nan")
-    emp_median = float(np.median(log10_r_p)) if n_proto else float("nan")
-    emp_p84 = float(np.percentile(log10_r_p, 84.0)) if n_proto else float("nan")
+    emp_median = float(np.median(log10_xi_hat)) if n_proto else float("nan")
+    emp_p84 = float(np.percentile(log10_xi_hat, 84.0)) if n_proto else float("nan")
 
     return dict(
         gamma=gamma_adopted, gamma_mle=gamma_mle, gamma_p16=gamma_p16, gamma_p84=gamma_p84,
