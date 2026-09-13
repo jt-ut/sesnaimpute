@@ -58,6 +58,16 @@ def _plain_formatter():
     return FuncFormatter(lambda v, _pos: _plain_number(v))
 
 
+def _decade_formatter():
+    """A log-axis tick as a power of ten in mathtext once it has more
+    than four digits ('$10^{7}$', not '10000000'); plain below that."""
+    def _fmt(v, _pos):
+        if v >= 1e4 and abs(np.log10(v) - round(np.log10(v))) < 1e-6:
+            return r"$10^{%d}$" % int(round(np.log10(v)))
+        return _plain_number(v)
+    return FuncFormatter(_fmt)
+
+
 def build(config, regions=None):
     """Reads `population/gal/counts_gal_survey.hdf5` and writes the one
     survey-wide galaxy-counts figure. Survey-wide; `regions` is accepted
@@ -98,8 +108,6 @@ def build(config, regions=None):
     ax_strip = fig.add_subplot(gs[1], sharex=ax)
 
     for a in (ax, ax_strip):
-        a.axvspan(s_lo, s_hi, color="0.90", zorder=0)
-        a.axvline(s_break, color="0.35", linestyle=":", linewidth=1.3, zorder=1)
         a.set_xscale("log")
         a.set_xlim(*xlim)
 
@@ -109,15 +117,9 @@ def build(config, regions=None):
     ax.set_ylabel(plot_style.label(r"$\mathbf{\phi(S)}$", "galaxies deg$^{-2}$ mJy$^{-1}$"),
                   fontsize=LABEL_FONTSIZE, fontweight="bold")
     ax.tick_params(labelsize=TICK_FONTSIZE)
-    ax.yaxis.set_major_formatter(_plain_formatter())
+    ax.yaxis.set_major_formatter(_decade_formatter())
     ax.legend(fontsize=TICK_FONTSIZE, loc="upper right", frameon=False)
     plt.setp(ax.get_xticklabels(), visible=False)
-
-    trans = ax.get_xaxis_transform()
-    ax.text(s_break / (10.0 ** 0.15), 0.92, f"slope {alpha_faint:.2f}", transform=trans,
-            ha="right", va="top", fontsize=TICK_FONTSIZE, color="0.25")
-    ax.text(s_break * (10.0 ** 0.15), 0.92, f"slope {alpha_bright:.2f}", transform=trans,
-            ha="left", va="top", fontsize=TICK_FONTSIZE, color="0.25")
 
     ax_strip.plot(s_mjy, p_point, color="tab:green", linewidth=2.0)
     ax_strip.set_ylim(0.0, 1.0)
