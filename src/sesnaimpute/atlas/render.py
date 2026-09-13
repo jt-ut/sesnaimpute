@@ -137,17 +137,18 @@ PAGE_WIDTH_IN, PAGE_HEIGHT_IN = 16.0, 9.0
 #: a narrow region's own aspect, whose Dec tick labels otherwise overhang
 #: the left edge by 0.03-0.17 in.
 MARGIN_LEFT_IN, MARGIN_RIGHT_IN = 0.75, 0.15
-MARGIN_TOP_IN, MARGIN_BOTTOM_IN = 1.0, 0.55
+MARGIN_TOP_IN, MARGIN_BOTTOM_IN = 0.85, 0.55
 GAP_X_IN, GAP_Y_IN = 0.10, 0.12
 
 #: `MARGIN_TOP_IN`'s own budget for the prior page's title (top pad,
-#: then the `TITLE_FONTSIZE` line) and, below it, the group heading (a
-#: gap, then the `LABEL_FONTSIZE` line), both measured down from the
-#: page's own top edge, `va="top"`; the posterior figure's own suptitle
-#: is unaffected, since it draws by its own fraction of the page height
-#: rather than from these pads.
+#: then the `TITLE_FONTSIZE` line, measured down from the page's own
+#: top edge, `va="top"`); the group heading sits just above the panel
+#: grid's own top edge (`HEADING_ABOVE_GRID_IN`, `va="bottom"`), so it
+#: reads as the heading of the three class columns beneath it. The
+#: posterior figure's own suptitle is unaffected, since it draws by its
+#: own fraction of the page height rather than from these pads.
 TITLE_TOP_PAD_IN = 0.14
-HEADING_TOP_PAD_IN = 0.52
+HEADING_ABOVE_GRID_IN = 0.06
 
 #: The left column (the column and density panels) meets the three
 #: class columns at this gap rather than `GAP_X_IN`, so the rule drawn
@@ -733,7 +734,7 @@ def _build_prior_page(config, region, formats, view):
                         cbar_label=None, hatch=None, cbar_ticks=None)
 
         col_panel = dict(data=col_grid, cmap="magma", norm=_log_norm(col_grid),
-                          title=plot_style.label("Column $A_K$", "mag"), cbar_label=None, hatch=None,
+                          title=plot_style.label(r"Column $\mathbf{A_K}$", "mag"), cbar_label=None, hatch=None,
                           cbar_ticks=None)
         density_title = plot_style.label(spec["density_label"], "deg$^{-2}$").replace(" [", "\n[")
         hatch = None
@@ -822,18 +823,17 @@ def _build_prior_page(config, region, formats, view):
                                [sep_y0_in / page_h_total, sep_y1_in / page_h_total],
                                transform=fig.transFigure, color="0.6", linewidth=0.8))
 
-        # The page title and, below it, the group heading centred over
-        # the three class columns -- both bold, both stacked in
-        # `MARGIN_TOP_IN`'s own budget above the panel titles
-        # (`TITLE_TOP_PAD_IN`/`HEADING_TOP_PAD_IN`), independent of the
-        # region's own aspect.
+        # The page title at the top of the page and the group heading
+        # centred over the three class columns, just above the panel
+        # grid's own top edge -- both bold, independent of the region's
+        # own aspect.
         heading_x_in = 0.5 * (col1_rect[0] + col3_rect[0] + geom["panel_w"] + geom["bar_w"])
         fig.text(0.5, (page_h_total - TITLE_TOP_PAD_IN) / page_h_total,
                   spec["page_title"] % region, fontsize=TITLE_FONTSIZE, fontweight="bold",
                   va="top", ha="center")
-        fig.text(heading_x_in / page_w, (page_h_total - HEADING_TOP_PAD_IN) / page_h_total,
+        fig.text(heading_x_in / page_w, (sep_y1_in + HEADING_ABOVE_GRID_IN) / page_h_total,
                   spec["group_heading"], fontsize=LABEL_FONTSIZE, fontweight="bold",
-                  va="top", ha="center")
+                  va="bottom", ha="center")
 
         out_dir = os.path.join(config.data_root, "bmstp", "atlas", "figures")
         os.makedirs(out_dir, exist_ok=True)
@@ -927,7 +927,7 @@ def build_posterior_region(config, region, formats):
                         grey=gap_grid)
 
         col_panel = dict(data=col_grid, cmap="magma", norm=_log_norm(col_grid),
-                          title=plot_style.label("Column $A_K$", "mag"), cbar_label=None, grey=None)
+                          title=plot_style.label(r"Column $\mathbf{A_K}$", "mag"), cbar_label=None, grey=None)
         # N_YSO_ABOVE_HALF (P11) is a raw per-pixel COUNT of P(YSO)>0.5
         # sources, never divided by the pixel's own solid angle -- unlike
         # N_CAT_C (deg^-2 already), so this title carries no unit rather
