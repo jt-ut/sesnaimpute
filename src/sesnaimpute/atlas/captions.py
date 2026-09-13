@@ -4,6 +4,7 @@ printed on both pages (`atlas.shapes`, `atlas.render`), so a reader never
 has to guess what a term means or which probability a panel shows.
 """
 
+import os
 import textwrap
 
 #: The vocabulary, in the order a reader meets the terms. Each entry is
@@ -42,9 +43,10 @@ VOCABULARY = (
     ("prior density Lambda_C",
      "Lambda_C(x, $F_{4.5}$; s) = A_C(s) h_C(x, $F_{4.5}$) f_C($F_{4.5}$; s), "
      "the density the fitter compares between classes"),
-    ("cataloged",
+    ("selected",
      "passing the survey's selection at the sky pixel: two of the eight bands "
-     "measured above the pixel's limits"),
+     "measured above the pixel's limits (the catalog's own condition; also "
+     "called cataloged)"),
     ("measured coordinate r = a_hat / A_beam",
      "the fitted foreground over the sightline's own BEAM-averaged column, rather than "
      "x's own true pencil column; the column kernel carries a class's shape past the wall "
@@ -77,13 +79,13 @@ ATLAS_INTRINSIC_TOTAL = (
     "sky pixel's own 50% completeness limit (the depth grid, from the "
     "sources' own IRAC limits).")
 ATLAS_SELECTION_CLASS = (
-    "Class panels: P(C | sky pixel, cataloged) = N_C(pixel) / sum over classes "
-    "of N(pixel), with N_C the prior's density of cataloged sources of class C "
-    "-- the prior probability that a cataloged source in this sky pixel is of "
+    "Class panels: P(C | sky pixel, selected) = N_C(pixel) / sum over classes "
+    "of N(pixel), with N_C the prior's density of selected sources of class C "
+    "-- the prior probability that a selected source in this sky pixel is of "
     "class C.")
 ATLAS_SELECTION_TOTAL = (
     "Density panel: sum over classes of N_C(pixel), per square degree -- the "
-    "prior's sky density of cataloged sources; the white outline marks the "
+    "prior's sky density of selected sources; the white outline marks the "
     "IRAC footprint at one half.")
 
 #: The region shapes page's three rows (`atlas.shapes.build_region_prior`,
@@ -127,7 +129,7 @@ SHAPES_REGION_TOTALS = (
 #: line: `{value}` is the region's own N_prior / N_catalog ratio.
 TOTAL_COUNT_CHECK = (
     r"$N_{{prior}} / N_{{catalog}}$ = {value:.3f}: the prior's expected number "
-    "of cataloged sources in the region (the selection densities summed over "
+    "of selected sources in the region (the selection densities summed over "
     "the sky pixels, times the surveyed area) against the number of sources "
     "in the catalog -- the check that the prior's normalization reproduces "
     "the survey's count; the observations enter here only as that check.")
@@ -184,6 +186,22 @@ PROTOSTAR_TIERS = (
 def vocabulary_block():
     """The vocabulary as one string, one term per line, for a page's caption."""
     return "\n".join("%s: %s" % (term, definition) for term, definition in VOCABULARY)
+
+
+def write_vocabulary(out_dir):
+    """Writes `vocabulary.txt` under `out_dir`: a one-line header naming
+    what the file is, then `vocabulary_block()` in full. The prior
+    pages' own captions carry the two panel statements (and, on the
+    selection page, the total-count check) but not this block, so a
+    caller writes it once per figure built; an idempotent overwrite,
+    since every call writes the same content to the same path."""
+    path = os.path.join(out_dir, "vocabulary.txt")
+    with open(path, "w") as f:
+        f.write("Vocabulary for the prior atlas pages (prior-atlas-intrinsic/"
+                 "prior-atlas-selection):\n\n")
+        f.write(vocabulary_block())
+        f.write("\n")
+    return path
 
 
 def caption_layout(text, wrap_chars, line_height_in, top_pad_in, bottom_pad_in):
