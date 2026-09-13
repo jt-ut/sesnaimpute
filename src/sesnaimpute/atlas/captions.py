@@ -93,42 +93,23 @@ ATLAS_SELECTION_TOTAL = (
     "prior's sky density of selected sources; the white outline marks the "
     "IRAC footprint at one half.")
 
-#: The region shapes page's three rows (`atlas.shapes.build_region_prior`,
-#: SPEC_BMSTP_DRAFT.md sec. 8): P6's own per-cell region grids, read and
+#: The region shapes page's one row (`atlas.shapes.build_region_prior`,
+#: SPEC_BMSTP_DRAFT.md sec. 8): P6's own per-cell region grid, read and
 #: never recomputed (rule 5).
-SHAPES_REGION_ROW_TITLES = (
-    "Row 1 -- N_CAT_CELL: the cataloged count per cell",
-    "Row 2 -- the class share among cataloged objects",
-    "Row 3 -- N_CELL: the intrinsic prior density (selection-free)",
-)
 SHAPES_REGION_ROW1 = (
-    "Row 1, per class: N_CAT_CELL_C(cell) -- the region's expected number "
-    "of cataloged objects of class C per parameter cell (bmstp.atlas P6, "
-    "sec. 8), summing over cells to RATIO_C * TOTAL_OBSERVED. One log "
-    "color scale for all six panels, so the panels compare cell by cell; "
-    "a cell below one millionth of the row's peak is white, and each panel's "
-    "title carries that class's own peak, so a class whose whole count sits "
-    "below that floor draws white by that rule and not for want of mass.")
-SHAPES_REGION_ROW2 = (
-    "Row 2, per class: N_CAT_CELL_C(cell) / sum over classes of "
-    "N_CAT_CELL(cell) -- the class share of the region's cataloged "
-    "objects at that cell, drawn wherever the denominator is nonzero and "
-    "white elsewhere. The two contours over each panel enclose 50% and "
-    "99% of that class's own cataloged mass (row 1's own density), so "
-    "the eye reads the share where the population lives.")
-SHAPES_REGION_ROW3 = (
-    "Row 3, per class: N_CELL_C(cell) -- the region's UNTHINNED intrinsic "
-    "population of class C per parameter cell (bmstp.atlas P6, sec. 8), "
-    "before the survey's selection: no flux cut, no dimming. One log "
-    "color scale for all six panels, the same floor and the same peak-in-title "
-    "convention as row 1.")
+    "Each panel: N_C(cell), the number of selected objects of class C the "
+    "prior expects in the region per parameter cell (ξ, F_4.5), summed "
+    "over the region's sources; one log colour scale for the six panels, "
+    "white at one millionth of the row's peak. The dotted line is the "
+    "region's median 4.5 µm 50 % completeness limit; the dashed line "
+    "is ξ = 1.")
 #: The region totals line, one per class (rule 7a): `{n_cat}` = sum
-#: N_CAT_CELL_C = the class's cataloged count, `{n_cell}` = sum N_CELL_C =
-#: its intrinsic count, `{ratio}` their ratio = the class's catalogable
-#: fraction.
+#: N_CAT_CELL_C = the class's selected count, `{n_cell}` = sum N_CELL_C =
+#: its count before selection, `{ratio}` their ratio = the class's
+#: catalogable fraction.
 SHAPES_REGION_TOTALS = (
-    "{cls}: cataloged={n_cat:.6g}, intrinsic={n_cell:.6g}, "
-    "catalogable fraction={ratio:.6f}")
+    "{cls}: selected {n_cat:.6g} of {n_cell:.6g} before selection "
+    "(fraction {ratio:.3f})")
 
 #: The total-count check (sec. 8, sec. 9), the selection page's caption
 #: line: `{value}` is the region's own N_prior / N_catalog ratio.
