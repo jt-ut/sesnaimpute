@@ -582,7 +582,10 @@ def _draw_figure(config, region, data):
     for c, cls in enumerate(CLASS_ORDER):
         x0 = margin_l + c * (shape_w + col_gap)
         ax1 = fig.add_axes([x0 / page_w, y0_row1 / page_h, shape_w / page_w, row_h / page_h])
-        im1 = ax1.imshow(joint[cls].T, origin="lower", aspect="auto", extent=extent, cmap=cmap1, norm=norm1)
+        # a cell at the common floor is drawn white (masked), as the region
+        # page draws a cell below its floor, so the floor is not a colour
+        arr1 = np.ma.masked_less_equal(joint[cls], norm1.vmin)
+        im1 = ax1.imshow(arr1.T, origin="lower", aspect="auto", extent=extent, cmap=cmap1, norm=norm1)
         ax1.axvline(_LOG10_XI_EDGE, color="0.35", lw=0.9, linestyle="--", alpha=0.9)
         ax1.set_xlim(_LOG10_XI_MIN, log10_xi_max)
         # No x-axis title on row 1 -- row 2 below carries it; the tick

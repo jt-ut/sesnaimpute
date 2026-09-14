@@ -58,7 +58,7 @@ VOCABULARY = (
 #: The probability each panel draws, one statement per panel kind.
 SHAPES_ROW1 = (
     "Top row, per class: P(C, cell | s), the prior probability that a "
-    "source at s is of class C and lies in the cell at (ξ̂, F_4.5); "
+    "source at s is of class C and lies in the cell at ($\\hat{\\xi}$, F_4.5); "
     "one log color scale for the six panels.")
 SHAPES_ROW2 = (
     "Bottom row, per class: P(C | cell, s) = Lambda_C(cell) / sum over classes of "
