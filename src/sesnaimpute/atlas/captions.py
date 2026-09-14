@@ -144,7 +144,7 @@ PROTOSTAR_CASES = (
     "limit.")
 
 PROTOSTAR_RATIO = (
-    "Protostars per YSO the prior expects in the footprint: "
+    "Protostars per YSO the prior expects in the covered footprint: "
     "{ratio:.3f} (Dunham et al. 2014: {dunham:g}).")
 
 
