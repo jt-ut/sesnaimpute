@@ -49,6 +49,7 @@ from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.population import field_stars
+from sesnaimpute.population import knot_rate
 from sesnaimpute.population import yso as yso_module
 from sesnaimpute.population.yso import PROVENANCE_HERSCHEL, law_count, pc2_per_deg2
 from sesnaimpute.bmstp import grid
@@ -56,14 +57,6 @@ from sesnaimpute.bmstp import knot_field
 from sesnaimpute.bmstp import sample_cloud
 from sesnaimpute.bmstp import sample_gal
 
-#: Knots per law-predicted young star, depth-corrected, by region --
-#: Froebrich et al. 2015 (UWISH2), Giannini et al. 2013.
-ETA = {
-    "Cygnus X": 0.0065,
-    "North America Nebula": 0.0394,
-    "Vela D": 0.0408,
-}
-ETA_ELSEWHERE = 0.0401
 #: The fraction of knots clearing the limits that the source finder
 #: catalogues -- cross-matches against five knot surveys (section 5.6).
 EPS_EXT = 0.25
@@ -313,7 +306,7 @@ def build_region(config, region, st):
     # convolution sampled at the source instead (a map operation, once
     # per region). An edge Herschel-arm source (outside the convolved
     # map) falls back to `density_yso_intrinsic`, counted below.
-    eta_r = ETA.get(region, ETA_ELSEWHERE)
+    eta_r, eta_band_dex = knot_rate.eta_for_region(config, region)
     law_map, law_wcs, knot_meta = knot_field.convolved_law(config, region)
     herschel_mask = arm == PROVENANCE_HERSCHEL
     l_of_s = density_yso_intrinsic.copy()
@@ -356,7 +349,7 @@ def build_region(config, region, st):
         on_grid_star=on_grid_star, on_grid_agb=on_grid_agb, on_grid_yso=on_grid_yso,
         on_grid_h2s=on_grid_h2s, on_grid_gal=on_grid_gal, d_front=d_front,
         omega_sim=omega_sim, f_dusty_o=f_dusty_o, f_dusty_c=f_dusty_c, f_c=f_c,
-        eta_r=eta_r, retention_limits=retention_limits, yso_law_err=yso_law_err,
+        eta_r=eta_r, eta_band_dex=eta_band_dex, retention_limits=retention_limits, yso_law_err=yso_law_err,
         kappa_used=kappa_used,
         d_r_pc=d_r_pc, n=n, knot_meta=knot_meta, n_herschel=n_herschel, n_edge=n_edge,
         knot_ratio_median=knot_ratio_median, knot_ratio_p90=knot_ratio_p90)
@@ -385,6 +378,7 @@ def write_region(path, result):
         f.create_dataset("DENSITY_H2S", data=result["density_h2s"].astype(np.float64))
         f.attrs["KAPPA_USED"] = result["kappa_used"]
         f.attrs["ETA"] = result["eta_r"]
+        f.attrs["ETA_BAND_DEX"] = result["eta_band_dex"]
         f.attrs["EPS_EXT"] = EPS_EXT
         f.attrs["F_DUSTY_O"] = result["f_dusty_o"]
         f.attrs["F_DUSTY_C"] = result["f_dusty_c"]
