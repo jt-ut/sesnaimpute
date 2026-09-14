@@ -75,6 +75,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import h2s as h2s_module
+from sesnaimpute.population import knot_rate
 from sesnaimpute.population import pahc_curve
 from sesnaimpute.population import selection as selection_module
 from sesnaimpute.population import yso as yso_module
@@ -1654,7 +1655,9 @@ def build_region(config, region):
         # and H2S's mean density below read, so they never disagree. The
         # map itself is convolved ONCE here (sec. 5.6 "a map operation,
         # once per region") and passed to both calls.
-        eta_r = density_module.ETA.get(region, density_module.ETA_ELSEWHERE)
+        # the region's knot rate, formed at build against the fitted law
+        # (`population.knot_rate`, the same call `bmstp.density` makes)
+        eta_r = knot_rate.eta_for_region(config, region)
         law_map, law_wcs, knot_meta = knot_field.convolved_law(config, region)
         density_yso_pix_law = yso_module.law_count(
             config, region, a_col_gas * cloud_frac_by_sl[sl_row_of_pix], arm)
