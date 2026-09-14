@@ -41,7 +41,7 @@ from sesnaimpute import progress
 from sesnaimpute.atlas import captions
 from sesnaimpute.atlas import shapes as shapes_module
 from sesnaimpute.atlas.render import (
-    LABEL_FONTSIZE, _add_panel, _align, _footprint_geometry, _log_norm, _panel_colorbar, _reproject)
+    LABEL_FONTSIZE, _add_panel, _footprint_geometry, _log_norm, _panel_colorbar, _reproject)
 from sesnaimpute.bmstp import grid
 from sesnaimpute.fittp import likelihood as likelihood_module
 from sesnaimpute.population import kernel as kernel_module
@@ -297,9 +297,13 @@ def _read_w_dex_i2(config, region):
 
 
 def _read_prior_atlas(config, region):
-    """P6's admitted nside-512 pixels and cataloged YSO share, sorted by
-    pixel for the `searchsorted` joins below (the position line, sec.
-    5.5's caption (ii))."""
+    """P6's admitted nside-512 pixels, the cataloged YSO share (the
+    position line, sec. 5.5's caption (ii)), and the young-star law's own
+    AREA INTEGRAL per pixel `INTENSITY_YSO` (deg^-2) with each pixel's own
+    survey `COVERAGE` -- Panel C's own map and its `N_YSO_prior` count
+    (sec. 5.5), never the per-source law read at the sources' own columns
+    (`DENSITY_YSO`, which is not the pixel's area integral). Sorted by
+    pixel for the `searchsorted` joins below."""
     path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
     if not os.path.exists(path):
         raise ValueError(
@@ -308,19 +312,22 @@ def _read_prior_atlas(config, region):
     with h5py.File(path, "r") as f:
         pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
         share_yso = np.asarray(f["SHARE_YSO"][:], dtype=np.float64)
+        intensity_yso = np.asarray(f["INTENSITY_YSO"][:], dtype=np.float64)
+        coverage = np.asarray(f["COVERAGE"][:], dtype=np.float64)
     order = np.argsort(pix)
-    return pix[order], share_yso[order]
+    return pix[order], share_yso[order], intensity_yso[order], coverage[order]
 
 
 def _read_density_table_for_map(config, region):
-    """P1's per-source `HPX_512` and `DENSITY_YSO` (sec. 5.5's quadratic
-    column law, evaluated at each catalogued source's own column) -- panel
-    2's own map, unchanged from the prior design."""
+    """P1's per-source `HPX_512`: each catalogued source's own pixel, the
+    position line's own denominator (`_position_line`'s `density_hpx512`
+    argument, item 6 of the 2026-09-13 owner ruling). Panel C's own map
+    and count read the atlas product's own `INTENSITY_YSO`/`COVERAGE`
+    directly (`_read_prior_atlas`) and no longer need this per-source
+    table's `DENSITY_YSO`."""
     path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
     with h5py.File(path, "r") as f:
-        hpx512 = np.asarray(f["HPX_512"][:], dtype=np.int64)
-        density_yso = np.asarray(f["DENSITY_YSO"][:], dtype=np.float64)
-    return hpx512, density_yso
+        return np.asarray(f["HPX_512"][:], dtype=np.int64)
 
 
 def _join(atlas_pix, atlas_values, query_pix):
@@ -573,22 +580,23 @@ def _position_line(config, region, protostars_pix, atlas_pix, share_yso, density
     return median_proto, median_source, int(np.count_nonzero(~found))
 
 
-def _panel_c(footprint_pix, density_hpx512, density_yso, n_proto_footprint):
-    """The map of the prior's intrinsic YSO density per pixel, the
-    protostars overplotted by class, and the implied protostellar
-    fraction against Dunham et al. 2014 (sec. 5.5 Panel C, unchanged)."""
-    uniq_pix, inverse = np.unique(density_hpx512, return_inverse=True)
-    sum_density = np.bincount(inverse, weights=density_yso)
-    count_per_pix = np.bincount(inverse)
-    mean_density = sum_density / count_per_pix
-
-    aligned = _align(footprint_pix, uniq_pix, mean_density, np.nan)
+def _panel_c(atlas_pix, intensity_yso, coverage, n_proto_footprint):
+    """The map of the prior's own per-pixel young-star INTENSITY (deg^-2,
+    the law's area integral, `_read_prior_atlas`'s `INTENSITY_YSO` --
+    already in `atlas_pix` order, one row per admitted pixel, so no
+    per-source aggregation or alignment is needed here), the protostars
+    overplotted by class, and the implied protostellar fraction against
+    Dunham et al. 2014 (sec. 5.5 Panel C). `N_YSO_prior = Sum INTENSITY_YSO
+    * pixel area * COVERAGE` over the admitted pixels -- the same
+    coverage-weighted area integral the region page prints as the
+    population before selection (`bmstp.atlas`'s own `TOTAL_PREDICTED`),
+    never the per-source law read at the sources' own columns."""
     pixel_area_deg2 = float(hp.nside2pixarea(NSIDE_512, degrees=True))
-    n_yso_prior = float(np.nansum(aligned) * pixel_area_deg2)
+    n_yso_prior = float(np.sum(intensity_yso * coverage) * pixel_area_deg2)
     ratio = n_proto_footprint / n_yso_prior if n_yso_prior > 0 else float("nan")
 
-    geom = _footprint_geometry(footprint_pix)
-    grid_ = _reproject(footprint_pix, aligned, geom["grid_pix"], geom["shape"])
+    geom = _footprint_geometry(atlas_pix)
+    grid_ = _reproject(atlas_pix, intensity_yso, geom["grid_pix"], geom["shape"])
     return dict(geom=geom, grid=grid_, n_yso_prior=n_yso_prior, ratio=ratio)
 
 
@@ -635,13 +643,13 @@ def build_region(config, region, formats=("png", "pdf")):
         n_measured = int(np.count_nonzero(verdict["measured"]))
         n_not_measured = int(verdict["measured"].size - n_measured)
 
-        atlas_pix, share_yso = _read_prior_atlas(config, region)
-        density_hpx512, density_yso = _read_density_table_for_map(config, region)
+        atlas_pix, share_yso, intensity_yso, coverage = _read_prior_atlas(config, region)
+        density_hpx512 = _read_density_table_for_map(config, region)
         median_proto, median_source, n_dropped_pos = _position_line(
             config, region, pix_u, atlas_pix, share_yso, density_hpx512)
 
         n_proto_footprint = pix_u.size - n_dropped_pos
-        c = _panel_c(atlas_pix, density_hpx512, density_yso, n_proto_footprint)
+        c = _panel_c(atlas_pix, intensity_yso, coverage, n_proto_footprint)
         catalogue_word = _catalogue_word(region, protostars["survey"][used][~excluded])
 
         print(f"atlas.protostars [{region}]: n_class_ii_excluded={n_class_ii} "
@@ -672,7 +680,8 @@ def build_region(config, region, formats=("png", "pdf")):
         print(f"atlas.protostars [{region}] position: median_share_protostars={median_proto:.4g} "
               f"median_share_sources={median_source:.4g}")
         print(f"atlas.protostars [{region}] count: N_proto={n_proto_footprint} "
-              f"N_YSO_prior={c['n_yso_prior']:.4g} ratio={c['ratio']:.4g} "
+              f"N_YSO_prior(young stars the prior expects in the covered footprint)="
+              f"{c['n_yso_prior']:.4g} ratio={c['ratio']:.4g} "
               f"Dunham+2014 Class0+I+flat/all={DUNHAM2014_PROTOSTELLAR_FRACTION:g}")
 
         paths = _draw_figure(config, region, protostars, used, excluded, verdict,
