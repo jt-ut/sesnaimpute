@@ -50,7 +50,7 @@ from sesnaimpute.granules import access
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.population import field_stars
 from sesnaimpute.population import yso as yso_module
-from sesnaimpute.population.yso import KAPPA_HERSCHEL, PROVENANCE_HERSCHEL, law_count, pc2_per_deg2
+from sesnaimpute.population.yso import PROVENANCE_HERSCHEL, law_count, pc2_per_deg2
 from sesnaimpute.bmstp import grid
 from sesnaimpute.bmstp import knot_field
 from sesnaimpute.bmstp import sample_cloud
@@ -299,9 +299,10 @@ def build_region(config, region, st):
     with h5py.File(law_path, "r") as f:
         law_region_names = [v.decode("utf-8") for v in f["REGION"][:]]
         i_law = law_region_names.index(region)
-        file_kappa_h = float(f["KAPPA_HERSCHEL"][()])
+        file_kappa_used = float(f["KAPPA_USED"][i_law])
         file_pc2 = float(f["PC2_PER_DEG2"][i_law])
-    yso_law_err = max(abs(KAPPA_HERSCHEL - file_kappa_h), abs(pc2 - file_pc2) / file_pc2)
+    kappa_used = yso_module._kappa_used(config, region)
+    yso_law_err = max(abs(kappa_used - file_kappa_used), abs(pc2 - file_pc2) / file_pc2)
 
     # H2S, sec. 5.6 "Sky density": `A_H2S(s) = L(s) . eta_r . eps_ext .
     # ON_GRID_H2S(s)`. `L(s)` is the INTRINSIC young-star law at the
@@ -356,6 +357,7 @@ def build_region(config, region, st):
         on_grid_h2s=on_grid_h2s, on_grid_gal=on_grid_gal, d_front=d_front,
         omega_sim=omega_sim, f_dusty_o=f_dusty_o, f_dusty_c=f_dusty_c, f_c=f_c,
         eta_r=eta_r, retention_limits=retention_limits, yso_law_err=yso_law_err,
+        kappa_used=kappa_used,
         d_r_pc=d_r_pc, n=n, knot_meta=knot_meta, n_herschel=n_herschel, n_edge=n_edge,
         knot_ratio_median=knot_ratio_median, knot_ratio_p90=knot_ratio_p90)
 
@@ -381,7 +383,7 @@ def write_region(path, result):
         f.create_dataset("DENSITY_GAL", data=result["density_gal"].astype(np.float64))
         f.create_dataset("DENSITY_YSO", data=result["density_yso"].astype(np.float64))
         f.create_dataset("DENSITY_H2S", data=result["density_h2s"].astype(np.float64))
-        f.attrs["KAPPA_HERSCHEL"] = KAPPA_HERSCHEL
+        f.attrs["KAPPA_USED"] = result["kappa_used"]
         f.attrs["ETA"] = result["eta_r"]
         f.attrs["EPS_EXT"] = EPS_EXT
         f.attrs["F_DUSTY_O"] = result["f_dusty_o"]
@@ -497,7 +499,7 @@ def build(config, regions=None):
                         a_sq = a_cloud_h ** 2
                     else:
                         a_sq = float(yso_module._kernel_second_moment_planck(config, np.array([a_cloud_h]))[0])
-                    hand_yso[k] = KAPPA_HERSCHEL * pc2_h * a_sq * result["on_grid_yso"][k]
+                    hand_yso[k] = result["kappa_used"] * pc2_h * a_sq * result["on_grid_yso"][k]
                 hand_dev = float(np.max(np.abs(hand_yso - result["density_yso"][:n_check])))
             else:
                 hand_dev = float("nan")
