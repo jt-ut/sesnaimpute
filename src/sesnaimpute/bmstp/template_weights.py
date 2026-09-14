@@ -46,7 +46,16 @@ not `log10` stellar mass (owner's ruling 2026-09-09): a template's
 4.5 micron flux is a disc-and-envelope quantity the IMF over photospheric
 mass does not constrain, so the numerator is Dunham et al. 2015's own
 census density in the same quantity, not the IMF (sec 1.4's "which
-quantities are constrained is set by the data, not by choice").
+quantities are constrained is set by the data, not by choice"). Both
+sides run over every YSO template, Class III included: the census's own
+brightness histogram already carries the Class III objects' fluxes (no
+class cut on the catalogue, W83), so excluding CIII templates from the
+library side alone would double-count the mismatch. The evolutionary-
+class census (statement (iii), `yso_population_weight`) then splits
+`w_theta` into three groups fitted on the same census's own slopes,
+`population/yso/law_yso_region.hdf5`'s `CLASS_SHARE_PROTO`/
+`CLASS_SHARE_DISK`/`CLASS_SHARE_WEAK` (W83, the young-star population
+redefined on the Dunham census), not module constants.
 
 Survey products (galz) are built once; region products (yso, sps, agb,
 pahc, h2shock) once per region named on the command line. H2S is regional
@@ -96,6 +105,11 @@ from sesnaimpute.population import pahc_curve
 #: `config_module.product_path`.
 DUNHAM2015_CENSUS_PATH_ARGS = ("sky/derived", "dunham2015", "yso", "survey")
 
+#: `population/yso/law_yso_region.hdf5`'s own path args (W83's schema):
+#: the source of the evolutionary-class shares `CLASS_SHARE_PROTO`/
+#: `CLASS_SHARE_DISK`/`CLASS_SHARE_WEAK`, statement (iii)'s numerator.
+YSO_LAW_REGION_PATH_ARGS = ("population", "yso", "law", "region")
+
 #: A normalised factor's value in an empty cell, and the floor every
 #: normalised template-weight factor is renormalised against (spec sec 2,
 #: "the floor": no hypothesis at -inf from the prior); shared with
@@ -115,16 +129,19 @@ PROB_CAP = 1.0 - FACTOR_FLOOR
 YSO_SUBGRIDS = (("c0", "C0"), ("cI", "CI"), ("cII", "CII"),
                 ("cIII", "CIII"), ("td", "TD"))
 
-#: The evolutionary-class census (spec sec 5.5, Dunham et al. 2014's
-#: Class 0+I+flat fraction over the c2d and Gould Belt clouds, owner's
-#: ruling 2026-09-09): Class 0 and Class I together carry this share of
-#: the YSO population.
-YSO_PROTOSTAR_SHARE = 0.27
-#: Class II and transition disk together carry this share (Dunham+2014);
-#: Class III (a bare photosphere) carries none and leaves the population.
-YSO_DISK_SHARE = 0.73
-YSO_CENSUS_GROUPS = (({"C0", "CI"}, YSO_PROTOSTAR_SHARE),
-                      ({"CII", "TD"}, YSO_DISK_SHARE))
+#: The evolutionary-class groups the census fits a share for (spec sec
+#: 5.5; W83, "the young-star population redefined on the Dunham
+#: census"): three groups, the census's own three slope groups --
+#: Class 0 + Class I (protostellar), Class II + transition disk
+#: (disc-bearing), and Class III (`definitions.py`'s `CIII`, "Stage
+#: III: M_env < 0.1 Msun, no disc; not a bare photosphere" -- a real
+#: member of the YSO population, not excluded). Label sets only: the
+#: shares themselves, `CLASS_SHARE_PROTO`/`CLASS_SHARE_DISK`/
+#: `CLASS_SHARE_WEAK`, are `population/yso/law_yso_region.hdf5`'s own
+#: fitted scalars (the schema, `_yso_class_shares`), read at
+#: `yso_population_weight` call time -- a fitted quantity, not a module
+#: constant.
+YSO_CENSUS_GROUPS = ({"C0", "CI"}, {"CII", "TD"}, {"CIII"})
 
 #: The floor yso `population`'s library-density histogram of
 #: `log10 f_ref,4.5,theta` holds per bin before it is trusted as a density
@@ -370,31 +387,53 @@ def _dunham_census_brightness_histogram(config):
     return p_census, n_finite
 
 
+def _yso_class_shares(config):
+    """The evolutionary-class census's three shares (W83, `_W83_design.md`
+    schema): `CLASS_SHARE_PROTO`, `CLASS_SHARE_DISK`, `CLASS_SHARE_WEAK`,
+    fitted on Dunham et al. 2015's own slopes and read from
+    `population/yso/law_yso_region.hdf5` -- a fitted scalar, not a module
+    constant, so `yso_population_weight` reads it fresh at call time.
+    Returns `(share_proto, share_disk, share_weak)`, matching
+    `YSO_CENSUS_GROUPS`'s own order."""
+    path = config_module.product_path(config, *YSO_LAW_REGION_PATH_ARGS)
+    with h5py.File(path, "r") as f:
+        share_proto = float(f["CLASS_SHARE_PROTO"][()])
+        share_disk = float(f["CLASS_SHARE_DISK"][()])
+        share_weak = float(f["CLASS_SHARE_WEAK"][()])
+    return share_proto, share_disk, share_weak
+
+
 def yso_population_weight(config):
     """The YSO `population` weight `w_theta` (spec sec 5.5 "Template
-    weights", owner's ruling 2026-09-09): three population
-    statements and one division, shared verbatim by `build_yso` below,
-    `sample_cloud.p_ref_f45` and `bmstp.atlas._yso_register` -- called by
-    all three rather than re-derived, so the class census and the
-    brightness density live in exactly one place. (i) Dunham et al.
-    2015's own census density at each template's `log10 f_ref,4.5,theta`
-    (`C_THETA`, floored the same way `_c_theta` floors it),
-    `_dunham_census_brightness_histogram`'s per-cell value -- zero where
-    the census does not populate the cell, the census being complete
-    there -- divided by the library's density of templates in the SAME
-    quantity (`_fixed_width_binned_density`, `YSO_F45_BIN_DEX` bins
-    floored at `LIBRARY_DENSITY_MIN_COUNT`, Class III templates excluded,
-    never `RHO_KDE1`): a disc-and-envelope flux the IMF over photospheric
-    mass does not constrain, so no IMF over mass enters
-    (`population.yso_mass` is not read here; its product and stage
-    stay in place for sec 3.5's mass table and the protostar check).
-    (ii) The viewing angle, uniform in cos i (the existing sin i factor).
-    (iii) The evolutionary-class census: Class 0 + Class I together carry
-    `YSO_PROTOSTAR_SHARE`, Class II + transition disk together
-    `YSO_DISK_SHARE` (Dunham et al. 2014), Class III none; the split
-    within a pair is the templates' own (i)x(ii) weight. `Sigma w_theta`
-    is exactly 1 (the two shares sum to 1) by construction. Returns
-    `(names, w_theta)` in the register's own row order."""
+    weights", W83 "the young-star population redefined on the Dunham
+    census"): three population statements and one division, shared
+    verbatim by `build_yso` below, `sample_cloud.p_ref_f45` and
+    `bmstp.atlas._yso_register` -- called by all three rather than
+    re-derived, so the class census and the brightness density live in
+    exactly one place. (i) Dunham et al. 2015's own census density at
+    each template's `log10 f_ref,4.5,theta` (`C_THETA`, floored the same
+    way `_c_theta` floors it), `_dunham_census_brightness_histogram`'s
+    per-cell value -- zero where the census does not populate the cell,
+    the census being complete there -- divided by the library's density
+    of templates in the SAME quantity (`_fixed_width_binned_density`,
+    `YSO_F45_BIN_DEX` bins floored at `LIBRARY_DENSITY_MIN_COUNT`, EVERY
+    YSO template including Class III, never `RHO_KDE1`): a disc-and-
+    envelope flux the IMF over photospheric mass does not constrain, so
+    no IMF over mass enters (`population.yso_mass` is not read here; its
+    product and stage stay in place for sec 3.5's mass table and the
+    protostar check). The census's own brightness histogram already
+    carries the Class III objects' fluxes (no class cut on the
+    catalogue), so the library side matches it template for template.
+    (ii) The viewing angle, uniform in cos i (the existing sin i
+    factor). (iii) The evolutionary-class census: three groups fitted on
+    the census's own slopes (`_yso_class_shares`,
+    `population/yso/law_yso_region.hdf5`'s `CLASS_SHARE_PROTO`/
+    `CLASS_SHARE_DISK`/`CLASS_SHARE_WEAK`) -- Class 0 + Class I together,
+    Class II + transition disk together, Class III alone; the split
+    within a group is the templates' own (i)x(ii) weight. `Sigma w_theta`
+    is exactly 1 (the three shares sum to 1, the schema's own invariant)
+    by construction. Returns `(names, w_theta)` in the register's own
+    row order."""
     reg = _read_register(config, "yso")
     names, subclass = reg["names"], reg["subclass"]
     n_model = names.size
@@ -417,26 +456,27 @@ def yso_population_weight(config):
 
     # (i) the census density over the constrained quantity, log10 F_ref
     # (spec sec 5.5 "Template weights"): the library's density is
-    # measured on the population templates only (Class III excluded, a
-    # bare photosphere is not in the YSO population, spec sec 5.5).
+    # measured over EVERY YSO template, Class III included --
+    # `definitions.py`'s own CIII is Stage III ("M_env < 0.1 Msun, no
+    # disc; not a bare photosphere"), a real member of the population,
+    # and the census's own brightness histogram already carries its
+    # objects' fluxes (W83).
     p_census, _n_census = _dunham_census_brightness_histogram(config)
     bin_idx = np.digitize(c_theta, grid.LOG10_F45_EDGES) - 1
     in_range = (bin_idx >= 0) & (bin_idx < p_census.size)
     p_at_theta = np.zeros(n_model, dtype=np.float64)
     p_at_theta[in_range] = p_census[np.clip(bin_idx[in_range], 0, p_census.size - 1)]
 
-    not_ciii = subclass != "CIII"
-    n_lib_not_ciii = _fixed_width_binned_density(c_theta[not_ciii], YSO_F45_BIN_DEX,
-                                                  LIBRARY_DENSITY_MIN_COUNT)
-    w_pre_census = np.zeros(n_model, dtype=np.float64)
-    w_pre_census[not_ciii] = (p_at_theta[not_ciii] * incl_raw[not_ciii]
-                               / n_lib_not_ciii)                # (i) x (ii), sec 1.4's division
+    n_lib = _fixed_width_binned_density(c_theta, YSO_F45_BIN_DEX, LIBRARY_DENSITY_MIN_COUNT)
+    w_pre_census = p_at_theta * incl_raw / n_lib                # (i) x (ii), sec 1.4's division
 
-    # (iii) the evolutionary-class census: within each pair the split is
-    # w_pre_census's own share; Class III's templates are left at zero
-    # (not in the YSO population, spec sec 5.5).
+    # (iii) the evolutionary-class census: three groups fitted on Dunham
+    # et al. 2015's own slopes (W83, `_yso_class_shares`); within each
+    # group the split is w_pre_census's own share.
+    share_proto, share_disk, share_weak = _yso_class_shares(config)
+    census_groups = tuple(zip(YSO_CENSUS_GROUPS, (share_proto, share_disk, share_weak)))
     w_theta = np.zeros(n_model, dtype=np.float64)
-    for labels, share in YSO_CENSUS_GROUPS:
+    for labels, share in census_groups:
         sel = np.isin(subclass, list(labels))
         group_sum = w_pre_census[sel].sum()
         if group_sum > 0:
