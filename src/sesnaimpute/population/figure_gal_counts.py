@@ -39,7 +39,7 @@ STATEMENT_FONTSIZE = 9
 #: This figure's own fixed page size (the brief's own acceptance line),
 #: not a `FIGURE_SIZES` entry -- one panel with a strip beneath, wide
 #: enough for the strip's own axis and the statement line below it.
-PAGE_WIDTH_IN, PAGE_HEIGHT_IN = 10.0, 7.0
+PAGE_WIDTH_IN, PAGE_HEIGHT_IN = 16.0, 6.0
 
 
 def _plain_number(value):
