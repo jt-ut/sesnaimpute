@@ -40,11 +40,10 @@ population (sec. 8): alongside it this build writes `N_CAT_CELL_<C>` (128, 110,
 `grid.LOG10_XI_EDGES` by `grid.LOG10_F45_EDGES`) for all six classes, each
 class's own expected number of catalogued objects per parameter cell, summing
 over cells to `RATIO_<C> * N_source`; and `N_CELL_<C>` (same axes, sec. 8's
-intrinsic population), the class's UNTHINNED population per cell -- no flux
-cut, no dimming -- `Sum_pix coverage * pixel area * A_C(pixel) * h_C(cell;
-pixel) * f_C(cell; pixel)`, the same per-pixel grain shape and weight factor
-the intrinsic view's `_above_fraction` reads, gathered over every cell rather
-than collapsed above one flux limit.
+intrinsic population), the SAME members quadrature as `N_CAT_CELL_<C>` with
+every member's own probability of being catalogued set to one (no flux cut,
+no dimming enters that one factor), so `N_CAT_CELL_<C> <= N_CELL_<C>` cell by
+cell by construction and their ratio is the class's surviving fraction.
 
 Every module on this atlas's worker path (this module, `knot_field`,
 `sample_gal`, `sample_star`, `sample_cloud`, `grid`, `density`,
@@ -589,7 +588,7 @@ def _collapse_star_members(u, flux0, w_star, w_star_only, w_pahc_only):
 def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_in_tile, width_dex,
                      agb_pool, coverage_in_tile):
     """One tile's `{cls: (frac, density, frac_bright3, frac_bright10,
-    n_cat_cell_tile)}` for STAR/AGB/PAHC, over its own admitted pixels,
+    n_cat_cell_tile, n_cell_tile)}` for STAR/AGB/PAHC, over its own admitted pixels,
     from the star-family population's own retained sample (`population/
     star/population_star_tile__R.hdf5`'s `tile_<id>` group): each class's
     catalogued fraction is the WEIGHTED SUM over every one of its own
@@ -612,7 +611,13 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     on the class's own members at their own `x`/`log10 F_4.5`, weighted
     by each member's own expected catalogued count (`density * (w /
     w.sum()) * s_member`, `s_member` `catalogued_fraction`'s exact
-    pixel-area-weighted catalogued probability per member).
+    pixel-area-weighted catalogued probability per member). `n_cell_tile`
+    (128, 110) is the SAME members quadrature with the tile's own
+    pixel-area total (`weight_pix.sum()`) standing in for `s_member` --
+    every member's own probability of being catalogued set to one, no
+    flux cut, no dimming: `c_m_all = density * (w / w.sum()) *
+    weight_pix.sum()`, the same `_safe_cell_bin(u, log10 F_4.5, c_m_all)`,
+    so `n_cat_cell_tile <= n_cell_tile` cell by cell.
 
     The returned dict also carries `"_FIELD_STAR_DENSITY"`, the tile's
     own UNSPLIT field-star level `w_star.sum() / omega_t` (`density.
@@ -667,6 +672,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     u_c, flux0_c, w_star_c, w_pahc_c, n_members_before, n_members_after = (
         _collapse_star_members(u, flux0_all, w_star, w_star_only, w_pahc_only))
 
+    weight_pix_total = float(weight_pix.sum())
     out = {}
     for cls, weight_full, weight_c in (("STAR", w_star_only, w_star_c), ("PAHC", w_pahc_only, w_pahc_c)):
         m = weight_c > 0
@@ -677,12 +683,15 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
             frac_bright3 = np.zeros(pix_in_tile.size)
             frac_bright10 = np.zeros(pix_in_tile.size)
             n_cat_cell_tile = np.zeros((n_x, n_b))
+            n_cell_tile = np.zeros((n_x, n_b))
         else:
             frac, frac_bright3, frac_bright10, s_member = catalogued_fraction(
                 a_col_in_tile, u_c[m], flux0_c[m], w, f_lim_in_tile, width_dex, config, weight_pix)
             c_m = density * (w / w.sum()) * s_member
             n_cat_cell_tile = _safe_cell_bin(u_c[m], np.log10(flux0_c[m, IDX_I2]), c_m)
-        out[cls] = (frac, density, frac_bright3, frac_bright10, n_cat_cell_tile)
+            c_m_all = density * (w / w.sum()) * weight_pix_total
+            n_cell_tile = _safe_cell_bin(u_c[m], np.log10(flux0_c[m, IDX_I2]), c_m_all)
+        out[cls] = (frac, density, frac_bright3, frac_bright10, n_cat_cell_tile, n_cell_tile)
 
     # AGB (sec. 5.2): every evolved star with positive weight
     # (`sample_star.sample_agb`'s `w_a`; `x_a`'s first half O-rich,
@@ -729,6 +738,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         frac_agb_bright3 = np.zeros(pix_in_tile.size)
         frac_agb_bright10 = np.zeros(pix_in_tile.size)
         n_cat_cell_agb = np.zeros((n_x, n_b))
+        n_cell_agb = np.zeros((n_x, n_b))
     else:
         u_agb = np.concatenate(u_parts)
         flux0_agb = np.concatenate(flux0_parts, axis=0)
@@ -739,7 +749,9 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         w_sum_agb = float(w_agb_member.sum())
         c_m_agb = density_agb * (w_agb_member / w_sum_agb) * s_member_agb
         n_cat_cell_agb = _safe_cell_bin(u_agb, f45_agb_member, c_m_agb)
-    out["AGB"] = (frac_agb, density_agb, frac_agb_bright3, frac_agb_bright10, n_cat_cell_agb)
+        c_m_agb_all = density_agb * (w_agb_member / w_sum_agb) * weight_pix_total
+        n_cell_agb = _safe_cell_bin(u_agb, f45_agb_member, c_m_agb_all)
+    out["AGB"] = (frac_agb, density_agb, frac_agb_bright3, frac_agb_bright10, n_cat_cell_agb, n_cell_agb)
     # sec. 5.3's shared field-star intensity (`build_one_tile`'s own
     # docstring paragraph): the UNSPLIT field-star level, before the
     # STAR/PAHC retention split above -- `density.density_star_raw`'s
@@ -949,9 +961,9 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
     """One sightline's YSO and H2S quadratures over the population, no
     draw, shared by every admitted pixel it parents: `(frac_yso,
     density_yso, frac_yso_bright3, frac_yso_bright10, n_cat_cell_yso,
-    frac_h2s, frac_h2s_bright3, frac_h2s_bright10, n_cat_cell_h2s,
-    n_members_yso, n_members_h2s)` (sec. 9's bright-end check, same
-    members).
+    n_cell_yso, frac_h2s, frac_h2s_bright3, frac_h2s_bright10,
+    n_cat_cell_h2s, n_cell_h2s, n_members_yso, n_members_h2s)` (sec. 9's
+    bright-end check, same members).
 
     YSO (sec. 5.5): `flux0_ts`/`w_ts` are the region's own template x
     shift product (`_yso_region_nodes`, computed once by the caller),
@@ -985,7 +997,14 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
     `l_of_pix_in_sl * eta_r * eps_ext`, so `s_member` in both cases is
     already density-weighted and no second multiply is needed;
     `grid.bin(u, log10 F_4.5, c_m) * c_m.sum()` with `log10 F_4.5` the
-    member's own undimmed `log10 flux0[:, IDX_I2]`. No `rng`, no `seed`:
+    member's own undimmed `log10 flux0[:, IDX_I2]`. `n_cell_yso`/
+    `n_cell_h2s` are the SAME members quadrature with every member's own
+    probability of being catalogued set to one: `s_member`'s pixel sum
+    (`sum_pix weight_pix[pix] * p_cat[pix, m]`) is the same for every
+    member once `p_cat` is one, so it collapses to the sightline's own
+    density-weighted pixel-area total (`(density_yso * weight_pix).sum()`
+    for YSO, `weight_h2s.sum()` for H2S) -- `c_m_all = (w / w.sum()) *
+    that total`, binned the same way. No `rng`, no `seed`:
     every factor here is a deterministic quadrature, so this call induces
     no correlation between sightlines and no error term of its own."""
     a_cloud_in_sl = a_col_gas_in_sl * cloud_frac_sl
@@ -999,6 +1018,9 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
         weight_pix=density_yso * weight_pix)
     c_m_yso = (w_yso_full / w_yso_full.sum()) * s_member_yso
     n_cat_cell_yso = _safe_cell_bin(u_yso, np.log10(flux0_yso_full[:, IDX_I2]), c_m_yso)
+    weight_pix_yso_total = float(np.sum(density_yso * weight_pix))
+    c_m_yso_all = (w_yso_full / w_yso_full.sum()) * weight_pix_yso_total
+    n_cell_yso = _safe_cell_bin(u_yso, np.log10(flux0_yso_full[:, IDX_I2]), c_m_yso_all)
 
     u_h2s, flux0_h2s_full, w_h2s_full = _combine_with_depth(flux0_br, w_br, xi_centers, w_depth)
     weight_h2s = l_of_pix_in_sl * eta_r * density_module.EPS_EXT * weight_pix
@@ -1007,9 +1029,12 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
         weight_pix=weight_h2s)
     c_m_h2s = (w_h2s_full / w_h2s_full.sum()) * s_member_h2s
     n_cat_cell_h2s = _safe_cell_bin(u_h2s, np.log10(flux0_h2s_full[:, IDX_I2]), c_m_h2s)
+    weight_pix_h2s_total = float(weight_h2s.sum())
+    c_m_h2s_all = (w_h2s_full / w_h2s_full.sum()) * weight_pix_h2s_total
+    n_cell_h2s = _safe_cell_bin(u_h2s, np.log10(flux0_h2s_full[:, IDX_I2]), c_m_h2s_all)
 
-    return (frac_yso, density_yso, frac_yso_bright3, frac_yso_bright10, n_cat_cell_yso,
-            frac_h2s, frac_h2s_bright3, frac_h2s_bright10, n_cat_cell_h2s,
+    return (frac_yso, density_yso, frac_yso_bright3, frac_yso_bright10, n_cat_cell_yso, n_cell_yso,
+            frac_h2s, frac_h2s_bright3, frac_h2s_bright10, n_cat_cell_h2s, n_cell_h2s,
             int(u_yso.size), int(u_h2s.size))
 
 
@@ -1200,8 +1225,9 @@ def _gal_members(config):
 
 
 def _gal_catalogued_fraction(config, a_col, f_lim, width_dex, coverage, tick):
-    """`(frac, frac_bright3, frac_bright10, n_cat_cell, density, n_members_before,
-    n_members_after)` for GAL's one region-wide DETERMINISTIC quadrature (sec. 8).
+    """`(frac, frac_bright3, frac_bright10, n_cat_cell, n_cell, density,
+    n_members_before, n_members_after)` for GAL's one region-wide DETERMINISTIC
+    quadrature (sec. 8).
     `catalogued_probability` reaches `fittp.likelihood`'s one `@njit(parallel=True)`
     kernel (`_ln_one_minus_c_kernel`, via `_ln_one_minus_c`) -- the atlas's only
     numba call -- and numba's thread pool is not fork-safe: a process that has
@@ -1230,7 +1256,11 @@ def _gal_catalogued_fraction(config, a_col, f_lim, width_dex, coverage, tick):
     the `c_m.sum() == 0` case the same way as every other class's own cell grid
     (`_safe_cell_bin`'s own docstring). The mass `grid.bin`'s own edges drop is not
     stored (expected ~= 0 for GAL, sec. 5.4's population sitting well inside the
-    grid).
+    grid). `n_cell` (128, 110) is the SAME quadrature with every member's own
+    probability of being catalogued set to one: `s_member`'s pixel sum collapses
+    to the region's own coverage-weighted pixel-area total (`weight_pix_all.sum()`,
+    the same for every member), `c_m_all = density * (w / w.sum()) *
+    weight_pix_all.sum()`, `_safe_cell_bin(u, log10_s, c_m_all)`.
 
     `n_members_before`/`n_members_after` (`_gal_members`'s own return, passed
     through unchanged) are the region's `(node, template)` and `(node, colour
@@ -1260,7 +1290,9 @@ def _gal_catalogued_fraction(config, a_col, f_lim, width_dex, coverage, tick):
     w_sum = float(w.sum())
     c_m = density * (w / w_sum) * s_member
     n_cat_cell = _safe_cell_bin(u, log10_s, c_m)
-    return (frac, frac_bright3, frac_bright10, n_cat_cell, density,
+    c_m_all = density * (w / w_sum) * float(weight_pix_all.sum())
+    n_cell = _safe_cell_bin(u, log10_s, c_m_all)
+    return (frac, frac_bright3, frac_bright10, n_cat_cell, n_cell, density,
             n_members_before, n_members_after)
 
 
@@ -1333,8 +1365,8 @@ def _above_factor_batch_size(n_model, n_b):
     return max(1, _ABOVE_BATCH_BUDGET_BYTES // row_bytes)
 
 
-def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve, cell_weight):
-    """`(out, n_cell)`. Per admitted pixel, the deterministic sum
+def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve):
+    """`out`. Per admitted pixel, the deterministic sum
     `Sum_cells h_C(cell; grain) * f_C(F_j; pixel) * 1[F_obs(cell) > F_0]`
     that `N_ABOVE_C(pixel) = A_C(pixel) *` this sum multiplies
     (SPEC_BMSTP_DRAFT.md sec. 8). `h_C` is the class's own RAW stored grain
@@ -1357,18 +1389,7 @@ def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve,
     BATCH's own pixels only, never the whole admitted-pixel axis at once
     (a per-source-style call over every pixel at once ran 8.6 GB, Orion A
     PAHC, to 27 GB, Cygnus X, since the model axis can run to several
-    hundred templates).
-
-    `n_cell` (n_x, n_b): the region's UNTHINNED population per cell
-    (sec. 8's intrinsic population, `N_CELL_<C>`) -- `Sum_pix cell_weight[pix]
-    * h_C(cell; pixel) * f_C(cell; pixel)`, no flux cut and no dimming (the
-    `above`/`a`/`kappa45` terms above never enter it): the same `h_C`/`f_C`
-    this function already gathers for `out`, summed over every cell of the
-    grid rather than collapsed above one flux limit. `cell_weight[pix]` is
-    the caller's own `coverage * pixel area * INTENSITY_C(pixel)`, so
-    `n_cell.sum() == Sum_pix cell_weight[pix] * out[pix]` if `out` were
-    computed with `f0 = -inf` (no cut) -- one extra weighted sum per pixel
-    batch, no new loop over pixels or cells."""
+    hundred templates)."""
     xi_centers = 0.5 * (reader.xi_edges[:-1] + reader.xi_edges[1:])  # log10 ξ
     b_centers = 0.5 * (reader.b_edges[:-1] + reader.b_edges[1:])  # log10 F_4.5
     x_lin = 10.0 ** xi_centers
@@ -1376,7 +1397,6 @@ def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve,
     n_x, n_b = xi_centers.size, b_centers.size
     n_pix = a_col.size
     out = np.empty(n_pix, dtype=np.float64)
-    n_cell = np.zeros((n_x, n_b), dtype=np.float64)
 
     is_factor_cls = cls in ("STAR", "PAHC")
     batch = _above_batch_size(n_x, n_b)
@@ -1403,8 +1423,7 @@ def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve,
             term_cell = h_b
             term = term_cell * above
         out[start:stop] = term.sum(axis=(1, 2))
-        n_cell += np.tensordot(cell_weight[start:stop], term_cell, axes=(0, 0))
-    return out, n_cell
+    return out
 
 
 def build_region(config, region):
@@ -1497,9 +1516,13 @@ def build_region(config, region):
         # every class is a deterministic quadrature (sec. 8): the region's
         # own catalogued-count-per-cell grid, accumulated tile by tile
         # (STAR/AGB/PAHC), sightline by sightline (YSO/H2S) and once for
-        # GAL, below.
+        # GAL, below. `n_cell` is the SAME accumulation, every member's
+        # own probability of being catalogued set to one (module
+        # docstring's `N_CELL_<C>`).
         n_cat_cell = {c: np.zeros((grid.LOG10_XI_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1))
                       for c in ("STAR", "PAHC", "AGB", "YSO", "H2S")}
+        n_cell = {c: np.zeros((grid.LOG10_XI_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1))
+                  for c in ("STAR", "PAHC", "AGB", "YSO", "H2S")}
 
         def _one(tile_id):
             m = usable & (tile_of_pix == tile_id)
@@ -1515,12 +1538,13 @@ def build_region(config, region):
             # P(q)`/`P(q)`), never in `INTENSITY_<C>` again.
             field_star_density = out["_FIELD_STAR_DENSITY"]
             for cls in ("STAR", "AGB", "PAHC"):
-                frac, density, frac_bright3, frac_bright10, n_cat_cell_tile = out[cls]
+                frac, density, frac_bright3, frac_bright10, n_cat_cell_tile, n_cell_tile = out[cls]
                 n_cat[cls][m] = density * frac
                 intensity[cls][m] = field_star_density if cls in ("STAR", "PAHC") else density
                 n_cat_bright3[cls][m] = density * frac_bright3
                 n_cat_bright10[cls][m] = density * frac_bright10
                 n_cat_cell[cls] += n_cat_cell_tile
+                n_cell[cls] += n_cell_tile
             st.tick(i + 1, len(tiles_here), "tiles")
 
         # GAL, sec. 5.4: one region-wide DETERMINISTIC quadrature (no draw,
@@ -1532,7 +1556,7 @@ def build_region(config, region):
         # through `Parallel` itself, so `build_region`'s parent process
         # still never runs a numba kernel, and no child a later fork
         # spawns can inherit a live numba thread pool.
-        (frac_gal, frac_gal_bright3, frac_gal_bright10, n_cat_cell_gal, density_gal,
+        (frac_gal, frac_gal_bright3, frac_gal_bright10, n_cat_cell_gal, n_cell_gal, density_gal,
          n_gal_members_before, n_gal_members_after) = _gal_catalogued_fraction(
             config, a_col, f_lim, width_dex, coverage,
             lambda done, total: st.tick(done, total, "GAL pixel chunks"))
@@ -1546,6 +1570,7 @@ def build_region(config, region):
         # cell (module docstring): STAR/PAHC/AGB already accumulated
         # theirs, tile by tile, above.
         n_cat_cell["GAL"] = n_cat_cell_gal
+        n_cell["GAL"] = n_cell_gal
 
         # YSO/H2S, sec. 5.5-5.6: grouped by the pixel's own nside-256
         # sightline (YSO's grain), one deterministic quadrature per
@@ -1637,13 +1662,14 @@ def build_region(config, region):
 
         def _one_sl(sl_row):
             m = sl_row_of_pix == sl_row
-            (f_y, d_y, fb3_y, fb10_y, ncc_y,
-             f_h, fb3_h, fb10_h, ncc_h, n_mem_y, n_mem_h) = _build_one_sightline(
+            (f_y, d_y, fb3_y, fb10_y, ncc_y, ncl_y,
+             f_h, fb3_h, fb10_h, ncc_h, ncl_h, n_mem_y, n_mem_h) = _build_one_sightline(
                 config, region, sl_row, a_col[m], a_col_gas[m], arm[m], f_lim[m],
                 loaded_profile, flux0_ts, w_ts, float(cloud_frac_by_sl[sl_row]), d_front, d_back,
                 flux0_br, w_br, width_dex[m],
                 coverage[m] * _HPX512_PIXEL_DEG2, eta_r, l_of_pix_for_weight[m])
-            return m, f_y, d_y, fb3_y, fb10_y, ncc_y, f_h, fb3_h, fb10_h, ncc_h, n_mem_y, n_mem_h
+            return (m, f_y, d_y, fb3_y, fb10_y, ncc_y, ncl_y,
+                    f_h, fb3_h, fb10_h, ncc_h, ncl_h, n_mem_y, n_mem_h)
 
         frac_h2s_pix = np.full(n_pix, np.nan, dtype=np.float64)
         frac_h2s_bright3_pix = np.full(n_pix, np.nan, dtype=np.float64)
@@ -1655,7 +1681,8 @@ def build_region(config, region):
         # number, not a random sample, so it induces no covariance
         # between sightlines and no error term of its own.
         n_members_yso_list, n_members_h2s_list = [], []
-        for i, (m, f_y, d_y, fb3_y, fb10_y, ncc_y, f_h, fb3_h, fb10_h, ncc_h, n_mem_y, n_mem_h) in enumerate(results_sl):
+        for i, (m, f_y, d_y, fb3_y, fb10_y, ncc_y, ncl_y,
+                f_h, fb3_h, fb10_h, ncc_h, ncl_h, n_mem_y, n_mem_h) in enumerate(results_sl):
             n_cat["YSO"][m] = d_y * f_y
             intensity["YSO"][m] = d_y
             frac_h2s_pix[m] = f_h
@@ -1665,7 +1692,9 @@ def build_region(config, region):
             frac_h2s_bright3_pix[m] = fb3_h
             frac_h2s_bright10_pix[m] = fb10_h
             n_cat_cell["YSO"] += ncc_y
+            n_cell["YSO"] += ncl_y
             n_cat_cell["H2S"] += ncc_h
+            n_cell["H2S"] += ncl_h
             n_members_yso_list.append(n_mem_y)
             n_members_h2s_list.append(n_mem_h)
             st.tick(i + 1, len(sls_here), "sightlines")
@@ -1706,12 +1735,6 @@ def build_region(config, region):
         # into `reader.grid_all` for YSO/H2S.
         p3_row_of_pix = loc_p3[sl_row_of_pix]
         n_above = {}
-        # sec. 8's intrinsic population per cell (`N_CELL_<C>`, module
-        # docstring): `coverage * pixel area * A_C(pixel)`, the same
-        # per-pixel coefficient `N_ABOVE_C` itself scales `frac_above` by
-        # below, gathered into cells instead of collapsed above one flux
-        # limit (`_above_fraction`'s own docstring paragraph).
-        n_cell = {}
         for cls in CLASSES:
             reader = prior_reader.load(config, region, cls)
             if cls in ("STAR", "AGB", "PAHC"):
@@ -1720,9 +1743,8 @@ def build_region(config, region):
                 grain_of_pix = p3_row_of_pix
             else:  # GAL: one survey-wide grain (`prior_reader.load`'s own convention)
                 grain_of_pix = np.zeros(n_pix, dtype=np.int64)
-            cell_weight = coverage * _HPX512_PIXEL_DEG2 * intensity[cls]
-            frac_above, n_cell[cls] = _above_fraction(
-                config, reader, cls, grain_of_pix, a_col, f0_pix, d_pahc_pix, curve, cell_weight)
+            frac_above = _above_fraction(
+                config, reader, cls, grain_of_pix, a_col, f0_pix, d_pahc_pix, curve)
             n_above[cls] = intensity[cls] * frac_above
 
         built = CLASSES
@@ -1842,8 +1864,11 @@ def build_region(config, region):
             f.create_dataset("N_CAT_CELL_YSO", data=n_cat_cell["YSO"].astype(np.float32))
             f.create_dataset("N_CAT_CELL_H2S", data=n_cat_cell["H2S"].astype(np.float32))
             # the region's UNTHINNED intrinsic population per parameter
-            # cell (module docstring, sec. 8): no flux cut, no dimming --
-            # `_above_fraction`'s own `n_cell` return, same axes.
+            # cell (module docstring, sec. 8): the same members quadrature
+            # as `N_CAT_CELL_<C>` with every member's own probability of
+            # being catalogued set to one, accumulated tile by tile,
+            # sightline by sightline and once for GAL exactly like
+            # `N_CAT_CELL_<C>` above, same axes.
             for c in CLASSES:
                 f.create_dataset(f"N_CELL_{c}", data=n_cell[c].astype(np.float32))
             for c in built:
