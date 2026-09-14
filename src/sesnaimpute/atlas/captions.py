@@ -57,17 +57,18 @@ VOCABULARY = (
 
 #: The probability each panel draws, one statement per panel kind.
 SHAPES_ROW1 = (
-    "Top panel: P($\\hat{\\xi}$, F_4.5 | s) = Σ_C Λ_C(cell) / Σ_C Σ_cells "
-    "Λ_C(cell) -- the prior probability that a source at s lies in the cell, summed "
-    "over the six classes: where the prior expects a source at this position.")
+    "Top row, per class: P(C, cell | s), the prior probability that a "
+    "source at s is of class C and lies in the cell at (ξ̂, F_4.5); "
+    "one log color scale for the six panels.")
 SHAPES_ROW2 = (
-    "Row 2, per class: P(C | cell, s) = Lambda_C(cell) / sum over classes of "
+    "Bottom row, per class: P(C | cell, s) = Lambda_C(cell) / sum over classes of "
     "Lambda(cell) -- the prior probability that a source at s known to lie in "
     "the parameter cell at ($\\hat{\\xi}$, F_4.5) is of class C. Where every class is at "
     "the common floor the six shares are equal: the prior places no source "
     "there. Each cell is drawn at opacity 1 − H / ln 6, H the entropy of the six "
     "shares: solid where the prior decides the class, faded to white where it is "
-    "blind (every class at the common floor, the six shares equal).")
+    "blind (every class at the common floor, the six shares equal), drawn white "
+    "where the class has no share.")
 SHAPES_MEASURED = (
     "$\\hat{\\xi}$ = â_s / A_s, the fitted foreground extinction as a fraction of the "
     "sightline's column; the shapes are drawn as the fitter reads them, blurred by "
