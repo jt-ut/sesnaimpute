@@ -3,14 +3,14 @@ library (P4, `bms_review/briefs/P4.md`): one survey-wide figure, two
 panels.
 
 Left panel -- the star-gas law itself (`population.yso.law_count`,
-`KAPPA_HERSCHEL * (d_r*pi/180)^2 * A_K^2`, Pokhrel et al. 2020): the
+`KAPPA_POOLED * (d_r*pi/180)^2 * A_K^2`, fitted on the Dunham census): the
 region product `population/yso/law_yso_region.hdf5` carries only
 `D_R_PC` and `PC2_PER_DEG2` per region (no per-region column), so the
 one axis the 30 regions can vary along is distance -- each region's
 young-star count per square degree AT A REFERENCE COLUMN (A_K = 1 mag,
-so `N_law = KAPPA_HERSCHEL * PC2_PER_DEG2`) against `D_R_PC`. Because
-`KAPPA_HERSCHEL` is the one pooled coefficient every region shares, a
-region's point falls exactly on the curve `N_law(d) = KAPPA_HERSCHEL *
+so `N_law = KAPPA_POOLED * PC2_PER_DEG2`) against `D_R_PC`. Because
+`KAPPA_POOLED` is the pooled coefficient drawn here, a
+region's point falls exactly on the curve `N_law(d) = KAPPA_POOLED *
 (d*pi/180)^2`; the `LAW_BAND_DEX` band around it is Pokhrel+2020's own
 reported cloud-to-cloud scatter of the normalisation, not a fit
 residual. Drawn against distance rather than column since the region
@@ -70,10 +70,11 @@ def _read_law(config):
         region = _decode(f["REGION"][:])
         d_r_pc = np.asarray(f["D_R_PC"][:], dtype=np.float64)
         pc2_per_deg2 = np.asarray(f["PC2_PER_DEG2"][:], dtype=np.float64)
-        kappa_herschel = float(f["KAPPA_HERSCHEL"][()])
+        kappa_used = np.asarray(f["KAPPA_USED"][:], dtype=np.float64)
+        kappa_herschel = float(f["KAPPA_POOLED"][()])
         law_band_dex = float(f["LAW_BAND_DEX"][()])
     return dict(region=region, d_r_pc=d_r_pc, pc2_per_deg2=pc2_per_deg2,
-                kappa_herschel=kappa_herschel, law_band_dex=law_band_dex, path=path)
+                kappa_herschel=kappa_herschel, kappa_used=kappa_used, law_band_dex=law_band_dex, path=path)
 
 
 def _read_census(config):
@@ -225,7 +226,7 @@ def build(config, regions=None):
     fig.savefig(pdf_path, dpi=150)
     plt.close(fig)
 
-    print(f"figure_yso_law: KAPPA_HERSCHEL={kappa:.3f} young stars pc^-2 mag^-2, "
+    print(f"figure_yso_law: KAPPA_POOLED={kappa:.3f} young stars pc^-2 mag^-2, "
           f"LAW_BAND_DEX={band_dex:.3f} dex, "
           f"census median log10 F_4.5={census_median:.3f} (n={int(finite.sum())}), "
           f"library median log10 F_4.5={library_median:.3f} (n={c_theta.size})")

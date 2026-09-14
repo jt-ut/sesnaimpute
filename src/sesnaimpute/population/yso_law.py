@@ -26,9 +26,10 @@ its own `sightline_lookup` is reused here for `cloud_frac`, not re-derived
 summed over the footprint: `I`. `KAPPA_REGION = N / I`, the Poisson
 maximum-likelihood coefficient, fitted only where `N >= 50`; its 68%
 interval is the standard Poisson (Garwood) interval on `N`, converted by
-the same `/ I`. `KAPPA_POOLED = sum(N) / sum(I)` over the fitted regions;
-`LAW_BAND_DEX` is the rms of the fitted regions' own log10 kappa about
-log10 `KAPPA_POOLED`. `KAPPA_USED` is `KAPPA_REGION` where fitted, else
+the same `/ I`. `KAPPA_POOLED` is the geometric mean of the fitted regions'
+kappa (the centre of a lognormal cloud-to-cloud scatter, each cloud weighing
+the same); `LAW_BAND_DEX` is the rms of the fitted regions' own log10 kappa
+about log10 `KAPPA_POOLED`. `KAPPA_USED` is `KAPPA_REGION` where fitted, else
 `KAPPA_POOLED`. The class shares (`CLASS_SHARE_PROTO/DISK/WEAK`) are the
 whole census's own `ALPHA0` slope fractions, independent of region.
 
@@ -233,12 +234,10 @@ def _fit_region(config, region, census, survey_map):
 
     # `population.young_stars.build_region` forms exactly this per
     # pixel (`law_area_integral * omega_pix * cloud_frac**2`), reused
-    # rather than re-derived; `/ KAPPA_HERSCHEL` strips the OLD
-    # coefficient back out, leaving the pure geometric/column integral
-    # (coefficient 1) this fit solves for.
-    n_law_full = (yso_module.law_area_integral(config, region, footprint)
-                  * OMEGA_PIX_512_DEG2 * cloud_frac ** 2)
-    i_per_pix = n_law_full / yso_module.KAPPA_HERSCHEL
+    # rather than re-derived, at coefficient 1: the pure geometric/column
+    # integral this fit solves for.
+    i_per_pix = (yso_module.law_area_integral(config, region, footprint, kappa=1.0)
+                 * OMEGA_PIX_512_DEG2 * cloud_frac ** 2)
     i_integral = float(i_per_pix.sum())
     row["i_integral"] = i_integral
 
@@ -295,14 +294,19 @@ def build(config, regions=None):
             st.tick(i + 1, len(names), region)
 
         fitted = [r for r in names if np.isfinite(rows[r]["kappa"])]
-        sum_n = sum(rows[r]["n_census"] for r in fitted)
-        sum_i = sum(rows[r]["i_integral"] for r in fitted)
-        kappa_pooled = sum_n / sum_i if sum_i > 0 else np.nan
-        if fitted and np.isfinite(kappa_pooled) and kappa_pooled > 0:
+        # the pooled coefficient is the geometric mean over the fitted
+        # clouds (owner's ruling 2026-09-14): the coefficient scatters
+        # lognormally from cloud to cloud, so the centre of that
+        # distribution is the mean of the logarithm, and the band is
+        # the rms of the logarithm about it; each cloud weighs the same,
+        # since the cloud-to-cloud spread is ten times any cloud's own
+        # interval
+        if fitted:
             log_k = np.array([np.log10(rows[r]["kappa"]) for r in fitted])
+            kappa_pooled = float(10.0 ** np.mean(log_k))
             law_band_dex = float(np.sqrt(np.mean((log_k - np.log10(kappa_pooled)) ** 2)))
         else:
-            law_band_dex = np.nan
+            kappa_pooled, law_band_dex = np.nan, np.nan
 
         proto, disk, weak = _class_shares(census)
 

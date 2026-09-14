@@ -139,7 +139,7 @@ def convolved_law(config, region):
     valid = np.isfinite(data) & (data > 0)
     a_k = np.where(valid, data.astype(np.float64) * herschel_column_module.NH2_TO_AK, 0.0)
     pc2 = float(yso_module.pc2_per_deg2(d_r_pc))
-    law_native = yso_module.KAPPA_HERSCHEL * pc2 * a_k ** 2
+    law_native = yso_module._kappa_used(config, region) * pc2 * a_k ** 2
 
     pc_per_arcsec = (np.pi / 180.0 / 3600.0) * d_r_pc
     lambda_arcsec = LAMBDA_PC / pc_per_arcsec

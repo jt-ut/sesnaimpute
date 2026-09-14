@@ -63,10 +63,6 @@ from sesnaimpute.sky.derived import planck_column as sky_planck_column
 # 6.1 -- the law count
 # ====================================================================
 
-#: Pokhrel+2020's pooled star-gas relation on Herschel columns: 14.5 young
-#: stars pc^-2 mag^-2 of A_K at the Herschel arm's 36.3" beam
-#: (SPEC_PRIORS.md section 6.1).
-KAPPA_HERSCHEL = 14.5
 
 #: Provenance codes of the adopted column (SPEC_PRIORS.md section 1.1):
 #: 0 Herschel, 1 Planck.
@@ -104,13 +100,44 @@ def _adopted_columns(config, region):
     return out
 
 
+_KAPPA_USED_CACHE = {}
+
+
+def _kappa_used(config, region):
+    """The region's own `KAPPA_USED` (`_W83_design.md`'s law product,
+    `population/yso/law_yso_region.hdf5`): the region's fitted coefficient
+    where the Dunham census covers it, else the pooled value -- cached per
+    `(config, region)`, since `law_count` reads it once per call and
+    `law_area_integral` once per region."""
+    key = (id(config), region)
+    cached = _KAPPA_USED_CACHE.get(key)
+    if cached is not None:
+        return cached
+    path = config_module.product_path(config, "population", "yso", "law", "region")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "population.yso: law product missing at %s -- run the "
+            "'sesnaimpute.population.yso' RUNBOOK line first" % path)
+    with h5py.File(path, "r") as f:
+        if "KAPPA_USED" not in f:
+            raise KeyError(
+                "population.yso: %s lacks KAPPA_USED -- run the "
+                "'sesnaimpute.population.yso' RUNBOOK line first" % path)
+        names = [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in f["REGION"][:]]
+        if region not in names:
+            raise ValueError("population.yso: region %r has no row in %s" % (region, path))
+        kappa = float(f["KAPPA_USED"][names.index(region)])
+    _KAPPA_USED_CACHE[key] = kappa
+    return kappa
+
+
 def law_count(config, region, a_col, provenance):
     """`N_law`, young stars deg^-2, for arrays of adopted column and arm
-    (SPEC_PRIORS.md section 6.1): one coefficient, `KAPPA_HERSCHEL`, at
-    every arm's own 36" resolution.
+    (`_W83_design.md`): the region's own `KAPPA_USED` (`_kappa_used`, the
+    Dunham-census law product), at every arm's own 36" resolution.
 
-        N_law = KAPPA_HERSCHEL * (d_r*pi/180)^2 * a_col^2          (Herschel)
-        N_law = KAPPA_HERSCHEL * (d_r*pi/180)^2 * E[T^2 | a_col]   (Planck)
+        N_law = KAPPA_USED[region] * (d_r*pi/180)^2 * a_col^2          (Herschel)
+        N_law = KAPPA_USED[region] * (d_r*pi/180)^2 * E[T^2 | a_col]   (Planck)
 
     the source's whole adopted column, no pedestal; the Planck arm reads
     the kernel's own second moment (`_kernel_second_moment_planck`), the
@@ -122,8 +149,9 @@ def law_count(config, region, a_col, provenance):
     provenance = np.asarray(provenance)
     d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
     pc2 = pc2_per_deg2(d_r_pc)
-    herschel_value = KAPPA_HERSCHEL * pc2 * a_col ** 2
-    planck_value = KAPPA_HERSCHEL * pc2 * _kernel_second_moment_planck(config, a_col)
+    kappa = _kappa_used(config, region)
+    herschel_value = kappa * pc2 * a_col ** 2
+    planck_value = kappa * pc2 * _kernel_second_moment_planck(config, a_col)
     return np.where(provenance == PROVENANCE_HERSCHEL, herschel_value, planck_value)
 
 
@@ -343,7 +371,7 @@ def _planck_parent_column(config, parent256):
     return a_k_sorted[capped]
 
 
-def law_area_integral(config, region, hpx_pix_512):
+def law_area_integral(config, region, hpx_pix_512, kappa=None):
     """`N_law` integrated over each requested nside-512 pixel's own area
     (SPEC_PRIORS.md section 2.1's "young stars in the anchors" row, "the
     law count integrated over the tile"; section 6.4 item 1's per-cloud
@@ -382,7 +410,9 @@ def law_area_integral(config, region, hpx_pix_512):
 
     d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
     pc2 = pc2_per_deg2(d_r_pc)
-    kappa_h_full = KAPPA_HERSCHEL * pc2
+    # `kappa`, when given, replaces the region's fitted coefficient: the
+    # law fit passes 1.0 to obtain the coefficient-free integral it solves for
+    kappa_h_full = (_kappa_used(config, region) if kappa is None else float(kappa)) * pc2
 
     sum_sq, count = _herschel_pixel_stats(config, pix_sorted)
     herschel_covered = count > 0
