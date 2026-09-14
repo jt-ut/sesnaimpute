@@ -30,6 +30,7 @@ import os
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.ticker import LogLocator, MaxNLocator
 
 from sesnaimpute import config as config_module
 from sesnaimpute import plot_style
@@ -39,7 +40,7 @@ from sesnaimpute import regions as regions_module
 _TITLE_FONTSIZE = 18
 _LABEL_FONTSIZE = 13
 _TICK_FONTSIZE = 10
-_STATEMENT_FONTSIZE = 7.5
+_STATEMENT_FONTSIZE = 9
 
 #: The distance axis every panel shares, pc.
 _D_MIN, _D_MAX = 0.0, 2000.0
@@ -151,8 +152,8 @@ def build_region(config, region):
     stretches = _flat_stretches(dist_pc, a_cum_k, xi)
 
     plot_style.apply_style()
-    fig, (ax1, ax2, ax3) = plt.subplots(nrows=3, ncols=1, figsize=(8, 9), sharex=True)
-    fig.subplots_adjust(top=0.90, bottom=0.14, hspace=0.18, left=0.13, right=0.96)
+    fig, (ax1, ax2, ax3) = plt.subplots(nrows=3, ncols=1, figsize=(16, 7), sharex=True)
+    fig.subplots_adjust(top=0.91, bottom=0.20, hspace=0.08, left=0.07, right=0.98)
 
     for ax in (ax1, ax2):
         ax.axvspan(d_lo, d_hi, color=_BAND_COLOR, zorder=0)
@@ -160,6 +161,7 @@ def build_region(config, region):
     ax1.plot(dist_pc, a_cum_k, color=_HUE, lw=1.6)
     ax1.set_ylabel(r"$\mathbf{A_K}$ [mag]", fontsize=_LABEL_FONTSIZE)
     ax1.set_ylim(bottom=0.0)
+    ax1.yaxis.set_major_locator(MaxNLocator(nbins=4))
 
     with np.errstate(divide="ignore", invalid="ignore"):
         ax2.plot(dist_pc, xi, color=_HUE, lw=1.6)
@@ -167,11 +169,13 @@ def build_region(config, region):
     ax2.set_yscale("log")
     ax2.set_ylim(_XI_MIN, _XI_MAX)
     ax2.set_ylabel(r"$\mathbf{\xi}$", fontsize=_LABEL_FONTSIZE)
+    ax2.yaxis.set_major_locator(LogLocator(base=10.0, numticks=4))
 
     bins = np.arange(_D_MIN, _D_MAX + _HIST_BIN_PC, _HIST_BIN_PC)
     ax3.hist(field_dist_pc, bins=bins, color=_HUE, edgecolor="white", linewidth=0.3)
     ax3.set_ylabel("simulated stars per bin", fontsize=_LABEL_FONTSIZE)
     ax3.set_xlabel("Distance [pc]", fontsize=_LABEL_FONTSIZE)
+    ax3.yaxis.set_major_locator(MaxNLocator(nbins=4))
 
     for ax in (ax1, ax2, ax3):
         ax.set_xlim(_D_MIN, _D_MAX)
@@ -183,8 +187,8 @@ def build_region(config, region):
              "Edenhofer et al. 2023 (top), the depth fraction ξ = A(d) / A(∞) it")
     line2 = ("implies (middle), and the distances of the field stars a model of the "
              "Milky Way (TRILEGAL) places along it (bottom); the grey band is the cloud.")
-    fig.text(0.5, 0.045, line1, fontsize=_STATEMENT_FONTSIZE, ha="center", va="bottom")
-    fig.text(0.5, 0.02, line2, fontsize=_STATEMENT_FONTSIZE, ha="center", va="bottom")
+    fig.text(0.5, 0.085, line1, fontsize=_STATEMENT_FONTSIZE, ha="center", va="bottom")
+    fig.text(0.5, 0.03, line2, fontsize=_STATEMENT_FONTSIZE, ha="center", va="bottom")
 
     out_dir = f"{config.data_root}/sky/derived/edenhofer/figures"
     os.makedirs(out_dir, exist_ok=True)
