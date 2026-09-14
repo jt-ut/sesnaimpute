@@ -6,7 +6,10 @@ Joins `table1.dat` (18 clouds, each cloud's `Dist1`), `table2.dat` (2,966
 YSOs: bolometric properties) and `table3.dat`/`table4.dat` (observed and
 extinction-corrected 2MASS/Spitzer flux densities, mJy) from the fetched
 `sky/download/dunham2015/` bytes (`-999`/`-999.` sentinels become `nan`,
-the ReadMe's own missing-value convention).
+the ReadMe's own missing-value convention). `RA_DEG`/`DEC_DEG` are parsed
+from `table2.dat`'s own `ID` column, the ReadMe's `JHHMMSS.s+DDMMSS`
+J2000 sexagesimal source name -- table2.dat carries no separate
+coordinate columns.
 
 `LOG10_F45_REF = log10(F45_MJY * (DIST_PC / 1000 pc)^2)` is the
 extinction-corrected 4.5 micron flux scaled to 1 kpc, in the SAME units
@@ -89,6 +92,36 @@ def _read_fwf(path, colspecs, names):
     return pd.read_fwf(path, colspecs=colspecs, names=names, header=None)
 
 
+#: The ReadMe's own `ID` label format, "SSTc2d or SSTgb Spitzer source
+#: name (JHHMMSS.s+DDMMSS)": table2.dat carries no separate RA/Dec
+#: columns, so the position is the sexagesimal name itself, parsed here.
+_ID_RE = re.compile(
+    r"^J(\d{2})(\d{2})(\d{2}\.\d)([+-])(\d{2})(\d{2})(\d{2})$")
+
+
+def _radec_from_id(id_series):
+    """`(ra_deg, dec_deg)` parsed from the `ID` column's own J2000
+    sexagesimal name, `JHHMMSS.s+DDMMSS` (hours/minutes/seconds of RA,
+    signed degrees/arcmin/arcsec of Dec) -- the census's only position,
+    since table2.dat has no RA/Dec fields of its own."""
+    m = id_series.str.strip().str.extract(_ID_RE)
+    if m.isna().any(axis=None):
+        bad = id_series[m.isna().any(axis=1)].tolist()
+        raise ValueError(
+            "sky.derived.dunham_yso: ID entries do not match the ReadMe's "
+            "JHHMMSS.s+DDMMSS name format: %r" % bad[:5])
+    hh = m[0].astype(np.float64)
+    mm = m[1].astype(np.float64)
+    ss = m[2].astype(np.float64)
+    sign = np.where(m[3].to_numpy() == "-", -1.0, 1.0)
+    dd = m[4].astype(np.float64)
+    dm = m[5].astype(np.float64)
+    ds = m[6].astype(np.float64)
+    ra_deg = 15.0 * (hh + mm / 60.0 + ss / 3600.0)
+    dec_deg = sign * (dd + dm / 60.0 + ds / 3600.0)
+    return ra_deg.to_numpy(), dec_deg.to_numpy()
+
+
 def build(config, regions=None):
     """Writes `sky/derived/dunham2015/yso_dunham2015_survey.hdf5`
     (`GRANULE = "survey"`), one row per `Seq`. `regions` is accepted for
@@ -116,6 +149,8 @@ def build(config, regions=None):
         f45_mjy = t4["F4.5"].to_numpy(dtype=np.float64)
         log10_f45_ref = np.log10(f45_mjy * (dist_pc / 1000.0) ** 2)
 
+        ra_deg, dec_deg = _radec_from_id(t2["ID"])
+
         out_path = config_module.product_path(config, "sky/derived", "dunham2015", "yso", "survey")
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with h5py.File(out_path, "w") as f:
@@ -123,6 +158,8 @@ def build(config, regions=None):
             f.create_dataset("SEQ", data=t2["Seq"].to_numpy(dtype=np.int64))
             f.create_dataset("CLOUD", data=cloud.to_numpy(dtype="S16"))
             f.create_dataset("ID", data=t2["ID"].str.strip().to_numpy(dtype="S16"))
+            f.create_dataset("RA_DEG", data=ra_deg.astype(np.float64))
+            f.create_dataset("DEC_DEG", data=dec_deg.astype(np.float64))
             f.create_dataset("DIST_PC", data=dist_pc.astype(np.float32))
             f.create_dataset("AV", data=t2["Av"].to_numpy(dtype=np.float32))
             f.create_dataset("ALPHA0", data=t2["alpha0"].to_numpy(dtype=np.float32))

@@ -53,7 +53,6 @@ from joblib import Parallel, delayed
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
-from sesnaimpute import tables as tables_module
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import kernel as kernel_module
@@ -68,11 +67,6 @@ from sesnaimpute.sky.derived import planck_column as sky_planck_column
 #: stars pc^-2 mag^-2 of A_K at the Herschel arm's 36.3" beam
 #: (SPEC_PRIORS.md section 6.1).
 KAPPA_HERSCHEL = 14.5
-
-#: Pokhrel+2020's cloud-to-cloud scatter of the normalisation: the
-#: uncertainty on any one region's law level, reported and never
-#: marginalised (SPEC_PRIORS.md section 6.1).
-LAW_BAND_DEX = 0.36
 
 #: Provenance codes of the adopted column (SPEC_PRIORS.md section 1.1):
 #: 0 Herschel, 1 Planck.
@@ -131,40 +125,6 @@ def law_count(config, region, a_col, provenance):
     herschel_value = KAPPA_HERSCHEL * pc2 * a_col ** 2
     planck_value = KAPPA_HERSCHEL * pc2 * _kernel_second_moment_planck(config, a_col)
     return np.where(provenance == PROVENANCE_HERSCHEL, herschel_value, planck_value)
-
-
-def _law_row(config, region):
-    """One region's law-product row: the region distance and the
-    pc^2/deg^2 factor `law_count` multiplies."""
-    d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
-    pc2 = float(pc2_per_deg2(d_r_pc))
-    return dict(region=region, d_r_pc=float(d_r_pc), pc2_per_deg2=pc2)
-
-
-def _write_law_product(config, regions, rows):
-    """Writes the 30-row law product, in place for `regions`
-    (CODING_RULES.md 5c), plus the two region-independent constants
-    (`KAPPA_HERSCHEL`, `LAW_BAND_DEX`) as the same root-level scalar
-    datasets every build has always written -- created once, since their
-    value never depends on which regions ran."""
-    path = config_module.product_path(config, "population", "yso", "law", "region")
-    tables_module.update_rows(
-        path, regions,
-        {
-            "D_R_PC": np.array([r["d_r_pc"] for r in rows], dtype=np.float64),
-            "PC2_PER_DEG2": np.array([r["pc2_per_deg2"] for r in rows], dtype=np.float64),
-        },
-        granule="region")
-    with tables_module.open_product(path, granule="region") as f:
-        for name, value in (("KAPPA_HERSCHEL", KAPPA_HERSCHEL),
-                             ("LAW_BAND_DEX", LAW_BAND_DEX)):
-            if name in f:
-                del f[name]
-            f.create_dataset(name, data=np.float64(value))
-        for stale in ("PEDESTAL_K", "PEDESTAL_REMOVED_FRAC"):
-            if stale in f:
-                del f[stale]
-    return path
 
 
 # ====================================================================
@@ -697,18 +657,21 @@ def build_shape(config, region):
 
 def build(config, regions=None):
     """Writes, per region, the YSO shape product (section 6.3) -- the
-    embedding density -- and one 30-row (or subset) law product (section
-    6.1) over `regions` (default: all thirty)."""
+    embedding density -- over `regions` (default: all thirty), then the
+    30-row law product (`population.yso_law.build`, the owner's
+    2026-09-14 Dunham-census ruling, `_W83_design.md`): the young-star
+    law's coefficient fitted per region on the Dunham et al. 2015
+    census, not Pokhrel et al. 2020's fixed coefficient."""
     names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
-    law_rows = []
     for region in names:
         with progress.Stage("population.yso", region) as st:
             path, u_median = build_shape(config, region)
-            law_rows.append(_law_row(config, region))
             st.done(path, n_sightline=np.asarray(u_median).size,
                     median_u_median=float(np.median(u_median)))
-    _write_law_product(config, names, law_rows)
+
+    from sesnaimpute.population import yso_law
+    yso_law.build(config, regions=names)
 
 
 if __name__ == "__main__":
