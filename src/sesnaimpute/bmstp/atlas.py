@@ -1657,7 +1657,7 @@ def build_region(config, region):
         # once per region") and passed to both calls.
         # the region's knot rate, formed at build against the fitted law
         # (`population.knot_rate`, the same call `bmstp.density` makes)
-        eta_r = knot_rate.eta_for_region(config, region)
+        eta_r, _eta_band_dex = knot_rate.eta_for_region(config, region)
         law_map, law_wcs, knot_meta = knot_field.convolved_law(config, region)
         density_yso_pix_law = yso_module.law_count(
             config, region, a_col_gas * cloud_frac_by_sl[sl_row_of_pix], arm)
