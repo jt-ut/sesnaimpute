@@ -98,7 +98,7 @@ def _read_fit(config):
 
 def _sample_and_mixture(config, fit):
     """The fitted protostars' own `log10 xi_hat` and, for each of them,
-    its own sightline cloud-interval column distribution (`log10x`,
+    its own sightline cloud-interval column distribution (`log10_xi`,
     `mass`) and the adopted one-component cloud-class mixture
     (`w_tilt`, `mu_tilt`, `sigma_tot`) -- the same objects
     `kernel._fit_cloud_gamma_sigma_herschel` forms at its own trial grid
@@ -117,21 +117,21 @@ def _sample_and_mixture(config, fit):
     extra_var = ((match["sigma_beam"] / (a_beam * _LN10)) ** 2
                  + (fit["zp_herschel_k"] / (a_beam * _LN10)) ** 2)
 
-    log10x_parts = []
+    log10_xi_parts = []
     for region in kernel_module._PROTOSTAR_REGIONS:
         sel = match["region"] == region.encode("utf-8")
         if not np.any(sel):
             continue
-        log10x_r, mass_r = kernel_module._cloud_cells_for_pixels(
+        log10_xi_r, mass_r = kernel_module._cloud_cells_for_pixels(
             config, yso_module, region, match["pix256"][sel])
-        log10x_parts.append((sel, log10x_r, mass_r))
-    n_u_max = max(p[1].shape[1] for p in log10x_parts)
-    log10x = np.zeros((n_proto, n_u_max))
+        log10_xi_parts.append((sel, log10_xi_r, mass_r))
+    n_u_max = max(p[1].shape[1] for p in log10_xi_parts)
+    log10_xi = np.zeros((n_proto, n_u_max))
     mass = np.zeros((n_proto, n_u_max))
-    for sel, log10x_r, mass_r in log10x_parts:
-        n_u = log10x_r.shape[1]
+    for sel, log10_xi_r, mass_r in log10_xi_parts:
+        n_u = log10_xi_r.shape[1]
         rows = np.where(sel)[0]
-        log10x[rows[:, None], np.arange(n_u)[None, :]] = log10x_r
+        log10_xi[rows[:, None], np.arange(n_u)[None, :]] = log10_xi_r
         mass[rows[:, None], np.arange(n_u)[None, :]] = mass_r
 
     w0, mu0, sigma0 = kernel_module._cloud_single_component(fit["sigma_cloud"], n_proto)
@@ -143,7 +143,7 @@ def _sample_and_mixture(config, fit):
     wt = np.stack([w0, 1.0 - w0], axis=1) * np.exp(log_wt)
     w_tilt = wt[:, 0] / wt.sum(axis=1)
 
-    return dict(log10_xi_hat=log10_xi_hat, log10x=log10x, mass=mass,
+    return dict(log10_xi_hat=log10_xi_hat, log10_xi=log10_xi, mass=mass,
                 w_tilt=w_tilt, mu_tilt=mu_tilt, sigma_tot=sigma_tot, n_proto=n_proto)
 
 
@@ -152,8 +152,8 @@ def _pooled_cdf(z, sample):
     sample's own per-protostar sightline columns -- one shared number,
     averaged over protostars, exactly `kernel._fit_cloud_gamma_sigma_
     herschel`'s own `_pooled_cdf` at the adopted grid point."""
-    off0 = (z - sample["log10x"] - sample["mu_tilt"][:, 0:1]) / sample["sigma_tot"][:, 0:1]
-    off1 = (z - sample["log10x"] - sample["mu_tilt"][:, 1:2]) / sample["sigma_tot"][:, 1:2]
+    off0 = (z - sample["log10_xi"] - sample["mu_tilt"][:, 0:1]) / sample["sigma_tot"][:, 0:1]
+    off1 = (z - sample["log10_xi"] - sample["mu_tilt"][:, 1:2]) / sample["sigma_tot"][:, 1:2]
     cdf_cell = (sample["w_tilt"][:, None] * _norm_cdf(off0)
                 + (1.0 - sample["w_tilt"][:, None]) * _norm_cdf(off1))
     return float(np.mean(np.sum(sample["mass"] * cdf_cell, axis=1)))
@@ -179,8 +179,8 @@ def _predicted_density(z_grid, sample):
     over the sample per grid point (rule 8)."""
     dens = np.empty(z_grid.size, dtype=np.float64)
     for iz, z in enumerate(z_grid):
-        off0 = (z - sample["log10x"] - sample["mu_tilt"][:, 0:1]) / sample["sigma_tot"][:, 0:1]
-        off1 = (z - sample["log10x"] - sample["mu_tilt"][:, 1:2]) / sample["sigma_tot"][:, 1:2]
+        off0 = (z - sample["log10_xi"] - sample["mu_tilt"][:, 0:1]) / sample["sigma_tot"][:, 0:1]
+        off1 = (z - sample["log10_xi"] - sample["mu_tilt"][:, 1:2]) / sample["sigma_tot"][:, 1:2]
         pdf0 = np.exp(-0.5 * off0 * off0) / (sample["sigma_tot"][:, 0:1] * _SQRT2PI)
         pdf1 = np.exp(-0.5 * off1 * off1) / (sample["sigma_tot"][:, 1:2] * _SQRT2PI)
         pdf_cell = sample["w_tilt"][:, None] * pdf0 + (1.0 - sample["w_tilt"][:, None]) * pdf1

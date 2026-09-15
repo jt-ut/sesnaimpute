@@ -621,14 +621,14 @@ def _match_protostars_to_beam(config):
 
 
 def _cloud_cells_for_pixels(config, yso_module, region, pix256):
-    """`(log10x_mid, mass)`, each `(len(pix256), n_cell)`: the region's
+    """`(log10_xi_mid, mass)`, each `(len(pix256), n_cell)`: the region's
     cloud-interval-restricted embedding density (`population.yso.
     embedding_and_ridge`/`restrict_and_renormalize`/`cloud_interval_pc`,
     full profile resolution -- the same restriction `population.
     young_stars.sightline_lookup` applies for the field-star deduction),
     read off at each of `pix256`'s own nside-256 sightline row. `mass`
     sums to 1 per row (cells outside the cloud interval carry zero);
-    `log10x_mid` is each cell's own `log10 u` at the midpoint of its
+    `log10_xi_mid` is each cell's own `log10 u` at the midpoint of its
     (floored) `u` span -- `x = u = A(d)/A(inf)`, the fraction of the
     sightline's total column in front of a member at that depth.
     """
@@ -649,7 +649,7 @@ def _cloud_cells_for_pixels(config, yso_module, region, pix256):
     mass, inside_frac, removed_frac = yso_module.restrict_and_renormalize(
         p_u, u_lo, u_hi, d_lo, d_hi, d_front, d_back)
     mass_restricted = (mass * inside_frac) / np.maximum(1.0 - removed_frac, 1e-300)[:, None]
-    log10x_mid = 0.5 * (np.log10(np.maximum(u_lo, _U_LOG_FLOOR))
+    log10_xi_mid = 0.5 * (np.log10(np.maximum(u_lo, _U_LOG_FLOOR))
                          + np.log10(np.maximum(u_hi, _U_LOG_FLOOR)))
 
     sl_pix = profile["hpx_pix_256"]
@@ -664,7 +664,7 @@ def _cloud_cells_for_pixels(config, yso_module, region, pix256):
             "row in the embedding profile -- run the 'population.yso' RUNBOOK line"
             % (int(np.count_nonzero(~matched)), pix256.size, region))
     rows = order[capped]
-    return log10x_mid[rows], mass_restricted[rows]
+    return log10_xi_mid[rows], mass_restricted[rows]
 
 
 def _fit_cloud_gamma_sigma_herschel(config, zp_herschel_k):
@@ -728,20 +728,20 @@ def _fit_cloud_gamma_sigma_herschel(config, zp_herschel_k):
     extra_var = ((match["sigma_beam"] / (a_beam * _LN10)) ** 2
                  + (zp_herschel_k / (a_beam * _LN10)) ** 2)
 
-    log10x_parts = []
+    log10_xi_parts = []
     for region in _PROTOSTAR_REGIONS:
         sel = match["region"] == region.encode("utf-8")
         if not np.any(sel):
             continue
-        log10x_r, mass_r = _cloud_cells_for_pixels(config, yso_module, region, match["pix256"][sel])
-        log10x_parts.append((sel, log10x_r, mass_r))
-    n_u_max = max(p[1].shape[1] for p in log10x_parts)
-    log10x = np.zeros((n_proto, n_u_max))
+        log10_xi_r, mass_r = _cloud_cells_for_pixels(config, yso_module, region, match["pix256"][sel])
+        log10_xi_parts.append((sel, log10_xi_r, mass_r))
+    n_u_max = max(p[1].shape[1] for p in log10_xi_parts)
+    log10_xi = np.zeros((n_proto, n_u_max))
     mass = np.zeros((n_proto, n_u_max))
-    for sel, log10x_r, mass_r in log10x_parts:
-        n_u = log10x_r.shape[1]
+    for sel, log10_xi_r, mass_r in log10_xi_parts:
+        n_u = log10_xi_r.shape[1]
         rows = np.where(sel)[0]
-        log10x[rows[:, None], np.arange(n_u)[None, :]] = log10x_r
+        log10_xi[rows[:, None], np.arange(n_u)[None, :]] = log10_xi_r
         mass[rows[:, None], np.arange(n_u)[None, :]] = mass_r
 
     n_sigma = int(round((_CLOUD_SIGMA_GRID_HI - _CLOUD_SIGMA_GRID_LO) / _CLOUD_SIGMA_GRID_STEP)) + 1
@@ -766,7 +766,7 @@ def _fit_cloud_gamma_sigma_herschel(config, zp_herschel_k):
     for gi, gamma in enumerate(gamma_grid):
         c = gamma * _LN10
         mu_tilt = mu0_grid[:, None] + c * sigma_tot_grid ** 2  # (n_sigma, n_proto)
-        off = ((log10_xi_hat[None, :, None] - log10x[None, :, :] - mu_tilt[:, :, None])
+        off = ((log10_xi_hat[None, :, None] - log10_xi[None, :, :] - mu_tilt[:, :, None])
                / sigma_tot_grid[:, :, None])
         dens_cell = np.exp(-0.5 * off * off) / (sigma_tot_grid[:, :, None] * _SQRT2PI)
         density_p = np.sum(mass[None, :, :] * dens_cell, axis=2)  # (n_sigma, n_proto)
@@ -823,8 +823,8 @@ def _fit_cloud_gamma_sigma_herschel(config, zp_herschel_k):
     frac_below_reach = float(np.mean(p_reach < 0.01)) if n_proto else float("nan")
 
     def _pooled_cdf(z):
-        off0 = (z - log10x - mu_tilt[:, 0:1]) / sigma_tot[:, 0:1]
-        off1 = (z - log10x - mu_tilt[:, 1:2]) / sigma_tot[:, 1:2]
+        off0 = (z - log10_xi - mu_tilt[:, 0:1]) / sigma_tot[:, 0:1]
+        off1 = (z - log10_xi - mu_tilt[:, 1:2]) / sigma_tot[:, 1:2]
         cdf_cell = w_tilt[:, None] * _norm_cdf(off0) + (1.0 - w_tilt[:, None]) * _norm_cdf(off1)
         return float(np.mean(np.sum(mass * cdf_cell, axis=1)))
 

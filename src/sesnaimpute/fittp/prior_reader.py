@@ -152,7 +152,7 @@ def load(config, region, cls):
         # one origin, one width, shared with every other class.
         path = config_module.product_path(config, "bmstp", "shape", "star", "tile", region=region)
         with h5py.File(path, "r") as f:
-            xi_edges = f["LOG10_X_EDGES"][:]  # stored as LOG10_X_EDGES; the depth fraction ξ grid edges
+            xi_edges = f["LOG10_XI_EDGES"][:]
             b_edges = f["LOG10_F45_EDGES"][:]
             grid_all = f[dset][:]
         grain = tile
@@ -164,14 +164,14 @@ def load(config, region, cls):
             # the H2S template's Sigma-to-4.5-micron conversion `C_THETA`
             # (P5, `bmstp.template_weights.h2shock_conversion`) folded in
             # at the shape stage, not at this read -- no private axis.
-            xi_edges = f["LOG10_X_EDGES"][:]  # stored as LOG10_X_EDGES; the depth fraction ξ grid edges
+            xi_edges = f["LOG10_XI_EDGES"][:]
             b_edges = f["LOG10_F45_EDGES"][:]
             grid_all = f[dset][:]
         grain = sightline
     else:  # gal: one survey-wide grid, no grain axis, on the common axis too
         path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
         with h5py.File(path, "r") as f:
-            xi_edges = f["LOG10_X_EDGES"][:]  # stored as LOG10_X_EDGES; the depth fraction ξ grid edges
+            xi_edges = f["LOG10_XI_EDGES"][:]
             b_edges = f["LOG10_F45_EDGES"][:]
             grid_all = f["GRID"][:][None, :, :]
         grain = np.zeros(a_col.shape[0], dtype=np.int64)

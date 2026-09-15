@@ -157,7 +157,7 @@ def _read_density_rows(config, region):
     row's own per-band 50% limit, sec. 6.2's `F_lim,50`), and the column
     kernel's own per-row terms `A_COL_SIG_K`, `ARM`, `ZP_SIG_K`
     (`population.kernel.Kernel.mixture`) plus `SIGHTLINE_ROW` (this
-    brief's item 5, the median source's own `X_MARGINAL` row)."""
+    brief's item 5, the median source's own `XI_MARGINAL` row)."""
     path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
     with h5py.File(path, "r") as f:
         name = f["NAME"][:]
@@ -171,13 +171,12 @@ def _read_density_rows(config, region):
 
 
 def _read_xi_marginal(config, region, sightline_row):
-    """The median source's own `X_MARGINAL` row (P3, `bmstp.shapes`): the
+    """The median source's own `XI_MARGINAL` row (P3, `bmstp.shapes`): the
     YSO `x` marginal at its sightline -- this brief's item 5, the kernel
     validation's own `x_member` distribution."""
     path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
     with h5py.File(path, "r") as f:
-        # stored as X_MARGINAL; the depth fraction ξ's marginal
-        return np.asarray(f["X_MARGINAL"][int(sightline_row)], dtype=np.float64)
+        return np.asarray(f["XI_MARGINAL"][int(sightline_row)], dtype=np.float64)
 
 
 def _norm_cdf(z):
@@ -255,7 +254,7 @@ def _kernel_validation(log10_xi_hat, w, mu, sigma, xi_marginal, xi_centers, beyo
     """`(emp_median, emp_p84, pred_median, pred_p84, frac_beyond)`: this
     brief's item 5, the kernel's own prediction for a cloud member's beam
     ratio -- `log10 ξi_hat = log10 ξ_member + y`, `x_member` from the
-    region's median-sightline YSO `x` marginal (`X_MARGINAL`, shared
+    region's median-sightline YSO `x` marginal (`XI_MARGINAL`, shared
     across protostars), `y` from each protostar's OWN class kernel (`w`,
     `mu`, `sigma`) -- against the sample's own empirical `log10 ξi_hat`. The
     predicted CDF pools each protostar's own kernel CDF into ONE shared

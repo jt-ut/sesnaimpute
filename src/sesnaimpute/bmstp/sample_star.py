@@ -6,7 +6,7 @@ Reads `population.star_population`'s per-tile product
 (`population/star/population_star_tile__R.hdf5`): one root group per tile,
 `tile_<id>`, holding `STAR_INDEX` (the row into the region's retained
 field-star sample, `population.field_stars`'s `field-stars_trilegal_region`
-product), `U` (the depth fraction ξ, stored under that name), `W_STAR`/`W_AGB` (the reweighting of sec.
+product), `XI` (the depth fraction ξ), `W_STAR`/`W_AGB` (the reweighting of sec.
 5.2) and `IS_EVOLVED`. PAHC has no sampler of its own: it reads STAR's grid
 (`GRID_STAR`) unchanged.
 
@@ -68,7 +68,7 @@ def sample_star(config, region, tile_id):
     `w = W_STAR` (the field-star share of the reweighting, sec. 5.2)."""
     with h5py.File(_tile_path(config, region), "r") as f:
         grp = f[f"tile_{tile_id}"]
-        x = grp["U"][()].astype(np.float64)
+        x = grp["XI"][()].astype(np.float64)
         star_index = grp["STAR_INDEX"][()].astype(np.int64)
         w = grp["W_STAR"][()].astype(np.float64)
     with h5py.File(_field_stars_path(config, region), "r") as f:
@@ -294,7 +294,7 @@ def sample_agb(config, region, tile_id):
         grp = f[f"tile_{tile_id}"]
         evolved = grp["IS_EVOLVED"][()].astype(bool)
         star_index = grp["STAR_INDEX"][()].astype(np.int64)[evolved]
-        u = grp["U"][()].astype(np.float64)[evolved]
+        u = grp["XI"][()].astype(np.float64)[evolved]
         w_agb = grp["W_AGB"][()].astype(np.float64)[evolved]
     with h5py.File(_field_stars_path(config, region), "r") as f:
         dist_pc_all = f["DIST_PC"][:].astype(np.float64)

@@ -4,14 +4,14 @@ shape-grid products of IMPLEMENTATION_BMSTP_DRAFT.md sec. 1.2
 (SPEC_BMSTP_DRAFT.md sec. 2, sec. 4.1's "shape grids", sec. 5.1-5.6).
 
 Writes P2 (the star-family grids, per tile), P3 (the cloud-class grid,
-per sightline: YSO's `GRID_YSO`/`X_MARGINAL`, and H2S's own
-`GRID_H2S` on the SAME common grid -- `GRID_H2S[x, F] = p_x(x) . [L_Sigma
-(*) K_c](F)`, `p_x` the sightline's own `X_MARGINAL`, `L_Sigma` the
+per sightline: YSO's `GRID_YSO`/`XI_MARGINAL`, and H2S's own
+`GRID_H2S` on the SAME common grid -- `GRID_H2S[ξ, F] = p_ξ(ξ) . [L_Sigma
+(*) K_c](F)`, `p_ξ` the sightline's own `XI_MARGINAL`, `L_Sigma` the
 region's knot lognormal (`LOGSIG_MEAN`/`LOGSIG_STD`, kept as attributes),
 `K_c` the distribution of the h2shock templates' own Sigma-to-4.5-micron
 conversions under their (uniform) weights -- one convolution, survey-wide
 in its template content, computed once per region and broadcast over
-sightlines through `p_x` alone, sec. 5.6 "Marks"), and P4 (the galaxy
+sightlines through `p_ξ` alone, sec. 5.6 "Marks"), and P4 (the galaxy
 grid, survey-wide). Every brightness axis is the one common
 `LOG10_F45_EDGES` (sec. 2): no per-shape origin, not even H2S's.
 
@@ -153,7 +153,7 @@ def build_star_family(config, region):
             f.attrs["N_STARS_PER_TILE"] = n_stars_per_tile
             f.attrs["F45_PER_L_SPREAD_DEX_O"] = agb_ratio["O"]["spread_dex"]
             f.attrs["F45_PER_L_SPREAD_DEX_C"] = agb_ratio["C"]["spread_dex"]
-            f.create_dataset("LOG10_X_EDGES", data=grid.LOG10_XI_EDGES)  # stored as LOG10_X_EDGES; the depth fraction ξ grid edges
+            f.create_dataset("LOG10_XI_EDGES", data=grid.LOG10_XI_EDGES)
             f.create_dataset("LOG10_F45_EDGES", data=grid.LOG10_F45_EDGES)
             f.create_dataset("TILE_ID", data=ids.astype(np.int32))
             f.create_dataset("GRID_STAR", data=grid_star)
@@ -203,7 +203,7 @@ def _n_stars_per_tile(config, region, ids):
     path = config_module.product_path(
         config, "population", "star", "population", "tile", region=region)
     with h5py.File(path, "r") as f:
-        return np.array([f[f"tile_{int(t)}"]["U"].shape[0] for t in ids], dtype=np.int32)
+        return np.array([f[f"tile_{int(t)}"]["XI"].shape[0] for t in ids], dtype=np.int32)
 
 
 def _field_star_f45_range(config, region):
@@ -241,7 +241,7 @@ def _yso_kernel_placement(x_idx, delta, weights, on_x, n_x, kernel_1d, p_ref, n_
 
 
 def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
-    """One sightline's `(GRID_YSO, X_MARGINAL, MASS_OUTSIDE_YSO,
+    """One sightline's `(GRID_YSO, XI_MARGINAL, MASS_OUTSIDE_YSO,
     removed_frac)` (sec. 5.5 "Marks"): every depth sub-sample
     (`sample_cloud._cell_subsamples`, weight `w_k,sub`, depth `x_k,sub`,
     distance `d_k,sub`) adds its own shifted-and-smoothed copy of `p_ref`
@@ -250,7 +250,7 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     log10(d_k,sub / 1 kpc)` histogram before the ONE EXACT Gaussian
     smoothing (`kernel_1d`, `sample_cloud.exact_gaussian_kernel`) and the
     ONE convolution with `p_ref` reproduces the per-sub-sample sum
-    exactly). `X_MARGINAL` (`p_x`) is unchanged in value
+    exactly). `XI_MARGINAL` (`p_x`) is unchanged in value
     (`sample_cloud.sample_x`, its own one-cell-smoothed bin).
     `MASS_OUTSIDE_YSO` is the shortfall of `GRID_YSO`'s own total against
     the sightline's intended mass, `sum(w_k,sub) * p_ref.sum()`: THE EDGE ξ = 1
@@ -262,11 +262,11 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     `GRID_YSO` carries its own true zeros: no per-shape floor is baked in
     here."""
     p_x, _mo_x, removed_frac = sample_cloud.sample_x(loaded, row, d_front, d_back)
-    log10x_nudged, w_sub, d_sub, _removed = sample_cloud._cell_subsamples(loaded, row, d_front, d_back)
+    log10_xi_nudged, w_sub, d_sub, _removed = sample_cloud._cell_subsamples(loaded, row, d_front, d_back)
     n_x = grid.LOG10_XI_EDGES.size - 1
     n_b = grid.LOG10_F45_EDGES.size - 1
 
-    x_idx = np.digitize(log10x_nudged, grid.LOG10_XI_EDGES) - 1
+    x_idx = np.digitize(log10_xi_nudged, grid.LOG10_XI_EDGES) - 1
     on_x = (x_idx >= 0) & (x_idx < n_x)
     delta = -2.0 * np.log10(d_sub / 1000.0)
     # the sub-samples' own raw weights through the shift-kernel placement
@@ -305,7 +305,7 @@ def build_cloud(config, region):
     survey's surface-brightness sample to the region's own distance
     (`population.h2s.transport_log10_sigma`,
     `population.h2s.region_sigma_lognormal`) -- H2S has no grid of its own
-    (sec. 5.6 "Marks": separable, `X_MARGINAL` times this Gaussian, formed
+    (sec. 5.6 "Marks": separable, `XI_MARGINAL` times this Gaussian, formed
     at read on the common `LOG10_F45_EDGES` through the template's own
     `C_THETA` offset, never a class-specific origin). Neither grid carries
     an `N_EFF` dataset or a `FLOOR` attribute, per `bmstp.grid`'s module docstring."""
@@ -313,7 +313,8 @@ def build_cloud(config, region):
     old_xi_marginal = None
     if os.path.exists(p3_path):
         with h5py.File(p3_path, "r") as f:
-            old_xi_marginal = f["X_MARGINAL"][()]  # stored as X_MARGINAL; the depth fraction ξ's marginal
+            if "XI_MARGINAL" in f:
+                old_xi_marginal = f["XI_MARGINAL"][()]
 
     with progress.Stage("bmstp.shapes.cloud", region) as st:
         loaded = sample_cloud._region_profile(config, region)
@@ -355,10 +356,10 @@ def build_cloud(config, region):
         log10_sigma = h2s_module.transport_log10_sigma(log10_sb_native, area_pc2, r.d_r_pc)
         logsig_mean, logsig_std = h2s_module.region_sigma_lognormal(log10_sigma)
 
-        # GRID_H2S (sec. 5.6 "Marks"): GRID_H2S[x, F] = p_x(x)
+        # GRID_H2S (sec. 5.6 "Marks"): GRID_H2S[ξ, F] = p_ξ(ξ)
         # . [L_Sigma (*) K_c](F), one marginal per region (the template
         # content and the region's own lognormal are both region-wide, not
-        # per-sightline), broadcast over sightlines through X_MARGINAL
+        # per-sightline), broadcast over sightlines through XI_MARGINAL
         # alone below. `log10 Sigma` itself is never placed on the common
         # grid (its own scale, ~-8 dex here, sits nowhere near the grid's
         # `log10 F_4.5` range) -- only `log10 Sigma + c_theta` is a
@@ -403,7 +404,7 @@ def build_cloud(config, region):
         on_grid_h2s = (1.0 - mass_outside_h2s).astype(np.float32)
 
         # sec. 5.5's acceptance identity: the current (pre-overwrite)
-        # X_MARGINAL restricted to the cloud interval and renormalised,
+        # XI_MARGINAL restricted to the cloud interval and renormalised,
         # against the freshly built one -- both read above/built above,
         # compared per sightline.
         max_xi_marginal_dev = float("nan")
@@ -422,11 +423,11 @@ def build_cloud(config, region):
             f.attrs["LOGSIG_STD"] = logsig_std
             f.attrs["D_FRONT_PC"] = float(d_front)
             f.attrs["D_BACK_PC"] = float(d_back)
-            f.create_dataset("LOG10_X_EDGES", data=grid.LOG10_XI_EDGES)  # stored as LOG10_X_EDGES; the depth fraction ξ grid edges
+            f.create_dataset("LOG10_XI_EDGES", data=grid.LOG10_XI_EDGES)
             f.create_dataset("LOG10_F45_EDGES", data=grid.LOG10_F45_EDGES)
             f.create_dataset("HPX_PIX_256", data=loaded["hpx_pix_256"])
             f.create_dataset("GRID_YSO", data=grid_yso)
-            f.create_dataset("X_MARGINAL", data=xi_marginal)  # stored as X_MARGINAL; the depth fraction ξ's marginal
+            f.create_dataset("XI_MARGINAL", data=xi_marginal)
             f.create_dataset("MASS_OUTSIDE_YSO", data=mass_outside_yso)
             f.create_dataset("ON_GRID_YSO", data=on_grid_yso)
             f.create_dataset("GRID_H2S", data=grid_h2s)
@@ -505,7 +506,7 @@ def _rebin_conservative(old_edges, values, new_edges):
     linear interpolation of that cumulative sum at the new edges recovers
     it exactly there, whatever the new grid's own phase (`np.interp` on
     `old_edges`'s own cumulative sum, then differenced) -- the same
-    technique this module used to check `X_MARGINAL` against a native
+    technique this module used to check `XI_MARGINAL` against a native
     profile before the 4.5B redesign."""
     old_cum = np.concatenate([[0.0], np.cumsum(values)])
     new_cum = np.interp(new_edges, old_edges, old_cum, left=0.0, right=old_cum[-1])
@@ -551,7 +552,7 @@ def build_gal(config):
             f.attrs["DENSITY_GAL"] = density_gal
             f.attrs["COSMIC_VARIANCE_DEX"] = _gal_cosmic_variance_dex(config)
             f.attrs["ON_GRID_GAL"] = float(on_grid_gal)
-            f.create_dataset("LOG10_X_EDGES", data=grid.LOG10_XI_EDGES)  # stored as LOG10_X_EDGES; the depth fraction ξ grid edges
+            f.create_dataset("LOG10_XI_EDGES", data=grid.LOG10_XI_EDGES)
             f.create_dataset("LOG10_F45_EDGES", data=grid.LOG10_F45_EDGES)
             f.create_dataset("GRID", data=h.astype(np.float32))
 

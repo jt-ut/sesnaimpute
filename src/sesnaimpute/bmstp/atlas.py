@@ -644,7 +644,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         # covers.
         omega_t = float(grp.attrs["OMEGA_POINTING_DEG2"])
         star_index = np.asarray(grp["STAR_INDEX"][()], dtype=np.int64)
-        u = np.asarray(grp["U"][()], dtype=np.float64)
+        u = np.asarray(grp["XI"][()], dtype=np.float64)
         w_star = np.asarray(grp["W_STAR"][()], dtype=np.float64)
         p_pahc_grid = np.asarray(grp["P_PAHC"][()], dtype=np.float64)  # (n_star, 8)
     with h5py.File(field_path, "r") as f:
@@ -921,8 +921,8 @@ def _depth_nodes(loaded_profile, sl_row, d_front, d_back):
     mask = p_x > 0
     width = grid.LOG10_XI_EDGES[1] - grid.LOG10_XI_EDGES[0]
     centers = grid.LOG10_XI_EDGES[:-1] + 0.5 * width
-    log10x_nodes = _quantile_nodes_from_weight(centers[mask], p_x[mask], N_DEPTH_NODES)
-    xi_centers = 10.0 ** log10x_nodes
+    log10_xi_nodes = _quantile_nodes_from_weight(centers[mask], p_x[mask], N_DEPTH_NODES)
+    xi_centers = 10.0 ** log10_xi_nodes
     return xi_centers, np.full(N_DEPTH_NODES, 1.0 / N_DEPTH_NODES)
 
 

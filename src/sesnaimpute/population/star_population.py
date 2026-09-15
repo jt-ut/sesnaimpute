@@ -105,17 +105,17 @@ attrs `GRANULE="tile"`, `OMEGA_SIM_DEG2`, `F_DUSTY_O`, `F_DUSTY_C`,
 `F_DUSTY_MEAN`, `F_C`; a `LIMIT8_GRID_MJY` (8,) dataset, the region's PAHC
 limit grid; one HDF5 group `tile_<id>` per tile, attr
 `OMEGA_POINTING_DEG2`, with datasets `STAR_INDEX` (row into
-`population.field_stars`' retained group), `U`, `W`, `W_STAR`, `W_AGB`,
+`population.field_stars`' retained group), `XI`, `W`, `W_STAR`, `W_AGB`,
 `IS_EVOLVED`, `LOG10_B`, `LOG10_B_PAHC`, `LOG10_B_AGB_C`, `LOG10_B_AGB_O`,
 `P_PAHC` (n_star, 8). The population stores each
-star's placement fraction `U` alone (owner, 2026-09-06): a star's own
-extinction is `A_s * U`, `A_s` a real source's own adopted column, formed
+star's placement fraction `XI` alone (owner, 2026-09-06): a star's own
+extinction is `A_s * XI`, `A_s` a real source's own adopted column, formed
 at read time by the consumer that has a source to apply it to; this
 module never stores a tile-mean extinction. The tile's own mean column
 (`a_tile`, computed below) is still used internally, unstored, to place
 each simulated star's predicted magnitude for the anchor-weight lookup
 and the PAHC contamination weight -- the same per-tile approximation the
-module docstring above already describes for `U` itself.
+module docstring above already describes for `XI` itself.
 """
 
 import os
@@ -883,7 +883,7 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c):
             # since that pointing's retained sample is all a tile draws from.
             grp.attrs["OMEGA_POINTING_DEG2"] = float(result["pointing_area"][tile_result["pointing_index"]])
             grp.create_dataset("STAR_INDEX", data=tile_result["star_index"])
-            grp.create_dataset("U", data=tile_result["u"])
+            grp.create_dataset("XI", data=tile_result["u"])
             grp.create_dataset("W", data=tile_result["w"])
             grp.create_dataset("W_STAR", data=tile_result["w_star"])
             grp.create_dataset("W_AGB", data=tile_result["w_agb"])

@@ -31,7 +31,7 @@ sightline. `embedding_and_ridge` returns this density (`xi_edges`/`p_u`)
 at the profile's own full resolution -- `bmstp.sample_cloud` calls it
 directly to place the star family's members along the sightline's own
 `(u, d)` segments. `build` writes one product per region, sightline
-granule: `HPX_PIX_256`, `U_EDGES`/`P_U`, the same density coarsened to
+granule: `HPX_PIX_256`, `XI_EDGES`/`P_XI`, the same density coarsened to
 `N_PROFILE_CELLS` equal-mass cells for storage -- `population.young_stars`
 reads this coarsened form for the anchor pixels' own placement.
 
@@ -660,8 +660,8 @@ def _write_shape_product(path, hpx_pix_256, embed):
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "sightline"
         f.create_dataset("HPX_PIX_256", data=hpx_pix_256)
-        f.create_dataset("U_EDGES", data=embed["xi_edges"])  # stored as U_EDGES; the depth fraction ξ's profile edges
-        f.create_dataset("P_U", data=embed["p_u"])  # stored as P_U; the depth fraction ξ's profile density
+        f.create_dataset("XI_EDGES", data=embed["xi_edges"])
+        f.create_dataset("P_XI", data=embed["p_u"])
 
 
 def build_shape(config, region):

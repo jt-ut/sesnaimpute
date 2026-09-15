@@ -163,9 +163,9 @@ def _cell_subsamples(loaded, row, d_front, d_back):
     `log10 ξ` segment, mass `p_k * du_k` split `N_SUB` ways as before, each
     sub-sample's own distance `d_k,sub` interpolated LINEARLY in `d` along
     the same cell at the same fractional position (the cell's own `(u, d)`
-    segment is monotonic in both). Returns `(log10x_nudged, w, d_sub,
+    segment is monotonic in both). Returns `(log10_xi_nudged, w, d_sub,
     removed_frac)`, all `(n_cell_kept * N_SUB,)` flat except the scalar
-    `removed_frac` -- `sample_x` bins `log10x_nudged` into `p_x`;
+    `removed_frac` -- `sample_x` bins `log10_xi_nudged` into `p_x`;
     `shift_kernel` and `bmstp.shapes._build_one_sightline` turn `d_sub`
     into the brightness shift `delta = -2 log10(d_sub / 1 kpc)`."""
     xi_edges = loaded["xi_edges"][row]
@@ -186,8 +186,8 @@ def _cell_subsamples(loaded, row, d_front, d_back):
 
     keep = inside_frac > 0.0
     mass_k = (mass * inside_frac)[keep]
-    log10x_lo = np.log10(np.maximum(u_lo[keep], _X_FLOOR))
-    log10x_hi = np.log10(np.maximum(u_hi[keep], _X_FLOOR))
+    log10_xi_lo = np.log10(np.maximum(u_lo[keep], _X_FLOOR))
+    log10_xi_hi = np.log10(np.maximum(u_hi[keep], _X_FLOOR))
     # a cell straddling an interval edge keeps only its own inside
     # fraction's worth of mass (above) but, without this clip, would
     # still spread its sub-samples' own DISTANCE across the cell's full
@@ -197,14 +197,14 @@ def _cell_subsamples(loaded, row, d_front, d_back):
     d_lo_k = np.clip(d_lo[keep], d_front, d_back)
     d_hi_k = np.clip(d_hi[keep], d_front, d_back)
 
-    log10x = log10x_lo[:, None] + _SUB_T[None, :] * (log10x_hi - log10x_lo)[:, None]
+    log10_xi = log10_xi_lo[:, None] + _SUB_T[None, :] * (log10_xi_hi - log10_xi_lo)[:, None]
     d_sub = d_lo_k[:, None] + _SUB_T[None, :] * (d_hi_k - d_lo_k)[:, None]
-    w = np.broadcast_to((mass_k / N_SUB)[:, None], log10x.shape)
+    w = np.broadcast_to((mass_k / N_SUB)[:, None], log10_xi.shape)
     # edge convention (sec. 2): a mark exactly on a cell edge belongs to
     # the cell below it (`bmstp.grid.bin`'s own nudge, repeated here since
     # this is a standalone 1-D bin, not a call to `grid.bin`).
-    log10x_nudged = np.nextafter(log10x.ravel(), -np.inf)
-    return log10x_nudged, w.ravel(), d_sub.ravel(), removed_frac
+    log10_xi_nudged = np.nextafter(log10_xi.ravel(), -np.inf)
+    return log10_xi_nudged, w.ravel(), d_sub.ravel(), removed_frac
 
 
 def sample_x(loaded, row, d_front, d_back):
@@ -217,8 +217,8 @@ def sample_x(loaded, row, d_front, d_back):
     sightline's own (pre-restriction) mass the cloud-interval restriction
     removed, report-only (sec. 5.5's "1-9 percent median, up to 84
     percent")."""
-    log10x_nudged, w, _d_sub, removed_frac = _cell_subsamples(loaded, row, d_front, d_back)
-    p_x, mass_outside = _bin1d(log10x_nudged, w, grid.LOG10_XI_EDGES, sigma_cells=1.0)
+    log10_xi_nudged, w, _d_sub, removed_frac = _cell_subsamples(loaded, row, d_front, d_back)
+    p_x, mass_outside = _bin1d(log10_xi_nudged, w, grid.LOG10_XI_EDGES, sigma_cells=1.0)
     return p_x, mass_outside, removed_frac
 
 
@@ -357,7 +357,7 @@ def shift_kernel(config, region, d_front, d_back):
     d_edges[:, n_d] = dist_pc[-1] + 2.0 * fb_profile["tail_efold_pc"][0]
     loaded_fb = dict(xi_edges=embed["xi_edges"], p_u=embed["p_u"], d_edges=d_edges)
 
-    _log10x, w, d_sub, _removed = _cell_subsamples(loaded_fb, 0, d_front, d_back)
+    _log10_xi, w, d_sub, _removed = _cell_subsamples(loaded_fb, 0, d_front, d_back)
     delta = -2.0 * np.log10(d_sub / 1000.0)
     sigma_d = sigma_d_dex(r)
     total_weight = float(w.sum())

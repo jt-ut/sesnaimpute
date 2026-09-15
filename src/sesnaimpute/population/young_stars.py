@@ -60,7 +60,7 @@ region distance"), never a per-source distance.
 
 Extinction is drawn from the pixel's own embedding density: `a = A_pix *
 u`, `u` on the parent nside-256 sightline's own full-resolution
-`U_EDGES`/`P_U` (`population.yso.embedding_and_ridge`), RESTRICTED to
+`XI_EDGES`/`P_XI` (`population.yso.embedding_and_ridge`), RESTRICTED to
 the region's cloud interval `[d_front, d_back]` and renormalised
 (`population.yso.restrict_and_renormalize`, `sightline_lookup`) -- a
 young star in the anchor's own count is a member of the region's cloud,
