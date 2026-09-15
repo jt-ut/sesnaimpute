@@ -279,9 +279,11 @@ def build(config, regions=None):
     """Writes `population/yso/law_yso_region.hdf5` (module docstring).
     `regions` (default: all thirty) selects which regions' own rows are
     fitted and written this call (CODING_RULES.md 5c, other rows left
-    untouched); `KAPPA_POOLED`/`LAW_BAND_DEX`/the class shares are
-    computed over THIS call's own fitted regions -- a full run (the
-    default) is what the schema's own pooled figures describe."""
+    untouched); `KAPPA_POOLED`/`LAW_BAND_DEX` are pooled over EVERY
+    fitted row the product then holds (this call's and the rows an
+    earlier run left in place), so a region-restricted call leaves the
+    other regions' `KAPPA_USED` intact; the class shares are the whole
+    census's."""
     names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
     census = _load_census(config)
@@ -292,21 +294,6 @@ def build(config, regions=None):
         for i, region in enumerate(names):
             rows[region] = _fit_region(config, region, census, survey_map)
             st.tick(i + 1, len(names), region)
-
-        fitted = [r for r in names if np.isfinite(rows[r]["kappa"])]
-        # the pooled coefficient is the geometric mean over the fitted
-        # clouds (owner's ruling 2026-09-14): the coefficient scatters
-        # lognormally from cloud to cloud, so the centre of that
-        # distribution is the mean of the logarithm, and the band is
-        # the rms of the logarithm about it; each cloud weighs the same,
-        # since the cloud-to-cloud spread is ten times any cloud's own
-        # interval
-        if fitted:
-            log_k = np.array([np.log10(rows[r]["kappa"]) for r in fitted])
-            kappa_pooled = float(10.0 ** np.mean(log_k))
-            law_band_dex = float(np.sqrt(np.mean((log_k - np.log10(kappa_pooled)) ** 2)))
-        else:
-            kappa_pooled, law_band_dex = np.nan, np.nan
 
         proto, disk, weak = _class_shares(census)
 
@@ -329,7 +316,25 @@ def build(config, regions=None):
                 if stale in f:
                     del f[stale]
             kappa_region = np.asarray(f["KAPPA_REGION"][:], dtype=np.float64)
-            kappa_used = np.where(np.isfinite(kappa_region), kappa_region, kappa_pooled)
+            # the pooled coefficient is the geometric mean over EVERY
+            # fitted cloud in the product (the rows this call fitted and
+            # the rows an earlier full run left in place), so a
+            # region-restricted call never re-pools over its own rows
+            # alone and blanks `KAPPA_USED` for the other regions
+            # (2026-09-15: a one-region run of `population.yso` did
+            # exactly that). Owner's ruling 2026-09-14: the coefficient
+            # scatters lognormally from cloud to cloud, so the centre is
+            # the mean of the logarithm and the band the rms about it;
+            # each cloud weighs the same.
+            fitted_all = np.isfinite(kappa_region)
+            if fitted_all.any():
+                log_k = np.log10(kappa_region[fitted_all])
+                kappa_pooled = float(10.0 ** np.mean(log_k))
+                law_band_dex = float(np.sqrt(np.mean((log_k - np.log10(kappa_pooled)) ** 2)))
+            else:
+                kappa_pooled, law_band_dex = np.nan, np.nan
+            fitted = [names[i] for i in range(len(names)) if np.isfinite(rows[names[i]]["kappa"])]
+            kappa_used = np.where(fitted_all, kappa_region, kappa_pooled)
             for name, value in (
                 ("KAPPA_USED", kappa_used),
                 ("KAPPA_POOLED", np.float64(kappa_pooled)),
