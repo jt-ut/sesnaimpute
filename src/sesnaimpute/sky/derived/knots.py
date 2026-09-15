@@ -42,9 +42,20 @@ equivalent Ks-band flux density through the 2MASS Ks bandwidth first. Upper
 limits (the raw table's `l_F*` flag columns) are excluded from the ratio:
 a ratio against an upper limit is not a measured colour.
 
+Also writes `uwish2_images`, one row per UWISH2 WFCAM detector-array image
+(`sky.download.h2_knot_surveys.build`'s own `uwish2_tablec1.csv`, ported
+from Froebrich et al. 2015's PDF appendix Table C1): each image's tile,
+name, position in equatorial and galactic coordinates, and one-pixel
+background noise, `IMAGE_SIDE_ARCMIN = 13.653` carried as an attr (S-D37's
+verified fact, a square with sides along RA and Dec). This is the
+survey's own footprint record -- `population.knot_rate` reads it to
+restrict a region's admitted pixels to those a UWISH2 image actually
+covers, rather than a fixed literal area.
+
 Feeds SPEC_PRIORS.md section 7 (H2S): `eps_ext` (positional cross-match
 against these four surveys), `eps_s` (the knot-colour ratio distribution,
 below), and the UWISH2-only jet-class surface-brightness shape.
+`uwish2_images` feeds `population.knot_rate`'s own footprint.
 """
 
 import email
@@ -371,6 +382,44 @@ def _parse_uwish2(raw_dir):
     }
 
 
+# ------------------------------------------------------------ UWISH2 images
+
+#: UWISH2's own image geometry (S-D37, Froebrich et al. 2015 sect. 2 and
+#: the WFCAM 2048x2048 pixel array at 0.4 arcsec): each image is this
+#: side, in arcmin, a square with sides along RA and Dec.
+UWISH2_IMAGE_SIDE_ARCMIN = 13.653
+
+
+def _parse_uwish2_images(raw_dir):
+    """UWISH2's own Table C1 (module docstring): one row per WFCAM
+    detector-array image, from `sky.download.h2_knot_surveys.build`'s
+    `uwish2_tablec1.csv`."""
+    path = f"{raw_dir}/uwish2/uwish2_tablec1.csv"
+    _require(path, "sesnaimpute.sky.download.h2_knot_surveys.build")
+    df = pd.read_csv(path)
+    return {
+        "TILE": df["Tile"].to_numpy(dtype="S16"),
+        "IMAGE": df["Image"].to_numpy(dtype="S32"),
+        "RA_DEG": df["RAdeg"].to_numpy(dtype=np.float64),
+        "DEC_DEG": df["DEdeg"].to_numpy(dtype=np.float64),
+        "GLON_DEG": df["GLON"].to_numpy(dtype=np.float64),
+        "GLAT_DEG": df["GLAT"].to_numpy(dtype=np.float64),
+        "NOISE": df["Noise"].to_numpy(dtype=np.float64),
+    }
+
+
+def _write_uwish2_images(config, data):
+    out_path = product_path(config, "sky/derived", "knots", "uwish2_images", "survey")
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with h5py.File(out_path, "w") as f:
+        f.attrs["GRANULE"] = "survey"
+        f.attrs["IMAGE_SIDE_ARCMIN"] = UWISH2_IMAGE_SIDE_ARCMIN
+        f.attrs["N_IMAGES"] = int(data["TILE"].size)
+        for name, arr in data.items():
+            f.create_dataset(name, data=arr)
+    return out_path
+
+
 # ----------------------------------------------------------------- writers
 
 _UNITS = {
@@ -451,18 +500,21 @@ def build(config, regions=None):
     with progress_module.Stage("sky.derived.knots") as st:
         raw_dir = _raw_dir(config)
         giannini = _parse_giannini(raw_dir)
-        st.tick(1, 4, "surveys")
+        st.tick(1, 5, "surveys")
         davis = _parse_davis(raw_dir)
-        st.tick(2, 4, "surveys")
+        st.tick(2, 5, "surveys")
         walawender = _parse_walawender(raw_dir)
-        st.tick(3, 4, "surveys")
+        st.tick(3, 5, "surveys")
         uwish2 = _parse_uwish2(raw_dir)
-        st.tick(4, 4, "surveys")
+        st.tick(4, 5, "surveys")
+        uwish2_images = _parse_uwish2_images(raw_dir)
+        st.tick(5, 5, "surveys")
 
         _write_survey(config, "giannini2013", giannini)
         _write_survey(config, "davis2009", davis)
         _write_survey(config, "walawender2005", walawender)
         _write_survey(config, "uwish2", uwish2)
+        _write_uwish2_images(config, uwish2_images)
 
         colours = _giannini_colours(giannini)
         _write_colours(config, colours)
@@ -472,12 +524,13 @@ def build(config, regions=None):
               f"walawender2005 {len(walawender['RA_DEG'])} knots "
               f"({int(walawender['H2_SELECTED'].sum())} H2-selected), "
               f"uwish2 {len(uwish2['RA_DEG'])} features "
-              f"({int(uwish2['JET_CLASS'].sum())} jet-class)")
+              f"({int(uwish2['JET_CLASS'].sum())} jet-class), "
+              f"uwish2_images {len(uwish2_images['RA_DEG'])} images")
         for band_key, stats in colours.items():
             print(f"sky.derived.knots build: colours {band_key} N={stats['N']} "
                   f"median={stats['MEDIAN']:.3f} 16-84%=[{stats['P16']:.3f}, {stats['P84']:.3f}]")
         st.done(None, knots=len(giannini["RA_DEG"]) + len(davis["RA_DEG"]) + len(walawender["RA_DEG"]),
-                features=len(uwish2["RA_DEG"]))
+                features=len(uwish2["RA_DEG"]), images=len(uwish2_images["RA_DEG"]))
 
 
 if __name__ == "__main__":
