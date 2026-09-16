@@ -15,12 +15,15 @@ import h5py
 import numpy as np
 
 from sesnaimpute import config as config_module
+from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.bmstp import grid
 from sesnaimpute.fittp import prior_reader
-from sesnaimpute.fittp.sweep import CLASSES
+
+#: the six class codes, the order `common_floor` maxes over
+CLASSES = tuple(c.code for c in definitions.CLASSES)
 
 
 def build_region(config, region):
