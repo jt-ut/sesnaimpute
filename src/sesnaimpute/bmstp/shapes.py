@@ -278,7 +278,8 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     # own p_x already carries it; GRID_YSO gets its own pass here since its
     # x-axis rows were built from the raw (unsmoothed) sub-sample scatter
     # above, not from p_x.
-    grid_yso = gaussian_filter1d(grid_yso, sigma=1.0, axis=0, mode="constant")
+    grid_yso = gaussian_filter1d(grid_yso, sigma=1.0, axis=0, mode="constant",
+                                  truncate=grid._truncate_for(1.0, n_x))
 
     total_intended = float(w_sub.sum()) * float(p_ref.sum())
     # THE EDGE ξ = 1: `log10 ξ = 0` reflects -- the shift-kernel convolution's

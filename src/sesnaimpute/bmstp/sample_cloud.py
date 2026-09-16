@@ -149,7 +149,8 @@ def _bin1d(values, w, edges, sigma_cells):
     mass_outside = float((total_weight - h.sum()) / total_weight)
     h = h / total_weight
     mass_before = float(h.sum())
-    h = gaussian_filter1d(h, sigma=sigma_cells, mode="constant")
+    h = gaussian_filter1d(h, sigma=sigma_cells, mode="constant",
+                           truncate=grid._truncate_for(sigma_cells, h.size))
     mass_outside += mass_before - float(h.sum())
     h = grid.fold_wall(h)
     return h.astype(np.float64), mass_outside
