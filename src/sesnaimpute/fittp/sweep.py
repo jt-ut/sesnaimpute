@@ -23,8 +23,10 @@ the Gaia term (`GaiaTerm`), the class's own `Prior` reader
 ready-made from `bmstp.floor`'s product, so no other class's grid is read)
 and the region's whole catalogue (`_load_region_catalog`: fluxes, uncertainties,
 `ORIGIN_FNU`, `NAME`, `F_LIM_50`). These are stashed in `_WORKER` and a
-`multiprocessing.get_context("fork").Pool` is created AFTER that load and
-BEFORE any task runs -- the workers inherit `_WORKER` by fork by
+`multiprocessing.get_context("fork").Pool` is created AFTER that load, and
+after one warm source has compiled every numba kernel in the parent so the
+workers inherit the compiled code rather than each paying for it -- the
+workers inherit `_WORKER` and that code by fork by
 copy-on-write, never through `Pool`'s `initializer`/`initargs` (which
 pickles) and never by opening a register, grid or product themselves.
 `_init_worker` (the Pool's own, data-free initializer) pins numba and BLAS
@@ -65,6 +67,12 @@ import re
 
 import h5py
 import numba
+
+# numba's own workqueue layer, "forksafe everywhere" (numba/np/ufunc/parallel.py):
+# this module warms every kernel in the parent and then forks a pool, so the layer
+# has to survive the fork. Set before numba initialises one; each worker pins
+# itself to a single thread anyway (`_init_worker`), so the choice costs nothing.
+numba.config.THREADING_LAYER = "forksafe"
 import numpy as np
 import threadpoolctl
 from scipy.special import logsumexp
@@ -90,6 +98,17 @@ CLASSES = tuple(c.code for c in definitions.CLASSES)
 #: without holding back result consumption (results are still delivered,
 #: and written, in catalogue order) for long.
 _IMAP_CHUNKSIZE = 16
+
+#: Per-worker memory floor, MB: what a forked worker costs beyond its own
+#: source's arrays -- the interpreter, the imported stack, and the
+#: copy-on-write pages the parent's inherited objects dirty as CPython
+#: refcounts them. Measured with `vmmap --summary` (physical footprint, which
+#: excludes the clean pages workers share, unlike RSS) on the YSO library, the
+#: largest: ~310 MB steady, ~430 MB peak per worker. Rounded to the peak, since
+#: the node has to hold it. `build_region_class`'s warm-up is what keeps the
+#: JIT out of this figure: without it every worker compiles its own kernels and
+#: the floor is ~180 MB higher.
+WORKER_PROCESS_FLOOR_MB = 430
 
 #: The datasets every P7 part file and the joined product carry, in write
 #: order (one row per source; `FAILED`, below, is a part-file-only column
@@ -557,16 +576,20 @@ def build_region_class(config, region, cls, st, reader, lambda_floor, catalog,
     if limit is not None:
         n_source = min(n_source, limit)
 
-    # item 8's memory disclosure: the per-worker working set is now one
-    # source's own (likelihood.WORKER_WORKING_SET_EQUIV float32-(n_model, 8)
-    # equivalents), not a block's; printed once, at the top of this stage,
-    # from the closed-form cost alone -- no RAM measurement, no auto-
-    # capping: the user reads this and sets --workers themselves.
-    per_worker_mb = n_model * N_BANDS * 4 * likelihood.WORKER_WORKING_SET_EQUIV / 1e6
+    # item 8's memory disclosure: printed once, at the top of this stage, from
+    # closed-form cost plus one documented constant -- no RAM measurement, no
+    # auto-capping. The user reads this line and sets --workers themselves.
+    # Two terms, because the array arithmetic alone understates a worker several
+    # times over and would have the user oversubscribe a node: this source's own
+    # arrays, and WORKER_PROCESS_FLOOR_MB, the floor every forked worker carries
+    # whatever the library size.
+    arrays_mb = n_model * N_BANDS * 4 * likelihood.WORKER_WORKING_SET_EQUIV / 1e6
+    per_worker_mb = arrays_mb + WORKER_PROCESS_FLOOR_MB
     total_gb = per_worker_mb * n_workers / 1024.0
-    print("fittp.sweep.%s [%s]: n_model=%d, per-worker working set %.0f MB, "
-          "--workers %d -> %.1f GB resident" % (cls, region, n_model, per_worker_mb,
-                                                 n_workers, total_gb), flush=True)
+    print("fittp.sweep.%s [%s]: n_model=%d, per worker %.0f MB (%.0f MB arrays + %d MB "
+          "process floor), --workers %d -> %.1f GB" % (cls, region, n_model, per_worker_mb,
+                                                        arrays_mb, WORKER_PROCESS_FLOOR_MB,
+                                                        n_workers, total_gb), flush=True)
 
     batch_size = config.fit_batch_size
     batch_bounds = [(s, min(s + batch_size, n_source)) for s in range(0, n_source, batch_size)]
@@ -582,9 +605,20 @@ def build_region_class(config, region, cls, st, reader, lambda_floor, catalog,
                        flux=catalog["flux"], sigma=catalog["sigma"], origin=catalog["origin"],
                        f_lim50=catalog["f_lim50"])
 
-    # item 5: forked here, below every load above and before any numba
-    # kernel has run anywhere in this process -- none of those loads calls
-    # one; every fit, prior read and Gaia term now runs inside a worker.
+    # numba JIT-compiles once per PROCESS, so a worker meeting a kernel cold
+    # pays its compile memory privately -- measured at ~82 MB per kernel, which
+    # 100 workers would carry 100 times over. Warming here, in the parent,
+    # leaves the compiled code in pages every worker inherits copy-on-write:
+    # measured private growth per worker falls from ~82 MB a kernel to ~1.6 MB.
+    # The warm is one real source through the real task, so it compiles exactly
+    # the signatures the workers go on to call (`_cell_sum` alone takes 21
+    # arguments; an explicit signature list would be a second thing to keep
+    # right). `_source_task` catches its own failures, so this cannot raise.
+    numba.set_num_threads(1)
+    _source_task(batch_bounds[0][0])
+
+    # Forked below every load above, and below the warm -- the threading layer
+    # pinned at import is fork-safe by numba's own contract.
     ctx = mp.get_context("fork")
     with ctx.Pool(n_workers, initializer=_init_worker) as pool:
         for bi, (bstart, bstop) in enumerate(batch_bounds):
