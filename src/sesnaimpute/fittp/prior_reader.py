@@ -343,6 +343,17 @@ def _factor_ln(reader, rows, a_hat, log10_b_hat, slope, sigma_a, model_index):
         dlb = float(b_centers[1] - b_centers[0])
         pos = (arg - b_centers[0]) / dlb
         pos = np.where(np.isfinite(pos), pos, 0.0)
+        # PARALLEL brief item 10: `pos` is finite here but can run far
+        # beyond int64 (a template whose implied brightness sits many
+        # decades off the factor table's own axis) -- `floor` of that huge
+        # finite value then overflows the cast to `INT64_MIN`, which the
+        # old clip(..., 0, size-2) floor read as bin 0 with frac=1.0: a
+        # template off the TOP of the table was silently read at the
+        # SECOND-FAINTEST bin instead. Clamping `pos` itself first is the
+        # same clamp the in-range path already performs at both edges, so
+        # every out-of-range case lands on the table's own nearest edge
+        # bin, top or bottom, not on a wrapped sign.
+        pos = np.clip(pos, 0.0, b_centers.size - 1)
         j0 = np.clip(np.floor(pos).astype(np.int64), 0, b_centers.size - 2)
         frac = np.clip(pos - j0, 0.0, 1.0)
         rows_idx = np.arange(m)[None, :]

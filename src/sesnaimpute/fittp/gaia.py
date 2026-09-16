@@ -275,6 +275,22 @@ class GaiaTerm:
             self._star_marginals[cls] = cached
         return cached
 
+    def warm(self, cls):
+        """Populates this class's own lazy caches (`_register`, and, for
+        the field-star classes, `_star_marginal`) now, in the CALLING
+        process. `_register`/`_star_marginal` load on first use by design
+        (a class `ln_gamma` never asks for is never read), which is exactly
+        wrong for `fittp.sweep`'s forked worker pool (PARALLEL brief item
+        4): left lazy, every worker would independently open the same
+        register/population product on its own first task -- eight reads
+        of one file instead of one. Call this in the PARENT, on the one
+        class this call's pool will sweep, before the pool forks; the
+        warmed cache then reaches every worker by fork, copy-on-write.
+        """
+        self._register(cls)
+        if cls in STAR_MARGINAL_CLASSES:
+            self._star_marginal(cls)
+
     def _g_s_and_a_x_block(self, rows, cls):
         """The source-and-class-level factors `ln_gamma` needs, vectorised
         over the block's own sources (`rows`, `(n_block,)`): `matched`
