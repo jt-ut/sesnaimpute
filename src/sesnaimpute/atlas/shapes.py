@@ -52,16 +52,18 @@ the printed peaks); it is drawn, since the read
 `blur=True`) carries a real, non-zero density there -- a pencil column
 above the beam mean, in the measured coordinate's one-dex padding, never
 folded back -- so both rows draw it, past the `x = 1` line marked on
-every panel. (2) One common floor on the prior DENSITY `Lambda_C`,
-common to every class at the source rather than per class:
-`Lambda_floor(s) = grid.FLOOR * max over classes and SUPPORT cells of
-Lambda_C(cell; s)`; where every class was below it the six classes read
-exactly equal, one sixth apiece, and the likelihood is left to decide --
-applied over the WHOLE array, support and padding alike, so an empty
-padding cell reads the same floor too. The support is
-`bmstp.grid.N_XI_SUPPORT`, the floor `fittp.prior_reader.common_floor` --
-the same two definitions the fitter's read uses, imported, never
-restated.
+every panel. (2) One common floor line this PAGE marks on the prior
+DENSITY `Lambda_C`, common to every class at the source rather than per
+class: `Lambda_floor(s) = grid.FLOOR * max over classes and SUPPORT
+cells of Lambda_C(cell; s)`; where every class was below it the six
+classes read exactly equal, one sixth apiece, and the likelihood is left
+to decide -- applied over the WHOLE array, support and padding alike, so
+an empty padding cell reads the same floor too. This floor is the
+page's own diagnostic (`fittp.prior_reader.common_floor`,
+`bmstp.grid.N_XI_SUPPORT` for the support), never applied by the
+fitter's own read (`fittp.prior_reader.ln_prior`/`_cell_sum`), which
+reads a stored zero as an exact zero and a template whose whole window
+is empty as `-inf`.
 
 This page draws the MEASURED depth fraction, the fitter's own
 $\hat\xi$ (owner's ruling): its x-axis title reads `$log_{10}\,\hat\xi$`
@@ -369,8 +371,8 @@ def _panel_xi_max(xi_edges, densities):
     less than THE EDGE ξ = 1 (`_LOG10_XI_EDGE`), and no further right than the
     last cell, across the six classes' own blurred reads (`_panel_shape`),
     that still carries a non-negligible share of that class's own mass --
-    `grid.FLOOR` of its own peak row, the same relative floor the read
-    applies everywhere else."""
+    `grid.FLOOR` of its own peak row, the relative floor this page marks
+    on its own plot (the fitter's own read applies none)."""
     last_idx = -1
     for density in densities:
         row_mass = density.sum(axis=1)
