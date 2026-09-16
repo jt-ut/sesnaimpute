@@ -46,9 +46,11 @@ def _build_one_tile(config, region, tile_id):
     """One tile's `(GRID_STAR, MASS_OUTSIDE_STAR, GRID_AGB,
     MASS_OUTSIDE_AGB, sum_check, above_star_w, total_star_w, above_agb_w,
     total_agb_w)`, `sum_check` the max, over the two grids, of the
-    pre-floor identity `|H.sum() - (1 - mass_outside)|` (an identity of
-    `grid.bin`, SPEC_BMSTP_DRAFT.md sec. 9's normalisation check for this
-    class). `above_*_w`/`total_*_w` are each class's own RAW (unnormalised)
+    pre-floor identity `|H.sum() - (1 - mass_outside)|` (`mass_outside`
+    from `grid.bin_star_widths`'s own INDEPENDENT bookkeeping, not read
+    back off `H.sum()`, so this is a genuine check, SPEC_BMSTP_DRAFT.md
+    sec. 9's normalisation check for this class). `above_*_w`/`total_*_w`
+    are each class's own RAW (unnormalised)
     weight above the grid's top edge and its own total weight, summed
     across tiles by the caller into the region's single mass-above-top
     fraction (sec. 2, sec. 9's 0.1% bar, W24b -- distinct from
@@ -252,13 +254,23 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     ONE convolution with `p_ref` reproduces the per-sub-sample sum
     exactly). `XI_MARGINAL` (`p_x`) is unchanged in value
     (`sample_cloud.sample_x`, its own one-cell-smoothed bin).
-    `MASS_OUTSIDE_YSO` is the shortfall of `GRID_YSO`'s own total against
-    the sightline's intended mass, `sum(w_k,sub) * p_ref.sum()`: THE EDGE ξ = 1
-    (`bmstp.grid`'s module docstring) reflects whatever of the one-cell
-    `x` smoothing's own mass reaches `log10 ξ > 0` back onto the support
-    (`grid.fold_wall`) rather than dropping it, exactly as `grid.bin` does
-    for every other class, so only mass a sub-sample's own smoothing
-    carries past the array's true `log10 ξ` edges is ever shortfall.
+    A stored shape is normalised to one over the CLASS'S OWN population
+    (sec. 4.1's "shape grids": "normalised to one over cells", true of
+    every class alike): the sightline's cloud-interval-restricted
+    sub-sample weight, `total_weight = sum(w_k,sub)` (`sample_x`'s own
+    denominator, `sample_cloud._bin1d`, so `GRID_YSO`'s `x`-marginal
+    agrees with `XI_MARGINAL` by construction), never `sum(w_k,sub) *
+    p_ref.sum()` (a quantity that shrinks with `GRID_YSO`'s own
+    shortfall and so cannot measure it). `GRID_YSO` is divided by
+    `total_weight` here, the same division `_bin1d` already applies to
+    build `p_x`. `MASS_OUTSIDE_YSO` is the shortfall against that
+    invariant (1, after the division): THE EDGE ξ = 1 (`bmstp.grid`'s
+    module docstring) reflects whatever of the one-cell `x` smoothing's
+    own mass reaches `log10 ξ > 0` back onto the support (`grid.fold_wall`)
+    rather than dropping it, exactly as `grid.bin` does for every other
+    class, so only mass a sub-sample's own smoothing carries past the
+    array's true `log10 ξ` edges, or `p_ref`'s own off-grid template
+    share (`sample_cloud.p_ref_f45`'s docstring), is ever shortfall.
     `GRID_YSO` carries its own true zeros: no per-shape floor is baked in
     here."""
     p_x, _mo_x, removed_frac = sample_cloud.sample_x(loaded, row, d_front, d_back)
@@ -281,15 +293,26 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
     grid_yso = gaussian_filter1d(grid_yso, sigma=1.0, axis=0, mode="constant",
                                   truncate=grid._truncate_for(1.0, n_x))
 
-    total_intended = float(w_sub.sum()) * float(p_ref.sum())
+    # the invariant GRID_YSO is normalised against: the sightline's own
+    # cloud-interval-restricted sub-sample weight, the SAME denominator
+    # `sample_cloud._bin1d` divides by to build `p_x` (sec. 4.1's "shape
+    # grids", "normalised to one over cells") -- never `total_weight *
+    # p_ref.sum()`, which is derived from `GRID_YSO`'s own incomplete
+    # construction and shrinks in lockstep with it, so it could not
+    # measure a shortfall (the defect this replaces).
+    total_weight = float(w_sub.sum())
     # THE EDGE ξ = 1: `log10 ξ = 0` reflects -- the shift-kernel convolution's
     # own padding dex is folded back onto the support (`grid.fold_wall`)
     # rather than dropped, so `mass_outside_yso` below counts only what
-    # the smoothing carries past the array's true `log10 ξ` edges.
+    # the smoothing carries past the array's true `log10 ξ` edges, or what
+    # `p_ref` itself never placed on the grid.
     grid_yso = grid.fold_wall(grid_yso)
     total_actual = float(grid_yso.sum())
-    mass_outside_yso = (0.0 if total_intended <= 0.0
-                         else float(np.clip(1.0 - total_actual / total_intended, 0.0, 1.0)))
+    if total_weight <= 0.0:
+        mass_outside_yso = 1.0
+    else:
+        mass_outside_yso = float(np.clip(1.0 - total_actual / total_weight, 0.0, 1.0))
+        grid_yso = grid_yso / total_weight
     return (grid_yso.astype(np.float32), p_x.astype(np.float32), mass_outside_yso, removed_frac)
 
 

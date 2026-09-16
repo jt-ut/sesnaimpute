@@ -212,7 +212,15 @@ def bin_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
     reports, since every star belongs to exactly one class and the edge ξ = 1
     reflects (`fold_wall`) rather than drops what a wide width class
     carries past it; `H` carries its own true zeros, including the exact
-    zero the edge ξ = 1 holds in the padding above it."""
+    zero the edge ξ = 1 holds in the padding above it. `mass_outside` is
+    tracked incrementally PER WIDTH CLASS, exactly as `bin` tracks it for
+    its own one histogram (a mark's weight `histogram2d` drops silently
+    outside the array's own extent, then the two smoothing passes' own
+    edge loss, summed over classes before `fold_wall`) -- never read back
+    off `1 - H.sum()`, which would make the identity above true by
+    definition regardless of what `H` holds and unable to catch a
+    bookkeeping bug (the same defect class as `bmstp.shapes`' old
+    `MASS_OUTSIDE_YSO`)."""
     x = np.asarray(x, dtype=float)
     log10_f45 = np.asarray(log10_f45, dtype=float)
     w = np.asarray(w, dtype=float)
@@ -225,24 +233,33 @@ def bin_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
     # edge convention (sec. 2), the same nudge `bin` applies.
     log10_xi = np.nextafter(log10_xi, -np.inf)
     H = np.zeros((_N_X, _N_B), dtype=np.float64)
+    mass_outside = 0.0
     for k in range(len(sigma_classes_cells)):
         sel = width_class == k
         if not np.any(sel):
             continue
+        w_k = w[sel]
         Hk, _, _ = np.histogram2d(
-            log10_xi[sel], log10_f45[sel], bins=[LOG10_XI_EDGES, LOG10_F45_EDGES], weights=w[sel])
+            log10_xi[sel], log10_f45[sel], bins=[LOG10_XI_EDGES, LOG10_F45_EDGES], weights=w_k)
+        # a mark whose (xi, F) falls entirely outside the array's own
+        # extent is dropped silently by `histogram2d`: counted against
+        # the SAME `total_weight` every class's `mass_outside` is
+        # measured against (the tile's whole retained sample), not
+        # against this width class's own subtotal.
+        mass_outside += (float(w_k.sum()) - float(Hk.sum())) / total_weight
         Hk = Hk / total_weight
+        mass_before = float(Hk.sum())
         sigma_k = float(sigma_classes_cells[k])
         Hk = gaussian_filter1d(Hk, sigma=sigma_k, axis=0, mode="constant",
                                 truncate=_truncate_for(sigma_k, _N_X))
         Hk = gaussian_filter1d(Hk, sigma=1.0, axis=1, mode="constant",
                                 truncate=_truncate_for(1.0, _N_B))
+        mass_outside += mass_before - float(Hk.sum())
         H += Hk
     # THE EDGE ξ = 1: fold whatever mass a width class's own smoothing carried
-    # past `log10 ξ = 0` back onto the support, before the identity is
-    # read off `H.sum()` -- reflected, never dropped.
+    # past `log10 ξ = 0` back onto the support -- reflected, never dropped,
+    # and mass-conserving, so it does not change `mass_outside`.
     H = fold_wall(H)
-    mass_outside = float(1.0 - H.sum())
     return H.astype(np.float64), mass_outside
 
 
