@@ -146,8 +146,7 @@ _GAIA_ROW_COLUMNS = (
 N_MASS_QUADRATURE = 200
 
 #: Anchor pixels per joblib block: bounds one block's `(n_pix, n_mass,
-#: n_u)` array instead of holding a whole region's at once (rule 8/9),
-#: the same blocking idiom `prior.yso._sightline_block` uses.
+#: n_u)` array instead of holding a whole region's at once (rule 8/9).
 PIXEL_BLOCK = 32
 
 _GAIA_TABLE_CACHE = {}

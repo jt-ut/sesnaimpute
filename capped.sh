@@ -15,7 +15,7 @@ ROOT=$!
 trap 'echo "capped: interrupted -- stopping the command" >&2; pkill -TERM -P "$ROOT" 2>/dev/null; kill -TERM "$ROOT" 2>/dev/null; sleep 1; pkill -KILL -P "$ROOT" 2>/dev/null; kill -KILL "$ROOT" 2>/dev/null; orphans; exit 130' INT TERM HUP
 peak=0
 while kill -0 "$ROOT" 2>/dev/null; do
-  total=$(ps -o pid=,ppid=,rss= -ax | awk -v root="$ROOT" '
+  total=$(ps -e -o pid=,ppid=,rss= | awk -v root="$ROOT" '
     { pid[NR]=$1; ppid[NR]=$2; rss[NR]=$3 }
     END {
       inset[root]=1

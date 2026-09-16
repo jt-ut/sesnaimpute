@@ -36,12 +36,6 @@ _FILES = {
     "J_ApJS_266_32.vot": "J/ApJS/266/32/ehops",
 }
 
-#: The archive's own verbatim copy of both VOTables (MANIFEST.md), used
-#: when present so the build is a copy, not a re-fetch.
-_ARCHIVE_DIR = (
-    "/Users/jtaylor/Dropbox/Research/SESNA_Complete/archive/sky_pre_wave2/hops/download"
-)
-
 
 def build(config, regions=None):
     """Copies (or, failing that, fetches) the HOPS and eHOPS VOTables to
@@ -49,11 +43,14 @@ def build(config, regions=None):
     and ignored: this is a survey-wide product.
     """
     dest_dir = f"{config.data_root}/sky/download/hops"
+    # The archive's own verbatim copy of both VOTables (MANIFEST.md), used
+    # when present so the build is a copy, not a re-fetch.
+    archive_dir = f"{config.data_root}/archive/sky_pre_wave2/hops/download"
     os.makedirs(dest_dir, exist_ok=True)
     with progress_module.Stage("sky.download.hops") as st:
         for i, (name, source_table) in enumerate(_FILES.items()):
             dest_path = f"{dest_dir}/{name}"
-            archive_path = f"{_ARCHIVE_DIR}/{name}"
+            archive_path = f"{archive_dir}/{name}"
             if os.path.exists(dest_path):
                 print(f"sky.download.hops: {dest_path} present, skipped")
             elif os.path.exists(archive_path):

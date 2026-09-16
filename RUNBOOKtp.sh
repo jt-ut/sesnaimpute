@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # RUNBOOKtp.sh -- the orchestration for the thinned-Poisson design: the inputs,
 # the population summaries, the bmstp prior, the fittp fitter and posterior.
-# RUNBOOK.sh drives the earlier design; the input stages are shared verbatim.
 #
 # This file's line order IS the dependency order: each stage below reads
 # only the products of stages already listed above it. Each line
@@ -25,7 +24,7 @@ set -euo pipefail
 
 # Usage: RUNBOOKtp.sh [--from <module>] [--to <module>] [--regions R1 R2 ...]
 #   --from     start at the line whose module is <module> (fully qualified,
-#              e.g. sesnaimpute.prior.yso, matching the PY lines below
+#              e.g. sesnaimpute.bmstp.shapes, matching the PY lines below
 #              verbatim) and run everything after it: a change to one stage
 #              rebuilds only its dependants. Lines before it are skipped.
 #   --to       stop after the line whose module is <module> (inclusive): a prior-only
@@ -39,9 +38,9 @@ while [ $# -gt 0 ]; do case "$1" in
   --regions) shift; while [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; do REGIONS+=("$1"); shift; done ;;
   *) echo "RUNBOOKtp.sh: unknown argument $1" >&2; exit 2 ;;
 esac; done
-PYBIN=/usr/local/bin/python3.9
+PYBIN=${SESNA_PYTHON:-/usr/local/bin/python3.9}
 export PYTHONPATH="$(cd "$(dirname "$0")" && pwd)/src"
-CONFIG=/Users/jtaylor/Dropbox/Research/SESNA_Complete/config/root.cfg
+CONFIG=${SESNA_CONFIG:-$HOME/Dropbox/Research/SESNA_Complete/config/root.cfg}
 STARTED=0; [ -z "$FROM" ] && STARTED=1
 STOPPED=0
 # Every stage runs through capped.sh (CODING_RULES 10a) with the region list.

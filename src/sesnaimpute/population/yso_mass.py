@@ -78,7 +78,8 @@ def _read_subgrid(config, subdir):
     path = f"{config.inputs['sed_models']}/yso/{subdir}/parameters.fits"
     if not os.path.isfile(path):
         raise FileNotFoundError(
-            f"yso_mass: missing {path}; run RUNBOOK.sh's YSO curation stage first")
+            f"yso_mass: missing {path}; run the YSO SED-model curation that "
+            "populates sed_models/yso first")
     with fits.open(path) as hdul:
         d = hdul[1].data
         names = np.char.strip(d["MODEL_NAME"].astype(str))
@@ -125,7 +126,7 @@ def _read_mist_1myr_track(config):
             "MIST_v1.2_feh_p0.00_afe_p0.0_vvcrit0.0_basic.iso")
     if not os.path.isfile(path):
         raise FileNotFoundError(
-            f"yso_mass: missing {path}; run RUNBOOK.sh's sky.download.mist2016 stage first")
+            f"yso_mass: missing {path}; run RUNBOOKtp.sh's sky.download.mist2016 stage first")
     rows = []
     with open(path) as f:
         for line in f:
