@@ -95,6 +95,34 @@ N_WIDTH_CLASSES = 8
 
 _SQRT2 = float(np.sqrt(2.0))
 
+#: The `truncate` rule for every `gaussian_filter1d` call in this module
+#: (TRUNCATE brief), replacing scipy's default of 4.0 sigma: every grid
+#: this module fills is stored as `float32` (`bmstp/shapes.py`'s
+#: `GRID_STAR`/`GRID_AGB`/`GRID_YSO`/`GRID_H2S`/`GRID` all
+#: `.astype(np.float32)`), whose smallest normal magnitude is ~1.18e-38.
+#: A unit Gaussian's peak-relative value first falls below that at the
+#: radius `r` solving `exp(-r**2 / 2) = 1.18e-38`, i.e. `r =
+#: sqrt(-2 * ln(1.18e-38)) ~= 13.2` sigma; a few more sigma past that
+#: (15) reaches ~4e-49, already below `float32`'s smallest SUBNORMAL
+#: (1.4e-45), so nothing beyond 15 sigma would survive the cast to
+#: `float32` regardless of how much further the kernel ran. 15 sigma is
+#: therefore the point past which a wider kernel buys nothing the stored
+#: dtype can hold. The other stopping condition is the array's own
+#: extent along the smoothed axis: running the kernel past the array
+#: costs compute for values `mode="constant"` zero-padding already
+#: supplies. `_truncate_for` returns, for a given `sigma` (in cells) and
+#: axis length `n_cells`, the `truncate` (scipy's sigma-multiplier
+#: convention) that reaches whichever of those two radii is smaller.
+def _truncate_for(sigma, n_cells):
+    """`truncate` for `gaussian_filter1d`/`gaussian_filter` reaching
+    `float32`'s storable floor (15 sigma) or the smoothed axis's own
+    extent (`n_cells`), whichever radius is smaller -- see the module
+    constant block above this function for the dtype reasoning."""
+    sigma = float(sigma)
+    if sigma <= 0.0:
+        return 15.0
+    return min(15.0, n_cells / sigma)
+
 
 def fold_wall(H):
     """THE EDGE ξ = 1 (module docstring): mirror-reflects whatever mass sits in
@@ -151,8 +179,10 @@ def bin(x, log10_f45, w):
     # `log10 F_4.5 = -4.0`/`+7.0`, is mass outside the grid -- folded into
     # `mass_outside` below, not reappeared at the opposite edge.
     mass_before = float(H.sum())
-    H = gaussian_filter1d(H, sigma=1.0, axis=0, mode="constant")
-    H = gaussian_filter1d(H, sigma=1.0, axis=1, mode="constant")
+    H = gaussian_filter1d(H, sigma=1.0, axis=0, mode="constant",
+                           truncate=_truncate_for(1.0, _N_X))
+    H = gaussian_filter1d(H, sigma=1.0, axis=1, mode="constant",
+                           truncate=_truncate_for(1.0, _N_B))
     mass_outside += mass_before - float(H.sum())
     # THE EDGE ξ = 1: `log10 ξ = 0` reflects, it does not drop -- the one-cell
     # x smoothing's own mass above it is folded back onto the support,
@@ -202,8 +232,11 @@ def bin_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
         Hk, _, _ = np.histogram2d(
             log10_xi[sel], log10_f45[sel], bins=[LOG10_XI_EDGES, LOG10_F45_EDGES], weights=w[sel])
         Hk = Hk / total_weight
-        Hk = gaussian_filter1d(Hk, sigma=float(sigma_classes_cells[k]), axis=0, mode="constant")
-        Hk = gaussian_filter1d(Hk, sigma=1.0, axis=1, mode="constant")
+        sigma_k = float(sigma_classes_cells[k])
+        Hk = gaussian_filter1d(Hk, sigma=sigma_k, axis=0, mode="constant",
+                                truncate=_truncate_for(sigma_k, _N_X))
+        Hk = gaussian_filter1d(Hk, sigma=1.0, axis=1, mode="constant",
+                                truncate=_truncate_for(1.0, _N_B))
         H += Hk
     # THE EDGE ξ = 1: fold whatever mass a width class's own smoothing carried
     # past `log10 ξ = 0` back onto the support, before the identity is
