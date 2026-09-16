@@ -56,6 +56,13 @@ GRAY_COLUMN = -2.0
 #: bands has no two-parameter fit and is flagged, not fitted.
 MIN_DETECTED_BANDS = 2
 
+#: `catalog.curated`'s ORIGIN_FNU code for a band the survey never observed
+#: at the source's position: no flux and no completeness depth of its own,
+#: so the curation substituted a sky neighbour's depth. That substituted
+#: value is not a limit on this source (section 6.2), so the band carries
+#: no non-detection term -- it is excluded, like a band with no limit.
+ORIGIN_UNOBSERVED = 91
+
 #: SPEC_BMSTP_DRAFT.md section 6.1 -- the reported mark's ceiling, in A_K
 #: magnitudes; the design's own A_V amplitude is clamped to this converted
 #: by the source's own (A_K/A_V).
@@ -244,8 +251,9 @@ def prepare(config, flux, sigma, origin, sigma_lib_l, f_lim50, width_dex):
     (`sigma_lib_by_class`, read once in the parent) and this source's own
     `F_LIM_50` and region roll-off width `WIDTH_DEX` (`(8,)`, sliced once
     from the region-wide arrays the caller loaded, never read from disk
-    here). Builds the per-band weight and the fit's other
-    design-independent numbers. The extinction-law design itself is not
+    here). Builds the per-band weight, the non-detection mask (undetected,
+    limited, and observed: `ORIGIN_UNOBSERVED` bands carry no term) and
+    the fit's other design-independent numbers. The extinction-law design itself is not
     built here: it depends on the fit's own extinction mark (section 2), so
     `fit` builds and converges it once the per-template residual exists.
     """
@@ -289,11 +297,19 @@ def prepare(config, flux, sigma, origin, sigma_lib_l, f_lim50, width_dex):
     f_lim50 = np.asarray(f_lim50, dtype=np.float64)
     log10_f_lim50 = np.log10(f_lim50)
     width = np.asarray(width_dex, dtype=np.float64)
-    # section 6.2: a band with no measurement and no limit is excluded;
-    # SESNA's curated substitution always supplies one or the other, so
-    # this only guards a non-finite F_LIM_50. Row 15's unmeasured
-    # detections fall in here too, since `detected` already excludes them.
-    nondet_mask = (~detected) & np.isfinite(f_lim50)
+    # section 6.2: a band with no measurement and no limit is excluded.
+    # Two ways a band has no limit: a non-finite F_LIM_50 (section 3.3's
+    # unsurveyed band), and ORIGIN_UNOBSERVED -- the survey never observed
+    # the band at this source (outside that band's mosaic, or masked), and
+    # the curation filled in a neighbour's depth, which is no limit on
+    # this source. Charging it as a non-detection priced a photosphere
+    # detected at 3.6 um for its absence from an unobserved 4.5 um at
+    # tens of nats and handed those sources to the largest library
+    # (studies/open_yso_excess_2026-09-16.md section 8). Row 15's
+    # unmeasured detections fall in here too, since `detected` already
+    # excludes them.
+    unobserved = np.asarray(origin) == ORIGIN_UNOBSERVED
+    nondet_mask = (~detected) & np.isfinite(f_lim50) & ~unobserved
 
     return Batch(log10_f_obs=log10_f_obs, weight=weight, config=config,
                  log10_f_lim50=log10_f_lim50.astype(np.float32),
