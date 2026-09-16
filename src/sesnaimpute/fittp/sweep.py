@@ -2,8 +2,8 @@
 posterior record of SPEC_BMSTP_DRAFT.md section 1.3
 (IMPLEMENTATION_BMSTP_DRAFT.md section 1.3 P7, section 4 row 2.4).
 
-Per source and template `theta`, the template's log posterior weight is
-the three-factor sum of section 1.3:
+The unit of work is ONE SOURCE (PARALLEL brief): for source `s` and every
+template `theta` of the class's library,
 
     ln w_theta = ln <Lambda_C>_s(theta)   -- prior_reader.ln_prior, section 4.2
                + ln L_hat_s(theta)         -- likelihood.fit's chi2 and non-detection term
@@ -15,16 +15,32 @@ added here). The class evidence is `logsumexp` over every template; the
 subclass evidence restricts that sum to one subclass's templates
 (`-inf` where a subclass has none).
 
-Region and class are read once (the register, the prior product, the
-Gaia term); sources are then swept in batches of `[fit] batch_size`, and
-each batch in blocks of `~[fit] block_budget_mb` sources
-(`likelihood.block_size`): per block, the fit, the prior read, the
-per-source Gaia term, the fold to evidence, the evidence-weighted flux
-moments and the top-K record. Every block's own `(n_block, n_model, 8)`
-working set is discarded once its block's row of results is written.
-Each batch's own rows are written straight to their own part file
-(`<product>.partN`, rule 10b); no batch or region array, and no part
-file's read at join time, ever holds the whole region's P7 at once.
+Region and class are read once, in the PARENT process (`build_region_class`):
+the register (`_register`), the region's non-detection width (`_width_dex`),
+the class's own library-resolution number (`likelihood.sigma_lib_by_class`),
+the Gaia term (`GaiaTerm`), the class's own `Prior` reader
+(`prior_reader.load`, via `build`'s first-pass `region_lambda_floor`) and
+the region's whole catalogue (`_load_region_catalog`: fluxes, uncertainties,
+`ORIGIN_FNU`, `NAME`, `F_LIM_50`). These are stashed in `_WORKER` and a
+`multiprocessing.get_context("fork").Pool` is created AFTER that load and
+BEFORE any task runs -- the workers inherit `_WORKER` by fork by
+copy-on-write, never through `Pool`'s `initializer`/`initargs` (which
+pickles) and never by opening a register, grid or product themselves.
+`_init_worker` (the Pool's own, data-free initializer) pins numba and BLAS
+to one thread each per worker, since the source axis is now the pool's own
+parallel axis and the per-template numba kernels threading too would
+oversubscribe.
+
+`pool.imap(_source_task, ..., chunksize=_IMAP_CHUNKSIZE)` dispatches one
+task per source and returns results in catalogue order; the parent groups
+them into batches of `[fit] batch_size` sources purely as the part-file
+write granularity (`<product>.partN`, rule 10b, `sed_fit/batch.py`'s own
+pattern) -- no block, and no per-block memory budget, exists anywhere in
+this module or in `fittp.likelihood` any more. A source whose task raises
+is caught inside `_source_task` and returned as a NaN row with `FAILED`
+set (rule: one bad source must not lose a multi-hour job); `join_parts`
+sums `FAILED` across every part file it finds on disk into `FAILED_ROWS`,
+and `build`'s done line reports `n_failed`.
 
 Three of section 1.3's own numbers are pinned to one reading each, since a
 second reading of the same physical quantity is a second, silently
@@ -41,8 +57,10 @@ flagged source's `FLUX_MEAN`/`FLUX_COV` are written `NaN`, not the zero a
 flagged fit has no posterior to report a flux moment of.
 """
 
+import glob
+import multiprocessing as mp
 import os
-import time
+import re
 
 import h5py
 import numba
@@ -54,6 +72,7 @@ from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.catalog import limits as catalog_limits
 from sesnaimpute.fittp import likelihood
 from sesnaimpute.fittp import prior_reader
 from sesnaimpute.fittp.gaia import GaiaTerm
@@ -65,26 +84,27 @@ N_BANDS = len(BAND_KEYS)
 #: (IMPLEMENTATION_BMSTP_DRAFT.md section 1).
 CLASSES = tuple(c.code for c in definitions.CLASSES)
 
-#: `_block_result`'s `log10_flux` is the one float64 `(n_block, n_model, 8)`
-#: array left -- 2 float32-equivalents -- not counted by `likelihood.
-#: block_size`'s own `NONDET_BUFFERS`; passed to `block_size` as
-#: `extra_buffers` so the block's real working set stays inside `[fit]
-#: block_budget_mb` (W7 review finding 6). W9 tried building it in float32
-#: (the register/design column/clamped marks that feed it are already
-#: float32); the STAR sweep's own FLUX_MEAN then missed the 1e-6 relative
-#: bar against the float64 product (7.7e-6, W9 phase 2 acceptance run) --
-#: reverted, float64 kept, no speed claimed here. W9d's `flux_theta =
-#: 10**log10_flux` companion array (also float64, 2 more equivalents) is
-#: gone -- `_flux_moments_topk_kernel` builds each template's 8-band flux
-#: once, in a per-source buffer, and never materialises it over the whole
-#: model axis.
-SWEEP_EXTRA_BUFFERS = 2
+#: one `imap` task per source, but many small tasks paid for one at a time
+#: costs more in IPC than it saves; a modest chunksize amortises that
+#: without holding back result consumption (results are still delivered,
+#: and written, in catalogue order) for long.
+_IMAP_CHUNKSIZE = 16
 
 #: The datasets every P7 part file and the joined product carry, in write
-#: order.
+#: order (one row per source; `FAILED`, below, is a part-file-only column
+#: consumed at join time into `FAILED_ROWS`, never copied into the joined
+#: product itself).
 _PART_KEYS = ("NAME", "LN_EVIDENCE", "FLUX_MEAN", "FLUX_COV", "TOPK_MODEL", "TOPK_A_K",
               "TOPK_LOG10_B", "TOPK_CHI2", "TOPK_LN_L", "TOPK_LN_PRIOR", "TOPK_FLUX",
               "OCCAM_GAP", "FRAC_CLAMPED", "N_DETECTED", "N_LAW_ITER")
+
+_FIELD_OF_KEY = {
+    "NAME": "name", "LN_EVIDENCE": "ln_evidence", "FLUX_MEAN": "flux_mean",
+    "FLUX_COV": "flux_cov", "TOPK_MODEL": "topk_model", "TOPK_A_K": "topk_a_k",
+    "TOPK_LOG10_B": "topk_log10_b", "TOPK_CHI2": "topk_chi2", "TOPK_LN_L": "topk_ln_l",
+    "TOPK_LN_PRIOR": "topk_ln_prior", "TOPK_FLUX": "topk_flux", "OCCAM_GAP": "occam_gap",
+    "FRAC_CLAMPED": "frac_clamped", "N_DETECTED": "n_detected", "N_LAW_ITER": "n_law_iter",
+}
 
 
 def _register(config, cls):
@@ -133,15 +153,20 @@ def _width_dex(config, region):
         return np.asarray(f["W_DEX"][:], dtype=np.float64)
 
 
-def _catalog_block(config, region, start, stop):
-    """One block's own curated rows: fluxes, uncertainties and
-    `ORIGIN_FNU` (the same read `fittp.cascade` uses)."""
+def _load_region_catalog(config, region):
+    """This region's whole catalogue, read ONCE (item 4): fluxes,
+    uncertainties and `ORIGIN_FNU` (the same read `fittp.cascade` uses),
+    `NAME`, and `catalog.limits.limits`'s own per-source `F_LIM_50` -- so
+    every worker's own per-source task slices these already-loaded, fork-
+    inherited arrays instead of opening either product itself."""
     path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
     with h5py.File(path, "r") as f:
-        flux = f["FNU_MJY"][start:stop]
-        sigma = f["SIGMA_FNU_MJY"][start:stop]
-        origin = f["ORIGIN_FNU"][start:stop]
-    return flux, sigma, origin
+        flux = np.asarray(f["FNU_MJY"][:], dtype=np.float64)
+        sigma = np.asarray(f["SIGMA_FNU_MJY"][:], dtype=np.float64)
+        origin = f["ORIGIN_FNU"][:]
+        name = f["NAME"][:]
+    f_lim50 = catalog_limits.limits(config, region)
+    return dict(flux=flux, sigma=sigma, origin=origin, name=name, f_lim50=f_lim50)
 
 
 def _n_sources(config, region):
@@ -155,22 +180,24 @@ def _flux_moments_topk_kernel(log10_flux, p_theta, sorted_order, rank_position,
                                good, out_mean, out_m2, out_topk_flux):
     """The evidence-weighted flux moments (section 1.3's posterior mean and
     second moment in flux, `E[F]` and `E[F F^T]`) and the top-K flux record,
-    one pass over every (source, template) pair, per source via `prange`:
-    for each template `t` the linear flux `f = 10**log10_flux[s, t, :]` (8
+    one pass per source (`prange`, item 5's own worker-side thread cap:
+    called here with a leading axis of 1, one source at a time -- the
+    kernel's own generality over many sources is unused, not a block): for
+    each template `t` the linear flux `f = 10**log10_flux[s, t, :]` (8
     float64 values, held in a small per-source buffer, never written to a
-    `(n_block, n_model, 8)` array) is folded into `mean += p_theta*f` and
-    `m2 += p_theta*f f^T`, and, for the templates already chosen by the
-    argpartition/argsort on `ln_w` before this kernel runs (`_block_result`,
-    unchanged), copied into `out_topk_flux` at that template's rank.
-    `sorted_order` is each source's own top-K template indices sorted
-    ascending, and `rank_position` maps each ascending slot back to its
-    position in the ln_w-descending top-K list, so the O(1) pointer walk
-    below (advancing only when `t` reaches the next sorted index) lands each
-    flux in the same slot `topk_model`/`topk_a_k`/etc. use for that
-    template. `good[s]` false (a flagged source, `batch.flagged`) skips the
-    top-K write only -- `out_topk_flux` was pre-filled with NaN by the
-    caller -- while the moments still accumulate over every source, matching
-    the unmasked `flux_mean`/`flux_cov` of the array form this replaces.
+    `(n, n_model, 8)` array) is folded into `mean += p_theta*f` and `m2 +=
+    p_theta*f f^T`, and, for the templates already chosen by the
+    argpartition/argsort on `ln_w` before this kernel runs (`_source_task`),
+    copied into `out_topk_flux` at that template's rank. `sorted_order` is
+    the source's own top-K template indices sorted ascending, and
+    `rank_position` maps each ascending slot back to its position in the
+    ln_w-descending top-K list, so the O(1) pointer walk below (advancing
+    only when `t` reaches the next sorted index) lands each flux in the
+    same slot `topk_model`/`topk_a_k`/etc. use for that template. `good[s]`
+    false (a flagged source) skips the top-K write only -- `out_topk_flux`
+    was pre-filled with NaN by the caller -- while the moments still
+    accumulate p_theta=0 everywhere, matching the unmasked
+    `flux_mean`/`flux_cov` the caller overwrites with NaN afterward.
     """
     n_block = log10_flux.shape[0]
     n_model = log10_flux.shape[1]
@@ -202,186 +229,226 @@ def _flux_moments_topk_kernel(log10_flux, p_theta, sorted_order, rank_position,
                 out_m2[s, a, b] = m2[a, b]
 
 
-def _block_result(config, region, cls, reader, gaia_term, template_log, subclass_idx,
-                   n_sub, width_dex, topk, start, stop, timing, lambda_floor):
-    """One block's own P7 rows (section 1.3): the fit, the prior read, the
-    per-source Gaia term, the fold to `ln w_theta`, the evidence-weighted
-    flux moments and the top-K record -- one `(n_block, n_model[, 8])`
-    working set, discarded on return. `timing` accumulates this block's
-    own wall time by stage (rule 17's per-{region, class} split).
-    `lambda_floor` is the region's own `Lambda_floor(s)` (`build`'s first
-    pass, common to every class), sliced here to this block's rows --
-    this class's read floors at its own share of it, never a floor of its
-    own."""
-    n_model = template_log.shape[0]
-    t = time.perf_counter()
-    flux, sigma, origin = _catalog_block(config, region, start, stop)
-    batch = likelihood.prepare(config, region, cls, start, stop, flux, sigma, origin, width_dex)
-    timing["prepare"] += time.perf_counter() - t
+# ---------------------------------------------------------------------------
+# the worker side: one task per source (PARALLEL brief items 3, 4, 5, 7)
+# ---------------------------------------------------------------------------
 
-    t = time.perf_counter()
-    fit = likelihood.fit(batch, template_log)
-    timing["fit"] += time.perf_counter() - t
+#: Populated by `_set_worker_state` in the PARENT, before the pool forks;
+#: every worker then reads it by copy-on-write inheritance -- never sent
+#: through `Pool`'s own `initializer`/`initargs`, which pickles. Read-only
+#: after the pool is created.
+_WORKER = {}
 
-    rows = np.arange(start, stop)
-    t = time.perf_counter()
-    h = prior_reader.prepare(reader, rows)
-    # d(log10 B)/d(a_K) from the fit's own d(SC)/d(A_V) (batch.slope_sc_av):
-    # log10_B = -2*SC, a_K = ak_per_av * A_V, so d(log10_B)/d(a_K) =
-    # -2 * slope_sc_av / ak_per_av (likelihood.fit's docstring, section 1.3).
-    slope_log10b_per_ak = -2.0 * batch.slope_sc_av / batch.ak_per_av
-    ln_lambda = prior_reader.ln_prior(reader, rows, h, fit.a_hat, fit.log10_b_hat,
-                                       slope_log10b_per_ak, batch.sigma_a_ak,
-                                       np.arange(n_model), lambda_floor[start:stop])
-    timing["ln_prior"] += time.perf_counter() - t
 
-    ln_l = -0.5 * fit.chi2_min.astype(np.float64) + fit.ln_nondet.astype(np.float64)
+def _set_worker_state(**kw):
+    global _WORKER
+    _WORKER = kw
 
-    n_block = stop - start
-    model_index = np.arange(n_model)
-    # Gaia term, vectorised over the whole block at once (W9: no Python
-    # loop over sources -- CODING_RULES_BMSTP.md rule 8). Gamma reads the
-    # same unclamped optimum a_hat/log10_b_hat the prior read above takes
-    # (one set of marks for the two class-evidence factors, section 6.4;
-    # the clamped marks stay for the reported marks, the top-K record and
-    # the flux prediction only, section 6.1).
-    t = time.perf_counter()
-    ln_gamma = gaia_term.ln_gamma(rows, model_index,
-                                   fit.a_hat, fit.log10_b_hat, cls.lower())
-    timing["ln_gamma"] += time.perf_counter() - t
 
-    ln_w = ln_lambda.astype(np.float64) + ln_l + ln_gamma
-    ln_w[batch.flagged] = -np.inf
+def _init_worker():
+    """The Pool's own initializer, run once per forked worker before its
+    first task -- deliberately carries no data (item 4: an initializer
+    that DID take the register/reader/catalogue would pickle them once per
+    worker, exactly what fork is here to avoid). Caps numba and BLAS to one
+    thread each (item 5): the source axis is now the parallel axis (the
+    pool itself), so the per-template numba kernels
+    (`fittp.likelihood._ln_one_minus_c_kernel`, `fittp.prior_reader.
+    _cell_sum`, `fittp.gaia._gaia_h_kernel`, `_flux_moments_topk_kernel`
+    above) and BLAS's own small gemms threading too would oversubscribe
+    the machine. Must run before any of those kernels executes in this
+    worker for the first time, which it does: nothing calls one before a
+    task does."""
+    numba.set_num_threads(1)
+    threadpoolctl.threadpool_limits(1, user_api="blas")
 
-    # The fold: each model belongs to exactly one subclass (`_register`'s
-    # own check), so the per-subclass logsumexp values already partition
-    # every column ln w_theta touches; the region total is their own
-    # logsumexp rather than a second full (n_block, n_model) reduction
-    # over the same elements (W9 -- the two passes were the same sum,
-    # done twice).
-    t = time.perf_counter()
-    ln_evidence64 = np.full((n_block, n_sub), -np.inf, dtype=np.float64)
-    for k in range(n_sub):
-        mask = subclass_idx == k
-        if mask.any():
-            ln_evidence64[:, k] = logsumexp(ln_w[:, mask], axis=1)
-    ln_evidence = ln_evidence64.astype(np.float32)
-    ev_total = logsumexp(ln_evidence64, axis=1)
-    timing["fold"] += time.perf_counter() - t
 
-    t = time.perf_counter()
-    with np.errstate(invalid="ignore"):
-        p_theta = np.exp(ln_w - ev_total[:, None])
-    p_theta = np.where(np.isfinite(p_theta), p_theta, 0.0)
-    timing["moments"] += time.perf_counter() - t
-
-    # the top-K template indices, from `ln_w` alone -- computed before the
-    # moments kernel below so its per-source pointer walk knows, for each
-    # template it visits in order, which rank (if any) to write the flux
-    # into; unchanged from the array form (argpartition then an argsort of
-    # just the K survivors).
-    t = time.perf_counter()
-    k_keep = min(topk, n_model)
-    order = np.argpartition(-ln_w, k_keep - 1, axis=1)[:, :k_keep]
-    row_idx = np.arange(n_block)[:, None]
-    order = order[row_idx, np.argsort(-ln_w[row_idx, order], axis=1)]
-    # section 9's Occam gap is `ln EV_C - max_theta ln(Lambda L_hat)`: the
-    # per-template Gamma factor already folded into `ln_w` is excluded from
-    # the subtracted maximum, so the gap measures the library-volume
-    # penalty alone, not Gamma's own penalty at the best template.
-    occam_gap = (ev_total - (ln_lambda.astype(np.float64) + ln_l).max(axis=1)).astype(np.float32)
-    timing["topk"] += time.perf_counter() - t
-
-    good = ~batch.flagged
-
-    t = time.perf_counter()
-    # the template's fitted flux at its clamped marks: recovering the
-    # A_V-unit extinction the design column (batch.ext_col) was built in
-    # from the reported a_K mark (fit.a_hat_clamped = A_V_clamped *
-    # ak_per_av, likelihood.fit's own docstring) -- algebraically the
-    # same log10-flux likelihood.fit's own non-detection term evaluates.
-    # float64 here (W9 phase 2: a float32 version of this exact expression
-    # measured 7.7e-6 relative on FLUX_MEAN against this float64 form, over
-    # the 1e-6 bar, so the float64 temporary is kept -- not the redundant
-    # pass the brief was aimed at). log10_flux stays a full (n_block,
-    # n_model, 8) array (the fit's own output); the linear flux
-    # 10**log10_flux is never materialised over the whole model axis --
-    # `_flux_moments_topk_kernel` builds each template's 8-band flux once,
-    # in a per-source buffer, and folds it straight into the posterior
-    # mean/second moment and, for the top-K templates chosen above, the
-    # top-K flux record (W9d).
-    a_clamped64 = fit.a_hat_clamped.astype(np.float64)
-    b_clamped64 = fit.log10_b_hat_clamped.astype(np.float64)
-    av_clamped = a_clamped64 / batch.ak_per_av[:, None]
-    log10_flux = (template_log[None, :, :].astype(np.float64)
-                  + batch.ext_col.astype(np.float64)[:, None, :] * av_clamped[:, :, None]
-                  + b_clamped64[:, :, None])
-
-    # templates sorted ascending per source, for the kernel's O(1) pointer
-    # walk against the increasing template index `t`; rank_position maps
-    # each sorted slot back to its ln_w-descending rank in `order`, so
-    # topk_flux lands in the same slot topk_model/topk_a_k/etc. use.
-    sort_idx = np.argsort(order, axis=1)
-    sorted_order = np.take_along_axis(order, sort_idx, axis=1).astype(np.int64)
-    rank_position = sort_idx.astype(np.int64)
-
-    flux_mean = np.empty((n_block, N_BANDS), dtype=np.float64)
-    flux_m2 = np.empty((n_block, N_BANDS, N_BANDS), dtype=np.float64)
-    topk_flux = np.full((n_block, topk, N_BANDS), np.nan, dtype=np.float32)
-    _flux_moments_topk_kernel(log10_flux, p_theta, sorted_order, rank_position,
-                               good, flux_mean, flux_m2, topk_flux)
-    flux_cov = flux_m2 - flux_mean[:, :, None] * flux_mean[:, None, :]
-    # A flagged source's posterior weight is undefined (ln_w is -inf at
-    # every template, section 1.6), not a zero-flux measurement: the
-    # moments kernel above accumulates p_theta=0 for these rows (its
-    # p_theta was replaced from NaN), so overwrite them here rather than
-    # report a fabricated zero flux and covariance (R3 U2).
-    flux_mean[~good] = np.nan
-    flux_cov[~good] = np.nan
-    timing["moments"] += time.perf_counter() - t
-
-    t = time.perf_counter()
-    topk_model = np.full((n_block, topk), -1, dtype=np.int32)
-    topk_a_k = np.full((n_block, topk), np.nan, dtype=np.float32)
-    topk_log10_b = np.full((n_block, topk), np.nan, dtype=np.float32)
-    topk_chi2 = np.full((n_block, topk), np.nan, dtype=np.float32)
-    topk_ln_l = np.full((n_block, topk), np.nan, dtype=np.float32)
-    topk_ln_prior = np.full((n_block, topk), np.nan, dtype=np.float32)
-
-    topk_model[good, :k_keep] = order[good].astype(np.int32)
-    topk_a_k[good, :k_keep] = fit.a_hat_clamped[row_idx, order][good]
-    topk_log10_b[good, :k_keep] = fit.log10_b_hat_clamped[row_idx, order][good]
-    topk_chi2[good, :k_keep] = fit.chi2_min[row_idx, order][good]
-    topk_ln_l[good, :k_keep] = ln_l[row_idx, order][good].astype(np.float32)
-    topk_ln_prior[good, :k_keep] = ln_lambda[row_idx, order][good]
-    occam_gap[~good] = np.nan
-    timing["topk"] += time.perf_counter() - t
-
+def _empty_row(topk, n_sub):
     return dict(
-        ln_evidence=ln_evidence,
-        flux_mean=flux_mean.astype(np.float32), flux_cov=flux_cov.astype(np.float32),
-        topk_model=topk_model, topk_a_k=topk_a_k, topk_log10_b=topk_log10_b,
-        topk_chi2=topk_chi2, topk_ln_l=topk_ln_l, topk_ln_prior=topk_ln_prior,
-        topk_flux=topk_flux, occam_gap=occam_gap,
-        frac_clamped=fit.frac_clamped, n_detected=batch.n_detected,
-        n_law_iter=fit.n_law_iter,
-        zero_ext_count=int((fit.a_hat[good] < 0.0).sum()) if good.any() else 0,
-        n_templates_checked=int(good.sum()) * n_model,
+        ln_evidence=np.full(n_sub, -np.inf, dtype=np.float32),
+        flux_mean=np.full(N_BANDS, np.nan, dtype=np.float32),
+        flux_cov=np.full((N_BANDS, N_BANDS), np.nan, dtype=np.float32),
+        topk_model=np.full(topk, -1, dtype=np.int32),
+        topk_a_k=np.full(topk, np.nan, dtype=np.float32),
+        topk_log10_b=np.full(topk, np.nan, dtype=np.float32),
+        topk_chi2=np.full(topk, np.nan, dtype=np.float32),
+        topk_ln_l=np.full(topk, np.nan, dtype=np.float32),
+        topk_ln_prior=np.full(topk, np.nan, dtype=np.float32),
+        topk_flux=np.full((topk, N_BANDS), np.nan, dtype=np.float32),
+        occam_gap=np.float32(np.nan), frac_clamped=np.float32(np.nan),
+        n_detected=np.int8(-1), n_law_iter=np.int8(-1),
     )
 
+
+def _source_task(i):
+    """One task, one source: fit `cls`'s whole library to catalogue row
+    `i` (SPEC_BMSTP_DRAFT.md section 1.3; the PARALLEL brief's "one
+    iteration = fit this class's models to this one source"), reading
+    nothing from disk -- every product this touches came from `_WORKER`,
+    loaded once in the parent and reached this process by fork. A source
+    whose fit raises is caught here and returned as a NaN row with
+    `FAILED` set (item 7): one bad source must not lose the whole sweep,
+    and the failure is recorded, never silent.
+    """
+    w = _WORKER
+    topk = w["topk"]
+    n_sub = w["n_sub"]
+    try:
+        flux = w["flux"][i]
+        sigma = w["sigma"][i]
+        origin = w["origin"][i]
+        f_lim50 = w["f_lim50"][i]
+
+        batch = likelihood.prepare(w["config"], flux, sigma, origin,
+                                    w["sigma_lib_l"], f_lim50, w["width_dex"])
+        fit = likelihood.fit(batch, w["template_log"])
+
+        n_model = w["n_model"]
+        rows = np.array([i])
+        model_index = np.arange(n_model)
+        h = prior_reader.prepare(w["reader"], rows)
+        # d(log10 B)/d(a_K) from the fit's own d(SC)/d(A_V) (batch.slope_sc_av):
+        # log10_B = -2*SC, a_K = ak_per_av * A_V, so d(log10_B)/d(a_K) =
+        # -2 * slope_sc_av / ak_per_av (likelihood.fit's docstring, section 1.3).
+        slope_log10b_per_ak = np.array([-2.0 * batch.slope_sc_av / batch.ak_per_av])
+        ln_lambda = prior_reader.ln_prior(
+            w["reader"], rows, h, fit.a_hat[None, :], fit.log10_b_hat[None, :],
+            slope_log10b_per_ak, np.array([batch.sigma_a_ak]), model_index,
+            np.array([w["lambda_floor"][i]]))[0]
+
+        ln_l = -0.5 * fit.chi2_min.astype(np.float64) + fit.ln_nondet.astype(np.float64)
+
+        # Gamma reads the same unclamped optimum a_hat/log10_b_hat the
+        # prior read above takes (one set of marks for the two class-
+        # evidence factors, section 6.4; the clamped marks stay for the
+        # reported marks, the top-K record and the flux prediction only,
+        # section 6.1).
+        ln_gamma = w["gaia_term"].ln_gamma(rows, model_index, fit.a_hat[None, :],
+                                            fit.log10_b_hat[None, :], w["cls"].lower())[0]
+
+        ln_w = ln_lambda.astype(np.float64) + ln_l + ln_gamma
+        if batch.flagged:
+            ln_w = np.full(n_model, -np.inf, dtype=np.float64)
+
+        subclass_idx = w["subclass_idx"]
+        ln_evidence64 = np.full(n_sub, -np.inf, dtype=np.float64)
+        for k in range(n_sub):
+            mask = subclass_idx == k
+            if mask.any():
+                ln_evidence64[k] = logsumexp(ln_w[mask])
+        ev_total = logsumexp(ln_evidence64)
+
+        with np.errstate(invalid="ignore"):
+            p_theta = np.exp(ln_w - ev_total)
+        p_theta = np.where(np.isfinite(p_theta), p_theta, 0.0)
+
+        k_keep = min(topk, n_model)
+        order = np.argpartition(-ln_w, k_keep - 1)[:k_keep]
+        order = order[np.argsort(-ln_w[order])]
+        # section 9's Occam gap is `ln EV_C - max_theta ln(Lambda L_hat)`:
+        # the per-template Gamma factor already folded into `ln_w` is
+        # excluded from the subtracted maximum, so the gap measures the
+        # library-volume penalty alone, not Gamma's own penalty at the
+        # best template.
+        occam_gap = float(ev_total - (ln_lambda.astype(np.float64) + ln_l).max())
+
+        good = not batch.flagged
+
+        # the template's fitted flux at its clamped marks: recovering the
+        # A_V-unit extinction the design column (batch.ext_col) was built
+        # in from the reported a_K mark (fit.a_hat_clamped =
+        # A_V_clamped * ak_per_av, likelihood.fit's own docstring) --
+        # algebraically the same log10-flux likelihood.fit's own non-
+        # detection term evaluates.
+        a_clamped64 = fit.a_hat_clamped.astype(np.float64)
+        b_clamped64 = fit.log10_b_hat_clamped.astype(np.float64)
+        av_clamped = a_clamped64 / batch.ak_per_av
+        log10_flux = (w["template_log"].astype(np.float64)
+                      + batch.ext_col.astype(np.float64)[None, :] * av_clamped[:, None]
+                      + b_clamped64[:, None])                               # (m, 8)
+
+        sort_idx = np.argsort(order)
+        sorted_order = order[sort_idx].astype(np.int64)
+        rank_position = sort_idx.astype(np.int64)
+
+        out_mean = np.empty((1, N_BANDS), dtype=np.float64)
+        out_m2 = np.empty((1, N_BANDS, N_BANDS), dtype=np.float64)
+        out_topk_flux = np.full((1, topk, N_BANDS), np.nan, dtype=np.float32)
+        _flux_moments_topk_kernel(
+            log10_flux[None, :, :], p_theta[None, :], sorted_order[None, :],
+            rank_position[None, :], np.array([good]), out_mean, out_m2, out_topk_flux)
+        flux_mean = out_mean[0]
+        flux_cov = out_m2[0] - np.outer(flux_mean, flux_mean)
+        topk_flux = out_topk_flux[0]
+        if not good:
+            flux_mean = np.full(N_BANDS, np.nan)
+            flux_cov = np.full((N_BANDS, N_BANDS), np.nan)
+
+        topk_model = np.full(topk, -1, dtype=np.int32)
+        topk_a_k = np.full(topk, np.nan, dtype=np.float32)
+        topk_log10_b = np.full(topk, np.nan, dtype=np.float32)
+        topk_chi2 = np.full(topk, np.nan, dtype=np.float32)
+        topk_ln_l = np.full(topk, np.nan, dtype=np.float32)
+        topk_ln_prior = np.full(topk, np.nan, dtype=np.float32)
+        if good:
+            topk_model[:k_keep] = order.astype(np.int32)
+            topk_a_k[:k_keep] = fit.a_hat_clamped[order]
+            topk_log10_b[:k_keep] = fit.log10_b_hat_clamped[order]
+            topk_chi2[:k_keep] = fit.chi2_min[order]
+            topk_ln_l[:k_keep] = ln_l[order].astype(np.float32)
+            topk_ln_prior[:k_keep] = ln_lambda[order]
+        else:
+            occam_gap = float("nan")
+
+        zero_ext_count = int((fit.a_hat < 0.0).sum()) if good else 0
+        n_templates_checked = n_model if good else 0
+
+        row = dict(
+            ln_evidence=ln_evidence64.astype(np.float32),
+            flux_mean=flux_mean.astype(np.float32), flux_cov=flux_cov.astype(np.float32),
+            topk_model=topk_model, topk_a_k=topk_a_k, topk_log10_b=topk_log10_b,
+            topk_chi2=topk_chi2, topk_ln_l=topk_ln_l, topk_ln_prior=topk_ln_prior,
+            topk_flux=topk_flux, occam_gap=np.float32(occam_gap),
+            frac_clamped=fit.frac_clamped, n_detected=np.int8(batch.n_detected),
+            n_law_iter=np.int8(fit.n_law_iter),
+        )
+        return dict(i=i, failed=False, zero_ext_count=zero_ext_count,
+                     n_templates_checked=n_templates_checked, **row)
+    except Exception as exc:  # rule: one bad source must not lose the job
+        row = _empty_row(topk, n_sub)
+        return dict(i=i, failed=True, zero_ext_count=0, n_templates_checked=0,
+                     error=str(exc), **row)
+
+
+# ---------------------------------------------------------------------------
+# the parent side: load once, dispatch the pool, write parts, join
+# ---------------------------------------------------------------------------
 
 def _part_path(path, bi):
     return "%s.part%d" % (path, bi)
 
 
-def _batch_result(config, region, cls, reader, gaia_term, template_log, subclass_idx,
-                   n_sub, width_dex, topk, block, bstart, bstop, timing, lambda_floor):
-    """One batch's own P7 rows, `[bstart, bstop)`, folded block by block
-    (rule 10b): a batch-sized array, never a region-sized one. `timing`
-    accumulates this batch's wall time by stage. `lambda_floor` is the
-    region's own common floor (`build`'s first pass), passed through to
-    each block's read."""
-    m = bstop - bstart
+def _discover_parts(path):
+    """Every `<path>.partN` file already on disk, sorted by `N` (item 9): a
+    restart's own re-run (`--batches`) writes only the batches it names,
+    and `join_parts` re-discovers every part present -- from this run or an
+    earlier one -- rather than trusting an in-memory list a crash would
+    have lost.
+    """
+    pattern = re.compile(re.escape(path) + r"\.part(\d+)$")
+    found = {}
+    for p in glob.glob(glob.escape(path) + ".part*"):
+        m = pattern.match(p)
+        if m:
+            found[int(m.group(1))] = p
+    return [found[k] for k in sorted(found)]
+
+
+def _assemble_batch(results, name_slice, n_sub, topk):
+    """Folds one batch's own per-source task results (already in catalogue
+    order, `build_region_class`'s own `imap` consumption) into the batch-
+    sized arrays `_write_part` writes -- a batch-sized array, never a
+    region-sized one (rule 10b)."""
+    m = len(results)
     ln_evidence = np.empty((m, n_sub), dtype=np.float32)
     flux_mean = np.empty((m, N_BANDS), dtype=np.float32)
     flux_cov = np.empty((m, N_BANDS, N_BANDS), dtype=np.float32)
@@ -396,54 +463,42 @@ def _batch_result(config, region, cls, reader, gaia_term, template_log, subclass
     frac_clamped = np.empty(m, dtype=np.float32)
     n_detected = np.empty(m, dtype=np.int8)
     n_law_iter = np.empty(m, dtype=np.int8)
-
+    failed = np.zeros(m, dtype=bool)
     zero_ext_count = 0
     n_templates_checked = 0
-    for start in range(bstart, bstop, block):
-        stop = min(start + block, bstop)
-        r = _block_result(config, region, cls, reader, gaia_term, template_log,
-                           subclass_idx, n_sub, width_dex, topk, start, stop, timing,
-                           lambda_floor)
-        sl = slice(start - bstart, stop - bstart)
-        ln_evidence[sl] = r["ln_evidence"]
-        flux_mean[sl] = r["flux_mean"]
-        flux_cov[sl] = r["flux_cov"]
-        topk_model[sl] = r["topk_model"]
-        topk_a_k[sl] = r["topk_a_k"]
-        topk_log10_b[sl] = r["topk_log10_b"]
-        topk_chi2[sl] = r["topk_chi2"]
-        topk_ln_l[sl] = r["topk_ln_l"]
-        topk_ln_prior[sl] = r["topk_ln_prior"]
-        topk_flux[sl] = r["topk_flux"]
-        occam_gap[sl] = r["occam_gap"]
-        frac_clamped[sl] = r["frac_clamped"]
-        n_detected[sl] = r["n_detected"]
-        n_law_iter[sl] = r["n_law_iter"]
+    for k, r in enumerate(results):
+        ln_evidence[k] = r["ln_evidence"]
+        flux_mean[k] = r["flux_mean"]
+        flux_cov[k] = r["flux_cov"]
+        topk_model[k] = r["topk_model"]
+        topk_a_k[k] = r["topk_a_k"]
+        topk_log10_b[k] = r["topk_log10_b"]
+        topk_chi2[k] = r["topk_chi2"]
+        topk_ln_l[k] = r["topk_ln_l"]
+        topk_ln_prior[k] = r["topk_ln_prior"]
+        topk_flux[k] = r["topk_flux"]
+        occam_gap[k] = r["occam_gap"]
+        frac_clamped[k] = r["frac_clamped"]
+        n_detected[k] = r["n_detected"]
+        n_law_iter[k] = r["n_law_iter"]
+        failed[k] = r["failed"]
         zero_ext_count += r["zero_ext_count"]
         n_templates_checked += r["n_templates_checked"]
-
-    with h5py.File(config_module.product_path(config, "catalog", "sesna", "sources", "source",
-                                               region=region), "r") as f:
-        name = f["NAME"][bstart:bstop]
-
-    return dict(
-        name=name, ln_evidence=ln_evidence, flux_mean=flux_mean, flux_cov=flux_cov,
-        topk_model=topk_model, topk_a_k=topk_a_k, topk_log10_b=topk_log10_b,
-        topk_chi2=topk_chi2, topk_ln_l=topk_ln_l, topk_ln_prior=topk_ln_prior,
-        topk_flux=topk_flux, occam_gap=occam_gap, frac_clamped=frac_clamped,
-        n_detected=n_detected, n_law_iter=n_law_iter, zero_ext_count=zero_ext_count,
-        n_templates_checked=n_templates_checked,
-    )
+    return dict(name=name_slice, ln_evidence=ln_evidence, flux_mean=flux_mean, flux_cov=flux_cov,
+                topk_model=topk_model, topk_a_k=topk_a_k, topk_log10_b=topk_log10_b,
+                topk_chi2=topk_chi2, topk_ln_l=topk_ln_l, topk_ln_prior=topk_ln_prior,
+                topk_flux=topk_flux, occam_gap=occam_gap, frac_clamped=frac_clamped,
+                n_detected=n_detected, n_law_iter=n_law_iter, failed=failed,
+                zero_ext_count=zero_ext_count, n_templates_checked=n_templates_checked)
 
 
 def _write_part(part_path, batch):
     with h5py.File(part_path, "w") as f:
-        for key, field in zip(_PART_KEYS,
-                               ("name", "ln_evidence", "flux_mean", "flux_cov", "topk_model",
-                                "topk_a_k", "topk_log10_b", "topk_chi2", "topk_ln_l",
-                                "topk_ln_prior", "topk_flux", "occam_gap", "frac_clamped",
-                                "n_detected", "n_law_iter")):
-            f.create_dataset(key, data=batch[field])
+        for key in _PART_KEYS:
+            f.create_dataset(key, data=batch[_FIELD_OF_KEY[key]])
+        f.create_dataset("FAILED", data=batch["failed"])
+        f.attrs["ZERO_EXT_COUNT"] = batch["zero_ext_count"]
+        f.attrs["N_TEMPLATES_CHECKED"] = batch["n_templates_checked"]
 
 
 def region_lambda_floor(config, region):
@@ -461,7 +516,11 @@ def region_lambda_floor(config, region):
     tables (`grain_peaks`/`factor_peak`). `readers` is returned so `build`
     hands the SAME loaded `Prior` to `build_region_class` below: the grids
     are read exactly once per class, never a second time for the floor
-    and again for the class's own sweep."""
+    and again for the class's own sweep. Plain numpy throughout (no numba
+    kernel runs here), which matters for item 5: the parent must not run a
+    `@njit(parallel=True)` kernel before the pool forks, and it never does
+    anywhere in this module -- every numba kernel this stage owns runs
+    inside a worker's own per-source task."""
     peaks = []
     readers = {}
     for cls in CLASSES:
@@ -471,63 +530,84 @@ def region_lambda_floor(config, region):
     return readers, prior_reader.common_floor(peaks)
 
 
-def build_region_class(config, region, cls, st, reader, lambda_floor, limit=None):
+def build_region_class(config, region, cls, st, reader, lambda_floor, catalog,
+                        n_workers=1, limit=None, batches=None):
     """Sweeps one {region, class}'s whole region (or, with `limit`, its
     first `limit` catalogue rows only -- a timing/acceptance device, never
-    a default) in batches of `[fit] batch_size`, each batch in blocks of
-    `likelihood.block_size` sources (section 1.3; IMPLEMENTATION_BMSTP_
-    DRAFT.md section 4 row 2.4). Each batch's own rows are written
-    straight to their own part file (rule 10b); the caller joins the
-    parts once every batch is done. Returns the part file list and the
-    summary numbers for the caller's join and report. `reader` is this
-    class's own `Prior`, and `lambda_floor` the region's own common floor
-     -- both `build`'s `region_lambda_floor`
-    first pass, so this call reads no grid a second time.
+    a default) one source at a time, over a `multiprocessing` pool of
+    `n_workers` (section 1.3; IMPLEMENTATION_BMSTP_DRAFT.md section 4 row
+    2.4; PARALLEL brief). Sources are grouped into batches of `[fit]
+    batch_size` only as the part-file write granularity; each batch's own
+    rows are written straight to their own part file (rule 10b). `batches`,
+    given, restricts this call to those batch indices only (item 9: a
+    restart writes just the missing parts); the caller (`build`) always
+    joins whatever part files are on disk after. Returns the summary
+    numbers `join_parts` and the report need. `reader` is this class's own
+    `Prior` and `lambda_floor` the region's own common floor (`build`'s
+    `region_lambda_floor` first pass, so this call reads no grid a second
+    time); `catalog` is `_load_region_catalog`'s one whole-region read,
+    also loaded once by `build` and shared across classes.
     """
     template_log, subclass_idx, n_sub = _register(config, cls)
     n_model = template_log.shape[0]
     gaia_term = GaiaTerm(config, region)
+    # gaia.GaiaTerm.warm's own docstring (item 4): its per-class register
+    # and field-star marginal are lazily cached on first `ln_gamma` call by
+    # design; left lazy, each of this call's own forked workers would
+    # independently open that product on its own first task. Warmed here,
+    # in the parent, before the pool below forks.
+    gaia_term.warm(cls.lower())
     width_dex = _width_dex(config, region)
     topk = config.fit_topk
-    block = likelihood.block_size(n_model, config.fit_block_budget_mb,
-                                   extra_buffers=SWEEP_EXTRA_BUFFERS)
 
-    n_source = _n_sources(config, region)
+    lib_path = config_module.product_path(config, "fittp", "check", "library-resolution", "survey")
+    sigma_lib_l = likelihood.sigma_lib_by_class(lib_path)[cls]
+
+    n_source = catalog["flux"].shape[0]
     if limit is not None:
         n_source = min(n_source, limit)
+
+    # item 8's memory disclosure: the per-worker working set is now one
+    # source's own (likelihood.WORKER_WORKING_SET_EQUIV float32-(n_model, 8)
+    # equivalents), not a block's; printed once, at the top of this stage,
+    # from the closed-form cost alone -- no RAM measurement, no auto-
+    # capping: the user reads this and sets --workers themselves.
+    per_worker_mb = n_model * N_BANDS * 4 * likelihood.WORKER_WORKING_SET_EQUIV / 1e6
+    total_gb = per_worker_mb * n_workers / 1024.0
+    print("fittp.sweep.%s [%s]: n_model=%d, per-worker working set %.0f MB, "
+          "--workers %d -> %.1f GB resident" % (cls, region, n_model, per_worker_mb,
+                                                 n_workers, total_gb), flush=True)
+
     batch_size = config.fit_batch_size
     batch_bounds = [(s, min(s + batch_size, n_source)) for s in range(0, n_source, batch_size)]
+    selected = set(batches) if batches is not None else None
 
     path = config_module.product_path(config, "fittp", "fit", cls, "source", region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
-    part_paths = []
-    zero_ext_count = 0
-    n_templates_checked = 0
-    # Per-{region, class} wall-time split (rule 17): the stages a batch
-    # passes through, plus the part-file write, each block/batch adds its
-    # own share into these totals.
-    timing = dict.fromkeys(
-        ("prepare", "fit", "ln_prior", "ln_gamma", "fold", "moments", "topk", "write"), 0.0)
+    _set_worker_state(config=config, cls=cls, reader=reader, gaia_term=gaia_term,
+                       template_log=template_log, subclass_idx=subclass_idx, n_sub=n_sub,
+                       width_dex=width_dex, topk=topk, n_model=n_model,
+                       lambda_floor=lambda_floor, sigma_lib_l=sigma_lib_l,
+                       flux=catalog["flux"], sigma=catalog["sigma"], origin=catalog["origin"],
+                       f_lim50=catalog["f_lim50"])
 
-    # BLAS's own thread pool is capped to 1 for the fit's small (m,8)@(8,8)
-    # gemms (W9a: memory-bound, 1 thread ~10% faster than 4) while numba's
-    # separate erfc kernel keeps its own 4 threads (fittp.likelihood).
-    with threadpoolctl.threadpool_limits(1, user_api="blas"):
+    # item 5: forked here, below every load above and before any numba
+    # kernel has run anywhere in this process -- none of those loads calls
+    # one; every fit, prior read and Gaia term now runs inside a worker.
+    ctx = mp.get_context("fork")
+    with ctx.Pool(n_workers, initializer=_init_worker) as pool:
         for bi, (bstart, bstop) in enumerate(batch_bounds):
-            batch = _batch_result(config, region, cls, reader, gaia_term, template_log,
-                                   subclass_idx, n_sub, width_dex, topk, block, bstart, bstop,
-                                   timing, lambda_floor)
-            part_path = _part_path(path, bi)
-            t = time.perf_counter()
-            _write_part(part_path, batch)
-            timing["write"] += time.perf_counter() - t
-            part_paths.append(part_path)
-            zero_ext_count += batch["zero_ext_count"]
-            n_templates_checked += batch["n_templates_checked"]
+            if selected is not None and bi not in selected:
+                continue
+            m = bstop - bstart
+            results = [None] * m
+            for r in pool.imap(_source_task, range(bstart, bstop), chunksize=_IMAP_CHUNKSIZE):
+                results[r["i"] - bstart] = r
+            batch = _assemble_batch(results, catalog["name"][bstart:bstop], n_sub, topk)
+            _write_part(_part_path(path, bi), batch)
             st.tick(bi + 1, len(batch_bounds), "batches")
 
-    zero_ext_frac = zero_ext_count / n_templates_checked if n_templates_checked else float("nan")
     density_file = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
     lib, granule = ("sps", "region") if cls == "STAR" else \
         {"AGB": ("agb", "region"), "PAHC": ("pahc", "region"), "YSO": ("yso", "survey"),
@@ -535,33 +615,58 @@ def build_region_class(config, region, cls, st, reader, lambda_floor, limit=None
     weights_file = config_module.product_path(
         config, "bmstp", "weights", lib, granule, region=(region if granule == "region" else None))
     return dict(
-        path=path, part_paths=part_paths, n_source=n_source, n_model=n_model,
+        path=path, n_source=n_source, n_model=n_model, n_batches=len(batch_bounds),
         subclasses=definitions.SUBCLASSES_OF[cls], library=definitions.CLASS_REGISTER[cls],
-        zero_ext_frac=zero_ext_frac, density_file=density_file, weights_file=weights_file,
-        timing=timing,
+        density_file=density_file, weights_file=weights_file,
     )
 
 
 def join_parts(summary, topk):
     """Joins one {region, class}'s part files into the final P7 product,
     one part's rows at a time, dataset by dataset (rule 10b: never a
-    region-sized array); removes the part files once written.
+    region-sized array); removes the part files once written. Item 9:
+    the part list comes from `_discover_parts`, not an in-memory record
+    of what THIS call wrote, so a join after a restart picks up parts an
+    earlier, crashed run already left on disk. Raises if any batch's part
+    file is still missing -- rule 6, fail on the impossible, naming what
+    to rerun rather than joining a silently incomplete product. Also folds
+    every part's own `ZERO_EXT_COUNT`/`N_TEMPLATES_CHECKED` (for the
+    report's `zero_ext_frac`) and `FAILED` column (item 7's `FAILED_ROWS`,
+    the count reported as `n_failed`) across every part, present or
+    reproduced.
     """
     path = summary["path"]
     n_source = summary["n_source"]
+    n_batches = summary["n_batches"]
+    part_paths = _discover_parts(path)
+    if len(part_paths) != n_batches:
+        raise RuntimeError(
+            "fittp.sweep.join_parts [%s]: %d of %d batch part files present for %s -- "
+            "rerun with --batches naming the missing indices before joining"
+            % (summary.get("cls"), len(part_paths), n_batches, path))
+    zero_ext_count = 0
+    n_templates_checked = 0
+    failed_chunks = []
     with h5py.File(path, "w") as out:
         for key in _PART_KEYS:
-            with h5py.File(summary["part_paths"][0], "r") as pf0:
+            with h5py.File(part_paths[0], "r") as pf0:
                 shape = (n_source,) + pf0[key].shape[1:]
                 dtype = pf0[key].dtype
             out.create_dataset(key, shape=shape, dtype=dtype)
         offset = 0
-        for part_path in summary["part_paths"]:
+        for part_path in part_paths:
             with h5py.File(part_path, "r") as pf:
                 m = pf["NAME"].shape[0]
                 for key in _PART_KEYS:
                     out[key][offset:offset + m] = pf[key][:]
+                failed_here = np.nonzero(pf["FAILED"][:])[0]
+                failed_chunks.append(failed_here + offset)
+                zero_ext_count += int(pf.attrs["ZERO_EXT_COUNT"])
+                n_templates_checked += int(pf.attrs["N_TEMPLATES_CHECKED"])
             offset += m
+        failed_rows = (np.concatenate(failed_chunks) if failed_chunks
+                        else np.array([], dtype=np.int64)).astype(np.int64)
+        out.create_dataset("FAILED_ROWS", data=failed_rows)
         out.attrs["GRANULE"] = "source"
         out.attrs["CLASS"] = summary.get("cls")
         out.attrs["SUBCLASSES"] = np.array(summary["subclasses"], dtype="S8")
@@ -570,23 +675,31 @@ def join_parts(summary, topk):
         out.attrs["K"] = topk
         out.attrs["WEIGHTS_FILE"] = summary["weights_file"]
         out.attrs["DENSITY_FILE"] = summary["density_file"]
-    for part_path in summary["part_paths"]:
+    for part_path in part_paths:
         os.remove(part_path)
+    zero_ext_frac = zero_ext_count / n_templates_checked if n_templates_checked else float("nan")
+    return dict(zero_ext_frac=zero_ext_frac, n_failed=int(failed_rows.size))
 
 
-def build(config, regions=None, classes=None, limit=None):
+def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=None):
     """Writes `fittp/fit/<CLS>_fit_source__R.hdf5` for every {region,
     class} pair (default all thirty regions, all six classes; section
     1.3, IMPLEMENTATION_BMSTP_DRAFT.md P7). `limit` restricts every
     region to its first `limit` catalogue rows -- a timing/acceptance
     device for a class whose prior read does not fit the run budget on
-    the whole region, never a default. Per region, `region_lambda_floor`
-    is the first pass: it loads all SIX classes' `Prior` and forms
-    `Lambda_floor(s)` once, common by construction to every class this
-    region sweeps, before any class's own read. `classes` here only
-    selects which of the six this call WRITES P7 for -- a run restricted
-    to a subset still reads every one of the six classes' own P2-P5
-    products (its shape grid, its template-weight table), since the
+    the whole region, never a default. `n_workers` sizes the per-{region,
+    class} multiprocessing pool (item 6: `--workers` on the CLI, falling
+    back to `[fittp] workers`, default 1 -- never auto-detected, never
+    capped by the code). `batches`, given, restricts every {region, class}
+    this call sweeps to those batch indices only (item 9). Per region,
+    `region_lambda_floor` is the first pass: it loads all SIX classes'
+    `Prior` and forms `Lambda_floor(s)` once, common by construction to
+    every class this region sweeps, before any class's own read; the
+    region's whole catalogue (`_load_region_catalog`) is also loaded once
+    here and shared across every class this call sweeps. `classes` here
+    only selects which of the six this call WRITES P7 for -- a run
+    restricted to a subset still reads every one of the six classes' own
+    P2-P5 products (its shape grid, its template-weight table), since the
     floor is common by construction only if it maxes over all six, never
     the run's own subset.
     """
@@ -594,23 +707,21 @@ def build(config, regions=None, classes=None, limit=None):
     class_codes = classes if classes is not None else list(CLASSES)
     for region in region_names:
         readers, lambda_floor = region_lambda_floor(config, region)
+        catalog = _load_region_catalog(config, region)
         for cls in class_codes:
             with progress.Stage("fittp.sweep.%s" % cls, region) as st:
-                summary = build_region_class(config, region, cls, st, readers[cls],
-                                              lambda_floor, limit=limit)
+                summary = build_region_class(config, region, cls, st, readers[cls], lambda_floor,
+                                              catalog, n_workers=n_workers, limit=limit,
+                                              batches=batches)
                 summary["cls"] = cls
-                join_parts(summary, config.fit_topk)
+                joined = join_parts(summary, config.fit_topk)
                 with h5py.File(summary["path"], "r") as f:
                     occam = np.asarray(f["OCCAM_GAP"][:])
                 occam_finite = occam[np.isfinite(occam)]
                 occam_median = float(np.median(occam_finite)) if occam_finite.size else float("nan")
-                # Rule 17's per-{region, class} wall-time split (W9): where the
-                # sweep's own time goes, stage by stage, so a future pass reads
-                # the long pole straight off the done line instead of profiling.
-                split = " ".join("%s=%.1fs" % (k, v) for k, v in summary["timing"].items())
                 st.done(summary["path"], n=summary["n_source"], n_model=summary["n_model"],
-                        zero_ext_frac=summary["zero_ext_frac"], occam_gap_median=occam_median,
-                        n_batches=len(summary["part_paths"]), split=split)
+                        zero_ext_frac=joined["zero_ext_frac"], occam_gap_median=occam_median,
+                        n_batches=summary["n_batches"], n_failed=joined["n_failed"])
 
 
 if __name__ == "__main__":
@@ -624,6 +735,18 @@ if __name__ == "__main__":
     parser.add_argument("--limit", type=int, default=None,
                          help="sweep only the first LIMIT catalogue rows of each region "
                               "(a timing/acceptance device, never a default)")
+    parser.add_argument("--workers", type=int, default=None,
+                         help="the per-{region, class} multiprocessing pool size, one task "
+                              "per source; falls back to [fittp] workers (default 1). Never "
+                              "auto-detected, never capped by the code -- read this stage's "
+                              "own printed per-worker cost and set the number that fits")
+    parser.add_argument("--batches", type=int, nargs="+", default=None,
+                         help="rerun only these batch indices (0-based, by position in the "
+                              "region's own source order at [fit] batch_size) -- e.g. after a "
+                              "crash, regenerate just the missing part files; the join always "
+                              "re-discovers every part file on disk")
     args = parser.parse_args()
     cfg = config_module.load(args.config)
-    build(cfg, regions=args.regions, classes=args.classes, limit=args.limit)
+    n_workers = args.workers if args.workers is not None else cfg.fittp_workers
+    build(cfg, regions=args.regions, classes=args.classes, limit=args.limit,
+          n_workers=n_workers, batches=args.batches)

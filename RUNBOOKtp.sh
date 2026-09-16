@@ -14,11 +14,13 @@
 # Every joblib-parallelised stage's worker count is `root.cfg`'s own
 # `[run] n_jobs`, with no separate module-level cap (CODING_RULES_BMSTP.md
 # rule 10a): the owner sets it to what the machine's memory allows.
-# `NUMBA_NUM_THREADS` governs the numba kernels in fittp's prior reader
-# (`fittp.prior_reader`) and its likelihood (`fittp.likelihood`)
-# separately from that worker count; the sweep (`fittp.sweep`) pins BLAS
-# to one thread for its small per-source gemms while those numba kernels
-# keep their own thread pool.
+# `fittp.sweep` is not one of those joblib stages: its own parallel axis is
+# the SOURCE, one task per source over a `multiprocessing` pool sized by
+# `[fittp] workers`/`--workers` (PARALLEL brief), not `[run] n_jobs`. Each
+# worker pins both BLAS and numba (the per-template kernels in
+# `fittp.likelihood`, `fittp.prior_reader`, `fittp.gaia`) to one thread —
+# the pool itself is the parallelism, so a numba kernel threading too
+# inside a worker would oversubscribe the machine.
 set -euo pipefail
 
 # Usage: RUNBOOKtp.sh [--from <module>] [--to <module>] [--regions R1 R2 ...]
@@ -161,11 +163,17 @@ PY sesnaimpute.atlas.protostars   # the protostar check figure per region with H
 
 # --- fittp (the thinned-Poisson fitter, the classification, the cascade, the posterior atlas; writes fittp/) ---
 # Lines are added here as each stage lands (IMPLEMENTATION_BMSTP sec 4). The
-# [fit]/[fittp] knobs (config.py's [fit] section) live in root.cfg:
+# [fit]/[fittp] knobs (config.py's [fit]/[fittp] sections) live in root.cfg:
 # topk -> fit_topk (fittp.sweep's per-source top-K record size), batch_size
-# -> fit_batch_size (fittp.sweep's per-part-file source count), block_budget_mb
-# -> fit_block_budget_mb (fittp.sweep/likelihood.block_size's per-block memory
-# cap), beta -> fit_beta (fittp.classify's cascade-evidence blend weight).
+# -> fit_batch_size (fittp.sweep's per-part-file source count, the ONLY
+# meaning "batch" carries here -- the fitter's unit of work is one source,
+# PARALLEL brief), beta -> fit_beta (fittp.classify's cascade-evidence
+# blend weight), workers -> fittp_workers (fittp.sweep's own
+# multiprocessing pool size, one task per source, --workers on the line
+# below overriding it per run; never auto-detected, never capped by the
+# code -- the stage prints its own closed-form per-worker cost,
+# n_model x 8 bands x 4 bytes x 10, at start, and the owner reads it and
+# sets the count that fits).
 # cascade's measured half needs no fit, so it runs before the fit loop; its
 # imputed half (fittp.classify's FLUX_IMPUTED) is filled in by re-running this
 # same line after classify, once per region, once classify has written.
@@ -173,7 +181,7 @@ PY sesnaimpute.fittp.cascade   # the colour cascade on the measured fluxes, Psi 
 PY sesnaimpute.fittp.library_resolution   # SIGMA_LIB_DEX per library, the fit's per-band variance floor (SPEC_BMSTP sec 6.1)
 # One capped.sh process per class, so one class's peak resident is never summed with the class before it.
 for FIT_CLASS in STAR AGB PAHC GAL YSO H2S; do
-  PY sesnaimpute.fittp.sweep --classes "$FIT_CLASS"   # the class evidence sweep, P7, batched at [fit] batch_size/block_budget_mb, K=[fit] topk (SPEC_BMSTP sec 1.3; IMPLEMENTATION_BMSTP sec 4 row 2.4)
+  PY sesnaimpute.fittp.sweep --classes "$FIT_CLASS"   # the class evidence sweep, P7, one task per source over [fittp] workers, K=[fit] topk, part files at [fit] batch_size (SPEC_BMSTP sec 1.3; IMPLEMENTATION_BMSTP sec 4 row 2.4)
 done
 PY sesnaimpute.fittp.classify   # P(C|D) at [fit] beta, subclasses, MAP, imputed flux (P8) and the literature-band sensitivity (P9) (SPEC_BMSTP sec 7.1, 7.2)
 PY sesnaimpute.fittp.cascade   # re-run: fills the cascade's imputed half now that classify has written (SPEC_BMSTP sec 7.3)

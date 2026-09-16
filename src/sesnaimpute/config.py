@@ -29,6 +29,11 @@ DEFAULT_FIT_TOPK = 5
 DEFAULT_FIT_BATCH_SIZE = 10_000
 DEFAULT_FIT_BETA = 0.0
 DEFAULT_FIT_BLOCK_BUDGET_MB = 512
+#: `fittp.sweep`'s own multiprocessing pool size, one task per source
+#: (PARALLEL brief item 6): never auto-detected, never capped by the code
+#: -- the owner sets it per partition to what the stage's own printed
+#: per-worker cost allows.
+DEFAULT_FITTP_WORKERS = 1
 
 
 @dataclass(frozen=True)
@@ -40,6 +45,7 @@ class Config:
     fit_batch_size: int
     fit_beta: float
     fit_block_budget_mb: int
+    fittp_workers: int
 
 
 def load(path):
@@ -54,9 +60,11 @@ def load(path):
     fit_beta = parser.getfloat("fit", "beta", fallback=DEFAULT_FIT_BETA)
     fit_block_budget_mb = parser.getint(
         "fit", "block_budget_mb", fallback=DEFAULT_FIT_BLOCK_BUDGET_MB)
+    fittp_workers = parser.getint("fittp", "workers", fallback=DEFAULT_FITTP_WORKERS)
     return Config(data_root=data_root, inputs=inputs, n_jobs=n_jobs,
                   fit_topk=fit_topk, fit_batch_size=fit_batch_size,
-                  fit_beta=fit_beta, fit_block_budget_mb=fit_block_budget_mb)
+                  fit_beta=fit_beta, fit_block_budget_mb=fit_block_budget_mb,
+                  fittp_workers=fittp_workers)
 
 
 def product_path(config, area, source, quantity, granule, region=None):
