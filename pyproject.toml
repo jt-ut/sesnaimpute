@@ -13,10 +13,23 @@ dependencies = [
     "joblib",
     "healpy",
     "numba",
+    "astropy",
+    "matplotlib",
+    "pandas",
+    "threadpoolctl",
+    "tomli",
+    "beautifulsoup4",
+]
+
+[project.optional-dependencies]
+download = [
+    "astroquery",
+    "pdfplumber",
+    "pdfminer.six",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-sesnaimpute = ["data/extinction_laws/*/*"]
+sesnaimpute = ["data/extinction_laws/*/*", "gutcolors/tables/*.toml"]

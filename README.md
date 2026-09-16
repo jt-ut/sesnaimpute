@@ -1,6 +1,14 @@
 # sesnaimpute
 
-Produces the imputed SESNA catalogue: per-source BMS impute decisions, class/subclass probabilities, and diagnostics.
-The spec is `/Users/jtaylor/Dropbox/Research/SESNA_Complete/claude code/bms/SPEC_PRIORS.md`, with placement conventions in `IMPLEMENTATION.md` and coding conventions in `CODING_RULES.md`, both in that same directory.
-Run a build with `PY=/usr/local/bin/python3.9 python -m sesnaimpute.<area>.<product>.build CONFIG [--regions R1 R2 ...]`.
-`RUNBOOK.sh` is the only orchestration; its line order is the dependency order.
+Computes the SESNA class posterior and imputed fluxes under the thinned-Poisson design.
+
+Install: `pip install -e .`; add `.[download]` for the `sky/download/` stages.
+
+Configuration: `root.cfg` (data root and external input paths), located by the
+`SESNA_CONFIG` environment variable or `RUNBOOKtp.sh`'s own default; `SESNA_PYTHON`
+selects the interpreter; `CAPPED_CEILING_KB` sets `capped.sh`'s memory ceiling.
+
+Run with `./RUNBOOKtp.sh --from <module> --to <module> [--regions R1 R2 ...]`.
+
+Design documents: `SPEC_BMSTP_DRAFT.md` and `IMPLEMENTATION_BMSTP_DRAFT.md`, kept
+with the project's review documents.
