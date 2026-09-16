@@ -153,6 +153,19 @@ def convolved_law(config, region):
 
     t0 = time.time()
     convolved = fftconvolve(law_ds, kernel, mode="same")
+    # `law_ds` is non-negative (kappa_arm . A_K^2, with unmeasured pixels
+    # contributing zero, not a fabricated column) and `K(r) ~ e^{-r/lambda}/r`
+    # is non-negative, so the convolution of the two is non-negative
+    # everywhere in exact arithmetic. Any negative value here is FFT
+    # round-off -- measured at -1.9e-13 against a map scale of order 1 --
+    # and it reaches `bmstp.density` as `DENSITY_H2S = L(s) . eta_r .
+    # eps_ext . ON_GRID_H2S`, where `fittp.prior_reader.ln_prior`'s
+    # `log(density)` turns it into a NaN that takes the source's whole
+    # classification with it (3,997 sources in Orion A, 1,644 in Aquila).
+    # Clamping removes the round-off, not signal; a genuinely zero knot
+    # density is physical (owner's ruling 2026-09-16) and reads as -inf,
+    # which contributes nothing to the evidence instead of poisoning it.
+    np.maximum(convolved, 0.0, out=convolved)
     wall_s = time.time() - t0
 
     wcs_ds = wcs.deepcopy()
