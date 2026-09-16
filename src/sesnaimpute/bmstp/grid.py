@@ -40,14 +40,15 @@ losing half its mass to a phantom edge. The array's own low and top
 `log10 ξ` edges (`-3.0`, `+1.0`) keep the ordinary edge rule -- mass a
 kernel pushes past THOSE is truly outside and is counted in
 `mass_outside`, since `+1.0` is padding sized for the edge ξ = 1's own
-reflection, one dex, never reached by the kernels this design uses. THE
-FLOOR IS COMMON. `FLOOR` is one absolute value on the read prior density,
-common to every class at a source, applied where the prior is read
-(`fittp.prior_reader`), not a per-class, per-shape constant baked in
-here: a stored shape carries its own true zeros, so an empty cell reads
-equal across the six classes and the likelihood alone decides it.
-`blur`'s own shift-and-smooth carries no floor step; its caller applies
-the common one, at the read.
+reflection, one dex, never reached by the kernels this design uses. A
+stored shape carries its own true zeros, never a per-class, per-shape
+floor baked in here: an empty cell reads as an empty cell, and the
+fitter's own read (`fittp.prior_reader.ln_prior`/`_cell_sum`) applies no
+floor to it either, so a template whose whole cell window is empty reads
+a clean `-inf`, never an inflated pedestal. `FLOOR` below survives only
+as the relative floor `atlas.shapes`'s per-source diagnostic page marks
+on its own plot (`fittp.prior_reader.common_floor`), not as anything the
+fitter's read applies.
 """
 
 import numpy as np
@@ -79,11 +80,12 @@ _N_B = LOG10_F45_EDGES.size - 1
 D_LOG10_F45 = (LOG10_F45_EDGES[-1] - LOG10_F45_EDGES[0]) / _N_B
 _B_CENTERS = LOG10_F45_EDGES[:-1] + 0.5 * D_LOG10_F45
 
-#: The floor fraction (sec. 2, "the floor"; module docstring's common-floor
-#: statement): not baked into a stored shape, which carries its own true
-#: zeros -- read alone, as one value common to every class at a source,
+#: The relative floor `atlas.shapes`'s per-source diagnostic page marks
+#: on its own plot (`fittp.prior_reader.common_floor`, `peak_density`):
 #: `FLOOR` times the largest cell density any of the six classes reaches
-#: there (`fittp.prior_reader.common_floor`).
+#: at a source. The fitter's own read applies no floor; `bmstp.template_
+#: weights.FACTOR_FLOOR` reuses this same value for an unrelated factor-
+#: table floor, not a prior-density one.
 FLOOR = 1e-6
 
 #: (sec. 2 "minimum widths", sec. 5.1 "Marks"): the number of

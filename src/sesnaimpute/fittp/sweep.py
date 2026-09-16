@@ -19,8 +19,8 @@ Region and class are read once, in the PARENT process (`build_region_class`):
 the register (`_register`), the region's non-detection width (`_width_dex`),
 the class's own library-resolution number (`likelihood.sigma_lib_by_class`),
 the Gaia term (`GaiaTerm`), the class's own `Prior` reader
-(`prior_reader.load`, this class's only -- the region's common floor comes
-ready-made from `bmstp.floor`'s product, so no other class's grid is read)
+(`prior_reader.load`, this class's only -- the prior read applies no
+floor, so no other class's grid is read)
 and the region's whole catalogue (`_load_region_catalog`: fluxes, uncertainties,
 `ORIGIN_FNU`, `NAME`, `F_LIM_50`). These are stashed in `_WORKER` and a
 `multiprocessing.get_context("fork").Pool` is created AFTER that load, and
@@ -332,8 +332,7 @@ def _source_task(i):
         slope_log10b_per_ak = np.array([-2.0 * batch.slope_sc_av / batch.ak_per_av])
         ln_lambda = prior_reader.ln_prior(
             w["reader"], rows, h, fit.a_hat[None, :], fit.log10_b_hat[None, :],
-            slope_log10b_per_ak, np.array([batch.sigma_a_ak]), model_index,
-            np.array([w["lambda_floor"][i]]))[0]
+            slope_log10b_per_ak, np.array([batch.sigma_a_ak]), model_index)[0]
 
         ln_l = -0.5 * fit.chi2_min.astype(np.float64) + fit.ln_nondet.astype(np.float64)
 
@@ -521,24 +520,7 @@ def _write_part(part_path, batch):
         f.attrs["N_TEMPLATES_CHECKED"] = batch["n_templates_checked"]
 
 
-def _region_lambda_floor(config, region):
-    """`(n_source,)` `Lambda_floor(s)`, read from `bmstp.floor`'s own
-    product (`bmstp/density/floor_density_source__R.hdf5`, the common-floor
-    rule, SPEC_BMSTP_DRAFT.md section 4.1): computed once per region in the
-    prior chain, off all six classes' own `Prior`, since it depends only
-    on the prior chain's own products and the source list, never on the
-    fit. Rule 5b: a missing floor product fails with one sentence naming
-    the RUNBOOK line that makes it."""
-    path = config_module.product_path(config, "bmstp", "density", "floor", "source", region=region)
-    if not os.path.exists(path):
-        raise RuntimeError(
-            "fittp.sweep._region_lambda_floor [%s]: missing %s -- run RUNBOOKtp.sh's "
-            "'PY sesnaimpute.bmstp.floor' line first" % (region, path))
-    with h5py.File(path, "r") as f:
-        return f["LAMBDA_FLOOR"][:].astype(np.float64)
-
-
-def build_region_class(config, region, cls, st, reader, lambda_floor, catalog,
+def build_region_class(config, region, cls, st, reader, catalog,
                         n_workers=1, limit=None, batches=None):
     """Sweeps one {region, class}'s whole region (or, with `limit`, its
     first `limit` catalogue rows only -- a timing/acceptance device, never
@@ -551,9 +533,7 @@ def build_region_class(config, region, cls, st, reader, lambda_floor, catalog,
     restart writes just the missing parts); the caller (`build`) always
     joins whatever part files are on disk after. Returns the summary
     numbers `join_parts` and the report need. `reader` is this class's own
-    `Prior` (`build`'s own `prior_reader.load`, this class's only) and
-    `lambda_floor` the region's own common floor (`build`'s
-    `_region_lambda_floor`, `bmstp.floor`'s product read once per region);
+    `Prior` (`build`'s own `prior_reader.load`, this class's only);
     `catalog` is `_load_region_catalog`'s one whole-region read,
     also loaded once by `build` and shared across classes.
     """
@@ -601,7 +581,7 @@ def build_region_class(config, region, cls, st, reader, lambda_floor, catalog,
     _set_worker_state(config=config, cls=cls, reader=reader, gaia_term=gaia_term,
                        template_log=template_log, subclass_idx=subclass_idx, n_sub=n_sub,
                        width_dex=width_dex, topk=topk, n_model=n_model,
-                       lambda_floor=lambda_floor, sigma_lib_l=sigma_lib_l,
+                       sigma_lib_l=sigma_lib_l,
                        flux=catalog["flux"], sigma=catalog["sigma"], origin=catalog["origin"],
                        f_lim50=catalog["f_lim50"])
 
@@ -716,24 +696,19 @@ def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=N
     back to `[fittp] workers`, default 1 -- never auto-detected, never
     capped by the code). `batches`, given, restricts every {region, class}
     this call sweeps to those batch indices only (item 9). Per region,
-    `Lambda_floor(s)` is read once from `bmstp.floor`'s own product
-    (`_region_lambda_floor`), common to every class this region sweeps; the
-    region's whole catalogue (`_load_region_catalog`) is also loaded once
-    here and shared across every class this call sweeps. each class in `classes` then loads only its OWN `Prior`
-    (`prior_reader.load`), never the other five's shape grids or
-    template-weight tables -- unlike the floor, which is common by
-    construction only if it maxes over all six, and so is computed once,
-    in the prior chain, by `bmstp.floor`, never here.
+    the whole catalogue (`_load_region_catalog`) is loaded once here and
+    shared across every class this call sweeps; each class in `classes`
+    then loads only its OWN `Prior` (`prior_reader.load`), never the
+    other five's shape grids or template-weight tables.
     """
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     class_codes = classes if classes is not None else list(CLASSES)
     for region in region_names:
-        lambda_floor = _region_lambda_floor(config, region)
         catalog = _load_region_catalog(config, region)
         for cls in class_codes:
             with progress.Stage("fittp.sweep.%s" % cls, region) as st:
                 reader = prior_reader.load(config, region, cls)
-                summary = build_region_class(config, region, cls, st, reader, lambda_floor,
+                summary = build_region_class(config, region, cls, st, reader,
                                               catalog, n_workers=n_workers, limit=limit,
                                               batches=batches)
                 summary["cls"] = cls

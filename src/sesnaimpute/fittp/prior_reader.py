@@ -216,9 +216,10 @@ def prepare(reader, rows):
     IMPLEMENTATION_BMSTP_DRAFT.md section 9). Mass `grid.blur` carries
     past `log10 ξ = 0` is a real pencil column above the beam mean in the
     measured coordinate and stays in the sum, in the one-dex padding the
-    array already carries above the edge ξ = 1. The per-shape floor `bin` once
-    baked in is gone (the common-floor rule) -- the common floor is
-    applied once, at the read, by `common_floor`/`ln_prior` below."""
+    array already carries above the edge ξ = 1. An empty cell after
+    blurring is a real, unfloored zero: `ln_prior`/`_cell_sum` below read
+    it as such, and a template whose whole window sums to zero prior mass
+    reads `ln <Lambda_C>_s(theta) = -inf` there."""
     rows = np.asarray(rows)
     a_col = reader.a_col[rows]
     a_col_sig = reader.a_col_sig[rows]
@@ -245,10 +246,12 @@ def grain_peaks(reader):
     the measured coordinate's full extent, one per grain (tile,
     sightline, or the single GAL row) -- `reader.grid_all` is already
     whole in memory (`load`'s own read), so this is one array max, no
-    second file read and no per-source blur. `peak_density`/`common_floor`
-    below use it as the stored, cheap stand-in for the per-source blurred
-    peak (blurring only ever spreads a cell's mass thinner, so this is a
-    safe, if slightly conservative, upper bound on it)."""
+    second file read and no per-source blur. Kept only for
+    `atlas.shapes`'s per-source shapes page (the report-only prior
+    diagnostic, RUNBOOKtp.sh's `sesnaimpute.atlas.shapes` line), which
+    marks its own plotted floor line off `peak_density`/`common_floor`
+    below; the fitter's own read (`ln_prior`/`_cell_sum`) applies no
+    floor and does not call this."""
     return reader.grid_all.reshape(
         reader.grid_all.shape[0], -1).max(axis=1).astype(np.float64)
 
@@ -269,12 +272,13 @@ def factor_peak(reader):
 
 def peak_density(reader, rows, peaks=None, peak_f=None):
     """This class's own `A_C(s) * grain_peak * factor_peak / (dlx * dlb)`
-    (`n,`): the per-source, per-class peak cell density `common_floor`
-    maxes over classes to form `Lambda_floor(s)` (the common-floor rule). `peaks`
-    (`grain_peaks(reader)`) and `peak_f` (`factor_peak(reader)`) are
-    accepted pre-computed so a caller forming this for every class up
-    front (`fittp.sweep`'s first pass) pays for each class's grid and
-    factor tables once, not once per batch."""
+    (`n,`): the per-source, per-class peak cell density. Kept only for
+    `atlas.shapes`'s per-source shapes page (see `grain_peaks` above);
+    the fitter's own read applies no floor and does not call this.
+    `peaks` (`grain_peaks(reader)`) and `peak_f` (`factor_peak(reader)`)
+    are accepted pre-computed so a caller forming this for every class up
+    front pays for each class's grid and factor tables once, not once
+    per batch."""
     rows = np.asarray(rows)
     density = reader.density[rows]
     peaks = grain_peaks(reader) if peaks is None else peaks
@@ -284,10 +288,11 @@ def peak_density(reader, rows, peaks=None, peak_f=None):
 
 
 def common_floor(peaks):
-    """`Lambda_floor(s) = FLOOR * max` over the six classes' own
-    `peak_density(s)` (the common-floor rule): one absolute floor per source, common to
-    every class, so an empty cell reads the SAME density for all six and
-    the likelihood alone decides it. `peaks` is a sequence of `(n,)`
+    """`Lambda_floor(s) = grid.FLOOR * max` over the six classes' own
+    `peak_density(s)`: the figure-only floor line `atlas.shapes`'s
+    per-source shapes page marks on its own plot (see `grain_peaks`
+    above). The fitter's own read (`ln_prior`/`_cell_sum`) applies no
+    floor and does not call this. `peaks` is a sequence of `(n,)`
     arrays, one per class, row-aligned by source."""
     return grid.FLOOR * np.stack(peaks, axis=0).max(axis=0)
 
@@ -503,8 +508,7 @@ def _ln_half_erfc(z):
 @numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
 def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               b_origin, dlb, dlx, a_edges_buf,
-              m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
-              floor_over_density):
+              m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab):
     """The cell sum of SPEC_BMSTP_DRAFT.md section 4.2, per source and
     template: the cell window `[i_lo, i_hi]` holding `a_hat +/- 5 sigma_a`
     found in O(1) from the grid's own geometric spacing (no scan of the
@@ -539,18 +543,11 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     carries past that wall into real mass -- a pencil column above the
     beam mean -- so the window and both fallbacks below run to the
     array's own top edge, `n_x`, the measured coordinate's full extent,
-    not to the edge ξ = 1. The common floor:
-    `h`'s stored density is an exact zero in an empty cell (no per-shape
-    floor is baked in), so every `dens` this function reads is floored at
-    `floor_over_density[s, th]`, this (source, template)'s own share of
-    `Lambda_floor(s) = FLOOR * max` over the six classes' own `A_C h_C
-    f_C` (`ln_prior` divides `Lambda_floor(s)` by this class's own `A_C(s)
-    * exp(factor_term)` before calling here, so `f_C`, folded back in by
-    `ln_prior` after this function returns, is a `theta`-dependent
-    correction to the SAME `Lambda_floor(s)` for every class, not a
-    second, class-specific floor on top of it) -- an empty cell then
-    reads the SAME `Lambda_C = Lambda_floor(s)` for every class and the
-    likelihood alone decides it.
+    not to the edge ξ = 1. No floor: `h`'s stored density is an exact
+    zero in an empty cell and every `dens` this function reads is exactly
+    that zero, unmodified -- a window whose every cell is empty sums to
+    `total = 0.0` and reads `out[s, th] = -inf` (its initial value,
+    below), a clean veto that contributes nothing to the evidence.
 
     Kernel mass outside the grid is outside the prior, at either edge
     (section 2): cell 0's own mass `M_0` and mean `a*_0` are
@@ -560,15 +557,18 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     the top edge. The table path (`_build_a_star_tables`) and this exact
     path agree on this.
 
-    Two fallbacks, and no others, read a single substitute cell instead
-    of a cleared one, so no template's prior is ever `-inf` (section
-    1.3). A window with no mass on the grid at all -- entirely below
-    `a_edges[0]` -- reads the lowest cell's floored density at that
-    cell's own geometric centre, `a_c0 = sqrt(a_edges[0] * a_edges[1])`,
+    Two fallbacks, and no others, read a single substitute cell's own
+    (unfloored) density instead of a cleared one, so a window whose mass
+    sits entirely off the grid still reads a finite prior wherever that
+    cell's own stored density is itself nonzero -- and `-inf` where it is
+    zero, exactly as a mass-bearing window's own empty cells read. A
+    window with no mass on the grid at all -- entirely below
+    `a_edges[0]` -- reads the lowest cell's density at that cell's own
+    geometric centre, `a_c0 = sqrt(a_edges[0] * a_edges[1])`,
     times the Gaussian's tail mass beyond `a_edges[0]`; never at
     `a_edges[0]` itself, which the Jacobian `1 / a` would misprice by
     orders of magnitude. A window entirely above the grid's TOP edge
-    reads the mirror point -- the top cell's own floored density at its
+    reads the mirror point -- the top cell's own density at its
     own upper edge, times the tail mass beyond that edge -- because mass
     above the grid is mass outside and is never wrapped onto the grid's
     low end (section 2)."""
@@ -595,7 +595,6 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
         off = offset_tab[s]
         for th in numba.prange(m):
             ah = a_hat[s, th]
-            fd = floor_over_density[s, th]
             lo_a = ah - 5.0 * sig
             hi_a = ah + 5.0 * sig
             total = 0.0
@@ -640,8 +639,6 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                             j0 = n_b - 2
                             frac = 1.0
                         dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
-                        if dens < fd:
-                            dens = fd
                         total += dens * mi / a_star
             else:
                 z_prev = (a_edges[i_lo] - ah) * inv_sig
@@ -671,8 +668,6 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                             j0 = n_b - 2
                             frac = 1.0
                         dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
-                        if dens < fd:
-                            dens = fd
                         total += dens * mi / a_star
                     cdf_prev = cdf_next
                     phi_prev = phi_next
@@ -680,16 +675,18 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
             if total > 0.0:
                 out[s, th] = np.log(total)
             elif in_grid and lo_a >= a_edges[n_x]:
-                # section 1.3: no template's prior is -inf. The window's
-                # own low bound already clears the array's own top edge
-                # (the measured coordinate's full extent, not the stored
-                # shape's wall at `x = 1`): mass above it is mass outside
-                # the prior, never wrapped back (section 2), so this reads
-                # as the top cell's own density at its own upper edge,
-                # times the Gaussian's tail mass beyond that edge -- the
-                # mirror of the low-edge fallback below, not that
-                # fallback's a_0 and cell 0 (which would misprice the
-                # Jacobian by the ratio of the two edges).
+                # The window's own low bound already clears the array's
+                # own top edge (the measured coordinate's full extent,
+                # not the stored shape's wall at `x = 1`): mass above it
+                # is mass outside the prior, never wrapped back (section
+                # 2), so this reads as the top cell's own density at its
+                # own upper edge, times the Gaussian's tail mass beyond
+                # that edge -- the mirror of the low-edge fallback below,
+                # not that fallback's a_0 and cell 0 (which would
+                # misprice the Jacobian by the ratio of the two edges).
+                # `out[s, th]` stays at its initial `-inf` if that cell's
+                # own density is itself an exact zero: a clean veto, not
+                # a floored substitute.
                 a_top = a_edges[n_x]
                 z_top = (a_top - ah) * inv_sig
                 ln_tail = _ln_half_erfc(z_top / sqrt2)
@@ -704,8 +701,6 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     j0 = n_b - 2
                     frac = 1.0
                 dens = (h[s, n_x - 1, j0] * (1.0 - frac) + h[s, n_x - 1, j0 + 1] * frac) / (dlx * dlb)
-                if dens < fd:
-                    dens = fd
                 if dens > 0.0:
                     out[s, th] = math.log(dens / a_top) + ln_tail
             else:
@@ -731,14 +726,12 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     j0 = n_b - 2
                     frac = 1.0
                 dens = (h[s, 0, j0] * (1.0 - frac) + h[s, 0, j0 + 1] * frac) / (dlx * dlb)
-                if dens < fd:
-                    dens = fd
                 if dens > 0.0:
                     out[s, th] = math.log(dens / a_c0) + ln_tail
     return out
 
 
-def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, lambda_floor):
+def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index):
     """`(n, m)` float32: `ln <Lambda_C>_s(theta)` of SPEC_BMSTP_DRAFT.md
     section 4.2, plus `ln A_C(s)` (section 1.3) -- everything the fitter's
     evidence sum needs from the prior. `rows` indexes `reader`'s per-source
@@ -747,17 +740,10 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, l
     `fittp.likelihood.fit`'s unconstrained mark, its conditional slope and
     the fit's own `sigma_a`, all in `A_K`; `model_index` locates each of
     the `m` templates in the class's `C_THETA` and weight-factor tables
-    (identity order where the library is read whole). `lambda_floor` is
-    `common_floor`'s own `(n,)` `Lambda_floor(s)`, the SAME array for
-    every class at these sources -- the floor is on the FULL prior
-    density `Lambda_C = A_C h_C f_C`, so `factor_term` (`f_C`'s own log,
-    `ln Pi_f PI_f`, evaluated once per (source, template) at `a*` and
-    constant across the cell window) is formed FIRST and divided out
-    along with `A_C(s)` (`reader.density`) into the `(n, m)` per-cell
-    `dens` floor `_cell_sum` applies: flooring `h_C`'s own cell at
-    `lambda_floor / (A_C * exp(factor_term))` and then multiplying back
-    `A_C` and `factor_term` below reads exactly `Lambda_floor(s)` in an
-    empty window, for every template and every class alike."""
+    (identity order where the library is read whole). No floor: `_cell_sum`
+    reads `h_C`'s own cell density exactly as stored, so a template whose
+    whole cell window sums to zero prior mass reads `ln <Lambda_C>_s(theta)
+    = -inf`, a clean veto rather than an inflated pedestal."""
     rows = np.asarray(rows)
     a_col = reader.a_col[rows]
     density = reader.density[rows]
@@ -771,14 +757,13 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, l
     factor_term = _factor_ln(reader, rows, a_hat64,
                               np.asarray(log10_b_hat, dtype=np.float64),
                               np.asarray(slope, dtype=np.float64), sigma_a, model_index)
-    floor_over_density = (np.asarray(lambda_floor, dtype=np.float64)[:, None]
-                           / (density[:, None] * np.exp(factor_term)))
     m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab = _build_a_star_tables(
         a_col, reader.xi_edges, sigma_a, a_hat64)
     core = _cell_sum(a_col, reader.xi_edges, sigma_a,
                       a_hat64, np.asarray(log10_b_hat, dtype=np.float64),
                       np.asarray(slope, dtype=np.float64), np.asarray(c_theta, dtype=np.float64),
                       h, reader.b_origin, reader.dlb, reader.dlx, a_edges_buf,
-                      m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
-                      floor_over_density)
-    return (core + np.log(density)[:, None] + factor_term).astype(np.float32)
+                      m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab)
+    with np.errstate(divide="ignore"):
+        ln_density = np.log(density)[:, None]
+    return (core + ln_density + factor_term).astype(np.float32)
