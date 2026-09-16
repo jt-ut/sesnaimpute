@@ -446,29 +446,21 @@ def _write_part(part_path, batch):
             f.create_dataset(key, data=batch[field])
 
 
-def region_lambda_floor(config, region):
-    """`(readers, lambda_floor)`, the FIRST PASS `build` runs once per
-    region, before any class's own read:
-    `readers[cls] = prior_reader.load(config, region, cls)` for every one
-    of the six classes -- ALWAYS all six, regardless of which classes this
-    run will actually sweep, since `Lambda_floor(s)` is a max over all of
-    them and so is common by construction only if every class's own P2-P5
-    products (its shape grid and its template-weight table) exist and are
-    read here, whether or not this run writes that class's own P7 -- and
-    `lambda_floor = prior_reader.common_floor(peaks)`,
-    `peaks[cls] = prior_reader.peak_density(readers[cls], arange(n_source))`
-    off each reader's own already-loaded, unblurred grid and factor
-    tables (`grain_peaks`/`factor_peak`). `readers` is returned so `build`
-    hands the SAME loaded `Prior` to `build_region_class` below: the grids
-    are read exactly once per class, never a second time for the floor
-    and again for the class's own sweep."""
-    peaks = []
-    readers = {}
-    for cls in CLASSES:
-        reader = prior_reader.load(config, region, cls)
-        readers[cls] = reader
-        peaks.append(prior_reader.peak_density(reader, np.arange(reader.density.size)))
-    return readers, prior_reader.common_floor(peaks)
+def _region_lambda_floor(config, region):
+    """`(n_source,)` `Lambda_floor(s)`, read from `bmstp.floor`'s own
+    product (`bmstp/density/floor_density_source__R.hdf5`, the common-floor
+    rule, SPEC_BMSTP_DRAFT.md section 4.1): computed once per region in the
+    prior chain, off all six classes' own `Prior`, since it depends only
+    on the prior chain's own products and the source list, never on the
+    fit. Rule 5b: a missing floor product fails with one sentence naming
+    the RUNBOOK line that makes it."""
+    path = config_module.product_path(config, "bmstp", "density", "floor", "source", region=region)
+    if not os.path.exists(path):
+        raise RuntimeError(
+            "fittp.sweep._region_lambda_floor [%s]: missing %s -- run RUNBOOKtp.sh's "
+            "'PY sesnaimpute.bmstp.floor' line first" % (region, path))
+    with h5py.File(path, "r") as f:
+        return f["LAMBDA_FLOOR"][:].astype(np.float64)
 
 
 def build_region_class(config, region, cls, st, reader, lambda_floor, limit=None):
@@ -480,9 +472,9 @@ def build_region_class(config, region, cls, st, reader, lambda_floor, limit=None
     straight to their own part file (rule 10b); the caller joins the
     parts once every batch is done. Returns the part file list and the
     summary numbers for the caller's join and report. `reader` is this
-    class's own `Prior`, and `lambda_floor` the region's own common floor
-     -- both `build`'s `region_lambda_floor`
-    first pass, so this call reads no grid a second time.
+    class's own `Prior` (`build`'s own `prior_reader.load`) and
+    `lambda_floor` the region's own common floor (`build`'s
+    `_region_lambda_floor`, `bmstp.floor`'s product read once per region).
     """
     template_log, subclass_idx, n_sub = _register(config, cls)
     n_model = template_log.shape[0]
@@ -580,23 +572,22 @@ def build(config, regions=None, classes=None, limit=None):
     1.3, IMPLEMENTATION_BMSTP_DRAFT.md P7). `limit` restricts every
     region to its first `limit` catalogue rows -- a timing/acceptance
     device for a class whose prior read does not fit the run budget on
-    the whole region, never a default. Per region, `region_lambda_floor`
-    is the first pass: it loads all SIX classes' `Prior` and forms
-    `Lambda_floor(s)` once, common by construction to every class this
-    region sweeps, before any class's own read. `classes` here only
-    selects which of the six this call WRITES P7 for -- a run restricted
-    to a subset still reads every one of the six classes' own P2-P5
-    products (its shape grid, its template-weight table), since the
-    floor is common by construction only if it maxes over all six, never
-    the run's own subset.
+    the whole region, never a default. Per region, `Lambda_floor(s)` is
+    read once from `bmstp.floor`'s own product (`_region_lambda_floor`),
+    common to every class this region sweeps; each class in `classes`
+    then loads only its OWN `Prior` (`prior_reader.load`), never the
+    other five's shape grids or template-weight tables -- unlike the
+    floor, which is common by construction only if it maxes over all six
+    (computed once, in the prior chain, by `bmstp.floor`, never here).
     """
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     class_codes = classes if classes is not None else list(CLASSES)
     for region in region_names:
-        readers, lambda_floor = region_lambda_floor(config, region)
+        lambda_floor = _region_lambda_floor(config, region)
         for cls in class_codes:
             with progress.Stage("fittp.sweep.%s" % cls, region) as st:
-                summary = build_region_class(config, region, cls, st, readers[cls],
+                reader = prior_reader.load(config, region, cls)
+                summary = build_region_class(config, region, cls, st, reader,
                                               lambda_floor, limit=limit)
                 summary["cls"] = cls
                 join_parts(summary, config.fit_topk)

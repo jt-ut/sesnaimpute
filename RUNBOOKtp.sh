@@ -158,6 +158,7 @@ PY sesnaimpute.atlas.render   # the sky atlas figures from P6 (the prior rows; t
 PY sesnaimpute.atlas.shapes   # the prior at a source: h_C(x, log10 B) per class and A_C(s), two sources per region (report-only, SPEC_BMSTP sec 4.1-4.2, 5.1-5.6)
 PY sesnaimpute.atlas.shapes_region   # the prior's mass in the nuisance plane, selection included: N_CAT_CELL_<C>/N_CELL_<C> per class, one page per region (report-only, SPEC_BMSTP sec 8)
 PY sesnaimpute.atlas.protostars   # the protostar check figure per region with HOPS/eHOPS coverage (report-only, SPEC_BMSTP sec 9)
+PY sesnaimpute.bmstp.floor   # the common floor Lambda_floor(s), P1's own row-aligned vector, once per region off all six classes' Prior (SPEC_BMSTP sec 4.1's common-floor rule)
 
 # --- fittp (the thinned-Poisson fitter, the classification, the cascade, the posterior atlas; writes fittp/) ---
 # Lines are added here as each stage lands (IMPLEMENTATION_BMSTP sec 4). The
