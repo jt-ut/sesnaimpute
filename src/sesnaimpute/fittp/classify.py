@@ -23,9 +23,9 @@ name, SPEC_BMSTP_DRAFT.md section 6.1) straight through, unreduced by
 `A_COL_K` (`bmstp/density/table_density_source__<R>.hdf5`) to form
 `XI_POST` itself.
 
-`LOG10_FLUX_IMPUTED_COV` (BATCH0917 item 1, replacing `FLUX_IMPUTED_COV`):
+`LOG10_FLUX_IMPUTED_COV` replaces `FLUX_IMPUTED_COV`:
 the MAP class's own `LOG10_FLUX_COV` (P7, the imputed flux's total
-uncertainty in log10 flux, section 1) with every OBSERVED band's row and
+uncertainty in log10 flux, section 6.1) with every OBSERVED band's row and
 column zeroed and that band's own diagonal set to the catalogue's own
 variance in log10 flux, `(SIGMA_FNU_MJY / (FNU_MJY ln 10))^2` -- the copied
 datum is independent of the model, so its uncertainty is the catalogue's,
@@ -315,7 +315,7 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
     imputed = cflux[row_idx, map_c_safe, :]
     imputed_cov = flux_cov_stack[map_c_safe, row_idx]
 
-    # LOG10_FLUX_IMPUTED_COV (BATCH0917 item 1): on an observed band the
+    # LOG10_FLUX_IMPUTED_COV: on an observed band the
     # copied datum is independent of the model, so its row and column are
     # zeroed and its own diagonal is set to the catalogue's own variance in
     # log10 flux -- never the class's model uncertainty there.

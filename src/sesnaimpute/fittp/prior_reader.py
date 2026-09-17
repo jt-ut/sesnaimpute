@@ -705,12 +705,12 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         # this cell (SPEC_BMSTP_DRAFT.md section 4.2's own
                         # summand, m1/m2 the a*_i-weighted mass, the a_star
                         # Jacobian cancelling against `dens * mi / a_star`'s
-                        # own 1/a_star -- section 6.1 above item 1). Item 2's
-                        # two-design mixture: the cell's own dense-fraction
-                        # weight (`cell_weight[s, i]`, `1 - w_i` on the
-                        # diffuse call, `w_i` on the dense one) multiplies
-                        # the cell's mass before the Jacobian, so a cell the
-                        # caller's design does not own contributes nothing.
+                        # own 1/a_star -- section 6.1 above item 1). The
+                        # two-design mixture's own cell weight (`cell_weight
+                        # [s, i]`, `1 - w_i` on the diffuse call, `w_i` on the
+                        # dense one, section 2) multiplies the cell's mass
+                        # before the Jacobian, so a cell the caller's design
+                        # does not own contributes nothing.
                         term = dens * mi * cell_weight[s, i]
                         total += term / a_star
                         m1 += term
@@ -782,9 +782,9 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     frac = 1.0
                 dens = (h[s, n_x - 1, j0] * (1.0 - frac) + h[s, n_x - 1, j0 + 1] * frac) / (dlx * dlb)
                 # the edge fallback reads the cell it substitutes for, so it
-                # carries that cell's own dense-fraction weight too (item 2):
-                # a design the source's own w_i excludes from cell n_x - 1
-                # must not read a finite prior off this fallback either.
+                # carries that cell's own dense-fraction weight too: a design
+                # the source's own w_i excludes from cell n_x - 1 must not
+                # read a finite prior off this fallback either.
                 w_edge = cell_weight[s, n_x - 1]
                 if dens > 0.0 and w_edge > 0.0:
                     out[s, th] = math.log(dens * w_edge / a_top) + ln_tail

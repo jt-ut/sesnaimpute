@@ -174,9 +174,11 @@ PY sesnaimpute.atlas.protostars   # the protostar check figure per region with H
 # code -- the stage prints its own closed-form per-worker cost,
 # n_model x 8 bands x 4 bytes x 10, at start, and the owner reads it and
 # sets the count that fits).
-# cascade's measured half needs no fit, so it runs before the fit loop; its
-# imputed half (fittp.classify's FLUX_IMPUTED) is filled in by re-running this
-# same line after classify, once per region, once classify has written.
+# cascade's measured half needs no fit, so it runs before the fit loop, with
+# no flag: never opens a fit file or the posterior product. Its imputed half
+# (fittp.classify's FLUX_IMPUTED, and PSI_VOTES/ENTROPY_PSI_VOTES) is filled
+# in by the second line below, --imputed, once classify has written; each
+# reads only the file it names, no version or content check.
 PY sesnaimpute.fittp.cascade   # the colour cascade on the measured fluxes, Psi per source (SPEC_BMSTP sec 6.5)
 PY sesnaimpute.fittp.library_resolution   # SIGMA_LIB_DEX per library, the fit's per-band variance floor (SPEC_BMSTP sec 6.1)
 # One capped.sh process per class, so one class's peak resident is never summed with the class before it.
@@ -184,7 +186,7 @@ for FIT_CLASS in STAR AGB PAHC GAL YSO H2S; do
   PY sesnaimpute.fittp.sweep --classes "$FIT_CLASS"   # the class evidence sweep, P7, one task per source over [fittp] workers, K=[fit] topk, part files at [fit] batch_size (SPEC_BMSTP sec 1.3; IMPLEMENTATION_BMSTP sec 4 row 2.4)
 done
 PY sesnaimpute.fittp.classify   # P(C|D) at [fit] beta, subclasses, MAP, imputed flux (P8) and the literature-band sensitivity (P9) (SPEC_BMSTP sec 7.1, 7.2)
-PY sesnaimpute.fittp.cascade   # re-run: fills the cascade's imputed half now that classify has written (SPEC_BMSTP sec 7.3)
+PY sesnaimpute.fittp.cascade --imputed   # the imputed half, PSI_VOTES/ENTROPY_PSI_VOTES, now that classify has written (SPEC_BMSTP sec 6.5, 7.3)
 PY sesnaimpute.fittp.atlas   # the posterior atlas, P11: per-pixel mean P(C|D) and the P(YSO)>0.5 count (SPEC_BMSTP sec 8)
 PY sesnaimpute.fittp.check   # the spec sec 9 checks read from P1-P11, report only (IMPLEMENTATION_BMSTP sec 7)
 PY sesnaimpute.atlas.render   # the sky atlas figures from P6 and, where it exists, P11 -- renders both when both exist (SPEC_BMSTP sec 8)

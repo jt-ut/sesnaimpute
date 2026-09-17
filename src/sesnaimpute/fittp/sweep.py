@@ -148,9 +148,9 @@ WORKER_PROCESS_FLOOR_MB = 430
 #: The datasets every P7 part file and the joined product carry, in write
 #: order (one row per source; `FAILED`, below, is a part-file-only column
 #: consumed at join time into `FAILED_ROWS`, never copied into the joined
-#: product itself). `N_LAW_ITER` is gone (item 2, the self-consistent
-#: extinction-law solve it counted no longer exists); `TOPK_LAW`,
-#: `TOPK_LN_GAMMA` and `P_DENSE` are new (item 2, item 3).
+#: product itself). `N_LAW_ITER` is gone: the self-consistent
+#: extinction-law solve it counted no longer exists; `TOPK_LAW`,
+#: `TOPK_LN_GAMMA` and `P_DENSE` are new (section 2, section 6.4).
 _PART_KEYS = ("NAME", "LN_EVIDENCE", "FLUX_MEAN", "LOG10_FLUX_COV", "TOPK_MODEL", "TOPK_A_K",
               "TOPK_LOG10_B", "TOPK_CHI2", "TOPK_LN_L", "TOPK_LN_PRIOR", "TOPK_FLUX", "TOPK_LAW",
               "TOPK_LN_GAMMA", "OCCAM_GAP", "A_K_POST", "A_K_POST_SIG", "P_DENSE",
@@ -378,15 +378,28 @@ def _source_task(i):
         w_dense_cell = w["reader"].w_dense[i][None, :]           # (1, n_x)
         cell_weight_by_law = (1.0 - w_dense_cell, w_dense_cell)
 
-        fits = []
-        ln_lambda = []       # float32 (m,) per design
-        a_post_t = []        # float64 (m,) per design
-        a2_post_t = []
-        ln_l = []             # float64 (m,) per design
-        ln_gamma = []         # float64 (m,) per design
-        for k, blend_w in enumerate((0.0, 1.0)):
+        # Where the source's own w_i is 0 in every cell, the dense design
+        # cannot contribute: its cell sum is exactly zero at every template
+        # (`prior_reader._cell_sum`'s cell-weight guard, both the exact/table
+        # path and the two edge fallbacks), so its ln_lambda is -inf for
+        # every template regardless of what its own fit or Gamma read would
+        # say, and that -inf alone drives ln_w_k[1] to -inf too (a finite or
+        # -inf ln_l/ln_gamma added to -inf is still -inf). The fit, prior
+        # read and Gamma call for that design are skipped; the mixture reads
+        # the -inf directly instead of computing it.
+        dense_possible = bool(np.any(w_dense_cell > 0.0))
+        active_laws = (0, 1) if dense_possible else (0,)
+
+        fits = [None, None]
+        ln_lambda = [None, None]       # float32 (m,) per design
+        a_post_t = [None, None]        # float64 (m,) per design
+        a2_post_t = [None, None]
+        ln_l = [None, None]             # float64 (m,) per design
+        ln_gamma = [None, None]         # float64 (m,) per design
+        for k in active_laws:
+            blend_w = float(k)
             fit_k = likelihood.fit(batch, w["template_log"], blend_w)
-            fits.append(fit_k)
+            fits[k] = fit_k
 
             # d(log10 B)/d(a_K) from this design's own d(SC)/d(A_V)
             # (fit_k.slope_sc_av): log10_B = -2*SC, a_K = ak_per_av * A_V,
@@ -397,28 +410,35 @@ def _source_task(i):
                 w["reader"], rows, h, fit_k.a_hat[None, :], fit_k.log10_b_hat[None, :],
                 slope_log10b_per_ak, np.array([fit_k.sigma_a_ak]), model_index,
                 cell_weight_by_law[k])
-            ln_lambda.append(ln_lambda_k[0])
-            a_post_t.append(a_post_k[0])
-            a2_post_t.append(a2_post_k[0])
+            ln_lambda[k] = ln_lambda_k[0]
+            a_post_t[k] = a_post_k[0]
+            a2_post_t[k] = a2_post_k[0]
 
-            ln_l.append(-0.5 * fit_k.chi2_min.astype(np.float64) + fit_k.ln_nondet.astype(np.float64))
+            ln_l[k] = -0.5 * fit_k.chi2_min.astype(np.float64) + fit_k.ln_nondet.astype(np.float64)
 
             # Gamma reads this design's own unclamped optimum a_hat/log10_b_hat
             # (one set of marks per design for the two class-evidence factors,
             # section 6.4; the clamped marks stay for the reported marks, the
             # top-K record and the flux prediction only, section 6.1).
-            ln_gamma.append(w["gaia_term"].ln_gamma(
+            ln_gamma[k] = w["gaia_term"].ln_gamma(
                 rows, model_index, fit_k.a_hat[None, :], fit_k.log10_b_hat[None, :],
-                w["cls"].lower())[0])
+                w["cls"].lower())[0]
 
-        combined_flagged = fits[0].flagged or fits[1].flagged
+        if not dense_possible:
+            ln_lambda[1] = np.full(n_model, -np.inf, dtype=np.float32)
+            ln_l[1] = np.full(n_model, -np.inf, dtype=np.float64)
+            ln_gamma[1] = np.zeros(n_model, dtype=np.float64)
+            a_post_t[1] = np.full(n_model, np.nan, dtype=np.float64)
+            a2_post_t[1] = np.full(n_model, np.nan, dtype=np.float64)
+
+        combined_flagged = fits[0].flagged or (fits[1].flagged if fits[1] is not None else False)
 
         ln_lambda64 = [x.astype(np.float64) for x in ln_lambda]
         ln_w_k = np.stack([ln_lambda64[k] + ln_l[k] + ln_gamma[k] for k in (0, 1)], axis=0)  # (2, m)
         if combined_flagged:
             ln_w_k = np.full((2, n_model), -np.inf, dtype=np.float64)
 
-        # the mixture (item 2): logsumexp over the two designs at each
+        # the mixture (section 2): logsumexp over the two designs at each
         # template; the sightline's own w_i already makes the two designs'
         # PRIOR terms sum to the single-law read, so no further weight is
         # applied here (module docstring).
@@ -453,16 +473,15 @@ def _source_task(i):
         good = not combined_flagged
 
         # TOPK_LAW: which design carried the larger ln_w_k for each of the
-        # k_keep selected templates (item 2, item 3's TOPK_LN_GAMMA rides
-        # the same branch).
+        # k_keep selected templates (section 2); TOPK_LN_GAMMA (section 6.4)
+        # rides the same branch.
         topk_law_sel = (ln_w_k[1, order] > ln_w_k[0, order]).astype(np.int8)     # (k_keep,)
 
         # the posterior extinction mark (section 6.1): the p_theta * p_k
         # -weighted mean over templates AND designs of prior_reader.ln_prior's
-        # own per-template, per-design posterior first/second moment of a
-        # (POSTMARK's own nansum convention, per design, then summed: a NaN
-        # moment carries p_theta * p_k = 0 by construction wherever ln_w_k is
-        # -inf there).
+        # own per-template, per-design posterior first/second moment of a,
+        # nansum applied per design then summed: a NaN moment carries
+        # p_theta * p_k = 0 by construction wherever ln_w_k is -inf there.
         with np.errstate(invalid="ignore"):
             a_post = 0.0
             a2_post = 0.0
@@ -474,7 +493,7 @@ def _source_task(i):
         if not good or not np.isfinite(ev_total):
             a_post, a_post_sig = float("nan"), float("nan")
 
-        # P_DENSE (item 2): the source's own posterior weight on the dense
+        # P_DENSE: the source's own posterior weight on the dense
         # design, 0 wherever the sightline's own w_i is 0 in every cell
         # (the dense design's prior term is -inf everywhere then, so
         # p_k[1] is 0 for every template).
@@ -484,11 +503,11 @@ def _source_task(i):
         # the A_V-unit extinction that design's own column (fit_k.ext_col)
         # was built in from its reported a_K mark (fit_k.a_hat_clamped =
         # A_V_clamped * ak_per_av, likelihood.fit's own docstring).
-        log10_flux_by_law = []
-        for k in (0, 1):
+        log10_flux_by_law = [None, None]
+        for k in active_laws:
             fit_k = fits[k]
             av_clamped_k = fit_k.a_hat_clamped.astype(np.float64) / fit_k.ak_per_av
-            log10_flux_by_law.append(
+            log10_flux_by_law[k] = (
                 w["template_log"].astype(np.float64)
                 + fit_k.ext_col.astype(np.float64)[None, :] * av_clamped_k[:, None]
                 + fit_k.log10_b_hat_clamped.astype(np.float64)[:, None])              # (m, 8)
@@ -498,16 +517,16 @@ def _source_task(i):
         rank_position = sort_idx.astype(np.int64)
 
         # FLUX_MEAN (mJy) and LOG10_FLUX_COV's between term, from the 2m
-        # (template, design) points weighted by p_theta * p_k (item 1): the
-        # moments kernel is unchanged, called once per design (its own
+        # (template, design) points weighted by p_theta * p_k (section 6.1):
+        # the moments kernel is unchanged, called once per design (its own
         # (m, 8) log10 flux and (m,) weight), the two LINEAR weighted sums
         # added -- correct since p_theta*p_k[0] + p_theta*p_k[1] = p_theta,
         # which already sums to 1 over templates.
         out_mean_sum = np.zeros(N_BANDS, dtype=np.float64)
-        topk_flux_by_law = []
+        topk_flux_by_law = [None, None]
         mean_log10 = np.zeros(N_BANDS, dtype=np.float64)
         m2_log10 = np.zeros((N_BANDS, N_BANDS), dtype=np.float64)
-        for k in (0, 1):
+        for k in active_laws:
             wk = (p_theta * p_k[k]).astype(np.float64)
             out_mean = np.empty((1, N_BANDS), dtype=np.float64)
             out_m2 = np.empty((1, N_BANDS, N_BANDS), dtype=np.float64)
@@ -516,22 +535,25 @@ def _source_task(i):
                 log10_flux_by_law[k][None, :, :], wk[None, :], sorted_order[None, :],
                 rank_position[None, :], np.array([good]), out_mean, out_m2, out_topk_flux)
             out_mean_sum += out_mean[0]
-            topk_flux_by_law.append(out_topk_flux[0])
-            # the between term (item 1): the weighted mean/second moment of
-            # LOG10 flux itself (not the kernel's own linear moments), summed
-            # over the two designs the same way the mean above is.
+            topk_flux_by_law[k] = out_topk_flux[0]
+            # the between term: the weighted mean/second moment of LOG10 flux
+            # itself (not the kernel's own linear moments), summed over the
+            # two designs the same way the mean above is.
             weighted_log10 = log10_flux_by_law[k] * wk[:, None]
             mean_log10 += weighted_log10.sum(axis=0)
             m2_log10 += weighted_log10.T @ log10_flux_by_law[k]
         flux_mean = out_mean_sum
         between = m2_log10 - np.outer(mean_log10, mean_log10)
 
-        # the within term (item 1): sum_k P_k * D_k Sigma_k D_k^T, P_k each
-        # design's own total posterior weight, one (8, 8) matrix per design
-        # (D_k Sigma_k D_k^T does not depend on the template).
+        # the within term: sum_k P_k * D_k Sigma_k D_k^T, P_k each design's
+        # own total posterior weight, one (8, 8) matrix per design (D_k
+        # Sigma_k D_k^T does not depend on the template). A design left out
+        # of `active_laws` carries P_k = 0 exactly (its own ln_w_k is -inf
+        # everywhere, so p_k is 0 everywhere), so it contributes nothing and
+        # is skipped rather than computed and multiplied by zero.
         within = np.zeros((N_BANDS, N_BANDS), dtype=np.float64)
         p_total = [0.0, 0.0]
-        for k in (0, 1):
+        for k in active_laws:
             fit_k = fits[k]
             p_total[k] = float(np.sum(p_theta * p_k[k]))
             d_k = np.column_stack([fit_k.ext_col.astype(np.float64),
@@ -544,8 +566,11 @@ def _source_task(i):
             log10_flux_cov = np.full((N_BANDS, N_BANDS), np.nan)
 
         # FRAC_CLAMPED: the p_k-weighted mean of the two designs' own clamp
-        # fractions (item 2), the same P_k total weight `within` used.
-        frac_clamped = np.float32(p_total[0] * fits[0].frac_clamped + p_total[1] * fits[1].frac_clamped)
+        # fractions, the same P_k total weight `within` used; a skipped
+        # design's own P_k is 0, so its (unread) clamp fraction contributes
+        # nothing either way.
+        frac_clamped_1 = fits[1].frac_clamped if fits[1] is not None else np.float32(0.0)
+        frac_clamped = np.float32(p_total[0] * fits[0].frac_clamped + p_total[1] * frac_clamped_1)
 
         topk_model = np.full(topk, -1, dtype=np.int32)
         topk_a_k = np.full(topk, np.nan, dtype=np.float32)
@@ -575,8 +600,8 @@ def _source_task(i):
         else:
             occam_gap = float("nan")
 
-        zero_ext_count = int(sum(int((fits[k].a_hat < 0.0).sum()) for k in (0, 1))) if good else 0
-        n_templates_checked = 2 * n_model if good else 0
+        zero_ext_count = int(sum(int((fits[k].a_hat < 0.0).sum()) for k in active_laws)) if good else 0
+        n_templates_checked = len(active_laws) * n_model if good else 0
 
         row = dict(
             ln_evidence=ln_evidence64.astype(np.float32),
@@ -731,9 +756,12 @@ def build_region_class(config, region, cls, st, reader, catalog,
     # Two terms, because the array arithmetic alone understates a worker several
     # times over and would have the user oversubscribe a node: this source's own
     # arrays, and WORKER_PROCESS_FLOOR_MB, the floor every forked worker carries
-    # whatever the library size. BATCH0917 item 2: two extinction-law designs
-    # now fit every source (section 2's mixture), so the per-source working
-    # set the equivalents count prices is doubled.
+    # whatever the library size. Two extinction-law designs fit every source
+    # (section 2's mixture) whenever the dense one can contribute, so the
+    # per-source working set the equivalents count prices is doubled; this
+    # is the worst case (`active_laws` skips the dense design, and its own
+    # fit/prior-read/Gamma cost, wherever the sightline's own w_i is 0 in
+    # every cell).
     arrays_mb = 2 * n_model * N_BANDS * 4 * likelihood.WORKER_WORKING_SET_EQUIV / 1e6
     per_worker_mb = arrays_mb + WORKER_PROCESS_FLOOR_MB
     total_gb = per_worker_mb * n_workers / 1024.0
