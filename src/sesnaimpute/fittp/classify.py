@@ -15,6 +15,13 @@ over the full 25-column row then gives `P_SUBCLASS` directly, and
 `P_CLASS` is its per-class column sum -- the two acceptance identities
 (`P_CLASS` sums to 1; `P_SUBCLASS` summed within a class equals `P_CLASS`)
 hold by construction, not by a separate normalisation.
+
+`A_K_POST`, `A_K_POST_SIG` (n, 6), `CLASSES` order, carry each class's own
+posterior extinction mark and its spread (P7's own columns of the same
+name, SPEC_BMSTP_DRAFT.md section 6.1) straight through, unreduced by
+`MAP_CLASS`: a reader divides the class column it wants by P1's own
+`A_COL_K` (`bmstp/density/table_density_source__<R>.hdf5`) to form
+`XI_POST` itself.
 """
 
 import argparse
@@ -243,9 +250,14 @@ def _part_path(path, bi):
     return "%s.part%d" % (path, bi)
 
 
-#: The datasets every P8 part file and the joined product carry.
+#: The datasets every P8 part file and the joined product carry. `A_K_POST`/
+#: `A_K_POST_SIG` are `(n, 6)` in `CLASSES` order (module docstring), read
+#: off the six fit files' own columns of the same name exactly as
+#: `LN_EVIDENCE` -- no MAP-class column: a reader picks the class it wants
+#: and divides `A_K_POST` by P1's own `A_COL_K`.
 _CLASSIFY_PART_KEYS = ("NAME", "P_CLASS", "P_SUBCLASS", "P_YSO", "MAP_CLASS", "N_DETECTED",
                        "CANDIDATE_FLUX", "FLUX_IMPUTED", "FLUX_IMPUTED_COV",
+                       "A_K_POST", "A_K_POST_SIG",
                        "ENTROPY_CLASS", "ENTROPY_SUBCLASS")
 
 
@@ -255,10 +267,14 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
     m = stop - start
     flux_mean_stack = np.empty((len(CLASSES), m, N_BANDS), dtype=np.float64)
     flux_cov_stack = np.empty((len(CLASSES), m, N_BANDS, N_BANDS), dtype=np.float64)
+    a_k_post_stack = np.empty((len(CLASSES), m), dtype=np.float32)
+    a_k_post_sig_stack = np.empty((len(CLASSES), m), dtype=np.float32)
     for ci, cls in enumerate(CLASSES):
         f = class_files[cls]
         flux_mean_stack[ci] = np.asarray(f["FLUX_MEAN"][start:stop, :], dtype=np.float64)
         flux_cov_stack[ci] = np.asarray(f["FLUX_COV"][start:stop, :, :], dtype=np.float64)
+        a_k_post_stack[ci] = np.asarray(f["A_K_POST"][start:stop], dtype=np.float32)
+        a_k_post_sig_stack[ci] = np.asarray(f["A_K_POST_SIG"][start:stop], dtype=np.float32)
 
     ln_ev = _batch_ln_evidence(class_files, psi_file, beta, start, stop, m)
     # A flagged source's fit is undefined at every template of every class
@@ -294,11 +310,19 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
         ent_c = -np.sum(np.where(p_cls > 0, p_cls * np.log(p_cls), 0.0), axis=1)
         ent_s = -np.sum(np.where(p_sub > 0, p_sub * np.log(p_sub), 0.0), axis=1)
 
+    # A_K_POST/A_K_POST_SIG, (m, 6) in CLASSES order (module docstring):
+    # read off the six fit files' own columns, transposed to a row per
+    # source -- no MAP-class reduction, unlike CANDIDATE_FLUX/FLUX_IMPUTED
+    # above.
+    a_k_post = np.ascontiguousarray(a_k_post_stack.T)
+    a_k_post_sig = np.ascontiguousarray(a_k_post_sig_stack.T)
+
     return dict(
         p_class=p_cls.astype(np.float32), p_subclass=p_sub.astype(np.float32),
         map_class=map_c.astype(np.int8), n_detected=detected.sum(axis=1).astype(np.int8),
         candidate_flux=cflux.astype(np.float32), flux_imputed=imputed.astype(np.float32),
         flux_imputed_cov=imputed_cov.astype(np.float32),
+        a_k_post=a_k_post, a_k_post_sig=a_k_post_sig,
         entropy_class=ent_c.astype(np.float32), entropy_subclass=ent_s.astype(np.float32),
         imputed_identity_err=imputed_identity_err, n_flagged=int(flagged.sum()),
     )
@@ -315,6 +339,8 @@ def _write_classify_part(part_path, batch):
         f.create_dataset("CANDIDATE_FLUX", data=batch["candidate_flux"])
         f.create_dataset("FLUX_IMPUTED", data=batch["flux_imputed"])
         f.create_dataset("FLUX_IMPUTED_COV", data=batch["flux_imputed_cov"])
+        f.create_dataset("A_K_POST", data=batch["a_k_post"])
+        f.create_dataset("A_K_POST_SIG", data=batch["a_k_post_sig"])
         f.create_dataset("ENTROPY_CLASS", data=batch["entropy_class"])
         f.create_dataset("ENTROPY_SUBCLASS", data=batch["entropy_subclass"])
 

@@ -14,7 +14,10 @@ from the grid's own geometric spacing (section 2) rather than a scan or a
 tabulated `a_hat` grid, the Gaussian's mass `M_i` there by an erf
 difference, the gather along the conditional brightness line and the dot
 product with `M`, the Jacobian, then the weight factors and the log sky
-density (section 1.3, 1.4, 4.2).
+density (section 1.3, 1.4, 4.2); it also returns, per template, the same
+cell sum's own posterior first and second moment of `a`, section 6.1's
+posterior extinction mark before `fittp.sweep` folds the six classes'
+`p_theta` weight over templates.
 
 The stored shapes live in the DISTANCE coordinate `x = a / T`, the
 object's foreground extinction over the true column along its own pencil
@@ -508,9 +511,22 @@ def _ln_half_erfc(z):
 @numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
 def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               b_origin, dlb, dlx, a_edges_buf,
-              m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab):
+              m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
+              out1, out2):
     """The cell sum of SPEC_BMSTP_DRAFT.md section 4.2, per source and
-    template: the cell window `[i_lo, i_hi]` holding `a_hat +/- 5 sigma_a`
+    template, `out` unchanged by the two moments below.
+    `out1`, `out2` are `(n, m)` float64 scratch this function fills in
+    place with the posterior first and second moment of `a` within the
+    same cell sum -- section 4.2's own summand `dens * mi / a_star` is
+    the posterior density of `a` in cell `i` up to the constant `total`
+    normalises away, so `m1 = sum(dens * mi)` and `m2 = sum(dens * mi *
+    a_star)` (the Jacobian `1 / a_star` cancelling against the `a_star`
+    the moment itself carries) give `out1 = m1 / total`, `out2 = m2 /
+    total` wherever `total > 0`; each of the two fallbacks below puts the
+    whole mass at its one substitute point, so `out1`/`out2` there are
+    that point and its square; left at their caller's initial NaN
+    wherever `out` stays `-inf`. The cell window
+    `[i_lo, i_hi]` holding `a_hat +/- 5 sigma_a`
     found in O(1) from the grid's own geometric spacing (no scan of the
     other 125 cells); in each cell the Gaussian's mass `M_i` and the
     brightness argument `a*_i`, the cell's own truncated-normal mean --
@@ -598,6 +614,8 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
             lo_a = ah - 5.0 * sig
             hi_a = ah + 5.0 * sig
             total = 0.0
+            m1 = 0.0
+            m2 = 0.0
             lbh = log10_b_hat[s, th]
             sl = slope[s]
             ct = c_theta[th]
@@ -639,7 +657,15 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                             j0 = n_b - 2
                             frac = 1.0
                         dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
-                        total += dens * mi / a_star
+                        # the posterior's first and second moment of a within
+                        # this cell (SPEC_BMSTP_DRAFT.md section 4.2's own
+                        # summand, m1/m2 the a*_i-weighted mass, the a_star
+                        # Jacobian cancelling against `dens * mi / a_star`'s
+                        # own 1/a_star -- section 6.1 above item 1).
+                        term = dens * mi
+                        total += term / a_star
+                        m1 += term
+                        m2 += term * a_star
             else:
                 z_prev = (a_edges[i_lo] - ah) * inv_sig
                 cdf_prev = 0.5 * (1.0 + math.erf(z_prev / sqrt2))
@@ -668,12 +694,17 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                             j0 = n_b - 2
                             frac = 1.0
                         dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
-                        total += dens * mi / a_star
+                        term = dens * mi
+                        total += term / a_star
+                        m1 += term
+                        m2 += term * a_star
                     cdf_prev = cdf_next
                     phi_prev = phi_next
                     z_prev = z_next
             if total > 0.0:
                 out[s, th] = np.log(total)
+                out1[s, th] = m1 / total
+                out2[s, th] = m2 / total
             elif in_grid and lo_a >= a_edges[n_x]:
                 # The window's own low bound already clears the array's
                 # own top edge (the measured coordinate's full extent,
@@ -703,6 +734,11 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 dens = (h[s, n_x - 1, j0] * (1.0 - frac) + h[s, n_x - 1, j0 + 1] * frac) / (dlx * dlb)
                 if dens > 0.0:
                     out[s, th] = math.log(dens / a_top) + ln_tail
+                    # the fallback puts the whole mass at this one point
+                    # (module docstring item 1): a_post/a2_post read the
+                    # point itself, not a cell mean.
+                    out1[s, th] = a_top
+                    out2[s, th] = a_top * a_top
             else:
                 # No mass on the grid at all: the window lies entirely
                 # below a_edges[0], kernel mass there being outside the
@@ -728,13 +764,27 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 dens = (h[s, 0, j0] * (1.0 - frac) + h[s, 0, j0 + 1] * frac) / (dlx * dlb)
                 if dens > 0.0:
                     out[s, th] = math.log(dens / a_c0) + ln_tail
+                    # the fallback puts the whole mass at this one point
+                    # (module docstring item 1): a_post/a2_post read the
+                    # point itself, not a cell mean.
+                    out1[s, th] = a_c0
+                    out2[s, th] = a_c0 * a_c0
     return out
 
 
 def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index):
-    """`(n, m)` float32: `ln <Lambda_C>_s(theta)` of SPEC_BMSTP_DRAFT.md
-    section 4.2, plus `ln A_C(s)` (section 1.3) -- everything the fitter's
-    evidence sum needs from the prior. `rows` indexes `reader`'s per-source
+    """`((n, m) float32, (n, m) float64, (n, m) float64)`: `ln <Lambda_C>_s
+    (theta)` of SPEC_BMSTP_DRAFT.md section 4.2, plus `ln A_C(s)` (section
+    1.3) -- everything the fitter's evidence sum needs from the prior --
+    together with `a_post`, `a2_post`, the cell sum's own first and second
+    moment of `a` per template (SPEC_BMSTP_DRAFT.md
+    section 6.1's posterior mark, formed by `fittp.sweep` from these two
+    with the template's own `p_theta`). `a_post`/`a2_post` carry neither
+    `ln A_C(s)` nor the factor term below -- section 4.2's own summand is
+    the whole of the posterior density of `a` within a cell, so the two
+    moments come from `_cell_sum` alone, unscaled by the per-source density
+    or the per-template `Pi_f PI_f` factor (both constant across `a` at
+    fixed `theta`, section 4.1). `rows` indexes `reader`'s per-source
     arrays; `h` is `prepare(rows)`'s blurred grid for the same sources, in
     the same order; `a_hat`, `log10_b_hat`, `slope`, `sigma_a` are
     `fittp.likelihood.fit`'s unconstrained mark, its conditional slope and
@@ -743,12 +793,13 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index):
     (identity order where the library is read whole). No floor: `_cell_sum`
     reads `h_C`'s own cell density exactly as stored, so a template whose
     whole cell window sums to zero prior mass reads `ln <Lambda_C>_s(theta)
-    = -inf`, a clean veto rather than an inflated pedestal."""
+    = -inf`, a clean veto rather than an inflated pedestal, and `a_post`/
+    `a2_post` NaN there."""
     rows = np.asarray(rows)
     a_col = reader.a_col[rows]
     density = reader.density[rows]
     model_index = np.asarray(model_index)
-    m = a_hat.shape[1]
+    n, m = a_hat.shape
     n_x = reader.xi_edges.size - 1
     c_theta = reader.c_theta[model_index] if reader.c_theta.size else np.zeros(m)
     a_edges_buf = np.empty((rows.size, n_x + 1), dtype=np.float64)
@@ -759,11 +810,15 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index):
                               np.asarray(slope, dtype=np.float64), sigma_a, model_index)
     m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab = _build_a_star_tables(
         a_col, reader.xi_edges, sigma_a, a_hat64)
+    a_post = np.full((n, m), np.nan, dtype=np.float64)
+    a2_post = np.full((n, m), np.nan, dtype=np.float64)
     core = _cell_sum(a_col, reader.xi_edges, sigma_a,
                       a_hat64, np.asarray(log10_b_hat, dtype=np.float64),
                       np.asarray(slope, dtype=np.float64), np.asarray(c_theta, dtype=np.float64),
                       h, reader.b_origin, reader.dlb, reader.dlx, a_edges_buf,
-                      m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab)
+                      m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
+                      a_post, a2_post)
     with np.errstate(divide="ignore"):
         ln_density = np.log(density)[:, None]
-    return (core + ln_density + factor_term).astype(np.float32)
+    ln_lambda = (core + ln_density + factor_term).astype(np.float32)
+    return ln_lambda, a_post, a2_post

@@ -58,6 +58,12 @@ own per-template penalty from the maximum it is compared against. A
 flagged source's `FLUX_MEAN`/`FLUX_COV` are written `NaN`, not the zero a
 `p_theta` of zero everywhere would otherwise silently accumulate, since a
 flagged fit has no posterior to report a flux moment of.
+
+`A_K_POST`/`A_K_POST_SIG` (section 6.1's reported extinction mark, not
+`TOPK_A_K`'s maximum-likelihood one) fold `prior_reader.ln_prior`'s own
+per-template posterior first/second moment of `a` over templates with the
+same `p_theta` the flux moments use; a flagged source writes `NaN` for
+both, the same convention as the flux moments.
 """
 
 import glob
@@ -116,13 +122,14 @@ WORKER_PROCESS_FLOOR_MB = 430
 #: product itself).
 _PART_KEYS = ("NAME", "LN_EVIDENCE", "FLUX_MEAN", "FLUX_COV", "TOPK_MODEL", "TOPK_A_K",
               "TOPK_LOG10_B", "TOPK_CHI2", "TOPK_LN_L", "TOPK_LN_PRIOR", "TOPK_FLUX",
-              "OCCAM_GAP", "FRAC_CLAMPED", "N_DETECTED", "N_LAW_ITER")
+              "OCCAM_GAP", "A_K_POST", "A_K_POST_SIG", "FRAC_CLAMPED", "N_DETECTED", "N_LAW_ITER")
 
 _FIELD_OF_KEY = {
     "NAME": "name", "LN_EVIDENCE": "ln_evidence", "FLUX_MEAN": "flux_mean",
     "FLUX_COV": "flux_cov", "TOPK_MODEL": "topk_model", "TOPK_A_K": "topk_a_k",
     "TOPK_LOG10_B": "topk_log10_b", "TOPK_CHI2": "topk_chi2", "TOPK_LN_L": "topk_ln_l",
     "TOPK_LN_PRIOR": "topk_ln_prior", "TOPK_FLUX": "topk_flux", "OCCAM_GAP": "occam_gap",
+    "A_K_POST": "a_k_post", "A_K_POST_SIG": "a_k_post_sig",
     "FRAC_CLAMPED": "frac_clamped", "N_DETECTED": "n_detected", "N_LAW_ITER": "n_law_iter",
 }
 
@@ -294,7 +301,9 @@ def _empty_row(topk, n_sub):
         topk_ln_l=np.full(topk, np.nan, dtype=np.float32),
         topk_ln_prior=np.full(topk, np.nan, dtype=np.float32),
         topk_flux=np.full((topk, N_BANDS), np.nan, dtype=np.float32),
-        occam_gap=np.float32(np.nan), frac_clamped=np.float32(np.nan),
+        occam_gap=np.float32(np.nan),
+        a_k_post=np.float32(np.nan), a_k_post_sig=np.float32(np.nan),
+        frac_clamped=np.float32(np.nan),
         n_detected=np.int8(-1), n_law_iter=np.int8(-1),
     )
 
@@ -330,9 +339,12 @@ def _source_task(i):
         # log10_B = -2*SC, a_K = ak_per_av * A_V, so d(log10_B)/d(a_K) =
         # -2 * slope_sc_av / ak_per_av (likelihood.fit's docstring, section 1.3).
         slope_log10b_per_ak = np.array([-2.0 * batch.slope_sc_av / batch.ak_per_av])
-        ln_lambda = prior_reader.ln_prior(
+        ln_lambda, a_post_t, a2_post_t = prior_reader.ln_prior(
             w["reader"], rows, h, fit.a_hat[None, :], fit.log10_b_hat[None, :],
-            slope_log10b_per_ak, np.array([batch.sigma_a_ak]), model_index)[0]
+            slope_log10b_per_ak, np.array([batch.sigma_a_ak]), model_index)
+        ln_lambda = ln_lambda[0]
+        a_post_t = a_post_t[0]
+        a2_post_t = a2_post_t[0]
 
         ln_l = -0.5 * fit.chi2_min.astype(np.float64) + fit.ln_nondet.astype(np.float64)
 
@@ -371,6 +383,27 @@ def _source_task(i):
         occam_gap = float(ev_total - (ln_lambda.astype(np.float64) + ln_l).max())
 
         good = not batch.flagged
+
+        # the posterior extinction mark (SPEC_BMSTP_DRAFT.md section 6.1):
+        # the p_theta-weighted mean over templates of prior_reader.ln_prior's own per-template posterior
+        # first/second moment of a; a NaN moment (ln_lambda = -inf there)
+        # carries p_theta = 0 by construction (ln_w = -inf), so nansum
+        # skips it rather than propagating 0 * NaN. Two cases leave every
+        # template's p_theta at 0 while some of its own a_post_t are still
+        # finite (not NaN) numbers -- a flagged source (ln_w forced to
+        # -inf above) and a source whose whole class evidence underflows
+        # (ev_total = -inf: every template's likelihood or Gamma term is
+        # -inf even though its own prior geometry is finite) -- and in
+        # both, nansum would read a plain 0.0 there instead of NaN, since
+        # 0 * finite is 0, not NaN. A_K_POST is NaN exactly where
+        # LN_EVIDENCE is -inf in every subclass, i.e. `not np.isfinite(ev_total)`, or the source is
+        # flagged -- written NaN explicitly, the same convention
+        # flux_mean/flux_cov use.
+        with np.errstate(invalid="ignore"):
+            a_post = float(np.nansum(p_theta * a_post_t))
+            a_post_sig = float(np.sqrt(max(np.nansum(p_theta * a2_post_t) - a_post ** 2, 0.0)))
+        if not good or not np.isfinite(ev_total):
+            a_post, a_post_sig = float("nan"), float("nan")
 
         # the template's fitted flux at its clamped marks: recovering the
         # A_V-unit extinction the design column (batch.ext_col) was built
@@ -427,6 +460,7 @@ def _source_task(i):
             topk_model=topk_model, topk_a_k=topk_a_k, topk_log10_b=topk_log10_b,
             topk_chi2=topk_chi2, topk_ln_l=topk_ln_l, topk_ln_prior=topk_ln_prior,
             topk_flux=topk_flux, occam_gap=np.float32(occam_gap),
+            a_k_post=np.float32(a_post), a_k_post_sig=np.float32(a_post_sig),
             frac_clamped=fit.frac_clamped, n_detected=np.int8(batch.n_detected),
             n_law_iter=np.int8(fit.n_law_iter),
         )
@@ -479,6 +513,8 @@ def _assemble_batch(results, name_slice, n_sub, topk):
     topk_ln_prior = np.empty((m, topk), dtype=np.float32)
     topk_flux = np.empty((m, topk, N_BANDS), dtype=np.float32)
     occam_gap = np.empty(m, dtype=np.float32)
+    a_k_post = np.empty(m, dtype=np.float32)
+    a_k_post_sig = np.empty(m, dtype=np.float32)
     frac_clamped = np.empty(m, dtype=np.float32)
     n_detected = np.empty(m, dtype=np.int8)
     n_law_iter = np.empty(m, dtype=np.int8)
@@ -497,6 +533,8 @@ def _assemble_batch(results, name_slice, n_sub, topk):
         topk_ln_prior[k] = r["topk_ln_prior"]
         topk_flux[k] = r["topk_flux"]
         occam_gap[k] = r["occam_gap"]
+        a_k_post[k] = r["a_k_post"]
+        a_k_post_sig[k] = r["a_k_post_sig"]
         frac_clamped[k] = r["frac_clamped"]
         n_detected[k] = r["n_detected"]
         n_law_iter[k] = r["n_law_iter"]
@@ -506,7 +544,9 @@ def _assemble_batch(results, name_slice, n_sub, topk):
     return dict(name=name_slice, ln_evidence=ln_evidence, flux_mean=flux_mean, flux_cov=flux_cov,
                 topk_model=topk_model, topk_a_k=topk_a_k, topk_log10_b=topk_log10_b,
                 topk_chi2=topk_chi2, topk_ln_l=topk_ln_l, topk_ln_prior=topk_ln_prior,
-                topk_flux=topk_flux, occam_gap=occam_gap, frac_clamped=frac_clamped,
+                topk_flux=topk_flux, occam_gap=occam_gap,
+                a_k_post=a_k_post, a_k_post_sig=a_k_post_sig,
+                frac_clamped=frac_clamped,
                 n_detected=n_detected, n_law_iter=n_law_iter, failed=failed,
                 zero_ext_count=zero_ext_count, n_templates_checked=n_templates_checked)
 
