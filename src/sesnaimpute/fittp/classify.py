@@ -22,6 +22,14 @@ name, SPEC_BMSTP_DRAFT.md section 6.1) straight through, unreduced by
 `MAP_CLASS`: a reader divides the class column it wants by P1's own
 `A_COL_K` (`bmstp/density/table_density_source__<R>.hdf5`) to form
 `XI_POST` itself.
+
+`LOG10_FLUX_IMPUTED_COV` replaces `FLUX_IMPUTED_COV`:
+the MAP class's own `LOG10_FLUX_COV` (P7, the imputed flux's total
+uncertainty in log10 flux, section 6.1) with every OBSERVED band's row and
+column zeroed and that band's own diagonal set to the catalogue's own
+variance in log10 flux, `(SIGMA_FNU_MJY / (FNU_MJY ln 10))^2` -- the copied
+datum is independent of the model, so its uncertainty is the catalogue's,
+not the class's, and it carries no covariance with any other band.
 """
 
 import argparse
@@ -76,9 +84,9 @@ CLASS_SLICES = _class_slices()
 SUBCLASS_LABELS = tuple("%s:%s" % (s.cls, s.name) for s in _SUBCLASS_NAMES)
 
 #: Per-row working set for the batch loop (rule 10b): six classes' own
-#: LN_EVIDENCE (<=9 cols), FLUX_MEAN (8) and FLUX_COV (8x8) float32 rows,
-#: plus the measured flux/sigma/origin and the global (25) and (6,8,8)
-#: intermediates, at a generous margin.
+#: LN_EVIDENCE (<=9 cols), FLUX_MEAN (8) and LOG10_FLUX_COV (8x8) float32
+#: rows, plus the measured flux/sigma/origin and the global (25) and
+#: (6,8,8) intermediates, at a generous margin.
 ROW_BYTES = 8192
 
 #: The literature-band sensitivity runs (spec sec 7.2, sec 10; P9's own
@@ -256,9 +264,14 @@ def _part_path(path, bi):
 #: `LN_EVIDENCE` -- no MAP-class column: a reader picks the class it wants
 #: and divides `A_K_POST` by P1's own `A_COL_K`.
 _CLASSIFY_PART_KEYS = ("NAME", "P_CLASS", "P_SUBCLASS", "P_YSO", "MAP_CLASS", "N_DETECTED",
-                       "CANDIDATE_FLUX", "FLUX_IMPUTED", "FLUX_IMPUTED_COV",
+                       "CANDIDATE_FLUX", "FLUX_IMPUTED", "LOG10_FLUX_IMPUTED_COV",
                        "A_K_POST", "A_K_POST_SIG",
                        "ENTROPY_CLASS", "ENTROPY_SUBCLASS")
+
+#: SPEC_BMSTP_DRAFT.md section 1/6.1 -- the log10-flux Jacobian, `sigma_log
+#: = sigma_f / (f ln 10)`, the same conversion `fittp.likelihood.prepare`
+#: uses for the fit's own per-band variance.
+_LN10 = np.log(10.0)
 
 
 def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
@@ -272,7 +285,7 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
     for ci, cls in enumerate(CLASSES):
         f = class_files[cls]
         flux_mean_stack[ci] = np.asarray(f["FLUX_MEAN"][start:stop, :], dtype=np.float64)
-        flux_cov_stack[ci] = np.asarray(f["FLUX_COV"][start:stop, :, :], dtype=np.float64)
+        flux_cov_stack[ci] = np.asarray(f["LOG10_FLUX_COV"][start:stop, :, :], dtype=np.float64)
         a_k_post_stack[ci] = np.asarray(f["A_K_POST"][start:stop], dtype=np.float32)
         a_k_post_sig_stack[ci] = np.asarray(f["A_K_POST_SIG"][start:stop], dtype=np.float32)
 
@@ -288,6 +301,7 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
 
     with h5py.File(cat_path, "r") as cf:
         flux = np.asarray(cf["FNU_MJY"][start:stop], dtype=np.float64)
+        sigma = np.asarray(cf["SIGMA_FNU_MJY"][start:stop], dtype=np.float64)
         origin = np.asarray(cf["ORIGIN_FNU"][start:stop])
     detected = origin == 1
 
@@ -300,6 +314,19 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
     map_c_safe = np.where(flagged, 0, map_c)
     imputed = cflux[row_idx, map_c_safe, :]
     imputed_cov = flux_cov_stack[map_c_safe, row_idx]
+
+    # LOG10_FLUX_IMPUTED_COV: on an observed band the
+    # copied datum is independent of the model, so its row and column are
+    # zeroed and its own diagonal is set to the catalogue's own variance in
+    # log10 flux -- never the class's model uncertainty there.
+    not_detected = ~detected
+    imputed_cov = imputed_cov * not_detected[:, :, None] * not_detected[:, None, :]
+    band_idx = np.arange(N_BANDS)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        catalogue_var_log10 = (sigma / (flux * _LN10)) ** 2
+    diag = np.where(detected, catalogue_var_log10, imputed_cov[:, band_idx, band_idx])
+    imputed_cov[:, band_idx, band_idx] = diag
+
     imputed[flagged] = np.nan
     imputed_cov[flagged] = np.nan
     detected_ok = detected & ~flagged[:, None]
@@ -321,7 +348,7 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
         p_class=p_cls.astype(np.float32), p_subclass=p_sub.astype(np.float32),
         map_class=map_c.astype(np.int8), n_detected=detected.sum(axis=1).astype(np.int8),
         candidate_flux=cflux.astype(np.float32), flux_imputed=imputed.astype(np.float32),
-        flux_imputed_cov=imputed_cov.astype(np.float32),
+        log10_flux_imputed_cov=imputed_cov.astype(np.float32),
         a_k_post=a_k_post, a_k_post_sig=a_k_post_sig,
         entropy_class=ent_c.astype(np.float32), entropy_subclass=ent_s.astype(np.float32),
         imputed_identity_err=imputed_identity_err, n_flagged=int(flagged.sum()),
@@ -338,7 +365,7 @@ def _write_classify_part(part_path, batch):
         f.create_dataset("N_DETECTED", data=batch["n_detected"])
         f.create_dataset("CANDIDATE_FLUX", data=batch["candidate_flux"])
         f.create_dataset("FLUX_IMPUTED", data=batch["flux_imputed"])
-        f.create_dataset("FLUX_IMPUTED_COV", data=batch["flux_imputed_cov"])
+        f.create_dataset("LOG10_FLUX_IMPUTED_COV", data=batch["log10_flux_imputed_cov"])
         f.create_dataset("A_K_POST", data=batch["a_k_post"])
         f.create_dataset("A_K_POST_SIG", data=batch["a_k_post_sig"])
         f.create_dataset("ENTROPY_CLASS", data=batch["entropy_class"])
@@ -347,7 +374,7 @@ def _write_classify_part(part_path, batch):
 
 def build_region(config, region, st, beta):
     """One region's P8, written one `ROW_BYTES` batch's own part file at a
-    time (rule 10b: `CANDIDATE_FLUX` and `FLUX_IMPUTED_COV` are the two
+    time (rule 10b: `CANDIDATE_FLUX` and `LOG10_FLUX_IMPUTED_COV` are the two
     region-sized arrays the W7 review found here); the caller joins the
     parts once every batch is done."""
     _require_fit_files(config, region)
@@ -583,7 +610,7 @@ def build(config, regions=None, beta=0.0):
                                  result["n_source"], result["fit_files"], result["n_flagged"])
 
             # the joined file's own small columns (n, 6) and (n, 25) --
-            # not CANDIDATE_FLUX/FLUX_IMPUTED_COV, the two region-sized
+            # not CANDIDATE_FLUX/LOG10_FLUX_IMPUTED_COV, the two region-sized
             # arrays rule 10b keeps out of memory (W7 review finding 6).
             with h5py.File(result["path"], "r") as f:
                 p_class = np.asarray(f["P_CLASS"][:])

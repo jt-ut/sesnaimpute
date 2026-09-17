@@ -110,7 +110,8 @@ class Prior(object):
     calls over the class's batches (section 4)."""
 
     def __init__(self, cls, a_col, a_col_sig, arm, zp_sig, grain, density, p1_columns,
-                 grid_all, xi_edges, b_edges, model_name, c_theta, factors, kernel):
+                 grid_all, xi_edges, b_edges, model_name, c_theta, factors, kernel,
+                 w_dense):
         self.cls = cls
         self.a_col = a_col
         self.a_col_sig = a_col_sig
@@ -129,6 +130,12 @@ class Prior(object):
         self.c_theta = c_theta
         self.factors = factors  # list of dict(W, C_F, D_F, normalised)
         self.kernel = kernel
+        #: `(n_source, n_x)` float64, the DENSE design's own per-cell
+        #: weight `w_i` (section 2, section 4.2): every source's own row,
+        #: through P1's `SIGHTLINE_ROW` -- every class reads it, the tile
+        #: classes included, since the law is the sightline's, never the
+        #: grain's. The DIFFUSE design's own weight is `1 - w_dense`.
+        self.w_dense = w_dense
 
 
 def load(config, region, cls):
@@ -202,8 +209,45 @@ def load(config, region, cls):
                                  b_centers=b_centers_w))
 
     kernel = kernel_module.Kernel.read(config)
+    w_dense = _dense_weight_by_source(config, region, sightline)
     return Prior(cls, a_col, a_col_sig, arm, zp_sig, grain, density, p1_columns,
-                 grid_all, xi_edges, b_edges, model_name, c_theta, factors, kernel)
+                 grid_all, xi_edges, b_edges, model_name, c_theta, factors, kernel,
+                 w_dense)
+
+
+#: `xi_i`, the common grid's own cell centres in the DEPTH FRACTION itself
+#: (not `log10 xi`), section 2's dense-fraction formula `f_i = clip(xi_i -
+#: XI_FRONT, 0, XI_BACK - XI_FRONT) / xi_i`. A bare module global, shared by
+#: every source and class -- the common grid is the same for all six.
+_XI_CENTERS = 10.0 ** grid._X_CENTERS
+
+
+def _dense_weight_by_source(config, region, sightline_row):
+    """`(n_source, n_x)` float64, the DENSE design's own per-cell weight
+    `w_i = f_i * W_CLOUD` (section 2): `XI_FRONT`, `XI_BACK`, `W_CLOUD` come
+    from `bmstp.cloud_interval`'s own sightline product, read through P1's
+    `SIGHTLINE_ROW` -- the sky data alone (the cloud interval and the 3-D
+    profile), never the prior. `sightline_row` is P1's whole-region column
+    (`load`'s own `sightline` read), the same row index `bmstp.shapes`
+    itself uses for this class's grain when `cls` is a cloud class, and the
+    join every OTHER class reads too (the law is the sightline's for every
+    class, section 2)."""
+    path = config_module.product_path(config, "bmstp", "shape", "cloud_interval", "sightline", region=region)
+    if not os.path.exists(path):
+        raise RuntimeError(
+            "fittp.prior_reader.load [%s]: missing %s -- run RUNBOOKtp.sh's "
+            "'PY sesnaimpute.bmstp.cloud_interval' line first" % (region, path))
+    with h5py.File(path, "r") as f:
+        xi_front = np.asarray(f["XI_FRONT"][:], dtype=np.float64)
+        xi_back = np.asarray(f["XI_BACK"][:], dtype=np.float64)
+        w_cloud = np.asarray(f["W_CLOUD"][:], dtype=np.float64)
+    row = np.asarray(sightline_row)
+    xi_front_s = xi_front[row]     # (n_source,)
+    xi_back_s = xi_back[row]
+    w_cloud_s = w_cloud[row]
+    f_i = np.clip(_XI_CENTERS[None, :] - xi_front_s[:, None], 0.0,
+                  (xi_back_s - xi_front_s)[:, None]) / _XI_CENTERS[None, :]
+    return f_i * w_cloud_s[:, None]
 
 
 def prepare(reader, rows):
@@ -510,7 +554,7 @@ def _ln_half_erfc(z):
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
 def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
-              b_origin, dlb, dlx, a_edges_buf,
+              b_origin, dlb, dlx, a_edges_buf, cell_weight,
               m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
               out1, out2):
     """The cell sum of SPEC_BMSTP_DRAFT.md section 4.2, per source and
@@ -661,8 +705,13 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         # this cell (SPEC_BMSTP_DRAFT.md section 4.2's own
                         # summand, m1/m2 the a*_i-weighted mass, the a_star
                         # Jacobian cancelling against `dens * mi / a_star`'s
-                        # own 1/a_star -- section 6.1 above item 1).
-                        term = dens * mi
+                        # own 1/a_star -- section 6.1 above item 1). The
+                        # two-design mixture's own cell weight (`cell_weight
+                        # [s, i]`, `1 - w_i` on the diffuse call, `w_i` on the
+                        # dense one, section 2) multiplies the cell's mass
+                        # before the Jacobian, so a cell the caller's design
+                        # does not own contributes nothing.
+                        term = dens * mi * cell_weight[s, i]
                         total += term / a_star
                         m1 += term
                         m2 += term * a_star
@@ -694,7 +743,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                             j0 = n_b - 2
                             frac = 1.0
                         dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
-                        term = dens * mi
+                        term = dens * mi * cell_weight[s, i]
                         total += term / a_star
                         m1 += term
                         m2 += term * a_star
@@ -732,8 +781,13 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     j0 = n_b - 2
                     frac = 1.0
                 dens = (h[s, n_x - 1, j0] * (1.0 - frac) + h[s, n_x - 1, j0 + 1] * frac) / (dlx * dlb)
-                if dens > 0.0:
-                    out[s, th] = math.log(dens / a_top) + ln_tail
+                # the edge fallback reads the cell it substitutes for, so it
+                # carries that cell's own dense-fraction weight too: a design
+                # the source's own w_i excludes from cell n_x - 1 must not
+                # read a finite prior off this fallback either.
+                w_edge = cell_weight[s, n_x - 1]
+                if dens > 0.0 and w_edge > 0.0:
+                    out[s, th] = math.log(dens * w_edge / a_top) + ln_tail
                     # the fallback puts the whole mass at this one point
                     # (module docstring item 1): a_post/a2_post read the
                     # point itself, not a cell mean.
@@ -762,8 +816,10 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     j0 = n_b - 2
                     frac = 1.0
                 dens = (h[s, 0, j0] * (1.0 - frac) + h[s, 0, j0 + 1] * frac) / (dlx * dlb)
-                if dens > 0.0:
-                    out[s, th] = math.log(dens / a_c0) + ln_tail
+                # same weighting as the top-edge fallback above, at cell 0.
+                w_edge = cell_weight[s, 0]
+                if dens > 0.0 and w_edge > 0.0:
+                    out[s, th] = math.log(dens * w_edge / a_c0) + ln_tail
                     # the fallback puts the whole mass at this one point
                     # (module docstring item 1): a_post/a2_post read the
                     # point itself, not a cell mean.
@@ -772,7 +828,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     return out
 
 
-def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index):
+def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, cell_weight):
     """`((n, m) float32, (n, m) float64, (n, m) float64)`: `ln <Lambda_C>_s
     (theta)` of SPEC_BMSTP_DRAFT.md section 4.2, plus `ln A_C(s)` (section
     1.3) -- everything the fitter's evidence sum needs from the prior --
@@ -788,11 +844,20 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index):
     arrays; `h` is `prepare(rows)`'s blurred grid for the same sources, in
     the same order; `a_hat`, `log10_b_hat`, `slope`, `sigma_a` are
     `fittp.likelihood.fit`'s unconstrained mark, its conditional slope and
-    the fit's own `sigma_a`, all in `A_K`; `model_index` locates each of
+    the fit's own `sigma_a`, all in `A_K`, for ONE of the two extinction-law
+    designs (section 2); `model_index` locates each of
     the `m` templates in the class's `C_THETA` and weight-factor tables
-    (identity order where the library is read whole). No floor: `_cell_sum`
+    (identity order where the library is read whole). `cell_weight` is
+    `(n, n_x)`, the per-source per-cell dense-fraction weight this call's
+    own design owns -- `1 - reader.w_dense[rows]` for the diffuse design,
+    `reader.w_dense[rows]` for the dense one (`fittp.sweep._source_task`
+    calls this twice, once per design); `_cell_sum` multiplies every cell's
+    mass by it before the Jacobian, so the two calls' evidence sums to the
+    single-law read whichever design the weight favours at each cell. No
+    floor: `_cell_sum`
     reads `h_C`'s own cell density exactly as stored, so a template whose
-    whole cell window sums to zero prior mass reads `ln <Lambda_C>_s(theta)
+    whole cell window sums to zero prior mass (all its cells excluded by
+    `cell_weight`, or genuinely empty) reads `ln <Lambda_C>_s(theta)
     = -inf`, a clean veto rather than an inflated pedestal, and `a_post`/
     `a2_post` NaN there."""
     rows = np.asarray(rows)
@@ -805,6 +870,7 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index):
     a_edges_buf = np.empty((rows.size, n_x + 1), dtype=np.float64)
     sigma_a = np.asarray(sigma_a, dtype=np.float64)
     a_hat64 = np.asarray(a_hat, dtype=np.float64)
+    cell_weight = np.ascontiguousarray(np.asarray(cell_weight, dtype=np.float64))
     factor_term = _factor_ln(reader, rows, a_hat64,
                               np.asarray(log10_b_hat, dtype=np.float64),
                               np.asarray(slope, dtype=np.float64), sigma_a, model_index)
@@ -815,7 +881,7 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index):
     core = _cell_sum(a_col, reader.xi_edges, sigma_a,
                       a_hat64, np.asarray(log10_b_hat, dtype=np.float64),
                       np.asarray(slope, dtype=np.float64), np.asarray(c_theta, dtype=np.float64),
-                      h, reader.b_origin, reader.dlb, reader.dlx, a_edges_buf,
+                      h, reader.b_origin, reader.dlb, reader.dlx, a_edges_buf, cell_weight,
                       m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
                       a_post, a2_post)
     with np.errstate(divide="ignore"):

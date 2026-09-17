@@ -24,7 +24,6 @@ from sesnaimpute import config as config_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.batches import batches
-from sesnaimpute.build import run
 from sesnaimpute.gutcolors import crisp
 from sesnaimpute.gutcolors import prob as gc_prob
 
@@ -200,44 +199,131 @@ def _classify_path(config, region):
         config, "fittp", "classification", "posterior", "source", region=region)
 
 
-def build_region_imputed(config, region, st, name, n_detected, verdict_measured):
+def _label_set_vote(verdict_idx):
+    """`(n, 6)`: one reading's own unit, split equally over the classes
+    whose `CONCORDANT_LABELS` set holds `verdict_idx`'s own most probable
+    label -- `GROUP_MATRIX` row `v` is already that
+    label's 0/1 membership over the six classes (module docstring, `psi_
+    class`), so the row divided by its own sum is the split; a row that
+    sums to zero (UNCLASSIFIED, which no class's set holds) is a clean
+    ABSTAIN, left at zero rather than divided."""
+    row = GROUP_MATRIX[verdict_idx]
+    row_sum = row.sum(axis=1, keepdims=True)
+    return np.divide(row, row_sum, out=np.zeros_like(row), where=row_sum > 0)
+
+
+def _prior_leaning_vote(config, region, hpx512_source):
+    """`(n,)` int64, `CLASSES` index of `argmax_C N_CAT_C` at the source's
+    own pixel (spec sec 6.5's vote readings): `bmstp.atlas`'s own prior
+    atlas (`bmstp/atlas/prior_atlas_hpx512__<R>.hdf5`), the source's pixel
+    found the same way `fittp.atlas.build_region` finds it -- a sorted
+    search on the atlas's own `HPX_PIX_512` against `hpx512_source`
+    (`bmstp.density`'s own `HPX_512` column, P1). -1 (ABSTAIN) where the
+    source's pixel carries no row there (should not occur inside the
+    admitted footprint, but read defensively rather than assumed)."""
+    path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
+    if not os.path.exists(path):
+        raise RuntimeError(
+            "fittp.cascade --imputed [%s]: missing %s -- run RUNBOOKtp.sh's "
+            "'PY sesnaimpute.bmstp.atlas' line first" % (region, path))
+    with h5py.File(path, "r") as f:
+        pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
+        n_cat = np.stack([np.asarray(f["N_CAT_%s" % c][:], dtype=np.float64) for c in CLASSES], axis=1)
+    order = np.argsort(pix)
+    pix_sorted = pix[order]
+    n_cat_sorted = n_cat[order]
+    n = hpx512_source.shape[0]
+    leaning = np.full(n, -1, dtype=np.int64)
+    if pix_sorted.size:
+        idx = np.clip(np.searchsorted(pix_sorted, hpx512_source), 0, pix_sorted.size - 1)
+        valid = pix_sorted[idx] == hpx512_source
+        leaning[valid] = np.argmax(n_cat_sorted[idx[valid]], axis=1)
+    return leaning
+
+
+def _gaia_leaning_vote(config, region, name):
+    """`(n,)` int64, `CLASSES` index of `argmax_C TOPK_LN_GAMMA[:, 0]` over
+    the six fit files (spec sec 6.5's vote readings): -1 (ABSTAIN) where the
+    six values are all equal (no Gaia datum -- `fittp.gaia.GaiaTerm.
+    ln_gamma`'s own convention for a source with no counterpart is
+    `ln Gamma = 0` for every model of every class, so this falls out of
+    the same equality test) or where any of the six is not finite (a
+    flagged source's `TOPK_LN_GAMMA` is NaN, `fittp.sweep._empty_row`)."""
+    n = name.shape[0]
+    vals = np.empty((n, len(CLASSES)), dtype=np.float64)
+    for ci, cls in enumerate(CLASSES):
+        path = config_module.product_path(config, "fittp", "fit", cls, "source", region=region)
+        if not os.path.exists(path):
+            raise RuntimeError(
+                "fittp.cascade --imputed [%s]: missing %s -- run RUNBOOKtp.sh's "
+                "'PY sesnaimpute.fittp.sweep --classes \"%s\"' line first" % (region, path, cls))
+        with h5py.File(path, "r") as f:
+            cls_name = f["NAME"][:]
+            vals[:, ci] = np.asarray(f["TOPK_LN_GAMMA"][:, 0], dtype=np.float64)
+        if not np.array_equal(cls_name, name):
+            raise ValueError("fittp.cascade --imputed [%s]: %s's NAME does not row-align "
+                              "with the cascade's own" % (region, path))
+    abstain = np.any(~np.isfinite(vals), axis=1) | np.all(vals == vals[:, [0]], axis=1)
+    leaning = np.where(abstain, -1, np.argmax(vals, axis=1))
+    return leaning
+
+
+def build_region_imputed(config, region, st):
     """The imputed half (spec sec 6.5, 7.3; IMPLEMENTATION_BMSTP_DRAFT.md
     row 2.5): the cascade run on `classify`'s `FLUX_IMPUTED` with
     `valid = detected = all` -- every band usable, since the imputed SED
     is the MAP class's own candidate, not a measurement, so it carries no
     sigma of its own (`sigma = 0`, the crisp limit of `classify_prob`).
-    Runs only once `classify` has written the region (rule 5b: otherwise
-    None, the caller leaves the imputed half absent, not a failure --
-    the measured half stands on its own).
+    Reads the measured half (`NAME`, `N_DETECTED`, `VERDICT_MEASURED`,
+    `P_VERDICT_MEASURED`) from the cascade product already on disk, and
+    `classify`'s own `FLUX_IMPUTED`/`MAP_CLASS`/`P_YSO`; a missing input
+    fails with one sentence naming the RUNBOOK line that makes it (rule
+    5b), nothing checks its content.
 
     `confusion_yso` (spec sec 7.3's second table) is built from the
-    MEASURED verdict (`verdict_measured`, this region's own
-    `VERDICT_MEASURED`), not the imputed one: the imputed verdict is the
-    MAP class's own SED read back (module docstring, sec 6.5), so it
-    cannot serve as independent evidence against `P(YSO) > 0.5`.
-    `confusion_verdict_map` is the other sec 7.3 table and keeps the
-    imputed verdict, which is exactly what it checks -- the library's
-    idea of the class against the cascade's idea of the class.
+    MEASURED verdict (this region's own `VERDICT_MEASURED`), not the
+    imputed one: the imputed verdict is the MAP class's own SED read back
+    (module docstring, sec 6.5), so it cannot serve as independent
+    evidence against `P(YSO) > 0.5`. `confusion_verdict_map` is the other
+    sec 7.3 table and keeps the imputed verdict, which is exactly what it
+    checks -- the library's idea of the class against the cascade's idea
+    of the class.
+
+    PSI_VOTES/ENTROPY_PSI_VOTES (spec sec 6.5): four readings, each
+    casting one unit split over the classes it implicates, or abstaining
+    -- the prior atlas's own leaning at the source's pixel
+    (`_prior_leaning_vote`), the Gaia term's own leaning
+    (`_gaia_leaning_vote`, `TOPK_LN_GAMMA`), and the two cascade verdicts
+    above (`_label_set_vote`).
     """
+    cascade_path = config_module.product_path(
+        config, "fittp", "classification", "cascade", "source", region=region)
+    if not os.path.exists(cascade_path):
+        raise RuntimeError(
+            "fittp.cascade --imputed [%s]: missing %s -- run RUNBOOKtp.sh's "
+            "'PY sesnaimpute.fittp.cascade' line first" % (region, cascade_path))
+    with h5py.File(cascade_path, "r") as f:
+        name = f["NAME"][:]
+        n_detected = f["N_DETECTED"][:]
+        verdict_measured = f["VERDICT_MEASURED"][:]
+        p_verdict_measured = np.asarray(f["P_VERDICT_MEASURED"][:])
+    verdict_idx_measured = np.argmax(p_verdict_measured, axis=1)
+
     path = _classify_path(config, region)
     if not os.path.exists(path):
-        print("fittp.cascade [%s]: no classify product yet (%s) -- run "
-              "'PY sesnaimpute.fittp.classify' after the fit loop, then "
-              "'PY sesnaimpute.fittp.cascade' again for the imputed half"
-              % (region, path))
-        return None
-
+        raise RuntimeError(
+            "fittp.cascade --imputed [%s]: missing %s -- run RUNBOOKtp.sh's "
+            "'PY sesnaimpute.fittp.classify' line first" % (region, path))
     with h5py.File(path, "r") as f:
         classify_name = f["NAME"][:]
         map_class = f["MAP_CLASS"][:]
         p_yso = f["P_YSO"][:]
         n = f["FLUX_IMPUTED"].shape[0]
     if not np.array_equal(classify_name, name):
-        raise ValueError("fittp.cascade [%s]: classify's NAME does not row-align "
+        raise ValueError("fittp.cascade --imputed [%s]: classify's NAME does not row-align "
                           "with the cascade's own" % region)
 
     p_verdict_imp = np.empty((n, len(crisp.LABELS)), dtype=np.float32)
-    all_true = None
     bounds = list(batches(n, ROW_BYTES))
     for i, (start, stop) in enumerate(bounds):
         with h5py.File(path, "r") as f:
@@ -271,19 +357,55 @@ def build_region_imputed(config, region, st, name, n_detected, verdict_measured)
     pyso_half = p_yso > 0.5
     confusion_yso_measured = confusion_yso_by_count(cascade_yso, pyso_half, n_detected)
 
+    # PSI_VOTES, ENTROPY_PSI_VOTES (spec sec 6.5): four readings, each
+    # casting one unit (split equally where a reading's own set is not a
+    # single class), the prior atlas and the fit files' own Gaia term
+    # already on disk beside the posterior product this run just opened.
+    density_path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
+    if not os.path.exists(density_path):
+        raise RuntimeError(
+            "fittp.cascade --imputed [%s]: missing %s -- run RUNBOOKtp.sh's "
+            "'PY sesnaimpute.bmstp.density' line first" % (region, density_path))
+    with h5py.File(density_path, "r") as f:
+        density_name = f["NAME"][:]
+        hpx512_source = np.asarray(f["HPX_512"][:], dtype=np.int64)
+    if not np.array_equal(density_name, name):
+        raise ValueError("fittp.cascade --imputed [%s]: bmstp.density's NAME does not row-align "
+                          "with the cascade's own" % region)
+
+    prior_leaning = _prior_leaning_vote(config, region, hpx512_source)
+    gaia_leaning = _gaia_leaning_vote(config, region, name)
+
+    votes = np.zeros((n, len(CLASSES)), dtype=np.float64)
+    for leaning in (prior_leaning, gaia_leaning):
+        cast = leaning >= 0
+        votes[cast, leaning[cast]] += 1.0
+    votes += _label_set_vote(verdict_idx_measured)
+    votes += _label_set_vote(verdict_idx)
+    row_sum = votes.sum(axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        p_votes = votes / row_sum[:, None]
+        entropy = -np.nansum(np.where(p_votes > 0, p_votes * np.log(p_votes), 0.0), axis=1)
+    entropy = np.where(row_sum > 0, entropy, np.nan)
+
     return dict(p_verdict=p_verdict_imp, verdict=verdict_imp,
                 confusion_imputed=confusion_imputed,
                 confusion_verdict_imputed_vs_map=confusion_verdict_map,
-                confusion_cascade_yso_measured_vs_pyso=confusion_yso_measured)
+                confusion_cascade_yso_measured_vs_pyso=confusion_yso_measured,
+                psi_votes=votes.astype(np.float32), entropy_psi_votes=entropy.astype(np.float32))
 
 
 def write_region_imputed(path, imputed):
     with h5py.File(path, "a") as f:
-        for name in ("P_VERDICT_IMPUTED", "VERDICT_IMPUTED"):
+        for name in ("P_VERDICT_IMPUTED", "VERDICT_IMPUTED", "PSI_VOTES", "ENTROPY_PSI_VOTES"):
             if name in f:
                 del f[name]
         f.create_dataset("P_VERDICT_IMPUTED", data=imputed["p_verdict"])
         f.create_dataset("VERDICT_IMPUTED", data=imputed["verdict"])
+        # (n, 6) CLASSES-order votes (0-4 per row) and the row's own
+        # entropy (nats), normalised to 1, NaN where nothing voted.
+        f.create_dataset("PSI_VOTES", data=imputed["psi_votes"])
+        f.create_dataset("ENTROPY_PSI_VOTES", data=imputed["entropy_psi_votes"])
         f.attrs["CONFUSION_IMPUTED"] = imputed["confusion_imputed"]
         # sec 7.3's first table: imputed verdict against the MAP class.
         f.attrs["CONFUSION_VERDICT_IMPUTED_VS_MAP"] = imputed["confusion_verdict_imputed_vs_map"]
@@ -291,56 +413,81 @@ def write_region_imputed(path, imputed):
         f.attrs["CONFUSION_CASCADE_YSO_MEASURED_VS_PYSO"] = imputed["confusion_cascade_yso_measured_vs_pyso"]
 
 
-def build(config, regions=None):
+def _path(config, region):
+    return config_module.product_path(
+        config, "fittp", "classification", "cascade", "source", region=region)
+
+
+def build(config, regions=None, imputed=False):
     """Writes `fittp/classification/cascade_classification_source[__R].hdf5`
     for `regions` (default all thirty), one file per region
     (IMPLEMENTATION_BMSTP_DRAFT.md section 1.3, P10).
+
+    Without `imputed` (the `--imputed` CLI flag): the MEASURED half only,
+    reading the region's curated catalogue alone -- never a fit file or the
+    posterior product. With it: the IMPUTED half only (`P_VERDICT_IMPUTED`,
+    `VERDICT_IMPUTED`, the spec sec 7.3 confusion tables,
+    `PSI_VOTES`/`ENTROPY_PSI_VOTES`), reading the measured half from the
+    cascade product already on disk, `classify`'s own `FLUX_IMPUTED`, the
+    prior atlas and the fit files' own Gaia term. A missing input fails
+    with one sentence naming the RUNBOOK line that makes it (rule 5b);
+    nothing checks its content.
     """
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     for region in region_names:
-        with progress.Stage("fittp.cascade", region) as st:
-            result = build_region(config, region, st)
-            path = config_module.product_path(
-                config, "fittp", "classification", "cascade", "source", region=region)
-            write_region(path, result)
+        if not imputed:
+            with progress.Stage("fittp.cascade", region) as st:
+                result = build_region(config, region, st)
+                path = _path(config, region)
+                write_region(path, result)
 
-            n = result["name"].shape[0]
-            # each PSI_CLASS column is the sum of its own label set's
-            # P_VERDICT_MEASURED probabilities, by construction.
-            label_sum_err = 0.0
-            classified = result["verdict"] != -100
-            for c, labels in CONCORDANT_LABELS.items():
-                idx = [crisp.LABEL_INDEX[lab] for lab in labels]
-                expect = result["p_verdict"][:, idx].sum(axis=1)
-                err = np.max(np.abs(result["psi"][classified, CLASSES.index(c)]
-                                     - expect[classified])) if classified.any() else 0.0
-                label_sum_err = max(label_sum_err, float(err))
-            p_defined = classified
-            p_sum_err = float(np.max(np.abs(result["p_verdict"][p_defined].sum(axis=1) - 1.0))) \
-                if p_defined.any() else 0.0
-            uniform_ok = bool(np.allclose(
-                result["psi"][~p_defined], 1.0 / len(CLASSES), atol=1e-6)) if (~p_defined).any() else True
+                n = result["name"].shape[0]
+                # each PSI_CLASS column is the sum of its own label set's
+                # P_VERDICT_MEASURED probabilities, by construction.
+                label_sum_err = 0.0
+                classified = result["verdict"] != -100
+                for c, labels in CONCORDANT_LABELS.items():
+                    idx = [crisp.LABEL_INDEX[lab] for lab in labels]
+                    expect = result["p_verdict"][:, idx].sum(axis=1)
+                    err = np.max(np.abs(result["psi"][classified, CLASSES.index(c)]
+                                         - expect[classified])) if classified.any() else 0.0
+                    label_sum_err = max(label_sum_err, float(err))
+                p_defined = classified
+                p_sum_err = float(np.max(np.abs(result["p_verdict"][p_defined].sum(axis=1) - 1.0))) \
+                    if p_defined.any() else 0.0
+                uniform_ok = bool(np.allclose(
+                    result["psi"][~p_defined], 1.0 / len(CLASSES), atol=1e-6)) if (~p_defined).any() else True
 
-            st.done(path, n=n, n_classified=int(p_defined.sum()),
-                     psi_column_err=label_sum_err, p_verdict_sum_err=p_sum_err,
-                     unclassified_rows_uniform=uniform_ok)
-            print(f"fittp.cascade {region}: verdict counts by detected-band count "
-                  f"(rows=verdict in LABELS order, cols=2..8):\n{result['confusion']}")
-
-        with progress.Stage("fittp.cascade.imputed", region) as st:
-            imputed = build_region_imputed(config, region, st, result["name"],
-                                            result["n_detected"], result["verdict"])
-            if imputed is not None:
-                write_region_imputed(path, imputed)
-                st.done(path, n=imputed["p_verdict"].shape[0])
+                st.done(path, n=n, n_classified=int(p_defined.sum()),
+                         psi_column_err=label_sum_err, p_verdict_sum_err=p_sum_err,
+                         unclassified_rows_uniform=uniform_ok)
+                print(f"fittp.cascade {region}: verdict counts by detected-band count "
+                      f"(rows=verdict in LABELS order, cols=2..8):\n{result['confusion']}")
+        else:
+            with progress.Stage("fittp.cascade.imputed", region) as st:
+                result = build_region_imputed(config, region, st)
+                path = _path(config, region)
+                write_region_imputed(path, result)
+                st.done(path, n=result["p_verdict"].shape[0])
                 print(f"fittp.cascade {region}: imputed-verdict-vs-MAP confusion (rows=verdict, "
-                      f"cols=MAP class {CLASSES}):\n{imputed['confusion_verdict_imputed_vs_map']}")
+                      f"cols=MAP class {CLASSES}):\n{result['confusion_verdict_imputed_vs_map']}")
                 print(f"fittp.cascade {region}: MEASURED-verdict cascade YSO set vs P(YSO)>0.5 "
                       f"[[not-not, not-yso],[cascade-not, cascade-yso]]:"
-                      f"\n{imputed['confusion_cascade_yso_measured_vs_pyso']}")
-            else:
-                st.done(None, n=0)
+                      f"\n{result['confusion_cascade_yso_measured_vs_pyso']}")
 
 
 if __name__ == "__main__":
-    run(build)
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("config")
+    parser.add_argument("--regions", nargs="+", default=None)
+    parser.add_argument("--imputed", action="store_true",
+                         help="the imputed half only (P_VERDICT_IMPUTED, VERDICT_IMPUTED, the "
+                              "spec sec 7.3 confusion tables, PSI_VOTES/ENTROPY_PSI_VOTES): reads "
+                              "the measured half already on disk and classify's own FLUX_IMPUTED. "
+                              "Without this flag: the measured half only, never opening a fit "
+                              "file or the posterior product.")
+    args = parser.parse_args()
+    cfg = config_module.load(args.config)
+    build(cfg, regions=args.regions, imputed=args.imputed)
