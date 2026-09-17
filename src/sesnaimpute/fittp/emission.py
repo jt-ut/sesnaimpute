@@ -23,7 +23,7 @@ then never consulted. `valid = detected` = all bands True is therefore
 the argument (passed to `classify_crisp`) that turns the cascade's
 extinction correction off: the library's templates are intrinsic SEDs
 with no reddening applied, and the template's own reddening -- if any is
-ever added -- is the fit's business (EMISSION.md), not this table's.
+ever added -- is the fit's business, not this table's.
 """
 
 import os
@@ -38,8 +38,7 @@ from sesnaimpute.build import run
 from sesnaimpute.bmstp import grid
 from sesnaimpute.gutcolors import crisp
 
-#: The six libraries, `fittp.prior_reader._LIB`'s own values (EMISSION.md
-#: "Module and runbook").
+#: The six libraries, `fittp.prior_reader._LIB`'s own values.
 LIBRARIES = ("sps", "agb", "pahc", "galz", "yso", "h2shock")
 
 #: `definitions.BANDS`' order (J H Ks I1 I2 I3 I4 M1) is `gutcolors.crisp`'s
@@ -81,16 +80,14 @@ def _read_register(config, key):
 
 
 def _subclass_order(subclass):
-    """The register's own subclass set, in first-appearance row order
-    (EMISSION.md identity 1: "SUBCLASSES equals the register's subclass
-    set in the register's order")."""
+    """The register's own subclass set, in first-appearance row order."""
     _, first = np.unique(subclass, return_index=True)
     return subclass[np.sort(first)]
 
 
 def _scale_to_bin(f_ref, f45_floored, log10_target):
     """The (n_model, 8) SED with every template's I2 (4.5 micron) flux
-    scaled to sit at `10**log10_target` mJy (EMISSION.md "Computation"):
+    scaled to sit at `10**log10_target` mJy:
     linear in the register's own F_REF, so every band moves by the same
     per-template factor and the SED's shape -- its subclass's colours --
     is unchanged."""
@@ -99,15 +96,15 @@ def _scale_to_bin(f_ref, f45_floored, log10_target):
 
 
 def _hand_check_pairs(n_model, n_bin, rng):
-    """20 random (template, bin) pairs (EMISSION.md identity 4)."""
+    """20 random (template, bin) pairs for the stage's own hand check."""
     theta = rng.integers(0, n_model, size=HAND_CHECK_N)
     b = rng.integers(0, n_bin, size=HAND_CHECK_N)
     return theta, b
 
 
 def _emission_table(f_ref, floor_linear, subclass, st):
-    """`E[k, b, v]`, `SUBCLASSES`, and the identity-4 hand check, for one
-    library (EMISSION.md "Computation"). One `classify_crisp` call per
+    """`E[k, b, v]`, `SUBCLASSES`, and the 20-pair hand check, for one
+    library. One `classify_crisp` call per
     brightness bin, vectorised over every template in the library; no
     population weight (a library property, not the luminosity function,
     which stays in P5)."""
@@ -143,7 +140,7 @@ def _emission_table(f_ref, floor_linear, subclass, st):
     totals = counts.sum(axis=2, keepdims=True)
     E = np.divide(counts, totals, out=np.zeros_like(counts), where=totals > 0).astype(np.float32)
 
-    # identity 4: a direct, single-row crisp call on the same scaled SED,
+    # the hand check: a direct, single-row crisp call on the same scaled SED,
     # independent of the batched per-bin loop above.
     hand_direct = np.full(HAND_CHECK_N, -1, dtype=np.int64)
     for i in range(HAND_CHECK_N):
@@ -157,7 +154,7 @@ def _emission_table(f_ref, floor_linear, subclass, st):
     return E, subclasses, edges, hand_ok
 
 
-def _write(path, E, subclasses, edges):
+def _write(path, key, E, subclasses, edges):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.create_dataset("E", data=E)
@@ -165,13 +162,13 @@ def _write(path, E, subclasses, edges):
         f.create_dataset("LOG10_F45_EDGES", data=edges.astype(np.float64))
         f.create_dataset("LABELS", data=np.array(crisp.LABELS, dtype="S20"))
         f.attrs["GRANULE"] = "survey"
-        f.attrs["LIBRARY"] = "gutcolors"
+        f.attrs["LIBRARY"] = key
 
 
 def build(config, regions=None):
     """Writes `fittp/emission/<key>_emission_survey.hdf5` for each of the
     six libraries (`config.product_path(config, "fittp", "emission", key,
-    "survey")`, EMISSION.md "Module and runbook"). Survey-wide and
+    "survey")`). Survey-wide and
     region-independent: `regions` is accepted, per rule 5c, and ignored.
     """
     del regions
@@ -182,7 +179,7 @@ def build(config, regions=None):
 
             row_sum_err = float(np.max(np.abs(E.sum(axis=2) - 1.0)))
             path = config_module.product_path(config, "fittp", "emission", key, "survey")
-            _write(path, E, subclasses, edges)
+            _write(path, key, E, subclasses, edges)
 
             st.done(path, n_model=f_ref.shape[0], n_subclass=subclasses.size,
                      row_sum_err=row_sum_err, hand_check_20_ok=hand_ok)
