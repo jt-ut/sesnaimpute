@@ -176,6 +176,7 @@ PY sesnaimpute.atlas.protostars   # the protostar check figure per region with H
 # cascade's measured half needs no fit, so it runs before the fit loop; its
 # imputed half (fittp.classify's FLUX_IMPUTED) is filled in by re-running this
 # same line after classify, once per region, once classify has written.
+PY sesnaimpute.fittp.emission   # the measured emission table E[k,b,v], one call per library, region-independent (SPEC_BMSTP sec 6.5)
 PY sesnaimpute.fittp.cascade   # the colour cascade on the measured fluxes, Psi per source (SPEC_BMSTP sec 6.5)
 PY sesnaimpute.fittp.library_resolution   # SIGMA_LIB_DEX per library, the fit's per-band variance floor (SPEC_BMSTP sec 6.1)
 # One capped.sh process per class, so one class's peak resident is never summed with the class before it.
