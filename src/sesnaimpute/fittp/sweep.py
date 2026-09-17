@@ -384,9 +384,8 @@ def _source_task(i):
 
         good = not batch.flagged
 
-        # the posterior extinction mark (SPEC_BMSTP_DRAFT.md section 6.1,
-        # POSTMARK brief items 1-2): the p_theta-weighted mean over
-        # templates of prior_reader.ln_prior's own per-template posterior
+        # the posterior extinction mark (SPEC_BMSTP_DRAFT.md section 6.1):
+        # the p_theta-weighted mean over templates of prior_reader.ln_prior's own per-template posterior
         # first/second moment of a; a NaN moment (ln_lambda = -inf there)
         # carries p_theta = 0 by construction (ln_w = -inf), so nansum
         # skips it rather than propagating 0 * NaN. Two cases leave every
@@ -396,9 +395,8 @@ def _source_task(i):
         # (ev_total = -inf: every template's likelihood or Gamma term is
         # -inf even though its own prior geometry is finite) -- and in
         # both, nansum would read a plain 0.0 there instead of NaN, since
-        # 0 * finite is 0, not NaN. Identity 2 (POSTMARK brief item 4):
-        # A_K_POST is NaN exactly where LN_EVIDENCE is -inf in every
-        # subclass, i.e. `not np.isfinite(ev_total)`, or the source is
+        # 0 * finite is 0, not NaN. A_K_POST is NaN exactly where
+        # LN_EVIDENCE is -inf in every subclass, i.e. `not np.isfinite(ev_total)`, or the source is
         # flagged -- written NaN explicitly, the same convention
         # flux_mean/flux_cov use.
         with np.errstate(invalid="ignore"):

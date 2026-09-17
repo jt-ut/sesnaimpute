@@ -254,7 +254,7 @@ def _part_path(path, bi):
 #: `A_K_POST_SIG` are `(n, 6)` in `CLASSES` order (module docstring), read
 #: off the six fit files' own columns of the same name exactly as
 #: `LN_EVIDENCE` -- no MAP-class column: a reader picks the class it wants
-#: and divides `A_K_POST` by P1's own `A_COL_K` (POSTMARK brief item 3).
+#: and divides `A_K_POST` by P1's own `A_COL_K`.
 _CLASSIFY_PART_KEYS = ("NAME", "P_CLASS", "P_SUBCLASS", "P_YSO", "MAP_CLASS", "N_DETECTED",
                        "CANDIDATE_FLUX", "FLUX_IMPUTED", "FLUX_IMPUTED_COV",
                        "A_K_POST", "A_K_POST_SIG",
@@ -313,7 +313,7 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
     # A_K_POST/A_K_POST_SIG, (m, 6) in CLASSES order (module docstring):
     # read off the six fit files' own columns, transposed to a row per
     # source -- no MAP-class reduction, unlike CANDIDATE_FLUX/FLUX_IMPUTED
-    # above (POSTMARK brief item 3).
+    # above.
     a_k_post = np.ascontiguousarray(a_k_post_stack.T)
     a_k_post_sig = np.ascontiguousarray(a_k_post_sig_stack.T)
 

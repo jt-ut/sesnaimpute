@@ -514,7 +514,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
               out1, out2):
     """The cell sum of SPEC_BMSTP_DRAFT.md section 4.2, per source and
-    template, `out` unchanged (identity 1: `LN_EVIDENCE` must not move).
+    template, `out` unchanged by the two moments below.
     `out1`, `out2` are `(n, m)` float64 scratch this function fills in
     place with the posterior first and second moment of `a` within the
     same cell sum -- section 4.2's own summand `dens * mi / a_star` is
@@ -525,7 +525,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     total` wherever `total > 0`; each of the two fallbacks below puts the
     whole mass at its one substitute point, so `out1`/`out2` there are
     that point and its square; left at their caller's initial NaN
-    wherever `out` stays `-inf` (POSTMARK brief item 1). The cell window
+    wherever `out` stays `-inf`. The cell window
     `[i_lo, i_hi]` holding `a_hat +/- 5 sigma_a`
     found in O(1) from the grid's own geometric spacing (no scan of the
     other 125 cells); in each cell the Gaussian's mass `M_i` and the
@@ -777,7 +777,7 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index):
     (theta)` of SPEC_BMSTP_DRAFT.md section 4.2, plus `ln A_C(s)` (section
     1.3) -- everything the fitter's evidence sum needs from the prior --
     together with `a_post`, `a2_post`, the cell sum's own first and second
-    moment of `a` per template (POSTMARK brief item 1; SPEC_BMSTP_DRAFT.md
+    moment of `a` per template (SPEC_BMSTP_DRAFT.md
     section 6.1's posterior mark, formed by `fittp.sweep` from these two
     with the template's own `p_theta`). `a_post`/`a2_post` carry neither
     `ln A_C(s)` nor the factor term below -- section 4.2's own summand is
@@ -794,7 +794,7 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index):
     reads `h_C`'s own cell density exactly as stored, so a template whose
     whole cell window sums to zero prior mass reads `ln <Lambda_C>_s(theta)
     = -inf`, a clean veto rather than an inflated pedestal, and `a_post`/
-    `a2_post` NaN there (identity 2)."""
+    `a2_post` NaN there."""
     rows = np.asarray(rows)
     a_col = reader.a_col[rows]
     density = reader.density[rows]
