@@ -200,6 +200,68 @@ def _classify_path(config, region):
         config, "fittp", "classification", "posterior", "source", region=region)
 
 
+def _label_set_vote(verdict_idx):
+    """`(n, 6)`: one reading's own unit, split equally over the classes
+    whose `CONCORDANT_LABELS` set holds `verdict_idx`'s own most probable
+    label (BATCH0917 item 4) -- `GROUP_MATRIX` row `v` is already that
+    label's 0/1 membership over the six classes (module docstring, `psi_
+    class`), so the row divided by its own sum is the split; a row that
+    sums to zero (UNCLASSIFIED, which no class's set holds) is a clean
+    ABSTAIN, left at zero rather than divided."""
+    row = GROUP_MATRIX[verdict_idx]
+    row_sum = row.sum(axis=1, keepdims=True)
+    return np.divide(row, row_sum, out=np.zeros_like(row), where=row_sum > 0)
+
+
+def _prior_leaning_vote(config, region, hpx512_source):
+    """`(n,)` int64, `CLASSES` index of `argmax_C N_CAT_C` at the source's
+    own pixel (BATCH0917 item 4, reading 1): `bmstp.atlas`'s own prior
+    atlas (`bmstp/atlas/prior_atlas_hpx512__<R>.hdf5`), the source's pixel
+    found the same way `fittp.atlas.build_region` finds it -- a sorted
+    search on the atlas's own `HPX_PIX_512` against `hpx512_source`
+    (`bmstp.density`'s own `HPX_512` column, P1). -1 (ABSTAIN) where the
+    source's pixel carries no row there (should not occur inside the
+    admitted footprint, but read defensively rather than assumed)."""
+    path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
+    with h5py.File(path, "r") as f:
+        pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
+        n_cat = np.stack([np.asarray(f["N_CAT_%s" % c][:], dtype=np.float64) for c in CLASSES], axis=1)
+    order = np.argsort(pix)
+    pix_sorted = pix[order]
+    n_cat_sorted = n_cat[order]
+    n = hpx512_source.shape[0]
+    leaning = np.full(n, -1, dtype=np.int64)
+    if pix_sorted.size:
+        idx = np.clip(np.searchsorted(pix_sorted, hpx512_source), 0, pix_sorted.size - 1)
+        valid = pix_sorted[idx] == hpx512_source
+        leaning[valid] = np.argmax(n_cat_sorted[idx[valid]], axis=1)
+    return leaning
+
+
+def _gaia_leaning_vote(config, region, name):
+    """`(n,)` int64, `CLASSES` index of `argmax_C TOPK_LN_GAMMA[:, 0]` over
+    the six fit files (BATCH0917 item 4, reading 2): -1 (ABSTAIN) where the
+    six values are all equal (no Gaia datum -- `fittp.gaia.GaiaTerm.
+    ln_gamma`'s own convention for a source with no counterpart is
+    `ln Gamma = 0` for every model of every class, so this falls out of
+    the same equality test) or where any of the six is not finite (a
+    flagged source's `TOPK_LN_GAMMA` is NaN, module docstring's `_empty_
+    row`)."""
+    n = name.shape[0]
+    vals = np.empty((n, len(CLASSES)), dtype=np.float64)
+    for ci, cls in enumerate(CLASSES):
+        path = config_module.product_path(config, "fittp", "fit", cls, "source", region=region)
+        with h5py.File(path, "r") as f:
+            cls_name = f["NAME"][:]
+            vals[:, ci] = np.asarray(f["TOPK_LN_GAMMA"][:, 0], dtype=np.float64)
+        if not np.array_equal(cls_name, name):
+            raise ValueError("fittp.cascade [%s]: %s's NAME does not row-align "
+                              "with the cascade's own" % (region, path))
+    abstain = np.any(~np.isfinite(vals), axis=1) | np.all(vals == vals[:, [0]], axis=1)
+    leaning = np.where(abstain, -1, np.argmax(vals, axis=1))
+    return leaning
+
+
 def build_region_imputed(config, region, st, name, n_detected, verdict_measured):
     """The imputed half (spec sec 6.5, 7.3; IMPLEMENTATION_BMSTP_DRAFT.md
     row 2.5): the cascade run on `classify`'s `FLUX_IMPUTED` with
@@ -227,6 +289,25 @@ def build_region_imputed(config, region, st, name, n_detected, verdict_measured)
               % (region, path))
         return None
 
+    # PSI_VOTES' own Gaia-leaning reading (BATCH0917 item 4) needs this
+    # run's own fit files, which carry TOPK_LN_GAMMA only once THIS
+    # region's sweep has (re)written them: an older classify product left
+    # on disk from a PRIOR run (rule 5c: this line re-runs in place) would
+    # otherwise read a stale fit file that has no such column. Same
+    # "not ready yet" treatment as the classify guard above, not a version
+    # stamp -- the fit files this call is ABOUT to read are simply missing
+    # the column it needs.
+    for cls in CLASSES:
+        fit_path = config_module.product_path(config, "fittp", "fit", cls, "source", region=region)
+        with h5py.File(fit_path, "r") as f:
+            has_gamma = "TOPK_LN_GAMMA" in f
+        if not has_gamma:
+            print("fittp.cascade [%s]: %s has no TOPK_LN_GAMMA yet (stale, pre-BATCH0917) -- "
+                  "run the fit loop (PY sesnaimpute.fittp.sweep) and classify again, then "
+                  "'PY sesnaimpute.fittp.cascade' again for the imputed half"
+                  % (region, fit_path))
+            return None
+
     with h5py.File(path, "r") as f:
         classify_name = f["NAME"][:]
         map_class = f["MAP_CLASS"][:]
@@ -235,6 +316,16 @@ def build_region_imputed(config, region, st, name, n_detected, verdict_measured)
     if not np.array_equal(classify_name, name):
         raise ValueError("fittp.cascade [%s]: classify's NAME does not row-align "
                           "with the cascade's own" % region)
+
+    # PSI_VOTES' own measured-half reading (BATCH0917 item 4, reading 3):
+    # this region's own P_VERDICT_MEASURED, already on disk on the CASCADE
+    # product (not `path` above, the classify one) -- `write_region`, the
+    # first cascade run this region made, earlier in this same `build()` call.
+    cascade_path = config_module.product_path(
+        config, "fittp", "classification", "cascade", "source", region=region)
+    with h5py.File(cascade_path, "r") as f:
+        p_verdict_measured = np.asarray(f["P_VERDICT_MEASURED"][:])
+    verdict_idx_measured = np.argmax(p_verdict_measured, axis=1)
 
     p_verdict_imp = np.empty((n, len(crisp.LABELS)), dtype=np.float32)
     all_true = None
@@ -271,19 +362,51 @@ def build_region_imputed(config, region, st, name, n_detected, verdict_measured)
     pyso_half = p_yso > 0.5
     confusion_yso_measured = confusion_yso_by_count(cascade_yso, pyso_half, n_detected)
 
+    # PSI_VOTES, ENTROPY_PSI_VOTES (BATCH0917 item 4): four readings, each
+    # casting one unit (split equally where a reading's own set is not a
+    # single class), the prior atlas and the fit files' own Gaia term
+    # already on disk beside the posterior product this run just opened.
+    density_path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
+    with h5py.File(density_path, "r") as f:
+        density_name = f["NAME"][:]
+        hpx512_source = np.asarray(f["HPX_512"][:], dtype=np.int64)
+    if not np.array_equal(density_name, name):
+        raise ValueError("fittp.cascade [%s]: bmstp.density's NAME does not row-align "
+                          "with the cascade's own" % region)
+
+    prior_leaning = _prior_leaning_vote(config, region, hpx512_source)
+    gaia_leaning = _gaia_leaning_vote(config, region, name)
+
+    votes = np.zeros((n, len(CLASSES)), dtype=np.float64)
+    for leaning in (prior_leaning, gaia_leaning):
+        cast = leaning >= 0
+        votes[cast, leaning[cast]] += 1.0
+    votes += _label_set_vote(verdict_idx_measured)
+    votes += _label_set_vote(verdict_idx)
+    row_sum = votes.sum(axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        p_votes = votes / row_sum[:, None]
+        entropy = -np.nansum(np.where(p_votes > 0, p_votes * np.log(p_votes), 0.0), axis=1)
+    entropy = np.where(row_sum > 0, entropy, np.nan)
+
     return dict(p_verdict=p_verdict_imp, verdict=verdict_imp,
                 confusion_imputed=confusion_imputed,
                 confusion_verdict_imputed_vs_map=confusion_verdict_map,
-                confusion_cascade_yso_measured_vs_pyso=confusion_yso_measured)
+                confusion_cascade_yso_measured_vs_pyso=confusion_yso_measured,
+                psi_votes=votes.astype(np.float32), entropy_psi_votes=entropy.astype(np.float32))
 
 
 def write_region_imputed(path, imputed):
     with h5py.File(path, "a") as f:
-        for name in ("P_VERDICT_IMPUTED", "VERDICT_IMPUTED"):
+        for name in ("P_VERDICT_IMPUTED", "VERDICT_IMPUTED", "PSI_VOTES", "ENTROPY_PSI_VOTES"):
             if name in f:
                 del f[name]
         f.create_dataset("P_VERDICT_IMPUTED", data=imputed["p_verdict"])
         f.create_dataset("VERDICT_IMPUTED", data=imputed["verdict"])
+        # BATCH0917 item 4: (n, 6) CLASSES-order votes (0-4 per row) and the
+        # row's own entropy (nats), normalised to 1, NaN where nothing voted.
+        f.create_dataset("PSI_VOTES", data=imputed["psi_votes"])
+        f.create_dataset("ENTROPY_PSI_VOTES", data=imputed["entropy_psi_votes"])
         f.attrs["CONFUSION_IMPUTED"] = imputed["confusion_imputed"]
         # sec 7.3's first table: imputed verdict against the MAP class.
         f.attrs["CONFUSION_VERDICT_IMPUTED_VS_MAP"] = imputed["confusion_verdict_imputed_vs_map"]

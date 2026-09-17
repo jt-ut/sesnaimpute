@@ -9,7 +9,7 @@ an occupied one. Each source's pixel is `bmstp.density`'s own `HPX_512`
 column (P1); the per-source `P_CLASS`/`P_YSO` come from `fittp.classify`
 (P8), read in source batches (rule 10b) and folded straight into each
 admitted pixel's running sum and count -- P8's `CANDIDATE_FLUX` and
-`FLUX_IMPUTED_COV` are what make a region-sized read of it expensive
+`LOG10_FLUX_IMPUTED_COV` are what make a region-sized read of it expensive
 (W7 review finding 6), so `P_CLASS`/`P_YSO` alone are read here, never
 the whole file. An admitted pixel with no sources of its own keeps
 `N_SOURCES = 0` and a NaN mean, not a borrowed neighbour's -- unlike the

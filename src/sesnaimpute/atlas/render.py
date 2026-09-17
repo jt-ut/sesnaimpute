@@ -309,7 +309,7 @@ def _two_band_fraction(config, region):
     carries no such attribute (`fittp.classify`'s own `st.done` line
     computes it the same way, then prints it, without storing it), so it
     is read here as a direct count over that one small column, never
-    P8's large per-source arrays (`CANDIDATE_FLUX`, `FLUX_IMPUTED_COV`)."""
+    P8's large per-source arrays (`CANDIDATE_FLUX`, `LOG10_FLUX_IMPUTED_COV`)."""
     path = config_module.product_path(config, "fittp", "classification", "posterior", "source", region=region)
     with h5py.File(path, "r") as f:
         n_detected = np.asarray(f["N_DETECTED"][:])

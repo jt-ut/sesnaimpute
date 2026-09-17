@@ -152,6 +152,7 @@ PY sesnaimpute.population.check   # every population/ dataset against its bms/ t
 # --- bmstp (the prior: shape grids per grain, the per-source density table, template weights, the atlas; writes bmstp/) ---
 # Lines are added here as each stage lands (IMPLEMENTATION_BMSTP sec 3).
 PY sesnaimpute.bmstp.shapes   # the star-family, cloud-class and galaxy shape grids, P2/P3/P4 (SPEC_BMSTP sec 4.1, 5.1-5.6)
+PY sesnaimpute.bmstp.cloud_interval   # the sightline's own dense fraction, XI_FRONT/XI_BACK/W_CLOUD, from the cloud interval and the 3-D profile alone (SPEC_BMSTP sec 2)
 PY sesnaimpute.bmstp.template_weights   # the P5 template-weight tables per library (SPEC_BMSTP sec 1.4, 4.1, 4.2, 5.1-5.6)
 PY sesnaimpute.bmstp.density   # the per-source density table, P1: column, grain indices, F_LIM_50, D_PAHC, the six sky densities (SPEC_BMSTP sec 4.1, 5.1-5.6)
 PY sesnaimpute.bmstp.atlas   # the prior atlas, P6: per-pixel Monte Carlo selection and the total-count check (SPEC_BMSTP sec 8)

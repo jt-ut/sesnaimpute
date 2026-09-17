@@ -12,23 +12,21 @@ sigma_lib,L^2` (section 6.1; `sigma_lib,L` read once by the caller from
 in as a plain number), a band SESNA marks detected but whose flux is <= 0
 counted as unmeasured rather than a fabricated datum, and a non-finite
 sigma on a detected band flagging the source rather than carrying a NaN
-normalisation into every template's likelihood. `fit` then solves the
-diffuse/dense extinction-law blend of section 2 self-consistently against
-the fit's own extinction mark (never the sightline column or SESNA's
-published `AK`, spec section 2's ruling): starting from the pure diffuse
-design, it fits every template, reads the source's own extinction back
-from the result (the median over every template's own unconstrained
-a_hat), rebuilds the design at the blend that mark implies, and refits,
-until the source's own mark stops moving by more than 0.01 mag or four
-rounds have run -- a plain loop with a `break`, one design and one set of
-convergence numbers per source, no mask arrays: those existed only to let
-one block-wide loop serve many sources whose own rounds finished at
-different times, and a whole block was fitted at once only because the
-block existed (PARALLEL brief). Every template is then reduced to two
-matrix products at that converged design for the UNCONSTRAINED optimum
-the prior read integrates over, the CLAMPED marks for the reported record
-and the flux prediction, and the non-detection term (plus section 6.1's
-per-source normalisation) at those clamped marks.
+normalisation into every template's likelihood. `fit` then fits every
+template of the class's library at ONE fixed extinction-law design, `w`
+(0 the diffuse design, 1 the dense one, section 2's two-design mixture):
+never a self-consistent solve against the fit's own extinction mark, and
+never the sightline column or SESNA's published `AK`. `fittp.sweep.
+_source_task` calls this twice per source, once per design, and mixes the
+two designs' own evidence by the sightline's own dense fraction (section
+2, `fittp.prior_reader`'s `cell_weight`) -- never by a per-template
+extinction mark. Every template is reduced to two matrix products at
+`w`'s own design for the UNCONSTRAINED optimum the prior read integrates
+over, the CLAMPED marks for the reported record and the flux prediction,
+and the non-detection term (plus section 6.1's per-source normalisation)
+at those clamped marks; the design's own parameter covariance
+(`xtwx_inv`) is returned too, section 1's own covariance identity's
+`within` term.
 """
 
 import math
@@ -76,16 +74,6 @@ SIGMA_CAL_DEX = np.array([
     0.013, 0.013, 0.013, 0.013,   # IRAC -- Reach et al. 2005, astro-ph/0507139
     0.017,                        # MIPS 24 um -- Engelbracht et al. 2007, PASP 119, 994
 ], dtype=np.float64)
-
-#: SPEC_BMSTP_DRAFT.md section 2, owner's ruling 2026-09-10 -- the
-#: self-consistent extinction-law solve's own stopping rule: converged once
-#: the source's own mark moves less than this between rounds, in A_K
-#: magnitudes, or after this many rounds, whichever comes first. A GUARD,
-#: not a stopping rule the fit relies on for accuracy: the chi2 solve
-#: itself is closed-form and always succeeds, this loop is a fixed point on
-#: the extinction-law choice alone (PARALLEL brief).
-LAW_ITER_TOL_MAG = 0.01
-LAW_ITER_MAX = 4
 
 _SQRT2 = np.float32(np.sqrt(2.0))
 
@@ -196,18 +184,16 @@ class Batch:
     detected band, section 6.1/16), the per-band `F_LIM_50` and roll-off
     width `WIDTH_DEX` (`(8,)`, section 6.2), `ln_norm_term` (section 6.1's
     per-source Gaussian normalisation, over only the bands with a finite
-    variance), and `config` (the extinction-law solve's own need, `fit`'s
-    docstring). `fit` fills in, once its self-consistent solve has
-    converged, the design's own extinction column (`ext_col`, `(8,)`) and
-    the source's `sigma_a`, conditional slope and (A_K/A_V) at that design
-    (section 1.3) -- one number each, since every template of a source
-    shares the one design the solve converges to.
+    variance), and `config` (`fit`'s own need, the design's law). `fit`
+    never mutates this object: everything a design's own call produces
+    (`ext_col`, `sigma_a_ak`, `slope_sc_av`, `ak_per_av`, `xtwx_inv`) comes
+    back on its own `Fit`, so the two designs `fittp.sweep._source_task`
+    fits from the SAME `Batch` never clobber each other's.
     """
 
     __slots__ = ("log10_f_obs", "weight", "config",
                  "log10_f_lim50", "width_dex", "nondet_mask",
-                 "n_detected", "flagged", "ln_norm_term",
-                 "ext_col", "s0", "w_sum", "sigma_a_ak", "slope_sc_av", "ak_per_av")
+                 "n_detected", "flagged", "ln_norm_term")
 
     def __init__(self, **kw):
         for key, value in kw.items():
@@ -224,7 +210,14 @@ Fit = namedtuple("Fit", (
     "ln_nondet",              # (m,) f4 -- section 6.2 (clamped marks) plus
                               # section 6.1's per-source ln_norm_term, the one
                               # sum `fittp.sweep` already adds unscaled into ln L_hat
-    "n_law_iter",             # int -- N_LAW_ITER, rounds the law solve ran
+    "flagged",                # bool -- prepare's own flag widened by this design's
+                              # own singular XtWX (never written back to Batch)
+    "ext_col",                # (8,) f4 -- this design's own column, section 1's D
+    "ak_per_av",              # float -- (A_K/A_V) at this design's own blend weight
+    "sigma_a_ak",             # float -- sigma_a in A_K at this design
+    "slope_sc_av",            # float -- d(SC)/d(A_V) at this design
+    "xtwx_inv",                # (2, 2) f8 -- Sigma, this design's own parameter
+                              # covariance, section 1's covariance identity
 ))
 
 
@@ -318,39 +311,24 @@ def prepare(config, flux, sigma, origin, sigma_lib_l, f_lim50, width_dex):
                  ln_norm_term=ln_norm_term)
 
 
-def fit(batch, log10_f_ref):
+def fit(batch, log10_f_ref, w):
     """The closed-form fit of SPEC_BMSTP_DRAFT.md section 6.1 over every
     template of `log10_f_ref` (`(m, 8)` float32, this class's shared
-    register) at this ONE source, `r = log10_f_obs - log10_f_ref`, with the
-    extinction law of section 2 solved self-consistently first (owner's
-    ruling 2026-09-10, row 13):
+    register) at this ONE source and ONE fixed extinction-law design `w`
+    (0 the diffuse design, 1 the dense one; section 2's two-design
+    mixture -- `fittp.sweep._source_task` calls this twice, once per
+    design, and mixes the two evidence sums itself through the sightline's
+    own dense fraction, never through a per-template extinction mark):
+    `r = log10_f_obs - log10_f_ref`.
 
-    - The design this source's whole library shares needs one blend
-      weight, so the solve starts at the pure diffuse design (`a = 0`)
-      and, each round, fits every template at that design, takes the
-      MEDIAN of every template's own unconstrained `a_hat` (`(m,)` values
-      collapsed to this source's own extinction, since no one hypothesis
-      is privileged over the others), sets `w = law_dense_weight(that
-      median)`, and rebuilds the design at `w` -- a plain loop with a
-      `break` once the median moves by less than `LAW_ITER_TOL_MAG`
-      between rounds, or after `LAW_ITER_MAX` rounds, whichever comes
-      first; `n_law_iter` is the round this source's own median stopped
-      moving (`LAW_ITER_MAX` if it never did). No per-source mask array:
-      one source, one design, one convergence flag (PARALLEL brief -- the
-      block form's `still_open`/`newly_converged` bookkeeping existed only
-      to let many sources' rounds, finishing at different times, share one
-      loop). Never `AK_SESNA` or the sightline column (row 13;
-      `classify.py`'s claim that `AK_SESNA` is unread by `fittp` is now
-      true).
-    - At the converged design, `chi2_min = r^T P r` and the UNCONSTRAINED
-      `(Av_hat, SC_hat) = r M^T` at every template, `r`/`P`/`M` kept
-      float64 (`P` is a projector built from cancelling O(weight)
-      ~1e3-1e4 terms; a float32 `P` leaves `P @ X` at ~1e-4 instead of
-      ~0, which fails identity (i) -- measured): `a_hat`, `log10_b_hat`
-      float64; `chi2_min` float32. The design solve is one plain 2x2
-      matrix inverse per source (`xtwx`, `(2, 2)`), and the marks are one
-      `(m, 8) @ (8, 2)` matmul -- no per-call transpose, `M` stored
-      `(2, 8)` so `r @ M.T` needs none either.
+    - `chi2_min = r^T P r` and the UNCONSTRAINED `(Av_hat, SC_hat) = r M^T`
+      at every template, `r`/`P`/`M` kept float64 (`P` is a projector built
+      from cancelling O(weight) ~1e3-1e4 terms; a float32 `P` leaves
+      `P @ X` at ~1e-4 instead of ~0, which fails identity (i) -- measured):
+      `a_hat`, `log10_b_hat` float64; `chi2_min` float32. The design solve
+      is one plain 2x2 matrix inverse per source (`xtwx`, `(2, 2)`), and
+      the marks are one `(m, 8) @ (8, 2)` matmul -- no per-call transpose,
+      `M` stored `(2, 8)` so `r @ M.T` needs none either.
     - The CLAMPED marks, `Av` restricted to `[0, 75/(A_K/A_V)_s]`: because
       the gray column is one constant in every band, the least-squares
       residual is orthogonal to both design columns, so re-solving `SC` at
@@ -371,11 +349,12 @@ def fit(batch, log10_f_ref):
       without any change to that formula.
 
     `batch.flagged` (fewer than two detected bands or a non-finite sigma,
-    `prepare`'s own flags) is widened here by a singular design at the
-    converged blend, and `batch.ext_col`/`sigma_a_ak`/`slope_sc_av`/
-    `ak_per_av` are filled in at that same converged design for
-    `fittp.sweep`'s prior-read conversion and flux reconstruction. Every
-    output is NaN throughout if the source ends up flagged.
+    `prepare`'s own flags) is widened by this design's own singular XtWX
+    into the RETURNED `flagged`, never written back to `batch`, so the
+    other design's own call reads `prepare`'s own flag unchanged; likewise
+    `ext_col`/`sigma_a_ak`/`slope_sc_av`/`ak_per_av`/`xtwx_inv` are this
+    design's own numbers, returned on `Fit`, not stashed on the shared
+    `batch`. Every output is NaN throughout if the source ends up flagged.
     """
     config = batch.config
     log10_f_ref = np.asarray(log10_f_ref, dtype=np.float32)
@@ -385,52 +364,33 @@ def fit(batch, log10_f_ref):
     weight = batch.weight                              # (8,) float64
     diag = np.arange(N_BANDS)
 
-    a_source = 0.0     # section 2: start at the diffuse design
-    n_law_iter = LAW_ITER_MAX
-    source_flagged = bool(batch.flagged)
+    kappa_k = population_selection.kappa_hybrid(config, w)          # (8,)
+    ak_per_av = float(population_selection.ak_per_av(config, w))
+    ext_col = -0.4 * kappa_k * ak_per_av                                 # (8,)
 
-    for it in range(1, LAW_ITER_MAX + 1):
-        w_ramp = population_selection.law_dense_weight(a_source)
-        kappa_k = population_selection.kappa_hybrid(config, w_ramp)          # (8,)
-        ak_per_av = float(population_selection.ak_per_av(config, w_ramp))
-        ext_col = -0.4 * kappa_k * ak_per_av                                 # (8,)
+    design = np.empty((N_BANDS, 2), dtype=np.float64)
+    design[:, 0] = ext_col
+    design[:, 1] = GRAY_COLUMN
 
-        design = np.empty((N_BANDS, 2), dtype=np.float64)
-        design[:, 0] = ext_col
-        design[:, 1] = GRAY_COLUMN
+    wx = design * weight[:, None]                    # (8, 2)
+    xtwx = wx.T @ design                              # (2, 2)
+    det_xtwx = xtwx[0, 0] * xtwx[1, 1] - xtwx[0, 1] * xtwx[1, 0]
+    source_flagged = bool(batch.flagged) or det_xtwx <= 0.0
+    xtwx_safe = xtwx if not source_flagged else np.eye(2)
+    xtwx_inv = np.linalg.inv(xtwx_safe)
 
-        wx = design * weight[:, None]                    # (8, 2)
-        xtwx = wx.T @ design                              # (2, 2)
-        det_xtwx = xtwx[0, 0] * xtwx[1, 1] - xtwx[0, 1] * xtwx[1, 0]
-        source_flagged = bool(batch.flagged) or det_xtwx <= 0.0
-        xtwx_safe = xtwx if not source_flagged else np.eye(2)
-        xtwx_inv = np.linalg.inv(xtwx_safe)
-
-        m_mat = xtwx_inv @ wx.T                           # (2, 8), (XtWX)^-1 XtW
-        marks = r @ m_mat.T                               # (m, 2)
-        av_hat = marks[:, 0]
-        sc_hat = marks[:, 1]
-        a_hat = av_hat * ak_per_av                        # (m,)
-
-        # every reader of law_dense_weight elsewhere in the package (gaia,
-        # atlas, the prior) evaluates it at a physical, non-negative
-        # extinction; the unconstrained a_hat can dip below zero on a
-        # near-zero-extinction source's fit noise, which the ramp's own
-        # log(a/LAW_RAMP_LO) has no value for -- floored at zero before
-        # driving the next round's design, never before the reported marks.
-        a_med = float(np.median(np.maximum(a_hat, 0.0)))
-        converged = abs(a_med - a_source) < LAW_ITER_TOL_MAG
-        a_source = a_med
-        n_law_iter = it
-        if converged:
-            break
+    m_mat = xtwx_inv @ wx.T                           # (2, 8), (XtWX)^-1 XtW
+    marks = r @ m_mat.T                               # (m, 2)
+    av_hat = marks[:, 0]
+    sc_hat = marks[:, 1]
+    a_hat = av_hat * ak_per_av                        # (m,)
 
     p_mat = -(wx @ m_mat)                                 # (8, 8)
     p_mat[diag, diag] += weight
 
     # sigma_a^2 = [(XtWX)^-1]_aa (section 1.3), converted A_V -> A_K by the
     # same ratio; the conditional slope d SC / d A_V from the same matrix,
-    # at the converged design.
+    # at this design.
     sigma_a_ak = float(np.sqrt(xtwx_inv[0, 0]) * ak_per_av)
     slope_sc_av = float(xtwx_inv[1, 0] / xtwx_inv[0, 0])
 
@@ -440,11 +400,7 @@ def fit(batch, log10_f_ref):
     # docstring above for the algebra).
     s0 = float((weight * ext_col).sum())
     w_sum = float(weight.sum())
-
-    batch.flagged = source_flagged
-    batch.ext_col = ext_col.astype(np.float32)
-    batch.s0, batch.w_sum = s0, w_sum
-    batch.sigma_a_ak, batch.slope_sc_av, batch.ak_per_av = sigma_a_ak, slope_sc_av, ak_per_av
+    ext_col32 = ext_col.astype(np.float32)
 
     rp = r @ p_mat
     chi2_min = (r * rp).sum(axis=1).astype(np.float32)
@@ -465,11 +421,11 @@ def fit(batch, log10_f_ref):
     # threaded back through the clamp above.
     av_clamped32 = av_clamped.astype(np.float32)
     sc_clamped32 = sc_clamped.astype(np.float32)
-    ln_nondet = _ln_nondet(batch.ext_col, log10_f_ref, av_clamped32, sc_clamped32,
+    ln_nondet = _ln_nondet(ext_col32, log10_f_ref, av_clamped32, sc_clamped32,
                             batch.log10_f_lim50, batch.width_dex, batch.nondet_mask)
     ln_nondet = ln_nondet + np.float32(batch.ln_norm_term)
 
-    if batch.flagged:
+    if source_flagged:
         chi2_min = np.full(m, np.nan, dtype=np.float32)
         a_hat = np.full(m, np.nan, dtype=np.float64)
         log10_b_hat = np.full(m, np.nan, dtype=np.float64)
@@ -479,4 +435,6 @@ def fit(batch, log10_f_ref):
 
     return Fit(chi2_min=chi2_min, a_hat=a_hat, log10_b_hat=log10_b_hat,
                a_hat_clamped=a_hat_clamped, log10_b_hat_clamped=log10_b_hat_clamped,
-               frac_clamped=frac_clamped, ln_nondet=ln_nondet, n_law_iter=n_law_iter)
+               frac_clamped=frac_clamped, ln_nondet=ln_nondet, flagged=source_flagged,
+               ext_col=ext_col32, ak_per_av=ak_per_av, sigma_a_ak=sigma_a_ak,
+               slope_sc_av=slope_sc_av, xtwx_inv=xtwx_inv)
