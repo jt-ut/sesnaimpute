@@ -16,9 +16,13 @@ import os
 import h5py
 import numpy as np
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+
+_STEM = "column-grid_sesna_survey"
 
 #: The ladder's floor, in A_K magnitudes -- fixed, not measured.
 AK_FLOOR = 0.037
@@ -76,7 +80,7 @@ def build(config, regions=None):
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with h5py.File(out_path, "w") as f:
             f.attrs["GRANULE"] = "survey"
-            f.create_dataset("A_NODES", data=node_arr.astype(np.float64))
+            build_module.write_dataset(f, "A_NODES", node_arr.astype(np.float64), *REGISTRY[(_STEM, "A_NODES")])
 
         st.done(out_path, n_nodes=int(node_arr.size), floor=float(node_arr[0]), cap=float(node_arr[-1]))
     print("column_grid: floor=%.6f cap=%.6f step=%g dex -> %d nodes -> %s"

@@ -115,14 +115,18 @@ from joblib import Parallel, delayed
 from scipy.special import erf
 
 from sesnaimpute import astro_utils
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import constants
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import anchor_tiles
+
+_STEM = "young-stars_anchors_hpx512"
 from sesnaimpute.population import field_stars
 from sesnaimpute.population import selection
 from sesnaimpute.population import yso
@@ -711,10 +715,13 @@ def _write_product(config, region, result):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "hpx512"
-        f.create_dataset("HPX_PIX_512", data=result["pixels"].astype(np.int64))
-        f.create_dataset("N_G_YOUNG", data=result["n_g_young"].astype(np.float32))
-        f.create_dataset("N_KS_YOUNG", data=result["n_ks_young"].astype(np.float32))
-        f.create_dataset("N_YOUNG_TOTAL", data=result["n_young_total"].astype(np.float64))
+        for name, data in (
+            ("HPX_PIX_512", result["pixels"].astype(np.int64)),
+            ("N_G_YOUNG", result["n_g_young"].astype(np.float32)),
+            ("N_KS_YOUNG", result["n_ks_young"].astype(np.float32)),
+            ("N_YOUNG_TOTAL", result["n_young_total"].astype(np.float64)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
     return path
 
 

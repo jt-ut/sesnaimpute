@@ -61,6 +61,41 @@ REGISTRY = {
         "90 the source's own 90%-completeness flux, 91 the median "
         "90%-completeness flux of its nearest sky neighbours."),
 
+    # population.young_stars -- young-stars_anchors_hpx512: the model's own
+    # expected young-star count in each STAR anchor pixel, by magnitude,
+    # subtracted from the observed Gaia/2MASS histograms before fitting
+    # the field-star weight.
+    ("young-stars_anchors_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "This region's own occupied nside-512 pixel numbers (nested "
+        "ordering), the same pixels the anchor histogram product shares. "
+        "Row i here is row i of N_YOUNG_TOTAL."),
+    ("young-stars_anchors_hpx512", "N_G_YOUNG"): ("stars",
+        "For the matching pixel in HPX_PIX_512 and each Gaia G magnitude "
+        "bin of the anchor histogram product's own G_EDGES, the model's "
+        "expected number of 1-Myr young stars at that apparent magnitude, "
+        "weighted by the Gaia detection probability at that magnitude and "
+        "summed to N_YOUNG_TOTAL for the pixel."),
+    ("young-stars_anchors_hpx512", "N_KS_YOUNG"): ("stars",
+        "For the matching pixel in HPX_PIX_512 and each 2MASS Ks magnitude "
+        "bin of the anchor histogram product's own KS_EDGES, the model's "
+        "expected number of 1-Myr young stars at that apparent magnitude, "
+        "summed to N_YOUNG_TOTAL for the pixel together with the stars "
+        "falling outside KS_EDGES and above the model's own 1.4 solar "
+        "mass top."),
+    ("young-stars_anchors_hpx512", "N_YOUNG_TOTAL"): ("stars",
+        "For the matching pixel in HPX_PIX_512, the model's total expected "
+        "number of young stars belonging to this region's cloud: the "
+        "young-star law integrated over the pixel's own column map, times "
+        "the pixel's solid angle, times the square of the cloud's own "
+        "share of the line-of-sight column."),
+
+    # population.column_grid -- column-grid_sesna_survey: the fixed column
+    # ladder every class tabulates its column kernel on.
+    ("column-grid_sesna_survey", "A_NODES"): ("mag A_K",
+        "The fixed, evenly-log10-spaced column ladder every class's "
+        "column kernel is tabulated on, from its floor to its cap, 0.02 "
+        "dex per step."),
+
     # sky.derived.column -- the adopted (gas) column and the extinction
     # (star-light) column, each at source and sightline granule, plus the
     # Herschel/Planck disagreement check.
