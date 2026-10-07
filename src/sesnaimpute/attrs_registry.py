@@ -61,6 +61,56 @@ REGISTRY = {
         "90 the source's own 90%-completeness flux, 91 the median "
         "90%-completeness flux of its nearest sky neighbours."),
 
+    # sky.derived.gaia_match -- match_gaia_source: the SESNA-Gaia crossmatch
+    # and its congruence term G_S, per source.
+    ("match_gaia_source", "G_S"): ("dimensionless",
+        "The Gaia congruence term for this source: the likelihood ratio of "
+        "its Gaia match data under a true counterpart versus chance "
+        "alignment, renormalized at even prior odds (L / (1+L)). Close to "
+        "1 means the match data strongly favor a true Gaia counterpart; "
+        "close to 0.5 means the two are equally favored; low values favor "
+        "chance alignment, including the case of no candidate at all."),
+    ("match_gaia_source", "SEP_ARCSEC"): ("arcsec",
+        "The angular separation to the nearest Gaia DR3 candidate within 3 "
+        "arcsec of this source, after propagating that candidate's own "
+        "proper motion (where it has one) to the survey epoch. NaN where "
+        "no Gaia candidate falls within that radius."),
+    ("match_gaia_source", "GAIA_SOURCE_ID"): ("Gaia DR3 source_id",
+        "The matched candidate's own Gaia DR3 catalog identifier. -1 "
+        "where no candidate falls within SEP_ARCSEC's 3 arcsec radius."),
+    ("match_gaia_source", "G_MAG"): ("mag Gaia G",
+        "The matched candidate's Gaia G-band magnitude. NaN where no "
+        "candidate falls within SEP_ARCSEC's 3 arcsec radius."),
+    ("match_gaia_source", "BP_MAG"): ("mag Gaia BP",
+        "The matched candidate's Gaia BP-band magnitude. NaN where no "
+        "candidate falls within SEP_ARCSEC's 3 arcsec radius."),
+    ("match_gaia_source", "RP_MAG"): ("mag Gaia RP",
+        "The matched candidate's Gaia RP-band magnitude. NaN where no "
+        "candidate falls within SEP_ARCSEC's 3 arcsec radius."),
+    ("match_gaia_source", "PLX_MAS"): ("mas",
+        "The matched candidate's Gaia parallax. NaN where no candidate "
+        "falls within SEP_ARCSEC's 3 arcsec radius."),
+    ("match_gaia_source", "E_PLX_MAS"): ("mas",
+        "The 1-sigma uncertainty on PLX_MAS. NaN where no candidate falls "
+        "within SEP_ARCSEC's 3 arcsec radius."),
+    ("match_gaia_source", "RUWE"): ("dimensionless",
+        "The matched candidate's Gaia renormalized unit weight error, a "
+        "quality indicator for its astrometric solution (values well "
+        "above 1.4 suggest a poor single-star fit). NaN where no "
+        "candidate falls within SEP_ARCSEC's 3 arcsec radius."),
+    ("match_gaia_source", "NO_PM"): ("boolean",
+        "True where the matched candidate carries no Gaia proper-motion "
+        "solution, so it was matched at the Gaia table's own 2016.0 epoch "
+        "directly rather than propagated to the survey epoch. False where "
+        "there is no match at all."),
+    ("match_gaia_source", "RHO_PER_ARCSEC2"): ("per arcsec^2",
+        "The local all-sky Gaia source surface density (G < 21) at this "
+        "source's own nside-512 pixel, read from the Gaia anchor-count "
+        "product: that pixel's Gaia star count divided by its solid "
+        "angle, converted to square arcseconds. Used as the chance-"
+        "alignment rate in G_S's own likelihood ratio, defined for every "
+        "source regardless of whether it has a matched candidate."),
+
     # sky.derived.profile -- profile_edenhofer_sightline (per region) and
     # depth_edenhofer_region (survey-wide): the Edenhofer et al. (2023/2024)
     # cumulative extinction profile along each sightline, and each region's

@@ -67,11 +67,15 @@ import pandas as pd
 from joblib import Parallel, delayed
 from scipy.optimize import minimize, minimize_scalar
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.granules import access as granule_access
+
+_STEM = "match_gaia_source"
 
 # Gaia DR3 astrometric reference epoch (VizieR I/355/gaiadr3; region_pull.py's
 # GAIA_EPOCH). Every candidate position in the download's CSV (RAdeg/DEdeg) is
@@ -404,17 +408,20 @@ def _write_region(config, region, matched, rho, g_s, s1, s2, eps):
         f.attrs["S2_ARCSEC"] = s2
         f.attrs["EPS_HALO"] = eps
         f.attrs["R_MAX_ARCSEC"] = R_MAX_ARCSEC
-        f.create_dataset("G_S", data=g_s.astype(np.float32))
-        f.create_dataset("SEP_ARCSEC", data=matched["sep_arcsec"].astype(np.float32))
-        f.create_dataset("GAIA_SOURCE_ID", data=matched["gaia_source_id"].astype(np.int64))
-        f.create_dataset("G_MAG", data=matched["g_mag"].astype(np.float32))
-        f.create_dataset("BP_MAG", data=matched["bp_mag"].astype(np.float32))
-        f.create_dataset("RP_MAG", data=matched["rp_mag"].astype(np.float32))
-        f.create_dataset("PLX_MAS", data=matched["plx_mas"].astype(np.float32))
-        f.create_dataset("E_PLX_MAS", data=matched["e_plx_mas"].astype(np.float32))
-        f.create_dataset("RUWE", data=matched["ruwe"].astype(np.float32))
-        f.create_dataset("NO_PM", data=matched["no_pm"].astype(bool))
-        f.create_dataset("RHO_PER_ARCSEC2", data=rho.astype(np.float32))
+        for name, data in (
+            ("G_S", g_s.astype(np.float32)),
+            ("SEP_ARCSEC", matched["sep_arcsec"].astype(np.float32)),
+            ("GAIA_SOURCE_ID", matched["gaia_source_id"].astype(np.int64)),
+            ("G_MAG", matched["g_mag"].astype(np.float32)),
+            ("BP_MAG", matched["bp_mag"].astype(np.float32)),
+            ("RP_MAG", matched["rp_mag"].astype(np.float32)),
+            ("PLX_MAS", matched["plx_mas"].astype(np.float32)),
+            ("E_PLX_MAS", matched["e_plx_mas"].astype(np.float32)),
+            ("RUWE", matched["ruwe"].astype(np.float32)),
+            ("NO_PM", matched["no_pm"].astype(bool)),
+            ("RHO_PER_ARCSEC2", rho.astype(np.float32)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
 
 
 # --------------------------------------------------------------- one region
