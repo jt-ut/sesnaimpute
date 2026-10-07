@@ -16,7 +16,7 @@ dataset, when a dataset it finds has no entry here.
 REGISTRY = {
 
     # catalog.curated -- sources_sesna_source: the per-region curated SESNA
-    # catalogue, one row per source.
+    # catalog, one row per source.
     ("sources_sesna_source", "NAME"): ("source name",
         "The source's name from the SESNA catalog, in this file's row order."),
     ("sources_sesna_source", "RA_DEG"): ("deg",
@@ -67,21 +67,20 @@ REGISTRY = {
     # the field-star weight.
     ("young-stars_anchors_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
         "This region's own occupied nside-512 pixel numbers (nested "
-        "ordering), the same pixels the anchor histogram product shares. "
-        "Row i here is row i of N_YOUNG_TOTAL."),
+        "ordering). Row i here is row i of N_YOUNG_TOTAL."),
     ("young-stars_anchors_hpx512", "N_G_YOUNG"): ("stars",
         "For the matching pixel in HPX_PIX_512 and each Gaia G magnitude "
-        "bin of the anchor histogram product's own G_EDGES, the model's "
-        "expected number of 1-Myr young stars at that apparent magnitude, "
-        "weighted by the Gaia detection probability at that magnitude and "
-        "summed to N_YOUNG_TOTAL for the pixel."),
+        "bin of the STAR anchor's own half-magnitude binning grid, the "
+        "model's expected number of 1-Myr young stars at that apparent "
+        "magnitude, weighted by the Gaia detection probability at that "
+        "magnitude and summed to N_YOUNG_TOTAL for the pixel."),
     ("young-stars_anchors_hpx512", "N_KS_YOUNG"): ("stars",
-        "For the matching pixel in HPX_PIX_512 and each 2MASS Ks magnitude "
-        "bin of the anchor histogram product's own KS_EDGES, the model's "
-        "expected number of 1-Myr young stars at that apparent magnitude, "
-        "summed to N_YOUNG_TOTAL for the pixel together with the stars "
-        "falling outside KS_EDGES and above the model's own 1.4 solar "
-        "mass top."),
+        "For the matching pixel in HPX_PIX_512 and each 2MASS Ks "
+        "magnitude bin of the STAR anchor's own half-magnitude binning "
+        "grid, the model's expected number of 1-Myr young stars at that "
+        "apparent magnitude, summed to N_YOUNG_TOTAL for the pixel "
+        "together with the stars fainter than that grid's own faint "
+        "edge and the stars above the model's own 1.4 solar mass top."),
     ("young-stars_anchors_hpx512", "N_YOUNG_TOTAL"): ("stars",
         "For the matching pixel in HPX_PIX_512, the model's total expected "
         "number of young stars belonging to this region's cloud: the "
@@ -107,8 +106,8 @@ REGISTRY = {
         "by the cell's own width in u. Integrating P_XI times the cell "
         "width over all cells gives 1."),
 
-    # bmstp.atlas -- prior_atlas_hpx512 (P6): the prior atlas, per admitted
-    # nside-512 pixel, every class's catalogued and intrinsic density and
+    # bmstp.atlas -- prior_atlas_hpx512: the prior atlas, per admitted
+    # nside-512 pixel, every class's cataloged and intrinsic density and
     # their grid breakdowns.
     ("prior_atlas_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
         "This region's own admitted nside-512 pixel numbers (nested "
@@ -118,7 +117,7 @@ REGISTRY = {
         "For the matching pixel in HPX_PIX_512, the adopted extinction "
         "column every class's density is dimmed by."),
     ("prior_atlas_hpx512", "COVERAGE"): ("dimensionless",
-        "For the matching pixel in HPX_PIX_512, the catalogue's own "
+        "For the matching pixel in HPX_PIX_512, the catalog's own "
         "observed footprint fraction (the catalog coverage product): "
         "what share of this pixel SESNA was actually extracted on."),
     ("prior_atlas_hpx512", "F_LIM_50_PIX_MJY"): ("mJy",
@@ -127,189 +126,273 @@ REGISTRY = {
         "project's own band order), the pixel's own marginalized "
         "50%-completeness flux limit."),
     ("prior_atlas_hpx512", "N_CAT_STAR"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the STAR population's "
-        "own catalogued density: its dimmed intrinsic density "
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "the STAR population: its dimmed intrinsic density "
         "(INTENSITY_STAR) weighted by the probability of clearing "
         "SESNA's two-of-eight-band detection rule at this pixel's own "
         "depth."),
     ("prior_atlas_hpx512", "N_CAT_AGB"): ("objects per square degree",
-        "The same catalogued density as N_CAT_STAR, for the AGB "
-        "population."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "the AGB population: its dimmed intrinsic density weighted by "
+        "the probability of clearing SESNA's two-of-eight-band detection "
+        "rule at this pixel's own depth."),
     ("prior_atlas_hpx512", "N_CAT_PAHC"): ("objects per square degree",
-        "The same catalogued density as N_CAT_STAR, for the PAHC "
-        "population."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "the PAHC population: its dimmed intrinsic density weighted by "
+        "the probability of clearing SESNA's two-of-eight-band detection "
+        "rule at this pixel's own depth."),
     ("prior_atlas_hpx512", "N_CAT_GAL"): ("objects per square degree",
-        "The same catalogued density as N_CAT_STAR, for the background-"
-        "galaxy population."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "the background-galaxy population: its dimmed intrinsic density "
+        "weighted by the probability of clearing SESNA's two-of-eight-"
+        "band detection rule at this pixel's own depth."),
     ("prior_atlas_hpx512", "N_CAT_YSO"): ("objects per square degree",
-        "The same catalogued density as N_CAT_STAR, for the YSO "
-        "population."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "the YSO population: its dimmed intrinsic density weighted by "
+        "the probability of clearing SESNA's two-of-eight-band detection "
+        "rule at this pixel's own depth."),
     ("prior_atlas_hpx512", "N_CAT_H2S"): ("objects per square degree",
-        "The same catalogued density as N_CAT_STAR, for the H2-shock "
-        "population."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "the H2-shock population: its dimmed intrinsic density weighted "
+        "by the probability of clearing SESNA's two-of-eight-band "
+        "detection rule at this pixel's own depth."),
     ("prior_atlas_hpx512", "INTENSITY_STAR"): ("objects per square degree",
         "For the matching pixel in HPX_PIX_512, the STAR population's "
         "own dimmed intrinsic density at this pixel's own column, before "
-        "the catalogued-detection probability N_CAT_STAR applies."),
+        "the cataloged-detection probability N_CAT_STAR applies."),
     ("prior_atlas_hpx512", "INTENSITY_AGB"): ("objects per square degree",
-        "The same dimmed intrinsic density as INTENSITY_STAR, for the "
-        "AGB population."),
+        "For the matching pixel in HPX_PIX_512, the AGB population's own "
+        "dimmed intrinsic density at this pixel's own column, before the "
+        "cataloged-detection probability N_CAT_AGB applies."),
     ("prior_atlas_hpx512", "INTENSITY_PAHC"): ("objects per square degree",
-        "The same dimmed intrinsic density as INTENSITY_STAR, for the "
-        "PAHC population."),
+        "For the matching pixel in HPX_PIX_512, the PAHC population's "
+        "own dimmed intrinsic density at this pixel's own column, before "
+        "the cataloged-detection probability N_CAT_PAHC applies."),
     ("prior_atlas_hpx512", "INTENSITY_GAL"): ("objects per square degree",
-        "The same dimmed intrinsic density as INTENSITY_STAR, for the "
-        "background-galaxy population."),
+        "For the matching pixel in HPX_PIX_512, the background-galaxy "
+        "population's own dimmed intrinsic density at this pixel's own "
+        "column, before the cataloged-detection probability N_CAT_GAL "
+        "applies."),
     ("prior_atlas_hpx512", "INTENSITY_YSO"): ("objects per square degree",
-        "The same dimmed intrinsic density as INTENSITY_STAR, for the "
-        "YSO population."),
+        "For the matching pixel in HPX_PIX_512, the YSO population's own "
+        "dimmed intrinsic density at this pixel's own column, before the "
+        "cataloged-detection probability N_CAT_YSO applies."),
     ("prior_atlas_hpx512", "INTENSITY_H2S"): ("objects per square degree",
-        "The same dimmed intrinsic density as INTENSITY_STAR, for the "
-        "H2-shock population, after the region's own knot-rate "
-        "convolution."),
+        "For the matching pixel in HPX_PIX_512, the H2-shock "
+        "population's own dimmed intrinsic density at this pixel's own "
+        "column, after the region's own knot-rate convolution and before "
+        "the cataloged-detection probability N_CAT_H2S applies."),
     ("prior_atlas_hpx512", "N_ABOVE_STAR"): ("objects per square degree",
         "For the matching pixel in HPX_PIX_512, how much of the STAR "
         "population's own intrinsic density (INTENSITY_STAR) lies above "
         "this pixel's own I2 (4.5 micron) 50%-completeness flux, read "
         "directly from the class's own stored shape rather than from "
-        "the catalogued-detection fraction."),
+        "the cataloged-detection fraction."),
     ("prior_atlas_hpx512", "N_ABOVE_AGB"): ("objects per square degree",
-        "The same above-the-limit density as N_ABOVE_STAR, for the AGB "
-        "population."),
+        "For the matching pixel in HPX_PIX_512, how much of the AGB "
+        "population's own intrinsic density lies above this pixel's own "
+        "I2 (4.5 micron) 50%-completeness flux, read directly from the "
+        "class's own stored shape rather than from the cataloged-"
+        "detection fraction."),
     ("prior_atlas_hpx512", "N_ABOVE_PAHC"): ("objects per square degree",
-        "The same above-the-limit density as N_ABOVE_STAR, for the "
-        "PAHC population, using the pixel's own 8 micron depth cut in "
-        "place of the I2 limit."),
+        "For the matching pixel in HPX_PIX_512, how much of the PAHC "
+        "population's own intrinsic density lies above this pixel's own "
+        "8 micron depth cut, read directly from the class's own stored "
+        "shape rather than from the cataloged-detection fraction."),
     ("prior_atlas_hpx512", "N_ABOVE_GAL"): ("objects per square degree",
-        "The same above-the-limit density as N_ABOVE_STAR, for the "
-        "background-galaxy population."),
+        "For the matching pixel in HPX_PIX_512, how much of the "
+        "background-galaxy population's own intrinsic density lies "
+        "above this pixel's own I2 (4.5 micron) 50%-completeness flux, "
+        "read directly from the class's own stored shape rather than "
+        "from the cataloged-detection fraction."),
     ("prior_atlas_hpx512", "N_ABOVE_YSO"): ("objects per square degree",
-        "The same above-the-limit density as N_ABOVE_STAR, for the YSO "
-        "population."),
+        "For the matching pixel in HPX_PIX_512, how much of the YSO "
+        "population's own intrinsic density lies above this pixel's own "
+        "I2 (4.5 micron) 50%-completeness flux, read directly from the "
+        "class's own stored shape rather than from the cataloged-"
+        "detection fraction."),
     ("prior_atlas_hpx512", "N_ABOVE_H2S"): ("objects per square degree",
-        "The same above-the-limit density as N_ABOVE_STAR, for the "
-        "H2-shock population."),
+        "For the matching pixel in HPX_PIX_512, how much of the "
+        "H2-shock population's own intrinsic density lies above this "
+        "pixel's own I2 (4.5 micron) 50%-completeness flux, read "
+        "directly from the class's own stored shape rather than from "
+        "the cataloged-detection fraction."),
     ("prior_atlas_hpx512", "N_CAT_BRIGHT3_STAR"): ("objects per square degree",
-        "The same catalogued density as N_CAT_STAR, restricted to STAR "
-        "members predicted brighter than three times this pixel's own "
-        "I2 50%-completeness limit, where completeness is effectively 1 "
-        "on both the catalogued and the predicted side."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "STAR members predicted brighter than three times this pixel's "
+        "own I2 50%-completeness limit, where completeness is "
+        "effectively 1 on both the cataloged and the predicted side."),
     ("prior_atlas_hpx512", "N_CAT_BRIGHT3_AGB"): ("objects per square degree",
-        "The same bright-end catalogued density as N_CAT_BRIGHT3_STAR, "
-        "for the AGB population."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "AGB members predicted brighter than three times this pixel's "
+        "own I2 50%-completeness limit, where completeness is "
+        "effectively 1 on both the cataloged and the predicted side."),
     ("prior_atlas_hpx512", "N_CAT_BRIGHT3_PAHC"): ("objects per square degree",
-        "The same bright-end catalogued density as N_CAT_BRIGHT3_STAR, "
-        "for the PAHC population."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "PAHC members predicted brighter than three times this pixel's "
+        "own I2 50%-completeness limit, where completeness is "
+        "effectively 1 on both the cataloged and the predicted side."),
     ("prior_atlas_hpx512", "N_CAT_BRIGHT3_GAL"): ("objects per square degree",
-        "The same bright-end catalogued density as N_CAT_BRIGHT3_STAR, "
-        "for the background-galaxy population."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "background-galaxy members predicted brighter than three times "
+        "this pixel's own I2 50%-completeness limit, where completeness "
+        "is effectively 1 on both the cataloged and the predicted side."),
     ("prior_atlas_hpx512", "N_CAT_BRIGHT3_YSO"): ("objects per square degree",
-        "The same bright-end catalogued density as N_CAT_BRIGHT3_STAR, "
-        "for the YSO population."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "YSO members predicted brighter than three times this pixel's "
+        "own I2 50%-completeness limit, where completeness is "
+        "effectively 1 on both the cataloged and the predicted side."),
     ("prior_atlas_hpx512", "N_CAT_BRIGHT3_H2S"): ("objects per square degree",
-        "The same bright-end catalogued density as N_CAT_BRIGHT3_STAR, "
-        "for the H2-shock population."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "H2-shock members predicted brighter than three times this "
+        "pixel's own I2 50%-completeness limit, where completeness is "
+        "effectively 1 on both the cataloged and the predicted side."),
     ("prior_atlas_hpx512", "N_CAT_BRIGHT10_STAR"): ("objects per square degree",
-        "The same catalogued density as N_CAT_STAR, restricted to STAR "
-        "members predicted brighter than ten times this pixel's own I2 "
-        "50%-completeness limit."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "STAR members predicted brighter than ten times this pixel's "
+        "own I2 50%-completeness limit, where completeness is "
+        "effectively 1 on both the cataloged and the predicted side."),
     ("prior_atlas_hpx512", "N_CAT_BRIGHT10_AGB"): ("objects per square degree",
-        "The same bright-end catalogued density as N_CAT_BRIGHT10_STAR, "
-        "for the AGB population."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "AGB members predicted brighter than ten times this pixel's own "
+        "I2 50%-completeness limit, where completeness is effectively 1 "
+        "on both the cataloged and the predicted side."),
     ("prior_atlas_hpx512", "N_CAT_BRIGHT10_PAHC"): ("objects per square degree",
-        "The same bright-end catalogued density as N_CAT_BRIGHT10_STAR, "
-        "for the PAHC population."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "PAHC members predicted brighter than ten times this pixel's own "
+        "I2 50%-completeness limit, where completeness is effectively 1 "
+        "on both the cataloged and the predicted side."),
     ("prior_atlas_hpx512", "N_CAT_BRIGHT10_GAL"): ("objects per square degree",
-        "The same bright-end catalogued density as N_CAT_BRIGHT10_STAR, "
-        "for the background-galaxy population."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "background-galaxy members predicted brighter than ten times "
+        "this pixel's own I2 50%-completeness limit, where completeness "
+        "is effectively 1 on both the cataloged and the predicted side."),
     ("prior_atlas_hpx512", "N_CAT_BRIGHT10_YSO"): ("objects per square degree",
-        "The same bright-end catalogued density as N_CAT_BRIGHT10_STAR, "
-        "for the YSO population."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "YSO members predicted brighter than ten times this pixel's own "
+        "I2 50%-completeness limit, where completeness is effectively 1 "
+        "on both the cataloged and the predicted side."),
     ("prior_atlas_hpx512", "N_CAT_BRIGHT10_H2S"): ("objects per square degree",
-        "The same bright-end catalogued density as N_CAT_BRIGHT10_STAR, "
-        "for the H2-shock population."),
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "H2-shock members predicted brighter than ten times this "
+        "pixel's own I2 50%-completeness limit, where completeness is "
+        "effectively 1 on both the cataloged and the predicted side."),
     ("prior_atlas_hpx512", "N_CAT_CELL_GAL"): ("objects",
         "For the matching pixel in HPX_PIX_512, the background-galaxy "
-        "population's own expected catalogued count on the common "
+        "population's own expected cataloged count on the common "
         "(log10 xi, log10 F_4.5) grid: summing every cell gives this "
         "pixel's own RATIO_GAL times the region's source count."),
     ("prior_atlas_hpx512", "N_CAT_CELL_STAR"): ("objects",
-        "The same per-cell catalogued count as N_CAT_CELL_GAL, for the "
-        "STAR population."),
+        "For the matching pixel in HPX_PIX_512, the STAR population's "
+        "own expected cataloged count on the common (log10 xi, "
+        "log10 F_4.5) grid: summing every cell gives this pixel's own "
+        "RATIO_STAR times the region's source count."),
     ("prior_atlas_hpx512", "N_CAT_CELL_PAHC"): ("objects",
-        "The same per-cell catalogued count as N_CAT_CELL_GAL, for the "
-        "PAHC population."),
+        "For the matching pixel in HPX_PIX_512, the PAHC population's "
+        "own expected cataloged count on the common (log10 xi, "
+        "log10 F_4.5) grid: summing every cell gives this pixel's own "
+        "RATIO_PAHC times the region's source count."),
     ("prior_atlas_hpx512", "N_CAT_CELL_AGB"): ("objects",
-        "The same per-cell catalogued count as N_CAT_CELL_GAL, for the "
-        "AGB population."),
+        "For the matching pixel in HPX_PIX_512, the AGB population's own "
+        "expected cataloged count on the common (log10 xi, log10 F_4.5) "
+        "grid: summing every cell gives this pixel's own RATIO_AGB times "
+        "the region's source count."),
     ("prior_atlas_hpx512", "N_CAT_CELL_YSO"): ("objects",
-        "The same per-cell catalogued count as N_CAT_CELL_GAL, for the "
-        "YSO population."),
+        "For the matching pixel in HPX_PIX_512, the YSO population's own "
+        "expected cataloged count on the common (log10 xi, log10 F_4.5) "
+        "grid: summing every cell gives this pixel's own RATIO_YSO times "
+        "the region's source count."),
     ("prior_atlas_hpx512", "N_CAT_CELL_H2S"): ("objects",
-        "The same per-cell catalogued count as N_CAT_CELL_GAL, for the "
-        "H2-shock population."),
+        "For the matching pixel in HPX_PIX_512, the H2-shock "
+        "population's own expected cataloged count on the common "
+        "(log10 xi, log10 F_4.5) grid: summing every cell gives this "
+        "pixel's own RATIO_H2S times the region's source count."),
     ("prior_atlas_hpx512", "N_CELL_STAR"): ("objects",
         "For the matching pixel in HPX_PIX_512, the STAR population's "
-        "own UNTHINNED intrinsic count on the common (log10 xi, "
-        "log10 F_4.5) grid: the same quadrature as N_CAT_CELL_STAR with "
-        "every member's own probability of being catalogued set to one, "
-        "so N_CAT_CELL_STAR never exceeds this cell by cell."),
+        "own unthinned intrinsic count on the common (log10 xi, "
+        "log10 F_4.5) grid: the expected count with every member's own "
+        "probability of being cataloged set to one (no flux cut, no "
+        "dimming), so N_CAT_CELL_STAR never exceeds this cell by cell."),
     ("prior_atlas_hpx512", "N_CELL_AGB"): ("objects",
-        "The same unthinned intrinsic per-cell count as N_CELL_STAR, for "
-        "the AGB population."),
+        "For the matching pixel in HPX_PIX_512, the AGB population's own "
+        "unthinned intrinsic count on the common (log10 xi, log10 F_4.5) "
+        "grid: the expected count with every member's own probability "
+        "of being cataloged set to one (no flux cut, no dimming), so "
+        "N_CAT_CELL_AGB never exceeds this cell by cell."),
     ("prior_atlas_hpx512", "N_CELL_PAHC"): ("objects",
-        "The same unthinned intrinsic per-cell count as N_CELL_STAR, for "
-        "the PAHC population."),
+        "For the matching pixel in HPX_PIX_512, the PAHC population's "
+        "own unthinned intrinsic count on the common (log10 xi, "
+        "log10 F_4.5) grid: the expected count with every member's own "
+        "probability of being cataloged set to one (no flux cut, no "
+        "dimming), so N_CAT_CELL_PAHC never exceeds this cell by cell."),
     ("prior_atlas_hpx512", "N_CELL_GAL"): ("objects",
-        "The same unthinned intrinsic per-cell count as N_CELL_STAR, for "
-        "the background-galaxy population."),
+        "For the matching pixel in HPX_PIX_512, the background-galaxy "
+        "population's own unthinned intrinsic count on the common "
+        "(log10 xi, log10 F_4.5) grid: the expected count with every "
+        "member's own probability of being cataloged set to one (no "
+        "flux cut, no dimming), so N_CAT_CELL_GAL never exceeds this "
+        "cell by cell."),
     ("prior_atlas_hpx512", "N_CELL_YSO"): ("objects",
-        "The same unthinned intrinsic per-cell count as N_CELL_STAR, for "
-        "the YSO population."),
+        "For the matching pixel in HPX_PIX_512, the YSO population's own "
+        "unthinned intrinsic count on the common (log10 xi, log10 F_4.5) "
+        "grid: the expected count with every member's own probability "
+        "of being cataloged set to one (no flux cut, no dimming), so "
+        "N_CAT_CELL_YSO never exceeds this cell by cell."),
     ("prior_atlas_hpx512", "N_CELL_H2S"): ("objects",
-        "The same unthinned intrinsic per-cell count as N_CELL_STAR, for "
-        "the H2-shock population."),
+        "For the matching pixel in HPX_PIX_512, the H2-shock "
+        "population's own unthinned intrinsic count on the common "
+        "(log10 xi, log10 F_4.5) grid: the expected count with every "
+        "member's own probability of being cataloged set to one (no "
+        "flux cut, no dimming), so N_CAT_CELL_H2S never exceeds this "
+        "cell by cell."),
     ("prior_atlas_hpx512", "SHARE_STAR"): ("dimensionless",
         "For the matching pixel in HPX_PIX_512, the STAR population's "
-        "own share of this pixel's total catalogued density: N_CAT_STAR "
+        "own share of this pixel's total cataloged density: N_CAT_STAR "
         "divided by the sum of N_CAT_<class> over every class."),
     ("prior_atlas_hpx512", "SHARE_AGB"): ("dimensionless",
-        "The same catalogued-density share as SHARE_STAR, for the AGB "
-        "population."),
+        "For the matching pixel in HPX_PIX_512, the AGB population's own "
+        "share of this pixel's total cataloged density: N_CAT_AGB "
+        "divided by the sum of N_CAT_<class> over every class."),
     ("prior_atlas_hpx512", "SHARE_PAHC"): ("dimensionless",
-        "The same catalogued-density share as SHARE_STAR, for the PAHC "
-        "population."),
+        "For the matching pixel in HPX_PIX_512, the PAHC population's "
+        "own share of this pixel's total cataloged density: N_CAT_PAHC "
+        "divided by the sum of N_CAT_<class> over every class."),
     ("prior_atlas_hpx512", "SHARE_GAL"): ("dimensionless",
-        "The same catalogued-density share as SHARE_STAR, for the "
-        "background-galaxy population."),
+        "For the matching pixel in HPX_PIX_512, the background-galaxy "
+        "population's own share of this pixel's total cataloged "
+        "density: N_CAT_GAL divided by the sum of N_CAT_<class> over "
+        "every class."),
     ("prior_atlas_hpx512", "SHARE_YSO"): ("dimensionless",
-        "The same catalogued-density share as SHARE_STAR, for the YSO "
-        "population."),
+        "For the matching pixel in HPX_PIX_512, the YSO population's own "
+        "share of this pixel's total cataloged density: N_CAT_YSO "
+        "divided by the sum of N_CAT_<class> over every class."),
     ("prior_atlas_hpx512", "SHARE_H2S"): ("dimensionless",
-        "The same catalogued-density share as SHARE_STAR, for the "
-        "H2-shock population."),
+        "For the matching pixel in HPX_PIX_512, the H2-shock "
+        "population's own share of this pixel's total cataloged "
+        "density: N_CAT_H2S divided by the sum of N_CAT_<class> over "
+        "every class."),
     ("prior_atlas_hpx512", "N_OBS"): ("sources",
         "For the matching pixel in HPX_PIX_512, how many sources the "
-        "real SESNA catalogue holds there."),
+        "real SESNA catalog holds there."),
     ("prior_atlas_hpx512", "N_OBS_BRIGHT3"): ("sources",
-        "The same observed source count as N_OBS, restricted to sources "
-        "brighter than three times this pixel's own I2 50%-completeness "
-        "limit."),
+        "For the matching pixel in HPX_PIX_512, how many sources the "
+        "real SESNA catalog holds there that are brighter than three "
+        "times this pixel's own I2 50%-completeness limit."),
     ("prior_atlas_hpx512", "N_OBS_BRIGHT10"): ("sources",
-        "The same observed source count as N_OBS, restricted to sources "
-        "brighter than ten times this pixel's own I2 50%-completeness "
-        "limit."),
+        "For the matching pixel in HPX_PIX_512, how many sources the "
+        "real SESNA catalog holds there that are brighter than ten "
+        "times this pixel's own I2 50%-completeness limit."),
 
     # bmstp.density -- table_density_source (P1): one row per curated
     # source, its column, grain indices, detection limits and the six sky
     # densities.
     ("table_density_source", "NAME"): ("source name",
         "The source's name from the SESNA catalog, in this file's row "
-        "order (the curated catalogue's own order)."),
+        "order (the curated catalog's own order)."),
     ("table_density_source", "A_COL_K"): ("mag A_K",
-        "This source's own adopted extinction column (sky/derived/"
-        "adopted's extinction column, Herschel where covered, Planck "
-        "elsewhere)."),
+        "This source's own adopted dust-column extinction: the "
+        "Herschel arm's value where Herschel covers the source, the "
+        "Planck arm's value elsewhere."),
     ("table_density_source", "A_COL_SIG_K"): ("mag A_K",
         "The 1-sigma uncertainty on A_COL_K."),
     ("table_density_source", "ARM"): ("code",
@@ -318,17 +401,17 @@ REGISTRY = {
         "The uncertainty on the Herschel field zero-point offset already "
         "subtracted from A_COL_K; 0 for a Planck-arm source."),
     ("table_density_source", "TILE"): ("tile index",
-        "This source's own row into the STAR/AGB shape product's "
-        "per-tile grain axis (bmstp's star shape product, P2)."),
+        "This source's own row into the per-tile STAR/AGB shape grid: "
+        "which tile this source belongs to."),
     ("table_density_source", "SIGHTLINE_ROW"): ("row index",
-        "This source's own row into the YSO/H2S shape product's "
-        "per-sightline grain axis (bmstp's cloud shape product, P3)."),
+        "This source's own row into the per-sightline YSO/H2S shape "
+        "grid: which sightline this source's position falls on."),
     ("table_density_source", "HPX_512"): ("nested HEALPix pixel, nside 512",
         "This source's own nested nside-512 pixel number."),
     ("table_density_source", "F_LIM_50_MJY"): ("mJy",
         "This source's own 50%-completeness flux limit in each of the "
         "eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this "
-        "project's own band order), the catalogue's per-source limits "
+        "project's own band order), the catalog's per-source limits "
         "product."),
     ("table_density_source", "D_PAHC"): ("dimensionless (log10 mJy)",
         "Minus log10 of this source's own 8 micron completeness-limit "
@@ -375,7 +458,7 @@ REGISTRY = {
         "This YSO template's own offset onto the common brightness axis: "
         "its reference 4.5 micron flux, scaled to 1 kpc, as log10."),
     ("yso_weights_region", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
-        "The centres of the 110 common brightness cells every factor "
+        "The centers of the 110 common brightness cells every factor "
         "table in this file is tabulated on."),
     ("yso_weights_region", "W"): ("dimensionless",
         "For every YSO template and every cell of LOG10_F45_CENTERS, this "
@@ -397,13 +480,13 @@ REGISTRY = {
         "This galaxy template's own offset onto the common brightness "
         "axis: its reference 4.5 micron flux, scaled to 1 kpc, as log10."),
     ("galz_weights_survey", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
-        "The centres of the 110 common brightness cells every factor "
+        "The centers of the 110 common brightness cells every factor "
         "table in this file is tabulated on."),
     ("galz_weights_survey", "W"): ("dimensionless",
         "For every galaxy template and every cell of LOG10_F45_CENTERS, "
-        "this factor's own per-template weight: the galaxy colour "
+        "this factor's own per-template weight: the galaxy color "
         "Gaussian kernel density reweighting that template relative to "
-        "the library's own colour density. Which population statement "
+        "the library's own color density. Which population statement "
         "this factor encodes is named by this dataset's own enclosing "
         "group's NAME attribute."),
     ("galz_weights_survey", "C_F"): ("dimensionless",
@@ -418,7 +501,7 @@ REGISTRY = {
         "This atmosphere template's own offset onto the common brightness "
         "axis: its reference 4.5 micron flux, scaled to 1 kpc, as log10."),
     ("sps_weights_region", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
-        "The centres of the 110 common brightness cells every factor "
+        "The centers of the 110 common brightness cells every factor "
         "table in this file is tabulated on."),
     ("sps_weights_region", "W"): ("dimensionless",
         "For every atmosphere template and every cell of "
@@ -439,7 +522,7 @@ REGISTRY = {
         "This AGB template's own offset onto the common brightness axis: "
         "its reference 4.5 micron flux, scaled to 1 kpc, as log10."),
     ("agb_weights_region", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
-        "The centres of the 110 common brightness cells every factor "
+        "The centers of the 110 common brightness cells every factor "
         "table in this file is tabulated on."),
     ("agb_weights_region", "W"): ("dimensionless",
         "For every AGB template and every cell of LOG10_F45_CENTERS, "
@@ -459,7 +542,7 @@ REGISTRY = {
         "This PAHC template's own offset onto the common brightness axis: "
         "its reference 4.5 micron flux, scaled to 1 kpc, as log10."),
     ("pahc_weights_region", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
-        "The centres of the 110 common brightness cells every factor "
+        "The centers of the 110 common brightness cells every factor "
         "table in this file is tabulated on."),
     ("pahc_weights_region", "W"): ("dimensionless",
         "For every PAHC template and every cell of LOG10_F45_CENTERS, "
@@ -482,7 +565,7 @@ REGISTRY = {
         "axis, from its own Sigma-to-4.5-micron conversion, applied once "
         "at build time (not reapplied when this column is read)."),
     ("h2shock_weights_region", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
-        "The centres of the 110 common brightness cells every factor "
+        "The centers of the 110 common brightness cells every factor "
         "table in this file is tabulated on."),
     ("h2shock_weights_region", "W"): ("dimensionless",
         "For every h2shock template and every cell of LOG10_F45_CENTERS, "
@@ -520,7 +603,9 @@ REGISTRY = {
     ("star_shape_tile", "GRID_AGB"): ("dimensionless",
         "For the matching tile in TILE_ID, the evolved (AGB) field stars' "
         "own population density on the common (log10 xi, log10 F_4.5) "
-        "grid, on the same convention as GRID_STAR."),
+        "grid: integrating over a cell gives that cell's own share of "
+        "the tile's AGB population, up to the floor ON_GRID_AGB leaves "
+        "out."),
     ("star_shape_tile", "MASS_OUTSIDE_STAR"): ("dimensionless",
         "For the matching tile in TILE_ID, the fraction of this tile's "
         "own STAR population weight that falls outside the common grid "
@@ -571,8 +656,9 @@ REGISTRY = {
         "population density on the common (log10 xi, log10 F_4.5) grid: "
         "XI_MARGINAL times this region's own H2-shock brightness "
         "distribution (this file's LOGSIG_MEAN/LOGSIG_STD attributes "
-        "convolved with the h2shock template conversions), on the same "
-        "convention as GRID_YSO."),
+        "convolved with the h2shock template conversions): integrating "
+        "over a cell gives that cell's own share of the sightline's H2 "
+        "shock population, up to the floor ON_GRID_H2S leaves out."),
     ("cloud_shape_sightline", "MASS_OUTSIDE_H2S"): ("dimensionless",
         "For the matching sightline in HPX_PIX_256, the fraction of this "
         "sightline's own H2 shock population weight that falls outside "
@@ -601,8 +687,8 @@ REGISTRY = {
     # per region.
     ("cloud_interval_shape_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
         "This region's own occupied nside-256 pixel numbers (nested "
-        "ordering), the same sightline order bmstp's shape product "
-        "shares. Row i here is row i of XI_FRONT, XI_BACK and W_CLOUD."),
+        "ordering). Row i here is row i of XI_FRONT, XI_BACK and "
+        "W_CLOUD."),
     ("cloud_interval_shape_sightline", "XI_FRONT"): ("dimensionless",
         "For the matching sightline in HPX_PIX_256, its own cumulative "
         "extinction profile u = A(d)/A(inf) evaluated at this region's "
@@ -701,10 +787,9 @@ REGISTRY = {
         "as a real source's adopted column times this fraction."),
     ("population_star_tile", "W"): ("dimensionless",
         "For every star this tile draws, its total anchor reweighting "
-        "factor: the Gaia/2MASS joint or marginal weight "
-        "(population.anchor_weights) at the star's own placement and "
-        "predicted magnitude. W_STAR plus W_AGB equals this value "
-        "exactly, row by row."),
+        "factor: the STAR anchor's own Gaia/2MASS joint or marginal "
+        "weight at the star's own placement and predicted magnitude. "
+        "W_STAR plus W_AGB equals this value exactly, row by row."),
     ("population_star_tile", "W_STAR"): ("dimensionless",
         "The non-evolved share of W for every star this tile draws: W "
         "itself for a star that is not evolved, 0 for one that is."),
@@ -722,10 +807,10 @@ REGISTRY = {
         "flux divided by its matched atmosphere template's own reference "
         "flux, as log10."),
     ("population_star_tile", "LOG10_B_PAHC"): ("dex",
-        "For every star this tile draws, the same median flux ratio as "
-        "LOG10_B, restricted to the J, H and Ks bands and measured "
-        "against the PAHC library's own continuum reference flux "
-        "instead, as log10."),
+        "For every star this tile draws, its PAHC brightness unit: the "
+        "median, over the J, H and Ks bands only, of its own intrinsic "
+        "TRILEGAL flux divided by the PAHC library's own continuum "
+        "reference flux at its matched atmosphere template, as log10."),
     ("population_star_tile", "LOG10_B_AGB_C"): ("dex",
         "For every star this tile draws, the AGB brightness unit under "
         "the carbon-rich dust chemistry, as log10. NaN for a star with "
@@ -763,10 +848,10 @@ REGISTRY = {
         "simulated 2MASS+Spitzer output."),
     ("field-stars_trilegal_region", "G_PROXY"): ("mag Gaia G",
         "This retained synthetic star's intrinsic Gaia G magnitude "
-        "proxy: its Ks magnitude plus the TRILEGAL G-Ks colour relation "
-        "(sky.derived.trilegal_colour) read at its own atmosphere, or, "
-        "where no populated cell of that relation is within one step, "
-        "its matched atmosphere template's own G-Ks colour."),
+        "proxy: its Ks magnitude plus TRILEGAL's own Gaia G minus 2MASS "
+        "Ks color relation, read at its own atmosphere, or, where no "
+        "populated cell of that relation is within one step, its "
+        "matched atmosphere template's own G-Ks color."),
     ("field-stars_trilegal_region", "KS_MAG"): ("mag 2MASS Ks",
         "This retained synthetic star's intrinsic 2MASS Ks magnitude, "
         "TRILEGAL's own simulated value."),
@@ -780,42 +865,47 @@ REGISTRY = {
         "matched atmosphere template."),
     ("field-stars_trilegal_region", "TEMPLATE_INDEX"): ("template index",
         "This retained synthetic star's nearest atmosphere template, as "
-        "a row position in the project's stellar-atmosphere register "
-        "(sps_register.hdf5)."),
+        "a row position in the project's stellar-atmosphere template "
+        "library."),
     ("field-stars_trilegal_region", "POINTING_INDEX"): ("pointing index",
         "This retained synthetic star's own TRILEGAL pointing, as a "
         "position in this region's list of simulated sky pointings."),
     ("field-stars_trilegal_region", "RAW/G_PROXY"): ("mag Gaia G",
-        "The same Gaia G magnitude proxy as the retained sample's "
-        "G_PROXY, for every simulated star before the retention cut "
-        "(CODING_RULES_BMSTP.md's anchor-prediction population)."),
+        "For every simulated star before the retention cut, its "
+        "intrinsic Gaia G magnitude proxy: its Ks magnitude plus the "
+        "TRILEGAL G-Ks color relation read at its own atmosphere, or, "
+        "where no populated cell of that relation is within one step, "
+        "its matched atmosphere template's own G-Ks color. Carried for "
+        "every simulated star, not only the ones that survive retention, "
+        "since predicting the anchors' observed counts needs the whole "
+        "simulated population."),
     ("field-stars_trilegal_region", "RAW/KS_MAG"): ("mag 2MASS Ks",
-        "The same intrinsic 2MASS Ks magnitude as the retained sample's "
-        "KS_MAG, for every simulated star before the retention cut."),
+        "For every simulated star before the retention cut, its "
+        "intrinsic 2MASS Ks magnitude, TRILEGAL's own simulated value."),
     ("field-stars_trilegal_region", "RAW/DIST_PC"): ("pc",
-        "The same true distance as the retained sample's DIST_PC, for "
-        "every simulated star before the retention cut."),
+        "For every simulated star before the retention cut, its true "
+        "distance from the Sun, TRILEGAL's own simulated value."),
     ("field-stars_trilegal_region", "RAW/K_G_DIFFUSE"): ("A_G/A_V",
-        "The same diffuse-ISM Gaia extinction coefficient as the "
-        "retained sample's K_G_DIFFUSE, for every simulated star before "
-        "the retention cut."),
+        "For every simulated star before the retention cut, its Gaia "
+        "extinction coefficient under the diffuse-ISM law (Danielski "
+        "et al. 2018), from its matched atmosphere template."),
     ("field-stars_trilegal_region", "RAW/K_G_DENSE"): ("A_G/A_V",
-        "The same dense-cloud Gaia extinction coefficient as the "
-        "retained sample's K_G_DENSE, for every simulated star before "
-        "the retention cut."),
+        "For every simulated star before the retention cut, its Gaia "
+        "extinction coefficient under the dense-cloud law (Danielski "
+        "et al. 2018), from its matched atmosphere template."),
     ("field-stars_trilegal_region", "RAW/POINTING_INDEX"): ("pointing index",
-        "The same TRILEGAL pointing index as the retained sample's "
-        "POINTING_INDEX, for every simulated star before the retention "
-        "cut."),
+        "For every simulated star before the retention cut, its own "
+        "TRILEGAL pointing, as a position in this region's list of "
+        "simulated sky pointings."),
 
     # population.anchor_weights -- weights_anchors_tile: the STAR
     # per-tile-and-bin anchor reweighting factor W, per region.
     ("weights_anchors_tile", "G_EDGES"): ("mag Gaia G",
         "The edges of the Gaia G magnitude bins W_G and W_REGION_G are "
-        "tabulated on, the same edges the anchor histogram product uses."),
+        "tabulated on."),
     ("weights_anchors_tile", "KS_EDGES"): ("mag 2MASS/UKIDSS Ks",
         "The edges of the Ks magnitude bins W_KS and W_REGION_KS are "
-        "tabulated on, the same edges the anchor histogram product uses."),
+        "tabulated on."),
     ("weights_anchors_tile", "W_G"): ("dimensionless",
         "For each tile and each Gaia G bin of G_EDGES, the anchor "
         "reweighting factor: the sky's own observed star count over the "
@@ -858,9 +948,11 @@ REGISTRY = {
     ("weights_anchors_tile", "W_JOINT"): ("dimensionless",
         "For each tile, each Gaia G bin of G_EDGES and each Ks bin of "
         "KS_EDGES, the anchor reweighting factor on the joint (G, Ks) "
-        "grid, fit the same way as W_G and W_KS. Read only where "
-        "USE_JOINT is True for that tile and bin; a star without a "
-        "usable joint cell takes the marginal weight instead."),
+        "grid: the sky's own observed star count over the model's "
+        "predicted count in that joint cell, shrunk toward the region-"
+        "pooled value in the log. Read only where USE_JOINT is True for "
+        "that tile and bin; a star without a usable joint cell takes "
+        "the marginal weight instead."),
     ("weights_anchors_tile", "USE_JOINT"): ("boolean",
         "For each tile, each Gaia G bin of G_EDGES and each Ks bin of "
         "KS_EDGES, True where this region's pooled count in that joint "
@@ -869,8 +961,10 @@ REGISTRY = {
         "matching joint observed count for this tile is positive."),
     ("weights_anchors_tile", "W_REGION_JOINT"): ("dimensionless",
         "One value per joint (G, Ks) cell (shared by every tile): the "
-        "region-pooled joint reweighting factor, or the survey-pooled "
-        "value, or NaN, on the same fallback rule as W_REGION_G."),
+        "region-pooled joint reweighting factor, or, where no tile in "
+        "this region has usable evidence in that cell, the survey-"
+        "pooled value, or NaN where neither this region nor the survey "
+        "has any."),
     ("weights_anchors_tile", "EXCLUDED"): ("boolean",
         "One value per tile: True where this tile's own pooled observed-"
         "over-predicted ratio departs from the region's median by more "
@@ -902,10 +996,10 @@ REGISTRY = {
         "(a separate, shorter list in this same file, one row per tile "
         "rather than one row per pixel)."),
     ("tiles_anchors_hpx512", "TILE_L_DEG"): ("deg",
-        "One row per tile (not one row per pixel): the tile's own centre "
+        "One row per tile (not one row per pixel): the tile's own center "
         "Galactic longitude."),
     ("tiles_anchors_hpx512", "TILE_B_DEG"): ("deg",
-        "One row per tile: the tile's own centre Galactic latitude."),
+        "One row per tile: the tile's own center Galactic latitude."),
     ("tiles_anchors_hpx512", "TILE_OMEGA_DEG2"): ("deg^2",
         "One row per tile: the tile's own total solid angle, the sum of "
         "its member pixels' areas."),
@@ -950,9 +1044,11 @@ REGISTRY = {
         "that pointing's own solid angle."),
     ("histograms_anchors_hpx512", "N_GK_PRED"): ("stars",
         "For the matching pixel in HPX_PIX_512, each Gaia G bin of "
-        "G_EDGES and each Ks bin of KS_EDGES, the model's predicted joint "
-        "count: the same dereddened, Gaia-detection-weighted TRILEGAL "
-        "stars as N_G_PRED, binned jointly in (G, Ks) instead of "
+        "G_EDGES and each Ks bin of KS_EDGES, the model's predicted "
+        "joint count: the nearest TRILEGAL pointing's raw stars, "
+        "dereddened by A_PIX_K and weighted by the Gaia detection "
+        "probability, divided by that pointing's own solid angle and "
+        "binned jointly in (G, Ks) rather than in each magnitude "
         "marginally."),
     ("histograms_anchors_hpx512", "DEEP_COVERED"): ("boolean",
         "For the matching pixel in HPX_PIX_512, True where the region's "
@@ -1055,15 +1151,14 @@ REGISTRY = {
     # and cluster-member counts already subtracted.
     ("observed_anchors_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
         "This region's own occupied nside-512 anchor pixel numbers "
-        "(nested ordering), the same pixels the anchor histogram product "
-        "shares. Row i here is row i of N_G_SUB, N_KS_SUB and N_GK_SUB."),
+        "(nested ordering). Row i here is row i of N_G_SUB, N_KS_SUB "
+        "and N_GK_SUB."),
     ("observed_anchors_hpx512", "G_EDGES"): ("mag Gaia G",
         "The edges of the Gaia G magnitude bins N_G_SUB and N_GK_SUB are "
-        "tabulated on, the same edges the anchor histogram product uses."),
+        "tabulated on."),
     ("observed_anchors_hpx512", "KS_EDGES"): ("mag 2MASS Ks",
         "The edges of the 2MASS Ks magnitude bins N_KS_SUB and N_GK_SUB "
-        "are tabulated on, the same edges the anchor histogram product "
-        "uses."),
+        "are tabulated on."),
     ("observed_anchors_hpx512", "N_G_SUB"): ("stars",
         "For the matching pixel in HPX_PIX_512 and each Gaia G bin of "
         "G_EDGES, the observed star count with the model's own expected "
@@ -1100,11 +1195,15 @@ REGISTRY = {
         "predicted count there. NaN where the footprint holds fewer than "
         "50 census objects."),
     ("law_yso_region", "KAPPA_REGION_LO"): ("young stars pc^-2 per mag^2 of A_K",
-        "The lower end of KAPPA_REGION's 68% Poisson (Garwood) confidence "
-        "interval. NaN under the same condition as KAPPA_REGION."),
+        "The lower end of this region's fitted young-star law "
+        "coefficient's own 68% Poisson (Garwood) confidence interval. "
+        "NaN where this region's fit footprint holds fewer than 50 "
+        "Dunham et al. (2015) census objects."),
     ("law_yso_region", "KAPPA_REGION_HI"): ("young stars pc^-2 per mag^2 of A_K",
-        "The upper end of KAPPA_REGION's 68% Poisson (Garwood) confidence "
-        "interval. NaN under the same condition as KAPPA_REGION."),
+        "The upper end of this region's fitted young-star law "
+        "coefficient's own 68% Poisson (Garwood) confidence interval. "
+        "NaN where this region's fit footprint holds fewer than 50 "
+        "Dunham et al. (2015) census objects."),
     ("law_yso_region", "N_CENSUS_REGION"): ("YSOs",
         "How many Dunham et al. (2015) census objects, of any class, fall "
         "inside this region's own fit footprint."),
@@ -1156,8 +1255,9 @@ REGISTRY = {
         "3.6 and 4.5 micron photometry and no 4.5 micron excess fall in "
         "it: this curve's own denominator."),
     ("curve_pahc_survey", "M_PER_BIN"): ("sources",
-        "For each bin of LOG10_Q_EDGES, how many of that bin's own "
-        "N_PER_BIN sources also have a measured 8 micron flux."),
+        "For each bin of LOG10_Q_EDGES, how many of the sources with "
+        "measured 3.6 and 4.5 micron photometry and no 4.5 micron "
+        "excess that fall in it also have a measured 8 micron flux."),
     ("curve_pahc_survey", "P_Q_BRIGHT_EXCESS"): ("dimensionless",
         "For each bin of LOG10_Q_EDGES whose q is too small for a "
         "3-sigma nebular excess to register (where P_Q is zeroed for "
@@ -1166,8 +1266,10 @@ REGISTRY = {
         "contamination but circumstellar 8 micron emission. Zero for "
         "every other bin."),
     ("curve_pahc_survey", "N_PER_BIN_BRIGHT_EXCESS"): ("sources",
-        "The same N_PER_BIN count, kept for the bins P_Q_BRIGHT_EXCESS "
-        "describes. Zero for every other bin."),
+        "For each bin of LOG10_Q_EDGES whose q is too small for a "
+        "3-sigma nebular excess to register, how many sources with "
+        "measured 3.6 and 4.5 micron photometry and no 4.5 micron "
+        "excess fall in it. Zero for every other bin."),
 
     # population.column_grid -- column-grid_sesna_survey: the fixed column
     # ladder every class tabulates its column kernel on.
@@ -1180,7 +1282,7 @@ REGISTRY = {
     # (star-light) column, each at source and sightline granule, plus the
     # Herschel/Planck disagreement check.
     ("column_adopted_source", "A_COL_K"): ("mag A_K",
-        "For every catalogued source of this region, the adopted dust-"
+        "For every cataloged source of this region, the adopted dust-"
         "column extinction: the Herschel arm's own A_K, its field's own "
         "zero-point offset subtracted, where Herschel covers the source "
         "and that value is finite and positive; the Planck arm's A_K "
@@ -1198,29 +1300,29 @@ REGISTRY = {
         "from: the Herschel Gould Belt Survey's 36.3 arcsec where "
         "A_COL_PROVENANCE is 0, the measured Planck beam otherwise."),
     ("column_adopted_source", "HERSCHEL_MAP_ID"): ("map index",
-        "For every catalogued source of this region, which map in this "
+        "For every cataloged source of this region, which map in this "
         "file's own MAP_NAME list covers its position, as a position in "
         "that list. -1 where A_COL_PROVENANCE is 1 (Planck)."),
     ("column_adopted_source", "MAP_NAME"): ("map name",
         "The file name of each HGBS column-density map that reaches some "
         "part of this region, in the order HERSCHEL_MAP_ID indexes."),
     ("column_adopted_source", "ZP_SIGMA_K"): ("mag A_K",
-        "For every catalogued source of this region, the uncertainty on "
+        "For every cataloged source of this region, the uncertainty on "
         "the Herschel field zero-point offset already subtracted from "
         "A_COL_K: 0 where A_COL_PROVENANCE is 1 (Planck), or where the "
         "source's own Herschel-covered region has no measured zero "
         "point."),
 
     ("extinction_adopted_source", "A_COL_K"): ("mag A_K",
-        "For every catalogued source of this region, the extinction a "
+        "For every cataloged source of this region, the extinction a "
         "star's own light passes through: the adopted dust column (this "
         "package's column_adopted_source A_COL_K, re-derived here) "
         "multiplied by this source's own F_EXTINCTION, which raises it to "
-        "match the Juvela & Montillaud (2016) star-colour map wherever "
+        "match the Juvela & Montillaud (2016) star-color map wherever "
         "that map reads higher."),
     ("extinction_adopted_source", "A_COL_SIG_K"): ("mag A_K",
-        "The adopted dust column's own 1-sigma uncertainty, multiplied by "
-        "the same F_EXTINCTION as A_COL_K."),
+        "The adopted dust column's own 1-sigma uncertainty, multiplied "
+        "by this source's own F_EXTINCTION factor."),
     ("extinction_adopted_source", "A_COL_PROVENANCE"): ("code",
         "Which arm the dust column A_COL_K is scaled from, before the "
         "F_EXTINCTION correction: 0 Herschel, 1 Planck."),
@@ -1229,25 +1331,25 @@ REGISTRY = {
         "the Herschel Gould Belt Survey's 36.3 arcsec where "
         "A_COL_PROVENANCE is 0, the measured Planck beam otherwise."),
     ("extinction_adopted_source", "HERSCHEL_MAP_ID"): ("map index",
-        "For every catalogued source of this region, which map in this "
+        "For every cataloged source of this region, which map in this "
         "file's own MAP_NAME list the dust column was read from, as a "
         "position in that list. -1 where A_COL_PROVENANCE is 1 (Planck)."),
     ("extinction_adopted_source", "MAP_NAME"): ("map name",
         "The file name of each HGBS column-density map that reaches some "
         "part of this region, in the order HERSCHEL_MAP_ID indexes."),
     ("extinction_adopted_source", "ZP_SIGMA_K"): ("mag A_K",
-        "For every catalogued source of this region, the uncertainty on "
+        "For every cataloged source of this region, the uncertainty on "
         "the Herschel field zero-point offset already subtracted from the "
         "dust column before scaling: 0 where A_COL_PROVENANCE is 1 "
         "(Planck), or where the source's own Herschel-covered region has "
         "no measured zero point."),
     ("extinction_adopted_source", "F_EXTINCTION"): ("dimensionless",
-        "For every catalogued source of this region, the factor its "
+        "For every cataloged source of this region, the factor its "
         "adopted dust column is multiplied by to form A_COL_K: at least "
-        "1, the ratio of the Juvela & Montillaud (2016) star-colour "
+        "1, the ratio of the Juvela & Montillaud (2016) star-color "
         "extinction to the adopted dust column, averaged over the "
         "source's own nside-1024 cell. 1 where that ratio is below 1, "
-        "since a star-colour map can read low but the emission map's own "
+        "since a star-color map can read low but the emission map's own "
         "dust cannot be reduced by it."),
 
     ("column_adopted_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
@@ -1285,12 +1387,12 @@ REGISTRY = {
         "column (column_adopted_sightline A_K) multiplied by F_EXTINCTION."),
     ("extinction_adopted_sightline", "SIGMA_A_K"): ("mag A_K",
         "The adopted sightline column's own 1-sigma uncertainty, "
-        "multiplied by the same F_EXTINCTION as A_K."),
+        "multiplied by this pixel's own F_EXTINCTION factor."),
     ("extinction_adopted_sightline", "F_EXTINCTION"): ("dimensionless",
         "For the matching pixel in HPX_PIX_256, the mean of its own "
-        "catalogued sources' per-source F_EXTINCTION factor (this "
+        "cataloged sources' per-source F_EXTINCTION factor (this "
         "package's extinction_adopted_source F_EXTINCTION). 1 where the "
-        "pixel is admitted but carries no catalogued source, so the "
+        "pixel is admitted but carries no cataloged source, so the "
         "adopted column passes through unscaled."),
     ("extinction_adopted_sightline", "PROVENANCE"): ("code",
         "Which arm the dust column before the F_EXTINCTION scaling came "
@@ -1322,16 +1424,24 @@ REGISTRY = {
         "For each of the four A_HERSCHEL quartile bins, the median, over "
         "that bin's own pixels, of A_MAP_EDGE / A_HERSCHEL."),
     ("column-check_adopted_survey", "BIN_MAP_EDGE_RATIO_P16"): ("dimensionless",
-        "The 16th percentile of the same ratio, same bins."),
+        "For each of the four A_HERSCHEL quartile bins, the 16th "
+        "percentile, over that bin's own pixels, of A_MAP_EDGE / "
+        "A_HERSCHEL."),
     ("column-check_adopted_survey", "BIN_MAP_EDGE_RATIO_P84"): ("dimensionless",
-        "The 84th percentile of the same ratio, same bins."),
+        "For each of the four A_HERSCHEL quartile bins, the 84th "
+        "percentile, over that bin's own pixels, of A_MAP_EDGE / "
+        "A_HERSCHEL."),
     ("column-check_adopted_survey", "BIN_PLANCK_RATIO_MEDIAN"): ("dimensionless",
         "For each of the four A_HERSCHEL quartile bins, the median, over "
         "that bin's own pixels, of A_PLANCK / A_HERSCHEL."),
     ("column-check_adopted_survey", "BIN_PLANCK_RATIO_P16"): ("dimensionless",
-        "The 16th percentile of the same ratio, same bins."),
+        "For each of the four A_HERSCHEL quartile bins, the 16th "
+        "percentile, over that bin's own pixels, of A_PLANCK / "
+        "A_HERSCHEL."),
     ("column-check_adopted_survey", "BIN_PLANCK_RATIO_P84"): ("dimensionless",
-        "The 84th percentile of the same ratio, same bins."),
+        "For each of the four A_HERSCHEL quartile bins, the 84th "
+        "percentile, over that bin's own pixels, of A_PLANCK / "
+        "A_HERSCHEL."),
     ("column-check_adopted_survey", "REGION"): ("region name",
         "Which region each row of REGION_MAP_EDGE_RATIO_* and "
         "REGION_PLANCK_RATIO_* describes, in the order REGION_CODE_AXIS "
@@ -1343,17 +1453,25 @@ REGISTRY = {
         "region's own Herschel-covered admitted pixels, of A_MAP_EDGE / "
         "A_HERSCHEL."),
     ("column-check_adopted_survey", "REGION_MAP_EDGE_RATIO_P16"): ("dimensionless",
-        "The 16th percentile of the same ratio, same regions."),
+        "For the matching region in REGION, the 16th percentile, over "
+        "that region's own Herschel-covered admitted pixels, of "
+        "A_MAP_EDGE / A_HERSCHEL."),
     ("column-check_adopted_survey", "REGION_MAP_EDGE_RATIO_P84"): ("dimensionless",
-        "The 84th percentile of the same ratio, same regions."),
+        "For the matching region in REGION, the 84th percentile, over "
+        "that region's own Herschel-covered admitted pixels, of "
+        "A_MAP_EDGE / A_HERSCHEL."),
     ("column-check_adopted_survey", "REGION_PLANCK_RATIO_MEDIAN"): ("dimensionless",
         "For the matching region in REGION, the median, over that "
         "region's own Herschel-covered admitted pixels, of A_PLANCK / "
         "A_HERSCHEL."),
     ("column-check_adopted_survey", "REGION_PLANCK_RATIO_P16"): ("dimensionless",
-        "The 16th percentile of the same ratio, same regions."),
+        "For the matching region in REGION, the 16th percentile, over "
+        "that region's own Herschel-covered admitted pixels, of "
+        "A_PLANCK / A_HERSCHEL."),
     ("column-check_adopted_survey", "REGION_PLANCK_RATIO_P84"): ("dimensionless",
-        "The 84th percentile of the same ratio, same regions."),
+        "For the matching region in REGION, the 84th percentile, over "
+        "that region's own Herschel-covered admitted pixels, of "
+        "A_PLANCK / A_HERSCHEL."),
 
     # sky.derived.subbeam -- subbeam_herschel_region: how much the true
     # column varies within one Herschel beam, per region, plus the
@@ -1379,29 +1497,43 @@ REGISTRY = {
         "this region's own 512-arcsec tiles: the fit's own lower sampling "
         "bound."),
     ("subbeam_herschel_region", "BETA_BOOT_P84"): ("dimensionless",
-        "The 84th percentile of BETA over the same 200 block-bootstrap "
-        "resamples: the fit's own upper sampling bound."),
+        "The 84th percentile of BETA over 200 block-bootstrap resamples "
+        "of this region's own 512-arcsec tiles: the fit's own upper "
+        "sampling bound."),
     ("subbeam_herschel_region", "W_ABS_36P3"): ("dimensionless (ln column ratio)",
-        "The median, over the same 200 bootstrap resamples, of the "
-        "absolute pencil-to-beam width of true column at the HGBS map's "
-        "own 36.3 arcsec beam, in natural-log column units."),
+        "The median, over 200 block-bootstrap resamples of this "
+        "region's own 512-arcsec tiles, of the absolute pencil-to-beam "
+        "width of true column at the HGBS map's own 36.3 arcsec beam, "
+        "in natural-log column units."),
     ("subbeam_herschel_region", "W_ABS_L108"): ("dimensionless (ln column ratio)",
-        "The same absolute pencil-to-beam width at a 108 arcsec beam."),
+        "The median, over 200 block-bootstrap resamples of this region's "
+        "own 512-arcsec tiles, of the absolute pencil-to-beam width of "
+        "true column at a 108 arcsec beam, in natural-log column units."),
     ("subbeam_herschel_region", "W_ABS_L302"): ("dimensionless (ln column ratio)",
-        "The same absolute pencil-to-beam width at a 301.8 arcsec beam "
-        "(Planck's own measured beam)."),
+        "The median, over 200 block-bootstrap resamples of this region's "
+        "own 512-arcsec tiles, of the absolute pencil-to-beam width of "
+        "true column at a 301.8 arcsec beam (Planck's own measured "
+        "beam), in natural-log column units."),
     ("subbeam_herschel_region", "W_ABS_L821"): ("dimensionless (ln column ratio)",
-        "The same absolute pencil-to-beam width at an 821 arcsec beam "
-        "(the extinction-profile grid's nside-256 pixel scale)."),
+        "The median, over 200 block-bootstrap resamples of this region's "
+        "own 512-arcsec tiles, of the absolute pencil-to-beam width of "
+        "true column at an 821 arcsec beam (the extinction-profile "
+        "grid's nside-256 pixel scale), in natural-log column units."),
     ("subbeam_herschel_region", "COMPLETION_L108"): ("dimensionless",
         "W_ABS_L108 divided by the two-scale width actually measured "
         "between the map's own beam and 108 arcsec: how much of the "
         "absolute pencil-to-beam width at 108 arcsec is directly measured "
         "rather than model extrapolation."),
     ("subbeam_herschel_region", "COMPLETION_L302"): ("dimensionless",
-        "The same completion fraction at 301.8 arcsec."),
+        "W_ABS_L302 divided by the two-scale width actually measured "
+        "between the map's own beam and 301.8 arcsec: how much of the "
+        "absolute pencil-to-beam width at 301.8 arcsec is directly "
+        "measured rather than model extrapolation."),
     ("subbeam_herschel_region", "COMPLETION_L821"): ("dimensionless",
-        "The same completion fraction at 821 arcsec."),
+        "W_ABS_L821 divided by the two-scale width actually measured "
+        "between the map's own beam and 821 arcsec: how much of the "
+        "absolute pencil-to-beam width at 821 arcsec is directly "
+        "measured rather than model extrapolation."),
     ("subbeam_herschel_region", "RESCALE_EXPONENT"): ("dimensionless",
         "(BETA - 2) / 2: the exponent that rescales the absolute "
         "pencil-to-beam width from one beam size to another under this "
@@ -1437,11 +1569,17 @@ REGISTRY = {
         "(KD_EDGES), summed over that region's own HGBS maps: the column-"
         "conditional kernel at 108 arcsec."),
     ("subbeam_herschel_region", "COND_KERNEL_L302"): ("counts",
-        "The same column-conditional kernel at a 301.8 arcsec beam "
-        "(Planck's own measured beam)."),
+        "For every region, the 2-D histogram of ln(true column) "
+        "(KA_EDGES) against the two-scale increment d to a 301.8 "
+        "arcsec beam (Planck's own measured beam) (KD_EDGES), summed "
+        "over that region's own HGBS maps: the column-conditional "
+        "kernel at 301.8 arcsec."),
     ("subbeam_herschel_region", "COND_KERNEL_L821"): ("counts",
-        "The same column-conditional kernel at an 821 arcsec beam (the "
-        "extinction-profile grid's nside-256 pixel scale)."),
+        "For every region, the 2-D histogram of ln(true column) "
+        "(KA_EDGES) against the two-scale increment d to an 821 arcsec "
+        "beam (the extinction-profile grid's nside-256 pixel scale) "
+        "(KD_EDGES), summed over that region's own HGBS maps: the "
+        "column-conditional kernel at 821 arcsec."),
     ("subbeam_herschel_region", "MIX_W"): ("dimensionless",
         "For every region, beam (108, 301.8, 821 arcsec) and column bin of "
         "MIX_KA_CENTRES with at least 200 counts, the mixing weight of the "
@@ -1450,49 +1588,88 @@ REGISTRY = {
         "kernel, after deconvolving the fine map's own noise "
         "(FINE_MAP_NOISE_K). NaN where that bin had too few counts."),
     ("subbeam_herschel_region", "MIX_MU1"): ("dimensionless (ln column ratio)",
-        "The mean of the mixture's first Gaussian component, same "
-        "indexing and NaN condition as MIX_W."),
+        "For every region, beam and column bin of MIX_KA_CENTRES with "
+        "at least 200 counts, the mean of the first of the two Gaussian "
+        "components in the noise-separated structural mixture fit to "
+        "that bin's own column-conditional kernel. NaN where that bin "
+        "had too few counts."),
     ("subbeam_herschel_region", "MIX_MU2"): ("dimensionless (ln column ratio)",
-        "The mean of the mixture's second Gaussian component, same "
-        "indexing and NaN condition as MIX_W."),
+        "For every region, beam and column bin of MIX_KA_CENTRES with "
+        "at least 200 counts, the mean of the second of the two "
+        "Gaussian components in the noise-separated structural mixture "
+        "fit to that bin's own column-conditional kernel. NaN where "
+        "that bin had too few counts."),
     ("subbeam_herschel_region", "MIX_SIG1"): ("dimensionless (ln column ratio)",
-        "The standard deviation of the mixture's first Gaussian "
-        "component, same indexing and NaN condition as MIX_W."),
+        "For every region, beam and column bin of MIX_KA_CENTRES with "
+        "at least 200 counts, the standard deviation of the first of "
+        "the two Gaussian components in the noise-separated structural "
+        "mixture fit to that bin's own column-conditional kernel. NaN "
+        "where that bin had too few counts."),
     ("subbeam_herschel_region", "MIX_SIG2"): ("dimensionless (ln column ratio)",
-        "The standard deviation of the mixture's second Gaussian "
-        "component, same indexing and NaN condition as MIX_W."),
+        "For every region, beam and column bin of MIX_KA_CENTRES with "
+        "at least 200 counts, the standard deviation of the second of "
+        "the two Gaussian components in the noise-separated structural "
+        "mixture fit to that bin's own column-conditional kernel. NaN "
+        "where that bin had too few counts."),
     ("subbeam_herschel_region", "MIX_MAX_CDF_ERR"): ("dimensionless",
-        "The largest absolute difference, over the fitted histogram's own "
-        "bins, between the noise-convolved mixture model's CDF and the "
-        "observed CDF: this fit's own worst-case goodness-of-fit error, "
-        "same indexing and NaN condition as MIX_W."),
+        "For every region, beam and column bin of MIX_KA_CENTRES with "
+        "at least 200 counts, the largest absolute difference, over "
+        "the fitted histogram's own bins, between the noise-convolved "
+        "mixture model's CDF and the observed CDF: that fit's own "
+        "worst-case goodness-of-fit error. NaN where that bin had too "
+        "few counts."),
     ("subbeam_herschel_region", "MIX_KA_CENTRES"): ("ln(mag A_K)",
-        "The centre of each natural-log column bin MIX_W and the other "
-        "MIX_* datasets' last axis runs over: the midpoints of KA_EDGES."),
+        "The center of each natural-log column bin the mixture-fit "
+        "datasets in this file are tabulated on: the midpoints of "
+        "KA_EDGES."),
     ("subbeam_herschel_region", "FINE_MAP_NOISE_K"): ("mag A_K",
         "For every region, the estimated standard deviation of the "
         "36.3 arcsec HGBS map's own additive noise, in A_K units, from the "
         "lowest well-populated column bin of its 108 arcsec conditional "
         "histogram."),
     ("subbeam_herschel_region", "MIX_POOLED_W"): ("dimensionless",
-        "The same mixing weight as MIX_W, fit once per beam and column "
-        "bin on every region's counts pooled together, rather than "
-        "per region."),
+        "For every beam (108, 301.8, 821 arcsec) and column bin of "
+        "MIX_KA_CENTRES, the mixing weight of the first of two Gaussian "
+        "components in the noise-separated structural mixture fit to "
+        "that bin's own column-conditional kernel summed over every "
+        "region's counts, after deconvolving each region's own fine-"
+        "map noise."),
     ("subbeam_herschel_region", "MIX_POOLED_MU1"): ("dimensionless (ln column ratio)",
-        "The same first-component mean as MIX_MU1, from the survey-pooled "
-        "fit."),
+        "For every beam (108, 301.8, 821 arcsec) and column bin of "
+        "MIX_KA_CENTRES, the mean of the first of two Gaussian "
+        "components in the noise-separated structural mixture fit to "
+        "that bin's own column-conditional kernel summed over every "
+        "region's counts, after deconvolving each region's own fine-"
+        "map noise."),
     ("subbeam_herschel_region", "MIX_POOLED_MU2"): ("dimensionless (ln column ratio)",
-        "The same second-component mean as MIX_MU2, from the survey-pooled "
-        "fit."),
+        "For every beam (108, 301.8, 821 arcsec) and column bin of "
+        "MIX_KA_CENTRES, the mean of the second of two Gaussian "
+        "components in the noise-separated structural mixture fit to "
+        "that bin's own column-conditional kernel summed over every "
+        "region's counts, after deconvolving each region's own fine-"
+        "map noise."),
     ("subbeam_herschel_region", "MIX_POOLED_SIG1"): ("dimensionless (ln column ratio)",
-        "The same first-component standard deviation as MIX_SIG1, from the "
-        "survey-pooled fit."),
+        "For every beam (108, 301.8, 821 arcsec) and column bin of "
+        "MIX_KA_CENTRES, the standard deviation of the first of two "
+        "Gaussian components in the noise-separated structural mixture "
+        "fit to that bin's own column-conditional kernel summed over "
+        "every region's counts, after deconvolving each region's own "
+        "fine-map noise."),
     ("subbeam_herschel_region", "MIX_POOLED_SIG2"): ("dimensionless (ln column ratio)",
-        "The same second-component standard deviation as MIX_SIG2, from "
-        "the survey-pooled fit."),
+        "For every beam (108, 301.8, 821 arcsec) and column bin of "
+        "MIX_KA_CENTRES, the standard deviation of the second of two "
+        "Gaussian components in the noise-separated structural mixture "
+        "fit to that bin's own column-conditional kernel summed over "
+        "every region's counts, after deconvolving each region's own "
+        "fine-map noise."),
     ("subbeam_herschel_region", "MIX_POOLED_MAX_CDF_ERR"): ("dimensionless",
-        "The same worst-case goodness-of-fit error as MIX_MAX_CDF_ERR, "
-        "from the survey-pooled fit."),
+        "For every beam (108, 301.8, 821 arcsec) and column bin of "
+        "MIX_KA_CENTRES, the largest absolute difference, over the "
+        "fitted histogram's own bins, between the noise-convolved "
+        "mixture model's CDF and the observed CDF, for the structural "
+        "mixture fit to that bin's own column-conditional kernel "
+        "summed over every region's counts: that fit's own worst-case "
+        "goodness-of-fit error."),
 
     # sky.derived.planck_column -- calibration_planck_survey (survey-wide
     # tau353-to-A_K calibration) and column_planck_sightline (per nside-256
@@ -1518,15 +1695,15 @@ REGISTRY = {
         "combining the calibration's own statistical, within-beam and "
         "region-to-region terms in quadrature."),
     ("column_planck_sightline", "GAL_L_DEG"): ("deg",
-        "Galactic longitude of the matching pixel's centre."),
+        "Galactic longitude of the matching pixel's center."),
     ("column_planck_sightline", "GAL_B_DEG"): ("deg",
-        "Galactic latitude of the matching pixel's centre."),
+        "Galactic latitude of the matching pixel's center."),
     ("column_planck_sightline", "TEMP_K"): ("K",
         "Planck's own fitted thermal-dust temperature at the matching "
         "pixel."),
 
     # sky.derived.dunham_yso -- yso_dunham2015_survey: the Dunham et al.
-    # (2015) YSO census, one row per catalogued YSO.
+    # (2015) YSO census, one row per cataloged YSO.
     ("yso_dunham2015_survey", "SEQ"): ("catalog sequence number",
         "Dunham et al. (2015)'s own running sequence number for this YSO, "
         "the order every dataset in this file shares."),
@@ -1580,9 +1757,9 @@ REGISTRY = {
     ("yso_dunham2015_survey", "LOG10_F45_REF"): ("log10 mJy at 1 kpc",
         "log10 of F45_MJY scaled to a common reference distance of 1 kpc "
         "by (DIST_PC / 1000)^2: 10**x is a flux in mJy a source at this "
-        "YSO's own brightness would show at 1 kpc. On the same scale and "
-        "reference distance as the YSO template register's own reference "
-        "4.5 micron brightness."),
+        "YSO's own brightness would show at 1 kpc. This is the "
+        "reference-brightness scale and distance the YSO templates "
+        "used elsewhere in this package are also tabulated at."),
 
     # sky.derived.herschel_column -- sigma_herschel_survey (survey-wide
     # calibration) and column_herschel_source (per region): the Herschel
@@ -1605,7 +1782,8 @@ REGISTRY = {
         "own column-binned scatter."),
     ("sigma_herschel_survey", "C1"): ("dimensionless",
         "The term of the random-uncertainty model SIGMA_RAND_K^2 = C0^2 + "
-        "C1^2 * A_K^2 that scales with A_K, from the same fit as C0."),
+        "C1^2 * A_K^2 that scales with A_K, fit over every overlapping "
+        "HGBS map pair's own column-binned scatter."),
     ("sigma_herschel_survey", "N_PAIRS"): ("map pairs",
         "How many overlapping HGBS map pairs went into fitting C0 and C1."),
     ("sigma_herschel_survey", "FIELD_NAME"): ("region name",
@@ -1618,15 +1796,17 @@ REGISTRY = {
         "this field's own Herschel zero-point offset."),
     ("sigma_herschel_survey", "ZP_SIGMA_FIELD"): ("mag A_K",
         "For the matching field in FIELD_NAME, the uncertainty on "
-        "ZP_FIELD: the robust scatter of the same per-pixel differences, "
-        "divided by the square root of ZP_N_FIELD."),
+        "ZP_FIELD: the robust scatter (1.4826 times the median absolute "
+        "deviation) of the Herschel column minus the Planck column over "
+        "that field's own low-column, Herschel-covered admitted "
+        "sightline pixels, divided by the square root of ZP_N_FIELD."),
     ("sigma_herschel_survey", "ZP_N_FIELD"): ("pixels",
         "For the matching field in FIELD_NAME, how many low-column, "
         "Herschel-covered admitted sightline pixels went into ZP_FIELD and "
         "ZP_SIGMA_FIELD."),
 
     ("column_herschel_source", "A_K"): ("mag A_K",
-        "For every catalogued source of this region, the K-band "
+        "For every cataloged source of this region, the K-band "
         "extinction from the Herschel Gould Belt Survey N(H2) map at the "
         "source's own position, where a map covers it. Not meaningful "
         "where COVERED is False."),
@@ -1647,7 +1827,7 @@ REGISTRY = {
         "True where an HGBS map reaches this source's own position, so "
         "A_K and its uncertainty columns in this file are meaningful."),
     ("column_herschel_source", "MAP_ID"): ("map index",
-        "For every catalogued source of this region, which map in this "
+        "For every cataloged source of this region, which map in this "
         "file's own MAP_NAME list covers its position, as a position in "
         "that list. -1 where no map covers it."),
     ("column_herschel_source", "MAP_NAME"): ("map name",
@@ -1775,9 +1955,9 @@ REGISTRY = {
         "uncertainty treated as perfectly correlated with every other "
         "step's."),
     ("profile_edenhofer_sightline", "GAL_L_DEG"): ("deg",
-        "Galactic longitude of the matching pixel's centre in HPX_PIX_256."),
+        "Galactic longitude of the matching pixel's center in HPX_PIX_256."),
     ("profile_edenhofer_sightline", "GAL_B_DEG"): ("deg",
-        "Galactic latitude of the matching pixel's centre in HPX_PIX_256."),
+        "Galactic latitude of the matching pixel's center in HPX_PIX_256."),
     ("profile_edenhofer_sightline", "TAIL_RESIDUAL_K"): ("mag A_K",
         "For the matching pixel in HPX_PIX_256, the part of this "
         "sightline's own total column (A_INF_K) beyond the map's own "
@@ -1810,8 +1990,9 @@ REGISTRY = {
         "so its own edge value, plus TAIL_RESIDUAL_K, matches A_INF_K, "
         "rather than left as the input maps measured it."),
     ("profile_edenhofer_sightline", "fallback/DIST_PC"): ("pc",
-        "The same distance grid as this file's top-level DIST_PC, repeated "
-        "here for the region's fallback profile."),
+        "The distance grid along the line of sight, starting at 0 pc, "
+        "that fallback/A_CUM_K and the region's other fallback-profile "
+        "datasets in this file are tabulated on."),
     ("profile_edenhofer_sightline", "fallback/A_CUM_K"): ("mag A_K",
         "For each distance in fallback/DIST_PC, this region's "
         "source-weighted mean of A_CUM_K over every sightline in this "
@@ -1877,7 +2058,7 @@ REGISTRY = {
         "are meaningful; False where none was found."),
 
     # sky.derived.twomass_column_scale -- column-scale_twomass_region: each
-    # arm's map column regressed against 2MASS background-star colour, by
+    # arm's map column regressed against 2MASS background-star color, by
     # region and arm.
     ("column-scale_twomass_region", "REGION"): ("region name",
         "The name of the region this row describes, in the fixed thirty-"
@@ -1889,7 +2070,7 @@ REGISTRY = {
         "For this region and the matching arm in ARM, the factor that "
         "rescales that arm's own map column to match the reddening of "
         "2MASS background stars: the regression slope of their median "
-        "H minus Ks colour against the arm's per-pixel column, divided by "
+        "H minus Ks color against the arm's per-pixel column, divided by "
         "the adopted hybrid extinction law's own A_H/A_K minus 1. NaN "
         "where the region has too few usable pixels."),
     ("column-scale_twomass_region", "SCALE_SIGMA"): ("dimensionless",
@@ -1898,14 +2079,16 @@ REGISTRY = {
         "too few usable pixels."),
     ("column-scale_twomass_region", "SLOPE_H_KS_PER_AK"): ("mag (H-Ks) per mag A_K",
         "For this region and the matching arm in ARM, the ordinary-least-"
-        "squares slope of the background stars' median H minus Ks colour "
+        "squares slope of the background stars' median H minus Ks color "
         "against that arm's per-pixel map column, before the A_H/A_K "
         "conversion SCALE applies. NaN where the region has too few "
         "usable pixels."),
     ("column-scale_twomass_region", "INTERCEPT_H_KS"): ("mag",
-        "For this region and the matching arm in ARM, the same regression's "
-        "intercept: the background stars' predicted median H minus Ks "
-        "colour at zero map column. NaN where the region has too few "
+        "For this region and the matching arm in ARM, the intercept of "
+        "the ordinary-least-squares regression of the background "
+        "stars' median H minus Ks color against that arm's per-pixel "
+        "map column: the background stars' predicted median H minus Ks "
+        "color at zero map column. NaN where the region has too few "
         "usable pixels."),
     ("column-scale_twomass_region", "N_STARS"): ("stars",
         "For this region and the matching arm in ARM, how many background "
@@ -1913,7 +2096,7 @@ REGISTRY = {
         "regression, went into it."),
     ("column-scale_twomass_region", "N_PIXELS"): ("pixels",
         "For this region and the matching arm in ARM, how many nside-512 "
-        "pixels carried both a usable background-star colour and a usable "
+        "pixels carried both a usable background-star color and a usable "
         "arm column, and so went into the regression."),
 
     # catalog.depths -- depths_sesna_region: the fitted 50%-completeness
@@ -1967,7 +2150,7 @@ REGISTRY = {
         "for the five Spitzer bands. NaN for the three 2MASS bands, which "
         "carry no resampling uncertainty."),
 
-    # catalog.coverage -- coverage_sesna_hpx512: the catalogue's own observed
+    # catalog.coverage -- coverage_sesna_hpx512: the catalog's own observed
     # IRAC footprint on the nside-512 grid, per region.
     ("coverage_sesna_hpx512", "HPX_PIX"): ("nested HEALPix pixel, nside 512",
         "The region's admitted nside-512 pixel numbers (nested ordering), "
@@ -1975,7 +2158,7 @@ REGISTRY = {
     ("coverage_sesna_hpx512", "FRAC"): ("dimensionless",
         "For the matching pixel in HPX_PIX, the fraction of its 16 nside-2048 "
         "child pixels holding at least one SESNA source with a measured 3.6, "
-        "4.5, 5.8 or 8.0 micron detection. This is the catalogue's own observed "
+        "4.5, 5.8 or 8.0 micron detection. This is the catalog's own observed "
         "footprint, used as that pixel's survey coverage fraction."),
 
     # catalog.depth_grid, per-source product -- limits_sesna_source: each
@@ -1988,30 +2171,31 @@ REGISTRY = {
         "by how much brighter or fainter this source's own completeness-limit "
         "flux is than the region's typical source."),
     ("limits_sesna_source", "W_DEX"): ("dex",
-        "One value per band (same eight bands and order as F_LIM_50_MJY), the "
+        "One value per band (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), the "
         "roll-off width of the region's fitted detection curve: how many factors "
         "of 10 in flux the detection fraction takes to fall from high to low "
         "around F_50_REGION_MJY. The same eight values apply to every source in "
         "this file."),
     ("limits_sesna_source", "F_50_REGION_MJY"): ("mJy",
-        "One value per band (same eight bands and order as F_LIM_50_MJY), the "
+        "One value per band (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), the "
         "region's own fitted 50%-completeness flux: the flux at which half of "
         "the region's sources at that depth are detected. The same eight values "
         "apply to every source in this file. A value of +inf means the region "
         "did not sample enough of that band's roll-off to fit one."),
     ("limits_sesna_source", "ALPHA_REGION"): ("dimensionless",
-        "One value per band (same eight bands and order as F_LIM_50_MJY), the "
+        "One value per band (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), the "
         "power-law slope of the region's own source counts at fluxes well above "
-        "F_50_REGION_MJY, from the same fit. The same eight values apply to "
-        "every source in this file."),
+        "F_50_REGION_MJY, from the region's own fitted detection curve. The "
+        "same eight values apply to every source in this file."),
     ("limits_sesna_source", "DCOMP90_REF_LOG10"): ("log10 mJy",
-        "One value per band (same eight bands and order as F_LIM_50_MJY), the "
+        "One value per band (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), the "
         "log10 90%-completeness flux that F_LIM_50_MJY's per-source shift is "
         "measured from: the median, over the region's own low-extinction, "
-        "well-covered sources, of log10 DCOMP90_MJY (catalog/curated's own "
-        "column). The same eight values apply to every source in this file."),
+        "well-covered sources, of the log10 90%-completeness flux each of "
+        "those sources carries in the curated catalog. The same eight "
+        "values apply to every source in this file."),
     ("limits_sesna_source", "LIMIT_KIND"): ("code",
-        "One value per band (same eight bands and order as F_LIM_50_MJY), how "
+        "One value per band (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), how "
         "F_50_REGION_MJY for that band was obtained: \"fit\" means the region's "
         "own source counts show a genuine roll-off; \"bound\" means this band's "
         "faint end is set by a different, more restrictive band's requirement, "
@@ -2022,7 +2206,7 @@ REGISTRY = {
         "in this file."),
 
     # catalog.depth_grid, per-pixel product -- depth-grid_sesna_hpx512: the
-    # same per-source limits, summarised on the nside-512 grid.
+    # same per-source limits, summarized on the nside-512 grid.
     ("depth-grid_sesna_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
         "The region's admitted nside-512 pixel numbers (nested ordering), "
         "ascending. Row i here matches row i of every other dataset in this "
@@ -2035,16 +2219,12 @@ REGISTRY = {
         "For the matching pixel in HPX_PIX_512 and each of the eight bands (J, "
         "H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), "
         "the median, over the pixel's own sources, of each source's own "
-        "50%-completeness flux limit (catalog/sesna's per-source limits "
-        "product). A pixel with no sources of its own (N_SOURCES = 0) takes its "
-        "nearest occupied pixel's value."),
+        "50%-completeness flux limit (the catalog's own per-source limits product). A pixel with no sources of its own (N_SOURCES = 0) takes its nearest occupied pixel's value."),
     ("depth-grid_sesna_hpx512", "F_LIM_50_PIX_MJY"): ("mJy",
         "For the matching pixel in HPX_PIX_512 and each of the eight bands (J, "
         "H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), "
         "the median, over the pixel's own sources, of each source's own "
-        "50%-completeness flux limit (catalog/sesna's per-source limits "
-        "product). A pixel with no sources of its own (N_SOURCES = 0) takes its "
-        "nearest occupied pixel's value."),
+        "50%-completeness flux limit (the catalog's own per-source limits product). A pixel with no sources of its own (N_SOURCES = 0) takes its nearest occupied pixel's value."),
     ("depth-grid_sesna_hpx512", "W_DEX_PIX"): ("dex",
         "For the matching pixel in HPX_PIX_512 and each of the eight bands (J, "
         "H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), "
@@ -2120,7 +2300,7 @@ REGISTRY = {
         "measurement: 0 good, 2 uncertain."),
 
     ("walawender2005_knots_survey", "FIELD"): ("field name",
-        "Which field this object was catalogued in: Perseus or Barnard 1."),
+        "Which field this object was cataloged in: Perseus or Barnard 1."),
     ("walawender2005_knots_survey", "TABLE_ORIGIN"): ("table label",
         "Which table of Walawender et al. (2005) this row comes from: "
         "hh_known (previously known Herbig-Haro objects, Perseus), hh_new "
@@ -2135,8 +2315,8 @@ REGISTRY = {
     ("walawender2005_knots_survey", "RA_DEG"): ("deg", "Right ascension, equinox J2000."),
     ("walawender2005_knots_survey", "DEC_DEG"): ("deg", "Declination, equinox J2000."),
 
-    ("uwish2_knots_survey", "UWISH2_ID"): ("UWISH2 catalogue identifier",
-        "This feature's identifier in the UWISH2 catalogue (Froebrich et al. "
+    ("uwish2_knots_survey", "UWISH2_ID"): ("UWISH2 catalog identifier",
+        "This feature's identifier in the UWISH2 catalog (Froebrich et al. "
         "2015)."),
     ("uwish2_knots_survey", "RA_DEG"): ("deg", "Right ascension, equinox J2000."),
     ("uwish2_knots_survey", "DEC_DEG"): ("deg", "Declination, equinox J2000."),
@@ -2167,19 +2347,19 @@ REGISTRY = {
     ("uwish2_images_knots_survey", "IMAGE"): ("image name",
         "This WFCAM detector-array image's own identifier."),
     ("uwish2_images_knots_survey", "RA_DEG"): ("deg",
-        "Right ascension of the image centre, equinox J2000."),
+        "Right ascension of the image center, equinox J2000."),
     ("uwish2_images_knots_survey", "DEC_DEG"): ("deg",
-        "Declination of the image centre, equinox J2000."),
+        "Declination of the image center, equinox J2000."),
     ("uwish2_images_knots_survey", "GLON_DEG"): ("deg",
-        "Galactic longitude of the image centre."),
+        "Galactic longitude of the image center."),
     ("uwish2_images_knots_survey", "GLAT_DEG"): ("deg",
-        "Galactic latitude of the image centre."),
+        "Galactic latitude of the image center."),
     ("uwish2_images_knots_survey", "NOISE"): ("counts",
         "The image's own one-pixel background noise level, in the map's "
         "native calibrated counts (Froebrich et al. 2015, their Table C1)."),
 
     # sky.derived.trilegal_colour -- colour_trilegal_survey: TRILEGAL's own
-    # Gaia G - 2MASS Ks colour as a function of atmosphere alone.
+    # Gaia G - 2MASS Ks color as a function of atmosphere alone.
     ("colour_trilegal_survey", "LOG_TEFF_EDGES"): ("dex log10(K)",
         "The edges of this file's log10(effective temperature) bins, "
         "0.02 dex wide: bin i runs from LOG_TEFF_EDGES[i] to "
@@ -2192,21 +2372,22 @@ REGISTRY = {
         "runs from MH_EDGES[k] to MH_EDGES[k+1]."),
     ("colour_trilegal_survey", "G_MINUS_KS_MEDIAN"): ("mag",
         "For the cell at (LOG_TEFF_EDGES[i], LOG_G_EDGES[j], MH_EDGES[k]), "
-        "the median Gaia G minus 2MASS Ks colour of the TRILEGAL stars that "
+        "the median Gaia G minus 2MASS Ks color of the TRILEGAL stars that "
         "fall in it. NaN where COUNT is 0."),
     ("colour_trilegal_survey", "G_MINUS_KS_HALFWIDTH"): ("mag",
-        "For the same cell as G_MINUS_KS_MEDIAN, half the difference "
-        "between the 84th and 16th percentile of that cell's own G minus "
-        "Ks colours: a robust one-sided spread around the median. NaN "
+        "For the cell at (LOG_TEFF_EDGES[i], LOG_G_EDGES[j], MH_EDGES[k]), "
+        "half the difference between the 84th and 16th percentile of "
+        "the Gaia G minus 2MASS Ks colors of the TRILEGAL stars that "
+        "fall in it: a robust one-sided spread around the median. NaN "
         "where COUNT is 0."),
     ("colour_trilegal_survey", "COUNT"): ("stars",
-        "For the same cell as G_MINUS_KS_MEDIAN, how many TRILEGAL stars "
-        "from the download fall in it."),
+        "For the cell at (LOG_TEFF_EDGES[i], LOG_G_EDGES[j], MH_EDGES[k]), "
+        "how many TRILEGAL stars from the download fall in it."),
 
     # sky.derived.planck_source_column -- column_planck_source: the Planck
     # thermal-dust arm of the per-source extinction column.
     ("column_planck_source", "A_K"): ("mag A_K",
-        "For every catalogued source of this region, the K-band extinction "
+        "For every cataloged source of this region, the K-band extinction "
         "from the Planck R1.20 thermal-dust optical depth (TAU353) "
         "bilinearly interpolated at the source's own Galactic position."),
     ("column_planck_source", "SIGMA_A_K"): ("mag A_K",
@@ -2221,9 +2402,10 @@ REGISTRY = {
         "reference column it is calibrated against: a fixed offset plus a "
         "term growing with A_K."),
     ("column_planck_source", "SIGMA_REGION_K"): ("mag A_K",
-        "The part of A_K's uncertainty from the region-to-region scatter of "
-        "the same Planck-to-reference calibration, not reduced by beam "
-        "averaging since a single sightline sees exactly one Planck beam."),
+        "The part of A_K's uncertainty from the region-to-region scatter "
+        "of the Planck-based column against the reference column it is "
+        "calibrated against, not reduced by beam averaging since a "
+        "single sightline sees exactly one Planck beam."),
 
     # sky.derived.edenhofer_samples -- profile-sigma-samples_edenhofer_sightline:
     # the across-sample uncertainty on the Edenhofer et al. (2024) extinction
@@ -2246,14 +2428,14 @@ REGISTRY = {
         "DIST_PC, the standard deviation, across the map's 12 released "
         "posterior samples, of the ratio of the cumulative extinction at "
         "that distance to the sample's own total extinction along the "
-        "whole sightline. This ratio is the depth mark a star's placement "
-        "along the sightline reads, so this is that mark's own sample "
-        "uncertainty, smaller near the far end (where the ratio is "
-        "pinned near 1 for every sample) than SIGMA_SAMPLES_K's absolute "
-        "uncertainty would suggest."),
+        "whole sightline. A star's own position along the sightline is "
+        "set by this same ratio, so this is the sample uncertainty on "
+        "that positioning quantity: smaller near the far end (where the "
+        "ratio is pinned near 1 for every sample) than SIGMA_SAMPLES_K's "
+        "absolute uncertainty would suggest."),
 
     # sky.derived.swire_galaxies -- galaxies_swire_survey: the surviving
-    # SWIRE galaxies, survey-wide, their IRAC colours and flux-grid node.
+    # SWIRE galaxies, survey-wide, their IRAC colors and flux-grid node.
     ("galaxies_swire_survey", "LOG10_S"): ("log10 mJy",
         "This galaxy's 4.5 micron (IRAC I2) flux density: 10**x is a flux in "
         "mJy."),
@@ -2276,18 +2458,18 @@ REGISTRY = {
     ("galaxies_swire_survey", "SIGMA_COLOUR_I1I2"): ("dex",
         "The 1-sigma uncertainty on COLOUR_I1I2: each band's flux "
         "uncertainty divided by its own flux and by ln(10), combined in "
-        "quadrature over the 3.6 and 4.5 micron bands. NaN under the same "
-        "condition as COLOUR_I1I2."),
+        "quadrature over the 3.6 and 4.5 micron bands. NaN where either "
+        "band's flux or uncertainty is missing or not positive."),
     ("galaxies_swire_survey", "SIGMA_COLOUR_I2I3"): ("dex",
         "The 1-sigma uncertainty on COLOUR_I2I3: each band's flux "
         "uncertainty divided by its own flux and by ln(10), combined in "
-        "quadrature over the 4.5 and 5.8 micron bands. NaN under the same "
-        "condition as COLOUR_I2I3."),
+        "quadrature over the 4.5 and 5.8 micron bands. NaN where either "
+        "band's flux or uncertainty is missing or not positive."),
     ("galaxies_swire_survey", "SIGMA_COLOUR_I2I4"): ("dex",
         "The 1-sigma uncertainty on COLOUR_I2I4: each band's flux "
         "uncertainty divided by its own flux and by ln(10), combined in "
-        "quadrature over the 4.5 and 8.0 micron bands. NaN under the same "
-        "condition as COLOUR_I2I4."),
+        "quadrature over the 4.5 and 8.0 micron bands. NaN where either "
+        "band's flux or uncertainty is missing or not positive."),
     ("galaxies_swire_survey", "FIELD"): ("field index",
         "Which of the six SWIRE fields this galaxy comes from, as a "
         "position in this file's own FIELDS attribute (a semicolon-"
@@ -2305,20 +2487,20 @@ REGISTRY = {
     ("galaxies_swire_survey", "N_NODE_ALL"): ("galaxies",
         "For each of the 61 points in LOG10_S_GRID, how many surviving "
         "galaxies land nearest that point (NODE) and also carry a finite "
-        "value in all three colours, COLOUR_I1I2, COLOUR_I2I3 and "
+        "value in all three colors, COLOUR_I1I2, COLOUR_I2I3 and "
         "COLOUR_I2I4."),
 
     # sky.derived.juvela_extinction -- extinction_juvela_source (per
     # region) and extinction_juvela_sightline (survey-wide): the Juvela &
-    # Montillaud (2016) NICEST star-colour extinction map, converted to
+    # Montillaud (2016) NICEST star-color extinction map, converted to
     # A_K.
     ("extinction_juvela_source", "A_K"): ("mag A_K",
-        "For every catalogued source of this region, the NICEST star-colour "
+        "For every cataloged source of this region, the NICEST star-color "
         "extinction map's value at the source's own sky position, converted "
         "from the map's native A_J to A_K with the adopted diffuse "
         "extinction law's own A_J/A_K ratio."),
     ("extinction_juvela_source", "HPX_PIX_1024"): ("nested HEALPix pixel, nside 1024",
-        "For every catalogued source of this region, the nested nside-1024 "
+        "For every cataloged source of this region, the nested nside-1024 "
         "pixel number of the source's own sky position: the map cell this "
         "file's A_K value is read at."),
     ("extinction_juvela_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
@@ -2326,7 +2508,7 @@ REGISTRY = {
         "regions, nested ordering. Row i here is row i of A_K."),
     ("extinction_juvela_sightline", "A_K"): ("mag A_K",
         "For the matching pixel in HPX_PIX_256, the mean of the NICEST "
-        "star-colour extinction map's A_K value over all 64 of that pixel's "
+        "star-color extinction map's A_K value over all 64 of that pixel's "
         "nside-2048 children, covering the whole sightline rather than only "
         "where a source happens to fall."),
 
