@@ -70,15 +70,19 @@ import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import constants
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.population.selection import MIN_BANDS
 from sesnaimpute.sky.download.trilegal import build as trilegal_download
+
+_STEM = "field-stars_trilegal_region"
 
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
@@ -522,33 +526,39 @@ def write_region(path, region, result):
     ret = result["retained"]
     raw = result["raw"]
     with h5py.File(path, "w") as f:
-        f.create_dataset("DIST_PC", data=ret["dist_pc"].astype(np.float32))
-        f.create_dataset("LOG_TEFF", data=ret["log_teff"].astype(np.float32))
-        f.create_dataset("LOG_G", data=ret["log_g"].astype(np.float32))
-        f.create_dataset("LOG_L", data=ret["log_l"].astype(np.float32))
-        f.create_dataset("FNU_MJY", data=ret["fnu_mjy"].astype(np.float32))
-        f.create_dataset("G_PROXY", data=ret["g_proxy"].astype(np.float32))
-        f.create_dataset("KS_MAG", data=ret["ks_mag"].astype(np.float32))
-        f.create_dataset("K_G_DIFFUSE", data=ret["k_g_diffuse"].astype(np.float32))
-        f.create_dataset("K_G_DENSE", data=ret["k_g_dense"].astype(np.float32))
-        f.create_dataset("TEMPLATE_INDEX", data=ret["template_index"].astype(np.int32))
-        f.create_dataset("POINTING_INDEX", data=ret["pointing_index"].astype(np.int16))
+        for name, data in (
+            ("DIST_PC", ret["dist_pc"].astype(np.float32)),
+            ("LOG_TEFF", ret["log_teff"].astype(np.float32)),
+            ("LOG_G", ret["log_g"].astype(np.float32)),
+            ("LOG_L", ret["log_l"].astype(np.float32)),
+            ("FNU_MJY", ret["fnu_mjy"].astype(np.float32)),
+            ("G_PROXY", ret["g_proxy"].astype(np.float32)),
+            ("KS_MAG", ret["ks_mag"].astype(np.float32)),
+            ("K_G_DIFFUSE", ret["k_g_diffuse"].astype(np.float32)),
+            ("K_G_DENSE", ret["k_g_dense"].astype(np.float32)),
+            ("TEMPLATE_INDEX", ret["template_index"].astype(np.int32)),
+            ("POINTING_INDEX", ret["pointing_index"].astype(np.int16)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
 
         raw_group = f.create_group("RAW")
-        raw_group.create_dataset("G_PROXY", data=raw["g_proxy"].astype(np.float32))
-        raw_group.create_dataset("KS_MAG", data=raw["ks_mag"].astype(np.float32))
-        raw_group.create_dataset("DIST_PC", data=raw["dist_pc"].astype(np.float32))
         # the anchor prediction (SPEC_PRIORS.md section 2.1, "N^{model->obs}")
         # dims every raw row in G through its own diffuse/dense Gaia
         # coefficient, blended by the section 1.3 ramp at the star's own
         # local column -- carried here so the prediction never re-matches
-        # the atmosphere register.
-        raw_group.create_dataset("K_G_DIFFUSE", data=raw["k_g_diffuse"].astype(np.float32))
-        raw_group.create_dataset("K_G_DENSE", data=raw["k_g_dense"].astype(np.float32))
-        # each raw row's own pointing, the same per-row column the retained
-        # group carries (`population.anchor_tiles`: a pixel's predicted
-        # counts come from its nearest pointing's own raw stars only).
-        raw_group.create_dataset("POINTING_INDEX", data=raw["pointing_index"].astype(np.int16))
+        # the atmosphere register. Each raw row's own pointing is the same
+        # per-row column the retained group carries (`population.
+        # anchor_tiles`: a pixel's predicted counts come from its nearest
+        # pointing's own raw stars only).
+        for name, data in (
+            ("G_PROXY", raw["g_proxy"].astype(np.float32)),
+            ("KS_MAG", raw["ks_mag"].astype(np.float32)),
+            ("DIST_PC", raw["dist_pc"].astype(np.float32)),
+            ("K_G_DIFFUSE", raw["k_g_diffuse"].astype(np.float32)),
+            ("K_G_DENSE", raw["k_g_dense"].astype(np.float32)),
+            ("POINTING_INDEX", raw["pointing_index"].astype(np.int16)),
+        ):
+            build_module.write_dataset(raw_group, name, data, *REGISTRY[(_STEM, f"RAW/{name}")])
 
         f.attrs["GRANULE"] = "region"
         f.attrs["OMEGA_SIM_DEG2"] = float(result["area_deg2"])

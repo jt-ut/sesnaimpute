@@ -107,6 +107,73 @@ REGISTRY = {
         "by the cell's own width in u. Integrating P_XI times the cell "
         "width over all cells gives 1."),
 
+    # population.field_stars -- field-stars_trilegal_region: the synthetic
+    # TRILEGAL field-star population, retained sample and pre-retention
+    # raw columns, per region.
+    ("field-stars_trilegal_region", "DIST_PC"): ("pc",
+        "This retained synthetic star's true distance from the Sun, "
+        "TRILEGAL's own simulated value."),
+    ("field-stars_trilegal_region", "LOG_TEFF"): ("log10 K",
+        "This retained synthetic star's effective temperature: 10**x is "
+        "a temperature in Kelvin."),
+    ("field-stars_trilegal_region", "LOG_G"): ("log10(cm/s^2)",
+        "This retained synthetic star's surface gravity: 10**x is a "
+        "gravity in cm/s^2."),
+    ("field-stars_trilegal_region", "LOG_L"): ("log10 Lsun",
+        "This retained synthetic star's bolometric luminosity: 10**x is "
+        "a luminosity in solar luminosities."),
+    ("field-stars_trilegal_region", "FNU_MJY"): ("mJy",
+        "This retained synthetic star's intrinsic (undimmed) flux "
+        "density in each of the eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 "
+        "and 24 micron, this file's own band order), TRILEGAL's own "
+        "simulated 2MASS+Spitzer output."),
+    ("field-stars_trilegal_region", "G_PROXY"): ("mag Gaia G",
+        "This retained synthetic star's intrinsic Gaia G magnitude "
+        "proxy: its Ks magnitude plus the TRILEGAL G-Ks colour relation "
+        "(sky.derived.trilegal_colour) read at its own atmosphere, or, "
+        "where no populated cell of that relation is within one step, "
+        "its matched atmosphere template's own G-Ks colour."),
+    ("field-stars_trilegal_region", "KS_MAG"): ("mag 2MASS Ks",
+        "This retained synthetic star's intrinsic 2MASS Ks magnitude, "
+        "TRILEGAL's own simulated value."),
+    ("field-stars_trilegal_region", "K_G_DIFFUSE"): ("A_G/A_V",
+        "This retained synthetic star's Gaia extinction coefficient "
+        "under the diffuse-ISM law (Danielski et al. 2018), from its "
+        "matched atmosphere template."),
+    ("field-stars_trilegal_region", "K_G_DENSE"): ("A_G/A_V",
+        "This retained synthetic star's Gaia extinction coefficient "
+        "under the dense-cloud law (Danielski et al. 2018), from its "
+        "matched atmosphere template."),
+    ("field-stars_trilegal_region", "TEMPLATE_INDEX"): ("template index",
+        "This retained synthetic star's nearest atmosphere template, as "
+        "a row position in the project's stellar-atmosphere register "
+        "(sps_register.hdf5)."),
+    ("field-stars_trilegal_region", "POINTING_INDEX"): ("pointing index",
+        "This retained synthetic star's own TRILEGAL pointing, as a "
+        "position in this region's list of simulated sky pointings."),
+    ("field-stars_trilegal_region", "RAW/G_PROXY"): ("mag Gaia G",
+        "The same Gaia G magnitude proxy as the retained sample's "
+        "G_PROXY, for every simulated star before the retention cut "
+        "(CODING_RULES_BMSTP.md's anchor-prediction population)."),
+    ("field-stars_trilegal_region", "RAW/KS_MAG"): ("mag 2MASS Ks",
+        "The same intrinsic 2MASS Ks magnitude as the retained sample's "
+        "KS_MAG, for every simulated star before the retention cut."),
+    ("field-stars_trilegal_region", "RAW/DIST_PC"): ("pc",
+        "The same true distance as the retained sample's DIST_PC, for "
+        "every simulated star before the retention cut."),
+    ("field-stars_trilegal_region", "RAW/K_G_DIFFUSE"): ("A_G/A_V",
+        "The same diffuse-ISM Gaia extinction coefficient as the "
+        "retained sample's K_G_DIFFUSE, for every simulated star before "
+        "the retention cut."),
+    ("field-stars_trilegal_region", "RAW/K_G_DENSE"): ("A_G/A_V",
+        "The same dense-cloud Gaia extinction coefficient as the "
+        "retained sample's K_G_DENSE, for every simulated star before "
+        "the retention cut."),
+    ("field-stars_trilegal_region", "RAW/POINTING_INDEX"): ("pointing index",
+        "The same TRILEGAL pointing index as the retained sample's "
+        "POINTING_INDEX, for every simulated star before the retention "
+        "cut."),
+
     # population.anchor_weights -- weights_anchors_tile: the STAR
     # per-tile-and-bin anchor reweighting factor W, per region.
     ("weights_anchors_tile", "G_EDGES"): ("mag Gaia G",
