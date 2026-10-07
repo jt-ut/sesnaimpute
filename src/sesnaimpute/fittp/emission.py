@@ -159,12 +159,22 @@ def _emission_table(f_ref, floor_linear, subclass, st):
 #: table carries. A module-level constant so a file already on disk from
 #: before this rule can be backfilled in place, without a recompute.
 _READINGS = {
-    "E": ("dimensionless",
-           "E[k, b, v]: the fraction of subclass k's templates, scaled to sit at "
-           "apparent 4.5 micron flux bin b, that the colour cascade calls verdict v"),
-    "SUBCLASSES": ("subclass label", "E's own first-axis order, this library's subclasses"),
-    "LOG10_F45_EDGES": ("log10 mJy", "E's own second-axis bin edges, the apparent 4.5 micron flux grid"),
-    "LABELS": ("verdict label", "E's own third-axis order, the cascade's eleven verdicts"),
+    "E": ("fraction",
+        "For each kind of model in this library, the fraction that the color cuts "
+        "of Gutermuth et al. (2009) place in each of their categories, as a "
+        "function of how bright the model appears. The three axes are the kinds of "
+        "model named in SUBCLASSES, the brightness bins bounded by LOG10_F45_EDGES, "
+        "and the categories named in LABELS. Each kind and brightness adds to 1 "
+        "across the categories."),
+    "SUBCLASSES": ("model kind",
+        "The kinds of model this library holds, in the row order E uses."),
+    "LABELS": ("category name",
+        "The eleven categories the color cuts of Gutermuth et al. (2009) can "
+        "assign, in the column order E uses."),
+    "LOG10_F45_EDGES": ("log10 of flux in mJy",
+        "The edges of the brightness bins E uses, as the base-10 logarithm of "
+        "apparent 4.5 micron flux in mJy. There is one more edge than there are "
+        "bins."),
 }
 
 

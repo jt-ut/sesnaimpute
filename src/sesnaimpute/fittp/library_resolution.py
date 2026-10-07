@@ -245,21 +245,56 @@ def _library_thickness(config, cls, sigma_i, kappa_prime):
 #: disk from before this rule can be backfilled in place (`set_readings`
 #: skips any name not present), without a recompute.
 _READINGS = {
-    "BANDS": ("band key", "the eight SESNA bands, SIGMA_I's own column order"),
-    "SIGMA_I": ("dex", "the survey's own 10th-percentile log-flux error per band, floored at SIGMA_FLOOR_DEX"),
-    "YSO_GROUP": ("geometry label", "the YSO register's own sub-grid this row's spacing was measured on"),
-    "YSO_N_AT_SIZE": ("templates", "that sub-grid's own template count at the size this row measured"),
-    "YSO_D50_AT_SIZE": ("dex", "that sub-grid's own 50th-percentile nearest-neighbour spacing at that size"),
-    "YSO_D90_AT_SIZE": ("dex", "that sub-grid's own 90th-percentile nearest-neighbour spacing at that size"),
-    "YSO_D_EFF": ("dimensionless", "that sub-grid's own fitted effective dimension of the spacing-vs-size line"),
-    "YSO_N_STAR": ("templates", "the template count at which that sub-grid's fitted line reaches RESOLUTION_TOL"),
-    "OTHER_LIBRARY": ("library key", "a library other than YSO's own key"),
-    "OTHER_N_TEMPLATES": ("templates", "that library's own current template count"),
-    "OTHER_D50": ("dex", "that library's own 50th-percentile nearest-neighbour spacing at its current count"),
-    "OTHER_D90": ("dex", "that library's own 90th-percentile nearest-neighbour spacing at its current count"),
-    "OTHER_THICK_ENOUGH": ("boolean (0/1)", "whether that library's own OTHER_D90 already clears RESOLUTION_TOL"),
-    "LIBRARY": ("library key", "SIGMA_LIB_DEX's own row order, one entry per class's library"),
-    "SIGMA_LIB_DEX": ("dex", "section 6.1's sigma_lib,L, one number per library, the fit's own per-band variance floor"),
+    "LIBRARY": ("library name",
+        "The model library this row describes, one per class."),
+    "SIGMA_LIB_DEX": ("dex",
+        "How finely that library samples the space of spectral shapes, in dex, "
+        "measured as the typical distance between a model and its nearest neighbor. "
+        "The fit adds this to each band's measurement error, so that no model can "
+        "be favored over a near-identical one by more than the library's own "
+        "sampling allows."),
+    "SIGMA_I": ("dex",
+        "The survey's own flux uncertainty in each of the eight bands, in dex, "
+        "taken as the tenth percentile over sources, in the band order given by the "
+        "BANDS dataset."),
+    "BANDS": ("band name",
+        "The eight SESNA bands, in the column order SIGMA_I uses."),
+    "OTHER_LIBRARY": ("library name",
+        "A model library other than the young stellar object one."),
+    "OTHER_N_TEMPLATES": ("models",
+        "How many models that library holds."),
+    "OTHER_D50": ("dex",
+        "The median distance between a model of that library and its nearest "
+        "neighbor."),
+    "OTHER_D90": ("dex",
+        "The distance between a model of that library and its nearest neighbor, at "
+        "the ninetieth percentile over models: the spacing of its most isolated "
+        "models."),
+    "OTHER_THICK_ENOUGH": ("true or false",
+        "Whether that library's models are already spaced more widely than the "
+        "tolerance this check uses, so that adding models to it would refine the "
+        "fit."),
+    "YSO_GROUP": ("model group",
+        "Which group of young stellar object models this row describes; the library "
+        "is built in groups by evolutionary stage and geometry."),
+    "YSO_N_AT_SIZE": ("models",
+        "How many models that group holds at each of four sizes, formed by thinning "
+        "the group, so that the spacing can be measured as a function of how many "
+        "models a library carries."),
+    "YSO_D50_AT_SIZE": ("dex",
+        "The median nearest-neighbor distance for that group at each of those four "
+        "sizes."),
+    "YSO_D90_AT_SIZE": ("dex",
+        "The ninetieth-percentile nearest-neighbor distance for that group at each "
+        "of those four sizes."),
+    "YSO_D_EFF": ("dimensionless",
+        "How quickly that group's model spacing shrinks as models are added, as the "
+        "slope of spacing against size. It behaves like the number of dimensions "
+        "the group's models really fill."),
+    "YSO_N_STAR": ("models",
+        "How many models that group would need for its spacing to reach the "
+        "tolerance this check uses, read off the fitted slope, at each of three "
+        "tolerances."),
 }
 
 

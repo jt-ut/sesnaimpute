@@ -767,19 +767,29 @@ def write_sensitivity(path, region, result):
         f.create_dataset("N_PYSO_ABOVE_HALF", data=n_pyso_above_half.astype(np.int32))
         f.create_dataset("N_SOURCES", data=n_sources.astype(np.int32))
         set_readings(f, {
-            "REGION": ("region name", "this row's region, REGION order fixed to regions.REGIONS"),
-            "RUN": ("sensitivity-run name", "one of the nine literature-band re-runs of spec sec 7.2"),
-            "SCALING": ("dimensionless",
-                         "the factor this run multiplied that class's sky density by (1.0 "
-                         "where the run does not touch the class); yso_floor's own row is "
-                         "this region's mean per-source factor, not a fixed literature-band one"),
-            "FRAC_MAP_CHANGED": ("dimensionless",
-                                   "the fraction of this region's sources whose MAP class moved "
-                                   "under this run against the nominal classification"),
+            "REGION": ("region name", "The star-forming region this row describes."),
+            "RUN": ("test name",
+                     "One of nine tests, each changing how many objects of a class the sky is "
+                     "expected to hold, by the amount the published measurements allow, to see "
+                     "how far the classification moves."),
+            "SCALING": ("factor",
+                         "The factor by which a test multiplied the expected number of objects "
+                         "of each class, with 1.0 where a test leaves a class alone. The class "
+                         "order is the CLASSES attribute of this file. The row for the young "
+                         "stellar object floor test holds that region's average factor over its "
+                         "own sources rather than a single published number."),
+            "FRAC_MAP_CHANGED": ("fraction",
+                                   "The fraction of the region's sources whose most probable "
+                                   "class changed under that test, compared with the "
+                                   "classification the pipeline reports."),
             "N_PYSO_ABOVE_HALF": ("sources",
-                                    "the count of P(YSO) > 0.5 sources under this run; column 0 "
-                                    "is the nominal classification, no run applied"),
-            "N_SOURCES": ("sources", "this region's own source count, the denominator of FRAC_MAP_CHANGED"),
+                                    "How many of the region's sources have a probability above "
+                                    "one half of being a young stellar object, under each test. "
+                                    "The first column is the classification the pipeline "
+                                    "reports, with no test applied."),
+            "N_SOURCES": ("sources",
+                           "How many sources the region holds, the number FRAC_MAP_CHANGED is a "
+                           "fraction of."),
         })
         f.attrs["GRANULE"] = "region"
         f.attrs["SCALING_YSO_FLOOR_IS_PER_SOURCE"] = (

@@ -98,12 +98,26 @@ def write_region(path, result):
             f.create_dataset("MEAN_P_%s" % cls, data=result["mean_p"][:, ci])
         f.create_dataset("N_YSO_ABOVE_HALF", data=result["n_yso_half"])
         readings = {
-            "HPX_PIX_512": ("nside-512 HEALPix pixel", "this row's admitted pixel, catalog.depth_grid's own set"),
-            "N_SOURCES": ("sources", "the pixel's own source count; 0 and a NaN mean for an admitted pixel with none"),
-            "N_YSO_ABOVE_HALF": ("sources", "the pixel's own count of P(YSO | D) > 0.5 sources"),
+            "HPX_PIX_512": ("HEALPix pixel number",
+                             "The patch of sky this row describes, as a HEALPix pixel number at "
+                             "nside 512, about 7 arcminutes across, in the nested numbering "
+                             "scheme."),
+            "N_SOURCES": ("sources",
+                           "How many catalog sources fall in this patch of sky. Where the count "
+                           "is zero the mean probabilities for the patch are not numbers."),
+            "N_YSO_ABOVE_HALF": ("sources",
+                                   "How many sources in this patch have a probability above one "
+                                   "half of being a young stellar object."),
         }
+        _CLASS_WORDS = {"STAR": "a field star", "AGB": "a dusty evolved star",
+                        "PAHC": "an aperture contaminated by nebular emission",
+                        "GAL": "a background galaxy", "YSO": "a young stellar object",
+                        "H2S": "a knot of shocked gas"}
         for cls in CLASSES:
-            readings["MEAN_P_%s" % cls] = ("dimensionless", "the pixel's own mean P(%s | D) over its sources" % cls)
+            readings["MEAN_P_%s" % cls] = (
+                "probability",
+                "The average probability, over the sources in this patch of sky, that a source "
+                "is %s." % _CLASS_WORDS[cls])
         set_readings(f, readings)
         f.attrs["GRANULE"] = "hpx512"
         f.attrs["CLASSES"] = np.array(CLASSES, dtype="S8")

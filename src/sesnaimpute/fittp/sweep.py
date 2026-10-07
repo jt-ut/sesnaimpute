@@ -169,62 +169,97 @@ _PART_KEYS = ("NAME", "LN_EVIDENCE", "LOG10_FLUX_MEAN", "LOG10_FLUX_COV", "TOPK_
 #: joined fit file carries, including `FAILED_ROWS` (join-time only, not
 #: a `_PART_KEYS` member).
 _READINGS = {
-    "NAME": ("row into the catalogue, same order",
-             "the source's own name, this product's row order matching the catalogue's"),
+    "NAME": ("source name",
+        "The source's name as the SESNA catalog gives it. Rows follow the catalog's "
+        "own order."),
+    "N_DETECTED": ("bands",
+        "How many of the source's eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 "
+        "micron) hold a measured, positive flux. The remaining bands are upper "
+        "limits or were never observed at this position."),
     "LN_EVIDENCE": ("nats",
-                     "the subclass log evidence, logsumexp over that subclass's own templates "
-                     "and the two extinction-law designs; -inf where the subclass has no "
-                     "templates of its own or the source is flagged"),
-    "LOG10_FLUX_MEAN": ("log10 mJy",
-                         "the evidence-weighted mean of this class's templates' log10 flux at "
-                         "their fitted marks; 10**x is the median flux in mJy"),
-    "LOG10_FLUX_COV": ("dex^2",
-                        "the total variance of this class's imputed flux in log10 flux, the "
-                        "between-template-and-design spread plus the fit's own parameter "
-                        "covariance mapped into the bands (within); 68% interval 10**(x - s) to "
-                        "10**(x + s) with s the root of the diagonal"),
-    "TOPK_MODEL": ("index into the class's template register",
-                    "this rank's kept template index, by descending mixture weight; -1 past "
-                    "the kept K or on a flagged source"),
-    "TOPK_A_K": ("mag A_K", "this top-K template's own clamped extinction mark"),
-    "TOPK_LOG10_B": ("log10 (gray scale)",
-                      "this top-K template's own clamped gray-scale mark, log10 B = -2 SC"),
-    "TOPK_CHI2": ("dimensionless (chi^2)",
-                   "this top-K template's chi^2 at the unconstrained optimum of its own "
-                   "carried design"),
-    "TOPK_LN_L": ("nats",
-                   "this top-K template's own log likelihood at the clamped marks, -1/2 chi^2 "
-                   "plus the non-detection term and the per-source normalisation"),
-    "TOPK_LN_PRIOR": ("nats",
-                       "this top-K template's own log prior density at its carried design's "
-                       "own cell weight"),
-    "TOPK_FLUX": ("mJy", "this top-K template's own model flux at its clamped marks, linear mJy"),
-    "TOPK_LAW": ("index (0 diffuse, 1 dense)",
-                  "which extinction-law design carried this top-K template's larger mixture "
-                  "weight"),
-    "TOPK_LN_GAMMA": ("nats",
-                       "the Gaia congruence term at this top-K template's own carried design "
-                       "and unclamped marks; the no-counterpart convention is gaia.py's own"),
+        "How well this class explains the source, as a natural logarithm, given "
+        "separately for each subdivision of the class named in the SUBCLASSES "
+        "attribute of this file. Each value gathers every model in that subdivision "
+        "under both extinction laws. It is minus infinity where the subdivision "
+        "holds no models, or where the class cannot explain the source at all, or "
+        "where the source could not be fitted."),
+    "LOG10_FLUX_MEAN": ("log10 of flux in mJy",
+        "This class's estimate of the source's eight-band spectrum, as the base-10 "
+        "logarithm of flux in mJy, in the band order J, H, Ks, 3.6, 4.5, 5.8, 8.0 "
+        "and 24 micron. It averages the models of this class, each weighted by how "
+        "well it explains the measured photometry. Raise 10 to the stored value to "
+        "get a flux in mJy."),
+    "LOG10_FLUX_COV": ("squared dex",
+        "The 8 by 8 covariance of the eight values in LOG10_FLUX_MEAN, in squared "
+        "dex, where one dex is a factor of 10. It combines how much the models of "
+        "this class disagree about the spectrum with how precisely the photometry "
+        "fixes this class's own brightness and extinction. The square root of a "
+        "diagonal entry is the uncertainty in log flux for that band."),
+    "A_K_POST": ("magnitudes of K-band extinction",
+        "The extinction in front of the source if it belongs to this class, in "
+        "magnitudes at K band (2.2 micron), averaged over every model and "
+        "extinction law of this class, weighted by how well each explains the "
+        "photometry."),
+    "A_K_POST_SIG": ("magnitudes of K-band extinction",
+        "The uncertainty on the extinction stored in A_K_POST, in magnitudes at K "
+        "band. It is the standard deviation of the extinction over every model and "
+        "extinction law of this class, so it reflects both how precisely the "
+        "photometry fixes the extinction and how much the models disagree about it. "
+        "It is not a formal fitting error."),
+    "P_DENSE": ("fraction",
+        "How much of this class's support for the source comes from the dense "
+        "extinction law rather than the diffuse one, between 0 and 1. It is 0 where "
+        "the sightline carries no dense dust in front of the source."),
     "OCCAM_GAP": ("nats",
-                   "the class log evidence less the single best template's own log(Lambda * "
-                   "L_hat) at its carried design, Gamma excluded from both"),
-    "A_K_POST": ("mag A_K",
-                  "the prior-weighted mean of the fitted extinction along the fit's ridge, a "
-                  "mean in linear extinction; sits below the wall by the column kernel's width "
-                  "on a source the data cannot place"),
-    "A_K_POST_SIG": ("mag A_K",
-                      "the spread of the same posterior extinction mark, the square root of "
-                      "its second moment less its mean squared"),
-    "P_DENSE": ("dimensionless",
-                 "this class's own posterior weight on the dense extinction-law design, summed "
-                 "over templates"),
-    "FRAC_CLAMPED": ("dimensionless",
-                       "the posterior-weighted fraction of templates whose unconstrained "
-                       "extinction optimum the clamp moved off its own design's bound"),
-    "N_DETECTED": ("bands", "the number of this source's eight bands with a measured, positive flux"),
-    "FAILED_ROWS": ("row index into the catalogue",
-                     "the row indices this build flagged and excluded from the acceptance "
-                     "identities, never silently zeroed"),
+        "How much more support this class has than its single best model alone, as "
+        "a natural logarithm. A large value means many models of the class explain "
+        "the source about equally well, which counts against a class whose library "
+        "offers many similar models."),
+    "FRAC_CLAMPED": ("fraction",
+        "The fraction of this class's models whose best fit called for negative "
+        "extinction and was held at zero instead, weighted by how well each model "
+        "explains the source."),
+    "FAILED_ROWS": ("source position",
+        "The positions, counting from zero in catalog order, of any sources this "
+        "run could not fit and left out. The array is empty when every source was "
+        "fitted."),
+    "TOPK_MODEL": ("model position",
+        "The five models of this class that best explain the source, best first, "
+        "given as positions in this class's model library. The value is -1 where "
+        "the class offers fewer than five models or the source could not be fitted. "
+        "The other TOPK columns describe these same five models in the same order."),
+    "TOPK_FLUX": ("mJy",
+        "The eight-band spectrum of each of the five best models, in mJy, at the "
+        "brightness and extinction fitted for that model, in the band order J, H, "
+        "Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron."),
+    "TOPK_A_K": ("magnitudes of K-band extinction",
+        "The extinction fitted for each of the five best models, in magnitudes at K "
+        "band. A model whose best fit called for negative extinction is held at "
+        "zero."),
+    "TOPK_LOG10_B": ("log10 of a scale factor",
+        "The brightness scaling fitted for each of the five best models, as the "
+        "base-10 logarithm of the factor the model's own reference spectrum is "
+        "multiplied by."),
+    "TOPK_CHI2": ("chi-squared",
+        "The chi-squared of each of the five best models against the source's "
+        "measured fluxes, with the brightness and extinction fitted for that model."),
+    "TOPK_LN_L": ("nats",
+        "How well each of the five best models matches the photometry, as a natural "
+        "logarithm. It combines the fit to the measured fluxes with, for every band "
+        "the survey did not detect, the chance the survey would have missed the "
+        "flux that model predicts there."),
+    "TOPK_LN_PRIOR": ("nats",
+        "How many objects of this class the sky is expected to hold at the "
+        "position, brightness and depth that each of the five best models implies, "
+        "as a natural logarithm of a density."),
+    "TOPK_LN_GAMMA": ("nats",
+        "What Gaia says about each of the five best models, as a natural logarithm: "
+        "whether a Gaia counterpart is present or absent, and whether its parallax "
+        "suits the distance the model implies. The value is 0 for every model where "
+        "Gaia has nothing to say about the source."),
+    "TOPK_LAW": ("law position",
+        "Which extinction law fits each of the five best models better: 0 for the "
+        "diffuse law, 1 for the dense law."),
 }
 
 _FIELD_OF_KEY = {
