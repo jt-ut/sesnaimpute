@@ -28,14 +28,19 @@ import healpy as hp
 import numpy as np
 import pandas as pd
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute import tables as tables_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import selection as selection_module
 from sesnaimpute.sky.derived.twomass_counts import _csv_row_batch_size, _download_path
+
+_STEM = "column-scale_twomass_region"
+_READINGS = {name: value for (stem, name), value in REGISTRY.items() if stem == _STEM}
 
 NSIDE = 512
 ARMS = ("herschel", "planck")
@@ -228,10 +233,11 @@ def build(config, regions=None):
         for name, key in keys:
             dtype = np.int64 if key in ("n_stars", "n_pixels") else np.float64
             rows[name] = np.array([[r[arm][key] for arm in ARMS] for r in results], dtype=dtype)
-        tables_module.update_rows(out_path, names, rows, granule="region")
+        tables_module.update_rows(out_path, names, rows, granule="region", readings=_READINGS)
         with h5py.File(out_path, "a") as f:
             if "ARM" not in f:
-                f.create_dataset("ARM", data=np.array([a.encode("utf-8") for a in ARMS]))
+                build_module.write_dataset(f, "ARM", np.array([a.encode("utf-8") for a in ARMS]),
+                                            *_READINGS["ARM"])
 
         n_below_min = sum(1 for r in results for arm in ARMS if r[arm]["n_pixels"] < MIN_PIXELS)
         print("twomass_column_scale: kappa_hybrid A_H/A_K at diffuse=%.4f, dense=%.4f "

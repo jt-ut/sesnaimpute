@@ -61,6 +61,97 @@ REGISTRY = {
         "90 the source's own 90%-completeness flux, 91 the median "
         "90%-completeness flux of its nearest sky neighbours."),
 
+    # sky.derived.twomass_column_scale -- column-scale_twomass_region: each
+    # arm's map column regressed against 2MASS background-star colour, by
+    # region and arm.
+    ("column-scale_twomass_region", "REGION"): ("region name",
+        "The name of the region this row describes, in the fixed thirty-"
+        "region order every region-axis product in this package shares."),
+    ("column-scale_twomass_region", "ARM"): ("arm name",
+        "The two map arms this file's second axis runs over, in column "
+        "order: herschel, planck."),
+    ("column-scale_twomass_region", "SCALE"): ("dimensionless",
+        "For this region and the matching arm in ARM, the factor that "
+        "rescales that arm's own map column to match the reddening of "
+        "2MASS background stars: the regression slope of their median "
+        "H minus Ks colour against the arm's per-pixel column, divided by "
+        "the adopted hybrid extinction law's own A_H/A_K minus 1. NaN "
+        "where the region has too few usable pixels."),
+    ("column-scale_twomass_region", "SCALE_SIGMA"): ("dimensionless",
+        "The standard deviation of SCALE over 200 bootstrap resamples of "
+        "this region and arm's own usable pixels. NaN where the region has "
+        "too few usable pixels."),
+    ("column-scale_twomass_region", "SLOPE_H_KS_PER_AK"): ("mag (H-Ks) per mag A_K",
+        "For this region and the matching arm in ARM, the ordinary-least-"
+        "squares slope of the background stars' median H minus Ks colour "
+        "against that arm's per-pixel map column, before the A_H/A_K "
+        "conversion SCALE applies. NaN where the region has too few "
+        "usable pixels."),
+    ("column-scale_twomass_region", "INTERCEPT_H_KS"): ("mag",
+        "For this region and the matching arm in ARM, the same regression's "
+        "intercept: the background stars' predicted median H minus Ks "
+        "colour at zero map column. NaN where the region has too few "
+        "usable pixels."),
+    ("column-scale_twomass_region", "N_STARS"): ("stars",
+        "For this region and the matching arm in ARM, how many background "
+        "2MASS stars, summed over the pixels usable for that arm's "
+        "regression, went into it."),
+    ("column-scale_twomass_region", "N_PIXELS"): ("pixels",
+        "For this region and the matching arm in ARM, how many nside-512 "
+        "pixels carried both a usable background-star colour and a usable "
+        "arm column, and so went into the regression."),
+
+    # catalog.depths -- depths_sesna_region: the fitted 50%-completeness
+    # detection curve per region and band.
+    ("depths_sesna_region", "REGION"): ("region name",
+        "The name of the region this row describes, in the fixed thirty-"
+        "region order every region-axis product in this package shares."),
+    ("depths_sesna_region", "DELTA_DEX"): ("dex",
+        "For each of the five Spitzer bands (I1, I2, I3, I4, M1, this "
+        "dataset's own column order), the fitted offset from this region's "
+        "90%-completeness map value to its 50%-completeness flux: "
+        "F_lim,50 = DCOMP90_MJY * 10**(-DELTA_DEX). A column can be "
+        "negative where a band's detections turn over brighter than the "
+        "map's own 90% level."),
+    ("depths_sesna_region", "SIGMA_DELTA_DEX"): ("dex",
+        "The 1-sigma fit uncertainty on DELTA_DEX, same five Spitzer bands "
+        "and column order."),
+    ("depths_sesna_region", "W_MAG"): ("mag",
+        "For each of the five Spitzer bands (I1, I2, I3, I4, M1, this "
+        "dataset's own column order), the fitted roll-off width of this "
+        "region's detection curve, in magnitude. WIDTH_DEX in this file is "
+        "this value times 0.4 (dex per magnitude)."),
+    ("depths_sesna_region", "FIT_RESIDUAL"): ("dimensionless",
+        "For each of the five Spitzer bands (I1, I2, I3, I4, M1, this "
+        "dataset's own column order), the fitted detection curve's "
+        "relative L1 distance from this region's own observed histogram, "
+        "measured only past the roll-off's own 90% point."),
+    ("depths_sesna_region", "F50_2MASS_MJY"): ("mJy",
+        "For each of the three 2MASS bands (J, H, Ks, this dataset's own "
+        "column order), this region's fitted 50%-completeness flux."),
+    ("depths_sesna_region", "FIT_RESIDUAL_2MASS"): ("dimensionless",
+        "For each of the three 2MASS bands (J, H, Ks, this dataset's own "
+        "column order), the fitted detection curve's relative L1 distance "
+        "from this region's own observed magnitude histogram, measured "
+        "only past one magnitude brighter than the fitted 50% point."),
+    ("depths_sesna_region", "SUBSTITUTED"): ("boolean",
+        "For each of the eight bands (J, H, Ks, I1, I2, I3, I4, M1, this "
+        "dataset's own column order), True where this region's own fit did "
+        "not converge and DELTA_DEX and WIDTH_DEX for that band were "
+        "replaced by that band's median over the regions whose fit did "
+        "converge. Always False for the three 2MASS bands, which carry no "
+        "convergence check."),
+    ("depths_sesna_region", "WIDTH_DEX"): ("dex",
+        "For each of the eight bands (J, H, Ks, I1, I2, I3, I4, M1, this "
+        "dataset's own column order), this region's effective detection "
+        "roll-off width: W_MAG times 0.4 for the five Spitzer bands, the "
+        "directly fitted magnitude-space width for the three 2MASS bands."),
+    ("depths_sesna_region", "SIGMA_WIDTH_DEX"): ("dex",
+        "For each of the eight bands (J, H, Ks, I1, I2, I3, I4, M1, this "
+        "dataset's own column order), the 1-sigma uncertainty on WIDTH_DEX "
+        "for the five Spitzer bands. NaN for the three 2MASS bands, which "
+        "carry no resampling uncertainty."),
+
     # catalog.coverage -- coverage_sesna_hpx512: the catalogue's own observed
     # IRAC footprint on the nside-512 grid, per region.
     ("coverage_sesna_hpx512", "HPX_PIX"): ("nested HEALPix pixel, nside 512",

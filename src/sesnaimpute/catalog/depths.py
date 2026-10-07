@@ -95,7 +95,11 @@ from sesnaimpute import definitions
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute import tables as tables_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+
+_STEM = "depths_sesna_region"
+_READINGS = {name: value for (stem, name), value in REGISTRY.items() if stem == _STEM}
 
 IRAC_MIPS_KEYS = ("I1", "I2", "I3", "I4", "M1")
 TWOMASS_KEYS = ("J", "H", "Ks")
@@ -457,6 +461,7 @@ def build(config, regions=None):
                 "SIGMA_WIDTH_DEX": sigma_width_dex,
             },
             granule="region",
+            readings=_READINGS,
         )
         if "NGC 7129" in regions:
             ri = regions.index("NGC 7129")

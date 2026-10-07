@@ -10,6 +10,7 @@ from contextlib import contextmanager
 import h5py
 import numpy as np
 
+from sesnaimpute import build as build_module
 from sesnaimpute.regions import REGIONS
 
 ALL_REGIONS = [r.name for r in REGIONS]
@@ -43,19 +44,21 @@ def _fill_value(dtype):
     raise ValueError(f"tables.update_rows: no fill value for dtype {dtype}")
 
 
-def _widen_to_canonical(f):
+def _widen_to_canonical(f, readings=None):
     """Upgrades a file whose `REGION` dataset does not already list all
     thirty regions in `ALL_REGIONS` order (a product last written before
     this module existed, holding only whichever regions its own last
     build touched) to the canonical thirty-row shape: every dataset is
     rebuilt at that shape, each old row carried to its own region's slot
     by name, every other slot taking that dataset's own placeholder. A
-    file already in canonical shape is left untouched."""
+    file already in canonical shape is left untouched. `readings`, if
+    given, restores each rebuilt dataset's own `UNITS`/`READING`."""
     if "REGION" not in f:
         return
     existing = [r.decode() if isinstance(r, bytes) else r for r in f["REGION"][:]]
     if existing == ALL_REGIONS:
         return
+    readings = readings or {}
     old_idx = {name: i for i, name in enumerate(existing)}
     for name in list(f.keys()):
         if name == "REGION":
@@ -69,34 +72,50 @@ def _widen_to_canonical(f):
             if region in ROW_IDX:
                 new[ROW_IDX[region]] = old[i]
         del f[name]
-        f.create_dataset(name, data=new)
+        if name in readings:
+            build_module.write_dataset(f, name, new, *readings[name])
+        else:
+            f.create_dataset(name, data=new)
     del f["REGION"]
-    f.create_dataset("REGION", data=np.array(
-        [r.encode("utf-8") for r in ALL_REGIONS], dtype="S64"))
+    region_data = np.array([r.encode("utf-8") for r in ALL_REGIONS], dtype="S64")
+    if "REGION" in readings:
+        build_module.write_dataset(f, "REGION", region_data, *readings["REGION"])
+    else:
+        f.create_dataset("REGION", data=region_data)
 
 
-def update_rows(path, regions, rows, granule="region", attrs=None):
+def update_rows(path, regions, rows, granule="region", attrs=None, readings=None):
     """Writes `rows` (dataset name -> array, first axis aligned to
     `regions`) into the thirty-row product at `path`: creates the file
     with all thirty regions' rows, every dataset filled with its own
     placeholder, when the file or a dataset is absent, and writes only
     the given regions' rows -- the rest of the file is left exactly as
     it was (CODING_RULES.md 5c). `attrs`, if given, are set as root
-    attributes.
+    attributes. `readings`, a `{dataset name: (units, reading)}` map
+    covering `rows` and, where the file is new, "REGION" -- the two
+    dataset attributes CODING_RULES_BMSTP.md rule 5 asks for, set once,
+    at the dataset's own creation only.
     """
     regions = list(regions)
     row_idx = ROW_IDX
+    readings = readings or {}
     with open_product(path, granule) as f:
-        _widen_to_canonical(f)
+        _widen_to_canonical(f, readings)
         if "REGION" not in f:
-            f.create_dataset("REGION", data=np.array(
-                [r.encode("utf-8") for r in ALL_REGIONS], dtype="S64"))
+            region_data = np.array([r.encode("utf-8") for r in ALL_REGIONS], dtype="S64")
+            if "REGION" in readings:
+                build_module.write_dataset(f, "REGION", region_data, *readings["REGION"])
+            else:
+                f.create_dataset("REGION", data=region_data)
         for name, values in rows.items():
             values = np.asarray(values)
             if name not in f:
                 shape = (len(ALL_REGIONS),) + values.shape[1:]
-                f.create_dataset(name, data=np.full(
-                    shape, _fill_value(values.dtype), dtype=values.dtype))
+                fill = np.full(shape, _fill_value(values.dtype), dtype=values.dtype)
+                if name in readings:
+                    build_module.write_dataset(f, name, fill, *readings[name])
+                else:
+                    f.create_dataset(name, data=fill)
             dset = f[name]
             for i, region in enumerate(regions):
                 dset[row_idx[region]] = values[i]
