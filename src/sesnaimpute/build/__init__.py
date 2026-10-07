@@ -70,3 +70,17 @@ def run(build_fn):
     args = parser.parse_args(sys.argv[1:])
     config = config_module.load(args.config)
     build_fn(config, regions=args.regions)
+
+
+def write_dataset(group, name, data, units, reading, **kwargs):
+    """Creates the dataset `name` in `group` and sets the two attributes
+    every dataset in a catalog, sky, population, bmstp or atlas product
+    carries (CODING_RULES_BMSTP.md rule 5): `UNITS`, a short unit string,
+    and `READING`, one plain-language sentence saying what the number is.
+    No writer spells those two attribute names itself. `**kwargs` passes
+    straight through to `create_dataset` (e.g. `compression="gzip"`) --
+    it changes storage, never a value."""
+    dataset = group.create_dataset(name, data=data, **kwargs)
+    dataset.attrs["UNITS"] = units
+    dataset.attrs["READING"] = reading
+    return dataset

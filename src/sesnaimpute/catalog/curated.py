@@ -33,11 +33,17 @@ import pandas as pd
 from scipy.spatial import cKDTree
 
 from sesnaimpute import batches as batches_module
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+
+#: This module's own key into `attrs_registry.REGISTRY`
+#: (`config.product_path`'s file stem for what it writes).
+_STEM = "sources_sesna_source"
 
 #: Row-batch memory budget for the raw-delivery read (rule 10b): the raw
 #: delivery carries far more columns than this module selects (measured
@@ -285,17 +291,20 @@ def build(config, regions=None):
                 f.attrs["REGION"] = region
                 f.attrs["N_SOURCES"] = assembled["n"]
                 f.attrs["BANDS"] = band_keys
-                f.create_dataset("NAME", data=name_bytes)
-                f.create_dataset("RA_DEG", data=assembled["ra_deg"])
-                f.create_dataset("DEC_DEG", data=assembled["dec_deg"])
-                f.create_dataset("GAL_L_DEG", data=assembled["gal_l_deg"])
-                f.create_dataset("GAL_B_DEG", data=assembled["gal_b_deg"])
-                f.create_dataset("CLASS", data=assembled["class_"])
-                f.create_dataset("AK_SESNA", data=assembled["ak_sesna"])
-                f.create_dataset("FNU_MJY", data=assembled["fnu"])
-                f.create_dataset("SIGMA_FNU_MJY", data=assembled["sigma_fnu"])
-                f.create_dataset("DCOMP90_MJY", data=assembled["dcomp90"])
-                f.create_dataset("ORIGIN_FNU", data=assembled["origin"])
+                for name, data in (
+                    ("NAME", name_bytes),
+                    ("RA_DEG", assembled["ra_deg"]),
+                    ("DEC_DEG", assembled["dec_deg"]),
+                    ("GAL_L_DEG", assembled["gal_l_deg"]),
+                    ("GAL_B_DEG", assembled["gal_b_deg"]),
+                    ("CLASS", assembled["class_"]),
+                    ("AK_SESNA", assembled["ak_sesna"]),
+                    ("FNU_MJY", assembled["fnu"]),
+                    ("SIGMA_FNU_MJY", assembled["sigma_fnu"]),
+                    ("DCOMP90_MJY", assembled["dcomp90"]),
+                    ("ORIGIN_FNU", assembled["origin"]),
+                ):
+                    build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
             st.done(out_path, sources=int(assembled["n"]))
 
 
