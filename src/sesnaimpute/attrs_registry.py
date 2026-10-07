@@ -107,6 +107,71 @@ REGISTRY = {
         "by the cell's own width in u. Integrating P_XI times the cell "
         "width over all cells gives 1."),
 
+    # bmstp.density -- table_density_source (P1): one row per curated
+    # source, its column, grain indices, detection limits and the six sky
+    # densities.
+    ("table_density_source", "NAME"): ("source name",
+        "The source's name from the SESNA catalog, in this file's row "
+        "order (the curated catalogue's own order)."),
+    ("table_density_source", "A_COL_K"): ("mag A_K",
+        "This source's own adopted extinction column (sky/derived/"
+        "adopted's extinction column, Herschel where covered, Planck "
+        "elsewhere)."),
+    ("table_density_source", "A_COL_SIG_K"): ("mag A_K",
+        "The 1-sigma uncertainty on A_COL_K."),
+    ("table_density_source", "ARM"): ("code",
+        "Which arm A_COL_K came from: 0 Herschel, 1 Planck."),
+    ("table_density_source", "ZP_SIG_K"): ("mag A_K",
+        "The uncertainty on the Herschel field zero-point offset already "
+        "subtracted from A_COL_K; 0 for a Planck-arm source."),
+    ("table_density_source", "TILE"): ("tile index",
+        "This source's own row into the STAR/AGB shape product's "
+        "per-tile grain axis (bmstp's star shape product, P2)."),
+    ("table_density_source", "SIGHTLINE_ROW"): ("row index",
+        "This source's own row into the YSO/H2S shape product's "
+        "per-sightline grain axis (bmstp's cloud shape product, P3)."),
+    ("table_density_source", "HPX_512"): ("nested HEALPix pixel, nside 512",
+        "This source's own nested nside-512 pixel number."),
+    ("table_density_source", "F_LIM_50_MJY"): ("mJy",
+        "This source's own 50%-completeness flux limit in each of the "
+        "eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this "
+        "project's own band order), the catalogue's per-source limits "
+        "product."),
+    ("table_density_source", "D_PAHC"): ("dimensionless (log10 mJy)",
+        "Minus log10 of this source's own 8 micron completeness-limit "
+        "flux (F_LIM_50_MJY's 8 micron column): the PAHC contamination "
+        "test's own depth term, before dividing by a predicted "
+        "photospheric flux."),
+    ("table_density_source", "A_CLOUD_K"): ("mag A_K",
+        "This source's own cloud-foreground extinction: A_COL_K times "
+        "the sightline's own foreground share of the column (nothing "
+        "behind the cloud interval's front edge is deducted, since the "
+        "3-D map cannot partition column reliably behind a cloud at a "
+        "kiloparsec)."),
+    ("table_density_source", "DENSITY_STAR"): ("objects per square degree",
+        "This source's own retained STAR sky density: the field-star "
+        "population's tile density at this source's own tile."),
+    ("table_density_source", "DENSITY_AGB"): ("objects per square degree",
+        "This source's own retained AGB sky density: the evolved-star "
+        "population's tile density at this source's own tile."),
+    ("table_density_source", "DENSITY_PAHC"): ("objects per square degree",
+        "This source's own retained PAHC sky density, identical to "
+        "DENSITY_STAR (PAHC shares the STAR population's own grid)."),
+    ("table_density_source", "DENSITY_GAL"): ("objects per square degree",
+        "This source's own retained background-galaxy sky density: the "
+        "one survey-wide galaxy counts-law density, the same number for "
+        "every source."),
+    ("table_density_source", "DENSITY_YSO"): ("objects per square degree",
+        "This source's own retained YSO sky density: the young-star law "
+        "applied to A_CLOUD_K and this source's own arm, times the "
+        "sightline's own on-grid retained fraction."),
+    ("table_density_source", "DENSITY_H2S"): ("objects per square degree",
+        "This source's own retained H2-shock sky density: the intrinsic "
+        "young-star law density (convolved with the region's own HGBS "
+        "map for a Herschel-arm source the convolution reaches) times "
+        "the region's own knot rate and universal external fraction, "
+        "times the sightline's own on-grid retained fraction."),
+
     # bmstp.template_weights -- P5, six template libraries
     # (<lib>_weights_<granule>): one factor per external population
     # statement the library's own templates are reweighted by, stored per
