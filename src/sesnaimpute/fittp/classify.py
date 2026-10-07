@@ -524,50 +524,89 @@ def build_region(config, region, st, beta):
 #: `UNITS`/`READING` (CODING_RULES_BMSTP.md rule 5): every dataset the
 #: joined P8 posterior product carries.
 _READINGS = {
-    "NAME": ("row into the catalogue, same order",
-             "the source's own name, this product's row order matching the catalogue's"),
+    "NAME": ("source name",
+        "The source's name as the SESNA catalog gives it. Rows follow the catalog's "
+        "own order."),
     "CLASS_SESNA": ("SESNA class code",
-                     "the class SESNA delivered for this source, the curated catalogue's own "
-                     "CLASS copied verbatim; the codes and their names are "
-                     "constants.GUTERMUTH_LABELS, the same vocabulary the cascade product's "
-                     "VERDICT_MEASURED uses; nothing in the pipeline reads this column"),
-    "P_CLASS": ("dimensionless",
-                 "the posterior probability of each of the six classes, CLASSES order; "
-                 "sums to 1 over the row"),
-    "P_SUBCLASS": ("dimensionless",
-                    "the posterior probability of each of the 25 subclasses, SUBCLASSES "
-                    "order; summed within a class equals that class's own P_CLASS"),
-    "P_YSO": ("dimensionless", "P_CLASS's own YSO column, read out for convenience"),
-    "MAP_CLASS": ("index into CLASSES",
-                   "the class of maximum posterior probability; -1 on a flagged source"),
-    "N_DETECTED": ("bands", "the number of this source's eight bands with a measured, positive flux"),
-    "LOG10_CANDIDATE_FLUX": ("log10 mJy",
-                              "each class's own LOG10_FLUX_MEAN with the measured bands restored "
-                              "to the catalogue's own log10 flux, one row per class, CLASSES order"),
-    "LOG10_FLUX_IMPUTED": ("log10 mJy",
-                            "the evidence-weighted mean of the models' log10 flux at their "
-                            "fitted marks; 10**x is the median flux in mJy; on a measured band "
-                            "x is log10 of the catalogue flux"),
-    "LOG10_FLUX_IMPUTED_COV": ("dex^2",
-                                "on an imputed band the log-space covariance, 68 % interval "
-                                "10**(x - s) to 10**(x + s) with s the root of the diagonal; on "
-                                "a measured band the catalogue sigma, recovered as sigma_mJy = "
-                                "10**x * ln 10 * s and read as a symmetric error in linear flux; "
-                                "cross terms between a measured and an imputed band are the "
-                                "fit's own and are what a colour between them needs; cross terms "
-                                "between two measured bands are zero"),
-    "A_K_POST": ("mag A_K",
-                  "the prior-weighted mean of the fitted extinction along the fit's ridge, a "
-                  "mean in linear extinction, one column per class in CLASSES order (read the "
-                  "MAP class's column for the source's own reported extinction, and divide by "
-                  "the density table's A_COL_K for the depth fraction); sits below the wall by "
-                  "the column kernel's width on a source the data cannot place"),
-    "A_K_POST_SIG": ("mag A_K",
-                      "the spread of the same posterior extinction mark, the square root of "
-                      "its second moment less its mean squared, one column per class in "
-                      "CLASSES order"),
-    "ENTROPY_CLASS": ("nats", "the entropy of P_CLASS's own row"),
-    "ENTROPY_SUBCLASS": ("nats", "the entropy of P_SUBCLASS's own row"),
+        "The classification SESNA delivered for this source, copied from the catalog. "
+        "The codes are 0 deeply embedded protostar, 1 class I protostar, 2 class II, "
+        "3 transition disk, 9 H2 shock blob, 19 PAH emitter (star-forming galaxy), 29 "
+        "AGN, 39 PAH-contaminated source, 49 generic galaxy, 99 diskless star, -100 "
+        "unclassified. Nothing in the pipeline reads this column, so it does not "
+        "affect any other number here."),
+    "N_DETECTED": ("bands",
+        "How many of the source's eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 "
+        "micron) hold a measured, positive flux. The remaining bands are upper limits "
+        "or were never observed at this position."),
+    "P_CLASS": ("probability",
+        "The probability that the source belongs to each of six classes: a field "
+        "star, a dusty evolved star, an aperture contaminated by nebular emission, a "
+        "background galaxy, a young stellar object, or a knot of shocked gas. The "
+        "column order is the CLASSES attribute of this file. The six probabilities "
+        "add to 1 for every source."),
+    "P_SUBCLASS": ("probability",
+        "The probability of each of 25 subdivisions of the six classes, such as "
+        "spectral type for a field star or evolutionary stage for a young stellar "
+        "object. The column order is the SUBCLASSES attribute of this file. Adding "
+        "the columns belonging to one class gives that class's probability in "
+        "P_CLASS, and all 25 add to 1 for every source."),
+    "P_YSO": ("probability",
+        "The probability that the source is a young stellar object. This repeats the "
+        "young stellar object column of P_CLASS for convenience."),
+    "MAP_CLASS": ("class position",
+        "Which of the six classes has the highest probability for this source, given "
+        "as a position in the CLASSES attribute of this file, counting from zero. The "
+        "value is -1 where the source could not be fitted, which happens when fewer "
+        "than two bands hold a measured flux or when a flux error is not a finite "
+        "number."),
+    "A_K_POST": ("magnitudes of K-band extinction",
+        "The extinction in front of the source, in magnitudes at K band (2.2 micron). "
+        "There is one value per class, each the extinction the source would have if "
+        "it belonged to that class, in the column order of the CLASSES attribute of "
+        "this file. The value for the class in MAP_CLASS is the pipeline's estimate "
+        "for the source. Each value averages over every model and extinction law the "
+        "fit considered, weighted by how well each one explains the photometry."),
+    "A_K_POST_SIG": ("magnitudes of K-band extinction",
+        "The uncertainty on the extinction stored in A_K_POST, in magnitudes at K "
+        "band, one value per class in the column order of the CLASSES attribute of "
+        "this file. It is the standard deviation of the extinction over every model "
+        "and extinction law the fit considered, so it reflects both how precisely the "
+        "photometry fixes the extinction and how much the models that fit this source "
+        "disagree about it. It is not a formal fitting error."),
+    "LOG10_FLUX_IMPUTED": ("log10 of flux in mJy",
+        "The source's eight-band spectrum, stored as the base-10 logarithm of flux in "
+        "mJy, in the band order J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron. A band "
+        "the survey measured carries the logarithm of the measured flux. A band it "
+        "did not carries an estimate: the average log flux of the models that fit "
+        "this source, each weighted by how well it explains the photometry. Raise 10 "
+        "to the stored value to get a flux in mJy."),
+    "LOG10_FLUX_IMPUTED_COV": ("squared dex",
+        "The 8 by 8 covariance of the eight values in LOG10_FLUX_IMPUTED, in squared "
+        "dex, where one dex is a factor of 10. On an estimated band, the square root "
+        "of the diagonal is the uncertainty in log flux, so the flux lies between "
+        "10**(x - s) and 10**(x + s) about 68 percent of the time, with x the stored "
+        "log flux and s that square root. On a measured band, the diagonal carries "
+        "the catalog's own flux error written the same way, and the error in mJy is "
+        "10**x times 2.3026 times s. An entry linking a measured band to an estimated "
+        "band is not zero, because the measurement constrains the estimate, and a "
+        "color formed from one measured and one estimated band needs that entry. "
+        "Entries linking two measured bands are zero, since the catalog's errors are "
+        "independent from band to band."),
+    "LOG10_CANDIDATE_FLUX": ("log10 of flux in mJy",
+        "The source's eight-band spectrum as it would be under each of the six "
+        "classes in turn, stored as the base-10 logarithm of flux in mJy. The class "
+        "order is the CLASSES attribute of this file and the band order is J, H, Ks, "
+        "3.6, 4.5, 5.8, 8.0 and 24 micron. Measured bands carry the logarithm of the "
+        "measured flux; the other bands carry that class's own estimate."),
+    "ENTROPY_CLASS": ("nats",
+        "How uncertain the classification of this source is, computed from the six "
+        "probabilities in P_CLASS. Zero means one class holds all the probability. "
+        "The largest possible value, 1.79, means all six classes are equally likely."),
+    "ENTROPY_SUBCLASS": ("nats",
+        "How uncertain the subdivision of this source is, computed from the 25 "
+        "probabilities in P_SUBCLASS. Zero means one subdivision holds all the "
+        "probability. The largest possible value, 3.22, means all 25 are equally "
+        "likely."),
 }
 
 
