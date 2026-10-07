@@ -147,4 +147,136 @@ REGISTRY = {
         "to low around that band's 50%-completeness flux. The same eight values "
         "apply to every pixel in this file."),
 
+    # sky.derived.knots -- five whole-survey products (GRANULE "survey", no
+    # region axis) feeding the H2-shock-knot rate (SPEC_PRIORS.md section 7).
+    ("giannini2013_knots_survey", "KNOT_ID"): ("knot identifier",
+        "This knot's identifier in Giannini et al. (2013)."),
+    ("giannini2013_knots_survey", "RA_DEG"): ("deg", "Right ascension, equinox J2000."),
+    ("giannini2013_knots_survey", "DEC_DEG"): ("deg", "Declination, equinox J2000."),
+    ("giannini2013_knots_survey", "SIZE_ARCSEC2"): ("arcsec^2",
+        "The knot's projected area on the sky, from Giannini et al. (2013)."),
+    ("giannini2013_knots_survey", "FLUX_2P12_MJY"): ("mJy",
+        "The knot's 2.12 micron (H2 1-0 S(1)) line flux density, from Giannini "
+        "et al. (2013)."),
+    ("giannini2013_knots_survey", "FLUX_ERR_2P12_MJY"): ("mJy",
+        "The 1-sigma uncertainty on FLUX_2P12_MJY."),
+    ("giannini2013_knots_survey", "LUMINOSITY_IRAC_1E-2LSUN"): ("1e-2 Lsun",
+        "The knot's summed-IRAC luminosity: multiply by 0.01 to get solar "
+        "luminosities."),
+    ("giannini2013_knots_survey", "LUMINOSITY_2P12_1E-2LSUN"): ("1e-2 Lsun",
+        "The knot's 2.12 micron line luminosity: multiply by 0.01 to get solar "
+        "luminosities."),
+    ("giannini2013_knots_survey", "FLUX_I1_MJY"): ("mJy",
+        "The knot's flux density in the Spitzer IRAC 3.6 micron band, from "
+        "Giannini et al. (2013)."),
+    ("giannini2013_knots_survey", "FLUX_ERR_I1_MJY"): ("mJy",
+        "The 1-sigma uncertainty on FLUX_I1_MJY."),
+    ("giannini2013_knots_survey", "FLUX_I2_MJY"): ("mJy",
+        "The knot's flux density in the Spitzer IRAC 4.5 micron band, from "
+        "Giannini et al. (2013)."),
+    ("giannini2013_knots_survey", "FLUX_ERR_I2_MJY"): ("mJy",
+        "The 1-sigma uncertainty on FLUX_I2_MJY."),
+    ("giannini2013_knots_survey", "FLUX_I3_MJY"): ("mJy",
+        "The knot's flux density in the Spitzer IRAC 5.8 micron band, from "
+        "Giannini et al. (2013)."),
+    ("giannini2013_knots_survey", "FLUX_ERR_I3_MJY"): ("mJy",
+        "The 1-sigma uncertainty on FLUX_I3_MJY."),
+    ("giannini2013_knots_survey", "FLUX_I4_MJY"): ("mJy",
+        "The knot's flux density in the Spitzer IRAC 8.0 micron band, from "
+        "Giannini et al. (2013)."),
+    ("giannini2013_knots_survey", "FLUX_ERR_I4_MJY"): ("mJy",
+        "The 1-sigma uncertainty on FLUX_I4_MJY."),
+    ("giannini2013_knots_survey", "UPPER_LIMIT_I1"): ("boolean",
+        "True where the 3.6 micron flux above is an upper limit rather than a "
+        "measured detection, Giannini et al. (2013)'s own flag."),
+    ("giannini2013_knots_survey", "UPPER_LIMIT_I2"): ("boolean",
+        "True where the 4.5 micron flux above is an upper limit rather than a "
+        "measured detection. Giannini et al. (2013) reports no upper-limit flag "
+        "for this band, so this is always False."),
+    ("giannini2013_knots_survey", "UPPER_LIMIT_I3"): ("boolean",
+        "True where the 5.8 micron flux above is an upper limit rather than a "
+        "measured detection, Giannini et al. (2013)'s own flag."),
+    ("giannini2013_knots_survey", "UPPER_LIMIT_I4"): ("boolean",
+        "True where the 8.0 micron flux above is an upper limit rather than a "
+        "measured detection, Giannini et al. (2013)'s own flag."),
+
+    ("davis2009_knots_survey", "KNOT_ID"): ("knot identifier",
+        "This knot's identifier in Davis et al. (2009)."),
+    ("davis2009_knots_survey", "RA_DEG"): ("deg", "Right ascension, equinox J2000."),
+    ("davis2009_knots_survey", "DEC_DEG"): ("deg", "Declination, equinox J2000."),
+    ("davis2009_knots_survey", "TANGENTIAL_VELOCITY_KM_S"): ("km/s",
+        "The knot's proper-motion tangential velocity, from Davis et al. (2009)."),
+    ("davis2009_knots_survey", "POSITION_ANGLE_DEG"): ("deg",
+        "The position angle of the knot's proper-motion vector, east of north, "
+        "from Davis et al. (2009)."),
+    ("davis2009_knots_survey", "QUALITY_FLAG"): ("code",
+        "Davis et al. (2009)'s own quality flag for this proper-motion "
+        "measurement: 0 good, 2 uncertain."),
+
+    ("walawender2005_knots_survey", "FIELD"): ("field name",
+        "Which field this object was catalogued in: Perseus or Barnard 1."),
+    ("walawender2005_knots_survey", "TABLE_ORIGIN"): ("table label",
+        "Which table of Walawender et al. (2005) this row comes from: "
+        "hh_known (previously known Herbig-Haro objects, Perseus), hh_new "
+        "(newly discovered Herbig-Haro objects, Perseus), or h2_shocks (H2 "
+        "narrowband-selected shocks, Barnard 1)."),
+    ("walawender2005_knots_survey", "H2_SELECTED"): ("boolean",
+        "True where the object was selected by narrowband H2 imaging "
+        "(Barnard 1's h2_shocks table only); False for Perseus's optical "
+        "Halpha/[S II] Herbig-Haro objects."),
+    ("walawender2005_knots_survey", "DESIGNATION"): ("object name",
+        "The object's designation in its own source table."),
+    ("walawender2005_knots_survey", "RA_DEG"): ("deg", "Right ascension, equinox J2000."),
+    ("walawender2005_knots_survey", "DEC_DEG"): ("deg", "Declination, equinox J2000."),
+
+    ("uwish2_knots_survey", "UWISH2_ID"): ("UWISH2 catalogue identifier",
+        "This feature's identifier in the UWISH2 catalogue (Froebrich et al. "
+        "2015)."),
+    ("uwish2_knots_survey", "RA_DEG"): ("deg", "Right ascension, equinox J2000."),
+    ("uwish2_knots_survey", "DEC_DEG"): ("deg", "Declination, equinox J2000."),
+    ("uwish2_knots_survey", "AREA_ARCSEC2"): ("arcsec^2",
+        "The feature's projected area on the sky."),
+    ("uwish2_knots_survey", "RADIUS_ARCSEC"): ("arcsec",
+        "The feature's equivalent circular radius."),
+    ("uwish2_knots_survey", "SURFACE_BRIGHTNESS_MEDIAN_1E-19_W_M2_ARCSEC2"): ("1e-19 W m^-2 arcsec^-2",
+        "The feature's aperture-median H2 1-0 S(1) surface brightness: "
+        "multiply by 1e-19 to get W per square meter per square arcsecond."),
+    ("uwish2_knots_survey", "SURFACE_BRIGHTNESS_MAX_1E-19_W_M2_ARCSEC2"): ("1e-19 W m^-2 arcsec^-2",
+        "The feature's peak H2 1-0 S(1) surface brightness: multiply by 1e-19 "
+        "to get W per square meter per square arcsecond."),
+    ("uwish2_knots_survey", "TOTAL_FLUX_1E-19_W_M2"): ("1e-19 W m^-2",
+        "The feature's total H2 1-0 S(1) line flux, summed over its aperture: "
+        "multiply by 1e-19 to get W per square meter."),
+    ("uwish2_knots_survey", "CLASS"): ("code",
+        "Froebrich et al. (2015)'s own one-letter classification for this "
+        "feature: j jet, p planetary nebula, s supernova remnant, u unknown."),
+    ("uwish2_knots_survey", "JET_CLASS"): ("boolean",
+        "True where CLASS is \"j\" (jet)."),
+    ("uwish2_knots_survey", "GROUP"): ("group identifier",
+        "Froebrich et al. (2015)'s own grouping identifier linking features "
+        "that belong to the same physical outflow."),
+
+    ("uwish2_images_knots_survey", "TILE"): ("tile name",
+        "Which UWISH2 survey tile this image belongs to."),
+    ("uwish2_images_knots_survey", "IMAGE"): ("image name",
+        "This WFCAM detector-array image's own identifier."),
+    ("uwish2_images_knots_survey", "RA_DEG"): ("deg",
+        "Right ascension of the image centre, equinox J2000."),
+    ("uwish2_images_knots_survey", "DEC_DEG"): ("deg",
+        "Declination of the image centre, equinox J2000."),
+    ("uwish2_images_knots_survey", "GLON_DEG"): ("deg",
+        "Galactic longitude of the image centre."),
+    ("uwish2_images_knots_survey", "GLAT_DEG"): ("deg",
+        "Galactic latitude of the image centre."),
+    ("uwish2_images_knots_survey", "NOISE"): ("counts",
+        "The image's own one-pixel background noise level, in the map's "
+        "native calibrated counts (Froebrich et al. 2015, their Table C1)."),
+
+    ("colours_knots_survey", "LOG10_RATIO"): ("dex",
+        "log10(F_IRAC_band / F_2.12um) for every Giannini et al. (2013) knot "
+        "with a measured, non-upper-limit flux in both the 2.12 micron line "
+        "and this group's own IRAC band, one value per knot. This dataset's "
+        "enclosing group is named by the Spitzer IRAC band: I1 3.6 micron, I2 "
+        "4.5 micron, I3 5.8 micron, I4 8.0 micron."),
+
 }
