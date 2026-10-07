@@ -35,9 +35,13 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import least_squares
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+
+_STEM = "counts_gal_survey"
 
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
@@ -457,15 +461,19 @@ def write_counts(path, result):
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "survey"
         for name, val in zip(BrokenPowerLaw.PARAM_NAMES, fit.params):
-            f.create_dataset(name.upper(), data=np.float64(val))
-        f.create_dataset("LOG10_S_GRID", data=result["log10_s_grid"].astype(np.float64))
-        f.create_dataset("PHI_S", data=result["phi_s"].astype(np.float64))
-        f.create_dataset("P_POINT", data=result["p_point"].astype(np.float64))
-        f.create_dataset("PHI_S_POINT", data=result["phi_s_point"].astype(np.float64))
-        f.create_dataset("COSMIC_VARIANCE_DEX", data=np.float64(result["cosmic_variance_dex"]))
-        f.create_dataset("FIT_LOG10_S_MIN", data=np.float64(fit.log_range[0]))
-        f.create_dataset("FIT_LOG10_S_MAX", data=np.float64(fit.log_range[1]))
-        f.create_dataset("FIT_RMS_DEX", data=np.float64(result["stats"]["rms_dex"]))
+            upper = name.upper()
+            build_module.write_dataset(f, upper, np.float64(val), *REGISTRY[(_STEM, upper)])
+        for name, data in (
+            ("LOG10_S_GRID", result["log10_s_grid"].astype(np.float64)),
+            ("PHI_S", result["phi_s"].astype(np.float64)),
+            ("P_POINT", result["p_point"].astype(np.float64)),
+            ("PHI_S_POINT", result["phi_s_point"].astype(np.float64)),
+            ("COSMIC_VARIANCE_DEX", np.float64(result["cosmic_variance_dex"])),
+            ("FIT_LOG10_S_MIN", np.float64(fit.log_range[0])),
+            ("FIT_LOG10_S_MAX", np.float64(fit.log_range[1])),
+            ("FIT_RMS_DEX", np.float64(result["stats"]["rms_dex"])),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
 
 
 # ---------------------------------------------------------------------------

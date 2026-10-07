@@ -107,6 +107,56 @@ REGISTRY = {
         "by the cell's own width in u. Integrating P_XI times the cell "
         "width over all cells gives 1."),
 
+    # population.gal -- counts_gal_survey: the background-galaxy number-
+    # counts law, survey-wide.
+    ("counts_gal_survey", "LOG10_A"): ("log10(deg^-2)",
+        "The fitted broken power law's own normalization: log10 of the "
+        "cumulative galaxy count per square degree, N(>S), at the break "
+        "flux LOG10_S_BREAK."),
+    ("counts_gal_survey", "LOG10_S_BREAK"): ("log10 mJy",
+        "The fitted broken power law's own break flux at 4.5 micron: "
+        "10**x is a flux in mJy."),
+    ("counts_gal_survey", "ALPHA_FAINT"): ("dimensionless",
+        "The fitted broken power law's own faint-end slope of log10 N(>S) "
+        "against log10 S."),
+    ("counts_gal_survey", "ALPHA_BRIGHT"): ("dimensionless",
+        "The fitted broken power law's own bright-end slope of log10 "
+        "N(>S) against log10 S."),
+    ("counts_gal_survey", "SMOOTHNESS"): ("dex",
+        "The fitted broken power law's own smoothness parameter: how "
+        "many dex in flux the transition between ALPHA_FAINT and "
+        "ALPHA_BRIGHT spans around LOG10_S_BREAK."),
+    ("counts_gal_survey", "LOG10_S_GRID"): ("log10 mJy",
+        "The 4.5 micron flux grid PHI_S, P_POINT and PHI_S_POINT are "
+        "tabulated on: 10**x is a flux in mJy."),
+    ("counts_gal_survey", "PHI_S"): ("deg^-2 mJy^-1",
+        "Fazio et al. (2004)'s intrinsic galaxy differential number-"
+        "counts law, phi(S) = -dN/dS, at each flux in LOG10_S_GRID: the "
+        "number of galaxies per square degree per mJy of flux at 4.5 "
+        "micron."),
+    ("counts_gal_survey", "P_POINT"): ("dimensionless",
+        "The fraction of galaxies at each flux in LOG10_S_GRID retained "
+        "as IRAC point sources rather than resolved and excluded, "
+        "measured against Fazio et al. (2004)'s own star counts."),
+    ("counts_gal_survey", "PHI_S_POINT"): ("deg^-2 mJy^-1",
+        "PHI_S times P_POINT: the point-source-corrected galaxy counts "
+        "law every consumer of this product reads."),
+    ("counts_gal_survey", "COSMIC_VARIANCE_DEX"): ("dex",
+        "The root-mean-square, in dex, of the counts-law fit's own "
+        "field-to-field scatter over its candidate fitting variants: the "
+        "cosmic-variance uncertainty on PHI_S and PHI_S_POINT."),
+    ("counts_gal_survey", "FIT_LOG10_S_MIN"): ("log10 mJy",
+        "The faintest flux Fazio et al. (2004)'s own tabulated bins "
+        "reach, the lower bound of the range the broken power law was "
+        "actually fitted over: 10**x is a flux in mJy."),
+    ("counts_gal_survey", "FIT_LOG10_S_MAX"): ("log10 mJy",
+        "The brightest flux Fazio et al. (2004)'s own tabulated bins "
+        "reach, the upper bound of the range the broken power law was "
+        "actually fitted over: 10**x is a flux in mJy."),
+    ("counts_gal_survey", "FIT_RMS_DEX"): ("dex",
+        "The root-mean-square residual, in dex, of the fitted broken "
+        "power law against Fazio et al. (2004)'s own tabulated counts."),
+
     # population.anchor_observed -- observed_anchors_hpx512: the STAR
     # anchors' observed joint histogram with the model's own young-star
     # and cluster-member counts already subtracted.
