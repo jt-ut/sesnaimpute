@@ -107,6 +107,69 @@ REGISTRY = {
         "by the cell's own width in u. Integrating P_XI times the cell "
         "width over all cells gives 1."),
 
+    # population.kernel -- kernel_sesna_survey: the column kernel p(T |
+    # A_measured), a two-log-normal mixture per arm and node, survey-wide,
+    # plus the cloud-class within-beam tilt fit.
+    ("kernel_sesna_survey", "A_NODES"): ("mag A_K",
+        "The fixed column ladder (this package's own column-grid product) "
+        "the kernel's mixture is tabulated on."),
+    ("kernel_sesna_survey", "MIX_W"): ("dimensionless",
+        "For each of the two arms (row 0 Herschel, row 1 Planck) and each "
+        "node of A_NODES, the mixing weight of the first of the two "
+        "log-normal components in the column kernel's mixture."),
+    ("kernel_sesna_survey", "MIX_MU"): ("dex",
+        "For each of the two arms (index 0 Herschel, index 1 Planck), "
+        "each node of A_NODES and each of the two mixture components "
+        "(last axis), the component's own log10 offset from the node's "
+        "measured column: log10(true column) = log10(A_NODES) + MIX_MU, "
+        "recentred so the mixture's own linear-space mean is exactly the "
+        "node's measured column."),
+    ("kernel_sesna_survey", "MIX_SIGMA"): ("dex",
+        "For each of the two arms, each node of A_NODES and each of the "
+        "two mixture components (last axis), that component's own "
+        "standard deviation in log10(true column), before any per-source "
+        "measurement or zero-point uncertainty is added in quadrature."),
+    ("kernel_sesna_survey", "ZP_HERSCHEL_K"): ("mag A_K",
+        "The survey-wide root-mean-square Herschel field zero-point "
+        "offset, used as a source's own ZP_SIGMA_K only where a caller "
+        "does not supply that source's own field-specific value."),
+    ("kernel_sesna_survey", "CLOUD_SIGMA_HERSCHEL_DEX"): ("dex",
+        "The fitted additional structural width, in log10(true column), "
+        "of the cloud classes (YSO, H2S) at the Herschel arm's own beam, "
+        "from the joint fit on HOPS/eHOPS protostars."),
+    ("kernel_sesna_survey", "CLOUD_SIGMA_HERSCHEL_P16"): ("dex",
+        "The 16th-percentile bound of CLOUD_SIGMA_HERSCHEL_DEX's own "
+        "68% confidence interval from the joint fit."),
+    ("kernel_sesna_survey", "CLOUD_SIGMA_HERSCHEL_P84"): ("dex",
+        "The 84th-percentile bound of CLOUD_SIGMA_HERSCHEL_DEX's own "
+        "68% confidence interval from the joint fit."),
+    ("kernel_sesna_survey", "CLOUD_GAMMA_HERSCHEL"): ("dimensionless",
+        "The fitted within-beam column exponent for the cloud classes "
+        "(YSO, H2S) at the Herschel arm's own beam: 0 if the joint fit's "
+        "own 68% interval for this exponent includes 0, the fitted value "
+        "otherwise."),
+    ("kernel_sesna_survey", "CLOUD_GAMMA_HERSCHEL_P16"): ("dimensionless",
+        "The 16th-percentile bound of the fitted exponent's own 68% "
+        "confidence interval, before the zero-inclusion rule that sets "
+        "CLOUD_GAMMA_HERSCHEL to 0."),
+    ("kernel_sesna_survey", "CLOUD_GAMMA_HERSCHEL_P84"): ("dimensionless",
+        "The 84th-percentile bound of the fitted exponent's own 68% "
+        "confidence interval, before the zero-inclusion rule that sets "
+        "CLOUD_GAMMA_HERSCHEL to 0."),
+    ("kernel_sesna_survey", "CLOUD_SIGMA_GRID_DEX"): ("dex",
+        "The grid of structural-width values the joint maximum-likelihood "
+        "fit searched over to find CLOUD_SIGMA_HERSCHEL_DEX."),
+    ("kernel_sesna_survey", "CLOUD_GAMMA_GRID"): ("dimensionless",
+        "The grid of within-beam exponent values the joint maximum-"
+        "likelihood fit searched over to find CLOUD_GAMMA_HERSCHEL."),
+    ("kernel_sesna_survey", "CLOUD_GAMMA_SIGMA_LOGLIKE"): ("nats",
+        "The joint fit's own log-likelihood surface over "
+        "CLOUD_GAMMA_GRID (rows) and CLOUD_SIGMA_GRID_DEX (columns), as a "
+        "natural logarithm."),
+    ("kernel_sesna_survey", "N_PROTOSTARS_FIT"): ("protostars",
+        "How many HOPS/eHOPS protostars (Orion A, Aquila) went into the "
+        "joint CLOUD_GAMMA_HERSCHEL/CLOUD_SIGMA_HERSCHEL_DEX fit."),
+
     # population.star_population -- population_star_tile: per-tile field-
     # star placement, anchor weight and brightness unit, per region (the
     # same dataset names repeat in every tile_<id> group this file holds).
