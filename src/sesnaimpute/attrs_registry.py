@@ -107,6 +107,106 @@ REGISTRY = {
         "by the cell's own width in u. Integrating P_XI times the cell "
         "width over all cells gives 1."),
 
+    # bmstp.shapes -- star_shape_tile (P2, per tile), cloud_shape_sightline
+    # (P3, per sightline) and gal_shape_survey (P4, survey-wide): each
+    # class's population sample binned onto the common (log10 xi,
+    # log10 F_4.5) shape grid.
+    ("star_shape_tile", "LOG10_XI_EDGES"): ("log10(dimensionless)",
+        "The edges of the log10(depth fraction) axis every shape grid in "
+        "this package shares: 10**x is the dimensionless depth fraction "
+        "xi, 0 at the observer and 1 at a sightline's own total column."),
+    ("star_shape_tile", "LOG10_F45_EDGES"): ("log10 mJy at 1 kpc",
+        "The edges of the common log10(4.5 micron flux, scaled to 1 kpc) "
+        "axis every shape grid in this package shares: 10**x is a flux "
+        "in mJy at the register's 1 kpc reference distance."),
+    ("star_shape_tile", "TILE_ID"): ("tile index",
+        "The tile each row of GRID_STAR, GRID_AGB and the other per-tile "
+        "datasets in this file describes, in this file's own row order."),
+    ("star_shape_tile", "GRID_STAR"): ("dimensionless",
+        "For the matching tile in TILE_ID, the normal (non-evolved) field "
+        "stars' own population density on the common (log10 xi, "
+        "log10 F_4.5) grid: integrating over a cell gives that cell's own "
+        "share of the tile's STAR population, up to the floor ON_GRID_STAR "
+        "leaves out."),
+    ("star_shape_tile", "GRID_AGB"): ("dimensionless",
+        "For the matching tile in TILE_ID, the evolved (AGB) field stars' "
+        "own population density on the common (log10 xi, log10 F_4.5) "
+        "grid, on the same convention as GRID_STAR."),
+    ("star_shape_tile", "MASS_OUTSIDE_STAR"): ("dimensionless",
+        "For the matching tile in TILE_ID, the fraction of this tile's "
+        "own STAR population weight that falls outside the common grid "
+        "(below the retention limit or beyond an edge), not stored in "
+        "GRID_STAR."),
+    ("star_shape_tile", "MASS_OUTSIDE_AGB"): ("dimensionless",
+        "For the matching tile in TILE_ID, the fraction of this tile's "
+        "own AGB population weight that falls outside the common grid, "
+        "not stored in GRID_AGB."),
+    ("star_shape_tile", "ON_GRID_STAR"): ("dimensionless",
+        "1 minus MASS_OUTSIDE_STAR: the fraction of this tile's own STAR "
+        "population weight that GRID_STAR actually holds."),
+    ("star_shape_tile", "ON_GRID_AGB"): ("dimensionless",
+        "1 minus MASS_OUTSIDE_AGB: the fraction of this tile's own AGB "
+        "population weight that GRID_AGB actually holds."),
+
+    ("cloud_shape_sightline", "LOG10_XI_EDGES"): ("log10(dimensionless)",
+        "The edges of the log10(depth fraction) axis every shape grid in "
+        "this package shares: 10**x is the dimensionless depth fraction "
+        "xi, 0 at the observer and 1 at a sightline's own total column."),
+    ("cloud_shape_sightline", "LOG10_F45_EDGES"): ("log10 mJy at 1 kpc",
+        "The edges of the common log10(4.5 micron flux, scaled to 1 kpc) "
+        "axis every shape grid in this package shares: 10**x is a flux "
+        "in mJy at the register's 1 kpc reference distance."),
+    ("cloud_shape_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
+        "This region's own occupied nside-256 pixel numbers (nested "
+        "ordering). Row i here is row i of GRID_YSO, XI_MARGINAL and the "
+        "other per-sightline datasets in this file."),
+    ("cloud_shape_sightline", "GRID_YSO"): ("dimensionless",
+        "For the matching sightline in HPX_PIX_256, the YSO population "
+        "density on the common (log10 xi, log10 F_4.5) grid, restricted "
+        "to this region's own cloud interval: integrating over a cell "
+        "gives that cell's own share of the sightline's YSO population, "
+        "up to the floor ON_GRID_YSO leaves out."),
+    ("cloud_shape_sightline", "XI_MARGINAL"): ("dimensionless",
+        "For the matching sightline in HPX_PIX_256, GRID_YSO summed over "
+        "the brightness axis: the YSO population's own depth-fraction "
+        "distribution alone, restricted to this region's cloud interval."),
+    ("cloud_shape_sightline", "MASS_OUTSIDE_YSO"): ("dimensionless",
+        "For the matching sightline in HPX_PIX_256, the fraction of this "
+        "sightline's own YSO population weight that falls outside the "
+        "common grid, not stored in GRID_YSO."),
+    ("cloud_shape_sightline", "ON_GRID_YSO"): ("dimensionless",
+        "1 minus MASS_OUTSIDE_YSO: the fraction of this sightline's own "
+        "YSO population weight that GRID_YSO actually holds."),
+    ("cloud_shape_sightline", "GRID_H2S"): ("dimensionless",
+        "For the matching sightline in HPX_PIX_256, the H2 shock "
+        "population density on the common (log10 xi, log10 F_4.5) grid: "
+        "XI_MARGINAL times this region's own H2-shock brightness "
+        "distribution (this file's LOGSIG_MEAN/LOGSIG_STD attributes "
+        "convolved with the h2shock template conversions), on the same "
+        "convention as GRID_YSO."),
+    ("cloud_shape_sightline", "MASS_OUTSIDE_H2S"): ("dimensionless",
+        "For the matching sightline in HPX_PIX_256, the fraction of this "
+        "sightline's own H2 shock population weight that falls outside "
+        "the common grid, not stored in GRID_H2S."),
+    ("cloud_shape_sightline", "ON_GRID_H2S"): ("dimensionless",
+        "1 minus MASS_OUTSIDE_H2S: the fraction of this sightline's own "
+        "H2 shock population weight that GRID_H2S actually holds."),
+
+    ("gal_shape_survey", "LOG10_XI_EDGES"): ("log10(dimensionless)",
+        "The edges of the log10(depth fraction) axis every shape grid in "
+        "this package shares: 10**x is the dimensionless depth fraction "
+        "xi, 0 at the observer and 1 at a sightline's own total column."),
+    ("gal_shape_survey", "LOG10_F45_EDGES"): ("log10 mJy at 1 kpc",
+        "The edges of the common log10(4.5 micron flux, scaled to 1 kpc) "
+        "axis every shape grid in this package shares: 10**x is a flux "
+        "in mJy at the register's 1 kpc reference distance."),
+    ("gal_shape_survey", "GRID"): ("dimensionless",
+        "The survey-wide background-galaxy population density on the "
+        "common (log10 xi, log10 F_4.5) grid: a delta at xi = 0 (a "
+        "galaxy's light passes through the whole sightline) times the "
+        "background-galaxy counts law in F_4.5, up to the floor this "
+        "file's ON_GRID_GAL attribute leaves out."),
+
     # bmstp.cloud_interval -- cloud_interval_shape_sightline: each
     # sightline's own dense fraction between the region's cloud interval,
     # per region.
