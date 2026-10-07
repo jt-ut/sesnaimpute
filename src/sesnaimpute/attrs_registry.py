@@ -61,6 +61,76 @@ REGISTRY = {
         "90 the source's own 90%-completeness flux, 91 the median "
         "90%-completeness flux of its nearest sky neighbours."),
 
+    # sky.derived.herschel_column -- sigma_herschel_survey (survey-wide
+    # calibration) and column_herschel_source (per region): the Herschel
+    # Gould Belt Survey dust-column arm of the per-source extinction.
+    ("sigma_herschel_survey", "MAP_NAME"): ("map name",
+        "The file name of each HGBS column-density map this survey-wide "
+        "calibration was measured from."),
+    ("sigma_herschel_survey", "BEAM_FWHM_ARCSEC"): ("arcsec",
+        "The matching map's own beam full width at half maximum, from its "
+        "FITS header where stated, else the survey's own stated value, "
+        "36.3 arcsec."),
+    ("sigma_herschel_survey", "SIGMA_ZP_K"): ("mag A_K",
+        "The root-mean-square, over every field with a measured zero "
+        "point in ZP_FIELD, of that field's own zero point: one number "
+        "for a reader that wants a single survey-wide zero-point "
+        "uncertainty rather than FIELD_NAME's per-field values."),
+    ("sigma_herschel_survey", "C0"): ("mag A_K",
+        "The constant term of the random-uncertainty model SIGMA_RAND_K^2 "
+        "= C0^2 + C1^2 * A_K^2, fit over every overlapping HGBS map pair's "
+        "own column-binned scatter."),
+    ("sigma_herschel_survey", "C1"): ("dimensionless",
+        "The term of the random-uncertainty model SIGMA_RAND_K^2 = C0^2 + "
+        "C1^2 * A_K^2 that scales with A_K, from the same fit as C0."),
+    ("sigma_herschel_survey", "N_PAIRS"): ("map pairs",
+        "How many overlapping HGBS map pairs went into fitting C0 and C1."),
+    ("sigma_herschel_survey", "FIELD_NAME"): ("region name",
+        "Which SESNA region (HGBS-covered \"field\") each row of ZP_FIELD, "
+        "ZP_SIGMA_FIELD and ZP_N_FIELD describes."),
+    ("sigma_herschel_survey", "ZP_FIELD"): ("mag A_K",
+        "For the matching field in FIELD_NAME, the median of the Herschel "
+        "column minus the Planck column over that field's own low-column "
+        "(A_PLANCK < 0.3 mag), Herschel-covered admitted sightline pixels: "
+        "this field's own Herschel zero-point offset."),
+    ("sigma_herschel_survey", "ZP_SIGMA_FIELD"): ("mag A_K",
+        "For the matching field in FIELD_NAME, the uncertainty on "
+        "ZP_FIELD: the robust scatter of the same per-pixel differences, "
+        "divided by the square root of ZP_N_FIELD."),
+    ("sigma_herschel_survey", "ZP_N_FIELD"): ("pixels",
+        "For the matching field in FIELD_NAME, how many low-column, "
+        "Herschel-covered admitted sightline pixels went into ZP_FIELD and "
+        "ZP_SIGMA_FIELD."),
+
+    ("column_herschel_source", "A_K"): ("mag A_K",
+        "For every catalogued source of this region, the K-band "
+        "extinction from the Herschel Gould Belt Survey N(H2) map at the "
+        "source's own position, where a map covers it. Not meaningful "
+        "where COVERED is False."),
+    ("column_herschel_source", "SIGMA_A_K"): ("mag A_K",
+        "The total 1-sigma uncertainty on A_K, combining SIGMA_RAND_K and "
+        "this map's own zero-point uncertainty in quadrature. Not "
+        "meaningful where COVERED is False."),
+    ("column_herschel_source", "SIGMA_RAND_K"): ("mag A_K",
+        "The part of A_K's uncertainty from map noise that varies "
+        "independently from source to source: sqrt(C0^2 + C1^2 * A_K^2), "
+        "the survey-wide calibration's own random-uncertainty model. Not "
+        "meaningful where COVERED is False."),
+    ("column_herschel_source", "SIGMA_ZP_K"): ("mag A_K",
+        "The part of A_K's uncertainty from this source's own map's "
+        "zero-point offset, a systematic shared by every source that map "
+        "covers. Not meaningful where COVERED is False."),
+    ("column_herschel_source", "COVERED"): ("boolean",
+        "True where an HGBS map reaches this source's own position, so "
+        "A_K and its uncertainty columns in this file are meaningful."),
+    ("column_herschel_source", "MAP_ID"): ("map index",
+        "For every catalogued source of this region, which map in this "
+        "file's own MAP_NAME list covers its position, as a position in "
+        "that list. -1 where no map covers it."),
+    ("column_herschel_source", "MAP_NAME"): ("map name",
+        "The file name of each HGBS column-density map that reaches some "
+        "part of this region, in the order MAP_ID indexes."),
+
     # sky.derived.protostars -- protostars_survey: the pooled HOPS/eHOPS
     # Herschel-confirmed protostar sample, a report-only overlay.
     ("protostars_survey", "SURVEY"): ("survey name",
