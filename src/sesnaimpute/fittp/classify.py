@@ -14,7 +14,14 @@ leaves the subclass shares within the class untouched. A single softmax
 over the full 25-column row then gives `P_SUBCLASS` directly, and
 `P_CLASS` is its per-class column sum -- the two acceptance identities
 (`P_CLASS` sums to 1; `P_SUBCLASS` summed within a class equals `P_CLASS`)
-hold by construction, not by a separate normalisation.
+hold by construction, not by a separate normalisation. At `beta != 0`,
+`Psi_C(s)` reads the cascade's own `P_VERDICT_MEASURED` (P10) against the
+emission table `E[k, b, v]` (`fittp.emission`, `briefs/EMISSION.md`); that
+reader is not wired here -- `briefs/EMISSION.md` scopes its own consumer
+(a per-template read inside the fit, not a per-class one at classification
+time) as a separate, later piece of work, so this module raises rather
+than approximate it. `beta = 0` is the only supported value today, and at
+`beta = 0` nothing of the cascade is read.
 
 `A_K_POST`, `A_K_POST_SIG` (n, 6), `CLASSES` order, carry each class's own
 posterior extinction mark and its spread (P7's own columns of the same
@@ -148,13 +155,6 @@ EPS_EXT_CENTRAL, EPS_EXT_LO, EPS_EXT_HI = 0.25, 0.15, 0.35
 #: `max(A_s, A_MIN_YSO_LAW)`, mag A_K, applied to YSO and to H2S (sec 5.6:
 #: H2S rides on the law).
 A_MIN_YSO_LAW = 0.3
-#: Psi floored at this fraction of its own row's maximum before
-#: `beta * ln Psi` enters a class's evidence (spec sec 6.5, sec 2: "no
-#: hypothesis is ever at -inf" -- the cascade may argue against a class,
-#: never veto it outright).
-PSI_FLOOR_FRAC = 1e-6
-
-
 def _sensitivity_scale(run, f_dusty_o=None, f_dusty_c=None, f_c=None):
     """`(classes, ln_scale)` for one of the eight fixed literature-band
     runs -- the constant added to every one of `classes`'s whole CLASSMAP
@@ -241,25 +241,21 @@ def _cascade_path(config, region):
 def _batch_ln_evidence(class_files, psi_file, beta, start, stop, m):
     """One batch's global `(m, 25)` ln-evidence array: each class's own
     `LN_EVIDENCE` block, shifted by `beta * ln Psi_C(s)` when `beta != 0`
-    (spec sec 6.5's logsumexp-shift, see module docstring). `Psi_C` is
-    floored at `PSI_FLOOR_FRAC` of its own row's maximum before the log is
-    taken (sec 6.5, sec 2) -- read here at classification time only; the
-    cascade product on disk keeps its own unfloored numbers.
+    (spec sec 6.5's logsumexp-shift, see module docstring). `beta != 0`
+    needs `Psi_C(s)` read from `psi_file`'s own `P_VERDICT_MEASURED` (P10)
+    against the emission table, which is not wired here (module
+    docstring); `beta = 0` is the only supported value.
     """
-    ln_ev = np.full((m, N_SUBCLASS), -np.inf, dtype=np.float64)
-    ln_psi_by_class = None
     if beta != 0.0:
-        psi_raw = np.asarray(psi_file["PSI_CLASS"][start:stop, :], dtype=np.float64)
-        psi_floor = PSI_FLOOR_FRAC * psi_raw.max(axis=1, keepdims=True)
-        psi_floored = np.maximum(psi_raw, psi_floor)
-        with np.errstate(divide="ignore"):
-            ln_psi_by_class = np.log(psi_floored)
+        raise NotImplementedError(
+            "fittp.classify: beta=%.3g needs Psi_C(s) from P_VERDICT_MEASURED and the "
+            "emission table -- that reader is briefs/EMISSION.md's own scope, deferred "
+            "there; beta = 0 is the only supported value today" % beta)
+    ln_ev = np.full((m, N_SUBCLASS), -np.inf, dtype=np.float64)
     for ci, cls in enumerate(CLASSES):
         f = class_files[cls]
         lo, hi = CLASS_SLICES[cls]
         block = np.asarray(f["LN_EVIDENCE"][start:stop, :], dtype=np.float64)
-        if beta != 0.0:
-            block = block + beta * ln_psi_by_class[:, ci][:, None]
         ln_ev[:, lo:hi] = block
     return ln_ev
 
