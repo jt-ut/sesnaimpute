@@ -23,8 +23,10 @@ from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
 from joblib import Parallel, delayed
 
+from sesnaimpute import build as build_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.config import product_path
 from sesnaimpute.definitions import BANDS_BY_KEY
@@ -193,11 +195,14 @@ def _region_coverage(fields_by_band):
 def _write(config, region, granule, pix, frac):
     out_path = product_path(config, "sky/derived", "spitzer", "coverage", granule, region=region)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    stem = f"coverage_spitzer_{granule}"
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = granule
-        f.create_dataset("HPX_PIX", data=pix.astype(np.int64), compression="gzip", compression_opts=4)
-        f.create_dataset("FRAC", data=frac.astype(np.float32), compression="gzip", compression_opts=4)
-        f.create_dataset("BANDS", data=np.array(SPITZER_BANDS, dtype="S8"))
+        build_module.write_dataset(f, "HPX_PIX", pix.astype(np.int64), *REGISTRY[(stem, "HPX_PIX")],
+                                    compression="gzip", compression_opts=4)
+        build_module.write_dataset(f, "FRAC", frac.astype(np.float32), *REGISTRY[(stem, "FRAC")],
+                                    compression="gzip", compression_opts=4)
+        build_module.write_dataset(f, "BANDS", np.array(SPITZER_BANDS, dtype="S8"), *REGISTRY[(stem, "BANDS")])
 
 
 def _build_one_region(config, region, masks_path):

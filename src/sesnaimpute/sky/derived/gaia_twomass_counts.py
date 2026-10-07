@@ -37,11 +37,14 @@ import numpy as np
 from sesnaimpute import build as build_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.granules import access
 from sesnaimpute.sky.derived import twomass_counts as twomass_derived
 
 G_EDGES = np.arange(10.0, 20.0, 1.0)  # SPEC_BMSTP_DRAFT.md 5.1 "joint and marginal bins": G < 19
 KS_EDGES = twomass_derived.MAG_EDGES  # the 2MASS marginal's own grid, 9.0-14.3 (module docstring)
+
+_STEM = "joint-counts_gaia-twomass_hpx512"
 
 
 def _download_path(config, region):
@@ -87,10 +90,13 @@ def _write_region(config, region, pixels, n):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "hpx512"
-        f.create_dataset("HPX_PIX_512", data=pixels.astype(np.int64))
-        f.create_dataset("G_EDGES", data=G_EDGES.astype(np.float64))
-        f.create_dataset("KS_EDGES", data=KS_EDGES.astype(np.float64))
-        f.create_dataset("N_GK", data=n.astype(np.int64))
+        for name, data in (
+            ("HPX_PIX_512", pixels.astype(np.int64)),
+            ("G_EDGES", G_EDGES.astype(np.float64)),
+            ("KS_EDGES", KS_EDGES.astype(np.float64)),
+            ("N_GK", n.astype(np.int64)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
 
 
 def build(config, regions=None):

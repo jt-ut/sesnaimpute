@@ -272,6 +272,83 @@ REGISTRY = {
         "The image's own one-pixel background noise level, in the map's "
         "native calibrated counts (Froebrich et al. 2015, their Table C1)."),
 
+    # sky.derived.gaia_twomass_counts -- joint-counts_gaia-twomass_hpx512:
+    # the joint Gaia G x 2MASS Ks anchor count, per region.
+    ("joint-counts_gaia-twomass_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "The region's own occupied nside-512 pixel numbers (nested ordering), "
+        "ascending. Row i here is row i of N_GK."),
+    ("joint-counts_gaia-twomass_hpx512", "G_EDGES"): ("mag Gaia G",
+        "The edges of the 1-magnitude Gaia G bins this file counts stars in, "
+        "10 to 19: bin j runs from G_EDGES[j] to G_EDGES[j+1]."),
+    ("joint-counts_gaia-twomass_hpx512", "KS_EDGES"): ("mag 2MASS Ks",
+        "The edges of the half-magnitude 2MASS Ks bins this file counts "
+        "stars in, 9.0 to 14.3: bin j runs from KS_EDGES[j] to KS_EDGES[j+1]."),
+    ("joint-counts_gaia-twomass_hpx512", "N_GK"): ("stars",
+        "For the matching pixel in HPX_PIX_512, each Gaia G bin in G_EDGES "
+        "and each 2MASS Ks bin in KS_EDGES, how many Gaia-2MASS crossmatched "
+        "stars fall in that pixel and that pair of bins."),
+
+    # sky.derived.coverage -- coverage_spitzer_sightline (nside-256) and
+    # coverage_spitzer_hpx512 (nside-512): the Spitzer mosaic coverage
+    # fraction per pixel and band, per region.
+    ("coverage_spitzer_sightline", "HPX_PIX"): ("nested HEALPix pixel, nside 256",
+        "The region's nside-256 pixel numbers (nested ordering) that its own "
+        "Spitzer mosaics touch, ascending. Row i here is row i of FRAC."),
+    ("coverage_spitzer_sightline", "FRAC"): ("dimensionless",
+        "For the matching pixel in HPX_PIX and each of the five Spitzer bands "
+        "named in BANDS, the fraction of that nside-256 pixel's area that "
+        "falls on a covered mosaic pixel in that band."),
+    ("coverage_spitzer_sightline", "BANDS"): ("band key",
+        "The five Spitzer band keys, in the column order FRAC's second axis "
+        "uses: I1, I2, I3, I4 (IRAC), M1 (MIPS)."),
+    ("coverage_spitzer_hpx512", "HPX_PIX"): ("nested HEALPix pixel, nside 512",
+        "The region's nside-512 pixel numbers (nested ordering) that its own "
+        "Spitzer mosaics touch, ascending. Row i here is row i of FRAC."),
+    ("coverage_spitzer_hpx512", "FRAC"): ("dimensionless",
+        "For the matching pixel in HPX_PIX and each of the five Spitzer bands "
+        "named in BANDS, the fraction of that nside-512 pixel's area that "
+        "falls on a covered mosaic pixel in that band."),
+    ("coverage_spitzer_hpx512", "BANDS"): ("band key",
+        "The five Spitzer band keys, in the column order FRAC's second axis "
+        "uses: I1, I2, I3, I4 (IRAC), M1 (MIPS)."),
+
+    # sky.derived.gaia_counts / twomass_counts / ukidss_counts -- anchor
+    # star counts on the region's own nside-512 pixels, one magnitude band
+    # per survey.
+    ("counts_gaia_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "The region's own occupied nside-512 pixel numbers (nested ordering), "
+        "ascending. Row i here is row i of N."),
+    ("counts_gaia_hpx512", "MAG_EDGES"): ("mag Gaia G",
+        "The edges of the eleven 1-magnitude Gaia G bins this file counts "
+        "stars in, 10 to 21: bin j runs from MAG_EDGES[j] to MAG_EDGES[j+1]."),
+    ("counts_gaia_hpx512", "N"): ("stars",
+        "For the matching pixel in HPX_PIX_512 and each magnitude bin in "
+        "MAG_EDGES, how many Gaia DR3 sources fall in that pixel and bin."),
+
+    ("counts_twomass_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "The region's own occupied nside-512 pixel numbers (nested ordering), "
+        "ascending. Row i here is row i of N."),
+    ("counts_twomass_hpx512", "MAG_EDGES"): ("mag 2MASS Ks",
+        "The edges of the half-magnitude 2MASS Ks bins this file counts "
+        "stars in, 9.0 to 14.3: bin j runs from MAG_EDGES[j] to "
+        "MAG_EDGES[j+1]."),
+    ("counts_twomass_hpx512", "N"): ("stars",
+        "For the matching pixel in HPX_PIX_512 and each magnitude bin in "
+        "MAG_EDGES, how many 2MASS Point Source Catalog detections fall in "
+        "that pixel and bin."),
+
+    ("counts_ukidss_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "The region's own occupied nside-512 pixel numbers (nested ordering), "
+        "ascending. Row i here is row i of N."),
+    ("counts_ukidss_hpx512", "MAG_EDGES"): ("mag UKIRT K",
+        "The edges of the half-magnitude UKIDSS GPS K bins (UKIRT "
+        "photometric system) this file counts stars in, 9.0 to 17.0: bin j "
+        "runs from MAG_EDGES[j] to MAG_EDGES[j+1]."),
+    ("counts_ukidss_hpx512", "N"): ("stars",
+        "For the matching pixel in HPX_PIX_512 and each magnitude bin in "
+        "MAG_EDGES, how many clean-photometry UKIDSS GPS detections fall in "
+        "that pixel and bin."),
+
     ("colours_knots_survey", "LOG10_RATIO"): ("dex",
         "log10(F_IRAC_band / F_2.12um) for every Giannini et al. (2013) knot "
         "with a measured, non-upper-limit flux in both the 2.12 micron line "
