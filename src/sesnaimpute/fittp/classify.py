@@ -59,6 +59,7 @@ import h5py
 import numpy as np
 
 from sesnaimpute import config as config_module
+from sesnaimpute.constants import GUTERMUTH_LABELS
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
@@ -285,7 +286,7 @@ def _part_path(path, bi):
 #: off the six fit files' own columns of the same name exactly as
 #: `LN_EVIDENCE` -- no MAP-class column: a reader picks the class it wants
 #: and divides `A_K_POST` by P1's own `A_COL_K`.
-_CLASSIFY_PART_KEYS = ("NAME", "P_CLASS", "P_SUBCLASS", "P_YSO", "MAP_CLASS", "N_DETECTED",
+_CLASSIFY_PART_KEYS = ("NAME", "CLASS_SESNA", "P_CLASS", "P_SUBCLASS", "P_YSO", "MAP_CLASS", "N_DETECTED",
                        "LOG10_CANDIDATE_FLUX", "LOG10_FLUX_IMPUTED", "LOG10_FLUX_IMPUTED_COV",
                        "A_K_POST", "A_K_POST_SIG",
                        "ENTROPY_CLASS", "ENTROPY_SUBCLASS")
@@ -358,6 +359,14 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
         flux = np.asarray(cf["FNU_MJY"][start:stop], dtype=np.float64)
         sigma = np.asarray(cf["SIGMA_FNU_MJY"][start:stop], dtype=np.float64)
         origin = np.asarray(cf["ORIGIN_FNU"][start:stop])
+        # the class SESNA delivered for these sources, carried through so the
+        # catalogue's own label is in the product the classification is read
+        # from; nothing in the pipeline reads it (rule 7).
+        class_sesna = np.asarray(cf["CLASS"][start:stop], dtype=np.int64)
+    unknown = set(np.unique(class_sesna).tolist()) - set(GUTERMUTH_LABELS.index.tolist())
+    if unknown:
+        raise ValueError("fittp.classify: catalogue CLASS codes absent from "
+                          "constants.GUTERMUTH_LABELS: %s" % sorted(unknown))
     detected = (origin == 1) & (flux > 0)
 
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -418,6 +427,7 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     a_k_post_sig = np.ascontiguousarray(a_k_post_sig_stack.T)
 
     return dict(
+        class_sesna=class_sesna.astype(np.int16),
         p_class=p_cls.astype(np.float32), p_subclass=p_sub.astype(np.float32),
         map_class=map_c.astype(np.int8), n_detected=detected.sum(axis=1).astype(np.int8),
         log10_candidate_flux=cflux.astype(np.float32), log10_flux_imputed=imputed.astype(np.float32),
@@ -431,6 +441,7 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
 def _write_classify_part(part_path, batch):
     with h5py.File(part_path, "w") as f:
         f.create_dataset("NAME", data=batch["name"])
+        f.create_dataset("CLASS_SESNA", data=batch["class_sesna"])
         f.create_dataset("P_CLASS", data=batch["p_class"])
         f.create_dataset("P_SUBCLASS", data=batch["p_subclass"])
         f.create_dataset("P_YSO", data=batch["p_class"][:, YSO_INDEX])
@@ -519,6 +530,11 @@ def build_region(config, region, st, beta):
 _READINGS = {
     "NAME": ("row into the catalogue, same order",
              "the source's own name, this product's row order matching the catalogue's"),
+    "CLASS_SESNA": ("SESNA class code",
+                     "the class SESNA delivered for this source, the curated catalogue's own "
+                     "CLASS copied verbatim; the codes and their names are "
+                     "constants.GUTERMUTH_LABELS, the same vocabulary the cascade product's "
+                     "VERDICT_MEASURED uses; nothing in the pipeline reads this column"),
     "P_CLASS": ("dimensionless",
                  "the posterior probability of each of the six classes, CLASSES order; "
                  "sums to 1 over the row"),
