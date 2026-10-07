@@ -61,6 +61,46 @@ REGISTRY = {
         "90 the source's own 90%-completeness flux, 91 the median "
         "90%-completeness flux of its nearest sky neighbours."),
 
+    # sky.derived.protostars -- protostars_survey: the pooled HOPS/eHOPS
+    # Herschel-confirmed protostar sample, a report-only overlay.
+    ("protostars_survey", "SURVEY"): ("survey name",
+        "Which survey this protostar comes from: HOPS (Furlan et al. 2016, "
+        "Orion) or eHOPS (Pokhrel et al. 2023, Aquila)."),
+    ("protostars_survey", "ID"): ("catalog identifier",
+        "This protostar's own identifier in its source survey's table."),
+    ("protostars_survey", "RA_DEG"): ("deg", "Right ascension, equinox J2000."),
+    ("protostars_survey", "DEC_DEG"): ("deg", "Declination, equinox J2000."),
+    ("protostars_survey", "CLASS"): ("code",
+        "This protostar's evolutionary class in its source survey's own "
+        "SED-fitted classification, on HOPS's own four-way scale: \"0\" "
+        "Class 0, \"I\" Class I, \"flat\" flat-spectrum, \"II\" Class II. "
+        "eHOPS's own labels are mapped onto these four before being "
+        "written here."),
+    ("protostars_survey", "LBOL_LSUN"): ("Lsun",
+        "This protostar's bolometric luminosity, from its source survey's "
+        "own SED fit."),
+    ("protostars_survey", "TBOL_K"): ("K",
+        "This protostar's bolometric temperature, from its source survey's "
+        "own SED fit."),
+    ("protostars_survey", "AV_FOREGROUND_MAG"): ("mag A_V",
+        "This protostar's foreground V-band extinction, from its source "
+        "survey's own SED fit."),
+    ("protostars_survey", "F45_MJY"): ("mJy",
+        "This protostar's measured 4.5 micron flux density, from its "
+        "source survey's own photometry table. NaN where F45_MEASURED is "
+        "False."),
+    ("protostars_survey", "E_F45_MJY"): ("mJy",
+        "The 1-sigma uncertainty on F45_MJY. NaN where F45_MEASURED is "
+        "False."),
+    ("protostars_survey", "F45_MEASURED"): ("boolean",
+        "True where this protostar's source survey reports an actual 4.5 "
+        "micron flux measurement rather than no photometry at that "
+        "wavelength."),
+    ("protostars_survey", "REGION"): ("region name",
+        "The SESNA region whose admitted footprint contains this "
+        "protostar's position, or an empty string where its position "
+        "falls outside every region's footprint."),
+
     # sky.derived.gaia_match -- match_gaia_source: the SESNA-Gaia crossmatch
     # and its congruence term G_S, per source.
     ("match_gaia_source", "G_S"): ("dimensionless",

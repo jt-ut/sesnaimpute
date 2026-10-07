@@ -40,10 +40,14 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.io.votable import parse as parse_votable
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
+
+_STEM = "protostars_survey"
 
 #: (VOTable file, VizieR table name, id column, class values -> HOPS's
 #: own four labels).
@@ -176,18 +180,21 @@ def build(config, regions=None):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with h5py.File(path, "w") as f:
             f.attrs["GRANULE"] = "survey"
-            f.create_dataset("SURVEY", data=survey)
-            f.create_dataset("ID", data=ident)
-            f.create_dataset("RA_DEG", data=ra_deg)
-            f.create_dataset("DEC_DEG", data=dec_deg)
-            f.create_dataset("CLASS", data=cls)
-            f.create_dataset("LBOL_LSUN", data=lbol)
-            f.create_dataset("TBOL_K", data=tbol)
-            f.create_dataset("AV_FOREGROUND_MAG", data=av)
-            f.create_dataset("F45_MJY", data=f45_mjy)
-            f.create_dataset("E_F45_MJY", data=e45_mjy)
-            f.create_dataset("F45_MEASURED", data=f45_measured)
-            f.create_dataset("REGION", data=region)
+            for name, data in (
+                ("SURVEY", survey),
+                ("ID", ident),
+                ("RA_DEG", ra_deg),
+                ("DEC_DEG", dec_deg),
+                ("CLASS", cls),
+                ("LBOL_LSUN", lbol),
+                ("TBOL_K", tbol),
+                ("AV_FOREGROUND_MAG", av),
+                ("F45_MJY", f45_mjy),
+                ("E_F45_MJY", e45_mjy),
+                ("F45_MEASURED", f45_measured),
+                ("REGION", region),
+            ):
+                build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
 
         n_by_region = {}
         for name in np.unique(region):
