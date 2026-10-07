@@ -107,6 +107,37 @@ REGISTRY = {
         "by the cell's own width in u. Integrating P_XI times the cell "
         "width over all cells gives 1."),
 
+    # population.anchor_observed -- observed_anchors_hpx512: the STAR
+    # anchors' observed joint histogram with the model's own young-star
+    # and cluster-member counts already subtracted.
+    ("observed_anchors_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "This region's own occupied nside-512 anchor pixel numbers "
+        "(nested ordering), the same pixels the anchor histogram product "
+        "shares. Row i here is row i of N_G_SUB, N_KS_SUB and N_GK_SUB."),
+    ("observed_anchors_hpx512", "G_EDGES"): ("mag Gaia G",
+        "The edges of the Gaia G magnitude bins N_G_SUB and N_GK_SUB are "
+        "tabulated on, the same edges the anchor histogram product uses."),
+    ("observed_anchors_hpx512", "KS_EDGES"): ("mag 2MASS Ks",
+        "The edges of the 2MASS Ks magnitude bins N_KS_SUB and N_GK_SUB "
+        "are tabulated on, the same edges the anchor histogram product "
+        "uses."),
+    ("observed_anchors_hpx512", "N_G_SUB"): ("stars",
+        "For the matching pixel in HPX_PIX_512 and each Gaia G bin of "
+        "G_EDGES, the observed star count with the model's own expected "
+        "young-star count and any overlapping bound star cluster's own "
+        "member count both subtracted, floored at zero."),
+    ("observed_anchors_hpx512", "N_KS_SUB"): ("stars",
+        "For the matching pixel in HPX_PIX_512 and each 2MASS Ks bin of "
+        "KS_EDGES, the observed star count with the model's own expected "
+        "young-star count and any overlapping bound star cluster's own "
+        "member count both subtracted, floored at zero."),
+    ("observed_anchors_hpx512", "N_GK_SUB"): ("stars",
+        "For the matching pixel in HPX_PIX_512, each Gaia G bin of "
+        "G_EDGES and each 2MASS Ks bin of KS_EDGES, the Gaia-2MASS joint "
+        "crossmatch count with the model's own expected young-star joint "
+        "count and any overlapping bound star cluster's own member joint "
+        "count both subtracted, floored at zero."),
+
     # population.yso_law -- law_yso_region: the young-star law's
     # coefficient, fitted per region on the Dunham et al. (2015) census.
     ("law_yso_region", "REGION"): ("region name",
