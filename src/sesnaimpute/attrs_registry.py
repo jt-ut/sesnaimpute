@@ -107,6 +107,41 @@ REGISTRY = {
         "by the cell's own width in u. Integrating P_XI times the cell "
         "width over all cells gives 1."),
 
+    # population.yso_mass -- mass_yso_survey: each pooled YSO register
+    # template's own stellar mass, read off a pre-main-sequence track.
+    ("mass_yso_survey", "MODEL_NAME"): ("source name",
+        "This template's own identifier, in the pooled YSO register's own "
+        "row order."),
+    ("mass_yso_survey", "M_STAR"): ("Msun",
+        "This template's stellar mass: the mass at which the BHAC15 1 Myr "
+        "track (or, above its 1.4 solar-mass top, the MIST v1.2 1 Myr "
+        "isochrone) has the template's own luminosity LOG10_L, floored at "
+        "0.1 solar masses (FLAG_BELOW_FLOOR) and capped at the MIST "
+        "track's own top (FLAG_ABOVE_TOP)."),
+    ("mass_yso_survey", "LOG10_L"): ("log10 Lsun",
+        "This template's own bolometric luminosity, from its radiative-"
+        "transfer grid, independent of any stellar-evolution track: "
+        "10**x is a luminosity in solar luminosities."),
+    ("mass_yso_survey", "T_EFF"): ("K",
+        "This template's own effective temperature, from its radiative-"
+        "transfer grid, stored for reference but not used to derive "
+        "M_STAR."),
+    ("mass_yso_survey", "SUBGRID"): ("subclass code",
+        "Which of the five YSO sub-grids this template belongs to: C0, "
+        "CI, CII, CIII or TD."),
+    ("mass_yso_survey", "FLAG_ABOVE_TOP"): ("boolean",
+        "True where this template's luminosity exceeds the MIST v1.2 1 "
+        "Myr isochrone's own top, so M_STAR is capped at that track's "
+        "highest tabulated mass rather than interpolated."),
+    ("mass_yso_survey", "FLAG_BELOW_FLOOR"): ("boolean",
+        "True where this template's luminosity implies a mass below the "
+        "Chabrier (2003) system IMF's own 0.1 solar-mass floor, so "
+        "M_STAR is set to that floor."),
+    ("mass_yso_survey", "FLAG_HIGH"): ("boolean",
+        "True where this template's mass was read from the MIST v1.2 1 "
+        "Myr isochrone (above the BHAC15 track's 1.4 solar-mass top) "
+        "rather than from the BHAC15 1 Myr track."),
+
     # population.gal -- counts_gal_survey: the background-galaxy number-
     # counts law, survey-wide.
     ("counts_gal_survey", "LOG10_A"): ("log10(deg^-2)",

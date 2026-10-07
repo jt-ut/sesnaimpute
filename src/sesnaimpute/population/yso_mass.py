@@ -29,9 +29,13 @@ import h5py
 import numpy as np
 from astropy.io import fits
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+
+_STEM = "mass_yso_survey"
 
 #: The five YSO sub-grids, in the pooled register's own row order
 #: (`yso_register.hdf5`'s `members/MEMBER_KEY`), with the `SUBCLASS`
@@ -269,14 +273,17 @@ def build(config, regions=None):
             f.attrs["N_ABOVE_TOP_HIGH"] = n_above_top_high
             f.attrs["N_BELOW_FLOOR"] = n_below_floor
             f.attrs["N_HIGH"] = n_high
-            f.create_dataset("MODEL_NAME", data=np.char.encode(reg_names, "utf-8"))
-            f.create_dataset("M_STAR", data=m_star.astype(np.float32))
-            f.create_dataset("LOG10_L", data=join_log_l.astype(np.float32))
-            f.create_dataset("T_EFF", data=join_teff.astype(np.float32))
-            f.create_dataset("SUBGRID", data=np.char.encode(join_label, "utf-8"))
-            f.create_dataset("FLAG_ABOVE_TOP", data=flag_above_top.astype(np.int8))
-            f.create_dataset("FLAG_BELOW_FLOOR", data=flag_below_floor.astype(np.int8))
-            f.create_dataset("FLAG_HIGH", data=flag_high.astype(np.int8))
+            for name, data in (
+                ("MODEL_NAME", np.char.encode(reg_names, "utf-8")),
+                ("M_STAR", m_star.astype(np.float32)),
+                ("LOG10_L", join_log_l.astype(np.float32)),
+                ("T_EFF", join_teff.astype(np.float32)),
+                ("SUBGRID", np.char.encode(join_label, "utf-8")),
+                ("FLAG_ABOVE_TOP", flag_above_top.astype(np.int8)),
+                ("FLAG_BELOW_FLOOR", flag_below_floor.astype(np.int8)),
+                ("FLAG_HIGH", flag_high.astype(np.int8)),
+            ):
+                build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
 
         q = np.percentile(m_star, [10, 50, 90, 99])
         st.done(out_path, n_register=n_register, m_top=m_top, m_top_high=m_top_high,
