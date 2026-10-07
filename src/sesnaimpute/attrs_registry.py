@@ -61,6 +61,185 @@ REGISTRY = {
         "90 the source's own 90%-completeness flux, 91 the median "
         "90%-completeness flux of its nearest sky neighbours."),
 
+    # sky.derived.column -- the adopted (gas) column and the extinction
+    # (star-light) column, each at source and sightline granule, plus the
+    # Herschel/Planck disagreement check.
+    ("column_adopted_source", "A_COL_K"): ("mag A_K",
+        "For every catalogued source of this region, the adopted dust-"
+        "column extinction: the Herschel arm's own A_K, its field's own "
+        "zero-point offset subtracted, where Herschel covers the source "
+        "and that value is finite and positive; the Planck arm's A_K "
+        "otherwise."),
+    ("column_adopted_source", "A_COL_SIG_K"): ("mag A_K",
+        "The 1-sigma uncertainty on A_COL_K, rebuilt from whichever arm's "
+        "own value was adopted: the Herschel arm's random term combined "
+        "with ZP_SIGMA_K in quadrature where Herschel was used, the "
+        "Planck arm's own uncertainty otherwise."),
+    ("column_adopted_source", "A_COL_PROVENANCE"): ("code",
+        "Which arm A_COL_K for this source came from: 0 Herschel, 1 "
+        "Planck."),
+    ("column_adopted_source", "A_COL_FWHM_ARCSEC"): ("arcsec",
+        "The beam size of whichever map A_COL_K for this source came "
+        "from: the Herschel Gould Belt Survey's 36.3 arcsec where "
+        "A_COL_PROVENANCE is 0, the measured Planck beam otherwise."),
+    ("column_adopted_source", "HERSCHEL_MAP_ID"): ("map index",
+        "For every catalogued source of this region, which map in this "
+        "file's own MAP_NAME list covers its position, as a position in "
+        "that list. -1 where A_COL_PROVENANCE is 1 (Planck)."),
+    ("column_adopted_source", "MAP_NAME"): ("map name",
+        "The file name of each HGBS column-density map that reaches some "
+        "part of this region, in the order HERSCHEL_MAP_ID indexes."),
+    ("column_adopted_source", "ZP_SIGMA_K"): ("mag A_K",
+        "For every catalogued source of this region, the uncertainty on "
+        "the Herschel field zero-point offset already subtracted from "
+        "A_COL_K: 0 where A_COL_PROVENANCE is 1 (Planck), or where the "
+        "source's own Herschel-covered region has no measured zero "
+        "point."),
+
+    ("extinction_adopted_source", "A_COL_K"): ("mag A_K",
+        "For every catalogued source of this region, the extinction a "
+        "star's own light passes through: the adopted dust column (this "
+        "package's column_adopted_source A_COL_K, re-derived here) "
+        "multiplied by this source's own F_EXTINCTION, which raises it to "
+        "match the Juvela & Montillaud (2016) star-colour map wherever "
+        "that map reads higher."),
+    ("extinction_adopted_source", "A_COL_SIG_K"): ("mag A_K",
+        "The adopted dust column's own 1-sigma uncertainty, multiplied by "
+        "the same F_EXTINCTION as A_COL_K."),
+    ("extinction_adopted_source", "A_COL_PROVENANCE"): ("code",
+        "Which arm the dust column A_COL_K is scaled from, before the "
+        "F_EXTINCTION correction: 0 Herschel, 1 Planck."),
+    ("extinction_adopted_source", "A_COL_FWHM_ARCSEC"): ("arcsec",
+        "The beam size of whichever map the dust column was taken from: "
+        "the Herschel Gould Belt Survey's 36.3 arcsec where "
+        "A_COL_PROVENANCE is 0, the measured Planck beam otherwise."),
+    ("extinction_adopted_source", "HERSCHEL_MAP_ID"): ("map index",
+        "For every catalogued source of this region, which map in this "
+        "file's own MAP_NAME list the dust column was read from, as a "
+        "position in that list. -1 where A_COL_PROVENANCE is 1 (Planck)."),
+    ("extinction_adopted_source", "MAP_NAME"): ("map name",
+        "The file name of each HGBS column-density map that reaches some "
+        "part of this region, in the order HERSCHEL_MAP_ID indexes."),
+    ("extinction_adopted_source", "ZP_SIGMA_K"): ("mag A_K",
+        "For every catalogued source of this region, the uncertainty on "
+        "the Herschel field zero-point offset already subtracted from the "
+        "dust column before scaling: 0 where A_COL_PROVENANCE is 1 "
+        "(Planck), or where the source's own Herschel-covered region has "
+        "no measured zero point."),
+    ("extinction_adopted_source", "F_EXTINCTION"): ("dimensionless",
+        "For every catalogued source of this region, the factor its "
+        "adopted dust column is multiplied by to form A_COL_K: at least "
+        "1, the ratio of the Juvela & Montillaud (2016) star-colour "
+        "extinction to the adopted dust column, averaged over the "
+        "source's own nside-1024 cell. 1 where that ratio is below 1, "
+        "since a star-colour map can read low but the emission map's own "
+        "dust cannot be reduced by it."),
+
+    ("column_adopted_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
+        "Every region's admitted nside-256 pixel numbers (nested "
+        "ordering), concatenated region by region. Row i here is row i of "
+        "A_K."),
+    ("column_adopted_sightline", "REGION_CODE"): ("region code",
+        "The region each pixel in HPX_PIX_256 belongs to, as the integer "
+        "code the granule map assigns that region (its REGION_CODE_AXIS, "
+        "where that dataset is present; otherwise its own region_code "
+        "table)."),
+    ("column_adopted_sightline", "A_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256, the adopted dust-column "
+        "extinction: the Herschel arm's block-averaged A_K where it "
+        "covers that pixel, the Planck sightline column's A_K otherwise."),
+    ("column_adopted_sightline", "SIGMA_A_K"): ("mag A_K",
+        "The 1-sigma uncertainty on A_K, from whichever arm was adopted "
+        "for that pixel: the Herschel sigma model (zero point, within-"
+        "beam and random terms) where Herschel was used, the Planck "
+        "sightline column's own uncertainty otherwise."),
+    ("column_adopted_sightline", "PROVENANCE"): ("code",
+        "Which arm A_K for the matching pixel came from: 0 Herschel, 1 "
+        "Planck."),
+
+    ("extinction_adopted_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
+        "Every region's admitted nside-256 pixel numbers (nested "
+        "ordering), concatenated region by region. Row i here is row i of "
+        "A_K."),
+    ("extinction_adopted_sightline", "REGION_CODE"): ("region code",
+        "The region each pixel in HPX_PIX_256 belongs to, as the integer "
+        "code the granule map assigns that region."),
+    ("extinction_adopted_sightline", "A_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256, the extinction a star's "
+        "own light passes through: this package's adopted sightline "
+        "column (column_adopted_sightline A_K) multiplied by F_EXTINCTION."),
+    ("extinction_adopted_sightline", "SIGMA_A_K"): ("mag A_K",
+        "The adopted sightline column's own 1-sigma uncertainty, "
+        "multiplied by the same F_EXTINCTION as A_K."),
+    ("extinction_adopted_sightline", "F_EXTINCTION"): ("dimensionless",
+        "For the matching pixel in HPX_PIX_256, the mean of its own "
+        "catalogued sources' per-source F_EXTINCTION factor (this "
+        "package's extinction_adopted_source F_EXTINCTION). 1 where the "
+        "pixel is admitted but carries no catalogued source, so the "
+        "adopted column passes through unscaled."),
+    ("extinction_adopted_sightline", "PROVENANCE"): ("code",
+        "Which arm the dust column before the F_EXTINCTION scaling came "
+        "from, carried unchanged from the adopted sightline column: 0 "
+        "Herschel, 1 Planck."),
+
+    ("column-check_adopted_survey", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
+        "The Herschel-covered admitted sightline pixel numbers (nested "
+        "ordering) this disagreement check is measured on, concatenated "
+        "region by region. Row i here is row i of A_HERSCHEL."),
+    ("column-check_adopted_survey", "REGION_CODE"): ("region code",
+        "The region each pixel in HPX_PIX_256 belongs to, as the integer "
+        "code the granule map assigns that region."),
+    ("column-check_adopted_survey", "A_HERSCHEL"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256, the Herschel arm's own "
+        "block-averaged K-band extinction."),
+    ("column-check_adopted_survey", "A_PLANCK"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256, the Planck arm's own "
+        "K-band extinction."),
+    ("column-check_adopted_survey", "A_MAP_EDGE"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256, the Edenhofer et al. "
+        "(2023) 3-D extinction map's own cumulative extinction at its "
+        "tabulated edge, before any far-field rescaling."),
+    ("column-check_adopted_survey", "A_HERSCHEL_QUARTILE_EDGES"): ("mag A_K",
+        "The five edges of the four quartile bins A_HERSCHEL is split "
+        "into for BIN_MAP_EDGE_RATIO_* and BIN_PLANCK_RATIO_*: bin g runs "
+        "from A_HERSCHEL_QUARTILE_EDGES[g] to [g+1]."),
+    ("column-check_adopted_survey", "BIN_MAP_EDGE_RATIO_MEDIAN"): ("dimensionless",
+        "For each of the four A_HERSCHEL quartile bins, the median, over "
+        "that bin's own pixels, of A_MAP_EDGE / A_HERSCHEL."),
+    ("column-check_adopted_survey", "BIN_MAP_EDGE_RATIO_P16"): ("dimensionless",
+        "The 16th percentile of the same ratio, same bins."),
+    ("column-check_adopted_survey", "BIN_MAP_EDGE_RATIO_P84"): ("dimensionless",
+        "The 84th percentile of the same ratio, same bins."),
+    ("column-check_adopted_survey", "BIN_PLANCK_RATIO_MEDIAN"): ("dimensionless",
+        "For each of the four A_HERSCHEL quartile bins, the median, over "
+        "that bin's own pixels, of A_PLANCK / A_HERSCHEL."),
+    ("column-check_adopted_survey", "BIN_PLANCK_RATIO_P16"): ("dimensionless",
+        "The 16th percentile of the same ratio, same bins."),
+    ("column-check_adopted_survey", "BIN_PLANCK_RATIO_P84"): ("dimensionless",
+        "The 84th percentile of the same ratio, same bins."),
+    ("column-check_adopted_survey", "REGION"): ("region name",
+        "Which region each row of REGION_MAP_EDGE_RATIO_* and "
+        "REGION_PLANCK_RATIO_* describes, in the order REGION_CODE_AXIS "
+        "gives."),
+    ("column-check_adopted_survey", "REGION_CODE_AXIS"): ("region code",
+        "The integer region code matching each entry of REGION."),
+    ("column-check_adopted_survey", "REGION_MAP_EDGE_RATIO_MEDIAN"): ("dimensionless",
+        "For the matching region in REGION, the median, over that "
+        "region's own Herschel-covered admitted pixels, of A_MAP_EDGE / "
+        "A_HERSCHEL."),
+    ("column-check_adopted_survey", "REGION_MAP_EDGE_RATIO_P16"): ("dimensionless",
+        "The 16th percentile of the same ratio, same regions."),
+    ("column-check_adopted_survey", "REGION_MAP_EDGE_RATIO_P84"): ("dimensionless",
+        "The 84th percentile of the same ratio, same regions."),
+    ("column-check_adopted_survey", "REGION_PLANCK_RATIO_MEDIAN"): ("dimensionless",
+        "For the matching region in REGION, the median, over that "
+        "region's own Herschel-covered admitted pixels, of A_PLANCK / "
+        "A_HERSCHEL."),
+    ("column-check_adopted_survey", "REGION_PLANCK_RATIO_P16"): ("dimensionless",
+        "The 16th percentile of the same ratio, same regions."),
+    ("column-check_adopted_survey", "REGION_PLANCK_RATIO_P84"): ("dimensionless",
+        "The 84th percentile of the same ratio, same regions."),
+
     # sky.derived.subbeam -- subbeam_herschel_region: how much the true
     # column varies within one Herschel beam, per region, plus the
     # column-conditional kernel and noise-separated structural mixture

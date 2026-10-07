@@ -54,13 +54,21 @@ import h5py
 import numpy as np
 from joblib import Parallel, delayed
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.sky.derived import planck_column
 from sesnaimpute.sky.derived import profile as profile_module
 from sesnaimpute.sky.derived.planck_source_column import _load_planck_calibration
+
+_COLUMN_SOURCE_STEM = "column_adopted_source"
+_EXTINCTION_SOURCE_STEM = "extinction_adopted_source"
+_COLUMN_SIGHTLINE_STEM = "column_adopted_sightline"
+_EXTINCTION_SIGHTLINE_STEM = "extinction_adopted_sightline"
+_CHECK_STEM = "column-check_adopted_survey"
 
 PROV_HERSCHEL = np.uint8(0)
 PROV_PLANCK = np.uint8(1)
@@ -170,13 +178,16 @@ def _build_one_region(config, region, cal, field_zp=None):
     name_bytes = np.array([(x if isinstance(x, bytes) else str(x).encode("utf-8")) for x in d["map_names"]])
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "source"
-        f.create_dataset("A_COL_K", data=d["a_col"].astype(np.float32))
-        f.create_dataset("A_COL_SIG_K", data=d["sig_col"].astype(np.float32))
-        f.create_dataset("A_COL_PROVENANCE", data=d["prov"])
-        f.create_dataset("A_COL_FWHM_ARCSEC", data=d["fwhm"])
-        f.create_dataset("HERSCHEL_MAP_ID", data=d["map_id"])
-        f.create_dataset("MAP_NAME", data=name_bytes)
-        f.create_dataset("ZP_SIGMA_K", data=d["zp_sigma_k"].astype(np.float32))
+        for name, data in (
+            ("A_COL_K", d["a_col"].astype(np.float32)),
+            ("A_COL_SIG_K", d["sig_col"].astype(np.float32)),
+            ("A_COL_PROVENANCE", d["prov"]),
+            ("A_COL_FWHM_ARCSEC", d["fwhm"]),
+            ("HERSCHEL_MAP_ID", d["map_id"]),
+            ("MAP_NAME", name_bytes),
+            ("ZP_SIGMA_K", d["zp_sigma_k"].astype(np.float32)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_COLUMN_SOURCE_STEM, name)])
     return region, d["n"], d["n_herschel"]
 
 
@@ -222,14 +233,17 @@ def _build_one_extinction_region(config, region, cal, field_zp=None):
     name_bytes = np.array([(x if isinstance(x, bytes) else str(x).encode("utf-8")) for x in d["map_names"]])
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "source"
-        f.create_dataset("A_COL_K", data=(d["a_col"] * factor).astype(np.float32))
-        f.create_dataset("A_COL_SIG_K", data=(d["sig_col"] * factor).astype(np.float32))
-        f.create_dataset("A_COL_PROVENANCE", data=d["prov"])
-        f.create_dataset("A_COL_FWHM_ARCSEC", data=d["fwhm"])
-        f.create_dataset("HERSCHEL_MAP_ID", data=d["map_id"])
-        f.create_dataset("MAP_NAME", data=name_bytes)
-        f.create_dataset("ZP_SIGMA_K", data=d["zp_sigma_k"].astype(np.float32))
-        f.create_dataset("F_EXTINCTION", data=factor.astype(np.float32))
+        for name, data in (
+            ("A_COL_K", (d["a_col"] * factor).astype(np.float32)),
+            ("A_COL_SIG_K", (d["sig_col"] * factor).astype(np.float32)),
+            ("A_COL_PROVENANCE", d["prov"]),
+            ("A_COL_FWHM_ARCSEC", d["fwhm"]),
+            ("HERSCHEL_MAP_ID", d["map_id"]),
+            ("MAP_NAME", name_bytes),
+            ("ZP_SIGMA_K", d["zp_sigma_k"].astype(np.float32)),
+            ("F_EXTINCTION", factor.astype(np.float32)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_EXTINCTION_SOURCE_STEM, name)])
     return region, d["n"], float(np.median(factor))
 
 
@@ -320,12 +334,15 @@ def build_extinction_sightline(config, stage=None):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as fh:
         fh.attrs["GRANULE"] = "sightline"
-        fh.create_dataset("HPX_PIX_256", data=pix)
-        fh.create_dataset("REGION_CODE", data=region_code)
-        fh.create_dataset("A_K", data=a_k.astype(np.float32))
-        fh.create_dataset("SIGMA_A_K", data=sig.astype(np.float32))
-        fh.create_dataset("F_EXTINCTION", data=f.astype(np.float32))
-        fh.create_dataset("PROVENANCE", data=prov_out)
+        for name, data in (
+            ("HPX_PIX_256", pix),
+            ("REGION_CODE", region_code),
+            ("A_K", a_k.astype(np.float32)),
+            ("SIGMA_A_K", sig.astype(np.float32)),
+            ("F_EXTINCTION", f.astype(np.float32)),
+            ("PROVENANCE", prov_out),
+        ):
+            build_module.write_dataset(fh, name, data, *REGISTRY[(_EXTINCTION_SIGHTLINE_STEM, name)])
 
     n = int(pix.size)
     print("column.build_extinction_sightline: %d sightline rows, %d regions, median f=%.3f"
@@ -458,11 +475,14 @@ def build_sightline(config, stage=None):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "sightline"
-        f.create_dataset("HPX_PIX_256", data=pix)
-        f.create_dataset("REGION_CODE", data=region_code)
-        f.create_dataset("A_K", data=a_col.astype(np.float32))
-        f.create_dataset("SIGMA_A_K", data=sig_col.astype(np.float32))
-        f.create_dataset("PROVENANCE", data=prov)
+        for name, data in (
+            ("HPX_PIX_256", pix),
+            ("REGION_CODE", region_code),
+            ("A_K", a_col.astype(np.float32)),
+            ("SIGMA_A_K", sig_col.astype(np.float32)),
+            ("PROVENANCE", prov),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_COLUMN_SIGHTLINE_STEM, name)])
 
     n = int(pix.size)
     n_h = int(np.count_nonzero(prov == PROV_HERSCHEL))
@@ -582,26 +602,29 @@ def build_column_check(config, stage=None):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "survey"
-        f.create_dataset("HPX_PIX_256", data=pix)
-        f.create_dataset("REGION_CODE", data=region_code)
-        f.create_dataset("A_HERSCHEL", data=a_herschel.astype(np.float32))
-        f.create_dataset("A_PLANCK", data=a_planck.astype(np.float32))
-        f.create_dataset("A_MAP_EDGE", data=a_edge.astype(np.float32))
-        f.create_dataset("A_HERSCHEL_QUARTILE_EDGES", data=q_edges)
-        f.create_dataset("BIN_MAP_EDGE_RATIO_MEDIAN", data=bin_map_med)
-        f.create_dataset("BIN_MAP_EDGE_RATIO_P16", data=bin_map_lo)
-        f.create_dataset("BIN_MAP_EDGE_RATIO_P84", data=bin_map_hi)
-        f.create_dataset("BIN_PLANCK_RATIO_MEDIAN", data=bin_planck_med)
-        f.create_dataset("BIN_PLANCK_RATIO_P16", data=bin_planck_lo)
-        f.create_dataset("BIN_PLANCK_RATIO_P84", data=bin_planck_hi)
-        f.create_dataset("REGION", data=region_names)
-        f.create_dataset("REGION_CODE_AXIS", data=region_code_axis)
-        f.create_dataset("REGION_MAP_EDGE_RATIO_MEDIAN", data=reg_map_med)
-        f.create_dataset("REGION_MAP_EDGE_RATIO_P16", data=reg_map_lo)
-        f.create_dataset("REGION_MAP_EDGE_RATIO_P84", data=reg_map_hi)
-        f.create_dataset("REGION_PLANCK_RATIO_MEDIAN", data=reg_planck_med)
-        f.create_dataset("REGION_PLANCK_RATIO_P16", data=reg_planck_lo)
-        f.create_dataset("REGION_PLANCK_RATIO_P84", data=reg_planck_hi)
+        for name, data in (
+            ("HPX_PIX_256", pix),
+            ("REGION_CODE", region_code),
+            ("A_HERSCHEL", a_herschel.astype(np.float32)),
+            ("A_PLANCK", a_planck.astype(np.float32)),
+            ("A_MAP_EDGE", a_edge.astype(np.float32)),
+            ("A_HERSCHEL_QUARTILE_EDGES", q_edges),
+            ("BIN_MAP_EDGE_RATIO_MEDIAN", bin_map_med),
+            ("BIN_MAP_EDGE_RATIO_P16", bin_map_lo),
+            ("BIN_MAP_EDGE_RATIO_P84", bin_map_hi),
+            ("BIN_PLANCK_RATIO_MEDIAN", bin_planck_med),
+            ("BIN_PLANCK_RATIO_P16", bin_planck_lo),
+            ("BIN_PLANCK_RATIO_P84", bin_planck_hi),
+            ("REGION", region_names),
+            ("REGION_CODE_AXIS", region_code_axis),
+            ("REGION_MAP_EDGE_RATIO_MEDIAN", reg_map_med),
+            ("REGION_MAP_EDGE_RATIO_P16", reg_map_lo),
+            ("REGION_MAP_EDGE_RATIO_P84", reg_map_hi),
+            ("REGION_PLANCK_RATIO_MEDIAN", reg_planck_med),
+            ("REGION_PLANCK_RATIO_P16", reg_planck_lo),
+            ("REGION_PLANCK_RATIO_P84", reg_planck_hi),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_CHECK_STEM, name)])
     return out_path
 
 
