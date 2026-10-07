@@ -15,7 +15,8 @@ from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.bmstp import grid, sample_gal
 from sesnaimpute.build import run
-from sesnaimpute.fittp import prior_reader
+from sesnaimpute.fittp import cascade, prior_reader
+from sesnaimpute.gutcolors import crisp
 
 CLASSES = tuple(c.code for c in definitions.CLASSES)
 #: 1,000 sampled sources per class for the blurred-shape normalisation
@@ -184,18 +185,91 @@ def _total_count_ratios(config, region):
     return ratios, total, shares
 
 
+def _verdict_by_count(verdict_idx, n_detected):
+    """`(11, 7)` verdict counts by detected-band count 2..8 (spec sec
+    7.3's first table, one column per count 2 through 8: SESNA's own
+    two-of-eight retention admits seven values)."""
+    table = np.zeros((len(crisp.LABELS), 7), dtype=np.int64)
+    for k in range(2, 9):
+        sel = n_detected == k
+        if sel.any():
+            table[:, k - 2] = np.bincount(verdict_idx[sel], minlength=len(crisp.LABELS))
+    return table
+
+
+def _verdict_vs_map_by_count(verdict_idx, map_class, n_detected, n_classes):
+    """`(7, 11, n_classes)`: sec 7.3's imputed-verdict-vs-MAP table, one
+    slice per detected-band count 2..8, so the two axes can still be
+    crossed with the count after the fact instead of only their region
+    total -- the summed-over-count table hides exactly the split sec 6.5
+    says matters, the cascade abstaining on every two-band source."""
+    table = np.zeros((7, len(crisp.LABELS), n_classes), dtype=np.int64)
+    for k in range(2, 9):
+        sel_k = n_detected == k
+        for ci in range(n_classes):
+            sel = sel_k & (map_class == ci)
+            if sel.any():
+                table[k - 2, :, ci] = np.bincount(verdict_idx[sel], minlength=len(crisp.LABELS))
+    return table
+
+
+def _yso_vs_pyso_by_count(cascade_yso, pyso_half, n_detected):
+    """`(7, 2, 2)`: sec 7.3's cascade-YSO-set-vs-`P(YSO)>0.5` table, one
+    2x2 slice per detected-band count 2..8, rows/cols `[not, yso]`."""
+    table = np.zeros((7, 2, 2), dtype=np.int64)
+    for k in range(2, 9):
+        sel = n_detected == k
+        table[k - 2, 0, 0] = int((sel & ~cascade_yso & ~pyso_half).sum())
+        table[k - 2, 0, 1] = int((sel & ~cascade_yso & pyso_half).sum())
+        table[k - 2, 1, 0] = int((sel & cascade_yso & ~pyso_half).sum())
+        table[k - 2, 1, 1] = int((sel & cascade_yso & pyso_half).sum())
+    return table
+
+
 def _cascade_confusion(config, region):
-    """P10's confusion attrs: `CONFUSION_MEASURED`/`CONFUSION_IMPUTED`
-    (verdict x detected-band-count 2-8) and, where the imputed half has
-    been filled in, `CONFUSION_VERDICT_VS_MAP` (verdict x MAP class)."""
+    """Section 7.3's four tables, computed here from P10's verdicts and
+    P8's `MAP_CLASS`/`P_YSO` rather than read off any stored attribute
+    (P10 stores the verdicts and their probabilities only, not a
+    diagnostic derived from them): the verdict-by-detected-band-count
+    table for the measured and the imputed half; the imputed verdict
+    against the MAP class; and the MEASURED verdict's YSO set
+    (`cascade.CONCORDANT_LABELS["YSO"]`) against `P(YSO) > 0.5`, both
+    by detected-band count. The last two are `None` where the imputed
+    half (`VERDICT_IMPUTED`) has not yet been written."""
     path = config_module.product_path(config, "fittp", "classification", "cascade", "source", region=region)
     _require(path, "sesnaimpute.fittp.cascade")
     with h5py.File(path, "r") as f:
-        measured = np.asarray(f.attrs["CONFUSION_MEASURED"])
-        imputed = np.asarray(f.attrs["CONFUSION_IMPUTED"]) if "CONFUSION_IMPUTED" in f.attrs else None
-        verdict_vs_map = np.asarray(f.attrs["CONFUSION_VERDICT_VS_MAP"]) if "CONFUSION_VERDICT_VS_MAP" in f.attrs else None
+        name = f["NAME"][:]
+        n_detected = f["N_DETECTED"][:]
+        verdict_measured = f["VERDICT_MEASURED"][:]
+        verdict_imputed = f["VERDICT_IMPUTED"][:] if "VERDICT_IMPUTED" in f else None
         labels = [l.decode() for l in f.attrs["LABELS"]]
-    return labels, measured, imputed, verdict_vs_map
+
+    verdict_idx_measured = crisp.labels_from_class(verdict_measured)
+    measured_table = _verdict_by_count(verdict_idx_measured, n_detected)
+
+    yso_label_idx = [crisp.LABEL_INDEX[lab] for lab in cascade.CONCORDANT_LABELS["YSO"]]
+    cascade_yso = np.isin(verdict_measured, crisp.CLASS_CODE[yso_label_idx])
+
+    imputed_table = verdict_vs_map = yso_vs_pyso = None
+    if verdict_imputed is not None:
+        verdict_idx_imputed = crisp.labels_from_class(verdict_imputed)
+        imputed_table = _verdict_by_count(verdict_idx_imputed, n_detected)
+
+        post_path = config_module.product_path(
+            config, "fittp", "classification", "posterior", "source", region=region)
+        _require(post_path, "sesnaimpute.fittp.classify")
+        with h5py.File(post_path, "r") as pf:
+            post_name = pf["NAME"][:]
+            map_class = pf["MAP_CLASS"][:]
+            p_yso = pf["P_YSO"][:]
+        if not np.array_equal(post_name, name):
+            raise ValueError("fittp.check [%s]: classify's NAME does not row-align "
+                              "with the cascade's own" % region)
+        verdict_vs_map = _verdict_vs_map_by_count(verdict_idx_imputed, map_class, n_detected, len(CLASSES))
+        yso_vs_pyso = _yso_vs_pyso_by_count(cascade_yso, p_yso > 0.5, n_detected)
+
+    return labels, measured_table, imputed_table, verdict_vs_map, yso_vs_pyso
 
 
 def _prior_vs_posterior_share(config, region, prior_shares):
@@ -223,8 +297,8 @@ def build(config, regions=None):
     template-weight normalisation, the Occam gap, the two-band fraction
     beside the `P(YSO) > 0.5` count, the zero-extinction fraction, the
     literature-band sensitivity (P9), the total-count ratios (P6), the
-    cascade confusion (P10), and P6's prior share against P11's posterior
-    share."""
+    cascade confusion computed from P10 and P8 (section 7.3's four
+    tables), and P6's prior share against P11's posterior share."""
     regions = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     with progress.Stage("fittp.check") as st:
         for region in regions:
@@ -250,13 +324,18 @@ def build(config, regions=None):
             ratios, total, shares = _total_count_ratios(config, region)
             print("fittp.check [%s]: total-count ratios per class %s, total %.4g"
                   % (region, ratios, total), flush=True)
-            labels, confusion_measured, confusion_imputed, confusion_vs_map = _cascade_confusion(config, region)
+            labels, confusion_measured, confusion_imputed, confusion_vs_map, confusion_yso = \
+                _cascade_confusion(config, region)
             print("fittp.check [%s]: cascade confusion by detected-band count (rows=labels %s, "
                   "cols=2..8) measured:\n%s\nimputed:\n%s" % (region, labels, confusion_measured,
                                                                confusion_imputed), flush=True)
             if confusion_vs_map is not None:
-                print("fittp.check [%s]: cascade verdict vs MAP class (rows=labels, cols=%s):\n%s"
+                print("fittp.check [%s]: cascade verdict (imputed) vs MAP class, by detected-band "
+                      "count 2..8 (rows=labels, cols=%s):\n%s"
                       % (region, CLASSES, confusion_vs_map), flush=True)
+                print("fittp.check [%s]: MEASURED-verdict cascade YSO set vs P(YSO)>0.5, by "
+                      "detected-band count 2..8 [[not-not, not-yso],[cascade-not, cascade-yso]]:"
+                      "\n%s" % (region, confusion_yso), flush=True)
             share = _prior_vs_posterior_share(config, region, shares)
             print("fittp.check [%s]: prior share vs posterior share per class (mean over pixels): %s"
                   % (region, share), flush=True)
