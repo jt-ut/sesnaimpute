@@ -99,25 +99,24 @@ def write_region(path, result):
         f.create_dataset("N_YSO_ABOVE_HALF", data=result["n_yso_half"])
         readings = {
             "HPX_PIX_512": ("HEALPix pixel number",
-                             "The patch of sky this row describes, as a HEALPix pixel number at "
-                             "nside 512, about 7 arcminutes across, in the nested numbering "
-                             "scheme."),
+                             "The patch of sky this row describes: a HEALPix pixel at "
+                             "nside 512, about 7 arcminutes across, nested numbering."),
             "N_SOURCES": ("sources",
-                           "How many catalog sources fall in this patch of sky. Where the count "
-                           "is zero the mean probabilities for the patch are not numbers."),
+                           "How many catalog sources fall in this patch. Where it is zero "
+                           "the mean probabilities are not numbers."),
             "N_YSO_ABOVE_HALF": ("sources",
-                                   "How many sources in this patch have a probability above one "
-                                   "half of being a young stellar object."),
+                                   "How many sources in this patch have a young stellar "
+                                   "object probability above one half."),
         }
         _CLASS_WORDS = {"STAR": "a field star", "AGB": "a dusty evolved star",
-                        "PAHC": "an aperture contaminated by nebular emission",
+                        "PAHC": "a nebula-contaminated aperture",
                         "GAL": "a background galaxy", "YSO": "a young stellar object",
-                        "H2S": "a knot of shocked gas"}
+                        "H2S": "a shocked gas knot"}
         for cls in CLASSES:
             readings["MEAN_P_%s" % cls] = (
                 "probability",
-                "The average probability, over the sources in this patch of sky, that a source "
-                "is %s." % _CLASS_WORDS[cls])
+                "Average probability over this patch's sources that a source is %s."
+                % _CLASS_WORDS[cls])
         set_readings(f, readings)
         f.attrs["GRANULE"] = "hpx512"
         f.attrs["CLASSES"] = np.array(CLASSES, dtype="S8")
