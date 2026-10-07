@@ -61,6 +61,145 @@ REGISTRY = {
         "90 the source's own 90%-completeness flux, 91 the median "
         "90%-completeness flux of its nearest sky neighbours."),
 
+    # sky.derived.subbeam -- subbeam_herschel_region: how much the true
+    # column varies within one Herschel beam, per region, plus the
+    # column-conditional kernel and noise-separated structural mixture
+    # the column prior's evaluator reads at an arbitrary beam.
+    ("subbeam_herschel_region", "REGION"): ("region name",
+        "Which Herschel-covered region each row of every other dataset in "
+        "this file describes. Only regions with HGBS coverage appear; "
+        "this is not the fixed thirty-region table."),
+    ("subbeam_herschel_region", "SCALES"): ("arcsec",
+        "The beam sizes of the two-scale increment ladder every region's "
+        "COND_QUANTILES row is measured at, shared by every region in "
+        "this file."),
+    ("subbeam_herschel_region", "QS"): ("dimensionless",
+        "The seven probability levels (0.01, 0.05, 0.16, 0.50, 0.84, 0.95, "
+        "0.99) COND_QUANTILES is tabulated at."),
+    ("subbeam_herschel_region", "BETA"): ("dimensionless",
+        "The fitted power-law index beta of this region's true-column "
+        "power spectrum P(k) ~ k^-beta, from its own beam-ladder two-scale "
+        "increments."),
+    ("subbeam_herschel_region", "BETA_BOOT_P16"): ("dimensionless",
+        "The 16th percentile of BETA over 200 block-bootstrap resamples of "
+        "this region's own 512-arcsec tiles: the fit's own lower sampling "
+        "bound."),
+    ("subbeam_herschel_region", "BETA_BOOT_P84"): ("dimensionless",
+        "The 84th percentile of BETA over the same 200 block-bootstrap "
+        "resamples: the fit's own upper sampling bound."),
+    ("subbeam_herschel_region", "W_ABS_36P3"): ("dimensionless (ln column ratio)",
+        "The median, over the same 200 bootstrap resamples, of the "
+        "absolute pencil-to-beam width of true column at the HGBS map's "
+        "own 36.3 arcsec beam, in natural-log column units."),
+    ("subbeam_herschel_region", "W_ABS_L108"): ("dimensionless (ln column ratio)",
+        "The same absolute pencil-to-beam width at a 108 arcsec beam."),
+    ("subbeam_herschel_region", "W_ABS_L302"): ("dimensionless (ln column ratio)",
+        "The same absolute pencil-to-beam width at a 301.8 arcsec beam "
+        "(Planck's own measured beam)."),
+    ("subbeam_herschel_region", "W_ABS_L821"): ("dimensionless (ln column ratio)",
+        "The same absolute pencil-to-beam width at an 821 arcsec beam "
+        "(the extinction-profile grid's nside-256 pixel scale)."),
+    ("subbeam_herschel_region", "COMPLETION_L108"): ("dimensionless",
+        "W_ABS_L108 divided by the two-scale width actually measured "
+        "between the map's own beam and 108 arcsec: how much of the "
+        "absolute pencil-to-beam width at 108 arcsec is directly measured "
+        "rather than model extrapolation."),
+    ("subbeam_herschel_region", "COMPLETION_L302"): ("dimensionless",
+        "The same completion fraction at 301.8 arcsec."),
+    ("subbeam_herschel_region", "COMPLETION_L821"): ("dimensionless",
+        "The same completion fraction at 821 arcsec."),
+    ("subbeam_herschel_region", "RESCALE_EXPONENT"): ("dimensionless",
+        "(BETA - 2) / 2: the exponent that rescales the absolute "
+        "pencil-to-beam width from one beam size to another under this "
+        "region's fitted power spectrum."),
+    ("subbeam_herschel_region", "OFFSET_EXPONENT"): ("dimensionless",
+        "The power-law exponent p of the two-scale distribution's median "
+        "offset from zero, offset(L) = -c*L^p, fit through the measured "
+        "median offsets at 301.8 and 821 arcsec (c itself is not stored)."),
+    ("subbeam_herschel_region", "N_FIT"): ("pairs",
+        "How many measured beam pairs at or above 108 arcsec went into "
+        "this region's held-out-scale validation fit."),
+    ("subbeam_herschel_region", "N_PRED"): ("pairs",
+        "How many finer, held-out beam pairs the validation fit's own "
+        "prediction (RMS_PRED_DEX) was checked against."),
+    ("subbeam_herschel_region", "RMS_PRED_DEX"): ("dex",
+        "The root-mean-square error, in dex, of the held-out-scale "
+        "validation: the fit from N_FIT's own coarse pairs predicting "
+        "N_PRED's own finer pairs."),
+    ("subbeam_herschel_region", "COND_QUANTILES"): ("dimensionless (ln column ratio)",
+        "For every region, every beam size in SCALES and every "
+        "probability level in QS, the quantile of d = ln(A at the map's "
+        "native beam) - ln(A at that ladder beam), the two-scale "
+        "increment this region's power-spectrum fit is measured from."),
+    ("subbeam_herschel_region", "KA_EDGES"): ("ln(mag A_K)",
+        "The edges of the natural-log column bins the COND_KERNEL_* "
+        "histograms' first axis runs over."),
+    ("subbeam_herschel_region", "KD_EDGES"): ("dimensionless (ln column ratio)",
+        "The edges of the two-scale increment d's own bins, the "
+        "COND_KERNEL_* histograms' second axis."),
+    ("subbeam_herschel_region", "COND_KERNEL_L108"): ("counts",
+        "For every region, the 2-D histogram of ln(true column) (KA_EDGES) "
+        "against the two-scale increment d to a 108 arcsec beam "
+        "(KD_EDGES), summed over that region's own HGBS maps: the column-"
+        "conditional kernel at 108 arcsec."),
+    ("subbeam_herschel_region", "COND_KERNEL_L302"): ("counts",
+        "The same column-conditional kernel at a 301.8 arcsec beam "
+        "(Planck's own measured beam)."),
+    ("subbeam_herschel_region", "COND_KERNEL_L821"): ("counts",
+        "The same column-conditional kernel at an 821 arcsec beam (the "
+        "extinction-profile grid's nside-256 pixel scale)."),
+    ("subbeam_herschel_region", "MIX_W"): ("dimensionless",
+        "For every region, beam (108, 301.8, 821 arcsec) and column bin of "
+        "MIX_KA_CENTRES with at least 200 counts, the mixing weight of the "
+        "first of two Gaussian components in the noise-separated "
+        "structural mixture fit to that bin's own column-conditional "
+        "kernel, after deconvolving the fine map's own noise "
+        "(FINE_MAP_NOISE_K). NaN where that bin had too few counts."),
+    ("subbeam_herschel_region", "MIX_MU1"): ("dimensionless (ln column ratio)",
+        "The mean of the mixture's first Gaussian component, same "
+        "indexing and NaN condition as MIX_W."),
+    ("subbeam_herschel_region", "MIX_MU2"): ("dimensionless (ln column ratio)",
+        "The mean of the mixture's second Gaussian component, same "
+        "indexing and NaN condition as MIX_W."),
+    ("subbeam_herschel_region", "MIX_SIG1"): ("dimensionless (ln column ratio)",
+        "The standard deviation of the mixture's first Gaussian "
+        "component, same indexing and NaN condition as MIX_W."),
+    ("subbeam_herschel_region", "MIX_SIG2"): ("dimensionless (ln column ratio)",
+        "The standard deviation of the mixture's second Gaussian "
+        "component, same indexing and NaN condition as MIX_W."),
+    ("subbeam_herschel_region", "MIX_MAX_CDF_ERR"): ("dimensionless",
+        "The largest absolute difference, over the fitted histogram's own "
+        "bins, between the noise-convolved mixture model's CDF and the "
+        "observed CDF: this fit's own worst-case goodness-of-fit error, "
+        "same indexing and NaN condition as MIX_W."),
+    ("subbeam_herschel_region", "MIX_KA_CENTRES"): ("ln(mag A_K)",
+        "The centre of each natural-log column bin MIX_W and the other "
+        "MIX_* datasets' last axis runs over: the midpoints of KA_EDGES."),
+    ("subbeam_herschel_region", "FINE_MAP_NOISE_K"): ("mag A_K",
+        "For every region, the estimated standard deviation of the "
+        "36.3 arcsec HGBS map's own additive noise, in A_K units, from the "
+        "lowest well-populated column bin of its 108 arcsec conditional "
+        "histogram."),
+    ("subbeam_herschel_region", "MIX_POOLED_W"): ("dimensionless",
+        "The same mixing weight as MIX_W, fit once per beam and column "
+        "bin on every region's counts pooled together, rather than "
+        "per region."),
+    ("subbeam_herschel_region", "MIX_POOLED_MU1"): ("dimensionless (ln column ratio)",
+        "The same first-component mean as MIX_MU1, from the survey-pooled "
+        "fit."),
+    ("subbeam_herschel_region", "MIX_POOLED_MU2"): ("dimensionless (ln column ratio)",
+        "The same second-component mean as MIX_MU2, from the survey-pooled "
+        "fit."),
+    ("subbeam_herschel_region", "MIX_POOLED_SIG1"): ("dimensionless (ln column ratio)",
+        "The same first-component standard deviation as MIX_SIG1, from the "
+        "survey-pooled fit."),
+    ("subbeam_herschel_region", "MIX_POOLED_SIG2"): ("dimensionless (ln column ratio)",
+        "The same second-component standard deviation as MIX_SIG2, from "
+        "the survey-pooled fit."),
+    ("subbeam_herschel_region", "MIX_POOLED_MAX_CDF_ERR"): ("dimensionless",
+        "The same worst-case goodness-of-fit error as MIX_MAX_CDF_ERR, "
+        "from the survey-pooled fit."),
+
     # sky.derived.planck_column -- calibration_planck_survey (survey-wide
     # tau353-to-A_K calibration) and column_planck_sightline (per nside-256
     # pixel): the Planck arm of the extinction column.

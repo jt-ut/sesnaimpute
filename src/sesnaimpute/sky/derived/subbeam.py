@@ -47,11 +47,15 @@ from scipy import fft as sfft
 from scipy import optimize
 from scipy.special import ndtr
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.sky.derived.herschel_column import _map_header
 from sesnaimpute.sky.download.herschel_hgbs.build import _FILES as HGBS_FILES
+
+_STEM = "subbeam_herschel_region"
 
 #: N(H2) -> A_K, ZGR23 (matches sesnaimpute.sky.derived.column's own use).
 AK_PER_NH2 = 1.12e-22
@@ -637,24 +641,28 @@ def build(config, regions=None):
                            N_PRED="n_pred", RMS_PRED_DEX="rms_pred_dex")
         with h5py.File(out_path, "w") as fh:
             fh.attrs["GRANULE"] = "region"
-            fh.create_dataset("REGION", data=np.array([r.encode("utf-8") for r in regs]))
-            fh.create_dataset("SCALES", data=scales)
-            fh.create_dataset("QS", data=np.array(QS))
+            build_module.write_dataset(fh, "REGION", np.array([r.encode("utf-8") for r in regs]),
+                                        *REGISTRY[(_STEM, "REGION")])
+            build_module.write_dataset(fh, "SCALES", scales, *REGISTRY[(_STEM, "SCALES")])
+            build_module.write_dataset(fh, "QS", np.array(QS), *REGISTRY[(_STEM, "QS")])
             for name, key in scalar_cols.items():
-                fh.create_dataset(name, data=np.array([per_region[r][key] for r in regs]))
-            fh.create_dataset("COND_QUANTILES",
-                              data=np.array([per_region[r]["quantiles"] for r in regs]))
+                build_module.write_dataset(fh, name, np.array([per_region[r][key] for r in regs]),
+                                            *REGISTRY[(_STEM, name)])
+            build_module.write_dataset(
+                fh, "COND_QUANTILES", np.array([per_region[r]["quantiles"] for r in regs]),
+                *REGISTRY[(_STEM, "COND_QUANTILES")])
             # The column-conditional kernel `prior/kernel.py` evaluates: the
             # 2-D KA (log column) x KD (log ratio) count histogram `kern`,
             # summed over this region's maps, at each of the three tabulated
             # beams. KA_EDGES/KD_EDGES are the shared axes (K_A_EDGES/K_D_EDGES
             # above); K_A_EDGES is already in ln(column).
-            fh.create_dataset("KA_EDGES", data=K_A_EDGES)
-            fh.create_dataset("KD_EDGES", data=K_D_EDGES)
+            build_module.write_dataset(fh, "KA_EDGES", K_A_EDGES, *REGISTRY[(_STEM, "KA_EDGES")])
+            build_module.write_dataset(fh, "KD_EDGES", K_D_EDGES, *REGISTRY[(_STEM, "KD_EDGES")])
             for lab in ("L108", "L302", "L821"):
-                fh.create_dataset("COND_KERNEL_%s" % lab,
-                                  data=np.array([per_region[r]["kern_%s" % lab]
-                                                for r in regs]))
+                name = "COND_KERNEL_%s" % lab
+                build_module.write_dataset(
+                    fh, name, np.array([per_region[r]["kern_%s" % lab] for r in regs]),
+                    *REGISTRY[(_STEM, name)])
         print("subbeam: wrote %s (%.2f MB)"
               % (out_path, os.path.getsize(out_path) / 1e6), flush=True)
         _write_mixture_datasets(out_path)
@@ -865,20 +873,15 @@ def _write_mixture_datasets(out_path):
                      "MIX_POOLED_SIG1", "MIX_POOLED_SIG2", "MIX_POOLED_MAX_CDF_ERR"):
             if name in fh:
                 del fh[name]
-        fh.create_dataset("MIX_W", data=W)
-        fh.create_dataset("MIX_MU1", data=MU1)
-        fh.create_dataset("MIX_MU2", data=MU2)
-        fh.create_dataset("MIX_SIG1", data=S1)
-        fh.create_dataset("MIX_SIG2", data=S2)
-        fh.create_dataset("MIX_MAX_CDF_ERR", data=ERR)
-        fh.create_dataset("MIX_KA_CENTRES", data=ka_cent)
-        fh.create_dataset("FINE_MAP_NOISE_K", data=fine_noise)
-        fh.create_dataset("MIX_POOLED_W", data=PW)
-        fh.create_dataset("MIX_POOLED_MU1", data=PMU1)
-        fh.create_dataset("MIX_POOLED_MU2", data=PMU2)
-        fh.create_dataset("MIX_POOLED_SIG1", data=PS1)
-        fh.create_dataset("MIX_POOLED_SIG2", data=PS2)
-        fh.create_dataset("MIX_POOLED_MAX_CDF_ERR", data=PERR)
+        for name, data in (
+            ("MIX_W", W), ("MIX_MU1", MU1), ("MIX_MU2", MU2),
+            ("MIX_SIG1", S1), ("MIX_SIG2", S2), ("MIX_MAX_CDF_ERR", ERR),
+            ("MIX_KA_CENTRES", ka_cent), ("FINE_MAP_NOISE_K", fine_noise),
+            ("MIX_POOLED_W", PW), ("MIX_POOLED_MU1", PMU1), ("MIX_POOLED_MU2", PMU2),
+            ("MIX_POOLED_SIG1", PS1), ("MIX_POOLED_SIG2", PS2),
+            ("MIX_POOLED_MAX_CDF_ERR", PERR),
+        ):
+            build_module.write_dataset(fh, name, data, *REGISTRY[(_STEM, name)])
     print("subbeam: wrote mixture fit datasets (per-region and pooled) to %s"
           % out_path, flush=True)
 
