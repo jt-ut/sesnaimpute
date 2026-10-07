@@ -36,10 +36,14 @@ import healpy as hp
 import numpy as np
 from astropy.io import fits
 
+from sesnaimpute import build as build_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.config import product_path
 from sesnaimpute.sky.derived import profile as profile_module
+
+_STEM = "profile-sigma-samples_edenhofer_sightline"
 
 SAMPLES_INNER_NAME = "samples_healpix.fits"
 SAMPLES_OUTER_NAME = "validation_with_less_data_but_2kpc_samples_healpix.fits"
@@ -312,10 +316,13 @@ def _build_one_region(config, region, region_pixels, union_pixels, union_inner, 
         f.attrs["GRANULE"] = "sightline"
         if ratio_splice is not None:
             f.attrs["RATIO_SPLICED"] = ratio_splice
-        f.create_dataset("HPX_PIX_256", data=region_pixels)
-        f.create_dataset("DIST_PC", data=dist_pc)
-        f.create_dataset("SIGMA_SAMPLES_K", data=sigma_samples)
-        f.create_dataset("SIGMA_RATIO_SAMPLES", data=sigma_ratio_samples.astype(np.float32))
+        for name, data in (
+            ("HPX_PIX_256", region_pixels),
+            ("DIST_PC", dist_pc),
+            ("SIGMA_SAMPLES_K", sigma_samples),
+            ("SIGMA_RATIO_SAMPLES", sigma_ratio_samples.astype(np.float32)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
 
     return dict(region=region, max_rel_diff=max_rel_diff, med_cor=med_cor, med_unc=med_unc, med_narrow=med_narrow)
 

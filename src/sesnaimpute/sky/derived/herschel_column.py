@@ -40,11 +40,16 @@ from astropy.wcs import WCS
 from joblib import Parallel, delayed
 from scipy.ndimage import binary_erosion
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.sky.download.herschel_hgbs.build import _FILES as HGBS_FILES
+
+_SIGMA_STEM = "sigma_herschel_survey"
+_COLUMN_STEM = "column_herschel_source"
 
 #: `_pair_native` holds two full-resolution HGBS maps at once (up to
 #: 22,500x13,000 float32, ~1.17 GB each) plus their eroded masks --
@@ -263,12 +268,15 @@ def _write_sigma_survey(config, maps, header_by_name, sig):
                       for n in names], dtype=np.float32)
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "survey"
-        f.create_dataset("MAP_NAME", data=np.array([n.encode("utf-8") for n in names]))
-        f.create_dataset("BEAM_FWHM_ARCSEC", data=fwhm)
-        f.create_dataset("SIGMA_ZP_K", data=np.float64(sig["sig_zp_ak"]))
-        f.create_dataset("C0", data=np.float64(sig["rand_c0"]))
-        f.create_dataset("C1", data=np.float64(sig["rand_c1"]))
-        f.create_dataset("N_PAIRS", data=np.int64(sig["n_pairs"]))
+        for name, data in (
+            ("MAP_NAME", np.array([n.encode("utf-8") for n in names])),
+            ("BEAM_FWHM_ARCSEC", fwhm),
+            ("SIGMA_ZP_K", np.float64(sig["sig_zp_ak"])),
+            ("C0", np.float64(sig["rand_c0"])),
+            ("C1", np.float64(sig["rand_c1"])),
+            ("N_PAIRS", np.int64(sig["n_pairs"])),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_SIGMA_STEM, name)])
 
 #: Below this Planck-arm column, the two arms' disagreement is dominated
 #: by Herschel's additive zero point rather than the tau353 calibration's
@@ -346,11 +354,14 @@ def write_field_zeropoint(config):
         for ds in ("FIELD_NAME", "ZP_FIELD", "ZP_SIGMA_FIELD", "ZP_N_FIELD", "SIGMA_ZP_K"):
             if ds in f:
                 del f[ds]
-        f.create_dataset("FIELD_NAME", data=np.array([n.encode("utf-8") for n in names]))
-        f.create_dataset("ZP_FIELD", data=zp)
-        f.create_dataset("ZP_SIGMA_FIELD", data=zp_sigma)
-        f.create_dataset("ZP_N_FIELD", data=n_field)
-        f.create_dataset("SIGMA_ZP_K", data=np.float64(sigma_zp_survey))
+        for name, data in (
+            ("FIELD_NAME", np.array([n.encode("utf-8") for n in names])),
+            ("ZP_FIELD", zp),
+            ("ZP_SIGMA_FIELD", zp_sigma),
+            ("ZP_N_FIELD", n_field),
+            ("SIGMA_ZP_K", np.float64(sigma_zp_survey)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_SIGMA_STEM, name)])
 
     print("herschel_column FIELD_ZP n_fields=%d cut=A_PLANCK<%.2f sigma_zp_survey_rms=%.4f (was single "
           "two-pair constant)" % (len(names), FIELD_ZP_LOW_COLUMN_CUT_AK, sigma_zp_survey), flush=True)
@@ -414,13 +425,16 @@ def _write_region(config, region, a_k, sig_a_k, sig_rand, sig_zp, covered, map_i
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "source"
-        f.create_dataset("A_K", data=a_k.astype(np.float32))
-        f.create_dataset("SIGMA_A_K", data=sig_a_k.astype(np.float32))
-        f.create_dataset("SIGMA_RAND_K", data=sig_rand.astype(np.float32))
-        f.create_dataset("SIGMA_ZP_K", data=sig_zp.astype(np.float32))
-        f.create_dataset("COVERED", data=covered)
-        f.create_dataset("MAP_ID", data=map_id.astype(np.int32))
-        f.create_dataset("MAP_NAME", data=np.array([n.encode("utf-8") for n in map_names]))
+        for name, data in (
+            ("A_K", a_k.astype(np.float32)),
+            ("SIGMA_A_K", sig_a_k.astype(np.float32)),
+            ("SIGMA_RAND_K", sig_rand.astype(np.float32)),
+            ("SIGMA_ZP_K", sig_zp.astype(np.float32)),
+            ("COVERED", covered),
+            ("MAP_ID", map_id.astype(np.int32)),
+            ("MAP_NAME", np.array([n.encode("utf-8") for n in map_names])),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_COLUMN_STEM, name)])
 
 def build(config, regions=None):
     """`sigma`/`survey` (beam FWHM and the SIG_ZP/SIG_RAND model, fit over

@@ -41,7 +41,10 @@ from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.granules import access
+
+_STEM = "counts_ukidss_hpx512"
 
 NSIDE = 512
 
@@ -119,9 +122,12 @@ def _write_region(config, region, pixels, n):
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "hpx512"
         f.attrs["N_SOURCES"] = int(n.sum())
-        f.create_dataset("HPX_PIX_512", data=pixels.astype(np.int64))
-        f.create_dataset("MAG_EDGES", data=MAG_EDGES.astype(np.float64))
-        f.create_dataset("N", data=n.astype(np.int64))
+        for name, data in (
+            ("HPX_PIX_512", pixels.astype(np.int64)),
+            ("MAG_EDGES", MAG_EDGES.astype(np.float64)),
+            ("N", n.astype(np.int64)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
 
 
 def build(config, regions=None):

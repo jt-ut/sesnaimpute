@@ -50,14 +50,18 @@ from astropy.wcs import WCS
 import astropy.units as u
 from joblib import Parallel, delayed
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import kernel as kernel_module
 from sesnaimpute.sky.derived import herschel_column as sky_herschel_column
 from sesnaimpute.sky.derived import planck_column as sky_planck_column
+
+_SHAPE_STEM = "prior_yso_sightline"
 
 # ====================================================================
 # 6.1 -- the law count
@@ -659,9 +663,12 @@ def _write_shape_product(path, hpx_pix_256, embed):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "sightline"
-        f.create_dataset("HPX_PIX_256", data=hpx_pix_256)
-        f.create_dataset("XI_EDGES", data=embed["xi_edges"])
-        f.create_dataset("P_XI", data=embed["p_u"])
+        for name, data in (
+            ("HPX_PIX_256", hpx_pix_256),
+            ("XI_EDGES", embed["xi_edges"]),
+            ("P_XI", embed["p_u"]),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_SHAPE_STEM, name)])
 
 
 def build_shape(config, region):

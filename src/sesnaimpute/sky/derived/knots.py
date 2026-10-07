@@ -67,7 +67,9 @@ import numpy as np
 import pandas as pd
 from bs4 import BeautifulSoup
 
+from sesnaimpute import build as build_module
 from sesnaimpute import progress as progress_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.config import product_path
 
@@ -415,39 +417,22 @@ def _write_uwish2_images(config, data):
         f.attrs["GRANULE"] = "survey"
         f.attrs["IMAGE_SIDE_ARCMIN"] = UWISH2_IMAGE_SIDE_ARCMIN
         f.attrs["N_IMAGES"] = int(data["TILE"].size)
+        stem = "uwish2_images_knots_survey"
         for name, arr in data.items():
-            f.create_dataset(name, data=arr)
+            build_module.write_dataset(f, name, arr, *REGISTRY[(stem, name)])
     return out_path
 
 
 # ----------------------------------------------------------------- writers
 
-_UNITS = {
-    "SIZE_ARCSEC2": "arcsec^2",
-    "FLUX_2P12_MJY": "mJy", "FLUX_ERR_2P12_MJY": "mJy",
-    "FLUX_I1_MJY": "mJy", "FLUX_ERR_I1_MJY": "mJy",
-    "FLUX_I2_MJY": "mJy", "FLUX_ERR_I2_MJY": "mJy",
-    "FLUX_I3_MJY": "mJy", "FLUX_ERR_I3_MJY": "mJy",
-    "FLUX_I4_MJY": "mJy", "FLUX_ERR_I4_MJY": "mJy",
-    "LUMINOSITY_IRAC_1E-2LSUN": "1e-2 Lsun", "LUMINOSITY_2P12_1E-2LSUN": "1e-2 Lsun",
-    "TANGENTIAL_VELOCITY_KM_S": "km/s", "POSITION_ANGLE_DEG": "deg",
-    "RA_DEG": "deg", "DEC_DEG": "deg",
-    "AREA_ARCSEC2": "arcsec^2", "RADIUS_ARCSEC": "arcsec",
-    "SURFACE_BRIGHTNESS_MEDIAN_1E-19_W_M2_ARCSEC2": "1e-19 W m^-2 arcsec^-2",
-    "SURFACE_BRIGHTNESS_MAX_1E-19_W_M2_ARCSEC2": "1e-19 W m^-2 arcsec^-2",
-    "TOTAL_FLUX_1E-19_W_M2": "1e-19 W m^-2",
-}
-
-
 def _write_survey(config, survey, data):
     out_path = product_path(config, "sky/derived", "knots", survey, "survey")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    stem = f"{survey}_knots_survey"
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "survey"
         for name, arr in data.items():
-            dset = f.create_dataset(name, data=arr)
-            if name in _UNITS:
-                dset.attrs["UNIT"] = _UNITS[name]
+            build_module.write_dataset(f, name, arr, *REGISTRY[(stem, name)])
     return out_path
 
 
@@ -476,13 +461,14 @@ def _giannini_colours(giannini):
 def _write_colours(config, colours):
     out_path = product_path(config, "sky/derived", "knots", "colours", "survey")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    stem = "colours_knots_survey"
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "survey"
         f.attrs["primary_sample"] = "Giannini et al. 2013, ApJ 767, 147, knots with a 2.12um detection"
         f.attrs["ratio_definition"] = "log10(F_IRAC_band / F_2.12um), both flux densities in mJy, no unit conversion needed"
         for band_key, stats in colours.items():
             group = f.create_group(band_key)
-            group.create_dataset("LOG10_RATIO", data=stats["RATIO"])
+            build_module.write_dataset(group, "LOG10_RATIO", stats["RATIO"], *REGISTRY[(stem, "LOG10_RATIO")])
             group.attrs["N"] = stats["N"]
             group.attrs["MEDIAN_LOG10_RATIO"] = stats["MEDIAN"]
             group.attrs["P16_LOG10_RATIO"] = stats["P16"]

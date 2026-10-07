@@ -25,12 +25,16 @@ import os
 import h5py
 import numpy as np
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.bmstp import sample_cloud
 from sesnaimpute.population import selection as population_selection
+
+_STEM = "cloud_interval_shape_sightline"
 
 
 def _sightline_a_col_k(config, region, hpx_pix_256):
@@ -96,10 +100,13 @@ def build_region(config, region, st):
         f.attrs["GRANULE"] = "sightline"
         f.attrs["D_FRONT_PC"] = float(d_front)
         f.attrs["D_BACK_PC"] = float(d_back)
-        f.create_dataset("HPX_PIX_256", data=hpx_pix_256)
-        f.create_dataset("XI_FRONT", data=xi_front.astype(np.float32))
-        f.create_dataset("XI_BACK", data=xi_back.astype(np.float32))
-        f.create_dataset("W_CLOUD", data=w_cloud.astype(np.float32))
+        for name, data in (
+            ("HPX_PIX_256", hpx_pix_256),
+            ("XI_FRONT", xi_front.astype(np.float32)),
+            ("XI_BACK", xi_back.astype(np.float32)),
+            ("W_CLOUD", w_cloud.astype(np.float32)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
     return path, n_sl, xi_front, xi_back, w_cloud
 
 

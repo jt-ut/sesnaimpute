@@ -81,10 +81,12 @@ from astropy.io import fits
 from joblib import Parallel, delayed
 from scipy.spatial import cKDTree
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.bmstp import grid, sample_star
 from sesnaimpute.build import run
 from sesnaimpute.population import star_population
@@ -304,17 +306,21 @@ def _write_library(config, lib, granule, names, c_theta, log10_f45_centers, fact
     entry of `factors` (`name -> (W, C_F, D_F, normalised, source)`)."""
     path = config_module.product_path(config, "bmstp", "weights", lib, granule, region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    stem = f"{lib}_weights_{granule}"
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = granule
         for k, v in (extra_attrs or {}).items():
             f.attrs[k] = v
-        f.create_dataset("MODEL_NAME", data=np.char.encode(names, "utf-8"))
-        f.create_dataset("C_THETA", data=c_theta.astype(np.float64))
-        f.create_dataset("LOG10_F45_CENTERS", data=log10_f45_centers.astype(np.float64))
+        for name, data in (
+            ("MODEL_NAME", np.char.encode(names, "utf-8")),
+            ("C_THETA", c_theta.astype(np.float64)),
+            ("LOG10_F45_CENTERS", log10_f45_centers.astype(np.float64)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(stem, name)])
         for i, (name, (w, c_f, d_f, normalised, source)) in enumerate(factors.items()):
             grp = f.create_group(f"factor_{i}")
-            grp.create_dataset("W", data=w.astype(np.float32))
-            grp.create_dataset("C_F", data=c_f.astype(np.float64))
+            build_module.write_dataset(grp, "W", w.astype(np.float32), *REGISTRY[(stem, "W")])
+            build_module.write_dataset(grp, "C_F", c_f.astype(np.float64), *REGISTRY[(stem, "C_F")])
             grp.attrs["NAME"] = name
             grp.attrs["D_F"] = d_f
             grp.attrs["NORMALISED"] = bool(normalised)

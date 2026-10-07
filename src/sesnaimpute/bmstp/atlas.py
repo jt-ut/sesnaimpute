@@ -68,15 +68,19 @@ import numpy as np
 from joblib import Parallel, delayed
 from scipy.special import ndtri
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import h2s as h2s_module
 from sesnaimpute.population import knot_rate
 from sesnaimpute.population import pahc_curve
+
+_STEM = "prior_atlas_hpx512"
 from sesnaimpute.population import selection as selection_module
 from sesnaimpute.population import yso as yso_module
 from sesnaimpute.bmstp import density as density_module
@@ -1846,26 +1850,28 @@ def build_region(config, region):
             f.attrs["RATIO_BRIGHT10"] = ratio_bright10_total
             for c in built:
                 f.attrs[f"RATIO_BRIGHT3_{c}"] = ratio_bright3[c]
-            f.create_dataset("HPX_PIX_512", data=pix)
-            f.create_dataset("A_COL_K", data=a_col.astype(np.float32))
-            f.create_dataset("COVERAGE", data=coverage.astype(np.float32))
-            f.create_dataset("F_LIM_50_PIX_MJY", data=f_lim.astype(np.float32))
+            for name, data in (
+                ("HPX_PIX_512", pix),
+                ("A_COL_K", a_col.astype(np.float32)),
+                ("COVERAGE", coverage.astype(np.float32)),
+                ("F_LIM_50_PIX_MJY", f_lim.astype(np.float32)),
+            ):
+                build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
             for c in CLASSES:
-                f.create_dataset(f"N_CAT_{c}", data=n_cat[c].astype(np.float32))
-                f.create_dataset(f"INTENSITY_{c}", data=intensity[c].astype(np.float32))
-                f.create_dataset(f"N_ABOVE_{c}", data=n_above[c].astype(np.float32))
-                f.create_dataset(f"N_CAT_BRIGHT3_{c}", data=n_cat_bright3[c].astype(np.float32))
-                f.create_dataset(f"N_CAT_BRIGHT10_{c}", data=n_cat_bright10[c].astype(np.float32))
+                for prefix, table in (
+                    ("N_CAT_", n_cat), ("INTENSITY_", intensity), ("N_ABOVE_", n_above),
+                    ("N_CAT_BRIGHT3_", n_cat_bright3), ("N_CAT_BRIGHT10_", n_cat_bright10),
+                ):
+                    name = f"{prefix}{c}"
+                    build_module.write_dataset(f, name, table[c].astype(np.float32),
+                                                *REGISTRY[(_STEM, name)])
             # the region's expected number of catalogued objects per
             # parameter cell (module docstring), summing to `RATIO_<C> *
             # N_source`; `(128, 110)` on `grid.LOG10_XI_EDGES` x
             # `grid.LOG10_F45_EDGES`, the shapes' own axes.
-            f.create_dataset("N_CAT_CELL_GAL", data=n_cat_cell["GAL"].astype(np.float32))
-            f.create_dataset("N_CAT_CELL_STAR", data=n_cat_cell["STAR"].astype(np.float32))
-            f.create_dataset("N_CAT_CELL_PAHC", data=n_cat_cell["PAHC"].astype(np.float32))
-            f.create_dataset("N_CAT_CELL_AGB", data=n_cat_cell["AGB"].astype(np.float32))
-            f.create_dataset("N_CAT_CELL_YSO", data=n_cat_cell["YSO"].astype(np.float32))
-            f.create_dataset("N_CAT_CELL_H2S", data=n_cat_cell["H2S"].astype(np.float32))
+            for c, data in n_cat_cell.items():
+                name = f"N_CAT_CELL_{c}"
+                build_module.write_dataset(f, name, data.astype(np.float32), *REGISTRY[(_STEM, name)])
             # the region's UNTHINNED intrinsic population per parameter
             # cell (module docstring, sec. 8): the same members quadrature
             # as `N_CAT_CELL_<C>` with every member's own probability of
@@ -1873,12 +1879,17 @@ def build_region(config, region):
             # sightline by sightline and once for GAL exactly like
             # `N_CAT_CELL_<C>` above, same axes.
             for c in CLASSES:
-                f.create_dataset(f"N_CELL_{c}", data=n_cell[c].astype(np.float32))
+                name = f"N_CELL_{c}"
+                build_module.write_dataset(f, name, n_cell[c].astype(np.float32), *REGISTRY[(_STEM, name)])
             for c in built:
-                f.create_dataset(f"SHARE_{c}", data=share[c].astype(np.float32))
-            f.create_dataset("N_OBS", data=n_obs.astype(np.int32))
-            f.create_dataset("N_OBS_BRIGHT3", data=n_obs_bright3.astype(np.int32))
-            f.create_dataset("N_OBS_BRIGHT10", data=n_obs_bright10.astype(np.int32))
+                name = f"SHARE_{c}"
+                build_module.write_dataset(f, name, share[c].astype(np.float32), *REGISTRY[(_STEM, name)])
+            for name, data in (
+                ("N_OBS", n_obs.astype(np.int32)),
+                ("N_OBS_BRIGHT3", n_obs_bright3.astype(np.int32)),
+                ("N_OBS_BRIGHT10", n_obs_bright10.astype(np.int32)),
+            ):
+                build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
 
         st.done(path, n_pix=n_pix, n_tile=len(tiles_here), n_sightline=len(sls_here),
                 n_tile_filled=n_tile_filled,

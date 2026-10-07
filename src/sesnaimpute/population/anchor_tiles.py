@@ -62,15 +62,20 @@ import healpy as hp
 import numpy as np
 from joblib import Parallel, delayed
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.batches import batches
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import selection
 from sesnaimpute.sky.derived import profile as profile_module
 from sesnaimpute.sky.download.trilegal import build as trilegal_download
+
+_TILES_STEM = "tiles_anchors_hpx512"
+_HIST_STEM = "histograms_anchors_hpx512"
 
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
@@ -667,11 +672,14 @@ def write_tiles(config, region, result):
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "hpx512"
         f.attrs["L_STAR_DEG"] = tiles["l_star_deg"]
-        f.create_dataset("HPX_PIX_512", data=pixels.astype(np.int64))
-        f.create_dataset("TILE_ID", data=tiles["tile_of_pix"].astype(np.int64))
-        f.create_dataset("TILE_L_DEG", data=tiles["tile_l_deg"])
-        f.create_dataset("TILE_B_DEG", data=tiles["tile_b_deg"])
-        f.create_dataset("TILE_OMEGA_DEG2", data=tiles["tile_omega_deg2"])
+        for name, data in (
+            ("HPX_PIX_512", pixels.astype(np.int64)),
+            ("TILE_ID", tiles["tile_of_pix"].astype(np.int64)),
+            ("TILE_L_DEG", tiles["tile_l_deg"]),
+            ("TILE_B_DEG", tiles["tile_b_deg"]),
+            ("TILE_OMEGA_DEG2", tiles["tile_omega_deg2"]),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_TILES_STEM, name)])
 
 
 def write_histograms(config, region, result):
@@ -680,21 +688,24 @@ def write_histograms(config, region, result):
     n_pix = result["pixels"].size
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "hpx512"
-        f.create_dataset("HPX_PIX_512", data=result["pixels"].astype(np.int64))
-        f.create_dataset("A_PIX_K", data=result["a_pix"].astype(np.float32))
-        f.create_dataset("OMEGA_PIX_DEG2", data=np.full(n_pix, result["omega_pix_deg2"], dtype=np.float64))
-        f.create_dataset("G_EDGES", data=result["g_edges"])
-        f.create_dataset("KS_EDGES", data=result["ks_edges"])
-        f.create_dataset("N_G_OBS", data=result["n_g_obs"])
-        f.create_dataset("N_G_PRED", data=result["n_g_pred"])
-        f.create_dataset("N_KS_OBS", data=result["n_ks_obs"])
-        f.create_dataset("N_KS_PRED", data=result["n_ks_pred"])
-        f.create_dataset("N_GK_PRED", data=result["n_gk_pred"])
-        f.create_dataset("DEEP_COVERED", data=result["deep_covered"].astype(np.bool_))
-        # W46: which survey each Ks bin takes (0=2MASS/1=UKIDSS),
-        # replacing the single KS_SPLIT_MAG attr -- downstream
-        # (`anchor_weights.ks_served_mask`) reads this per bin.
-        f.create_dataset("KS_SOURCE", data=result["ks_source"].astype(np.int8))
+        # W46: KS_SOURCE records which survey each Ks bin takes
+        # (0=2MASS/1=UKIDSS), replacing the single KS_SPLIT_MAG attr --
+        # downstream (`anchor_weights.ks_served_mask`) reads this per bin.
+        for name, data in (
+            ("HPX_PIX_512", result["pixels"].astype(np.int64)),
+            ("A_PIX_K", result["a_pix"].astype(np.float32)),
+            ("OMEGA_PIX_DEG2", np.full(n_pix, result["omega_pix_deg2"], dtype=np.float64)),
+            ("G_EDGES", result["g_edges"]),
+            ("KS_EDGES", result["ks_edges"]),
+            ("N_G_OBS", result["n_g_obs"]),
+            ("N_G_PRED", result["n_g_pred"]),
+            ("N_KS_OBS", result["n_ks_obs"]),
+            ("N_KS_PRED", result["n_ks_pred"]),
+            ("N_GK_PRED", result["n_gk_pred"]),
+            ("DEEP_COVERED", result["deep_covered"].astype(np.bool_)),
+            ("KS_SOURCE", result["ks_source"].astype(np.int8)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_HIST_STEM, name)])
 
 
 def build(config, regions=None):

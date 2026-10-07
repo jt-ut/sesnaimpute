@@ -126,15 +126,19 @@ from joblib import Parallel, delayed
 from scipy.interpolate import interp1d
 from scipy.stats import binned_statistic
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import constants
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
 from sesnaimpute.population import selection as selection_module
+
+_STEM = "curve_pahc_survey"
 
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
@@ -609,12 +613,15 @@ def write_curve(path, curve, q_min, residual_width_mag):
         f.attrs["Q_MIN"] = float(q_min)
         f.attrs["RESIDUAL_WIDTH_MAG"] = float(residual_width_mag)
         f.attrs["F_NOISE"] = float(curve["f_noise"])
-        f.create_dataset("LOG10_Q_EDGES", data=curve["edges"].astype(np.float64))
-        f.create_dataset("P_Q", data=curve["p_a"].astype(np.float64))
-        f.create_dataset("N_PER_BIN", data=curve["n_a"].astype(np.int64))
-        f.create_dataset("M_PER_BIN", data=curve["m_a"].astype(np.int64))
-        f.create_dataset("P_Q_BRIGHT_EXCESS", data=curve["p_bright_excess"].astype(np.float64))
-        f.create_dataset("N_PER_BIN_BRIGHT_EXCESS", data=curve["n_bright_excess"].astype(np.int64))
+        for name, data in (
+            ("LOG10_Q_EDGES", curve["edges"].astype(np.float64)),
+            ("P_Q", curve["p_a"].astype(np.float64)),
+            ("N_PER_BIN", curve["n_a"].astype(np.int64)),
+            ("M_PER_BIN", curve["m_a"].astype(np.int64)),
+            ("P_Q_BRIGHT_EXCESS", curve["p_bright_excess"].astype(np.float64)),
+            ("N_PER_BIN_BRIGHT_EXCESS", curve["n_bright_excess"].astype(np.int64)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
 
 
 def read(config):

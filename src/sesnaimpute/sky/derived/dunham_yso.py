@@ -28,9 +28,13 @@ import h5py
 import numpy as np
 import pandas as pd
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+
+_STEM = "yso_dunham2015_survey"
 
 # byte-by-byte column layouts (0-indexed half-open slices), CDS ReadMe
 # for J/ApJS/220/11: table2.dat at its line 158, table3/4.dat at 180.
@@ -155,24 +159,27 @@ def build(config, regions=None):
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with h5py.File(out_path, "w") as f:
             f.attrs["GRANULE"] = "survey"
-            f.create_dataset("SEQ", data=t2["Seq"].to_numpy(dtype=np.int64))
-            f.create_dataset("CLOUD", data=cloud.to_numpy(dtype="S16"))
-            f.create_dataset("ID", data=t2["ID"].str.strip().to_numpy(dtype="S16"))
-            f.create_dataset("RA_DEG", data=ra_deg.astype(np.float64))
-            f.create_dataset("DEC_DEG", data=dec_deg.astype(np.float64))
-            f.create_dataset("DIST_PC", data=dist_pc.astype(np.float32))
-            f.create_dataset("AV", data=t2["Av"].to_numpy(dtype=np.float32))
-            f.create_dataset("ALPHA0", data=t2["alpha0"].to_numpy(dtype=np.float32))
-            f.create_dataset("TBOL0_K", data=t2["Tbol0"].to_numpy(dtype=np.float32))
-            f.create_dataset("LBOL0_LSUN", data=t2["Lbol0"].to_numpy(dtype=np.float32))
-            f.create_dataset("F45_MJY", data=f45_mjy.astype(np.float32))
-            f.create_dataset("E_F45_MJY", data=t4["e_F4.5"].to_numpy(dtype=np.float32))
-            f.create_dataset("F45_OBS_MJY", data=t3["F4.5"].to_numpy(dtype=np.float32))
-            f.create_dataset("F36_MJY", data=t4["F3.6"].to_numpy(dtype=np.float32))
-            f.create_dataset("F58_MJY", data=t4["F5.8"].to_numpy(dtype=np.float32))
-            f.create_dataset("F80_MJY", data=t4["F8.0"].to_numpy(dtype=np.float32))
-            f.create_dataset("F24_MJY", data=t4["F24"].to_numpy(dtype=np.float32))
-            f.create_dataset("LOG10_F45_REF", data=log10_f45_ref.astype(np.float32))
+            for name, data in (
+                ("SEQ", t2["Seq"].to_numpy(dtype=np.int64)),
+                ("CLOUD", cloud.to_numpy(dtype="S16")),
+                ("ID", t2["ID"].str.strip().to_numpy(dtype="S16")),
+                ("RA_DEG", ra_deg.astype(np.float64)),
+                ("DEC_DEG", dec_deg.astype(np.float64)),
+                ("DIST_PC", dist_pc.astype(np.float32)),
+                ("AV", t2["Av"].to_numpy(dtype=np.float32)),
+                ("ALPHA0", t2["alpha0"].to_numpy(dtype=np.float32)),
+                ("TBOL0_K", t2["Tbol0"].to_numpy(dtype=np.float32)),
+                ("LBOL0_LSUN", t2["Lbol0"].to_numpy(dtype=np.float32)),
+                ("F45_MJY", f45_mjy.astype(np.float32)),
+                ("E_F45_MJY", t4["e_F4.5"].to_numpy(dtype=np.float32)),
+                ("F45_OBS_MJY", t3["F4.5"].to_numpy(dtype=np.float32)),
+                ("F36_MJY", t4["F3.6"].to_numpy(dtype=np.float32)),
+                ("F58_MJY", t4["F5.8"].to_numpy(dtype=np.float32)),
+                ("F80_MJY", t4["F8.0"].to_numpy(dtype=np.float32)),
+                ("F24_MJY", t4["F24"].to_numpy(dtype=np.float32)),
+                ("LOG10_F45_REF", log10_f45_ref.astype(np.float32)),
+            ):
+                build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
         st.tick(1, 1, "clouds joined")
         st.done(out_path, rows=len(t2), finite_f45=int(np.isfinite(f45_mjy).sum()))
 

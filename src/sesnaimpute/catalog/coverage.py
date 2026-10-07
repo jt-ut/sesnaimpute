@@ -31,11 +31,15 @@ import healpy as hp
 import numpy as np
 
 from sesnaimpute import batches as batches_module
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.catalog import depth_grid as depth_grid_module
+
+_STEM = "coverage_sesna_hpx512"
 
 NSIDE_512 = 512
 NSIDE_2048 = 2048
@@ -135,8 +139,8 @@ def build_region(config, region, st):
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "hpx512"
         f.attrs["AREA_DEG2"] = area_deg2
-        f.create_dataset("HPX_PIX", data=pix)
-        f.create_dataset("FRAC", data=frac.astype(np.float32))
+        build_module.write_dataset(f, "HPX_PIX", pix, *REGISTRY[(_STEM, "HPX_PIX")])
+        build_module.write_dataset(f, "FRAC", frac.astype(np.float32), *REGISTRY[(_STEM, "FRAC")])
     return out_path, pix.size, area_deg2, hole_rate, len(batch_list)
 
 

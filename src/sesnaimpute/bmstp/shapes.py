@@ -30,12 +30,18 @@ from scipy import ndimage
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import fftconvolve
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.bmstp import grid, sample_cloud, sample_gal, sample_star, template_weights
 from sesnaimpute.population import h2s as h2s_module
+
+_STAR_STEM = "star_shape_tile"
+_CLOUD_STEM = "cloud_shape_sightline"
+_GAL_STEM = "gal_shape_survey"
 
 
 # ---------------------------------------------------------------------------
@@ -155,15 +161,18 @@ def build_star_family(config, region):
             f.attrs["N_STARS_PER_TILE"] = n_stars_per_tile
             f.attrs["F45_PER_L_SPREAD_DEX_O"] = agb_ratio["O"]["spread_dex"]
             f.attrs["F45_PER_L_SPREAD_DEX_C"] = agb_ratio["C"]["spread_dex"]
-            f.create_dataset("LOG10_XI_EDGES", data=grid.LOG10_XI_EDGES)
-            f.create_dataset("LOG10_F45_EDGES", data=grid.LOG10_F45_EDGES)
-            f.create_dataset("TILE_ID", data=ids.astype(np.int32))
-            f.create_dataset("GRID_STAR", data=grid_star)
-            f.create_dataset("GRID_AGB", data=grid_agb)
-            f.create_dataset("MASS_OUTSIDE_STAR", data=mass_outside_star)
-            f.create_dataset("MASS_OUTSIDE_AGB", data=mass_outside_agb)
-            f.create_dataset("ON_GRID_STAR", data=on_grid_star.astype(np.float32))
-            f.create_dataset("ON_GRID_AGB", data=on_grid_agb.astype(np.float32))
+            for name, data in (
+                ("LOG10_XI_EDGES", grid.LOG10_XI_EDGES),
+                ("LOG10_F45_EDGES", grid.LOG10_F45_EDGES),
+                ("TILE_ID", ids.astype(np.int32)),
+                ("GRID_STAR", grid_star),
+                ("GRID_AGB", grid_agb),
+                ("MASS_OUTSIDE_STAR", mass_outside_star),
+                ("MASS_OUTSIDE_AGB", mass_outside_agb),
+                ("ON_GRID_STAR", on_grid_star.astype(np.float32)),
+                ("ON_GRID_AGB", on_grid_agb.astype(np.float32)),
+            ):
+                build_module.write_dataset(f, name, data, *REGISTRY[(_STAR_STEM, name)])
 
         # STAR's acceptance identity (sec. 9): the new `x`-marginal against
         # the OLD product's own, read above before the overwrite.
@@ -447,16 +456,19 @@ def build_cloud(config, region):
             f.attrs["LOGSIG_STD"] = logsig_std
             f.attrs["D_FRONT_PC"] = float(d_front)
             f.attrs["D_BACK_PC"] = float(d_back)
-            f.create_dataset("LOG10_XI_EDGES", data=grid.LOG10_XI_EDGES)
-            f.create_dataset("LOG10_F45_EDGES", data=grid.LOG10_F45_EDGES)
-            f.create_dataset("HPX_PIX_256", data=loaded["hpx_pix_256"])
-            f.create_dataset("GRID_YSO", data=grid_yso)
-            f.create_dataset("XI_MARGINAL", data=xi_marginal)
-            f.create_dataset("MASS_OUTSIDE_YSO", data=mass_outside_yso)
-            f.create_dataset("ON_GRID_YSO", data=on_grid_yso)
-            f.create_dataset("GRID_H2S", data=grid_h2s)
-            f.create_dataset("MASS_OUTSIDE_H2S", data=mass_outside_h2s)
-            f.create_dataset("ON_GRID_H2S", data=on_grid_h2s)
+            for name, data in (
+                ("LOG10_XI_EDGES", grid.LOG10_XI_EDGES),
+                ("LOG10_F45_EDGES", grid.LOG10_F45_EDGES),
+                ("HPX_PIX_256", loaded["hpx_pix_256"]),
+                ("GRID_YSO", grid_yso),
+                ("XI_MARGINAL", xi_marginal),
+                ("MASS_OUTSIDE_YSO", mass_outside_yso),
+                ("ON_GRID_YSO", on_grid_yso),
+                ("GRID_H2S", grid_h2s),
+                ("MASS_OUTSIDE_H2S", mass_outside_h2s),
+                ("ON_GRID_H2S", on_grid_h2s),
+            ):
+                build_module.write_dataset(f, name, data, *REGISTRY[(_CLOUD_STEM, name)])
 
         # the region's own brightness marginal (sec. 9's report): P_ref
         # convolved with the region's own shift kernel K (sec. 5.5
@@ -576,9 +588,12 @@ def build_gal(config):
             f.attrs["DENSITY_GAL"] = density_gal
             f.attrs["COSMIC_VARIANCE_DEX"] = _gal_cosmic_variance_dex(config)
             f.attrs["ON_GRID_GAL"] = float(on_grid_gal)
-            f.create_dataset("LOG10_XI_EDGES", data=grid.LOG10_XI_EDGES)
-            f.create_dataset("LOG10_F45_EDGES", data=grid.LOG10_F45_EDGES)
-            f.create_dataset("GRID", data=h.astype(np.float32))
+            for name, data in (
+                ("LOG10_XI_EDGES", grid.LOG10_XI_EDGES),
+                ("LOG10_F45_EDGES", grid.LOG10_F45_EDGES),
+                ("GRID", h.astype(np.float32)),
+            ):
+                build_module.write_dataset(f, name, data, *REGISTRY[(_GAL_STEM, name)])
 
         # sec. 9's identity: the current (pre-overwrite) P4's own `log10 S`
         # marginal, conservatively rebinned onto the common axis, against

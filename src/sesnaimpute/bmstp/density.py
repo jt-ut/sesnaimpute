@@ -40,10 +40,12 @@ import os
 import h5py
 import numpy as np
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.batches import batches
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
@@ -52,6 +54,8 @@ from sesnaimpute.population import field_stars
 from sesnaimpute.population import knot_rate
 from sesnaimpute.population import yso as yso_module
 from sesnaimpute.population.yso import PROVENANCE_HERSCHEL, law_count, pc2_per_deg2
+
+_STEM = "table_density_source"
 from sesnaimpute.bmstp import grid
 from sesnaimpute.bmstp import knot_field
 from sesnaimpute.bmstp import sample_cloud
@@ -359,23 +363,26 @@ def write_region(path, result):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "source"
-        f.create_dataset("NAME", data=result["name"])
-        f.create_dataset("A_COL_K", data=result["a_col"])
-        f.create_dataset("A_COL_SIG_K", data=result["a_col_sig"])
-        f.create_dataset("ARM", data=result["arm"])
-        f.create_dataset("ZP_SIG_K", data=result["zp_sig"])
-        f.create_dataset("TILE", data=result["tile"])
-        f.create_dataset("SIGHTLINE_ROW", data=result["sightline_row"])
-        f.create_dataset("HPX_512", data=result["hpx512"])
-        f.create_dataset("F_LIM_50_MJY", data=result["f_lim"])
-        f.create_dataset("D_PAHC", data=result["d_pahc"])
-        f.create_dataset("A_CLOUD_K", data=result["a_cloud"])
-        f.create_dataset("DENSITY_STAR", data=result["density_star"].astype(np.float64))
-        f.create_dataset("DENSITY_AGB", data=result["density_agb"].astype(np.float64))
-        f.create_dataset("DENSITY_PAHC", data=result["density_pahc"].astype(np.float64))
-        f.create_dataset("DENSITY_GAL", data=result["density_gal"].astype(np.float64))
-        f.create_dataset("DENSITY_YSO", data=result["density_yso"].astype(np.float64))
-        f.create_dataset("DENSITY_H2S", data=result["density_h2s"].astype(np.float64))
+        for name, data in (
+            ("NAME", result["name"]),
+            ("A_COL_K", result["a_col"]),
+            ("A_COL_SIG_K", result["a_col_sig"]),
+            ("ARM", result["arm"]),
+            ("ZP_SIG_K", result["zp_sig"]),
+            ("TILE", result["tile"]),
+            ("SIGHTLINE_ROW", result["sightline_row"]),
+            ("HPX_512", result["hpx512"]),
+            ("F_LIM_50_MJY", result["f_lim"]),
+            ("D_PAHC", result["d_pahc"]),
+            ("A_CLOUD_K", result["a_cloud"]),
+            ("DENSITY_STAR", result["density_star"].astype(np.float64)),
+            ("DENSITY_AGB", result["density_agb"].astype(np.float64)),
+            ("DENSITY_PAHC", result["density_pahc"].astype(np.float64)),
+            ("DENSITY_GAL", result["density_gal"].astype(np.float64)),
+            ("DENSITY_YSO", result["density_yso"].astype(np.float64)),
+            ("DENSITY_H2S", result["density_h2s"].astype(np.float64)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
         f.attrs["KAPPA_USED"] = result["kappa_used"]
         f.attrs["ETA"] = result["eta_r"]
         f.attrs["ETA_BAND_DEX"] = result["eta_band_dex"]

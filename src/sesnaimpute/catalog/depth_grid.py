@@ -116,14 +116,19 @@ import healpy as hp
 import numpy as np
 import pandas as pd
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.catalog import depths as depths_module
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access as access_module
+
+_SOURCE_STEM = "limits_sesna_source"
+_PIX_STEM = "depth-grid_sesna_hpx512"
 
 NSIDE_512 = 512
 
@@ -606,12 +611,15 @@ def build(config, regions=None):
             os.makedirs(os.path.dirname(source_out_path), exist_ok=True)
             with h5py.File(source_out_path, "w") as f:
                 f.attrs["GRANULE"] = "source"
-                f.create_dataset("F_LIM_50_MJY", data=f_lim_50_mjy.astype(np.float32))
-                f.create_dataset("W_DEX", data=w_dex_full)
-                f.create_dataset("F_50_REGION_MJY", data=f50_full)
-                f.create_dataset("ALPHA_REGION", data=alpha_full)
-                f.create_dataset("DCOMP90_REF_LOG10", data=dcomp90_ref_log10)
-                f.create_dataset("LIMIT_KIND", data=limit_kind_full)
+                for name, data in (
+                    ("F_LIM_50_MJY", f_lim_50_mjy.astype(np.float32)),
+                    ("W_DEX", w_dex_full),
+                    ("F_50_REGION_MJY", f50_full),
+                    ("ALPHA_REGION", alpha_full),
+                    ("DCOMP90_REF_LOG10", dcomp90_ref_log10),
+                    ("LIMIT_KIND", limit_kind_full),
+                ):
+                    build_module.write_dataset(f, name, data, *REGISTRY[(_SOURCE_STEM, name)])
 
             # the pixel grid (module docstring, Part A): F_LIM_50_PIX_MJY
             # and F_LIM_50_MED_MJY are now the same pixel median of the
@@ -645,11 +653,14 @@ def build(config, regions=None):
                 f.attrs["LOW_COLUMN_N_SOURCES"] = n_low_column
                 f.attrs["LOW_COLUMN_FALLBACK"] = fallback
                 f.attrs["LIMIT_KIND"] = limit_kind_full
-                f.create_dataset("HPX_PIX_512", data=pix)
-                f.create_dataset("N_SOURCES", data=n_sources)
-                f.create_dataset("F_LIM_50_MED_MJY", data=f_lim_50_pix_mjy.astype(np.float32))
-                f.create_dataset("F_LIM_50_PIX_MJY", data=f_lim_50_pix_mjy.astype(np.float32))
-                f.create_dataset("W_DEX_PIX", data=w_dex_pix)
+                for name, data in (
+                    ("HPX_PIX_512", pix),
+                    ("N_SOURCES", n_sources),
+                    ("F_LIM_50_MED_MJY", f_lim_50_pix_mjy.astype(np.float32)),
+                    ("F_LIM_50_PIX_MJY", f_lim_50_pix_mjy.astype(np.float32)),
+                    ("W_DEX_PIX", w_dex_pix),
+                ):
+                    build_module.write_dataset(f, name, data, *REGISTRY[(_PIX_STEM, name)])
 
             out_paths.append(out_path)
             n_admitted_total += int(admitted.size)

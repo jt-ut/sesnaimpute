@@ -69,8 +69,12 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 from scipy.special import erf
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
+from sesnaimpute.attrs_registry import REGISTRY
+
+_STEM = "kernel_sesna_survey"
 
 #: The beam the sub-beam mixture table is pooled from for the Planck arm
 #: (index into the sub-beam product's beam axis, order L108/L302/L821).
@@ -934,21 +938,24 @@ def build(config, regions=None):
     out_path = config_module.product_path(config, "population", "sesna", "kernel", "survey")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
-        f.create_dataset("A_NODES", data=a_nodes.astype(np.float64))
-        f.create_dataset("MIX_W", data=W.astype(np.float64))
-        f.create_dataset("MIX_MU", data=MU.astype(np.float64))
-        f.create_dataset("MIX_SIGMA", data=SIGMA.astype(np.float64))
-        f.create_dataset("ZP_HERSCHEL_K", data=np.float64(zp))
-        f.create_dataset("CLOUD_SIGMA_HERSCHEL_DEX", data=np.float64(fit["sigma_cloud"]))
-        f.create_dataset("CLOUD_SIGMA_HERSCHEL_P16", data=np.float64(fit["p16"]))
-        f.create_dataset("CLOUD_SIGMA_HERSCHEL_P84", data=np.float64(fit["p84"]))
-        f.create_dataset("CLOUD_GAMMA_HERSCHEL", data=np.float64(fit["gamma"]))
-        f.create_dataset("CLOUD_GAMMA_HERSCHEL_P16", data=np.float64(fit["gamma_p16"]))
-        f.create_dataset("CLOUD_GAMMA_HERSCHEL_P84", data=np.float64(fit["gamma_p84"]))
-        f.create_dataset("CLOUD_SIGMA_GRID_DEX", data=fit["sigma_grid"].astype(np.float64))
-        f.create_dataset("CLOUD_GAMMA_GRID", data=fit["gamma_grid"].astype(np.float64))
-        f.create_dataset("CLOUD_GAMMA_SIGMA_LOGLIKE", data=fit["loglike2d"].astype(np.float64))
-        f.create_dataset("N_PROTOSTARS_FIT", data=np.int64(fit["n_protostars"]))
+        for name, data in (
+            ("A_NODES", a_nodes.astype(np.float64)),
+            ("MIX_W", W.astype(np.float64)),
+            ("MIX_MU", MU.astype(np.float64)),
+            ("MIX_SIGMA", SIGMA.astype(np.float64)),
+            ("ZP_HERSCHEL_K", np.float64(zp)),
+            ("CLOUD_SIGMA_HERSCHEL_DEX", np.float64(fit["sigma_cloud"])),
+            ("CLOUD_SIGMA_HERSCHEL_P16", np.float64(fit["p16"])),
+            ("CLOUD_SIGMA_HERSCHEL_P84", np.float64(fit["p84"])),
+            ("CLOUD_GAMMA_HERSCHEL", np.float64(fit["gamma"])),
+            ("CLOUD_GAMMA_HERSCHEL_P16", np.float64(fit["gamma_p16"])),
+            ("CLOUD_GAMMA_HERSCHEL_P84", np.float64(fit["gamma_p84"])),
+            ("CLOUD_SIGMA_GRID_DEX", fit["sigma_grid"].astype(np.float64)),
+            ("CLOUD_GAMMA_GRID", fit["gamma_grid"].astype(np.float64)),
+            ("CLOUD_GAMMA_SIGMA_LOGLIKE", fit["loglike2d"].astype(np.float64)),
+            ("N_PROTOSTARS_FIT", np.int64(fit["n_protostars"])),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
 
     st.done(out_path, n_arms=len(_ARM_ORDER), n_node=n_node, zp_herschel_k=float(zp),
             herschel_stretch=herschel_factor, cloud_sigma_herschel_dex=fit["sigma_cloud"],
