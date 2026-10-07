@@ -89,6 +89,79 @@ REGISTRY = {
         "the pixel's solid angle, times the square of the cloud's own "
         "share of the line-of-sight column."),
 
+    # population.yso -- prior_yso_sightline: the young-star embedding
+    # density along each occupied sightline of a region.
+    ("prior_yso_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
+        "This region's own occupied nside-256 pixel numbers (nested "
+        "ordering). Row i here is row i of XI_EDGES and P_XI."),
+    ("prior_yso_sightline", "XI_EDGES"): ("dimensionless",
+        "For the matching pixel in HPX_PIX_256, the edges, in u = "
+        "(cumulative extinction to a depth) / (the sightline's own total "
+        "extinction), of the 32 equal-mass cells P_XI is tabulated on: "
+        "cell j runs from XI_EDGES[:, j] to XI_EDGES[:, j+1], with u = 0 "
+        "at the observer and u = 1 at the sightline's own total column."),
+    ("prior_yso_sightline", "P_XI"): ("per unit u",
+        "For the matching pixel in HPX_PIX_256 and each cell of XI_EDGES, "
+        "the young-star embedding density per unit u: the probability "
+        "that a young star on this sightline sits in that cell, divided "
+        "by the cell's own width in u. Integrating P_XI times the cell "
+        "width over all cells gives 1."),
+
+    # population.yso_law -- law_yso_region: the young-star law's
+    # coefficient, fitted per region on the Dunham et al. (2015) census.
+    ("law_yso_region", "REGION"): ("region name",
+        "The name of the region this row describes, in the fixed thirty-"
+        "region order every region-axis product in this package shares."),
+    ("law_yso_region", "D_R_PC"): ("pc",
+        "This region's own canonical distance, carried over from this "
+        "package's region table."),
+    ("law_yso_region", "PC2_PER_DEG2"): ("pc^2 per deg^2",
+        "The area conversion factor at this region's own distance: one "
+        "square degree on the sky subtends this many square parsecs "
+        "there."),
+    ("law_yso_region", "KAPPA_REGION"): ("young stars pc^-2 per mag^2 of A_K",
+        "This region's own fitted young-star law coefficient: the Poisson "
+        "maximum-likelihood value matching the Dunham et al. (2015) "
+        "census count in this region's fit footprint to the model's "
+        "predicted count there. NaN where the footprint holds fewer than "
+        "50 census objects."),
+    ("law_yso_region", "KAPPA_REGION_LO"): ("young stars pc^-2 per mag^2 of A_K",
+        "The lower end of KAPPA_REGION's 68% Poisson (Garwood) confidence "
+        "interval. NaN under the same condition as KAPPA_REGION."),
+    ("law_yso_region", "KAPPA_REGION_HI"): ("young stars pc^-2 per mag^2 of A_K",
+        "The upper end of KAPPA_REGION's 68% Poisson (Garwood) confidence "
+        "interval. NaN under the same condition as KAPPA_REGION."),
+    ("law_yso_region", "N_CENSUS_REGION"): ("YSOs",
+        "How many Dunham et al. (2015) census objects, of any class, fall "
+        "inside this region's own fit footprint."),
+    ("law_yso_region", "FIT_A_K_MIN"): ("mag A_K",
+        "The gas-column floor a pixel must clear to enter this region's "
+        "own fit footprint: 0.22 mag where the census cloud(s) overlapping "
+        "the region are c2d clouds, 0.33 mag where they are Gould Belt "
+        "clouds."),
+    ("law_yso_region", "KAPPA_USED"): ("young stars pc^-2 per mag^2 of A_K",
+        "The young-star law coefficient every other product in this "
+        "package reads for this region: KAPPA_REGION where it was fitted, "
+        "KAPPA_POOLED otherwise."),
+    ("law_yso_region", "KAPPA_POOLED"): ("young stars pc^-2 per mag^2 of A_K",
+        "The geometric mean of KAPPA_REGION over every region with a "
+        "fitted value, in this file as a whole: the coefficient used for "
+        "a region whose own fit did not clear the 50-object minimum."),
+    ("law_yso_region", "LAW_BAND_DEX"): ("dex",
+        "The root-mean-square of log10(KAPPA_REGION) about "
+        "log10(KAPPA_POOLED), over every region with a fitted value: the "
+        "cloud-to-cloud scatter of the young-star law coefficient."),
+    ("law_yso_region", "CLASS_SHARE_PROTO"): ("dimensionless",
+        "The fraction of the whole Dunham et al. (2015) census (every "
+        "region) with an infrared spectral index alpha0 >= -0.3 "
+        "(protostellar), independent of region."),
+    ("law_yso_region", "CLASS_SHARE_DISK"): ("dimensionless",
+        "The fraction of the whole Dunham et al. (2015) census with "
+        "-1.6 <= alpha0 < -0.3 (disk-bearing), independent of region."),
+    ("law_yso_region", "CLASS_SHARE_WEAK"): ("dimensionless",
+        "The fraction of the whole Dunham et al. (2015) census with "
+        "alpha0 < -1.6 (weak or no disk), independent of region."),
+
     # population.pahc_curve -- curve_pahc_survey: the PAH-contamination
     # probability curve P(q), survey-wide.
     ("curve_pahc_survey", "LOG10_Q_EDGES"): ("log10(dimensionless)",

@@ -47,13 +47,18 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 from scipy.stats import chi2
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute import tables as tables_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.population import yso as yso_module
 from sesnaimpute.population import young_stars as young_stars_module
+
+_STEM = "law_yso_region"
+_READINGS = {name: value for (stem, name), value in REGISTRY.items() if stem == _STEM}
 
 #: The fit footprint's own column floor (SPEC ruling, `_W83_design.md`):
 #: the c2d coverage rule (A_V >= 2) and the Gould Belt rule (A_V >= 3),
@@ -309,7 +314,7 @@ def build(config, regions=None):
                 "N_CENSUS_REGION": np.array([rows[r]["n_census"] for r in names], dtype=np.int64),
                 "FIT_A_K_MIN": np.array([rows[r]["fit_a_k_min"] for r in names], dtype=np.float64),
             },
-            granule="region")
+            granule="region", readings=_READINGS)
 
         with tables_module.open_product(path, granule="region") as f:
             for stale in ("KAPPA_HERSCHEL", "KAPPA_PLANCK"):
@@ -345,7 +350,7 @@ def build(config, regions=None):
             ):
                 if name in f:
                     del f[name]
-                f.create_dataset(name, data=value)
+                build_module.write_dataset(f, name, value, *_READINGS[name])
             f.attrs["KAPPA_EXPONENT"] = 2.0
             f.attrs["CENSUS"] = "Dunham et al. 2015"
 
