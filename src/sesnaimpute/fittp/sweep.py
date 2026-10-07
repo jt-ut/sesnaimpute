@@ -72,9 +72,10 @@ unclamped optimum `(a_hat, log10_b_hat)`, never a mix of clamped and
 unclamped marks for the two factors of the same evidence; and section 9's
 Occam gap subtracts `max_theta ln(mixture_k(Lambda_k L_hat_k))` (Gamma
 excluded from both the mixture and the maximum). A
-flagged source's `FLUX_MEAN`/`LOG10_FLUX_COV` are written `NaN`, not the
-zero a `p_theta` of zero everywhere would otherwise silently accumulate,
-since a flagged fit has no posterior to report a flux moment of.
+flagged source's `LOG10_FLUX_MEAN`/`LOG10_FLUX_COV` are written `NaN`, not
+the zero a `p_theta` of zero everywhere would otherwise silently
+accumulate, since a flagged fit has no posterior to report a flux moment
+of.
 
 `A_K_POST`/`A_K_POST_SIG` (section 6.1's reported extinction mark, not
 `TOPK_A_K`'s maximum-likelihood one) fold `prior_reader.ln_prior`'s own
@@ -83,16 +84,23 @@ templates and designs with the joint weight `p_theta * p_k(theta)`; a
 flagged source writes `NaN` for both, the same convention as the flux
 moments.
 
-`LOG10_FLUX_COV` (section 1, replacing the old `FLUX_COV`) is the total
-variance of the imputed flux in log10 flux, `between + within`: `between`
-is the `p_theta * p_k`-weighted covariance of the `(template, design)`
-pairs' own log10 flux at their clamped marks (the spread across templates
-AND designs); `within` is `sum_k P_k * D_k Sigma_k D_k^T`, `P_k` each
-design's own total posterior weight (`sum_theta p_theta * p_k(theta)`),
-`D_k = [ext_col_k, GRAY_COLUMN]` that design's own `(8, 2)` design and
-`Sigma_k = xtwx_inv_k` its own `(2, 2)` parameter covariance (`likelihood
-.fit`'s own return) -- one `(8, 8)` matrix per design, not per template,
-since `D_k Sigma_k D_k^T` does not depend on the template.
+`LOG10_FLUX_MEAN` is the `p_theta * p_k`-weighted mean, in log10 flux, of
+the `(template, design)` pairs' own log10 flux at their clamped marks --
+the imputed photometry's own first moment, on the one scale section 6.1
+stores the mean and covariance on (`FLUX_MEAN`, the same mean in linear
+mJy, is gone: a second moment of the same distribution on a second scale
+is a second, silently different number). `LOG10_FLUX_COV` (section 1, replacing the old
+`FLUX_COV`) is the total variance of the imputed flux in log10 flux,
+`between + within`: `between` is the `p_theta * p_k`-weighted covariance
+of the same `(template, design)` pairs' log10 flux about `LOG10_FLUX_MEAN`
+(the spread across templates AND designs); `within` is `sum_k P_k * D_k
+Sigma_k D_k^T`, `P_k` each design's own total posterior weight
+(`sum_theta p_theta * p_k(theta)`), `D_k = [ext_col_k, GRAY_COLUMN]` that
+design's own `(8, 2)` design and `Sigma_k = xtwx_inv_k` its own `(2, 2)`
+parameter covariance (`likelihood.fit`'s own return) -- one `(8, 8)`
+matrix per design, not per template, since `D_k Sigma_k D_k^T` does not
+depend on the template. `TOPK_FLUX` stays linear mJy, the top-K record's
+own per-template value, unaffected by either rename.
 """
 
 import glob
@@ -120,6 +128,7 @@ from sesnaimpute.catalog import limits as catalog_limits
 from sesnaimpute.fittp import likelihood
 from sesnaimpute.fittp import prior_reader
 from sesnaimpute.fittp.gaia import GaiaTerm
+from sesnaimpute.readings import set_readings
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
@@ -151,13 +160,75 @@ WORKER_PROCESS_FLOOR_MB = 430
 #: product itself). `N_LAW_ITER` is gone: the self-consistent
 #: extinction-law solve it counted no longer exists; `TOPK_LAW`,
 #: `TOPK_LN_GAMMA` and `P_DENSE` are new (section 2, section 6.4).
-_PART_KEYS = ("NAME", "LN_EVIDENCE", "FLUX_MEAN", "LOG10_FLUX_COV", "TOPK_MODEL", "TOPK_A_K",
+_PART_KEYS = ("NAME", "LN_EVIDENCE", "LOG10_FLUX_MEAN", "LOG10_FLUX_COV", "TOPK_MODEL", "TOPK_A_K",
               "TOPK_LOG10_B", "TOPK_CHI2", "TOPK_LN_L", "TOPK_LN_PRIOR", "TOPK_FLUX", "TOPK_LAW",
               "TOPK_LN_GAMMA", "OCCAM_GAP", "A_K_POST", "A_K_POST_SIG", "P_DENSE",
               "FRAC_CLAMPED", "N_DETECTED")
 
+#: `UNITS`/`READING` (CODING_RULES_BMSTP.md rule 5): every dataset the
+#: joined fit file carries, including `FAILED_ROWS` (join-time only, not
+#: a `_PART_KEYS` member).
+_READINGS = {
+    "NAME": ("row into the catalogue, same order",
+             "the source's own name, this product's row order matching the catalogue's"),
+    "LN_EVIDENCE": ("nats",
+                     "the subclass log evidence, logsumexp over that subclass's own templates "
+                     "and the two extinction-law designs; -inf where the subclass has no "
+                     "templates of its own or the source is flagged"),
+    "LOG10_FLUX_MEAN": ("log10 mJy",
+                         "the evidence-weighted mean of this class's templates' log10 flux at "
+                         "their fitted marks; 10**x is the median flux in mJy"),
+    "LOG10_FLUX_COV": ("dex^2",
+                        "the total variance of this class's imputed flux in log10 flux, the "
+                        "between-template-and-design spread plus the fit's own parameter "
+                        "covariance mapped into the bands (within); 68% interval 10**(x - s) to "
+                        "10**(x + s) with s the root of the diagonal"),
+    "TOPK_MODEL": ("index into the class's template register",
+                    "this rank's kept template index, by descending mixture weight; -1 past "
+                    "the kept K or on a flagged source"),
+    "TOPK_A_K": ("mag A_K", "this top-K template's own clamped extinction mark"),
+    "TOPK_LOG10_B": ("log10 (gray scale)",
+                      "this top-K template's own clamped gray-scale mark, log10 B = -2 SC"),
+    "TOPK_CHI2": ("dimensionless (chi^2)",
+                   "this top-K template's chi^2 at the unconstrained optimum of its own "
+                   "carried design"),
+    "TOPK_LN_L": ("nats",
+                   "this top-K template's own log likelihood at the clamped marks, -1/2 chi^2 "
+                   "plus the non-detection term and the per-source normalisation"),
+    "TOPK_LN_PRIOR": ("nats",
+                       "this top-K template's own log prior density at its carried design's "
+                       "own cell weight"),
+    "TOPK_FLUX": ("mJy", "this top-K template's own model flux at its clamped marks, linear mJy"),
+    "TOPK_LAW": ("index (0 diffuse, 1 dense)",
+                  "which extinction-law design carried this top-K template's larger mixture "
+                  "weight"),
+    "TOPK_LN_GAMMA": ("nats",
+                       "the Gaia congruence term at this top-K template's own carried design "
+                       "and unclamped marks; the no-counterpart convention is gaia.py's own"),
+    "OCCAM_GAP": ("nats",
+                   "the class log evidence less the single best template's own log(Lambda * "
+                   "L_hat) at its carried design, Gamma excluded from both"),
+    "A_K_POST": ("mag A_K",
+                  "the prior-weighted mean of the fitted extinction along the fit's ridge, a "
+                  "mean in linear extinction; sits below the wall by the column kernel's width "
+                  "on a source the data cannot place"),
+    "A_K_POST_SIG": ("mag A_K",
+                      "the spread of the same posterior extinction mark, the square root of "
+                      "its second moment less its mean squared"),
+    "P_DENSE": ("dimensionless",
+                 "this class's own posterior weight on the dense extinction-law design, summed "
+                 "over templates"),
+    "FRAC_CLAMPED": ("dimensionless",
+                       "the posterior-weighted fraction of templates whose unconstrained "
+                       "extinction optimum the clamp moved off its own design's bound"),
+    "N_DETECTED": ("bands", "the number of this source's eight bands with a measured, positive flux"),
+    "FAILED_ROWS": ("row index into the catalogue",
+                     "the row indices this build flagged and excluded from the acceptance "
+                     "identities, never silently zeroed"),
+}
+
 _FIELD_OF_KEY = {
-    "NAME": "name", "LN_EVIDENCE": "ln_evidence", "FLUX_MEAN": "flux_mean",
+    "NAME": "name", "LN_EVIDENCE": "ln_evidence", "LOG10_FLUX_MEAN": "log10_flux_mean",
     "LOG10_FLUX_COV": "log10_flux_cov", "TOPK_MODEL": "topk_model", "TOPK_A_K": "topk_a_k",
     "TOPK_LOG10_B": "topk_log10_b", "TOPK_CHI2": "topk_chi2", "TOPK_LN_L": "topk_ln_l",
     "TOPK_LN_PRIOR": "topk_ln_prior", "TOPK_FLUX": "topk_flux", "TOPK_LAW": "topk_law",
@@ -236,57 +307,41 @@ def _n_sources(config, region):
 
 
 @numba.njit(parallel=True, cache=True)
-def _flux_moments_topk_kernel(log10_flux, p_theta, sorted_order, rank_position,
-                               good, out_mean, out_m2, out_topk_flux):
-    """The evidence-weighted flux moments (section 1.3's posterior mean and
-    second moment in flux, `E[F]` and `E[F F^T]`) and the top-K flux record,
-    one pass per source (`prange`, item 5's own worker-side thread cap:
-    called here with a leading axis of 1, one source at a time -- the
-    kernel's own generality over many sources is unused, not a block): for
-    each template `t` the linear flux `f = 10**log10_flux[s, t, :]` (8
-    float64 values, held in a small per-source buffer, never written to a
-    `(n, n_model, 8)` array) is folded into `mean += p_theta*f` and `m2 +=
-    p_theta*f f^T`, and, for the templates already chosen by the
-    argpartition/argsort on `ln_w` before this kernel runs (`_source_task`),
-    copied into `out_topk_flux` at that template's rank. `sorted_order` is
-    the source's own top-K template indices sorted ascending, and
-    `rank_position` maps each ascending slot back to its position in the
-    ln_w-descending top-K list, so the O(1) pointer walk below (advancing
-    only when `t` reaches the next sorted index) lands each flux in the
-    same slot `topk_model`/`topk_a_k`/etc. use for that template. `good[s]`
-    false (a flagged source) skips the top-K write only -- `out_topk_flux`
-    was pre-filled with NaN by the caller -- while the moments still
-    accumulate p_theta=0 everywhere, matching the unmasked
-    `flux_mean`/`flux_cov` the caller overwrites with NaN afterward.
-    """
+def _topk_flux_kernel(log10_flux, sorted_order, rank_position, good, out_topk_flux):
+    """The top-K flux record (`TOPK_FLUX`, linear mJy), one pass per
+    source (`prange`, item 5's own worker-side thread cap: called here
+    with a leading axis of 1, one source at a time -- the kernel's own
+    generality over many sources is unused, not a block): for each
+    template `t` already chosen by the argpartition/argsort on `ln_w`
+    before this kernel runs (`_source_task`), the linear flux `f = 10**
+    log10_flux[s, t, :]` is copied into `out_topk_flux` at that template's
+    rank. `sorted_order` is the source's own top-K template indices sorted
+    ascending, and `rank_position` maps each ascending slot back to its
+    position in the ln_w-descending top-K list, so the O(1) pointer walk
+    below (advancing only when `t` reaches the next sorted index) lands
+    each flux in the same slot `topk_model`/`topk_a_k`/etc. use for that
+    template. `good[s]` false (a flagged source) skips the write --
+    `out_topk_flux` was pre-filled with NaN by the caller."""
     n_block = log10_flux.shape[0]
     n_model = log10_flux.shape[1]
     n_bands = log10_flux.shape[2]
     k_keep = sorted_order.shape[1]
     for s in numba.prange(n_block):
-        mean = np.zeros(n_bands)
-        m2 = np.zeros((n_bands, n_bands))
         f = np.empty(n_bands)
         ptr = 0
         row_good = good[s]
+        if not row_good:
+            continue
         for t in range(n_model):
-            for b in range(n_bands):
-                f[b] = 10.0 ** log10_flux[s, t, b]
-            p = p_theta[s, t]
-            for a in range(n_bands):
-                pa = p * f[a]
-                mean[a] += pa
+            if ptr >= k_keep:
+                break
+            if t == sorted_order[s, ptr]:
                 for b in range(n_bands):
-                    m2[a, b] += pa * f[b]
-            if row_good and ptr < k_keep and t == sorted_order[s, ptr]:
+                    f[b] = 10.0 ** log10_flux[s, t, b]
                 r = rank_position[s, ptr]
                 for b in range(n_bands):
                     out_topk_flux[s, r, b] = f[b]
                 ptr += 1
-        for a in range(n_bands):
-            out_mean[s, a] = mean[a]
-            for b in range(n_bands):
-                out_m2[s, a, b] = m2[a, b]
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +368,7 @@ def _init_worker():
     thread each (item 5): the source axis is now the parallel axis (the
     pool itself), so the per-template numba kernels
     (`fittp.likelihood._ln_one_minus_c_kernel`, `fittp.prior_reader.
-    _cell_sum`, `fittp.gaia._gaia_h_kernel`, `_flux_moments_topk_kernel`
+    _cell_sum`, `fittp.gaia._gaia_h_kernel`, `_topk_flux_kernel`
     above) and BLAS's own small gemms threading too would oversubscribe
     the machine. Must run before any of those kernels executes in this
     worker for the first time, which it does: nothing calls one before a
@@ -325,7 +380,7 @@ def _init_worker():
 def _empty_row(topk, n_sub):
     return dict(
         ln_evidence=np.full(n_sub, -np.inf, dtype=np.float32),
-        flux_mean=np.full(N_BANDS, np.nan, dtype=np.float32),
+        log10_flux_mean=np.full(N_BANDS, np.nan, dtype=np.float32),
         log10_flux_cov=np.full((N_BANDS, N_BANDS), np.nan, dtype=np.float32),
         topk_model=np.full(topk, -1, dtype=np.int32),
         topk_a_k=np.full(topk, np.nan, dtype=np.float32),
@@ -516,33 +571,25 @@ def _source_task(i):
         sorted_order = order[sort_idx].astype(np.int64)
         rank_position = sort_idx.astype(np.int64)
 
-        # FLUX_MEAN (mJy) and LOG10_FLUX_COV's between term, from the 2m
+        # LOG10_FLUX_MEAN and LOG10_FLUX_COV's between term, from the 2m
         # (template, design) points weighted by p_theta * p_k (section 6.1):
-        # the moments kernel is unchanged, called once per design (its own
-        # (m, 8) log10 flux and (m,) weight), the two LINEAR weighted sums
-        # added -- correct since p_theta*p_k[0] + p_theta*p_k[1] = p_theta,
-        # which already sums to 1 over templates.
-        out_mean_sum = np.zeros(N_BANDS, dtype=np.float64)
+        # the between term is the weighted mean/second moment of LOG10 flux
+        # itself, summed over the two designs; TOPK_FLUX (linear mJy) is
+        # the one thing `_topk_flux_kernel` still extracts per design.
         topk_flux_by_law = [None, None]
         mean_log10 = np.zeros(N_BANDS, dtype=np.float64)
         m2_log10 = np.zeros((N_BANDS, N_BANDS), dtype=np.float64)
         for k in active_laws:
             wk = (p_theta * p_k[k]).astype(np.float64)
-            out_mean = np.empty((1, N_BANDS), dtype=np.float64)
-            out_m2 = np.empty((1, N_BANDS, N_BANDS), dtype=np.float64)
             out_topk_flux = np.full((1, topk, N_BANDS), np.nan, dtype=np.float32)
-            _flux_moments_topk_kernel(
-                log10_flux_by_law[k][None, :, :], wk[None, :], sorted_order[None, :],
-                rank_position[None, :], np.array([good]), out_mean, out_m2, out_topk_flux)
-            out_mean_sum += out_mean[0]
+            _topk_flux_kernel(
+                log10_flux_by_law[k][None, :, :], sorted_order[None, :],
+                rank_position[None, :], np.array([good]), out_topk_flux)
             topk_flux_by_law[k] = out_topk_flux[0]
-            # the between term: the weighted mean/second moment of LOG10 flux
-            # itself (not the kernel's own linear moments), summed over the
-            # two designs the same way the mean above is.
             weighted_log10 = log10_flux_by_law[k] * wk[:, None]
             mean_log10 += weighted_log10.sum(axis=0)
             m2_log10 += weighted_log10.T @ log10_flux_by_law[k]
-        flux_mean = out_mean_sum
+        log10_flux_mean = mean_log10
         between = m2_log10 - np.outer(mean_log10, mean_log10)
 
         # the within term: sum_k P_k * D_k Sigma_k D_k^T, P_k each design's
@@ -562,7 +609,7 @@ def _source_task(i):
         log10_flux_cov = between + within
 
         if not good:
-            flux_mean = np.full(N_BANDS, np.nan)
+            log10_flux_mean = np.full(N_BANDS, np.nan)
             log10_flux_cov = np.full((N_BANDS, N_BANDS), np.nan)
 
         # FRAC_CLAMPED: the p_k-weighted mean of the two designs' own clamp
@@ -605,7 +652,7 @@ def _source_task(i):
 
         row = dict(
             ln_evidence=ln_evidence64.astype(np.float32),
-            flux_mean=flux_mean.astype(np.float32), log10_flux_cov=log10_flux_cov.astype(np.float32),
+            log10_flux_mean=log10_flux_mean.astype(np.float32), log10_flux_cov=log10_flux_cov.astype(np.float32),
             topk_model=topk_model, topk_a_k=topk_a_k, topk_log10_b=topk_log10_b,
             topk_chi2=topk_chi2, topk_ln_l=topk_ln_l, topk_ln_prior=topk_ln_prior,
             topk_flux=topk_flux, topk_law=topk_law, topk_ln_gamma=topk_ln_gamma,
@@ -653,7 +700,7 @@ def _assemble_batch(results, name_slice, n_sub, topk):
     region-sized one (rule 10b)."""
     m = len(results)
     ln_evidence = np.empty((m, n_sub), dtype=np.float32)
-    flux_mean = np.empty((m, N_BANDS), dtype=np.float32)
+    log10_flux_mean = np.empty((m, N_BANDS), dtype=np.float32)
     log10_flux_cov = np.empty((m, N_BANDS, N_BANDS), dtype=np.float32)
     topk_model = np.empty((m, topk), dtype=np.int32)
     topk_a_k = np.empty((m, topk), dtype=np.float32)
@@ -675,7 +722,7 @@ def _assemble_batch(results, name_slice, n_sub, topk):
     n_templates_checked = 0
     for k, r in enumerate(results):
         ln_evidence[k] = r["ln_evidence"]
-        flux_mean[k] = r["flux_mean"]
+        log10_flux_mean[k] = r["log10_flux_mean"]
         log10_flux_cov[k] = r["log10_flux_cov"]
         topk_model[k] = r["topk_model"]
         topk_a_k[k] = r["topk_a_k"]
@@ -695,7 +742,7 @@ def _assemble_batch(results, name_slice, n_sub, topk):
         failed[k] = r["failed"]
         zero_ext_count += r["zero_ext_count"]
         n_templates_checked += r["n_templates_checked"]
-    return dict(name=name_slice, ln_evidence=ln_evidence, flux_mean=flux_mean, log10_flux_cov=log10_flux_cov,
+    return dict(name=name_slice, ln_evidence=ln_evidence, log10_flux_mean=log10_flux_mean, log10_flux_cov=log10_flux_cov,
                 topk_model=topk_model, topk_a_k=topk_a_k, topk_log10_b=topk_log10_b,
                 topk_chi2=topk_chi2, topk_ln_l=topk_ln_l, topk_ln_prior=topk_ln_prior,
                 topk_flux=topk_flux, topk_law=topk_law, topk_ln_gamma=topk_ln_gamma, occam_gap=occam_gap,
@@ -870,6 +917,7 @@ def join_parts(summary, topk):
         failed_rows = (np.concatenate(failed_chunks) if failed_chunks
                         else np.array([], dtype=np.int64)).astype(np.int64)
         out.create_dataset("FAILED_ROWS", data=failed_rows)
+        set_readings(out, _READINGS)
         out.attrs["GRANULE"] = "source"
         out.attrs["CLASS"] = summary.get("cls")
         out.attrs["SUBCLASSES"] = np.array(summary["subclasses"], dtype="S8")

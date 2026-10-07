@@ -26,6 +26,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.batches import batches
 from sesnaimpute.gutcolors import crisp
 from sesnaimpute.gutcolors import prob as gc_prob
+from sesnaimpute.readings import set_readings
 
 #: The fitter's six classes, in the order every P-product's class axis
 #: uses (IMPLEMENTATION_BMSTP_DRAFT.md section 1).
@@ -54,6 +55,35 @@ CONCORDANT_LABELS = {
 LABEL_SETS = tuple(",".join(CONCORDANT_LABELS[c]) for c in CLASSES)
 
 UNCLASSIFIED_INDEX = crisp.LABEL_INDEX["UNCLASSIFIED"]
+
+#: `UNITS`/`READING` (CODING_RULES_BMSTP.md rule 5): every dataset the P10
+#: cascade product carries, measured and imputed halves both.
+_READINGS = {
+    "NAME": ("row into the catalogue, same order",
+             "the source's own name, this product's row order matching the catalogue's"),
+    "P_VERDICT_MEASURED": ("dimensionless",
+                            "the cascade's own verdict probability over the eleven LABELS, "
+                            "run on the measured photometry with the real detection pattern; "
+                            "undefined (NaN) where the detected bands allow no verdict"),
+    "PSI_CLASS": ("dimensionless",
+                   "the measured verdict's probability grouped by class (CONCORDANT_LABELS), "
+                   "floored at PSI_FLOOR_FRAC of its own row's maximum before classify's "
+                   "beta != 0 path takes its log; rows need not sum to 1"),
+    "VERDICT_MEASURED": ("CLASS_CODE",
+                          "the cascade's own most probable verdict on the measured photometry"),
+    "N_DETECTED": ("bands", "the number of this source's eight bands with a measured, positive flux"),
+    "P_VERDICT_IMPUTED": ("dimensionless",
+                           "the cascade's own verdict probability over the eleven LABELS, run "
+                           "on the imputed SED (10**LOG10_FLUX_IMPUTED) with every band usable"),
+    "VERDICT_IMPUTED": ("CLASS_CODE",
+                         "the cascade's own most probable verdict on the imputed SED; the MAP "
+                         "class's own SED read back, not independent evidence"),
+    "PSI_VOTES": ("votes",
+                   "four readings each cast one unit over the classes: the prior's leaning at "
+                   "the pixel, the Gaia term's, the colour cuts on the measured bands, the "
+                   "colour cuts on the imputed fluxes; a row sums to the number that voted"),
+    "ENTROPY_PSI_VOTES": ("nats", "the entropy of PSI_VOTES's own row, normalised to 1"),
+}
 
 #: (11, 6) 0/1 label-to-class matrix. Columns need not be disjoint (AGB
 #: overlaps YSO in CLASS_II and TRANSITION_DISK) and need not cover every
@@ -187,6 +217,7 @@ def write_region(path, result):
         f.create_dataset("PSI_CLASS", data=result["psi"])
         f.create_dataset("VERDICT_MEASURED", data=result["verdict"])
         f.create_dataset("N_DETECTED", data=result["n_detected"])
+        set_readings(f, _READINGS)
         f.attrs["GRANULE"] = "source"
         f.attrs["LABELS"] = np.array(crisp.LABELS, dtype="S20")
         f.attrs["CLASSES"] = np.array(CLASSES, dtype="S8")
@@ -270,15 +301,16 @@ def _gaia_leaning_vote(config, region, name):
 
 def build_region_imputed(config, region, st):
     """The imputed half (spec sec 6.5, 7.3; IMPLEMENTATION_BMSTP_DRAFT.md
-    row 2.5): the cascade run on `classify`'s `FLUX_IMPUTED` with
-    `valid = detected = all` -- every band usable, since the imputed SED
-    is the MAP class's own candidate, not a measurement, so it carries no
-    sigma of its own (`sigma = 0`, the crisp limit of `classify_prob`).
+    row 2.5): the cascade run on `classify`'s `LOG10_FLUX_IMPUTED`, `10**x`
+    the median flux in mJy (SPEC_BMSTP_DRAFT.md sec 7.1), with `valid =
+    detected = all` -- every band usable, since the imputed SED is the MAP
+    class's own candidate, not a measurement, so it carries no sigma of
+    its own (`sigma = 0`, the crisp limit of `classify_prob`).
     Reads the measured half (`NAME`, `N_DETECTED`, `VERDICT_MEASURED`,
     `P_VERDICT_MEASURED`) from the cascade product already on disk, and
-    `classify`'s own `FLUX_IMPUTED`/`MAP_CLASS`/`P_YSO`; a missing input
-    fails with one sentence naming the RUNBOOK line that makes it (rule
-    5b), nothing checks its content.
+    `classify`'s own `LOG10_FLUX_IMPUTED`/`MAP_CLASS`/`P_YSO`; a missing
+    input fails with one sentence naming the RUNBOOK line that makes it
+    (rule 5b), nothing checks its content.
 
     `confusion_yso` (spec sec 7.3's second table) is built from the
     MEASURED verdict (this region's own `VERDICT_MEASURED`), not the
@@ -318,7 +350,7 @@ def build_region_imputed(config, region, st):
         classify_name = f["NAME"][:]
         map_class = f["MAP_CLASS"][:]
         p_yso = f["P_YSO"][:]
-        n = f["FLUX_IMPUTED"].shape[0]
+        n = f["LOG10_FLUX_IMPUTED"].shape[0]
     if not np.array_equal(classify_name, name):
         raise ValueError("fittp.cascade --imputed [%s]: classify's NAME does not row-align "
                           "with the cascade's own" % region)
@@ -327,7 +359,10 @@ def build_region_imputed(config, region, st):
     bounds = list(batches(n, ROW_BYTES))
     for i, (start, stop) in enumerate(bounds):
         with h5py.File(path, "r") as f:
-            flux = np.asarray(f["FLUX_IMPUTED"][start:stop], dtype=float)
+            log10_flux = np.asarray(f["LOG10_FLUX_IMPUTED"][start:stop], dtype=float)
+        # section 7.1's median flux, 10**x, where the linear mean was read
+        # before (identity 7: the imputed cascade half's verdicts move).
+        flux = 10.0 ** log10_flux
         sigma = np.zeros_like(flux)
         detected = np.ones(flux.shape, dtype=bool)
         prob = gc_prob.classify_prob(flux, sigma, valid=detected, detected=detected).prob
@@ -406,6 +441,7 @@ def write_region_imputed(path, imputed):
         # entropy (nats), normalised to 1, NaN where nothing voted.
         f.create_dataset("PSI_VOTES", data=imputed["psi_votes"])
         f.create_dataset("ENTROPY_PSI_VOTES", data=imputed["entropy_psi_votes"])
+        set_readings(f, _READINGS)
         f.attrs["CONFUSION_IMPUTED"] = imputed["confusion_imputed"]
         # sec 7.3's first table: imputed verdict against the MAP class.
         f.attrs["CONFUSION_VERDICT_IMPUTED_VS_MAP"] = imputed["confusion_verdict_imputed_vs_map"]
@@ -428,8 +464,8 @@ def build(config, regions=None, imputed=False):
     posterior product. With it: the IMPUTED half only (`P_VERDICT_IMPUTED`,
     `VERDICT_IMPUTED`, the spec sec 7.3 confusion tables,
     `PSI_VOTES`/`ENTROPY_PSI_VOTES`), reading the measured half from the
-    cascade product already on disk, `classify`'s own `FLUX_IMPUTED`, the
-    prior atlas and the fit files' own Gaia term. A missing input fails
+    cascade product already on disk, `classify`'s own `LOG10_FLUX_IMPUTED`,
+    the prior atlas and the fit files' own Gaia term. A missing input fails
     with one sentence naming the RUNBOOK line that makes it (rule 5b);
     nothing checks its content.
     """
@@ -485,7 +521,7 @@ if __name__ == "__main__":
     parser.add_argument("--imputed", action="store_true",
                          help="the imputed half only (P_VERDICT_IMPUTED, VERDICT_IMPUTED, the "
                               "spec sec 7.3 confusion tables, PSI_VOTES/ENTROPY_PSI_VOTES): reads "
-                              "the measured half already on disk and classify's own FLUX_IMPUTED. "
+                              "the measured half already on disk and classify's own LOG10_FLUX_IMPUTED. "
                               "Without this flag: the measured half only, never opening a fit "
                               "file or the posterior product.")
     args = parser.parse_args()

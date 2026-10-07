@@ -8,7 +8,7 @@ nside-512 child of a region's source-bearing nside-256 pixels, not merely
 an occupied one. Each source's pixel is `bmstp.density`'s own `HPX_512`
 column (P1); the per-source `P_CLASS`/`P_YSO` come from `fittp.classify`
 (P8), read in source batches (rule 10b) and folded straight into each
-admitted pixel's running sum and count -- P8's `CANDIDATE_FLUX` and
+admitted pixel's running sum and count -- P8's `LOG10_CANDIDATE_FLUX` and
 `LOG10_FLUX_IMPUTED_COV` are what make a region-sized read of it expensive
 (W7 review finding 6), so `P_CLASS`/`P_YSO` alone are read here, never
 the whole file. An admitted pixel with no sources of its own keeps
@@ -28,6 +28,7 @@ from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.batches import batches
 from sesnaimpute.fittp.classify import CLASSES, YSO_INDEX
+from sesnaimpute.readings import set_readings
 
 #: Per-row working set for the batch loop (rule 10b): HPX_512 (int64) and
 #: P_CLASS (6 float64) / P_YSO (float64) reads, at a generous margin.
@@ -96,6 +97,14 @@ def write_region(path, result):
         for ci, cls in enumerate(CLASSES):
             f.create_dataset("MEAN_P_%s" % cls, data=result["mean_p"][:, ci])
         f.create_dataset("N_YSO_ABOVE_HALF", data=result["n_yso_half"])
+        readings = {
+            "HPX_PIX_512": ("nside-512 HEALPix pixel", "this row's admitted pixel, catalog.depth_grid's own set"),
+            "N_SOURCES": ("sources", "the pixel's own source count; 0 and a NaN mean for an admitted pixel with none"),
+            "N_YSO_ABOVE_HALF": ("sources", "the pixel's own count of P(YSO | D) > 0.5 sources"),
+        }
+        for cls in CLASSES:
+            readings["MEAN_P_%s" % cls] = ("dimensionless", "the pixel's own mean P(%s | D) over its sources" % cls)
+        set_readings(f, readings)
         f.attrs["GRANULE"] = "hpx512"
         f.attrs["CLASSES"] = np.array(CLASSES, dtype="S8")
 

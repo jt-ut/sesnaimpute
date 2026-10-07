@@ -23,13 +23,32 @@ name, SPEC_BMSTP_DRAFT.md section 6.1) straight through, unreduced by
 `A_COL_K` (`bmstp/density/table_density_source__<R>.hdf5`) to form
 `XI_POST` itself.
 
-`LOG10_FLUX_IMPUTED_COV` replaces `FLUX_IMPUTED_COV`:
-the MAP class's own `LOG10_FLUX_COV` (P7, the imputed flux's total
-uncertainty in log10 flux, section 6.1) with every OBSERVED band's row and
-column zeroed and that band's own diagonal set to the catalogue's own
-variance in log10 flux, `(SIGMA_FNU_MJY / (FNU_MJY ln 10))^2` -- the copied
-datum is independent of the model, so its uncertainty is the catalogue's,
-not the class's, and it carries no covariance with any other band.
+`LOG10_FLUX_IMPUTED` (n, 8), the one scale section 7.1 stores the imputed
+photometry on: the MAP class's own `LOG10_FLUX_MEAN` on the bands it did
+not measure, and `log10(FNU_MJY)` on the bands it did -- the catalogue's
+own measurement, recoverable to float32 with no join back to the
+catalogue. `LOG10_CANDIDATE_FLUX` (n, 6, 8) is the same construction for
+every class, not only the MAP one (each class's own `LOG10_FLUX_MEAN` with
+the measured bands restored).
+
+`LOG10_FLUX_IMPUTED_COV` (n, 8, 8), section 6.1's `m`/`u` block structure
+(measured bands `m`, imputed bands `u`): on `[m, m]` the catalogue's own
+variance in log10 flux, `(SIGMA_FNU_MJY / (FNU_MJY ln 10))^2`, diagonal,
+zero off-diagonal (two catalogue errors are independent by band); on
+`[u, u']` the MAP class's own `LOG10_FLUX_COV` (P7) unchanged, between plus
+within; on `[m, u]` (and its transpose `[u, m]`) the fit's own
+cross-covariance between a measured and an imputed band, `sum_k P_k (D_k
+Sigma_k D_k^T)[m, u]`, `P_k` the MAP class's stored `P_DENSE` (and `1 -
+P_DENSE`) and `Sigma_k = (X^T W X)^-1` rebuilt here (never stored) from the
+catalogue's own measured-band weights (`likelihood.SIGMA_CAL_DEX`, this
+source's MAP class's own `sigma_lib,L`) and `D_k`'s design from `config`
+at law `k` (`population.selection.kappa_hybrid`/`ak_per_av`, `likelihood
+.GRAY_COLUMN`) -- the same two matrix products `likelihood.fit` forms per
+source and design, since neither depends on which template is being
+scored, so no template loop is needed to rebuild it. This block is `Sigma_k
+= (X^T W X)^-1` itself, not a per-template quantity (section 6.1): the
+between-template term contributes nothing to `[m, u]`, since a measured
+band's own datum does not vary across templates.
 """
 
 import argparse
@@ -40,10 +59,14 @@ import h5py
 import numpy as np
 
 from sesnaimpute import config as config_module
+from sesnaimpute.constants import GUTERMUTH_LABELS
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.batches import batches
+from sesnaimpute.fittp import likelihood
+from sesnaimpute.population import selection as population_selection
+from sesnaimpute.readings import set_readings
 
 #: The fitter's six classes, in the order every P-product's class axis
 #: uses (IMPLEMENTATION_BMSTP_DRAFT.md section 1) -- the same order
@@ -84,9 +107,9 @@ CLASS_SLICES = _class_slices()
 SUBCLASS_LABELS = tuple("%s:%s" % (s.cls, s.name) for s in _SUBCLASS_NAMES)
 
 #: Per-row working set for the batch loop (rule 10b): six classes' own
-#: LN_EVIDENCE (<=9 cols), FLUX_MEAN (8) and LOG10_FLUX_COV (8x8) float32
-#: rows, plus the measured flux/sigma/origin and the global (25) and
-#: (6,8,8) intermediates, at a generous margin.
+#: LN_EVIDENCE (<=9 cols), LOG10_FLUX_MEAN (8) and LOG10_FLUX_COV (8x8)
+#: float32 rows, plus the measured flux/sigma/origin and the global (25)
+#: and (6,8,8) intermediates, at a generous margin.
 ROW_BYTES = 8192
 
 #: The literature-band sensitivity runs (spec sec 7.2, sec 10; P9's own
@@ -263,8 +286,8 @@ def _part_path(path, bi):
 #: off the six fit files' own columns of the same name exactly as
 #: `LN_EVIDENCE` -- no MAP-class column: a reader picks the class it wants
 #: and divides `A_K_POST` by P1's own `A_COL_K`.
-_CLASSIFY_PART_KEYS = ("NAME", "P_CLASS", "P_SUBCLASS", "P_YSO", "MAP_CLASS", "N_DETECTED",
-                       "CANDIDATE_FLUX", "FLUX_IMPUTED", "LOG10_FLUX_IMPUTED_COV",
+_CLASSIFY_PART_KEYS = ("NAME", "CLASS_SESNA", "P_CLASS", "P_SUBCLASS", "P_YSO", "MAP_CLASS", "N_DETECTED",
+                       "LOG10_CANDIDATE_FLUX", "LOG10_FLUX_IMPUTED", "LOG10_FLUX_IMPUTED_COV",
                        "A_K_POST", "A_K_POST_SIG",
                        "ENTROPY_CLASS", "ENTROPY_SUBCLASS")
 
@@ -274,20 +297,53 @@ _CLASSIFY_PART_KEYS = ("NAME", "P_CLASS", "P_SUBCLASS", "P_YSO", "MAP_CLASS", "N
 _LN10 = np.log(10.0)
 
 
-def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
+def _cross_cov_by_law(config, weight):
+    """`[D_k Sigma_k D_k^T]` for both extinction-law designs, `k = 0`
+    (diffuse) and `k = 1` (dense), vectorised over the batch's own `m`
+    sources at once (module docstring): `Sigma_k = (X^T W X)^-1` is this
+    design's `(2, 2)` parameter covariance, `weight` (m, 8) the per-source,
+    per-band measurement weight already carrying the catalogue sigma, the
+    calibration floor and each source's own MAP-class `sigma_lib,L`
+    (`likelihood.prepare`'s own formula). `D_k = [ext_col_k, GRAY_COLUMN]` does not depend on the
+    source (`likelihood.fit`'s own `ext_col`/`GRAY_COLUMN`), so it is built
+    once per design and broadcast, never recomputed per source. Returns
+    `(cross_0, cross_1)`, each `(m, 8, 8)`.
+    """
+    gray = np.full(N_BANDS, likelihood.GRAY_COLUMN, dtype=np.float64)
+    cross = []
+    for k in (0, 1):
+        ext_col_k = -0.4 * population_selection.kappa_hybrid(config, float(k)) \
+            * float(population_selection.ak_per_av(config, float(k)))
+        design_k = np.column_stack([ext_col_k, gray])            # (8, 2)
+        wx = design_k[None, :, :] * weight[:, :, None]            # (m, 8, 2)
+        xtwx = np.einsum("mbi,bj->mij", wx, design_k)             # (m, 2, 2)
+        det = xtwx[:, 0, 0] * xtwx[:, 1, 1] - xtwx[:, 0, 1] * xtwx[:, 1, 0]
+        safe_det = np.where(det > 0, det, 1.0)
+        xtwx_inv = np.empty_like(xtwx)
+        xtwx_inv[:, 0, 0] = xtwx[:, 1, 1] / safe_det
+        xtwx_inv[:, 1, 1] = xtwx[:, 0, 0] / safe_det
+        xtwx_inv[:, 0, 1] = -xtwx[:, 0, 1] / safe_det
+        xtwx_inv[:, 1, 0] = -xtwx[:, 1, 0] / safe_det
+        cross.append(np.einsum("bi,mij,cj->mbc", design_k, xtwx_inv, design_k))
+    return cross[0], cross[1]
+
+
+def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals):
     """One ROW_BYTES batch's own P8 rows (rule 10b): a batch-sized array
     only, never a region-sized one."""
     m = stop - start
-    flux_mean_stack = np.empty((len(CLASSES), m, N_BANDS), dtype=np.float64)
+    log10_flux_mean_stack = np.empty((len(CLASSES), m, N_BANDS), dtype=np.float64)
     flux_cov_stack = np.empty((len(CLASSES), m, N_BANDS, N_BANDS), dtype=np.float64)
     a_k_post_stack = np.empty((len(CLASSES), m), dtype=np.float32)
     a_k_post_sig_stack = np.empty((len(CLASSES), m), dtype=np.float32)
+    p_dense_stack = np.empty((len(CLASSES), m), dtype=np.float64)
     for ci, cls in enumerate(CLASSES):
         f = class_files[cls]
-        flux_mean_stack[ci] = np.asarray(f["FLUX_MEAN"][start:stop, :], dtype=np.float64)
+        log10_flux_mean_stack[ci] = np.asarray(f["LOG10_FLUX_MEAN"][start:stop, :], dtype=np.float64)
         flux_cov_stack[ci] = np.asarray(f["LOG10_FLUX_COV"][start:stop, :, :], dtype=np.float64)
         a_k_post_stack[ci] = np.asarray(f["A_K_POST"][start:stop], dtype=np.float32)
         a_k_post_sig_stack[ci] = np.asarray(f["A_K_POST_SIG"][start:stop], dtype=np.float32)
+        p_dense_stack[ci] = np.asarray(f["P_DENSE"][start:stop], dtype=np.float64)
 
     ln_ev = _batch_ln_evidence(class_files, psi_file, beta, start, stop, m)
     # A flagged source's fit is undefined at every template of every class
@@ -303,11 +359,21 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
         flux = np.asarray(cf["FNU_MJY"][start:stop], dtype=np.float64)
         sigma = np.asarray(cf["SIGMA_FNU_MJY"][start:stop], dtype=np.float64)
         origin = np.asarray(cf["ORIGIN_FNU"][start:stop])
-    detected = origin == 1
+        # the class SESNA delivered for these sources, carried through so the
+        # catalogue's own label is in the product the classification is read
+        # from; nothing in the pipeline reads it (rule 7).
+        class_sesna = np.asarray(cf["CLASS"][start:stop], dtype=np.int64)
+    unknown = set(np.unique(class_sesna).tolist()) - set(GUTERMUTH_LABELS.index.tolist())
+    if unknown:
+        raise ValueError("fittp.classify: catalogue CLASS codes absent from "
+                          "constants.GUTERMUTH_LABELS: %s" % sorted(unknown))
+    detected = (origin == 1) & (flux > 0)
 
-    cflux = np.transpose(flux_mean_stack, (1, 0, 2)).copy()  # (m, 6, 8)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log10_flux_meas = np.log10(np.where(detected, flux, 1.0))
+    cflux = np.transpose(log10_flux_mean_stack, (1, 0, 2)).copy()  # (m, 6, 8)
     mask = np.broadcast_to(detected[:, None, :], cflux.shape)
-    cflux = np.where(mask, flux[:, None, :], cflux)
+    cflux = np.where(mask, log10_flux_meas[:, None, :], cflux)
     row_idx = np.arange(m)
     # a safe (in-range) class index for the gather below; the flagged rows
     # it touches are overwritten with NaN immediately after, never read.
@@ -315,12 +381,28 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
     imputed = cflux[row_idx, map_c_safe, :]
     imputed_cov = flux_cov_stack[map_c_safe, row_idx]
 
-    # LOG10_FLUX_IMPUTED_COV: on an observed band the
-    # copied datum is independent of the model, so its row and column are
-    # zeroed and its own diagonal is set to the catalogue's own variance in
-    # log10 flux -- never the class's model uncertainty there.
-    not_detected = ~detected
-    imputed_cov = imputed_cov * not_detected[:, :, None] * not_detected[:, None, :]
+    # LOG10_FLUX_IMPUTED_COV (module docstring, SPEC_BMSTP_DRAFT.md 6.1):
+    # [u, u'] (both imputed) keeps the MAP class's own LOG10_FLUX_COV
+    # untouched; [m, m'] (both measured) is zeroed, [m, m] (the diagonal)
+    # is overwritten by the catalogue's own log10-flux variance below; and
+    # the mixed block [m, u] carries the fit's own cross-covariance,
+    # rebuilt here from the MAP class's own sigma_lib,L and its stored
+    # P_DENSE split between the two extinction-law designs.
+    mm_either = detected[:, :, None] | detected[:, None, :]
+    cross_mask = detected[:, :, None] ^ detected[:, None, :]
+    imputed_cov = np.where(mm_either, 0.0, imputed_cov)
+
+    safe_flux = np.where(detected, flux, 1.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sigma_log = sigma / (safe_flux * _LN10)
+    sigma_lib_map = sigma_lib_vals[map_c_safe]                        # (m,)
+    sigma2 = sigma_log ** 2 + likelihood.SIGMA_CAL_DEX[None, :] ** 2 + sigma_lib_map[:, None] ** 2
+    weight = np.where(detected & (sigma_log > 0), 1.0 / sigma2, 0.0)  # (m, 8)
+    cross_0, cross_1 = _cross_cov_by_law(config, weight)
+    p_dense_map = p_dense_stack[map_c_safe, row_idx]                  # (m,)
+    cross_total = (1.0 - p_dense_map)[:, None, None] * cross_0 + p_dense_map[:, None, None] * cross_1
+    imputed_cov = np.where(cross_mask, cross_total, imputed_cov)
+
     band_idx = np.arange(N_BANDS)
     with np.errstate(divide="ignore", invalid="ignore"):
         catalogue_var_log10 = (sigma / (flux * _LN10)) ** 2
@@ -330,7 +412,7 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
     imputed[flagged] = np.nan
     imputed_cov[flagged] = np.nan
     detected_ok = detected & ~flagged[:, None]
-    imputed_identity_err = float(np.max(np.abs(imputed[detected_ok] - flux[detected_ok]))) \
+    imputed_identity_err = float(np.max(np.abs(10.0 ** imputed[detected_ok] - flux[detected_ok]))) \
         if detected_ok.any() else 0.0
 
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -339,15 +421,16 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
 
     # A_K_POST/A_K_POST_SIG, (m, 6) in CLASSES order (module docstring):
     # read off the six fit files' own columns, transposed to a row per
-    # source -- no MAP-class reduction, unlike CANDIDATE_FLUX/FLUX_IMPUTED
-    # above.
+    # source -- no MAP-class reduction, unlike LOG10_CANDIDATE_FLUX/
+    # LOG10_FLUX_IMPUTED above.
     a_k_post = np.ascontiguousarray(a_k_post_stack.T)
     a_k_post_sig = np.ascontiguousarray(a_k_post_sig_stack.T)
 
     return dict(
+        class_sesna=class_sesna.astype(np.int16),
         p_class=p_cls.astype(np.float32), p_subclass=p_sub.astype(np.float32),
         map_class=map_c.astype(np.int8), n_detected=detected.sum(axis=1).astype(np.int8),
-        candidate_flux=cflux.astype(np.float32), flux_imputed=imputed.astype(np.float32),
+        log10_candidate_flux=cflux.astype(np.float32), log10_flux_imputed=imputed.astype(np.float32),
         log10_flux_imputed_cov=imputed_cov.astype(np.float32),
         a_k_post=a_k_post, a_k_post_sig=a_k_post_sig,
         entropy_class=ent_c.astype(np.float32), entropy_subclass=ent_s.astype(np.float32),
@@ -358,13 +441,14 @@ def _classify_batch(class_files, psi_file, beta, cat_path, start, stop):
 def _write_classify_part(part_path, batch):
     with h5py.File(part_path, "w") as f:
         f.create_dataset("NAME", data=batch["name"])
+        f.create_dataset("CLASS_SESNA", data=batch["class_sesna"])
         f.create_dataset("P_CLASS", data=batch["p_class"])
         f.create_dataset("P_SUBCLASS", data=batch["p_subclass"])
         f.create_dataset("P_YSO", data=batch["p_class"][:, YSO_INDEX])
         f.create_dataset("MAP_CLASS", data=batch["map_class"])
         f.create_dataset("N_DETECTED", data=batch["n_detected"])
-        f.create_dataset("CANDIDATE_FLUX", data=batch["candidate_flux"])
-        f.create_dataset("FLUX_IMPUTED", data=batch["flux_imputed"])
+        f.create_dataset("LOG10_CANDIDATE_FLUX", data=batch["log10_candidate_flux"])
+        f.create_dataset("LOG10_FLUX_IMPUTED", data=batch["log10_flux_imputed"])
         f.create_dataset("LOG10_FLUX_IMPUTED_COV", data=batch["log10_flux_imputed_cov"])
         f.create_dataset("A_K_POST", data=batch["a_k_post"])
         f.create_dataset("A_K_POST_SIG", data=batch["a_k_post_sig"])
@@ -374,10 +458,18 @@ def _write_classify_part(part_path, batch):
 
 def build_region(config, region, st, beta):
     """One region's P8, written one `ROW_BYTES` batch's own part file at a
-    time (rule 10b: `CANDIDATE_FLUX` and `LOG10_FLUX_IMPUTED_COV` are the two
-    region-sized arrays the W7 review found here); the caller joins the
-    parts once every batch is done."""
+    time (rule 10b: `LOG10_CANDIDATE_FLUX` and `LOG10_FLUX_IMPUTED_COV` are
+    the two region-sized arrays the W7 review found here); the caller
+    joins the parts once every batch is done."""
     _require_fit_files(config, region)
+
+    # section 6.1's sigma_lib,L, one number per class's own library,
+    # gathered once here (never per batch or per source) so `_classify_
+    # batch` rebuilds the MAP class's own measurement weight exactly as
+    # `likelihood.prepare` built it at fit time.
+    lib_path = config_module.product_path(config, "fittp", "check", "library-resolution", "survey")
+    sigma_lib_by_cls = likelihood.sigma_lib_by_class(lib_path)
+    sigma_lib_vals = np.array([sigma_lib_by_cls[cls] for cls in CLASSES], dtype=np.float64)
 
     class_files = {}
     names = None
@@ -414,7 +506,7 @@ def build_region(config, region, st, beta):
     n_flagged = 0
     bounds = list(batches(n, ROW_BYTES))
     for bi, (start, stop) in enumerate(bounds):
-        batch = _classify_batch(class_files, psi_file, beta, cat_path, start, stop)
+        batch = _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals)
         batch["name"] = names[start:stop]
         part_path = _part_path(path, bi)
         _write_classify_part(part_path, batch)
@@ -433,6 +525,53 @@ def build_region(config, region, st, beta):
                 imputed_identity_err=imputed_identity_err, n_flagged=n_flagged)
 
 
+#: `UNITS`/`READING` (CODING_RULES_BMSTP.md rule 5): every dataset the
+#: joined P8 posterior product carries.
+_READINGS = {
+    "NAME": ("row into the catalogue, same order",
+             "the source's own name, this product's row order matching the catalogue's"),
+    "CLASS_SESNA": ("SESNA class code",
+                     "the class SESNA delivered for this source, the curated catalogue's own "
+                     "CLASS copied verbatim; the codes and their names are "
+                     "constants.GUTERMUTH_LABELS, the same vocabulary the cascade product's "
+                     "VERDICT_MEASURED uses; nothing in the pipeline reads this column"),
+    "P_CLASS": ("dimensionless",
+                 "the posterior probability of each of the six classes, CLASSES order; "
+                 "sums to 1 over the row"),
+    "P_SUBCLASS": ("dimensionless",
+                    "the posterior probability of each of the 25 subclasses, SUBCLASSES "
+                    "order; summed within a class equals that class's own P_CLASS"),
+    "P_YSO": ("dimensionless", "P_CLASS's own YSO column, read out for convenience"),
+    "MAP_CLASS": ("index into CLASSES",
+                   "the class of maximum posterior probability; -1 on a flagged source"),
+    "N_DETECTED": ("bands", "the number of this source's eight bands with a measured, positive flux"),
+    "LOG10_CANDIDATE_FLUX": ("log10 mJy",
+                              "each class's own LOG10_FLUX_MEAN with the measured bands restored "
+                              "to the catalogue's own log10 flux, one row per class, CLASSES order"),
+    "LOG10_FLUX_IMPUTED": ("log10 mJy",
+                            "the evidence-weighted mean of the models' log10 flux at their "
+                            "fitted marks; 10**x is the median flux in mJy; on a measured band "
+                            "x is log10 of the catalogue flux"),
+    "LOG10_FLUX_IMPUTED_COV": ("dex^2",
+                                "on an imputed band the log-space covariance, 68 % interval "
+                                "10**(x - s) to 10**(x + s) with s the root of the diagonal; on "
+                                "a measured band the catalogue sigma, recovered as sigma_mJy = "
+                                "10**x * ln 10 * s and read as a symmetric error in linear flux; "
+                                "cross terms between a measured and an imputed band are the "
+                                "fit's own and are what a colour between them needs; cross terms "
+                                "between two measured bands are zero"),
+    "A_K_POST": ("mag A_K",
+                  "the prior-weighted mean of the fitted extinction along the fit's ridge, a "
+                  "mean in linear extinction; sits below the wall by the column kernel's width "
+                  "on a source the data cannot place"),
+    "A_K_POST_SIG": ("mag A_K",
+                      "the spread of the same posterior extinction mark, the square root of "
+                      "its second moment less its mean squared"),
+    "ENTROPY_CLASS": ("nats", "the entropy of P_CLASS's own row"),
+    "ENTROPY_SUBCLASS": ("nats", "the entropy of P_SUBCLASS's own row"),
+}
+
+
 def join_classify_parts(path, part_paths, n_source, fit_files, n_flagged):
     """Joins one region's P8 part files, one part's rows at a time,
     dataset by dataset (rule 10b: never a region-sized array); removes the
@@ -449,13 +588,14 @@ def join_classify_parts(path, part_paths, n_source, fit_files, n_flagged):
                 for key in _CLASSIFY_PART_KEYS:
                     out[key][offset:offset + m] = pf[key][:]
             offset += m
+        set_readings(out, _READINGS)
         out.attrs["GRANULE"] = "source"
         out.attrs["CLASSES"] = np.array(CLASSES, dtype="S8")
         out.attrs["SUBCLASSES"] = np.array(SUBCLASS_LABELS, dtype="S12")
         out.attrs["FIT_FILES"] = fit_files
         # sources flagged by the fit (n_detected < 2, or a singular design
         # matrix): MAP_CLASS is -1 for these, never STAR, and P_CLASS/
-        # P_SUBCLASS/P_YSO/FLUX_IMPUTED are NaN (R3 U1, U2) -- recorded
+        # P_SUBCLASS/P_YSO/LOG10_FLUX_IMPUTED are NaN (R3 U1, U2) -- recorded
         # once here rather than recomputed by every consumer.
         out.attrs["N_FLAGGED"] = n_flagged
     for part_path in part_paths:
@@ -588,6 +728,21 @@ def write_sensitivity(path, region, result):
         f.create_dataset("FRAC_MAP_CHANGED", data=frac_map_changed.astype(np.float32))
         f.create_dataset("N_PYSO_ABOVE_HALF", data=n_pyso_above_half.astype(np.int32))
         f.create_dataset("N_SOURCES", data=n_sources.astype(np.int32))
+        set_readings(f, {
+            "REGION": ("region name", "this row's region, REGION order fixed to regions.REGIONS"),
+            "RUN": ("sensitivity-run name", "one of the nine literature-band re-runs of spec sec 7.2"),
+            "SCALING": ("dimensionless",
+                         "the factor this run multiplied that class's sky density by (1.0 "
+                         "where the run does not touch the class); yso_floor's own row is "
+                         "this region's mean per-source factor, not a fixed literature-band one"),
+            "FRAC_MAP_CHANGED": ("dimensionless",
+                                   "the fraction of this region's sources whose MAP class moved "
+                                   "under this run against the nominal classification"),
+            "N_PYSO_ABOVE_HALF": ("sources",
+                                    "the count of P(YSO) > 0.5 sources under this run; column 0 "
+                                    "is the nominal classification, no run applied"),
+            "N_SOURCES": ("sources", "this region's own source count, the denominator of FRAC_MAP_CHANGED"),
+        })
         f.attrs["GRANULE"] = "region"
         f.attrs["SCALING_YSO_FLOOR_IS_PER_SOURCE"] = (
             "SCALING row %d (yso_floor) is each region's own mean over sources of "
@@ -610,7 +765,7 @@ def build(config, regions=None, beta=0.0):
                                  result["n_source"], result["fit_files"], result["n_flagged"])
 
             # the joined file's own small columns (n, 6) and (n, 25) --
-            # not CANDIDATE_FLUX/LOG10_FLUX_IMPUTED_COV, the two region-sized
+            # not LOG10_CANDIDATE_FLUX/LOG10_FLUX_IMPUTED_COV, the two region-sized
             # arrays rule 10b keeps out of memory (W7 review finding 6).
             with h5py.File(result["path"], "r") as f:
                 p_class = np.asarray(f["P_CLASS"][:])
