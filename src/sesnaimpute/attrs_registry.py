@@ -89,6 +89,39 @@ REGISTRY = {
         "the pixel's solid angle, times the square of the cloud's own "
         "share of the line-of-sight column."),
 
+    # population.pahc_curve -- curve_pahc_survey: the PAH-contamination
+    # probability curve P(q), survey-wide.
+    ("curve_pahc_survey", "LOG10_Q_EDGES"): ("log10(dimensionless)",
+        "The edges of the 40 bins in log10(q) this curve is tabulated on, "
+        "q being a source's own 8 micron completeness limit divided by "
+        "its predicted photospheric 8 micron flux: bin j runs from "
+        "LOG10_Q_EDGES[j] to LOG10_Q_EDGES[j+1]."),
+    ("curve_pahc_survey", "P_Q"): ("dimensionless",
+        "For each bin of LOG10_Q_EDGES, the probability that a source at "
+        "that q is contaminated by extended PAH nebular emission in its "
+        "aperture: the measured excess fraction, scaled by the bin's own "
+        "8-micron-measured share and with the survey's noise rate "
+        "subtracted, floored at zero. Zero for every bin whose q is too "
+        "small for a 3-sigma nebular excess to register at all (see "
+        "P_Q_BRIGHT_EXCESS)."),
+    ("curve_pahc_survey", "N_PER_BIN"): ("sources",
+        "For each bin of LOG10_Q_EDGES, how many sources with measured "
+        "3.6 and 4.5 micron photometry and no 4.5 micron excess fall in "
+        "it: this curve's own denominator."),
+    ("curve_pahc_survey", "M_PER_BIN"): ("sources",
+        "For each bin of LOG10_Q_EDGES, how many of that bin's own "
+        "N_PER_BIN sources also have a measured 8 micron flux."),
+    ("curve_pahc_survey", "P_Q_BRIGHT_EXCESS"): ("dimensionless",
+        "For each bin of LOG10_Q_EDGES whose q is too small for a "
+        "3-sigma nebular excess to register (where P_Q is zeroed for "
+        "that reason), the measured, unscaled fraction of that bin's "
+        "8-micron-measured sources that show an excess: not "
+        "contamination but circumstellar 8 micron emission. Zero for "
+        "every other bin."),
+    ("curve_pahc_survey", "N_PER_BIN_BRIGHT_EXCESS"): ("sources",
+        "The same N_PER_BIN count, kept for the bins P_Q_BRIGHT_EXCESS "
+        "describes. Zero for every other bin."),
+
     # population.column_grid -- column-grid_sesna_survey: the fixed column
     # ladder every class tabulates its column kernel on.
     ("column-grid_sesna_survey", "A_NODES"): ("mag A_K",
