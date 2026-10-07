@@ -55,47 +55,39 @@ CONCORDANT_LABELS = {
 #: cascade product carries, measured and imputed halves both.
 _READINGS = {
     "NAME": ("source name",
-        "The source's name as the SESNA catalog gives it. Rows follow the catalog's "
-        "own order."),
+        "The source's name from the SESNA catalog. Rows are in catalog order."),
     "N_DETECTED": ("bands",
-        "How many of the source's eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 "
-        "micron) hold a measured, positive flux. The remaining bands are upper limits "
-        "or were never observed at this position."),
+        "How many of the eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron) "
+        "have a measured, positive flux."),
     "VERDICT_MEASURED": ("SESNA class code",
-        "The class the color cuts of Gutermuth et al. (2009) assign this source from "
-        "its measured fluxes alone. Those cuts are deterministic, so this is the "
-        "category the source's colors fall in rather than a most likely class. The "
-        "codes are 0 deeply embedded protostar, 1 class I protostar, 2 class II, 3 "
-        "transition disk, 9 H2 shock blob, 19 PAH emitter (star-forming galaxy), 29 "
-        "AGN, 39 PAH-contaminated source, 49 generic galaxy and 99 diskless star. A source "
-        "whose colors satisfy none of the cuts' rules is -100."),
+        "The class the Gutermuth et al. (2009) color cuts give from the measured "
+        "fluxes alone. The cuts are deterministic, so this is the category the "
+        "colors fall in, not a most likely class. Codes: 0 deeply embedded "
+        "protostar, 1 class I, 2 class II, 3 transition disk, 9 H2 shock blob, 19 "
+        "PAH emitter (star-forming galaxy), 29 AGN, 39 PAH-contaminated source, 49 "
+        "generic galaxy, 99 diskless star, -100 unclassified, with -100 where no "
+        "cut applies."),
     "VERDICT_IMPUTED": ("SESNA class code",
-        "The class the color cuts of Gutermuth et al. (2009) assign this source when "
-        "the bands the survey did not measure are filled in with the pipeline's "
-        "estimates. Those estimates already assume the class the pipeline chose, so "
-        "this column is a comparison rather than independent evidence about the "
-        "class. The codes are the same as in VERDICT_MEASURED."),
+        "The same color cuts after the unmeasured bands are filled in with the "
+        "pipeline's estimates. Those estimates assume the class the pipeline chose, "
+        "so this is a comparison, not independent evidence. Codes as in "
+        "VERDICT_MEASURED."),
     "P_VERDICT_MEASURED": ("probability",
-        "How the color cuts of Gutermuth et al. (2009) would classify this source if "
-        "its measured fluxes were moved around within their errors: a probability for "
-        "each of the cuts' eleven categories, in the column order of the LABELS "
-        "attribute of this file. The eleven add to 1 for every source, and the "
-        "unclassified column holds the probability that the measured bands satisfy "
-        "none of the cuts' rules."),
+        "Probability of each of the color cuts' eleven categories when the measured "
+        "fluxes are varied within their errors. Column order is the LABELS "
+        "attribute. Sums to 1; the unclassified column is the chance that no cut "
+        "applies."),
     "PSI_VOTES": ("votes",
-        "How four independent indicators classify this source, each casting one vote "
-        "spread over the six classes in the column order of the CLASSES attribute of "
-        "this file. The indicators are: the mix of classes expected at this position "
-        "on the sky; whether Gaia's detection and parallax suit each class; the color "
-        "cuts of Gutermuth et al. (2009) on the measured fluxes; and those same cuts "
-        "on the spectrum with the unmeasured bands filled in. An indicator that "
-        "cannot speak for this source casts no vote, so the votes add to between 0 "
-        "and 4. They are reported for comparison and do not enter the classification."),
-    "ENTROPY_PSI_VOTES": ("nats",
-        "How much the four indicators in PSI_VOTES disagree about this source, "
-        "computed after scaling its votes to add to 1. Zero means every indicator "
-        "that voted chose the same class. The value is not a number where no "
-        "indicator voted."),
+        "Four indicators, each casting one vote across the six classes in CLASSES "
+        "order: the class mix expected at the source's position, Gaia's detection "
+        "and parallax, the Gutermuth color cuts on the measured fluxes, and those "
+        "cuts on the filled-in spectrum. An indicator with nothing to say abstains, "
+        "so a row sums to between 0 and 4. Reported only; the classification does "
+        "not use it."),
+    "ENTROPY_PSI_VOTES": ("fraction of maximum",
+        "How spread those votes are, divided by their maximum spread. 0 means the "
+        "indicators that voted agreed, 1 means they spread evenly over the six "
+        "classes. Not a number where none voted."),
 }
 
 
@@ -336,7 +328,10 @@ def build_region_imputed(config, region, st):
     row_sum = votes.sum(axis=1)
     with np.errstate(divide="ignore", invalid="ignore"):
         p_votes = votes / row_sum[:, None]
-        entropy = -np.nansum(np.where(p_votes > 0, p_votes * np.log(p_votes), 0.0), axis=1)
+        # divided by its own maximum, ln of the number of classes, so the
+        # value reads 0 (the voters agreed) to 1 (they spread evenly).
+        entropy = -np.nansum(np.where(p_votes > 0, p_votes * np.log(p_votes), 0.0),
+                              axis=1) / np.log(len(CLASSES))
     entropy = np.where(row_sum > 0, entropy, np.nan)
 
     return dict(verdict=verdict_imp,

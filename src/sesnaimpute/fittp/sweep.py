@@ -170,96 +170,78 @@ _PART_KEYS = ("NAME", "LN_EVIDENCE", "LOG10_FLUX_MEAN", "LOG10_FLUX_COV", "TOPK_
 #: a `_PART_KEYS` member).
 _READINGS = {
     "NAME": ("source name",
-        "The source's name as the SESNA catalog gives it. Rows follow the catalog's "
-        "own order."),
+        "The source's name from the SESNA catalog. Rows are in catalog order."),
     "N_DETECTED": ("bands",
-        "How many of the source's eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 "
-        "micron) hold a measured, positive flux. The remaining bands are upper "
-        "limits or were never observed at this position."),
+        "How many of the eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron) "
+        "have a measured, positive flux."),
     "LN_EVIDENCE": ("nats",
-        "How well this class explains the source, as a natural logarithm, given "
-        "separately for each subdivision of the class named in the SUBCLASSES "
-        "attribute of this file. Each value gathers every model in that subdivision "
-        "under both extinction laws. It is minus infinity where the subdivision "
-        "holds no models, or where the class cannot explain the source at all, or "
-        "where the source could not be fitted."),
+        "How well this class explains the source, one value per subdivision named "
+        "in the SUBCLASSES attribute, as a natural logarithm. Each gathers every "
+        "model of that subdivision under both extinction laws. Minus infinity means "
+        "the subdivision has no models, or the class cannot explain the source, or "
+        "the source could not be fitted."),
     "LOG10_FLUX_MEAN": ("log10 of flux in mJy",
-        "This class's estimate of the source's eight-band spectrum, as the base-10 "
-        "logarithm of flux in mJy, in the band order J, H, Ks, 3.6, 4.5, 5.8, 8.0 "
-        "and 24 micron. It averages the models of this class, each weighted by how "
-        "well it explains the measured photometry. Raise 10 to the stored value to "
-        "get a flux in mJy."),
+        "This class's estimate of the eight-band spectrum, band order J, H, Ks, "
+        "3.6, 4.5, 5.8, 8.0 and 24 micron, averaging its models by their share of "
+        "the support for the source. 10**x is a flux in mJy."),
     "LOG10_FLUX_COV": ("squared dex",
-        "The 8 by 8 covariance of the eight values in LOG10_FLUX_MEAN, in squared "
-        "dex, where one dex is a factor of 10. It combines how much the models of "
-        "this class disagree about the spectrum with how precisely the photometry "
-        "fixes this class's own brightness and extinction. The square root of a "
-        "diagonal entry is the uncertainty in log flux for that band."),
+        "Covariance of those eight values, one dex being a factor of 10. It "
+        "combines disagreement between this class's models with the precision of "
+        "the fitted brightness and extinction. sqrt(diagonal) is the uncertainty in "
+        "log flux."),
     "A_K_POST": ("magnitudes of K-band extinction",
-        "The extinction in front of the source if it belongs to this class, in "
-        "magnitudes at K band (2.2 micron), averaged over every model and "
-        "extinction law of this class, weighted by how well each explains the "
-        "photometry."),
+        "The fitted extinction in front of the source if it belongs to this class, "
+        "averaging each model's own fitted range over all models and both "
+        "extinction laws, weighted by each model's share of the support."),
     "A_K_POST_SIG": ("magnitudes of K-band extinction",
-        "The uncertainty on the extinction stored in A_K_POST, in magnitudes at K "
-        "band. It is the standard deviation of the extinction over every model and "
-        "extinction law of this class, so it reflects both how precisely the "
-        "photometry fixes the extinction and how much the models disagree about it. "
-        "It is not a formal fitting error."),
+        "The standard deviation of that fitted extinction. It covers both the "
+        "precision of the fit and disagreement between models, and is not a formal "
+        "fitting error."),
     "P_DENSE": ("fraction",
-        "How much of this class's support for the source comes from the dense "
-        "extinction law rather than the diffuse one, between 0 and 1. It is 0 where "
-        "the sightline carries no dense dust in front of the source."),
+        "How much of this class's support comes from the dense extinction law "
+        "rather than the diffuse one. 0 where the sightline carries no dense dust "
+        "in front of the source."),
     "OCCAM_GAP": ("nats",
-        "How much more support this class has than its single best model alone, as "
-        "a natural logarithm. A large value means many models of the class explain "
-        "the source about equally well, which counts against a class whose library "
-        "offers many similar models."),
+        "How much more support this class has than its single best model, as a "
+        "natural logarithm. A large value means many of its models fit about "
+        "equally well."),
     "FRAC_CLAMPED": ("fraction",
-        "The fraction of this class's models whose best fit called for negative "
-        "extinction and was held at zero instead, weighted by how well each model "
-        "explains the source."),
+        "The support-weighted fraction of this class's models whose best fit called "
+        "for negative extinction and was held at zero."),
     "FAILED_ROWS": ("source position",
-        "The positions, counting from zero in catalog order, of any sources this "
-        "run could not fit and left out. The array is empty when every source was "
-        "fitted."),
+        "Positions, counting from zero in catalog order, of sources this run could "
+        "not fit. Empty where every source was fitted."),
     "TOPK_MODEL": ("model position",
-        "The five models of this class that best explain the source, best first, "
-        "given as positions in this class's model library. The value is -1 where "
-        "the class offers fewer than five models or the source could not be fitted. "
-        "The other TOPK columns describe these same five models in the same order."),
+        "The five models of this class that best explain the source, best first, as "
+        "positions in its model library. -1 where fewer were kept or the source "
+        "could not be fitted. The other TOPK columns follow this same order."),
     "TOPK_FLUX": ("mJy",
-        "The eight-band spectrum of each of the five best models, in mJy, at the "
-        "brightness and extinction fitted for that model, in the band order J, H, "
-        "Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron."),
+        "Each of those five models' eight-band spectrum, band order J, H, Ks, 3.6, "
+        "4.5, 5.8, 8.0 and 24 micron, at its own fitted brightness and extinction."),
     "TOPK_A_K": ("magnitudes of K-band extinction",
-        "The extinction fitted for each of the five best models, in magnitudes at K "
-        "band. A model whose best fit called for negative extinction is held at "
-        "zero."),
+        "The extinction fitted for each of those five models. A model whose best "
+        "fit called for negative extinction is held at zero."),
     "TOPK_LOG10_B": ("log10 of a scale factor",
-        "The brightness scaling fitted for each of the five best models, as the "
-        "base-10 logarithm of the factor the model's own reference spectrum is "
-        "multiplied by."),
+        "The brightness fitted for each of those five models, as log10 of the "
+        "factor multiplying the model's own reference spectrum."),
     "TOPK_CHI2": ("chi-squared",
-        "The chi-squared of each of the five best models against the source's "
-        "measured fluxes, with the brightness and extinction fitted for that model."),
+        "Chi-squared of each of those five models against the measured fluxes, at "
+        "its fitted brightness and extinction."),
     "TOPK_LN_L": ("nats",
-        "How well each of the five best models matches the photometry, as a natural "
-        "logarithm. It combines the fit to the measured fluxes with, for every band "
-        "the survey did not detect, the chance the survey would have missed the "
-        "flux that model predicts there."),
+        "How well each of those five models matches the photometry, as a natural "
+        "logarithm: the fit to the measured fluxes, together with the chance the "
+        "survey would have missed the flux predicted in each undetected band."),
     "TOPK_LN_PRIOR": ("nats",
         "How many objects of this class the sky is expected to hold at the "
-        "position, brightness and depth that each of the five best models implies, "
-        "as a natural logarithm of a density."),
+        "position, brightness and depth each of those five models implies, as a "
+        "natural logarithm of a density."),
     "TOPK_LN_GAMMA": ("nats",
-        "What Gaia says about each of the five best models, as a natural logarithm: "
-        "whether a Gaia counterpart is present or absent, and whether its parallax "
-        "suits the distance the model implies. The value is 0 for every model where "
-        "Gaia has nothing to say about the source."),
+        "What Gaia says about each of those five models, as a natural logarithm: "
+        "whether a counterpart is present or absent, and whether its parallax suits "
+        "the model's distance. 0 where Gaia has nothing to say."),
     "TOPK_LAW": ("law position",
-        "Which extinction law fits each of the five best models better: 0 for the "
-        "diffuse law, 1 for the dense law."),
+        "Which extinction law fits each of those five models better: 0 diffuse, 1 "
+        "dense."),
 }
 
 _FIELD_OF_KEY = {
