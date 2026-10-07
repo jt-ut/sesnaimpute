@@ -53,6 +53,9 @@ import pandas as pd
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
+from sesnaimpute.attrs_registry import REGISTRY
+
+_STEM = "galaxies_swire_survey"
 
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
@@ -89,17 +92,6 @@ STELLARITY_STAR_MIN = 0.98
 N_S_GRID = 61
 LOG10_S_GRID_LO = -2.221848749616356
 LOG10_S_GRID_HI = 1.2540644529143379
-
-#: Per-dataset `UNIT`/`DEFINITION` attrs (owner ruling): a reader of the
-#: file alone gets the convention without reading this module.
-_COLOUR_DEFINITIONS = {
-    "COLOUR_I1I2": "log10(F_I1) - log10(F_I2), IRAC fluxes in mJy",
-    "COLOUR_I2I3": "log10(F_I2) - log10(F_I3), IRAC fluxes in mJy",
-    "COLOUR_I2I4": "log10(F_I2) - log10(F_I4), IRAC fluxes in mJy",
-    "SIGMA_COLOUR_I1I2": "sigma_f / (f ln 10), summed in quadrature over the two bands (I1, I2)",
-    "SIGMA_COLOUR_I2I3": "sigma_f / (f ln 10), summed in quadrature over the two bands (I2, I3)",
-    "SIGMA_COLOUR_I2I4": "sigma_f / (f ln 10), summed in quadrature over the two bands (I2, I4)",
-}
 
 
 def _read_field(path, field_index):
@@ -222,15 +214,14 @@ def build(config, regions=None):
             f.attrs["N_FINITE_I2I3"] = int(finite_i2i3.sum())
             f.attrs["N_FINITE_I2I4"] = int(finite_i2i4.sum())
             f.attrs["N_FINITE_ALL"] = int(finite_all.sum())
-            f.create_dataset("LOG10_S_GRID",
-                              data=np.linspace(LOG10_S_GRID_LO, LOG10_S_GRID_HI, N_S_GRID).astype(np.float64))
-            f.create_dataset("N_NODE_I1I2", data=n_node_i1i2)
-            f.create_dataset("N_NODE_ALL", data=n_node_all)
+            build_module.write_dataset(
+                f, "LOG10_S_GRID",
+                np.linspace(LOG10_S_GRID_LO, LOG10_S_GRID_HI, N_S_GRID).astype(np.float64),
+                *REGISTRY[(_STEM, "LOG10_S_GRID")])
+            build_module.write_dataset(f, "N_NODE_I1I2", n_node_i1i2, *REGISTRY[(_STEM, "N_NODE_I1I2")])
+            build_module.write_dataset(f, "N_NODE_ALL", n_node_all, *REGISTRY[(_STEM, "N_NODE_ALL")])
             for name, arr in columns.items():
-                dset = f.create_dataset(name, data=arr)
-                if name in _COLOUR_DEFINITIONS:
-                    dset.attrs["UNIT"] = "dex"
-                    dset.attrs["DEFINITION"] = _COLOUR_DEFINITIONS[name]
+                build_module.write_dataset(f, name, arr, *REGISTRY[(_STEM, name)])
 
         st.done(out_path, n_galaxies=n_galaxies, n_stars_removed=n_stars_removed)
     return dict(n_galaxies=n_galaxies, n_stars_removed=n_stars_removed, path=out_path)

@@ -272,6 +272,111 @@ REGISTRY = {
         "The image's own one-pixel background noise level, in the map's "
         "native calibrated counts (Froebrich et al. 2015, their Table C1)."),
 
+    # sky.derived.edenhofer_samples -- profile-sigma-samples_edenhofer_sightline:
+    # the across-sample uncertainty on the Edenhofer et al. (2024) extinction
+    # profile, from its 12 released posterior samples.
+    ("profile-sigma-samples_edenhofer_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
+        "This region's own nside-256 pixel numbers (nested ordering). Row i "
+        "here is row i of SIGMA_SAMPLES_K and SIGMA_RATIO_SAMPLES."),
+    ("profile-sigma-samples_edenhofer_sightline", "DIST_PC"): ("pc",
+        "The distance grid along the line of sight that SIGMA_SAMPLES_K and "
+        "SIGMA_RATIO_SAMPLES are tabulated on, shared by every pixel in "
+        "this file."),
+    ("profile-sigma-samples_edenhofer_sightline", "SIGMA_SAMPLES_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256 and each distance in "
+        "DIST_PC, the standard deviation, across the map's 12 released "
+        "posterior samples, of the cumulative K-band extinction to that "
+        "distance. This is the sample-based uncertainty on the cumulative "
+        "column, in place of a correlated- or uncorrelated-sum bound."),
+    ("profile-sigma-samples_edenhofer_sightline", "SIGMA_RATIO_SAMPLES"): ("dimensionless",
+        "For the matching pixel in HPX_PIX_256 and each distance in "
+        "DIST_PC, the standard deviation, across the map's 12 released "
+        "posterior samples, of the ratio of the cumulative extinction at "
+        "that distance to the sample's own total extinction along the "
+        "whole sightline. This ratio is the depth mark a star's placement "
+        "along the sightline reads, so this is that mark's own sample "
+        "uncertainty, smaller near the far end (where the ratio is "
+        "pinned near 1 for every sample) than SIGMA_SAMPLES_K's absolute "
+        "uncertainty would suggest."),
+
+    # sky.derived.swire_galaxies -- galaxies_swire_survey: the surviving
+    # SWIRE galaxies, survey-wide, their IRAC colours and flux-grid node.
+    ("galaxies_swire_survey", "LOG10_S"): ("log10 mJy",
+        "This galaxy's 4.5 micron (IRAC I2) flux density: 10**x is a flux in "
+        "mJy."),
+    ("galaxies_swire_survey", "NODE"): ("grid node index",
+        "Which point of LOG10_S_GRID this galaxy's LOG10_S falls nearest to "
+        "(the midpoint between two adjacent grid points marks the "
+        "boundary), or -1 where LOG10_S falls outside the grid's own range."),
+    ("galaxies_swire_survey", "COLOUR_I1I2"): ("dex",
+        "log10(3.6 micron flux) minus log10(4.5 micron flux), both flux "
+        "densities in mJy, for this surviving SWIRE galaxy. NaN where "
+        "either band's flux or uncertainty is missing or not positive."),
+    ("galaxies_swire_survey", "COLOUR_I2I3"): ("dex",
+        "log10(4.5 micron flux) minus log10(5.8 micron flux), both flux "
+        "densities in mJy, for this surviving SWIRE galaxy. NaN where "
+        "either band's flux or uncertainty is missing or not positive."),
+    ("galaxies_swire_survey", "COLOUR_I2I4"): ("dex",
+        "log10(4.5 micron flux) minus log10(8.0 micron flux), both flux "
+        "densities in mJy, for this surviving SWIRE galaxy. NaN where "
+        "either band's flux or uncertainty is missing or not positive."),
+    ("galaxies_swire_survey", "SIGMA_COLOUR_I1I2"): ("dex",
+        "The 1-sigma uncertainty on COLOUR_I1I2: each band's flux "
+        "uncertainty divided by its own flux and by ln(10), combined in "
+        "quadrature over the 3.6 and 4.5 micron bands. NaN under the same "
+        "condition as COLOUR_I1I2."),
+    ("galaxies_swire_survey", "SIGMA_COLOUR_I2I3"): ("dex",
+        "The 1-sigma uncertainty on COLOUR_I2I3: each band's flux "
+        "uncertainty divided by its own flux and by ln(10), combined in "
+        "quadrature over the 4.5 and 5.8 micron bands. NaN under the same "
+        "condition as COLOUR_I2I3."),
+    ("galaxies_swire_survey", "SIGMA_COLOUR_I2I4"): ("dex",
+        "The 1-sigma uncertainty on COLOUR_I2I4: each band's flux "
+        "uncertainty divided by its own flux and by ln(10), combined in "
+        "quadrature over the 4.5 and 8.0 micron bands. NaN under the same "
+        "condition as COLOUR_I2I4."),
+    ("galaxies_swire_survey", "FIELD"): ("field index",
+        "Which of the six SWIRE fields this galaxy comes from, as a "
+        "position in this file's own FIELDS attribute (a semicolon-"
+        "separated list of the six field file names): 0 the first field "
+        "named there, and so on."),
+    ("galaxies_swire_survey", "LOG10_S_GRID"): ("log10 mJy",
+        "The 61 flux-grid points every SWIRE-galaxy product shares, from "
+        "SWIRE's own 5-sigma depth at 4.5 micron to the brightest "
+        "tabulated point in Fazio et al. (2004)'s galaxy counts law. 10**x "
+        "is a flux in mJy."),
+    ("galaxies_swire_survey", "N_NODE_I1I2"): ("galaxies",
+        "For each of the 61 points in LOG10_S_GRID, how many surviving "
+        "galaxies land nearest that point (NODE) and also carry a finite "
+        "COLOUR_I1I2."),
+    ("galaxies_swire_survey", "N_NODE_ALL"): ("galaxies",
+        "For each of the 61 points in LOG10_S_GRID, how many surviving "
+        "galaxies land nearest that point (NODE) and also carry a finite "
+        "value in all three colours, COLOUR_I1I2, COLOUR_I2I3 and "
+        "COLOUR_I2I4."),
+
+    # sky.derived.juvela_extinction -- extinction_juvela_source (per
+    # region) and extinction_juvela_sightline (survey-wide): the Juvela &
+    # Montillaud (2016) NICEST star-colour extinction map, converted to
+    # A_K.
+    ("extinction_juvela_source", "A_K"): ("mag A_K",
+        "For every catalogued source of this region, the NICEST star-colour "
+        "extinction map's value at the source's own sky position, converted "
+        "from the map's native A_J to A_K with the adopted diffuse "
+        "extinction law's own A_J/A_K ratio."),
+    ("extinction_juvela_source", "HPX_PIX_1024"): ("nested HEALPix pixel, nside 1024",
+        "For every catalogued source of this region, the nested nside-1024 "
+        "pixel number of the source's own sky position: the map cell this "
+        "file's A_K value is read at."),
+    ("extinction_juvela_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
+        "The admitted nside-256 pixel numbers of every one of the thirty "
+        "regions, nested ordering. Row i here is row i of A_K."),
+    ("extinction_juvela_sightline", "A_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256, the mean of the NICEST "
+        "star-colour extinction map's A_K value over all 64 of that pixel's "
+        "nside-2048 children, covering the whole sightline rather than only "
+        "where a source happens to fall."),
+
     # sky.derived.gaia_twomass_counts -- joint-counts_gaia-twomass_hpx512:
     # the joint Gaia G x 2MASS Ks anchor count, per region.
     ("joint-counts_gaia-twomass_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",

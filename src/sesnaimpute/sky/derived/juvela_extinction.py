@@ -32,9 +32,11 @@ import h5py
 import healpy as hp
 import numpy as np
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import selection as selection_module
@@ -107,8 +109,9 @@ def _write_source(config, region, a_k, hpx_pix_1024):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "source"
-        f.create_dataset("A_K", data=a_k.astype(np.float32))
-        f.create_dataset("HPX_PIX_1024", data=hpx_pix_1024.astype(np.int64))
+        build_module.write_dataset(f, "A_K", a_k.astype(np.float32), *REGISTRY[("extinction_juvela_source", "A_K")])
+        build_module.write_dataset(f, "HPX_PIX_1024", hpx_pix_1024.astype(np.int64),
+                                    *REGISTRY[("extinction_juvela_source", "HPX_PIX_1024")])
 
 
 def build(config, regions=None):
@@ -150,8 +153,10 @@ def build(config, regions=None):
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with h5py.File(out_path, "w") as f:
             f.attrs["GRANULE"] = "sightline"
-            f.create_dataset("HPX_PIX_256", data=pix_all.astype(np.int64))
-            f.create_dataset("A_K", data=a_k_all.astype(np.float32))
+            build_module.write_dataset(f, "HPX_PIX_256", pix_all.astype(np.int64),
+                                        *REGISTRY[("extinction_juvela_sightline", "HPX_PIX_256")])
+            build_module.write_dataset(f, "A_K", a_k_all.astype(np.float32),
+                                        *REGISTRY[("extinction_juvela_sightline", "A_K")])
         st.done(out_path, regions=n_regions, sightlines=pix_all.size)
 
 
