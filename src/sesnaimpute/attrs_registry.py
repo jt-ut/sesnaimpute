@@ -107,6 +107,81 @@ REGISTRY = {
         "by the cell's own width in u. Integrating P_XI times the cell "
         "width over all cells gives 1."),
 
+    # population.anchor_tiles -- tiles_anchors_hpx512 and
+    # histograms_anchors_hpx512: the STAR anchor tiling and the two
+    # anchors' observed/predicted magnitude histograms, per region.
+    ("tiles_anchors_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "This region's own occupied nside-512 pixel numbers (nested "
+        "ordering). Row i here is row i of TILE_ID."),
+    ("tiles_anchors_hpx512", "TILE_ID"): ("tile index",
+        "For the matching pixel in HPX_PIX_512, which tile it belongs to, "
+        "as a position in TILE_L_DEG, TILE_B_DEG and TILE_OMEGA_DEG2 "
+        "(a separate, shorter list in this same file, one row per tile "
+        "rather than one row per pixel)."),
+    ("tiles_anchors_hpx512", "TILE_L_DEG"): ("deg",
+        "One row per tile (not one row per pixel): the tile's own centre "
+        "Galactic longitude."),
+    ("tiles_anchors_hpx512", "TILE_B_DEG"): ("deg",
+        "One row per tile: the tile's own centre Galactic latitude."),
+    ("tiles_anchors_hpx512", "TILE_OMEGA_DEG2"): ("deg^2",
+        "One row per tile: the tile's own total solid angle, the sum of "
+        "its member pixels' areas."),
+
+    ("histograms_anchors_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "This region's own occupied nside-512 pixel numbers (nested "
+        "ordering). Row i here is row i of every other per-pixel dataset "
+        "in this file."),
+    ("histograms_anchors_hpx512", "A_PIX_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_512, the extinction column at "
+        "that pixel's position, used to deredden the nearest TRILEGAL "
+        "pointing's raw stars into this pixel's own predicted counts."),
+    ("histograms_anchors_hpx512", "OMEGA_PIX_DEG2"): ("deg^2",
+        "For the matching pixel in HPX_PIX_512, the solid angle of one "
+        "nside-512 pixel: the same value repeated for every pixel in "
+        "this file."),
+    ("histograms_anchors_hpx512", "G_EDGES"): ("mag Gaia G",
+        "The edges of the Gaia G magnitude bins N_G_OBS, N_G_PRED and "
+        "N_GK_PRED are tabulated on."),
+    ("histograms_anchors_hpx512", "KS_EDGES"): ("mag 2MASS/UKIDSS Ks",
+        "The edges of the Ks magnitude bins N_KS_OBS, N_KS_PRED and "
+        "N_GK_PRED are tabulated on, on the shared 2MASS/UKIDSS scale "
+        "KS_SOURCE names per bin."),
+    ("histograms_anchors_hpx512", "N_G_OBS"): ("stars",
+        "For the matching pixel in HPX_PIX_512 and each Gaia G bin of "
+        "G_EDGES, the observed Gaia anchor star count, from the external "
+        "Gaia anchor-count product."),
+    ("histograms_anchors_hpx512", "N_G_PRED"): ("stars",
+        "For the matching pixel in HPX_PIX_512 and each Gaia G bin of "
+        "G_EDGES, the model's predicted Gaia anchor star count: the "
+        "nearest TRILEGAL pointing's raw stars, dereddened by A_PIX_K and "
+        "weighted by the Gaia detection probability, divided by that "
+        "pointing's own solid angle."),
+    ("histograms_anchors_hpx512", "N_KS_OBS"): ("stars",
+        "For the matching pixel in HPX_PIX_512 and each Ks bin of "
+        "KS_EDGES, the observed 2MASS/UKIDSS anchor star count, from the "
+        "external anchor-count products KS_SOURCE names per bin."),
+    ("histograms_anchors_hpx512", "N_KS_PRED"): ("stars",
+        "For the matching pixel in HPX_PIX_512 and each Ks bin of "
+        "KS_EDGES, the model's predicted anchor star count: the nearest "
+        "TRILEGAL pointing's raw stars, dereddened by A_PIX_K, divided by "
+        "that pointing's own solid angle."),
+    ("histograms_anchors_hpx512", "N_GK_PRED"): ("stars",
+        "For the matching pixel in HPX_PIX_512, each Gaia G bin of "
+        "G_EDGES and each Ks bin of KS_EDGES, the model's predicted joint "
+        "count: the same dereddened, Gaia-detection-weighted TRILEGAL "
+        "stars as N_G_PRED, binned jointly in (G, Ks) instead of "
+        "marginally."),
+    ("histograms_anchors_hpx512", "DEEP_COVERED"): ("boolean",
+        "For the matching pixel in HPX_PIX_512, True where the region's "
+        "deeper UKIDSS GPS survey reaches that pixel, so KS_EDGES runs "
+        "past the 2MASS-only cut and KS_SOURCE marks the UKIDSS-only "
+        "bins for it."),
+    ("histograms_anchors_hpx512", "KS_SOURCE"): ("code",
+        "For each Ks bin of KS_EDGES (one value per bin, shared by every "
+        "pixel), which survey that bin's counts come from: 0 2MASS, 1 "
+        "UKIDSS. Every bin past the 2MASS cut is 1; a region with no "
+        "UKIDSS coverage at all has every bin 0."),
+
     # population.yso_mass -- mass_yso_survey: each pooled YSO register
     # template's own stellar mass, read off a pre-main-sequence track.
     ("mass_yso_survey", "MODEL_NAME"): ("source name",
