@@ -155,13 +155,6 @@ EPS_EXT_CENTRAL, EPS_EXT_LO, EPS_EXT_HI = 0.25, 0.15, 0.35
 #: `max(A_s, A_MIN_YSO_LAW)`, mag A_K, applied to YSO and to H2S (sec 5.6:
 #: H2S rides on the law).
 A_MIN_YSO_LAW = 0.3
-#: Psi floored at this fraction of its own row's maximum before
-#: `beta * ln Psi` enters a class's evidence (spec sec 6.5, sec 2: "no
-#: hypothesis is ever at -inf" -- the cascade may argue against a class,
-#: never veto it outright).
-PSI_FLOOR_FRAC = 1e-6
-
-
 def _sensitivity_scale(run, f_dusty_o=None, f_dusty_c=None, f_c=None):
     """`(classes, ln_scale)` for one of the eight fixed literature-band
     runs -- the constant added to every one of `classes`'s whole CLASSMAP
