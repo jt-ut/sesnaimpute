@@ -516,8 +516,7 @@ def build_region(config, region, st, beta):
     if psi_file is not None:
         psi_file.close()
 
-    fit_files = np.array([_fit_path(config, region, cls) for cls in CLASSES], dtype="S256")
-    return dict(path=path, part_paths=part_paths, n_source=n, fit_files=fit_files,
+    return dict(path=path, part_paths=part_paths, n_source=n,
                 imputed_identity_err=imputed_identity_err, n_flagged=n_flagged)
 
 
@@ -545,11 +544,15 @@ _READINGS = {
         "column order is the CLASSES attribute of this file. The six probabilities "
         "add to 1 for every source."),
     "P_SUBCLASS": ("probability",
-        "The probability of each of 25 subdivisions of the six classes, such as "
-        "spectral type for a field star or evolutionary stage for a young stellar "
-        "object. The column order is the SUBCLASSES attribute of this file. Adding "
-        "the columns belonging to one class gives that class's probability in "
-        "P_CLASS, and all 25 add to 1 for every source."),
+        "The probability of each of 25 subdivisions of the six classes. The column "
+        "order is the SUBCLASSES attribute of this file, where each name reads as "
+        "class and subdivision: field stars are split by spectral type, O through T; "
+        "dusty evolved stars into oxygen-rich and carbon-rich shells; galaxies into "
+        "active, star-forming, composite and passive; young stellar objects into "
+        "class 0, class I, class II, class III and transition disk; and shocked gas "
+        "knots into J-type, C-type, steady C-type and C-J-type shocks. Adding the "
+        "columns belonging to one class gives that class's probability in P_CLASS, "
+        "and all 25 add to 1 for every source."),
     "P_YSO": ("probability",
         "The probability that the source is a young stellar object. This repeats the "
         "young stellar object column of P_CLASS for convenience."),
@@ -610,7 +613,7 @@ _READINGS = {
 }
 
 
-def join_classify_parts(path, part_paths, n_source, fit_files, n_flagged):
+def join_classify_parts(path, part_paths, n_source):
     """Joins one region's P8 part files, one part's rows at a time,
     dataset by dataset (rule 10b: never a region-sized array); removes the
     part files once written."""
@@ -630,12 +633,6 @@ def join_classify_parts(path, part_paths, n_source, fit_files, n_flagged):
         out.attrs["GRANULE"] = "source"
         out.attrs["CLASSES"] = np.array(CLASSES, dtype="S8")
         out.attrs["SUBCLASSES"] = np.array(SUBCLASS_LABELS, dtype="S12")
-        out.attrs["FIT_FILES"] = fit_files
-        # sources flagged by the fit (n_detected < 2, or a singular design
-        # matrix): MAP_CLASS is -1 for these, never STAR, and P_CLASS/
-        # P_SUBCLASS/P_YSO/LOG10_FLUX_IMPUTED are NaN (R3 U1, U2) -- recorded
-        # once here rather than recomputed by every consumer.
-        out.attrs["N_FLAGGED"] = n_flagged
     for part_path in part_paths:
         os.remove(part_path)
 
@@ -810,7 +807,7 @@ def build(config, regions=None, beta=0.0):
         with progress.Stage("fittp.classify", region) as st:
             result = build_region(config, region, st, beta)
             join_classify_parts(result["path"], result["part_paths"],
-                                 result["n_source"], result["fit_files"], result["n_flagged"])
+                                 result["n_source"])
 
             # the joined file's own small columns (n, 6) and (n, 25) --
             # not LOG10_CANDIDATE_FLUX/LOG10_FLUX_IMPUTED_COV, the two region-sized
