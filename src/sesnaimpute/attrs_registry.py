@@ -61,6 +61,65 @@ REGISTRY = {
         "90 the source's own 90%-completeness flux, 91 the median "
         "90%-completeness flux of its nearest sky neighbours."),
 
+    # sky.derived.dunham_yso -- yso_dunham2015_survey: the Dunham et al.
+    # (2015) YSO census, one row per catalogued YSO.
+    ("yso_dunham2015_survey", "SEQ"): ("catalog sequence number",
+        "Dunham et al. (2015)'s own running sequence number for this YSO, "
+        "the order every dataset in this file shares."),
+    ("yso_dunham2015_survey", "CLOUD"): ("cloud name",
+        "Which of the eighteen clouds of Dunham et al. (2015) this YSO "
+        "belongs to."),
+    ("yso_dunham2015_survey", "ID"): ("catalog identifier",
+        "This YSO's own Spitzer source name, the J2000 sexagesimal string "
+        "RA_DEG and DEC_DEG are parsed from."),
+    ("yso_dunham2015_survey", "RA_DEG"): ("deg",
+        "Right ascension, equinox J2000, parsed from this row's own ID."),
+    ("yso_dunham2015_survey", "DEC_DEG"): ("deg",
+        "Declination, equinox J2000, parsed from this row's own ID."),
+    ("yso_dunham2015_survey", "DIST_PC"): ("pc",
+        "The adopted distance to this YSO's own cloud, Dunham et al. "
+        "(2015)'s Table 1."),
+    ("yso_dunham2015_survey", "AV"): ("mag A_V",
+        "This YSO's fitted visual extinction, Dunham et al. (2015)'s own "
+        "SED fit."),
+    ("yso_dunham2015_survey", "ALPHA0"): ("dimensionless",
+        "This YSO's infrared spectral index (d log(lambda F_lambda) / "
+        "d log(lambda)) before extinction correction, Dunham et al. "
+        "(2015)'s own measurement."),
+    ("yso_dunham2015_survey", "TBOL0_K"): ("K",
+        "This YSO's bolometric temperature before extinction correction, "
+        "Dunham et al. (2015)'s own measurement."),
+    ("yso_dunham2015_survey", "LBOL0_LSUN"): ("Lsun",
+        "This YSO's bolometric luminosity before extinction correction, "
+        "Dunham et al. (2015)'s own measurement."),
+    ("yso_dunham2015_survey", "F45_MJY"): ("mJy",
+        "This YSO's extinction-corrected 4.5 micron flux density, Dunham "
+        "et al. (2015)'s Table 4."),
+    ("yso_dunham2015_survey", "E_F45_MJY"): ("mJy",
+        "The 1-sigma uncertainty on F45_MJY, Dunham et al. (2015)'s "
+        "Table 4."),
+    ("yso_dunham2015_survey", "F45_OBS_MJY"): ("mJy",
+        "This YSO's observed (not extinction-corrected) 4.5 micron flux "
+        "density, Dunham et al. (2015)'s Table 3."),
+    ("yso_dunham2015_survey", "F36_MJY"): ("mJy",
+        "This YSO's extinction-corrected 3.6 micron flux density, Dunham "
+        "et al. (2015)'s Table 4."),
+    ("yso_dunham2015_survey", "F58_MJY"): ("mJy",
+        "This YSO's extinction-corrected 5.8 micron flux density, Dunham "
+        "et al. (2015)'s Table 4."),
+    ("yso_dunham2015_survey", "F80_MJY"): ("mJy",
+        "This YSO's extinction-corrected 8.0 micron flux density, Dunham "
+        "et al. (2015)'s Table 4."),
+    ("yso_dunham2015_survey", "F24_MJY"): ("mJy",
+        "This YSO's extinction-corrected 24 micron flux density, Dunham "
+        "et al. (2015)'s Table 4."),
+    ("yso_dunham2015_survey", "LOG10_F45_REF"): ("log10 mJy at 1 kpc",
+        "log10 of F45_MJY scaled to a common reference distance of 1 kpc "
+        "by (DIST_PC / 1000)^2: 10**x is a flux in mJy a source at this "
+        "YSO's own brightness would show at 1 kpc. On the same scale and "
+        "reference distance as the YSO template register's own reference "
+        "4.5 micron brightness."),
+
     # sky.derived.herschel_column -- sigma_herschel_survey (survey-wide
     # calibration) and column_herschel_source (per region): the Herschel
     # Gould Belt Survey dust-column arm of the per-source extinction.
