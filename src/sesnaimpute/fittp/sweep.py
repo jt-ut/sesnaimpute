@@ -158,24 +158,27 @@ _IMAP_CHUNKSIZE = 16
 #: Per-worker memory floor, MB: what a forked worker costs beyond its own
 #: source's arrays -- the interpreter, the imported stack, and the
 #: copy-on-write pages the parent's inherited objects dirty as CPython
-#: refcounts them. This is an UPPER BOUND measured on a different platform
-#: (MAPARRAYS section 6 item 4): `vmmap --summary` (physical footprint,
-#: which excludes the clean pages workers share, unlike RSS) on this
-#: laptop's own macOS fork, on the YSO library, the largest: ~310 MB
-#: steady, ~430 MB peak per worker. macOS and Stampede3's Linux account a
-#: fork's shared/private pages differently, and now that MAPARRAYS section
-#: 1 has made every large array in `_WORKER` a memory map -- pages shared
-#: with the parent and every sibling worker, not copy-on-write private
-#: ones -- this number has not been re-measured since. The real number is
-#: `/proc/<pid>/smaps_rollup`'s `Pss` and `Private_Dirty`, summed, read
-#: from inside one forked worker on Stampede3 itself (`Pss` apportions a
-#: shared mapping's pages fairly across the workers sharing it, which
-#: `vmmap`'s physical footprint does not); no Linux machine was available
-#: to this unit to take it. Rounded to the peak, since the node has to
-#: hold it. `build_region_class`'s warm-up is what keeps the JIT out of
-#: this figure: without it every worker compiles its own kernels and the
-#: floor is ~180 MB higher.
-WORKER_PROCESS_FLOOR_MB = 430
+#: refcounts them. MEASURED ON THE CLUSTER, 2026-10-08:
+#: `/proc/<pid>/smaps_rollup` read from inside the running Aquila YSO job
+#: on an spr node at 112 workers (the largest library, 200,000 templates)
+#: gives a mean `Pss` of 72.8 MB and a mean `Private_Dirty` of 69.0 MB per
+#: worker -- `Pss` being the right measure, since it apportions a shared
+#: mapping's pages fairly across the workers sharing it. Rounded to 70.
+#: The previous value, 430, was a macOS `vmmap` peak from the laptop and
+#: overstated this by six times.
+#:
+#: The TOTAL the stage prints from this (arrays + floor, times the worker
+#: count) is still an UPPER BOUND, because the arrays term counts pages
+#: that are now memory-mapped and therefore shared rather than private to
+#: each worker. The same measurement put that whole job's real footprint
+#: at 7.96 GB of summed `Pss` across its 112 workers, against the 61 GB
+#: the formula printed with the old floor. Treat the printed number as a
+#: ceiling when capping `--workers`, not as the cost.
+#:
+#: `build_region_class`'s warm-up is what keeps the JIT out of this
+#: figure: without it every worker compiles its own kernels and the floor
+#: is ~180 MB higher.
+WORKER_PROCESS_FLOOR_MB = 70
 
 #: The datasets every P7 part file and the joined product carry, in write
 #: order (one row per source; `FAILED`, below, is a part-file-only column
