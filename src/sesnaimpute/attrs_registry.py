@@ -107,6 +107,30 @@ REGISTRY = {
         "by the cell's own width in u. Integrating P_XI times the cell "
         "width over all cells gives 1."),
 
+    # bmstp.cloud_interval -- cloud_interval_shape_sightline: each
+    # sightline's own dense fraction between the region's cloud interval,
+    # per region.
+    ("cloud_interval_shape_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
+        "This region's own occupied nside-256 pixel numbers (nested "
+        "ordering), the same sightline order bmstp's shape product "
+        "shares. Row i here is row i of XI_FRONT, XI_BACK and W_CLOUD."),
+    ("cloud_interval_shape_sightline", "XI_FRONT"): ("dimensionless",
+        "For the matching sightline in HPX_PIX_256, its own cumulative "
+        "extinction profile u = A(d)/A(inf) evaluated at this region's "
+        "cloud interval's own front edge (this file's D_FRONT_PC "
+        "attribute)."),
+    ("cloud_interval_shape_sightline", "XI_BACK"): ("dimensionless",
+        "For the matching sightline in HPX_PIX_256, its own cumulative "
+        "extinction profile u = A(d)/A(inf) evaluated at this region's "
+        "cloud interval's own back edge (this file's D_BACK_PC "
+        "attribute). Never smaller than XI_FRONT."),
+    ("cloud_interval_shape_sightline", "W_CLOUD"): ("dimensionless",
+        "For the matching sightline in HPX_PIX_256, the diffuse/dense "
+        "extinction-law ramp weight evaluated at the column of dust "
+        "between the cloud interval's front and back edges, (XI_BACK - "
+        "XI_FRONT) times this sightline's own total extinction column. "
+        "0 where that column is 0."),
+
     # population.kernel -- kernel_sesna_survey: the column kernel p(T |
     # A_measured), a two-log-normal mixture per arm and node, survey-wide,
     # plus the cloud-class within-beam tilt fit.
