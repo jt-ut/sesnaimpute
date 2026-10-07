@@ -107,6 +107,137 @@ REGISTRY = {
         "by the cell's own width in u. Integrating P_XI times the cell "
         "width over all cells gives 1."),
 
+    # bmstp.template_weights -- P5, six template libraries
+    # (<lib>_weights_<granule>): one factor per external population
+    # statement the library's own templates are reweighted by, stored per
+    # template and brightness cell on the common log10(F_4.5) axis.
+    ("yso_weights_region", "MODEL_NAME"): ("source name",
+        "This YSO template's own identifier, in this file's row order."),
+    ("yso_weights_region", "C_THETA"): ("log10 mJy at 1 kpc",
+        "This YSO template's own offset onto the common brightness axis: "
+        "its reference 4.5 micron flux, scaled to 1 kpc, as log10."),
+    ("yso_weights_region", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
+        "The centres of the 110 common brightness cells every factor "
+        "table in this file is tabulated on."),
+    ("yso_weights_region", "W"): ("dimensionless",
+        "For every YSO template and every cell of LOG10_F45_CENTERS, this "
+        "factor's own per-template weight: how the Dunham et al. (2015) "
+        "YSO census's brightness density (or, for a template-matched "
+        "factor, the region's own shift kernel) reweights that template "
+        "relative to the library's own template density, at that "
+        "brightness. Which population statement this factor encodes is "
+        "named by this dataset's own enclosing group's NAME attribute."),
+    ("yso_weights_region", "C_F"): ("dimensionless",
+        "For every YSO template, this factor's own per-template offset: "
+        "a correction applied to the template's weight at read time, "
+        "beyond the per-cell table in W."),
+
+    ("galz_weights_survey", "MODEL_NAME"): ("source name",
+        "This galaxy template's own identifier, in this file's row "
+        "order."),
+    ("galz_weights_survey", "C_THETA"): ("log10 mJy at 1 kpc",
+        "This galaxy template's own offset onto the common brightness "
+        "axis: its reference 4.5 micron flux, scaled to 1 kpc, as log10."),
+    ("galz_weights_survey", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
+        "The centres of the 110 common brightness cells every factor "
+        "table in this file is tabulated on."),
+    ("galz_weights_survey", "W"): ("dimensionless",
+        "For every galaxy template and every cell of LOG10_F45_CENTERS, "
+        "this factor's own per-template weight: the galaxy colour "
+        "Gaussian kernel density reweighting that template relative to "
+        "the library's own colour density. Which population statement "
+        "this factor encodes is named by this dataset's own enclosing "
+        "group's NAME attribute."),
+    ("galz_weights_survey", "C_F"): ("dimensionless",
+        "For every galaxy template, this factor's own per-template "
+        "offset: a correction applied to the template's weight at read "
+        "time, beyond the per-cell table in W."),
+
+    ("sps_weights_region", "MODEL_NAME"): ("source name",
+        "This stellar-atmosphere template's own identifier, in this "
+        "file's row order."),
+    ("sps_weights_region", "C_THETA"): ("log10 mJy at 1 kpc",
+        "This atmosphere template's own offset onto the common brightness "
+        "axis: its reference 4.5 micron flux, scaled to 1 kpc, as log10."),
+    ("sps_weights_region", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
+        "The centres of the 110 common brightness cells every factor "
+        "table in this file is tabulated on."),
+    ("sps_weights_region", "W"): ("dimensionless",
+        "For every atmosphere template and every cell of "
+        "LOG10_F45_CENTERS, this factor's own per-template weight: this "
+        "region's own matched-star count for that template's atmosphere "
+        "type, needing no division by a library density since the count "
+        "is already a weight. Which population statement this factor "
+        "encodes is named by this dataset's own enclosing group's NAME "
+        "attribute."),
+    ("sps_weights_region", "C_F"): ("dimensionless",
+        "For every atmosphere template, this factor's own per-template "
+        "offset: a correction applied to the template's weight at read "
+        "time, beyond the per-cell table in W."),
+
+    ("agb_weights_region", "MODEL_NAME"): ("source name",
+        "This AGB template's own identifier, in this file's row order."),
+    ("agb_weights_region", "C_THETA"): ("log10 mJy at 1 kpc",
+        "This AGB template's own offset onto the common brightness axis: "
+        "its reference 4.5 micron flux, scaled to 1 kpc, as log10."),
+    ("agb_weights_region", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
+        "The centres of the 110 common brightness cells every factor "
+        "table in this file is tabulated on."),
+    ("agb_weights_region", "W"): ("dimensionless",
+        "For every AGB template and every cell of LOG10_F45_CENTERS, "
+        "this factor's own per-template weight: the Riebel et al. (2012) "
+        "GRAMS optical-depth census, by dust chemistry, reweighting that "
+        "template relative to the library's own optical-depth density. "
+        "Which population statement this factor encodes is named by this "
+        "dataset's own enclosing group's NAME attribute."),
+    ("agb_weights_region", "C_F"): ("dimensionless",
+        "For every AGB template, this factor's own per-template offset: "
+        "a correction applied to the template's weight at read time, "
+        "beyond the per-cell table in W."),
+
+    ("pahc_weights_region", "MODEL_NAME"): ("source name",
+        "This PAHC template's own identifier, in this file's row order."),
+    ("pahc_weights_region", "C_THETA"): ("log10 mJy at 1 kpc",
+        "This PAHC template's own offset onto the common brightness axis: "
+        "its reference 4.5 micron flux, scaled to 1 kpc, as log10."),
+    ("pahc_weights_region", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
+        "The centres of the 110 common brightness cells every factor "
+        "table in this file is tabulated on."),
+    ("pahc_weights_region", "W"): ("dimensionless",
+        "For every PAHC template and every cell of LOG10_F45_CENTERS, "
+        "this factor's own per-template weight: this region's own sps "
+        "atmosphere-type count, borrowed at each PAHC template's nearest "
+        "atmosphere match since the PAHC library carries no atmosphere-"
+        "type axis of its own, needing no further division by a library "
+        "density. Which population statement this factor encodes is "
+        "named by this dataset's own enclosing group's NAME attribute."),
+    ("pahc_weights_region", "C_F"): ("dimensionless",
+        "For every PAHC template, this factor's own per-template offset: "
+        "a correction applied to the template's weight at read time, "
+        "beyond the per-cell table in W."),
+
+    ("h2shock_weights_region", "MODEL_NAME"): ("source name",
+        "This h2shock template's own identifier, in this file's row "
+        "order."),
+    ("h2shock_weights_region", "C_THETA"): ("log10 mJy at 1 kpc",
+        "This h2shock template's own offset onto the common brightness "
+        "axis, from its own Sigma-to-4.5-micron conversion, applied once "
+        "at build time (not reapplied when this column is read)."),
+    ("h2shock_weights_region", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
+        "The centres of the 110 common brightness cells every factor "
+        "table in this file is tabulated on."),
+    ("h2shock_weights_region", "W"): ("dimensionless",
+        "For every h2shock template and every cell of LOG10_F45_CENTERS, "
+        "this factor's own per-template weight: the uniform template "
+        "weight, since h2shock's conditional table already carries the "
+        "region's own knot-brightness distribution (no external density "
+        "to divide by). Which population statement this factor encodes "
+        "is named by this dataset's own enclosing group's NAME attribute."),
+    ("h2shock_weights_region", "C_F"): ("dimensionless",
+        "For every h2shock template, this factor's own per-template "
+        "offset: a correction applied to the template's weight at read "
+        "time, beyond the per-cell table in W."),
+
     # bmstp.shapes -- star_shape_tile (P2, per tile), cloud_shape_sightline
     # (P3, per sightline) and gal_shape_survey (P4, survey-wide): each
     # class's population sample binned onto the common (log10 xi,
