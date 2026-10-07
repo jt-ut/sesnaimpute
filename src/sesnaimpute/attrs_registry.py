@@ -61,6 +61,138 @@ REGISTRY = {
         "90 the source's own 90%-completeness flux, 91 the median "
         "90%-completeness flux of its nearest sky neighbours."),
 
+    # sky.derived.profile -- profile_edenhofer_sightline (per region) and
+    # depth_edenhofer_region (survey-wide): the Edenhofer et al. (2023/2024)
+    # cumulative extinction profile along each sightline, and each region's
+    # own cloud depth read off it.
+    ("profile_edenhofer_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
+        "This region's own admitted nside-256 pixel numbers (nested "
+        "ordering). Row i here is row i of A_CUM_K and every other "
+        "per-sightline dataset in this file."),
+    ("profile_edenhofer_sightline", "DIST_PC"): ("pc",
+        "The distance grid along the line of sight, starting at 0 pc, that "
+        "every per-sightline dataset in this file is tabulated on."),
+    ("profile_edenhofer_sightline", "A_CUM_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256 and each distance in "
+        "DIST_PC, the cumulative K-band extinction from the observer out "
+        "to that distance along that sightline."),
+    ("profile_edenhofer_sightline", "RHO_K_PER_PC"): ("mag A_K per pc",
+        "For the matching pixel in HPX_PIX_256 and each interval between "
+        "two adjacent points of DIST_PC, the mean rate of change of "
+        "A_CUM_K over that interval: the local extinction density."),
+    ("profile_edenhofer_sightline", "SIGMA_UNC_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256 and each distance in "
+        "DIST_PC, the lower-bound uncertainty on A_CUM_K: the sum, over "
+        "every step out to that distance, of that step's own map "
+        "uncertainty treated as independent of every other step's."),
+    ("profile_edenhofer_sightline", "SIGMA_COR_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256 and each distance in "
+        "DIST_PC, the upper-bound uncertainty on A_CUM_K: the sum, over "
+        "every step out to that distance, of that step's own map "
+        "uncertainty treated as perfectly correlated with every other "
+        "step's."),
+    ("profile_edenhofer_sightline", "GAL_L_DEG"): ("deg",
+        "Galactic longitude of the matching pixel's centre in HPX_PIX_256."),
+    ("profile_edenhofer_sightline", "GAL_B_DEG"): ("deg",
+        "Galactic latitude of the matching pixel's centre in HPX_PIX_256."),
+    ("profile_edenhofer_sightline", "TAIL_RESIDUAL_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256, the part of this "
+        "sightline's own total column (A_INF_K) beyond the map's own "
+        "tabulated edge that is attributed to the exponential dust-disc "
+        "tail there, capped at what the map's own edge density and tail "
+        "shape together imply; any remaining excess is spread back into "
+        "A_CUM_K's own in-map values instead (see RESCALED)."),
+    ("profile_edenhofer_sightline", "TAIL_MODE"): ("code",
+        "For the matching pixel in HPX_PIX_256, which analytic shape the "
+        "exponential dust-disc tail beyond the map's own edge takes along "
+        "this sightline: 0 vertical (scale height above the Galactic "
+        "plane), 1 disc (radial profile within the plane)."),
+    ("profile_edenhofer_sightline", "TAIL_SCALE_PC"): ("pc",
+        "For the matching pixel in HPX_PIX_256, the tail's own geometric "
+        "scale along this sightline: the vertical scale height where "
+        "TAIL_MODE is 0, or NaN where TAIL_MODE is 1 (the disc branch "
+        "carries no single scale length)."),
+    ("profile_edenhofer_sightline", "TAIL_EFOLD_PC"): ("pc",
+        "For the matching pixel in HPX_PIX_256, the e-folding distance of "
+        "the tail's exponential falloff along this sightline, consistent "
+        "with TAIL_MODE and used to form TAIL_RESIDUAL_K."),
+    ("profile_edenhofer_sightline", "A_INF_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256, this sightline's own total "
+        "K-band column from the adopted sightline column product "
+        "(Herschel where covered, Planck elsewhere): the value A_CUM_K "
+        "approaches as distance grows without bound."),
+    ("profile_edenhofer_sightline", "RESCALED"): ("boolean",
+        "For the matching pixel in HPX_PIX_256, True where this "
+        "sightline's in-map profile (A_CUM_K and RHO_K_PER_PC) was scaled "
+        "so its own edge value, plus TAIL_RESIDUAL_K, matches A_INF_K, "
+        "rather than left as the input maps measured it."),
+    ("profile_edenhofer_sightline", "fallback/DIST_PC"): ("pc",
+        "The same distance grid as this file's top-level DIST_PC, repeated "
+        "here for the region's fallback profile."),
+    ("profile_edenhofer_sightline", "fallback/A_CUM_K"): ("mag A_K",
+        "For each distance in fallback/DIST_PC, this region's "
+        "source-weighted mean of A_CUM_K over every sightline in this "
+        "file, each sightline weighted by its own admitted-pixel source "
+        "count: the one profile a consumer uses for a position with no "
+        "sightline of its own in this file."),
+    ("profile_edenhofer_sightline", "fallback/A_EDGE_K"): ("mag A_K",
+        "This region's source-weighted mean, over every sightline in this "
+        "file, of A_CUM_K's own value at the map's farthest tabulated "
+        "distance."),
+    ("profile_edenhofer_sightline", "fallback/A_COL_SIGHTLINE_K"): ("mag A_K",
+        "This region's source-weighted mean, over every sightline in this "
+        "file, of A_INF_K."),
+    ("profile_edenhofer_sightline", "fallback/RESIDUAL_K"): ("mag A_K",
+        "This region's source-weighted mean, over every sightline in this "
+        "file, of TAIL_RESIDUAL_K."),
+    ("profile_edenhofer_sightline", "fallback/GAL_L_DEG"): ("deg",
+        "The Galactic longitude of this region's source-weighted mean sky "
+        "direction, the direction the fallback tail geometry below is "
+        "evaluated at."),
+    ("profile_edenhofer_sightline", "fallback/GAL_B_DEG"): ("deg",
+        "The Galactic latitude of this region's source-weighted mean sky "
+        "direction, the direction the fallback tail geometry below is "
+        "evaluated at."),
+    ("profile_edenhofer_sightline", "fallback/TAIL_MODE"): ("code",
+        "The tail shape (TAIL_MODE's own codes) evaluated at this region's "
+        "source-weighted mean sky direction."),
+    ("profile_edenhofer_sightline", "fallback/TAIL_SCALE_PC"): ("pc",
+        "The tail scale length (TAIL_SCALE_PC) evaluated at this region's "
+        "source-weighted mean sky direction."),
+    ("profile_edenhofer_sightline", "fallback/TAIL_EFOLD_PC"): ("pc",
+        "The tail e-folding distance (TAIL_EFOLD_PC) evaluated at this "
+        "region's source-weighted mean sky direction."),
+
+    ("depth_edenhofer_region", "REGION"): ("region name",
+        "The name of the region this row describes, in the fixed thirty-"
+        "region order every region-axis product in this package shares."),
+    ("depth_edenhofer_region", "D_R_PC"): ("pc",
+        "This region's own canonical distance, carried over from this "
+        "package's region table."),
+    ("depth_edenhofer_region", "SIGMA_D_PC"): ("pc",
+        "The quoted uncertainty on this region's canonical distance, "
+        "carried over from this package's region table."),
+    ("depth_edenhofer_region", "D_PEAK_PC"): ("pc",
+        "The distance of the extinction-weighted peak of this region's own "
+        "fallback profile, in the structure nearest its canonical distance "
+        "D_R_PC."),
+    ("depth_edenhofer_region", "D_LO_PC"): ("pc",
+        "The 16th-percentile distance of the extinction-weighted "
+        "distribution inside that same structure."),
+    ("depth_edenhofer_region", "D_HI_PC"): ("pc",
+        "The 84th-percentile distance of the extinction-weighted "
+        "distribution inside that same structure."),
+    ("depth_edenhofer_region", "SIGMA_DEPTH_PC"): ("pc",
+        "Half of D_HI_PC minus D_LO_PC: this region's own line-of-sight "
+        "depth, read as a half-width."),
+    ("depth_edenhofer_region", "FWHM_PC"): ("pc",
+        "The full width at half maximum of the extinction-weighted "
+        "distribution inside that same structure."),
+    ("depth_edenhofer_region", "DEPTH_OK"): ("boolean",
+        "True where a structure near this region's canonical distance was "
+        "found at all, so D_PEAK_PC and the other depth values in this row "
+        "are meaningful; False where none was found."),
+
     # sky.derived.twomass_column_scale -- column-scale_twomass_region: each
     # arm's map column regressed against 2MASS background-star colour, by
     # region and arm.

@@ -36,10 +36,16 @@ import numpy as np
 from astropy.io import fits
 from joblib import Parallel, delayed
 
+from sesnaimpute import build as build_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute import tables as tables_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.config import product_path
+
+_PROFILE_STEM = "profile_edenhofer_sightline"
+_DEPTH_STEM = "depth_edenhofer_region"
+_DEPTH_READINGS = {name: value for (stem, name), value in REGISTRY.items() if stem == _DEPTH_STEM}
 
 # --- the unit chain (spec 1.4) -------------------------------------------
 #
@@ -652,31 +658,37 @@ def _build_one_region(config, region, canon, input_dir):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "sightline"
-        f.create_dataset("HPX_PIX_256", data=admitted_pix)
-        f.create_dataset("DIST_PC", data=dist_pc)
-        f.create_dataset("A_CUM_K", data=a_cum_k)
-        f.create_dataset("RHO_K_PER_PC", data=rho_k_per_pc)
-        f.create_dataset("SIGMA_UNC_K", data=sigma_unc_k)
-        f.create_dataset("SIGMA_COR_K", data=sigma_cor_k)
-        f.create_dataset("GAL_L_DEG", data=gl)
-        f.create_dataset("GAL_B_DEG", data=gb)
-        f.create_dataset("TAIL_RESIDUAL_K", data=tail["residual"])
-        f.create_dataset("TAIL_MODE", data=tail["mode"])
-        f.create_dataset("TAIL_SCALE_PC", data=tail["scale"])
-        f.create_dataset("TAIL_EFOLD_PC", data=tail["efold"])
-        f.create_dataset("A_INF_K", data=a_inf)
-        f.create_dataset("RESCALED", data=rescaled)
+        for name, data in (
+            ("HPX_PIX_256", admitted_pix),
+            ("DIST_PC", dist_pc),
+            ("A_CUM_K", a_cum_k),
+            ("RHO_K_PER_PC", rho_k_per_pc),
+            ("SIGMA_UNC_K", sigma_unc_k),
+            ("SIGMA_COR_K", sigma_cor_k),
+            ("GAL_L_DEG", gl),
+            ("GAL_B_DEG", gb),
+            ("TAIL_RESIDUAL_K", tail["residual"]),
+            ("TAIL_MODE", tail["mode"]),
+            ("TAIL_SCALE_PC", tail["scale"]),
+            ("TAIL_EFOLD_PC", tail["efold"]),
+            ("A_INF_K", a_inf),
+            ("RESCALED", rescaled),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_PROFILE_STEM, name)])
         fb = f.create_group("fallback")
-        fb.create_dataset("DIST_PC", data=dist_pc)
-        fb.create_dataset("A_CUM_K", data=fallback_a_cum)
-        fb.create_dataset("A_EDGE_K", data=fallback["a_edge_ref_k"])
-        fb.create_dataset("A_COL_SIGHTLINE_K", data=fallback["a_col_sightline_ref_k"])
-        fb.create_dataset("RESIDUAL_K", data=fallback["residual_ref_k"])
-        fb.create_dataset("GAL_L_DEG", data=fallback["gal_l_ref_deg"])
-        fb.create_dataset("GAL_B_DEG", data=fallback["gal_b_ref_deg"])
-        fb.create_dataset("TAIL_MODE", data=fallback["tail_mode_ref"])
-        fb.create_dataset("TAIL_SCALE_PC", data=fallback["tail_scale_ref_pc"])
-        fb.create_dataset("TAIL_EFOLD_PC", data=fallback["tail_efold_ref_pc"])
+        for name, data in (
+            ("DIST_PC", dist_pc),
+            ("A_CUM_K", fallback_a_cum),
+            ("A_EDGE_K", fallback["a_edge_ref_k"]),
+            ("A_COL_SIGHTLINE_K", fallback["a_col_sightline_ref_k"]),
+            ("RESIDUAL_K", fallback["residual_ref_k"]),
+            ("GAL_L_DEG", fallback["gal_l_ref_deg"]),
+            ("GAL_B_DEG", fallback["gal_b_ref_deg"]),
+            ("TAIL_MODE", fallback["tail_mode_ref"]),
+            ("TAIL_SCALE_PC", fallback["tail_scale_ref_pc"]),
+            ("TAIL_EFOLD_PC", fallback["tail_efold_ref_pc"]),
+        ):
+            build_module.write_dataset(fb, name, data, *REGISTRY[(_PROFILE_STEM, f"fallback/{name}")])
 
     return dict(region=region, d_r_pc=canon.d_r_pc, sigma_d_pc=canon.sigma_pc,
                 d_peak_pc=depth["d_peak_pc"], d_lo_pc=depth["d_lo_pc"], d_hi_pc=depth["d_hi_pc"],
@@ -711,7 +723,7 @@ def build(config, regions=None):
                               ("FWHM_PC", "fwhm_pc"))
         }
         depth_rows["DEPTH_OK"] = np.array([r["depth_ok"] for r in rows], dtype=bool)
-        tables_module.update_rows(depth_path, names, depth_rows, granule="region")
+        tables_module.update_rows(depth_path, names, depth_rows, granule="region", readings=_DEPTH_READINGS)
         st.done(depth_path, regions=n_regions, depth_ok=int(depth_rows["DEPTH_OK"].sum()),
                 median_d_peak_pc=float(np.nanmedian(depth_rows["D_PEAK_PC"])))
 
