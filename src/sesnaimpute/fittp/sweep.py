@@ -476,7 +476,7 @@ def _source_task(i):
         # fraction w_i (fittp.prior_reader.load, from bmstp.cloud_interval
         # through P1's SIGHTLINE_ROW), 1 - w_i owned by the diffuse design,
         # w_i by the dense one -- never a per-hypothesis extinction mark.
-        w_dense_cell = w["reader"].w_dense[i][None, :]           # (1, n_x)
+        w_dense_cell = w["reader"].w_dense_row(i)[None, :]        # (1, n_x)
         cell_weight_by_law = (1.0 - w_dense_cell, w_dense_cell)
 
         # Where the source's own w_i is 0 in every cell, the dense design

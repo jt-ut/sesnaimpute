@@ -141,7 +141,7 @@ class Prior(object):
 
     def __init__(self, cls, a_col, a_col_sig, arm, zp_sig, grain, density, p1_columns,
                  grid_all, xi_edges, b_edges, model_name, c_theta, factors, kernel,
-                 w_dense):
+                 w_dense, sightline_row):
         self.cls = cls
         self.a_col = a_col
         self.a_col_sig = a_col_sig
@@ -160,12 +160,24 @@ class Prior(object):
         self.c_theta = c_theta
         self.factors = factors  # list of dict(W, C_F, D_F, normalised)
         self.kernel = kernel
-        #: `(n_source, n_x)` float64, the DENSE design's own per-cell
-        #: weight `w_i` (section 2, section 4.2): every source's own row,
-        #: through P1's `SIGHTLINE_ROW` -- every class reads it, the tile
-        #: classes included, since the law is the sightline's, never the
-        #: grain's. The DIFFUSE design's own weight is `1 - w_dense`.
+        #: `(n_sightline, n_x)` float64, the DENSE design's own per-cell
+        #: weight `w_i` (section 2, section 4.2): every sightline's own row,
+        #: reached by a source through P1's `SIGHTLINE_ROW` (`sightline_row`
+        #: below, `w_dense_row`) -- every class reads it, the tile classes
+        #: included, since the law is the sightline's, never the grain's.
+        #: The DIFFUSE design's own weight is `1 - w_dense`.
         self.w_dense = w_dense
+        #: P1's `SIGHTLINE_ROW` (`load`'s own `sightline` read): source `i`
+        #: reaches its own `w_dense` row at `sightline_row[i]`, through
+        #: `w_dense_row` below.
+        self.sightline_row = sightline_row
+
+    def w_dense_row(self, rows):
+        """Source(s) `rows`' own row(s) of `w_dense` (SPEC_BMSTP_DRAFT.md
+        section 2): `w_dense` is held per sightline, not per source, so a
+        source reaches its row through its own `sightline_row` (P1's
+        `SIGHTLINE_ROW`)."""
+        return self.w_dense[self.sightline_row[rows]]
 
 
 def load(config, region, cls):
@@ -239,10 +251,10 @@ def load(config, region, cls):
                                  b_centers=b_centers_w))
 
     kernel = kernel_module.Kernel.read(config)
-    w_dense = _dense_weight_by_source(config, region, sightline)
+    w_dense = _dense_weight_by_sightline(config, region)
     return Prior(cls, a_col, a_col_sig, arm, zp_sig, grain, density, p1_columns,
                  grid_all, xi_edges, b_edges, model_name, c_theta, factors, kernel,
-                 w_dense)
+                 w_dense, sightline)
 
 
 #: `xi_i`, the common grid's own cell centres in the DEPTH FRACTION itself
@@ -252,13 +264,13 @@ def load(config, region, cls):
 _XI_CENTERS = 10.0 ** grid._X_CENTERS
 
 
-def _dense_weight_by_source(config, region, sightline_row):
-    """`(n_source, n_x)` float64, the DENSE design's own per-cell weight
-    `w_i = f_i * W_CLOUD` (section 2): `XI_FRONT`, `XI_BACK`, `W_CLOUD` come
-    from `bmstp.cloud_interval`'s own sightline product, read through P1's
-    `SIGHTLINE_ROW` -- the sky data alone (the cloud interval and the 3-D
-    profile), never the prior. `sightline_row` is P1's whole-region column
-    (`load`'s own `sightline` read), the same row index `bmstp.shapes`
+def _dense_weight_by_sightline(config, region):
+    """`(n_sightline, n_x)` float64, the DENSE design's own per-cell weight
+    `w_i = f_i * W_CLOUD` (section 2) at every sightline of
+    `bmstp.cloud_interval`'s own sightline product: `XI_FRONT`, `XI_BACK`,
+    `W_CLOUD` -- the sky data alone (the cloud interval and the 3-D
+    profile), never the prior. A source reaches its own row through P1's
+    `SIGHTLINE_ROW` (`Prior.w_dense_row`), the same row index `bmstp.shapes`
     itself uses for this class's grain when `cls` is a cloud class, and the
     join every OTHER class reads too (the law is the sightline's for every
     class, section 2)."""
@@ -275,13 +287,9 @@ def _dense_weight_by_source(config, region, sightline_row):
         xi_front = mmap_dataset(f, "XI_FRONT")
         xi_back = mmap_dataset(f, "XI_BACK")
         w_cloud = mmap_dataset(f, "W_CLOUD")
-    row = np.asarray(sightline_row)
-    xi_front_s = xi_front[row]     # (n_source,)
-    xi_back_s = xi_back[row]
-    w_cloud_s = w_cloud[row]
-    f_i = np.clip(_XI_CENTERS[None, :] - xi_front_s[:, None], 0.0,
-                  (xi_back_s - xi_front_s)[:, None]) / _XI_CENTERS[None, :]
-    return f_i * w_cloud_s[:, None]
+    f_i = np.clip(_XI_CENTERS[None, :] - xi_front[:, None], 0.0,
+                  (xi_back - xi_front)[:, None]) / _XI_CENTERS[None, :]
+    return f_i * w_cloud[:, None]
 
 
 def prepare(reader, rows):
@@ -889,8 +897,8 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
     the `m` templates in the class's `C_THETA` and weight-factor tables
     (identity order where the library is read whole). `cell_weight` is
     `(n, n_x)`, the per-source per-cell dense-fraction weight this call's
-    own design owns -- `1 - reader.w_dense[rows]` for the diffuse design,
-    `reader.w_dense[rows]` for the dense one (`fittp.sweep._source_task`
+    own design owns -- `1 - reader.w_dense_row(rows)` for the diffuse design,
+    `reader.w_dense_row(rows)` for the dense one (`fittp.sweep._source_task`
     calls this twice, once per design); `_cell_sum` multiplies every cell's
     mass by it before the Jacobian, so the two calls' evidence sums to the
     single-law read whichever design the weight favours at each cell. No
