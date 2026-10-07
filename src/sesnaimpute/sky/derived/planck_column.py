@@ -55,8 +55,12 @@ from scipy.ndimage import gaussian_filter
 from sesnaimpute import build as build_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.config import product_path
 from sesnaimpute.sky.derived import herschel_column as sky_herschel_column
+
+_CAL_STEM = "calibration_planck_survey"
+_COLUMN_STEM = "column_planck_sightline"
 
 NSIDE = 256
 NSIDE_P = 2048
@@ -396,9 +400,11 @@ def _write_calibration(config, cal):
         f.attrs["PLANCK_FWHM_ARCMIN"] = cal["fwhm_arcmin"]
         f.attrs["N_BEAMS_PER_PIXEL"] = cal["n_beams_per_pixel"]
         regs = cal["regions"]
-        f.create_dataset("REGION", data=np.array(regs, dtype="S64"))
-        f.create_dataset("CV_FRAC_ERROR",
-                         data=np.array([cal["cv_frac_by_region"][r] for r in regs]))
+        build_module.write_dataset(f, "REGION", np.array(regs, dtype="S64"),
+                                    *REGISTRY[(_CAL_STEM, "REGION")])
+        build_module.write_dataset(f, "CV_FRAC_ERROR",
+                                    np.array([cal["cv_frac_by_region"][r] for r in regs]),
+                                    *REGISTRY[(_CAL_STEM, "CV_FRAC_ERROR")])
     return path
 
 
@@ -426,12 +432,15 @@ def build_column(config, a_tau, sigma_within_s0, sigma_within_f, sigma_region_fr
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "sightline"
-        f.create_dataset("HPX_PIX_256", data=pix)
-        f.create_dataset("A_K", data=a_col)
-        f.create_dataset("SIGMA_A_K", data=sigma)
-        f.create_dataset("GAL_L_DEG", data=l_deg)
-        f.create_dataset("GAL_B_DEG", data=b_deg)
-        f.create_dataset("TEMP_K", data=temp)
+        for name, data in (
+            ("HPX_PIX_256", pix),
+            ("A_K", a_col),
+            ("SIGMA_A_K", sigma),
+            ("GAL_L_DEG", l_deg),
+            ("GAL_B_DEG", b_deg),
+            ("TEMP_K", temp),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_COLUMN_STEM, name)])
     return path, pix.size
 
 

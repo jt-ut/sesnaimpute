@@ -61,6 +61,37 @@ REGISTRY = {
         "90 the source's own 90%-completeness flux, 91 the median "
         "90%-completeness flux of its nearest sky neighbours."),
 
+    # sky.derived.planck_column -- calibration_planck_survey (survey-wide
+    # tau353-to-A_K calibration) and column_planck_sightline (per nside-256
+    # pixel): the Planck arm of the extinction column.
+    ("calibration_planck_survey", "REGION"): ("region name",
+        "Which HGBS-covered region each row of CV_FRAC_ERROR describes."),
+    ("calibration_planck_survey", "CV_FRAC_ERROR"): ("dimensionless",
+        "For the matching region in REGION, the median fractional "
+        "difference between its own HGBS column and the Planck-based "
+        "column predicted for it by the calibration fit with that region "
+        "held out: the cross-validation residual this file's own "
+        "SIGMA_REGION_FRAC attribute is the scatter of."),
+
+    ("column_planck_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
+        "This file's admitted nside-256 pixel numbers (nested ordering, "
+        "the granule map's own footprint). Row i here is row i of A_K."),
+    ("column_planck_sightline", "A_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256, the K-band extinction from "
+        "the Planck thermal-dust optical depth (TAU353) at that pixel, "
+        "through this file's own A_TAU calibration."),
+    ("column_planck_sightline", "SIGMA_A_K"): ("mag A_K",
+        "The total 1-sigma uncertainty on A_K for the matching pixel, "
+        "combining the calibration's own statistical, within-beam and "
+        "region-to-region terms in quadrature."),
+    ("column_planck_sightline", "GAL_L_DEG"): ("deg",
+        "Galactic longitude of the matching pixel's centre."),
+    ("column_planck_sightline", "GAL_B_DEG"): ("deg",
+        "Galactic latitude of the matching pixel's centre."),
+    ("column_planck_sightline", "TEMP_K"): ("K",
+        "Planck's own fitted thermal-dust temperature at the matching "
+        "pixel."),
+
     # sky.derived.dunham_yso -- yso_dunham2015_survey: the Dunham et al.
     # (2015) YSO census, one row per catalogued YSO.
     ("yso_dunham2015_survey", "SEQ"): ("catalog sequence number",
