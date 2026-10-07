@@ -105,10 +105,14 @@ import h5py
 import numpy as np
 import pandas as pd
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+
+_STEM = "weights_anchors_tile"
 
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
@@ -1005,27 +1009,31 @@ def _write_product(config, region, result):
         f.attrs["GRANULE"] = "tile"
         f.attrs["FAINT_TREND_G_DEX_PER_MAG"] = result["faint_trend_g"]
         f.attrs["FAINT_TREND_KS_DEX_PER_MAG"] = result["faint_trend_ks"]
-        f.create_dataset("G_EDGES", data=result["g_edges"])
-        f.create_dataset("KS_EDGES", data=result["ks_edges"])
-        f.create_dataset("W_G", data=result["w_g"])
-        f.create_dataset("W_REGION_G", data=result["w_region_g"])
-        # item 3: the explicit per-bin flag, replacing the `w_region !=
-        # 1.0` sentinel -- this region's own tile evidence, whether or
-        # not the bin fell back to the survey-pooled value (item 1).
-        f.create_dataset("POPULATED_G", data=result["populated_g"])
-        f.create_dataset("W_KS", data=result["w_ks"])
-        f.create_dataset("W_REGION_KS", data=result["w_region_ks"])
-        f.create_dataset("POPULATED_KS", data=result["populated_ks"])
-        f.create_dataset("MEASURED_KS", data=result["measured_ks"].astype(np.bool_))
-        f.create_dataset("W_JOINT", data=result["w_joint"])
-        f.create_dataset("USE_JOINT", data=result["use_joint"])
-        f.create_dataset("W_REGION_JOINT", data=result["w_region_joint"])
-        f.create_dataset("EXCLUDED", data=result["excluded"])
-        # W13/W38: the 2MASS anchor's own per-tile completeness sigmoid;
-        # the width is now one fixed instrument value, not a per-tile fit.
-        f.create_dataset("P_KS", data=result["p_ks"])
-        f.create_dataset("KS_M50", data=result["ks_m50"])
-        f.create_dataset("KS_SCALE", data=np.float64(KS_SCALE_MAG))
+        # item 3: POPULATED_G/POPULATED_KS are the explicit per-bin flag,
+        # replacing the `w_region != 1.0` sentinel -- this region's own
+        # tile evidence, whether or not the bin fell back to the
+        # survey-pooled value (item 1). W13/W38: P_KS/KS_M50/KS_SCALE are
+        # the 2MASS anchor's own per-tile completeness sigmoid; the width
+        # is now one fixed instrument value, not a per-tile fit.
+        for name, data in (
+            ("G_EDGES", result["g_edges"]),
+            ("KS_EDGES", result["ks_edges"]),
+            ("W_G", result["w_g"]),
+            ("W_REGION_G", result["w_region_g"]),
+            ("POPULATED_G", result["populated_g"]),
+            ("W_KS", result["w_ks"]),
+            ("W_REGION_KS", result["w_region_ks"]),
+            ("POPULATED_KS", result["populated_ks"]),
+            ("MEASURED_KS", result["measured_ks"].astype(np.bool_)),
+            ("W_JOINT", result["w_joint"]),
+            ("USE_JOINT", result["use_joint"]),
+            ("W_REGION_JOINT", result["w_region_joint"]),
+            ("EXCLUDED", result["excluded"]),
+            ("P_KS", result["p_ks"]),
+            ("KS_M50", result["ks_m50"]),
+            ("KS_SCALE", np.float64(KS_SCALE_MAG)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
     return path
 
 

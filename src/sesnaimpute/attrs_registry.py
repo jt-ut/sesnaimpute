@@ -107,6 +107,88 @@ REGISTRY = {
         "by the cell's own width in u. Integrating P_XI times the cell "
         "width over all cells gives 1."),
 
+    # population.anchor_weights -- weights_anchors_tile: the STAR
+    # per-tile-and-bin anchor reweighting factor W, per region.
+    ("weights_anchors_tile", "G_EDGES"): ("mag Gaia G",
+        "The edges of the Gaia G magnitude bins W_G and W_REGION_G are "
+        "tabulated on, the same edges the anchor histogram product uses."),
+    ("weights_anchors_tile", "KS_EDGES"): ("mag 2MASS/UKIDSS Ks",
+        "The edges of the Ks magnitude bins W_KS and W_REGION_KS are "
+        "tabulated on, the same edges the anchor histogram product uses."),
+    ("weights_anchors_tile", "W_G"): ("dimensionless",
+        "For each tile and each Gaia G bin of G_EDGES, the anchor "
+        "reweighting factor: the sky's own observed star count over the "
+        "model's predicted count, shrunk toward the region-pooled value "
+        "in the log. Where this tile carries no usable evidence in this "
+        "bin, this is W_REGION_G's own value for that bin."),
+    ("weights_anchors_tile", "W_REGION_G"): ("dimensionless",
+        "One value per Gaia G bin of G_EDGES (shared by every tile): the "
+        "region-pooled reweighting factor, or, where no tile in this "
+        "region has usable evidence in that bin, the survey-pooled "
+        "value, or NaN where neither this region nor the survey has any."),
+    ("weights_anchors_tile", "POPULATED_G"): ("boolean",
+        "One value per Gaia G bin of G_EDGES: True where at least one "
+        "tile of this region carries usable evidence in that bin, so "
+        "W_REGION_G is this region's own fit rather than a survey-pooled "
+        "or absent value."),
+    ("weights_anchors_tile", "W_KS"): ("dimensionless",
+        "For each tile and each Ks bin of KS_EDGES, the anchor "
+        "reweighting factor on the already completeness-corrected (P_KS) "
+        "predicted counts: the sky's own observed star count over the "
+        "model's predicted count, shrunk toward the region-pooled value "
+        "in the log. Where this tile carries no usable evidence in this "
+        "bin, this is W_REGION_KS's own value for that bin."),
+    ("weights_anchors_tile", "W_REGION_KS"): ("dimensionless",
+        "One value per Ks bin of KS_EDGES (shared by every tile): the "
+        "region-pooled reweighting factor, or, where no tile in this "
+        "region has usable evidence in that bin, the survey-pooled "
+        "value, or NaN where neither this region nor the survey has any."),
+    ("weights_anchors_tile", "POPULATED_KS"): ("boolean",
+        "One value per Ks bin of KS_EDGES: True where at least one tile "
+        "of this region carries usable evidence in that bin, so "
+        "W_REGION_KS is this region's own fit rather than a survey-pooled "
+        "or absent value."),
+    ("weights_anchors_tile", "MEASURED_KS"): ("boolean",
+        "For each tile and each Ks bin of KS_EDGES, True where the "
+        "model predicts at least one star there: False marks a bin past "
+        "this tile's own survey depth (the deep UKIDSS bins where the "
+        "region carries no deep coverage), which a consumer must not "
+        "read a weight for at all."),
+    ("weights_anchors_tile", "W_JOINT"): ("dimensionless",
+        "For each tile, each Gaia G bin of G_EDGES and each Ks bin of "
+        "KS_EDGES, the anchor reweighting factor on the joint (G, Ks) "
+        "grid, fit the same way as W_G and W_KS. Read only where "
+        "USE_JOINT is True for that tile and bin; a star without a "
+        "usable joint cell takes the marginal weight instead."),
+    ("weights_anchors_tile", "USE_JOINT"): ("boolean",
+        "For each tile, each Gaia G bin of G_EDGES and each Ks bin of "
+        "KS_EDGES, True where this region's pooled count in that joint "
+        "cell reached the fitting floor and W_JOINT is therefore an "
+        "actual fit rather than an unfitted placeholder, and the "
+        "matching joint observed count for this tile is positive."),
+    ("weights_anchors_tile", "W_REGION_JOINT"): ("dimensionless",
+        "One value per joint (G, Ks) cell (shared by every tile): the "
+        "region-pooled joint reweighting factor, or the survey-pooled "
+        "value, or NaN, on the same fallback rule as W_REGION_G."),
+    ("weights_anchors_tile", "EXCLUDED"): ("boolean",
+        "One value per tile: True where this tile's own pooled observed-"
+        "over-predicted ratio departs from the region's median by more "
+        "than the cluster-exclusion band, so its evidence is pooled into "
+        "the region fit rather than kept as its own."),
+    ("weights_anchors_tile", "P_KS"): ("dimensionless",
+        "For each tile and each Ks bin of KS_EDGES, the 2MASS anchor's "
+        "own per-tile completeness sigmoid: 1 on every UKIDSS-served bin, "
+        "and on a 2MASS-served bin the fitted probability of detection at "
+        "that bin's own magnitude given this tile's KS_M50 and this "
+        "file's fixed KS_SCALE."),
+    ("weights_anchors_tile", "KS_M50"): ("mag 2MASS Ks",
+        "One value per tile: the Ks magnitude at which this tile's own "
+        "(or, where too few bins clear the counting floor, the region-"
+        "summed) completeness sigmoid reaches 50%."),
+    ("weights_anchors_tile", "KS_SCALE"): ("mag",
+        "The fixed roll-off width of the 2MASS completeness sigmoid P_KS "
+        "is evaluated with, the same value for every tile in this file."),
+
     # population.anchor_tiles -- tiles_anchors_hpx512 and
     # histograms_anchors_hpx512: the STAR anchor tiling and the two
     # anchors' observed/predicted magnitude histograms, per region.
