@@ -27,6 +27,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.build import run
 from sesnaimpute.fittp.likelihood import GRAY_COLUMN
 from sesnaimpute.population import selection as population_selection
+from sesnaimpute.readings import set_readings
 
 #: The eight SESNA bands, `catalog`'s and `fittp.likelihood`'s own order.
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
@@ -239,6 +240,29 @@ def _library_thickness(config, cls, sigma_i, kappa_prime):
     return names.size, d50, d90, d90 <= RESOLUTION_TOL
 
 
+#: `UNITS`/`READING` (CODING_RULES_BMSTP.md rule 5): every dataset this
+#: survey check carries. A module-level constant so a file already on
+#: disk from before this rule can be backfilled in place (`set_readings`
+#: skips any name not present), without a recompute.
+_READINGS = {
+    "BANDS": ("band key", "the eight SESNA bands, SIGMA_I's own column order"),
+    "SIGMA_I": ("dex", "the survey's own 10th-percentile log-flux error per band, floored at SIGMA_FLOOR_DEX"),
+    "YSO_GROUP": ("geometry label", "the YSO register's own sub-grid this row's spacing was measured on"),
+    "YSO_N_AT_SIZE": ("templates", "that sub-grid's own template count at the size this row measured"),
+    "YSO_D50_AT_SIZE": ("dex", "that sub-grid's own 50th-percentile nearest-neighbour spacing at that size"),
+    "YSO_D90_AT_SIZE": ("dex", "that sub-grid's own 90th-percentile nearest-neighbour spacing at that size"),
+    "YSO_D_EFF": ("dimensionless", "that sub-grid's own fitted effective dimension of the spacing-vs-size line"),
+    "YSO_N_STAR": ("templates", "the template count at which that sub-grid's fitted line reaches RESOLUTION_TOL"),
+    "OTHER_LIBRARY": ("library key", "a library other than YSO's own key"),
+    "OTHER_N_TEMPLATES": ("templates", "that library's own current template count"),
+    "OTHER_D50": ("dex", "that library's own 50th-percentile nearest-neighbour spacing at its current count"),
+    "OTHER_D90": ("dex", "that library's own 90th-percentile nearest-neighbour spacing at its current count"),
+    "OTHER_THICK_ENOUGH": ("boolean (0/1)", "whether that library's own OTHER_D90 already clears RESOLUTION_TOL"),
+    "LIBRARY": ("library key", "SIGMA_LIB_DEX's own row order, one entry per class's library"),
+    "SIGMA_LIB_DEX": ("dex", "section 6.1's sigma_lib,L, one number per library, the fit's own per-band variance floor"),
+}
+
+
 def _write(path, sigma_i, n_sample, n_total, groups, sizes_all, p50_all, p90_all,
            deff_all, nstar_all, other, library_order, sigma_lib_dex):
     labels = list(groups)
@@ -265,6 +289,7 @@ def _write(path, sigma_i, n_sample, n_total, groups, sizes_all, p50_all, p90_all
         f.create_dataset("LIBRARY", data=np.array(library_order, dtype="S6"))
         f.create_dataset("SIGMA_LIB_DEX", data=np.array(
             [sigma_lib_dex[c] for c in library_order]))
+        set_readings(f, _READINGS)
 
 
 def build(config, regions=None):

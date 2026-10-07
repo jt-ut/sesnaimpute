@@ -37,6 +37,7 @@ from sesnaimpute import progress
 from sesnaimpute.build import run
 from sesnaimpute.bmstp import grid
 from sesnaimpute.gutcolors import crisp
+from sesnaimpute.readings import set_readings
 
 #: The six libraries, `fittp.prior_reader._LIB`'s own values.
 LIBRARIES = ("sps", "agb", "pahc", "galz", "yso", "h2shock")
@@ -154,6 +155,19 @@ def _emission_table(f_ref, floor_linear, subclass, st):
     return E, subclasses, edges, hand_ok
 
 
+#: `UNITS`/`READING` (CODING_RULES_BMSTP.md rule 5): every dataset this
+#: table carries. A module-level constant so a file already on disk from
+#: before this rule can be backfilled in place, without a recompute.
+_READINGS = {
+    "E": ("dimensionless",
+           "E[k, b, v]: the fraction of subclass k's templates, scaled to sit at "
+           "apparent 4.5 micron flux bin b, that the colour cascade calls verdict v"),
+    "SUBCLASSES": ("subclass label", "E's own first-axis order, this library's subclasses"),
+    "LOG10_F45_EDGES": ("log10 mJy", "E's own second-axis bin edges, the apparent 4.5 micron flux grid"),
+    "LABELS": ("verdict label", "E's own third-axis order, the cascade's eleven verdicts"),
+}
+
+
 def _write(path, key, E, subclasses, edges):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
@@ -161,6 +175,7 @@ def _write(path, key, E, subclasses, edges):
         f.create_dataset("SUBCLASSES", data=np.array(subclasses, dtype="S16"))
         f.create_dataset("LOG10_F45_EDGES", data=edges.astype(np.float64))
         f.create_dataset("LABELS", data=np.array(crisp.LABELS, dtype="S20"))
+        set_readings(f, _READINGS)
         f.attrs["GRANULE"] = "survey"
         f.attrs["LIBRARY"] = key
 

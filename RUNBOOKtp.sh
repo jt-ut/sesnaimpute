@@ -177,7 +177,7 @@ PY sesnaimpute.atlas.protostars   # the protostar check figure per region with H
 PY sesnaimpute.fittp.emission   # the measured emission table E[k,b,v], one call per library, region-independent (SPEC_BMSTP sec 6.5)
 # cascade's measured half needs no fit, so it runs before the fit loop, with
 # no flag: never opens a fit file or the posterior product. Its imputed half
-# (fittp.classify's FLUX_IMPUTED, and PSI_VOTES/ENTROPY_PSI_VOTES) is filled
+# (fittp.classify's LOG10_FLUX_IMPUTED, and PSI_VOTES/ENTROPY_PSI_VOTES) is filled
 # in by the second line below, --imputed, once classify has written; each
 # reads only the file it names, no version or content check.
 PY sesnaimpute.fittp.cascade   # the colour cascade on the measured fluxes, Psi per source (SPEC_BMSTP sec 6.5)
