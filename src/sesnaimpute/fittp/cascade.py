@@ -67,9 +67,8 @@ _READINGS = {
         "category the source's colors fall in rather than a most likely class. The "
         "codes are 0 deeply embedded protostar, 1 class I protostar, 2 class II, 3 "
         "transition disk, 9 H2 shock blob, 19 PAH emitter (star-forming galaxy), 29 "
-        "AGN, 39 PAH-contaminated source, 49 generic galaxy, 99 diskless star, -100 "
-        "unclassified, and -100 means the measured bands satisfy none of the cuts' "
-        "rules."),
+        "AGN, 39 PAH-contaminated source, 49 generic galaxy and 99 diskless star. A source "
+        "whose colors satisfy none of the cuts' rules is -100."),
     "VERDICT_IMPUTED": ("SESNA class code",
         "The class the color cuts of Gutermuth et al. (2009) assign this source when "
         "the bands the survey did not measure are filled in with the pipeline's "
