@@ -20,9 +20,13 @@ import h5py
 import numpy as np
 import pandas as pd
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+
+_STEM = "colour_trilegal_survey"
 
 #: TRILEGAL's own column header for the Gaia+Tycho2+2MASS system
 #: (`sky.download.trilegal.colour`), verbatim; a header that does not
@@ -123,12 +127,15 @@ def write_table(path, table, n_stars):
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "survey"
         f.attrs["N_STARS"] = int(n_stars)
-        f.create_dataset("LOG_TEFF_EDGES", data=table["log_teff_edges"].astype(np.float64))
-        f.create_dataset("LOG_G_EDGES", data=table["log_g_edges"].astype(np.float64))
-        f.create_dataset("MH_EDGES", data=table["mh_edges"].astype(np.float64))
-        f.create_dataset("G_MINUS_KS_MEDIAN", data=table["median"].astype(np.float32))
-        f.create_dataset("G_MINUS_KS_HALFWIDTH", data=table["halfwidth"].astype(np.float32))
-        f.create_dataset("COUNT", data=table["count"].astype(np.int32))
+        for name, data in (
+            ("LOG_TEFF_EDGES", table["log_teff_edges"].astype(np.float64)),
+            ("LOG_G_EDGES", table["log_g_edges"].astype(np.float64)),
+            ("MH_EDGES", table["mh_edges"].astype(np.float64)),
+            ("G_MINUS_KS_MEDIAN", table["median"].astype(np.float32)),
+            ("G_MINUS_KS_HALFWIDTH", table["halfwidth"].astype(np.float32)),
+            ("COUNT", table["count"].astype(np.int32)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
 
 
 def build(config, regions=None):

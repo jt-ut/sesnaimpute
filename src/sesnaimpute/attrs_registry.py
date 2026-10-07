@@ -272,6 +272,53 @@ REGISTRY = {
         "The image's own one-pixel background noise level, in the map's "
         "native calibrated counts (Froebrich et al. 2015, their Table C1)."),
 
+    # sky.derived.trilegal_colour -- colour_trilegal_survey: TRILEGAL's own
+    # Gaia G - 2MASS Ks colour as a function of atmosphere alone.
+    ("colour_trilegal_survey", "LOG_TEFF_EDGES"): ("dex log10(K)",
+        "The edges of this file's log10(effective temperature) bins, "
+        "0.02 dex wide: bin i runs from LOG_TEFF_EDGES[i] to "
+        "LOG_TEFF_EDGES[i+1]."),
+    ("colour_trilegal_survey", "LOG_G_EDGES"): ("dex log10(cm/s^2)",
+        "The edges of this file's log10(surface gravity) bins, 0.25 dex "
+        "wide: bin j runs from LOG_G_EDGES[j] to LOG_G_EDGES[j+1]."),
+    ("colour_trilegal_survey", "MH_EDGES"): ("dex [M/H]",
+        "The edges of this file's metallicity bins, 0.25 dex wide: bin k "
+        "runs from MH_EDGES[k] to MH_EDGES[k+1]."),
+    ("colour_trilegal_survey", "G_MINUS_KS_MEDIAN"): ("mag",
+        "For the cell at (LOG_TEFF_EDGES[i], LOG_G_EDGES[j], MH_EDGES[k]), "
+        "the median Gaia G minus 2MASS Ks colour of the TRILEGAL stars that "
+        "fall in it. NaN where COUNT is 0."),
+    ("colour_trilegal_survey", "G_MINUS_KS_HALFWIDTH"): ("mag",
+        "For the same cell as G_MINUS_KS_MEDIAN, half the difference "
+        "between the 84th and 16th percentile of that cell's own G minus "
+        "Ks colours: a robust one-sided spread around the median. NaN "
+        "where COUNT is 0."),
+    ("colour_trilegal_survey", "COUNT"): ("stars",
+        "For the same cell as G_MINUS_KS_MEDIAN, how many TRILEGAL stars "
+        "from the download fall in it."),
+
+    # sky.derived.planck_source_column -- column_planck_source: the Planck
+    # thermal-dust arm of the per-source extinction column.
+    ("column_planck_source", "A_K"): ("mag A_K",
+        "For every catalogued source of this region, the K-band extinction "
+        "from the Planck R1.20 thermal-dust optical depth (TAU353) "
+        "bilinearly interpolated at the source's own Galactic position."),
+    ("column_planck_source", "SIGMA_A_K"): ("mag A_K",
+        "The total 1-sigma uncertainty on A_K, combining SIGMA_STAT_K, "
+        "SIGMA_WITHIN_K and SIGMA_REGION_K in quadrature."),
+    ("column_planck_source", "SIGMA_STAT_K"): ("mag A_K",
+        "The part of A_K's uncertainty from the Planck map's own per-pixel "
+        "statistical error on TAU353 at the source's position."),
+    ("column_planck_source", "SIGMA_WITHIN_K"): ("mag A_K",
+        "The part of A_K's uncertainty from the measured scatter, within "
+        "this source's region, between the Planck-based column and the "
+        "reference column it is calibrated against: a fixed offset plus a "
+        "term growing with A_K."),
+    ("column_planck_source", "SIGMA_REGION_K"): ("mag A_K",
+        "The part of A_K's uncertainty from the region-to-region scatter of "
+        "the same Planck-to-reference calibration, not reduced by beam "
+        "averaging since a single sightline sees exactly one Planck beam."),
+
     # sky.derived.edenhofer_samples -- profile-sigma-samples_edenhofer_sightline:
     # the across-sample uncertainty on the Edenhofer et al. (2024) extinction
     # profile, from its 12 released posterior samples.

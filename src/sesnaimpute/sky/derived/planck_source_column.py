@@ -21,10 +21,14 @@ import h5py
 import numpy as np
 from joblib import Parallel, delayed
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+
+_STEM = "column_planck_source"
 
 # Planck R1.20 thermal-dust model: Planck Collaboration XI 2014, A&A 571, A11.
 PLANCK_NSIDE = 2048
@@ -138,11 +142,14 @@ def _build_one_region(config, region, fits_path, cal):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "source"
-        f.create_dataset("A_K", data=a_col.astype(np.float32))
-        f.create_dataset("SIGMA_A_K", data=sig.astype(np.float32))
-        f.create_dataset("SIGMA_STAT_K", data=sig_stat.astype(np.float32))
-        f.create_dataset("SIGMA_WITHIN_K", data=sig_within.astype(np.float32))
-        f.create_dataset("SIGMA_REGION_K", data=sig_region.astype(np.float32))
+        for name, data in (
+            ("A_K", a_col.astype(np.float32)),
+            ("SIGMA_A_K", sig.astype(np.float32)),
+            ("SIGMA_STAT_K", sig_stat.astype(np.float32)),
+            ("SIGMA_WITHIN_K", sig_within.astype(np.float32)),
+            ("SIGMA_REGION_K", sig_region.astype(np.float32)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
     return region, int(l.size), float(np.median(a_col))
 
 
