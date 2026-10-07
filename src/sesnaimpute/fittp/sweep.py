@@ -46,6 +46,16 @@ workers inherit the compiled code rather than each paying for it -- the
 workers inherit `_WORKER` and that code by fork by
 copy-on-write, never through `Pool`'s `initializer`/`initargs` (which
 pickles) and never by opening a register, grid or product themselves.
+Read once, shared pages, never per worker: every one of `_WORKER`'s own
+arrays that `prior_reader.load`/`_load_region_catalog` read off disk is,
+wherever the dataset allows it, a `numpy.memmap` (`prior_reader.
+mmap_dataset`, MAPARRAYS section 1) opened once here, in the parent,
+before the fork -- its pages already sit in the OS page cache, and every
+forked worker's own mapping reads those SAME physical pages rather than a
+private copy, which is what keeps this stage's own parent small at fork
+(the small Python objects in `_WORKER` -- `config`, `topk`, the register's
+own compressed arrays -- still reach a worker by fork's ordinary
+copy-on-write, unchanged).
 `_init_worker` (the Pool's own, data-free initializer) pins numba and BLAS
 to one thread each per worker, since the source axis is now the pool's own
 parallel axis and the per-template numba kernels threading too would
@@ -103,10 +113,12 @@ depend on the template. `TOPK_FLUX` stays linear mJy, the top-K record's
 own per-template value, unaffected by either rename.
 """
 
+import errno
 import glob
 import multiprocessing as mp
 import os
 import re
+import time
 
 import h5py
 import numba
@@ -146,12 +158,23 @@ _IMAP_CHUNKSIZE = 16
 #: Per-worker memory floor, MB: what a forked worker costs beyond its own
 #: source's arrays -- the interpreter, the imported stack, and the
 #: copy-on-write pages the parent's inherited objects dirty as CPython
-#: refcounts them. Measured with `vmmap --summary` (physical footprint, which
-#: excludes the clean pages workers share, unlike RSS) on the YSO library, the
-#: largest: ~310 MB steady, ~430 MB peak per worker. Rounded to the peak, since
-#: the node has to hold it. `build_region_class`'s warm-up is what keeps the
-#: JIT out of this figure: without it every worker compiles its own kernels and
-#: the floor is ~180 MB higher.
+#: refcounts them. This is an UPPER BOUND measured on a different platform
+#: (MAPARRAYS section 6 item 4): `vmmap --summary` (physical footprint,
+#: which excludes the clean pages workers share, unlike RSS) on this
+#: laptop's own macOS fork, on the YSO library, the largest: ~310 MB
+#: steady, ~430 MB peak per worker. macOS and Stampede3's Linux account a
+#: fork's shared/private pages differently, and now that MAPARRAYS section
+#: 1 has made every large array in `_WORKER` a memory map -- pages shared
+#: with the parent and every sibling worker, not copy-on-write private
+#: ones -- this number has not been re-measured since. The real number is
+#: `/proc/<pid>/smaps_rollup`'s `Pss` and `Private_Dirty`, summed, read
+#: from inside one forked worker on Stampede3 itself (`Pss` apportions a
+#: shared mapping's pages fairly across the workers sharing it, which
+#: `vmmap`'s physical footprint does not); no Linux machine was available
+#: to this unit to take it. Rounded to the peak, since the node has to
+#: hold it. `build_region_class`'s warm-up is what keeps the JIT out of
+#: this figure: without it every worker compiles its own kernels and the
+#: floor is ~180 MB higher.
 WORKER_PROCESS_FLOOR_MB = 430
 
 #: The datasets every P7 part file and the joined product carry, in write
@@ -309,10 +332,16 @@ def _load_region_catalog(config, region):
     inherited arrays instead of opening either product itself."""
     path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
     with h5py.File(path, "r") as f:
-        flux = np.asarray(f["FNU_MJY"][:], dtype=np.float64)
-        sigma = np.asarray(f["SIGMA_FNU_MJY"][:], dtype=np.float64)
-        origin = f["ORIGIN_FNU"][:]
-        name = f["NAME"][:]
+        # memory-mapped (MAPARRAYS section 1): FNU_MJY/SIGMA_FNU_MJY are
+        # already float64 on disk, so this is the same values as the old
+        # `.astype(np.float64)`, not held a second time in process memory.
+        flux = prior_reader.mmap_dataset(f, "FNU_MJY")
+        sigma = prior_reader.mmap_dataset(f, "SIGMA_FNU_MJY")
+        origin = prior_reader.mmap_dataset(f, "ORIGIN_FNU")
+        name = prior_reader.mmap_dataset(f, "NAME")
+    # catalog.limits.limits is a shared reader (every class, every consumer
+    # of a detection limit, not just this one) outside this unit's own code
+    # paths -- left as its own plain read (MAPARRAYS report).
     f_lim50 = catalog_limits.limits(config, region)
     return dict(flux=flux, sigma=sigma, origin=origin, name=name, f_lim50=f_lim50)
 
@@ -778,6 +807,72 @@ def _write_part(part_path, batch):
         f.attrs["N_TEMPLATES_CHECKED"] = batch["n_templates_checked"]
 
 
+#: Section 3's own retry on `ctx.Pool`'s creation: the Aquila failure
+#: (MAPARRAYS "Why") landed on HBM nodes still reclaiming a job just
+#: vacated, where `fork` refuses outright with `ENOMEM` rather than
+#: waiting a moment for the pages back. Four attempts total, 20 s apart
+#: (three gaps) -- "three attempts" the three retries after the first.
+POOL_RETRY_ATTEMPTS = 4
+POOL_RETRY_SECONDS = 20.0
+
+
+def _meminfo_free_available():
+    """`(MemFree, MemAvailable)` in kB off `/proc/meminfo` -- the node's
+    own two numbers the Stampede3 diagnostic read (MAPARRAYS "Why").
+    `(None, None)` where the file does not exist (this laptop's own
+    macOS has no `/proc`), so the retry's print line still runs
+    everywhere, naming what it could not read."""
+    free = avail = None
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemFree:"):
+                    free = int(line.split()[1])
+                elif line.startswith("MemAvailable:"):
+                    avail = int(line.split()[1])
+    except OSError:
+        pass
+    return free, avail
+
+
+def _make_pool(ctx, n_workers):
+    """`ctx.Pool(n_workers, initializer=_init_worker)`, retried on a
+    transient refusal (section 3): up to `POOL_RETRY_ATTEMPTS` tries,
+    `POOL_RETRY_SECONDS` apart, surviving only an `OSError` whose `errno`
+    is `ENOMEM` -- any other exception raises straight through,
+    unretried. The ordinary, never-fails case stays silent
+    (CODING_RULES_BMSTP.md rule 17, "nothing else prints"): a line
+    prints only once a failure has happened, one per failed attempt plus
+    one confirming the eventual success, each with the node's own
+    `MemFree`/`MemAvailable` (`_meminfo_free_available`); the last
+    attempt's own `ENOMEM` raises instead of sleeping again, those same
+    two numbers in the message."""
+    for attempt in range(1, POOL_RETRY_ATTEMPTS + 1):
+        try:
+            pool = ctx.Pool(n_workers, initializer=_init_worker)
+        except OSError as exc:
+            if exc.errno != errno.ENOMEM:
+                raise
+            free, avail = _meminfo_free_available()
+            print("fittp.sweep._make_pool: attempt %d/%d failed with ENOMEM -- "
+                  "MemFree=%s kB MemAvailable=%s kB"
+                  % (attempt, POOL_RETRY_ATTEMPTS, free, avail), flush=True)
+            if attempt == POOL_RETRY_ATTEMPTS:
+                raise OSError(
+                    errno.ENOMEM,
+                    "fittp.sweep._make_pool: %d attempts at ctx.Pool(%d) all failed "
+                    "with ENOMEM -- MemFree=%s kB MemAvailable=%s kB"
+                    % (POOL_RETRY_ATTEMPTS, n_workers, free, avail))
+            time.sleep(POOL_RETRY_SECONDS)
+            continue
+        if attempt > 1:
+            free, avail = _meminfo_free_available()
+            print("fittp.sweep._make_pool: attempt %d/%d succeeded -- "
+                  "MemFree=%s kB MemAvailable=%s kB"
+                  % (attempt, POOL_RETRY_ATTEMPTS, free, avail), flush=True)
+        return pool
+
+
 def build_region_class(config, region, cls, st, reader, catalog,
                         n_workers=1, limit=None, batches=None):
     """Sweeps one {region, class}'s whole region (or, with `limit`, its
@@ -863,7 +958,7 @@ def build_region_class(config, region, cls, st, reader, catalog,
     # Forked below every load above, and below the warm -- the threading layer
     # pinned at import is fork-safe by numba's own contract.
     ctx = mp.get_context("fork")
-    with ctx.Pool(n_workers, initializer=_init_worker) as pool:
+    with _make_pool(ctx, n_workers) as pool:
         for bi, (bstart, bstop) in enumerate(batch_bounds):
             if selected is not None and bi not in selected:
                 continue
