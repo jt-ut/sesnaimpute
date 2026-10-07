@@ -7,6 +7,15 @@ sum of section 4.2. A library module: no `progress` use, no runbook line
 grid (P2 for STAR/AGB, P2's STAR grid for PAHC, P3 for YSO/H2S, P4 for
 GAL), the class's template weights (P5) and `C_THETA`, and the population
 column kernel (`population.kernel.Kernel`, section 2 "the column kernel").
+Every one of those arrays is read-only and never written, so `load` reads
+it as a `numpy.memmap` wherever the dataset is stored contiguous and
+uncompressed (`mmap_dataset`, below), falling back to a plain read only
+where it is neither (the register's own compressed arrays, read
+elsewhere): read once, shared pages, never per worker -- the pages this
+call maps live once in the OS page cache, and `fittp.sweep`'s own forked
+pool (its own module docstring) has every worker read the same pages
+rather than copy one, which is what keeps the PARENT's own footprint at
+fork small (MAPARRAYS section 1).
 `prepare` blurs a block's grain shapes by each source's own kernel
 (`bmstp.grid.blur`). `ln_prior` is the cell sum itself, in numba: per
 template the cell window holding `a_hat +/- 5 sigma_a`, found in O(1)
@@ -64,6 +73,27 @@ _LIB = {"STAR": ("sps", "region"), "AGB": ("agb", "region"), "PAHC": ("pahc", "r
 
 _SQRT2 = float(np.sqrt(2.0))
 _SQRT2PI = float(np.sqrt(2.0 * np.pi))
+
+
+def mmap_dataset(f, name):
+    """`name`'s dataset in the open file or group `f`: a read-only
+    `numpy.memmap` over the file's own bytes wherever the dataset is
+    stored contiguous and uncompressed (`h5py`'s own backing-store
+    offset, `Dataset.id.get_offset()`), so its pages live once in the OS
+    page cache and every forked worker in `fittp.sweep` reads the same
+    pages instead of copying its own private one (MAPARRAYS section 1,
+    the "read once, shared pages, never per worker" rule); a chunked or
+    compressed dataset (`get_offset()` returns `None` -- the register's
+    own `models/*`, gzip-compressed) falls back to a plain read into
+    process memory, since no single run of bytes backs it. Never
+    written back; `dset.file.filename` reaches the owning file whether
+    `f` itself is a `File` or one of its `Group`s."""
+    dset = f[name]
+    offset = dset.id.get_offset()
+    if offset is None:
+        return dset[:]
+    return np.memmap(dset.file.filename, dtype=dset.dtype, mode="r",
+                      offset=offset, shape=dset.shape)
 
 #: the stored shape's own support edge (`bmstp.grid`'s module docstring):
 #: `x = a / T <= 1` there, `log10 ξ = 0` the edge ξ = 1. The read
@@ -147,14 +177,14 @@ def load(config, region, cls):
     """
     p1_path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
     with h5py.File(p1_path, "r") as f:
-        a_col = f["A_COL_K"][:].astype(np.float64)
-        a_col_sig = f["A_COL_SIG_K"][:].astype(np.float64)
-        arm = f["ARM"][:]
-        zp_sig = f["ZP_SIG_K"][:].astype(np.float64)
-        density = f["DENSITY_%s" % cls][:].astype(np.float64)
-        tile = f["TILE"][:]
-        sightline = f["SIGHTLINE_ROW"][:]
-        p1_columns = {"D_PAHC": f["D_PAHC"][:].astype(np.float64)}
+        a_col = mmap_dataset(f, "A_COL_K")
+        a_col_sig = mmap_dataset(f, "A_COL_SIG_K")
+        arm = mmap_dataset(f, "ARM")
+        zp_sig = mmap_dataset(f, "ZP_SIG_K")
+        density = mmap_dataset(f, "DENSITY_%s" % cls)
+        tile = mmap_dataset(f, "TILE")
+        sightline = mmap_dataset(f, "SIGHTLINE_ROW")
+        p1_columns = {"D_PAHC": mmap_dataset(f, "D_PAHC")}
 
     shape_src, dset = _SHAPE[cls]
     if shape_src == "star":
@@ -162,9 +192,9 @@ def load(config, region, cls):
         # one origin, one width, shared with every other class.
         path = config_module.product_path(config, "bmstp", "shape", "star", "tile", region=region)
         with h5py.File(path, "r") as f:
-            xi_edges = f["LOG10_XI_EDGES"][:]
-            b_edges = f["LOG10_F45_EDGES"][:]
-            grid_all = f[dset][:]
+            xi_edges = mmap_dataset(f, "LOG10_XI_EDGES")
+            b_edges = mmap_dataset(f, "LOG10_F45_EDGES")
+            grid_all = mmap_dataset(f, dset)
         grain = tile
     elif shape_src == "cloud":
         path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
@@ -174,16 +204,16 @@ def load(config, region, cls):
             # the H2S template's Sigma-to-4.5-micron conversion `C_THETA`
             # (P5, `bmstp.template_weights.h2shock_conversion`) folded in
             # at the shape stage, not at this read -- no private axis.
-            xi_edges = f["LOG10_XI_EDGES"][:]
-            b_edges = f["LOG10_F45_EDGES"][:]
-            grid_all = f[dset][:]
+            xi_edges = mmap_dataset(f, "LOG10_XI_EDGES")
+            b_edges = mmap_dataset(f, "LOG10_F45_EDGES")
+            grid_all = mmap_dataset(f, dset)
         grain = sightline
     else:  # gal: one survey-wide grid, no grain axis, on the common axis too
         path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
         with h5py.File(path, "r") as f:
-            xi_edges = f["LOG10_XI_EDGES"][:]
-            b_edges = f["LOG10_F45_EDGES"][:]
-            grid_all = f["GRID"][:][None, :, :]
+            xi_edges = mmap_dataset(f, "LOG10_XI_EDGES")
+            b_edges = mmap_dataset(f, "LOG10_F45_EDGES")
+            grid_all = mmap_dataset(f, "GRID")[None, :, :]
         grain = np.zeros(a_col.shape[0], dtype=np.int64)
 
     lib, granule = _LIB[cls]
@@ -196,15 +226,15 @@ def load(config, region, cls):
             "fittp.prior_reader.load [%s/%s]: missing %s -- run RUNBOOKtp.sh's "
             "'PY sesnaimpute.bmstp.template_weights' line first" % (region, cls, weight_path))
     with h5py.File(weight_path, "r") as f:
-        model_name = f["MODEL_NAME"][:]
-        c_theta = f["C_THETA"][:]
+        model_name = mmap_dataset(f, "MODEL_NAME")
+        c_theta = mmap_dataset(f, "C_THETA")
         # the factor tables' cell axis is the common one (P5, section 4.1).
-        b_centers_w = f["LOG10_F45_CENTERS"][:]
+        b_centers_w = mmap_dataset(f, "LOG10_F45_CENTERS")
         n_factor = sum(1 for k in f.keys() if k.startswith("factor_"))
         factors = []
         for k in range(n_factor):
             grp = f["factor_%d" % k]
-            factors.append(dict(W=grp["W"][:].astype(np.float64), C_F=grp["C_F"][:],
+            factors.append(dict(W=mmap_dataset(grp, "W"), C_F=mmap_dataset(grp, "C_F"),
                                  D_F=grp.attrs.get("D_F", ""),
                                  b_centers=b_centers_w))
 
@@ -238,9 +268,13 @@ def _dense_weight_by_source(config, region, sightline_row):
             "fittp.prior_reader.load [%s]: missing %s -- run RUNBOOKtp.sh's "
             "'PY sesnaimpute.bmstp.cloud_interval' line first" % (region, path))
     with h5py.File(path, "r") as f:
-        xi_front = np.asarray(f["XI_FRONT"][:], dtype=np.float64)
-        xi_back = np.asarray(f["XI_BACK"][:], dtype=np.float64)
-        w_cloud = np.asarray(f["W_CLOUD"][:], dtype=np.float64)
+        # memory-mapped, native float32 on disk; the arithmetic below mixes
+        # each with `_XI_CENTERS` (float64), which promotes it to float64
+        # exactly as the old `.astype(np.float64)` did, since float32 ->
+        # float64 widening loses nothing (MAPARRAYS section 2).
+        xi_front = mmap_dataset(f, "XI_FRONT")
+        xi_back = mmap_dataset(f, "XI_BACK")
+        w_cloud = mmap_dataset(f, "W_CLOUD")
     row = np.asarray(sightline_row)
     xi_front_s = xi_front[row]     # (n_source,)
     xi_back_s = xi_back[row]
@@ -268,9 +302,13 @@ def prepare(reader, rows):
     it as such, and a template whose whole window sums to zero prior mass
     reads `ln <Lambda_C>_s(theta) = -inf` there."""
     rows = np.asarray(rows)
-    a_col = reader.a_col[rows]
-    a_col_sig = reader.a_col_sig[rows]
-    zp_sig = reader.zp_sig[rows]
+    # `reader.a_col`/`a_col_sig`/`zp_sig` are memory-mapped, native float32
+    # (section 2): cast to float64 here, at first use, rather than at
+    # `load` -- the same values `Kernel.mixture` always received, widened
+    # exactly as before, just not held doubled in the parent's RSS.
+    a_col = np.asarray(reader.a_col[rows], dtype=np.float64)
+    a_col_sig = np.asarray(reader.a_col_sig[rows], dtype=np.float64)
+    zp_sig = np.asarray(reader.zp_sig[rows], dtype=np.float64)
     arm = reader.arm[rows]
     grain = reader.grain[rows]
     exponent = reader.kernel.cloud_gamma_herschel if CLOUD[reader.cls] else 0.0
@@ -380,7 +418,9 @@ def _factor_ln(reader, rows, a_hat, log10_b_hat, slope, sigma_a, model_index):
     n, m = a_hat.shape
     if not reader.factors:
         return np.zeros((n, m), dtype=np.float64)
-    a_floor = reader.a_col[rows][:, None] * (10.0 ** reader.xi_edges[0])
+    # `reader.a_col` is memory-mapped, native float32 (section 2); cast here,
+    # at first use, to the float64 this factor sum has always run in.
+    a_floor = np.asarray(reader.a_col[rows], dtype=np.float64)[:, None] * (10.0 ** reader.xi_edges[0])
     a_star = _truncated_mean(a_hat, sigma_a, a_floor)
     b_star = log10_b_hat + slope[:, None] * (a_star - a_hat)
     total = np.zeros((n, m), dtype=np.float64)
@@ -861,7 +901,11 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
     = -inf`, a clean veto rather than an inflated pedestal, and `a_post`/
     `a2_post` NaN there."""
     rows = np.asarray(rows)
-    a_col = reader.a_col[rows]
+    # `reader.a_col` is memory-mapped, native float32 (section 2); cast to
+    # float64 here, at the numba kernel's own call below, rather than at
+    # `load` -- `_cell_sum`/`_build_a_star_tables` have always run in
+    # float64, and float32 -> float64 widening carries the same values.
+    a_col = np.asarray(reader.a_col[rows], dtype=np.float64)
     density = reader.density[rows]
     model_index = np.asarray(model_index)
     n, m = a_hat.shape
