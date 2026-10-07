@@ -58,12 +58,13 @@ _READINGS = {
              "the source's own name, this product's row order matching the catalogue's"),
     "P_VERDICT_MEASURED": ("dimensionless",
                             "the cascade's own verdict probability over the eleven LABELS, "
-                            "run on the measured photometry with the real detection pattern; "
-                            "undefined (NaN) where the detected bands allow no verdict"),
-    "VERDICT_MEASURED": ("CLASS_CODE",
+                            "run on the measured photometry with the real detection pattern; the "
+                            "row is a distribution and sums to 1, UNCLASSIFIED carrying the "
+                            "probability that the detected bands allow no verdict"),
+    "VERDICT_MEASURED": ("SESNA class code",
                           "the cascade's own most probable verdict on the measured photometry"),
     "N_DETECTED": ("bands", "the number of this source's eight bands with a measured, positive flux"),
-    "VERDICT_IMPUTED": ("CLASS_CODE",
+    "VERDICT_IMPUTED": ("SESNA class code",
                          "the cascade's own most probable verdict on the imputed SED; the MAP "
                          "class's own SED read back, not independent evidence"),
     "PSI_VOTES": ("votes",

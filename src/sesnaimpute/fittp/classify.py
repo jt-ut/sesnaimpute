@@ -558,11 +558,14 @@ _READINGS = {
                                 "between two measured bands are zero"),
     "A_K_POST": ("mag A_K",
                   "the prior-weighted mean of the fitted extinction along the fit's ridge, a "
-                  "mean in linear extinction; sits below the wall by the column kernel's width "
-                  "on a source the data cannot place"),
+                  "mean in linear extinction, one column per class in CLASSES order (read the "
+                  "MAP class's column for the source's own reported extinction, and divide by "
+                  "the density table's A_COL_K for the depth fraction); sits below the wall by "
+                  "the column kernel's width on a source the data cannot place"),
     "A_K_POST_SIG": ("mag A_K",
                       "the spread of the same posterior extinction mark, the square root of "
-                      "its second moment less its mean squared"),
+                      "its second moment less its mean squared, one column per class in "
+                      "CLASSES order"),
     "ENTROPY_CLASS": ("nats", "the entropy of P_CLASS's own row"),
     "ENTROPY_SUBCLASS": ("nats", "the entropy of P_SUBCLASS's own row"),
 }
