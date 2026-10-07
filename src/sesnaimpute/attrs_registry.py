@@ -107,6 +107,199 @@ REGISTRY = {
         "by the cell's own width in u. Integrating P_XI times the cell "
         "width over all cells gives 1."),
 
+    # bmstp.atlas -- prior_atlas_hpx512 (P6): the prior atlas, per admitted
+    # nside-512 pixel, every class's catalogued and intrinsic density and
+    # their grid breakdowns.
+    ("prior_atlas_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "This region's own admitted nside-512 pixel numbers (nested "
+        "ordering). Row i here is row i of every other per-pixel dataset "
+        "in this file."),
+    ("prior_atlas_hpx512", "A_COL_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_512, the adopted extinction "
+        "column every class's density is dimmed by."),
+    ("prior_atlas_hpx512", "COVERAGE"): ("dimensionless",
+        "For the matching pixel in HPX_PIX_512, the catalogue's own "
+        "observed footprint fraction (the catalog coverage product): "
+        "what share of this pixel SESNA was actually extracted on."),
+    ("prior_atlas_hpx512", "F_LIM_50_PIX_MJY"): ("mJy",
+        "For the matching pixel in HPX_PIX_512 and each of the eight "
+        "bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this "
+        "project's own band order), the pixel's own marginalized "
+        "50%-completeness flux limit."),
+    ("prior_atlas_hpx512", "N_CAT_STAR"): ("objects per square degree",
+        "For the matching pixel in HPX_PIX_512, the STAR population's "
+        "own catalogued density: its dimmed intrinsic density "
+        "(INTENSITY_STAR) weighted by the probability of clearing "
+        "SESNA's two-of-eight-band detection rule at this pixel's own "
+        "depth."),
+    ("prior_atlas_hpx512", "N_CAT_AGB"): ("objects per square degree",
+        "The same catalogued density as N_CAT_STAR, for the AGB "
+        "population."),
+    ("prior_atlas_hpx512", "N_CAT_PAHC"): ("objects per square degree",
+        "The same catalogued density as N_CAT_STAR, for the PAHC "
+        "population."),
+    ("prior_atlas_hpx512", "N_CAT_GAL"): ("objects per square degree",
+        "The same catalogued density as N_CAT_STAR, for the background-"
+        "galaxy population."),
+    ("prior_atlas_hpx512", "N_CAT_YSO"): ("objects per square degree",
+        "The same catalogued density as N_CAT_STAR, for the YSO "
+        "population."),
+    ("prior_atlas_hpx512", "N_CAT_H2S"): ("objects per square degree",
+        "The same catalogued density as N_CAT_STAR, for the H2-shock "
+        "population."),
+    ("prior_atlas_hpx512", "INTENSITY_STAR"): ("objects per square degree",
+        "For the matching pixel in HPX_PIX_512, the STAR population's "
+        "own dimmed intrinsic density at this pixel's own column, before "
+        "the catalogued-detection probability N_CAT_STAR applies."),
+    ("prior_atlas_hpx512", "INTENSITY_AGB"): ("objects per square degree",
+        "The same dimmed intrinsic density as INTENSITY_STAR, for the "
+        "AGB population."),
+    ("prior_atlas_hpx512", "INTENSITY_PAHC"): ("objects per square degree",
+        "The same dimmed intrinsic density as INTENSITY_STAR, for the "
+        "PAHC population."),
+    ("prior_atlas_hpx512", "INTENSITY_GAL"): ("objects per square degree",
+        "The same dimmed intrinsic density as INTENSITY_STAR, for the "
+        "background-galaxy population."),
+    ("prior_atlas_hpx512", "INTENSITY_YSO"): ("objects per square degree",
+        "The same dimmed intrinsic density as INTENSITY_STAR, for the "
+        "YSO population."),
+    ("prior_atlas_hpx512", "INTENSITY_H2S"): ("objects per square degree",
+        "The same dimmed intrinsic density as INTENSITY_STAR, for the "
+        "H2-shock population, after the region's own knot-rate "
+        "convolution."),
+    ("prior_atlas_hpx512", "N_ABOVE_STAR"): ("objects per square degree",
+        "For the matching pixel in HPX_PIX_512, how much of the STAR "
+        "population's own intrinsic density (INTENSITY_STAR) lies above "
+        "this pixel's own I2 (4.5 micron) 50%-completeness flux, read "
+        "directly from the class's own stored shape rather than from "
+        "the catalogued-detection fraction."),
+    ("prior_atlas_hpx512", "N_ABOVE_AGB"): ("objects per square degree",
+        "The same above-the-limit density as N_ABOVE_STAR, for the AGB "
+        "population."),
+    ("prior_atlas_hpx512", "N_ABOVE_PAHC"): ("objects per square degree",
+        "The same above-the-limit density as N_ABOVE_STAR, for the "
+        "PAHC population, using the pixel's own 8 micron depth cut in "
+        "place of the I2 limit."),
+    ("prior_atlas_hpx512", "N_ABOVE_GAL"): ("objects per square degree",
+        "The same above-the-limit density as N_ABOVE_STAR, for the "
+        "background-galaxy population."),
+    ("prior_atlas_hpx512", "N_ABOVE_YSO"): ("objects per square degree",
+        "The same above-the-limit density as N_ABOVE_STAR, for the YSO "
+        "population."),
+    ("prior_atlas_hpx512", "N_ABOVE_H2S"): ("objects per square degree",
+        "The same above-the-limit density as N_ABOVE_STAR, for the "
+        "H2-shock population."),
+    ("prior_atlas_hpx512", "N_CAT_BRIGHT3_STAR"): ("objects per square degree",
+        "The same catalogued density as N_CAT_STAR, restricted to STAR "
+        "members predicted brighter than three times this pixel's own "
+        "I2 50%-completeness limit, where completeness is effectively 1 "
+        "on both the catalogued and the predicted side."),
+    ("prior_atlas_hpx512", "N_CAT_BRIGHT3_AGB"): ("objects per square degree",
+        "The same bright-end catalogued density as N_CAT_BRIGHT3_STAR, "
+        "for the AGB population."),
+    ("prior_atlas_hpx512", "N_CAT_BRIGHT3_PAHC"): ("objects per square degree",
+        "The same bright-end catalogued density as N_CAT_BRIGHT3_STAR, "
+        "for the PAHC population."),
+    ("prior_atlas_hpx512", "N_CAT_BRIGHT3_GAL"): ("objects per square degree",
+        "The same bright-end catalogued density as N_CAT_BRIGHT3_STAR, "
+        "for the background-galaxy population."),
+    ("prior_atlas_hpx512", "N_CAT_BRIGHT3_YSO"): ("objects per square degree",
+        "The same bright-end catalogued density as N_CAT_BRIGHT3_STAR, "
+        "for the YSO population."),
+    ("prior_atlas_hpx512", "N_CAT_BRIGHT3_H2S"): ("objects per square degree",
+        "The same bright-end catalogued density as N_CAT_BRIGHT3_STAR, "
+        "for the H2-shock population."),
+    ("prior_atlas_hpx512", "N_CAT_BRIGHT10_STAR"): ("objects per square degree",
+        "The same catalogued density as N_CAT_STAR, restricted to STAR "
+        "members predicted brighter than ten times this pixel's own I2 "
+        "50%-completeness limit."),
+    ("prior_atlas_hpx512", "N_CAT_BRIGHT10_AGB"): ("objects per square degree",
+        "The same bright-end catalogued density as N_CAT_BRIGHT10_STAR, "
+        "for the AGB population."),
+    ("prior_atlas_hpx512", "N_CAT_BRIGHT10_PAHC"): ("objects per square degree",
+        "The same bright-end catalogued density as N_CAT_BRIGHT10_STAR, "
+        "for the PAHC population."),
+    ("prior_atlas_hpx512", "N_CAT_BRIGHT10_GAL"): ("objects per square degree",
+        "The same bright-end catalogued density as N_CAT_BRIGHT10_STAR, "
+        "for the background-galaxy population."),
+    ("prior_atlas_hpx512", "N_CAT_BRIGHT10_YSO"): ("objects per square degree",
+        "The same bright-end catalogued density as N_CAT_BRIGHT10_STAR, "
+        "for the YSO population."),
+    ("prior_atlas_hpx512", "N_CAT_BRIGHT10_H2S"): ("objects per square degree",
+        "The same bright-end catalogued density as N_CAT_BRIGHT10_STAR, "
+        "for the H2-shock population."),
+    ("prior_atlas_hpx512", "N_CAT_CELL_GAL"): ("objects",
+        "For the matching pixel in HPX_PIX_512, the background-galaxy "
+        "population's own expected catalogued count on the common "
+        "(log10 xi, log10 F_4.5) grid: summing every cell gives this "
+        "pixel's own RATIO_GAL times the region's source count."),
+    ("prior_atlas_hpx512", "N_CAT_CELL_STAR"): ("objects",
+        "The same per-cell catalogued count as N_CAT_CELL_GAL, for the "
+        "STAR population."),
+    ("prior_atlas_hpx512", "N_CAT_CELL_PAHC"): ("objects",
+        "The same per-cell catalogued count as N_CAT_CELL_GAL, for the "
+        "PAHC population."),
+    ("prior_atlas_hpx512", "N_CAT_CELL_AGB"): ("objects",
+        "The same per-cell catalogued count as N_CAT_CELL_GAL, for the "
+        "AGB population."),
+    ("prior_atlas_hpx512", "N_CAT_CELL_YSO"): ("objects",
+        "The same per-cell catalogued count as N_CAT_CELL_GAL, for the "
+        "YSO population."),
+    ("prior_atlas_hpx512", "N_CAT_CELL_H2S"): ("objects",
+        "The same per-cell catalogued count as N_CAT_CELL_GAL, for the "
+        "H2-shock population."),
+    ("prior_atlas_hpx512", "N_CELL_STAR"): ("objects",
+        "For the matching pixel in HPX_PIX_512, the STAR population's "
+        "own UNTHINNED intrinsic count on the common (log10 xi, "
+        "log10 F_4.5) grid: the same quadrature as N_CAT_CELL_STAR with "
+        "every member's own probability of being catalogued set to one, "
+        "so N_CAT_CELL_STAR never exceeds this cell by cell."),
+    ("prior_atlas_hpx512", "N_CELL_AGB"): ("objects",
+        "The same unthinned intrinsic per-cell count as N_CELL_STAR, for "
+        "the AGB population."),
+    ("prior_atlas_hpx512", "N_CELL_PAHC"): ("objects",
+        "The same unthinned intrinsic per-cell count as N_CELL_STAR, for "
+        "the PAHC population."),
+    ("prior_atlas_hpx512", "N_CELL_GAL"): ("objects",
+        "The same unthinned intrinsic per-cell count as N_CELL_STAR, for "
+        "the background-galaxy population."),
+    ("prior_atlas_hpx512", "N_CELL_YSO"): ("objects",
+        "The same unthinned intrinsic per-cell count as N_CELL_STAR, for "
+        "the YSO population."),
+    ("prior_atlas_hpx512", "N_CELL_H2S"): ("objects",
+        "The same unthinned intrinsic per-cell count as N_CELL_STAR, for "
+        "the H2-shock population."),
+    ("prior_atlas_hpx512", "SHARE_STAR"): ("dimensionless",
+        "For the matching pixel in HPX_PIX_512, the STAR population's "
+        "own share of this pixel's total catalogued density: N_CAT_STAR "
+        "divided by the sum of N_CAT_<class> over every class."),
+    ("prior_atlas_hpx512", "SHARE_AGB"): ("dimensionless",
+        "The same catalogued-density share as SHARE_STAR, for the AGB "
+        "population."),
+    ("prior_atlas_hpx512", "SHARE_PAHC"): ("dimensionless",
+        "The same catalogued-density share as SHARE_STAR, for the PAHC "
+        "population."),
+    ("prior_atlas_hpx512", "SHARE_GAL"): ("dimensionless",
+        "The same catalogued-density share as SHARE_STAR, for the "
+        "background-galaxy population."),
+    ("prior_atlas_hpx512", "SHARE_YSO"): ("dimensionless",
+        "The same catalogued-density share as SHARE_STAR, for the YSO "
+        "population."),
+    ("prior_atlas_hpx512", "SHARE_H2S"): ("dimensionless",
+        "The same catalogued-density share as SHARE_STAR, for the "
+        "H2-shock population."),
+    ("prior_atlas_hpx512", "N_OBS"): ("sources",
+        "For the matching pixel in HPX_PIX_512, how many sources the "
+        "real SESNA catalogue holds there."),
+    ("prior_atlas_hpx512", "N_OBS_BRIGHT3"): ("sources",
+        "The same observed source count as N_OBS, restricted to sources "
+        "brighter than three times this pixel's own I2 50%-completeness "
+        "limit."),
+    ("prior_atlas_hpx512", "N_OBS_BRIGHT10"): ("sources",
+        "The same observed source count as N_OBS, restricted to sources "
+        "brighter than ten times this pixel's own I2 50%-completeness "
+        "limit."),
+
     # bmstp.density -- table_density_source (P1): one row per curated
     # source, its column, grain indices, detection limits and the six sky
     # densities.
