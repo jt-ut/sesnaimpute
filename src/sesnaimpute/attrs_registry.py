@@ -107,6 +107,64 @@ REGISTRY = {
         "by the cell's own width in u. Integrating P_XI times the cell "
         "width over all cells gives 1."),
 
+    # population.star_population -- population_star_tile: per-tile field-
+    # star placement, anchor weight and brightness unit, per region (the
+    # same dataset names repeat in every tile_<id> group this file holds).
+    ("population_star_tile", "LIMIT8_GRID_MJY"): ("mJy",
+        "The region's own 8 micron completeness-limit grid: the 5th, "
+        "20th, 35th, 50th, 65th, 80th, 95th and 99th percentiles of this "
+        "region's sources' own 50%-completeness limit at 8 micron, the "
+        "nodes P_PAHC is tabulated on."),
+    ("population_star_tile", "STAR_INDEX"): ("row index",
+        "For every star this tile draws, its own row in this region's "
+        "field-star product's retained group."),
+    ("population_star_tile", "XI"): ("dimensionless",
+        "For every star this tile draws, its placement fraction along "
+        "this tile's own mean extinction profile: u = A(d)/A(inf) at the "
+        "star's own distance. A consumer forms the star's own extinction "
+        "as a real source's adopted column times this fraction."),
+    ("population_star_tile", "W"): ("dimensionless",
+        "For every star this tile draws, its total anchor reweighting "
+        "factor: the Gaia/2MASS joint or marginal weight "
+        "(population.anchor_weights) at the star's own placement and "
+        "predicted magnitude. W_STAR plus W_AGB equals this value "
+        "exactly, row by row."),
+    ("population_star_tile", "W_STAR"): ("dimensionless",
+        "The non-evolved share of W for every star this tile draws: W "
+        "itself for a star that is not evolved, 0 for one that is."),
+    ("population_star_tile", "W_AGB"): ("dimensionless",
+        "The evolved (AGB) share of W for every star this tile draws: "
+        "the region's own dust-production fraction F_DUSTY_MEAN times W "
+        "for a star flagged IS_EVOLVED, 0 otherwise."),
+    ("population_star_tile", "IS_EVOLVED"): ("boolean (0/1)",
+        "For every star this tile draws, whether TRILEGAL's own raw "
+        "surface gravity, temperature and luminosity place it past the "
+        "evolved-star HR-diagram cut (1) or not (0)."),
+    ("population_star_tile", "LOG10_B"): ("dex",
+        "For every star this tile draws, its STAR brightness unit: the "
+        "median, over the eight bands, of its own intrinsic TRILEGAL "
+        "flux divided by its matched atmosphere template's own reference "
+        "flux, as log10."),
+    ("population_star_tile", "LOG10_B_PAHC"): ("dex",
+        "For every star this tile draws, the same median flux ratio as "
+        "LOG10_B, restricted to the J, H and Ks bands and measured "
+        "against the PAHC library's own continuum reference flux "
+        "instead, as log10."),
+    ("population_star_tile", "LOG10_B_AGB_C"): ("dex",
+        "For every star this tile draws, the AGB brightness unit under "
+        "the carbon-rich dust chemistry, as log10. NaN for a star with "
+        "IS_EVOLVED False."),
+    ("population_star_tile", "LOG10_B_AGB_O"): ("dex",
+        "For every star this tile draws, the AGB brightness unit under "
+        "the oxygen-rich dust chemistry, as log10. NaN for a star with "
+        "IS_EVOLVED False."),
+    ("population_star_tile", "P_PAHC"): ("dimensionless",
+        "For every star this tile draws and each of the eight nodes of "
+        "LIMIT8_GRID_MJY, the probability that its aperture is "
+        "contaminated by PAH nebular emission at that assumed 8 micron "
+        "completeness limit, from the PAH-contamination probability "
+        "curve P(q) read at this star's own tile-dimmed 8 micron flux."),
+
     # population.field_stars -- field-stars_trilegal_region: the synthetic
     # TRILEGAL field-star population, retained sample and pre-retention
     # raw columns, per region.

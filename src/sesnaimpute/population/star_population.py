@@ -128,13 +128,17 @@ import pandas as pd
 from astropy.io import fits
 from joblib import Parallel, delayed
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
+
+_STEM = "population_star_tile"
 from sesnaimpute.population import anchor_tiles, pahc_curve, selection
 from sesnaimpute.sky.derived import profile as profile_module
 from sesnaimpute.sky.download.trilegal import build as trilegal_download
@@ -873,7 +877,8 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c):
         f.attrs["F_DUSTY_C"] = f_dusty_c
         f.attrs["F_DUSTY_MEAN"] = result["f_dusty_mean"]
         f.attrs["F_C"] = F_C
-        f.create_dataset("LIMIT8_GRID_MJY", data=result["limit_grid_mjy"])
+        build_module.write_dataset(f, "LIMIT8_GRID_MJY", result["limit_grid_mjy"],
+                                    *REGISTRY[(_STEM, "LIMIT8_GRID_MJY")])
         for tile_result in result["tiles"]:
             grp = f.create_group("tile_%d" % tile_result["tile"])
             # section 5.1's Omega_sim = n_pointings * Omega_pointing: the
@@ -882,18 +887,21 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c):
             # tile group below carries the ONE pointing's own area instead,
             # since that pointing's retained sample is all a tile draws from.
             grp.attrs["OMEGA_POINTING_DEG2"] = float(result["pointing_area"][tile_result["pointing_index"]])
-            grp.create_dataset("STAR_INDEX", data=tile_result["star_index"])
-            grp.create_dataset("XI", data=tile_result["u"])
-            grp.create_dataset("W", data=tile_result["w"])
-            grp.create_dataset("W_STAR", data=tile_result["w_star"])
-            grp.create_dataset("W_AGB", data=tile_result["w_agb"])
             si = tile_result["star_index"]
-            grp.create_dataset("IS_EVOLVED", data=result["is_evolved"][si].astype(np.int8))
-            grp.create_dataset("LOG10_B", data=result["log10_b"][si].astype(np.float32))
-            grp.create_dataset("LOG10_B_PAHC", data=result["log10_b_pahc"][si].astype(np.float32))
-            grp.create_dataset("LOG10_B_AGB_C", data=result["log10_b_agb_c"][si].astype(np.float32))
-            grp.create_dataset("LOG10_B_AGB_O", data=result["log10_b_agb_o"][si].astype(np.float32))
-            grp.create_dataset("P_PAHC", data=tile_result["p_pahc"])
+            for name, data in (
+                ("STAR_INDEX", tile_result["star_index"]),
+                ("XI", tile_result["u"]),
+                ("W", tile_result["w"]),
+                ("W_STAR", tile_result["w_star"]),
+                ("W_AGB", tile_result["w_agb"]),
+                ("IS_EVOLVED", result["is_evolved"][si].astype(np.int8)),
+                ("LOG10_B", result["log10_b"][si].astype(np.float32)),
+                ("LOG10_B_PAHC", result["log10_b_pahc"][si].astype(np.float32)),
+                ("LOG10_B_AGB_C", result["log10_b_agb_c"][si].astype(np.float32)),
+                ("LOG10_B_AGB_O", result["log10_b_agb_o"][si].astype(np.float32)),
+                ("P_PAHC", tile_result["p_pahc"]),
+            ):
+                build_module.write_dataset(grp, name, data, *REGISTRY[(_STEM, name)])
     return path
 
 
