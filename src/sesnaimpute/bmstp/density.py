@@ -111,9 +111,9 @@ _HPX512_PIXEL_DEG2 = 41252.96 / (12 * 512 ** 2)
 def _tile_membership(config, region):
     """`(pix, tile)`, sorted by pixel: the STAR anchor's own nside-512
     pixel-to-tile map (`population/anchors/tiles_anchors_hpx512__R.hdf5`,
-    `population.star_population`'s tile definition), the pixel-granule
-    counterpart of `granules.access`'s bms-area `_tile_membership` (this
-    design keeps its own copy under `population/`, never reading `bms/`)."""
+    `population.star_population`'s tile definition); `granules.access`'s
+    `per_source` has no tile-granule join, so this design keeps its own
+    copy here."""
     path = config_module.product_path(config, "population", "anchors", "tiles", "hpx512", region=region)
     with h5py.File(path, "r") as f:
         pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)

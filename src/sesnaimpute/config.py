@@ -16,7 +16,7 @@ from types import MappingProxyType
 
 from sesnaimpute import definitions
 
-_AREAS = ("sky/download", "sky/derived", "catalog", "granules", "bms",
+_AREAS = ("sky/download", "sky/derived", "catalog", "granules",
           "population", "bmstp", "fittp")
 
 #: CODING_RULES.md 10a: cap joblib worker pools at 4 where root.cfg names
@@ -74,7 +74,7 @@ def product_path(config, area, source, quantity, granule, region=None):
 
     or, for a per-region product, with `__<Region>` before the extension,
     the region name verbatim. `area` is one of "sky/download", "sky/derived",
-    "catalog", "granules", "bms". `granule` must be one of
+    "catalog", "granules". `granule` must be one of
     `definitions.GRANULES`. Every build writes here and every reader reads
     here; nothing else encodes the tree.
     """

@@ -7,8 +7,6 @@ dispatching on the product's own `GRANULE` root attribute -- never a
 registry.
 """
 
-import os
-
 import h5py
 import numpy as np
 
@@ -155,19 +153,6 @@ def _read_region_granule(path, region, columns, n_sources):
     return out
 
 
-def _tile_membership(config):
-    path = product_path(config, "bms", "anchors", "tile-membership", "hpx512")
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "per_source: tile membership %s does not exist yet -- run the STAR anchor "
-            "stage's RUNBOOK line first" % path)
-    with h5py.File(path, "r") as f:
-        pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
-        tile = np.asarray(f["TILE"][:])
-    order = np.argsort(pix)
-    return pix[order], tile[order]
-
-
 def per_source(config, region, path, columns, missing=None, granule=None):
     """`{column: array}`, one row per catalogued source of `region`, in
     catalogue-row order, for `path` -- the join every consumer of a
@@ -197,17 +182,6 @@ def per_source(config, region, path, columns, missing=None, granule=None):
         return _read_keyed_granule(path, "HPX_PIX_512", columns, rs["hpx_pix_512"], missing)
     if resolved == "sightline":
         return _read_keyed_granule(path, "HPX_PIX_256", columns, rs["hpx_pix_256"], missing)
-    if resolved == "tile":
-        tile_pix, tile_of_pix = _tile_membership(config)
-        loc = np.searchsorted(tile_pix, rs["hpx_pix_512"])
-        capped = np.minimum(loc, tile_pix.size - 1) if tile_pix.size else loc
-        valid = tile_pix.size and (tile_pix[capped] == rs["hpx_pix_512"])
-        if not np.all(valid):
-            raise ValueError("per_source: %d source(s) have an hpx512 pixel with no tile "
-                             "in the STAR anchor tile-membership table"
-                             % int(np.count_nonzero(~np.asarray(valid))))
-        source_tile = tile_of_pix[capped]
-        return _read_keyed_granule(path, "TILE", columns, source_tile, missing)
     if resolved == "region":
         return _read_region_granule(path, region, columns, n_sources)
     if resolved == "survey":
