@@ -2826,9 +2826,11 @@ _SWEEP_FIT_READINGS = {
         "rather than the diffuse one. 0 where the sightline carries no dense dust "
         "in front of the source."),
     "OCCAM_GAP": ("nats",
-        "How much more support this class has than its single best model, as a "
-        "natural logarithm. A large value means many of its models fit about "
-        "equally well."),
+        "How much more room this class's model library has near its single best "
+        "model, as a natural logarithm, counting the models alone, not how well "
+        "any of them fits this source. Never negative. A large value means many "
+        "models occupy that neighborhood, a library-volume effect rather than "
+        "evidence about the source."),
     "FRAC_CLAMPED": ("fraction",
         "The support-weighted fraction of this class's models whose best fit called "
         "for negative extinction and was held at zero."),
@@ -2852,9 +2854,12 @@ _SWEEP_FIT_READINGS = {
         "Chi-squared of each of those five models against the measured fluxes, at "
         "its fitted brightness and extinction."),
     "TOPK_LN_L": ("nats",
-        "How well each of those five models matches the photometry, as a natural "
-        "logarithm: the fit to the measured fluxes, together with the chance the "
-        "survey would have missed the flux predicted in each undetected band."),
+        "How well each of those five models matches the photometry at its own "
+        "best-fit brightness and extinction, as a natural logarithm: the fit to "
+        "the measured fluxes, together with the chance the survey would have "
+        "missed the flux predicted in each undetected band at that one point. "
+        "The class evidence itself reads that same chance across a range of "
+        "extinction, not at this one point, so it need not match this column."),
     "TOPK_LN_PRIOR": ("nats",
         "How many objects of this class the sky is expected to hold at the "
         "position, brightness and depth each of those five models implies, as a "
