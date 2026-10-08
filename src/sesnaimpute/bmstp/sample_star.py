@@ -112,16 +112,22 @@ def _tile_centre_lb(config, region, tile_id):
 
 
 def tile_width_classes(config, region, tile_id):
-    """`(row, sigma_classes_dex)` (the depth-width rule): the tile's own
-    representative sightline (`_RegionProfile.row_of_lb` at the tile's
-    own centre) and its `grid.N_WIDTH_CLASSES` geometric width classes in
-    `log10 x`, floored at one grid cell (`grid._X_CELL_WIDTH`) and capped
-    at that sightline's own cloud-interval span, `log10 u(d_back) -
-    log10 u(d_front)` (`sample_cloud.cloud_interval_pc`'s region-level
+    """`(row, sigma_classes_dex, d_front, d_back, u_front)` (the
+    depth-width rule): the tile's own representative sightline
+    (`_RegionProfile.row_of_lb` at the tile's own centre) and its
+    `grid.N_WIDTH_CLASSES` geometric width classes in `log10 x`, floored
+    at one grid cell (`grid._X_CELL_WIDTH`) and capped at that
+    sightline's own cloud-interval span, `log10 u(d_back) - log10
+    u(d_front)` (`sample_cloud.cloud_interval_pc`'s region-level
     front/back distances, read against the sightline's own total column
     `A_INF_K` so a `d_back` past the map's own edge -- the doubled cloud
     interval routinely reaches it, sec. 2 -- still sees the analytic
-    far-field tail rather than a flat extrapolation)."""
+    far-field tail rather than a flat extrapolation). `d_front`/`d_back`
+    and `u_front` (this SAME representative sightline's own profile read
+    at the cloud interval's front edge) are returned beside the width
+    classes so a caller building the STAR depth mark (C5) reads the
+    identical front edge and foreground share this function already
+    computed, rather than a second, independent read of the profile."""
     from sesnaimpute.bmstp import sample_cloud  # deferred: sample_cloud
     # imports template_weights, which imports this module -- a module-load
     # cycle a top-level import here would create.
@@ -135,7 +141,7 @@ def tile_width_classes(config, region, tile_id):
     floor_dex = float(grid._X_CELL_WIDTH)
     cap_dex = max(floor_dex, np.log10(max(u_back, 1e-300)) - np.log10(max(u_front, 1e-300)))
     sigma_classes_dex = np.geomspace(floor_dex, cap_dex, grid.N_WIDTH_CLASSES)
-    return row, sigma_classes_dex
+    return row, sigma_classes_dex, d_front, d_back, u_front
 
 
 _SIGMA_SAMPLES_CACHE = {}
