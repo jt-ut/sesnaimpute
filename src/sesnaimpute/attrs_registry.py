@@ -556,9 +556,12 @@ REGISTRY = {
         "this factor's own per-template weight: this region's own sps "
         "atmosphere-type count, borrowed at each PAHC template's nearest "
         "atmosphere match since the PAHC library carries no atmosphere-"
-        "type axis of its own, needing no further division by a library "
-        "density. Which population statement this factor encodes is "
-        "named by this dataset's own enclosing group's NAME attribute."),
+        "type axis of its own, times the measured 8 micron excess-"
+        "amplitude distribution of contaminated sources read onto the "
+        "template's own amplitude parameter, needing no further "
+        "division by a library density. Which population statement "
+        "this factor encodes is named by this dataset's own enclosing "
+        "group's NAME attribute."),
     ("pahc_weights_region", "C_F"): ("dimensionless",
         "For every PAHC template, this factor's own per-template offset: "
         "a correction applied to the template's weight at read time, "
@@ -576,11 +579,13 @@ REGISTRY = {
         "table in this file is tabulated on."),
     ("h2shock_weights_region", "W"): ("dimensionless",
         "For every h2shock template and every cell of LOG10_F45_CENTERS, "
-        "this factor's own per-template weight: the uniform template "
-        "weight, since h2shock's conditional table already carries the "
-        "region's own knot-brightness distribution (no external density "
-        "to divide by). Which population statement this factor encodes "
-        "is named by this dataset's own enclosing group's NAME attribute."),
+        "this factor's own per-template weight: the template's share of "
+        "the measured population of outflow knots (its pre-shock "
+        "density and its infrared colour against catalogued knots), "
+        "spread onto the brightness axis by the region's own knot-"
+        "brightness distribution. Which population statement this "
+        "factor encodes is named by this dataset's own enclosing "
+        "group's NAME attribute."),
     ("h2shock_weights_region", "C_F"): ("dimensionless",
         "For every h2shock template, this factor's own per-template "
         "offset: a correction applied to the template's weight at read "

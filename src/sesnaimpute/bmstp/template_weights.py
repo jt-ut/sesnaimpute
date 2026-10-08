@@ -8,16 +8,28 @@ one row. `q_theta` is the template's values of the quantities THAT
 CLASS'S OWN EXTERNAL DATA CONSTRAIN and `n_C` the library's density of
 templates in them -- never the library's density in eight-band SED space
 (`RHO_KDE1`, a space no class's data constrain: owner's ruling 2026-09-09,
-`briefs/reports/W29_review.md`, `briefs/W31.md`). sps/pahc `type` divide
+`briefs/reports/W29_review.md`, `briefs/W31.md`). sps `type` divides
 by nothing (a matched-star count is already a weight per template); agb
 `tau` and yso `population` divide by a 1-D histogram of the library's own
 templates in the constrained quantity (tau by chemistry; `log10
 f_ref,4.5,theta`), bins wide enough to hold the floor count, linearly
 interpolated;
 galz `colour` divides by a Gaussian KDE of the library's own templates in
-colour, the same bandwidth as the galaxy KDE. h2shock's `uniform` factor
-(sec 5.6's rule) divides by nothing (no external distribution): the
-conditional is the region's own knot lognormal convolved with the
+colour, the same bandwidth as the galaxy KDE. pahc `type` is sps's own
+matched-star count folded, per template, against the measured 8 micron
+excess-amplitude distribution of contaminated sources (review ledger C8:
+PAHC's own amplitude parameter `R` is a grid spanning three decades
+where the measured excess spans 1.4; `_pahc_amplitude_ratio`, the
+curve's own q axis read onto `R`'s grid cells) -- folded into the SAME
+plain-argument factor rather than stored a second time (sec 1.4:
+"factors that share the plain argument are one stored factor").
+h2shock's one factor (review ledger A9/C9, REWRITTEN from "uniform",
+sec 5.6's "disclosed" default) weights the register by the measured
+pre-shock density of outflow knots (1e4-1e5 cm^-3, Nisini et al. 2010,
+Giannini et al. 2011) and the IRAC [3.6]/[4.5] colour of the 64
+Giannini et al. 2013 Vela-D knots with a measured 3.6 and 4.5 micron
+flux (`h2shock_knot_population_weight`), in place of a flat `w_theta`:
+the conditional is the region's own knot lognormal convolved with the
 templates' Sigma-to-flux conversions and placed on the common axis at
 grid-build time, `PI[theta, k] = w_theta L_Sigma(F_k - c_conversion) /
 p(F_k)`.
@@ -160,6 +172,21 @@ YSO_F45_BIN_DEX = 0.1
 #: galz `colour`'s template KDE bandwidth, the same as the galaxy KDE's
 #: own (spec sec 5.4: "the colour error, ~0.04 dex"; sec 1.4).
 GALZ_COLOUR_BANDWIDTH_DEX = 0.04
+
+#: The pre-shock density of real outflow knots, measured (review ledger
+#: A9/C9): Nisini et al. 2010 (ApJ 724, 1) and Giannini et al. 2011
+#: (A&A 525, A74) place catalogued H2 knots' own pre-shock gas density
+#: in this range. `NH` (`sed_models/h2shock/parameters.fits`) is a GRID
+#: (7 distinct cm^-3 values), not a sample, so this range is a uniform
+#: population density integrated over NH's own grid cells, the same
+#: grid treatment `agb_tau_ratio` gives `tau` (`_h2shock_nh_ratio`).
+H2SHOCK_NH_RANGE_LOG10_NH = (4.0, 5.0)
+
+#: Giannini et al. 2013 (ApJ 767, 147), the Vela-D knot survey already
+#: parsed as a view (`sky.derived.knots`): path args for
+#: `config_module.product_path`, the source of A9/C9's measured IRAC
+#: [3.6]/[4.5] knot colour (`_h2shock_colour_ratio`).
+GIANNINI2013_KNOTS_PATH_ARGS = ("sky/derived", "knots", "giannini2013", "survey")
 
 _REGISTER_FILE = {key: "%s_register.hdf5" % key for key in definitions.CLASS_REGISTER.values()}
 
@@ -1012,7 +1039,11 @@ def build_agb(config, region):
 
 # ---------------------------------------------------------------------------
 # PAHC: type, contrast (per region, sec 5.3; the `type` match is an owner
-# ruling, PAHC's aperture library carrying no atmosphere axis of its own)
+# ruling, PAHC's aperture library carrying no atmosphere axis of its own).
+# `type` also carries the amplitude weight of review ledger C8: the
+# measured 8 micron excess-amplitude distribution of contaminated
+# sources, folded in because it shares `type`'s own plain argument
+# (spec sec 1.4).
 # ---------------------------------------------------------------------------
 
 def _read_teff_logg(path, logg_col):
@@ -1053,6 +1084,79 @@ def _match_pahc_to_sps(config, sps_names):
     return idx, dist
 
 
+def _pahc_contaminated_amplitude_density(config):
+    """`(log10_q_centers, density_per_dex)`: the measured 8 micron
+    excess-amplitude distribution of contaminated sources (review
+    ledger C8, "the same population-level measurement as the curve"):
+    `population.pahc_curve`'s own `P_Q(bin) x N_PER_BIN(bin)`, the
+    expected count of contaminated sources per bin of its `log10 q`
+    axis (`q`, a dimensionless flux-fraction amplitude, spec sec 5.3's
+    "an excess of order q in flux-fraction units" -- the same scale
+    PAHC's own template amplitude `R` is stated in), turned into a
+    density per dex of `log10 q` for `_pahc_amplitude_ratio` to
+    interpolate onto `R`'s own grid. Normalised to integrate to 1."""
+    path = config_module.product_path(config, "population", "pahc", "curve", "survey")
+    with h5py.File(path, "r") as f:
+        edges = f["LOG10_Q_EDGES"][:].astype(np.float64)
+        p_q = f["P_Q"][:].astype(np.float64)
+        n_per_bin = f["N_PER_BIN"][:].astype(np.float64)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    mass = p_q * n_per_bin
+    bin_width = float(edges[1] - edges[0])
+    total = float(mass.sum())
+    density = mass / (total * bin_width) if total > 0 else mass
+    return centers, density
+
+
+def _pahc_amplitude_ratio(config):
+    """`(names, ratio, r_u, cell_mass)`: review ledger C8's amplitude weight, `p_C(log10
+    R) / n_C(log10 R)` in spec sec 1.4's own form. PAHC's amplitude
+    parameter `R` (`sed_models/pahc/parameters.fits`) is a GRID (32
+    distinct values spanning three decades, 0.1 to 100), not a sample,
+    so it takes `agb_tau_ratio`'s own grid rule: the library's distinct
+    `log10 R` values partition the axis into cells (the midpoints
+    between neighbouring values; the two end cells stop at the grid's
+    own edges, never extrapolated past them), `_pahc_contaminated_
+    amplitude_density`'s measured density is read at each cell's own
+    centre and multiplied by the cell's width to get that cell's mass
+    (zero past the curve's own measured q range), and each cell's mass
+    is shared equally among the templates sitting at its distinct `R`,
+    normalised to sum to 1 over the whole register."""
+    reg = _read_register(config, "pahc")
+    names = reg["names"]
+    n_model = names.size
+    path = f"{config.inputs['sed_models']}/pahc/parameters.fits"
+    with fits.open(path) as hdul:
+        d = hdul[1].data
+        grid_names = np.char.strip(d["MODEL_NAME"].astype(str))
+        r = d["R"].astype(np.float64)
+    n_matched = int(np.sum(grid_names == names)) if grid_names.size == n_model else 0
+    if n_matched != n_model:
+        raise ValueError(f"template_weights._pahc_amplitude_ratio: join n_matched={n_matched} "
+                          f"!= n_register={n_model}")
+
+    log10_r = np.log10(r)
+    r_u, inverse, counts = np.unique(log10_r, return_inverse=True, return_counts=True)
+    cell_mids = 0.5 * (r_u[:-1] + r_u[1:])
+    cell_edges = np.concatenate(([r_u[0]], cell_mids, [r_u[-1]]))
+    cell_centers = 0.5 * (cell_edges[:-1] + cell_edges[1:])
+    cell_widths = np.diff(cell_edges)
+
+    q_centers, q_density = _pahc_contaminated_amplitude_density(config)
+    cell_density = np.interp(cell_centers, q_centers, q_density, left=0.0, right=0.0)
+    cell_mass = cell_density * cell_widths
+    total_mass = float(cell_mass.sum())
+    if total_mass <= 0:
+        raise ValueError(
+            "template_weights._pahc_amplitude_ratio: the measured excess-amplitude "
+            "distribution (population.pahc.curve_pahc_survey) does not overlap "
+            "PAHC's own R grid (sed_models/pahc/parameters.fits)")
+    cell_mass = cell_mass / total_mass
+    ratio_at_r = cell_mass / counts
+    ratio = ratio_at_r[inverse]
+    return names, ratio / ratio.sum(), r_u, cell_mass
+
+
 def build_pahc(config, region):
     with progress.Stage("bmstp.template_weights.pahc", region) as st:
         reg = _read_register(config, "pahc")
@@ -1069,6 +1173,19 @@ def build_pahc(config, region):
         # matched-star count is already a weight per template (sec 1.4):
         # nothing divides it.
         raw_type = h_sps[sps_idx, :]
+
+        # review ledger C8: the amplitude axis weighted by the measured
+        # 8 micron excess distribution of contaminated sources, folded
+        # into this SAME plain-argument factor rather than stored and
+        # normalised a second time (spec sec 1.4: "factors that share
+        # the plain argument are one stored factor, so the
+        # normalisation is of the class weight, not of each piece").
+        names_amp, amp_ratio, amp_r_u, amp_cell_mass = _pahc_amplitude_ratio(config)
+        if not np.array_equal(names_amp, names):
+            raise ValueError("template_weights.pahc: amplitude-ratio join row order "
+                              "disagrees with the pahc register")
+        raw_type = raw_type * amp_ratio[:, None]
+
         type_w = _normalise_over_theta(raw_type)
         type_w, frac_zero_type = _floor_normalised(type_w)
 
@@ -1081,7 +1198,9 @@ def build_pahc(config, region):
         factors = {
             "type": (type_w, c_theta, "", True,
                      f"population.star_population {region} W_STAR, "
-                     "nearest sps template in (log10 T_EFF, LOGG)"),
+                     "nearest sps template in (log10 T_EFF, LOGG), "
+                     "x population.pahc.curve_pahc_survey's measured excess-amplitude "
+                     "density onto sed_models/pahc/parameters.fits R (ledger C8)"),
             "contrast": (contrast_w, c_f, "D_PAHC", False,
                          "population.pahc.curve_pahc_survey P_Q"),
         }
@@ -1090,6 +1209,12 @@ def build_pahc(config, region):
         col_sum = type_w.sum(axis=0)
         n_matched_sps_used = int(np.unique(sps_idx).size)
         _curve_centers, curve_p_q = _pahc_curve_raw_bins(config)
+
+        # C8's own identity: the amplitude weight's marginal (mass per
+        # distinct R, `amp_cell_mass`, printed below) against the
+        # measured excess-amplitude distribution it was built from --
+        # equal by construction ("the amplitude marginal matches the
+        # measured excess distribution").
         print(f"template_weights.pahc [{region}]: match n=median {float(np.median(dist)):.4f} "
               f"max {float(dist.max()):.4f} (log10 T_EFF, LOGG); "
               f"{n_matched_sps_used}/{sps_names.size} sps templates ever matched; "
@@ -1097,6 +1222,9 @@ def build_pahc(config, region):
               f"floored_fraction type={frac_zero_type:.4f} contrast={frac_zero_contrast:.4f}; "
               f"contrast at axis ends={float(row[0]):.4f}/{float(row[-1]):.4f} "
               f"vs curve end bins={float(curve_p_q[0]):.4f}/{float(curve_p_q[-1]):.4f}; "
+              f"amplitude (C8) distinct log10 R={np.array2string(amp_r_u, precision=2)} "
+              f"measured excess mass per R={np.array2string(amp_cell_mass, precision=4)} "
+              f"(sum={float(amp_cell_mass.sum()):.6f}); "
               f"C_THETA range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
               f"max={c_theta.max():.4f}", flush=True)
         st.done(path, n_model=n_model, n_matched_sps_used=n_matched_sps_used)
@@ -1146,11 +1274,124 @@ def h2shock_conversion(config):
     return names, c_theta
 
 
+def _h2shock_nh_ratio(config):
+    """`(names, ratio)`: review ledger A9/C9's pre-shock-density factor,
+    `p_C(log10 NH) / n_C(log10 NH)` in spec sec 1.4's own form, the same
+    grid rule `agb_tau_ratio` gives `tau`: `NH` (`sed_models/h2shock/
+    parameters.fits`) is a GRID (7 distinct cm^-3 values), not a
+    sample, so the measured pre-shock density of real outflow knots
+    (`H2SHOCK_NH_RANGE_LOG10_NH`, Nisini et al. 2010, Giannini et al.
+    2011) is a uniform population density integrated over each of NH's
+    own grid cells (the midpoints between neighbouring distinct
+    `log10 NH` values; the two end cells stop at the grid's own edges)
+    and shared equally among the templates at that cell's distinct NH,
+    normalised to sum to 1 over the whole register."""
+    reg = _read_register(config, "h2shock")
+    names = reg["names"]
+    n_model = names.size
+    grid_path = f"{config.inputs['sed_models']}/h2shock/parameters.fits"
+    with fits.open(grid_path) as hdul:
+        d = hdul[1].data
+        grid_names = np.char.strip(d["MODEL_NAME"].astype(str))
+        nh = d["NH"].astype(np.float64)
+    n_matched = int(np.sum(grid_names == names)) if grid_names.size == n_model else 0
+    if n_matched != n_model:
+        raise ValueError(f"template_weights._h2shock_nh_ratio: join n_matched={n_matched} "
+                          f"!= n_register={n_model}")
+
+    log10_nh = np.log10(nh)
+    nh_u, inverse, counts = np.unique(log10_nh, return_inverse=True, return_counts=True)
+    cell_mids = 0.5 * (nh_u[:-1] + nh_u[1:])
+    cell_edges = np.concatenate(([nh_u[0]], cell_mids, [nh_u[-1]]))
+    lo, hi = H2SHOCK_NH_RANGE_LOG10_NH
+    overlap = np.clip(np.minimum(cell_edges[1:], hi) - np.maximum(cell_edges[:-1], lo), 0.0, None)
+    total_overlap = float(overlap.sum())
+    if total_overlap <= 0:
+        raise ValueError(
+            "template_weights._h2shock_nh_ratio: the measured pre-shock density range "
+            f"{H2SHOCK_NH_RANGE_LOG10_NH} (log10 cm^-3) does not overlap the grid's own "
+            "NH cells (sed_models/h2shock/parameters.fits)")
+    cell_mass = overlap / total_overlap
+    ratio_at_nh = cell_mass / counts
+    ratio = ratio_at_nh[inverse]
+    return names, ratio / ratio.sum()
+
+
+def _h2shock_colour_ratio(config, colour_theta_f32):
+    """`(ratio, n_knots)`: review ledger A9/C9's IRAC-colour factor,
+    `p_C(colour) / n_C(colour)` in spec sec 1.4's own form, `colour =
+    log10(F_REF_I1/F_REF_I2)`. `p_C` is a Gaussian-kernel density
+    (`_node_kde`, the same construction `build_galz` uses for GAL's own
+    colour factor) of the Giannini et al. 2013 Vela-D knots
+    (`GIANNINI2013_KNOTS_PATH_ARGS`, already parsed as a view) that
+    carry a measured, non-upper-limit 3.6 and 4.5 micron flux (64 of
+    69), each knot's own bandwidth its catalogued flux errors
+    propagated into `log10(F_3.6/F_4.5)`; `n_C` the same kernel density
+    of the register's own `colour_theta` against itself, at the fixed
+    bandwidth the knots' own median error sets (no survey colour error
+    is published for this library, unlike GAL's)."""
+    path = config_module.product_path(config, *GIANNINI2013_KNOTS_PATH_ARGS)
+    with h5py.File(path, "r") as f:
+        f1, f2 = f["FLUX_I1_MJY"][:], f["FLUX_I2_MJY"][:]
+        e1, e2 = f["FLUX_ERR_I1_MJY"][:], f["FLUX_ERR_I2_MJY"][:]
+        u1, u2 = f["UPPER_LIMIT_I1"][:], f["UPPER_LIMIT_I2"][:]
+    good = (~u1) & (~u2) & np.isfinite(f1) & np.isfinite(f2) & (f1 > 0) & (f2 > 0)
+    colour_knot = (np.log10(f1[good]) - np.log10(f2[good])).astype(np.float32)
+    sigma_knot = np.sqrt((e1[good] / (f1[good] * np.log(10.0))) ** 2
+                          + (e2[good] / (f2[good] * np.log(10.0))) ** 2).astype(np.float32)
+
+    knot_density, _ = _node_kde(colour_theta_f32, colour_knot, sigma_knot)
+    template_bandwidth = np.full(colour_theta_f32.size, float(np.median(sigma_knot)), dtype=np.float32)
+    template_density, _ = _node_kde(colour_theta_f32, colour_theta_f32, template_bandwidth)
+    ratio = knot_density / template_density
+    return ratio / ratio.sum(), int(good.sum())
+
+
+def h2shock_knot_population_weight(config):
+    """`(names, w_theta)`: review ledger A9/C9's knot-population
+    weight, replacing the flat `w_theta` spec sec 5.6 states for want
+    of an external distribution over shock parameters -- the sweep's
+    own finding that one exists, in the measured pre-shock density of
+    outflow knots (`_h2shock_nh_ratio`) and the measured IRAC
+    [3.6]/[4.5] colour of the catalogued Vela-D knots
+    (`_h2shock_colour_ratio`): two independently measured constrained
+    quantities (spec sec 1.4: "which quantities are constrained is set
+    by the data, not by choice"), each its own `p_C/n_C` ratio,
+    multiplied -- the same construction YSO's census, inclination and
+    evolutionary-class factors already combine by -- and renormalised
+    to sum to 1 over the register. Prints the W-weighted median
+    `log10(I1/I2)` the brief's own identity checks against the knots'
+    measured -0.3648."""
+    reg = _read_register(config, "h2shock")
+    names = reg["names"]
+    colour_theta = (np.log10(np.maximum(reg["f_ref"]["I1"], reg["floor_linear"]))
+                    - np.log10(np.maximum(reg["f_ref"]["I2"], reg["floor_linear"])))
+    colour_theta_f32 = colour_theta.astype(np.float32)
+
+    names_nh, nh_ratio = _h2shock_nh_ratio(config)
+    if not np.array_equal(names_nh, names):
+        raise ValueError("template_weights.h2shock_knot_population_weight: NH join "
+                          "row order disagrees with the h2shock register")
+    colour_ratio, n_knots = _h2shock_colour_ratio(config, colour_theta_f32)
+
+    w = nh_ratio * colour_ratio
+    w_theta = w / w.sum()
+
+    order = np.argsort(colour_theta)
+    cum = np.cumsum(w_theta[order])
+    weighted_median_colour = float(np.interp(0.5, cum, colour_theta[order]))
+    print(f"template_weights.h2shock: knot population weight (A9/C9) n_knots_colour="
+          f"{n_knots} W-weighted median log10(I1/I2)={weighted_median_colour:.4f} "
+          "(uniform grid median -0.032; knots' own measured median -0.3648)", flush=True)
+    return names, w_theta
+
+
 def build_h2shock(config, region):
     """P5's H2S table, one per region (sec 5.6's rule -- REWRITTEN
     from the survey-wide table): `PI[theta, k] = w_theta L_Sigma(F_k -
-    c_theta_conversion) / p(F_k)`, `w_theta` uniform over the register (no
-    external distribution, sec 5.6), `c_theta_conversion`
+    c_theta_conversion) / p(F_k)`, `w_theta` review ledger A9/C9's
+    knot-population weight (`h2shock_knot_population_weight`, in place
+    of sec 5.6's flat default), `c_theta_conversion`
     `h2shock_conversion`'s own Sigma-to-4.5-micron offset used ONLY to
     place each template's knot lognormal onto the shape grid's common
     `log10 F_4.5` axis, `L_Sigma` the region's own knot log10-Sigma
@@ -1183,7 +1424,14 @@ def build_h2shock(config, region):
         log10_sigma = h2s_module.transport_log10_sigma(log10_sb_native, area_pc2, r.d_r_pc)
         logsig_mean, logsig_std = h2s_module.region_sigma_lognormal(log10_sigma)
 
-        w_theta = np.full(n_model, 1.0 / n_model, dtype=np.float64)
+        # review ledger A9/C9: the measured pre-shock density and IRAC
+        # colour of real outflow knots, in place of sec 5.6's flat
+        # default (`h2shock_knot_population_weight`, survey-wide: the
+        # register and the knot survey it reads carry no region axis).
+        names_w, w_theta = h2shock_knot_population_weight(config)
+        if not (names_w.size == n_model and np.array_equal(names_w, names)):
+            raise ValueError("template_weights.h2shock: knot_population_weight's row "
+                              "order disagrees with the h2shock register")
         kernel = sample_cloud.exact_gaussian_kernel(logsig_std)
         half_width = (kernel.size - 1) // 2
         idx_center = np.round(
@@ -1203,10 +1451,14 @@ def build_h2shock(config, region):
         population_w, frac_zero = _floor_normalised(contribution)
 
         factors = {
-            "uniform": (population_w, c_theta, "", True,
-                        "no external distribution (sec 5.6); knot lognormal "
-                        f"LOGSIG_MEAN={logsig_mean:.4f} LOGSIG_STD={logsig_std:.4f} "
-                        f"at d_r={r.d_r_pc:.1f} pc"),
+            "knot_population": (population_w, c_theta, "", True,
+                                 "pre-shock density 1e4-1e5 cm^-3 (Nisini et al. 2010, "
+                                 "Giannini et al. 2011) and the IRAC [3.6]/[4.5] colour of "
+                                 "the Giannini et al. 2013 Vela-D knots (sky/derived/knots/"
+                                 "giannini2013_knots_survey.hdf5), review ledger A9/C9; "
+                                 "knot lognormal "
+                                 f"LOGSIG_MEAN={logsig_mean:.4f} LOGSIG_STD={logsig_std:.4f} "
+                                 f"at d_r={r.d_r_pc:.1f} pc"),
         }
         path = _write_library(config, "h2shock", "region", names, c_theta, log10_f45_centers, factors,
                                region=region,
