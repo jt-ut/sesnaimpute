@@ -55,6 +55,7 @@ import numba
 import numpy as np
 
 from sesnaimpute import config as config_module
+from sesnaimpute import definitions
 from sesnaimpute.bmstp import grid
 from sesnaimpute.population import kernel as kernel_module
 
@@ -106,6 +107,13 @@ def mmap_dataset(f, name):
 #: compile-time constant inside `_cell_sum`.
 N_XI_SUPPORT = grid.N_XI_SUPPORT
 
+#: `definitions.BANDS`' own count (8) -- a bare module global, like
+#: `N_XI_SUPPORT` above, so numba freezes it as a compile-time constant
+#: inside `_cell_sum`'s own per-band non-detection loop (NONDET brief
+#: section 1: the non-detection factor moves into this cell sum, so the
+#: sum now needs the band axis `fittp.likelihood` already carries).
+N_BANDS = len(definitions.BANDS)
+
 #: the column kernel's class-conditional reweighting (SPEC_BMSTP_DRAFT.md
 #: section 5.5): the cloud classes' young stars and shocked H2 knots both
 #: form within a beam in proportion to a power of the column, so their
@@ -120,6 +128,13 @@ N_XI_SUPPORT = grid.N_XI_SUPPORT
 #: 68% interval for gamma includes 0), `False` reads `exponent = 0.0`.
 CLOUD = {"STAR": False, "AGB": False, "PAHC": False, "GAL": False, "YSO": True, "H2S": True}
 
+
+#: NONDET brief section 2: a nondet band whose charge, `ln[1 - C_b(z_b)]`,
+#: is above `-_NONDET_PREFILTER_EPS` at BOTH of a template's window ends
+#: (`lo_a`, `hi_a`) is negligible throughout it (section 2's monotonicity)
+#: and is skipped for every cell of that template's window; nats, far
+#: below the float32 precision of any evidence this charge ever joins.
+_NONDET_PREFILTER_EPS = 1e-6
 
 #: SPEC_BMSTP_DRAFT.md section 4.2: a window at most this many cells wide
 #: is summed by exact per-cell erf differences; a wider one reads the
@@ -588,7 +603,9 @@ def _ln_half_erfc(z):
     for the Gaussian's tail mass beyond the grid's first cell edge, so
     that a template whose window never reaches positive extinction, or
     whose cells all floor below `1e-6`, still reads a finite prior
-    (section 1.3: no hypothesis is ever at `-inf`)."""
+    (section 1.3: no hypothesis is ever at `-inf`) -- and, since NONDET,
+    for `ln[1 - C_b(z_b)]` itself, the completeness roll-off `z` is the
+    same scalar function of either argument (`_nondet_ln_sum` below)."""
     ln_half = -0.6931471805599453
     sqrt_pi = 1.7724538509055159
     if z < 0.0:
@@ -600,13 +617,68 @@ def _ln_half_erfc(z):
         return ln_half + ln_erfcx - z * z
 
 
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _nondet_ln_sum(a_val, active, base, slope_b, template_row, log10_f_lim50_row, width_dex_row):
+    """NONDET brief section 1: `Sum_{b in active} ln[1 - C_b(z_b(a_val))]`,
+    the non-detection factor's own log at ONE extinction value `a_val` --
+    a cell's own `a*` (the per-cell, per-template callers below) or a
+    single-point fallback's one substitute extinction (where `active` is
+    every `nondet_mask` band, the window prefilter not applying to a
+    single point). `active` is a bitmask over the 8 bands (`1 << b`),
+    already restricted to this source's own undetected, limited, observed
+    bands by the caller. `template_row` is `template_log[th]`,
+    `log10_f_lim50_row`/`width_dex_row` are this source's own `(8,)` rows
+    -- the same per-band roll-off `fittp.likelihood._ln_nondet` reads at
+    the clamped mark, read here at an arbitrary `a` instead."""
+    sqrt2 = 1.4142135623730951
+    total = 0.0
+    for b in range(N_BANDS):
+        if not ((active >> b) & 1):
+            continue
+        z = (template_row[b] + base + slope_b[b] * a_val
+             - log10_f_lim50_row[b]) / (sqrt2 * width_dex_row[b])
+        total += _ln_half_erfc(z)
+    return total
+
+
 @numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
 def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               b_origin, dlb, dlx, a_edges_buf, cell_weight,
               m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
+              template_log, ext_col_ak, log10_f_lim50, width_dex, nondet_mask,
               out1, out2):
     """The cell sum of SPEC_BMSTP_DRAFT.md section 4.2, per source and
     template, `out` unchanged by the two moments below.
+
+    NONDET brief section 1 (section 6.2, amended): the survey's completeness
+    term for this source's own undetected, limited, observed bands
+    (`fittp.likelihood`'s `nondet_mask`) now multiplies the cell's own mass
+    INSIDE this sum, at the CELL'S OWN `a*` along the fit's conditional
+    ridge -- not once, at the likelihood's clamped maximum-likelihood mark,
+    as a per-template constant outside the integral. Per band `b`, the
+    template's predicted log flux along the ridge is linear in `a`,
+    `log10_fhat_b(a) = template_log[th, b] + base + slope_b[b] * a`, where
+    `base = log10_b_hat[s, th] - sl * a_hat[s, th]` is the template's own
+    intercept and `slope_b[b] = ext_col_ak[b] + sl` folds the law's own
+    per-band dimming (`ext_col_ak`, `-0.4 kappa_b` in `A_K`, band- and
+    design-dependent, template-independent) and the ridge's own conditional
+    brightness slope (`sl = slope[s]`, the same number `bval`'s own `a*`
+    term below already carries) into one per-band, per-source constant.
+    `z_b(a) = (log10_fhat_b(a) - log10 F_LIM_50_b) / (sqrt2 * W_DEX_b)` is
+    therefore linear in `a` too (section 1 "verified against the code"),
+    which is what makes the per-template, per-band prefilter at the
+    window's own two ends (`lo_a`, `hi_a`) exact: a band whose charge is
+    negligible at both ends is negligible throughout, monotone between
+    them. The cell's own factor, `exp(Sum_{b in nondet_mask, active}
+    ln[1 - C_b(z_b(a_star))])` (`_ln_half_erfc`, section 6.2's three
+    branches), multiplies `dens * mi * cell_weight` before the Jacobian in
+    every one of the four paths below -- the table path, the exact path,
+    and both single-point edge fallbacks, where it is evaluated once at
+    that one substitute point instead of per cell, over every
+    `nondet_mask` band (no prefilter needed for a single point). `chi2` and
+    `TOPK_LN_L` are untouched: this sum's own prior density carries the
+    non-detection factor now, never the likelihood.
+
     `out1`, `out2` are `(n, m)` float64 scratch this function fills in
     place with the posterior first and second moment of `a` within the
     same cell sum -- section 4.2's own summand `dens * mi / a_star` is
@@ -701,6 +773,16 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
         a_min = a_min_tab[s]
         a_step = step_tab[s]
         off = offset_tab[s]
+        # NONDET brief section 1: the ridge's own conditional slope and the
+        # law's own per-band dimming, folded into one per-band constant --
+        # once per source, not per template (neither term varies with th).
+        sl = slope[s]
+        slope_b = np.empty(N_BANDS, dtype=np.float64)
+        active_full = 0
+        for b in range(N_BANDS):
+            slope_b[b] = ext_col_ak[b] + sl
+            if nondet_mask[s, b]:
+                active_full |= (1 << b)
         for th in numba.prange(m):
             ah = a_hat[s, th]
             lo_a = ah - 5.0 * sig
@@ -709,8 +791,8 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
             m1 = 0.0
             m2 = 0.0
             lbh = log10_b_hat[s, th]
-            sl = slope[s]
             ct = c_theta[th]
+            base = lbh - sl * ah
             in_grid = hi_a > 0.0
             i_lo = 0
             i_hi = -1
@@ -719,6 +801,24 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 i_hi = _cell_index(hi_a, log10_ak, x0, dlx, n_x)
             kpos = (ah - a_min) / a_step if n_ap > 0 else 0.0
             use_table = n_ap > 0 and (i_hi - i_lo + 1) > N_EXACT
+            # section 2's prefilter: at the window's own two ends, which
+            # nondet bands carry a non-negligible charge somewhere in the
+            # window -- z_b(a) is linear in a (above), so monotone between
+            # two negligible ends is negligible throughout, and a band
+            # that clears this check is skipped in every cell below.
+            active = 0
+            if in_grid:
+                for b in range(N_BANDS):
+                    if not nondet_mask[s, b]:
+                        continue
+                    z_lo = (template_log[th, b] + base + slope_b[b] * lo_a
+                            - log10_f_lim50[s, b]) / (sqrt2 * width_dex[s, b])
+                    z_hi = (template_log[th, b] + base + slope_b[b] * hi_a
+                            - log10_f_lim50[s, b]) / (sqrt2 * width_dex[s, b])
+                    c_lo = _ln_half_erfc(z_lo)
+                    c_hi = _ln_half_erfc(z_hi)
+                    if c_lo < -_NONDET_PREFILTER_EPS or c_hi < -_NONDET_PREFILTER_EPS:
+                        active |= (1 << b)
             if not in_grid:
                 pass  # the +/-5 sigma window never reaches positive extinction
             elif use_table:
@@ -758,8 +858,14 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         # [s, i]`, `1 - w_i` on the diffuse call, `w_i` on the
                         # dense one, section 2) multiplies the cell's mass
                         # before the Jacobian, so a cell the caller's design
-                        # does not own contributes nothing.
-                        term = dens * mi * cell_weight[s, i]
+                        # does not own contributes nothing. NONDET brief
+                        # section 1: this cell's own non-detection factor, at
+                        # ITS OWN a_star, multiplies the cell's mass too, so
+                        # the posterior these moments describe is the one the
+                        # evidence sum below actually integrates.
+                        nondet_ln = _nondet_ln_sum(a_star, active, base, slope_b,
+                                                    template_log[th], log10_f_lim50[s], width_dex[s])
+                        term = dens * mi * cell_weight[s, i] * math.exp(nondet_ln)
                         total += term / a_star
                         m1 += term
                         m2 += term * a_star
@@ -791,7 +897,10 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                             j0 = n_b - 2
                             frac = 1.0
                         dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
-                        term = dens * mi * cell_weight[s, i]
+                        # NONDET brief section 1: see the table path above.
+                        nondet_ln = _nondet_ln_sum(a_star, active, base, slope_b,
+                                                    template_log[th], log10_f_lim50[s], width_dex[s])
+                        term = dens * mi * cell_weight[s, i] * math.exp(nondet_ln)
                         total += term / a_star
                         m1 += term
                         m2 += term * a_star
@@ -835,7 +944,12 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 # read a finite prior off this fallback either.
                 w_edge = cell_weight[s, n_x - 1]
                 if dens > 0.0 and w_edge > 0.0:
-                    out[s, th] = math.log(dens * w_edge / a_top) + ln_tail
+                    # NONDET brief section 1: the fallback's one substitute
+                    # point carries the non-detection factor too, over every
+                    # nondet_mask band (no window to prefilter at one point).
+                    nondet_ln = _nondet_ln_sum(a_top, active_full, base, slope_b,
+                                                template_log[th], log10_f_lim50[s], width_dex[s])
+                    out[s, th] = math.log(dens * w_edge / a_top) + ln_tail + nondet_ln
                     # the fallback puts the whole mass at this one point
                     # (module docstring item 1): a_post/a2_post read the
                     # point itself, not a cell mean.
@@ -867,7 +981,10 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 # same weighting as the top-edge fallback above, at cell 0.
                 w_edge = cell_weight[s, 0]
                 if dens > 0.0 and w_edge > 0.0:
-                    out[s, th] = math.log(dens * w_edge / a_c0) + ln_tail
+                    # NONDET brief section 1: see the top-edge fallback above.
+                    nondet_ln = _nondet_ln_sum(a_c0, active_full, base, slope_b,
+                                                template_log[th], log10_f_lim50[s], width_dex[s])
+                    out[s, th] = math.log(dens * w_edge / a_c0) + ln_tail + nondet_ln
                     # the fallback puts the whole mass at this one point
                     # (module docstring item 1): a_post/a2_post read the
                     # point itself, not a cell mean.
@@ -876,7 +993,8 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     return out
 
 
-def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, cell_weight):
+def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, cell_weight,
+             template_log, ext_col_ak, log10_f_lim50, width_dex, nondet_mask):
     """`((n, m) float32, (n, m) float64, (n, m) float64)`: `ln <Lambda_C>_s
     (theta)` of SPEC_BMSTP_DRAFT.md section 4.2, plus `ln A_C(s)` (section
     1.3) -- everything the fitter's evidence sum needs from the prior --
@@ -907,7 +1025,18 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
     whole cell window sums to zero prior mass (all its cells excluded by
     `cell_weight`, or genuinely empty) reads `ln <Lambda_C>_s(theta)
     = -inf`, a clean veto rather than an inflated pedestal, and `a_post`/
-    `a2_post` NaN there."""
+    `a2_post` NaN there.
+
+    NONDET brief section 1: `template_log` (`m, 8`, `fittp.sweep`'s own
+    register read, `likelihood.N_BANDS`-wide and shared by every design
+    and every source of this class) and `ext_col_ak` (`8,`, this call's
+    own design's per-band dimming in `A_K`, `fit_k.ext_col / fit_k.
+    ak_per_av`) place the non-detection factor's own flux prediction at
+    each cell's `a*`; `log10_f_lim50`, `width_dex`, `nondet_mask`
+    (`n, 8`, `likelihood.Batch`'s own per-source rows) are the same
+    completeness inputs `fittp.likelihood.prepare`/`_ln_nondet` read, at
+    the clamped mark, for the top-K record's own reporting value -- here
+    read at every cell instead, inside `_cell_sum`."""
     rows = np.asarray(rows)
     # `reader.a_col` is memory-mapped, native float32 (section 2); cast to
     # float64 here, at the numba kernel's own call below, rather than at
@@ -935,6 +1064,11 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
                       np.asarray(slope, dtype=np.float64), np.asarray(c_theta, dtype=np.float64),
                       h, reader.b_origin, reader.dlb, reader.dlx, a_edges_buf, cell_weight,
                       m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
+                      np.asarray(template_log, dtype=np.float64),
+                      np.asarray(ext_col_ak, dtype=np.float64),
+                      np.asarray(log10_f_lim50, dtype=np.float64),
+                      np.asarray(width_dex, dtype=np.float64),
+                      np.ascontiguousarray(np.asarray(nondet_mask)),
                       a_post, a2_post)
     with np.errstate(divide="ignore"):
         ln_density = np.log(density)[:, None]

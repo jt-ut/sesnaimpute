@@ -207,9 +207,14 @@ Fit = namedtuple("Fit", (
     "a_hat_clamped",         # (m,) f4 -- for the reported record and flux prediction
     "log10_b_hat_clamped",   # (m,) f4
     "frac_clamped",          # f4    -- FRAC_CLAMPED, fraction of templates clamped
-    "ln_nondet",              # (m,) f4 -- section 6.2 (clamped marks) plus
-                              # section 6.1's per-source ln_norm_term, the one
-                              # sum `fittp.sweep` already adds unscaled into ln L_hat
+    "ln_nondet",              # (m,) f4 -- section 6.2 AT THE CLAMPED MARK plus
+                              # section 6.1's per-source ln_norm_term: the
+                              # maximum-likelihood-point quantity TOPK_LN_L
+                              # reports (NONDET brief section 1 -- the
+                              # non-detection factor the class EVIDENCE itself
+                              # reads now rides inside the prior's own cell
+                              # sum instead, `fittp.prior_reader.ln_prior`,
+                              # at each cell's own a*, never this field)
     "flagged",                # bool -- prepare's own flag widened by this design's
                               # own singular XtWX (never written back to Batch)
     "ext_col",                # (8,) f4 -- this design's own column, section 1's D
@@ -336,17 +341,22 @@ def fit(batch, log10_f_ref, w):
       `SC_clamped = SC_hat + (Av_hat - Av_clamped) * S0 / (gray * W_sum)`,
       `S0 = sum_b W_b X_b0`. `FRAC_CLAMPED` is the fraction of `m`
       templates where the clamp engaged.
-    - The non-detection term of section 6.2 at the CLAMPED marks: the
+    - The non-detection term of section 6.2 AT THE CLAMPED MARKS: the
       template's model flux `f_hat_i` in every undetected, limited band,
       compared to this source's own `F_LIM_50,i` through the region-band
       roll-off width `WIDTH_DEX`, `ln[1 - C_i(f_hat_i)]` via the scaled
       complementary error function (`_ln_one_minus_c`), gathered to only
       this source's own undetected bands (`_ln_nondet`), plus
       `batch.ln_norm_term` (section 6.1's `-1/2 Sum_i ln sigma_i^2`, one
-      number): `ln_nondet` is exactly the one field `fittp.sweep` adds
-      unscaled into `ln L_hat = -1/2 chi2_min + ln_nondet`, so both
-      section 6.2's term and section 6.1's normalisation ride in it
-      without any change to that formula.
+      number): `ln_nondet` is the maximum-likelihood-point quantity
+      `fittp.sweep` reports as `TOPK_LN_L - 1/2 TOPK_CHI2` (NONDET brief
+      section 1, section 4 identity 1) -- the stored top-K record's own
+      meaning, unchanged. The class EVIDENCE itself no longer adds this
+      term: `fittp.sweep` adds only `batch.ln_norm_term` to `-1/2
+      chi2_min` there, because the non-detection factor now rides inside
+      `fittp.prior_reader.ln_prior`'s own cell sum, evaluated at each
+      cell's own `a*` along this same ridge instead of once at this one
+      clamped point.
 
     `batch.flagged` (fewer than two detected bands or a non-finite sigma,
     `prepare`'s own flags) is widened by this design's own singular XtWX

@@ -7,9 +7,13 @@ two extinction-law designs (diffuse `k=d`, `w=0`; dense `k=D`, `w=1`) and
 every template `theta` of the class's library,
 
     ln w_theta,k = ln <Lambda_C>_s,k(theta)   -- prior_reader.ln_prior, section 4.2,
-                                                  the DESIGN's own cell weight
-                 + ln L_hat_s,k(theta)         -- likelihood.fit(batch, ..., w)'s
-                                                  chi2 and non-detection term, this design
+                                                  the DESIGN's own cell weight, carrying
+                                                  the non-detection factor at each cell's
+                                                  own a* (NONDET brief section 1)
+                 + ln L_hat_s,k(theta)         -- likelihood.fit(batch, ..., w)'s chi2
+                                                  plus the per-source normalisation only,
+                                                  this design (the non-detection term no
+                                                  longer rides here -- see ln_lambda above)
                  + ln Gamma_s,k(theta)         -- gaia.GaiaTerm.ln_gamma, section 6.4,
                                                   this design's own marks
 
@@ -80,8 +84,13 @@ and the atlas's acceptance fraction already read, not `catalog.depths`'
 differently-fit `WIDTH_DEX`); Gamma and the prior read a design's own
 unclamped optimum `(a_hat, log10_b_hat)`, never a mix of clamped and
 unclamped marks for the two factors of the same evidence; and section 9's
-Occam gap subtracts `max_theta ln(mixture_k(Lambda_k L_hat_k))` (Gamma
-excluded from both the mixture and the maximum). A
+Occam gap (NONDET brief section 3, deleting the old mixed `Lambda_k L_hat_k`
+definition) is `logsumexp_theta(cell_sum) - max_theta(cell_sum)`, the SAME
+vector `cell_sum(theta) = logsumexp_k(ln_lambda_k(theta))` in both terms --
+`L_hat`/chi2 and Gamma in NEITHER term, unlike `ev_total` -- so it is
+non-negative by construction (`logsumexp(v) >= max(v)` for any real `v`),
+a pure library-volume read, no longer a read of how well any one template
+fits the data. A
 flagged source's `LOG10_FLUX_MEAN`/`LOG10_FLUX_COV` are written `NaN`, not
 the zero a `p_theta` of zero everywhere would otherwise silently
 accumulate, since a flagged fit has no posterior to report a flux moment
@@ -429,7 +438,15 @@ def _source_task(i):
         ln_lambda = [None, None]       # float32 (m,) per design
         a_post_t = [None, None]        # float64 (m,) per design
         a2_post_t = [None, None]
+        # ln_l: chi2 plus the per-source normalisation ONLY (NONDET brief
+        # section 1 -- the non-detection band charge no longer rides here,
+        # it is already folded into ln_lambda, inside the prior's own cell
+        # sum). ln_l_report keeps the OLD full quantity (chi2 plus the
+        # non-detection charge AT THE CLAMPED MARK, likelihood.fit's own
+        # `ln_nondet`) for TOPK_LN_L alone, which stays the maximum-
+        # likelihood-point quantity it has always been (brief section 1).
         ln_l = [None, None]             # float64 (m,) per design
+        ln_l_report = [None, None]      # float64 (m,) per design
         ln_gamma = [None, None]         # float64 (m,) per design
         for k in active_laws:
             blend_w = float(k)
@@ -441,15 +458,33 @@ def _source_task(i):
             # so d(log10_B)/d(a_K) = -2 * slope_sc_av / ak_per_av
             # (likelihood.fit's docstring, section 1.3).
             slope_log10b_per_ak = np.array([-2.0 * fit_k.slope_sc_av / fit_k.ak_per_av])
+            # NONDET brief section 1: this design's own per-band dimming in
+            # A_K (`-0.4 kappa_b`, likelihood.fit's own `ext_col` divided by
+            # its `ak_per_av` undoes the A_V->A_K conversion built into
+            # `ext_col`, EXACT_CODE_SITES), fed to the cell sum so it can
+            # place the non-detection factor at each cell's own a*.
+            ext_col_ak_k = fit_k.ext_col.astype(np.float64) / fit_k.ak_per_av
             ln_lambda_k, a_post_k, a2_post_k = prior_reader.ln_prior(
                 w["reader"], rows, h, fit_k.a_hat[None, :], fit_k.log10_b_hat[None, :],
                 slope_log10b_per_ak, np.array([fit_k.sigma_a_ak]), model_index,
-                cell_weight_by_law[k])
+                cell_weight_by_law[k],
+                w["template_log"], ext_col_ak_k,
+                batch.log10_f_lim50[None, :].astype(np.float64),
+                batch.width_dex[None, :].astype(np.float64),
+                batch.nondet_mask[None, :])
             ln_lambda[k] = ln_lambda_k[0]
             a_post_t[k] = a_post_k[0]
             a2_post_t[k] = a2_post_k[0]
 
-            ln_l[k] = -0.5 * fit_k.chi2_min.astype(np.float64) + fit_k.ln_nondet.astype(np.float64)
+            # `likelihood._ln_nondet` has always added `batch.ln_norm_term`
+            # in float32 (its own return dtype); reading it through the same
+            # float32 cast here, rather than full float64, keeps a source
+            # with nothing to charge bit-identical to `main` (NONDET brief
+            # section 4 identity 3) -- the two are equal to float64's own
+            # ~1e-7 relative precision either way, so nothing scientific
+            # rides on which one this reads.
+            ln_l[k] = -0.5 * fit_k.chi2_min.astype(np.float64) + np.float64(np.float32(batch.ln_norm_term))
+            ln_l_report[k] = -0.5 * fit_k.chi2_min.astype(np.float64) + fit_k.ln_nondet.astype(np.float64)
 
             # Gamma reads this design's own unclamped optimum a_hat/log10_b_hat
             # (one set of marks per design for the two class-evidence factors,
@@ -462,6 +497,7 @@ def _source_task(i):
         if not dense_possible:
             ln_lambda[1] = np.full(n_model, -np.inf, dtype=np.float32)
             ln_l[1] = np.full(n_model, -np.inf, dtype=np.float64)
+            ln_l_report[1] = np.full(n_model, -np.inf, dtype=np.float64)
             ln_gamma[1] = np.zeros(n_model, dtype=np.float64)
             a_post_t[1] = np.full(n_model, np.nan, dtype=np.float64)
             a2_post_t[1] = np.full(n_model, np.nan, dtype=np.float64)
@@ -498,12 +534,17 @@ def _source_task(i):
         order = np.argpartition(-ln_w, k_keep - 1)[:k_keep]
         order = order[np.argsort(-ln_w[order])]
 
-        # section 9's Occam gap is `ln EV_C - max_theta ln(mixture)`: the
-        # mixture here is the two designs' own (Lambda, L_hat) alone, Gamma
-        # excluded from both the mixture and the subtracted maximum.
-        ln_ll_k = np.stack([ln_lambda64[k] + ln_l[k] for k in (0, 1)], axis=0)   # (2, m)
-        mixture_ll = logsumexp(ln_ll_k, axis=0)
-        occam_gap = float(ev_total - mixture_ll.max())
+        # section 9's Occam gap (NONDET brief section 3, planner's 2026-10-08
+        # ruling): `logsumexp_theta(cell_sum) - max_theta(cell_sum)`, the
+        # SAME vector in both terms -- `L_hat` and Gamma in NEITHER term, so
+        # this is library-volume spread alone, non-negative by construction
+        # (logsumexp(v) >= max(v) for any real v). `cell_sum(theta)` is the
+        # two designs' own `ln_lambda` mixed, the only quantity this reads;
+        # it no longer mixes in the likelihood or Gamma the way `ev_total`
+        # (used elsewhere, unchanged) does -- the old `Lambda * L_hat` mixed
+        # definition is deleted, not amended, and survives nowhere.
+        cell_sum_mix = logsumexp(np.stack(ln_lambda64, axis=0), axis=0)   # (m,)
+        occam_gap = float(logsumexp(cell_sum_mix) - cell_sum_mix.max())
 
         good = not combined_flagged
 
@@ -620,7 +661,7 @@ def _source_task(i):
                 topk_a_k[:k_keep][sel] = fit_k.a_hat_clamped[idx_sel]
                 topk_log10_b[:k_keep][sel] = fit_k.log10_b_hat_clamped[idx_sel]
                 topk_chi2[:k_keep][sel] = fit_k.chi2_min[idx_sel]
-                topk_ln_l[:k_keep][sel] = ln_l[k][idx_sel].astype(np.float32)
+                topk_ln_l[:k_keep][sel] = ln_l_report[k][idx_sel].astype(np.float32)
                 topk_ln_prior[:k_keep][sel] = ln_lambda[k][idx_sel]
                 topk_ln_gamma[:k_keep][sel] = ln_gamma[k][idx_sel].astype(np.float32)
                 topk_flux[:k_keep][sel] = topk_flux_by_law[k][:k_keep][sel]
