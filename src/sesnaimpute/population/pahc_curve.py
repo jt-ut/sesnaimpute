@@ -672,6 +672,49 @@ def write_curve(path, curve, q_min, residual_width_mag, residual_width_45_mag):
             build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)], **extra)
 
 
+def _region_row(config, region, caller):
+    """`(centers, p_q, n_per_bin)`, this region's own raw row of the
+    shipped curve (`P_Q_REGION`/`N_PER_BIN_REGION`), straight off disk,
+    no plateau correction. The one place that opens the curve product
+    (`population/pahc/curve_pahc_survey.hdf5`) at all -- `read` and
+    `read_raw_bins` both call this rather than each reading the file,
+    so there is exactly one piece of code that knows the product's own
+    dataset names and `REGION` axis. `caller` names the public function
+    in a region-not-found error, for a useful traceback."""
+    path = config_module.product_path(config, "population", "pahc", "curve", "survey")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"prior.pahc_curve: no PAHC curve product at {path!r} -- run the "
+            f"'prior.pahc_curve' RUNBOOK line first")
+    with h5py.File(path, "r") as f:
+        edges = f["LOG10_Q_EDGES"][:]
+        region_names = [r.decode("utf-8") if isinstance(r, bytes) else r for r in f["REGION"][:]]
+        if region not in region_names:
+            raise ValueError(
+                f"prior.pahc_curve.{caller}: region {region!r} is not one of the "
+                f"{len(region_names)} regions this curve was built on {region_names!r} "
+                f"-- rebuild 'prior.pahc_curve' with that region included")
+        r = region_names.index(region)
+        p_q = f["P_Q_REGION"][r]
+        n_per_bin = f["N_PER_BIN_REGION"][r]
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    return centers, p_q, n_per_bin
+
+
+def read_raw_bins(config, region):
+    """`(centers, p_q, n_per_bin)`, this region's own curve exactly as
+    stored: the bin centers in log10 q, `P_Q_REGION`'s own row (no
+    plateau correction -- that is `read`'s own read-time convenience for
+    a continuous callable, not part of the stored curve), and
+    `N_PER_BIN_REGION`'s own row, the count each bin's value rests on.
+    For a consumer that needs the curve's own tabulated bins directly
+    (a diagnostic report against them, or a density built from them),
+    rather than a continuous lookup at an arbitrary q -- so that
+    consumer never opens the curve product itself (`_region_row` is the
+    one place that does)."""
+    return _region_row(config, region, "read_raw_bins")
+
+
 def read(config, region):
     """The shipped curve `P(q)` for one region, as a callable, linear in
     log10 q (WP-POP-4, ledger C7: the excess rate is regional by a
@@ -687,23 +730,7 @@ def read(config, region):
     those bins and the right-hand fill hold. The stored bins and counts
     on disk are unchanged; only how this reader extrapolates beyond
     them."""
-    path = config_module.product_path(config, "population", "pahc", "curve", "survey")
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"prior.pahc_curve: no PAHC curve product at {path!r} -- run the "
-            f"'prior.pahc_curve' RUNBOOK line first")
-    with h5py.File(path, "r") as f:
-        edges = f["LOG10_Q_EDGES"][:]
-        region_names = [r.decode("utf-8") if isinstance(r, bytes) else r for r in f["REGION"][:]]
-        if region not in region_names:
-            raise ValueError(
-                f"prior.pahc_curve.read: region {region!r} is not one of the "
-                f"{len(region_names)} regions this curve was built on {region_names!r} "
-                f"-- rebuild 'prior.pahc_curve' with that region included")
-        r = region_names.index(region)
-        p_q = f["P_Q_REGION"][r]
-        n_per_bin = f["N_PER_BIN_REGION"][r]
-    centers = 0.5 * (edges[:-1] + edges[1:])
+    centers, p_q, n_per_bin = _region_row(config, region, "read")
 
     on_plateau = (centers >= PLATEAU_LOG10_Q_MIN) & (n_per_bin > 0)
     plateau = (float(np.average(p_q[on_plateau], weights=n_per_bin[on_plateau]))

@@ -357,26 +357,34 @@ def _write_library(config, lib, granule, names, c_theta, log10_f45_centers, fact
 
 # ---------------------------------------------------------------------------
 # the contamination curve, shared by pahc `contrast` and sps
-# `uncontaminated` (spec sec 5.1, sec 5.3): read through
-# `population.pahc_curve.read`, the one accessor every consumer of the
-# shipped curve uses, so the sparse-bin plateau correction it applies
-# (bins beyond the last well-measured one folded into the curve's own
-# flat high-q shelf, `population/pahc_curve.py:read`) is part of what
-# "the shipped curve" means here too -- not re-derived as a second,
-# uncorrected reader (audit B: this module used to open the file
-# directly and `np.interp` the raw, individually sparse bins).
+# `uncontaminated` (spec sec 5.1, sec 5.3): read ONLY through
+# `population.pahc_curve.read` and `population.pahc_curve.read_raw_bins`,
+# the two accessors every consumer in this file uses -- nothing here
+# opens the curve product (`population/pahc/curve_pahc_survey.hdf5`)
+# directly, so neither its region-axis layout nor its dataset names are
+# repeated in this file (audit B: this module used to open the file
+# directly and `np.interp` the raw, individually sparse bins; a later
+# regression reopened it directly a second time, in
+# `_pahc_contaminated_amplitude_density`, reading dataset names WP-POP-4
+# had since renamed -- this header is the standing reminder not to).
+# `read`'s own sparse-bin plateau correction (bins beyond the last
+# well-measured one folded into the curve's own flat high-q shelf,
+# `population/pahc_curve.py:read`) is part of what "the shipped curve"
+# means for `_pahc_contrast_row`; `read_raw_bins` is for a consumer that
+# wants the curve's own tabulated bins, uncorrected, for a diagnostic or
+# a density built from them.
 # ---------------------------------------------------------------------------
 
 def _pahc_curve_raw_bins(config, region):
     """This region's own curve's tabulated centers and values, through
-    `population.pahc_curve.read` (the one accessor every consumer of the
-    shipped curve uses, module comment above -- the curve product's own
-    path and granule are WP-POP-4's, named nowhere in this file), read
-    for the build's own diagnostic report only (how far the curve's own
-    tabulated ends sit from `_pahc_contrast_row`'s query row at the
-    F45 grid's own ends)."""
-    curve = pahc_curve.read(config, region)
-    return curve.x, curve.y
+    `population.pahc_curve.read_raw_bins` (the one accessor every
+    consumer of the curve product reads through -- the curve product's
+    own path, granule and dataset names are WP-POP-4's, named nowhere in
+    this file), read for the build's own diagnostic report only (how far
+    the curve's own tabulated ends sit from `_pahc_contrast_row`'s query
+    row at the F45 grid's own ends)."""
+    centers, p_q, _n_per_bin = pahc_curve.read_raw_bins(config, region)
+    return centers, p_q
 
 
 def _pahc_contrast_row(config, region, n_b_centers):
@@ -1125,44 +1133,44 @@ def _match_pahc_to_sps(config, sps_names):
     return idx, dist
 
 
-def _pahc_contaminated_amplitude_density(config):
-    """`(log10_q_centers, density_per_dex)`: the measured 8 micron
-    excess-amplitude distribution of contaminated sources (review
+def _pahc_contaminated_amplitude_density(config, region):
+    """`(log10_q_centers, density_per_dex)`: this region's own measured 8
+    micron excess-amplitude distribution of contaminated sources (review
     ledger C8, "the same population-level measurement as the curve"):
-    `population.pahc_curve`'s own `P_Q(bin) x N_PER_BIN(bin)`, the
-    expected count of contaminated sources per bin of its `log10 q`
-    axis (`q`, a dimensionless flux-fraction amplitude, spec sec 5.3's
-    "an excess of order q in flux-fraction units" -- the same scale
-    PAHC's own template amplitude `R` is stated in), turned into a
-    density per dex of `log10 q` for `_pahc_amplitude_ratio` to
-    interpolate onto `R`'s own grid. Normalised to integrate to 1."""
-    path = config_module.product_path(config, "population", "pahc", "curve", "survey")
-    with h5py.File(path, "r") as f:
-        edges = f["LOG10_Q_EDGES"][:].astype(np.float64)
-        p_q = f["P_Q"][:].astype(np.float64)
-        n_per_bin = f["N_PER_BIN"][:].astype(np.float64)
-    centers = 0.5 * (edges[:-1] + edges[1:])
+    `population.pahc_curve.read_raw_bins`'s own `P_Q_REGION(bin) x
+    N_PER_BIN_REGION(bin)`, the expected count of this region's own
+    contaminated sources per bin of its `log10 q` axis (`q`, a
+    dimensionless flux-fraction amplitude, spec sec 5.3's "an excess of
+    order q in flux-fraction units" -- the same scale PAHC's own
+    template amplitude `R` is stated in), turned into a density per dex
+    of `log10 q` for `_pahc_amplitude_ratio` to interpolate onto `R`'s
+    own grid. Normalised to integrate to 1. Reads the curve product only
+    through `read_raw_bins` (WP-POP-4 owns its path, granule and
+    region-axis layout; this file does not repeat them)."""
+    centers, p_q, n_per_bin = pahc_curve.read_raw_bins(config, region)
     mass = p_q * n_per_bin
-    bin_width = float(edges[1] - edges[0])
+    bin_width = float(centers[1] - centers[0])  # LOG10_Q_EDGES is evenly spaced
     total = float(mass.sum())
     density = mass / (total * bin_width) if total > 0 else mass
     return centers, density
 
 
-def _pahc_amplitude_ratio(config):
+def _pahc_amplitude_ratio(config, region):
     """`(names, ratio, r_u, cell_mass)`: review ledger C8's amplitude weight, `p_C(log10
-    R) / n_C(log10 R)` in spec sec 1.4's own form. PAHC's amplitude
-    parameter `R` (`sed_models/pahc/parameters.fits`) is a GRID (32
-    distinct values spanning three decades, 0.1 to 100), not a sample,
-    so it takes `agb_tau_ratio`'s own grid rule: the library's distinct
-    `log10 R` values partition the axis into cells (the midpoints
-    between neighbouring values; the two end cells stop at the grid's
-    own edges, never extrapolated past them), `_pahc_contaminated_
-    amplitude_density`'s measured density is read at each cell's own
-    centre and multiplied by the cell's width to get that cell's mass
-    (zero past the curve's own measured q range), and each cell's mass
-    is shared equally among the templates sitting at its distinct `R`,
-    normalised to sum to 1 over the whole register."""
+    R) / n_C(log10 R)` in spec sec 1.4's own form, for this region's own
+    measured excess-amplitude distribution (WP-POP-4: regional by a
+    factor of 8, ledger C7 -- there is no survey-pooled version left to
+    read). PAHC's amplitude parameter `R` (`sed_models/pahc/parameters.fits`)
+    is a GRID (32 distinct values spanning three decades, 0.1 to 100),
+    not a sample, so it takes `agb_tau_ratio`'s own grid rule: the
+    library's distinct `log10 R` values partition the axis into cells
+    (the midpoints between neighbouring values; the two end cells stop
+    at the grid's own edges, never extrapolated past them), `_pahc_
+    contaminated_amplitude_density`'s measured density is read at each
+    cell's own centre and multiplied by the cell's width to get that
+    cell's mass (zero past the curve's own measured q range), and each
+    cell's mass is shared equally among the templates sitting at its
+    distinct `R`, normalised to sum to 1 over the whole register."""
     reg = _read_register(config, "pahc")
     names = reg["names"]
     n_model = names.size
@@ -1183,15 +1191,15 @@ def _pahc_amplitude_ratio(config):
     cell_centers = 0.5 * (cell_edges[:-1] + cell_edges[1:])
     cell_widths = np.diff(cell_edges)
 
-    q_centers, q_density = _pahc_contaminated_amplitude_density(config)
+    q_centers, q_density = _pahc_contaminated_amplitude_density(config, region)
     cell_density = np.interp(cell_centers, q_centers, q_density, left=0.0, right=0.0)
     cell_mass = cell_density * cell_widths
     total_mass = float(cell_mass.sum())
     if total_mass <= 0:
         raise ValueError(
-            "template_weights._pahc_amplitude_ratio: the measured excess-amplitude "
-            "distribution (population.pahc.curve_pahc_survey) does not overlap "
-            "PAHC's own R grid (sed_models/pahc/parameters.fits)")
+            f"template_weights._pahc_amplitude_ratio: {region}'s own measured "
+            "excess-amplitude distribution (population.pahc.curve_pahc_survey) does "
+            "not overlap PAHC's own R grid (sed_models/pahc/parameters.fits)")
     cell_mass = cell_mass / total_mass
     ratio_at_r = cell_mass / counts
     ratio = ratio_at_r[inverse]
@@ -1221,7 +1229,7 @@ def build_pahc(config, region):
         # normalised a second time (spec sec 1.4: "factors that share
         # the plain argument are one stored factor, so the
         # normalisation is of the class weight, not of each piece").
-        names_amp, amp_ratio, amp_r_u, amp_cell_mass = _pahc_amplitude_ratio(config)
+        names_amp, amp_ratio, amp_r_u, amp_cell_mass = _pahc_amplitude_ratio(config, region)
         if not np.array_equal(names_amp, names):
             raise ValueError("template_weights.pahc: amplitude-ratio join row order "
                               "disagrees with the pahc register")
