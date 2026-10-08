@@ -673,6 +673,16 @@ REGISTRY = {
     ("cloud_shape_sightline", "ON_GRID_H2S"): ("dimensionless",
         "1 minus MASS_OUTSIDE_H2S: the fraction of this sightline's own "
         "H2 shock population weight that GRID_H2S actually holds."),
+    ("cloud_shape_sightline", "D_PEAK_SIGHTLINE_PC"): ("pc",
+        "For the matching sightline in HPX_PIX_256, the distance of this "
+        "sightline's own dust-structure peak in the 3-D extinction map "
+        "(the local maximum nearest this region's adopted distance), used "
+        "to anchor GRID_YSO's brightness shift so that a footprint with "
+        "more than one structure along the line of sight (for instance "
+        "Aquila's Serpens-Main and Aquila-Rift components) gets a "
+        "different shift on each side. Equal to this region's own single "
+        "D_PEAK_PC (sky/derived/edenhofer/depth/region) where no separable "
+        "local peak is found."),
 
     ("gal_shape_survey", "LOG10_XI_EDGES"): ("log10(dimensionless)",
         "The edges of the log10(depth fraction) axis every shape grid in "
