@@ -8,14 +8,13 @@ every template `theta` of the class's library,
 
     ln w_theta,k = ln <Lambda_C>_s,k(theta)   -- prior_reader.ln_prior, section 4.2,
                                                   the DESIGN's own cell weight, carrying
-                                                  the non-detection factor at each cell's
-                                                  own a* (NONDET brief section 1)
+                                                  the non-detection factor (NONDET brief
+                                                  section 1) AND the Gaia factor (NONDET2
+                                                  brief section 1) at each cell's own a*
                  + ln L_hat_s,k(theta)         -- likelihood.fit(batch, ..., w)'s chi2
                                                   plus the per-source normalisation only,
-                                                  this design (the non-detection term no
-                                                  longer rides here -- see ln_lambda above)
-                 + ln Gamma_s,k(theta)         -- gaia.GaiaTerm.ln_gamma, section 6.4,
-                                                  this design's own marks
+                                                  this design (neither the non-detection
+                                                  nor the Gaia term rides here any more)
 
     ln w_theta   = logsumexp_k(ln w_theta,k)      -- the mixture; the sightline's own
                                                       per-cell dense fraction (section 2)
@@ -32,9 +31,13 @@ added here). The class evidence is `logsumexp` over every template's mixture
 `ln w_theta`; the subclass evidence restricts that sum to one subclass's
 templates (`-inf` where a subclass has none). `TOPK_LAW` records, per
 top-K template, which design carried the larger `ln w_theta,k`; the record's
-other TOPK_* fields, and `TOPK_LN_GAMMA`, are that design's own numbers.
-`P_DENSE` is the source's own posterior weight on the dense design,
-`sum_theta p_theta * p_D(theta)`.
+per-design TOPK_* fields (`TOPK_A_K`, `TOPK_CHI2`, `TOPK_LN_L`, `TOPK_LN_L`,
+`TOPK_LN_PRIOR_ML`, `TOPK_LN_GAMMA_ML`, `TOPK_FLUX`) are that design's own
+numbers; the separable record's three additive fields (NONDET2 brief
+section 2: `TOPK_LN_PRIOR_FIT`, `TOPK_LN_UNSEEN`, `TOPK_LN_GAIA`) are the
+LAW-MIXED S0, S1 - S0, S2 - S1 instead, so their sum is `ln w_theta` itself
+at every top-K template. `P_DENSE` is the source's own posterior weight on
+the dense design, `sum_theta p_theta * p_D(theta)`.
 
 Region and class are read once, in the PARENT process (`build_region_class`):
 the register (`_register`), the region's non-detection width (`_width_dex`),
@@ -84,13 +87,13 @@ and the atlas's acceptance fraction already read, not `catalog.depths`'
 differently-fit `WIDTH_DEX`); Gamma and the prior read a design's own
 unclamped optimum `(a_hat, log10_b_hat)`, never a mix of clamped and
 unclamped marks for the two factors of the same evidence; and section 9's
-Occam gap (NONDET brief section 3, deleting the old mixed `Lambda_k L_hat_k`
-definition) is `logsumexp_theta(cell_sum) - max_theta(cell_sum)`, the SAME
-vector `cell_sum(theta) = logsumexp_k(ln_lambda_k(theta))` in both terms --
-`L_hat`/chi2 and Gamma in NEITHER term, unlike `ev_total` -- so it is
-non-negative by construction (`logsumexp(v) >= max(v)` for any real `v`),
-a pure library-volume read, no longer a read of how well any one template
-fits the data. A
+Occam gap (NONDET2 brief section 2, restating NONDET.md section 8's ruling)
+is `logsumexp_theta(S1) - max_theta(S1)`, the SAME vector `S1(theta)` (the
+law-mixed prior-and-fit-and-non-detection total, `s1_arr` below) in both
+terms -- Gamma in NEITHER term, unlike `ev_total` -- so it is non-negative
+by construction (`logsumexp(v) >= max(v)` for any real `v`), a
+library-volume-and-non-detection read, no longer a read of how well any one
+template's photometric fit alone, or Gaia, favours it. A
 flagged source's `LOG10_FLUX_MEAN`/`LOG10_FLUX_COV` are written `NaN`, not
 the zero a `p_theta` of zero everywhere would otherwise silently
 accumulate, since a flagged fit has no posterior to report a flux moment
@@ -194,11 +197,22 @@ WORKER_PROCESS_FLOOR_MB = 70
 #: order (one row per source; `FAILED`, below, is a part-file-only column
 #: consumed at join time into `FAILED_ROWS`, never copied into the joined
 #: product itself). `N_LAW_ITER` is gone: the self-consistent
-#: extinction-law solve it counted no longer exists; `TOPK_LAW`,
-#: `TOPK_LN_GAMMA` and `P_DENSE` are new (section 2, section 6.4).
+#: extinction-law solve it counted no longer exists; `TOPK_LAW` and
+#: `P_DENSE` are new since section 2/6.4. NONDET2 brief section 2: `
+#: TOPK_LN_PRIOR` (which silently carried prior x non-detection after
+#: NONDET) and `TOPK_LN_GAMMA` (the Gaia term at one point, used inside
+#: the evidence) are gone; the separable record in their place is `
+#: TOPK_LN_PRIOR_FIT` (S0), `TOPK_LN_UNSEEN` (S1 - S0), `TOPK_LN_GAIA`
+#: (S2 - S1) -- the three EXACT additive marginal factors summing to `
+#: ln_w` -- plus two report-only guides, `TOPK_LN_PRIOR_ML` (the prior
+#: alone at the best-fit point, today's `TOPK_LN_PRIOR` before NONDET)
+#: and `TOPK_LN_GAMMA_ML` (the Gaia term at the best-fit point, today's
+#: `TOPK_LN_GAMMA`).
 _PART_KEYS = ("NAME", "LN_EVIDENCE", "LOG10_FLUX_MEAN", "LOG10_FLUX_COV", "TOPK_MODEL", "TOPK_A_K",
-              "TOPK_LOG10_B", "TOPK_CHI2", "TOPK_LN_L", "TOPK_LN_PRIOR", "TOPK_FLUX", "TOPK_LAW",
-              "TOPK_LN_GAMMA", "OCCAM_GAP", "A_K_POST", "A_K_POST_SIG", "P_DENSE",
+              "TOPK_LOG10_B", "TOPK_CHI2", "TOPK_LN_L",
+              "TOPK_LN_PRIOR_FIT", "TOPK_LN_UNSEEN", "TOPK_LN_GAIA",
+              "TOPK_LN_PRIOR_ML", "TOPK_LN_GAMMA_ML",
+              "TOPK_FLUX", "TOPK_LAW", "OCCAM_GAP", "A_K_POST", "A_K_POST_SIG", "P_DENSE",
               "FRAC_CLAMPED", "N_DETECTED")
 
 #: Every dataset the joined fit file carries, including `FAILED_ROWS`
@@ -214,8 +228,10 @@ _FIELD_OF_KEY = {
     "NAME": "name", "LN_EVIDENCE": "ln_evidence", "LOG10_FLUX_MEAN": "log10_flux_mean",
     "LOG10_FLUX_COV": "log10_flux_cov", "TOPK_MODEL": "topk_model", "TOPK_A_K": "topk_a_k",
     "TOPK_LOG10_B": "topk_log10_b", "TOPK_CHI2": "topk_chi2", "TOPK_LN_L": "topk_ln_l",
-    "TOPK_LN_PRIOR": "topk_ln_prior", "TOPK_FLUX": "topk_flux", "TOPK_LAW": "topk_law",
-    "TOPK_LN_GAMMA": "topk_ln_gamma", "OCCAM_GAP": "occam_gap",
+    "TOPK_LN_PRIOR_FIT": "topk_ln_prior_fit", "TOPK_LN_UNSEEN": "topk_ln_unseen",
+    "TOPK_LN_GAIA": "topk_ln_gaia", "TOPK_LN_PRIOR_ML": "topk_ln_prior_ml",
+    "TOPK_LN_GAMMA_ML": "topk_ln_gamma_ml",
+    "TOPK_FLUX": "topk_flux", "TOPK_LAW": "topk_law", "OCCAM_GAP": "occam_gap",
     "A_K_POST": "a_k_post", "A_K_POST_SIG": "a_k_post_sig", "P_DENSE": "p_dense",
     "FRAC_CLAMPED": "frac_clamped", "N_DETECTED": "n_detected",
 }
@@ -376,10 +392,13 @@ def _empty_row(topk, n_sub):
         topk_log10_b=np.full(topk, np.nan, dtype=np.float32),
         topk_chi2=np.full(topk, np.nan, dtype=np.float32),
         topk_ln_l=np.full(topk, np.nan, dtype=np.float32),
-        topk_ln_prior=np.full(topk, np.nan, dtype=np.float32),
+        topk_ln_prior_fit=np.full(topk, np.nan, dtype=np.float32),
+        topk_ln_unseen=np.full(topk, np.nan, dtype=np.float32),
+        topk_ln_gaia=np.full(topk, np.nan, dtype=np.float32),
+        topk_ln_prior_ml=np.full(topk, np.nan, dtype=np.float32),
+        topk_ln_gamma_ml=np.full(topk, np.nan, dtype=np.float32),
         topk_flux=np.full((topk, N_BANDS), np.nan, dtype=np.float32),
         topk_law=np.full(topk, -1, dtype=np.int8),
-        topk_ln_gamma=np.full(topk, np.nan, dtype=np.float32),
         occam_gap=np.float32(np.nan),
         a_k_post=np.float32(np.nan), a_k_post_sig=np.float32(np.nan),
         p_dense=np.float32(np.nan),
@@ -434,8 +453,23 @@ def _source_task(i):
         dense_possible = bool(np.any(w_dense_cell > 0.0))
         active_laws = (0, 1) if dense_possible else (0,)
 
+        # NONDET2 brief section 1: G_S, A_X and the register's per-template
+        # G0MAG/KG_DRAINE/KG_WHITNEY are law-independent (the per-cell ramp
+        # blend that varies with the extinction `a` is formed inside
+        # `_cell_sum` itself, at each cell's own `a*`), so this reads once
+        # per source, not once per design below.
+        gaia_inputs = w["gaia_term"].cell_inputs(rows, model_index, w["cls"].lower())
+
         fits = [None, None]
-        ln_lambda = [None, None]       # float32 (m,) per design
+        # NONDET2 section 2: the separable record's three totals, per
+        # design, each WITHOUT ln_l (chi2 + normalisation, added below, per
+        # law, before the two designs mix): ln_lambda0 carries neither the
+        # non-detection nor the Gaia factor, ln_lambda1 the non-detection
+        # factor only, ln_lambda2 both -- `ln_lambda`, the one array this
+        # call returned before NONDET2.
+        ln_lambda0 = [None, None]      # float32 (m,) per design -- S0, no ln_l
+        ln_lambda1 = [None, None]      # float32 (m,) per design -- S1, no ln_l
+        ln_lambda2 = [None, None]      # float32 (m,) per design -- S2, no ln_l
         a_post_t = [None, None]        # float64 (m,) per design
         a2_post_t = [None, None]
         # ln_l: chi2 plus the per-source normalisation ONLY (NONDET brief
@@ -447,7 +481,11 @@ def _source_task(i):
         # likelihood-point quantity it has always been (brief section 1).
         ln_l = [None, None]             # float64 (m,) per design
         ln_l_report = [None, None]      # float64 (m,) per design
-        ln_gamma = [None, None]         # float64 (m,) per design
+        # NONDET2 section 1: the Gaia term now rides inside ln_lambda2 (per
+        # cell, at that cell's own a*); `ln_gamma_ml` is kept only for the
+        # two report-only ML-point uses, TOPK_LN_GAMMA_ML and PSI_VOTES'
+        # Gaia reading (`gaia.GaiaTerm.ln_gamma`, unchanged).
+        ln_gamma_ml = [None, None]      # float64 (m,) per design
         for k in active_laws:
             blend_w = float(k)
             fit_k = likelihood.fit(batch, w["template_log"], blend_w)
@@ -464,15 +502,17 @@ def _source_task(i):
             # `ext_col`, EXACT_CODE_SITES), fed to the cell sum so it can
             # place the non-detection factor at each cell's own a*.
             ext_col_ak_k = fit_k.ext_col.astype(np.float64) / fit_k.ak_per_av
-            ln_lambda_k, a_post_k, a2_post_k = prior_reader.ln_prior(
+            ln_lambda2_k, ln_lambda0_k, ln_lambda1_k, a_post_k, a2_post_k = prior_reader.ln_prior(
                 w["reader"], rows, h, fit_k.a_hat[None, :], fit_k.log10_b_hat[None, :],
                 slope_log10b_per_ak, np.array([fit_k.sigma_a_ak]), model_index,
                 cell_weight_by_law[k],
                 w["template_log"], ext_col_ak_k,
                 batch.log10_f_lim50[None, :].astype(np.float64),
                 batch.width_dex[None, :].astype(np.float64),
-                batch.nondet_mask[None, :])
-            ln_lambda[k] = ln_lambda_k[0]
+                batch.nondet_mask[None, :], gaia_inputs)
+            ln_lambda2[k] = ln_lambda2_k[0]
+            ln_lambda0[k] = ln_lambda0_k[0]
+            ln_lambda1[k] = ln_lambda1_k[0]
             a_post_t[k] = a_post_k[0]
             a2_post_t[k] = a2_post_k[0]
 
@@ -486,34 +526,50 @@ def _source_task(i):
             ln_l[k] = -0.5 * fit_k.chi2_min.astype(np.float64) + np.float64(np.float32(batch.ln_norm_term))
             ln_l_report[k] = -0.5 * fit_k.chi2_min.astype(np.float64) + fit_k.ln_nondet.astype(np.float64)
 
-            # Gamma reads this design's own unclamped optimum a_hat/log10_b_hat
-            # (one set of marks per design for the two class-evidence factors,
-            # section 6.4; the clamped marks stay for the reported marks, the
-            # top-K record and the flux prediction only, section 6.1).
-            ln_gamma[k] = w["gaia_term"].ln_gamma(
+            # Gamma reads this design's own unclamped optimum a_hat/log10_b_hat;
+            # report-only now (NONDET2 section 1) -- the clamped marks stay
+            # for the reported marks, the top-K record and the flux
+            # prediction only, section 6.1.
+            ln_gamma_ml[k] = w["gaia_term"].ln_gamma(
                 rows, model_index, fit_k.a_hat[None, :], fit_k.log10_b_hat[None, :],
                 w["cls"].lower())[0]
 
         if not dense_possible:
-            ln_lambda[1] = np.full(n_model, -np.inf, dtype=np.float32)
+            ln_lambda0[1] = np.full(n_model, -np.inf, dtype=np.float32)
+            ln_lambda1[1] = np.full(n_model, -np.inf, dtype=np.float32)
+            ln_lambda2[1] = np.full(n_model, -np.inf, dtype=np.float32)
             ln_l[1] = np.full(n_model, -np.inf, dtype=np.float64)
             ln_l_report[1] = np.full(n_model, -np.inf, dtype=np.float64)
-            ln_gamma[1] = np.zeros(n_model, dtype=np.float64)
+            ln_gamma_ml[1] = np.zeros(n_model, dtype=np.float64)
             a_post_t[1] = np.full(n_model, np.nan, dtype=np.float64)
             a2_post_t[1] = np.full(n_model, np.nan, dtype=np.float64)
 
         combined_flagged = fits[0].flagged or (fits[1].flagged if fits[1] is not None else False)
 
-        ln_lambda64 = [x.astype(np.float64) for x in ln_lambda]
-        ln_w_k = np.stack([ln_lambda64[k] + ln_l[k] + ln_gamma[k] for k in (0, 1)], axis=0)  # (2, m)
+        # NONDET2 section 2: S0, S1, S2 are each a logsumexp over the two
+        # designs of that design's own (cell-sum total + ln_l) -- the law
+        # mixture is already applied per cell inside `_cell_sum`, so no
+        # further weight is applied here. S2 is `ln_w` exactly: the Gaia
+        # term no longer rides as a separate addend at this level.
+        ln_lambda0_64 = [x.astype(np.float64) for x in ln_lambda0]
+        ln_lambda1_64 = [x.astype(np.float64) for x in ln_lambda1]
+        ln_lambda2_64 = [x.astype(np.float64) for x in ln_lambda2]
+        s0_k = np.stack([ln_lambda0_64[k] + ln_l[k] for k in (0, 1)], axis=0)    # (2, m)
+        s1_k = np.stack([ln_lambda1_64[k] + ln_l[k] for k in (0, 1)], axis=0)    # (2, m)
+        ln_w_k = np.stack([ln_lambda2_64[k] + ln_l[k] for k in (0, 1)], axis=0)  # (2, m) == S2 per law
         if combined_flagged:
+            s0_k = np.full((2, n_model), -np.inf, dtype=np.float64)
+            s1_k = np.full((2, n_model), -np.inf, dtype=np.float64)
             ln_w_k = np.full((2, n_model), -np.inf, dtype=np.float64)
 
+        with np.errstate(invalid="ignore"):
+            s0_arr = logsumexp(s0_k, axis=0)                    # (m,) -- TOPK_LN_PRIOR_FIT
+            s1_arr = logsumexp(s1_k, axis=0)                    # (m,)
         # the mixture (section 2): logsumexp over the two designs at each
         # template; the sightline's own w_i already makes the two designs'
         # PRIOR terms sum to the single-law read, so no further weight is
         # applied here (module docstring).
-        ln_w = logsumexp(ln_w_k, axis=0)                        # (m,)
+        ln_w = logsumexp(ln_w_k, axis=0)                        # (m,) == S2
         with np.errstate(invalid="ignore"):
             p_k = np.exp(ln_w_k - ln_w[None, :])                # (2, m), each design's own share
         p_k = np.where(np.isfinite(p_k), p_k, 0.0)
@@ -534,23 +590,24 @@ def _source_task(i):
         order = np.argpartition(-ln_w, k_keep - 1)[:k_keep]
         order = order[np.argsort(-ln_w[order])]
 
-        # section 9's Occam gap (NONDET brief section 3, planner's 2026-10-08
-        # ruling): `logsumexp_theta(cell_sum) - max_theta(cell_sum)`, the
-        # SAME vector in both terms -- `L_hat` and Gamma in NEITHER term, so
-        # this is library-volume spread alone, non-negative by construction
-        # (logsumexp(v) >= max(v) for any real v). `cell_sum(theta)` is the
-        # two designs' own `ln_lambda` mixed, the only quantity this reads;
-        # it no longer mixes in the likelihood or Gamma the way `ev_total`
-        # (used elsewhere, unchanged) does -- the old `Lambda * L_hat` mixed
-        # definition is deleted, not amended, and survives nowhere.
-        cell_sum_mix = logsumexp(np.stack(ln_lambda64, axis=0), axis=0)   # (m,)
-        occam_gap = float(logsumexp(cell_sum_mix) - cell_sum_mix.max())
+        # section 9's Occam gap, NONDET2 brief section 2 (NONDET.md section
+        # 8's ruling, restated): `logsumexp_theta(S1) - max_theta(S1)`, the
+        # SAME vector (`s1_arr`) in both terms -- Gamma in NEITHER term, so
+        # this is library-volume-and-non-detection spread alone, non-negative
+        # by construction (logsumexp(v) >= max(v) for any real v). The old
+        # Gamma-and-L_hat-free `cell_sum_mix` reading survives nowhere. A
+        # source whose S1 is -inf at every template (good=True here, but
+        # every class template vetoed by the prior -- row 12's fix) subtracts
+        # -inf from -inf; the resulting NaN is overwritten below ("else:
+        # occam_gap = nan") for a flagged source, and is itself the correct,
+        # disclosed reading for a prior-vetoed one, not a warning-worthy one.
+        with np.errstate(invalid="ignore"):
+            occam_gap = float(logsumexp(s1_arr) - s1_arr.max())
 
         good = not combined_flagged
 
         # TOPK_LAW: which design carried the larger ln_w_k for each of the
-        # k_keep selected templates (section 2); TOPK_LN_GAMMA (section 6.4)
-        # rides the same branch.
+        # k_keep selected templates (section 2).
         topk_law_sel = (ln_w_k[1, order] > ln_w_k[0, order]).astype(np.int8)     # (k_keep,)
 
         # the posterior extinction mark (section 6.1): the p_theta * p_k
@@ -645,13 +702,30 @@ def _source_task(i):
         topk_log10_b = np.full(topk, np.nan, dtype=np.float32)
         topk_chi2 = np.full(topk, np.nan, dtype=np.float32)
         topk_ln_l = np.full(topk, np.nan, dtype=np.float32)
-        topk_ln_prior = np.full(topk, np.nan, dtype=np.float32)
+        topk_ln_prior_fit = np.full(topk, np.nan, dtype=np.float32)
+        topk_ln_unseen = np.full(topk, np.nan, dtype=np.float32)
+        topk_ln_gaia = np.full(topk, np.nan, dtype=np.float32)
+        topk_ln_prior_ml = np.full(topk, np.nan, dtype=np.float32)
+        topk_ln_gamma_ml = np.full(topk, np.nan, dtype=np.float32)
         topk_law = np.full(topk, -1, dtype=np.int8)
-        topk_ln_gamma = np.full(topk, np.nan, dtype=np.float32)
         topk_flux = np.full((topk, N_BANDS), np.nan, dtype=np.float32)
         if good:
             topk_model[:k_keep] = order.astype(np.int32)
             topk_law[:k_keep] = topk_law_sel
+            # NONDET2 section 2: the separable record's three additive
+            # fields are the LAW-MIXED S0, S1 - S0, S2 - S1 at the selected
+            # templates -- not that template's winning design alone, unlike
+            # every other TOPK_* field below (identity 1: their sum is
+            # `ln_w[order]` exactly, to float32).
+            topk_ln_prior_fit[:k_keep] = s0_arr[order].astype(np.float32)
+            # a top-K template whose S1 (or S0) is -inf -- vetoed by the
+            # prior at every cell (row 12's fix) -- subtracts -inf from
+            # -inf; the NaN that results is the correct, disclosed reading
+            # (identity 1 still holds: NaN + anything is NaN, consistent
+            # with ln_w itself being -inf there), not a warning-worthy one.
+            with np.errstate(invalid="ignore"):
+                topk_ln_unseen[:k_keep] = (s1_arr[order] - s0_arr[order]).astype(np.float32)
+                topk_ln_gaia[:k_keep] = (ln_w[order] - s1_arr[order]).astype(np.float32)
             for k in (0, 1):
                 sel = topk_law_sel == k
                 if not sel.any():
@@ -662,8 +736,11 @@ def _source_task(i):
                 topk_log10_b[:k_keep][sel] = fit_k.log10_b_hat_clamped[idx_sel]
                 topk_chi2[:k_keep][sel] = fit_k.chi2_min[idx_sel]
                 topk_ln_l[:k_keep][sel] = ln_l_report[k][idx_sel].astype(np.float32)
-                topk_ln_prior[:k_keep][sel] = ln_lambda[k][idx_sel]
-                topk_ln_gamma[:k_keep][sel] = ln_gamma[k][idx_sel].astype(np.float32)
+                # TOPK_LN_PRIOR_ML: the prior alone (no non-detection, no
+                # Gaia), the winning design's own number -- today's
+                # TOPK_LN_PRIOR before NONDET (module docstring, section 2).
+                topk_ln_prior_ml[:k_keep][sel] = ln_lambda0[k][idx_sel]
+                topk_ln_gamma_ml[:k_keep][sel] = ln_gamma_ml[k][idx_sel].astype(np.float32)
                 topk_flux[:k_keep][sel] = topk_flux_by_law[k][:k_keep][sel]
         else:
             occam_gap = float("nan")
@@ -671,22 +748,54 @@ def _source_task(i):
         zero_ext_count = int(sum(int((fits[k].a_hat < 0.0).sum()) for k in active_laws)) if good else 0
         n_templates_checked = len(active_laws) * n_model if good else 0
 
+        # NONDET2 brief identity 1: TOPK_LN_PRIOR_FIT + TOPK_LN_UNSEEN +
+        # TOPK_LN_GAIA against ln_w[order] (float64, before any of the
+        # three parts' own float32 cast), at every top-K entry this source
+        # kept. Checked only where both sides are finite, or both are
+        # exactly -inf (the two totals agree the template is vetoed); a
+        # template whose window carries no mass at all makes S0 = S1 = -inf
+        # together (row 12's fix), so TOPK_LN_UNSEEN is NaN there -- a
+        # disclosed 0/0, not a defect -- and is excluded from the error
+        # statistic, counted separately.
+        id1_max_err, id1_sum_err, id1_n_checked, id1_n_undefined = 0.0, 0.0, 0, 0
+        if good and k_keep > 0:
+            true_sum = ln_w[order].astype(np.float64)
+            stored_sum = (topk_ln_prior_fit[:k_keep].astype(np.float64)
+                          + topk_ln_unseen[:k_keep].astype(np.float64)
+                          + topk_ln_gaia[:k_keep].astype(np.float64))
+            both_neginf = np.isneginf(true_sum) & np.isneginf(stored_sum)
+            with np.errstate(invalid="ignore"):
+                diff = np.abs(stored_sum - true_sum)
+            checked = np.isfinite(diff) | both_neginf
+            diff_checked = np.where(both_neginf, 0.0, diff)[checked]
+            id1_n_checked = int(checked.sum())
+            id1_n_undefined = int(k_keep - id1_n_checked)
+            if id1_n_checked:
+                id1_max_err = float(diff_checked.max())
+                id1_sum_err = float(diff_checked.sum())
+
         row = dict(
             ln_evidence=ln_evidence64.astype(np.float32),
             log10_flux_mean=log10_flux_mean.astype(np.float32), log10_flux_cov=log10_flux_cov.astype(np.float32),
             topk_model=topk_model, topk_a_k=topk_a_k, topk_log10_b=topk_log10_b,
-            topk_chi2=topk_chi2, topk_ln_l=topk_ln_l, topk_ln_prior=topk_ln_prior,
-            topk_flux=topk_flux, topk_law=topk_law, topk_ln_gamma=topk_ln_gamma,
+            topk_chi2=topk_chi2, topk_ln_l=topk_ln_l,
+            topk_ln_prior_fit=topk_ln_prior_fit, topk_ln_unseen=topk_ln_unseen,
+            topk_ln_gaia=topk_ln_gaia, topk_ln_prior_ml=topk_ln_prior_ml,
+            topk_ln_gamma_ml=topk_ln_gamma_ml,
+            topk_flux=topk_flux, topk_law=topk_law,
             occam_gap=np.float32(occam_gap),
             a_k_post=np.float32(a_post), a_k_post_sig=np.float32(a_post_sig),
             p_dense=np.float32(p_dense),
             frac_clamped=frac_clamped, n_detected=np.int8(batch.n_detected),
         )
         return dict(i=i, failed=False, zero_ext_count=zero_ext_count,
-                     n_templates_checked=n_templates_checked, **row)
+                     n_templates_checked=n_templates_checked,
+                     id1_max_err=id1_max_err, id1_sum_err=id1_sum_err,
+                     id1_n_checked=id1_n_checked, id1_n_undefined=id1_n_undefined, **row)
     except Exception as exc:  # rule: one bad source must not lose the job
         row = _empty_row(topk, n_sub)
         return dict(i=i, failed=True, zero_ext_count=0, n_templates_checked=0,
+                     id1_max_err=0.0, id1_sum_err=0.0, id1_n_checked=0, id1_n_undefined=0,
                      error=str(exc), **row)
 
 
@@ -728,10 +837,13 @@ def _assemble_batch(results, name_slice, n_sub, topk):
     topk_log10_b = np.empty((m, topk), dtype=np.float32)
     topk_chi2 = np.empty((m, topk), dtype=np.float32)
     topk_ln_l = np.empty((m, topk), dtype=np.float32)
-    topk_ln_prior = np.empty((m, topk), dtype=np.float32)
+    topk_ln_prior_fit = np.empty((m, topk), dtype=np.float32)
+    topk_ln_unseen = np.empty((m, topk), dtype=np.float32)
+    topk_ln_gaia = np.empty((m, topk), dtype=np.float32)
+    topk_ln_prior_ml = np.empty((m, topk), dtype=np.float32)
+    topk_ln_gamma_ml = np.empty((m, topk), dtype=np.float32)
     topk_flux = np.empty((m, topk, N_BANDS), dtype=np.float32)
     topk_law = np.empty((m, topk), dtype=np.int8)
-    topk_ln_gamma = np.empty((m, topk), dtype=np.float32)
     occam_gap = np.empty(m, dtype=np.float32)
     a_k_post = np.empty(m, dtype=np.float32)
     a_k_post_sig = np.empty(m, dtype=np.float32)
@@ -741,6 +853,7 @@ def _assemble_batch(results, name_slice, n_sub, topk):
     failed = np.zeros(m, dtype=bool)
     zero_ext_count = 0
     n_templates_checked = 0
+    id1_max_err, id1_sum_err, id1_n_checked, id1_n_undefined = 0.0, 0.0, 0, 0
     for k, r in enumerate(results):
         ln_evidence[k] = r["ln_evidence"]
         log10_flux_mean[k] = r["log10_flux_mean"]
@@ -750,10 +863,13 @@ def _assemble_batch(results, name_slice, n_sub, topk):
         topk_log10_b[k] = r["topk_log10_b"]
         topk_chi2[k] = r["topk_chi2"]
         topk_ln_l[k] = r["topk_ln_l"]
-        topk_ln_prior[k] = r["topk_ln_prior"]
+        topk_ln_prior_fit[k] = r["topk_ln_prior_fit"]
+        topk_ln_unseen[k] = r["topk_ln_unseen"]
+        topk_ln_gaia[k] = r["topk_ln_gaia"]
+        topk_ln_prior_ml[k] = r["topk_ln_prior_ml"]
+        topk_ln_gamma_ml[k] = r["topk_ln_gamma_ml"]
         topk_flux[k] = r["topk_flux"]
         topk_law[k] = r["topk_law"]
-        topk_ln_gamma[k] = r["topk_ln_gamma"]
         occam_gap[k] = r["occam_gap"]
         a_k_post[k] = r["a_k_post"]
         a_k_post_sig[k] = r["a_k_post_sig"]
@@ -763,14 +879,23 @@ def _assemble_batch(results, name_slice, n_sub, topk):
         failed[k] = r["failed"]
         zero_ext_count += r["zero_ext_count"]
         n_templates_checked += r["n_templates_checked"]
+        id1_max_err = max(id1_max_err, r["id1_max_err"])
+        id1_sum_err += r["id1_sum_err"]
+        id1_n_checked += r["id1_n_checked"]
+        id1_n_undefined += r["id1_n_undefined"]
     return dict(name=name_slice, ln_evidence=ln_evidence, log10_flux_mean=log10_flux_mean, log10_flux_cov=log10_flux_cov,
                 topk_model=topk_model, topk_a_k=topk_a_k, topk_log10_b=topk_log10_b,
-                topk_chi2=topk_chi2, topk_ln_l=topk_ln_l, topk_ln_prior=topk_ln_prior,
-                topk_flux=topk_flux, topk_law=topk_law, topk_ln_gamma=topk_ln_gamma, occam_gap=occam_gap,
+                topk_chi2=topk_chi2, topk_ln_l=topk_ln_l,
+                topk_ln_prior_fit=topk_ln_prior_fit, topk_ln_unseen=topk_ln_unseen,
+                topk_ln_gaia=topk_ln_gaia, topk_ln_prior_ml=topk_ln_prior_ml,
+                topk_ln_gamma_ml=topk_ln_gamma_ml,
+                topk_flux=topk_flux, topk_law=topk_law, occam_gap=occam_gap,
                 a_k_post=a_k_post, a_k_post_sig=a_k_post_sig, p_dense=p_dense,
                 frac_clamped=frac_clamped,
                 n_detected=n_detected, failed=failed,
-                zero_ext_count=zero_ext_count, n_templates_checked=n_templates_checked)
+                zero_ext_count=zero_ext_count, n_templates_checked=n_templates_checked,
+                id1_max_err=id1_max_err, id1_sum_err=id1_sum_err,
+                id1_n_checked=id1_n_checked, id1_n_undefined=id1_n_undefined)
 
 
 def _write_part(part_path, batch, cls):
@@ -786,6 +911,12 @@ def _write_part(part_path, batch, cls):
         f.create_dataset("FAILED", data=batch["failed"])
         f.attrs["ZERO_EXT_COUNT"] = batch["zero_ext_count"]
         f.attrs["N_TEMPLATES_CHECKED"] = batch["n_templates_checked"]
+        # NONDET2 brief identity 1, report-only (not a product column: rule
+        # 5 describes a product, this is the build's own check number).
+        f.attrs["ID1_MAX_ERR"] = batch["id1_max_err"]
+        f.attrs["ID1_SUM_ERR"] = batch["id1_sum_err"]
+        f.attrs["ID1_N_CHECKED"] = batch["id1_n_checked"]
+        f.attrs["ID1_N_UNDEFINED"] = batch["id1_n_undefined"]
 
 
 #: Section 3's own retry on `ctx.Pool`'s creation: the Aquila failure
@@ -990,6 +1121,7 @@ def join_parts(summary, topk):
     stem = _STEM(summary.get("cls"))
     zero_ext_count = 0
     n_templates_checked = 0
+    id1_max_err, id1_sum_err, id1_n_checked, id1_n_undefined = 0.0, 0.0, 0, 0
     failed_chunks = []
     with h5py.File(path, "w") as out:
         for key in _PART_KEYS:
@@ -1007,6 +1139,10 @@ def join_parts(summary, topk):
                 failed_chunks.append(failed_here + offset)
                 zero_ext_count += int(pf.attrs["ZERO_EXT_COUNT"])
                 n_templates_checked += int(pf.attrs["N_TEMPLATES_CHECKED"])
+                id1_max_err = max(id1_max_err, float(pf.attrs["ID1_MAX_ERR"]))
+                id1_sum_err += float(pf.attrs["ID1_SUM_ERR"])
+                id1_n_checked += int(pf.attrs["ID1_N_CHECKED"])
+                id1_n_undefined += int(pf.attrs["ID1_N_UNDEFINED"])
             offset += m
         failed_rows = (np.concatenate(failed_chunks) if failed_chunks
                         else np.array([], dtype=np.int64)).astype(np.int64)
@@ -1022,7 +1158,10 @@ def join_parts(summary, topk):
     for part_path in part_paths:
         os.remove(part_path)
     zero_ext_frac = zero_ext_count / n_templates_checked if n_templates_checked else float("nan")
-    return dict(zero_ext_frac=zero_ext_frac, n_failed=int(failed_rows.size))
+    id1_mean_err = id1_sum_err / id1_n_checked if id1_n_checked else float("nan")
+    return dict(zero_ext_frac=zero_ext_frac, n_failed=int(failed_rows.size),
+                id1_max_err=id1_max_err, id1_mean_err=id1_mean_err,
+                id1_n_checked=id1_n_checked, id1_n_undefined=id1_n_undefined)
 
 
 def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=None):
@@ -1059,7 +1198,9 @@ def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=N
                 occam_median = float(np.median(occam_finite)) if occam_finite.size else float("nan")
                 st.done(summary["path"], n=summary["n_source"], n_model=summary["n_model"],
                         zero_ext_frac=joined["zero_ext_frac"], occam_gap_median=occam_median,
-                        n_batches=summary["n_batches"], n_failed=joined["n_failed"])
+                        n_batches=summary["n_batches"], n_failed=joined["n_failed"],
+                        id1_max_err=joined["id1_max_err"], id1_mean_err=joined["id1_mean_err"],
+                        id1_n_checked=joined["id1_n_checked"], id1_n_undefined=joined["id1_n_undefined"])
 
 
 if __name__ == "__main__":
