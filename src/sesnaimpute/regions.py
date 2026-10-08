@@ -66,16 +66,30 @@ _REGIONS = (
     Region("Musca", 172, 16, (0.156, 0.188), "D",
            "Zucker, Goodman, Alves, Bialy, Koch, Speagle et al. 2021, ApJ 919, 35, table 1 "
            "('Musca' row)"),
-    Region("NGC 7129", 926, 163, (0.763, 1.089), "M",
-           "Dzib et al., VLBA parallaxes of 40 YSOs"),
+    Region("NGC 7129", 912.0, 7.6, (0.904, 0.920), "S",
+           "Hunt & Reffert 2023, A&A 673, A114 (VizieR J/A+A/673/A114), cluster "
+           "'NGC_7129': mean parallax Plx = 1.0965 +/- 0.0092 mas (standard error "
+           "over 136 Gaia DR3 members, 91 used for the distance fit), d = 1000/Plx; "
+           "their own maximum-likelihood distance (dist50) is 910.96 "
+           "(908.32-913.62) pc, consistent"),
     Region("North America Nebula", 785, 16, (0.769, 0.801), "O",
            "Kuhn & Hillenbrand, Gaia EDR3"),
     Region("Ophiuchus", 137.3, 1.2, (0.1361, 0.1385), "M+S",
            "VLBA parallax (author not recorded in the old table)"),
     Region("Orion A", 418, 21, (0.397, 0.439), "S",
            "Yan, via Pokhrel et al."),
-    Region("Orion B", 418, 21, (0.397, 0.439), "S",
-           "Yan, via Pokhrel et al. (as Orion A)"),
+    Region("Orion B", 413.4, 9.2, (0.404, 0.423), "S",
+           "Hunt & Reffert 2023, A&A 673, A114 (VizieR J/A+A/673/A114), cluster "
+           "'NGC_2068' (the only one of Orion B's three named clusters -- NGC 2068, "
+           "NGC 2071, NGC 2024 -- resolved by name in this download; 102 Gaia DR3 "
+           "members, 77 within the tidal radius, 87 used for the distance fit): "
+           "mean parallax Plx = 2.4188 +/- 0.0054 mas (standard error), d = 1000/Plx "
+           "= 413.4 pc; their own maximum-likelihood distance (dist50) for the same "
+           "cluster is 404.20 (403.62-404.79) pc, so sigma is the 9.2 pc gap between "
+           "the inversion and dist50 (the standard error alone, 0.9 pc, understates "
+           "the catalogue's own systematic); consistent with Kounkel et al. 2017's "
+           "independent NGC 2068 parallax distance of 405 +/- 16 pc, within 1 sigma "
+           "of either estimate"),
     Region("Perseus", 294, 15.133, (0.2789, 0.3091), "D",
            "Zucker et al."),
     Region("Pipe", 163, 5, (0.158, 0.168), "M",
