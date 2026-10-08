@@ -1323,16 +1323,19 @@ REGISTRY = {
     ("extinction_adopted_source", "A_COL_K"): ("mag A_K",
         "For every cataloged source of this region, the extinction a "
         "star's own light passes through: the adopted dust column (this "
-        "package's column_adopted_source A_COL_K, re-derived here) "
-        "multiplied by this source's own F_EXTINCTION, which raises it to "
-        "match the Juvela & Montillaud (2016) star-color map wherever "
-        "that map reads higher."),
+        "package's column_adopted_source A_COL_K, re-derived here), "
+        "converted onto the scale of the Juvela & Montillaud (2016) "
+        "near-infrared star-color extinction map by this region's one "
+        "straight-line calibration (CAL_OFFSET_K plus CAL_SLOPE times "
+        "the dust column), fitted the way Lombardi, Bouy, Alves and Lada "
+        "(2014) calibrated a dust-emission map against the same kind of "
+        "star-color map."),
     ("extinction_adopted_source", "A_COL_SIG_K"): ("mag A_K",
-        "The adopted dust column's own 1-sigma uncertainty, multiplied "
-        "by this source's own F_EXTINCTION factor."),
+        "The adopted dust column's own 1-sigma uncertainty, scaled by "
+        "this region's CAL_SLOPE."),
     ("extinction_adopted_source", "A_COL_PROVENANCE"): ("code",
-        "Which arm the dust column A_COL_K is scaled from, before the "
-        "F_EXTINCTION correction: 0 Herschel, 1 Planck."),
+        "Which arm the dust column A_COL_K is converted from, before "
+        "this region's straight-line calibration: 0 Herschel, 1 Planck."),
     ("extinction_adopted_source", "A_COL_FWHM_ARCSEC"): ("arcsec",
         "The beam size of whichever map the dust column was taken from: "
         "the Herschel Gould Belt Survey's 36.3 arcsec where "
@@ -1350,14 +1353,20 @@ REGISTRY = {
         "dust column before scaling: 0 where A_COL_PROVENANCE is 1 "
         "(Planck), or where the source's own Herschel-covered region has "
         "no measured zero point."),
-    ("extinction_adopted_source", "F_EXTINCTION"): ("dimensionless",
-        "For every cataloged source of this region, the factor its "
-        "adopted dust column is multiplied by to form A_COL_K: at least "
-        "1, the ratio of the Juvela & Montillaud (2016) star-color "
-        "extinction to the adopted dust column, averaged over the "
-        "source's own nside-1024 cell. 1 where that ratio is below 1, "
-        "since a star-color map can read low but the emission map's own "
-        "dust cannot be reduced by it."),
+    ("extinction_adopted_source", "CAL_OFFSET_K"): ("mag A_K",
+        "One number for the whole region: the additive offset of the "
+        "straight line that converts the dust-emission extinction column "
+        "onto the scale of the Juvela & Montillaud (2016) near-infrared "
+        "star-color extinction map, A_K(star-color) = CAL_OFFSET_K plus "
+        "CAL_SLOPE times A_K(dust emission). Fitted the way Lombardi, "
+        "Bouy, Alves and Lada (2014) calibrated a dust-emission map "
+        "against a star-color map, over the region's sightlines where "
+        "both maps read below 1 magnitude of K-band extinction, then "
+        "applied to every source and sightline of the region."),
+    ("extinction_adopted_source", "CAL_SLOPE"): ("dimensionless",
+        "One number for the whole region: the multiplicative slope of "
+        "the same straight-line calibration described under "
+        "CAL_OFFSET_K."),
 
     ("column_adopted_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
         "Every region's admitted nside-256 pixel numbers (nested "
@@ -1391,20 +1400,17 @@ REGISTRY = {
     ("extinction_adopted_sightline", "A_K"): ("mag A_K",
         "For the matching pixel in HPX_PIX_256, the extinction a star's "
         "own light passes through: this package's adopted sightline "
-        "column (column_adopted_sightline A_K) multiplied by F_EXTINCTION."),
+        "column (column_adopted_sightline A_K), converted onto the "
+        "near-infrared star-color extinction scale by that pixel's own "
+        "region's straight-line calibration (extinction_adopted_source's "
+        "CAL_OFFSET_K and CAL_SLOPE)."),
     ("extinction_adopted_sightline", "SIGMA_A_K"): ("mag A_K",
-        "The adopted sightline column's own 1-sigma uncertainty, "
-        "multiplied by this pixel's own F_EXTINCTION factor."),
-    ("extinction_adopted_sightline", "F_EXTINCTION"): ("dimensionless",
-        "For the matching pixel in HPX_PIX_256, the mean of its own "
-        "cataloged sources' per-source F_EXTINCTION factor (this "
-        "package's extinction_adopted_source F_EXTINCTION). 1 where the "
-        "pixel is admitted but carries no cataloged source, so the "
-        "adopted column passes through unscaled."),
+        "The adopted sightline column's own 1-sigma uncertainty, scaled "
+        "by that pixel's own region's CAL_SLOPE."),
     ("extinction_adopted_sightline", "PROVENANCE"): ("code",
-        "Which arm the dust column before the F_EXTINCTION scaling came "
-        "from, carried unchanged from the adopted sightline column: 0 "
-        "Herschel, 1 Planck."),
+        "Which arm the dust column came from before the region's "
+        "straight-line calibration, carried unchanged from the adopted "
+        "sightline column: 0 Herschel, 1 Planck."),
 
     ("column-check_adopted_survey", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
         "The Herschel-covered admitted sightline pixel numbers (nested "
