@@ -39,10 +39,10 @@ BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
 
 #: SPEC_BMSTP_DRAFT.md sec 6.1's calibration systematic on `sigma_log`:
-#: `fittp/likelihood.py`'s `prepare` carries no such floor and
-#: `constants.py` names none, so this check discloses the brief's own
-#: fallback -- Reach et al. 2005 (astro-ph/0507139), the IRAC absolute
-#: flux calibration's own uncertainty.
+#: `constants.SIGMA_CAL_DEX` names that systematic per band, but no module
+#: names a single floor for this check's own whitening, so it discloses
+#: the brief's own fallback -- Reach et al. 2005 (astro-ph/0507139), the
+#: IRAC absolute flux calibration's own uncertainty.
 SIGMA_FLOOR_DEX = 0.02
 
 #: `ORIGIN_FNU`'s detected code, the same value `fittp.likelihood.prepare`
