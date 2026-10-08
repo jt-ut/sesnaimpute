@@ -74,10 +74,11 @@ weight splits `w_AGB = F_dusty * w`, `w_STAR = w - w_AGB`, row by row, so
 `w_STAR + w_AGB == w` exactly (reading note 04_star_family.md section C,
 `partition_weights`). TRILEGAL carries no chemistry per star, so
 `F_dusty` is the weighted mean over the two chemistries measured once,
-survey-wide, off Riebel et al. (2012, ApJ 753, 71) per-star GRAMS fits
-against the curated GRAMS library's own optical-depth floor
-(`f_dusty_by_chemistry`, spec section 10 item 2); `f_C = 0.18` (Le Bertre
-et al. 2003) is the fixed carbon-fraction weight.
+survey-wide, off Riebel et al. (2012, ApJ 753, 71) per-star GRAMS fits: the
+per-chemistry share whose fitted dust mass-loss rate clears the GRAMS
+grid's own physical thin-shell floor, `MDOT_DUSTY_THRESHOLD_MSUN_YR`
+(`f_dusty_by_chemistry`); `f_C = 0.18` (Le Bertre et al. 2003) is the fixed
+carbon-fraction weight.
 
 Brightness units (C3, spec section 2.2, section 3, section 4). Every
 star, evolved or not, carries `LOG10_B` (STAR): the median over the
@@ -195,11 +196,24 @@ F_C = 0.18
 RIEBEL_GCL_COLSPEC = (33, 34)
 RIEBEL_TAU_COLSPEC = (85, 92)
 
-#: The curated GRAMS library's own detectability floor in that same
-#: per-chemistry band (SPEC_PRIORS.md section 3): "tau_10 >= 0.0128
-#: (O-rich) and tau_11.3 >= 0.02 (C-rich)".
-TAU_FLOOR_O = 0.0128
-TAU_FLOOR_C = 0.02
+#: Riebel et al. 2012 also fit a dust mass-loss rate per star, the
+#: GRAMS radiative-transfer code's own output quantity (table3.dat ReadMe:
+#: "dM/dt Dust mass-loss rate of best-fit model", Msun/yr), bytes 43-50 --
+#: a physical rate, not the grid's own dimensionless, coarsely-spaced
+#: `tau` node.
+RIEBEL_MDOT_COLSPEC = (42, 50)
+
+#: The dusty/non-dusty mass-loss-rate floor: the GRAMS grid's own
+#: thin-shell limit stated in physical dust mass-loss units (Sargent et al.
+#: 2011, ApJ 728, 93, the O-rich grid; Srinivasan et al. 2011, A&A 532, A54,
+#: the carbon grid) rather than read off the grid's own lowest, coarsely
+#: spaced `tau` node -- the curated `agb` library's own `MLR_DUST` column
+#: carries dust mass-loss rates in these same physical units at every
+#: template, so a star's fitted rate is compared on the library's own
+#: scale. One shared value for both chemistries: a mass-loss rate is a
+#: physical quantity, not the wavelength-dependent optical depth `tau` is,
+#: so it carries no separate O-rich/C-rich floor.
+MDOT_DUSTY_THRESHOLD_MSUN_YR = 1.0e-8
 
 #: PAHC's own small grid of 8 micron completeness-limit values (SPEC_PRIORS.md
 #: section 4, `IMPLEMENTATION.md` section 3): the percentiles of the
@@ -408,19 +422,35 @@ def read_riebel_optical_depths(config):
     return df["GCL"].to_numpy(dtype=str), df["TAU"].to_numpy(dtype=np.float64)
 
 
-def f_dusty_by_chemistry(config):
-    """`(f_dusty_o, f_dusty_c, n_o, n_c)` (SPEC_PRIORS.md section 3, "the
-    value is the fraction of Riebel's stars whose fitted optical depth
-    exceeds the on-disk floor, per chemistry"): the per-chemistry share
-    of Riebel+2012's own per-star fits whose fitted `tau` clears the
-    curated GRAMS library's own detectability floor, `TAU_FLOOR_O`/
-    `TAU_FLOOR_C`, at that chemistry's own fitted band (10.0um O-rich,
-    11.3um C-rich -- one column already carries the right band)."""
-    gcl, tau = read_riebel_optical_depths(config)
+def read_riebel_mass_loss_rates(config):
+    """`(gcl, mdot)`, `(n,)` each: every Riebel et al. 2012 AGB candidate's
+    own GRAMS chemistry class ("o"/"c") and fitted dust mass-loss rate,
+    Msun/yr, read by byte position off the same fixed-width `table3.dat.gz`
+    `read_riebel_optical_depths` reads (module docstring's
+    `RIEBEL_MDOT_COLSPEC`, `sky.download.riebel2012`'s own ReadMe)."""
+    path = f"{config.data_root}/sky/download/riebel2012/table3.dat.gz"
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "prior.star_population: no Riebel+2012 table at %r -- run the "
+            "sesnaimpute.sky.download.riebel2012 RUNBOOK line first" % path)
+    df = pd.read_fwf(path, colspecs=[RIEBEL_GCL_COLSPEC, RIEBEL_MDOT_COLSPEC],
+                      names=["GCL", "MDOT"], compression="gzip")
+    return df["GCL"].to_numpy(dtype=str), df["MDOT"].to_numpy(dtype=np.float64)
+
+
+def f_dusty_by_chemistry(config, mdot_threshold_msun_yr=MDOT_DUSTY_THRESHOLD_MSUN_YR):
+    """`(f_dusty_o, f_dusty_c, n_o, n_c)`: "dusty" defined physically, by a
+    mass-loss-rate threshold on Riebel+2012's own per-star fitted dust
+    mass-loss rates, not by the curated GRAMS library's lowest, coarsely
+    spaced `tau` node (a third of the O-rich fits sit exactly at that node,
+    so the old definition moved with the grid's own spacing, not the sky).
+    The per-chemistry share of Riebel's fits whose fitted rate clears
+    `mdot_threshold_msun_yr` (default `MDOT_DUSTY_THRESHOLD_MSUN_YR`)."""
+    gcl, mdot = read_riebel_mass_loss_rates(config)
     is_o, is_c = gcl == "o", gcl == "c"
     n_o, n_c = int(is_o.sum()), int(is_c.sum())
-    f_o = float(np.mean(tau[is_o] >= TAU_FLOOR_O)) if n_o else float("nan")
-    f_c = float(np.mean(tau[is_c] >= TAU_FLOOR_C)) if n_c else float("nan")
+    f_o = float(np.mean(mdot[is_o] >= mdot_threshold_msun_yr)) if n_o else float("nan")
+    f_c = float(np.mean(mdot[is_c] >= mdot_threshold_msun_yr)) if n_c else float("nan")
     return f_o, f_c, n_o, n_c
 
 
@@ -1016,10 +1046,11 @@ def _report(result):
 def build(config, regions=None):
     """Writes the per-tile placement-and-weight product for `regions`
     (default: all thirty), one file per region (module docstring). The
-    literature `F_dusty` (Riebel+2012 against the curated GRAMS floor)
-    and the GRAMS O-rich library's own shared luminosity are survey-wide
-    and read once, not per region (rule 9); likewise the two libraries'
-    own reference-flux tables and the measured PAHC curve."""
+    literature `F_dusty` (Riebel+2012's fitted dust mass-loss rates against
+    the GRAMS grid's own physical thin-shell floor) and the GRAMS O-rich
+    library's own shared luminosity are survey-wide and read once, not per
+    region (rule 9); likewise the two libraries' own reference-flux tables
+    and the measured PAHC curve."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
     f_dusty_o, f_dusty_c, n_riebel_o, n_riebel_c = f_dusty_by_chemistry(config)
@@ -1027,10 +1058,27 @@ def build(config, regions=None):
     f_ref_sps = load_sps_reference_fluxes(config)
     teff_node, ref_jhk = load_pahc_continuum_reference(config)
     curve = pahc_curve.read(config)
+    f_dusty_mean = (1.0 - F_C) * f_dusty_o + F_C * f_dusty_c
     print(
-        "star_population: F_dusty_O=%.4f (n=%d) F_dusty_C=%.4f (n=%d) "
+        "star_population: F_dusty_O=%.4f (n=%d) F_dusty_C=%.4f (n=%d) F_dusty_mean=%.4f "
+        "mass-loss-rate threshold=%.1e Msun/yr (Riebel+2012 dust dM/dt, bytes 43-50) "
         "L_O=%.2f Lsun (n_model=%d, sed_models/agb/parameters.fits CHEM=='O') f_C=%.2f"
-        % (f_dusty_o, n_riebel_o, f_dusty_c, n_riebel_c, l_o_lsun, n_orich_models, F_C))
+        % (f_dusty_o, n_riebel_o, f_dusty_c, n_riebel_c, f_dusty_mean,
+           MDOT_DUSTY_THRESHOLD_MSUN_YR, l_o_lsun, n_orich_models, F_C))
+    # C12 identity: the share's sensitivity to a factor two in the threshold
+    # either way, on the same Riebel+2012 fits -- the grid-node floor this
+    # replaces moved the share by a factor of 1.4 to 2.8 per node (ledger
+    # C12), so this is the same kind of number for the physical threshold.
+    for factor, label in ((2.0, "2x"), (0.5, "0.5x")):
+        thr = factor * MDOT_DUSTY_THRESHOLD_MSUN_YR
+        f_o_f, f_c_f, _, _ = f_dusty_by_chemistry(config, thr)
+        f_mean_f = (1.0 - F_C) * f_o_f + F_C * f_c_f
+        print(
+            "star_population: F_dusty sensitivity, threshold %s=%.1e Msun/yr: "
+            "F_dusty_O=%.4f F_dusty_C=%.4f F_dusty_mean=%.4f (%+.3f dex against the "
+            "adopted threshold's %.4f)"
+            % (label, thr, f_o_f, f_c_f, f_mean_f,
+               np.log10(f_mean_f / f_dusty_mean), f_dusty_mean))
 
     for region in region_names:
         with progress.Stage("prior.star_population", region) as st:
