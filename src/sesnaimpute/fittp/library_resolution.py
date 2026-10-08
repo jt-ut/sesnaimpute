@@ -19,12 +19,14 @@ The same product's `SIGMA_LIB_DEX`, one row per LIBRARY and one column per
 BAND (sec 6.1), is `fittp.likelihood.prepare`'s own read of this
 measurement: the per-band width the kernel sum over templates needs to
 resolve a source sitting midway between a library's two nearest
-neighbours, `d50 * LIBRARY_SAMPLING_SIGMA_LOG_DEX_b / (2 sqrt(6))` for a
-library whose own 90th-percentile spacing clears `RESOLUTION_TOL`
-sampling lengths, or one full sampling length, `LIBRARY_SAMPLING_SIGMA_LOG_DEX_b`
-itself, where it does not (a library that fails the 90th-percentile check
-can read a small `d50` from a locally clustered pocket of templates while
-being sparse everywhere else, so `d50` alone is not trusted there).
+neighbours, `d50 * LIBRARY_SAMPLING_SIGMA_LOG_DEX_b / (2 sqrt(6))` at the
+library's own MEASURED `d50` -- the formula alone, for every class, no
+thickness branch and no fallback (planner's ruling, WP-PRIOR-8 correction):
+the curated registers are built by a sampler that asserts packing >= 1 and
+coverage < 1 everywhere, so the spacing is uniform at the sampling scale
+by construction and `d50` IS the spacing, not a locally clustered pocket's
+understatement of it. A guard against that failure mode cannot fire under
+the design that stands, so it is not kept as a trap for the next reader.
 """
 
 import os
@@ -57,12 +59,6 @@ N_BANDS = len(BAND_KEYS)
 #: A_K=1.0, so 0.5 is the blend's own midpoint -- the brief's "median
 #: blended extinction law".
 AK_MEDIAN = 0.5
-
-#: The Gaussian resolution rule: a library's own 90th-percentile nearest-
-#: neighbour spacing, in sampling lengths (`_shape_space`'s whitening),
-#: must sit at or below this to trust its `d50` as a per-band `sigma_lib`
-#: (WP-PRIOR-8; the fallback below otherwise).
-RESOLUTION_TOL = 0.5
 
 
 def _register_path(config, cls):
@@ -123,53 +119,50 @@ def _shape_space(log10_f_ref, kappa_prime):
     return y - (y @ q) @ q.T
 
 
-def _sigma_lib_dex(d50, thick):
-    """WP-PRIOR-8's per-band conversion: a THICK library's own `d50`
-    (dimensionless, sampling lengths) back to a per-band dex offset,
+def _sigma_lib_dex(d50):
+    """WP-PRIOR-8's per-band conversion, the formula alone (planner's
+    correction: the thickness guard is removed): a library's own measured
+    `d50` (dimensionless, sampling lengths) back to a per-band dex offset,
     `d50 * (2 sigma_b) / (2 sqrt(6))` -- distributed over the 6-D shape
     space's dimensions (dividing by `sqrt(6)`) and halved (a source midway
-    between two neighbours sits at `d50/2` from each). A library that
-    fails the thickness check (`d90 > RESOLUTION_TOL`) takes one full
-    sampling length per band, `constants.LIBRARY_SAMPLING_SIGMA_LOG_DEX`
-    itself, not `d50` converted.
+    between two neighbours sits at `d50/2` from each). No fallback: the
+    curated registers are built by a sampler that asserts packing >= 1 and
+    coverage < 1 everywhere, so a library's spacing is uniform at the
+    sampling scale by construction and `d50` is trusted as that spacing
+    directly, never a locally clustered pocket's understatement of it.
     """
     scale = constants.LIBRARY_SAMPLING_SIGMA_LOG_DEX
-    if thick:
-        return d50 * scale / (2.0 * np.sqrt(6.0))
-    return scale.copy()
+    return d50 * scale / (2.0 * np.sqrt(6.0))
 
 
-def _library_thickness(config, cls, kappa_prime):
+def _library_sigma_lib(config, cls, kappa_prime):
     """One library's own pooled 50th/90th-percentile nearest-neighbour
     spacing (dimensionless, `_shape_space`'s whitening, `scipy.spatial.
-    cKDTree`, k=2) at its full, current count, whether its own 90th
-    percentile clears `RESOLUTION_TOL`, and the per-band `sigma_lib` that
-    measurement implies (`_sigma_lib_dex`)."""
+    cKDTree`, k=2) at its full, current count, and the per-band
+    `sigma_lib` the measured `d50` implies (`_sigma_lib_dex`, the formula
+    alone). `d90` is reported alongside `d50` but decides nothing."""
     names, log10_f_ref = _read_register(config, cls)
     shape = _shape_space(log10_f_ref, kappa_prime)
     d, _ = cKDTree(shape).query(shape, k=2)
     d50 = float(np.percentile(d[:, 1], 50))
     d90 = float(np.percentile(d[:, 1], 90))
-    thick = d90 <= RESOLUTION_TOL
-    return names.size, d50, d90, thick, _sigma_lib_dex(d50, thick)
+    return names.size, d50, d90, _sigma_lib_dex(d50)
 
 
 #: `UNITS`/`READING` for every dataset here (CODING_RULES_BMSTP.md rule 5)
 #: live in `attrs_registry.REGISTRY`, keyed by `(_STEM, name)`.
 
 
-def _write(path, library_order, n_by_lib, d50_by_lib, d90_by_lib, thick_by_lib, sigma_lib_dex):
+def _write(path, library_order, n_by_lib, d50_by_lib, d90_by_lib, sigma_lib_dex):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "survey"
-        f.attrs["RESOLUTION_TOL"] = RESOLUTION_TOL
         for key, data in (
             ("BANDS", np.array(BAND_KEYS, dtype="S4")),
             ("LIBRARY", np.array(library_order, dtype="S6")),
             ("N_TEMPLATES", np.array([n_by_lib[c] for c in library_order], dtype=np.int64)),
             ("D50", np.array([d50_by_lib[c] for c in library_order])),
             ("D90", np.array([d90_by_lib[c] for c in library_order])),
-            ("THICK_ENOUGH", np.array([int(thick_by_lib[c]) for c in library_order], dtype=np.int8)),
             ("SIGMA_LIB_DEX", np.array([sigma_lib_dex[c] for c in library_order])),
         ):
             build_module.write_dataset(f, key, data, *REGISTRY[(_STEM, key)])
@@ -180,8 +173,8 @@ def build(config, regions=None):
     (report-only; `regions` ignored, a survey check over the six
     registers, not a per-region product). Prints each library's own
     pooled nearest-neighbour spacing (d50/d90, dimensionless sampling
-    lengths), whether it clears `RESOLUTION_TOL`, and the per-band
-    `sigma_lib` (dex) that measurement implies.
+    lengths) and the per-band `sigma_lib` (dex) the formula gives at that
+    measured `d50` -- no thickness branch (planner's ruling).
     """
     del regions
     with progress.Stage("fittp.library_resolution") as st:
@@ -189,23 +182,20 @@ def build(config, regions=None):
         kappa_prime = population_selection.kappa_hybrid(config, w_ramp)[0]
 
         library_order = list(definitions.CLASS_REGISTER)
-        n_by_lib, d50_by_lib, d90_by_lib, thick_by_lib, sigma_lib_dex = {}, {}, {}, {}, {}
+        n_by_lib, d50_by_lib, d90_by_lib, sigma_lib_dex = {}, {}, {}, {}
         for i, cls in enumerate(library_order):
-            n_t, d50, d90, thick, sigma_lib_b = _library_thickness(config, cls, kappa_prime)
-            n_by_lib[cls], d50_by_lib[cls], d90_by_lib[cls], thick_by_lib[cls] = n_t, d50, d90, thick
+            n_t, d50, d90, sigma_lib_b = _library_sigma_lib(config, cls, kappa_prime)
+            n_by_lib[cls], d50_by_lib[cls], d90_by_lib[cls] = n_t, d50, d90
             sigma_lib_dex[cls] = sigma_lib_b
-            print("fittp.library_resolution: %-5s n=%6d d50=%.4f d90=%.4f (sampling lengths) -- %s; "
+            print("fittp.library_resolution: %-5s n=%6d d50=%.4f d90=%.4f (sampling lengths); "
                   "sigma_lib (dex, per band %s) = %s"
-                  % (cls, n_t, d50, d90,
-                     "thick enough" if thick else "too thin, fallback = 1 sampling length/band",
-                     list(BAND_KEYS), np.round(sigma_lib_b, 4).tolist()))
+                  % (cls, n_t, d50, d90, list(BAND_KEYS), np.round(sigma_lib_b, 4).tolist()))
             st.tick(i + 1, len(library_order), "libraries")
 
         out_path = config_module.product_path(config, "fittp", "check", "library-resolution", "survey")
-        _write(out_path, library_order, n_by_lib, d50_by_lib, d90_by_lib, thick_by_lib, sigma_lib_dex)
+        _write(out_path, library_order, n_by_lib, d50_by_lib, d90_by_lib, sigma_lib_dex)
 
-        st.done(out_path, n_library=len(library_order),
-                 n_thick=int(sum(thick_by_lib.values())))
+        st.done(out_path, n_library=len(library_order))
 
 
 if __name__ == "__main__":

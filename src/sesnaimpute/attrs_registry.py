@@ -2847,17 +2847,13 @@ REGISTRY = {
         "space)."),
     ("library-resolution_check_survey", "D90"): ("sampling lengths",
         "The same distance at the ninetieth percentile: the spacing of that "
-        "library's most isolated models."),
-    ("library-resolution_check_survey", "THICK_ENOUGH"): ("true or false",
-        "Whether that library's ninetieth-percentile spacing (D90) sits at or below "
-        "this check's tolerance, so its own median spacing (D50) is trusted to set "
-        "SIGMA_LIB_DEX; where false, SIGMA_LIB_DEX falls back to one full sampling "
-        "length per band instead."),
+        "library's most isolated models. Reported alongside D50 but does not enter "
+        "SIGMA_LIB_DEX."),
     ("library-resolution_check_survey", "SIGMA_LIB_DEX"): ("dex",
-        "How finely that library samples spectral shape, per band: the fit adds "
-        "this in quadrature to that band's measurement error and its calibration "
-        "systematic, so no model can beat a near-identical one by more than the "
-        "sampling allows."),
+        "How finely that library samples spectral shape, per band, read straight off "
+        "D50 (the formula alone, no fallback): the fit adds this in quadrature to "
+        "that band's measurement error and its calibration systematic, so no model "
+        "can beat a near-identical one by more than the sampling allows."),
 
 }
 
