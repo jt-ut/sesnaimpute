@@ -305,6 +305,16 @@ def _dense_weight_by_sightline(config, region):
         w_cloud = mmap_dataset(f, "W_CLOUD")
     f_i = np.clip(_XI_CENTERS[None, :] - xi_front[:, None], 0.0,
                   (xi_back - xi_front)[:, None]) / _XI_CENTERS[None, :]
+    # D4 (REVIEW_LEDGER_2026-10-08.md, unit2 row 20): past the wall
+    # (`xi_hat > 1`, the one-dex padding from `N_XI_SUPPORT` on), this
+    # formula's own `1/xi_hat` decay is a change-of-variables artefact of
+    # the MEASURED coordinate (`grid.blur` carries real mass there, a
+    # pencil column above the beam mean), not a property of the
+    # dense/diffuse law itself, which is defined on the sightline's own
+    # DISTANCE coordinate and has no opinion past the wall. Hold the
+    # wall's own cell value flat through the padding instead of letting
+    # it keep falling.
+    f_i[:, N_XI_SUPPORT:] = f_i[:, N_XI_SUPPORT - 1:N_XI_SUPPORT]
     return f_i * w_cloud[:, None]
 
 

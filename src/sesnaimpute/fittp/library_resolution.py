@@ -352,7 +352,19 @@ def build(config, regions=None):
         library_order = list(definitions.CLASS_REGISTER)
         d50_yso_pooled = p50_all["POOLED"][0]
         sigma_lib_dex = {"YSO": d50_yso_pooled * SIGMA_LIB_SCALE}
-        sigma_lib_dex.update({cls: d50 * SIGMA_LIB_SCALE for cls, _, d50, _, _ in other})
+        # D5: honour the thickness check this stage itself defines (`thick`,
+        # `_library_thickness`'s own `d90 <= RESOLUTION_TOL`) -- a library
+        # that FAILS it is too thin for its own measured d50 to be trusted
+        # as a resolution (d50 can read small from a locally clustered
+        # pocket of templates while the library is sparse everywhere else,
+        # which is exactly what the check's d90 catches); it takes the
+        # fallback already disclosed above, the survey's own calibration
+        # floor `SIGMA_FLOOR_DEX`, not its own d50. No change to the YSO
+        # term above, which this stage never puts through the thickness
+        # check at all.
+        sigma_lib_dex.update({
+            cls: (d50 * SIGMA_LIB_SCALE if thick else SIGMA_FLOOR_DEX)
+            for cls, _, d50, _, thick in other})
         print("fittp.library_resolution: sigma_lib (dex, per library) = %s"
               % {c: round(sigma_lib_dex[c], 4) for c in library_order})
 
