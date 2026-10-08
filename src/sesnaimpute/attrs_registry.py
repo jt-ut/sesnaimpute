@@ -2621,7 +2621,9 @@ REGISTRY = {
     ("posterior_classification_source", "MAP_CLASS"): ("class position",
         "The most probable class, as a position in the CLASSES attribute, counting "
         "from zero. -1 means the source could not be fitted: fewer than two "
-        "measured bands, or a flux error that is not finite."),
+        "measured bands, or a flux error that is not finite. -2 means the fit "
+        "itself was valid but no class has any prior mass at this source's fitted "
+        "brightness and depth."),
     ("posterior_classification_source", "P_CLASS"): ("probability",
         "Probability of each class: field star, dusty evolved star, "
         "nebula-contaminated aperture, background galaxy, young stellar object, "
@@ -2860,18 +2862,23 @@ _SWEEP_FIT_READINGS = {
         "missed the flux predicted in each undetected band at that one point. "
         "The class evidence itself reads that same chance across a range of "
         "extinction, not at this one point, so it need not match this column."),
-    "TOPK_LN_PRIOR": ("nats",
-        "How many objects of this class the sky is expected to hold at the "
-        "position, brightness and depth each of those five models implies, as a "
-        "natural logarithm of a density, read across the range of extinction the "
-        "source allows rather than at one value. It also carries the chance the "
-        "survey would have missed the flux each model predicts in the bands where "
-        "the source was observed and not seen, which is read across that same "
-        "range, so this column is not an expected number of objects alone."),
-    "TOPK_LN_GAMMA": ("nats",
-        "What Gaia says about each of those five models, as a natural logarithm: "
-        "whether a counterpart is present or absent, and whether its parallax suits "
-        "the model's distance. 0 where Gaia has nothing to say."),
+    "TOPK_LN_PRIOR_FIT": ("nats",
+        "The prior and the fit to the measured bands integrated together over "
+        "extinction along the fit's ridge; not separable into the two under the "
+        "integral."),
+    "TOPK_LN_UNSEEN": ("nats",
+        "What the bands observed but not detected contributed, as a log factor "
+        "given the prior and the measured fit, integrated over extinction; reduces "
+        "to the point value when the fit pins the extinction."),
+    "TOPK_LN_GAIA": ("nats",
+        "What the Gaia detection and parallax contributed, as a log factor given "
+        "the rest, integrated over extinction."),
+    "TOPK_LN_PRIOR_ML": ("nats",
+        "The prior at the best-fit point; a guide to how TOPK_LN_PRIOR_FIT splits "
+        "between the prior and the fit, not an addend."),
+    "TOPK_LN_GAMMA_ML": ("nats",
+        "The Gaia term at the best-fit point; report-only; the vote reading uses "
+        "it."),
     "TOPK_LAW": ("law position",
         "Which extinction law fits each of those five models better: 0 diffuse, 1 "
         "dense."),
