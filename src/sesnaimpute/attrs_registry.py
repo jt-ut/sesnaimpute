@@ -1,16 +1,23 @@
-"""The one table every catalog, sky, population, bmstp and atlas writer
-reads from, and the one table `build.attrs`'s in-place pass walks
+"""The one table every catalog, sky, population, bmstp, fittp and atlas
+writer reads from, and the one table `build.attrs`'s in-place pass walks
 (CODING_RULES_BMSTP.md rule 5, briefs/ATTRS.md): `UNITS` and `READING`
 for every dataset those writers create, keyed by the product's own file
 stem (`<quantity>_<source>_<granule>`, `config.product_path`'s own name
 for the file with any `__<Region>` suffix and `.hdf5` removed) and the
-dataset's name. `sesnaimpute.fittp` carries its own readings (LOGFLUX)
-and is not in this table.
+dataset's name. `fittp.atlas`'s `MEAN_P_<CLASS>` readings are generated
+from a sentence template at that module's own call site (READINGS brief
+section 3) and stay there, not here -- `fittp.atlas`'s other three
+datasets (`HPX_PIX_512`, `N_SOURCES`, `N_YSO_ABOVE_HALF`) ride along with
+them, so `posterior_atlas_hpx512` carries no entry in this table either.
 
 A writer calls `build.write_dataset(group, name, data, *REGISTRY[(STEM,
-name)])`, `STEM` being its own module-level constant. The migration pass
-derives `STEM` from each file name on disk and raises, naming the file and
-dataset, when a dataset it finds has no entry here.
+name)])`, `STEM` being its own module-level constant (or, where one
+reading applies to several files of the same shape -- `fittp.sweep`'s six
+per-class fit files, `fittp.emission`'s six per-library tables -- computed
+the same way `config.product_path` would for that file, inside a loop
+over the fixed class/library list at the bottom of this module). The
+migration pass derives `STEM` from each file name on disk and raises,
+naming the file and dataset, when a dataset it finds has no entry here.
 """
 
 REGISTRY = {
@@ -2596,4 +2603,298 @@ REGISTRY = {
         "enclosing group is named by the Spitzer IRAC band: I1 3.6 micron, I2 "
         "4.5 micron, I3 5.8 micron, I4 8.0 micron."),
 
+    # fittp.classify -- posterior_classification_source (P8): the class and
+    # subclass posterior, the MAP class, and the imputed flux, one file per
+    # region (moved from fittp/classify.py's own _READINGS, READINGS brief
+    # section 3).
+    ("posterior_classification_source", "NAME"): ("source name",
+        "The source's name from the SESNA catalog. Rows are in catalog order."),
+    ("posterior_classification_source", "CLASS_SESNA"): ("SESNA class code",
+        "SESNA's own classification, copied from the catalog: 0 deeply embedded "
+        "protostar, 1 class I, 2 class II, 3 transition disk, 9 H2 shock blob, 19 "
+        "PAH emitter (star-forming galaxy), 29 AGN, 39 PAH-contaminated source, 49 "
+        "generic galaxy, 99 diskless star, -100 unclassified. No other column here "
+        "depends on it."),
+    ("posterior_classification_source", "N_DETECTED"): ("bands",
+        "How many of the eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron) "
+        "have a measured, positive flux."),
+    ("posterior_classification_source", "MAP_CLASS"): ("class position",
+        "The most probable class, as a position in the CLASSES attribute, counting "
+        "from zero. -1 means the source could not be fitted: fewer than two "
+        "measured bands, or a flux error that is not finite."),
+    ("posterior_classification_source", "P_CLASS"): ("probability",
+        "Probability of each class: field star, dusty evolved star, "
+        "nebula-contaminated aperture, background galaxy, young stellar object, "
+        "shocked gas knot. Column order is the CLASSES attribute. Sums to 1."),
+    ("posterior_classification_source", "P_SUBCLASS"): ("probability",
+        "Probability of each of 25 subdivisions, named class and subdivision in the "
+        "SUBCLASSES attribute: field stars by spectral type O to T, evolved stars "
+        "oxygen-rich or carbon-rich, galaxies active, star-forming, composite or "
+        "passive, young stellar objects class 0 to III or transition disk, knots J, "
+        "C, steady C or C-J shocks. A class's columns sum to its P_CLASS; all 25 "
+        "sum to 1."),
+    ("posterior_classification_source", "P_YSO"): ("probability",
+        "Probability that the source is a young stellar object: the young stellar "
+        "object column of P_CLASS."),
+    ("posterior_classification_source", "ENTROPY_CLASS"): ("fraction of maximum",
+        "How spread the six class probabilities are, divided by their maximum "
+        "spread. 0 means one class takes all the probability, 1 means all six are "
+        "equally likely."),
+    ("posterior_classification_source", "ENTROPY_SUBCLASS"): ("fraction of maximum",
+        "How spread the 25 subdivision probabilities are, divided by their maximum "
+        "spread. 0 means one subdivision takes all the probability, 1 means all 25 "
+        "are equally likely."),
+    ("posterior_classification_source", "A_K_POST"): ("magnitudes of K-band extinction",
+        "The fitted extinction in front of the source, one column per class in "
+        "CLASSES order: the value if the source were of that class. Read the "
+        "MAP_CLASS column. Each model's own fitted range of extinction is averaged "
+        "over all models and both extinction laws, weighted by each model's share "
+        "of the support for the source: its fit to the measured fluxes, how many "
+        "such objects the sky holds at that position and brightness, and what Gaia "
+        "says."),
+    ("posterior_classification_source", "A_K_POST_SIG"): ("magnitudes of K-band extinction",
+        "The standard deviation of that fitted extinction, one column per class. It "
+        "covers both the precision of the fit and disagreement between the models "
+        "that fit the source. It is not a formal fitting error."),
+    ("posterior_classification_source", "LOG10_FLUX_IMPUTED"): ("log10 of flux in mJy",
+        "The eight-band spectrum, band order J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 "
+        "micron. A measured band holds log10 of the catalog flux; the rest hold the "
+        "support-weighted average over the models that fit the source. 10**x is a "
+        "flux in mJy."),
+    ("posterior_classification_source", "LOG10_FLUX_IMPUTED_COV"): ("squared dex",
+        "Covariance of those eight values, one dex being a factor of 10. On an "
+        "estimated band, s = sqrt(diagonal) is the uncertainty in log flux, so the "
+        "flux spans 10**(x-s) to 10**(x+s) with 68 percent probability. On a "
+        "measured band the diagonal is the catalog error, recovered in mJy as 10**x "
+        "times 2.3026 times s. An entry between a measured and an estimated band is "
+        "not zero and is needed for a color across the pair; between two measured "
+        "bands it is zero."),
+    ("posterior_classification_source", "LOG10_CANDIDATE_FLUX"): ("log10 of flux in mJy",
+        "The same spectrum under each class in turn, CLASSES order then band order. "
+        "A measured band holds log10 of the catalog flux; the rest hold that "
+        "class's own estimate."),
+
+    # fittp.classify -- sensitivity_classification_region (P9): the
+    # literature-band sensitivity, one row per region (moved from fittp/
+    # classify.py's own inline map in write_sensitivity, READINGS brief
+    # section 3).
+    ("sensitivity_classification_region", "REGION"): ("region name",
+        "The region this row describes."),
+    ("sensitivity_classification_region", "RUN"): ("test name",
+        "One of nine tests. Each changes how many objects of a class the sky "
+        "is expected to hold, by as much as the published measurements allow, "
+        "to see how far the classification moves."),
+    ("sensitivity_classification_region", "SCALING"): ("factor",
+        "The factor a test applied to each class's expected numbers, 1.0 "
+        "where it leaves a class alone. Class order is the CLASSES "
+        "attribute. The young-star floor test holds that region's average "
+        "factor over its own sources, not a single published number."),
+    ("sensitivity_classification_region", "FRAC_MAP_CHANGED"): ("fraction",
+        "The fraction of the region's sources whose most "
+        "probable class changed under that test."),
+    ("sensitivity_classification_region", "N_PYSO_ABOVE_HALF"): ("sources",
+        "How many sources have a young stellar object "
+        "probability above one half under each test. The first "
+        "column is the reported classification, untested."),
+    ("sensitivity_classification_region", "N_SOURCES"): ("sources", "How many sources the region holds."),
+
+    # fittp.cascade -- cascade_classification_source (P10): the Gutermuth
+    # color-cascade verdicts, measured and imputed halves, one file per
+    # region (moved from fittp/cascade.py's own _READINGS, READINGS brief
+    # section 3).
+    ("cascade_classification_source", "NAME"): ("source name",
+        "The source's name from the SESNA catalog. Rows are in catalog order."),
+    ("cascade_classification_source", "N_DETECTED"): ("bands",
+        "How many of the eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron) "
+        "have a measured, positive flux."),
+    ("cascade_classification_source", "VERDICT_MEASURED"): ("SESNA class code",
+        "The class the Gutermuth et al. (2009) color cuts give from the measured "
+        "fluxes alone. The cuts are deterministic, so this is the category the "
+        "colors fall in, not a most likely class. Codes: 0 deeply embedded "
+        "protostar, 1 class I, 2 class II, 3 transition disk, 9 H2 shock blob, 19 "
+        "PAH emitter (star-forming galaxy), 29 AGN, 39 PAH-contaminated source, 49 "
+        "generic galaxy, 99 diskless star, -100 unclassified, with -100 where no "
+        "cut applies."),
+    ("cascade_classification_source", "VERDICT_IMPUTED"): ("SESNA class code",
+        "The same color cuts after the unmeasured bands are filled in with the "
+        "pipeline's estimates. Those estimates assume the class the pipeline chose, "
+        "so this is a comparison, not independent evidence. Codes as in "
+        "VERDICT_MEASURED."),
+    ("cascade_classification_source", "P_VERDICT_MEASURED"): ("probability",
+        "Probability of each of the color cuts' eleven categories when the measured "
+        "fluxes are varied within their errors. Column order is the LABELS "
+        "attribute. Sums to 1; the unclassified column is the chance that no cut "
+        "applies."),
+    ("cascade_classification_source", "PSI_VOTES"): ("votes",
+        "Four indicators, each casting one vote across the six classes in CLASSES "
+        "order: the class mix expected at the source's position, Gaia's detection "
+        "and parallax, the Gutermuth color cuts on the measured fluxes, and those "
+        "cuts on the filled-in spectrum. An indicator with nothing to say abstains, "
+        "so a row sums to between 0 and 4. Reported only; the classification does "
+        "not use it."),
+    ("cascade_classification_source", "ENTROPY_PSI_VOTES"): ("fraction of maximum",
+        "How spread those votes are, divided by their maximum spread. 0 means the "
+        "indicators that voted agreed, 1 means they spread evenly over the six "
+        "classes. Not a number where none voted."),
+
+    # fittp.library_resolution -- library-resolution_check_survey: whether
+    # each class's library has enough templates to resolve the survey's own
+    # photometric error, one survey-wide file (moved from fittp/
+    # library_resolution.py's own _READINGS, READINGS brief section 3).
+    ("library-resolution_check_survey", "LIBRARY"): ("library name",
+        "The model library this row describes, one per class."),
+    ("library-resolution_check_survey", "SIGMA_LIB_DEX"): ("dex",
+        "How finely that library samples spectral shape: the typical distance from "
+        "a model to its nearest neighbor. The fit adds this to each band's "
+        "measurement error, so no model can beat a near-identical one by more than "
+        "the sampling allows."),
+    ("library-resolution_check_survey", "SIGMA_I"): ("dex",
+        "The survey's flux uncertainty per band, as the tenth percentile over "
+        "sources. Band order is the BANDS dataset."),
+    ("library-resolution_check_survey", "BANDS"): ("band name",
+        "The eight SESNA bands, in SIGMA_I's column order."),
+    ("library-resolution_check_survey", "OTHER_LIBRARY"): ("library name",
+        "A library other than the young stellar object one."),
+    ("library-resolution_check_survey", "OTHER_N_TEMPLATES"): ("models",
+        "How many models that library holds."),
+    ("library-resolution_check_survey", "OTHER_D50"): ("dex",
+        "Median distance from a model of that library to its nearest neighbor."),
+    ("library-resolution_check_survey", "OTHER_D90"): ("dex",
+        "The same distance at the ninetieth percentile: the spacing of that "
+        "library's most isolated models."),
+    ("library-resolution_check_survey", "OTHER_THICK_ENOUGH"): ("true or false",
+        "Whether that library's models are spaced more widely than this check's "
+        "tolerance, so adding models would sharpen the fit."),
+    ("library-resolution_check_survey", "YSO_GROUP"): ("model group",
+        "Which group of young stellar object models this row describes. The library "
+        "is built in groups by evolutionary stage and geometry."),
+    ("library-resolution_check_survey", "YSO_N_AT_SIZE"): ("models",
+        "How many models that group holds at each of four sizes, thinned from the "
+        "full group, so spacing can be measured against library size."),
+    ("library-resolution_check_survey", "YSO_D50_AT_SIZE"): ("dex",
+        "Median nearest-neighbor distance for that group at each of the four sizes."),
+    ("library-resolution_check_survey", "YSO_D90_AT_SIZE"): ("dex",
+        "Ninetieth-percentile nearest-neighbor distance at each of the four sizes."),
+    ("library-resolution_check_survey", "YSO_D_EFF"): ("dimensionless",
+        "How fast that group's spacing shrinks as models are added, from the slope "
+        "of spacing against size. It acts like the number of dimensions the group "
+        "really fills."),
+    ("library-resolution_check_survey", "YSO_N_STAR"): ("models",
+        "How many models that group would need to reach this check's tolerance, "
+        "read off the fitted slope, at each of three tolerances."),
+
 }
+
+# --- fittp.sweep -- <CLS>_fit_source (P7): one file per {region, class},
+# the class evidence, imputed flux and top-K posterior record. The same
+# dataset names and readings repeat in every one of the six classes' own
+# files (moved from fittp/sweep.py's own _READINGS, READINGS brief section
+# 3), so they are filled once here and copied to each class's own stem --
+# `fittp.sweep`'s own STEM, computed the same way `config.product_path`
+# would (quantity=class code, source="fit", granule="source"). ---
+_SWEEP_FIT_READINGS = {
+    "NAME": ("source name",
+        "The source's name from the SESNA catalog. Rows are in catalog order."),
+    "N_DETECTED": ("bands",
+        "How many of the eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron) "
+        "have a measured, positive flux."),
+    "LN_EVIDENCE": ("nats",
+        "How well this class explains the source, one value per subdivision named "
+        "in the SUBCLASSES attribute, as a natural logarithm. Each gathers every "
+        "model of that subdivision under both extinction laws. Minus infinity means "
+        "the subdivision has no models, or the class cannot explain the source, or "
+        "the source could not be fitted."),
+    "LOG10_FLUX_MEAN": ("log10 of flux in mJy",
+        "This class's estimate of the eight-band spectrum, band order J, H, Ks, "
+        "3.6, 4.5, 5.8, 8.0 and 24 micron, averaging its models by their share of "
+        "the support for the source. 10**x is a flux in mJy."),
+    "LOG10_FLUX_COV": ("squared dex",
+        "Covariance of those eight values, one dex being a factor of 10. It "
+        "combines disagreement between this class's models with the precision of "
+        "the fitted brightness and extinction. sqrt(diagonal) is the uncertainty in "
+        "log flux."),
+    "A_K_POST": ("magnitudes of K-band extinction",
+        "The fitted extinction in front of the source if it belongs to this class, "
+        "averaging each model's own fitted range over all models and both "
+        "extinction laws, weighted by each model's share of the support."),
+    "A_K_POST_SIG": ("magnitudes of K-band extinction",
+        "The standard deviation of that fitted extinction. It covers both the "
+        "precision of the fit and disagreement between models, and is not a formal "
+        "fitting error."),
+    "P_DENSE": ("fraction",
+        "How much of this class's support comes from the dense extinction law "
+        "rather than the diffuse one. 0 where the sightline carries no dense dust "
+        "in front of the source."),
+    "OCCAM_GAP": ("nats",
+        "How much more support this class has than its single best model, as a "
+        "natural logarithm. A large value means many of its models fit about "
+        "equally well."),
+    "FRAC_CLAMPED": ("fraction",
+        "The support-weighted fraction of this class's models whose best fit called "
+        "for negative extinction and was held at zero."),
+    "FAILED_ROWS": ("source position",
+        "Positions, counting from zero in catalog order, of sources this run could "
+        "not fit. Empty where every source was fitted."),
+    "TOPK_MODEL": ("model position",
+        "The five models of this class that best explain the source, best first, as "
+        "positions in its model library. -1 where fewer were kept or the source "
+        "could not be fitted. The other TOPK columns follow this same order."),
+    "TOPK_FLUX": ("mJy",
+        "Each of those five models' eight-band spectrum, band order J, H, Ks, 3.6, "
+        "4.5, 5.8, 8.0 and 24 micron, at its own fitted brightness and extinction."),
+    "TOPK_A_K": ("magnitudes of K-band extinction",
+        "The extinction fitted for each of those five models. A model whose best "
+        "fit called for negative extinction is held at zero."),
+    "TOPK_LOG10_B": ("log10 of a scale factor",
+        "The brightness fitted for each of those five models, as log10 of the "
+        "factor multiplying the model's own reference spectrum."),
+    "TOPK_CHI2": ("chi-squared",
+        "Chi-squared of each of those five models against the measured fluxes, at "
+        "its fitted brightness and extinction."),
+    "TOPK_LN_L": ("nats",
+        "How well each of those five models matches the photometry, as a natural "
+        "logarithm: the fit to the measured fluxes, together with the chance the "
+        "survey would have missed the flux predicted in each undetected band."),
+    "TOPK_LN_PRIOR": ("nats",
+        "How many objects of this class the sky is expected to hold at the "
+        "position, brightness and depth each of those five models implies, as a "
+        "natural logarithm of a density."),
+    "TOPK_LN_GAMMA": ("nats",
+        "What Gaia says about each of those five models, as a natural logarithm: "
+        "whether a counterpart is present or absent, and whether its parallax suits "
+        "the model's distance. 0 where Gaia has nothing to say."),
+    "TOPK_LAW": ("law position",
+        "Which extinction law fits each of those five models better: 0 diffuse, 1 "
+        "dense."),
+}
+for _cls in ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S"):
+    _stem = "%s_fit_source" % _cls
+    for _name, _rd in _SWEEP_FIT_READINGS.items():
+        REGISTRY[(_stem, _name)] = _rd
+
+# --- fittp.emission -- <lib>_emission_survey: the measured emission table
+# E[k, b, v], one survey-wide file per library. The same dataset names and
+# readings repeat in every one of the six libraries' own files (moved from
+# fittp/emission.py's own _READINGS, READINGS brief section 3). ---
+_EMISSION_READINGS = {
+    "E": ("fraction",
+        "For each kind of model in this library, the fraction that the color cuts "
+        "of Gutermuth et al. (2009) place in each of their categories, as a "
+        "function of how bright the model appears. The three axes are the kinds of "
+        "model named in SUBCLASSES, the brightness bins bounded by LOG10_F45_EDGES, "
+        "and the categories named in LABELS. Each kind and brightness adds to 1 "
+        "across the categories."),
+    "SUBCLASSES": ("model kind",
+        "The kinds of model this library holds, in the row order E uses."),
+    "LABELS": ("category name",
+        "The eleven categories the color cuts of Gutermuth et al. (2009) can "
+        "assign, in the column order E uses."),
+    "LOG10_F45_EDGES": ("log10 of flux in mJy",
+        "The edges of the brightness bins E uses, as the base-10 logarithm of "
+        "apparent 4.5 micron flux in mJy. There is one more edge than there are "
+        "bins."),
+}
+for _lib in ("sps", "agb", "pahc", "galz", "yso", "h2shock"):
+    _stem = "%s_emission_survey" % _lib
+    for _name, _rd in _EMISSION_READINGS.items():
+        REGISTRY[(_stem, _name)] = _rd
