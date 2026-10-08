@@ -135,11 +135,25 @@ SENSITIVITY_RUNS = ("kappa_lo", "kappa_hi", "eta_lo", "eta_hi",
                      "yso_floor")
 
 #: kappa: the young-star law's own normalisation (spec sec 5.5's N_law,
-#: sec 10's kappa 14.5/18.7 pc^-2 mag^-2, exponent 2), band 0.36 dex,
-#: Pokhrel+2020's cloud-to-cloud scatter -- scales YSO's whole density,
-#: and H2S's with it (spec sec 5.6: `A_H2S = (N_law (x) K) eta eps`, so a
-#: kappa shift of `N_law` moves H2S by exactly the same factor).
-KAPPA_DEX = 0.36
+#: sec 10's kappa 14.5/18.7 pc^-2 mag^-2, exponent 2) -- scales YSO's whole
+#: density, and H2S's with it (spec sec 5.6: `A_H2S = (N_law (x) K) eta eps`,
+#: so a kappa shift of `N_law` moves H2S by exactly the same factor). The
+#: band itself is NOT a literal here (NONDET2 brief section 6, derivation-
+#: review row 28): it is the law product's own `LAW_BAND_DEX`
+#: (`population/yso/law_yso_region.hdf5`, `population.yso_law`'s pooled rms
+#: of the fitted regions' own log10 kappa, spec sec 7.2 and 10, 0.2576 dex)
+#: -- a hardcoded 0.36 dex here (Pokhrel+2020's cloud-to-cloud scatter) was
+#: a different, wider number than the design's own band and overstated the
+#: kappa runs by about 40%. Read once by `_law_band_dex`, never duplicated.
+def _law_band_dex(config):
+    """The young-star law's own band, `LAW_BAND_DEX`, off
+    `population/yso/law_yso_region.hdf5` -- the pooled rms this module's
+    `KAPPA_DEX` used to shadow with a wider literal (module docstring)."""
+    path = config_module.product_path(config, "population", "yso", "law", "region")
+    with h5py.File(path, "r") as f:
+        return float(f["LAW_BAND_DEX"][()])
+
+
 #: eta_r: H2S's knots-per-young-star rate (spec sec 5.6), band 0.45 dex,
 #: Froebrich+2015 (UWISH2) / Giannini+2013 -- scales H2S alone.
 ETA_DEX = 0.45
@@ -161,19 +175,20 @@ EPS_EXT_CENTRAL, EPS_EXT_LO, EPS_EXT_HI = 0.25, 0.15, 0.35
 #: `max(A_s, A_MIN_YSO_LAW)`, mag A_K, applied to YSO and to H2S (sec 5.6:
 #: H2S rides on the law).
 A_MIN_YSO_LAW = 0.3
-def _sensitivity_scale(run, f_dusty_o=None, f_dusty_c=None, f_c=None):
+def _sensitivity_scale(run, f_dusty_o=None, f_dusty_c=None, f_c=None, kappa_dex=None):
     """`(classes, ln_scale)` for one of the eight fixed literature-band
     runs -- the constant added to every one of `classes`'s whole CLASSMAP
     subclass blocks. `kappa_lo`/`kappa_hi` name both YSO and H2S (module
-    docstring). `yso_floor` is not a fixed constant (`_yso_floor_shift`,
+    docstring), and need `kappa_dex` (`_law_band_dex`, the law product's own
+    `LAW_BAND_DEX`). `yso_floor` is not a fixed constant (`_yso_floor_shift`,
     per source) and is not returned here. `f_dusty_lo`/`f_dusty_hi` need
     the region's own `f_dusty_o`, `f_dusty_c`, `f_c` (module docstring).
     """
     ln10 = np.log(10.0)
     if run == "kappa_lo":
-        return ("YSO", "H2S"), -KAPPA_DEX * ln10
+        return ("YSO", "H2S"), -kappa_dex * ln10
     if run == "kappa_hi":
-        return ("YSO", "H2S"), KAPPA_DEX * ln10
+        return ("YSO", "H2S"), kappa_dex * ln10
     if run == "eta_lo":
         return ("H2S",), -ETA_DEX * ln10
     if run == "eta_hi":
@@ -207,18 +222,19 @@ def _yso_floor_shift(a_col_k):
     return 2.0 * (np.log(a_col_k_floored) - np.log(a_col_k))
 
 
-def sensitivity_scaling_matrix(f_dusty_o, f_dusty_c, f_c):
+def sensitivity_scaling_matrix(f_dusty_o, f_dusty_c, f_c, kappa_dex):
     """`(9, 6)` `SCALING`: the factor applied to each class's density in
     each of the eight fixed literature-band runs (1.0 where a run does not
     touch that class). The ninth row (`yso_floor`) is left at 1.0 here --
     its factor is per-source and per-region, filled in at write time
-    (`write_sensitivity`) from the region's own mean.
+    (`write_sensitivity`) from the region's own mean. `kappa_dex` is the
+    law product's own `LAW_BAND_DEX` (`_law_band_dex`).
     """
     scaling = np.ones((len(SENSITIVITY_RUNS), len(CLASSES)), dtype=np.float32)
     for ri, run in enumerate(SENSITIVITY_RUNS):
         if run == "yso_floor":
             continue
-        classes, ln_scale = _sensitivity_scale(run, f_dusty_o, f_dusty_c, f_c)
+        classes, ln_scale = _sensitivity_scale(run, f_dusty_o, f_dusty_c, f_c, kappa_dex)
         for cls in classes:
             scaling[ri, CLASSES.index(cls)] = np.exp(ln_scale)
     return scaling
@@ -339,6 +355,12 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     a_k_post_stack = np.empty((len(CLASSES), m), dtype=np.float32)
     a_k_post_sig_stack = np.empty((len(CLASSES), m), dtype=np.float32)
     p_dense_stack = np.empty((len(CLASSES), m), dtype=np.float64)
+    # NONDET2 brief section 6 (row 13): whether THIS class's own fit was
+    # ever valid at this source -- `sweep.py`'s `good` flag, read back as
+    # `TOPK_MODEL[:, 0] != -1` (only a `good` source ever gets a top-K
+    # template written) -- independent of whether the prior vetoed every
+    # one of that fit's templates.
+    fit_good_stack = np.empty((len(CLASSES), m), dtype=bool)
     for ci, cls in enumerate(CLASSES):
         f = class_files[cls]
         log10_flux_mean_stack[ci] = np.asarray(f["LOG10_FLUX_MEAN"][start:stop, :], dtype=np.float64)
@@ -346,16 +368,27 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
         a_k_post_stack[ci] = np.asarray(f["A_K_POST"][start:stop], dtype=np.float32)
         a_k_post_sig_stack[ci] = np.asarray(f["A_K_POST_SIG"][start:stop], dtype=np.float32)
         p_dense_stack[ci] = np.asarray(f["P_DENSE"][start:stop], dtype=np.float64)
+        fit_good_stack[ci] = np.asarray(f["TOPK_MODEL"][start:stop, 0]) != -1
 
     ln_ev = _batch_ln_evidence(class_files, psi_file, beta, start, stop, m)
-    # A flagged source's fit is undefined at every template of every class
-    # (sweep.py sets ln_w to -inf there), so its whole (25,) evidence row
-    # is -inf and the identities below must stop testing it, not turn it
-    # into a fabricated STAR verdict (R3 U1).
-    flagged = ~np.isfinite(ln_ev).any(axis=1)
+    # Row 13's fix: `~isfinite(ln_ev).any(axis=1)` alone conflates a source
+    # the FIT flagged (fewer than two detections, a non-finite sigma, a
+    # singular design -- `sweep.py`'s `good = False` in every one of the
+    # six class files) with a source the PRIOR vetoes in every class (every
+    # one of the 25 subclass evidences `-inf`, while every class's own fit
+    # was perfectly valid). `flagged` (MAP_CLASS = -1) is the first case
+    # alone; `prior_vetoed` (MAP_CLASS = -2, a new state, NOT counted in
+    # `N_FLAGGED`) is the second. Neither turns into a fabricated STAR
+    # verdict (R3 U1); both get the same NaN treatment downstream as the
+    # old single `flagged` state did.
+    evidence_all_inf = ~np.isfinite(ln_ev).any(axis=1)
+    any_fit_good = fit_good_stack.any(axis=0)
+    flagged = ~any_fit_good
+    prior_vetoed = any_fit_good & evidence_all_inf
+    flagged_any = flagged | prior_vetoed
     p_sub, p_cls = _class_probs(ln_ev)
     map_c = np.argmax(p_cls, axis=1)
-    map_c = np.where(flagged, -1, map_c)
+    map_c = np.where(flagged, -1, np.where(prior_vetoed, -2, map_c))
 
     with h5py.File(cat_path, "r") as cf:
         flux = np.asarray(cf["FNU_MJY"][start:stop], dtype=np.float64)
@@ -377,9 +410,10 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     mask = np.broadcast_to(detected[:, None, :], cflux.shape)
     cflux = np.where(mask, log10_flux_meas[:, None, :], cflux)
     row_idx = np.arange(m)
-    # a safe (in-range) class index for the gather below; the flagged rows
-    # it touches are overwritten with NaN immediately after, never read.
-    map_c_safe = np.where(flagged, 0, map_c)
+    # a safe (in-range) class index for the gather below; the flagged AND
+    # prior-vetoed rows it touches (map_c -1 or -2, neither a valid class
+    # index) are overwritten with NaN immediately after, never read.
+    map_c_safe = np.where(flagged_any, 0, map_c)
     imputed = cflux[row_idx, map_c_safe, :]
     imputed_cov = flux_cov_stack[map_c_safe, row_idx]
 
@@ -411,9 +445,9 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     diag = np.where(detected, catalogue_var_log10, imputed_cov[:, band_idx, band_idx])
     imputed_cov[:, band_idx, band_idx] = diag
 
-    imputed[flagged] = np.nan
-    imputed_cov[flagged] = np.nan
-    detected_ok = detected & ~flagged[:, None]
+    imputed[flagged_any] = np.nan
+    imputed_cov[flagged_any] = np.nan
+    detected_ok = detected & ~flagged_any[:, None]
     imputed_identity_err = float(np.max(np.abs(10.0 ** imputed[detected_ok] - flux[detected_ok]))) \
         if detected_ok.any() else 0.0
 
@@ -439,6 +473,7 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
         a_k_post=a_k_post, a_k_post_sig=a_k_post_sig,
         entropy_class=ent_c.astype(np.float32), entropy_subclass=ent_s.astype(np.float32),
         imputed_identity_err=imputed_identity_err, n_flagged=int(flagged.sum()),
+        n_prior_vetoed=int(prior_vetoed.sum()),
     )
 
 
@@ -505,6 +540,7 @@ def build_region(config, region, st, beta):
     part_paths = []
     imputed_identity_err = 0.0
     n_flagged = 0
+    n_prior_vetoed = 0
     bounds = list(batches(n, ROW_BYTES))
     for bi, (start, stop) in enumerate(bounds):
         batch = _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals)
@@ -514,6 +550,7 @@ def build_region(config, region, st, beta):
         part_paths.append(part_path)
         imputed_identity_err = max(imputed_identity_err, batch["imputed_identity_err"])
         n_flagged += batch["n_flagged"]
+        n_prior_vetoed += batch["n_prior_vetoed"]
         st.tick(bi + 1, len(bounds), "batches")
 
     for f in class_files.values():
@@ -522,7 +559,8 @@ def build_region(config, region, st, beta):
         psi_file.close()
 
     return dict(path=path, part_paths=part_paths, n_source=n,
-                imputed_identity_err=imputed_identity_err, n_flagged=n_flagged)
+                imputed_identity_err=imputed_identity_err, n_flagged=n_flagged,
+                n_prior_vetoed=n_prior_vetoed)
 
 
 #: `UNITS`/`READING` for every dataset here (CODING_RULES_BMSTP.md rule 5)
@@ -580,6 +618,9 @@ def run_sensitivity_region(config, region, st, beta):
     f_dusty_o = float(density_file.attrs["F_DUSTY_O"])
     f_dusty_c = float(density_file.attrs["F_DUSTY_C"])
     f_c = float(density_file.attrs["F_C"])
+    # NONDET2 brief section 6 (row 28): the kappa runs' own band off the
+    # law product, never a hardcoded literal.
+    kappa_dex = _law_band_dex(config)
 
     n = names.shape[0]
     n_run = len(SENSITIVITY_RUNS)
@@ -607,7 +648,7 @@ def run_sensitivity_region(config, region, st, beta):
                     lo, hi = CLASS_SLICES[cls]
                     ln_ev_run[:, lo:hi] += yso_floor_shift[:, None]
             else:
-                classes, ln_scale = _sensitivity_scale(run, f_dusty_o, f_dusty_c, f_c)
+                classes, ln_scale = _sensitivity_scale(run, f_dusty_o, f_dusty_c, f_c, kappa_dex)
                 for cls in classes:
                     lo, hi = CLASS_SLICES[cls]
                     ln_ev_run[:, lo:hi] += ln_scale
@@ -626,7 +667,7 @@ def run_sensitivity_region(config, region, st, beta):
     return dict(n_source=n, frac_map_changed=(changed / n if n else changed.astype(np.float64)),
                 n_pyso_above_half=n_pyso,
                 yso_floor_mean_factor=(yso_floor_factor_sum / n if n else float("nan")),
-                f_dusty_o=f_dusty_o, f_dusty_c=f_dusty_c, f_c=f_c)
+                f_dusty_o=f_dusty_o, f_dusty_c=f_dusty_c, f_c=f_c, kappa_dex=kappa_dex)
 
 
 def write_sensitivity(path, region, result):
@@ -642,7 +683,8 @@ def write_sensitivity(path, region, result):
     n_run = len(SENSITIVITY_RUNS)
     n_cls = len(CLASSES)
     yso_floor_ri = SENSITIVITY_RUNS.index("yso_floor")
-    fixed = sensitivity_scaling_matrix(result["f_dusty_o"], result["f_dusty_c"], result["f_c"])
+    fixed = sensitivity_scaling_matrix(result["f_dusty_o"], result["f_dusty_c"], result["f_c"],
+                                        result["kappa_dex"])
     if os.path.exists(path):
         with h5py.File(path, "r") as f:
             frac_map_changed = np.asarray(f["FRAC_MAP_CHANGED"][:])
@@ -712,11 +754,12 @@ def build(config, regions=None, beta=0.0):
                 n_detected = np.asarray(f["N_DETECTED"][:])
                 map_class = np.asarray(f["MAP_CLASS"][:])
 
-            # a flagged source (MAP_CLASS == -1) carries a NaN P_CLASS/
-            # P_SUBCLASS row by construction (R3 U1); both acceptance
-            # identities are tested only on the sources the fit actually
-            # resolved, so one flagged source no longer stops either check.
-            ok = map_class != -1
+            # A flagged (-1) or prior-vetoed (-2) source carries a NaN
+            # P_CLASS/P_SUBCLASS row by construction (R3 U1, NONDET2 brief
+            # section 6 row 13); both acceptance identities are tested only
+            # on the sources the fit actually resolved AND the prior did
+            # not veto everywhere.
+            ok = (map_class != -1) & (map_class != -2)
             p_class_err = float(np.max(np.abs(p_class[ok].sum(axis=1) - 1.0))) if ok.any() else 0.0
             sub_sum = np.zeros_like(p_class)
             for ci, cls in enumerate(CLASSES):
@@ -729,7 +772,8 @@ def build(config, regions=None, beta=0.0):
                     p_class_sum_err=p_class_err, p_subclass_sum_err=subclass_err,
                     flux_imputed_identity_err=result["imputed_identity_err"],
                     n_pyso_above_half=n_pyso_half, two_band_frac=two_band_frac,
-                    n_flagged=result["n_flagged"], n_batches=len(result["part_paths"]))
+                    n_flagged=result["n_flagged"], n_prior_vetoed=result["n_prior_vetoed"],
+                    n_batches=len(result["part_paths"]))
 
         with progress.Stage("fittp.classify.sensitivity", region) as st:
             sens = run_sensitivity_region(config, region, st, beta)
