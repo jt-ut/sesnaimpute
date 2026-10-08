@@ -184,7 +184,7 @@ def _sigma_samples_at(config, region, hpx_pix, dist_pc):
     return np.interp(dist_pc, dist, sigma[j])
 
 
-def star_width_class(config, region, dist_pc, row, sigma_classes_dex):
+def star_width_class(config, region, dist_pc, row, sigma_classes_dex, d_front, d_back):
     """Per star, the width-class index (0..N_WIDTH_CLASSES-1) nearest its
     own `sigma_x` (the depth-width rule): `sigma_x(d) / (u(d) ln 10)`,
     `u(d)` the depth mark itself, `A(d) / A_inf` on the tile's
@@ -193,7 +193,16 @@ def star_width_class(config, region, dist_pc, row, sigma_classes_dex):
     (`sky.derived.edenhofer_samples`'s module docstring), both at the
     star's own distance, clipped to the class range before the
     nearest-class lookup (in log space, since the classes are
-    geometric)."""
+    geometric). Consequence of the C5 ruling: a star the interval logic
+    PINS (`dist_pc > d_back` or `dist_pc < d_front` -- `shapes._star_
+    depth_mark`'s own test) has no distance uncertainty in `x` left to
+    carry -- the interval has already decided which side of the wall
+    it's on, so the map's own `sigma_x(d)` no longer describes its mark;
+    what pencil-over-beam spread such a star DOES carry is the reader's
+    own column kernel, applied later, not this stage's. A pinned star
+    therefore takes the FLOOR width, class 0 (`sigma_classes_dex[0]`,
+    one grid cell); only a star genuinely inside the interval keeps the
+    profile's own `sigma_x` class computed above."""
     profile_obj = _cached_profile(config, region)
     dist_pc = np.asarray(dist_pc, dtype=np.float64)
     hpx_pix = int(profile_obj.hpx[row])
@@ -203,6 +212,8 @@ def star_width_class(config, region, dist_pc, row, sigma_classes_dex):
     sigma_x = sigma_x_d / (np.maximum(u_d, 1e-12) * np.log(10.0))
     sigma_x = np.clip(sigma_x, sigma_classes_dex[0], sigma_classes_dex[-1])
     idx = np.argmin(np.abs(np.log(sigma_x)[:, None] - np.log(sigma_classes_dex)[None, :]), axis=1)
+    pinned = (dist_pc > d_back) | (dist_pc < d_front)
+    idx = np.where(pinned, 0, idx)
     return idx.astype(np.int64)
 
 

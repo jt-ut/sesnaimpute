@@ -90,14 +90,16 @@ def _build_one_tile(config, region, tile_id):
     # (sec. 2 "minimum widths", sec. 5.1 "Marks"): the field-star
     # depth mark's own width is the map's propagated column sigma at the
     # star's distance, not a fixed one cell -- AGB follows STAR (the same
-    # stars, sec. 5.2), so both read the SAME tile width classes.
+    # stars, sec. 5.2), so both read the SAME tile width classes. A star
+    # the interval pins (below) takes the floor class instead
+    # (`star_width_class`'s own docstring, the C5 consequence).
     row, sigma_classes_dex, d_front, d_back, u_front = sample_star.tile_width_classes(
         config, region, tile_id)
     sigma_classes_cells = sigma_classes_dex / grid._X_CELL_WIDTH
     dist_s = sample_star.star_distances(config, region, tile_id)
     dist_a = sample_star.agb_star_distances(config, region, tile_id)
-    class_s = sample_star.star_width_class(config, region, dist_s, row, sigma_classes_dex)
-    class_a = sample_star.star_width_class(config, region, dist_a, row, sigma_classes_dex)
+    class_s = sample_star.star_width_class(config, region, dist_s, row, sigma_classes_dex, d_front, d_back)
+    class_a = sample_star.star_width_class(config, region, dist_a, row, sigma_classes_dex, d_front, d_back)
 
     # the STAR depth mark from the cloud interval (owner's ruling, C5):
     # AGB follows STAR, the SAME rule on the SAME stars' distances (sec.
