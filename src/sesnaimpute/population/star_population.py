@@ -75,10 +75,12 @@ weight splits `w_AGB = F_dusty * w`, `w_STAR = w - w_AGB`, row by row, so
 `partition_weights`). TRILEGAL carries no chemistry per star, so
 `F_dusty` is the weighted mean over the two chemistries measured once,
 survey-wide, off Riebel et al. (2012, ApJ 753, 71) per-star GRAMS fits: the
-per-chemistry share whose fitted dust mass-loss rate clears the GRAMS
-grid's own physical thin-shell floor, `MDOT_DUSTY_THRESHOLD_MSUN_YR`
-(`f_dusty_by_chemistry`); `f_C = 0.18` (Le Bertre et al. 2003) is the fixed
-carbon-fraction weight.
+per-chemistry share whose fitted `tau` clears a detectability threshold --
+the `tau` at which the GRAMS shell first changes the raw grid's own
+eight-band SED from its bare photosphere by more than SIGEFF in any band
+(`read_sigeff`, `detectability_tau_threshold`, `f_dusty_by_chemistry`), not
+the curated library's own lowest `tau` node; `f_C = 0.18` (Le Bertre et al.
+2003) is the fixed carbon-fraction weight.
 
 Brightness units (C3, spec section 2.2, section 3, section 4). Every
 star, evolved or not, carries `LOG10_B` (STAR): the median over the
@@ -128,6 +130,7 @@ import numpy as np
 import pandas as pd
 from astropy.io import fits
 from joblib import Parallel, delayed
+from scipy.interpolate import interp1d
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
@@ -199,21 +202,29 @@ RIEBEL_TAU_COLSPEC = (85, 92)
 #: Riebel et al. 2012 also fit a dust mass-loss rate per star, the
 #: GRAMS radiative-transfer code's own output quantity (table3.dat ReadMe:
 #: "dM/dt Dust mass-loss rate of best-fit model", Msun/yr), bytes 43-50 --
-#: a physical rate, not the grid's own dimensionless, coarsely-spaced
-#: `tau` node.
+#: read for the report only (context alongside the detectability tau
+#: threshold below), not for the dusty/not-dusty decision itself.
 RIEBEL_MDOT_COLSPEC = (42, 50)
 
-#: The dusty/non-dusty mass-loss-rate floor: the GRAMS grid's own
-#: thin-shell limit stated in physical dust mass-loss units (Sargent et al.
-#: 2011, ApJ 728, 93, the O-rich grid; Srinivasan et al. 2011, A&A 532, A54,
-#: the carbon grid) rather than read off the grid's own lowest, coarsely
-#: spaced `tau` node -- the curated `agb` library's own `MLR_DUST` column
-#: carries dust mass-loss rates in these same physical units at every
-#: template, so a star's fitted rate is compared on the library's own
-#: scale. One shared value for both chemistries: a mass-loss rate is a
-#: physical quantity, not the wavelength-dependent optical depth `tau` is,
-#: so it carries no separate O-rich/C-rich floor.
-MDOT_DUSTY_THRESHOLD_MSUN_YR = 1.0e-8
+#: The raw, un-curated GRAMS grid file each chemistry's own download lives
+#: in (`sky.download.riebel2012`'s own fitting grid, the full grid Riebel
+#: fit against -- wider than the curated `agb` library's 1,980-row subset),
+#: and the `tau` column fitted at that chemistry's own band (table3.dat
+#: ReadMe note 4: 10.0um O-rich, 11.3um C-rich -- the same band Riebel's
+#: own fitted `tau` reports).
+GRAMS_RAW_FILENAME = {"o": "grams_o.fits", "c": "grams_c.fits"}
+GRAMS_RAW_TAU_COLUMN = {"o": "tau10", "c": "tau11_3"}
+
+#: `definitions.BANDS`' eight effective wavelengths, log10 micron -- where
+#: a GRAMS model's own spectrum (`Lspec`/`Fstar`/`Fspec`) is sampled to
+#: compare the shell against the bare photosphere in SESNA's own bands.
+_LOG_WVL_UM = np.log10(np.array([b.wvl_um for b in definitions.BANDS]))
+
+#: The detectability criterion's own pooling bar (owner ruling 2026-10-09):
+#: the tau threshold reported is where HALF of the raw grid's own models
+#: at that tau node first clear `SIGEFF` in some band -- a population
+#: statement, not a single model's.
+DETECT_FRACTION_HALF = 0.5
 
 #: PAHC's own small grid of 8 micron completeness-limit values (SPEC_PRIORS.md
 #: section 4, `IMPLEMENTATION.md` section 3): the percentiles of the
@@ -427,7 +438,9 @@ def read_riebel_mass_loss_rates(config):
     own GRAMS chemistry class ("o"/"c") and fitted dust mass-loss rate,
     Msun/yr, read by byte position off the same fixed-width `table3.dat.gz`
     `read_riebel_optical_depths` reads (module docstring's
-    `RIEBEL_MDOT_COLSPEC`, `sky.download.riebel2012`'s own ReadMe)."""
+    `RIEBEL_MDOT_COLSPEC`, `sky.download.riebel2012`'s own ReadMe). Read by
+    `build` for report context alongside the dusty share; the dusty/not-
+    dusty decision itself is `detectability_tau_threshold`'s criterion."""
     path = f"{config.data_root}/sky/download/riebel2012/table3.dat.gz"
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -438,20 +451,92 @@ def read_riebel_mass_loss_rates(config):
     return df["GCL"].to_numpy(dtype=str), df["MDOT"].to_numpy(dtype=np.float64)
 
 
-def f_dusty_by_chemistry(config, mdot_threshold_msun_yr=MDOT_DUSTY_THRESHOLD_MSUN_YR):
-    """`(f_dusty_o, f_dusty_c, n_o, n_c)`: "dusty" defined physically, by a
-    mass-loss-rate threshold on Riebel+2012's own per-star fitted dust
-    mass-loss rates, not by the curated GRAMS library's lowest, coarsely
-    spaced `tau` node (a third of the O-rich fits sit exactly at that node,
-    so the old definition moved with the grid's own spacing, not the sky).
-    The per-chemistry share of Riebel's fits whose fitted rate clears
-    `mdot_threshold_msun_yr` (default `MDOT_DUSTY_THRESHOLD_MSUN_YR`)."""
-    gcl, mdot = read_riebel_mass_loss_rates(config)
+def read_sigeff(config):
+    """SIGEFF (dex), the package's own already-built effective photometric
+    sigma: every curated register (`sed_models/registers/*_register.hdf5`)
+    carries the identical value as a root attribute (one survey-wide
+    number, `SIGLGSRC` names its receipt as `catalog:sigma_log`), with
+    `_KEYWORD_COMMENTS` documenting it as "sigma_eff in the quotient
+    space". Read off the curated `agb` register rather than restated as a
+    module constant, since this module is already that register's own
+    consumer (`agb_orich_l_sun`)."""
+    path = f"{config.data_root}/sed_models/registers/agb_register.hdf5"
+    with h5py.File(path, "r") as f:
+        return float(f.attrs["SIGEFF"])
+
+
+def _grams_raw_detectability(config, chem):
+    """`(tau, max_abs_delta_dex)`, one row per raw GRAMS model (owner
+    ruling 2026-10-09): every model in the full, un-curated grid Riebel
+    fit against (`sed_models/downloads/grams/grams_{o,c}.fits` --
+    `GRAMS_RAW_FILENAME`), not the curated 1,980-row `agb` library subset.
+    `Fstar` (the radiative-transfer code's own bare-photosphere component,
+    no shell) and `Fspec` (star plus shell) share one 111-point wavelength
+    grid per file (`Lspec`, identical on every row, verified at read time);
+    both are log-log interpolated onto `definitions.BANDS`' eight effective
+    wavelengths (`_LOG_WVL_UM`), and `max_abs_delta_dex` is the largest of
+    the eight `|log10(F_spec/F_star)|` -- the shell's own largest SESNA-band
+    departure from the bare photosphere, in dex."""
+    path = f"{config.data_root}/sed_models/downloads/grams/{GRAMS_RAW_FILENAME[chem]}"
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "prior.star_population: no raw GRAMS grid at %r -- the %s-rich "
+            "download must be on disk" % (path, chem.upper()))
+    with fits.open(path) as hdul:
+        d = hdul[1].data
+        log_wvl_grid = np.log10(np.asarray(d["Lspec"][0], dtype=np.float64))
+        if not np.array_equal(np.asarray(d["Lspec"][-1], dtype=np.float64), np.asarray(d["Lspec"][0], dtype=np.float64)):
+            raise ValueError(
+                "prior.star_population: %r's Lspec wavelength grid is not "
+                "the same on every row -- the shared-grid interpolation below "
+                "assumes it is" % path)
+        log_fstar = np.log10(np.clip(np.asarray(d["Fstar"], dtype=np.float64), 1e-300, None))
+        log_fspec = np.log10(np.clip(np.asarray(d["Fspec"], dtype=np.float64), 1e-300, None))
+        tau = np.asarray(d[GRAMS_RAW_TAU_COLUMN[chem]], dtype=np.float64)
+    band_star = interp1d(log_wvl_grid, log_fstar, axis=1, assume_sorted=True)(_LOG_WVL_UM)
+    band_spec = interp1d(log_wvl_grid, log_fspec, axis=1, assume_sorted=True)(_LOG_WVL_UM)
+    max_abs_delta_dex = np.max(np.abs(band_spec - band_star), axis=1)
+    return tau, max_abs_delta_dex
+
+
+def detectability_tau_threshold(config, chem, sigeff):
+    """The optical depth the SIGEFF detectability criterion corresponds to
+    (owner ruling 2026-10-09): "a model counts as dusty where the GRAMS
+    shell changes the eight-band SED from the bare photosphere by more
+    than SIGEFF in any band", reported as one tau per chemistry so it sits
+    beside the superseded curated-library floor (`tau` 0.0128 O-rich,
+    0.02 C-rich). Pooled over the raw grid's own distinct `tau` nodes
+    (`_grams_raw_detectability`), the fraction of models detectable at
+    `sigeff` rises monotonically with `tau`; the threshold returned is the
+    `tau` at which that fraction first reaches `DETECT_FRACTION_HALF`,
+    log-interpolated between the two bracketing grid nodes."""
+    tau, max_abs_delta_dex = _grams_raw_detectability(config, chem)
+    u_tau = np.unique(tau)
+    frac = np.array([float(np.mean(max_abs_delta_dex[tau == t] > sigeff)) for t in u_tau])
+    log_tau_half = float(np.interp(DETECT_FRACTION_HALF, frac, np.log10(u_tau)))
+    return float(10.0 ** log_tau_half), u_tau, frac
+
+
+def f_dusty_by_chemistry(config, sigeff=None):
+    """`(f_dusty_o, f_dusty_c, n_o, n_c, tau_detect_o, tau_detect_c)`:
+    "dusty" defined by a detectability criterion (owner ruling 2026-10-09),
+    not by the curated GRAMS library's lowest, coarsely spaced `tau` node.
+    `detectability_tau_threshold` turns SIGEFF (`read_sigeff`
+    if `sigeff` is not given) into one `tau` threshold per chemistry; the
+    per-chemistry share returned is Riebel+2012's own per-star fits
+    (`read_riebel_optical_depths`) whose fitted `tau` clears it -- the
+    same band Riebel's fit and the detectability test both use (10.0um
+    O-rich, 11.3um C-rich)."""
+    if sigeff is None:
+        sigeff = read_sigeff(config)
+    tau_detect_o, _, _ = detectability_tau_threshold(config, "o", sigeff)
+    tau_detect_c, _, _ = detectability_tau_threshold(config, "c", sigeff)
+    gcl, tau = read_riebel_optical_depths(config)
     is_o, is_c = gcl == "o", gcl == "c"
     n_o, n_c = int(is_o.sum()), int(is_c.sum())
-    f_o = float(np.mean(mdot[is_o] >= mdot_threshold_msun_yr)) if n_o else float("nan")
-    f_c = float(np.mean(mdot[is_c] >= mdot_threshold_msun_yr)) if n_c else float("nan")
-    return f_o, f_c, n_o, n_c
+    f_o = float(np.mean(tau[is_o] >= tau_detect_o)) if n_o else float("nan")
+    f_c = float(np.mean(tau[is_c] >= tau_detect_c)) if n_c else float("nan")
+    return f_o, f_c, n_o, n_c, tau_detect_o, tau_detect_c
 
 
 def agb_orich_l_sun(config):
@@ -1046,38 +1131,54 @@ def _report(result):
 def build(config, regions=None):
     """Writes the per-tile placement-and-weight product for `regions`
     (default: all thirty), one file per region (module docstring). The
-    literature `F_dusty` (Riebel+2012's fitted dust mass-loss rates against
-    the GRAMS grid's own physical thin-shell floor) and the GRAMS O-rich
-    library's own shared luminosity are survey-wide and read once, not per
-    region (rule 9); likewise the two libraries' own reference-flux tables
-    and the measured PAHC curve."""
+    literature `F_dusty` (Riebel+2012's fitted `tau` against a SIGEFF
+    detectability threshold) and the GRAMS O-rich library's own shared
+    luminosity are survey-wide and read once, not per region (rule 9);
+    likewise the two libraries' own reference-flux tables and the measured
+    PAHC curve."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
-    f_dusty_o, f_dusty_c, n_riebel_o, n_riebel_c = f_dusty_by_chemistry(config)
+    sigeff = read_sigeff(config)
+    f_dusty_o, f_dusty_c, n_riebel_o, n_riebel_c, tau_detect_o, tau_detect_c = \
+        f_dusty_by_chemistry(config, sigeff)
     l_o_lsun, n_orich_models = agb_orich_l_sun(config)
     f_ref_sps = load_sps_reference_fluxes(config)
     teff_node, ref_jhk = load_pahc_continuum_reference(config)
     curve = pahc_curve.read(config)
     f_dusty_mean = (1.0 - F_C) * f_dusty_o + F_C * f_dusty_c
     print(
-        "star_population: F_dusty_O=%.4f (n=%d) F_dusty_C=%.4f (n=%d) F_dusty_mean=%.4f "
-        "mass-loss-rate threshold=%.1e Msun/yr (Riebel+2012 dust dM/dt, bytes 43-50) "
+        "star_population: SIGEFF=%.5f dex (sed_models/registers/agb_register.hdf5) "
+        "tau_detect_O=%.5f tau_detect_C=%.5f (the curated library's superseded floor "
+        "was 0.0128/0.02) F_dusty_O=%.4f (n=%d) F_dusty_C=%.4f (n=%d) F_dusty_mean=%.4f "
         "L_O=%.2f Lsun (n_model=%d, sed_models/agb/parameters.fits CHEM=='O') f_C=%.2f"
-        % (f_dusty_o, n_riebel_o, f_dusty_c, n_riebel_c, f_dusty_mean,
-           MDOT_DUSTY_THRESHOLD_MSUN_YR, l_o_lsun, n_orich_models, F_C))
-    # C12 identity: the share's sensitivity to a factor two in the threshold
-    # either way, on the same Riebel+2012 fits -- the grid-node floor this
-    # replaces moved the share by a factor of 1.4 to 2.8 per node (ledger
-    # C12), so this is the same kind of number for the physical threshold.
-    for factor, label in ((2.0, "2x"), (0.5, "0.5x")):
-        thr = factor * MDOT_DUSTY_THRESHOLD_MSUN_YR
-        f_o_f, f_c_f, _, _ = f_dusty_by_chemistry(config, thr)
+        % (sigeff, tau_detect_o, tau_detect_c, f_dusty_o, n_riebel_o, f_dusty_c, n_riebel_c,
+           f_dusty_mean, l_o_lsun, n_orich_models, F_C))
+    # the mass-loss-rate reader, kept for report context (not the
+    # criterion): the median Riebel+2012-fitted dust mass-loss rate among
+    # the stars the new, detectability-based F_dusty now counts as dusty,
+    # set beside the share itself.
+    _gcl_mdot, mdot = read_riebel_mass_loss_rates(config)
+    gcl_tau, tau = read_riebel_optical_depths(config)
+    for chem, tau_c, label in (("o", tau_detect_o, "O"), ("c", tau_detect_c, "C")):
+        dusty = (gcl_tau == chem) & (tau >= tau_c)
+        median_mdot = float(np.median(mdot[dusty])) if dusty.any() else float("nan")
+        print(
+            "star_population: %s-rich dusty stars (n=%d): median Riebel+2012-fitted "
+            "dust mass-loss rate = %.3e Msun/yr"
+            % (label, int(dusty.sum()), median_mdot))
+    # C12 identity: the share's sensitivity to a factor two in SIGEFF
+    # either way, the detectability bar itself, which is what the new
+    # criterion makes the natural dial (the old mass-loss-rate threshold
+    # is withdrawn).
+    for factor, sig_label in ((2.0, "2x"), (0.5, "0.5x")):
+        sigeff_f = factor * sigeff
+        f_o_f, f_c_f, _, _, tau_o_f, tau_c_f = f_dusty_by_chemistry(config, sigeff_f)
         f_mean_f = (1.0 - F_C) * f_o_f + F_C * f_c_f
         print(
-            "star_population: F_dusty sensitivity, threshold %s=%.1e Msun/yr: "
-            "F_dusty_O=%.4f F_dusty_C=%.4f F_dusty_mean=%.4f (%+.3f dex against the "
-            "adopted threshold's %.4f)"
-            % (label, thr, f_o_f, f_c_f, f_mean_f,
+            "star_population: F_dusty sensitivity, SIGEFF %s=%.5f dex: "
+            "tau_detect_O=%.5f tau_detect_C=%.5f F_dusty_O=%.4f F_dusty_C=%.4f "
+            "F_dusty_mean=%.4f (%+.3f dex against the adopted SIGEFF's %.4f)"
+            % (sig_label, sigeff_f, tau_o_f, tau_c_f, f_o_f, f_c_f, f_mean_f,
                np.log10(f_mean_f / f_dusty_mean), f_dusty_mean))
 
     for region in region_names:
