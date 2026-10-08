@@ -18,6 +18,13 @@ the row's sources, section 3.2's "extinction column"). `fittp.prior_reader`
 reads this product through P1's `SIGHTLINE_ROW` to form the per-cell dense
 fraction `w_i` every class's prior read blends the two extinction-law
 designs by (section 2, section 4.2).
+
+At a region `sample_cloud.far_region` selects (ledger C14: the 3-D map's
+own radial resolution at that distance exceeds the cloud's measured
+depth), `XI_FRONT`/`XI_BACK` are not read off the map's `xi(d)` at all --
+`XI_FRONT = 0`, `XI_BACK = 1` every row, so `W_CLOUD` is the ramp
+evaluated at the sightline's own column whole, i.e. at `A_COL_K` as the
+Planck arm measures it (the only arm a region this far out carries).
 """
 
 import os
@@ -71,20 +78,34 @@ def build_region(config, region, st):
     n_sl = hpx_pix_256.size
 
     d_front, d_back = sample_cloud.cloud_interval_pc(config, region)
+    far = sample_cloud.far_region(config, region)
 
-    xi_front = np.zeros(n_sl, dtype=np.float64)
-    xi_back = np.zeros(n_sl, dtype=np.float64)
-    for row in range(n_sl):
-        # xi(d) at this sightline's own native cumulative profile: d_edges[row]
-        # spans at least [dist_pc[0], dist_pc[-1] + 2*tail_efold_pc[row]], which
-        # `sample_cloud.cloud_interval_pc` already caps d_front/d_back inside of
-        # (its own floor/cap against dist_first and dist_last + 2*min(tail_efold)),
-        # so both lookups sit inside every row's own domain -- no extrapolation.
-        xi_front[row] = np.clip(np.interp(d_front, d_edges[row], xi_edges[row]), 0.0, 1.0)
-        xi_back[row] = np.clip(np.interp(d_back, d_edges[row], xi_edges[row]), 0.0, 1.0)
-    # XI_FRONT <= XI_BACK by construction (xi(d) non-decreasing in d,
-    # d_front <= d_back); guarded against float round-off alone.
-    xi_back = np.maximum(xi_back, xi_front)
+    if far:
+        # ledger C14: at a region the 3-D map cannot resolve radially, the
+        # map's own xi(d) cannot be trusted to say how much of the column
+        # sits between d_front/d_back either -- `_RADIAL_RESOLUTION_FRAC`'s
+        # whole point is that the map's structure fit there is a
+        # measurement of the map, not of the cloud. The dense share is
+        # taken from the sightline's own column whole (XI_FRONT = 0,
+        # XI_BACK = 1), i.e. from `A_COL_K` as the Planck arm measures it
+        # (every far region's only arm), rather than from an interval
+        # fraction the map cannot support.
+        xi_front = np.zeros(n_sl, dtype=np.float64)
+        xi_back = np.ones(n_sl, dtype=np.float64)
+    else:
+        xi_front = np.zeros(n_sl, dtype=np.float64)
+        xi_back = np.zeros(n_sl, dtype=np.float64)
+        for row in range(n_sl):
+            # xi(d) at this sightline's own native cumulative profile: d_edges[row]
+            # spans at least [dist_pc[0], dist_pc[-1] + 2*tail_efold_pc[row]], which
+            # `sample_cloud.cloud_interval_pc` already caps d_front/d_back inside of
+            # (its own floor/cap against dist_first and dist_last + 2*min(tail_efold)),
+            # so both lookups sit inside every row's own domain -- no extrapolation.
+            xi_front[row] = np.clip(np.interp(d_front, d_edges[row], xi_edges[row]), 0.0, 1.0)
+            xi_back[row] = np.clip(np.interp(d_back, d_edges[row], xi_edges[row]), 0.0, 1.0)
+        # XI_FRONT <= XI_BACK by construction (xi(d) non-decreasing in d,
+        # d_front <= d_back); guarded against float round-off alone.
+        xi_back = np.maximum(xi_back, xi_front)
 
     a_col_k = _sightline_a_col_k(config, region, hpx_pix_256)
     # a sightline with no dust between the two depths (XI_BACK == XI_FRONT,
@@ -107,7 +128,7 @@ def build_region(config, region, st):
             ("W_CLOUD", w_cloud.astype(np.float32)),
         ):
             build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
-    return path, n_sl, xi_front, xi_back, w_cloud
+    return path, n_sl, xi_front, xi_back, w_cloud, far
 
 
 def build(config, regions=None):
@@ -119,9 +140,9 @@ def build(config, regions=None):
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     for region in region_names:
         with progress.Stage("bmstp.cloud_interval", region) as st:
-            path, n_sl, xi_front, xi_back, w_cloud = build_region(config, region, st)
+            path, n_sl, xi_front, xi_back, w_cloud, far = build_region(config, region, st)
             removed_frac = 1.0 - (xi_back - xi_front)
-            st.done(path, n_sightline=n_sl,
+            st.done(path, n_sightline=n_sl, far_region=far,
                     xi_front_range=(float(xi_front.min()), float(xi_front.max())) if n_sl else (0.0, 0.0),
                     xi_back_range=(float(xi_back.min()), float(xi_back.max())) if n_sl else (0.0, 0.0),
                     w_cloud_range=(float(w_cloud.min()), float(w_cloud.max())) if n_sl else (0.0, 0.0),

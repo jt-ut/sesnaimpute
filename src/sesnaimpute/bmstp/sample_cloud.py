@@ -24,16 +24,24 @@ density construction (`_load_profile_arrays`, `embedding_and_ridge`) at its
 FULL resolution -- the profile product it points at, sec. 5.5's "the
 profile's cells" -- restricted to the cells whose distance range overlaps
 the region's cloud interval `[d_front, d_back]` (sec. 2's "region distance
-and depth", REWRITTEN after W24: `cloud_interval_pc` DOUBLES the region
-depth product's own `D_LO_PC`/`D_HI_PC` half-widths about `D_PEAK_PC`,
-W24b); a cell partly inside counts its own inside fraction. The matching
-distance edges are formed the same way `population.yso`'s own tail cell is
-(`d_mid_tail = dist_pc[-1] + tail_efold`, sec. 6.3 there): the map's own
-`DIST_PC` points, plus one more edge `dist_pc[-1] + 2 * tail_efold` past
-the map's reach, so the tail cell's midpoint distance matches
-`population.yso`'s exactly. `_cell_subsamples` is `p(x)`'s own machinery
-one level down: the raw, unbinned sub-samples (weight, depth, distance)
-`p(x)`, `shift_kernel` and `GRID_YSO`'s row-by-row construction all share.
+and depth"); a cell partly inside counts its own inside fraction. The
+matching distance edges are formed the same way `population.yso`'s own
+tail cell is (`d_mid_tail = dist_pc[-1] + tail_efold`, sec. 6.3 there): the
+map's own `DIST_PC` points, plus one more edge `dist_pc[-1] + 2 *
+tail_efold` past the map's reach, so the tail cell's midpoint distance
+matches `population.yso`'s exactly. `_cell_subsamples` is `p(x)`'s own
+machinery one level down: the raw, unbinned sub-samples (weight, depth,
+distance) `p(x)`, `shift_kernel` and `GRID_YSO`'s row-by-row construction
+all share.
+
+`cloud_interval_pc` DOUBLES the region depth product's own `D_LO_PC`/
+`D_HI_PC` half-widths about `D_PEAK_PC` -- the 3-D map's own measurement of
+where the cloud sits. At a region whose distance makes that measurement
+unusable (`far_region`, below), it instead centres the interval on the
+region's own literature distance (`regions.Region.d_r_pc`, the cluster
+parallax where one is adopted) with a half-width taken from the cloud's
+OWN projected size on the sky (`_cloud_projected_radius_pc`), independent
+of the map's radial read entirely.
 
 `shift_kernel`'s `K(delta)`, per region (sec. 5.5): the
 region's FALLBACK sightline's own depth draw turned into the distribution
@@ -47,6 +55,7 @@ the same `K`.
 """
 
 import h5py
+import healpy as hp
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from scipy.special import ndtr
@@ -60,6 +69,22 @@ from sesnaimpute.population import yso as yso_module
 #: in `log10 ξ` (sec. 5.5 "Marks": "in practice, a fixed number of
 #: sub-samples per cell").
 N_SUB = 16
+
+#: `HPX_PIX_256`'s own HEALPix order (sec. "the grid of grains": the
+#: sightline grain), needed to turn a region's admitted sightlines back
+#: into sky positions for `_cloud_projected_radius_pc`.
+_SIGHTLINE_NSIDE = 256
+
+#: The 3-D map's own radial precision, as a fraction of distance: Gaia
+#: BP/RP spectrophotometric parallaxes (Zhang, Green & Rix 2023, the
+#: catalogue Edenhofer et al. 2024 build the map from) carry an individual-
+#: star distance precision of order 10-20 percent, worst at the catalogue's
+#: faint end and best at its bright, well-measured end. This uses the
+#: stated range's lower half -- the map's OWN best case -- so a region's
+#: structure is judged unresolved only where even that best case already
+#: exceeds the structure's own measured 16th-to-84th-percentile depth
+#: (`D_HI_PC - D_LO_PC`, the region depth product; ledger C14).
+_RADIAL_RESOLUTION_FRAC = 0.115
 
 #: The common grid's own `log10 ξ` floor (sec. 2), guarding `log10(0)` at
 #: a sightline's nearest cell edge (`u = 0` at `d = 0`).
@@ -90,33 +115,93 @@ def sightline_count(config, region):
     return _region_profile(config, region)["hpx_pix_256"].size
 
 
-def cloud_interval_pc(config, region):
-    """`(d_front, d_back)`, the region's CLOUD INTERVAL (sec. 2 "region
-    distance and depth", REWRITTEN after W24, W24b): the dust structure's
-    peak distance minus TWICE its lower half-width, to its peak plus TWICE
-    its upper half-width -- `d_front = D_PEAK - 2 (D_PEAK - D_LO)`, `d_back
-    = D_PEAK + 2 (D_HI - D_PEAK)` -- read directly off the region depth
-    product's own `D_PEAK_PC`/`D_LO_PC`/`D_HI_PC` (the bare 16-84 interval
-    alone held only two thirds of the structure's own dust by construction
-    and cut 19-84% of the YSO placement's mass, W24; the doubled interval
-    holds ~95% of it). Floored at the profile's own first cell
-    (`DIST_PC[0]`, 0 pc) and capped at its own last reachable edge (the
-    map's own edge plus twice the SMALLEST sightline's tail e-folding
-    scale -- the same construction `_region_profile` uses to close every
-    sightline's own support), so the interval never reaches past what
-    every sightline of the region can represent."""
+def _region_depth_row(config, region):
+    """One row of the region depth product (sec. 2 "region distance and
+    depth"): `(d_r_pc, d_peak_pc, d_lo_pc, d_hi_pc)`, the literature
+    distance and the 3-D map's own structure fit."""
     depth_path = config_module.product_path(config, "sky/derived", "edenhofer", "depth", "region")
     with h5py.File(depth_path, "r") as f:
         names = [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in f["REGION"][:]]
         if region not in names:
-            raise ValueError("sample_cloud.cloud_interval_pc: region %r has no row in %s"
-                              % (region, depth_path))
+            raise ValueError("sample_cloud: region %r has no row in %s" % (region, depth_path))
         i = names.index(region)
-        d_peak = float(f["D_PEAK_PC"][i])
-        d_lo = float(f["D_LO_PC"][i])
-        d_hi = float(f["D_HI_PC"][i])
-    d_front = d_peak - 2.0 * (d_peak - d_lo)
-    d_back = d_peak + 2.0 * (d_hi - d_peak)
+        return (float(f["D_R_PC"][i]), float(f["D_PEAK_PC"][i]),
+                float(f["D_LO_PC"][i]), float(f["D_HI_PC"][i]))
+
+
+def far_region(config, region):
+    """True where the 3-D map's own radial resolution at this region's
+    distance (`_RADIAL_RESOLUTION_FRAC * d_r_pc`) exceeds the structure's
+    own measured depth (`D_HI_PC - D_LO_PC`) -- ledger C14: a region this
+    far out cannot have its cloud interval read off the map's structure
+    fit, because the fit cannot be narrower than the map's own resolution
+    and so no longer measures the cloud, it measures the map."""
+    d_r_pc, _d_peak, d_lo, d_hi = _region_depth_row(config, region)
+    return _RADIAL_RESOLUTION_FRAC * d_r_pc > (d_hi - d_lo)
+
+
+def far_regions(config):
+    """Every survey region `far_region` selects, name and the two numbers
+    the rule compares (report-only; the brief's "the rule and the regions
+    it selects are printed")."""
+    rows = []
+    for r in regions_module.REGIONS:
+        d_r_pc, _d_peak, d_lo, d_hi = _region_depth_row(config, r.name)
+        resolution_pc = _RADIAL_RESOLUTION_FRAC * d_r_pc
+        depth_pc = d_hi - d_lo
+        if resolution_pc > depth_pc:
+            rows.append((r.name, resolution_pc, depth_pc))
+    return rows
+
+
+def _cloud_projected_radius_pc(config, region, d_r_pc):
+    """The cloud's own projected physical size (ledger C14): the radius,
+    in parsecs at the region's own distance `d_r_pc`, of a circle on the
+    sky with the same solid angle as the region's admitted sightlines
+    (`_region_profile`'s `hpx_pix_256`, nside 256) -- the cloud's own
+    angular footprint, not the 3-D map's radial read, so it carries none
+    of that map's resolution limit."""
+    hpx_pix_256 = _region_profile(config, region)["hpx_pix_256"]
+    solid_angle_sr = hpx_pix_256.size * hp.nside2pixarea(_SIGHTLINE_NSIDE)
+    radius_rad = np.sqrt(solid_angle_sr / np.pi)
+    return radius_rad * d_r_pc
+
+
+def cloud_interval_pc(config, region):
+    """`(d_front, d_back)`, the region's CLOUD INTERVAL (sec. 2 "region
+    distance and depth"). At a region the map resolves (`far_region` is
+    False, the ordinary case): the dust structure's peak distance minus
+    TWICE its lower half-width, to its peak plus TWICE its upper
+    half-width -- `d_front = D_PEAK - 2 (D_PEAK - D_LO)`, `d_back = D_PEAK
+    + 2 (D_HI - D_PEAK)` -- read directly off the region depth product's
+    own `D_PEAK_PC`/`D_LO_PC`/`D_HI_PC` (the bare 16-84 interval alone
+    holds only two thirds of the structure's own dust by construction;
+    the doubled interval holds ~95% of it).
+
+    At a region the map does not resolve (`far_region` is True, ledger
+    C14): the map's own structure fit is not read at all -- `D_PEAK_PC`
+    there is a measurement of the map's resolution, not of the cloud.
+    Instead the interval is centred on the region's own literature
+    distance (`regions.Region.d_r_pc`, the cluster parallax where one is
+    adopted; Hunt & Reffert 2023 for NGC 7129) with a half-width taken
+    from the cloud's own projected size on the sky
+    (`_cloud_projected_radius_pc`), independent of the map's radial
+    resolution.
+
+    Either way, floored at the profile's own first cell (`DIST_PC[0]`, 0
+    pc) and capped at its own last reachable edge (the map's own edge
+    plus twice the SMALLEST sightline's tail e-folding scale -- the same
+    construction `_region_profile` uses to close every sightline's own
+    support), so the interval never reaches past what every sightline of
+    the region can represent."""
+    d_r_pc, d_peak, d_lo, d_hi = _region_depth_row(config, region)
+    if far_region(config, region):
+        radius_pc = _cloud_projected_radius_pc(config, region, d_r_pc)
+        d_front = d_r_pc - radius_pc
+        d_back = d_r_pc + radius_pc
+    else:
+        d_front = d_peak - 2.0 * (d_peak - d_lo)
+        d_back = d_peak + 2.0 * (d_hi - d_peak)
 
     profile_path = config_module.product_path(
         config, "sky/derived", "edenhofer", "profile", "sightline", region=region)
@@ -216,8 +301,10 @@ def sample_x(loaded, row, d_front, d_back):
     usual one-cell smoothing (sec. 2 "minimum widths"). Returns `(p_x,
     mass_outside, removed_frac)`: `removed_frac` is the fraction of the
     sightline's own (pre-restriction) mass the cloud-interval restriction
-    removed, report-only (sec. 5.5's "1-9 percent median, up to 84
-    percent")."""
+    removed, report-only -- a number to measure per region and build, not
+    a quoted target (no figure here is authority over a fresh measurement,
+    `far_region` being exactly the case where the old figure stopped
+    describing the product)."""
     log10_xi_nudged, w, _d_sub, removed_frac = _cell_subsamples(loaded, row, d_front, d_back)
     p_x, mass_outside = _bin1d(log10_xi_nudged, w, grid.LOG10_XI_EDGES, sigma_cells=1.0)
     return p_x, mass_outside, removed_frac
