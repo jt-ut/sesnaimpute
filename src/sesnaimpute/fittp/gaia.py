@@ -43,6 +43,15 @@ weight (`P_PAHC`, at a grid of 8 micron limit values, keyed by
 `STAR_INDEX` within each tile against a grid column a pooled read cannot
 select) is a second, separate reweighting this term still does not carry
 -- disclosed, not silently guessed (brief's own fallback).
+
+NONDET2.md section 1 (NONDET.md section 8's finding): `H_h` at the fitted
+mark alone is not well approximated across the width the evidence integral
+spans -- the same defect, and the same fix, as the non-detection factor --
+so the class evidence reads it per cell, inside `fittp.prior_reader.
+_cell_sum`, through `cell_inputs` below rather than through `ln_gamma`.
+`ln_gamma` stays exactly as it was -- one point, the fitted mark -- for the
+two report-only uses that still want that one point: `TOPK_LN_GAMMA_ML`
+and `PSI_VOTES`' Gaia reading.
 """
 
 import math
@@ -60,6 +69,15 @@ from sesnaimpute.population.anchor_tiles import (
     GAIA_G_LIM_MAG, GAIA_G_ROLLOFF_MAG, gaia_detection_weight)
 
 __all__ = ["GaiaTerm", "GAIA_G_LIM_MAG", "GAIA_G_ROLLOFF_MAG"]
+
+#: NONDET2 brief section 1: the law-dense ramp weight `w(a)` that blends
+#: KG_DRAINE/KG_WHITNEY at a GIVEN extinction `a` (`selection.
+#: law_dense_weight`'s own constants) is now evaluated per cell, inside
+#: `prior_reader._cell_sum`'s numba kernel, so the two ramp edges travel
+#: there as bare floats rather than as a second import of `selection`
+#: inside a numba module.
+LAW_RAMP_LO = selection.LAW_RAMP_LO
+LAW_RAMP_HI = selection.LAW_RAMP_HI
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +346,39 @@ class GaiaTerm:
                 raise ValueError(f"GaiaTerm: no A_X branch defined for class {cls!r}")
         a_x[good] = a_x_good[good]
         return matched, g_s, a_x
+
+    def cell_inputs(self, rows, model_index, cls):
+        """NONDET2 brief section 1 (NONDET.md section 8): everything
+        `prior_reader._cell_sum` needs to evaluate `ln Gamma` at EACH
+        CELL'S own `a*` rather than once at the fitted mark -- `G_S`/`A_X`
+        stay per source and class, outside the per-cell evaluation
+        (`_g_s_and_a_x_block`, unchanged); `G0MAG`/`KG_DRAINE`/`KG_WHITNEY`
+        stay per template, off this class's own register
+        (`_register`, unchanged); `r_diffuse`/`r_dense` are the two
+        extinction curves' own `(A_K/A_V)` ratios the per-cell ramp blend
+        needs (`selection.ak_per_av` at the ramp's two ends). Returns a
+        plain tuple of arrays/floats, numba-ready: `(matched, g_s, a_x,
+        g0_mag, kg_draine, kg_whitney, r_diffuse, r_dense)`.
+        """
+        rows = np.asarray(rows)
+        model_index = np.asarray(model_index)
+        matched, g_s, a_x = self._g_s_and_a_x_block(rows, cls)
+        reg = self._register(cls)
+        g0_mag = reg["g0_mag"][model_index]
+        kg_draine = reg["kg_draine"][model_index]
+        kg_whitney = reg["kg_whitney"][model_index]
+        # a dark model's G0_FLUX = 0 drives G0MAG to +inf (module docstring
+        # for `_register`); NaN (no G-band coverage) likewise never detected.
+        # Both read as a Gaia-invisible template -- H = 0 at every `a` -- by
+        # forcing G0MAG itself to +inf rather than letting a numba kernel
+        # carry a NaN through the per-cell sigmoid.
+        g0_mag = np.where(np.isfinite(g0_mag), g0_mag, np.inf)
+        r_diffuse = float(selection.ak_per_av(self.config, 0.0))
+        r_dense = float(selection.ak_per_av(self.config, 1.0))
+        return (np.ascontiguousarray(matched), np.ascontiguousarray(g_s),
+                np.ascontiguousarray(a_x), np.ascontiguousarray(g0_mag, dtype=np.float64),
+                np.ascontiguousarray(kg_draine, dtype=np.float64),
+                np.ascontiguousarray(kg_whitney, dtype=np.float64), r_diffuse, r_dense)
 
     def ln_gamma(self, rows, model_index, a, log10_b, cls):
         """`ln Gamma_{s,h}` for one block's own sources (`rows`, their row

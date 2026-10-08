@@ -57,6 +57,7 @@ import numpy as np
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute.bmstp import grid
+from sesnaimpute.fittp import gaia as gaia_module
 from sesnaimpute.population import kernel as kernel_module
 
 #: class -> (shape-grid source, its dataset, template-weight library, its
@@ -641,18 +642,92 @@ def _nondet_ln_sum(a_val, active, base, slope_b, template_row, log10_f_lim50_row
     return total
 
 
+#: NONDET2 brief section 1 (NONDET.md section 8): a Gaia H(a) within this
+#: of 0 or of 1 at BOTH of a template's window ends is constant across it
+#: (Gmag(a) is linear in a, as section 1's docstring derives below, so H
+#: saturates monotonically), and the per-cell sigmoid is skipped for every
+#: cell of that window, the one evaluation at the window's own `a_hat`
+#: standing in for all of them; nats, the same floor `_NONDET_PREFILTER_EPS`
+#: uses.
+_GAIA_PREFILTER_EPS = 1e-6
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _law_dense_weight_scalar(a_val, ramp_lo, ramp_hi):
+    """`population.selection.law_dense_weight`'s own smoothstep, one value
+    at a time (numba cannot call that numpy function from inside
+    `_cell_sum`): 0 at and below `ramp_lo`, 1 at and above `ramp_hi`,
+    evaluated in log column."""
+    if a_val <= 0.0:
+        return 0.0
+    x = math.log(a_val / ramp_lo) / math.log(ramp_hi / ramp_lo)
+    if x < 0.0:
+        x = 0.0
+    elif x > 1.0:
+        x = 1.0
+    return x * x * (3.0 - 2.0 * x)
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _gaia_h(a_val, g0_mag, kg_draine, kg_whitney, base, sl, r_diffuse, r_dense,
+            ramp_lo, ramp_hi, g_lim, g_rolloff):
+    """`H(a) = sigmoid((G_LIM - Gmag(a)) / TAU_G)` (`gaia.py`'s module
+    docstring, NONDET2 section 1): `Gmag(a) = G0MAG - 2.5 log10_B(a) +
+    kappa_G(a) a`, `log10_B(a) = base + sl * a` the fit's own conditional
+    ridge (the same `base`, `sl` `_cell_sum` already forms for the
+    non-detection factor), `kappa_G(a)` the KG_DRAINE/KG_WHITNEY blend at
+    the law-dense ramp weight AT THIS a (`_law_dense_weight_scalar`) --
+    `gaia.GaiaTerm.ln_gamma`'s own algebra, evaluated at an arbitrary `a`
+    instead of the fitted mark alone."""
+    log10b = base + sl * a_val
+    w = _law_dense_weight_scalar(a_val, ramp_lo, ramp_hi)
+    kappa_g = (1.0 - w) * (kg_draine / r_diffuse) + w * (kg_whitney / r_dense)
+    gmag = g0_mag - 2.5 * log10b + a_val * kappa_g
+    arg = -(g_lim - gmag) / g_rolloff
+    if arg > 700.0:
+        arg = 700.0
+    elif arg < -700.0:
+        arg = -700.0
+    return 1.0 / (1.0 + math.exp(arg))
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _gaia_ln_gamma(a_val, g0_mag, kg_draine, kg_whitney, base, sl, r_diffuse, r_dense,
+                    ramp_lo, ramp_hi, g_s, a_x, g_lim, g_rolloff):
+    """`ln Gamma(a) = ln[G_S H(a) A_X + (1 - G_S)(1 - H(a))]` at ONE
+    extinction value (a cell's own `a*`, or a single-point fallback's one
+    substitute), `G_S`/`A_X` per source and class, outside (NONDET2
+    section 1; `gaia.py` module docstring)."""
+    h = _gaia_h(a_val, g0_mag, kg_draine, kg_whitney, base, sl, r_diffuse, r_dense,
+                ramp_lo, ramp_hi, g_lim, g_rolloff)
+    gamma = g_s * h * a_x + (1.0 - g_s) * (1.0 - h)
+    if gamma < 1e-300:
+        gamma = 1e-300
+    return math.log(gamma)
+
+
 @numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
 def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               b_origin, dlb, dlx, a_edges_buf, cell_weight,
               m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
               template_log, ext_col_ak, log10_f_lim50, width_dex, nondet_mask,
-              out1, out2):
+              gaia_matched, g_s, a_x, g0_mag, kg_draine, kg_whitney,
+              r_diffuse, r_dense, ramp_lo, ramp_hi, g_lim, g_rolloff,
+              out_s0, out_s1, a_post_out, a2_post_out):
     """The cell sum of SPEC_BMSTP_DRAFT.md section 4.2, per source and
-    template, `out` unchanged by the two moments below.
+    template. NONDET2 brief section 2: the sum accumulates THREE totals,
+    not one -- `total0` (the prior read along the fit's ridge alone),
+    `total1` (`total0` times the non-detection factor, NONDET brief
+    section 1), `total2` (`total1` times the Gaia factor, NONDET2 section
+    1) -- and returns the LOG of all three: `out_s0`, `out_s1` in place
+    (the two marginal records, `fittp.sweep` forms `S0 = out_s0 + ln_l`,
+    `S1 = out_s1 + ln_l` per law before mixing), and `out` (the function's
+    own return, `S2`'s own un-mixed half) exactly as before NONDET2 --
+    every other caller of this function still reads one array.
 
     NONDET brief section 1 (section 6.2, amended): the survey's completeness
     term for this source's own undetected, limited, observed bands
-    (`fittp.likelihood`'s `nondet_mask`) now multiplies the cell's own mass
+    (`fittp.likelihood`'s `nondet_mask`) multiplies the cell's own mass
     INSIDE this sum, at the CELL'S OWN `a*` along the fit's conditional
     ridge -- not once, at the likelihood's clamped maximum-likelihood mark,
     as a per-template constant outside the integral. Per band `b`, the
@@ -665,57 +740,56 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     brightness slope (`sl = slope[s]`, the same number `bval`'s own `a*`
     term below already carries) into one per-band, per-source constant.
     `z_b(a) = (log10_fhat_b(a) - log10 F_LIM_50_b) / (sqrt2 * W_DEX_b)` is
-    therefore linear in `a` too (section 1 "verified against the code"),
-    which is what makes the per-template, per-band prefilter at the
-    window's own two ends (`lo_a`, `hi_a`) exact: a band whose charge is
-    negligible at both ends is negligible throughout, monotone between
-    them. The cell's own factor, `exp(Sum_{b in nondet_mask, active}
-    ln[1 - C_b(z_b(a_star))])` (`_ln_half_erfc`, section 6.2's three
-    branches), multiplies `dens * mi * cell_weight` before the Jacobian in
-    every one of the four paths below -- the table path, the exact path,
-    and both single-point edge fallbacks, where it is evaluated once at
-    that one substitute point instead of per cell, over every
-    `nondet_mask` band (no prefilter needed for a single point). `chi2` and
-    `TOPK_LN_L` are untouched: this sum's own prior density carries the
-    non-detection factor now, never the likelihood.
+    therefore linear in `a` too, which is what makes the per-template,
+    per-band prefilter at the window's own two ends (`lo_a`, `hi_a`) exact:
+    a band whose charge is negligible at both ends is negligible
+    throughout, monotone between them.
 
-    `out1`, `out2` are `(n, m)` float64 scratch this function fills in
-    place with the posterior first and second moment of `a` within the
-    same cell sum -- section 4.2's own summand `dens * mi / a_star` is
-    the posterior density of `a` in cell `i` up to the constant `total`
-    normalises away, so `m1 = sum(dens * mi)` and `m2 = sum(dens * mi *
-    a_star)` (the Jacobian `1 / a_star` cancelling against the `a_star`
-    the moment itself carries) give `out1 = m1 / total`, `out2 = m2 /
-    total` wherever `total > 0`; each of the two fallbacks below puts the
-    whole mass at its one substitute point, so `out1`/`out2` there are
-    that point and its square; left at their caller's initial NaN
-    wherever `out` stays `-inf`. The cell window
-    `[i_lo, i_hi]` holding `a_hat +/- 5 sigma_a`
-    found in O(1) from the grid's own geometric spacing (no scan of the
-    other 125 cells); in each cell the Gaussian's mass `M_i` and the
+    NONDET2 brief section 1 (NONDET.md section 8): the Gaia factor
+    `Gamma(a) = G_S H(a) A_X + (1 - G_S)(1 - H(a))` (`gaia.py`'s module
+    docstring) multiplies the cell's mass the same way, at the SAME
+    cell's own `a*`, for a source with a Gaia counterpart only (`
+    gaia_matched[s]`; an unmatched source carries `Gamma = 1` at every
+    `a`, so its `total2` is `total1` exactly, no per-cell work). `H(a)`
+    depends on `a` through the same ridge `log10_B(a) = base + sl * a`
+    this sum already forms for the non-detection factor, plus the law-dense
+    ramp's own `kappa_G(a)` (`_gaia_h`); since `Gmag(a)` is linear-plus-a-
+    smoothstep in `a`, the window-ends prefilter applies the same way: `H`
+    at both `lo_a` and `hi_a` saturating to (both near 0) or (both near 1)
+    means `Gamma` is constant across the window, read once at `a_hat`
+    rather than re-evaluated per cell (`_GAIA_PREFILTER_EPS`).
+
+    `out_s0`/`out_s1` are `(n, m)` float32, this function's SCRATCH output
+    (caller pre-fills `-inf`), read by `fittp.sweep` as the two marginal
+    accumulators S0, S1-S0 (together with `out`'s own S2, S2-S1) of NONDET2
+    section 2's separable record. `a_post_out`/`a2_post_out` are `(n, m)`
+    float64 scratch holding the posterior first and second moment of `a`
+    within the cell sum, under the FULL `total2` weight (NONDET2 section 2:
+    "A_K_POST moments accumulate under the full S2 weight") -- `m1 = sum(
+    term2)`, `m2 = sum(term2 * a_star)`, the Jacobian `1 / a_star` cancelling
+    against the `a_star` the moment itself carries, `a_post_out = m1 /
+    total2`, `a2_post_out = m2 / total2` wherever `total2 > 0`; each of the
+    two fallbacks below puts the whole mass at its one substitute point, so
+    both moments there are that point and its square regardless of which
+    total is positive. The cell window `[i_lo, i_hi]` holding `a_hat +/- 5
+    sigma_a` found in O(1) from the grid's own geometric spacing (no scan
+    of the other 125 cells); in each cell the Gaussian's mass `M_i` and the
     brightness argument `a*_i`, the cell's own truncated-normal mean --
     `a_hat` itself for a narrow Gaussian, the cell's midpoint for a wide
     one, so `h`'s gather and the Jacobian `1 / a*_i` both sit at the
     mass's own mean within the cell. A window at most `N_EXACT` cells
     wide still pays one erf and one exp per cell exactly; a wider one --
-    by window width alone, whatever `sigma_a` is (W6d ruling: a narrow
-    Gaussian near the grid's low-extinction end can still have a wide
-    window, since cells there are far narrower than `sigma_a`) -- instead
-    gathers `M_i`, `a*_i` from the source's own `a'`-grid table
-    (`_build_a_star_tables`, W6d item 2) by linear interpolation in `a'`
-    -- no erf, no exp, no per-template log10 for that window's mass, only
-    the one log10 pair that still decides which path a given template's
-    window takes (measured negligible next to the erf/exp it replaces,
-    W6d report). `m_tab`/`a_tab`/`ilo_tab`/`ihi_tab` are flat, one
-    source's rows at `offset_tab[s] : offset_tab[s] + n_ap_tab[s]`, no
-    padding to the block's widest range (finding 3). The dot with `M` runs over cells
+    by window width alone, whatever `sigma_a` is -- instead gathers `M_i`,
+    `a*_i` from the source's own `a'`-grid table (`_build_a_star_tables`)
+    by linear interpolation in `a'`. `m_tab`/`a_tab`/`ilo_tab`/`ihi_tab` are
+    flat, one source's rows at `offset_tab[s] : offset_tab[s] + n_ap_tab[s]`,
+    no padding to the block's widest range. The dot with `M` runs over cells
     above 1e-6. `A_COL_K` and `ln 10` in the Jacobian, common to every
     template at a source, are dropped. No `(n_source x n_model x cells)`
     intermediate. `a_edges_buf` is `(n, n_x+1)` scratch, one row per
     source. The outer source loop is plain and serial (the fitter's
     harness calls this one source at a time); `prange` is the inner loop
-    over templates, so a single source's read still uses every core
-    (W6d item 3).
+    over templates, so a single source's read still uses every core.
 
     The measured coordinate: the stored shape's own support ends at the
     wall, `x = a / T <= 1`, but this read evaluates a fitted source in
@@ -725,33 +799,24 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     array's own top edge, `n_x`, the measured coordinate's full extent,
     not to the edge ξ = 1. No floor: `h`'s stored density is an exact
     zero in an empty cell and every `dens` this function reads is exactly
-    that zero, unmodified -- a window whose every cell is empty sums to
-    `total = 0.0` and reads `out[s, th] = -inf` (its initial value,
-    below), a clean veto that contributes nothing to the evidence.
+    that zero, unmodified.
 
-    Kernel mass outside the grid is outside the prior, at either edge
-    (section 2): cell 0's own mass `M_0` and mean `a*_0` are
-    its own cdf difference and truncated-normal mean over its own bounds
-    `[a_edges[0], a_edges[1]]`, exactly like every other cell -- the mass
-    below `a_edges[0]` contributes nothing, the same as the mass above
-    the top edge. The table path (`_build_a_star_tables`) and this exact
-    path agree on this.
-
-    Two fallbacks, and no others, read a single substitute cell's own
-    (unfloored) density instead of a cleared one, so a window whose mass
-    sits entirely off the grid still reads a finite prior wherever that
-    cell's own stored density is itself nonzero -- and `-inf` where it is
-    zero, exactly as a mass-bearing window's own empty cells read. A
-    window with no mass on the grid at all -- entirely below
-    `a_edges[0]` -- reads the lowest cell's density at that cell's own
-    geometric centre, `a_c0 = sqrt(a_edges[0] * a_edges[1])`,
-    times the Gaussian's tail mass beyond `a_edges[0]`; never at
-    `a_edges[0]` itself, which the Jacobian `1 / a` would misprice by
-    orders of magnitude. A window entirely above the grid's TOP edge
-    reads the mirror point -- the top cell's own density at its
-    own upper edge, times the tail mass beyond that edge -- because mass
-    above the grid is mass outside and is never wrapped onto the grid's
-    low end (section 2)."""
+    Derivation-review unit 1, row 12 (the fix this brief's section 6
+    riders at its source): the low-edge fallback is taken ONLY when the
+    window lies entirely below `a_edges[0]` (`hi_a <= a_edges[0]`, true
+    whenever the window is not `in_grid` at all, since `a_edges[0] > 0`
+    always) -- never merely because `total0 == 0`. A window that overlaps
+    the grid (`in_grid`, and not entirely above the top edge either) but
+    whose every cell carries zero mass or zero stored density reads a
+    clean `-inf` in all three totals, its caller's initial value, rather
+    than the low-edge fallback's inflated substitute. Two fallbacks, and
+    no others, read a single substitute cell's own (unfloored) density
+    instead of a cleared one: a window entirely below `a_edges[0]` reads
+    the lowest cell's density at that cell's own geometric centre,
+    `a_c0 = sqrt(a_edges[0] * a_edges[1])`, times the Gaussian's tail mass
+    beyond `a_edges[0]`; a window entirely above the grid's top edge reads
+    the mirror point, the top cell's own density at its own upper edge,
+    times the tail mass beyond that edge."""
     n, m = a_hat.shape
     n_x = xi_edges.size - 1
     n_b = h.shape[2]
@@ -783,11 +848,16 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
             slope_b[b] = ext_col_ak[b] + sl
             if nondet_mask[s, b]:
                 active_full |= (1 << b)
+        matched_s = gaia_matched[s]
+        g_s_s = g_s[s]
+        a_x_s = a_x[s]
         for th in numba.prange(m):
             ah = a_hat[s, th]
             lo_a = ah - 5.0 * sig
             hi_a = ah + 5.0 * sig
-            total = 0.0
+            total0 = 0.0
+            total1 = 0.0
+            total2 = 0.0
             m1 = 0.0
             m2 = 0.0
             lbh = log10_b_hat[s, th]
@@ -819,6 +889,27 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     c_hi = _ln_half_erfc(z_hi)
                     if c_lo < -_NONDET_PREFILTER_EPS or c_hi < -_NONDET_PREFILTER_EPS:
                         active |= (1 << b)
+            # NONDET2 section 1's own prefilter: H(a) at the window's two
+            # ends, both near 0 or both near 1, means Gamma is constant
+            # across the window -- read once at a_hat, never per cell.
+            g0m = g0_mag[th]
+            kgd = kg_draine[th]
+            kgw = kg_whitney[th]
+            gaia_do_percell = False
+            gaia_const_exp = 1.0
+            if matched_s and in_grid:
+                h_lo = _gaia_h(lo_a, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
+                               ramp_lo, ramp_hi, g_lim, g_rolloff)
+                h_hi = _gaia_h(hi_a, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
+                               ramp_lo, ramp_hi, g_lim, g_rolloff)
+                both_low = h_lo < _GAIA_PREFILTER_EPS and h_hi < _GAIA_PREFILTER_EPS
+                both_high = h_lo > 1.0 - _GAIA_PREFILTER_EPS and h_hi > 1.0 - _GAIA_PREFILTER_EPS
+                if both_low or both_high:
+                    gaia_const_exp = math.exp(_gaia_ln_gamma(
+                        ah, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
+                        ramp_lo, ramp_hi, g_s_s, a_x_s, g_lim, g_rolloff))
+                else:
+                    gaia_do_percell = True
             if not in_grid:
                 pass  # the +/-5 sigma window never reaches positive extinction
             elif use_table:
@@ -849,26 +940,33 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                             j0 = n_b - 2
                             frac = 1.0
                         dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
-                        # the posterior's first and second moment of a within
-                        # this cell (SPEC_BMSTP_DRAFT.md section 4.2's own
-                        # summand, m1/m2 the a*_i-weighted mass, the a_star
-                        # Jacobian cancelling against `dens * mi / a_star`'s
-                        # own 1/a_star -- section 6.1 above item 1). The
-                        # two-design mixture's own cell weight (`cell_weight
-                        # [s, i]`, `1 - w_i` on the diffuse call, `w_i` on the
-                        # dense one, section 2) multiplies the cell's mass
-                        # before the Jacobian, so a cell the caller's design
-                        # does not own contributes nothing. NONDET brief
-                        # section 1: this cell's own non-detection factor, at
-                        # ITS OWN a_star, multiplies the cell's mass too, so
-                        # the posterior these moments describe is the one the
-                        # evidence sum below actually integrates.
+                        # the two-design mixture's own cell weight
+                        # (`cell_weight[s, i]`, `1 - w_i` on the diffuse call,
+                        # `w_i` on the dense one, section 2) multiplies the
+                        # cell's mass before the Jacobian, so a cell the
+                        # caller's design does not own contributes nothing.
+                        term0 = dens * mi * cell_weight[s, i]
+                        # NONDET brief section 1: this cell's own non-detection
+                        # factor, at ITS OWN a_star.
                         nondet_ln = _nondet_ln_sum(a_star, active, base, slope_b,
                                                     template_log[th], log10_f_lim50[s], width_dex[s])
-                        term = dens * mi * cell_weight[s, i] * math.exp(nondet_ln)
-                        total += term / a_star
-                        m1 += term
-                        m2 += term * a_star
+                        term1 = term0 * math.exp(nondet_ln)
+                        # NONDET2 section 1: this cell's own Gaia factor, at
+                        # ITS OWN a_star, or the window's own constant value.
+                        if gaia_do_percell:
+                            gaia_ln = _gaia_ln_gamma(a_star, g0m, kgd, kgw, base, sl,
+                                                      r_diffuse, r_dense, ramp_lo, ramp_hi,
+                                                      g_s_s, a_x_s, g_lim, g_rolloff)
+                            term2 = term1 * math.exp(gaia_ln)
+                        else:
+                            term2 = term1 * gaia_const_exp
+                        total0 += term0 / a_star
+                        total1 += term1 / a_star
+                        total2 += term2 / a_star
+                        # the posterior's first and second moment of a within
+                        # this cell, under the FULL term2 weight (section 2).
+                        m1 += term2
+                        m2 += term2 * a_star
             else:
                 z_prev = (a_edges[i_lo] - ah) * inv_sig
                 cdf_prev = 0.5 * (1.0 + math.erf(z_prev / sqrt2))
@@ -897,20 +995,35 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                             j0 = n_b - 2
                             frac = 1.0
                         dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
+                        term0 = dens * mi * cell_weight[s, i]
                         # NONDET brief section 1: see the table path above.
                         nondet_ln = _nondet_ln_sum(a_star, active, base, slope_b,
                                                     template_log[th], log10_f_lim50[s], width_dex[s])
-                        term = dens * mi * cell_weight[s, i] * math.exp(nondet_ln)
-                        total += term / a_star
-                        m1 += term
-                        m2 += term * a_star
+                        term1 = term0 * math.exp(nondet_ln)
+                        # NONDET2 section 1: see the table path above.
+                        if gaia_do_percell:
+                            gaia_ln = _gaia_ln_gamma(a_star, g0m, kgd, kgw, base, sl,
+                                                      r_diffuse, r_dense, ramp_lo, ramp_hi,
+                                                      g_s_s, a_x_s, g_lim, g_rolloff)
+                            term2 = term1 * math.exp(gaia_ln)
+                        else:
+                            term2 = term1 * gaia_const_exp
+                        total0 += term0 / a_star
+                        total1 += term1 / a_star
+                        total2 += term2 / a_star
+                        m1 += term2
+                        m2 += term2 * a_star
                     cdf_prev = cdf_next
                     phi_prev = phi_next
                     z_prev = z_next
-            if total > 0.0:
-                out[s, th] = np.log(total)
-                out1[s, th] = m1 / total
-                out2[s, th] = m2 / total
+            if total0 > 0.0:
+                out_s0[s, th] = np.log(total0)
+                if total1 > 0.0:
+                    out_s1[s, th] = np.log(total1)
+                if total2 > 0.0:
+                    out[s, th] = np.log(total2)
+                    a_post_out[s, th] = m1 / total2
+                    a2_post_out[s, th] = m2 / total2
             elif in_grid and lo_a >= a_edges[n_x]:
                 # The window's own low bound already clears the array's
                 # own top edge (the measured coordinate's full extent,
@@ -918,12 +1031,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 # is mass outside the prior, never wrapped back (section
                 # 2), so this reads as the top cell's own density at its
                 # own upper edge, times the Gaussian's tail mass beyond
-                # that edge -- the mirror of the low-edge fallback below,
-                # not that fallback's a_0 and cell 0 (which would
-                # misprice the Jacobian by the ratio of the two edges).
-                # `out[s, th]` stays at its initial `-inf` if that cell's
-                # own density is itself an exact zero: a clean veto, not
-                # a floored substitute.
+                # that edge -- the mirror of the low-edge fallback below.
                 a_top = a_edges[n_x]
                 z_top = (a_top - ah) * inv_sig
                 ln_tail = _ln_half_erfc(z_top / sqrt2)
@@ -939,31 +1047,34 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     frac = 1.0
                 dens = (h[s, n_x - 1, j0] * (1.0 - frac) + h[s, n_x - 1, j0 + 1] * frac) / (dlx * dlb)
                 # the edge fallback reads the cell it substitutes for, so it
-                # carries that cell's own dense-fraction weight too: a design
-                # the source's own w_i excludes from cell n_x - 1 must not
-                # read a finite prior off this fallback either.
+                # carries that cell's own dense-fraction weight too.
                 w_edge = cell_weight[s, n_x - 1]
                 if dens > 0.0 and w_edge > 0.0:
-                    # NONDET brief section 1: the fallback's one substitute
-                    # point carries the non-detection factor too, over every
-                    # nondet_mask band (no window to prefilter at one point).
+                    s0 = math.log(dens * w_edge / a_top) + ln_tail
                     nondet_ln = _nondet_ln_sum(a_top, active_full, base, slope_b,
                                                 template_log[th], log10_f_lim50[s], width_dex[s])
-                    out[s, th] = math.log(dens * w_edge / a_top) + ln_tail + nondet_ln
-                    # the fallback puts the whole mass at this one point
-                    # (module docstring item 1): a_post/a2_post read the
-                    # point itself, not a cell mean.
-                    out1[s, th] = a_top
-                    out2[s, th] = a_top * a_top
-            else:
-                # No mass on the grid at all: the window lies entirely
-                # below a_edges[0], kernel mass there being outside the
-                # prior (section 2) same as above the top edge.
-                # The tail mass is the Gaussian's mass beyond the grid's
-                # true low edge a_edges[0]; it is READ at the lowest
-                # cell's own geometric centre a_c0 = sqrt(a_edges[0] *
-                # a_edges[1]) -- never at a_edges[0] itself, which the
-                # Jacobian 1/a would misprice by orders of magnitude.
+                    s1 = s0 + nondet_ln
+                    gaia_ln = (_gaia_ln_gamma(a_top, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
+                                               ramp_lo, ramp_hi, g_s_s, a_x_s, g_lim, g_rolloff)
+                               if matched_s else 0.0)
+                    out_s0[s, th] = s0
+                    out_s1[s, th] = s1
+                    out[s, th] = s1 + gaia_ln
+                    # the fallback puts the whole mass at this one point:
+                    # a_post/a2_post read the point itself, not a cell mean.
+                    a_post_out[s, th] = a_top
+                    a2_post_out[s, th] = a_top * a_top
+            elif hi_a <= a_edges[0]:
+                # Derivation-review unit 1, row 12's fix: the low-edge
+                # fallback is taken ONLY when the window lies entirely below
+                # a_edges[0] -- never merely because total0 == 0 on a window
+                # that overlaps the grid (that case falls through below,
+                # reading a clean -inf in all three totals). The tail mass
+                # is the Gaussian's mass beyond the grid's true low edge
+                # a_edges[0]; it is READ at the lowest cell's own geometric
+                # centre a_c0 = sqrt(a_edges[0] * a_edges[1]) -- never at
+                # a_edges[0] itself, which the Jacobian 1/a would misprice
+                # by orders of magnitude.
                 a_c0 = math.sqrt(a_edges[0] * a_edges[1])
                 z0 = (a_edges[0] - ah) * inv_sig
                 ln_tail = _ln_half_erfc(z0 / sqrt2)
@@ -981,28 +1092,42 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 # same weighting as the top-edge fallback above, at cell 0.
                 w_edge = cell_weight[s, 0]
                 if dens > 0.0 and w_edge > 0.0:
-                    # NONDET brief section 1: see the top-edge fallback above.
+                    s0 = math.log(dens * w_edge / a_c0) + ln_tail
                     nondet_ln = _nondet_ln_sum(a_c0, active_full, base, slope_b,
                                                 template_log[th], log10_f_lim50[s], width_dex[s])
-                    out[s, th] = math.log(dens * w_edge / a_c0) + ln_tail + nondet_ln
-                    # the fallback puts the whole mass at this one point
-                    # (module docstring item 1): a_post/a2_post read the
-                    # point itself, not a cell mean.
-                    out1[s, th] = a_c0
-                    out2[s, th] = a_c0 * a_c0
+                    s1 = s0 + nondet_ln
+                    gaia_ln = (_gaia_ln_gamma(a_c0, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
+                                               ramp_lo, ramp_hi, g_s_s, a_x_s, g_lim, g_rolloff)
+                               if matched_s else 0.0)
+                    out_s0[s, th] = s0
+                    out_s1[s, th] = s1
+                    out[s, th] = s1 + gaia_ln
+                    a_post_out[s, th] = a_c0
+                    a2_post_out[s, th] = a_c0 * a_c0
+            # else: the window overlaps the grid but carries zero mass at
+            # this template's own brightness everywhere -- a clean -inf in
+            # all three totals (the caller's initial value), never the
+            # low-edge fallback's substitute (row 12's fix).
     return out
 
 
 def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, cell_weight,
-             template_log, ext_col_ak, log10_f_lim50, width_dex, nondet_mask):
-    """`((n, m) float32, (n, m) float64, (n, m) float64)`: `ln <Lambda_C>_s
+             template_log, ext_col_ak, log10_f_lim50, width_dex, nondet_mask, gaia_inputs):
+    """`(ln_lambda2, ln_lambda0, ln_lambda1, a_post, a2_post)`: `ln <Lambda_C>_s
     (theta)` of SPEC_BMSTP_DRAFT.md section 4.2, plus `ln A_C(s)` (section
     1.3) -- everything the fitter's evidence sum needs from the prior --
     together with `a_post`, `a2_post`, the cell sum's own first and second
-    moment of `a` per template (SPEC_BMSTP_DRAFT.md
-    section 6.1's posterior mark, formed by `fittp.sweep` from these two
-    with the template's own `p_theta`). `a_post`/`a2_post` carry neither
-    `ln A_C(s)` nor the factor term below -- section 4.2's own summand is
+    moment of `a` per template (SPEC_BMSTP_DRAFT.md section 6.1's posterior
+    mark, formed by `fittp.sweep` from these two with the template's own
+    `p_theta`, under the FULL `ln_lambda2` weight -- NONDET2 section 2).
+    `ln_lambda2` is the non-detection- and Gaia-included read this call has
+    always returned as its one array (`ln_lambda` before NONDET2); `
+    ln_lambda0`, `ln_lambda1` are NONDET2 section 2's two marginal
+    accumulators -- `ln_lambda0` carries neither the non-detection nor the
+    Gaia factor, `ln_lambda1` the non-detection factor only -- each formed
+    the same way as `ln_lambda2` (`_cell_sum`'s own `out_s0`/`out_s1` plus
+    `ln A_C(s)` and the factor-table term, below). `a_post`/`a2_post` carry
+    neither `ln A_C(s)` nor the factor term -- section 4.2's own summand is
     the whole of the posterior density of `a` within a cell, so the two
     moments come from `_cell_sum` alone, unscaled by the per-source density
     or the per-template `Pi_f PI_f` factor (both constant across `a` at
@@ -1023,8 +1148,8 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
     floor: `_cell_sum`
     reads `h_C`'s own cell density exactly as stored, so a template whose
     whole cell window sums to zero prior mass (all its cells excluded by
-    `cell_weight`, or genuinely empty) reads `ln <Lambda_C>_s(theta)
-    = -inf`, a clean veto rather than an inflated pedestal, and `a_post`/
+    `cell_weight`, or genuinely empty) reads every one of the three totals
+    `-inf`, a clean veto rather than an inflated pedestal, and `a_post`/
     `a2_post` NaN there.
 
     NONDET brief section 1: `template_log` (`m, 8`, `fittp.sweep`'s own
@@ -1036,7 +1161,15 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
     (`n, 8`, `likelihood.Batch`'s own per-source rows) are the same
     completeness inputs `fittp.likelihood.prepare`/`_ln_nondet` read, at
     the clamped mark, for the top-K record's own reporting value -- here
-    read at every cell instead, inside `_cell_sum`."""
+    read at every cell instead, inside `_cell_sum`.
+
+    NONDET2 brief section 1: `gaia_inputs` is `gaia.GaiaTerm.cell_inputs`'s
+    own return for this block's `rows` and `model_index` -- `(matched, g_s,
+    a_x, g0_mag, kg_draine, kg_whitney, r_diffuse, r_dense)` -- unpacked and
+    handed to `_cell_sum` with the two law-ramp edges and the Gaia anchor's
+    own limit/roll-off (`gaia.LAW_RAMP_LO`/`LAW_RAMP_HI`, `gaia.
+    GAIA_G_LIM_MAG`/`GAIA_G_ROLLOFF_MAG`), so the Gaia factor is read per
+    cell, at that cell's own `a*`, exactly as the non-detection factor is."""
     rows = np.asarray(rows)
     # `reader.a_col` is memory-mapped, native float32 (section 2); cast to
     # float64 here, at the numba kernel's own call below, rather than at
@@ -1059,6 +1192,9 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
         a_col, reader.xi_edges, sigma_a, a_hat64)
     a_post = np.full((n, m), np.nan, dtype=np.float64)
     a2_post = np.full((n, m), np.nan, dtype=np.float64)
+    out_s0 = np.full((n, m), -np.inf, dtype=np.float32)
+    out_s1 = np.full((n, m), -np.inf, dtype=np.float32)
+    (matched, g_s, a_x, g0_mag, kg_draine, kg_whitney, r_diffuse, r_dense) = gaia_inputs
     core = _cell_sum(a_col, reader.xi_edges, sigma_a,
                       a_hat64, np.asarray(log10_b_hat, dtype=np.float64),
                       np.asarray(slope, dtype=np.float64), np.asarray(c_theta, dtype=np.float64),
@@ -1069,8 +1205,18 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
                       np.asarray(log10_f_lim50, dtype=np.float64),
                       np.asarray(width_dex, dtype=np.float64),
                       np.ascontiguousarray(np.asarray(nondet_mask)),
-                      a_post, a2_post)
+                      np.ascontiguousarray(matched), np.ascontiguousarray(g_s, dtype=np.float64),
+                      np.ascontiguousarray(a_x, dtype=np.float64),
+                      np.ascontiguousarray(g0_mag, dtype=np.float64),
+                      np.ascontiguousarray(kg_draine, dtype=np.float64),
+                      np.ascontiguousarray(kg_whitney, dtype=np.float64),
+                      float(r_diffuse), float(r_dense),
+                      float(gaia_module.LAW_RAMP_LO), float(gaia_module.LAW_RAMP_HI),
+                      float(gaia_module.GAIA_G_LIM_MAG), float(gaia_module.GAIA_G_ROLLOFF_MAG),
+                      out_s0, out_s1, a_post, a2_post)
     with np.errstate(divide="ignore"):
         ln_density = np.log(density)[:, None]
-    ln_lambda = (core + ln_density + factor_term).astype(np.float32)
-    return ln_lambda, a_post, a2_post
+    ln_lambda2 = (core + ln_density + factor_term).astype(np.float32)
+    ln_lambda0 = (out_s0 + ln_density + factor_term).astype(np.float32)
+    ln_lambda1 = (out_s1 + ln_density + factor_term).astype(np.float32)
+    return ln_lambda2, ln_lambda0, ln_lambda1, a_post, a2_post
