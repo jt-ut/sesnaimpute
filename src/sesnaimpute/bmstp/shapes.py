@@ -38,6 +38,7 @@ from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.bmstp import grid, sample_cloud, sample_gal, sample_star, template_weights
 from sesnaimpute.population import h2s as h2s_module
+from sesnaimpute.sky.derived import profile as profile_module
 
 _STAR_STEM = "star_shape_tile"
 _CLOUD_STEM = "cloud_shape_sightline"
@@ -266,6 +267,68 @@ def _field_star_f45_range(config, region):
 # P3 -- the cloud-class grid, per sightline (sec. 5.5)
 # ---------------------------------------------------------------------------
 
+def _region_peak_pc(config, region):
+    """This region's own single `D_PEAK_PC`
+    (`sky/derived/edenhofer/depth_edenhofer_region`), the SAME aggregate
+    dust-structure peak `sample_cloud.cloud_interval_pc`'s cloud interval
+    and `fittp.gaia`'s cloud-anchored Normal are already built from (sec.
+    2 "region distance and depth") -- the baseline
+    `_sightline_dust_peaks_pc` offsets each sightline's own peak against,
+    read directly off the same product rather than threaded through
+    another stage's return value."""
+    depth_path = config_module.product_path(config, "sky/derived", "edenhofer", "depth", "region")
+    with h5py.File(depth_path, "r") as f:
+        names = [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in f["REGION"][:]]
+        return float(f["D_PEAK_PC"][names.index(region)])
+
+
+def _sightline_dust_peaks_pc(config, region, hpx_pix_256, d_r_pc, d_front, d_back, d_peak_region_pc):
+    """Each of this region's own sightlines' own 3-D-map dust-structure
+    peak distance (sec. 5.5 "Marks", the shift-kernel rule's own
+    distance): `sky.derived.profile.structure_depth` -- the SAME
+    peak-finder that stage already runs once, on the region's own
+    sightline-weighted mean density, for the D_PEAK_PC the depth mark
+    (`sample_cloud.cloud_interval_pc`) and the Gaia term
+    (`fittp.gaia._cloud_normal_params_mas`) both already read -- run here
+    PER SIGHTLINE on that sightline's own `RHO_K_PER_PC` row, target the
+    region's own literature distance (the same target `measure_region`
+    uses for the aggregate peak), so a footprint whose line of sight
+    crosses more than one structure (Aquila's Serpens-Main and
+    Aquila-Rift components) returns a different peak for the sightlines
+    on each side rather than the one region-wide blend. The search is
+    restricted to `[d_front, d_back]`, the SAME cloud interval every
+    other sub-sample of this sightline is already restricted to
+    (`sample_cloud.cloud_interval_pc`), so a peak outside the region's
+    own cloud (foreground cirrus, an unrelated background clump) is
+    never returned. Falls back to the region's own `d_peak_region_pc` on
+    a sightline whose own density carries no separable local maximum
+    inside that window (`structure_depth` returns a NaN peak only then;
+    a peak found but failing its own fractional-depth bar is still a
+    real distance and is kept). Returns `d_peak_pc`, `(n_sl,)`, aligned
+    to `hpx_pix_256`."""
+    path = config_module.product_path(
+        config, "sky/derived", "edenhofer", "profile", "sightline", region=region)
+    with h5py.File(path, "r") as f:
+        hpx_profile = f["HPX_PIX_256"][:]
+        dist_pc = f["DIST_PC"][:]
+        rho = f["RHO_K_PER_PC"][:]
+    if hpx_profile.shape != hpx_pix_256.shape or not np.array_equal(hpx_profile, hpx_pix_256):
+        raise ValueError(
+            "bmstp.shapes._sightline_dust_peaks_pc: HPX_PIX_256 order mismatch between "
+            "the profile product and the region's own embedding, region %r" % region)
+    radii = 0.5 * (dist_pc[:-1] + dist_pc[1:])
+    in_window = (radii >= d_front) & (radii <= d_back)
+    radii_w = radii[in_window]
+    n_sl = rho.shape[0]
+    d_peak_pc = np.empty(n_sl, dtype=np.float64)
+    for row in range(n_sl):
+        found = (profile_module.structure_depth(radii_w, rho[row][in_window], d_r_pc)
+                 if radii_w.size >= 3 else {"d_peak_pc": np.nan})
+        peak = found["d_peak_pc"]
+        d_peak_pc[row] = peak if np.isfinite(peak) else d_peak_region_pc
+    return d_peak_pc
+
+
 def _yso_kernel_placement(x_idx, delta, weights, on_x, n_x, kernel_1d, p_ref, n_b):
     """One sub-sample weight column shifted-and-smoothed through the
     kernel-placement pipeline (sec. 5.5, the shift-kernel rule): the raw
@@ -282,18 +345,29 @@ def _yso_kernel_placement(x_idx, delta, weights, on_x, n_x, kernel_1d, p_ref, n_
     return np.maximum(conv[:, start:start + n_b], 0.0)
 
 
-def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
+def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back, peak_offset_dex=0.0):
     """One sightline's `(GRID_YSO, XI_MARGINAL, MASS_OUTSIDE_YSO,
     removed_frac)` (sec. 5.5 "Marks"): every depth sub-sample
     (`sample_cloud._cell_subsamples`, weight `w_k,sub`, depth `x_k,sub`,
     distance `d_k,sub`) adds its own shifted-and-smoothed copy of `p_ref`
     to its own `log10 ξ` row -- grouped by row first (linear in the
     sub-samples, so summing the row's own raw weighted `delta = -2
-    log10(d_k,sub / 1 kpc)` histogram before the ONE EXACT Gaussian
-    smoothing (`kernel_1d`, `sample_cloud.exact_gaussian_kernel`) and the
-    ONE convolution with `p_ref` reproduces the per-sub-sample sum
-    exactly). `XI_MARGINAL` (`p_x`) is unchanged in value
-    (`sample_cloud.sample_x`, its own one-cell-smoothed bin).
+    log10(d_k,sub / 1 kpc) + peak_offset_dex` histogram before the ONE
+    EXACT Gaussian smoothing (`kernel_1d`, `sample_cloud.
+    exact_gaussian_kernel`) and the ONE convolution with `p_ref`
+    reproduces the per-sub-sample sum exactly). `peak_offset_dex`
+    (`_sightline_dust_peaks_pc`, this sightline's own 3-D-map
+    dust-structure peak against the region's single D_PEAK_PC) carries
+    the sightline's own distance into the shift alongside `d_sub`'s
+    within-structure depth variation, rather than letting every
+    sightline of a multi-structure footprint share the one region-wide
+    reference the depth mark and the Gaia term already peak-anchor
+    (sec. 2 "region distance and depth"); it is zero for a single-
+    structure region, where this reduces to the prior behaviour exactly.
+    `XI_MARGINAL` (`p_x`) is unchanged in value (`sample_cloud.sample_x`,
+    its own one-cell-smoothed bin) and is built from the SAME `d_front`/
+    `d_back` cloud interval, untouched by `peak_offset_dex`, so the depth
+    mark this sweep's other packages own is not altered here.
     A stored shape is normalised to one over the CLASS'S OWN population
     (sec. 4.1's "shape grids": "normalised to one over cells", true of
     every class alike): the sightline's cloud-interval-restricted
@@ -320,7 +394,7 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back):
 
     x_idx = np.digitize(log10_xi_nudged, grid.LOG10_XI_EDGES) - 1
     on_x = (x_idx >= 0) & (x_idx < n_x)
-    delta = -2.0 * np.log10(d_sub / 1000.0)
+    delta = -2.0 * np.log10(d_sub / 1000.0) + peak_offset_dex
     # the sub-samples' own raw weights through the shift-kernel placement
     # -- identically what `GRID_YSO` is, before its own one-cell
     # `x`-smoothing (sec. 2 "minimum widths").
@@ -364,7 +438,11 @@ def build_cloud(config, region):
     `MASS_OUTSIDE_YSO`, `ON_GRID_YSO` (`1 - mass_outside_yso` per
     sightline, sec. 2's ON-GRID FRACTION, W26's own read), the cloud
     interval `D_FRONT_PC`/`D_BACK_PC` (DOUBLED about the region's own peak
-    distance, W24b), and the region's H2S brightness Gaussian (`LOGSIG_MEAN`,
+    distance, W24b), `D_PEAK_SIGHTLINE_PC` (each sightline's own 3-D-map
+    dust-structure peak, `_sightline_dust_peaks_pc`, that anchors
+    `GRID_YSO`'s brightness shift alongside the within-structure depth
+    `d_sub` already carries, sec. 2 "region distance and depth"), and the
+    region's H2S brightness Gaussian (`LOGSIG_MEAN`,
     `LOGSIG_STD`, sec. 5.6) computed here by transporting the UWISH2 knot
     survey's surface-brightness sample to the region's own distance
     (`population.h2s.transport_log10_sigma`,
@@ -386,6 +464,21 @@ def build_cloud(config, region):
         d_front, d_back = sample_cloud.cloud_interval_pc(config, region)
         r = regions_module.REGIONS_BY_NAME[region]
 
+        # the YSO brightness-shift distance per sightline (sec. 2 "region
+        # distance and depth"): each sightline's own 3-D-map dust peak,
+        # read against the region's single D_PEAK_PC the depth mark and
+        # the Gaia term already use, so a footprint crossing more than
+        # one structure (Aquila's Serpens-Main and Aquila-Rift
+        # components) shifts its own sightlines by their own distance
+        # rather than the one region-wide blend.
+        d_peak_region_pc = _region_peak_pc(config, region)
+        d_peak_sightline_pc = (
+            _sightline_dust_peaks_pc(config, region, loaded["hpx_pix_256"], r.d_r_pc,
+                                      d_front, d_back, d_peak_region_pc)
+            if n_sl else np.zeros((0,), dtype=np.float64))
+        peak_offset_dex = (-2.0 * np.log10(d_peak_sightline_pc / d_peak_region_pc)
+                            if n_sl else np.zeros((0,), dtype=np.float64))
+
         # P_ref (sec. 5.5), survey-wide, unplaced -- built
         # once, not per sightline or region; every sub-sample's own row
         # convolves it with that row's own shift kernel below.
@@ -397,7 +490,8 @@ def build_cloud(config, region):
         # rule 10a): the owner sets it to what the machine's memory allows.
         n_jobs = int(config.n_jobs)
         results = Parallel(n_jobs=n_jobs)(
-            delayed(_build_one_sightline)(loaded, row, p_ref, kernel_1d, d_front, d_back)
+            delayed(_build_one_sightline)(loaded, row, p_ref, kernel_1d, d_front, d_back,
+                                           peak_offset_dex[row])
             for row in range(n_sl))
         for i in range(n_sl):
             st.tick(i + 1, n_sl, "sightlines")
@@ -491,6 +585,7 @@ def build_cloud(config, region):
                 ("LOG10_XI_EDGES", grid.LOG10_XI_EDGES),
                 ("LOG10_F45_EDGES", grid.LOG10_F45_EDGES),
                 ("HPX_PIX_256", loaded["hpx_pix_256"]),
+                ("D_PEAK_SIGHTLINE_PC", d_peak_sightline_pc),
                 ("GRID_YSO", grid_yso),
                 ("XI_MARGINAL", xi_marginal),
                 ("MASS_OUTSIDE_YSO", mass_outside_yso),
@@ -556,7 +651,12 @@ def build_cloud(config, region):
                 row46_corr=row46_corr, median_col_corr=med_corr,
                 d_front_pc=float(d_front), d_back_pc=float(d_back),
                 on_grid_h2s_range=(float(on_grid_h2s.min()), float(on_grid_h2s.max())) if n_sl else (0.0, 0.0),
-                h2s_f45_p16=h2s_p16_f45, h2s_f45_p84=h2s_p84_f45)
+                h2s_f45_p16=h2s_p16_f45, h2s_f45_p84=h2s_p84_f45,
+                d_peak_region_pc=float(d_peak_region_pc),
+                d_peak_sightline_range=(float(d_peak_sightline_pc.min()), float(d_peak_sightline_pc.max()))
+                if n_sl else (0.0, 0.0),
+                peak_offset_dex_range=(float(peak_offset_dex.min()), float(peak_offset_dex.max()))
+                if n_sl else (0.0, 0.0))
     return (path, n_sl, mass_outside_yso, removed_frac, max_xi_marginal_dev,
             (peak_f45, p16_f45, p84_f45), on_grid_yso, (d_front, d_back))
 
