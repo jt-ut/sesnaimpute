@@ -1732,7 +1732,7 @@ def build_region(config, region):
         # ratio (SPEC_BMSTP_DRAFT.md sec. 8).
         f0_pix = f_lim[:, IDX_I2]
         d_pahc_pix = -np.log10(f_lim[:, IDX_I4])
-        curve = pahc_curve.read(config)
+        curve = pahc_curve.read(config, region)
         # `fittp.prior_reader.load`'s `GRID_YSO`/`GRID_H2S` are P3's own
         # array, in P3's own `HPX_PIX_256` row order -- NOT the cloud
         # profile's own order `sl_row_of_pix` indexes (the two sightline
