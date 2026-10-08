@@ -89,8 +89,9 @@ template's reference flux (`population.field_stars`' own `TEMPLATE_INDEX`
 into `sed_models/registers/sps_register.hdf5`) -- a unit change only
 (C3). `LOG10_B_PAHC` is the same median, J/H/Ks only, against the PAHC
 library's own continuum reference (`sed_models/registers/
-pahc_register.hdf5`'s `library/pahc_fstar` table, nearest of its eleven
-`T_EFF` nodes). An evolved star additionally carries `LOG10_B_AGB_C` and
+pahc_register.hdf5`'s `library/pahc_fstar` table, 144 host rows, nearest
+in `(log10 T_eff, log g)` -- T_EFF alone is ambiguous, hosts sharing a
+T_eff at several log g, WP-REG-1). An evolved star additionally carries `LOG10_B_AGB_C` and
 `LOG10_B_AGB_O` (spec section 3's closed forms, `b_agb`); NaN for a
 non-evolved star.
 
@@ -501,25 +502,31 @@ def load_sps_reference_fluxes(config):
 
 
 def load_pahc_continuum_reference(config):
-    """`(teff_node, ref_jhk)`: the PAHC library's own continuum reference
-    table (`sed_models/registers/pahc_register.hdf5`, `library/
-    pahc_fstar`), eleven `T_EFF` nodes each carrying the underlying
-    star's own J/H/Ks reference flux before any PAH template is added --
-    the PAHC register's own reference fluxes (module docstring,
-    `LOG10_B_PAHC`), not the atmosphere template's, since the register
-    carries them. Its per-model `F_REF_J/H/Ks` (one row per PAH-template
-    combination, thousands of rows) carry no independent T_EFF key to
-    match a star against economically, so this reduced table -- the
-    register's own built-in T_EFF grid -- is what a star's own T_eff is
-    matched to."""
+    """`(node_log10_teff, node_logg, ref_jhk)`: the PAHC library's own
+    continuum reference table (`sed_models/registers/pahc_register.hdf5`,
+    `library/pahc_fstar`), 144 host rows (`HOST`, `T_EFF`, `LOGG`, `Z_H`)
+    each carrying the underlying star's own J/H/Ks reference flux before
+    any PAH template is added -- the PAHC register's own reference fluxes
+    (module docstring, `LOG10_B_PAHC`), not the atmosphere template's,
+    since the register carries them.
+
+    WP-REG-1 (coordinator addendum 2026-10-08): matching on `T_EFF` alone
+    is ambiguous -- hosts share a `T_EFF` at several `log g` (measured on
+    the 144 rows: only 43 distinct `T_EFF` values, 130/144 rows share
+    their own `T_EFF` with at least one other row, the worst `T_EFF`
+    shared by 9 hosts), while `(T_EFF, LOGG)` is unique for every one of
+    the 144. The match is therefore on `(log10 T_EFF, LOGG)`, the same
+    two-parameter Euclidean match `template_weights._match_pahc_to_sps`
+    uses to join PAHC templates to the sps atmosphere grid."""
     path = f"{config.data_root}/sed_models/registers/pahc_register.hdf5"
     with h5py.File(path, "r") as f:
         grp = f["library/pahc_fstar"]
-        teff_node = np.asarray(grp["T_EFF"], dtype=np.float64)
+        node_log10_teff = np.log10(np.asarray(grp["T_EFF"], dtype=np.float64))
+        node_logg = np.asarray(grp["LOGG"], dtype=np.float64)
         ref_jhk = np.column_stack(
             [np.asarray(grp["J"], dtype=np.float64), np.asarray(grp["H"], dtype=np.float64),
              np.asarray(grp["Ks"], dtype=np.float64)])
-    return teff_node, ref_jhk
+    return node_log10_teff, node_logg, ref_jhk
 
 
 # ---------------------------------------------------------------------------
@@ -549,14 +556,19 @@ def star_brightness_log10_b(fnu_mjy, template_index, f_ref_sps):
     return np.log10(np.median(ratio, axis=1))
 
 
-def pahc_brightness_log10_b(fnu_mjy, log_teff, teff_node, ref_jhk):
+def pahc_brightness_log10_b(fnu_mjy, log_teff, log_g, node_log10_teff, node_logg, ref_jhk):
     """`LOG10_B_PAHC` (module docstring): `log10` of the median over
     J/H/Ks of a star's own TRILEGAL flux over the PAHC continuum
-    reference at its nearest `T_EFF` node (`load_pahc_continuum_reference`),
-    matched in log T_eff."""
-    node_log_teff = np.log10(teff_node)
-    star_log_teff = np.asarray(log_teff, dtype=np.float64)
-    nearest = np.argmin(np.abs(star_log_teff[:, None] - node_log_teff[None, :]), axis=1)
+    reference at its nearest host node (`load_pahc_continuum_reference`),
+    matched in `(log10 T_eff, log g)` -- Euclidean, the same two-parameter
+    convention `template_weights._match_pahc_to_sps` uses, needed because
+    hosts share a `T_EFF` at several `log g` (WP-REG-1: T_EFF alone is
+    ambiguous for 130 of the 144 hosts)."""
+    star_point = np.column_stack(
+        [np.asarray(log_teff, dtype=np.float64), np.asarray(log_g, dtype=np.float64)])
+    node_point = np.column_stack([node_log10_teff, node_logg])
+    nearest = np.argmin(
+        ((star_point[:, None, :] - node_point[None, :, :]) ** 2).sum(axis=2), axis=1)
     ratio = fnu_mjy[:, IDX_JHK] / ref_jhk[nearest]
     return np.log10(np.median(ratio, axis=1))
 
@@ -808,7 +820,7 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
 
 
 def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
-                  f_ref_sps, teff_node, ref_jhk, curve, st=None):
+                  f_ref_sps, node_log10_teff, node_logg, ref_jhk, curve, st=None):
     stars_raw, omega_sim_deg2, n_raw = _read_field_stars(config, region)
     r_diffuse = float(selection.ak_per_av(config, 0.0))
     r_dense = float(selection.ak_per_av(config, 1.0))
@@ -820,7 +832,8 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
     is_evolved = evolved_selector(stars_raw["log_g"], stars_raw["log_teff"], stars_raw["log_l"])
     f_dusty_mean = (1.0 - F_C) * f_dusty_o + F_C * f_dusty_c
     log10_b = star_brightness_log10_b(stars_raw["fnu_mjy"], stars_raw["template_index"], f_ref_sps)
-    log10_b_pahc = pahc_brightness_log10_b(stars_raw["fnu_mjy"], stars_raw["log_teff"], teff_node, ref_jhk)
+    log10_b_pahc = pahc_brightness_log10_b(stars_raw["fnu_mjy"], stars_raw["log_teff"],
+                                            stars_raw["log_g"], node_log10_teff, node_logg, ref_jhk)
     log10_b_agb_c, log10_b_agb_o = agb_brightness_log10_b(
         stars_raw["dist_pc"], stars_raw["log_l"], l_o_lsun, is_evolved)
     limit_grid_mjy = pahc_limit_grid_mjy(config, region)
@@ -1062,7 +1075,7 @@ def build(config, regions=None):
         f_dusty_by_chemistry(config)
     l_o_lsun, n_orich_models = agb_orich_l_sun(config)
     f_ref_sps = load_sps_reference_fluxes(config)
-    teff_node, ref_jhk = load_pahc_continuum_reference(config)
+    node_log10_teff, node_logg, ref_jhk = load_pahc_continuum_reference(config)
     f_dusty_mean = (1.0 - F_C) * f_dusty_o + F_C * f_dusty_c
     print(
         "star_population: tau_floor_O=%.5f tau_floor_C=%.5f "
@@ -1077,7 +1090,7 @@ def build(config, regions=None):
         with progress.Stage("prior.star_population", region) as st:
             curve = pahc_curve.read(config, region)
             result = build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
-                                   f_ref_sps, teff_node, ref_jhk, curve, st=st)
+                                   f_ref_sps, node_log10_teff, node_logg, ref_jhk, curve, st=st)
             path = write_region(config, region, result, f_dusty_o, f_dusty_c)
             rep = _report(result)
             st.done(path, n_tile=rep["n_tile"], n_pointing=rep["n_pointing"],

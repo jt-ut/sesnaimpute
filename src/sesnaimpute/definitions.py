@@ -109,6 +109,16 @@ CLASSMAP = (
     ModelSubclass("GAL", "PASS", "Passive: EW(6.2um) <= 0.2 um, outside the Donley AGN wedge"),
     ModelSubclass("YSO", "C0", "Stage 0: M_env > 0.1 Msun, T_star < 3000 K (deeply embedded)"),
     ModelSubclass("YSO", "CI", "Stage I: M_env > 0.1 Msun, T_star > 3000 K (embedded protostar)"),
+    # Placed between CI and CII (evolutionary position, not appended): a
+    # flat-spectrum source's own spectral index sits between Class I's and
+    # Class II's, and `SUBCLASSES_OF`/every register's `/subclass_prob`
+    # column order is read by name everywhere downstream (`fittp.sweep`'s
+    # `subclass_order`, `fittp.classify`'s `SUBCLASSES` attribute), never
+    # by a hardcoded position -- verified by grep before choosing this
+    # position (WP-REG-1).
+    ModelSubclass("YSO", "FLAT", "Flat-spectrum: -0.3 <= alpha <= 0.3 (Greene et al. 1994), "
+                   "relabelled from Stage/TD; grouped with the protostars in the census "
+                   "(Dunham et al. 2015 count Class 0+I+Flat together)"),
     ModelSubclass("YSO", "CII", "Stage II: M_env < 0.1 Msun, disc present"),
     ModelSubclass("YSO", "CIII", "Stage III: M_env < 0.1 Msun, no disc; not a bare photosphere"),
     ModelSubclass("YSO", "TD", "Transition disc: Stage II/III carved by the Gutermuth 24um criterion"),
