@@ -14,12 +14,22 @@ from dataclasses import dataclass
 # The eight SESNA bands, transcribed from sesnacomplete.constants.BANDS.
 # wvl_um is the precise in-flight-calibrated effective wavelength (matches
 # the old BANDS[...].wvl_effective_um). vega_zero_point_jy is the Vega-system
-# zero-point flux density in Jy.
+# zero-point flux density in Jy. sigma_cal_dex is the survey's own absolute-
+# calibration systematic in log10 flux (SPEC_BMSTP_DRAFT.md sec 6.1), added
+# in quadrature to a source's statistical log-flux error by every consumer
+# of the fit's per-band variance (`fittp.likelihood.prepare`,
+# `fittp.classify`); it is a property of the survey, not of the fit, so it
+# lives here beside the band's other survey quantities.
 #
 # Sources, as cited in the old file:
 #   2MASS J/H/Ks: Cohen, Wheaton & Megeath 2003, AJ 126, 1090.
 #   IRAC I1-I4: Reach et al. 2005 (astro-ph/0507139) / IRAC Instrument Handbook.
 #   MIPS M1: Rieke et al. 2008, ApJ 135, 2245.
+#
+# sigma_cal_dex sources (distinct from the zero-point sources above):
+#   2MASS J/H/Ks: Skrutskie et al. 2006, AJ 131, 1163; 0.010 dex.
+#   IRAC I1-I4: Reach et al. 2005, astro-ph/0507139; 0.013 dex.
+#   MIPS M1: Engelbracht et al. 2007, PASP 119, 994; 0.017 dex.
 @dataclass(frozen=True)
 class Band:
     key: str
@@ -27,17 +37,27 @@ class Band:
     wvl_um: float
     vega_zero_point_jy: float
     source: str
+    sigma_cal_dex: float
+    sigma_cal_source: str
 
 
 BANDS = (
-    Band("J", "2MASS", 1.235, 1594.0, "Cohen, Wheaton & Megeath 2003, AJ 126, 1090"),
-    Band("H", "2MASS", 1.662, 1024.0, "Cohen, Wheaton & Megeath 2003, AJ 126, 1090"),
-    Band("Ks", "2MASS", 2.159, 666.7, "Cohen, Wheaton & Megeath 2003, AJ 126, 1090"),
-    Band("I1", "IRAC", 3.550, 280.9, "Reach et al. 2005 (astro-ph/0507139) / IRAC Instrument Handbook"),
-    Band("I2", "IRAC", 4.493, 179.7, "Reach et al. 2005 (astro-ph/0507139) / IRAC Instrument Handbook"),
-    Band("I3", "IRAC", 5.731, 115.0, "Reach et al. 2005 (astro-ph/0507139) / IRAC Instrument Handbook"),
-    Band("I4", "IRAC", 7.872, 64.13, "Reach et al. 2005 (astro-ph/0507139) / IRAC Instrument Handbook"),
-    Band("M1", "MIPS", 23.68, 7.17, "Rieke et al. 2008, ApJ 135, 2245"),
+    Band("J", "2MASS", 1.235, 1594.0, "Cohen, Wheaton & Megeath 2003, AJ 126, 1090",
+         0.010, "Skrutskie et al. 2006, AJ 131, 1163"),
+    Band("H", "2MASS", 1.662, 1024.0, "Cohen, Wheaton & Megeath 2003, AJ 126, 1090",
+         0.010, "Skrutskie et al. 2006, AJ 131, 1163"),
+    Band("Ks", "2MASS", 2.159, 666.7, "Cohen, Wheaton & Megeath 2003, AJ 126, 1090",
+         0.010, "Skrutskie et al. 2006, AJ 131, 1163"),
+    Band("I1", "IRAC", 3.550, 280.9, "Reach et al. 2005 (astro-ph/0507139) / IRAC Instrument Handbook",
+         0.013, "Reach et al. 2005, astro-ph/0507139"),
+    Band("I2", "IRAC", 4.493, 179.7, "Reach et al. 2005 (astro-ph/0507139) / IRAC Instrument Handbook",
+         0.013, "Reach et al. 2005, astro-ph/0507139"),
+    Band("I3", "IRAC", 5.731, 115.0, "Reach et al. 2005 (astro-ph/0507139) / IRAC Instrument Handbook",
+         0.013, "Reach et al. 2005, astro-ph/0507139"),
+    Band("I4", "IRAC", 7.872, 64.13, "Reach et al. 2005 (astro-ph/0507139) / IRAC Instrument Handbook",
+         0.013, "Reach et al. 2005, astro-ph/0507139"),
+    Band("M1", "MIPS", 23.68, 7.17, "Rieke et al. 2008, ApJ 135, 2245",
+         0.017, "Engelbracht et al. 2007, PASP 119, 994"),
 )
 BANDS_BY_KEY = {b.key: b for b in BANDS}
 

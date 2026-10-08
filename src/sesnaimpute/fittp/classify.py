@@ -47,7 +47,7 @@ within; on `[m, u]` (and its transpose `[u, m]`) the fit's own
 cross-covariance between a measured and an imputed band, `sum_k P_k (D_k
 Sigma_k D_k^T)[m, u]`, `P_k` the MAP class's stored `P_DENSE` (and `1 -
 P_DENSE`) and `Sigma_k = (X^T W X)^-1` rebuilt here (never stored) from the
-catalogue's own measured-band weights (`likelihood.SIGMA_CAL_DEX`, this
+catalogue's own measured-band weights (`constants.SIGMA_CAL_DEX`, this
 source's MAP class's own `sigma_lib,L`) and `D_k`'s design from `config`
 at law `k` (`population.selection.kappa_hybrid`/`ak_per_av`, `likelihood
 .GRAY_COLUMN`) -- the same two matrix products `likelihood.fit` forms per
@@ -67,7 +67,7 @@ import numpy as np
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
-from sesnaimpute.constants import GUTERMUTH_LABELS
+from sesnaimpute.constants import GUTERMUTH_LABELS, SIGMA_CAL_DEX
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
@@ -432,7 +432,7 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     with np.errstate(divide="ignore", invalid="ignore"):
         sigma_log = sigma / (safe_flux * _LN10)
     sigma_lib_map = sigma_lib_vals[map_c_safe]                        # (m,)
-    sigma2 = sigma_log ** 2 + likelihood.SIGMA_CAL_DEX[None, :] ** 2 + sigma_lib_map[:, None] ** 2
+    sigma2 = sigma_log ** 2 + SIGMA_CAL_DEX[None, :] ** 2 + sigma_lib_map[:, None] ** 2
     weight = np.where(detected & (sigma_log > 0), 1.0 / sigma2, 0.0)  # (m, 8)
     cross_0, cross_1 = _cross_cov_by_law(config, weight)
     p_dense_map = p_dense_stack[map_c_safe, row_idx]                  # (m,)

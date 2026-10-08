@@ -10,6 +10,7 @@ Pattern:
     # VEGA_ZERO_POINT_JY = {"J": 1594.0}  # Cohen, Wheaton & Megeath 2003, AJ 126, 1090
 """
 
+import numpy as np
 import pandas as pd
 
 from sesnaimpute import definitions
@@ -46,3 +47,14 @@ VEGA_ZERO_POINT_MJY = {b.key: b.vega_zero_point_jy * 1000.0 for b in definitions
 #: Riello et al. 2021, A&A 649, A3 (Gaia EDR3 photometric calibration,
 #: carried forward unchanged into DR3).
 GAIA_G_VEGA_ZP_MJY = 3_228_750.0
+
+#: SPEC_BMSTP_DRAFT.md section 6.1 -- the absolute-calibration systematic
+#: per band, dex, added in quadrature to the statistical log-flux error by
+#: every consumer of the fit's per-band variance (`fittp.likelihood.prepare`,
+#: `fittp.classify`). The same numbers as `definitions.BANDS[*]
+#: .sigma_cal_dex`, in `definitions.BANDS`' own order (2MASS J, H, Ks;
+#: IRAC I1-I4; MIPS M1). Sources (per band, as in `definitions.BANDS`):
+#: 2MASS J/H/Ks, Skrutskie et al. 2006, AJ 131, 1163 (0.010 dex); IRAC
+#: I1-I4, Reach et al. 2005, astro-ph/0507139 (0.013 dex); MIPS M1,
+#: Engelbracht et al. 2007, PASP 119, 994 (0.017 dex).
+SIGMA_CAL_DEX = np.array([b.sigma_cal_dex for b in definitions.BANDS], dtype=np.float64)

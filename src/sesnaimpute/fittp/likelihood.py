@@ -37,6 +37,7 @@ import h5py
 import numba
 import numpy as np
 
+from sesnaimpute import constants
 from sesnaimpute import definitions
 from sesnaimpute.population import selection as population_selection
 
@@ -65,15 +66,6 @@ ORIGIN_UNOBSERVED = 91
 #: magnitudes; the design's own A_V amplitude is clamped to this converted
 #: by the source's own (A_K/A_V).
 AV_CLAMP_MAX_AK = 75.0
-
-#: SPEC_BMSTP_DRAFT.md section 6.1 -- the absolute-calibration systematic
-#: per band, dex, added in quadrature to the statistical log-flux error;
-#: `BAND_KEYS`' own order (2MASS J, H, Ks; IRAC I1-I4; MIPS M1).
-SIGMA_CAL_DEX = np.array([
-    0.010, 0.010, 0.010,          # 2MASS -- Skrutskie et al. 2006, AJ 131, 1163
-    0.013, 0.013, 0.013, 0.013,   # IRAC -- Reach et al. 2005, astro-ph/0507139
-    0.017,                        # MIPS 24 um -- Engelbracht et al. 2007, PASP 119, 994
-], dtype=np.float64)
 
 _SQRT2 = np.float32(np.sqrt(2.0))
 
@@ -269,14 +261,15 @@ def prepare(config, flux, sigma, origin, sigma_lib_l, f_lim50, width_dex):
 
     # section 6.1: the per-band variance is the statistical log-flux error
     # in quadrature with the band's absolute-calibration systematic
-    # (SIGMA_CAL_DEX) and the class's library resolution (sigma_lib,L,
-    # one number, the same in every band): sigma_log = sigma_f/(f ln 10),
-    # weight 1/sigma_i^2 for detected bands, zero elsewhere (undetected
-    # bands never enter the sum: see the zero row/column of P in `fit`).
+    # (`constants.SIGMA_CAL_DEX`, a survey property, not this module's own)
+    # and the class's library resolution (sigma_lib,L, one number, the
+    # same in every band): sigma_log = sigma_f/(f ln 10), weight
+    # 1/sigma_i^2 for detected bands, zero elsewhere (undetected bands
+    # never enter the sum: see the zero row/column of P in `fit`).
     safe_flux = np.where(detected, flux, 1.0)
     log10_f_obs = np.log10(safe_flux)
     sigma_log = sigma / (safe_flux * np.log(10.0))
-    sigma2 = sigma_log ** 2 + SIGMA_CAL_DEX ** 2 + sigma_lib_l ** 2
+    sigma2 = sigma_log ** 2 + constants.SIGMA_CAL_DEX ** 2 + sigma_lib_l ** 2
     weight = np.where(detected & (sigma_log > 0), 1.0 / sigma2, 0.0)
 
     # (16, R2 D3): a non-finite sigma on a detected band already carries
