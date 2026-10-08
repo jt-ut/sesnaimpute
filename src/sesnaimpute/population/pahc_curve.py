@@ -71,32 +71,59 @@ flag its excess sources; then again on the shelf with that cut applied,
 which is what is shipped and used for both tests' final sigma. Both
 iterations are reported at build.
 
-The shipped curve is measured on sources with no 4.5 micron excess (the
-final iteration's flag); the curve on the 4.5-micron-excess sources is
-reported beside it, and the same shipped construction is repeated per
-region as a check (SPEC_PRIORS.md section 4, "Checks"). Both curves and
-the region checks share one 40-bin log10 q grid, spanning the full
-eligible population's own measured range. A bin's own 8 micron-measured
-share, `m(bin) = M_PER_BIN/N_PER_BIN`, varies bin to bin (it falls with
-`q`, the module docstring's own reason for the enlarged denominator), so
-the noise floor -- a false 3 sigma excess from a source that carries no
-real nebular contamination -- cannot be a rate against the whole
-denominator: it is a property of an 8 micron measurement, so it is
-measured as one, `F_NOISE`, the shelf's own excess count over the
-shelf's own 8-micron-measured count, `0.1 <= q <= 2.0`, no 4.5 micron
-excess, one number survey-wide. Each bin's own measured-only excess
-fraction has `F_NOISE` subtracted and clipped at zero, since a
-probability cannot be negative, then scaled back down by that bin's own
-`m(bin)` -- `P_Q(bin) = m(bin) * clip(p(excess | measured, bin) -
-F_NOISE, 0)` -- so a bin with almost no 8 micron coverage is not judged
-against a noise rate measured where coverage is high; the raw curve
-(`m(bin) * p(excess | measured, bin)`, no noise subtracted) is kept
-beside it.
+The curve `P(q)` is measured and shipped PER REGION (ledger C7,
+`REVIEW_LEDGER_2026-10-08.md`; `verify_B.md` V7; `prior_5_PAHC.md`
+section 4): the shelf excess rate (`0.1 <= q <= 2`, no 4.5 micron
+excess) is regional by a factor of 8 -- Orion A 0.047, Pipe 0.0056,
+Aquila 0.0054, against the one-survey-wide curve's own shipped shelf
+values of 0.0033-0.0068 -- because nebular 8 micron brightness is a
+property of the region (Povich et al. 2007, ApJ 660, 346), not a
+survey-wide constant. One curve applied to every region therefore
+starved PAHC's prior by about 1.4 nats in Orion A's shelf while handing
+Pipe and Musca a nonzero probability where their own measurement
+supports zero. Every region in the build's own region list gets its own
+row, `p(excess | measured, bin)` by bin, with NO scaling by that bin's
+own 8-micron-measured share `m(bin) = M_PER_BIN/N_PER_BIN`: the earlier
+construction's `P_Q(bin) = m(bin) * p(excess | measured, bin)` is
+equivalent to asserting that a source with no 8 micron measurement is
+never contaminated, which is a depth statement, not a contamination
+one, and understated the level by roughly 1.6 dex at high `q`, where
+most of the eligible population sits (`prior_5_PAHC.md` section 1). The
+shipped per-region value is the region's own measured-only excess
+fraction, unscaled, with the floor below subtracted and clipped at
+zero: `P_Q_REGION(region, bin) = clip(p(excess | measured, region, bin)
+- F_FLOOR, 0)`; the same quantity before the floor subtraction is kept
+beside it, `P_Q_REGION_RAW`.
+
+The floor -- a false 3 sigma excess from a source that carries no real
+nebular contamination -- is a property of the 8 micron band itself, not
+of any one region's own nebular brightness, so it is measured once,
+survey-wide in CONSTRUCTION but not in POPULATION: pooled only over the
+three regions whose own measured shelf rate is lowest, Pipe, Musca and
+Aquila (`QUIESCENT_FLOOR_REGIONS`), rather than over all thirty. The
+earlier construction pooled the floor over every region, `F_NOISE =
+0.0161`, about 2.5 times the quiescent regions' own rate (about 0.006),
+because that pool is dominated by nebulous regions and so contains real
+contamination, subtracting signal from every bin it is meant to
+protect. `F_FLOOR` is the quiescent regions' own pooled shelf excess
+count over their own pooled shelf 8-micron-measured count, one number,
+subtracted from every region's curve alike.
+
+The curve on sources WITH a 4.5 micron excess (disk-bearing or
+otherwise circumstellar) is measured the same unscaled way,
+`p(excess | measured, bin)` with no `m(bin)` factor, pooled survey-wide
+and left unfloored, and reported beside the shipped curve
+(SPEC_BMSTP_DRAFT.md section 5.3, "The curve on disc-excess sources is
+reported beside it").
 
 Reads SESNA photometry (the curated catalogues, their own detection
 limits and adopted column) and the external TRILEGAL population -- never
-a classification label (rule 7). Writes one survey-wide product,
-`bms/pahc/curve_pahc_survey.hdf5`.
+a classification label (rule 7). Writes one product with a region axis,
+`population/pahc/curve_pahc_survey.hdf5`; the earlier design's
+`bms/pahc/curve_pahc_survey.hdf5` is a stale, superseded toy (225
+sources, 1 region, 6 Sep) that this module does not read, write, or
+delete (CODING_RULES_BMSTP.md: no unit edits the earlier design's
+products under `bms/`; its removal is the rebuild's own housekeeping).
 
 The bright end of q (log10 q from about -2.5 to -1.5, q 30-1000: sources
 far brighter than their own 8 micron limit) holds no possible nebular-
@@ -110,12 +137,14 @@ exceeds any excess nebular light alone could add. A 3 sigma excess from
 nebular light therefore requires `q >= Q_MIN = EXCESS_SIGMA * s`; below
 that, an observed 3 sigma 8 micron excess with no 4.5 micron excess is
 circumstellar (a dusty evolved star, or a disc with an inner hole), not
-contamination. Every `P_Q` bin whose upper edge in q lies below `Q_MIN`
-is set to exactly zero (bins at or above `Q_MIN` are unchanged, floor and
-all); each such bin's own measured, unfloored excess fraction is kept
-instead in `P_Q_BRIGHT_EXCESS`, with its own `N_PER_BIN_BRIGHT_EXCESS` --
-the fraction of bright field stars carrying circumstellar 8 micron
-emission with no 4.5 micron excess.
+contamination. Every `P_Q_REGION` bin whose upper edge in q lies below
+`Q_MIN` is set to exactly zero, in every region's row alike since
+`Q_MIN` is not region-specific (bins at or above `Q_MIN` are unchanged,
+floor and all); each such bin's own measured, unfloored, per-region
+excess fraction is kept instead in `P_Q_REGION_BRIGHT_EXCESS`, with its
+own `N_PER_BIN_REGION_BRIGHT_EXCESS` -- that region's own fraction of
+bright field stars carrying circumstellar 8 micron emission with no 4.5
+micron excess.
 """
 
 import os
@@ -182,6 +211,14 @@ N_Q_BINS = 40
 #: The floor's own flat shelf in q (SPEC_PRIORS.md section 4, the `P(q)`
 #: row: "the floor being the flat shelf at 0.1 <= q <= 2").
 FLOOR_Q_LO, FLOOR_Q_HI = 0.1, 2.0
+
+#: The regions whose pooled shelf excess rate anchors the noise floor
+#: `F_FLOOR` (ledger C7, `REVIEW_LEDGER_2026-10-08.md`; WP-POP-4): the
+#: three regions `verify_B.md` V7 and `prior_5_PAHC.md` section 4 measure
+#: the lowest shelf rate on, about 0.006 pooled, against the
+#: all-region pool's 0.0161 -- a region earns a place here by its own
+#: measured rate, not by an independent quiescence criterion.
+QUIESCENT_FLOOR_REGIONS = ("Pipe", "Musca", "Aquila")
 
 #: `read()`'s own right-hand extrapolation rule, not the stored curve: a
 #: bin below this count is too sparse to hold on its own beyond the
@@ -485,17 +522,6 @@ def excess_flags(f_obs, f_pred, sigma_meas, width_mag, valid):
 # 3. the 40-bin curve: shipped, disk-excess, per-region check, floor
 # ---------------------------------------------------------------------------
 
-def binned_fraction(log10_q, excess, edges):
-    """`(fraction, count)` per bin of `edges`: `binned_statistic`'s own
-    vectorised mean of the excess flag and count, no Python loop over
-    bins (rule 8). Empty bins report a zero fraction and a zero count."""
-    counts, _, _ = binned_statistic(log10_q, excess.astype(np.float64), statistic="count", bins=edges)
-    means, _, _ = binned_statistic(log10_q, excess.astype(np.float64), statistic="mean", bins=edges)
-    counts = counts.astype(np.int64)
-    fraction = np.where(counts > 0, means, 0.0)
-    return fraction, counts
-
-
 def binned_measured_rate(log10_q, have_8um, excess8, edges):
     """`(n, m, p_measured)` per bin of `edges`, all `(n_bin,)`: `n` the
     denominator count (every source, module docstring), `m` the count
@@ -528,40 +554,46 @@ def q_min_bright_excess(width_mag, excess_sigma=EXCESS_SIGMA):
 
 
 def apply_bright_end_rule(curve, q_min):
-    """Zeros every `P_Q` bin whose upper edge in q lies below `q_min`
-    (module docstring): nebular light cannot produce a 3 sigma excess
-    there, so the bin's measured excess fraction is not contamination.
-    Those bins' own unfloored excess fraction and count move to
-    `p_bright_excess`/`n_bright_excess` instead; bins at or above `q_min`
-    are untouched (identity, rule 11)."""
+    """Zeros, in every region's row of `p_region`, the bins whose upper
+    edge in q lies below `q_min` (module docstring): nebular light
+    cannot produce a 3 sigma excess there, so a bin's measured excess
+    fraction there is circumstellar, not contamination -- the same
+    physical argument in every region, since `q_min` comes from the
+    shelf's own survey-wide residual width, not from region. Those
+    bins' own unfloored, per-region excess fraction and count move to
+    `p_region_bright_excess`/`n_region_bright_excess` instead; bins at
+    or above `q_min` are untouched (identity, rule 11)."""
     upper_q = 10.0 ** curve["edges"][1:]
     zeroed = upper_q < q_min
-    p_a = curve["p_a"].copy()
-    p_bright_excess = np.zeros_like(p_a)
-    n_bright_excess = np.zeros_like(curve["n_a"])
-    p_bright_excess[zeroed] = curve["p_a_raw"][zeroed]
-    n_bright_excess[zeroed] = curve["n_a"][zeroed]
-    p_a[zeroed] = 0.0
+    p_region = curve["p_region"].copy()
+    p_region_bright_excess = np.zeros_like(p_region)
+    n_region_bright_excess = np.zeros_like(curve["n_region_bin"])
+    p_region_bright_excess[:, zeroed] = curve["p_region_raw"][:, zeroed]
+    n_region_bright_excess[:, zeroed] = curve["n_region_bin"][:, zeroed]
+    p_region[:, zeroed] = 0.0
     curve = dict(curve)
-    curve.update(p_a=p_a, p_bright_excess=p_bright_excess,
-                 n_bright_excess=n_bright_excess, zeroed=zeroed, q_min=q_min)
+    curve.update(p_region=p_region, p_region_bright_excess=p_region_bright_excess,
+                 n_region_bright_excess=n_region_bright_excess, zeroed=zeroed, q_min=q_min)
     return curve
 
 
-def build_curve(q, excess8, excess45, have_8um, region_idx, n_region, n_bins=N_Q_BINS):
-    """Assembles the 40-bin log10 q curve family: the shipped curve (no
-    4.5 micron excess, noise-corrected and raw), the disk-excess curve
-    (with a 4.5 micron excess), the per-region check curves, and the
-    noise rate. Returns a dict ready for `write_curve`.
+def build_curve(q, excess8, excess45, have_8um, region_idx, region_names, n_bins=N_Q_BINS):
+    """Assembles the 40-bin log10 q curve family, per region (WP-POP-4,
+    ledger C7): the shipped per-region curve (no 4.5 micron excess,
+    floored and raw), the disk-excess curve (with a 4.5 micron excess,
+    survey-wide, unfloored), and the floor. Returns a dict ready for
+    `write_curve`.
 
-    The noise rate, `F_NOISE`, is a property of an 8 micron measurement,
-    not of the denominator: it is the shelf's own excess count over its
-    own 8-micron-measured count, `0.1 <= q <= 2`, no 4.5 micron excess. A
-    bin's own `P_Q` is that bin's 8-micron-measured fraction, `m(bin)`,
-    times its own measured-only excess fraction net of `F_NOISE`, clipped
-    at zero -- so a bin with a tiny measured share is scaled down by that
-    share rather than compared, unscaled, against a shelf noise rate
-    measured on a much larger one.
+    `F_FLOOR` is a property of the 8 micron band's own false-excess
+    rate, not of any one region's nebular brightness: it is the pooled
+    shelf excess count over the pooled shelf 8-micron-measured count,
+    `0.1 <= q <= 2`, no 4.5 micron excess, restricted to
+    `QUIESCENT_FLOOR_REGIONS` -- never the all-region pool, which is
+    dominated by nebulous regions and so is itself contaminated (module
+    docstring). Each region's own `P_Q_REGION` is that region's own
+    measured-only excess fraction net of `F_FLOOR`, clipped at zero, with
+    NO scaling by that bin's 8-micron-measured share: a source with no 8
+    micron measurement is not assumed uncontaminated.
     """
     finite_q = np.isfinite(q) & (q > 0)
     q, excess8, excess45, have_8um, region_idx = (
@@ -569,34 +601,43 @@ def build_curve(q, excess8, excess45, have_8um, region_idx, n_region, n_bins=N_Q
     log10_q = np.log10(q)
     edges = np.linspace(log10_q.min(), log10_q.max(), n_bins + 1)
 
-    mask_a = ~excess45
-    mask_b = excess45
-    n_a, m_a, p_measured_a = binned_measured_rate(log10_q[mask_a], have_8um[mask_a], excess8[mask_a], edges)
-    p_b_raw, n_b = binned_fraction(log10_q[mask_b], excess8[mask_b], edges)
-
-    # the noise rate: the shelf's own excess count over its own
-    # 8-micron-measured count (module docstring, "the floor"; owner's
-    # ruling on the enlarged denominator)
+    mask_a = ~excess45  # the shipped population: no 4.5 micron excess
+    mask_b = excess45   # the disk-excess population, reported beside it
     shelf = mask_a & (q >= FLOOR_Q_LO) & (q <= FLOOR_Q_HI)
-    shelf_measured = shelf & have_8um
-    f_noise = float(np.mean(excess8[shelf_measured])) if shelf_measured.any() else 0.0
 
-    m_frac_a = np.where(n_a > 0, m_a / np.maximum(n_a, 1), 0.0)
-    p_a_raw = m_frac_a * p_measured_a
-    p_a = m_frac_a * np.clip(p_measured_a - f_noise, 0.0, None)
+    floor_region_idx = [i for i, r in enumerate(region_names) if r in QUIESCENT_FLOOR_REGIONS]
+    if not floor_region_idx:
+        raise ValueError(
+            "pahc_curve.build_curve: none of the floor regions %r are in this build's "
+            "own region list %r -- the noise floor cannot be measured without at least "
+            "one of them" % (QUIESCENT_FLOOR_REGIONS, tuple(region_names)))
+    in_floor_region = np.isin(region_idx, floor_region_idx)
+    floor_shelf_measured = shelf & have_8um & in_floor_region
+    f_floor = float(np.mean(excess8[floor_shelf_measured])) if floor_shelf_measured.any() else 0.0
 
+    n_region = len(region_names)
+    p_region_raw = np.zeros((n_region, n_bins), dtype=np.float64)
     p_region = np.zeros((n_region, n_bins), dtype=np.float64)
     n_region_bin = np.zeros((n_region, n_bins), dtype=np.int64)
+    m_region_bin = np.zeros((n_region, n_bins), dtype=np.int64)
     for r in range(n_region):
         sel = mask_a & (region_idx == r)
-        if sel.any():
-            n_r, m_r, p_measured_r = binned_measured_rate(log10_q[sel], have_8um[sel], excess8[sel], edges)
-            p_region[r] = np.where(n_r > 0, m_r / np.maximum(n_r, 1), 0.0) * p_measured_r
-            n_region_bin[r] = n_r
+        n_r, m_r, p_measured_r = binned_measured_rate(log10_q[sel], have_8um[sel], excess8[sel], edges)
+        p_region_raw[r] = p_measured_r
+        p_region[r] = np.clip(p_measured_r - f_floor, 0.0, None)
+        n_region_bin[r] = n_r
+        m_region_bin[r] = m_r
+
+    n_disk_excess_bin, m_disk_excess_bin, p_disk_excess = binned_measured_rate(
+        log10_q[mask_b], have_8um[mask_b], excess8[mask_b], edges)
 
     return dict(
-        edges=edges, p_a=p_a, p_a_raw=p_a_raw, n_a=n_a, m_a=m_a, f_noise=f_noise,
-        p_b_raw=p_b_raw, n_b=n_b, p_region=p_region, n_region_bin=n_region_bin,
+        edges=edges, region_names=tuple(region_names),
+        f_floor=f_floor, floor_regions=tuple(region_names[i] for i in floor_region_idx),
+        p_region=p_region, p_region_raw=p_region_raw,
+        n_region_bin=n_region_bin, m_region_bin=m_region_bin,
+        p_disk_excess=p_disk_excess, n_disk_excess_bin=n_disk_excess_bin,
+        m_disk_excess_bin=m_disk_excess_bin,
         n_shipped=int(mask_a.sum()), n_disk_excess=int(mask_b.sum()),
         n_eligible=int(finite_q.sum()),
     )
@@ -606,36 +647,46 @@ def build_curve(q, excess8, excess45, have_8um, region_idx, n_region, n_bins=N_Q
 # 4. write, read
 # ---------------------------------------------------------------------------
 
-def write_curve(path, curve, q_min, residual_width_mag):
+def write_curve(path, curve, q_min, residual_width_mag, residual_width_45_mag):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "survey"
         f.attrs["Q_MIN"] = float(q_min)
         f.attrs["RESIDUAL_WIDTH_MAG"] = float(residual_width_mag)
-        f.attrs["F_NOISE"] = float(curve["f_noise"])
-        for name, data in (
-            ("LOG10_Q_EDGES", curve["edges"].astype(np.float64)),
-            ("P_Q", curve["p_a"].astype(np.float64)),
-            ("N_PER_BIN", curve["n_a"].astype(np.int64)),
-            ("M_PER_BIN", curve["m_a"].astype(np.int64)),
-            ("P_Q_BRIGHT_EXCESS", curve["p_bright_excess"].astype(np.float64)),
-            ("N_PER_BIN_BRIGHT_EXCESS", curve["n_bright_excess"].astype(np.int64)),
+        f.attrs["RESIDUAL_WIDTH_45_MAG"] = float(residual_width_45_mag)
+        f.attrs["F_FLOOR"] = float(curve["f_floor"])
+        f.attrs["FLOOR_REGIONS"] = ", ".join(curve["floor_regions"])
+        for name, data, extra in (
+            ("LOG10_Q_EDGES", curve["edges"].astype(np.float64), {}),
+            ("REGION", np.array(curve["region_names"], dtype=object),
+             dict(dtype=h5py.string_dtype(encoding="utf-8"))),
+            ("P_Q_REGION", curve["p_region"].astype(np.float64), {}),
+            ("P_Q_REGION_RAW", curve["p_region_raw"].astype(np.float64), {}),
+            ("N_PER_BIN_REGION", curve["n_region_bin"].astype(np.int64), {}),
+            ("M_PER_BIN_REGION", curve["m_region_bin"].astype(np.int64), {}),
+            ("P_Q_REGION_BRIGHT_EXCESS", curve["p_region_bright_excess"].astype(np.float64), {}),
+            ("N_PER_BIN_REGION_BRIGHT_EXCESS", curve["n_region_bright_excess"].astype(np.int64), {}),
+            ("P_Q_DISK_EXCESS", curve["p_disk_excess"].astype(np.float64), {}),
+            ("N_PER_BIN_DISK_EXCESS", curve["n_disk_excess_bin"].astype(np.int64), {}),
         ):
-            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
+            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)], **extra)
 
 
-def read(config):
-    """The shipped curve `P(q)` as a callable, linear in log10 q. Left of
-    the measured range, the first bin's own value is held. Right of it,
-    the value held is not necessarily the last bin's own value: a bin
-    with fewer than `MIN_PLATEAU_BIN_COUNT` stars is too sparse to trust
-    on its own (a couple of stars can put it far from the shelf), so
-    every bin beyond the last bin that clears that count is folded into
-    one plateau value -- the count-weighted mean `P` over the bins at
-    `q` above `PLATEAU_LOG10_Q_MIN`, the curve's own flat high-q shelf --
-    and that plateau is what both those bins and the right-hand fill
-    hold. The stored bins and counts on disk are unchanged; only how
-    this reader extrapolates beyond them."""
+def read(config, region):
+    """The shipped curve `P(q)` for one region, as a callable, linear in
+    log10 q (WP-POP-4, ledger C7: the excess rate is regional by a
+    factor of 8, so every consumer reads its own region's row, never a
+    pooled one -- there is no region-less fallback). Left of the
+    measured range, the first bin's own value is held. Right of it, the
+    value held is not necessarily the last bin's own value: a bin with
+    fewer than `MIN_PLATEAU_BIN_COUNT` sources, in THIS region, is too
+    sparse to trust on its own, so every bin beyond the last one that
+    clears that count, in this region's own row, is folded into one
+    plateau value -- the count-weighted mean `P` over this region's bins
+    at `q` above `PLATEAU_LOG10_Q_MIN` -- and that plateau is what both
+    those bins and the right-hand fill hold. The stored bins and counts
+    on disk are unchanged; only how this reader extrapolates beyond
+    them."""
     path = config_module.product_path(config, "population", "pahc", "curve", "survey")
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -643,8 +694,15 @@ def read(config):
             f"'prior.pahc_curve' RUNBOOK line first")
     with h5py.File(path, "r") as f:
         edges = f["LOG10_Q_EDGES"][:]
-        p_q = f["P_Q"][:]
-        n_per_bin = f["N_PER_BIN"][:]
+        region_names = [r.decode("utf-8") if isinstance(r, bytes) else r for r in f["REGION"][:]]
+        if region not in region_names:
+            raise ValueError(
+                f"prior.pahc_curve.read: region {region!r} is not one of the "
+                f"{len(region_names)} regions this curve was built on {region_names!r} "
+                f"-- rebuild 'prior.pahc_curve' with that region included")
+        r = region_names.index(region)
+        p_q = f["P_Q_REGION"][r]
+        n_per_bin = f["N_PER_BIN_REGION"][r]
     centers = 0.5 * (edges[:-1] + edges[1:])
 
     on_plateau = (centers >= PLATEAU_LOG10_Q_MIN) & (n_per_bin > 0)
@@ -667,10 +725,17 @@ def read(config):
 # ---------------------------------------------------------------------------
 
 def build(config, regions=None):
-    """Measures `P(q)` over the pool of sources in `regions` (default:
-    all thirty), writes `bms/pahc/curve_pahc_survey.hdf5`. The
-    photospheric colour relation pools the TRILEGAL retained population
-    of the same region set. The regions are read in chunks of at most
+    """Measures `P(q)` per region over `regions` (default: all thirty),
+    writes `population/pahc/curve_pahc_survey.hdf5` with one row per
+    region (WP-POP-4, ledger C7). The photospheric colour relation and
+    both residual widths still pool the TRILEGAL retained population and
+    the shelf of the same region set (SPEC_BMSTP_DRAFT.md section 5.3:
+    "measured once, survey-wide"), since neither is a contamination
+    rate; only the contamination rate itself, and the floor that nets
+    it, are now region-specific and quiescent-region-specific
+    respectively. The floor needs at least one of
+    `QUIESCENT_FLOOR_REGIONS` in `regions` (`build_curve` raises
+    otherwise). The regions are read in chunks of at most
     `config.n_jobs` at a time (CODING_RULES.md 10a)."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     st = progress.Stage("prior.pahc_curve")
@@ -742,23 +807,40 @@ def build(config, regions=None):
           f"n_8um={int((shelf_final & have_8um).sum())}) "
           f"[4.5]-[8.0]={width48:.4f} [3.6]-[4.5]={width45:.4f} mag", flush=True)
 
-    curve = build_curve(q, excess8, excess45, have_8um, region_idx, len(region_names))
+    curve = build_curve(q, excess8, excess45, have_8um, region_idx, region_names)
 
     # the bright end of q: below Q_MIN a 3 sigma excess cannot be
-    # nebular light, so P_Q is zeroed there and the measured fraction
-    # moves to P_Q_BRIGHT_EXCESS (module docstring)
+    # nebular light, so P_Q_REGION is zeroed there (every region alike)
+    # and the measured fraction moves to P_Q_REGION_BRIGHT_EXCESS
+    # (module docstring)
     q_min = q_min_bright_excess(width48)
     curve = apply_bright_end_rule(curve, q_min)
     n_zeroed = int(curve["zeroed"].sum())
-    frac_eligible_zeroed = float(curve["n_a"][curve["zeroed"]].sum()) / curve["n_eligible"]
+    frac_eligible_zeroed = float(curve["n_region_bin"][:, curve["zeroed"]].sum()) / curve["n_eligible"]
 
     out_path = config_module.product_path(config, "population", "pahc", "curve", "survey")
-    write_curve(out_path, curve, q_min, width48)
+    write_curve(out_path, curve, q_min, width48, width45)
+
+    # the sweep's own identity (WP-POP-4, ledger C7): each region's own
+    # raw shelf rate (no floor subtracted, no m(bin) scaling), measured
+    # directly from the per-source arrays the same way F_FLOOR is
+    # measured, must reproduce the review's independent measurement
+    # (`verify_B.md` V7) -- Orion A 0.047, Aquila 0.005
+    shelf_q_mask = ~excess45 & (q >= FLOOR_Q_LO) & (q <= FLOOR_Q_HI)
+    for check_region, target in (("Orion A", 0.047), ("Aquila", 0.005)):
+        if check_region in region_names:
+            r = region_names.index(check_region)
+            region_shelf_measured = shelf_q_mask & have_8um & (region_idx == r)
+            rate = float(np.mean(excess8[region_shelf_measured])) if region_shelf_measured.any() else float("nan")
+            print(f"pahc_curve: identity -- {check_region} shelf rate (raw, no floor, no "
+                  f"m(bin) scaling), n_measured={int(region_shelf_measured.sum())}: "
+                  f"{rate:.4f} against the review's {target}", flush=True)
 
     st.done(out_path, n_shipped=curve["n_shipped"], n_disk_excess=curve["n_disk_excess"],
-            f_noise=curve["f_noise"], q_min=q_min, n_zeroed=n_zeroed)
+            f_floor=curve["f_floor"], floor_regions=curve["floor_regions"], q_min=q_min, n_zeroed=n_zeroed)
     print(f"pahc_curve: shipped n={curve['n_shipped']} disk-excess n={curve['n_disk_excess']} "
-          f"f_noise={curve['f_noise']:.6f} Q_MIN={q_min:.4f} bins_zeroed={n_zeroed}/{N_Q_BINS} "
+          f"f_floor={curve['f_floor']:.6f} (regions {curve['floor_regions']}) "
+          f"Q_MIN={q_min:.4f} bins_zeroed={n_zeroed}/{N_Q_BINS} "
           f"({frac_eligible_zeroed:.4%} of the eligible, no-4.5um-excess population) "
           f"-> {out_path}", flush=True)
 
