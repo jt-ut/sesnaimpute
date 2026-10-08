@@ -19,13 +19,18 @@ import os
 import h5py
 import numpy as np
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.batches import batches
 from sesnaimpute.gutcolors import crisp
 from sesnaimpute.gutcolors import prob as gc_prob
-from sesnaimpute.readings import set_readings
+
+#: `config.product_path`'s own stem for this module's one product
+#: (`attrs_registry.REGISTRY`'s key, CODING_RULES_BMSTP.md rule 5).
+_STEM = "cascade_classification_source"
 
 #: The fitter's six classes, in the order every P-product's class axis
 #: uses (IMPLEMENTATION_BMSTP_DRAFT.md section 1).
@@ -51,44 +56,9 @@ CONCORDANT_LABELS = {
     "H2S": ("SHOCK_BLOB",),
 }
 
-#: `UNITS`/`READING` (CODING_RULES_BMSTP.md rule 5): every dataset the P10
-#: cascade product carries, measured and imputed halves both.
-_READINGS = {
-    "NAME": ("source name",
-        "The source's name from the SESNA catalog. Rows are in catalog order."),
-    "N_DETECTED": ("bands",
-        "How many of the eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron) "
-        "have a measured, positive flux."),
-    "VERDICT_MEASURED": ("SESNA class code",
-        "The class the Gutermuth et al. (2009) color cuts give from the measured "
-        "fluxes alone. The cuts are deterministic, so this is the category the "
-        "colors fall in, not a most likely class. Codes: 0 deeply embedded "
-        "protostar, 1 class I, 2 class II, 3 transition disk, 9 H2 shock blob, 19 "
-        "PAH emitter (star-forming galaxy), 29 AGN, 39 PAH-contaminated source, 49 "
-        "generic galaxy, 99 diskless star, -100 unclassified, with -100 where no "
-        "cut applies."),
-    "VERDICT_IMPUTED": ("SESNA class code",
-        "The same color cuts after the unmeasured bands are filled in with the "
-        "pipeline's estimates. Those estimates assume the class the pipeline chose, "
-        "so this is a comparison, not independent evidence. Codes as in "
-        "VERDICT_MEASURED."),
-    "P_VERDICT_MEASURED": ("probability",
-        "Probability of each of the color cuts' eleven categories when the measured "
-        "fluxes are varied within their errors. Column order is the LABELS "
-        "attribute. Sums to 1; the unclassified column is the chance that no cut "
-        "applies."),
-    "PSI_VOTES": ("votes",
-        "Four indicators, each casting one vote across the six classes in CLASSES "
-        "order: the class mix expected at the source's position, Gaia's detection "
-        "and parallax, the Gutermuth color cuts on the measured fluxes, and those "
-        "cuts on the filled-in spectrum. An indicator with nothing to say abstains, "
-        "so a row sums to between 0 and 4. Reported only; the classification does "
-        "not use it."),
-    "ENTROPY_PSI_VOTES": ("fraction of maximum",
-        "How spread those votes are, divided by their maximum spread. 0 means the "
-        "indicators that voted agreed, 1 means they spread evenly over the six "
-        "classes. Not a number where none voted."),
-}
+#: `UNITS`/`READING` for every dataset here (CODING_RULES_BMSTP.md rule 5),
+#: measured and imputed halves both, live in `attrs_registry.REGISTRY`,
+#: keyed by `(_STEM, name)`.
 
 
 def verdict_code(prob):
@@ -144,11 +114,9 @@ def write_region(path, result):
     """
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
-        f.create_dataset("NAME", data=result["name"])
-        f.create_dataset("P_VERDICT_MEASURED", data=result["p_verdict"])
-        f.create_dataset("VERDICT_MEASURED", data=result["verdict"])
-        f.create_dataset("N_DETECTED", data=result["n_detected"])
-        set_readings(f, _READINGS)
+        for key, field in (("NAME", "name"), ("P_VERDICT_MEASURED", "p_verdict"),
+                           ("VERDICT_MEASURED", "verdict"), ("N_DETECTED", "n_detected")):
+            build_module.write_dataset(f, key, result[field], *REGISTRY[(_STEM, key)])
         f.attrs["GRANULE"] = "source"
         f.attrs["LABELS"] = np.array(crisp.LABELS, dtype="S20")
         f.attrs["CLASSES"] = np.array(CLASSES, dtype="S8")
@@ -343,12 +311,12 @@ def write_region_imputed(path, imputed):
         for name in ("VERDICT_IMPUTED", "PSI_VOTES", "ENTROPY_PSI_VOTES"):
             if name in f:
                 del f[name]
-        f.create_dataset("VERDICT_IMPUTED", data=imputed["verdict"])
+        build_module.write_dataset(f, "VERDICT_IMPUTED", imputed["verdict"], *REGISTRY[(_STEM, "VERDICT_IMPUTED")])
         # (n, 6) CLASSES-order votes (0-4 per row) and the row's own
         # entropy (nats), normalised to 1, NaN where nothing voted.
-        f.create_dataset("PSI_VOTES", data=imputed["psi_votes"])
-        f.create_dataset("ENTROPY_PSI_VOTES", data=imputed["entropy_psi_votes"])
-        set_readings(f, _READINGS)
+        build_module.write_dataset(f, "PSI_VOTES", imputed["psi_votes"], *REGISTRY[(_STEM, "PSI_VOTES")])
+        build_module.write_dataset(f, "ENTROPY_PSI_VOTES", imputed["entropy_psi_votes"],
+                                    *REGISTRY[(_STEM, "ENTROPY_PSI_VOTES")])
 
 
 def _path(config, region):

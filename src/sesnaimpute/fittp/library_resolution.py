@@ -20,14 +20,19 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from sesnaimpute import batches as batches_module
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.fittp.likelihood import GRAY_COLUMN
 from sesnaimpute.population import selection as population_selection
-from sesnaimpute.readings import set_readings
+
+#: `config.product_path`'s own stem for this module's one product
+#: (`attrs_registry.REGISTRY`'s key, CODING_RULES_BMSTP.md rule 5).
+_STEM = "library-resolution_check_survey"
 
 #: The eight SESNA bands, `catalog`'s and `fittp.likelihood`'s own order.
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
@@ -240,53 +245,10 @@ def _library_thickness(config, cls, sigma_i, kappa_prime):
     return names.size, d50, d90, d90 <= RESOLUTION_TOL
 
 
-#: `UNITS`/`READING` (CODING_RULES_BMSTP.md rule 5): every dataset this
-#: survey check carries. A module-level constant so a file already on
-#: disk from before this rule can be backfilled in place (`set_readings`
-#: skips any name not present), without a recompute.
-_READINGS = {
-    "LIBRARY": ("library name",
-        "The model library this row describes, one per class."),
-    "SIGMA_LIB_DEX": ("dex",
-        "How finely that library samples spectral shape: the typical distance from "
-        "a model to its nearest neighbor. The fit adds this to each band's "
-        "measurement error, so no model can beat a near-identical one by more than "
-        "the sampling allows."),
-    "SIGMA_I": ("dex",
-        "The survey's flux uncertainty per band, as the tenth percentile over "
-        "sources. Band order is the BANDS dataset."),
-    "BANDS": ("band name",
-        "The eight SESNA bands, in SIGMA_I's column order."),
-    "OTHER_LIBRARY": ("library name",
-        "A library other than the young stellar object one."),
-    "OTHER_N_TEMPLATES": ("models",
-        "How many models that library holds."),
-    "OTHER_D50": ("dex",
-        "Median distance from a model of that library to its nearest neighbor."),
-    "OTHER_D90": ("dex",
-        "The same distance at the ninetieth percentile: the spacing of that "
-        "library's most isolated models."),
-    "OTHER_THICK_ENOUGH": ("true or false",
-        "Whether that library's models are spaced more widely than this check's "
-        "tolerance, so adding models would sharpen the fit."),
-    "YSO_GROUP": ("model group",
-        "Which group of young stellar object models this row describes. The library "
-        "is built in groups by evolutionary stage and geometry."),
-    "YSO_N_AT_SIZE": ("models",
-        "How many models that group holds at each of four sizes, thinned from the "
-        "full group, so spacing can be measured against library size."),
-    "YSO_D50_AT_SIZE": ("dex",
-        "Median nearest-neighbor distance for that group at each of the four sizes."),
-    "YSO_D90_AT_SIZE": ("dex",
-        "Ninetieth-percentile nearest-neighbor distance at each of the four sizes."),
-    "YSO_D_EFF": ("dimensionless",
-        "How fast that group's spacing shrinks as models are added, from the slope "
-        "of spacing against size. It acts like the number of dimensions the group "
-        "really fills."),
-    "YSO_N_STAR": ("models",
-        "How many models that group would need to reach this check's tolerance, "
-        "read off the fitted slope, at each of three tolerances."),
-}
+#: `UNITS`/`READING` for every dataset here (CODING_RULES_BMSTP.md rule 5)
+#: live in `attrs_registry.REGISTRY`, keyed by `(_STEM, name)`: one home,
+#: shared with every other writer the registry covers, rather than a
+#: module-level dict of its own.
 
 
 def _write(path, sigma_i, n_sample, n_total, groups, sizes_all, p50_all, p90_all,
@@ -299,23 +261,24 @@ def _write(path, sigma_i, n_sample, n_total, groups, sizes_all, p50_all, p90_all
         f.attrs["N_SOURCE_TOTAL"] = n_total
         f.attrs["TOLERANCES"] = np.asarray(TOLERANCES)
         f.attrs["RESOLUTION_TOL"] = RESOLUTION_TOL
-        f.create_dataset("BANDS", data=np.array(BAND_KEYS, dtype="S4"))
-        f.create_dataset("SIGMA_I", data=sigma_i)
-        f.create_dataset("YSO_GROUP", data=np.array(labels, dtype="S8"))
-        f.create_dataset("YSO_N_AT_SIZE", data=np.array([sizes_all[g] for g in labels]))
-        f.create_dataset("YSO_D50_AT_SIZE", data=np.array([p50_all[g] for g in labels]))
-        f.create_dataset("YSO_D90_AT_SIZE", data=np.array([p90_all[g] for g in labels]))
-        f.create_dataset("YSO_D_EFF", data=np.array([deff_all[g] for g in labels]))
-        f.create_dataset("YSO_N_STAR", data=np.array([nstar_all[g] for g in labels]))
-        f.create_dataset("OTHER_LIBRARY", data=np.array([o[0] for o in other], dtype="S6"))
-        f.create_dataset("OTHER_N_TEMPLATES", data=np.array([o[1] for o in other], dtype=np.int64))
-        f.create_dataset("OTHER_D50", data=np.array([o[2] for o in other]))
-        f.create_dataset("OTHER_D90", data=np.array([o[3] for o in other]))
-        f.create_dataset("OTHER_THICK_ENOUGH", data=np.array([int(o[4]) for o in other], dtype=np.int8))
-        f.create_dataset("LIBRARY", data=np.array(library_order, dtype="S6"))
-        f.create_dataset("SIGMA_LIB_DEX", data=np.array(
-            [sigma_lib_dex[c] for c in library_order]))
-        set_readings(f, _READINGS)
+        for key, data in (
+            ("BANDS", np.array(BAND_KEYS, dtype="S4")),
+            ("SIGMA_I", sigma_i),
+            ("YSO_GROUP", np.array(labels, dtype="S8")),
+            ("YSO_N_AT_SIZE", np.array([sizes_all[g] for g in labels])),
+            ("YSO_D50_AT_SIZE", np.array([p50_all[g] for g in labels])),
+            ("YSO_D90_AT_SIZE", np.array([p90_all[g] for g in labels])),
+            ("YSO_D_EFF", np.array([deff_all[g] for g in labels])),
+            ("YSO_N_STAR", np.array([nstar_all[g] for g in labels])),
+            ("OTHER_LIBRARY", np.array([o[0] for o in other], dtype="S6")),
+            ("OTHER_N_TEMPLATES", np.array([o[1] for o in other], dtype=np.int64)),
+            ("OTHER_D50", np.array([o[2] for o in other])),
+            ("OTHER_D90", np.array([o[3] for o in other])),
+            ("OTHER_THICK_ENOUGH", np.array([int(o[4]) for o in other], dtype=np.int8)),
+            ("LIBRARY", np.array(library_order, dtype="S6")),
+            ("SIGMA_LIB_DEX", np.array([sigma_lib_dex[c] for c in library_order])),
+        ):
+            build_module.write_dataset(f, key, data, *REGISTRY[(_STEM, key)])
 
 
 def build(config, regions=None):
