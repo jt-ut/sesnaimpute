@@ -1043,20 +1043,23 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
             int(u_yso.size), int(u_h2s.size))
 
 
-def _herschel_convolved_law(law_map, law_wcs, pix, arm, density_yso_pix):
-    """H2S's sky density (sec. 5.6) is the young-star law convolved by the
-    knot-driver kernel on the Herschel arm, the region's convolved-law map
-    (`knot_field.convolved_law`, computed ONCE per region by the caller,
+def _herschel_convolved_law(law_map, law_wcs, pix, arm, density_h2s_law_pooled_pix):
+    """H2S's sky density (sec. 5.6) is the SAME pooled-coefficient
+    quadratic law (`knot_field.law_count_at_kappa` at `kappa_pooled`,
+    never `population.yso.law_count`'s region-fitted value -- WP-POP-5's
+    finding) convolved by the knot-driver kernel on the Herschel arm,
+    the region's convolved-law map (`knot_field.convolved_law`, itself
+    built at `kappa_pooled`, computed ONCE per region by the caller,
     sec. 5.6 "a map operation, once per region") sampled at each pixel's
     own mean position (`mean_over_area`); a Planck pixel, or a Herschel
-    pixel the map does not reach, keeps the point law `density_yso_pix`
-    already carries. Two callers read this from the SAME deterministic
-    `density_yso_pix` (`population.yso.law_count`, no randomness):
-    `build_region`'s own H2S error weight, before the sightline quadrature
+    pixel the map does not reach, keeps the point law
+    `density_h2s_law_pooled_pix` already carries. Two callers read this
+    from the SAME deterministic `density_h2s_law_pooled_pix`: `build_
+    region`'s own H2S error weight, before the sightline quadrature
     runs, and its H2S mean density, after -- one function, one convolved
     map, so the two agree exactly, never a pre-convolution weight beside
     a convolved mean."""
-    l_of_pix = density_yso_pix.copy()
+    l_of_pix = density_h2s_law_pooled_pix.copy()
     herschel_pix = arm == yso_module.PROVENANCE_HERSCHEL
     if law_map is not None and herschel_pix.any():
         gl_pix, gb_pix = hp.pix2ang(512, pix[herschel_pix], nest=True, lonlat=True)
@@ -1643,18 +1646,26 @@ def build_region(config, region):
         on_grid_yso_by_sl_row = on_grid_yso_p3[loc_p3]
 
         # H2S, sec. 5.6 "Sky density": `A_H2S = L . eta_r . eps_ext`. `L` is
-        # the young-star law at the pixel's own column EXCEPT on the
-        # Herschel arm, where it is the region's convolved law map
-        # (`bmstp.knot_field.convolved_law`) averaged over the pixel's
-        # own area (item 3: the mean of L over the pixel, not a single
-        # nearest sample -- a pixel is much larger than the map's own
-        # downsampled grid); a Planck pixel, or a Herschel pixel the
-        # convolved map does not reach, keeps the law at its own column.
-        # `L` is entirely deterministic (`population.yso.law_count`, no
-        # random draw), so it is built here, before the sightline
-        # quadrature, from the same `a_col_gas * cloud_frac` every
-        # sightline itself computes (`_build_one_sightline`'s own
-        # `density_yso`) --
+        # a SEPARATE evaluation of the SAME quadratic law, at the
+        # SURVEY-POOLED coefficient `KAPPA_POOLED`, never this region's
+        # own fitted `KAPPA_USED` (`population.yso.law_count` reads for
+        # YSO's own density, `density_yso` inside `_build_one_sightline`,
+        # untouched) -- `population.knot_rate.eta_for_region`'s own
+        # calibration denominator is formed at that pooled level, so the
+        # law it multiplies must be too, on both arms, or the ratio does
+        # not cancel (WP-POP-5's finding; `knot_field.kappa_pooled`/
+        # `law_count_at_kappa`, the SAME functions `bmstp.density` reads
+        # for its own H2S path). `L` is entirely deterministic (no random
+        # draw), so it is built here, before the sightline quadrature,
+        # from the same `a_col_gas * cloud_frac` every sightline itself
+        # computes for its own YSO density, at the pooled coefficient
+        # instead -- EXCEPT on the Herschel arm, where it is the region's
+        # convolved law map (`bmstp.knot_field.convolved_law`, already
+        # built at `kappa_pooled`) averaged over the pixel's own area
+        # (item 3: the mean of L over the pixel, not a single nearest
+        # sample -- a pixel is much larger than the map's own downsampled
+        # grid); a Planck pixel, or a Herschel pixel the convolved map
+        # does not reach, keeps the pooled-coefficient point law.
         # `_herschel_convolved_law` is the one function both this weight
         # and H2S's mean density below read, so they never disagree. The
         # map itself is convolved ONCE here (sec. 5.6 "a map operation,
@@ -1663,9 +1674,10 @@ def build_region(config, region):
         # (`population.knot_rate`, the same call `bmstp.density` makes)
         eta_r, _eta_band_dex = knot_rate.eta_for_region(config, region)
         law_map, law_wcs, knot_meta = knot_field.convolved_law(config, region)
-        density_yso_pix_law = yso_module.law_count(
-            config, region, a_col_gas * cloud_frac_by_sl[sl_row_of_pix], arm)
-        l_of_pix_for_weight = _herschel_convolved_law(law_map, law_wcs, pix, arm, density_yso_pix_law)
+        density_h2s_law_pooled_pix = knot_field.law_count_at_kappa(
+            config, region, a_col_gas * cloud_frac_by_sl[sl_row_of_pix], arm,
+            knot_field.kappa_pooled(config))
+        l_of_pix_for_weight = _herschel_convolved_law(law_map, law_wcs, pix, arm, density_h2s_law_pooled_pix)
 
         def _one_sl(sl_row):
             m = sl_row_of_pix == sl_row
@@ -1714,8 +1726,14 @@ def build_region(config, region):
         # the SAME retained density P1 reports as `DENSITY_YSO`.
         density_yso_retained_pix = density_yso_pix * on_grid_yso_by_sl_row[sl_row_of_pix]
 
-        l_of_pix = _herschel_convolved_law(law_map, law_wcs, pix, arm, density_yso_pix)
-        density_h2s_before = density_yso_pix * eta_r * density_module.EPS_EXT
+        # H2S's mean density reads the SAME pooled-coefficient baseline
+        # the weight above does (`density_h2s_law_pooled_pix`), never
+        # `density_yso_pix` (YSO's own region-coefficient density, kept
+        # for YSO's own `density_yso_retained_pix`/`intensity["YSO"]`
+        # above and untouched) -- the same basis mismatch WP-POP-5 found
+        # in `bmstp.density` existed here too, on the SAME two lines.
+        l_of_pix = _herschel_convolved_law(law_map, law_wcs, pix, arm, density_h2s_law_pooled_pix)
+        density_h2s_before = density_h2s_law_pooled_pix * eta_r * density_module.EPS_EXT
         density_h2s = l_of_pix * eta_r * density_module.EPS_EXT
         n_cat["H2S"] = density_h2s * frac_h2s_pix
         intensity["H2S"] = density_h2s
