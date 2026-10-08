@@ -1281,40 +1281,66 @@ REGISTRY = {
         "alpha0 < -1.6 (weak or no disk), independent of region."),
 
     # population.pahc_curve -- curve_pahc_survey: the PAH-contamination
-    # probability curve P(q), survey-wide.
+    # probability curve P(q), one row per region (WP-POP-4, ledger C7:
+    # the excess rate is regional by a factor of 8, so one survey-wide
+    # curve is wrong).
     ("curve_pahc_survey", "LOG10_Q_EDGES"): ("log10(dimensionless)",
         "The edges of the 40 bins in log10(q) this curve is tabulated on, "
         "q being a source's own 8 micron completeness limit divided by "
         "its predicted photospheric 8 micron flux: bin j runs from "
         "LOG10_Q_EDGES[j] to LOG10_Q_EDGES[j+1]."),
-    ("curve_pahc_survey", "P_Q"): ("dimensionless",
-        "For each bin of LOG10_Q_EDGES, the probability that a source at "
-        "that q is contaminated by extended PAH nebular emission in its "
-        "aperture: the measured excess fraction, scaled by the bin's own "
-        "8-micron-measured share and with the survey's noise rate "
-        "subtracted, floored at zero. Zero for every bin whose q is too "
-        "small for a 3-sigma nebular excess to register at all (see "
-        "P_Q_BRIGHT_EXCESS)."),
-    ("curve_pahc_survey", "N_PER_BIN"): ("sources",
-        "For each bin of LOG10_Q_EDGES, how many sources with measured "
-        "3.6 and 4.5 micron photometry and no 4.5 micron excess fall in "
-        "it: this curve's own denominator."),
-    ("curve_pahc_survey", "M_PER_BIN"): ("sources",
-        "For each bin of LOG10_Q_EDGES, how many of the sources with "
-        "measured 3.6 and 4.5 micron photometry and no 4.5 micron "
-        "excess that fall in it also have a measured 8 micron flux."),
-    ("curve_pahc_survey", "P_Q_BRIGHT_EXCESS"): ("dimensionless",
-        "For each bin of LOG10_Q_EDGES whose q is too small for a "
-        "3-sigma nebular excess to register (where P_Q is zeroed for "
-        "that reason), the measured, unscaled fraction of that bin's "
-        "8-micron-measured sources that show an excess: not "
-        "contamination but circumstellar 8 micron emission. Zero for "
-        "every other bin."),
-    ("curve_pahc_survey", "N_PER_BIN_BRIGHT_EXCESS"): ("sources",
-        "For each bin of LOG10_Q_EDGES whose q is too small for a "
-        "3-sigma nebular excess to register, how many sources with "
-        "measured 3.6 and 4.5 micron photometry and no 4.5 micron "
-        "excess fall in it. Zero for every other bin."),
+    ("curve_pahc_survey", "REGION"): ("name",
+        "The region name of each row of every per-region array in this "
+        "product, in the order those arrays are indexed on their first "
+        "axis."),
+    ("curve_pahc_survey", "P_Q_REGION"): ("dimensionless",
+        "For each region (rows, REGION) and bin of LOG10_Q_EDGES "
+        "(columns), the probability that a source at that q, in that "
+        "region, is contaminated by extended PAH nebular emission in "
+        "its aperture: that region's own measured-only excess fraction "
+        "among its 8-micron-measured sources at that q, with the "
+        "survey's quiescent-region noise floor (F_FLOOR) subtracted and "
+        "floored at zero. Not scaled by how many of the region's "
+        "sources at that q have an 8 micron measurement: a source with "
+        "none is not assumed uncontaminated. Zero for every bin whose q "
+        "is too small for a 3-sigma nebular excess to register at all "
+        "(see P_Q_REGION_BRIGHT_EXCESS)."),
+    ("curve_pahc_survey", "P_Q_REGION_RAW"): ("dimensionless",
+        "The same quantity as P_Q_REGION before the quiescent-region "
+        "noise floor is subtracted: that region's own measured-only "
+        "excess fraction among its 8-micron-measured sources at that q."),
+    ("curve_pahc_survey", "N_PER_BIN_REGION"): ("sources",
+        "For each region and bin of LOG10_Q_EDGES, how many of that "
+        "region's own sources with measured 3.6 and 4.5 micron "
+        "photometry and no 4.5 micron excess fall in it: that region's "
+        "own eligible population at that q."),
+    ("curve_pahc_survey", "M_PER_BIN_REGION"): ("sources",
+        "For each region and bin of LOG10_Q_EDGES, how many of "
+        "N_PER_BIN_REGION's sources also have a measured 8 micron flux: "
+        "the subset P_Q_REGION's excess fraction is actually measured "
+        "on."),
+    ("curve_pahc_survey", "P_Q_REGION_BRIGHT_EXCESS"): ("dimensionless",
+        "For each region and bin of LOG10_Q_EDGES whose q is too small "
+        "for a 3-sigma nebular excess to register (where P_Q_REGION is "
+        "zeroed for that reason), that region's measured, unfloored "
+        "fraction of its 8-micron-measured sources there that show an "
+        "excess: not contamination but circumstellar 8 micron emission. "
+        "Zero for every other bin."),
+    ("curve_pahc_survey", "N_PER_BIN_REGION_BRIGHT_EXCESS"): ("sources",
+        "For each region and bin of LOG10_Q_EDGES whose q is too small "
+        "for a 3-sigma nebular excess to register, that region's own "
+        "eligible population there. Zero for every other bin."),
+    ("curve_pahc_survey", "P_Q_DISK_EXCESS"): ("dimensionless",
+        "For each bin of LOG10_Q_EDGES, pooled over every region, the "
+        "measured-only excess fraction among the 8-micron-measured "
+        "sources that DO carry a 4.5 micron excess over their "
+        "photospheric prediction (disk-bearing or otherwise "
+        "circumstellar): reported beside the shipped, no-4.5-micron- "
+        "excess curve, not subject to its noise floor."),
+    ("curve_pahc_survey", "N_PER_BIN_DISK_EXCESS"): ("sources",
+        "For each bin of LOG10_Q_EDGES, how many sources with a 4.5 "
+        "micron excess and measured 3.6 and 4.5 micron photometry fall "
+        "in it: P_Q_DISK_EXCESS's own denominator."),
 
     # population.column_grid -- column-grid_sesna_survey: the fixed column
     # ladder every class tabulates its column kernel on.
