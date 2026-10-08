@@ -538,21 +538,29 @@ def build_yso(config, region):
         # cells (sec 5.5, the shift-kernel rule, in place of W25b's Gaussian CDF
         # difference): a sparse accumulation over templates, never a
         # dense (n_model x n_b) evaluation (CODING_RULES_BMSTP.md rule
-        # 10a). `idx_center[theta] + m` lands the kernel's own cell `m`
-        # (its value K[m] already the mass of `delta` landing there) at
-        # `c_theta`'s own nearest cell plus `m` cells -- exact since both
-        # `idx_center` and `m` share the SAME grid origin. The column sum
-        # below, BEFORE the floor, is the population's own `p(F_4.5)` up
-        # to normalisation -- the same shape `sample_cloud` sums into
+        # 10a). `kernel` is `K(delta)`, binned RAW on the SAME grid as
+        # `log10_f45_centers` (`sample_cloud.shift_kernel`'s own
+        # `np.histogram(delta, bins=grid.LOG10_F45_EDGES, ...)`), so its
+        # index `m` names `delta = log10_f45_centers[m]` directly, not a
+        # cell offset from `delta = 0`. `zero_idx` is that grid's own
+        # cell for `delta = 0` (the SAME round-to-nearest-cell rule
+        # `idx_center` uses for `c_theta`, so the two indices share one
+        # origin); `idx_center[theta] + (m - zero_idx)` lands `K[m]`'s
+        # mass at `c_theta`'s own nearest cell shifted by `delta`'s own
+        # `m - zero_idx` cells -- a signed offset, matching
+        # `build_h2shock`'s placement of its own kernel below. The column
+        # sum below, BEFORE the floor, is the population's own `p(F_4.5)`
+        # up to normalisation -- the same shape `sample_cloud` sums into
         # `GRID_YSO`'s brightness marginal, from the SAME kernel (sec
         # 4.1's "joint over (x, F_4.5, theta) preserved").
         support = np.nonzero(kernel > 1e-6 * kernel.max())[0]
         idx_center = np.round(
             (c_theta - log10_f45_centers[0]) / grid.D_LOG10_F45).astype(np.int64)
+        zero_idx = int(np.round((0.0 - log10_f45_centers[0]) / grid.D_LOG10_F45))
         theta_idx = np.arange(n_model)
         contribution = np.zeros((n_model, n_b), dtype=np.float64)
         for m in support:
-            cell_idx = idx_center + int(m)
+            cell_idx = idx_center + (int(m) - zero_idx)
             valid = (cell_idx >= 0) & (cell_idx < n_b)
             if not np.any(valid):
                 continue
@@ -605,6 +613,36 @@ def build_yso(config, region):
               f"C_THETA range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
               f"max={c_theta.max():.4f}", flush=True)
 
+        # the placement identity (ledger row C1, the stage's own
+        # acceptance check, in place of normalisation alone): for each
+        # column `k` that carries real pre-floor structure (its own
+        # raw `contribution` column sum above 1e-6 of the largest
+        # column's, the same threshold `shift_kernel`'s own support uses
+        # above), the W-weighted mean `C_THETA` of the templates
+        # contributing to that column should sit `F_k` minus the
+        # region's own distance term (`delta = -2 log10(d_r / 1 kpc)`,
+        # `sample_cloud.sigma_d_dex`'s own placement, the SAME shift
+        # `shift_kernel` convolves `K` around) below `F_k` -- a template
+        # lands in column `k` because its OWN `c_theta` sits near
+        # `F_k - delta`, so `F_k - <C_THETA>_k` should equal the
+        # kernel's own mean `delta`, not the pre-fix +4 dex grid-origin
+        # excess (verify_A V2).
+        raw_col_sum = contribution.sum(axis=0)
+        structured = raw_col_sum > (1e-6 * raw_col_sum.max())
+        mean_c_theta_k = np.full(n_b, np.nan, dtype=np.float64)
+        mean_c_theta_k[structured] = (
+            (contribution[:, structured] * c_theta[:, None]).sum(axis=0)
+            / raw_col_sum[structured])
+        placement_gap = log10_f45_centers[structured] - mean_c_theta_k[structured]
+        distance_term = -2.0 * np.log10(r.d_r_pc / 1000.0)
+        print(f"template_weights.yso [{region}]: PLACEMENT IDENTITY (C1) "
+              f"structured columns={int(structured.sum())} "
+              f"median(F_k - <C_THETA>_k)={np.median(placement_gap):.4f} "
+              f"range=[{placement_gap.min():.4f},{placement_gap.max():.4f}] "
+              f"region distance term (-2 log10(d_r/1kpc))={distance_term:.4f} "
+              f"residual (median - distance term)={np.median(placement_gap) - distance_term:.4f}",
+              flush=True)
+
         # report only (spec sec 5.5's check, sec 5.5 census): the census
         # share held by each register SUBCLASS value (survey-wide, same
         # in every region by construction -- the expected check figure)
@@ -621,7 +659,9 @@ def build_yso(config, region):
                   f"census_share={census_share:.4f} on_grid_retained_share={retained_share:.4f}",
                   flush=True)
         st.done(path, n_model=n_model, floored_fraction=frac_zero,
-                marginal_dev_retained=marginal_dev_retained, retained_frac=retained_frac)
+                marginal_dev_retained=marginal_dev_retained, retained_frac=retained_frac,
+                placement_gap_median=float(np.median(placement_gap)),
+                distance_term=float(distance_term))
 
 
 # ---------------------------------------------------------------------------
