@@ -48,6 +48,28 @@ _GAL_STEM = "gal_shape_survey"
 # P2 -- the star-family grids, per tile (sec. 5.1, 5.2)
 # ---------------------------------------------------------------------------
 
+def _star_depth_mark(x, dist_pc, d_front, d_back, u_front):
+    """The STAR depth mark from the cloud interval (owner's ruling, C5,
+    `bms_review/REVIEW_LEDGER_2026-10-08.md`): a star beyond the
+    interval's back edge (`dist_pc > d_back`) sits at the full column
+    exactly (`x = 1`), never at the profile's own `u(d)` read there --
+    the 3-D map's radial smearing (Edenhofer 2023's own stated radial
+    resolution; Leike 2020 measures the same bias) otherwise spreads
+    background stars forward into partial extinction they do not
+    physically carry (prior_1 concern 2). A star in front of the front
+    edge (`dist_pc < d_front`) takes the foreground share, `u_front`
+    (`sample_star.tile_width_classes`' own profile read at `d_front` on
+    the tile's representative sightline) -- the SAME value for every
+    foreground star, since the map cannot resolve a finer distance
+    there. Only a star inside the interval keeps its own partial value
+    straight off the profile: `x` unchanged."""
+    x = np.array(x, dtype=np.float64, copy=True)
+    dist_pc = np.asarray(dist_pc, dtype=np.float64)
+    x[dist_pc > d_back] = 1.0
+    x[dist_pc < d_front] = u_front
+    return x
+
+
 def _build_one_tile(config, region, tile_id):
     """One tile's `(GRID_STAR, MASS_OUTSIDE_STAR, GRID_AGB,
     MASS_OUTSIDE_AGB, sum_check, above_star_w, total_star_w, above_agb_w,
@@ -68,13 +90,22 @@ def _build_one_tile(config, region, tile_id):
     # (sec. 2 "minimum widths", sec. 5.1 "Marks"): the field-star
     # depth mark's own width is the map's propagated column sigma at the
     # star's distance, not a fixed one cell -- AGB follows STAR (the same
-    # stars, sec. 5.2), so both read the SAME tile width classes.
-    row, sigma_classes_dex = sample_star.tile_width_classes(config, region, tile_id)
+    # stars, sec. 5.2), so both read the SAME tile width classes. A star
+    # the interval pins (below) takes the floor class instead
+    # (`star_width_class`'s own docstring, the C5 consequence).
+    row, sigma_classes_dex, d_front, d_back, u_front = sample_star.tile_width_classes(
+        config, region, tile_id)
     sigma_classes_cells = sigma_classes_dex / grid._X_CELL_WIDTH
-    class_s = sample_star.star_width_class(
-        config, region, sample_star.star_distances(config, region, tile_id), row, sigma_classes_dex)
-    class_a = sample_star.star_width_class(
-        config, region, sample_star.agb_star_distances(config, region, tile_id), row, sigma_classes_dex)
+    dist_s = sample_star.star_distances(config, region, tile_id)
+    dist_a = sample_star.agb_star_distances(config, region, tile_id)
+    class_s = sample_star.star_width_class(config, region, dist_s, row, sigma_classes_dex, d_front, d_back)
+    class_a = sample_star.star_width_class(config, region, dist_a, row, sigma_classes_dex, d_front, d_back)
+
+    # the STAR depth mark from the cloud interval (owner's ruling, C5):
+    # AGB follows STAR, the SAME rule on the SAME stars' distances (sec.
+    # 5.2) -- see `_star_depth_mark`'s own docstring.
+    x_s = _star_depth_mark(x_s, dist_s, d_front, d_back, u_front)
+    x_a = _star_depth_mark(x_a, dist_a, d_front, d_back, u_front)
 
     h_star, mo_star = grid.bin_star_widths(x_s, f45_s, w_s, class_s, sigma_classes_cells)
     h_agb, mo_agb = grid.bin_star_widths(x_a, f45_a, w_a, class_a, sigma_classes_cells)
