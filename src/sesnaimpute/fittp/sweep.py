@@ -737,10 +737,11 @@ def _write_part(part_path, batch, cls):
     with h5py.File(part_path, "w") as f:
         for key in _PART_KEYS:
             build_module.write_dataset(f, key, batch[_FIELD_OF_KEY[key]], *REGISTRY[(stem, key)])
-        # "FAILED" is a part-file-only column (module docstring): no
-        # `_READINGS`/`REGISTRY` entry ever carried it, since the current
-        # design's `set_readings` never touched a part file either -- left
-        # as a plain dataset, not given an invented reading (unit report).
+        # "FAILED" is a part-file-only column (module docstring), and a part
+        # file is transient: `join_parts` folds it into FAILED_ROWS and then
+        # removes the file, so no product a consumer opens ever carries this
+        # column. It is the one dataset in the fitter with no registry entry
+        # and no unit or reading, deliberately: rule 5 describes a product.
         f.create_dataset("FAILED", data=batch["failed"])
         f.attrs["ZERO_EXT_COUNT"] = batch["zero_ext_count"]
         f.attrs["N_TEMPLATES_CHECKED"] = batch["n_templates_checked"]
