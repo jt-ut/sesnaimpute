@@ -367,23 +367,24 @@ def _write_library(config, lib, granule, names, c_theta, log10_f45_centers, fact
 # directly and `np.interp` the raw, individually sparse bins).
 # ---------------------------------------------------------------------------
 
-def _pahc_curve_raw_bins(config):
-    """The curve's raw on-disk `P_Q` bin centers and values, read for the
-    build's own diagnostic report only (how much the plateau correction
-    below moves the curve's tabulated ends) -- `_pahc_contrast_row` reads
-    the curve through the accessor, not this."""
-    path = config_module.product_path(config, "population", "pahc", "curve", "survey")
-    with h5py.File(path, "r") as f:
-        edges = f["LOG10_Q_EDGES"][:].astype(np.float64)
-        p_q = f["P_Q"][:].astype(np.float64)
-    return 0.5 * (edges[:-1] + edges[1:]), p_q
+def _pahc_curve_raw_bins(config, region):
+    """This region's own curve's tabulated centers and values, through
+    `population.pahc_curve.read` (the one accessor every consumer of the
+    shipped curve uses, module comment above -- the curve product's own
+    path and granule are WP-POP-4's, named nowhere in this file), read
+    for the build's own diagnostic report only (how far the curve's own
+    tabulated ends sit from `_pahc_contrast_row`'s query row at the
+    F45 grid's own ends)."""
+    curve = pahc_curve.read(config, region)
+    return curve.x, curve.y
 
 
-def _pahc_contrast_row(config, n_b_centers):
+def _pahc_contrast_row(config, region, n_b_centers):
     """The one row `P(-log10 q = LOG10_F45_CENTERS[k])`, the same for every
     template (spec sec 5.3: template enters only through `C_F`), from
-    `population.pahc_curve.read`'s plateau-corrected callable."""
-    curve = pahc_curve.read(config)
+    `population.pahc_curve.read`'s plateau-corrected callable, this
+    region's own row (WP-POP-4: regional by a factor of 8, ledger C7)."""
+    curve = pahc_curve.read(config, region)
     return curve(-n_b_centers)
 
 
@@ -902,7 +903,7 @@ def build_sps(config, region):
         type_w = _normalise_over_theta(h)
         type_w, frac_zero_type = _floor_normalised(type_w)
 
-        n_b_row = _pahc_contrast_row(config, log10_f45_centers)
+        n_b_row = _pahc_contrast_row(config, region, log10_f45_centers)
         unc_raw = 1.0 - np.repeat(n_b_row[None, :], n_model, axis=0)  # 1 - P(q), sec 5.1
         unc_raw, frac_zero_unc = _floor_probability(unc_raw)
         c_theta = _c_theta(reg)
@@ -920,7 +921,7 @@ def build_sps(config, region):
         retained_weighted = float(weight.sum())
         histogram_weighted = float(h.sum())
         col_sum = type_w.sum(axis=0)
-        _curve_centers, curve_p_q = _pahc_curve_raw_bins(config)
+        _curve_centers, curve_p_q = _pahc_curve_raw_bins(config, region)
         print(f"template_weights.sps [{region}]: retained weighted count={retained_weighted:.4f} "
               f"histogram sum={histogram_weighted:.4f} "
               f"max|colsum-1|={float(np.max(np.abs(col_sum - 1.0))):.3g} "
@@ -1229,7 +1230,7 @@ def build_pahc(config, region):
         type_w = _normalise_over_theta(raw_type)
         type_w, frac_zero_type = _floor_normalised(type_w)
 
-        row = _pahc_contrast_row(config, log10_f45_centers)
+        row = _pahc_contrast_row(config, region, log10_f45_centers)
         contrast_w = np.repeat(row[None, :], n_model, axis=0)
         contrast_w, frac_zero_contrast = _floor_probability(contrast_w)
         c_theta = _c_theta(reg)
@@ -1248,7 +1249,7 @@ def build_pahc(config, region):
                                region=region)
         col_sum = type_w.sum(axis=0)
         n_matched_sps_used = int(np.unique(sps_idx).size)
-        _curve_centers, curve_p_q = _pahc_curve_raw_bins(config)
+        _curve_centers, curve_p_q = _pahc_curve_raw_bins(config, region)
 
         # C8's own identity: the amplitude weight's marginal (mass per
         # distinct R, `amp_cell_mass`, printed below) against the

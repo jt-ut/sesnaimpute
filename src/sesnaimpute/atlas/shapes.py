@@ -322,7 +322,7 @@ def lambda_grids(config, region, rows, blur=True):
     n_rows = rows.size
     dtab = _read_density_table(config, region)
     d_pahc_rows = dtab["d_pahc"][rows].astype(np.float64).reshape(-1, 1, 1)
-    curve = pahc_curve.read(config)
+    curve = pahc_curve.read(config, region)
 
     lam = {}
     for cls in CLASS_ORDER:

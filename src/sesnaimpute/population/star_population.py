@@ -1019,14 +1019,18 @@ def build(config, regions=None):
     literature `F_dusty` (Riebel+2012 against the curated GRAMS floor)
     and the GRAMS O-rich library's own shared luminosity are survey-wide
     and read once, not per region (rule 9); likewise the two libraries'
-    own reference-flux tables and the measured PAHC curve."""
+    own reference-flux tables. The measured PAHC curve is regional by a
+    factor of 8 (WP-POP-4, ledger C7), not a survey-wide constant, so it
+    is read once per region, inside the loop below, not here: rule 9 is
+    about never touching the full catalogue or the full template
+    register inside a per-item loop, and the PAHC curve product is 15
+    KB, a small per-region product, not either of those."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
     f_dusty_o, f_dusty_c, n_riebel_o, n_riebel_c = f_dusty_by_chemistry(config)
     l_o_lsun, n_orich_models = agb_orich_l_sun(config)
     f_ref_sps = load_sps_reference_fluxes(config)
     teff_node, ref_jhk = load_pahc_continuum_reference(config)
-    curve = pahc_curve.read(config)
     print(
         "star_population: F_dusty_O=%.4f (n=%d) F_dusty_C=%.4f (n=%d) "
         "L_O=%.2f Lsun (n_model=%d, sed_models/agb/parameters.fits CHEM=='O') f_C=%.2f"
@@ -1034,6 +1038,7 @@ def build(config, regions=None):
 
     for region in region_names:
         with progress.Stage("prior.star_population", region) as st:
+            curve = pahc_curve.read(config, region)
             result = build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
                                    f_ref_sps, teff_node, ref_jhk, curve, st=st)
             path = write_region(config, region, result, f_dusty_o, f_dusty_c)
