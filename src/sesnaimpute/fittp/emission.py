@@ -31,13 +31,14 @@ import os
 import h5py
 import numpy as np
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import progress
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.bmstp import grid
 from sesnaimpute.gutcolors import crisp
-from sesnaimpute.readings import set_readings
 
 #: The six libraries, `fittp.prior_reader._LIB`'s own values.
 LIBRARIES = ("sps", "agb", "pahc", "galz", "yso", "h2shock")
@@ -155,37 +156,25 @@ def _emission_table(f_ref, floor_linear, subclass, st):
     return E, subclasses, edges, hand_ok
 
 
-#: `UNITS`/`READING` (CODING_RULES_BMSTP.md rule 5): every dataset this
-#: table carries. A module-level constant so a file already on disk from
-#: before this rule can be backfilled in place, without a recompute.
-_READINGS = {
-    "E": ("fraction",
-        "For each kind of model in this library, the fraction that the color cuts "
-        "of Gutermuth et al. (2009) place in each of their categories, as a "
-        "function of how bright the model appears. The three axes are the kinds of "
-        "model named in SUBCLASSES, the brightness bins bounded by LOG10_F45_EDGES, "
-        "and the categories named in LABELS. Each kind and brightness adds to 1 "
-        "across the categories."),
-    "SUBCLASSES": ("model kind",
-        "The kinds of model this library holds, in the row order E uses."),
-    "LABELS": ("category name",
-        "The eleven categories the color cuts of Gutermuth et al. (2009) can "
-        "assign, in the column order E uses."),
-    "LOG10_F45_EDGES": ("log10 of flux in mJy",
-        "The edges of the brightness bins E uses, as the base-10 logarithm of "
-        "apparent 4.5 micron flux in mJy. There is one more edge than there are "
-        "bins."),
-}
+#: `UNITS`/`READING` for every dataset here (CODING_RULES_BMSTP.md rule 5)
+#: live in `attrs_registry.REGISTRY`, keyed by `(key + "_emission_survey",
+#: name)` -- `_STEM`, below -- the same text repeated for every one of
+#: the six libraries' own files.
+def _STEM(key):
+    return "%s_emission_survey" % key
 
 
 def _write(path, key, E, subclasses, edges):
+    stem = _STEM(key)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
-        f.create_dataset("E", data=E)
-        f.create_dataset("SUBCLASSES", data=np.array(subclasses, dtype="S16"))
-        f.create_dataset("LOG10_F45_EDGES", data=edges.astype(np.float64))
-        f.create_dataset("LABELS", data=np.array(crisp.LABELS, dtype="S20"))
-        set_readings(f, _READINGS)
+        for name, data in (
+            ("E", E),
+            ("SUBCLASSES", np.array(subclasses, dtype="S16")),
+            ("LOG10_F45_EDGES", edges.astype(np.float64)),
+            ("LABELS", np.array(crisp.LABELS, dtype="S20")),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(stem, name)])
         f.attrs["GRANULE"] = "survey"
         f.attrs["LIBRARY"] = key
 
