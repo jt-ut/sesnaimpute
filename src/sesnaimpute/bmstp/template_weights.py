@@ -796,6 +796,26 @@ def build_galz(config):
             beyond3_fraction[k] = 1.0 if node_gal[k][0].size == 0 else float(np.mean(min_z > 3.0))
             st.tick(k + 1, n_node, "S nodes")
 
+        # a node this build's own SWIRE pooling (`sky.derived.swire_galaxies.
+        # _pool_bright_nodes`) left with none of its own galaxies reads its
+        # nearest populated node's density instead of the flat "no galaxies"
+        # default `_node_kde` returns (review ledger C16): the SAME nearest-
+        # node borrowing `bmstp.atlas._gal_members` already applies to an
+        # empty counts-law node, so an empty colour node is never read as
+        # uniform here either.
+        has_gal = np.array([node_gal[k][0].size > 0 for k in range(n_node)])
+        if not has_gal.all():
+            node_ids = np.arange(n_node)
+            have_idx = node_ids[has_gal]
+            empty_idx = node_ids[~has_gal]
+            nearest = have_idx[np.argmin(np.abs(empty_idx[:, None] - have_idx[None, :]), axis=1)]
+            node_density[empty_idx] = node_density[nearest]
+            beyond3_fraction[empty_idx] = beyond3_fraction[nearest]
+            print(f"template_weights.galz: {empty_idx.size} empty S node(s) borrowed "
+                  f"from their nearest populated node: "
+                  + ",".join(f"{k}<-{n}" for k, n in zip(empty_idx.tolist(), nearest.tolist())),
+                  flush=True)
+
         node_w = _normalise_over_theta((node_density / template_density[None, :]).T).T  # (n_node, n_model)
 
         # interpolate the per-node, per-template normalised density onto

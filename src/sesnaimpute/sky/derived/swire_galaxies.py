@@ -54,6 +54,7 @@ from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute.attrs_registry import REGISTRY
+from sesnaimpute.population.gal import N_S_GRID, build_log10_s_grid
 
 _STEM = "galaxies_swire_survey"
 
@@ -84,17 +85,56 @@ SWIRE_FLUX_ERR_COLUMNS = ("uncf_ap2_36", "uncf_ap2_45", "uncf_ap2_58", "uncf_ap2
 STELLARITY_STAR_MIN = 0.98
 
 #: The 61-node flux grid every GAL product is tabulated on (SPEC_BMSTP_DRAFT
-#: sec 3.2; `prior.gal.build_log10_s_grid`): SWIRE's own I2 5-sigma depth
-#: (log10 of 6.0 uJy in mJy) to Fazio et al. 2004 Table 1's brightest
-#: tabulated 4.5um row -- the counts law's own tabulated range, held fixed
-#: here so it matches `bms/gal/counts_gal_survey.hdf5`'s LOG10_S_GRID
-#: exactly rather than being recomputed from the Fazio table again.
-N_S_GRID = 61
-LOG10_S_GRID_LO = -2.221848749616356
-LOG10_S_GRID_HI = 1.2540644529143379
+#: sec 3.2; `population.gal.build_log10_s_grid`, the owner of this grid --
+#: SWIRE's own I2 5-sigma depth to Fazio et al. 2004 Table 1's brightest
+#: tabulated 4.5um row): read from there rather than kept as a second copy
+#: here, so this module's node grid matches `population/gal`'s
+#: `counts_gal_survey` product's LOG10_S_GRID by construction, not by two
+#: literals happening to agree (review ledger C16).
+FAZIO_PATH_SUFFIX = "sky/download/fazio2004/fazio2004_table1_irac_counts.csv"
+
+#: The floor every bright node's own galaxy count is pooled up to before
+#: its colour KDE is trusted (review ledger C16): node 60 (the grid's
+#: bright edge, 18 mJy) holds 13 SWIRE galaxies on its own, and every
+#: `build_galz` brightness cell above that edge clamps to that one node's
+#: KDE (`bmstp.template_weights.build_galz`'s own `s_query` clip) --
+#: `LIBRARY_DENSITY_MIN_COUNT`'s own floor (20) is a template-density
+#: floor, not a galaxy-count one, so this is its own number, chosen to
+#: match the planner's ruling (`briefs/SWEEP_2026-10-09.md` sec 5, C16:
+#: "pool the bright nodes so none holds fewer than 100 galaxies").
+MIN_NODE_GALAXIES = 100
 
 
-def _read_field(path, field_index):
+def _pool_bright_nodes(node, n_node, min_count):
+    """Remaps `node` (per-galaxy indices into the 61-point LOG10_S_GRID) so
+    that every node a galaxy is ever assigned to holds at least `min_count`
+    galaxies, by merging thin bright nodes DOWNWARD into their nearest
+    better-populated fainter neighbour (review ledger C16): the counts law
+    falls steeply toward bright flux, so thinness is a bright-end problem,
+    never a faint-end one over this grid. Walking from the brightest node
+    (60) to the faintest (0), galaxies accumulate into the open group's
+    representative -- the group's own brightest member -- until the running
+    count clears `min_count`; the group then closes and a fresh one opens at
+    the next (fainter) node. A merged-away node (zero galaxies of its own
+    after the remap) is read by `build_galz` through the SAME nearest-node
+    borrowing `bmstp.atlas._gal_members` already applies to an empty node,
+    not left uniform. Returns `(node_pooled, counts_pooled)`, the second the
+    61 canonical positions' own post-merge counts (zero at a merged-away
+    position) for the build's report."""
+    counts = np.bincount(node[node >= 0], minlength=n_node)
+    remap = np.arange(n_node)
+    acc, rep = 0, n_node - 1
+    for k in range(n_node - 1, -1, -1):
+        remap[k] = rep
+        acc += int(counts[k])
+        if acc >= min_count:
+            acc, rep = 0, k - 1
+    node_pooled = np.where(node >= 0, remap[np.clip(node, 0, n_node - 1)], node).astype(node.dtype)
+    counts_pooled = np.bincount(node_pooled[node_pooled >= 0], minlength=n_node)
+    return node_pooled, counts_pooled
+
+
+def _read_field(path, field_index, log10_s_grid):
     """One SWIRE field CSV -> the surviving galaxies' rows (rule 10b: the
     catalogue is read one field at a time, never all six loaded together).
     A row survives if it is classed a galaxy by the adopted split and its
@@ -141,11 +181,16 @@ def _read_field(path, field_index):
     # guarantees it is finite and positive), independent of whether I2's
     # own uncertainty is a sentinel -- a bad error never removes a galaxy
     # from the flux grid, only from a colour or sigma that uses that band.
-    log10_s_grid = np.linspace(LOG10_S_GRID_LO, LOG10_S_GRID_HI, N_S_GRID)
+    # `log10_s_grid` is the OWNER's grid (`population.gal.build_log10_s_grid`,
+    # passed in by `build`), never a second copy (review ledger C16); the
+    # bright-end pooling that keeps each node's own galaxy count usable
+    # (`_pool_bright_nodes`) runs once in `build`, after every field's rows
+    # are concatenated, not per field here.
+    lo, hi = float(log10_s_grid[0]), float(log10_s_grid[-1])
     edges = 0.5 * (log10_s_grid[1:] + log10_s_grid[:-1])
     log10_f2_flux = np.log10(f2k)
-    in_range = (log10_f2_flux >= LOG10_S_GRID_LO) & (log10_f2_flux <= LOG10_S_GRID_HI)
-    node = np.clip(np.searchsorted(edges, log10_f2_flux), 0, N_S_GRID - 1)
+    in_range = (log10_f2_flux >= lo) & (log10_f2_flux <= hi)
+    node = np.clip(np.searchsorted(edges, log10_f2_flux), 0, log10_s_grid.size - 1)
     node = np.where(in_range, node, -1).astype(np.int16)
 
     colour_i1i2 = (log10_f1 - log10_f2).astype(np.float32)
@@ -173,6 +218,8 @@ def build(config, regions=None):
         print("swire_galaxies: survey-wide product, --regions ignored")
 
     dest_dir = f"{config.data_root}/sky/download/swire"
+    fazio_path = f"{config.data_root}/{FAZIO_PATH_SUFFIX}"
+    log10_s_grid = build_log10_s_grid(fazio_path)
     with progress_module.Stage("sky.derived.swire_galaxies") as st:
         field_blocks, n_stars_removed, n_fields = [], 0, len(SWIRE_FIELD_FILES)
         for i, name in enumerate(SWIRE_FIELD_FILES):
@@ -181,7 +228,7 @@ def build(config, regions=None):
                 raise FileNotFoundError(
                     f"swire_galaxies: no SWIRE field catalogue at {path!r} -- run the "
                     f"'sesnaimpute.sky.download.swire.build' RUNBOOK line")
-            block, n_star, n_row = _read_field(path, i)
+            block, n_star, n_row = _read_field(path, i, log10_s_grid)
             field_blocks.append(block)
             n_stars_removed += n_star
             print(f"swire_galaxies: {name}: {n_row} rows, {n_star} stars removed, "
@@ -190,6 +237,17 @@ def build(config, regions=None):
 
         columns = {k: np.concatenate([b[k] for b in field_blocks]) for k in field_blocks[0]}
         n_galaxies = int(columns["LOG10_S"].size)
+
+        # the bright-end pool (review ledger C16): every node a galaxy is
+        # read from a column survey-wide, so pooling runs once here, on the
+        # six fields combined, not per field.
+        counts_raw = np.bincount(columns["NODE"][columns["NODE"] >= 0], minlength=N_S_GRID)
+        columns["NODE"], counts_pooled = _pool_bright_nodes(columns["NODE"], N_S_GRID, MIN_NODE_GALAXIES)
+        n_merged = int(np.sum((counts_raw > 0) & (counts_pooled == 0)))
+        print(f"swire_galaxies: bright-node pool: floor={MIN_NODE_GALAXIES}, "
+              f"{n_merged} of {N_S_GRID} nodes merged away; node counts before/after "
+              f"at the bright edge (56-60)="
+              f"{list(zip(counts_raw[56:].tolist(), counts_pooled[56:].tolist()))}")
 
         finite_i1i2 = np.isfinite(columns["COLOUR_I1I2"])
         finite_i2i3 = np.isfinite(columns["COLOUR_I2I3"])
@@ -214,17 +272,20 @@ def build(config, regions=None):
             f.attrs["N_FINITE_I2I3"] = int(finite_i2i3.sum())
             f.attrs["N_FINITE_I2I4"] = int(finite_i2i4.sum())
             f.attrs["N_FINITE_ALL"] = int(finite_all.sum())
+            f.attrs["MIN_NODE_GALAXIES"] = MIN_NODE_GALAXIES
+            f.attrs["N_NODES_MERGED"] = n_merged
             build_module.write_dataset(
-                f, "LOG10_S_GRID",
-                np.linspace(LOG10_S_GRID_LO, LOG10_S_GRID_HI, N_S_GRID).astype(np.float64),
+                f, "LOG10_S_GRID", log10_s_grid.astype(np.float64),
                 *REGISTRY[(_STEM, "LOG10_S_GRID")])
             build_module.write_dataset(f, "N_NODE_I1I2", n_node_i1i2, *REGISTRY[(_STEM, "N_NODE_I1I2")])
             build_module.write_dataset(f, "N_NODE_ALL", n_node_all, *REGISTRY[(_STEM, "N_NODE_ALL")])
             for name, arr in columns.items():
                 build_module.write_dataset(f, name, arr, *REGISTRY[(_STEM, name)])
 
-        st.done(out_path, n_galaxies=n_galaxies, n_stars_removed=n_stars_removed)
-    return dict(n_galaxies=n_galaxies, n_stars_removed=n_stars_removed, path=out_path)
+        st.done(out_path, n_galaxies=n_galaxies, n_stars_removed=n_stars_removed,
+                 n_nodes_merged=n_merged)
+    return dict(n_galaxies=n_galaxies, n_stars_removed=n_stars_removed, path=out_path,
+                n_nodes_merged=n_merged)
 
 
 if __name__ == "__main__":
