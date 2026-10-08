@@ -24,7 +24,15 @@ own absolute-width ratio between the two beams, then recentred so
 the mean of its own pencils (`_pool_herschel_ref_mixture`). The
 per-source measurement uncertainty and the field zero point are added to
 each component's sigma in quadrature, at the source's own column,
-converted to dex, for both arms alike.
+converted to dex, for both arms alike, and the mixture is recentred a
+SECOND time, per source, at that combined sigma (`Kernel.mixture`) --
+the structural-only recentring above leaves `E[T / A_beam] = 1` at
+`sigma0` alone, and a lognormal mixture's own mean grows with its width,
+so stopping there understates the per-source mean wherever the added
+width is a large share of the total (measured 1.08-1.27 on the
+Planck arm's high-relative-error sightlines); the identity
+(SPEC_BMSTP_DRAFT.md section 2) is `E[T / A_beam] = 1` per source, after
+the quadrature, not before it.
 
 The kernel is also class-conditional: `Kernel.mixture`'s `exponent`
 keyword reweights the mixture by `T ** exponent`, the star-gas law's own
@@ -302,6 +310,17 @@ class Kernel(object):
         yet wired) uses the survey-wide zero point for every Herschel
         source, as before the per-field fix.
 
+        Once the per-source width is folded in, `mu` is shifted again,
+        uniformly across the two components, so `E[T / A_beam] = 1`
+        holds for THIS source's own combined sigma, not just for the
+        structural term's (SPEC_BMSTP_DRAFT.md section 2's identity).
+        The structural mixture read off the stored product is already
+        centred at its own (smaller) `sigma0`; adding measurement and
+        zero-point width without recentring again leaves the mixture's
+        linear-space mean above one, growing with the extra width -- the
+        defect this recentring removes, at the order the quadrature is
+        combined in, never before it.
+
         `exponent` is the star-gas law's own column exponent, `gamma` in
         `p(T | A_beam, C) propto T**gamma * p(T | A_beam)`
         (SPEC_BMSTP_DRAFT.md section 5.5): a class whose members form in
@@ -364,6 +383,25 @@ class Kernel(object):
         zp_dex = self._zp_herschel_dex(a_col, arm_idx, zp_sigma_k)
         extra_var = sigma_col_dex * sigma_col_dex + zp_dex * zp_dex
         sigma = np.sqrt(sigma0 * sigma0 + extra_var[:, np.newaxis])
+        # Recentre so `E[T / A_beam] = 1` HOLDS PER SOURCE, at the
+        # COMBINED sigma -- after the per-source column and zero-point
+        # widths are added in quadrature above, not before (recentring
+        # the structural term alone, at `sigma0`, and leaving it there
+        # is the defect: a lognormal mixture's own mean grows with its
+        # width, so a source whose own column or zero-point uncertainty
+        # is a large share of its total sigma ends up with `E[T/A_beam]`
+        # above 1 -- measured 1.08 (field classes) to 1.27 (cloud
+        # classes) on Planck-arm sightlines with ~40% column error).
+        # Exactly `build`'s own recentring (SPEC_BMSTP_DRAFT.md section
+        # 2's identity), solved again here at the per-source `sigma`
+        # rather than left at the structural `sigma0`: one uniform shift
+        # of both components' means so the mixture's own linear-space
+        # mean is exactly one. No-op where a source carries no extra
+        # width (`extra_var = 0`), since the structural term is already
+        # centred there.
+        e_raw = (w * 10.0 ** (mu[:, 0] + sigma[:, 0] ** 2 * _LN10 / 2.0)
+                 + (1.0 - w) * 10.0 ** (mu[:, 1] + sigma[:, 1] ** 2 * _LN10 / 2.0))
+        mu = mu + (-np.log10(e_raw))[:, np.newaxis]
         if exponent == 0.0:
             return w, mu, sigma
         c = exponent * _LN10
