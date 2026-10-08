@@ -15,28 +15,55 @@ whole adopted column, at the front edge of `bmstp.sample_cloud`'s own
 cloud interval: the 3-D map cannot partition the column reliably behind
 a cloud at a kiloparsec, so nothing behind the front edge is deducted),
 `kappa` selected by which arm reached the source (`ARM`, from the
-adopted column's own provenance flag). H2S (section 5.6) rides on that
-same INTRINSIC young-star law density -- the SAME `A_cloud`-based law on
-whichever column the arm carries, one form on both arms -- scaled by the
-region's `eta` and the universal `eps_ext`, but on the Herschel arm the
-law itself is the knot-driver kernel's convolution of the region's HGBS
-map, cloud-shared the same way (`bmstp.knot_field.convolved_law`),
-sampled at the source's own position -- a map operation, once per
-region, never a per-source convolution. A Herschel-arm source whose
-position falls outside the convolved map's own grid reads its NEAREST
-COVERED cell's convolved value instead (`knot_field.sample_at`'s own
-clamp, sec. 5.6's brief: never the unconvolved law silently); every
-Planck-arm source (the kernel is sub-beam at Planck's 5.03' beam) takes
-the law at its own column instead, as sec. 5.6 intends. Every
-density is a RETAINED density (section 4.1): the intrinsic count times
-the population's on-grid fraction at the source's own grain -- STAR/AGB
-by tile, YSO and H2S by sightline (both read from P3, the cloud shape
-product), GAL the one survey-wide attr, PAHC reading STAR's own
-fraction (section 5.5, 5.6): `ON_GRID_H2S` is a real, stored per-sightline
-retained fraction on the same common depth axis `ON_GRID_YSO` uses, not
-an assumed 1, since the knots' brightness axis moved onto that common
-grid, so it is applied exactly like every other class's on-grid
-fraction rather than treated as formed at read time.
+adopted column's own provenance flag). H2S (section 5.6) rides on a
+SEPARATE evaluation of that SAME `A_cloud`-based quadratic law, one form
+on both arms, but at the SURVEY-POOLED coefficient `KAPPA_POOLED`
+(`bmstp.knot_field.kappa_pooled`/`law_count_at_kappa`), never at this
+region's own fitted `KAPPA_USED` the YSO density above reads: the knot
+count scales with the column-squared integral `population.knot_rate.
+eta_for_region`'s own calibration denominator is formed against, at that
+pooled level, so H2S's own law must be evaluated there too, on BOTH
+arms, or the ratio `eta_r` represents does not cancel (WP-POP-5's
+finding). Scaled by the region's `eta` and the universal `eps_ext`, but
+on the Herschel arm the pooled-coefficient law is the knot-driver
+kernel's convolution of the region's HGBS map, cloud-shared the same
+way (`bmstp.knot_field.convolved_law`), sampled at the source's own
+position -- a map operation, once per region, never a per-source
+convolution. A Herschel-arm source whose position falls outside the
+convolved map's own grid reads its NEAREST COVERED cell's convolved
+value instead (`knot_field.sample_at`'s own clamp, sec. 5.6's brief:
+never the unconvolved law silently); every Planck-arm source (the
+kernel is sub-beam at Planck's 5.03' beam) takes the SAME
+pooled-coefficient law at its own column instead, UNCONVOLVED.
+
+DISCLOSED: that Planck-arm UNCONVOLVED reading is the reason the
+Herschel and Planck arms' own `L/law` ratios differ (measured: Orion A's
+arm-0 median 0.056, a 17.75x step against arm-1's trivial 1; Pipe's
+arm-0 median 0.745, a 1.34x step) -- not an error in either arm's value.
+A knot sits displaced from its driver by the knot-driver kernel's own
+0.32 pc scale (`LAMBDA_PC`), so most of a filament's own knot field
+lands OFF the filament, where the catalogued sources mostly are not;
+the Herschel arm's convolved value, read at a real source position, IS
+that physical displacement, genuinely suppressed below the unconvolved
+point law. The Planck arm's fallback never applies the displacement at
+all (no convolution runs there), so its own ratio is exactly 1 by
+construction, regardless of whether the true displacement is large or
+small at that arm's resolution -- the arm-to-arm step is therefore the
+Planck arm's own missing convolution, not a defect in the Herschel arm's
+number. Whether to convolve the Planck column too (its kernel width,
+0.32 pc, is comparable to the Planck beam at a few hundred pc, so it
+would be a cheap new row to add) is an open question, decided after the
+refit's own H2S numbers are in -- not resolved here.
+
+Every density is a RETAINED density (section 4.1): the intrinsic count
+times the population's on-grid fraction at the source's own grain --
+STAR/AGB by tile, YSO and H2S by sightline (both read from P3, the
+cloud shape product), GAL the one survey-wide attr, PAHC reading STAR's
+own fraction (section 5.5, 5.6): `ON_GRID_H2S` is a real, stored
+per-sightline retained fraction on the same common depth axis
+`ON_GRID_YSO` uses, not an assumed 1, since the knots' brightness axis
+moved onto that common grid, so it is applied exactly like every other
+class's on-grid fraction rather than treated as formed at read time.
 """
 
 import os
@@ -291,24 +318,48 @@ def build_region(config, region, st):
     yso_law_err = max(abs(kappa_used - file_kappa_used), abs(pc2 - file_pc2) / file_pc2)
 
     # H2S, sec. 5.6 "Sky density": `A_H2S(s) = L(s) . eta_r . eps_ext .
-    # ON_GRID_H2S(s)`. `L(s)` is the INTRINSIC young-star law at the
-    # source's own column/arm/region distance -- `density_yso_intrinsic`
-    # above -- EXCEPT for every Herschel-arm source, where `L(s)` is the
-    # region's convolved law map (`bmstp.knot_field.convolved_law`, built
-    # on the SAME `A_cloud` the intrinsic law uses, sec. 5.6's brief: one
-    # form on both arms) sampled at the source instead -- a map
+    # ON_GRID_H2S(s)`. `L(s)` is a SEPARATE evaluation of the SAME
+    # quadratic law, at the SURVEY-POOLED coefficient `KAPPA_POOLED`,
+    # never at this region's own fitted `KAPPA_USED` the YSO density
+    # above (`density_yso_intrinsic`) reads -- WP-POP-5's finding:
+    # `population.knot_rate.eta_for_region`'s own calibration denominator
+    # is formed at the pooled level, so the law it multiplies must be
+    # too, on BOTH arms, or the ratio does not cancel
+    # (`knot_field.law_count_at_kappa`/`kappa_pooled`). On the Herschel
+    # arm that pooled-coefficient law is the region's convolved law map
+    # (`bmstp.knot_field.convolved_law`, built on the SAME `A_cloud` the
+    # intrinsic law uses) sampled at the source instead -- a map
     # operation, once per region, never a per-source convolution. A
     # source whose position falls outside the map's own grid reads its
     # NEAREST COVERED cell's convolved value (`knot_field.sample_at`'s
     # own clamp), so every Herschel-arm source carries a genuinely
-    # convolved value, never `density_yso_intrinsic`'s unconvolved one;
+    # convolved value, never the unconvolved pooled-coefficient law;
     # `n_edge` below is the report's own identity that this is so (sec.
     # 5.6's brief: "100 percent of Orion A's Herschel-arm sources carry a
-    # convolved value").
+    # convolved value"). On the Planck arm the SAME pooled-coefficient
+    # law is read UNCONVOLVED, at the source's own column (the kernel is
+    # sub-beam at Planck's 5.03' beam, sec. 5.6) -- DISCLOSED: this is
+    # the genuine asymmetry between the two arms, not an error on
+    # either side. A knot sits displaced from its driver by the
+    # kernel's own 0.32 pc scale, so most of a filament's knot field
+    # lands OFF the filament, where the catalogued sources mostly are
+    # not; the convolved Herschel value's own point-sampled suppression
+    # at a real source position IS that physical displacement, measured
+    # (not a target): Orion A's arm-0-over-arm-1 `L/law` median is
+    # 0.056 (a 17.75x step), Pipe's is 0.745 (a 1.34x step). The
+    # Planck-arm fallback never applies that displacement at all, so
+    # its own ratio is exactly 1 by construction -- the arm-to-arm step
+    # is the Planck arm's own missing convolution, not a defect in the
+    # Herschel arm's value. (Whether to convolve the Planck column too
+    # -- the kernel's 0.32 pc is comparable to the Planck beam at a few
+    # hundred pc -- is an open, separately-costed question, not
+    # resolved here.)
     eta_r, eta_band_dex = knot_rate.eta_for_region(config, region)
+    kappa_pooled_value = knot_field.kappa_pooled(config)
+    density_h2s_law_pooled = knot_field.law_count_at_kappa(config, region, a_cloud, arm, kappa_pooled_value)
     law_map, law_wcs, knot_meta = knot_field.convolved_law(config, region)
     herschel_mask = arm == PROVENANCE_HERSCHEL
-    l_of_s = density_yso_intrinsic.copy()
+    l_of_s = density_h2s_law_pooled.copy()
     n_herschel = int(np.count_nonzero(herschel_mask))
     n_edge = 0
     knot_ratio_median = knot_ratio_p90 = float("nan")
@@ -319,11 +370,12 @@ def build_region(config, region, st):
         idx = np.flatnonzero(herschel_mask)
         l_of_s[idx[finite]] = l_convolved[finite]
         # sec. 5.6's report: the kernel's own effect on Herschel-arm
-        # sources, `L(s) / (kappa_Herschel A_s^2 . pc2/deg2)` -- the
+        # sources, `L(s) / (kappa_pooled A_cloud^2 . pc2/deg2)` -- the
         # ratio of the convolved to the unconvolved law at the same
-        # source, `density_yso_intrinsic` being exactly that unconvolved
-        # value.
-        ratio = l_convolved[finite] / density_yso_intrinsic[idx[finite]]
+        # source, `density_h2s_law_pooled` being exactly that unconvolved,
+        # pooled-coefficient value (DISCLOSED above: this ratio is the
+        # physical knot-driver displacement, not a defect to chase to 1).
+        ratio = l_convolved[finite] / density_h2s_law_pooled[idx[finite]]
         if ratio.size:
             knot_ratio_median = float(np.median(ratio))
             knot_ratio_p90 = float(np.percentile(ratio, 90))
@@ -349,7 +401,7 @@ def build_region(config, region, st):
         on_grid_h2s=on_grid_h2s, on_grid_gal=on_grid_gal, d_front=d_front,
         omega_sim=omega_sim, f_dusty_o=f_dusty_o, f_dusty_c=f_dusty_c, f_c=f_c,
         eta_r=eta_r, eta_band_dex=eta_band_dex, retention_limits=retention_limits, yso_law_err=yso_law_err,
-        kappa_used=kappa_used,
+        kappa_used=kappa_used, kappa_pooled=kappa_pooled_value, density_h2s_law_pooled=density_h2s_law_pooled,
         d_r_pc=d_r_pc, n=n, knot_meta=knot_meta, n_herschel=n_herschel, n_edge=n_edge,
         knot_ratio_median=knot_ratio_median, knot_ratio_p90=knot_ratio_p90)
 
@@ -544,12 +596,19 @@ def build(config, regions=None):
                 print(f"bmstp.density {region}: H2S n_herschel_arm={result['n_herschel']} "
                       f"n_edge_own_column={result['n_edge']} (identity: 0, every Herschel-arm "
                       f"source carries a convolved value -- sec. 5.6's brief) "
-                      f"arm-0 L(s)/density_yso_intrinsic(s) median={result['knot_ratio_median']:.4g} "
-                      f"p90={result['knot_ratio_p90']:.4g}; arm-1's own ratio is 1 identically "
-                      f"(no convolution there, sec. 5.6), so the arm-0-over-arm-1 STEP = "
-                      f"{1.0 / result['knot_ratio_median'] if result['knot_ratio_median'] else float('nan'):.4g} "
-                      f"(identity: no step, sec. 5.6's brief)")
-            density_h2s_before = float(np.mean(result["density_yso_intrinsic"] * result["eta_r"] * EPS_EXT))
+                      f"arm-0 L(s)/density_h2s_law_pooled(s) median={result['knot_ratio_median']:.4g} "
+                      f"p90={result['knot_ratio_p90']:.4g}; arm-1's own ratio is 1 identically, by "
+                      f"construction, since it is the SAME pooled-coefficient law UNCONVOLVED, not "
+                      f"because no knot-driver displacement exists there -- the arm-0-over-arm-1 "
+                      f"STEP = {1.0 / result['knot_ratio_median'] if result['knot_ratio_median'] else float('nan'):.4g} "
+                      f"is DISCLOSED (sec. 5.6), the Planck arm's own missing convolution, not a "
+                      f"defect in the Herschel arm's genuinely displaced value; measured, not a bar")
+            print(f"bmstp.density {region}: H2S law coefficient kappa_pooled={result['kappa_pooled']:.6g} "
+                  f"vs this region's YSO kappa_used={result['kappa_used']:.6g}, ratio="
+                  f"{result['kappa_pooled'] / result['kappa_used']:.6g} (WP-POP-5: H2S reads "
+                  f"kappa_pooled on both arms, never this region's own fitted coefficient, which "
+                  f"YSO's own density keeps using unchanged)")
+            density_h2s_before = float(np.mean(result["density_h2s_law_pooled"] * result["eta_r"] * EPS_EXT))
             density_h2s_after = float(np.mean(result["density_h2s"]))
             print(f"bmstp.density {region}: RATIO_H2S (mean density, deg^-2) "
                   f"before={density_h2s_before:.6g} after={density_h2s_after:.6g} "

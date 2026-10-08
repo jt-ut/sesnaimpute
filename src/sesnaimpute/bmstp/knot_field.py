@@ -1,11 +1,15 @@
 """The young-star law convolved with the knot-driver displacement kernel,
 as a map operation (SPEC_BMSTP_DRAFT.md sec. 5.6 "Sky density"): a knot
-rides on `kappa_arm . A_cloud^2` -- sec. 5.5's law, on the CLOUD's own
+rides on `kappa_pooled . A_cloud^2` -- sec. 5.5's law, on the CLOUD's own
 share of whichever column the arm carries (sec. 5.5: "the cloud's share
 of the column"; the same `A_cloud = A . cloud_frac` every reader of the
 law applies, never the raw column alone, since `eta_r`'s own calibration
 (sec. 5.6's constant table) is formed against that same cloud-share-
-squared denominator) -- smeared by `K(r) ~ e^{-r/lambda}/r`, the
+squared denominator), at the SURVEY-POOLED coefficient `kappa_pooled`
+rather than the region's own fitted `KAPPA_USED` (`population.knot_rate`'s
+own calibration is formed at that pooled level; WP-POP-5's finding --
+H2S's own law, never YSO's, whose density stays at the region's own
+coefficient everywhere else) -- smeared by `K(r) ~ e^{-r/lambda}/r`, the
 driver-to-knot separation kernel (Davis+2009, Walawender+2005). The
 convolution runs once per region on the region's own HGBS column map, at
 whatever coarsening keeps the kernel resolved and the map under a few
@@ -19,11 +23,10 @@ outside the array itself, by projecting onto the array's own nearest
 in-grid pixel -- so every Herschel-arm source, in the map's own footprint
 or not, reads a genuine convolved value (sec. 5.6's brief). A Planck-arm
 source/pixel never reaches this module: the kernel is sub-beam at
-Planck's 5.03' resolution, so it takes the law at its own column instead
-(sec. 5.6, `bmstp.density`/`bmstp.atlas`) -- the SAME `law_count` function,
-on the SAME cloud-shared column, just without the plane-of-sky smoothing
-a coarser-than-kernel beam already makes moot.
-"""
+Planck's 5.03' resolution, so it takes the SAME `kappa_pooled`-evaluated
+law at its own column instead (`law_count_at_kappa`, below;
+`bmstp.density`/`bmstp.atlas`), UNCONVOLVED -- `bmstp.density`'s own
+docstring states what that means for the arm-to-arm step."""
 
 import time
 import warnings
@@ -59,6 +62,45 @@ TRUNCATE_N_LAMBDA = 5.0
 MIN_KERNEL_PIXELS = 4.0
 #: ...and until the map holds at most this many pixels (sec. 5.6's brief).
 MAX_MAP_PIXELS = 4_000_000
+
+
+def kappa_pooled(config):
+    """`KAPPA_POOLED`, the survey-wide pooled young-star-law coefficient
+    (`population/yso/law_yso_region.hdf5`'s own scalar attribute, the
+    SAME value for every region -- `population.yso` sec. 6.1's "geometric
+    mean over the fitted regions"). H2S's own law evaluation reads this,
+    never a region's fitted `KAPPA_USED` (`yso_module._kappa_used`):
+    the knot count scales with the column-squared integral calibrated at
+    the knot survey's own anchors (`population.knot_rate.eta_for_region`'s
+    own denominator, `region_predicted_yso`, is formed at the SAME pooled
+    level by construction -- it reads `yso_module.law_area_integral`
+    with `kappa=None`, which falls back to `KAPPA_USED`, but every
+    region but the pooled one's own anchor is calibrated relative to it;
+    WP-POP-5's finding), independent of which level the YSO class itself
+    happens to be fitted at in that one region. YSO's own density is
+    UNCHANGED by this: it still reads `_kappa_used`, via `population.yso.
+    law_count`, exactly as before."""
+    path = config_module.product_path(config, "population", "yso", "law", "region")
+    with h5py.File(path, "r") as f:
+        return float(f["KAPPA_POOLED"][()])
+
+
+def law_count_at_kappa(config, region, a_col, provenance, kappa):
+    """`N_law`, exactly `population.yso.law_count`'s own formula (the
+    region's `(pc^2/deg^2)_r` factor, the Planck arm's kernel second
+    moment) -- but at an EXPLICIT coefficient `kappa` rather than the
+    region's own fitted `KAPPA_USED`. H2S's own law evaluation calls this
+    at `kappa_pooled(config)`, on both arms, so the ratio `eta_r` is
+    itself calibrated against (`population.knot_rate`) never picks up a
+    second, uncancelled region-specific factor; YSO's own `law_count`
+    call elsewhere is untouched."""
+    a_col = np.asarray(a_col, dtype=float)
+    provenance = np.asarray(provenance)
+    d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
+    pc2 = yso_module.pc2_per_deg2(d_r_pc)
+    herschel_value = kappa * pc2 * a_col ** 2
+    planck_value = kappa * pc2 * yso_module._kernel_second_moment_planck(config, a_col)
+    return np.where(provenance == yso_module.PROVENANCE_HERSCHEL, herschel_value, planck_value)
 
 
 def _serving_map_name(config, region):
@@ -199,7 +241,7 @@ def _kernel(pixscale_pc, truncate_pc):
 
 def convolved_law(config, region):
     """`(law_map, wcs, meta)`: the region's dominant HGBS column map, as
-    `kappa_Herschel . (pc^2/deg^2)_r . A_cloud^2` -- sec. 5.5's law, on
+    `kappa_pooled . (pc^2/deg^2)_r . A_cloud^2` -- sec. 5.5's law, on
     the CLOUD's own share of the column (`cloud_column_fraction`, the
     SAME fraction every source's own `A_CLOUD_K` carries), already in
     the sky density's own deg^-2 units so a consumer can use it exactly
@@ -207,9 +249,14 @@ def convolved_law(config, region):
     convolved once with the knot-driver kernel above, then filled so
     every downsampled cell the map's own footprint reaches holds a
     genuinely convolved value (`_fill_uncovered`, sec. 5.6's brief: never
-    the unconvolved law silently). `(None, None, None)` if no HGBS map
-    serves the region (an all-Planck-arm region). `meta` carries the
-    map name, the downsampling factor, the kernel's radius and width in
+    the unconvolved law silently). This map is H2S's OWN, never read for
+    YSO's own density: it is evaluated at the SURVEY-POOLED coefficient
+    `kappa_pooled`, not the region's own fitted `KAPPA_USED`, because the
+    knot count scales with the column-squared integral `eta_r` is
+    calibrated against at the pooled level (WP-POP-5's finding;
+    `kappa_pooled`, above). `(None, None, None)` if no HGBS map serves
+    the region (an all-Planck-arm region). `meta` carries the map name,
+    the downsampling factor, the kernel's radius and width in
     downsampled pixels, the convolution's wall time, the covered
     fraction before the nearest-cell fill, and the pre-/post-convolution
     totals (deg^-2 x deg^2 = a count) for the report's conservation
@@ -227,16 +274,19 @@ def convolved_law(config, region):
             "is not among the fetched HGBS files" % (name, region))
     data, wcs, pixscale_arcsec_native = herschel_column_module._open_hgbs_map(maps_by_name[name])
 
-    # The law on the map's own native grid, sec. 5.5: `kappa_Herschel *
+    # The law on the map's own native grid, sec. 5.5: `kappa_pooled *
     # A_K^2`, carried straight to deg^-2 units (the same region-constant
-    # pc^2/deg^2 factor `bmstp.density`'s DENSITY_YSO uses) so the
-    # convolved map is directly comparable to it; unmeasured pixels
-    # (`herschel_column`'s own "on" test: finite and positive) contribute
-    # zero, not a fabricated column.
+    # pc^2/deg^2 factor `bmstp.density`'s DENSITY_YSO uses, so the
+    # convolved map is directly comparable to it) but at the SURVEY-
+    # POOLED coefficient, never the region's own `KAPPA_USED` -- H2S's
+    # own law, not YSO's (see this function's own docstring,
+    # `kappa_pooled`, above). Unmeasured pixels (`herschel_column`'s own
+    # "on" test: finite and positive) contribute zero, not a fabricated
+    # column.
     valid = np.isfinite(data) & (data > 0)
     a_k = np.where(valid, data.astype(np.float64) * herschel_column_module.NH2_TO_AK, 0.0)
     pc2 = float(yso_module.pc2_per_deg2(d_r_pc))
-    law_native = yso_module._kappa_used(config, region) * pc2 * a_k ** 2
+    law_native = kappa_pooled(config) * pc2 * a_k ** 2
 
     pc_per_arcsec = (np.pi / 180.0 / 3600.0) * d_r_pc
     lambda_arcsec = LAMBDA_PC / pc_per_arcsec
@@ -275,7 +325,7 @@ def convolved_law(config, region):
 
     t0 = time.time()
     convolved = fftconvolve(law_ds, kernel, mode="same")
-    # `law_ds` is non-negative (kappa_arm . A_cloud^2, with unmeasured
+    # `law_ds` is non-negative (kappa_pooled . A_cloud^2, with unmeasured
     # pixels contributing zero, not a fabricated column) and `K(r) ~
     # e^{-r/lambda}/r` is non-negative, so the convolution of the two is
     # non-negative everywhere in exact arithmetic. Any negative value
