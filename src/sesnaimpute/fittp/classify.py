@@ -65,15 +65,21 @@ import os
 import h5py
 import numpy as np
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute.constants import GUTERMUTH_LABELS
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.batches import batches
 from sesnaimpute.fittp import likelihood
 from sesnaimpute.population import selection as population_selection
-from sesnaimpute.readings import set_readings
+
+#: `config.product_path`'s own stems for this module's two products
+#: (`attrs_registry.REGISTRY`'s keys, CODING_RULES_BMSTP.md rule 5).
+_POSTERIOR_STEM = "posterior_classification_source"
+_SENSITIVITY_STEM = "sensitivity_classification_region"
 
 #: The fitter's six classes, in the order every P-product's class axis
 #: uses (IMPLEMENTATION_BMSTP_DRAFT.md section 1) -- the same order
@@ -438,20 +444,17 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
 
 def _write_classify_part(part_path, batch):
     with h5py.File(part_path, "w") as f:
-        f.create_dataset("NAME", data=batch["name"])
-        f.create_dataset("CLASS_SESNA", data=batch["class_sesna"])
-        f.create_dataset("P_CLASS", data=batch["p_class"])
-        f.create_dataset("P_SUBCLASS", data=batch["p_subclass"])
-        f.create_dataset("P_YSO", data=batch["p_class"][:, YSO_INDEX])
-        f.create_dataset("MAP_CLASS", data=batch["map_class"])
-        f.create_dataset("N_DETECTED", data=batch["n_detected"])
-        f.create_dataset("LOG10_CANDIDATE_FLUX", data=batch["log10_candidate_flux"])
-        f.create_dataset("LOG10_FLUX_IMPUTED", data=batch["log10_flux_imputed"])
-        f.create_dataset("LOG10_FLUX_IMPUTED_COV", data=batch["log10_flux_imputed_cov"])
-        f.create_dataset("A_K_POST", data=batch["a_k_post"])
-        f.create_dataset("A_K_POST_SIG", data=batch["a_k_post_sig"])
-        f.create_dataset("ENTROPY_CLASS", data=batch["entropy_class"])
-        f.create_dataset("ENTROPY_SUBCLASS", data=batch["entropy_subclass"])
+        for key, field in (
+            ("NAME", "name"), ("CLASS_SESNA", "class_sesna"), ("P_CLASS", "p_class"),
+            ("P_SUBCLASS", "p_subclass"), ("MAP_CLASS", "map_class"), ("N_DETECTED", "n_detected"),
+            ("LOG10_CANDIDATE_FLUX", "log10_candidate_flux"), ("LOG10_FLUX_IMPUTED", "log10_flux_imputed"),
+            ("LOG10_FLUX_IMPUTED_COV", "log10_flux_imputed_cov"), ("A_K_POST", "a_k_post"),
+            ("A_K_POST_SIG", "a_k_post_sig"), ("ENTROPY_CLASS", "entropy_class"),
+            ("ENTROPY_SUBCLASS", "entropy_subclass"),
+        ):
+            build_module.write_dataset(f, key, batch[field], *REGISTRY[(_POSTERIOR_STEM, key)])
+        build_module.write_dataset(f, "P_YSO", batch["p_class"][:, YSO_INDEX],
+                                    *REGISTRY[(_POSTERIOR_STEM, "P_YSO")])
 
 
 def build_region(config, region, st, beta):
@@ -522,76 +525,8 @@ def build_region(config, region, st, beta):
                 imputed_identity_err=imputed_identity_err, n_flagged=n_flagged)
 
 
-#: `UNITS`/`READING` (CODING_RULES_BMSTP.md rule 5): every dataset the
-#: joined P8 posterior product carries.
-_READINGS = {
-    "NAME": ("source name",
-        "The source's name from the SESNA catalog. Rows are in catalog order."),
-    "CLASS_SESNA": ("SESNA class code",
-        "SESNA's own classification, copied from the catalog: 0 deeply embedded "
-        "protostar, 1 class I, 2 class II, 3 transition disk, 9 H2 shock blob, 19 "
-        "PAH emitter (star-forming galaxy), 29 AGN, 39 PAH-contaminated source, 49 "
-        "generic galaxy, 99 diskless star, -100 unclassified. No other column here "
-        "depends on it."),
-    "N_DETECTED": ("bands",
-        "How many of the eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron) "
-        "have a measured, positive flux."),
-    "MAP_CLASS": ("class position",
-        "The most probable class, as a position in the CLASSES attribute, counting "
-        "from zero. -1 means the source could not be fitted: fewer than two "
-        "measured bands, or a flux error that is not finite."),
-    "P_CLASS": ("probability",
-        "Probability of each class: field star, dusty evolved star, "
-        "nebula-contaminated aperture, background galaxy, young stellar object, "
-        "shocked gas knot. Column order is the CLASSES attribute. Sums to 1."),
-    "P_SUBCLASS": ("probability",
-        "Probability of each of 25 subdivisions, named class and subdivision in the "
-        "SUBCLASSES attribute: field stars by spectral type O to T, evolved stars "
-        "oxygen-rich or carbon-rich, galaxies active, star-forming, composite or "
-        "passive, young stellar objects class 0 to III or transition disk, knots J, "
-        "C, steady C or C-J shocks. A class's columns sum to its P_CLASS; all 25 "
-        "sum to 1."),
-    "P_YSO": ("probability",
-        "Probability that the source is a young stellar object: the young stellar "
-        "object column of P_CLASS."),
-    "ENTROPY_CLASS": ("fraction of maximum",
-        "How spread the six class probabilities are, divided by their maximum "
-        "spread. 0 means one class takes all the probability, 1 means all six are "
-        "equally likely."),
-    "ENTROPY_SUBCLASS": ("fraction of maximum",
-        "How spread the 25 subdivision probabilities are, divided by their maximum "
-        "spread. 0 means one subdivision takes all the probability, 1 means all 25 "
-        "are equally likely."),
-    "A_K_POST": ("magnitudes of K-band extinction",
-        "The fitted extinction in front of the source, one column per class in "
-        "CLASSES order: the value if the source were of that class. Read the "
-        "MAP_CLASS column. Each model's own fitted range of extinction is averaged "
-        "over all models and both extinction laws, weighted by each model's share "
-        "of the support for the source: its fit to the measured fluxes, how many "
-        "such objects the sky holds at that position and brightness, and what Gaia "
-        "says."),
-    "A_K_POST_SIG": ("magnitudes of K-band extinction",
-        "The standard deviation of that fitted extinction, one column per class. It "
-        "covers both the precision of the fit and disagreement between the models "
-        "that fit the source. It is not a formal fitting error."),
-    "LOG10_FLUX_IMPUTED": ("log10 of flux in mJy",
-        "The eight-band spectrum, band order J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 "
-        "micron. A measured band holds log10 of the catalog flux; the rest hold the "
-        "support-weighted average over the models that fit the source. 10**x is a "
-        "flux in mJy."),
-    "LOG10_FLUX_IMPUTED_COV": ("squared dex",
-        "Covariance of those eight values, one dex being a factor of 10. On an "
-        "estimated band, s = sqrt(diagonal) is the uncertainty in log flux, so the "
-        "flux spans 10**(x-s) to 10**(x+s) with 68 percent probability. On a "
-        "measured band the diagonal is the catalog error, recovered in mJy as 10**x "
-        "times 2.3026 times s. An entry between a measured and an estimated band is "
-        "not zero and is needed for a color across the pair; between two measured "
-        "bands it is zero."),
-    "LOG10_CANDIDATE_FLUX": ("log10 of flux in mJy",
-        "The same spectrum under each class in turn, CLASSES order then band order. "
-        "A measured band holds log10 of the catalog flux; the rest hold that "
-        "class's own estimate."),
-}
+#: `UNITS`/`READING` for every dataset here (CODING_RULES_BMSTP.md rule 5)
+#: live in `attrs_registry.REGISTRY`, keyed by `(_POSTERIOR_STEM, name)`.
 
 
 def join_classify_parts(path, part_paths, n_source):
@@ -602,7 +537,8 @@ def join_classify_parts(path, part_paths, n_source):
         with h5py.File(part_paths[0], "r") as pf0:
             for key in _CLASSIFY_PART_KEYS:
                 shape = (n_source,) + pf0[key].shape[1:]
-                out.create_dataset(key, shape=shape, dtype=pf0[key].dtype)
+                build_module.write_dataset(out, key, None, *REGISTRY[(_POSTERIOR_STEM, key)],
+                                            shape=shape, dtype=pf0[key].dtype)
         offset = 0
         for part_path in part_paths:
             with h5py.File(part_path, "r") as pf:
@@ -610,7 +546,6 @@ def join_classify_parts(path, part_paths, n_source):
                 for key in _CLASSIFY_PART_KEYS:
                     out[key][offset:offset + m] = pf[key][:]
             offset += m
-        set_readings(out, _READINGS)
         out.attrs["GRANULE"] = "source"
         out.attrs["CLASSES"] = np.array(CLASSES, dtype="S8")
         out.attrs["SUBCLASSES"] = np.array(SUBCLASS_LABELS, dtype="S12")
@@ -738,32 +673,15 @@ def write_sensitivity(path, region, result):
 
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
-        f.create_dataset("REGION", data=np.array(region_names, dtype="S32"))
-        f.create_dataset("RUN", data=np.array(SENSITIVITY_RUNS, dtype="S16"))
-        f.create_dataset("SCALING", data=scaling.astype(np.float32))
-        f.create_dataset("FRAC_MAP_CHANGED", data=frac_map_changed.astype(np.float32))
-        f.create_dataset("N_PYSO_ABOVE_HALF", data=n_pyso_above_half.astype(np.int32))
-        f.create_dataset("N_SOURCES", data=n_sources.astype(np.int32))
-        set_readings(f, {
-            "REGION": ("region name", "The region this row describes."),
-            "RUN": ("test name",
-                     "One of nine tests. Each changes how many objects of a class the sky "
-                     "is expected to hold, by as much as the published measurements allow, "
-                     "to see how far the classification moves."),
-            "SCALING": ("factor",
-                         "The factor a test applied to each class's expected numbers, 1.0 "
-                         "where it leaves a class alone. Class order is the CLASSES "
-                         "attribute. The young-star floor test holds that region's average "
-                         "factor over its own sources, not a single published number."),
-            "FRAC_MAP_CHANGED": ("fraction",
-                                   "The fraction of the region's sources whose most "
-                                   "probable class changed under that test."),
-            "N_PYSO_ABOVE_HALF": ("sources",
-                                    "How many sources have a young stellar object "
-                                    "probability above one half under each test. The first "
-                                    "column is the reported classification, untested."),
-            "N_SOURCES": ("sources", "How many sources the region holds."),
-        })
+        for key, data in (
+            ("REGION", np.array(region_names, dtype="S32")),
+            ("RUN", np.array(SENSITIVITY_RUNS, dtype="S16")),
+            ("SCALING", scaling.astype(np.float32)),
+            ("FRAC_MAP_CHANGED", frac_map_changed.astype(np.float32)),
+            ("N_PYSO_ABOVE_HALF", n_pyso_above_half.astype(np.int32)),
+            ("N_SOURCES", n_sources.astype(np.int32)),
+        ):
+            build_module.write_dataset(f, key, data, *REGISTRY[(_SENSITIVITY_STEM, key)])
         f.attrs["GRANULE"] = "region"
         f.attrs["SCALING_YSO_FLOOR_IS_PER_SOURCE"] = (
             "SCALING row %d (yso_floor) is each region's own mean over sources of "
