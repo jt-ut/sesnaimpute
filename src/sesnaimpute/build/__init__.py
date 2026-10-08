@@ -74,13 +74,26 @@ def run(build_fn):
 
 def write_dataset(group, name, data, units, reading, **kwargs):
     """Creates the dataset `name` in `group` and sets the two attributes
-    every dataset in a catalog, sky, population, bmstp or atlas product
-    carries (CODING_RULES_BMSTP.md rule 5): `UNITS`, a short unit string,
-    and `READING`, one plain-language sentence saying what the number is.
-    No writer spells those two attribute names itself. `**kwargs` passes
-    straight through to `create_dataset` (e.g. `compression="gzip"`) --
-    it changes storage, never a value."""
-    dataset = group.create_dataset(name, data=data, **kwargs)
+    every dataset in a catalog, sky, population, bmstp, fittp or atlas
+    product carries (CODING_RULES_BMSTP.md rule 5): `UNITS`, a short unit
+    string, and `READING`, one plain-language sentence saying what the
+    number is. No writer spells those two attribute names itself.
+    `**kwargs` passes straight through to `create_dataset` (e.g.
+    `compression="gzip"`, or `shape`/`dtype` for the pre-allocate-then-fill
+    form below) -- it changes storage, never a value.
+
+    `data` is `None` for a dataset created empty and filled by slice after
+    (`fittp.sweep.join_parts`'s own join, rule 10b): exactly one of `data`
+    or `shape` (passed through `**kwargs`) must be given, since a caller
+    naming both or neither has made a mistake about which form it wants."""
+    if (data is None) == ("shape" not in kwargs):
+        raise ValueError("build.write_dataset: %r in %r needs exactly one of data= or "
+                          "shape= (got data=%s, shape=%s)"
+                          % (name, group.name, data is not None, "shape" in kwargs))
+    if data is not None:
+        dataset = group.create_dataset(name, data=data, **kwargs)
+    else:
+        dataset = group.create_dataset(name, **kwargs)
     dataset.attrs["UNITS"] = units
     dataset.attrs["READING"] = reading
     return dataset
