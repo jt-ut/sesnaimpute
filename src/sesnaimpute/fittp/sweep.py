@@ -132,15 +132,16 @@ import numpy as np
 import threadpoolctl
 from scipy.special import logsumexp
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.catalog import limits as catalog_limits
 from sesnaimpute.fittp import likelihood
 from sesnaimpute.fittp import prior_reader
 from sesnaimpute.fittp.gaia import GaiaTerm
-from sesnaimpute.readings import set_readings
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
@@ -191,84 +192,14 @@ _PART_KEYS = ("NAME", "LN_EVIDENCE", "LOG10_FLUX_MEAN", "LOG10_FLUX_COV", "TOPK_
               "TOPK_LN_GAMMA", "OCCAM_GAP", "A_K_POST", "A_K_POST_SIG", "P_DENSE",
               "FRAC_CLAMPED", "N_DETECTED")
 
-#: `UNITS`/`READING` (CODING_RULES_BMSTP.md rule 5): every dataset the
-#: joined fit file carries, including `FAILED_ROWS` (join-time only, not
-#: a `_PART_KEYS` member).
-_READINGS = {
-    "NAME": ("source name",
-        "The source's name from the SESNA catalog. Rows are in catalog order."),
-    "N_DETECTED": ("bands",
-        "How many of the eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron) "
-        "have a measured, positive flux."),
-    "LN_EVIDENCE": ("nats",
-        "How well this class explains the source, one value per subdivision named "
-        "in the SUBCLASSES attribute, as a natural logarithm. Each gathers every "
-        "model of that subdivision under both extinction laws. Minus infinity means "
-        "the subdivision has no models, or the class cannot explain the source, or "
-        "the source could not be fitted."),
-    "LOG10_FLUX_MEAN": ("log10 of flux in mJy",
-        "This class's estimate of the eight-band spectrum, band order J, H, Ks, "
-        "3.6, 4.5, 5.8, 8.0 and 24 micron, averaging its models by their share of "
-        "the support for the source. 10**x is a flux in mJy."),
-    "LOG10_FLUX_COV": ("squared dex",
-        "Covariance of those eight values, one dex being a factor of 10. It "
-        "combines disagreement between this class's models with the precision of "
-        "the fitted brightness and extinction. sqrt(diagonal) is the uncertainty in "
-        "log flux."),
-    "A_K_POST": ("magnitudes of K-band extinction",
-        "The fitted extinction in front of the source if it belongs to this class, "
-        "averaging each model's own fitted range over all models and both "
-        "extinction laws, weighted by each model's share of the support."),
-    "A_K_POST_SIG": ("magnitudes of K-band extinction",
-        "The standard deviation of that fitted extinction. It covers both the "
-        "precision of the fit and disagreement between models, and is not a formal "
-        "fitting error."),
-    "P_DENSE": ("fraction",
-        "How much of this class's support comes from the dense extinction law "
-        "rather than the diffuse one. 0 where the sightline carries no dense dust "
-        "in front of the source."),
-    "OCCAM_GAP": ("nats",
-        "How much more support this class has than its single best model, as a "
-        "natural logarithm. A large value means many of its models fit about "
-        "equally well."),
-    "FRAC_CLAMPED": ("fraction",
-        "The support-weighted fraction of this class's models whose best fit called "
-        "for negative extinction and was held at zero."),
-    "FAILED_ROWS": ("source position",
-        "Positions, counting from zero in catalog order, of sources this run could "
-        "not fit. Empty where every source was fitted."),
-    "TOPK_MODEL": ("model position",
-        "The five models of this class that best explain the source, best first, as "
-        "positions in its model library. -1 where fewer were kept or the source "
-        "could not be fitted. The other TOPK columns follow this same order."),
-    "TOPK_FLUX": ("mJy",
-        "Each of those five models' eight-band spectrum, band order J, H, Ks, 3.6, "
-        "4.5, 5.8, 8.0 and 24 micron, at its own fitted brightness and extinction."),
-    "TOPK_A_K": ("magnitudes of K-band extinction",
-        "The extinction fitted for each of those five models. A model whose best "
-        "fit called for negative extinction is held at zero."),
-    "TOPK_LOG10_B": ("log10 of a scale factor",
-        "The brightness fitted for each of those five models, as log10 of the "
-        "factor multiplying the model's own reference spectrum."),
-    "TOPK_CHI2": ("chi-squared",
-        "Chi-squared of each of those five models against the measured fluxes, at "
-        "its fitted brightness and extinction."),
-    "TOPK_LN_L": ("nats",
-        "How well each of those five models matches the photometry, as a natural "
-        "logarithm: the fit to the measured fluxes, together with the chance the "
-        "survey would have missed the flux predicted in each undetected band."),
-    "TOPK_LN_PRIOR": ("nats",
-        "How many objects of this class the sky is expected to hold at the "
-        "position, brightness and depth each of those five models implies, as a "
-        "natural logarithm of a density."),
-    "TOPK_LN_GAMMA": ("nats",
-        "What Gaia says about each of those five models, as a natural logarithm: "
-        "whether a counterpart is present or absent, and whether its parallax suits "
-        "the model's distance. 0 where Gaia has nothing to say."),
-    "TOPK_LAW": ("law position",
-        "Which extinction law fits each of those five models better: 0 diffuse, 1 "
-        "dense."),
-}
+#: Every dataset the joined fit file carries, including `FAILED_ROWS`
+#: (join-time only, not a `_PART_KEYS` member), has its `UNITS`/`READING`
+#: (CODING_RULES_BMSTP.md rule 5) in `attrs_registry.REGISTRY`, keyed by
+#: `(cls + "_fit_source", name)` -- `_STEM`, below -- the same text
+#: repeated for every one of the six classes' own files.
+def _STEM(cls):
+    return "%s_fit_source" % cls
+
 
 _FIELD_OF_KEY = {
     "NAME": "name", "LN_EVIDENCE": "ln_evidence", "LOG10_FLUX_MEAN": "log10_flux_mean",
@@ -801,10 +732,15 @@ def _assemble_batch(results, name_slice, n_sub, topk):
                 zero_ext_count=zero_ext_count, n_templates_checked=n_templates_checked)
 
 
-def _write_part(part_path, batch):
+def _write_part(part_path, batch, cls):
+    stem = _STEM(cls)
     with h5py.File(part_path, "w") as f:
         for key in _PART_KEYS:
-            f.create_dataset(key, data=batch[_FIELD_OF_KEY[key]])
+            build_module.write_dataset(f, key, batch[_FIELD_OF_KEY[key]], *REGISTRY[(stem, key)])
+        # "FAILED" is a part-file-only column (module docstring): no
+        # `_READINGS`/`REGISTRY` entry ever carried it, since the current
+        # design's `set_readings` never touched a part file either -- left
+        # as a plain dataset, not given an invented reading (unit report).
         f.create_dataset("FAILED", data=batch["failed"])
         f.attrs["ZERO_EXT_COUNT"] = batch["zero_ext_count"]
         f.attrs["N_TEMPLATES_CHECKED"] = batch["n_templates_checked"]
@@ -970,7 +906,7 @@ def build_region_class(config, region, cls, st, reader, catalog,
             for r in pool.imap(_source_task, range(bstart, bstop), chunksize=_IMAP_CHUNKSIZE):
                 results[r["i"] - bstart] = r
             batch = _assemble_batch(results, catalog["name"][bstart:bstop], n_sub, topk)
-            _write_part(_part_path(path, bi), batch)
+            _write_part(_part_path(path, bi), batch, cls)
             st.tick(bi + 1, len(batch_bounds), "batches")
 
     density_file = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
@@ -1009,6 +945,7 @@ def join_parts(summary, topk):
             "fittp.sweep.join_parts [%s]: %d of %d batch part files present for %s -- "
             "rerun with --batches naming the missing indices before joining"
             % (summary.get("cls"), len(part_paths), n_batches, path))
+    stem = _STEM(summary.get("cls"))
     zero_ext_count = 0
     n_templates_checked = 0
     failed_chunks = []
@@ -1017,7 +954,7 @@ def join_parts(summary, topk):
             with h5py.File(part_paths[0], "r") as pf0:
                 shape = (n_source,) + pf0[key].shape[1:]
                 dtype = pf0[key].dtype
-            out.create_dataset(key, shape=shape, dtype=dtype)
+            build_module.write_dataset(out, key, None, *REGISTRY[(stem, key)], shape=shape, dtype=dtype)
         offset = 0
         for part_path in part_paths:
             with h5py.File(part_path, "r") as pf:
@@ -1031,8 +968,7 @@ def join_parts(summary, topk):
             offset += m
         failed_rows = (np.concatenate(failed_chunks) if failed_chunks
                         else np.array([], dtype=np.int64)).astype(np.int64)
-        out.create_dataset("FAILED_ROWS", data=failed_rows)
-        set_readings(out, _READINGS)
+        build_module.write_dataset(out, "FAILED_ROWS", failed_rows, *REGISTRY[(stem, "FAILED_ROWS")])
         out.attrs["GRANULE"] = "source"
         out.attrs["CLASS"] = summary.get("cls")
         out.attrs["SUBCLASSES"] = np.array(summary["subclasses"], dtype="S8")
