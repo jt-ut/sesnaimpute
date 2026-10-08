@@ -250,6 +250,132 @@ def _position_distribution(log10_xi_hat, w, mu, sigma):
     return median, lo16, hi84, p_reach, beyond_reach
 
 
+#: The kernel's own calibration sample (`population.kernel.
+#: _PROTOSTAR_REGIONS`, the joint fit SPEC_BMSTP_DRAFT.md sec. 2 runs):
+#: Orion A's and Aquila's own matched Class 0/I/flat protostars. Read off
+#: the fitting module itself rather than restated here, so this check
+#: cannot drift from the sample the width and the tilt were actually
+#: fit on (ledger C15: the two must name the same regions).
+_KERNEL_FIT_REGIONS = kernel_module._PROTOSTAR_REGIONS
+
+
+def _region_kernel_group(config, region, kernel):
+    """`(log10_xi_hat, w, mu, sigma, beyond_reach, xi_marginal, xi_centers,
+    n, n_raw)` for one region's own matched Class 0/I/flat protostars with
+    a fitted foreground (`AV_FOREGROUND_MAG > 0`) -- the same construction
+    `_verdict` uses for its own single-region kernel check, factored out
+    so the holdout check (ledger C15) can read it for a region whose page
+    is not the one being drawn. `xi_marginal` is this region's own
+    median-sightline YSO x marginal (`_read_xi_marginal`), exactly as
+    `_verdict`'s own kernel check reads it. `n_raw` is the region's own
+    Class 0/I/flat count in `sky.derived.protostars` before any match or
+    foreground exclusion (78 for Orion B) -- the ledger's own number,
+    disclosed beside `n`, the smaller count this check actually uses."""
+    protostars = _read_protostars(config, region)
+    used = np.isin(protostars["cls"], CLASS_USED)
+    n_raw = int(np.count_nonzero(used))
+    ra_u = protostars["ra_deg"][used]
+    dec_u = protostars["dec_deg"][used]
+    av_u = protostars["av_mag"][used]
+
+    (density_row, _, _, excluded, _, a_col_dens, _) = _match_to_catalogue(config, region, ra_u, dec_u)
+    (_, _, _, a_col_sig_dens, arm_dens, zp_sig_dens, sightline_dens) = _read_density_rows(config, region)
+
+    keep = ~excluded
+    rows = density_row[keep]
+    no_fg = av_u[keep] <= 0.0
+
+    a_col_row = a_col_dens[rows]
+    w_ramp_col = population_selection.law_dense_weight(a_col_row)
+    ak_per_av_col = population_selection.ak_per_av(config, w_ramp_col)
+    a_p = av_u[keep] * ak_per_av_col
+    xi_hat = np.maximum(a_p / a_col_row, 10.0 ** grid.LOG10_XI_EDGES[0])
+    log10_xi_hat = np.log10(xi_hat)
+
+    w_mix, mu_mix, sigma_mix = kernel.mixture(
+        a_col_row, a_col_sig_dens[rows], arm_dens[rows], zp_sigma_k=zp_sig_dens[rows],
+        exponent=kernel.cloud_gamma_herschel)
+    (_, _, _, _, beyond_reach) = _position_distribution(log10_xi_hat, w_mix, mu_mix, sigma_mix)
+    beyond_reach = beyond_reach & ~no_fg
+
+    fg = ~no_fg
+    idx_median = shapes_module._select_source(a_col_dens)
+    xi_marginal = _read_xi_marginal(config, region, sightline_dens[idx_median])
+    xi_centers = 0.5 * (grid.LOG10_XI_EDGES[:-1] + grid.LOG10_XI_EDGES[1:])
+
+    return (log10_xi_hat[fg], w_mix[fg], mu_mix[fg], sigma_mix[fg], beyond_reach[fg],
+            xi_marginal, xi_centers, int(np.count_nonzero(fg)), n_raw)
+
+
+def _pooled_kernel_check(groups):
+    """`(emp_median, emp_p84, pred_median, pred_p84, frac_beyond, n, n_raw)`:
+    `groups`, a list of one `_region_kernel_group` tuple per region, pooled
+    into a single statistic (ledger C15's holdout check against the
+    in-sample one). The empirical statistics pool every group's own
+    `log10 ξi_hat` directly (no convolution needed). The predicted statistic
+    cannot pool that way, since two regions carry two different cloud `x`
+    marginals: each group's own predicted CDF (its protostars' pooled
+    kernel convolved with ITS OWN `xi_marginal`, exactly `_kernel_validation`'s
+    construction) is formed on the shared `z_grid` first, then the groups'
+    CDFs are averaged weighted by each group's own protostar count before
+    the median/84th percentile are read off the pooled curve."""
+    z_grid = np.arange(-4.0, 2.0 + 1e-9, _GRID_STEP_DEX)
+    u_grid = np.arange(-3.0, 3.0 + 1e-9, _GRID_STEP_DEX)
+    cdf_sum = np.zeros_like(z_grid)
+    n_total = 0
+    n_raw_total = 0
+    xi_hat_parts, beyond_parts = [], []
+    for log10_xi_hat, w, mu, sigma, beyond_reach, xi_marginal, xi_centers, n, n_raw in groups:
+        n_raw_total += n_raw
+        if n == 0:
+            continue
+        z0 = (u_grid[None, :] - mu[:, 0][:, None]) / sigma[:, 0][:, None]
+        z1 = (u_grid[None, :] - mu[:, 1][:, None]) / sigma[:, 1][:, None]
+        cdf_y = w[:, None] * _norm_cdf(z0) + (1.0 - w[:, None]) * _norm_cdf(z1)
+        g_pooled = cdf_y.mean(axis=0)
+
+        total = float(xi_marginal.sum())
+        x_marg = xi_marginal / total if total > 0.0 else xi_marginal
+        offsets = z_grid[:, None] - xi_centers[None, :]
+        g_vals = np.interp(offsets.ravel(), u_grid, g_pooled, left=0.0, right=1.0).reshape(offsets.shape)
+        cdf_sum += n * (g_vals * x_marg[None, :]).sum(axis=1)
+        n_total += n
+        xi_hat_parts.append(log10_xi_hat)
+        beyond_parts.append(beyond_reach)
+
+    if n_total == 0:
+        return (float("nan"), float("nan"), float("nan"), float("nan"), float("nan"), 0, n_raw_total)
+    cdf_pooled = cdf_sum / n_total
+    pred_median = float(np.interp(0.5, cdf_pooled, z_grid))
+    pred_p84 = float(np.interp(0.84, cdf_pooled, z_grid))
+    pooled_xi_hat = np.concatenate(xi_hat_parts)
+    pooled_beyond = np.concatenate(beyond_parts)
+    emp_median = float(np.median(pooled_xi_hat))
+    emp_p84 = float(np.percentile(pooled_xi_hat, 84.0))
+    frac_beyond = float(np.mean(pooled_beyond)) if pooled_beyond.size else float("nan")
+    return emp_median, emp_p84, pred_median, pred_p84, frac_beyond, n_total, n_raw_total
+
+
+def _kernel_holdout_check(config):
+    """The calibration sample's own pooled kernel check (Orion A + Aquila,
+    `_KERNEL_FIT_REGIONS`) beside the held-out regions' pooled check (every
+    region with protostars that is not in the fit -- today Orion B alone):
+    ledger C15's own remedy, "validate on the 78 Orion B protostars held
+    out of the fit, [print] beside the in-sample one". Returns `(in_sample,
+    held_out)`, each a `(_pooled_kernel_check result, region names)` pair;
+    `held_out` is `None` where every region with protostars is in the fit
+    sample (nothing left to hold out)."""
+    kernel = kernel_module.Kernel.read(config)
+    all_regions = _regions_with_protostars(config)
+    fit_regions = [r for r in all_regions if r in _KERNEL_FIT_REGIONS]
+    held_out_regions = [r for r in all_regions if r not in _KERNEL_FIT_REGIONS]
+
+    in_sample = _pooled_kernel_check([_region_kernel_group(config, r, kernel) for r in fit_regions])
+    held_out = (_pooled_kernel_check([_region_kernel_group(config, r, kernel) for r in held_out_regions])
+                if held_out_regions else None)
+    return (in_sample, fit_regions), (held_out, held_out_regions)
+
+
 def _kernel_validation(log10_xi_hat, w, mu, sigma, xi_marginal, xi_centers, beyond_reach):
     """`(emp_median, emp_p84, pred_median, pred_p84, frac_beyond)`: this
     brief's item 5, the kernel's own prediction for a cloud member's beam
@@ -610,7 +736,12 @@ def _catalogue_word(region, survey_used):
 def build_region(config, region, formats=("png", "pdf")):
     """Writes `bmstp/atlas/figures/protostar-check_<region>.png/.pdf` and
     prints the check's numbers (SPEC_BMSTP_DRAFT.md sec. 5.5, sec. 9's
-    protostellar-fraction row)."""
+    protostellar-fraction row), plus the kernel holdout check (ledger
+    C15): the calibration sample's own pooled kernel-validation statistic
+    (Orion A + Aquila, the regions `population.kernel`'s joint fit actually
+    runs on) printed beside the held-out regions' pooled one (Orion B,
+    never in that fit) -- both computed fresh regardless of which region's
+    page this call is drawing, so the disclosure reads the same everywhere."""
     with progress.Stage("atlas.protostars", region) as st:
         protostars = _read_protostars(config, region)
         n_class_ii = int(np.count_nonzero(protostars["cls"] == b"II"))
@@ -667,6 +798,23 @@ def build_region(config, region, formats=("png", "pdf")):
               f"median={verdict['emp_median']:.4g} p84={verdict['emp_p84']:.4g}; predicted "
               f"median={verdict['pred_median']:.4g} p84={verdict['pred_p84']:.4g}; "
               f"frac_beyond_reach={verdict['frac_beyond_reach']:.4g}")
+        (in_sample_stat, in_sample_regions), (held_out_stat, held_out_regions) = _kernel_holdout_check(config)
+        ei_med, ei_p84, pi_med, pi_p84, fi_beyond, n_in, n_in_raw = in_sample_stat
+        print(f"atlas.protostars [{region}] kernel holdout check, in-sample "
+              f"(the fit's own calibration sample, {'+'.join(in_sample_regions)}, "
+              f"n={n_in} of {n_in_raw} Class 0/I/flat): "
+              f"empirical log10_xi_hat median={ei_med:.4g} p84={ei_p84:.4g}; predicted "
+              f"median={pi_med:.4g} p84={pi_p84:.4g}; frac_beyond_reach={fi_beyond:.4g}")
+        if held_out_stat is not None:
+            eh_med, eh_p84, ph_med, ph_p84, fh_beyond, n_held, n_held_raw = held_out_stat
+            print(f"atlas.protostars [{region}] kernel holdout check, held out "
+                  f"(not in the fit, {'+'.join(held_out_regions)}, "
+                  f"n={n_held} of {n_held_raw} Class 0/I/flat): "
+                  f"empirical log10_xi_hat median={eh_med:.4g} p84={eh_p84:.4g}; predicted "
+                  f"median={ph_med:.4g} p84={ph_p84:.4g}; frac_beyond_reach={fh_beyond:.4g}")
+        else:
+            print(f"atlas.protostars [{region}] kernel holdout check: no region with "
+                  f"protostars is held out of the fit (every one of {in_sample_regions} is)")
         print(f"atlas.protostars [{region}] verdict (all): "
               f"frac_yso_leads={verdict['frac_yso_leads']:.4g} "
               f"median_P_YSO={verdict['median_p_yso']:.4g}")
