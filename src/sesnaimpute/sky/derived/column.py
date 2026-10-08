@@ -38,14 +38,20 @@ edge (`profile.py`'s inner/outer/splice/measure chain, called before any
 rescaling), binned by quartile of the Herschel column and by region.
 
 `_build_one_extinction_region`/`build_extinction_sightline` write the
-second column, the one a star's light passes through (the
-rule"): the emission-based adopted column, source by source, scaled up
-in each nside-1024 cell (the reference map's own 3' beam) by the factor
-that cell's Juvela & Montillaud 2016 NICEST star-colour map (a whole-
-sightline 2MASS reddening measurement, `sky.derived.juvela_extinction`)
-exceeds it by, floored at 1 -- a star-colour map can run short of
-background stars and read low, but it cannot invent dust the emission
-map already shows.
+second column, the one a star's light passes through: the emission-based
+adopted column calibrated onto the scale of that region's Juvela &
+Montillaud 2016 NICEST star-colour map (a whole-sightline 2MASS reddening
+measurement, `sky.derived.juvela_extinction`), by the method of Lombardi,
+Bouy, Alves & Lada (2014, A&A 566, A45), who calibrated Planck tau353
+against NICEST the same way. One region-wide linear fit, `A_K(NICEST) =
+CAL_OFFSET_K + CAL_SLOPE * A_K(adopted)`, is made over the nside-1024
+cells (the reference map's own 3' beam) where both the cell's mean
+NICEST and mean adopted column read below `UNSATURATED_A_K_MAG` --
+neither tracer has begun to saturate there -- and then applied to every
+source's and every sightline's own adopted-column value, in every cell,
+whether or not that cell entered the fit. `CAL_OFFSET_K` and
+`CAL_SLOPE` are stored once per region, in the source product, and read
+from there to rescale the sightline product.
 """
 
 import os
@@ -79,6 +85,12 @@ HERSCHEL_STATED_FWHM_ARCSEC = 36.3
 #: than the calibration's own MIN_FILL=0.98, which selects pixels clean
 #: enough to fit the tau353-to-A_K coefficient, not just covered ones.
 SIGHTLINE_MIN_FILL = 0.5
+
+#: Lombardi, Bouy, Alves & Lada (2014, A&A 566, A45)'s unsaturated range:
+#: below this K-band extinction, neither the NICEST star-colour map nor
+#: the dust-emission map has begun to saturate, so a cell's two means are
+#: compared on equal footing there.
+UNSATURATED_A_K_MAG = 1.0
 
 
 def _dec(v):
@@ -205,28 +217,49 @@ def _load_juvela_source_view(config, region):
         return np.asarray(f["A_K"][:], dtype=np.float64), np.asarray(f["HPX_PIX_1024"][:], dtype=np.int64)
 
 
-def _cell_factor(a_nicest, a_adopted, cell_pix):
-    """`f = max(1, mean A_K(NICEST) / mean A_COL_K)` in each nside-1024
-    cell, broadcast to every source of the cell: the
-    star map sets the beam-scale factor, the emission map keeps the
-    structure inside the beam."""
+def _region_calibration(a_nicest, a_adopted, cell_pix):
+    """This region's one Lombardi et al. (2014) calibration: bin both
+    `a_nicest` (NICEST) and `a_adopted` (the gas column) into their
+    nside-1024 cell means, keep the cells where both means read below
+    `UNSATURATED_A_K_MAG`, and fit `mean_nicest = offset + slope *
+    mean_adopted` by ordinary least squares over those cells alone.
+    Returns `(offset, slope, rms, n_fit)`; `rms` is the fit's own
+    residual scatter on the cells it was fit to, the scale the two
+    regimes (region-wide, protostar positions) are checked to agree
+    within."""
     uniq, inv, counts = np.unique(cell_pix, return_inverse=True, return_counts=True)
     mean_nicest = np.bincount(inv, weights=a_nicest, minlength=uniq.size) / counts
     mean_adopted = np.bincount(inv, weights=a_adopted, minlength=uniq.size) / counts
-    cell_f = np.maximum(1.0, mean_nicest / mean_adopted)
-    return cell_f[inv]
+    unsaturated = (mean_nicest < UNSATURATED_A_K_MAG) & (mean_adopted < UNSATURATED_A_K_MAG)
+    n_fit = int(np.count_nonzero(unsaturated))
+    if n_fit < 2:
+        raise ValueError("sky.derived.column._region_calibration: only %d unsaturated nside-1024 "
+                          "cell(s) (below %.2f mag on both tracers), too few to fit a line"
+                          % (n_fit, UNSATURATED_A_K_MAG))
+    slope, offset = np.polyfit(mean_adopted[unsaturated], mean_nicest[unsaturated], 1)
+    resid = mean_nicest[unsaturated] - (offset + slope * mean_adopted[unsaturated])
+    rms = float(np.sqrt(np.mean(resid ** 2)))
+    return float(offset), float(slope), rms, n_fit
 
 
 def _build_one_extinction_region(config, region, cal, field_zp=None):
     """Writes this region's extinction source product: the adopted column
-    (re-merged from the same two arms `merge_region` reads) times its
-    source's cell factor, plus `F_EXTINCTION` itself."""
+    (re-merged from the same two arms `merge_region` reads), converted
+    onto the NICEST star-colour map's scale by this region's one
+    Lombardi et al. (2014) calibration (`_region_calibration`), plus the
+    fitted `CAL_OFFSET_K`/`CAL_SLOPE` pair itself."""
     d = merge_region(config, region, cal, field_zp=field_zp)
     a_nicest, cell_pix = _load_juvela_source_view(config, region)
     if a_nicest.size != d["n"]:
         raise ValueError(f"sky.derived.column.build: {region!r} NICEST view has {a_nicest.size} "
                          f"source(s), the adopted column has {d['n']}")
-    factor = _cell_factor(a_nicest, d["a_col"], cell_pix)
+    offset, slope, rms, n_fit = _region_calibration(a_nicest, d["a_col"], cell_pix)
+    a_col_cal = offset + slope * d["a_col"]
+    bad = ~np.isfinite(a_col_cal) | (a_col_cal <= 0)
+    if np.any(bad):
+        raise ValueError(f"sky.derived.column.build: {region!r} has {int(np.count_nonzero(bad))} "
+                         "source(s) with a non-finite or non-positive calibrated extinction column "
+                         f"(offset={offset:.4f}, slope={slope:.4f})")
 
     out_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "source", region=region)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -234,30 +267,30 @@ def _build_one_extinction_region(config, region, cal, field_zp=None):
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "source"
         for name, data in (
-            ("A_COL_K", (d["a_col"] * factor).astype(np.float32)),
-            ("A_COL_SIG_K", (d["sig_col"] * factor).astype(np.float32)),
+            ("A_COL_K", a_col_cal.astype(np.float32)),
+            ("A_COL_SIG_K", (d["sig_col"] * abs(slope)).astype(np.float32)),
             ("A_COL_PROVENANCE", d["prov"]),
             ("A_COL_FWHM_ARCSEC", d["fwhm"]),
             ("HERSCHEL_MAP_ID", d["map_id"]),
             ("MAP_NAME", name_bytes),
             ("ZP_SIGMA_K", d["zp_sigma_k"].astype(np.float32)),
-            ("F_EXTINCTION", factor.astype(np.float32)),
+            ("CAL_OFFSET_K", np.float64(offset)),
+            ("CAL_SLOPE", np.float64(slope)),
         ):
             build_module.write_dataset(f, name, data, *REGISTRY[(_EXTINCTION_SOURCE_STEM, name)])
-    return region, d["n"], float(np.median(factor))
+    return region, d["n"], offset, slope, rms, n_fit
 
 
 def _extinction_row_one_region(config, region, region_code, adopted_pix, adopted_a_k, adopted_sig, adopted_prov):
     """One region's extinction sightline row: the adopted sightline column
-    (`build_sightline`'s own Herschel/Planck value, unchanged -- "no new
-    machinery) times `F_EXTINCTION`, the sightline mean of its
-    sources' per-source factor. A sightline the granule map admits but
-    that carries no catalogued source has no factor to average, so it
-    takes 1 and the adopted value passes through unscaled. This is also
-    the identity check: `f` forced to 1 everywhere makes `F_EXTINCTION`
-    1 everywhere, and this column reproduces the adopted sightline
-    column bit for bit. `PROVENANCE`/`REGION_CODE` are carried from the
-    adopted sightline column product."""
+    (`build_sightline`'s own Herschel/Planck value, unchanged) converted
+    onto the NICEST star-colour map's scale by this region's one
+    `CAL_OFFSET_K`/`CAL_SLOPE` pair (read from the region's own extinction
+    source product, where `_build_one_extinction_region` fit and stored
+    it) -- the same affine transform for every admitted sightline of the
+    region, whether or not it carries a catalogued source.
+    `PROVENANCE`/`REGION_CODE` are carried from the adopted sightline
+    column product."""
     ext_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "source", region=region)
     if not os.path.exists(ext_path):
         raise FileNotFoundError(
@@ -265,20 +298,10 @@ def _extinction_row_one_region(config, region, region_code, adopted_pix, adopted
             f"{region!r} at {ext_path!r} -- run the sesnaimpute.sky.derived.column RUNBOOK line for it"
         )
     with h5py.File(ext_path, "r") as f:
-        factor = np.asarray(f["F_EXTINCTION"][:], dtype=np.float64)
-    _, cell_pix = _load_juvela_source_view(config, region)
-    pix256 = cell_pix >> 4  # nside 1024 -> 256: two NESTED quad-tree levels
+        offset = float(f["CAL_OFFSET_K"][()])
+        slope = float(f["CAL_SLOPE"][()])
 
     admitted_pix, _ = profile_module._admitted_sightlines(config, region)
-    uniq, inv, counts = np.unique(pix256, return_inverse=True, return_counts=True)
-    if np.any(~np.isin(uniq, admitted_pix)):
-        raise ValueError(f"sky.derived.column.build_extinction_sightline: {region!r} has a source cell "
-                         "outside its admitted sightlines")
-    mean_f = np.bincount(inv, weights=factor, minlength=uniq.size) / counts
-
-    f_ext = np.ones(admitted_pix.size)
-    f_ext[np.searchsorted(admitted_pix, uniq)] = mean_f
-
     loc = np.searchsorted(adopted_pix, admitted_pix)
     capped = np.minimum(loc, adopted_pix.size - 1) if adopted_pix.size else loc
     ok = adopted_pix.size and np.all(adopted_pix[capped] == admitted_pix)
@@ -287,18 +310,18 @@ def _extinction_row_one_region(config, region, region_code, adopted_pix, adopted
                          "adopted sightline column product")
 
     return dict(pix=admitted_pix, region_code=np.full(admitted_pix.size, region_code, dtype=np.int16),
-               a_k=adopted_a_k[capped] * f_ext, sig_a_k=adopted_sig[capped] * f_ext,
-               f=f_ext, prov=adopted_prov[capped])
+               a_k=offset + slope * adopted_a_k[capped], sig_a_k=abs(slope) * adopted_sig[capped],
+               prov=adopted_prov[capped])
 
 
 def build_extinction_sightline(config, stage=None):
     """Writes the extinction sightline column: one
     row per admitted nside-256 pixel of every region, the adopted
-    sightline column scaled by that sightline's mean source factor --
-    the quantity a star's light passes through, distinct from the gas
-    column `build_sightline` writes. Survey-wide regardless of any
-    `regions` list a caller passed to `build`, mirroring
-    `build_sightline`."""
+    sightline column converted onto the NICEST star-colour map's scale by
+    that region's own `CAL_OFFSET_K`/`CAL_SLOPE` pair -- the quantity a
+    star's light passes through, distinct from the gas column
+    `build_sightline` writes. Survey-wide regardless of any `regions`
+    list a caller passed to `build`, mirroring `build_sightline`."""
     regions = [r.name for r in regions_module.REGIONS]
     codes = _region_codes(config, regions)
     adopted_path = config_module.product_path(config, "sky/derived", "adopted", "column", "sightline")
@@ -327,7 +350,6 @@ def build_extinction_sightline(config, stage=None):
     region_code = np.concatenate([r["region_code"] for r in rows])
     a_k = np.concatenate([r["a_k"] for r in rows])
     sig = np.concatenate([r["sig_a_k"] for r in rows])
-    f = np.concatenate([r["f"] for r in rows])
     prov_out = np.concatenate([r["prov"] for r in rows])
 
     out_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "sightline")
@@ -339,14 +361,13 @@ def build_extinction_sightline(config, stage=None):
             ("REGION_CODE", region_code),
             ("A_K", a_k.astype(np.float32)),
             ("SIGMA_A_K", sig.astype(np.float32)),
-            ("F_EXTINCTION", f.astype(np.float32)),
             ("PROVENANCE", prov_out),
         ):
             build_module.write_dataset(fh, name, data, *REGISTRY[(_EXTINCTION_SIGHTLINE_STEM, name)])
 
     n = int(pix.size)
-    print("column.build_extinction_sightline: %d sightline rows, %d regions, median f=%.3f"
-          % (n, len(regions), float(np.median(f)) if n else float("nan")), flush=True)
+    print("column.build_extinction_sightline: %d sightline rows, %d regions"
+          % (n, len(regions)), flush=True)
     return out_path
 
 
@@ -664,7 +685,9 @@ def build(config, regions=None):
 
         ext_results = Parallel(n_jobs=config.n_jobs)(delayed(_one_ext)(region) for region in regions)
         st.done(None, regions=n_regions, sources=sum(r[1] for r in ext_results),
-                median_factor=float(np.median([r[2] for r in ext_results])) if ext_results else float("nan"))
+                median_offset_k=float(np.median([r[2] for r in ext_results])) if ext_results else float("nan"),
+                median_slope=float(np.median([r[3] for r in ext_results])) if ext_results else float("nan"),
+                median_fit_rms=float(np.median([r[4] for r in ext_results])) if ext_results else float("nan"))
 
     with progress_module.Stage("sky.derived.column.sightline") as st:
         out_path = build_sightline(config, stage=st)
