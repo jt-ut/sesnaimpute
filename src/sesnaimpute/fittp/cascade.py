@@ -178,13 +178,13 @@ def _prior_leaning_vote(config, region, hpx512_source):
 
 
 def _gaia_leaning_vote(config, region, name):
-    """`(n,)` int64, `CLASSES` index of `argmax_C TOPK_LN_GAMMA[:, 0]` over
+    """`(n,)` int64, `CLASSES` index of `argmax_C TOPK_LN_GAMMA_ML[:, 0]` over
     the six fit files (spec sec 6.5's vote readings): -1 (ABSTAIN) where the
     six values are all equal (no Gaia datum -- `fittp.gaia.GaiaTerm.
     ln_gamma`'s own convention for a source with no counterpart is
     `ln Gamma = 0` for every model of every class, so this falls out of
     the same equality test) or where any of the six is not finite (a
-    flagged source's `TOPK_LN_GAMMA` is NaN, `fittp.sweep._empty_row`)."""
+    flagged source's `TOPK_LN_GAMMA_ML` is NaN, `fittp.sweep._empty_row`)."""
     n = name.shape[0]
     vals = np.empty((n, len(CLASSES)), dtype=np.float64)
     for ci, cls in enumerate(CLASSES):
@@ -195,7 +195,7 @@ def _gaia_leaning_vote(config, region, name):
                 "'PY sesnaimpute.fittp.sweep --classes \"%s\"' line first" % (region, path, cls))
         with h5py.File(path, "r") as f:
             cls_name = f["NAME"][:]
-            vals[:, ci] = np.asarray(f["TOPK_LN_GAMMA"][:, 0], dtype=np.float64)
+            vals[:, ci] = np.asarray(f["TOPK_LN_GAMMA_ML"][:, 0], dtype=np.float64)
         if not np.array_equal(cls_name, name):
             raise ValueError("fittp.cascade --imputed [%s]: %s's NAME does not row-align "
                               "with the cascade's own" % (region, path))
@@ -225,7 +225,7 @@ def build_region_imputed(config, region, st):
     casting one unit split over the classes it implicates, or abstaining
     -- the prior atlas's own leaning at the source's pixel
     (`_prior_leaning_vote`), the Gaia term's own leaning
-    (`_gaia_leaning_vote`, `TOPK_LN_GAMMA`), and the two cascade verdicts
+    (`_gaia_leaning_vote`, `TOPK_LN_GAMMA_ML`), and the two cascade verdicts
     above (`_label_set_vote`).
     """
     cascade_path = config_module.product_path(

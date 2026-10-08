@@ -153,6 +153,19 @@ def _two_band_and_pyso(config, region):
     return two_band, n_pyso, int(n_detected.size)
 
 
+def _flagged_and_vetoed(config, region):
+    """NONDET2 brief section 6 (row 13): `MAP_CLASS == -1` (the fit itself
+    flagged -- fewer than two detections, a non-finite sigma, a singular
+    design) counted separately from `MAP_CLASS == -2` (every class's own
+    prior vetoed every one of its templates at this source's fitted
+    brightness and depth, while the fit itself was valid), off P8."""
+    path = config_module.product_path(config, "fittp", "classification", "posterior", "source", region=region)
+    _require(path, "sesnaimpute.fittp.classify")
+    with h5py.File(path, "r") as f:
+        map_class = f["MAP_CLASS"][:]
+    return int(np.sum(map_class == -1)), int(np.sum(map_class == -2)), int(map_class.size)
+
+
 def _sensitivity(config, region):
     """P9's rows for `region`: `RUN`, `SCALING`'s non-unity column,
     `FRAC_MAP_CHANGED`, `N_PYSO_ABOVE_HALF` (column 0 the nominal)."""
@@ -317,6 +330,10 @@ def build(config, regions=None):
             two_band, n_pyso, n_source = _two_band_and_pyso(config, region)
             print("fittp.check [%s]: two-band fraction %.4g beside P(YSO)>0.5 count %d of %d"
                   % (region, two_band, n_pyso, n_source), flush=True)
+            n_flagged_fit, n_prior_vetoed, n_map = _flagged_and_vetoed(config, region)
+            print("fittp.check [%s]: MAP_CLASS -1 (fit flagged) %d, -2 (prior vetoed "
+                  "every class, fit valid) %d, of %d" % (region, n_flagged_fit, n_prior_vetoed, n_map),
+                  flush=True)
             n_pyso_nominal, sens_rows = _sensitivity(config, region)
             print("fittp.check [%s]: literature-band sensitivity, nominal P(YSO)>0.5=%d, "
                   "rows (run, class, scaling, frac_map_changed, n_pyso_above_half): %s"
