@@ -407,28 +407,34 @@ def read_riebel_optical_depths(config):
 
 def agb_register_tau_floor(config):
     """`(tau_floor_o, tau_floor_c)`: the curated GRAMS `agb` library's own
-    support boundary, per chemistry -- the lowest `tau` any template in
-    the register sits at (`sed_models/agb/parameters.fits`, the register's
-    own parameter table, the same file `agb_orich_l_sun` reads). A model
-    below this `tau` has no template the fitter can ever place it on. Read
-    here as an input the curation stage sets, the way `agb_orich_l_sun`
-    already takes the register's own shared O-rich luminosity as an
-    input rather than a constant this module decides."""
-    path = f"{config.data_root}/sed_models/agb/parameters.fits"
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "prior.star_population: no AGB library parameters at %r -- "
-            "the GRAMS library must be curated before this build" % path)
-    with fits.open(path) as hdul:
-        d = hdul[1].data
-        chem = np.array([c.strip() for c in np.asarray(d["CHEM"]).astype(str)])
-        tau = np.asarray(d["TAU"], dtype=np.float64)
-    is_o, is_c = chem == "O", chem == "C"
+    support boundary, per chemistry -- the lowest `TAU` any template in
+    the register's own `models` group carries (`sed_models/registers/
+    agb_register.hdf5`), grouped by that same group's own `SUBCLASS`
+    column (`b"O"`/`b"C"`). A model below this `tau` has no template the
+    fitter can ever place it on. One source: the register's own `TAU`
+    column is the fact (the A12 pass promotes every curated library's
+    parameter columns, `TAU` among them, into its register's `models`
+    group) -- no join to a second file, no name parsed out of
+    `MODEL_NAME`, no attribute restating it. Fails loudly, not a fallback,
+    while that column is not yet on the register."""
+    path = f"{config.data_root}/sed_models/registers/agb_register.hdf5"
+    with h5py.File(path, "r") as f:
+        models = f["models"]
+        if "TAU" not in models:
+            raise ValueError(
+                "prior.star_population: the models group of %r carries no "
+                "`TAU` column -- the A12 pass (promoting every curated "
+                "library's parameter columns into its register) must add "
+                "it before this stage can set the dusty floor" % path)
+        subclass = models["SUBCLASS"][:]
+        tau = np.asarray(models["TAU"][:], dtype=np.float64)
+    is_o, is_c = subclass == b"O", subclass == b"C"
     if not is_o.any() or not is_c.any():
         raise ValueError(
-            "prior.star_population: %r has no CHEM=='O' or no CHEM=='C' "
-            "rows -- agb_register_tau_floor needs both chemistries present" % path)
-    return float(tau[is_o].min()), float(tau[is_c].min())
+            "prior.star_population: the models group of %r has no "
+            "SUBCLASS==b'O' or no SUBCLASS==b'C' rows -- "
+            "agb_register_tau_floor needs both chemistries present" % path)
+    return float(np.nanmin(tau[is_o])), float(np.nanmin(tau[is_c]))
 
 
 def f_dusty_by_chemistry(config):
@@ -1056,9 +1062,10 @@ def build(config, regions=None):
     f_dusty_mean = (1.0 - F_C) * f_dusty_o + F_C * f_dusty_c
     print(
         "star_population: tau_floor_O=%.5f tau_floor_C=%.5f "
-        "(sed_models/agb/parameters.fits, the curated library's own lowest tau node) "
-        "F_dusty_O=%.4f (n=%d) F_dusty_C=%.4f (n=%d) F_dusty_mean=%.4f "
-        "L_O=%.2f Lsun (n_model=%d, sed_models/agb/parameters.fits CHEM=='O') f_C=%.2f"
+        "(sed_models/registers/agb_register.hdf5 models/TAU, the curated library's "
+        "own lowest tau node) F_dusty_O=%.4f (n=%d) F_dusty_C=%.4f (n=%d) "
+        "F_dusty_mean=%.4f L_O=%.2f Lsun (n_model=%d, "
+        "sed_models/agb/parameters.fits CHEM=='O') f_C=%.2f"
         % (tau_floor_o, tau_floor_c, f_dusty_o, n_riebel_o, f_dusty_c, n_riebel_c,
            f_dusty_mean, l_o_lsun, n_orich_models, F_C))
 
