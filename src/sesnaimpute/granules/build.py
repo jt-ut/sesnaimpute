@@ -35,29 +35,21 @@ def _catalog_path(config, region):
 
 
 def _iter_catalog(config, region, chunk_rows=CHUNK_ROWS):
-    """Chunks of (ra, dec, gl, gb, name) in the curated catalogue's own row
-    order. Falls back to the old pandas-HDFStore SEDFIT_INPUT file when the
-    new curated catalogue has not landed yet."""
+    """Chunks of (ra, dec, gl, gb, name) in the catalogue's own row order.
+    The catalogue is `catalog/sesna/sources_sesna_source__<Region>.hdf5` and
+    nothing else: there is no fallback onto a retired file, so a missing
+    catalogue stops the stage instead of silently substituting another
+    source's coordinates and names."""
     path = _catalog_path(config, region)
-    old_path = f"{config.data_root}/catalog/curated/{region}_SEDFIT_INPUT.hdf5"
-    if not os.path.exists(path) and os.path.exists(old_path):
-        path = old_path
     with h5py.File(path, "r") as f:
-        if "RA_DEG" in f:
-            n = f["RA_DEG"].shape[0]
-            for start in range(0, n, chunk_rows):
-                stop = min(start + chunk_rows, n)
-                yield (np.asarray(f["RA_DEG"][start:stop], dtype=np.float64),
-                       np.asarray(f["DEC_DEG"][start:stop], dtype=np.float64),
-                       np.asarray(f["GAL_L_DEG"][start:stop], dtype=np.float64),
-                       np.asarray(f["GAL_B_DEG"][start:stop], dtype=np.float64),
-                       np.asarray(f["NAME"][start:stop]).astype(NAME_DTYPE))
-        else:  # remove when catalog/curated lands
-            co = np.asarray(f["COORDS/table"][:])
-            name = np.asarray(f["ID/table"][:])["SESNA_NAME"]
-            yield (co["RA"].astype(np.float64), co["DEC"].astype(np.float64),
-                   co["L"].astype(np.float64), co["B"].astype(np.float64),
-                   np.asarray(name).astype(NAME_DTYPE))
+        n = f["RA_DEG"].shape[0]
+        for start in range(0, n, chunk_rows):
+            stop = min(start + chunk_rows, n)
+            yield (np.asarray(f["RA_DEG"][start:stop], dtype=np.float64),
+                   np.asarray(f["DEC_DEG"][start:stop], dtype=np.float64),
+                   np.asarray(f["GAL_L_DEG"][start:stop], dtype=np.float64),
+                   np.asarray(f["GAL_B_DEG"][start:stop], dtype=np.float64),
+                   np.asarray(f["NAME"][start:stop]).astype(NAME_DTYPE))
 
 
 _COVERAGE_GRANULE = {256: "sightline", 512: "hpx512"}
