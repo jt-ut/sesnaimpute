@@ -74,9 +74,12 @@ weight splits `w_AGB = F_dusty * w`, `w_STAR = w - w_AGB`, row by row, so
 `w_STAR + w_AGB == w` exactly (reading note 04_star_family.md section C,
 `partition_weights`). TRILEGAL carries no chemistry per star, so
 `F_dusty` is the weighted mean over the two chemistries measured once,
-survey-wide, off Riebel et al. (2012, ApJ 753, 71) per-star GRAMS fits
-against the curated GRAMS library's own optical-depth floor
-(`f_dusty_by_chemistry`, spec section 10 item 2); `f_C = 0.18` (Le Bertre
+survey-wide, off Riebel et al. (2012, ApJ 753, 71) per-star GRAMS fits: the
+per-chemistry share whose fitted `tau` is at or above the curated GRAMS
+library's own lowest `tau` node, the library's own support boundary
+(`agb_register_tau_floor`, `f_dusty_by_chemistry`) -- "dusty" is a shell
+the curated library can represent, by construction, since that floor is
+read from the register rather than computed here; `f_C = 0.18` (Le Bertre
 et al. 2003) is the fixed carbon-fraction weight.
 
 Brightness units (C3, spec section 2.2, section 3, section 4). Every
@@ -194,12 +197,6 @@ F_C = 0.18
 #: band already selected per star by the fit itself.
 RIEBEL_GCL_COLSPEC = (33, 34)
 RIEBEL_TAU_COLSPEC = (85, 92)
-
-#: The curated GRAMS library's own detectability floor in that same
-#: per-chemistry band (SPEC_PRIORS.md section 3): "tau_10 >= 0.0128
-#: (O-rich) and tau_11.3 >= 0.02 (C-rich)".
-TAU_FLOOR_O = 0.0128
-TAU_FLOOR_C = 0.02
 
 #: PAHC's own small grid of 8 micron completeness-limit values (SPEC_PRIORS.md
 #: section 4, `IMPLEMENTATION.md` section 3): the percentiles of the
@@ -408,20 +405,53 @@ def read_riebel_optical_depths(config):
     return df["GCL"].to_numpy(dtype=str), df["TAU"].to_numpy(dtype=np.float64)
 
 
+def agb_register_tau_floor(config):
+    """`(tau_floor_o, tau_floor_c)`: the curated GRAMS `agb` library's own
+    support boundary, per chemistry -- the lowest `TAU` any template in
+    the register's own `models` group carries (`sed_models/registers/
+    agb_register.hdf5`), grouped by that same group's own `SUBCLASS`
+    column (`b"O"`/`b"C"`). A model below this `tau` has no template the
+    fitter can ever place it on. One source: the register's own `TAU`
+    column is the fact (the A12 pass promotes every curated library's
+    parameter columns, `TAU` among them, into its register's `models`
+    group) -- no join to a second file, no name parsed out of
+    `MODEL_NAME`, no attribute restating it. Fails loudly, not a fallback,
+    while that column is not yet on the register."""
+    path = f"{config.data_root}/sed_models/registers/agb_register.hdf5"
+    with h5py.File(path, "r") as f:
+        models = f["models"]
+        if "TAU" not in models:
+            raise ValueError(
+                "prior.star_population: the models group of %r carries no "
+                "`TAU` column -- the A12 pass (promoting every curated "
+                "library's parameter columns into its register) must add "
+                "it before this stage can set the dusty floor" % path)
+        subclass = models["SUBCLASS"][:]
+        tau = np.asarray(models["TAU"][:], dtype=np.float64)
+    is_o, is_c = subclass == b"O", subclass == b"C"
+    if not is_o.any() or not is_c.any():
+        raise ValueError(
+            "prior.star_population: the models group of %r has no "
+            "SUBCLASS==b'O' or no SUBCLASS==b'C' rows -- "
+            "agb_register_tau_floor needs both chemistries present" % path)
+    return float(np.nanmin(tau[is_o])), float(np.nanmin(tau[is_c]))
+
+
 def f_dusty_by_chemistry(config):
-    """`(f_dusty_o, f_dusty_c, n_o, n_c)` (SPEC_PRIORS.md section 3, "the
-    value is the fraction of Riebel's stars whose fitted optical depth
-    exceeds the on-disk floor, per chemistry"): the per-chemistry share
-    of Riebel+2012's own per-star fits whose fitted `tau` clears the
-    curated GRAMS library's own detectability floor, `TAU_FLOOR_O`/
-    `TAU_FLOOR_C`, at that chemistry's own fitted band (10.0um O-rich,
-    11.3um C-rich -- one column already carries the right band)."""
+    """`(f_dusty_o, f_dusty_c, n_o, n_c, tau_floor_o, tau_floor_c)`:
+    "dusty" is a shell the curated GRAMS library can represent -- the
+    per-chemistry share of Riebel+2012's own per-star fits
+    (`read_riebel_optical_depths`) whose fitted `tau` is at or above the
+    curated library's own lowest `tau` node (`agb_register_tau_floor`),
+    not a threshold this module computes or sets. The curation stage sets
+    the floor; this module reads it."""
+    tau_floor_o, tau_floor_c = agb_register_tau_floor(config)
     gcl, tau = read_riebel_optical_depths(config)
     is_o, is_c = gcl == "o", gcl == "c"
     n_o, n_c = int(is_o.sum()), int(is_c.sum())
-    f_o = float(np.mean(tau[is_o] >= TAU_FLOOR_O)) if n_o else float("nan")
-    f_c = float(np.mean(tau[is_c] >= TAU_FLOOR_C)) if n_c else float("nan")
-    return f_o, f_c, n_o, n_c
+    f_o = float(np.mean(tau[is_o] >= tau_floor_o)) if n_o else float("nan")
+    f_c = float(np.mean(tau[is_c] >= tau_floor_c)) if n_c else float("nan")
+    return f_o, f_c, n_o, n_c, tau_floor_o, tau_floor_c
 
 
 def agb_orich_l_sun(config):
@@ -1016,25 +1046,32 @@ def _report(result):
 def build(config, regions=None):
     """Writes the per-tile placement-and-weight product for `regions`
     (default: all thirty), one file per region (module docstring). The
-    literature `F_dusty` (Riebel+2012 against the curated GRAMS floor)
-    and the GRAMS O-rich library's own shared luminosity are survey-wide
-    and read once, not per region (rule 9); likewise the two libraries'
-    own reference-flux tables. The measured PAHC curve is regional by a
-    factor of 8 (WP-POP-4, ledger C7), not a survey-wide constant, so it
-    is read once per region, inside the loop below, not here: rule 9 is
-    about never touching the full catalogue or the full template
-    register inside a per-item loop, and the PAHC curve product is 15
-    KB, a small per-region product, not either of those."""
+    literature `F_dusty` (Riebel+2012's fitted `tau` against the curated
+    GRAMS library's own lowest `tau` node) and the GRAMS O-rich library's
+    own shared luminosity are survey-wide and read once, not per region
+    (rule 9); likewise the two libraries' own reference-flux tables. The
+    measured PAHC curve is regional by a factor of 8 (WP-POP-4, ledger
+    C7), not a survey-wide constant, so it is read once per region,
+    inside the loop below, not here: rule 9 is about never touching the
+    full catalogue or the full template register inside a per-item loop,
+    and the PAHC curve product is 15 KB, a small per-region product, not
+    either of those."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
-    f_dusty_o, f_dusty_c, n_riebel_o, n_riebel_c = f_dusty_by_chemistry(config)
+    f_dusty_o, f_dusty_c, n_riebel_o, n_riebel_c, tau_floor_o, tau_floor_c = \
+        f_dusty_by_chemistry(config)
     l_o_lsun, n_orich_models = agb_orich_l_sun(config)
     f_ref_sps = load_sps_reference_fluxes(config)
     teff_node, ref_jhk = load_pahc_continuum_reference(config)
+    f_dusty_mean = (1.0 - F_C) * f_dusty_o + F_C * f_dusty_c
     print(
-        "star_population: F_dusty_O=%.4f (n=%d) F_dusty_C=%.4f (n=%d) "
-        "L_O=%.2f Lsun (n_model=%d, sed_models/agb/parameters.fits CHEM=='O') f_C=%.2f"
-        % (f_dusty_o, n_riebel_o, f_dusty_c, n_riebel_c, l_o_lsun, n_orich_models, F_C))
+        "star_population: tau_floor_O=%.5f tau_floor_C=%.5f "
+        "(sed_models/registers/agb_register.hdf5 models/TAU, the curated library's "
+        "own lowest tau node) F_dusty_O=%.4f (n=%d) F_dusty_C=%.4f (n=%d) "
+        "F_dusty_mean=%.4f L_O=%.2f Lsun (n_model=%d, "
+        "sed_models/agb/parameters.fits CHEM=='O') f_C=%.2f"
+        % (tau_floor_o, tau_floor_c, f_dusty_o, n_riebel_o, f_dusty_c, n_riebel_c,
+           f_dusty_mean, l_o_lsun, n_orich_models, F_C))
 
     for region in region_names:
         with progress.Stage("prior.star_population", region) as st:
