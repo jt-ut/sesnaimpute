@@ -28,9 +28,15 @@ every template `theta` of the class's library,
 (the library-sampling weight is already folded into the prior's own
 template-weight factors, section 6.3, so no separate library weight is
 added here). The class evidence is `logsumexp` over every template's mixture
-`ln w_theta`; the subclass evidence restricts that sum to one subclass's
-templates (`-inf` where a subclass has none). `TOPK_LAW` records, per
-top-K template, which design carried the larger `ln w_theta,k`; the record's
+`ln w_theta`; the subclass evidence is a `logsumexp` of `ln w_theta + ln
+p_theta,k` over every template, `p_theta,k` the register's own per-template
+stage fraction (`_register`, one-hot where a register carries none) --
+a proper marginal, not a hard mask, so a kept template that represents a
+mixed-stage set (WP-PRIOR-1's "ALSO" finding, ledger C1) is shared across
+the subclasses it represents; the class evidence is unchanged by this
+either way, since every template's own fractions sum to 1. `TOPK_LAW`
+records, per top-K template, which design carried the larger `ln
+w_theta,k`; the record's
 per-design TOPK_* fields (`TOPK_A_K`, `TOPK_CHI2`, `TOPK_LN_L`, `TOPK_LN_L`,
 `TOPK_LN_PRIOR_ML`, `TOPK_LN_GAMMA_ML`, `TOPK_FLUX`) are that design's own
 numbers; the separable record's three additive fields (NONDET2 brief
@@ -238,16 +244,25 @@ _FIELD_OF_KEY = {
 
 
 def _register(config, cls):
-    """`(template_log, subclass_idx, n_sub)` for `cls`'s own library
+    """`(template_log, n_sub, subclass_prob)` for `cls`'s own library
     register (`definitions.CLASS_REGISTER`): `template_log` is `(n_model,
     8)` float32 `log10 F_REF` (floored at the register's own
     `FLOOR_LINEAR`, its FREFRAW convention -- a genuinely dark band is not
-    `-inf`), in `definitions.BANDS` order; `subclass_idx` locates each
-    model in `definitions.SUBCLASSES_OF[cls]`'s own order (P7's
-    `LN_EVIDENCE` column order).
+    `-inf`), in `definitions.BANDS` order. `subclass_prob` is `(n_model,
+    n_sub)` float64, every row summing to 1, in `definitions.
+    SUBCLASSES_OF[cls]`'s own order (P7's `LN_EVIDENCE` column order):
+    the register's own `subclass_prob` group's per-template stage
+    fractions where the register carries one (today, YSO only --
+    WP-PRIOR-1's "ALSO" finding, ledger C1: the register's own evidence
+    that a kept template represents a mixed-stage set, non-one-hot on
+    about 46% of rows); a one-hot row at the register's hard `SUBCLASS`
+    label otherwise, so the subclass evidence below reduces exactly to
+    today's hard-label partition for every class without a
+    `subclass_prob` group.
     """
     key = definitions.CLASS_REGISTER[cls]
     path = os.path.join(config.inputs["sed_models"], "registers", "%s_register.hdf5" % key)
+    subclass_order = definitions.SUBCLASSES_OF[cls]
     with h5py.File(path, "r") as f:
         n_model = f["models"]["MODEL_NAME"].shape[0]
         f_ref = np.empty((n_model, N_BANDS), dtype=np.float64)
@@ -255,17 +270,46 @@ def _register(config, cls):
             f_ref[:, j] = np.asarray(f["models"]["F_REF_%s" % bkey][:], dtype=np.float64)
         floor_linear = np.asarray(f["models"]["FLOOR_LINEAR"][:], dtype=np.float64)
         subclass_raw = f["models"]["SUBCLASS"][:]
-    subclass_names = [s.decode() if isinstance(s, bytes) else s for s in subclass_raw]
-    subclass_order = definitions.SUBCLASSES_OF[cls]
-    sub_to_idx = {s: i for i, s in enumerate(subclass_order)}
-    unknown = set(subclass_names) - set(sub_to_idx)
-    if unknown:
-        raise ValueError("fittp.sweep: register %r carries SUBCLASS %r not in "
-                          "definitions.SUBCLASSES_OF[%r] = %r"
-                          % (path, sorted(unknown), cls, subclass_order))
-    subclass_idx = np.array([sub_to_idx[s] for s in subclass_names], dtype=np.intp)
+        subclass_names = [s.decode() if isinstance(s, bytes) else s for s in subclass_raw]
+        sub_to_idx = {s: i for i, s in enumerate(subclass_order)}
+        unknown = set(subclass_names) - set(sub_to_idx)
+        if unknown:
+            raise ValueError("fittp.sweep: register %r carries SUBCLASS %r not in "
+                              "definitions.SUBCLASSES_OF[%r] = %r"
+                              % (path, sorted(unknown), cls, subclass_order))
+        subclass_idx = np.array([sub_to_idx[s] for s in subclass_names], dtype=np.intp)
+
+        if "subclass_prob" in f:
+            missing = [s for s in subclass_order if s not in f["subclass_prob"]]
+            if missing:
+                raise ValueError(
+                    "fittp.sweep: register %r carries 'subclass_prob' but is missing "
+                    "column(s) %r of definitions.SUBCLASSES_OF[%r] = %r"
+                    % (path, missing, cls, subclass_order))
+            subclass_prob = np.stack(
+                [np.asarray(f["subclass_prob"][s][:], dtype=np.float64) for s in subclass_order],
+                axis=1)
+        else:
+            subclass_prob = None
     template_log = np.log10(np.maximum(f_ref, floor_linear[:, None])).astype(np.float32)
-    return template_log, subclass_idx, len(subclass_order)
+
+    if subclass_prob is None:
+        # no register carries a per-template stage-fraction table for
+        # this class: a one-hot row at the hard label, exactly today's
+        # partition (built this way so the fitter's own formula, not a
+        # special case, produces the identical result).
+        subclass_prob = np.zeros((n_model, len(subclass_order)), dtype=np.float64)
+        subclass_prob[np.arange(n_model), subclass_idx] = 1.0
+    else:
+        row_sum = subclass_prob.sum(axis=1)
+        bad = ~np.isclose(row_sum, 1.0, atol=1e-6)
+        if bad.any():
+            raise ValueError(
+                "fittp.sweep: register %r 'subclass_prob' rows do not sum to 1 (max "
+                "|sum-1|=%.3g on %d/%d rows) -- not a proper per-template stage fraction"
+                % (path, float(np.max(np.abs(row_sum[bad] - 1.0))), int(bad.sum()), n_model))
+
+    return template_log, len(subclass_order), subclass_prob
 
 
 def _width_dex(config, region):
@@ -574,12 +618,19 @@ def _source_task(i):
             p_k = np.exp(ln_w_k - ln_w[None, :])                # (2, m), each design's own share
         p_k = np.where(np.isfinite(p_k), p_k, 0.0)
 
-        subclass_idx = w["subclass_idx"]
-        ln_evidence64 = np.full(n_sub, -np.inf, dtype=np.float64)
-        for kk in range(n_sub):
-            mask = subclass_idx == kk
-            if mask.any():
-                ln_evidence64[kk] = logsumexp(ln_w[mask])
+        # WP-PRIOR-1's "ALSO" finding / WP-HOUSE wiring (ledger C1): the
+        # subclass evidence is a proper marginal over the register's own
+        # per-template stage fractions `p_theta,k` (`_register`, one-hot
+        # where a register carries none), not a hard mask --
+        # `ln EV_k = logsumexp_theta(ln w_theta + ln p_theta,k)`.
+        # `P_CLASS` (`ev_total` below) is unchanged by construction: since
+        # every row of `ln_subclass_prob` sums (in linear space) to 1,
+        # `logsumexp_k(EV_k) = logsumexp_theta(ln w_theta + ln
+        # sum_k p_theta,k) = logsumexp_theta(ln w_theta)` exactly, the same
+        # total a hard one-hot partition always gave.
+        ln_subclass_prob = w["ln_subclass_prob"]            # (n_model, n_sub)
+        with np.errstate(invalid="ignore"):
+            ln_evidence64 = logsumexp(ln_w[:, None] + ln_subclass_prob, axis=0)
         ev_total = logsumexp(ln_evidence64)
 
         with np.errstate(invalid="ignore"):
@@ -1002,8 +1053,16 @@ def build_region_class(config, region, cls, st, reader, catalog,
     `catalog` is `_load_region_catalog`'s one whole-region read,
     also loaded once by `build` and shared across classes.
     """
-    template_log, subclass_idx, n_sub = _register(config, cls)
+    template_log, n_sub, subclass_prob = _register(config, cls)
     n_model = template_log.shape[0]
+    # computed once, in the parent, never per source (rule 8): `ln
+    # p_theta,k`, `-inf` where a template carries no mass in that
+    # subclass -- `0.0` entries are exact zeros from `_register`'s own
+    # construction (a one-hot row or a register's own stage fraction),
+    # not a rounding artefact, so the divide-by-zero warning is expected
+    # and silenced, not masked.
+    with np.errstate(divide="ignore"):
+        ln_subclass_prob = np.log(subclass_prob).astype(np.float64)
     gaia_term = GaiaTerm(config, region)
     # gaia.GaiaTerm.warm's own docstring (item 4): its per-class register
     # and field-star marginal are lazily cached on first `ln_gamma` call by
@@ -1049,7 +1108,7 @@ def build_region_class(config, region, cls, st, reader, catalog,
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
     _set_worker_state(config=config, cls=cls, reader=reader, gaia_term=gaia_term,
-                       template_log=template_log, subclass_idx=subclass_idx, n_sub=n_sub,
+                       template_log=template_log, ln_subclass_prob=ln_subclass_prob, n_sub=n_sub,
                        width_dex=width_dex, topk=topk, n_model=n_model,
                        sigma_lib_l=sigma_lib_l,
                        flux=catalog["flux"], sigma=catalog["sigma"], origin=catalog["origin"],
