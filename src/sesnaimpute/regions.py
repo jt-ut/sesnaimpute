@@ -66,16 +66,22 @@ _REGIONS = (
     Region("Musca", 172, 16, (0.156, 0.188), "D",
            "Zucker, Goodman, Alves, Bialy, Koch, Speagle et al. 2021, ApJ 919, 35, table 1 "
            "('Musca' row)"),
-    Region("NGC 7129", 926, 163, (0.763, 1.089), "M",
-           "Dzib et al., VLBA parallaxes of 40 YSOs"),
+    Region("NGC 7129", 912.0, 7.6, (0.904, 0.920), "S",
+           "Hunt & Reffert 2023, A&A 673, A114 (VizieR J/A+A/673/A114), cluster "
+           "'NGC_7129': mean parallax Plx = 1.0965 +/- 0.0092 mas (standard error "
+           "over 136 Gaia DR3 members, 91 used for the distance fit), d = 1000/Plx; "
+           "their own maximum-likelihood distance (dist50) is 910.96 "
+           "(908.32-913.62) pc, consistent"),
     Region("North America Nebula", 785, 16, (0.769, 0.801), "O",
            "Kuhn & Hillenbrand, Gaia EDR3"),
     Region("Ophiuchus", 137.3, 1.2, (0.1361, 0.1385), "M+S",
            "VLBA parallax (author not recorded in the old table)"),
     Region("Orion A", 418, 21, (0.397, 0.439), "S",
            "Yan, via Pokhrel et al."),
-    Region("Orion B", 418, 21, (0.397, 0.439), "S",
-           "Yan, via Pokhrel et al. (as Orion A)"),
+    Region("Orion B", 403.2, 4.8, (0.398, 0.408), "M+S",
+           "Kounkel et al. 2017, ApJ 834, 142, and the same survey's follow-up VLBA "
+           "astrometry (Gaia-corroborated): 405 +/- 16 pc (NGC 2068), 403 +/- 5 pc "
+           "(NGC 2024); inverse-variance weighted mean of Orion B's own two cores"),
     Region("Perseus", 294, 15.133, (0.2789, 0.3091), "D",
            "Zucker et al."),
     Region("Pipe", 163, 5, (0.158, 0.168), "M",
