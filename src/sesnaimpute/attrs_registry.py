@@ -2863,7 +2863,11 @@ _SWEEP_FIT_READINGS = {
     "TOPK_LN_PRIOR": ("nats",
         "How many objects of this class the sky is expected to hold at the "
         "position, brightness and depth each of those five models implies, as a "
-        "natural logarithm of a density."),
+        "natural logarithm of a density, read across the range of extinction the "
+        "source allows rather than at one value. It also carries the chance the "
+        "survey would have missed the flux each model predicts in the bands where "
+        "the source was observed and not seen, which is read across that same "
+        "range, so this column is not an expected number of objects alone."),
     "TOPK_LN_GAMMA": ("nats",
         "What Gaia says about each of those five models, as a natural logarithm: "
         "whether a counterpart is present or absent, and whether its parallax suits "
