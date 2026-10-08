@@ -136,13 +136,6 @@ FACTOR_FLOOR = grid.FLOOR
 PROB_CAP = 1.0 - FACTOR_FLOOR
 
 
-#: The five YSO sub-grid directories under `sed_models/yso/` (different
-#: geometries, different parameter sets): read only to join each
-#: sub-grid's own `parameters.fits` (inclination) to the pooled
-#: register by `MODEL_NAME` -- a file lookup, not a weighting.
-YSO_SUBGRIDS = (("c0", "C0"), ("cI", "CI"), ("cII", "CII"),
-                ("cIII", "CIII"), ("td", "TD"))
-
 #: The evolutionary-class groups the census fits a share for (spec sec
 #: 5.5; W83, "the young-star population redefined on the Dunham
 #: census"): three groups, the census's own three slope groups --
@@ -155,7 +148,14 @@ YSO_SUBGRIDS = (("c0", "C0"), ("cI", "CI"), ("cII", "CII"),
 #: fitted scalars (the schema, `_yso_class_shares`), read at
 #: `yso_population_weight` call time -- a fitted quantity, not a module
 #: constant.
-YSO_CENSUS_GROUPS = ({"C0", "CI"}, {"CII", "TD"}, {"CIII"})
+#: FLAT (flat-spectrum, Greene et al. 1994) joins the protostellar group:
+#: the census schema (`population/yso/law_yso_region.hdf5`) carries
+#: exactly three fitted shares, `CLASS_SHARE_PROTO`/`CLASS_SHARE_DISK`/
+#: `CLASS_SHARE_WEAK`, so a fourth FLAT-only group would have no share to
+#: read; Dunham et al. 2015's own census counts flat-spectrum sources
+#: among the protostars (their Class 0+I+Flat), which is the census this
+#: factor is fitted to (WP-REG-1, coordinator addendum 2026-10-08).
+YSO_CENSUS_GROUPS = ({"C0", "CI", "FLAT"}, {"CII", "TD"}, {"CIII"})
 
 #: The floor yso `population`'s library-density histogram of
 #: `log10 f_ref,4.5,theta` holds per bin before it is trusted as a density
@@ -400,12 +400,25 @@ def _pahc_contrast_row(config, region, n_b_centers):
 # YSO: imf, inclination (survey, sec 5.5)
 # ---------------------------------------------------------------------------
 
-def _read_yso_subgrid_inclination(config, subdir):
-    path = f"{config.inputs['sed_models']}/yso/{subdir}/parameters.fits"
-    with fits.open(path) as hdul:
-        d = hdul[1].data
-        names = np.char.strip(d["MODEL_NAME"].astype(str))
-        incl_deg = d["inclination"].astype(np.float64)
+def _yso_inclination(config):
+    """`(names, incl_deg)`: every kept YSO template's own inclination
+    (degrees), in the register's own row order. YSO is now one library
+    directory (WP-REG-1, coordinator addendum 2026-10-08): the five
+    sub-grid `parameters.fits` files this used to join by `MODEL_NAME` no
+    longer exist, but the curated register's own `/models` carries the
+    A12 physical-parameter join already (verified on disk: the register's
+    `INCL` column is byte-identical to `yso/parameters.fits`' `INCL`, the
+    Robitaille grid's own column name, HDF5-safe already -- `bms_review/
+    briefs/reports/curation/UNIT_YSO.md`'s own build writes `parameters.
+    fits` and the register from the SAME in-memory table). Reading it off
+    the register `yso_population_weight` already opens, rather than
+    reopening `yso/parameters.fits` separately, needs no join at all: the
+    two arrays come from one `h5py.File` read, so there is no row-order
+    question to check."""
+    path = f"{config.inputs['sed_models']}/registers/{_REGISTER_FILE['yso']}"
+    with h5py.File(path, "r") as f:
+        names = np.char.decode(f["models"]["MODEL_NAME"][:].astype("S"), "utf-8")
+        incl_deg = f["models"]["INCL"][:].astype(np.float64)
     return names, incl_deg
 
 
@@ -481,13 +494,7 @@ def yso_population_weight(config):
     n_model = names.size
     c_theta = _c_theta(reg)  # log10 f_ref,4.5,theta, floored (sec 4.1)
 
-    incl_names, incl_deg = [], []
-    for subdir, _label in YSO_SUBGRIDS:
-        n, i = _read_yso_subgrid_inclination(config, subdir)
-        incl_names.append(n)
-        incl_deg.append(i)
-    incl_names = np.concatenate(incl_names)
-    incl_deg = np.concatenate(incl_deg)
+    incl_names, incl_deg = _yso_inclination(config)
     n_matched_incl = int(np.sum(incl_names == names)) if incl_names.size == n_model else 0
     if n_matched_incl != n_model:
         raise ValueError(
@@ -608,7 +615,7 @@ def build_yso(config, region):
         factors = {
             "population": (population_w, c_theta, "", True,
                             "sky/derived/dunham2015/yso_dunham2015_survey.hdf5 LOG10_F45_REF "
-                            "census; yso sub-grid parameters.fits inclination; "
+                            "census; yso_register.hdf5 models/INCL inclination; "
                             "Dunham et al. 2014 class census; sample_cloud.shift_kernel "
                             f"at d_r={r.d_r_pc:.1f} pc"),
         }
@@ -1135,7 +1142,7 @@ def _match_pahc_to_sps(config, sps_names):
     `MODEL_NAME`, not assumed."""
     sps_path = f"{config.inputs['sed_models']}/sps/parameters.fits"
     pahc_path = f"{config.inputs['sed_models']}/pahc/parameters.fits"
-    sps_p_names, sps_teff, sps_logg = _read_teff_logg(sps_path, "LOG[G]")
+    sps_p_names, sps_teff, sps_logg = _read_teff_logg(sps_path, "LOGG")
     pahc_p_names, pahc_teff, pahc_logg = _read_teff_logg(pahc_path, "LOGG")
 
     reg_pahc_names = _read_register(config, "pahc")["names"]

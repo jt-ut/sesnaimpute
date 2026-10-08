@@ -78,9 +78,12 @@ TOLERANCES = (0.3, 0.5, 1.0)
 #: each).
 SIGMA_LIB_SCALE = SIGMA_FLOOR_DEX / (2.0 * np.sqrt(6.0))
 
-#: The YSO register's five sub-grid `SUBCLASS`/`SUBGRID` labels
-#: (`population.yso_mass`'s own `_SUBGRIDS`).
-YSO_SUBGRID_LABELS = ("C0", "CI", "CII", "CIII", "TD")
+#: The YSO register's own `SUBCLASS` labels, read from `definitions.py`'s
+#: `SUBCLASSES_OF` rather than a second hardcoded tuple (WP-REG-1): the
+#: six-label set must agree with the register's own `/subclass_prob`
+#: columns and with `definitions.CLASSMAP`'s YSO rows by construction, not
+#: by three lists kept in sync by hand.
+YSO_SUBGRID_LABELS = definitions.SUBCLASSES_OF["YSO"]
 #: The four sizes the spacing scaling curve is fit from (brief item 3).
 SUBSET_FRACTIONS = (1.0, 0.5, 0.25, 0.125)
 

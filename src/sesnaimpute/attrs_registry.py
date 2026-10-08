@@ -1109,13 +1109,10 @@ REGISTRY = {
         "This template's own bolometric luminosity, from its radiative-"
         "transfer grid, independent of any stellar-evolution track: "
         "10**x is a luminosity in solar luminosities."),
-    ("mass_yso_survey", "T_EFF"): ("K",
-        "This template's own effective temperature, from its radiative-"
-        "transfer grid, stored for reference but not used to derive "
-        "M_STAR."),
     ("mass_yso_survey", "SUBGRID"): ("subclass code",
-        "Which of the five YSO sub-grids this template belongs to: C0, "
-        "CI, CII, CIII or TD."),
+        "This template's own SUBCLASS in the YSO register: C0, CI, FLAT, "
+        "CII, CIII or TD (definitions.SUBCLASSES_OF['YSO'] is the index "
+        "authority for order; this column is a name, not a position)."),
     ("mass_yso_survey", "FLAG_ABOVE_TOP"): ("boolean",
         "True where this template's luminosity exceeds the MIST v1.2 1 "
         "Myr isochrone's own top, so M_STAR is capped at that track's "

@@ -1,12 +1,10 @@
 """The YSO templates' stellar mass (SPEC_BMSTP_DRAFT.md sec 3.5, sec 5.5
 "Template weights", sec 10): the one physical quantity the pooled YSO
 register lacks that the Chabrier IMF factor needs. Each of the register's
-200,000 templates carries a luminosity and a temperature from its own
-radiative-transfer grid, sampled independently of any stellar-evolution
-track; the template's mass is read off a pre-main-sequence track at the
-template's own luminosity, by monotone interpolation of mass against
-log10 L. Temperature is stored beside the mass but never used: it is the
-grid's own freely-sampled `star.temperature`, not a track quantity.
+398,458 kept templates carries a luminosity from its own radiative-
+transfer grid, sampled independently of any stellar-evolution track; the
+template's mass is read off a pre-main-sequence track at the template's
+own luminosity, by monotone interpolation of mass against log10 L.
 
 The BHAC15 1 Myr track only reaches 1.4 M⊙ (log10 L = 0.52), well below
 most of the register's luminosities; above that top, mass comes from the
@@ -16,18 +14,24 @@ MIST v1.2 1 Myr isochrone (Choi et al. 2016) instead, which reaches
 discontinuity is disclosed, not patched, and a template just above
 BHAC15's top with log10 L below MIST's 1.4 M⊙ value takes 1.4 M⊙ flat.
 
-The five sub-grid `parameters.fits` files (`c0`, `cI`, `cII`, `cIII`,
-`td`), read in that order and concatenated, reproduce the pooled
-register's own row order exactly (`yso_register.hdf5`'s
-`members/MEMBER_KEY`, `N_MODELS`, `ROW_OFFSET`); the join is verified
-against the register's own `MODEL_NAME`, not assumed.
+YSO is one library directory, not five sub-grids (WP-REG-1, coordinator
+addendum 2026-10-08): the curated register's own `/models` carries the
+A12 physical-parameter join already (`LSUN`, among the Robitaille grid's
+own HDF5-safe column names), one row per kept template, so this reads
+`LSUN` straight off the SAME register file this module already opens for
+`MODEL_NAME`/`SUBCLASS` -- no second file, no join to verify. The old
+sub-grid `parameters.fits` files' `star.temperature` column has no
+counterpart in the rebuilt register or in `yso/parameters.fits` (checked:
+neither carries any temperature column); since nothing downstream ever
+read this module's own `T_EFF` output (confirmed by grep: it was "stored
+for reference but not used"), that dataset is dropped rather than
+written from a guessed name, and the discrepancy is reported upstream.
 """
 
 import os
 
 import h5py
 import numpy as np
-from astropy.io import fits
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
@@ -36,12 +40,6 @@ from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 
 _STEM = "mass_yso_survey"
-
-#: The five YSO sub-grids, in the pooled register's own row order
-#: (`yso_register.hdf5`'s `members/MEMBER_KEY`), with the `SUBCLASS`
-#: label each carries in that register.
-_SUBGRIDS = (("c0", "C0"), ("cI", "CI"), ("cII", "CII"),
-             ("cIII", "CIII"), ("td", "TD"))
 
 #: The BHAC15 age this design derives mass at (SPEC_BMSTP_DRAFT.md sec 10:
 #: "isochrone BHAC15, 1 Myr"), in the track file's own age unit (Gyr).
@@ -65,31 +63,17 @@ MIST_LOG10_AGE_YR = 6.0
 
 
 def _read_register(config):
-    """The pooled YSO register's own `MODEL_NAME` and `SUBCLASS`, in its
-    row order (SPEC_BMSTP_DRAFT.md sec 3.5: the register carries no
-    physical parameters, only the join key and the class partition)."""
+    """The pooled YSO register's own `MODEL_NAME`, `SUBCLASS` and `LSUN`
+    (SPEC_BMSTP_DRAFT.md sec 3.5), in its row order: the curated register's
+    `/models` now carries the A12 physical-parameter join (WP-REG-1), so
+    the template's own luminosity is read off the SAME file as the join
+    key and the class partition -- one open, no sub-grid join to verify."""
     path = f"{config.inputs['sed_models']}/registers/yso_register.hdf5"
     with h5py.File(path, "r") as f:
         names = np.char.decode(f["models"]["MODEL_NAME"][:].astype("S"), "utf-8")
         subclass = np.char.decode(f["models"]["SUBCLASS"][:].astype("S"), "utf-8")
-    return names, subclass
-
-
-def _read_subgrid(config, subdir):
-    """One sub-grid's `MODEL_NAME`, `log10(Source Luminosity)` and
-    `star.temperature` (SPEC_BMSTP_DRAFT.md sec 3.5: the three physical
-    columns on disk, `Source Luminosity` in L_sun, linear)."""
-    path = f"{config.inputs['sed_models']}/yso/{subdir}/parameters.fits"
-    if not os.path.isfile(path):
-        raise FileNotFoundError(
-            f"yso_mass: missing {path}; run the YSO SED-model curation that "
-            "populates sed_models/yso first")
-    with fits.open(path) as hdul:
-        d = hdul[1].data
-        names = np.char.strip(d["MODEL_NAME"].astype(str))
-        log_l = np.log10(d["Source Luminosity"].astype(np.float64))
-        t_eff = d["star.temperature"].astype(np.float64)
-    return names, log_l, t_eff
+        lsun = f["models"]["LSUN"][:].astype(np.float64)
+    return names, subclass, lsun
 
 
 def _read_bhac15_1myr_track(config):
@@ -168,36 +152,17 @@ def build(config, regions=None):
     accepted for RUNBOOK compatibility and ignored (rule 5c): the register
     and the isochrone are both survey-wide."""
     with progress.Stage("population.yso_mass") as st:
-        reg_names, reg_subclass = _read_register(config)
+        # WP-REG-1: the register's own LSUN (its `/models`' A12
+        # parameter join) is the template's luminosity directly -- no
+        # sub-grid join, no row-order check, since `_read_register`'s
+        # three arrays come from the SAME file read, row for row.
+        reg_names, reg_subclass, reg_lsun = _read_register(config)
         n_register = reg_names.size
-
-        # The join: each sub-grid's own MODEL_NAME set, concatenated in
-        # the register's own sub-grid order, checked against the
-        # register's MODEL_NAME row for row (SPEC_BMSTP_DRAFT.md sec 3.5).
-        sub_names, sub_log_l, sub_teff, sub_label, sub_counts = [], [], [], [], {}
-        for subdir, label in _SUBGRIDS:
-            names, log_l, t_eff = _read_subgrid(config, subdir)
-            sub_names.append(names)
-            sub_log_l.append(log_l)
-            sub_teff.append(t_eff)
-            sub_label.append(np.full(names.size, label))
-            sub_counts[label] = names.size
-        join_names = np.concatenate(sub_names)
-        join_log_l = np.concatenate(sub_log_l)
-        join_teff = np.concatenate(sub_teff)
-        join_label = np.concatenate(sub_label)
-
-        n_matched = int(np.sum(join_names == reg_names)) if join_names.size == n_register else 0
-        subgrid_sum = sum(sub_counts.values())
-        print("yso_mass: join n_matched=%d n_register=%d subgrid_sum=%d subgrid_counts=%s"
-              % (n_matched, n_register, subgrid_sum, sub_counts), flush=True)
-        if n_matched != n_register or subgrid_sum != n_register:
-            raise ValueError(
-                "yso_mass: the pooled register and the five sub-grid parameters.fits "
-                "files do not join row for row (n_matched=%d, n_register=%d, "
-                "subgrid_sum=%d)" % (n_matched, n_register, subgrid_sum))
-        if not np.array_equal(join_label, reg_subclass):
-            raise ValueError("yso_mass: sub-grid SUBCLASS labels disagree with the register")
+        join_log_l = np.log10(reg_lsun)
+        join_label = reg_subclass
+        print("yso_mass: register n_model=%d, SUBCLASS counts=%s"
+              % (n_register, dict(zip(*np.unique(join_label, return_counts=True)))),
+              flush=True)
 
         track_mass, track_log_l, _track_teff = _read_bhac15_1myr_track(config)
         mono_mass, mono_log_l = _monotone_envelope(track_mass, track_log_l, "BHAC15 1 Myr track")
@@ -277,7 +242,6 @@ def build(config, regions=None):
                 ("MODEL_NAME", np.char.encode(reg_names, "utf-8")),
                 ("M_STAR", m_star.astype(np.float32)),
                 ("LOG10_L", join_log_l.astype(np.float32)),
-                ("T_EFF", join_teff.astype(np.float32)),
                 ("SUBGRID", np.char.encode(join_label, "utf-8")),
                 ("FLAG_ABOVE_TOP", flag_above_top.astype(np.int8)),
                 ("FLAG_BELOW_FLOOR", flag_below_floor.astype(np.int8)),
