@@ -78,10 +78,15 @@ _REGIONS = (
            "VLBA parallax (author not recorded in the old table)"),
     Region("Orion A", 418, 21, (0.397, 0.439), "S",
            "Yan, via Pokhrel et al."),
-    Region("Orion B", 403.2, 4.8, (0.398, 0.408), "M+S",
-           "Kounkel et al. 2017, ApJ 834, 142, and the same survey's follow-up VLBA "
-           "astrometry (Gaia-corroborated): 405 +/- 16 pc (NGC 2068), 403 +/- 5 pc "
-           "(NGC 2024); inverse-variance weighted mean of Orion B's own two cores"),
+    Region("Orion B", 413.4, 0.9, (0.412, 0.414), "S",
+           "Hunt & Reffert 2023, A&A 673, A114 (VizieR J/A+A/673/A114), cluster "
+           "'NGC_2068' (the only one of Orion B's three named clusters -- NGC 2068, "
+           "NGC 2071, NGC 2024 -- resolved by name in this download; 102 Gaia DR3 "
+           "members, 77 within the tidal radius, 87 used for the distance fit): "
+           "mean parallax Plx = 2.4188 +/- 0.0054 mas (standard error), d = 1000/Plx; "
+           "consistent with Kounkel et al. 2017's own, independent NGC 2068 parallax "
+           "distance of 405 +/- 16 pc; their own maximum-likelihood distance "
+           "(dist50) for the cluster is 404.20 (403.62-404.79) pc"),
     Region("Perseus", 294, 15.133, (0.2789, 0.3091), "D",
            "Zucker et al."),
     Region("Pipe", 163, 5, (0.158, 0.168), "M",
