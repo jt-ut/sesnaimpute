@@ -23,12 +23,12 @@ import os
 import h5py
 import numpy as np
 
+from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.batches import batches
 from sesnaimpute.fittp.classify import CLASSES, YSO_INDEX
-from sesnaimpute.readings import set_readings
 
 #: Per-row working set for the batch loop (rule 10b): HPX_512 (int64) and
 #: P_CLASS (6 float64) / P_YSO (float64) reads, at a generous margin.
@@ -90,34 +90,43 @@ def build_region(config, region, st):
 
 
 def write_region(path, result):
+    """`MEAN_P_<CLASS>`'s own reading is generated here from one sentence
+    template and `_CLASS_WORDS`, not stored as six copied sentences in
+    `attrs_registry.REGISTRY` (READINGS brief section 3: the other five
+    writers' readings move there, this one stays local since its text
+    itself varies by class and the template is the one home for it);
+    computed before the datasets below so each can go straight through
+    `build.write_dataset`."""
+    readings = {
+        "HPX_PIX_512": ("HEALPix pixel number",
+                         "The patch of sky this row describes: a HEALPix pixel at "
+                         "nside 512, about 7 arcminutes across, nested numbering."),
+        "N_SOURCES": ("sources",
+                       "How many catalog sources fall in this patch. Where it is zero "
+                       "the mean probabilities are not numbers."),
+        "N_YSO_ABOVE_HALF": ("sources",
+                               "How many sources in this patch have a young stellar "
+                               "object probability above one half."),
+    }
+    _CLASS_WORDS = {"STAR": "a field star", "AGB": "a dusty evolved star",
+                    "PAHC": "a nebula-contaminated aperture",
+                    "GAL": "a background galaxy", "YSO": "a young stellar object",
+                    "H2S": "a shocked gas knot"}
+    for cls in CLASSES:
+        readings["MEAN_P_%s" % cls] = (
+            "probability",
+            "Average probability over this patch's sources that a source is %s."
+            % _CLASS_WORDS[cls])
+
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
-        f.create_dataset("HPX_PIX_512", data=result["pix"])
-        f.create_dataset("N_SOURCES", data=result["n_sources"])
+        build_module.write_dataset(f, "HPX_PIX_512", result["pix"], *readings["HPX_PIX_512"])
+        build_module.write_dataset(f, "N_SOURCES", result["n_sources"], *readings["N_SOURCES"])
         for ci, cls in enumerate(CLASSES):
-            f.create_dataset("MEAN_P_%s" % cls, data=result["mean_p"][:, ci])
-        f.create_dataset("N_YSO_ABOVE_HALF", data=result["n_yso_half"])
-        readings = {
-            "HPX_PIX_512": ("HEALPix pixel number",
-                             "The patch of sky this row describes: a HEALPix pixel at "
-                             "nside 512, about 7 arcminutes across, nested numbering."),
-            "N_SOURCES": ("sources",
-                           "How many catalog sources fall in this patch. Where it is zero "
-                           "the mean probabilities are not numbers."),
-            "N_YSO_ABOVE_HALF": ("sources",
-                                   "How many sources in this patch have a young stellar "
-                                   "object probability above one half."),
-        }
-        _CLASS_WORDS = {"STAR": "a field star", "AGB": "a dusty evolved star",
-                        "PAHC": "a nebula-contaminated aperture",
-                        "GAL": "a background galaxy", "YSO": "a young stellar object",
-                        "H2S": "a shocked gas knot"}
-        for cls in CLASSES:
-            readings["MEAN_P_%s" % cls] = (
-                "probability",
-                "Average probability over this patch's sources that a source is %s."
-                % _CLASS_WORDS[cls])
-        set_readings(f, readings)
+            name = "MEAN_P_%s" % cls
+            build_module.write_dataset(f, name, result["mean_p"][:, ci], *readings[name])
+        build_module.write_dataset(f, "N_YSO_ABOVE_HALF", result["n_yso_half"],
+                                    *readings["N_YSO_ABOVE_HALF"])
         f.attrs["GRANULE"] = "hpx512"
         f.attrs["CLASSES"] = np.array(CLASSES, dtype="S8")
 
