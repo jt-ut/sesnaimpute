@@ -77,7 +77,6 @@ from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
-from sesnaimpute.batches import batches
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.catalog import limits as limits_module
