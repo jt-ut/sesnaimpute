@@ -16,14 +16,18 @@ cloud interval: the 3-D map cannot partition the column reliably behind
 a cloud at a kiloparsec, so nothing behind the front edge is deducted),
 `kappa` selected by which arm reached the source (`ARM`, from the
 adopted column's own provenance flag). H2S (section 5.6) rides on that
-same INTRINSIC young-star law density, scaled by the region's `eta` and
-the universal `eps_ext`, but on the Herschel arm the law itself is the
-knot-driver kernel's convolution of the region's HGBS map
-(`bmstp.knot_field.convolved_law`), sampled at the source's own
-position -- a map operation, once per region, never a per-source
-convolution; a Herschel-arm source whose position falls outside the
-convolved map, and every Planck-arm source (the kernel is sub-beam at
-Planck's 5.03' beam), takes the law at its own column instead. Every
+same INTRINSIC young-star law density -- the SAME `A_cloud`-based law on
+whichever column the arm carries, one form on both arms -- scaled by the
+region's `eta` and the universal `eps_ext`, but on the Herschel arm the
+law itself is the knot-driver kernel's convolution of the region's HGBS
+map, cloud-shared the same way (`bmstp.knot_field.convolved_law`),
+sampled at the source's own position -- a map operation, once per
+region, never a per-source convolution. A Herschel-arm source whose
+position falls outside the convolved map's own grid reads its NEAREST
+COVERED cell's convolved value instead (`knot_field.sample_at`'s own
+clamp, sec. 5.6's brief: never the unconvolved law silently); every
+Planck-arm source (the kernel is sub-beam at Planck's 5.03' beam) takes
+the law at its own column instead, as sec. 5.6 intends. Every
 density is a RETAINED density (section 4.1): the intrinsic count times
 the population's on-grid fraction at the source's own grain -- STAR/AGB
 by tile, YSO and H2S by sightline (both read from P3, the cloud shape
@@ -58,7 +62,6 @@ from sesnaimpute.population.yso import PROVENANCE_HERSCHEL, law_count, pc2_per_d
 _STEM = "table_density_source"
 from sesnaimpute.bmstp import grid
 from sesnaimpute.bmstp import knot_field
-from sesnaimpute.bmstp import sample_cloud
 from sesnaimpute.bmstp import sample_gal
 
 #: The fraction of knots clearing the limits that the source finder
@@ -155,40 +158,26 @@ def _gal_density(config):
 
 def _cloud_column_fraction(config, region):
     """`A_cloud(sightline) / A_s`, section 5.5 "Sky density": the CLOUD's
-    own share of the sightline's column, `1 - u(d_front)`, `u(d) =
-    A_CUM_K / A_INF_K` (the profile product,
-    `sky/derived/edenhofer/profile_edenhofer_sightline__R.hdf5`)
-    interpolated linearly in distance on its own `DIST_PC` axis, at the
-    front edge of the region's cloud interval, `d_front`
-    (`bmstp.sample_cloud`'s own interval rule, W24b -- imported, not
-    re-derived). Only the FOREGROUND is deducted: the 3-D dust map
-    partitions a sightline's column reliably in front of a cloud and not
-    behind it at a kiloparsec (toward NGC 7129 it spreads the cloud over
-    500-2000 pc), so nothing behind `d_front` is deducted -- the in-map
-    background and the disc tail past the map's own reach both stay with
-    the cloud. Returns the per-sightline fraction, one value per row of
-    the profile product's own `HPX_PIX_256` axis -- the SAME axis, in the
-    SAME order, P3's `HPX_PIX_256` is built from (`bmstp.shapes.build_cloud`
-    writes it straight from `sample_cloud._region_profile`'s own read of
-    this product), so a source's `sightline_row` into P3 indexes it
-    directly."""
-    path = config_module.product_path(
-        config, "sky/derived", "edenhofer", "profile", "sightline", region=region)
-    with h5py.File(path, "r") as f:
-        dist_pc = np.asarray(f["DIST_PC"][:], dtype=np.float64)
-        a_cum_k = np.asarray(f["A_CUM_K"][:], dtype=np.float64)
-        a_inf_k = np.asarray(f["A_INF_K"][:], dtype=np.float64)
-    u = a_cum_k / a_inf_k[:, None]  # (n_sl, n_d): u(DIST_PC[j]) per sightline
+    own share of the sightline's column. Only the FOREGROUND is deducted
+    (the 3-D dust map partitions a sightline's column reliably in front
+    of a cloud and not behind it at a kiloparsec, toward NGC 7129 it
+    spreads the cloud over 500-2000 pc, so nothing behind the cloud
+    interval's front edge is deducted -- the in-map background and the
+    disc tail past the map's own reach both stay with the cloud).
 
-    def _u_at(d):
-        j = int(np.clip(np.searchsorted(dist_pc, d), 1, dist_pc.size - 1))
-        d0, d1 = dist_pc[j - 1], dist_pc[j]
-        frac = (d - d0) / (d1 - d0) if d1 > d0 else 0.0
-        return u[:, j - 1] + frac * (u[:, j] - u[:, j - 1])  # (n_sl,)
-
-    d_front, _d_back = sample_cloud.cloud_interval_pc(config, region)
-    u_front = _u_at(d_front)
-    return 1.0 - u_front, d_front
+    The ONE measurement of this fraction lives in `bmstp.knot_field.
+    cloud_column_fraction` (section 5.6's brief: the knot field's own
+    column must carry the identical cloud share, so there is one
+    function, not two); this is a thin wrapper kept at its own name
+    for `bmstp.atlas`'s existing read of it, dropping the sightline-axis
+    return the atlas does not use. Returns the per-sightline fraction,
+    one value per row of the profile product's own `HPX_PIX_256` axis --
+    the SAME axis, in the SAME order, P3's `HPX_PIX_256` is built from
+    (`bmstp.shapes.build_cloud` writes it straight from `sample_cloud.
+    _region_profile`'s own read of this product), so a source's
+    `sightline_row` into P3 indexes it directly."""
+    cloud_frac, _sightline_axis, d_front = knot_field.cloud_column_fraction(config, region)
+    return cloud_frac, d_front
 
 
 def build_region(config, region, st):
@@ -304,12 +293,18 @@ def build_region(config, region, st):
     # H2S, sec. 5.6 "Sky density": `A_H2S(s) = L(s) . eta_r . eps_ext .
     # ON_GRID_H2S(s)`. `L(s)` is the INTRINSIC young-star law at the
     # source's own column/arm/region distance -- `density_yso_intrinsic`
-    # above -- EXCEPT for a Herschel-arm source whose position the
-    # region's convolved law map
-    # (`bmstp.knot_field.convolved_law`) reaches, where `L(s)` is that
-    # convolution sampled at the source instead (a map operation, once
-    # per region). An edge Herschel-arm source (outside the convolved
-    # map) falls back to `density_yso_intrinsic`, counted below.
+    # above -- EXCEPT for every Herschel-arm source, where `L(s)` is the
+    # region's convolved law map (`bmstp.knot_field.convolved_law`, built
+    # on the SAME `A_cloud` the intrinsic law uses, sec. 5.6's brief: one
+    # form on both arms) sampled at the source instead -- a map
+    # operation, once per region, never a per-source convolution. A
+    # source whose position falls outside the map's own grid reads its
+    # NEAREST COVERED cell's convolved value (`knot_field.sample_at`'s
+    # own clamp), so every Herschel-arm source carries a genuinely
+    # convolved value, never `density_yso_intrinsic`'s unconvolved one;
+    # `n_edge` below is the report's own identity that this is so (sec.
+    # 5.6's brief: "100 percent of Orion A's Herschel-arm sources carry a
+    # convolved value").
     eta_r, eta_band_dex = knot_rate.eta_for_region(config, region)
     law_map, law_wcs, knot_meta = knot_field.convolved_law(config, region)
     herschel_mask = arm == PROVENANCE_HERSCHEL
@@ -543,10 +538,17 @@ def build(config, regions=None):
                 print(f"bmstp.density {region}: H2S conservation total_before={km['total_before']:.6g} "
                       f"total_after={km['total_after']:.6g} rel_err={km['conservation_rel_err']:.3e} "
                       f"(sec. 5.6: kernel conserves the law's total)")
+                print(f"bmstp.density {region}: H2S map covered_frac={km['covered_frac']:.6g} "
+                      f"of downsampled cells before the nearest-cell fill (sec. 5.6's brief: "
+                      f"every uncovered cell is filled, never left at the unconvolved law)")
                 print(f"bmstp.density {region}: H2S n_herschel_arm={result['n_herschel']} "
-                      f"n_edge_own_column={result['n_edge']} "
-                      f"L(s)/(kappa A_s^2) median={result['knot_ratio_median']:.4g} "
-                      f"p90={result['knot_ratio_p90']:.4g}")
+                      f"n_edge_own_column={result['n_edge']} (identity: 0, every Herschel-arm "
+                      f"source carries a convolved value -- sec. 5.6's brief) "
+                      f"arm-0 L(s)/density_yso_intrinsic(s) median={result['knot_ratio_median']:.4g} "
+                      f"p90={result['knot_ratio_p90']:.4g}; arm-1's own ratio is 1 identically "
+                      f"(no convolution there, sec. 5.6), so the arm-0-over-arm-1 STEP = "
+                      f"{1.0 / result['knot_ratio_median'] if result['knot_ratio_median'] else float('nan'):.4g} "
+                      f"(identity: no step, sec. 5.6's brief)")
             density_h2s_before = float(np.mean(result["density_yso_intrinsic"] * result["eta_r"] * EPS_EXT))
             density_h2s_after = float(np.mean(result["density_h2s"]))
             print(f"bmstp.density {region}: RATIO_H2S (mean density, deg^-2) "
