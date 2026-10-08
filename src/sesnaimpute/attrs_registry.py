@@ -1444,8 +1444,15 @@ REGISTRY = {
         "applied to every source and sightline of the region."),
     ("extinction_adopted_source", "CAL_SLOPE"): ("dimensionless",
         "One number for the whole region: the multiplicative slope of "
-        "the same straight-line calibration described under "
-        "CAL_OFFSET_K."),
+        "the straight line that converts the dust-emission extinction "
+        "column onto the scale of the Juvela & Montillaud (2016) "
+        "near-infrared star-color extinction map, A_K(star-color) = "
+        "CAL_OFFSET_K plus CAL_SLOPE times A_K(dust emission). Fitted "
+        "the way Lombardi, Bouy, Alves and Lada (2014) calibrated a "
+        "dust-emission map against a star-color map, over the region's "
+        "sightlines where both maps read below 1 magnitude of K-band "
+        "extinction, then applied to every source and sightline of the "
+        "region."),
 
     ("column_adopted_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
         "Every region's admitted nside-256 pixel numbers (nested "
