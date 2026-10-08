@@ -51,11 +51,47 @@ of 14 regions (`studies/star_galaxy_level.md`), each of which fell back
 to the survey-pooled weight even where its own anchors disagreed with it
 by a factor of ~2.
 
-Faint end (decision 5): the tables stop at `G_EDGES`/`KS_EDGES`' own
-faint edges (the anchors' own limits); the log10 trend of the region-
-pooled weight across each anchor's faintest three POPULATED bins (bins
-some tile actually measured) is fit by least squares and stored as a
-root attribute, the disclosed uncertainty on the faint-end extrapolation.
+Faint end, Gaia axis: `G_EDGES` stops at the Gaia anchor's own faint
+edge; the log10 trend of the region-pooled weight across its faintest
+three POPULATED bins (bins some tile actually measured) is fit by
+least squares and stored as a root attribute, the disclosed
+uncertainty on the Gaia faint-end extrapolation (unchanged by the C6
+ruling below: the owner's ruling and `REVIEW_LEDGER_2026-10-08.md`'s
+row C6 concern the Ks anchor only).
+
+Faint end, Ks axis (ledger row C6, owner's ruling 2026-10-09: ANCHOR,
+`bms_review/briefs/SWEEP_2026-10-09.md` WP-POP-3). The deepest Ks
+anchor most of the survey carries is 2MASS's own Ks 14.3 (`KS_CUT_MAG`
+below) -- 92 percent of the retained field-star population is fainter
+than that, so its faint-end weight was TRILEGAL's own unanchored
+luminosity-function slope there (`studies/faint_end_excess.md`),
+predicting 1.6 to 4 times the observed count at one to three times a
+pixel's own depth limit, STAR carrying 83 to 96 percent of the excess.
+A region whose `KS_SOURCE` reaches 1 (`population.anchor_tiles`'
+UKIDSS GPS or VVV extension to `KS_DEEP_CUT_MAG`, about Ks 17) HAS a
+real anchor out there; this module's `deep_slope_dex_per_mag` fits the
+log10 region-pooled weight's slope across exactly those deep-sourced,
+counting-floor-cleared bins (never the Gaia-axis rule's generic
+"faintest three populated bins", which for a region with no deep
+coverage would just be 2MASS's own last bins, already absorbed by the
+completeness correction `P_KS` below, and never the SESNA catalogue's
+own retained counts, which would make the prior read the data it is
+meant to predict). `survey_pooled_weights` pools every region's own
+deep-measured slope (a straight mean, printed with its own region
+count) into ONE survey-wide TRANSPORTED slope. A region with no deep
+coverage at all takes that transported slope as `FAINT_TREND_KS_DEX_
+PER_MAG` (root attr `FAINT_TREND_KS_TRANSPORTED` discloses this), and
+`_extend_shallow_ks_axis` appends synthetic bins to ITS OWN `KS_EDGES`/
+`W_KS`/`W_REGION_KS`/`W_JOINT`/`W_REGION_JOINT`/`P_KS` from its own
+faint edge out to `KS_DEEP_CUT_MAG`, each new bin's weight the region's
+own last REAL bin stepped by the transported slope -- so a star this
+faint, read generically by `population.star_population.star_weights`
+off whatever `KS_EDGES`/`W_KS` this file carries, gets the transported
+correction with no change to that module. The new bins carry no tile
+or region evidence of their own (`POPULATED_KS`/`MEASURED_KS`/
+`USE_JOINT` all False there): the weight is a disclosed extrapolation,
+never a fit. A region whose own deep bins exist but do not clear the
+counting floor falls back to the transported slope the same way.
 
 Product, per region, `bms/anchors/weights_anchors_tile__<Region>.hdf5`:
 `W_JOINT`/`USE_JOINT` (n_tile, n_G, n_Ks), `W_G` (n_tile, n_G), `W_KS`
@@ -63,7 +99,14 @@ Product, per region, `bms/anchors/weights_anchors_tile__<Region>.hdf5`:
 `W_REGION_KS` (n_Ks), `EXCLUDED` (n_tile, bool), `G_EDGES`, `KS_EDGES`,
 `P_KS` (n_tile, n_Ks), `KS_M50` (n_tile), `KS_SCALE` (scalar -- the one
 fixed instrument width every tile fits with, W38); root attrs
-`GRANULE="tile"`, `FAINT_TREND_G_DEX_PER_MAG`, `FAINT_TREND_KS_DEX_PER_MAG`.
+`GRANULE="tile"`, `FAINT_TREND_G_DEX_PER_MAG`, `FAINT_TREND_KS_DEX_PER_MAG`,
+`FAINT_TREND_KS_TRANSPORTED` (bool -- C6 ruling: True where this
+region's own `KS_SOURCE` never clears the counting floor and
+`FAINT_TREND_KS_DEX_PER_MAG` is the OTHER, deep-covered regions'
+transported slope rather than this region's own measurement; `n_Ks`
+is then `_extend_shallow_ks_axis`'s own longer axis, out to
+`KS_DEEP_CUT_MAG`, not `population.anchor_tiles`' original `KS_EDGES`
+for this region).
 
 W13 (SPEC_BMSTP_DRAFT.md 5.1's "N^{model->obs}" row), extended by W38 and
 W46: 2MASS's raw predicted count `n_pred_ks`/the Ks axis of `n_pred_joint`
@@ -111,6 +154,7 @@ from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+from sesnaimpute.population.anchor_tiles import KS_DEEP_CUT_MAG
 
 _STEM = "weights_anchors_tile"
 
@@ -176,6 +220,18 @@ KS_SCALE_MAG = 2.5 * KS_ROLLOFF_DEX * np.sqrt(3.0) / np.pi
 #: the observed and predicted side to carry its own completeness fit;
 #: fewer, and it takes the region-summed fit.
 KS_COMPLETENESS_MIN_BINS = 3
+
+#: WP-POP-3 (C6, owner's ruling 2026-10-09: ANCHOR). A region without
+#: its own deep-sourced evidence takes the OTHER regions' transported
+#: faint-end slope, extrapolated in steps of this width from its own
+#: faint edge out to `KS_DEEP_CUT_MAG` -- the same granularity as the
+#: shared axis's own regular bins (module docstring).
+KS_FAINT_EXTENSION_STEP_MAG = 0.5
+
+#: The least number of deep-sourced (`KS_SOURCE == 1`), counting-floor-
+#: cleared bins a region's own Ks axis needs for `deep_slope_dex_per_mag`
+#: to fit a line through them at all.
+DEEP_SLOPE_MIN_BINS = 2
 
 
 # ---------------------------------------------------------------------------
@@ -705,14 +761,22 @@ def survey_pooled_weights(config, region_names, clusters, min_counts=MIN_COUNTS)
     position, so no region is skipped for its Ks axis length. `skipped`
     now names only a region whose upstream anchor product is missing.
 
+    Also returns the WP-POP-3 (C6) TRANSPORTED Ks faint-end slope: the
+    straight mean, over every region whose own deep-sourced bins clear
+    `min_counts` (`deep_slope_dex_per_mag` on this region's OWN pooled
+    ratio, not yet shrunk toward anything), of that region's own
+    deep-range log10 slope -- one survey-wide number, disclosed with
+    the regions that contributed it.
+
     Returns `(w_pool_g, w_pool_ks, g_edges, ks_lower, ks_upper, skipped,
-    n_pool_ks)`, `n_pool_ks` the count of regions carrying each returned
-    Ks bin.
+    n_pool_ks, transported_ks_slope, deep_slope_regions)`, `n_pool_ks`
+    the count of regions carrying each returned Ks bin.
     """
     sum_obs_g = sum_pred_g = None
     g_edges = None
     ks_lower_list, ks_upper_list, ks_obs_list, ks_pred_list = [], [], [], []
     skipped = []
+    deep_slopes, deep_slope_regions = [], []
     for region in region_names:
         try:
             rc = region_tile_counts(config, region, clusters, min_counts)
@@ -737,10 +801,26 @@ def survey_pooled_weights(config, region_names, clusters, min_counts=MIN_COUNTS)
         ks_edges_r = rc["hist"]["ks_edges"]
         usable_ks = (~rc["excluded"])[:, None] & (rc["n_obs_ks"] >= min_counts) \
             & (rc["n_pred_ks"] >= min_counts)
+        ks_obs_r = np.where(usable_ks, rc["n_obs_ks"], 0.0).sum(axis=0)
+        ks_pred_r = np.where(usable_ks, rc["n_pred_ks"], 0.0).sum(axis=0)
         ks_lower_list.append(ks_edges_r[:-1])
         ks_upper_list.append(ks_edges_r[1:])
-        ks_obs_list.append(np.where(usable_ks, rc["n_obs_ks"], 0.0).sum(axis=0))
-        ks_pred_list.append(np.where(usable_ks, rc["n_pred_ks"], 0.0).sum(axis=0))
+        ks_obs_list.append(ks_obs_r)
+        ks_pred_list.append(ks_pred_r)
+
+        # WP-POP-3 (C6): this region's own deep-sourced, floor-cleared
+        # bins, fit on the plain region-summed ratio (the slope needs
+        # no per-tile shrinkage, only the level does).
+        if np.any(rc["ks_source"] == 1):
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ratio_r = np.where(ks_pred_r > 0,
+                                    ks_obs_r / np.where(ks_pred_r > 0, ks_pred_r, 1.0), np.nan)
+            deep_populated_r = (ks_pred_r >= min_counts) & (ks_obs_r >= min_counts) \
+                & np.isfinite(ratio_r) & (ratio_r > 0)
+            slope_r = deep_slope_dex_per_mag(ratio_r, ks_edges_r, rc["ks_source"], deep_populated_r)
+            if np.isfinite(slope_r):
+                deep_slopes.append(slope_r)
+                deep_slope_regions.append(region)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         w_pool_g = np.where(sum_pred_g > 0,
@@ -751,7 +831,10 @@ def survey_pooled_weights(config, region_names, clusters, min_counts=MIN_COUNTS)
     with np.errstate(divide="ignore", invalid="ignore"):
         w_pool_ks = np.where(sum_pred_ks > 0,
                               sum_obs_ks / np.where(sum_pred_ks > 0, sum_pred_ks, 1.0), np.nan)
-    return w_pool_g, w_pool_ks, g_edges, ks_lower, ks_upper, skipped, n_pool_ks
+
+    transported_ks_slope = float(np.mean(deep_slopes)) if deep_slopes else float("nan")
+    return (w_pool_g, w_pool_ks, g_edges, ks_lower, ks_upper, skipped, n_pool_ks,
+            transported_ks_slope, deep_slope_regions)
 
 
 def _pool_at_region_bins(pool_w, pool_lower, pool_upper, region_edges):
@@ -800,6 +883,91 @@ def faint_trend_dex_per_mag(w_region, edges, populated, n_bins=FAINT_TREND_N_BIN
         return float("nan")
     slope, _ = np.polyfit(x, y, 1)
     return float(slope)
+
+
+def deep_slope_dex_per_mag(w_region_ks, ks_edges, ks_source, populated_ks,
+                            min_bins=DEEP_SLOPE_MIN_BINS):
+    """WP-POP-3 (C6 ruling: anchor). The log10(`W_REGION_KS`) slope
+    across this region's own DEEP-sourced Ks bins alone (`ks_source ==
+    1`: UKIDSS GPS or VVV, measured out to `KS_DEEP_CUT_MAG`) that also
+    cleared the counting floor (`populated_ks`) -- never the 2MASS-only
+    range, which the completeness correction `P_KS` already absorbs,
+    and never a generic "faintest N populated bins" count that could
+    reach into that range. `nan` where fewer than `min_bins` such bins
+    exist: no deep coverage at all, or too little of it to clear the
+    floor (module docstring's "Faint end, Ks axis").
+    """
+    centres = 0.5 * (np.asarray(ks_edges[:-1]) + np.asarray(ks_edges[1:]))
+    mask = np.asarray(populated_ks, dtype=bool) & (np.asarray(ks_source) == 1)
+    if np.count_nonzero(mask) < min_bins:
+        return float("nan")
+    slope, _ = np.polyfit(centres[mask], np.log10(np.asarray(w_region_ks)[mask]), 1)
+    return float(slope)
+
+
+def _extend_shallow_ks_axis(ks_edges, w_ks, w_region_ks, populated_ks, measured_ks,
+                             w_joint, use_joint, w_region_joint, p_ks,
+                             slope_dex_per_mag, n_tile,
+                             target_mag=KS_DEEP_CUT_MAG,
+                             step_mag=KS_FAINT_EXTENSION_STEP_MAG):
+    """WP-POP-3 (C6 ruling: anchor). This region's Ks axis carries no
+    evidence past its own survey depth (no deep-sourced bin clears the
+    counting floor). Append synthetic bins from this axis's own faint
+    edge out to `target_mag` (the deep regions' own reach), each new
+    bin's weight the region's own last REAL bin stepped by the
+    TRANSPORTED survey-wide deep-region slope (module docstring).
+    `populated_ks`/`measured_ks`/`use_joint` are False at every new bin
+    (no tile or region evidence of its own there -- a disclosed
+    extrapolation, never a fit); `w_joint`/`w_region_joint` are padded
+    with the same Ks marginal value at every Gaia bin, never read since
+    `use_joint` stays False.
+
+    Returns the nine Ks-indexed arrays unchanged where the axis already
+    reaches `target_mag` or no transported slope is available (this
+    region's own faint edge, or `nan`, respectively) -- the no-op path
+    `build_region` also takes for a region with its own deep coverage.
+    """
+    edge0 = float(ks_edges[-1])
+    if edge0 >= target_mag - 1e-9 or not np.isfinite(slope_dex_per_mag):
+        return (ks_edges, w_ks, w_region_ks, populated_ks, measured_ks,
+                w_joint, use_joint, w_region_joint, p_ks)
+
+    ref_candidates = np.flatnonzero(populated_ks)
+    ref_idx = int(ref_candidates[-1]) if ref_candidates.size else int(populated_ks.size - 1)
+    ref_centre = 0.5 * (ks_edges[ref_idx] + ks_edges[ref_idx + 1])
+    ref_w_region = float(w_region_ks[ref_idx])
+    if not np.isfinite(ref_w_region):
+        # neither this region nor the survey pool has a usable value at
+        # its own faint edge either -- nothing to step the slope from.
+        return (ks_edges, w_ks, w_region_ks, populated_ks, measured_ks,
+                w_joint, use_joint, w_region_joint, p_ks)
+    ref_w_tile = w_ks[:, ref_idx]
+
+    n_new = max(1, int(np.ceil((target_mag - edge0) / step_mag)))
+    new_edges = np.concatenate([edge0 + np.arange(1, n_new) * step_mag, [target_mag]])
+    new_centres = 0.5 * (np.concatenate([[edge0], new_edges[:-1]]) + new_edges)
+    n_new_bins = new_edges.size
+    step = 10.0 ** (slope_dex_per_mag * (new_centres - ref_centre))
+
+    new_w_region = ref_w_region * step
+    new_w_tile = ref_w_tile[:, None] * step[None, :]
+    n_g = w_joint.shape[1]
+
+    return (
+        np.concatenate([ks_edges, new_edges]),
+        np.concatenate([w_ks, new_w_tile], axis=1),
+        np.concatenate([w_region_ks, new_w_region]),
+        np.concatenate([populated_ks, np.zeros(n_new_bins, dtype=bool)]),
+        np.concatenate([measured_ks, np.zeros((n_tile, n_new_bins), dtype=bool)], axis=1),
+        np.concatenate(
+            [w_joint, np.broadcast_to(new_w_tile[:, None, :], (n_tile, n_g, n_new_bins))],
+            axis=2),
+        np.concatenate([use_joint, np.zeros((n_tile, n_g, n_new_bins), dtype=bool)], axis=2),
+        np.concatenate(
+            [w_region_joint, np.broadcast_to(new_w_region[None, :], (n_g, n_new_bins))],
+            axis=1),
+        np.concatenate([p_ks, np.ones((n_tile, n_new_bins), dtype=np.float64)], axis=1),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -910,7 +1078,8 @@ def check_gaia_vs_2mass(n_obs_g, n_pred_g, n_obs_ks, n_pred_ks):
 # per-region build
 # ---------------------------------------------------------------------------
 
-def build_region(config, region, clusters, w_pool_g, w_pool_ks, ks_pool_lower, ks_pool_upper):
+def build_region(config, region, clusters, w_pool_g, w_pool_ks, ks_pool_lower, ks_pool_upper,
+                  transported_ks_slope):
     rc = region_tile_counts(config, region, clusters)
     tiles, hist = rc["tiles"], rc["hist"]
     n_tile = rc["n_tile"]
@@ -951,7 +1120,24 @@ def build_region(config, region, clusters, w_pool_g, w_pool_ks, ks_pool_lower, k
     use_joint = (n_obs_joint > 0.0) & joint_fitted[None, :, :]
 
     faint_g = faint_trend_dex_per_mag(fit_g["w_region"], hist["g_edges"], fit_g["populated"])
-    faint_ks = faint_trend_dex_per_mag(fit_ks["w_region"], hist["ks_edges"], fit_ks["populated"])
+
+    # WP-POP-3 (C6 ruling: anchor). This region's OWN deep-sourced
+    # slope, measured only on its KS_SOURCE == 1 bins; a region with no
+    # such bins, or too few clearing the counting floor, takes the
+    # OTHER regions' transported value instead (module docstring).
+    faint_ks_own = deep_slope_dex_per_mag(fit_ks["w_region"], hist["ks_edges"],
+                                           ks_source, fit_ks["populated"])
+    faint_ks_transported = not np.isfinite(faint_ks_own)
+    faint_ks = transported_ks_slope if faint_ks_transported else faint_ks_own
+
+    # The synthetic faint-end extension (module docstring): a no-op for
+    # a region whose own KS_EDGES already reaches KS_DEEP_CUT_MAG, or
+    # when no transported slope is available at all.
+    (ks_edges_out, w_ks_out, w_region_ks_out, populated_ks_out, measured_ks_out,
+     w_joint_out, use_joint_out, w_region_joint_out, p_ks_out) = _extend_shallow_ks_axis(
+        hist["ks_edges"], fit_ks["w"], fit_ks["w_region"], fit_ks["populated"], measured_ks,
+        w_joint, use_joint, w_region_joint, p_ks, faint_ks, n_tile)
+    n_ks_added = int(ks_edges_out.size) - int(hist["ks_edges"].size)
 
     # acceptance (CODING_RULES.md rule 11): the raw ratio, before
     # shrinkage, reproduces N_OBS_G exactly wherever the marginal is used
@@ -979,13 +1165,13 @@ def build_region(config, region, clusters, w_pool_g, w_pool_ks, ks_pool_lower, k
 
     return dict(
         region=region, n_tile=n_tile,
-        g_edges=hist["g_edges"], ks_edges=hist["ks_edges"],
+        g_edges=hist["g_edges"], ks_edges=ks_edges_out,
         n_obs_g=n_obs_g, n_pred_g=n_pred_g, w_g=fit_g["w"], b_g=fit_g["b"], w_region_g=fit_g["w_region"],
         populated_g=fit_g["populated"], pooled_g=fit_g["pooled"],
-        n_obs_ks=n_obs_ks, n_pred_ks=n_pred_ks, w_ks=fit_ks["w"], b_ks=fit_ks["b"], w_region_ks=fit_ks["w_region"],
-        populated_ks=fit_ks["populated"], pooled_ks=fit_ks["pooled"], measured_ks=measured_ks,
-        n_obs_joint=n_obs_joint, n_pred_joint=n_pred_joint, w_joint=w_joint,
-        w_region_joint=w_region_joint, use_joint=use_joint,
+        n_obs_ks=n_obs_ks, n_pred_ks=n_pred_ks, w_ks=w_ks_out, b_ks=fit_ks["b"], w_region_ks=w_region_ks_out,
+        populated_ks=populated_ks_out, pooled_ks=fit_ks["pooled"], measured_ks=measured_ks_out,
+        n_obs_joint=n_obs_joint, n_pred_joint=n_pred_joint, w_joint=w_joint_out,
+        w_region_joint=w_region_joint_out, use_joint=use_joint_out,
         excluded=excluded, reason=reason, nearest_cluster=nearest_cluster,
         n_excluded_ratio=int(np.count_nonzero(excluded_ratio)),
         # the old rule's tile count, for the report only (module
@@ -994,11 +1180,12 @@ def build_region(config, region, clusters, w_pool_g, w_pool_ks, ks_pool_lower, k
         n_freed_by_subtraction=int(np.count_nonzero(excluded_catalog & ~excluded_ratio)),
         clusters_hit=sorted(set(nearest_cluster[excluded_catalog].tolist())),
         faint_trend_g=faint_g, faint_trend_ks=faint_ks,
+        faint_trend_ks_transported=bool(faint_ks_transported), n_ks_added=n_ks_added,
         max_identity_dev=max_identity_dev, n_identity_checked=int(np.count_nonzero(check_mask)),
         max_region_pooled_dev=max_region_pooled_dev,
         scatter_observed=scatter_obs, scatter_expected=scatter_expected,
         frac_disagree_2sigma=frac_disagree_2sigma,
-        ks_m50=ks_m50, ks_own_fit=ks_own_fit, p_ks=p_ks, ks_source=ks_source,
+        ks_m50=ks_m50, ks_own_fit=ks_own_fit, p_ks=p_ks_out, ks_source=ks_source,
     )
 
 
@@ -1009,6 +1196,11 @@ def _write_product(config, region, result):
         f.attrs["GRANULE"] = "tile"
         f.attrs["FAINT_TREND_G_DEX_PER_MAG"] = result["faint_trend_g"]
         f.attrs["FAINT_TREND_KS_DEX_PER_MAG"] = result["faint_trend_ks"]
+        # WP-POP-3 (C6 ruling: anchor): True where this region has no
+        # deep-sourced evidence of its own and FAINT_TREND_KS_DEX_PER_MAG
+        # is therefore the OTHER regions' transported slope (module
+        # docstring, "Faint end, Ks axis"), not this region's own fit.
+        f.attrs["FAINT_TREND_KS_TRANSPORTED"] = result["faint_trend_ks_transported"]
         # item 3: POPULATED_G/POPULATED_KS are the explicit per-bin flag,
         # replacing the `w_region != 1.0` sentinel -- this region's own
         # tile evidence, whether or not the bin fell back to the
@@ -1051,8 +1243,8 @@ def build(config, regions=None):
     # before any per-region fit -- every region (even one being rebuilt
     # alone) needs the same pooled fallback, not a pool of itself.
     all_region_names = [r.name for r in regions_module.REGIONS]
-    w_pool_g, w_pool_ks, pool_g_edges, ks_pool_lower, ks_pool_upper, pool_skipped, n_pool_ks = \
-        survey_pooled_weights(config, all_region_names, clusters)
+    (w_pool_g, w_pool_ks, pool_g_edges, ks_pool_lower, ks_pool_upper, pool_skipped, n_pool_ks,
+     transported_ks_slope, deep_slope_regions) = survey_pooled_weights(config, all_region_names, clusters)
     print(
         "prior.anchor_weights: survey pool over %d regions (skipped %s): "
         "W_POOL_G=[%.3f,%.3f] W_POOL_KS=[%.3f,%.3f] "
@@ -1061,11 +1253,19 @@ def build(config, regions=None):
            float(np.nanmin(w_pool_g)), float(np.nanmax(w_pool_g)),
            float(np.nanmin(w_pool_ks)), float(np.nanmax(w_pool_ks)),
            ks_pool_lower.tolist(), n_pool_ks.tolist()))
+    # WP-POP-3 (C6 ruling: anchor): the ONE survey-wide Ks faint-end
+    # slope transported to every region with no deep coverage of its
+    # own, and exactly which regions' own deep (UKIDSS GPS or VVV)
+    # evidence it was measured from.
+    print(
+        "prior.anchor_weights: C6 transported Ks faint-end slope=%.4f dex/mag "
+        "from %d deep-covered region(s): %s"
+        % (transported_ks_slope, len(deep_slope_regions), deep_slope_regions))
 
     for region in region_names:
         with progress.Stage("prior.anchor_weights", region) as st:
             result = build_region(config, region, clusters, w_pool_g, w_pool_ks,
-                                   ks_pool_lower, ks_pool_upper)
+                                   ks_pool_lower, ks_pool_upper, transported_ks_slope)
             path = _write_product(config, region, result)
             st.done(path, n_tile=result["n_tile"], max_identity_dev=result["max_identity_dev"])
 
@@ -1074,7 +1274,8 @@ def build(config, regions=None):
             "prior.anchor_weights: %s tiles=%d excluded(ratio=%d) "
             "previously_catalog_excluded=%d freed_by_subtraction=%d clusters=%s "
             "W_region_G=[%.3f,%.3f] W_region_Ks=[%.3f,%.3f] W_range=[%.3f,%.3f] "
-            "faint_slope_G=%.3f faint_slope_Ks=%.3f identity_max_dev=%.2e (n=%d) "
+            "faint_slope_G=%.3f faint_slope_Ks=%.3f (transported=%s, ks_bins_added=%d) "
+            "identity_max_dev=%.2e (n=%d) "
             "region_pooled_max_reldev=%.4f scatter_obs=%.3f scatter_expected=%.3f "
             "gaia_2mass_disagree_frac=%.3f -> %s"
             % (region, result["n_tile"], result["n_excluded_ratio"],
@@ -1084,6 +1285,7 @@ def build(config, regions=None):
                float(result["w_region_ks"].min()), float(result["w_region_ks"].max()),
                float(w_all.min()), float(w_all.max()),
                result["faint_trend_g"], result["faint_trend_ks"],
+               result["faint_trend_ks_transported"], result["n_ks_added"],
                result["max_identity_dev"], result["n_identity_checked"],
                result["max_region_pooled_dev"], result["scatter_observed"],
                result["scatter_expected"], result["frac_disagree_2sigma"], path))

@@ -912,7 +912,10 @@ REGISTRY = {
         "tabulated on."),
     ("weights_anchors_tile", "KS_EDGES"): ("mag 2MASS/UKIDSS Ks",
         "The edges of the Ks magnitude bins W_KS and W_REGION_KS are "
-        "tabulated on."),
+        "tabulated on. For a region with no deep (UKIDSS GPS or VVV) "
+        "coverage of its own, the faintest bins past its own 2MASS "
+        "depth are a disclosed extrapolation (see W_REGION_KS), not an "
+        "observed anchor."),
     ("weights_anchors_tile", "W_G"): ("dimensionless",
         "For each tile and each Gaia G bin of G_EDGES, the anchor "
         "reweighting factor: the sky's own observed star count over the "
@@ -940,18 +943,26 @@ REGISTRY = {
         "One value per Ks bin of KS_EDGES (shared by every tile): the "
         "region-pooled reweighting factor, or, where no tile in this "
         "region has usable evidence in that bin, the survey-pooled "
-        "value, or NaN where neither this region nor the survey has any."),
+        "value, or NaN where neither this region nor the survey has any. "
+        "A region with no deep coverage of its own carries no real Ks "
+        "anchor past 2MASS's own depth; its faintest bins are instead "
+        "its own last measured value stepped by the faint-end slope "
+        "measured on the OTHER, deep-covered regions (one survey-wide "
+        "number, FAINT_TREND_KS_DEX_PER_MAG with FAINT_TREND_KS_"
+        "TRANSPORTED True) -- a disclosed extrapolation, not a fit."),
     ("weights_anchors_tile", "POPULATED_KS"): ("boolean",
         "One value per Ks bin of KS_EDGES: True where at least one tile "
         "of this region carries usable evidence in that bin, so "
-        "W_REGION_KS is this region's own fit rather than a survey-pooled "
-        "or absent value."),
+        "W_REGION_KS is this region's own fit rather than a survey-pooled, "
+        "transported-slope, or absent value."),
     ("weights_anchors_tile", "MEASURED_KS"): ("boolean",
         "For each tile and each Ks bin of KS_EDGES, True where the "
         "model predicts at least one star there: False marks a bin past "
-        "this tile's own survey depth (the deep UKIDSS bins where the "
-        "region carries no deep coverage), which a consumer must not "
-        "read a weight for at all."),
+        "this tile's own survey depth (a deep UKIDSS/VVV bin the region "
+        "carries no deep coverage for, or a faint bin this file added "
+        "beyond the region's own anchor depth by extrapolation), where a "
+        "consumer reads W_KS/W_REGION_KS as a disclosed extrapolation, "
+        "never as an observed anchor."),
     ("weights_anchors_tile", "W_JOINT"): ("dimensionless",
         "For each tile, each Gaia G bin of G_EDGES and each Ks bin of "
         "KS_EDGES, the anchor reweighting factor on the joint (G, Ks) "
