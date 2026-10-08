@@ -268,45 +268,10 @@ def pooled(config, fitted_rates=None):
     return eta_pooled, band_dex
 
 
-def _kappa_pooled(config):
-    """`KAPPA_POOLED` (`population/yso/law_yso_region.hdf5`'s own scalar):
-    the coefficient every field in `KNOT_COMPLETENESS` already carries,
-    since none of the three (Cygnus X, North America Nebula, Vela D) is
-    one of the young-star law's own fitted regions, so each reads
-    `KAPPA_USED` = `KAPPA_POOLED` there already (`population.yso.
-    _kappa_used`). `eta_for_region` below holds every region's rate to
-    this same coefficient before a caller multiplies it into that
-    region's own law evaluation."""
-    path = config_module.product_path(config, "population", "yso", "law", "region")
-    with h5py.File(path, "r") as f:
-        return float(f["KAPPA_POOLED"][()])
-
-
 def eta_for_region(config, region):
     """`(eta_r, band_dex)`: the field's own fitted rate (band 0.0, exact
     for its own footprint) where `region` carries a knot survey, else the
-    pooled rate and its band -- in both cases rescaled by `KAPPA_POOLED /
-    KAPPA_USED[region]`.
-
-    `eta_r`'s own denominator (`region_predicted_yso`, formed at the
-    anchor fields) is evaluated against `KAPPA_POOLED` already, because
-    none of Cygnus X, North America Nebula or Vela D is one of the six
-    regions the young-star law fits its own coefficient on
-    (`population.yso_law`). A caller forms a region's H2S level as this
-    rate times that SAME region's own law count
-    (`population.yso.law_count`/`law_area_integral`), which reads
-    `KAPPA_USED[region]` -- the region's own fitted coefficient for the
-    six regions the law fits, `KAPPA_POOLED` for every other region. The
-    rate is dimensionless, and the coefficient cancels out of the product,
-    only if both sides carry the same coefficient; rescaling here by
-    `KAPPA_POOLED / KAPPA_USED[region]` cancels the region's own
-    coefficient back out of the rate wherever it differs from
-    `KAPPA_POOLED`, so the caller's multiplication is against
-    `KAPPA_POOLED` on both sides. For every region but those six, `KAPPA_
-    USED[region]` already equals `KAPPA_POOLED` and the rescale is 1.0."""
-    kappa_ratio = _kappa_pooled(config) / yso_module._kappa_used(config, region)
+    pooled rate and its band."""
     if region in KNOT_COMPLETENESS:
-        eta = knots_corrected(config, region) / region_predicted_yso(config, region)
-        return eta * kappa_ratio, 0.0
-    eta, band = pooled(config)
-    return eta * kappa_ratio, band
+        return knots_corrected(config, region) / region_predicted_yso(config, region), 0.0
+    return pooled(config)
