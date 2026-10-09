@@ -385,7 +385,8 @@ def _build_one_extinction_region(config, region, cal, field_zp=None):
     return region, d["n"], offset, slope, rms, n_fit
 
 
-def _extinction_row_one_region(config, region, region_code, adopted_pix, adopted_a_k, adopted_sig, adopted_prov):
+def _extinction_row_one_region(config, region, region_code, adopted_pix, adopted_code, adopted_a_k, adopted_sig,
+                               adopted_prov):
     """One region's extinction sightline row: the adopted sightline column
     (`build_sightline`'s own Herschel/Planck value, unchanged) converted
     onto the NICEST star-colour map's scale by this region's one
@@ -394,7 +395,8 @@ def _extinction_row_one_region(config, region, region_code, adopted_pix, adopted
     it) -- the same affine transform for every admitted sightline of the
     region, whether or not it carries a catalogued source.
     `PROVENANCE`/`REGION_CODE` are carried from the adopted sightline
-    column product."""
+    column product, which carries one row per (region, pixel): only this
+    region's own rows are looked up."""
     ext_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "source", region=region)
     if not os.path.exists(ext_path):
         raise FileNotFoundError(
@@ -406,16 +408,19 @@ def _extinction_row_one_region(config, region, region_code, adopted_pix, adopted
         slope = float(f["CAL_SLOPE"][()])
 
     admitted_pix, _ = profile_module._admitted_sightlines(config, region)
-    loc = np.searchsorted(adopted_pix, admitted_pix)
-    capped = np.minimum(loc, adopted_pix.size - 1) if adopted_pix.size else loc
-    ok = adopted_pix.size and np.all(adopted_pix[capped] == admitted_pix)
+    own = np.flatnonzero(adopted_code == region_code)
+    own_pix = adopted_pix[own]
+    loc = np.searchsorted(own_pix, admitted_pix)
+    capped = np.minimum(loc, own_pix.size - 1) if own_pix.size else loc
+    ok = own_pix.size and np.all(own_pix[capped] == admitted_pix)
     if not ok:
         raise ValueError(f"sky.derived.column.build_extinction_sightline: {region!r} missing from the "
                          "adopted sightline column product")
+    row = own[capped]
 
     return dict(pix=admitted_pix, region_code=np.full(admitted_pix.size, region_code, dtype=np.int16),
-               a_k=offset + slope * adopted_a_k[capped], sig_a_k=abs(slope) * adopted_sig[capped],
-               prov=adopted_prov[capped])
+               a_k=offset + slope * adopted_a_k[row], sig_a_k=abs(slope) * adopted_sig[row],
+               prov=adopted_prov[row])
 
 
 def build_extinction_sightline(config, stage=None):
@@ -435,11 +440,12 @@ def build_extinction_sightline(config, stage=None):
             "%r -- run sky.derived.column.build_sightline first (this module's own RUNBOOK line)" % adopted_path)
     with h5py.File(adopted_path, "r") as f:
         adopted_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
+        adopted_code = np.asarray(f["REGION_CODE"][:], dtype=np.int16)
         adopted_prov = np.asarray(f["PROVENANCE"][:])
         adopted_a_k = np.asarray(f["A_K"][:], dtype=np.float64)
         adopted_sig = np.asarray(f["SIGMA_A_K"][:], dtype=np.float64)
-    order = np.argsort(adopted_pix)
-    adopted_pix, adopted_prov = adopted_pix[order], adopted_prov[order]
+    order = np.argsort(adopted_pix, kind="stable")
+    adopted_pix, adopted_code, adopted_prov = adopted_pix[order], adopted_code[order], adopted_prov[order]
     adopted_a_k, adopted_sig = adopted_a_k[order], adopted_sig[order]
 
     n_regions = len(regions)
@@ -449,7 +455,8 @@ def build_extinction_sightline(config, stage=None):
         part = regions[start:start + chunk]
         rows.extend(Parallel(n_jobs=config.n_jobs)(
             delayed(_extinction_row_one_region)(config, region, codes[region],
-                                                adopted_pix, adopted_a_k, adopted_sig, adopted_prov)
+                                                adopted_pix, adopted_code, adopted_a_k, adopted_sig,
+                                                adopted_prov)
             for region in part))
         if stage is not None:
             stage.tick(min(start + chunk, n_regions), n_regions, "regions")

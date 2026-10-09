@@ -1142,9 +1142,7 @@ def build_region_class(config, region, cls, st, reader, catalog,
             st.tick(bi + 1, len(batch_bounds), "batches")
 
     density_file = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
-    lib, granule = ("sps", "region") if cls == "STAR" else \
-        {"AGB": ("agb", "region"), "PAHC": ("pahc", "region"), "YSO": ("yso", "survey"),
-         "H2S": ("h2shock", "survey"), "GAL": ("galz", "survey")}[cls]
+    lib, granule = prior_reader._LIB[cls]
     weights_file = config_module.product_path(
         config, "bmstp", "weights", lib, granule, region=(region if granule == "region" else None))
     return dict(
@@ -1264,6 +1262,7 @@ def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=N
 
 if __name__ == "__main__":
     import argparse
+    import dataclasses
 
     parser = argparse.ArgumentParser()
     parser.add_argument("config")
@@ -1283,8 +1282,14 @@ if __name__ == "__main__":
                               "region's own source order at [fit] batch_size) -- e.g. after a "
                               "crash, regenerate just the missing part files; the join always "
                               "re-discovers every part file on disk")
+    #: applied to config.n_jobs only; the sweep's own pool is --workers / fittp_workers, unchanged
+    parser.add_argument("--n-jobs", type=int, default=None)
     args = parser.parse_args()
     cfg = config_module.load(args.config)
+    if args.n_jobs is not None:
+        cfg = dataclasses.replace(cfg, n_jobs=args.n_jobs)
+        print("%s: n_jobs=%d from --n-jobs (config says %d)"
+              % ("sesnaimpute.fittp.sweep", args.n_jobs, config_module.load(args.config).n_jobs))
     n_workers = args.workers if args.workers is not None else cfg.fittp_workers
     build(cfg, regions=args.regions, classes=args.classes, limit=args.limit,
           n_workers=n_workers, batches=args.batches)

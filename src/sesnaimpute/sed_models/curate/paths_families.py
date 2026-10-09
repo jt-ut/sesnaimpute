@@ -9,7 +9,7 @@ site, exactly like every other subpackage's own `paths_families` module
 (see `sed_models_register.paths_families` for the shape being followed).
 
 YSO is a single family naming the shared parent directory
-(`sed_models/yso`) that holds the five stratum folders
+(`<sed_models>/yso`) that holds the five stratum folders
 (`c0`/`cI`/`cII`/`cIII`/`td`, `yso_fps.STRATUM_OUTPUT_FOLDER`) -- there is
 one build (`build.yso`) producing all five together, not five
 independent families.
@@ -23,14 +23,15 @@ at build time.
 """
 
 FAMILIES = {
-    "sed_models_sps": "sed_models/sps",
-    "sed_models_agb": "sed_models/agb",
-    "sed_models_galz": "sed_models/galz",
-    "sed_models_h2shock": "sed_models/h2shock",
-    "sed_models_pahc": "sed_models/pahc",
-    "sed_models_yso": "sed_models/yso",
+    "sed_models_sps": "sps",
+    "sed_models_agb": "agb",
+    "sed_models_galz": "galz",
+    "sed_models_h2shock": "h2shock",
+    "sed_models_pahc": "pahc",
+    "sed_models_yso": "yso",
 }
 
-FAMILIES_AREA = {}
+# Every family is relative to the `[inputs] sed_models` area.
+FAMILIES_AREA = {name: "sed_models" for name in FAMILIES}
 
 FUTURE_FAMILIES = frozenset()

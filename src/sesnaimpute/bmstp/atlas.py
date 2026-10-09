@@ -92,6 +92,7 @@ from sesnaimpute.bmstp import sample_star
 from sesnaimpute.bmstp import template_weights
 from sesnaimpute.fittp import likelihood as likelihood_module
 from sesnaimpute.fittp import prior_reader
+from sesnaimpute.sky.derived import column as column_module
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
@@ -225,7 +226,7 @@ def _coverage(config, region, pix):
     return out
 
 
-def _pixel_column(config, pix):
+def _pixel_column(config, region, pix):
     """The pixel's own extinction column and arm, from the sightline it is
     a child of (SPEC_BMSTP_DRAFT.md sec. 8: "placed at the pixel (its
     column, its tile or sightline, its arm)"). Nested HEALPix, confirmed
@@ -248,9 +249,10 @@ def _pixel_column(config, pix):
             "bmstp.atlas: no extinction sightline column at %s -- run the "
             "'sesnaimpute.sky.derived.column' RUNBOOKtp.sh line first" % path)
     with h5py.File(path, "r") as f:
-        sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
-        a_k = np.asarray(f["A_K"][:], dtype=np.float64)
-        prov = np.asarray(f["PROVENANCE"][:])
+        mine = np.asarray(f["REGION_CODE"][:]) == column_module._region_codes(config, [region])[region]
+        sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)[mine]
+        a_k = np.asarray(f["A_K"][:], dtype=np.float64)[mine]
+        prov = np.asarray(f["PROVENANCE"][:])[mine]
     order = np.argsort(sl_pix)
     loc = np.searchsorted(sl_pix[order], parent256)
     loc = np.minimum(loc, sl_pix.size - 1)
@@ -262,7 +264,7 @@ def _pixel_column(config, pix):
     return a_k[hit], prov[hit]
 
 
-def _pixel_gas_column(config, pix):
+def _pixel_gas_column(config, region, pix):
     """The pixel's own GAS column, from the sightline it is a child of --
     the same nesting `_pixel_column` uses (`pix // 4` into the nside-256
     parent). `sky/derived/adopted/column_adopted_sightline.hdf5`
@@ -279,8 +281,9 @@ def _pixel_gas_column(config, pix):
             "bmstp.atlas: no gas sightline column at %s -- run the "
             "'sesnaimpute.sky.derived.column' RUNBOOKtp.sh line first" % path)
     with h5py.File(path, "r") as f:
-        sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
-        a_k = np.asarray(f["A_K"][:], dtype=np.float64)
+        mine = np.asarray(f["REGION_CODE"][:]) == column_module._region_codes(config, [region])[region]
+        sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)[mine]
+        a_k = np.asarray(f["A_K"][:], dtype=np.float64)[mine]
     order = np.argsort(sl_pix)
     loc = np.searchsorted(sl_pix[order], parent256)
     loc = np.minimum(loc, sl_pix.size - 1)
@@ -1480,8 +1483,8 @@ def build_region(config, region):
         pix, f_lim, width_dex = _depth_grid(config, region)
         n_pix = pix.size
         coverage = _coverage(config, region, pix)
-        a_col, arm = _pixel_column(config, pix)
-        a_col_gas = _pixel_gas_column(config, pix)
+        a_col, arm = _pixel_column(config, region, pix)
+        a_col_gas = _pixel_gas_column(config, region, pix)
         tile_of_pix, n_tile_filled = _pixel_tile(config, region, pix)
 
         n_cat = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}

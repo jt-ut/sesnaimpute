@@ -60,6 +60,7 @@ band's own datum does not vary across templates.
 
 import argparse
 import configparser
+import dataclasses
 import os
 
 import h5py
@@ -792,8 +793,13 @@ if __name__ == "__main__":
     parser.add_argument("--regions", nargs="+", default=None)
     parser.add_argument("--beta", type=float, default=None,
                          help="default: root.cfg's [fittp] beta (0.0 if absent)")
+    parser.add_argument("--n-jobs", type=int, default=None)
     args = parser.parse_args()
     cfg = config_module.load(args.config)
+    if args.n_jobs is not None:
+        cfg = dataclasses.replace(cfg, n_jobs=args.n_jobs)
+        print("%s: n_jobs=%d from --n-jobs (config says %d)"
+              % ("sesnaimpute.fittp.classify", args.n_jobs, config_module.load(args.config).n_jobs))
     if args.beta is None:
         ini = configparser.ConfigParser()
         ini.read(args.config)

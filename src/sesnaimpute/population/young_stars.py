@@ -431,7 +431,7 @@ def _young_star_kg_by_mass(config, mass_grid):
         log10_mass, np.log10(masses[order]), np.log10(teff[order]))
     logg_at_mass = np.interp(log10_mass, np.log10(masses[order]), logg[order])
 
-    register_path = f"{config.data_root}/sed_models/registers/sps_register.hdf5"
+    register_path = f"{config.inputs['sed_models']}/registers/sps_register.hdf5"
     atmosphere = field_stars.load_atmosphere_grid(register_path)
     idx, _ = field_stars.match_templates(
         teff_at_mass, logg_at_mass, np.zeros_like(teff_at_mass), atmosphere["grid"])

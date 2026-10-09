@@ -244,7 +244,7 @@ def agb_star_distances(config, region, tile_id):
 
 
 @functools.lru_cache(maxsize=None)
-def agb_log10_ratio_stats(data_root):
+def agb_log10_ratio_stats(sed_models):
     """Per chemistry, the AGB library's own ratio of its 4.5 micron
     reference flux (`F_REF_I2`, mJy at the register's 1 kpc reference) to
     its bolometric luminosity (`L_SUN`, `sed_models/agb/parameters.fits`,
@@ -256,11 +256,11 @@ def agb_log10_ratio_stats(data_root):
     parameters table, vectorised (`np.searchsorted` on the sorted
     parameters table, never a per-template python loop, rule 8), cached:
     survey-wide, the same for every region and tile."""
-    register_path = f"{data_root}/sed_models/registers/agb_register.hdf5"
+    register_path = f"{sed_models}/registers/agb_register.hdf5"
     with h5py.File(register_path, "r") as f:
         reg_names = np.char.decode(f["models/MODEL_NAME"][:].astype("S"), "utf-8")
         f_ref_i2 = f["models/F_REF_I2"][:].astype(np.float64)
-    params_path = f"{data_root}/sed_models/agb/parameters.fits"
+    params_path = f"{sed_models}/agb/parameters.fits"
     with fits.open(params_path) as hdul:
         data = hdul[1].data
         p_names = np.char.strip(np.asarray(data["MODEL_NAME"]).astype(str))
@@ -319,7 +319,7 @@ def sample_agb(config, region, tile_id):
     dist_pc = dist_pc_all[star_index]
     log_l = log_l_all[star_index]
 
-    ratio = agb_log10_ratio_stats(config.data_root)
+    ratio = agb_log10_ratio_stats(config.inputs["sed_models"])
     two_log_inv_d = 2.0 * np.log10(1000.0 / dist_pc)
     log10_f45_o = log_l + two_log_inv_d + ratio["O"]["log10_r"]
     log10_f45_c = log_l + two_log_inv_d + ratio["C"]["log10_r"]

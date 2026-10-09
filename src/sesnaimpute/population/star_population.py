@@ -418,7 +418,7 @@ def agb_register_tau_floor(config):
     group) -- no join to a second file, no name parsed out of
     `MODEL_NAME`, no attribute restating it. Fails loudly, not a fallback,
     while that column is not yet on the register."""
-    path = f"{config.data_root}/sed_models/registers/agb_register.hdf5"
+    path = f"{config.inputs['sed_models']}/registers/agb_register.hdf5"
     with h5py.File(path, "r") as f:
         models = f["models"]
         if "TAU" not in models:
@@ -463,7 +463,7 @@ def agb_orich_l_sun(config):
     so the class mean is exact to floating precision, not a fit. Fails
     loudly if a re-curated library ever ships a spread of O-rich
     luminosities, since `b_agb`'s closed form assumes one shared value."""
-    path = f"{config.data_root}/sed_models/agb/parameters.fits"
+    path = f"{config.inputs['sed_models']}/agb/parameters.fits"
     if not os.path.exists(path):
         raise FileNotFoundError(
             "prior.star_population: no AGB library parameters at %r -- "
@@ -494,7 +494,7 @@ def load_sps_reference_fluxes(config):
     template's own reference flux (`sed_models/registers/
     sps_register.hdf5`), indexed later by `population.field_stars`'
     `TEMPLATE_INDEX` for `LOG10_B` (STAR, all eight bands)."""
-    path = f"{config.data_root}/sed_models/registers/sps_register.hdf5"
+    path = f"{config.inputs['sed_models']}/registers/sps_register.hdf5"
     with h5py.File(path, "r") as f:
         models = f["models"]
         return np.column_stack(
@@ -518,7 +518,7 @@ def load_pahc_continuum_reference(config):
     the 144. The match is therefore on `(log10 T_EFF, LOGG)`, the same
     two-parameter Euclidean match `template_weights._match_pahc_to_sps`
     uses to join PAHC templates to the sps atmosphere grid."""
-    path = f"{config.data_root}/sed_models/registers/pahc_register.hdf5"
+    path = f"{config.inputs['sed_models']}/registers/pahc_register.hdf5"
     with h5py.File(path, "r") as f:
         grp = f["library/pahc_fstar"]
         node_log10_teff = np.log10(np.asarray(grp["T_EFF"], dtype=np.float64))

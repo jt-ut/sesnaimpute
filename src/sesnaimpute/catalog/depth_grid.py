@@ -126,6 +126,7 @@ from sesnaimpute.build import run
 from sesnaimpute.catalog import depths as depths_module
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access as access_module
+from sesnaimpute.sky.derived.column import _region_codes
 
 _SOURCE_STEM = "limits_sesna_source"
 _PIX_STEM = "depth-grid_sesna_hpx512"
@@ -272,9 +273,10 @@ def _pixel_coverage(config, region, pix):
     return out
 
 
-def _pixel_column(config, pix):
+def _pixel_column(config, region, pix):
     """Each admitted pixel's own extinction column, from the nside-256
-    sightline it is a child of (survey-wide product, no region argument;
+    sightline it is a child of (survey-wide product, one row per region and
+    pixel: this region's own rows are read;
     `granules/build.py`'s own `HPX_PIX_256 = HPX_PIX_512 // 4`) -- the same
     join `bmstp.atlas._pixel_column` performs. The depth grid's low-column
     selection is a starlight (IRAC) selection, so it reads the extinction
@@ -286,9 +288,11 @@ def _pixel_column(config, pix):
         raise FileNotFoundError(
             "catalog.depth_grid: no extinction sightline column at %s -- run the "
             "'sesnaimpute.sky.derived.column' RUNBOOKtp.sh line first" % path)
+    code = _region_codes(config, [region])[region]
     with h5py.File(path, "r") as f:
-        sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
-        a_k = np.asarray(f["A_K"][:], dtype=np.float64)
+        own = np.asarray(f["REGION_CODE"][:], dtype=np.int64) == code
+        sl_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)[own]
+        a_k = np.asarray(f["A_K"][:], dtype=np.float64)[own]
     order = np.argsort(sl_pix)
     loc = np.minimum(np.searchsorted(sl_pix[order], parent256), sl_pix.size - 1)
     hit = order[loc]
@@ -311,7 +315,7 @@ def _low_column_selection(config, region, hpx_pix_512, admitted):
     """
     pix = np.sort(admitted)
     cov = _pixel_coverage(config, region, pix)
-    col = _pixel_column(config, pix)
+    col = _pixel_column(config, region, pix)
     well_covered = cov > COVERAGE_FLOOR
     if well_covered.any():
         threshold = float(np.percentile(col[well_covered], COLUMN_PERCENTILE))

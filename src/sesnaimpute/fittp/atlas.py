@@ -18,6 +18,7 @@ pixel with different sources.
 """
 
 import argparse
+import dataclasses
 import os
 
 import h5py
@@ -59,6 +60,7 @@ def build_region(config, region, st):
 
     sum_p = np.zeros((n_pix, len(CLASSES)), dtype=np.float64)
     count = np.zeros(n_pix, dtype=np.int64)
+    n_finite = np.zeros(n_pix, dtype=np.int64)
     n_yso_half = np.zeros(n_pix, dtype=np.int64)
 
     with h5py.File(density_path, "r") as fd, h5py.File(post_path, "r") as fp:
@@ -77,13 +79,18 @@ def build_region(config, region, st):
             valid = pix[idx] == hpx_b
             idx_v = idx[valid]
             np.add.at(count, idx_v, 1)
-            np.add.at(sum_p, idx_v, p_class_b[valid])
-            np.add.at(n_yso_half, idx_v, (p_yso_b[valid] > 0.5).astype(np.int64))
+            # classify writes NaN P_CLASS for flagged and prior-vetoed sources
+            # by design: they count in N_SOURCES but not in the averages.
+            fin = np.isfinite(p_class_b).all(axis=1)[valid]
+            idx_f = idx_v[fin]
+            np.add.at(n_finite, idx_f, 1)
+            np.add.at(sum_p, idx_f, p_class_b[valid][fin])
+            np.add.at(n_yso_half, idx_f, (p_yso_b[valid][fin] > 0.5).astype(np.int64))
             st.tick(bi + 1, len(bounds), "batches")
 
     mean_p = np.full((n_pix, len(CLASSES)), np.nan, dtype=np.float32)
-    has = count > 0
-    mean_p[has] = (sum_p[has] / count[has, None]).astype(np.float32)
+    has = n_finite > 0
+    mean_p[has] = (sum_p[has] / n_finite[has, None]).astype(np.float32)
 
     return dict(pix=pix, n_sources=count.astype(np.int32), mean_p=mean_p,
                 n_yso_half=n_yso_half.astype(np.int32), n_total_sources=n_total)
@@ -102,8 +109,9 @@ def write_region(path, result):
                          "The patch of sky this row describes: a HEALPix pixel at "
                          "nside 512, about 7 arcminutes across, nested numbering."),
         "N_SOURCES": ("sources",
-                       "How many catalog sources fall in this patch. Where it is zero "
-                       "the mean probabilities are not numbers."),
+                       "How many catalog sources fall in this patch. Sources with no "
+                       "probabilities are counted here but not averaged; where none "
+                       "has any, the mean probabilities are not numbers."),
         "N_YSO_ABOVE_HALF": ("sources",
                                "How many sources in this patch have a young stellar "
                                "object probability above one half."),
@@ -153,6 +161,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("config")
     parser.add_argument("--regions", nargs="+", default=None)
+    parser.add_argument("--n-jobs", type=int, default=None)
     args = parser.parse_args()
     cfg = config_module.load(args.config)
+    if args.n_jobs is not None:
+        cfg = dataclasses.replace(cfg, n_jobs=args.n_jobs)
+        print("%s: n_jobs=%d from --n-jobs (config says %d)"
+              % ("sesnaimpute.fittp.atlas", args.n_jobs, config_module.load(args.config).n_jobs))
     build(cfg, regions=args.regions)

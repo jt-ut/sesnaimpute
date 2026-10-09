@@ -363,6 +363,7 @@ def build(config, regions=None, imputed=False):
 
 if __name__ == "__main__":
     import argparse
+    import dataclasses
 
     parser = argparse.ArgumentParser()
     parser.add_argument("config")
@@ -372,6 +373,11 @@ if __name__ == "__main__":
                               "ENTROPY_PSI_VOTES): reads the measured half already on disk and "
                               "classify's own LOG10_FLUX_IMPUTED. Without this flag: the measured "
                               "half only, never opening a fit file or the posterior product.")
+    parser.add_argument("--n-jobs", type=int, default=None)
     args = parser.parse_args()
     cfg = config_module.load(args.config)
+    if args.n_jobs is not None:
+        cfg = dataclasses.replace(cfg, n_jobs=args.n_jobs)
+        print("%s: n_jobs=%d from --n-jobs (config says %d)"
+              % ("sesnaimpute.fittp.cascade", args.n_jobs, config_module.load(args.config).n_jobs))
     build(cfg, regions=args.regions, imputed=args.imputed)

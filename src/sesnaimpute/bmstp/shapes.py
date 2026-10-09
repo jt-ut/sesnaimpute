@@ -168,7 +168,7 @@ def build_star_family(config, region):
 
         # AGB's own flux-to-luminosity ratio spread by chemistry (sec.
         # 5.2): survey-wide, cached, computed once regardless of region.
-        agb_ratio = sample_star.agb_log10_ratio_stats(config.data_root)
+        agb_ratio = sample_star.agb_log10_ratio_stats(config.inputs["sed_models"])
 
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with h5py.File(path, "w") as f:

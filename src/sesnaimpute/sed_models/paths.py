@@ -68,7 +68,7 @@ RETIRED_FAMILIES -- a subpackage's `paths_families` module may also
 WHERE A FAMILY RESOLVES: `FAMILIES` templates a product family relative to
     `data_root()` EXCEPT the families listed in `FAMILIES_AREA`, whose
     template is instead relative to their declared `[inputs]` directory (an
-    external area, read-only, never a product this package writes) --
+    external area; the `sed_models` area is also where the library builds write) --
     `path_for` looks a family up in `FAMILIES_AREA` first and resolves
     against `input_dir(area)` if it is there, `data_root()` otherwise.
 

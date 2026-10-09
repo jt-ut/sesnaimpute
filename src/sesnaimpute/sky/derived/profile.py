@@ -560,8 +560,10 @@ def measure_region(d_r_pc, inner, splice, dist_new, rho_dist_new, weight):
 
 def _admitted_sightlines(config, region):
     """The region's admitted sightlines (spec IMPLEMENTATION.md 1): every
-    occupied nside-256 galactic-NESTED pixel the granule map associates
-    with `region`, and its source count."""
+    nside-256 galactic-NESTED pixel the granule map associates with
+    `region` -- source-bearing or mosaic-supported, including rows with
+    zero sources -- and each row's source count. Callers must not filter
+    it."""
     path = product_path(config, "granules", "sesna", "granule-map", "source")
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -591,9 +593,13 @@ def _join_total_column(config, region, admitted_pix):
         raise FileNotFoundError(
             "profile.build: adopted extinction sightline product missing at %s -- run the "
             "sesnaimpute.sky.derived.column RUNBOOK line for it" % path)
+    # column.py imports this module, so its region-code reader is imported here
+    from sesnaimpute.sky.derived.column import _region_codes
+    code = _region_codes(config, [region])[region]
     with h5py.File(path, "r") as f:
-        hpx = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
-        a_inf = np.asarray(f["A_K"][:], dtype=float)
+        own = np.asarray(f["REGION_CODE"][:], dtype=np.int64) == code
+        hpx = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)[own]
+        a_inf = np.asarray(f["A_K"][:], dtype=float)[own]
     order = np.argsort(hpx)
     hpx_sorted = hpx[order]
     pos = np.searchsorted(hpx_sorted, admitted_pix)

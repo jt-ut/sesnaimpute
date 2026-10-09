@@ -40,6 +40,7 @@ from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.bmstp import sample_cloud
 from sesnaimpute.population import selection as population_selection
+from sesnaimpute.sky.derived import column as column_module
 
 _STEM = "cloud_interval_shape_sightline"
 
@@ -47,7 +48,8 @@ _STEM = "cloud_interval_shape_sightline"
 def _sightline_a_col_k(config, region, hpx_pix_256):
     """This region's own sightlines' `A_COL_K`, the extinction column
     (survey-wide `sky/derived/adopted/extinction/sightline` product,
-    keyed by `HPX_PIX_256`) -- the same column `bmstp.density` (P1)
+    keyed by `HPX_PIX_256`, one row per (region, pixel), so only this
+    region's `REGION_CODE` rows are read) -- the same column `bmstp.density` (P1)
     assigns each row's sources, read here at the sightline granule
     directly rather than re-derived."""
     path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "sightline")
@@ -56,8 +58,9 @@ def _sightline_a_col_k(config, region, hpx_pix_256):
             "bmstp.cloud_interval: no adopted extinction sightline product at %s -- run the "
             "'sesnaimpute.sky.derived.column' RUNBOOKtp.sh line first" % path)
     with h5py.File(path, "r") as f:
-        pix_all = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
-        a_k_all = np.asarray(f["A_K"][:], dtype=np.float64)
+        mine = np.asarray(f["REGION_CODE"][:]) == column_module._region_codes(config, [region])[region]
+        pix_all = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)[mine]
+        a_k_all = np.asarray(f["A_K"][:], dtype=np.float64)[mine]
     order = np.argsort(pix_all)
     pix_sorted = pix_all[order]
     a_k_sorted = a_k_all[order]

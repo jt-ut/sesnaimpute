@@ -21,6 +21,7 @@ since nothing computed here is a prior input.
 """
 
 import argparse
+import dataclasses
 import os
 
 import astropy.units as u
@@ -356,7 +357,7 @@ def _pooled_kernel_check(groups):
     return emp_median, emp_p84, pred_median, pred_p84, frac_beyond, n_total, n_raw_total
 
 
-def _kernel_holdout_check(config):
+def _kernel_holdout_check(config, built_regions):
     """The calibration sample's own pooled kernel check (Orion A + Aquila,
     `_KERNEL_FIT_REGIONS`) beside the held-out regions' pooled check (every
     region with protostars that is not in the fit -- today Orion B alone):
@@ -364,9 +365,12 @@ def _kernel_holdout_check(config):
     out of the fit, [print] beside the in-sample one". Returns `(in_sample,
     held_out)`, each a `(_pooled_kernel_check result, region names)` pair;
     `held_out` is `None` where every region with protostars is in the fit
-    sample (nothing left to hold out)."""
+    sample (nothing left to hold out). Only the protostar regions among
+    `built_regions` (the regions this invocation builds) are read: a
+    `--regions` run reads only those regions' products, and on an
+    all-region run the set is every region with protostars."""
     kernel = kernel_module.Kernel.read(config)
-    all_regions = _regions_with_protostars(config)
+    all_regions = [r for r in _regions_with_protostars(config) if r in built_regions]
     fit_regions = [r for r in all_regions if r in _KERNEL_FIT_REGIONS]
     held_out_regions = [r for r in all_regions if r not in _KERNEL_FIT_REGIONS]
 
@@ -733,7 +737,7 @@ def _catalogue_word(region, survey_used):
     return uniq[0].decode("utf-8") if uniq.size == 1 else "Herschel"
 
 
-def build_region(config, region, formats=("png", "pdf")):
+def build_region(config, region, built_regions, formats=("png", "pdf")):
     """Writes `bmstp/atlas/figures/protostar-check_<region>.png/.pdf` and
     prints the check's numbers (SPEC_BMSTP_DRAFT.md sec. 5.5, sec. 9's
     protostellar-fraction row), plus the kernel holdout check (ledger
@@ -741,7 +745,9 @@ def build_region(config, region, formats=("png", "pdf")):
     (Orion A + Aquila, the regions `population.kernel`'s joint fit actually
     runs on) printed beside the held-out regions' pooled one (Orion B,
     never in that fit) -- both computed fresh regardless of which region's
-    page this call is drawing, so the disclosure reads the same everywhere."""
+    page this call is drawing, so the disclosure reads the same everywhere
+    (over the protostar regions among `built_regions`, this invocation's
+    own region list)."""
     with progress.Stage("atlas.protostars", region) as st:
         protostars = _read_protostars(config, region)
         n_class_ii = int(np.count_nonzero(protostars["cls"] == b"II"))
@@ -798,7 +804,7 @@ def build_region(config, region, formats=("png", "pdf")):
               f"median={verdict['emp_median']:.4g} p84={verdict['emp_p84']:.4g}; predicted "
               f"median={verdict['pred_median']:.4g} p84={verdict['pred_p84']:.4g}; "
               f"frac_beyond_reach={verdict['frac_beyond_reach']:.4g}")
-        (in_sample_stat, in_sample_regions), (held_out_stat, held_out_regions) = _kernel_holdout_check(config)
+        (in_sample_stat, in_sample_regions), (held_out_stat, held_out_regions) = _kernel_holdout_check(config, built_regions)
         ei_med, ei_p84, pi_med, pi_p84, fi_beyond, n_in, n_in_raw = in_sample_stat
         print(f"atlas.protostars [{region}] kernel holdout check, in-sample "
               f"(the fit's own calibration sample, {'+'.join(in_sample_regions)}, "
@@ -813,8 +819,8 @@ def build_region(config, region, formats=("png", "pdf")):
                   f"empirical log10_xi_hat median={eh_med:.4g} p84={eh_p84:.4g}; predicted "
                   f"median={ph_med:.4g} p84={ph_p84:.4g}; frac_beyond_reach={fh_beyond:.4g}")
         else:
-            print(f"atlas.protostars [{region}] kernel holdout check: no region with "
-                  f"protostars is held out of the fit (every one of {in_sample_regions} is)")
+            print(f"atlas.protostars [{region}] kernel holdout check: no held-out region "
+                  f"among the regions built with protostars (the fit's own: {in_sample_regions})")
         print(f"atlas.protostars [{region}] verdict (all): "
               f"frac_yso_leads={verdict['frac_yso_leads']:.4g} "
               f"median_P_YSO={verdict['median_p_yso']:.4g}")
@@ -1010,17 +1016,27 @@ def build(config, regions=None):
     """`build(config, regions=None)`: per region, `build_region`
     (default: every region with at least one protostar in `REGION`, sec.
     5.5 -- in practice Orion A and Aquila)."""
-    region_names = regions if regions is not None else _regions_with_protostars(config)
+    with_protostars = _regions_with_protostars(config)
+    region_names = regions if regions is not None else with_protostars
+    built_regions = [r for r in region_names if r in with_protostars]
     for region in region_names:
-        build_region(config, region)
+        if region not in with_protostars:
+            print(f"atlas.protostars [{region}]: no HOPS/eHOPS protostars in this region, no page")
+            continue
+        build_region(config, region, built_regions)
 
 
 def _main():
     parser = argparse.ArgumentParser()
     parser.add_argument("config")
     parser.add_argument("--regions", nargs="+", default=None)
+    parser.add_argument("--n-jobs", type=int, default=None)
     args = parser.parse_args()
     config = config_module.load(args.config)
+    if args.n_jobs is not None:
+        config = dataclasses.replace(config, n_jobs=args.n_jobs)
+        print("%s: n_jobs=%d from --n-jobs (config says %d)"
+              % ("sesnaimpute.atlas.protostars", args.n_jobs, config_module.load(args.config).n_jobs))
     build(config, regions=args.regions)
 
 

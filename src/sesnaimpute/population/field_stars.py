@@ -580,7 +580,7 @@ def build(config, regions=None):
     all thirty), one file per region.
     """
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
-    register_path = f"{config.data_root}/sed_models/registers/sps_register.hdf5"
+    register_path = f"{config.inputs['sed_models']}/registers/sps_register.hdf5"
     atmosphere = load_atmosphere_grid(register_path)
     colour_table = load_colour_table(config)
     for region in region_names:

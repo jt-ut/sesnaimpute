@@ -68,6 +68,7 @@ with no letterboxing.
 """
 
 import argparse
+import dataclasses
 import os
 
 import astropy.units as u
@@ -982,8 +983,13 @@ def _main():
     parser.add_argument("config")
     parser.add_argument("--regions", nargs="+", default=None)
     parser.add_argument("--formats", default="png,pdf")
+    parser.add_argument("--n-jobs", type=int, default=None)
     args = parser.parse_args()
     config = config_module.load(args.config)
+    if args.n_jobs is not None:
+        config = dataclasses.replace(config, n_jobs=args.n_jobs)
+        print("%s: n_jobs=%d from --n-jobs (config says %d)"
+              % ("sesnaimpute.atlas.render", args.n_jobs, config_module.load(args.config).n_jobs))
     formats = tuple(s.strip() for s in args.formats.split(",") if s.strip())
     build(config, regions=args.regions, formats=formats)
 
