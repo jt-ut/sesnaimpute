@@ -37,6 +37,8 @@ region` is what every reader calls: a field's own fitted rate where it has
 a survey, else the pooled rate.
 """
 
+import os
+
 import astropy.units as u
 import h5py
 import healpy as hp
@@ -104,6 +106,10 @@ def _uwish2_image_positions(config):
     uwish2_images_knots_survey.hdf5`, `sky.derived.knots`'s own product
     off `sky.download.h2_knot_surveys.build`'s Table C1 CSV."""
     path = config_module.product_path(config, "sky/derived", "knots", "uwish2_images", "survey")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "population.knot_rate: no UWISH2 image-position product at %s -- run the "
+            "'sesnaimpute.sky.derived.knots' RUNBOOK line first" % path)
     with h5py.File(path, "r") as f:
         ra = np.asarray(f["RA_DEG"][:], dtype=np.float64)
         dec = np.asarray(f["DEC_DEG"][:], dtype=np.float64)
@@ -137,6 +143,10 @@ def _coverage_frac(config, region, pix512):
     `bmstp.atlas._coverage`'s own join rather than imported: population
     may not import bmstp (bmstp imports population)."""
     path = config_module.product_path(config, "catalog", "sesna", "coverage", "hpx512", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "population.knot_rate: no coverage product for region %r at %s -- run the "
+            "'sesnaimpute.catalog.coverage' RUNBOOK line first" % (region, path))
     with h5py.File(path, "r") as f:
         cov_pix = np.asarray(f["HPX_PIX"][:], dtype=np.int64)
         frac = np.asarray(f["FRAC"][:], dtype=np.float64)
@@ -195,6 +205,10 @@ def knots_in_footprint(config, region, pix512=None):
         pix512, _frac = footprint_pixels(config, region)
     survey, want_jet_class = _KNOT_SURVEY[region]
     path = config_module.product_path(config, "sky/derived", "knots", survey, "survey")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "population.knot_rate: no %r knots product at %s -- run the "
+            "'sesnaimpute.sky.derived.knots' RUNBOOK line first" % (survey, path))
     with h5py.File(path, "r") as f:
         ra = np.asarray(f["RA_DEG"][:], dtype=np.float64)
         dec = np.asarray(f["DEC_DEG"][:], dtype=np.float64)

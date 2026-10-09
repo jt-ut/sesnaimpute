@@ -740,6 +740,10 @@ def build(config, regions=None):
 
             hist_path = config_module.product_path(config, "population", "anchors",
                                                     "histograms", "hpx512", region=region)
+            if not os.path.exists(hist_path):
+                raise FileNotFoundError(
+                    "prior.young_stars: anchor histograms missing for region %r at "
+                    "%s -- run the 'prior.anchor_tiles' RUNBOOK line first" % (region, hist_path))
             with h5py.File(hist_path, "r") as f:
                 n_ks_obs = np.asarray(f["N_KS_OBS"][:], dtype=np.float64).sum(axis=1)
 

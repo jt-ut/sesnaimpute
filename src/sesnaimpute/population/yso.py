@@ -606,6 +606,10 @@ def cloud_interval_pc(config, region):
     deduct the identical population."""
     depth_path = config_module.product_path(
         config, "sky/derived", "edenhofer", "depth", "region")
+    if not os.path.exists(depth_path):
+        raise FileNotFoundError(
+            "population.yso: no region depth product at %s -- run the "
+            "'sesnaimpute.sky.derived.profile' RUNBOOK line first" % depth_path)
     with h5py.File(depth_path, "r") as f:
         names = [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in f["REGION"][:]]
         if region not in names:
@@ -619,6 +623,10 @@ def cloud_interval_pc(config, region):
     d_back = d_peak + 2.0 * (d_hi - d_peak)
 
     profile_path = _profile_path(config, region)
+    if not os.path.exists(profile_path):
+        raise FileNotFoundError(
+            "population.yso: sightline profile missing for region %r at %s "
+            "-- run the 'sky.derived.profile' RUNBOOK line first" % (region, profile_path))
     with h5py.File(profile_path, "r") as f:
         dist_first = float(f["DIST_PC"][0])
         dist_last = float(f["DIST_PC"][-1])

@@ -622,6 +622,10 @@ def pahc_contamination_weight(fnu_8um, a_i, limit_grid_mjy, config, curve):
 
 def _read_field_stars(config, region):
     path = config_module.product_path(config, "population", "trilegal", "field-stars", "region", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "prior.star_population: no field-star product for region %r at %s -- run "
+            "the `sesnaimpute.population.field_stars` RUNBOOK line first" % (region, path))
     with h5py.File(path, "r") as f:
         stars = dict(
             dist_pc=f["DIST_PC"][:].astype(np.float64),
@@ -693,6 +697,10 @@ def _read_anchor_ratio(config, region):
     weight's own reference point), for this module's report-only check
     against `star_weights`' reweighted retained population."""
     path = config_module.product_path(config, "population", "anchors", "histograms", "hpx512", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "prior.star_population: anchor histograms missing for region %r at %s -- "
+            "run the `prior.anchor_tiles` RUNBOOK line first" % (region, path))
     with h5py.File(path, "r") as f:
         n_obs = float(np.asarray(f["N_G_OBS"]).sum() + np.asarray(f["N_KS_OBS"]).sum())
         n_pred = float(np.asarray(f["N_G_PRED"]).sum() + np.asarray(f["N_KS_PRED"]).sum())
