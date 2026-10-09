@@ -20,6 +20,7 @@ completeness (`depths.py`'s per-source `DELTA_DEX` rule is report-only).
 """
 
 import numpy as np
+import os
 import h5py
 
 from sesnaimpute import config as config_module
@@ -34,5 +35,9 @@ def limits(config, region):
     per-source limits product (`depth_grid.build`).
     """
     path = config_module.product_path(config, "catalog", "sesna", "limits", "source", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "catalog.limits: no per-source limits product at %r -- run the "
+            "'sesnaimpute.catalog.depth_grid' RUNBOOK line first" % path)
     with h5py.File(path, "r") as f:
         return np.asarray(f["F_LIM_50_MJY"][:], dtype=np.float64)

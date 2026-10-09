@@ -168,7 +168,9 @@ N_RATIO_NODES = 5
 #: N_RATIO_NODES's own comment).
 N_SIGMA_NODES = 20
 
-_HPX512_PIXEL_DEG2 = 41252.96 / (12 * 512 ** 2)
+#: one definition, shared with `bmstp.density` (it feeds area-weighted
+#: density totals in both, so a divergence would silently move a number).
+_HPX512_PIXEL_DEG2 = density_module._HPX512_PIXEL_DEG2
 
 
 def _depth_grid(config, region):

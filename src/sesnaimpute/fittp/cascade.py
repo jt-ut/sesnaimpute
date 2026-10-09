@@ -18,6 +18,7 @@ import os
 
 import h5py
 import numpy as np
+from sesnaimpute import definitions
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
@@ -34,7 +35,7 @@ _STEM = "cascade_classification_source"
 
 #: The fitter's six classes, in the order every P-product's class axis
 #: uses (IMPLEMENTATION_BMSTP_DRAFT.md section 1).
-CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
+CLASSES = tuple(c.code for c in definitions.CLASSES)
 
 #: Each class's own verdict set (SPEC_BMSTP_DRAFT.md section 6.5): the set
 #: of verdicts an object of class C itself receives from the colour cuts,

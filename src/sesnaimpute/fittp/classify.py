@@ -84,7 +84,7 @@ _SENSITIVITY_STEM = "sensitivity_classification_region"
 #: The fitter's six classes, in the order every P-product's class axis
 #: uses (IMPLEMENTATION_BMSTP_DRAFT.md section 1) -- the same order
 #: `definitions.CLASSMAP` groups its subclass rows in.
-CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
+CLASSES = tuple(c.code for c in definitions.CLASSES)
 YSO_INDEX = CLASSES.index("YSO")
 N_BANDS = len(definitions.BANDS)
 

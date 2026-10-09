@@ -183,7 +183,13 @@ def _fit_a_k_min(census, survey_map, admitted_pix512):
         return None
     clouds_here = census["cloud"][matched]
     uniq, counts = np.unique(clouds_here, return_counts=True)
-    surveys = np.array([survey_map.get(c, "GB") for c in uniq])
+    unknown = [c for c in uniq if c not in survey_map]
+    if unknown:
+        raise KeyError(
+            "population.yso_law: census CLOUD %r has no Survey field in "
+            "sky/download/dunham2015/table1.dat -- the per-region fit footprint "
+            "(FIT_A_K_MIN) cannot be chosen for it" % unknown)
+    surveys = np.array([survey_map[c] for c in uniq])
     n_c2d = int(counts[surveys == "c2d"].sum())
     n_gb = int(counts[surveys == "GB"].sum())
     return FIT_A_K_MIN_C2D if n_c2d > n_gb else FIT_A_K_MIN_GB
