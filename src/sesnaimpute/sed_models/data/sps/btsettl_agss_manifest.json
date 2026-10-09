@@ -1,0 +1,555 @@
+{
+  "lte023+0.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 479,
+    "logg": 0.0,
+    "nbytes_raw": 1752213,
+    "sha256": "e71f80a959a2f41592445b1a288c6f1bf586e478555c33f108eff57cb8a8afd2",
+    "teff": 2300
+  },
+  "lte023+0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 489,
+    "logg": 0.5,
+    "nbytes_raw": 1752215,
+    "sha256": "c5ea7b4c2fa4bc0511ae55b29644785fc2abfb2dcf4f4ac4cd9034cadc40621d",
+    "teff": 2300
+  },
+  "lte023+1.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 509,
+    "logg": 1.0,
+    "nbytes_raw": 1752213,
+    "sha256": "6d8b77986051532abb85ca70adbb45089507d922b6aba975bebdea9b9d92a025",
+    "teff": 2300
+  },
+  "lte023+1.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 519,
+    "logg": 1.5,
+    "nbytes_raw": 1752215,
+    "sha256": "6d728f03a9c94aed6854415580d6f061ad87ce9e6439de60316c7d86fb3f9ff3",
+    "teff": 2300
+  },
+  "lte023+2.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 529,
+    "logg": 2.0,
+    "nbytes_raw": 1752213,
+    "sha256": "3e78185f130a56476f1fb5bd65a813832e8b21ece7045bb331adebe80e0359f5",
+    "teff": 2300
+  },
+  "lte023-0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 490,
+    "logg": -0.5,
+    "nbytes_raw": 1752216,
+    "sha256": "6d36302a2f8ff291934a634c4dea7aa9e7ed4220364c2cc52fd0c5182a1c2b10",
+    "teff": 2300
+  },
+  "lte024+0.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 614,
+    "logg": 0.0,
+    "nbytes_raw": 1752213,
+    "sha256": "bf1bd9d760a248d4c4964e0aab5c36aca7f6220b3c956a5af6091260ba3aaa89",
+    "teff": 2400
+  },
+  "lte024+0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 624,
+    "logg": 0.5,
+    "nbytes_raw": 1752215,
+    "sha256": "ee9193fb4ae084312cc8a13aa5ca6d46da3a429084132e7aada426ad8da4a9d7",
+    "teff": 2400
+  },
+  "lte024+1.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 644,
+    "logg": 1.0,
+    "nbytes_raw": 1752213,
+    "sha256": "ea3278ed394504e7f7a20bee63ddf0c64beef946010b4fb26755bfb31c5537b2",
+    "teff": 2400
+  },
+  "lte024+1.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 654,
+    "logg": 1.5,
+    "nbytes_raw": 1752215,
+    "sha256": "11cf2b875a304f65b022d11e388f973926a370857339cd34873f4ae796367168",
+    "teff": 2400
+  },
+  "lte024+2.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 664,
+    "logg": 2.0,
+    "nbytes_raw": 1752213,
+    "sha256": "fc7eb75ce00ef63c70c2bc77a282cc44e5e6beaf8ce761846ef1eff6a29f3c59",
+    "teff": 2400
+  },
+  "lte024-0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 625,
+    "logg": -0.5,
+    "nbytes_raw": 1752216,
+    "sha256": "480f1fd456b03ec7afb726dcd3ed68b11ef779161263c0aaa0a3603c26456af4",
+    "teff": 2400
+  },
+  "lte025+0.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 749,
+    "logg": 0.0,
+    "nbytes_raw": 1752213,
+    "sha256": "0fa178418e9618e2eb57e3154c3ab30b7c747d140944d5404d732192a2c7716a",
+    "teff": 2500
+  },
+  "lte025+0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 759,
+    "logg": 0.5,
+    "nbytes_raw": 1752215,
+    "sha256": "115582c295d1d0388b2486c9a38f033bb388dda1fe33ad923debfd67cdaaab85",
+    "teff": 2500
+  },
+  "lte025+1.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 779,
+    "logg": 1.0,
+    "nbytes_raw": 1752213,
+    "sha256": "18b70ba65cf46b5a34df36c3583c7147ef07580eb0cfe988fdb0237c161ed850",
+    "teff": 2500
+  },
+  "lte025+1.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 789,
+    "logg": 1.5,
+    "nbytes_raw": 1752215,
+    "sha256": "c94b63668b1d5eac2b65d8a95673504606ed928fbce16da3f61fe7c740dd548d",
+    "teff": 2500
+  },
+  "lte025+2.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 799,
+    "logg": 2.0,
+    "nbytes_raw": 1752213,
+    "sha256": "0f2048822e83c58d34c6051599f526185093c22c8495a6379e893c24b8fb0f5f",
+    "teff": 2500
+  },
+  "lte025-0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 760,
+    "logg": -0.5,
+    "nbytes_raw": 1752216,
+    "sha256": "5dda737f42fda8ae37b9b888dcaac489896e4ab2ce8fc46db5e8776b4d577a77",
+    "teff": 2500
+  },
+  "lte026+0.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 906,
+    "logg": 0.0,
+    "nbytes_raw": 12150678,
+    "sha256": "6d51d8f7588057f3c99bfbb97db0e887cb32725124816875e0b640a6814ff4d4",
+    "teff": 2600
+  },
+  "lte026+0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 917,
+    "logg": 0.5,
+    "nbytes_raw": 12170117,
+    "sha256": "14bdfb98b5842f23f324d73a1038dee361c44505f91be0dd1d7f3d7510ff0155",
+    "teff": 2600
+  },
+  "lte026+1.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 939,
+    "logg": 1.0,
+    "nbytes_raw": 12217503,
+    "sha256": "8a8fcfc97abedf5bd16ec7f0415575f22172b17a7cd61e4023bb65ddc2d5f196",
+    "teff": 2600
+  },
+  "lte026+1.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 950,
+    "logg": 1.5,
+    "nbytes_raw": 12248954,
+    "sha256": "b60811d8fe4f95722856582ed71bb56cb3caab6c549887bfc58eb1526aa40c59",
+    "teff": 2600
+  },
+  "lte026+2.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 961,
+    "logg": 2.0,
+    "nbytes_raw": 12322905,
+    "sha256": "a8fb1eb513446391a4ea15a70ecde35a0f410cf0fe4559300c8a72481314a0d6",
+    "teff": 2600
+  },
+  "lte026-0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 918,
+    "logg": -0.5,
+    "nbytes_raw": 12137712,
+    "sha256": "d99078c7cae08b0bce808c7f8aa789a857fc922daece4a4ddf6cf3bc27afa63b",
+    "teff": 2600
+  },
+  "lte027+0.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1061,
+    "logg": 0.0,
+    "nbytes_raw": 12156156,
+    "sha256": "9e6fee79c65f0dbdc8bd449606a306272477cb0c145cf36c535f16f39d4f519a",
+    "teff": 2700
+  },
+  "lte027+0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1072,
+    "logg": 0.5,
+    "nbytes_raw": 12169325,
+    "sha256": "adfa1e6602441d18d37d5e96a4d697fc0d057be1d74607cb244bbb8562f9ea12",
+    "teff": 2700
+  },
+  "lte027+1.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1094,
+    "logg": 1.0,
+    "nbytes_raw": 12225489,
+    "sha256": "31a4d4d89e465c6a83cee9486decc66ff16831086c01309b03b933090145db23",
+    "teff": 2700
+  },
+  "lte027+1.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1105,
+    "logg": 1.5,
+    "nbytes_raw": 12248129,
+    "sha256": "0f624fc5e2b420b662db0b705db1005849701ebc86e3049428a5902888eaedc1",
+    "teff": 2700
+  },
+  "lte027+2.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1116,
+    "logg": 2.0,
+    "nbytes_raw": 12291588,
+    "sha256": "10ab2a19b4445c56d9781cc676d2d3743deed7acb77001c8f490a29b7440132e",
+    "teff": 2700
+  },
+  "lte027-0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1073,
+    "logg": -0.5,
+    "nbytes_raw": 12136557,
+    "sha256": "220bf031539d02fc76b58de9145cb5ae61566d2a08f65e90cb8e7ee3b31f3dad",
+    "teff": 2700
+  },
+  "lte028+0.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1212,
+    "logg": 0.0,
+    "nbytes_raw": 12155067,
+    "sha256": "78d6322b0ece9b9dbcdb3da63baf6e51a1cb25cd21a6e87759a561a06727976c",
+    "teff": 2800
+  },
+  "lte028+0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1223,
+    "logg": 0.5,
+    "nbytes_raw": 12170084,
+    "sha256": "25ad001bda1645d79150bdd9ab287687bcebe976f4cd06b10d90cc0f128dd030",
+    "teff": 2800
+  },
+  "lte028+1.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1245,
+    "logg": 1.0,
+    "nbytes_raw": 12220770,
+    "sha256": "1df5d826d0f4ed072b552334d76135b9479730e095cafc76049489ce25193a05",
+    "teff": 2800
+  },
+  "lte028+1.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1256,
+    "logg": 1.5,
+    "nbytes_raw": 12246050,
+    "sha256": "5f8b9c9ab338b1ec4fbe4e27f109bbc3ec8cbe9be9c9d23313d6186567fc88c1",
+    "teff": 2800
+  },
+  "lte028+2.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1267,
+    "logg": 2.0,
+    "nbytes_raw": 12265881,
+    "sha256": "221ae5bfbf94b2b9bf1098045ebd4c0ead13c6c85ea312cfb0fb0cbf89896af4",
+    "teff": 2800
+  },
+  "lte028-0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1224,
+    "logg": -0.5,
+    "nbytes_raw": 12134346,
+    "sha256": "e1e7656981cb37463d4fc5227856cfd6d1823ddb4ab87affcb1b72a00f67ecb8",
+    "teff": 2800
+  },
+  "lte029+0.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1367,
+    "logg": 0.0,
+    "nbytes_raw": 12160248,
+    "sha256": "f1e2696f8ef8dc36b1d8837a245f93186ba956866548d5be260e4f4476ab1f0f",
+    "teff": 2900
+  },
+  "lte029+0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1378,
+    "logg": 0.5,
+    "nbytes_raw": 12170942,
+    "sha256": "923db606693fc8430b5f89d7c35034233b1f13bf42b632ad3b9a88ca23156588",
+    "teff": 2900
+  },
+  "lte029+1.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1400,
+    "logg": 1.0,
+    "nbytes_raw": 12224400,
+    "sha256": "419c0f66a43106b79a3a08e72238901f55e966b63794101835537ec6946fbae4",
+    "teff": 2900
+  },
+  "lte029+1.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1411,
+    "logg": 1.5,
+    "nbytes_raw": 12246413,
+    "sha256": "eab85a827d708b734c795de4d08c42a8ca72b8e7d15dfb09d36af70ede3f3e68",
+    "teff": 2900
+  },
+  "lte029+2.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1422,
+    "logg": 2.0,
+    "nbytes_raw": 12265353,
+    "sha256": "a0f933590248cb62fd75d11a148331ecd9f2a2d4d046b445f7ea78540e2643a8",
+    "teff": 2900
+  },
+  "lte029-0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1379,
+    "logg": -0.5,
+    "nbytes_raw": 12134973,
+    "sha256": "fb2fef538a3ac57762cca96d8405850d0e47f334334e7d4c4802e64d316d5250",
+    "teff": 2900
+  },
+  "lte030+0.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1518,
+    "logg": 0.0,
+    "nbytes_raw": 12163053,
+    "sha256": "3995329e6585104ca2e00c644f646afe9039cc77fb6f3d9d76d6168124e8d64b",
+    "teff": 3000
+  },
+  "lte030+0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1529,
+    "logg": 0.5,
+    "nbytes_raw": 12170414,
+    "sha256": "c4d0c710bb502515ed730f220d91fd401ef33085ed427613d0f4cfc9973bb4a4",
+    "teff": 3000
+  },
+  "lte030+1.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1551,
+    "logg": 1.0,
+    "nbytes_raw": 12224004,
+    "sha256": "d5d58d69e37ddfa1f5c5acb66a2c12fb194a6c6d20bfe544798cd077caf807dc",
+    "teff": 3000
+  },
+  "lte030+1.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1562,
+    "logg": 1.5,
+    "nbytes_raw": 12248789,
+    "sha256": "7854c28ca9cbfa0a9e3aeb841dbadee8e5f72f86ccbffce4afd61e11e4ce6e23",
+    "teff": 3000
+  },
+  "lte030+2.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1573,
+    "logg": 2.0,
+    "nbytes_raw": 12273603,
+    "sha256": "095dcf026644557e91cde596ae32021b942f87e061ae29067d868a2b54c04f29",
+    "teff": 3000
+  },
+  "lte030-0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1530,
+    "logg": -0.5,
+    "nbytes_raw": 12128901,
+    "sha256": "9e8f686768dcd63abc7474d86d8a5cb937894fa1c5830fabf880266c9fb9e8b7",
+    "teff": 3000
+  },
+  "lte031+0.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1673,
+    "logg": 0.0,
+    "nbytes_raw": 12169851,
+    "sha256": "44644deb25fcabdc8431f33d65f1e403eeb86ddbb42f9c5a725e871e722c3ca7",
+    "teff": 3100
+  },
+  "lte031+0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1684,
+    "logg": 0.5,
+    "nbytes_raw": 12175727,
+    "sha256": "643783fcb1489076040581725561a63d4c84778683ef5eec83dadbb6a7cd223f",
+    "teff": 3100
+  },
+  "lte031+1.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1706,
+    "logg": 1.0,
+    "nbytes_raw": 12219747,
+    "sha256": "6418d9e5246adc0f3832b9ecfe2dd056472daa30d640ecc8d30de087ee4b0548",
+    "teff": 3100
+  },
+  "lte031+1.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1717,
+    "logg": 1.5,
+    "nbytes_raw": 12251858,
+    "sha256": "9930c96f5e37abb8a8bf62f48c3daaf29dde05da4d74c388f52c8b7b247e403a",
+    "teff": 3100
+  },
+  "lte031+2.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1728,
+    "logg": 2.0,
+    "nbytes_raw": 12270303,
+    "sha256": "89d7d1318d8a1f85aa60cda818b046cf83e6f98d51ae161fa299afa8649a052d",
+    "teff": 3100
+  },
+  "lte031-0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1685,
+    "logg": -0.5,
+    "nbytes_raw": 12129099,
+    "sha256": "f59f1642541e7d0491be4e4657fd386864d790fbcb2136dcbdb197d13b1c04fc",
+    "teff": 3100
+  },
+  "lte032+0.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1824,
+    "logg": 0.0,
+    "nbytes_raw": 12166947,
+    "sha256": "1a37941ca28530eec8e7f24507e89b3ee81a1db130260416b0a07f0ef99316e1",
+    "teff": 3200
+  },
+  "lte032+0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1835,
+    "logg": 0.5,
+    "nbytes_raw": 12183482,
+    "sha256": "b9ccd2fea186f13ba3d1d65b8a7567e6a186cc6072acbf410702aa20d1da986d",
+    "teff": 3200
+  },
+  "lte032+1.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1857,
+    "logg": 1.0,
+    "nbytes_raw": 12217899,
+    "sha256": "2e35193cb1e7ad6c3ad6ce3989e9e8910296dbbce8acb9994e05233c3c85d822",
+    "teff": 3200
+  },
+  "lte032+1.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1868,
+    "logg": 1.5,
+    "nbytes_raw": 12253937,
+    "sha256": "58eca40361bdc8aa74c1c06bef68859aaa0d2ecfc532deaf46c21b329b565dbc",
+    "teff": 3200
+  },
+  "lte032+2.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1879,
+    "logg": 2.0,
+    "nbytes_raw": 12269280,
+    "sha256": "0d672e3d8124b5bd4f493f90cd37e27ce530d6a4976d0c096e95a43a6cfb6801",
+    "teff": 3200
+  },
+  "lte032-0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1836,
+    "logg": -0.5,
+    "nbytes_raw": 12127746,
+    "sha256": "53560efa13a429377e62b23d00d478480700c78b714d7c7b9a6526d0e1536aa5",
+    "teff": 3200
+  },
+  "lte033+0.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1980,
+    "logg": 0.0,
+    "nbytes_raw": 12165957,
+    "sha256": "c21973c1e2567f40b75752e167a8c9bb1d230caecce076b6a2a31f93630ac8a4",
+    "teff": 3300
+  },
+  "lte033+0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1991,
+    "logg": 0.5,
+    "nbytes_raw": 12188531,
+    "sha256": "d576571ec3294c07d36f782fbc0a9954753af82114a879ee158fa1f1d9224353",
+    "teff": 3300
+  },
+  "lte033+1.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2013,
+    "logg": 1.0,
+    "nbytes_raw": 12216315,
+    "sha256": "a8b40d183beb030ec783a0aaf9335ecaa78a301d15d27b47e6253f925fcc3838",
+    "teff": 3300
+  },
+  "lte033+1.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2024,
+    "logg": 1.5,
+    "nbytes_raw": 12250043,
+    "sha256": "ea4436adb04dd182b0186512b5cfda07d744fa29a41f22d19027550c4b540379",
+    "teff": 3300
+  },
+  "lte033+2.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2035,
+    "logg": 2.0,
+    "nbytes_raw": 12272283,
+    "sha256": "101628822c9d45a41b8f1a85ffaed7df76a8a0fd31dd27a417e14fcd00e4fbea",
+    "teff": 3300
+  },
+  "lte033-0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 1992,
+    "logg": -0.5,
+    "nbytes_raw": 12130056,
+    "sha256": "42f443d114de7d119a41be06b5f537c6f89d17f85c7fb948f2f13617beccbeba",
+    "teff": 3300
+  },
+  "lte034+0.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2132,
+    "logg": 0.0,
+    "nbytes_raw": 12166749,
+    "sha256": "21a2e8b4ef04dfca6a21d77e175222ed2eb7147f56f7de49906a070fc2f0e5f7",
+    "teff": 3400
+  },
+  "lte034+0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2143,
+    "logg": 0.5,
+    "nbytes_raw": 12190841,
+    "sha256": "929cdf6004a16b59d61fb0fceca88c6ce50852d6dc2a474cfe63b1c6e6fa79ec",
+    "teff": 3400
+  },
+  "lte034+1.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2165,
+    "logg": 1.0,
+    "nbytes_raw": 12212982,
+    "sha256": "fced788eb0ad22d820f412b6a82a06625c8a59b200a059978761ab152064b747",
+    "teff": 3400
+  },
+  "lte034+1.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2176,
+    "logg": 1.5,
+    "nbytes_raw": 12251891,
+    "sha256": "3cf42db32f2c42b7d71067627c2ebd8e227f3ca630c9e9d852ace5f87168411a",
+    "teff": 3400
+  },
+  "lte034+2.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2187,
+    "logg": 2.0,
+    "nbytes_raw": 12268653,
+    "sha256": "b0da66c66086ab72902d905175f6147737a64b600412945e335ca1d8dbc0e10f",
+    "teff": 3400
+  },
+  "lte034-0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2144,
+    "logg": -0.5,
+    "nbytes_raw": 12132762,
+    "sha256": "f5f4589082a3f0b27eaec7de784ce32109314e7fb52aae6cc84e064c7bd4d157",
+    "teff": 3400
+  },
+  "lte035-0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2300,
+    "logg": -0.5,
+    "nbytes_raw": 12130749,
+    "sha256": "1bba521eb3fab418240688589d72fe3b3cd0a8314ecd1d0b6ffdf09e8081cb44",
+    "teff": 3500
+  },
+  "lte036+0.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2440,
+    "logg": 0.0,
+    "nbytes_raw": 12172623,
+    "sha256": "ee4fe96fb612acc494f1af0cb56db0c6be3efb32c27d53322cdfa0d5962ad6a7",
+    "teff": 3600
+  },
+  "lte036+0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2451,
+    "logg": 0.5,
+    "nbytes_raw": 12196451,
+    "sha256": "2f373bd4bc65a5b863f85be15be32d8a7092a7cb55984b86dac9db31667ffc8c",
+    "teff": 3600
+  },
+  "lte036+1.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2473,
+    "logg": 1.0,
+    "nbytes_raw": 12207669,
+    "sha256": "5186a659168b09603630c9b80cf18c4cf7d04ecd6d7c583f9794e15b3840e7ac",
+    "teff": 3600
+  },
+  "lte036+1.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2484,
+    "logg": 1.5,
+    "nbytes_raw": 12244499,
+    "sha256": "3426390a13ce4282ced180544c0463bcc0c3017016e0e3625a0a60d46cd1834d",
+    "teff": 3600
+  },
+  "lte036+2.0-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2495,
+    "logg": 2.0,
+    "nbytes_raw": 12263769,
+    "sha256": "765f2ffb9b82f373cc2b84b8d319ff1289d866822b4ba967ba57f6827f0c0824",
+    "teff": 3600
+  },
+  "lte036-0.5-0.0a+0.0.BT-Settl.AGSS2009.dat.gz": {
+    "fid": 2452,
+    "logg": -0.5,
+    "nbytes_raw": 12133521,
+    "sha256": "22675999dc7c15c94ceafbf3b1662bc62e579dfa41940601f1010cca329b76e2",
+    "teff": 3600
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "law": "draine_rv3.1",
+  "av_over_ak_curve": 8.51604395297302,
+  "quantity": "(A_V/A_K) implied by this law's own tabulated curve, i.e. chi(v_wavelength_um) / chi(ks_wavelength_um) under linear interpolation of the (wave_um, opacity_cm2_per_g) columns in draine_rv3.1.par",
+  "ks_wavelength_um": 2.159,
+  "ks_wavelength_source": "sesnacomplete.constants.BANDS['Ks'].wvl_effective_um",
+  "v_wavelength_um": 0.55,
+  "v_wavelength_source": "sedfitter's hardcoded A_V normalization wavelength (Extinction.get_av)",
+  "interpolation": "linear in wavelength (numpy.interp) on the curve sorted ascending by wave_um -- matches sedfitter's own Extinction.get_av convention exactly (see sed_fit/docs/sedfitter_behavior.md, Q4 ANSWER/RECEIPTS: k(i) = chi(lambda_i)/chi(0.55um), np.interp, left=0., right=0.)",
+  "av_over_ak_info_scalar": 8.8009,
+  "info_scalar_source": "draine_rv3.1.info, AV_over_AK line -- a published summary scalar from the law's original source, not derived from this package's tabulated curve",
+  "frac_disagreement_curve_vs_info_scalar": 0.03236669511379302,
+  "ruling": "owner ruling 2026-08-18 (SESNA task: canonicalize A_K/A_V per extinction law as the curve-internal value): av_over_ak_curve is THE canonical project value -- computed and stored here, alongside the law, so that kappa_Ks = k_Ks/k_Ks == 1 holds exactly and no law-dependent skew enters any a-vs-A_s comparison. The .info AV_over_AK scalar above is retained for provenance/comparison only and must not be used in any dimming computation.",
+  "date": "2026-08-18"
+}
