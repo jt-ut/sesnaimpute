@@ -950,8 +950,13 @@ def _assemble_batch(results, name_slice, n_sub, topk):
 
 
 def _write_part(part_path, batch, cls):
+    """Written as `<part>.tmp` and renamed into place once closed, so a part
+    file under its own name is always complete: several slurm part jobs of
+    one {region, class} run at once, and the join (`_discover_parts`) must
+    never pick up a part another job is still writing."""
     stem = _STEM(cls)
-    with h5py.File(part_path, "w") as f:
+    tmp_path = part_path + ".tmp"
+    with h5py.File(tmp_path, "w") as f:
         for key in _PART_KEYS:
             build_module.write_dataset(f, key, batch[_FIELD_OF_KEY[key]], *REGISTRY[(stem, key)])
         # "FAILED" is a part-file-only column (module docstring), and a part
@@ -968,6 +973,7 @@ def _write_part(part_path, batch, cls):
         f.attrs["ID1_SUM_ERR"] = batch["id1_sum_err"]
         f.attrs["ID1_N_CHECKED"] = batch["id1_n_checked"]
         f.attrs["ID1_N_UNDEFINED"] = batch["id1_n_undefined"]
+    os.replace(tmp_path, part_path)
 
 
 #: Section 3's own retry on `ctx.Pool`'s creation: the Aquila failure
@@ -1141,12 +1147,23 @@ def build_region_class(config, region, cls, st, reader, catalog,
             _write_part(_part_path(path, bi), batch, cls)
             st.tick(bi + 1, len(batch_bounds), "batches")
 
+    return _summary(config, region, cls, n_source, n_model)
+
+
+def _summary(config, region, cls, n_source, n_model):
+    """The numbers `join_parts` and the report need for one {region,
+    class}, shared by a sweep and by a join-only call (`build`'s
+    `join_only`), which sweeps nothing and so has no sweep to take them
+    from."""
+    path = config_module.product_path(config, "fittp", "fit", cls, "source", region=region)
     density_file = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
     lib, granule = prior_reader._LIB[cls]
     weights_file = config_module.product_path(
         config, "bmstp", "weights", lib, granule, region=(region if granule == "region" else None))
+    batch_size = config.batch_size
     return dict(
-        path=path, n_source=n_source, n_model=n_model, n_batches=len(batch_bounds),
+        path=path, n_source=n_source, n_model=n_model,
+        n_batches=(n_source + batch_size - 1) // batch_size,
         subclasses=definitions.SUBCLASSES_OF[cls], library=definitions.CLASS_REGISTER[cls],
         density_file=density_file, weights_file=weights_file,
     )
@@ -1221,7 +1238,8 @@ def join_parts(summary, topk):
                 id1_n_checked=id1_n_checked, id1_n_undefined=id1_n_undefined)
 
 
-def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=None):
+def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=None,
+          join=True, join_only=False):
     """Writes `fittp/fit/<CLS>_fit_source__R.hdf5` for every {region,
     class} pair (default all thirty regions, all six classes; section
     1.3, IMPLEMENTATION_BMSTP_DRAFT.md P7). `limit` restricts every
@@ -1236,18 +1254,36 @@ def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=N
     shared across every class this call sweeps; each class in `classes`
     then loads only its OWN `Prior` (`prior_reader.load`), never the
     other five's shape grids or template-weight tables.
+
+    A class split across several slurm jobs runs each part job with
+    `join=False` (writes its batches' part files and stops) and then one
+    `join_only=True` call once every part job has ended (sweeps nothing,
+    joins every part file on disk, and fails naming the missing batches
+    if any part is absent) -- so the part jobs can run at the same time
+    without two of them joining at once.
     """
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     class_codes = classes if classes is not None else list(CLASSES)
     for region in region_names:
-        catalog = _load_region_catalog(config, region)
+        catalog = None if join_only else _load_region_catalog(config, region)
         for cls in class_codes:
             with progress.Stage("fittp.sweep.%s" % cls, region) as st:
-                reader = prior_reader.load(config, region, cls)
-                summary = build_region_class(config, region, cls, st, reader,
-                                              catalog, n_workers=n_workers, limit=limit,
-                                              batches=batches)
+                if join_only:
+                    n_source = _n_sources(config, region)
+                    if limit is not None:
+                        n_source = min(n_source, limit)
+                    summary = _summary(config, region, cls, n_source, _register(config, cls)[0].shape[0])
+                else:
+                    reader = prior_reader.load(config, region, cls)
+                    summary = build_region_class(config, region, cls, st, reader,
+                                                  catalog, n_workers=n_workers, limit=limit,
+                                                  batches=batches)
                 summary["cls"] = cls
+                if not join:
+                    st.done(None, n=summary["n_source"], n_batches=summary["n_batches"],
+                            parts_written=(len(batches) if batches is not None else summary["n_batches"]),
+                            joined="no (--no-join)")
+                    continue
                 joined = join_parts(summary, config.topk)
                 with h5py.File(summary["path"], "r") as f:
                     occam = np.asarray(f["OCCAM_GAP"][:])
@@ -1282,9 +1318,17 @@ if __name__ == "__main__":
                               "region's own source order at [fit] batch_size) -- e.g. after a "
                               "crash, regenerate just the missing part files; the join always "
                               "re-discovers every part file on disk")
+    parser.add_argument("--no-join", action="store_true",
+                         help="write this call's part files and stop, without joining: one of "
+                              "several part jobs of a split class running at the same time")
+    parser.add_argument("--join-only", action="store_true",
+                         help="sweep nothing; join every part file on disk into the class's "
+                              "product (run once, after every part job of a split class has ended)")
     #: applied to config.n_jobs only; the sweep's own pool is --workers / fittp_workers, unchanged
     parser.add_argument("--n-jobs", type=int, default=None)
     args = parser.parse_args()
+    if args.no_join and args.join_only:
+        parser.error("--no-join and --join-only exclude each other")
     cfg = config_module.load(args.config)
     if args.n_jobs is not None:
         cfg = dataclasses.replace(cfg, n_jobs=args.n_jobs)
@@ -1292,4 +1336,5 @@ if __name__ == "__main__":
               % ("sesnaimpute.fittp.sweep", args.n_jobs, config_module.load(args.config).n_jobs))
     n_workers = args.workers if args.workers is not None else cfg.fittp_workers
     build(cfg, regions=args.regions, classes=args.classes, limit=args.limit,
-          n_workers=n_workers, batches=args.batches)
+          n_workers=n_workers, batches=args.batches,
+          join=not args.no_join, join_only=args.join_only)
