@@ -365,7 +365,11 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
         [rule == WEIGHT_RULE_JOINT, rule == WEIGHT_RULE_G_MARGINAL,
          rule == WEIGHT_RULE_KS_MARGINAL, rule == WEIGHT_RULE_BOTH_MARGINAL,
          rule == WEIGHT_RULE_FAINT_END],
-        [joint_val, g_val, ks_val, placement_val, faint_val],
+        # a single in-range marginal unmeasured in its own bin even after the
+        # survey pool takes the OTHER anchor's weight (owner ruling 2026-09-06
+        # item 2, docstring above), as the placement rule already does.
+        [joint_val, np.where(g_measured, g_val, ks_val), np.where(ks_measured, ks_val, g_val),
+         placement_val, faint_val],
         # bright end only: the same joint-or-placement rule, at the
         # clamped populated bright-edge bin.
         default=np.where(joint_here, joint_val, placement_val))
