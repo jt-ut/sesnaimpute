@@ -1822,15 +1822,7 @@ def build_region(config, region):
         ratio_bright3_total = sum(ratio_bright3.values())
         ratio_bright10_total = sum(ratio_bright10.values())
 
-        # the fixed-seed reproducibility check the run asks for: the
-        # region's pre-existing `RATIO_BUILT` header, read before this
-        # build overwrites it.
         path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
-        old_ratio_built = None
-        if os.path.exists(path):
-            with h5py.File(path, "r") as fold:
-                old_ratio_built = float(fold.attrs["RATIO_BUILT"]) if "RATIO_BUILT" in fold.attrs else None
-        print(f"bmstp.atlas {region}: RATIO_BUILT reproduction old={old_ratio_built} new={ratio_built:.6g}")
 
         print(f"bmstp.atlas: {region} ratio_all={ratio_built:.4g} ratio_bright3={ratio_bright3_total:.4g} "
               f"ratio_bright10={ratio_bright10_total:.4g} "

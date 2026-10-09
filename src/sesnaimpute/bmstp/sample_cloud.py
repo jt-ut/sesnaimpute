@@ -310,29 +310,6 @@ def sample_x(loaded, row, d_front, d_back):
     return p_x, mass_outside, removed_frac
 
 
-def restrict_old_xi_marginal(loaded, row, old_xi_marginal, d_front, d_back):
-    """The acceptance check's own reference: the OLD (pre-4.5B)
-    `X_MARGINAL`, read off disk before this build overwrites it,
-    restricted to the cloud interval and renormalised. Each of the common
-    grid's 128 `log10 ξ` cells' own distance range is approximated by
-    inverting the sightline's native `ξ(d)` mapping (`loaded`'s
-    `xi_edges`/`d_edges`, both monotonic) at the grid's own edges, then the
-    same inside-fraction rule `sample_x` applies at native resolution.
-    Report-only: the two constructions restrict at different resolutions
-    (native profile cells there, the common grid's own cells here), so
-    exact agreement is not expected."""
-    xi_edges_native = loaded["xi_edges"][row]
-    d_edges_native = loaded["d_edges"][row]
-    grid_xi_edges = 10.0 ** grid.LOG10_XI_EDGES
-    d_at_grid_edges = np.interp(grid_xi_edges, xi_edges_native, d_edges_native)
-    d_lo, d_hi = d_at_grid_edges[:-1], d_at_grid_edges[1:]
-    overlap = np.clip(np.minimum(d_hi, d_back) - np.maximum(d_lo, d_front), 0.0, None)
-    width = np.maximum(d_hi - d_lo, 1e-300)
-    inside_frac = overlap / width
-    restricted = np.asarray(old_xi_marginal, dtype=np.float64) * inside_frac
-    total = float(restricted.sum())
-    return restricted / total if total > 0 else restricted
-
 
 def p_ref_f45(config):
     """`P_ref`, the census-weighted YSO template marginal AT THE
