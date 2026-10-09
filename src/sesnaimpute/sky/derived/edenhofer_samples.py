@@ -237,6 +237,11 @@ def _build_one_region(config, region, region_pixels, union_pixels, union_inner, 
 
     profile_path = product_path(config, "sky/derived", "edenhofer", "profile", "sightline", region=region)
     depth_path = product_path(config, "sky/derived", "edenhofer", "depth", "region")
+    for path in (profile_path, depth_path):
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                "edenhofer_samples.build: product missing at %r -- run the "
+                "sesnaimpute.sky.derived.profile RUNBOOK line for it" % path)
     with h5py.File(profile_path, "r") as f:
         prof_hpx = f["HPX_PIX_256"][:]
         prof_dist = f["DIST_PC"][:]

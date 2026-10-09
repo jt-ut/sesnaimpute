@@ -117,6 +117,10 @@ def _admitted_pixels(config):
     """The survey's admitted nside-256 pixels (source-bearing or Spitzer-
     supported), the granule map's own footprint."""
     path = product_path(config, "granules", "sesna", "granule-map", "source")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "sky.derived.planck_column: granule map missing at %r -- run the "
+            "sesnaimpute.granules.build RUNBOOK line for it" % path)
     with h5py.File(path, "r") as f:
         return np.sort(np.asarray(f["healpix256/HPX_PIX_256"][:], dtype=np.int64))
 
