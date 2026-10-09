@@ -1,0 +1,1367 @@
+{
+  "lte012-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 1,
+    "logg": 2.5,
+    "nbytes_raw": 40122501,
+    "sha256": "c0fd68013718f8180c4950d21bb3a3688577a38f96b59a7ecf04d4a425609537",
+    "teff": 1200
+  },
+  "lte012-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 2,
+    "logg": 3.0,
+    "nbytes_raw": 40122499,
+    "sha256": "b70b0736b51a653b649001a96aed414a58b74b2deacbbb68cef1d97f1615666a",
+    "teff": 1200
+  },
+  "lte012-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 3,
+    "logg": 3.5,
+    "nbytes_raw": 40122501,
+    "sha256": "fde0ec1acb2b908b7efb657f1690e558b78b88048fb0b5da986df07fec2d40c7",
+    "teff": 1200
+  },
+  "lte012-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 4,
+    "logg": 4.0,
+    "nbytes_raw": 40122499,
+    "sha256": "d5bf8ce0dc6cf307dab288241d478a1402ea86300d0cf02361be83e794713071",
+    "teff": 1200
+  },
+  "lte012-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 5,
+    "logg": 4.5,
+    "nbytes_raw": 40122501,
+    "sha256": "c05ce3c376d3b7261fed2d1440b6e1e752dec36b8f5578cde970050737bdac52",
+    "teff": 1200
+  },
+  "lte012-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 6,
+    "logg": 5.0,
+    "nbytes_raw": 40122499,
+    "sha256": "c6953b8ba257f5fd2970413a0fee70125b7b68c795d06328995108663dcc7782",
+    "teff": 1200
+  },
+  "lte012-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 7,
+    "logg": 5.5,
+    "nbytes_raw": 40122501,
+    "sha256": "f265261a5dc59423b8a492d26216fd94c937ecb1cd2dada8ca4fee3cc74a1e00",
+    "teff": 1200
+  },
+  "lte013-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 8,
+    "logg": 2.5,
+    "nbytes_raw": 40122501,
+    "sha256": "986c83be45fe057ec2a83d08d14d43d473189b1dc24bf3d7286ab0638e4c4876",
+    "teff": 1300
+  },
+  "lte013-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 9,
+    "logg": 3.0,
+    "nbytes_raw": 40122499,
+    "sha256": "2295c5a9de9300360626cf9f140767984c3ca6cbdca5202182f16f72f28b1feb",
+    "teff": 1300
+  },
+  "lte013-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 10,
+    "logg": 3.5,
+    "nbytes_raw": 40122501,
+    "sha256": "f6656d7ef9da305a62a0b3a58e209cb7612cdab3af8fe5239acf42faa29d1480",
+    "teff": 1300
+  },
+  "lte013-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 11,
+    "logg": 4.0,
+    "nbytes_raw": 40122499,
+    "sha256": "b5ab15bbf9cec97f600e3551bedca78603e4aba816f60b5216de090ad9d3ef7a",
+    "teff": 1300
+  },
+  "lte013-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 12,
+    "logg": 4.5,
+    "nbytes_raw": 40122501,
+    "sha256": "0609811bd3a7918b468d9cad9bd922f9c953cda554d3406c2bede7a38ff1e889",
+    "teff": 1300
+  },
+  "lte013-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 13,
+    "logg": 5.0,
+    "nbytes_raw": 40122499,
+    "sha256": "d0e483fe1c9e9def81bf3b719ef90f89d8e423fd8807cb5c756acb39c52978e9",
+    "teff": 1300
+  },
+  "lte013-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 14,
+    "logg": 5.5,
+    "nbytes_raw": 40122501,
+    "sha256": "c1d085f4db7dd7f66338ba8b7b9c22b252418569e35ddb3f2b994933493b5a2d",
+    "teff": 1300
+  },
+  "lte014-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 15,
+    "logg": 3.0,
+    "nbytes_raw": 40122499,
+    "sha256": "3b5765b9e05424dac6e3bc66740825fd2ff8c412d9534675c6e2b6f64862e582",
+    "teff": 1400
+  },
+  "lte014-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 16,
+    "logg": 3.5,
+    "nbytes_raw": 40122501,
+    "sha256": "d28a48b120c99cdab178d472336279ed92cce0c74b303732666460983d96779b",
+    "teff": 1400
+  },
+  "lte014-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 17,
+    "logg": 4.0,
+    "nbytes_raw": 40122499,
+    "sha256": "54ad6bd301f2fb49265f22ac79d753d86c29ac2125c5c0fe0b14bdde6d7bc4c0",
+    "teff": 1400
+  },
+  "lte014-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 18,
+    "logg": 4.5,
+    "nbytes_raw": 40122501,
+    "sha256": "da871e02d133ccf5e2dd86c63a86a441b0ce15f060b79e169707d2f7495d0001",
+    "teff": 1400
+  },
+  "lte014-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 19,
+    "logg": 5.0,
+    "nbytes_raw": 40122499,
+    "sha256": "36f35a3accd401d3b42ad24275c775f4ad2634f8278940f5562b9a21ad92b11f",
+    "teff": 1400
+  },
+  "lte014-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 20,
+    "logg": 5.5,
+    "nbytes_raw": 40122501,
+    "sha256": "569bb173b8da7cdaec4303a34d320314f75e96641f762897454744433b8056d3",
+    "teff": 1400
+  },
+  "lte015-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 21,
+    "logg": 2.5,
+    "nbytes_raw": 40617501,
+    "sha256": "ac456343fc3826ca999bd55a78b155ed3ad64bfc1197524f2fd36a01ccf49029",
+    "teff": 1500
+  },
+  "lte015-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 22,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "f25df736a67666229e74b43a121d1003360b5cc93973782c10937130c151b854",
+    "teff": 1500
+  },
+  "lte015-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 23,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "472bb7ab260232c1b6ddead170d4efc07c724b851cea2cb8dd59a50bfee45397",
+    "teff": 1500
+  },
+  "lte015-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 24,
+    "logg": 4.0,
+    "nbytes_raw": 40617499,
+    "sha256": "910ef8ac3f4ca93046baa2965b8dd5b57b26b3f37db6d0d63210fe72c7c6669b",
+    "teff": 1500
+  },
+  "lte015-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 25,
+    "logg": 4.5,
+    "nbytes_raw": 40617501,
+    "sha256": "fb16ba8ecac71cb16a3b7c82d27b7305bbbd67438a70aa5c55aefeec0c236f2d",
+    "teff": 1500
+  },
+  "lte015-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 26,
+    "logg": 5.0,
+    "nbytes_raw": 40617499,
+    "sha256": "5ac07e9e33b57cdce722c5aaed6f79c53babcea512942f06d39f34ca628a577c",
+    "teff": 1500
+  },
+  "lte015-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 27,
+    "logg": 5.5,
+    "nbytes_raw": 40617501,
+    "sha256": "edc46190fd21584a6c1665a019282a6c441411b5a198d6e7bf3e4cd82382335a",
+    "teff": 1500
+  },
+  "lte016-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 30,
+    "logg": 2.5,
+    "nbytes_raw": 40617501,
+    "sha256": "ed35d6c39e6fb787e98d127d1c90b05605d70a920b96b44fedbf58c33fb5d555",
+    "teff": 1600
+  },
+  "lte016-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 31,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "8b18930b76f16b223fd5ebe04c1b1999b82e7876a0cb8809c34822a8126c01fb",
+    "teff": 1600
+  },
+  "lte016-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 32,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "ced65d3192b333b80a2a87508707d44298a80d34bdcca74da5f6919935085793",
+    "teff": 1600
+  },
+  "lte016-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 33,
+    "logg": 4.0,
+    "nbytes_raw": 40617499,
+    "sha256": "08c8005b27a657f0abf002e59b4dba8b4b3258fab5f1605261ff765355710bbb",
+    "teff": 1600
+  },
+  "lte016-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 34,
+    "logg": 4.5,
+    "nbytes_raw": 40617501,
+    "sha256": "dc9a046288153226369d45f822f575565ebe2508c10a1b49373ff768fa56d987",
+    "teff": 1600
+  },
+  "lte016-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 35,
+    "logg": 5.0,
+    "nbytes_raw": 40617499,
+    "sha256": "a57748b5105ed948640b8a6acbd825a7f24b1fb9392d5634ab2a653193dfa5dc",
+    "teff": 1600
+  },
+  "lte016-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 36,
+    "logg": 5.5,
+    "nbytes_raw": 40617501,
+    "sha256": "deec170af7ff80ba054d08c691917d87ec1e3bc29c8b3b84e3f8363a8c54d958",
+    "teff": 1600
+  },
+  "lte017-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 39,
+    "logg": 2.5,
+    "nbytes_raw": 40617501,
+    "sha256": "f062821177ac8695d2952bc17d25e298f1e07c147a6308c837e2c44fc5d7d23f",
+    "teff": 1700
+  },
+  "lte017-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 40,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "102a48dd196e27464cb36e5ac28bddef2b6db2d86344961b2f2b5c9f2dffa550",
+    "teff": 1700
+  },
+  "lte017-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 41,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "02c9c2b10f02dd91ea5221b4becc2028cbe8339975c0c524ee0f9c707287b687",
+    "teff": 1700
+  },
+  "lte017-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 42,
+    "logg": 4.0,
+    "nbytes_raw": 40617499,
+    "sha256": "0379f3f548684a7347a30c0cc2f9e50690308959f2dce1518e8e1aca7637f0e8",
+    "teff": 1700
+  },
+  "lte017-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 43,
+    "logg": 4.5,
+    "nbytes_raw": 40617501,
+    "sha256": "0f8f93f3a976ab3f8dc7d0dce4cb6826514028defd4fbacbed07adfd8bd141b0",
+    "teff": 1700
+  },
+  "lte017-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 44,
+    "logg": 5.0,
+    "nbytes_raw": 40617499,
+    "sha256": "d68fdc91eac1564f12fcc934a6aa657e72d5b3bf85927fe1e621dfe89b07085c",
+    "teff": 1700
+  },
+  "lte017-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 45,
+    "logg": 5.5,
+    "nbytes_raw": 40617501,
+    "sha256": "2d93cd53710a6b7a8d4c64a2dc167ef889deb0be94db810a13b2c1cd1ff6bd4e",
+    "teff": 1700
+  },
+  "lte018-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 48,
+    "logg": 2.5,
+    "nbytes_raw": 40617501,
+    "sha256": "5cfacf2d855e64b83deb47c3c8adae7e74a2724bf34835832e172442a6834db8",
+    "teff": 1800
+  },
+  "lte018-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 49,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "5dd18ead3f9c6c6d74991aaef500544f73992e5c3464df6739fad8c633c05bdc",
+    "teff": 1800
+  },
+  "lte018-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 50,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "6746d1c1ed119ad77b36f6e5889af1260d21058cbd02ea89d9883be54499919d",
+    "teff": 1800
+  },
+  "lte018-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 51,
+    "logg": 4.0,
+    "nbytes_raw": 40617499,
+    "sha256": "d5cb806220bbac4fab76defe1ced581bb94a2000c2045b224fc9619486622f8b",
+    "teff": 1800
+  },
+  "lte018-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 52,
+    "logg": 4.5,
+    "nbytes_raw": 40617501,
+    "sha256": "a82de25d030111cb01070e921650737fc0ac06578a4b6fcb936a6c386086071f",
+    "teff": 1800
+  },
+  "lte018-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 53,
+    "logg": 5.0,
+    "nbytes_raw": 40617499,
+    "sha256": "92071d806bf13a80305bb3e7bad4be682e5138fafb92c483441da0c5a84f860f",
+    "teff": 1800
+  },
+  "lte018-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 54,
+    "logg": 5.5,
+    "nbytes_raw": 40617501,
+    "sha256": "72af52a48ed64aebf36e5bf70603ea0f8f6c4383ada69944eb379ddb8a12afbc",
+    "teff": 1800
+  },
+  "lte019-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 57,
+    "logg": 2.5,
+    "nbytes_raw": 40617501,
+    "sha256": "399a3f9378d553efe9408aeeecdad3df7a8e81451fad9b7a651ba394abae2327",
+    "teff": 1900
+  },
+  "lte019-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 58,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "c13e42af1990a8abccc7485a37c5c9c8fe252d38774d46884d5a2ce73f74847e",
+    "teff": 1900
+  },
+  "lte019-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 59,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "2c2c6e4c60ef571b73105e732fba3d5dbd732561fe0f3d25cb10e4f0a5a6ec84",
+    "teff": 1900
+  },
+  "lte019-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 60,
+    "logg": 4.0,
+    "nbytes_raw": 40617499,
+    "sha256": "02418bf1cbe7cf26577efba8fa5181ca9e1ed15bc0a2c7a82abc7778ee953393",
+    "teff": 1900
+  },
+  "lte019-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 61,
+    "logg": 4.5,
+    "nbytes_raw": 40617501,
+    "sha256": "c82e274c24b4937ed39de01c6a97ab360b5ba13c0123eb7af472fe2500d47238",
+    "teff": 1900
+  },
+  "lte019-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 62,
+    "logg": 5.0,
+    "nbytes_raw": 40617499,
+    "sha256": "5108e33e59836a3e939a0913729e3daf95de4d4856810ff65f9604e07ad473b7",
+    "teff": 1900
+  },
+  "lte019-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 63,
+    "logg": 5.5,
+    "nbytes_raw": 40617501,
+    "sha256": "cd232181c83097dedd11f1d61c55c601dcb03c40300f4b3d74ad1f5b9a3cb598",
+    "teff": 1900
+  },
+  "lte020-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 66,
+    "logg": 2.5,
+    "nbytes_raw": 40617501,
+    "sha256": "f9b5ced88e3c69b7eaf3f319e8811789efc87fd421c8e38f6e89a16ca909abbc",
+    "teff": 2000
+  },
+  "lte020-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 67,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "521f0096090bd0daaa82223a4d9de91febb0254adeb66e2f7dcde302b3c9df31",
+    "teff": 2000
+  },
+  "lte020-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 68,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "d5adba0c6017335a5442434601354a82d648f79d6ad771a326f35355824e7412",
+    "teff": 2000
+  },
+  "lte020-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 69,
+    "logg": 4.0,
+    "nbytes_raw": 42597499,
+    "sha256": "e584065761ec78243eb3f6f14f23fd55d31315d49505d9a5c36c111eb9d97d24",
+    "teff": 2000
+  },
+  "lte020-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 70,
+    "logg": 4.5,
+    "nbytes_raw": 42597501,
+    "sha256": "c557a4d7d7ea292add3a5f5815c5d93d017423acd62261a743379dcfa062a569",
+    "teff": 2000
+  },
+  "lte020-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 71,
+    "logg": 5.0,
+    "nbytes_raw": 42597499,
+    "sha256": "e2d5237df40440d22c755c7d17532c2bd29b82310d9cad2483eeea48c96c5f9d",
+    "teff": 2000
+  },
+  "lte020-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 72,
+    "logg": 5.5,
+    "nbytes_raw": 42597501,
+    "sha256": "d4e77b159f06be761ccff6891721cab140720450e6e03ab407e4201477ad3d96",
+    "teff": 2000
+  },
+  "lte021-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 79,
+    "logg": 2.5,
+    "nbytes_raw": 40617501,
+    "sha256": "b708b469621a566b7543d26cfaa86ba40f85d5aea1e9ab6b0a61b9246e569528",
+    "teff": 2100
+  },
+  "lte021-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 80,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "cf882da6537bb9f8a85fa6cba023b04e7e817538b54eacd6f9cc8bf70aa95d8d",
+    "teff": 2100
+  },
+  "lte021-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 81,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "8b89881b4699a53b4dd8426122ade550bc1c9e53d3a0e46ffdcdc2f4c5206668",
+    "teff": 2100
+  },
+  "lte021-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 82,
+    "logg": 4.0,
+    "nbytes_raw": 40617499,
+    "sha256": "a004e7a2e596a6e6c2f8ab76608f081a9e1cb2e5c5267a8a3527845425e69055",
+    "teff": 2100
+  },
+  "lte021-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 83,
+    "logg": 4.5,
+    "nbytes_raw": 42597501,
+    "sha256": "3de4e6f47fd1210f6e622070d9e211fef098cee621bcb0ba06b56e6c714de84b",
+    "teff": 2100
+  },
+  "lte021-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 84,
+    "logg": 5.0,
+    "nbytes_raw": 42597499,
+    "sha256": "35c26f3dab0fe19aa0a48be777aba6d4bca57f349b0fe7fd6aa972793d2d82e2",
+    "teff": 2100
+  },
+  "lte021-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 85,
+    "logg": 5.5,
+    "nbytes_raw": 40617501,
+    "sha256": "c329d5dca10a46c21c02a6aa2298354f87e83e8bb96f8dc79d4b794a80366965",
+    "teff": 2100
+  },
+  "lte022-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 92,
+    "logg": 2.5,
+    "nbytes_raw": 40617501,
+    "sha256": "26a4398daab72f7d5e918927048bcfc413f2169e44531ca2ab33ee525b85bdd4",
+    "teff": 2200
+  },
+  "lte022-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 93,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "54143426eb24865cdda42e12b0517765c28762998e466c3fe53db160e6469b0d",
+    "teff": 2200
+  },
+  "lte022-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 94,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "7af2b2ef060dc4b55a92e2e006d89f674f677a6bd206fe7316c02f7784dac4ec",
+    "teff": 2200
+  },
+  "lte022-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 95,
+    "logg": 4.0,
+    "nbytes_raw": 40617499,
+    "sha256": "7c3fb98d5db844ee6e20b6f758be6fbf17251e0c272e0a47e972314448decdc2",
+    "teff": 2200
+  },
+  "lte022-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 96,
+    "logg": 4.5,
+    "nbytes_raw": 42597501,
+    "sha256": "d245fd3845ee83baed3d0f9b3907177c6fca0cdb0b607de22b5f0baa86c7184d",
+    "teff": 2200
+  },
+  "lte022-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 97,
+    "logg": 5.0,
+    "nbytes_raw": 42597499,
+    "sha256": "e53694f94d31770c06f87477f0b40952a695da5100ba5ef3f77d94ce4c69c756",
+    "teff": 2200
+  },
+  "lte022-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 98,
+    "logg": 5.5,
+    "nbytes_raw": 42597501,
+    "sha256": "e23c758709638599ebaa7a048adce978d09e40d749e158608b8fd9eb5bc9bd9f",
+    "teff": 2200
+  },
+  "lte023-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 105,
+    "logg": 2.5,
+    "nbytes_raw": 40617501,
+    "sha256": "0ac2d2549736bf90cdfd1e3e82f90b7bceeaff67c83f734f056ef188a5481de6",
+    "teff": 2300
+  },
+  "lte023-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 106,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "af86829293c9a960631f53590402e35a7cd322c1a221b00372227963c05a3981",
+    "teff": 2300
+  },
+  "lte023-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 107,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "1ef68d2f6013a266ad633f77b231036e654cc60ea2360cda699811c3f3a2283b",
+    "teff": 2300
+  },
+  "lte023-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 108,
+    "logg": 4.0,
+    "nbytes_raw": 40617499,
+    "sha256": "075c8c07652f31809a83aa4739dbcdae700c5d7463434ec1763932ce0dc175c3",
+    "teff": 2300
+  },
+  "lte023-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 109,
+    "logg": 4.5,
+    "nbytes_raw": 42597501,
+    "sha256": "27eb72a6932ade38fd9edb8db1f8d42f7f3c7b4c978a97c3a68e6147ad74cb00",
+    "teff": 2300
+  },
+  "lte023-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 110,
+    "logg": 5.0,
+    "nbytes_raw": 42597499,
+    "sha256": "c884aa87a0607be319545450fc511d526d4faa9cf2a1b2306f1dc7d6b5f3144e",
+    "teff": 2300
+  },
+  "lte023-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 111,
+    "logg": 5.5,
+    "nbytes_raw": 42597501,
+    "sha256": "2ab8612cab2af2fb815cc535681d08b5e149f6df4d0fa74cdf333b5ec4e9b509",
+    "teff": 2300
+  },
+  "lte024-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 118,
+    "logg": 2.5,
+    "nbytes_raw": 40617501,
+    "sha256": "8a543b042724552c720ecd23507ebd378d89ad3961f903a91a8a462202c3500f",
+    "teff": 2400
+  },
+  "lte024-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 119,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "e8969f9da8fd65e76cd5f793479a517269cd0bb944fee87471f090e349b67a1e",
+    "teff": 2400
+  },
+  "lte024-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 120,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "c67424ae10f5cc95d83e969450c048a5e88b624d1e52b2d66c1db5c7a0f9ee86",
+    "teff": 2400
+  },
+  "lte024-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 121,
+    "logg": 4.0,
+    "nbytes_raw": 40617499,
+    "sha256": "d02d14674a190cc94ec3d42fbb0a5575a29ffea328b3826a4970d1d18000c668",
+    "teff": 2400
+  },
+  "lte024-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 122,
+    "logg": 4.5,
+    "nbytes_raw": 42597501,
+    "sha256": "0e9675ccbe3743bcbd3f58eb73f16dfa155ff9d61be125dc8815768915d32dd1",
+    "teff": 2400
+  },
+  "lte024-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 123,
+    "logg": 5.0,
+    "nbytes_raw": 42597499,
+    "sha256": "5a0fac4bda2d1dc11431782aed336b7189d8d129b7f67abed072ec20c40a4373",
+    "teff": 2400
+  },
+  "lte024-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 124,
+    "logg": 5.5,
+    "nbytes_raw": 42597501,
+    "sha256": "e497723af4ba3833adc895a3838bf8d10f6d60b42a97a5d2cf4b847730366732",
+    "teff": 2400
+  },
+  "lte025-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 125,
+    "logg": 2.5,
+    "nbytes_raw": 40617501,
+    "sha256": "4c0213a9212207b261ab7f6eed7625937ef55af5130c7d3619779e1c68ccb1ee",
+    "teff": 2500
+  },
+  "lte025-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 126,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "354a8ac2326b2beec0e87f3f31d6b7167daa1cb17fa6121cae542f6f0f64234d",
+    "teff": 2500
+  },
+  "lte025-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 127,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "108153c815ae49b9ff84e60e017f2b1e80b82092c0bb464c2607314c9b0097e2",
+    "teff": 2500
+  },
+  "lte025-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 128,
+    "logg": 4.0,
+    "nbytes_raw": 40617499,
+    "sha256": "a32220fe1e66921ff34c258eb82e0a8a01f3081f2560c66dc11da9f40a2330e1",
+    "teff": 2500
+  },
+  "lte025-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 129,
+    "logg": 4.5,
+    "nbytes_raw": 40617501,
+    "sha256": "40cbaa49e7d48c0c8c4184ddc3ffcf5b0ef78dc9456ce1ab7118aa10cfb773db",
+    "teff": 2500
+  },
+  "lte025-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 130,
+    "logg": 5.0,
+    "nbytes_raw": 42597499,
+    "sha256": "171d4fdabc590a79ee16c7820bd851952b31b767fa6d1b3b06dfa7eed24e6435",
+    "teff": 2500
+  },
+  "lte025-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 131,
+    "logg": 5.5,
+    "nbytes_raw": 40617501,
+    "sha256": "331abc6bdd298fd981688bec3736c9f14bbde1e0c3d644f9132fb0564e52e955",
+    "teff": 2500
+  },
+  "lte026-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 132,
+    "logg": 2.5,
+    "nbytes_raw": 40617501,
+    "sha256": "37160ce2e8f8a5f92a79eef1359ff241810cd7976f6c1b1a66839cc7fc4998cc",
+    "teff": 2600
+  },
+  "lte026-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 133,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "0e18c3459daf036fa9cc801367df88228ad9e66dde2144a7d1414da6b3f90974",
+    "teff": 2600
+  },
+  "lte026-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 134,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "d8016cb0b4b17bc0ca1a114aa8ac18702d18c98460c184d8ab3fee42484c90ad",
+    "teff": 2600
+  },
+  "lte026-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 135,
+    "logg": 4.0,
+    "nbytes_raw": 40617499,
+    "sha256": "cdff2730dbebcdfd4a6dccd7af39a82df54a632fe9211ea1e13a9dab33d9f47b",
+    "teff": 2600
+  },
+  "lte026-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 136,
+    "logg": 4.5,
+    "nbytes_raw": 42597501,
+    "sha256": "763537da91d588f4ae5e13d2e6f2260d3413e1c7d0814c69b9be7af4ca799002",
+    "teff": 2600
+  },
+  "lte026-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 137,
+    "logg": 5.0,
+    "nbytes_raw": 42597499,
+    "sha256": "05f910fe6de250654ec44e63ce9f4df59e7bae21306f5dffbd9c4865631d2336",
+    "teff": 2600
+  },
+  "lte026-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 138,
+    "logg": 5.5,
+    "nbytes_raw": 42597501,
+    "sha256": "6f774e1dc606acd0bf71ebf0ce983e23c9c5792885195212827eb31f015f7adb",
+    "teff": 2600
+  },
+  "lte027-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 139,
+    "logg": 2.5,
+    "nbytes_raw": 40617501,
+    "sha256": "22cd7dad9f1c1654aadf3709f88f0b523f8aeb327c9a497549df882ff417f2dc",
+    "teff": 2700
+  },
+  "lte027-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 140,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "8fc0c3c0d0a46a176198ad32a4414394cffafa747ff1ccfd7d4f13806bae2158",
+    "teff": 2700
+  },
+  "lte027-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 141,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "6522d910dc6bf38e73c54704e823629e4949d52048365ebfb2d0ea7095234bbd",
+    "teff": 2700
+  },
+  "lte027-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 142,
+    "logg": 4.0,
+    "nbytes_raw": 39083890,
+    "sha256": "cc23f09d9223e39adf652fc3225ed0dd09ea0f876c8e298bb7d78cad5cbedf25",
+    "teff": 2700
+  },
+  "lte027-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 143,
+    "logg": 4.5,
+    "nbytes_raw": 40617501,
+    "sha256": "6619b43f66ba05dd67e4294438e30a72239674e5a8073dfe124cfa96d9b2c69c",
+    "teff": 2700
+  },
+  "lte027-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 144,
+    "logg": 5.0,
+    "nbytes_raw": 40617499,
+    "sha256": "1c7ce4a3969f6e0fba2833eedc97e44c9caf312acb53ac65d3c20573c1b9b092",
+    "teff": 2700
+  },
+  "lte027-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 145,
+    "logg": 5.5,
+    "nbytes_raw": 42597501,
+    "sha256": "85e9c8901f53e61b99599809cec6c54ed29e7fdd524c38c18daf790cb7e231ff",
+    "teff": 2700
+  },
+  "lte028-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 146,
+    "logg": 2.5,
+    "nbytes_raw": 40617501,
+    "sha256": "dfe039ad221a0fde94039a146eaf530fab0d4a00d9cbec66d3391b17a080f008",
+    "teff": 2800
+  },
+  "lte028-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 147,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "22256b1767fff0891804885aef9a111a3a1d657b874d7018d03b6d62da872b2f",
+    "teff": 2800
+  },
+  "lte028-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 148,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "45682e3bf63126956f94af453a4576172b026edaed095c8c08ca6a114de623fc",
+    "teff": 2800
+  },
+  "lte028-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 149,
+    "logg": 4.0,
+    "nbytes_raw": 40617499,
+    "sha256": "a2117e1f80b3a38ea8dafa2f523d0a834f8cbd0c9eaa84f1e084271d2f965aba",
+    "teff": 2800
+  },
+  "lte028-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 150,
+    "logg": 4.5,
+    "nbytes_raw": 42597501,
+    "sha256": "b47e2a8c4519bf67e7c9bf43ac567498528f0bb90753056723793a56e00c72e3",
+    "teff": 2800
+  },
+  "lte028-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 151,
+    "logg": 5.0,
+    "nbytes_raw": 40617499,
+    "sha256": "0cf919f3b6331720ca14e64924f6be623b666e7a695e5a9a268020dc93697ace",
+    "teff": 2800
+  },
+  "lte028-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 152,
+    "logg": 5.5,
+    "nbytes_raw": 42597501,
+    "sha256": "518697669d53ffabe4f66c92b2e9c134286d6da50f2af65194afac55abb24cae",
+    "teff": 2800
+  },
+  "lte029-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 153,
+    "logg": 2.5,
+    "nbytes_raw": 36407790,
+    "sha256": "0c19cf0d960fb8d47a3344c0ee12463530f8b4d6547821408de8eac61323c104",
+    "teff": 2900
+  },
+  "lte029-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 154,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "304ab5f5e50525135f2cb1cc96c2a7ace8d402e380fc6aa853dc286d2c27e1c1",
+    "teff": 2900
+  },
+  "lte029-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 155,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "b7f1440589fe1a76eca52a98cb60c271aa002408ed5b2ce85823d7ff6553d602",
+    "teff": 2900
+  },
+  "lte029-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 156,
+    "logg": 4.0,
+    "nbytes_raw": 40617499,
+    "sha256": "f5303dfacea2c025125fd12305bc661f7b0206601bf2dcab5a1b37cb8d596408",
+    "teff": 2900
+  },
+  "lte029-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 157,
+    "logg": 4.5,
+    "nbytes_raw": 40617501,
+    "sha256": "04fc61f76737d604f30ed0c6b6aabb13e56bb87bc5e8885bc5a68abfb55a7022",
+    "teff": 2900
+  },
+  "lte029-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 158,
+    "logg": 5.0,
+    "nbytes_raw": 42597499,
+    "sha256": "6a1184a1e2201398434c5902bf11846e665ac9556aade3e47414adab3e0661fe",
+    "teff": 2900
+  },
+  "lte029-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 159,
+    "logg": 5.5,
+    "nbytes_raw": 42597501,
+    "sha256": "2a2291f6cf6c7055a3deaa2453120dc1aafebdeec6c21d099b3181749490773d",
+    "teff": 2900
+  },
+  "lte030-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 160,
+    "logg": 2.5,
+    "nbytes_raw": 40617501,
+    "sha256": "5774dba6b21902ff62b41ad69fcfb48251742add0a997a7f4fcb8a4822029dac",
+    "teff": 3000
+  },
+  "lte030-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 161,
+    "logg": 3.0,
+    "nbytes_raw": 40617499,
+    "sha256": "fb972e7d8c98c4947cce65c6ca679d8572ff2b0bc38fa66327ab8cd6ac73d280",
+    "teff": 3000
+  },
+  "lte030-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 162,
+    "logg": 3.5,
+    "nbytes_raw": 40617501,
+    "sha256": "ab3739c6dae4a9346acbd3a0d8a3f2e8fc74e7eadce8830a0b37d6aaab5a931a",
+    "teff": 3000
+  },
+  "lte030-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 163,
+    "logg": 4.0,
+    "nbytes_raw": 40617499,
+    "sha256": "52a73cb5519b7f446fb4ed6a40fe471243eecad643f029b9926bb61677f811cc",
+    "teff": 3000
+  },
+  "lte030-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 164,
+    "logg": 4.5,
+    "nbytes_raw": 40617501,
+    "sha256": "d005ab1542e43e309f9ebab1f48d74f2c9c6040f2fe86922a554275ca88d5882",
+    "teff": 3000
+  },
+  "lte030-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 165,
+    "logg": 5.0,
+    "nbytes_raw": 42597499,
+    "sha256": "d1fe45aee6bef76178ccefcfa72169f1e09ddc1b47bf6796b7cf75f830dfa307",
+    "teff": 3000
+  },
+  "lte030-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 166,
+    "logg": 5.5,
+    "nbytes_raw": 42597501,
+    "sha256": "915b231eebe4dc68458c45eec65df511a247cf5a87575c87b7ac1ed0bc9f7c34",
+    "teff": 3000
+  },
+  "lte031-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 167,
+    "logg": 2.5,
+    "nbytes_raw": 44082501,
+    "sha256": "e8ab5382a1827fc80b0bf0df78eb72ebf405983324b7a542e54a44c304dfa465",
+    "teff": 3100
+  },
+  "lte031-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 168,
+    "logg": 3.0,
+    "nbytes_raw": 44082499,
+    "sha256": "e5830e5efc9f99a77934172155e95a0b0f32dc7ed8c01a276c0f52d91ab90831",
+    "teff": 3100
+  },
+  "lte031-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 169,
+    "logg": 3.5,
+    "nbytes_raw": 44082501,
+    "sha256": "0b1682750fa11d86ae2180d000e512b6c97fc6cb8179669d542be5155783a740",
+    "teff": 3100
+  },
+  "lte031-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 170,
+    "logg": 4.0,
+    "nbytes_raw": 44082499,
+    "sha256": "0859f33e137de2aba5ba2a8a4b5eed3368c68ddb22810eeb232a3f2126f514fa",
+    "teff": 3100
+  },
+  "lte031-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 171,
+    "logg": 4.5,
+    "nbytes_raw": 44082501,
+    "sha256": "053f73063dad8e37f600e4211e35351ee470889d03a7ba9f4ed28ee16e20c2d1",
+    "teff": 3100
+  },
+  "lte031-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 172,
+    "logg": 5.0,
+    "nbytes_raw": 44082499,
+    "sha256": "f74e7388d6445c661ff83badb0e817db51cb812ca0c74e2ac469301ddb41a193",
+    "teff": 3100
+  },
+  "lte031-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 173,
+    "logg": 5.5,
+    "nbytes_raw": 44082501,
+    "sha256": "5607d6a6be1b1e433897fbc2da9a5681f8b0baaf07c46f39ab19cce3252fc46a",
+    "teff": 3100
+  },
+  "lte032-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 174,
+    "logg": 2.5,
+    "nbytes_raw": 44082501,
+    "sha256": "5fff1722e3e6cca859f466754426ca8e925fb51bb072223a66e8ac38c25e0ae5",
+    "teff": 3200
+  },
+  "lte032-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 175,
+    "logg": 3.0,
+    "nbytes_raw": 44082499,
+    "sha256": "258060e78ece50678a457fc7f12849b0c5d6da74129729307f9ebca231479642",
+    "teff": 3200
+  },
+  "lte032-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 176,
+    "logg": 3.5,
+    "nbytes_raw": 44082501,
+    "sha256": "935fc1965fba69993052a3f7db11c91d0c4dca7c6c707fe4183e7677cb0dc46f",
+    "teff": 3200
+  },
+  "lte032-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 177,
+    "logg": 4.0,
+    "nbytes_raw": 44082499,
+    "sha256": "cf15b0665e26c5d37627fc46cf3eb29e9dd2c8daf6e5fdaf63744be950cfb6bb",
+    "teff": 3200
+  },
+  "lte032-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 178,
+    "logg": 4.5,
+    "nbytes_raw": 44082501,
+    "sha256": "73450c95149f1809b27a54721c1f40626cb87fe41733b784c3e02f46cd56d835",
+    "teff": 3200
+  },
+  "lte032-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 179,
+    "logg": 5.0,
+    "nbytes_raw": 44082499,
+    "sha256": "820b6a882baddd4e7051e99242286af06e8ec89c38ccdb6a3a63c44a683e8eeb",
+    "teff": 3200
+  },
+  "lte032-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 180,
+    "logg": 5.5,
+    "nbytes_raw": 44082501,
+    "sha256": "117fff358db9056f44d22f72d9b89e17164642ca123d5133745243fd20b65567",
+    "teff": 3200
+  },
+  "lte033-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 181,
+    "logg": 2.5,
+    "nbytes_raw": 44082501,
+    "sha256": "9ac20be1ce79f836ac0ec7ad93562b48729b2a9df006e803c7d92180491e2c28",
+    "teff": 3300
+  },
+  "lte033-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 182,
+    "logg": 3.0,
+    "nbytes_raw": 44082499,
+    "sha256": "cc40429a59270e35da720fa7572f17f218b223165e6b602eaf9cefc46c905e62",
+    "teff": 3300
+  },
+  "lte033-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 183,
+    "logg": 3.5,
+    "nbytes_raw": 44082501,
+    "sha256": "ff58deceb2c9106d0169ea7510765195856c95c2e10e6526edaa4e5f2e22a210",
+    "teff": 3300
+  },
+  "lte033-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 184,
+    "logg": 4.0,
+    "nbytes_raw": 44082499,
+    "sha256": "7368aeb5b689aa360aa03da5d3a546faf0d29694c8951f2528adad7a26b4c844",
+    "teff": 3300
+  },
+  "lte033-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 185,
+    "logg": 4.5,
+    "nbytes_raw": 44082501,
+    "sha256": "a082ca1d876efccfb4bf3044ac8634d28edbede5948f4c7e0eb46b3dce231263",
+    "teff": 3300
+  },
+  "lte033-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 186,
+    "logg": 5.0,
+    "nbytes_raw": 44082499,
+    "sha256": "1260ba81fc8113b2a39f7f163db8632bfc520a177853b2b0f9bd1d972a1f2294",
+    "teff": 3300
+  },
+  "lte033-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 187,
+    "logg": 5.5,
+    "nbytes_raw": 44082501,
+    "sha256": "cfd0ebe821b234b24f5d6c764032d3f11635da09d15ab78165d84a20d19d3bea",
+    "teff": 3300
+  },
+  "lte034-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 188,
+    "logg": 2.5,
+    "nbytes_raw": 44082501,
+    "sha256": "f83ef6e824df02400554fabaeb2cf0df67b4e6e4fe6a38c3e374f7e239a77063",
+    "teff": 3400
+  },
+  "lte034-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 189,
+    "logg": 3.0,
+    "nbytes_raw": 44082499,
+    "sha256": "479e9814fbcdcdf920b28aa5d2484b89cdf28ddb3a6374ddc5fa5de0e3931021",
+    "teff": 3400
+  },
+  "lte034-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 190,
+    "logg": 3.5,
+    "nbytes_raw": 44082501,
+    "sha256": "f5561df87f38eff855bdc07a0dcf551b37c1c4f11caabd4dd8c99a4a634808ce",
+    "teff": 3400
+  },
+  "lte034-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 191,
+    "logg": 4.0,
+    "nbytes_raw": 44082499,
+    "sha256": "397b7564bcc0b3d42e478c7a7c418f9a01ddedadd7cbb1a8c6d1497b43589c0f",
+    "teff": 3400
+  },
+  "lte034-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 192,
+    "logg": 4.5,
+    "nbytes_raw": 44082501,
+    "sha256": "a9da4d6b737112b7710caf62a361bbe5ff5f5d618e54e14e1126675967afa640",
+    "teff": 3400
+  },
+  "lte034-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 193,
+    "logg": 5.0,
+    "nbytes_raw": 44082499,
+    "sha256": "629aa5c8135e7056062a5531e3fa33d81a3e5627c77eae3ad700c44235ee2419",
+    "teff": 3400
+  },
+  "lte034-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 194,
+    "logg": 5.5,
+    "nbytes_raw": 44082501,
+    "sha256": "7cc084ce410ef004aa73182ad6023c0eb6fc8b56c95f16ae8c632b3d31dea520",
+    "teff": 3400
+  },
+  "lte035-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 195,
+    "logg": 2.5,
+    "nbytes_raw": 44082501,
+    "sha256": "e72a54c33394ba461468aef141fac019c3348162973bb27ae86a39ed4c84cd0e",
+    "teff": 3500
+  },
+  "lte035-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 196,
+    "logg": 3.0,
+    "nbytes_raw": 44082499,
+    "sha256": "42e8a66f5a53ee932901e16a0b8d10fbcb20c60f94dcfcfbaedba32de51044a9",
+    "teff": 3500
+  },
+  "lte035-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 197,
+    "logg": 3.5,
+    "nbytes_raw": 44082501,
+    "sha256": "ab374a64baa2c54ca36b0a2bbc9cc4826f2dc8ff467df135f18283ea8e2176cc",
+    "teff": 3500
+  },
+  "lte035-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 198,
+    "logg": 4.0,
+    "nbytes_raw": 44082499,
+    "sha256": "a24322cf5f5f8f4198e7076f1d1d5db69973ea9d5a9b4efc4fe9e6b012784f82",
+    "teff": 3500
+  },
+  "lte035-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 199,
+    "logg": 4.5,
+    "nbytes_raw": 44082501,
+    "sha256": "6b6c18e1275fb35c6017d1ba9dd7042e8a8ab466e5ae42ae737bc81e826eadc5",
+    "teff": 3500
+  },
+  "lte035-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 200,
+    "logg": 5.0,
+    "nbytes_raw": 44082499,
+    "sha256": "38d4f98723bdf606f0639d2e22316b52389fafcc3dd19fc7dbaf5653fc89d9e1",
+    "teff": 3500
+  },
+  "lte035-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 201,
+    "logg": 5.5,
+    "nbytes_raw": 44082501,
+    "sha256": "841b6912a9a2370300f30279946316031f5dfdeb37cd231895f8fb14e1281307",
+    "teff": 3500
+  },
+  "lte036-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 202,
+    "logg": 2.5,
+    "nbytes_raw": 44082501,
+    "sha256": "f28d0fe7f89a6596a2b6b30215789308a92b42f008b84bf2e7d919ff14504834",
+    "teff": 3600
+  },
+  "lte036-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 203,
+    "logg": 3.0,
+    "nbytes_raw": 44082499,
+    "sha256": "3badde096473b50dfe8ce8f751e581064a70c999701ed19efbd480286a7ec405",
+    "teff": 3600
+  },
+  "lte036-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 204,
+    "logg": 3.5,
+    "nbytes_raw": 44082501,
+    "sha256": "a3fceaf7f283d15eb0a461c2c7937fe846be4beec403822e8ba8948a22f3da48",
+    "teff": 3600
+  },
+  "lte036-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 205,
+    "logg": 4.0,
+    "nbytes_raw": 44082499,
+    "sha256": "07d47d5bff5cd4b873f0cf46378862e543fc41b2bbf285ecd882716ca261b0f4",
+    "teff": 3600
+  },
+  "lte036-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 206,
+    "logg": 4.5,
+    "nbytes_raw": 44082501,
+    "sha256": "a8f802db4450a6d2a33859c1cf677f1186d47da0d6af8b6a30fdc140e5dfe0f4",
+    "teff": 3600
+  },
+  "lte036-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 207,
+    "logg": 5.0,
+    "nbytes_raw": 44082499,
+    "sha256": "6db1fe3664c8da62576271bcb8a4cf72007196fbdd69fef79d5978fc97235716",
+    "teff": 3600
+  },
+  "lte036-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 208,
+    "logg": 5.5,
+    "nbytes_raw": 44082501,
+    "sha256": "b32e81021bb3a8804e0ae5bf7d06d505fff0b7c96bcae3974c8469ebb317de4f",
+    "teff": 3600
+  },
+  "lte037-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 209,
+    "logg": 2.5,
+    "nbytes_raw": 44082501,
+    "sha256": "e2f5589ae39d1b5cf69d4cde3a0db4e763fa9be01e17e53bcc5f8aab1552b6af",
+    "teff": 3700
+  },
+  "lte037-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 210,
+    "logg": 3.0,
+    "nbytes_raw": 44082499,
+    "sha256": "fd56d7f9d2b207ffcfde63d01e9ee90b45b543009ba7b92941f57614a8a0d9c7",
+    "teff": 3700
+  },
+  "lte037-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 211,
+    "logg": 3.5,
+    "nbytes_raw": 44082501,
+    "sha256": "41649e8a35ec6d28a62eefce490e9012bc8f042de53fa76586079bb0bbbe5cf4",
+    "teff": 3700
+  },
+  "lte037-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 212,
+    "logg": 4.0,
+    "nbytes_raw": 44082499,
+    "sha256": "f6bd7591169a8f5dd0d370faee7a9835077e33ceda3b2436fb1071475df7a275",
+    "teff": 3700
+  },
+  "lte037-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 213,
+    "logg": 4.5,
+    "nbytes_raw": 44082501,
+    "sha256": "cd43294e7d1efa9e082ecb403e387505ce07dfedec7403f38f43a1e7f19aabf6",
+    "teff": 3700
+  },
+  "lte037-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 214,
+    "logg": 5.0,
+    "nbytes_raw": 44082499,
+    "sha256": "0c35f9b64ea7b8b73d2251885784b0f3ca9191755cc9afb6857e868c3e597a18",
+    "teff": 3700
+  },
+  "lte037-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 215,
+    "logg": 5.5,
+    "nbytes_raw": 44082501,
+    "sha256": "3de218ac569d040a4189def6be03832295a2b22620777ea8fe8e6d5a6ee121be",
+    "teff": 3700
+  },
+  "lte038-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 216,
+    "logg": 2.5,
+    "nbytes_raw": 44082501,
+    "sha256": "e8e838107143b8a37b4338414dc7cfd60f40114d41fd2921f764ed0c10288e10",
+    "teff": 3800
+  },
+  "lte038-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 217,
+    "logg": 3.0,
+    "nbytes_raw": 44082499,
+    "sha256": "6593bdde6ef690cf53b7853629fb83a960e6927708a089ca378de047ded5cfa3",
+    "teff": 3800
+  },
+  "lte038-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 218,
+    "logg": 3.5,
+    "nbytes_raw": 44082501,
+    "sha256": "52a3797949218d110b17b29f1fcc0d002a9057ee89a048a3b418eb1e9871d863",
+    "teff": 3800
+  },
+  "lte038-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 219,
+    "logg": 4.0,
+    "nbytes_raw": 44082499,
+    "sha256": "0a73c2668cc04843c9bf8e31a03ab9893c078b22c6433d40092c08b86298d0a8",
+    "teff": 3800
+  },
+  "lte038-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 220,
+    "logg": 4.5,
+    "nbytes_raw": 44082501,
+    "sha256": "a66c29417a45a90ad405b7bc0377c5d368146011f4e02d313b3aa18df6642042",
+    "teff": 3800
+  },
+  "lte038-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 221,
+    "logg": 5.0,
+    "nbytes_raw": 44082499,
+    "sha256": "2948a81a40a2bbc7d44be75005357d28d9fdbd086f350a5997164c1881dcfe1a",
+    "teff": 3800
+  },
+  "lte038-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 222,
+    "logg": 5.5,
+    "nbytes_raw": 44082501,
+    "sha256": "19fd7ffae25c67ba1943cc6b6851a2d2d2ce75c2902786cb2ee1cd82fb94d887",
+    "teff": 3800
+  },
+  "lte039-2.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 223,
+    "logg": 2.5,
+    "nbytes_raw": 44082501,
+    "sha256": "717c4cb5854cea5993d00551b4b0bacb3785cfd763a224cd289788bf6440e245",
+    "teff": 3900
+  },
+  "lte039-3.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 224,
+    "logg": 3.0,
+    "nbytes_raw": 44082499,
+    "sha256": "7fbb8b2cc37e38f4f029f53ff3783219e6eef80062c88639c75a4d7f12d1ad89",
+    "teff": 3900
+  },
+  "lte039-3.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 225,
+    "logg": 3.5,
+    "nbytes_raw": 44082501,
+    "sha256": "97a839d5f30a05b72642b6a62353b32537099c3f3c8eaf565edc6ff468ddecd4",
+    "teff": 3900
+  },
+  "lte039-4.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 226,
+    "logg": 4.0,
+    "nbytes_raw": 44082499,
+    "sha256": "7f8dbde01e640449430d1668346726cc755a4ccdbb70a078260ff640a862b707",
+    "teff": 3900
+  },
+  "lte039-4.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 227,
+    "logg": 4.5,
+    "nbytes_raw": 44082501,
+    "sha256": "c4c17ae86dfa041ea92a2e8810b7c77966f2a065304f7dde4793023a11978902",
+    "teff": 3900
+  },
+  "lte039-5.0-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 228,
+    "logg": 5.0,
+    "nbytes_raw": 44082499,
+    "sha256": "e3123d8f71ad05ec5c7f767ea14dbc84945fecfe4dccb1a6ed455a623d061334",
+    "teff": 3900
+  },
+  "lte039-5.5-0.0a+0.0.BT-Settl.CIFIST2011_2015.dat.gz": {
+    "fid": 229,
+    "logg": 5.5,
+    "nbytes_raw": 44082501,
+    "sha256": "bc37b3f6816e9ab59cc3c5eb3d0680ae79e04b54fd9855b0fc0a5a4b73247132",
+    "teff": 3900
+  }
+}

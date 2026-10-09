@@ -1,0 +1,14 @@
+{
+  "grams_c.fits": {
+    "expected_rows": 12243,
+    "nbytes": 46728000,
+    "sha256": "6e015ae5a6e28508b0382f040b53fab0201734e64ed83372d2681caceb4b4ea9",
+    "url": "https://ndownloader.figshare.com/files/9684328"
+  },
+  "grams_o.fits": {
+    "expected_rows": 68600,
+    "nbytes": 230506560,
+    "sha256": "f72bd848f67c69fae2664bdaaf0fa285b6b4c8eb38d86a08d5a85a0a0bb0148c",
+    "url": "https://ndownloader.figshare.com/files/9684331"
+  }
+}

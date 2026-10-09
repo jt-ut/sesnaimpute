@@ -1,0 +1,18 @@
+## Extinction law info file. 
+## This specifies certain properties about the extinction law that are used during SED fitting and saving of results 
+
+## The short-hand name of the law, that will be stored in the results table 
+name  DraineRV31
+
+## The path to the extinction file. This should be an ascii table with at least 2 columns: 
+## one column should be wavelength (in microns) the other should be absorption/opacity (in cm^2/g)
+## The columns do not have to be ordered, column identifiers will be specified below. 
+path   /Users/jtaylor/Dropbox/Research/SESNA_SEDFit/SESNA_SEDFit_redo/extinction_laws/draine_rv3.1/draine_rv3.1.par  
+
+## The column indices of the wavelength and opacity columns in the file specified by 'path'
+colidx_wav   0
+colidx_extinction   1
+
+## The ratio of AV / AK in this law 
+AV_over_AK  8.8009
+
