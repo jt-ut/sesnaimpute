@@ -117,22 +117,6 @@ def _build_one_tile(config, region, tile_id):
             above_star_w, float(w_s.sum()), above_agb_w, float(w_a.sum()))
 
 
-def _read_old_star_product(path):
-    """The current P2's own `x`-marginals (`GRID_STAR`/`GRID_AGB` summed
-    over the whole brightness axis), read before this build overwrites
-    the file (STAR's acceptance identity, sec. 9: the depth placement is
-    unchanged, only the brightness axis was redefined, so summing away
-    that axis must reproduce the SAME `x` shape). `None` if no product
-    exists yet (first build)."""
-    if not os.path.exists(path):
-        return None
-    with h5py.File(path, "r") as f:
-        tile_id = f["TILE_ID"][()].astype(np.int64)
-        xi_marginal_star = f["GRID_STAR"][()].sum(axis=2)
-        xi_marginal_agb = f["GRID_AGB"][()].sum(axis=2)
-    return dict(tile_id=tile_id, xi_marginal_star=xi_marginal_star, xi_marginal_agb=xi_marginal_agb)
-
-
 def build_star_family(config, region):
     """Writes P2, `bmstp/shape/star_shape_tile__R.hdf5`: `GRID_STAR` and
     `GRID_AGB` per tile (sec. 5.1, 5.2) on the common `LOG10_F45_EDGES`,
@@ -145,7 +129,6 @@ def build_star_family(config, region):
     and no `FLOOR` attribute, like every shape product (`bmstp.grid`'s
     module docstring)."""
     path = config_module.product_path(config, "bmstp", "shape", "star", "tile", region=region)
-    old = _read_old_star_product(path)
 
     with progress.Stage("bmstp.shapes.star_family", region) as st:
         ids = sample_star.tile_ids(config, region)
@@ -206,14 +189,6 @@ def build_star_family(config, region):
             ):
                 build_module.write_dataset(f, name, data, *REGISTRY[(_STAR_STEM, name)])
 
-        # STAR's acceptance identity (sec. 9): the new `x`-marginal against
-        # the OLD product's own, read above before the overwrite.
-        max_xi_marginal_dev = float("nan")
-        if old is not None and np.array_equal(old["tile_id"], ids):
-            new_xi_marginal_star = grid_star.sum(axis=2)
-            max_xi_marginal_dev = float(
-                np.max(np.abs(old["xi_marginal_star"] - new_xi_marginal_star)))
-
         # STAR's own F_4.5 range against the field-stars product's own
         # flux column (sec. 9's "must agree, since it is the same
         # numbers"): report only, the field-stars flux is what `GRID_STAR`
@@ -232,13 +207,12 @@ def build_star_family(config, region):
                 mass_outside_star_max=float(mass_outside_star.max()) if n_tile else 0.0,
                 mass_outside_agb_max=float(mass_outside_agb.max()) if n_tile else 0.0,
                 sum_check_max=float(max_sum_check),
-                xi_marginal_max_dev=max_xi_marginal_dev,
                 f45_range_field_stars=(f45_lo, f45_hi),
                 mass_above_top_star=float(above_top_star),
                 mass_above_top_agb=float(above_top_agb),
                 on_grid_star_range=(float(on_grid_star.min()), float(on_grid_star.max())) if n_tile else (0.0, 0.0),
                 on_grid_agb_range=(float(on_grid_agb.min()), float(on_grid_agb.max())) if n_tile else (0.0, 0.0))
-    return (path, n_tile, mass_outside_star, mass_outside_agb, max_sum_check, max_xi_marginal_dev,
+    return (path, n_tile, mass_outside_star, mass_outside_agb, max_sum_check,
             above_top_star, above_top_agb, on_grid_star, on_grid_agb)
 
 
@@ -452,11 +426,6 @@ def build_cloud(config, region):
     `C_THETA` offset, never a class-specific origin). Neither grid carries
     an `N_EFF` dataset or a `FLOOR` attribute, per `bmstp.grid`'s module docstring."""
     p3_path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
-    old_xi_marginal = None
-    if os.path.exists(p3_path):
-        with h5py.File(p3_path, "r") as f:
-            if "XI_MARGINAL" in f:
-                old_xi_marginal = f["XI_MARGINAL"][()]
 
     with progress.Stage("bmstp.shapes.cloud", region) as st:
         loaded = sample_cloud._region_profile(config, region)
@@ -561,17 +530,6 @@ def build_cloud(config, region):
                              if n_sl else np.zeros((0,), dtype=np.float32))
         on_grid_h2s = (1.0 - mass_outside_h2s).astype(np.float32)
 
-        # sec. 5.5's acceptance identity: the current (pre-overwrite)
-        # XI_MARGINAL restricted to the cloud interval and renormalised,
-        # against the freshly built one -- both read above/built above,
-        # compared per sightline.
-        max_xi_marginal_dev = float("nan")
-        if old_xi_marginal is not None and old_xi_marginal.shape[0] == n_sl:
-            ref = np.stack([
-                sample_cloud.restrict_old_xi_marginal(loaded, row, old_xi_marginal[row], d_front, d_back)
-                for row in range(n_sl)]) if n_sl else np.zeros((0, n_x))
-            max_xi_marginal_dev = float(np.max(np.abs(ref - xi_marginal))) if n_sl else 0.0
-
         path = p3_path
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with h5py.File(path, "w") as f:
@@ -645,7 +603,6 @@ def build_cloud(config, region):
                 on_grid_yso_range=(float(on_grid_yso.min()), float(on_grid_yso.max())) if n_sl else (0.0, 0.0),
                 removed_frac_median=float(np.median(removed_frac)) if n_sl else 0.0,
                 removed_frac_max=float(removed_frac.max()) if n_sl else 0.0,
-                xi_marginal_max_dev=max_xi_marginal_dev,
                 f45_peak=peak_f45, f45_p16=p16_f45, f45_p84=p84_f45,
                 sigma_d_dex=sigma_d, mass_outside_k=float(mo_k),
                 row46_corr=row46_corr, median_col_corr=med_corr,
@@ -657,28 +614,13 @@ def build_cloud(config, region):
                 if n_sl else (0.0, 0.0),
                 peak_offset_dex_range=(float(peak_offset_dex.min()), float(peak_offset_dex.max()))
                 if n_sl else (0.0, 0.0))
-    return (path, n_sl, mass_outside_yso, removed_frac, max_xi_marginal_dev,
+    return (path, n_sl, mass_outside_yso, removed_frac,
             (peak_f45, p16_f45, p84_f45), on_grid_yso, (d_front, d_back))
 
 
 # ---------------------------------------------------------------------------
 # P4 -- the galaxy grid, survey-wide (sec. 5.4)
 # ---------------------------------------------------------------------------
-
-def _rebin_conservative(old_edges, values, new_edges):
-    """Conservative regridding of a piecewise-constant histogram from
-    `old_edges` (its own bin edges, uniform-density within each bin -- what
-    a stored histogram value means) to `new_edges`: exact, since a
-    piecewise-constant function's cumulative sum is piecewise LINEAR, so
-    linear interpolation of that cumulative sum at the new edges recovers
-    it exactly there, whatever the new grid's own phase (`np.interp` on
-    `old_edges`'s own cumulative sum, then differenced) -- the same
-    technique this module used to check `XI_MARGINAL` against a native
-    profile before the 4.5B redesign."""
-    old_cum = np.concatenate([[0.0], np.cumsum(values)])
-    new_cum = np.interp(new_edges, old_edges, old_cum, left=0.0, right=old_cum[-1])
-    return np.diff(new_cum)
-
 
 def build_gal(config):
     """Writes P4, `bmstp/shape/gal_shape_survey.hdf5`: the one
@@ -691,15 +633,6 @@ def build_gal(config):
     dataset and no `FLOOR` attribute, like every shape product
     (`bmstp.grid`'s module docstring)."""
     path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
-    old = None
-    if os.path.exists(path):
-        # the current product is already on the common `LOG10_F45_EDGES`
-        # schema -- there is no pre-4.5B `LOG10_B_EDGES` product to
-        # migrate -- so the conservative regrid below only ever runs
-        # across the grid's own top-edge move, never a per-shape-origin
-        # phase shift.
-        with h5py.File(path, "r") as f:
-            old = dict(grid=f["GRID"][()], log10_f45_edges=f["LOG10_F45_EDGES"][()])
 
     with progress.Stage("bmstp.shapes.gal") as st:
         x, log10_b, w = sample_gal.sample(config)
@@ -726,21 +659,10 @@ def build_gal(config):
             ):
                 build_module.write_dataset(f, name, data, *REGISTRY[(_GAL_STEM, name)])
 
-        # sec. 9's identity: the current (pre-overwrite) P4's own `log10 S`
-        # marginal, conservatively rebinned onto the common axis, against
-        # the freshly built one.
-        max_dev = float("nan")
-        if old is not None:
-            old_b_marginal = old["grid"].sum(axis=0)
-            old_b_edges = old["log10_f45_edges"]
-            ref = _rebin_conservative(old_b_edges, old_b_marginal, grid.LOG10_F45_EDGES)
-            new_b_marginal = h.sum(axis=0)
-            max_dev = float(np.max(np.abs(ref - new_b_marginal)))
-
         st.done(path, mass_outside=float(mass_outside), sum_check=float(sum_check),
-                density_gal_deg2=density_gal, f45_marginal_max_dev=max_dev,
+                density_gal_deg2=density_gal,
                 mass_above_top_gal=float(above_top_gal), on_grid_gal=float(on_grid_gal))
-    return path, mass_outside, sum_check, max_dev, above_top_gal, on_grid_gal
+    return path, mass_outside, sum_check, above_top_gal, on_grid_gal
 
 
 def _gal_cosmic_variance_dex(config):
@@ -754,20 +676,17 @@ def _gal_cosmic_variance_dex(config):
 # ---------------------------------------------------------------------------
 
 def build(config, regions=None):
-    """Per region, P2 (the star family) and P3 (the cloud class); once,
-    P4 (GAL, survey-wide, built when `regions` includes the survey's
-    first region or the file is absent -- IMPLEMENTATION_BMSTP_DRAFT.md
-    sec. 1.2 P4)."""
+    """Per region, P2 (the star family) and P3 (the cloud class); once per
+    call, P4 (GAL, survey-wide, IMPLEMENTATION_BMSTP_DRAFT.md sec. 1.2
+    P4) -- rebuilt every time this driver runs, regardless of `regions`,
+    since it is not a per-region product."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
     for region in region_names:
         build_star_family(config, region)
         build_cloud(config, region)
 
-    gal_path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
-    first_region = regions_module.REGIONS[0].name
-    if first_region in region_names or not os.path.exists(gal_path):
-        build_gal(config)
+    build_gal(config)
 
 
 if __name__ == "__main__":

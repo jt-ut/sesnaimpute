@@ -451,38 +451,9 @@ def build(config, regions=None):
     for region in region_names:
         with progress.Stage("bmstp.density", region) as st:
             path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
-            # rule: read the CURRENT product's own DENSITY_* before this
-            # build overwrites it -- the sec. 9 identity (STAR/GAL before
-            # retention bit-identical to the current, pre-W26 product)
-            # and the YSO before/after report both need it.
-            old = None
-            if os.path.exists(path):
-                with h5py.File(path, "r") as f:
-                    old = dict(
-                        density_star=np.asarray(f["DENSITY_STAR"][:], dtype=np.float64),
-                        density_gal=np.asarray(f["DENSITY_GAL"][:], dtype=np.float64),
-                        density_yso=np.asarray(f["DENSITY_YSO"][:], dtype=np.float64),
-                        density_h2s=np.asarray(f["DENSITY_H2S"][:], dtype=np.float64),
-                    )
 
             result = build_region(config, region, st)
             write_region(path, result)
-
-            if old is not None and old["density_star"].shape == result["density_star_raw"].shape:
-                star_dev = float(np.max(np.abs(old["density_star"] - result["density_star_raw"])))
-                gal_dev = float(np.max(np.abs(old["density_gal"] - result["density_gal_raw"])))
-                yso_sum_before = float(np.sum(old["density_yso"]))
-            else:
-                star_dev = gal_dev = float("nan")
-                yso_sum_before = float("nan")
-            yso_sum_after = float(np.sum(result["density_yso"]))
-            print(f"bmstp.density {region}: identity DENSITY_STAR before-retention max abs dev "
-                  f"vs current product={star_dev:.3e}, DENSITY_GAL before-retention max abs dev "
-                  f"vs current product={gal_dev:.3e} (sec. 9: bit-identical, W26 adds only the "
-                  f"multiplicative retention step)")
-            print(f"bmstp.density {region}: DENSITY_YSO sum over sources before={yso_sum_before:.6g} "
-                  f"after={yso_sum_after:.6g} deg^-2 (before: law_count(A_s), no retention; after: "
-                  f"law_count(A_cloud) x ON_GRID_YSO, W26)")
 
             cloud_frac = result["cloud_frac"]
             cf_med, cf_16, cf_84 = np.percentile(cloud_frac, [50, 16, 84])
@@ -494,21 +465,6 @@ def build(config, regions=None):
                 print(f"bmstp.density {region}: on-grid fraction {cls} median={np.median(og):.6g}")
             print(f"bmstp.density {region}: on-grid fraction GAL={result['on_grid_gal']:.6g} "
                   f"(survey-wide attr; PAHC uses STAR's own on-grid fraction, sec. 4.1)")
-
-            # every dataset but DENSITY_H2S is unaffected by this change:
-            # a bit-identical check against the current product for each,
-            # and DENSITY_H2S's own before/after median ratio, which is
-            # exactly ON_GRID_H2S since nothing else in its computation
-            # moved.
-            if old is not None and old["density_h2s"].shape == result["density_h2s"].shape:
-                for cls, key in (("STAR", "density_star"), ("GAL", "density_gal"),
-                                  ("YSO", "density_yso")):
-                    dev = float(np.max(np.abs(old[key] - result[key])))
-                    print(f"bmstp.density {region}: identity {key.upper()} vs current "
-                          f"product max abs dev={dev:.3e}")
-                h2s_ratio = result["density_h2s"] / old["density_h2s"]
-                print(f"bmstp.density {region}: DENSITY_H2S before/after median ratio="
-                      f"{np.median(h2s_ratio):.6g} (should equal ON_GRID_H2S's own median)")
 
             # sec. 9-style acceptance: DENSITY_YSO on the first ten sources,
             # recomputed BY HAND straight off the adopted-column and

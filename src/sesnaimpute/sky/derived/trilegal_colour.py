@@ -145,10 +145,6 @@ def build(config, regions=None):
     """
     out_path = config_module.product_path(config, "sky/derived", "trilegal", "colour", "survey")
     with progress_module.Stage("sky.derived.trilegal_colour") as st:
-        if os.path.exists(out_path):
-            print(f"trilegal_colour derive: {out_path} present, skipped")
-            st.done(out_path, skipped=1)
-            return
         df = read_download(_download_path(config))
         table = colour_table(df)
         write_table(out_path, table, len(df))
