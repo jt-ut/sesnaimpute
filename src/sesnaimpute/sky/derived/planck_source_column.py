@@ -34,10 +34,6 @@ _STEM = "column_planck_source"
 PLANCK_NSIDE = 2048
 PLANCK_BAD = -1.6375e30  # the map's own bad-pixel sentinel
 
-# Process-local cache so a joblib worker that draws more than one region
-# reads the 1.6 GB FITS map once, not once per region.
-_MAP_CACHE = {}
-
 
 def _planck_map_path(config):
     import glob
@@ -52,10 +48,7 @@ def _planck_map_path(config):
 
 def _load_planck_map(fits_path):
     """TAU353 and ERR_TAU as full HEALPix NESTED arrays at `PLANCK_NSIDE`,
-    bad pixels set to NaN; cached per process."""
-    cached = _MAP_CACHE.get(fits_path)
-    if cached is not None:
-        return cached
+    bad pixels set to NaN."""
     from astropy.io import fits
     with fits.open(fits_path, memmap=True) as hd:
         hdr = hd[1].header
@@ -66,7 +59,6 @@ def _load_planck_map(fits_path):
         err_tau = np.asarray(hd[1].data["ERR_TAU"], dtype=np.float64)
     tau353[tau353 <= PLANCK_BAD / 2.0] = np.nan
     err_tau[err_tau <= PLANCK_BAD / 2.0] = np.nan
-    _MAP_CACHE[fits_path] = (tau353, err_tau)
     return tau353, err_tau
 
 
@@ -129,9 +121,8 @@ def _read_curated_positions(config, region):
         return np.asarray(f["GAL_L_DEG"][:], dtype=np.float64), np.asarray(f["GAL_B_DEG"][:], dtype=np.float64)
 
 
-def _build_one_region(config, region, fits_path, cal):
+def _build_one_region(config, region, tau353, err_tau, cal):
     l, b = _read_curated_positions(config, region)
-    tau353, err_tau = _load_planck_map(fits_path)
     _pix, _tau_nn, err_nn, tau_interp = sample_planck_column(l, b, tau353, err_tau)
 
     a_col = cal["a_tau"] * tau_interp
@@ -156,28 +147,30 @@ def _build_one_region(config, region, fits_path, cal):
 def build(config, regions=None):
     """Builds the Planck source-column product for each region in
     `regions` (default: every region in `regions.REGIONS`), parallelised
-    over regions with joblib; each worker reads the Planck map once per
-    process and samples every region it draws from its own cached copy.
+    over regions with a joblib thread pool; the Planck map is read once,
+    before the pool starts, and every thread samples that one copy
+    read-only.
     """
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
     fits_path = _planck_map_path(config)
     cal = _load_planck_calibration(config)
+    tau353, err_tau = _load_planck_map(fits_path)
     with progress_module.Stage("sky.derived.planck_source_column") as st:
         n_regions = len(regions)
         n_done = [0]
 
         def _one(region):
-            r = _build_one_region(config, region, fits_path, cal)
+            r = _build_one_region(config, region, tau353, err_tau, cal)
             n_done[0] += 1
             st.tick(n_done[0], n_regions, "regions")
             return r
 
-        # Threads, not processes: `_MAP_CACHE` is process-local, so a process
-        # pool would hold one 1.6 GB Planck map per worker (config.n_jobs
-        # copies at once); every per-region computation here is vectorised
-        # numpy/healpy array arithmetic, which releases the GIL, so threads
-        # cost nothing and keep the map to the one cached copy (CODING_RULES.md 10a).
+        # Threads, not processes: a process pool would hold one 1.6 GB Planck
+        # map per worker (config.n_jobs copies at once); every per-region
+        # computation here is vectorised numpy/healpy array arithmetic, which
+        # releases the GIL, so threads cost nothing and share the one map
+        # loaded above, read-only (CODING_RULES.md 10a).
         results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
             delayed(_one)(region) for region in regions)
         st.done(None, regions=n_regions, sources=sum(r[1] for r in results),
