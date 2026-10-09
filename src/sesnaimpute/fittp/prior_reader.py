@@ -774,7 +774,28 @@ def _factor_weight_sum(reader, model_index, d_values, chunk=20000):
     return g
 
 
-def ln_prior_mass(reader, rows, h, model_index):
+def prepare_prior_mass(reader, rows, model_index):
+    """Parent-side, before the worker pool forks: form `_factor_weight_sum`
+    once per distinct per-source factor column value among `rows` (once in
+    all, for a class whose factors read no per-source column) and hold the
+    table on `reader`, keyed by that value tuple, for `ln_prior_mass` to look
+    up. Returns the number of distinct `G` tables formed."""
+    rows = np.asarray(rows)
+    model_index = np.asarray(model_index)
+    names = sorted(set(f["D_F"] for f in reader.factors if f["D_F"]))
+    table = {}
+    if names:
+        cols = np.stack([np.asarray(reader.p1_columns[nm][rows], dtype=np.float64) for nm in names], axis=1)
+        keys = set(map(tuple, np.unique(cols, axis=0)))
+    else:
+        keys = {()}
+    for key in keys:
+        table[key] = _factor_weight_sum(reader, model_index, dict(zip(names, key)))
+    reader.__dict__["_g_table"] = (names, table)
+    return len(table)
+
+
+def ln_prior_mass(reader, rows, h):
     """`(n,)` float64: `ln` of the class's prior integrated over every
     template, every brightness and every extinction cell at each source,
     with no likelihood -- what `ln_lambda0`'s logsumexp over templates
@@ -782,24 +803,16 @@ def ln_prior_mass(reader, rows, h, model_index):
     `ln density[s] + ln Sum_b hb[b] G(b)`: `hb` is the source's blurred
     shape `h` summed over the extinction cells (it sums to one; the two
     designs' cell weights sum to one in every cell), and `G` is
-    `_factor_weight_sum`. An exact sum over all cells and all templates;
-    `G` is class-level and held on `reader` unless a factor reads a
-    per-source column (`D_F`), in which case it is formed per source."""
+    `_factor_weight_sum`, looked up in the table `prepare_prior_mass` formed
+    in the parent (a missing entry is an error, never a recompute)."""
     rows = np.asarray(rows)
-    model_index = np.asarray(model_index)
-    cache = reader.__dict__.setdefault("_g_cache", {})
+    names, table = reader.__dict__["_g_table"]
     out = np.empty(rows.size, dtype=np.float64)
-    names = sorted(set(f["D_F"] for f in reader.factors if f["D_F"]))
     for k in range(rows.size):
-        d_values = {nm: float(reader.p1_columns[nm][rows[k]]) for nm in names}
-        key = (model_index.size, tuple(d_values[nm] for nm in names))
-        if key not in cache:
-            if len(cache) > 64:
-                cache.clear()
-            cache[key] = _factor_weight_sum(reader, model_index, d_values)
+        key = tuple(float(reader.p1_columns[nm][rows[k]]) for nm in names)
         hb = h[k].astype(np.float64).sum(axis=0)
         with np.errstate(divide="ignore"):
-            out[k] = np.log(reader.density[rows[k]]) + np.log(float((hb * cache[key]).sum()))
+            out[k] = np.log(reader.density[rows[k]]) + np.log(float((hb * table[key]).sum()))
     return out
 
 

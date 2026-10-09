@@ -661,7 +661,7 @@ def _source_task(i):
             occam_gap = float(logsumexp(s1_arr) - s1_arr.max())
             ln_ev_measured = float(logsumexp(s0_arr))
             ln_ev_nondet = float(logsumexp(s1_arr))
-        ln_prior_mass = float(prior_reader.ln_prior_mass(w["reader"], rows, h, model_index)[0])
+        ln_prior_mass = float(prior_reader.ln_prior_mass(w["reader"], rows, h)[0])
 
         good = not combined_flagged
 
@@ -1132,6 +1132,13 @@ def build_region_class(config, region, cls, st, reader, catalog,
     path = config_module.product_path(config, "fittp", "fit", cls, "source", region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
+    # LN_PRIOR_MASS: the factor-weight table G once per distinct per-source
+    # factor value in this region's sources, formed here in the parent so
+    # the workers (forked after) only look it up.
+    import time as _time
+    _t0 = _time.time()
+    n_g = prior_reader.prepare_prior_mass(reader, np.arange(n_source), np.arange(n_model))
+    print("fittp.sweep.%s [%s]: prior-mass tables %d in %.2f s" % (cls, region, n_g, _time.time() - _t0), flush=True)
     _set_worker_state(config=config, cls=cls, reader=reader, gaia_term=gaia_term,
                        template_log=template_log, ln_subclass_prob=ln_subclass_prob, n_sub=n_sub,
                        width_dex=width_dex, topk=topk, n_model=n_model,
