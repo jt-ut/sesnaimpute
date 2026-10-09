@@ -245,6 +245,10 @@ def build_region(config, region, st):
     # measured on this quantity
     gas_path = config_module.product_path(
         config, "sky/derived", "adopted", "column", "source", region=region)
+    if not os.path.exists(gas_path):
+        raise FileNotFoundError(
+            "bmstp.density: no gas column for %s at %s -- run the "
+            "'sesnaimpute.sky.derived.column' RUNBOOKtp.sh line first" % (region, gas_path))
     with h5py.File(gas_path, "r") as f:
         a_col_gas = np.asarray(f["A_COL_K"][:], dtype=np.float64)
     if a_col_gas.shape[0] != n:

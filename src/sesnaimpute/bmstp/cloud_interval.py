@@ -51,6 +51,10 @@ def _sightline_a_col_k(config, region, hpx_pix_256):
     assigns each row's sources, read here at the sightline granule
     directly rather than re-derived."""
     path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "sightline")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "bmstp.cloud_interval: no adopted extinction sightline product at %s -- run the "
+            "'sesnaimpute.sky.derived.column' RUNBOOKtp.sh line first" % path)
     with h5py.File(path, "r") as f:
         pix_all = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
         a_k_all = np.asarray(f["A_K"][:], dtype=np.float64)
