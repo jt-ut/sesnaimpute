@@ -309,7 +309,8 @@ _CLASSIFY_PART_KEYS = ("NAME", "CLASS_SESNA", "P_CLASS", "P_SUBCLASS", "P_YSO", 
                        "LOG10_CANDIDATE_FLUX", "LOG10_FLUX_IMPUTED", "LOG10_FLUX_IMPUTED_COV",
                        "A_K_POST", "A_K_POST_SIG",
                        "ENTROPY_CLASS", "ENTROPY_SUBCLASS",
-                       "LOG_ODDS", "LOG_ODDS_PRIOR", "LOG_ODDS_DATA")
+                       "LOG_ODDS", "LOG_ODDS_PRIOR", "LOG_ODDS_DATA",
+                       "LOG_ODDS_MEASURED", "LOG_ODDS_NONDET", "LOG_ODDS_GAIA")
 
 #: SPEC_BMSTP_DRAFT.md section 1/6.1 -- the log10-flux Jacobian, `sigma_log
 #: = sigma_f / (f ln 10)`, the same conversion `fittp.likelihood.prepare`
@@ -401,6 +402,19 @@ def _prior_terms(class_files, density_file, start, stop):
             else:
                 ln_s[:, ci] = np.log(sum(d[k] for k in nonstellar if k != c) + d["STAR"])
     return ln_m, ln_s
+
+
+def _stage_evidence(class_files, start, stop):
+    """`(ev_measured, ev_nondet)`, each `(m, 6)` in CLASSES order: each
+    class's evidence after the prior and the measured bands, and after the
+    undetected bands too (Gaia not yet), summed over every model -- the fit
+    files' own `LN_EVIDENCE_MEASURED`/`LN_EVIDENCE_NONDET`. `None` where the
+    fit does not record them."""
+    if not all("LN_EVIDENCE_MEASURED" in class_files[c] and "LN_EVIDENCE_NONDET" in class_files[c]
+               for c in CLASSES):
+        return None
+    return tuple(np.stack([np.asarray(class_files[c][k][start:stop], dtype=np.float64) for c in CLASSES],
+                          axis=1) for k in ("LN_EVIDENCE_MEASURED", "LN_EVIDENCE_NONDET"))
 
 
 def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals,
@@ -538,6 +552,25 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     log_odds_data = np.where(bad, np.nan, log_odds_data)
     log_odds = np.where(flagged_any[:, None], np.nan, log_odds)
 
+    # LOG_ODDS_MEASURED/_NONDET/_GAIA (m, 6): the data part split by the
+    # chain rule. At each stage t (prior, + measured bands, + undetected
+    # bands, + Gaia) a class's log odds against the other five is
+    # E_t(C) - lse_{k!=C} E_t(k); each column is one stage's odds less the
+    # previous stage's, so the three sum to LOG_ODDS_DATA exactly.
+    stages = _stage_evidence(class_files, start, stop)
+    if stages is None:
+        log_odds_meas = log_odds_nondet = log_odds_gaia = np.full_like(log_odds, np.nan)
+    else:
+        ev_m, ev_n = stages
+        with np.errstate(divide="ignore", invalid="ignore"):
+            odds_m = ev_m - _lse_others(ev_m)
+            odds_n = ev_n - _lse_others(ev_n)
+            log_odds_meas = odds_m - log_odds_prior
+            log_odds_nondet = odds_n - odds_m
+            log_odds_gaia = (ev - lse_other) - odds_n
+        log_odds_meas, log_odds_nondet, log_odds_gaia = (
+            np.where(bad | ~np.isfinite(x), np.nan, x) for x in (log_odds_meas, log_odds_nondet, log_odds_gaia))
+
     return dict(
         class_sesna=class_sesna.astype(np.int16),
         p_class=p_cls.astype(np.float32), p_subclass=p_sub.astype(np.float32),
@@ -548,6 +581,9 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
         entropy_class=ent_c.astype(np.float32), entropy_subclass=ent_s.astype(np.float32),
         log_odds=log_odds.astype(np.float32), log_odds_prior=log_odds_prior.astype(np.float32),
         log_odds_data=log_odds_data.astype(np.float32),
+        log_odds_measured=log_odds_meas.astype(np.float32),
+        log_odds_nondet=log_odds_nondet.astype(np.float32),
+        log_odds_gaia=log_odds_gaia.astype(np.float32),
         imputed_identity_err=imputed_identity_err, n_flagged=int(flagged.sum()),
         n_prior_vetoed=int(prior_vetoed.sum()),
     )
@@ -563,6 +599,8 @@ def _write_classify_part(part_path, batch):
             ("A_K_POST_SIG", "a_k_post_sig"), ("ENTROPY_CLASS", "entropy_class"),
             ("ENTROPY_SUBCLASS", "entropy_subclass"), ("LOG_ODDS", "log_odds"),
             ("LOG_ODDS_PRIOR", "log_odds_prior"), ("LOG_ODDS_DATA", "log_odds_data"),
+            ("LOG_ODDS_MEASURED", "log_odds_measured"), ("LOG_ODDS_NONDET", "log_odds_nondet"),
+            ("LOG_ODDS_GAIA", "log_odds_gaia"),
         ):
             build_module.write_dataset(f, key, batch[field], *REGISTRY[(_POSTERIOR_STEM, key)])
         build_module.write_dataset(f, "P_YSO", batch["p_class"][:, YSO_INDEX],

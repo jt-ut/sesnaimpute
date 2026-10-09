@@ -2741,6 +2741,22 @@ REGISTRY = {
         "spread in brightness and extinction, explains its measured fluxes, its "
         "non-detections and its Gaia measurement. Positive means the source's own "
         "data favour the class."),
+    ("posterior_classification_source", "LOG_ODDS_MEASURED"): ("nats",
+        "The part of LOG_ODDS_DATA that comes from the bands the source was measured "
+        "in: how much they move each class's log odds from the prior. "
+        "LOG_ODDS_MEASURED + LOG_ODDS_NONDET + LOG_ODDS_GAIA = LOG_ODDS_DATA. Not a "
+        "number where the fit does not record it."),
+    ("posterior_classification_source", "LOG_ODDS_NONDET"): ("nats",
+        "The part of LOG_ODDS_DATA that comes from the bands the survey observed but "
+        "did not detect the source in, after the measured bands: how much they "
+        "move each class's log odds. A non-detection can only count against a class "
+        "on its own; it raises a class's odds only by counting more heavily against "
+        "the others. Not a number where the fit does not record it."),
+    ("posterior_classification_source", "LOG_ODDS_GAIA"): ("nats",
+        "The part of LOG_ODDS_DATA that comes from Gaia's detection and parallax, "
+        "after the measured and undetected bands: how much they move each class's "
+        "log odds. Zero where Gaia did not see the source. Not a number where the "
+        "fit does not record it."),
     ("posterior_classification_source", "P_YSO"): ("probability",
         "Probability that the source is a young stellar object: the young stellar "
         "object column of P_CLASS."),
