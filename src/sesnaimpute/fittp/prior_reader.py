@@ -774,25 +774,26 @@ def _factor_weight_sum(reader, model_index, d_values, chunk=20000):
     return g
 
 
-def prepare_prior_mass(reader, rows, model_index):
-    """Parent-side, before the worker pool forks: form `_factor_weight_sum`
-    once per distinct per-source factor column value among `rows` (once in
-    all, for a class whose factors read no per-source column) and hold the
-    table on `reader`, keyed by that value tuple, for `ln_prior_mass` to look
-    up. Returns the number of distinct `G` tables formed."""
+def prior_mass_keys(reader, rows):
+    """`(names, keys)`: the per-source factor columns this class's factors
+    read (`D_F`), and the sorted distinct value tuples among `rows` -- one
+    `G` table per key (`((),)` for a class whose factors read no column)."""
     rows = np.asarray(rows)
-    model_index = np.asarray(model_index)
     names = sorted(set(f["D_F"] for f in reader.factors if f["D_F"]))
-    table = {}
-    if names:
-        cols = np.stack([np.asarray(reader.p1_columns[nm][rows], dtype=np.float64) for nm in names], axis=1)
-        keys = set(map(tuple, np.unique(cols, axis=0)))
-    else:
-        keys = {()}
-    for key in keys:
-        table[key] = _factor_weight_sum(reader, model_index, dict(zip(names, key)))
+    if not names:
+        return names, [()]
+    cols = np.stack([np.asarray(reader.p1_columns[nm][rows], dtype=np.float64) for nm in names], axis=1)
+    return names, sorted(set(map(tuple, np.unique(cols, axis=0))))
+
+
+def prior_mass_table(reader, names, key, model_index):
+    """The `G` table (`_factor_weight_sum`) for one key of `prior_mass_keys`."""
+    return _factor_weight_sum(reader, np.asarray(model_index), dict(zip(names, key)))
+
+
+def set_prior_mass_tables(reader, names, table):
+    """Hold the gathered `{key: G}` on `reader` for `ln_prior_mass`'s lookups."""
     reader.__dict__["_g_table"] = (names, table)
-    return len(table)
 
 
 def ln_prior_mass(reader, rows, h):
@@ -803,8 +804,8 @@ def ln_prior_mass(reader, rows, h):
     `ln density[s] + ln Sum_b hb[b] G(b)`: `hb` is the source's blurred
     shape `h` summed over the extinction cells (it sums to one; the two
     designs' cell weights sum to one in every cell), and `G` is
-    `_factor_weight_sum`, looked up in the table `prepare_prior_mass` formed
-    in the parent (a missing entry is an error, never a recompute)."""
+    `_factor_weight_sum`, looked up in the tables the sweep formed
+    (`set_prior_mass_tables`) before the source tasks (a missing entry is an error, never a recompute)."""
     rows = np.asarray(rows)
     names, table = reader.__dict__["_g_table"]
     out = np.empty(rows.size, dtype=np.float64)

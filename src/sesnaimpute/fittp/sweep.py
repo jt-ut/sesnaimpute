@@ -412,6 +412,13 @@ def _set_worker_state(**kw):
     _WORKER = kw
 
 
+def _g_task(key):
+    """One `LN_PRIOR_MASS` factor-weight table (`prior_reader.prior_mass_table`)
+    for `key`, from the fork-inherited reader."""
+    w = _WORKER
+    return key, prior_reader.prior_mass_table(w["reader"], w["g_names"], key, np.arange(w["n_model"]))
+
+
 def _init_worker():
     """The Pool's own initializer, run once per forked worker before its
     first task -- deliberately carries no data (item 4: an initializer
@@ -1132,13 +1139,6 @@ def build_region_class(config, region, cls, st, reader, catalog,
     path = config_module.product_path(config, "fittp", "fit", cls, "source", region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
-    # LN_PRIOR_MASS: the factor-weight table G once per distinct per-source
-    # factor value in this region's sources, formed here in the parent so
-    # the workers (forked after) only look it up.
-    import time as _time
-    _t0 = _time.time()
-    n_g = prior_reader.prepare_prior_mass(reader, np.arange(n_source), np.arange(n_model))
-    print("fittp.sweep.%s [%s]: prior-mass tables %d in %.2f s" % (cls, region, n_g, _time.time() - _t0), flush=True)
     _set_worker_state(config=config, cls=cls, reader=reader, gaia_term=gaia_term,
                        template_log=template_log, ln_subclass_prob=ln_subclass_prob, n_sub=n_sub,
                        width_dex=width_dex, topk=topk, n_model=n_model,
@@ -1156,11 +1156,37 @@ def build_region_class(config, region, cls, st, reader, catalog,
     # arguments; an explicit signature list would be a second thing to keep
     # right). `_source_task` catches its own failures, so this cannot raise.
     numba.set_num_threads(1)
+    # LN_PRIOR_MASS: the warm source's own factor-weight table G first (the
+    # warm task looks it up), then the rest below in a pool of their own.
+    g_names, g_keys = prior_reader.prior_mass_keys(reader, np.arange(n_source))
+    g_warm_key = prior_reader.prior_mass_keys(reader, np.array([batch_bounds[0][0]]))[1][0]
+    g_table = {g_warm_key: prior_reader.prior_mass_table(reader, g_names, g_warm_key, np.arange(n_model))}
+    prior_reader.set_prior_mass_tables(reader, g_names, g_table)
     _source_task(batch_bounds[0][0])
 
     # Forked below every load above, and below the warm -- the threading layer
     # pinned at import is fork-safe by numba's own contract.
     ctx = mp.get_context("fork")
+    # G once per distinct per-source factor value in THIS job's sources, over
+    # the pool, one task per value (workers read the fork-inherited reader,
+    # nothing from disk); the pool is then closed and the source pool below
+    # forks with the gathered dict already on `reader`.
+    todo = [k for k in g_keys if k not in g_table]
+    _t0 = time.time()
+    if todo:
+        _set_worker_state(reader=reader, g_names=g_names, n_model=n_model)
+        with _make_pool(ctx, n_workers) as gpool:
+            for key, g in gpool.imap(_g_task, todo, chunksize=1):
+                g_table[key] = g
+    print("fittp.sweep.%s [%s]: prior-mass tables %d in %.2f s (%d workers)"
+          % (cls, region, len(g_table), time.time() - _t0, n_workers), flush=True)
+    prior_reader.set_prior_mass_tables(reader, g_names, g_table)
+    _set_worker_state(config=config, cls=cls, reader=reader, gaia_term=gaia_term,
+                       template_log=template_log, ln_subclass_prob=ln_subclass_prob, n_sub=n_sub,
+                       width_dex=width_dex, topk=topk, n_model=n_model,
+                       sigma_lib_l=sigma_lib_l,
+                       flux=catalog["flux"], sigma=catalog["sigma"], origin=catalog["origin"],
+                       f_lim50=catalog["f_lim50"])
     with _make_pool(ctx, n_workers) as pool:
         for bi, (bstart, bstop) in enumerate(batch_bounds):
             if selected is not None and bi not in selected:
