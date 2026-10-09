@@ -66,49 +66,59 @@ def _masks_path(config):
 
 
 def _field_masks(masks_path, region):
-    """`{band: [(astropy.wcs.WCS, bool mask array), ...]}` for `region`'s
-    own per-field masks (`MASKS/<region>/<band>/field_*`), which carry a
-    real CD-matrix WCS; the `ALLBAND/union_*` datasets are a different,
-    lower-fidelity reprojection and are not read here."""
+    """`(h5py.File, {band: [(astropy.wcs.WCS, h5py.Dataset), ...]})` for
+    `region`'s own per-field masks (`MASKS/<region>/<band>/field_*`), which
+    carry a real CD-matrix WCS; the `ALLBAND/union_*` datasets are a
+    different, lower-fidelity reprojection and are not read here. The mask
+    pixel data itself is NOT read here -- only shape and WCS attrs (cheap
+    HDF5 metadata) -- so the caller must keep the returned file open until
+    done, then close it; `_band_covered` reads only the sub-rectangle of
+    each dataset its query points actually touch."""
     out = {band: [] for band in SPITZER_BANDS}
-    with h5py.File(masks_path, "r") as f:
-        group = f["MASKS"][region]
-        for band in SPITZER_BANDS:
-            if band not in group:
+    f = h5py.File(masks_path, "r")
+    group = f["MASKS"][region]
+    for band in SPITZER_BANDS:
+        if band not in group:
+            continue
+        band_group = group[band]
+        for key in band_group.keys():
+            if not key.startswith("field_"):
                 continue
-            band_group = group[band]
-            for key in band_group.keys():
-                if not key.startswith("field_"):
-                    continue
-                dataset = band_group[key]
-                mask = np.asarray(dataset[()], dtype=bool)
-                attrs = dataset.attrs
-                wcs = WCS(naxis=2)
-                wcs.wcs.crpix = [attrs["CRPIX1"], attrs["CRPIX2"]]
-                wcs.wcs.cdelt = [1.0, 1.0]
-                wcs.wcs.crval = [attrs["CRVAL1"], attrs["CRVAL2"]]
-                wcs.wcs.ctype = [str(attrs["CTYPE1"]), str(attrs["CTYPE2"])]
-                wcs.wcs.cd = [[attrs["CD1_1"], attrs["CD1_2"]],
-                              [attrs["CD2_1"], attrs["CD2_2"]]]
-                out[band].append((wcs, mask))
-    return out
+            dataset = band_group[key]
+            attrs = dataset.attrs
+            wcs = WCS(naxis=2)
+            wcs.wcs.crpix = [attrs["CRPIX1"], attrs["CRPIX2"]]
+            wcs.wcs.cdelt = [1.0, 1.0]
+            wcs.wcs.crval = [attrs["CRVAL1"], attrs["CRVAL2"]]
+            wcs.wcs.ctype = [str(attrs["CTYPE1"]), str(attrs["CTYPE2"])]
+            wcs.wcs.cd = [[attrs["CD1_1"], attrs["CD1_2"]],
+                          [attrs["CD2_1"], attrs["CD2_2"]]]
+            out[band].append((wcs, dataset))
+    return f, out
 
 
 def _band_covered(ra_deg, dec_deg, fields):
     """Boolean, one entry per `(ra_deg, dec_deg)` sample point: True where
     the point falls on a covered pixel of any of this band's field masks
-    (nearest-pixel WCS lookup, the same test the old anchor code used)."""
+    (nearest-pixel WCS lookup, the same test the old anchor code used).
+    Loads no full mask: for each field, projects the query points to pixel
+    coordinates, takes the bounding box of the in-bounds ones, and reads
+    only that sub-rectangle off the HDF5 dataset; a field whose query
+    points are all out of bounds is skipped with no read at all."""
     covered = np.zeros(ra_deg.shape, dtype=bool)
-    for wcs, mask in fields:
+    for wcs, dataset in fields:
         px, py = wcs.wcs_world2pix(ra_deg, dec_deg, 0)
-        ny, nx = mask.shape
+        ny, nx = dataset.shape
         col = np.rint(px).astype(np.int64)
         row = np.rint(py).astype(np.int64)
         inbounds = (col >= 0) & (col < nx) & (row >= 0) & (row < ny)
         idx = np.flatnonzero(inbounds)
         if idx.size == 0:
             continue
-        covered[idx] |= mask[row[idx], col[idx]]
+        y0, y1 = int(row[idx].min()), int(row[idx].max()) + 1
+        x0, x1 = int(col[idx].min()), int(col[idx].max()) + 1
+        sub = np.asarray(dataset[y0:y1, x0:x1], dtype=bool)
+        covered[idx] |= sub[row[idx] - y0, col[idx] - x0]
     return covered
 
 
@@ -206,8 +216,11 @@ def _write(config, region, granule, pix, frac):
 
 
 def _build_one_region(config, region, masks_path):
-    fields_by_band = _field_masks(masks_path, region)
-    pix256, frac256, pix512, frac512 = _region_coverage(fields_by_band)
+    h5file, fields_by_band = _field_masks(masks_path, region)
+    try:
+        pix256, frac256, pix512, frac512 = _region_coverage(fields_by_band)
+    finally:
+        h5file.close()
     _write(config, region, "sightline", pix256, frac256)
     _write(config, region, "hpx512", pix512, frac512)
     return dict(region=region, n_sightline=int(pix256.size), n_hpx512=int(pix512.size),
