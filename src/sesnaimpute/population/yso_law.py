@@ -133,6 +133,10 @@ def _cloud_survey_map(config):
 def _admitted_pix512(config, region):
     path = config_module.product_path(config, "catalog", "sesna", "depth-grid",
                                        "hpx512", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "population.yso_law: no depth-grid product for region %r at %s -- run the "
+            "'sesnaimpute.catalog.depth_grid' RUNBOOK line first" % (region, path))
     with h5py.File(path, "r") as f:
         return np.sort(np.asarray(f["HPX_PIX_512"][:], dtype=np.int64))
 
@@ -147,6 +151,10 @@ def _column_sightline(config):
     if key not in _COLUMN_SIGHTLINE_CACHE:
         path = config_module.product_path(config, "sky/derived", "adopted",
                                            "column", "sightline")
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                "population.yso_law: no adopted sightline column product at %s -- run the "
+                "'sesnaimpute.sky.derived.column' RUNBOOK line first" % path)
         with h5py.File(path, "r") as f:
             pix256 = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
             a_k = np.asarray(f["A_K"][:], dtype=np.float64)

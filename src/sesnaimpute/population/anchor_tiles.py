@@ -349,6 +349,10 @@ def _read_field_stars_raw(config, region):
     re-evaluated per pixel (`_predicted_histograms`).
     """
     path = config_module.product_path(config, "population", "trilegal", "field-stars", "region", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"anchor_tiles: no field-star product for region {region!r} at {path} -- run "
+            "the `sesnaimpute.population.field_stars` RUNBOOK line first")
     with h5py.File(path, "r") as f:
         omega_sim_deg2 = float(f.attrs["OMEGA_SIM_DEG2"])
         raw = f["RAW"]
@@ -447,10 +451,18 @@ def _read_anchor_counts(config, region, pixels):
     gaia_path = config_module.product_path(config, "sky/derived", "gaia", "counts", "hpx512", region=region)
     twomass_path = config_module.product_path(config, "sky/derived", "twomass", "counts", "hpx512", region=region)
     ukidss_path = config_module.product_path(config, "sky/derived", "ukidss", "counts", "hpx512", region=region)
+    if not os.path.exists(gaia_path):
+        raise FileNotFoundError(
+            f"anchor_tiles: Gaia counts missing for region {region!r} at {gaia_path} -- run "
+            "`sesnaimpute.sky.derived.gaia_counts` first")
     with h5py.File(gaia_path, "r") as f:
         gaia_pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
         gaia_edges_full = np.asarray(f["MAG_EDGES"][:], dtype=np.float64)
         gaia_n = np.asarray(f["N"][:], dtype=np.float64)
+    if not os.path.exists(twomass_path):
+        raise FileNotFoundError(
+            f"anchor_tiles: 2MASS counts missing for region {region!r} at {twomass_path} -- run "
+            "`sesnaimpute.sky.derived.twomass_counts` first")
     with h5py.File(twomass_path, "r") as f:
         ks_pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
         ks_edges_2mass = np.asarray(f["MAG_EDGES"][:], dtype=np.float64)

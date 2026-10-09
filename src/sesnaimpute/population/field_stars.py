@@ -406,6 +406,10 @@ def _region_width_dex(config, region):
     region counts fit's width for the five Spitzer bands, `catalog.depths`'
     fitted width for the three 2MASS bands, module docstring)."""
     path = config_module.product_path(config, "catalog", "sesna", "limits", "source", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "field_stars: no per-source limits product at %r -- run the "
+            "'sesnaimpute.catalog.depth_grid' RUNBOOK line first" % path)
     with h5py.File(path, "r") as f:
         return np.asarray(f["W_DEX"][:], dtype=np.float64)
 

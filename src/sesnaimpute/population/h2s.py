@@ -25,6 +25,8 @@ lognormal's axis. `bmstp.shapes` and `bmstp.atlas` read them directly.
    knot's IRAC flux is needed. J, H and M1 carry no Giannini ratio.
 """
 
+import os
+
 import h5py
 import numpy as np
 from astropy import units as u
@@ -101,6 +103,10 @@ def uwish2_reference_knots(config):
     to any target region's own distance.
     """
     path = config_module.product_path(config, "sky/derived", "knots", "uwish2", "survey")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "population.h2s: no UWISH2 knots product at %s -- run the "
+            "'sesnaimpute.sky.derived.knots' RUNBOOK line first" % path)
     with h5py.File(path, "r") as f:
         jet = f["JET_CLASS"][:].astype(bool)
         ra = np.asarray(f["RA_DEG"][:], dtype=float)[jet]
@@ -161,6 +167,10 @@ def _load_giannini_ratios(config):
     Vela D knots carry a measured colour for (SPEC_PRIORS.md section 7,
     "the knot colours")."""
     path = config_module.product_path(config, "sky/derived", "knots", "colours", "survey")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "population.h2s: no knot-colours product at %s -- run the "
+            "'sesnaimpute.sky.derived.knots' RUNBOOK line first" % path)
     out = {}
     with h5py.File(path, "r") as f:
         for band in IRAC_RATIO_BAND_KEYS:

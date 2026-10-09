@@ -143,6 +143,10 @@ def _load_sigma_zp_herschel(config):
     caller with no per-source `ZP_SIGMA_K` of its own gets."""
     path = config_module.product_path(config, "sky/derived", "herschel",
                                       "sigma", "survey")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "prior.kernel: no Herschel zero-point sigma product at %s -- run the "
+            "'sesnaimpute.sky.derived.column' RUNBOOK line first" % path)
     with h5py.File(path, "r") as f:
         return float(f["SIGMA_ZP_K"][()])
 
@@ -547,6 +551,10 @@ def _match_one_region_to_catalogue(config, region, ra_deg, dec_deg):
     from sesnaimpute.granules import access
 
     cat_path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
+    if not os.path.exists(cat_path):
+        raise FileNotFoundError(
+            "prior.kernel: no curated catalogue for region %r at %s -- run the "
+            "'sesnaimpute.catalog.curated' RUNBOOK line first" % (region, cat_path))
     with h5py.File(cat_path, "r") as f:
         ra_cat = np.asarray(f["RA_DEG"][:], dtype=np.float64)
         dec_cat = np.asarray(f["DEC_DEG"][:], dtype=np.float64)
@@ -616,6 +624,10 @@ def _match_protostars_to_beam(config):
     Herschel arm at the matched source (a Planck-arm source).
     """
     proto_path = f"{config.data_root}/sky/derived/protostars/protostars_survey.hdf5"
+    if not os.path.exists(proto_path):
+        raise FileNotFoundError(
+            "prior.kernel: no protostar overlay product at %s -- run the "
+            "'sesnaimpute.sky.derived.protostars' RUNBOOK line first" % proto_path)
     with h5py.File(proto_path, "r") as f:
         region = f["REGION"][:]
         cls = f["CLASS"][:]
@@ -918,6 +930,10 @@ def build(config, regions=None):
     st = progress.Stage("prior.kernel")
     subbeam_path = config_module.product_path(config, "sky/derived", "herschel",
                                               "subbeam", "region")
+    if not os.path.exists(subbeam_path):
+        raise FileNotFoundError(
+            "prior.kernel: no Herschel sub-beam product at %s -- run the "
+            "'sesnaimpute.sky.derived.subbeam' RUNBOOK line first" % subbeam_path)
     zp = _load_sigma_zp_herschel(config)
     a_nodes = column_grid.nodes(config)
     n_node = a_nodes.size
