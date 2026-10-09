@@ -2829,50 +2829,31 @@ REGISTRY = {
         "classes. Not a number where none voted."),
 
     # fittp.library_resolution -- library-resolution_check_survey: whether
-    # each class's library has enough templates to resolve the survey's own
-    # photometric error, one survey-wide file (moved from fittp/
+    # each class's library samples spectral shape finely enough, against
+    # the library's own fixed sampling scale (twice the survey's
+    # calibration precision, `constants.LIBRARY_SAMPLING_SIGMA_LOG_DEX`),
+    # one survey-wide file (WP-PRIOR-8; moved from fittp/
     # library_resolution.py's own _READINGS, READINGS brief section 3).
     ("library-resolution_check_survey", "LIBRARY"): ("library name",
         "The model library this row describes, one per class."),
-    ("library-resolution_check_survey", "SIGMA_LIB_DEX"): ("dex",
-        "How finely that library samples spectral shape: the typical distance from "
-        "a model to its nearest neighbor. The fit adds this to each band's "
-        "measurement error, so no model can beat a near-identical one by more than "
-        "the sampling allows."),
-    ("library-resolution_check_survey", "SIGMA_I"): ("dex",
-        "The survey's flux uncertainty per band, as the tenth percentile over "
-        "sources. Band order is the BANDS dataset."),
     ("library-resolution_check_survey", "BANDS"): ("band name",
-        "The eight SESNA bands, in SIGMA_I's column order."),
-    ("library-resolution_check_survey", "OTHER_LIBRARY"): ("library name",
-        "A library other than the young stellar object one."),
-    ("library-resolution_check_survey", "OTHER_N_TEMPLATES"): ("models",
+        "The eight SESNA bands, in SIGMA_LIB_DEX's column order."),
+    ("library-resolution_check_survey", "N_TEMPLATES"): ("models",
         "How many models that library holds."),
-    ("library-resolution_check_survey", "OTHER_D50"): ("dex",
-        "Median distance from a model of that library to its nearest neighbor."),
-    ("library-resolution_check_survey", "OTHER_D90"): ("dex",
+    ("library-resolution_check_survey", "D50"): ("sampling lengths",
+        "Median distance from a model of that library to its nearest neighbor, in "
+        "units of the library's own fixed sampling scale (twice the survey's "
+        "calibration precision, per band, combined into one dimensionless shape "
+        "space)."),
+    ("library-resolution_check_survey", "D90"): ("sampling lengths",
         "The same distance at the ninetieth percentile: the spacing of that "
-        "library's most isolated models."),
-    ("library-resolution_check_survey", "OTHER_THICK_ENOUGH"): ("true or false",
-        "Whether that library's models are spaced more widely than this check's "
-        "tolerance, so adding models would sharpen the fit."),
-    ("library-resolution_check_survey", "YSO_GROUP"): ("model group",
-        "Which group of young stellar object models this row describes. The library "
-        "is built in groups by evolutionary stage and geometry."),
-    ("library-resolution_check_survey", "YSO_N_AT_SIZE"): ("models",
-        "How many models that group holds at each of four sizes, thinned from the "
-        "full group, so spacing can be measured against library size."),
-    ("library-resolution_check_survey", "YSO_D50_AT_SIZE"): ("dex",
-        "Median nearest-neighbor distance for that group at each of the four sizes."),
-    ("library-resolution_check_survey", "YSO_D90_AT_SIZE"): ("dex",
-        "Ninetieth-percentile nearest-neighbor distance at each of the four sizes."),
-    ("library-resolution_check_survey", "YSO_D_EFF"): ("dimensionless",
-        "How fast that group's spacing shrinks as models are added, from the slope "
-        "of spacing against size. It acts like the number of dimensions the group "
-        "really fills."),
-    ("library-resolution_check_survey", "YSO_N_STAR"): ("models",
-        "How many models that group would need to reach this check's tolerance, "
-        "read off the fitted slope, at each of three tolerances."),
+        "library's most isolated models. Reported alongside D50 but does not enter "
+        "SIGMA_LIB_DEX."),
+    ("library-resolution_check_survey", "SIGMA_LIB_DEX"): ("dex",
+        "How finely that library samples spectral shape, per band, read straight off "
+        "D50 (the formula alone, no fallback): the fit adds this in quadrature to "
+        "that band's measurement error and its calibration systematic, so no model "
+        "can beat a near-identical one by more than the sampling allows."),
 
 }
 

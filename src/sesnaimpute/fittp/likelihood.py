@@ -7,9 +7,10 @@ use, no runbook line (IMPLEMENTATION_BMSTP_DRAFT.md section 4 row 2.2).
 
 `prepare` builds, once per source and the source's own class/library, the
 per-band weight at variance `sigma_i^2 = sigma_log,i^2 + sigma_cal,i^2 +
-sigma_lib,L^2` (section 6.1; `sigma_lib,L` read once by the caller from
-`fittp.library_resolution`'s check product for the class named and handed
-in as a plain number), a band SESNA marks detected but whose flux is <= 0
+sigma_lib,L,i^2` (section 6.1; `sigma_lib,L`, one number PER BAND,
+WP-PRIOR-8, read once by the caller from `fittp.library_resolution`'s
+check product for the class named and handed in as an `(8,)` array), a
+band SESNA marks detected but whose flux is <= 0
 counted as unmeasured rather than a fabricated datum, and a non-finite
 sigma on a detected band flagging the source rather than carrying a NaN
 normalisation into every template's likelihood. `fit` then fits every
@@ -220,30 +221,31 @@ Fit = namedtuple("Fit", (
 
 @lru_cache(maxsize=None)
 def sigma_lib_by_class(path):
-    """`{class code: sigma_lib,L dex}`, section 6.1's one number per LIBRARY,
-    from `fittp.library_resolution`'s check product (its `LIBRARY`/
-    `SIGMA_LIB_DEX` datasets). Called once by `fittp.sweep` in the parent,
-    before the pool is created, and handed into `prepare` as a plain
-    number -- not re-opened per source or per worker (rule 9); `lru_cache`
-    on the product's own path keeps a second class's own read of the same
-    tiny (six-number) file from repeating the open.
+    """`{class code: sigma_lib,L (8,) dex}`, section 6.1's one vector PER
+    BAND per LIBRARY (WP-PRIOR-8), from `fittp.library_resolution`'s check
+    product (its `LIBRARY`/`SIGMA_LIB_DEX` datasets, `SIGMA_LIB_DEX`'s
+    second axis in `BAND_KEYS` order). Called once by `fittp.sweep` in the
+    parent, before the pool is created, and handed into `prepare` as a
+    plain array -- not re-opened per source or per worker (rule 9);
+    `lru_cache` on the product's own path keeps a second class's own read
+    of the same tiny file from repeating the open.
     """
     with h5py.File(path, "r") as f:
         libs = np.char.decode(f["LIBRARY"][:].astype("S"), "utf-8")
-        sigma = f["SIGMA_LIB_DEX"][:]
-    return dict(zip(libs.tolist(), sigma.tolist()))
+        sigma = np.asarray(f["SIGMA_LIB_DEX"][:], dtype=np.float64)
+    return {lib: sigma[i] for i, lib in enumerate(libs.tolist())}
 
 
 def prepare(config, flux, sigma, origin, sigma_lib_l, f_lim50, width_dex):
     """One source's own fit inputs (SPEC_BMSTP_DRAFT.md section 6.1): its
     fluxes, uncertainties and `ORIGIN_FNU` (the same read `fittp.cascade`
-    uses, each `(8,)`), this class's one `sigma_lib,L` number
-    (`sigma_lib_by_class`, read once in the parent) and this source's own
-    `F_LIM_50` and region roll-off width `WIDTH_DEX` (`(8,)`, sliced once
-    from the region-wide arrays the caller loaded, never read from disk
-    here). Builds the per-band weight, the non-detection mask (undetected,
-    limited, and observed: `ORIGIN_UNOBSERVED` bands carry no term) and
-    the fit's other design-independent numbers. The extinction-law design itself is not
+    uses, each `(8,)`), this class's own per-band `sigma_lib,L` vector
+    `(8,)` (`sigma_lib_by_class`, read once in the parent) and this
+    source's own `F_LIM_50` and region roll-off width `WIDTH_DEX` (`(8,)`,
+    sliced once from the region-wide arrays the caller loaded, never read
+    from disk here). Builds the per-band weight, the non-detection mask
+    (undetected, limited, and observed: `ORIGIN_UNOBSERVED` bands carry no
+    term) and the fit's other design-independent numbers. The extinction-law design itself is not
     built here: it depends on the fit's own extinction mark (section 2), so
     `fit` builds and converges it once the per-template residual exists.
     """
@@ -262,8 +264,8 @@ def prepare(config, flux, sigma, origin, sigma_lib_l, f_lim50, width_dex):
     # section 6.1: the per-band variance is the statistical log-flux error
     # in quadrature with the band's absolute-calibration systematic
     # (`constants.SIGMA_CAL_DEX`, a survey property, not this module's own)
-    # and the class's library resolution (sigma_lib,L, one number, the
-    # same in every band): sigma_log = sigma_f/(f ln 10), weight
+    # and the class's own library resolution (sigma_lib,L, one number PER
+    # BAND, WP-PRIOR-8): sigma_log = sigma_f/(f ln 10), weight
     # 1/sigma_i^2 for detected bands, zero elsewhere (undetected bands
     # never enter the sum: see the zero row/column of P in `fit`).
     safe_flux = np.where(detected, flux, 1.0)

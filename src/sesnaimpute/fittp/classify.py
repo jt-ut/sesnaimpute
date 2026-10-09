@@ -431,8 +431,8 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     safe_flux = np.where(detected, flux, 1.0)
     with np.errstate(divide="ignore", invalid="ignore"):
         sigma_log = sigma / (safe_flux * _LN10)
-    sigma_lib_map = sigma_lib_vals[map_c_safe]                        # (m,)
-    sigma2 = sigma_log ** 2 + SIGMA_CAL_DEX[None, :] ** 2 + sigma_lib_map[:, None] ** 2
+    sigma_lib_map = sigma_lib_vals[map_c_safe]                        # (m, 8), WP-PRIOR-8: per band
+    sigma2 = sigma_log ** 2 + SIGMA_CAL_DEX[None, :] ** 2 + sigma_lib_map ** 2
     weight = np.where(detected & (sigma_log > 0), 1.0 / sigma2, 0.0)  # (m, 8)
     cross_0, cross_1 = _cross_cov_by_law(config, weight)
     p_dense_map = p_dense_stack[map_c_safe, row_idx]                  # (m,)
@@ -499,13 +499,14 @@ def build_region(config, region, st, beta):
     joins the parts once every batch is done."""
     _require_fit_files(config, region)
 
-    # section 6.1's sigma_lib,L, one number per class's own library,
-    # gathered once here (never per batch or per source) so `_classify_
-    # batch` rebuilds the MAP class's own measurement weight exactly as
-    # `likelihood.prepare` built it at fit time.
+    # section 6.1's sigma_lib,L, one (8,) per-band vector per class's own
+    # library (WP-PRIOR-8), gathered once here (never per batch or per
+    # source) so `_classify_batch` rebuilds the MAP class's own
+    # measurement weight exactly as `likelihood.prepare` built it at fit
+    # time.
     lib_path = config_module.product_path(config, "fittp", "check", "library-resolution", "survey")
     sigma_lib_by_cls = likelihood.sigma_lib_by_class(lib_path)
-    sigma_lib_vals = np.array([sigma_lib_by_cls[cls] for cls in CLASSES], dtype=np.float64)
+    sigma_lib_vals = np.stack([sigma_lib_by_cls[cls] for cls in CLASSES])  # (n_class, 8)
 
     class_files = {}
     names = None

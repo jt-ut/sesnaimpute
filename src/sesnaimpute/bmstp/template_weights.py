@@ -250,6 +250,47 @@ def _read_register(config, cls):
     return dict(names=names, f_ref=f_ref, subclass=subclass, floor_linear=floor_linear)
 
 
+def _read_subclass_prob(config, cls):
+    """This class's own per-template subclass fractions, `FRAC_<subclass>`
+    (`sed_models/<key>/members.fits`'s own columns, the SAME numbers the
+    curated register's `/subclass_prob` group carries, `fittp.sweep.
+    _register`'s own read generalised here for the population weight):
+    `(n_model, n_sub)` float64, `definitions.SUBCLASSES_OF[cls]`'s own
+    column order, each row summing to 1. WP-PRIOR-8, the members-group
+    ruling: a kept template is a class MIXTURE of however many raw grid
+    points collapsed onto it, whatever their own subclass -- never
+    weighted by HOW MANY collapsed (`N_MEMBERS` itself enters no weight,
+    spec sec 1.4's own division, in either direction) -- so wherever class
+    is a constrained quantity, both the population statement's numerator
+    and the library's own density in it are evaluated with these
+    fractions, not with the register's single hard `SUBCLASS` label.
+    """
+    key = definitions.CLASS_REGISTER[cls]
+    path = f"{config.inputs['sed_models']}/registers/{key}_register.hdf5"
+    subclass_order = definitions.SUBCLASSES_OF[cls]
+    with h5py.File(path, "r") as f:
+        if "subclass_prob" not in f:
+            raise ValueError(f"template_weights._read_subclass_prob: {path} carries no "
+                              "'subclass_prob' group")
+        missing = [s for s in subclass_order if s not in f["subclass_prob"]]
+        if missing:
+            raise ValueError(
+                f"template_weights._read_subclass_prob: {path} 'subclass_prob' is "
+                f"missing column(s) {missing} of definitions.SUBCLASSES_OF[{cls!r}] "
+                f"= {subclass_order}")
+        frac = np.stack(
+            [np.asarray(f["subclass_prob"][s][:], dtype=np.float64) for s in subclass_order],
+            axis=1)
+    row_sum = frac.sum(axis=1)
+    bad = ~np.isclose(row_sum, 1.0, atol=1e-6)
+    if bad.any():
+        raise ValueError(
+            f"template_weights._read_subclass_prob: {path} 'subclass_prob' rows do not "
+            f"sum to 1 (max|sum-1|={float(np.max(np.abs(row_sum[bad] - 1.0))):.3g} on "
+            f"{int(bad.sum())}/{frac.shape[0]} rows)")
+    return frac
+
+
 def _log10_f45_centers():
     """`LOG10_F45_CENTERS` (110), the one common brightness axis every
     library's `C_THETA` and factor rows are stored on (sec 2, sec 4.1)."""
@@ -483,14 +524,21 @@ def yso_population_weight(config):
     factor). (iii) The evolutionary-class census: three groups fitted on
     the census's own slopes (`_yso_class_shares`,
     `population/yso/law_yso_region.hdf5`'s `CLASS_SHARE_PROTO`/
-    `CLASS_SHARE_DISK`/`CLASS_SHARE_WEAK`) -- Class 0 + Class I together,
-    Class II + transition disk together, Class III alone; the split
-    within a group is the templates' own (i)x(ii) weight. `Sigma w_theta`
-    is exactly 1 (the three shares sum to 1, the schema's own invariant)
-    by construction. Returns `(names, w_theta)` in the register's own
-    row order."""
+    `CLASS_SHARE_DISK`/`CLASS_SHARE_WEAK`) -- Class 0 + Class I + Flat
+    together, Class II + transition disk together, Class III alone
+    (`YSO_CENSUS_GROUPS`); WP-PRIOR-8: a template's membership in a group
+    is its own SOFT fraction, the sum of its `FRAC_<subclass>` over the
+    group's subclasses (`_read_subclass_prob`), not a hard `SUBCLASS`
+    mask, because a kept template is a class mixture of however many raw
+    grid points collapsed onto it; the split within a group is the
+    templates' own (i)x(ii) weight times that fraction. `Sigma w_theta` is
+    exactly 1 (the three shares sum to 1, the schema's own invariant, and
+    every template's own group fractions sum to 1 over the three groups
+    since `FRAC_<subclass>` sums to 1 over all six subclasses) by
+    construction. Returns `(names, w_theta)` in the register's own row
+    order."""
     reg = _read_register(config, "yso")
-    names, subclass = reg["names"], reg["subclass"]
+    names = reg["names"]
     n_model = names.size
     c_theta = _c_theta(reg)  # log10 f_ref,4.5,theta, floored (sec 4.1)
 
@@ -521,15 +569,20 @@ def yso_population_weight(config):
 
     # (iii) the evolutionary-class census: three groups fitted on Dunham
     # et al. 2015's own slopes (W83, `_yso_class_shares`); within each
-    # group the split is w_pre_census's own share.
+    # group the split is w_pre_census's own share, apportioned by the
+    # template's own SOFT group fraction (WP-PRIOR-8's members-group
+    # ruling), not a hard SUBCLASS mask -- `N_MEMBERS` enters nothing
+    # here, only the register's own `/subclass_prob` fractions.
+    frac = _read_subclass_prob(config, "YSO")       # (n_model, n_sub), SUBCLASSES_OF["YSO"] order
+    sub_idx = {s: i for i, s in enumerate(definitions.SUBCLASSES_OF["YSO"])}
     share_proto, share_disk, share_weak = _yso_class_shares(config)
     census_groups = tuple(zip(YSO_CENSUS_GROUPS, (share_proto, share_disk, share_weak)))
     w_theta = np.zeros(n_model, dtype=np.float64)
     for labels, share in census_groups:
-        sel = np.isin(subclass, list(labels))
-        group_sum = w_pre_census[sel].sum()
+        frac_group = frac[:, [sub_idx[s] for s in labels]].sum(axis=1)   # soft group fraction
+        group_sum = (w_pre_census * frac_group).sum()
         if group_sum > 0:
-            w_theta[sel] = share * w_pre_census[sel] / group_sum
+            w_theta += share * w_pre_census * frac_group / group_sum
     return names, w_theta
 
 
@@ -687,17 +740,20 @@ def build_yso(config, region):
               flush=True)
 
         # report only (spec sec 5.5's check, sec 5.5 census): the census
-        # share held by each register SUBCLASS value (survey-wide, same
-        # in every region by construction -- the expected check figure)
-        # against the same class's share of the ON-GRID retained weight
-        # AT THIS REGION's distance (post-placement, what the built table
-        # can actually represent), a diagnostic never used in the weight
-        # itself.
-        subclass = reg["subclass"]
-        for label in np.unique(subclass):
-            sel = subclass == label
-            census_share = float(w_theta[sel].sum())
-            retained_share = float(retained[sel].sum() / retained.sum())
+        # share held by each of the SIX subclasses (survey-wide, same in
+        # every region by construction -- the expected check figure)
+        # against the same subclass's share of the ON-GRID retained
+        # weight AT THIS REGION's distance (post-placement, what the
+        # built table can actually represent), a diagnostic never used in
+        # the weight itself. WP-PRIOR-8: a template's own share of a
+        # subclass is its soft `FRAC_<subclass>` (`_read_subclass_prob`),
+        # not a hard `SUBCLASS` mask, so every one of the six subclasses
+        # is reported (not only those that are some template's own
+        # plurality label).
+        frac = _read_subclass_prob(config, "YSO")
+        for i, label in enumerate(definitions.SUBCLASSES_OF["YSO"]):
+            census_share = float((w_theta * frac[:, i]).sum())
+            retained_share = float((retained * frac[:, i]).sum() / retained.sum())
             print(f"template_weights.yso [{region}]: subclass={label} "
                   f"census_share={census_share:.4f} on_grid_retained_share={retained_share:.4f}",
                   flush=True)
