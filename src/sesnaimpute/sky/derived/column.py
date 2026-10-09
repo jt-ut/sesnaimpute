@@ -6,10 +6,19 @@ region has a Herschel product and the source is covered, finite and
 positive; `A_COL_K = A_K` from the Planck arm (`planck_source_column.py`,
 PLANCK_FWHM_ARCMIN beam) elsewhere. A measured systematic left unapplied
 is an error of its own size (owner, 2026-09-06): `field` is the source's
-own region, one of the 13 named in `herschel_column.py`'s `sigma`/
-`survey` `FIELD_NAME`/`ZP_FIELD`/`ZP_SIGMA_FIELD`; a Herschel-covered
-region absent from that table (no column-check pixels) gets no offset
-and `ZP_SIGMA_K = 0`, unchanged from before. Sigma, the beam and the
+own region, one of the 13 `_measure_field_zeropoints` finds enough
+low-column Herschel-covered admitted sightline pixels for. That
+measurement -- median `A_HERSCHEL - A_PLANCK` at each field's own
+Herschel-covered admitted sightline pixels, `A_PLANCK` below
+`FIELD_ZP_LOW_COLUMN_CUT_AK` -- runs here, in the same pass that merges
+the two arms (`build`), and is written into `sky.derived.herschel_column`'s
+`sigma`/`survey` product (`FIELD_NAME`/`ZP_FIELD`/`ZP_SIGMA_FIELD`),
+not read from a second product that needs a prior pass of this same
+stage to exist. `merge_region(config, region, cal)` called standalone,
+with no `field_zp` of its own, instead reads that already-written table
+(`_load_field_zeropoints`); a Herschel-covered region absent from it (no
+qualifying pixels) gets no offset and `ZP_SIGMA_K = 0`, unchanged from
+before. Sigma, the beam and the
 Herschel map id all follow the same arm as the value -- one arm per
 source, never blended; sigma is rebuilt from the Herschel arm's own
 random term (`SIGMA_RAND_K`) plus the field's own `ZP_SIGMA_K`, not
@@ -75,10 +84,20 @@ _EXTINCTION_SOURCE_STEM = "extinction_adopted_source"
 _COLUMN_SIGHTLINE_STEM = "column_adopted_sightline"
 _EXTINCTION_SIGHTLINE_STEM = "extinction_adopted_sightline"
 _CHECK_STEM = "column-check_adopted_survey"
+_HERSCHEL_SIGMA_STEM = "sigma_herschel_survey"
 
 PROV_HERSCHEL = np.uint8(0)
 PROV_PLANCK = np.uint8(1)
 HERSCHEL_STATED_FWHM_ARCSEC = 36.3
+
+#: Below this Planck-arm column, the two arms' disagreement is dominated
+#: by Herschel's additive zero point rather than the tau353 calibration's
+#: own multiplicative residual: the column-check table (page 5's read of
+#: `column-check_adopted_survey.hdf5`) shows the Planck/Herschel ratio
+#: departing from unity mostly below A_K ~ 0.3 and sitting within 1-5% of
+#: unity from 0.19 to 0.50, so a cut here isolates the offset the way the
+#: measurement is meant to.
+FIELD_ZP_LOW_COLUMN_CUT_AK = 0.3
 
 #: SPEC_PRIORS.md 1.1's sightline product: a pixel is Herschel-covered
 #: when at least half its native HGBS block samples are finite -- looser
@@ -132,6 +151,87 @@ def _load_field_zeropoints(config):
         zp = np.asarray(f["ZP_FIELD"][:], dtype=np.float64)
         zp_sigma = np.asarray(f["ZP_SIGMA_FIELD"][:], dtype=np.float64)
     return {n: (float(z), float(s)) for n, z, s in zip(names, zp, zp_sigma)}
+
+
+def _robust_sigma(x):
+    """1.4826 * MAD: the same robust scatter estimator
+    `herschel_column.py`'s own map-pair replicate uses for its random
+    term."""
+    med = np.median(x)
+    return float(1.482602218505602 * np.median(np.abs(x - med)))
+
+
+def _measure_field_zeropoints(config):
+    """The Herschel zero point, one number per field (owner, 2026-09-06):
+    for every HGBS-covered SESNA region, the median of
+    `A_HERSCHEL - A_PLANCK` over that region's Herschel-covered admitted
+    sightline pixels with `A_PLANCK < FIELD_ZP_LOW_COLUMN_CUT_AK`, and its
+    uncertainty as that offset's own scatter (`_robust_sigma` of the same
+    per-pixel differences) divided by sqrt(n). This is the arm-against-arm
+    comparison at sightline granule (`planck_column.load_hgbs`, the
+    granule map's admitted sightlines, `_load_planck_sightline`) -- none
+    of it is this stage's own output, so it runs in the same pass that
+    merges the two arms, before the per-source merge (`merge_region`)
+    consumes the result. Returns `(names, zp_ak, zp_sigma_ak, n)`, one
+    entry per field with at least 2 qualifying pixels, region-name
+    order."""
+    herschel = planck_column.load_hgbs(config, min_fill=SIGHTLINE_MIN_FILL)
+    covered_regions = sorted(r for r, h in herschel.items() if h["pix"].size)
+    planck_pix, planck_ak, _ = _load_planck_sightline(config)
+
+    names, zp, zp_sigma, n_out = [], [], [], []
+    for region in covered_regions:
+        admitted_pix, _ = profile_module._admitted_sightlines(config, region)
+        _, pix, a_h = _herschel_on_admitted(admitted_pix, herschel[region])
+        if pix.size == 0:
+            continue
+        loc = np.searchsorted(planck_pix, pix)
+        a_p = planck_ak[loc]
+        sel = a_p < FIELD_ZP_LOW_COLUMN_CUT_AK
+        n = int(np.count_nonzero(sel))
+        if n < 2:
+            continue
+        d = a_h[sel] - a_p[sel]
+        names.append(region)
+        zp.append(float(np.median(d)))
+        zp_sigma.append(_robust_sigma(d) / np.sqrt(n))
+        n_out.append(n)
+    return (names, np.asarray(zp, dtype=np.float64),
+            np.asarray(zp_sigma, dtype=np.float64), np.asarray(n_out, dtype=np.int64))
+
+
+def _write_field_zeropoints(config, names, zp, zp_sigma, n_field):
+    """Writes this pass's field zero point (`_measure_field_zeropoints`)
+    into `herschel`/`sigma`/`survey`'s `FIELD_NAME`/`ZP_FIELD`/
+    `ZP_SIGMA_FIELD`/`ZP_N_FIELD`, and `SIGMA_ZP_K` as the RMS of the
+    per-field values, for a reader that still wants one number
+    (`population.kernel._load_sigma_zp_herschel`'s fallback).
+    `BEAM_FWHM_ARCSEC`/`C0`/`C1`/`N_PAIRS`/`MAP_NAME` --
+    `herschel_column.build`'s own -- are left untouched. The file must
+    already exist (that RUNBOOK line)."""
+    out_path = config_module.product_path(config, "sky/derived", "herschel", "sigma", "survey")
+    if not os.path.exists(out_path):
+        raise FileNotFoundError(
+            "sky.derived.column._write_field_zeropoints: %r missing -- run the "
+            "sesnaimpute.sky.derived.herschel_column RUNBOOK line for it" % out_path)
+    sigma_zp_survey = float(np.sqrt(np.mean(zp ** 2))) if zp.size else 0.0
+    with h5py.File(out_path, "a") as f:
+        for ds in ("FIELD_NAME", "ZP_FIELD", "ZP_SIGMA_FIELD", "ZP_N_FIELD", "SIGMA_ZP_K"):
+            if ds in f:
+                del f[ds]
+        for name, data in (
+            ("FIELD_NAME", np.array([n.encode("utf-8") for n in names])),
+            ("ZP_FIELD", zp),
+            ("ZP_SIGMA_FIELD", zp_sigma),
+            ("ZP_N_FIELD", n_field),
+            ("SIGMA_ZP_K", np.float64(sigma_zp_survey)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_HERSCHEL_SIGMA_STEM, name)])
+    print("column.build FIELD_ZP n_fields=%d cut=A_PLANCK<%.2f sigma_zp_survey_rms=%.4f"
+          % (len(names), FIELD_ZP_LOW_COLUMN_CUT_AK, sigma_zp_survey), flush=True)
+    for name, z, zs, n in zip(names, zp, zp_sigma, n_field):
+        print("  field %-22s n=%5d  ZP_FIELD=%+.4f  ZP_SIGMA_FIELD=%.4f" % (name, n, z, zs), flush=True)
+    return sigma_zp_survey
 
 
 def merge_region(config, region, cal, field_zp=None):
@@ -654,11 +754,17 @@ def build(config, regions=None):
     `regions` (default: every region in `regions.REGIONS`), merging the
     Planck and Herschel arms one region at a time, parallelised with
     joblib; then the adopted sightline column and its Herschel/Planck/
-    3-D-map check, both survey-wide."""
+    3-D-map check, both survey-wide. The field zero point
+    (`_measure_field_zeropoints`) is measured and written
+    (`_write_field_zeropoints`) first, in this same pass, from the two
+    arms' sightline views alone -- not read back from a second product --
+    so a cold build (no prior run of this stage) still applies it."""
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
     cal = _load_planck_calibration(config)
-    field_zp = _load_field_zeropoints(config)
+    zp_names, zp_ak, zp_sigma_ak, zp_n = _measure_field_zeropoints(config)
+    _write_field_zeropoints(config, zp_names, zp_ak, zp_sigma_ak, zp_n)
+    field_zp = {n: (float(z), float(s)) for n, z, s in zip(zp_names, zp_ak, zp_sigma_ak)}
     with progress_module.Stage("sky.derived.column") as st:
         n_regions = len(regions)
         n_done = [0]

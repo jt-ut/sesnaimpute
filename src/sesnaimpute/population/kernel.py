@@ -54,7 +54,7 @@ product's `cloud_gamma_herschel` for YSO/H2S (`fittp.prior_reader`'s
 `CLOUD` flag, `atlas.protostars._verdict`) -- never a literal `2.0`.
 
 The zero point is one systematic per field (owner, 2026-09-06;
-`sky.derived.herschel_column.field_zeropoints`), not one survey constant,
+`sky.derived.column._measure_field_zeropoints`), not one survey constant,
 and a measured systematic left unapplied is an error of its own size: the
 column stage (`sky.derived.column.merge_region`) now subtracts the
 field's own offset from a Herschel-arm source's `A_COL_K` and writes the
@@ -139,7 +139,7 @@ _U_LOG_FLOOR = 1.0e-6
 def _load_sigma_zp_herschel(config):
     """`SIGMA_ZP_K`: the survey-wide RMS of the per-field Herschel zero
     points (SPEC_PRIORS.md section 1.2), from
-    `sky.derived.herschel_column.write_field_zeropoint` -- the fallback a
+    `sky.derived.column._write_field_zeropoints` -- the fallback a
     caller with no per-source `ZP_SIGMA_K` of its own gets."""
     path = config_module.product_path(config, "sky/derived", "herschel",
                                       "sigma", "survey")

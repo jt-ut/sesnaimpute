@@ -107,17 +107,17 @@ PY sesnaimpute.sky.download.twomass_counts.build
 PY sesnaimpute.sky.download.ukidss_gps.build   # UKIDSS GPS clean-photometry rows, K < 17.5, per region (SPEC_BMSTP_DRAFT.md sec 5.1 STAR anchor, deep K extension, W37)
 PY sesnaimpute.sky.derived.gaia_counts
 PY sesnaimpute.sky.derived.twomass_counts
-PY sesnaimpute.sky.derived.gaia_twomass_counts   # the joint (G, Ks) anchor's own external, whole-pixel view (SPEC_BMSTP_DRAFT.md sec 5.1, W45)
+PY sesnaimpute.sky.derived.gaia_twomass_counts   # the joint (G, Ks) anchor's own external, whole-pixel view (SPEC_BMSTP_DRAFT.md sec 5.1, W45) -- also imports sesnaimpute.sky.derived.twomass_counts as a MODULE (its MAG_EDGES), a dependency on the line above that no product-file scan can see
 PY sesnaimpute.sky.derived.ukidss_counts   # UKIDSS GPS counts per nside-512 pixel per half-mag bin, 9.0-17.0 (SPEC_BMSTP_DRAFT.md sec 5.1 STAR anchor, W37)
 PY sesnaimpute.sky.derived.gaia_match
 PY sesnaimpute.sky.derived.herschel_column
 PY sesnaimpute.sky.derived.subbeam
 PY sesnaimpute.sky.derived.planck_column
 PY sesnaimpute.sky.derived.planck_source_column
-PY sesnaimpute.sky.derived.juvela_extinction   # NICEST star-colour A_K per source and per sightline, the whole-sightline reference the extinction column's per-cell factor is formed against (W49a, SPEC_BMSTP sec 3.2)
+PY sesnaimpute.sky.derived.juvela_extinction   # NICEST star-colour A_K per source and per sightline, the whole-sightline reference the extinction column's per-cell factor is formed against (W49a, SPEC_BMSTP sec 3.2) -- its admitted-sightline pixel set comes from granules.build above, never from the column line below, so this and the next line stay acyclic on a cold build
 PY sesnaimpute.sky.derived.dunham_yso   # the Dunham et al. 2015 YSO census at the survey granule, dereddened 4.5 micron flux scaled to 1 kpc -- the population density over brightness W54 constrains the template weights with (SPEC_BMSTP sec 1.4)
 PY sesnaimpute.sky.derived.twomass_column_scale   # report-only, read by nothing: each arm's map column against the reddening of Ks 11-13 stars per region; a magnitude-limited window loses reddened background stars behind dense pixels, so the number is not a calibration (briefs/reports/W35.md)
-PY sesnaimpute.sky.derived.column   # the adopted (gas) column per source and sightline, and the extinction column beside it -- the adopted column scaled to the Juvela & Montillaud 2016 NICEST map's own beam factor (its survey-wide disagreement check is not run: an (n_source) array over 8.7 M sources, the earlier design's)
+PY sesnaimpute.sky.derived.column   # the adopted (gas) column per source and sightline, and the extinction column beside it -- the adopted column scaled to the Juvela & Montillaud 2016 NICEST map's own beam factor (its survey-wide disagreement check is not run: an (n_source) array over 8.7 M sources, the earlier design's); this line also measures and writes the per-field Herschel zero point (reads only the two arms' sightline views, not a second pass of this line) before merging the arms
 PY sesnaimpute.sky.derived.profile
 # Edenhofer et al. 2024's 12 posterior samples (19.5/24.7 GB, no bytes
 # sesnaimpute.sky.download.edenhofer2023.build fetches): acquire by hand into

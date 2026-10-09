@@ -40,6 +40,7 @@ from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import selection as selection_module
+from sesnaimpute.sky.derived import profile as profile_module
 
 NSIDE_MAP = 2048
 NSIDE_CELL = 1024
@@ -81,26 +82,16 @@ def _region_positions(config, region):
 
 def _admitted_sightlines_by_region(config):
     """`{region: sorted unique HPX_PIX_256}` for every admitted sightline
-    of every region -- the adopted (gas) column's own sightline product,
-    which admits a pixel by coverage, not by whether a source happens to
-    fall in it, so it runs wider than a region's catalogued-source pixel
-    set. That is the "admitted sightline" set."""
-    adopted_path = config_module.product_path(config, "sky/derived", "adopted", "column", "sightline")
-    if not os.path.exists(adopted_path):
-        raise FileNotFoundError(
-            "sky.derived.juvela_extinction: no adopted sightline column at %r -- run "
-            "the 'sesnaimpute.sky.derived.column' RUNBOOK line first" % adopted_path)
-    with h5py.File(adopted_path, "r") as f:
-        pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
-        code = np.asarray(f["REGION_CODE"][:], dtype=np.int64)
-    map_path = config_module.product_path(config, "granules", "sesna", "granule-map", "source")
-    with h5py.File(map_path, "r") as f:
-        names = [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in f["region/REGION"][:]]
-        codes = np.asarray(f["region/REGION_CODE"][:], dtype=np.int64)
-    code_of_name = dict(zip(names, codes.tolist()))
+    of every region -- the granule map's own admission
+    (`granules.build`'s `association/region_healpix256` group, read
+    through `sky.derived.profile`'s own `_admitted_sightlines`): a pixel
+    is admitted by coverage, fixed once the granule map is built, not by
+    any later column's values, so this never depends on the gas column
+    `sky.derived.column` writes."""
     out = {}
-    for region, region_code in code_of_name.items():
-        out[region] = np.unique(pix[code == region_code])
+    for region in [r.name for r in regions_module.REGIONS]:
+        pix, _ = profile_module._admitted_sightlines(config, region)
+        out[region] = pix
     return out
 
 
