@@ -308,7 +308,8 @@ def _part_path(path, bi):
 _CLASSIFY_PART_KEYS = ("NAME", "CLASS_SESNA", "P_CLASS", "P_SUBCLASS", "P_YSO", "MAP_CLASS", "N_DETECTED",
                        "LOG10_CANDIDATE_FLUX", "LOG10_FLUX_IMPUTED", "LOG10_FLUX_IMPUTED_COV",
                        "A_K_POST", "A_K_POST_SIG",
-                       "ENTROPY_CLASS", "ENTROPY_SUBCLASS")
+                       "ENTROPY_CLASS", "ENTROPY_SUBCLASS",
+                       "LOG_ODDS", "LOG_ODDS_ABUNDANCE", "LOG_ODDS_DATA")
 
 #: SPEC_BMSTP_DRAFT.md section 1/6.1 -- the log10-flux Jacobian, `sigma_log
 #: = sigma_f / (f ln 10)`, the same conversion `fittp.likelihood.prepare`
@@ -347,7 +348,53 @@ def _cross_cov_by_law(config, weight):
     return cross[0], cross[1]
 
 
-def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals):
+def _class_ln_evidence(ln_ev):
+    """`(m, 6)` per-class ln evidence: logsumexp of the class's own
+    subclass columns, the totals `_class_probs` softmaxes."""
+    out = np.full((ln_ev.shape[0], len(CLASSES)), -np.inf, dtype=np.float64)
+    for ci, cls in enumerate(CLASSES):
+        lo, hi = CLASS_SLICES[cls]
+        block = ln_ev[:, lo:hi]
+        mx = block.max(axis=1)
+        mx_safe = np.where(np.isfinite(mx), mx, 0.0)
+        with np.errstate(divide="ignore"):
+            out[:, ci] = mx_safe + np.log(np.exp(block - mx_safe[:, None]).sum(axis=1))
+    return out
+
+
+def _lse_others(ev):
+    """`(m, 6)`: logsumexp over the other five classes' columns."""
+    out = np.empty_like(ev)
+    for ci in range(ev.shape[1]):
+        o = np.delete(ev, ci, axis=1)
+        mx = o.max(axis=1)
+        mx_safe = np.where(np.isfinite(mx), mx, 0.0)
+        with np.errstate(divide="ignore"):
+            out[:, ci] = mx_safe + np.log(np.exp(o - mx_safe[:, None]).sum(axis=1))
+    return out
+
+
+def _abundance_terms(density_file, start, stop):
+    """`(A, S)`, each `(m, 6)` in CLASSES order, objects per square degree
+    from `bmstp.density`'s `DENSITY_<C>`. A_STAR = A_PAHC = DENSITY_STAR
+    (one field-star abundance, split later by a brightness-dependent
+    factor); S_C sums the other classes' abundance with the stellar term
+    counted once, and for STAR/PAHC excludes it entirely."""
+    d = {c: np.asarray(density_file["DENSITY_" + c][start:stop], dtype=np.float64) for c in CLASSES}
+    d["PAHC"] = d["STAR"]
+    nonstellar = [c for c in CLASSES if c not in ("STAR", "PAHC")]
+    a = np.stack([d[c] for c in CLASSES], axis=1)
+    s = np.empty_like(a)
+    for ci, c in enumerate(CLASSES):
+        tot = sum(d[k] for k in nonstellar if k != c)
+        if c not in ("STAR", "PAHC"):
+            tot = tot + d["STAR"]
+        s[:, ci] = tot
+    return a, s
+
+
+def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals,
+                    density_file):
     """One ROW_BYTES batch's own P8 rows (rule 10b): a batch-sized array
     only, never a region-sized one."""
     m = stop - start
@@ -465,6 +512,22 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     a_k_post = np.ascontiguousarray(a_k_post_stack.T)
     a_k_post_sig = np.ascontiguousarray(a_k_post_sig_stack.T)
 
+    # LOG_ODDS, LOG_ODDS_ABUNDANCE, LOG_ODDS_DATA (m, 6): ev_C is the
+    # class's ln evidence (P_CLASS is their softmax); ln[P/(1-P)] =
+    # ev_C - lse_{k!=C} ev_k. The data term is the Bayes factor of C
+    # against the abundance-weighted alternative, computed directly.
+    ev = _class_ln_evidence(ln_ev)
+    lse_other = _lse_others(ev)
+    a_dens, s_dens = _abundance_terms(density_file, start, stop)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_odds = ev - lse_other
+        log_odds_abund = np.log(a_dens) - np.log(s_dens)
+        log_odds_data = (ev - np.log(a_dens)) - (lse_other - np.log(s_dens))
+    bad = flagged_any[:, None] | ~(np.isfinite(a_dens) & (a_dens > 0) & np.isfinite(s_dens) & (s_dens > 0))
+    log_odds_abund = np.where(bad, np.nan, log_odds_abund)
+    log_odds_data = np.where(bad, np.nan, log_odds_data)
+    log_odds = np.where(flagged_any[:, None], np.nan, log_odds)
+
     return dict(
         class_sesna=class_sesna.astype(np.int16),
         p_class=p_cls.astype(np.float32), p_subclass=p_sub.astype(np.float32),
@@ -473,6 +536,8 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
         log10_flux_imputed_cov=imputed_cov.astype(np.float32),
         a_k_post=a_k_post, a_k_post_sig=a_k_post_sig,
         entropy_class=ent_c.astype(np.float32), entropy_subclass=ent_s.astype(np.float32),
+        log_odds=log_odds.astype(np.float32), log_odds_abundance=log_odds_abund.astype(np.float32),
+        log_odds_data=log_odds_data.astype(np.float32),
         imputed_identity_err=imputed_identity_err, n_flagged=int(flagged.sum()),
         n_prior_vetoed=int(prior_vetoed.sum()),
     )
@@ -486,7 +551,8 @@ def _write_classify_part(part_path, batch):
             ("LOG10_CANDIDATE_FLUX", "log10_candidate_flux"), ("LOG10_FLUX_IMPUTED", "log10_flux_imputed"),
             ("LOG10_FLUX_IMPUTED_COV", "log10_flux_imputed_cov"), ("A_K_POST", "a_k_post"),
             ("A_K_POST_SIG", "a_k_post_sig"), ("ENTROPY_CLASS", "entropy_class"),
-            ("ENTROPY_SUBCLASS", "entropy_subclass"),
+            ("ENTROPY_SUBCLASS", "entropy_subclass"), ("LOG_ODDS", "log_odds"),
+            ("LOG_ODDS_ABUNDANCE", "log_odds_abundance"), ("LOG_ODDS_DATA", "log_odds_data"),
         ):
             build_module.write_dataset(f, key, batch[field], *REGISTRY[(_POSTERIOR_STEM, key)])
         build_module.write_dataset(f, "P_YSO", batch["p_class"][:, YSO_INDEX],
@@ -534,6 +600,12 @@ def build_region(config, region, st, beta):
 
     cat_path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
 
+    density_path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
+    density_file = h5py.File(density_path, "r")
+    if not np.array_equal(density_file["NAME"][:], names):
+        raise ValueError("fittp.classify [%s]: bmstp.density's NAME does not row-align "
+                          "with the fit files' own" % region)
+
     n = names.shape[0]
     path = config_module.product_path(config, "fittp", "classification", "posterior",
                                        "source", region=region)
@@ -545,7 +617,8 @@ def build_region(config, region, st, beta):
     n_prior_vetoed = 0
     bounds = list(batches(n, ROW_BYTES))
     for bi, (start, stop) in enumerate(bounds):
-        batch = _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals)
+        batch = _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals,
+                               density_file)
         batch["name"] = names[start:stop]
         part_path = _part_path(path, bi)
         _write_classify_part(part_path, batch)
@@ -559,6 +632,7 @@ def build_region(config, region, st, beta):
         f.close()
     if psi_file is not None:
         psi_file.close()
+    density_file.close()
 
     return dict(path=path, part_paths=part_paths, n_source=n,
                 imputed_identity_err=imputed_identity_err, n_flagged=n_flagged,

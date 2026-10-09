@@ -2724,6 +2724,21 @@ REGISTRY = {
         "passive, young stellar objects class 0 to III or transition disk, knots J, "
         "C, steady C or C-J shocks. A class's columns sum to its P_CLASS; all 25 "
         "sum to 1."),
+    ("posterior_classification_source", "LOG_ODDS"): ("nats",
+        "How strongly the pipeline favours each class over all the others combined, "
+        "as the natural log of the odds P/(1-P). One column per class, CLASSES "
+        "order. 0 is even odds; +3 about 20 to 1 for; -3 about 20 to 1 against."),
+    ("posterior_classification_source", "LOG_ODDS_ABUNDANCE"): ("nats",
+        "The part of LOG_ODDS that comes from how common each kind of object is at "
+        "this position on the sky, counting objects of every brightness, before this "
+        "source's own measurements are used. Field stars and nebula-contaminated "
+        "apertures share one stellar abundance; their split depends on brightness "
+        "and is in LOG_ODDS_DATA. LOG_ODDS_ABUNDANCE + LOG_ODDS_DATA = LOG_ODDS."),
+    ("posterior_classification_source", "LOG_ODDS_DATA"): ("nats",
+        "The part of LOG_ODDS that comes from this source itself: how well each "
+        "class's population of model spectra, their spread in brightness and "
+        "extinction, explains its measured fluxes, its non-detections and its Gaia "
+        "measurement. Positive means the source's own data favour the class."),
     ("posterior_classification_source", "P_YSO"): ("probability",
         "Probability that the source is a young stellar object: the young stellar "
         "object column of P_CLASS."),
