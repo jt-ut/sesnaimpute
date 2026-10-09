@@ -2921,26 +2921,26 @@ _SWEEP_FIT_READINGS = {
         "models occupy that neighborhood, a library-volume effect rather than "
         "evidence about the source."),
     "LN_EVIDENCE_MEASURED": ("nats",
-        "The support this class has from the prior and the measured bands alone, "
-        "as a natural logarithm summed over every model in its library and over "
-        "extinction. The undetected bands and Gaia are left out. Compare with "
-        "LN_EVIDENCE_NONDET and with the class evidence to see how much each "
-        "added."),
+        "This class's evidence from its prior and the measured bands only, as a "
+        "natural logarithm, summed over every model in its library and over "
+        "extinction; the undetected bands and Gaia are not yet included. "
+        "LN_EVIDENCE_MEASURED minus LN_PRIOR_MASS is how much the measured bands "
+        "raise or lower the class."),
     "LN_EVIDENCE_NONDET": ("nats",
-        "The support this class has from the prior, the measured bands and the "
-        "undetected bands, as a natural logarithm summed over every model in its "
-        "library and over extinction. Gaia is left out. Never above "
-        "LN_EVIDENCE_MEASURED, because an undetected band can only lower the "
-        "support. The class evidence adds Gaia to this."),
-    "LN_PRIOR_MASS": ("nats",
-        "The natural logarithm of the prior probability this class has at the "
-        "source's position before any photometry is used: the class's expected "
-        "source density there, summed over every model in its library and every "
-        "brightness and extinction. A class whose models are all equally "
-        "admissible reads the log of its density; a class that shares its "
-        "models with another reads lower. Subtract it from LN_EVIDENCE_MEASURED "
-        "to see how much the measured bands raised or lowered the class "
-        "relative to the prior."),
+        "This class's evidence once the undetected bands are also included (Gaia "
+        "not yet), as a natural logarithm summed over every model and over "
+        "extinction. Never above LN_EVIDENCE_MEASURED: a band the source was not "
+        "detected in can only count against a class. The class's full evidence "
+        "adds Gaia to this."),
+    "LN_PRIOR_MASS": ("natural log of objects per square degree",
+        "This class's prior at the source's position, before any photometry is "
+        "used, as the natural logarithm of an expected number of objects per "
+        "square degree: the class's sky density there, summed over every model in "
+        "its library and every brightness and extinction. Divided across the six "
+        "classes it gives each class's prior probability. For most classes it is "
+        "the log of the class's sky density; field stars and nebula-contaminated "
+        "apertures share one stellar density, split by brightness and the nebular "
+        "emission around the source."),
     "FRAC_CLAMPED": ("fraction",
         "The support-weighted fraction of this class's models whose best fit called "
         "for negative extinction and was held at zero."),
