@@ -1071,7 +1071,7 @@ def build_region_class(config, region, cls, st, reader, catalog,
     # in the parent, before the pool below forks.
     gaia_term.warm(cls.lower())
     width_dex = _width_dex(config, region)
-    topk = config.fit_topk
+    topk = config.topk
 
     lib_path = config_module.product_path(config, "fittp", "check", "library-resolution", "survey")
     sigma_lib_l = likelihood.sigma_lib_by_class(lib_path)[cls]
@@ -1100,7 +1100,7 @@ def build_region_class(config, region, cls, st, reader, catalog,
                                                         arrays_mb, WORKER_PROCESS_FLOOR_MB,
                                                         n_workers, total_gb), flush=True)
 
-    batch_size = config.fit_batch_size
+    batch_size = config.batch_size
     batch_bounds = [(s, min(s + batch_size, n_source)) for s in range(0, n_source, batch_size)]
     selected = set(batches) if batches is not None else None
 
@@ -1250,7 +1250,7 @@ def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=N
                                               catalog, n_workers=n_workers, limit=limit,
                                               batches=batches)
                 summary["cls"] = cls
-                joined = join_parts(summary, config.fit_topk)
+                joined = join_parts(summary, config.topk)
                 with h5py.File(summary["path"], "r") as f:
                     occam = np.asarray(f["OCCAM_GAP"][:])
                 occam_finite = occam[np.isfinite(occam)]

@@ -2,12 +2,11 @@
 
 Reads `root.cfg`'s `[output] data_root` and `[inputs]` section with
 configparser, plus the `[run] n_jobs` worker count (CODING_RULES.md 10a's
-cap, default 4 where the key is absent) and the `[fit]` section (the
-owner's 2026-09-06 ruling): the fitter's per-call knobs restored as
-configuration rather than module constants, so a cluster job reads them
-off the one config path instead of a value frozen at import time. A
-`paths` section (the internal tree layout under `data_root`) is not built
-yet; only `product_path` below encodes it.
+cap, default 4 where the key is absent) and the `[fittp]` section: the
+fitter's per-call knobs restored as configuration rather than module
+constants, so a cluster job reads them off the one config path instead of
+a value frozen at import time. A `paths` section (the internal tree layout
+under `data_root`) is not built yet; only `product_path` below encodes it.
 """
 
 import configparser
@@ -23,12 +22,10 @@ _AREAS = ("sky/download", "sky/derived", "catalog", "granules",
 #: no `[run] n_jobs`.
 DEFAULT_N_JOBS = 4
 
-#: `[fit]` section fallbacks, used where root.cfg names no such key --
+#: `[fittp]` section fallbacks, used where root.cfg names no such key --
 #: the values the code carried as hard constants before this ruling.
-DEFAULT_FIT_TOPK = 5
-DEFAULT_FIT_BATCH_SIZE = 10_000
-DEFAULT_FIT_BETA = 0.0
-DEFAULT_FIT_BLOCK_BUDGET_MB = 512
+DEFAULT_TOPK = 5
+DEFAULT_BATCH_SIZE = 10_000
 #: `fittp.sweep`'s own multiprocessing pool size, one task per source
 #: (PARALLEL brief item 6): never auto-detected, never capped by the code
 #: -- the owner sets it per partition to what the stage's own printed
@@ -41,10 +38,8 @@ class Config:
     data_root: str
     inputs: MappingProxyType
     n_jobs: int
-    fit_topk: int
-    fit_batch_size: int
-    fit_beta: float
-    fit_block_budget_mb: int
+    topk: int
+    batch_size: int
     fittp_workers: int
 
 
@@ -55,15 +50,11 @@ def load(path):
     data_root = parser["output"]["data_root"]
     inputs = MappingProxyType(dict(parser["inputs"]))
     n_jobs = parser.getint("run", "n_jobs", fallback=DEFAULT_N_JOBS)
-    fit_topk = parser.getint("fit", "topk", fallback=DEFAULT_FIT_TOPK)
-    fit_batch_size = parser.getint("fit", "batch_size", fallback=DEFAULT_FIT_BATCH_SIZE)
-    fit_beta = parser.getfloat("fit", "beta", fallback=DEFAULT_FIT_BETA)
-    fit_block_budget_mb = parser.getint(
-        "fit", "block_budget_mb", fallback=DEFAULT_FIT_BLOCK_BUDGET_MB)
+    topk = parser.getint("fittp", "topk", fallback=DEFAULT_TOPK)
+    batch_size = parser.getint("fittp", "batch_size", fallback=DEFAULT_BATCH_SIZE)
     fittp_workers = parser.getint("fittp", "workers", fallback=DEFAULT_FITTP_WORKERS)
     return Config(data_root=data_root, inputs=inputs, n_jobs=n_jobs,
-                  fit_topk=fit_topk, fit_batch_size=fit_batch_size,
-                  fit_beta=fit_beta, fit_block_budget_mb=fit_block_budget_mb,
+                  topk=topk, batch_size=batch_size,
                   fittp_workers=fittp_workers)
 
 
