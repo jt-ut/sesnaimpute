@@ -77,6 +77,10 @@ def _read_coverage(config, region):
     """`catalog.coverage`'s own admitted-pixel `HPX_PIX`/`FRAC`, plus the
     root attribute `AREA_DEG2` this page prints (module docstring)."""
     path = config_module.product_path(config, "catalog", "sesna", "coverage", "hpx512", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "catalog.figure_depth: no catalogue coverage for %s at %s -- run the "
+            "'sesnaimpute.catalog.coverage' RUNBOOKtp.sh line first" % (region, path))
     with h5py.File(path, "r") as f:
         pix = np.asarray(f["HPX_PIX"][:], dtype=np.int64)
         frac = np.asarray(f["FRAC"][:], dtype=np.float64)
@@ -90,6 +94,10 @@ def _read_depth_pixels(config, region):
     and `W_DEX_PIX` (n, 8), sorted by pixel to match `_read_depth_grid`'s
     footprint ordering."""
     path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "catalog.figure_depth: no depth grid for %s at %s -- run the "
+            "'sesnaimpute.catalog.depth_grid' RUNBOOKtp.sh line first" % (region, path))
     with h5py.File(path, "r") as f:
         pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
         f_lim = np.asarray(f["F_LIM_50_PIX_MJY"][:], dtype=np.float64)

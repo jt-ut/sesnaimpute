@@ -130,6 +130,7 @@ from sesnaimpute.granules import access as access_module
 _SOURCE_STEM = "limits_sesna_source"
 _PIX_STEM = "depth-grid_sesna_hpx512"
 
+NSIDE_256 = 256
 NSIDE_512 = 512
 
 # Ten pixels for the fixed-seed identity check the brief asks for.
@@ -159,18 +160,32 @@ RECOVERY_FLOOR_FRACTION = 0.9
 def admitted_pixels_512(config, region):
     """Every nside-512 child of the region's own source-bearing nside-256
     pixels -- the granule map's admission rule (`granules/build.py`): a
-    pixel/region association, not a per-source column, so read directly
-    rather than through `granules.access.per_source`.
+    pixel carries at least one SESNA source, full stop.
+
+    Computed directly from the curated catalogue's own positions
+    (`catalog.curated`'s `GAL_L_DEG`/`GAL_B_DEG`), not from the granule
+    map: `granules.build`'s own admission table (`association/
+    region_healpix256`) restricted to this region and to `N_SOURCE_ROWS >
+    0` is exactly `unique(hp.ang2pix(256, gl, gb, nest=True))` for this
+    region's own catalogued sources (`granules/build.py`'s
+    `_region_arrays`/`source_pix256`: the mosaic-support-only pixels
+    (`SESNA_MOSAIC_SUPPORTED`) only ever add `N_SOURCE_ROWS == 0` rows to
+    that table, which this filter already drops) -- so this is the same
+    pixel set, bit for bit, read one RUNBOOK line earlier
+    (`catalog.curated`, not `granules.build`) to keep `catalog.coverage`
+    off the granule map it would otherwise need before that map exists on
+    a cold build.
     """
-    path = config_module.product_path(config, "granules", "sesna", "granule-map", "source")
+    path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "catalog.depth_grid: no curated catalogue for %s at %s -- run the "
+            "'sesnaimpute.catalog.curated' RUNBOOKtp.sh line first" % (region, path))
     with h5py.File(path, "r") as f:
-        names = [n.decode() if isinstance(n, bytes) else n for n in f["region/REGION"][:]]
-        code = f["region/REGION_CODE"][names.index(region)]
-        g = f["association/region_healpix256"]
-        pix256 = np.asarray(g["HPX_PIX_256"][:], dtype=np.int64)
-        region_code = np.asarray(g["REGION_CODE"][:])
-        n_source_rows = np.asarray(g["N_SOURCE_ROWS"][:])
-    source_pix256 = pix256[(region_code == code) & (n_source_rows > 0)]
+        gl = np.asarray(f["GAL_L_DEG"][:], dtype=np.float64)
+        gb = np.asarray(f["GAL_B_DEG"][:], dtype=np.float64)
+    pix256 = hp.ang2pix(NSIDE_256, gl, gb, nest=True, lonlat=True).astype(np.int64)
+    source_pix256 = np.unique(pix256)
     children = (source_pix256[:, None] * 4 + np.arange(4, dtype=np.int64)[None, :]).reshape(-1)
     return np.unique(children)
 
@@ -201,6 +216,10 @@ def _raw_source_arrays(config, region):
     map value or flux).
     """
     path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "catalog.depth_grid: no curated catalogue for %s at %s -- run the "
+            "'sesnaimpute.catalog.curated' RUNBOOKtp.sh line first" % (region, path))
     with h5py.File(path, "r") as f:
         fnu = f["FNU_MJY"][:]
         dcomp90 = f["DCOMP90_MJY"][:]
@@ -215,6 +234,10 @@ def _depth_fit_params(config, region):
     reads, and the 2MASS bands' own constant limit and width.
     """
     path = config_module.product_path(config, "catalog", "sesna", "depths", "region")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "catalog.depth_grid: no survey-depths product at %s -- run the "
+            "'sesnaimpute.catalog.depths' RUNBOOKtp.sh line first" % path)
     with h5py.File(path, "r") as f:
         regions = [r.decode() if isinstance(r, bytes) else r for r in f["REGION"][:]]
         ridx = regions.index(region)
