@@ -2920,6 +2920,27 @@ _SWEEP_FIT_READINGS = {
         "any of them fits this source. Never negative. A large value means many "
         "models occupy that neighborhood, a library-volume effect rather than "
         "evidence about the source."),
+    "LN_EVIDENCE_MEASURED": ("nats",
+        "The support this class has from the prior and the measured bands alone, "
+        "as a natural logarithm summed over every model in its library and over "
+        "extinction. The undetected bands and Gaia are left out. Compare with "
+        "LN_EVIDENCE_NONDET and with the class evidence to see how much each "
+        "added."),
+    "LN_EVIDENCE_NONDET": ("nats",
+        "The support this class has from the prior, the measured bands and the "
+        "undetected bands, as a natural logarithm summed over every model in its "
+        "library and over extinction. Gaia is left out. Never above "
+        "LN_EVIDENCE_MEASURED, because an undetected band can only lower the "
+        "support. The class evidence adds Gaia to this."),
+    "LN_PRIOR_MASS": ("nats",
+        "The natural logarithm of the prior probability this class has at the "
+        "source's position before any photometry is used: the class's expected "
+        "source density there, summed over every model in its library and every "
+        "brightness and extinction. A class whose models are all equally "
+        "admissible reads the log of its density; a class that shares its "
+        "models with another reads lower. Subtract it from LN_EVIDENCE_MEASURED "
+        "to see how much the measured bands raised or lowered the class "
+        "relative to the prior."),
     "FRAC_CLAMPED": ("fraction",
         "The support-weighted fraction of this class's models whose best fit called "
         "for negative extinction and was held at zero."),
@@ -2950,9 +2971,11 @@ _SWEEP_FIT_READINGS = {
         "The class evidence itself reads that same chance across a range of "
         "extinction, not at this one point, so it need not match this column."),
     "TOPK_LN_PRIOR_FIT": ("nats",
-        "The prior and the fit to the measured bands integrated together over "
-        "extinction along the fit's ridge; not separable into the two under the "
-        "integral."),
+        "How strongly the prior and the measured bands together support each of "
+        "those five models, as a natural logarithm, before the undetected bands "
+        "and Gaia are considered. It is a single combined number, summed over the "
+        "range of extinction the source allows; it cannot be split into a prior "
+        "part and a fit part."),
     "TOPK_LN_UNSEEN": ("nats",
         "What the bands observed but not detected contributed, as a log factor "
         "given the prior and the measured fit, integrated over extinction; reduces "

@@ -219,7 +219,8 @@ _PART_KEYS = ("NAME", "LN_EVIDENCE", "LOG10_FLUX_MEAN", "LOG10_FLUX_COV", "TOPK_
               "TOPK_LN_PRIOR_FIT", "TOPK_LN_UNSEEN", "TOPK_LN_GAIA",
               "TOPK_LN_PRIOR_ML", "TOPK_LN_GAMMA_ML",
               "TOPK_FLUX", "TOPK_LAW", "OCCAM_GAP", "A_K_POST", "A_K_POST_SIG", "P_DENSE",
-              "FRAC_CLAMPED", "N_DETECTED")
+              "FRAC_CLAMPED", "N_DETECTED",
+              "LN_EVIDENCE_MEASURED", "LN_EVIDENCE_NONDET", "LN_PRIOR_MASS")
 
 #: Every dataset the joined fit file carries, including `FAILED_ROWS`
 #: (join-time only, not a `_PART_KEYS` member), has its `UNITS`/`READING`
@@ -240,6 +241,8 @@ _FIELD_OF_KEY = {
     "TOPK_FLUX": "topk_flux", "TOPK_LAW": "topk_law", "OCCAM_GAP": "occam_gap",
     "A_K_POST": "a_k_post", "A_K_POST_SIG": "a_k_post_sig", "P_DENSE": "p_dense",
     "FRAC_CLAMPED": "frac_clamped", "N_DETECTED": "n_detected",
+    "LN_EVIDENCE_MEASURED": "ln_evidence_measured", "LN_EVIDENCE_NONDET": "ln_evidence_nondet",
+    "LN_PRIOR_MASS": "ln_prior_mass",
 }
 
 
@@ -409,6 +412,13 @@ def _set_worker_state(**kw):
     _WORKER = kw
 
 
+def _g_task(key):
+    """One `LN_PRIOR_MASS` factor-weight table (`prior_reader.prior_mass_table`)
+    for `key`, from the fork-inherited reader."""
+    w = _WORKER
+    return key, prior_reader.prior_mass_table(w["reader"], w["g_names"], key, np.arange(w["n_model"]))
+
+
 def _init_worker():
     """The Pool's own initializer, run once per forked worker before its
     first task -- deliberately carries no data (item 4: an initializer
@@ -444,6 +454,8 @@ def _empty_row(topk, n_sub):
         topk_flux=np.full((topk, N_BANDS), np.nan, dtype=np.float32),
         topk_law=np.full(topk, -1, dtype=np.int8),
         occam_gap=np.float32(np.nan),
+        ln_evidence_measured=np.float32(np.nan), ln_evidence_nondet=np.float32(np.nan),
+        ln_prior_mass=np.float32(np.nan),
         a_k_post=np.float32(np.nan), a_k_post_sig=np.float32(np.nan),
         p_dense=np.float32(np.nan),
         frac_clamped=np.float32(np.nan),
@@ -654,6 +666,9 @@ def _source_task(i):
         # disclosed reading for a prior-vetoed one, not a warning-worthy one.
         with np.errstate(invalid="ignore"):
             occam_gap = float(logsumexp(s1_arr) - s1_arr.max())
+            ln_ev_measured = float(logsumexp(s0_arr))
+            ln_ev_nondet = float(logsumexp(s1_arr))
+        ln_prior_mass = float(prior_reader.ln_prior_mass(w["reader"], rows, h)[0])
 
         good = not combined_flagged
 
@@ -835,6 +850,9 @@ def _source_task(i):
             topk_ln_gamma_ml=topk_ln_gamma_ml,
             topk_flux=topk_flux, topk_law=topk_law,
             occam_gap=np.float32(occam_gap),
+            ln_evidence_measured=np.float32(ln_ev_measured if good else np.nan),
+            ln_evidence_nondet=np.float32(ln_ev_nondet if good else np.nan),
+            ln_prior_mass=np.float32(ln_prior_mass),
             a_k_post=np.float32(a_post), a_k_post_sig=np.float32(a_post_sig),
             p_dense=np.float32(p_dense),
             frac_clamped=frac_clamped, n_detected=np.int8(batch.n_detected),
@@ -896,6 +914,9 @@ def _assemble_batch(results, name_slice, n_sub, topk):
     topk_flux = np.empty((m, topk, N_BANDS), dtype=np.float32)
     topk_law = np.empty((m, topk), dtype=np.int8)
     occam_gap = np.empty(m, dtype=np.float32)
+    ln_evidence_measured = np.empty(m, dtype=np.float32)
+    ln_evidence_nondet = np.empty(m, dtype=np.float32)
+    ln_prior_mass = np.empty(m, dtype=np.float32)
     a_k_post = np.empty(m, dtype=np.float32)
     a_k_post_sig = np.empty(m, dtype=np.float32)
     p_dense = np.empty(m, dtype=np.float32)
@@ -922,6 +943,9 @@ def _assemble_batch(results, name_slice, n_sub, topk):
         topk_flux[k] = r["topk_flux"]
         topk_law[k] = r["topk_law"]
         occam_gap[k] = r["occam_gap"]
+        ln_evidence_measured[k] = r["ln_evidence_measured"]
+        ln_evidence_nondet[k] = r["ln_evidence_nondet"]
+        ln_prior_mass[k] = r["ln_prior_mass"]
         a_k_post[k] = r["a_k_post"]
         a_k_post_sig[k] = r["a_k_post_sig"]
         p_dense[k] = r["p_dense"]
@@ -941,6 +965,8 @@ def _assemble_batch(results, name_slice, n_sub, topk):
                 topk_ln_gaia=topk_ln_gaia, topk_ln_prior_ml=topk_ln_prior_ml,
                 topk_ln_gamma_ml=topk_ln_gamma_ml,
                 topk_flux=topk_flux, topk_law=topk_law, occam_gap=occam_gap,
+                ln_evidence_measured=ln_evidence_measured, ln_evidence_nondet=ln_evidence_nondet,
+                ln_prior_mass=ln_prior_mass,
                 a_k_post=a_k_post, a_k_post_sig=a_k_post_sig, p_dense=p_dense,
                 frac_clamped=frac_clamped,
                 n_detected=n_detected, failed=failed,
@@ -1130,11 +1156,37 @@ def build_region_class(config, region, cls, st, reader, catalog,
     # arguments; an explicit signature list would be a second thing to keep
     # right). `_source_task` catches its own failures, so this cannot raise.
     numba.set_num_threads(1)
+    # LN_PRIOR_MASS: the warm source's own factor-weight table G first (the
+    # warm task looks it up), then the rest below in a pool of their own.
+    g_names, g_keys = prior_reader.prior_mass_keys(reader, np.arange(n_source))
+    g_warm_key = prior_reader.prior_mass_keys(reader, np.array([batch_bounds[0][0]]))[1][0]
+    g_table = {g_warm_key: prior_reader.prior_mass_table(reader, g_names, g_warm_key, np.arange(n_model))}
+    prior_reader.set_prior_mass_tables(reader, g_names, g_table)
     _source_task(batch_bounds[0][0])
 
     # Forked below every load above, and below the warm -- the threading layer
     # pinned at import is fork-safe by numba's own contract.
     ctx = mp.get_context("fork")
+    # G once per distinct per-source factor value in THIS job's sources, over
+    # the pool, one task per value (workers read the fork-inherited reader,
+    # nothing from disk); the pool is then closed and the source pool below
+    # forks with the gathered dict already on `reader`.
+    todo = [k for k in g_keys if k not in g_table]
+    _t0 = time.time()
+    if todo:
+        _set_worker_state(reader=reader, g_names=g_names, n_model=n_model)
+        with _make_pool(ctx, n_workers) as gpool:
+            for key, g in gpool.imap(_g_task, todo, chunksize=1):
+                g_table[key] = g
+    print("fittp.sweep.%s [%s]: prior-mass tables %d in %.2f s (%d workers)"
+          % (cls, region, len(g_table), time.time() - _t0, n_workers), flush=True)
+    prior_reader.set_prior_mass_tables(reader, g_names, g_table)
+    _set_worker_state(config=config, cls=cls, reader=reader, gaia_term=gaia_term,
+                       template_log=template_log, ln_subclass_prob=ln_subclass_prob, n_sub=n_sub,
+                       width_dex=width_dex, topk=topk, n_model=n_model,
+                       sigma_lib_l=sigma_lib_l,
+                       flux=catalog["flux"], sigma=catalog["sigma"], origin=catalog["origin"],
+                       f_lim50=catalog["f_lim50"])
     with _make_pool(ctx, n_workers) as pool:
         for bi, (bstart, bstop) in enumerate(batch_bounds):
             if selected is not None and bi not in selected:

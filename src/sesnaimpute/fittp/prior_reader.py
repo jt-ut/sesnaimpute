@@ -717,6 +717,107 @@ def _gaia_ln_gamma(a_val, g0_mag, kg_draine, kg_whitney, base, sl, r_diffuse, r_
 
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
+def _factor_ln_accumulate(total, w_theta, c_f, shift, b_cells, b0, dlb_f):
+    """`total[t, j] += ln PI[t](b_cells[j] + shift[t] + c_f[t])`: one factor
+    table's linear interpolation and edge clamp, exactly `_factor_ln`'s."""
+    n_t, n_b = total.shape
+    n_k = w_theta.shape[1]
+    for t in numba.prange(n_t):
+        for j in range(n_b):
+            pos = (b_cells[j] + shift[t] + c_f[t] - b0) / dlb_f
+            if pos < 0.0:
+                pos = 0.0
+            elif pos > n_k - 1:
+                pos = float(n_k - 1)
+            j0 = int(math.floor(pos))
+            if j0 > n_k - 2:
+                j0 = n_k - 2
+            frac = pos - j0
+            if frac < 0.0:
+                frac = 0.0
+            elif frac > 1.0:
+                frac = 1.0
+            v = w_theta[t, j0] * (1.0 - frac) + w_theta[t, j0 + 1] * frac
+            if v < 1e-300:
+                v = 1e-300
+            total[t, j] += math.log(v)
+
+
+def _factor_weight_sum(reader, model_index, d_values, chunk=20000):
+    """`G(b) = Sum_theta Pi_f PI_f[theta](b - C_theta[theta] + C_F_f[theta] +
+    D_F_f)` on the shape grid's own brightness cell centres `b` (`(n_b,)`
+    float64): the class's factor-table weights summed over every template,
+    read at the template's own brightness (the shape grid's `b` less the
+    template's `C_THETA`, the same shift `_cell_sum` applies the other way).
+    Linear interpolation and edge clamp are `_factor_ln`'s own. `d_values`
+    maps a factor's `D_F` column name to the source's scalar (none needed
+    for a factor without one). A class with no factor tables sums to the
+    template count."""
+    n_b = reader.b_edges.size - 1
+    b_cells = reader.b_origin + (np.arange(n_b) + 0.5) * reader.dlb
+    m = model_index.size
+    c_theta = (np.asarray(reader.c_theta[model_index], dtype=np.float64)
+               if reader.c_theta.size else np.zeros(m))
+    g = np.zeros(n_b, dtype=np.float64)
+    for s0 in range(0, m, chunk):
+        sl = slice(s0, min(s0 + chunk, m))
+        idx = model_index[sl]
+        total = np.zeros((idx.size, n_b), dtype=np.float64)
+        for f in reader.factors:
+            c_f = np.asarray(f["C_F"][idx], dtype=np.float64)
+            d_f = d_values[f["D_F"]] if f["D_F"] else 0.0
+            b_centers = f["b_centers"]
+            _factor_ln_accumulate(total, np.ascontiguousarray(f["W"][idx], dtype=np.float64),
+                                  c_f, d_f - c_theta[sl], b_cells,
+                                  float(b_centers[0]), float(b_centers[1] - b_centers[0]))
+        g += np.exp(total).sum(axis=0)
+    return g
+
+
+def prior_mass_keys(reader, rows):
+    """`(names, keys)`: the per-source factor columns this class's factors
+    read (`D_F`), and the sorted distinct value tuples among `rows` -- one
+    `G` table per key (`((),)` for a class whose factors read no column)."""
+    rows = np.asarray(rows)
+    names = sorted(set(f["D_F"] for f in reader.factors if f["D_F"]))
+    if not names:
+        return names, [()]
+    cols = np.stack([np.asarray(reader.p1_columns[nm][rows], dtype=np.float64) for nm in names], axis=1)
+    return names, sorted(set(map(tuple, np.unique(cols, axis=0))))
+
+
+def prior_mass_table(reader, names, key, model_index):
+    """The `G` table (`_factor_weight_sum`) for one key of `prior_mass_keys`."""
+    return _factor_weight_sum(reader, np.asarray(model_index), dict(zip(names, key)))
+
+
+def set_prior_mass_tables(reader, names, table):
+    """Hold the gathered `{key: G}` on `reader` for `ln_prior_mass`'s lookups."""
+    reader.__dict__["_g_table"] = (names, table)
+
+
+def ln_prior_mass(reader, rows, h):
+    """`(n,)` float64: `ln` of the class's prior integrated over every
+    template, every brightness and every extinction cell at each source,
+    with no likelihood -- what `ln_lambda0`'s logsumexp over templates
+    would be if the measured-band likelihood were 1 everywhere. It is
+    `ln density[s] + ln Sum_b hb[b] G(b)`: `hb` is the source's blurred
+    shape `h` summed over the extinction cells (it sums to one; the two
+    designs' cell weights sum to one in every cell), and `G` is
+    `_factor_weight_sum`, looked up in the tables the sweep formed
+    (`set_prior_mass_tables`) before the source tasks (a missing entry is an error, never a recompute)."""
+    rows = np.asarray(rows)
+    names, table = reader.__dict__["_g_table"]
+    out = np.empty(rows.size, dtype=np.float64)
+    for k in range(rows.size):
+        key = tuple(float(reader.p1_columns[nm][rows[k]]) for nm in names)
+        hb = h[k].astype(np.float64).sum(axis=0)
+        with np.errstate(divide="ignore"):
+            out[k] = np.log(reader.density[rows[k]]) + np.log(float((hb * table[key]).sum()))
+    return out
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
 def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               b_origin, dlb, dlx, a_edges_buf, cell_weight,
               m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
