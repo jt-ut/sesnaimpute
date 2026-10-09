@@ -996,6 +996,10 @@ def _regions_with_protostars(config):
     default), the union of `sky.derived.protostars`'s own admitted-
     footprint assignment."""
     path = f"{config.data_root}/sky/derived/protostars/protostars_survey.hdf5"
+    if not os.path.exists(path):
+        raise ValueError(
+            f"atlas.protostars: no {path!r} -- run RUNBOOKtp.sh's "
+            f"'PY sesnaimpute.sky.derived.protostars' line")
     with h5py.File(path, "r") as f:
         region_col = f["REGION"][:]
     names = np.unique(region_col)
