@@ -219,7 +219,8 @@ _PART_KEYS = ("NAME", "LN_EVIDENCE", "LOG10_FLUX_MEAN", "LOG10_FLUX_COV", "TOPK_
               "TOPK_LN_PRIOR_FIT", "TOPK_LN_UNSEEN", "TOPK_LN_GAIA",
               "TOPK_LN_PRIOR_ML", "TOPK_LN_GAMMA_ML",
               "TOPK_FLUX", "TOPK_LAW", "OCCAM_GAP", "A_K_POST", "A_K_POST_SIG", "P_DENSE",
-              "FRAC_CLAMPED", "N_DETECTED")
+              "FRAC_CLAMPED", "N_DETECTED",
+              "LN_EVIDENCE_MEASURED", "LN_EVIDENCE_NONDET", "LN_PRIOR_MASS")
 
 #: Every dataset the joined fit file carries, including `FAILED_ROWS`
 #: (join-time only, not a `_PART_KEYS` member), has its `UNITS`/`READING`
@@ -240,6 +241,8 @@ _FIELD_OF_KEY = {
     "TOPK_FLUX": "topk_flux", "TOPK_LAW": "topk_law", "OCCAM_GAP": "occam_gap",
     "A_K_POST": "a_k_post", "A_K_POST_SIG": "a_k_post_sig", "P_DENSE": "p_dense",
     "FRAC_CLAMPED": "frac_clamped", "N_DETECTED": "n_detected",
+    "LN_EVIDENCE_MEASURED": "ln_evidence_measured", "LN_EVIDENCE_NONDET": "ln_evidence_nondet",
+    "LN_PRIOR_MASS": "ln_prior_mass",
 }
 
 
@@ -444,6 +447,8 @@ def _empty_row(topk, n_sub):
         topk_flux=np.full((topk, N_BANDS), np.nan, dtype=np.float32),
         topk_law=np.full(topk, -1, dtype=np.int8),
         occam_gap=np.float32(np.nan),
+        ln_evidence_measured=np.float32(np.nan), ln_evidence_nondet=np.float32(np.nan),
+        ln_prior_mass=np.float32(np.nan),
         a_k_post=np.float32(np.nan), a_k_post_sig=np.float32(np.nan),
         p_dense=np.float32(np.nan),
         frac_clamped=np.float32(np.nan),
@@ -654,6 +659,9 @@ def _source_task(i):
         # disclosed reading for a prior-vetoed one, not a warning-worthy one.
         with np.errstate(invalid="ignore"):
             occam_gap = float(logsumexp(s1_arr) - s1_arr.max())
+            ln_ev_measured = float(logsumexp(s0_arr))
+            ln_ev_nondet = float(logsumexp(s1_arr))
+        ln_prior_mass = float(prior_reader.ln_prior_mass(w["reader"], rows, h, model_index)[0])
 
         good = not combined_flagged
 
@@ -835,6 +843,9 @@ def _source_task(i):
             topk_ln_gamma_ml=topk_ln_gamma_ml,
             topk_flux=topk_flux, topk_law=topk_law,
             occam_gap=np.float32(occam_gap),
+            ln_evidence_measured=np.float32(ln_ev_measured if good else np.nan),
+            ln_evidence_nondet=np.float32(ln_ev_nondet if good else np.nan),
+            ln_prior_mass=np.float32(ln_prior_mass),
             a_k_post=np.float32(a_post), a_k_post_sig=np.float32(a_post_sig),
             p_dense=np.float32(p_dense),
             frac_clamped=frac_clamped, n_detected=np.int8(batch.n_detected),
@@ -896,6 +907,9 @@ def _assemble_batch(results, name_slice, n_sub, topk):
     topk_flux = np.empty((m, topk, N_BANDS), dtype=np.float32)
     topk_law = np.empty((m, topk), dtype=np.int8)
     occam_gap = np.empty(m, dtype=np.float32)
+    ln_evidence_measured = np.empty(m, dtype=np.float32)
+    ln_evidence_nondet = np.empty(m, dtype=np.float32)
+    ln_prior_mass = np.empty(m, dtype=np.float32)
     a_k_post = np.empty(m, dtype=np.float32)
     a_k_post_sig = np.empty(m, dtype=np.float32)
     p_dense = np.empty(m, dtype=np.float32)
@@ -922,6 +936,9 @@ def _assemble_batch(results, name_slice, n_sub, topk):
         topk_flux[k] = r["topk_flux"]
         topk_law[k] = r["topk_law"]
         occam_gap[k] = r["occam_gap"]
+        ln_evidence_measured[k] = r["ln_evidence_measured"]
+        ln_evidence_nondet[k] = r["ln_evidence_nondet"]
+        ln_prior_mass[k] = r["ln_prior_mass"]
         a_k_post[k] = r["a_k_post"]
         a_k_post_sig[k] = r["a_k_post_sig"]
         p_dense[k] = r["p_dense"]
@@ -941,6 +958,8 @@ def _assemble_batch(results, name_slice, n_sub, topk):
                 topk_ln_gaia=topk_ln_gaia, topk_ln_prior_ml=topk_ln_prior_ml,
                 topk_ln_gamma_ml=topk_ln_gamma_ml,
                 topk_flux=topk_flux, topk_law=topk_law, occam_gap=occam_gap,
+                ln_evidence_measured=ln_evidence_measured, ln_evidence_nondet=ln_evidence_nondet,
+                ln_prior_mass=ln_prior_mass,
                 a_k_post=a_k_post, a_k_post_sig=a_k_post_sig, p_dense=p_dense,
                 frac_clamped=frac_clamped,
                 n_detected=n_detected, failed=failed,
