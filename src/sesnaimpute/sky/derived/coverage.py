@@ -66,10 +66,15 @@ def _masks_path(config):
 
 
 def _field_masks(masks_path, region):
-    """`{band: [(astropy.wcs.WCS, bool mask array), ...]}` for `region`'s
-    own per-field masks (`MASKS/<region>/<band>/field_*`), which carry a
-    real CD-matrix WCS; the `ALLBAND/union_*` datasets are a different,
-    lower-fidelity reprojection and are not read here."""
+    """`{band: [(astropy.wcs.WCS, bit-packed mask, (ny, nx)), ...]}` for
+    `region`'s own per-field masks (`MASKS/<region>/<band>/field_*`), which
+    carry a real CD-matrix WCS; the `ALLBAND/union_*` datasets are a
+    different, lower-fidelity reprojection and are not read here.
+
+    Each mask is kept resident bit-packed (`np.packbits`, axis=-1, 8x
+    smaller than the one-byte-per-pixel `bool` array) rather than unpacked;
+    `_band_covered` indexes the packed bytes arithmetically and never
+    materializes a whole unpacked mask."""
     out = {band: [] for band in SPITZER_BANDS}
     with h5py.File(masks_path, "r") as f:
         group = f["MASKS"][region]
@@ -82,6 +87,7 @@ def _field_masks(masks_path, region):
                     continue
                 dataset = band_group[key]
                 mask = np.asarray(dataset[()], dtype=bool)
+                packed = np.packbits(mask, axis=-1)
                 attrs = dataset.attrs
                 wcs = WCS(naxis=2)
                 wcs.wcs.crpix = [attrs["CRPIX1"], attrs["CRPIX2"]]
@@ -90,25 +96,33 @@ def _field_masks(masks_path, region):
                 wcs.wcs.ctype = [str(attrs["CTYPE1"]), str(attrs["CTYPE2"])]
                 wcs.wcs.cd = [[attrs["CD1_1"], attrs["CD1_2"]],
                               [attrs["CD2_1"], attrs["CD2_2"]]]
-                out[band].append((wcs, mask))
+                out[band].append((wcs, packed, mask.shape))
     return out
 
 
 def _band_covered(ra_deg, dec_deg, fields):
     """Boolean, one entry per `(ra_deg, dec_deg)` sample point: True where
     the point falls on a covered pixel of any of this band's field masks
-    (nearest-pixel WCS lookup, the same test the old anchor code used)."""
+    (nearest-pixel WCS lookup, the same test the old anchor code used).
+
+    `fields` masks are bit-packed (`np.packbits(mask, axis=-1)`); only the
+    one bit each sample point needs is unpacked, via integer arithmetic on
+    the packed byte array, never a whole unpacked mask."""
     covered = np.zeros(ra_deg.shape, dtype=bool)
-    for wcs, mask in fields:
+    for wcs, packed, shape in fields:
         px, py = wcs.wcs_world2pix(ra_deg, dec_deg, 0)
-        ny, nx = mask.shape
+        ny, nx = shape
         col = np.rint(px).astype(np.int64)
         row = np.rint(py).astype(np.int64)
         inbounds = (col >= 0) & (col < nx) & (row >= 0) & (row < ny)
         idx = np.flatnonzero(inbounds)
         if idx.size == 0:
             continue
-        covered[idx] |= mask[row[idx], col[idx]]
+        r = row[idx]
+        c = col[idx]
+        byte = packed[r, c // 8]
+        bit = (byte >> (7 - (c % 8))) & 1
+        covered[idx] |= bit.astype(bool)
     return covered
 
 
@@ -121,8 +135,8 @@ def _candidate_pix256(fields_by_band):
     `CANDIDATE_PAD_MARGIN_DEG`."""
     pix_parts = []
     for band in SPITZER_BANDS:
-        for wcs, mask in fields_by_band[band]:
-            ny, nx = mask.shape
+        for wcs, _packed, shape in fields_by_band[band]:
+            ny, nx = shape
             cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
             xs = np.array([0.0, nx - 1.0, 0.0, nx - 1.0, cx])
             ys = np.array([0.0, 0.0, ny - 1.0, ny - 1.0, cy])
