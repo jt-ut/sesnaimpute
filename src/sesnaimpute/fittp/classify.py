@@ -309,7 +309,7 @@ _CLASSIFY_PART_KEYS = ("NAME", "CLASS_SESNA", "P_CLASS", "P_SUBCLASS", "P_YSO", 
                        "LOG10_CANDIDATE_FLUX", "LOG10_FLUX_IMPUTED", "LOG10_FLUX_IMPUTED_COV",
                        "A_K_POST", "A_K_POST_SIG",
                        "ENTROPY_CLASS", "ENTROPY_SUBCLASS",
-                       "LOG_ODDS", "LOG_ODDS_ABUNDANCE", "LOG_ODDS_DATA")
+                       "LOG_ODDS", "LOG_ODDS_PRIOR", "LOG_ODDS_DATA")
 
 #: SPEC_BMSTP_DRAFT.md section 1/6.1 -- the log10-flux Jacobian, `sigma_log
 #: = sigma_f / (f ln 10)`, the same conversion `fittp.likelihood.prepare`
@@ -374,23 +374,33 @@ def _lse_others(ev):
     return out
 
 
-def _abundance_terms(density_file, start, stop):
-    """`(A, S)`, each `(m, 6)` in CLASSES order, objects per square degree
-    from `bmstp.density`'s `DENSITY_<C>`. A_STAR = A_PAHC = DENSITY_STAR
-    (one field-star abundance, split later by a brightness-dependent
-    factor); S_C sums the other classes' abundance with the stellar term
-    counted once, and for STAR/PAHC excludes it entirely."""
+def _prior_terms(class_files, density_file, start, stop):
+    """`(ln_m, ln_s)`, each `(m, 6)` in CLASSES order: the ln prior mass of
+    each class at each source, and the ln summed prior mass of the other
+    five. Read from each fit file's own `LN_PRIOR_MASS` (the class's prior
+    integrated over every template, brightness and extinction) where the
+    fit carries it. Otherwise from `bmstp.density`'s `DENSITY_<C>`, which is
+    that same mass for every class whose prior shape and template weights
+    sum to one -- all but STAR and PAHC, which share one stellar density
+    split by a brightness-dependent factor: there the stellar density
+    enters the other classes' sums once, and STAR's and PAHC's own columns
+    are NaN."""
+    if all("LN_PRIOR_MASS" in class_files[c] for c in CLASSES):
+        ln_m = np.stack([np.asarray(class_files[c]["LN_PRIOR_MASS"][start:stop], dtype=np.float64)
+                         for c in CLASSES], axis=1)
+        return ln_m, _lse_others(ln_m)
     d = {c: np.asarray(density_file["DENSITY_" + c][start:stop], dtype=np.float64) for c in CLASSES}
-    d["PAHC"] = d["STAR"]
-    nonstellar = [c for c in CLASSES if c not in ("STAR", "PAHC")]
-    a = np.stack([d[c] for c in CLASSES], axis=1)
-    s = np.empty_like(a)
-    for ci, c in enumerate(CLASSES):
-        tot = sum(d[k] for k in nonstellar if k != c)
-        if c not in ("STAR", "PAHC"):
-            tot = tot + d["STAR"]
-        s[:, ci] = tot
-    return a, s
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ln_m = np.stack([np.log(d[c]) for c in CLASSES], axis=1)
+        nonstellar = [c for c in CLASSES if c not in ("STAR", "PAHC")]
+        ln_s = np.empty_like(ln_m)
+        for ci, c in enumerate(CLASSES):
+            if c in ("STAR", "PAHC"):
+                ln_s[:, ci] = np.nan
+                ln_m[:, ci] = np.nan
+            else:
+                ln_s[:, ci] = np.log(sum(d[k] for k in nonstellar if k != c) + d["STAR"])
+    return ln_m, ln_s
 
 
 def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals,
@@ -512,19 +522,19 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     a_k_post = np.ascontiguousarray(a_k_post_stack.T)
     a_k_post_sig = np.ascontiguousarray(a_k_post_sig_stack.T)
 
-    # LOG_ODDS, LOG_ODDS_ABUNDANCE, LOG_ODDS_DATA (m, 6): ev_C is the
+    # LOG_ODDS, LOG_ODDS_PRIOR, LOG_ODDS_DATA (m, 6): ev_C is the
     # class's ln evidence (P_CLASS is their softmax); ln[P/(1-P)] =
     # ev_C - lse_{k!=C} ev_k. The data term is the Bayes factor of C
-    # against the abundance-weighted alternative, computed directly.
+    # against the prior-weighted alternative, computed directly.
     ev = _class_ln_evidence(ln_ev)
     lse_other = _lse_others(ev)
-    a_dens, s_dens = _abundance_terms(density_file, start, stop)
+    ln_m, ln_s = _prior_terms(class_files, density_file, start, stop)
     with np.errstate(divide="ignore", invalid="ignore"):
         log_odds = ev - lse_other
-        log_odds_abund = np.log(a_dens) - np.log(s_dens)
-        log_odds_data = (ev - np.log(a_dens)) - (lse_other - np.log(s_dens))
-    bad = flagged_any[:, None] | ~(np.isfinite(a_dens) & (a_dens > 0) & np.isfinite(s_dens) & (s_dens > 0))
-    log_odds_abund = np.where(bad, np.nan, log_odds_abund)
+        log_odds_prior = ln_m - ln_s
+        log_odds_data = (ev - ln_m) - (lse_other - ln_s)
+    bad = flagged_any[:, None] | ~(np.isfinite(ln_m) & np.isfinite(ln_s))
+    log_odds_prior = np.where(bad, np.nan, log_odds_prior)
     log_odds_data = np.where(bad, np.nan, log_odds_data)
     log_odds = np.where(flagged_any[:, None], np.nan, log_odds)
 
@@ -536,7 +546,7 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
         log10_flux_imputed_cov=imputed_cov.astype(np.float32),
         a_k_post=a_k_post, a_k_post_sig=a_k_post_sig,
         entropy_class=ent_c.astype(np.float32), entropy_subclass=ent_s.astype(np.float32),
-        log_odds=log_odds.astype(np.float32), log_odds_abundance=log_odds_abund.astype(np.float32),
+        log_odds=log_odds.astype(np.float32), log_odds_prior=log_odds_prior.astype(np.float32),
         log_odds_data=log_odds_data.astype(np.float32),
         imputed_identity_err=imputed_identity_err, n_flagged=int(flagged.sum()),
         n_prior_vetoed=int(prior_vetoed.sum()),
@@ -552,7 +562,7 @@ def _write_classify_part(part_path, batch):
             ("LOG10_FLUX_IMPUTED_COV", "log10_flux_imputed_cov"), ("A_K_POST", "a_k_post"),
             ("A_K_POST_SIG", "a_k_post_sig"), ("ENTROPY_CLASS", "entropy_class"),
             ("ENTROPY_SUBCLASS", "entropy_subclass"), ("LOG_ODDS", "log_odds"),
-            ("LOG_ODDS_ABUNDANCE", "log_odds_abundance"), ("LOG_ODDS_DATA", "log_odds_data"),
+            ("LOG_ODDS_PRIOR", "log_odds_prior"), ("LOG_ODDS_DATA", "log_odds_data"),
         ):
             build_module.write_dataset(f, key, batch[field], *REGISTRY[(_POSTERIOR_STEM, key)])
         build_module.write_dataset(f, "P_YSO", batch["p_class"][:, YSO_INDEX],

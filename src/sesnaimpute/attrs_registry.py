@@ -2718,7 +2718,7 @@ REGISTRY = {
         "nebula-contaminated aperture, background galaxy, young stellar object, "
         "shocked gas knot. Column order is the CLASSES attribute. Sums to 1."),
     ("posterior_classification_source", "P_SUBCLASS"): ("probability",
-        "Probability of each of 25 subdivisions, named class and subdivision in the "
+        "Probability of each of 25 subclasses, named class and subclass in the "
         "SUBCLASSES attribute: field stars by spectral type O to T, evolved stars "
         "oxygen-rich or carbon-rich, galaxies active, star-forming, composite or "
         "passive, young stellar objects class 0 to III or transition disk, knots J, "
@@ -2728,17 +2728,19 @@ REGISTRY = {
         "How strongly the pipeline favours each class over all the others combined, "
         "as the natural log of the odds P/(1-P). One column per class, CLASSES "
         "order. 0 is even odds; +3 about 20 to 1 for; -3 about 20 to 1 against."),
-    ("posterior_classification_source", "LOG_ODDS_ABUNDANCE"): ("nats",
-        "The part of LOG_ODDS that comes from how common each kind of object is at "
-        "this position on the sky, counting objects of every brightness, before this "
-        "source's own measurements are used. Field stars and nebula-contaminated "
-        "apertures share one stellar abundance; their split depends on brightness "
-        "and is in LOG_ODDS_DATA. LOG_ODDS_ABUNDANCE + LOG_ODDS_DATA = LOG_ODDS."),
+    ("posterior_classification_source", "LOG_ODDS_PRIOR"): ("nats",
+        "The part of LOG_ODDS that comes from the prior: the prior odds of each "
+        "class against the other five at this position on the sky, before this "
+        "source's own measurements are used, counting objects of every brightness. "
+        "LOG_ODDS_PRIOR + LOG_ODDS_DATA = LOG_ODDS. Not a number for field stars and "
+        "nebula-contaminated apertures where the fit does not record their separate "
+        "prior."),
     ("posterior_classification_source", "LOG_ODDS_DATA"): ("nats",
-        "The part of LOG_ODDS that comes from this source itself: how well each "
-        "class's population of model spectra, their spread in brightness and "
-        "extinction, explains its measured fluxes, its non-detections and its Gaia "
-        "measurement. Positive means the source's own data favour the class."),
+        "The part of LOG_ODDS that comes from this source itself, the log Bayes "
+        "factor: how well each class's population of model spectra, with the prior's "
+        "spread in brightness and extinction, explains its measured fluxes, its "
+        "non-detections and its Gaia measurement. Positive means the source's own "
+        "data favour the class."),
     ("posterior_classification_source", "P_YSO"): ("probability",
         "Probability that the source is a young stellar object: the young stellar "
         "object column of P_CLASS."),
@@ -2747,8 +2749,8 @@ REGISTRY = {
         "spread. 0 means one class takes all the probability, 1 means all six are "
         "equally likely."),
     ("posterior_classification_source", "ENTROPY_SUBCLASS"): ("fraction of maximum",
-        "How spread the 25 subdivision probabilities are, divided by their maximum "
-        "spread. 0 means one subdivision takes all the probability, 1 means all 25 "
+        "How spread the 25 subclass probabilities are, divided by their maximum "
+        "spread. 0 means one subclass takes all the probability, 1 means all 25 "
         "are equally likely."),
     ("posterior_classification_source", "A_K_POST"): ("magnitudes of K-band extinction",
         "The fitted extinction in front of the source, one column per class in "
@@ -2886,10 +2888,10 @@ _SWEEP_FIT_READINGS = {
         "How many of the eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron) "
         "have a measured, positive flux."),
     "LN_EVIDENCE": ("nats",
-        "How well this class explains the source, one value per subdivision named "
+        "How well this class explains the source, one value per subclass named "
         "in the SUBCLASSES attribute, as a natural logarithm. Each gathers every "
-        "model of that subdivision under both extinction laws. Minus infinity means "
-        "the subdivision has no models, or the class cannot explain the source, or "
+        "model of that subclass under both extinction laws. Minus infinity means "
+        "the subclass has no models, or the class cannot explain the source, or "
         "the source could not be fitted."),
     "LOG10_FLUX_MEAN": ("log10 of flux in mJy",
         "This class's estimate of the eight-band spectrum, band order J, H, Ks, "
