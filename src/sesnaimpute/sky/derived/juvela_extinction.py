@@ -90,14 +90,7 @@ def _admitted_sightlines_by_region(config):
     `sky.derived.column` writes."""
     out = {}
     for region in [r.name for r in regions_module.REGIONS]:
-        # `_admitted_sightlines` returns every association row with its source
-        # count; the admitted set is the OCCUPIED ones. `granules.build` writes
-        # exactly that to `healpix256` (`healpix256 = source256`, build.py:214 --
-        # the union with the mosaic-supported pixels is kept only as the
-        # `_before` diagnostic), and `planck_column` reads it, so a sightline
-        # with no sources has no Planck column and must not be admitted here.
-        pix, nsrc = profile_module._admitted_sightlines(config, region)
-        pix = pix[nsrc > 0]
+        pix, _ = profile_module._admitted_sightlines(config, region)
         out[region] = pix
     return out
 

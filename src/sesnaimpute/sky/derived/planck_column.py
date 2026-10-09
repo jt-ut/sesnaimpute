@@ -122,7 +122,17 @@ def _admitted_pixels(config):
             "sky.derived.planck_column: granule map missing at %r -- run the "
             "sesnaimpute.granules.build RUNBOOK line for it" % path)
     with h5py.File(path, "r") as f:
-        return np.sort(np.asarray(f["healpix256/HPX_PIX_256"][:], dtype=np.int64))
+        # The `healpix256` group is the SOURCE-BEARING set only
+        # (`granules.build`: `healpix256 = source256`, with the union against
+        # the mosaic-supported pixels kept only as `healpix256_before`). Every
+        # consumer of a sightline column -- `column`'s merge and its field
+        # zero points, `profile`, `edenhofer_samples` -- iterates the granule
+        # map's own per-region ASSOCIATION, which admits a pixel by coverage
+        # and so includes the mosaic-supported pixels that carry no source.
+        # Reading `healpix256` here left those 767 pixels with no Planck
+        # column, and `column.build_sightline` failed naming them.
+        assoc = f["association/region_healpix256/HPX_PIX_256"]
+        return np.unique(np.asarray(assoc[:], dtype=np.int64))
 
 
 def _block_reduce(data, finite, factor):
