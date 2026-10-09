@@ -61,15 +61,101 @@ SAMPLING_NSIDE = NSIDE_HPX512 * _SUPERSAMPLE_PER_SIDE
 PIX256_BATCH = 256
 
 
+_RLE_BAND_ROWS = 2048
+# Row-slice height used to build a field's RLE straight off the HDF5
+# dataset: a band this tall is materialised, converted to run-length
+# edges, and released before the next band is read, so the full bool
+# array (716 MB for Cygnus X I2 field_Field2) is never resident -- only
+# one ~53 MB band (band_rows x field width) is, at a time.
+
+
+class _RLEMask:
+    """Per-row run-length encoding of one field's boolean coverage mask.
+
+    The field masks are rotated-rectangle footprints averaging ~2.3
+    run-length edges per row, so this representation holds the same
+    boolean field at roughly 700x less memory than the resident bool
+    array (measured on Cygnus X I2 field_Field2, 27953x25626: 716 MB bool
+    array vs ~1 MB here), with a point query (`query`) that stays fully
+    vectorised over a whole batch of (row, col) arrays -- no python loop
+    over rows.
+
+    `offsets[n_rows+1]` is the CSR-style row pointer; `start_vals` is the
+    value at column 0 of each row; `keyed_edges` is each row's run-length
+    edges (the column index where the row's value flips) biased into its
+    own numeric band (`edge + row_index * stride`, `stride = n_cols + 1`),
+    so the whole concatenated array is one globally monotone key a single
+    `np.searchsorted` can answer for every query point at once -- it is
+    built directly in that keyed form by `from_dataset`, band by band."""
+
+    __slots__ = ("offsets", "keyed_edges", "start_vals", "shape", "_stride")
+
+    def __init__(self, offsets, keyed_edges, start_vals, shape):
+        self.offsets = offsets
+        self.keyed_edges = keyed_edges
+        self.start_vals = start_vals
+        self.shape = shape
+        self._stride = shape[1] + 1
+
+    @classmethod
+    def from_dataset(cls, dataset, band_rows=_RLE_BAND_ROWS):
+        """Builds the RLE straight off the (chunked, gzip'd) HDF5
+        `dataset`, `band_rows` rows at a time, so the field's full bool
+        array is never materialised -- each band is read, turned into
+        run-length edges, and released before the next band is read.
+        Each row is wholly contained in one band (bands split on rows
+        only), so no row's edges are ever split across a band boundary;
+        bands are read in increasing row order and, within a band,
+        `np.nonzero` on a row-major array yields edges in increasing
+        (row, col) order, so the concatenated `keyed_edges` across all
+        bands comes out already globally sorted."""
+        n_rows, n_cols = dataset.shape
+        stride = n_cols + 1
+        keyed_parts = []
+        start_parts = []
+        counts = np.zeros(n_rows, dtype=np.int64)
+        for y0 in range(0, n_rows, band_rows):
+            y1 = min(y0 + band_rows, n_rows)
+            block = np.asarray(dataset[y0:y1, :], dtype=bool)
+            flips = block[:, 1:] != block[:, :-1]
+            rr, cc = np.nonzero(flips)
+            global_rows = (rr + y0).astype(np.int64)
+            edges = (cc + 1).astype(np.int64)
+            keyed_parts.append(edges + global_rows * stride)
+            start_parts.append(block[:, 0].copy())
+            counts[y0:y1] = np.bincount(rr, minlength=y1 - y0)
+            del block, flips, rr, cc
+        keyed_edges = (np.concatenate(keyed_parts) if keyed_parts
+                       else np.empty(0, dtype=np.int64))
+        start_vals = (np.concatenate(start_parts) if start_parts
+                      else np.empty(0, dtype=bool))
+        offsets = np.zeros(n_rows + 1, dtype=np.int64)
+        offsets[1:] = np.cumsum(counts)
+        return cls(offsets, keyed_edges, start_vals, (n_rows, n_cols))
+
+    def query(self, rows, cols):
+        """Boolean, one entry per `(rows[i], cols[i])`, equivalent to
+        `mask[rows, cols]` on the original bool array."""
+        rows64 = np.asarray(rows, dtype=np.int64)
+        cols64 = np.asarray(cols, dtype=np.int64)
+        q = rows64 * self._stride + cols64
+        idx = np.searchsorted(self.keyed_edges, q, side="right")
+        count_before = idx - self.offsets[rows64]
+        return self.start_vals[rows64] ^ (count_before & 1).astype(bool)
+
+
 def _masks_path(config):
     return f"{config.data_root}/sky/download/spitzer_coverage/spitzer_coverage_masks.hdf5"
 
 
 def _field_masks(masks_path, region):
-    """`{band: [(astropy.wcs.WCS, bool mask array), ...]}` for `region`'s
-    own per-field masks (`MASKS/<region>/<band>/field_*`), which carry a
-    real CD-matrix WCS; the `ALLBAND/union_*` datasets are a different,
-    lower-fidelity reprojection and are not read here."""
+    """`{band: [(astropy.wcs.WCS, _RLEMask), ...]}` for `region`'s own
+    per-field masks (`MASKS/<region>/<band>/field_*`), which carry a real
+    CD-matrix WCS; the `ALLBAND/union_*` datasets are a different,
+    lower-fidelity reprojection and are not read here. Each field's
+    `_RLEMask` is built straight off its HDF5 dataset band by band
+    (`_RLEMask.from_dataset`); the field's full bool array is never
+    materialised, let alone held resident across fields."""
     out = {band: [] for band in SPITZER_BANDS}
     with h5py.File(masks_path, "r") as f:
         group = f["MASKS"][region]
@@ -81,7 +167,7 @@ def _field_masks(masks_path, region):
                 if not key.startswith("field_"):
                     continue
                 dataset = band_group[key]
-                mask = np.asarray(dataset[()], dtype=bool)
+                rle = _RLEMask.from_dataset(dataset)
                 attrs = dataset.attrs
                 wcs = WCS(naxis=2)
                 wcs.wcs.crpix = [attrs["CRPIX1"], attrs["CRPIX2"]]
@@ -90,7 +176,7 @@ def _field_masks(masks_path, region):
                 wcs.wcs.ctype = [str(attrs["CTYPE1"]), str(attrs["CTYPE2"])]
                 wcs.wcs.cd = [[attrs["CD1_1"], attrs["CD1_2"]],
                               [attrs["CD2_1"], attrs["CD2_2"]]]
-                out[band].append((wcs, mask))
+                out[band].append((wcs, rle))
     return out
 
 
@@ -99,16 +185,16 @@ def _band_covered(ra_deg, dec_deg, fields):
     the point falls on a covered pixel of any of this band's field masks
     (nearest-pixel WCS lookup, the same test the old anchor code used)."""
     covered = np.zeros(ra_deg.shape, dtype=bool)
-    for wcs, mask in fields:
+    for wcs, rle in fields:
         px, py = wcs.wcs_world2pix(ra_deg, dec_deg, 0)
-        ny, nx = mask.shape
+        ny, nx = rle.shape
         col = np.rint(px).astype(np.int64)
         row = np.rint(py).astype(np.int64)
         inbounds = (col >= 0) & (col < nx) & (row >= 0) & (row < ny)
         idx = np.flatnonzero(inbounds)
         if idx.size == 0:
             continue
-        covered[idx] |= mask[row[idx], col[idx]]
+        covered[idx] |= rle.query(row[idx], col[idx])
     return covered
 
 
@@ -121,8 +207,8 @@ def _candidate_pix256(fields_by_band):
     `CANDIDATE_PAD_MARGIN_DEG`."""
     pix_parts = []
     for band in SPITZER_BANDS:
-        for wcs, mask in fields_by_band[band]:
-            ny, nx = mask.shape
+        for wcs, rle in fields_by_band[band]:
+            ny, nx = rle.shape
             cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
             xs = np.array([0.0, nx - 1.0, 0.0, nx - 1.0, cx])
             ys = np.array([0.0, 0.0, ny - 1.0, ny - 1.0, cy])
