@@ -41,6 +41,10 @@ def _iter_catalog(config, region, chunk_rows=CHUNK_ROWS):
     catalogue stops the stage instead of silently substituting another
     source's coordinates and names."""
     path = _catalog_path(config, region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "granules.build: no curated catalogue for %s at %s -- run the "
+            "'sesnaimpute.catalog.curated' RUNBOOKtp.sh line first" % (region, path))
     with h5py.File(path, "r") as f:
         n = f["RA_DEG"].shape[0]
         for start in range(0, n, chunk_rows):

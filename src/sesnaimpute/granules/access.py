@@ -7,6 +7,8 @@ dispatching on the product's own `GRANULE` root attribute -- never a
 registry.
 """
 
+import os
+
 import h5py
 import numpy as np
 
@@ -29,6 +31,10 @@ def region_slice(config, region):
     if cached is not None:
         return cached
     path = product_path(config, "granules", "sesna", "granule-map", "source")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "granules.access.region_slice: no granule map at %s -- run the "
+            "'sesnaimpute.granules.build' RUNBOOKtp.sh line first" % path)
     with h5py.File(path, "r") as f:
         names = [_text(v) for v in f["region/REGION"][:]]
         if region not in names:
@@ -204,6 +210,10 @@ def primary_region_for_pixel(config, pix256):
     path = product_path(config, "granules", "sesna", "granule-map", "source")
     cached = _PRIMARY_REGION_CACHE.get(path)
     if cached is None:
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                "granules.access.primary_region_for_pixel: no granule map at %s -- run the "
+                "'sesnaimpute.granules.build' RUNBOOKtp.sh line first" % path)
         with h5py.File(path, "r") as f:
             assoc = f["association/region_healpix256"]
             assoc_pix = np.asarray(assoc["HPX_PIX_256"][:], dtype=np.int64)
