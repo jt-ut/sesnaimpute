@@ -563,6 +563,10 @@ def _admitted_sightlines(config, region):
     occupied nside-256 galactic-NESTED pixel the granule map associates
     with `region`, and its source count."""
     path = product_path(config, "granules", "sesna", "granule-map", "source")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "profile.build: granule map missing at %r -- run the "
+            "sesnaimpute.granules.build RUNBOOK line for it" % path)
     with h5py.File(path, "r") as f:
         names = [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in f["region/REGION"][:]]
         if region not in names:
@@ -857,6 +861,11 @@ def read(config, region):
     """The region's profile evaluator (see `_RegionProfile`)."""
     profile_path = product_path(config, "sky/derived", "edenhofer", "profile", "sightline", region=region)
     depth_path = product_path(config, "sky/derived", "edenhofer", "depth", "region")
+    for path in (profile_path, depth_path):
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                "profile.read: product missing at %r -- run the "
+                "sesnaimpute.sky.derived.profile RUNBOOK line for it" % path)
     with h5py.File(depth_path, "r") as f:
         names = [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in f["REGION"][:]]
         if region not in names:

@@ -144,6 +144,10 @@ def _load_field_zeropoints(config):
     predates the per-field measurement, so every region falls back to no
     offset and `ZP_SIGMA_K = 0`, exactly the old behaviour."""
     path = config_module.product_path(config, "sky/derived", "herschel", "sigma", "survey")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "sky.derived.column._load_field_zeropoints: %r missing -- run the "
+            "sesnaimpute.sky.derived.herschel_column RUNBOOK line for it" % path)
     with h5py.File(path, "r") as f:
         if "FIELD_NAME" not in f:
             return {}
@@ -425,6 +429,10 @@ def build_extinction_sightline(config, stage=None):
     regions = [r.name for r in regions_module.REGIONS]
     codes = _region_codes(config, regions)
     adopted_path = config_module.product_path(config, "sky/derived", "adopted", "column", "sightline")
+    if not os.path.exists(adopted_path):
+        raise FileNotFoundError(
+            "sky.derived.column.build_extinction_sightline: adopted sightline column missing at "
+            "%r -- run sky.derived.column.build_sightline first (this module's own RUNBOOK line)" % adopted_path)
     with h5py.File(adopted_path, "r") as f:
         adopted_pix = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
         adopted_prov = np.asarray(f["PROVENANCE"][:])
@@ -475,6 +483,10 @@ def _region_codes(config, regions):
     """{region: REGION_CODE} read from the granule map, the same codes
     every other product keys a region by."""
     path = config_module.product_path(config, "granules", "sesna", "granule-map", "source")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "sky.derived.column._region_codes: granule map missing at %r -- run the "
+            "sesnaimpute.granules.build RUNBOOK line for it" % path)
     with h5py.File(path, "r") as f:
         names = [_dec(v) for v in f["region/REGION"][:]]
         codes = np.asarray(f["region/REGION_CODE"][:], dtype=np.int16)
