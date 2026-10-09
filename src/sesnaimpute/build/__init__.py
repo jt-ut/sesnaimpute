@@ -29,6 +29,7 @@ between phases or between regions.
 """
 
 import argparse
+import dataclasses
 import sys
 
 from joblib import register_parallel_backend
@@ -67,8 +68,18 @@ def run(build_fn):
     parser = argparse.ArgumentParser()
     parser.add_argument("config")
     parser.add_argument("--regions", nargs="+", default=None)
+    #: The joblib pool size for this one invocation, overriding the config's
+    #: `[run] n_jobs`. An INPUT, never inferred from a stage's own footprint
+    #: (the owner's rule for `fittp.sweep`'s `--workers`, which this mirrors):
+    #: a stage whose per-worker cost does not fit the machine is run with a
+    #: count that does, named on the runbook line, not silently capped here.
+    parser.add_argument("--n-jobs", type=int, default=None)
     args = parser.parse_args(sys.argv[1:])
     config = config_module.load(args.config)
+    if args.n_jobs is not None:
+        config = dataclasses.replace(config, n_jobs=args.n_jobs)
+        print("%s: n_jobs=%d from --n-jobs (config says %d)"
+              % (build_fn.__module__, args.n_jobs, config_module.load(args.config).n_jobs))
     build_fn(config, regions=args.regions)
 
 
