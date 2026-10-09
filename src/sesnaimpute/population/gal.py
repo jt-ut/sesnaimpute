@@ -800,9 +800,8 @@ def ashby_seds_cumulative(config, threshold_mjy):
         path = f"{base}/{name}"
         if not os.path.exists(path):
             raise FileNotFoundError(
-                f"gal: no Ashby 2013 SEDS table at {path!r} -- see the "
-                f"'sky/download/ashby2013_seds' RUNBOOK comment line: manual "
-                f"acquisition, no reachable download URL")
+                f"gal: no Ashby 2013 SEDS table at {path!r} -- made by the "
+                f"RUNBOOKtp.sh line sesnaimpute.sky.download.ashby2013_seds.build")
         with gzip.open(path, "rt") as fh:
             df = pd.read_fwf(fh, colspecs=list(ASHBY_SEDS_COLSPECS), names=list(ASHBY_SEDS_COLUMN_NAMES))
         good = (df["f45"] == 0) & (df["mag45psf"] > 0)
