@@ -131,6 +131,7 @@ import numpy as np
 import pandas as pd
 from astropy.io import fits
 
+from sesnaimpute import batches as batches_module
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
@@ -560,6 +561,16 @@ def star_brightness_log10_b(fnu_mjy, template_index, f_ref_sps):
     return np.log10(np.median(ratio, axis=1))
 
 
+#: Row footprint of one star's own slice of the (n_star, n_node, 2)
+#: nearest-host cross array `pahc_brightness_log10_b` forms per batch
+#: (144 PAHC host nodes, 2 columns, float64, a factor of 4 for the
+#: difference, its square, the per-row sum and working room): the batch
+#: size `sesnaimpute.batches.batches` derives from this row footprint
+#: keeps that cross array under its own 512 MB budget, never the full
+#: population at once (CODING_RULES_BMSTP.md 10a, 10b).
+_PAHC_MATCH_ROW_BYTES = 144 * 2 * 8 * 4
+
+
 def pahc_brightness_log10_b(fnu_mjy, log_teff, log_g, node_log10_teff, node_logg, ref_jhk):
     """`LOG10_B_PAHC` (module docstring): `log10` of the median over
     J/H/Ks of a star's own TRILEGAL flux over the PAHC continuum
@@ -567,12 +578,27 @@ def pahc_brightness_log10_b(fnu_mjy, log_teff, log_g, node_log10_teff, node_logg
     matched in `(log10 T_eff, log g)` -- Euclidean, the same two-parameter
     convention `template_weights._match_pahc_to_sps` uses, needed because
     hosts share a `T_EFF` at several `log g` (WP-REG-1: T_EFF alone is
-    ambiguous for 130 of the 144 hosts)."""
+    ambiguous for 130 of the 144 hosts). The match is formed one batch of
+    stars at a time (`sesnaimpute.batches.batches`, rule 10b): the full
+    population's own (n_star, n_node, 2) cross array against the 144
+    host nodes was this module's dominant memory cost
+    (CODING_RULES_BMSTP.md 10a forbids materialising one); a per-batch
+    cross array is the identical arithmetic on a slice of rows, so the
+    result -- including this module's own tie-break, the lowest node
+    index on an exact distance tie, `np.argmin`'s own convention -- is
+    unchanged from forming it in one pass. (A `scipy.spatial.cKDTree`
+    nearest-neighbour query gives the same matched node for every star
+    except an exact tie, where it does not honour that lowest-index
+    convention; measured on Cygnus X, 22 of 2,941,598 stars.)"""
     star_point = np.column_stack(
         [np.asarray(log_teff, dtype=np.float64), np.asarray(log_g, dtype=np.float64)])
     node_point = np.column_stack([node_log10_teff, node_logg])
-    nearest = np.argmin(
-        ((star_point[:, None, :] - node_point[None, :, :]) ** 2).sum(axis=2), axis=1)
+    n_star = star_point.shape[0]
+    nearest = np.empty(n_star, dtype=np.int64)
+    for lo, hi in batches_module.batches(n_star, _PAHC_MATCH_ROW_BYTES):
+        chunk = star_point[lo:hi]
+        nearest[lo:hi] = np.argmin(
+            ((chunk[:, None, :] - node_point[None, :, :]) ** 2).sum(axis=2), axis=1)
     ratio = fnu_mjy[:, IDX_JHK] / ref_jhk[nearest]
     return np.log10(np.median(ratio, axis=1))
 
@@ -625,6 +651,16 @@ def pahc_contamination_weight(fnu_8um, a_i, limit_grid_mjy, config, curve):
 # ---------------------------------------------------------------------------
 
 def _read_field_stars(config, region):
+    """Reads `population.field_stars`' retained group at its own stored
+    dtype (float32 for every flux/magnitude/distance column, int32 for
+    `TEMPLATE_INDEX`, int16 for `POINTING_INDEX`) -- an upcast to
+    float64/int64 here would add no precision, since `field_stars.
+    write_region` already rounded every one of these columns to that
+    narrower dtype on write; carrying them at double width only doubles
+    this region's retained working set (CODING_RULES_BMSTP.md 10a). Every
+    downstream reader that needs float64 arithmetic (`evolved_selector`,
+    `agb_brightness_log10_b`) already casts internally, at the scale of
+    one short-lived array, not this whole dict."""
     path = config_module.product_path(config, "population", "trilegal", "field-stars", "region", region=region)
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -632,17 +668,17 @@ def _read_field_stars(config, region):
             "the `sesnaimpute.population.field_stars` RUNBOOK line first" % (region, path))
     with h5py.File(path, "r") as f:
         stars = dict(
-            dist_pc=f["DIST_PC"][:].astype(np.float64),
-            g_proxy=f["G_PROXY"][:].astype(np.float64),
-            ks_mag=f["KS_MAG"][:].astype(np.float64),
-            k_g_diffuse=f["K_G_DIFFUSE"][:].astype(np.float64),
-            k_g_dense=f["K_G_DENSE"][:].astype(np.float64),
-            log_g=f["LOG_G"][:].astype(np.float64),
-            log_teff=f["LOG_TEFF"][:].astype(np.float64),
-            log_l=f["LOG_L"][:].astype(np.float64),
-            fnu_mjy=f["FNU_MJY"][:].astype(np.float64),
-            template_index=f["TEMPLATE_INDEX"][:].astype(np.int64),
-            pointing_index=f["POINTING_INDEX"][:].astype(np.int64),
+            dist_pc=f["DIST_PC"][:],
+            g_proxy=f["G_PROXY"][:],
+            ks_mag=f["KS_MAG"][:],
+            k_g_diffuse=f["K_G_DIFFUSE"][:],
+            k_g_dense=f["K_G_DENSE"][:],
+            log_g=f["LOG_G"][:],
+            log_teff=f["LOG_TEFF"][:],
+            log_l=f["LOG_L"][:],
+            fnu_mjy=f["FNU_MJY"][:],
+            template_index=f["TEMPLATE_INDEX"][:],
+            pointing_index=f["POINTING_INDEX"][:],
         )
         omega_sim_deg2 = float(f.attrs["OMEGA_SIM_DEG2"])
         n_raw = int(f.attrs["N_RAW"])
