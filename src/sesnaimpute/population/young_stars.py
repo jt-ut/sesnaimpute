@@ -151,9 +151,24 @@ _GAIA_ROW_COLUMNS = (
 #: x u vectorisation).
 N_MASS_QUADRATURE = 200
 
-#: Anchor pixels per joblib block: bounds one block's `(n_pix, n_mass,
-#: n_u)` array instead of holding a whole region's at once (rule 8/9).
-PIXEL_BLOCK = 32
+#: Target bytes for one pixel block's own `(block, N_MASS_QUADRATURE,
+#: n_u)` broadcast temporary -- `_pixel_block`'s `a_rep`/`weight`/`g_obs`/
+#: `ks_obs_1myr`/`p_g` and `_weighted_hist`'s own index arrays are about a
+#: dozen arrays of this one shape alive in a worker at once -- sized as a
+#: fraction of the per-worker ceiling (CODING_RULES_BMSTP.md rule 10a,
+#: 512 MB) small enough that a dozen of them and the worker's own ~300 MB
+#: interpreter floor both fit.
+_PIXEL_BLOCK_TARGET_BYTES = 24 * 1024 * 1024
+
+
+def pixel_block_size(n_u, n_mass=N_MASS_QUADRATURE):
+    """Anchor pixels per joblib block, sized DOWN from `n_u` (the
+    embedding's own `u`-cell count, measured off the region's own
+    profile product -- round 3 T2) so one block's `(block, n_mass, n_u)`
+    temporary stays near `_PIXEL_BLOCK_TARGET_BYTES`, never the fixed 32
+    this module applied regardless of how large `n_u` is."""
+    bytes_per_pixel = max(1, int(n_mass) * int(n_u) * 8)
+    return max(1, _PIXEL_BLOCK_TARGET_BYTES // bytes_per_pixel)
 
 _GAIA_TABLE_CACHE = {}
 
@@ -491,8 +506,8 @@ def law_count_per_pixel(config, region, pixels):
     return sum_law / n_src
 
 
-def sightline_lookup(config, region, pixels, d_front, d_back):
-    """Per anchor pixel, its own parent nside-256 sightline's embedding
+def sightline_embedding(config, region, d_front, d_back):
+    """The region's own DISTINCT parent nside-256 sightlines' embedding
     density AT THE PROFILE'S OWN FULL RESOLUTION (`population.yso.
     embedding_and_ridge`), restricted to the region's cloud interval
     `[d_front, d_back]` and renormalised (`population.yso.restrict_and_
@@ -501,17 +516,26 @@ def sightline_lookup(config, region, pixels, d_front, d_back):
     sightline: a deducted young star sits on the SAME cloud population
     `bmstp.sample_cloud` places (sec. 5.5), recomputed in memory at the
     same full resolution `bmstp` uses rather than read off the coarsened
-    disk form. The parent is the HEALPix NESTED ancestor, `pixels >> 2`.
+    disk form.
 
-    Returns `(xi_edges, mass, cloud_frac, removed_frac_report)`: `xi_edges`
-    (n_pix, n_cell+1) and `mass` (n_pix, n_cell, summing to 1 per row)
-    are the restricted, renormalised placement; `cloud_frac` (n_pix,) is
-    `1 - u(d_front)`, the cloud's own share of each pixel's column (sec.
-    5.5 "Sky density", the SAME quantity `bmstp.density._cloud_column_
-    fraction` forms, duplicated here for the same import-direction
-    reason `cloud_interval_pc` is); `removed_frac_report` is the median
-    fraction of pre-restriction mass the interval removed, across the
-    region's occupied sightlines.
+    Kept at SIGHTLINE resolution (n_sl rows, round 3 T2), never expanded
+    to one row per occupied nside-512 pixel here: several pixels share
+    one parent sightline, and `anchor_pixel_lookup` below does that
+    expansion per pixel BLOCK instead, so no `(n_pix, n_cell)` array --
+    the whole region's worth, in the parent, before any block ran -- is
+    ever held.
+
+    Returns `(sl_pix_sorted, xi_edges, mass, cloud_frac, removed_frac_
+    report)`: `sl_pix_sorted` (n_sl,) ascending parent-pixel ids;
+    `xi_edges` (n_sl, n_cell+1) and `mass` (n_sl, n_cell, summing to 1
+    per row), in `sl_pix_sorted`'s own order, are the restricted,
+    renormalised placement; `cloud_frac` (n_sl,) is `1 - u(d_front)`,
+    the cloud's own share of each sightline's column (sec. 5.5 "Sky
+    density", the SAME quantity `bmstp.density._cloud_column_fraction`
+    forms, duplicated here for the same import-direction reason `cloud_
+    interval_pc` is); `removed_frac_report` is the median fraction of
+    pre-restriction mass the interval removed, across the region's
+    sightlines.
     """
     profile = yso._load_profile_arrays(config, region)
     embed = yso.embedding_and_ridge(profile)
@@ -541,8 +565,19 @@ def sightline_lookup(config, region, pixels, d_front, d_back):
     cloud_frac = 1.0 - u_front
 
     order = np.argsort(sl_pix)
-    sl_pix_sorted = sl_pix[order]
-    parent256 = pixels >> 2
+    return (sl_pix[order], xi_edges[order], mass_restricted[order], cloud_frac[order],
+            float(np.median(removed_frac)))
+
+
+def anchor_pixel_lookup(sl_pix_sorted, xi_edges_sl, mass_sl, cloud_frac_sl, pixels, region):
+    """`(xi_edges, mass, cloud_frac)` for `pixels` (any subset -- a whole
+    region's or one block's), each row `pixels`'s own parent nside-256
+    sightline's (`pixels >> 2`) row of `sightline_embedding`'s output.
+    The expansion `sightline_lookup` used to do for the WHOLE region's
+    pixel axis at once now happens wherever its caller's own `pixels`
+    array is scoped (round 3 T2: `build_region` scopes it to one pixel
+    block, so the duplicated `(n_pix, n_cell)` array never exists)."""
+    parent256 = np.asarray(pixels) >> 2
     loc = np.searchsorted(sl_pix_sorted, parent256)
     capped = np.minimum(loc, max(sl_pix_sorted.size - 1, 0))
     matched = (sl_pix_sorted.size > 0) & (sl_pix_sorted[capped] == parent256)
@@ -551,8 +586,32 @@ def sightline_lookup(config, region, pixels, d_front, d_back):
             "prior.young_stars: %r has an anchor pixel whose parent "
             "nside-256 sightline is absent from its own sky.derived.profile "
             "product" % region)
-    idx = order[capped]
-    return xi_edges[idx], mass_restricted[idx], cloud_frac[idx], float(np.median(removed_frac))
+    return xi_edges_sl[capped], mass_sl[capped], cloud_frac_sl[capped]
+
+
+def sightline_lookup(config, region, pixels, d_front, d_back):
+    """Per anchor pixel, its own parent nside-256 sightline's restricted,
+    renormalised embedding placement -- `sightline_embedding` (the per-
+    sightline computation) then `anchor_pixel_lookup` (the per-pixel
+    expansion), both over the WHOLE of `pixels` at once. Kept, with its
+    original signature and return order, for `population.yso_law` and
+    `population.knot_rate`'s own single-pixel-set callers; `build_region`
+    below calls the two pieces directly, one pixel block at a time
+    (round 3 T2), so it never materialises the whole-`pixels`-axis
+    `(xi_edges, mass)` this wrapper still returns here.
+
+    Returns `(xi_edges, mass, cloud_frac, removed_frac_report)`: `xi_edges`
+    (n_pix, n_cell+1) and `mass` (n_pix, n_cell, summing to 1 per row)
+    are the restricted, renormalised placement; `cloud_frac` (n_pix,) is
+    `1 - u(d_front)`, the cloud's own share of each pixel's column;
+    `removed_frac_report` is the median fraction of pre-restriction mass
+    the interval removed, across the region's occupied sightlines.
+    """
+    sl_pix_sorted, xi_edges_sl, mass_sl, cloud_frac_sl, removed_frac_report = sightline_embedding(
+        config, region, d_front, d_back)
+    xi_edges, mass, cloud_frac = anchor_pixel_lookup(
+        sl_pix_sorted, xi_edges_sl, mass_sl, cloud_frac_sl, pixels, region)
+    return xi_edges, mass, cloud_frac, removed_frac_report
 
 
 # ---------------------------------------------------------------------
@@ -586,25 +645,42 @@ def _weighted_hist(values, weights, edges):
     return counts, faint_overflow, bright_overflow
 
 
-def _pixel_block(piece, a_pix, xi_edges, mass, n_young_total,
+def _pixel_block(piece, pixels, a_pix, sl_pix_sorted, xi_edges_sl, mass_sl, cloud_frac_sl,
+                  n_young_total_whole_column, region,
                   mass_grid, mass_weight, ks_abs_1myr, g_abs_1myr,
                   mu, g_edges, ks_edges, k_g_diffuse, k_g_dense, r_diffuse, r_dense):
     """One piece's own contiguous block of pixel indices (owner ruling
     2026-10-09: within a region, many small pieces on one pool, never a
-    stage's own `joblib.Parallel` -- the region-wide pixel arrays
-    `a_pix`/`xi_edges`/`mass`/`n_young_total` are bound by
-    `build_region`'s own `functools.partial`, pickled once per batch of
-    tasks by `pieces.run`'s shared loky pool, not once per piece): the
-    `(N_G_YOUNG, N_KS_YOUNG)` and the 1 Myr Ks acceptance pieces,
-    vectorised over every mass and every `u`-cell of every pixel in the
-    block at once. `k_g_diffuse`/`k_g_dense` are `(n_mass,)`, each mass
-    point's own register-template coefficient (`_young_star_kg_by_mass`).
+    stage's own `joblib.Parallel` -- the region-wide arrays `pixels`/
+    `a_pix`/`sl_pix_sorted`/`xi_edges_sl`/`mass_sl`/`cloud_frac_sl`/
+    `n_young_total_whole_column` are bound by `build_region`'s own
+    `functools.partial`, pickled once per batch of tasks by `pieces.
+    run`'s shared loky pool, not once per piece): the `(N_G_YOUNG,
+    N_KS_YOUNG)` and the 1 Myr Ks acceptance pieces, vectorised over
+    every mass and every `u`-cell of every pixel in the block at once.
+    `k_g_diffuse`/`k_g_dense` are `(n_mass,)`, each mass point's own
+    register-template coefficient (`_young_star_kg_by_mass`).
+
+    This block's own `(xi_edges, mass, cloud_frac)` come from `anchor_
+    pixel_lookup` HERE, scoped to `pixels[lo:hi]` alone (round 3 T2):
+    `sl_pix_sorted`/`xi_edges_sl`/`mass_sl`/`cloud_frac_sl` are `build_
+    region`'s region-wide but SIGHTLINE-resolution (`sightline_
+    embedding`) arrays, far smaller than one row per occupied pixel, so
+    the `(n_pix, n_cell)` expansion a whole-region lookup would hold
+    exists only as this one block's own small, immediately-consumed
+    temporary.
     """
     lo, hi = piece
+    pixels_blk = pixels[lo:hi]
     a_pix_blk = a_pix[lo:hi]
-    xi_edges_blk = xi_edges[lo:hi]
-    mass_blk = mass[lo:hi]
-    n_young_blk = n_young_total[lo:hi]
+    xi_edges_blk, mass_blk, cloud_frac_blk = anchor_pixel_lookup(
+        sl_pix_sorted, xi_edges_sl, mass_sl, cloud_frac_sl, pixels_blk, region)
+    # the model's own young-star density (sec. 5.5 "Sky density"): the
+    # law is quadratic in column, so evaluating it at the CLOUD's own
+    # share of the column is the whole-column integral times
+    # `cloud_frac**2` (`build_region`'s own module docstring comment,
+    # moved here so it runs on this block's own pixels alone).
+    n_young_blk = n_young_total_whole_column[lo:hi] * cloud_frac_blk ** 2
     u_mid = 0.5 * (xi_edges_blk[:, :-1] + xi_edges_blk[:, 1:])      # (n_blk, n_u)
     u_mass = mass_blk                                             # sums to 1 per row (cloud-restricted)
 
@@ -628,7 +704,7 @@ def _pixel_block(piece, a_pix, xi_edges, mass, n_young_total,
     n_g, _, _ = _weighted_hist(g_obs, weight * p_g, g_edges)
     n_ks, ks_faint, ks_bright = _weighted_hist(ks_obs_1myr, weight, ks_edges)
 
-    return n_g, n_ks, ks_faint, ks_bright
+    return n_g, n_ks, ks_faint, ks_bright, n_young_blk
 
 
 # ---------------------------------------------------------------------
@@ -656,18 +732,20 @@ def build_region(config, region):
 
     d_front, d_back = yso.cloud_interval_pc(config, region)
     n_young_source_mean = law_count_per_pixel(config, region, pixels) * omega_pix_deg2
-    xi_edges, mass, cloud_frac, removed_frac_report = sightline_lookup(
-        config, region, pixels, d_front, d_back)
-    # the model's own young-star density (sec. 5.5 "Sky density"): the
-    # law is quadratic in column, so evaluating it at the CLOUD's own
-    # share of the column, `A_cloud = A_gas * cloud_frac`, is the whole-
-    # column integral times `cloud_frac**2` -- exactly how `bmstp.
-    # density` forms `DENSITY_YSO` (`a_cloud = a_col_gas * cloud_frac`,
-    # then squared inside the law), imported rather than re-derived: the
-    # class this module deducts is the SAME young-star population by
-    # construction, foreground-only deducted, never the whole sightline.
+    # round 3 T2: kept at SIGHTLINE resolution here (`sl_pix_sorted`/
+    # `xi_edges_sl`/`mass_sl`/`cloud_frac_sl`, far fewer rows than
+    # `pixels` -- several occupied nside-512 pixels share one parent
+    # nside-256 sightline); `_pixel_block` below does the per-pixel
+    # expansion (`anchor_pixel_lookup`) and the `cloud_frac**2` young-
+    # star density (sec. 5.5 "Sky density": the law is quadratic in
+    # column, so evaluating it at the CLOUD's own share of the column,
+    # `A_cloud = A_gas * cloud_frac`, is the whole-column integral times
+    # `cloud_frac**2` -- exactly how `bmstp.density` forms `DENSITY_YSO`)
+    # itself, one pixel block at a time, so the `(n_pix, n_cell)` array a
+    # whole-region expansion would hold never exists.
+    sl_pix_sorted, xi_edges_sl, mass_sl, cloud_frac_sl, removed_frac_report = sightline_embedding(
+        config, region, d_front, d_back)
     n_young_total_whole_column = yso.law_area_integral(config, region, pixels) * omega_pix_deg2
-    n_young_total = n_young_total_whole_column * cloud_frac ** 2
 
     mass_grid, mass_weight = mass_grid_and_weight()
     ks_abs_1myr = abs_mag_grid(
@@ -683,14 +761,19 @@ def build_region(config, region):
 
     n_pix = pixels.size
     # owner ruling 2026-10-09: the one shared pool, never a stage's own
-    # `joblib.Parallel` -- `PIXEL_BLOCK`-sized pieces (module docstring's
-    # own memory bound, rule 8/9: one block's `(n_pix, n_mass, n_u)`
-    # array, not a whole region's) run through `pieces.run`'s pinned
-    # worker pool, region-wide pixel arrays bound once by this
-    # `functools.partial`, not re-pickled per piece.
-    pixel_pieces = [(s, min(s + PIXEL_BLOCK, n_pix)) for s in range(0, n_pix, PIXEL_BLOCK)]
+    # `joblib.Parallel` -- pieces sized by `pixel_block_size` off this
+    # region's own measured `n_u` (round 3 T2; module docstring's own
+    # memory bound, rule 8/9: one block's `(block, n_mass, n_u)` array,
+    # not a whole region's) run through `pieces.run`'s pinned worker
+    # pool, region-wide arrays bound once by this `functools.partial`,
+    # not re-pickled per piece.
+    n_u = mass_sl.shape[1]
+    block_size = pixel_block_size(n_u)
+    pixel_pieces = [(s, min(s + block_size, n_pix)) for s in range(0, n_pix, block_size)]
     fn = functools.partial(
-        _pixel_block, a_pix=a_pix, xi_edges=xi_edges, mass=mass, n_young_total=n_young_total,
+        _pixel_block, pixels=pixels, a_pix=a_pix, sl_pix_sorted=sl_pix_sorted,
+        xi_edges_sl=xi_edges_sl, mass_sl=mass_sl, cloud_frac_sl=cloud_frac_sl,
+        n_young_total_whole_column=n_young_total_whole_column, region=region,
         mass_grid=mass_grid, mass_weight=mass_weight, ks_abs_1myr=ks_abs_1myr, g_abs_1myr=g_abs_1myr,
         mu=mu, g_edges=g_edges, ks_edges=ks_edges, k_g_diffuse=k_g_diffuse, k_g_dense=k_g_dense,
         r_diffuse=r_diffuse, r_dense=r_dense)
@@ -702,6 +785,12 @@ def build_region(config, region):
         np.empty((0, ks_edges.size - 1))
     ks_faint = np.concatenate([b[2] for b in blocks]) if blocks else np.empty(0)
     ks_bright = np.concatenate([b[3] for b in blocks]) if blocks else np.empty(0)
+    # `n_young_total` (the cloud-restricted density, `cloud_frac**2`
+    # applied) is now formed per block, inside `_pixel_block`, alongside
+    # the histograms it weights -- concatenated here for the report and
+    # the acceptance check below, same values `cloud_frac**2 *
+    # n_young_total_whole_column` always gave.
+    n_young_total = np.concatenate([b[4] for b in blocks]) if blocks else np.empty(0)
 
     n_bright = n_young_total * IMF_FRAC_ABOVE_1P4
 
