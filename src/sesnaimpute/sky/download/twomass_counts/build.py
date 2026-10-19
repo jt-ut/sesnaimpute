@@ -63,11 +63,8 @@ tessellation). So this module fetches verbatim per-source rows -- `J`,
 `H`, `Ks`, the per-band photometric-quality, confusion and read flags,
 and Galactic position -- and the nside-512 binning that pairs it with
 the Gaia module's product happens in `sesnaimpute.sky.derived.twomass_counts`,
-the one `derive` step in this pair that legitimately computes. `j_m`/
-`h_m`/`ph_qual` feed a second, independent view,
-`sesnaimpute.sky.derived.twomass_column_scale` (SPEC_BMSTP_DRAFT.md
-3.1): the near-infrared colour of the same clean background stars, at
-the map's own nside-512 pixels.
+the one `derive` step in this pair that legitimately computes, off the
+`Ks`/quality/confusion columns alone.
 
 Query, per region (the exact text sent, `{l0}`/`{l1}`/`{b0}`/`{b1}` a
 padded Galactic bounding box around the region's occupied nside-512

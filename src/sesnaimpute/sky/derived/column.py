@@ -40,12 +40,6 @@ finite); its sigma is `herschel_column.py`'s per-map SIG_ZP/SIG_RAND
 model. Elsewhere the pixel takes the Planck sightline column and its
 composed sigma from `planck_column.py`'s own sightline product.
 
-`build_column_check` is the disagreement check SPEC_PRIORS.md 1.1/1.4
-motivates: on every Herschel-covered sightline pixel, the Herschel value,
-the Planck value, and the 3-D map's own cumulative extinction at its
-edge (`profile.py`'s inner/outer/splice/measure chain, called before any
-rescaling), binned by quartile of the Herschel column and by region.
-
 `_build_one_extinction_region`/`build_extinction_sightline` write the
 second column, the one a star's light passes through: the emission-based
 adopted column calibrated onto the scale of that region's Juvela &
@@ -83,7 +77,6 @@ _COLUMN_SOURCE_STEM = "column_adopted_source"
 _EXTINCTION_SOURCE_STEM = "extinction_adopted_source"
 _COLUMN_SIGHTLINE_STEM = "column_adopted_sightline"
 _EXTINCTION_SIGHTLINE_STEM = "extinction_adopted_sightline"
-_CHECK_STEM = "column-check_adopted_survey"
 _HERSCHEL_SIGMA_STEM = "sigma_herschel_survey"
 
 PROV_HERSCHEL = np.uint8(0)
@@ -628,143 +621,6 @@ def build_sightline(config, stage=None):
     n_h = int(np.count_nonzero(prov == PROV_HERSCHEL))
     print("column.build_sightline: %d sightline rows, %d regions, %d Herschel (%.1f%%)"
           % (n, len(regions), n_h, 100.0 * n_h / n if n else 0.0), flush=True)
-    return out_path
-
-
-def _map_edge_for_pixels(config, region, pixels, input_dir):
-    """`A_MAP_EDGE`: profile.py's own inner/outer/splice/measure chain for
-    `pixels` of `region`, called exactly as `profile._build_one_region`
-    does, before the sightline-column rescaling step. `a_out`'s last
-    column does not depend on the per-pixel weight `measure_region` also
-    computes (it only shapes the unused structure-depth diagnostic), so a
-    uniform weight is passed rather than the region's true source counts."""
-    canon = regions_module.REGIONS_BY_NAME[region]
-    inner = profile_module.read_inner_map(f"{input_dir}/{profile_module.MAP_INNER_NAME}",
-                                          pixels, profile_module.ZGR23_R_KS)
-    splice = profile_module.read_outer_increment(f"{input_dir}/{profile_module.MAP_OUTER_NAME}",
-                                                  pixels, profile_module.ZGR23_R_KS)
-    dist_new, rho_dist_new = profile_module.splice_axes(
-        inner["dist1"], inner["radii1"], splice["bnd2"], splice["cen2"], splice["k"])
-    weight = profile_module.region_weight(np.ones(pixels.size))
-    measured = profile_module.measure_region(canon.d_r_pc, inner, splice, dist_new, rho_dist_new, weight)
-    return measured["a_out"][:, -1]
-
-
-def _binned_stats(x, group, n_groups):
-    """Per-group median, 16th and 84th percentile of `x`; NaN for an
-    empty group."""
-    med = np.full(n_groups, np.nan)
-    lo = np.full(n_groups, np.nan)
-    hi = np.full(n_groups, np.nan)
-    for g in range(n_groups):
-        sel = group == g
-        if sel.any():
-            lo[g], med[g], hi[g] = np.percentile(x[sel], [16, 50, 84])
-    return med, lo, hi
-
-
-def build_column_check(config, stage=None):
-    """Writes and prints SPEC_PRIORS.md 1.1/1.4's tracer-disagreement
-    check: on every Herschel-covered sightline pixel, A_HERSCHEL,
-    A_PLANCK, and A_MAP_EDGE (the 3-D map's own cumulative extinction at
-    its edge, unrescaled), and the two ratios A_MAP_EDGE/A_HERSCHEL and
-    A_PLANCK/A_HERSCHEL, binned by quartile of A_HERSCHEL and by region --
-    whether the Planck calibration runs low on diffuse sightlines, the 3-D
-    map runs high, or both.
-
-    `stage`, if given, is the caller's own `progress.Stage`: one
-    `stage.tick` per region of this function's own sequential loop
-    (owner ruling 2026-09-06 -- this stage otherwise runs to completion
-    with no progress line at all)."""
-    herschel = planck_column.load_hgbs(config, min_fill=SIGHTLINE_MIN_FILL)
-    covered_regions = sorted(r for r, h in herschel.items() if h["pix"].size)
-    planck_pix, planck_ak, _ = _load_planck_sightline(config)
-    codes = _region_codes(config, covered_regions)
-    input_dir = profile_module._input_dir(config)
-
-    per_region = []
-    n_covered = len(covered_regions)
-    for i, region in enumerate(covered_regions):
-        admitted_pix, _ = profile_module._admitted_sightlines(config, region)
-        _, pix, a_h = _herschel_on_admitted(admitted_pix, herschel[region])
-        if pix.size == 0:
-            if stage is not None:
-                stage.tick(i + 1, n_covered, "regions")
-            continue
-        loc = np.searchsorted(planck_pix, pix)
-        a_p = planck_ak[loc]
-        a_edge = _map_edge_for_pixels(config, region, pix, input_dir)
-        per_region.append(dict(region=region, code=codes[region], pix=pix,
-                               a_herschel=a_h, a_planck=a_p, a_edge=a_edge))
-        if stage is not None:
-            stage.tick(i + 1, n_covered, "regions")
-
-    if not per_region:
-        raise ValueError("sky.derived.column.build_column_check: no Herschel-covered "
-                         "admitted sightline pixel found in any region")
-
-    pix = np.concatenate([r["pix"] for r in per_region])
-    region_code = np.concatenate([np.full(r["pix"].size, r["code"], dtype=np.int16) for r in per_region])
-    a_herschel = np.concatenate([r["a_herschel"] for r in per_region])
-    a_planck = np.concatenate([r["a_planck"] for r in per_region])
-    a_edge = np.concatenate([r["a_edge"] for r in per_region])
-    ratio_map = a_edge / a_herschel
-    ratio_planck = a_planck / a_herschel
-
-    q_edges = np.percentile(a_herschel, [0, 25, 50, 75, 100])
-    bin_idx = np.clip(np.searchsorted(q_edges, a_herschel, side="right") - 1, 0, 3)
-    bin_map_med, bin_map_lo, bin_map_hi = _binned_stats(ratio_map, bin_idx, 4)
-    bin_planck_med, bin_planck_lo, bin_planck_hi = _binned_stats(ratio_planck, bin_idx, 4)
-
-    # np.unique's own inverse index, not a searchsorted against per_region's
-    # (alphabetical, not code-sorted) order, so a region's rows land in the
-    # right group regardless of how covered_regions was ordered above.
-    region_code_axis, region_pos = np.unique(region_code, return_inverse=True)
-    code_to_name = {v: k for k, v in codes.items()}
-    region_names = np.array([code_to_name[int(c)] for c in region_code_axis], dtype="S64")
-    reg_map_med, reg_map_lo, reg_map_hi = _binned_stats(ratio_map, region_pos, region_code_axis.size)
-    reg_planck_med, reg_planck_lo, reg_planck_hi = _binned_stats(ratio_planck, region_pos, region_code_axis.size)
-
-    print("column.build_column_check: %d Herschel-covered sightline pixels over %d regions"
-          % (pix.size, region_code_axis.size), flush=True)
-    for g in range(4):
-        print("  A_HERSCHEL bin %d [%.3f, %.3f): map_edge/A_HERSCHEL med=%.3f [%.3f, %.3f]  "
-              "planck/A_HERSCHEL med=%.3f [%.3f, %.3f]"
-              % (g, q_edges[g], q_edges[g + 1], bin_map_med[g], bin_map_lo[g], bin_map_hi[g],
-                 bin_planck_med[g], bin_planck_lo[g], bin_planck_hi[g]), flush=True)
-    for i, region in enumerate(region_names):
-        print("  region %-20s map_edge/A_HERSCHEL med=%.3f [%.3f, %.3f]  "
-              "planck/A_HERSCHEL med=%.3f [%.3f, %.3f]"
-              % (_dec(region), reg_map_med[i], reg_map_lo[i], reg_map_hi[i],
-                 reg_planck_med[i], reg_planck_lo[i], reg_planck_hi[i]), flush=True)
-
-    out_path = config_module.product_path(config, "sky/derived", "adopted", "column-check", "survey")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with h5py.File(out_path, "w") as f:
-        f.attrs["GRANULE"] = "survey"
-        for name, data in (
-            ("HPX_PIX_256", pix),
-            ("REGION_CODE", region_code),
-            ("A_HERSCHEL", a_herschel.astype(np.float32)),
-            ("A_PLANCK", a_planck.astype(np.float32)),
-            ("A_MAP_EDGE", a_edge.astype(np.float32)),
-            ("A_HERSCHEL_QUARTILE_EDGES", q_edges),
-            ("BIN_MAP_EDGE_RATIO_MEDIAN", bin_map_med),
-            ("BIN_MAP_EDGE_RATIO_P16", bin_map_lo),
-            ("BIN_MAP_EDGE_RATIO_P84", bin_map_hi),
-            ("BIN_PLANCK_RATIO_MEDIAN", bin_planck_med),
-            ("BIN_PLANCK_RATIO_P16", bin_planck_lo),
-            ("BIN_PLANCK_RATIO_P84", bin_planck_hi),
-            ("REGION", region_names),
-            ("REGION_CODE_AXIS", region_code_axis),
-            ("REGION_MAP_EDGE_RATIO_MEDIAN", reg_map_med),
-            ("REGION_MAP_EDGE_RATIO_P16", reg_map_lo),
-            ("REGION_MAP_EDGE_RATIO_P84", reg_map_hi),
-            ("REGION_PLANCK_RATIO_MEDIAN", reg_planck_med),
-            ("REGION_PLANCK_RATIO_P16", reg_planck_lo),
-            ("REGION_PLANCK_RATIO_P84", reg_planck_hi),
-        ):
-            build_module.write_dataset(f, name, data, *REGISTRY[(_CHECK_STEM, name)])
     return out_path
 
 

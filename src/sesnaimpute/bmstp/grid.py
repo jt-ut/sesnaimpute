@@ -198,9 +198,9 @@ def bin_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):
     "minimum widths", sec. 5.1 "Marks"): like `bin`, but the `log10 ξ`
     axis is smoothed by each star's OWN width class instead of the fixed
     one-cell floor -- the field-star depth mark carries the released
-    posterior samples' own spread of the cumulative column at the star's
-    distance (`sky.derived.edenhofer_samples`' `SIGMA_SAMPLES_K`), not a
-    delta narrower than the map itself resolves. `sigma_classes_cells`
+    posterior samples' own spread of the depth mark's ratio at the
+    star's distance (`sky.derived.edenhofer_samples`' `SIGMA_RATIO_
+    SAMPLES`), not a delta narrower than the map itself resolves. `sigma_classes_cells`
     (`N_WIDTH_CLASSES`,), in grid cells (>= 1.0, the floor, geometric to
     the sightline's own cloud-interval-span cap, `sample_star
     .tile_width_classes`); `width_class` (n_star,) each star's own class

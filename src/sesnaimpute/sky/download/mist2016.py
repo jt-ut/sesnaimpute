@@ -9,9 +9,9 @@ solar-metallicity file it carries, and discards the tarball (the other
 metallicities in the same archive are not this design's isochrone).
 
 Extends the pre-main-sequence mass-luminosity relation past BHAC15's
-1.4 M⊙ top (`sesnaimpute.population.yso_mass`), which SPEC_BMSTP_DRAFT.md
-sections 3.5 and 10 need for YSO templates whose luminosity exceeds
-BHAC15's covered range.
+1.4 M⊙ top (`sesnaimpute.sed_models.build_yso`, `sesnaimpute.sed_models.
+curate.yso_pms`), which SPEC_BMSTP_DRAFT.md sections 3.5 and 10 need for
+YSO templates whose luminosity exceeds BHAC15's covered range.
 """
 
 import os

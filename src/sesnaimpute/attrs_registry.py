@@ -95,24 +95,6 @@ REGISTRY = {
         "the pixel's solid angle, times the square of the cloud's own "
         "share of the line-of-sight column."),
 
-    # population.yso -- prior_yso_sightline: the young-star embedding
-    # density along each occupied sightline of a region.
-    ("prior_yso_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
-        "This region's own occupied nside-256 pixel numbers (nested "
-        "ordering). Row i here is row i of XI_EDGES and P_XI."),
-    ("prior_yso_sightline", "XI_EDGES"): ("dimensionless",
-        "For the matching pixel in HPX_PIX_256, the edges, in u = "
-        "(cumulative extinction to a depth) / (the sightline's own total "
-        "extinction), of the 32 equal-mass cells P_XI is tabulated on: "
-        "cell j runs from XI_EDGES[:, j] to XI_EDGES[:, j+1], with u = 0 "
-        "at the observer and u = 1 at the sightline's own total column."),
-    ("prior_yso_sightline", "P_XI"): ("per unit u",
-        "For the matching pixel in HPX_PIX_256 and each cell of XI_EDGES, "
-        "the young-star embedding density per unit u: the probability "
-        "that a young star on this sightline sits in that cell, divided "
-        "by the cell's own width in u. Integrating P_XI times the cell "
-        "width over all cells gives 1."),
-
     # bmstp.atlas -- prior_atlas_hpx512: the prior atlas, per admitted
     # nside-512 pixel, every class's cataloged and intrinsic density and
     # their grid breakdowns.
@@ -415,22 +397,11 @@ REGISTRY = {
         "grid: which sightline this source's position falls on."),
     ("table_density_source", "HPX_512"): ("nested HEALPix pixel, nside 512",
         "This source's own nested nside-512 pixel number."),
-    ("table_density_source", "F_LIM_50_MJY"): ("mJy",
-        "This source's own 50%-completeness flux limit in each of the "
-        "eight bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this "
-        "project's own band order), the catalog's per-source limits "
-        "product."),
     ("table_density_source", "D_PAHC"): ("dimensionless (log10 mJy)",
         "Minus log10 of this source's own 8 micron completeness-limit "
-        "flux (F_LIM_50_MJY's 8 micron column): the PAHC contamination "
-        "test's own depth term, before dividing by a predicted "
-        "photospheric flux."),
-    ("table_density_source", "A_CLOUD_K"): ("mag A_K",
-        "This source's own cloud-foreground extinction: A_COL_K times "
-        "the sightline's own foreground share of the column (nothing "
-        "behind the cloud interval's front edge is deducted, since the "
-        "3-D map cannot partition column reliably behind a cloud at a "
-        "kiloparsec)."),
+        "flux (`catalog.limits.limits`'s 8 micron column, the catalog's "
+        "per-source limits product): the PAHC contamination test's own "
+        "depth term, before dividing by a predicted photospheric flux."),
     ("table_density_source", "DENSITY_STAR"): ("objects per square degree",
         "This source's own retained STAR sky density: the field-star "
         "population's tile density at this source's own tile."),
@@ -446,8 +417,10 @@ REGISTRY = {
         "every source."),
     ("table_density_source", "DENSITY_YSO"): ("objects per square degree",
         "This source's own retained YSO sky density: the young-star law "
-        "applied to A_CLOUD_K and this source's own arm, times the "
-        "sightline's own on-grid retained fraction."),
+        "applied to this source's own cloud-foreground column (A_COL_K "
+        "times the sightline's own foreground share of the column) and "
+        "this source's own arm, times the sightline's own on-grid "
+        "retained fraction."),
     ("table_density_source", "DENSITY_H2S"): ("objects per square degree",
         "This source's own retained H2-shock sky density: the intrinsic "
         "young-star law density (convolved with the region's own HGBS "
@@ -1094,38 +1067,6 @@ REGISTRY = {
         "UKIDSS. Every bin past the 2MASS cut is 1; a region with no "
         "UKIDSS coverage at all has every bin 0."),
 
-    # population.yso_mass -- mass_yso_survey: each pooled YSO register
-    # template's own stellar mass, read off a pre-main-sequence track.
-    ("mass_yso_survey", "MODEL_NAME"): ("source name",
-        "This template's own identifier, in the pooled YSO register's own "
-        "row order."),
-    ("mass_yso_survey", "M_STAR"): ("Msun",
-        "This template's stellar mass: the mass at which the BHAC15 1 Myr "
-        "track (or, above its 1.4 solar-mass top, the MIST v1.2 1 Myr "
-        "isochrone) has the template's own luminosity LOG10_L, floored at "
-        "0.1 solar masses (FLAG_BELOW_FLOOR) and capped at the MIST "
-        "track's own top (FLAG_ABOVE_TOP)."),
-    ("mass_yso_survey", "LOG10_L"): ("log10 Lsun",
-        "This template's own bolometric luminosity, from its radiative-"
-        "transfer grid, independent of any stellar-evolution track: "
-        "10**x is a luminosity in solar luminosities."),
-    ("mass_yso_survey", "SUBGRID"): ("subclass code",
-        "This template's own SUBCLASS in the YSO register: C0, CI, FLAT, "
-        "CII, CIII or TD (definitions.SUBCLASSES_OF['YSO'] is the index "
-        "authority for order; this column is a name, not a position)."),
-    ("mass_yso_survey", "FLAG_ABOVE_TOP"): ("boolean",
-        "True where this template's luminosity exceeds the MIST v1.2 1 "
-        "Myr isochrone's own top, so M_STAR is capped at that track's "
-        "highest tabulated mass rather than interpolated."),
-    ("mass_yso_survey", "FLAG_BELOW_FLOOR"): ("boolean",
-        "True where this template's luminosity implies a mass below the "
-        "Chabrier (2003) system IMF's own 0.1 solar-mass floor, so "
-        "M_STAR is set to that floor."),
-    ("mass_yso_survey", "FLAG_HIGH"): ("boolean",
-        "True where this template's mass was read from the MIST v1.2 1 "
-        "Myr isochrone (above the BHAC15 track's 1.4 solar-mass top) "
-        "rather than from the BHAC15 1 Myr track."),
-
     # population.gal -- counts_gal_survey: the background-galaxy number-
     # counts law, survey-wide.
     ("counts_gal_survey", "LOG10_A"): ("log10(deg^-2 mJy^-1)",
@@ -1354,13 +1295,6 @@ REGISTRY = {
         "micron excess and measured 3.6 and 4.5 micron photometry fall "
         "in it: P_Q_DISK_EXCESS's own denominator."),
 
-    # population.column_grid -- column-grid_sesna_survey: the fixed column
-    # ladder every class tabulates its column kernel on.
-    ("column-grid_sesna_survey", "A_NODES"): ("mag A_K",
-        "The fixed, evenly-log10-spaced column ladder every class's "
-        "column kernel is tabulated on, from its floor to its cap, 0.02 "
-        "dex per step."),
-
     # sky.derived.column -- the adopted (gas) column and the extinction
     # (star-light) column, each at source and sightline granule, plus the
     # Herschel/Planck disagreement check.
@@ -1494,80 +1428,6 @@ REGISTRY = {
         "Which arm the dust column came from before the region's "
         "straight-line calibration, carried unchanged from the adopted "
         "sightline column: 0 Herschel, 1 Planck."),
-
-    ("column-check_adopted_survey", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
-        "The Herschel-covered admitted sightline pixel numbers (nested "
-        "ordering) this disagreement check is measured on, concatenated "
-        "region by region. Row i here is row i of A_HERSCHEL."),
-    ("column-check_adopted_survey", "REGION_CODE"): ("region code",
-        "The region each pixel in HPX_PIX_256 belongs to, as the integer "
-        "code the granule map assigns that region."),
-    ("column-check_adopted_survey", "A_HERSCHEL"): ("mag A_K",
-        "For the matching pixel in HPX_PIX_256, the Herschel arm's own "
-        "block-averaged K-band extinction."),
-    ("column-check_adopted_survey", "A_PLANCK"): ("mag A_K",
-        "For the matching pixel in HPX_PIX_256, the Planck arm's own "
-        "K-band extinction."),
-    ("column-check_adopted_survey", "A_MAP_EDGE"): ("mag A_K",
-        "For the matching pixel in HPX_PIX_256, the Edenhofer et al. "
-        "(2023) 3-D extinction map's own cumulative extinction at its "
-        "tabulated edge, before any far-field rescaling."),
-    ("column-check_adopted_survey", "A_HERSCHEL_QUARTILE_EDGES"): ("mag A_K",
-        "The five edges of the four quartile bins A_HERSCHEL is split "
-        "into for BIN_MAP_EDGE_RATIO_* and BIN_PLANCK_RATIO_*: bin g runs "
-        "from A_HERSCHEL_QUARTILE_EDGES[g] to [g+1]."),
-    ("column-check_adopted_survey", "BIN_MAP_EDGE_RATIO_MEDIAN"): ("dimensionless",
-        "For each of the four A_HERSCHEL quartile bins, the median, over "
-        "that bin's own pixels, of A_MAP_EDGE / A_HERSCHEL."),
-    ("column-check_adopted_survey", "BIN_MAP_EDGE_RATIO_P16"): ("dimensionless",
-        "For each of the four A_HERSCHEL quartile bins, the 16th "
-        "percentile, over that bin's own pixels, of A_MAP_EDGE / "
-        "A_HERSCHEL."),
-    ("column-check_adopted_survey", "BIN_MAP_EDGE_RATIO_P84"): ("dimensionless",
-        "For each of the four A_HERSCHEL quartile bins, the 84th "
-        "percentile, over that bin's own pixels, of A_MAP_EDGE / "
-        "A_HERSCHEL."),
-    ("column-check_adopted_survey", "BIN_PLANCK_RATIO_MEDIAN"): ("dimensionless",
-        "For each of the four A_HERSCHEL quartile bins, the median, over "
-        "that bin's own pixels, of A_PLANCK / A_HERSCHEL."),
-    ("column-check_adopted_survey", "BIN_PLANCK_RATIO_P16"): ("dimensionless",
-        "For each of the four A_HERSCHEL quartile bins, the 16th "
-        "percentile, over that bin's own pixels, of A_PLANCK / "
-        "A_HERSCHEL."),
-    ("column-check_adopted_survey", "BIN_PLANCK_RATIO_P84"): ("dimensionless",
-        "For each of the four A_HERSCHEL quartile bins, the 84th "
-        "percentile, over that bin's own pixels, of A_PLANCK / "
-        "A_HERSCHEL."),
-    ("column-check_adopted_survey", "REGION"): ("region name",
-        "Which region each row of REGION_MAP_EDGE_RATIO_* and "
-        "REGION_PLANCK_RATIO_* describes, in the order REGION_CODE_AXIS "
-        "gives."),
-    ("column-check_adopted_survey", "REGION_CODE_AXIS"): ("region code",
-        "The integer region code matching each entry of REGION."),
-    ("column-check_adopted_survey", "REGION_MAP_EDGE_RATIO_MEDIAN"): ("dimensionless",
-        "For the matching region in REGION, the median, over that "
-        "region's own Herschel-covered admitted pixels, of A_MAP_EDGE / "
-        "A_HERSCHEL."),
-    ("column-check_adopted_survey", "REGION_MAP_EDGE_RATIO_P16"): ("dimensionless",
-        "For the matching region in REGION, the 16th percentile, over "
-        "that region's own Herschel-covered admitted pixels, of "
-        "A_MAP_EDGE / A_HERSCHEL."),
-    ("column-check_adopted_survey", "REGION_MAP_EDGE_RATIO_P84"): ("dimensionless",
-        "For the matching region in REGION, the 84th percentile, over "
-        "that region's own Herschel-covered admitted pixels, of "
-        "A_MAP_EDGE / A_HERSCHEL."),
-    ("column-check_adopted_survey", "REGION_PLANCK_RATIO_MEDIAN"): ("dimensionless",
-        "For the matching region in REGION, the median, over that "
-        "region's own Herschel-covered admitted pixels, of A_PLANCK / "
-        "A_HERSCHEL."),
-    ("column-check_adopted_survey", "REGION_PLANCK_RATIO_P16"): ("dimensionless",
-        "For the matching region in REGION, the 16th percentile, over "
-        "that region's own Herschel-covered admitted pixels, of "
-        "A_PLANCK / A_HERSCHEL."),
-    ("column-check_adopted_survey", "REGION_PLANCK_RATIO_P84"): ("dimensionless",
-        "For the matching region in REGION, the 84th percentile, over "
-        "that region's own Herschel-covered admitted pixels, of "
-        "A_PLANCK / A_HERSCHEL."),
 
     # sky.derived.subbeam -- subbeam_herschel_region: how much the true
     # column varies within one Herschel beam, per region, plus the
@@ -2039,17 +1899,6 @@ REGISTRY = {
         "For the matching pixel in HPX_PIX_256 and each interval between "
         "two adjacent points of DIST_PC, the mean rate of change of "
         "A_CUM_K over that interval: the local extinction density."),
-    ("profile_edenhofer_sightline", "SIGMA_UNC_K"): ("mag A_K",
-        "For the matching pixel in HPX_PIX_256 and each distance in "
-        "DIST_PC, the lower-bound uncertainty on A_CUM_K: the sum, over "
-        "every step out to that distance, of that step's own map "
-        "uncertainty treated as independent of every other step's."),
-    ("profile_edenhofer_sightline", "SIGMA_COR_K"): ("mag A_K",
-        "For the matching pixel in HPX_PIX_256 and each distance in "
-        "DIST_PC, the upper-bound uncertainty on A_CUM_K: the sum, over "
-        "every step out to that distance, of that step's own map "
-        "uncertainty treated as perfectly correlated with every other "
-        "step's."),
     ("profile_edenhofer_sightline", "GAL_L_DEG"): ("deg",
         "Galactic longitude of the matching pixel's center in HPX_PIX_256."),
     ("profile_edenhofer_sightline", "GAL_B_DEG"): ("deg",
@@ -2152,48 +2001,6 @@ REGISTRY = {
         "True where a structure near this region's canonical distance was "
         "found at all, so D_PEAK_PC and the other depth values in this row "
         "are meaningful; False where none was found."),
-
-    # sky.derived.twomass_column_scale -- column-scale_twomass_region: each
-    # arm's map column regressed against 2MASS background-star color, by
-    # region and arm.
-    ("column-scale_twomass_region", "REGION"): ("region name",
-        "The name of the region this row describes, in the fixed thirty-"
-        "region order every region-axis product in this package shares."),
-    ("column-scale_twomass_region", "ARM"): ("arm name",
-        "The two map arms this file's second axis runs over, in column "
-        "order: herschel, planck."),
-    ("column-scale_twomass_region", "SCALE"): ("dimensionless",
-        "For this region and the matching arm in ARM, the factor that "
-        "rescales that arm's own map column to match the reddening of "
-        "2MASS background stars: the regression slope of their median "
-        "H minus Ks color against the arm's per-pixel column, divided by "
-        "the adopted hybrid extinction law's own A_H/A_K minus 1. NaN "
-        "where the region has too few usable pixels."),
-    ("column-scale_twomass_region", "SCALE_SIGMA"): ("dimensionless",
-        "The standard deviation of SCALE over 200 bootstrap resamples of "
-        "this region and arm's own usable pixels. NaN where the region has "
-        "too few usable pixels."),
-    ("column-scale_twomass_region", "SLOPE_H_KS_PER_AK"): ("mag (H-Ks) per mag A_K",
-        "For this region and the matching arm in ARM, the ordinary-least-"
-        "squares slope of the background stars' median H minus Ks color "
-        "against that arm's per-pixel map column, before the A_H/A_K "
-        "conversion SCALE applies. NaN where the region has too few "
-        "usable pixels."),
-    ("column-scale_twomass_region", "INTERCEPT_H_KS"): ("mag",
-        "For this region and the matching arm in ARM, the intercept of "
-        "the ordinary-least-squares regression of the background "
-        "stars' median H minus Ks color against that arm's per-pixel "
-        "map column: the background stars' predicted median H minus Ks "
-        "color at zero map column. NaN where the region has too few "
-        "usable pixels."),
-    ("column-scale_twomass_region", "N_STARS"): ("stars",
-        "For this region and the matching arm in ARM, how many background "
-        "2MASS stars, summed over the pixels usable for that arm's "
-        "regression, went into it."),
-    ("column-scale_twomass_region", "N_PIXELS"): ("pixels",
-        "For this region and the matching arm in ARM, how many nside-512 "
-        "pixels carried both a usable background-star color and a usable "
-        "arm column, and so went into the regression."),
 
     # catalog.depths -- depths_sesna_region: the fitted 50%-completeness
     # detection curve per region and band.
@@ -2505,20 +2312,13 @@ REGISTRY = {
 
     # sky.derived.edenhofer_samples -- profile-sigma-samples_edenhofer_sightline:
     # the across-sample uncertainty on the Edenhofer et al. (2024) extinction
-    # profile, from its 12 released posterior samples.
+    # profile's depth mark, from its 12 released posterior samples.
     ("profile-sigma-samples_edenhofer_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
         "This region's own nside-256 pixel numbers (nested ordering). Row i "
-        "here is row i of SIGMA_SAMPLES_K and SIGMA_RATIO_SAMPLES."),
+        "here is row i of SIGMA_RATIO_SAMPLES."),
     ("profile-sigma-samples_edenhofer_sightline", "DIST_PC"): ("pc",
-        "The distance grid along the line of sight that SIGMA_SAMPLES_K and "
-        "SIGMA_RATIO_SAMPLES are tabulated on, shared by every pixel in "
-        "this file."),
-    ("profile-sigma-samples_edenhofer_sightline", "SIGMA_SAMPLES_K"): ("mag A_K",
-        "For the matching pixel in HPX_PIX_256 and each distance in "
-        "DIST_PC, the standard deviation, across the map's 12 released "
-        "posterior samples, of the cumulative K-band extinction to that "
-        "distance. This is the sample-based uncertainty on the cumulative "
-        "column, in place of a correlated- or uncorrelated-sum bound."),
+        "The distance grid along the line of sight that SIGMA_RATIO_SAMPLES "
+        "is tabulated on, shared by every pixel in this file."),
     ("profile-sigma-samples_edenhofer_sightline", "SIGMA_RATIO_SAMPLES"): ("dimensionless",
         "For the matching pixel in HPX_PIX_256 and each distance in "
         "DIST_PC, the standard deviation, across the map's 12 released "
@@ -2526,9 +2326,8 @@ REGISTRY = {
         "that distance to the sample's own total extinction along the "
         "whole sightline. A star's own position along the sightline is "
         "set by this same ratio, so this is the sample uncertainty on "
-        "that positioning quantity: smaller near the far end (where the "
-        "ratio is pinned near 1 for every sample) than SIGMA_SAMPLES_K's "
-        "absolute uncertainty would suggest."),
+        "that positioning quantity: smaller near the far end, where the "
+        "ratio is pinned near 1 for every sample."),
 
     # sky.derived.swire_galaxies -- galaxies_swire_survey: the surviving
     # SWIRE galaxies, survey-wide, their IRAC colors and flux-grid node.
@@ -2586,10 +2385,9 @@ REGISTRY = {
         "value in all three colors, COLOUR_I1I2, COLOUR_I2I3 and "
         "COLOUR_I2I4."),
 
-    # sky.derived.juvela_extinction -- extinction_juvela_source (per
-    # region) and extinction_juvela_sightline (survey-wide): the Juvela &
-    # Montillaud (2016) NICEST star-color extinction map, converted to
-    # A_K.
+    # sky.derived.juvela_extinction -- extinction_juvela_source: the
+    # Juvela & Montillaud (2016) NICEST star-color extinction map,
+    # converted to A_K, at every cataloged source's own position.
     ("extinction_juvela_source", "A_K"): ("mag A_K",
         "For every cataloged source of this region, the NICEST star-color "
         "extinction map's value at the source's own sky position, converted "
@@ -2599,14 +2397,6 @@ REGISTRY = {
         "For every cataloged source of this region, the nested nside-1024 "
         "pixel number of the source's own sky position: the map cell this "
         "file's A_K value is read at."),
-    ("extinction_juvela_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
-        "The admitted nside-256 pixel numbers of every one of the thirty "
-        "regions, nested ordering. Row i here is row i of A_K."),
-    ("extinction_juvela_sightline", "A_K"): ("mag A_K",
-        "For the matching pixel in HPX_PIX_256, the mean of the NICEST "
-        "star-color extinction map's A_K value over all 64 of that pixel's "
-        "nside-2048 children, covering the whole sightline rather than only "
-        "where a source happens to fall."),
 
     # sky.derived.gaia_twomass_counts -- joint-counts_gaia-twomass_hpx512:
     # the joint Gaia G x 2MASS Ks anchor count, per region.
