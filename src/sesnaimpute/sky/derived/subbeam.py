@@ -684,7 +684,7 @@ def build(config, regions=None):
                     *REGISTRY[(_STEM, name)])
         print("subbeam: wrote %s (%.2f MB)"
               % (out_path, os.path.getsize(out_path) / 1e6), flush=True)
-        _write_mixture_datasets(out_path)
+        _write_mixture_datasets(out_path, config.n_jobs)
         st.done(out_path, regions=len(regs), maps=len(per_map))
 
 #: A (region, beam, KA) cell needs this many counts before a mixture is fit.
@@ -802,51 +802,105 @@ def fit_one_mixture(counts, A, sigma_map, kd_edges, kd_cent):
     return w, float(mu1), float(s1), float(mu2), float(s2), max_err
 
 
-def _fit_pooled_mixture(kern, fine_noise, ka_cent, kd_edges, kd_cent, n_beam, n_ka, beams):
-    """Fits the noise-separated structural mixture on the SURVEY-POOLED
-    histogram at every (beam, KA bin): the raw per-region histograms are
-    summed count-for-count (a count-weighted pool of histograms is just
-    their sum), and the noise level fed to the same forward model is the
-    count-weighted root-mean-square of the contributing regions' own
-    `FINE_MAP_NOISE_K`, weighted by each region's own counts in that bin
-    -- the pooled distribution is the count-weighted mixture of the
-    regions' distributions, not an average of their fitted parameters, so
-    it needs its own fit. Returns `(W, MU1, MU2, SIG1, SIG2, ERR)`, each
-    `(n_beam, n_ka)`."""
-    shp = (n_beam, n_ka)
-    W = np.full(shp, np.nan)
-    MU1 = np.full(shp, np.nan)
-    MU2 = np.full(shp, np.nan)
-    S1 = np.full(shp, np.nan)
-    S2 = np.full(shp, np.nan)
-    ERR = np.full(shp, np.nan)
+def _region_items(kern, fine_noise, beams, n_ka):
+    """Every `(region, beam, KA-bin)` triple with enough counts and a
+    finite fine-map noise to fit -- the cells `_write_mixture_datasets`'s
+    region loop used to visit one at a time. A triple carries only its
+    three indices; `kern`/`fine_noise` stay region-wide read-only inputs
+    bound into the fit function itself."""
+    items = []
     for b, lab in enumerate(beams):
-        K = kern[lab]                              # (n_region, n_ka, n_kd)
-        counts_per_bin = K.sum(axis=2)              # (n_region, n_ka)
+        counts_per_bin = kern[lab].sum(axis=2)        # (n_region, n_ka)
+        rs, js = np.nonzero(counts_per_bin >= MIX_MIN_COUNTS)
+        for r, j in zip(rs.tolist(), js.tolist()):
+            if np.isfinite(fine_noise[r]):
+                items.append((r, b, j))
+    return items
+
+
+def _region_fit_item(item, kern, fine_noise, ka_cent, kd_edges, kd_cent, beams):
+    """One `(region, beam, KA-bin)` fit -- reads only its own histogram
+    slice `kern[beam][region, ka_bin]` and the already-computed
+    `fine_noise[region]`, so it needs nothing another item's fit touches."""
+    r, b, j = item
+    counts = kern[beams[b]][r, j]
+    A = float(np.exp(ka_cent[j]))
+    return fit_one_mixture(counts, A, fine_noise[r], kd_edges, kd_cent)
+
+
+def _pooled_items(kern, fine_noise, beams, n_ka):
+    """Every `(beam, KA-bin)` pair whose survey-pooled histogram has
+    enough counts and at least one contributing region with finite
+    fine-map noise."""
+    items = []
+    for b, lab in enumerate(beams):
+        pooled_counts_per_bin = kern[lab].sum(axis=(0, 2))   # (n_ka,)
+        counts_per_bin = kern[lab].sum(axis=2)               # (n_region, n_ka)
         for j in range(n_ka):
-            pooled_counts = K[:, j, :].sum(axis=0)  # (n_kd,)
-            if pooled_counts.sum() < MIX_MIN_COUNTS:
+            if pooled_counts_per_bin[j] < MIX_MIN_COUNTS:
                 continue
             wt = counts_per_bin[:, j]
-            ok = np.isfinite(fine_noise) & (wt > 0)
-            if not ok.any():
-                continue
-            sigma_pool = float(np.sqrt(np.sum(wt[ok] * fine_noise[ok] ** 2)
-                                       / np.sum(wt[ok])))
-            A = float(np.exp(ka_cent[j]))
-            w, mu1, s1, mu2, s2, err = fit_one_mixture(
-                pooled_counts, A, sigma_pool, kd_edges, kd_cent)
-            W[b, j], MU1[b, j], MU2[b, j] = w, mu1, mu2
-            S1[b, j], S2[b, j], ERR[b, j] = s1, s2, err
-    return W, MU1, MU2, S1, S2, ERR
+            if (np.isfinite(fine_noise) & (wt > 0)).any():
+                items.append((b, j))
+    return items
 
 
-def _write_mixture_datasets(out_path):
+def _pooled_fit_item(item, kern, fine_noise, ka_cent, kd_edges, kd_cent, beams):
+    """One `(beam, KA-bin)` survey-pooled fit: the raw per-region
+    histograms summed count-for-count (a count-weighted pool of
+    histograms is just their sum), and the noise fed to the same forward
+    model the count-weighted root-mean-square of the contributing
+    regions' own fine-map noise, weighted by each region's own counts in
+    this bin -- the pooled distribution is the count-weighted mixture of
+    the regions' distributions, not an average of their fitted
+    parameters, so it needs its own fit."""
+    b, j = item
+    K = kern[beams[b]][:, j, :]            # (n_region, n_kd)
+    pooled_counts = K.sum(axis=0)
+    wt = K.sum(axis=1)
+    ok = np.isfinite(fine_noise) & (wt > 0)
+    sigma_pool = float(np.sqrt(np.sum(wt[ok] * fine_noise[ok] ** 2) / np.sum(wt[ok])))
+    A = float(np.exp(ka_cent[j]))
+    return fit_one_mixture(pooled_counts, A, sigma_pool, kd_edges, kd_cent)
+
+
+def _fit_mixture_batch(item_fn, items, bounds):
+    """One piece of the mixture-fit pool: `item_fn` on `items[start:stop]`,
+    returned together with that range so the parent can scatter the
+    results back by each item's own `(region, beam, KA)` or `(beam, KA)`
+    index -- the fits are independent of each other, so it makes no
+    difference which worker computes which cell."""
+    start, stop = bounds
+    return start, stop, [item_fn(items[i]) for i in range(start, stop)]
+
+
+def _run_mixture_fits(item_fn, items, n_jobs):
+    """Runs `item_fn` over every entry of `items`, cut into
+    `pieces.slices` pieces across `n_jobs` workers (`sesnaimpute.pieces`,
+    the one pool every stage uses); returns the six fit-parameter tuples
+    in the original order of `items`."""
+    out = [None] * len(items)
+    if not items:
+        return out
+    batch_fn = functools.partial(_fit_mixture_batch, item_fn, items)
+    for start, stop, rows in pieces_module.run(
+            batch_fn, pieces_module.slices(len(items), n_jobs), n_jobs):
+        out[start:stop] = rows
+    return out
+
+
+def _write_mixture_datasets(out_path, n_jobs=1):
     """Fits the noise-separated structural mixture at every (region, beam,
     KA bin) with at least `MIX_MIN_COUNTS` counts, from the histograms
     already stored in the sub-beam product, plus the survey-pooled fit at
-    every (beam, KA bin) (`_fit_pooled_mixture`), and adds both as new
-    datasets (nothing already in the file is touched)."""
+    every (beam, KA bin), and adds both as new datasets (nothing already
+    in the file is touched). Each (region, beam, KA) cell's fit and each
+    (beam, KA) pooled fit reads only its own histogram slice and the
+    already-computed `fine_noise` -- no state carries between cells -- so
+    both loops are flattened to an item list and spread over `n_jobs`
+    workers through `sesnaimpute.pieces`; the parent scatters each item's
+    result back by its own index, so the numbers do not depend on which
+    worker fit which cell."""
     beams = ("L108", "L302", "L821")
     with h5py.File(out_path, "r") as fh:
         ka_edges = fh["KA_EDGES"][:]
@@ -868,22 +922,31 @@ def _write_mixture_datasets(out_path):
     S2 = np.full(shp, np.nan)
     ERR = np.full(shp, np.nan)
 
-    for r in range(n_region):
-        sigma_map = fine_noise[r]
-        for b, lab in enumerate(beams):
-            K = kern[lab][r]
-            counts_per_bin = K.sum(axis=1)
-            for j in range(n_ka):
-                if counts_per_bin[j] < MIX_MIN_COUNTS or not np.isfinite(sigma_map):
-                    continue
-                A = float(np.exp(ka_cent[j]))
-                w, mu1, s1, mu2, s2, err = fit_one_mixture(
-                    K[j], A, sigma_map, kd_edges, kd_cent)
-                W[r, b, j], MU1[r, b, j], MU2[r, b, j] = w, mu1, mu2
-                S1[r, b, j], S2[r, b, j], ERR[r, b, j] = s1, s2, err
+    region_items = _region_items(kern, fine_noise, beams, n_ka)
+    region_fn = functools.partial(_region_fit_item, kern=kern, fine_noise=fine_noise,
+                                  ka_cent=ka_cent, kd_edges=kd_edges, kd_cent=kd_cent,
+                                  beams=beams)
+    for (r, b, j), (w, mu1, s1, mu2, s2, err) in zip(
+            region_items, _run_mixture_fits(region_fn, region_items, n_jobs)):
+        W[r, b, j], MU1[r, b, j], MU2[r, b, j] = w, mu1, mu2
+        S1[r, b, j], S2[r, b, j], ERR[r, b, j] = s1, s2, err
 
-    (PW, PMU1, PMU2, PS1, PS2, PERR) = _fit_pooled_mixture(
-        kern, fine_noise, ka_cent, kd_edges, kd_cent, n_beam, n_ka, beams)
+    pshp = (n_beam, n_ka)
+    PW = np.full(pshp, np.nan)
+    PMU1 = np.full(pshp, np.nan)
+    PMU2 = np.full(pshp, np.nan)
+    PS1 = np.full(pshp, np.nan)
+    PS2 = np.full(pshp, np.nan)
+    PERR = np.full(pshp, np.nan)
+
+    pooled_items = _pooled_items(kern, fine_noise, beams, n_ka)
+    pooled_fn = functools.partial(_pooled_fit_item, kern=kern, fine_noise=fine_noise,
+                                  ka_cent=ka_cent, kd_edges=kd_edges, kd_cent=kd_cent,
+                                  beams=beams)
+    for (b, j), (w, mu1, s1, mu2, s2, err) in zip(
+            pooled_items, _run_mixture_fits(pooled_fn, pooled_items, n_jobs)):
+        PW[b, j], PMU1[b, j], PMU2[b, j] = w, mu1, mu2
+        PS1[b, j], PS2[b, j], PERR[b, j] = s1, s2, err
 
     with h5py.File(out_path, "a") as fh:
         for name in ("MIX_W", "MIX_MU1", "MIX_MU2", "MIX_SIG1", "MIX_SIG2",
@@ -910,7 +973,7 @@ def fit_only(config, regions=None):
     sub-beam product already on disk, without touching any map."""
     out_path = config_module.product_path(config, "sky/derived", "herschel",
                                           "subbeam", "region")
-    _write_mixture_datasets(out_path)
+    _write_mixture_datasets(out_path, config.n_jobs)
 
 
 if __name__ == "__main__":
