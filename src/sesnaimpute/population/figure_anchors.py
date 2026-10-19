@@ -4,8 +4,10 @@ the cloud) and 2MASS Ks (stars seen through it), with the adopted
 reweighting factor `W` drawn beneath each panel (P2 brief;
 `_figure_conventions.md`).
 
-Reads three products `population.anchor_tiles`, `population.young_stars`
-and `population.anchor_weights` already wrote, per region:
+Reads two products `population.anchor_tiles` and `population.anchor_weights`
+already wrote, per region, plus `population.young_stars.build_region`'s
+own in-memory result (brief U4: that stage writes no product of its own
+any more, folded into `population.anchor_weights.build`):
 
   `histograms_anchors_hpx512__<Region>.hdf5` -- `G_EDGES`, `KS_EDGES`,
   `N_G_OBS`/`N_G_PRED` (n_pix, n_G), `N_KS_OBS`/`N_KS_PRED` (n_pix, n_Ks).
@@ -41,6 +43,7 @@ from matplotlib.ticker import NullFormatter, ScalarFormatter
 from sesnaimpute import config as config_module
 from sesnaimpute import plot_style
 from sesnaimpute import regions as regions_module
+from sesnaimpute.population import young_stars
 
 #: page size the figure conventions name for a product figure
 #: (`_figure_conventions.md`: "16 x 6 in unless the content needs
@@ -79,12 +82,17 @@ def _read_histograms(config, region):
 
 
 def _read_young_stars(config, region):
-    path = config_module.product_path(config, "population", "anchors", "young-stars", "hpx512", region=region)
-    with h5py.File(path, "r") as f:
-        return dict(
-            n_g_young=np.asarray(f["N_G_YOUNG"][:], dtype=np.float64).sum(axis=0),
-            n_ks_young=np.asarray(f["N_KS_YOUNG"][:], dtype=np.float64).sum(axis=0),
-        )
+    """The region-total young-star expectation per bin: `population.
+    young_stars` is a library, not a stage, since brief U4 folded its
+    only non-figure reader (`population.anchor_observed`) into
+    `population.anchor_weights.build`, so there is no `young-stars_
+    anchors_hpx512` file to read any more -- this figure recomputes the
+    same per-pixel result in memory and sums it itself."""
+    result = young_stars.build_region(config, region)
+    return dict(
+        n_g_young=np.asarray(result["n_g_young"], dtype=np.float64).sum(axis=0),
+        n_ks_young=np.asarray(result["n_ks_young"], dtype=np.float64).sum(axis=0),
+    )
 
 
 def _read_weights(config, region):

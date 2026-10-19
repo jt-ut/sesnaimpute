@@ -68,32 +68,12 @@ REGISTRY = {
         "90 the source's own 90%-completeness flux, 91 the median "
         "90%-completeness flux of its nearest sky neighbours."),
 
-    # population.young_stars -- young-stars_anchors_hpx512: the model's own
-    # expected young-star count in each STAR anchor pixel, by magnitude,
-    # subtracted from the observed Gaia/2MASS histograms before fitting
-    # the field-star weight.
-    ("young-stars_anchors_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
-        "This region's own occupied nside-512 pixel numbers (nested "
-        "ordering). Row i here is row i of N_YOUNG_TOTAL."),
-    ("young-stars_anchors_hpx512", "N_G_YOUNG"): ("stars",
-        "For the matching pixel in HPX_PIX_512 and each Gaia G magnitude "
-        "bin of the STAR anchor's own half-magnitude binning grid, the "
-        "model's expected number of 1-Myr young stars at that apparent "
-        "magnitude, weighted by the Gaia detection probability at that "
-        "magnitude and summed to N_YOUNG_TOTAL for the pixel."),
-    ("young-stars_anchors_hpx512", "N_KS_YOUNG"): ("stars",
-        "For the matching pixel in HPX_PIX_512 and each 2MASS Ks "
-        "magnitude bin of the STAR anchor's own half-magnitude binning "
-        "grid, the model's expected number of 1-Myr young stars at that "
-        "apparent magnitude, summed to N_YOUNG_TOTAL for the pixel "
-        "together with the stars fainter than that grid's own faint "
-        "edge and the stars above the model's own 1.4 solar mass top."),
-    ("young-stars_anchors_hpx512", "N_YOUNG_TOTAL"): ("stars",
-        "For the matching pixel in HPX_PIX_512, the model's total expected "
-        "number of young stars belonging to this region's cloud: the "
-        "young-star law integrated over the pixel's own column map, times "
-        "the pixel's solid angle, times the square of the cloud's own "
-        "share of the line-of-sight column."),
+    # population.young_stars: folded into population.anchor_weights.build
+    # (brief U4) -- no product of its own, no registry entries. See
+    # population.young_stars.build_region's own docstring for what
+    # N_G_YOUNG/N_KS_YOUNG/N_YOUNG_TOTAL mean; figure_anchors recomputes
+    # them in memory, population.anchor_observed.compute_region reads
+    # them as the dict build_region returns, directly.
 
     # population.yso -- prior_yso_sightline: the young-star embedding
     # density along each occupied sightline of a region.
@@ -688,6 +668,25 @@ REGISTRY = {
         "different shift on each side. Equal to this region's own single "
         "D_PEAK_PC (sky/derived/edenhofer/depth/region) where no separable "
         "local peak is found."),
+    ("cloud_shape_sightline", "XI_FRONT"): ("dimensionless",
+        "For the matching sightline in HPX_PIX_256, its own cumulative "
+        "extinction profile u = A(d)/A(inf) evaluated at this region's "
+        "cloud interval's own front edge (this file's D_FRONT_PC "
+        "attribute). Folded in from the retired bmstp.cloud_interval "
+        "stage (brief U4)."),
+    ("cloud_shape_sightline", "XI_BACK"): ("dimensionless",
+        "For the matching sightline in HPX_PIX_256, its own cumulative "
+        "extinction profile u = A(d)/A(inf) evaluated at this region's "
+        "cloud interval's own back edge (this file's D_BACK_PC "
+        "attribute). Never smaller than XI_FRONT. Folded in from the "
+        "retired bmstp.cloud_interval stage (brief U4)."),
+    ("cloud_shape_sightline", "W_CLOUD"): ("dimensionless",
+        "For the matching sightline in HPX_PIX_256, the diffuse/dense "
+        "extinction-law ramp weight evaluated at the column of dust "
+        "between the cloud interval's front and back edges, (XI_BACK - "
+        "XI_FRONT) times this sightline's own total extinction column. "
+        "0 where that column is 0. Folded in from the retired "
+        "bmstp.cloud_interval stage (brief U4)."),
 
     ("gal_shape_survey", "LOG10_XI_EDGES"): ("log10(dimensionless)",
         "The edges of the log10(depth fraction) axis every shape grid in "
@@ -703,30 +702,6 @@ REGISTRY = {
         "galaxy's light passes through the whole sightline) times the "
         "background-galaxy counts law in F_4.5, up to the floor this "
         "file's ON_GRID_GAL attribute leaves out."),
-
-    # bmstp.cloud_interval -- cloud_interval_shape_sightline: each
-    # sightline's own dense fraction between the region's cloud interval,
-    # per region.
-    ("cloud_interval_shape_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
-        "This region's own occupied nside-256 pixel numbers (nested "
-        "ordering). Row i here is row i of XI_FRONT, XI_BACK and "
-        "W_CLOUD."),
-    ("cloud_interval_shape_sightline", "XI_FRONT"): ("dimensionless",
-        "For the matching sightline in HPX_PIX_256, its own cumulative "
-        "extinction profile u = A(d)/A(inf) evaluated at this region's "
-        "cloud interval's own front edge (this file's D_FRONT_PC "
-        "attribute)."),
-    ("cloud_interval_shape_sightline", "XI_BACK"): ("dimensionless",
-        "For the matching sightline in HPX_PIX_256, its own cumulative "
-        "extinction profile u = A(d)/A(inf) evaluated at this region's "
-        "cloud interval's own back edge (this file's D_BACK_PC "
-        "attribute). Never smaller than XI_FRONT."),
-    ("cloud_interval_shape_sightline", "W_CLOUD"): ("dimensionless",
-        "For the matching sightline in HPX_PIX_256, the diffuse/dense "
-        "extinction-law ramp weight evaluated at the column of dust "
-        "between the cloud interval's front and back edges, (XI_BACK - "
-        "XI_FRONT) times this sightline's own total extinction column. "
-        "0 where that column is 0."),
 
     # population.kernel -- kernel_sesna_survey: the column kernel p(T |
     # A_measured), a two-log-normal mixture per arm and node, survey-wide,
@@ -1203,35 +1178,13 @@ REGISTRY = {
         "POINT_FRACTION_LOG10_S_CENTERS bin: the sample size behind each "
         "POINT_FRACTION_MEASURED value."),
 
-    # population.anchor_observed -- observed_anchors_hpx512: the STAR
-    # anchors' observed joint histogram with the model's own young-star
-    # and cluster-member counts already subtracted.
-    ("observed_anchors_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
-        "This region's own occupied nside-512 anchor pixel numbers "
-        "(nested ordering). Row i here is row i of N_G_SUB, N_KS_SUB "
-        "and N_GK_SUB."),
-    ("observed_anchors_hpx512", "G_EDGES"): ("mag Gaia G",
-        "The edges of the Gaia G magnitude bins N_G_SUB and N_GK_SUB are "
-        "tabulated on."),
-    ("observed_anchors_hpx512", "KS_EDGES"): ("mag 2MASS Ks",
-        "The edges of the 2MASS Ks magnitude bins N_KS_SUB and N_GK_SUB "
-        "are tabulated on."),
-    ("observed_anchors_hpx512", "N_G_SUB"): ("stars",
-        "For the matching pixel in HPX_PIX_512 and each Gaia G bin of "
-        "G_EDGES, the observed star count with the model's own expected "
-        "young-star count and any overlapping bound star cluster's own "
-        "member count both subtracted, floored at zero."),
-    ("observed_anchors_hpx512", "N_KS_SUB"): ("stars",
-        "For the matching pixel in HPX_PIX_512 and each 2MASS Ks bin of "
-        "KS_EDGES, the observed star count with the model's own expected "
-        "young-star count and any overlapping bound star cluster's own "
-        "member count both subtracted, floored at zero."),
-    ("observed_anchors_hpx512", "N_GK_SUB"): ("stars",
-        "For the matching pixel in HPX_PIX_512, each Gaia G bin of "
-        "G_EDGES and each 2MASS Ks bin of KS_EDGES, the Gaia-2MASS joint "
-        "crossmatch count with the model's own expected young-star joint "
-        "count and any overlapping bound star cluster's own member joint "
-        "count both subtracted, floored at zero."),
+    # population.anchor_observed: folded into population.anchor_weights.
+    # build (brief U4) -- no product of its own, no registry entries.
+    # N_G_SUB/N_KS_SUB/N_GK_SUB (the model's own expected young-star and
+    # cluster-member count subtracted from the observed Gaia/2MASS
+    # histogram, floored at zero) live only in the dict
+    # `anchor_observed.compute_region` returns, read directly by
+    # `anchor_weights.region_tile_counts`.
 
     # population.yso_law -- law_yso_region: the young-star law's
     # coefficient, fitted per region on the Dunham et al. (2015) census.
@@ -2480,28 +2433,9 @@ REGISTRY = {
         "For the cell at (LOG_TEFF_EDGES[i], LOG_G_EDGES[j], MH_EDGES[k]), "
         "how many TRILEGAL stars from the download fall in it."),
 
-    # sky.derived.planck_source_column -- column_planck_source: the Planck
-    # thermal-dust arm of the per-source extinction column.
-    ("column_planck_source", "A_K"): ("mag A_K",
-        "For every cataloged source of this region, the K-band extinction "
-        "from the Planck R1.20 thermal-dust optical depth (TAU353) "
-        "bilinearly interpolated at the source's own Galactic position."),
-    ("column_planck_source", "SIGMA_A_K"): ("mag A_K",
-        "The total 1-sigma uncertainty on A_K, combining SIGMA_STAT_K, "
-        "SIGMA_WITHIN_K and SIGMA_REGION_K in quadrature."),
-    ("column_planck_source", "SIGMA_STAT_K"): ("mag A_K",
-        "The part of A_K's uncertainty from the Planck map's own per-pixel "
-        "statistical error on TAU353 at the source's position."),
-    ("column_planck_source", "SIGMA_WITHIN_K"): ("mag A_K",
-        "The part of A_K's uncertainty from the measured scatter, within "
-        "this source's region, between the Planck-based column and the "
-        "reference column it is calibrated against: a fixed offset plus a "
-        "term growing with A_K."),
-    ("column_planck_source", "SIGMA_REGION_K"): ("mag A_K",
-        "The part of A_K's uncertainty from the region-to-region scatter "
-        "of the Planck-based column against the reference column it is "
-        "calibrated against, not reduced by beam averaging since a "
-        "single sightline sees exactly one Planck beam."),
+    # sky.derived.planck_source_column: folded into sky.derived.column's
+    # merge (its own per-source product's only reader) -- no product of
+    # its own, no registry entries.
 
     # sky.derived.edenhofer_samples -- profile-sigma-samples_edenhofer_sightline:
     # the across-sample uncertainty on the Edenhofer et al. (2024) extinction

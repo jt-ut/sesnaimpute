@@ -261,8 +261,15 @@ def _sig_model(pairs):
 
 def _write_sigma_survey(config, maps, header_by_name, sig):
     """The survey-wide product: every map's own beam FWHM (header value,
-    else the survey's 36.3") and the zero-point/random sigma model the
-    per-region column files are computed with."""
+    else the survey's 36.3") and the random-term model (C0/C1) the
+    per-region column files are computed with. The zero point itself,
+    `SIGMA_ZP_K`, is NOT written here -- `sig["sig_zp_ak"]` (the RMS of
+    the overlapping-map-pair half-differences) is a diagnostic printed by
+    `build` only; the one `SIGMA_ZP_K` this file carries is
+    `sky.derived.column._write_field_zeropoints`'s per-field measurement,
+    appended into this same file in the pass that follows (module
+    docstring). A reader before that pass has run finds no `SIGMA_ZP_K`
+    at all, rather than this stage's own superseded number."""
     out_path = config_module.product_path(config, "sky/derived", "herschel", "sigma", "survey")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     names = [m["name"] for m in maps]
@@ -273,7 +280,6 @@ def _write_sigma_survey(config, maps, header_by_name, sig):
         for name, data in (
             ("MAP_NAME", np.array([n.encode("utf-8") for n in names])),
             ("BEAM_FWHM_ARCSEC", fwhm),
-            ("SIGMA_ZP_K", np.float64(sig["sig_zp_ak"])),
             ("C0", np.float64(sig["rand_c0"])),
             ("C1", np.float64(sig["rand_c1"])),
             ("N_PAIRS", np.int64(sig["n_pairs"])),

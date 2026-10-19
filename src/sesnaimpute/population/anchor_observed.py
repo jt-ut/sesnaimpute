@@ -4,6 +4,13 @@ and "young stars in the anchors" rows), per nside-512 anchor pixel --
 the same pixels and edges `population.anchor_tiles.write_histograms` and
 `population.young_stars` already wrote.
 
+A library, not a stage of its own (brief U4, 2026-10-19): folded into
+`population.anchor_weights.build`, which computes this module's
+`compute_region` in memory, between the anchor histograms
+(`population.anchor_tiles`) and the per-tile weight fit, and writes no
+product -- the old `observed_anchors_hpx512_<Region>.hdf5` had exactly
+one reader, `population.anchor_weights`.
+
 N_GK_OBS. Read from `sky/derived/gaia/joint-counts_gaia-twomass_hpx512__
 <Region>.hdf5` (`sesnaimpute.sky.derived.gaia_twomass_counts`) and placed
 onto the histograms product's own `G_EDGES`/`KS_EDGES`: the joint count
@@ -91,15 +98,7 @@ import healpy as hp
 import numpy as np
 import pandas as pd
 
-from sesnaimpute import build as build_module
-from sesnaimpute import config as config_module
-from sesnaimpute import progress
-from sesnaimpute import regions as regions_module
-from sesnaimpute.attrs_registry import REGISTRY
-from sesnaimpute.build import run
 from sesnaimpute.population import anchor_weights as anchor_weights_module
-
-_STEM = "observed_anchors_hpx512"
 
 #: `population.anchor_tiles.NSIDE`: the anchor histograms' own pixel
 #: grain, matched here so a cluster member's own position lands on the
@@ -173,6 +172,15 @@ def _read_cluster_members(config, cluster_names):
     region's own candidate set is a small fraction of the clusters, so
     each chunk is filtered to that set before it is kept, and only the
     kept rows accumulate.
+
+    Called ONCE, in `population.anchor_weights.build`, with the UNION of
+    every requested region's own candidate clusters (brief U4: this scan
+    cost 11-12 s per region, region count times, when each of the three
+    retired stages called it per region on its own); the per-region
+    selection below (`select_region_members`) then filters the returned
+    `name` column in memory, no second scan. Returns `name` alongside the
+    numeric columns so that per-region split can happen without rereading
+    the file.
     """
     path = f"{config.data_root}/sky/download/hunt_reffert2023/members.dat"
     if not os.path.exists(path):
@@ -180,8 +188,10 @@ def _read_cluster_members(config, cluster_names):
             "prior.anchor_observed: Hunt & Reffert 2023 member table missing at "
             f"{path} -- run `sesnaimpute.sky.download.hunt_reffert2023.build` first")
     name_set = set(str(n) for n in cluster_names)
+    empty = dict(name=np.zeros(0, dtype=str), glon=np.zeros(0), glat=np.zeros(0),
+                 gmag=np.zeros(0), bp_rp=np.zeros(0))
     if not name_set:
-        return dict(glon=np.zeros(0), glat=np.zeros(0), gmag=np.zeros(0), bp_rp=np.zeros(0))
+        return empty
     kept = []
     reader = pd.read_fwf(path, colspecs=_MEMBER_COLSPECS, names=_MEMBER_NAMES,
                           header=None, dtype=str, chunksize=_MEMBER_CHUNK_ROWS)
@@ -190,15 +200,28 @@ def _read_cluster_members(config, cluster_names):
         if len(chunk):
             kept.append(chunk)
     if not kept:
-        return dict(glon=np.zeros(0), glat=np.zeros(0), gmag=np.zeros(0), bp_rp=np.zeros(0))
+        return empty
     df = pd.concat(kept, ignore_index=True)
     for col in ("PROB", "GLON", "GLAT", "GMAG", "BP_RP"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
     df = df[df["PROB"] >= _MEMBER_PROB_MIN]
-    return dict(glon=df["GLON"].to_numpy(dtype=np.float64),
+    return dict(name=df["NAME"].str.strip().to_numpy(dtype=str),
+                glon=df["GLON"].to_numpy(dtype=np.float64),
                 glat=df["GLAT"].to_numpy(dtype=np.float64),
                 gmag=df["GMAG"].to_numpy(dtype=np.float64),
                 bp_rp=df["BP_RP"].to_numpy(dtype=np.float64))
+
+
+def select_region_members(members_all, region_cluster_names):
+    """This region's own slice of `_read_cluster_members`'s
+    union-of-all-requested-regions result, by name, in memory -- no file
+    I/O (brief U4's "read once, pass down")."""
+    name_set = set(str(n) for n in region_cluster_names)
+    if members_all["name"].size == 0 or not name_set:
+        return dict(glon=np.zeros(0), glat=np.zeros(0), gmag=np.zeros(0), bp_rp=np.zeros(0))
+    mask = np.isin(members_all["name"], list(name_set))
+    return dict(glon=members_all["glon"][mask], glat=members_all["glat"][mask],
+                gmag=members_all["gmag"][mask], bp_rp=members_all["bp_rp"][mask])
 
 
 def _cluster_member_histograms(pixels, members, g_edges, ks_edges):
@@ -262,41 +285,6 @@ def _cluster_member_histograms(pixels, members, g_edges, ks_edges):
 # per-region build
 # ---------------------------------------------------------------------
 
-def _read_histograms(config, region):
-    path = config_module.product_path(config, "population", "anchors", "histograms", "hpx512", region=region)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "prior.anchor_observed: anchor histograms missing for region %r at "
-            "%s -- run the 'prior.anchor_tiles' RUNBOOK line first" % (region, path))
-    with h5py.File(path, "r") as f:
-        return dict(
-            pixels=np.asarray(f["HPX_PIX_512"][:], dtype=np.int64),
-            g_edges=np.asarray(f["G_EDGES"][:], dtype=np.float64),
-            ks_edges=np.asarray(f["KS_EDGES"][:], dtype=np.float64),
-            n_g_obs=np.asarray(f["N_G_OBS"][:], dtype=np.float64),
-            n_ks_obs=np.asarray(f["N_KS_OBS"][:], dtype=np.float64),
-        )
-
-
-def _read_young_stars(config, region, pixels):
-    path = config_module.product_path(config, "population", "anchors", "young-stars", "hpx512", region=region)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "prior.anchor_observed: young-star anchor expectation missing for region %r at "
-            "%s -- run the 'prior.young_stars' RUNBOOK line first" % (region, path))
-    with h5py.File(path, "r") as f:
-        yp = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
-        n_g_young = np.asarray(f["N_G_YOUNG"][:], dtype=np.float64)
-        n_ks_young = np.asarray(f["N_KS_YOUNG"][:], dtype=np.float64)
-        n_young_total = np.asarray(f["N_YOUNG_TOTAL"][:], dtype=np.float64)
-    if not np.array_equal(pixels, yp):
-        raise ValueError(
-            "prior.anchor_observed: %r's young-star product pixel set disagrees with "
-            "the anchor histograms' own pixel set -- rerun 'prior.anchor_tiles' or "
-            "'prior.young_stars' for this region" % region)
-    return n_g_young, n_ks_young, n_young_total
-
-
 def _read_joint_counts(config, region):
     """`sky/derived/gaia/joint-counts_gaia-twomass_hpx512__<Region>.hdf5`
     (`sesnaimpute.sky.derived.gaia_twomass_counts`): the Gaia archive's
@@ -336,12 +324,35 @@ def _place_joint_on_ks_axis(n_gk_joint, joint_ks_edges, hist_ks_edges):
     return out
 
 
-def build_region(config, region):
-    hist = _read_histograms(config, region)
+def compute_region(config, region, hist, young, tiles, clusters, members_all):
+    """The young-star-and-cluster-subtracted observed anchor histogram,
+    in memory, from already-loaded pieces (brief U4: this function
+    replaces the retired `population.anchor_observed` stage, called
+    directly by `population.anchor_weights.region_tile_counts`):
+
+    `hist` is `population.anchor_weights._read_histograms`'s result
+    (`population.anchor_tiles`' histograms product: HPX_PIX_512,
+    G_EDGES, KS_EDGES, N_G_OBS, N_KS_OBS, among others this function
+    does not read). `young` is `population.young_stars.build_region`'s
+    result, computed over the SAME pixel set (both ultimately read the
+    same histograms file, so the two pixel arrays agree in value; cross-
+    checked below as an internal consistency check, not a cross-file
+    guard -- there is no second file any more). `tiles` is
+    `population.anchor_weights._read_tiles`'s result. `clusters` is
+    `population.anchor_weights._read_hunt_reffert_clusters`'s result.
+    `members_all` is `_read_cluster_members`'s result for the UNION of
+    every requested region's own candidate clusters, read once by the
+    caller's `build()` and passed down.
+    """
     pixels, g_edges, ks_edges = hist["pixels"], hist["g_edges"], hist["ks_edges"]
     n_pix = pixels.size
 
-    n_g_young, n_ks_young, n_young_total = _read_young_stars(config, region, pixels)
+    if not np.array_equal(pixels, young["pixels"]):
+        raise ValueError(
+            "population.anchor_observed.compute_region: %r's young-star pixel set "
+            "disagrees with the anchor histograms' own pixel set" % region)
+    n_g_young, n_ks_young, n_young_total = (
+        young["n_g_young"], young["n_ks_young"], young["n_young_total"])
 
     joint = _read_joint_counts(config, region)
     if not np.array_equal(pixels, joint["pixels"]):
@@ -375,18 +386,19 @@ def build_region(config, region):
 
     # the cluster-member subtraction (module docstring, "THE CLUSTER
     # SUBTRACTION"): applied on top of the young-star-subtracted
-    # histogram, same floor-at-zero mechanism.
-    tiles = anchor_weights_module._read_tiles(config, region)
+    # histogram, same floor-at-zero mechanism. `tiles`/`clusters` are
+    # already loaded by the caller; the member table itself was already
+    # read ONCE for the whole build (brief U4), so only the in-memory
+    # per-region selection happens here, no file I/O.
     if not np.array_equal(pixels, tiles["pixels"]):
         raise ValueError(
             "prior.anchor_observed: %r's tiles product pixel set disagrees with the "
             "anchor histograms' own pixel set -- rerun `prior.anchor_tiles` for this "
             "region" % region)
-    clusters = anchor_weights_module._read_hunt_reffert_clusters(config)
     touching = _clusters_touching_region(
         tiles["tile_l_deg"], tiles["tile_b_deg"], tiles["l_star_deg"], clusters)
     cluster_names = clusters["name"][touching]
-    members = _read_cluster_members(config, cluster_names)
+    members = select_region_members(members_all, cluster_names)
     n_g_cluster, n_ks_cluster, n_gk_cluster, n_members_matched, n_members_with_ks = \
         _cluster_member_histograms(pixels, members, g_edges, ks_edges)
 
@@ -421,63 +433,36 @@ def build_region(config, region):
     )
 
 
-def _write_product(config, region, result):
-    path = config_module.product_path(config, "population", "anchors", "observed", "hpx512", region=region)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with h5py.File(path, "w") as f:
-        f.attrs["GRANULE"] = "hpx512"
-        for name, data in (
-            ("HPX_PIX_512", result["pixels"].astype(np.int64)),
-            ("G_EDGES", result["g_edges"]),
-            ("KS_EDGES", result["ks_edges"]),
-            ("N_G_SUB", result["n_g_sub"].astype(np.float32)),
-            ("N_KS_SUB", result["n_ks_sub"].astype(np.float32)),
-            ("N_GK_SUB", result["n_gk_sub"].astype(np.float32)),
-        ):
-            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
-    return path
+def report(region, result):
+    """Prints the diagnostic line the retired `population.anchor_observed`
+    stage used to print at its own `build()`: the number of archive
+    crossmatch rows entering `N_GK_OBS`, the fraction of pixels carrying
+    any floored bin, the region-total subtracted fraction in `G` and
+    `Ks`, and the cluster-member subtraction's own candidate-cluster
+    count, matched-member count and floored-bin count. Called by
+    `population.anchor_weights.build` -- this stage no longer writes its
+    own product, so there is no path to report."""
+    any_floored = ((result["floored_g"] > 0) | (result["floored_ks"] > 0)
+                    | (result["floored_gk"] > 0))
+    frac_floored_pix = float(any_floored.mean()) if any_floored.size else float("nan")
+    any_cluster_floored = ((result["cluster_floored_g"] > 0)
+                            | (result["cluster_floored_ks"] > 0)
+                            | (result["cluster_floored_gk"] > 0))
+    n_cluster_floored_pix = int(np.count_nonzero(any_cluster_floored))
 
-
-def build(config, regions=None):
-    """Writes, per region (default: all thirty), `bms/anchors/observed_
-    anchors_hpx512__<Region>.hdf5` (module docstring). Prints, per
-    region, the number of archive crossmatch rows entering `N_GK_OBS`,
-    the fraction of pixels carrying any floored bin, the region-total
-    subtracted fraction in `G` and `Ks`, and the cluster-member
-    subtraction's own candidate-cluster count, matched-member count and
-    floored-bin count.
-    """
-    names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
-    for region in names:
-        with progress.Stage("prior.anchor_observed", region) as st:
-            result = build_region(config, region)
-            path = _write_product(config, region, result)
-
-            any_floored = ((result["floored_g"] > 0) | (result["floored_ks"] > 0)
-                            | (result["floored_gk"] > 0))
-            frac_floored_pix = float(any_floored.mean()) if any_floored.size else float("nan")
-            any_cluster_floored = ((result["cluster_floored_g"] > 0)
-                                    | (result["cluster_floored_ks"] > 0)
-                                    | (result["cluster_floored_gk"] > 0))
-            n_cluster_floored_pix = int(np.count_nonzero(any_cluster_floored))
-
-            total_g_obs, total_ks_obs = result["total_g_obs"], result["total_ks_obs"]
-            region_frac_g = ((total_g_obs - float(result["n_g_sub"].sum())) / total_g_obs
-                              if total_g_obs > 0 else float("nan"))
-            region_frac_ks = ((total_ks_obs - float(result["n_ks_sub"].sum())) / total_ks_obs
-                               if total_ks_obs > 0 else float("nan"))
-            st.done(path, n_entering=result["n_entering"], frac_pixels_floored=frac_floored_pix)
-        print(
-            "prior.anchor_observed: %s N_GK_OBS entering=%d "
-            "frac_pixels_floored=%.4f region_subtracted_frac G=%.4f Ks=%.4f "
-            "clusters_touching=%d members_matched=%d members_with_ks=%d "
-            "N_G_CLUSTER_sum=%.1f N_KS_CLUSTER_sum=%.1f cluster_floored_pixels=%d -> %s"
-            % (region, result["n_entering"], frac_floored_pix,
-               region_frac_g, region_frac_ks, result["n_clusters_touching"],
-               result["n_members_matched"], result["n_members_with_ks"],
-               result["n_g_cluster_total"], result["n_ks_cluster_total"],
-               n_cluster_floored_pix, path))
-
-
-if __name__ == "__main__":
-    run(build)
+    total_g_obs, total_ks_obs = result["total_g_obs"], result["total_ks_obs"]
+    region_frac_g = ((total_g_obs - float(result["n_g_sub"].sum())) / total_g_obs
+                      if total_g_obs > 0 else float("nan"))
+    region_frac_ks = ((total_ks_obs - float(result["n_ks_sub"].sum())) / total_ks_obs
+                       if total_ks_obs > 0 else float("nan"))
+    print(
+        "prior.anchor_observed: %s N_GK_OBS entering=%d "
+        "frac_pixels_floored=%.4f region_subtracted_frac G=%.4f Ks=%.4f "
+        "clusters_touching=%d members_matched=%d members_with_ks=%d "
+        "N_G_CLUSTER_sum=%.1f N_KS_CLUSTER_sum=%.1f cluster_floored_pixels=%d"
+        % (region, result["n_entering"], frac_floored_pix,
+           region_frac_g, region_frac_ks, result["n_clusters_touching"],
+           result["n_members_matched"], result["n_members_with_ks"],
+           result["n_g_cluster_total"], result["n_ks_cluster_total"],
+           n_cluster_floored_pix))
+    return frac_floored_pix

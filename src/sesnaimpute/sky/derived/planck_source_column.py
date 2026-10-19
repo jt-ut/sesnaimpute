@@ -1,5 +1,10 @@
 """The Planck arm of the source column, `A_K` from thermal-dust emission
-(SPEC_PRIORS.md section 1.1).
+(SPEC_PRIORS.md section 1.1) -- a library `sky.derived.column` calls, not
+a stage of its own: its only reader was `column.py`'s per-source merge
+(`merge_region`), so the per-source product this module used to write
+(`planck/column/source_<R>.hdf5`) is gone, and `column.build` computes
+the Planck arm itself, in memory, in the same pass that merges it with
+the Herschel arm.
 
 Per source: bilinear TAU353 at the source's Galactic position (the
 sub-pixel information a nearest-pixel read would throw away) and
@@ -21,14 +26,7 @@ import h5py
 import numpy as np
 from joblib import Parallel, delayed
 
-from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
-from sesnaimpute import progress as progress_module
-from sesnaimpute import regions as regions_module
-from sesnaimpute.attrs_registry import REGISTRY
-from sesnaimpute.build import run
-
-_STEM = "column_planck_source"
 
 # Planck R1.20 thermal-dust model: Planck Collaboration XI 2014, A&A 571, A11.
 PLANCK_NSIDE = 2048
@@ -40,7 +38,7 @@ def _planck_map_path(config):
     found = sorted(glob.glob(os.path.join(config.data_root, "sky/download/planck_r120", "*.fits")))
     if not found:
         raise FileNotFoundError(
-            "sky.derived.planck_source_column.build: no Planck R1.20 FITS map under "
+            "sky.derived.column.build: no Planck R1.20 FITS map under "
             f"{config.data_root}/sky/download/planck_r120 -- run the Planck R1.20 download RUNBOOK line"
         )
     return found[0]
@@ -71,7 +69,7 @@ def _load_planck_calibration(config):
     path = config_module.product_path(config, "sky/derived", "planck", "calibration", "survey")
     if not os.path.exists(path):
         raise FileNotFoundError(
-            f"sky.derived.planck_source_column.build: Planck calibration product missing at {path!r} "
+            f"sky.derived.column.build: Planck calibration product missing at {path!r} "
             "-- run the sesnaimpute.sky.derived.planck_column RUNBOOK line for it"
         )
     with h5py.File(path, "r") as f:
@@ -114,68 +112,35 @@ def _read_curated_positions(config, region):
     path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
     if not os.path.exists(path):
         raise FileNotFoundError(
-            f"sky.derived.planck_source_column.build: curated catalogue missing for region {region!r} "
+            f"sky.derived.column.build: curated catalogue missing for region {region!r} "
             f"at {path!r} -- run the curated-catalogue RUNBOOK line for it"
         )
     with h5py.File(path, "r") as f:
         return np.asarray(f["GAL_L_DEG"][:], dtype=np.float64), np.asarray(f["GAL_B_DEG"][:], dtype=np.float64)
 
 
-def _build_one_region(config, region, tau353, err_tau, cal):
+def planck_arm_region(config, region, tau353, err_tau, cal):
+    """`(a_col, sig_col, n)`: this region's Planck-arm `A_K` and its
+    composed total sigma (module docstring), from an already-loaded
+    Planck map and calibration -- `column.merge_region`'s in-memory
+    replacement for the old `planck/column/source_<R>.hdf5` read."""
     l, b = _read_curated_positions(config, region)
     _pix, _tau_nn, err_nn, tau_interp = sample_planck_column(l, b, tau353, err_tau)
-
     a_col = cal["a_tau"] * tau_interp
-    sig, sig_stat, sig_within, sig_region = compose_planck_sigma(
+    sig, _sig_stat, _sig_within, _sig_region = compose_planck_sigma(
         a_col, err_nn, cal["a_tau"], cal["s0_mag"], cal["f_rel"], cal["sig_region_frac"])
-
-    out_path = config_module.product_path(config, "sky/derived", "planck", "column", "source", region=region)
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with h5py.File(out_path, "w") as f:
-        f.attrs["GRANULE"] = "source"
-        for name, data in (
-            ("A_K", a_col.astype(np.float32)),
-            ("SIGMA_A_K", sig.astype(np.float32)),
-            ("SIGMA_STAT_K", sig_stat.astype(np.float32)),
-            ("SIGMA_WITHIN_K", sig_within.astype(np.float32)),
-            ("SIGMA_REGION_K", sig_region.astype(np.float32)),
-        ):
-            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
-    return region, int(l.size), float(np.median(a_col))
+    return a_col, sig, int(l.size)
 
 
-def build(config, regions=None):
-    """Builds the Planck source-column product for each region in
-    `regions` (default: every region in `regions.REGIONS`), parallelised
-    over regions with a joblib thread pool; the Planck map is read once,
-    before the pool starts, and every thread samples that one copy
-    read-only.
-    """
-    if regions is None:
-        regions = [r.name for r in regions_module.REGIONS]
-    fits_path = _planck_map_path(config)
-    cal = _load_planck_calibration(config)
-    tau353, err_tau = _load_planck_map(fits_path)
-    with progress_module.Stage("sky.derived.planck_source_column") as st:
-        n_regions = len(regions)
-        n_done = [0]
-
-        def _one(region):
-            r = _build_one_region(config, region, tau353, err_tau, cal)
-            n_done[0] += 1
-            st.tick(n_done[0], n_regions, "regions")
-            return r
-
-        # Threads, not processes: a process pool would hold one 1.6 GB Planck
-        # map per worker (config.n_jobs copies at once); every per-region
-        # computation here is vectorised numpy/healpy array arithmetic, which
-        # releases the GIL, so threads cost nothing and share the one map
-        # loaded above, read-only (CODING_RULES.md 10a).
-        results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
-            delayed(_one)(region) for region in regions)
-        st.done(None, regions=n_regions, sources=sum(r[1] for r in results),
-                median_a_k=float(np.median([r[2] for r in results])))
-
-
-if __name__ == "__main__":
-    run(build)
+def planck_arm_all(config, regions, n_jobs, cal=None):
+    """`{region: (a_col, sig_col, n)}` for every region in `regions`: the
+    Planck map (1.6 GB) is read ONCE here and every region samples that
+    one copy, threaded rather than process-parallel (160fd31: a process
+    pool would hold one copy of the map per worker) -- `column.build`'s
+    own per-region merge then runs in its usual process pool on these
+    already-computed, much smaller per-region arrays."""
+    cal = cal if cal is not None else _load_planck_calibration(config)
+    tau353, err_tau = _load_planck_map(_planck_map_path(config))
+    results = Parallel(n_jobs=n_jobs, prefer="threads")(
+        delayed(planck_arm_region)(config, region, tau353, err_tau, cal) for region in regions)
+    return dict(zip(regions, results))

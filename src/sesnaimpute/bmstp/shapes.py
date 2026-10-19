@@ -38,6 +38,8 @@ from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.bmstp import grid, sample_cloud, sample_gal, sample_star, template_weights
 from sesnaimpute.population import h2s as h2s_module
+from sesnaimpute.population import selection as population_selection
+from sesnaimpute.sky.derived import column as column_module
 from sesnaimpute.sky.derived import profile as profile_module
 
 _STAR_STEM = "star_shape_tile"
@@ -404,6 +406,93 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back, peak_of
     return (grid_yso.astype(np.float32), p_x.astype(np.float32), mass_outside_yso, removed_frac)
 
 
+def _sightline_a_col_k(config, region, hpx_pix_256):
+    """This region's own sightlines' `A_COL_K`, the extinction column
+    (survey-wide `sky/derived/adopted/extinction/sightline` product,
+    keyed by `HPX_PIX_256`, one row per (region, pixel), so only this
+    region's `REGION_CODE` rows are read) -- the same column P1
+    (`bmstp.density`) assigns each row's sources, read here at the
+    sightline granule directly rather than re-derived. Folded in from
+    the retired `bmstp.cloud_interval` stage (brief U4)."""
+    path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "sightline")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "bmstp.shapes.build_cloud: no adopted extinction sightline product at %s -- run the "
+            "'sesnaimpute.sky.derived.column' RUNBOOKtp.sh line first" % path)
+    with h5py.File(path, "r") as f:
+        mine = np.asarray(f["REGION_CODE"][:]) == column_module._region_codes(config, [region])[region]
+        pix_all = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)[mine]
+        a_k_all = np.asarray(f["A_K"][:], dtype=np.float64)[mine]
+    order = np.argsort(pix_all)
+    pix_sorted = pix_all[order]
+    a_k_sorted = a_k_all[order]
+    loc = np.searchsorted(pix_sorted, hpx_pix_256)
+    capped = np.minimum(loc, pix_sorted.size - 1) if pix_sorted.size else loc
+    ok = pix_sorted.size > 0 and np.all(pix_sorted[capped] == hpx_pix_256)
+    if not ok:
+        missing = hpx_pix_256[pix_sorted[capped] != hpx_pix_256] if pix_sorted.size else hpx_pix_256
+        raise ValueError("bmstp.shapes.build_cloud [%s]: sightline pixel(s) %r missing from %s"
+                          % (region, missing[:5].tolist(), path))
+    return a_k_sorted[capped]
+
+
+def _cloud_interval_weight(config, region, loaded, d_front, d_back):
+    """`(xi_front, xi_back, w_cloud)`, one row per sightline, in `loaded`'s
+    own sightline order (so a source's `SIGHTLINE_ROW`, P1, indexes this
+    exactly as it indexes P3): how much of the region's cloud interval
+    `[d_front, d_back]` sits in front of each sightline's own `log10 xi`
+    cell, from the SAME native cumulative profile `loaded["xi_edges"]`/
+    `loaded["d_edges"]` this stage already read for `GRID_YSO` -- folded
+    in from the retired `bmstp.cloud_interval` stage (brief U4: that
+    stage's only reader, `fittp.prior_reader`, now reads this file's
+    `XI_FRONT`/`XI_BACK`/`W_CLOUD` instead), sky data alone (the 3-D dust
+    map and the cloud interval), never the prior.
+
+    `W_CLOUD` is the diffuse/dense ramp weight
+    (`population.selection.law_dense_weight`) evaluated at the column of
+    dust BETWEEN those two depths, `(XI_BACK - XI_FRONT) * A_COL_K` with
+    `A_COL_K` the sightline's own extinction column (the same column P1
+    assigns each of the row's sources, sec. 3.2's "extinction column").
+
+    At a region `sample_cloud.far_region` selects (ledger C14: the 3-D
+    map's own radial resolution at that distance exceeds the cloud's
+    measured depth), `XI_FRONT`/`XI_BACK` are not read off the map's
+    `xi(d)` at all -- `XI_FRONT = 0`, `XI_BACK = 1` every row, so
+    `W_CLOUD` is the ramp evaluated at the sightline's own column whole,
+    i.e. at `A_COL_K` as the Planck arm measures it (the only arm a
+    region this far out carries).
+    """
+    xi_edges = loaded["xi_edges"]
+    d_edges = loaded["d_edges"]
+    hpx_pix_256 = loaded["hpx_pix_256"]
+    n_sl = hpx_pix_256.size
+
+    far = sample_cloud.far_region(config, region)
+    if far:
+        xi_front = np.zeros(n_sl, dtype=np.float64)
+        xi_back = np.ones(n_sl, dtype=np.float64)
+    else:
+        xi_front = np.zeros(n_sl, dtype=np.float64)
+        xi_back = np.zeros(n_sl, dtype=np.float64)
+        for row in range(n_sl):
+            # xi(d) at this sightline's own native cumulative profile:
+            # d_edges[row] spans at least [dist_pc[0], dist_pc[-1] +
+            # 2*tail_efold_pc[row]], which `sample_cloud.cloud_interval_pc`
+            # already caps d_front/d_back inside of, so both lookups sit
+            # inside every row's own domain -- no extrapolation.
+            xi_front[row] = np.clip(np.interp(d_front, d_edges[row], xi_edges[row]), 0.0, 1.0)
+            xi_back[row] = np.clip(np.interp(d_back, d_edges[row], xi_edges[row]), 0.0, 1.0)
+        xi_back = np.maximum(xi_back, xi_front)
+
+    a_col_k = _sightline_a_col_k(config, region, hpx_pix_256)
+    # a sightline with no dust between the two depths (XI_BACK == XI_FRONT)
+    # reads a column of dust of exactly zero there, and
+    # `law_dense_weight(0) == 0`: XI_FRONT = XI_BACK = 0 and W_CLOUD = 0
+    # both fall out of this one formula, no special case.
+    w_cloud = population_selection.law_dense_weight((xi_back - xi_front) * a_col_k)
+    return xi_front.astype(np.float32), xi_back.astype(np.float32), w_cloud.astype(np.float32), far
+
+
 def build_cloud(config, region):
     """Writes P3, `bmstp/shape/cloud_shape_sightline__R.hdf5`: `GRID_YSO`
     (sec. 5.5, the shift-kernel rule -- each depth sub-sample's own shifted copy of
@@ -412,8 +501,11 @@ def build_cloud(config, region):
     `MASS_OUTSIDE_YSO`, `ON_GRID_YSO` (`1 - mass_outside_yso` per
     sightline, sec. 2's ON-GRID FRACTION, W26's own read), the cloud
     interval `D_FRONT_PC`/`D_BACK_PC` (DOUBLED about the region's own peak
-    distance, W24b), `D_PEAK_SIGHTLINE_PC` (each sightline's own 3-D-map
-    dust-structure peak, `_sightline_dust_peaks_pc`, that anchors
+    distance, W24b), `XI_FRONT`/`XI_BACK`/`W_CLOUD` (the sightline's own
+    dense fraction, folded in from the retired `bmstp.cloud_interval`
+    stage, brief U4: `_cloud_interval_weight`), `D_PEAK_SIGHTLINE_PC`
+    (each sightline's own 3-D-map dust-structure peak,
+    `_sightline_dust_peaks_pc`, that anchors
     `GRID_YSO`'s brightness shift alongside the within-structure depth
     `d_sub` already carries, sec. 2 "region distance and depth"), and the
     region's H2S brightness Gaussian (`LOGSIG_MEAN`,
@@ -530,6 +622,14 @@ def build_cloud(config, region):
                              if n_sl else np.zeros((0,), dtype=np.float32))
         on_grid_h2s = (1.0 - mass_outside_h2s).astype(np.float32)
 
+        # the sightline's own dense fraction (sec. 2, the diffuse/dense
+        # law), folded in from the retired `bmstp.cloud_interval` stage
+        # (brief U4): reads the SAME native cumulative profile (`loaded`)
+        # this stage already loaded above, no second pass of
+        # `sample_cloud._region_profile`.
+        xi_front_cloud, xi_back_cloud, w_cloud, far_region = _cloud_interval_weight(
+            config, region, loaded, d_front, d_back)
+
         path = p3_path
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with h5py.File(path, "w") as f:
@@ -539,6 +639,7 @@ def build_cloud(config, region):
             f.attrs["LOGSIG_STD"] = logsig_std
             f.attrs["D_FRONT_PC"] = float(d_front)
             f.attrs["D_BACK_PC"] = float(d_back)
+            f.attrs["FAR_REGION"] = bool(far_region)
             for name, data in (
                 ("LOG10_XI_EDGES", grid.LOG10_XI_EDGES),
                 ("LOG10_F45_EDGES", grid.LOG10_F45_EDGES),
@@ -551,6 +652,9 @@ def build_cloud(config, region):
                 ("GRID_H2S", grid_h2s),
                 ("MASS_OUTSIDE_H2S", mass_outside_h2s),
                 ("ON_GRID_H2S", on_grid_h2s),
+                ("XI_FRONT", xi_front_cloud),
+                ("XI_BACK", xi_back_cloud),
+                ("W_CLOUD", w_cloud),
             ):
                 build_module.write_dataset(f, name, data, *REGISTRY[(_CLOUD_STEM, name)])
 
@@ -613,7 +717,9 @@ def build_cloud(config, region):
                 d_peak_sightline_range=(float(d_peak_sightline_pc.min()), float(d_peak_sightline_pc.max()))
                 if n_sl else (0.0, 0.0),
                 peak_offset_dex_range=(float(peak_offset_dex.min()), float(peak_offset_dex.max()))
-                if n_sl else (0.0, 0.0))
+                if n_sl else (0.0, 0.0),
+                far_region=bool(far_region),
+                w_cloud_range=(float(w_cloud.min()), float(w_cloud.max())) if n_sl else (0.0, 0.0))
     return (path, n_sl, mass_outside_yso, removed_frac,
             (peak_f45, p16_f45, p84_f45), on_grid_yso, (d_front, d_back))
 
