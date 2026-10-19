@@ -109,11 +109,6 @@ REGISTRY = {
         "For the matching pixel in HPX_PIX_512, the catalog's own "
         "observed footprint fraction (the catalog coverage product): "
         "what share of this pixel SESNA was actually extracted on."),
-    ("prior_atlas_hpx512", "F_LIM_50_PIX_MJY"): ("mJy",
-        "For the matching pixel in HPX_PIX_512 and each of the eight "
-        "bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this "
-        "project's own band order), the pixel's own marginalized "
-        "50%-completeness flux limit."),
     ("prior_atlas_hpx512", "N_CAT_STAR"): ("objects per square degree",
         "For the matching pixel in HPX_PIX_512, the cataloged density of "
         "the STAR population: its dimmed intrinsic density "
@@ -145,35 +140,13 @@ REGISTRY = {
         "the H2-shock population: its dimmed intrinsic density weighted "
         "by the probability of clearing SESNA's two-of-eight-band "
         "detection rule at this pixel's own depth."),
-    ("prior_atlas_hpx512", "INTENSITY_STAR"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the STAR population's "
-        "own dimmed intrinsic density at this pixel's own column, before "
-        "the cataloged-detection probability N_CAT_STAR applies."),
-    ("prior_atlas_hpx512", "INTENSITY_AGB"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the AGB population's own "
-        "dimmed intrinsic density at this pixel's own column, before the "
-        "cataloged-detection probability N_CAT_AGB applies."),
-    ("prior_atlas_hpx512", "INTENSITY_PAHC"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the PAHC population's "
-        "own dimmed intrinsic density at this pixel's own column, before "
-        "the cataloged-detection probability N_CAT_PAHC applies."),
-    ("prior_atlas_hpx512", "INTENSITY_GAL"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the background-galaxy "
-        "population's own dimmed intrinsic density at this pixel's own "
-        "column, before the cataloged-detection probability N_CAT_GAL "
-        "applies."),
     ("prior_atlas_hpx512", "INTENSITY_YSO"): ("objects per square degree",
         "For the matching pixel in HPX_PIX_512, the YSO population's own "
         "dimmed intrinsic density at this pixel's own column, before the "
         "cataloged-detection probability N_CAT_YSO applies."),
-    ("prior_atlas_hpx512", "INTENSITY_H2S"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the H2-shock "
-        "population's own dimmed intrinsic density at this pixel's own "
-        "column, after the region's own knot-rate convolution and before "
-        "the cataloged-detection probability N_CAT_H2S applies."),
     ("prior_atlas_hpx512", "N_ABOVE_STAR"): ("objects per square degree",
         "For the matching pixel in HPX_PIX_512, how much of the STAR "
-        "population's own intrinsic density (INTENSITY_STAR) lies above "
+        "population's own intrinsic density lies above "
         "this pixel's own I2 (4.5 micron) 50%-completeness flux, read "
         "directly from the class's own stored shape rather than from "
         "the cataloged-detection fraction."),
@@ -206,66 +179,6 @@ REGISTRY = {
         "pixel's own I2 (4.5 micron) 50%-completeness flux, read "
         "directly from the class's own stored shape rather than from "
         "the cataloged-detection fraction."),
-    ("prior_atlas_hpx512", "N_CAT_BRIGHT3_STAR"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the cataloged density of "
-        "STAR members predicted brighter than three times this pixel's "
-        "own I2 50%-completeness limit, where completeness is "
-        "effectively 1 on both the cataloged and the predicted side."),
-    ("prior_atlas_hpx512", "N_CAT_BRIGHT3_AGB"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the cataloged density of "
-        "AGB members predicted brighter than three times this pixel's "
-        "own I2 50%-completeness limit, where completeness is "
-        "effectively 1 on both the cataloged and the predicted side."),
-    ("prior_atlas_hpx512", "N_CAT_BRIGHT3_PAHC"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the cataloged density of "
-        "PAHC members predicted brighter than three times this pixel's "
-        "own I2 50%-completeness limit, where completeness is "
-        "effectively 1 on both the cataloged and the predicted side."),
-    ("prior_atlas_hpx512", "N_CAT_BRIGHT3_GAL"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the cataloged density of "
-        "background-galaxy members predicted brighter than three times "
-        "this pixel's own I2 50%-completeness limit, where completeness "
-        "is effectively 1 on both the cataloged and the predicted side."),
-    ("prior_atlas_hpx512", "N_CAT_BRIGHT3_YSO"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the cataloged density of "
-        "YSO members predicted brighter than three times this pixel's "
-        "own I2 50%-completeness limit, where completeness is "
-        "effectively 1 on both the cataloged and the predicted side."),
-    ("prior_atlas_hpx512", "N_CAT_BRIGHT3_H2S"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the cataloged density of "
-        "H2-shock members predicted brighter than three times this "
-        "pixel's own I2 50%-completeness limit, where completeness is "
-        "effectively 1 on both the cataloged and the predicted side."),
-    ("prior_atlas_hpx512", "N_CAT_BRIGHT10_STAR"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the cataloged density of "
-        "STAR members predicted brighter than ten times this pixel's "
-        "own I2 50%-completeness limit, where completeness is "
-        "effectively 1 on both the cataloged and the predicted side."),
-    ("prior_atlas_hpx512", "N_CAT_BRIGHT10_AGB"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the cataloged density of "
-        "AGB members predicted brighter than ten times this pixel's own "
-        "I2 50%-completeness limit, where completeness is effectively 1 "
-        "on both the cataloged and the predicted side."),
-    ("prior_atlas_hpx512", "N_CAT_BRIGHT10_PAHC"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the cataloged density of "
-        "PAHC members predicted brighter than ten times this pixel's own "
-        "I2 50%-completeness limit, where completeness is effectively 1 "
-        "on both the cataloged and the predicted side."),
-    ("prior_atlas_hpx512", "N_CAT_BRIGHT10_GAL"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the cataloged density of "
-        "background-galaxy members predicted brighter than ten times "
-        "this pixel's own I2 50%-completeness limit, where completeness "
-        "is effectively 1 on both the cataloged and the predicted side."),
-    ("prior_atlas_hpx512", "N_CAT_BRIGHT10_YSO"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the cataloged density of "
-        "YSO members predicted brighter than ten times this pixel's own "
-        "I2 50%-completeness limit, where completeness is effectively 1 "
-        "on both the cataloged and the predicted side."),
-    ("prior_atlas_hpx512", "N_CAT_BRIGHT10_H2S"): ("objects per square degree",
-        "For the matching pixel in HPX_PIX_512, the cataloged density of "
-        "H2-shock members predicted brighter than ten times this "
-        "pixel's own I2 50%-completeness limit, where completeness is "
-        "effectively 1 on both the cataloged and the predicted side."),
     ("prior_atlas_hpx512", "N_CAT_CELL_GAL"): ("objects",
         "For the matching pixel in HPX_PIX_512, the background-galaxy "
         "population's own expected cataloged count on the common "
@@ -360,17 +273,6 @@ REGISTRY = {
         "population's own share of this pixel's total cataloged "
         "density: N_CAT_H2S divided by the sum of N_CAT_<class> over "
         "every class."),
-    ("prior_atlas_hpx512", "N_OBS"): ("sources",
-        "For the matching pixel in HPX_PIX_512, how many sources the "
-        "real SESNA catalog holds there."),
-    ("prior_atlas_hpx512", "N_OBS_BRIGHT3"): ("sources",
-        "For the matching pixel in HPX_PIX_512, how many sources the "
-        "real SESNA catalog holds there that are brighter than three "
-        "times this pixel's own I2 50%-completeness limit."),
-    ("prior_atlas_hpx512", "N_OBS_BRIGHT10"): ("sources",
-        "For the matching pixel in HPX_PIX_512, how many sources the "
-        "real SESNA catalog holds there that are brighter than ten "
-        "times this pixel's own I2 50%-completeness limit."),
 
     # bmstp.density -- table_density_source (P1): one row per curated
     # source, its column, grain indices, detection limits and the six sky

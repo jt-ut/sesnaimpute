@@ -65,7 +65,6 @@ import os
 import h5py
 import healpy as hp
 import numpy as np
-from joblib import Parallel, delayed
 from scipy.special import ndtri
 
 from sesnaimpute import build as build_module
@@ -435,18 +434,42 @@ def catalogued_probability(a_col, u, flux0, f_lim, width_dex, config):
          / (likelihood_module._SQRT2 * width_dex[:, None, :]))
     p = np.where(has_flux, 1.0 - np.exp(likelihood_module._ln_one_minus_c(z)), 0.0)
     one_minus_p = 1.0 - p  # (n_pix, n_mem, 8)
-    prod_all = np.prod(one_minus_p, axis=2)
+    # the leave-one-out products (F4 2026-10-09 "change A", the single
+    # largest kernel cost: 9 `np.delete` copies of this whole (n_pix,
+    # n_mem, 7) array plus 9 strided `np.prod` reductions). `prefix[k]`
+    # is the LEFT FOLD of bands `0..k-1` on the band-major views
+    # `one_minus_p[:, :, k]` (no copy): `prefix[N_BANDS]` is therefore
+    # the same left-to-right fold of all 8 bands `np.prod(one_minus_p,
+    # axis=2)` performs along its own short contiguous last axis, and
+    # leaving band `i` out continues that SAME fold from `prefix[i]`
+    # through bands `i+1..N_BANDS-1` one band at a time -- the exact
+    # continuation of the one left fold `np.prod(np.delete(...))` used
+    # to perform on the remaining 7 bands in their original order,
+    # never a separately-folded suffix (a suffix product folds
+    # right-to-left, a different association that can move the last
+    # bit, F4 risk 1/3).
+    prefix = [np.ones(one_minus_p.shape[:2], dtype=one_minus_p.dtype)]
+    for k in range(N_BANDS):
+        prefix.append(prefix[-1] * one_minus_p[:, :, k])
+    prod_all = prefix[N_BANDS]
+    loo = []
+    for i in range(N_BANDS):
+        term = prefix[i]
+        for k in range(i + 1, N_BANDS):
+            term = term * one_minus_p[:, :, k]
+        loo.append(term)
     sum_term = np.zeros_like(prod_all)
     for i in range(N_BANDS):
-        sum_term += p[:, :, i] * np.prod(np.delete(one_minus_p, i, axis=2), axis=2)
+        sum_term += p[:, :, i] * loo[i]
     p_cat = 1.0 - prod_all - sum_term
 
     # the bright-end check (sec. 9): a member counts as bright only if it
     # would be CATALOGUED WITH I2 ITSELF MEASURED (its own I2 cleared,
     # `p[:,:,IDX_I2]`, AND at least one of the other seven also clears,
     # `1 - prod_{i!=I2}(1-p_i)`); flux_i2 lets the caller apply the 3x/10x
-    # test against this pixel's own I2 50% limit.
-    prob_other_detect = 1.0 - np.prod(np.delete(one_minus_p, IDX_I2, axis=2), axis=2)
+    # test against this pixel's own I2 50% limit. `loo[IDX_I2]` is
+    # already exactly that leave-I2-out product, computed once above.
+    prob_other_detect = 1.0 - loo[IDX_I2]
     p_cat_i2 = p[:, :, IDX_I2] * prob_other_detect
     flux_i2 = flux[:, :, IDX_I2]  # (n_pix, n_mem)
     return p_cat, p_cat_i2, flux_i2
@@ -1244,70 +1267,81 @@ def _gal_members(config):
             n_members_before, n_members_after)
 
 
-def _gal_catalogued_fraction(config, gal_members, a_col, f_lim, width_dex, coverage, tick):
-    """`(frac, frac_bright3, frac_bright10, n_cat_cell, n_cell, density,
-    n_members_before, n_members_after)` for GAL's one region-wide DETERMINISTIC
-    quadrature (sec. 8).
-    `catalogued_probability` reaches `fittp.likelihood`'s one `@njit(parallel=True)`
-    kernel (`_ln_one_minus_c_kernel`, via `_ln_one_minus_c`) -- the atlas's only
-    numba call -- and numba's thread pool is not fork-safe: a process that has
-    itself started that pool poisons every child a later `os.fork()` creates from
-    it -- and joblib respawns idle-expired workers by forking the parent between
-    phases. This function is called directly by `build_region`'s own parent frame
-    (no wrapping `Parallel` there), but the admitted pixels are split into
-    `config.n_jobs` contiguous chunks (`np.array_split`, rule 8's "spread the
-    largest iterator") and each chunk's `catalogued_fraction` call -- the one that
-    reaches the numba kernel -- is dispatched through `Parallel`, so the kernel
-    still only ever runs inside a worker and the parent never starts numba's pool.
-    The chunks' `frac`/`frac_bright3`/`frac_bright10` are concatenated in pixel
-    order (contiguous chunks keep the axis ordered) and their `s_member` values are
-    SUMMED (`catalogued_fraction`'s own docstring: `s_member` is a sum over pixels,
-    so splitting the pixel axis and adding the pieces back is exact). The cell grid
-    below is formed once from that summed `s_member`, exactly as when one call held
-    every pixel.
-
-    `n_cat_cell` (128, 110): the region's expected number of catalogued GAL objects
-    per parameter cell (module docstring), the same one-cell smoothing and wall
-    fold every stored shape carries (`grid.bin`), so the region grid and the shapes
-    share one convention. Each member's own expected catalogued count in the region
-    is `c_m = density * (w_m / w.sum()) * s_member[m]` (the population's own weight
-    share times its pixel-area-weighted catalogued probability over the region,
-    `catalogued_fraction`'s `s_member`); `_safe_cell_bin(u, log10_s, c_m)` guards
-    the `c_m.sum() == 0` case the same way as every other class's own cell grid
-    (`_safe_cell_bin`'s own docstring). The mass `grid.bin`'s own edges drop is not
-    stored (expected ~= 0 for GAL, sec. 5.4's population sitting well inside the
-    grid). `n_cell` (128, 110) is the SAME quadrature with every member's own
-    probability of being catalogued set to one: `s_member`'s pixel sum collapses
-    to the region's own coverage-weighted pixel-area total (`weight_pix_all.sum()`,
-    the same for every member), `c_m_all = density * (w / w.sum()) *
-    weight_pix_all.sum()`, `_safe_cell_bin(u, log10_s, c_m_all)`.
-
-    `gal_members` is `_gal_members`'s own survey-wide return, computed once
-    by `build` and passed in here rather than re-derived per region.
-    `n_members_before`/`n_members_after` (`_gal_members`'s own return, passed
-    through unchanged) are the region's `(node, template)` and `(node, colour
-    cell)` member counts, for the build's own report."""
-    flux0, u, w, log10_s, density, n_members_before, n_members_after = gal_members
-    n_pix = a_col.size
+def _gal_pixel_chunks(config, n_pix):
+    """The admitted-pixel axis split into `config.n_jobs` contiguous chunks
+    (`np.array_split`): GAL's own pieces in `build_region`'s one flat piece
+    list (owner's ruling: one pool, one flat list across tiles, GAL,
+    sightlines and the tail, parent reduces in a fixed order). Kept at
+    exactly `config.n_jobs` chunks: `catalogued_fraction`'s own `s_member`
+    sums across chunks exactly wherever the chunk boundaries are these
+    same ones (F4 risk 2), so a different chunk count would move the
+    region's GAL numbers at their last bit."""
     n_jobs = max(1, int(config.n_jobs))
-    idx_chunks = [c for c in np.array_split(np.arange(n_pix), n_jobs) if c.size]
-    n_chunks = len(idx_chunks)
-    weight_pix_all = coverage * _HPX512_PIXEL_DEG2
+    return [c for c in np.array_split(np.arange(n_pix), n_jobs) if c.size]
 
-    def _one_chunk(i, idx):
-        result = catalogued_fraction(
-            a_col[idx], u, flux0, w, f_lim[idx], width_dex[idx], config,
-            weight_pix=weight_pix_all[idx])
-        if tick is not None:
-            tick(i + 1, n_chunks)
-        return result
 
-    results = Parallel(n_jobs=n_jobs)(
-        delayed(_one_chunk)(i, idx) for i, idx in enumerate(idx_chunks))
-    frac = np.concatenate([r[0] for r in results])
-    frac_bright3 = np.concatenate([r[1] for r in results])
-    frac_bright10 = np.concatenate([r[2] for r in results])
-    s_member = sum(r[3] for r in results)
+def _gal_chunk_result(config, gal_members, idx, a_col, f_lim, width_dex, weight_pix_all):
+    """One GAL pixel chunk's own `catalogued_fraction` call -- the piece
+    `build_region`'s flat list submits to the region's one pool. Reached
+    only inside a worker, never the parent: `catalogued_probability`
+    reaches `fittp.likelihood`'s one `@njit(parallel=True)` kernel, and
+    numba's thread pool is not fork-safe (a process that has itself
+    started that pool poisons every child a later `os.fork()` creates
+    from it, and joblib respawns idle-expired workers by forking the
+    parent between phases); `pieces.run` never runs a piece in the
+    parent process except its own `n_jobs <= 1` fallback, so this call
+    never reaches the kernel outside a worker under the region's normal
+    `n_jobs >= 2`."""
+    flux0, u, w, _log10_s, _density, _n_before, _n_after = gal_members
+    return catalogued_fraction(
+        a_col[idx], u, flux0, w, f_lim[idx], width_dex[idx], config,
+        weight_pix=weight_pix_all[idx])
+
+
+def _gal_reduce(gal_members, chunk_results, weight_pix_all):
+    """`(frac, frac_bright3, frac_bright10, n_cat_cell, n_cell, density,
+    n_members_before, n_members_after)` for GAL's one region-wide
+    DETERMINISTIC quadrature (sec. 8), reduced from `_gal_chunk_result`'s
+    own per-chunk pieces IN CHUNK ORDER (`build_region`'s flat piece list
+    keeps `pieces.run`'s own results in the order its pieces were
+    submitted, so `chunk_results` here is in the same order
+    `_gal_pixel_chunks` built them -- this reduction is exactly what the
+    former `_gal_catalogued_fraction` did with its own `Parallel` call's
+    results). `frac`/`frac_bright3`/`frac_bright10` concatenate in pixel
+    order (contiguous chunks keep the axis ordered); `s_member` values are
+    SUMMED (`catalogued_fraction`'s own docstring: `s_member` is a sum
+    over pixels, so splitting the pixel axis and adding the pieces back is
+    exact). The cell grid below is formed once from that summed
+    `s_member`, exactly as when one call held every pixel.
+
+    `n_cat_cell` (128, 110): the region's expected number of catalogued
+    GAL objects per parameter cell (module docstring), the same one-cell
+    smoothing and wall fold every stored shape carries (`grid.bin`), so
+    the region grid and the shapes share one convention. Each member's own
+    expected catalogued count in the region is `c_m = density * (w_m /
+    w.sum()) * s_member[m]` (the population's own weight share times its
+    pixel-area-weighted catalogued probability over the region,
+    `catalogued_fraction`'s `s_member`); `_safe_cell_bin(u, log10_s, c_m)`
+    guards the `c_m.sum() == 0` case the same way as every other class's
+    own cell grid (`_safe_cell_bin`'s own docstring). The mass `grid.bin`'s
+    own edges drop is not stored (expected ~= 0 for GAL, sec. 5.4's
+    population sitting well inside the grid). `n_cell` (128, 110) is the
+    SAME quadrature with every member's own probability of being
+    catalogued set to one: `s_member`'s pixel sum collapses to the
+    region's own coverage-weighted pixel-area total (`weight_pix_all.
+    sum()`, the same for every member), `c_m_all = density * (w / w.sum())
+    * weight_pix_all.sum()`, `_safe_cell_bin(u, log10_s, c_m_all)`.
+
+    `gal_members` is `_gal_members`'s own survey-wide return, computed
+    once by `build` and passed in here rather than re-derived per region.
+    `n_members_before`/`n_members_after` (`_gal_members`'s own return,
+    passed through unchanged) are the region's `(node, template)` and
+    `(node, colour cell)` member counts, for the build's own report."""
+    flux0, u, w, log10_s, density, n_members_before, n_members_after = gal_members
+    frac = np.concatenate([r[0] for r in chunk_results])
+    frac_bright3 = np.concatenate([r[1] for r in chunk_results])
+    frac_bright10 = np.concatenate([r[2] for r in chunk_results])
+    s_member = sum(r[3] for r in chunk_results)
 
     w_sum = float(w.sum())
     c_m = density * (w / w_sum) * s_member
@@ -1550,57 +1584,30 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         n_cell = {c: np.zeros((grid.LOG10_XI_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1))
                   for c in ("STAR", "PAHC", "AGB", "YSO", "H2S")}
 
-        def _one(tile_id):
-            m = usable & (tile_of_pix == tile_id)
-            return tile_id, m, _build_one_tile(
-                config, region, tile_id, pix[m], a_col[m], f_lim[m], width_dex[m], agb_pool,
-                coverage[m])
-
-        results = Parallel(n_jobs=n_jobs)(delayed(_one)(t) for t in tiles_here)
-        for i, (tile_id, m, out) in enumerate(results):
-            # sec. 5.3: `A_PAHC(s) = A_STAR(s)`, the field-star level
-            # shared by both classes -- the STAR/PAHC split lives only in
-            # `_above_fraction`'s own weight factor (sec. 5.1's `1 -
-            # P(q)`/`P(q)`), never in `INTENSITY_<C>` again.
-            field_star_density = out["_FIELD_STAR_DENSITY"]
-            for cls in ("STAR", "AGB", "PAHC"):
-                frac, density, frac_bright3, frac_bright10, n_cat_cell_tile, n_cell_tile = out[cls]
-                n_cat[cls][m] = density * frac
-                intensity[cls][m] = field_star_density if cls in ("STAR", "PAHC") else density
-                n_cat_bright3[cls][m] = density * frac_bright3
-                n_cat_bright10[cls][m] = density * frac_bright10
-                n_cat_cell[cls] += n_cat_cell_tile
-                n_cell[cls] += n_cell_tile
-            st.tick(i + 1, len(tiles_here), "tiles")
-
-        # GAL, sec. 5.4: one region-wide DETERMINISTIC quadrature (no draw,
-        # no seed -- GAL has no tile and no population sample), evaluated
-        # at every admitted pixel's own column and limits with the shared
-        # `catalogued_fraction`. Called directly (`_gal_catalogued_fraction`'s
-        # own docstring): it splits the pixel axis into `config.n_jobs`
-        # chunks and dispatches each chunk's `catalogued_fraction` call
-        # through `Parallel` itself, so `build_region`'s parent process
-        # still never runs a numba kernel, and no child a later fork
-        # spawns can inherit a live numba thread pool.
-        (frac_gal, frac_gal_bright3, frac_gal_bright10, n_cat_cell_gal, n_cell_gal, density_gal,
-         n_gal_members_before, n_gal_members_after) = _gal_catalogued_fraction(
-            config, gal_members, a_col, f_lim, width_dex, coverage,
-            lambda done, total: st.tick(done, total, "GAL pixel chunks"))
-        n_cat["GAL"] = density_gal * frac_gal
-        # sec. 5.4's own density is one survey-wide constant, so GAL's
-        # intensity is that same scalar broadcast to every admitted pixel.
-        intensity["GAL"] = np.full(n_pix, density_gal, dtype=np.float64)
-        n_cat_bright3["GAL"] = density_gal * frac_gal_bright3
-        n_cat_bright10["GAL"] = density_gal * frac_gal_bright10
-        # the region's expected number of catalogued objects per parameter
-        # cell (module docstring): STAR/PAHC/AGB already accumulated
-        # theirs, tile by tile, above.
-        n_cat_cell["GAL"] = n_cat_cell_gal
-        n_cell["GAL"] = n_cell_gal
+        # ONE pool, one flat list of pieces across tiles, GAL, sightlines
+        # and the tail (owner's ruling 2026-10-09): every piece below is
+        # computed by `_dispatch`, below, on the region's one pool
+        # (`pieces.run`); the parent reduces each group's own results,
+        # AFTER the one dispatch call returns, in the SAME fixed order
+        # (tiles_here order, GAL's own chunk order, sls_here order, the
+        # tail's class/pixel-slice order) the three former `Parallel`
+        # calls and the N_ABOVE-only `pieces.run` call used -- so this is
+        # a dispatch-mechanism change only, not a computation change:
+        # every piece below runs the exact function call its own former
+        # phase made. GAL's own pixel chunks (`_gal_pixel_chunks`) are
+        # built here instead of inside a GAL-only call, so they can share
+        # the one flat list.
+        gal_idx_chunks = _gal_pixel_chunks(config, n_pix)
+        weight_pix_all = coverage * _HPX512_PIXEL_DEG2
 
         # YSO/H2S, sec. 5.5-5.6: grouped by the pixel's own nside-256
         # sightline (YSO's grain), one deterministic quadrature per
-        # sightline shared by every admitted pixel it parents.
+        # sightline shared by every admitted pixel it parents. This setup
+        # (region-wide, no tile/GAL/sightline RESULT it depends on) used
+        # to sit between the GAL call and the sightline `Parallel` call;
+        # it is hoisted here, before the one dispatch, so every piece
+        # below -- tiles, GAL, sightlines and the tail alike -- can be
+        # submitted together.
         reg = regions_module.REGIONS_BY_NAME[region]
         d_r_pc = float(reg.d_r_pc)
         loaded_profile = sample_cloud._region_profile(config, region)
@@ -1705,29 +1712,148 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
             knot_field.kappa_pooled(config))
         l_of_pix_for_weight = _herschel_convolved_law(law_map, law_wcs, pix, arm, density_h2s_law_pooled_pix)
 
-        def _one_sl(sl_row):
-            m = sl_row_of_pix == sl_row
-            (f_y, d_y, fb3_y, fb10_y, ncc_y, ncl_y,
-             f_h, fb3_h, fb10_h, ncc_h, ncl_h, n_mem_y, n_mem_h) = _build_one_sightline(
-                config, region, sl_row, a_col[m], a_col_gas[m], arm[m], f_lim[m],
-                loaded_profile, flux0_ts, w_ts, float(cloud_frac_by_sl[sl_row]), d_front, d_back,
-                flux0_br, w_br, width_dex[m],
-                coverage[m] * _HPX512_PIXEL_DEG2, eta_r, l_of_pix_for_weight[m])
-            return (m, f_y, d_y, fb3_y, fb10_y, ncc_y, ncl_y,
-                    f_h, fb3_h, fb10_h, ncc_h, ncl_h, n_mem_y, n_mem_h)
+        # the tail's own per-pixel inputs (F5 2026-10-09 "change A"; same
+        # computation as before, only hoisted above the one dispatch so
+        # the tail's pieces can join the same flat list as tiles/GAL/
+        # sightlines): each pixel's `N_ABOVE` depends only on that
+        # pixel's own slice of `a_col`/`f0_pix`/`d_pahc_pix`/grain
+        # (`_above_fraction`'s own per-pixel reduction, `term.sum(axis=
+        # (1,2))`), never on a tile, GAL or sightline RESULT, so these
+        # pieces need nothing the dispatch below produces.
+        f0_pix = f_lim[:, IDX_I2]
+        d_pahc_pix = -np.log10(f_lim[:, IDX_I4])
+        # `fittp.prior_reader.load`'s `GRID_YSO`/`GRID_H2S` are P3's own
+        # array, in P3's own `HPX_PIX_256` row order -- NOT the cloud
+        # profile's own order `sl_row_of_pix` indexes (the two sightline
+        # axes can differ, which is exactly why `loc_p3` above resolves
+        # `on_grid_yso_by_sl_row` the same way): `loc_p3[sl_row_of_pix]`
+        # is the pixel's row in P3's own order, the correct grain index
+        # into `reader.grid_all` for YSO/H2S.
+        p3_row_of_pix = loc_p3[sl_row_of_pix]
+        _gal_grain = np.zeros(n_pix, dtype=np.int64)
+        grain_of_pix_by_cls = {
+            "STAR": tile_of_pix, "AGB": tile_of_pix, "PAHC": tile_of_pix,  # P2's TILE_ID is dense 0..n_tile-1
+            "YSO": p3_row_of_pix, "H2S": p3_row_of_pix,
+            "GAL": _gal_grain,  # one survey-wide grain (`prior_reader.load`'s own convention)
+        }
+        # STAR and PAHC alone carry the tail's own cost (F5: PAHC's own
+        # 57,603-model factor is over 98% of the element work; STAR's own
+        # 151-model factor is the same shape, far smaller): only they are
+        # cut into many small pixel pieces; GAL/AGB/YSO/H2S (no
+        # template-weight factor, ~1% of the tail together) are each one
+        # piece -- more pieces than that buys nothing for them (measured
+        # on NGC 7129: piece dispatch overhead, not file-open or compute,
+        # dominates a class with ~1 ms/pixel of real work), but putting
+        # even their one piece each in the SAME flat list (rather than a
+        # direct parent-process call) is what lets every piece in the
+        # region share the one pool. `reader`/`curve` are opened once per
+        # class, not once per piece (the same NGC 7129 measurement:
+        # re-opening `prior_reader.load`'s several HDF5 files per piece
+        # cost far more than one pixel's own work) and closed over by
+        # every piece; `reader`'s own arrays are memmaps (`prior_reader.
+        # mmap_dataset`) and `curve` is one small `interp1d`, so the
+        # closure joblib pickles once per task batch carries file paths
+        # and small arrays, not a full read. `min_items=8` keeps a
+        # region's piece count from outrunning what 8 pixels of this
+        # cost is worth dispatching.
+        readers_by_cls = {cls: prior_reader.load(config, region, cls) for cls in CLASSES}
+        curve = pahc_curve.read(config, region)
 
+        def _dispatch(piece):
+            kind = piece[0]
+            if kind == "TILE":
+                tile_id = piece[1]
+                m = usable & (tile_of_pix == tile_id)
+                return piece, (m, _build_one_tile(
+                    config, region, tile_id, pix[m], a_col[m], f_lim[m], width_dex[m], agb_pool,
+                    coverage[m]))
+            if kind == "GAL":
+                idx = gal_idx_chunks[piece[1]]
+                return piece, _gal_chunk_result(
+                    config, gal_members, idx, a_col, f_lim, width_dex, weight_pix_all)
+            if kind == "SL":
+                sl_row = piece[1]
+                m = sl_row_of_pix == sl_row
+                out = _build_one_sightline(
+                    config, region, sl_row, a_col[m], a_col_gas[m], arm[m], f_lim[m],
+                    loaded_profile, flux0_ts, w_ts, float(cloud_frac_by_sl[sl_row]), d_front, d_back,
+                    flux0_br, w_br, width_dex[m],
+                    coverage[m] * _HPX512_PIXEL_DEG2, eta_r, l_of_pix_for_weight[m])
+                return piece, (m,) + out
+            if kind == "TAIL":
+                cls, start, stop = piece[1], piece[2], piece[3]
+                frac_above = _above_fraction(
+                    config, readers_by_cls[cls], cls, grain_of_pix_by_cls[cls][start:stop],
+                    a_col[start:stop], f0_pix[start:stop], d_pahc_pix[start:stop], curve)
+                return piece, frac_above
+            cls = piece[1]  # "TAIL_WHOLE"
+            frac_above = _above_fraction(
+                config, readers_by_cls[cls], cls, grain_of_pix_by_cls[cls],
+                a_col, f0_pix, d_pahc_pix, curve)
+            return piece, frac_above
+
+        tail_split_pieces = [("TAIL", cls, start, stop) for cls in ("STAR", "PAHC")
+                             for start, stop in pieces.slices(n_pix, n_jobs, min_items=8)]
+        flat_pieces = (
+            [("TILE", t) for t in tiles_here]
+            + [("GAL", i) for i in range(len(gal_idx_chunks))]
+            + [("SL", r) for r in sls_here]
+            + tail_split_pieces
+            + [("TAIL_WHOLE", cls) for cls in ("AGB", "GAL", "YSO", "H2S")])
+        flat_out = dict(pieces.run(_dispatch, flat_pieces, n_jobs, stage=st, unit="region pieces"))
+
+        # ---- reduce, in the fixed order every former phase used ----
+
+        # tiles, in tiles_here order (unchanged from the former `Parallel`
+        # call's own reduction).
+        for tile_id in tiles_here:
+            m, out = flat_out[("TILE", tile_id)]
+            # sec. 5.3: `A_PAHC(s) = A_STAR(s)`, the field-star level
+            # shared by both classes -- the STAR/PAHC split lives only in
+            # `_above_fraction`'s own weight factor (sec. 5.1's `1 -
+            # P(q)`/`P(q)`), never in `INTENSITY_<C>` again.
+            field_star_density = out["_FIELD_STAR_DENSITY"]
+            for cls in ("STAR", "AGB", "PAHC"):
+                frac, density, frac_bright3, frac_bright10, n_cat_cell_tile, n_cell_tile = out[cls]
+                n_cat[cls][m] = density * frac
+                intensity[cls][m] = field_star_density if cls in ("STAR", "PAHC") else density
+                n_cat_bright3[cls][m] = density * frac_bright3
+                n_cat_bright10[cls][m] = density * frac_bright10
+                n_cat_cell[cls] += n_cat_cell_tile
+                n_cell[cls] += n_cell_tile
+
+        # GAL, in its own chunk order (unchanged from the former
+        # `_gal_catalogued_fraction`'s own reduction).
+        gal_chunk_results = [flat_out[("GAL", i)] for i in range(len(gal_idx_chunks))]
+        (frac_gal, frac_gal_bright3, frac_gal_bright10, n_cat_cell_gal, n_cell_gal, density_gal,
+         n_gal_members_before, n_gal_members_after) = _gal_reduce(
+            gal_members, gal_chunk_results, weight_pix_all)
+        n_cat["GAL"] = density_gal * frac_gal
+        # sec. 5.4's own density is one survey-wide constant, so GAL's
+        # intensity is that same scalar broadcast to every admitted pixel.
+        intensity["GAL"] = np.full(n_pix, density_gal, dtype=np.float64)
+        n_cat_bright3["GAL"] = density_gal * frac_gal_bright3
+        n_cat_bright10["GAL"] = density_gal * frac_gal_bright10
+        # the region's expected number of catalogued objects per parameter
+        # cell (module docstring): STAR/PAHC/AGB already accumulated
+        # theirs, tile by tile, above.
+        n_cat_cell["GAL"] = n_cat_cell_gal
+        n_cell["GAL"] = n_cell_gal
+
+        # sightlines, in sls_here order (unchanged from the former
+        # `Parallel` call's own reduction). Every sightline's own
+        # quadrature is deterministic (no `rng`): YSO's shared
+        # region-wide template x shift table is a fixed number, not a
+        # random sample, so it induces no covariance between sightlines
+        # and no error term of its own.
         frac_h2s_pix = np.full(n_pix, np.nan, dtype=np.float64)
         frac_h2s_bright3_pix = np.full(n_pix, np.nan, dtype=np.float64)
         frac_h2s_bright10_pix = np.full(n_pix, np.nan, dtype=np.float64)
         density_yso_pix = np.full(n_pix, np.nan, dtype=np.float64)
-        results_sl = Parallel(n_jobs=n_jobs)(delayed(_one_sl)(r) for r in sls_here)
-        # every sightline's own quadrature is deterministic (no `rng`):
-        # YSO's shared region-wide template x shift table is a fixed
-        # number, not a random sample, so it induces no covariance
-        # between sightlines and no error term of its own.
         n_members_yso_list, n_members_h2s_list = [], []
-        for i, (m, f_y, d_y, fb3_y, fb10_y, ncc_y, ncl_y,
-                f_h, fb3_h, fb10_h, ncc_h, ncl_h, n_mem_y, n_mem_h) in enumerate(results_sl):
+        for sl_row in sls_here:
+            (m, f_y, d_y, fb3_y, fb10_y, ncc_y, ncl_y,
+             f_h, fb3_h, fb10_h, ncc_h, ncl_h, n_mem_y, n_mem_h) = flat_out[("SL", sl_row)]
             n_cat["YSO"][m] = d_y * f_y
             intensity["YSO"][m] = d_y
             frac_h2s_pix[m] = f_h
@@ -1742,7 +1868,6 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
             n_cell["H2S"] += ncl_h
             n_members_yso_list.append(n_mem_y)
             n_members_h2s_list.append(n_mem_h)
-            st.tick(i + 1, len(sls_here), "sightlines")
         print(f"bmstp.atlas {region}: YSO members/sightline median={int(np.median(n_members_yso_list))} "
               f"max={int(np.max(n_members_yso_list))}; H2S members/sightline "
               f"median={int(np.median(n_members_h2s_list))} max={int(np.max(n_members_h2s_list))}")
@@ -1767,76 +1892,23 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         n_cat_bright3["H2S"] = density_h2s * frac_h2s_bright3_pix
         n_cat_bright10["H2S"] = density_h2s * frac_h2s_bright10_pix
 
-        # The intrinsic view above a fixed flux, deterministic, no draw.
-        # `N_ABOVE_C(pixel) = A_C(pixel) * _above_fraction(...)`
-        # (`_above_fraction`'s own docstring paragraph), read straight off
-        # each class's own stored grain shape (`fittp.prior_reader.load`)
-        # rather than the catalogued-fraction members above -- the
-        # atlas's intrinsic page draws this, not `INTENSITY_C`'s own
-        # ratio (SPEC_BMSTP_DRAFT.md sec. 8).
-        f0_pix = f_lim[:, IDX_I2]
-        d_pahc_pix = -np.log10(f_lim[:, IDX_I4])
-        # `fittp.prior_reader.load`'s `GRID_YSO`/`GRID_H2S` are P3's own
-        # array, in P3's own `HPX_PIX_256` row order -- NOT the cloud
-        # profile's own order `sl_row_of_pix` indexes (the two sightline
-        # axes can differ, which is exactly why `loc_p3` above resolves
-        # `on_grid_yso_by_sl_row` the same way): `loc_p3[sl_row_of_pix]`
-        # is the pixel's row in P3's own order, the correct grain index
-        # into `reader.grid_all` for YSO/H2S.
-        p3_row_of_pix = loc_p3[sl_row_of_pix]
-        _gal_grain = np.zeros(n_pix, dtype=np.int64)
-        grain_of_pix_by_cls = {
-            "STAR": tile_of_pix, "AGB": tile_of_pix, "PAHC": tile_of_pix,  # P2's TILE_ID is dense 0..n_tile-1
-            "YSO": p3_row_of_pix, "H2S": p3_row_of_pix,
-            "GAL": _gal_grain,  # one survey-wide grain (`prior_reader.load`'s own convention)
-        }
-
-        # N_ABOVE's own per-pixel sum (F5 2026-10-09 "change A"): each
-        # pixel's result depends only on that pixel's own slice of
-        # `a_col`/`f0_pix`/`d_pahc_pix`/grain (`_above_fraction`'s own
-        # per-pixel reduction, `term.sum(axis=(1,2))`), so cutting the
-        # pixel axis into many small pieces and running them on the
-        # region's pool, instead of one class at a time in the parent,
-        # changes no number -- this was the single largest serial block
-        # of the whole build (measured ~1,870 s of 4,011 s over 30
-        # regions). STAR and PAHC alone carry the cost (F5: PAHC's own
-        # 57,603-model factor is over 98% of the element work; STAR's own
-        # 151-model factor is the same shape, far smaller): only they are
-        # cut into pieces; GAL/AGB/YSO/H2S (no template-weight factor,
-        # ~1% of the tail together) run as one call each in the parent,
-        # same as before -- more pieces than that buys nothing (measured
-        # on NGC 7129: piece dispatch overhead, not file-open or compute,
-        # dominates a class with ~1 ms/pixel of real work). `reader`/
-        # `curve` are opened once per class, not once per piece (the
-        # same NGC 7129 measurement: re-opening `prior_reader.load`'s
-        # several HDF5 files per piece cost far more than one pixel's
-        # own work) and closed over by every STAR/PAHC piece; `reader`'s
-        # own arrays are memmaps (`prior_reader.mmap_dataset`) and
-        # `curve` is one small `interp1d`, so the closure joblib pickles
-        # once per task batch carries file paths and small arrays, not a
-        # full read. `min_items=8` keeps a region's piece count from
-        # outrunning what 8 pixels of this cost is worth dispatching.
-        readers_by_cls = {cls: prior_reader.load(config, region, cls) for cls in CLASSES}
-        curve = pahc_curve.read(config, region)
+        # the tail, in the same class/pixel-slice order the former
+        # N_ABOVE-only `pieces.run` call reduced (unchanged): `N_ABOVE_C
+        # (pixel) = A_C(pixel) * _above_fraction(...)` (`_above_fraction`'s
+        # own docstring paragraph), read straight off each class's own
+        # stored grain shape (`fittp.prior_reader.load`) rather than the
+        # catalogued-fraction members above -- the atlas's intrinsic page
+        # draws this, not `INTENSITY_C`'s own ratio (SPEC_BMSTP_DRAFT.md
+        # sec. 8). Every piece's `frac_above` was already computed by the
+        # one dispatch above; this only multiplies in `intensity[cls]`,
+        # which the tile/GAL/sightline reductions above have now filled.
         n_above = {cls: np.empty(n_pix, dtype=np.float64) for cls in CLASSES}
-
-        def _above_piece(piece):
-            cls, start, stop = piece
-            frac_above = _above_fraction(
-                config, readers_by_cls[cls], cls, grain_of_pix_by_cls[cls][start:stop],
-                a_col[start:stop], f0_pix[start:stop], d_pahc_pix[start:stop], curve)
-            return cls, start, stop, frac_above
-
-        tail_pieces = [(cls, start, stop) for cls in ("STAR", "PAHC")
-                       for start, stop in pieces.slices(n_pix, n_jobs, min_items=8)]
-        tail_out = pieces.run(_above_piece, tail_pieces, n_jobs, stage=st, unit="N_ABOVE pieces")
-        for cls, start, stop, frac_above in tail_out:
-            n_above[cls][start:stop] = intensity[cls][start:stop] * frac_above
-
+        for cls in ("STAR", "PAHC"):
+            for start, stop in pieces.slices(n_pix, n_jobs, min_items=8):
+                frac_above = flat_out[("TAIL", cls, start, stop)]
+                n_above[cls][start:stop] = intensity[cls][start:stop] * frac_above
         for cls in ("AGB", "GAL", "YSO", "H2S"):
-            frac_above = _above_fraction(
-                config, readers_by_cls[cls], cls, grain_of_pix_by_cls[cls],
-                a_col, f0_pix, d_pahc_pix, curve)
+            frac_above = flat_out[("TAIL_WHOLE", cls)]
             n_above[cls] = intensity[cls] * frac_above
 
         built = CLASSES
@@ -1908,40 +1980,45 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with h5py.File(path, "w") as f:
             f.attrs["GRANULE"] = "hpx512"
-            f.attrs["DENSITY_GAL"] = density_gal
             f.attrs["TOTAL_PREDICTED"] = total_predicted_built
             f.attrs["SURVEYED_AREA_DEG2"] = surveyed_area_deg2
-            f.attrs["ADMITTED_AREA_DEG2"] = area_deg2
             f.attrs["TOTAL_OBSERVED"] = float(n_source)
             for c in built:
                 f.attrs[f"RATIO_{c}"] = ratio[c]
             f.attrs["RATIO_BUILT"] = ratio_built
-            # the YSO population's catalogable fraction (sec 5.5, sec 8):
-            # accepted / intrinsic density, never the survey's observed
-            # source count.
-            f.attrs["CATALOGABLE_FRACTION_YSO"] = catalogable_fraction_yso
             # sec. 9's bright-end check: the same catalogued/observed
             # ratio, above 3x/10x the pixel's own I2 50% limit, where
-            # completeness is 1 on both sides.
+            # completeness is 1 on both sides. Read by fittp.figure_
+            # count_check as the two TOTAL numbers only (grep, step 5
+            # 2026-10-19): the per-class RATIO_BRIGHT3_<C> attr, DENSITY_GAL,
+            # ADMITTED_AREA_DEG2 and CATALOGABLE_FRACTION_YSO are read by
+            # nothing and no longer written; the build still computes and
+            # prints catalogable_fraction_yso and density_gal above.
             f.attrs["RATIO_BRIGHT3"] = ratio_bright3_total
             f.attrs["RATIO_BRIGHT10"] = ratio_bright10_total
-            for c in built:
-                f.attrs[f"RATIO_BRIGHT3_{c}"] = ratio_bright3[c]
             for name, data in (
                 ("HPX_PIX_512", pix),
                 ("A_COL_K", a_col.astype(np.float32)),
                 ("COVERAGE", coverage.astype(np.float32)),
-                ("F_LIM_50_PIX_MJY", f_lim.astype(np.float32)),
             ):
                 build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
+            # F_LIM_50_PIX_MJY is read by nothing here: every reader goes
+            # straight to catalog.depth_grid's own copy (atlas/shapes.py,
+            # atlas/protostars.py); no longer written.
             for c in CLASSES:
-                for prefix, table in (
-                    ("N_CAT_", n_cat), ("INTENSITY_", intensity), ("N_ABOVE_", n_above),
-                    ("N_CAT_BRIGHT3_", n_cat_bright3), ("N_CAT_BRIGHT10_", n_cat_bright10),
-                ):
-                    name = f"{prefix}{c}"
-                    build_module.write_dataset(f, name, table[c].astype(np.float32),
-                                                *REGISTRY[(_STEM, name)])
+                name = f"N_CAT_{c}"
+                build_module.write_dataset(f, name, n_cat[c].astype(np.float32), *REGISTRY[(_STEM, name)])
+            for c in CLASSES:
+                name = f"N_ABOVE_{c}"
+                build_module.write_dataset(f, name, n_above[c].astype(np.float32), *REGISTRY[(_STEM, name)])
+            # INTENSITY_YSO is atlas/protostars.py's own read (grep, step 5
+            # 2026-10-19); INTENSITY_STAR/AGB/PAHC/GAL/H2S and every
+            # N_CAT_BRIGHT3_<C>/N_CAT_BRIGHT10_<C> (the bright-end check's
+            # per-pixel tables; only their coverage-weighted sums survive,
+            # as the two RATIO_BRIGHT3/RATIO_BRIGHT10 attrs above) are read
+            # by nothing and no longer written.
+            build_module.write_dataset(f, "INTENSITY_YSO", intensity["YSO"].astype(np.float32),
+                                        *REGISTRY[(_STEM, "INTENSITY_YSO")])
             # the region's expected number of catalogued objects per
             # parameter cell (module docstring), summing to `RATIO_<C> *
             # N_source`; `(128, 110)` on `grid.LOG10_XI_EDGES` x
@@ -1961,12 +2038,10 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
             for c in built:
                 name = f"SHARE_{c}"
                 build_module.write_dataset(f, name, share[c].astype(np.float32), *REGISTRY[(_STEM, name)])
-            for name, data in (
-                ("N_OBS", n_obs.astype(np.int32)),
-                ("N_OBS_BRIGHT3", n_obs_bright3.astype(np.int32)),
-                ("N_OBS_BRIGHT10", n_obs_bright10.astype(np.int32)),
-            ):
-                build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
+            # N_OBS/N_OBS_BRIGHT3/N_OBS_BRIGHT10 are read by nothing here
+            # (grep, step 5 2026-10-19): the build still computes them
+            # in-process, for RATIO_BRIGHT3/RATIO_BRIGHT10 above, and no
+            # longer writes them.
 
         st.done(path, n_pix=n_pix, n_tile=len(tiles_here), n_sightline=len(sls_here),
                 n_tile_filled=n_tile_filled,
