@@ -18,13 +18,13 @@ import os
 
 import h5py
 import numpy as np
-import pandas as pd
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+from sesnaimpute.sky.download.trilegal import build as trilegal_download
 
 _STEM = "colour_trilegal_survey"
 
@@ -44,21 +44,23 @@ BIN_MH = 0.25
 
 
 def _download_path(config):
-    return f"{config.data_root}/sky/download/trilegal/colour_gaiaDR2_2mass_perseus.dat"
+    return f"{config.data_root}/sky/download/trilegal/colour_gaiaDR2_2mass_perseus.h5"
 
 
 def read_download(path):
-    """The one query's table as a DataFrame, header-checked."""
+    """The one query's table as a DataFrame, read from its converted
+    HDF5 (T6, 2026-10-19: `trilegal_download.read_region_part_h5`, the
+    one function every reader of a converted TRILEGAL table uses -- no
+    text parse here any more), header-checked."""
     if not os.path.exists(path):
         raise FileNotFoundError(
-            f"trilegal_colour derive: no download at {path} -- run the "
-            "'sesnaimpute.sky.download.trilegal.colour' RUNBOOK line first")
-    with open(path, "r") as fh:
-        header = fh.readline()
-    names = tuple(header.lstrip("#").split())
+            f"trilegal_colour derive: no converted download at {path} -- run "
+            "'python -m sesnaimpute.sky.download.trilegal.convert' (or, for a fresh "
+            "pull, the 'sesnaimpute.sky.download.trilegal.colour' RUNBOOK line) first")
+    df = trilegal_download.read_region_part_h5(path)
+    names = tuple(df.columns)
     if names != TRILEGAL_COLOUR_COLUMNS:
         raise ValueError(f"{path}: unexpected TRILEGAL columns {names}")
-    df = pd.read_csv(path, sep=r"\s+", comment="#", header=None, names=names, engine="c")
     df = df.dropna(subset=["m-M0"])
     if len(df) == 0:
         raise ValueError(f"{path}: no rows")

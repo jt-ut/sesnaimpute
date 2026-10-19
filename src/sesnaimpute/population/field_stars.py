@@ -283,20 +283,17 @@ def lookup_colour(log_teff, log_g, mh, table):
 # ---------------------------------------------------------------------------
 
 def _read_trilegal_part(path):
-    """One TRILEGAL ascii part as a DataFrame, its header checked against
+    """One TRILEGAL part/pointing, read from its converted HDF5 (T6,
+    2026-10-19: no text parse here any more -- `trilegal_download.
+    read_region_part_h5` is the one function every reader of a converted
+    TRILEGAL table uses), as a DataFrame with its header checked against
     `TRILEGAL_COLUMNS` so a service format change fails loudly rather than
     silently misreading columns.
     """
-    with open(path, "r") as fh:
-        header = fh.readline()
-    names = tuple(header.lstrip("#").split())
+    df = trilegal_download.read_region_part_h5(path)
+    names = tuple(df.columns)
     if names != TRILEGAL_COLUMNS:
         raise ValueError(f"{path}: unexpected TRILEGAL columns {names}")
-    df = pd.read_csv(path, sep=r"\s+", comment="#", header=None,
-                      names=names, engine="c")
-    df = df.dropna(subset=["m-M0"])
-    if len(df) == 0:
-        raise ValueError(f"{path}: no rows")
     return df
 
 
@@ -314,7 +311,7 @@ def _region_pointing_plan(config, region):
     simulated area is `n_pointings * area_deg2`, not a share of it.
 
     A region whose grid needs more than one cell but whose disk carries
-    only the historical single pointing (`<Region>[_part<n>].dat`, no
+    only the historical single pointing (`<Region>[_part<n>].h5`, no
     `_pt` files -- no re-download, rule 6) is read as that ONE pointing
     instead: every star gets `POINTING_INDEX` 0 and the simulated area is
     the single pointing's own area (`REGION_POINTINGS[region]["area_deg2"]`,

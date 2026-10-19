@@ -42,6 +42,88 @@ REGISTRY = {
     ("spitzer_coverage_masks", "BAND"): ("band key",
         "The band (I1, I2, I3, I4 or M1) parsed from that source filename."),
 
+    # sky.download.trilegal -- trilegal_ascii: one entry per TRILEGAL ascii
+    # column this project saves (Girardi et al. 2005, A&A 436, 895), shared
+    # by every converted part/pointing file (`build.fetch_region_part`,
+    # `sky.download.trilegal.convert`) and the one Gaia+Tycho2+2MASS colour
+    # query (`sky.download.trilegal.colour`); dataset names are the header
+    # token with brackets dropped and '/' replaced by '_'
+    # (`build.sanitize_column_name`), the verbatim token recovered from the
+    # file's own HEADER attr. T6, 2026-10-19.
+    ("trilegal_ascii", "Gc"): ("TRILEGAL component code",
+        "TRILEGAL's own code for the Galactic component (thin disk, thick disk, "
+        "bulge, halo, ...) this synthetic star was drawn from."),
+    ("trilegal_ascii", "logAge"): ("log10 yr",
+        "This synthetic star's age: 10**x is an age in years."),
+    ("trilegal_ascii", "M_H"): ("dex [M/H]",
+        "This synthetic star's metallicity, [M/H]."),
+    ("trilegal_ascii", "m_ini"): ("Msun",
+        "This synthetic star's initial (birth) mass."),
+    ("trilegal_ascii", "logL"): ("log10 Lsun",
+        "This synthetic star's bolometric luminosity: 10**x is a luminosity in "
+        "solar luminosities."),
+    ("trilegal_ascii", "logTe"): ("log10 K",
+        "This synthetic star's effective temperature: 10**x is a temperature in "
+        "Kelvin."),
+    ("trilegal_ascii", "logg"): ("log10(cm/s^2)",
+        "This synthetic star's surface gravity: 10**x is a gravity in cm/s^2."),
+    ("trilegal_ascii", "m-M0"): ("mag",
+        "This synthetic star's true distance modulus, dust-free (the query's own "
+        "internal_extinction_kind = 0): TRILEGAL's own simulated grid value, not "
+        "yet the continuous distance a reader draws from it "
+        "(`population.field_stars.distance_pc`)."),
+    ("trilegal_ascii", "Av"): ("mag",
+        "The internal (circumstellar/disk) extinction TRILEGAL applied to this "
+        "star: always 0, by this project's own query setting "
+        "(internal_extinction_kind = 0, module docstring) -- the census applies "
+        "its own measured line-of-sight extinction later instead."),
+    ("trilegal_ascii", "m2_m1"): ("mass ratio",
+        "This synthetic star's binary companion-to-primary mass ratio, m2/m1; 0 "
+        "for a single star."),
+    ("trilegal_ascii", "mbol"): ("mag bolometric",
+        "This synthetic star's intrinsic bolometric apparent magnitude."),
+    ("trilegal_ascii", "J"): ("mag 2MASS J Vega",
+        "This synthetic star's intrinsic 2MASS J apparent magnitude."),
+    ("trilegal_ascii", "H"): ("mag 2MASS H Vega",
+        "This synthetic star's intrinsic 2MASS H apparent magnitude."),
+    ("trilegal_ascii", "Ks"): ("mag 2MASS Ks Vega",
+        "This synthetic star's intrinsic 2MASS Ks apparent magnitude."),
+    ("trilegal_ascii", "3.6"): ("mag Spitzer IRAC I1 Vega",
+        "This synthetic star's intrinsic Spitzer IRAC 3.6 micron apparent magnitude."),
+    ("trilegal_ascii", "4.5"): ("mag Spitzer IRAC I2 Vega",
+        "This synthetic star's intrinsic Spitzer IRAC 4.5 micron apparent magnitude."),
+    ("trilegal_ascii", "5.8"): ("mag Spitzer IRAC I3 Vega",
+        "This synthetic star's intrinsic Spitzer IRAC 5.8 micron apparent magnitude."),
+    ("trilegal_ascii", "8.0"): ("mag Spitzer IRAC I4 Vega",
+        "This synthetic star's intrinsic Spitzer IRAC 8.0 micron apparent magnitude."),
+    ("trilegal_ascii", "24"): ("mag Spitzer MIPS M1 Vega",
+        "This synthetic star's intrinsic Spitzer MIPS 24 micron apparent magnitude."),
+    ("trilegal_ascii", "70"): ("mag Spitzer MIPS M2 Vega",
+        "This synthetic star's intrinsic Spitzer MIPS 70 micron apparent magnitude "
+        "(unused downstream of this file: the survey's own bands stop at 24 "
+        "micron, module docstring)."),
+    ("trilegal_ascii", "160"): ("mag Spitzer MIPS M3 Vega",
+        "This synthetic star's intrinsic Spitzer MIPS 160 micron apparent "
+        "magnitude (unused downstream of this file: the survey's own bands stop "
+        "at 24 micron, module docstring)."),
+    ("trilegal_ascii", "Mact"): ("Msun",
+        "This synthetic star's current (actual, post-evolution) mass."),
+    ("trilegal_ascii", "G"): ("mag Gaia DR2 G Vega",
+        "This synthetic star's intrinsic Gaia DR2 G apparent magnitude (the one "
+        "Gaia+Tycho2+2MASS colour query, `sky.download.trilegal.colour`)."),
+    ("trilegal_ascii", "G_BP"): ("mag Gaia DR2 BP Vega",
+        "This synthetic star's intrinsic Gaia DR2 BP apparent magnitude (the one "
+        "Gaia+Tycho2+2MASS colour query, `sky.download.trilegal.colour`)."),
+    ("trilegal_ascii", "G_RP"): ("mag Gaia DR2 RP Vega",
+        "This synthetic star's intrinsic Gaia DR2 RP apparent magnitude (the one "
+        "Gaia+Tycho2+2MASS colour query, `sky.download.trilegal.colour`)."),
+    ("trilegal_ascii", "B_T"): ("mag Tycho-2 B_T Vega",
+        "This synthetic star's intrinsic Tycho-2 B_T apparent magnitude (the one "
+        "Gaia+Tycho2+2MASS colour query, `sky.download.trilegal.colour`)."),
+    ("trilegal_ascii", "V_T"): ("mag Tycho-2 V_T Vega",
+        "This synthetic star's intrinsic Tycho-2 V_T apparent magnitude (the one "
+        "Gaia+Tycho2+2MASS colour query, `sky.download.trilegal.colour`)."),
+
     # catalog.curated -- sources_sesna_source: the per-region curated SESNA
     # catalog, one row per source.
     ("sources_sesna_source", "NAME"): ("source name",
