@@ -1980,40 +1980,45 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with h5py.File(path, "w") as f:
             f.attrs["GRANULE"] = "hpx512"
-            f.attrs["DENSITY_GAL"] = density_gal
             f.attrs["TOTAL_PREDICTED"] = total_predicted_built
             f.attrs["SURVEYED_AREA_DEG2"] = surveyed_area_deg2
-            f.attrs["ADMITTED_AREA_DEG2"] = area_deg2
             f.attrs["TOTAL_OBSERVED"] = float(n_source)
             for c in built:
                 f.attrs[f"RATIO_{c}"] = ratio[c]
             f.attrs["RATIO_BUILT"] = ratio_built
-            # the YSO population's catalogable fraction (sec 5.5, sec 8):
-            # accepted / intrinsic density, never the survey's observed
-            # source count.
-            f.attrs["CATALOGABLE_FRACTION_YSO"] = catalogable_fraction_yso
             # sec. 9's bright-end check: the same catalogued/observed
             # ratio, above 3x/10x the pixel's own I2 50% limit, where
-            # completeness is 1 on both sides.
+            # completeness is 1 on both sides. Read by fittp.figure_
+            # count_check as the two TOTAL numbers only (grep, step 5
+            # 2026-10-19): the per-class RATIO_BRIGHT3_<C> attr, DENSITY_GAL,
+            # ADMITTED_AREA_DEG2 and CATALOGABLE_FRACTION_YSO are read by
+            # nothing and no longer written; the build still computes and
+            # prints catalogable_fraction_yso and density_gal above.
             f.attrs["RATIO_BRIGHT3"] = ratio_bright3_total
             f.attrs["RATIO_BRIGHT10"] = ratio_bright10_total
-            for c in built:
-                f.attrs[f"RATIO_BRIGHT3_{c}"] = ratio_bright3[c]
             for name, data in (
                 ("HPX_PIX_512", pix),
                 ("A_COL_K", a_col.astype(np.float32)),
                 ("COVERAGE", coverage.astype(np.float32)),
-                ("F_LIM_50_PIX_MJY", f_lim.astype(np.float32)),
             ):
                 build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
+            # F_LIM_50_PIX_MJY is read by nothing here: every reader goes
+            # straight to catalog.depth_grid's own copy (atlas/shapes.py,
+            # atlas/protostars.py); no longer written.
             for c in CLASSES:
-                for prefix, table in (
-                    ("N_CAT_", n_cat), ("INTENSITY_", intensity), ("N_ABOVE_", n_above),
-                    ("N_CAT_BRIGHT3_", n_cat_bright3), ("N_CAT_BRIGHT10_", n_cat_bright10),
-                ):
-                    name = f"{prefix}{c}"
-                    build_module.write_dataset(f, name, table[c].astype(np.float32),
-                                                *REGISTRY[(_STEM, name)])
+                name = f"N_CAT_{c}"
+                build_module.write_dataset(f, name, n_cat[c].astype(np.float32), *REGISTRY[(_STEM, name)])
+            for c in CLASSES:
+                name = f"N_ABOVE_{c}"
+                build_module.write_dataset(f, name, n_above[c].astype(np.float32), *REGISTRY[(_STEM, name)])
+            # INTENSITY_YSO is atlas/protostars.py's own read (grep, step 5
+            # 2026-10-19); INTENSITY_STAR/AGB/PAHC/GAL/H2S and every
+            # N_CAT_BRIGHT3_<C>/N_CAT_BRIGHT10_<C> (the bright-end check's
+            # per-pixel tables; only their coverage-weighted sums survive,
+            # as the two RATIO_BRIGHT3/RATIO_BRIGHT10 attrs above) are read
+            # by nothing and no longer written.
+            build_module.write_dataset(f, "INTENSITY_YSO", intensity["YSO"].astype(np.float32),
+                                        *REGISTRY[(_STEM, "INTENSITY_YSO")])
             # the region's expected number of catalogued objects per
             # parameter cell (module docstring), summing to `RATIO_<C> *
             # N_source`; `(128, 110)` on `grid.LOG10_XI_EDGES` x
@@ -2033,12 +2038,10 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
             for c in built:
                 name = f"SHARE_{c}"
                 build_module.write_dataset(f, name, share[c].astype(np.float32), *REGISTRY[(_STEM, name)])
-            for name, data in (
-                ("N_OBS", n_obs.astype(np.int32)),
-                ("N_OBS_BRIGHT3", n_obs_bright3.astype(np.int32)),
-                ("N_OBS_BRIGHT10", n_obs_bright10.astype(np.int32)),
-            ):
-                build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
+            # N_OBS/N_OBS_BRIGHT3/N_OBS_BRIGHT10 are read by nothing here
+            # (grep, step 5 2026-10-19): the build still computes them
+            # in-process, for RATIO_BRIGHT3/RATIO_BRIGHT10 above, and no
+            # longer writes them.
 
         st.done(path, n_pix=n_pix, n_tile=len(tiles_here), n_sightline=len(sls_here),
                 n_tile_filled=n_tile_filled,
