@@ -62,6 +62,7 @@ retention itself biases that prediction (reading note 04, section A,
 `raw_anchor_columns`).
 """
 
+import functools
 import os
 import re
 
@@ -74,6 +75,7 @@ from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import constants
 from sesnaimpute import definitions
+from sesnaimpute import pieces as pieces_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
@@ -442,15 +444,73 @@ def passes_two_of_eight(flux, f_lim, min_bands=RETENTION_MIN_BANDS):
 # per-region build
 # ---------------------------------------------------------------------------
 
-def build_region(config, region, atmosphere, colour_table, st=None):
+def _process_block(piece, flux, log_teff, logg, mh, log_l, ks_mag, dist_pc,
+                    pointing_index, atmosphere, colour_table, f_lim_deep):
+    """One block of this pointing's own stars (COMMON.md 2026-10-19
+    ruling: the piece is a block of synthetic stars, not a pointing --
+    the retention test and the colour/magnitude work are row-local). The
+    atmosphere register and the colour table are not rebuilt here: both
+    are built once, in the parent (`load_atmosphere_grid`,
+    `load_colour_table`, called once in `build`), and bound into this
+    function by `functools.partial` so joblib pickles each read-only
+    only once per dispatch, not once per block.
+
+    Returns `(raw, ret, n_colour_fallback)` for this block; the caller
+    concatenates blocks in piece order, which `pieces.run` already
+    preserves, so the result is identical to deriving every column from
+    the pointing's whole array in one pass.
+    """
+    start, stop = piece
+    sl = slice(start, stop)
+    flux_b = flux[sl]
+    log_teff_b = log_teff[sl]
+    logg_b = logg[sl]
+    mh_b = mh[sl]
+    ks_b = ks_mag[sl]
+    dist_b = dist_pc[sl]
+    log_l_b = log_l[sl]
+    pointing_b = pointing_index[sl]
+
+    idx, _ = match_templates(10.0 ** log_teff_b, logg_b, mh_b, atmosphere["grid"])
+    kg_diffuse = atmosphere["kg_diffuse"][idx]
+    kg_dense = atmosphere["kg_dense"][idx]
+    # the proxy's colour is TRILEGAL's own: G - Ks from the survey-wide
+    # colour table at this star's own atmosphere, falling back to the
+    # fitter's atmosphere-library template only where no cell within
+    # COLOUR_TABLE_MAX_STEP steps exists (W42).
+    g_minus_ks_table, colour_matched = lookup_colour(log_teff_b, logg_b, mh_b, colour_table)
+    g_minus_ks = np.where(colour_matched, g_minus_ks_table, atmosphere["g_minus_ks"][idx])
+    g_proxy = ks_b + g_minus_ks
+    keep = passes_two_of_eight(flux_b, f_lim_deep)
+
+    raw = dict(
+        g_proxy=g_proxy, ks_mag=ks_b, dist_pc=dist_b,
+        k_g_diffuse=kg_diffuse, k_g_dense=kg_dense, pointing_index=pointing_b,
+    )
+    ret = dict(
+        dist_pc=dist_b[keep], log_teff=log_teff_b[keep], log_g=logg_b[keep],
+        log_l=log_l_b[keep], fnu_mjy=flux_b[keep], g_proxy=g_proxy[keep], ks_mag=ks_b[keep],
+        k_g_diffuse=kg_diffuse[keep], k_g_dense=kg_dense[keep], template_index=idx[keep],
+        pointing_index=pointing_b[keep],
+    )
+    return raw, ret, int((~colour_matched).sum())
+
+
+def build_region(config, region, atmosphere, colour_table, n_jobs, st=None):
     """The region's matched, retained TRILEGAL table plus the raw group,
     as a dict of arrays ready for `write_region`. Streamed one pointing at
     a time (CODING_RULES.md 10a): each pointing's own ascii frame is read,
-    reduced to its flux/distance/template-match/retention columns, and
-    dropped before the next pointing is read, so nothing holds more than
-    one pointing's raw TRILEGAL frame at once. The per-pointing columns
-    are additive (each star's own derivation reads no other star), so
-    concatenating them once at the end reproduces exactly what deriving
+    reduced to its flux/distance columns, and dropped before the next
+    pointing is read, so nothing holds more than one pointing's raw
+    TRILEGAL frame at once. Within one pointing, the per-star match,
+    colour lookup and retention test (row-local; COMMON.md 2026-10-19
+    ruling) are cut into one block per worker and run through the one
+    shared pool, `pieces.run` (a coarse cut, not `pieces.PIECES_PER_WORKER`
+    blocks per worker: the per-star cost here is uniform, so a fine grain
+    only pays the per-task dispatch and result-pickling cost without
+    smoothing any unevenness). The per-pointing, per-block columns are
+    additive (each star's own derivation reads no other star), so
+    concatenating them in piece order reproduces exactly what deriving
     them from the whole-region frame in one pass would give.
     """
     specs, area_deg2, n_pointings_grid, n_pointings_on_disk = _region_pointing_plan(config, region)
@@ -476,31 +536,27 @@ def build_region(config, region, atmosphere, colour_table, st=None):
         # whose admitted footprint needs only one grid cell (NGC 7129) still has
         # every row at pointing index 0, unchanged.
         pointing_index = df_p["POINTING_INDEX"].to_numpy(dtype=np.int16)
+        n_stars = len(df_p)
         del df_p  # the ascii frame is not needed past this pointing's own columns
 
-        idx, _ = match_templates(10.0 ** log_teff, logg, mh, atmosphere["grid"])
-        kg_diffuse = atmosphere["kg_diffuse"][idx]
-        kg_dense = atmosphere["kg_dense"][idx]
-        # the proxy's colour is TRILEGAL's own: G - Ks from the survey-wide
-        # colour table at this star's own atmosphere, falling back to the
-        # fitter's atmosphere-library template only where no cell within
-        # COLOUR_TABLE_MAX_STEP steps exists (W42).
-        g_minus_ks_table, colour_matched = lookup_colour(log_teff, logg, mh, colour_table)
-        g_minus_ks = np.where(colour_matched, g_minus_ks_table, atmosphere["g_minus_ks"][idx])
-        n_colour_fallback += int((~colour_matched).sum())
-        g_proxy = ks_mag + g_minus_ks
-        keep = passes_two_of_eight(flux, f_lim_deep)
+        fn = functools.partial(
+            _process_block, flux=flux, log_teff=log_teff, logg=logg, mh=mh, log_l=log_l,
+            ks_mag=ks_mag, dist_pc=dist_pc, pointing_index=pointing_index,
+            atmosphere=atmosphere, colour_table=colour_table, f_lim_deep=f_lim_deep)
+        # the per-star cost here is uniform (no row costs more than
+        # another), so this pointing's own stars are cut into one block
+        # per worker, not `pieces.PIECES_PER_WORKER` times that many: a
+        # pointing is processed 1-26 times per region, and at the pointing
+        # sizes this stage sees (1e5-1e6 stars), the per-task dispatch and
+        # result-pickling cost of many fine pieces outweighs the gain a
+        # fine grain buys only when pieces vary in cost.
+        min_items = max(1, -(-n_stars // n_jobs))
+        for raw_b, ret_b, n_fallback_b in pieces_module.run(
+                fn, pieces_module.slices(n_stars, n_jobs, min_items=min_items), n_jobs):
+            raw_parts.append(raw_b)
+            ret_parts.append(ret_b)
+            n_colour_fallback += n_fallback_b
 
-        raw_parts.append(dict(
-            g_proxy=g_proxy, ks_mag=ks_mag, dist_pc=dist_pc,
-            k_g_diffuse=kg_diffuse, k_g_dense=kg_dense, pointing_index=pointing_index,
-        ))
-        ret_parts.append(dict(
-            dist_pc=dist_pc[keep], log_teff=log_teff[keep], log_g=logg[keep],
-            log_l=log_l[keep], fnu_mjy=flux[keep], g_proxy=g_proxy[keep], ks_mag=ks_mag[keep],
-            k_g_diffuse=kg_diffuse[keep], k_g_dense=kg_dense[keep], template_index=idx[keep],
-            pointing_index=pointing_index[keep],
-        ))
         if st is not None:
             st.tick(i + 1, len(specs), "pointings")
 
@@ -585,7 +641,7 @@ def build(config, regions=None):
     colour_table = load_colour_table(config)
     for region in region_names:
         with progress.Stage("population.field_stars", region) as st:
-            result = build_region(config, region, atmosphere, colour_table, st=st)
+            result = build_region(config, region, atmosphere, colour_table, config.n_jobs, st=st)
             path = config_module.product_path(config, "population", "trilegal", "field-stars",
                                                 "region", region=region)
             write_region(path, region, result)
