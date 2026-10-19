@@ -1,11 +1,8 @@
-"""Per-sightline width from the released posterior samples, not the
-correlated-sum bound: Edenhofer et al. 2024 state no correlation length
-for the map's kernel (`bms_review/studies/edenhofer_kernel.md`) and
-advise using the 12 released posterior samples for any quantitative use;
-the released per-voxel standard deviation, summed fully correlated along
-the line of sight (`sky.derived.profile`'s `SIGMA_COR_K`), is only an
-upper bound in the kernel's absence, and the uncorrelated sum
-(`SIGMA_UNC_K`) is the matching lower bound.
+"""Per-sightline width of the depth mark's own ratio, from the released
+posterior samples, not the correlated-sum bound: Edenhofer et al. 2024
+state no correlation length for the map's kernel
+(`bms_review/studies/edenhofer_kernel.md`) and advise using the 12
+released posterior samples for any quantitative use.
 
 Each samples file is one fixed-layout cube, HDU `SAMPLES`, numpy shape
 `(12, n_shell, 786432)` -- read in one sequential pass, shell-row
@@ -14,19 +11,20 @@ union, far fewer bytes than one region's worth of re-reads per region);
 the outer file's pass starts at the shell holding the inner map's own
 edge, never earlier. From the union columns, each region's cumulative
 extinction `A_s(d)` is formed per sample -- the same conversion and
-splice `sky.derived.profile` uses for the mean -- and `SIGMA_SAMPLES_K`
-is their standard deviation, every term in it sampled: the map's
+splice `sky.derived.profile` uses for the mean -- and `SIGMA_RATIO_
+SAMPLES` is the across-sample standard deviation of the depth mark's own
+ratio `u(d) = A_s(d) / A_s,inf` (`sigma_ratio_samples_of`): the map's
 pre-69-pc "integrated inner" contribution is itself released per sample
 (the `INTEGRATED INNER 68.8 PC` HDU, one column per sample), gathered
 for the union pixels in the same pass and used as each sample's own
 starting value, never a value shared across samples. Where the outer
-samples file is absent from disk, the spliced part
-is the outer map's `SIGMA_COR_K` scaled by the region's own median
-`SIGMA_SAMPLES_K / SIGMA_COR_K` behind the cloud on the inner map
-(`RATIO_SPLICED`, one line printed); any other disagreement between a
-samples cube and its mean map (shell count, missing HDU, distance axis)
-raises. The samples files are deleted by the coordinator once every
-region's product exists here.
+samples file is absent from disk, the ratio's own terminal grid point
+already stands for the column at infinity, so `SIGMA_RATIO_SAMPLES` has
+nothing left to grow past the inner edge: the spliced part is zero, one
+line printed; any other disagreement between a samples cube and its
+mean map (shell count, missing HDU, distance axis) raises. The samples
+files are deleted by the coordinator once every region's product exists
+here.
 """
 
 import os
@@ -150,20 +148,11 @@ def cumulative_outer_increment(union_outer, bnd2, k):
     return np.cumsum(rho2 * widths2, axis=1)
 
 
-def sigma_samples_of(a_full):
-    """`SIGMA_SAMPLES_K`, `(n_pix, n_dist)`: the across-sample std of
-    `A(d)` -- every term, including the pre-69-pc baseline, comes from
-    the samples themselves (module docstring), so no correction term is
-    added here; zero at the leading `d=0` point, where every sample is 0
-    by construction."""
-    return a_full.std(axis=0, ddof=0).T
-
-
 def sigma_ratio_samples_of(a_full, a_edge_prof, a_inf_prof):
     """`SIGMA_RATIO_SAMPLES`, `(n_pix, n_dist)`: the across-sample std of
     the depth mark's own ratio `ratio_s(d) = A_s(d) / A_inf,s`, the width
     the star placement reads (`x = u(d) = A(d) / A_inf`, sec. 5.1 "Marks")
-    in place of the numerator's spread over the mean, `SIGMA_SAMPLES_K`: near the far
+    in place of the numerator's spread over the mean: near the far
     end numerator and denominator move together and the ratio's spread is
     smaller, while at the near end the two agree and the two widths
     coincide.
@@ -207,20 +196,6 @@ def region_a_full(union_inner_region, bounds1, centers1, baseline_per_sample_e_r
     return dist_pc, a_full
 
 
-def region_ratio_medians(sigma_samples, sigma_cor, sigma_unc, dist_pc, d_hi_pc):
-    """Per-region median ratios behind the cloud (`dist_pc > d_hi_pc`),
-    `SIGMA_SAMPLES_K / SIGMA_COR_K` and `/ SIGMA_UNC_K`, restricted to
-    cells where the two bounds actually bracket the samples estimate."""
-    behind = dist_pc > d_hi_pc
-    if not np.any(behind):
-        return np.nan, np.nan
-    s, c, u = sigma_samples[:, behind], sigma_cor[:, behind], sigma_unc[:, behind]
-    bracket = (s >= u) & (s <= c) & (c > 0) & (u > 0)
-    if not np.any(bracket):
-        return np.nan, np.nan
-    return float(np.median(s[bracket] / c[bracket])), float(np.median(s[bracket] / u[bracket]))
-
-
 # --- build -----------------------------------------------------------
 
 
@@ -231,7 +206,6 @@ def _build_one_region(config, region, region_pixels, union_pixels, union_inner, 
     union_outer_region = union_outer[:, :, idx] if outer_present else None
     dist_pc, a_full = region_a_full(union_inner[:, :, idx], bounds1, centers1, baseline_per_sample_e[:, idx],
                                      union_outer_region, bnd2, cen2, k)
-    sigma_samples = sigma_samples_of(a_full)
     mean_a = a_full.mean(axis=0)
     n_dist_samples = a_full.shape[1]
 
@@ -245,13 +219,10 @@ def _build_one_region(config, region, region_pixels, union_pixels, union_inner, 
     with h5py.File(profile_path, "r") as f:
         prof_hpx = f["HPX_PIX_256"][:]
         prof_dist = f["DIST_PC"][:]
-        sigma_cor = f["SIGMA_COR_K"][:]
-        sigma_unc = f["SIGMA_UNC_K"][:]
         a_cum_prof = f["A_CUM_K"][:]
         a_inf_prof = f["A_INF_K"][:]
     order = np.argsort(prof_hpx)
     pos = order[np.searchsorted(prof_hpx[order], region_pixels)]
-    sigma_cor, sigma_unc = sigma_cor[pos], sigma_unc[pos]
     a_cum_prof, a_inf_prof = a_cum_prof[pos].astype(np.float64), a_inf_prof[pos].astype(np.float64)
     with h5py.File(depth_path, "r") as f:
         names_all = [v.decode() if isinstance(v, bytes) else str(v) for v in f["REGION"][:]]
@@ -266,7 +237,6 @@ def _build_one_region(config, region, region_pixels, union_pixels, union_inner, 
     a_edge_prof = a_cum_prof[:, n_dist_samples - 1]
     sigma_ratio_samples = sigma_ratio_samples_of(a_full, a_edge_prof, a_inf_prof)
 
-    ratio_splice = None
     if outer_present:
         if dist_pc.size != prof_dist.size or not np.allclose(dist_pc, prof_dist, atol=1e-6):
             raise ValueError(
@@ -278,20 +248,15 @@ def _build_one_region(config, region, region_pixels, union_pixels, union_inner, 
             raise ValueError(
                 "edenhofer_samples.build: %s: the inner samples' distance axis disagrees with the built "
                 "profile's -- radial-axis mismatch between the samples cube and the mean map" % region)
-        behind_inner = prof_dist[:n_inner] > d_hi_pc
-        ratio = sigma_samples[:, behind_inner] / np.maximum(sigma_cor[:, :n_inner][:, behind_inner], 1e-300)
-        ratio_splice = float(np.nanmedian(ratio)) if ratio.size else 1.0
-        pad = sigma_cor[:, n_inner:] * ratio_splice
-        sigma_samples = np.concatenate([sigma_samples, pad], axis=1)
         # the ratio's own terminal grid point already stands for the
         # column at infinity (`sigma_ratio_samples_of`'s docstring), so
-        # its width has nothing left to grow past the inner edge: zero,
-        # not the correlated-sum-scaled pad `SIGMA_SAMPLES_K` takes.
+        # its width has nothing left to grow past the inner edge: zero.
+        n_pad = prof_dist.size - n_inner
         sigma_ratio_samples = np.concatenate(
-            [sigma_ratio_samples, np.zeros((region_pixels.size, pad.shape[1]))], axis=1)
+            [sigma_ratio_samples, np.zeros((region_pixels.size, n_pad))], axis=1)
         dist_pc = prof_dist
-        print("edenhofer_samples.build: %s: outer samples absent -- RATIO_SPLICED=%.3g applied to %d cells "
-              "past the inner edge" % (region, ratio_splice, pad.shape[1]))
+        print("edenhofer_samples.build: %s: outer samples absent -- SIGMA_RATIO_SAMPLES zero-padded for %d cells "
+              "past the inner edge" % (region, n_pad))
 
     # identity: mean-over-samples A(d) against the UNSCALED in-map+splice
     # profile (not A_CUM_K, which carries `profile.py`'s per-sightline
@@ -304,38 +269,27 @@ def _build_one_region(config, region, region_pixels, union_pixels, union_inner, 
         a_ref = np.concatenate([a_ref, a_ref[:, -1:] + splice_ref["dA2"]], axis=1)
     a_ref = np.concatenate([np.zeros((region_pixels.size, 1)), a_ref], axis=1)
     max_rel_diff = float(np.nanmax(np.abs(mean_a.T - a_ref) / np.maximum(np.abs(a_ref), 1e-12)))
-
-    med_cor, med_unc = region_ratio_medians(sigma_samples, sigma_cor, sigma_unc, dist_pc, d_hi_pc)
-    behind = dist_pc > d_hi_pc
-    old_width = sigma_samples[:, behind] / np.maximum(a_cum_prof[:, behind], 1e-300)
-    narrow = sigma_ratio_samples[:, behind] / np.maximum(old_width, 1e-300)
-    med_narrow = float(np.nanmedian(narrow)) if narrow.size else np.nan
-    print("edenhofer_samples.build: %s: max rel. diff of the sample mean against the unscaled profile=%.3g, "
-          "median SIGMA_SAMPLES_K/SIGMA_COR_K=%.3g, /SIGMA_UNC_K=%.3g behind the cloud, "
-          "median SIGMA_RATIO_SAMPLES/(SIGMA_SAMPLES_K/A)=%.3g behind the cloud"
-          % (region, max_rel_diff, med_cor, med_unc, med_narrow))
+    print("edenhofer_samples.build: %s: max rel. diff of the sample mean against the unscaled profile=%.3g"
+          % (region, max_rel_diff))
 
     out_path = product_path(config, "sky/derived", "edenhofer", "profile-sigma-samples", "sightline", region=region)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
         f.attrs["GRANULE"] = "sightline"
-        if ratio_splice is not None:
-            f.attrs["RATIO_SPLICED"] = ratio_splice
         for name, data in (
             ("HPX_PIX_256", region_pixels),
             ("DIST_PC", dist_pc),
-            ("SIGMA_SAMPLES_K", sigma_samples),
             ("SIGMA_RATIO_SAMPLES", sigma_ratio_samples.astype(np.float32)),
         ):
             build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
 
-    return dict(region=region, max_rel_diff=max_rel_diff, med_cor=med_cor, med_unc=med_unc, med_narrow=med_narrow)
+    return dict(region=region, max_rel_diff=max_rel_diff)
 
 
 def build(config, regions=None):
     """One sequential pass per samples file over the union of the named
     regions' admitted sightlines (module docstring), then each region's
-    own `SIGMA_SAMPLES_K` product from the union columns."""
+    own `SIGMA_RATIO_SAMPLES` product from the union columns."""
     names = regions or [r.name for r in regions_module.REGIONS]
     input_dir = profile_module._input_dir(config)
     inner_samples_path = f"{input_dir}/{SAMPLES_INNER_NAME}"
@@ -366,8 +320,8 @@ def build(config, regions=None):
                                                shell_lo=k - 1, shell_hi=bnd2.size - 1)
         else:
             union_outer = None
-            print("edenhofer_samples.build: %s absent from disk -- RATIO_SPLICED applies past the inner edge"
-                  % outer_samples_path)
+            print("edenhofer_samples.build: %s absent from disk -- SIGMA_RATIO_SAMPLES zero-padded past the "
+                  "inner edge" % outer_samples_path)
         st.tick(2, 3, "outer samples read" if outer_present else "outer samples absent")
 
         rows = [_build_one_region(config, name, pix_by_region[name], union_pixels, union_inner, bounds1, centers1,

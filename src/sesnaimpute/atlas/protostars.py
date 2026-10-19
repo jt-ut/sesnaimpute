@@ -150,24 +150,50 @@ def _read_curated(config, region):
     return name, ra_deg, dec_deg
 
 
+def _read_depth_grid_pix(config, region):
+    """This region's `catalog.depth_grid` per-pixel limit, the one source
+    of a source's own completeness limit (`catalog.depth_grid` module
+    docstring): sorted `HPX_PIX_512` and `F_LIM_50_PIX_MJY` (n_pix, 8
+    bands, this project's own band order)."""
+    path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
+    if not os.path.exists(path):
+        raise ValueError(
+            f"atlas.protostars: no {path!r} -- run RUNBOOKtp.sh's "
+            f"'PY sesnaimpute.catalog.depth_grid' line")
+    with h5py.File(path, "r") as f:
+        pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
+        f_lim_pix = np.asarray(f["F_LIM_50_PIX_MJY"][:], dtype=np.float64)
+    return pix, f_lim_pix
+
+
 def _read_density_rows(config, region):
     """P1's per-source rows this check needs to place a protostar's
     matched counterpart in the prior: `NAME` (the alignment check below),
     `A_COL_K` (the row's own sightline BEAM column, sec. 3.2's own
-    extinction column -- this check's own `A_beam`), `F_LIM_50_MJY` (the
-    row's own per-band 50% limit, sec. 6.2's `F_lim,50`), and the column
-    kernel's own per-row terms `A_COL_SIG_K`, `ARM`, `ZP_SIG_K`
-    (`population.kernel.Kernel.mixture`) plus `SIGHTLINE_ROW` (this
-    brief's item 5, the median source's own `XI_MARGINAL` row)."""
+    extinction column -- this check's own `A_beam`), `HPX_512` joined
+    against `catalog.depth_grid`'s own `HPX_PIX_512`/`F_LIM_50_PIX_MJY`
+    for the row's own per-band 50% limit (sec. 6.2's `F_lim,50`; the
+    depth grid is the one source of that number, not a per-source copy),
+    and the column kernel's own per-row terms `A_COL_SIG_K`, `ARM`,
+    `ZP_SIG_K` (`population.kernel.Kernel.mixture`) plus `SIGHTLINE_ROW`
+    (this brief's item 5, the median source's own `XI_MARGINAL` row)."""
     path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
     with h5py.File(path, "r") as f:
         name = f["NAME"][:]
         a_col = np.asarray(f["A_COL_K"][:], dtype=np.float64)
-        f_lim_50_mjy = np.asarray(f["F_LIM_50_MJY"][:], dtype=np.float64)
+        hpx512 = np.asarray(f["HPX_512"][:], dtype=np.int64)
         a_col_sig = np.asarray(f["A_COL_SIG_K"][:], dtype=np.float64)
         arm = f["ARM"][:]
         zp_sig = np.asarray(f["ZP_SIG_K"][:], dtype=np.float64)
         sightline = np.asarray(f["SIGHTLINE_ROW"][:], dtype=np.int64)
+    pix, f_lim_pix = _read_depth_grid_pix(config, region)
+    loc = np.minimum(np.searchsorted(pix, hpx512), pix.size - 1) if pix.size else np.zeros_like(hpx512)
+    ok = pix.size and np.all(pix[loc] == hpx512)
+    if not ok:
+        missing = hpx512[pix[loc] != hpx512][:5] if pix.size else hpx512[:5]
+        raise ValueError("atlas.protostars: region %r has no depth-grid row for nside-512 pixel(s) %s"
+                         % (region, missing.tolist()))
+    f_lim_50_mjy = f_lim_pix[loc]
     return name, a_col, f_lim_50_mjy, a_col_sig, arm, zp_sig, sightline
 
 

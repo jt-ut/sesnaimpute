@@ -542,17 +542,12 @@ def measure_region(d_r_pc, inner, splice, dist_new, rho_dist_new, weight):
     dA2 = splice["dA2"]
     a_out = np.concatenate([a_cum1_T, a_cum1_T[:, -1:] + dA2], axis=1)
 
-    base_u, base_c = inner["sig1_unc"][:, -1], inner["sig1_cor"][:, -1]
-    s2 = splice["s2_terms"].T
-    sig_u = np.concatenate([inner["sig1_unc"], np.sqrt(base_u[:, None] ** 2 + np.cumsum(s2 ** 2, axis=1))], axis=1)
-    sig_c = np.concatenate([inner["sig1_cor"], base_c[:, None] + np.cumsum(s2, axis=1)], axis=1)
-
     mean_rho_inner = (inner["rho1"] * weight[np.newaxis, :]).sum(axis=1)
     rho_outer = (splice["rho2"] * weight[np.newaxis, :]).sum(axis=1)
     rho_mean_full = np.concatenate([mean_rho_inner, rho_outer])
 
     depth = structure_depth(rho_dist_new, rho_mean_full, d_r_pc)
-    return {"a_out": a_out, "sig_u": sig_u, "sig_c": sig_c, "depth": depth}
+    return {"a_out": a_out, "depth": depth}
 
 
 # --- build ------------------------------------------------------------
@@ -629,7 +624,7 @@ def _build_one_region(config, region, canon, input_dir):
 
     weight = region_weight(nsrc)
     measured = measure_region(canon.d_r_pc, inner, splice, dist_new, rho_dist_new, weight)
-    a_out, sig_u, sig_c, depth = measured["a_out"], measured["sig_u"], measured["sig_c"], measured["depth"]
+    a_out, depth = measured["a_out"], measured["depth"]
 
     d_edge = dist_new[-1]
     a_edge_raw = a_out[:, -1]
@@ -658,8 +653,6 @@ def _build_one_region(config, region, canon, input_dir):
 
     dist_pc = np.concatenate([[0.0], dist_new])
     a_cum_k = np.concatenate([np.zeros((admitted_pix.size, 1)), a_out], axis=1)
-    sigma_unc_k = np.concatenate([np.zeros((admitted_pix.size, 1)), sig_u], axis=1)
-    sigma_cor_k = np.concatenate([np.zeros((admitted_pix.size, 1)), sig_c], axis=1)
     rho_k_per_pc = np.diff(a_cum_k, axis=1) / np.diff(dist_pc)[np.newaxis, :]
     fallback_a_cum = weight @ a_cum_k
 
@@ -672,8 +665,6 @@ def _build_one_region(config, region, canon, input_dir):
             ("DIST_PC", dist_pc),
             ("A_CUM_K", a_cum_k),
             ("RHO_K_PER_PC", rho_k_per_pc),
-            ("SIGMA_UNC_K", sigma_unc_k),
-            ("SIGMA_COR_K", sigma_cor_k),
             ("GAL_L_DEG", gl),
             ("GAL_B_DEG", gb),
             ("TAIL_RESIDUAL_K", tail["residual"]),

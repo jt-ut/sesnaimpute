@@ -148,14 +148,13 @@ _SIGMA_SAMPLES_CACHE = {}
 
 
 def _sigma_samples_product(config, region):
-    """The region's `SIGMA_RATIO_SAMPLES` product beside its
-    `SIGMA_SAMPLES_K`: the 12 released Edenhofer posterior samples' own
-    standard deviation of the depth mark's ratio `u(d) = A(d) / A_inf`,
-    read in place of the profile's fully correlated `SIGMA_COR_K` sum --
-    an upper bound absent a stated correlation length
+    """The region's `SIGMA_RATIO_SAMPLES` product: the 12 released
+    Edenhofer posterior samples' own standard deviation of the depth
+    mark's ratio `u(d) = A(d) / A_inf`, read in place of a correlated-sum
+    bound -- there is no stated correlation length
     (`bms_review/studies/edenhofer_kernel.md`). No fallback: a region
     without this product fails here by name rather than silently reading
-    the bound."""
+    a bound."""
     key = (config.data_root, region)
     if key not in _SIGMA_SAMPLES_CACHE:
         path = config_module.product_path(config, "sky/derived", "edenhofer", "profile-sigma-samples",

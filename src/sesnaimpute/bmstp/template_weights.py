@@ -515,9 +515,7 @@ def yso_population_weight(config):
     `YSO_F45_BIN_DEX` bins floored at `LIBRARY_DENSITY_MIN_COUNT`, EVERY
     YSO template including Class III, never `RHO_KDE1`): a disc-and-
     envelope flux the IMF over photospheric mass does not constrain, so
-    no IMF over mass enters (`population.yso_mass` is not read here; its
-    product and stage stay in place for sec 3.5's mass table and the
-    protostar check). The census's own brightness histogram already
+    no IMF over mass enters. The census's own brightness histogram already
     carries the Class III objects' fluxes (no class cut on the
     catalogue), so the library side matches it template for template.
     (ii) The viewing angle, uniform in cos i (the existing sin i

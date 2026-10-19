@@ -1,7 +1,9 @@
 """The YSO law count and the per-sightline shape (SPEC_PRIORS.md section 6.1,
 6.3; IMPLEMENTATION.md section 3, the YSO row).
 
-Two products, independent of each other and of the mass-based selection
+One product, `build`'s own 30-row law product, plus a shared shape
+function every caller calls live off the profile (never a stored shape
+product), independent of each other and of the mass-based selection
 (section 6.2, built elsewhere):
 
 `law_count` (section 6.1): disk-bearing young stars form in proportion to
@@ -28,12 +30,12 @@ Sigma_YSO ~ Sigma_gas^2 surface law), on the profile's own piecewise-linear
 cells; the far-field tail past the 3-D map's edge (section 1.4) is one
 further cell carrying the residual column, so `u` reaches 1 on every
 sightline. `embedding_and_ridge` returns this density (`xi_edges`/`p_u`)
-at the profile's own full resolution -- `bmstp.sample_cloud` calls it
-directly to place the star family's members along the sightline's own
-`(u, d)` segments. `build` writes one product per region, sightline
-granule: `HPX_PIX_256`, `XI_EDGES`/`P_XI`, the same density coarsened to
-`N_PROFILE_CELLS` equal-mass cells for storage -- `population.young_stars`
-reads this coarsened form for the anchor pixels' own placement.
+at the profile's own full resolution -- `bmstp.sample_cloud` and
+`population.young_stars.sightline_lookup` both call it directly, at that
+same full resolution, to place a young star along the sightline's own
+`(u, d)` segments: never a stored, coarsened form (a coarsened disk copy
+carries no distance per cell to restrict a placement to the region's own
+cloud interval by).
 
 No selection (section 6.2) and no library enter either product (C3):
 neither reads a template register or an IMF.
@@ -50,18 +52,13 @@ from astropy.wcs import WCS
 import astropy.units as u
 from joblib import Parallel, delayed
 
-from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
-from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
-from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import kernel as kernel_module
 from sesnaimpute.sky.derived import herschel_column as sky_herschel_column
 from sesnaimpute.sky.derived import planck_column as sky_planck_column
-
-_SHAPE_STEM = "prior_yso_sightline"
 
 # ====================================================================
 # 6.1 -- the law count
@@ -542,49 +539,6 @@ def embedding_and_ridge(profile):
     return dict(xi_edges=xi_edges, p_u=p_u, u_median=u_median)
 
 
-#: The stored embedding profile's own cell count (SPEC_PRIORS.md section
-#: 6.3): the 3-D map's ~600 distance cells carry no information the
-#: profile's own one-degree resolution and the cloud's real few-cell
-#: structure along the ray support, so `build_shape` coarsens to this
-#: many equal-mass cells once at build. 16 failed the 0.02 check bar (200
-#: fixed-seed NGC 7129 sources, worst density relative L1 0.027); 32 is
-#: the smallest power of two that passes (worst CDF 0.0026, worst density
-#: relative L1 0.0055).
-N_PROFILE_CELLS = 32
-
-
-def coarsen_profile(xi_edges, p_u, n_out):
-    """`(xi_edges, p_u)` re-cut to `n_out` equal-mass cells: the new edges
-    are the embedding CDF's own mass quantiles (`i / n_out`), read off the
-    piecewise-linear CDF by exact inversion (the same interpolation
-    `embedding_and_ridge` uses for the reported median, generalised to
-    `n_out - 1` interior quantiles), so every new cell carries exactly
-    `1 / n_out` of the sightline's own mass and the new density is that
-    fixed mass over the new cell's own width -- mass-preserving by
-    construction, not a re-fit."""
-    n_sl, n_cell = p_u.shape
-    widths = np.diff(xi_edges, axis=1)
-    cum = np.concatenate(
-        [np.zeros((n_sl, 1)), np.cumsum(p_u * widths, axis=1)], axis=1)
-    cum[:, -1] = 1.0
-    new_edges = np.empty((n_sl, n_out + 1))
-    new_edges[:, 0] = xi_edges[:, 0]
-    new_edges[:, -1] = xi_edges[:, -1]
-    for i in range(1, n_out):
-        t = i / n_out
-        idx = np.clip(np.sum(cum <= t, axis=1) - 1, 0, n_cell - 1)
-        cum_lo = np.take_along_axis(cum, idx[:, None], axis=1)[:, 0]
-        cum_hi = np.take_along_axis(cum, (idx + 1)[:, None], axis=1)[:, 0]
-        u_lo = np.take_along_axis(xi_edges, idx[:, None], axis=1)[:, 0]
-        u_hi = np.take_along_axis(xi_edges, (idx + 1)[:, None], axis=1)[:, 0]
-        frac = np.where(cum_hi > cum_lo,
-                        (t - cum_lo) / np.maximum(cum_hi - cum_lo, 1e-300), 0.0)
-        new_edges[:, i] = u_lo + frac * (u_hi - u_lo)
-    new_widths = np.diff(new_edges, axis=1)
-    new_p_u = np.where(new_widths > 0, (1.0 / n_out) / np.maximum(new_widths, 1e-300), 0.0)
-    return new_edges, new_p_u
-
-
 # ====================================================================
 # 5.5 -- the cloud interval and its restriction of p_u (SPEC_BMSTP_
 # DRAFT.md sec. 5.5, sec. 2 "region distance and depth"): the YSO class
@@ -667,53 +621,14 @@ def restrict_and_renormalize(p_u, u_lo, u_hi, d_lo, d_hi, d_front, d_back):
     return mass, inside_frac, removed_frac
 
 
-def _write_shape_product(path, hpx_pix_256, embed):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with h5py.File(path, "w") as f:
-        f.attrs["GRANULE"] = "sightline"
-        for name, data in (
-            ("HPX_PIX_256", hpx_pix_256),
-            ("XI_EDGES", embed["xi_edges"]),
-            ("P_XI", embed["p_u"]),
-        ):
-            build_module.write_dataset(f, name, data, *REGISTRY[(_SHAPE_STEM, name)])
-
-
-def build_shape(config, region):
-    """Writes one region's `population/yso/prior_yso_sightline` product
-    (SPEC_PRIORS.md section 6.3): the embedding shape for every occupied
-    sightline. The stored `xi_edges`/`p_u` are the embedding density
-    coarsened to `N_PROFILE_CELLS` equal-mass cells (`coarsen_profile`);
-    the reported median is still read off the full-resolution profile,
-    unaffected.
-    """
-    profile = _load_profile_arrays(config, region)
-    sl_pix = profile["hpx_pix_256"]
-    embed = embedding_and_ridge(profile)
-    coarse_edges, coarse_p_u = coarsen_profile(embed["xi_edges"], embed["p_u"], N_PROFILE_CELLS)
-    u_median = embed["u_median"]
-    embed = dict(embed, xi_edges=coarse_edges, p_u=coarse_p_u)
-
-    path = config_module.product_path(config, "population", "yso", "prior",
-                                       "sightline", region=region)
-    _write_shape_product(path, sl_pix, embed)
-    return path, u_median
-
-
 def build(config, regions=None):
-    """Writes, per region, the YSO shape product (section 6.3) -- the
-    embedding density -- over `regions` (default: all thirty), then the
-    30-row law product (`population.yso_law.build`, the owner's
+    """The 30-row law product (`population.yso_law.build`, the owner's
     2026-09-14 Dunham-census ruling, `_W83_design.md`): the young-star
     law's coefficient fitted per region on the Dunham et al. 2015
-    census, not Pokhrel et al. 2020's fixed coefficient."""
+    census, not Pokhrel et al. 2020's fixed coefficient. The shape
+    (module docstring) writes no product of its own -- every caller
+    reads it live off the profile."""
     names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
-
-    for region in names:
-        with progress.Stage("population.yso", region) as st:
-            path, u_median = build_shape(config, region)
-            st.done(path, n_sightline=np.asarray(u_median).size,
-                    median_u_median=float(np.median(u_median)))
 
     from sesnaimpute.population import yso_law
     yso_law.build(config, regions=names)
