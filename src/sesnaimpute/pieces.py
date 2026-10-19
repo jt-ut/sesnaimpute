@@ -90,3 +90,27 @@ def run(fn, pieces, n_jobs, stage=None, unit="pieces"):
         if stage is not None:
             stage.tick(i + 1, n, unit)
     return out
+
+
+def iterate(fn, pieces, n_jobs, stage=None, unit="pieces"):
+    """Generator twin of `run`: yields `fn(p)` for each `p` in `pieces`, one
+    at a time, in the same piece order, instead of collecting every result
+    into a list first -- a caller that reduces as results arrive (summing,
+    or writing into a preallocated array) never holds more than the pieces
+    still in flight, where `run`'s own `out` list holds the whole region's
+    worth of raw per-piece results at once. `n_jobs == 1` runs in this
+    process."""
+    pieces = list(pieces)
+    n = len(pieces)
+    if int(n_jobs) <= 1 or n <= 1:
+        for i, p in enumerate(pieces):
+            yield fn(p)
+            if stage is not None:
+                stage.tick(i + 1, n, unit)
+        return
+    gen = Parallel(n_jobs=int(n_jobs), return_as="generator")(
+        delayed(_call_pinned)(fn, p) for p in pieces)
+    for i, r in enumerate(gen):
+        yield r
+        if stage is not None:
+            stage.tick(i + 1, n, unit)
