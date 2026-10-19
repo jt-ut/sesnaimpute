@@ -15,6 +15,7 @@ read. Pixel admission (which pixels carry a SESNA source) is `granules.build`'s
 own job, from the curated catalogue, not this product's.
 """
 
+import functools
 import os
 
 import h5py
@@ -23,9 +24,9 @@ import numpy as np
 from astropy import units as u
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
-from joblib import Parallel, delayed
 
 from sesnaimpute import build as build_module
+from sesnaimpute import pieces as pieces_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
@@ -258,24 +259,38 @@ def _supersampled_fraction(pix256_batch, fields_by_band):
     return frac512, pix512
 
 
-def _region_coverage(fields_by_band):
+def _coverage_piece(piece, pix256, fields_by_band):
+    """One `PIX256_BATCH`-sized piece: the candidate-grain batch's own
+    `(start, stop)` bounds into `pix256`, the region-wide candidate array
+    (indices, not data, as `pieces.py` asks)."""
+    start, stop = piece
+    return _supersampled_fraction(pix256[start:stop], fields_by_band)
+
+
+def _region_coverage(fields_by_band, n_jobs, stage=None):
     """`(pix512, frac512)` for one region: the nside-512 grains any of the
-    region's field masks touch and their per-band covered fraction,
-    batched over `PIX256_BATCH` nside-256 candidate grains (`NSIDE_CANDIDATE256`)
-    at a time -- the candidate grain is only a batching unit here, not a
-    published resolution of this product."""
+    region's field masks touch and their per-band covered fraction. The
+    candidate nside-256 grains (`NSIDE_CANDIDATE256`, only a batching unit
+    here, not a published resolution) are cut into `PIX256_BATCH`-sized
+    pieces -- the same batching the astropy coordinate-transform working-
+    set bound always needed -- and run on `sesnaimpute.pieces`' shared
+    pool (owner ruling 2026-10-09: the region loop itself, in `build`
+    below, stays sequential; this is where one region's work is spread
+    over many small pieces). Each piece is independent (no partial sum to
+    reduce), so running them out of order and concatenating in piece
+    order reproduces the serial result exactly -- no float rounding at
+    all, not even the ~1e-13 COMMON.md allows for a changed reduction
+    order."""
     pix256 = _candidate_pix256(fields_by_band)
     if pix256.size == 0:
         empty = np.empty((0, len(SPITZER_BANDS)), dtype=np.float32)
         return pix256, empty
-    frac512_parts, pix512_parts = [], []
-    for start in range(0, pix256.size, PIX256_BATCH):
-        batch = pix256[start:start + PIX256_BATCH]
-        f512, p512 = _supersampled_fraction(batch, fields_by_band)
-        frac512_parts.append(f512)
-        pix512_parts.append(p512)
-    pix512 = np.concatenate(pix512_parts)
-    frac512 = np.concatenate(frac512_parts).astype(np.float32)
+    pieces = [(start, min(start + PIX256_BATCH, pix256.size))
+              for start in range(0, pix256.size, PIX256_BATCH)]
+    fn = functools.partial(_coverage_piece, pix256=pix256, fields_by_band=fields_by_band)
+    results = pieces_module.run(fn, pieces, n_jobs, stage=stage, unit="pixel batches")
+    pix512 = np.concatenate([p512 for _f512, p512 in results])
+    frac512 = np.concatenate([f512 for f512, _p512 in results]).astype(np.float32)
     return pix512, frac512
 
 
@@ -292,9 +307,9 @@ def _write(config, region, granule, pix, frac):
         build_module.write_dataset(f, "BANDS", np.array(SPITZER_BANDS, dtype="S8"), *REGISTRY[(stem, "BANDS")])
 
 
-def _build_one_region(config, region, masks_path):
+def _build_one_region(config, region, masks_path, n_jobs, stage):
     fields_by_band = _field_masks(masks_path, region)
-    pix512, frac512 = _region_coverage(fields_by_band)
+    pix512, frac512 = _region_coverage(fields_by_band, n_jobs, stage=stage)
     _write(config, region, "hpx512", pix512, frac512)
     return dict(region=region, n_hpx512=int(pix512.size),
                 mean_frac=frac512.mean(axis=0) if frac512.size else np.zeros(len(SPITZER_BANDS)))
@@ -302,7 +317,12 @@ def _build_one_region(config, region, masks_path):
 
 def build(config, regions=None):
     """Writes each region's `coverage_spitzer_hpx512` product. Regions run
-    in a joblib pool; each worker reads only its own region's field masks."""
+    one after another (owner ruling 2026-10-09: regions are sequential,
+    only the work inside one region is spread over workers); each
+    region's own candidate-grain batches run on the shared pool
+    `sesnaimpute.pieces.run` gives every stage, with the region's field
+    masks (`fields_by_band`) bound once per region as the pieces' shared,
+    read-only input."""
     masks_path = _masks_path(config)
     if not os.path.exists(masks_path):
         raise FileNotFoundError(
@@ -311,17 +331,8 @@ def build(config, regions=None):
             "data root; nothing acquires them" % masks_path)
     names = regions or [r.name for r in regions_module.REGIONS]
     with progress_module.Stage("sky.derived.coverage") as st:
-        n_regions = len(names)
-        n_done = [0]
-
-        def _one(name):
-            r = _build_one_region(config, name, masks_path)
-            n_done[0] += 1
-            st.tick(n_done[0], n_regions, "regions")
-            return r
-
-        rows = Parallel(n_jobs=config.n_jobs)(delayed(_one)(name) for name in names)
-        st.done(None, regions=n_regions,
+        rows = [_build_one_region(config, name, masks_path, config.n_jobs, st) for name in names]
+        st.done(None, regions=len(names),
                 hpx512_pixels=sum(r["n_hpx512"] for r in rows))
 
 
