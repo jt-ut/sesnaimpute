@@ -186,12 +186,58 @@ def _field_masks(masks_path, region):
     return out
 
 
+def _flatten_fields(fields_by_band):
+    """`{band: [(wcs_params, offsets, keyed_edges, start_vals, shape),
+    ...]}`: the same fields `_field_masks` returns, with each field's
+    `astropy.wcs.WCS` reduced to a tuple of plain numbers and its
+    `_RLEMask` reduced to its three underlying numpy arrays plus its
+    plain-number `shape`. `pieces.py`'s module docstring: only numpy
+    arrays bound into a piece function are memory-mapped to the
+    workers; a `_RLEMask` or `WCS` object bound directly is pickled
+    whole, with every batch -- measured on Cygnus X as 35 of this
+    stage's 38 s. This is what `_region_coverage` binds into the piece
+    function instead of `fields_by_band`; `_band_covered` rebuilds each
+    field's lightweight `_RLEMask` view and `WCS` from these arrays and
+    numbers (no copy of `offsets`/`keyed_edges`/`start_vals`)."""
+    out = {}
+    for band, fields in fields_by_band.items():
+        flat = []
+        for wcs, rle in fields:
+            wcs_params = (float(wcs.wcs.crpix[0]), float(wcs.wcs.crpix[1]),
+                          float(wcs.wcs.crval[0]), float(wcs.wcs.crval[1]),
+                          str(wcs.wcs.ctype[0]), str(wcs.wcs.ctype[1]),
+                          float(wcs.wcs.cd[0, 0]), float(wcs.wcs.cd[0, 1]),
+                          float(wcs.wcs.cd[1, 0]), float(wcs.wcs.cd[1, 1]))
+            flat.append((wcs_params, rle.offsets, rle.keyed_edges, rle.start_vals, rle.shape))
+        out[band] = flat
+    return out
+
+
+def _wcs_from_params(wcs_params):
+    """Rebuilds one field's `astropy.wcs.WCS` from the plain numbers
+    `_flatten_fields` reduced it to -- the same construction
+    `_field_masks` uses, just off a tuple instead of HDF5 attrs."""
+    crpix1, crpix2, crval1, crval2, ctype1, ctype2, cd11, cd12, cd21, cd22 = wcs_params
+    wcs = WCS(naxis=2)
+    wcs.wcs.crpix = [crpix1, crpix2]
+    wcs.wcs.cdelt = [1.0, 1.0]
+    wcs.wcs.crval = [crval1, crval2]
+    wcs.wcs.ctype = [ctype1, ctype2]
+    wcs.wcs.cd = [[cd11, cd12], [cd21, cd22]]
+    return wcs
+
+
 def _band_covered(ra_deg, dec_deg, fields):
     """Boolean, one entry per `(ra_deg, dec_deg)` sample point: True where
     the point falls on a covered pixel of any of this band's field masks
-    (nearest-pixel WCS lookup, the same test the old anchor code used)."""
+    (nearest-pixel WCS lookup, the same test the old anchor code used).
+    `fields` is `_flatten_fields`'s per-field tuples; the `WCS` and
+    `_RLEMask` view are rebuilt here, once per field per call, from the
+    arrays and numbers a piece actually receives memory-mapped."""
     covered = np.zeros(ra_deg.shape, dtype=bool)
-    for wcs, rle in fields:
+    for wcs_params, offsets, keyed_edges, start_vals, shape in fields:
+        wcs = _wcs_from_params(wcs_params)
+        rle = _RLEMask(offsets, keyed_edges, start_vals, shape)
         px, py = wcs.wcs_world2pix(ra_deg, dec_deg, 0)
         ny, nx = rle.shape
         col = np.rint(px).astype(np.int64)
@@ -287,7 +333,13 @@ def _region_coverage(fields_by_band, n_jobs, stage=None):
         return pix256, empty
     pieces = [(start, min(start + PIX256_BATCH, pix256.size))
               for start in range(0, pix256.size, PIX256_BATCH)]
-    fn = functools.partial(_coverage_piece, pix256=pix256, fields_by_band=fields_by_band)
+    # Bound into the piece function as its arrays and plain numbers
+    # (`_flatten_fields`), not as `fields_by_band`'s `WCS`/`_RLEMask`
+    # objects: only the former is memory-mapped to the workers instead
+    # of pickled whole with every batch (module docstring, measured
+    # fix: 35 of Cygnus X's 38 s).
+    fields_flat = _flatten_fields(fields_by_band)
+    fn = functools.partial(_coverage_piece, pix256=pix256, fields_by_band=fields_flat)
     results = pieces_module.run(fn, pieces, n_jobs, stage=stage, unit="pixel batches")
     pix512 = np.concatenate([p512 for _f512, p512 in results])
     frac512 = np.concatenate([f512 for f512, _p512 in results]).astype(np.float32)
