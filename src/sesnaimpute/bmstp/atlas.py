@@ -71,6 +71,7 @@ from scipy.special import ndtri
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
+from sesnaimpute import pieces
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
@@ -1770,7 +1771,6 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         # ratio (SPEC_BMSTP_DRAFT.md sec. 8).
         f0_pix = f_lim[:, IDX_I2]
         d_pahc_pix = -np.log10(f_lim[:, IDX_I4])
-        curve = pahc_curve.read(config, region)
         # `fittp.prior_reader.load`'s `GRID_YSO`/`GRID_H2S` are P3's own
         # array, in P3's own `HPX_PIX_256` row order -- NOT the cloud
         # profile's own order `sl_row_of_pix` indexes (the two sightline
@@ -1779,17 +1779,59 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         # is the pixel's row in P3's own order, the correct grain index
         # into `reader.grid_all` for YSO/H2S.
         p3_row_of_pix = loc_p3[sl_row_of_pix]
-        n_above = {}
-        for cls in CLASSES:
-            reader = prior_reader.load(config, region, cls)
-            if cls in ("STAR", "AGB", "PAHC"):
-                grain_of_pix = tile_of_pix  # P2's TILE_ID is dense 0..n_tile-1, tile id == array position
-            elif cls in ("YSO", "H2S"):
-                grain_of_pix = p3_row_of_pix
-            else:  # GAL: one survey-wide grain (`prior_reader.load`'s own convention)
-                grain_of_pix = np.zeros(n_pix, dtype=np.int64)
+        _gal_grain = np.zeros(n_pix, dtype=np.int64)
+        grain_of_pix_by_cls = {
+            "STAR": tile_of_pix, "AGB": tile_of_pix, "PAHC": tile_of_pix,  # P2's TILE_ID is dense 0..n_tile-1
+            "YSO": p3_row_of_pix, "H2S": p3_row_of_pix,
+            "GAL": _gal_grain,  # one survey-wide grain (`prior_reader.load`'s own convention)
+        }
+
+        # N_ABOVE's own per-pixel sum (F5 2026-10-09 "change A"): each
+        # pixel's result depends only on that pixel's own slice of
+        # `a_col`/`f0_pix`/`d_pahc_pix`/grain (`_above_fraction`'s own
+        # per-pixel reduction, `term.sum(axis=(1,2))`), so cutting the
+        # pixel axis into many small pieces and running them on the
+        # region's pool, instead of one class at a time in the parent,
+        # changes no number -- this was the single largest serial block
+        # of the whole build (measured ~1,870 s of 4,011 s over 30
+        # regions). STAR and PAHC alone carry the cost (F5: PAHC's own
+        # 57,603-model factor is over 98% of the element work; STAR's own
+        # 151-model factor is the same shape, far smaller): only they are
+        # cut into pieces; GAL/AGB/YSO/H2S (no template-weight factor,
+        # ~1% of the tail together) run as one call each in the parent,
+        # same as before -- more pieces than that buys nothing (measured
+        # on NGC 7129: piece dispatch overhead, not file-open or compute,
+        # dominates a class with ~1 ms/pixel of real work). `reader`/
+        # `curve` are opened once per class, not once per piece (the
+        # same NGC 7129 measurement: re-opening `prior_reader.load`'s
+        # several HDF5 files per piece cost far more than one pixel's
+        # own work) and closed over by every STAR/PAHC piece; `reader`'s
+        # own arrays are memmaps (`prior_reader.mmap_dataset`) and
+        # `curve` is one small `interp1d`, so the closure joblib pickles
+        # once per task batch carries file paths and small arrays, not a
+        # full read. `min_items=8` keeps a region's piece count from
+        # outrunning what 8 pixels of this cost is worth dispatching.
+        readers_by_cls = {cls: prior_reader.load(config, region, cls) for cls in CLASSES}
+        curve = pahc_curve.read(config, region)
+        n_above = {cls: np.empty(n_pix, dtype=np.float64) for cls in CLASSES}
+
+        def _above_piece(piece):
+            cls, start, stop = piece
             frac_above = _above_fraction(
-                config, reader, cls, grain_of_pix, a_col, f0_pix, d_pahc_pix, curve)
+                config, readers_by_cls[cls], cls, grain_of_pix_by_cls[cls][start:stop],
+                a_col[start:stop], f0_pix[start:stop], d_pahc_pix[start:stop], curve)
+            return cls, start, stop, frac_above
+
+        tail_pieces = [(cls, start, stop) for cls in ("STAR", "PAHC")
+                       for start, stop in pieces.slices(n_pix, n_jobs, min_items=8)]
+        tail_out = pieces.run(_above_piece, tail_pieces, n_jobs, stage=st, unit="N_ABOVE pieces")
+        for cls, start, stop, frac_above in tail_out:
+            n_above[cls][start:stop] = intensity[cls][start:stop] * frac_above
+
+        for cls in ("AGB", "GAL", "YSO", "H2S"):
+            frac_above = _above_fraction(
+                config, readers_by_cls[cls], cls, grain_of_pix_by_cls[cls],
+                a_col, f0_pix, d_pahc_pix, curve)
             n_above[cls] = intensity[cls] * frac_above
 
         built = CLASSES
