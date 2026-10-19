@@ -4,6 +4,13 @@ observed Gaia/2MASS histograms before fitting `W` (SPEC_PRIORS.md
 section 2.1, the "young stars in the anchors" row; IMPLEMENTATION.md
 section 6, build order stage 7).
 
+A library, not a stage of its own (brief U4, 2026-10-19): `build_region`
+is called directly by `population.anchor_weights.build`, which folds
+this module's result straight into `population.anchor_observed.
+compute_region` in memory, and by `population.figure_anchors` for its
+own report. No product is written any more -- the old `young-stars_
+anchors_hpx512_<Region>.hdf5` had exactly those two readers.
+
 Two pieces, per occupied nside-512 anchor pixel (the same pixels and
 edges `population.anchor_tiles.write_histograms` already wrote).
 
@@ -115,18 +122,12 @@ from joblib import Parallel, delayed
 from scipy.special import erf
 
 from sesnaimpute import astro_utils
-from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import constants
 from sesnaimpute import definitions
-from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
-from sesnaimpute.attrs_registry import REGISTRY
-from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import anchor_tiles
-
-_STEM = "young-stars_anchors_hpx512"
 from sesnaimpute.population import field_stars
 from sesnaimpute.population import selection
 from sesnaimpute.population import yso
@@ -709,68 +710,39 @@ def build_region(config, region):
     )
 
 
-def _write_product(config, region, result):
-    path = config_module.product_path(config, "population", "anchors", "young-stars",
-                                       "hpx512", region=region)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with h5py.File(path, "w") as f:
-        f.attrs["GRANULE"] = "hpx512"
-        for name, data in (
-            ("HPX_PIX_512", result["pixels"].astype(np.int64)),
-            ("N_G_YOUNG", result["n_g_young"].astype(np.float32)),
-            ("N_KS_YOUNG", result["n_ks_young"].astype(np.float32)),
-            ("N_YOUNG_TOTAL", result["n_young_total"].astype(np.float64)),
-        ):
-            build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
-    return path
+def report(config, region, result):
+    """Prints the diagnostic line the retired `population.young_stars`
+    stage used to print at its own `build()`: the total expected
+    young-star count, the observed 2MASS count (`Ks < 14.3`) in the
+    same pixels and their ratio, and the algebraic acceptance's
+    worst-pixel relative deviation. Called by
+    `population.anchor_weights.build` -- this stage no longer writes
+    its own product, so there is no path to report."""
+    hist_path = config_module.product_path(config, "population", "anchors",
+                                            "histograms", "hpx512", region=region)
+    with h5py.File(hist_path, "r") as f:
+        n_ks_obs = np.asarray(f["N_KS_OBS"][:], dtype=np.float64).sum(axis=1)
 
-
-def build(config, regions=None):
-    """Writes, per region (default: all thirty), `bms/anchors/young-
-    stars_anchors_hpx512__<Region>.hdf5` (module docstring). Prints,
-    per region, the total expected young-star count, the observed 2MASS
-    count (`Ks < 14.3`) in the same pixels and their ratio, and the
-    algebraic acceptance's worst-pixel relative deviation.
-    """
-    names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
-    for region in names:
-        with progress.Stage("prior.young_stars", region) as st:
-            result = build_region(config, region)
-            path = _write_product(config, region, result)
-
-            hist_path = config_module.product_path(config, "population", "anchors",
-                                                    "histograms", "hpx512", region=region)
-            if not os.path.exists(hist_path):
-                raise FileNotFoundError(
-                    "prior.young_stars: anchor histograms missing for region %r at "
-                    "%s -- run the 'prior.anchor_tiles' RUNBOOK line first" % (region, hist_path))
-            with h5py.File(hist_path, "r") as f:
-                n_ks_obs = np.asarray(f["N_KS_OBS"][:], dtype=np.float64).sum(axis=1)
-
-            total_young = float(result["n_young_total"].sum())
-            total_young_whole_column = float(result["n_young_total_whole_column"].sum())
-            total_source_mean = float(result["n_young_source_mean"].sum())
-            total_obs = float(n_ks_obs.sum())
-            ratio = total_young / total_obs if total_obs > 0 else float("nan")
-            area_over_source = (total_young / total_source_mean
-                                 if total_source_mean > 0 else float("nan"))
-            share = np.where(n_ks_obs > 0, result["n_young_total"] / n_ks_obs, 0.0)
-            i_worst = int(np.argmax(share))
-            st.done(path, n_young_total=total_young, ratio_to_2mass=ratio)
-        print(
-            "prior.young_stars: %s N_YOUNG_TOTAL=%.2f (whole-column, pre-cloud-"
-            "restriction, was %.2f, x%.4f) N_YOUNG_SOURCE_MEAN=%.2f "
-            "(area/source-mean=%.3fx) 2MASS(Ks<14.3)=%.2f ratio=%.4f "
-            "worst-pixel young/2MASS share=%.4f at A_PIX_K=%.3f "
-            "median cloud-interval-restriction removed_frac=%.4f "
-            "max_rel_dev=%.3e -> %s"
-            % (region, total_young, total_young_whole_column,
-               total_young / total_young_whole_column if total_young_whole_column > 0 else float("nan"),
-               total_source_mean, area_over_source,
-               total_obs, ratio, share[i_worst],
-               result["a_pix"][i_worst], result["removed_frac_report"],
-               result["max_rel_dev"], path))
-
-
-if __name__ == "__main__":
-    run(build)
+    total_young = float(result["n_young_total"].sum())
+    total_young_whole_column = float(result["n_young_total_whole_column"].sum())
+    total_source_mean = float(result["n_young_source_mean"].sum())
+    total_obs = float(n_ks_obs.sum())
+    ratio = total_young / total_obs if total_obs > 0 else float("nan")
+    area_over_source = (total_young / total_source_mean
+                         if total_source_mean > 0 else float("nan"))
+    share = np.where(n_ks_obs > 0, result["n_young_total"] / n_ks_obs, 0.0)
+    i_worst = int(np.argmax(share))
+    print(
+        "prior.young_stars: %s N_YOUNG_TOTAL=%.2f (whole-column, pre-cloud-"
+        "restriction, was %.2f, x%.4f) N_YOUNG_SOURCE_MEAN=%.2f "
+        "(area/source-mean=%.3fx) 2MASS(Ks<14.3)=%.2f ratio=%.4f "
+        "worst-pixel young/2MASS share=%.4f at A_PIX_K=%.3f "
+        "median cloud-interval-restriction removed_frac=%.4f "
+        "max_rel_dev=%.3e"
+        % (region, total_young, total_young_whole_column,
+           total_young / total_young_whole_column if total_young_whole_column > 0 else float("nan"),
+           total_source_mean, area_over_source,
+           total_obs, ratio, share[i_worst],
+           result["a_pix"][i_worst], result["removed_frac_report"],
+           result["max_rel_dev"]))
+    return total_young, ratio

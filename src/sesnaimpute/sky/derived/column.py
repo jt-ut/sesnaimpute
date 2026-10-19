@@ -71,7 +71,7 @@ from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.sky.derived import planck_column
 from sesnaimpute.sky.derived import profile as profile_module
-from sesnaimpute.sky.derived.planck_source_column import _load_planck_calibration
+from sesnaimpute.sky.derived.planck_source_column import _load_planck_calibration, planck_arm_all
 
 _COLUMN_SOURCE_STEM = "column_adopted_source"
 _EXTINCTION_SOURCE_STEM = "extinction_adopted_source"
@@ -231,24 +231,26 @@ def _write_field_zeropoints(config, names, zp, zp_sigma, n_field):
     return sigma_zp_survey
 
 
-def merge_region(config, region, cal, field_zp=None):
-    """Reads this region's two arms and merges them: Herschel where
-    covered, finite and positive (its own field's zero point subtracted,
-    the offset's uncertainty carried as `ZP_SIGMA_K`); else Planck.
-    Returns the merged arrays. `field_zp` is `_load_field_zeropoints`'s
-    dict, loaded once by `build()`; `merge_region(config, region, cal)`
-    still works standalone, loading it itself."""
+def merge_region(config, region, cal, field_zp=None, planck_arm=None):
+    """Merges this region's two arms: Herschel where covered, finite and
+    positive (its own field's zero point subtracted, the offset's
+    uncertainty carried as `ZP_SIGMA_K`); else Planck. Returns the merged
+    arrays. `field_zp` is `_load_field_zeropoints`'s dict, `planck_arm`
+    is `(a_col, sig_col, n)` from `planck_source_column.planck_arm_region`
+    -- both loaded once by `build()` and passed down (the Planck map
+    `planck_arm_all` reads is 1.6 GB, not reread per region);
+    `merge_region(config, region, cal)` still works standalone, loading
+    each itself (one full Planck-map read for the one region)."""
     if field_zp is None:
         field_zp = _load_field_zeropoints(config)
-    planck_path = config_module.product_path(config, "sky/derived", "planck", "column", "source", region=region)
-    if not os.path.exists(planck_path):
-        raise FileNotFoundError(
-            f"sky.derived.column.build: Planck arm missing for region {region!r} at "
-            f"{planck_path!r} -- run the Planck source-column RUNBOOK line for it"
-        )
-    with h5py.File(planck_path, "r") as f:
-        a_col = np.asarray(f["A_K"][:], dtype=np.float64)
-        sig_col = np.asarray(f["SIGMA_A_K"][:], dtype=np.float64)
+    if planck_arm is None:
+        from sesnaimpute.sky.derived.planck_source_column import planck_arm_region
+        from sesnaimpute.sky.derived.planck_source_column import _load_planck_map, _planck_map_path
+        tau353, err_tau = _load_planck_map(_planck_map_path(config))
+        planck_arm = planck_arm_region(config, region, tau353, err_tau, cal)
+    a_col_src, sig_col_src, _n_planck = planck_arm
+    a_col = np.array(a_col_src, dtype=np.float64)
+    sig_col = np.array(sig_col_src, dtype=np.float64)
 
     n = a_col.size
     fwhm = np.full(n, cal["fwhm_arcmin"] * 60.0, dtype=np.float32)
@@ -280,8 +282,8 @@ def merge_region(config, region, cal, field_zp=None):
                zp_sigma_k=zp_sigma_k, n_herschel=int(np.count_nonzero(prov == PROV_HERSCHEL)), n=n)
 
 
-def _build_one_region(config, region, cal, field_zp=None):
-    d = merge_region(config, region, cal, field_zp=field_zp)
+def _build_one_region(config, region, cal, field_zp=None, planck_arm=None):
+    d = merge_region(config, region, cal, field_zp=field_zp, planck_arm=planck_arm)
     out_path = config_module.product_path(config, "sky/derived", "adopted", "column", "source", region=region)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     name_bytes = np.array([(x if isinstance(x, bytes) else str(x).encode("utf-8")) for x in d["map_names"]])
@@ -640,12 +642,19 @@ def build(config, regions=None):
     zp_names, zp_ak, zp_sigma_ak, zp_n = _measure_field_zeropoints(config)
     _write_field_zeropoints(config, zp_names, zp_ak, zp_sigma_ak, zp_n)
     field_zp = {n: (float(z), float(s)) for n, z, s in zip(zp_names, zp_ak, zp_sigma_ak)}
+    # the Planck arm (sky.derived.planck_source_column, folded in here: its
+    # own per-source product had one reader, this merge): the 1.6 GB map is
+    # read ONCE, threaded over every region, before the per-region merge
+    # below runs in its usual process pool on the small resulting arrays
+    # (160fd31 -- a process pool would hold one map copy per worker).
+    planck_arm_by_region = planck_arm_all(config, regions, config.n_jobs, cal=cal)
     with progress_module.Stage("sky.derived.column") as st:
         n_regions = len(regions)
         n_done = [0]
 
         def _one(region):
-            r = _build_one_region(config, region, cal, field_zp=field_zp)
+            r = _build_one_region(config, region, cal, field_zp=field_zp,
+                                   planck_arm=planck_arm_by_region[region])
             n_done[0] += 1
             st.tick(n_done[0], n_regions, "regions")
             return r

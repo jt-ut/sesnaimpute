@@ -282,19 +282,21 @@ _XI_CENTERS = 10.0 ** grid._X_CENTERS
 
 def _dense_weight_by_sightline(config, region):
     """`(n_sightline, n_x)` float64, the DENSE design's own per-cell weight
-    `w_i = f_i * W_CLOUD` (section 2) at every sightline of
-    `bmstp.cloud_interval`'s own sightline product: `XI_FRONT`, `XI_BACK`,
-    `W_CLOUD` -- the sky data alone (the cloud interval and the 3-D
+    `w_i = f_i * W_CLOUD` (section 2) at every sightline of `bmstp.shapes`'
+    own P3 cloud sightline product: `XI_FRONT`, `XI_BACK`, `W_CLOUD`
+    (folded into `bmstp.shapes.build_cloud` from the retired
+    `bmstp.cloud_interval` stage, brief U4 -- its only reader was this
+    function) -- the sky data alone (the cloud interval and the 3-D
     profile), never the prior. A source reaches its own row through P1's
     `SIGHTLINE_ROW` (`Prior.w_dense_row`), the same row index `bmstp.shapes`
     itself uses for this class's grain when `cls` is a cloud class, and the
     join every OTHER class reads too (the law is the sightline's for every
     class, section 2)."""
-    path = config_module.product_path(config, "bmstp", "shape", "cloud_interval", "sightline", region=region)
+    path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
     if not os.path.exists(path):
         raise RuntimeError(
             "fittp.prior_reader.load [%s]: missing %s -- run RUNBOOKtp.sh's "
-            "'PY sesnaimpute.bmstp.cloud_interval' line first" % (region, path))
+            "'PY sesnaimpute.bmstp.shapes' line first" % (region, path))
     with h5py.File(path, "r") as f:
         # memory-mapped, native float32 on disk; the arithmetic below mixes
         # each with `_XI_CENTERS` (float64), which promotes it to float64

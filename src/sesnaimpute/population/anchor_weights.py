@@ -1,9 +1,20 @@
 """The STAR per-tile-and-bin anchor weight `W` (SPEC_PRIORS.md section
 2.1, table rows "W", "cluster exclusion", "faint end"; reading note
 04_star_family.md section B, `fit_tile_weights`, `shrink_log_normal`,
-`cluster_excluded_tiles`), from the tile geometry, the predicted anchor
-histograms, and the young-star-subtracted observed anchor histograms
-`population.anchor_tiles` and `population.anchor_observed` already wrote.
+`cluster_excluded_tiles`), from the tile geometry and the predicted
+anchor histograms `population.anchor_tiles` already wrote, and the
+young-star-subtracted observed anchor histogram this stage now computes
+itself (brief U4, 2026-10-19): the star-anchor chain `population.
+young_stars` -> `population.anchor_observed` -> `population.
+anchor_weights` is now ONE stage. `region_tile_counts` calls `population.
+young_stars.build_region` (the model's own young-star expectation) and
+`population.anchor_observed.compute_region` (the young-star-and-cluster
+subtraction) directly, in memory, per region; neither writes a product
+of its own any more, and the Hunt & Reffert 2023 member table (1.29 M
+rows) is read ONCE, for the union of every requested region's own
+candidate clusters, by this module's `build` (it was 11-12 s per
+region, every region, under the retired `population.anchor_observed`
+stage).
 
     W(t, bin) = N_obs(t, bin) / N_pred(t, bin)
 
@@ -622,29 +633,44 @@ def ks_served_mask(ks_source):
 # owner ruling 2026-09-06, item 1: the survey-pooled fallback weight
 # ---------------------------------------------------------------------------
 
-def region_tile_counts(config, region, clusters, min_counts=MIN_COUNTS):
+def region_tile_counts(config, region, clusters, members_all, min_counts=MIN_COUNTS, cache=None):
     """One region's tile-level predicted/observed counts and exclusion
     mask, with no weight fit performed -- the read-and-aggregate half of
     `build_region`, split out so `survey_pooled_weights` (the once-over-
     all-thirty-regions pass, item 1) and the per-region fit share the
     same counts rather than reading the on-disk products twice with two
-    slightly different code paths."""
+    slightly different code paths.
+
+    The young-star expectation and the observed-anchor subtraction
+    (brief U4: the retired `population.young_stars` and
+    `population.anchor_observed` stages) are computed HERE, in memory,
+    from the one histograms read below -- no `young-stars_anchors_
+    hpx512` or `observed_anchors_hpx512` file is read or written any
+    more. `cache` (set by `build`, a plain `{region: (young, obs)}`
+    dict shared across this call and `survey_pooled_weights`' own pass
+    over all thirty regions) makes sure each region's young-star
+    quadrature and cluster-member subtraction run exactly ONCE per
+    `build()` call, however many times `region_tile_counts` itself is
+    invoked for that region."""
+    from sesnaimpute.population import anchor_observed, young_stars
+
     tiles = _read_tiles(config, region)
     hist = _read_histograms(config, region)
-    obs = _read_observed(config, region)
 
-    if not (np.array_equal(tiles["pixels"], hist["pixels"])
-            and np.array_equal(tiles["pixels"], obs["pixels"])):
+    if not np.array_equal(tiles["pixels"], hist["pixels"]):
         raise ValueError(
-            f"prior.anchor_weights: {region!r}'s tiles/histograms/observed products "
-            "disagree on their own pixel set -- rerun `prior.anchor_tiles` and "
-            "`prior.anchor_observed` for this region")
-    if not (np.array_equal(hist["g_edges"], obs["g_edges"])
-            and np.array_equal(hist["ks_edges"], obs["ks_edges"])):
-        raise ValueError(
-            f"prior.anchor_weights: {region!r}'s histograms/observed products carry "
-            "different G_EDGES/KS_EDGES -- rerun `prior.anchor_tiles` and "
-            "`prior.anchor_observed` for this region")
+            f"prior.anchor_weights: {region!r}'s tiles/histograms products "
+            "disagree on their own pixel set -- rerun `prior.anchor_tiles` for this region")
+
+    if cache is not None and region in cache:
+        young, obs = cache[region]
+    else:
+        young = young_stars.build_region(config, region)
+        obs = anchor_observed.compute_region(config, region, hist, young, tiles, clusters, members_all)
+        young_stars.report(config, region, young)
+        anchor_observed.report(region, obs)
+        if cache is not None:
+            cache[region] = (young, obs)
 
     n_tile = tiles["tile_l_deg"].size
     tile_of_pix = tiles["tile_of_pix"]
@@ -745,7 +771,7 @@ def _pool_bins_by_edge(lower_list, upper_list, value_lists):
     return lower_out, upper_out, n_regions, sums
 
 
-def survey_pooled_weights(config, region_names, clusters, min_counts=MIN_COUNTS):
+def survey_pooled_weights(config, region_names, clusters, members_all, min_counts=MIN_COUNTS, cache=None):
     """The SURVEY-POOLED weight per magnitude bin, on the `G` and `Ks`
     marginals (owner ruling 2026-09-06, item 1): sum the observed and
     the predicted counts over EVERY region's own populated tiles (not
@@ -779,7 +805,7 @@ def survey_pooled_weights(config, region_names, clusters, min_counts=MIN_COUNTS)
     deep_slopes, deep_slope_regions = [], []
     for region in region_names:
         try:
-            rc = region_tile_counts(config, region, clusters, min_counts)
+            rc = region_tile_counts(config, region, clusters, members_all, min_counts, cache=cache)
         except (FileNotFoundError, KeyError) as exc:
             # flag, do not block: a region whose upstream anchor products
             # are missing or stale (an older schema without N_GK_PRED,
@@ -1005,6 +1031,12 @@ def _read_tiles(config, region):
 
 
 def _read_histograms(config, region):
+    """The one read of `population.anchor_tiles`' histograms product: the
+    predicted-side fields `region_tile_counts` fits against, and the
+    observed-side marginals (`N_G_OBS`/`N_KS_OBS`) the young-star and
+    cluster-member subtraction below needs -- one open serving both,
+    where the retired `population.anchor_observed` stage used to open
+    the same file a second time (brief U4)."""
     path = config_module.product_path(config, "population", "anchors", "histograms", "hpx512", region=region)
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -1019,23 +1051,8 @@ def _read_histograms(config, region):
             n_g_pred=np.asarray(f["N_G_PRED"][:], dtype=np.float64),
             n_ks_pred=np.asarray(f["N_KS_PRED"][:], dtype=np.float64),
             n_gk_pred=np.asarray(f["N_GK_PRED"][:], dtype=np.float64),
-        )
-
-
-def _read_observed(config, region):
-    path = config_module.product_path(config, "population", "anchors", "observed", "hpx512", region=region)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"prior.anchor_weights: observed anchors missing for region {region!r} at "
-            f"{path} -- run `sesnaimpute.population.anchor_observed` first")
-    with h5py.File(path, "r") as f:
-        return dict(
-            pixels=np.asarray(f["HPX_PIX_512"][:], dtype=np.int64),
-            g_edges=np.asarray(f["G_EDGES"][:], dtype=np.float64),
-            ks_edges=np.asarray(f["KS_EDGES"][:], dtype=np.float64),
-            n_g_sub=np.asarray(f["N_G_SUB"][:], dtype=np.float64),
-            n_ks_sub=np.asarray(f["N_KS_SUB"][:], dtype=np.float64),
-            n_gk_sub=np.asarray(f["N_GK_SUB"][:], dtype=np.float64),
+            n_g_obs=np.asarray(f["N_G_OBS"][:], dtype=np.float64),
+            n_ks_obs=np.asarray(f["N_KS_OBS"][:], dtype=np.float64),
         )
 
 
@@ -1078,9 +1095,9 @@ def check_gaia_vs_2mass(n_obs_g, n_pred_g, n_obs_ks, n_pred_ks):
 # per-region build
 # ---------------------------------------------------------------------------
 
-def build_region(config, region, clusters, w_pool_g, w_pool_ks, ks_pool_lower, ks_pool_upper,
-                  transported_ks_slope):
-    rc = region_tile_counts(config, region, clusters)
+def build_region(config, region, clusters, members_all, w_pool_g, w_pool_ks, ks_pool_lower, ks_pool_upper,
+                  transported_ks_slope, cache=None):
+    rc = region_tile_counts(config, region, clusters, members_all, cache=cache)
     tiles, hist = rc["tiles"], rc["hist"]
     n_tile = rc["n_tile"]
     n_g, n_ks = hist["g_edges"].size - 1, hist["ks_edges"].size - 1
@@ -1236,6 +1253,8 @@ def build(config, regions=None):
     and 2MASS weights, the tile-weight range, the faint-end slopes, and
     the two section 2.3 checks.
     """
+    from sesnaimpute.population import anchor_observed
+
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     clusters = _read_hunt_reffert_clusters(config)
 
@@ -1243,8 +1262,34 @@ def build(config, regions=None):
     # before any per-region fit -- every region (even one being rebuilt
     # alone) needs the same pooled fallback, not a pool of itself.
     all_region_names = [r.name for r in regions_module.REGIONS]
+
+    # brief U4: the Hunt & Reffert 2023 member table (1.29 M rows) is
+    # read ONCE here, for the UNION of every one-of-thirty region's own
+    # candidate clusters (the survey pool pass below always touches all
+    # thirty regardless of `regions`), rather than once per region as
+    # the retired `population.anchor_observed` stage did (11-12 s each,
+    # every region, tiny or huge).
+    all_touching_names = set()
+    for region in all_region_names:
+        tiles_r = _read_tiles(config, region)
+        touching_r = anchor_observed._clusters_touching_region(
+            tiles_r["tile_l_deg"], tiles_r["tile_b_deg"], tiles_r["l_star_deg"], clusters)
+        all_touching_names.update(clusters["name"][touching_r].tolist())
+    members_all = anchor_observed._read_cluster_members(config, sorted(all_touching_names))
+    print("prior.anchor_weights: Hunt & Reffert member table read once for %d candidate "
+          "cluster(s) (survey-wide union) -> %d member rows"
+          % (len(all_touching_names), members_all["glon"].size))
+
+    # young_stars.build_region/anchor_observed.compute_region run at
+    # most once per region per `build()` call: the survey pool pass
+    # below and the per-region fit pass further down both call
+    # `region_tile_counts` for every requested region, and this cache
+    # makes the second call a lookup, not a second computation.
+    cache = {}
+
     (w_pool_g, w_pool_ks, pool_g_edges, ks_pool_lower, ks_pool_upper, pool_skipped, n_pool_ks,
-     transported_ks_slope, deep_slope_regions) = survey_pooled_weights(config, all_region_names, clusters)
+     transported_ks_slope, deep_slope_regions) = survey_pooled_weights(
+        config, all_region_names, clusters, members_all, cache=cache)
     print(
         "prior.anchor_weights: survey pool over %d regions (skipped %s): "
         "W_POOL_G=[%.3f,%.3f] W_POOL_KS=[%.3f,%.3f] "
@@ -1264,8 +1309,8 @@ def build(config, regions=None):
 
     for region in region_names:
         with progress.Stage("prior.anchor_weights", region) as st:
-            result = build_region(config, region, clusters, w_pool_g, w_pool_ks,
-                                   ks_pool_lower, ks_pool_upper, transported_ks_slope)
+            result = build_region(config, region, clusters, members_all, w_pool_g, w_pool_ks,
+                                   ks_pool_lower, ks_pool_upper, transported_ks_slope, cache=cache)
             path = _write_product(config, region, result)
             st.done(path, n_tile=result["n_tile"], max_identity_dev=result["max_identity_dev"])
 
