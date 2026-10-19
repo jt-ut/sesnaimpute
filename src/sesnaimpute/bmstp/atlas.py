@@ -435,18 +435,42 @@ def catalogued_probability(a_col, u, flux0, f_lim, width_dex, config):
          / (likelihood_module._SQRT2 * width_dex[:, None, :]))
     p = np.where(has_flux, 1.0 - np.exp(likelihood_module._ln_one_minus_c(z)), 0.0)
     one_minus_p = 1.0 - p  # (n_pix, n_mem, 8)
-    prod_all = np.prod(one_minus_p, axis=2)
+    # the leave-one-out products (F4 2026-10-09 "change A", the single
+    # largest kernel cost: 9 `np.delete` copies of this whole (n_pix,
+    # n_mem, 7) array plus 9 strided `np.prod` reductions). `prefix[k]`
+    # is the LEFT FOLD of bands `0..k-1` on the band-major views
+    # `one_minus_p[:, :, k]` (no copy): `prefix[N_BANDS]` is therefore
+    # the same left-to-right fold of all 8 bands `np.prod(one_minus_p,
+    # axis=2)` performs along its own short contiguous last axis, and
+    # leaving band `i` out continues that SAME fold from `prefix[i]`
+    # through bands `i+1..N_BANDS-1` one band at a time -- the exact
+    # continuation of the one left fold `np.prod(np.delete(...))` used
+    # to perform on the remaining 7 bands in their original order,
+    # never a separately-folded suffix (a suffix product folds
+    # right-to-left, a different association that can move the last
+    # bit, F4 risk 1/3).
+    prefix = [np.ones(one_minus_p.shape[:2], dtype=one_minus_p.dtype)]
+    for k in range(N_BANDS):
+        prefix.append(prefix[-1] * one_minus_p[:, :, k])
+    prod_all = prefix[N_BANDS]
+    loo = []
+    for i in range(N_BANDS):
+        term = prefix[i]
+        for k in range(i + 1, N_BANDS):
+            term = term * one_minus_p[:, :, k]
+        loo.append(term)
     sum_term = np.zeros_like(prod_all)
     for i in range(N_BANDS):
-        sum_term += p[:, :, i] * np.prod(np.delete(one_minus_p, i, axis=2), axis=2)
+        sum_term += p[:, :, i] * loo[i]
     p_cat = 1.0 - prod_all - sum_term
 
     # the bright-end check (sec. 9): a member counts as bright only if it
     # would be CATALOGUED WITH I2 ITSELF MEASURED (its own I2 cleared,
     # `p[:,:,IDX_I2]`, AND at least one of the other seven also clears,
     # `1 - prod_{i!=I2}(1-p_i)`); flux_i2 lets the caller apply the 3x/10x
-    # test against this pixel's own I2 50% limit.
-    prob_other_detect = 1.0 - np.prod(np.delete(one_minus_p, IDX_I2, axis=2), axis=2)
+    # test against this pixel's own I2 50% limit. `loo[IDX_I2]` is
+    # already exactly that leave-I2-out product, computed once above.
+    prob_other_detect = 1.0 - loo[IDX_I2]
     p_cat_i2 = p[:, :, IDX_I2] * prob_other_detect
     flux_i2 = flux[:, :, IDX_I2]  # (n_pix, n_mem)
     return p_cat, p_cat_i2, flux_i2
