@@ -113,18 +113,19 @@ sum to the IMF's exact in-range fraction and the embedding density's own
 ridge`), so nothing but the three named pieces can carry the total.
 """
 
+import functools
 import os
 import re
 
 import h5py
 import numpy as np
-from joblib import Parallel, delayed
 from scipy.special import erf
 
 from sesnaimpute import astro_utils
 from sesnaimpute import config as config_module
 from sesnaimpute import constants
 from sesnaimpute import definitions
+from sesnaimpute import pieces as pieces_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.granules import access
 from sesnaimpute.population import anchor_tiles
@@ -585,15 +586,25 @@ def _weighted_hist(values, weights, edges):
     return counts, faint_overflow, bright_overflow
 
 
-def _pixel_block(config, a_pix_blk, xi_edges_blk, mass_blk, n_young_blk,
+def _pixel_block(piece, a_pix, xi_edges, mass, n_young_total,
                   mass_grid, mass_weight, ks_abs_1myr, g_abs_1myr,
                   mu, g_edges, ks_edges, k_g_diffuse, k_g_dense, r_diffuse, r_dense):
-    """One block's `(N_G_YOUNG, N_KS_YOUNG)` and the 1 Myr Ks acceptance
-    pieces, vectorised over every mass and every `u`-cell of every pixel
-    in the block at once. `k_g_diffuse`/`k_g_dense` are `(n_mass,)`,
-    each mass point's own register-template coefficient
-    (`_young_star_kg_by_mass`).
+    """One piece's own contiguous block of pixel indices (owner ruling
+    2026-10-09: within a region, many small pieces on one pool, never a
+    stage's own `joblib.Parallel` -- the region-wide pixel arrays
+    `a_pix`/`xi_edges`/`mass`/`n_young_total` are bound by
+    `build_region`'s own `functools.partial`, pickled once per batch of
+    tasks by `pieces.run`'s shared loky pool, not once per piece): the
+    `(N_G_YOUNG, N_KS_YOUNG)` and the 1 Myr Ks acceptance pieces,
+    vectorised over every mass and every `u`-cell of every pixel in the
+    block at once. `k_g_diffuse`/`k_g_dense` are `(n_mass,)`, each mass
+    point's own register-template coefficient (`_young_star_kg_by_mass`).
     """
+    lo, hi = piece
+    a_pix_blk = a_pix[lo:hi]
+    xi_edges_blk = xi_edges[lo:hi]
+    mass_blk = mass[lo:hi]
+    n_young_blk = n_young_total[lo:hi]
     u_mid = 0.5 * (xi_edges_blk[:, :-1] + xi_edges_blk[:, 1:])      # (n_blk, n_u)
     u_mass = mass_blk                                             # sums to 1 per row (cloud-restricted)
 
@@ -671,14 +682,19 @@ def build_region(config, region):
     r_dense = float(selection.ak_per_av(config, 1.0))
 
     n_pix = pixels.size
-    starts = list(range(0, n_pix, PIXEL_BLOCK))
-    blocks = Parallel(n_jobs=config.n_jobs)(
-        delayed(_pixel_block)(
-            config, a_pix[s:s + PIXEL_BLOCK], xi_edges[s:s + PIXEL_BLOCK],
-            mass[s:s + PIXEL_BLOCK], n_young_total[s:s + PIXEL_BLOCK],
-            mass_grid, mass_weight, ks_abs_1myr, g_abs_1myr,
-            mu, g_edges, ks_edges, k_g_diffuse, k_g_dense, r_diffuse, r_dense)
-        for s in starts)
+    # owner ruling 2026-10-09: the one shared pool, never a stage's own
+    # `joblib.Parallel` -- `PIXEL_BLOCK`-sized pieces (module docstring's
+    # own memory bound, rule 8/9: one block's `(n_pix, n_mass, n_u)`
+    # array, not a whole region's) run through `pieces.run`'s pinned
+    # worker pool, region-wide pixel arrays bound once by this
+    # `functools.partial`, not re-pickled per piece.
+    pixel_pieces = [(s, min(s + PIXEL_BLOCK, n_pix)) for s in range(0, n_pix, PIXEL_BLOCK)]
+    fn = functools.partial(
+        _pixel_block, a_pix=a_pix, xi_edges=xi_edges, mass=mass, n_young_total=n_young_total,
+        mass_grid=mass_grid, mass_weight=mass_weight, ks_abs_1myr=ks_abs_1myr, g_abs_1myr=g_abs_1myr,
+        mu=mu, g_edges=g_edges, ks_edges=ks_edges, k_g_diffuse=k_g_diffuse, k_g_dense=k_g_dense,
+        r_diffuse=r_diffuse, r_dense=r_dense)
+    blocks = pieces_module.run(fn, pixel_pieces, config.n_jobs)
 
     n_g_young = np.concatenate([b[0] for b in blocks], axis=0) if blocks else \
         np.empty((0, g_edges.size - 1))
