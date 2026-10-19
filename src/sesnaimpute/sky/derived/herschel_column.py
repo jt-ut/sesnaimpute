@@ -29,6 +29,7 @@ measured systematic left unapplied is an error of its own size (owner,
 2026-09-06).
 """
 
+import functools
 import os
 import re
 import time
@@ -39,11 +40,11 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS
-from joblib import Parallel, delayed
 from scipy.ndimage import binary_erosion
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
+from sesnaimpute import pieces as pieces_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
@@ -302,38 +303,45 @@ def _region_sources(config, region):
         dec = np.asarray(f["DEC_DEG"][:], dtype=np.float64)
     return ra, dec
 
-def _sample_map_job(map_entry, region_sources):
-    """One HGBS map, one joblib worker: nearest-pixel N(H2) at every
-    source of every requested region the map reaches -- this sampling is
-    what decides which regions the map serves. `region_sources` is
-    {region: (ra_deg, dec_deg)}, bbox-screened per region first."""
-    data, wcs, _px = _open_hgbs_map(map_entry["path"])
-    ny, nx = data.shape
-    box = _bbox_of(wcs, data.shape)
-
-    out = {}
-    for region, (ra, dec) in region_sources.items():
-        if ra.size == 0:
+def _sample_region_block(map_entries, ra, dec, bounds):
+    """One region, one source block (owner ruling 2026-10-09: pieces over
+    source blocks, far more pieces than workers): the nearest-pixel N(H2)
+    lookup, converted to A_K, against every candidate map overlapping this
+    region, in size-descending order, first match wins. `map_entries` is
+    `[(candidate_index, data, wcs, bbox), ...]` for this region, bound into
+    this function once (joblib memory-maps the large map arrays to the
+    worker); `ra`/`dec` are the region's full coordinate arrays, also
+    region-wide read-only inputs; `bounds` is the piece's own `(start,
+    stop)` source-index range. Returns `(start, stop, a_k, candidate_id)`,
+    `candidate_id` -1 where no map covers the source."""
+    start, stop = bounds
+    sub_ra = ra[start:stop]
+    sub_dec = dec[start:stop]
+    nloc = stop - start
+    a_k = np.full(nloc, np.nan, dtype=np.float64)
+    cand_id = np.full(nloc, -1, dtype=np.int64)
+    for ci, data, wcs, box in map_entries:
+        fill = cand_id < 0
+        if not fill.any():
+            break
+        loc = np.where(fill & (sub_dec >= box[2] - 0.05) & (sub_dec <= box[3] + 0.05))[0]
+        if loc.size == 0:
             continue
-        rbox = (float(ra.min()), float(ra.max()), float(dec.min()), float(dec.max()))
-        if not _boxes_overlap(box, rbox, pad=0.05):
-            continue
-        cand = np.where((dec >= box[2] - 0.05) & (dec <= box[3] + 0.05))[0]
-        if cand.size == 0:
-            continue
-        x, y = wcs.world_to_pixel(SkyCoord(ra[cand] * u.deg, dec[cand] * u.deg, frame="icrs"))
+        x, y = wcs.world_to_pixel(SkyCoord(sub_ra[loc] * u.deg, sub_dec[loc] * u.deg, frame="icrs"))
         xi = np.rint(x).astype(np.int64)
         yi = np.rint(y).astype(np.int64)
+        ny, nx = data.shape
         inside = (xi >= 0) & (xi < nx) & (yi >= 0) & (yi < ny)
         if not inside.any():
             continue
-        cand, xi, yi = cand[inside], xi[inside], yi[inside]
-        vals = data[yi, xi]
+        loc2 = loc[inside]
+        vals = data[yi[inside], xi[inside]]
         on = np.isfinite(vals) & (vals > 0)
         if on.any():
-            out[region] = (cand[on], vals[on].astype(np.float64))
-    del data
-    return map_entry["name"], out
+            sel = loc2[on]
+            a_k[sel] = vals[on].astype(np.float64) * NH2_TO_AK
+            cand_id[sel] = ci
+    return start, stop, a_k, cand_id
 
 def _write_region(config, region, a_k, sig_a_k, sig_rand, sig_zp, covered, map_id, map_names):
     """One region's `column`/`source` product, catalogue-row order --
@@ -367,8 +375,9 @@ def build(config, regions=None):
                      for i in range(len(maps)) for j in range(i + 1, len(maps))
                      if _boxes_overlap(maps[i]["bbox"], maps[j]["bbox"])]
         t_sig0 = time.time()
-        pair_results = Parallel(n_jobs=min(config.n_jobs, PAIR_JOBS_MAX_CONCURRENT))(
-            delayed(_pair_native)(*p) for p in pair_jobs)
+        pair_results = pieces_module.run(
+            lambda p: _pair_native(*p), pair_jobs,
+            min(config.n_jobs, PAIR_JOBS_MAX_CONCURRENT))
         sig = _sig_model(pair_results)
         sigma_wall_s = time.time() - t_sig0
         _write_sigma_survey(config, maps, header_by_name, sig)
@@ -383,36 +392,54 @@ def build(config, regions=None):
                 ra.size and _boxes_overlap(
                     m["bbox"], (float(ra.min()), float(ra.max()), float(dec.min()), float(dec.max())), pad=0.05)
                 for ra, dec in region_ra_dec.values())])
-        sample_results = Parallel(n_jobs=config.n_jobs)(
-            delayed(_sample_map_job)(m, region_ra_dec) for m in candidate_maps)
-        per_map = dict(sample_results)
 
+        # Regions run one after another (owner ruling 2026-10-09); inside a
+        # region the source axis -- the piece whose cost scales with the
+        # region (Cygnus X's catalogue is 1000x NGC 7129's) -- is cut into
+        # pieces and run through the one shared pool. Each candidate map is
+        # opened once per region, in this parent process, and bound into the
+        # piece function as a region-wide read-only input (joblib memory-maps
+        # it to the workers); a piece carries only its source-index bounds.
         written = []
         n_regions = len(regions)
         for i, region in enumerate(regions):
             ra, dec = region_ra_dec[region]
             n = ra.size
-            serving = [m for m in candidate_maps if region in per_map.get(m["name"], {})]
             a_k = np.full(n, np.nan, dtype=np.float64)
             map_id = np.full(n, -1, dtype=np.int32)
-            for mi, m in enumerate(serving):
-                idx, nh2 = per_map[m["name"]][region]
-                fill_mask = map_id[idx] < 0
-                if not fill_mask.any():
-                    continue
-                sel = idx[fill_mask]
-                a_k[sel] = nh2[fill_mask] * NH2_TO_AK
-                map_id[sel] = mi
+            serving_names = []
+            if n:
+                rbox = (float(ra.min()), float(ra.max()), float(dec.min()), float(dec.max()))
+                region_map_idx = [ci for ci, m in enumerate(candidate_maps)
+                                   if _boxes_overlap(m["bbox"], rbox, pad=0.05)]
+                map_entries = []
+                for ci in region_map_idx:
+                    data, wcs, _px = _open_hgbs_map(candidate_maps[ci]["path"])
+                    map_entries.append((ci, data, wcs, candidate_maps[ci]["bbox"]))
+                fn = functools.partial(_sample_region_block, map_entries)
+                blocks = pieces_module.run(fn, pieces_module.slices(n, config.n_jobs), config.n_jobs)
+                cand_id = np.full(n, -1, dtype=np.int64)
+                for start, stop, a_k_blk, cand_id_blk in blocks:
+                    a_k[start:stop] = a_k_blk
+                    cand_id[start:stop] = cand_id_blk
+                # Compact to the maps actually used (size-descending, first
+                # match wins -- identical to the per-source candidate order
+                # above), so MAP_ID indexes only the serving maps, same as
+                # before the within-region piece split.
+                used = sorted(set(int(c) for c in cand_id[cand_id >= 0]))
+                for k, c in enumerate(used):
+                    map_id[cand_id == c] = k
+                serving_names = [candidate_maps[c]["name"] for c in used]
             covered = map_id >= 0
             sig_rand = np.where(covered, np.sqrt(sig["rand_c0"] ** 2 + (sig["rand_c1"] * a_k) ** 2), np.nan)
             sig_zp = np.where(covered, sig["sig_zp_ak"], np.nan)
             sig_a_k = np.sqrt(sig_rand ** 2 + sig_zp ** 2)
             _write_region(config, region, a_k, sig_a_k, sig_rand, sig_zp, covered, map_id,
-                           [m["name"] for m in serving])
+                           serving_names)
             frac = float(covered.mean()) if n else float("nan")
             med = float(np.median(a_k[covered])) if covered.any() else float("nan")
             print("herschel_column REGION %-16s n=%6d covered=%.3f median_A_K=%.3f maps=%d"
-                  % (region, n, frac, med, len(serving)), flush=True)
+                  % (region, n, frac, med, len(serving_names)), flush=True)
             written.append(region)
             st.tick(i + 1, n_regions, "regions")
         sample_wall_s = time.time() - t_sample0
