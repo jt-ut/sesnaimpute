@@ -199,30 +199,35 @@ def _depth_grid(config, region):
 
 
 def _coverage(config, region, pix):
-    """The catalogue's own IRAC footprint at each admitted pixel (sec.
-    3.3's "coverage", sec. 8's catalogue definition): `catalog.coverage`'s
-    `FRAC`, the fraction of the pixel's 16 nside-2048 children holding a
-    catalogued source with a measured IRAC flux -- replaces
-    `sky.derived.coverage`'s Spitzer field-mask union, whose native masks
-    are missing mosaics outright for Pipe and Auriga-California
-    (`studies/count_discrepancy.md`, cause 1). `catalog.coverage` writes
-    one row per admitted pixel, the same axis as `pix` (`catalog.
-    depth_grid`'s own), so this is a direct read, not a join."""
-    path = config_module.product_path(config, "catalog", "sesna", "coverage", "hpx512", region=region)
+    """The catalogue's own surveyed fraction at each admitted pixel (sec.
+    3.3's "coverage", sec. 8's catalogue definition): `sky/derived/
+    spitzer/coverage_spitzer_hpx512`'s own per-band `FRAC` (I1 I2 I3 I4
+    M1, that product's own column order), the fraction of the pixel on a
+    covered mosaic pixel. The four IRAC bands' `max` is taken as the
+    any-IRAC union fraction -- a LOWER BOUND on the true union (the
+    product stores only each band's own fraction, not the union mask
+    itself), exact where the four IRAC footprints coincide, which is
+    nearly everywhere since 3.6/5.8 um share one camera array and 4.5/8.0
+    um the other. The Spitzer product covers a superset of the admitted
+    pixels (every pixel a mosaic touches), so a pixel absent from it
+    (never touched by a mosaic) reads FRAC = 0; joins are by HPX_PIX, not
+    by row."""
+    path = config_module.product_path(config, "sky/derived", "spitzer", "coverage", "hpx512", region=region)
     if not os.path.exists(path):
         raise FileNotFoundError(
-            "bmstp.atlas: no catalogue coverage for %s at %s -- run the "
-            "'catalog.coverage' RUNBOOKtp.sh line first" % (region, path))
+            "bmstp.atlas: no Spitzer mosaic coverage for %s at %s -- run the "
+            "'sesnaimpute.sky.derived.coverage' RUNBOOKtp.sh line first" % (region, path))
     with h5py.File(path, "r") as f:
         cov_pix = np.asarray(f["HPX_PIX"][:], dtype=np.int64)
         frac = np.asarray(f["FRAC"][:], dtype=np.float64)
+    union = frac[:, :4].max(axis=1) if frac.size else np.empty(0, dtype=np.float64)
     order = np.argsort(cov_pix)
     loc = np.searchsorted(cov_pix[order], pix)
     loc = np.minimum(loc, cov_pix.size - 1)
     hit = order[loc]
-    found = cov_pix[hit] == pix
+    found = cov_pix[hit] == pix if cov_pix.size else np.zeros(pix.size, dtype=bool)
     out = np.zeros(pix.size, dtype=np.float64)
-    out[found] = frac[hit[found]]
+    out[found] = union[hit[found]]
     return out
 
 

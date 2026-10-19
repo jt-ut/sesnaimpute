@@ -15,12 +15,13 @@ the one whose own 4.5 um (`I2`) limit is the region's median -- a single,
 reproducible pixel, not an average over pixels, so its eight bands' limits
 and widths are a real, self-consistent set a reader could look up.
 
-`catalog.coverage` writes `FRAC`, the fraction of each admitted pixel's
-16 nside-2048 children carrying a catalogued IRAC detection (sec. 8's "the
-fraction of each sky pixel the IRAC catalog covers"); drawn on the same
-tangent-plane footprint and Gaussian reprojection every atlas page uses
-(`atlas.render._footprint_geometry`/`_reproject`), so this page's map lines
-up with the rest of the deck's sky figures pixel for pixel.
+`sky.derived.coverage` writes `FRAC`, each Spitzer band's own fraction of
+the pixel on a covered mosaic pixel; the any-IRAC union taken here (the
+four IRAC bands' `max`, sec. 8's "the fraction of each sky pixel the IRAC
+catalog covers") is drawn on the same tangent-plane footprint and Gaussian
+reprojection every atlas page uses (`atlas.render._footprint_geometry`/
+`_reproject`), so this page's map lines up with the rest of the deck's sky
+figures pixel for pixel.
 """
 
 import argparse
@@ -52,6 +53,11 @@ _STATEMENT_FONTSIZE = 9
 
 _SQRT2 = float(np.sqrt(2.0))
 
+#: One nside-512 HEALPix pixel's solid angle, deg^2 (41252.96 deg^2 of
+#: full sky over 12 * nside^2 equal-area pixels), the area the covered-
+#: area print multiplies the admitted footprint's own union fraction by.
+_HPX512_PIXEL_DEG2 = 41252.96 / (12 * 512 ** 2)
+
 #: The eight bands, `definitions.BANDS`' own fixed order (J, H, Ks, I1-I4,
 #: M1), each with the plain wavelength word this page's direct labels use.
 _BAND_LABELS = ("J", "H", "Ks", "3.6", "4.5", "5.8", "8.0", "24")
@@ -74,19 +80,26 @@ def _completeness(log10_f, log10_f50, w_dex):
 
 
 def _read_coverage(config, region):
-    """`catalog.coverage`'s own admitted-pixel `HPX_PIX`/`FRAC`, plus the
-    root attribute `AREA_DEG2` this page prints (module docstring)."""
-    path = config_module.product_path(config, "catalog", "sesna", "coverage", "hpx512", region=region)
+    """`sky/derived/spitzer/coverage_spitzer_hpx512`'s own `HPX_PIX` and
+    per-band `FRAC` (I1 I2 I3 I4 M1, that product's own column order),
+    reduced to the any-IRAC union fraction -- the four IRAC bands' `max`,
+    a LOWER BOUND on the true union (the product stores only each band's
+    own fraction, not the union mask itself), exact where the four IRAC
+    footprints coincide, which is nearly everywhere since 3.6/5.8 um
+    share one camera array and 4.5/8.0 um the other. The product carries
+    no `AREA_DEG2` attribute; `build_region` computes the covered area
+    from this fraction restricted to the region's own admitted pixels."""
+    path = config_module.product_path(config, "sky/derived", "spitzer", "coverage", "hpx512", region=region)
     if not os.path.exists(path):
         raise FileNotFoundError(
-            "catalog.figure_depth: no catalogue coverage for %s at %s -- run the "
-            "'sesnaimpute.catalog.coverage' RUNBOOKtp.sh line first" % (region, path))
+            "catalog.figure_depth: no Spitzer mosaic coverage for %s at %s -- run the "
+            "'sesnaimpute.sky.derived.coverage' RUNBOOKtp.sh line first" % (region, path))
     with h5py.File(path, "r") as f:
         pix = np.asarray(f["HPX_PIX"][:], dtype=np.int64)
         frac = np.asarray(f["FRAC"][:], dtype=np.float64)
-        area_deg2 = float(f.attrs["AREA_DEG2"])
+    union = frac[:, :4].max(axis=1) if frac.size else np.empty(0, dtype=np.float64)
     order = np.argsort(pix)
-    return pix[order], frac[order], area_deg2
+    return pix[order], union[order]
 
 
 def _read_depth_pixels(config, region):
@@ -198,9 +211,10 @@ def build_region(config, region, formats=("png", "pdf")):
         f_lim_row = f_lim[row]
         w_row = w_dex[row]
 
-        cov_pix, frac, area_deg2 = _read_coverage(config, region)
+        cov_pix, frac = _read_coverage(config, region)
         footprint_pix = _read_depth_grid(config, region)
         frac_aligned = _align(footprint_pix, cov_pix, frac, fill=0.0)
+        area_deg2 = float(np.sum(frac_aligned) * _HPX512_PIXEL_DEG2)
 
         band_words = " ".join(
             "%s=%.4g/%.3g" % (label, f, w) for label, f, w in zip(_BAND_LABELS, f_lim_row, w_row))

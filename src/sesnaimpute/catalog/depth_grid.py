@@ -7,27 +7,20 @@ pixel (IMPLEMENTATION_BMSTP_DRAFT.md P6), not merely per occupied one.
 Per region, admission is the granule map's own rule (`granules/build.py`):
 every nside-512 child of one of the region's source-bearing nside-256
 pixels. For an OCCUPIED admitted pixel (carrying at least one catalogued
-source), `F_LIM_50_MED_MJY` is the median, over the pixel's own sources, of
-each band's 50%-completeness limit -- `catalog.limits.limits`, the one
-limits reader every consumer uses, evaluated once for the whole region and
-grouped by pixel with a pandas groupby (vectorised: no loop over pixels).
-An admitted pixel with no sources of its own (a mosaic-support sibling of an
-occupied nside-256 pixel) takes the row of its nearest occupied pixel by
-angular distance between pixel centres (a vectorised argmax of the
-unit-vector dot product against every occupied pixel, no loop over pixels),
-with its own `N_SOURCES = 0` so a consumer can tell a filled row from a
-measured one. This is the pixel's median source flux and is kept only as
-the diagnostic the study (`studies/star_galaxy_level.md`) compares the fix
-against: it biases bright by 0.14-0.64 dex, because within a pixel the
-per-source map value `DCOMP90` rises with the source's own flux, so the
-median tracks the pixel's median source flux rather than the survey's own
-turnover.
+source), `F_LIM_50_PIX_MJY` is the median, over the pixel's own sources, of
+each source's own corrected `F_LIM_50_MJY` (Part A below) -- a pandas
+groupby, no loop over pixels. An admitted pixel with no sources of its own
+(a mosaic-support sibling of an occupied nside-256 pixel) takes the row of
+its nearest occupied pixel by angular distance between pixel centres (a
+vectorised argmax of the unit-vector dot product against every occupied
+pixel, no loop over pixels), with its own `N_SOURCES = 0` so a consumer can
+tell a filled row from a measured one.
 
 The counts fit, per region and Spitzer band, is the one limit every reader
 now shares (SPEC_BMSTP_DRAFT.md sec. 1.2, 3.3, 6.2): on the sources of
 "complete low-column" admitted pixels -- catalogue coverage above 0.9
-(`catalog.coverage`, the same product and read the atlas's own admission
-uses) and adopted column below the 25th percentile of
+(`sky/derived/spitzer/coverage_spitzer_hpx512`'s own four-band mask union,
+the same read the atlas's own admission uses) and adopted column below the 25th percentile of
 that well-covered set's own column (`sky/derived/adopted/column`), the
 selection `studies/star_galaxy_level.md` section 1 uses; a region with
 fewer than `MIN_LOW_COLUMN_SOURCES` such sources uses every one of its
@@ -99,14 +92,11 @@ selection the fit used. This is written as the per-source product
 `DCOMP90_REF_LOG10` (8,), `LIMIT_KIND` (8,)), the one product
 `catalog.limits.limits` reads. Per admitted pixel, `F_LIM_50_PIX_MJY` is
 the pixel median of these per-source limits (a pandas groupby, no loop
-over pixels); `F_LIM_50_MED_MJY`, once a separate brightness-biased
-median of the OLD per-source rule, is now the identical array -- the two
-readers' 0.14-0.64 dex drift (`studies/star_galaxy_level.md`) is closed
-by construction. `W_DEX_PIX` is `W_DEX` broadcast to every pixel. A pixel
+over pixels). `W_DEX_PIX` is `W_DEX` broadcast to every pixel. A pixel
 with no sources of its own takes its nearest occupied pixel's row, the
 same fill both columns use. The three 2MASS bands carry no per-source map
 and keep the region's constant `F50_2MASS_MJY`/`WIDTH_DEX`
-(`catalog.depths`), unchanged, for both products.
+(`catalog.depths`), unchanged.
 """
 
 import os
@@ -173,7 +163,7 @@ def admitted_pixels_512(config, region):
     (`SESNA_MOSAIC_SUPPORTED`) only ever add `N_SOURCE_ROWS == 0` rows to
     that table, which this filter already drops) -- so this is the same
     pixel set, bit for bit, read one RUNBOOK line earlier
-    (`catalog.curated`, not `granules.build`) to keep `catalog.coverage`
+    (`catalog.curated`, not `granules.build`) to keep `catalog.depth_grid`
     off the granule map it would otherwise need before that map exists on
     a cold build.
     """
@@ -248,28 +238,34 @@ def _depth_fit_params(config, region):
 
 
 def _pixel_coverage(config, region, pix):
-    """Each admitted pixel's catalogue coverage fraction: `catalog.
-    coverage`'s `FRAC`, the fraction of the pixel's nside-2048 children
-    holding a catalogued source with a measured IRAC flux -- the same
-    product and read `bmstp.atlas._coverage` performs, not `sky.derived.
-    coverage`'s Spitzer field-mask union, whose native masks are missing
-    mosaics outright for Pipe and Auriga-California (`catalog.coverage`'s
-    own module docstring), 0 where a pixel is absent (never observed).
+    """Each admitted pixel's IRAC coverage fraction: `sky/derived/spitzer/
+    coverage_spitzer_hpx512`'s own per-band `FRAC` (I1 I2 I3 I4 M1, that
+    product's own column order), the fraction of the pixel on a covered
+    mosaic pixel. The four IRAC bands' `max` is taken as the any-IRAC
+    union fraction -- a LOWER BOUND on the true union (the product stores
+    only each band's own fraction, not the union mask itself), exact
+    where the four IRAC footprints coincide, which is nearly everywhere
+    since 3.6/5.8 um share one camera array and 4.5/8.0 um the other. The
+    Spitzer product covers a superset of the admitted pixels (every pixel
+    a mosaic touches), so a pixel absent from it (never touched by a
+    mosaic) reads FRAC = 0, the same join `bmstp.atlas._coverage` and
+    `population.knot_rate._coverage_frac` perform.
     """
-    path = config_module.product_path(config, "catalog", "sesna", "coverage", "hpx512", region=region)
+    path = config_module.product_path(config, "sky/derived", "spitzer", "coverage", "hpx512", region=region)
     if not os.path.exists(path):
         raise FileNotFoundError(
-            "catalog.depth_grid: no catalogue coverage for %s at %s -- run the "
-            "'catalog.coverage' RUNBOOKtp.sh line first" % (region, path))
+            "catalog.depth_grid: no Spitzer mosaic coverage for %s at %s -- run the "
+            "'sesnaimpute.sky.derived.coverage' RUNBOOKtp.sh line first" % (region, path))
     with h5py.File(path, "r") as f:
         cov_pix = np.asarray(f["HPX_PIX"][:], dtype=np.int64)
         frac = np.asarray(f["FRAC"][:], dtype=np.float64)
+    union = frac[:, :4].max(axis=1) if frac.size else np.empty(0, dtype=np.float64)
     order = np.argsort(cov_pix)
     loc = np.minimum(np.searchsorted(cov_pix[order], pix), max(cov_pix.size - 1, 0))
     hit = order[loc]
     found = cov_pix[hit] == pix if cov_pix.size else np.zeros(pix.size, dtype=bool)
     out = np.zeros(pix.size, dtype=np.float64)
-    out[found] = frac[hit[found]]
+    out[found] = union[hit[found]]
     return out
 
 
@@ -649,8 +645,7 @@ def build(config, regions=None):
                     build_module.write_dataset(f, name, data, *REGISTRY[(_SOURCE_STEM, name)])
 
             # the pixel grid (module docstring, Part A): F_LIM_50_PIX_MJY
-            # and F_LIM_50_MED_MJY are now the same pixel median of the
-            # corrected per-source limits, closing the two readers' drift.
+            # is the pixel median of the corrected per-source limits.
             occupied, occupied_n_sources, occupied_medians = _pixel_medians(
                 hpx_pix_512, f_lim_50_mjy.astype(np.float32)
             )
@@ -683,7 +678,6 @@ def build(config, regions=None):
                 for name, data in (
                     ("HPX_PIX_512", pix),
                     ("N_SOURCES", n_sources),
-                    ("F_LIM_50_MED_MJY", f_lim_50_pix_mjy.astype(np.float32)),
                     ("F_LIM_50_PIX_MJY", f_lim_50_pix_mjy.astype(np.float32)),
                     ("W_DEX_PIX", w_dex_pix),
                 ):
