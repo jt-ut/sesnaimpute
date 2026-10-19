@@ -51,6 +51,30 @@ def _field_stars_path(config, region):
         config, "population", "trilegal", "field-stars", "region", region=region)
 
 
+_FIELD_STAR_CACHE = {}
+
+
+def _field_star_arrays(config, region):
+    """The region's retained field-stars product's own `FNU_MJY` (I2
+    column, dereddened, log10 mJy), `DIST_PC` and `LOG_L`, read ONCE per
+    `(data root, region)` and cached for the worker process's lifetime --
+    the same per-process memoization `_cached_profile` already applies to
+    the sightline product, here for a per-tile caller
+    (`sample_star`/`sample_agb`/`star_distances`/`agb_star_distances`,
+    `bmstp.shapes`' own per-tile piece) that would otherwise reread the
+    region's WHOLE field-star catalogue (Cygnus X: 2.4 GB) on every one of
+    a region's tiles (rule 9, CODING_RULES_BMSTP.md: never touch the full
+    catalogue inside a per-item loop)."""
+    key = (config.data_root, region)
+    if key not in _FIELD_STAR_CACHE:
+        with h5py.File(_field_stars_path(config, region), "r") as f:
+            log10_f45 = np.log10(f["FNU_MJY"][:, IDX_I2].astype(np.float64))
+            dist_pc = f["DIST_PC"][:].astype(np.float64)
+            log_l = f["LOG_L"][:].astype(np.float64)
+        _FIELD_STAR_CACHE[key] = (log10_f45, dist_pc, log_l)
+    return _FIELD_STAR_CACHE[key]
+
+
 def tile_ids(config, region):
     """The region's tile ids (the root groups `tile_<id>` of the per-tile
     star population product), sorted -- one grain axis for P2, read once
@@ -71,9 +95,8 @@ def sample_star(config, region, tile_id):
         x = grp["XI"][()].astype(np.float64)
         star_index = grp["STAR_INDEX"][()].astype(np.int64)
         w = grp["W_STAR"][()].astype(np.float64)
-    with h5py.File(_field_stars_path(config, region), "r") as f:
-        fnu_i2 = f["FNU_MJY"][:, IDX_I2].astype(np.float64)
-    log10_f45 = np.log10(fnu_i2[star_index])
+    log10_f45_all, _dist_pc, _log_l = _field_star_arrays(config, region)
+    log10_f45 = log10_f45_all[star_index]
     return x, log10_f45, w
 
 
@@ -222,8 +245,7 @@ def star_distances(config, region, tile_id):
     join `sample_star` uses for `F_4.5`."""
     with h5py.File(_tile_path(config, region), "r") as f:
         star_index = f[f"tile_{tile_id}"]["STAR_INDEX"][()].astype(np.int64)
-    with h5py.File(_field_stars_path(config, region), "r") as f:
-        dist_pc = f["DIST_PC"][:].astype(np.float64)
+    _log10_f45, dist_pc, _log_l = _field_star_arrays(config, region)
     return dist_pc[star_index]
 
 
@@ -236,8 +258,7 @@ def agb_star_distances(config, region, tile_id):
         grp = f[f"tile_{tile_id}"]
         evolved = grp["IS_EVOLVED"][()].astype(bool)
         star_index = grp["STAR_INDEX"][()].astype(np.int64)[evolved]
-    with h5py.File(_field_stars_path(config, region), "r") as f:
-        dist_pc_all = f["DIST_PC"][:].astype(np.float64)
+    _log10_f45, dist_pc_all, _log_l = _field_star_arrays(config, region)
     d = dist_pc_all[star_index]
     return np.concatenate([d, d])
 
@@ -312,9 +333,7 @@ def sample_agb(config, region, tile_id):
         star_index = grp["STAR_INDEX"][()].astype(np.int64)[evolved]
         u = grp["XI"][()].astype(np.float64)[evolved]
         w_agb = grp["W_AGB"][()].astype(np.float64)[evolved]
-    with h5py.File(_field_stars_path(config, region), "r") as f:
-        dist_pc_all = f["DIST_PC"][:].astype(np.float64)
-        log_l_all = f["LOG_L"][:].astype(np.float64)
+    _log10_f45, dist_pc_all, log_l_all = _field_star_arrays(config, region)
     dist_pc = dist_pc_all[star_index]
     log_l = log_l_all[star_index]
 
