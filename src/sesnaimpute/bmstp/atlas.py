@@ -551,6 +551,96 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, width_dex, config, weight_pix
     return frac, frac_bright3, frac_bright10, s_member
 
 
+def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, width_dex, config, weight_pix):
+    """`(frac_a, frac_bright3_a, frac_bright10_a, frac_b, frac_bright3_b,
+    frac_bright10_b, s_member)`: `catalogued_fraction`'s own quadrature,
+    run ONCE for two classes that share one member set (STAR/PAHC,
+    `_build_one_tile`, F4 2026-10-09 'change C') instead of once each.
+    `u`/`flux0` are the two classes' shared collapsed cells (their
+    weights' own UNION support); `w_a`/`w_b` are each class's own weight
+    over that SAME union, zero wherever a cell belongs to the other
+    class only. `catalogued_probability` depends on `a_col`/`u`/`flux0`/
+    `f_lim`/`width_dex` only, never on the weight, so it is evaluated
+    once per pixel batch/member chunk and both classes' weighted sums
+    are formed from that ONE evaluation (a zero weight contributes
+    exactly 0.0 to a dot product, `x + w*0 == x`). `s_member` -- `sum_pix
+    weight_pix[pix] * p_cat[pix, m]` -- does not depend on either
+    weight at all, so it is the SAME single array for both classes (not
+    one each): a cell both classes share gets one `s_member` value,
+    read by both classes' own `c_m = density * (w / w.sum()) *
+    s_member` downstream. Chunked exactly as `catalogued_fraction`, over
+    the union's own member count -- bit-identical to summing `w_a`/`w_b`
+    separately is NOT claimed (the union's member count sets different
+    pixel-batch/member-chunk boundaries than each class's own former,
+    smaller compacted count would), only mathematically exact; measured
+    against the un-shared baseline (brief's 1e-13 bar)."""
+    n_mem = u.size
+    n_pix = a_col.size
+    w_a_sum = float(w_a.sum())
+    w_b_sum = float(w_b.sum())
+    # a class with no member at all in this union (`w_a`/`w_b` all
+    # zero -- e.g. a tile with no PAHC members) would divide 0/0 below;
+    # `catalogued_fraction`'s own caller instead special-cased
+    # `w.size == 0` to an all-zero `frac`. Dividing by 1.0 here gives the
+    # SAME zero (the numerator is already exactly 0.0 when the weight is
+    # all zero), with no branch needed.
+    w_a_sum_safe = w_a_sum if w_a_sum > 0 else 1.0
+    w_b_sum_safe = w_b_sum if w_b_sum > 0 else 1.0
+    frac_a = np.empty(n_pix, dtype=np.float64)
+    frac_bright3_a = np.empty(n_pix, dtype=np.float64)
+    frac_bright10_a = np.empty(n_pix, dtype=np.float64)
+    frac_b = np.empty(n_pix, dtype=np.float64)
+    frac_bright3_b = np.empty(n_pix, dtype=np.float64)
+    frac_bright10_b = np.empty(n_pix, dtype=np.float64)
+    s_member = np.zeros(n_mem, dtype=np.float64)
+    batch = _pixel_batch_size(n_mem)
+    for start in range(0, n_pix, batch):
+        stop = min(start + batch, n_pix)
+        n_pix_batch = stop - start
+        f_lim_b = f_lim[start:stop]
+        width_dex_b = width_dex[start:stop]
+        a_col_b = a_col[start:stop]
+        i2_lim_b = f_lim_b[:, IDX_I2:IDX_I2 + 1]  # (n_pix_batch, 1)
+
+        weighted_sum_a = np.zeros(n_pix_batch, dtype=np.float64)
+        weighted_bright3_a = np.zeros(n_pix_batch, dtype=np.float64)
+        weighted_bright10_a = np.zeros(n_pix_batch, dtype=np.float64)
+        weighted_sum_b = np.zeros(n_pix_batch, dtype=np.float64)
+        weighted_bright3_b = np.zeros(n_pix_batch, dtype=np.float64)
+        weighted_bright10_b = np.zeros(n_pix_batch, dtype=np.float64)
+        n_mem_chunk = max(1, _PIXEL_BATCH_BUDGET_BYTES
+                           // (N_BANDS * 8 * _N_TEMP_ARRAYS * n_pix_batch))
+        for mstart in range(0, n_mem, n_mem_chunk):
+            mstop = min(mstart + n_mem_chunk, n_mem)
+            u_c = u[mstart:mstop]
+            flux0_c = flux0[mstart:mstop]
+            wa_c = w_a[mstart:mstop]
+            wb_c = w_b[mstart:mstop]
+            p_cat, catalogued_i2_measured, flux_i2 = catalogued_probability(
+                a_col_b, u_c, flux0_c, f_lim_b, width_dex_b, config)
+            weighted_sum_a += p_cat @ wa_c
+            weighted_sum_b += p_cat @ wb_c
+
+            bright3 = flux_i2 > BRIGHT_MULT_3 * i2_lim_b
+            bright10 = flux_i2 > BRIGHT_MULT_10 * i2_lim_b
+            cat_bright3 = catalogued_i2_measured * bright3
+            cat_bright10 = catalogued_i2_measured * bright10
+            weighted_bright3_a += cat_bright3 @ wa_c
+            weighted_bright10_a += cat_bright10 @ wa_c
+            weighted_bright3_b += cat_bright3 @ wb_c
+            weighted_bright10_b += cat_bright10 @ wb_c
+
+            s_member[mstart:mstop] += weight_pix[start:stop] @ p_cat
+        frac_a[start:stop] = weighted_sum_a / w_a_sum_safe
+        frac_bright3_a[start:stop] = weighted_bright3_a / w_a_sum_safe
+        frac_bright10_a[start:stop] = weighted_bright10_a / w_a_sum_safe
+        frac_b[start:stop] = weighted_sum_b / w_b_sum_safe
+        frac_bright3_b[start:stop] = weighted_bright3_b / w_b_sum_safe
+        frac_bright10_b[start:stop] = weighted_bright10_b / w_b_sum_safe
+    return (frac_a, frac_bright3_a, frac_bright10_a,
+            frac_b, frac_bright3_b, frac_bright10_b, s_member)
+
+
 def _pahc_weight(limit8_grid, p_pahc, x):
     """`P_PAHC` interpolated to the flux limit `x` (a scalar mJy, the
     tile's own mean I4 limit -- an approximation of sec. 4's per-pixel
@@ -712,25 +802,41 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         _collapse_star_members(u, flux0_all, w_star, w_star_only, w_pahc_only))
 
     weight_pix_total = float(weight_pix.sum())
+    density_star = float(w_star_only.sum()) / omega_t  # objects deg^-2, sec. 5.1/5.2's Omega_pointing
+    density_pahc = float(w_pahc_only.sum()) / omega_t
     out = {}
-    for cls, weight_full, weight_c in (("STAR", w_star_only, w_star_c), ("PAHC", w_pahc_only, w_pahc_c)):
-        m = weight_c > 0
-        w = weight_c[m]
-        density = float(weight_full.sum()) / omega_t  # objects deg^-2, sec. 5.1/5.2's Omega_pointing
-        if w.size == 0:
-            frac = np.zeros(pix_in_tile.size)
-            frac_bright3 = np.zeros(pix_in_tile.size)
-            frac_bright10 = np.zeros(pix_in_tile.size)
-            n_cat_cell_tile = np.zeros((n_x, n_b))
-            n_cell_tile = np.zeros((n_x, n_b))
-        else:
-            frac, frac_bright3, frac_bright10, s_member = catalogued_fraction(
-                a_col_in_tile, u_c[m], flux0_c[m], w, f_lim_in_tile, width_dex, config, weight_pix)
-            c_m = density * (w / w.sum()) * s_member
-            n_cat_cell_tile = _safe_cell_bin(u_c[m], np.log10(flux0_c[m, IDX_I2]), c_m)
-            c_m_all = density * (w / w.sum()) * weight_pix_total
-            n_cell_tile = _safe_cell_bin(u_c[m], np.log10(flux0_c[m, IDX_I2]), c_m_all)
-        out[cls] = (frac, density, frac_bright3, frac_bright10, n_cat_cell_tile, n_cell_tile)
+    # STAR and PAHC share the SAME collapsed cells (`u_c`/`flux0_c`
+    # above): `catalogued_probability` depends on the cell, never on
+    # which class's weight is being summed, so the two classes'
+    # quadratures run as ONE call over the union of their own nonzero
+    # cells (`catalogued_fraction_pair`, F4 2026-10-09 "change C")
+    # instead of `_build_one_tile`'s former two separate
+    # `catalogued_fraction` calls on the identical members.
+    m_union = (w_star_c > 0) | (w_pahc_c > 0)
+    if not np.any(m_union):
+        for cls, density in (("STAR", density_star), ("PAHC", density_pahc)):
+            out[cls] = (np.zeros(pix_in_tile.size), density, np.zeros(pix_in_tile.size),
+                        np.zeros(pix_in_tile.size), np.zeros((n_x, n_b)), np.zeros((n_x, n_b)))
+    else:
+        u_u, flux0_u = u_c[m_union], flux0_c[m_union]
+        w_star_u, w_pahc_u = w_star_c[m_union], w_pahc_c[m_union]
+        log10_f45_u = np.log10(flux0_u[:, IDX_I2])
+        (frac_star, fb3_star, fb10_star,
+         frac_pahc, fb3_pahc, fb10_pahc, s_member) = catalogued_fraction_pair(
+            a_col_in_tile, u_u, flux0_u, w_star_u, w_pahc_u, f_lim_in_tile, width_dex, config, weight_pix)
+        for cls, density, w_u, frac, frac_bright3, frac_bright10 in (
+                ("STAR", density_star, w_star_u, frac_star, fb3_star, fb10_star),
+                ("PAHC", density_pahc, w_pahc_u, frac_pahc, fb3_pahc, fb10_pahc)):
+            w_sum = float(w_u.sum())
+            if w_sum == 0:
+                n_cat_cell_tile = np.zeros((n_x, n_b))
+                n_cell_tile = np.zeros((n_x, n_b))
+            else:
+                c_m = density * (w_u / w_sum) * s_member
+                n_cat_cell_tile = _safe_cell_bin(u_u, log10_f45_u, c_m)
+                c_m_all = density * (w_u / w_sum) * weight_pix_total
+                n_cell_tile = _safe_cell_bin(u_u, log10_f45_u, c_m_all)
+            out[cls] = (frac, density, frac_bright3, frac_bright10, n_cat_cell_tile, n_cell_tile)
 
     # AGB (sec. 5.2): every evolved star with positive weight
     # (`sample_star.sample_agb`'s `w_a`; `x_a`'s first half O-rich,
