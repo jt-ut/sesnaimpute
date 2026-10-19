@@ -86,12 +86,12 @@ import os
 
 import h5py
 import numpy as np
-from joblib import Parallel, delayed
 from scipy.optimize import minimize
 from scipy.special import erfc
 
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
+from sesnaimpute import pieces as pieces_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute import tables as tables_module
@@ -315,11 +315,11 @@ def _fit_twomass_band(detected_flux):
     return dict(f50=f50, residual=residual, w=w_hat)
 
 
-def _region_depths(curated_path):
-    """One region's fitted Delta, width (dex) and their bootstrap sigmas
-    and fit residual per Spitzer band, and fitted F50, width (dex) and
-    fit residual per 2MASS band (SPEC_BMSTP_DRAFT.md section 6.2: see
-    `_fit_twomass_band`).
+def _region_detected_arrays(curated_path):
+    """One region's own detected flux (and, for the five Spitzer bands,
+    the paired map value) per band -- the small per-band arrays the
+    region's eight independent band fits need, read once here so no band
+    fit re-opens the curated file.
     """
     with h5py.File(curated_path, "r") as f:
         fnu = f["FNU_MJY"][:]
@@ -327,54 +327,45 @@ def _region_depths(curated_path):
         origin = f["ORIGIN_FNU"][:]
         bands = [b.decode() if isinstance(b, bytes) else b for b in f.attrs["BANDS"]]
 
-    delta_dex = np.full(len(IRAC_MIPS_KEYS), np.nan)
-    sigma_delta_dex = np.full(len(IRAC_MIPS_KEYS), np.nan)
-    w_mag = np.full(len(IRAC_MIPS_KEYS), np.nan)
-    sigma_width_dex = np.full(len(IRAC_MIPS_KEYS), np.nan)
-    fit_residual = np.full(len(IRAC_MIPS_KEYS), np.nan)
-    converged = np.zeros(len(IRAC_MIPS_KEYS), dtype=bool)
-    for j, key in enumerate(IRAC_MIPS_KEYS):
+    spitzer, twomass = [], []
+    for key in IRAC_MIPS_KEYS:
         b = bands.index(key)
         mask = origin[:, b] == 1
-        detected = fnu[mask, b]
-        dcomp90_detected = dcomp90[mask, b]
-        result = _fit_spitzer_band(detected, dcomp90_detected)
-        delta_dex[j] = result["delta"]
-        sigma_delta_dex[j] = result["sigma"]
-        w_mag[j] = result["w"]
-        sigma_width_dex[j] = result["sigma_width"]
-        fit_residual[j] = result["residual"]
-        converged[j] = result["converged"]
-
-    f50_2mass = np.full(len(TWOMASS_KEYS), np.nan)
-    w_mag_2mass = np.full(len(TWOMASS_KEYS), np.nan)
-    fit_residual_2mass = np.full(len(TWOMASS_KEYS), np.nan)
-    for j, key in enumerate(TWOMASS_KEYS):
+        spitzer.append((fnu[mask, b], dcomp90[mask, b]))
+    for key in TWOMASS_KEYS:
         b = bands.index(key)
-        detected = fnu[origin[:, b] == 1, b]
-        result = _fit_twomass_band(detected)
-        f50_2mass[j] = result["f50"]
-        fit_residual_2mass[j] = result["residual"]
-        w_mag_2mass[j] = result["w"]
+        twomass.append(fnu[origin[:, b] == 1, b])
+    return spitzer, twomass
 
-    width_dex = DEX_PER_MAG * w_mag
-    width_dex_2mass = DEX_PER_MAG * w_mag_2mass
-    return (delta_dex, sigma_delta_dex, w_mag, fit_residual, converged, f50_2mass,
-            fit_residual_2mass, width_dex, sigma_width_dex, width_dex_2mass)
+
+def _fit_piece(piece):
+    """One region-band's fit (the pool's unit of work, SPEC_PRIORS.md
+    section 1.3): a Spitzer piece is `("spitzer", detected_flux,
+    dcomp90_detected)`, a 2MASS piece `("twomass", detected_flux)`.
+    """
+    if piece[0] == "spitzer":
+        return _fit_spitzer_band(piece[1], piece[2])
+    return _fit_twomass_band(piece[1])
 
 
 def build(config, regions=None):
     """Builds the region-granule survey-depths product for the given
-    regions (default: every region in `regions.REGIONS`), parallelised
-    over regions with joblib (capped at `config.n_jobs` workers). Reads the
-    curated catalogues from `curated.build`, and updates only the given
-    regions' rows of the product (`tables.update_rows`).
+    regions (default: every region in `regions.REGIONS`). Reads the curated
+    catalogues from `curated.build` (one short read per region, in this
+    process), then fits every region's eight bands as one flat set of
+    pieces on the shared pool (`pieces.run`, capped at `config.n_jobs`
+    workers) -- the region loop alone leaves `config.n_jobs - 1` workers
+    idle for most of this stage's cost (each band's fit, bootstrap
+    resampling included, is independent of every other band and region),
+    so the piece is one region's one band, not one region. Updates only
+    the given regions' rows of the product (`tables.update_rows`).
     """
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
 
     with progress_module.Stage("catalog.depths") as st:
-        curated_paths = []
+        n_spitzer, n_twomass = len(IRAC_MIPS_KEYS), len(TWOMASS_KEYS)
+        band_pieces = []  # one ("spitzer"|"twomass", ...) piece per region per band, in region x band order
         for region in regions:
             p = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
             if not os.path.exists(p):
@@ -382,18 +373,31 @@ def build(config, regions=None):
                     f"catalog.depths.build: curated catalogue missing for region {region!r} "
                     f"at {p!r} -- run the curated-catalogue RUNBOOK line for it"
                 )
-            curated_paths.append(p)
+            spitzer, twomass = _region_detected_arrays(p)
+            band_pieces += [("spitzer", detected, dcomp) for detected, dcomp in spitzer]
+            band_pieces += [("twomass", detected) for detected in twomass]
 
-        n_regions = len(curated_paths)
-        n_done = [0]
+        n_regions = len(regions)
+        fit_results = pieces_module.run(_fit_piece, band_pieces, config.n_jobs, st, unit="band fits")
 
-        def _one(p):
-            r = _region_depths(p)
-            n_done[0] += 1
-            st.tick(n_done[0], n_regions, "regions")
-            return r
+        per_region_bands = n_spitzer + n_twomass
+        results = []
+        for r in range(n_regions):
+            row = fit_results[r * per_region_bands:(r + 1) * per_region_bands]
+            spitzer_r, twomass_r = row[:n_spitzer], row[n_spitzer:]
+            results.append((
+                np.array([x["delta"] for x in spitzer_r]),
+                np.array([x["sigma"] for x in spitzer_r]),
+                np.array([x["w"] for x in spitzer_r]),
+                np.array([x["residual"] for x in spitzer_r]),
+                np.array([x["converged"] for x in spitzer_r]),
+                np.array([x["f50"] for x in twomass_r]),
+                np.array([x["residual"] for x in twomass_r]),
+                DEX_PER_MAG * np.array([x["w"] for x in spitzer_r]),
+                np.array([x["sigma_width"] for x in spitzer_r]),
+                DEX_PER_MAG * np.array([x["w"] for x in twomass_r]),
+            ))
 
-        results = Parallel(n_jobs=config.n_jobs, prefer="threads")(delayed(_one)(p) for p in curated_paths)
         delta_dex = np.array([r[0] for r in results])
         sigma_delta_dex = np.array([r[1] for r in results])
         w_mag = np.array([r[2] for r in results])
