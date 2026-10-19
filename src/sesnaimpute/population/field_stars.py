@@ -584,7 +584,7 @@ def build(config, regions=None):
     atmosphere = load_atmosphere_grid(register_path)
     colour_table = load_colour_table(config)
     for region in region_names:
-        with progress.Stage("prior.field_stars", region) as st:
+        with progress.Stage("population.field_stars", region) as st:
             result = build_region(config, region, atmosphere, colour_table, st=st)
             path = config_module.product_path(config, "population", "trilegal", "field-stars",
                                                 "region", region=region)

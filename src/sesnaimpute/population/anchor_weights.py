@@ -1308,7 +1308,7 @@ def build(config, regions=None):
         % (transported_ks_slope, len(deep_slope_regions), deep_slope_regions))
 
     for region in region_names:
-        with progress.Stage("prior.anchor_weights", region) as st:
+        with progress.Stage("population.anchor_weights", region) as st:
             result = build_region(config, region, clusters, members_all, w_pool_g, w_pool_ks,
                                    ks_pool_lower, ks_pool_upper, transported_ks_slope, cache=cache)
             path = _write_product(config, region, result)

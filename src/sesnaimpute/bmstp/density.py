@@ -206,7 +206,7 @@ def _cloud_column_fraction(config, region):
     return cloud_frac, d_front
 
 
-def build_region(config, region, st):
+def build_region(config, region, st, fitted_rates=None, pooled_eta=None):
     rs = access.region_slice(config, region)
     n = rs["n_sources"]
     hpx512 = rs["hpx_pix_512"]
@@ -357,7 +357,7 @@ def build_region(config, region, st):
     # -- the kernel's 0.32 pc is comparable to the Planck beam at a few
     # hundred pc -- is an open, separately-costed question, not
     # resolved here.)
-    eta_r, eta_band_dex = knot_rate.eta_for_region(config, region)
+    eta_r, eta_band_dex = knot_rate.eta_for_region(config, region, fitted_rates, pooled_eta)
     kappa_pooled_value = knot_field.kappa_pooled(config)
     density_h2s_law_pooled = knot_field.law_count_at_kappa(config, region, a_cloud, arm, kappa_pooled_value)
     law_map, law_wcs, knot_meta = knot_field.convolved_law(config, region)
@@ -450,11 +450,15 @@ def build(config, regions=None):
     """Writes `bmstp/density/table_density_source[__R].hdf5` for `regions`
     (default all thirty), one file per region."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
+    # the knot rate's survey-wide table once per build, not once per
+    # region (population.knot_rate.eta_for_region's own docstring)
+    fitted_rates = knot_rate.fitted(config)
+    pooled_eta = knot_rate.pooled(config, fitted_rates)
     for region in region_names:
         with progress.Stage("bmstp.density", region) as st:
             path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
 
-            result = build_region(config, region, st)
+            result = build_region(config, region, st, fitted_rates, pooled_eta)
             write_region(path, result)
 
             cloud_frac = result["cloud_frac"]

@@ -290,10 +290,19 @@ def pooled(config, fitted_rates=None):
     return eta_pooled, band_dex
 
 
-def eta_for_region(config, region):
+def eta_for_region(config, region, fitted_rates=None, pooled_eta=None):
     """`(eta_r, band_dex)`: the field's own fitted rate (band 0.0, exact
     for its own footprint) where `region` carries a knot survey, else the
-    pooled rate and its band."""
+    pooled rate and its band. `fitted_rates` (`fitted(config)`) and
+    `pooled_eta` (`pooled(config, fitted_rates)`) are the survey-wide
+    table a stage computes ONCE in its `build()` and passes down: the
+    three knot regions' law integrals cost ~19 s and do not depend on
+    `region`, so a stage that calls this per region without them pays
+    that for every region (bmstp.atlas and bmstp.density both did)."""
+    if fitted_rates is None:
+        fitted_rates = fitted(config)
     if region in KNOT_COMPLETENESS:
-        return knots_corrected(config, region) / region_predicted_yso(config, region), 0.0
-    return pooled(config)
+        return fitted_rates[region], 0.0
+    if pooled_eta is None:
+        pooled_eta = pooled(config, fitted_rates)
+    return pooled_eta

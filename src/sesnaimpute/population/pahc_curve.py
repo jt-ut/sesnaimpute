@@ -272,8 +272,8 @@ def _field_star_path(config, region):
         config, "population", "trilegal", "field-stars", "region", region=region)
     if not os.path.exists(path):
         raise FileNotFoundError(
-            f"prior.pahc_curve: field-star product missing for region {region!r} "
-            f"at {path!r} -- run the 'prior.field_stars' RUNBOOK line first")
+            f"population.pahc_curve: field-star product missing for region {region!r} "
+            f"at {path!r} -- run the 'population.field_stars' RUNBOOK line first")
     return path
 
 
@@ -407,7 +407,7 @@ def region_measurement(config, region, colour_knots, colour45_median):
         config, "catalog", "sesna", "sources", "source", region=region)
     if not os.path.exists(src_path):
         raise FileNotFoundError(
-            f"prior.pahc_curve: curated catalogue missing for region {region!r} "
+            f"population.pahc_curve: curated catalogue missing for region {region!r} "
             f"at {src_path!r} -- run the 'catalog.curated' RUNBOOK line first")
     with h5py.File(src_path, "r") as f:
         fnu = f["FNU_MJY"][:]
@@ -684,16 +684,16 @@ def _region_row(config, region, caller):
     path = config_module.product_path(config, "population", "pahc", "curve", "survey")
     if not os.path.exists(path):
         raise FileNotFoundError(
-            f"prior.pahc_curve: no PAHC curve product at {path!r} -- run the "
-            f"'prior.pahc_curve' RUNBOOK line first")
+            f"population.pahc_curve: no PAHC curve product at {path!r} -- run the "
+            f"'population.pahc_curve' RUNBOOK line first")
     with h5py.File(path, "r") as f:
         edges = f["LOG10_Q_EDGES"][:]
         region_names = [r.decode("utf-8") if isinstance(r, bytes) else r for r in f["REGION"][:]]
         if region not in region_names:
             raise ValueError(
-                f"prior.pahc_curve.{caller}: region {region!r} is not one of the "
+                f"population.pahc_curve.{caller}: region {region!r} is not one of the "
                 f"{len(region_names)} regions this curve was built on {region_names!r} "
-                f"-- rebuild 'prior.pahc_curve' with that region included")
+                f"-- rebuild 'population.pahc_curve' with that region included")
         r = region_names.index(region)
         p_q = f["P_Q_REGION"][r]
         n_per_bin = f["N_PER_BIN_REGION"][r]
@@ -765,7 +765,7 @@ def build(config, regions=None):
     otherwise). The regions are read in chunks of at most
     `config.n_jobs` at a time (CODING_RULES.md 10a)."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
-    st = progress.Stage("prior.pahc_curve")
+    st = progress.Stage("population.pahc_curve")
 
     c12_star, c48_star = load_field_star_colours(config, region_names)
     colour_edges, colour_medians, colour_widths, colour_counts = colour_relation(c12_star, c48_star)

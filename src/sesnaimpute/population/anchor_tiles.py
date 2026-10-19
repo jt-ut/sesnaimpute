@@ -745,7 +745,7 @@ def build(config, regions=None):
     all thirty), one file pair per region."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     for region in region_names:
-        with progress.Stage("prior.anchor_tiles", region) as st:
+        with progress.Stage("population.anchor_tiles", region) as st:
             result = build_region(config, region)
             write_tiles(config, region, result)
             write_histograms(config, region, result)

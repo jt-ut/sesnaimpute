@@ -1114,7 +1114,7 @@ def build(config, regions=None):
            f_dusty_mean, l_o_lsun, n_orich_models, F_C))
 
     for region in region_names:
-        with progress.Stage("prior.star_population", region) as st:
+        with progress.Stage("population.star_population", region) as st:
             curve = pahc_curve.read(config, region)
             result = build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
                                    f_ref_sps, node_log10_teff, node_logg, ref_jhk, curve, st=st)

@@ -145,7 +145,7 @@ def _load_sigma_zp_herschel(config):
                                       "sigma", "survey")
     if not os.path.exists(path):
         raise FileNotFoundError(
-            "prior.kernel: no Herschel zero-point sigma product at %s -- run the "
+            "population.kernel: no Herschel zero-point sigma product at %s -- run the "
             "'sesnaimpute.sky.derived.column' RUNBOOK line first" % path)
     with h5py.File(path, "r") as f:
         return float(f["SIGMA_ZP_K"][()])
@@ -224,8 +224,8 @@ class Kernel(object):
         path = config_module.product_path(config, "population", "sesna", "kernel", "survey")
         if not os.path.exists(path):
             raise FileNotFoundError(
-                "prior.kernel: no kernel product at %s -- run the "
-                "'prior.kernel' RUNBOOK line first" % path)
+                "population.kernel: no kernel product at %s -- run the "
+                "'population.kernel' RUNBOOK line first" % path)
         with h5py.File(path, "r") as f:
             return cls(f["A_NODES"][:], f["MIX_W"][:], f["MIX_MU"][:],
                        f["MIX_SIGMA"][:], float(f["ZP_HERSCHEL_K"][()]),
@@ -261,7 +261,7 @@ class Kernel(object):
             bad = (idx < 0) | (idx > max(_ARM_CODE.values()))
             if np.any(bad):
                 raise ValueError(
-                    "prior.kernel: map_class carries a numeric provenance code outside "
+                    "population.kernel: map_class carries a numeric provenance code outside "
                     "%r" % (sorted(_ARM_CODE.values()),))
             return idx
         if mc.dtype.kind == "S":
@@ -274,7 +274,7 @@ class Kernel(object):
             resolved |= hit
         if not np.all(resolved):
             raise ValueError(
-                "prior.kernel: map_class carries a value outside %r" % (_ARM_ORDER,))
+                "population.kernel: map_class carries a value outside %r" % (_ARM_ORDER,))
         return idx
 
     def _structural(self, a_col, arm_idx):
@@ -553,7 +553,7 @@ def _match_one_region_to_catalogue(config, region, ra_deg, dec_deg):
     cat_path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
     if not os.path.exists(cat_path):
         raise FileNotFoundError(
-            "prior.kernel: no curated catalogue for region %r at %s -- run the "
+            "population.kernel: no curated catalogue for region %r at %s -- run the "
             "'sesnaimpute.catalog.curated' RUNBOOK line first" % (region, cat_path))
     with h5py.File(cat_path, "r") as f:
         ra_cat = np.asarray(f["RA_DEG"][:], dtype=np.float64)
@@ -626,7 +626,7 @@ def _match_protostars_to_beam(config):
     proto_path = f"{config.data_root}/sky/derived/protostars/protostars_survey.hdf5"
     if not os.path.exists(proto_path):
         raise FileNotFoundError(
-            "prior.kernel: no protostar overlay product at %s -- run the "
+            "population.kernel: no protostar overlay product at %s -- run the "
             "'sesnaimpute.sky.derived.protostars' RUNBOOK line first" % proto_path)
     with h5py.File(proto_path, "r") as f:
         region = f["REGION"][:]
@@ -927,12 +927,12 @@ def build(config, regions=None):
     """
     from sesnaimpute.population import column_grid
 
-    st = progress.Stage("prior.kernel")
+    st = progress.Stage("population.kernel")
     subbeam_path = config_module.product_path(config, "sky/derived", "herschel",
                                               "subbeam", "region")
     if not os.path.exists(subbeam_path):
         raise FileNotFoundError(
-            "prior.kernel: no Herschel sub-beam product at %s -- run the "
+            "population.kernel: no Herschel sub-beam product at %s -- run the "
             "'sesnaimpute.sky.derived.subbeam' RUNBOOK line first" % subbeam_path)
     zp = _load_sigma_zp_herschel(config)
     a_nodes = column_grid.nodes(config)

@@ -159,10 +159,9 @@ def admitted_pixels_512(config, region):
     region_healpix256`) restricted to this region and to `N_SOURCE_ROWS >
     0` is exactly `unique(hp.ang2pix(256, gl, gb, nest=True))` for this
     region's own catalogued sources (`granules/build.py`'s
-    `_region_arrays`/`source_pix256`: the mosaic-support-only pixels
-    (`SESNA_MOSAIC_SUPPORTED`) only ever add `N_SOURCE_ROWS == 0` rows to
-    that table, which this filter already drops) -- so this is the same
-    pixel set, bit for bit, read one RUNBOOK line earlier
+    `_region_arrays`/`source_pix256`; every association row carries
+    sources, so the filter is a no-op kept for the statement) -- so this
+    is the same pixel set, bit for bit, read one RUNBOOK line earlier
     (`catalog.curated`, not `granules.build`) to keep `catalog.depth_grid`
     off the granule map it would otherwise need before that map exists on
     a cold build.
