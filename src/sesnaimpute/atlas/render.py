@@ -213,34 +213,32 @@ def _outer_rows(n_panels, cols):
 # reading, reprojection, rendering
 # ---------------------------------------------------------------------------
 
-def _read_prior(path, region, require_above):
-    """The prior atlas (P6), sorted by pixel for the reprojection's
-    `searchsorted` lookup. `N_ABOVE_<C>` (the intrinsic view's own
-    per-pixel density above the pixel's own 4.5 um 50% completeness limit,
-    SPEC_BMSTP_DRAFT.md sec. 8's rule) is required only for the intrinsic
-    page (`require_above`; the posterior page and the selection page read
-    this product only for `A_COL_K`/`N_CAT_C`) -- a product that lacks it
-    fails here, by name, rather than the intrinsic page silently falling
-    back to some other quantity."""
+def _read_prior(path, region):
+    """The prior atlas (P6), read ONCE per region and shared by all three
+    pages `build` draws from it (the intrinsic and selection prior pages,
+    and the posterior page's own column panel) -- the previous version of
+    this reader opened the same file up to three times per region, once
+    per page. `N_ABOVE_<C>` (the intrinsic view's own per-pixel density
+    above the pixel's own 4.5 um 50% completeness limit, SPEC_BMSTP_DRAFT.md
+    sec. 8's rule) is read here whenever present; a product that lacks it
+    is still returned (`above=None`), since only the intrinsic page needs
+    it -- `_build_prior_page` raises THERE, by name, when that page is the
+    one being built, rather than this shared read failing for every page
+    on a product only the intrinsic page cannot use."""
     with h5py.File(path, "r") as f:
         pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
         a_k = np.asarray(f["A_COL_K"][:], dtype=np.float64)
         coverage = np.asarray(f["COVERAGE"][:], dtype=np.float64)
         n_cat = np.stack([np.asarray(f["N_CAT_%s" % c][:], dtype=np.float64) for c in CLASSES], axis=1)
-        above = None
-        if require_above:
-            missing = [c for c in CLASSES if ("N_ABOVE_%s" % c) not in f]
-            if missing:
-                raise KeyError(
-                    "atlas.render [%s]: prior atlas carries no N_ABOVE_%s -- run "
-                    "RUNBOOKtp.sh's 'PY sesnaimpute.bmstp.atlas' line to rebuild it"
-                    % (region, missing[0]))
-            above = np.stack([np.asarray(f["N_ABOVE_%s" % c][:], dtype=np.float64) for c in CLASSES], axis=1)
+        missing_above = next((c for c in CLASSES if ("N_ABOVE_%s" % c) not in f), None)
+        above = (None if missing_above is not None else
+                 np.stack([np.asarray(f["N_ABOVE_%s" % c][:], dtype=np.float64) for c in CLASSES], axis=1))
         attrs = dict(f.attrs)
     order = np.argsort(pix)
     return dict(pix=pix[order], a_k=a_k[order], coverage=coverage[order],
                 n_cat=n_cat[order],
                 above=above[order] if above is not None else None,
+                missing_above=missing_above,
                 attrs=attrs)
 
 
@@ -655,27 +653,39 @@ def _require_depth_grid(config, region):
     return _read_depth_grid(config, region)
 
 
-def _build_prior_page(config, region, formats, view):
+def _build_prior_page(config, region, formats, view, prior=None, footprint_pix=None, geom_grid=None):
     """Writes one prior-atlas page (8 panels: column, the class-summed
     density, the six class panels) under `bmstp/atlas/figures/` --
     `prior-atlas-intrinsic_<R>` (`A_C`, before the survey's selection) or
     `prior-atlas-selection_<R>` (`N_CAT_C`, after it), `view` selecting
     which stored quantity feeds the density and class panels (`VIEWS`)
     so the two pages are one code path rather than two copies that could
-    drift apart."""
+    drift apart. `prior`/`footprint_pix`/`geom_grid`, when given (`build`'s
+    own one-read-per-region share), skip this page's own read of the prior
+    atlas and the depth-grid footprint/geometry -- the three pages a
+    region's `build` draws read every one of those once, not once per
+    page."""
     spec = VIEWS[view]
     prior_path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
-    if not os.path.exists(prior_path):
-        print("atlas.render [%s]: no prior atlas -- run RUNBOOKtp.sh's "
-              "'PY sesnaimpute.bmstp.atlas' line first, skipped" % region, flush=True)
-        return None
-    footprint_pix = _require_depth_grid(config, region)
+    if prior is None:
+        if not os.path.exists(prior_path):
+            print("atlas.render [%s]: no prior atlas -- run RUNBOOKtp.sh's "
+                  "'PY sesnaimpute.bmstp.atlas' line first, skipped" % region, flush=True)
+            return None
+        prior = _read_prior(prior_path, region)
+    if view == "intrinsic" and prior["above"] is None:
+        raise KeyError(
+            "atlas.render [%s]: prior atlas carries no N_ABOVE_%s -- run "
+            "RUNBOOKtp.sh's 'PY sesnaimpute.bmstp.atlas' line to rebuild it"
+            % (region, prior["missing_above"]))
     if footprint_pix is None:
-        return None
-    prior = _read_prior(prior_path, region, require_above=(view == "intrinsic"))
+        footprint_pix = _require_depth_grid(config, region)
+        if footprint_pix is None:
+            return None
 
     with progress.Stage("atlas.render.prior.%s" % view, region) as st:
-        geom_grid = _footprint_geometry(footprint_pix)
+        if geom_grid is None:
+            geom_grid = _footprint_geometry(footprint_pix)
         wcs, grid_pix, shape = geom_grid["wcs"], geom_grid["grid_pix"], geom_grid["shape"]
 
         a_k = _align(footprint_pix, prior["pix"], prior["a_k"], np.nan)
@@ -841,48 +851,56 @@ def _build_prior_page(config, region, formats, view):
     return paths
 
 
-def build_prior_intrinsic_region(config, region, formats):
+def build_prior_intrinsic_region(config, region, formats, prior=None, footprint_pix=None, geom_grid=None):
     """The prior atlas's intrinsic page (`_build_prior_page`, view
     "intrinsic"): the sky density and class shares before the survey's
     selection, `A_C` from the product's own `N_CAT_C`."""
-    return _build_prior_page(config, region, formats, "intrinsic")
+    return _build_prior_page(config, region, formats, "intrinsic",
+                              prior=prior, footprint_pix=footprint_pix, geom_grid=geom_grid)
 
 
-def build_prior_selection_region(config, region, formats):
+def build_prior_selection_region(config, region, formats, prior=None, footprint_pix=None, geom_grid=None):
     """The prior atlas's selection page (`_build_prior_page`, view
     "selection"): the same layout after the survey's selection, `N_C`
     from the product's own `N_CAT_C`, plus the coverage outline and the
     predicted/observed and bright-source ratios the selection alone
     determines."""
-    return _build_prior_page(config, region, formats, "selection")
+    return _build_prior_page(config, region, formats, "selection",
+                              prior=prior, footprint_pix=footprint_pix, geom_grid=geom_grid)
 
 
-def build_posterior_region(config, region, formats):
+def build_posterior_region(config, region, formats, prior=None, footprint_pix=None, geom_grid=None):
     """Writes the posterior-atlas figure (P11, 8 panels: column, the six
     posterior means, the posterior YSO count) under `fittp/atlas/figures/`,
     on the SAME footprint as the prior figure's own (`catalog.depth_grid`)
     and the SAME fixed 4x2 layout the prior figure uses, so the two
     pages read as one pair. The column panel reuses P6's own `A_COL_K`
-    (P11 carries no column), so this figure needs the prior atlas too."""
+    (P11 carries no column), so this figure needs the prior atlas too.
+    `prior`/`footprint_pix`/`geom_grid`, when given (`build`'s own
+    one-read-per-region share), skip this page's own read of the prior
+    atlas and the depth-grid footprint/geometry."""
     post_path = config_module.product_path(config, "fittp", "atlas", "posterior", "hpx512", region=region)
     if not os.path.exists(post_path):
         print("atlas.render [%s]: no posterior atlas -- run RUNBOOKtp.sh's "
               "'PY sesnaimpute.fittp.atlas' line first, skipped" % region, flush=True)
         return None
-    prior_path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
-    if not os.path.exists(prior_path):
-        print("atlas.render [%s]: posterior atlas present but no prior atlas for its "
-              "column panel -- run RUNBOOKtp.sh's 'PY sesnaimpute.bmstp.atlas' line first, skipped"
-              % region, flush=True)
-        return None
-    footprint_pix = _require_depth_grid(config, region)
+    if prior is None:
+        prior_path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
+        if not os.path.exists(prior_path):
+            print("atlas.render [%s]: posterior atlas present but no prior atlas for its "
+                  "column panel -- run RUNBOOKtp.sh's 'PY sesnaimpute.bmstp.atlas' line first, skipped"
+                  % region, flush=True)
+            return None
+        prior = _read_prior(prior_path, region)
     if footprint_pix is None:
-        return None
+        footprint_pix = _require_depth_grid(config, region)
+        if footprint_pix is None:
+            return None
     posterior = _read_posterior(post_path)
-    prior = _read_prior(prior_path, region, require_above=False)
 
     with progress.Stage("atlas.render.posterior", region) as st:
-        geom_grid = _footprint_geometry(footprint_pix)
+        if geom_grid is None:
+            geom_grid = _footprint_geometry(footprint_pix)
         wcs, grid_pix, shape = geom_grid["wcs"], geom_grid["grid_pix"], geom_grid["shape"]
 
         a_k = _align(footprint_pix, prior["pix"], prior["a_k"], np.nan)
@@ -971,13 +989,29 @@ def build(config, regions=None, formats=("png", "pdf")):
     figure (`fittp/atlas/figures/`, when P11 exists), on the same
     depth-grid footprint -- rendering, not a build (no product is stored
     at display resolution), so a region missing an input is skipped
-    rather than failed."""
+    rather than failed. The depth-grid footprint, its display geometry
+    (the WCS and the per-cell nside-512 lookup, each built once from an
+    astropy frame rotation over every display cell) and the prior
+    atlas are each read ONCE here and shared by all three pages below --
+    the previous version had each page redo all three reads for itself,
+    tripling this region's I/O and geometry cost for no reason, since
+    every page draws on the identical footprint (sec. 8)."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     t0 = time.time()
     for region in region_names:
-        build_prior_intrinsic_region(config, region, formats)
-        build_prior_selection_region(config, region, formats)
-        build_posterior_region(config, region, formats)
+        footprint_pix = _require_depth_grid(config, region)
+        if footprint_pix is None:
+            continue
+        geom_grid = _footprint_geometry(footprint_pix)
+        prior_path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
+        prior = _read_prior(prior_path, region) if os.path.exists(prior_path) else None
+
+        build_prior_intrinsic_region(config, region, formats,
+                                      prior=prior, footprint_pix=footprint_pix, geom_grid=geom_grid)
+        build_prior_selection_region(config, region, formats,
+                                      prior=prior, footprint_pix=footprint_pix, geom_grid=geom_grid)
+        build_posterior_region(config, region, formats,
+                                prior=prior, footprint_pix=footprint_pix, geom_grid=geom_grid)
     progress.summary("atlas.render", len(region_names), t0)
 
 
