@@ -21,17 +21,18 @@ erase it) and reports the identity the brief names against the freshly
 built product.
 """
 
+import functools
 import os
 
 import h5py
 import numpy as np
-from joblib import Parallel, delayed
 from scipy import ndimage
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import fftconvolve
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
+from sesnaimpute import pieces
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
@@ -119,6 +120,15 @@ def _build_one_tile(config, region, tile_id):
             above_star_w, float(w_s.sum()), above_agb_w, float(w_a.sum()))
 
 
+def _build_tile_piece(config, region, ids, bounds):
+    """One `pieces.run` piece for P2: every tile in `ids[start:stop]`
+    (`bounds`), in order -- the region-wide `ids` array is bound by the
+    caller's `functools.partial`, so a piece itself carries only its own
+    slice bounds, not data (`sesnaimpute.pieces`'s module docstring)."""
+    start, stop = bounds
+    return [_build_one_tile(config, region, int(t)) for t in ids[start:stop]]
+
+
 def build_star_family(config, region):
     """Writes P2, `bmstp/shape/star_shape_tile__R.hdf5`: `GRID_STAR` and
     `GRID_AGB` per tile (sec. 5.1, 5.2) on the common `LOG10_F45_EDGES`,
@@ -138,11 +148,20 @@ def build_star_family(config, region):
 
         # worker count is `root.cfg`'s own `[run] n_jobs` (CODING_RULES_BMSTP.md
         # rule 10a): the owner sets it to what the machine's memory allows.
+        # Within-region parallelism (owner ruling 2026-10-09): tiles are the
+        # natural piece, cut far more finely than `n_jobs` by
+        # `pieces.slices` so uneven tiles even out; `ids` (the region-wide,
+        # read-only tile-id list) is bound into the piece function by
+        # `functools.partial`, a piece carries only its own slice bounds
+        # (`sesnaimpute.pieces`'s module docstring). The per-tile field-star
+        # catalogue reads this used to repeat per tile are now a
+        # once-per-worker-process cache (`sample_star._field_star_arrays`),
+        # which is what brought the stage's own 14.3 GB peak down.
         n_jobs = int(config.n_jobs)
-        results = Parallel(n_jobs=n_jobs)(
-            delayed(_build_one_tile)(config, region, int(t)) for t in ids)
-        for i in range(n_tile):
-            st.tick(i + 1, n_tile, "tiles")
+        bounds = pieces.slices(n_tile, n_jobs)
+        fn = functools.partial(_build_tile_piece, config, region, ids)
+        piece_results = pieces.run(fn, bounds, n_jobs, stage=st, unit="tiles")
+        results = [r for chunk in piece_results for r in chunk]
 
         grid_star = np.stack([r[0] for r in results])
         mass_outside_star = np.array([r[1] for r in results], dtype=np.float32)
@@ -321,9 +340,20 @@ def _yso_kernel_placement(x_idx, delta, weights, on_x, n_x, kernel_1d, p_ref, n_
     return np.maximum(conv[:, start:start + n_b], 0.0)
 
 
-def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back, peak_offset_dex=0.0):
+def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back, far, peak_offset_dex=0.0):
     """One sightline's `(GRID_YSO, XI_MARGINAL, MASS_OUTSIDE_YSO,
-    removed_frac)` (sec. 5.5 "Marks"): every depth sub-sample
+    removed_frac, XI_FRONT, XI_BACK)` (sec. 5.5 "Marks"); the last two,
+    this row's own dense-fraction marks (sec. 2, the diffuse/dense law,
+    folded in from the retired `bmstp.cloud_interval` stage, brief U4),
+    computed here -- inside the per-sightline piece every other P3
+    quantity already runs through -- rather than in a second, serial
+    Python loop over every sightline afterwards (`far` true: the region
+    `sample_cloud.far_region` selects, ledger C14, reads `XI_FRONT=0`,
+    `XI_BACK=1` with no map lookup at all; otherwise both are this row's
+    own native cumulative profile, `loaded["xi_edges"]`/`["d_edges"]`,
+    read at `d_front`/`d_back` -- inside this row's own domain by
+    construction, `sample_cloud.cloud_interval_pc`'s own cap, so no
+    extrapolation). Every depth sub-sample
     (`sample_cloud._cell_subsamples`, weight `w_k,sub`, depth `x_k,sub`,
     distance `d_k,sub`) adds its own shifted-and-smoothed copy of `p_ref`
     to its own `log10 ξ` row -- grouped by row first (linear in the
@@ -363,6 +393,15 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back, peak_of
     share (`sample_cloud.p_ref_f45`'s docstring), is ever shortfall.
     `GRID_YSO` carries its own true zeros: no per-shape floor is baked in
     here."""
+    if far:
+        xi_front_row, xi_back_row = 0.0, 1.0
+    else:
+        xi_front_row = float(np.clip(
+            np.interp(d_front, loaded["d_edges"][row], loaded["xi_edges"][row]), 0.0, 1.0))
+        xi_back_row = float(np.clip(
+            np.interp(d_back, loaded["d_edges"][row], loaded["xi_edges"][row]), 0.0, 1.0))
+        xi_back_row = max(xi_back_row, xi_front_row)
+
     p_x, _mo_x, removed_frac = sample_cloud.sample_x(loaded, row, d_front, d_back)
     log10_xi_nudged, w_sub, d_sub, _removed = sample_cloud._cell_subsamples(loaded, row, d_front, d_back)
     n_x = grid.LOG10_XI_EDGES.size - 1
@@ -403,7 +442,21 @@ def _build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back, peak_of
     else:
         mass_outside_yso = float(np.clip(1.0 - total_actual / total_weight, 0.0, 1.0))
         grid_yso = grid_yso / total_weight
-    return (grid_yso.astype(np.float32), p_x.astype(np.float32), mass_outside_yso, removed_frac)
+    return (grid_yso.astype(np.float32), p_x.astype(np.float32), mass_outside_yso, removed_frac,
+            xi_front_row, xi_back_row)
+
+
+def _build_sightline_piece(loaded, p_ref, kernel_1d, d_front, d_back, far, peak_offset_dex, bounds):
+    """One `pieces.run` piece for P3: every sightline row in
+    `range(start, stop)` (`bounds`) -- the region-wide, read-only
+    `loaded`/`p_ref`/`kernel_1d`/`peak_offset_dex` are bound by the
+    caller's `functools.partial`, so a piece itself carries only its own
+    row-range bounds, not data (`sesnaimpute.pieces`'s module
+    docstring)."""
+    start, stop = bounds
+    return [_build_one_sightline(loaded, row, p_ref, kernel_1d, d_front, d_back, far,
+                                  peak_offset_dex[row])
+            for row in range(start, stop)]
 
 
 def _sightline_a_col_k(config, region, hpx_pix_256):
@@ -436,61 +489,25 @@ def _sightline_a_col_k(config, region, hpx_pix_256):
     return a_k_sorted[capped]
 
 
-def _cloud_interval_weight(config, region, loaded, d_front, d_back):
-    """`(xi_front, xi_back, w_cloud)`, one row per sightline, in `loaded`'s
-    own sightline order (so a source's `SIGHTLINE_ROW`, P1, indexes this
-    exactly as it indexes P3): how much of the region's cloud interval
-    `[d_front, d_back]` sits in front of each sightline's own `log10 xi`
-    cell, from the SAME native cumulative profile `loaded["xi_edges"]`/
-    `loaded["d_edges"]` this stage already read for `GRID_YSO` -- folded
-    in from the retired `bmstp.cloud_interval` stage (brief U4: that
-    stage's only reader, `fittp.prior_reader`, now reads this file's
-    `XI_FRONT`/`XI_BACK`/`W_CLOUD` instead), sky data alone (the 3-D dust
-    map and the cloud interval), never the prior.
-
-    `W_CLOUD` is the diffuse/dense ramp weight
+def _cloud_dense_weight(config, region, hpx_pix_256, xi_front, xi_back):
+    """`W_CLOUD`, one row per sightline, in `hpx_pix_256`'s own sightline
+    order (so a source's `SIGHTLINE_ROW`, P1, indexes this exactly as it
+    indexes P3): the diffuse/dense ramp weight
     (`population.selection.law_dense_weight`) evaluated at the column of
-    dust BETWEEN those two depths, `(XI_BACK - XI_FRONT) * A_COL_K` with
-    `A_COL_K` the sightline's own extinction column (the same column P1
-    assigns each of the row's sources, sec. 3.2's "extinction column").
-
-    At a region `sample_cloud.far_region` selects (ledger C14: the 3-D
-    map's own radial resolution at that distance exceeds the cloud's
-    measured depth), `XI_FRONT`/`XI_BACK` are not read off the map's
-    `xi(d)` at all -- `XI_FRONT = 0`, `XI_BACK = 1` every row, so
-    `W_CLOUD` is the ramp evaluated at the sightline's own column whole,
-    i.e. at `A_COL_K` as the Planck arm measures it (the only arm a
-    region this far out carries).
-    """
-    xi_edges = loaded["xi_edges"]
-    d_edges = loaded["d_edges"]
-    hpx_pix_256 = loaded["hpx_pix_256"]
-    n_sl = hpx_pix_256.size
-
-    far = sample_cloud.far_region(config, region)
-    if far:
-        xi_front = np.zeros(n_sl, dtype=np.float64)
-        xi_back = np.ones(n_sl, dtype=np.float64)
-    else:
-        xi_front = np.zeros(n_sl, dtype=np.float64)
-        xi_back = np.zeros(n_sl, dtype=np.float64)
-        for row in range(n_sl):
-            # xi(d) at this sightline's own native cumulative profile:
-            # d_edges[row] spans at least [dist_pc[0], dist_pc[-1] +
-            # 2*tail_efold_pc[row]], which `sample_cloud.cloud_interval_pc`
-            # already caps d_front/d_back inside of, so both lookups sit
-            # inside every row's own domain -- no extrapolation.
-            xi_front[row] = np.clip(np.interp(d_front, d_edges[row], xi_edges[row]), 0.0, 1.0)
-            xi_back[row] = np.clip(np.interp(d_back, d_edges[row], xi_edges[row]), 0.0, 1.0)
-        xi_back = np.maximum(xi_back, xi_front)
-
+    dust BETWEEN each sightline's own `XI_FRONT`/`XI_BACK` (sec. 2; each
+    row's own mark, computed per sightline inside `_build_one_sightline`,
+    folded in from the retired `bmstp.cloud_interval` stage, brief U4:
+    that stage's only reader, `fittp.prior_reader`, now reads this
+    file's `XI_FRONT`/`XI_BACK`/`W_CLOUD` instead), `(XI_BACK - XI_FRONT)
+    * A_COL_K`, `A_COL_K` the sightline's own extinction column (the
+    same column P1 assigns each of the row's sources, sec. 3.2's
+    "extinction column") -- vectorised over every sightline at once, sky
+    data alone (the 3-D dust map and the cloud interval), never the
+    prior. A sightline with no dust between the two depths (`XI_BACK ==
+    XI_FRONT`) reads a column of dust of exactly zero there, and
+    `law_dense_weight(0) == 0`: no special case."""
     a_col_k = _sightline_a_col_k(config, region, hpx_pix_256)
-    # a sightline with no dust between the two depths (XI_BACK == XI_FRONT)
-    # reads a column of dust of exactly zero there, and
-    # `law_dense_weight(0) == 0`: XI_FRONT = XI_BACK = 0 and W_CLOUD = 0
-    # both fall out of this one formula, no special case.
-    w_cloud = population_selection.law_dense_weight((xi_back - xi_front) * a_col_k)
-    return xi_front.astype(np.float32), xi_back.astype(np.float32), w_cloud.astype(np.float32), far
+    return population_selection.law_dense_weight((xi_back - xi_front) * a_col_k).astype(np.float32)
 
 
 def build_cloud(config, region):
@@ -547,15 +564,25 @@ def build_cloud(config, region):
         sigma_d = sample_cloud.sigma_d_dex(r)
         kernel_1d = sample_cloud.exact_gaussian_kernel(sigma_d)
 
+        # whether the map's own structure fit is read at all (ledger C14),
+        # the SAME for every sightline of the region -- read once, bound
+        # into every piece below, rather than re-read per sightline.
+        far = sample_cloud.far_region(config, region)
+
         # worker count is `root.cfg`'s own `[run] n_jobs` (CODING_RULES_BMSTP.md
         # rule 10a): the owner sets it to what the machine's memory allows.
+        # Within-region parallelism (owner ruling 2026-10-09): sightlines
+        # are the natural piece, cut far more finely than `n_jobs` by
+        # `pieces.slices`; `loaded`/`p_ref`/`kernel_1d`/`peak_offset_dex`
+        # (region-wide, read-only) are bound into the piece function by
+        # `functools.partial`, a piece carries only its own row-range
+        # bounds (`sesnaimpute.pieces`'s module docstring).
         n_jobs = int(config.n_jobs)
-        results = Parallel(n_jobs=n_jobs)(
-            delayed(_build_one_sightline)(loaded, row, p_ref, kernel_1d, d_front, d_back,
-                                           peak_offset_dex[row])
-            for row in range(n_sl))
-        for i in range(n_sl):
-            st.tick(i + 1, n_sl, "sightlines")
+        bounds = pieces.slices(n_sl, n_jobs)
+        fn = functools.partial(_build_sightline_piece, loaded, p_ref, kernel_1d, d_front, d_back,
+                                far, peak_offset_dex)
+        piece_results = pieces.run(fn, bounds, n_jobs, stage=st, unit="sightlines")
+        results = [r for chunk in piece_results for r in chunk]
 
         n_b = grid.LOG10_F45_EDGES.size - 1
         n_x = grid.LOG10_XI_EDGES.size - 1
@@ -567,6 +594,13 @@ def build_cloud(config, region):
                              if n_sl else np.zeros((0,))).astype(np.float32)
         removed_frac = np.array([r_[3] for r_ in results], dtype=np.float64)
         on_grid_yso = (1.0 - mass_outside_yso).astype(np.float32)
+        # XI_FRONT/XI_BACK (sec. 2, the diffuse/dense law): each
+        # sightline's own mark, already computed inside its piece above
+        # (`_build_one_sightline`), never a second, serial pass.
+        xi_front_cloud = (np.array([r_[4] for r_ in results], dtype=np.float64)
+                           if n_sl else np.zeros((0,))).astype(np.float32)
+        xi_back_cloud = (np.array([r_[5] for r_ in results], dtype=np.float64)
+                          if n_sl else np.zeros((0,))).astype(np.float32)
 
         # H2S's brightness lognormal (sec. 5.6 "Marks"): the UWISH2 knot
         # survey's reference sample, transported from each knot's own
@@ -622,13 +656,11 @@ def build_cloud(config, region):
                              if n_sl else np.zeros((0,), dtype=np.float32))
         on_grid_h2s = (1.0 - mass_outside_h2s).astype(np.float32)
 
-        # the sightline's own dense fraction (sec. 2, the diffuse/dense
-        # law), folded in from the retired `bmstp.cloud_interval` stage
-        # (brief U4): reads the SAME native cumulative profile (`loaded`)
-        # this stage already loaded above, no second pass of
-        # `sample_cloud._region_profile`.
-        xi_front_cloud, xi_back_cloud, w_cloud, far_region = _cloud_interval_weight(
-            config, region, loaded, d_front, d_back)
+        # W_CLOUD (sec. 2, the diffuse/dense law), folded in from the
+        # retired `bmstp.cloud_interval` stage (brief U4): vectorised over
+        # every sightline's own XI_FRONT/XI_BACK, computed per sightline
+        # above.
+        w_cloud = _cloud_dense_weight(config, region, loaded["hpx_pix_256"], xi_front_cloud, xi_back_cloud)
 
         path = p3_path
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -639,7 +671,7 @@ def build_cloud(config, region):
             f.attrs["LOGSIG_STD"] = logsig_std
             f.attrs["D_FRONT_PC"] = float(d_front)
             f.attrs["D_BACK_PC"] = float(d_back)
-            f.attrs["FAR_REGION"] = bool(far_region)
+            f.attrs["FAR_REGION"] = bool(far)
             for name, data in (
                 ("LOG10_XI_EDGES", grid.LOG10_XI_EDGES),
                 ("LOG10_F45_EDGES", grid.LOG10_F45_EDGES),
@@ -718,7 +750,7 @@ def build_cloud(config, region):
                 if n_sl else (0.0, 0.0),
                 peak_offset_dex_range=(float(peak_offset_dex.min()), float(peak_offset_dex.max()))
                 if n_sl else (0.0, 0.0),
-                far_region=bool(far_region),
+                far_region=bool(far),
                 w_cloud_range=(float(w_cloud.min()), float(w_cloud.max())) if n_sl else (0.0, 0.0))
     return (path, n_sl, mass_outside_yso, removed_frac,
             (peak_f45, p16_f45, p84_f45), on_grid_yso, (d_front, d_back))

@@ -85,17 +85,18 @@ own depth together -- a brightness-independent table double-counts
 the population's own density at the source's flux (sec 4.1).
 """
 
+import functools
 import os
 
 import h5py
 import numpy as np
 from astropy.io import fits
-from joblib import Parallel, delayed
 from scipy.spatial import cKDTree
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
+from sesnaimpute import pieces
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
@@ -807,6 +808,29 @@ def _node_kde(colour_theta_f32, c_gal, s_gal):
     return dens / n_gal, min_z
 
 
+def _galz_node_piece(colour, sigma, node, finite, colour_theta_f32, bounds):
+    """One `pieces.run` piece for P4/galz's colour KDE: every S node in
+    `range(start, stop)` (`bounds`), in order -- `colour`/`sigma`/`node`/
+    `finite`/`colour_theta_f32` (the region-wide, read-only galaxy and
+    template arrays) are bound by the caller's `functools.partial`, so a
+    piece itself carries only its own node-range bounds, not data
+    (`sesnaimpute.pieces`'s module docstring); no `backend="threading"`
+    (COMMON.md: no stage keeps a thread pool of its own). Returns one
+    `(dens, beyond3_fraction, n_gal)` per node, `n_gal` this node's own
+    galaxy count (for the caller's empty-node borrowing, sec 5.4's own
+    nearest-node rule, review ledger C16)."""
+    start, stop = bounds
+    out = []
+    for k in range(start, stop):
+        sel = finite & (node == k)
+        c_gal = colour[sel]
+        s_gal = sigma[sel]
+        dens, min_z = _node_kde(colour_theta_f32, c_gal, s_gal)
+        beyond3 = 1.0 if c_gal.size == 0 else float(np.mean(min_z > 3.0))
+        out.append((dens, beyond3, int(c_gal.size)))
+    return out
+
+
 def build_galz(config):
     with progress.Stage("bmstp.template_weights.galz") as st:
         reg = _read_register(config, "galz")
@@ -840,22 +864,25 @@ def build_galz(config):
         log10_f45_centers = _log10_f45_centers()
         n_b = log10_f45_centers.size
 
-        # one (n_model x galaxy-batch) KDE block per node (sec 5.4); the
-        # 61 nodes are independent, so they run on threads, worker count
-        # `root.cfg`'s own `[run] n_jobs` (CODING_RULES_BMSTP.md rule
-        # 10a), each still batching its own galaxies under the 512 MB
-        # block (rule 10b).
-        node_gal = [(colour[finite & (node == k)], sigma[finite & (node == k)])
-                    for k in range(n_node)]
+        # one (n_model x galaxy-batch) KDE block per node (sec 5.4): the
+        # 61 nodes are independent, cut into pieces far more numerous than
+        # `n_jobs` (owner ruling 2026-10-09, `sesnaimpute.pieces`) rather
+        # than a stage-owned thread pool -- `colour`/`sigma`/`node`/
+        # `finite`/`colour_theta_f32` (region-wide, read-only) are bound
+        # into the piece function by `functools.partial`; each piece still
+        # batches its own galaxies under the 512 MB block (rule 10b).
         n_jobs = int(config.n_jobs)
-        results = Parallel(n_jobs=n_jobs, backend="threading")(
-            delayed(_node_kde)(colour_theta_f32, c_gal, s_gal) for c_gal, s_gal in node_gal)
+        bounds = pieces.slices(n_node, n_jobs)
+        fn = functools.partial(_galz_node_piece, colour, sigma, node, finite, colour_theta_f32)
+        piece_results = pieces.run(fn, bounds, n_jobs, stage=st, unit="S nodes")
+        results = [r for chunk in piece_results for r in chunk]
         node_density = np.empty((n_node, n_model), dtype=np.float64)
         beyond3_fraction = np.empty(n_node, dtype=np.float64)
-        for k, (dens, min_z) in enumerate(results):
+        has_gal = np.empty(n_node, dtype=bool)
+        for k, (dens, beyond3, n_gal_k) in enumerate(results):
             node_density[k] = dens
-            beyond3_fraction[k] = 1.0 if node_gal[k][0].size == 0 else float(np.mean(min_z > 3.0))
-            st.tick(k + 1, n_node, "S nodes")
+            beyond3_fraction[k] = beyond3
+            has_gal[k] = n_gal_k > 0
 
         # a node this build's own SWIRE pooling (`sky.derived.swire_galaxies.
         # _pool_bright_nodes`) left with none of its own galaxies reads its
@@ -863,8 +890,8 @@ def build_galz(config):
         # default `_node_kde` returns (review ledger C16): the SAME nearest-
         # node borrowing `bmstp.atlas._gal_members` already applies to an
         # empty counts-law node, so an empty colour node is never read as
-        # uniform here either.
-        has_gal = np.array([node_gal[k][0].size > 0 for k in range(n_node)])
+        # uniform here either (`has_gal`, from each piece's own `n_gal`,
+        # computed above).
         if not has_gal.all():
             node_ids = np.arange(n_node)
             have_idx = node_ids[has_gal]
