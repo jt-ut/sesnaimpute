@@ -596,11 +596,15 @@ def build_cloud(config, region):
         on_grid_yso = (1.0 - mass_outside_yso).astype(np.float32)
         # XI_FRONT/XI_BACK (sec. 2, the diffuse/dense law): each
         # sightline's own mark, already computed inside its piece above
-        # (`_build_one_sightline`), never a second, serial pass.
+        # (`_build_one_sightline`), never a second, serial pass -- kept
+        # float64 here (cast to float32 only at the write below, as every
+        # other dataset in this file is) so `_cloud_dense_weight`'s own
+        # `(XI_BACK - XI_FRONT) * A_COL_K` runs at the SAME precision the
+        # identity (rule 11) is measured at.
         xi_front_cloud = (np.array([r_[4] for r_ in results], dtype=np.float64)
-                           if n_sl else np.zeros((0,))).astype(np.float32)
+                           if n_sl else np.zeros((0,)))
         xi_back_cloud = (np.array([r_[5] for r_ in results], dtype=np.float64)
-                          if n_sl else np.zeros((0,))).astype(np.float32)
+                          if n_sl else np.zeros((0,)))
 
         # H2S's brightness lognormal (sec. 5.6 "Marks"): the UWISH2 knot
         # survey's reference sample, transported from each knot's own
@@ -684,8 +688,8 @@ def build_cloud(config, region):
                 ("GRID_H2S", grid_h2s),
                 ("MASS_OUTSIDE_H2S", mass_outside_h2s),
                 ("ON_GRID_H2S", on_grid_h2s),
-                ("XI_FRONT", xi_front_cloud),
-                ("XI_BACK", xi_back_cloud),
+                ("XI_FRONT", xi_front_cloud.astype(np.float32)),
+                ("XI_BACK", xi_back_cloud.astype(np.float32)),
                 ("W_CLOUD", w_cloud),
             ):
                 build_module.write_dataset(f, name, data, *REGISTRY[(_CLOUD_STEM, name)])
