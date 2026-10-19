@@ -55,15 +55,16 @@ Products, per region:
   2MASS's own to `KS_CUT_MAG`); root attr `GRANULE="hpx512"`.
 """
 
+import functools
 import os
 
 import h5py
 import healpy as hp
 import numpy as np
-from joblib import Parallel, delayed
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
+from sesnaimpute import pieces as pieces_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
@@ -519,6 +520,45 @@ def _pointing_bounds(sorted_pointing_index, present_pointings):
     return bounds
 
 
+def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, r_dense,
+                  parent256, a_pix, pixel_pointing, pointing_bounds, n_bin_g, n_bin_ks):
+    """One piece's own contiguous block of pixel indices (owner ruling
+    2026-10-09: within a region, many small pieces on one pool, never a
+    thread per pixel): each pixel's `(N_G, N_KS, N_GK)` exactly as a
+    single pixel's own loop below computed it before, batched over its
+    own pointing's star axis (`sesnaimpute.batches.batches`) so one
+    pixel's temporaries stay bounded regardless of its pointing's own
+    star count. The region-wide read-only inputs (`raw`, `profile_obj`,
+    ...) are bound by `_predicted_histograms`'s own `functools.partial`,
+    pickled once per batch by `pieces.run`'s loky pool, not once per
+    piece."""
+    lo_pix, hi_pix = piece
+    dist_pc = raw["dist_pc"]
+    g_proxy = raw["g_proxy"]
+    ks_mag = raw["ks_mag"]
+    k_g_diffuse = raw["k_g_diffuse"]
+    k_g_dense = raw["k_g_dense"]
+    n = hi_pix - lo_pix
+    n_g_block = np.zeros((n, n_bin_g), dtype=np.float64)
+    n_ks_block = np.zeros((n, n_bin_ks), dtype=np.float64)
+    n_gk_block = np.zeros((n, n_bin_g, n_bin_ks), dtype=np.float64)
+    for j, i in enumerate(range(lo_pix, hi_pix)):
+        parent = int(parent256[i])
+        a_p = float(a_pix[i])
+        lo, hi = pointing_bounds[int(pixel_pointing[i])]
+        for blo, bhi in batches(hi - lo, row_bytes=72 * config.n_jobs):
+            s = slice(lo + blo, lo + bhi)
+            g_obs, ks_obs = anchor_observables(
+                dist_pc[s], g_proxy[s], ks_mag[s],
+                k_g_diffuse[s], k_g_dense[s],
+                profile_obj, parent, a_p, r_diffuse, r_dense)
+            p_g = gaia_detection_weight(g_obs)
+            n_g_block[j] += np.histogram(g_obs, bins=g_edges, weights=p_g)[0]
+            n_ks_block[j] += np.histogram(ks_obs, bins=ks_edges)[0]
+            n_gk_block[j] += np.histogram2d(g_obs, ks_obs, bins=[g_edges, ks_edges], weights=p_g)[0]
+    return n_g_block, n_ks_block, n_gk_block
+
+
 def _predicted_histograms(config, profile_obj, parent256, a_pix, raw, g_edges, ks_edges,
                            r_diffuse, r_dense, pixel_pointing, pointing_bounds, weight_pix):
     """`(N_G_PRED, N_KS_PRED, N_GK_PRED)`: each pixel's own nearest
@@ -532,48 +572,28 @@ def _predicted_histograms(config, profile_obj, parent256, a_pix, raw, g_edges, k
     one value per pixel -- SPEC_BMSTP_DRAFT.md section 5.1). `N_GK_PRED`
     (n_pix, n_G_bin, n_Ks_bin) is the same population, same Gaia-weight,
     digitised jointly on `(G_obs, Ks_obs)` onto the same two edge arrays
-    (SPEC_PRIORS.md section 2.1, "joint and marginal bins"). Vectorised
-    over a batch of one pixel's own pointing slice; the Python loop is
-    over pixels, run in threads (profile evaluation and histogramming
-    are numpy/C and release the GIL, and the raw population and profile
-    are shared read-only rather than repickled per pixel), and, inside
-    each pixel, over batches of its own pointing's star axis
-    (`sesnaimpute.batches.batches`): the three histogram outputs are each
-    additive over disjoint star batches, so accumulating them with `+=`
-    across batches is exact and bounds one pixel's own temporaries
-    regardless of its pointing's own star count, independent of the
-    `n_jobs` pixel-threads running concurrently.
+    (SPEC_PRIORS.md section 2.1, "joint and marginal bins"). The pixel
+    axis is cut into `pieces.slices` pieces and run through `pieces.run`
+    (owner ruling 2026-10-09: one pool of pinned worker processes over
+    many small pieces, never a thread per pixel); inside each pixel, a
+    batch loop over its own pointing's star axis bounds one pixel's own
+    temporaries regardless of its pointing's own star count, independent
+    of how many pieces run concurrently.
     """
-    dist_pc = raw["dist_pc"]
-    g_proxy = raw["g_proxy"]
-    ks_mag = raw["ks_mag"]
-    k_g_diffuse = raw["k_g_diffuse"]
-    k_g_dense = raw["k_g_dense"]
     n_bin_g = g_edges.size - 1
     n_bin_ks = ks_edges.size - 1
+    n_pix = parent256.size
 
-    def _one_pixel(parent, a_p, lo, hi):
-        n_g = np.zeros(n_bin_g, dtype=np.float64)
-        n_ks = np.zeros(n_bin_ks, dtype=np.float64)
-        n_gk = np.zeros((n_bin_g, n_bin_ks), dtype=np.float64)
-        for blo, bhi in batches(hi - lo, row_bytes=72 * config.n_jobs):
-            s = slice(lo + blo, lo + bhi)
-            g_obs, ks_obs = anchor_observables(
-                dist_pc[s], g_proxy[s], ks_mag[s],
-                k_g_diffuse[s], k_g_dense[s],
-                profile_obj, int(parent), float(a_p), r_diffuse, r_dense)
-            p_g = gaia_detection_weight(g_obs)
-            n_g += np.histogram(g_obs, bins=g_edges, weights=p_g)[0]
-            n_ks += np.histogram(ks_obs, bins=ks_edges)[0]
-            n_gk += np.histogram2d(g_obs, ks_obs, bins=[g_edges, ks_edges], weights=p_g)[0]
-        return n_g, n_ks, n_gk
-
-    results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
-        delayed(_one_pixel)(parent256[i], a_pix[i], *pointing_bounds[int(pixel_pointing[i])])
-        for i in range(parent256.size))
-    n_g_pred = np.stack([r[0] for r in results]) * weight_pix[:, None]
-    n_ks_pred = np.stack([r[1] for r in results]) * weight_pix[:, None]
-    n_gk_pred = np.stack([r[2] for r in results]) * weight_pix[:, None, None]
+    fn = functools.partial(
+        _pixel_block, config=config, profile_obj=profile_obj, raw=raw,
+        g_edges=g_edges, ks_edges=ks_edges, r_diffuse=r_diffuse, r_dense=r_dense,
+        parent256=parent256, a_pix=a_pix, pixel_pointing=pixel_pointing,
+        pointing_bounds=pointing_bounds, n_bin_g=n_bin_g, n_bin_ks=n_bin_ks)
+    pixel_pieces = pieces_module.slices(n_pix, config.n_jobs)
+    blocks = pieces_module.run(fn, pixel_pieces, config.n_jobs)
+    n_g_pred = np.concatenate([b[0] for b in blocks], axis=0) * weight_pix[:, None]
+    n_ks_pred = np.concatenate([b[1] for b in blocks], axis=0) * weight_pix[:, None]
+    n_gk_pred = np.concatenate([b[2] for b in blocks], axis=0) * weight_pix[:, None, None]
     return n_g_pred, n_ks_pred, n_gk_pred
 
 
