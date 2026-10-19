@@ -1800,116 +1800,122 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
             + [("SL", r) for r in sls_here]
             + tail_split_pieces
             + [("TAIL_WHOLE", cls) for cls in ("AGB", "GAL", "YSO", "H2S")])
-        flat_out = dict(pieces.run(_dispatch, flat_pieces, n_jobs, stage=st, unit="region pieces"))
-
-        # ---- reduce, in the fixed order every former phase used ----
-
-        # tiles, in tiles_here order (unchanged from the former `Parallel`
-        # call's own reduction).
-        for tile_id in tiles_here:
-            m, out = flat_out[("TILE", tile_id)]
-            # sec. 5.3: `A_PAHC(s) = A_STAR(s)`, the field-star level
-            # shared by both classes -- the STAR/PAHC split lives only in
-            # `_above_fraction`'s own weight factor (sec. 5.1's `1 -
-            # P(q)`/`P(q)`), never in `INTENSITY_<C>` again.
-            field_star_density = out["_FIELD_STAR_DENSITY"]
-            for cls in ("STAR", "AGB", "PAHC"):
-                frac, density, frac_bright3, frac_bright10, n_cat_cell_tile, n_cell_tile = out[cls]
-                n_cat[cls][m] = density * frac
-                intensity[cls][m] = field_star_density if cls in ("STAR", "PAHC") else density
-                n_cat_bright3[cls][m] = density * frac_bright3
-                n_cat_bright10[cls][m] = density * frac_bright10
-                n_cat_cell[cls] += n_cat_cell_tile
-                n_cell[cls] += n_cell_tile
-
-        # GAL, in its own chunk order (unchanged from the former
-        # `_gal_catalogued_fraction`'s own reduction).
-        gal_chunk_results = [flat_out[("GAL", i)] for i in range(len(gal_idx_chunks))]
-        (frac_gal, frac_gal_bright3, frac_gal_bright10, n_cat_cell_gal, n_cell_gal, density_gal,
-         n_gal_members_before, n_gal_members_after) = _gal_reduce(
-            gal_members, gal_chunk_results, weight_pix_all)
-        n_cat["GAL"] = density_gal * frac_gal
-        # sec. 5.4's own density is one survey-wide constant, so GAL's
-        # intensity is that same scalar broadcast to every admitted pixel.
-        intensity["GAL"] = np.full(n_pix, density_gal, dtype=np.float64)
-        n_cat_bright3["GAL"] = density_gal * frac_gal_bright3
-        n_cat_bright10["GAL"] = density_gal * frac_gal_bright10
-        # the region's expected number of catalogued objects per parameter
-        # cell (module docstring): STAR/PAHC/AGB already accumulated
-        # theirs, tile by tile, above.
-        n_cat_cell["GAL"] = n_cat_cell_gal
-        n_cell["GAL"] = n_cell_gal
-
-        # sightlines, in sls_here order (unchanged from the former
-        # `Parallel` call's own reduction). Every sightline's own
-        # quadrature is deterministic (no `rng`): YSO's shared
-        # region-wide template x shift table is a fixed number, not a
-        # random sample, so it induces no covariance between sightlines
-        # and no error term of its own.
+        # ---- reduce each piece as it arrives, in the SAME fixed order
+        # the former collect-then-reduce dict walk used (tiles_here order,
+        # GAL's own chunk order, sls_here order, the tail's class/pixel-
+        # slice order): `pieces.iterate` yields results in piece order, so
+        # processing one result per iteration and dropping it is the same
+        # reduction, only without `flat_out` holding every one of the
+        # region's pieces (tiles, GAL chunks, sightlines and the tail)
+        # live at once (F4 2026-10-09: +29% peak on Perseus from exactly
+        # that collection). A later piece may depend on an earlier one's
+        # reduction (the tail's `intensity[cls]`, H2S's `density_h2s`
+        # from the last sightline) only because it is later in this same
+        # fixed order, never because of anything outside it.
+        gal_chunk_results = [None] * len(gal_idx_chunks)
+        n_gal_seen = 0
         frac_h2s_pix = np.full(n_pix, np.nan, dtype=np.float64)
         frac_h2s_bright3_pix = np.full(n_pix, np.nan, dtype=np.float64)
         frac_h2s_bright10_pix = np.full(n_pix, np.nan, dtype=np.float64)
         density_yso_pix = np.full(n_pix, np.nan, dtype=np.float64)
         n_members_yso_list, n_members_h2s_list = [], []
-        for sl_row in sls_here:
-            (m, f_y, d_y, fb3_y, fb10_y, ncc_y, ncl_y,
-             f_h, fb3_h, fb10_h, ncc_h, ncl_h, n_mem_y, n_mem_h) = flat_out[("SL", sl_row)]
-            n_cat["YSO"][m] = d_y * f_y
-            intensity["YSO"][m] = d_y
-            frac_h2s_pix[m] = f_h
-            density_yso_pix[m] = d_y
-            n_cat_bright3["YSO"][m] = d_y * fb3_y
-            n_cat_bright10["YSO"][m] = d_y * fb10_y
-            frac_h2s_bright3_pix[m] = fb3_h
-            frac_h2s_bright10_pix[m] = fb10_h
-            n_cat_cell["YSO"] += ncc_y
-            n_cell["YSO"] += ncl_y
-            n_cat_cell["H2S"] += ncc_h
-            n_cell["H2S"] += ncl_h
-            n_members_yso_list.append(n_mem_y)
-            n_members_h2s_list.append(n_mem_h)
-        print(f"bmstp.atlas {region}: YSO members/sightline median={int(np.median(n_members_yso_list))} "
-              f"max={int(np.max(n_members_yso_list))}; H2S members/sightline "
-              f"median={int(np.median(n_members_h2s_list))} max={int(np.max(n_members_h2s_list))}")
-
-        # this atlas's own INTRINSIC YSO density (before retention),
-        # multiplied by P3's own `ON_GRID_YSO` at the pixel's sightline:
-        # the SAME retained density P1 reports as `DENSITY_YSO`.
-        density_yso_retained_pix = density_yso_pix * on_grid_yso_by_sl_row[sl_row_of_pix]
-
-        # H2S's mean density reads the SAME pooled-coefficient baseline
-        # the weight above does (`density_h2s_law_pooled_pix`), never
-        # `density_yso_pix` (YSO's own region-coefficient density, kept
-        # for YSO's own `density_yso_retained_pix`/`intensity["YSO"]`
-        # above and untouched) -- the same basis mismatch WP-POP-5 found
-        # in `bmstp.density` existed here too, on the SAME two lines.
-        l_of_pix = _herschel_convolved_law(law_map, law_wcs, pix, arm, density_h2s_law_pooled_pix)
-        density_h2s_before = density_h2s_law_pooled_pix * eta_r * density_module.EPS_EXT
-        density_h2s = l_of_pix * eta_r * density_module.EPS_EXT
-        n_cat["H2S"] = density_h2s * frac_h2s_pix
-        intensity["H2S"] = density_h2s
-        n_cat_h2s_before = density_h2s_before * frac_h2s_pix
-        n_cat_bright3["H2S"] = density_h2s * frac_h2s_bright3_pix
-        n_cat_bright10["H2S"] = density_h2s * frac_h2s_bright10_pix
-
-        # the tail, in the same class/pixel-slice order the former
-        # N_ABOVE-only `pieces.run` call reduced (unchanged): `N_ABOVE_C
-        # (pixel) = A_C(pixel) * _above_fraction(...)` (`_above_fraction`'s
-        # own docstring paragraph), read straight off each class's own
-        # stored grain shape (`fittp.prior_reader.load`) rather than the
-        # catalogued-fraction members above -- the atlas's intrinsic page
-        # draws this, not `INTENSITY_C`'s own ratio (SPEC_BMSTP_DRAFT.md
-        # sec. 8). Every piece's `frac_above` was already computed by the
-        # one dispatch above; this only multiplies in `intensity[cls]`,
-        # which the tile/GAL/sightline reductions above have now filled.
+        n_sl_seen = 0
         n_above = {cls: np.empty(n_pix, dtype=np.float64) for cls in CLASSES}
-        for cls in ("STAR", "PAHC"):
-            for start, stop in pieces.slices(n_pix, n_jobs, min_items=8):
-                frac_above = flat_out[("TAIL", cls, start, stop)]
-                n_above[cls][start:stop] = intensity[cls][start:stop] * frac_above
-        for cls in ("AGB", "GAL", "YSO", "H2S"):
-            frac_above = flat_out[("TAIL_WHOLE", cls)]
-            n_above[cls] = intensity[cls] * frac_above
+
+        for piece, data in pieces.iterate(_dispatch, flat_pieces, n_jobs, stage=st, unit="region pieces"):
+            kind = piece[0]
+            if kind == "TILE":
+                m, out = data
+                # sec. 5.3: `A_PAHC(s) = A_STAR(s)`, the field-star level
+                # shared by both classes -- the STAR/PAHC split lives only
+                # in `_above_fraction`'s own weight factor (sec. 5.1's
+                # `1 - P(q)`/`P(q)`), never in `INTENSITY_<C>` again.
+                field_star_density = out["_FIELD_STAR_DENSITY"]
+                for cls in ("STAR", "AGB", "PAHC"):
+                    frac, density, frac_bright3, frac_bright10, n_cat_cell_tile, n_cell_tile = out[cls]
+                    n_cat[cls][m] = density * frac
+                    intensity[cls][m] = field_star_density if cls in ("STAR", "PAHC") else density
+                    n_cat_bright3[cls][m] = density * frac_bright3
+                    n_cat_bright10[cls][m] = density * frac_bright10
+                    n_cat_cell[cls] += n_cat_cell_tile
+                    n_cell[cls] += n_cell_tile
+            elif kind == "GAL":
+                gal_chunk_results[piece[1]] = data
+                n_gal_seen += 1
+                if n_gal_seen == len(gal_idx_chunks):
+                    (frac_gal, frac_gal_bright3, frac_gal_bright10, n_cat_cell_gal, n_cell_gal,
+                     density_gal, n_gal_members_before, n_gal_members_after) = _gal_reduce(
+                        gal_members, gal_chunk_results, weight_pix_all)
+                    n_cat["GAL"] = density_gal * frac_gal
+                    # sec. 5.4's own density is one survey-wide constant,
+                    # so GAL's intensity is that same scalar broadcast to
+                    # every admitted pixel.
+                    intensity["GAL"] = np.full(n_pix, density_gal, dtype=np.float64)
+                    n_cat_bright3["GAL"] = density_gal * frac_gal_bright3
+                    n_cat_bright10["GAL"] = density_gal * frac_gal_bright10
+                    n_cat_cell["GAL"] = n_cat_cell_gal
+                    n_cell["GAL"] = n_cell_gal
+            elif kind == "SL":
+                sl_row = piece[1]
+                (m, f_y, d_y, fb3_y, fb10_y, ncc_y, ncl_y,
+                 f_h, fb3_h, fb10_h, ncc_h, ncl_h, n_mem_y, n_mem_h) = data
+                n_cat["YSO"][m] = d_y * f_y
+                intensity["YSO"][m] = d_y
+                frac_h2s_pix[m] = f_h
+                density_yso_pix[m] = d_y
+                n_cat_bright3["YSO"][m] = d_y * fb3_y
+                n_cat_bright10["YSO"][m] = d_y * fb10_y
+                frac_h2s_bright3_pix[m] = fb3_h
+                frac_h2s_bright10_pix[m] = fb10_h
+                n_cat_cell["YSO"] += ncc_y
+                n_cell["YSO"] += ncl_y
+                n_cat_cell["H2S"] += ncc_h
+                n_cell["H2S"] += ncl_h
+                n_members_yso_list.append(n_mem_y)
+                n_members_h2s_list.append(n_mem_h)
+                n_sl_seen += 1
+                if n_sl_seen == len(sls_here):
+                    print(f"bmstp.atlas {region}: YSO members/sightline "
+                          f"median={int(np.median(n_members_yso_list))} "
+                          f"max={int(np.max(n_members_yso_list))}; H2S members/sightline "
+                          f"median={int(np.median(n_members_h2s_list))} max={int(np.max(n_members_h2s_list))}")
+                    # this atlas's own INTRINSIC YSO density (before
+                    # retention), multiplied by P3's own `ON_GRID_YSO` at
+                    # the pixel's sightline: the SAME retained density P1
+                    # reports as `DENSITY_YSO`.
+                    density_yso_retained_pix = density_yso_pix * on_grid_yso_by_sl_row[sl_row_of_pix]
+                    # H2S's mean density reads the SAME pooled-coefficient
+                    # baseline the weight above does
+                    # (`density_h2s_law_pooled_pix`), never
+                    # `density_yso_pix` (YSO's own region-coefficient
+                    # density, kept for YSO's own
+                    # `density_yso_retained_pix`/`intensity["YSO"]` above
+                    # and untouched) -- the same basis mismatch WP-POP-5
+                    # found in `bmstp.density` existed here too, on the
+                    # SAME two lines.
+                    l_of_pix = _herschel_convolved_law(law_map, law_wcs, pix, arm, density_h2s_law_pooled_pix)
+                    density_h2s_before = density_h2s_law_pooled_pix * eta_r * density_module.EPS_EXT
+                    density_h2s = l_of_pix * eta_r * density_module.EPS_EXT
+                    n_cat["H2S"] = density_h2s * frac_h2s_pix
+                    intensity["H2S"] = density_h2s
+                    n_cat_h2s_before = density_h2s_before * frac_h2s_pix
+                    n_cat_bright3["H2S"] = density_h2s * frac_h2s_bright3_pix
+                    n_cat_bright10["H2S"] = density_h2s * frac_h2s_bright10_pix
+            elif kind == "TAIL":
+                # `N_ABOVE_C(pixel) = A_C(pixel) * _above_fraction(...)`
+                # (`_above_fraction`'s own docstring paragraph), read
+                # straight off each class's own stored grain shape
+                # (`fittp.prior_reader.load`) rather than the catalogued-
+                # fraction members above -- the atlas's intrinsic page
+                # draws this, not `INTENSITY_C`'s own ratio
+                # (SPEC_BMSTP_DRAFT.md sec. 8). `intensity[cls]` is
+                # already filled: every TILE/GAL/SL piece for this class
+                # precedes every TAIL piece in `flat_pieces`.
+                cls, start, stop = piece[1], piece[2], piece[3]
+                n_above[cls][start:stop] = intensity[cls][start:stop] * data
+            else:  # "TAIL_WHOLE"
+                cls = piece[1]
+                n_above[cls] = intensity[cls] * data
 
         built = CLASSES
         # every admitted pixel now has every class's `N_CAT` (finding 3
