@@ -19,8 +19,9 @@ pixel. `a_tau = A_K / tau353` is fit through the origin (a coherent dust
 opacity has no additive term), region-balanced so no one region's pixel
 count dominates, and cross-validated by holding out one region at a time.
 The Planck beam itself is not trusted from the FITS header (it carries
-none): it is MEASURED (`_beam_one`/`_peak`) by cross-correlating a native-
-resolution HGBS map, smoothed through a ladder of trial beams, against
+none): it is MEASURED (`_beam_prep_one`/`_beam_corr_piece`/`_peak`) by
+cross-correlating a native-resolution HGBS map, smoothed through a ladder
+of trial beams, against
 native Planck tau353 -- the FWHM that maximises the correlation is the
 beam that made Planck's own map. The within-pixel scatter of A_K around
 `a_tau * tau353` is fit as `sigma_within^2 = s0^2 + (f*A)^2` in column
@@ -39,6 +40,7 @@ within-beam term, and the region term, in quadrature. `TEMP_K`, Planck's
 own dust temperature at the pixel, is carried for the atlas.
 """
 
+import functools
 import glob
 import os
 
@@ -49,10 +51,10 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS
 import astropy.units as u
-from joblib import Parallel, delayed
 from scipy.ndimage import gaussian_filter
 
 from sesnaimpute import build as build_module
+from sesnaimpute import pieces as pieces_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
@@ -259,11 +261,13 @@ def _peak(x, y):
     return float(-b / (2 * a)) if a < 0 else float(x1)
 
 
-def _beam_one(planck_path, path):
-    """Cross-correlates one native-resolution HGBS map, smoothed through
-    `BEAM_LADDER`, against native Planck tau353 sampled at the same cell
-    centres; the FWHM maximising the correlation is that MEASUREMENT's
-    estimate of Planck's own effective beam."""
+def _beam_prep_one(path):
+    """One HGBS map's native-resolution read and block-reduction to ~24"
+    cells -- the same single pass `_hgbs_one` makes, kept separate so the
+    native array (this build's largest single read, CODING_RULES.md 10a)
+    is freed the moment this function returns, before the ladder's
+    convolutions run. Returns the compact, block-reduced `(dm, mm, sel,
+    p2048, cell)` the 23 trial-beam pieces below share read-only."""
     with fits.open(path, memmap=False) as hd:
         data = np.asarray(hd[0].data, dtype=np.float64)
         hdr = hd[0].header
@@ -282,31 +286,67 @@ def _beam_one(planck_path, path):
                               (by[sel] * f + (f - 1) / 2.0).astype(float), 0)
     gc = SkyCoord(ra=ra * u.deg, dec=dec * u.deg, frame="icrs").galactic
     p2048 = hp.ang2pix(NSIDE_P, gc.l.deg, gc.b.deg, nest=True, lonlat=True)
-    with fits.open(planck_path, memmap=True) as hd2:
-        tau = np.asarray(hd2[1].data["TAU353"], dtype=np.float64)[p2048]
-
     dm = np.where(sel, np.nan_to_num(bmean), 0.0)
     mm = sel.astype(np.float64)
-    r_vals = []
-    for fw in BEAM_LADDER:
-        sig = (fw * 60.0 / cell) / 2.354820045
-        num = gaussian_filter(dm, sig, mode="constant", cval=0.0, truncate=3.0)
-        den = gaussian_filter(mm, sig, mode="constant", cval=0.0, truncate=3.0)
-        sm = np.where(den > 0.5, num / np.maximum(den, 1e-30), np.nan)[sel]
-        ok = np.isfinite(sm) & np.isfinite(tau)
-        r_vals.append(float(np.corrcoef(sm[ok], tau[ok])[0, 1]))
-    return _peak(BEAM_LADDER, r_vals)
+    return dm, mm, sel, p2048, cell
 
 
-def measure_beam(config):
+def _beam_corr_piece(piece, preps):
+    """One (map, trial-beam FWHM) piece: the map's block-reduced field
+    smoothed to that one FWHM, correlated against Planck's native tau353
+    at the same cells (`preps[name]`'s own `tau`, already matched by
+    `measure_beam`). `preps` -- every map's compact, block-reduced
+    arrays, built once in the parent -- is the region-wide read-only
+    input `pieces.run` pickles once per batch, not once per piece."""
+    name, fw = piece
+    dm, mm, sel, tau, cell = preps[name]
+    sig = (fw * 60.0 / cell) / 2.354820045
+    num = gaussian_filter(dm, sig, mode="constant", cval=0.0, truncate=3.0)
+    den = gaussian_filter(mm, sig, mode="constant", cval=0.0, truncate=3.0)
+    sm = np.where(den > 0.5, num / np.maximum(den, 1e-30), np.nan)[sel]
+    ok = np.isfinite(sm) & np.isfinite(tau)
+    return float(np.corrcoef(sm[ok], tau[ok])[0, 1])
+
+
+def measure_beam(config, tau_native, stage=None):
     """Planck's effective FWHM (arcmin): the median, over `BEAM_MAPS`, of
-    each map's own cross-correlation peak, computed in parallel with
-    joblib -- one job per map, capped at `config.n_jobs` (CODING_RULES.md 10a)."""
-    planck_path = _planck_path(config)
+    each map's own cross-correlation peak. Each map's native-resolution
+    read and block-reduction (`_beam_prep_one`) runs once, in series, one
+    map at a time, as `load_hgbs` already does; the ladder's 23 trial
+    beams for all `BEAM_MAPS` -- 115 small, independent convolutions on
+    the already block-reduced grids -- then run as pieces on the one
+    shared pool (COMMON.md's ruling), far more pieces than `config.n_jobs`
+    workers. `tau_native`, Planck's own native nside-2048 TAU353 column,
+    is read once by the caller and matched to each map's own cells here,
+    not reopened once per map as before (five redundant ~200 MB reads of
+    the same column, the likely source of this stage's reported memory
+    peak)."""
     paths_by_name = {m["name"]: m["path"] for m in sky_herschel_column._map_list(config)}
-    peaks = Parallel(n_jobs=min(config.n_jobs, len(BEAM_MAPS)))(
-        delayed(_beam_one)(planck_path, paths_by_name[fname]) for fname in BEAM_MAPS)
+    preps = {}
+    for name in BEAM_MAPS:
+        dm, mm, sel, p2048, cell = _beam_prep_one(paths_by_name[name])
+        preps[name] = (dm, mm, sel, tau_native[p2048].astype(np.float64), cell)
+
+    fn = functools.partial(_beam_corr_piece, preps=preps)
+    tasks = [(name, fw) for name in BEAM_MAPS for fw in BEAM_LADDER]
+    corrs = pieces_module.run(fn, tasks, config.n_jobs, stage=stage, unit="beam points")
+    by_map = {name: [] for name in BEAM_MAPS}
+    for (name, _fw), r in zip(tasks, corrs):
+        by_map[name].append(r)
+    peaks = [_peak(BEAM_LADDER, by_map[name]) for name in BEAM_MAPS]
     return float(np.median(peaks))
+
+
+def _native_tau353(config):
+    """Planck's native nside-2048 TAU353 column, read once at its own
+    stored precision (float32) and shared read-only by `measure_beam`'s
+    115 pieces (`stage_planck`'s own read of this file is a separate,
+    already block-averaged nside-256 pass and shares nothing with this
+    array)."""
+    with fits.open(_planck_path(config), memmap=True) as hd:
+        tau = np.asarray(hd[1].data["TAU353"], dtype=np.float32)
+    tau[tau <= BAD / 2.0] = np.nan
+    return tau
 
 
 def stage_planck(config):
@@ -335,15 +375,16 @@ def stage_planck(config):
     return out
 
 
-def build_calibration(config):
+def build_calibration(config, planck, stage=None):
     """Fits `A_K = a_tau * tau353` through the origin, region-balanced,
     over every HGBS-covered region; measures Planck's beam by cross-
     correlation; fits the within-region scatter model `sigma_within^2 =
     s0^2 + (f*A)^2` over 20 column bins; and cross-validates the
     coefficient by holding out one region at a time, whose scatter is
-    `sigma_region_frac`. Returns the calibration dict written to the
-    survey calibration product."""
-    planck = stage_planck(config)
+    `sigma_region_frac`. `planck` is `stage_planck`'s own block-averaged
+    product, read once by `build` and passed in here (and to
+    `build_column`) rather than re-read per caller. Returns the
+    calibration dict written to the survey calibration product."""
     hgbs = load_hgbs(config)
     regs = sorted(hgbs)
     if not regs:
@@ -354,6 +395,12 @@ def build_calibration(config):
 
     a_tau = _origin_fit([tau[r] for r in regs], [ak[r] for r in regs])
 
+    # Held-out cross-validation: ~N_REGIONS refits of a weighted sum over
+    # already-compact per-region arrays, microseconds each -- the shared
+    # pool's own spin-up (worker processes importing numpy/scipy/astropy
+    # fresh) costs far more than this loop ever would, so it stays a plain
+    # loop; the piece axis below (the ladder's 115 real convolutions) is
+    # where parallelism actually pays for itself.
     cv_frac = {}
     for held in regs:
         others = [r for r in regs if r != held]
@@ -386,7 +433,7 @@ def build_calibration(config):
     sigma_within_s0 = float(np.sqrt(max(coeffs[0], 0.0)))
     sigma_within_f = float(np.sqrt(max(coeffs[1], 0.0)))
 
-    fwhm_arcmin = measure_beam(config)
+    fwhm_arcmin = measure_beam(config, _native_tau353(config), stage=stage)
     n_beams_per_pixel = float(PIXAREA_DEG2 / (1.133 * (fwhm_arcmin / 60.0) ** 2))
 
     return {"a_tau": float(a_tau), "sigma_within_s0": sigma_within_s0,
@@ -416,26 +463,53 @@ def _write_calibration(config, cal):
     return path
 
 
-def build_column(config, a_tau, sigma_within_s0, sigma_within_f, sigma_region_frac,
-                  n_beams_per_pixel):
+def _column_block(piece, pix, tau, err_tau, a_tau, sigma_within_s0, sigma_within_f,
+                   sigma_region_frac, n_beams_per_pixel):
+    """One contiguous block of admitted sightlines: `A_K`, its
+    uncertainty, and the block's own galactic coordinates -- the exact
+    per-sightline arithmetic `build_column` used to run on the whole
+    survey array at once, sliced to `piece`'s `(lo, hi)` bounds so the
+    survey's sightline axis is cut into pieces (COMMON.md's ruling) like
+    every other array here."""
+    lo, hi = piece
+    s = slice(lo, hi)
+    a_col = a_tau * tau[s]
+    sig_stat = a_tau * err_tau[s] / np.sqrt(n_beams_per_pixel)
+    sig_within = np.sqrt(sigma_within_s0 ** 2 + (sigma_within_f * a_col) ** 2)
+    sig_region = sigma_region_frac * a_col
+    sigma = np.sqrt(sig_stat ** 2 + sig_within ** 2 + sig_region ** 2)
+    l_deg, b_deg = hp.pix2ang(NSIDE, pix[s], nest=True, lonlat=True)
+    return a_col, sigma, l_deg, b_deg
+
+
+def build_column(config, planck, a_tau, sigma_within_s0, sigma_within_f, sigma_region_frac,
+                  n_beams_per_pixel, stage=None):
     """Per admitted nside-256 sightline: `A = a_tau * tau353` and its
     uncertainty in quadrature -- the arm's own statistical term (Planck's
     tau error, reduced by the beams packed into the pixel), the within-
     beam dispersion, and the region-to-region scatter as a fraction of
-    `A` (SPEC_PRIORS.md 1.1/1.2)."""
+    `A` (SPEC_PRIORS.md 1.1/1.2). `planck` is `build`'s own single read
+    of `stage_planck`'s product, not a second one here. The survey's
+    admitted-pixel count is small today (thousands on a slice root, up
+    to the low hundreds of thousands at the full 30-region footprint),
+    so this stage's own cost is well under 30 s even unchunked; it is
+    cut into pieces anyway, over sightline blocks, to match COMMON.md's
+    ruling and the full footprint's size."""
     pix = _admitted_pixels(config)
-    planck = stage_planck(config)
     tau = planck["TAU353"][pix]
     err_tau = planck["ERR_TAU"][pix]
     temp = planck["TEMP"][pix]
 
-    a_col = a_tau * tau
-    sig_stat = a_tau * err_tau / np.sqrt(n_beams_per_pixel)
-    sig_within = np.sqrt(sigma_within_s0 ** 2 + (sigma_within_f * a_col) ** 2)
-    sig_region = sigma_region_frac * a_col
-    sigma = np.sqrt(sig_stat ** 2 + sig_within ** 2 + sig_region ** 2)
+    fn = functools.partial(_column_block, pix=pix, tau=tau, err_tau=err_tau, a_tau=a_tau,
+                            sigma_within_s0=sigma_within_s0, sigma_within_f=sigma_within_f,
+                            sigma_region_frac=sigma_region_frac, n_beams_per_pixel=n_beams_per_pixel)
+    blocks = pieces_module.run(fn, pieces_module.slices(pix.size, config.n_jobs), config.n_jobs,
+                                stage=stage, unit="sightline blocks")
+    a_col = np.concatenate([b[0] for b in blocks])
+    sigma = np.concatenate([b[1] for b in blocks])
+    l_deg = np.concatenate([b[2] for b in blocks])
+    b_deg = np.concatenate([b[3] for b in blocks])
 
-    l_deg, b_deg = hp.pix2ang(NSIDE, pix, nest=True, lonlat=True)
     path = product_path(config, "sky/derived", "planck", "column", "sightline")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
@@ -458,10 +532,11 @@ def build(config, regions=None):
     both products are survey-wide (SPEC_PRIORS.md 1.1's Planck arm covers
     the whole footprint, not just the Herschel-overlapping regions)."""
     with progress_module.Stage("sky.derived.planck_column") as st:
-        cal = build_calibration(config)
+        planck = stage_planck(config)
+        cal = build_calibration(config, planck, stage=st)
         _write_calibration(config, cal)
-        path, n_pix = build_column(config, cal["a_tau"], cal["sigma_within_s0"], cal["sigma_within_f"],
-                                    cal["sigma_region_frac"], cal["n_beams_per_pixel"])
+        path, n_pix = build_column(config, planck, cal["a_tau"], cal["sigma_within_s0"], cal["sigma_within_f"],
+                                    cal["sigma_region_frac"], cal["n_beams_per_pixel"], stage=st)
         st.done(path, pixels=n_pix, a_tau=float(cal["a_tau"]))
 
 
