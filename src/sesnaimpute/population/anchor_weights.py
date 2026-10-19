@@ -1271,7 +1271,13 @@ def build(config, regions=None):
     # every region, tiny or huge).
     all_touching_names = set()
     for region in all_region_names:
-        tiles_r = _read_tiles(config, region)
+        try:
+            tiles_r = _read_tiles(config, region)
+        except FileNotFoundError as exc:
+            # the same rule as the survey pool below: a region whose tiles
+            # are absent is named and left out, never a stop for the rest
+            print("population.anchor_weights: cluster scan skipping %r (%s)" % (region, exc))
+            continue
         touching_r = anchor_observed._clusters_touching_region(
             tiles_r["tile_l_deg"], tiles_r["tile_b_deg"], tiles_r["l_star_deg"], clusters)
         all_touching_names.update(clusters["name"][touching_r].tolist())
@@ -1290,6 +1296,11 @@ def build(config, regions=None):
     (w_pool_g, w_pool_ks, pool_g_edges, ks_pool_lower, ks_pool_upper, pool_skipped, n_pool_ks,
      transported_ks_slope, deep_slope_regions) = survey_pooled_weights(
         config, all_region_names, clusters, members_all, cache=cache)
+    # the pool pass held every region's own tile counts; only the regions
+    # this call fits need them again (one region's working set at a time)
+    for region in list(cache):
+        if region not in region_names:
+            del cache[region]
     print(
         "prior.anchor_weights: survey pool over %d regions (skipped %s): "
         "W_POOL_G=[%.3f,%.3f] W_POOL_KS=[%.3f,%.3f] "
