@@ -8,9 +8,11 @@ already carries at `sky/download/spitzer_coverage/spitzer_coverage_masks.hdf5`
 data root under the tree `IMPLEMENTATION.md` section 1a names for external
 bytes). For each region and each of the five Spitzer bands (I1-I4, M1; the
 three 2MASS bands are all-sky and are not part of this product), it measures
-the fraction of every nside-512 and every nside-256 HEALPix pixel the
-region's own mosaics touch that falls on a covered mask pixel, and writes one
-`hpx512` and one `sightline` product per region.
+the fraction of every nside-512 HEALPix pixel the region's own mosaics touch
+that falls on a covered mask pixel, and writes one `hpx512` product per
+region -- the coverage fraction per band the depth grid, atlas and knot rate
+read. Pixel admission (which pixels carry a SESNA source) is `granules.build`'s
+own job, from the curated catalogue, not this product's.
 """
 
 import os
@@ -37,7 +39,10 @@ SPITZER_BANDS = ("I1", "I2", "I3", "I4", "M1")
 for _band in SPITZER_BANDS:
     assert BANDS_BY_KEY[_band].survey in ("IRAC", "MIPS")
 
-NSIDE_SIGHTLINE = 256
+# The coarse grain the mask-overlap search batches candidates on before
+# dividing down to the published nside-512 pixel: not an output resolution
+# of this product (there is no nside-256 "sightline" product any more).
+NSIDE_CANDIDATE256 = 256
 NSIDE_HPX512 = 512
 
 # Candidate-grain padding and supersampling density, lifted from the old
@@ -219,7 +224,7 @@ def _candidate_pix256(fields_by_band):
             gal = center.galactic
             vec = hp.ang2vec(float(gal.l.deg), float(gal.b.deg), lonlat=True)
             radius_rad = np.radians(radius_deg * CANDIDATE_PAD_FACTOR + CANDIDATE_PAD_MARGIN_DEG)
-            pix_parts.append(hp.query_disc(NSIDE_SIGHTLINE, vec, radius_rad, nest=True, inclusive=True))
+            pix_parts.append(hp.query_disc(NSIDE_CANDIDATE256, vec, radius_rad, nest=True, inclusive=True))
     if not pix_parts:
         return np.empty(0, dtype=np.int64)
     return np.unique(np.concatenate(pix_parts)).astype(np.int64)
@@ -231,12 +236,11 @@ def _children(pix, factor):
 
 
 def _supersampled_fraction(pix256_batch, fields_by_band):
-    """`(frac256, frac512)`, each `(n_pix, n_band)` float64, for one batch
-    of nside-256 candidate grains: the mean, over each grain's own
-    `SAMPLING_NSIDE` children, of the per-band coverage boolean -- both
-    nsides read off the same hi-res sample array, so the nside-512 rows
-    aggregate exactly into their nside-256 parent."""
-    pix512 = _children(pix256_batch, (NSIDE_HPX512 // NSIDE_SIGHTLINE) ** 2)
+    """`(frac512, pix512)`, `frac512` `(n_pix, n_band)` float64, for one
+    batch of nside-256 candidate grains: the mean, over each nside-512
+    child's own `SAMPLING_NSIDE` grandchildren, of the per-band coverage
+    boolean."""
+    pix512 = _children(pix256_batch, (NSIDE_HPX512 // NSIDE_CANDIDATE256) ** 2)
     hi_factor = (SAMPLING_NSIDE // NSIDE_HPX512) ** 2
     hi_pix = _children(pix512, hi_factor)
     gl, gb = hp.pix2ang(SAMPLING_NSIDE, hi_pix, nest=True, lonlat=True)
@@ -244,38 +248,35 @@ def _supersampled_fraction(pix256_batch, fields_by_band):
     ra_hi, dec_hi = icrs.ra.deg, icrs.dec.deg
 
     n512 = pix512.size
-    n256 = pix256_batch.size
     frac512 = np.zeros((n512, len(SPITZER_BANDS)), dtype=np.float64)
-    frac256 = np.zeros((n256, len(SPITZER_BANDS)), dtype=np.float64)
     for j, band in enumerate(SPITZER_BANDS):
         fields = fields_by_band[band]
         if not fields:
             continue  # band never observed in this region: fraction stays 0
         covered_hi = _band_covered(ra_hi, dec_hi, fields)
         frac512[:, j] = covered_hi.reshape(n512, hi_factor).mean(axis=1)
-        frac256[:, j] = covered_hi.reshape(n256, 4 * hi_factor).mean(axis=1)
-    return frac256, frac512, pix512
+    return frac512, pix512
 
 
 def _region_coverage(fields_by_band):
-    """`(pix256, frac256, pix512, frac512)` for one region: candidate
-    grains at both resolutions and their per-band covered fraction,
-    batched over `PIX256_BATCH` nside-256 grains at a time."""
+    """`(pix512, frac512)` for one region: the nside-512 grains any of the
+    region's field masks touch and their per-band covered fraction,
+    batched over `PIX256_BATCH` nside-256 candidate grains (`NSIDE_CANDIDATE256`)
+    at a time -- the candidate grain is only a batching unit here, not a
+    published resolution of this product."""
     pix256 = _candidate_pix256(fields_by_band)
     if pix256.size == 0:
         empty = np.empty((0, len(SPITZER_BANDS)), dtype=np.float32)
-        return pix256, empty, pix256, empty
-    frac256_parts, frac512_parts, pix512_parts = [], [], []
+        return pix256, empty
+    frac512_parts, pix512_parts = [], []
     for start in range(0, pix256.size, PIX256_BATCH):
         batch = pix256[start:start + PIX256_BATCH]
-        f256, f512, p512 = _supersampled_fraction(batch, fields_by_band)
-        frac256_parts.append(f256)
+        f512, p512 = _supersampled_fraction(batch, fields_by_band)
         frac512_parts.append(f512)
         pix512_parts.append(p512)
-    frac256 = np.concatenate(frac256_parts).astype(np.float32)
     pix512 = np.concatenate(pix512_parts)
     frac512 = np.concatenate(frac512_parts).astype(np.float32)
-    return pix256, frac256, pix512, frac512
+    return pix512, frac512
 
 
 def _write(config, region, granule, pix, frac):
@@ -293,17 +294,15 @@ def _write(config, region, granule, pix, frac):
 
 def _build_one_region(config, region, masks_path):
     fields_by_band = _field_masks(masks_path, region)
-    pix256, frac256, pix512, frac512 = _region_coverage(fields_by_band)
-    _write(config, region, "sightline", pix256, frac256)
+    pix512, frac512 = _region_coverage(fields_by_band)
     _write(config, region, "hpx512", pix512, frac512)
-    return dict(region=region, n_sightline=int(pix256.size), n_hpx512=int(pix512.size),
+    return dict(region=region, n_hpx512=int(pix512.size),
                 mean_frac=frac512.mean(axis=0) if frac512.size else np.zeros(len(SPITZER_BANDS)))
 
 
 def build(config, regions=None):
-    """Writes each region's `coverage_spitzer_hpx512` and
-    `coverage_spitzer_sightline` products. Regions run in a joblib pool;
-    each worker reads only its own region's field masks."""
+    """Writes each region's `coverage_spitzer_hpx512` product. Regions run
+    in a joblib pool; each worker reads only its own region's field masks."""
     masks_path = _masks_path(config)
     if not os.path.exists(masks_path):
         raise FileNotFoundError(
@@ -323,7 +322,6 @@ def build(config, regions=None):
 
         rows = Parallel(n_jobs=config.n_jobs)(delayed(_one)(name) for name in names)
         st.done(None, regions=n_regions,
-                sightline_pixels=sum(r["n_sightline"] for r in rows),
                 hpx512_pixels=sum(r["n_hpx512"] for r in rows))
 
 

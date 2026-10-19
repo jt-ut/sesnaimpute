@@ -3,14 +3,10 @@
 Stores, once per catalogued source, its nside-256 and nside-512 galactic
 NESTED HEALPix pixel, its sightline row (the row into its region's own
 sorted source-bearing nside-256 pixels), its survey-wide sightline id, and
-its region. A nside-256 pixel is admitted if it carries at least one
-SESNA source (SPEC_PRIORS.md section 0.2's admission definition); every
-nside-512 child of an admitted nside-256 pixel is admitted too. A pixel
-with positive Spitzer mosaic support but no catalogued source is no
-longer admitted (owner, 2026-09-06) -- mosaic-support-only pixels fed no
-source-keyed product, so admitting them only inflated the granule map's
-own footprint; each pixel's own mosaic-support flag is kept regardless
-(`SESNA_MOSAIC_SUPPORTED`), for a reader that still wants it.
+its region. Admission is sources, full stop (owner, 2026-09-06): a
+nside-256 pixel is admitted if it carries at least one SESNA source
+(SPEC_PRIORS.md section 0.2's admission definition), and every nside-512
+child of an admitted nside-256 pixel is admitted too.
 """
 
 import os
@@ -54,27 +50,6 @@ def _iter_catalog(config, region, chunk_rows=CHUNK_ROWS):
                    np.asarray(f["GAL_L_DEG"][start:stop], dtype=np.float64),
                    np.asarray(f["GAL_B_DEG"][start:stop], dtype=np.float64),
                    np.asarray(f["NAME"][start:stop]).astype(NAME_DTYPE))
-
-
-_COVERAGE_GRANULE = {256: "sightline", 512: "hpx512"}
-
-
-def _supported_pixels(config, region, nside):
-    """Sorted nside-`nside` galactic NESTED pixels with positive coverage
-    in any Spitzer band for `region` (IMPLEMENTATION.md section 1,
-    SPEC_PRIORS.md section 2.1), read from that region's own
-    `coverage_spitzer_{sightline,hpx512}` product."""
-    granule = _COVERAGE_GRANULE[nside]
-    path = product_path(config, "sky/derived", "spitzer", "coverage", granule, region=region)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "granules.build: no coverage product at %s -- run "
-            "sesnaimpute.sky.derived.coverage first" % path)
-    with h5py.File(path, "r") as f:
-        pix = np.asarray(f["HPX_PIX"][:], dtype=np.int64)
-        frac = np.asarray(f["FRAC"][:], dtype=np.float64)
-    positive = np.any(frac > 0.0, axis=1) if frac.size else np.zeros(0, dtype=bool)
-    return np.sort(pix[positive])
 
 
 def _region_arrays(config, region):
@@ -164,11 +139,9 @@ def build(config, regions=None):
             source_pix256 = np.unique(arrays["pix256"])
             hpx256_row = np.searchsorted(source_pix256, arrays["pix256"])
             sightline_id = sightline_offset + hpx256_row
-            supported256 = _supported_pixels(config, region, NSIDE_256)
-            supported512 = _supported_pixels(config, region, NSIDE_512)
             per_region.append(dict(
                 region=region, code=code, source_offset=source_offset, n=n,
-                source_pix256=source_pix256, supported256=supported256, supported512=supported512,
+                source_pix256=source_pix256,
                 hpx256_row=hpx256_row, sightline_id=sightline_id, **arrays))
             sightline_offset += source_pix256.size
             source_offset += n
@@ -202,45 +175,17 @@ def build(config, regions=None):
 
             # admission (owner, 2026-09-06): a pixel carries at least one
             # SESNA source, full stop; every nside-512 child of an admitted
-            # nside-256 pixel is admitted too. `direct256`/`direct512` (the
-            # mosaic-support-only pixels) no longer widen admission -- they
-            # are kept only to flag `SESNA_MOSAIC_SUPPORTED` below and to
-            # report the before/after admission counts.
-            direct256 = np.unique(np.concatenate([r["supported256"] for r in per_region])) \
-                if per_region else np.empty(0, dtype=np.int64)
+            # nside-256 pixel is admitted too.
             all_source_pix256 = np.concatenate([r["pix256"] for r in per_region]) if n_sources else np.empty(0, "i8")
-            source256, counts256 = np.unique(all_source_pix256, return_counts=True)
-            healpix256_before = np.union1d(source256, direct256)
-            healpix256 = source256
+            healpix256, n_rows256 = np.unique(all_source_pix256, return_counts=True)
             healpix512 = (healpix256[:, None] * 4 + np.arange(4, dtype=np.int64)[None, :]).reshape(-1) \
                 if healpix256.size else np.empty(0, dtype=np.int64)
-            healpix512_before = (healpix256_before[:, None] * 4 + np.arange(4, dtype=np.int64)[None, :]).reshape(-1) \
-                if healpix256_before.size else np.empty(0, dtype=np.int64)
-            direct512 = np.unique(np.concatenate([r["supported512"] for r in per_region])) \
-                if per_region else np.empty(0, dtype=np.int64)
             all_source_pix512 = np.concatenate([r["pix512"] for r in per_region]) if n_sources else np.empty(0, "i8")
             source512, counts512 = np.unique(all_source_pix512, return_counts=True)
 
-            print("granules.build: admission (SESNA-source pixels only): "
-                  "nside-256 %d -> %d (dropped %d mosaic-support-only), "
-                  "nside-512 %d -> %d (dropped %d)"
-                  % (healpix256_before.size, healpix256.size, healpix256_before.size - healpix256.size,
-                     healpix512_before.size, healpix512.size, healpix512_before.size - healpix512.size))
-            for r in per_region:
-                if r["region"] != "NGC 7129":
-                    continue
-                before256 = np.union1d(r["source_pix256"], r["supported256"])
-                before512 = (before256[:, None] * 4 + np.arange(4, dtype=np.int64)[None, :]).reshape(-1) \
-                    if before256.size else np.empty(0, dtype=np.int64)
-                after512 = (r["source_pix256"][:, None] * 4 + np.arange(4, dtype=np.int64)[None, :]).reshape(-1) \
-                    if r["source_pix256"].size else np.empty(0, dtype=np.int64)
-                print("granules.build: NGC 7129 admission: nside-256 %d -> %d, "
-                      "nside-512 %d -> %d"
-                      % (before256.size, r["source_pix256"].size, before512.size, after512.size))
+            print("granules.build: admission (SESNA-source pixels): "
+                  "nside-256 %d, nside-512 %d" % (healpix256.size, healpix512.size))
 
-            n_rows256 = np.zeros(healpix256.shape, dtype=np.int64)
-            loc = np.searchsorted(healpix256, source256)
-            n_rows256[loc] = counts256
             n_rows512 = np.zeros(healpix512.shape, dtype=np.int64)
             if healpix512.size:
                 loc512 = np.searchsorted(healpix512, source512)
@@ -249,31 +194,27 @@ def build(config, regions=None):
             hp256 = f.create_group("healpix256")
             _region_dataset(hp256, "HPX_PIX_256", healpix256)
             _region_dataset(hp256, "N_SOURCE_ROWS", n_rows256)
-            _region_dataset(hp256, "SESNA_MOSAIC_SUPPORTED", np.isin(healpix256, direct256))
 
             hp512 = f.create_group("healpix512")
             _region_dataset(hp512, "HPX_PIX_512", healpix512)
             _region_dataset(hp512, "HPX_PIX_256", healpix512 // 4 if healpix512.size else healpix512)
             _region_dataset(hp512, "N_SOURCE_ROWS", n_rows512)
-            _region_dataset(hp512, "SESNA_MOSAIC_SUPPORTED", np.isin(healpix512, direct512))
 
+            # association rows are exactly the source-bearing pixels: every
+            # row here has N_SOURCE_ROWS > 0.
             assoc = f.create_group("association")
             for level, healpix, key in ((256, "pix256", "HPX_PIX_256"), (512, "pix512", "HPX_PIX_512")):
                 rows = []
                 for r in per_region:
                     pix = r["pix256"] if level == 256 else r["pix512"]
-                    supported = r["supported256"] if level == 256 else r["supported512"]
                     uniq, cnt = np.unique(pix, return_counts=True)
-                    count_of = dict(zip(uniq.tolist(), cnt.tolist()))
-                    members = sorted(set(count_of) | set(supported.tolist()))
-                    for p in members:
-                        rows.append((p, r["code"], count_of.get(p, 0), p in set(supported.tolist())))
+                    for p, c in zip(uniq.tolist(), cnt.tolist()):
+                        rows.append((p, r["code"], c))
                 rows.sort(key=lambda row: (row[0], row[1]))
                 group = assoc.create_group(f"region_healpix{level}")
                 _region_dataset(group, key, np.array([row[0] for row in rows], dtype=np.int64))
                 _region_dataset(group, "REGION_CODE", np.array([row[1] for row in rows], dtype=np.int16))
                 _region_dataset(group, "N_SOURCE_ROWS", np.array([row[2] for row in rows], dtype=np.int64))
-                _region_dataset(group, "SESNA_MOSAIC_SUPPORTED", np.array([row[3] for row in rows], dtype=bool))
 
         st.done(out_path, regions=n_regions, sources=n_sources,
                 healpix256=int(healpix256.size), healpix512=int(healpix512.size))
