@@ -147,11 +147,11 @@ bright field stars carrying circumstellar 8 micron emission with no 4.5
 micron excess.
 """
 
+import functools
 import os
 
 import h5py
 import numpy as np
-from joblib import Parallel, delayed
 from scipy.interpolate import interp1d
 from scipy.stats import binned_statistic
 
@@ -159,6 +159,7 @@ from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import constants
 from sesnaimpute import definitions
+from sesnaimpute import pieces as pieces_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
@@ -259,12 +260,15 @@ MAD_TO_SIGMA = 1.4826
 # 1. the photospheric colour relation, external, from pooled TRILEGAL stars
 # ---------------------------------------------------------------------------
 
-def _chunks(seq, size):
-    """`seq` split into consecutive chunks of at most `size` items
-    (CODING_RULES.md 10a: never hold every region's own arrays resident
-    at once; process the thirty regions in chunks of the worker cap)."""
-    seq = list(seq)
-    return [seq[i:i + size] for i in range(0, len(seq), size)]
+def _coarse_pieces(n_items, n_jobs):
+    """One block per worker, not `pieces.PIECES_PER_WORKER` blocks per
+    worker (COMMON.md 2026-10-19 ruling): every piece in this module costs
+    the same (a region's read, or a block of a region's own eligible
+    sources, is uniform elementwise work), so a fine grain only pays the
+    per-task dispatch and result-pickling cost without smoothing any
+    unevenness that does not exist here."""
+    min_items = max(1, -(-n_items // max(1, int(n_jobs))))
+    return pieces_module.slices(n_items, n_jobs, min_items=min_items)
 
 
 def _field_star_path(config, region):
@@ -290,9 +294,10 @@ def load_field_star_colours(config, region_names):
     two `(n_region,)` colour columns -- not the full flux array -- ever
     cross back to this process; those columns are written straight into
     two arrays preallocated to the survey total (CODING_RULES.md 10a),
-    never pooled through a growing list and `np.concatenate` (no region's
-    flux array, and no other region's colours, are held at once beyond one
-    `n_jobs`-wide chunk).
+    never pooled through a growing list and `np.concatenate`. This is a
+    survey-wide stage (one curve for every region); the region is its own
+    natural piece here, run through the one shared pool, `pieces.run`
+    (COMMON.md 2026-10-19 ruling).
     """
     def _one_region(region):
         with h5py.File(_field_star_path(config, region), "r") as f:
@@ -309,12 +314,12 @@ def load_field_star_colours(config, region_names):
     c48_all = np.empty(sum(counts), dtype=np.float64)
 
     cursor = 0
-    for chunk in _chunks(region_names, config.n_jobs):
-        for c12, c48 in Parallel(n_jobs=config.n_jobs)(delayed(_one_region)(r) for r in chunk):
-            n = c12.size
-            c12_all[cursor:cursor + n] = c12
-            c48_all[cursor:cursor + n] = c48
-            cursor += n
+    for region, (c12, c48) in zip(region_names,
+                                   pieces_module.run(_one_region, region_names, config.n_jobs)):
+        n = c12.size
+        c12_all[cursor:cursor + n] = c12
+        c48_all[cursor:cursor + n] = c48
+        cursor += n
 
     finite = np.isfinite(c12_all) & np.isfinite(c48_all)
     return c12_all[finite], c48_all[finite]
@@ -389,13 +394,42 @@ def _reddened(f0, a_col, kappa):
     return f0 * 10.0 ** (-0.4 * a_col * kappa)
 
 
+def _q_block(piece, f1, f2, a_col, kappa1, kappa2, kappa4, colour_knots,
+             colour45_median, f_lim8, zp1, zp2, zp4):
+    """One block of this region's own eligible sources (COMMON.md
+    2026-10-19 ruling): the de-reddened colour, the photospheric
+    prediction and `q` -- row-local, vectorised over the block. The
+    region-wide inputs (the eligible arrays, the colour relation's own
+    knots, the survey's constant [3.6]-[4.5] median) are read-only and
+    bound into this function by `functools.partial`, never rebuilt per
+    block. Returns `(q, f2_pred, f4_pred)` for this block."""
+    sl = slice(*piece)
+    f1_0 = _dereddened(f1[sl], a_col[sl], kappa1[sl])
+    f2_0 = _dereddened(f2[sl], a_col[sl], kappa2[sl])
+    c12 = -2.5 * np.log10(f1_0 / zp1) + 2.5 * np.log10(f2_0 / zp2)
+
+    centers, medians, widths = colour_knots
+    c48_pred, _ = predict_colour_48(c12, centers, medians, widths)
+    f4_pred_0 = _predicted_flux(f2_0, c48_pred, zp2, zp4)
+    f4_pred = _reddened(f4_pred_0, a_col[sl], kappa4[sl])
+
+    f2_pred_0 = _predicted_flux(f1_0, colour45_median, zp1, zp2)
+    f2_pred = _reddened(f2_pred_0, a_col[sl], kappa2[sl])
+
+    q = f_lim8[sl] / f4_pred
+    return q, f2_pred, f4_pred
+
+
 def region_measurement(config, region, colour_knots, colour45_median):
     """One region's eligible sources (module docstring: every I1+I2
     measured source, the curve's own denominator): `q` and the seven
     arrays the survey-wide excess tests are built from -- `(q, f2,
     f2_pred, f4, f4_pred, sigma2, sigma4, have_8um)`, `(m,)` each, `m` the
     region's own eligible count -- vectorised over the region's sources,
-    no Python loop. `have_8um` flags the subset with a measured I4 flux as
+    no Python loop (the de-reddening, colour-relation lookup and `q`
+    calculation, `_q_block`, cut into blocks of the region's own eligible
+    sources and run through the one shared pool, COMMON.md 2026-10-19
+    ruling). `have_8um` flags the subset with a measured I4 flux as
     well (`EXCESS_BAND_IDX`); `f4`/`sigma4` hold the catalogue's own
     substitute (a completeness-limit flux, `catalog.curated`'s own
     docstring) where it is False, read by no excess test. The excess
@@ -447,34 +481,25 @@ def region_measurement(config, region, colour_knots, colour45_median):
     kappa = selection_module.kappa_hybrid(config, selection_module.law_dense_weight(a_col))
     kappa1, kappa2, kappa4 = kappa[:, IDX_I1], kappa[:, IDX_I2], kappa[:, IDX_I4]
 
-    # de-redden the observed 3.6 and 4.5 micron fluxes before the colour
-    # relation reads them (module docstring, "De-reddening"): the
-    # relation is built from TRILEGAL's own undimmed fluxes
-    f1_0 = _dereddened(f1, a_col, kappa1)
-    f2_0 = _dereddened(f2, a_col, kappa2)
-    c12 = -2.5 * np.log10(f1_0 / zp1) + 2.5 * np.log10(f2_0 / zp2)
-
-    # the photospheric prediction, in the de-reddened frame, reddened
-    # back with kappa_8 to the observed frame the catalogue's own flux
-    # and sigma live in (module docstring)
-    centers, medians, widths = colour_knots
-    c48_pred, _ = predict_colour_48(c12, centers, medians, widths)
-    f4_pred_0 = _predicted_flux(f2_0, c48_pred, zp2, zp4)
-    f4_pred = _reddened(f4_pred_0, a_col, kappa4)
-
-    # the 4.5 micron excess's own prediction (SPEC_PRIORS.md section 4,
-    # "disks separated from PAH"): the population's constant
-    # photospheric [3.6]-[4.5], de-reddened frame, reddened back with
-    # kappa_4.5
-    f2_pred_0 = _predicted_flux(f1_0, colour45_median, zp1, zp2)
-    f2_pred = _reddened(f2_pred_0, a_col, kappa2)
-
     # q reads the predicted photospheric 8 micron flux, never the
     # observed one (module docstring; the atlas factor tables read it the
     # same way), so every eligible source has a q whether or not it has
     # an 8 micron measurement
     f_lim8 = limits_module.limits(config, region)[eligible, IDX_I4]
-    q = f_lim8 / f4_pred
+
+    # de-reddening, the colour-relation lookup and q (module docstring,
+    # "De-reddening"; `_q_block`) over blocks of this region's own
+    # eligible sources, through the one shared pool (COMMON.md 2026-10-19
+    # ruling) -- region-wide read-only inputs bound in by
+    # `functools.partial`, a block carries only its own index range.
+    fn = functools.partial(
+        _q_block, f1=f1, f2=f2, a_col=a_col, kappa1=kappa1, kappa2=kappa2, kappa4=kappa4,
+        colour_knots=colour_knots, colour45_median=colour45_median, f_lim8=f_lim8,
+        zp1=zp1, zp2=zp2, zp4=zp4)
+    blocks = pieces_module.run(fn, _coarse_pieces(n_eligible, config.n_jobs), config.n_jobs)
+    q = np.concatenate([b[0] for b in blocks])
+    f2_pred = np.concatenate([b[1] for b in blocks])
+    f4_pred = np.concatenate([b[2] for b in blocks])
 
     return q, f2, f2_pred, f4, f4_pred, sigma2, sigma4, have_8um
 
@@ -762,8 +787,10 @@ def build(config, regions=None):
     it, are now region-specific and quiescent-region-specific
     respectively. The floor needs at least one of
     `QUIESCENT_FLOOR_REGIONS` in `regions` (`build_curve` raises
-    otherwise). The regions are read in chunks of at most
-    `config.n_jobs` at a time (CODING_RULES.md 10a)."""
+    otherwise). Regions run one after another, never two regions' own
+    catalogue arrays resident at once (COMMON.md 2026-10-19 ruling); the
+    work inside each region is cut into blocks, not the region loop
+    itself (`region_measurement`)."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     st = progress.Stage("population.pahc_curve")
 
@@ -776,13 +803,10 @@ def build(config, regions=None):
           f"(width {COLOUR_BIN_WIDTH_MAG} mag), "
           f"[3.6]-[4.5] median={colour45_median:.4f} mag", flush=True)
 
-    chunks = list(_chunks(region_names, config.n_jobs))
     results = []
-    for i_chunk, chunk in enumerate(chunks, start=1):
-        results.extend(Parallel(n_jobs=config.n_jobs)(
-            delayed(region_measurement)(config, region, knots, colour45_median)
-            for region in chunk))
-        st.tick(i_chunk, len(chunks), "region chunks")
+    for i_region, region in enumerate(region_names, start=1):
+        results.append(region_measurement(config, region, knots, colour45_median))
+        st.tick(i_region, len(region_names), "regions")
     q = np.concatenate([r[0] for r in results]) if results else np.empty(0)
     f2 = np.concatenate([r[1] for r in results]) if results else np.empty(0)
     f2_pred = np.concatenate([r[2] for r in results]) if results else np.empty(0)
