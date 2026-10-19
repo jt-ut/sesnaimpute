@@ -39,6 +39,7 @@ import functools
 import gzip
 import os
 import tempfile
+import zlib
 
 import h5py
 import numpy as np
@@ -509,7 +510,11 @@ def _region_join(per_map, cloud_regions, herschel_regions, n_jobs):
 
         # Block bootstrap over BOOT_TILE_ARCSEC tiles for the fit's own
         # sampling uncertainty.
-        rng = np.random.default_rng(abs(hash(reg)) % (2 ** 31))
+        # Python's string hash is randomised per process (PYTHONHASHSEED);
+        # the block bootstrap needs the same draw every run for the
+        # region-choice ordering of the stage pool not to change its
+        # numbers, so the seed comes from a fixed, non-randomised hash.
+        rng = np.random.default_rng(zlib.crc32(reg.encode("utf-8")) % (2 ** 31))
         Wd = rng.multinomial(n_tiles, np.full(n_tiles, 1.0 / n_tiles),
                              size=N_BOOT).astype(np.float32)
         acc = (Wd @ tile).reshape(N_BOOT, ns, N_DT + 2)
