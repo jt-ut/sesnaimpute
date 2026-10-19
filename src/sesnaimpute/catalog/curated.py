@@ -24,6 +24,7 @@ map, rescaled per region and band, as the per-source 50%-completeness
 limit for the five Spitzer bands.
 """
 
+import functools
 import os
 import re
 
@@ -36,6 +37,7 @@ from sesnaimpute import batches as batches_module
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
+from sesnaimpute import pieces as pieces_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
@@ -86,17 +88,29 @@ DEFAULT_NN_K = 5
 _DTYPE_MAPPER = {"CHAR": str, "DOUBLE": float, "FLOAT": float, "INT": "Int64"}
 
 
-def _read_raw_delivery(path, select_columns, batch_budget_bytes=ROW_BATCH_BUDGET_BYTES):
+def _read_fwf_batch(path, colspecs, names, bounds):
+    """One row-batch's worth of fixed-width parsing (the pool's unit of
+    work): `pandas.read_fwf` reads only `bounds`'s own rows at
+    `colspecs`'s byte ranges, independent of every other batch.
+    """
+    start, stop = bounds
+    return pd.read_fwf(path, colspecs=colspecs, skiprows=5 + start, nrows=stop - start,
+                        header=None, names=names)
+
+
+def _read_raw_delivery(path, select_columns, n_jobs=1, batch_budget_bytes=ROW_BATCH_BUDGET_BYTES):
     """Reads one region's IPAC1 raw-delivery text file: 5 header lines
     (a `\\created` stamp, pipe-delimited fixed-width column names, dtypes,
     units, null-value sentinels), then one fixed-width row per source.
     `pandas.read_fwf` is asked for `select_columns`'s own byte ranges
     only -- the raw delivery carries many more columns than this module
     keeps, and parsing the ones it discards is the module's dominant
-    memory cost -- and is called once per row batch (rule 10b), each
-    batch's rows concatenated in file order. Returns the selected columns
-    as a `pandas.DataFrame` (missing values left as the file's own
-    sentinel, not NaN) and a `{column: sentinel}` map.
+    memory cost. Each row batch (rule 10b) is a row-local, independent
+    parse, so the batches are the pool's pieces (`pieces.run`,
+    `n_jobs` workers) rather than a serial list comprehension; results
+    come back in file order and are concatenated in that order. Returns
+    the selected columns as a `pandas.DataFrame` (missing values left as
+    the file's own sentinel, not NaN) and a `{column: sentinel}` map.
     """
     with open(path, "r") as f:
         head = [next(f) for _ in range(5)]
@@ -127,11 +141,9 @@ def _read_raw_delivery(path, select_columns, batch_budget_bytes=ROW_BATCH_BUDGET
         n_rows = sum(1 for _ in f) - 5
     row_bytes = int(sum(hi - lo for lo, hi in colspecs)) or 1
 
-    parts = [
-        pd.read_fwf(path, colspecs=colspecs, skiprows=5 + start, nrows=stop - start,
-                    header=None, names=names)
-        for start, stop in batches_module.batches(n_rows, row_bytes, budget_bytes=batch_budget_bytes)
-    ]
+    bounds = list(batches_module.batches(n_rows, row_bytes, budget_bytes=batch_budget_bytes))
+    fn = functools.partial(_read_fwf_batch, path, colspecs, names)
+    parts = pieces_module.run(fn, bounds, n_jobs, unit="row batches")
     df = pd.concat(parts, ignore_index=True) if len(parts) > 1 else parts[0]
     return df, navals
 
@@ -140,11 +152,29 @@ def _raw_catalog_path(config, region):
     return os.path.join(config.inputs["raw_catalogs"], f"{region}_catalog_ipac1.txt")
 
 
-def _median_nn_impute(ra_deg, dec_deg, source_mask, query_mask, values, k=DEFAULT_NN_K):
+def _query_tree_chunk(tree, vectors_query, k_eff, bounds):
+    """One block of query rows against `tree` (built once in the parent):
+    the pool's unit of work for the neighbour search, which is not
+    row-local to the raw delivery's own row blocks (a query row's nearest
+    neighbours can land anywhere in the region), so it is cut over query
+    rows instead -- each worker single-threaded (`workers=1`) since the
+    pool itself, not scipy's own thread pool, is this stage's
+    parallelism.
+    """
+    start, stop = bounds
+    _, idx = tree.query(vectors_query[start:stop], k=k_eff, workers=1)
+    if k_eff == 1:
+        idx = idx.reshape(-1, 1)
+    return idx
+
+
+def _median_nn_impute(ra_deg, dec_deg, source_mask, query_mask, values, n_jobs=1, k=DEFAULT_NN_K):
     """The median DCOMP90 of a source's `k` nearest sky neighbours (3-D
     unit-sphere Euclidean distance, distortion-free and wraparound-free,
-    searched with a k-d tree), used when the source has no DCOMP90 of its
-    own.
+    searched with a k-d tree built once here), used when the source has
+    no DCOMP90 of its own. The tree is built once, in this process; the
+    query is cut over query-row blocks and run on the shared pool
+    (`pieces.run`, `n_jobs` workers).
     """
     ra, dec = np.radians(ra_deg), np.radians(dec_deg)
     vectors = np.column_stack(
@@ -153,9 +183,11 @@ def _median_nn_impute(ra_deg, dec_deg, source_mask, query_mask, values, k=DEFAUL
     n_source = int(source_mask.sum())
     tree = cKDTree(vectors[source_mask])
     k_eff = min(k, n_source)
-    _, neighbor_idx = tree.query(vectors[query_mask], k=k_eff, workers=-1)
-    if k_eff == 1:
-        neighbor_idx = neighbor_idx.reshape(-1, 1)
+    vectors_query = vectors[query_mask]
+    bounds = pieces_module.slices(vectors_query.shape[0], n_jobs)
+    fn = functools.partial(_query_tree_chunk, tree, vectors_query, k_eff)
+    chunks = pieces_module.run(fn, bounds, n_jobs, unit="query rows")
+    neighbor_idx = np.concatenate(chunks, axis=0) if len(chunks) > 1 else chunks[0]
     source_values = values[source_mask]
     return np.median(source_values[neighbor_idx], axis=1)
 
@@ -172,7 +204,7 @@ def _assemble_region(config, region):
         if b.survey in ("IRAC", "MIPS"):
             select_columns.append(f"DCOMP90_FNU_{_RAW_SUFFIX[b.key]}")
 
-    df, navals = _read_raw_delivery(_raw_catalog_path(config, region), select_columns)
+    df, navals = _read_raw_delivery(_raw_catalog_path(config, region), select_columns, n_jobs=config.n_jobs)
 
     dup = df["SESNA_NAME"].duplicated()
     if dup.any():
@@ -230,7 +262,7 @@ def _assemble_region(config, region):
         dcomp_j[has_dcomp] = raw_dcomp[has_dcomp]
         if isna_dcomp.any():
             dcomp_j[isna_dcomp] = _median_nn_impute(
-                ra_deg, dec_deg, has_dcomp, isna_dcomp, raw_dcomp
+                ra_deg, dec_deg, has_dcomp, isna_dcomp, raw_dcomp, n_jobs=config.n_jobs
             )
             case_flux_no_dcomp = isna_dcomp & ~isna_flux
             dcomp_j[case_flux_no_dcomp] = np.maximum(
