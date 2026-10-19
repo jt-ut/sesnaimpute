@@ -40,7 +40,7 @@ finite); its sigma is `herschel_column.py`'s per-map SIG_ZP/SIG_RAND
 model. Elsewhere the pixel takes the Planck sightline column and its
 composed sigma from `planck_column.py`'s own sightline product.
 
-`_build_one_extinction_region`/`build_extinction_sightline` write the
+`_build_one_region`/`build_extinction_sightline` write the
 second column, the one a star's light passes through: the emission-based
 adopted column calibrated onto the scale of that region's Juvela &
 Montillaud 2016 NICEST star-colour map (a whole-sightline 2MASS reddening
@@ -57,14 +57,15 @@ whether or not that cell entered the fit. `CAL_OFFSET_K` and
 from there to rescale the sightline product.
 """
 
+import functools
 import os
 
 import h5py
 import numpy as np
-from joblib import Parallel, delayed
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
+from sesnaimpute import pieces as pieces_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
@@ -109,28 +110,6 @@ def _dec(v):
     return v.decode("utf-8") if isinstance(v, bytes) else str(v)
 
 
-def _load_herschel_arm(config, region):
-    """`{covered, a_k, sigma_rand_k, map_id, map_names}` for `region`, in
-    catalogue row order. `sigma_rand_k` is the per-map random term alone
-    (`herschel_column.py`'s `SIGMA_RAND_K`, no zero point in it) -- the
-    field zero point is composed in fresh here, per field, not read from
-    this file's own (pre-refit) `SIGMA_A_K`."""
-    path = config_module.product_path(config, "sky/derived", "herschel", "column", "source", region=region)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"sky.derived.column.build: Herschel arm missing for region {region!r} at "
-            f"{path!r} -- run the sesnaimpute.sky.derived.herschel_column RUNBOOK line for it"
-        )
-    with h5py.File(path, "r") as f:
-        return dict(
-            covered=np.asarray(f["COVERED"][:], dtype=bool),
-            a_k=np.asarray(f["A_K"][:], dtype=np.float64),
-            sigma_rand_k=np.asarray(f["SIGMA_RAND_K"][:], dtype=np.float64),
-            map_id=np.asarray(f["MAP_ID"][:], dtype=np.int32),
-            map_names=np.asarray(f["MAP_NAME"][:]),
-        )
-
-
 def _load_field_zeropoints(config):
     """`{field: (zp_field, zp_sigma_field)}` from `herschel_column.py`'s
     `sigma`/`survey` product (owner, 2026-09-06) -- empty if the product
@@ -158,7 +137,25 @@ def _robust_sigma(x):
     return float(1.482602218505602 * np.median(np.abs(x - med)))
 
 
-def _measure_field_zeropoints(config):
+def _field_zeropoint_piece(region, *, config, herschel, planck_pix, planck_ak):
+    """One covered region's own zero-point candidate (or `None` below 2
+    qualifying pixels): the piece `_measure_field_zeropoints` reduces, in
+    the shared pool, one piece per covered region."""
+    admitted_pix, _ = profile_module._admitted_sightlines(config, region)
+    _, pix, a_h = _herschel_on_admitted(admitted_pix, herschel[region])
+    if pix.size == 0:
+        return None
+    loc = np.searchsorted(planck_pix, pix)
+    a_p = planck_ak[loc]
+    sel = a_p < FIELD_ZP_LOW_COLUMN_CUT_AK
+    n = int(np.count_nonzero(sel))
+    if n < 2:
+        return None
+    d = a_h[sel] - a_p[sel]
+    return region, float(np.median(d)), _robust_sigma(d) / np.sqrt(n), n
+
+
+def _measure_field_zeropoints(config, n_jobs=1, stage=None):
     """The Herschel zero point, one number per field (owner, 2026-09-06):
     for every HGBS-covered SESNA region, the median of
     `A_HERSCHEL - A_PLANCK` over that region's Herschel-covered admitted
@@ -169,29 +166,26 @@ def _measure_field_zeropoints(config):
     granule map's admitted sightlines, `_load_planck_sightline`) -- none
     of it is this stage's own output, so it runs in the same pass that
     merges the two arms, before the per-source merge (`merge_region`)
-    consumes the result. Returns `(names, zp_ak, zp_sigma_ak, n)`, one
-    entry per field with at least 2 qualifying pixels, region-name
-    order."""
+    consumes the result. One piece per covered region, through the
+    shared pool (`pieces.run`), reduced here into `(names, zp_ak,
+    zp_sigma_ak, n)` in the pieces' own (region-name) order -- one entry
+    per field with at least 2 qualifying pixels."""
     herschel = planck_column.load_hgbs(config, min_fill=SIGHTLINE_MIN_FILL)
     covered_regions = sorted(r for r, h in herschel.items() if h["pix"].size)
     planck_pix, planck_ak, _ = _load_planck_sightline(config)
 
+    fn = functools.partial(_field_zeropoint_piece, config=config, herschel=herschel,
+                           planck_pix=planck_pix, planck_ak=planck_ak)
+    parts = pieces_module.run(fn, covered_regions, n_jobs, stage=stage, unit="fields")
+
     names, zp, zp_sigma, n_out = [], [], [], []
-    for region in covered_regions:
-        admitted_pix, _ = profile_module._admitted_sightlines(config, region)
-        _, pix, a_h = _herschel_on_admitted(admitted_pix, herschel[region])
-        if pix.size == 0:
+    for part in parts:
+        if part is None:
             continue
-        loc = np.searchsorted(planck_pix, pix)
-        a_p = planck_ak[loc]
-        sel = a_p < FIELD_ZP_LOW_COLUMN_CUT_AK
-        n = int(np.count_nonzero(sel))
-        if n < 2:
-            continue
-        d = a_h[sel] - a_p[sel]
-        names.append(region)
-        zp.append(float(np.median(d)))
-        zp_sigma.append(_robust_sigma(d) / np.sqrt(n))
+        name, z, zs, n = part
+        names.append(name)
+        zp.append(z)
+        zp_sigma.append(zs)
         n_out.append(n)
     return (names, np.asarray(zp, dtype=np.float64),
             np.asarray(zp_sigma, dtype=np.float64), np.asarray(n_out, dtype=np.int64))
@@ -231,16 +225,78 @@ def _write_field_zeropoints(config, names, zp, zp_sigma, n_field):
     return sigma_zp_survey
 
 
-def merge_region(config, region, cal, field_zp=None, planck_arm=None):
+def _herschel_path(config, region):
+    """The Herschel arm's product path for `region`, checked once per
+    region (not per piece)."""
+    path = config_module.product_path(config, "sky/derived", "herschel", "column", "source", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"sky.derived.column.build: Herschel arm missing for region {region!r} at "
+            f"{path!r} -- run the sesnaimpute.sky.derived.herschel_column RUNBOOK line for it"
+        )
+    return path
+
+
+def _load_herschel_map_names(path):
+    """The region's small map-name lookup (one entry per Herschel map
+    serving it, not per source) -- read once, not per source-block
+    piece."""
+    with h5py.File(path, "r") as f:
+        return np.asarray(f["MAP_NAME"][:])
+
+
+def _merge_piece(piece, *, a_col_all, sig_col_all, herschel_path, zp_offset, zp_sigma, fwhm_arcsec):
+    """One source-block's merge: this piece's own slice of the Planck arm
+    (`a_col_all`/`sig_col_all`, already computed for the whole region)
+    merged with its own slice of the Herschel arm, read straight off disk
+    for just `[lo, hi)` -- no caller ever materialises a whole region's
+    Herschel arrays at once (`merge_region`'s own per-piece lookup
+    against the Herschel arm's file, the shared pool's natural piece
+    being the source block, COMMON.md 2026-10-19)."""
+    lo, hi = piece
+    n = hi - lo
+    with h5py.File(herschel_path, "r") as f:
+        covered = np.asarray(f["COVERED"][lo:hi], dtype=bool)
+        a_h_raw = np.asarray(f["A_K"][lo:hi], dtype=np.float64)
+        sig_rand = np.asarray(f["SIGMA_RAND_K"][lo:hi], dtype=np.float64)
+        map_id_h = np.asarray(f["MAP_ID"][lo:hi], dtype=np.int32)
+
+    a_col = np.array(a_col_all[lo:hi], dtype=np.float64)
+    sig_col = np.array(sig_col_all[lo:hi], dtype=np.float64)
+    fwhm = np.full(n, fwhm_arcsec, dtype=np.float32)
+    prov = np.full(n, PROV_PLANCK, dtype=np.uint8)
+    map_id = np.full(n, -1, dtype=np.int32)
+    zp_sigma_k = np.zeros(n, dtype=np.float64)
+
+    a_h = a_h_raw - zp_offset
+    use_h = covered & np.isfinite(a_h) & (a_h > 0)
+    a_col[use_h] = a_h[use_h]
+    sig_col[use_h] = np.sqrt(sig_rand[use_h] ** 2 + zp_sigma ** 2)
+    zp_sigma_k[use_h] = zp_sigma
+    fwhm[use_h] = HERSCHEL_STATED_FWHM_ARCSEC
+    prov[use_h] = PROV_HERSCHEL
+    map_id[use_h] = map_id_h[use_h]
+
+    return a_col, sig_col, prov, fwhm, map_id, zp_sigma_k
+
+
+def merge_region(config, region, cal, field_zp=None, planck_arm=None, n_jobs=1, stage=None):
     """Merges this region's two arms: Herschel where covered, finite and
     positive (its own field's zero point subtracted, the offset's
-    uncertainty carried as `ZP_SIGMA_K`); else Planck. Returns the merged
-    arrays. `field_zp` is `_load_field_zeropoints`'s dict, `planck_arm`
-    is `(a_col, sig_col, n)` from `planck_source_column.planck_arm_region`
-    -- both loaded once by `build()` and passed down (the Planck map
-    `planck_arm_all` reads is 1.6 GB, not reread per region);
-    `merge_region(config, region, cal)` still works standalone, loading
-    each itself (one full Planck-map read for the one region)."""
+    uncertainty carried as `ZP_SIGMA_K`); else Planck. The merge itself
+    runs through the shared pool, cut into pieces over source blocks
+    (`pieces.run`, `_merge_piece`): each piece looks up its own slice of
+    the Herschel arm straight off disk and merges it with its own slice
+    of the already-computed Planck arm; the parent concatenates the
+    pieces' own arrays in their fixed (source-index) order -- the same
+    merge as a single whole-region pass, just assembled from blocks none
+    larger than `n // (PIECES_PER_WORKER * n_jobs)`. `field_zp` is
+    `_load_field_zeropoints`'s dict, `planck_arm` is `(a_col, sig_col,
+    n)` from `planck_source_column.planck_arm_region` -- both loaded
+    once by `build()` and passed down (the Planck map `planck_arm_all`
+    reads is 1.6 GB, not reread per region); `merge_region(config,
+    region, cal)` still works standalone, loading each itself (one full
+    Planck-map read for the one region)."""
     if field_zp is None:
         field_zp = _load_field_zeropoints(config)
     if planck_arm is None:
@@ -249,27 +305,26 @@ def merge_region(config, region, cal, field_zp=None, planck_arm=None):
         tau353, err_tau = _load_planck_map(_planck_map_path(config))
         planck_arm = planck_arm_region(config, region, tau353, err_tau, cal)
     a_col_src, sig_col_src, _n_planck = planck_arm
-    a_col = np.array(a_col_src, dtype=np.float64)
-    sig_col = np.array(sig_col_src, dtype=np.float64)
-
-    n = a_col.size
-    fwhm = np.full(n, cal["fwhm_arcmin"] * 60.0, dtype=np.float32)
-    prov = np.full(n, PROV_PLANCK, dtype=np.uint8)
-    map_id = np.full(n, -1, dtype=np.int32)
-    zp_sigma_k = np.zeros(n, dtype=np.float64)
-
-    herschel = _load_herschel_arm(config, region)
-    covered, a_h_raw, sig_rand = herschel["covered"], herschel["a_k"], herschel["sigma_rand_k"]
+    n = int(np.asarray(a_col_src).size)
+    herschel_path = _herschel_path(config, region)
     zp_offset, zp_sigma = field_zp.get(region, (0.0, 0.0))
-    a_h = a_h_raw - zp_offset
-    use_h = covered & np.isfinite(a_h) & (a_h > 0)
-    a_col[use_h] = a_h[use_h]
-    sig_col[use_h] = np.sqrt(sig_rand[use_h] ** 2 + zp_sigma ** 2)
-    zp_sigma_k[use_h] = zp_sigma
-    fwhm[use_h] = HERSCHEL_STATED_FWHM_ARCSEC
-    prov[use_h] = PROV_HERSCHEL
-    map_id[use_h] = herschel["map_id"][use_h]
-    map_names = herschel["map_names"]
+
+    fn = functools.partial(
+        _merge_piece, a_col_all=np.asarray(a_col_src, dtype=np.float64),
+        sig_col_all=np.asarray(sig_col_src, dtype=np.float64), herschel_path=herschel_path,
+        zp_offset=zp_offset, zp_sigma=zp_sigma, fwhm_arcsec=cal["fwhm_arcmin"] * 60.0)
+    parts = pieces_module.run(fn, pieces_module.slices(n, n_jobs), n_jobs, stage=stage, unit="sources")
+    if parts:
+        a_col = np.concatenate([p[0] for p in parts])
+        sig_col = np.concatenate([p[1] for p in parts])
+        prov = np.concatenate([p[2] for p in parts])
+        fwhm = np.concatenate([p[3] for p in parts])
+        map_id = np.concatenate([p[4] for p in parts])
+        zp_sigma_k = np.concatenate([p[5] for p in parts])
+    else:
+        a_col, sig_col = np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+        prov, fwhm = np.empty(0, dtype=np.uint8), np.empty(0, dtype=np.float32)
+        map_id, zp_sigma_k = np.empty(0, dtype=np.int32), np.empty(0, dtype=np.float64)
 
     bad = ~np.isfinite(a_col) | (a_col <= 0)
     if np.any(bad):
@@ -278,28 +333,9 @@ def merge_region(config, region, cal, field_zp=None, planck_arm=None):
             "with a non-finite or non-positive merged column"
         )
 
+    map_names = _load_herschel_map_names(herschel_path)
     return dict(a_col=a_col, sig_col=sig_col, prov=prov, fwhm=fwhm, map_id=map_id, map_names=map_names,
                zp_sigma_k=zp_sigma_k, n_herschel=int(np.count_nonzero(prov == PROV_HERSCHEL)), n=n)
-
-
-def _build_one_region(config, region, cal, field_zp=None, planck_arm=None):
-    d = merge_region(config, region, cal, field_zp=field_zp, planck_arm=planck_arm)
-    out_path = config_module.product_path(config, "sky/derived", "adopted", "column", "source", region=region)
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    name_bytes = np.array([(x if isinstance(x, bytes) else str(x).encode("utf-8")) for x in d["map_names"]])
-    with h5py.File(out_path, "w") as f:
-        f.attrs["GRANULE"] = "source"
-        for name, data in (
-            ("A_COL_K", d["a_col"].astype(np.float32)),
-            ("A_COL_SIG_K", d["sig_col"].astype(np.float32)),
-            ("A_COL_PROVENANCE", d["prov"]),
-            ("A_COL_FWHM_ARCSEC", d["fwhm"]),
-            ("HERSCHEL_MAP_ID", d["map_id"]),
-            ("MAP_NAME", name_bytes),
-            ("ZP_SIGMA_K", d["zp_sigma_k"].astype(np.float32)),
-        ):
-            build_module.write_dataset(f, name, data, *REGISTRY[(_COLUMN_SOURCE_STEM, name)])
-    return region, d["n"], d["n_herschel"]
 
 
 def _load_juvela_source_view(config, region):
@@ -341,13 +377,33 @@ def _region_calibration(a_nicest, a_adopted, cell_pix):
     return float(offset), float(slope), rms, n_fit
 
 
-def _build_one_extinction_region(config, region, cal, field_zp=None):
-    """Writes this region's extinction source product: the adopted column
-    (re-merged from the same two arms `merge_region` reads), converted
-    onto the NICEST star-colour map's scale by this region's one
-    Lombardi et al. (2014) calibration (`_region_calibration`), plus the
-    fitted `CAL_OFFSET_K`/`CAL_SLOPE` pair itself."""
-    d = merge_region(config, region, cal, field_zp=field_zp)
+def _build_one_region(config, region, cal, field_zp, planck_arm, n_jobs, stage=None):
+    """One region, one pass (COMMON.md 2026-10-19): merges the two arms
+    once (`merge_region`, piece-parallel over source blocks) and writes
+    both the adopted column-source product and, from the SAME merge, the
+    extinction-source product (the adopted column converted onto the
+    NICEST star-colour map's scale by this region's one Lombardi et al.
+    (2014) calibration, `_region_calibration`) -- replacing the former
+    two separate region-level passes, which each re-merged the region
+    (and, for the second pass alone, re-read the whole 1.6 GB Planck map
+    per worker, since it never received the already-computed `planck_arm`)."""
+    d = merge_region(config, region, cal, field_zp=field_zp, planck_arm=planck_arm, n_jobs=n_jobs, stage=stage)
+    out_path = config_module.product_path(config, "sky/derived", "adopted", "column", "source", region=region)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    name_bytes = np.array([(x if isinstance(x, bytes) else str(x).encode("utf-8")) for x in d["map_names"]])
+    with h5py.File(out_path, "w") as f:
+        f.attrs["GRANULE"] = "source"
+        for name, data in (
+            ("A_COL_K", d["a_col"].astype(np.float32)),
+            ("A_COL_SIG_K", d["sig_col"].astype(np.float32)),
+            ("A_COL_PROVENANCE", d["prov"]),
+            ("A_COL_FWHM_ARCSEC", d["fwhm"]),
+            ("HERSCHEL_MAP_ID", d["map_id"]),
+            ("MAP_NAME", name_bytes),
+            ("ZP_SIGMA_K", d["zp_sigma_k"].astype(np.float32)),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_COLUMN_SOURCE_STEM, name)])
+
     a_nicest, cell_pix = _load_juvela_source_view(config, region)
     if a_nicest.size != d["n"]:
         raise ValueError(f"sky.derived.column.build: {region!r} NICEST view has {a_nicest.size} "
@@ -360,10 +416,9 @@ def _build_one_extinction_region(config, region, cal, field_zp=None):
                          "source(s) with a non-finite or non-positive calibrated extinction column "
                          f"(offset={offset:.4f}, slope={slope:.4f})")
 
-    out_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "source", region=region)
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    name_bytes = np.array([(x if isinstance(x, bytes) else str(x).encode("utf-8")) for x in d["map_names"]])
-    with h5py.File(out_path, "w") as f:
+    ext_out_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "source", region=region)
+    os.makedirs(os.path.dirname(ext_out_path), exist_ok=True)
+    with h5py.File(ext_out_path, "w") as f:
         f.attrs["GRANULE"] = "source"
         for name, data in (
             ("A_COL_K", a_col_cal.astype(np.float32)),
@@ -377,21 +432,23 @@ def _build_one_extinction_region(config, region, cal, field_zp=None):
             ("CAL_SLOPE", np.float64(slope)),
         ):
             build_module.write_dataset(f, name, data, *REGISTRY[(_EXTINCTION_SOURCE_STEM, name)])
-    return region, d["n"], offset, slope, rms, n_fit
+    return region, d["n"], d["n_herschel"], offset, slope, rms, n_fit
 
 
-def _extinction_row_one_region(config, region, region_code, adopted_pix, adopted_code, adopted_a_k, adopted_sig,
+def _extinction_row_one_region(region, *, config, codes, adopted_pix, adopted_code, adopted_a_k, adopted_sig,
                                adopted_prov):
     """One region's extinction sightline row: the adopted sightline column
     (`build_sightline`'s own Herschel/Planck value, unchanged) converted
     onto the NICEST star-colour map's scale by this region's one
     `CAL_OFFSET_K`/`CAL_SLOPE` pair (read from the region's own extinction
-    source product, where `_build_one_extinction_region` fit and stored
+    source product, where `_build_one_region` fit and stored
     it) -- the same affine transform for every admitted sightline of the
     region, whether or not it carries a catalogued source.
     `PROVENANCE`/`REGION_CODE` are carried from the adopted sightline
     column product, which carries one row per (region, pixel): only this
-    region's own rows are looked up."""
+    region's own rows are looked up. One piece per region, through the
+    shared pool (`build_extinction_sightline`)."""
+    region_code = codes[region]
     ext_path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "source", region=region)
     if not os.path.exists(ext_path):
         raise FileNotFoundError(
@@ -425,7 +482,9 @@ def build_extinction_sightline(config, stage=None):
     that region's own `CAL_OFFSET_K`/`CAL_SLOPE` pair -- the quantity a
     star's light passes through, distinct from the gas column
     `build_sightline` writes. Survey-wide regardless of any `regions`
-    list a caller passed to `build`, mirroring `build_sightline`."""
+    list a caller passed to `build`, mirroring `build_sightline`. One
+    piece per region, through the shared pool (`pieces.run`) -- no
+    region-level pool of its own."""
     regions = [r.name for r in regions_module.REGIONS]
     codes = _region_codes(config, regions)
     adopted_path = config_module.product_path(config, "sky/derived", "adopted", "column", "sightline")
@@ -443,18 +502,10 @@ def build_extinction_sightline(config, stage=None):
     adopted_pix, adopted_code, adopted_prov = adopted_pix[order], adopted_code[order], adopted_prov[order]
     adopted_a_k, adopted_sig = adopted_a_k[order], adopted_sig[order]
 
-    n_regions = len(regions)
-    chunk = max(1, config.n_jobs)
-    rows = []
-    for start in range(0, n_regions, chunk):
-        part = regions[start:start + chunk]
-        rows.extend(Parallel(n_jobs=config.n_jobs)(
-            delayed(_extinction_row_one_region)(config, region, codes[region],
-                                                adopted_pix, adopted_code, adopted_a_k, adopted_sig,
-                                                adopted_prov)
-            for region in part))
-        if stage is not None:
-            stage.tick(min(start + chunk, n_regions), n_regions, "regions")
+    fn = functools.partial(_extinction_row_one_region, config=config, codes=codes,
+                           adopted_pix=adopted_pix, adopted_code=adopted_code,
+                           adopted_a_k=adopted_a_k, adopted_sig=adopted_sig, adopted_prov=adopted_prov)
+    rows = pieces_module.run(fn, regions, config.n_jobs, stage=stage, unit="regions")
 
     pix = np.concatenate([r["pix"] for r in rows])
     region_code = np.concatenate([r["region_code"] for r in rows])
@@ -542,10 +593,12 @@ def _herschel_on_admitted(admitted_pix, herschel_region):
     return capped[ok], h_pix[ok], herschel_region["ak"][ok]
 
 
-def _sightline_row_one_region(config, region, region_code, herschel, planck_pix, planck_ak, planck_sig,
+def _sightline_row_one_region(region, *, config, codes, herschel, planck_pix, planck_ak, planck_sig,
                               sig_zp, c0, c1):
     """One region's sightline rows: Planck everywhere admitted, Herschel
-    substituted where the pixel is covered (SPEC_PRIORS.md 1.1)."""
+    substituted where the pixel is covered (SPEC_PRIORS.md 1.1). One
+    piece per region, through the shared pool (`build_sightline`)."""
+    region_code = codes[region]
     admitted_pix, _ = profile_module._admitted_sightlines(config, region)
     n = admitted_pix.size
     loc = np.searchsorted(planck_pix, admitted_pix)
@@ -577,28 +630,20 @@ def build_sightline(config, stage=None):
     currently building, of whatever region, so the product cannot be
     partial.
 
-    `stage`, if given, is the caller's own `progress.Stage`: regions are
-    dispatched in chunks (still `config.n_jobs`-wide within a chunk) so
-    one `stage.tick` fires after each chunk -- this stage otherwise runs
-    to completion with no progress line at all (owner ruling
-    2026-09-06)."""
+    `stage`, if given, is the caller's own `progress.Stage`, ticked once
+    per region's own piece (`pieces.run`'s shared pool -- no region-level
+    pool of its own) -- this stage otherwise runs to completion with no
+    progress line at all (owner ruling 2026-09-06)."""
     regions = [r.name for r in regions_module.REGIONS]
     herschel = planck_column.load_hgbs(config, min_fill=SIGHTLINE_MIN_FILL)
     sig_zp, c0, c1 = _herschel_sigma_model(config)
     planck_pix, planck_ak, planck_sig = _load_planck_sightline(config)
     codes = _region_codes(config, regions)
 
-    n_regions = len(regions)
-    chunk = max(1, config.n_jobs)
-    rows = []
-    for start in range(0, n_regions, chunk):
-        part = regions[start:start + chunk]
-        rows.extend(Parallel(n_jobs=config.n_jobs)(
-            delayed(_sightline_row_one_region)(
-                config, region, codes[region], herschel, planck_pix, planck_ak, planck_sig, sig_zp, c0, c1)
-            for region in part))
-        if stage is not None:
-            stage.tick(min(start + chunk, n_regions), n_regions, "regions")
+    fn = functools.partial(_sightline_row_one_region, config=config, codes=codes, herschel=herschel,
+                           planck_pix=planck_pix, planck_ak=planck_ak, planck_sig=planck_sig,
+                           sig_zp=sig_zp, c0=c0, c1=c1)
+    rows = pieces_module.run(fn, regions, config.n_jobs, stage=stage, unit="regions")
 
     pix = np.concatenate([r["pix"] for r in rows])
     region_code = np.concatenate([r["region_code"] for r in rows])
@@ -627,11 +672,20 @@ def build_sightline(config, stage=None):
 
 
 def build(config, regions=None):
-    """Builds the adopted source-column product for each region in
-    `regions` (default: every region in `regions.REGIONS`), merging the
-    Planck and Herschel arms one region at a time, parallelised with
-    joblib; then the adopted sightline column and its Herschel/Planck/
-    3-D-map check, both survey-wide. The field zero point
+    """Builds the adopted source-column AND extinction-source products
+    for each region in `regions` (default: every region in
+    `regions.REGIONS`), one region at a time (COMMON.md 2026-10-19
+    ruling: regions run one after another) -- one merge per region, not
+    two (the former second pass re-merged the region from scratch and,
+    lacking the already-computed Planck arm, re-read the whole 1.6 GB
+    Planck map per worker). The working set at any moment is one
+    region's own arrays plus the two survey-wide inputs already loaded
+    (the field zero points, the Planck map read once by `planck_arm_all`
+    below); the merge itself is cut into pieces over source blocks, run
+    through the shared pool (`merge_region`, `pieces.run`) -- no
+    region-level `Parallel` of its own. Then the adopted sightline
+    column and the extinction sightline column, both survey-wide, each
+    cut the same way (one piece per region). The field zero point
     (`_measure_field_zeropoints`) is measured and written
     (`_write_field_zeropoints`) first, in this same pass, from the two
     arms' sightline views alone -- not read back from a second product --
@@ -639,45 +693,30 @@ def build(config, regions=None):
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
     cal = _load_planck_calibration(config)
-    zp_names, zp_ak, zp_sigma_ak, zp_n = _measure_field_zeropoints(config)
+    zp_names, zp_ak, zp_sigma_ak, zp_n = _measure_field_zeropoints(config, n_jobs=config.n_jobs)
     _write_field_zeropoints(config, zp_names, zp_ak, zp_sigma_ak, zp_n)
     field_zp = {n: (float(z), float(s)) for n, z, s in zip(zp_names, zp_ak, zp_sigma_ak)}
     # the Planck arm (sky.derived.planck_source_column, folded in here: its
     # own per-source product had one reader, this merge): the 1.6 GB map is
     # read ONCE, threaded over every region, before the per-region merge
-    # below runs in its usual process pool on the small resulting arrays
-    # (160fd31 -- a process pool would hold one map copy per worker).
+    # below runs on the small resulting arrays (160fd31 -- a process pool
+    # would hold one map copy per worker; kept as the owner's own ruling
+    # for this call, COMMON.md 2026-10-19).
     planck_arm_by_region = planck_arm_all(config, regions, config.n_jobs, cal=cal)
+
     with progress_module.Stage("sky.derived.column") as st:
         n_regions = len(regions)
-        n_done = [0]
-
-        def _one(region):
-            r = _build_one_region(config, region, cal, field_zp=field_zp,
-                                   planck_arm=planck_arm_by_region[region])
-            n_done[0] += 1
-            st.tick(n_done[0], n_regions, "regions")
-            return r
-
-        results = Parallel(n_jobs=config.n_jobs)(delayed(_one)(region) for region in regions)
+        results = []
+        for i, region in enumerate(regions):
+            results.append(_build_one_region(config, region, cal, field_zp=field_zp,
+                                             planck_arm=planck_arm_by_region[region], n_jobs=config.n_jobs))
+            st.tick(i + 1, n_regions, "regions")
         total_n = sum(r[1] for r in results)
         total_herschel = sum(r[2] for r in results)
-        st.done(None, regions=n_regions, sources=total_n, herschel_sources=total_herschel)
-
-    with progress_module.Stage("sky.derived.column.extinction") as st:
-        n_done_ext = [0]
-
-        def _one_ext(region):
-            r = _build_one_extinction_region(config, region, cal, field_zp=field_zp)
-            n_done_ext[0] += 1
-            st.tick(n_done_ext[0], n_regions, "regions")
-            return r
-
-        ext_results = Parallel(n_jobs=config.n_jobs)(delayed(_one_ext)(region) for region in regions)
-        st.done(None, regions=n_regions, sources=sum(r[1] for r in ext_results),
-                median_offset_k=float(np.median([r[2] for r in ext_results])) if ext_results else float("nan"),
-                median_slope=float(np.median([r[3] for r in ext_results])) if ext_results else float("nan"),
-                median_fit_rms=float(np.median([r[4] for r in ext_results])) if ext_results else float("nan"))
+        st.done(None, regions=n_regions, sources=total_n, herschel_sources=total_herschel,
+                median_offset_k=float(np.median([r[3] for r in results])) if results else float("nan"),
+                median_slope=float(np.median([r[4] for r in results])) if results else float("nan"),
+                median_fit_rms=float(np.median([r[5] for r in results])) if results else float("nan"))
 
     with progress_module.Stage("sky.derived.column.sightline") as st:
         out_path = build_sightline(config, stage=st)
