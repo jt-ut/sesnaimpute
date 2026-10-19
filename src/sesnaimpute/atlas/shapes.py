@@ -90,6 +90,7 @@ the bottom edge.
 import argparse
 import dataclasses
 import os
+import time
 
 import h5py
 import numpy as np
@@ -704,8 +705,10 @@ def build_region(config, region):
 
 def build(config, regions=None):
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
+    t0 = time.time()
     for region in region_names:
         build_region(config, region)
+    progress.summary("atlas.shapes", len(region_names), t0)
 
 
 # ====================================================================
@@ -793,12 +796,12 @@ def _build_region_prior_data(config, region):
 
 def _print_region_numbers(region, data):
     for c in CLASS_ORDER:
-        print("atlas.shapes.region [%s] %s: N_cat=%.6g RATIO=%.6f (RATIO*TOTAL_OBSERVED=%.6g) "
+        print("atlas.shapes_region [%s] %s: N_cat=%.6g RATIO=%.6f (RATIO*TOTAL_OBSERVED=%.6g) "
               "N_cell=%.6g catalogable_fraction=%.6f populated_log10x=[%.4g, %.4g]"
               % (region, c, data["n_cat_total"][c], data["ratio"][c],
                  data["ratio"][c] * data["total_observed"], data["n_cell_total"][c],
                  data["catalogable_fraction"][c], data["populated_x"][c][0], data["populated_x"][c][1]))
-    print("atlas.shapes.region [%s] I2 50%% limit log10 F45 = %.4g"
+    print("atlas.shapes_region [%s] I2 50%% limit log10 F45 = %.4g"
           % (region, data["log10_f_lim_med"]))
 
 
@@ -888,7 +891,7 @@ def _draw_region_figure(config, region, data):
 
 
 def build_region_prior_one(config, region):
-    with progress.Stage("atlas.shapes.region", region) as st:
+    with progress.Stage("atlas.shapes_region", region) as st:
         data = _build_region_prior_data(config, region)
         _print_region_numbers(region, data)
         fig, paths = _draw_region_figure(config, region, data)
@@ -902,8 +905,10 @@ def build_region_prior_one(config, region):
 
 def build_region_prior(config, regions=None):
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
+    t0 = time.time()
     for region in region_names:
         build_region_prior_one(config, region)
+    progress.summary("atlas.shapes_region", len(region_names), t0)
 
 
 def _main():

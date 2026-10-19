@@ -23,6 +23,7 @@ since nothing computed here is a prior input.
 import argparse
 import dataclasses
 import os
+import time
 
 import astropy.units as u
 import h5py
@@ -1019,11 +1020,13 @@ def build(config, regions=None):
     with_protostars = _regions_with_protostars(config)
     region_names = regions if regions is not None else with_protostars
     built_regions = [r for r in region_names if r in with_protostars]
+    t0 = time.time()
     for region in region_names:
         if region not in with_protostars:
             print(f"atlas.protostars [{region}]: no HOPS/eHOPS protostars in this region, no page")
             continue
         build_region(config, region, built_regions)
+    progress.summary("atlas.protostars", len(region_names), t0)
 
 
 def _main():

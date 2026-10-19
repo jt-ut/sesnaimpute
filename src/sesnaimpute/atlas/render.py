@@ -70,6 +70,7 @@ with no letterboxing.
 import argparse
 import dataclasses
 import os
+import time
 
 import astropy.units as u
 import h5py
@@ -972,10 +973,12 @@ def build(config, regions=None, formats=("png", "pdf")):
     at display resolution), so a region missing an input is skipped
     rather than failed."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
+    t0 = time.time()
     for region in region_names:
         build_prior_intrinsic_region(config, region, formats)
         build_prior_selection_region(config, region, formats)
         build_posterior_region(config, region, formats)
+    progress.summary("atlas.render", len(region_names), t0)
 
 
 def _main():

@@ -1316,6 +1316,7 @@ def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=N
     """
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     class_codes = classes if classes is not None else list(CLASSES)
+    t0 = time.time()
     for region in region_names:
         catalog = None if join_only else _load_region_catalog(config, region)
         for cls in class_codes:
@@ -1346,6 +1347,8 @@ def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=N
                         n_batches=summary["n_batches"], n_failed=joined["n_failed"],
                         id1_max_err=joined["id1_max_err"], id1_mean_err=joined["id1_mean_err"],
                         id1_n_checked=joined["id1_n_checked"], id1_n_undefined=joined["id1_n_undefined"])
+    for cls in class_codes:
+        progress.summary("fittp.sweep.%s" % cls, len(region_names), t0)
 
 
 if __name__ == "__main__":

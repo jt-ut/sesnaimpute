@@ -20,6 +20,7 @@ pixel with different sources.
 import argparse
 import dataclasses
 import os
+import time
 
 import h5py
 import numpy as np
@@ -145,6 +146,7 @@ def build(config, regions=None):
     DRAFT.md P11; SPEC_BMSTP_DRAFT.md section 8's posterior atlas).
     """
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
+    t0 = time.time()
     for region in region_names:
         with progress.Stage("fittp.atlas", region) as st:
             result = build_region(config, region, st)
@@ -155,6 +157,7 @@ def build(config, regions=None):
                     n_sources_region=result["n_total_sources"],
                     total_count_ratio=total_check / result["n_total_sources"]
                     if result["n_total_sources"] else float("nan"))
+    progress.summary("fittp.atlas", len(region_names), t0)
 
 
 if __name__ == "__main__":

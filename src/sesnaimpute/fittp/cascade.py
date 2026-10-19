@@ -15,6 +15,7 @@ needed here; only the mask tells the cascade which bands to trust.
 """
 
 import os
+import time
 
 import h5py
 import numpy as np
@@ -341,6 +342,7 @@ def build(config, regions=None, imputed=False):
     by `fittp.check`, not here.
     """
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
+    t0 = time.time()
     for region in region_names:
         if not imputed:
             with progress.Stage("fittp.cascade", region) as st:
@@ -359,6 +361,7 @@ def build(config, regions=None, imputed=False):
                 path = _path(config, region)
                 write_region_imputed(path, result)
                 st.done(path, n=result["verdict"].shape[0])
+    progress.summary("fittp.cascade.imputed" if imputed else "fittp.cascade", len(region_names), t0)
 
 
 if __name__ == "__main__":

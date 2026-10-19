@@ -824,7 +824,7 @@ def build(config, regions=None):
     its consistency checks against SWIRE, S-COSMOS and Ashby et al.
     (2013) SEDS. Survey-wide; `regions` is accepted and ignored.
     """
-    st = progress.Stage("prior.gal")
+    st = progress.Stage("population.gal")
 
     fazio_path = f"{config.data_root}/sky/download/fazio2004/fazio2004_table1_irac_counts.csv"
     if not os.path.exists(fazio_path):

@@ -40,6 +40,7 @@ neither reads a template register or an IMF.
 """
 
 import os
+import time
 
 import h5py
 import healpy as hp
@@ -709,11 +710,13 @@ def build(config, regions=None):
     census, not Pokhrel et al. 2020's fixed coefficient."""
     names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
+    t0 = time.time()
     for region in names:
         with progress.Stage("population.yso", region) as st:
             path, u_median = build_shape(config, region)
             st.done(path, n_sightline=np.asarray(u_median).size,
                     median_u_median=float(np.median(u_median)))
+    progress.summary("population.yso", len(names), t0)
 
     from sesnaimpute.population import yso_law
     yso_law.build(config, regions=names)
