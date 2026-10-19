@@ -59,16 +59,17 @@ RUWE, NO_PM, RHO_PER_ARCSEC2. Root attrs: GRANULE, S1_ARCSEC, S2_ARCSEC,
 EPS_HALO, R_MAX_ARCSEC.
 """
 
+import functools
 import os
 
 import h5py
 import numpy as np
 import pandas as pd
-from joblib import Parallel, delayed
 from scipy.optimize import minimize, minimize_scalar
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
+from sesnaimpute import pieces as pieces_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
@@ -327,21 +328,19 @@ def _read_candidates(config, region, name_to_row):
 
 # --------------------------------------------------------- nearest per source
 
-def _propagated_separation(df):
+def _propagated_separation(ra_src, dec_src, ra_2016, dec_2016, pmra, pmdec):
     """Every candidate's separation from its SESNA source AFTER propagating
     the candidate's own proper motion to SURVEY_EPOCH; candidates without a
-    usable proper-motion solution stay at their 2016.0 position (NO_PM)."""
-    pmra = df["pmRA"].to_numpy(dtype=np.float64)
-    pmdec = df["pmDE"].to_numpy(dtype=np.float64)
+    usable proper-motion solution stay at their 2016.0 position (NO_PM).
+    Takes plain arrays (a region's candidates, or one source block's slice
+    of them) rather than a dataframe, so a piece can call it on its own
+    slice."""
     has_pm = np.isfinite(pmra) & np.isfinite(pmdec)
-    ra_2016 = df["RAdeg"].to_numpy(dtype=np.float64)
-    dec_2016 = df["DEdeg"].to_numpy(dtype=np.float64)
     ra_prop, dec_prop = ra_2016.copy(), dec_2016.copy()
     if has_pm.any():
         ra_prop[has_pm], dec_prop[has_pm] = propagate_to_epoch(
             ra_2016[has_pm], dec_2016[has_pm], pmra[has_pm], pmdec[has_pm], GAIA_EPOCH, SURVEY_EPOCH)
-    sep = angular_sep_arcsec(df["RA_DEG"].to_numpy(dtype=np.float64),
-                             df["DEC_DEG"].to_numpy(dtype=np.float64), ra_prop, dec_prop)
+    sep = angular_sep_arcsec(ra_src, dec_src, ra_prop, dec_prop)
     return sep, ~has_pm
 
 
@@ -355,46 +354,91 @@ def _nearest_winner(req_idx, sep):
     return order[first]
 
 
-def _match_candidates(n_sources, df):
+def _empty_match(n_rows):
+    """The no-neighbour-atom default match columns, `n_rows` long."""
+    return dict(sep_arcsec=np.full(n_rows, np.nan),
+               gaia_source_id=np.full(n_rows, -1, dtype=np.int64),
+               g_mag=np.full(n_rows, np.nan), bp_mag=np.full(n_rows, np.nan),
+               rp_mag=np.full(n_rows, np.nan), plx_mas=np.full(n_rows, np.nan),
+               e_plx_mas=np.full(n_rows, np.nan), ruwe=np.full(n_rows, np.nan),
+               no_pm=np.zeros(n_rows, dtype=bool), has_neighbor=np.zeros(n_rows, dtype=bool))
+
+
+# candidate CSV columns the match needs, and the dtype each is read as; the
+# region's whole candidate table is pulled into these plain arrays once
+# (`_sorted_candidate_columns`), so a piece slices arrays, not a dataframe.
+_CANDIDATE_COLUMNS = dict(REQ_IDX=np.int64, RA_DEG=np.float64, DEC_DEG=np.float64,
+                          RAdeg=np.float64, DEdeg=np.float64, pmRA=np.float64, pmDE=np.float64,
+                          Source=np.int64, Gmag=np.float64, BPmag=np.float64, RPmag=np.float64,
+                          Plx=np.float64, e_Plx=np.float64, RUWE=np.float64)
+
+
+def _sorted_candidate_columns(df):
+    """The region's crossmatch candidates as plain arrays, sorted once by
+    REQ_IDX -- the Gaia tree a source-block piece searches into with
+    `np.searchsorted` for its own slice, built once in the parent (this
+    function), never per piece. A stable sort, so two candidates of the same
+    source keep their original row order; `_nearest_winner`'s own stable
+    sort on separation then breaks a tie exactly as it would on the whole,
+    unsorted table, so a piece's result is bit-identical to the undivided
+    computation."""
+    order = np.argsort(df["REQ_IDX"].to_numpy(dtype=np.int64), kind="mergesort")
+    return {col: df[col].to_numpy(dtype=dtype)[order] for col, dtype in _CANDIDATE_COLUMNS.items()}
+
+
+def _match_piece(cols, piece):
+    """One SESNA source block's match columns (SEP_ARCSEC, GAIA_SOURCE_ID,
+    photometry, astrometry, NO_PM) and its has-neighbour mask, in that
+    block's catalogue row order. `cols` is the region's REQ_IDX-sorted
+    candidate table (`_sorted_candidate_columns`); this piece touches only
+    the contiguous slice its own source range owns. A source with no
+    winning candidate inside R_MAX_ARCSEC -- including one with no candidate
+    row at all -- carries the defaults (no-neighbour atom)."""
+    start, stop = piece
+    req_idx_sorted = cols["REQ_IDX"]
+    c0 = int(np.searchsorted(req_idx_sorted, start))
+    c1 = int(np.searchsorted(req_idx_sorted, stop))
+    out = _empty_match(stop - start)
+    if c1 <= c0:
+        return out
+
+    local_req = req_idx_sorted[c0:c1] - start
+    sep, cand_no_pm = _propagated_separation(
+        cols["RA_DEG"][c0:c1], cols["DEC_DEG"][c0:c1],
+        cols["RAdeg"][c0:c1], cols["DEdeg"][c0:c1], cols["pmRA"][c0:c1], cols["pmDE"][c0:c1])
+    winner_pos = _nearest_winner(local_req, sep)
+    winner_req = local_req[winner_pos]
+    winner_sep = sep[winner_pos]
+    within = winner_sep <= R_MAX_ARCSEC
+    sel_req, sel_pos = winner_req[within], winner_pos[within]
+
+    out["sep_arcsec"][sel_req] = winner_sep[within]
+    out["gaia_source_id"][sel_req] = cols["Source"][c0:c1][sel_pos]
+    out["g_mag"][sel_req] = cols["Gmag"][c0:c1][sel_pos]
+    out["bp_mag"][sel_req] = cols["BPmag"][c0:c1][sel_pos]
+    out["rp_mag"][sel_req] = cols["RPmag"][c0:c1][sel_pos]
+    out["plx_mas"][sel_req] = cols["Plx"][c0:c1][sel_pos]
+    out["e_plx_mas"][sel_req] = cols["e_Plx"][c0:c1][sel_pos]
+    out["ruwe"][sel_req] = cols["RUWE"][c0:c1][sel_pos]
+    out["no_pm"][sel_req] = cand_no_pm[sel_pos]
+    out["has_neighbor"][sel_req] = True
+    return out
+
+
+def _match_candidates(n_sources, df, n_jobs=1):
     """Per-source winner arrays (SEP_ARCSEC, GAIA_SOURCE_ID, photometry,
-    astrometry, NO_PM) and the has-neighbour mask, catalogue row order.
-    A source with no winning candidate inside R_MAX_ARCSEC -- including one
-    with no candidate row at all -- carries the defaults (no-neighbour
-    atom)."""
-    sep_arcsec = np.full(n_sources, np.nan)
-    gaia_source_id = np.full(n_sources, -1, dtype=np.int64)
-    g_mag = np.full(n_sources, np.nan)
-    bp_mag = np.full(n_sources, np.nan)
-    rp_mag = np.full(n_sources, np.nan)
-    plx_mas = np.full(n_sources, np.nan)
-    e_plx_mas = np.full(n_sources, np.nan)
-    ruwe = np.full(n_sources, np.nan)
-    no_pm = np.zeros(n_sources, dtype=bool)
-    has_neighbor = np.zeros(n_sources, dtype=bool)
-
-    if df is not None:
-        sep, cand_no_pm = _propagated_separation(df)
-        req_idx = df["REQ_IDX"].to_numpy(dtype=np.int64)
-        winner_pos = _nearest_winner(req_idx, sep)
-        winner_req = req_idx[winner_pos]
-        winner_sep = sep[winner_pos]
-        within = winner_sep <= R_MAX_ARCSEC
-        sel_req, sel_pos = winner_req[within], winner_pos[within]
-
-        sep_arcsec[sel_req] = winner_sep[within]
-        gaia_source_id[sel_req] = df["Source"].to_numpy(dtype=np.int64)[sel_pos]
-        g_mag[sel_req] = df["Gmag"].to_numpy(dtype=np.float64)[sel_pos]
-        bp_mag[sel_req] = df["BPmag"].to_numpy(dtype=np.float64)[sel_pos]
-        rp_mag[sel_req] = df["RPmag"].to_numpy(dtype=np.float64)[sel_pos]
-        plx_mas[sel_req] = df["Plx"].to_numpy(dtype=np.float64)[sel_pos]
-        e_plx_mas[sel_req] = df["e_Plx"].to_numpy(dtype=np.float64)[sel_pos]
-        ruwe[sel_req] = df["RUWE"].to_numpy(dtype=np.float64)[sel_pos]
-        no_pm[sel_req] = cand_no_pm[sel_pos]
-        has_neighbor[sel_req] = True
-
-    return dict(sep_arcsec=sep_arcsec, gaia_source_id=gaia_source_id, g_mag=g_mag,
-               bp_mag=bp_mag, rp_mag=rp_mag, plx_mas=plx_mas, e_plx_mas=e_plx_mas,
-               ruwe=ruwe, no_pm=no_pm, has_neighbor=has_neighbor)
+    astrometry, NO_PM) and the has-neighbour mask, catalogue row order,
+    computed one SESNA source block at a time (`pieces.slices`) through the
+    shared pool so a big region's crossmatch spreads over every worker
+    instead of running on the one core the region used to occupy. The
+    assembled columns are exactly `_match_piece`'s pieces concatenated in
+    source-index order."""
+    if df is None:
+        return _empty_match(n_sources)
+    cols = _sorted_candidate_columns(df)
+    fn = functools.partial(_match_piece, cols)
+    results = pieces_module.run(fn, pieces_module.slices(n_sources, n_jobs), n_jobs)
+    return {key: np.concatenate([r[key] for r in results]) for key in results[0]}
 
 
 # ------------------------------------------------------------------- write
@@ -426,7 +470,7 @@ def _write_region(config, region, matched, rho, g_s, s1, s2, eps):
 
 # --------------------------------------------------------------- one region
 
-def _build_one_region(config, region):
+def _build_one_region(config, region, n_jobs=1):
     name, src_ra, src_dec = _read_curated_catalogue(config, region)
     n_sources = name.size
     hpx_pix_512 = _read_hpx_pix_512(config, region, n_sources)
@@ -434,7 +478,7 @@ def _build_one_region(config, region):
 
     name_to_row = pd.Series(np.arange(n_sources, dtype=np.int64), index=name)
     df = _read_candidates(config, region, name_to_row)
-    matched = _match_candidates(n_sources, df)
+    matched = _match_candidates(n_sources, df, n_jobs)
     has_neighbor = matched["has_neighbor"]
 
     s1, s2, eps = fit_true_pair_shape(
@@ -458,21 +502,20 @@ def _build_one_region(config, region):
 
 def build(config, regions=None):
     """Writes `sky/derived/gaia/match_gaia_source__<Region>.hdf5` for each
-    requested region (default: all thirty), parallelised over regions with
-    joblib; every computation inside a region is vectorised over sources."""
+    requested region (default: all thirty), one region after another
+    (owner ruling 2026-10-09): a region's own crossmatch is spread over many
+    SESNA source blocks through the shared pool (`_match_candidates`), so
+    the region with the most sources -- Cygnus X -- uses every worker
+    instead of leaving the rest idle while it alone runs on one core. The
+    region-wide S1/S2/EPS fit that follows is unchanged, one call per
+    region on the assembled columns."""
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
     with progress_module.Stage("sky.derived.gaia_match") as st:
         n_regions = len(regions)
-        n_done = [0]
-
-        def _one(region):
-            r = _build_one_region(config, region)
-            n_done[0] += 1
-            st.tick(n_done[0], n_regions, "regions")
-            return r
-
-        Parallel(n_jobs=config.n_jobs)(delayed(_one)(region) for region in regions)
+        for i, region in enumerate(regions):
+            _build_one_region(config, region, config.n_jobs)
+            st.tick(i + 1, n_regions, "regions")
         st.done(None, regions=n_regions)
 
 
