@@ -471,7 +471,7 @@ def _write_region(config, region, matched, rho, g_s, s1, s2, eps):
 # --------------------------------------------------------------- one region
 
 def _build_one_region(config, region, n_jobs=1):
-    name, src_ra, src_dec = _read_curated_catalogue(config, region)
+    name, _, _ = _read_curated_catalogue(config, region)
     n_sources = name.size
     hpx_pix_512 = _read_hpx_pix_512(config, region, n_sources)
     rho = local_gaia_density(config, region, hpx_pix_512)

@@ -58,8 +58,11 @@ MIN_DETECTED_BANDS = 2
 
 #: `catalog.curated`'s ORIGIN_FNU code for a band the survey never observed
 #: at the source's position: no flux and no completeness depth of its own,
-#: so the curation substituted a sky neighbour's depth. That substituted
-#: value is not a limit on this source (section 6.2), so the band carries
+#: so the curation substituted a sky neighbour's depth. Pokhrel et al. 2023
+#: (eHOPS I, ApJS 266, 32): the SESNA catalogue "provides the nearest 90%
+#: differential completeness value to each source's position for all bands
+#: covered at that position" -- so a band with no completeness value of
+#: its own is a band not covered there, and (section 6.2) the band carries
 #: no non-detection term -- it is excluded, like a band with no limit.
 ORIGIN_UNOBSERVED = 91
 

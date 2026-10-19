@@ -19,9 +19,13 @@ band:
 
 Every substitution is recorded per band in `ORIGIN_FNU` (1 = measured
 detection, 2 = 2MASS survey bound, 90 = own DCOMP90, 91 = neighbour
-DCOMP90). `SPEC_PRIORS.md` section 1.3 reads the resulting `DCOMP90_MJY`
-map, rescaled per region and band, as the per-source 50%-completeness
-limit for the five Spitzer bands.
+DCOMP90 -- Pokhrel et al. 2023 (eHOPS I, ApJS 266, 32): the SESNA catalogue
+"provides the nearest 90% differential completeness value to each
+source's position for all bands covered at that position", so a band
+with no completeness value of its own is a band not covered there).
+`SPEC_PRIORS.md` section 1.3 reads the resulting `DCOMP90_MJY` map,
+rescaled per region and band, as the per-source 50%-completeness limit
+for the five Spitzer bands.
 """
 
 import functools

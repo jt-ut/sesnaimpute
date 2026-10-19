@@ -86,7 +86,12 @@ REGISTRY = {
         "How FNU_MJY and DCOMP90_MJY in each band were obtained, one integer per "
         "band: 1 a measured detection, 2 the fixed 2MASS survey detection bound, "
         "90 the source's own 90%-completeness flux, 91 the median "
-        "90%-completeness flux of its nearest sky neighbours."),
+        "90%-completeness flux of its nearest sky neighbours -- Pokhrel et al. "
+        "2023 (eHOPS I, ApJS 266, 32): the SESNA catalogue \"provides the "
+        "nearest 90% differential completeness value to each source's "
+        "position for all bands covered at that position\", so a band with "
+        "no completeness value of its own is a band not covered there, and "
+        "the SED fitter's non-detection term excludes it."),
 
     # population.young_stars: folded into population.anchor_weights.build
     # (brief U4) -- no product of its own, no registry entries. See
