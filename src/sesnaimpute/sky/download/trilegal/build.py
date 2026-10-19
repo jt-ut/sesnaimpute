@@ -9,18 +9,28 @@ for the region being built, POSTs the query, and reads the "job running"
 reply's own status page and output-file URL: the output file exists (and
 grows) well before the job is done, so completion is read from the status
 page, not the file's mere existence. Once the status page reads "has
-finished", the module fetches the output file and saves it verbatim as
-`<data_root>/sky/download/trilegal/<Region>.dat`
+finished", the module fetches the output file, parses its own header
+line and saves it as a typed HDF5 table (T6, 2026-10-19), verbatim in
+content, at `<data_root>/sky/download/trilegal/<Region>.h5`
 (`_part<i>` for a region whose area is split into `n_parts` equal
 sub-queries). Each run is a new random realisation of the same population,
 so the files on disk are the realisation the current build used, and a
 re-run replaces them.
+
+Before T6, every part was saved as ascii text, verbatim; those 931 `.dat`
+files already on disk (21 GB) are converted in place, once, by hand, by
+the sibling module `sky.download.trilegal.convert` -- never by this
+module and never from RUNBOOKtp.sh (the `.dat` files are not deleted; the
+owner decides later). `read_ascii_table`, `write_ascii_table_h5` and
+`read_region_part_h5` below are the one parse/write/read the fetch and
+the converter share, so a reader never again parses TRILEGAL text itself.
 
 Feeds SPEC_PRIORS.md section 1.5 (the synthetic field-star population:
 STAR, AGB and PAHC share it).
 """
 
 import html.parser
+import io
 import os
 import re
 import ssl
@@ -29,10 +39,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import h5py
 import healpy as hp
 import numpy as np
+import pandas as pd
 
+from sesnaimpute import build as build_module
 from sesnaimpute import progress as progress_module
+from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.granules import access as granules_access
 
@@ -195,6 +209,127 @@ REGION_POINTINGS = {
     "Taurus": dict(l_deg=173.56161, b_deg=-17.77185, area_deg2=18.0116, n_parts=4),
     "Vela D": dict(l_deg=263.74753, b_deg=-0.09065, area_deg2=0.4045, n_parts=4),
 }
+
+
+# ---------------------------------------------------------------------------
+# T6 (2026-10-19): the ascii<->HDF5 schema shared by the fetch, the
+# in-place converter (`sky.download.trilegal.convert`) and every reader.
+# ---------------------------------------------------------------------------
+
+#: One attrs_registry stem for every TRILEGAL column this project saves,
+#: whichever query produced it: a TRILEGAL column's own meaning (Gc,
+#: logAge, ... Mact) is the service's, fixed since Girardi et al. 2005,
+#: A&A 436, 895, and is the same column whether it reaches disk from the
+#: survey's own 2MASS+Spitzer query (`fetch_region_part`) or the one
+#: Gaia+Tycho2+2MASS colour query (`sky.download.trilegal.colour`).
+ASCII_STEM = "trilegal_ascii"
+
+
+def sanitize_column_name(name):
+    """A TRILEGAL header token as a valid HDF5 dataset name: the
+    brackets TRILEGAL wraps a band name in (`[3.6]`) are dropped, and the
+    one character HDF5 reserves as its own path separator, `/` (in
+    `[M/H]` and `m2/m1`), is replaced with `_`. The verbatim token is
+    recovered from the file's own `HEADER` attr, so sanitising loses no
+    information a reader needs."""
+    return name.replace("[", "").replace("]", "").replace("/", "_")
+
+
+#: The three atmosphere axes a reader matches a star AGAINST, not just
+#: computes with: `population.field_stars.match_templates` (a k-d tree
+#: nearest-neighbour query) and `.lookup_colour` / `sky.derived.
+#: trilegal_colour.colour_table` (a `searchsorted` bin assignment, then a
+#: nearest-POPULATED-cell query) both make a DISCRETE choice -- which
+#: template, which bin -- as a function of these three columns. Rounding
+#: them to float32 before that choice is not a rounding of the final
+#: number, the way it is for a magnitude a reader only ever adds or
+#: multiplies: it can flip which template or bin a star lands in, measured
+#: on Cygnus X's 6.6M raw stars at up to 10 template positions and 22
+#: colour-table matches -- far above the float32-rounding bar
+#: (CODING_RULES_BMSTP.md's "~1e-13 relative") the owner accepts for a
+#: reduction-order change. `m-M0` joins them: every star's distance (an
+#: anchor-prediction input, module docstring) is a continuous but still
+#: precision-bearing transform of it, and the column costs 4 extra bytes
+#: either way.
+FLOAT64_COLUMNS = frozenset({"logTe", "logg", "M_H", "m-M0"})
+
+
+def column_dtype(sanitized_name):
+    """`int16` for `Gc` (the service's own small integer Galactic-component
+    code); float64 for the three atmosphere-match axes and `m-M0`
+    (`FLOAT64_COLUMNS`, bit-identical to the ascii parse); float32 for
+    every other column -- a magnitude or mass a reader only adds,
+    multiplies or takes a log of, where TRILEGAL's own textual precision
+    (at most five decimal digits, module docstring) is far coarser than
+    float32's own ~7 significant digits, and every reader that uses one
+    already upcasts it to float64 itself before computing with it."""
+    if sanitized_name == "Gc":
+        return np.int16
+    if sanitized_name in FLOAT64_COLUMNS:
+        return np.float64
+    return np.float32
+
+
+def _parse_ascii_table(text):
+    """One TRILEGAL ascii reply, as `(header_line, names, df)`: the
+    verbatim header line (with its trailing newline), its whitespace-split
+    column names, and the parsed table -- dropped of any trailing blank
+    row (the service's own reply, module docstring)."""
+    header_line = text.split("\n", 1)[0] + "\n"
+    names = tuple(header_line.lstrip("#").split())
+    df = pd.read_csv(io.StringIO(text), sep=r"\s+", comment="#", header=None,
+                      names=names, engine="c")
+    df = df.dropna(subset=[names[0]])
+    if len(df) == 0:
+        raise ValueError("parsed TRILEGAL ascii table has no rows")
+    return header_line, names, df
+
+
+def read_ascii_table(path):
+    """`_parse_ascii_table` on one file at `path`, the one parse the
+    fetch (on fresh bytes) and `sky.download.trilegal.convert` (on a
+    `.dat` already at rest) share."""
+    with open(path, "r") as fh:
+        text = fh.read()
+    try:
+        return _parse_ascii_table(text)
+    except ValueError as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+
+
+def write_ascii_table_h5(dest_path, header_line, names, df):
+    """Writes one TRILEGAL ascii table's columns as typed HDF5 datasets,
+    named exactly as the header names them (sanitised,
+    `sanitize_column_name`), plus the verbatim header line as a file
+    attr -- the one schema `fetch_region_part` (a fresh pull) and
+    `sky.download.trilegal.convert` (the 931 files already on disk) both
+    write (T6 items 1-2). Download never computes (CODING_RULES_BMSTP.md
+    5a): every dataset is one ascii column, cast to its stored dtype,
+    nothing derived."""
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    with h5py.File(dest_path, "w") as f:
+        f.attrs["HEADER"] = header_line.rstrip("\n")
+        for name in names:
+            clean = sanitize_column_name(name)
+            data = df[name].to_numpy(dtype=column_dtype(clean))
+            build_module.write_dataset(f, clean, data, *REGISTRY[(ASCII_STEM, clean)],
+                                        compression="gzip")
+
+
+def read_region_part_h5(path):
+    """One converted TRILEGAL table (a region/part/pointing file, or the
+    one Gaia+2MASS colour query's file) as a DataFrame, columns restored
+    to the TRILEGAL header's own spelling (`[M/H]`, `m-M0`, `m2/m1`,
+    `[3.6]`, ...) from the file's own `HEADER` attr -- the one function
+    every reader of a converted TRILEGAL table uses (T6 item 3):
+    `population.field_stars`, `sky.derived.trilegal_colour`, and this
+    module's own `convert` identity check. No reader parses TRILEGAL
+    ascii text any more."""
+    with h5py.File(path, "r") as f:
+        header_line = f.attrs["HEADER"]
+        names = tuple(header_line.lstrip("#").split())
+        data = {name: f[sanitize_column_name(name)][()] for name in names}
+    return pd.DataFrame(data)
 
 
 class _FormFields(html.parser.HTMLParser):
@@ -378,18 +513,20 @@ def _query_fields(defaults, l_deg, b_deg, area_deg2):
 
 def fetch_region_part(l_deg, b_deg, area_deg2, dest_path, defaults, action_url):
     """Runs one TRILEGAL query (one region, or one part of a region split
-    into `n_parts`) and saves the reply verbatim at `dest_path`. Returns
-    `(n_bytes, wall_time_s)` from POST to the file being saved.
+    into `n_parts`) and saves it, typed, at `dest_path` (T6: `.h5`, the
+    `write_ascii_table_h5` schema `sky.download.trilegal.convert` also
+    writes for the ascii already on disk) -- the reply's own values,
+    nothing derived. Returns `(n_rows, wall_time_s)` from POST to the
+    file being saved.
     """
     fields = _query_fields(defaults, l_deg, b_deg, area_deg2)
     output_url, status_fields, submitted_at = submit_query(action_url, fields)
     wait_until_finished(action_url, status_fields)
     data = fetch_output(output_url)
     wall_time_s = time.time() - submitted_at
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    with open(dest_path, "wb") as out:
-        out.write(data)
-    return len(data), wall_time_s
+    header_line, names, df = _parse_ascii_table(data.decode("iso-8859-1"))
+    write_ascii_table_h5(dest_path, header_line, names, df)
+    return len(df), wall_time_s
 
 
 def region_pointings(config, region):
@@ -430,24 +567,29 @@ def region_pointings(config, region):
 
 
 def _file_names(region, n_pointings, pointing_idx, n_parts):
-    """The file name(s) one pointing's query is saved under. A region with
-    a single pointing keeps the historical bare `<region>.dat` (or
-    `<region>_part<i>.dat`) name so a region whose footprint needs no more
-    than one cell (NGC 7129) reads its existing cache unchanged; a region
-    with more than one pointing gets `<region>_pt<pointing_idx>[_part<i>].dat`.
+    """The file name(s) one pointing's query is saved under (T6: `.h5`,
+    typed -- the historical ascii name with its extension swapped). A
+    region with a single pointing keeps the historical bare `<region>.h5`
+    (or `<region>_part<i>.h5`) name so a region whose footprint needs no
+    more than one cell (NGC 7129) reads its existing cache unchanged; a
+    region with more than one pointing gets
+    `<region>_pt<pointing_idx>[_part<i>].h5`.
     """
     prefix = region if n_pointings == 1 else f"{region}_pt{pointing_idx}"
     if n_parts == 1:
-        return (f"{prefix}.dat",)
-    return tuple(f"{prefix}_part{i}.dat" for i in range(1, n_parts + 1))
+        return (f"{prefix}.h5",)
+    return tuple(f"{prefix}_part{i}.h5" for i in range(1, n_parts + 1))
 
 
 def build(config, regions=None, _limit=None):
     """Drives the TRILEGAL web form once per pointing (once per part, for a
-    pointing whose area is split) and saves each reply verbatim at
-    `<data_root>/sky/download/trilegal`. `regions` restricts which
-    regions are queried (default: all 30 in `REGION_POINTINGS`); `_limit`
-    is a rehearsal knob capping the number of parts queried per pointing.
+    pointing whose area is split) and saves each reply, typed, at
+    `<data_root>/sky/download/trilegal` (T6: `.h5`, `fetch_region_part`).
+    `regions` restricts which regions are queried (default: all 30 in
+    `REGION_POINTINGS`); `_limit` is a rehearsal knob capping the number
+    of parts queried per pointing. DOES NOT RUN here (T6 ruling): the
+    931 `.dat` files already on disk are converted instead, by
+    `sky.download.trilegal.convert`, run by hand.
     """
     with progress_module.Stage("sky.download.trilegal") as st:
         version, action_url, defaults = read_form()
@@ -479,7 +621,7 @@ def build(config, regions=None, _limit=None):
 
         n_total = sum(len(item[4]) for item in plan) or 1
         n_files = 0
-        n_bytes = 0
+        n_rows = 0
         n_done = 0
         for region, p_idx, pt, area_per_part, file_names in plan:
             for name in file_names:
@@ -491,15 +633,15 @@ def build(config, regions=None, _limit=None):
                     n_out, wall_time_s = fetch_region_part(
                         pt["l_deg"], pt["b_deg"], area_per_part, dest_path, defaults, action_url)
                     n_files += 1
-                    n_bytes += n_out
+                    n_rows += n_out
                     print(f"trilegal build: {region!r} pointing {p_idx} "
                           f"(l={pt['l_deg']:.4f}, b={pt['b_deg']:.4f}) -> {dest_path} "
-                          f"({n_out} bytes, {wall_time_s:.0f}s)")
+                          f"({n_out} rows, {wall_time_s:.0f}s)")
                 n_done += 1
                 st.tick(n_done, n_total, "files")
-        print(f"trilegal build: {n_files} files, {n_bytes} bytes total, "
+        print(f"trilegal build: {n_files} files, {n_rows} rows total, "
               f"{len(names)} regions")
-        st.done(dest_dir, regions=len(names), fetched=n_files, bytes=n_bytes)
+        st.done(dest_dir, regions=len(names), fetched=n_files, rows=n_rows)
 
 
 if __name__ == "__main__":
