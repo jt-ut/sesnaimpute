@@ -122,19 +122,19 @@ and the PAHC contamination weight -- the same per-tile approximation the
 module docstring above already describes for `XI` itself.
 """
 
+import functools
 import os
-import threading
 
 import h5py
 import healpy as hp
 import numpy as np
 import pandas as pd
 from astropy.io import fits
-from joblib import Parallel, delayed
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
+from sesnaimpute import pieces as pieces_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
@@ -831,6 +831,22 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     )
 
 
+def _tile_piece(piece, config, geom, stars, weights, profile_obj, dist_grid, curve,
+                 pointing_l, pointing_b, present_pointings, front_edge_pc, region):
+    """One piece's own contiguous block of tile ids (owner ruling
+    2026-10-09: within a region, many small pieces on one pool, never a
+    thread per tile), each built by `_build_one_tile`; the region-wide
+    read-only inputs are bound into this function by `build_region`'s own
+    `functools.partial` so `pieces.run` pickles them once per batch, not
+    once per tile."""
+    lo, hi = piece
+    return [
+        _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, curve,
+                         pointing_l, pointing_b, present_pointings, front_edge_pc, region)
+        for t in range(lo, hi)
+    ]
+
+
 def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
                   f_ref_sps, node_log10_teff, node_logg, ref_jhk, curve, st=None):
     stars_raw, omega_sim_deg2, n_raw = _read_field_stars(config, region)
@@ -882,20 +898,19 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
     present_pointings = np.unique(stars["pointing_index"])
 
     n_tile_total = tiles["n_tile"]
-    _tick_lock = threading.Lock()
-    _done_count = [0]
-
-    def _one_tile(t):
-        result = _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, curve,
-                                  pointing_l, pointing_b, present_pointings, front_edge_pc, region)
-        if st is not None:
-            with _tick_lock:
-                _done_count[0] += 1
-                st.tick(_done_count[0], n_tile_total, "tiles")
-        return result
-
-    results = Parallel(n_jobs=config.n_jobs, prefer="threads")(
-        delayed(_one_tile)(t) for t in range(n_tile_total))
+    # owner ruling 2026-10-09 (pieces.py): one pool over many small
+    # pieces of tile ids, in place of a thread per tile -- the region-wide
+    # inputs (`geom`, `stars`, `weights`, `profile_obj`, ...) are bound by
+    # `functools.partial`, pickled once per batch by `pieces.run`'s loky
+    # pool, not once per piece.
+    fn = functools.partial(
+        _tile_piece, config=config, geom=geom, stars=stars, weights=weights,
+        profile_obj=profile_obj, dist_grid=dist_grid, curve=curve,
+        pointing_l=pointing_l, pointing_b=pointing_b, present_pointings=present_pointings,
+        front_edge_pc=front_edge_pc, region=region)
+    tile_pieces = pieces_module.slices(n_tile_total, config.n_jobs)
+    piece_results = pieces_module.run(fn, tile_pieces, config.n_jobs, stage=st, unit="tile pieces")
+    results = [one_tile for piece in piece_results for one_tile in piece]
 
     # report-only (blessing check, owner ruling 2026-09-06): the pointing a
     # tile would have used under the OLD one-pointing-per-region scheme --
