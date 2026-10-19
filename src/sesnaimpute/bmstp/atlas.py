@@ -423,10 +423,23 @@ def catalogued_probability(a_col, u, flux0, f_lim, width_dex, config):
     `a_col`/`f_lim`/`width_dex`; `u` and `flux0` are the caller's whole
     (unsliced) member draw."""
     assert MIN_BANDS_CLEAR == 2, "the closed form below is `P(>=2 of 8)` only"
-    a = a_col[:, None] * u[None, :]  # (n_pix, n_mem)
-    w_ramp = selection_module.law_dense_weight(a)  # (n_pix, n_mem)
-    kappa = selection_module.kappa_hybrid(config, w_ramp)  # (n_pix, n_mem, 8)
-    dimming = 0.4 * a[:, :, None] * kappa  # (n_pix, n_mem, 8)
+    # `a`/`w_ramp`/`kappa`/`dimming` below depend on the member only
+    # through its own `u`, never through `flux0` -- a member sharing
+    # another member's own `u` gets the EXACT SAME `dimming` (GAL's
+    # whole population has `u = 1` for every member, sec. 5.4; AGB
+    # repeats one star's own `u` once per its own shell template, sec.
+    # 5.2), so it is computed once per DISTINCT `u` and gathered back to
+    # the full member axis (F4 2026-10-09 "extinction per distinct
+    # (column, u)"): `a_col[p] * u_unique[inverse[m]] == a_col[p] *
+    # u[m]` exactly (the same two floats multiplied in the same order),
+    # so this is a bit-identical reorganisation of the same arithmetic,
+    # not an approximation.
+    u_unique, inverse = np.unique(u, return_inverse=True)
+    a_unique = a_col[:, None] * u_unique[None, :]  # (n_pix, n_unique)
+    w_ramp_unique = selection_module.law_dense_weight(a_unique)
+    kappa_unique = selection_module.kappa_hybrid(config, w_ramp_unique)  # (n_pix, n_unique, 8)
+    dimming_unique = 0.4 * a_unique[:, :, None] * kappa_unique  # (n_pix, n_unique, 8)
+    dimming = dimming_unique[:, inverse, :]  # (n_pix, n_mem, 8): gathered back to every member
     flux = flux0[None, :, :] * 10.0 ** (-dimming)  # (n_pix, n_mem, 8)
     has_flux = flux0[None, :, :] > 0.0  # (1, n_mem, 8), broadcasts
     log10_f = np.log10(np.where(has_flux, flux, 1.0))
