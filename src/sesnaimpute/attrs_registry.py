@@ -22,6 +22,26 @@ naming the file and dataset, when a dataset it finds has no entry here.
 
 REGISTRY = {
 
+    # sky.download.spitzer_coverage -- spitzer_coverage_masks: SESNA's own
+    # native per-field Spitzer IRAC/MIPS coverage masks and their inventory.
+    # FIELD_MASK is not itself a dataset name: every field_Field<n> dataset
+    # under MASKS/<region>/<band> (one varying name per field) is written
+    # with this one shared reading, instead of the per-name registry entry
+    # the convention above assumes.
+    ("spitzer_coverage_masks", "FIELD_MASK"): ("boolean",
+        "True where this field's own Spitzer mosaic image reports at least one exposure at "
+        "that sky pixel (a finite _cov.fits value greater than zero); False elsewhere, "
+        "including outside the field's own footprint."),
+    ("spitzer_coverage_masks", "NAME"): ("source filename",
+        "The _cov.fits file this row's field mask was built from, exactly as distributed (a "
+        "trailing -NNN duplicate-download suffix kept)."),
+    ("spitzer_coverage_masks", "BYTES"): ("bytes",
+        "The size of that source _cov.fits file."),
+    ("spitzer_coverage_masks", "FIELD"): ("field number",
+        "The field number parsed from that source filename."),
+    ("spitzer_coverage_masks", "BAND"): ("band key",
+        "The band (I1, I2, I3, I4 or M1) parsed from that source filename."),
+
     # catalog.curated -- sources_sesna_source: the per-region curated SESNA
     # catalog, one row per source.
     ("sources_sesna_source", "NAME"): ("source name",
