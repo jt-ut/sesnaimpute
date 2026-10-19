@@ -235,17 +235,39 @@ def sanitize_column_name(name):
     return name.replace("[", "").replace("]", "").replace("/", "_")
 
 
+#: The three atmosphere axes a reader matches a star AGAINST, not just
+#: computes with: `population.field_stars.match_templates` (a k-d tree
+#: nearest-neighbour query) and `.lookup_colour` / `sky.derived.
+#: trilegal_colour.colour_table` (a `searchsorted` bin assignment, then a
+#: nearest-POPULATED-cell query) both make a DISCRETE choice -- which
+#: template, which bin -- as a function of these three columns. Rounding
+#: them to float32 before that choice is not a rounding of the final
+#: number, the way it is for a magnitude a reader only ever adds or
+#: multiplies: it can flip which template or bin a star lands in, measured
+#: on Cygnus X's 6.6M raw stars at up to 10 template positions and 22
+#: colour-table matches -- far above the float32-rounding bar
+#: (CODING_RULES_BMSTP.md's "~1e-13 relative") the owner accepts for a
+#: reduction-order change. `m-M0` joins them: every star's distance (an
+#: anchor-prediction input, module docstring) is a continuous but still
+#: precision-bearing transform of it, and the column costs 4 extra bytes
+#: either way.
+FLOAT64_COLUMNS = frozenset({"logTe", "logg", "M_H", "m-M0"})
+
+
 def column_dtype(sanitized_name):
-    """float32 for every TRILEGAL column but `Gc` (the service's own
-    small integer Galactic-component code, stored `int16`): every other
-    column's own textual precision -- at most five decimal digits, on
-    values TRILEGAL caps at a few tens or hundreds (module docstring) --
-    is far coarser than float32's own ~7 significant digits, and every
-    reader that uses a column (`population.field_stars.distance_pc`,
-    `.intrinsic_fluxes_mjy`; `sky.derived.trilegal_colour.colour_table`)
-    already upcasts it to float64 itself before computing with it, so no
-    column's OWN stored precision needs more than float32."""
-    return np.int16 if sanitized_name == "Gc" else np.float32
+    """`int16` for `Gc` (the service's own small integer Galactic-component
+    code); float64 for the three atmosphere-match axes and `m-M0`
+    (`FLOAT64_COLUMNS`, bit-identical to the ascii parse); float32 for
+    every other column -- a magnitude or mass a reader only adds,
+    multiplies or takes a log of, where TRILEGAL's own textual precision
+    (at most five decimal digits, module docstring) is far coarser than
+    float32's own ~7 significant digits, and every reader that uses one
+    already upcasts it to float64 itself before computing with it."""
+    if sanitized_name == "Gc":
+        return np.int16
+    if sanitized_name in FLOAT64_COLUMNS:
+        return np.float64
+    return np.float32
 
 
 def _parse_ascii_table(text):
