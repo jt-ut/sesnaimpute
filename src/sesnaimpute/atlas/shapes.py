@@ -250,7 +250,7 @@ def _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2
     return float(on_grid_gal)  # GAL
 
 
-def _panel_shape(config, region, cls, idx_median):
+def _panel_shape(config, region, cls, idx_median, reader=None):
     """`(density, mass, reader)`: the shape `h_C` the fitter reads for
     the median source -- `fittp.prior_reader.load`/`prepare`, which
     blurs the class's stored grain shape by the source's own column
@@ -259,8 +259,14 @@ def _panel_shape(config, region, cls, idx_median):
     axes `log10`, sec. 2). `mass` is `prepare`'s own post-blur sum over
     the WHOLE grid (sec. 9's "shape normalisation after blur", 1 +/-
     1e-3 by construction): a blur-identity check, distinct from the
-    support restriction the read below applies."""
-    reader = prior_reader.load(config, region, cls)
+    support restriction the read below applies. `reader`, when given
+    (`_build_region_data`'s own one-load-per-class share), skips this
+    class's own `prior_reader.load` -- each class's P1/P2-P5 read is
+    several h5py files opened per call, and `_build_region_data` needs
+    the SAME reader again for `lambda_grids` right after, so loading it
+    twice per class bought nothing."""
+    if reader is None:
+        reader = prior_reader.load(config, region, cls)
     h = prior_reader.prepare(reader, np.array([idx_median]))[0]
     density = h.astype(np.float64) / (reader.dlx * reader.dlb)
     mass = float(density.sum() * reader.dlx * reader.dlb)
@@ -298,7 +304,7 @@ def _prepare_unblurred(reader, rows):
     return h.astype(np.float32)
 
 
-def lambda_grids(config, region, rows, blur=True):
+def lambda_grids(config, region, rows, blur=True, readers=None, dtab=None):
     """`(Lambda (n_rows, 6, n_x, n_b) float64, lambda_floor (n_rows,),
     class_order)`: every row's own six-class prior density `Lambda_C(cell;
     s) = A_C(s) h_C(cell; s) f_C(F; s)` (sec. 1.1/1.4), floored at the one
@@ -319,16 +325,23 @@ def lambda_grids(config, region, rows, blur=True):
     by construction, no read-side change of variables. Either way the one
     common floor (below) is applied over the whole array, so an empty
     cell reads the same floor for every class whether or not it sits past
-    the edge ξ = 1."""
+    the edge ξ = 1.
+
+    `readers`/`dtab`, when given (`_build_region_data`'s own one-read
+    share for its single median source), skip this function's own
+    `prior_reader.load` per class and `_read_density_table` -- both reads
+    `_build_region_data` already made for the same region just before
+    calling this."""
     rows = np.asarray(rows)
     n_rows = rows.size
-    dtab = _read_density_table(config, region)
+    if dtab is None:
+        dtab = _read_density_table(config, region)
     d_pahc_rows = dtab["d_pahc"][rows].astype(np.float64).reshape(-1, 1, 1)
     curve = pahc_curve.read(config, region)
 
     lam = {}
     for cls in CLASS_ORDER:
-        reader = prior_reader.load(config, region, cls)
+        reader = readers[cls] if readers is not None else prior_reader.load(config, region, cls)
         b_centers = 0.5 * (reader.b_edges[:-1] + reader.b_edges[1:])
         if cls in ("STAR", "PAHC"):
             batch = _lambda_batch_size(reader.c_theta.size, b_centers.size)
@@ -407,9 +420,17 @@ def _build_region_data(config, region):
     on_grid_c = {}
     intensity_c = {}
     densities = []
+    readers = {}
     xi_edges = b_edges = None
     for cls in CLASS_ORDER:
-        density, mass, reader = _panel_shape(config, region, cls, idx_median)
+        # Each class's reader (`fittp.prior_reader.load`, several h5py
+        # files) is loaded ONCE here and reused below by `lambda_grids`
+        # (`readers=`) -- the previous version loaded every class twice,
+        # once for this diagnostic panel and once again inside
+        # `lambda_grids` for the SAME one median source.
+        reader = prior_reader.load(config, region, cls)
+        readers[cls] = reader
+        density, mass, reader = _panel_shape(config, region, cls, idx_median, reader=reader)
         densities.append(density)
         xi_edges, b_edges = reader.xi_edges, reader.b_edges
         intensity_c[cls] = float(dtab[cls][idx_median])
@@ -418,7 +439,8 @@ def _build_region_data(config, region):
                                          on_grid_gal, idx_median)
     log10_xi_max = _panel_xi_max(xi_edges, densities)
 
-    lambda_all, lambda_floor_rows, class_order = lambda_grids(config, region, np.array([idx_median]))
+    lambda_all, lambda_floor_rows, class_order = lambda_grids(
+        config, region, np.array([idx_median]), readers=readers, dtab=dtab)
     lambda_floor = float(lambda_floor_rows[0])
     lam_floored = {cls: lambda_all[0, i] for i, cls in enumerate(class_order)}
 
