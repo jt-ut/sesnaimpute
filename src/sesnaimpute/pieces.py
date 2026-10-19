@@ -15,6 +15,14 @@ Region-wide read-only inputs go in `fn` itself (a `functools.partial` or a
 closure): joblib pickles `fn` once per batch of tasks, not once per piece,
 and memory-maps large numpy arrays to the workers. A piece should carry
 indices or slice bounds, not data.
+
+Only NUMPY ARRAYS bound into `fn` are memory-mapped. Any other large object
+bound into it (a run-length mask, a tree, a dict of arrays, an open file)
+is PICKLED and sent to every worker with every batch -- measured on
+sky.derived.coverage's Cygnus X masks as 35 s of a 38 s stage. Bind such an
+object as its underlying numpy arrays, or have each worker build or open
+it once (a module-level per-process cache keyed on the region, cleared
+when the region changes, as bmstp.sample_star does), never per piece.
 """
 
 import os

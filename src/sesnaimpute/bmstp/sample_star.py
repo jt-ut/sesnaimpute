@@ -67,6 +67,7 @@ def _field_star_arrays(config, region):
     catalogue inside a per-item loop)."""
     key = (config.data_root, region)
     if key not in _FIELD_STAR_CACHE:
+        _FIELD_STAR_CACHE.clear()   # one region's arrays per worker at a time
         with h5py.File(_field_stars_path(config, region), "r") as f:
             log10_f45 = np.log10(f["FNU_MJY"][:, IDX_I2].astype(np.float64))
             dist_pc = f["DIST_PC"][:].astype(np.float64)
@@ -122,6 +123,7 @@ def _cached_profile(config, region):
     per tile."""
     key = (config.data_root, region)
     if key not in _PROFILE_CACHE:
+        _PROFILE_CACHE.clear()   # one region's profile per worker at a time
         _PROFILE_CACHE[key] = profile_module.read(config, region)
     return _PROFILE_CACHE[key]
 

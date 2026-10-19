@@ -24,12 +24,15 @@ def _text(value):
 
 def region_slice(config, region):
     """The region's own source rows -- catalogue row, HPX256/512 pixel,
-    HPX256_ROW, SIGHTLINE_ID -- read once from the granule map and cached
-    for the life of the process."""
-    key = (id(config), region)
+    HPX256_ROW, SIGHTLINE_ID -- read once from the granule map and kept
+    for as long as the process works on this region: regions run one
+    after another (owner ruling 2026-10-09), so the cache holds ONE
+    region's slice and drops it when another region is asked for."""
+    key = (config.data_root, region)
     cached = _REGION_SLICE_CACHE.get(key)
     if cached is not None:
         return cached
+    _REGION_SLICE_CACHE.clear()
     path = product_path(config, "granules", "sesna", "granule-map", "source")
     if not os.path.exists(path):
         raise FileNotFoundError(
