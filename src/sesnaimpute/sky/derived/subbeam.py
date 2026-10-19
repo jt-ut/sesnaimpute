@@ -35,20 +35,22 @@ map-level joblib pool is capped to
 bounds this to 3 workers by formula.
 """
 
+import functools
 import gzip
 import os
 import tempfile
+import zlib
 
 import h5py
 import numpy as np
 from astropy.io import fits
-from joblib import Parallel, delayed
 from scipy import fft as sfft
 from scipy import optimize
 from scipy.special import ndtr
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
+from sesnaimpute import pieces as pieces_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
@@ -433,7 +435,29 @@ def _ladder_index(scales, target, tol=LADDER_TOL_ARCSEC):
             % (tol, target, scales[i]))
     return i
 
-def _region_join(per_map, cloud_regions, herschel_regions):
+def _boot_block(acc, scales, corr, L0, bounds):
+    """One region's block-bootstrap draws `[start, stop)` (owner ruling
+    2026-10-09: the axis whose cost scales -- for a region with many
+    bootstrap tiles this loop, not the one-row-per-draw Python `for`, is
+    the dominant cost): each draw's own bias-corrected two-scale width
+    curve, refit through `fit_ps`, and the absolute width `w_abs` at the
+    map's own reference beam plus the three tabulated beams. `acc` (the
+    per-draw resampled histograms), `scales`, `corr` and `L0` are this
+    region's read-only inputs, bound once into this function; `bounds` is
+    the piece's own `(start, stop)` draw-index range."""
+    start, stop = bounds
+    ns = len(scales)
+    rows = np.full((stop - start, 2 + len(TARGETS)), np.nan)
+    for j, b in enumerate(range(start, stop)):
+        wb = np.array([sd_of(acc[b, i], DT_CENT) for i in range(ns)]) * corr
+        pb = np.column_stack([np.full(ns, L0), scales, wb])
+        ab, bb, _ = fit_ps(pb)
+        rows[j, 0], rows[j, 1] = ab, bb
+        rows[j, 2:] = w_abs(ab, bb, TARGETS)
+    return start, stop, rows
+
+
+def _region_join(per_map, cloud_regions, herschel_regions, n_jobs):
     """Pools per-map payloads into one power-spectrum fit, held-out-scale
     validation, block bootstrap and quantile curve per Herschel-covered region."""
     scales = None
@@ -486,7 +510,11 @@ def _region_join(per_map, cloud_regions, herschel_regions):
 
         # Block bootstrap over BOOT_TILE_ARCSEC tiles for the fit's own
         # sampling uncertainty.
-        rng = np.random.default_rng(abs(hash(reg)) % (2 ** 31))
+        # Python's string hash is randomised per process (PYTHONHASHSEED);
+        # the block bootstrap needs the same draw every run for the
+        # region-choice ordering of the stage pool not to change its
+        # numbers, so the seed comes from a fixed, non-randomised hash.
+        rng = np.random.default_rng(zlib.crc32(reg.encode("utf-8")) % (2 ** 31))
         Wd = rng.multinomial(n_tiles, np.full(n_tiles, 1.0 / n_tiles),
                              size=N_BOOT).astype(np.float32)
         acc = (Wd @ tile).reshape(N_BOOT, ns, N_DT + 2)
@@ -495,12 +523,10 @@ def _region_join(per_map, cloud_regions, herschel_regions):
                          for i in range(ns)])
         corr = np.where(np.isfinite(sd_c) & (sd_c > 0), sd / sd_c, 1.0)
         boot = np.full((N_BOOT, 2 + len(TARGETS)), np.nan)
-        for b in range(N_BOOT):
-            wb = np.array([sd_of(acc[b, i], DT_CENT) for i in range(ns)]) * corr
-            pb = np.column_stack([np.full(ns, L0), scales, wb])
-            ab, bb, _ = fit_ps(pb)
-            boot[b, 0], boot[b, 1] = ab, bb
-            boot[b, 2:] = w_abs(ab, bb, TARGETS)
+        boot_fn = functools.partial(_boot_block, acc, scales, corr, L0)
+        for b_start, b_stop, b_rows in pieces_module.run(
+                boot_fn, pieces_module.slices(N_BOOT, n_jobs), n_jobs):
+            boot[b_start:b_stop] = b_rows
         boot_beta = boot[:, 1]
         w_boot_med = np.nanmedian(boot[:, 2:], axis=0)
 
@@ -610,20 +636,13 @@ def build(config, regions=None):
               flush=True)
         n_jobs = _pool_n_jobs(config, jobs)
         n_maps = len(jobs)
-        n_done = [0]
 
-        def _one(j):
-            r = process_map(j)
-            n_done[0] += 1
-            st.tick(n_done[0], n_maps, "maps")
-            return r
-
-        results = Parallel(n_jobs=n_jobs)(delayed(_one)(j) for j in jobs)
+        results = pieces_module.run(process_map, jobs, n_jobs, stage=st, unit="maps")
         per_map = {cloud: payload for cloud, payload in results if payload is not None}
         print("subbeam: %d/%d maps processed" % (len(per_map), len(jobs)), flush=True)
 
         herschel_regions = sorted(regions)
-        scales, per_region = _region_join(per_map, cloud_regions, herschel_regions)
+        scales, per_region = _region_join(per_map, cloud_regions, herschel_regions, config.n_jobs)
         regs = list(per_region)
         print("subbeam: %d/%d requested regions with Herschel coverage"
               % (len(regs), len(regions)), flush=True)
