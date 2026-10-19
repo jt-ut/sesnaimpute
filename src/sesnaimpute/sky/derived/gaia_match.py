@@ -196,14 +196,6 @@ def g_from_lr(lr):
 
 # ---------------------------------------------------- true-pair shape fit
 
-def _true_branch(sep, rho, s1, s2, eps):
-    """The density of the observed separation under d=1 (a true counterpart
-    is present), competing risks: the counterpart's own match distance or a
-    closer chance star, whichever comes first."""
-    return (true_pair_pdf(sep, s1, s2, eps) * chance_sf(sep, rho)
-            + chance_pdf(sep, rho) * true_pair_sf(sep, s1, s2, eps))
-
-
 def _profile_counterpart_fraction(p_true, p_chance, atom_true, atom_chance):
     """The ONE profiled nuisance per region: the share `q` of sources whose
     separation was drawn from the true-pair branch rather than pure chance.
@@ -219,30 +211,55 @@ def _profile_counterpart_fraction(p_true, p_chance, atom_true, atom_chance):
     return float(res.x), float(res.fun)
 
 
-def fit_true_pair_shape(sep_matched, rho_matched, rho_no_match, r_max=R_MAX_ARCSEC):
-    """Maximum-likelihood (s1, s2, eps) of the true-pair Rayleigh mixture,
-    the chance law fixed at each source's own measured density, with the
-    counterpart fraction profiled out at every trial point. Vectorised over
-    the region's sources; the only iteration is the optimiser's own restarts
-    (a handful of points, independent of source count)."""
-    p_chance = chance_pdf(sep_matched, rho_matched)
-    atom_chance = chance_sf(r_max, rho_no_match)
-
+def _restart_fit(sep_matched, p_chance, chance_sf_matched, atom_chance, r_max, s2_0):
+    """One Nelder-Mead restart of the (s1, s2, eps) search from its own
+    starting point (`fit_true_pair_shape`'s `_S2_RESTARTS`), over the
+    source arrays bound into this call once. The chance-law factors
+    `p_chance = CHANCE_PDF(sep_matched, rho_matched)`, `chance_sf_matched =
+    CHANCE_SF(sep_matched, rho_matched)` and `atom_chance = CHANCE_SF(r_max,
+    rho_no_match)` do not depend on (s1, s2, eps), so every trial's
+    likelihood (`nll`) recomputes only the two true-pair factors that do --
+    TRUE_PAIR_PDF and TRUE_PAIR_SF at `sep_matched` -- the density of the
+    observed separation under d=1 (a true counterpart is present,
+    competing risks: the counterpart's own match distance or a closer
+    chance star, whichever comes first) and the no-neighbour atom's
+    true-pair survival."""
     def nll(params):
         s1, s2, eps = params
         if not (0.02 < s1 < 1.0 and s1 < s2 < 8.0 and 0.0 <= eps < 0.6):
             return 1e12
-        p_true = _true_branch(sep_matched, rho_matched, s1, s2, eps)
-        atom_true = true_pair_sf(r_max, s1, s2, eps) * chance_sf(r_max, rho_no_match)
+        p_true = (true_pair_pdf(sep_matched, s1, s2, eps) * chance_sf_matched
+                  + p_chance * true_pair_sf(sep_matched, s1, s2, eps))
+        atom_true = true_pair_sf(r_max, s1, s2, eps) * atom_chance
         _, value = _profile_counterpart_fraction(p_true, p_chance, atom_true, atom_chance)
         return value
+    return minimize(nll, [0.12, s2_0, 0.06], method="Nelder-Mead",
+                    options=dict(maxiter=4000, maxfev=4000, xatol=1e-6, fatol=1e-4))
 
-    best = None
-    for s2_0 in _S2_RESTARTS:
-        res = minimize(nll, [0.12, s2_0, 0.06], method="Nelder-Mead",
-                       options=dict(maxiter=4000, maxfev=4000, xatol=1e-6, fatol=1e-4))
-        if best is None or res.fun < best.fun:
-            best = res
+
+def fit_true_pair_shape(sep_matched, rho_matched, rho_no_match, r_max=R_MAX_ARCSEC, n_jobs=1):
+    """Maximum-likelihood (s1, s2, eps) of the true-pair Rayleigh mixture,
+    the chance law fixed at each source's own measured density, with the
+    counterpart fraction profiled out at every trial point. The chance-law
+    factors that are the same at every trial (`p_chance`, `chance_sf_matched`,
+    `atom_chance`) are computed once here, outside every trial, instead of
+    inside one (`_restart_fit`'s own docstring names them). The three
+    Nelder-Mead restarts (`_S2_RESTARTS`) are independent full optimisations
+    over the same source arrays; they run on the shared stage pool
+    (`pieces.run`, `n_jobs` workers, each restart one piece -- a restart's
+    own trial count dwarfs the pool's per-piece dispatch cost, unlike a
+    source-range piece of one trial's likelihood, measured net slower than
+    the vectorised whole on this region's source counts) instead of one
+    after another, reduced to the best by the parent in `_S2_RESTARTS`
+    order -- the same order every time, so the restart that wins is
+    unaffected by whether the others ran before, after, or alongside it."""
+    p_chance = chance_pdf(sep_matched, rho_matched)
+    chance_sf_matched = chance_sf(sep_matched, rho_matched)
+    atom_chance = chance_sf(r_max, rho_no_match)
+
+    fn = functools.partial(_restart_fit, sep_matched, p_chance, chance_sf_matched, atom_chance, r_max)
+    results = pieces_module.run(fn, _S2_RESTARTS, min(int(n_jobs), len(_S2_RESTARTS)))
+    best = min(results, key=lambda res: res.fun)
     s1, s2, eps = best.x
     if s2 < s1:  # keep the labelling stable (core = smaller scale)
         s1, s2, eps = s2, s1, 1.0 - eps
@@ -482,7 +499,8 @@ def _build_one_region(config, region, n_jobs=1):
     has_neighbor = matched["has_neighbor"]
 
     s1, s2, eps = fit_true_pair_shape(
-        matched["sep_arcsec"][has_neighbor], rho[has_neighbor], rho[~has_neighbor], R_MAX_ARCSEC)
+        matched["sep_arcsec"][has_neighbor], rho[has_neighbor], rho[~has_neighbor], R_MAX_ARCSEC,
+        n_jobs=n_jobs)
 
     lr = np.empty(n_sources)
     lr[has_neighbor] = lr_matched(matched["sep_arcsec"][has_neighbor], rho[has_neighbor], s1, s2, eps)
