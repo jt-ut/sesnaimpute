@@ -361,6 +361,14 @@ def _pixel_tile(config, region, pix):
 _PIXEL_BATCH_BUDGET_BYTES = 512 * 1024 * 1024
 _N_TEMP_ARRAYS = 12
 
+#: `catalogued_probability`'s own inner member sub-block (F4 2026-10-09
+#: "change B"): a few thousand members keeps one sub-block's temporaries
+#: (`n_pix_batch * _MEMBER_SUBBLOCK * N_BANDS * 8 bytes`, several of
+#: them at once) within an L2-sized working set rather than the whole
+#: pixel batch's own member axis, without changing `_pixel_batch_size`
+#: or `catalogued_fraction`'s own chunking (rule 10b's F4 risk 2).
+_MEMBER_SUBBLOCK = 3000
+
 
 def _pixel_batch_size(n_mem):
     """Pixels per batch so `n_pixel_batch * n_mem * N_BANDS * 8 bytes
@@ -423,68 +431,87 @@ def catalogued_probability(a_col, u, flux0, f_lim, width_dex, config):
     `a_col`/`f_lim`/`width_dex`; `u` and `flux0` are the caller's whole
     (unsliced) member draw."""
     assert MIN_BANDS_CLEAR == 2, "the closed form below is `P(>=2 of 8)` only"
-    # `a`/`w_ramp`/`kappa`/`dimming` below depend on the member only
-    # through its own `u`, never through `flux0` -- a member sharing
-    # another member's own `u` gets the EXACT SAME `dimming` (GAL's
-    # whole population has `u = 1` for every member, sec. 5.4; AGB
-    # repeats one star's own `u` once per its own shell template, sec.
-    # 5.2), so it is computed once per DISTINCT `u` and gathered back to
-    # the full member axis (F4 2026-10-09 "extinction per distinct
-    # (column, u)"): `a_col[p] * u_unique[inverse[m]] == a_col[p] *
-    # u[m]` exactly (the same two floats multiplied in the same order),
-    # so this is a bit-identical reorganisation of the same arithmetic,
-    # not an approximation.
-    u_unique, inverse = np.unique(u, return_inverse=True)
-    a_unique = a_col[:, None] * u_unique[None, :]  # (n_pix, n_unique)
-    w_ramp_unique = selection_module.law_dense_weight(a_unique)
-    kappa_unique = selection_module.kappa_hybrid(config, w_ramp_unique)  # (n_pix, n_unique, 8)
-    dimming_unique = 0.4 * a_unique[:, :, None] * kappa_unique  # (n_pix, n_unique, 8)
-    dimming = dimming_unique[:, inverse, :]  # (n_pix, n_mem, 8): gathered back to every member
-    flux = flux0[None, :, :] * 10.0 ** (-dimming)  # (n_pix, n_mem, 8)
-    has_flux = flux0[None, :, :] > 0.0  # (1, n_mem, 8), broadcasts
-    log10_f = np.log10(np.where(has_flux, flux, 1.0))
-    z = ((log10_f - np.log10(f_lim)[:, None, :])
-         / (likelihood_module._SQRT2 * width_dex[:, None, :]))
-    p = np.where(has_flux, 1.0 - np.exp(likelihood_module._ln_one_minus_c(z)), 0.0)
-    one_minus_p = 1.0 - p  # (n_pix, n_mem, 8)
-    # the leave-one-out products (F4 2026-10-09 "change A", the single
-    # largest kernel cost: 9 `np.delete` copies of this whole (n_pix,
-    # n_mem, 7) array plus 9 strided `np.prod` reductions). `prefix[k]`
-    # is the LEFT FOLD of bands `0..k-1` on the band-major views
-    # `one_minus_p[:, :, k]` (no copy): `prefix[N_BANDS]` is therefore
-    # the same left-to-right fold of all 8 bands `np.prod(one_minus_p,
-    # axis=2)` performs along its own short contiguous last axis, and
-    # leaving band `i` out continues that SAME fold from `prefix[i]`
-    # through bands `i+1..N_BANDS-1` one band at a time -- the exact
-    # continuation of the one left fold `np.prod(np.delete(...))` used
-    # to perform on the remaining 7 bands in their original order,
-    # never a separately-folded suffix (a suffix product folds
-    # right-to-left, a different association that can move the last
-    # bit, F4 risk 1/3).
-    prefix = [np.ones(one_minus_p.shape[:2], dtype=one_minus_p.dtype)]
-    for k in range(N_BANDS):
-        prefix.append(prefix[-1] * one_minus_p[:, :, k])
-    prod_all = prefix[N_BANDS]
-    loo = []
-    for i in range(N_BANDS):
-        term = prefix[i]
-        for k in range(i + 1, N_BANDS):
-            term = term * one_minus_p[:, :, k]
-        loo.append(term)
-    sum_term = np.zeros_like(prod_all)
-    for i in range(N_BANDS):
-        sum_term += p[:, :, i] * loo[i]
-    p_cat = 1.0 - prod_all - sum_term
+    n_pix, n_mem = a_col.size, u.size
+    p_cat = np.empty((n_pix, n_mem), dtype=np.float64)
+    p_cat_i2 = np.empty((n_pix, n_mem), dtype=np.float64)
+    flux_i2 = np.empty((n_pix, n_mem), dtype=np.float64)
+    # member sub-blocks of `_MEMBER_SUBBLOCK` (F4 2026-10-09 "change B"):
+    # every array below is the SAME elementwise-per-(pixel,member)
+    # computation on a slice of the member axis, so splitting it changes
+    # no value -- `catalogued_fraction`'s own pixel batches and member
+    # chunks still see exactly the SAME `p_cat`/`p_cat_i2`/`flux_i2` this
+    # function always returned. The working set per sub-block
+    # (`n_pix * _MEMBER_SUBBLOCK * 8` elements) fits comfortably in L2
+    # cache instead of the full pixel-batch's own `_N_TEMP_ARRAYS *
+    # n_mem` DRAM-bound footprint.
+    for mstart in range(0, n_mem, _MEMBER_SUBBLOCK):
+        mstop = min(mstart + _MEMBER_SUBBLOCK, n_mem)
+        u_s = u[mstart:mstop]
+        flux0_s = flux0[mstart:mstop]
+        # `a`/`w_ramp`/`kappa`/`dimming` below depend on the member only
+        # through its own `u`, never through `flux0` -- a member sharing
+        # another member's own `u` gets the EXACT SAME `dimming` (GAL's
+        # whole population has `u = 1` for every member, sec. 5.4; AGB
+        # repeats one star's own `u` once per its own shell template,
+        # sec. 5.2), so it is computed once per DISTINCT `u` IN THIS
+        # SUB-BLOCK and gathered back to the sub-block's own member axis
+        # (F4 2026-10-09 "extinction per distinct (column, u)"):
+        # `a_col[p] * u_unique[inverse[m]] == a_col[p] * u[m]` exactly
+        # (the same two floats multiplied in the same order), so this is
+        # a bit-identical reorganisation of the same arithmetic, not an
+        # approximation.
+        u_unique, inverse = np.unique(u_s, return_inverse=True)
+        a_unique = a_col[:, None] * u_unique[None, :]  # (n_pix, n_unique)
+        w_ramp_unique = selection_module.law_dense_weight(a_unique)
+        kappa_unique = selection_module.kappa_hybrid(config, w_ramp_unique)  # (n_pix, n_unique, 8)
+        dimming_unique = 0.4 * a_unique[:, :, None] * kappa_unique  # (n_pix, n_unique, 8)
+        dimming = dimming_unique[:, inverse, :]  # (n_pix, n_sub, 8): gathered to the sub-block
+        flux = flux0_s[None, :, :] * 10.0 ** (-dimming)  # (n_pix, n_sub, 8)
+        has_flux = flux0_s[None, :, :] > 0.0  # (1, n_sub, 8), broadcasts
+        log10_f = np.log10(np.where(has_flux, flux, 1.0))
+        z = ((log10_f - np.log10(f_lim)[:, None, :])
+             / (likelihood_module._SQRT2 * width_dex[:, None, :]))
+        p = np.where(has_flux, 1.0 - np.exp(likelihood_module._ln_one_minus_c(z)), 0.0)
+        one_minus_p = 1.0 - p  # (n_pix, n_sub, 8)
+        # the leave-one-out products (F4 2026-10-09 "change A", the single
+        # largest kernel cost: 9 `np.delete` copies of this whole (n_pix,
+        # n_sub, 7) array plus 9 strided `np.prod` reductions). `prefix[k]`
+        # is the LEFT FOLD of bands `0..k-1` on the band-major views
+        # `one_minus_p[:, :, k]` (no copy): `prefix[N_BANDS]` is therefore
+        # the same left-to-right fold of all 8 bands `np.prod(one_minus_p,
+        # axis=2)` performs along its own short contiguous last axis, and
+        # leaving band `i` out continues that SAME fold from `prefix[i]`
+        # through bands `i+1..N_BANDS-1` one band at a time -- the exact
+        # continuation of the one left fold `np.prod(np.delete(...))` used
+        # to perform on the remaining 7 bands in their original order,
+        # never a separately-folded suffix (a suffix product folds
+        # right-to-left, a different association that can move the last
+        # bit, F4 risk 1/3).
+        prefix = [np.ones(one_minus_p.shape[:2], dtype=one_minus_p.dtype)]
+        for k in range(N_BANDS):
+            prefix.append(prefix[-1] * one_minus_p[:, :, k])
+        prod_all = prefix[N_BANDS]
+        loo = []
+        for i in range(N_BANDS):
+            term = prefix[i]
+            for k in range(i + 1, N_BANDS):
+                term = term * one_minus_p[:, :, k]
+            loo.append(term)
+        sum_term = np.zeros_like(prod_all)
+        for i in range(N_BANDS):
+            sum_term += p[:, :, i] * loo[i]
+        p_cat[:, mstart:mstop] = 1.0 - prod_all - sum_term
 
-    # the bright-end check (sec. 9): a member counts as bright only if it
-    # would be CATALOGUED WITH I2 ITSELF MEASURED (its own I2 cleared,
-    # `p[:,:,IDX_I2]`, AND at least one of the other seven also clears,
-    # `1 - prod_{i!=I2}(1-p_i)`); flux_i2 lets the caller apply the 3x/10x
-    # test against this pixel's own I2 50% limit. `loo[IDX_I2]` is
-    # already exactly that leave-I2-out product, computed once above.
-    prob_other_detect = 1.0 - loo[IDX_I2]
-    p_cat_i2 = p[:, :, IDX_I2] * prob_other_detect
-    flux_i2 = flux[:, :, IDX_I2]  # (n_pix, n_mem)
+        # the bright-end check (sec. 9): a member counts as bright only if
+        # it would be CATALOGUED WITH I2 ITSELF MEASURED (its own I2
+        # cleared, `p[:,:,IDX_I2]`, AND at least one of the other seven
+        # also clears, `1 - prod_{i!=I2}(1-p_i)`); `flux_i2` lets the
+        # caller apply the 3x/10x test against this pixel's own I2 50%
+        # limit. `loo[IDX_I2]` is already exactly that leave-I2-out
+        # product, computed once above.
+        prob_other_detect = 1.0 - loo[IDX_I2]
+        p_cat_i2[:, mstart:mstop] = p[:, :, IDX_I2] * prob_other_detect
+        flux_i2[:, mstart:mstop] = flux[:, :, IDX_I2]  # (n_pix, n_sub)
     return p_cat, p_cat_i2, flux_i2
 
 
