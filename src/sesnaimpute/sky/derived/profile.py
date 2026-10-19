@@ -561,9 +561,8 @@ def measure_region(d_r_pc, inner, splice, dist_new, rho_dist_new, weight):
 def _admitted_sightlines(config, region):
     """The region's admitted sightlines (spec IMPLEMENTATION.md 1): every
     nside-256 galactic-NESTED pixel the granule map associates with
-    `region` -- source-bearing or mosaic-supported, including rows with
-    zero sources -- and each row's source count. Callers must not filter
-    it."""
+    `region` -- source-bearing, full stop (every row's N_SOURCE_ROWS > 0)
+    -- and each row's source count."""
     path = product_path(config, "granules", "sesna", "granule-map", "source")
     if not os.path.exists(path):
         raise FileNotFoundError(

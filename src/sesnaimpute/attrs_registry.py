@@ -2644,19 +2644,8 @@ REGISTRY = {
         "and each 2MASS Ks bin in KS_EDGES, how many Gaia-2MASS crossmatched "
         "stars fall in that pixel and that pair of bins."),
 
-    # sky.derived.coverage -- coverage_spitzer_sightline (nside-256) and
-    # coverage_spitzer_hpx512 (nside-512): the Spitzer mosaic coverage
-    # fraction per pixel and band, per region.
-    ("coverage_spitzer_sightline", "HPX_PIX"): ("nested HEALPix pixel, nside 256",
-        "The region's nside-256 pixel numbers (nested ordering) that its own "
-        "Spitzer mosaics touch, ascending. Row i here is row i of FRAC."),
-    ("coverage_spitzer_sightline", "FRAC"): ("dimensionless",
-        "For the matching pixel in HPX_PIX and each of the five Spitzer bands "
-        "named in BANDS, the fraction of that nside-256 pixel's area that "
-        "falls on a covered mosaic pixel in that band."),
-    ("coverage_spitzer_sightline", "BANDS"): ("band key",
-        "The five Spitzer band keys, in the column order FRAC's second axis "
-        "uses: I1, I2, I3, I4 (IRAC), M1 (MIPS)."),
+    # sky.derived.coverage -- coverage_spitzer_hpx512 (nside-512): the
+    # Spitzer mosaic coverage fraction per pixel and band, per region.
     ("coverage_spitzer_hpx512", "HPX_PIX"): ("nested HEALPix pixel, nside 512",
         "The region's nside-512 pixel numbers (nested ordering) that its own "
         "Spitzer mosaics touch, ascending. Row i here is row i of FRAC."),
