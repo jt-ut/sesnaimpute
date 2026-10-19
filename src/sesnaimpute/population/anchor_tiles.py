@@ -520,6 +520,41 @@ def _pointing_bounds(sorted_pointing_index, present_pointings):
     return bounds
 
 
+def _sightline_profile_pieces(profile_obj, parent, d_pc):
+    """`(inside, a_edge, tail)`: the two per-star profile quantities
+    `profile_obj.a_of_d` folds into `a_local`, computed from the
+    pointing's own distance slice `d_pc` and the pixel's parent nside-256
+    sightline `parent` ALONE -- never from the pixel's own column
+    `A_PIX_K` (`sky.derived.profile._RegionProfile.a_of_d`: `inside =
+    interp(d, self.dist, self.a_cum[row])` and `tail = self.tail_shape(d,
+    hpx_pix)` are both evaluated before `total_column_ak` ever enters the
+    formula). `_magnitudes_from_pieces` below rebuilds `a_of_d`'s exact
+    output from these two arrays plus a scalar column, so sibling
+    nside-512 pixels sharing one nside-256 sightline (round 3 T2) compute
+    them once instead of once per sibling."""
+    row = int(np.asarray(profile_obj.sightline_row(parent)))
+    inside = np.interp(d_pc, profile_obj.dist, profile_obj.a_cum[row])
+    a_edge = float(profile_obj.a_cum[row, -1])
+    tail = profile_obj.tail_shape(d_pc, hpx_pix=parent)
+    return inside, a_edge, tail
+
+
+def _magnitudes_from_pieces(a_pix_k, inside, a_edge, tail, g_proxy, ks_mag,
+                             k_g_diffuse, k_g_dense, r_diffuse, r_dense):
+    """`(G_obs, Ks_obs)` from `_sightline_profile_pieces`'s cached
+    `(inside, a_edge, tail)` and one pixel's own `A_PIX_K`: `a_of_d`'s
+    exact algebra (`scale`/`residual` against `total_column_ak`) with
+    `inside`/`tail` held fixed, then `magnitudes_at_extinction` as
+    everywhere else in this module -- the same `a_local` a direct
+    `anchor_observables` call would give, to float64 bit-identity."""
+    total = float(a_pix_k)
+    scale = min(1.0, total / a_edge) if a_edge > 0 else 1.0
+    residual = max(0.0, total - a_edge * scale)
+    a_local = inside * scale + residual * tail
+    return magnitudes_at_extinction(a_local, g_proxy, ks_mag, k_g_diffuse, k_g_dense,
+                                     r_diffuse, r_dense)
+
+
 def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, r_dense,
                   parent256, a_pix, pixel_pointing, pointing_bounds, n_bin_g, n_bin_ks):
     """One piece's own contiguous block of pixel indices (owner ruling
@@ -531,7 +566,19 @@ def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, 
     star count. The region-wide read-only inputs (`raw`, `profile_obj`,
     ...) are bound by `_predicted_histograms`'s own `functools.partial`,
     pickled once per batch by `pieces.run`'s loky pool, not once per
-    piece."""
+    piece.
+
+    `_predicted_histograms` sorts the pixel axis by `(pointing, parent
+    nside-256 sightline)` before cutting pieces, so this piece's own
+    pixels arrive in that order too: a one-entry cache keyed on
+    `(pointing's own star bounds, parent)` carries `_sightline_profile_
+    pieces`'s `(inside, a_edge, tail)` across a run of sibling pixels
+    (round 3 T2: every occupied pixel used to re-run its pointing's full
+    star-slice interpolation through `profile_obj`, though every
+    nside-512 child of one nside-256 sightline shares the same
+    interpolated profile) -- only the per-pixel re-extinction and
+    histogram (this module's own per-pixel arithmetic, unchanged) still
+    runs once per pixel."""
     lo_pix, hi_pix = piece
     dist_pc = raw["dist_pc"]
     g_proxy = raw["g_proxy"]
@@ -542,16 +589,25 @@ def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, 
     n_g_block = np.zeros((n, n_bin_g), dtype=np.float64)
     n_ks_block = np.zeros((n, n_bin_ks), dtype=np.float64)
     n_gk_block = np.zeros((n, n_bin_g, n_bin_ks), dtype=np.float64)
+    cache_key = None
+    cache_batches = None  # [(blo, bhi, inside, a_edge, tail), ...]
     for j, i in enumerate(range(lo_pix, hi_pix)):
         parent = int(parent256[i])
         a_p = float(a_pix[i])
         lo, hi = pointing_bounds[int(pixel_pointing[i])]
-        for blo, bhi in batches(hi - lo, row_bytes=72 * config.n_jobs):
+        key = (lo, hi, parent)
+        if key != cache_key:
+            cache_key = key
+            cache_batches = []
+            for blo, bhi in batches(hi - lo, row_bytes=72 * config.n_jobs):
+                s = slice(lo + blo, lo + bhi)
+                inside, a_edge, tail = _sightline_profile_pieces(profile_obj, parent, dist_pc[s])
+                cache_batches.append((blo, bhi, inside, a_edge, tail))
+        for blo, bhi, inside, a_edge, tail in cache_batches:
             s = slice(lo + blo, lo + bhi)
-            g_obs, ks_obs = anchor_observables(
-                dist_pc[s], g_proxy[s], ks_mag[s],
-                k_g_diffuse[s], k_g_dense[s],
-                profile_obj, parent, a_p, r_diffuse, r_dense)
+            g_obs, ks_obs = _magnitudes_from_pieces(
+                a_p, inside, a_edge, tail, g_proxy[s], ks_mag[s],
+                k_g_diffuse[s], k_g_dense[s], r_diffuse, r_dense)
             p_g = gaia_detection_weight(g_obs)
             n_g_block[j] += np.histogram(g_obs, bins=g_edges, weights=p_g)[0]
             n_ks_block[j] += np.histogram(ks_obs, bins=ks_edges)[0]
@@ -579,21 +635,31 @@ def _predicted_histograms(config, profile_obj, parent256, a_pix, raw, g_edges, k
     batch loop over its own pointing's star axis bounds one pixel's own
     temporaries regardless of its pointing's own star count, independent
     of how many pieces run concurrently.
+
+    The pixel axis is sorted by `(pixel_pointing, parent256)` before it
+    is cut into pieces, so sibling nside-512 pixels of the same pointing
+    AND the same parent nside-256 sightline land together in one piece
+    (`_pixel_block`'s own cache, round 3 T2); the sort is undone on the
+    way out (`inverse`), so the returned arrays are in `parent256`'s own
+    (and so `pixels`'s own) order, unchanged by the reordering.
     """
     n_bin_g = g_edges.size - 1
     n_bin_ks = ks_edges.size - 1
     n_pix = parent256.size
 
+    order = np.lexsort((parent256, pixel_pointing))
+    inverse = np.argsort(order)
+
     fn = functools.partial(
         _pixel_block, config=config, profile_obj=profile_obj, raw=raw,
         g_edges=g_edges, ks_edges=ks_edges, r_diffuse=r_diffuse, r_dense=r_dense,
-        parent256=parent256, a_pix=a_pix, pixel_pointing=pixel_pointing,
+        parent256=parent256[order], a_pix=a_pix[order], pixel_pointing=pixel_pointing[order],
         pointing_bounds=pointing_bounds, n_bin_g=n_bin_g, n_bin_ks=n_bin_ks)
     pixel_pieces = pieces_module.slices(n_pix, config.n_jobs)
     blocks = pieces_module.run(fn, pixel_pieces, config.n_jobs)
-    n_g_pred = np.concatenate([b[0] for b in blocks], axis=0) * weight_pix[:, None]
-    n_ks_pred = np.concatenate([b[1] for b in blocks], axis=0) * weight_pix[:, None]
-    n_gk_pred = np.concatenate([b[2] for b in blocks], axis=0) * weight_pix[:, None, None]
+    n_g_pred = np.concatenate([b[0] for b in blocks], axis=0)[inverse] * weight_pix[:, None]
+    n_ks_pred = np.concatenate([b[1] for b in blocks], axis=0)[inverse] * weight_pix[:, None]
+    n_gk_pred = np.concatenate([b[2] for b in blocks], axis=0)[inverse] * weight_pix[:, None, None]
     return n_g_pred, n_ks_pred, n_gk_pred
 
 
