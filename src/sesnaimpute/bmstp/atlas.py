@@ -832,21 +832,22 @@ def _quantile_nodes_from_weight(values, weight, n):
     return v_sorted[idx]
 
 
-def _yso_region_nodes(config, region, d_front, d_back):
+def _yso_region_nodes(reg, config, region, d_front, d_back):
     """`(flux0_ts, w_ts)`, region-wide, built once (sec. 5.5 "Marks"):
     the product of two independent quadratures, each a set of nodes with
     weights summing to one. Templates: `N_YSO_NODES` equally spaced
-    quantiles of the register's own census weight (`_yso_register`'s
-    `weight`), each carrying weight `1/N_YSO_NODES`, its own eight
-    `F_REF` floored at the register's own `FLOOR_LINEAR`. Distance
-    shift: `N_YSO_SHIFT_NODES` equally spaced quantiles of the region's
-    own shift kernel (`sample_cloud.shift_kernel`), each a node at its
-    own cell centre on `grid.LOG10_F45_EDGES` (`_quantile_nodes_from_weight`),
+    quantiles of the register's own census weight (`reg`, `_yso_register`'s
+    own survey-wide return -- computed once for the whole build by the
+    caller, `build`, and passed in here rather than re-derived per
+    region), each carrying weight `1/N_YSO_NODES`, its own eight `F_REF`
+    floored at the register's own `FLOOR_LINEAR`. Distance shift:
+    `N_YSO_SHIFT_NODES` equally spaced quantiles of the region's own
+    shift kernel (`sample_cloud.shift_kernel`), each a node at its own
+    cell centre on `grid.LOG10_F45_EDGES` (`_quantile_nodes_from_weight`),
     weight `1/N_YSO_SHIFT_NODES` -- every kernel cell with nonzero mass
     makes the member set too large for a per-sightline build. The product
     set (`np.repeat`/`np.tile`, no Python loop over nodes): `flux0_ts[i,:] =
     flux0_template * 10**delta`, `w_ts = w_template * w_shift`."""
-    reg = _yso_register(config)
     weight_t, f_ref, floor_linear = reg["weight"], reg["f_ref"], reg["floor_linear"]
     csum = np.cumsum(weight_t) / weight_t.sum()
     q = (np.arange(N_YSO_NODES) + 0.5) / N_YSO_NODES
@@ -1237,7 +1238,7 @@ def _gal_members(config):
             n_members_before, n_members_after)
 
 
-def _gal_catalogued_fraction(config, a_col, f_lim, width_dex, coverage, tick):
+def _gal_catalogued_fraction(config, gal_members, a_col, f_lim, width_dex, coverage, tick):
     """`(frac, frac_bright3, frac_bright10, n_cat_cell, n_cell, density,
     n_members_before, n_members_after)` for GAL's one region-wide DETERMINISTIC
     quadrature (sec. 8).
@@ -1275,10 +1276,12 @@ def _gal_catalogued_fraction(config, a_col, f_lim, width_dex, coverage, tick):
     the same for every member), `c_m_all = density * (w / w.sum()) *
     weight_pix_all.sum()`, `_safe_cell_bin(u, log10_s, c_m_all)`.
 
+    `gal_members` is `_gal_members`'s own survey-wide return, computed once
+    by `build` and passed in here rather than re-derived per region.
     `n_members_before`/`n_members_after` (`_gal_members`'s own return, passed
     through unchanged) are the region's `(node, template)` and `(node, colour
     cell)` member counts, for the build's own report."""
-    flux0, u, w, log10_s, density, n_members_before, n_members_after = _gal_members(config)
+    flux0, u, w, log10_s, density, n_members_before, n_members_after = gal_members
     n_pix = a_col.size
     n_jobs = max(1, int(config.n_jobs))
     idx_chunks = [c for c in np.array_split(np.arange(n_pix), n_jobs) if c.size]
@@ -1439,7 +1442,7 @@ def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve)
     return out
 
 
-def build_region(config, region):
+def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg, fitted_rates, pooled_eta):
     """Writes `bmstp/atlas/prior_atlas_hpx512__R.hdf5` for one region: the
     admitted pixel axis (`catalog.depth_grid`), its column and coverage,
     and every class's `N_CAT_*`/`SHARE_*` from its own deterministic
@@ -1471,7 +1474,15 @@ def build_region(config, region):
     own extinction column, than the pixel's own 4.5 um 50% completeness
     limit (`_above_fraction`'s own docstring paragraph); the atlas's
     intrinsic page draws `P(C | pixel, above the limit) = N_ABOVE_C /
-    sum(N_ABOVE)`, never `INTENSITY_C`'s own ratio."""
+    sum(N_ABOVE)`, never `INTENSITY_C`'s own ratio.
+
+    `agb_pool`, `gal_members`, `giannini_ratios`, `yso_reg`,
+    `fitted_rates` and `pooled_eta` are every survey-wide input this
+    build needs (F1, F5 2026-10-09 diagnosis): computed once by `build`
+    and passed down here unchanged, never re-derived per region --
+    `_agb_shell_pool`, `_gal_members`, `h2s_module._load_giannini_ratios`,
+    `_yso_register`, `knot_rate.fitted` and `knot_rate.pooled`'s own
+    returns, in that order."""
     with progress.Stage("bmstp.atlas", region) as st:
         # the detection probability (sec. 6.2, sec. 3.3's "the depth
         # grid") reads the pixel's own marginalised limit
@@ -1522,10 +1533,6 @@ def build_region(config, region):
         # rule 10a): the owner sets it to what the machine's memory allows.
         n_jobs = int(config.n_jobs)
 
-        # AGB's own shell-template pool (sec. 5.2): survey-wide, computed
-        # once here rather than per tile.
-        agb_pool = _agb_shell_pool(config)
-
         # every class is a deterministic quadrature (sec. 8): the region's
         # own catalogued-count-per-cell grid, accumulated tile by tile
         # (STAR/AGB/PAHC), sightline by sightline (YSO/H2S) and once for
@@ -1571,7 +1578,7 @@ def build_region(config, region):
         # spawns can inherit a live numba thread pool.
         (frac_gal, frac_gal_bright3, frac_gal_bright10, n_cat_cell_gal, n_cell_gal, density_gal,
          n_gal_members_before, n_gal_members_after) = _gal_catalogued_fraction(
-            config, a_col, f_lim, width_dex, coverage,
+            config, gal_members, a_col, f_lim, width_dex, coverage,
             lambda done, total: st.tick(done, total, "GAL pixel chunks"))
         n_cat["GAL"] = density_gal * frac_gal
         # sec. 5.4's own density is one survey-wide constant, so GAL's
@@ -1601,8 +1608,7 @@ def build_region(config, region):
         # quadrature (sec. 5.5 "Template weights"), built once, shared by
         # every sightline of the region -- only the depth factor differs
         # per sightline (`_build_one_sightline`).
-        flux0_ts, w_ts = _yso_region_nodes(config, region, d_front, d_back)
-        giannini_ratios = h2s_module._load_giannini_ratios(config)
+        flux0_ts, w_ts = _yso_region_nodes(yso_reg, config, region, d_front, d_back)
         # H2S's brightness lognormal (sec. 5.6 "Marks") is P3's own
         # attribute (`bmstp.shapes.build_cloud`, sec. 4.1's shape grids):
         # no population/h2s region product to read, that stage no longer
@@ -1676,8 +1682,17 @@ def build_region(config, region):
         # map itself is convolved ONCE here (sec. 5.6 "a map operation,
         # once per region") and passed to both calls.
         # the region's knot rate, formed at build against the fitted law
-        # (`population.knot_rate`, the same call `bmstp.density` makes)
-        eta_r, _eta_band_dex = knot_rate.eta_for_region(config, region)
+        # (`population.knot_rate`, the same call `bmstp.density` makes):
+        # `knot_rate.eta_for_region`'s own branch, inlined here against
+        # `fitted_rates`/`pooled_eta` (`build`'s own `knot_rate.fitted`/
+        # `knot_rate.pooled` call, computed once for the whole survey --
+        # F1 2026-10-09: 27 of 30 regions share the one pooled value,
+        # which `eta_for_region` otherwise recomputes, from scratch,
+        # every region).
+        if region in knot_rate.KNOT_COMPLETENESS:
+            eta_r, _eta_band_dex = fitted_rates[region], 0.0
+        else:
+            eta_r, _eta_band_dex = pooled_eta
         law_map, law_wcs, knot_meta = knot_field.convolved_law(config, region)
         density_h2s_law_pooled_pix = knot_field.law_count_at_kappa(
             config, region, a_col_gas * cloud_frac_by_sl[sl_row_of_pix], arm,
@@ -1922,10 +1937,36 @@ def build_region(config, region):
 
 def build(config, regions=None):
     """`build(config, regions=None)`: per region, `build_region` (rule
-    5c's per-region product, one file per region)."""
+    5c's per-region product, one file per region).
+
+    Every survey-wide input `build_region` needs is computed exactly
+    ONCE here, for the whole build, and passed down unchanged (F1, F5
+    2026-10-09 diagnosis: `build_region` used to re-derive each of these
+    from scratch at the start of every one of the 30 regions -- about
+    460 s of the measured 4,200 s run, almost all of it
+    `knot_rate.fitted`'s own three HGBS area-integral calls, repeated
+    for every region without its own knot survey): `_agb_shell_pool`
+    (sec. 5.2's shell-template pool by chemistry), `_gal_members` (sec.
+    5.4's GAL population, sky density included), `h2s_module.
+    _load_giannini_ratios` (sec. 5.6's colour-ratio tables), `_yso_register`
+    (sec. 5.5's census-weighted template register), and `knot_rate.
+    fitted`/`knot_rate.pooled` (sec. 5.6's knot rate: each knot-surveyed
+    field's own fitted rate, and the geometric-mean rate every other
+    region reads, `knot_rate.eta_for_region`'s own two branches -- see
+    `build_region`'s inlined copy of that branch). None of these depends
+    on the region loop below; every one is a deterministic read with no
+    `rng`, so computing it once and reusing it for 30 regions changes no
+    number, only how many times the same arithmetic runs."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
+    agb_pool = _agb_shell_pool(config)
+    gal_members = _gal_members(config)
+    giannini_ratios = h2s_module._load_giannini_ratios(config)
+    yso_reg = _yso_register(config)
+    fitted_rates = knot_rate.fitted(config)
+    pooled_eta = knot_rate.pooled(config, fitted_rates)
     for region in region_names:
-        build_region(config, region)
+        build_region(config, region, agb_pool, gal_members, giannini_ratios,
+                     yso_reg, fitted_rates, pooled_eta)
 
 
 if __name__ == "__main__":
