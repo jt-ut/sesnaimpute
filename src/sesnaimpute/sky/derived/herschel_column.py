@@ -416,7 +416,7 @@ def build(config, regions=None):
                 for ci in region_map_idx:
                     data, wcs, _px = _open_hgbs_map(candidate_maps[ci]["path"])
                     map_entries.append((ci, data, wcs, candidate_maps[ci]["bbox"]))
-                fn = functools.partial(_sample_region_block, map_entries)
+                fn = functools.partial(_sample_region_block, map_entries, ra, dec)
                 blocks = pieces_module.run(fn, pieces_module.slices(n, config.n_jobs), config.n_jobs)
                 cand_id = np.full(n, -1, dtype=np.int64)
                 for start, stop, a_k_blk, cand_id_blk in blocks:
