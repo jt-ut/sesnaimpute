@@ -11,7 +11,8 @@ Giannini et al. 2013 (Vela D). The footprint itself is no longer a fixed
 literal area: it is carried as nside-512 pixels (`footprint_pixels`), the
 region's own admitted pixels (`catalog/sesna/depth-grid_sesna_hpx512__<R>.
 hdf5`'s `HPX_PIX_512`, reused from `population.yso_law._admitted_pix512`)
-weighted by their `catalog/sesna/coverage_sesna_hpx512__<R>.hdf5` `FRAC`,
+weighted by their `sky/derived/spitzer/coverage_spitzer_hpx512__<R>.hdf5`
+any-IRAC union fraction (`_coverage_frac`),
 restricted for Cygnus X and North America Nebula to pixels whose centre
 falls inside a UWISH2 image (`sky/derived/knots/uwish2_images_knots_
 survey.hdf5`, S-D37's own image-square test). Both the raw knot count
@@ -137,19 +138,26 @@ def _in_uwish2_footprint(ra_deg, dec_deg, img_ra, img_dec, k=12):
 
 
 def _coverage_frac(config, region, pix512):
-    """Each `pix512` pixel's own `catalog.coverage` `FRAC` (join on
-    `HPX_PIX`, `catalog/sesna/coverage_sesna_hpx512__<R>.hdf5`); a pixel
-    absent from the coverage product has `FRAC = 0`. Duplicated from
-    `bmstp.atlas._coverage`'s own join rather than imported: population
-    may not import bmstp (bmstp imports population)."""
-    path = config_module.product_path(config, "catalog", "sesna", "coverage", "hpx512", region=region)
+    """Each `pix512` pixel's own any-IRAC union fraction, from `sky/
+    derived/spitzer/coverage_spitzer_hpx512__<R>.hdf5`'s own per-band
+    `FRAC` (I1 I2 I3 I4 M1, that product's own column order): the four
+    IRAC bands' `max`, a LOWER BOUND on the true union (the product
+    stores only each band's own fraction, not the union mask itself),
+    exact where the four IRAC footprints coincide, which is nearly
+    everywhere since 3.6/5.8 um share one camera array and 4.5/8.0 um the
+    other (join on `HPX_PIX`; a pixel absent from the product, never
+    touched by a mosaic, has `FRAC = 0`). Duplicated from `bmstp.atlas.
+    _coverage`'s own join rather than imported: population may not
+    import bmstp (bmstp imports population)."""
+    path = config_module.product_path(config, "sky/derived", "spitzer", "coverage", "hpx512", region=region)
     if not os.path.exists(path):
         raise FileNotFoundError(
-            "population.knot_rate: no coverage product for region %r at %s -- run the "
-            "'sesnaimpute.catalog.coverage' RUNBOOK line first" % (region, path))
+            "population.knot_rate: no Spitzer mosaic coverage for region %r at %s -- run the "
+            "'sesnaimpute.sky.derived.coverage' RUNBOOK line first" % (region, path))
     with h5py.File(path, "r") as f:
         cov_pix = np.asarray(f["HPX_PIX"][:], dtype=np.int64)
         frac = np.asarray(f["FRAC"][:], dtype=np.float64)
+    union = frac[:, :4].max(axis=1) if frac.size else np.empty(0, dtype=np.float64)
     order = np.argsort(cov_pix)
     cov_pix_sorted = cov_pix[order]
     loc = np.searchsorted(cov_pix_sorted, pix512)
@@ -157,7 +165,7 @@ def _coverage_frac(config, region, pix512):
     hit = order[loc]
     found = (cov_pix_sorted.size > 0) & (cov_pix_sorted[loc] == pix512)
     out = np.zeros(pix512.shape, dtype=np.float64)
-    out[found] = frac[hit[found]]
+    out[found] = union[hit[found]]
     return out
 
 
@@ -165,8 +173,8 @@ def footprint_pixels(config, region):
     """`(pix512, frac)`: `region`'s knot-survey footprint as nside-512
     pixels -- the region's own admitted pixels (`population.yso_law.
     _admitted_pix512`, `catalog/sesna/depth-grid_sesna_hpx512__<R>.
-    hdf5`'s `HPX_PIX_512`), each with its own `catalog.coverage` `FRAC`
-    (`_coverage_frac`). Cygnus X and North America Nebula are further
+    hdf5`'s `HPX_PIX_512`), each with its own any-IRAC union coverage
+    fraction (`_coverage_frac`). Cygnus X and North America Nebula are further
     restricted to pixels whose centre falls inside at least one UWISH2
     image square (`_in_uwish2_footprint`); Vela D keeps every admitted
     pixel (Giannini's search covers the same Spitzer mosaic)."""

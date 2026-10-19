@@ -2246,16 +2246,6 @@ REGISTRY = {
         "for the five Spitzer bands. NaN for the three 2MASS bands, which "
         "carry no resampling uncertainty."),
 
-    # catalog.coverage -- coverage_sesna_hpx512: the catalog's own observed
-    # IRAC footprint on the nside-512 grid, per region.
-    ("coverage_sesna_hpx512", "HPX_PIX"): ("nested HEALPix pixel, nside 512",
-        "The region's admitted nside-512 pixel numbers (nested ordering), "
-        "ascending. Row i here is row i of FRAC."),
-    ("coverage_sesna_hpx512", "FRAC"): ("dimensionless",
-        "For the matching pixel in HPX_PIX, the fraction of its 16 nside-2048 "
-        "child pixels holding at least one SESNA source with a measured 3.6, "
-        "4.5, 5.8 or 8.0 micron detection. This is the catalog's own observed "
-        "footprint, used as that pixel's survey coverage fraction."),
 
     # catalog.depth_grid, per-source product -- limits_sesna_source: each
     # source's own 50%-completeness flux limit, by band.
@@ -2311,11 +2301,6 @@ REGISTRY = {
         "How many SESNA sources fall in the matching pixel in HPX_PIX_512. A "
         "value of 0 means the pixel holds no source of its own, and its other "
         "values in this file are copied from its nearest pixel that does."),
-    ("depth-grid_sesna_hpx512", "F_LIM_50_MED_MJY"): ("mJy",
-        "For the matching pixel in HPX_PIX_512 and each of the eight bands (J, "
-        "H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), "
-        "the median, over the pixel's own sources, of each source's own "
-        "50%-completeness flux limit (the catalog's own per-source limits product). A pixel with no sources of its own (N_SOURCES = 0) takes its nearest occupied pixel's value."),
     ("depth-grid_sesna_hpx512", "F_LIM_50_PIX_MJY"): ("mJy",
         "For the matching pixel in HPX_PIX_512 and each of the eight bands (J, "
         "H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), "

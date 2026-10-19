@@ -746,11 +746,11 @@ def _read_prior_atlas(config, region):
 
 def _region_f_lim_i2_mjy(config, region):
     """The region's median 4.5 micron 50% limit (I2), `catalog.
-    depth_grid`'s own per-pixel `F_LIM_50_MED_MJY` (rule 5: read, not
+    depth_grid`'s own per-pixel `F_LIM_50_PIX_MJY` (rule 5: read, not
     rebuilt) -- the horizontal line every panel of this page marks."""
     path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
     with h5py.File(path, "r") as f:
-        f_lim = f["F_LIM_50_MED_MJY"][:, _IDX_I2].astype(np.float64)
+        f_lim = f["F_LIM_50_PIX_MJY"][:, _IDX_I2].astype(np.float64)
     return float(np.median(f_lim))
 
 
