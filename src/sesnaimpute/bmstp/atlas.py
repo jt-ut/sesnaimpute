@@ -1421,7 +1421,40 @@ def _above_factor_batch_size(n_model, n_b):
     return max(1, _ABOVE_BATCH_BUDGET_BYTES // row_bytes)
 
 
-def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve):
+def _above_shared(config, reader, a_col, f0):
+    """`(above, b_centers)`, shared by every class's own `_above_fraction`
+    call below (F4 2026-10-09 "change C", "cheapest and safest"): `above`
+    (n_pix, n_x, n_b) bool, `F_obs(cell) = F_j * 10^(-0.4 kappa_4.5(a) a) >
+    F_0`, `a = x_i * a_col[pixel]` (the pixel's own extinction column,
+    `_pixel_column`), `kappa_4.5` the I2 entry of the blended law at that
+    extinction (`population.selection.kappa_hybrid`/`law_dense_weight`),
+    `F_0 = f0[pixel]` the pixel's own 4.5 um 50% completeness limit --
+    depends only on `a_col`/`f0`, NEVER on the class's own grain or shape
+    grid, so every one of the six classes shares the SAME `above` (every
+    class's own stored `xi_edges`/`b_edges` are the SAME `grid.
+    LOG10_XI_EDGES`/`grid.LOG10_F45_EDGES` written to every one of the
+    six classes' own files; `reader` is whichever class's own reader the
+    caller already opened first). Computed once for the WHOLE region's
+    pixel axis, unbatched: `(n_pix, n_x, n_b)` bool is a few tens of MB
+    even on the largest region (nowhere near the rule 10b 512 MB budget,
+    which exists for the per-class `(n_pixel_batch, n_model, n_b)`
+    `_factor_marginal` working set below, not for this), and every step
+    here is elementwise with no reduction across the pixel axis, so no
+    batch boundary -- one call here, or the six per-class batched calls
+    this replaces -- can move a bit."""
+    xi_centers = 0.5 * (reader.xi_edges[:-1] + reader.xi_edges[1:])  # log10 ξ
+    b_centers = 0.5 * (reader.b_edges[:-1] + reader.b_edges[1:])  # log10 F_4.5
+    x_lin = 10.0 ** xi_centers
+    f_j = 10.0 ** b_centers  # mJy
+    a = x_lin[None, :] * a_col[:, None]  # (n_pix, n_x)
+    w_ramp = selection_module.law_dense_weight(a)
+    kappa45 = selection_module.kappa_hybrid(config, w_ramp)[..., IDX_I2]  # (n_pix, n_x)
+    f_min = f0[:, None] * 10.0 ** (0.4 * kappa45 * a)  # (n_pix, n_x): F_j needed to clear F_0
+    above = f_j[None, None, :] > f_min[:, :, None]  # (n_pix, n_x, n_b)
+    return above, b_centers
+
+
+def _above_fraction(reader, cls, grain_of_pix, above, d_pahc, curve):
     """`out`. Per admitted pixel, the deterministic sum
     `Sum_cells h_C(cell; grain) * f_C(F_j; pixel) * 1[F_obs(cell) > F_0]`
     that `N_ABOVE_C(pixel) = A_C(pixel) *` this sum multiplies
@@ -1432,26 +1465,21 @@ def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve)
     the type-times-contamination marginal at the pixel's own 8 um limit
     (`bmstp.template_weights._factor_marginal`, moved out of
     `atlas.shapes` so the atlas and the shapes page share one
-    definition). `F_obs(cell) = F_j * 10^(-0.4 kappa_4.5(a) a)`, `a = x_i
-    * a_col[pixel]` (the pixel's own extinction column, `_pixel_column`;
-    GAL's grid already carries its whole-column delta at `x = 1`, so no
-    class-specific case is needed here), `kappa_4.5` the I2 entry of the
-    blended law at that extinction (`population.selection.kappa_hybrid`/
-    `law_dense_weight`); `F_0 = f0[pixel]`, the pixel's own 4.5 um 50%
-    completeness limit. Batched over the pixel axis: each batch holds one
-    `(n_pixel_batch, n_x, n_b)` working set (`_above_batch_size`) and, for
-    STAR/PAHC, one `(n_pixel_batch, n_model, n_b)` working set for
-    `_factor_marginal` (`_above_factor_batch_size`) -- evaluated for the
-    BATCH's own pixels only, never the whole admitted-pixel axis at once
-    (a per-source-style call over every pixel at once ran 8.6 GB, Orion A
-    PAHC, to 27 GB, Cygnus X, since the model axis can run to several
-    hundred templates)."""
-    xi_centers = 0.5 * (reader.xi_edges[:-1] + reader.xi_edges[1:])  # log10 ξ
+    definition). `above` (n_pix, n_x, n_b) is `_above_shared`'s own
+    `1[F_obs(cell) > F_0]`, this call's own slice of the region's shared
+    mask -- identical whichever class computed it, so it is computed once
+    by the caller and passed in here, never recomputed per class.
+    Batched over the pixel axis: each batch holds one `(n_pixel_batch,
+    n_x, n_b)` working set (`_above_batch_size`) and, for STAR/PAHC, one
+    `(n_pixel_batch, n_model, n_b)` working set for `_factor_marginal`
+    (`_above_factor_batch_size`) -- evaluated for the BATCH's own pixels
+    only, never the whole admitted-pixel axis at once (a per-source-style
+    call over every pixel at once ran 8.6 GB, Orion A PAHC, to 27 GB,
+    Cygnus X, since the model axis can run to several hundred
+    templates)."""
     b_centers = 0.5 * (reader.b_edges[:-1] + reader.b_edges[1:])  # log10 F_4.5
-    x_lin = 10.0 ** xi_centers
-    f_j = 10.0 ** b_centers  # mJy
-    n_x, n_b = xi_centers.size, b_centers.size
-    n_pix = a_col.size
+    n_x, n_b = above.shape[1], above.shape[2]
+    n_pix = above.shape[0]
     out = np.empty(n_pix, dtype=np.float64)
 
     is_factor_cls = cls in ("STAR", "PAHC")
@@ -1461,11 +1489,7 @@ def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve)
     for start in range(0, n_pix, batch):
         stop = min(start + batch, n_pix)
         h_b = reader.grid_all[grain_of_pix[start:stop]].astype(np.float64)  # (n_p, n_x, n_b)
-        a = x_lin[None, :] * a_col[start:stop, None]  # (n_p, n_x)
-        w_ramp = selection_module.law_dense_weight(a)
-        kappa45 = selection_module.kappa_hybrid(config, w_ramp)[..., IDX_I2]  # (n_p, n_x)
-        f_min = f0[start:stop, None] * 10.0 ** (0.4 * kappa45 * a)  # (n_p, n_x): F_j needed to clear F_0
-        above = f_j[None, None, :] > f_min[:, :, None]  # (n_p, n_x, n_b)
+        above_b = above[start:stop]  # (n_p, n_x, n_b): the region-shared mask's own slice
         if is_factor_cls:
             # STAR/PAHC's own template-weight factor at this batch's own
             # pixels' 8 um limits only, `d_pahc` reshaped to
@@ -1474,10 +1498,10 @@ def _above_fraction(config, reader, cls, grain_of_pix, a_col, f0, d_pahc, curve)
             f_c_batch = template_weights._factor_marginal(
                 b_centers, reader, cls, d_pahc[start:stop, None, None], curve)  # (n_p, n_b)
             term_cell = h_b * f_c_batch[:, None, :]  # no flux cut, no dimming
-            term = term_cell * above
+            term = term_cell * above_b
         else:
             term_cell = h_b
-            term = term_cell * above
+            term = term_cell * above_b
         out[start:stop] = term.sum(axis=(1, 2))
     return out
 
@@ -1758,6 +1782,13 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         # cost is worth dispatching.
         readers_by_cls = {cls: prior_reader.load(config, region, cls) for cls in CLASSES}
         curve = pahc_curve.read(config, region)
+        # the N_ABOVE tail's own "brighter than the pixel's own limit"
+        # mask (`_above_shared`'s docstring): depends only on `a_col`/
+        # `f0_pix`, identical for every one of the six classes, so it is
+        # computed once here (any one class's own reader supplies the
+        # SAME shape-grid edges) instead of once per class inside
+        # `_above_fraction`.
+        above_pix, _b_centers_shared = _above_shared(config, readers_by_cls["STAR"], a_col, f0_pix)
 
         def _dispatch(piece):
             kind = piece[0]
@@ -1783,13 +1814,13 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
             if kind == "TAIL":
                 cls, start, stop = piece[1], piece[2], piece[3]
                 frac_above = _above_fraction(
-                    config, readers_by_cls[cls], cls, grain_of_pix_by_cls[cls][start:stop],
-                    a_col[start:stop], f0_pix[start:stop], d_pahc_pix[start:stop], curve)
+                    readers_by_cls[cls], cls, grain_of_pix_by_cls[cls][start:stop],
+                    above_pix[start:stop], d_pahc_pix[start:stop], curve)
                 return piece, frac_above
             cls = piece[1]  # "TAIL_WHOLE"
             frac_above = _above_fraction(
-                config, readers_by_cls[cls], cls, grain_of_pix_by_cls[cls],
-                a_col, f0_pix, d_pahc_pix, curve)
+                readers_by_cls[cls], cls, grain_of_pix_by_cls[cls],
+                above_pix, d_pahc_pix, curve)
             return piece, frac_above
 
         tail_split_pieces = [("TAIL", cls, start, stop) for cls in ("STAR", "PAHC")
