@@ -150,6 +150,28 @@ class Completeness:
         return completeness_module.ln_one_minus_completeness(
             self._curve[band][row], g0, dm, n, log10_f, a, c)
 
+    def pixel_fraction_params(self, band):
+        """`(curve, g0, dm, n, a, c, scale)`: this band's own completeness
+        table as a plain in-memory array (`PIXEL_CURVE_<band>`, or row 0 of
+        `CURVE_<band>` for 2MASS -- the SAME table and row convention
+        `fraction_pixel` reads) plus the grid parameters `catalog.
+        completeness.completeness_many` needs, for a caller that evaluates
+        many `(pixel_row, flux)` pairs across many separate calls in one
+        worker's lifetime (`bmstp.atlas`'s per-tile/per-sightline member
+        quadrature) and would otherwise pay `fraction_pixel`'s own
+        per-call table read (`curves[:]`) again on every one of them: read
+        ONCE here and cached by the caller (`pieces.py`'s per-process
+        cache convention, `bmstp.sample_star`'s own pattern) for its own
+        worker process's lifetime."""
+        g0, dm = self._grid_params(band)
+        a, c = self._ac[band]
+        if band in TWOMASS_KEYS:
+            curves = self._curve[band]
+            return (np.asarray(curves[:]), g0, dm, curves.shape[1], a, c,
+                    float(completeness_module.STORAGE_SCALE))
+        curves = self._pixel_curve[band]
+        return np.asarray(curves[:]), g0, dm, curves.shape[1], a, c, 1.0
+
     def fraction_pixel(self, band, flux_mjy, pixel_row):
         """The completeness fraction at each of `pixel_row`'s own rows (a
         row index into `PIXEL_CURVE_<band>`, not a HEALPix pixel number;
@@ -256,28 +278,27 @@ class Completeness:
         """`(n,)` dex: this row's own measured local roll-off width, the
         per-row analogue of `catalog.depths`' region-wide fitted
         `WIDTH_DEX` (COMPLETENESS_2026-10-20.md rule 5: the Gaussian
-        model is not used for the completeness term itself, but the
-        erf-parametrised consumers this unit leaves unchanged
-        (`bmstp.atlas`/`bmstp.template_weights`) still need one width
-        number; this is the SAME erf-width definition depths.py uses
-        (`WIDTH_DEX = 0.4 * w_mag`), with `w_mag` now the row's own
-        measured half-distance between its C=0.8413 and C=0.1587
-        crossings (one sigma either side of the row's own measured 50%
-        point, the convention `catalog.depths.build`'s own fit used) --
-        a per-row MEASUREMENT, not a second region-wide fit."""
+        model is not used for the completeness term itself -- every
+        probability-computing consumer reads the measured curve directly
+        (`fraction`/`fraction_pixel`/`completeness_many`), never this
+        width -- but `catalog.figure_depth`'s own depth figure still
+        draws one disclosed Gaussian APPROXIMATION per pixel and needs
+        one width number for it; this is the SAME erf-width definition
+        depths.py uses (`WIDTH_DEX = 0.4 * w_mag`), with `w_mag` now the
+        row's own measured half-distance between its C=0.8413 and
+        C=0.1587 crossings (one sigma either side of the row's own
+        measured 50% point, the convention `catalog.depths.build`'s own
+        fit used) -- a per-row MEASUREMENT, not a second region-wide
+        fit."""
         mag_bright = self._crossing_mag(band, rows, 0.8413)  # one sigma brighter than 50%
         mag_faint = self._crossing_mag(band, rows, 0.1587)   # one sigma fainter than 50%
         w_mag = (mag_faint - mag_bright) / 2.0
         return 0.4 * w_mag
 
-    def local_width_dex(self, band, source_index):
-        """`(n,)` dex: `_local_width_dex` at each of `source_index`'s own
-        rows in `band`."""
-        rows = self._row_for(band, source_index)
-        return self._local_width_dex(band, rows)
-
     def local_width_dex_pixel(self, band, pixel_row):
-        """`(n,)` dex: the pixel-curve analogue of `local_width_dex`."""
+        """`(n,)` dex: `_local_width_dex`'s own pixel-curve form, read only
+        by `catalog.figure_depth`'s disclosed Gaussian approximation
+        (this class's own docstring: never by a probability computation)."""
         if band in TWOMASS_KEYS:
             rows = np.zeros(np.atleast_1d(pixel_row).shape, dtype=np.int64)
             return self._local_width_dex(band, rows)

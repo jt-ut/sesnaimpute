@@ -45,8 +45,8 @@ from sesnaimpute.atlas import shapes as shapes_module
 from sesnaimpute.atlas.render import (
     LABEL_FONTSIZE, _add_panel, _footprint_geometry, _log_norm, _panel_colorbar, _reproject)
 from sesnaimpute.bmstp import grid
+from sesnaimpute.catalog import completeness as completeness_module
 from sesnaimpute.catalog import limits as limits_module
-from sesnaimpute.fittp import likelihood as likelihood_module
 from sesnaimpute.population import kernel as kernel_module
 from sesnaimpute.population import selection as population_selection
 
@@ -154,11 +154,18 @@ def _read_curated(config, region):
 
 def _read_depth_grid_pix(config, region):
     """This region's per-pixel 50%-completeness limit, the one source of
-    a source's own completeness limit: sorted `HPX_PIX_512` and each
+    a source's own completeness limit: sorted `HPX_PIX_512`, each
     admitted pixel's own `fifty_percent_pixel` (n_pix, 8 bands, this
-    project's own band order), from `catalog.limits.completeness`'s
-    reader object (COMPLETENESS_2026-10-20.md), replacing the retired
-    `catalog.depth_grid` counts fit."""
+    project's own band order), and each pixel's own ROW into
+    `PIXEL_CURVE_<band>` (`reader`'s own, memory-mapped, never copied
+    table), from `catalog.limits.completeness`'s reader object
+    (COMPLETENESS_2026-10-20.md), replacing the retired `catalog.
+    depth_grid` counts fit. `pix`/`f_lim_pix`/`pixel_row` are all sorted
+    together by pixel number for the searchsorted join below; `pixel_row`
+    undoes that sort (`rows[order]`, not `order` itself), so a lookup at
+    sorted position `i` still reads `reader`'s own row `pixel_row[i]` --
+    `_likelihood_factor` reads the MEASURED curve there directly, never a
+    width reduced from it."""
     reader = limits_module.completeness(config, region)
     pix = reader.hpx_pix_512
     rows = np.arange(pix.shape[0])
@@ -168,7 +175,7 @@ def _read_depth_grid_pix(config, region):
         flux50 = reader.fifty_percent_pixel(band, rows)
         f_lim_pix[:, j] = np.where(np.isfinite(flux50), flux50, np.inf)
     order = np.argsort(pix)
-    return pix[order], f_lim_pix[order]
+    return pix[order], f_lim_pix[order], rows[order], reader
 
 
 def _read_density_rows(config, region):
@@ -181,7 +188,12 @@ def _read_density_rows(config, region):
     depth grid is the one source of that number, not a per-source copy),
     and the column kernel's own per-row terms `A_COL_SIG_K`, `ARM`,
     `ZP_SIG_K` (`population.kernel.Kernel.mixture`) plus `SIGHTLINE_ROW`
-    (this brief's item 5, the median source's own `XI_MARGINAL` row)."""
+    (this brief's item 5, the median source's own `XI_MARGINAL` row).
+    Also returns each row's own `pixel_row` into `catalog.limits.
+    Completeness`'s `PIXEL_CURVE_<band>` tables and the `reader` object
+    itself (`_read_depth_grid_pix`), so `_likelihood_factor` can read the
+    MEASURED completeness curve directly at a row's own pixel, never a
+    width reduced from it."""
     path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
     with h5py.File(path, "r") as f:
         name = f["NAME"][:]
@@ -191,7 +203,7 @@ def _read_density_rows(config, region):
         arm = f["ARM"][:]
         zp_sig = np.asarray(f["ZP_SIG_K"][:], dtype=np.float64)
         sightline = np.asarray(f["SIGHTLINE_ROW"][:], dtype=np.int64)
-    pix, f_lim_pix = _read_depth_grid_pix(config, region)
+    pix, f_lim_pix, pixel_row_by_sorted_pos, reader = _read_depth_grid_pix(config, region)
     loc = np.minimum(np.searchsorted(pix, hpx512), pix.size - 1) if pix.size else np.zeros_like(hpx512)
     ok = pix.size and np.all(pix[loc] == hpx512)
     if not ok:
@@ -199,7 +211,8 @@ def _read_density_rows(config, region):
         raise ValueError("atlas.protostars: region %r has no depth-grid row for nside-512 pixel(s) %s"
                          % (region, missing.tolist()))
     f_lim_50_mjy = f_lim_pix[loc]
-    return name, a_col, f_lim_50_mjy, a_col_sig, arm, zp_sig, sightline
+    pixel_row = pixel_row_by_sorted_pos[loc]
+    return name, a_col, f_lim_50_mjy, a_col_sig, arm, zp_sig, sightline, pixel_row, reader
 
 
 def _read_xi_marginal(config, region, sightline_row):
@@ -311,7 +324,7 @@ def _region_kernel_group(config, region, kernel):
     av_u = protostars["av_mag"][used]
 
     (density_row, _, _, excluded, _, a_col_dens, _) = _match_to_catalogue(config, region, ra_u, dec_u)
-    (_, _, _, a_col_sig_dens, arm_dens, zp_sig_dens, sightline_dens) = _read_density_rows(config, region)
+    (_, _, _, a_col_sig_dens, arm_dens, zp_sig_dens, sightline_dens, _, _) = _read_density_rows(config, region)
 
     keep = ~excluded
     rows = density_row[keep]
@@ -445,22 +458,6 @@ def _kernel_validation(log10_xi_hat, w, mu, sigma, xi_marginal, xi_centers, beyo
     return emp_median, emp_p84, pred_median, pred_p84, frac_beyond
 
 
-def _read_w_dex_i2(config, region):
-    """The region's own representative I2 (4.5 micron) roll-off width:
-    the MEDIAN of `catalog.limits.completeness`'s own `local_width_dex_
-    pixel` over every admitted pixel (COMPLETENESS_2026-10-20.md). The
-    retired `catalog.depth_grid`'s `W_DEX_PIX` was one region-wide fitted
-    value broadcast identically to every pixel, so any one row's entry
-    stood for the whole region; the measured curve's own width genuinely
-    varies pixel to pixel now (`bmstp.atlas._depth_grid`'s own read), so
-    this check takes the region's median instead of one arbitrary row."""
-    reader = limits_module.completeness(config, region)
-    rows = np.arange(reader.hpx_pix_512.shape[0])
-    width = reader.local_width_dex_pixel("I2", rows)
-    finite = np.isfinite(width)
-    return float(np.median(width[finite])) if finite.any() else float("nan")
-
-
 def _read_prior_atlas(config, region):
     """P6's admitted nside-512 pixels, the cataloged YSO share (the
     position line, sec. 5.5's caption (ii)), and the young-star law's own
@@ -518,7 +515,7 @@ def _match_to_catalogue(config, region, ra_deg, dec_deg):
     the same curated source list); a mismatch falls back to a match by
     `NAME` and is disclosed via `name_mismatch`."""
     name_cat, ra_cat, dec_cat = _read_curated(config, region)
-    name_dens, a_col_dens, f_lim_dens, _, _, _, _ = _read_density_rows(config, region)
+    name_dens, a_col_dens, f_lim_dens, _, _, _, _, _, _ = _read_density_rows(config, region)
 
     aligned = (name_cat.size == name_dens.size) and np.array_equal(name_cat, name_dens)
     if aligned:
@@ -563,16 +560,25 @@ def _match_to_catalogue(config, region, ra_deg, dec_deg):
     return density_row, direct, standin, excluded, (not aligned), a_col_dens, f_lim_dens
 
 
-def _likelihood_factor(f45_mjy, e_f45_mjy, measured, a_p, kappa_i2, f_lim_i2, w_i2, b_centers):
+def _likelihood_factor(f45_mjy, e_f45_mjy, measured, a_p, kappa_i2, reader, pixel_row_i2, b_centers):
     """`L(b)` per protostar per brightness cell (SPEC_BMSTP_DRAFT.md sec.
     6.2, this brief's item 3): a Gaussian in log10 F for a measured datum,
-    the survey's own non-detection probability below the pixel's I2 limit
-    otherwise -- ONE array expression; `measured` only selects between the
-    two already-computed arrays (rule 8, no branch on it). 47 of the 502
-    pooled protostars (7 HOPS, 40 eHOPS) carry a measured `F45_MJY` but no
-    `E_F45_MJY` (the VOTable's own uncertainty field masked though the
-    flux is not) -- `sigma`'s own `E_F45/(F45 ln 10)` term drops to zero
-    there rather than NaN, so the half-cell floor alone sets it."""
+    the survey's own non-detection probability below the pixel's own I2
+    limit otherwise -- ONE array expression; `measured` only selects
+    between the two already-computed arrays (rule 8, no branch on it). 47
+    of the 502 pooled protostars (7 HOPS, 40 eHOPS) carry a measured
+    `F45_MJY` but no `E_F45_MJY` (the VOTable's own uncertainty field
+    masked though the flux is not) -- `sigma`'s own `E_F45/(F45 ln 10)`
+    term drops to zero there rather than NaN, so the half-cell floor
+    alone sets it.
+
+    The non-detection term reads Rob Gutermuth's own MEASURED I2
+    completeness curve directly, at each protostar's own matched admitted
+    pixel (`reader.fraction_pixel`, `pixel_row_i2` -- `catalog.limits.
+    completeness`'s one reader, COMPLETENESS_2026-10-20.md), never a
+    Gaussian fit to it: `L = 1 - C(F(b))`, capped at the owner's `C_CAP`
+    (`catalog.completeness.C_CAP`, the measurement's own ~1/200
+    resolution floor)."""
     log10_f_b = b_centers[None, :] - 0.4 * a_p[:, None] * kappa_i2[:, None]  # (n, n_b)
 
     safe_f45 = np.where(measured, f45_mjy, 1.0)
@@ -582,8 +588,10 @@ def _likelihood_factor(f45_mjy, e_f45_mjy, measured, a_p, kappa_i2, f_lim_i2, w_
     z_meas = (log10_f45_dered[:, None] - b_centers[None, :]) / sigma[:, None]
     l_measured = np.exp(-0.5 * z_meas * z_meas) / (sigma[:, None] * _SQRT2PI)
 
-    z_nondet = (log10_f_b - np.log10(f_lim_i2)[:, None]) / (_SQRT2 * w_i2)
-    l_not_measured = np.exp(likelihood_module._ln_one_minus_c(z_nondet))
+    flux_b_mjy = 10.0 ** log10_f_b  # (n, n_b)
+    rows_2d = np.broadcast_to(pixel_row_i2[:, None], flux_b_mjy.shape)
+    c_vals = reader.fraction_pixel("I2", flux_b_mjy, rows_2d)
+    l_not_measured = 1.0 - np.minimum(c_vals, completeness_module.C_CAP)
 
     return np.where(measured[:, None], l_measured, l_not_measured)
 
@@ -620,8 +628,7 @@ def _verdict(config, region, protostars, used, density_row, idx_median):
     no_fg = av_u <= 0.0
 
     (_, a_col_dens, f_lim_dens, a_col_sig_dens, arm_dens, zp_sig_dens,
-     sightline_dens) = _read_density_rows(config, region)
-    w_i2 = _read_w_dex_i2(config, region)
+     sightline_dens, pixel_row_dens, reader_completeness) = _read_density_rows(config, region)
 
     # A_beam, sec. 3.2's own extinction column (A_COL_K): xi_hat = a_p / A_beam.
     a_col_row = a_col_dens[rows_u]
@@ -667,9 +674,11 @@ def _verdict(config, region, protostars, used, density_row, idx_median):
     w_ramp_p = population_selection.law_dense_weight(a_p)
     kappa_i2 = population_selection.kappa_hybrid(config, w_ramp_p)[:, IDX_I2]
     f_lim_i2 = f_lim_dens[rows_u, IDX_I2]
+    pixel_row_i2 = pixel_row_dens[rows_u]
 
     b_centers = 0.5 * (grid.LOG10_F45_EDGES[:-1] + grid.LOG10_F45_EDGES[1:])
-    l_b = _likelihood_factor(f45_u, e45_u, measured_u, a_p, kappa_i2, f_lim_i2, w_i2, b_centers)
+    l_b = _likelihood_factor(f45_u, e45_u, measured_u, a_p, kappa_i2,
+                              reader_completeness, pixel_row_i2, b_centers)
 
     lambda_verdict, _, class_order = shapes_module.lambda_grids(config, region, rows_u, blur=True)
     lambda_at_xp = lambda_verdict[np.arange(rows_u.size), :, cell_x, :]  # (n_used, 6, n_b)

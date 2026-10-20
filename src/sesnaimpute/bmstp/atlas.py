@@ -47,7 +47,7 @@ cell by construction and their ratio is the class's surviving fraction.
 
 Every module on this atlas's worker path (this module, `knot_field`,
 `sample_gal`, `sample_star`, `sample_cloud`, `grid`, `density`,
-`template_weights`, `sky.derived.profile`, `fittp.likelihood`,
+`template_weights`, `sky.derived.profile`, `catalog.completeness`,
 `population.yso`, `population.selection`, `sky.derived.herschel_column`, and
 whatever they import) carries every import of a module holding a compiled
 extension (`astropy.*`, `scipy.*`, `healpy`, `h5py`, `numba`) at module top
@@ -75,6 +75,7 @@ from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+from sesnaimpute.catalog import completeness as completeness_module
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
 from sesnaimpute.population import h2s as h2s_module
@@ -91,7 +92,6 @@ from sesnaimpute.bmstp import sample_cloud
 from sesnaimpute.bmstp import sample_gal
 from sesnaimpute.bmstp import sample_star
 from sesnaimpute.bmstp import template_weights
-from sesnaimpute.fittp import likelihood as likelihood_module
 from sesnaimpute.fittp import prior_reader
 from sesnaimpute.sky.derived import column as column_module
 
@@ -176,37 +176,39 @@ _HPX512_PIXEL_DEG2 = density_module._HPX512_PIXEL_DEG2
 
 
 def _depth_grid(config, region):
-    """The admitted pixel axis and its marginalised 50% limit and width,
-    read from Rob Gutermuth's own measured completeness curve
-    (COMPLETENESS_2026-10-20.md "The reader") through the one reader
-    object, `catalog.limits.completeness`: `(pix, f_lim_50_pix_mjy,
-    w_dex_pix)`, `f_lim_50_pix_mjy` each pixel's own `fifty_percent_pixel`
-    (the curve's own completeness=0.5 crossing) and `w_dex_pix` its own
-    `local_width_dex_pixel` (the SAME erf-width definition `catalog.
-    depths` fits region-wide, measured here per pixel from the curve's
-    own C=0.8413/C=0.1587 crossings) -- replaces `catalog.depth_grid`'s
-    retired region-wide counts fit (`F_LIM_50_PIX_MJY`/`W_DEX_PIX`)
-    outright; every downstream formula in this module (`catalogued_
-    probability`/`catalogued_fraction`, the erf-parametrised completeness
-    model sec. 8 prices) is unchanged, only its two per-pixel, per-band
-    numbers' own source is. A band with no on-map pixel anywhere in this
-    admitted pixel is unsurveyed there and carries `+inf`/`0` (never
-    `NaN`, the convention `catalog.depth_grid` used): the curve's own
-    crossing search returns `NaN` for exactly that case (never reaches
-    0.5 because every plane is 0, module docstring of `catalog.limits.
-    Completeness._crossing_mag`), substituted here."""
+    """The admitted pixel axis and its marginalised 50% limit, read from
+    Rob Gutermuth's own measured completeness curve (COMPLETENESS_2026-
+    10-20.md "The reader") through the one reader object, `catalog.
+    limits.completeness`: `(pix, f_lim_50_pix_mjy)`, `f_lim_50_pix_mjy`
+    each pixel's own `fifty_percent_pixel` (the curve's own
+    completeness=0.5 crossing), used only for the bright-end threshold
+    tests (sec. 9's 3x/10x check, `_above_fraction`'s own 4.5 um limit) --
+    the detection-probability model itself (`catalogued_probability`) no
+    longer reduces the curve to a limit and a width at all: it reads the
+    pixel's own `PIXEL_CURVE_<band>` directly, at the row this function's
+    caller gets from `np.arange(pix.size)` (`pix` IS `reader.
+    hpx_pix_512`'s own order, so a pixel's position in `pix` is exactly
+    its row into `PIXEL_CURVE_<band>`; `_completeness_band_params` below
+    is the one place that table is read, once per worker). This replaces
+    `catalog.depth_grid`'s retired region-wide counts fit
+    (`F_LIM_50_PIX_MJY`/`W_DEX_PIX`) outright. A band with no on-map
+    pixel anywhere in this admitted pixel is unsurveyed there and carries
+    `+inf` for `f_lim` (never `NaN`, the convention `catalog.depth_grid`
+    used): the curve's own crossing search returns `NaN` for exactly that
+    case (never reaches 0.5 because every plane is 0, module docstring of
+    `catalog.limits.Completeness._crossing_mag`), substituted here; the
+    SAME all-zero row read through `PIXEL_CURVE_<band>` directly already
+    gives a detection probability of exactly 0 at any flux (`catalog.
+    completeness.completeness_many`'s own zero-curve case), so no second
+    substitution is needed on that path."""
     reader = limits_module.completeness(config, region)
     pix = reader.hpx_pix_512
     rows = np.arange(pix.shape[0])
     f_lim = np.empty((pix.shape[0], N_BANDS), dtype=np.float64)
-    w_dex_pix = np.empty((pix.shape[0], N_BANDS), dtype=np.float64)
     for j, band in enumerate(BAND_KEYS):
         flux50 = reader.fifty_percent_pixel(band, rows)
-        width = reader.local_width_dex_pixel(band, rows)
-        unsurveyed = ~np.isfinite(flux50)
-        f_lim[:, j] = np.where(unsurveyed, np.inf, flux50)
-        w_dex_pix[:, j] = np.where(unsurveyed | ~np.isfinite(width), 0.0, width)
-    return pix, f_lim, w_dex_pix
+        f_lim[:, j] = np.where(np.isfinite(flux50), flux50, np.inf)
+    return pix, f_lim
 
 
 def _coverage(config, region, pix):
@@ -381,6 +383,29 @@ _N_TEMP_ARRAYS = 12
 _MEMBER_SUBBLOCK = 3000
 
 
+#: Per-process cache for `_completeness_band_params`, keyed `(data_root,
+#: region)` (`pieces.py`'s own per-process-cache convention, `bmstp.
+#: sample_star`'s pattern): `catalogued_probability` reads this for every
+#: tile or sightline a worker handles and would otherwise reread the
+#: region's whole `PIXEL_CURVE_<band>` table (`catalog.limits.
+#: Completeness.pixel_fraction_params`'s own `curves[:]`) on every one of
+#: them.
+_COMPLETENESS_PARAMS_CACHE = {}
+
+
+def _completeness_band_params(config, region):
+    """Every Spitzer band's own `(curve, g0, dm, n, a, c, scale)`
+    (`catalog.limits.Completeness.pixel_fraction_params`), read ONCE per
+    `(data root, region)` and cached for this worker process's lifetime."""
+    key = (config.data_root, region)
+    if key not in _COMPLETENESS_PARAMS_CACHE:
+        _COMPLETENESS_PARAMS_CACHE.clear()  # one region's tables per worker at a time
+        reader = limits_module.completeness(config, region)
+        _COMPLETENESS_PARAMS_CACHE[key] = {
+            band: reader.pixel_fraction_params(band) for band in BAND_KEYS}
+    return _COMPLETENESS_PARAMS_CACHE[key]
+
+
 def _pixel_batch_size(n_mem):
     """Pixels per batch so `n_pixel_batch * n_mem * N_BANDS * 8 bytes
     (float64) * _N_TEMP_ARRAYS` stays under `_PIXEL_BATCH_BUDGET_BYTES`
@@ -391,7 +416,7 @@ def _pixel_batch_size(n_mem):
     return max(1, _PIXEL_BATCH_BUDGET_BYTES // row_bytes)
 
 
-def catalogued_probability(a_col, u, flux0, f_lim, width_dex, config):
+def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
     """`(p_cat, p_cat_i2, flux_i2)` for ONE pixel batch: the closed-form
     probability that a member is catalogued (SPEC_BMSTP_DRAFT.md sec. 8,
     sec. 6.2) -- `catalogued_fraction` forms the weighted means over these
@@ -399,20 +424,22 @@ def catalogued_probability(a_col, u, flux0, f_lim, width_dex, config):
 
     `a_col` (n_pix,) the pixel's own column, `u` (n_mem,) the member's own
     placement fraction, `flux0` (n_mem, 8) undimmed member fluxes (zero
-    where the member carries no flux in a band), `f_lim` (n_pix, 8) the
-    pixel's own marginalised limits, `width_dex` (n_pix, 8)
-    `catalog.depth_grid`'s `W_DEX_PIX` (sec. 3.3): one value per band for
-    the region, broadcast across the pixel axis passed in here -- unlike
-    `f_lim`, it does not vary pixel to pixel. `a = a_col * u` (sec. 8's
-    "its own extinction"), dimmed through the blended law
-    (`population.selection.kappa_hybrid`). The two-of-eight step test is
-    replaced by the member's probability of being catalogued: per band
-    `p_i = C_i(f_i) = 1 - exp(ln[1-C_i])`, `ln[1-C_i]` from
-    `fittp.likelihood`'s own numerically stable erf kernel at
-    `z_i = (log10 f_i - log10 F_lim,50,i) / (sqrt(2) w_{r,i})` -- the same
-    completeness `fittp` prices non-detection with -- zero where the
-    member carries no flux in that band (GAL's 2MASS/24um, H2S's
-    J/H/24um).
+    where the member carries no flux in a band), `pixel_row` (n_pix,)
+    each pixel's own row into `PIXEL_CURVE_<band>` (`bmstp.atlas._depth_
+    grid`'s own `np.arange(pix.size)`, sliced the same way `a_col` is),
+    `band_params` the region's own `(curve, g0, dm, n, a, c, scale)` per
+    band (`_completeness_band_params`, read once per worker, never per
+    pixel batch or member sub-block). `a = a_col * u` (sec. 8's "its own
+    extinction"), dimmed through the blended law (`population.selection.
+    kappa_hybrid`). The two-of-eight step test is replaced by the
+    member's probability of being catalogued: per band `p_i = C_i(f_i)`,
+    Rob Gutermuth's own MEASURED completeness curve at this pixel
+    (`catalog.completeness.completeness_many`, the design's one kernel,
+    COMPLETENESS_2026-10-20.md "The reader") interpolated at the member's
+    own dimmed flux, capped at the owner's `C_CAP` (the measurement's own
+    ~1/200 resolution floor, `catalog.completeness.C_CAP`) -- never a
+    Gaussian roll-off fit to it -- zero where the member carries no flux
+    in that band (GAL's 2MASS/24um, H2S's J/H/24um).
 
     `p_cat` (n_pix, n_mem): `P(>=2 of 8) = 1 - Prod_i(1-p_i)
     - Sum_i p_i Prod_{j!=i}(1-p_j)` (bands independent given the fluxes).
@@ -426,21 +453,18 @@ def catalogued_probability(a_col, u, flux0, f_lim, width_dex, config):
     `flux_i2` (n_pix, n_mem): the dimmed I2 flux, for the bright tests
     (compared there to 3x/10x the pixel's own I2 50% limit).
 
-    An unsurveyed band's `f_lim` is `+inf` and its `width_dex` is 0
-    (`catalog.depth_grid`'s rule): `log10(f_lim) = +inf`, so `z`'s
-    numerator is `-inf` for every finite member flux regardless of the
-    zero width in its denominator (`-inf / 0 = -inf`, never `0 * inf` --
-    the numerator is never zero because a member's flux is never
-    infinite), and `_ln_one_minus_c(-inf) = 0` (`erfc(+inf) = 0`
-    exactly), so `p_i = 0`: the member is never detected in that band,
-    with no NaN at any step. `has_flux`'s own `np.where` keeps a
-    band with no flux at all out of this path already, so the two guards
-    do not interact.
+    A pixel off-map in a band (no on-map 30'' pixel inside it, module
+    docstring of `catalog.completeness.build`) carries an all-zero
+    `PIXEL_CURVE_<band>` row there, which `completeness_many` evaluates
+    to exactly 0 at any flux: the member is never detected in that band,
+    with no NaN at any step, the same outcome the retired `f_lim = +inf`
+    convention gave. `has_flux`'s own `np.where` keeps a band with no
+    flux at all out of this path already, so the two guards do not
+    interact.
 
     No batching inside: the caller (`catalogued_fraction`, rule 10b) passes
-    one pixel batch and its own slice of
-    `a_col`/`f_lim`/`width_dex`; `u` and `flux0` are the caller's whole
-    (unsliced) member draw."""
+    one pixel batch and its own slice of `a_col`/`pixel_row`; `u` and
+    `flux0` are the caller's whole (unsliced) member draw."""
     assert MIN_BANDS_CLEAR == 2, "the closed form below is `P(>=2 of 8)` only"
     n_pix, n_mem = a_col.size, u.size
     p_cat = np.empty((n_pix, n_mem), dtype=np.float64)
@@ -479,10 +503,24 @@ def catalogued_probability(a_col, u, flux0, f_lim, width_dex, config):
         dimming = dimming_unique[:, inverse, :]  # (n_pix, n_sub, 8): gathered to the sub-block
         flux = flux0_s[None, :, :] * 10.0 ** (-dimming)  # (n_pix, n_sub, 8)
         has_flux = flux0_s[None, :, :] > 0.0  # (1, n_sub, 8), broadcasts
-        log10_f = np.log10(np.where(has_flux, flux, 1.0))
-        z = ((log10_f - np.log10(f_lim)[:, None, :])
-             / (likelihood_module._SQRT2 * width_dex[:, None, :]))
-        p = np.where(has_flux, 1.0 - np.exp(likelihood_module._ln_one_minus_c(z)), 0.0)
+        # per band, the MEASURED completeness curve at this pixel's own
+        # row (`catalog.completeness.completeness_many`, the design's one
+        # kernel), never a Gaussian fit to it: one vectorised call per
+        # band over the sub-block's own (pixel, member) flux pairs,
+        # capped at the owner's `C_CAP` (`catalogued_probability`'s own
+        # docstring).
+        p = np.empty_like(flux)
+        rows_2d = np.broadcast_to(pixel_row[:, None], flux.shape[:2])
+        for bi, band in enumerate(BAND_KEYS):
+            curve_b, g0_b, dm_b, n_b, a_b, c_b, scale_b = band_params[band]
+            flux_b = flux[:, :, bi]
+            has_b = has_flux[:, :, bi]
+            log10_f_b = np.log10(np.where(has_b, flux_b, 1.0))
+            c_vals = completeness_module.completeness_many(
+                curve_b, np.ascontiguousarray(rows_2d).ravel(), g0_b, dm_b, n_b,
+                np.ascontiguousarray(log10_f_b).ravel(), a_b, c_b, scale_b
+            ).reshape(flux_b.shape)
+            p[:, :, bi] = np.where(has_b, np.minimum(c_vals, completeness_module.C_CAP), 0.0)
         one_minus_p = 1.0 - p  # (n_pix, n_sub, 8)
         # the leave-one-out products (F4 2026-10-09 "change A", the single
         # largest kernel cost: 9 `np.delete` copies of this whole (n_pix,
@@ -526,7 +564,7 @@ def catalogued_probability(a_col, u, flux0, f_lim, width_dex, config):
     return p_cat, p_cat_i2, flux_i2
 
 
-def catalogued_fraction(a_col, u, flux0, w, f_lim, width_dex, config, weight_pix, tick=None):
+def catalogued_fraction(a_col, u, flux0, w, f_lim, pixel_row, band_params, config, weight_pix, tick=None):
     """`(frac, frac_bright3, frac_bright10, s_member)`: the weighted, deterministic
     quadrature over a class's WHOLE population (SPEC_BMSTP_DRAFT.md sec. 8) -- exact
     up to the population's own binning, for every class (GAL first, sec. 5.4). `w`
@@ -546,7 +584,7 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, width_dex, config, weight_pix
     term: the quadrature is exact, not a draw).
 
     Processed in pixel batches of `_pixel_batch_size` (rule 10b): each batch is the
-    same elementwise-per-pixel computation on a slice of `a_col`/`f_lim`/`width_dex`,
+    same elementwise-per-pixel computation on a slice of `a_col`/`f_lim`/`pixel_row`,
     so splitting the pixel axis changes no result. Within one pixel batch the member
     axis is ALSO chunked, in
     `n_mem_chunk = _PIXEL_BATCH_BUDGET_BYTES // (N_BANDS * 8 * _N_TEMP_ARRAYS *
@@ -570,7 +608,7 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, width_dex, config, weight_pix
         stop = min(start + batch, n_pix)
         n_pix_batch = stop - start
         f_lim_b = f_lim[start:stop]
-        width_dex_b = width_dex[start:stop]
+        pixel_row_b = pixel_row[start:stop]
         a_col_b = a_col[start:stop]
         i2_lim_b = f_lim_b[:, IDX_I2:IDX_I2 + 1]  # (n_pix_batch, 1)
 
@@ -585,7 +623,7 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, width_dex, config, weight_pix
             flux0_c = flux0[mstart:mstop]
             w_c = w[mstart:mstop]
             p_cat, catalogued_i2_measured, flux_i2 = catalogued_probability(
-                a_col_b, u_c, flux0_c, f_lim_b, width_dex_b, config)
+                a_col_b, u_c, flux0_c, pixel_row_b, band_params, config)
             weighted_sum += p_cat @ w_c
 
             bright3 = flux_i2 > BRIGHT_MULT_3 * i2_lim_b
@@ -602,7 +640,7 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, width_dex, config, weight_pix
     return frac, frac_bright3, frac_bright10, s_member
 
 
-def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, width_dex, config, weight_pix):
+def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, pixel_row, band_params, config, weight_pix):
     """`(frac_a, frac_bright3_a, frac_bright10_a, frac_b, frac_bright3_b,
     frac_bright10_b, s_member)`: `catalogued_fraction`'s own quadrature,
     run ONCE for two classes that share one member set (STAR/PAHC,
@@ -611,7 +649,7 @@ def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, width_dex, config
     weights' own UNION support); `w_a`/`w_b` are each class's own weight
     over that SAME union, zero wherever a cell belongs to the other
     class only. `catalogued_probability` depends on `a_col`/`u`/`flux0`/
-    `f_lim`/`width_dex` only, never on the weight, so it is evaluated
+    `pixel_row`/`band_params` only, never on the weight, so it is evaluated
     once per pixel batch/member chunk and both classes' weighted sums
     are formed from that ONE evaluation (a zero weight contributes
     exactly 0.0 to a dot product, `x + w*0 == x`). `s_member` -- `sum_pix
@@ -649,7 +687,7 @@ def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, width_dex, config
         stop = min(start + batch, n_pix)
         n_pix_batch = stop - start
         f_lim_b = f_lim[start:stop]
-        width_dex_b = width_dex[start:stop]
+        pixel_row_b = pixel_row[start:stop]
         a_col_b = a_col[start:stop]
         i2_lim_b = f_lim_b[:, IDX_I2:IDX_I2 + 1]  # (n_pix_batch, 1)
 
@@ -668,7 +706,7 @@ def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, width_dex, config
             wa_c = w_a[mstart:mstop]
             wb_c = w_b[mstart:mstop]
             p_cat, catalogued_i2_measured, flux_i2 = catalogued_probability(
-                a_col_b, u_c, flux0_c, f_lim_b, width_dex_b, config)
+                a_col_b, u_c, flux0_c, pixel_row_b, band_params, config)
             weighted_sum_a += p_cat @ wa_c
             weighted_sum_b += p_cat @ wb_c
 
@@ -765,7 +803,7 @@ def _collapse_star_members(u, flux0, w_star, w_star_only, w_pahc_only):
     return u_cell, flux0_cell, w_cell_star_only, w_cell_pahc_only, n_before, n_after
 
 
-def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_in_tile, width_dex,
+def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_in_tile, pixel_row_in_tile,
                      agb_pool, coverage_in_tile):
     """One tile's `{cls: (frac, density, frac_bright3, frac_bright10,
     n_cat_cell_tile, n_cell_tile)}` for STAR/AGB/PAHC, over its own admitted pixels,
@@ -782,9 +820,12 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     with every shell template of THEIR OWN chemistry (sec. 5.2: the
     star's own `F_4.5` is the shell flux, not TRILEGAL's photosphere),
     each template's eight `F_REF` rescaled so its own 4.5 um reference
-    flux equals the star's `F_4.5`. `width_dex` is `catalog.depth_grid`'s
-    `W_DEX_PIX` (sec. 3.3): one value per band for the region, broadcast
-    to this tile's own pixels (n_pix_in_tile, 8), not a per-pixel fit.
+    flux equals the star's `F_4.5`. `pixel_row_in_tile` (n_pix_in_tile,)
+    is this tile's own slice of `bmstp.atlas._depth_grid`'s row index
+    into `PIXEL_CURVE_<band>` (`catalogued_probability`'s own docstring):
+    opened once here (`_completeness_band_params`, this worker's
+    per-process cache) rather than reduced to a region-wide width, since
+    the measured curve now feeds `catalogued_probability` directly.
     `n_cat_cell_tile` (128, 110) is this tile's own contribution to the
     region's expected catalogued count per parameter cell (module
     docstring's `N_CAT_CELL_GAL`, the same construction here): `grid.bin`
@@ -810,6 +851,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     `PAHC`'s own `density` (this function's per-class split density,
     `w_star_only.sum()`/`w_pahc_only.sum()` over `omega_t`) still feeds
     `N_CAT_<C>` and the members path exactly as before -- untouched."""
+    band_params = _completeness_band_params(config, region)
     star_path = config_module.product_path(
         config, "population", "star", "population", "tile", region=region)
     field_path = config_module.product_path(
@@ -874,7 +916,8 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         log10_f45_u = np.log10(flux0_u[:, IDX_I2])
         (frac_star, fb3_star, fb10_star,
          frac_pahc, fb3_pahc, fb10_pahc, s_member) = catalogued_fraction_pair(
-            a_col_in_tile, u_u, flux0_u, w_star_u, w_pahc_u, f_lim_in_tile, width_dex, config, weight_pix)
+            a_col_in_tile, u_u, flux0_u, w_star_u, w_pahc_u, f_lim_in_tile,
+            pixel_row_in_tile, band_params, config, weight_pix)
         for cls, density, w_u, frac, frac_bright3, frac_bright10 in (
                 ("STAR", density_star, w_star_u, frac_star, fb3_star, fb10_star),
                 ("PAHC", density_pahc, w_pahc_u, frac_pahc, fb3_pahc, fb10_pahc)):
@@ -941,7 +984,8 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         w_agb_member = np.concatenate(w_parts)
         f45_agb_member = np.concatenate(f45_parts)
         frac_agb, frac_agb_bright3, frac_agb_bright10, s_member_agb = catalogued_fraction(
-            a_col_in_tile, u_agb, flux0_agb, w_agb_member, f_lim_in_tile, width_dex, config, weight_pix)
+            a_col_in_tile, u_agb, flux0_agb, w_agb_member, f_lim_in_tile,
+            pixel_row_in_tile, band_params, config, weight_pix)
         w_sum_agb = float(w_agb_member.sum())
         c_m_agb = density_agb * (w_agb_member / w_sum_agb) * s_member_agb
         n_cat_cell_agb = _safe_cell_bin(u_agb, f45_agb_member, c_m_agb)
@@ -1153,7 +1197,7 @@ def _safe_cell_bin(u, log10_f45, c_m):
 
 def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, arm_in_sl, f_lim_in_sl,
                           loaded_profile, flux0_ts, w_ts, cloud_frac_sl, d_front, d_back,
-                          flux0_br, w_br, width_dex,
+                          flux0_br, w_br, pixel_row_in_sl,
                           weight_pix, eta_r, l_of_pix_in_sl):
     """One sightline's YSO and H2S quadratures over the population, no
     draw, shared by every admitted pixel it parents: `(frac_yso,
@@ -1180,10 +1224,11 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
     `weight_pix` `catalogued_fraction` receives, so its own `s_member`
     already carries the density factor.
 
-    `width_dex` is `catalog.depth_grid`'s `W_DEX_PIX` (sec. 3.3): one
-    value per band for the region, broadcast to this sightline's own
-    pixels. `weight_pix` (n_pix_in_sl,) is this sightline's own pixels'
-    coverage times pixel area.
+    `pixel_row_in_sl` (n_pix_in_sl,) is this sightline's own slice of
+    `bmstp.atlas._depth_grid`'s row index into `PIXEL_CURVE_<band>`
+    (`catalogued_probability`'s own docstring): the measured curve feeds
+    `catalogued_fraction` directly, never a region-wide width. `weight_pix`
+    (n_pix_in_sl,) is this sightline's own pixels' coverage times pixel area.
 
     Cell grids (W67c's own construction): `c_m = (w_m/w.sum()) *
     s_member[m]`, `s_member` `catalogued_fraction`'s own pixel-area-
@@ -1204,6 +1249,7 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
     that total`, binned the same way. No `rng`, no `seed`:
     every factor here is a deterministic quadrature, so this call induces
     no correlation between sightlines and no error term of its own."""
+    band_params = _completeness_band_params(config, region)
     a_cloud_in_sl = a_col_gas_in_sl * cloud_frac_sl
     density_yso = yso_module.law_count(config, region, a_cloud_in_sl, arm_in_sl)
 
@@ -1211,7 +1257,7 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
 
     u_yso, flux0_yso_full, w_yso_full = _combine_with_depth(flux0_ts, w_ts, xi_centers, w_depth)
     frac_yso, frac_yso_bright3, frac_yso_bright10, s_member_yso = catalogued_fraction(
-        a_col_in_sl, u_yso, flux0_yso_full, w_yso_full, f_lim_in_sl, width_dex, config,
+        a_col_in_sl, u_yso, flux0_yso_full, w_yso_full, f_lim_in_sl, pixel_row_in_sl, band_params, config,
         weight_pix=density_yso * weight_pix)
     c_m_yso = (w_yso_full / w_yso_full.sum()) * s_member_yso
     n_cat_cell_yso = _safe_cell_bin(u_yso, np.log10(flux0_yso_full[:, IDX_I2]), c_m_yso)
@@ -1222,7 +1268,7 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
     u_h2s, flux0_h2s_full, w_h2s_full = _combine_with_depth(flux0_br, w_br, xi_centers, w_depth)
     weight_h2s = l_of_pix_in_sl * eta_r * density_module.EPS_EXT * weight_pix
     frac_h2s, frac_h2s_bright3, frac_h2s_bright10, s_member_h2s = catalogued_fraction(
-        a_col_in_sl, u_h2s, flux0_h2s_full, w_h2s_full, f_lim_in_sl, width_dex, config,
+        a_col_in_sl, u_h2s, flux0_h2s_full, w_h2s_full, f_lim_in_sl, pixel_row_in_sl, band_params, config,
         weight_pix=weight_h2s)
     c_m_h2s = (w_h2s_full / w_h2s_full.sum()) * s_member_h2s
     n_cat_cell_h2s = _safe_cell_bin(u_h2s, np.log10(flux0_h2s_full[:, IDX_I2]), c_m_h2s)
@@ -1437,11 +1483,11 @@ def _gal_pixel_chunks(config, n_pix):
     return [c for c in np.array_split(np.arange(n_pix), n_jobs) if c.size]
 
 
-def _gal_chunk_result(config, gal_members, idx, a_col, f_lim, width_dex, weight_pix_all):
+def _gal_chunk_result(config, region, gal_members, idx, a_col, f_lim, pixel_row, weight_pix_all):
     """One GAL pixel chunk's own `catalogued_fraction` call -- the piece
     `build_region`'s flat list submits to the region's one pool. Reached
     only inside a worker, never the parent: `catalogued_probability`
-    reaches `fittp.likelihood`'s one `@njit(parallel=True)` kernel, and
+    reaches `catalog.completeness`'s one `@njit(parallel=True)` kernel, and
     numba's thread pool is not fork-safe (a process that has itself
     started that pool poisons every child a later `os.fork()` creates
     from it, and joblib respawns idle-expired workers by forking the
@@ -1450,8 +1496,9 @@ def _gal_chunk_result(config, gal_members, idx, a_col, f_lim, width_dex, weight_
     never reaches the kernel outside a worker under the region's normal
     `n_jobs >= 2`."""
     flux0, u, w, _log10_s, _density, _n_before, _n_after = gal_members
+    band_params = _completeness_band_params(config, region)
     return catalogued_fraction(
-        a_col[idx], u, flux0, w, f_lim[idx], width_dex[idx], config,
+        a_col[idx], u, flux0, w, f_lim[idx], pixel_row[idx], band_params, config,
         weight_pix=weight_pix_all[idx])
 
 
@@ -1706,13 +1753,13 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
     returns, in that order."""
     with progress.Stage("bmstp.atlas", region) as st:
         # the detection probability (sec. 6.2, sec. 3.3's "the depth
-        # grid") reads the pixel's own marginalised limit
-        # (`F_LIM_50_PIX_MJY`, which does vary pixel to pixel) and the
-        # region's own marginalised roll-off width (`W_DEX_PIX`: one
-        # value per band for the whole region, stored at every admitted
-        # pixel) -- a second, different region-band fit from the one
-        # `fittp.sweep` uses.
-        pix, f_lim, width_dex = _depth_grid(config, region)
+        # grid") reads Rob Gutermuth's own measured completeness curve
+        # directly, at each admitted pixel's own row into
+        # `PIXEL_CURVE_<band>` (`catalogued_probability`'s own
+        # docstring) -- the SAME curve `fittp.sweep` prices, never a
+        # second region-band fit.
+        pix, f_lim = _depth_grid(config, region)
+        pixel_row = np.arange(pix.size, dtype=np.int64)
         n_pix = pix.size
         coverage = _coverage(config, region, pix)
         a_col, arm = _pixel_column(config, region, pix)
@@ -1953,19 +2000,19 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
                 tile_id = piece[1]
                 m = usable & (tile_of_pix == tile_id)
                 return piece, (m, _build_one_tile(
-                    config, region, tile_id, pix[m], a_col[m], f_lim[m], width_dex[m], agb_pool,
+                    config, region, tile_id, pix[m], a_col[m], f_lim[m], pixel_row[m], agb_pool,
                     coverage[m]))
             if kind == "GAL":
                 idx = gal_idx_chunks[piece[1]]
                 return piece, _gal_chunk_result(
-                    config, gal_members, idx, a_col, f_lim, width_dex, weight_pix_all)
+                    config, region, gal_members, idx, a_col, f_lim, pixel_row, weight_pix_all)
             if kind == "SL":
                 sl_row = piece[1]
                 m = sl_row_of_pix == sl_row
                 out = _build_one_sightline(
                     config, region, sl_row, a_col[m], a_col_gas[m], arm[m], f_lim[m],
                     loaded_profile, flux0_ts, w_ts, float(cloud_frac_by_sl[sl_row]), d_front, d_back,
-                    flux0_br, w_br, width_dex[m],
+                    flux0_br, w_br, pixel_row[m],
                     coverage[m] * _HPX512_PIXEL_DEG2, eta_r, l_of_pix_for_weight[m])
                 return piece, (m,) + out
             if kind == "TAIL":
