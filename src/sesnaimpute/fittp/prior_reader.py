@@ -57,8 +57,19 @@ import numpy as np
 from sesnaimpute import config as config_module
 from sesnaimpute import definitions
 from sesnaimpute.bmstp import grid
+from sesnaimpute.catalog import completeness as completeness_module
 from sesnaimpute.fittp import gaia as gaia_module
 from sesnaimpute.population import kernel as kernel_module
+
+#: COMPLETENESS_2026-10-20.md "The reader": the measurement's own storage
+#: scale (a curve value is stored as fraction x this) and the owner's cap
+#: on the completeness fraction (`catalog.completeness`'s own citations),
+#: grabbed as plain module globals here so `_ln_one_minus_c_curve` -- a
+#: scalar, per-cell twin of `catalog.completeness.ln_one_minus_completeness`
+#: -- can use them inside a numba `njit` function (a bare global reference
+#: compiles to a literal; `completeness_module.STORAGE_SCALE` would not).
+_STORAGE_SCALE = completeness_module.STORAGE_SCALE
+_C_CAP = completeness_module.C_CAP
 
 #: class -> (shape-grid source, its dataset, template-weight library, its
 #: granule) -- IMPLEMENTATION_BMSTP_DRAFT.md section 1.2 P2-P5.
@@ -631,26 +642,54 @@ def _ln_half_erfc(z):
 
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy")
-def _nondet_ln_sum(a_val, active, base, slope_b, template_row, log10_f_lim50_row, width_dex_row):
-    """NONDET brief section 1: `Sum_{b in active} ln[1 - C_b(z_b(a_val))]`,
+def _ln_one_minus_c_curve(log10_fhat, curve_row, n, a, c):
+    """The scalar twin of `catalog.completeness.ln_one_minus_completeness`
+    (COMPLETENESS_2026-10-20.md "The reader"'s own piecewise-linear lookup
+    and `C_CAP` floor), for ONE log10 flux (mJy) at a time: `idx = a *
+    log10_fhat + c` (a fractional plane index into `curve_row`, uint16-
+    valued, value x `_STORAGE_SCALE`), clamped to `curve_row[0]` brightward
+    and 0 faintward of the last plane, else linear between the two
+    bracketing planes, divided by `_STORAGE_SCALE`, floored at `_C_CAP`.
+    A second, scalar implementation of that one kernel -- not a call into
+    it -- because `_cell_sum` below needs this at an arbitrary cell `a*`
+    found deep inside its own `prange` loop, never a batch of templates at
+    one fixed mark (`fittp.likelihood._ln_nondet`'s own call, the array
+    form, at the CLAMPED mark only)."""
+    idx = a * log10_fhat + c
+    if idx <= 0.0:
+        cval = curve_row[0] / _STORAGE_SCALE
+    elif idx >= n - 1:
+        cval = 0.0
+    else:
+        j = int(idx)
+        t = idx - j
+        cval = (curve_row[j] + t * (curve_row[j + 1] - curve_row[j])) / _STORAGE_SCALE
+    if cval > _C_CAP:
+        cval = _C_CAP
+    return math.log(1.0 - cval)
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _nondet_ln_sum(a_val, active, base, slope_b, template_row, curve_rows_s, band_a, band_c, band_n):
+    """NONDET brief section 1: `Sum_{b in active} ln[1 - C_b(f_hat_b(a_val))]`,
     the non-detection factor's own log at ONE extinction value `a_val` --
     a cell's own `a*` (the per-cell, per-template callers below) or a
     single-point fallback's one substitute extinction (where `active` is
     every `nondet_mask` band, the window prefilter not applying to a
     single point). `active` is a bitmask over the 8 bands (`1 << b`),
-    already restricted to this source's own undetected, limited, observed
+    already restricted to this source's own undetected, covered, observed
     bands by the caller. `template_row` is `template_log[th]`,
-    `log10_f_lim50_row`/`width_dex_row` are this source's own `(8,)` rows
-    -- the same per-band roll-off `fittp.likelihood._ln_nondet` reads at
-    the clamped mark, read here at an arbitrary `a` instead."""
-    sqrt2 = 1.4142135623730951
+    `curve_rows_s` is this source's own `(8, max_n)` measured completeness
+    curve (COMPLETENESS_2026-10-20.md), `band_a`/`band_c`/`band_n` the
+    region-wide per-band index parameters -- the same measured curve
+    `fittp.likelihood._ln_nondet` reads at the clamped mark, read here at
+    an arbitrary `a` instead."""
     total = 0.0
     for b in range(N_BANDS):
         if not ((active >> b) & 1):
             continue
-        z = (template_row[b] + base + slope_b[b] * a_val
-             - log10_f_lim50_row[b]) / (sqrt2 * width_dex_row[b])
-        total += _ln_half_erfc(z)
+        log10_fhat = template_row[b] + base + slope_b[b] * a_val
+        total += _ln_one_minus_c_curve(log10_fhat, curve_rows_s[b], band_n[b], band_a[b], band_c[b])
     return total
 
 
@@ -823,7 +862,7 @@ def ln_prior_mass(reader, rows, h):
 def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               b_origin, dlb, dlx, a_edges_buf, cell_weight,
               m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
-              template_log, ext_col_ak, log10_f_lim50, width_dex, nondet_mask,
+              template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask,
               gaia_matched, g_s, a_x, g0_mag, kg_draine, kg_whitney,
               r_diffuse, r_dense, ramp_lo, ramp_hi, g_lim, g_rolloff,
               out_s0, out_s1, a_post_out, a2_post_out):
@@ -838,25 +877,27 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     own return, `S2`'s own un-mixed half) exactly as before NONDET2 --
     every other caller of this function still reads one array.
 
-    NONDET brief section 1 (section 6.2, amended): the survey's completeness
-    term for this source's own undetected, limited, observed bands
-    (`fittp.likelihood`'s `nondet_mask`) multiplies the cell's own mass
-    INSIDE this sum, at the CELL'S OWN `a*` along the fit's conditional
-    ridge -- not once, at the likelihood's clamped maximum-likelihood mark,
-    as a per-template constant outside the integral. Per band `b`, the
-    template's predicted log flux along the ridge is linear in `a`,
-    `log10_fhat_b(a) = template_log[th, b] + base + slope_b[b] * a`, where
-    `base = log10_b_hat[s, th] - sl * a_hat[s, th]` is the template's own
-    intercept and `slope_b[b] = ext_col_ak[b] + sl` folds the law's own
-    per-band dimming (`ext_col_ak`, `-0.4 kappa_b` in `A_K`, band- and
-    design-dependent, template-independent) and the ridge's own conditional
-    brightness slope (`sl = slope[s]`, the same number `bval`'s own `a*`
-    term below already carries) into one per-band, per-source constant.
-    `z_b(a) = (log10_fhat_b(a) - log10 F_LIM_50_b) / (sqrt2 * W_DEX_b)` is
-    therefore linear in `a` too, which is what makes the per-template,
-    per-band prefilter at the window's own two ends (`lo_a`, `hi_a`) exact:
-    a band whose charge is negligible at both ends is negligible
-    throughout, monotone between them.
+    NONDET brief section 1 (section 6.2, amended; COMPLETENESS_2026-10-20.md):
+    the survey's completeness term for this source's own undetected,
+    covered, observed bands (`fittp.likelihood`'s `nondet_mask`) multiplies
+    the cell's own mass INSIDE this sum, at the CELL'S OWN `a*` along the
+    fit's conditional ridge -- not once, at the likelihood's clamped
+    maximum-likelihood mark, as a per-template constant outside the
+    integral. Per band `b`, the template's predicted log flux along the
+    ridge is linear in `a`, `log10_fhat_b(a) = template_log[th, b] + base +
+    slope_b[b] * a`, where `base = log10_b_hat[s, th] - sl * a_hat[s, th]`
+    is the template's own intercept and `slope_b[b] = ext_col_ak[b] + sl`
+    folds the law's own per-band dimming (`ext_col_ak`, `-0.4 kappa_b` in
+    `A_K`, band- and design-dependent, template-independent) and the
+    ridge's own conditional brightness slope (`sl = slope[s]`, the same
+    number `bval`'s own `a*` term below already carries) into one per-band,
+    per-source constant. `ln[1 - C_b(f_hat_b(a))]` (`_ln_one_minus_c_curve`,
+    the measured curve's own piecewise-linear lookup, monotone non-
+    increasing in flux by construction) is therefore monotone in `a` too,
+    which is what makes the per-template, per-band prefilter at the
+    window's own two ends (`lo_a`, `hi_a`) exact: a band whose charge is
+    negligible at both ends is negligible throughout, monotone between
+    them.
 
     NONDET2 brief section 1 (NONDET.md section 8): the Gaia factor
     `Gamma(a) = G_S H(a) A_X + (1 - G_S)(1 - H(a))` (`gaia.py`'s module
@@ -986,20 +1027,19 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
             use_table = n_ap > 0 and (i_hi - i_lo + 1) > N_EXACT
             # section 2's prefilter: at the window's own two ends, which
             # nondet bands carry a non-negligible charge somewhere in the
-            # window -- z_b(a) is linear in a (above), so monotone between
-            # two negligible ends is negligible throughout, and a band
-            # that clears this check is skipped in every cell below.
+            # window -- ln[1 - C_b(f_hat_b(a))] is monotone in a (above),
+            # so monotone between two negligible ends is negligible
+            # throughout, and a band that clears this check is skipped in
+            # every cell below.
             active = 0
             if in_grid:
                 for b in range(N_BANDS):
                     if not nondet_mask[s, b]:
                         continue
-                    z_lo = (template_log[th, b] + base + slope_b[b] * lo_a
-                            - log10_f_lim50[s, b]) / (sqrt2 * width_dex[s, b])
-                    z_hi = (template_log[th, b] + base + slope_b[b] * hi_a
-                            - log10_f_lim50[s, b]) / (sqrt2 * width_dex[s, b])
-                    c_lo = _ln_half_erfc(z_lo)
-                    c_hi = _ln_half_erfc(z_hi)
+                    log10_fhat_lo = template_log[th, b] + base + slope_b[b] * lo_a
+                    log10_fhat_hi = template_log[th, b] + base + slope_b[b] * hi_a
+                    c_lo = _ln_one_minus_c_curve(log10_fhat_lo, curve_rows[s, b], band_n[b], band_a[b], band_c[b])
+                    c_hi = _ln_one_minus_c_curve(log10_fhat_hi, curve_rows[s, b], band_n[b], band_a[b], band_c[b])
                     if c_lo < -_NONDET_PREFILTER_EPS or c_hi < -_NONDET_PREFILTER_EPS:
                         active |= (1 << b)
             # NONDET2 section 1's own prefilter: H(a) at the window's two
@@ -1062,7 +1102,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         # NONDET brief section 1: this cell's own non-detection
                         # factor, at ITS OWN a_star.
                         nondet_ln = _nondet_ln_sum(a_star, active, base, slope_b,
-                                                    template_log[th], log10_f_lim50[s], width_dex[s])
+                                                    template_log[th], curve_rows[s], band_a, band_c, band_n)
                         term1 = term0 * math.exp(nondet_ln)
                         # NONDET2 section 1: this cell's own Gaia factor, at
                         # ITS OWN a_star, or the window's own constant value.
@@ -1111,7 +1151,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         term0 = dens * mi * cell_weight[s, i]
                         # NONDET brief section 1: see the table path above.
                         nondet_ln = _nondet_ln_sum(a_star, active, base, slope_b,
-                                                    template_log[th], log10_f_lim50[s], width_dex[s])
+                                                    template_log[th], curve_rows[s], band_a, band_c, band_n)
                         term1 = term0 * math.exp(nondet_ln)
                         # NONDET2 section 1: see the table path above.
                         if gaia_do_percell:
@@ -1165,7 +1205,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 if dens > 0.0 and w_edge > 0.0:
                     s0 = math.log(dens * w_edge / a_top) + ln_tail
                     nondet_ln = _nondet_ln_sum(a_top, active_full, base, slope_b,
-                                                template_log[th], log10_f_lim50[s], width_dex[s])
+                                                template_log[th], curve_rows[s], band_a, band_c, band_n)
                     s1 = s0 + nondet_ln
                     gaia_ln = (_gaia_ln_gamma(a_top, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
                                                ramp_lo, ramp_hi, g_s_s, a_x_s, g_lim, g_rolloff)
@@ -1207,7 +1247,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 if dens > 0.0 and w_edge > 0.0:
                     s0 = math.log(dens * w_edge / a_c0) + ln_tail
                     nondet_ln = _nondet_ln_sum(a_c0, active_full, base, slope_b,
-                                                template_log[th], log10_f_lim50[s], width_dex[s])
+                                                template_log[th], curve_rows[s], band_a, band_c, band_n)
                     s1 = s0 + nondet_ln
                     gaia_ln = (_gaia_ln_gamma(a_c0, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
                                                ramp_lo, ramp_hi, g_s_s, a_x_s, g_lim, g_rolloff)
@@ -1225,7 +1265,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
 
 
 def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, cell_weight,
-             template_log, ext_col_ak, log10_f_lim50, width_dex, nondet_mask, gaia_inputs):
+             template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask, gaia_inputs):
     """`(ln_lambda2, ln_lambda0, ln_lambda1, a_post, a2_post)`: `ln <Lambda_C>_s
     (theta)` of SPEC_BMSTP_DRAFT.md section 4.2, plus `ln A_C(s)` (section
     1.3) -- everything the fitter's evidence sum needs from the prior --
@@ -1265,16 +1305,18 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
     `-inf`, a clean veto rather than an inflated pedestal, and `a_post`/
     `a2_post` NaN there.
 
-    NONDET brief section 1: `template_log` (`m, 8`, `fittp.sweep`'s own
-    register read, `likelihood.N_BANDS`-wide and shared by every design
-    and every source of this class) and `ext_col_ak` (`8,`, this call's
-    own design's per-band dimming in `A_K`, `fit_k.ext_col / fit_k.
-    ak_per_av`) place the non-detection factor's own flux prediction at
-    each cell's `a*`; `log10_f_lim50`, `width_dex`, `nondet_mask`
-    (`n, 8`, `likelihood.Batch`'s own per-source rows) are the same
-    completeness inputs `fittp.likelihood.prepare`/`_ln_nondet` read, at
-    the clamped mark, for the top-K record's own reporting value -- here
-    read at every cell instead, inside `_cell_sum`.
+    NONDET brief section 1 (COMPLETENESS_2026-10-20.md): `template_log`
+    (`m, 8`, `fittp.sweep`'s own register read, `likelihood.N_BANDS`-wide
+    and shared by every design and every source of this class) and
+    `ext_col_ak` (`8,`, this call's own design's per-band dimming in
+    `A_K`, `fit_k.ext_col / fit_k.ak_per_av`) place the non-detection
+    factor's own flux prediction at each cell's `a*`; `curve_rows`
+    (`n, 8, max_n`, `likelihood.Batch`'s own per-source measured
+    completeness curve), `band_a`/`band_c`/`band_n` (`8,`, region-wide)
+    and `nondet_mask` (`n, 8`) are the same completeness inputs
+    `fittp.likelihood.prepare`/`_ln_nondet` read, at the clamped mark, for
+    the top-K record's own reporting value -- here read at every cell
+    instead, inside `_cell_sum`.
 
     NONDET2 brief section 1: `gaia_inputs` is `gaia.GaiaTerm.cell_inputs`'s
     own return for this block's `rows` and `model_index` -- `(matched, g_s,
@@ -1315,8 +1357,10 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
                       m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
                       np.asarray(template_log, dtype=np.float64),
                       np.asarray(ext_col_ak, dtype=np.float64),
-                      np.asarray(log10_f_lim50, dtype=np.float64),
-                      np.asarray(width_dex, dtype=np.float64),
+                      np.asarray(curve_rows, dtype=np.float64),
+                      np.asarray(band_a, dtype=np.float64),
+                      np.asarray(band_c, dtype=np.float64),
+                      np.asarray(band_n, dtype=np.int64),
                       np.ascontiguousarray(np.asarray(nondet_mask)),
                       np.ascontiguousarray(matched), np.ascontiguousarray(g_s, dtype=np.float64),
                       np.ascontiguousarray(a_x, dtype=np.float64),

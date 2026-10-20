@@ -46,13 +46,16 @@ at every top-K template. `P_DENSE` is the source's own posterior weight on
 the dense design, `sum_theta p_theta * p_D(theta)`.
 
 Region and class are read once, in the PARENT process (`build_region_class`):
-the register (`_register`), the region's non-detection width (`_width_dex`),
-the class's own library-resolution number (`likelihood.sigma_lib_by_class`),
-the Gaia term (`GaiaTerm`), the class's own `Prior` reader
-(`prior_reader.load`, this class's only -- the prior read applies no
-floor, so no other class's grid is read)
-and the region's whole catalogue (`_load_region_catalog`: fluxes, uncertainties,
-`ORIGIN_FNU`, `NAME`, `F_LIM_50`). These are stashed in `_WORKER` and a
+the register (`_register`), the class's own library-resolution number
+(`likelihood.sigma_lib_by_class`), the Gaia term (`GaiaTerm`), the class's
+own `Prior` reader (`prior_reader.load`, this class's only -- the prior
+read applies no floor, so no other class's grid is read) and the region's
+whole catalogue (`_load_region_catalog`: fluxes, uncertainties,
+`ORIGIN_FNU`, `NAME`, and COMPLETENESS_2026-10-20.md's own measured
+completeness curves -- `curve_tables`, `source_row5`, `band_a`/`band_c`/
+`band_n`, read whole off `catalog.limits.completeness`'s product into
+plain arrays rather than kept as that reader's own h5py handle, unsafe to
+share across this stage's fork). These are stashed in `_WORKER` and a
 `multiprocessing.get_context("fork").Pool` is created AFTER that load, and
 after one warm source has compiled every numba kernel in the parent so the
 workers inherit the compiled code rather than each paying for it -- the
@@ -87,10 +90,11 @@ and `build`'s done line reports `n_failed`.
 
 Three of section 1.3's own numbers are pinned to one reading each, since a
 second reading of the same physical quantity is a second, silently
-different answer: the non-detection roll-off width is the per-source
-limits product's own region-band `W_DEX` (the same fit the retention floor
-and the atlas's acceptance fraction already read, not `catalog.depths`'
-differently-fit `WIDTH_DEX`); Gamma and the prior read a design's own
+different answer: the non-detection term reads SESNA's own measured
+differential completeness curve at the source's position (COMPLETENESS_
+2026-10-20.md, `catalog.limits.completeness`'s product -- the same curve
+the retention floor and the atlas's acceptance fraction read, not a
+region-wide fit of any kind); Gamma and the prior read a design's own
 unclamped optimum `(a_hat, log10_b_hat)`, never a mix of clamped and
 unclamped marks for the two factors of the same evidence; and section 9's
 Occam gap (NONDET2 brief section 2, restating NONDET.md section 8's ruling)
@@ -315,27 +319,29 @@ def _register(config, cls):
     return template_log, len(subclass_order), subclass_prob
 
 
-def _width_dex(config, region):
-    """The region's own non-detection roll-off width, all eight bands: the
-    per-source limits product's own `W_DEX` (`catalog.depth_grid`'s region
-    counts fit for the five Spitzer bands, `catalog.depths`' fitted width
-    for the three 2MASS bands, `catalog/depth_grid.py`'s module docstring)
-    -- the same width the retention floor and the atlas's acceptance
-    fraction already read (`population.field_stars._region_width_dex`,
-    `bmstp.atlas._depth_grid`), so the likelihood's non-detection term
-    prices the same roll-off as the rest of the completeness chain instead
-    of a second, differently-fit width off `catalog.depths` (audit A row 1)."""
-    path = config_module.product_path(config, "catalog", "sesna", "limits", "source", region=region)
-    with h5py.File(path, "r") as f:
-        return np.asarray(f["W_DEX"][:], dtype=np.float64)
-
-
 def _load_region_catalog(config, region):
     """This region's whole catalogue, read ONCE (item 4): fluxes,
     uncertainties and `ORIGIN_FNU` (the same read `fittp.cascade` uses),
-    `NAME`, and `catalog.limits.limits`'s own per-source `F_LIM_50` -- so
-    every worker's own per-source task slices these already-loaded, fork-
-    inherited arrays instead of opening either product itself."""
+    `NAME`, and the region's own measured completeness curves
+    (COMPLETENESS_2026-10-20.md, `catalog.limits.completeness`'s own
+    product) -- so every worker's own per-source task slices these
+    already-loaded, fork-inherited arrays instead of opening either
+    product itself.
+
+    The reader's `CURVE_<B>` tables are h5py datasets tied to one open
+    file handle, unsafe to share across the pool's fork (`catalog.limits.
+    Completeness`'s own docstring: "a caller that forks workers should
+    open one reader per worker, not share this one across a process
+    boundary"); mapped here instead with `prior_reader.mmap_dataset`
+    (the same technique `FNU_MJY`/`SIGMA_FNU_MJY` already use) -- a
+    `numpy.memmap` opened straight on the completeness product's own
+    file and byte offset, so it carries no live HDF5 handle at all once
+    created and is exactly as fork-safe as every other array this stage
+    reads once in the parent (MAPARRAYS section 1): its pages live once
+    in the OS page cache, read by every worker, never copied or pickled
+    per piece. The reader's own h5py file handle is closed immediately
+    after, since nothing here still needs it.
+    """
     path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
     with h5py.File(path, "r") as f:
         # memory-mapped (MAPARRAYS section 1): FNU_MJY/SIGMA_FNU_MJY are
@@ -345,11 +351,24 @@ def _load_region_catalog(config, region):
         sigma = prior_reader.mmap_dataset(f, "SIGMA_FNU_MJY")
         origin = prior_reader.mmap_dataset(f, "ORIGIN_FNU")
         name = prior_reader.mmap_dataset(f, "NAME")
-    # catalog.limits.limits is a shared reader (every class, every consumer
-    # of a detection limit, not just this one) outside this unit's own code
-    # paths -- left as its own plain read (MAPARRAYS report).
-    f_lim50 = catalog_limits.limits(config, region)
-    return dict(flux=flux, sigma=sigma, origin=origin, name=name, f_lim50=f_lim50)
+
+    comp = catalog_limits.completeness(config, region)
+    band_a = np.empty(N_BANDS, dtype=np.float64)
+    band_c = np.empty(N_BANDS, dtype=np.float64)
+    band_n = np.empty(N_BANDS, dtype=np.int64)
+    curve_tables = {}
+    for b, band in enumerate(BAND_KEYS):
+        a, c = comp._ac[band]
+        band_a[b], band_c[b] = a, c
+        band_n[b] = comp._mag_grid_band[band].size
+        curve_tables[band] = prior_reader.mmap_dataset(comp._f, "CURVE_%s" % band)
+    source_row5 = np.asarray(comp.source_row, dtype=np.int64)
+    max_n = int(band_n.max())
+    comp._f.close()
+
+    return dict(flux=flux, sigma=sigma, origin=origin, name=name,
+                curve_tables=curve_tables, source_row5=source_row5,
+                band_a=band_a, band_c=band_c, band_n=band_n, max_n=max_n)
 
 
 def _n_sources(config, region):
@@ -480,10 +499,32 @@ def _source_task(i):
         flux = w["flux"][i]
         sigma = w["sigma"][i]
         origin = w["origin"][i]
-        f_lim50 = w["f_lim50"][i]
+
+        # COMPLETENESS_2026-10-20.md "Per-source access in the fitter":
+        # this source's own five Spitzer rows (one per band, -1 off-map)
+        # into `catalog.limits.completeness`'s own region-wide CURVE_<B>
+        # tables (`w["curve_tables"]`, fork-inherited plain arrays, never
+        # re-read from disk), the three 2MASS bands' one shared row,
+        # gathered ONCE into one (8, max_n) array before the template
+        # loop (`likelihood.prepare`/`_ln_nondet`,
+        # `prior_reader._cell_sum`).
+        row5 = w["source_row5"][i]
+        curve_rows = np.zeros((N_BANDS, w["max_n"]), dtype=np.float64)
+        covered = np.empty(N_BANDS, dtype=bool)
+        for b, band in enumerate(BAND_KEYS):
+            n_b = w["band_n"][b]
+            if band in catalog_limits.TWOMASS_KEYS:
+                curve_rows[b, :n_b] = w["curve_tables"][band][0]
+                covered[b] = True
+            else:
+                r = row5[catalog_limits.IRAC_MIPS_KEYS.index(band)]
+                covered[b] = r >= 0
+                if r >= 0:
+                    curve_rows[b, :n_b] = w["curve_tables"][band][r]
 
         batch = likelihood.prepare(w["config"], flux, sigma, origin,
-                                    w["sigma_lib_l"], f_lim50, w["width_dex"])
+                                    w["sigma_lib_l"], curve_rows, covered,
+                                    w["band_a"], w["band_c"], w["band_n"])
 
         n_model = w["n_model"]
         rows = np.array([i])
@@ -563,8 +604,8 @@ def _source_task(i):
                 slope_log10b_per_ak, np.array([fit_k.sigma_a_ak]), model_index,
                 cell_weight_by_law[k],
                 w["template_log"], ext_col_ak_k,
-                batch.log10_f_lim50[None, :].astype(np.float64),
-                batch.width_dex[None, :].astype(np.float64),
+                batch.curve_rows[None, :, :],
+                batch.band_a, batch.band_c, batch.band_n,
                 batch.nondet_mask[None, :], gaia_inputs)
             ln_lambda2[k] = ln_lambda2_k[0]
             ln_lambda0[k] = ln_lambda0_k[0]
@@ -1102,7 +1143,6 @@ def build_region_class(config, region, cls, st, reader, catalog,
     # independently open that product on its own first task. Warmed here,
     # in the parent, before the pool below forks.
     gaia_term.warm(cls.lower())
-    width_dex = _width_dex(config, region)
     topk = config.topk
 
     lib_path = config_module.product_path(config, "fittp", "check", "library-resolution", "survey")
@@ -1141,10 +1181,12 @@ def build_region_class(config, region, cls, st, reader, catalog,
 
     _set_worker_state(config=config, cls=cls, reader=reader, gaia_term=gaia_term,
                        template_log=template_log, ln_subclass_prob=ln_subclass_prob, n_sub=n_sub,
-                       width_dex=width_dex, topk=topk, n_model=n_model,
+                       topk=topk, n_model=n_model,
                        sigma_lib_l=sigma_lib_l,
                        flux=catalog["flux"], sigma=catalog["sigma"], origin=catalog["origin"],
-                       f_lim50=catalog["f_lim50"])
+                       curve_tables=catalog["curve_tables"], source_row5=catalog["source_row5"],
+                       band_a=catalog["band_a"], band_c=catalog["band_c"], band_n=catalog["band_n"],
+                       max_n=catalog["max_n"])
 
     # numba JIT-compiles once per PROCESS, so a worker meeting a kernel cold
     # pays its compile memory privately -- measured at ~82 MB per kernel, which
@@ -1183,10 +1225,12 @@ def build_region_class(config, region, cls, st, reader, catalog,
     prior_reader.set_prior_mass_tables(reader, g_names, g_table)
     _set_worker_state(config=config, cls=cls, reader=reader, gaia_term=gaia_term,
                        template_log=template_log, ln_subclass_prob=ln_subclass_prob, n_sub=n_sub,
-                       width_dex=width_dex, topk=topk, n_model=n_model,
+                       topk=topk, n_model=n_model,
                        sigma_lib_l=sigma_lib_l,
                        flux=catalog["flux"], sigma=catalog["sigma"], origin=catalog["origin"],
-                       f_lim50=catalog["f_lim50"])
+                       curve_tables=catalog["curve_tables"], source_row5=catalog["source_row5"],
+                       band_a=catalog["band_a"], band_c=catalog["band_c"], band_n=catalog["band_n"],
+                       max_n=catalog["max_n"])
     with _make_pool(ctx, n_workers) as pool:
         for bi, (bstart, bstop) in enumerate(batch_bounds):
             if selected is not None and bi not in selected:
