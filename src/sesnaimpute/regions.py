@@ -1,4 +1,4 @@
-"""The 30 SESNA star-forming regions: name, distance, and basis.
+"""The 29 SESNA star-forming regions: name, distance, and basis.
 
 Transcribed from sesnacomplete.constants.REGIONS: name, d_r_pc (the point
 estimate), sigma_pc (its 1-sigma uncertainty), range_kpc, and basis are
@@ -34,8 +34,6 @@ _REGIONS = (
     Region("Auriga-California", 470, 24, (0.446, 0.494), "D",
            "Zucker, Speagle, Schlafly, Green, Finkbeiner, Goodman & Alves 2019, ApJ 879, 125, "
            "table 3 ('California' row), Gaia DR2 3-D dust"),
-    Region("BD+40o4124", 980, 196, (0.784, 1.176), "A-FLAG",
-           "Shevchenko 1991, via Sandell 2012"),
     Region("Cepheus Flare", 358, 32, (0.326, 0.39), "M",
            "Dzib et al., VLBA parallaxes of 47 YSOs"),
     Region("Cepheus OB3", 830, 40, (0.790, 0.870), "M+S",

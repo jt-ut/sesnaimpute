@@ -152,6 +152,6 @@ GRANULE_DEFINITIONS = {
     "hpx512": "one nside-512 HEALPix pixel",
     "sightline": "one nside-256 HEALPix pixel that contains at least one catalogue source",
     "tile": "a group of hpx512 pixels, 0.5-0.7 degrees across",
-    "region": "one of the 30 named star-forming regions",
+    "region": "one of the 29 named star-forming regions",
     "survey": "the whole survey, one value for everything",
 }

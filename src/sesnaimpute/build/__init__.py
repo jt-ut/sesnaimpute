@@ -7,7 +7,7 @@ Every build module exposes `build(config, regions=None)` and ends with:
 
 `run` parses `CONFIG [--regions R1 R2 ...]` from the command line, loads the
 config, and calls `build_fn(config, regions=None or the given list)`. The
-command line defaults to all thirty regions; per-region products are one
+command line defaults to every region in `regions.REGIONS`; per-region products are one
 file per region, so a subset run never touches the others.
 
 This module also holds a stage's worker pool alive for the stage's whole
