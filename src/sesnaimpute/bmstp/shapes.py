@@ -548,9 +548,9 @@ def build_cloud(config, region):
     separable the other way round -- a region-wide brightness marginal
     from the pattern sources' own measured I4 flux (`population.pahn.
     pattern_f45_1kpc`, converted to the 4.5um axis through the PAHN
-    templates' own I2/I4 ratio, or its DL21 fallback absent a register on
-    this branch, `population.pahn.dl21_i2_i4_log10_ratio`) times a
-    region-wide `log10 ξ = 0` front-surface marginal (`sample_cloud.
+    register's own median I2/I4 band ratio, `bmstp.template_weights.
+    pahn_i2_i4_log10_ratio`) times a region-wide `log10 ξ = 0`
+    front-surface marginal (`sample_cloud.
     pahn_front_marginal`), broadcast over every sightline the other way
     round from H2S. None of the three grids carries an `N_EFF` dataset or
     a `FLOOR` attribute, per `bmstp.grid`'s module docstring."""
@@ -696,13 +696,15 @@ def build_cloud(config, region):
         # (the mirror image of H2S's own construction, which tiles a
         # region-wide BRIGHTNESS marginal over YSO's per-sightline `xi`).
         # Brightness: the pattern sources' own I4 fluxes, converted to the
-        # grid's 4.5 um axis through the PAHN templates' own I2/I4 ratio
-        # (no PAHN register on this branch -- the DL21 shape's own ratio,
-        # `population.pahn.dl21_i2_i4_log10_ratio`, used instead, disclosed
-        # at `build`'s own report), each pattern source placed at the
-        # register's 1 kpc reference convention (`population.pahn.
-        # pattern_f45_1kpc`) the same way every other class's `C_THETA` is.
-        pahn_log10_ratio = pahn_module.dl21_i2_i4_log10_ratio(config)
+        # grid's 4.5 um axis through the PAHN register's own median I2/I4
+        # band ratio (`bmstp.template_weights.pahn_i2_i4_log10_ratio`,
+        # the register's own filter-convolved fluxes, C17 2026-10-20 --
+        # supersedes the retired `population.pahn.dl21_i2_i4_log10_ratio`
+        # point-sampled DL21 fallback, written before a register existed),
+        # each pattern source placed at the register's 1 kpc reference
+        # convention (`population.pahn.pattern_f45_1kpc`) the same way
+        # every other class's `C_THETA` is.
+        pahn_log10_ratio = template_weights.pahn_i2_i4_log10_ratio(config)
         log10_f_ref_i2_pahn, _log10_f_ref_i4_pahn = pahn_module.pattern_f45_1kpc(
             config, region, pahn_log10_ratio)
         n_pattern_pahn = log10_f_ref_i2_pahn.size
@@ -841,7 +843,7 @@ def build_cloud(config, region):
                 pahn_sum_check=pahn_sum_check, n_pattern_pahn=n_pattern_pahn,
                 pahn_mass_outside_hist=mass_outside_pahn_hist)
         print(f"bmstp.shapes.cloud [{region}]: PAHN n_pattern={n_pattern_pahn} "
-              f"log10(I2/I4) ratio={pahn_log10_ratio:.4f} (DL21 fallback, no PAHN register) "
+              f"log10(I2/I4) ratio={pahn_log10_ratio:.4f} (PAHN register's own median) "
               f"f45_marginal_on_grid={on_grid_frac_pahn:.4f} "
               f"ON_GRID_PAHN range={(float(on_grid_pahn.min()), float(on_grid_pahn.max())) if n_sl else (0.0, 0.0)} "
               f"sum_check(max|sum-(1-mass_outside)|)={pahn_sum_check:.3g}", flush=True)

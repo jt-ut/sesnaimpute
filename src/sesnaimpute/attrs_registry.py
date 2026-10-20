@@ -603,17 +603,18 @@ REGISTRY = {
         "time, beyond the per-cell table in W."),
 
     ("pahn_weights_region", "MODEL_NAME"): ("source name",
-        "This PAHN template's own identifier, in this file's row order. "
-        "No PAHN SED register exists on this branch: these are stand-in "
-        "names (PAHN_STAND_IN_<i>), not a register's own model names."),
+        "This PAHN template's own identifier, the register's own model "
+        "name, in this file's row order (the same register read every "
+        "other class uses)."),
     ("pahn_weights_region", "C_THETA"): ("log10 mJy at 1 kpc",
-        "This PAHN stand-in template's own offset onto the common "
-        "brightness axis. Unlike every other library's C_THETA (a "
-        "register's own F_REF_I2, survey-wide), this is one of n_model "
-        "equally spaced quantiles of THIS REGION's own pattern-source "
-        "brightness population (population.pahn.pattern_f45_1kpc) -- "
-        "region-specific, a disclosed placeholder for the missing "
-        "register's own per-template brightness."),
+        "This PAHN template's own offset onto the common brightness "
+        "axis. Unlike every other library's C_THETA (a register's own "
+        "F_REF_I2, survey-wide), this is one of n_model equally spaced "
+        "quantiles of THIS REGION's own pattern-source brightness "
+        "population (population.pahn.pattern_f45_1kpc) -- region-specific, "
+        "because the register carries no absolute flux scale of its own, "
+        "only the per-template shape bmstp.atlas._pahn_region_nodes reads "
+        "directly, matched to this row's own template by row position."),
     ("pahn_weights_region", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
         "The centers of the 110 common brightness cells every factor "
         "table in this file is tabulated on."),

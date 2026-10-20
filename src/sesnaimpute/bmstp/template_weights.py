@@ -1776,81 +1776,85 @@ def build_h2shock(config, region):
 
 # ---------------------------------------------------------------------------
 # PAHN: uniform over templates (region, C14_pahn_population.md, owner's
-# 2026-10-20 ruling "H2S is the pattern")
+# 2026-10-20 ruling "H2S is the pattern"); C17 2026-10-20: the PAHN SED
+# register now exists on every path (the LIB RUNBOOKtp.sh line builds it
+# before any PY line), so this reads it directly like every other library,
+# no stated-count fallback.
 # ---------------------------------------------------------------------------
 
-#: The stated template count this build uses when no PAHN SED register
-#: exists on this branch (brief: "the weights are uniform over templates
-#: and read the template count from the register only at run time -- if
-#: the register is absent, write the weights for a stated count of 33
-#: and say so in the report"). A sibling unit's own RUNBOOKtp.sh line
-#: (read, not its register file: C14 does not read another unit's own
-#: scratch root) independently states "33 raw = 33 kept" for the real
-#: PAHN library, agreeing with this stated count without this build
-#: depending on that branch at all.
-PAHN_STATED_TEMPLATE_COUNT = 33
-
-
-def _pahn_template_count(config):
-    """`(n_model, source)`: the PAHN register's own template count where
-    `sed_models/registers/pahn_register.hdf5` exists on THIS branch's
-    own `config.inputs['sed_models']`, else `PAHN_STATED_TEMPLATE_COUNT`
-    (module docstring) -- `source` is `"register"` or `"stated"`, printed
-    by `build_pahn` so every run says plainly which branch it took."""
-    key = definitions.CLASS_REGISTER["PAHN"]
-    path = f"{config.inputs['sed_models']}/registers/{key}_register.hdf5"
-    if os.path.exists(path):
-        with h5py.File(path, "r") as f:
-            return int(f["models"]["MODEL_NAME"].shape[0]), "register"
-    return PAHN_STATED_TEMPLATE_COUNT, "stated"
+def pahn_i2_i4_log10_ratio(config):
+    """`log10(F_I2/F_I4)`, the PAHN register's own band ratio (brief: "the
+    register's own band-convolved fluxes (the median over the 33)"): each
+    of the register's own templates' `F_REF_I2/F_REF_I4` (both floored at
+    that template's own `FLOOR_LINEAR`), the median over all templates --
+    the register's own filter-convolved fluxes, superseding the retired
+    `population.pahn.dl21_i2_i4_log10_ratio`'s point-sampled DL21 shape
+    (no register existed when that was written). Used wherever a PAHN
+    consumer needs a single, region-independent I4->I2 brightness
+    conversion for a quantity the register does not carry per-source
+    (the pattern sources' own measured I4 flux, `population.pahn.
+    pattern_f45_1kpc`): a per-template conversion belongs in
+    `bmstp.atlas._pahn_region_nodes` instead, which reads every template's
+    own ratio directly."""
+    reg = _read_register(config, "pahn")
+    f_i2 = np.maximum(reg["f_ref"]["I2"], reg["floor_linear"])
+    f_i4 = np.maximum(reg["f_ref"]["I4"], reg["floor_linear"])
+    return float(np.median(np.log10(f_i2 / f_i4)))
 
 
 def build_pahn(config, region):
     """P5's PAHN table, one per region (the brief: "the same product
-    layout as H2S's"): uniform weight over the PAHN templates -- "one
-    population, no axis the census can weight" -- `PI[theta, k] =
-    1/n_model` at every brightness cell `k` alike, independent of both
-    `theta` and `k`. `n_model` is the PAHN register's own template count
-    where one exists on this branch, else `PAHN_STATED_TEMPLATE_COUNT`
-    (`_pahn_template_count`, disclosed in this function's own print).
+    layout as H2S's"): uniform weight over the PAHN register's own
+    templates -- "one population, no axis the census can weight" --
+    `PI[theta, k] = 1/n_model` at every brightness cell `k` alike,
+    independent of both `theta` and `k`. `n_model` and `MODEL_NAME` are
+    the PAHN register's own row count and names (`_read_register`, the
+    same register read every other class uses); `bmstp.atlas.
+    _pahn_region_nodes` reads this file's own `C_THETA` for PLACEMENT and
+    the register directly for each row's own 8-band SHAPE, matched by
+    row position (`C17_pahn_integration.md`: both axes are the register's
+    own row order, so row i's template is placed at this file's i-th
+    `C_THETA`).
 
-    Lacking a register's own `F_REF_I2` to place each stand-in row's own
-    `C_THETA` at, this build places the `n_model` stand-in rows at
-    `n_model` equally spaced quantiles of THIS REGION's own pattern-
+    Lacking a survey-wide absolute flux scale of its own (the register's
+    templates carry no distance or luminosity calibration against the
+    real PAHN population, only relative SED shape), `C_THETA` is placed
+    at `n_model` equally spaced quantiles of THIS REGION's own pattern-
     source brightness population (`population.pahn.pattern_f45_1kpc`,
-    the SAME population `bmstp.shapes.build_cloud`'s own GRID_PAHN
-    brightness marginal is built from, so WEIGHTS and SHAPE share one
-    empirical basis) -- UNLIKE every other library, whose own `C_THETA`
-    is survey-wide (the register's own `F_REF_I2`, independent of
-    region): PAHN's own stand-in `C_THETA` is region-specific because
-    the pattern population standing in for its missing register is.
-    This is a disclosed placeholder, not a claim about the real PAHN
-    library's own template brightnesses, which this branch cannot read."""
+    converted from the pattern's own measured I4 through
+    `pahn_i2_i4_log10_ratio` -- the SAME population `bmstp.shapes.
+    build_cloud`'s own GRID_PAHN brightness marginal is built from, so
+    WEIGHTS and SHAPE share one empirical basis) -- UNLIKE every other
+    library, whose own `C_THETA` is survey-wide (the register's own
+    `F_REF_I2`, independent of region): PAHN's own `C_THETA` is
+    region-specific because the empirical anchor for its absolute
+    brightness is."""
     with progress.Stage("bmstp.template_weights.pahn", region) as st:
-        n_model, source = _pahn_template_count(config)
-        pahn_log10_ratio = pahn_module.dl21_i2_i4_log10_ratio(config)
+        reg = _read_register(config, "pahn")
+        n_model = reg["names"].size
+        names = reg["names"]
+        pahn_log10_ratio = pahn_i2_i4_log10_ratio(config)
         log10_f_ref_i2, _log10_f_ref_i4 = pahn_module.pattern_f45_1kpc(config, region, pahn_log10_ratio)
         if log10_f_ref_i2.size == 0:
             # no pattern source anywhere in this region (e.g. the
             # identity check that forces the pattern to admit none,
             # C14_pahn_population.md): no empirical basis to place
             # C_THETA at, so this falls back to evenly spaced quantiles
-            # of the common grid's own brightness range -- a neutral,
-            # disclosed placeholder (every downstream N_CAT_PAHN/N_CAT_
-            # CELL_PAHN still comes out exactly zero, since DENSITY_PAHN
-            # is zero everywhere in this same case, module docstring's
-            # own `pattern_mask`), never a module-wide hard failure for
-            # one class with no sources this region.
+            # of the common grid's own brightness range -- a neutral
+            # disclosure (every downstream N_CAT_PAHN/N_CAT_CELL_PAHN
+            # still comes out exactly zero, since DENSITY_PAHN is zero
+            # everywhere in this same case, module docstring's own
+            # `pattern_mask`), never a module-wide hard failure for one
+            # class with no sources this region.
             print(f"template_weights.pahn [{region}]: WARNING no pattern source in this region -- "
-                  "C_THETA falls back to the common grid's own brightness range, a neutral "
-                  "placeholder with no empirical basis", flush=True)
+                  "C_THETA falls back to the common grid's own brightness range, since there is "
+                  "no empirical brightness to place the register's own templates at", flush=True)
             b_edges = grid.LOG10_F45_EDGES
             q = (np.arange(n_model) + 0.5) / n_model
             c_theta = b_edges[0] + q * (b_edges[-1] - b_edges[0])
         else:
             q = (np.arange(n_model) + 0.5) / n_model
             c_theta = np.quantile(log10_f_ref_i2, q)
-        names = np.array([f"PAHN_STAND_IN_{i:02d}" for i in range(n_model)])
 
         log10_f45_centers = _log10_f45_centers()
         n_b = log10_f45_centers.size
@@ -1859,21 +1863,24 @@ def build_pahn(config, region):
         factors = {
             "uniform": (w, c_theta, "", True,
                         "one population, no axis the census can weight (brief): uniform "
-                        "weight 1/%d over the PAHN templates, every brightness cell alike" % n_model),
+                        "weight 1/%d over the PAHN register's own templates, every brightness "
+                        "cell alike" % n_model),
         }
         path = _write_library(
             config, "pahn", "region", names, c_theta, log10_f45_centers, factors, region=region,
-            extra_attrs={"N_MODEL_SOURCE": source,
-                         "C_THETA_SOURCE": ("no PAHN SED register on this branch: n_model equally "
-                                            "spaced quantiles of this region's own pattern-source "
-                                            "brightness population (population.pahn.pattern_f45_1kpc), "
-                                            "not a register's F_REF_I2")})
-        st.done(path, n_model=n_model, n_model_source=source,
+            extra_attrs={"N_MODEL_SOURCE": "register",
+                         "C_THETA_SOURCE": ("n_model equally spaced quantiles of this region's own "
+                                            "pattern-source brightness population "
+                                            "(population.pahn.pattern_f45_1kpc), not the register's "
+                                            "own F_REF_I2: the register carries no absolute flux "
+                                            "scale of its own, only the per-template SHAPE "
+                                            "bmstp.atlas._pahn_region_nodes reads directly")})
+        st.done(path, n_model=n_model, n_model_source="register",
                 c_theta_range=(float(c_theta.min()), float(c_theta.max())))
-        print(f"template_weights.pahn [{region}]: n_model={n_model} (source={source}) "
-              f"uniform weight=1/{n_model}={1.0 / n_model:.4g}; stand-in C_THETA (this region's "
-              f"own pattern quantiles, not a register) range min={c_theta.min():.4f} "
-              f"median={float(np.median(c_theta)):.4f} max={c_theta.max():.4f}", flush=True)
+        print(f"template_weights.pahn [{region}]: n_model={n_model} (source=register) "
+              f"uniform weight=1/{n_model}={1.0 / n_model:.4g}; C_THETA (this region's own pattern "
+              f"quantiles) range min={c_theta.min():.4f} median={float(np.median(c_theta)):.4f} "
+              f"max={c_theta.max():.4f}", flush=True)
 
 
 # ---------------------------------------------------------------------------
