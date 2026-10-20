@@ -150,30 +150,34 @@ REGISTRY = {
         "attribute gives. Where there is no detection the value is filled: the "
         "2MASS bands (J, H, Ks) take the survey's fixed detection bound, and the "
         "three IRAC bands and the one MIPS band take the source's own "
-        "90%-completeness flux, or, where it has none, the median "
-        "90%-completeness flux of its five nearest sky neighbours that do. "
-        "ORIGIN_FNU in this file says which bands were filled and how."),
+        "90%-completeness flux read off Rob Gutermuth's measured completeness map "
+        "at the source's nearest pixel (`catalog.completeness.lookup`), or NaN "
+        "where the source's own pixel is off every field's map. ORIGIN_FNU in "
+        "this file says which bands were filled and how."),
     ("sources_sesna_source", "SIGMA_FNU_MJY"): ("mJy",
         "The 1-sigma flux uncertainty for a measured detection in FNU_MJY, on the "
         "same mJy scale. Where FNU_MJY was filled instead of measured (see "
-        "ORIGIN_FNU), this is the fixed value 0.99: a flag the SED fitter reads as "
-        "an upper limit, not a real measurement uncertainty."),
+        "ORIGIN_FNU), this is the fixed value 0.99 (a flag the SED fitter reads as "
+        "an upper limit, not a real measurement uncertainty), or NaN where "
+        "ORIGIN_FNU is 91 (off-map, no fill at all)."),
     ("sources_sesna_source", "DCOMP90_MJY"): ("mJy",
         "The flux a source at this position and band would need to be detected at "
         "90% completeness: the survey's fixed bound for the 2MASS bands (J, H, "
-        "Ks), this source's own 90%-completeness flux for the three IRAC bands "
-        "and the one MIPS band, or, where it has none, the median "
-        "90%-completeness flux of its five nearest sky neighbours that do."),
+        "Ks), or, for the three IRAC bands and the one MIPS band, Rob Gutermuth's "
+        "measured completeness map value at the source's nearest pixel "
+        "(`catalog.completeness.lookup`), NaN where the source's own pixel is off "
+        "every field's map for that band."),
     ("sources_sesna_source", "ORIGIN_FNU"): ("code",
         "How FNU_MJY and DCOMP90_MJY in each band were obtained, one integer per "
         "band: 1 a measured detection, 2 the fixed 2MASS survey detection bound, "
-        "90 the source's own 90%-completeness flux, 91 the median "
-        "90%-completeness flux of its nearest sky neighbours -- Pokhrel et al. "
-        "2023 (eHOPS I, ApJS 266, 32): the SESNA catalogue \"provides the "
-        "nearest 90% differential completeness value to each source's "
-        "position for all bands covered at that position\", so a band with "
-        "no completeness value of its own is a band not covered there, and "
-        "the SED fitter's non-detection term excludes it."),
+        "90 covered but undetected (FNU_MJY filled from the completeness map's "
+        "own 90%-completeness flux at the source's pixel), 91 off-map -- no "
+        "completeness value and no non-detection term (COMPLETENESS_2026-10-20.md "
+        "rule 2: \"sources with a catalogue DCOMP90 are exactly the on-map "
+        "sources\", the same meaning Pokhrel et al. 2023, eHOPS I, ApJS 266, 32, "
+        "gave the old catalogue column: a band with no completeness value of its "
+        "own is a band not covered there, and the SED fitter's non-detection term "
+        "excludes it)."),
 
     # population.young_stars: folded into population.anchor_weights.build
     # (brief U4) -- no product of its own, no registry entries. See
