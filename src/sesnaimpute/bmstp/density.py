@@ -81,6 +81,7 @@ from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.population import knot_rate
+from sesnaimpute.population import pahn as pahn_module
 from sesnaimpute.population import yso as yso_module
 from sesnaimpute.population.yso import PROVENANCE_HERSCHEL, law_count, pc2_per_deg2
 
@@ -290,6 +291,7 @@ def build_region(config, region, st, fitted_rates=None, pooled_eta=None):
         sightline_axis = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
         on_grid_yso_by_sightline = np.asarray(f["ON_GRID_YSO"][:], dtype=np.float64)
         on_grid_h2s_by_sightline = np.asarray(f["ON_GRID_H2S"][:], dtype=np.float64)
+        on_grid_pahn_by_sightline = np.asarray(f["ON_GRID_PAHN"][:], dtype=np.float64)
     p4_path = config_module.product_path(config, "bmstp", "shape", "gal", "survey")
     with h5py.File(p4_path, "r") as f:
         on_grid_gal = float(f.attrs["ON_GRID_GAL"])
@@ -300,6 +302,7 @@ def build_region(config, region, st, fitted_rates=None, pooled_eta=None):
     on_grid_agb = on_grid_agb_by_tile[tile_row]
     on_grid_yso = on_grid_yso_by_sightline[sightline_row]
     on_grid_h2s = on_grid_h2s_by_sightline[sightline_row]
+    on_grid_pahn = on_grid_pahn_by_sightline[sightline_row]
     st.tick(1, 4, "batches")
 
     star_by_tile, agb_by_tile, omega_sim, f_dusty_o, f_dusty_c, f_c = \
@@ -411,6 +414,17 @@ def build_region(config, region, st, fitted_rates=None, pooled_eta=None):
     # `ON_GRID_YSO` is -- it is stored there, not "formed at read", since
     # the knots' brightness axis moved onto that common grid.
     density_h2s = l_of_s * eta_r * EPS_EXT * on_grid_h2s
+
+    # PAHN (C14_pahn_population.md): `DENSITY_PAHN(s) = population.pahn.
+    # read(config, region)` at this source's OWN ADMITTED PIXEL's I4 50%
+    # limit (`population.pahn.source_pixel_i4_limit_mjy` -- the SAME
+    # per-pixel limit the curve was built on, `population.pahn.
+    # region_measurement`, never the per-source curve `D_PAHC` reads),
+    # times `ON_GRID_PAHN`. No eta, no eps_ext: PAHN carries no external
+    # survey calibration of its own, unlike H2S's knot rate.
+    i4_pixel_limit_mjy = pahn_module.source_pixel_i4_limit_mjy(config, region, hpx512)
+    density_pahn_curve = pahn_module.read(config, region)
+    density_pahn = density_pahn_curve(np.log10(i4_pixel_limit_mjy)) * on_grid_pahn
     st.tick(4, 4, "batches")
 
     retention_limits = _deepest_limits_mjy(reader)
@@ -421,10 +435,11 @@ def build_region(config, region, st, fitted_rates=None, pooled_eta=None):
         d_pahc=d_pahc, a_cloud=a_cloud.astype(np.float32), cloud_frac=cloud_frac,
         density_star=density_star, density_agb=density_agb, density_pahc=density_pahc,
         density_gal=density_gal, density_yso=density_yso, density_h2s=density_h2s,
+        density_pahn=density_pahn,
         density_star_raw=density_star_raw, density_agb_raw=density_agb_raw,
         density_gal_raw=density_gal_raw, density_yso_intrinsic=density_yso_intrinsic,
         on_grid_star=on_grid_star, on_grid_agb=on_grid_agb, on_grid_yso=on_grid_yso,
-        on_grid_h2s=on_grid_h2s, on_grid_gal=on_grid_gal, d_front=d_front,
+        on_grid_h2s=on_grid_h2s, on_grid_pahn=on_grid_pahn, on_grid_gal=on_grid_gal, d_front=d_front,
         omega_sim=omega_sim, f_dusty_o=f_dusty_o, f_dusty_c=f_dusty_c, f_c=f_c,
         eta_r=eta_r, eta_band_dex=eta_band_dex, retention_limits=retention_limits, yso_law_err=yso_law_err,
         kappa_used=kappa_used, kappa_pooled=kappa_pooled_value, density_h2s_law_pooled=density_h2s_law_pooled,
@@ -452,6 +467,7 @@ def write_region(path, result):
             ("DENSITY_GAL", result["density_gal"].astype(np.float64)),
             ("DENSITY_YSO", result["density_yso"].astype(np.float64)),
             ("DENSITY_H2S", result["density_h2s"].astype(np.float64)),
+            ("DENSITY_PAHN", result["density_pahn"].astype(np.float64)),
         ):
             build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
         f.attrs["KAPPA_USED"] = result["kappa_used"]
@@ -490,7 +506,8 @@ def build(config, regions=None):
                   f"16-84%=[{cf_16:.6g}, {cf_84:.6g}] (cloud interval front edge "
                   f"d_front={result['d_front']:.6g} pc)")
             for cls, og in (("STAR", result["on_grid_star"]), ("AGB", result["on_grid_agb"]),
-                            ("YSO", result["on_grid_yso"]), ("H2S", result["on_grid_h2s"])):
+                            ("YSO", result["on_grid_yso"]), ("H2S", result["on_grid_h2s"]),
+                            ("PAHN", result["on_grid_pahn"])):
                 print(f"bmstp.density {region}: on-grid fraction {cls} median={np.median(og):.6g}")
             print(f"bmstp.density {region}: on-grid fraction GAL={result['on_grid_gal']:.6g} "
                   f"(survey-wide attr; PAHC uses STAR's own on-grid fraction, sec. 4.1)")
@@ -557,6 +574,16 @@ def build(config, regions=None):
             ratio = total_sum / n if n else float("nan")
             n_unresolved = int(np.count_nonzero(result["tile"] < 0) +
                               np.count_nonzero(result["sightline_row"] < 0))
+
+            # PAHN (C14_pahn_population.md): report-only, alongside the
+            # six established classes above, kept OUT of `total_sum`/
+            # `ratio` (that check predates this class and bmstp.atlas's
+            # own total-count check, sec. 8, is where PAHN's own ratio is
+            # actually measured).
+            pahn_mean_density = float(np.mean(result["density_pahn"]))
+            print(f"bmstp.density {region}: PAHN mean={pahn_mean_density:.6g} deg^-2, "
+                  f"total over area={pahn_mean_density * area_deg2:.6g} "
+                  f"(report-only, not in the six-class ratio above)")
 
             # sec. 5.6's brief report: the knot-driver convolution's own
             # numbers, once per region -- the map operation `knot_field.

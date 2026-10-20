@@ -422,6 +422,16 @@ REGISTRY = {
         "map for a Herschel-arm source the convolution reaches) times "
         "the region's own knot rate and universal external fraction, "
         "times the sightline's own on-grid retained fraction."),
+    ("table_density_source", "DENSITY_PAHN"): ("objects per square degree",
+        "This source's own retained PAHN (star-less PAH nebular source) "
+        "sky density: population.pahn's own measured density curve, "
+        "read at this source's own admitted pixel's 8 micron 50%-"
+        "completeness limit, times the sightline's own on-grid retained "
+        "fraction. No external calibration factor (unlike DENSITY_H2S's "
+        "knot rate): PAHN's density is the measured curve and the "
+        "shape's own retention alone. An upper bound: the measured "
+        "curve's own pattern count also contains any true protostar too "
+        "faint at 3.6 and 4.5 to detect, and artefacts."),
 
     # bmstp.template_weights -- P5, six template libraries
     # (<lib>_weights_<granule>): one factor per external population

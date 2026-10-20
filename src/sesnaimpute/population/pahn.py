@@ -410,6 +410,34 @@ def read(config, region):
     return interp1d(c, d, kind="linear", bounds_error=False, fill_value=(float(d[0]), float(d[-1])))
 
 
+def source_pixel_i4_limit_mjy(config, region, hpx_pix_512):
+    """`(n,)` mJy: each `hpx_pix_512` source's own I4 50%-completeness
+    limit AT ITS OWN ADMITTED PIXEL (`catalog.limits.Completeness.
+    fifty_percent_pixel`) -- the SAME per-pixel limit `region_measurement`
+    bins `DENSITY_PAHN` by, not the per-source curve `fifty_percent`
+    (`bmstp.density`'s own `D_PAHC`, a different quantity): `bmstp.
+    density`'s own `DENSITY_PAHN` reads `read(config, region)` at this
+    value, so the curve is read back on the exact axis it was built on.
+    `+inf` (never `NaN`) for a source whose own pixel carries no finite
+    limit, the convention every other reader in this package uses."""
+    reader = limits_module.completeness(config, region)
+    pix512 = reader.hpx_pix_512
+    order = np.argsort(pix512)
+    pix_sorted = pix512[order]
+    hpx_pix_512 = np.asarray(hpx_pix_512, dtype=np.int64)
+    loc = np.searchsorted(pix_sorted, hpx_pix_512)
+    loc = np.minimum(loc, max(pix_sorted.size - 1, 0))
+    hit = order[loc]
+    found = (pix_sorted.size > 0) & (pix_sorted[loc] == hpx_pix_512)
+    if not np.all(found):
+        bad = int(hpx_pix_512[~found][0])
+        raise ValueError(
+            "population.pahn.source_pixel_i4_limit_mjy [%s]: source pixel %d is absent "
+            "from the admitted pixel axis" % (region, bad))
+    limit = reader.fifty_percent_pixel("I4", hit)
+    return np.where(np.isfinite(limit), limit, np.inf)
+
+
 # ---------------------------------------------------------------------------
 # 6. build
 # ---------------------------------------------------------------------------
