@@ -652,6 +652,24 @@ REGISTRY = {
     ("cloud_shape_sightline", "ON_GRID_H2S"): ("dimensionless",
         "1 minus MASS_OUTSIDE_H2S: the fraction of this sightline's own "
         "H2 shock population weight that GRID_H2S actually holds."),
+    ("cloud_shape_sightline", "GRID_PAHN"): ("dimensionless",
+        "For the matching sightline in HPX_PIX_256, the PAHN (star-less "
+        "PAH nebular source) population density on the common (log10 xi, "
+        "log10 F_4.5) grid: separable, a region-wide brightness marginal "
+        "from the pattern sources' own measured I4 flux (population.pahn) "
+        "times a region-wide front-surface (log10 xi = 0) marginal, "
+        "broadcast over every sightline alike -- integrating over a cell "
+        "gives that cell's own share of the region's PAHN population, up "
+        "to the floor ON_GRID_PAHN leaves out."),
+    ("cloud_shape_sightline", "MASS_OUTSIDE_PAHN"): ("dimensionless",
+        "For the matching sightline in HPX_PIX_256, the fraction of the "
+        "region's own PAHN population weight that falls outside the "
+        "common grid, not stored in GRID_PAHN. The same value at every "
+        "sightline of a region: PAHN's own placement does not depend on "
+        "the sightline."),
+    ("cloud_shape_sightline", "ON_GRID_PAHN"): ("dimensionless",
+        "1 minus MASS_OUTSIDE_PAHN: the fraction of the region's own PAHN "
+        "population weight that GRID_PAHN actually holds."),
     ("cloud_shape_sightline", "D_PEAK_SIGHTLINE_PC"): ("pc",
         "For the matching sightline in HPX_PIX_256, the distance of this "
         "sightline's own dust-structure peak in the 3-D extinction map "

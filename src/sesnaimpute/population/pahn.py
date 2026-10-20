@@ -239,6 +239,79 @@ def _poisson_interval_68(n):
     return lo, hi
 
 
+#: The PAHC register's own fixed DL21 token (`sed_models.curate.
+#: pahc_curate`'s own fiducial choice, read as module constants there:
+#: `PAHC_LG_U_TOKEN`, `PAHC_IONIZATION`) and the three published
+#: grain-size distributions `load_pahc_excess_shape` reads over: PAHN has
+#: no SED register of its own on this branch, so its own SHAPE brightness
+#: conversion (I4 observed -> I2/4.5um reference) falls back to the PURE
+#: DL21 PAH-excess shape at that SAME fiducial, "the DL21 shape's own
+#: ratio computed the same way" the 33 PAHN templates' own median would
+#: be (brief).
+DL21_SIZE_TOKENS = ("sma", "std", "lrg")
+
+
+def dl21_i2_i4_log10_ratio(config):
+    """`log10(F_I2/F_I4)`, SHAPE's own fallback I2/I4 conversion (module
+    docstring, DL21_SIZE_TOKENS): the median, over the three published
+    grain-size distributions, of the pure DL21 PAH-excess shape's own
+    ratio at the two IRAC bands' own effective wavelength (`definitions.
+    BANDS_BY_KEY`) -- `sed_models.curate.pahc_curate.load_pahc_excess_
+    shape`'s own `P_hat(lambda)`, normalised so `P_hat(8um) = 1`, POINT-
+    SAMPLED (linear interpolation on its native wavelength grid, not
+    filter-convolved against the IRAC response curves) at I2's 4.493 um
+    and I4's 7.872 um -- a disclosed simplification (this build's own
+    report), since a true per-template register entry would be the
+    filter-convolved flux (`sed_models.build_pahc`'s own convolution),
+    not a single point sample. The DL21 spectra this reads
+    (`config.inputs['sed_models']/downloads/PAHspec`) are already on
+    disk (`sed_models.curate.pahc_curate.fetch_pahc_excess_templates`'s
+    own earlier fetch for PAHC): no network fetch here."""
+    from sesnaimpute.sed_models.curate import pahc_curate
+    download_dir = f"{config.inputs['sed_models']}/downloads/PAHspec"
+    wvl_i2 = definitions.BANDS_BY_KEY["I2"].wvl_um
+    wvl_i4 = definitions.BANDS_BY_KEY["I4"].wvl_um
+    ratios = []
+    for size in DL21_SIZE_TOKENS:
+        wave_um, p_hat = pahc_curate.load_pahc_excess_shape(download_dir, size)
+        p_i2 = float(np.interp(wvl_i2, wave_um, p_hat))
+        p_i4 = float(np.interp(wvl_i4, wave_um, p_hat))
+        ratios.append(np.log10(p_i2 / p_i4))
+    return float(np.median(ratios))
+
+
+def pattern_f45_1kpc(config, region, log10_ratio_i2_i4):
+    """`(log10_f_ref_i2_1kpc, log10_f_ref_i4_1kpc)`, one row per pattern
+    source in `region` (module docstring's pattern): each source's own
+    measured I4 flux (mJy), placed at the register's own 1 kpc reference
+    convention every other class's `C_THETA` uses (`bmstp.sample_cloud`
+    module docstring's `delta = -2 log10(d_r / 1 kpc)`, applied here
+    directly to each source's own observed flux at the region's one
+    distance `d_r`, since this is the measured SOURCE's own flux, not a
+    template placed at an arbitrary distance), and the I2 (4.5um)
+    reference flux the SAME brightness conversion `log10_ratio_i2_i4`
+    implies (the PAHN templates' own I2/I4 ratio, or its DL21 fallback,
+    `dl21_i2_i4_log10_ratio`)."""
+    reg = regions_module.REGIONS_BY_NAME[region]
+    d_r_pc = float(reg.d_r_pc)
+    scale_1kpc = (d_r_pc / 1000.0) ** 2
+
+    cat_path = config_module.product_path(
+        config, "catalog", "sesna", "sources", "source", region=region)
+    if not os.path.exists(cat_path):
+        raise FileNotFoundError(
+            "population.pahn: no curated catalogue for %r at %s -- run the "
+            "'sesnaimpute.catalog.curated' RUNBOOK line first" % (region, cat_path))
+    with h5py.File(cat_path, "r") as f:
+        fnu = f["FNU_MJY"][:]
+        origin = f["ORIGIN_FNU"][:]
+    pattern = pattern_mask(fnu, origin)
+    f_i4_obs_mjy = fnu[pattern, IDX_I4]
+    log10_f_ref_i4_1kpc = np.log10(f_i4_obs_mjy * scale_1kpc)
+    log10_f_ref_i2_1kpc = log10_f_ref_i4_1kpc + log10_ratio_i2_i4
+    return log10_f_ref_i2_1kpc, log10_f_ref_i4_1kpc
+
+
 def binned_density(i4_limit_mjy, area_deg2, pattern_count, edges):
     """`(density, poisson_lo, poisson_hi, n_per_bin, area_per_bin)`, each
     `(n_bin,)`: per bin of `edges` (log10 I4 50% limit, mJy), the TOTAL
