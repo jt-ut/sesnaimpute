@@ -323,9 +323,14 @@ def fazio_differential_phi(mag, log10_n, band_um=COORD_BAND_UM):
     """Fazio et al. (2004) Table 1's own tabulated DIFFERENTIAL galaxy
     counts, converted directly to phi(S) = dN/dS (galaxies deg^-2
     mJy^-1) at each populated 0.5-mag row -- never through an
-    intermediate cumulative integral (review ledger C3): the table's
-    `n(mag)` is a count per 0.5-mag bin per deg^2, so `dN/dmag =
-    10**n(mag) / 0.5`, and on the mag-flux relation `mag = -2.5 log10(S /
+    intermediate cumulative integral (review ledger C3). Fazio et al.
+    (2004, ApJS 154, 39, section 2) state Table 1's own units directly:
+    "the logarithm of the observed differential number counts in units
+    of number mag^-1 deg^-2" -- `n(mag)` tabulated in log10 is already
+    PER MAGNITUDE; the table's 0.5-mag spacing is only its sampling
+    step, not a bin width to divide out (review ledger C16: dividing by
+    0.5 doubled this law survey-wide). So `dN/dmag = 10**n(mag)`
+    directly, and on the mag-flux relation `mag = -2.5 log10(S /
     S_zp)`, `|dmag/dS| = 2.5 / (S ln10)`; `phi(S) = dN/dmag * |dmag/dS|`.
     Returns `(log10_S, log10_phi)`, ascending in `log10_S`, `S` in mJy on
     Fazio's own Vega zero point.
@@ -335,7 +340,7 @@ def fazio_differential_phi(mag, log10_n, band_um=COORD_BAND_UM):
     n_mag = np.asarray(log10_n, dtype=float)[ok]
     zp_mjy = FAZIO_VEGA_ZP_JY[band_um] * 1e3
     log10_S = np.log10(zp_mjy * 10.0 ** (-0.4 * m))
-    dn_dmag = (10.0 ** n_mag) / 0.5
+    dn_dmag = 10.0 ** n_mag
     s_mjy = 10.0 ** log10_S
     phi = dn_dmag * 2.5 / (s_mjy * np.log(10.0))
     order = np.argsort(log10_S)
