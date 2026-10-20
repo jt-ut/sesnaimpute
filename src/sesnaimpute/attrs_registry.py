@@ -1968,31 +1968,15 @@ REGISTRY = {
         "found at all, so D_PEAK_PC and the other depth values in this row "
         "are meaningful; False where none was found."),
 
-    # catalog.depths -- depths_sesna_region: the fitted 50%-completeness
-    # detection curve per region and band.
+    # catalog.depths -- depths_sesna_region: the fitted 2MASS (J, H, Ks)
+    # 50%-completeness detection curve per region. The five Spitzer bands'
+    # own fit retired (COMPLETENESS_2026-10-20.md): catalog.completeness's
+    # measured per-pixel maps replace it, so DELTA_DEX, SIGMA_DELTA_DEX,
+    # W_MAG, FIT_RESIDUAL and SUBSTITUTED (all Spitzer-only) are gone, and
+    # WIDTH_DEX/SIGMA_WIDTH_DEX carry the three 2MASS bands only.
     ("depths_sesna_region", "REGION"): ("region name",
-        "The name of the region this row describes, in the fixed thirty-"
-        "region order every region-axis product in this package shares."),
-    ("depths_sesna_region", "DELTA_DEX"): ("dex",
-        "For each of the five Spitzer bands (I1, I2, I3, I4, M1, this "
-        "dataset's own column order), the fitted offset from this region's "
-        "90%-completeness map value to its 50%-completeness flux: "
-        "F_lim,50 = DCOMP90_MJY * 10**(-DELTA_DEX). A column can be "
-        "negative where a band's detections turn over brighter than the "
-        "map's own 90% level."),
-    ("depths_sesna_region", "SIGMA_DELTA_DEX"): ("dex",
-        "The 1-sigma fit uncertainty on DELTA_DEX, same five Spitzer bands "
-        "and column order."),
-    ("depths_sesna_region", "W_MAG"): ("mag",
-        "For each of the five Spitzer bands (I1, I2, I3, I4, M1, this "
-        "dataset's own column order), the fitted roll-off width of this "
-        "region's detection curve, in magnitude. WIDTH_DEX in this file is "
-        "this value times 0.4 (dex per magnitude)."),
-    ("depths_sesna_region", "FIT_RESIDUAL"): ("dimensionless",
-        "For each of the five Spitzer bands (I1, I2, I3, I4, M1, this "
-        "dataset's own column order), the fitted detection curve's "
-        "relative L1 distance from this region's own observed histogram, "
-        "measured only past the roll-off's own 90% point."),
+        "The name of the region this row describes, in the fixed region "
+        "order every region-axis product in this package shares."),
     ("depths_sesna_region", "F50_2MASS_MJY"): ("mJy",
         "For each of the three 2MASS bands (J, H, Ks, this dataset's own "
         "column order), this region's fitted 50%-completeness flux."),
@@ -2001,23 +1985,12 @@ REGISTRY = {
         "column order), the fitted detection curve's relative L1 distance "
         "from this region's own observed magnitude histogram, measured "
         "only past one magnitude brighter than the fitted 50% point."),
-    ("depths_sesna_region", "SUBSTITUTED"): ("boolean",
-        "For each of the eight bands (J, H, Ks, I1, I2, I3, I4, M1, this "
-        "dataset's own column order), True where this region's own fit did "
-        "not converge and DELTA_DEX and WIDTH_DEX for that band were "
-        "replaced by that band's median over the regions whose fit did "
-        "converge. Always False for the three 2MASS bands, which carry no "
-        "convergence check."),
     ("depths_sesna_region", "WIDTH_DEX"): ("dex",
-        "For each of the eight bands (J, H, Ks, I1, I2, I3, I4, M1, this "
-        "dataset's own column order), this region's effective detection "
-        "roll-off width: W_MAG times 0.4 for the five Spitzer bands, the "
-        "directly fitted magnitude-space width for the three 2MASS bands."),
-    ("depths_sesna_region", "SIGMA_WIDTH_DEX"): ("dex",
-        "For each of the eight bands (J, H, Ks, I1, I2, I3, I4, M1, this "
-        "dataset's own column order), the 1-sigma uncertainty on WIDTH_DEX "
-        "for the five Spitzer bands. NaN for the three 2MASS bands, which "
-        "carry no resampling uncertainty."),
+        "For each of the three 2MASS bands (J, H, Ks, this dataset's own "
+        "column order), this region's effective detection roll-off width "
+        "(the directly fitted magnitude-space width times 0.4): the "
+        "quantity catalog.completeness's 2MASS CURVE_J/H/Ks tabulation "
+        "reads, beside F50_2MASS_MJY."),
 
 
     # catalog.depth_grid, per-source product -- limits_sesna_source: each
