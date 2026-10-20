@@ -218,12 +218,18 @@ def _a12_columns(names, lib):
     future mismatch degrades honestly instead of silently misaligning.
 
     DTYPE IS PRESERVED, not forced to float64: a column's own numeric
-    dtype (float32, uint8, ...) is a choice made at the source (the
-    library driver that wrote parameters.fits), and this join carries it
-    through rather than overwriting it -- the same "float32 for a
-    per-model column, float64 for a library-level scalar" convention
-    this file's own module docstring states for the fixed schema above.
-    An INTEGER column has no NaN to fall back on, so a name absent from
+    KIND AND WIDTH (float32, uint8, ...) is a choice made at the source
+    (the library driver that wrote parameters.fits), and this join
+    carries it through rather than overwriting it -- the same "float32
+    for a per-model column, float64 for a library-level scalar"
+    convention this file's own module docstring states for the fixed
+    schema above. BYTE ORDER IS NOT preserved: FITS is big-endian on
+    disk, so `lib.parameters` (read straight off that file) hands back
+    `>f4`/`>i4`, and this join normalises to the NATIVE byte order
+    (`newbyteorder("=")`) before storing -- the same native float32
+    every other `/models` column uses (`_f32`, above), so a consumer
+    never has to special-case an A12 column's endianness. An INTEGER
+    column has no NaN to fall back on, so a name absent from
     parameters.fits is an error here (never fires today -- see above),
     not a silent zero.
     """
@@ -249,10 +255,12 @@ def _a12_columns(names, lib):
                     f"no matching parameters.fits MODEL_NAME -- an integer "
                     f"column has no NaN sentinel for a safety-net fill"
                 )
-            out = np.asarray(src, dtype=src.dtype)[row_for]
+            native = src.dtype.newbyteorder("=")
+            out = np.asarray(src, dtype=native)[row_for]
         elif np.issubdtype(src.dtype, np.floating):
-            out = np.full(names.shape[0], np.nan, dtype=src.dtype)
-            out[matched] = np.asarray(src, dtype=src.dtype)[row_for[matched]]
+            native = src.dtype.newbyteorder("=")
+            out = np.full(names.shape[0], np.nan, dtype=native)
+            out[matched] = np.asarray(src, dtype=native)[row_for[matched]]
         else:
             dec = _modlib._as_str(src)
             out = np.full(names.shape[0], "", dtype=dec.dtype)
