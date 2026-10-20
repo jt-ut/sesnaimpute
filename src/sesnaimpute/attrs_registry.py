@@ -1654,64 +1654,62 @@ REGISTRY = {
         "Planck's own fitted thermal-dust temperature at the matching "
         "pixel."),
 
-    # sky.derived.dunham_yso -- yso_dunham2015_survey: the Dunham et al.
-    # (2015) YSO census, one row per cataloged YSO.
-    ("yso_dunham2015_survey", "SEQ"): ("catalog sequence number",
-        "Dunham et al. (2015)'s own running sequence number for this YSO, "
-        "the order every dataset in this file shares."),
-    ("yso_dunham2015_survey", "CLOUD"): ("cloud name",
-        "Which of the eighteen clouds of Dunham et al. (2015) this YSO "
-        "belongs to."),
-    ("yso_dunham2015_survey", "ID"): ("catalog identifier",
-        "This YSO's own Spitzer source name, the J2000 sexagesimal string "
-        "RA_DEG and DEC_DEG are parsed from."),
-    ("yso_dunham2015_survey", "RA_DEG"): ("deg",
-        "Right ascension, equinox J2000, parsed from this row's own ID."),
-    ("yso_dunham2015_survey", "DEC_DEG"): ("deg",
-        "Declination, equinox J2000, parsed from this row's own ID."),
-    ("yso_dunham2015_survey", "DIST_PC"): ("pc",
-        "The adopted distance to this YSO's own cloud, Dunham et al. "
-        "(2015)'s Table 1."),
-    ("yso_dunham2015_survey", "AV"): ("mag A_V",
-        "This YSO's fitted visual extinction, Dunham et al. (2015)'s own "
-        "SED fit."),
-    ("yso_dunham2015_survey", "ALPHA0"): ("dimensionless",
-        "This YSO's infrared spectral index (d log(lambda F_lambda) / "
-        "d log(lambda)) before extinction correction, Dunham et al. "
-        "(2015)'s own measurement."),
-    ("yso_dunham2015_survey", "TBOL0_K"): ("K",
-        "This YSO's bolometric temperature before extinction correction, "
-        "Dunham et al. (2015)'s own measurement."),
-    ("yso_dunham2015_survey", "LBOL0_LSUN"): ("Lsun",
-        "This YSO's bolometric luminosity before extinction correction, "
-        "Dunham et al. (2015)'s own measurement."),
-    ("yso_dunham2015_survey", "F45_MJY"): ("mJy",
-        "This YSO's extinction-corrected 4.5 micron flux density, Dunham "
-        "et al. (2015)'s Table 4."),
-    ("yso_dunham2015_survey", "E_F45_MJY"): ("mJy",
-        "The 1-sigma uncertainty on F45_MJY, Dunham et al. (2015)'s "
-        "Table 4."),
-    ("yso_dunham2015_survey", "F45_OBS_MJY"): ("mJy",
-        "This YSO's observed (not extinction-corrected) 4.5 micron flux "
-        "density, Dunham et al. (2015)'s Table 3."),
-    ("yso_dunham2015_survey", "F36_MJY"): ("mJy",
-        "This YSO's extinction-corrected 3.6 micron flux density, Dunham "
-        "et al. (2015)'s Table 4."),
-    ("yso_dunham2015_survey", "F58_MJY"): ("mJy",
-        "This YSO's extinction-corrected 5.8 micron flux density, Dunham "
-        "et al. (2015)'s Table 4."),
-    ("yso_dunham2015_survey", "F80_MJY"): ("mJy",
-        "This YSO's extinction-corrected 8.0 micron flux density, Dunham "
-        "et al. (2015)'s Table 4."),
-    ("yso_dunham2015_survey", "F24_MJY"): ("mJy",
-        "This YSO's extinction-corrected 24 micron flux density, Dunham "
-        "et al. (2015)'s Table 4."),
-    ("yso_dunham2015_survey", "LOG10_F45_REF"): ("log10 mJy at 1 kpc",
+    # sky.derived.yso_census -- census_yso_census_survey: every published
+    # excess-selected (and one protostar-only) young-star census the young-
+    # star law is fit against (owner's 2026-10-20 ruling), one row per
+    # catalogued object, replacing the retired yso_dunham2015_survey
+    # (Dunham et al. 2015 is now one SOURCE among eight).
+    ("census_yso_census_survey", "SOURCE"): ("census name",
+        "Which published census this object comes from (e.g. 'Dunham2015', "
+        "'Megeath2012', 'Strafella2010') -- see the module docstring of "
+        "sesnaimpute.sky.derived.yso_census for the paper behind each name."),
+    ("census_yso_census_survey", "CLOUD"): ("cloud name",
+        "The star-forming cloud this object belongs to, in its own "
+        "census's own naming (several census names share one CLOUD across "
+        "several SOURCE values is possible, e.g. none here do; one SOURCE "
+        "can carry several CLOUD values, e.g. Dunham2015's eighteen "
+        "clouds or Megeath2012's Orion A / Orion B)."),
+    ("census_yso_census_survey", "RA_DEG"): ("deg",
+        "Right ascension, equinox J2000."),
+    ("census_yso_census_survey", "DEC_DEG"): ("deg",
+        "Declination, equinox J2000."),
+    ("census_yso_census_survey", "DIST_PC"): ("pc",
+        "The adopted distance to this object's own cloud: the census "
+        "paper's own per-cloud distance where it gives one (Dunham2015 "
+        "only), else this project's own adopted distance for the same "
+        "cloud (sesnaimpute.regions.REGIONS_BY_NAME)."),
+    ("census_yso_census_survey", "ALPHA"): ("dimensionless",
+        "This object's infrared spectral index (d log(lambda F_lambda) / "
+        "d log(lambda)), the census paper's own measurement where it "
+        "gives one as a number; NaN where the census classifies the "
+        "object by a discrete class label only, with no numeric slope."),
+    ("census_yso_census_survey", "F45_MJY"): ("mJy",
+        "This object's 4.5 micron flux density: the census paper's own "
+        "measured flux where it gives one directly, else converted from "
+        "its own 4.5 micron magnitude at the IRAC channel-2 zero point "
+        "(179.7 Jy, Reach et al. 2005); NaN where the census gives "
+        "neither. Not extinction-corrected except for Dunham2015, whose "
+        "own Table 4 already is."),
+    ("census_yso_census_survey", "LOG10_F45_REF"): ("log10 mJy at 1 kpc",
         "log10 of F45_MJY scaled to a common reference distance of 1 kpc "
         "by (DIST_PC / 1000)^2: 10**x is a flux in mJy a source at this "
-        "YSO's own brightness would show at 1 kpc. This is the "
-        "reference-brightness scale and distance the YSO templates "
-        "used elsewhere in this package are also tabulated at."),
+        "object's own brightness would show at 1 kpc, the same reference-"
+        "brightness scale and distance the YSO templates used elsewhere "
+        "in this package are tabulated at. NaN wherever F45_MJY or "
+        "DIST_PC is NaN."),
+    ("census_yso_census_survey", "SELECTION"): ("selection kind",
+        "'excess' for an excess-selected young star (the law's own kind: "
+        "Class 0, I, flat, II, transition disk or weak excess), "
+        "'protostar' for a protostar-only census (Kryukova2014/Cygnus X): "
+        "the law unit decides how a protostar-only census enters a "
+        "region's fit."),
+    ("census_yso_census_survey", "SURVEY_FLOOR_A_K"): ("mag A_K",
+        "This object's own census's coverage/completeness column floor: "
+        "Dunham2015's c2d (0.22 mag) or Gould Belt (0.33 mag) rule; NaN "
+        "for every other census here, which states no comparable "
+        "extinction/coverage completeness criterion -- population.yso_law's "
+        "fit footprint for such a census is the coverage polygon alone, "
+        "with no column-floor restriction."),
 
     # sky.derived.herschel_column -- sigma_herschel_survey (survey-wide
     # calibration) and column_herschel_source (per region): the Herschel
