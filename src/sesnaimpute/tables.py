@@ -1,4 +1,4 @@
-"""Row-level updates for the thirty-region products (CODING_RULES.md 5c):
+"""Row-level updates for the region-axis products (CODING_RULES.md 5c):
 a build given a subset of regions writes only those regions' rows (or,
 for a per-region-group product, only those regions' groups) and leaves
 the rest of the file exactly as it was.
@@ -46,9 +46,9 @@ def _fill_value(dtype):
 
 def _widen_to_canonical(f, readings=None):
     """Upgrades a file whose `REGION` dataset does not already list all
-    thirty regions in `ALL_REGIONS` order (a product last written before
+    every region in `ALL_REGIONS` order (a product last written before
     this module existed, holding only whichever regions its own last
-    build touched) to the canonical thirty-row shape: every dataset is
+    build touched) to the canonical row shape: every dataset is
     rebuilt at that shape, each old row carried to its own region's slot
     by name, every other slot taking that dataset's own placeholder. A
     file already in canonical shape is left untouched. `readings`, if
@@ -86,8 +86,8 @@ def _widen_to_canonical(f, readings=None):
 
 def update_rows(path, regions, rows, granule="region", attrs=None, readings=None):
     """Writes `rows` (dataset name -> array, first axis aligned to
-    `regions`) into the thirty-row product at `path`: creates the file
-    with all thirty regions' rows, every dataset filled with its own
+    `regions`) into the region-row product at `path`: creates the file
+    with every region's row, every dataset filled with its own
     placeholder, when the file or a dataset is absent, and writes only
     the given regions' rows -- the rest of the file is left exactly as
     it was (CODING_RULES.md 5c). `attrs`, if given, are set as root

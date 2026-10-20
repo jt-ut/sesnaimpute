@@ -13,19 +13,24 @@ band:
   2MASS Explanatory Supplement section 1.6), via F = F0 * 10**(-mag/2.5)
   with the zero points in `definitions.BANDS` (Cohen, Wheaton & Megeath
   2003, AJ 126, 1090).
-- IRAC/MIPS (I1-I4, M1): the flux becomes the source's own `DCOMP90`
-  completeness-limit flux, or, when the source has none of its own, the
-  median `DCOMP90` of its `DEFAULT_NN_K` nearest sky neighbours that do.
+- IRAC/MIPS (I1-I4, M1): the flux becomes the source's own 90%-completeness
+  flux read off Rob Gutermuth's own measured map at the source's nearest
+  pixel (`catalog.completeness.lookup`, COMPLETENESS_2026-10-20.md rule 1),
+  never the catalogue's own `DCOMP90_FNU_*` column (no longer read) and
+  never a neighbour average (the old nearest-neighbour substitution is
+  gone: a source with no map value of its own is off-map, not missing).
 
 Every substitution is recorded per band in `ORIGIN_FNU` (1 = measured
-detection, 2 = 2MASS survey bound, 90 = own DCOMP90, 91 = neighbour
-DCOMP90 -- Pokhrel et al. 2023 (eHOPS I, ApJS 266, 32): the SESNA catalogue
-"provides the nearest 90% differential completeness value to each
-source's position for all bands covered at that position", so a band
-with no completeness value of its own is a band not covered there).
-`SPEC_PRIORS.md` section 1.3 reads the resulting `DCOMP90_MJY` map,
-rescaled per region and band, as the per-source 50%-completeness limit
-for the five Spitzer bands.
+detection, 2 = 2MASS survey bound, 90 = covered, undetected -- the map's
+own 90%-completeness flux there, 91 = off-map, no completeness value and
+no non-detection term -- COMPLETENESS_2026-10-20.md rule 2: "sources with
+a catalogue DCOMP90 are exactly the on-map sources", so a band with no
+map value is a band not covered there, same meaning Pokhrel et al. 2023
+(eHOPS I, ApJS 266, 32) gave the old catalogue column). `DCOMP90_MJY` is
+the map's 90%-completeness flux at the source's own pixel for every
+source in the five Spitzer bands (detected or not), `NaN` where off-map;
+`catalog.limits.completeness` reads the map's own curves directly for
+every consumer's non-detection term, not this column.
 """
 
 import functools
@@ -35,7 +40,6 @@ import re
 import h5py
 import numpy as np
 import pandas as pd
-from scipy.spatial import cKDTree
 
 from sesnaimpute import batches as batches_module
 from sesnaimpute import build as build_module
@@ -46,6 +50,7 @@ from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+from sesnaimpute.catalog import completeness as completeness_module
 
 #: This module's own key into `attrs_registry.REGISTRY`
 #: (`config.product_path`'s file stem for what it writes).
@@ -74,10 +79,6 @@ UB_2MASS_MJY = {"J": 0.763, "H": 0.934, "Ks": 1.27}
 # chi_squared, valid=3 branch): error=0.99 gives a large but finite
 # penalty short of the infinite cutoff at error=1.0.
 UPPER_LIMIT_SIGMA = 0.99
-
-# Sky neighbours averaged (by median) for a source with no DCOMP90 of
-# its own, in an IRAC/MIPS band.
-DEFAULT_NN_K = 5
 
 # The delivery's own 2MASS zero points (Vega system, Jy), measured from
 # its FNU_J/H/KS columns against its MAG_J/H/KS columns: J 1669, H 980,
@@ -156,46 +157,6 @@ def _raw_catalog_path(config, region):
     return os.path.join(config.inputs["raw_catalogs"], f"{region}_catalog_ipac1.txt")
 
 
-def _query_tree_chunk(tree, vectors_query, k_eff, bounds):
-    """One block of query rows against `tree` (built once in the parent):
-    the pool's unit of work for the neighbour search, which is not
-    row-local to the raw delivery's own row blocks (a query row's nearest
-    neighbours can land anywhere in the region), so it is cut over query
-    rows instead -- each worker single-threaded (`workers=1`) since the
-    pool itself, not scipy's own thread pool, is this stage's
-    parallelism.
-    """
-    start, stop = bounds
-    _, idx = tree.query(vectors_query[start:stop], k=k_eff, workers=1)
-    if k_eff == 1:
-        idx = idx.reshape(-1, 1)
-    return idx
-
-
-def _median_nn_impute(ra_deg, dec_deg, source_mask, query_mask, values, n_jobs=1, k=DEFAULT_NN_K):
-    """The median DCOMP90 of a source's `k` nearest sky neighbours (3-D
-    unit-sphere Euclidean distance, distortion-free and wraparound-free,
-    searched with a k-d tree built once here), used when the source has
-    no DCOMP90 of its own. The tree is built once, in this process; the
-    query is cut over query-row blocks and run on the shared pool
-    (`pieces.run`, `n_jobs` workers).
-    """
-    ra, dec = np.radians(ra_deg), np.radians(dec_deg)
-    vectors = np.column_stack(
-        [np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)]
-    )
-    n_source = int(source_mask.sum())
-    tree = cKDTree(vectors[source_mask])
-    k_eff = min(k, n_source)
-    vectors_query = vectors[query_mask]
-    bounds = pieces_module.slices(vectors_query.shape[0], n_jobs)
-    fn = functools.partial(_query_tree_chunk, tree, vectors_query, k_eff)
-    chunks = pieces_module.run(fn, bounds, n_jobs, unit="query rows")
-    neighbor_idx = np.concatenate(chunks, axis=0) if len(chunks) > 1 else chunks[0]
-    source_values = values[source_mask]
-    return np.median(source_values[neighbor_idx], axis=1)
-
-
 def _assemble_region(config, region):
     bands = definitions.BANDS
     select_columns = ["SESNA_NAME", "ra", "dec", "L", "B", "CLASS", "AK"]
@@ -204,9 +165,9 @@ def _assemble_region(config, region):
             select_columns += [f"MAG_{_RAW_SUFFIX[b.key]}", f"SIGMA_MAG_{_RAW_SUFFIX[b.key]}"]
         else:
             select_columns += [f"FNU_{_RAW_SUFFIX[b.key]}", f"SIGMA_FNU_{_RAW_SUFFIX[b.key]}"]
-    for b in bands:
-        if b.survey in ("IRAC", "MIPS"):
-            select_columns.append(f"DCOMP90_FNU_{_RAW_SUFFIX[b.key]}")
+    # No DCOMP90_FNU_* column: the completeness map (catalog.completeness),
+    # not the catalogue's own column, is this file's one source of a
+    # source's 90%-completeness flux (module docstring).
 
     df, navals = _read_raw_delivery(_raw_catalog_path(config, region), select_columns, n_jobs=config.n_jobs)
 
@@ -256,37 +217,35 @@ def _assemble_region(config, region):
         fnu_naval = navals[f"FNU_{suffix}"]
         isna_flux = raw_fnu == fnu_naval
 
-        dcomp_col = f"DCOMP90_FNU_{suffix}"
-        raw_dcomp = df[dcomp_col].to_numpy(dtype=np.float64)
-        dcomp_naval = navals[dcomp_col]
-        isna_dcomp = raw_dcomp == dcomp_naval
-        has_dcomp = ~isna_dcomp
-
-        dcomp_j = np.empty(n, dtype=np.float64)
-        dcomp_j[has_dcomp] = raw_dcomp[has_dcomp]
-        if isna_dcomp.any():
-            dcomp_j[isna_dcomp] = _median_nn_impute(
-                ra_deg, dec_deg, has_dcomp, isna_dcomp, raw_dcomp, n_jobs=config.n_jobs
-            )
-            case_flux_no_dcomp = isna_dcomp & ~isna_flux
-            dcomp_j[case_flux_no_dcomp] = np.maximum(
-                dcomp_j[case_flux_no_dcomp], raw_fnu[case_flux_no_dcomp]
-            )
+        # Every source's own 90%-completeness flux, read off Rob
+        # Gutermuth's map at its nearest pixel (COMPLETENESS_2026-10-20.md
+        # rule 1); NaN where off-map (rule 2 -- no non-detection term).
+        maps = completeness_module.field_maps(config, region, b.key)
+        field_idx, iy, ix = completeness_module.lookup(
+            config, region, b.key, ra_deg, dec_deg, n_jobs=config.n_jobs, maps=maps)
+        on_map = field_idx != -1
+        mag90 = np.full(n, np.nan, dtype=np.float64)
+        for fidx, m in enumerate(maps):
+            sel = field_idx == fidx
+            if sel.any():
+                mag90[sel] = m.map90[iy[sel], ix[sel]]
+        f0_mjy = b.vega_zero_point_jy * 1000.0
+        dcomp_j = np.where(on_map, f0_mjy * 10.0 ** (-0.4 * mag90), np.nan)
         dcomp90[:, j] = dcomp_j
 
         fnu_j = raw_fnu.copy()
         sigma_j = raw_sigma.copy()
         origin_j = origin[:, j]
 
-        case_no_flux_has_dcomp = isna_flux & has_dcomp
-        fnu_j[case_no_flux_has_dcomp] = dcomp_j[case_no_flux_has_dcomp]
-        sigma_j[case_no_flux_has_dcomp] = UPPER_LIMIT_SIGMA
-        origin_j[case_no_flux_has_dcomp] = 90
+        case_undetected_on_map = isna_flux & on_map
+        fnu_j[case_undetected_on_map] = dcomp_j[case_undetected_on_map]
+        sigma_j[case_undetected_on_map] = UPPER_LIMIT_SIGMA
+        origin_j[case_undetected_on_map] = 90
 
-        case_no_flux_no_dcomp = isna_flux & isna_dcomp
-        fnu_j[case_no_flux_no_dcomp] = dcomp_j[case_no_flux_no_dcomp]
-        sigma_j[case_no_flux_no_dcomp] = UPPER_LIMIT_SIGMA
-        origin_j[case_no_flux_no_dcomp] = 91
+        case_undetected_off_map = isna_flux & ~on_map
+        fnu_j[case_undetected_off_map] = np.nan
+        sigma_j[case_undetected_off_map] = np.nan
+        origin_j[case_undetected_off_map] = 91
 
         fnu[:, j] = fnu_j
         sigma_fnu[:, j] = sigma_j

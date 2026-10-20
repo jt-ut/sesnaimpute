@@ -150,30 +150,34 @@ REGISTRY = {
         "attribute gives. Where there is no detection the value is filled: the "
         "2MASS bands (J, H, Ks) take the survey's fixed detection bound, and the "
         "three IRAC bands and the one MIPS band take the source's own "
-        "90%-completeness flux, or, where it has none, the median "
-        "90%-completeness flux of its five nearest sky neighbours that do. "
-        "ORIGIN_FNU in this file says which bands were filled and how."),
+        "90%-completeness flux read off Rob Gutermuth's measured completeness map "
+        "at the source's nearest pixel (`catalog.completeness.lookup`), or NaN "
+        "where the source's own pixel is off every field's map. ORIGIN_FNU in "
+        "this file says which bands were filled and how."),
     ("sources_sesna_source", "SIGMA_FNU_MJY"): ("mJy",
         "The 1-sigma flux uncertainty for a measured detection in FNU_MJY, on the "
         "same mJy scale. Where FNU_MJY was filled instead of measured (see "
-        "ORIGIN_FNU), this is the fixed value 0.99: a flag the SED fitter reads as "
-        "an upper limit, not a real measurement uncertainty."),
+        "ORIGIN_FNU), this is the fixed value 0.99 (a flag the SED fitter reads as "
+        "an upper limit, not a real measurement uncertainty), or NaN where "
+        "ORIGIN_FNU is 91 (off-map, no fill at all)."),
     ("sources_sesna_source", "DCOMP90_MJY"): ("mJy",
         "The flux a source at this position and band would need to be detected at "
         "90% completeness: the survey's fixed bound for the 2MASS bands (J, H, "
-        "Ks), this source's own 90%-completeness flux for the three IRAC bands "
-        "and the one MIPS band, or, where it has none, the median "
-        "90%-completeness flux of its five nearest sky neighbours that do."),
+        "Ks), or, for the three IRAC bands and the one MIPS band, Rob Gutermuth's "
+        "measured completeness map value at the source's nearest pixel "
+        "(`catalog.completeness.lookup`), NaN where the source's own pixel is off "
+        "every field's map for that band."),
     ("sources_sesna_source", "ORIGIN_FNU"): ("code",
         "How FNU_MJY and DCOMP90_MJY in each band were obtained, one integer per "
         "band: 1 a measured detection, 2 the fixed 2MASS survey detection bound, "
-        "90 the source's own 90%-completeness flux, 91 the median "
-        "90%-completeness flux of its nearest sky neighbours -- Pokhrel et al. "
-        "2023 (eHOPS I, ApJS 266, 32): the SESNA catalogue \"provides the "
-        "nearest 90% differential completeness value to each source's "
-        "position for all bands covered at that position\", so a band with "
-        "no completeness value of its own is a band not covered there, and "
-        "the SED fitter's non-detection term excludes it."),
+        "90 covered but undetected (FNU_MJY filled from the completeness map's "
+        "own 90%-completeness flux at the source's pixel), 91 off-map -- no "
+        "completeness value and no non-detection term (COMPLETENESS_2026-10-20.md "
+        "rule 2: \"sources with a catalogue DCOMP90 are exactly the on-map "
+        "sources\", the same meaning Pokhrel et al. 2023, eHOPS I, ApJS 266, 32, "
+        "gave the old catalogue column: a band with no completeness value of its "
+        "own is a band not covered there, and the SED fitter's non-detection term "
+        "excludes it)."),
 
     # population.young_stars: folded into population.anchor_weights.build
     # (brief U4) -- no product of its own, no registry entries. See
@@ -1964,31 +1968,15 @@ REGISTRY = {
         "found at all, so D_PEAK_PC and the other depth values in this row "
         "are meaningful; False where none was found."),
 
-    # catalog.depths -- depths_sesna_region: the fitted 50%-completeness
-    # detection curve per region and band.
+    # catalog.depths -- depths_sesna_region: the fitted 2MASS (J, H, Ks)
+    # 50%-completeness detection curve per region. The five Spitzer bands'
+    # own fit retired (COMPLETENESS_2026-10-20.md): catalog.completeness's
+    # measured per-pixel maps replace it, so DELTA_DEX, SIGMA_DELTA_DEX,
+    # W_MAG, FIT_RESIDUAL and SUBSTITUTED (all Spitzer-only) are gone, and
+    # WIDTH_DEX/SIGMA_WIDTH_DEX carry the three 2MASS bands only.
     ("depths_sesna_region", "REGION"): ("region name",
-        "The name of the region this row describes, in the fixed thirty-"
-        "region order every region-axis product in this package shares."),
-    ("depths_sesna_region", "DELTA_DEX"): ("dex",
-        "For each of the five Spitzer bands (I1, I2, I3, I4, M1, this "
-        "dataset's own column order), the fitted offset from this region's "
-        "90%-completeness map value to its 50%-completeness flux: "
-        "F_lim,50 = DCOMP90_MJY * 10**(-DELTA_DEX). A column can be "
-        "negative where a band's detections turn over brighter than the "
-        "map's own 90% level."),
-    ("depths_sesna_region", "SIGMA_DELTA_DEX"): ("dex",
-        "The 1-sigma fit uncertainty on DELTA_DEX, same five Spitzer bands "
-        "and column order."),
-    ("depths_sesna_region", "W_MAG"): ("mag",
-        "For each of the five Spitzer bands (I1, I2, I3, I4, M1, this "
-        "dataset's own column order), the fitted roll-off width of this "
-        "region's detection curve, in magnitude. WIDTH_DEX in this file is "
-        "this value times 0.4 (dex per magnitude)."),
-    ("depths_sesna_region", "FIT_RESIDUAL"): ("dimensionless",
-        "For each of the five Spitzer bands (I1, I2, I3, I4, M1, this "
-        "dataset's own column order), the fitted detection curve's "
-        "relative L1 distance from this region's own observed histogram, "
-        "measured only past the roll-off's own 90% point."),
+        "The name of the region this row describes, in the fixed region "
+        "order every region-axis product in this package shares."),
     ("depths_sesna_region", "F50_2MASS_MJY"): ("mJy",
         "For each of the three 2MASS bands (J, H, Ks, this dataset's own "
         "column order), this region's fitted 50%-completeness flux."),
@@ -1997,91 +1985,142 @@ REGISTRY = {
         "column order), the fitted detection curve's relative L1 distance "
         "from this region's own observed magnitude histogram, measured "
         "only past one magnitude brighter than the fitted 50% point."),
-    ("depths_sesna_region", "SUBSTITUTED"): ("boolean",
-        "For each of the eight bands (J, H, Ks, I1, I2, I3, I4, M1, this "
-        "dataset's own column order), True where this region's own fit did "
-        "not converge and DELTA_DEX and WIDTH_DEX for that band were "
-        "replaced by that band's median over the regions whose fit did "
-        "converge. Always False for the three 2MASS bands, which carry no "
-        "convergence check."),
     ("depths_sesna_region", "WIDTH_DEX"): ("dex",
-        "For each of the eight bands (J, H, Ks, I1, I2, I3, I4, M1, this "
-        "dataset's own column order), this region's effective detection "
-        "roll-off width: W_MAG times 0.4 for the five Spitzer bands, the "
-        "directly fitted magnitude-space width for the three 2MASS bands."),
-    ("depths_sesna_region", "SIGMA_WIDTH_DEX"): ("dex",
-        "For each of the eight bands (J, H, Ks, I1, I2, I3, I4, M1, this "
-        "dataset's own column order), the 1-sigma uncertainty on WIDTH_DEX "
-        "for the five Spitzer bands. NaN for the three 2MASS bands, which "
-        "carry no resampling uncertainty."),
+        "For each of the three 2MASS bands (J, H, Ks, this dataset's own "
+        "column order), this region's effective detection roll-off width "
+        "(the directly fitted magnitude-space width times 0.4): the "
+        "quantity catalog.completeness's 2MASS CURVE_J/H/Ks tabulation "
+        "reads, beside F50_2MASS_MJY."),
 
 
-    # catalog.depth_grid, per-source product -- limits_sesna_source: each
-    # source's own 50%-completeness flux limit, by band.
-    ("limits_sesna_source", "F_LIM_50_MJY"): ("mJy",
-        "For every source and each of the eight bands (J, H, Ks, 3.6, 4.5, 5.8, "
-        "8.0 and 24 micron, this file's own band order), the flux at which a "
-        "source at this source's own depth would be 50% likely to be detected. "
-        "It is the region's fitted 50%-completeness flux for that band, shifted "
-        "by how much brighter or fainter this source's own completeness-limit "
-        "flux is than the region's typical source."),
-    ("limits_sesna_source", "W_DEX"): ("dex",
-        "One value per band (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), the "
-        "roll-off width of the region's fitted detection curve: how many factors "
-        "of 10 in flux the detection fraction takes to fall from high to low "
-        "around F_50_REGION_MJY. The same eight values apply to every source in "
-        "this file."),
-    ("limits_sesna_source", "F_50_REGION_MJY"): ("mJy",
-        "One value per band (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), the "
-        "region's own fitted 50%-completeness flux: the flux at which half of "
-        "the region's sources at that depth are detected. The same eight values "
-        "apply to every source in this file. A value of +inf means the region "
-        "did not sample enough of that band's roll-off to fit one."),
-    ("limits_sesna_source", "ALPHA_REGION"): ("dimensionless",
-        "One value per band (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), the "
-        "power-law slope of the region's own source counts at fluxes well above "
-        "F_50_REGION_MJY, from the region's own fitted detection curve. The "
-        "same eight values apply to every source in this file."),
-    ("limits_sesna_source", "DCOMP90_REF_LOG10"): ("log10 mJy",
-        "One value per band (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), the "
-        "log10 90%-completeness flux that F_LIM_50_MJY's per-source shift is "
-        "measured from: the median, over the region's own low-extinction, "
-        "well-covered sources, of the log10 90%-completeness flux each of "
-        "those sources carries in the curated catalog. The same eight "
-        "values apply to every source in this file."),
-    ("limits_sesna_source", "LIMIT_KIND"): ("code",
-        "One value per band (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), how "
-        "F_50_REGION_MJY for that band was obtained: \"fit\" means the region's "
-        "own source counts show a genuine roll-off; \"bound\" means this band's "
-        "faint end is set by a different, more restrictive band's requirement, "
-        "so F_50_REGION_MJY is a bound inherited from that other band rather "
-        "than this band's own turnover; \"unsurveyed\" means the region has too "
-        "few detections in that band to fit a roll-off at all, and "
-        "F_50_REGION_MJY is +inf. The same eight values apply to every source "
-        "in this file."),
-
-    # catalog.depth_grid, per-pixel product -- depth-grid_sesna_hpx512: the
-    # same per-source limits, summarized on the nside-512 grid.
-    ("depth-grid_sesna_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
-        "The region's admitted nside-512 pixel numbers (nested ordering), "
-        "ascending. Row i here matches row i of every other dataset in this "
-        "file."),
-    ("depth-grid_sesna_hpx512", "N_SOURCES"): ("sources",
-        "How many SESNA sources fall in the matching pixel in HPX_PIX_512. A "
-        "value of 0 means the pixel holds no source of its own, and its other "
-        "values in this file are copied from its nearest pixel that does."),
-    ("depth-grid_sesna_hpx512", "F_LIM_50_PIX_MJY"): ("mJy",
-        "For the matching pixel in HPX_PIX_512 and each of the eight bands (J, "
-        "H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), "
-        "the median, over the pixel's own sources, of each source's own "
-        "50%-completeness flux limit (the catalog's own per-source limits product). A pixel with no sources of its own (N_SOURCES = 0) takes its nearest occupied pixel's value."),
-    ("depth-grid_sesna_hpx512", "W_DEX_PIX"): ("dex",
-        "For the matching pixel in HPX_PIX_512 and each of the eight bands (J, "
-        "H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's own band order), "
-        "the roll-off width of the region's fitted detection curve: how many "
-        "factors of 10 in flux the detection fraction takes to fall from high "
-        "to low around that band's 50%-completeness flux. The same eight values "
-        "apply to every pixel in this file."),
+    # catalog.completeness -- completeness_sesna_source: Rob Gutermuth's
+    # own measured completeness curves, per region (COMPLETENESS_2026-10-
+    # 20.md "The reader: layout and kernel", amended by that file's own
+    # "Corrections 2026-10-20"; replaces catalog.depth_grid's limit/width
+    # role and limits_sesna_source/depth-grid_sesna_hpx512). CURVE_<band>,
+    # SOURCE_ROW and MAG_GRID_<band> share one convention per band -- see
+    # catalog/completeness.py's own module docstring for the exact
+    # per-band canonical grid (Corrections item 1) and the completion rule
+    # (item 2).
+    ("completeness_sesna_source", "CURVE_I1"): ("completeness fraction x600, uint16",
+        "One row per on-map 30-arcsec pixel of this region's own I1 (3.6 "
+        "micron) fields, field-major order: the differential completeness "
+        "fraction (0..1) at each of MAG_GRID_I1's own magnitudes, stored as "
+        "the fraction times 600 (lossless: every MEASURED value is an exact "
+        "multiple of 1/600; a COMPLETED plane, where COMPLETED_FROM_I1 is "
+        "not NaN, is the band's own median roll-off template and is not "
+        "itself guaranteed an exact multiple, but is stored the same way). "
+        "catalog.limits.completeness's kernel divides by 600 once per "
+        "evaluation; no other reader divides directly."),
+    ("completeness_sesna_source", "CURVE_I2"): ("completeness fraction x600, uint16",
+        "Same meaning as CURVE_I1, for I2 (4.5 micron) (MAG_GRID_I2, "
+        "COMPLETED_FROM_I2)."),
+    ("completeness_sesna_source", "CURVE_I3"): ("completeness fraction x600, uint16",
+        "Same meaning as CURVE_I1, for I3 (5.8 micron) (MAG_GRID_I3, "
+        "COMPLETED_FROM_I3)."),
+    ("completeness_sesna_source", "CURVE_I4"): ("completeness fraction x600, uint16",
+        "Same meaning as CURVE_I1, for I4 (8.0 micron) (MAG_GRID_I4, "
+        "COMPLETED_FROM_I4)."),
+    ("completeness_sesna_source", "CURVE_M1"): ("completeness fraction x600, uint16",
+        "Same meaning as CURVE_I1, for M1 (24 micron) (MAG_GRID_M1, "
+        "COMPLETED_FROM_M1)."),
+    ("completeness_sesna_source", "COMPLETED_FROM_I1"): ("mag, Vega",
+        "For each row of CURVE_I1, the magnitude of the FIRST plane that is "
+        "not this pixel's own measurement but the band's own median "
+        "roll-off template continued from its last measured value "
+        "(Corrections 2026-10-20.md item 2: Rob's own cube for this pixel's "
+        "field was cut off before reaching 0); NaN where the measured curve "
+        "reached 0 on its own, nothing here completed."),
+    ("completeness_sesna_source", "COMPLETED_FROM_I2"): ("mag, Vega",
+        "Same meaning as COMPLETED_FROM_I1, for I2 (4.5 micron)."),
+    ("completeness_sesna_source", "COMPLETED_FROM_I3"): ("mag, Vega",
+        "Same meaning as COMPLETED_FROM_I1, for I3 (5.8 micron)."),
+    ("completeness_sesna_source", "COMPLETED_FROM_I4"): ("mag, Vega",
+        "Same meaning as COMPLETED_FROM_I1, for I4 (8.0 micron)."),
+    ("completeness_sesna_source", "COMPLETED_FROM_M1"): ("mag, Vega",
+        "Same meaning as COMPLETED_FROM_I1, for M1 (24 micron)."),
+    ("completeness_sesna_source", "SOURCE_ROW"): ("row index into CURVE_<band>",
+        "For every curated source and each of the five Spitzer bands (I1, "
+        "I2, I3, I4, M1, this dataset's own column order), the row of that "
+        "band's own CURVE_<band> holding this source's own completeness "
+        "curve (its nearest on-map 30-arcsec pixel); -1 where the source's "
+        "own position is off every field's map in that band (no curve, no "
+        "non-detection term)."),
+    ("completeness_sesna_source", "PIXEL_CURVE_I1"): ("dimensionless (completeness fraction, 0..1)",
+        "For each of this region's admitted nside-512 pixels (HPX_PIX_512, "
+        "nested ordering, this file's own admitted-pixel axis), the I1 (3.6 "
+        "micron) completeness curve at MAG_GRID_I1's own magnitudes of the "
+        "one 30-arcsec completeness pixel whose own footprint contains this "
+        "nside-512 pixel's centre (CURVE_I1's own row, read directly, cast "
+        "to a float fraction); all zero where PIXEL_COVERED_FRAC_I1 is 0."),
+    ("completeness_sesna_source", "PIXEL_CURVE_I2"): ("dimensionless (completeness fraction, 0..1)",
+        "Same meaning as PIXEL_CURVE_I1, for I2 (4.5 micron)."),
+    ("completeness_sesna_source", "PIXEL_CURVE_I3"): ("dimensionless (completeness fraction, 0..1)",
+        "Same meaning as PIXEL_CURVE_I1, for I3 (5.8 micron)."),
+    ("completeness_sesna_source", "PIXEL_CURVE_I4"): ("dimensionless (completeness fraction, 0..1)",
+        "Same meaning as PIXEL_CURVE_I1, for I4 (8.0 micron)."),
+    ("completeness_sesna_source", "PIXEL_CURVE_M1"): ("dimensionless (completeness fraction, 0..1)",
+        "Same meaning as PIXEL_CURVE_I1, for M1 (24 micron)."),
+    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_I1"): ("boolean (0.0 or 1.0)",
+        "For each admitted nside-512 pixel in HPX_PIX_512, 1.0 where its "
+        "own centre falls on a 30-arcsec I1 (3.6 micron) completeness "
+        "pixel's own on-map footprint (PIXEL_CURVE_I1 is that pixel's own "
+        "curve), 0.0 where it falls off every I1 field's map (PIXEL_CURVE_I1 "
+        "is all zero there)."),
+    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_I2"): ("boolean (0.0 or 1.0)",
+        "Same meaning as PIXEL_COVERED_FRAC_I1, for I2 (4.5 micron)."),
+    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_I3"): ("boolean (0.0 or 1.0)",
+        "Same meaning as PIXEL_COVERED_FRAC_I1, for I3 (5.8 micron)."),
+    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_I4"): ("boolean (0.0 or 1.0)",
+        "Same meaning as PIXEL_COVERED_FRAC_I1, for I4 (8.0 micron)."),
+    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_M1"): ("boolean (0.0 or 1.0)",
+        "Same meaning as PIXEL_COVERED_FRAC_I1, for M1 (24 micron)."),
+    ("completeness_sesna_source", "MAG_GRID_I1"): ("mag, Vega",
+        "The magnitudes CURVE_I1 and PIXEL_CURVE_I1's own column order are "
+        "measured at: I1's own survey-wide canonical grid, 4.75..19.75 mag "
+        "in 0.5-mag steps (Corrections 2026-10-20.md item 1, measured over "
+        "every one of the survey's own I1 cubes); a field's own native grid "
+        "is placed here by EXACT plane alignment, never resampled -- "
+        "brightward of a field's own first plane, that field's own first "
+        "value; faintward of its own last measured plane, the band's own "
+        "template continuation (COMPLETED_FROM_I1) or that field's own "
+        "measured 0."),
+    ("completeness_sesna_source", "MAG_GRID_I2"): ("mag, Vega",
+        "Same meaning as MAG_GRID_I1, for I2: 3.75..18.75 mag."),
+    ("completeness_sesna_source", "MAG_GRID_I3"): ("mag, Vega",
+        "Same meaning as MAG_GRID_I1, for I3: 1.25..16.75 mag."),
+    ("completeness_sesna_source", "MAG_GRID_I4"): ("mag, Vega",
+        "Same meaning as MAG_GRID_I1, for I4: 1.75..16.25 mag."),
+    ("completeness_sesna_source", "MAG_GRID_M1"): ("mag, Vega",
+        "Same meaning as MAG_GRID_I1, for M1: 0.25..12.25 mag."),
+    ("completeness_sesna_source", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "This region's own admitted nside-512 pixel numbers (nested "
+        "ordering), ascending -- the same admission rule as "
+        "catalog.depth_grid.admitted_pixels_512 (every nside-512 child of "
+        "a source-bearing nside-256 pixel). Row i here is row i of every "
+        "PIXEL_CURVE_<band>/PIXEL_COVERED_FRAC_<band> dataset in this file."),
+    ("completeness_sesna_source", "CURVE_J"): ("completeness fraction x600, uint16",
+        "The one region-wide J-band completeness curve (no per-source "
+        "map for 2MASS): shape (1, n_J), the error-function roll-off "
+        "tabulated from catalog.depths' own fitted F50_2MASS_MJY and "
+        "WIDTH_DEX at MAG_GRID_J's own fine (0.05-mag) grid, stored as the "
+        "fraction times 600. Every source's SOURCE_ROW-style row for this "
+        "band is 0 (catalog.limits.completeness supplies it directly, no "
+        "per-source dataset needed)."),
+    ("completeness_sesna_source", "CURVE_H"): ("completeness fraction x600, uint16",
+        "Same meaning as CURVE_J, for H."),
+    ("completeness_sesna_source", "CURVE_Ks"): ("completeness fraction x600, uint16",
+        "Same meaning as CURVE_J, for Ks."),
+    ("completeness_sesna_source", "MAG_GRID_J"): ("mag, Vega",
+        "The magnitudes CURVE_J is tabulated at: a fine (0.05-mag) grid "
+        "spanning catalog.depths' own fitted F50_2MASS_MJY (J) by about "
+        "six roll-off widths on either side, wide enough for the "
+        "completeness fraction to reach both its bright (~1) and faint "
+        "(~0) plateau."),
+    ("completeness_sesna_source", "MAG_GRID_H"): ("mag, Vega",
+        "Same meaning as MAG_GRID_J, for H."),
+    ("completeness_sesna_source", "MAG_GRID_Ks"): ("mag, Vega",
+        "Same meaning as MAG_GRID_J, for Ks."),
 
     # sky.derived.knots -- five whole-survey products (GRANULE "survey", no
     # region axis) feeding the H2-shock-knot rate (SPEC_PRIORS.md section 7).
