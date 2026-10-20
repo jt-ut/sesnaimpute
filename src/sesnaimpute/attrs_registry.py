@@ -1226,33 +1226,51 @@ REGISTRY = {
         "census-internal split -- the two bookkeeping schemes are "
         "connected only through DISK_FRACTION, below."),
     ("law_yso_region", "DISK_FRACTION"): ("dimensionless",
-        "This region's own published disk fraction (owner's ruling "
-        "2026-10-20): the fraction of the region's young stars that "
-        "still carry an infrared excess at the region's own published "
-        "age (regions.Region.disk_fraction, regions.Region.age_myr, "
-        "regions.Region.disk_fraction_source cites the relation and the "
-        "age). 1.0 (the identity case) for a region with no published "
-        "age or disk fraction applied yet: every number downstream "
-        "(N_LAW_TOTAL_FACTOR, CLASS_SHARE_DISKLESS, and every reader of "
-        "the young-star law's level) is then unchanged from this "
-        "ruling's own branch."),
+        "This region's own disk fraction (owner's ruling 2026-10-20): "
+        "the fraction of the region's young stars that still carry an "
+        "infrared excess at the region's own published age -- MEASURED "
+        "from an excess-independent membership census where one covers "
+        "the field, else the Richert et al. 2018 relation at the "
+        "region's age (regions.Region.disk_fraction, .age_myr, "
+        ".disk_fraction_source cites which and the paper). WHICH YOUNG "
+        "STARS this fraction counts (whether protostars sit in its own "
+        "numerator and denominator, or are excluded from both) is "
+        "regions.Region.disk_fraction_definition ('all' or 'disks'), "
+        "read by N_LAW_TOTAL_FACTOR's own formula, not by this dataset. "
+        "1.0 (the identity case) for a region with no published age or "
+        "disk fraction applied yet: every number downstream (N_LAW_"
+        "TOTAL_FACTOR, CLASS_SHARE_DISKLESS, and every reader of the "
+        "young-star law's level) is then unchanged from this ruling's "
+        "own branch."),
     ("law_yso_region", "N_LAW_TOTAL_FACTOR"): ("dimensionless",
-        "1 / DISK_FRACTION: the factor population.yso.law_count and "
-        "population.yso.law_area_integral multiply the excess-selected "
-        "young-star law by to recover the TOTAL young-star count, "
-        "excess-selected members plus the diskless Class III members "
-        "the excess count implies at this region's own disk fraction. "
-        "1.0 (no change) where DISK_FRACTION is the identity case."),
+        "The factor population.yso.law_count and population.yso."
+        "law_area_integral multiply the excess-selected young-star law "
+        "by to recover the TOTAL young-star count, excess-selected "
+        "members plus the diskless Class III members the excess count "
+        "implies at this region's own disk fraction (never applied by "
+        "population.knot_rate.region_predicted_yso, which stays excess-"
+        "only by design). The formula depends on this region's own "
+        "regions.Region.disk_fraction_definition: '1 / DISK_FRACTION' "
+        "where the published fraction counts protostars in both its "
+        "own numerator and denominator ('all'); 'CLASS_SHARE_PROTO + "
+        "(1 - CLASS_SHARE_PROTO) / DISK_FRACTION' where protostars are "
+        "excluded from both ('disks') -- the excess law's own "
+        "protostar share then stays a share of the excess-selected "
+        "count, and only the remaining disk-or-diskless share is "
+        "inflated by 1 / DISK_FRACTION. Both give 1.0 (no change) where "
+        "DISK_FRACTION is the identity case."),
     ("law_yso_region", "CLASS_SHARE_DISKLESS"): ("dimensionless",
-        "1 - DISK_FRACTION: this region's own diskless Class III "
+        "1 - 1/N_LAW_TOTAL_FACTOR: this region's own diskless Class III "
         "members as a share of the TOTAL young-star population (not of "
-        "the excess-selected census: CLASS_SHARE_PROTO/DISK/WEAK, "
-        "together with this share, scaled by DISK_FRACTION, sum to 1 "
-        "over the total population). 0.0 where DISK_FRACTION is the "
-        "identity case -- no diskless members are added. Feeds "
+        "the excess-selected census: CLASS_SHARE_PROTO/DISK/WEAK, each "
+        "divided by N_LAW_TOTAL_FACTOR, together with this share sum to "
+        "1 over the total population, in both the 'all' and 'disks' "
+        "disk_fraction_definition cases alike). 0.0 where DISK_FRACTION "
+        "is the identity case -- no diskless members are added. Feeds "
         "bmstp.template_weights' own fourth {CIII} census group, "
         "region by region, on top of (not in place of) the survey-wide "
-        "CLASS_SHARE_WEAK group."),
+        "CLASS_SHARE_WEAK group, and bmstp.atlas's own YSO member draw "
+        "(_yso_region_weight)."),
 
     # population.pahc_curve -- curve_pahc_survey: the PAH-contamination
     # probability curve P(q), one row per region (WP-POP-4, ledger C7:

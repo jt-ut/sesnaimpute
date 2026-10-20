@@ -38,26 +38,48 @@ Writes `population/yso/law_yso_region.hdf5` (unchanged path/name); no
 that still expects one fails loudly, which is the point.
 
 The diskless Class III members (owner's ruling 2026-10-20, `bms_review/
-briefs/round4_2026-10-20/C11_yso_class3_population.md`): `KAPPA_USED`
-and `CLASS_SHARE_PROTO/DISK/WEAK` above count only the EXCESS-SELECTED
-census (what every Spitzer census can see); the published disk fraction
-at the region's age (`regions.Region.disk_fraction`, `.age_myr`, C12's
-own literature table) gives the diskless share the excess count
-implies: `DISK_FRACTION` (per region, 1.0 -- the identity case -- for a
-region with no published value applied), `N_LAW_TOTAL_FACTOR = 1 /
-DISK_FRACTION` (the factor `population.yso.law_count`/`law_area_
-integral` multiply the excess law by to read the TOTAL young-star
-level -- every reader of the level, `bmstp.density`'s `DENSITY_YSO`,
-`population.young_stars`'s anchor subtraction and `bmstp.atlas`, follows
-through that one pair of functions, no change of their own), and
-`CLASS_SHARE_DISKLESS = 1 - DISK_FRACTION` (this region's diskless share
-of the TOTAL population, read by `bmstp.template_weights`'s own fourth
-{CIII} census group). `disk_fraction`/`n_law_total_factor`/`class_share_
-diskless` below are the one place every reader of these three reads
-from. CLASS_SHARE_PROTO/DISK/WEAK themselves are left as fitted -- "the
-three census shares become shares of the total" is a report-time
-identity (each times DISK_FRACTION, the fourth being CLASS_SHARE_
-DISKLESS, so the four sum to 1 per region), not a second stored copy.
+briefs/round4_2026-10-20/C11_yso_class3_population.md`, with two later
+corrections on the same thread): `KAPPA_USED` and `CLASS_SHARE_PROTO/
+DISK/WEAK` above count only the EXCESS-SELECTED census (what every
+Spitzer census can see); the published disk fraction at the region's
+age (`regions.Region.disk_fraction`, `.age_myr`, C12's own literature
+table -- a measured sum where an excess-independent census covers the
+field, the Richert et al. 2018 relation otherwise, the owner's ruling)
+gives the diskless share the excess count implies: `DISK_FRACTION` (per
+region, 1.0 -- the identity case -- for a region with no published
+value applied), `N_LAW_TOTAL_FACTOR` (the factor `population.yso.
+law_count`/`law_area_integral` multiply the excess law by to read the
+TOTAL young-star level -- every reader of the level, `bmstp.density`'s
+`DENSITY_YSO`, `population.young_stars`'s anchor subtraction and
+`bmstp.atlas`'s own YSO member draw, follows through that one pair of
+functions, no change of their own; NOT `population.knot_rate`'s
+`region_predicted_yso`, which is calibrated per EXCESS-SELECTED young
+star and reads an explicit `kappa` instead, deliberately bypassing this
+factor), and `CLASS_SHARE_DISKLESS = 1 - 1/N_LAW_TOTAL_FACTOR` (this
+region's diskless share of the TOTAL population, read by `bmstp.
+template_weights`'s own fourth {CIII} census group).
+
+`N_LAW_TOTAL_FACTOR`'s own formula depends on `regions.Region.disk_
+fraction_definition` (owner's ruling 2026-10-20, second correction;
+C12's own RULED VALUES section states each region's own definition):
+`1 / DISK_FRACTION` where the published fraction counts protostars in
+BOTH its excess numerator and its total denominator ("all" -- Richert
+et al. 2018, Esplin & Luhman 2020, the bare relation), or
+`CLASS_SHARE_PROTO + (1 - CLASS_SHARE_PROTO) / DISK_FRACTION` where
+protostars are excluded from both ("disks" -- Ribas et al. 2014, Luhman
+et al. 2016, Stelzer & Scholz 2009): the excess law's own protostar
+share then stays a share of the excess-selected count, and only the
+remaining disk-or-diskless share is inflated by `1 / DISK_FRACTION`.
+Both reduce to `N_LAW_TOTAL_FACTOR = 1` at `DISK_FRACTION = 1`.
+
+`disk_fraction`/`n_law_total_factor`/`class_share_diskless` below are
+the one place every reader of these three reads from -- `n_law_total_
+factor` reads the STORED dataset (not `1 / disk_fraction`), since its
+own formula is definition-dependent. CLASS_SHARE_PROTO/DISK/WEAK
+themselves are left as fitted -- "the three census shares become
+shares of the total" is a report-time identity (each divided by
+`N_LAW_TOTAL_FACTOR`, the fourth being CLASS_SHARE_DISKLESS, so the
+four sum to 1 per region), not a second stored copy.
 """
 
 import os
@@ -375,27 +397,50 @@ def build(config, regions=None):
             # call -- unlike KAPPA_REGION/N_CENSUS_REGION (this call's
             # own `names` only), there is nothing here to FIT, so there
             # is no "untouched region" to leave alone: every row is
-            # simply read straight off `regions.py` again. N_LAW_TOTAL_
-            # FACTOR/CLASS_SHARE_DISKLESS follow algebraically; where
-            # DISK_FRACTION = 1, N_LAW_TOTAL_FACTOR = 1 and CLASS_SHARE_
-            # DISKLESS = 0, so `population.yso.law_count`/`law_area_
-            # integral` (the one place every reader of the level follows
-            # through) and `bmstp.template_weights`'s fourth {CIII} group
-            # change nothing for that region (the Identities section's
-            # own bit-identical check). CLASS_SHARE_PROTO/DISK/WEAK
-            # themselves are left exactly as fitted above -- shares of
-            # the EXCESS-SELECTED census alone, read as-is by
-            # `bmstp.template_weights.yso_population_weight` (survey-
-            # wide, unchanged); "shares of the total" (CLASS_SHARE_PROTO/
-            # DISK/WEAK each times DISK_FRACTION, so the four sum to 1 per
-            # region) is a report-time identity, printed below, not a
-            # second stored copy of these three numbers.
+            # simply read straight off `regions.py` again.
+            #
+            # N_LAW_TOTAL_FACTOR depends on `regions.Region.disk_fraction_
+            # definition` (owner's ruling 2026-10-20, second correction):
+            # "all" -- the published fraction counts protostars in BOTH
+            # its excess numerator and its total denominator (Richert et
+            # al. 2018, Esplin & Luhman 2020, and the bare relation) --
+            # `1 / DISK_FRACTION`, as before; "disks" -- the published
+            # fraction is Class II(+TD) over Class II+III, PROTOSTARS
+            # EXCLUDED from both (Ribas et al. 2014, Luhman et al. 2016,
+            # Stelzer & Scholz 2009) -- `CLASS_SHARE_PROTO + (1 -
+            # CLASS_SHARE_PROTO) / DISK_FRACTION`: the excess law's own
+            # protostar share stays a share of the excess-selected
+            # count (protostars are never in the "disks" fraction's own
+            # bookkeeping at all), and only the REMAINING, disk-or-
+            # diskless share is inflated by `1 / DISK_FRACTION`.
+            # CLASS_SHARE_DISKLESS = 1 - 1/N_LAW_TOTAL_FACTOR in BOTH
+            # cases (the diskless members' own share of the resulting
+            # TOTAL population; not `1 - DISK_FRACTION`, which only
+            # equals that in the "all" case). Where DISK_FRACTION = 1,
+            # N_LAW_TOTAL_FACTOR = 1 regardless of definition and
+            # CLASS_SHARE_DISKLESS = 0, so `population.yso.law_count`/
+            # `law_area_integral` (the one place every reader of the
+            # level follows through) and `bmstp.template_weights`'s
+            # fourth {CIII} group change nothing for that region (the
+            # Identities section's own bit-identical check). CLASS_
+            # SHARE_PROTO/DISK/WEAK themselves are left exactly as
+            # fitted above -- shares of the EXCESS-SELECTED census
+            # alone, read as-is by `bmstp.template_weights.
+            # yso_population_weight` (survey-wide, unchanged); "shares
+            # of the total" is a report-time identity, printed below,
+            # not a second stored copy of these three numbers.
             all_names = [r.name for r in regions_module.REGIONS]
             disk_fraction = np.array(
                 [regions_module.REGIONS_BY_NAME[r].disk_fraction for r in all_names],
                 dtype=np.float64)
-            n_law_total_factor = 1.0 / disk_fraction
-            class_share_diskless = 1.0 - disk_fraction
+            is_disks_definition = np.array(
+                [regions_module.REGIONS_BY_NAME[r].disk_fraction_definition == "disks"
+                 for r in all_names])
+            n_law_total_factor = np.where(
+                is_disks_definition,
+                proto + (1.0 - proto) / disk_fraction,
+                1.0 / disk_fraction)
+            class_share_diskless = 1.0 - 1.0 / n_law_total_factor
 
             for name, value in (
                 ("KAPPA_USED", kappa_used),
@@ -441,16 +486,26 @@ def build(config, regions=None):
     # time only -- "shares of the total" is never a second stored copy
     # of CLASS_SHARE_PROTO/DISK/WEAK, printed here per processed region
     # as the identity check the brief's own Identities section names
-    # ("the four shares sum to 1 for every region").
-    print("region                    DISK_FRACTION  N_LAW_TOTAL_FACTOR  "
+    # ("the four shares sum to 1 for every region"). Total = excess x
+    # factor, so a share of the TOTAL is a share of the EXCESS divided
+    # by the SAME factor, in both the "all" and "disks" cases alike
+    # (`1 / factor` replaces the "all"-only `DISK_FRACTION` this report
+    # used before the second correction; the two agree exactly when
+    # `definition == "all"`, since then `factor = 1 / DISK_FRACTION`).
+    print("region                    DISK_FRACTION  definition  N_LAW_TOTAL_FACTOR  "
           "PROTO_of_total  DISK_of_total  WEAK_of_total  DISKLESS  sum")
     for region in names:
-        df = float(regions_module.REGIONS_BY_NAME[region].disk_fraction)
-        proto_tot, disk_tot, weak_tot = proto * df, disk * df, weak * df
-        diskless_tot = 1.0 - df
+        r_obj = regions_module.REGIONS_BY_NAME[region]
+        df = float(r_obj.disk_fraction)
+        definition = r_obj.disk_fraction_definition
+        factor = (proto + (1.0 - proto) / df) if definition == "disks" else (1.0 / df)
+        inv_factor = 1.0 / factor
+        proto_tot, disk_tot, weak_tot = proto * inv_factor, disk * inv_factor, weak * inv_factor
+        diskless_tot = 1.0 - inv_factor
         total = proto_tot + disk_tot + weak_tot + diskless_tot
-        print("%-25s %13.4f  %18.4f  %14.4f  %13.4f  %13.4f  %8.4f  %.10f"
-              % (region, df, 1.0 / df, proto_tot, disk_tot, weak_tot, diskless_tot, total))
+        print("%-25s %13.4f  %10s  %18.4f  %14.4f  %13.4f  %13.4f  %8.4f  %.10f"
+              % (region, df, definition, factor, proto_tot, disk_tot, weak_tot,
+                 diskless_tot, total))
     return path
 
 
@@ -500,9 +555,15 @@ def disk_fraction(config, region):
 
 
 def n_law_total_factor(config, region):
-    """This region's own N_LAW_TOTAL_FACTOR = 1 / disk_fraction(config,
-    region) -- 1.0 (no change) at the identity case."""
-    return 1.0 / disk_fraction(config, region)
+    """This region's own N_LAW_TOTAL_FACTOR off `law_yso_region.hdf5`
+    (module docstring): `1 / disk_fraction(config, region)` where this
+    region's own `regions.Region.disk_fraction_definition` is "all", or
+    `CLASS_SHARE_PROTO + (1 - CLASS_SHARE_PROTO) / disk_fraction(config,
+    region)` where it is "disks" (owner's ruling 2026-10-20, second
+    correction) -- read off the stored dataset rather than recomputed
+    here, since the formula depends on `definition`, not on `disk_
+    fraction` alone. 1.0 (no change) at the identity case."""
+    return _law_row(config, region, "N_LAW_TOTAL_FACTOR", 1.0)
 
 
 def class_share_diskless(config, region):
