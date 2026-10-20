@@ -20,6 +20,24 @@ class Region:
     range_kpc: tuple
     basis: str
     source: str
+    # The young-star law's diskless Class III share (owner's ruling,
+    # 2026-10-20, `bms_review/briefs/round4_2026-10-20/
+    # C11_yso_class3_population.md`): a published mean age of the
+    # region's young population, and the disk fraction a published
+    # disk-fraction-versus-age relation gives at that age (unit C12's
+    # literature table, `bms_review/briefs/round4_2026-10-20/
+    # C12_ages_disk_fractions.txt`). Defaulted to the IDENTITY case (no
+    # age applied; disk_fraction = 1 leaves the young-star law's level
+    # and shares exactly as they were before this ruling) so every
+    # region not explicitly overridden below is unaffected; a region
+    # whose two values ARE measured overrides both kwargs where its
+    # tuple entry is built, below.
+    age_myr: float = float("nan")
+    age_source: str = ("no published age applied here; disk_fraction defaults to the "
+                        "identity case (1.0), not a measurement")
+    disk_fraction: float = 1.0
+    disk_fraction_source: str = ("identity (no measurement applied): N_LAW_TOTAL_FACTOR = "
+                                  "1/disk_fraction = 1, CLASS_SHARE_DISKLESS = 0")
 
 
 _REGIONS = (
@@ -69,7 +87,20 @@ _REGIONS = (
            "'NGC_7129': mean parallax Plx = 1.0965 +/- 0.0092 mas (standard error "
            "over 136 Gaia DR3 members, 91 used for the distance fit), d = 1000/Plx; "
            "their own maximum-likelihood distance (dist50) is 910.96 "
-           "(908.32-913.62) pc, consistent"),
+           "(908.32-913.62) pc, consistent",
+           age_myr=2.0,
+           age_source=("C12's 2026-10-20 literature table "
+                        "(bms_review/briefs/round4_2026-10-20/C12_ages_disk_fractions.txt) "
+                        "did not reach this region before C11's 40-minute wait expired; "
+                        "fallback per the C11 brief: 2 Myr, the Richert et al. 2018 "
+                        "t_half, not a region-specific measurement"),
+           disk_fraction=0.5,
+           disk_fraction_source=("Richert, Getman, Feigelson et al. 2018, MNRAS 477, 5191, "
+                                  "sec. 3.2, table 4: f_disk = exp(-t/tau), tau = 2.885 Myr, "
+                                  "evaluated at the fallback age t = 2 Myr = t_half, giving "
+                                  "f_disk = 0.5 exactly; C11 brief's fallback rule, no "
+                                  "region-specific published age or disk fraction found in "
+                                  "time")),
     Region("North America Nebula", 785, 16, (0.769, 0.801), "O",
            "Kuhn & Hillenbrand, Gaia EDR3"),
     Region("Ophiuchus", 137.3, 1.2, (0.1361, 0.1385), "M+S",
@@ -89,7 +120,21 @@ _REGIONS = (
            "independent NGC 2068 parallax distance of 405 +/- 16 pc, within 1 sigma "
            "of either estimate"),
     Region("Perseus", 294, 15.133, (0.2789, 0.3091), "D",
-           "Zucker et al."),
+           "Zucker et al.",
+           age_myr=2.45,
+           age_source=("Getman et al. 2014, ApJ 787, 108 (MYStIX) / Getman et al. 2018, "
+                        "MNRAS 477, 298 (SFiNCs) age tables, Siess (2000) Age_JX scale, "
+                        "member-count-weighted mean over Perseus's MYStIX/SFiNCs clusters "
+                        "(C12's 2026-10-20 table, interim)"),
+           disk_fraction=0.43,
+           disk_fraction_source=("Richert, Getman, Feigelson et al. 2018, MNRAS 477, 5191, "
+                                  "sec. 3.2, table 4: f_disk = exp(-t/tau), tau = 2.885 Myr, "
+                                  "at age_myr = 2.45 Myr, giving 0.43; Ribas, Merin, Bouy & "
+                                  "Maud 2014, A&A 561, A54 band 0.32-0.38; Richert et al. "
+                                  "2018 table 1's own measured (X-ray-selected diskless) "
+                                  "disk fraction over Perseus's clusters is 0.45 "
+                                  "(0.40-0.51, 95%), consistent (C12's 2026-10-20 table, "
+                                  "interim)")),
     Region("Pipe", 163, 5, (0.158, 0.168), "M",
            "B59 member astrometry"),
     Region("S131", 918, 48, (0.87, 0.966), "O",
