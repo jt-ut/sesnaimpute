@@ -13,8 +13,12 @@ distance while sizing the width off the structure peaked elsewhere puts
 the Normal's mass in the wrong tail wherever the two distances disagree
 (R4 D2); using the same peak for both keeps the statement single-sourced.
 
-    H_h      = sigmoid((G_LIM - Gmag_h) / TAU_G)     -- population.anchor_tiles.gaia_detection_weight
-    Gamma_h  = G_s * H_h * A_X  +  (1 - G_s) * (1 - H_h)
+    H_h      = S(Gmag_h | M10_s)                     -- population.anchor_tiles.gaia_detection_weight,
+                                                         Cantat-Gaudin et al. 2023's published,
+                                                         position-dependent selection function (C7
+                                                         brief Part A), M10_s the source's own sky pixel
+    Gamma_h  = G_s * H_h * A_X  +  (1 - G_s) * (1 - H_h)         -- matched
+    Gamma_h  = 1 - min(H_h, C_CAP)                               -- unmatched (C7 brief Part A)
 
 `Gmag_h` is the model's own predicted Gaia G magnitude at its fitted
 extinction and brightness (the register's `G0_FLUX`, dimmed by `KG_DRAINE`/
@@ -24,9 +28,14 @@ parallax anchored at the cloud for YSO/H2S, at zero parallax for GAL, and
 the region's simulated field-star population's own 1/D marginal for
 STAR/AGB/PAHC (`SPEC_PRIORS.md` section 4: PAHC's parent population is the
 whole simulated field-star population, so it shares STAR's shape). A
-source with no Gaia counterpart at all carries no information (Gamma = 1,
-ln Gamma = 0, every model); a matched source with no usable astrometric
-solution degrades to A_X = 1, the "toward no information, never a cliff"
+source with no Gaia counterpart at all is now scored AS a non-detection
+against this position's own published completeness (C7 brief Part A: the
+one survey-wide sigmoid before this gave every unmatched source Gamma = 1,
+no information, at any position -- 72% of Perseus's own sources said
+nothing), capped at `C_CAP` (COMPLETENESS_2026-10-20.md's own cap on the
+band curves) so one unmatched read can never veto a fit by itself, `ln
+Gamma >= ln(1/200)`; a matched source with no usable astrometric solution
+still degrades to A_X = 1, the "toward no information, never a cliff"
 rule for the no-parallax branch.
 
 The field-star classes' marginal is the same per-star reweighting every
@@ -64,11 +73,25 @@ from sesnaimpute import config as config_module
 from sesnaimpute import constants
 from sesnaimpute import definitions
 from sesnaimpute.bmstp import sample_cloud
+from sesnaimpute.catalog import completeness as completeness_module
+from sesnaimpute.granules import access as granule_access
+from sesnaimpute.population import anchor_tiles
 from sesnaimpute.population import selection
-from sesnaimpute.population.anchor_tiles import (
-    GAIA_G_LIM_MAG, GAIA_G_ROLLOFF_MAG, gaia_detection_weight)
 
-__all__ = ["GaiaTerm", "GAIA_G_LIM_MAG", "GAIA_G_ROLLOFF_MAG"]
+__all__ = ["GaiaTerm"]
+
+#: C7 brief Part A: the published, position-dependent Gaia DR3 selection
+#: function's own bright-side floor (`anchor_tiles.G_FLOOR_MAG`), a bare
+#: module global so `_gaia_h_kernel`/`fittp.prior_reader._gaia_h` can
+#: freeze it as a numba compile-time constant, like `LAW_RAMP_LO` below.
+G_FLOOR_MAG = anchor_tiles.G_FLOOR_MAG
+
+#: COMPLETENESS_2026-10-20.md's own cap (`catalog.completeness.C_CAP`),
+#: reused here for the SAME reason `fittp.prior_reader`'s `_C_CAP`
+#: exists: an unmatched source's own Gamma = 1 - H_h is capped the same
+#: way the band curves are, so `ln Gamma >= ln(1/200)` and one
+#: unmatched Gaia read can never veto a fit by itself (C7 brief Part A).
+_C_CAP = completeness_module.C_CAP
 
 #: NONDET2 brief section 1: the law-dense ramp weight `w(a)` that blends
 #: KG_DRAINE/KG_WHITNEY at a GIVEN extinction `a` (`selection.
@@ -122,20 +145,25 @@ _SQRT_2PI = np.sqrt(2.0 * np.pi)
 
 
 @numba.njit(parallel=True, cache=True)
-def _gaia_h_kernel(gmag_flat, out):
-    """`H_h = sigmoid((G_LIM - Gmag_h) / TAU_G)` for every (source,
-    template) pair, flattened (`population.anchor_tiles.
-    gaia_detection_weight`'s own algebra, one `exp` per pair -- the
-    floor), `@njit(parallel=True)` over the block's own pairs via
-    `prange` rather than numpy's single-threaded `exp` (W9c: `ln_gamma`'s
-    hot loop, 10_POSTERIOR.md T13).
+def _gaia_h_kernel(gmag_flat, x_flat, y_flat, z_flat, out):
+    """`H_h = S(Gmag_h | M10)`, Cantat-Gaudin et al. 2023's own published
+    selection function (`population.anchor_tiles.gaia_detection_weight`'s
+    algebra, `x_flat`/`y_flat`/`z_flat` already this pair's own source's
+    `(x, y, z)` broadcast against every template -- C7 brief Part A),
+    for every (source, template) pair, flattened, `@njit(parallel=True)`
+    over the block's own pairs via `prange` rather than numpy's single-
+    threaded `tanh`/`power` (W9c: `ln_gamma`'s hot loop, 10_POSTERIOR.md
+    T13). No overflow guard needed: `tanh` is bounded in [-1, 1] for any
+    finite argument.
     """
     n = gmag_flat.shape[0]
     for i in numba.prange(n):
-        arg = -(GAIA_G_LIM_MAG - gmag_flat[i]) / GAIA_G_ROLLOFF_MAG
-        if arg > 700.0:
-            arg = 700.0
-        out[i] = 1.0 / (1.0 + math.exp(arg))
+        gmag = gmag_flat[i]
+        if gmag < G_FLOOR_MAG:
+            out[i] = 1.0
+        else:
+            t = math.tanh((gmag - x_flat[i]) / y_flat[i])
+            out[i] = 1.0 - (0.5 * (t + 1.0)) ** z_flat[i]
 
 
 def _normal_pdf(x, mean, sigma):
@@ -185,6 +213,27 @@ def _load_gaia_match(config, region):
             ruwe=f["RUWE"][:].astype(np.float64),
             no_pm=f["NO_PM"][:].astype(bool),
         )
+
+
+def _load_source_xyz(config, region):
+    """`(x_s, y_s, z_s)`, each `(n_source,)` float64: this region's own
+    sources' Cantat-Gaudin et al. 2023 sigmoid parameters (C7 brief Part
+    A), read ONCE for the whole region (never per source, never per
+    block) -- every source's own M10, through its own NESTED nside-128
+    pixel (`granules.sesna.granule-map.source`'s `HPX_PIX_512`, the same
+    per-source pixel join `sky.derived.gaia_match.local_gaia_density`
+    already reads, `>> 4`), looked up in `anchor_tiles.gaia_selection`'s
+    own all-sky map and carried through `anchor_tiles.gaia_xyz_from_m10`
+    -- regardless of whether a source is itself Gaia-matched: an
+    UNMATCHED source still needs its own position's (x, y, z) to be
+    scored as a non-detection against (module docstring, `ln_gamma`,
+    `cell_inputs`).
+    """
+    granule_map_path = config_module.product_path(config, "granules", "sesna", "granule-map", "source")
+    columns = granule_access.per_source(config, region, granule_map_path, ["HPX_PIX_512"])
+    pix512 = np.asarray(columns["HPX_PIX_512"], dtype=np.int64)
+    m10 = anchor_tiles.gaia_selection(config)[pix512 >> 4]
+    return anchor_tiles.gaia_xyz_from_m10(m10)
 
 
 def _build_star_marginal(config, region, cls, bin_width_mas=STAR_MARGINAL_BIN_WIDTH_MAS):
@@ -258,6 +307,9 @@ class GaiaTerm:
         self.region = region
         self._cloud_centre_mas, self._cloud_depth_term_mas = _cloud_normal_params_mas(config, region)
         self._gaia = _load_gaia_match(config, region)
+        # C7 brief Part A: every source's own (x, y, z), region-wide,
+        # read once here (`_load_source_xyz`) -- matched or not.
+        self._x_s, self._y_s, self._z_s = _load_source_xyz(config, region)
         self._registers = {}
         self._star_marginals = {}
 
@@ -347,6 +399,14 @@ class GaiaTerm:
         a_x[good] = a_x_good[good]
         return matched, g_s, a_x
 
+    def _xyz_block(self, rows):
+        """C7 brief Part A: `(x_s, y_s, z_s)` for `rows`, straight off
+        `self._x_s`/`_y_s`/`_z_s` (`__init__`'s own region-wide,
+        class-independent read, `_load_source_xyz`) -- every source's
+        own (x, y, z), matched or not."""
+        rows = np.asarray(rows)
+        return self._x_s[rows], self._y_s[rows], self._z_s[rows]
+
     def cell_inputs(self, rows, model_index, cls):
         """NONDET2 brief section 1 (NONDET.md section 8): everything
         `prior_reader._cell_sum` needs to evaluate `ln Gamma` at EACH
@@ -356,13 +416,17 @@ class GaiaTerm:
         stay per template, off this class's own register
         (`_register`, unchanged); `r_diffuse`/`r_dense` are the two
         extinction curves' own `(A_K/A_V)` ratios the per-cell ramp blend
-        needs (`selection.ak_per_av` at the ramp's two ends). Returns a
-        plain tuple of arrays/floats, numba-ready: `(matched, g_s, a_x,
-        g0_mag, kg_draine, kg_whitney, r_diffuse, r_dense)`.
+        needs (`selection.ak_per_av` at the ramp's two ends). `x_s`/`y_s`/
+        `z_s` (C7 brief Part A, `_xyz_block`) are this block's own sources'
+        Cantat-Gaudin parameters, replacing the old survey-wide `(g_lim,
+        g_rolloff)` scalars. Returns a plain tuple of arrays/floats,
+        numba-ready: `(matched, g_s, a_x, g0_mag, kg_draine, kg_whitney,
+        r_diffuse, r_dense, x_s, y_s, z_s)`.
         """
         rows = np.asarray(rows)
         model_index = np.asarray(model_index)
         matched, g_s, a_x = self._g_s_and_a_x_block(rows, cls)
+        x_s, y_s, z_s = self._xyz_block(rows)
         reg = self._register(cls)
         g0_mag = reg["g0_mag"][model_index]
         kg_draine = reg["kg_draine"][model_index]
@@ -378,7 +442,10 @@ class GaiaTerm:
         return (np.ascontiguousarray(matched), np.ascontiguousarray(g_s),
                 np.ascontiguousarray(a_x), np.ascontiguousarray(g0_mag, dtype=np.float64),
                 np.ascontiguousarray(kg_draine, dtype=np.float64),
-                np.ascontiguousarray(kg_whitney, dtype=np.float64), r_diffuse, r_dense)
+                np.ascontiguousarray(kg_whitney, dtype=np.float64), r_diffuse, r_dense,
+                np.ascontiguousarray(x_s, dtype=np.float64),
+                np.ascontiguousarray(y_s, dtype=np.float64),
+                np.ascontiguousarray(z_s, dtype=np.float64))
 
     def ln_gamma(self, rows, model_index, a, log10_b, cls):
         """`ln Gamma_{s,h}` for one block's own sources (`rows`, their row
@@ -397,6 +464,7 @@ class GaiaTerm:
         model_index = np.asarray(model_index)
         n_model = model_index.shape[0]
         matched, g_s, a_x = self._g_s_and_a_x_block(rows, cls)
+        x_s, y_s, z_s = self._xyz_block(rows)
 
         reg = self._register(cls)
         g0 = reg["g0_flux"][model_index]
@@ -428,20 +496,31 @@ class GaiaTerm:
         # takes a log10).
         gmag = g0_mag[None, :] - 2.5 * log10_b + a_g
         h = np.empty(gmag.shape, dtype=np.float64)
-        _gaia_h_kernel(np.ascontiguousarray(gmag.ravel()), h.ravel())
+        x_b = np.broadcast_to(x_s[:, None], gmag.shape)
+        y_b = np.broadcast_to(y_s[:, None], gmag.shape)
+        z_b = np.broadcast_to(z_s[:, None], gmag.shape)
+        _gaia_h_kernel(np.ascontiguousarray(gmag.ravel()), np.ascontiguousarray(x_b.ravel()),
+                       np.ascontiguousarray(y_b.ravel()), np.ascontiguousarray(z_b.ravel()), h.ravel())
         # G0_FLUX = NaN (no G-band coverage, not darkness) -> H = 0
         # exactly; a dark model's G0_FLUX = 0 already drives Gmag to +inf
         # and H to 0 through the sigmoid's own limit, no special case.
         h = np.where(np.isnan(g0)[None, :], 0.0, h)
 
-        gamma = g_s[:, None] * h * a_x[:, None] + (1.0 - g_s[:, None]) * (1.0 - h)
+        gamma_matched = g_s[:, None] * h * a_x[:, None] + (1.0 - g_s[:, None]) * (1.0 - h)
+        # C7 brief Part A: an unmatched source is scored as a
+        # non-detection against this position's own completeness, capped
+        # at C_CAP the same way the band curves are, so ln Gamma never
+        # drops below ln(1/200) and never vetoes a fit on its own; a
+        # template with no optical flux (G0_FLUX = 0, H = 0 above) reads
+        # Gamma = 1 exactly, since 1 - min(0, C_CAP) = 1.
+        gamma_unmatched = 1.0 - np.minimum(h, _C_CAP)
+        gamma = np.where(matched[:, None], gamma_matched, gamma_unmatched)
         # gamma = 0 is a real zero-probability model under a Gaia
         # counterpart's own detection/non-detection evidence (e.g. the
         # source is seen but this model's H_h says it should not be, or
         # vice versa) -- ln(0) = -inf is the ruled likelihood, not a
         # defect, so the divide-by-zero warning is silenced, not the
-        # value. Rows with no Gaia counterpart at all carry no
-        # information: ln Gamma = 0 for every model, exactly.
+        # value.
         with np.errstate(divide="ignore"):
             ln_g = np.log(gamma)
-        return np.where(matched[:, None], ln_g, 0.0)
+        return ln_g

@@ -2503,9 +2503,10 @@ REGISTRY = {
         "on its own; it raises a class's odds only by counting more heavily against "
         "the others. Not a number where the fit does not record it."),
     ("posterior_classification_source", "LOG_ODDS_GAIA"): ("nats",
-        "The part of LOG_ODDS_DATA that comes from Gaia's detection and parallax, "
-        "after the measured and undetected bands: how much they move each class's "
-        "log odds. Zero where Gaia did not see the source. Not a number where the "
+        "The part of LOG_ODDS_DATA that comes from Gaia, after the measured and "
+        "undetected bands: how much it moves each class's log odds. Gaia DR3's "
+        "published completeness at the source's sky pixel; an unmatched source "
+        "is scored as a non-detection, not as nothing. Not a number where the "
         "fit does not record it."),
     ("posterior_classification_source", "P_YSO"): ("probability",
         "Probability that the source is a young stellar object: the young stellar "
@@ -2656,9 +2657,11 @@ _SWEEP_FIT_READINGS = {
     "LN_EVIDENCE": ("nats",
         "How well this class explains the source, one value per subclass named "
         "in the SUBCLASSES attribute, as a natural logarithm. Each gathers every "
-        "model of that subclass under both extinction laws. Minus infinity means "
-        "the subclass has no models, or the class cannot explain the source, or "
-        "the source could not be fitted."),
+        "model of that subclass under both extinction laws, the measured and "
+        "undetected bands and Gaia: Gaia DR3's published completeness at the "
+        "source's sky pixel; an unmatched source is scored as a non-detection. "
+        "Minus infinity means the subclass has no models, or the class cannot "
+        "explain the source, or the source could not be fitted."),
     "LOG10_FLUX_MEAN": ("log10 of flux in mJy",
         "This class's estimate of the eight-band spectrum, band order J, H, Ks, "
         "3.6, 4.5, 5.8, 8.0 and 24 micron, averaging its models by their share of "
@@ -2703,7 +2706,8 @@ _SWEEP_FIT_READINGS = {
         "stops, never letting a band be charged as more than 99.5 percent certain "
         "to have been missed. Never above LN_EVIDENCE_MEASURED: a band the source "
         "was not detected in can only count against a class. The class's full "
-        "evidence adds Gaia to this."),
+        "evidence adds Gaia to this: Gaia DR3's published completeness at the "
+        "source's sky pixel; an unmatched source is scored as a non-detection."),
     "LN_PRIOR_MASS": ("natural log of objects per square degree",
         "This class's prior at the source's position, before any photometry is "
         "used, as the natural logarithm of the expected number of objects per "
@@ -2758,14 +2762,16 @@ _SWEEP_FIT_READINGS = {
         "a band was missed); reduces to the point value when the fit pins the "
         "extinction."),
     "TOPK_LN_GAIA": ("nats",
-        "What the Gaia detection and parallax contributed, as a log factor given "
-        "the rest, integrated over extinction."),
+        "What Gaia contributed, as a log factor given the rest, integrated over "
+        "extinction: Gaia DR3's published completeness at the source's sky "
+        "pixel; an unmatched source is scored as a non-detection."),
     "TOPK_LN_PRIOR_ML": ("nats",
         "The prior at the best-fit point; a guide to how TOPK_LN_PRIOR_FIT splits "
         "between the prior and the fit, not an addend."),
     "TOPK_LN_GAMMA_ML": ("nats",
-        "The Gaia term at the best-fit point; report-only; the vote reading uses "
-        "it."),
+        "The Gaia term at the best-fit point (Gaia DR3's published completeness "
+        "at the source's sky pixel; an unmatched source is scored as a "
+        "non-detection); report-only; the vote reading uses it."),
     "TOPK_LAW": ("law position",
         "Which extinction law fits each of those five models better: 0 diffuse, 1 "
         "dense."),
