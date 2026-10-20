@@ -355,10 +355,27 @@ def members_table(names, rep_of, dist_to_rep, subclass, params):
             param_cols[p]["MEDIAN"][row] = np.median(vals)
             param_cols[p]["MAX"][row] = np.max(vals)
 
+    # MEMBER_INDEX as an explicit 1-D object array, filled by a loop --
+    # not `Column(member_index, dtype=object)`. When every row's member
+    # set happens to have the SAME length (e.g. a library with no
+    # sampling reduction, N_MEMBERS==1 everywhere), numpy's own
+    # object-array construction from a list of equal-length arrays
+    # collapses them into a true 2-D array (dtype object, shape
+    # (n_kept, L)) instead of a 1-D array of array objects, which
+    # astropy's FITS writer then rejects (`Illegal format ('O', (L,))`).
+    # A ragged member set (the common case, every other shipped library)
+    # never hits this, so it went uncaught until a library had a uniform
+    # N_MEMBERS. Explicit per-element assignment into a pre-sized object
+    # array is immune to the length of each entry either way (round-trip
+    # checked both ragged and uniform).
+    member_index_arr = np.empty(n_kept, dtype=object)
+    for row, m in enumerate(member_index):
+        member_index_arr[row] = m
+
     table = Table()
     table["MODEL_NAME"] = np.array(model_name)
     table["N_MEMBERS"] = np.array(n_members, dtype=np.int32)
-    table["MEMBER_INDEX"] = Column(member_index, dtype=object)
+    table["MEMBER_INDEX"] = Column(member_index_arr)
     table["DIST_MAX"] = np.array(dist_max, dtype=np.float64)
     for code in subclass_codes:
         table[f"FRAC_{code}"] = frac_cols[code]
