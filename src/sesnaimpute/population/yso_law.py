@@ -1,21 +1,39 @@
-"""The young-star law's coefficient, fitted per SESNA region on the
-Dunham et al. 2015 census (c2d + Gould Belt, 2,966 YSOs, classified
-independently of SESNA) -- the owner's 2026-09-14 ruling (`_W83_design.md`):
-the young-star level is no longer Pokhrel et al. 2020's coefficient, it is
-fitted here, on our own column maps, nothing about SESNA read except
-positions and the footprint.
+"""The young-star law's coefficient, fitted per SESNA region on a
+published census of excess-selected young stars (Class 0, I, flat, II,
+transition disk, weak excess), region by region, the pooled value only
+where no census exists -- the owner's 2026-09-14 ruling (`_W83_design.md`),
+extended by the owner's 2026-10-20 ruling
+(`briefs/round4_2026-10-20/C10_yso_census_table.md`) to every published
+census of the same kind (`sky.derived.yso_census`'s eight sources, not
+Dunham et al. 2015 alone): the young-star level is no longer Pokhrel et
+al. 2020's coefficient, it is fitted here, on our own column maps,
+nothing about SESNA read except positions and the footprint.
 
 Method, per region: the region's ADMITTED nside-512 pixels (`catalog.
 depth_grid`'s own product) restricted to a FIT FOOTPRINT -- those pixels
-whose gas column (`sky/derived/adopted/column_adopted_sightline.hdf5`'s
-`A_K` at nside 256, the pixel's own parent) is at least `FIT_A_K_MIN`: 0.22
-mag (A_V >= 2, the c2d coverage rule) where the census cloud(s) overlapping
-the region are c2d clouds, 0.33 mag (A_V >= 3) where they are Gould Belt
-clouds -- decided from `table1.dat`'s own `Survey` field for whichever
-Dunham cloud(s) the region's admitted (unrestricted) footprint contains
-census objects from, majority by count, ties to Gould Belt's own stricter
-floor. `N_CENSUS_REGION` is the count of census objects (every slope) whose
-position falls in the fit footprint. The model's own predicted count over
+inside the UNION of the census coverage polygons (`sky.derived.yso_census`'s
+own `coverage` group, one convex hull per `(SOURCE, CLOUD)`) overlapping
+the region AND, for each such polygon, at or above that census's own
+`SURVEY_FLOOR_A_K` column floor wherever it is finite (Dunham et al.
+2015's own c2d/Gould-Belt rule, read off the census product's own column
+rather than re-derived; every other census here states no comparable
+rule, so its own polygon alone is the floor, `SURVEY_FLOOR_A_K = NaN`,
+module docstring of `sky.derived.yso_census`) -- `_fit_a_k_min` finds the
+`(SOURCE, CLOUD)` group(s) the region's admitted (unrestricted) footprint
+holds census objects from (every ingested EXCESS census alike; a
+protostar-only census, Kryukova2014/Cygnus X, is counted separately,
+`N_CENSUS_PROTOSTAR_ONLY`, and plays no part in the footprint or
+`N_CENSUS_REGION` -- the law unit's own choice how it enters), and
+`FIT_A_K_MIN` (a report value, the majority-by-count group's own floor,
+ties to the stricter -- higher -- finite floor) is reported alongside;
+a region with two excess censuses of the SAME kind overlapping it pools
+both groups' objects into one footprint (union of their polygons) and
+one `N_CENSUS_REGION` (Orion: Megeath2012 is the only one that overlaps,
+so this case is not exercised by this round's own three fitted regions).
+`CENSUS_SOURCES` records the overlapping census(es)' own `SOURCE` names,
+";"-joined. `N_CENSUS_REGION` is the count of EXCESS census objects
+(every slope) whose position falls in the fit footprint. The model's own
+predicted count over
 that same footprint, with the coefficient normalised OUT (so what remains
 is a pure geometric/column integral, coefficient 1): `population.yso.
 law_area_integral(config, region, pix)` (already `KAPPA_HERSCHEL` times the
@@ -57,6 +75,7 @@ from sesnaimpute.build import run
 from sesnaimpute.catalog import depth_grid as depth_grid_module
 from sesnaimpute.population import yso as yso_module
 from sesnaimpute.population import young_stars as young_stars_module
+from sesnaimpute.sky.derived import yso_census as yso_census_module
 
 _STEM = "law_yso_region"
 _READINGS = {name: value for (stem, name), value in REGISTRY.items() if stem == _STEM}
@@ -87,44 +106,80 @@ OMEGA_PIX_512_DEG2 = float(hp.nside2pixarea(512, degrees=True))
 # ====================================================================
 
 def _census_survey_path(config):
-    return config_module.product_path(config, "sky/derived", "dunham2015", "yso", "survey")
+    return config_module.product_path(config, *yso_census_module.PATH_ARGS)
+
+
+def _decode_strs(arr):
+    return np.array([v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in arr])
 
 
 def _load_census(config):
-    """The whole 2,966-row census: `ra_deg`, `dec_deg`, `cloud` (survey
-    cloud name), `alpha0`, and `pix512` (the source's own nside-512
-    galactic NESTED pixel, the survey's standard pixelisation -- the
-    SAME frame the region admission and depth-grid pixels are in)."""
+    """Every ingested census (`sky.derived.yso_census`, owner's
+    2026-10-20 ruling, replacing the Dunham-only product this used to
+    read): `ra_deg`, `dec_deg`, `source` (the census name, e.g.
+    "Dunham2015"/"Megeath2012"), `cloud`, `alpha` (every ingested
+    object's own `ALPHA` column, NaN where its census gives no numeric
+    slope), `selection` ("excess"/"protostar"), `survey_floor_a_k`,
+    `pix512` (the object's own nside-512 galactic NESTED pixel, the
+    survey's standard pixelisation -- the SAME frame the region
+    admission and depth-grid pixels are in), and `coverage`: `{(source,
+    cloud): (poly_ra_deg, poly_dec_deg)}`, every `(SOURCE, CLOUD)`
+    group's own convex-hull coverage polygon.
+
+    `alpha0` is ALSO carried, but -- CENSUS INPUT/FOOTPRINT ownership
+    boundary (this brief, C11 owns SHARES/LEVEL and `_class_shares`
+    below, not touched by this unit) -- restricted to Dunham2015's own
+    rows (NaN everywhere else), so `_class_shares`'s statistics are
+    numerically UNCHANGED by this ruling's seven added censuses unless
+    C11 itself chooses to read the new, unrestricted `alpha`/`source`/
+    `selection` instead: pooling every census's own ALPHA into one
+    class-share statistic without being asked materially changes that
+    statistic (measured while developing this change: Dunham-only
+    CLASS_SHARE_PROTO = 0.1796, pooled across all eight censuses'
+    ALPHA = 0.3866 -- Megeath2012 alone carries far more high-alpha
+    protostar candidates than Dunham's own census does), so this unit
+    does not make that choice for C11."""
     path = _census_survey_path(config)
     if not os.path.exists(path):
         raise FileNotFoundError(
-            "population.yso_law: no Dunham census at %s -- run the "
-            "'sesnaimpute.sky.derived.dunham_yso' RUNBOOK line first" % path)
+            "population.yso_law: no census at %s -- run the "
+            "'sesnaimpute.sky.derived.yso_census' RUNBOOK line first" % path)
     with h5py.File(path, "r") as f:
         ra_deg = np.asarray(f["RA_DEG"][:], dtype=np.float64)
         dec_deg = np.asarray(f["DEC_DEG"][:], dtype=np.float64)
-        cloud = np.array([c.decode("utf-8") if isinstance(c, bytes) else c
-                           for c in f["CLOUD"][:]])
-        alpha0 = np.asarray(f["ALPHA0"][:], dtype=np.float64)
+        source = _decode_strs(f["SOURCE"][:])
+        cloud = _decode_strs(f["CLOUD"][:])
+        alpha = np.asarray(f["ALPHA"][:], dtype=np.float64)
+        selection = _decode_strs(f["SELECTION"][:])
+        survey_floor_a_k = np.asarray(f["SURVEY_FLOOR_A_K"][:], dtype=np.float64)
+        coverage = {}
+        for name in f["coverage"]:
+            g = f["coverage"][name]
+            key = (str(g.attrs["SOURCE"]), str(g.attrs["CLOUD"]))
+            coverage[key] = (np.asarray(g["RA_DEG"][:], dtype=np.float64),
+                              np.asarray(g["DEC_DEG"][:], dtype=np.float64))
     gal = SkyCoord(ra=ra_deg * u.deg, dec=dec_deg * u.deg, frame="icrs").galactic
     pix512 = hp.ang2pix(512, gal.l.deg, gal.b.deg, nest=True, lonlat=True).astype(np.int64)
-    return dict(ra_deg=ra_deg, dec_deg=dec_deg, cloud=cloud, alpha0=alpha0, pix512=pix512)
+    alpha0 = np.where(source == "Dunham2015", alpha, np.nan)
+    return dict(ra_deg=ra_deg, dec_deg=dec_deg, source=source, cloud=cloud,
+                alpha=alpha, alpha0=alpha0, selection=selection, survey_floor_a_k=survey_floor_a_k,
+                pix512=pix512, coverage=coverage)
 
 
-def _cloud_survey_map(config):
-    """`{cloud_name: "c2d" or "GB"}`, table1.dat's own `Survey` field
-    (the census cloud table), read directly rather than duplicated as a
-    stored column: the pipe-delimited `Cloud|Survey|Dist...` layout
-    `sky.derived.dunham_yso._read_table1` also reads."""
-    path = f"{config.data_root}/sky/download/dunham2015/table1.dat"
-    survey = {}
-    with open(path) as fh:
-        for line in fh:
-            if not line.strip():
-                continue
-            fields = line.rstrip("\n").split("|")
-            survey[fields[0].strip()] = fields[1].strip()
-    return survey
+def _cloud_survey_map(census):
+    """`{(source, cloud): survey_floor_a_k}`, read directly off the
+    loaded census's own `SURVEY_FLOOR_A_K` column (constant within a
+    `(SOURCE, CLOUD)` group by construction, `sky.derived.yso_census`'s
+    own build): generalises today's Dunham-only `table1.dat` `Survey`
+    read (0.22 mag c2d / 0.33 mag Gould Belt) to every census here, most
+    of which state no comparable coverage rule (`NaN` -- the fit
+    footprint for such a census is its coverage polygon alone)."""
+    out = {}
+    for source, cloud, floor in zip(census["source"], census["cloud"], census["survey_floor_a_k"]):
+        key = (source, cloud)
+        if key not in out:
+            out[key] = float(floor)
+    return out
 
 
 # ====================================================================
@@ -168,29 +223,45 @@ def _a_k_of_pix512(config, pix512):
 
 
 def _fit_a_k_min(census, survey_map, admitted_pix512):
-    """The region's own `FIT_A_K_MIN`: which Dunham cloud(s) the
-    region's (unrestricted) admitted footprint holds census objects
-    from, majority vote by count, ties to Gould Belt's own stricter
-    floor -- `NaN`/`None` where the region holds no census object at
-    all (no cloud identifiable, so no fit is possible)."""
+    """The `(SOURCE, CLOUD)` census group(s) the region's own
+    (unrestricted) admitted footprint holds EXCESS census objects from
+    (a protostar-only census, e.g. Kryukova2014/Cygnus X, never enters
+    the footprint or this report value -- `_fit_region`'s own
+    `N_CENSUS_PROTOSTAR_ONLY` counts it separately, the law unit's own
+    choice how it then enters), and the majority-by-count group's own
+    `SURVEY_FLOOR_A_K` as the report value `FIT_A_K_MIN` (ties go to the
+    stricter -- higher -- finite floor; any finite floor outranks NaN in
+    this tie-break, generalising today's c2d/Gould-Belt rule to every
+    census here). Returns `(fit_a_k_min, groups)`: `groups` is the
+    sorted list of EVERY `(SOURCE, CLOUD)` pair present, not only the
+    majority one -- `_fit_region` unions all of their coverage polygons
+    into one footprint (the 2026-10-20 ruling's own "a region with two
+    censuses of the same kind pools their objects"). Returns `(None,
+    [])` where the region holds no excess census object at all."""
+    excess = census["selection"] == "excess"
+    pix512_excess = census["pix512"][excess]
     admitted_sorted = admitted_pix512  # already sorted by caller
-    loc = np.searchsorted(admitted_sorted, census["pix512"])
+    loc = np.searchsorted(admitted_sorted, pix512_excess)
     capped = np.minimum(loc, max(admitted_sorted.size - 1, 0))
-    matched = (admitted_sorted.size > 0) & (admitted_sorted[capped] == census["pix512"])
+    matched = (admitted_sorted.size > 0) & (admitted_sorted[capped] == pix512_excess)
     if not matched.any():
-        return None
-    clouds_here = census["cloud"][matched]
-    uniq, counts = np.unique(clouds_here, return_counts=True)
-    unknown = [c for c in uniq if c not in survey_map]
+        return None, []
+    source_here = census["source"][excess][matched]
+    cloud_here = census["cloud"][excess][matched]
+    pairs = np.array([f"{s}\x1f{c}" for s, c in zip(source_here, cloud_here)])
+    uniq, counts = np.unique(pairs, return_counts=True)
+    groups = sorted(tuple(u.split("\x1f")) for u in uniq)
+    unknown = [g for g in groups if g not in survey_map]
     if unknown:
         raise KeyError(
-            "population.yso_law: census CLOUD %r has no Survey field in "
-            "sky/download/dunham2015/table1.dat -- the per-region fit footprint "
-            "(FIT_A_K_MIN) cannot be chosen for it" % unknown)
-    surveys = np.array([survey_map[c] for c in uniq])
-    n_c2d = int(counts[surveys == "c2d"].sum())
-    n_gb = int(counts[surveys == "GB"].sum())
-    return FIT_A_K_MIN_C2D if n_c2d > n_gb else FIT_A_K_MIN_GB
+            "population.yso_law: census group(s) %r have no SURVEY_FLOOR_A_K "
+            "entry -- sky.derived.yso_census's own build is incomplete for "
+            "them" % unknown)
+    max_count = counts.max()
+    top_groups = [tuple(u.split("\x1f")) for u, c in zip(uniq, counts) if c == max_count]
+    top_floors = [survey_map[g] if np.isfinite(survey_map[g]) else -np.inf for g in top_groups]
+    fit_a_k_min = survey_map[top_groups[int(np.argmax(top_floors))]]
+    return fit_a_k_min, groups
 
 
 def _poisson_interval_68(n):
@@ -206,36 +277,71 @@ def _poisson_interval_68(n):
 
 def _fit_region(config, region, census, survey_map):
     """One region's fit row: `dict(d_r_pc, pc2_per_deg2, fit_a_k_min,
-    n_census, kappa, kappa_lo, kappa_hi, i_integral, bin_report)`.
-    `kappa`/`kappa_lo`/`kappa_hi` are `NaN` where `n_census <
-    MIN_N_FOR_FIT` or no cloud overlap exists at all."""
+    n_census, census_sources, n_census_protostar_only, kappa, kappa_lo,
+    kappa_hi, i_integral, bin_report)`. `kappa`/`kappa_lo`/`kappa_hi` are
+    `NaN` where `n_census < MIN_N_FOR_FIT` or no census group overlaps
+    the region at all.
+
+    The fit footprint (owner's 2026-10-20 ruling): the region's admitted
+    pixels inside the UNION of the overlapping EXCESS census group(s)'
+    own coverage polygon (`sky.derived.yso_census.polygon_contains`),
+    each restricted to its own `SURVEY_FLOOR_A_K` where that is finite
+    (a census stating no coverage rule contributes its polygon alone, no
+    column restriction)."""
     d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
     pc2 = float(yso_module.pc2_per_deg2(d_r_pc))
 
     admitted = depth_grid_module.admitted_pixels_512(config, region)
-    fit_a_k_min = _fit_a_k_min(census, survey_map, admitted)
+    fit_a_k_min, groups = _fit_a_k_min(census, survey_map, admitted)
 
     row = dict(d_r_pc=float(d_r_pc), pc2_per_deg2=pc2,
-               fit_a_k_min=np.nan, n_census=0,
+               fit_a_k_min=np.nan, n_census=0, census_sources="",
+               n_census_protostar_only=0,
                kappa=np.nan, kappa_lo=np.nan, kappa_hi=np.nan,
                i_integral=np.nan, bin_report=None)
     if fit_a_k_min is None or admitted.size == 0:
         return row
     row["fit_a_k_min"] = fit_a_k_min
+    row["census_sources"] = ";".join(sorted(set(g[0] for g in groups)))
 
+    admitted_l, admitted_b = hp.pix2ang(512, admitted, nest=True, lonlat=True)
+    admitted_icrs = SkyCoord(l=admitted_l * u.deg, b=admitted_b * u.deg, frame="galactic").icrs
+    admitted_ra, admitted_dec = admitted_icrs.ra.deg, admitted_icrs.dec.deg
     a_k_admitted = _a_k_of_pix512(config, admitted)
-    in_footprint = np.isfinite(a_k_admitted) & (a_k_admitted >= fit_a_k_min)
+
+    in_footprint = np.zeros(admitted.shape, dtype=bool)
+    for group in groups:
+        poly = census["coverage"].get(group)
+        if poly is None:
+            raise KeyError(
+                "population.yso_law: census group %r has no coverage polygon -- "
+                "sky.derived.yso_census's own build is incomplete for it" % (group,))
+        poly_ra, poly_dec = poly
+        inside_poly = yso_census_module.polygon_contains(admitted_ra, admitted_dec, poly_ra, poly_dec)
+        floor = survey_map[group]
+        if np.isfinite(floor):
+            inside_poly = inside_poly & np.isfinite(a_k_admitted) & (a_k_admitted >= floor)
+        in_footprint |= inside_poly
     footprint = admitted[in_footprint]
     a_k_footprint = a_k_admitted[in_footprint]
     if footprint.size == 0:
         return row
 
-    loc = np.searchsorted(footprint, census["pix512"])
+    excess = census["selection"] == "excess"
+    pix512_excess = census["pix512"][excess]
+    loc = np.searchsorted(footprint, pix512_excess)
     capped = np.minimum(loc, max(footprint.size - 1, 0))
-    matched = (footprint.size > 0) & (footprint[capped] == census["pix512"])
+    matched = (footprint.size > 0) & (footprint[capped] == pix512_excess)
     n_per_pix = np.bincount(capped[matched], minlength=footprint.size).astype(np.float64)
     n_census = int(n_per_pix.sum())
     row["n_census"] = n_census
+
+    protostar = census["selection"] == "protostar"
+    pix512_protostar = census["pix512"][protostar]
+    loc_p = np.searchsorted(footprint, pix512_protostar)
+    capped_p = np.minimum(loc_p, max(footprint.size - 1, 0))
+    matched_p = (footprint.size > 0) & (footprint[capped_p] == pix512_protostar)
+    row["n_census_protostar_only"] = int(matched_p.sum())
 
     d_front, d_back = yso_module.cloud_interval_pc(config, region)
     _xi, _mass, cloud_frac, _removed = young_stars_module.sightline_lookup(
@@ -296,7 +402,7 @@ def build(config, regions=None):
     names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
 
     census = _load_census(config)
-    survey_map = _cloud_survey_map(config)
+    survey_map = _cloud_survey_map(census)
 
     rows = {}
     with progress.Stage("population.yso_law") as st:
@@ -317,6 +423,9 @@ def build(config, regions=None):
                 "KAPPA_REGION_HI": np.array([rows[r]["kappa_hi"] for r in names], dtype=np.float64),
                 "N_CENSUS_REGION": np.array([rows[r]["n_census"] for r in names], dtype=np.int64),
                 "FIT_A_K_MIN": np.array([rows[r]["fit_a_k_min"] for r in names], dtype=np.float64),
+                "CENSUS_SOURCES": np.array([rows[r]["census_sources"] for r in names], dtype="S64"),
+                "N_CENSUS_PROTOSTAR_ONLY": np.array(
+                    [rows[r]["n_census_protostar_only"] for r in names], dtype=np.int64),
             },
             granule="region", readings=_READINGS)
 

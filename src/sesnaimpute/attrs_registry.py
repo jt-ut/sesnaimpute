@@ -1177,13 +1177,38 @@ REGISTRY = {
         "NaN where this region's fit footprint holds fewer than 50 "
         "Dunham et al. (2015) census objects."),
     ("law_yso_region", "N_CENSUS_REGION"): ("YSOs",
-        "How many Dunham et al. (2015) census objects, of any class, fall "
-        "inside this region's own fit footprint."),
+        "How many excess-selected census objects (sesnaimpute.sky.derived."
+        "yso_census, every ingested census of that kind, not Dunham et al. "
+        "2015 alone -- owner's 2026-10-20 ruling), of any class, fall "
+        "inside this region's own fit footprint: the union of the "
+        "overlapping census(es)' own coverage polygon(s), each restricted "
+        "to its own SURVEY_FLOOR_A_K where that is finite. A protostar-"
+        "only census (Kryukova2014/Cygnus X) is never counted here -- see "
+        "N_CENSUS_PROTOSTAR_ONLY."),
     ("law_yso_region", "FIT_A_K_MIN"): ("mag A_K",
-        "The gas-column floor a pixel must clear to enter this region's "
-        "own fit footprint: 0.22 mag where the census cloud(s) overlapping "
-        "the region are c2d clouds, 0.33 mag where they are Gould Belt "
-        "clouds."),
+        "A report value, not itself part of the fit footprint test any "
+        "more (owner's 2026-10-20 ruling: the footprint is the census "
+        "coverage polygon union, each restricted to its own "
+        "SURVEY_FLOOR_A_K): the gas-column floor of whichever (SOURCE, "
+        "CLOUD) census group this region's admitted footprint holds the "
+        "most objects from (0.22 mag for a Dunham et al. 2015 c2d cloud, "
+        "0.33 mag for a Gould Belt cloud, NaN for every other census "
+        "here, which states no comparable coverage rule). NaN where no "
+        "excess census group overlaps this region at all."),
+    ("law_yso_region", "CENSUS_SOURCES"): ("';'-joined census names",
+        "Which published census(es) (sesnaimpute.sky.derived.yso_census's "
+        "own SOURCE values) overlap this region's admitted footprint and "
+        "feed N_CENSUS_REGION, joined by ';' (e.g. 'Dunham2015', or "
+        "'Megeath2012' for Orion A/B); empty where none overlap."),
+    ("law_yso_region", "N_CENSUS_PROTOSTAR_ONLY"): ("protostars",
+        "How many protostar-only census objects (sesnaimpute.sky.derived."
+        "yso_census's own SELECTION == 'protostar' rows, today only "
+        "Kryukova2014/Cygnus X) fall inside this region's own fit "
+        "footprint -- reported separately from N_CENSUS_REGION; the "
+        "owner's 2026-10-20 ruling leaves how a protostar-only census "
+        "enters a region's fit to the law unit, not decided by this "
+        "column's own existence. Zero where none fall there or no "
+        "protostar-only census overlaps the region at all."),
     ("law_yso_region", "KAPPA_USED"): ("young stars pc^-2 per mag^2 of A_K",
         "The young-star law coefficient every other product in this "
         "package reads for this region: KAPPA_REGION where it was fitted, "

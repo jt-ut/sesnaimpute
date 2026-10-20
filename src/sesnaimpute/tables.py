@@ -34,13 +34,19 @@ def open_product(path, granule="region"):
 
 def _fill_value(dtype):
     """The placeholder a freshly created row carries before any build
-    has written it: NaN for floats, -1 for integers, False for bool."""
+    has written it: NaN for floats, -1 for integers, False for bool, an
+    empty string for a fixed-width byte/unicode string column (added
+    for `population.yso_law`'s `CENSUS_SOURCES`, owner's 2026-10-20
+    ruling: a ";"-joined list of census names, empty where none
+    overlap a region)."""
     if np.issubdtype(dtype, np.floating):
         return np.nan
     if np.issubdtype(dtype, np.bool_):
         return False
     if np.issubdtype(dtype, np.integer):
         return -1
+    if dtype.kind in ("S", "U"):
+        return dtype.type("")
     raise ValueError(f"tables.update_rows: no fill value for dtype {dtype}")
 
 
