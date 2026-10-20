@@ -164,7 +164,7 @@ from sesnaimpute.catalog import limits as catalog_limits
 from sesnaimpute.fittp import likelihood
 from sesnaimpute.fittp import prior_reader
 from sesnaimpute.fittp.gaia import GaiaTerm
-from sesnaimpute.sed_models.register import darkness as darkness_module
+from sesnaimpute.granules import access as granule_access
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
@@ -252,9 +252,9 @@ _FIELD_OF_KEY = {
 
 
 def _register(config, cls):
-    """`(template_log, n_sub, subclass_prob, dark_bands)` for `cls`'s own
-    library register (`definitions.CLASS_REGISTER`): `template_log` is
-    `(n_model, 8)` float32 `log10 F_REF` (floored at the register's own
+    """`(template_log, n_sub, subclass_prob)` for `cls`'s own library
+    register (`definitions.CLASS_REGISTER`): `template_log` is `(n_model,
+    8)` float32 `log10 F_REF` (floored at the register's own
     `FLOOR_LINEAR`, its FREFRAW convention -- a genuinely dark band is not
     `-inf`), in `definitions.BANDS` order. `subclass_prob` is `(n_model,
     n_sub)` float64, every row summing to 1, in `definitions.
@@ -266,13 +266,7 @@ def _register(config, cls):
     about 46% of rows); a one-hot row at the register's hard `SUBCLASS`
     label otherwise, so the subclass evidence below reduces exactly to
     today's hard-label partition for every class without a
-    `subclass_prob` group. `dark_bands` is `(n_model, 8)` bool (C7 brief
-    Part B): the register's own `DARK_BANDS` byte, one bit per band
-    (`sed_models.register.darkness.unpack_dark_bands`), True where that
-    template carries no flux in that band at all -- distinct from merely
-    faint, which `FLOOR_LINEAR` already covers inside `template_log` --
-    the one input `fittp.prior_reader._p_cat` needs beyond what the
-    non-detection factor already reads.
+    `subclass_prob` group.
     """
     key = definitions.CLASS_REGISTER[cls]
     path = os.path.join(config.inputs["sed_models"], "registers", "%s_register.hdf5" % key)
@@ -283,7 +277,6 @@ def _register(config, cls):
         for j, bkey in enumerate(BAND_KEYS):
             f_ref[:, j] = np.asarray(f["models"]["F_REF_%s" % bkey][:], dtype=np.float64)
         floor_linear = np.asarray(f["models"]["FLOOR_LINEAR"][:], dtype=np.float64)
-        dark_bands = darkness_module.unpack_dark_bands(f["models"]["DARK_BANDS"][:], N_BANDS)
         subclass_raw = f["models"]["SUBCLASS"][:]
         subclass_names = [s.decode() if isinstance(s, bytes) else s for s in subclass_raw]
         sub_to_idx = {s: i for i, s in enumerate(subclass_order)}
@@ -324,7 +317,73 @@ def _register(config, cls):
                 "|sum-1|=%.3g on %d/%d rows) -- not a proper per-template stage fraction"
                 % (path, float(np.max(np.abs(row_sum[bad] - 1.0))), int(bad.sum()), n_model))
 
-    return template_log, len(subclass_order), subclass_prob, dark_bands
+    return template_log, len(subclass_order), subclass_prob
+
+
+def _prior_mass_by_source(config, region, cls, n_source):
+    """C7 rework (2026-10-20): `(n_source,) float32, (n_source,) bool` --
+    `LN_PRIOR_MASS` and whether the source's own pixel matched -- read
+    once per {region, class}, in the parent, never per source.
+
+    The owner's ruling: the brief's first try at this column
+    (`fittp.prior_reader._cell_sum`'s own `out_cat`/`_p_cat`, since
+    deleted) integrated the catalogue-admission probability over the
+    FIT's own +/-5 sigma window, so it depended on the data through the
+    window's position, and read -inf for most of a class's own sources
+    wherever the only templates that could fit needed extinction outside
+    the window's own catalogued range (measured: AGB 300 -> 4 finite on
+    the C7 slice). The quantity actually wanted -- the prior's own
+    catalogued mass over its FULL extinction support, no likelihood
+    anywhere -- is already priced once per admitted nside-512 pixel by
+    `bmstp.atlas`'s own prior atlas (`N_CAT_<cls>`, deg^-2: the class's
+    whole population at the pixel's own MEAN column, every member's own
+    probability of clearing SESNA's two-of-eight rule at the pixel's own
+    measured completeness curves -- `bmstp.atlas.build_region`'s own
+    module docstring). Re-deriving it per source and per cell (the
+    honest, data-independent version of the Part B attempt: every
+    template's FULL support, no window) would cost ~8 curve reads x 96
+    cells x every template per source -- measured ~2 s/source for YSO,
+    unaffordable over a whole region. This read is the affordable,
+    EXACT quantity instead: one pixel lookup per source.
+
+    Each source's own sky pixel comes from the granule map's own
+    `HPX_PIX_512` (`granules.sesna.granule-map.source`, the same
+    per-source join `sky.derived.gaia_match` and C7 Part A's own
+    `fittp.gaia._load_source_xyz` already read), looked up in the atlas's
+    own `HPX_PIX_512` (verified sorted ascending below -- `np.searchsorted`
+    assumes it). A source whose own pixel is not one of the atlas's
+    admitted pixels is NOT every source's: `matched` is False there and
+    `LN_PRIOR_MASS` is NaN, counted by the caller (`st.done`'s
+    `n_prior_mass_unmapped`), never silently zero. An admitted pixel
+    whose own `N_CAT_<cls>` is exactly zero reads `-inf` -- correct: no
+    such objects there, not a defect.
+    """
+    granule_map_path = config_module.product_path(config, "granules", "sesna", "granule-map", "source")
+    pix512 = np.asarray(
+        granule_access.per_source(config, region, granule_map_path, ["HPX_PIX_512"])["HPX_PIX_512"],
+        dtype=np.int64)
+    if pix512.shape[0] != n_source:
+        raise ValueError(
+            "fittp.sweep._prior_mass_by_source [%s]: granule map has %d source rows, "
+            "the region's own catalogue has %d -- row counts cannot be reconciled"
+            % (region, pix512.shape[0], n_source))
+    atlas_path = config_module.product_path(config, "bmstp", "atlas", "prior", "hpx512", region=region)
+    with h5py.File(atlas_path, "r") as f:
+        atlas_pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
+        n_cat = np.asarray(f["N_CAT_%s" % cls][:], dtype=np.float64)
+    if atlas_pix.size and np.any(np.diff(atlas_pix) <= 0):
+        raise ValueError(
+            "fittp.sweep._prior_mass_by_source [%s/%s]: %s's own HPX_PIX_512 is not "
+            "sorted ascending -- the searchsorted lookup below assumes it is"
+            % (region, cls, atlas_path))
+    loc = np.searchsorted(atlas_pix, pix512)
+    capped = np.clip(loc, 0, max(atlas_pix.size - 1, 0))
+    matched = (atlas_pix.size > 0) & (atlas_pix[capped] == pix512)
+    ln_prior_mass = np.full(n_source, np.nan, dtype=np.float32)
+    with np.errstate(divide="ignore"):
+        ln_n_cat = np.log(n_cat[capped])
+    ln_prior_mass[matched] = ln_n_cat[matched].astype(np.float32)
+    return ln_prior_mass, matched
 
 
 def _load_region_catalog(config, region):
@@ -568,10 +627,6 @@ def _source_task(i):
         ln_lambda0 = [None, None]      # float32 (m,) per design -- S0, no ln_l
         ln_lambda1 = [None, None]      # float32 (m,) per design -- S1, no ln_l
         ln_lambda2 = [None, None]      # float32 (m,) per design -- S2, no ln_l
-        # C7 brief Part B: LN_PRIOR_MASS's own per-design value -- the cell's
-        # prior mass alone (no likelihood, no Gaia) times P_cat, formed the
-        # same way ln_lambda0 is.
-        ln_lambda_cat = [None, None]   # float32 (m,) per design
         a_post_t = [None, None]        # float64 (m,) per design
         a2_post_t = [None, None]
         # ln_l: chi2 plus the per-source normalisation ONLY (NONDET brief
@@ -604,18 +659,17 @@ def _source_task(i):
             # `ext_col`, EXACT_CODE_SITES), fed to the cell sum so it can
             # place the non-detection factor at each cell's own a*.
             ext_col_ak_k = fit_k.ext_col.astype(np.float64) / fit_k.ak_per_av
-            ln_lambda2_k, ln_lambda0_k, ln_lambda1_k, ln_lambda_cat_k, a_post_k, a2_post_k = prior_reader.ln_prior(
+            ln_lambda2_k, ln_lambda0_k, ln_lambda1_k, a_post_k, a2_post_k = prior_reader.ln_prior(
                 w["reader"], rows, h, fit_k.a_hat[None, :], fit_k.log10_b_hat[None, :],
                 slope_log10b_per_ak, np.array([fit_k.sigma_a_ak]), model_index,
                 cell_weight_by_law[k],
                 w["template_log"], ext_col_ak_k,
                 batch.curve_rows[None, :, :],
                 batch.band_a, batch.band_c, batch.band_n,
-                batch.nondet_mask[None, :], gaia_inputs, w["dark_bands"])
+                batch.nondet_mask[None, :], gaia_inputs)
             ln_lambda2[k] = ln_lambda2_k[0]
             ln_lambda0[k] = ln_lambda0_k[0]
             ln_lambda1[k] = ln_lambda1_k[0]
-            ln_lambda_cat[k] = ln_lambda_cat_k[0]
             a_post_t[k] = a_post_k[0]
             a2_post_t[k] = a2_post_k[0]
 
@@ -641,7 +695,6 @@ def _source_task(i):
             ln_lambda0[1] = np.full(n_model, -np.inf, dtype=np.float32)
             ln_lambda1[1] = np.full(n_model, -np.inf, dtype=np.float32)
             ln_lambda2[1] = np.full(n_model, -np.inf, dtype=np.float32)
-            ln_lambda_cat[1] = np.full(n_model, -np.inf, dtype=np.float32)
             ln_l[1] = np.full(n_model, -np.inf, dtype=np.float64)
             ln_l_report[1] = np.full(n_model, -np.inf, dtype=np.float64)
             ln_gamma_ml[1] = np.zeros(n_model, dtype=np.float64)
@@ -717,22 +770,14 @@ def _source_task(i):
             ln_ev_measured = float(logsumexp(s0_arr))
             ln_ev_nondet = float(logsumexp(s1_arr))
 
-        # C7 brief Part B: LN_PRIOR_MASS reduces over templates exactly as
-        # S0 -- the mixture over the two designs (no further weight, the
-        # sightline's own cell weight already makes the two designs' prior
-        # terms sum to the single-law one), then logsumexp over every
-        # template (no p_theta reweighting, since this carries no
-        # photometry: every template's own prior weight is already inside
-        # `ln_lambda_cat` through the factor term, exactly how `ln_ev_measured`
-        # reduces `s0_arr`). Computed unconditionally, like the old
-        # density-table `ln_prior_mass` -- a flagged fit's own degenerate
-        # `a_hat`/`sigma_a_ak` reads back a clean `-inf` through `_cell_sum`'s
-        # own `sig <= 0`/NaN-comparison guards, never a NaN.
-        ln_lambda_cat_64 = [x.astype(np.float64) for x in ln_lambda_cat]
-        s_cat_k = np.stack(ln_lambda_cat_64, axis=0)               # (2, m)
-        with np.errstate(invalid="ignore"):
-            s_cat_arr = logsumexp(s_cat_k, axis=0)                 # (m,)
-            ln_prior_mass = float(logsumexp(s_cat_arr))
+        # C7 rework (2026-10-20): LN_PRIOR_MASS is a pure lookup now, not a
+        # per-source computation -- `w["ln_prior_mass"]` is this {region,
+        # class}'s own (n_source,) array, read once in the parent off
+        # bmstp.atlas's prior atlas (`_prior_mass_by_source`, called from
+        # `build_region_class`), one value per source's own sky pixel.
+        # NaN where the source's pixel is not one of the atlas's admitted
+        # pixels (counted separately, `n_prior_mass_unmapped`).
+        ln_prior_mass = float(w["ln_prior_mass"][i])
 
         good = not combined_flagged
 
@@ -1149,7 +1194,7 @@ def build_region_class(config, region, cls, st, reader, catalog,
     `catalog` is `_load_region_catalog`'s one whole-region read,
     also loaded once by `build` and shared across classes.
     """
-    template_log, n_sub, subclass_prob, dark_bands = _register(config, cls)
+    template_log, n_sub, subclass_prob = _register(config, cls)
     n_model = template_log.shape[0]
     # computed once, in the parent, never per source (rule 8): `ln
     # p_theta,k`, `-inf` where a template carries no mass in that
@@ -1172,8 +1217,16 @@ def build_region_class(config, region, cls, st, reader, catalog,
     sigma_lib_l = likelihood.sigma_lib_by_class(lib_path)[cls]
 
     n_source = catalog["flux"].shape[0]
+    # C7 rework: the atlas lookup covers the FULL region, row-aligned to
+    # every other per-source array here, regardless of `--limit` (a
+    # timing/acceptance device on the sweep loop below, never on what
+    # this reads) -- captured before `n_source` is clipped.
+    ln_prior_mass_by_source, prior_mass_matched = _prior_mass_by_source(config, region, cls, n_source)
     if limit is not None:
         n_source = min(n_source, limit)
+    # the unmapped count `st.done` reports is over THIS run's own swept
+    # rows only (0..n_source-1 post-`--limit`), not the whole region.
+    n_prior_mass_unmapped = int(np.count_nonzero(~prior_mass_matched[:n_source]))
 
     # item 8's memory disclosure: printed once, at the top of this stage, from
     # closed-form cost plus one documented constant -- no RAM measurement, no
@@ -1204,7 +1257,7 @@ def build_region_class(config, region, cls, st, reader, catalog,
 
     _set_worker_state(config=config, cls=cls, reader=reader, gaia_term=gaia_term,
                        template_log=template_log, ln_subclass_prob=ln_subclass_prob, n_sub=n_sub,
-                       dark_bands=dark_bands,
+                       ln_prior_mass=ln_prior_mass_by_source,
                        topk=topk, n_model=n_model,
                        sigma_lib_l=sigma_lib_l,
                        flux=catalog["flux"], sigma=catalog["sigma"], origin=catalog["origin"],
@@ -1239,14 +1292,17 @@ def build_region_class(config, region, cls, st, reader, catalog,
             _write_part(_part_path(path, bi), batch, cls)
             st.tick(bi + 1, len(batch_bounds), "batches")
 
-    return _summary(config, region, cls, n_source, n_model)
+    return _summary(config, region, cls, n_source, n_model,
+                    n_prior_mass_unmapped=n_prior_mass_unmapped)
 
 
-def _summary(config, region, cls, n_source, n_model):
+def _summary(config, region, cls, n_source, n_model, n_prior_mass_unmapped=None):
     """The numbers `join_parts` and the report need for one {region,
     class}, shared by a sweep and by a join-only call (`build`'s
     `join_only`), which sweeps nothing and so has no sweep to take them
-    from."""
+    from. `n_prior_mass_unmapped` (C7 rework) is `None` for the
+    join-only path -- it never computed `LN_PRIOR_MASS`'s own source-to-
+    pixel mapping, so there is nothing to report."""
     path = config_module.product_path(config, "fittp", "fit", cls, "source", region=region)
     density_file = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
     lib, granule = prior_reader._LIB[cls]
@@ -1258,6 +1314,7 @@ def _summary(config, region, cls, n_source, n_model):
         n_batches=(n_source + batch_size - 1) // batch_size,
         subclasses=definitions.SUBCLASSES_OF[cls], library=definitions.CLASS_REGISTER[cls],
         density_file=density_file, weights_file=weights_file,
+        n_prior_mass_unmapped=n_prior_mass_unmapped,
     )
 
 
@@ -1386,7 +1443,8 @@ def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=N
                         zero_ext_frac=joined["zero_ext_frac"], occam_gap_median=occam_median,
                         n_batches=summary["n_batches"], n_failed=joined["n_failed"],
                         id1_max_err=joined["id1_max_err"], id1_mean_err=joined["id1_mean_err"],
-                        id1_n_checked=joined["id1_n_checked"], id1_n_undefined=joined["id1_n_undefined"])
+                        id1_n_checked=joined["id1_n_checked"], id1_n_undefined=joined["id1_n_undefined"],
+                        n_prior_mass_unmapped=summary["n_prior_mass_unmapped"])
     for cls in class_codes:
         progress.summary("fittp.sweep.%s" % cls, len(region_names), t0)
 
