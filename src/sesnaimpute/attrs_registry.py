@@ -221,6 +221,12 @@ REGISTRY = {
         "the H2-shock population: its dimmed intrinsic density weighted "
         "by the probability of clearing SESNA's two-of-eight-band "
         "detection rule at this pixel's own depth."),
+    ("prior_atlas_hpx512", "N_CAT_PAHN"): ("objects per square degree",
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "the PAHN (star-less PAH nebular source) population: its "
+        "measured curve (population.pahn) at this pixel's own 8 micron "
+        "50%-completeness limit, weighted by the probability of "
+        "clearing SESNA's two-of-eight-band detection rule."),
     ("prior_atlas_hpx512", "INTENSITY_YSO"): ("objects per square degree",
         "For the matching pixel in HPX_PIX_512, the YSO population's own "
         "dimmed intrinsic density at this pixel's own column, before the "
@@ -260,6 +266,12 @@ REGISTRY = {
         "pixel's own I2 (4.5 micron) 50%-completeness flux, read "
         "directly from the class's own stored shape rather than from "
         "the cataloged-detection fraction."),
+    ("prior_atlas_hpx512", "N_ABOVE_PAHN"): ("objects per square degree",
+        "For the matching pixel in HPX_PIX_512, how much of the PAHN "
+        "population's own intrinsic density lies above this pixel's own "
+        "I2 (4.5 micron) 50%-completeness flux, read directly from the "
+        "class's own stored shape rather than from the cataloged-"
+        "detection fraction."),
     ("prior_atlas_hpx512", "N_CAT_CELL_GAL"): ("objects",
         "For the matching pixel in HPX_PIX_512, the background-galaxy "
         "population's own expected cataloged count on the common "
@@ -290,6 +302,11 @@ REGISTRY = {
         "population's own expected cataloged count on the common "
         "(log10 xi, log10 F_4.5) grid: summing every cell gives this "
         "pixel's own RATIO_H2S times the region's source count."),
+    ("prior_atlas_hpx512", "N_CAT_CELL_PAHN"): ("objects",
+        "For the matching pixel in HPX_PIX_512, the PAHN population's "
+        "own expected cataloged count on the common (log10 xi, "
+        "log10 F_4.5) grid: summing every cell gives this pixel's own "
+        "RATIO_PAHN times the region's source count."),
     ("prior_atlas_hpx512", "N_CELL_STAR"): ("objects",
         "For the matching pixel in HPX_PIX_512, the STAR population's "
         "own unthinned intrinsic count on the common (log10 xi, "
@@ -328,6 +345,12 @@ REGISTRY = {
         "member's own probability of being cataloged set to one (no "
         "flux cut, no dimming), so N_CAT_CELL_H2S never exceeds this "
         "cell by cell."),
+    ("prior_atlas_hpx512", "N_CELL_PAHN"): ("objects",
+        "For the matching pixel in HPX_PIX_512, the PAHN population's "
+        "own unthinned intrinsic count on the common (log10 xi, "
+        "log10 F_4.5) grid: the expected count with every member's own "
+        "probability of being cataloged set to one (no flux cut, no "
+        "dimming), so N_CAT_CELL_PAHN never exceeds this cell by cell."),
     ("prior_atlas_hpx512", "SHARE_STAR"): ("dimensionless",
         "For the matching pixel in HPX_PIX_512, the STAR population's "
         "own share of this pixel's total cataloged density: N_CAT_STAR "
@@ -359,6 +382,10 @@ REGISTRY = {
         "population's own share of this pixel's total cataloged "
         "density: N_CAT_H2S divided by the sum of N_CAT_<class> over "
         "every class."),
+    ("prior_atlas_hpx512", "SHARE_PAHN"): ("dimensionless",
+        "For the matching pixel in HPX_PIX_512, the PAHN population's "
+        "own share of this pixel's total cataloged density: N_CAT_PAHN "
+        "divided by the sum of N_CAT_<class> over every class."),
 
     # bmstp.density -- table_density_source (P1): one row per curated
     # source, its column, grain indices, detection limits and the six sky
