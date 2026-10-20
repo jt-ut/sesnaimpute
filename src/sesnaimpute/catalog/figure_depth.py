@@ -129,11 +129,18 @@ def _read_depth_pixels(config, region):
 def _median_pixel_row(pix, f_lim):
     """The row whose own 4.5 um (`I2`) limit is closest to the region's
     median 4.5 um limit -- one actual pixel's own eight-band set, not an
-    average over pixels (module docstring)."""
+    average over pixels (module docstring). Restricted to pixels actually
+    on the I2 map (`fifty_percent_pixel` finite): most of this region's
+    own admitted pixels can be off a given Spitzer band's own footprint
+    (measured: 26 of NGC 7129's 32), and the median/argmin of an array
+    that is mostly `+inf` is itself `+inf`/NaN."""
     i2 = f_lim[:, _I2_INDEX]
-    median = float(np.median(i2))
-    row = int(np.argmin(np.abs(i2 - median)))
-    return row, pix[row]
+    covered = np.flatnonzero(np.isfinite(i2))
+    if covered.size == 0:
+        raise ValueError("catalog.figure_depth: no admitted pixel is on the I2 map")
+    median = float(np.median(i2[covered]))
+    row = covered[int(np.argmin(np.abs(i2[covered] - median)))]
+    return int(row), pix[row]
 
 
 #: The completeness level each direct label sits at, on its own curve
@@ -174,12 +181,16 @@ def _draw_completeness_panel(fig, rect_in, page_w, page_h, f_lim_row, w_row):
     """Panel 1: each band's own completeness curve at the median pixel,
     `_completeness` against `log10` flux (mJy), viridis in wavelength
     order, a dotted 50% line, each line labelled directly on its own
-    curve near its right end (`_label_positions`)."""
+    curve near its right end (`_label_positions`). A band this pixel is
+    off the map of (`f_lim_row` `+inf`, `catalog.depth_grid`'s never-NaN
+    convention) draws no curve and no label: there is no completeness
+    to show there, and `+inf` would make the axis limits `+inf`."""
     ax = fig.add_axes([rect_in[0] / page_w, rect_in[1] / page_h,
                         rect_in[2] / page_w, rect_in[3] / page_h])
     log10_f50 = np.log10(f_lim_row)
-    x_min = float(np.min(log10_f50 - 5.0 * w_row))
-    x_max = float(np.max(log10_f50 + 5.0 * w_row))
+    surveyed = np.isfinite(log10_f50)
+    x_min = float(np.min((log10_f50 - 5.0 * w_row)[surveyed]))
+    x_max = float(np.max((log10_f50 + 5.0 * w_row)[surveyed]))
     x_grid = np.linspace(x_min, x_max, 600)
 
     cmap = plt.get_cmap("viridis")
@@ -187,13 +198,15 @@ def _draw_completeness_panel(fig, rect_in, page_w, page_h, f_lim_row, w_row):
     colors = [cmap(i / (n_bands - 1)) for i in range(n_bands)]
 
     for j in range(n_bands):
+        if not surveyed[j]:
+            continue
         y = _completeness(x_grid, log10_f50[j], w_row[j])
         ax.plot(x_grid, y, color=colors[j], lw=1.8, zorder=3)
 
-    label_x, label_y = _label_positions(log10_f50, w_row)
+    label_x, label_y = _label_positions(log10_f50[surveyed], w_row[surveyed])
     outline = [path_effects.withStroke(linewidth=2.5, foreground="white")]
-    for j in range(n_bands):
-        ax.text(label_x[j], label_y[j], _BAND_LABELS[j], fontsize=10.5, fontweight="bold",
+    for k, j in enumerate(np.flatnonzero(surveyed)):
+        ax.text(label_x[k], label_y[k], _BAND_LABELS[j], fontsize=10.5, fontweight="bold",
                 color=colors[j], va="center", ha="center", zorder=4, path_effects=outline)
 
     ax.axhline(0.5, color="grey", lw=1.0, linestyle=":", zorder=1)
