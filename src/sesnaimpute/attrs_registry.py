@@ -1291,6 +1291,53 @@ REGISTRY = {
         "micron excess and measured 3.6 and 4.5 micron photometry fall "
         "in it: P_Q_DISK_EXCESS's own denominator."),
 
+    # population.pahn -- density_pahn_region: the star-less PAH nebular
+    # source population's own sky density DENSITY_PAHN(limit), one row
+    # per region, bins on one shared axis (C14_pahn_population.md).
+    ("density_pahn_region", "LOG10_LIM_EDGES"): ("log10 mJy",
+        "The edges of the bins this density is tabulated on, in "
+        "log10(the pixel's own 8 micron 50%-completeness flux, mJy): "
+        "bin j runs from LOG10_LIM_EDGES[j] to LOG10_LIM_EDGES[j+1], 0.1 "
+        "dex wide, one shared axis for every region in this file."),
+    ("density_pahn_region", "REGION"): ("name",
+        "The region name of each row of every per-region array in this "
+        "product, in the order those arrays are indexed on their first "
+        "axis."),
+    ("density_pahn_region", "DENSITY_PAHN"): ("objects per square degree",
+        "For each region (rows, REGION) and bin of LOG10_LIM_EDGES "
+        "(columns): the sky density of the PAHN pattern -- a catalogued "
+        "source with a measured 5.8 and 8 micron flux and no measured "
+        "3.6 or 4.5 micron flux -- among this region's own admitted "
+        "pixels whose own 8 micron 50%-completeness limit falls in this "
+        "bin: the total pattern count there divided by the total "
+        "covered area there. NaN in a bin no admitted pixel's own limit "
+        "reaches. An upper bound: the pattern count also contains any "
+        "true protostar too faint at 3.6 and 4.5 to detect, and "
+        "artefacts."),
+    ("density_pahn_region", "N_PER_BIN"): ("sources",
+        "For each region and bin of LOG10_LIM_EDGES, the total pattern "
+        "count DENSITY_PAHN in that bin rests on. An upper bound: the "
+        "pattern count also contains any true protostar too faint at "
+        "3.6 and 4.5 to detect, and artefacts."),
+    ("density_pahn_region", "POISSON_LO"): ("objects per square degree",
+        "The lower edge of the standard 68% (Garwood) Poisson confidence "
+        "interval on DENSITY_PAHN, from N_PER_BIN's own raw count, on "
+        "the same density scale."),
+    ("density_pahn_region", "POISSON_HI"): ("objects per square degree",
+        "The upper edge of the standard 68% (Garwood) Poisson confidence "
+        "interval on DENSITY_PAHN, from N_PER_BIN's own raw count, on "
+        "the same density scale."),
+    ("density_pahn_region", "AREA_DEG2_PER_BIN"): ("square degrees",
+        "For each region and bin of LOG10_LIM_EDGES, the total covered "
+        "area (the any-IRAC union coverage fraction times the nside-512 "
+        "pixel area, summed over every admitted pixel in that bin) "
+        "DENSITY_PAHN divides N_PER_BIN by."),
+    ("density_pahn_region", "PATTERN_COUNT_REGION"): ("sources",
+        "For each region, the total pattern count over every admitted "
+        "pixel, before binning: N_PER_BIN's own column sum. An upper "
+        "bound: the pattern count also contains any true protostar too "
+        "faint at 3.6 and 4.5 to detect, and artefacts."),
+
     # sky.derived.column -- the adopted (gas) column and the extinction
     # (star-light) column, each at source and sightline granule, plus the
     # Herschel/Planck disagreement check.

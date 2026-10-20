@@ -84,6 +84,7 @@ CLASSES = (
     ModelClass("STAR", "Bare stellar photosphere (no disk, envelope or PAH excess)"),
     ModelClass("AGB", "Dusty evolved star: AGB/RSG photosphere + circumstellar dust shell (GRAMS)"),
     ModelClass("PAHC", "Field star whose aperture contains extended PAH emission"),
+    ModelClass("PAHN", "Extended PAH nebular emission with no star in the aperture (a patch of PAH-bright nebulosity extracted as a point source)"),   # after PAHC in CLASSES
     ModelClass("GAL", "Unresolved background galaxy (extragalactic contaminant)"),
     ModelClass("YSO", "Young stellar object (Richardson 2024 / Robitaille 2017 RT grid)"),
     ModelClass("H2S", "Shocked molecular hydrogen (H2) emission knot in a protostellar outflow"),
@@ -103,6 +104,7 @@ CLASSMAP = (
     ModelSubclass("AGB", "O", "Oxygen-rich: silicate dust, C/O < 1 (GRAMS O-rich, Sargent+2011)"),
     ModelSubclass("AGB", "C", "Carbon-rich: amorphous carbon + 10% SiC, C/O > 1 (GRAMS C-rich, Srinivasan+2011)"),
     ModelSubclass("PAHC", "NONE", "No subclass: one population, distinguished only by grid axes"),
+    ModelSubclass("PAHN", "NONE", "No subclass: one population, distinguished only by grid axes"),   # after PAHC's in CLASSMAP
     ModelSubclass("GAL", "AGN", "Power-law continuum: EW(6.2um) <= 0.2 um, inside Donley wedge"),
     ModelSubclass("GAL", "PAH", "Aromatic-dominated star formation: EW(6.2um) > 0.5 um"),
     ModelSubclass("GAL", "COMP", "Composite AGN + star formation: 0.2 < EW(6.2um) <= 0.5 um"),
@@ -140,6 +142,7 @@ SUBCLASSES_OF = {c.code: tuple(s.name for s in CLASSMAP if s.cls == c.code) for 
 CLASS_REGISTER = {
     "STAR": "sps", "AGB": "agb", "PAHC": "pahc",
     "GAL": "galz", "YSO": "yso", "H2S": "h2shock",
+    "PAHN": "pahn",   # CLASS_REGISTER
 }
 
 
