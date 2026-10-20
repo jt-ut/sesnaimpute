@@ -380,8 +380,12 @@ def _prior_mass_by_source(config, region, cls, n_source):
     capped = np.clip(loc, 0, max(atlas_pix.size - 1, 0))
     matched = (atlas_pix.size > 0) & (atlas_pix[capped] == pix512)
     ln_prior_mass = np.full(n_source, np.nan, dtype=np.float32)
+    # bmstp.atlas's own Monte Carlo quadrature can leave a true zero as a
+    # tiny negative float (measured: YSO as low as -4.8e-18 at an admitted
+    # pixel) -- clipped at 0 before the log so that reads -inf (a zero
+    # count, correctly), never NaN from log of a negative number.
     with np.errstate(divide="ignore"):
-        ln_n_cat = np.log(n_cat[capped])
+        ln_n_cat = np.log(np.maximum(n_cat[capped], 0.0))
     ln_prior_mass[matched] = ln_n_cat[matched].astype(np.float32)
     return ln_prior_mass, matched
 
