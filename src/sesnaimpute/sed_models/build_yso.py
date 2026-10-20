@@ -51,26 +51,48 @@ STAGES, each printing its removals or counts:
                           column-only; `yso_curation_state.seed_registry`)
     2. gates              aperture gate (`yso_aperture`), 1 Myr PMS gate
                           (`yso_pms`), each printing removals per stage
-    3. labeling + dedup   hard label per gated row (Stage from
+    3a. labeling          hard label per gated row (Stage from
                           info.fits; TD carved by the Gutermuth 2009
                           24um criterion as `yso_labeling.
                           compute_td_fraction` already defines it;
                           FLAT relabelled from Spectral Index, Greene
                           et al. 1994's -0.3/+0.3 band, overriding
-                          Stage/TD); dedup against `sps/_raw/` by the
-                          SAME metric the r-net below uses -- nearest-
-                          neighbour distance in the whitened quotient
-                          space, `yso_dedup.duplicate_mask`, ONE
-                          cKDTree over the 4,066 SPS points and one
+                          Stage/TD)
+    3b. dedup (a FLAG, not a removal -- owner's ruling, 2026-10-20).
+                          The YSO class is Stage 0/I/II/transition-disc
+                          AND Stage III, and a bare photosphere's class
+                          is decided by distance, extinction and sky
+                          position (the prior's geometry and the Gaia
+                          term), not by its photometry -- so a disk
+                          model whose SED cannot be told from a `sps/
+                          _raw/` photosphere at the fitter's resolution
+                          is NOT a wrong class to carry, it is the
+                          correct statement that STAR and YSO share that
+                          template. Removing it (the pre-2026-10-20
+                          behaviour below) enforced "no two classes
+                          share a template" -- the wrong rule, and its
+                          removal silently handed a diskless cloud
+                          member to the nearest edge-on disk model
+                          instead. Measured the SAME metric the r-net
+                          below uses -- nearest-neighbour distance in
+                          the whitened quotient space to the nearest
+                          `sps/_raw/` model, `yso_dedup.duplicate_mask`,
+                          ONE cKDTree over the 4,066 SPS points and one
                           batched query, not a sedfitter chi^2 fit (the
                           coordinator's 2026-10-08 ruling: the retired
                           `sed_fit`-based metric's register lookup has
-                          no meaning for an unregistered raw splice)
+                          no meaning for an unregistered raw splice).
+                          The result is carried as PHOTOSPHERE_DUPLICATE/
+                          PHOTOSPHERE_DISTANCE (register `/models`
+                          columns) and N_MEMBERS_PHOTOSPHERE_DUPLICATE
+                          (members table), and overrides the hard label
+                          to CIII regardless of Stage/TD/FLAT.
     4. r-net              ONE global sequential r-net at radius 1 in
                           the whitened quotient space
                           (`sed_models.sampling`, Unit S), no strata,
-                          no budget, over every gated+non-duplicate
-                          model
+                          no budget, over every gated model, photosphere
+                          duplicates included (nothing is removed by
+                          stage 3b any more)
     5. members + assembly FRAC_<subclass> and parameter ranges per kept
                           template (`sampling.members_table`); library
                           files for the kept templates only
@@ -101,10 +123,13 @@ or failure) -- no state file outlives this process.
 
 ACCEPTANCE (asserted here, numbers printed at the end): coverage max
 distance under 1.0 with zero uncovered gated models; packing >= 1.0;
-members' N_MEMBERS sums to the gated+non-dup count; every kept template
-has its own parameters row; FRAC columns sum to one per kept template;
-the register opens with h5py and its n_model equals the kept count; the
-package imports.
+members' N_MEMBERS sums to the gated count (no dedup removal any more);
+every kept template has its own parameters row; FRAC columns sum to one
+per kept template; the register opens with h5py and its n_model equals
+the kept count; the register's /models carries PHOTOSPHERE_DUPLICATE
+(uint8, {0,1}) and PHOTOSPHERE_DISTANCE (float32), and the members
+table's N_MEMBERS_PHOTOSPHERE_DUPLICATE sums to the gated pool's own
+duplicate count; the package imports.
 ====================================================================
 """
 
@@ -476,7 +501,12 @@ def run_labeling_and_features(ingest, eligible_pregate, pms_mass, yso_root, verb
 
 # ==========================================================================
 # STAGE 3b -- DEDUP: the r-net's own metric against sps/_raw/ (coordinator
-# ruling 2026-10-08 -- NOT sed_fit; see yso_dedup.py's module docstring)
+# ruling 2026-10-08 -- NOT sed_fit; see yso_dedup.py's module docstring).
+# A FLAG, not a removal (owner's ruling, 2026-10-20 -- see this module's
+# own top docstring, stage 3b, and yso_dedup.py's module docstring): a
+# photosphere-indistinguishable model is a correct YSO template, not a
+# duplicate to drop, because a bare photosphere's class comes from
+# distance/extinction/sky position, not its photometry.
 # ==========================================================================
 
 def run_dedup(model_id, mu, dark_mask, dedup_source, radius=R_NET_RADIUS, verbose=True):
