@@ -59,18 +59,20 @@ class Completeness:
 
     def __init__(self, h5file):
         self._f = h5file
-        self.mag_grid = np.asarray(h5file["MAG_GRID"][:], dtype=np.float64)
         self.source_row = np.asarray(h5file["SOURCE_ROW"][:], dtype=np.int64)
         self.hpx_pix_512 = np.asarray(h5file["HPX_PIX_512"][:], dtype=np.int64)
         self._ac = {}
         self._curve = {}
         self._pixel_curve = {}
         self._mag_grid_band = {}
+        # Corrections 2026-10-20.md item 1: ONE canonical grid PER BAND
+        # (no grid shared across bands any more), read from that band's
+        # own MAG_GRID_<band>.
         for band in IRAC_MIPS_KEYS:
             zp = h5file[f"CURVE_{band}"].attrs["ZERO_POINT_JY"]
-            self._mag_grid_band[band] = self.mag_grid
-            self._ac[band] = _band_ac(float(self.mag_grid[0]),
-                                       float(self.mag_grid[1] - self.mag_grid[0]), zp)
+            grid = np.asarray(h5file[f"MAG_GRID_{band}"][:], dtype=np.float64)
+            self._mag_grid_band[band] = grid
+            self._ac[band] = _band_ac(float(grid[0]), float(grid[1] - grid[0]), zp)
             self._curve[band] = h5file[f"CURVE_{band}"]
             self._pixel_curve[band] = h5file[f"PIXEL_CURVE_{band}"]
         for band in TWOMASS_KEYS:

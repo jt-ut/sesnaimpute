@@ -215,29 +215,31 @@ def lookup(config, region, band, ra_deg, dec_deg, n_jobs=1, maps=None):
 
 TWOMASS_KEYS = ("J", "H", "Ks")
 
-#: The design note's own canonical magnitude grid for the five Spitzer
-#: bands' CURVE_<B>/PIXEL_CURVE_<B>: 4.75 + 0.5*k, k = 0..28, applied the
-#: same for every band and region so the one on-disk layout and the one
-#: numba kernel (catalog/limits.py) never branch on either. Measured
-#: against the raw FITS headers (catalog/completeness.py's own module
-#: docstring): a field's own native grid can start brighter (CRVAL3 as
-#: low as 0.25, chiefly M1 and a few IRAC fields) or extend fainter
-#: (to 19.75) than this one. `_resample_field_cube` clamps a field's own
-#: curve to its OWN plane-0 value brightward of this grid's 4.75 and to 0
-#: faintward of its own last measured plane -- so a field whose own
-#: native range starts brighter than 4.75 has that bright excess
-#: (completeness already at or near 1 there, measured on every field
-#: inspected) folded into this grid's own plane 0 rather than lost: the
-#: clamp reads as "no fainter than this grid's bright edge", which for a
-#: field whose own curve is still at its bright plateau there costs
-#: nothing. A field whose own curve has ALREADY rolled off by 4.75 (none
-#: measured in this brief's two test regions) would instead have that
-#: roll-off clipped to the plane-0 value -- see the module's own report
-#: for which regions/bands this could still touch on a full build.
-CANON_MAG0 = 4.75
+#: Corrections 2026-10-20 (COMPLETENESS_2026-10-20.md "Corrections", item
+#: 1): a single fixed 29-plane, CRVAL3=4.75 grid for every band was read
+#: off four files, not measured survey-wide; the real grid is ONE PER
+#: BAND, spanning that band's own survey-wide range -- independently
+#: confirmed here over every one of the survey's 440 cube files (first
+#: plane / last plane / plane count): I1 4.75..19.75 (31), I2 3.75..18.75
+#: (31), I3 1.25..16.75 (32), I4 1.75..16.25 (30), M1 0.25..12.25 (25).
+#: CRPIX3=1.0 and CD3_3=0.5 hold everywhere (measured, no exceptions), so
+#: every field's own native grid shares this grid's exact phase: a
+#: field's own plane k lands at this grid's own index `offset + k` for an
+#: EXACT integer `offset`, never a fraction -- `_place_field_cube` below
+#: places it there directly, no interpolation, ever.
+BAND_MAG_RANGE = {
+    "I1": (4.75, 19.75), "I2": (3.75, 18.75), "I3": (1.25, 16.75),
+    "I4": (1.75, 16.25), "M1": (0.25, 12.25),
+}
 CANON_DMAG = 0.5
-CANON_N = 29
-CANON_MAG_GRID = CANON_MAG0 + CANON_DMAG * np.arange(CANON_N)
+
+
+def _band_mag_grid(band):
+    """This band's own canonical magnitude grid (`BAND_MAG_RANGE`,
+    `CANON_DMAG`-spaced)."""
+    lo, hi = BAND_MAG_RANGE[band]
+    n = int(round((hi - lo) / CANON_DMAG)) + 1
+    return lo + CANON_DMAG * np.arange(n)
 
 #: The 2MASS tabulation's own fine grid step (COMPLETENESS_2026-10-20.md
 #: "The reader": "0.05 mag, so the interpolation error of a w ~ 0.1 mag
@@ -370,30 +372,33 @@ def completeness_many(curves, rows, m0, dm, n, log10_f, a, c, scale):
     return out
 
 
-def _resample_field_cube(field_map):
-    """`field_map.cube` (n_mag, ny, nx), on its own (mag0, dmag) grid, onto
-    `CANON_MAG_GRID`: linear in magnitude between the field's own plane
-    centres, clamped to the field's own plane-0 value brightward of its
-    own grid and to 0 strictly faintward of its own last plane (brief
-    step 6: the last plane ITSELF keeps its own measured value -- only a
-    canonical magnitude beyond it is extrapolated to 0).
-    One pass per canonical plane (at most 29), each a plain array
-    operation over the whole field -- not a per-pixel loop.
+def _place_field_cube(field_map, band):
+    """Places `field_map.cube` (n_mag, ny, nx), on its own (mag0, dmag)
+    grid, onto `band`'s own canonical grid (`_band_mag_grid`) by EXACT
+    plane alignment -- Corrections 2026-10-20.md item 1: "each field
+    placed by exact plane alignment (no resampling)". Every field's own
+    `mag0` differs from the band grid's own first plane by an exact
+    integer number of `CANON_DMAG` steps (both share the same phase,
+    CRPIX3=1.0/CD3_3=0.5 everywhere, measured): `offset` below is always
+    an exact integer, never rounded. Brightward of the field's own first
+    plane: the field's own first value (the design's own rule). Faintward
+    of the field's own last plane: 0 here, as a placeholder -- `build`
+    calls `_complete_curve` afterward to replace it wherever the field's
+    own curve had not reached 0 on its own (Corrections 2026-10-20.md
+    item 2).
     """
-    n_native = field_map.n_mag
-    native_mags = field_map.mag0 + field_map.dmag * np.arange(n_native)
-    out = np.empty((CANON_N,) + field_map.cube.shape[1:], dtype=np.float32)
-    for k, mag in enumerate(CANON_MAG_GRID):
-        if mag <= native_mags[0]:
-            out[k] = field_map.cube[0]
-        elif mag == native_mags[-1]:
-            out[k] = field_map.cube[-1]
-        elif mag > native_mags[-1]:
-            out[k] = 0.0
-        else:
-            j = min(int(np.searchsorted(native_mags, mag, side="right") - 1), n_native - 2)
-            t = (mag - native_mags[j]) / field_map.dmag
-            out[k] = (1.0 - t) * field_map.cube[j] + t * field_map.cube[j + 1]
+    grid = _band_mag_grid(band)
+    n_band = grid.size
+    offset = int(round((field_map.mag0 - grid[0]) / CANON_DMAG))
+    if offset < 0 or offset + field_map.n_mag > n_band:
+        raise ValueError(
+            "catalog.completeness: field %r's own grid (mag0=%r, n=%d) does not fit inside "
+            "band %r's canonical grid (%r..%r, n=%d) -- BAND_MAG_RANGE is stale"
+            % (field_map.field, field_map.mag0, field_map.n_mag, band, grid[0], grid[-1], n_band))
+    out = np.zeros((n_band,) + field_map.cube.shape[1:], dtype=np.float32)
+    if offset > 0:
+        out[:offset] = field_map.cube[0]
+    out[offset:offset + field_map.n_mag] = field_map.cube
     return out
 
 
@@ -538,14 +543,16 @@ def build(config, regions=None):
                 corr_lengths = {}
                 n_pix_total = 0
                 for bi, band in enumerate(IRAC_MIPS_KEYS):
+                    grid = _band_mag_grid(band)
+                    n_band = grid.size
                     maps = field_maps(config, region, band)
                     row_chunks, row_index_maps = [], []
                     offset = 0
                     field_corrs = []
                     for m in maps:
-                        resampled = _resample_field_cube(m)
+                        placed = _place_field_cube(m, band)
                         iy_on, ix_on = np.where(m.on_map)
-                        row_chunks.append(resampled[:, iy_on, ix_on].T)
+                        row_chunks.append(placed[:, iy_on, ix_on].T)
                         row_map = np.full((m.ny, m.nx), -1, dtype=np.int64)
                         row_map[iy_on, ix_on] = offset + np.arange(iy_on.size)
                         row_index_maps.append(row_map)
@@ -554,12 +561,14 @@ def build(config, regions=None):
                     corr_lengths[band] = float(np.nanmean(field_corrs)) if field_corrs else float("nan")
 
                     curve_vals = (np.concatenate(row_chunks, axis=0) if row_chunks
-                                  else np.empty((0, CANON_N), dtype=np.float32))
+                                  else np.empty((0, n_band), dtype=np.float32))
                     n_pix_total += curve_vals.shape[0]
                     dset = build_module.write_dataset(
                         f, f"CURVE_{band}", _to_uint16(curve_vals),
                         *REGISTRY[("completeness_sesna_source", f"CURVE_{band}")])
                     dset.attrs["ZERO_POINT_JY"] = band_keys[band].vega_zero_point_jy
+                    build_module.write_dataset(f, f"MAG_GRID_{band}", grid,
+                                                *REGISTRY[("completeness_sesna_source", f"MAG_GRID_{band}")])
 
                     field_idx, iy, ix = lookup(config, region, band, ra_deg, dec_deg,
                                                 n_jobs=config.n_jobs, maps=maps)
@@ -569,7 +578,7 @@ def build(config, regions=None):
                                                     n_jobs=config.n_jobs, maps=maps)
                     prows = _row_for_positions(pfield_idx, piy, pix_, row_index_maps)
                     pon = prows >= 0
-                    pixel_curve = np.zeros((admitted.size, CANON_N), dtype=np.float32)
+                    pixel_curve = np.zeros((admitted.size, n_band), dtype=np.float32)
                     if pon.any():
                         pixel_curve[pon] = curve_vals[prows[pon]]
                     pixel_frac = pon.astype(np.float32)
@@ -580,8 +589,6 @@ def build(config, regions=None):
                         f, f"PIXEL_COVERED_FRAC_{band}", pixel_frac,
                         *REGISTRY[("completeness_sesna_source", f"PIXEL_COVERED_FRAC_{band}")])
 
-                build_module.write_dataset(f, "MAG_GRID", CANON_MAG_GRID,
-                                            *REGISTRY[("completeness_sesna_source", "MAG_GRID")])
                 build_module.write_dataset(f, "SOURCE_ROW", source_row,
                                             *REGISTRY[("completeness_sesna_source", "SOURCE_ROW")])
                 build_module.write_dataset(f, "HPX_PIX_512", admitted,

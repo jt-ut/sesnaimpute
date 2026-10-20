@@ -1995,26 +1995,50 @@ REGISTRY = {
 
     # catalog.completeness -- completeness_sesna_source: Rob Gutermuth's
     # own measured completeness curves, per region (COMPLETENESS_2026-10-
-    # 20.md "The reader: layout and kernel"; replaces catalog.depth_grid's
-    # limit/width role and limits_sesna_source/depth-grid_sesna_hpx512).
-    # CURVE_I1..CURVE_M1, SOURCE_ROW and MAG_GRID share one convention per
-    # band -- see catalog/completeness.py's own module docstring for the
-    # exact canonical grid and its own measured caveats.
+    # 20.md "The reader: layout and kernel", amended by that file's own
+    # "Corrections 2026-10-20"; replaces catalog.depth_grid's limit/width
+    # role and limits_sesna_source/depth-grid_sesna_hpx512). CURVE_<band>,
+    # SOURCE_ROW and MAG_GRID_<band> share one convention per band -- see
+    # catalog/completeness.py's own module docstring for the exact
+    # per-band canonical grid (Corrections item 1) and the completion rule
+    # (item 2).
     ("completeness_sesna_source", "CURVE_I1"): ("completeness fraction x600, uint16",
         "One row per on-map 30-arcsec pixel of this region's own I1 (3.6 "
         "micron) fields, field-major order: the differential completeness "
-        "fraction (0..1) at each of MAG_GRID's 29 magnitudes, stored as the "
-        "fraction times 600 (lossless: every measured value is an exact "
-        "multiple of 1/600). catalog.limits.completeness's kernel divides "
-        "by 600 once per evaluation; no other reader divides directly."),
+        "fraction (0..1) at each of MAG_GRID_I1's own magnitudes, stored as "
+        "the fraction times 600 (lossless: every MEASURED value is an exact "
+        "multiple of 1/600; a COMPLETED plane, where COMPLETED_FROM_I1 is "
+        "not NaN, is the band's own median roll-off template and is not "
+        "itself guaranteed an exact multiple, but is stored the same way). "
+        "catalog.limits.completeness's kernel divides by 600 once per "
+        "evaluation; no other reader divides directly."),
     ("completeness_sesna_source", "CURVE_I2"): ("completeness fraction x600, uint16",
-        "Same meaning as CURVE_I1, for I2 (4.5 micron)."),
+        "Same meaning as CURVE_I1, for I2 (4.5 micron) (MAG_GRID_I2, "
+        "COMPLETED_FROM_I2)."),
     ("completeness_sesna_source", "CURVE_I3"): ("completeness fraction x600, uint16",
-        "Same meaning as CURVE_I1, for I3 (5.8 micron)."),
+        "Same meaning as CURVE_I1, for I3 (5.8 micron) (MAG_GRID_I3, "
+        "COMPLETED_FROM_I3)."),
     ("completeness_sesna_source", "CURVE_I4"): ("completeness fraction x600, uint16",
-        "Same meaning as CURVE_I1, for I4 (8.0 micron)."),
+        "Same meaning as CURVE_I1, for I4 (8.0 micron) (MAG_GRID_I4, "
+        "COMPLETED_FROM_I4)."),
     ("completeness_sesna_source", "CURVE_M1"): ("completeness fraction x600, uint16",
-        "Same meaning as CURVE_I1, for M1 (24 micron)."),
+        "Same meaning as CURVE_I1, for M1 (24 micron) (MAG_GRID_M1, "
+        "COMPLETED_FROM_M1)."),
+    ("completeness_sesna_source", "COMPLETED_FROM_I1"): ("mag, Vega",
+        "For each row of CURVE_I1, the magnitude of the FIRST plane that is "
+        "not this pixel's own measurement but the band's own median "
+        "roll-off template continued from its last measured value "
+        "(Corrections 2026-10-20.md item 2: Rob's own cube for this pixel's "
+        "field was cut off before reaching 0); NaN where the measured curve "
+        "reached 0 on its own, nothing here completed."),
+    ("completeness_sesna_source", "COMPLETED_FROM_I2"): ("mag, Vega",
+        "Same meaning as COMPLETED_FROM_I1, for I2 (4.5 micron)."),
+    ("completeness_sesna_source", "COMPLETED_FROM_I3"): ("mag, Vega",
+        "Same meaning as COMPLETED_FROM_I1, for I3 (5.8 micron)."),
+    ("completeness_sesna_source", "COMPLETED_FROM_I4"): ("mag, Vega",
+        "Same meaning as COMPLETED_FROM_I1, for I4 (8.0 micron)."),
+    ("completeness_sesna_source", "COMPLETED_FROM_M1"): ("mag, Vega",
+        "Same meaning as COMPLETED_FROM_I1, for M1 (24 micron)."),
     ("completeness_sesna_source", "SOURCE_ROW"): ("row index into CURVE_<band>",
         "For every curated source and each of the five Spitzer bands (I1, "
         "I2, I3, I4, M1, this dataset's own column order), the row of that "
@@ -2025,8 +2049,8 @@ REGISTRY = {
     ("completeness_sesna_source", "PIXEL_CURVE_I1"): ("dimensionless (completeness fraction, 0..1)",
         "For each of this region's admitted nside-512 pixels (HPX_PIX_512, "
         "nested ordering, this file's own admitted-pixel axis), the I1 (3.6 "
-        "micron) completeness curve at MAG_GRID's 29 magnitudes of the one "
-        "30-arcsec completeness pixel whose own footprint contains this "
+        "micron) completeness curve at MAG_GRID_I1's own magnitudes of the "
+        "one 30-arcsec completeness pixel whose own footprint contains this "
         "nside-512 pixel's centre (CURVE_I1's own row, read directly, cast "
         "to a float fraction); all zero where PIXEL_COVERED_FRAC_I1 is 0."),
     ("completeness_sesna_source", "PIXEL_CURVE_I2"): ("dimensionless (completeness fraction, 0..1)",
@@ -2051,13 +2075,24 @@ REGISTRY = {
         "Same meaning as PIXEL_COVERED_FRAC_I1, for I4 (8.0 micron)."),
     ("completeness_sesna_source", "PIXEL_COVERED_FRAC_M1"): ("boolean (0.0 or 1.0)",
         "Same meaning as PIXEL_COVERED_FRAC_I1, for M1 (24 micron)."),
-    ("completeness_sesna_source", "MAG_GRID"): ("mag, Vega",
-        "The 29 magnitudes CURVE_I1..CURVE_M1 and PIXEL_CURVE_I1..PIXEL_"
-        "CURVE_M1's own column order are measured at: 4.75 + 0.5*k, k = "
-        "0..28 (catalog/completeness.py's own canonical grid; a field "
-        "whose own native magnitude grid differs is resampled onto this "
-        "one, clamped to its own bright/faint edge -- see that module's "
-        "docstring for which bands and fields this clamp actually binds)."),
+    ("completeness_sesna_source", "MAG_GRID_I1"): ("mag, Vega",
+        "The magnitudes CURVE_I1 and PIXEL_CURVE_I1's own column order are "
+        "measured at: I1's own survey-wide canonical grid, 4.75..19.75 mag "
+        "in 0.5-mag steps (Corrections 2026-10-20.md item 1, measured over "
+        "every one of the survey's own I1 cubes); a field's own native grid "
+        "is placed here by EXACT plane alignment, never resampled -- "
+        "brightward of a field's own first plane, that field's own first "
+        "value; faintward of its own last measured plane, the band's own "
+        "template continuation (COMPLETED_FROM_I1) or that field's own "
+        "measured 0."),
+    ("completeness_sesna_source", "MAG_GRID_I2"): ("mag, Vega",
+        "Same meaning as MAG_GRID_I1, for I2: 3.75..18.75 mag."),
+    ("completeness_sesna_source", "MAG_GRID_I3"): ("mag, Vega",
+        "Same meaning as MAG_GRID_I1, for I3: 1.25..16.75 mag."),
+    ("completeness_sesna_source", "MAG_GRID_I4"): ("mag, Vega",
+        "Same meaning as MAG_GRID_I1, for I4: 1.75..16.25 mag."),
+    ("completeness_sesna_source", "MAG_GRID_M1"): ("mag, Vega",
+        "Same meaning as MAG_GRID_I1, for M1: 0.25..12.25 mag."),
     ("completeness_sesna_source", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
         "This region's own admitted nside-512 pixel numbers (nested "
         "ordering), ascending -- the same admission rule as "
