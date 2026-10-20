@@ -36,6 +36,28 @@ whole census's own `ALPHA0` slope fractions, independent of region.
 Writes `population/yso/law_yso_region.hdf5` (unchanged path/name); no
 `KAPPA_HERSCHEL`/`KAPPA_PLANCK` dataset is written any more -- a reader
 that still expects one fails loudly, which is the point.
+
+The diskless Class III members (owner's ruling 2026-10-20, `bms_review/
+briefs/round4_2026-10-20/C11_yso_class3_population.md`): `KAPPA_USED`
+and `CLASS_SHARE_PROTO/DISK/WEAK` above count only the EXCESS-SELECTED
+census (what every Spitzer census can see); the published disk fraction
+at the region's age (`regions.Region.disk_fraction`, `.age_myr`, C12's
+own literature table) gives the diskless share the excess count
+implies: `DISK_FRACTION` (per region, 1.0 -- the identity case -- for a
+region with no published value applied), `N_LAW_TOTAL_FACTOR = 1 /
+DISK_FRACTION` (the factor `population.yso.law_count`/`law_area_
+integral` multiply the excess law by to read the TOTAL young-star
+level -- every reader of the level, `bmstp.density`'s `DENSITY_YSO`,
+`population.young_stars`'s anchor subtraction and `bmstp.atlas`, follows
+through that one pair of functions, no change of their own), and
+`CLASS_SHARE_DISKLESS = 1 - DISK_FRACTION` (this region's diskless share
+of the TOTAL population, read by `bmstp.template_weights`'s own fourth
+{CIII} census group). `disk_fraction`/`n_law_total_factor`/`class_share_
+diskless` below are the one place every reader of these three reads
+from. CLASS_SHARE_PROTO/DISK/WEAK themselves are left as fitted -- "the
+three census shares become shares of the total" is a report-time
+identity (each times DISK_FRACTION, the fourth being CLASS_SHARE_
+DISKLESS, so the four sum to 1 per region), not a second stored copy.
 """
 
 import os
@@ -344,6 +366,37 @@ def build(config, regions=None):
                 kappa_pooled, law_band_dex = np.nan, np.nan
             fitted = [names[i] for i in range(len(names)) if np.isfinite(rows[names[i]]["kappa"])]
             kappa_used = np.where(fitted_all, kappa_region, kappa_pooled)
+
+            # the young-star law's diskless Class III share (owner's
+            # ruling 2026-10-20): DISK_FRACTION is `regions.py`'s own
+            # per-region value (1.0, the identity case, for every region
+            # with no published age/disk-fraction applied there),
+            # carried over the WHOLE 30-region canonical order on every
+            # call -- unlike KAPPA_REGION/N_CENSUS_REGION (this call's
+            # own `names` only), there is nothing here to FIT, so there
+            # is no "untouched region" to leave alone: every row is
+            # simply read straight off `regions.py` again. N_LAW_TOTAL_
+            # FACTOR/CLASS_SHARE_DISKLESS follow algebraically; where
+            # DISK_FRACTION = 1, N_LAW_TOTAL_FACTOR = 1 and CLASS_SHARE_
+            # DISKLESS = 0, so `population.yso.law_count`/`law_area_
+            # integral` (the one place every reader of the level follows
+            # through) and `bmstp.template_weights`'s fourth {CIII} group
+            # change nothing for that region (the Identities section's
+            # own bit-identical check). CLASS_SHARE_PROTO/DISK/WEAK
+            # themselves are left exactly as fitted above -- shares of
+            # the EXCESS-SELECTED census alone, read as-is by
+            # `bmstp.template_weights.yso_population_weight` (survey-
+            # wide, unchanged); "shares of the total" (CLASS_SHARE_PROTO/
+            # DISK/WEAK each times DISK_FRACTION, so the four sum to 1 per
+            # region) is a report-time identity, printed below, not a
+            # second stored copy of these three numbers.
+            all_names = [r.name for r in regions_module.REGIONS]
+            disk_fraction = np.array(
+                [regions_module.REGIONS_BY_NAME[r].disk_fraction for r in all_names],
+                dtype=np.float64)
+            n_law_total_factor = 1.0 / disk_fraction
+            class_share_diskless = 1.0 - disk_fraction
+
             for name, value in (
                 ("KAPPA_USED", kappa_used),
                 ("KAPPA_POOLED", np.float64(kappa_pooled)),
@@ -351,6 +404,9 @@ def build(config, regions=None):
                 ("CLASS_SHARE_PROTO", np.float64(proto)),
                 ("CLASS_SHARE_DISK", np.float64(disk)),
                 ("CLASS_SHARE_WEAK", np.float64(weak)),
+                ("DISK_FRACTION", disk_fraction),
+                ("N_LAW_TOTAL_FACTOR", n_law_total_factor),
+                ("CLASS_SHARE_DISKLESS", class_share_diskless),
             ):
                 if name in f:
                     del f[name]
@@ -380,7 +436,80 @@ def build(config, regions=None):
           % (kappa_pooled, law_band_dex, len(fitted)))
     print("CLASS_SHARE_PROTO=%.4f CLASS_SHARE_DISK=%.4f CLASS_SHARE_WEAK=%.4f"
           % (proto, disk, weak))
+
+    # the diskless Class III share (owner's ruling 2026-10-20): report-
+    # time only -- "shares of the total" is never a second stored copy
+    # of CLASS_SHARE_PROTO/DISK/WEAK, printed here per processed region
+    # as the identity check the brief's own Identities section names
+    # ("the four shares sum to 1 for every region").
+    print("region                    DISK_FRACTION  N_LAW_TOTAL_FACTOR  "
+          "PROTO_of_total  DISK_of_total  WEAK_of_total  DISKLESS  sum")
+    for region in names:
+        df = float(regions_module.REGIONS_BY_NAME[region].disk_fraction)
+        proto_tot, disk_tot, weak_tot = proto * df, disk * df, weak * df
+        diskless_tot = 1.0 - df
+        total = proto_tot + disk_tot + weak_tot + diskless_tot
+        print("%-25s %13.4f  %18.4f  %14.4f  %13.4f  %13.4f  %8.4f  %.10f"
+              % (region, df, 1.0 / df, proto_tot, disk_tot, weak_tot, diskless_tot, total))
     return path
+
+
+# ====================================================================
+# accessors -- the one place every reader of DISK_FRACTION/N_LAW_TOTAL_
+# FACTOR/CLASS_SHARE_DISKLESS reads from, never regions.py directly for
+# the two derived quantities (CODING_RULES.md: one stored number, one
+# reader convention) -- cached per (config, region) the same way `yso.
+# _kappa_used` caches KAPPA_USED. A NaN on disk (a region this file's
+# own last build never touched -- a fresh product with no build yet, or
+# a build that restricted `regions` to a subset not including this one)
+# reads back as the identity value: DISK_FRACTION=1.0, N_LAW_TOTAL_
+# FACTOR=1.0, CLASS_SHARE_DISKLESS=0.0, never a propagated NaN.
+# ====================================================================
+
+_LAW_ROW_CACHE = {}
+
+
+def _law_row(config, region, name, identity_value):
+    key = (id(config), region, name)
+    if key not in _LAW_ROW_CACHE:
+        path = config_module.product_path(config, "population", "yso", "law", "region")
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                "population.yso_law: law product missing at %s -- run the "
+                "'sesnaimpute.population.yso_law' RUNBOOK line first" % path)
+        with h5py.File(path, "r") as f:
+            if name not in f:
+                raise KeyError(
+                    "population.yso_law: %s lacks %s -- run the "
+                    "'sesnaimpute.population.yso_law' RUNBOOK line first" % (path, name))
+            region_names = [v.decode("utf-8") if isinstance(v, bytes) else str(v)
+                            for v in f["REGION"][:]]
+            if region not in region_names:
+                raise ValueError("population.yso_law: region %r has no row in %s"
+                                  % (region, path))
+            value = float(f[name][region_names.index(region)])
+        _LAW_ROW_CACHE[key] = identity_value if not np.isfinite(value) else value
+    return _LAW_ROW_CACHE[key]
+
+
+def disk_fraction(config, region):
+    """This region's own DISK_FRACTION (module docstring, owner's ruling
+    2026-10-20) off `law_yso_region.hdf5` -- 1.0 (identity) where the row
+    is NaN (no build has touched this region's row yet)."""
+    return _law_row(config, region, "DISK_FRACTION", 1.0)
+
+
+def n_law_total_factor(config, region):
+    """This region's own N_LAW_TOTAL_FACTOR = 1 / disk_fraction(config,
+    region) -- 1.0 (no change) at the identity case."""
+    return 1.0 / disk_fraction(config, region)
+
+
+def class_share_diskless(config, region):
+    """This region's own CLASS_SHARE_DISKLESS = 1 - disk_fraction(config,
+    region) off `law_yso_region.hdf5` -- 0.0 (no diskless members) at the
+    identity case."""
+    return _law_row(config, region, "CLASS_SHARE_DISKLESS", 0.0)
 
 
 if __name__ == "__main__":
