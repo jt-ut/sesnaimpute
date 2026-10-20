@@ -84,7 +84,7 @@ CLASSES = (
     ModelClass("STAR", "Bare stellar photosphere (no disk, envelope or PAH excess)"),
     ModelClass("AGB", "Dusty evolved star: AGB/RSG photosphere + circumstellar dust shell (GRAMS)"),
     ModelClass("PAHC", "Field star whose aperture contains extended PAH emission"),
-    ModelClass("PAHN", "Extended PAH nebular emission with no star in the aperture (a knot of PAH-bright nebulosity extracted as a point source)"),
+    ModelClass("PAHN", "Extended PAH nebular emission with no star in the aperture (a patch of PAH-bright nebulosity extracted as a point source)"),
     ModelClass("GAL", "Unresolved background galaxy (extragalactic contaminant)"),
     ModelClass("YSO", "Young stellar object (Richardson 2024 / Robitaille 2017 RT grid)"),
     ModelClass("H2S", "Shocked molecular hydrogen (H2) emission knot in a protostellar outflow"),
