@@ -29,7 +29,7 @@ VOCABULARY = (
      "the fraction of its sixteen nside-2048 sub-pixels holding a cataloged "
      "source with an IRAC detection)"),
     ("class C",
-     "one of STAR, AGB, PAHC, YSO, H2S, GAL"),
+     "one of STAR, AGB, PAHC, PAHN, YSO, H2S, GAL"),
     ("intensity A_C(s)",
      "the prior's sky density of class C at s, per square degree, before the "
      "survey's selection"),
@@ -59,15 +59,15 @@ VOCABULARY = (
 SHAPES_ROW1 = (
     "Top row, per class: P(C, cell | s), the prior probability that a "
     "source at s is of class C and lies in the cell at ($\\hat{\\xi}$, F_4.5); "
-    "one log color scale for the six panels.")
+    "one log color scale for the seven panels.")
 SHAPES_ROW2 = (
     "Bottom row, per class: P(C | cell, s) = Lambda_C(cell) / sum over classes of "
     "Lambda(cell) -- the prior probability that a source at s known to lie in "
     "the parameter cell at ($\\hat{\\xi}$, F_4.5) is of class C. Where every class is at "
-    "the common floor the six shares are equal: the prior places no source "
-    "there. Each cell is drawn at opacity 1 − H / ln 6, H the entropy of the six "
+    "the common floor the seven shares are equal: the prior places no source "
+    "there. Each cell is drawn at opacity 1 − H / ln 7, H the entropy of the seven "
     "shares: solid where the prior decides the class, faded to white where it is "
-    "blind (every class at the common floor, the six shares equal), drawn white "
+    "blind (every class at the common floor, the seven shares equal), drawn white "
     "where the class has no share.")
 SHAPES_MEASURED = (
     "$\\hat{\\xi}$ = â_s / A_s, the fitted foreground extinction as a fraction of the "
@@ -100,7 +100,7 @@ ATLAS_SELECTION_TOTAL = (
 SHAPES_REGION_ROW1 = (
     "Each panel: N_C(cell), the number of selected objects of class C the "
     "prior expects in the region per parameter cell (ξ, F_4.5), summed "
-    "over the region's sources; one log color scale for the six panels, "
+    "over the region's sources; one log color scale for the seven panels, "
     "white at one millionth of the row's peak. The dotted line is the "
     "region's median 4.5 µm 50 % completeness limit; the dashed line "
     "is ξ = 1.")

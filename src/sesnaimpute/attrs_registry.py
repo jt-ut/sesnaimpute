@@ -2834,8 +2834,9 @@ REGISTRY = {
         "brightness and depth."),
     ("posterior_classification_source", "P_CLASS"): ("probability",
         "Probability of each class: field star, dusty evolved star, "
-        "nebula-contaminated aperture, background galaxy, young stellar object, "
-        "shocked gas knot. Column order is the CLASSES attribute. Sums to 1."),
+        "nebula-contaminated aperture, PAH nebular source (no star in the "
+        "aperture), background galaxy, young stellar object, shocked gas knot. "
+        "Column order is the CLASSES attribute. Sums to 1."),
     ("posterior_classification_source", "P_SUBCLASS"): ("probability",
         "Probability of each of 25 subclasses, named class and subclass in the "
         "SUBCLASSES attribute: field stars by spectral type O to T, evolved stars "
@@ -2850,7 +2851,7 @@ REGISTRY = {
     ("posterior_classification_source", "LOG_ODDS_PRIOR"): ("nats",
         "The part of LOG_ODDS that comes from the prior: from the prior atlas at "
         "this source's sky pixel (the pixel's mean column, not the source's own), "
-        "the prior odds of this class against the other five, before this "
+        "the prior odds of this class against the other six, before this "
         "source's own measurements are used. LOG_ODDS_PRIOR + LOG_ODDS_DATA = "
         "LOG_ODDS."),
     ("posterior_classification_source", "LOG_ODDS_DATA"): ("nats",
@@ -2882,8 +2883,8 @@ REGISTRY = {
         "Probability that the source is a young stellar object: the young stellar "
         "object column of P_CLASS."),
     ("posterior_classification_source", "ENTROPY_CLASS"): ("fraction of maximum",
-        "How spread the six class probabilities are, divided by their maximum "
-        "spread. 0 means one class takes all the probability, 1 means all six are "
+        "How spread the seven class probabilities are, divided by their maximum "
+        "spread. 0 means one class takes all the probability, 1 means all seven are "
         "equally likely."),
     ("posterior_classification_source", "ENTROPY_SUBCLASS"): ("fraction of maximum",
         "How spread the 25 subclass probabilities are, divided by their maximum "
@@ -2971,15 +2972,18 @@ REGISTRY = {
         "attribute. Sums to 1; the unclassified column is the chance that no cut "
         "applies."),
     ("cascade_classification_source", "PSI_VOTES"): ("votes",
-        "Four indicators, each casting one vote across the six classes in CLASSES "
+        "Four indicators, each casting one vote across the seven classes in CLASSES "
         "order: the class mix expected at the source's position, Gaia's detection "
         "and parallax, the Gutermuth color cuts on the measured fluxes, and those "
         "cuts on the filled-in spectrum. An indicator with nothing to say abstains, "
-        "so a row sums to between 0 and 4. Reported only; the classification does "
-        "not use it."),
+        "so a row sums to between 0 and 4. The PAH nebular source class has no star "
+        "and so no rule in the Gutermuth color cuts (its own two bands, 3.6 and 4.5 "
+        "micron, are exactly the two this class is defined by not having): the two "
+        "color-cut indicators never vote for it, only the class-mix and Gaia "
+        "indicators can. Reported only; the classification does not use it."),
     ("cascade_classification_source", "ENTROPY_PSI_VOTES"): ("fraction of maximum",
         "How spread those votes are, divided by their maximum spread. 0 means the "
-        "indicators that voted agreed, 1 means they spread evenly over the six "
+        "indicators that voted agreed, 1 means they spread evenly over the seven "
         "classes. Not a number where none voted."),
 
     # fittp.library_resolution -- library-resolution_check_survey: whether
@@ -3013,7 +3017,7 @@ REGISTRY = {
 
 # --- fittp.sweep -- <CLS>_fit_source (P7): one file per {region, class},
 # the class evidence, imputed flux and top-K posterior record. The same
-# dataset names and readings repeat in every one of the six classes' own
+# dataset names and readings repeat in every one of the seven classes' own
 # files (moved from fittp/sweep.py's own _READINGS, READINGS brief section
 # 3), so they are filled once here and copied to each class's own stem --
 # `fittp.sweep`'s own STEM, computed the same way `config.product_path`
@@ -3084,7 +3088,7 @@ _SWEEP_FIT_READINGS = {
         "atlas: the class's population at the pixel's mean column, each member "
         "weighted by its probability of clearing two of eight bands at the "
         "pixel's own completeness curves; the pixel's mean column, not the "
-        "source's own. No photometry. Divided across the six classes it gives "
+        "source's own. No photometry. Divided across the seven classes it gives "
         "each class's prior probability."),
     "FRAC_CLAMPED": ("fraction",
         "The support-weighted fraction of this class's models whose best fit called "

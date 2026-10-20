@@ -102,7 +102,7 @@ def build_region(config, region, st):
 
 def write_region(path, result):
     """`MEAN_P_<CLASS>`'s own reading is generated here from one sentence
-    template and `_CLASS_WORDS`, not stored as six copied sentences in
+    template and `_CLASS_WORDS`, not stored as seven copied sentences in
     `attrs_registry.REGISTRY` (READINGS brief section 3: the other five
     writers' readings move there, this one stays local since its text
     itself varies by class and the template is the one home for it);
@@ -122,6 +122,7 @@ def write_region(path, result):
     }
     _CLASS_WORDS = {"STAR": "a field star", "AGB": "a dusty evolved star",
                     "PAHC": "a nebula-contaminated aperture",
+                    "PAHN": "a PAH nebular source with no star in the aperture",
                     "GAL": "a background galaxy", "YSO": "a young stellar object",
                     "H2S": "a shocked gas knot"}
     for cls in CLASSES:

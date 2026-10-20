@@ -21,7 +21,7 @@ region's own display-grid aspect. The prior atlas is two pages per
 region, one code path (`_build_prior_page`) parameterised by `view`:
 `prior-atlas-intrinsic_<R>` reads the product's `N_ABOVE_C` (the density
 above the pixel's own 4.5 um 50% completeness limit, SPEC_BMSTP_DRAFT.md
-sec. 8) for the column-B density panel `Sigma_C N_ABOVE_C` and the six
+sec. 8) for the column-B density panel `Sigma_C N_ABOVE_C` and the seven
 class panels `N_ABOVE_C / Sigma N_ABOVE`; `prior-atlas-
 selection_<R>` reads `N_CAT_C` (catalogued density) for the same slots,
 `Sigma_C N_CAT_C` hatched where the surveyed IRAC-coverage fraction is
@@ -29,16 +29,17 @@ below 0.5. `atlas.captions` states which probability each class panel
 draws and the shared vocabulary; both are printed below the panel grid,
 the page growing taller to hold them rather than shrinking the type.
 The posterior figure carries the column `A_K`, the posterior
-mean `MEAN_P_C` per class in class order, and `N_YSO_ABOVE_HALF` -- 8
+mean `MEAN_P_C` per class in class order, and `N_YSO_ABOVE_HALF` -- 9
 panels. An admitted pixel with no sources of its own (P11's
 `N_SOURCES == 0`, or a pixel P11 omits) is painted flat neutral grey on
 every posterior-derived panel, masked out before the Gaussian smoothing
 so it never bleeds into an occupied neighbour's own value, rather than
 dropped as transparent; the posterior figure's caption says so. All
-three pages' 8 panels fill the SAME fixed four-column, two-stacked-panel
-grid (A/B | C/D | E/F | G/H: A = column, B = the row-1 counterpart --
+three pages' 9 panels fill the SAME fixed five-column, two-stacked-panel
+grid (A/B | C/D | E/F | G/H | I/- : A = column, B = the row-1 counterpart --
 the density panel for a prior page, the posterior YSO count for the
-posterior page -- C..H the six classes in the same column pairing),
+posterior page -- C..I the seven classes in the same column pairing,
+I's own bottom slot empty),
 each page's own panel scale derived from its region's aspect
 (`_atlas_page_size` below). The prior selection page's predicted/
 observed ratio and bright-source ratios, and the posterior figure's
@@ -50,7 +51,7 @@ describe it.
 Colour maps and scales follow the convention the earlier package's own
 sky-atlas figure used (`sesnacomplete.bms_prior.validation.sky_atlas`):
 the measured column on `magma`, every class quantity (share, posterior
-mean) on `viridis`. A prior page's six class panels draw a PROBABILITY,
+mean) on `viridis`. A prior page's seven class panels draw a PROBABILITY,
 of order one where a class holds the pixel, but each panel gets its OWN
 LINEAR colour bar spanning its own finite range, ticked automatically
 (`_panel_norm`): a shared 0-1 bar paints a rare class's whole spatial
@@ -60,7 +61,7 @@ and density panels keep their own log scale. That earlier figure's own `page_geo
 into the panel when the footprint leaves clear room for one and sizes a
 3x2 class block plus one wide dust panel to fill a page that grows to
 fit its content; here every panel of both figures is an equal member of
-the same fixed 4x2 grid, its own colour-bar strip inset into its own
+the same fixed 5x2 grid, its own colour-bar strip inset into its own
 right edge (`_panel_colorbar`) rather than a free-floating rectangle,
 and the page itself (`_atlas_page_size`) is sized to that grid's own
 content at the region's own aspect, so the panels always fill the page
@@ -95,7 +96,13 @@ from sesnaimpute.catalog import depth_grid as depth_grid_module
 from sesnaimpute.atlas import captions
 
 NSIDE = 512
-CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
+#: PAHN sits in its own, fifth column, beside H2S's (C15 ruling,
+#: 2026-10-20): the fixed layout below (`_build_prior_page`,
+#: `build_posterior_region`) grows from a 4x2 to a 5x2 panel grid to
+#: hold it, its own column's bottom slot left empty (`_outer_rows`
+#: already handles a partial last row, so nothing else here special-
+#: cases the seventh class).
+CLASSES = ("STAR", "AGB", "PAHC", "PAHN", "GAL", "YSO", "H2S")
 
 #: Panel titles, axis labels and colourbar labels at a size a reader
 #: sees on a slide; tick labels smaller -- the convention of every atlas
@@ -578,7 +585,7 @@ def _panel_norm(grid):
     panel: a rare class's whole probability range can sit within one
     tenth of that shared scale, painting its spatial structure in a
     single flat colour, so each panel is left to find its own range and
-    its own automatic ticks, at the cost of the six panels no longer
+    its own automatic ticks, at the cost of the seven panels no longer
     being directly comparable to each other."""
     finite = grid[np.isfinite(grid)]
     if finite.size == 0:
@@ -651,8 +658,8 @@ def _require_depth_grid(config, region):
 
 
 def _build_prior_page(config, region, formats, view, prior=None, footprint_pix=None, geom_grid=None):
-    """Writes one prior-atlas page (8 panels: column, the class-summed
-    density, the six class panels) under `bmstp/atlas/figures/` --
+    """Writes one prior-atlas page (9 panels: column, the class-summed
+    density, the seven class panels) under `bmstp/atlas/figures/` --
     `prior-atlas-intrinsic_<R>` (`A_C`, before the survey's selection) or
     `prior-atlas-selection_<R>` (`N_CAT_C`, after it), `view` selecting
     which stored quantity feeds the density and class panels (`VIEWS`)
@@ -705,23 +712,30 @@ def _build_prior_page(config, region, formats, view, prior=None, footprint_pix=N
         share_grids = [_reproject(footprint_pix, share_aligned[:, i], grid_pix, shape)
                        for i in range(len(CLASSES))]
 
-        # Fixed layout: four columns of two
-        # stacked panels, A/B | C/D | E/F | G/H -- A = column, B = the
-        # view's density, C = GAL, D = STAR, E = PAHC, F = AGB, G = YSO,
-        # H = H2S. Row-major fill into a 4-column grid puts the top row
-        # at [A, C, E, G] and the bottom row at [B, D, F, H], which is
-        # exactly this column pairing. Each class panel draws on its OWN
-        # linear scale, spanning its own pixel's range (`_panel_norm`),
-        # not a scale shared across the six, so a rare class's spatial
-        # structure is visible rather than flattened to one colour.
+        # Fixed layout: five columns of two
+        # stacked panels, A/B | C/D | E/F | G/H | I/- -- A = column, B =
+        # the view's density, C = GAL, D = STAR, E = PAHC, F = AGB, G =
+        # YSO, H = H2S, I = PAHN (C15 ruling, 2026-10-20: PAHN's own
+        # fifth column, beside H2S's; its own column's bottom slot (row
+        # 2) is left empty -- nine panels into ten slots -- rather than
+        # paired with a seventh existing class, since none is spare).
+        # Row-major fill into a 5-column grid puts the top row at
+        # [A, C, E, G, I] and the bottom row at [B, D, F, H], which is
+        # exactly this column pairing (`_outer_rows` already reads
+        # column I's own last row as row 0, its only occupant, so its
+        # RA tick labels show there rather than nowhere). Each class
+        # panel draws on its OWN linear scale, spanning its own pixel's
+        # range (`_panel_norm`), not a scale shared across the seven, so
+        # a rare class's spatial structure is visible rather than
+        # flattened to one colour.
         def _class_panel(cls):
             idx = CLASSES.index(cls)
             # The share as computed, on that panel's own linear scale:
             # nothing is clipped, and the colour bar's automatic ticks
             # read off whatever range this class actually spans.
-            # No per-panel colour-bar label: the probability the six
+            # No per-panel colour-bar label: the probability the seven
             # class panels draw is stated once, in the group heading
-            # above them (`spec["group_heading"]`), not repeated six
+            # above them (`spec["group_heading"]`), not repeated seven
             # times beside each bar.
             return dict(data=share_grids[idx], cmap="viridis", norm=_panel_norm(share_grids[idx]), title=cls,
                         cbar_label=None, hatch=None, cbar_ticks=None)
@@ -736,7 +750,8 @@ def _build_prior_page(config, region, formats, view, prior=None, footprint_pix=N
         density_panel = dict(data=density_grid, cmap="viridis", norm=_log_norm(density_grid),
                               title=density_title, cbar_label=None, hatch=hatch, cbar_ticks=None)
         panels = [col_panel, _class_panel("GAL"), _class_panel("PAHC"), _class_panel("YSO"),
-                  density_panel, _class_panel("STAR"), _class_panel("AGB"), _class_panel("H2S")]
+                  _class_panel("PAHN"), density_panel, _class_panel("STAR"), _class_panel("AGB"),
+                  _class_panel("H2S")]
         n_panels = len(panels)
 
         # The selection page's own caption lines, in addition to the
@@ -761,13 +776,13 @@ def _build_prior_page(config, region, formats, view, prior=None, footprint_pix=N
             extra_lines.append("Per-class total-count ratio: " + ", ".join(
                 "%s %.3g" % (cls, ratio) for cls, ratio in ratios))
 
-        # The panel grid is sized to the fixed 4x2 layout's content
-        # first; the caption block (below the grid) then grows the
-        # page's OWN height by exactly what it needs, so the grid itself
-        # never shrinks to make room.
+        # The panel grid is sized to the fixed 5x2 layout's content
+        # first (PAHN's own fifth column, C15 ruling); the caption block
+        # (below the grid) then grows the page's OWN height by exactly
+        # what it needs, so the grid itself never shrinks to make room.
         aspect = geom_grid["n_x"] / float(geom_grid["n_y"])
         page_w, page_h, geom = _atlas_page_size(
-            aspect, col_gaps=[SEPARATOR_GAP_IN, GAP_X_IN, GAP_X_IN])
+            aspect, cols=5, col_gaps=[SEPARATOR_GAP_IN, GAP_X_IN, GAP_X_IN, GAP_X_IN])
         extra_block = "\n".join(extra_lines) if extra_lines else None
         caption_text, caption_h = _caption_layout(_caption_block(view, extra_line=extra_block), page_w)
         page_h_total = page_h + caption_h
@@ -799,15 +814,19 @@ def _build_prior_page(config, region, formats, view, prior=None, footprint_pix=N
                   caption_text, fontsize=CAPTION_FONT_SIZE, va="top", ha="left")
 
         # The separator rule, between the left column (col_panel/
-        # density_panel, index 0) and the three class columns (indices
-        # 1-3): one thin vertical line centred in `SEPARATOR_GAP_IN`,
-        # from the bottom of the lower panel to the top of the upper
-        # panel's title strip -- both rows share that span regardless of
-        # column, since every panel in the grid is the same height.
+        # density_panel, index 0) and the four class columns (indices
+        # 1-4, the last -- PAHN's -- added by the C15 ruling): one thin
+        # vertical line centred in `SEPARATOR_GAP_IN`, from the bottom of
+        # the lower panel to the top of the upper panel's title strip --
+        # both rows share that span regardless of column, since every
+        # panel in the grid is the same height. `density_panel` is now
+        # panel index 5 (PAHN's own panel, index 4, sits between YSO and
+        # it in the panels list), so `bottom_rect` reads that index, not
+        # 4.
         left_rect = _panel_rect(geom, 0, page_w, page_h)
         col1_rect = _panel_rect(geom, 1, page_w, page_h)
-        col3_rect = _panel_rect(geom, 3, page_w, page_h)
-        bottom_rect = _panel_rect(geom, 4, page_w, page_h)
+        col4_rect = _panel_rect(geom, 4, page_w, page_h)
+        bottom_rect = _panel_rect(geom, 5, page_w, page_h)
         content_h = geom["rows"] * (geom["panel_h"] + geom["title_h"]) + (geom["rows"] - 1) * GAP_Y_IN
         sep_x_in = left_rect[0] + geom["panel_w"] + geom["bar_w"] + SEPARATOR_GAP_IN / 2.0
         sep_y0_in = bottom_rect[1] + caption_h
@@ -817,10 +836,10 @@ def _build_prior_page(config, region, formats, view, prior=None, footprint_pix=N
                                transform=fig.transFigure, color="0.6", linewidth=0.8))
 
         # The page title at the top of the page and the group heading
-        # centred over the three class columns, just above the panel
-        # grid's own top edge -- both bold, independent of the region's
-        # own aspect.
-        heading_x_in = 0.5 * (col1_rect[0] + col3_rect[0] + geom["panel_w"] + geom["bar_w"])
+        # centred over the four class columns (GAL/PAHC/YSO/PAHN), just
+        # above the panel grid's own top edge -- both bold, independent
+        # of the region's own aspect.
+        heading_x_in = 0.5 * (col1_rect[0] + col4_rect[0] + geom["panel_w"] + geom["bar_w"])
         fig.text(0.5, (page_h_total - TITLE_TOP_PAD_IN) / page_h_total,
                   spec["page_title"] % region, fontsize=TITLE_FONTSIZE, fontweight="bold",
                   va="top", ha="center")
@@ -867,10 +886,10 @@ def build_prior_selection_region(config, region, formats, prior=None, footprint_
 
 
 def build_posterior_region(config, region, formats, prior=None, footprint_pix=None, geom_grid=None):
-    """Writes the posterior-atlas figure (P11, 8 panels: column, the six
+    """Writes the posterior-atlas figure (P11, 9 panels: column, the seven
     posterior means, the posterior YSO count) under `fittp/atlas/figures/`,
     on the SAME footprint as the prior figure's own (`catalog.depth_grid`)
-    and the SAME fixed 4x2 layout the prior figure uses, so the two
+    and the SAME fixed 5x2 layout the prior figure uses, so the two
     pages read as one pair. The column panel reuses P6's own `A_COL_K`
     (P11 carries no column), so this figure needs the prior atlas too.
     `prior`/`footprint_pix`/`geom_grid`, when given (`build`'s own
@@ -914,13 +933,15 @@ def build_posterior_region(config, region, formats, prior=None, footprint_pix=No
         gap_grid = _gap_grid(footprint_pix, gap_1d, grid_pix, shape)
 
         # Fixed layout, the same one the
-        # prior figure uses: four columns of two stacked panels, A/B |
-        # C/D | E/F | G/H -- A = column, B = the posterior YSO count in
-        # the prior figure's "density" slot, C = GAL, D = STAR, E =
-        # PAHC, F = AGB, G = YSO, H = H2S. Every posterior-derived panel
-        # (not the column, which P6 defines for every admitted pixel
-        # regardless of source count) is painted grey at a source-less
-        # pixel.
+        # prior figure uses: five columns of two stacked panels, A/B |
+        # C/D | E/F | G/H | I/- -- A = column, B = the posterior YSO
+        # count in the prior figure's "density" slot, C = GAL, D = STAR,
+        # E = PAHC, F = AGB, G = YSO, H = H2S, I = PAHN (C15 ruling,
+        # 2026-10-20: PAHN's own fifth column beside H2S's, its bottom
+        # slot left empty, same as the prior figure's own layout).
+        # Every posterior-derived panel (not the column, which P6
+        # defines for every admitted pixel regardless of source count)
+        # is painted grey at a source-less pixel.
         def _class_panel(cls):
             idx = CLASSES.index(cls)
             return dict(data=mean_grids[idx], cmap="viridis", norm=None, title=cls,
@@ -938,12 +959,13 @@ def build_posterior_region(config, region, formats, prior=None, footprint_pix=No
                            title=plot_style.label("Posterior YSO Count", None),
                            cbar_label=None, grey=gap_grid)
         panels = [col_panel, _class_panel("GAL"), _class_panel("PAHC"), _class_panel("YSO"),
-                  nyso_panel, _class_panel("STAR"), _class_panel("AGB"), _class_panel("H2S")]
+                  _class_panel("PAHN"), nyso_panel, _class_panel("STAR"), _class_panel("AGB"),
+                  _class_panel("H2S")]
         n_panels = len(panels)
 
-        # The page ITSELF is sized to the fixed 4x2 layout's content,
+        # The page ITSELF is sized to the fixed 5x2 layout's content,
         aspect = geom_grid["n_x"] / float(geom_grid["n_y"])
-        page_w, page_h, geom = _atlas_page_size(aspect)
+        page_w, page_h, geom = _atlas_page_size(aspect, cols=5)
         cols = geom["cols"]
         last_row_of_col = _outer_rows(n_panels, cols)
 

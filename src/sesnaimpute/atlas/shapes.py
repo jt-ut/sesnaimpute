@@ -6,8 +6,8 @@ the two rows' probability statements are `atlas.captions`'s, imported
 and printed on the page, never restated here.
 
 Per region, ONE source: the one at the region's median `A_COL_K`
-(`_select_source`). Both rows carry the six class panels (GAL, YSO,
-H2S, STAR, PAHC, AGB): row 1 the joint `P(C, cell | s)` on the
+(`_select_source`). Both rows carry the seven class panels (GAL, YSO,
+H2S, PAHN, STAR, PAHC, AGB): row 1 the joint `P(C, cell | s)` on the
 `"YlGnBu"` ramp, row 2 the class share `share[cls]` on the same ramp,
 alpha-faded by the six shares' entropy. Every panel shares ONE
 pair of axes, `log10 ξ` (from -3.0 to the median source's own
@@ -114,8 +114,13 @@ from sesnaimpute.atlas import captions
 
 PAGE_W_IN = 16.0
 
-#: The page's panel order.
-CLASS_ORDER = ("GAL", "YSO", "H2S", "STAR", "PAHC", "AGB")
+#: The page's panel order. PAHN sits beside H2S (C15 ruling, 2026-10-20):
+#: both are cloud classes, on the common grid, with no factor tables --
+#: the two pages below (`lambda_grids`, `_class_on_grid`,
+#: `_build_region_data`/`_build_region_prior_data`) read every class
+#: through this one tuple, so a reader never needs a seven-vs-six special
+#: case anywhere else in this module.
+CLASS_ORDER = ("GAL", "YSO", "H2S", "PAHN", "STAR", "PAHC", "AGB")
 
 #: Every class reads the one common brightness axis (sec. 2, H2S included
 #: ): `log10 F_4.5` in mJy, `bmstp.grid.LOG10_F45_EDGES` -- the row's one
@@ -201,7 +206,7 @@ def _read_density_table(config, region):
             sightline=f["SIGHTLINE_ROW"][:].astype(np.int64),
             d_pahc=f["D_PAHC"][:].astype(np.float64),
         )
-        for c in ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S"):
+        for c in ("STAR", "AGB", "PAHC", "PAHN", "GAL", "YSO", "H2S"):
             d[c] = f["DENSITY_%s" % c][:].astype(np.float64)
     return d
 
@@ -230,6 +235,15 @@ def _on_grid_h2s(config, region):
         return f["ON_GRID_H2S"][:].astype(np.float64)
 
 
+def _on_grid_pahn(config, region):
+    """`ON_GRID_PAHN` per sightline (P3, C14: PAHN is on the common cloud
+    grid beside H2S, so its own on-grid fraction is measured the same
+    way, not fixed at 1)."""
+    path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
+    with h5py.File(path, "r") as f:
+        return f["ON_GRID_PAHN"][:].astype(np.float64)
+
+
 def _on_grid_gal(config):
     """`ON_GRID_GAL`, the one survey-wide attr (P4, W26): read directly,
     not recomputed -- `bmstp.shapes.build_gal` is this number's own build."""
@@ -238,7 +252,8 @@ def _on_grid_gal(config):
         return float(f.attrs["ON_GRID_GAL"])
 
 
-def _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2s, on_grid_gal, src_idx):
+def _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2s, on_grid_pahn,
+                    on_grid_gal, src_idx):
     if cls in ("STAR", "PAHC"):
         return float(on_grid_star[dtab["tile"][src_idx]])
     if cls == "AGB":
@@ -247,6 +262,8 @@ def _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2
         return float(on_grid_yso[dtab["sightline"][src_idx]])
     if cls == "H2S":
         return float(on_grid_h2s[dtab["sightline"][src_idx]])
+    if cls == "PAHN":
+        return float(on_grid_pahn[dtab["sightline"][src_idx]])
     return float(on_grid_gal)  # GAL
 
 
@@ -305,8 +322,8 @@ def _prepare_unblurred(reader, rows):
 
 
 def lambda_grids(config, region, rows, blur=True, readers=None, dtab=None):
-    """`(Lambda (n_rows, 6, n_x, n_b) float64, lambda_floor (n_rows,),
-    class_order)`: every row's own six-class prior density `Lambda_C(cell;
+    """`(Lambda (n_rows, 7, n_x, n_b) float64, lambda_floor (n_rows,),
+    class_order)`: every row's own seven-class prior density `Lambda_C(cell;
     s) = A_C(s) h_C(cell; s) f_C(F; s)` (sec. 1.1/1.4), floored at the one
     common floor per row (`prior_reader.common_floor`, the common-floor
     rule) -- the construction `_build_region_data` used inline for the
@@ -377,7 +394,7 @@ def lambda_grids(config, region, rows, blur=True, readers=None, dtab=None):
     # so flooring it simply reproduces the common floor.
     lambda_all = np.stack(
         [np.maximum(lam[cls], lambda_floor[:, None, None]) for cls in CLASS_ORDER],
-        axis=1)  # (n_rows, 6, n_x, n_b)
+        axis=1)  # (n_rows, 7, n_x, n_b)
     return lambda_all, lambda_floor, CLASS_ORDER
 
 
@@ -414,6 +431,7 @@ def _build_region_data(config, region):
     on_grid_star, on_grid_agb = _on_grid_star(config, region)
     on_grid_yso = _on_grid_yso(config, region)
     on_grid_h2s = _on_grid_h2s(config, region)
+    on_grid_pahn = _on_grid_pahn(config, region)
     on_grid_gal = _on_grid_gal(config)
 
     mass_c = {}
@@ -436,7 +454,7 @@ def _build_region_data(config, region):
         intensity_c[cls] = float(dtab[cls][idx_median])
         mass_c[cls] = mass
         on_grid_c[cls] = _class_on_grid(cls, dtab, on_grid_star, on_grid_agb, on_grid_yso, on_grid_h2s,
-                                         on_grid_gal, idx_median)
+                                         on_grid_pahn, on_grid_gal, idx_median)
     log10_xi_max = _panel_xi_max(xi_edges, densities)
 
     lambda_all, lambda_floor_rows, class_order = lambda_grids(
@@ -475,10 +493,10 @@ def _build_region_data(config, region):
     # included), the entropy of the six shares `p_C` and the opacity it
     # sets -- 1 where one class takes all, 0 where the six shares are
     # equal (every class at the common floor, the prior blind there).
-    share_stack = np.stack([share[cls] for cls in CLASS_ORDER])  # (6, n_x, n_b)
+    share_stack = np.stack([share[cls] for cls in CLASS_ORDER])  # (7, n_x, n_b)
     log_share = np.where(share_stack > 0.0, np.log(share_stack), 0.0)
     entropy = -(share_stack * log_share).sum(axis=0)
-    alpha = 1.0 - entropy / np.log(6.0)
+    alpha = 1.0 - entropy / np.log(len(CLASS_ORDER))
     alpha_low_fraction = float((alpha[support, :] < 0.05).sum()) / float(support.sum() * alpha.shape[1])
 
     xi_centers = 0.5 * (xi_edges[:-1] + xi_edges[1:])
@@ -571,7 +589,7 @@ def _draw_figure(config, region, data):
     page_h = margin_t + 2 * row_h + row_gap + AXIS_LABEL_MARGIN_IN + caption_block_h
     page_w = PAGE_W_IN
     usable_w = page_w - margin_l - margin_r
-    shape_w = (usable_w - 5 * col_gap) / 6.0
+    shape_w = (usable_w - (len(CLASS_ORDER) - 1) * col_gap) / len(CLASS_ORDER)
 
     fig = plot_style.new_sized_figure(page_w, page_h)
 
@@ -669,14 +687,14 @@ def _draw_figure(config, region, data):
 
     # Both colour bars sit at the row's own right edge, past the sixth
     # panel (item 1).
-    cax1_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / page_w,
+    cax1_rect = [(margin_l + len(CLASS_ORDER) * shape_w + (len(CLASS_ORDER) - 1) * col_gap + 0.15) / page_w,
                  y0_row1 / page_h, 0.22 / page_w, row_h / page_h]
     cax1 = fig.add_axes(cax1_rect)
     cbar1 = fig.colorbar(im1, cax=cax1)
     cbar1.set_label(r"$\mathbf{P(C, \hat{\xi}, F_{4.5} \mid s)}$", fontsize=_LABEL_FONTSIZE)
     cbar1.ax.tick_params(labelsize=_TICK_FONTSIZE)
 
-    cax2_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / page_w,
+    cax2_rect = [(margin_l + len(CLASS_ORDER) * shape_w + (len(CLASS_ORDER) - 1) * col_gap + 0.15) / page_w,
                  y0_row2 / page_h, 0.22 / page_w, row_h / page_h]
     cax2 = fig.add_axes(cax2_rect)
     cbar2 = fig.colorbar(sm2, cax=cax2)
@@ -845,7 +863,7 @@ def _draw_region_figure(config, region, data):
     page_h = margin_t + row_h + AXIS_LABEL_MARGIN_IN + caption_block_h
     page_w = PAGE_W_IN
     usable_w = page_w - margin_l - margin_r
-    shape_w = (usable_w - 5 * col_gap) / 6.0
+    shape_w = (usable_w - (len(CLASS_ORDER) - 1) * col_gap) / len(CLASS_ORDER)
 
     fig = plot_style.new_sized_figure(page_w, page_h)
 
@@ -889,7 +907,7 @@ def _draw_region_figure(config, region, data):
         if c == 0:
             ax.set_ylabel(_SHARED_Y_LABEL, fontsize=_LABEL_FONTSIZE)
 
-    cax_rect = [(margin_l + 6 * shape_w + 5 * col_gap + 0.15) / page_w,
+    cax_rect = [(margin_l + len(CLASS_ORDER) * shape_w + (len(CLASS_ORDER) - 1) * col_gap + 0.15) / page_w,
                 y0 / page_h, 0.22 / page_w, row_h / page_h]
     cax = fig.add_axes(cax_rect)
     cbar = fig.colorbar(im, cax=cax)

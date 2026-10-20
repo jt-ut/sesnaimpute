@@ -34,7 +34,7 @@ from sesnaimpute.gutcolors import prob as gc_prob
 #: (`attrs_registry.REGISTRY`'s key, CODING_RULES_BMSTP.md rule 5).
 _STEM = "cascade_classification_source"
 
-#: The fitter's six classes, in the order every P-product's class axis
+#: The fitter's seven classes, in the order every P-product's class axis
 #: uses (IMPLEMENTATION_BMSTP_DRAFT.md section 1).
 CLASSES = tuple(c.code for c in definitions.CLASSES)
 
@@ -49,6 +49,19 @@ CLASSES = tuple(c.code for c in definitions.CLASSES)
 #: CLASS_II and TRANSITION_DISK. Its only use in this module is the vote
 #: split (`_label_set_vote`): a reading's own unit is split equally over
 #: the classes whose set holds the cascade's most probable verdict.
+#: PAHN carries NO entry here (C15 ruling, 2026-10-20): every Phase-1 gate
+#: that could plausibly hold it (`P1_PAHAP` -> PAH_APERTURE, `P1_SHOCK` ->
+#: SHOCK_BLOB) reads the `irac_ccd_1` panel, Gutermuth's own [3.6]-[4.5] vs
+#: [5.8]-[8.0] colour-colour diagram (`gutcolors/tables/terms.toml`), which
+#: needs I1 (3.6 um) and I2 (4.5 um) to form its own x-axis colour -- the
+#: two bands a PAH nebular source is defined by NOT having (C15 brief: "no
+#: 3.6 or 4.5 detection"). No cut in the scheme fires on I3/I4 alone, so a
+#: PAH nebular source reaches the cascade's own residual, UNCLASSIFIED,
+#: through no rule ever written for it, not a rule this module invents for
+#: it. `_label_set_vote`'s own PAHN column is therefore all zero by
+#: construction: this class never receives a vote from either cascade
+#: reading, measured or imputed, and `_LABEL_CLASS_MATRIX` below carries
+#: that absence directly, not a special case.
 CONCORDANT_LABELS = {
     "STAR": ("DISKLESS_STAR",),
     "AGB": ("DISKLESS_STAR", "CLASS_II", "TRANSITION_DISK"),
@@ -129,8 +142,8 @@ def _classify_path(config, region):
         config, "fittp", "classification", "posterior", "source", region=region)
 
 
-#: (11, 6) 0/1 label-to-class matrix built from `CONCORDANT_LABELS`: row
-#: `v` is label `v`'s own membership over the six classes. Private to
+#: (11, 7) 0/1 label-to-class matrix built from `CONCORDANT_LABELS`: row
+#: `v` is label `v`'s own membership over the seven classes. Private to
 #: `_label_set_vote`, its only reader.
 _LABEL_CLASS_MATRIX = np.zeros((len(crisp.LABELS), len(CLASSES)), dtype=np.float64)
 for _cls, _labels in CONCORDANT_LABELS.items():
@@ -139,12 +152,14 @@ for _cls, _labels in CONCORDANT_LABELS.items():
 
 
 def _label_set_vote(verdict_idx):
-    """`(n, 6)`: one reading's own unit, split equally over the classes
+    """`(n, 7)`: one reading's own unit, split equally over the classes
     whose `CONCORDANT_LABELS` set holds `verdict_idx`'s own most probable
     label -- `_LABEL_CLASS_MATRIX` row `v` is already that label's 0/1
-    membership over the six classes, so the row divided by its own sum is
+    membership over the seven classes, so the row divided by its own sum is
     the split; a row that sums to zero (UNCLASSIFIED, which no class's
-    set holds) is a clean ABSTAIN, left at zero rather than divided."""
+    set holds, OR every class whose own set holds `v` is PAHN, which
+    `CONCORDANT_LABELS` never names -- C15 ruling, below) is a clean
+    ABSTAIN, left at zero rather than divided."""
     row = _LABEL_CLASS_MATRIX[verdict_idx]
     row_sum = row.sum(axis=1, keepdims=True)
     return np.divide(row, row_sum, out=np.zeros_like(row), where=row_sum > 0)
@@ -181,11 +196,11 @@ def _prior_leaning_vote(config, region, hpx512_source):
 
 def _gaia_leaning_vote(config, region, name):
     """`(n,)` int64, `CLASSES` index of `argmax_C TOPK_LN_GAMMA_ML[:, 0]` over
-    the six fit files (spec sec 6.5's vote readings): -1 (ABSTAIN) where the
-    six values are all equal (no Gaia datum -- `fittp.gaia.GaiaTerm.
+    the seven fit files (spec sec 6.5's vote readings): -1 (ABSTAIN) where the
+    seven values are all equal (no Gaia datum -- `fittp.gaia.GaiaTerm.
     ln_gamma`'s own convention for a source with no counterpart is
     `ln Gamma = 0` for every model of every class, so this falls out of
-    the same equality test) or where any of the six is not finite (a
+    the same equality test) or where any of the seven is not finite (a
     flagged source's `TOPK_LN_GAMMA_ML` is NaN, `fittp.sweep._empty_row`)."""
     n = name.shape[0]
     vals = np.empty((n, len(CLASSES)), dtype=np.float64)
@@ -314,7 +329,7 @@ def write_region_imputed(path, imputed):
             if name in f:
                 del f[name]
         build_module.write_dataset(f, "VERDICT_IMPUTED", imputed["verdict"], *REGISTRY[(_STEM, "VERDICT_IMPUTED")])
-        # (n, 6) CLASSES-order votes (0-4 per row) and the row's own
+        # (n, 7) CLASSES-order votes (0-4 per row) and the row's own
         # entropy (nats), normalised to 1, NaN where nothing voted.
         build_module.write_dataset(f, "PSI_VOTES", imputed["psi_votes"], *REGISTRY[(_STEM, "PSI_VOTES")])
         build_module.write_dataset(f, "ENTROPY_PSI_VOTES", imputed["entropy_psi_votes"],
