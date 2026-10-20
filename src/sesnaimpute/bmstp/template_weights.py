@@ -69,6 +69,17 @@ class census (statement (iii), `yso_population_weight`) then splits
 `CLASS_SHARE_DISK`/`CLASS_SHARE_WEAK` (W83, the young-star population
 redefined on the Dunham census), not module constants.
 
+A fourth group, region by region (owner's ruling 2026-10-20): the
+diskless Class III members the region's own published disk fraction
+implies beyond the excess-selected census (`population.yso_law.
+class_share_diskless`, `YSO_CENSUS_GROUP_DISKLESS`). `yso_population_
+weight` itself stays survey-wide and three-group, read once for the
+whole build by `bmstp.atlas._yso_register`; `build_yso` (region-
+specific already, for the shift kernel) scales that survey-wide weight
+by `DISK_FRACTION` and adds this fourth group's own region-specific
+weight (`yso_diskless_weight`) on top, so the two schemes stay
+consistent without `yso_population_weight` itself taking a region.
+
 Survey products (galz) are built once; region products (yso, sps, agb,
 pahc, h2shock) once per region named on the command line. H2S is regional
 since the common-axis rule: its table is the conditional at each brightness under the
@@ -105,6 +116,7 @@ from sesnaimpute.build import run
 from sesnaimpute.population import star_population
 from sesnaimpute.population import h2s as h2s_module
 from sesnaimpute.population import pahc_curve
+from sesnaimpute.population import yso_law as yso_law_module
 
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
@@ -157,6 +169,29 @@ PROB_CAP = 1.0 - FACTOR_FLOOR
 #: among the protostars (their Class 0+I+Flat), which is the census this
 #: factor is fitted to (WP-REG-1, coordinator addendum 2026-10-08).
 YSO_CENSUS_GROUPS = ({"C0", "CI", "FLAT"}, {"CII", "TD"}, {"CIII"})
+
+#: The FOURTH census group (owner's ruling 2026-10-20, C11 brief item 4):
+#: the diskless Class III members, carrying `population.yso_law.
+#: class_share_diskless` (1 - DISK_FRACTION, region by region, 0 at the
+#: identity case). Labels only, same label set as YSO_CENSUS_GROUPS's
+#: own WEAK group ("the WEAK share keeps today's group", the brief's own
+#: words: the two groups select the SAME register templates by SUBCLASS
+#: but are weighted by two DIFFERENT brightness densities -- WEAK by the
+#: census's own observed (excess) brightness, this group by the diskless
+#: members' own photospheric brightness (`bmstp.sample_cloud.
+#: photosphere_f45_marginal`) -- so a CIII template near photospheric
+#: brightness gets its share of CLASS_SHARE_DISKLESS, and one near the
+#: census's own weak-excess brightness keeps its share of CLASS_SHARE_
+#: WEAK, exactly the "photospheric templates their share at photospheric
+#: brightness" the brief asks for. NOT folded into YSO_CENSUS_GROUPS's
+#: own zip inside `yso_population_weight`: that function is read ONCE,
+#: survey-wide, by `bmstp.atlas._yso_register` for the whole build
+#: (`bmstp.atlas.build`'s own module docstring: "None of these depends
+#: on the region loop"), so it stays exactly as it was; this group's own
+#: per-region share is applied inside `build_yso` instead (`yso_
+#: diskless_weight`, below), the one P5 conditional table that is
+#: already built per region.
+YSO_CENSUS_GROUP_DISKLESS = frozenset({"CIII"})
 
 #: The floor yso `population`'s library-density histogram of
 #: `log10 f_ref,4.5,theta` holds per bin before it is trusted as a density
@@ -585,6 +620,72 @@ def yso_population_weight(config):
     return names, w_theta
 
 
+def yso_diskless_weight(config, region):
+    """The YSO `population` weight's own FOURTH group, per region
+    (owner's ruling 2026-10-20, C11 brief item 4,
+    `YSO_CENSUS_GROUP_DISKLESS`'s own docstring): `CLASS_SHARE_DISKLESS`
+    (`population.yso_law.class_share_diskless`, 0 at the identity case)
+    apportioned over the register's CIII-subclass templates by (i) the
+    diskless members' own photospheric brightness density at each
+    template's `log10 f_ref,4.5,theta` (`bmstp.sample_cloud.
+    photosphere_f45_marginal`, read at `c_theta` exactly as `yso_
+    population_weight`'s statement (i) reads the census density there,
+    but from the photospheric marginal instead -- "the photospheric
+    templates their share at photospheric brightness") divided by the
+    library's own density of CIII templates in the same quantity (the
+    SAME `_fixed_width_binned_density` construction, restricted to the
+    CIII group's own templates, since a template outside the group has
+    zero group fraction and so must not enter this divisor's binning
+    either), and (ii) inclination uniform in cos i. Returns `(names,
+    w_diskless)` in the register's own row order; `Sigma w_diskless =
+    CLASS_SHARE_DISKLESS[region]` by construction, exactly 0 at the
+    identity case (DISK_FRACTION = 1), where `photosphere_f45_marginal`
+    is never evaluated."""
+    reg = _read_register(config, "yso")
+    names = reg["names"]
+    n_model = names.size
+    c_theta = _c_theta(reg)
+
+    share_diskless = yso_law_module.class_share_diskless(config, region)
+    if share_diskless <= 0.0:
+        return names, np.zeros(n_model, dtype=np.float64)
+
+    incl_names, incl_deg = _yso_inclination(config)
+    n_matched_incl = int(np.sum(incl_names == names)) if incl_names.size == n_model else 0
+    if n_matched_incl != n_model:
+        raise ValueError(
+            f"template_weights.yso_diskless_weight: inclination join "
+            f"n_matched={n_matched_incl} != n_register={n_model}")
+    incl_raw = np.sin(np.radians(incl_deg))
+
+    frac = _read_subclass_prob(config, "YSO")
+    sub_idx = {s: i for i, s in enumerate(definitions.SUBCLASSES_OF["YSO"])}
+    frac_group = frac[:, [sub_idx[s] for s in YSO_CENSUS_GROUP_DISKLESS]].sum(axis=1)
+    in_group = frac_group > 0.0
+
+    # local import: `sample_cloud` itself imports this module (register/
+    # mass/inclination joins above), the same reason `build_yso` below
+    # imports `sample_cloud` locally for `shift_kernel`/`cloud_interval_pc`.
+    from sesnaimpute.bmstp import sample_cloud
+    p_photo = sample_cloud.photosphere_f45_marginal(config, region)
+    bin_idx = np.digitize(c_theta, grid.LOG10_F45_EDGES) - 1
+    bin_in_range = (bin_idx >= 0) & (bin_idx < p_photo.size)
+    p_at_theta = np.zeros(n_model, dtype=np.float64)
+    p_at_theta[bin_in_range] = p_photo[np.clip(bin_idx[bin_in_range], 0, p_photo.size - 1)]
+
+    n_lib = np.ones(n_model, dtype=np.float64)
+    if np.any(in_group):
+        n_lib[in_group] = _fixed_width_binned_density(
+            c_theta[in_group], YSO_F45_BIN_DEX, LIBRARY_DENSITY_MIN_COUNT)
+    w_pre = p_at_theta * incl_raw / n_lib
+
+    group_sum = (w_pre * frac_group).sum()
+    w_diskless = np.zeros(n_model, dtype=np.float64)
+    if group_sum > 0:
+        w_diskless = share_diskless * w_pre * frac_group / group_sum
+    return names, w_diskless
+
+
 def build_yso(config, region):
     """P5's YSO table, one per region (spec sec 5.5 "Template weights",
     REWRITTEN the shift-kernel rule): `PI[theta, k] = w_theta K(F_k - c_theta) / p(F_k)`,
@@ -613,6 +714,30 @@ def build_yso(config, region):
         if not (names_w.size == n_model and np.array_equal(names_w, names)):
             raise ValueError("template_weights.yso: yso_population_weight's row "
                               "order disagrees with the yso register")
+
+        # the diskless Class III members, per region (owner's ruling
+        # 2026-10-20, C11 brief items 1 and 4): `w_theta` above is
+        # `yso_population_weight`'s own SURVEY-WIDE, three-group census
+        # weight (left untouched -- `bmstp.atlas._yso_register` reads
+        # that same function once for the whole build and must keep
+        # seeing it unchanged). CLASS_SHARE_PROTO/DISK/WEAK (already
+        # inside `w_theta`) become shares of THIS region's own TOTAL
+        # population by the one uniform factor DISK_FRACTION; the
+        # diskless members' own share, CLASS_SHARE_DISKLESS, is added on
+        # top from `yso_diskless_weight` (a region-specific construction
+        # that borrows this function's own register/c_theta read rather
+        # than re-deriving them). `Sigma w_theta_region = DISK_FRACTION +
+        # CLASS_SHARE_DISKLESS = DISK_FRACTION + (1 - DISK_FRACTION) = 1`
+        # exactly. Bit-identical to `w_theta` alone at the identity case
+        # (DISK_FRACTION = 1, CLASS_SHARE_DISKLESS = 0, `yso_diskless_
+        # weight` returns all zeros without even reading the region's
+        # own age).
+        disk_frac_region = yso_law_module.disk_fraction(config, region)
+        names_d, w_diskless = yso_diskless_weight(config, region)
+        if not (names_d.size == n_model and np.array_equal(names_d, names)):
+            raise ValueError("template_weights.yso: yso_diskless_weight's row "
+                              "order disagrees with the yso register")
+        w_theta = disk_frac_region * w_theta + w_diskless
 
         # the region's own shift kernel (sec 5.5 "Template weights"
         # ruling 1 and 3): `K` carries the region-distance placement AND
