@@ -200,7 +200,12 @@ REGISTRY = {
         "For the matching pixel in HPX_PIX_512, the cataloged density of "
         "the PAHC population: its dimmed intrinsic density weighted by "
         "the probability of clearing SESNA's two-of-eight-band detection "
-        "rule at this pixel's own depth."),
+        "rule at this pixel's own depth, further split off STAR's own "
+        "density (N_CAT_STAR + N_CAT_PAHC never exceeds the field-star "
+        "density) by P_PAHC -- the fraction of catalogued stars at this "
+        "brightness relative to the local 8 micron limit whose measured "
+        "8 micron flux carries a nebular excess (population.pahc."
+        "curve_pahc_survey P_Q_REGION, ledger C8)."),
     ("prior_atlas_hpx512", "N_CAT_GAL"): ("objects per square degree",
         "For the matching pixel in HPX_PIX_512, the cataloged density of "
         "the background-galaxy population: its dimmed intrinsic density "
@@ -334,7 +339,12 @@ REGISTRY = {
     ("prior_atlas_hpx512", "SHARE_PAHC"): ("dimensionless",
         "For the matching pixel in HPX_PIX_512, the PAHC population's "
         "own share of this pixel's total cataloged density: N_CAT_PAHC "
-        "divided by the sum of N_CAT_<class> over every class."),
+        "(itself the field-star density split off STAR's by P_PAHC, the "
+        "fraction of catalogued stars at this brightness relative to "
+        "the local 8 micron limit whose measured 8 micron flux carries "
+        "a nebular excess, population.pahc.curve_pahc_survey "
+        "P_Q_REGION, ledger C8) divided by the sum of N_CAT_<class> "
+        "over every class."),
     ("prior_atlas_hpx512", "SHARE_GAL"): ("dimensionless",
         "For the matching pixel in HPX_PIX_512, the background-galaxy "
         "population's own share of this pixel's total cataloged "
@@ -388,7 +398,14 @@ REGISTRY = {
         "population's tile density at this source's own tile."),
     ("table_density_source", "DENSITY_PAHC"): ("objects per square degree",
         "This source's own retained PAHC sky density, identical to "
-        "DENSITY_STAR (PAHC shares the STAR population's own grid)."),
+        "DENSITY_STAR (PAHC shares the STAR population's own grid): "
+        "the field-star density UNSPLIT by contamination. The fraction "
+        "of catalogued stars at this brightness relative to the local 8 "
+        "micron limit whose measured 8 micron flux carries a nebular "
+        "excess (population.pahc.curve_pahc_survey P_Q_REGION, ledger "
+        "C8) is not applied here -- it splits this same density into "
+        "STAR-only and PAHC-only shares downstream, in bmstp.atlas's "
+        "N_CAT_STAR/N_CAT_PAHC, never in this table."),
     ("table_density_source", "DENSITY_GAL"): ("objects per square degree",
         "This source's own retained background-galaxy sky density: the "
         "one survey-wide galaxy counts-law density, the same number for "
@@ -508,7 +525,13 @@ REGISTRY = {
         "atmosphere-type count, borrowed at each PAHC template's nearest "
         "atmosphere match since the PAHC library carries no atmosphere-"
         "type axis of its own, times the measured 8 micron excess-"
-        "amplitude distribution of contaminated sources read onto the "
+        "amplitude distribution of contaminated sources (population."
+        "pahc.curve_pahc_survey P_Q_REGION x N_PER_BIN_REGION, ledger "
+        "C8: the fraction of catalogued stars at this brightness "
+        "relative to the local 8 micron limit whose measured 8 micron "
+        "flux carries a nebular excess, times the bin's own population, "
+        "i.e. the region's own expected contaminated-source count per "
+        "bin -- not the measured-only excess count) read onto the "
         "template's own amplitude parameter, needing no further "
         "division by a library density. Which population statement "
         "this factor encodes is named by this dataset's own enclosing "
@@ -1199,20 +1222,39 @@ REGISTRY = {
         "axis."),
     ("curve_pahc_survey", "P_Q_REGION"): ("dimensionless",
         "For each region (rows, REGION) and bin of LOG10_Q_EDGES "
-        "(columns), the probability that a source at that q, in that "
-        "region, is contaminated by extended PAH nebular emission in "
-        "its aperture: that region's own measured-only excess fraction "
-        "among its 8-micron-measured sources at that q, with the "
-        "survey's quiescent-region noise floor (F_FLOOR) subtracted and "
-        "floored at zero. Not scaled by how many of the region's "
-        "sources at that q have an 8 micron measurement: a source with "
-        "none is not assumed uncontaminated. Zero for every bin whose q "
-        "is too small for a 3-sigma nebular excess to register at all "
-        "(see P_Q_REGION_BRIGHT_EXCESS)."),
+        "(columns): the fraction of catalogued stars at this brightness "
+        "relative to the local 8 micron limit whose measured 8 micron "
+        "flux carries a nebular excess -- the probability every "
+        "consumer applies to EVERY source at that q, not just the ones "
+        "with an 8 micron measurement. Built from that region's own "
+        "measured-only excess rate among its 8-micron-measured sources "
+        "at that q, with the survey's quiescent-region noise floor "
+        "(F_FLOOR) subtracted and floored at zero, THEN multiplied by "
+        "that bin's own measured share M_PER_BIN_REGION/N_PER_BIN_REGION "
+        "(ledger C8, 2026-10-20: a source with no 8 micron measurement "
+        "is not assumed uncontaminated, so the measured-only rate is "
+        "charged only against the measured share of the bin, not every "
+        "source in it). Zero for every bin whose q is too small for a "
+        "3-sigma nebular excess to register at all (see "
+        "P_Q_REGION_BRIGHT_EXCESS). The measured-only rate itself, "
+        "before this scaling, is P_Q_REGION_MEASURED_ONLY."),
     ("curve_pahc_survey", "P_Q_REGION_RAW"): ("dimensionless",
-        "The same quantity as P_Q_REGION before the quiescent-region "
+        "The same construction as P_Q_REGION before the quiescent-region "
         "noise floor is subtracted: that region's own measured-only "
-        "excess fraction among its 8-micron-measured sources at that q."),
+        "excess rate at that q, multiplied by that bin's own measured "
+        "share M_PER_BIN_REGION/N_PER_BIN_REGION -- the unfloored excess "
+        "count over ALL of the bin's sources, not the measured-only rate "
+        "(that is P_Q_REGION_MEASURED_ONLY)."),
+    ("curve_pahc_survey", "P_Q_REGION_MEASURED_ONLY"): ("dimensionless",
+        "For each region and bin of LOG10_Q_EDGES, that region's own "
+        "excess fraction among ONLY its 8-micron-measured sources at "
+        "that q (P_Q_REGION's own numerator statistic before it is "
+        "scaled by the bin's measured share and floor-subtracted): kept "
+        "for a reader checking the measured subset specifically. This is "
+        "NOT the probability applied to a source -- a source with no 8 "
+        "micron measurement is not assumed to carry this rate, or any "
+        "assumed-zero rate either; P_Q_REGION is what every consumer "
+        "reads."),
     ("curve_pahc_survey", "N_PER_BIN_REGION"): ("sources",
         "For each region and bin of LOG10_Q_EDGES, how many of that "
         "region's own sources with measured 3.6 and 4.5 micron "
@@ -1226,10 +1268,13 @@ REGISTRY = {
     ("curve_pahc_survey", "P_Q_REGION_BRIGHT_EXCESS"): ("dimensionless",
         "For each region and bin of LOG10_Q_EDGES whose q is too small "
         "for a 3-sigma nebular excess to register (where P_Q_REGION is "
-        "zeroed for that reason), that region's measured, unfloored "
-        "fraction of its 8-micron-measured sources there that show an "
-        "excess: not contamination but circumstellar 8 micron emission. "
-        "Zero for every other bin."),
+        "zeroed for that reason), that region's own unfloored excess "
+        "fraction over ALL of the bin's sources (P_Q_REGION_RAW's own "
+        "construction, measured-only rate times the bin's measured "
+        "share): not contamination but circumstellar 8 micron emission, "
+        "a source with no 8 micron measurement no more presumed free of "
+        "it than of contamination elsewhere on the curve. Zero for "
+        "every other bin."),
     ("curve_pahc_survey", "N_PER_BIN_REGION_BRIGHT_EXCESS"): ("sources",
         "For each region and bin of LOG10_Q_EDGES whose q is too small "
         "for a 3-sigma nebular excess to register, that region's own "

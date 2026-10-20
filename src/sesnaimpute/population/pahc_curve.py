@@ -82,18 +82,41 @@ survey-wide constant. One curve applied to every region therefore
 starved PAHC's prior by about 1.4 nats in Orion A's shelf while handing
 Pipe and Musca a nonzero probability where their own measurement
 supports zero. Every region in the build's own region list gets its own
-row, `p(excess | measured, bin)` by bin, with NO scaling by that bin's
-own 8-micron-measured share `m(bin) = M_PER_BIN/N_PER_BIN`: the earlier
-construction's `P_Q(bin) = m(bin) * p(excess | measured, bin)` is
-equivalent to asserting that a source with no 8 micron measurement is
-never contaminated, which is a depth statement, not a contamination
-one, and understated the level by roughly 1.6 dex at high `q`, where
-most of the eligible population sits (`prior_5_PAHC.md` section 1). The
-shipped per-region value is the region's own measured-only excess
-fraction, unscaled, with the floor below subtracted and clipped at
-zero: `P_Q_REGION(region, bin) = clip(p(excess | measured, region, bin)
-- F_FLOOR, 0)`; the same quantity before the floor subtraction is kept
-beside it, `P_Q_REGION_RAW`.
+row, `p(excess | measured, bin)` by bin, SCALED by that bin's own
+8-micron-measured share `m(bin) = M_PER_BIN/N_PER_BIN` -- ledger C8
+(2026-10-20), reversing C7's own `REVIEW_LEDGER_2026-10-08.md` change:
+`P_Q_REGION` is the excess fraction among the 8-micron-MEASURED sources
+in a bin, but every consumer applies it to EVERY source at that `q`
+(this module's own docstring, "the denominator the curve is later
+applied against"). At large `q` (a star faint against its own local 8
+micron limit) almost no star has an 8 micron measurement, and the few
+that do are measured BECAUSE nebular light lifted them over the limit,
+so the measured subset is the contaminated subset by construction, not
+a fair sample of the bin: measured on the real tree's
+`population/pahc/curve_pahc_survey.hdf5`, Orion A's log `q` 1.27 bin
+holds 10,132 sources, 0.94% measured at 8 micron, 75% of those
+measured sources showing an excess -- C7's unscaled curve called 75% of
+ALL 10,132 stars there contaminated; the data support `m(bin) * 75% =
+0.7%`. Applying the unscaled rate survey-wide, the expected PAHC count
+(`sum N * P`) ran 30-55x the actual measured-excess count (`sum M *
+P_raw`): Orion A 50,423 vs. 1,655, Aquila 14x, Vela D 55x, Perseus 55x;
+the 2026-10-09 posterior found 5,512 PAHC in Orion A against the
+prior's 33,426 catalogued (6x, the atlas table). C7's own docstring
+argument -- that `m(bin)` scaling "is equivalent to asserting that a
+source with no 8 micron measurement is never contaminated, which is a
+depth statement, not a contamination one" -- is wrong for the class the
+fitter scores: a star whose aperture PAH light stays below the 8 micron
+limit is, in the catalogue's own data, a star with an 8 micron
+non-detection, and the fitter must see it as STAR; only detectable
+contamination is PAHC. The shipped per-region value is therefore the
+floor-subtracted measured-only rate times the measured share, i.e. the
+floor-corrected excess COUNT over ALL of the bin's sources:
+`P_Q_REGION(region, bin) = m(bin) * clip(p(excess | measured, region,
+bin) - F_FLOOR, 0)`. `P_Q_REGION_RAW` is the same construction before
+the floor subtraction, `m(bin) * p(excess | measured, region, bin)` --
+the unfloored excess count over all of the bin's sources, not the
+measured-only rate; a reader that wants the measured-only rate itself,
+unscaled, reads `P_Q_REGION_MEASURED_ONLY` instead.
 
 The floor -- a false 3 sigma excess from a source that carries no real
 nebular contamination -- is a property of the 8 micron band itself, not
@@ -140,9 +163,12 @@ circumstellar (a dusty evolved star, or a disc with an inner hole), not
 contamination. Every `P_Q_REGION` bin whose upper edge in q lies below
 `Q_MIN` is set to exactly zero, in every region's row alike since
 `Q_MIN` is not region-specific (bins at or above `Q_MIN` are unchanged,
-floor and all); each such bin's own measured, unfloored, per-region
-excess fraction is kept instead in `P_Q_REGION_BRIGHT_EXCESS`, with its
-own `N_PER_BIN_REGION_BRIGHT_EXCESS` -- that region's own fraction of
+floor and all); each such bin's own measured-share-scaled, unfloored
+excess count over all of that bin's sources (`P_Q_REGION_RAW`'s own
+construction, applied here since a star with no 8 micron measurement is
+no more presumed free of circumstellar emission than of contamination)
+is kept instead in `P_Q_REGION_BRIGHT_EXCESS`, with its own
+`N_PER_BIN_REGION_BRIGHT_EXCESS` -- that region's own fraction of
 bright field stars carrying circumstellar 8 micron emission with no 4.5
 micron excess.
 """
@@ -623,9 +649,15 @@ def build_curve(q, excess8, excess45, have_8um, region_idx, region_names, n_bins
     `QUIESCENT_FLOOR_REGIONS` -- never the all-region pool, which is
     dominated by nebulous regions and so is itself contaminated (module
     docstring). Each region's own `P_Q_REGION` is that region's own
-    measured-only excess fraction net of `F_FLOOR`, clipped at zero, with
-    NO scaling by that bin's 8-micron-measured share: a source with no 8
-    micron measurement is not assumed uncontaminated.
+    measured-only excess rate net of `F_FLOOR`, clipped at zero, SCALED
+    by that bin's own 8-micron-measured share `m(bin) =
+    M_PER_BIN/N_PER_BIN` (ledger C8, module docstring): a source with no
+    8 micron measurement is not assumed uncontaminated, so the floor-
+    subtracted rate is charged only against the measured share of the
+    bin, not against every source in it. `P_Q_REGION_RAW` is the same
+    `m(bin)` scaling applied before the floor subtraction; the
+    measured-only rate itself, unscaled, is kept beside both as
+    `P_Q_REGION_MEASURED_ONLY` for a reader that wants it.
     """
     finite_q = np.isfinite(q) & (q > 0)
     q, excess8, excess45, have_8um, region_idx = (
@@ -650,13 +682,23 @@ def build_curve(q, excess8, excess45, have_8um, region_idx, region_names, n_bins
     n_region = len(region_names)
     p_region_raw = np.zeros((n_region, n_bins), dtype=np.float64)
     p_region = np.zeros((n_region, n_bins), dtype=np.float64)
+    p_region_measured_only = np.zeros((n_region, n_bins), dtype=np.float64)
     n_region_bin = np.zeros((n_region, n_bins), dtype=np.int64)
     m_region_bin = np.zeros((n_region, n_bins), dtype=np.int64)
     for r in range(n_region):
         sel = mask_a & (region_idx == r)
         n_r, m_r, p_measured_r = binned_measured_rate(log10_q[sel], have_8um[sel], excess8[sel], edges)
-        p_region_raw[r] = p_measured_r
-        p_region[r] = np.clip(p_measured_r - f_floor, 0.0, None)
+        # ledger C8: P_Q_REGION is the excess fraction among the
+        # 8-micron-MEASURED sources in this bin, but every consumer
+        # applies it to EVERY source at that q (module docstring); the
+        # measured share m(bin) = M/N turns the measured-only rate back
+        # into a rate over the bin's own full population, floor
+        # subtracted first (on the measured-only rate, where F_FLOOR was
+        # itself measured) and clipped at zero.
+        m_share_r = np.divide(m_r, n_r, out=np.zeros_like(p_measured_r), where=n_r > 0)
+        p_region_measured_only[r] = p_measured_r
+        p_region_raw[r] = m_share_r * p_measured_r
+        p_region[r] = m_share_r * np.clip(p_measured_r - f_floor, 0.0, None)
         n_region_bin[r] = n_r
         m_region_bin[r] = m_r
 
@@ -667,6 +709,7 @@ def build_curve(q, excess8, excess45, have_8um, region_idx, region_names, n_bins
         edges=edges, region_names=tuple(region_names),
         f_floor=f_floor, floor_regions=tuple(region_names[i] for i in floor_region_idx),
         p_region=p_region, p_region_raw=p_region_raw,
+        p_region_measured_only=p_region_measured_only,
         n_region_bin=n_region_bin, m_region_bin=m_region_bin,
         p_disk_excess=p_disk_excess, n_disk_excess_bin=n_disk_excess_bin,
         m_disk_excess_bin=m_disk_excess_bin,
@@ -694,6 +737,7 @@ def write_curve(path, curve, q_min, residual_width_mag, residual_width_45_mag):
              dict(dtype=h5py.string_dtype(encoding="utf-8"))),
             ("P_Q_REGION", curve["p_region"].astype(np.float64), {}),
             ("P_Q_REGION_RAW", curve["p_region_raw"].astype(np.float64), {}),
+            ("P_Q_REGION_MEASURED_ONLY", curve["p_region_measured_only"].astype(np.float64), {}),
             ("N_PER_BIN_REGION", curve["n_region_bin"].astype(np.int64), {}),
             ("M_PER_BIN_REGION", curve["m_region_bin"].astype(np.int64), {}),
             ("P_Q_REGION_BRIGHT_EXCESS", curve["p_region_bright_excess"].astype(np.float64), {}),
