@@ -84,10 +84,12 @@ _SHAPE = {
     "PAHC": ("star", "GRID_STAR"),
     "YSO": ("cloud", "GRID_YSO"),
     "H2S": ("cloud", "GRID_H2S"),  # on the common grid since the common-axis rule, section 4.1 P3
+    "PAHN": ("cloud", "GRID_PAHN"),  # C14_pahn_population.md: on the common grid, like H2S
     "GAL": ("gal", "GRID"),
 }
 _LIB = {"STAR": ("sps", "region"), "AGB": ("agb", "region"), "PAHC": ("pahc", "region"),
-        "YSO": ("yso", "region"), "H2S": ("h2shock", "region"), "GAL": ("galz", "survey")}
+        "YSO": ("yso", "region"), "H2S": ("h2shock", "region"), "PAHN": ("pahn", "region"),
+        "GAL": ("galz", "survey")}
 
 _SQRT2 = float(np.sqrt(2.0))
 _SQRT2PI = float(np.sqrt(2.0 * np.pi))
@@ -143,7 +145,13 @@ N_BANDS = len(definitions.BANDS)
 #: reads the fitted `Kernel.cloud_gamma_herschel` (`population.kernel`'s
 #: own 2-D joint fit on the HOPS/eHOPS protostars, zero if that fit's own
 #: 68% interval for gamma includes 0), `False` reads `exponent = 0.0`.
-CLOUD = {"STAR": False, "AGB": False, "PAHC": False, "GAL": False, "YSO": True, "H2S": True}
+#: PAHN (C14_pahn_population.md) reads the kernel plain, like STAR/AGB/
+#: PAHC/GAL: it carries no fitted within-beam tilt of its own (unlike
+#: YSO/H2S, whose `True` reads a 2-D joint fit against the HOPS/eHOPS
+#: protostars) -- a disclosed default, not a measurement, since no such
+#: fit for PAHN exists.
+CLOUD = {"STAR": False, "AGB": False, "PAHC": False, "GAL": False, "YSO": True, "H2S": True,
+         "PAHN": False}
 
 
 #: NONDET brief section 2: a nondet band whose charge, `ln[1 - C_b(z_b)]`,

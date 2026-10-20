@@ -81,6 +81,7 @@ from sesnaimpute.granules import access
 from sesnaimpute.population import h2s as h2s_module
 from sesnaimpute.population import knot_rate
 from sesnaimpute.population import pahc_curve
+from sesnaimpute.population import pahn as pahn_module
 
 _STEM = "prior_atlas_hpx512"
 from sesnaimpute.population import selection as selection_module
@@ -100,7 +101,7 @@ BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
 IDX_I4 = BAND_KEYS.index("I4")
 IDX_I2 = BAND_KEYS.index("I2")
-CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
+CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S", "PAHN")
 
 #: The bright-end count check's two multiples of the pixel's own 4.5 um
 #: 50% limit (SPEC_BMSTP_DRAFT.md sec. 9 "the bright-end count ratio"):
@@ -1595,6 +1596,107 @@ def _gal_reduce(gal_members, chunk_results, weight_pix_all):
             n_members_before, n_members_after)
 
 
+# ---------------------------------------------------------------------------
+# PAHN: region-wide members (like GAL's own, not tile/sightline-grouped --
+# C14_pahn_population.md, owner's 2026-10-20 ruling "H2S is the pattern")
+# ---------------------------------------------------------------------------
+
+def _pahn_depth_nodes():
+    """`(xi_centers, weight)`: `N_DEPTH_NODES` equally spaced quantiles of
+    PAHN's own `p(x)` (`sample_cloud.pahn_front_marginal`, the SAME
+    front-surface marginal `bmstp.shapes.build_cloud` places `GRID_PAHN`'s
+    own x-axis with) -- unlike YSO/H2S's own `_depth_nodes`, this is NOT a
+    function of the sightline: PAHN's own placement does not depend on
+    one, so this is computed once per region, not once per sightline."""
+    p_x, _mo_x = sample_cloud.pahn_front_marginal()
+    mask = p_x > 0
+    width = grid.LOG10_XI_EDGES[1] - grid.LOG10_XI_EDGES[0]
+    centers = grid.LOG10_XI_EDGES[:-1] + 0.5 * width
+    log10_xi_nodes = _quantile_nodes_from_weight(centers[mask], p_x[mask], N_DEPTH_NODES)
+    xi_centers = 10.0 ** log10_xi_nodes
+    return xi_centers, np.full(N_DEPTH_NODES, 1.0 / N_DEPTH_NODES)
+
+
+def _pahn_region_nodes(config, region, reader_pahn, pahn_log10_ratio, d_r_pc):
+    """`(flux0_pahn, u_pahn, w_pahn)`: PAHN's own region-wide deterministic
+    quadrature (the brief: "the member draw from the PAHN shape and
+    weights") -- the brightness nodes are `bmstp.template_weights.
+    build_pahn`'s own `n_model` stand-in templates (`reader_pahn.c_theta`,
+    `bmstp.template_weights`'s product already read through `prior_
+    reader.load`, uniform weight `1/n_model` each -- the SAME nodes
+    WEIGHTS wrote, never recomputed here), PLACED AT THIS REGION's own
+    distance (`delta = -2 log10(d_r_pc / 1 kpc)`, the SAME shift every
+    other class's `C_THETA` is placed by): `log10 F_I2 = C_THETA + delta`
+    undimmed I2 flux at the region, `F_I4 = F_I2 / ratio` (the SAME
+    I2/I4 ratio `population.pahn.pattern_f45_1kpc` used to build C_THETA
+    in the first place, so placing-then-dividing-by-the-ratio recovers
+    exactly the pattern population's own observed I4 flux scale) --
+    every other band (J, H, Ks, I1, I3, M1) zero: a PAH nebular source's
+    2MASS flux is zero (brief, I1/I3/M1 likewise zero here for want of a
+    register to read them from, disclosed). Crossed with PAHN's own
+    depth nodes (`_pahn_depth_nodes`, region-wide, not per-sightline) via
+    `_combine_with_depth`, the SAME generic combiner YSO/H2S use."""
+    n_model = reader_pahn.c_theta.size
+    w_pre = np.full(n_model, 1.0 / n_model, dtype=np.float64)
+    delta = -2.0 * np.log10(d_r_pc / 1000.0)
+    flux0_i2 = 10.0 ** (reader_pahn.c_theta + delta)
+    flux0_i4 = flux0_i2 / (10.0 ** pahn_log10_ratio)
+    flux0_pre = np.zeros((n_model, N_BANDS), dtype=np.float64)
+    flux0_pre[:, IDX_I2] = flux0_i2
+    flux0_pre[:, BAND_KEYS.index("I4")] = flux0_i4
+
+    xi_centers, w_depth = _pahn_depth_nodes()
+    return _combine_with_depth(flux0_pre, w_pre, xi_centers, w_depth)
+
+
+def _pahn_chunk_result(config, region, pahn_members, density_pahn_pix, idx, a_col, f_lim, pixel_row,
+                        weight_pix_all):
+    """One PAHN pixel chunk's own `catalogued_fraction` call -- the GAL
+    pattern (`_gal_chunk_result`), but with `weight_pix` already carrying
+    this chunk's own INTRINSIC density (`density_pahn_pix[idx]`), the
+    SAME construction `_build_one_sightline` uses for H2S's own
+    density-weighted `s_member` (PAHN's own density varies pixel to
+    pixel, unlike GAL's one survey-wide scalar, so it cannot be folded
+    in only at the reduction step the way `_gal_reduce` does)."""
+    u_pahn, flux0_pahn, w_pahn = pahn_members
+    band_params = _completeness_band_params(config, region)
+    weight_pix = density_pahn_pix[idx] * weight_pix_all[idx]
+    return catalogued_fraction(
+        a_col[idx], u_pahn, flux0_pahn, w_pahn, f_lim[idx], pixel_row[idx], band_params, config,
+        weight_pix=weight_pix)
+
+
+def _pahn_reduce(pahn_members, chunk_results, density_pahn_pix, weight_pix_all):
+    """`(frac, frac_bright3, frac_bright10, n_cat_cell, n_cell)` for
+    PAHN's own region-wide deterministic quadrature, reduced from
+    `_pahn_chunk_result`'s own per-chunk pieces in chunk order (the SAME
+    `_gal_reduce` pattern) -- but `s_member` already carries PAHN's own
+    per-pixel density (`_pahn_chunk_result`'s own `weight_pix`), so `c_m`
+    needs no further density multiply here, unlike `_gal_reduce`'s own
+    `density * (w/w_sum) * s_member` (GAL's one scalar density is never
+    folded into `weight_pix`): `c_m = (w/w_sum) * s_member` directly, the
+    SAME form `_build_one_sightline` uses for H2S's own `c_m_h2s`.
+    `n_cell` is the SAME quadrature with every member's own probability
+    of being catalogued set to one: `s_member`'s pixel sum collapses to
+    the region's own density-weighted pixel-area total, `(density_pahn_
+    pix * weight_pix_all).sum()`, the SAME construction `_build_one_
+    sightline`'s own `weight_pix_yso_total`/`weight_pix_h2s_total` use."""
+    u_pahn, flux0_pahn, w_pahn = pahn_members
+    frac = np.concatenate([r[0] for r in chunk_results])
+    frac_bright3 = np.concatenate([r[1] for r in chunk_results])
+    frac_bright10 = np.concatenate([r[2] for r in chunk_results])
+    s_member = sum(r[3] for r in chunk_results)
+
+    w_sum = float(w_pahn.sum())
+    log10_f_i2 = np.log10(flux0_pahn[:, IDX_I2])
+    c_m = (w_pahn / w_sum) * s_member
+    n_cat_cell = _safe_cell_bin(u_pahn, log10_f_i2, c_m)
+    total_density_area = float(np.sum(density_pahn_pix * weight_pix_all))
+    c_m_all = (w_pahn / w_sum) * total_density_area
+    n_cell = _safe_cell_bin(u_pahn, log10_f_i2, c_m_all)
+    return frac, frac_bright3, frac_bright10, n_cat_cell, n_cell
+
+
 def _observed_bright_counts(config, region, pix, f_lim):
     """`(n_obs, n_obs_bright3, n_obs_bright10)`, int32 (n_pix,): the
     catalogue's own counterpart to the bright-end check (SPEC_BMSTP_DRAFT.md
@@ -2000,7 +2102,7 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         _gal_grain = np.zeros(n_pix, dtype=np.int64)
         grain_of_pix_by_cls = {
             "STAR": tile_of_pix, "AGB": tile_of_pix, "PAHC": tile_of_pix,  # P2's TILE_ID is dense 0..n_tile-1
-            "YSO": p3_row_of_pix, "H2S": p3_row_of_pix,
+            "YSO": p3_row_of_pix, "H2S": p3_row_of_pix, "PAHN": p3_row_of_pix,  # PAHN is on P3 too
             "GAL": _gal_grain,  # one survey-wide grain (`prior_reader.load`'s own convention)
         }
         # STAR and PAHC alone carry the tail's own cost (F5: PAHC's own
@@ -2025,6 +2127,23 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         # cost is worth dispatching.
         readers_by_cls = {cls: prior_reader.load(config, region, cls) for cls in CLASSES}
         curve = pahc_curve.read(config, region)
+
+        # PAHN (C14_pahn_population.md): INTENSITY_PAHN is the measured
+        # curve alone at each admitted pixel's own I4 50% limit (`f_lim`,
+        # already this pixel's own row into PIXEL_CURVE_I4) -- no eta, no
+        # eps_ext, no on-grid retention here (sec. 4.1: the atlas's own
+        # intrinsic page is pre-retention everywhere, the SAME convention
+        # YSO/H2S's own `density_yso`/`density_h2s_law_pooled_pix` use).
+        # Its own region-wide member quadrature (`_pahn_region_nodes`)
+        # reads WEIGHTS' own stand-in templates (`readers_by_cls["PAHN"]
+        # .c_theta`) straight off disk -- "the member draw from the PAHN
+        # shape and weights" (brief) -- placed at this region's own
+        # distance through the SAME DL21 fallback ratio SHAPE used.
+        density_pahn_pix = pahn_module.read(config, region)(np.log10(f_lim[:, IDX_I4]))
+        intensity["PAHN"] = density_pahn_pix
+        pahn_log10_ratio = pahn_module.dl21_i2_i4_log10_ratio(config)
+        pahn_members = _pahn_region_nodes(config, region, readers_by_cls["PAHN"], pahn_log10_ratio, d_r_pc)
+
         # the N_ABOVE tail's own "brighter than the pixel's own limit"
         # mask (`_above_shared`'s docstring): depends only on `a_col`/
         # `f0_pix`, identical for every one of the six classes, so it is
@@ -2045,6 +2164,11 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
                 idx = gal_idx_chunks[piece[1]]
                 return piece, _gal_chunk_result(
                     config, region, gal_members, idx, a_col, f_lim, pixel_row, weight_pix_all)
+            if kind == "PAHN":
+                idx = gal_idx_chunks[piece[1]]
+                return piece, _pahn_chunk_result(
+                    config, region, pahn_members, density_pahn_pix, idx, a_col, f_lim, pixel_row,
+                    weight_pix_all)
             if kind == "SL":
                 sl_row = piece[1]
                 m = sl_row_of_pix == sl_row
@@ -2071,9 +2195,10 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         flat_pieces = (
             [("TILE", t) for t in tiles_here]
             + [("GAL", i) for i in range(len(gal_idx_chunks))]
+            + [("PAHN", i) for i in range(len(gal_idx_chunks))]
             + [("SL", r) for r in sls_here]
             + tail_split_pieces
-            + [("TAIL_WHOLE", cls) for cls in ("AGB", "GAL", "YSO", "H2S")])
+            + [("TAIL_WHOLE", cls) for cls in ("AGB", "GAL", "YSO", "H2S", "PAHN")])
         # ---- reduce each piece as it arrives, in the SAME fixed order
         # the former collect-then-reduce dict walk used (tiles_here order,
         # GAL's own chunk order, sls_here order, the tail's class/pixel-
@@ -2088,6 +2213,8 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         # fixed order, never because of anything outside it.
         gal_chunk_results = [None] * len(gal_idx_chunks)
         n_gal_seen = 0
+        pahn_chunk_results = [None] * len(gal_idx_chunks)
+        n_pahn_seen = 0
         frac_h2s_pix = np.full(n_pix, np.nan, dtype=np.float64)
         frac_h2s_bright3_pix = np.full(n_pix, np.nan, dtype=np.float64)
         frac_h2s_bright10_pix = np.full(n_pix, np.nan, dtype=np.float64)
@@ -2129,6 +2256,18 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
                     n_cat_bright10["GAL"] = density_gal * frac_gal_bright10
                     n_cat_cell["GAL"] = n_cat_cell_gal
                     n_cell["GAL"] = n_cell_gal
+            elif kind == "PAHN":
+                pahn_chunk_results[piece[1]] = data
+                n_pahn_seen += 1
+                if n_pahn_seen == len(gal_idx_chunks):
+                    (frac_pahn, frac_pahn_bright3, frac_pahn_bright10,
+                     n_cat_cell_pahn, n_cell_pahn) = _pahn_reduce(
+                        pahn_members, pahn_chunk_results, density_pahn_pix, weight_pix_all)
+                    n_cat["PAHN"] = density_pahn_pix * frac_pahn
+                    n_cat_bright3["PAHN"] = density_pahn_pix * frac_pahn_bright3
+                    n_cat_bright10["PAHN"] = density_pahn_pix * frac_pahn_bright10
+                    n_cat_cell["PAHN"] = n_cat_cell_pahn
+                    n_cell["PAHN"] = n_cell_pahn
             elif kind == "SL":
                 sl_row = piece[1]
                 (m, f_y, d_y, fb3_y, fb10_y, ncc_y, ncl_y,

@@ -221,6 +221,12 @@ REGISTRY = {
         "the H2-shock population: its dimmed intrinsic density weighted "
         "by the probability of clearing SESNA's two-of-eight-band "
         "detection rule at this pixel's own depth."),
+    ("prior_atlas_hpx512", "N_CAT_PAHN"): ("objects per square degree",
+        "For the matching pixel in HPX_PIX_512, the cataloged density of "
+        "the PAHN (star-less PAH nebular source) population: its "
+        "measured curve (population.pahn) at this pixel's own 8 micron "
+        "50%-completeness limit, weighted by the probability of "
+        "clearing SESNA's two-of-eight-band detection rule."),
     ("prior_atlas_hpx512", "INTENSITY_YSO"): ("objects per square degree",
         "For the matching pixel in HPX_PIX_512, the YSO population's own "
         "dimmed intrinsic density at this pixel's own column, before the "
@@ -260,6 +266,12 @@ REGISTRY = {
         "pixel's own I2 (4.5 micron) 50%-completeness flux, read "
         "directly from the class's own stored shape rather than from "
         "the cataloged-detection fraction."),
+    ("prior_atlas_hpx512", "N_ABOVE_PAHN"): ("objects per square degree",
+        "For the matching pixel in HPX_PIX_512, how much of the PAHN "
+        "population's own intrinsic density lies above this pixel's own "
+        "I2 (4.5 micron) 50%-completeness flux, read directly from the "
+        "class's own stored shape rather than from the cataloged-"
+        "detection fraction."),
     ("prior_atlas_hpx512", "N_CAT_CELL_GAL"): ("objects",
         "For the matching pixel in HPX_PIX_512, the background-galaxy "
         "population's own expected cataloged count on the common "
@@ -290,6 +302,11 @@ REGISTRY = {
         "population's own expected cataloged count on the common "
         "(log10 xi, log10 F_4.5) grid: summing every cell gives this "
         "pixel's own RATIO_H2S times the region's source count."),
+    ("prior_atlas_hpx512", "N_CAT_CELL_PAHN"): ("objects",
+        "For the matching pixel in HPX_PIX_512, the PAHN population's "
+        "own expected cataloged count on the common (log10 xi, "
+        "log10 F_4.5) grid: summing every cell gives this pixel's own "
+        "RATIO_PAHN times the region's source count."),
     ("prior_atlas_hpx512", "N_CELL_STAR"): ("objects",
         "For the matching pixel in HPX_PIX_512, the STAR population's "
         "own unthinned intrinsic count on the common (log10 xi, "
@@ -328,6 +345,12 @@ REGISTRY = {
         "member's own probability of being cataloged set to one (no "
         "flux cut, no dimming), so N_CAT_CELL_H2S never exceeds this "
         "cell by cell."),
+    ("prior_atlas_hpx512", "N_CELL_PAHN"): ("objects",
+        "For the matching pixel in HPX_PIX_512, the PAHN population's "
+        "own unthinned intrinsic count on the common (log10 xi, "
+        "log10 F_4.5) grid: the expected count with every member's own "
+        "probability of being cataloged set to one (no flux cut, no "
+        "dimming), so N_CAT_CELL_PAHN never exceeds this cell by cell."),
     ("prior_atlas_hpx512", "SHARE_STAR"): ("dimensionless",
         "For the matching pixel in HPX_PIX_512, the STAR population's "
         "own share of this pixel's total cataloged density: N_CAT_STAR "
@@ -359,6 +382,10 @@ REGISTRY = {
         "population's own share of this pixel's total cataloged "
         "density: N_CAT_H2S divided by the sum of N_CAT_<class> over "
         "every class."),
+    ("prior_atlas_hpx512", "SHARE_PAHN"): ("dimensionless",
+        "For the matching pixel in HPX_PIX_512, the PAHN population's "
+        "own share of this pixel's total cataloged density: N_CAT_PAHN "
+        "divided by the sum of N_CAT_<class> over every class."),
 
     # bmstp.density -- table_density_source (P1): one row per curated
     # source, its column, grain indices, detection limits and the six sky
@@ -422,6 +449,16 @@ REGISTRY = {
         "map for a Herschel-arm source the convolution reaches) times "
         "the region's own knot rate and universal external fraction, "
         "times the sightline's own on-grid retained fraction."),
+    ("table_density_source", "DENSITY_PAHN"): ("objects per square degree",
+        "This source's own retained PAHN (star-less PAH nebular source) "
+        "sky density: population.pahn's own measured density curve, "
+        "read at this source's own admitted pixel's 8 micron 50%-"
+        "completeness limit, times the sightline's own on-grid retained "
+        "fraction. No external calibration factor (unlike DENSITY_H2S's "
+        "knot rate): PAHN's density is the measured curve and the "
+        "shape's own retention alone. An upper bound: the measured "
+        "curve's own pattern count also contains any true protostar too "
+        "faint at 3.6 and 4.5 to detect, and artefacts."),
 
     # bmstp.template_weights -- P5, six template libraries
     # (<lib>_weights_<granule>): one factor per external population
@@ -565,6 +602,34 @@ REGISTRY = {
         "offset: a correction applied to the template's weight at read "
         "time, beyond the per-cell table in W."),
 
+    ("pahn_weights_region", "MODEL_NAME"): ("source name",
+        "This PAHN template's own identifier, in this file's row order. "
+        "No PAHN SED register exists on this branch: these are stand-in "
+        "names (PAHN_STAND_IN_<i>), not a register's own model names."),
+    ("pahn_weights_region", "C_THETA"): ("log10 mJy at 1 kpc",
+        "This PAHN stand-in template's own offset onto the common "
+        "brightness axis. Unlike every other library's C_THETA (a "
+        "register's own F_REF_I2, survey-wide), this is one of n_model "
+        "equally spaced quantiles of THIS REGION's own pattern-source "
+        "brightness population (population.pahn.pattern_f45_1kpc) -- "
+        "region-specific, a disclosed placeholder for the missing "
+        "register's own per-template brightness."),
+    ("pahn_weights_region", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
+        "The centers of the 110 common brightness cells every factor "
+        "table in this file is tabulated on."),
+    ("pahn_weights_region", "W"): ("dimensionless",
+        "For every PAHN template and every cell of LOG10_F45_CENTERS, "
+        "this factor's own per-template weight: uniform, 1/n_model at "
+        "every cell alike (one population, no axis the census can "
+        "weight). Which population statement this factor encodes is "
+        "named by this dataset's own enclosing group's NAME attribute."),
+    ("pahn_weights_region", "C_F"): ("dimensionless",
+        "For every PAHN template, this factor's own per-template "
+        "offset: a correction applied to the template's weight at read "
+        "time, beyond the per-cell table in W. Equal to C_THETA here "
+        "(PAHN's single factor carries no second offset), the same "
+        "convention h2shock's own single factor uses."),
+
     # bmstp.shapes -- star_shape_tile (P2, per tile), cloud_shape_sightline
     # (P3, per sightline) and gal_shape_survey (P4, survey-wide): each
     # class's population sample binned onto the common (log10 xi,
@@ -661,6 +726,24 @@ REGISTRY = {
     ("cloud_shape_sightline", "ON_GRID_H2S"): ("dimensionless",
         "1 minus MASS_OUTSIDE_H2S: the fraction of this sightline's own "
         "H2 shock population weight that GRID_H2S actually holds."),
+    ("cloud_shape_sightline", "GRID_PAHN"): ("dimensionless",
+        "For the matching sightline in HPX_PIX_256, the PAHN (star-less "
+        "PAH nebular source) population density on the common (log10 xi, "
+        "log10 F_4.5) grid: separable, a region-wide brightness marginal "
+        "from the pattern sources' own measured I4 flux (population.pahn) "
+        "times a region-wide front-surface (log10 xi = 0) marginal, "
+        "broadcast over every sightline alike -- integrating over a cell "
+        "gives that cell's own share of the region's PAHN population, up "
+        "to the floor ON_GRID_PAHN leaves out."),
+    ("cloud_shape_sightline", "MASS_OUTSIDE_PAHN"): ("dimensionless",
+        "For the matching sightline in HPX_PIX_256, the fraction of the "
+        "region's own PAHN population weight that falls outside the "
+        "common grid, not stored in GRID_PAHN. The same value at every "
+        "sightline of a region: PAHN's own placement does not depend on "
+        "the sightline."),
+    ("cloud_shape_sightline", "ON_GRID_PAHN"): ("dimensionless",
+        "1 minus MASS_OUTSIDE_PAHN: the fraction of the region's own PAHN "
+        "population weight that GRID_PAHN actually holds."),
     ("cloud_shape_sightline", "D_PEAK_SIGHTLINE_PC"): ("pc",
         "For the matching sightline in HPX_PIX_256, the distance of this "
         "sightline's own dust-structure peak in the 3-D extinction map "
@@ -1380,6 +1463,53 @@ REGISTRY = {
         "For each bin of LOG10_Q_EDGES, how many sources with a 4.5 "
         "micron excess and measured 3.6 and 4.5 micron photometry fall "
         "in it: P_Q_DISK_EXCESS's own denominator."),
+
+    # population.pahn -- density_pahn_region: the star-less PAH nebular
+    # source population's own sky density DENSITY_PAHN(limit), one row
+    # per region, bins on one shared axis (C14_pahn_population.md).
+    ("density_pahn_region", "LOG10_LIM_EDGES"): ("log10 mJy",
+        "The edges of the bins this density is tabulated on, in "
+        "log10(the pixel's own 8 micron 50%-completeness flux, mJy): "
+        "bin j runs from LOG10_LIM_EDGES[j] to LOG10_LIM_EDGES[j+1], 0.1 "
+        "dex wide, one shared axis for every region in this file."),
+    ("density_pahn_region", "REGION"): ("name",
+        "The region name of each row of every per-region array in this "
+        "product, in the order those arrays are indexed on their first "
+        "axis."),
+    ("density_pahn_region", "DENSITY_PAHN"): ("objects per square degree",
+        "For each region (rows, REGION) and bin of LOG10_LIM_EDGES "
+        "(columns): the sky density of the PAHN pattern -- a catalogued "
+        "source with a measured 5.8 and 8 micron flux and no measured "
+        "3.6 or 4.5 micron flux -- among this region's own admitted "
+        "pixels whose own 8 micron 50%-completeness limit falls in this "
+        "bin: the total pattern count there divided by the total "
+        "covered area there. NaN in a bin no admitted pixel's own limit "
+        "reaches. An upper bound: the pattern count also contains any "
+        "true protostar too faint at 3.6 and 4.5 to detect, and "
+        "artefacts."),
+    ("density_pahn_region", "N_PER_BIN"): ("sources",
+        "For each region and bin of LOG10_LIM_EDGES, the total pattern "
+        "count DENSITY_PAHN in that bin rests on. An upper bound: the "
+        "pattern count also contains any true protostar too faint at "
+        "3.6 and 4.5 to detect, and artefacts."),
+    ("density_pahn_region", "POISSON_LO"): ("objects per square degree",
+        "The lower edge of the standard 68% (Garwood) Poisson confidence "
+        "interval on DENSITY_PAHN, from N_PER_BIN's own raw count, on "
+        "the same density scale."),
+    ("density_pahn_region", "POISSON_HI"): ("objects per square degree",
+        "The upper edge of the standard 68% (Garwood) Poisson confidence "
+        "interval on DENSITY_PAHN, from N_PER_BIN's own raw count, on "
+        "the same density scale."),
+    ("density_pahn_region", "AREA_DEG2_PER_BIN"): ("square degrees",
+        "For each region and bin of LOG10_LIM_EDGES, the total covered "
+        "area (the any-IRAC union coverage fraction times the nside-512 "
+        "pixel area, summed over every admitted pixel in that bin) "
+        "DENSITY_PAHN divides N_PER_BIN by."),
+    ("density_pahn_region", "PATTERN_COUNT_REGION"): ("sources",
+        "For each region, the total pattern count over every admitted "
+        "pixel, before binning: N_PER_BIN's own column sum. An upper "
+        "bound: the pattern count also contains any true protostar too "
+        "faint at 3.6 and 4.5 to detect, and artefacts."),
 
     # sky.derived.column -- the adopted (gas) column and the extinction
     # (star-light) column, each at source and sightline granule, plus the

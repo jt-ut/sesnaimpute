@@ -142,6 +142,7 @@ SUBCLASSES_OF = {c.code: tuple(s.name for s in CLASSMAP if s.cls == c.code) for 
 CLASS_REGISTER = {
     "STAR": "sps", "AGB": "agb", "PAHC": "pahc", "PAHN": "pahn",
     "GAL": "galz", "YSO": "yso", "H2S": "h2shock",
+    "PAHN": "pahn",   # CLASS_REGISTER
 }
 
 

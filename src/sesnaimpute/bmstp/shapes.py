@@ -12,8 +12,14 @@ region's knot lognormal (`LOGSIG_MEAN`/`LOGSIG_STD`, kept as attributes),
 conversions under their (uniform) weights -- one convolution, survey-wide
 in its template content, computed once per region and broadcast over
 sightlines through `p_ξ` alone, sec. 5.6 "Marks"), and P4 (the galaxy
-grid, survey-wide). Every brightness axis is the one common
-`LOG10_F45_EDGES` (sec. 2): no per-shape origin, not even H2S's.
+grid, survey-wide). Also writes PAHN's own `GRID_PAHN`/`ON_GRID_PAHN`
+into P3 (C14_pahn_population.md, owner's 2026-10-20 ruling "H2S is the
+pattern"): PAHN is separable the other way round from H2S -- a
+region-wide brightness marginal from the pattern sources' own measured
+fluxes (`population.pahn`) times a region-wide `log10 ξ = 0` (front-
+surface) marginal, broadcast over every sightline. Every brightness axis
+is the one common `LOG10_F45_EDGES` (sec. 2): no per-shape origin, not
+even H2S's or PAHN's.
 
 Before each product is overwritten, this module reads whatever the SAME
 path already holds (rule: acceptance is read before the write that would
@@ -39,6 +45,7 @@ from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.bmstp import grid, sample_cloud, sample_gal, sample_star, template_weights
 from sesnaimpute.population import h2s as h2s_module
+from sesnaimpute.population import pahn as pahn_module
 from sesnaimpute.population import selection as population_selection
 from sesnaimpute.sky.derived import column as column_module
 from sesnaimpute.sky.derived import profile as profile_module
@@ -536,8 +543,17 @@ def build_cloud(config, region):
     `population.h2s.region_sigma_lognormal`) -- H2S has no grid of its own
     (sec. 5.6 "Marks": separable, `XI_MARGINAL` times this Gaussian, formed
     at read on the common `LOG10_F45_EDGES` through the template's own
-    `C_THETA` offset, never a class-specific origin). Neither grid carries
-    an `N_EFF` dataset or a `FLOOR` attribute, per `bmstp.grid`'s module docstring."""
+    `C_THETA` offset, never a class-specific origin), and PAHN's own
+    `GRID_PAHN`/`MASS_OUTSIDE_PAHN`/`ON_GRID_PAHN` (C14_pahn_population.md):
+    separable the other way round -- a region-wide brightness marginal
+    from the pattern sources' own measured I4 flux (`population.pahn.
+    pattern_f45_1kpc`, converted to the 4.5um axis through the PAHN
+    templates' own I2/I4 ratio, or its DL21 fallback absent a register on
+    this branch, `population.pahn.dl21_i2_i4_log10_ratio`) times a
+    region-wide `log10 ξ = 0` front-surface marginal (`sample_cloud.
+    pahn_front_marginal`), broadcast over every sightline the other way
+    round from H2S. None of the three grids carries an `N_EFF` dataset or
+    a `FLOOR` attribute, per `bmstp.grid`'s module docstring."""
     p3_path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
 
     with progress.Stage("bmstp.shapes.cloud", region) as st:
@@ -669,6 +685,59 @@ def build_cloud(config, region):
                              if n_sl else np.zeros((0,), dtype=np.float32))
         on_grid_h2s = (1.0 - mass_outside_h2s).astype(np.float32)
 
+        # PAHN (C14_pahn_population.md, owner's 2026-10-20 ruling "H2S is
+        # the pattern"): on the cloud grid like H2S, but placed at the
+        # cloud's FRONT surface (PAH emission is the illuminated face --
+        # foreground extinction only), not YSO's own depth mark: every
+        # member sits at `u = 0`, blurred by the SAME one-cell kernel every
+        # `log10 ξ` axis in this package carries (`sample_cloud.
+        # pahn_front_marginal`) -- region-wide, not per-sightline, so
+        # `xi_marginal_pahn` is this one row tiled over every sightline
+        # (the mirror image of H2S's own construction, which tiles a
+        # region-wide BRIGHTNESS marginal over YSO's per-sightline `xi`).
+        # Brightness: the pattern sources' own I4 fluxes, converted to the
+        # grid's 4.5 um axis through the PAHN templates' own I2/I4 ratio
+        # (no PAHN register on this branch -- the DL21 shape's own ratio,
+        # `population.pahn.dl21_i2_i4_log10_ratio`, used instead, disclosed
+        # at `build`'s own report), each pattern source placed at the
+        # register's 1 kpc reference convention (`population.pahn.
+        # pattern_f45_1kpc`) the same way every other class's `C_THETA` is.
+        pahn_log10_ratio = pahn_module.dl21_i2_i4_log10_ratio(config)
+        log10_f_ref_i2_pahn, _log10_f_ref_i4_pahn = pahn_module.pattern_f45_1kpc(
+            config, region, pahn_log10_ratio)
+        n_pattern_pahn = log10_f_ref_i2_pahn.size
+        if n_pattern_pahn:
+            w_pattern = np.ones(n_pattern_pahn, dtype=np.float64)
+            h_f45_pahn, _ = np.histogram(log10_f_ref_i2_pahn, bins=grid.LOG10_F45_EDGES, weights=w_pattern)
+            total_w_pahn = float(w_pattern.sum())
+            mass_outside_pahn_hist = float((total_w_pahn - h_f45_pahn.sum()) / total_w_pahn)
+            h_f45_pahn = h_f45_pahn / total_w_pahn
+        else:
+            h_f45_pahn = np.zeros(n_b, dtype=np.float64)
+            mass_outside_pahn_hist = 1.0
+        mass_before_pahn = float(h_f45_pahn.sum())
+        h_f45_pahn = gaussian_filter1d(h_f45_pahn, sigma=1.0, mode="constant",
+                                        truncate=grid._truncate_for(1.0, n_b))
+        mass_outside_pahn_hist += mass_before_pahn - float(h_f45_pahn.sum())
+        f45_marginal_pahn = h_f45_pahn
+
+        p_x_pahn, mass_outside_x_pahn = sample_cloud.pahn_front_marginal()
+        xi_marginal_pahn = (np.tile(p_x_pahn[None, :], (n_sl, 1)) if n_sl
+                            else np.zeros((0, n_x), dtype=np.float64))
+
+        grid_pahn = (xi_marginal_pahn[:, :, None] * f45_marginal_pahn[None, None, :]).astype(np.float32)
+        on_grid_frac_pahn = float(f45_marginal_pahn.sum())
+        mass_outside_pahn = (np.clip(1.0 - xi_marginal_pahn.sum(axis=1) * on_grid_frac_pahn,
+                                     0.0, 1.0).astype(np.float32)
+                             if n_sl else np.zeros((0,), dtype=np.float32))
+        on_grid_pahn = (1.0 - mass_outside_pahn).astype(np.float32)
+        # Identities (brief): "the PAHN shape integrates to
+        # 1 - MASS_OUTSIDE_PAHN like the other cloud shapes" -- checked
+        # directly, not assumed from the outer-product algebra alone.
+        pahn_sum_check = (float(np.max(np.abs(grid_pahn.sum(axis=(1, 2)).astype(np.float64)
+                                               - (1.0 - mass_outside_pahn.astype(np.float64)))))
+                          if n_sl else 0.0)
+
         # W_CLOUD (sec. 2, the diffuse/dense law), folded in from the
         # retired `bmstp.cloud_interval` stage (brief U4): vectorised over
         # every sightline's own XI_FRONT/XI_BACK, computed per sightline
@@ -697,6 +766,9 @@ def build_cloud(config, region):
                 ("GRID_H2S", grid_h2s),
                 ("MASS_OUTSIDE_H2S", mass_outside_h2s),
                 ("ON_GRID_H2S", on_grid_h2s),
+                ("GRID_PAHN", grid_pahn),
+                ("MASS_OUTSIDE_PAHN", mass_outside_pahn),
+                ("ON_GRID_PAHN", on_grid_pahn),
                 ("XI_FRONT", xi_front_cloud.astype(np.float32)),
                 ("XI_BACK", xi_back_cloud.astype(np.float32)),
                 ("W_CLOUD", w_cloud),
@@ -764,7 +836,15 @@ def build_cloud(config, region):
                 peak_offset_dex_range=(float(peak_offset_dex.min()), float(peak_offset_dex.max()))
                 if n_sl else (0.0, 0.0),
                 far_region=bool(far),
-                w_cloud_range=(float(w_cloud.min()), float(w_cloud.max())) if n_sl else (0.0, 0.0))
+                w_cloud_range=(float(w_cloud.min()), float(w_cloud.max())) if n_sl else (0.0, 0.0),
+                on_grid_pahn_range=(float(on_grid_pahn.min()), float(on_grid_pahn.max())) if n_sl else (0.0, 0.0),
+                pahn_sum_check=pahn_sum_check, n_pattern_pahn=n_pattern_pahn,
+                pahn_mass_outside_hist=mass_outside_pahn_hist)
+        print(f"bmstp.shapes.cloud [{region}]: PAHN n_pattern={n_pattern_pahn} "
+              f"log10(I2/I4) ratio={pahn_log10_ratio:.4f} (DL21 fallback, no PAHN register) "
+              f"f45_marginal_on_grid={on_grid_frac_pahn:.4f} "
+              f"ON_GRID_PAHN range={(float(on_grid_pahn.min()), float(on_grid_pahn.max())) if n_sl else (0.0, 0.0)} "
+              f"sum_check(max|sum-(1-mass_outside)|)={pahn_sum_check:.3g}", flush=True)
     return (path, n_sl, mass_outside_yso, removed_frac,
             (peak_f45, p16_f45, p84_f45), on_grid_yso, (d_front, d_back))
 
