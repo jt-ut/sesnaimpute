@@ -1690,11 +1690,25 @@ def build_pahn(config, region):
         pahn_log10_ratio = pahn_module.dl21_i2_i4_log10_ratio(config)
         log10_f_ref_i2, _log10_f_ref_i4 = pahn_module.pattern_f45_1kpc(config, region, pahn_log10_ratio)
         if log10_f_ref_i2.size == 0:
-            raise ValueError(
-                "template_weights.build_pahn [%s]: no pattern source in this region to place "
-                "the %d stand-in templates' own C_THETA at" % (region, n_model))
-        q = (np.arange(n_model) + 0.5) / n_model
-        c_theta = np.quantile(log10_f_ref_i2, q)
+            # no pattern source anywhere in this region (e.g. the
+            # identity check that forces the pattern to admit none,
+            # C14_pahn_population.md): no empirical basis to place
+            # C_THETA at, so this falls back to evenly spaced quantiles
+            # of the common grid's own brightness range -- a neutral,
+            # disclosed placeholder (every downstream N_CAT_PAHN/N_CAT_
+            # CELL_PAHN still comes out exactly zero, since DENSITY_PAHN
+            # is zero everywhere in this same case, module docstring's
+            # own `pattern_mask`), never a module-wide hard failure for
+            # one class with no sources this region.
+            print(f"template_weights.pahn [{region}]: WARNING no pattern source in this region -- "
+                  "C_THETA falls back to the common grid's own brightness range, a neutral "
+                  "placeholder with no empirical basis", flush=True)
+            b_edges = grid.LOG10_F45_EDGES
+            q = (np.arange(n_model) + 0.5) / n_model
+            c_theta = b_edges[0] + q * (b_edges[-1] - b_edges[0])
+        else:
+            q = (np.arange(n_model) + 0.5) / n_model
+            c_theta = np.quantile(log10_f_ref_i2, q)
         names = np.array([f"PAHN_STAND_IN_{i:02d}" for i in range(n_model)])
 
         log10_f45_centers = _log10_f45_centers()

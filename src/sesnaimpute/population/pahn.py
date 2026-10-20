@@ -399,9 +399,15 @@ def read(config, region):
     module docstring). `limit` is the I4 50%-completeness flux in mJy
     (not its log10): the callable itself takes `log10(limit)`, the same
     argument convention every other per-source density reader in this
-    package uses on its own axis."""
+    package uses on its own axis. A bin is "populated" wherever
+    `binned_density` found it finite -- some admitted pixel's own limit
+    landed there (`AREA_DEG2_PER_BIN > 0`), REGARDLESS of its own
+    `N_PER_BIN` count: a bin with area but zero pattern count reads a
+    genuine, finite density of zero (the identity: forcing the pattern
+    count to zero everywhere must read DENSITY_PAHN = 0 everywhere, not
+    raise, module docstring's own `pattern_mask`)."""
     centers, density, n_per_bin = _region_row(config, region, "read")
-    populated = np.isfinite(density) & (n_per_bin > 0)
+    populated = np.isfinite(density)
     if not np.any(populated):
         raise ValueError(f"population.pahn.read: region {region!r} has no populated bin "
                           "at all -- its own pattern count was zero everywhere")
