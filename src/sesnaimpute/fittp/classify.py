@@ -3,15 +3,15 @@ the imputed flux of SPEC_BMSTP_DRAFT.md section 7.1
 (IMPLEMENTATION_BMSTP_DRAFT.md section 1.3 P8, section 4 row 2.5b).
 
 Per source, the seven classes' own `LN_EVIDENCE` columns (P7, one file per
-class) are laid into one (n, 25) array at `definitions.CLASSMAP`'s fixed
-per-class blocks (CLASSMAP groups its 25 rows by class in exactly
-`CLASSES` order, so each class occupies one contiguous slice). The cascade
-factor `Psi_C(s)^beta` (section 6.5) is a constant added to every subclass
-column of its own class before the softmax -- `logsumexp(x_i + a) =
+class) are laid into one (n, len(CLASSMAP)) array at `definitions.CLASSMAP`'s
+fixed per-class blocks (CLASSMAP groups every one of its rows by class in
+exactly `CLASSES` order, so each class occupies one contiguous slice). The
+cascade factor `Psi_C(s)^beta` (section 6.5) is a constant added to every
+subclass column of its own class before the softmax -- `logsumexp(x_i + a) =
 logsumexp(x_i) + a`, so adding `beta * ln Psi_C(s)` to a class's whole
 subclass block multiplies that class's evidence by `Psi_C(s)^beta` and
 leaves the subclass shares within the class untouched. A single softmax
-over the full 25-column row then gives `P_SUBCLASS` directly, and
+over the full CLASSMAP-width row then gives `P_SUBCLASS` directly, and
 `P_CLASS` is its per-class column sum -- the two acceptance identities
 (`P_CLASS` sums to 1; `P_SUBCLASS` summed within a class equals `P_CLASS`)
 hold by construction, not by a separate normalisation. At `beta != 0`,
@@ -90,7 +90,7 @@ CLASSES = tuple(c.code for c in definitions.CLASSES)
 YSO_INDEX = CLASSES.index("YSO")
 N_BANDS = len(definitions.BANDS)
 
-#: Each class's contiguous slice of `definitions.CLASSMAP`'s 25 rows
+#: Each class's contiguous slice of `definitions.CLASSMAP`'s rows
 #: (verified against `SUBCLASSES_OF` below at import time, never assumed
 #: silently).
 _SUBCLASS_NAMES = tuple(definitions.CLASSMAP)
@@ -98,10 +98,10 @@ N_SUBCLASS = len(_SUBCLASS_NAMES)
 
 
 def _class_slices():
-    """The (start, stop) slice of the global 25-column subclass axis each
-    class occupies, and the fully qualified `CLASS:subclass` label of
-    every column (two classes may reuse a subclass name, e.g. AGB and
-    STAR both carry "O")."""
+    """The (start, stop) slice of the global N_SUBCLASS-column subclass
+    axis each class occupies, and the fully qualified `CLASS:subclass`
+    label of every column (two classes may reuse a subclass name, e.g.
+    AGB and STAR both carry "O")."""
     slices = {}
     pos = 0
     for cls in CLASSES:
@@ -123,8 +123,8 @@ SUBCLASS_LABELS = tuple("%s:%s" % (s.cls, s.name) for s in _SUBCLASS_NAMES)
 
 #: Per-row working set for the batch loop (rule 10b): seven classes' own
 #: LN_EVIDENCE (<=9 cols), LOG10_FLUX_MEAN (8) and LOG10_FLUX_COV (8x8)
-#: float32 rows, plus the measured flux/sigma/origin and the global (25)
-#: and (6,8,8) intermediates, at a generous margin.
+#: float32 rows, plus the measured flux/sigma/origin and the global
+#: (N_SUBCLASS) and (6,8,8) intermediates, at a generous margin.
 ROW_BYTES = 8192
 
 #: The literature-band sensitivity runs (spec sec 7.2, sec 10; P9's own
@@ -263,7 +263,7 @@ def _cascade_path(config, region):
 
 
 def _batch_ln_evidence(class_files, psi_file, beta, start, stop, m):
-    """One batch's global `(m, 25)` ln-evidence array: each class's own
+    """One batch's global `(m, N_SUBCLASS)` ln-evidence array: each class's own
     `LN_EVIDENCE` block, shifted by `beta * ln Psi_C(s)` when `beta != 0`
     (spec sec 6.5's logsumexp-shift, see module docstring). `beta != 0`
     needs `Psi_C(s)` read from `psi_file`'s own `P_VERDICT_MEASURED` (P10)
@@ -285,7 +285,7 @@ def _batch_ln_evidence(class_files, psi_file, beta, start, stop, m):
 
 
 def _class_probs(ln_ev):
-    """`(P_SUBCLASS, P_CLASS)` from a global `(m, 25)` ln-evidence array:
+    """`(P_SUBCLASS, P_CLASS)` from a global `(m, N_SUBCLASS)` ln-evidence array:
     one softmax, then each class's column sum (module docstring)."""
     row_max = ln_ev.max(axis=1, keepdims=True)
     weights = np.exp(ln_ev - row_max)
@@ -434,7 +434,7 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     # the FIT flagged (fewer than two detections, a non-finite sigma, a
     # singular design -- `sweep.py`'s `good = False` in every one of the
     # seven class files) with a source the PRIOR vetoes in every class (every
-    # one of the 25 subclass evidences `-inf`, while every class's own fit
+    # one of the CLASSMAP subclass evidences `-inf`, while every class's own fit
     # was perfectly valid). `flagged` (MAP_CLASS = -1) is the first case
     # alone; `prior_vetoed` (MAP_CLASS = -2, a new state, NOT counted in
     # `N_FLAGGED`) is the second. Neither turns into a fabricated STAR
@@ -853,7 +853,7 @@ def build(config, regions=None, beta=0.0):
             join_classify_parts(result["path"], result["part_paths"],
                                  result["n_source"])
 
-            # the joined file's own small columns (n, 6) and (n, 25) --
+            # the joined file's own small columns (n, 6) and (n, N_SUBCLASS) --
             # not LOG10_CANDIDATE_FLUX/LOG10_FLUX_IMPUTED_COV, the two region-sized
             # arrays rule 10b keeps out of memory (W7 review finding 6).
             with h5py.File(result["path"], "r") as f:
