@@ -332,12 +332,15 @@ def _load_region_catalog(config, region):
     file handle, unsafe to share across the pool's fork (`catalog.limits.
     Completeness`'s own docstring: "a caller that forks workers should
     open one reader per worker, not share this one across a process
-    boundary"); read whole into plain `uint16` arrays here instead
-    (`curve_tables`, tens of MB per region, COMPLETENESS_2026-10-20.md),
-    which fork's ordinary copy-on-write then shares with every worker
-    exactly like the register and every other big array this stage reads
-    once in the parent -- no per-worker reader, no re-open. The reader's
-    own file handle is closed once these plain arrays are extracted.
+    boundary"); mapped here instead with `prior_reader.mmap_dataset`
+    (the same technique `FNU_MJY`/`SIGMA_FNU_MJY` already use) -- a
+    `numpy.memmap` opened straight on the completeness product's own
+    file and byte offset, so it carries no live HDF5 handle at all once
+    created and is exactly as fork-safe as every other array this stage
+    reads once in the parent (MAPARRAYS section 1): its pages live once
+    in the OS page cache, read by every worker, never copied or pickled
+    per piece. The reader's own h5py file handle is closed immediately
+    after, since nothing here still needs it.
     """
     path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
     with h5py.File(path, "r") as f:
@@ -358,7 +361,7 @@ def _load_region_catalog(config, region):
         a, c = comp._ac[band]
         band_a[b], band_c[b] = a, c
         band_n[b] = comp._mag_grid_band[band].size
-        curve_tables[band] = np.asarray(comp._curve[band][:], dtype=np.uint16)
+        curve_tables[band] = prior_reader.mmap_dataset(comp._f, "CURVE_%s" % band)
     source_row5 = np.asarray(comp.source_row, dtype=np.int64)
     max_n = int(band_n.max())
     comp._f.close()
