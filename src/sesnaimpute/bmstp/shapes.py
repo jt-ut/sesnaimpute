@@ -513,8 +513,12 @@ def _cloud_dense_weight(config, region, hpx_pix_256, xi_front, xi_back):
 def build_cloud(config, region):
     """Writes P3, `bmstp/shape/cloud_shape_sightline__R.hdf5`: `GRID_YSO`
     (sec. 5.5, the shift-kernel rule -- each depth sub-sample's own shifted copy of
-    `P_ref`, `bmstp.sample_cloud.p_ref_f45`, summed by `log10 ξ` row, NOT
-    an outer product) and its `log10 ξ` marginal per sightline,
+    `P_ref`, `bmstp.sample_cloud.p_ref_f45_mixture` (owner's ruling
+    2026-10-20: the excess-selected census marginal at weight
+    `DISK_FRACTION` plus the diskless Class III members' photospheric
+    marginal at weight `1 - DISK_FRACTION`, bit-identical to the
+    census-only `p_ref_f45` where `DISK_FRACTION = 1`), summed by
+    `log10 ξ` row, NOT an outer product) and its `log10 ξ` marginal per sightline,
     `MASS_OUTSIDE_YSO`, `ON_GRID_YSO` (`1 - mass_outside_yso` per
     sightline, sec. 2's ON-GRID FRACTION, W26's own read), the cloud
     interval `D_FRONT_PC`/`D_BACK_PC` (DOUBLED about the region's own peak
@@ -557,10 +561,15 @@ def build_cloud(config, region):
         peak_offset_dex = (-2.0 * np.log10(d_peak_sightline_pc / d_peak_region_pc)
                             if n_sl else np.zeros((0,), dtype=np.float64))
 
-        # P_ref (sec. 5.5), survey-wide, unplaced -- built
-        # once, not per sightline or region; every sub-sample's own row
-        # convolves it with that row's own shift kernel below.
-        p_ref = sample_cloud.p_ref_f45(config)
+        # P_ref (sec. 5.5), built once per region (not per sightline);
+        # every sub-sample's own row convolves it with that row's own
+        # shift kernel below. A two-component mixture (owner's ruling
+        # 2026-10-20): the excess-selected census's own P_ref at weight
+        # DISK_FRACTION, plus the diskless Class III members' own
+        # photospheric brightness marginal at weight 1 - DISK_FRACTION
+        # (`sample_cloud.p_ref_f45_mixture`) -- bit-identical to the
+        # census-only P_ref where DISK_FRACTION = 1 (the identity case).
+        p_ref = sample_cloud.p_ref_f45_mixture(config, region)
         sigma_d = sample_cloud.sigma_d_dex(r)
         kernel_1d = sample_cloud.exact_gaussian_kernel(sigma_d)
 

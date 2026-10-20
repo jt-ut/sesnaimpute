@@ -61,9 +61,13 @@ from scipy.ndimage import gaussian_filter1d
 from scipy.special import ndtr
 
 from sesnaimpute import config as config_module
+from sesnaimpute import constants
 from sesnaimpute import regions as regions_module
 from sesnaimpute.bmstp import grid, template_weights
+from sesnaimpute.population import field_stars as field_stars_module
 from sesnaimpute.population import yso as yso_module
+from sesnaimpute.population import yso_law as yso_law_module
+from sesnaimpute.population import young_stars as young_stars_module
 
 #: Sub-samples per profile cell, laid evenly along the cell's own segment
 #: in `log10 ξ` (sec. 5.5 "Marks": "in practice, a fixed number of
@@ -335,6 +339,171 @@ def p_ref_f45(config):
     _names_w, w_theta = template_weights.yso_population_weight(config)
     h, _ = np.histogram(c_theta, bins=grid.LOG10_F45_EDGES, weights=w_theta)
     return h
+
+
+# ====================================================================
+# the diskless Class III members (owner's ruling 2026-10-20, C11 brief
+# item 3): a second, photospheric brightness marginal, mixed into the
+# census marginal above at the region's own DISK_FRACTION.
+# ====================================================================
+
+_BHAC15_AGES_CACHE = {}
+
+
+def _bhac15_tabulated_ages_gyr(config):
+    """Every age (Gyr) BHAC15's own tables carry a block for -- read via
+    `young_stars._load_tables`'s own cache, not reopened here."""
+    key = config.data_root
+    if key not in _BHAC15_AGES_CACHE:
+        table = young_stars_module._load_tables(config)["2mass"]
+        _BHAC15_AGES_CACHE[key] = np.unique(table[:, 0])
+    return _BHAC15_AGES_CACHE[key]
+
+
+def nearest_bhac15_age_gyr(config, age_myr):
+    """`(age_gyr, age_myr_snapped)`: the nearest of BHAC15's own
+    tabulated ages to `age_myr` (Myr) -- no age interpolation
+    (`young_stars.abs_mag_grid`'s own convention: "Exact tabulated age
+    rows... no age interpolation"), so a region's own published age is
+    snapped to the nearest tabulated row before any isochrone read,
+    disclosed at build (the gap between `age_myr` and `age_myr_
+    snapped`)."""
+    ages_gyr = _bhac15_tabulated_ages_gyr(config)
+    age_gyr_target = float(age_myr) / 1000.0
+    idx = int(np.argmin(np.abs(ages_gyr - age_gyr_target)))
+    age_gyr = float(ages_gyr[idx])
+    return age_gyr, age_gyr * 1000.0
+
+
+def _isochrone_teff_logg(config, age_gyr, mass_grid):
+    """`(teff_k, logg)`, `(n_mass,)` each: BHAC15's own `TEFF_K`/`LOGG`
+    at the isochrone's exact `age_gyr` row, linear interpolation in
+    log10(mass) against the 2mass table's own tabulated masses -- the
+    SAME table and interpolation convention `young_stars.abs_mag_grid`
+    uses for its band magnitudes (`young_stars.py` is read-only to this
+    unit, C11 brief, so this is a parallel read at an arbitrary
+    tabulated age rather than a call into that module's own 1-Myr-only
+    `_young_star_kg_by_mass`)."""
+    table = young_stars_module._load_tables(config)["2mass"]
+    mask = np.isclose(table[:, 0], age_gyr, atol=1e-6)
+    if not np.any(mask):
+        raise ValueError(
+            "bmstp.sample_cloud: no t=%.4f Gyr block in BHAC15_iso.2mass" % age_gyr)
+    cols = young_stars_module._TWOMASS_ROW_COLUMNS
+    masses = table[mask, 1]
+    teff = table[mask, 1 + cols.index("TEFF_K")]
+    logg = table[mask, 1 + cols.index("LOGG")]
+    order = np.argsort(masses)
+    log10_mass = np.log10(np.asarray(mass_grid, dtype=np.float64))
+    teff_at_mass = 10.0 ** np.interp(
+        log10_mass, np.log10(masses[order]), np.log10(teff[order]))
+    logg_at_mass = np.interp(log10_mass, np.log10(masses[order]), logg[order])
+    return teff_at_mass, logg_at_mass
+
+
+_SPS_REGISTER_I2_KS_CACHE = {}
+
+
+def _sps_register_i2_ks(config):
+    """`(grid, f_ref_i2, f_ref_ks)`: the STAR library's own sps register
+    (`field_stars.load_atmosphere_grid`'s row order, Teff/logg/[M/H]),
+    and that SAME row order's own `F_REF_I2`/`F_REF_Ks` (mJy, at the
+    register's own fixed reference distance) -- read directly, since
+    `load_atmosphere_grid` itself returns only `F_REF_Ks` (its own Gaia-
+    colour construction)."""
+    key = config.data_root
+    if key not in _SPS_REGISTER_I2_KS_CACHE:
+        path = f"{config.inputs['sed_models']}/registers/sps_register.hdf5"
+        atmosphere = field_stars_module.load_atmosphere_grid(path)
+        with h5py.File(path, "r") as f:
+            f_ref_i2 = np.asarray(f["models"]["F_REF_I2"][:], dtype=np.float64)
+            f_ref_ks = np.asarray(f["models"]["F_REF_Ks"][:], dtype=np.float64)
+        _SPS_REGISTER_I2_KS_CACHE[key] = (atmosphere["grid"], f_ref_i2, f_ref_ks)
+    return _SPS_REGISTER_I2_KS_CACHE[key]
+
+
+#: BHAC15's own absolute magnitudes are quoted at the IAU standard 10 pc;
+#: the register's own C_THETA/F_REF convention is "at 1 kpc" (`p_ref_
+#: f45`'s own docstring) -- a plain, system-independent distance-modulus
+#: shift, `5 * log10(1000 / 10)`.
+_ABS_MAG_10PC_TO_1KPC = 10.0
+
+
+def photosphere_f45_marginal(config, region):
+    """`p_photo`, the diskless Class III members' own photospheric
+    brightness marginal at the library's 1 kpc reference distance
+    (owner's ruling 2026-10-20, C11 brief item 3), on the SAME
+    `LOG10_F45_EDGES` grid and in the SAME (not-necessarily-summing-to-1)
+    convention as `p_ref_f45`'s census marginal.
+
+    Masses: `young_stars.mass_grid_and_weight` (the Chabrier IMF
+    quadrature, 0.1-1.4 Msun, weight summing to `young_stars.MASS_FRAC_
+    IN_RANGE`); the IMF's own fraction above the isochrone top
+    (`young_stars.IMF_FRAC_ABOVE_1P4`) is carried exactly as `young_
+    stars` carries it -- never binned here either, so `p_photo.sum()` is
+    at most `MASS_FRAC_IN_RANGE`, short by whatever of that also falls
+    outside `LOG10_F45_EDGES`.
+
+    Each mass's Ks at this region's own published age (`regions.Region.
+    age_myr`, snapped to the nearest BHAC15-tabulated row, `nearest_
+    bhac15_age_gyr` -- no age interpolation), converted to 4.5 um
+    through the STAR library's own photospheres: the SPS register
+    template nearest this mass's own (Teff, logg) on the isochrone
+    (`field_stars.match_templates`, the SAME nearest-neighbour
+    construction `young_stars._young_star_kg_by_mass` uses for its own
+    extinction-law match), that template's own [4.5]-[Ks] colour
+    (`F_REF_I2`/`F_REF_Ks`, both at the register's one fixed reference,
+    so the colour is distance-independent) ADDED to the isochrone's OWN
+    Ks: the result is scaled to the isochrone's own luminosity (BHAC15's
+    Ks already carries it), never a fixed colour -- a young star's 4.5
+    um brightness borrows the matched photosphere's own SED SHAPE, not
+    its absolute level."""
+    age_myr = regions_module.REGIONS_BY_NAME[region].age_myr
+    age_gyr, _age_myr_snapped = nearest_bhac15_age_gyr(config, age_myr)
+    mass_grid, mass_weight = young_stars_module.mass_grid_and_weight()
+
+    ks_abs_10pc = young_stars_module.abs_mag_grid(
+        config, age_gyr, mass_grid)[:, young_stars_module.BAND_KEYS.index("Ks")]
+    teff_at_mass, logg_at_mass = _isochrone_teff_logg(config, age_gyr, mass_grid)
+
+    grid_tl, f_ref_i2, f_ref_ks = _sps_register_i2_ks(config)
+    idx, _dist = field_stars_module.match_templates(
+        teff_at_mass, logg_at_mass, np.zeros_like(teff_at_mass), grid_tl)
+    if not (np.all(f_ref_i2[idx] > 0) and np.all(f_ref_ks[idx] > 0)):
+        raise ValueError(
+            "bmstp.sample_cloud.photosphere_f45_marginal: a matched sps template's "
+            "F_REF_I2 or F_REF_Ks is not positive -- the [4.5]-[Ks] colour is undefined")
+    m_i2_template = -2.5 * np.log10(f_ref_i2[idx] / young_stars_module.AB_ZERO_POINT_MJY)
+    m_ks_template = -2.5 * np.log10(f_ref_ks[idx] / constants.VEGA_ZERO_POINT_MJY["Ks"])
+    delta_i2_minus_ks = m_i2_template - m_ks_template
+
+    i2_abs_10pc = ks_abs_10pc + delta_i2_minus_ks
+    m_i2_at_1kpc = i2_abs_10pc + _ABS_MAG_10PC_TO_1KPC
+    flux_mjy_1kpc = young_stars_module.AB_ZERO_POINT_MJY * 10.0 ** (-0.4 * m_i2_at_1kpc)
+    log10_f45 = np.log10(flux_mjy_1kpc)
+
+    h, _ = np.histogram(log10_f45, bins=grid.LOG10_F45_EDGES, weights=mass_weight)
+    return h
+
+
+def p_ref_f45_mixture(config, region):
+    """`P_ref`, the two-component mixture `p_ref_f45` (the census, weight
+    `DISK_FRACTION`) and `photosphere_f45_marginal` (the diskless Class
+    III members, weight `1 - DISK_FRACTION`) are blended into (owner's
+    ruling 2026-10-20, C11 brief item 3): depth placement, the shift
+    kernel and normalisation are identical for both components (both are
+    `P_ref`-shaped marginals on the SAME `LOG10_F45_EDGES` axis, mixed
+    BEFORE `shift_kernel`'s own per-sightline convolution, not after), so
+    this is the ONE place `bmstp.shapes.build_cloud` reads `P_ref` from.
+    Bit-identical to `p_ref_f45(config)` alone where `DISK_FRACTION = 1`
+    (the identity case): the diskless term's own weight is then exactly
+    0, and `photosphere_f45_marginal` is never evaluated."""
+    disk_frac = yso_law_module.disk_fraction(config, region)
+    p_census = p_ref_f45(config)
+    if disk_frac >= 1.0:
+        return p_census
+    p_photo = photosphere_f45_marginal(config, region)
+    return disk_frac * p_census + (1.0 - disk_frac) * p_photo
 
 
 def _fallback_profile(config, region):
