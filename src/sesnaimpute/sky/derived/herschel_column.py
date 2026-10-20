@@ -303,6 +303,43 @@ def _region_sources(config, region):
         dec = np.asarray(f["DEC_DEG"][:], dtype=np.float64)
     return ra, dec
 
+def _sample_map_job(map_entry, region_sources):
+    """One HGBS map: nearest-pixel N(H2) at every source of every
+    requested region the map reaches -- the coverage test that decides
+    which regions a map serves. `region_sources` is {region: (ra_deg,
+    dec_deg)}, bbox-screened per region first. The column build itself
+    samples per source block (`_sample_region_block`); this whole-map
+    form is what `sky.derived.planck_column._hgbs_region_map` reads for
+    the calibration's region labels."""
+    data, wcs, _px = _open_hgbs_map(map_entry["path"])
+    ny, nx = data.shape
+    box = _bbox_of(wcs, data.shape)
+
+    out = {}
+    for region, (ra, dec) in region_sources.items():
+        if ra.size == 0:
+            continue
+        rbox = (float(ra.min()), float(ra.max()), float(dec.min()), float(dec.max()))
+        if not _boxes_overlap(box, rbox, pad=0.05):
+            continue
+        cand = np.where((dec >= box[2] - 0.05) & (dec <= box[3] + 0.05))[0]
+        if cand.size == 0:
+            continue
+        x, y = wcs.world_to_pixel(SkyCoord(ra[cand] * u.deg, dec[cand] * u.deg, frame="icrs"))
+        xi = np.rint(x).astype(np.int64)
+        yi = np.rint(y).astype(np.int64)
+        inside = (xi >= 0) & (xi < nx) & (yi >= 0) & (yi < ny)
+        if not inside.any():
+            continue
+        cand, xi, yi = cand[inside], xi[inside], yi[inside]
+        vals = data[yi, xi]
+        on = np.isfinite(vals) & (vals > 0)
+        if on.any():
+            out[region] = (cand[on], vals[on].astype(np.float64))
+    del data
+    return map_entry["name"], out
+
+
 def _sample_region_block(map_entries, ra, dec, bounds):
     """One region, one source block (owner ruling 2026-10-09: pieces over
     source blocks, far more pieces than workers): the nearest-pixel N(H2)
