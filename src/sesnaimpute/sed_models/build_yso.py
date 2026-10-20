@@ -167,7 +167,12 @@ SUBCLASS_LEGEND = (
     # library's own legend; both must agree.
     ("FLAT", "Flat-spectrum: -0.3 <= Spectral Index <= 0.3 (Greene et al. 1994), overrides Stage/TD"),
     ("CII", "Stage II: disc-bearing"),
-    ("CIII", "Stage III: diskless; not a bare photosphere (see dedup)"),
+    # Owner's ruling, 2026-10-20: a model whose SED cannot be told from a
+    # bare stellar photosphere at the survey's precision (PHOTOSPHERE_
+    # DUPLICATE=1, see run_dedup) IS a diskless object for the fitter
+    # regardless of its Richardson Stage -- Stage III without that flag
+    # keeps CIII exactly as before.
+    ("CIII", "Stage III or photosphere-indistinguishable: diskless at the survey's precision"),
     ("TD", "Transition disc: Stage II/III carved by the Gutermuth (2009) 24um criterion"),
 )
 STAGE_TO_SUBCLASS = {0: "C0", 1: "CI", 2: "CII", 3: "CIII"}
@@ -673,6 +678,18 @@ def build(data_root, radius=R_NET_RADIUS, verbose=True):
     params["PHOTOSPHERE_DISTANCE"] = dist.astype(np.float32)
     _log(f"[dedup] {int(dup.sum())} of {n_gated} models flagged "
         f"PHOTOSPHERE_DUPLICATE=1; kept in the pool for the r-net")
+
+    # Owner's ruling, 2026-10-20: a photosphere duplicate's hard label is
+    # CIII whatever its Richardson Stage says -- applied AFTER
+    # _hard_label's own FLAT/TD overrides, so the duplicate flag has the
+    # last word over the whole hierarchy (a disk model whose SED is a
+    # photosphere at these apertures IS a diskless object for the
+    # fitter). Models that are Stage III and NOT duplicates keep CIII
+    # exactly as _hard_label already gave them.
+    n_relabeled_ciii = int(np.sum(dup & (label != "CIII")))
+    label = np.where(dup, "CIII", label).astype(str)
+    _log(f"[label] {n_relabeled_ciii} of {int(dup.sum())} photosphere "
+        f"duplicates relabeled CIII from a different Stage/TD/FLAT call")
 
     t_rnet0 = time.time()
     coords, kept_index, rep_of, dist_to_rep, max_dist, n_uncovered, min_kept_dist = run_rnet(
