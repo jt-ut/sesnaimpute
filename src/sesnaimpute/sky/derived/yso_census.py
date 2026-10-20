@@ -149,6 +149,7 @@ import numpy as np
 import pandas as pd
 from astropy.coordinates import SkyCoord
 import astropy.units as u
+from matplotlib.path import Path as _MplPath
 from scipy.spatial import ConvexHull
 
 from sesnaimpute import build as build_module
@@ -574,6 +575,36 @@ def _convex_hull_polygon(ra_deg, dec_deg):
         except Exception:
             hx, hy = uniq[:, 0], uniq[:, 1]
     return _inverse_tangent_plane(hx, hy, ra0, dec0)
+
+
+def polygon_contains(ra_deg, dec_deg, poly_ra_deg, poly_dec_deg):
+    """True where `(ra_deg, dec_deg)` (arrays, any shape) fall inside the
+    sky polygon `(poly_ra_deg, poly_dec_deg)` (ordered vertices -- a
+    `coverage` group's own `RA_DEG`/`DEC_DEG`, or any other closed
+    ordered loop): both projected into the SAME local tangent plane
+    used to BUILD a hull (`_convex_hull_polygon`), centred on the
+    polygon's own mean vertex position, and tested there with
+    `matplotlib.path.Path` (`population.yso_law`'s own fit-footprint
+    test, the public reason this function has no leading underscore).
+    Fewer than 3 polygon vertices (a degenerate single-point or
+    two-point "polygon", `_convex_hull_polygon`'s own fallback for a
+    census group with too few distinct positions to hull) contains
+    nothing -- `False` everywhere, not an exception, since a region
+    whose only overlapping census group is degenerate simply has no
+    census-polygon footprint there.
+    """
+    ra0 = float(np.mean(poly_ra_deg))
+    dec0 = float(np.mean(poly_dec_deg))
+    px, py = _tangent_plane(np.asarray(poly_ra_deg, dtype=np.float64),
+                             np.asarray(poly_dec_deg, dtype=np.float64), ra0, dec0)
+    shape = np.shape(ra_deg)
+    qx, qy = _tangent_plane(np.asarray(ra_deg, dtype=np.float64).ravel(),
+                             np.asarray(dec_deg, dtype=np.float64).ravel(), ra0, dec0)
+    if px.shape[0] < 3:
+        return np.zeros(shape, dtype=bool)
+    path = _MplPath(np.column_stack([px, py]))
+    inside = path.contains_points(np.column_stack([qx, qy]))
+    return inside.reshape(shape)
 
 
 def _write_coverage(f, source_arr, cloud_arr, ra_deg, dec_deg):
