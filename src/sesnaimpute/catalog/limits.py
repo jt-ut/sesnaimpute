@@ -74,6 +74,7 @@ class Completeness:
         self._mag_grid_band = {}
         self._completed_from = {}
         self._zero_point_jy = {}
+        self._envelope = {}
         # Corrections 2026-10-20.md item 1: ONE canonical grid PER BAND
         # (no grid shared across bands any more), read from that band's
         # own MAG_GRID_<band>.
@@ -86,6 +87,7 @@ class Completeness:
             self._curve[band] = h5file[f"CURVE_{band}"]
             self._pixel_curve[band] = h5file[f"PIXEL_CURVE_{band}"]
             self._completed_from[band] = np.asarray(h5file[f"COMPLETED_FROM_{band}"][:], dtype=np.float32)
+            self._envelope[band] = np.asarray(h5file[f"ENVELOPE_{band}"][:])
         for band in TWOMASS_KEYS:
             zp = h5file[f"CURVE_{band}"].attrs["ZERO_POINT_JY"]
             grid = np.asarray(h5file[f"MAG_GRID_{band}"][:], dtype=np.float64)
@@ -149,6 +151,26 @@ class Completeness:
             return np.full(log10_f.shape[0], completeness_module.LN_ONE_MINUS_C_FLOOR)
         return completeness_module.ln_one_minus_completeness(
             self._curve[band][row], g0, dm, n, log10_f, a, c)
+
+    def envelope_fraction(self, band, flux_mjy):
+        """The completeness fraction at `flux_mjy`'s own values (mJy), read
+        from this region's own ENVELOPE_<band> curve (`catalog.
+        completeness.build`'s max, over every on-map pixel, of CURVE_<band>
+        at each magnitude): the deepest completeness ANYWHERE in the
+        region's own footprint for `band`, position-independent --
+        `population.field_stars`'s retention test, since no synthetic
+        field star carries a sky position of its own (SPEC_PRIORS.md
+        section 1.5). 2MASS has no per-pixel map at all (module docstring),
+        so its own region-wide tabulated curve (`fraction` at row 0) IS
+        already position-independent and is read the same way here, never
+        a second curve."""
+        if band in TWOMASS_KEYS:
+            return self.fraction(band, flux_mjy, 0)
+        log10_f = np.log10(np.asarray(flux_mjy, dtype=np.float64))
+        g0, dm = self._grid_params(band)
+        n = self._envelope[band].shape[0]
+        a, c = self._ac[band]
+        return completeness_module.completeness(self._envelope[band], g0, dm, n, log10_f, a, c)
 
     def pixel_fraction_params(self, band):
         """`(curve, g0, dm, n, a, c, scale)`: this band's own completeness

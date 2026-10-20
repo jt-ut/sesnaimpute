@@ -707,6 +707,21 @@ def build(config, regions=None):
                         f, f"COMPLETED_FROM_{band}", completed_from_vals,
                         *REGISTRY[("completeness_sesna_source", f"COMPLETED_FROM_{band}")])
 
+                    # the region's own ENVELOPE curve (C4_coverage_readers's
+                    # fix, population.field_stars's retention test): the
+                    # deepest completeness ANYWHERE in the region's own
+                    # footprint for this band, the max over every on-map
+                    # 30-arcsec pixel's own CURVE_<band> row at each
+                    # magnitude -- a synthetic field star carries no sky
+                    # position of its own (SPEC_PRIORS 1.5), so retention
+                    # reads this position-independent curve, never one
+                    # pointing's own.
+                    envelope_vals = (curve_vals.max(axis=0) if curve_vals.shape[0]
+                                      else np.zeros(n_band, dtype=np.float32))
+                    build_module.write_dataset(
+                        f, f"ENVELOPE_{band}", _to_uint16(envelope_vals),
+                        *REGISTRY[("completeness_sesna_source", f"ENVELOPE_{band}")])
+
                     field_idx, iy, ix = lookup(config, region, band, ra_deg, dec_deg,
                                                 n_jobs=config.n_jobs, maps=maps)
                     source_row[:, bi] = _row_for_positions(field_idx, iy, ix, row_index_maps)

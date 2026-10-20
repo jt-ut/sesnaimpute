@@ -2078,6 +2078,25 @@ REGISTRY = {
         "Same meaning as MAG_GRID_I1, for I4: 1.75..16.25 mag."),
     ("completeness_sesna_source", "MAG_GRID_M1"): ("mag, Vega",
         "Same meaning as MAG_GRID_I1, for M1: 0.25..12.25 mag."),
+    ("completeness_sesna_source", "ENVELOPE_I1"): ("completeness fraction x600, uint16",
+        "This region's own I1 (3.6 micron) ENVELOPE curve: at each of "
+        "MAG_GRID_I1's own magnitudes, the MAXIMUM of CURVE_I1 over every "
+        "one of this region's own on-map 30-arcsec pixels -- the deepest "
+        "completeness anywhere in the region's own footprint, position- "
+        "independent. Read by population.field_stars's retention test, "
+        "since a synthetic field star carries no sky position of its own "
+        "(SPEC_PRIORS.md section 1.5): a star is retained if this curve is "
+        "nonzero at its own magnitude in at least two of eight bands, never "
+        "a single pointing's own curve. Stored as the fraction times 600, "
+        "the same convention as CURVE_I1."),
+    ("completeness_sesna_source", "ENVELOPE_I2"): ("completeness fraction x600, uint16",
+        "Same meaning as ENVELOPE_I1, for I2 (4.5 micron) (MAG_GRID_I2)."),
+    ("completeness_sesna_source", "ENVELOPE_I3"): ("completeness fraction x600, uint16",
+        "Same meaning as ENVELOPE_I1, for I3 (5.8 micron) (MAG_GRID_I3)."),
+    ("completeness_sesna_source", "ENVELOPE_I4"): ("completeness fraction x600, uint16",
+        "Same meaning as ENVELOPE_I1, for I4 (8.0 micron) (MAG_GRID_I4)."),
+    ("completeness_sesna_source", "ENVELOPE_M1"): ("completeness fraction x600, uint16",
+        "Same meaning as ENVELOPE_I1, for M1 (24 micron) (MAG_GRID_M1)."),
     ("completeness_sesna_source", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
         "This region's own admitted nside-512 pixel numbers (nested "
         "ordering), ascending -- the same admission rule as "
