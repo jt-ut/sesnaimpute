@@ -91,6 +91,7 @@ from sesnaimpute import config as config_module
 from sesnaimpute import plot_style
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.catalog import depth_grid as depth_grid_module
 from sesnaimpute.atlas import captions
 
 NSIDE = 512
@@ -256,14 +257,11 @@ def _read_posterior(path):
 
 
 def _read_depth_grid(config, region):
-    """The admitted-pixel footprint (`catalog.depth_grid`, sec. 3.3) --
-    the SAME footprint P6 and P11 are themselves built on (sec. 8), read
-    here directly so the prior and posterior figures share it exactly,
-    sorted by pixel."""
-    path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
-    with h5py.File(path, "r") as f:
-        pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
-    return np.sort(pix)
+    """The admitted-pixel footprint (`catalog.depth_grid.
+    admitted_pixels_512`, sec. 3.3) -- the SAME footprint P6 and P11 are
+    themselves built on (sec. 8), read here directly so the prior and
+    posterior figures share it exactly, sorted by pixel."""
+    return np.sort(depth_grid_module.admitted_pixels_512(config, region))
 
 
 def _align(footprint_pix, src_pix, values, fill):
@@ -645,12 +643,11 @@ def _caption_layout(text, page_w):
 def _require_depth_grid(config, region):
     """The depth-grid footprint, or `None` with a skip message -- both
     figures need it (sec. 8), P6 and P11 are each built on it already."""
-    depth_path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
-    if not os.path.exists(depth_path):
-        print("atlas.render [%s]: no depth grid -- run RUNBOOKtp.sh's "
-              "'PY sesnaimpute.catalog.depth_grid' line first, skipped" % region, flush=True)
+    try:
+        return _read_depth_grid(config, region)
+    except FileNotFoundError as exc:
+        print("atlas.render [%s]: no admitted-pixel footprint (%s), skipped" % (region, exc), flush=True)
         return None
-    return _read_depth_grid(config, region)
 
 
 def _build_prior_page(config, region, formats, view, prior=None, footprint_pix=None, geom_grid=None):

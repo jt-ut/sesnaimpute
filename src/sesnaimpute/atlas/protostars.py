@@ -45,6 +45,7 @@ from sesnaimpute.atlas import shapes as shapes_module
 from sesnaimpute.atlas.render import (
     LABEL_FONTSIZE, _add_panel, _footprint_geometry, _log_norm, _panel_colorbar, _reproject)
 from sesnaimpute.bmstp import grid
+from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.fittp import likelihood as likelihood_module
 from sesnaimpute.population import kernel as kernel_module
 from sesnaimpute.population import selection as population_selection
@@ -152,19 +153,22 @@ def _read_curated(config, region):
 
 
 def _read_depth_grid_pix(config, region):
-    """This region's `catalog.depth_grid` per-pixel limit, the one source
-    of a source's own completeness limit (`catalog.depth_grid` module
-    docstring): sorted `HPX_PIX_512` and `F_LIM_50_PIX_MJY` (n_pix, 8
-    bands, this project's own band order)."""
-    path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
-    if not os.path.exists(path):
-        raise ValueError(
-            f"atlas.protostars: no {path!r} -- run RUNBOOKtp.sh's "
-            f"'PY sesnaimpute.catalog.depth_grid' line")
-    with h5py.File(path, "r") as f:
-        pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
-        f_lim_pix = np.asarray(f["F_LIM_50_PIX_MJY"][:], dtype=np.float64)
-    return pix, f_lim_pix
+    """This region's per-pixel 50%-completeness limit, the one source of
+    a source's own completeness limit: sorted `HPX_PIX_512` and each
+    admitted pixel's own `fifty_percent_pixel` (n_pix, 8 bands, this
+    project's own band order), from `catalog.limits.completeness`'s
+    reader object (COMPLETENESS_2026-10-20.md), replacing the retired
+    `catalog.depth_grid` counts fit."""
+    reader = limits_module.completeness(config, region)
+    pix = reader.hpx_pix_512
+    rows = np.arange(pix.shape[0])
+    band_keys = tuple(b.key for b in definitions.BANDS)
+    f_lim_pix = np.empty((pix.shape[0], len(band_keys)), dtype=np.float64)
+    for j, band in enumerate(band_keys):
+        flux50 = reader.fifty_percent_pixel(band, rows)
+        f_lim_pix[:, j] = np.where(np.isfinite(flux50), flux50, np.inf)
+    order = np.argsort(pix)
+    return pix[order], f_lim_pix[order]
 
 
 def _read_density_rows(config, region):
@@ -442,14 +446,19 @@ def _kernel_validation(log10_xi_hat, w, mu, sigma, xi_marginal, xi_centers, beyo
 
 
 def _read_w_dex_i2(config, region):
-    """The region's own I2 (4.5 micron) roll-off width, `catalog.
-    depth_grid`'s `W_DEX_PIX` (sec. 6.2) -- one value per band for the
-    region, broadcast identically to every admitted pixel there
-    (`bmstp.atlas._depth_grid`'s own read); this check takes any one row's
-    entry, not a per-pixel join, since it is the region's own constant."""
-    path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
-    with h5py.File(path, "r") as f:
-        return float(f["W_DEX_PIX"][0, IDX_I2])
+    """The region's own representative I2 (4.5 micron) roll-off width:
+    the MEDIAN of `catalog.limits.completeness`'s own `local_width_dex_
+    pixel` over every admitted pixel (COMPLETENESS_2026-10-20.md). The
+    retired `catalog.depth_grid`'s `W_DEX_PIX` was one region-wide fitted
+    value broadcast identically to every pixel, so any one row's entry
+    stood for the whole region; the measured curve's own width genuinely
+    varies pixel to pixel now (`bmstp.atlas._depth_grid`'s own read), so
+    this check takes the region's median instead of one arbitrary row."""
+    reader = limits_module.completeness(config, region)
+    rows = np.arange(reader.hpx_pix_512.shape[0])
+    width = reader.local_width_dex_pixel("I2", rows)
+    finite = np.isfinite(width)
+    return float(np.median(width[finite])) if finite.any() else float("nan")
 
 
 def _read_prior_atlas(config, region):

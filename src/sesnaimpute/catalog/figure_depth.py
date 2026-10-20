@@ -44,6 +44,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.atlas.render import (
     LABEL_FONTSIZE, TICK_FONTSIZE, _add_panel, _align, _footprint_geometry,
     _panel_colorbar, _read_depth_grid)
+from sesnaimpute.catalog import limits as limits_module
 
 PAGE_W_IN = 16.0
 PAGE_H_IN = 6.0
@@ -103,18 +104,24 @@ def _read_coverage(config, region):
 
 
 def _read_depth_pixels(config, region):
-    """`catalog.depth_grid`'s own `HPX_PIX_512`, `F_LIM_50_PIX_MJY` (n, 8)
-    and `W_DEX_PIX` (n, 8), sorted by pixel to match `_read_depth_grid`'s
-    footprint ordering."""
-    path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "catalog.figure_depth: no depth grid for %s at %s -- run the "
-            "'sesnaimpute.catalog.depth_grid' RUNBOOKtp.sh line first" % (region, path))
-    with h5py.File(path, "r") as f:
-        pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
-        f_lim = np.asarray(f["F_LIM_50_PIX_MJY"][:], dtype=np.float64)
-        w_dex = np.asarray(f["W_DEX_PIX"][:], dtype=np.float64)
+    """Every admitted pixel's own measured 50%-completeness flux (n, 8)
+    and local erf-width (n, 8), from `catalog.limits.completeness`'s
+    reader object (`fifty_percent_pixel`/`local_width_dex_pixel` --
+    COMPLETENESS_2026-10-20.md "The reader"), sorted by pixel to match
+    `_read_depth_grid`'s footprint ordering; replaces the retired
+    `catalog.depth_grid` counts fit (`F_LIM_50_PIX_MJY`/`W_DEX_PIX`)."""
+    reader = limits_module.completeness(config, region)
+    pix = reader.hpx_pix_512
+    rows = np.arange(pix.shape[0])
+    band_keys = tuple(b.key for b in definitions.BANDS)
+    f_lim = np.empty((pix.shape[0], len(band_keys)), dtype=np.float64)
+    w_dex = np.empty((pix.shape[0], len(band_keys)), dtype=np.float64)
+    for j, band in enumerate(band_keys):
+        flux50 = reader.fifty_percent_pixel(band, rows)
+        width = reader.local_width_dex_pixel(band, rows)
+        unsurveyed = ~np.isfinite(flux50)
+        f_lim[:, j] = np.where(unsurveyed, np.inf, flux50)
+        w_dex[:, j] = np.where(unsurveyed | ~np.isfinite(width), 0.0, width)
     order = np.argsort(pix)
     return pix[order], f_lim[order], w_dex[order]
 

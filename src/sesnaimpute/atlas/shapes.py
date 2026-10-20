@@ -102,10 +102,10 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.colors import LogNorm, Normalize
 
 from sesnaimpute import config as config_module
-from sesnaimpute import definitions
 from sesnaimpute import plot_style
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
+from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.fittp import prior_reader
 from sesnaimpute.bmstp import grid
 from sesnaimpute.bmstp import template_weights
@@ -746,13 +746,6 @@ def build(config, regions=None):
 # by `bmstp`/`fittp` (module docstring's own rule).
 # ====================================================================
 
-#: I2 (4.5 micron)'s index into `catalog.depth_grid`'s own band axis --
-#: the same construction `bmstp.atlas.IDX_I2` uses.
-_BAND_KEYS = tuple(b.key for b in definitions.BANDS)
-_IDX_I2 = _BAND_KEYS.index("I2")
-
-
-
 def _read_prior_atlas(config, region):
     """P6's per-cell region grids and totals this page needs:
     `N_CAT_CELL_<C>`, `N_CELL_<C>` (both `(128, 110)` on `grid.
@@ -770,13 +763,17 @@ def _read_prior_atlas(config, region):
 
 
 def _region_f_lim_i2_mjy(config, region):
-    """The region's median 4.5 micron 50% limit (I2), `catalog.
-    depth_grid`'s own per-pixel `F_LIM_50_PIX_MJY` (rule 5: read, not
-    rebuilt) -- the horizontal line every panel of this page marks."""
-    path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
-    with h5py.File(path, "r") as f:
-        f_lim = f["F_LIM_50_PIX_MJY"][:, _IDX_I2].astype(np.float64)
-    return float(np.median(f_lim))
+    """The region's median 4.5 micron 50% limit (I2): `catalog.limits.
+    completeness`'s own per-pixel `fifty_percent_pixel` (the measured
+    curve's own completeness=0.5 crossing, COMPLETENESS_2026-10-20.md),
+    median over the admitted pixels -- the horizontal line every panel
+    of this page marks; replaces the retired `catalog.depth_grid`'s
+    `F_LIM_50_PIX_MJY` counts fit."""
+    reader = limits_module.completeness(config, region)
+    rows = np.arange(reader.hpx_pix_512.shape[0])
+    f_lim = reader.fifty_percent_pixel("I2", rows)
+    finite = np.isfinite(f_lim)
+    return float(np.median(f_lim[finite])) if finite.any() else float("nan")
 
 
 def _populated_xi_range(cell, xi_edges):
