@@ -164,6 +164,7 @@ from sesnaimpute.catalog import limits as catalog_limits
 from sesnaimpute.fittp import likelihood
 from sesnaimpute.fittp import prior_reader
 from sesnaimpute.fittp.gaia import GaiaTerm
+from sesnaimpute.sed_models.register import darkness as darkness_module
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
@@ -251,9 +252,9 @@ _FIELD_OF_KEY = {
 
 
 def _register(config, cls):
-    """`(template_log, n_sub, subclass_prob)` for `cls`'s own library
-    register (`definitions.CLASS_REGISTER`): `template_log` is `(n_model,
-    8)` float32 `log10 F_REF` (floored at the register's own
+    """`(template_log, n_sub, subclass_prob, dark_bands)` for `cls`'s own
+    library register (`definitions.CLASS_REGISTER`): `template_log` is
+    `(n_model, 8)` float32 `log10 F_REF` (floored at the register's own
     `FLOOR_LINEAR`, its FREFRAW convention -- a genuinely dark band is not
     `-inf`), in `definitions.BANDS` order. `subclass_prob` is `(n_model,
     n_sub)` float64, every row summing to 1, in `definitions.
@@ -265,7 +266,13 @@ def _register(config, cls):
     about 46% of rows); a one-hot row at the register's hard `SUBCLASS`
     label otherwise, so the subclass evidence below reduces exactly to
     today's hard-label partition for every class without a
-    `subclass_prob` group.
+    `subclass_prob` group. `dark_bands` is `(n_model, 8)` bool (C7 brief
+    Part B): the register's own `DARK_BANDS` byte, one bit per band
+    (`sed_models.register.darkness.unpack_dark_bands`), True where that
+    template carries no flux in that band at all -- distinct from merely
+    faint, which `FLOOR_LINEAR` already covers inside `template_log` --
+    the one input `fittp.prior_reader._p_cat` needs beyond what the
+    non-detection factor already reads.
     """
     key = definitions.CLASS_REGISTER[cls]
     path = os.path.join(config.inputs["sed_models"], "registers", "%s_register.hdf5" % key)
@@ -276,6 +283,7 @@ def _register(config, cls):
         for j, bkey in enumerate(BAND_KEYS):
             f_ref[:, j] = np.asarray(f["models"]["F_REF_%s" % bkey][:], dtype=np.float64)
         floor_linear = np.asarray(f["models"]["FLOOR_LINEAR"][:], dtype=np.float64)
+        dark_bands = darkness_module.unpack_dark_bands(f["models"]["DARK_BANDS"][:], N_BANDS)
         subclass_raw = f["models"]["SUBCLASS"][:]
         subclass_names = [s.decode() if isinstance(s, bytes) else s for s in subclass_raw]
         sub_to_idx = {s: i for i, s in enumerate(subclass_order)}
@@ -316,7 +324,7 @@ def _register(config, cls):
                 "|sum-1|=%.3g on %d/%d rows) -- not a proper per-template stage fraction"
                 % (path, float(np.max(np.abs(row_sum[bad] - 1.0))), int(bad.sum()), n_model))
 
-    return template_log, len(subclass_order), subclass_prob
+    return template_log, len(subclass_order), subclass_prob, dark_bands
 
 
 def _load_region_catalog(config, region):
@@ -429,13 +437,6 @@ _WORKER = {}
 def _set_worker_state(**kw):
     global _WORKER
     _WORKER = kw
-
-
-def _g_task(key):
-    """One `LN_PRIOR_MASS` factor-weight table (`prior_reader.prior_mass_table`)
-    for `key`, from the fork-inherited reader."""
-    w = _WORKER
-    return key, prior_reader.prior_mass_table(w["reader"], w["g_names"], key, np.arange(w["n_model"]))
 
 
 def _init_worker():
@@ -567,6 +568,10 @@ def _source_task(i):
         ln_lambda0 = [None, None]      # float32 (m,) per design -- S0, no ln_l
         ln_lambda1 = [None, None]      # float32 (m,) per design -- S1, no ln_l
         ln_lambda2 = [None, None]      # float32 (m,) per design -- S2, no ln_l
+        # C7 brief Part B: LN_PRIOR_MASS's own per-design value -- the cell's
+        # prior mass alone (no likelihood, no Gaia) times P_cat, formed the
+        # same way ln_lambda0 is.
+        ln_lambda_cat = [None, None]   # float32 (m,) per design
         a_post_t = [None, None]        # float64 (m,) per design
         a2_post_t = [None, None]
         # ln_l: chi2 plus the per-source normalisation ONLY (NONDET brief
@@ -599,17 +604,18 @@ def _source_task(i):
             # `ext_col`, EXACT_CODE_SITES), fed to the cell sum so it can
             # place the non-detection factor at each cell's own a*.
             ext_col_ak_k = fit_k.ext_col.astype(np.float64) / fit_k.ak_per_av
-            ln_lambda2_k, ln_lambda0_k, ln_lambda1_k, a_post_k, a2_post_k = prior_reader.ln_prior(
+            ln_lambda2_k, ln_lambda0_k, ln_lambda1_k, ln_lambda_cat_k, a_post_k, a2_post_k = prior_reader.ln_prior(
                 w["reader"], rows, h, fit_k.a_hat[None, :], fit_k.log10_b_hat[None, :],
                 slope_log10b_per_ak, np.array([fit_k.sigma_a_ak]), model_index,
                 cell_weight_by_law[k],
                 w["template_log"], ext_col_ak_k,
                 batch.curve_rows[None, :, :],
                 batch.band_a, batch.band_c, batch.band_n,
-                batch.nondet_mask[None, :], gaia_inputs)
+                batch.nondet_mask[None, :], gaia_inputs, w["dark_bands"])
             ln_lambda2[k] = ln_lambda2_k[0]
             ln_lambda0[k] = ln_lambda0_k[0]
             ln_lambda1[k] = ln_lambda1_k[0]
+            ln_lambda_cat[k] = ln_lambda_cat_k[0]
             a_post_t[k] = a_post_k[0]
             a2_post_t[k] = a2_post_k[0]
 
@@ -635,6 +641,7 @@ def _source_task(i):
             ln_lambda0[1] = np.full(n_model, -np.inf, dtype=np.float32)
             ln_lambda1[1] = np.full(n_model, -np.inf, dtype=np.float32)
             ln_lambda2[1] = np.full(n_model, -np.inf, dtype=np.float32)
+            ln_lambda_cat[1] = np.full(n_model, -np.inf, dtype=np.float32)
             ln_l[1] = np.full(n_model, -np.inf, dtype=np.float64)
             ln_l_report[1] = np.full(n_model, -np.inf, dtype=np.float64)
             ln_gamma_ml[1] = np.zeros(n_model, dtype=np.float64)
@@ -709,7 +716,23 @@ def _source_task(i):
             occam_gap = float(logsumexp(s1_arr) - s1_arr.max())
             ln_ev_measured = float(logsumexp(s0_arr))
             ln_ev_nondet = float(logsumexp(s1_arr))
-        ln_prior_mass = float(prior_reader.ln_prior_mass(w["reader"], rows, h)[0])
+
+        # C7 brief Part B: LN_PRIOR_MASS reduces over templates exactly as
+        # S0 -- the mixture over the two designs (no further weight, the
+        # sightline's own cell weight already makes the two designs' prior
+        # terms sum to the single-law one), then logsumexp over every
+        # template (no p_theta reweighting, since this carries no
+        # photometry: every template's own prior weight is already inside
+        # `ln_lambda_cat` through the factor term, exactly how `ln_ev_measured`
+        # reduces `s0_arr`). Computed unconditionally, like the old
+        # density-table `ln_prior_mass` -- a flagged fit's own degenerate
+        # `a_hat`/`sigma_a_ak` reads back a clean `-inf` through `_cell_sum`'s
+        # own `sig <= 0`/NaN-comparison guards, never a NaN.
+        ln_lambda_cat_64 = [x.astype(np.float64) for x in ln_lambda_cat]
+        s_cat_k = np.stack(ln_lambda_cat_64, axis=0)               # (2, m)
+        with np.errstate(invalid="ignore"):
+            s_cat_arr = logsumexp(s_cat_k, axis=0)                 # (m,)
+            ln_prior_mass = float(logsumexp(s_cat_arr))
 
         good = not combined_flagged
 
@@ -1126,7 +1149,7 @@ def build_region_class(config, region, cls, st, reader, catalog,
     `catalog` is `_load_region_catalog`'s one whole-region read,
     also loaded once by `build` and shared across classes.
     """
-    template_log, n_sub, subclass_prob = _register(config, cls)
+    template_log, n_sub, subclass_prob, dark_bands = _register(config, cls)
     n_model = template_log.shape[0]
     # computed once, in the parent, never per source (rule 8): `ln
     # p_theta,k`, `-inf` where a template carries no mass in that
@@ -1181,6 +1204,7 @@ def build_region_class(config, region, cls, st, reader, catalog,
 
     _set_worker_state(config=config, cls=cls, reader=reader, gaia_term=gaia_term,
                        template_log=template_log, ln_subclass_prob=ln_subclass_prob, n_sub=n_sub,
+                       dark_bands=dark_bands,
                        topk=topk, n_model=n_model,
                        sigma_lib_l=sigma_lib_l,
                        flux=catalog["flux"], sigma=catalog["sigma"], origin=catalog["origin"],
@@ -1194,43 +1218,15 @@ def build_region_class(config, region, cls, st, reader, catalog,
     # leaves the compiled code in pages every worker inherits copy-on-write:
     # measured private growth per worker falls from ~82 MB a kernel to ~1.6 MB.
     # The warm is one real source through the real task, so it compiles exactly
-    # the signatures the workers go on to call (`_cell_sum` alone takes 21
+    # the signatures the workers go on to call (`_cell_sum` alone takes 23
     # arguments; an explicit signature list would be a second thing to keep
     # right). `_source_task` catches its own failures, so this cannot raise.
     numba.set_num_threads(1)
-    # LN_PRIOR_MASS: the warm source's own factor-weight table G first (the
-    # warm task looks it up), then the rest below in a pool of their own.
-    g_names, g_keys = prior_reader.prior_mass_keys(reader, np.arange(n_source))
-    g_warm_key = prior_reader.prior_mass_keys(reader, np.array([batch_bounds[0][0]]))[1][0]
-    g_table = {g_warm_key: prior_reader.prior_mass_table(reader, g_names, g_warm_key, np.arange(n_model))}
-    prior_reader.set_prior_mass_tables(reader, g_names, g_table)
     _source_task(batch_bounds[0][0])
 
     # Forked below every load above, and below the warm -- the threading layer
     # pinned at import is fork-safe by numba's own contract.
     ctx = mp.get_context("fork")
-    # G once per distinct per-source factor value in THIS job's sources, over
-    # the pool, one task per value (workers read the fork-inherited reader,
-    # nothing from disk); the pool is then closed and the source pool below
-    # forks with the gathered dict already on `reader`.
-    todo = [k for k in g_keys if k not in g_table]
-    _t0 = time.time()
-    if todo:
-        _set_worker_state(reader=reader, g_names=g_names, n_model=n_model)
-        with _make_pool(ctx, n_workers) as gpool:
-            for key, g in gpool.imap(_g_task, todo, chunksize=1):
-                g_table[key] = g
-    print("fittp.sweep.%s [%s]: prior-mass tables %d in %.2f s (%d workers)"
-          % (cls, region, len(g_table), time.time() - _t0, n_workers), flush=True)
-    prior_reader.set_prior_mass_tables(reader, g_names, g_table)
-    _set_worker_state(config=config, cls=cls, reader=reader, gaia_term=gaia_term,
-                       template_log=template_log, ln_subclass_prob=ln_subclass_prob, n_sub=n_sub,
-                       topk=topk, n_model=n_model,
-                       sigma_lib_l=sigma_lib_l,
-                       flux=catalog["flux"], sigma=catalog["sigma"], origin=catalog["origin"],
-                       curve_tables=catalog["curve_tables"], source_row5=catalog["source_row5"],
-                       band_a=catalog["band_a"], band_c=catalog["band_c"], band_n=catalog["band_n"],
-                       max_n=catalog["max_n"])
     with _make_pool(ctx, n_workers) as pool:
         for bi, (bstart, bstop) in enumerate(batch_bounds):
             if selected is not None and bi not in selected:

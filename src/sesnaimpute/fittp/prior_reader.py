@@ -670,6 +670,67 @@ def _ln_one_minus_c_curve(log10_fhat, curve_row, n, a, c):
 
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _c_curve(log10_fhat, curve_row, n, a, c):
+    """`C_b`, the raw completeness fraction at ONE log10 flux (mJy) --
+    `_ln_one_minus_c_curve`'s own piecewise-linear lookup (same `idx`,
+    same clamps), returning the completeness value itself, not
+    `ln(1 - C)`, and with NO `_C_CAP` floor (C7 brief Part B: `p_b =
+    min(C_b(...), C_CAP)` applies the cap at the call site, on the
+    catalogue-count probability, not on this reader)."""
+    idx = a * log10_fhat + c
+    if idx <= 0.0:
+        return curve_row[0] / _STORAGE_SCALE
+    elif idx >= n - 1:
+        return 0.0
+    j = int(idx)
+    t = idx - j
+    return (curve_row[j] + t * (curve_row[j + 1] - curve_row[j])) / _STORAGE_SCALE
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _p_cat(a_val, base, slope_b, template_row, curve_rows_s, band_a, band_c, band_n, dark_th):
+    """C7 brief Part B: `P_cat`, the probability a class-C object with
+    this template's own SED, at this one extinction `a_val`, clears
+    SESNA's own "2 of 8 bands" catalogue admission rule -- `1 -
+    Prod_b(1-p_b) - Sum_b p_b Prod_{j!=b}(1-p_j)`, the exact probability
+    of at least two Bernoulli successes out of eight independent trials
+    with success probabilities `p_b`. `p_b = min(C_b(fhat_b(a_val)),
+    _C_CAP)` -- `C_b` the SAME magnitude construction and the SAME
+    per-source completeness curve `_nondet_ln_sum` reads (`template_row`,
+    `curve_rows_s`, `band_a`/`band_c`/`band_n`), evaluated over ALL
+    eight bands (never gated by the source's own `nondet_mask`: the
+    catalogue's admission rule does not care whether THIS source was
+    itself detected there) -- `0` where `dark_th[b]` (this template
+    carries no flux in band `b`: `sed_models.register.darkness.
+    DARK_BANDS`, unpacked once per class in `fittp.sweep._register`).
+    A band the source's own position has no curve for (`curve_rows_s[b]`
+    the all-zero off-map row) already reads `C_b = 0` at every flux
+    through this same lookup, no separate check needed.
+
+    `Prod_{j!=b}(1-p_j) = Prod_all / (1-p_b)` is safe since every kept
+    `p_b <= _C_CAP = 1 - 1/200 < 1`, so `1 - p_b >= 1/200` always."""
+    prod_all = 1.0
+    p = np.empty(N_BANDS, dtype=np.float64)
+    for b in range(N_BANDS):
+        if dark_th[b]:
+            p[b] = 0.0
+        else:
+            log10_fhat = template_row[b] + base + slope_b[b] * a_val
+            c_val = _c_curve(log10_fhat, curve_rows_s[b], band_n[b], band_a[b], band_c[b])
+            p[b] = c_val if c_val < _C_CAP else _C_CAP
+        prod_all *= (1.0 - p[b])
+    sum_term = 0.0
+    for b in range(N_BANDS):
+        sum_term += p[b] * prod_all / (1.0 - p[b])
+    p_cat = 1.0 - prod_all - sum_term
+    if p_cat < 0.0:
+        p_cat = 0.0
+    elif p_cat > 1.0:
+        p_cat = 1.0
+    return p_cat
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
 def _nondet_ln_sum(a_val, active, base, slope_b, template_row, curve_rows_s, band_a, band_c, band_n):
     """NONDET brief section 1: `Sum_{b in active} ln[1 - C_b(f_hat_b(a_val))]`,
     the non-detection factor's own log at ONE extinction value `a_val` --
@@ -758,114 +819,13 @@ def _gaia_ln_gamma(a_val, g0_mag, kg_draine, kg_whitney, base, sl, r_diffuse, r_
 
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
-def _factor_ln_accumulate(total, w_theta, c_f, shift, b_cells, b0, dlb_f):
-    """`total[t, j] += ln PI[t](b_cells[j] + shift[t] + c_f[t])`: one factor
-    table's linear interpolation and edge clamp, exactly `_factor_ln`'s."""
-    n_t, n_b = total.shape
-    n_k = w_theta.shape[1]
-    for t in numba.prange(n_t):
-        for j in range(n_b):
-            pos = (b_cells[j] + shift[t] + c_f[t] - b0) / dlb_f
-            if pos < 0.0:
-                pos = 0.0
-            elif pos > n_k - 1:
-                pos = float(n_k - 1)
-            j0 = int(math.floor(pos))
-            if j0 > n_k - 2:
-                j0 = n_k - 2
-            frac = pos - j0
-            if frac < 0.0:
-                frac = 0.0
-            elif frac > 1.0:
-                frac = 1.0
-            v = w_theta[t, j0] * (1.0 - frac) + w_theta[t, j0 + 1] * frac
-            if v < 1e-300:
-                v = 1e-300
-            total[t, j] += math.log(v)
-
-
-def _factor_weight_sum(reader, model_index, d_values, chunk=20000):
-    """`G(b) = Sum_theta Pi_f PI_f[theta](b - C_theta[theta] + C_F_f[theta] +
-    D_F_f)` on the shape grid's own brightness cell centres `b` (`(n_b,)`
-    float64): the class's factor-table weights summed over every template,
-    read at the template's own brightness (the shape grid's `b` less the
-    template's `C_THETA`, the same shift `_cell_sum` applies the other way).
-    Linear interpolation and edge clamp are `_factor_ln`'s own. `d_values`
-    maps a factor's `D_F` column name to the source's scalar (none needed
-    for a factor without one). A class with no factor tables sums to the
-    template count."""
-    n_b = reader.b_edges.size - 1
-    b_cells = reader.b_origin + (np.arange(n_b) + 0.5) * reader.dlb
-    m = model_index.size
-    c_theta = (np.asarray(reader.c_theta[model_index], dtype=np.float64)
-               if reader.c_theta.size else np.zeros(m))
-    g = np.zeros(n_b, dtype=np.float64)
-    for s0 in range(0, m, chunk):
-        sl = slice(s0, min(s0 + chunk, m))
-        idx = model_index[sl]
-        total = np.zeros((idx.size, n_b), dtype=np.float64)
-        for f in reader.factors:
-            c_f = np.asarray(f["C_F"][idx], dtype=np.float64)
-            d_f = d_values[f["D_F"]] if f["D_F"] else 0.0
-            b_centers = f["b_centers"]
-            _factor_ln_accumulate(total, np.ascontiguousarray(f["W"][idx], dtype=np.float64),
-                                  c_f, d_f - c_theta[sl], b_cells,
-                                  float(b_centers[0]), float(b_centers[1] - b_centers[0]))
-        g += np.exp(total).sum(axis=0)
-    return g
-
-
-def prior_mass_keys(reader, rows):
-    """`(names, keys)`: the per-source factor columns this class's factors
-    read (`D_F`), and the sorted distinct value tuples among `rows` -- one
-    `G` table per key (`((),)` for a class whose factors read no column)."""
-    rows = np.asarray(rows)
-    names = sorted(set(f["D_F"] for f in reader.factors if f["D_F"]))
-    if not names:
-        return names, [()]
-    cols = np.stack([np.asarray(reader.p1_columns[nm][rows], dtype=np.float64) for nm in names], axis=1)
-    return names, sorted(set(map(tuple, np.unique(cols, axis=0))))
-
-
-def prior_mass_table(reader, names, key, model_index):
-    """The `G` table (`_factor_weight_sum`) for one key of `prior_mass_keys`."""
-    return _factor_weight_sum(reader, np.asarray(model_index), dict(zip(names, key)))
-
-
-def set_prior_mass_tables(reader, names, table):
-    """Hold the gathered `{key: G}` on `reader` for `ln_prior_mass`'s lookups."""
-    reader.__dict__["_g_table"] = (names, table)
-
-
-def ln_prior_mass(reader, rows, h):
-    """`(n,)` float64: `ln` of the class's prior integrated over every
-    template, every brightness and every extinction cell at each source,
-    with no likelihood -- what `ln_lambda0`'s logsumexp over templates
-    would be if the measured-band likelihood were 1 everywhere. It is
-    `ln density[s] + ln Sum_b hb[b] G(b)`: `hb` is the source's blurred
-    shape `h` summed over the extinction cells (it sums to one; the two
-    designs' cell weights sum to one in every cell), and `G` is
-    `_factor_weight_sum`, looked up in the tables the sweep formed
-    (`set_prior_mass_tables`) before the source tasks (a missing entry is an error, never a recompute)."""
-    rows = np.asarray(rows)
-    names, table = reader.__dict__["_g_table"]
-    out = np.empty(rows.size, dtype=np.float64)
-    for k in range(rows.size):
-        key = tuple(float(reader.p1_columns[nm][rows[k]]) for nm in names)
-        hb = h[k].astype(np.float64).sum(axis=0)
-        with np.errstate(divide="ignore"):
-            out[k] = np.log(reader.density[rows[k]]) + np.log(float((hb * table[key]).sum()))
-    return out
-
-
-@numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
 def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               b_origin, dlb, dlx, a_edges_buf, cell_weight,
               m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
               template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask,
               gaia_matched, g_s, a_x, g0_mag, kg_draine, kg_whitney,
-              r_diffuse, r_dense, ramp_lo, ramp_hi, g_lim, g_rolloff,
-              out_s0, out_s1, a_post_out, a2_post_out):
+              r_diffuse, r_dense, ramp_lo, ramp_hi, g_lim, g_rolloff, dark_bands,
+              out_s0, out_s1, out_cat, a_post_out, a2_post_out):
     """The cell sum of SPEC_BMSTP_DRAFT.md section 4.2, per source and
     template. NONDET2 brief section 2: the sum accumulates THREE totals,
     not one -- `total0` (the prior read along the fit's ridge alone),
@@ -876,6 +836,17 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     `S1 = out_s1 + ln_l` per law before mixing), and `out` (the function's
     own return, `S2`'s own un-mixed half) exactly as before NONDET2 --
     every other caller of this function still reads one array.
+
+    C7 brief Part B: a FOURTH total, `total_cat`, accumulates alongside
+    `total0` -- the same cell mass `total0` uses (the Jacobian, the
+    Gaussian-in-a mass and `cell_weight`), times `_p_cat` (the catalogue's
+    own "2 of 8 bands" admission probability at that cell's own `a*`),
+    with NO likelihood and NO Gaia factor: `out_cat` (scratch, caller
+    pre-fills `-inf`) is this total's own log, read by `ln_prior` into
+    `LN_PRIOR_MASS`'s own per-template, per-design value. `dark_bands`
+    is `(m, 8)` bool, this class's own register's `DARK_BANDS`
+    (`fittp.sweep._register`): the one per-template input `_p_cat`
+    needs beyond what `_nondet_ln_sum` already reads.
 
     NONDET brief section 1 (section 6.2, amended; COMPLETENESS_2026-10-20.md):
     the survey's completeness term for this source's own undetected,
@@ -1012,11 +983,13 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
             total0 = 0.0
             total1 = 0.0
             total2 = 0.0
+            total_cat = 0.0
             m1 = 0.0
             m2 = 0.0
             lbh = log10_b_hat[s, th]
             ct = c_theta[th]
             base = lbh - sl * ah
+            dark_th = dark_bands[th]
             in_grid = hi_a > 0.0
             i_lo = 0
             i_hi = -1
@@ -1120,6 +1093,12 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         # this cell, under the FULL term2 weight (section 2).
                         m1 += term2
                         m2 += term2 * a_star
+                        # C7 brief Part B: this cell's own catalogue-count
+                        # mass, at ITS OWN a_star -- term0 (no likelihood, no
+                        # Gaia) times P_cat.
+                        p_cat_val = _p_cat(a_star, base, slope_b, template_log[th],
+                                           curve_rows[s], band_a, band_c, band_n, dark_th)
+                        total_cat += term0 * p_cat_val / a_star
             else:
                 z_prev = (a_edges[i_lo] - ah) * inv_sig
                 cdf_prev = 0.5 * (1.0 + math.erf(z_prev / sqrt2))
@@ -1166,6 +1145,10 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         total2 += term2 / a_star
                         m1 += term2
                         m2 += term2 * a_star
+                        # C7 brief Part B: see the table path above.
+                        p_cat_val = _p_cat(a_star, base, slope_b, template_log[th],
+                                           curve_rows[s], band_a, band_c, band_n, dark_th)
+                        total_cat += term0 * p_cat_val / a_star
                     cdf_prev = cdf_next
                     phi_prev = phi_next
                     z_prev = z_next
@@ -1177,6 +1160,8 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     out[s, th] = np.log(total2)
                     a_post_out[s, th] = m1 / total2
                     a2_post_out[s, th] = m2 / total2
+                if total_cat > 0.0:
+                    out_cat[s, th] = np.log(total_cat)
             elif in_grid and lo_a >= a_edges[n_x]:
                 # The window's own low bound already clears the array's
                 # own top edge (the measured coordinate's full extent,
@@ -1213,6 +1198,12 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     out_s0[s, th] = s0
                     out_s1[s, th] = s1
                     out[s, th] = s1 + gaia_ln
+                    # C7 brief Part B: the fallback's one substitute point
+                    # carries the whole catalogue-count mass too.
+                    p_cat_val = _p_cat(a_top, base, slope_b, template_log[th],
+                                       curve_rows[s], band_a, band_c, band_n, dark_th)
+                    if p_cat_val > 0.0:
+                        out_cat[s, th] = s0 + math.log(p_cat_val)
                     # the fallback puts the whole mass at this one point:
                     # a_post/a2_post read the point itself, not a cell mean.
                     a_post_out[s, th] = a_top
@@ -1255,6 +1246,11 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     out_s0[s, th] = s0
                     out_s1[s, th] = s1
                     out[s, th] = s1 + gaia_ln
+                    # C7 brief Part B: see the top-edge fallback above.
+                    p_cat_val = _p_cat(a_c0, base, slope_b, template_log[th],
+                                       curve_rows[s], band_a, band_c, band_n, dark_th)
+                    if p_cat_val > 0.0:
+                        out_cat[s, th] = s0 + math.log(p_cat_val)
                     a_post_out[s, th] = a_c0
                     a2_post_out[s, th] = a_c0 * a_c0
             # else: the window overlaps the grid but carries zero mass at
@@ -1265,8 +1261,10 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
 
 
 def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, cell_weight,
-             template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask, gaia_inputs):
-    """`(ln_lambda2, ln_lambda0, ln_lambda1, a_post, a2_post)`: `ln <Lambda_C>_s
+             template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask, gaia_inputs,
+             dark_bands):
+    """`(ln_lambda2, ln_lambda0, ln_lambda1, ln_lambda_cat, a_post, a2_post)`:
+    `ln <Lambda_C>_s
     (theta)` of SPEC_BMSTP_DRAFT.md section 4.2, plus `ln A_C(s)` (section
     1.3) -- everything the fitter's evidence sum needs from the prior --
     together with `a_post`, `a2_post`, the cell sum's own first and second
@@ -1324,7 +1322,14 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
     handed to `_cell_sum` with the two law-ramp edges and the Gaia anchor's
     own limit/roll-off (`gaia.LAW_RAMP_LO`/`LAW_RAMP_HI`, `gaia.
     GAIA_G_LIM_MAG`/`GAIA_G_ROLLOFF_MAG`), so the Gaia factor is read per
-    cell, at that cell's own `a*`, exactly as the non-detection factor is."""
+    cell, at that cell's own `a*`, exactly as the non-detection factor is.
+
+    C7 brief Part B: `ln_lambda_cat` is `LN_PRIOR_MASS`'s own per-template,
+    per-design value -- `_cell_sum`'s new `out_cat` (the cell's prior mass
+    alone, no likelihood, no Gaia, times `_p_cat`) plus `ln A_C(s)` and the
+    factor-table term, formed the same way `ln_lambda0` is. `dark_bands`
+    is `(m, 8)` bool, this class's own register's `DARK_BANDS`
+    (`fittp.sweep._register`), handed straight to `_cell_sum`."""
     rows = np.asarray(rows)
     # `reader.a_col` is memory-mapped, native float32 (section 2); cast to
     # float64 here, at the numba kernel's own call below, rather than at
@@ -1349,6 +1354,7 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
     a2_post = np.full((n, m), np.nan, dtype=np.float64)
     out_s0 = np.full((n, m), -np.inf, dtype=np.float32)
     out_s1 = np.full((n, m), -np.inf, dtype=np.float32)
+    out_cat = np.full((n, m), -np.inf, dtype=np.float32)
     (matched, g_s, a_x, g0_mag, kg_draine, kg_whitney, r_diffuse, r_dense) = gaia_inputs
     core = _cell_sum(a_col, reader.xi_edges, sigma_a,
                       a_hat64, np.asarray(log10_b_hat, dtype=np.float64),
@@ -1370,10 +1376,12 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
                       float(r_diffuse), float(r_dense),
                       float(gaia_module.LAW_RAMP_LO), float(gaia_module.LAW_RAMP_HI),
                       float(gaia_module.GAIA_G_LIM_MAG), float(gaia_module.GAIA_G_ROLLOFF_MAG),
-                      out_s0, out_s1, a_post, a2_post)
+                      np.ascontiguousarray(np.asarray(dark_bands, dtype=np.bool_)),
+                      out_s0, out_s1, out_cat, a_post, a2_post)
     with np.errstate(divide="ignore"):
         ln_density = np.log(density)[:, None]
     ln_lambda2 = (core + ln_density + factor_term).astype(np.float32)
     ln_lambda0 = (out_s0 + ln_density + factor_term).astype(np.float32)
     ln_lambda1 = (out_s1 + ln_density + factor_term).astype(np.float32)
-    return ln_lambda2, ln_lambda0, ln_lambda1, a_post, a2_post
+    ln_lambda_cat = (out_cat + ln_density + factor_term).astype(np.float32)
+    return ln_lambda2, ln_lambda0, ln_lambda1, ln_lambda_cat, a_post, a2_post

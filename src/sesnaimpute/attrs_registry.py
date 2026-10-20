@@ -2479,21 +2479,21 @@ REGISTRY = {
         "as the natural log of the odds P/(1-P). One column per class, CLASSES "
         "order. 0 is even odds; +3 about 20 to 1 for; -3 about 20 to 1 against."),
     ("posterior_classification_source", "LOG_ODDS_PRIOR"): ("nats",
-        "The part of LOG_ODDS that comes from the prior: the prior odds of each "
-        "class against the other five at this position on the sky, before this "
-        "source's own measurements are used, counting objects of every brightness. "
-        "LOG_ODDS_PRIOR + LOG_ODDS_DATA = LOG_ODDS. Not a number for field stars and "
-        "nebula-contaminated apertures where the fit does not record their separate "
-        "prior."),
+        "The part of LOG_ODDS that comes from the prior: among the sources the "
+        "survey can catalogue at this position, the prior odds of this class "
+        "against the other five, before this source's own measurements are used. "
+        "LOG_ODDS_PRIOR + LOG_ODDS_DATA = LOG_ODDS."),
     ("posterior_classification_source", "LOG_ODDS_DATA"): ("nats",
-        "The part of LOG_ODDS that comes from this source itself, the log Bayes "
-        "factor: how well each class's population of model spectra, with the prior's "
-        "spread in brightness and extinction, explains its measured fluxes, its "
-        "non-detections and its Gaia measurement. Positive means the source's own "
-        "data favour the class."),
+        "The part of LOG_ODDS that comes from this source itself: the photometry's "
+        "Bayes factor given a catalogued source, how well each class's population "
+        "of model spectra, with the prior's spread in brightness and extinction, "
+        "explains its measured fluxes, its non-detections and its Gaia measurement, "
+        "among the sources the survey could catalogue here. Positive means the "
+        "source's own data favour the class."),
     ("posterior_classification_source", "LOG_ODDS_MEASURED"): ("nats",
         "The part of LOG_ODDS_DATA that comes from the bands the source was measured "
-        "in: how much they move each class's log odds from the prior. "
+        "in: how much they move each class's log odds, measured against the prior "
+        "among the sources the survey can catalogue here. "
         "LOG_ODDS_MEASURED + LOG_ODDS_NONDET + LOG_ODDS_GAIA = LOG_ODDS_DATA. Not a "
         "number where the fit does not record it."),
     ("posterior_classification_source", "LOG_ODDS_NONDET"): ("nats",
@@ -2706,13 +2706,12 @@ _SWEEP_FIT_READINGS = {
         "evidence adds Gaia to this."),
     "LN_PRIOR_MASS": ("natural log of objects per square degree",
         "This class's prior at the source's position, before any photometry is "
-        "used, as the natural logarithm of an expected number of objects per "
-        "square degree: the class's sky density there, summed over every model in "
-        "its library and every brightness and extinction. Divided across the six "
-        "classes it gives each class's prior probability. For most classes it is "
-        "the log of the class's sky density; field stars and nebula-contaminated "
-        "apertures share one stellar density, split by brightness and the nebular "
-        "emission around the source."),
+        "used, as the natural logarithm of the expected number of objects per "
+        "square degree the survey would catalogue there: summed over every model "
+        "in its library and every brightness and extinction, with the survey's "
+        "own completeness curves (the same SESNA eight-band, at-least-two-bands "
+        "admission rule) at the source's position. No photometry. Divided across "
+        "the six classes it gives each class's prior probability."),
     "FRAC_CLAMPED": ("fraction",
         "The support-weighted fraction of this class's models whose best fit called "
         "for negative extinction and was held at zero."),
