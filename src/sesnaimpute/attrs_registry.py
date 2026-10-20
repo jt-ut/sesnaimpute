@@ -603,17 +603,18 @@ REGISTRY = {
         "time, beyond the per-cell table in W."),
 
     ("pahn_weights_region", "MODEL_NAME"): ("source name",
-        "This PAHN template's own identifier, in this file's row order. "
-        "No PAHN SED register exists on this branch: these are stand-in "
-        "names (PAHN_STAND_IN_<i>), not a register's own model names."),
+        "This PAHN template's own identifier, the register's own model "
+        "name, in this file's row order (the same register read every "
+        "other class uses)."),
     ("pahn_weights_region", "C_THETA"): ("log10 mJy at 1 kpc",
-        "This PAHN stand-in template's own offset onto the common "
-        "brightness axis. Unlike every other library's C_THETA (a "
-        "register's own F_REF_I2, survey-wide), this is one of n_model "
-        "equally spaced quantiles of THIS REGION's own pattern-source "
-        "brightness population (population.pahn.pattern_f45_1kpc) -- "
-        "region-specific, a disclosed placeholder for the missing "
-        "register's own per-template brightness."),
+        "This PAHN template's own offset onto the common brightness "
+        "axis. Unlike every other library's C_THETA (a register's own "
+        "F_REF_I2, survey-wide), this is one of n_model equally spaced "
+        "quantiles of THIS REGION's own pattern-source brightness "
+        "population (population.pahn.pattern_f45_1kpc) -- region-specific, "
+        "because the register carries no absolute flux scale of its own, "
+        "only the per-template shape bmstp.atlas._pahn_region_nodes reads "
+        "directly, matched to this row's own template by row position."),
     ("pahn_weights_region", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
         "The centers of the 110 common brightness cells every factor "
         "table in this file is tabulated on."),
@@ -2838,12 +2839,12 @@ REGISTRY = {
         "aperture), background galaxy, young stellar object, shocked gas knot. "
         "Column order is the CLASSES attribute. Sums to 1."),
     ("posterior_classification_source", "P_SUBCLASS"): ("probability",
-        "Probability of each of 25 subclasses, named class and subclass in the "
-        "SUBCLASSES attribute: field stars by spectral type O to T, evolved stars "
-        "oxygen-rich or carbon-rich, galaxies active, star-forming, composite or "
-        "passive, young stellar objects class 0 to III or transition disk, knots J, "
-        "C, steady C or C-J shocks. A class's columns sum to its P_CLASS; all 25 "
-        "sum to 1."),
+        "Probability of each subclass in the SUBCLASSES attribute (every subclass "
+        "in definitions.CLASSMAP), named class and subclass: field stars by "
+        "spectral type O to T, evolved stars oxygen-rich or carbon-rich, galaxies "
+        "active, star-forming, composite or passive, young stellar objects class "
+        "0 to III or transition disk, knots J, C, steady C or C-J shocks. A "
+        "class's columns sum to its P_CLASS; the whole row sums to 1."),
     ("posterior_classification_source", "LOG_ODDS"): ("nats",
         "How strongly the pipeline favours each class over all the others combined, "
         "as the natural log of the odds P/(1-P). One column per class, CLASSES "
@@ -2887,9 +2888,10 @@ REGISTRY = {
         "spread. 0 means one class takes all the probability, 1 means all seven are "
         "equally likely."),
     ("posterior_classification_source", "ENTROPY_SUBCLASS"): ("fraction of maximum",
-        "How spread the 25 subclass probabilities are, divided by their maximum "
-        "spread. 0 means one subclass takes all the probability, 1 means all 25 "
-        "are equally likely."),
+        "How spread the subclass probabilities are (every subclass in "
+        "definitions.CLASSMAP), divided by their maximum spread. 0 means one "
+        "subclass takes all the probability, 1 means every subclass is equally "
+        "likely."),
     ("posterior_classification_source", "A_K_POST"): ("magnitudes of K-band extinction",
         "The fitted extinction in front of the source, one column per class in "
         "CLASSES order: the value if the source were of that class. Read the "
@@ -3157,7 +3159,7 @@ for _cls in ("STAR", "AGB", "PAHC", "PAHN", "GAL", "YSO", "H2S"):
 
 # --- fittp.emission -- <lib>_emission_survey: the measured emission table
 # E[k, b, v], one survey-wide file per library. The same dataset names and
-# readings repeat in every one of the six libraries' own files (moved from
+# readings repeat in every one of the seven libraries' own files (moved from
 # fittp/emission.py's own _READINGS, READINGS brief section 3). ---
 _EMISSION_READINGS = {
     "E": ("fraction",
@@ -3177,7 +3179,7 @@ _EMISSION_READINGS = {
         "apparent 4.5 micron flux in mJy. There is one more edge than there are "
         "bins."),
 }
-for _lib in ("sps", "agb", "pahc", "galz", "yso", "h2shock"):
+for _lib in ("sps", "agb", "pahc", "galz", "yso", "h2shock", "pahn"):
     _stem = "%s_emission_survey" % _lib
     for _name, _rd in _EMISSION_READINGS.items():
         REGISTRY[(_stem, _name)] = _rd

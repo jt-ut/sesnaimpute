@@ -101,7 +101,7 @@ BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
 IDX_I4 = BAND_KEYS.index("I4")
 IDX_I2 = BAND_KEYS.index("I2")
-CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S", "PAHN")
+CLASSES = ("STAR", "AGB", "PAHC", "PAHN", "GAL", "YSO", "H2S")
 
 #: The bright-end count check's two multiples of the pixel's own 4.5 um
 #: 50% limit (SPEC_BMSTP_DRAFT.md sec. 9 "the bright-end count ratio"):
@@ -1617,33 +1617,46 @@ def _pahn_depth_nodes():
     return xi_centers, np.full(N_DEPTH_NODES, 1.0 / N_DEPTH_NODES)
 
 
-def _pahn_region_nodes(config, region, reader_pahn, pahn_log10_ratio, d_r_pc):
+def _pahn_region_nodes(config, region, reader_pahn, d_r_pc):
     """`(flux0_pahn, u_pahn, w_pahn)`: PAHN's own region-wide deterministic
     quadrature (the brief: "the member draw from the PAHN shape and
-    weights") -- the brightness nodes are `bmstp.template_weights.
-    build_pahn`'s own `n_model` stand-in templates (`reader_pahn.c_theta`,
-    `bmstp.template_weights`'s product already read through `prior_
-    reader.load`, uniform weight `1/n_model` each -- the SAME nodes
-    WEIGHTS wrote, never recomputed here), PLACED AT THIS REGION's own
-    distance (`delta = -2 log10(d_r_pc / 1 kpc)`, the SAME shift every
-    other class's `C_THETA` is placed by): `log10 F_I2 = C_THETA + delta`
-    undimmed I2 flux at the region, `F_I4 = F_I2 / ratio` (the SAME
-    I2/I4 ratio `population.pahn.pattern_f45_1kpc` used to build C_THETA
-    in the first place, so placing-then-dividing-by-the-ratio recovers
-    exactly the pattern population's own observed I4 flux scale) --
-    every other band (J, H, Ks, I1, I3, M1) zero: a PAH nebular source's
-    2MASS flux is zero (brief, I1/I3/M1 likewise zero here for want of a
-    register to read them from, disclosed). Crossed with PAHN's own
-    depth nodes (`_pahn_depth_nodes`, region-wide, not per-sightline) via
-    `_combine_with_depth`, the SAME generic combiner YSO/H2S use."""
+    weights") -- the brightness PLACEMENT is `bmstp.template_weights.
+    build_pahn`'s own `n_model` nodes (`reader_pahn.c_theta`, `bmstp.
+    template_weights`'s product already read through `prior_reader.load`,
+    uniform weight `1/n_model` each -- the SAME nodes WEIGHTS wrote, never
+    recomputed here), PLACED AT THIS REGION's own distance (`delta = -2
+    log10(d_r_pc / 1 kpc)`, the SAME shift every other class's `C_THETA`
+    is placed by): `log10 F_I2 = C_THETA + delta` undimmed I2 flux at the
+    region. The SHAPE (I1, I3, I4, M1, J, H, Ks, all relative to I2) is
+    the register's own 33 templates' 8-band reference fluxes (C17
+    2026-10-20, the same register `template_weights._read_register`
+    reads for every other class), row i's own template matched to
+    `C_THETA`'s i-th placement node by row position (both are the
+    register's own row order: `build_pahn` reads `n_model` and
+    `MODEL_NAME` straight off it) -- an arbitrary but uniform pairing,
+    harmless to the member set's own marginal distribution, since every
+    node already carries the same weight `1/n_model` regardless of which
+    register row supplies its shape. This recovers I1/I3/M1 as the
+    template's own PAH fluxes (the 3.3 um feature, the 6.2/7.7 complex,
+    the 24 um aperture growth) instead of the retired all-zero stand-in.
+    Crossed with PAHN's own depth nodes (`_pahn_depth_nodes`, region-wide,
+    not per-sightline) via `_combine_with_depth`, the SAME generic
+    combiner YSO/H2S use."""
+    reg = template_weights._read_register(config, "pahn")
     n_model = reader_pahn.c_theta.size
+    if reg["names"].size != n_model:
+        raise ValueError(
+            "bmstp.atlas: PAHN register has %d templates, WEIGHTS' own C_THETA "
+            "has %d -- template_weights.build_pahn must place exactly the "
+            "register's own rows" % (reg["names"].size, n_model))
     w_pre = np.full(n_model, 1.0 / n_model, dtype=np.float64)
     delta = -2.0 * np.log10(d_r_pc / 1000.0)
     flux0_i2 = 10.0 ** (reader_pahn.c_theta + delta)
-    flux0_i4 = flux0_i2 / (10.0 ** pahn_log10_ratio)
-    flux0_pre = np.zeros((n_model, N_BANDS), dtype=np.float64)
-    flux0_pre[:, IDX_I2] = flux0_i2
-    flux0_pre[:, BAND_KEYS.index("I4")] = flux0_i4
+    f_i2_reg = np.maximum(reg["f_ref"]["I2"], reg["floor_linear"])
+    flux0_pre = np.empty((n_model, N_BANDS), dtype=np.float64)
+    for j, bkey in enumerate(BAND_KEYS):
+        band_ratio = np.maximum(reg["f_ref"][bkey], reg["floor_linear"]) / f_i2_reg
+        flux0_pre[:, j] = flux0_i2 * band_ratio
 
     xi_centers, w_depth = _pahn_depth_nodes()
     return _combine_with_depth(flux0_pre, w_pre, xi_centers, w_depth)
@@ -2135,14 +2148,14 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         # intrinsic page is pre-retention everywhere, the SAME convention
         # YSO/H2S's own `density_yso`/`density_h2s_law_pooled_pix` use).
         # Its own region-wide member quadrature (`_pahn_region_nodes`)
-        # reads WEIGHTS' own stand-in templates (`readers_by_cls["PAHN"]
+        # reads WEIGHTS' own placement templates (`readers_by_cls["PAHN"]
         # .c_theta`) straight off disk -- "the member draw from the PAHN
         # shape and weights" (brief) -- placed at this region's own
-        # distance through the SAME DL21 fallback ratio SHAPE used.
+        # distance, with the PAHN register's own 8-band SHAPE (C17
+        # 2026-10-20), not a single global ratio.
         density_pahn_pix = pahn_module.read(config, region)(np.log10(f_lim[:, IDX_I4]))
         intensity["PAHN"] = density_pahn_pix
-        pahn_log10_ratio = pahn_module.dl21_i2_i4_log10_ratio(config)
-        pahn_members = _pahn_region_nodes(config, region, readers_by_cls["PAHN"], pahn_log10_ratio, d_r_pc)
+        pahn_members = _pahn_region_nodes(config, region, readers_by_cls["PAHN"], d_r_pc)
 
         # the N_ABOVE tail's own "brighter than the pixel's own limit"
         # mask (`_above_shared`'s docstring): depends only on `a_col`/

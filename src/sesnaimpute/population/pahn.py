@@ -49,9 +49,11 @@ for_region`), so its density is the measured curve and the shape's own
 retention alone.
 
 Writes `population/pahn/density_pahn_region.hdf5`. No register is read
-here (the PAHN SED-template library does not exist on this branch): this
-module reads only the curated catalogue and the measured completeness
-product, both already built.
+here: this module reads only the curated catalogue and the measured
+completeness product, both already built -- population may not import
+bmstp (this module's own docstring rule, repeated above), and the
+register read `bmstp.template_weights`/`bmstp.atlas` do for PAHN's own
+SHAPE and WEIGHTS lives there instead (`C17_pahn_integration.md`).
 """
 
 import os
@@ -239,47 +241,6 @@ def _poisson_interval_68(n):
     return lo, hi
 
 
-#: The PAHC register's own fixed DL21 token (`sed_models.curate.
-#: pahc_curate`'s own fiducial choice, read as module constants there:
-#: `PAHC_LG_U_TOKEN`, `PAHC_IONIZATION`) and the three published
-#: grain-size distributions `load_pahc_excess_shape` reads over: PAHN has
-#: no SED register of its own on this branch, so its own SHAPE brightness
-#: conversion (I4 observed -> I2/4.5um reference) falls back to the PURE
-#: DL21 PAH-excess shape at that SAME fiducial, "the DL21 shape's own
-#: ratio computed the same way" the 33 PAHN templates' own median would
-#: be (brief).
-DL21_SIZE_TOKENS = ("sma", "std", "lrg")
-
-
-def dl21_i2_i4_log10_ratio(config):
-    """`log10(F_I2/F_I4)`, SHAPE's own fallback I2/I4 conversion (module
-    docstring, DL21_SIZE_TOKENS): the median, over the three published
-    grain-size distributions, of the pure DL21 PAH-excess shape's own
-    ratio at the two IRAC bands' own effective wavelength (`definitions.
-    BANDS_BY_KEY`) -- `sed_models.curate.pahc_curate.load_pahc_excess_
-    shape`'s own `P_hat(lambda)`, normalised so `P_hat(8um) = 1`, POINT-
-    SAMPLED (linear interpolation on its native wavelength grid, not
-    filter-convolved against the IRAC response curves) at I2's 4.493 um
-    and I4's 7.872 um -- a disclosed simplification (this build's own
-    report), since a true per-template register entry would be the
-    filter-convolved flux (`sed_models.build_pahc`'s own convolution),
-    not a single point sample. The DL21 spectra this reads
-    (`config.inputs['sed_models']/downloads/PAHspec`) are already on
-    disk (`sed_models.curate.pahc_curate.fetch_pahc_excess_templates`'s
-    own earlier fetch for PAHC): no network fetch here."""
-    from sesnaimpute.sed_models.curate import pahc_curate
-    download_dir = f"{config.inputs['sed_models']}/downloads/PAHspec"
-    wvl_i2 = definitions.BANDS_BY_KEY["I2"].wvl_um
-    wvl_i4 = definitions.BANDS_BY_KEY["I4"].wvl_um
-    ratios = []
-    for size in DL21_SIZE_TOKENS:
-        wave_um, p_hat = pahc_curate.load_pahc_excess_shape(download_dir, size)
-        p_i2 = float(np.interp(wvl_i2, wave_um, p_hat))
-        p_i4 = float(np.interp(wvl_i4, wave_um, p_hat))
-        ratios.append(np.log10(p_i2 / p_i4))
-    return float(np.median(ratios))
-
-
 def pattern_f45_1kpc(config, region, log10_ratio_i2_i4):
     """`(log10_f_ref_i2_1kpc, log10_f_ref_i4_1kpc)`, one row per pattern
     source in `region` (module docstring's pattern): each source's own
@@ -290,8 +251,10 @@ def pattern_f45_1kpc(config, region, log10_ratio_i2_i4):
     distance `d_r`, since this is the measured SOURCE's own flux, not a
     template placed at an arbitrary distance), and the I2 (4.5um)
     reference flux the SAME brightness conversion `log10_ratio_i2_i4`
-    implies (the PAHN templates' own I2/I4 ratio, or its DL21 fallback,
-    `dl21_i2_i4_log10_ratio`)."""
+    implies (the caller's own ratio, e.g. the PAHN register's own median
+    I2/I4 band ratio, `bmstp.template_weights.pahn_i2_i4_log10_ratio` --
+    this function takes the ratio as an argument and reads no register
+    itself, population may not import bmstp)."""
     reg = regions_module.REGIONS_BY_NAME[region]
     d_r_pc = float(reg.d_r_pc)
     scale_1kpc = (d_r_pc / 1000.0) ** 2

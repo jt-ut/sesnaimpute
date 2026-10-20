@@ -569,9 +569,11 @@ def build(config, regions=None):
             n = result["n"]
             n_pix = int(np.unique(result["hpx512"]).size)
             area_deg2 = n_pix * _HPX512_PIXEL_DEG2
-            classes = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S")
-            keys = ("density_star", "density_agb", "density_pahc",
-                    "density_gal", "density_yso", "density_h2s")
+            # definitions.CLASSES order, less PAHN (report-only below,
+            # kept out of this six-class total_sum/ratio check, which
+            # predates PAHN -- never a hand-typed order of its own).
+            classes = tuple(c.code for c in definitions.CLASSES if c.code != "PAHN")
+            keys = tuple("density_%s" % cls.lower() for cls in classes)
             total_sum = 0.0
             print(f"bmstp.density {region}: n={n}, occupied nside-512 pixels={n_pix}, "
                   f"report-only area~{area_deg2:.4g} deg^2 (occupied-pixel estimate, not the "

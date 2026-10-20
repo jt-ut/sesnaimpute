@@ -40,8 +40,8 @@ from sesnaimpute.build import run
 from sesnaimpute.bmstp import grid
 from sesnaimpute.gutcolors import crisp
 
-#: The six libraries, `fittp.prior_reader._LIB`'s own values.
-LIBRARIES = ("sps", "agb", "pahc", "galz", "yso", "h2shock")
+#: The seven libraries, `fittp.prior_reader._LIB`'s own values.
+LIBRARIES = ("sps", "agb", "pahc", "galz", "yso", "h2shock", "pahn")
 
 #: `definitions.BANDS`' order (J H Ks I1 I2 I3 I4 M1) is `gutcolors.crisp`'s
 #: own BAND_ORDER (crisp.py module docstring); I2 is 4.5 micron
