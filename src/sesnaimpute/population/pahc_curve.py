@@ -484,8 +484,11 @@ def region_measurement(config, region, colour_knots, colour45_median):
     # q reads the predicted photospheric 8 micron flux, never the
     # observed one (module docstring; the atlas factor tables read it the
     # same way), so every eligible source has a q whether or not it has
-    # an 8 micron measurement
-    f_lim8 = limits_module.limits(config, region)[eligible, IDX_I4]
+    # an 8 micron measurement. The limit is each source's own measured
+    # completeness=0.5 crossing (`catalog.limits.completeness`'s reader
+    # object, `fifty_percent`), not the retired region-wide counts fit.
+    reader = limits_module.completeness(config, region)
+    f_lim8 = reader.fifty_percent("I4", np.flatnonzero(eligible))
 
     # de-reddening, the colour-relation lookup and q (module docstring,
     # "De-reddening"; `_q_block`) over blocks of this region's own

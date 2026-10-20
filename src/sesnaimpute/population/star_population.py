@@ -628,10 +628,13 @@ def partition_weights(w, is_evolved, f_dusty_mean):
 
 def pahc_limit_grid_mjy(config, region):
     """`(8,)` mJy (module docstring, `PAHC_LIMIT_QUANTILES`): the
-    region's own sources' 50%-completeness limit at I4
-    (`catalog.limits.limits`), at the eight percentiles PAHC's shape is
-    tabulated on."""
-    f_lim_i4 = limits_module.limits(config, region)[:, IDX_I4]
+    region's own sources' measured 50%-completeness limit at I4
+    (`catalog.limits.completeness`'s reader object, `fifty_percent` --
+    the curve's own completeness=0.5 crossing at each source's own row),
+    at the eight percentiles PAHC's shape is tabulated on."""
+    reader = limits_module.completeness(config, region)
+    n_source = reader.source_row.shape[0]
+    f_lim_i4 = reader.fifty_percent("I4", np.arange(n_source))
     return np.percentile(f_lim_i4, PAHC_LIMIT_QUANTILES)
 
 

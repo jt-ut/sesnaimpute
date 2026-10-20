@@ -75,6 +75,7 @@ from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
 from sesnaimpute.population import h2s as h2s_module
 from sesnaimpute.population import knot_rate
@@ -175,26 +176,36 @@ _HPX512_PIXEL_DEG2 = density_module._HPX512_PIXEL_DEG2
 
 
 def _depth_grid(config, region):
-    """The admitted pixel axis and its marginalised 50% limit and width
-    (`catalog.depth_grid`, sec. 3.3, the fixed point of the per-pixel
-    `log10 DCOMP90` vs `log10 f` fit, not the brightness-biased median):
-    `(pix, f_lim_50_pix_mjy, w_dex_pix)`. A band the region's own counts
-    fit cannot solve is unsurveyed there and carries `+inf`/`0` (never
-    `NaN`, `catalog.depth_grid`'s own rule); a `NaN` here means that rule
-    was not kept upstream, and every reader downstream would silently
-    turn it into a NaN region total (module docstring), so it raises here
-    instead, exactly as `_pixel_column` raises on a missing sightline."""
-    path = config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region)
-    with h5py.File(path, "r") as f:
-        pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
-        f_lim = np.asarray(f["F_LIM_50_PIX_MJY"][:], dtype=np.float64)
-        w_dex_pix = np.asarray(f["W_DEX_PIX"][:], dtype=np.float64)
-    bad = np.isnan(f_lim) | np.isnan(w_dex_pix)
-    if bad.any():
-        p_idx, b_idx = np.unravel_index(int(np.argmax(bad)), bad.shape)
-        raise ValueError("bmstp.atlas: pixel %d's %s limit or width is NaN in %s -- an "
-                          "unsurveyed band must be +inf/0, never NaN (catalog.depth_grid)"
-                          % (int(pix[p_idx]), BAND_KEYS[b_idx], path))
+    """The admitted pixel axis and its marginalised 50% limit and width,
+    read from Rob Gutermuth's own measured completeness curve
+    (COMPLETENESS_2026-10-20.md "The reader") through the one reader
+    object, `catalog.limits.completeness`: `(pix, f_lim_50_pix_mjy,
+    w_dex_pix)`, `f_lim_50_pix_mjy` each pixel's own `fifty_percent_pixel`
+    (the curve's own completeness=0.5 crossing) and `w_dex_pix` its own
+    `local_width_dex_pixel` (the SAME erf-width definition `catalog.
+    depths` fits region-wide, measured here per pixel from the curve's
+    own C=0.8413/C=0.1587 crossings) -- replaces `catalog.depth_grid`'s
+    retired region-wide counts fit (`F_LIM_50_PIX_MJY`/`W_DEX_PIX`)
+    outright; every downstream formula in this module (`catalogued_
+    probability`/`catalogued_fraction`, the erf-parametrised completeness
+    model sec. 8 prices) is unchanged, only its two per-pixel, per-band
+    numbers' own source is. A band with no on-map pixel anywhere in this
+    admitted pixel is unsurveyed there and carries `+inf`/`0` (never
+    `NaN`, the convention `catalog.depth_grid` used): the curve's own
+    crossing search returns `NaN` for exactly that case (never reaches
+    0.5 because every plane is 0, module docstring of `catalog.limits.
+    Completeness._crossing_mag`), substituted here."""
+    reader = limits_module.completeness(config, region)
+    pix = reader.hpx_pix_512
+    rows = np.arange(pix.shape[0])
+    f_lim = np.empty((pix.shape[0], N_BANDS), dtype=np.float64)
+    w_dex_pix = np.empty((pix.shape[0], N_BANDS), dtype=np.float64)
+    for j, band in enumerate(BAND_KEYS):
+        flux50 = reader.fifty_percent_pixel(band, rows)
+        width = reader.local_width_dex_pixel(band, rows)
+        unsurveyed = ~np.isfinite(flux50)
+        f_lim[:, j] = np.where(unsurveyed, np.inf, flux50)
+        w_dex_pix[:, j] = np.where(unsurveyed | ~np.isfinite(width), 0.0, width)
     return pix, f_lim, w_dex_pix
 
 
