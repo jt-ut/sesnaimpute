@@ -486,9 +486,13 @@ def region_measurement(config, region, colour_knots, colour45_median):
     # same way), so every eligible source has a q whether or not it has
     # an 8 micron measurement. The limit is each source's own measured
     # completeness=0.5 crossing (`catalog.limits.completeness`'s reader
-    # object, `fifty_percent`), not the retired region-wide counts fit.
+    # object, `fifty_percent`), not the retired region-wide counts fit;
+    # a source off the I4 map (`fifty_percent` NaN) carries `+inf`
+    # (`catalog.depth_grid`'s own never-NaN convention), or its own q
+    # would be NaN.
     reader = limits_module.completeness(config, region)
     f_lim8 = reader.fifty_percent("I4", np.flatnonzero(eligible))
+    f_lim8 = np.where(np.isfinite(f_lim8), f_lim8, np.inf)
 
     # de-reddening, the colour-relation lookup and q (module docstring,
     # "De-reddening"; `_q_block`) over blocks of this region's own

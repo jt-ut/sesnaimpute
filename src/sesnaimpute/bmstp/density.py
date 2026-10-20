@@ -271,9 +271,13 @@ def build_region(config, region, st, fitted_rates=None, pooled_eta=None):
 
     # D_PAHC, sec. 5.3: each source's own measured 8 um (I4) 50%-
     # completeness flux (COMPLETENESS_2026-10-20.md), from the reader
-    # object -- not the retired region-wide counts-fit product.
+    # object -- not the retired region-wide counts-fit product. A source
+    # off the I4 map (`fifty_percent` NaN) carries `+inf` (`catalog.
+    # depth_grid`'s own never-NaN convention), so D_PAHC is -inf there
+    # rather than NaN.
     reader = limits_module.completeness(config, region)
     f_lim_i4 = reader.fifty_percent("I4", np.arange(n))
+    f_lim_i4 = np.where(np.isfinite(f_lim_i4), f_lim_i4, np.inf)
     d_pahc = (-np.log10(f_lim_i4)).astype(np.float32)
 
     p2_path = config_module.product_path(config, "bmstp", "shape", "star", "tile", region=region)
