@@ -45,13 +45,17 @@ import glob
 import os
 
 import h5py
-import healpy as hp
 import numba
 import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.wcs import WCS
 from scipy.special import erfc
+# healpy's own import, AFTER scipy.special (catalog/depths.py's own
+# module docstring: importing healpy before `scipy.special.erfc` corrupts
+# loky's pickling of that ufunc across worker processes, measured, import
+# order the only variable reproducing it).
+import healpy as hp
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
@@ -78,6 +82,13 @@ _BAND_FILE = {
 }
 
 IRAC_MIPS_KEYS = ("I1", "I2", "I3", "I4", "M1")
+
+#: All eight bands, `definitions.BANDS`' own fixed order (J, H, Ks, I1-I4,
+#: M1): the one column order `completeness_sesna_source`'s own SOURCE_ROW
+#: shares with `fittp.sweep`'s `BAND_KEYS` (same tuple, same order), so a
+#: band's position in `definitions.BANDS` is directly its own column --
+#: no per-band index lookup needed at either end.
+ALL_BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 
 
 class FieldMap:
@@ -471,37 +482,83 @@ def _galactic_to_icrs(gl_deg, gb_deg):
     return c.ra.deg, c.dec.deg
 
 
-def _twomass_params(config, region):
-    """This region's own fitted `F50_2MASS_MJY` (mJy) and `WIDTH_DEX`
-    (dex) for J, H, Ks (`catalog.depths.build`'s product)."""
-    path = config_module.product_path(config, "catalog", "sesna", "depths", "region")
+def _pix128_row(gl_deg, gb_deg, hpx_pix_128):
+    """Row into `hpx_pix_128` (ascending) for each `(gl_deg, gb_deg)`
+    position's own nside-128 NESTED pixel (`catalog.depths`' own (lon,
+    lat) pair, its module docstring). Never -1: 2MASS carries no map
+    footprint to fall off (COMPLETENESS_2026-10-20.md: "2MASS is
+    all-sky"), and every source's own pixel is one `hpx_pix_128` was
+    built from (`catalog.depths._build_pixel_product`'s "every pixel
+    that holds at least one catalogue source"); a position whose own
+    pixel is absent means the caller passed the wrong region's catalogue
+    or an admitted pixel whose own nside-128 ancestor is not actually
+    source-bearing, both a build-time bug, so this asserts rather than
+    substituting -1 silently."""
+    pix = hp.ang2pix(128, np.asarray(gl_deg, dtype=np.float64),
+                      np.asarray(gb_deg, dtype=np.float64), nest=True, lonlat=True).astype(np.int64)
+    row = np.searchsorted(hpx_pix_128, pix)
+    row = np.clip(row, 0, hpx_pix_128.size - 1)
+    found = hpx_pix_128[row] == pix
+    if not np.all(found):
+        raise ValueError(
+            "catalog.completeness: %d position(s) have no nside-128 row in this region's "
+            "depths_sesna_hpx128 product -- 2MASS is all-sky, this should never happen"
+            % int(np.sum(~found)))
+    return row
+
+
+def _twomass_pixel_params(config, region):
+    """This region's own per-nside-128-pixel 2MASS fit (`catalog.depths`'
+    own `depths_sesna_hpx128__<Region>.hdf5`, briefs/round4_2026-10-20/
+    C6_twomass_pixel_depths.md): `(hpx_pix_128 (n_pix,) ascending,
+    f50_mjy (n_pix, 3), width_dex (n_pix, 3), from_regional (n_pix, 3)
+    bool)`, `TWOMASS_KEYS` column order. A pixel's own row already
+    carries the region's own depths_sesna_region value where
+    `from_regional` is true (`catalog.depths.build` copies it in), so
+    this reader needs no separate region-wide fallback of its own."""
+    path = config_module.product_path(config, "catalog", "sesna", "depths", "hpx128", region=region)
     if not os.path.exists(path):
         raise FileNotFoundError(
-            "catalog.completeness: no survey-depths product at %r -- run the "
+            "catalog.completeness: no per-pixel survey-depths product at %r -- run the "
             "'sesnaimpute.catalog.depths' RUNBOOK line first" % path)
     with h5py.File(path, "r") as f:
-        regions = [r.decode() if isinstance(r, bytes) else r for r in f["REGION"][:]]
-        ridx = regions.index(region)
-        f50 = f["F50_2MASS_MJY"][ridx, :]
-        width_dex = f["WIDTH_DEX"][ridx, :]
-    return f50, width_dex
+        hpx_pix_128 = np.asarray(f["HPX_PIX_128"][:], dtype=np.int64)
+        f50_mjy = np.asarray(f["F50_2MASS_MJY"][:], dtype=np.float64)
+        width_dex = np.asarray(f["WIDTH_DEX"][:], dtype=np.float64)
+        from_regional = np.asarray(f["FROM_REGIONAL"][:], dtype=bool)
+    return hpx_pix_128, f50_mjy, width_dex, from_regional
 
 
-def _tabulate_twomass_band(f50_mjy, width_dex, zero_point_jy):
-    """The error-function completeness roll-off tabulated on a fine
-    (`TWOMASS_DMAG`) magnitude grid spanning `TWOMASS_SPAN_WIDTHS` roll-
-    off widths either side of the fitted 50% point (COMPLETENESS_2026-10-
-    20.md "The reader": "TABULATED on its own fine grid ... so the
-    interpolation error of a w ~ 0.1 mag erf is < 0.005"). Returns
-    `(curve (1, n) uint16, mag_grid (n,) float64)`.
+def _tabulate_twomass_pixel_table(f50_mjy, width_dex, zero_point_jy):
+    """Every nside-128 pixel's own error-function completeness roll-off,
+    tabulated on ONE shared fine (`TWOMASS_DMAG`) magnitude grid -- the
+    SAME layout the five Spitzer bands' own `CURVE_<band>` tables use,
+    one row per pixel (briefs/round4_2026-10-20/C6_twomass_pixel_depths.md
+    item 2: "the union span"). The grid spans every row's own
+    `TWOMASS_SPAN_WIDTHS` roll-off widths either side of its own 50%
+    point (COMPLETENESS_2026-10-20.md "The reader": "so the interpolation
+    error of a w ~ 0.1 mag erf is < 0.005"): its first plane is the
+    BRIGHTEST row's own `m50 - half_span`, its last the FAINTEST row's
+    own `m50 + half_span`. A row narrower than that union is clamped to
+    exactly 1 brightward and 0 faintward of its OWN `+-TWOMASS_SPAN_
+    WIDTHS` (the brief's own "rows outside their own +-6 widths are 1
+    brightward and 0 faintward") rather than left to the erf's own
+    (already negligible there) tail. `f50_mjy`/`width_dex` are `(n_pix,)`.
+    Returns `(curve (n_pix, n) uint16, mag_grid (n,) float64)`.
     """
-    m50 = -2.5 * np.log10(f50_mjy / (zero_point_jy * 1000.0))
+    m50 = -2.5 * np.log10(f50_mjy / (zero_point_jy * 1000.0))  # (n_pix,)
     w_mag = width_dex / 0.4
     half_span = TWOMASS_SPAN_WIDTHS * w_mag
-    n = int(np.ceil(2.0 * half_span / TWOMASS_DMAG)) + 1
-    mag_grid = m50 - half_span + TWOMASS_DMAG * np.arange(n)
-    fraction = 0.5 * erfc((mag_grid - m50) / (np.sqrt(2.0) * w_mag))
-    return _to_uint16(fraction)[None, :], mag_grid
+    lo = float(np.min(m50 - half_span))
+    hi = float(np.max(m50 + half_span))
+    n = int(np.ceil((hi - lo) / TWOMASS_DMAG)) + 1
+    mag_grid = lo + TWOMASS_DMAG * np.arange(n)
+    z = (mag_grid[None, :] - m50[:, None]) / (np.sqrt(2.0) * w_mag[:, None])
+    fraction = 0.5 * erfc(z)
+    bright = mag_grid[None, :] < (m50[:, None] - half_span[:, None])
+    faint = mag_grid[None, :] > (m50[:, None] + half_span[:, None])
+    fraction = np.where(bright, 1.0, np.where(faint, 0.0, fraction))
+    return _to_uint16(fraction), mag_grid
 
 
 #: Rule 9: a fixed-seed subsample of each field's own COMPLETE pixels
@@ -616,10 +673,15 @@ def build(config, regions=None):
     """Builds the per-region completeness product (COMPLETENESS_2026-10-
     20.md "The reader: layout and kernel"): per Spitzer band, the on-map
     30-arcsec pixels' own curves (`CURVE_<B>`), each source's row into
-    them (`SOURCE_ROW`), and the admitted nside-512 pixels' own curves
-    and coverage (`PIXEL_CURVE_<B>`/`PIXEL_COVERED_FRAC_<B>`); per 2MASS
-    band, the one region-wide tabulated erf curve. `catalog.limits.
-    completeness` is the one reader.
+    them, and the admitted nside-512 pixels' own curves and coverage
+    (`PIXEL_CURVE_<B>`/`PIXEL_COVERED_FRAC_<B>`); per 2MASS band, the
+    SAME layout at nside-128 pixel resolution instead of 30-arcsec
+    (briefs/round4_2026-10-20/C6_twomass_pixel_depths.md): `catalog.
+    depths`' own per-pixel fit (`_twomass_pixel_params`), tabulated on
+    one shared grid (`_tabulate_twomass_pixel_table`). `SOURCE_ROW` is
+    one (n_source, 8) table, `ALL_BAND_KEYS` column order, shared by
+    both band families -- 2MASS's own column is never -1 (all-sky).
+    `catalog.limits.completeness` is the one reader.
     """
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
@@ -657,8 +719,10 @@ def build(config, regions=None):
             with h5py.File(src_path, "r") as f:
                 ra_deg = f["RA_DEG"][:]
                 dec_deg = f["DEC_DEG"][:]
+                gal_l_deg = f["GAL_L_DEG"][:]
+                gal_b_deg = f["GAL_B_DEG"][:]
             n_source = ra_deg.size
-            source_row = np.full((n_source, len(IRAC_MIPS_KEYS)), -1, dtype=np.int32)
+            source_row = np.full((n_source, len(ALL_BAND_KEYS)), -1, dtype=np.int32)
 
             with h5py.File(out_path, "w") as f:
                 f.attrs["GRANULE"] = "source"
@@ -667,7 +731,7 @@ def build(config, regions=None):
                 corr_lengths = {}
                 n_pix_total = 0
                 n_completed_total = {}
-                for bi, band in enumerate(IRAC_MIPS_KEYS):
+                for band in IRAC_MIPS_KEYS:
                     grid = _band_mag_grid(band)
                     n_band = grid.size
                     template_offs, template_c = templates[band]
@@ -724,7 +788,8 @@ def build(config, regions=None):
 
                     field_idx, iy, ix = lookup(config, region, band, ra_deg, dec_deg,
                                                 n_jobs=config.n_jobs, maps=maps)
-                    source_row[:, bi] = _row_for_positions(field_idx, iy, ix, row_index_maps)
+                    source_row[:, ALL_BAND_KEYS.index(band)] = _row_for_positions(
+                        field_idx, iy, ix, row_index_maps)
 
                     pfield_idx, piy, pix_ = lookup(config, region, band, admitted_ra, admitted_dec,
                                                     n_jobs=config.n_jobs, maps=maps)
@@ -741,15 +806,20 @@ def build(config, regions=None):
                         f, f"PIXEL_COVERED_FRAC_{band}", pixel_frac,
                         *REGISTRY[("completeness_sesna_source", f"PIXEL_COVERED_FRAC_{band}")])
 
-                build_module.write_dataset(f, "SOURCE_ROW", source_row,
-                                            *REGISTRY[("completeness_sesna_source", "SOURCE_ROW")])
-                build_module.write_dataset(f, "HPX_PIX_512", admitted,
-                                            *REGISTRY[("completeness_sesna_source", "HPX_PIX_512")])
-
-                f50_2mass, width_dex_2mass = _twomass_params(config, region)
+                # 2MASS, the SAME layout as the five Spitzer bands above,
+                # at nside-128 pixel resolution instead of 30-arcsec
+                # (briefs/round4_2026-10-20/C6_twomass_pixel_depths.md
+                # item 2): catalog.depths' own per-pixel fit (or the
+                # region's, where that fit failed a gate), tabulated on
+                # one shared grid per band.
+                hpx_pix_128, f50_2mass_pix, width_dex_2mass_pix, from_regional_2mass = \
+                    _twomass_pixel_params(config, region)
+                source_pix128_row = _pix128_row(gal_l_deg, gal_b_deg, hpx_pix_128)
+                admitted_pix128_row = _pix128_row(admitted_gl, admitted_gb, hpx_pix_128)
                 for tk, key in enumerate(TWOMASS_KEYS):
                     zp = band_keys[key].vega_zero_point_jy
-                    curve, mag_grid = _tabulate_twomass_band(f50_2mass[tk], width_dex_2mass[tk], zp)
+                    curve, mag_grid = _tabulate_twomass_pixel_table(
+                        f50_2mass_pix[:, tk], width_dex_2mass_pix[:, tk], zp)
                     dset = build_module.write_dataset(
                         f, f"CURVE_{key}", curve,
                         *REGISTRY[("completeness_sesna_source", f"CURVE_{key}")])
@@ -757,11 +827,41 @@ def build(config, regions=None):
                     build_module.write_dataset(
                         f, f"MAG_GRID_{key}", mag_grid,
                         *REGISTRY[("completeness_sesna_source", f"MAG_GRID_{key}")])
+                    build_module.write_dataset(
+                        f, f"COMPLETED_FROM_{key}", np.full(curve.shape[0], np.nan, dtype=np.float32),
+                        *REGISTRY[("completeness_sesna_source", f"COMPLETED_FROM_{key}")])
+                    build_module.write_dataset(
+                        f, f"FROM_REGIONAL_{key}", from_regional_2mass[:, tk],
+                        *REGISTRY[("completeness_sesna_source", f"FROM_REGIONAL_{key}")])
+                    envelope_vals = curve.max(axis=0) if curve.shape[0] else np.zeros(curve.shape[1], dtype=np.uint16)
+                    build_module.write_dataset(
+                        f, f"ENVELOPE_{key}", envelope_vals.astype(np.uint16),
+                        *REGISTRY[("completeness_sesna_source", f"ENVELOPE_{key}")])
+
+                    source_row[:, ALL_BAND_KEYS.index(key)] = source_pix128_row
+                    pixel_curve_2mass = (curve[admitted_pix128_row].astype(np.float32)
+                                         / STORAGE_SCALE)
+                    build_module.write_dataset(
+                        f, f"PIXEL_CURVE_{key}", pixel_curve_2mass,
+                        *REGISTRY[("completeness_sesna_source", f"PIXEL_CURVE_{key}")])
+                    build_module.write_dataset(
+                        f, f"PIXEL_COVERED_FRAC_{key}", np.ones(admitted.size, dtype=np.float32),
+                        *REGISTRY[("completeness_sesna_source", f"PIXEL_COVERED_FRAC_{key}")])
+
+                build_module.write_dataset(f, "SOURCE_ROW", source_row,
+                                            *REGISTRY[("completeness_sesna_source", "SOURCE_ROW")])
+                build_module.write_dataset(f, "HPX_PIX_512", admitted,
+                                            *REGISTRY[("completeness_sesna_source", "HPX_PIX_512")])
+
+                n_fallback_2mass = {key: int(from_regional_2mass[:, tk].sum())
+                                    for tk, key in enumerate(TWOMASS_KEYS)}
 
             print("catalog.completeness: %s pixel-to-pixel 50%% correlation by band: %s"
                   % (region, {k: round(v, 3) for k, v in corr_lengths.items()}))
             print("catalog.completeness: %s on-map pixels completed (cut off before reaching 0) by band: %s"
                   % (region, n_completed_total))
+            print("catalog.completeness: %s 2MASS nside-128 pixels on the regional fallback "
+                  "(of %d), by band: %s" % (region, hpx_pix_128.size, n_fallback_2mass))
             out_paths.append(out_path)
             n_done += 1
             st.tick(n_done, len(regions), "regions")

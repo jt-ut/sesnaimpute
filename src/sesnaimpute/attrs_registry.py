@@ -2069,12 +2069,17 @@ REGISTRY = {
     ("completeness_sesna_source", "COMPLETED_FROM_M1"): ("mag, Vega",
         "Same meaning as COMPLETED_FROM_I1, for M1 (24 micron)."),
     ("completeness_sesna_source", "SOURCE_ROW"): ("row index into CURVE_<band>",
-        "For every curated source and each of the five Spitzer bands (I1, "
-        "I2, I3, I4, M1, this dataset's own column order), the row of that "
-        "band's own CURVE_<band> holding this source's own completeness "
-        "curve (its nearest on-map 30-arcsec pixel); -1 where the source's "
-        "own position is off every field's map in that band (no curve, no "
-        "non-detection term)."),
+        "For every curated source and each of the eight bands, definitions."
+        "BANDS' own order (J, H, Ks, I1, I2, I3, I4, M1 -- the same order "
+        "fittp.sweep's BAND_KEYS uses, so a band's own position here IS "
+        "its column there, no translation): the row of that band's own "
+        "CURVE_<band> holding this source's own completeness curve. For "
+        "I1/I2/I3/I4/M1, its nearest on-map 30-arcsec pixel, -1 where the "
+        "source's own position is off every field's map in that band (no "
+        "curve, no non-detection term). For J/H/Ks, the row of catalog."
+        "depths' own nside-128 pixel this source falls in -- never -1 "
+        "(2MASS carries no map footprint to fall off, COMPLETENESS_2026-"
+        "10-20.md: 2MASS is all-sky)."),
     ("completeness_sesna_source", "PIXEL_CURVE_I1"): ("dimensionless (completeness fraction, 0..1)",
         "For each of this region's admitted nside-512 pixels (HPX_PIX_512, "
         "nested ordering, this file's own admitted-pixel axis), the I1 (3.6 "
@@ -2148,27 +2153,84 @@ REGISTRY = {
         "a source-bearing nside-256 pixel). Row i here is row i of every "
         "PIXEL_CURVE_<band>/PIXEL_COVERED_FRAC_<band> dataset in this file."),
     ("completeness_sesna_source", "CURVE_J"): ("completeness fraction x600, uint16",
-        "The one region-wide J-band completeness curve (no per-source "
-        "map for 2MASS): shape (1, n_J), the error-function roll-off "
-        "tabulated from catalog.depths' own fitted F50_2MASS_MJY and "
-        "WIDTH_DEX at MAG_GRID_J's own fine (0.05-mag) grid, stored as the "
-        "fraction times 600. Every source's SOURCE_ROW-style row for this "
-        "band is 0 (catalog.limits.completeness supplies it directly, no "
-        "per-source dataset needed)."),
+        "The SAME layout as CURVE_I1 (briefs/round4_2026-10-20/C6_twomass_"
+        "pixel_depths.md item 2), at nside-128 pixel resolution instead of "
+        "30-arcsec: one row per nside-128 pixel of the region that holds "
+        "at least one catalogue source, the error-function roll-off from "
+        "catalog.depths' own per-pixel fit of F50_2MASS_MJY/WIDTH_DEX (or "
+        "the region's, where that fit failed a gate -- FROM_REGIONAL_J "
+        "true there), tabulated on MAG_GRID_J's own shared fine (0.05-mag) "
+        "grid and stored as the fraction times 600. A row's own curve is "
+        "clamped to exactly 1 brightward and 0 faintward of its OWN six "
+        "roll-off widths, even past the shared grid's own wider span."),
     ("completeness_sesna_source", "CURVE_H"): ("completeness fraction x600, uint16",
-        "Same meaning as CURVE_J, for H."),
+        "Same meaning as CURVE_J, for H (MAG_GRID_H, FROM_REGIONAL_H)."),
     ("completeness_sesna_source", "CURVE_Ks"): ("completeness fraction x600, uint16",
-        "Same meaning as CURVE_J, for Ks."),
+        "Same meaning as CURVE_J, for Ks (MAG_GRID_Ks, FROM_REGIONAL_Ks)."),
+    ("completeness_sesna_source", "COMPLETED_FROM_J"): ("mag, Vega",
+        "Always NaN: 2MASS's own tabulated erf curve is never cut off "
+        "the way a measured Spitzer field cube can be (COMPLETENESS_2026-"
+        "10-20.md's own template-completion rule applies to I1-M1 only); "
+        "kept so a reader of CURVE_J can use the SAME completed_from "
+        "convention as the five Spitzer bands without a band-specific "
+        "branch."),
+    ("completeness_sesna_source", "COMPLETED_FROM_H"): ("mag, Vega",
+        "Same meaning as COMPLETED_FROM_J, for H: always NaN."),
+    ("completeness_sesna_source", "COMPLETED_FROM_Ks"): ("mag, Vega",
+        "Same meaning as COMPLETED_FROM_J, for Ks: always NaN."),
+    ("completeness_sesna_source", "FROM_REGIONAL_J"): ("boolean",
+        "One entry per CURVE_J row (one per nside-128 pixel): true where "
+        "that pixel's own J-band fit failed one of catalog.depths' own "
+        "four gates and CURVE_J's row is the region-wide depths_sesna_"
+        "region fit instead of that pixel's own (catalog.depths' own "
+        "depths_sesna_hpx128 FROM_REGIONAL column, carried over verbatim)."),
+    ("completeness_sesna_source", "FROM_REGIONAL_H"): ("boolean",
+        "Same meaning as FROM_REGIONAL_J, for H."),
+    ("completeness_sesna_source", "FROM_REGIONAL_Ks"): ("boolean",
+        "Same meaning as FROM_REGIONAL_J, for Ks."),
+    ("completeness_sesna_source", "PIXEL_CURVE_J"): ("dimensionless (completeness fraction, 0..1)",
+        "The SAME meaning as PIXEL_CURVE_I1: for each of this region's "
+        "admitted nside-512 pixels (HPX_PIX_512), the J-band completeness "
+        "curve at MAG_GRID_J's own magnitudes of that pixel's own PARENT "
+        "nside-128 pixel (nested, pix512 >> 4) -- CURVE_J's own row at "
+        "that parent, read directly, cast to a float fraction. Never all "
+        "zero (2MASS is all-sky, PIXEL_COVERED_FRAC_J is always 1)."),
+    ("completeness_sesna_source", "PIXEL_CURVE_H"): ("dimensionless (completeness fraction, 0..1)",
+        "Same meaning as PIXEL_CURVE_J, for H."),
+    ("completeness_sesna_source", "PIXEL_CURVE_Ks"): ("dimensionless (completeness fraction, 0..1)",
+        "Same meaning as PIXEL_CURVE_J, for Ks."),
+    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_J"): ("boolean (0.0 or 1.0)",
+        "Always 1.0: every admitted nside-512 pixel's own parent nside-128 "
+        "pixel carries a J-band curve (its own fit or the region's, never "
+        "neither) since 2MASS is all-sky, unlike the Spitzer bands' own "
+        "field footprints."),
+    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_H"): ("boolean (0.0 or 1.0)",
+        "Same meaning as PIXEL_COVERED_FRAC_J, for H: always 1.0."),
+    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_Ks"): ("boolean (0.0 or 1.0)",
+        "Same meaning as PIXEL_COVERED_FRAC_J, for Ks: always 1.0."),
     ("completeness_sesna_source", "MAG_GRID_J"): ("mag, Vega",
-        "The magnitudes CURVE_J is tabulated at: a fine (0.05-mag) grid "
-        "spanning catalog.depths' own fitted F50_2MASS_MJY (J) by about "
-        "six roll-off widths on either side, wide enough for the "
-        "completeness fraction to reach both its bright (~1) and faint "
-        "(~0) plateau."),
+        "The magnitudes CURVE_J and PIXEL_CURVE_J's own column order are "
+        "tabulated at: ONE shared fine (0.05-mag) grid spanning every "
+        "nside-128 pixel's own six roll-off widths either side of its own "
+        "50% point (the union: the grid's first plane is the brightest "
+        "pixel's own m50 - span, its last the faintest pixel's own m50 + "
+        "span); a pixel narrower than the union reads exactly 1 brightward "
+        "and 0 faintward of its own span (CURVE_J's own clamp)."),
     ("completeness_sesna_source", "MAG_GRID_H"): ("mag, Vega",
         "Same meaning as MAG_GRID_J, for H."),
     ("completeness_sesna_source", "MAG_GRID_Ks"): ("mag, Vega",
         "Same meaning as MAG_GRID_J, for Ks."),
+    ("completeness_sesna_source", "ENVELOPE_J"): ("completeness fraction x600, uint16",
+        "This region's own J-band ENVELOPE curve: the SAME meaning as "
+        "ENVELOPE_I1, at each of MAG_GRID_J's own magnitudes the MAXIMUM "
+        "of CURVE_J over every one of this region's own nside-128 pixels "
+        "-- the deepest completeness anywhere in the region, position-"
+        "independent, read by population.field_stars's retention test "
+        "the same way as the five Spitzer bands."),
+    ("completeness_sesna_source", "ENVELOPE_H"): ("completeness fraction x600, uint16",
+        "Same meaning as ENVELOPE_J, for H (MAG_GRID_H)."),
+    ("completeness_sesna_source", "ENVELOPE_Ks"): ("completeness fraction x600, uint16",
+        "Same meaning as ENVELOPE_J, for Ks (MAG_GRID_Ks)."),
 
     # sky.derived.knots -- five whole-survey products (GRANULE "survey", no
     # region axis) feeding the H2-shock-knot rate (SPEC_PRIORS.md section 7).
