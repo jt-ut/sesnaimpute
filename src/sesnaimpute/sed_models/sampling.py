@@ -302,7 +302,7 @@ def packing(coords, kept_index):
     return float(np.asarray(dist)[:, 1].min())
 
 
-def members_table(names, rep_of, dist_to_rep, subclass, params):
+def members_table(names, rep_of, dist_to_rep, subclass, params, photosphere_dup=None):
     """One row per KEPT template -- the represented-set table every
     library's `write_library` call passes to the shared register writer.
 
@@ -312,16 +312,34 @@ def members_table(names, rep_of, dist_to_rep, subclass, params):
     `np.unique(rep_of)` (ascending raw-index order, since `rep_of` only
     ever holds values from `r_net`'s kept index).
 
+    `photosphere_dup` : (n,) bool or None -- per-RAW-row whether the model
+    is a photosphere duplicate (`yso_dedup.duplicate_mask`'s `dup`,
+    aligned to `names`/`rep_of` by position, not to the kept subset). When
+    given, one extra column, `N_MEMBERS_PHOTOSPHERE_DUPLICATE`, counts how
+    many of a kept template's own represented members carry that flag --
+    a diskless cloud member is no longer silently absorbed into a
+    nearby disk template without a record of how often that happens.
+    `None` leaves the column out entirely (a library with no dedup
+    concept, e.g. AGB/GALZ/H2SHOCK/PAHC/SPS).
+
     Columns: `MODEL_NAME`, `N_MEMBERS`, `MEMBER_INDEX` (variable-length,
     the raw row indices of the represented set), `DIST_MAX`,
     `FRAC_<subclass>` per distinct subclass value (normalised to sum to
-    exactly 1.0 in float64 across a row), and `<param>_MIN`/`_MEDIAN`/
-    `_MAX` per column of `params`.
+    exactly 1.0 in float64 across a row), `<param>_MIN`/`_MEDIAN`/`_MAX`
+    per column of `params`, and `N_MEMBERS_PHOTOSPHERE_DUPLICATE` where
+    `photosphere_dup` is given.
     """
     names = np.asarray(names)
     rep_of = np.asarray(rep_of, dtype=int)
     dist_to_rep = np.asarray(dist_to_rep, dtype=float)
     subclass = np.asarray(subclass)
+    if photosphere_dup is not None:
+        photosphere_dup = np.asarray(photosphere_dup, dtype=bool)
+        if photosphere_dup.shape != rep_of.shape:
+            raise ValueError(
+                f"members_table: photosphere_dup shape {photosphere_dup.shape} "
+                f"!= rep_of shape {rep_of.shape}"
+            )
     kept = np.unique(rep_of)
     n_kept = kept.size
 
@@ -334,6 +352,7 @@ def members_table(names, rep_of, dist_to_rep, subclass, params):
         p: {stat: np.empty(n_kept, dtype=np.float64) for stat in ("MIN", "MEDIAN", "MAX")}
         for p in param_names
     }
+    n_members_dup = np.empty(n_kept, dtype=np.int32) if photosphere_dup is not None else None
 
     for row, rep in enumerate(kept):
         member_idx = np.flatnonzero(rep_of == rep)
@@ -355,6 +374,9 @@ def members_table(names, rep_of, dist_to_rep, subclass, params):
             param_cols[p]["MEDIAN"][row] = np.median(vals)
             param_cols[p]["MAX"][row] = np.max(vals)
 
+        if photosphere_dup is not None:
+            n_members_dup[row] = int(np.sum(photosphere_dup[member_idx]))
+
     table = Table()
     table["MODEL_NAME"] = np.array(model_name)
     table["N_MEMBERS"] = np.array(n_members, dtype=np.int32)
@@ -365,4 +387,6 @@ def members_table(names, rep_of, dist_to_rep, subclass, params):
     for p in param_names:
         for stat in ("MIN", "MEDIAN", "MAX"):
             table[f"{p}_{stat}"] = param_cols[p][stat]
+    if photosphere_dup is not None:
+        table["N_MEMBERS_PHOTOSPHERE_DUPLICATE"] = n_members_dup
     return table

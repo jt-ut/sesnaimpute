@@ -208,7 +208,7 @@ def _a12_columns(names, lib):
     register's own `/models` row order) by MODEL_NAME -- spec item A12.
 
     Not a positional concatenation: a name in `names` absent from this
-    library's own parameters.fits gets a NON-FINITE fill for a numeric
+    library's own parameters.fits gets a NON-FINITE fill for a floating
     column (`NaN`, never `0.0`, which would read as a real physical
     value) or an empty string for a text column. In practice every
     register member's `names` already IS `lib.model_names`, which is
@@ -216,6 +216,16 @@ def _a12_columns(names, lib):
     every row matches today and the fill path is a safety net, not the
     common case -- but the join is still by NAME, not position, so a
     future mismatch degrades honestly instead of silently misaligning.
+
+    DTYPE IS PRESERVED, not forced to float64: a column's own numeric
+    dtype (float32, uint8, ...) is a choice made at the source (the
+    library driver that wrote parameters.fits), and this join carries it
+    through rather than overwriting it -- the same "float32 for a
+    per-model column, float64 for a library-level scalar" convention
+    this file's own module docstring states for the fixed schema above.
+    An INTEGER column has no NaN to fall back on, so a name absent from
+    parameters.fits is an error here (never fires today -- see above),
+    not a silent zero.
     """
     params = lib.parameters
     name_col = _modlib._find_name_column(params)
@@ -231,9 +241,18 @@ def _a12_columns(names, lib):
         if col == name_col:
             continue
         src = params[col]
-        if np.issubdtype(src.dtype, np.floating) or np.issubdtype(src.dtype, np.integer):
-            out = np.full(names.shape[0], np.nan, dtype=np.float64)
-            out[matched] = np.asarray(src, dtype=np.float64)[row_for[matched]]
+        if np.issubdtype(src.dtype, np.integer):
+            if not matched.all():
+                raise ValueError(
+                    f"_a12_columns: integer column {col!r} has "
+                    f"{int((~matched).sum())} of {names.shape[0]} rows with "
+                    f"no matching parameters.fits MODEL_NAME -- an integer "
+                    f"column has no NaN sentinel for a safety-net fill"
+                )
+            out = np.asarray(src, dtype=src.dtype)[row_for]
+        elif np.issubdtype(src.dtype, np.floating):
+            out = np.full(names.shape[0], np.nan, dtype=src.dtype)
+            out[matched] = np.asarray(src, dtype=src.dtype)[row_for[matched]]
         else:
             dec = _modlib._as_str(src)
             out = np.full(names.shape[0], "", dtype=dec.dtype)
