@@ -3016,7 +3016,7 @@ _SWEEP_FIT_READINGS = {
         "Which extinction law fits each of those five models better: 0 diffuse, 1 "
         "dense."),
 }
-for _cls in ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S"):
+for _cls in ("STAR", "AGB", "PAHC", "PAHN", "GAL", "YSO", "H2S"):
     _stem = "%s_fit_source" % _cls
     for _name, _rd in _SWEEP_FIT_READINGS.items():
         REGISTRY[(_stem, _name)] = _rd

@@ -28,6 +28,7 @@ FAMILIES = {
     "sed_models_galz": "galz",
     "sed_models_h2shock": "h2shock",
     "sed_models_pahc": "pahc",
+    "sed_models_pahn": "pahn",
     "sed_models_yso": "yso",
 }
 

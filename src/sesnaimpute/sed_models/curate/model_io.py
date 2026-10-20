@@ -450,6 +450,11 @@ CONTRACT_PROFILES = {
     # this profile expects "3" where every other profile still expects "2".
     "pahc":    dict(info=False, stellar=False, require_version=True,  bands=CONVOLVED_BANDS,
                     version="3"),
+    # pahn (owner ruling, 2026-10-20): PAHC's own R -> infinity limit, no
+    # host star -- so no info.fits (no per-model host provenance to
+    # carry) and the standard version "2" (no PAHC-style schema bump;
+    # parameters.fits here carries only ALPHA/PAH_SIZE, no LOGG/T_EFF/R).
+    "pahn":    dict(info=False, stellar=False, require_version=True,  bands=CONVOLVED_BANDS),
     # SPS was the one profile needing exemptions here: its models.conf was
     # copied verbatim (no `version` key) and its convolved/ kept the 2008
     # distribution's own 2J/2H/2K spelling. Both are gone -- sps_curate now
