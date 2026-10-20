@@ -41,6 +41,15 @@ class Region:
     disk_fraction: float = 1.0
     disk_fraction_source: str = ("identity (no measurement applied): N_LAW_TOTAL_FACTOR = "
                                   "1/disk_fraction = 1, CLASS_SHARE_DISKLESS = 0")
+    # Which young stars `disk_fraction` counts (C12's 2026-10-20 RULED
+    # VALUES section, owner-confirmed field name): "all" -- protostars
+    # counted in both the excess numerator and the total denominator
+    # (Richert et al. 2018, Esplin & Luhman 2020, and the bare relation)
+    # -- or "disks" -- Class II(+TD) over II+III, protostars excluded
+    # from both (Ribas et al. 2014, Luhman et al. 2016, Stelzer & Scholz
+    # 2009). `population.yso_law`'s `N_LAW_TOTAL_FACTOR` reads this to
+    # choose its own formula.
+    disk_fraction_definition: str = "all"
 
 
 _REGIONS = (
@@ -213,12 +222,52 @@ _AGES = {
                "the 1.5 Myr dynamical time (not an isochrone age)"),
 }
 
+#: RULED disk fractions (owner's ruling 2026-10-20, C12's RULED VALUES
+#: section): MEASURED where the denominator (all young stars) comes from
+#: an excess-independent membership census (X-ray, spectroscopic or
+#: kinematic) covering the SESNA field or most of it; the Richert et al.
+#: 2018 relation (`_DF_SOURCE`) everywhere else. `{region name: (value,
+#: source, definition)}`, `definition` "all" or "disks" (the dataclass
+#: field's own docstring).
+_MEASURED = {
+    "Chameleon": (0.578, "MEASURED: Ribas et al. 2014, A&A 561, A54, table 4, Fraction_IRAC, "
+                  "spectroscopically confirmed members: Cha I 52% (86), Cha II 84% (19), "
+                  "member-weighted", "disks"),
+    "CrA": (0.50, "MEASURED: Ribas et al. 2014, A&A 561, A54, table 4, Fraction_IRAC, "
+            "spectroscopically confirmed members, 50 +/- 13% (16)", "disks"),
+    "IC 5146": (0.638, "MEASURED: Richert et al. 2018, MNRAS 477, 5191, table 1, IC 5146 B+U "
+                "summed, 125/196, Chandra X-ray + Spitzer census", "all"),
+    "Lupus": (0.52, "MEASURED: Ribas et al. 2014, A&A 561, A54, table 4, Fraction_IRAC, "
+              "spectroscopically confirmed members, 52 +/- 5% (85)", "disks"),
+    "NGC 7129": (0.51, "MEASURED: Stelzer & Scholz 2009, A&A 507, 227, sec. Disk fraction, "
+                 "26 Class II / 51 (M>0.5 Msun), Class III from Chandra X-rays", "disks"),
+    "Ophiuchus": (0.563, "MEASURED: Esplin & Luhman 2020, AJ 159, 282, abstract: 210 of 373 "
+                  "adopted members (spectroscopic youth + Gaia) show disks", "all"),
+    "Perseus": (0.457, "MEASURED: Luhman, Esplin & Loutrel 2016, ApJ 827, 52, table of disk "
+                "fractions summed over spectral types: IC 348 164/408 + NGC 1333 89/146",
+                "disks"),
+    "Taurus": (0.63, "MEASURED: Ribas et al. 2014, A&A 561, A54, table 4, Fraction_IRAC, "
+               "spectroscopically confirmed members, 63 +/- 4% (180)", "disks"),
+}
+
+
+def _disk_fraction(name, age_myr):
+    """`(value, source, definition)` for one region: `_MEASURED`'s own
+    entry where the owner ruled a measured sum, else the Richert et al.
+    2018 relation at this region's own `age_myr` ("all", the relation's
+    own definition)."""
+    if name in _MEASURED:
+        return _MEASURED[name]
+    return (round(math.exp(-age_myr / DISK_LIFETIME_MYR), 3), "RELATION: " + _DF_SOURCE, "all")
+
+
 _REGIONS = tuple(
     _dc.replace(r,
                 age_myr=_AGES[r.name][0],
                 age_source=_AGES[r.name][1],
-                disk_fraction=round(math.exp(-_AGES[r.name][0] / DISK_LIFETIME_MYR), 3),
-                disk_fraction_source=_DF_SOURCE)
+                disk_fraction=_disk_fraction(r.name, _AGES[r.name][0])[0],
+                disk_fraction_source=_disk_fraction(r.name, _AGES[r.name][0])[1],
+                disk_fraction_definition=_disk_fraction(r.name, _AGES[r.name][0])[2])
     if r.name in _AGES else r
     for r in _REGIONS
 )
