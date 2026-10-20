@@ -115,10 +115,13 @@ from sesnaimpute.population import pahc_curve
 #: ruling 2026-09-09): the source of statement (i)'s numerator,
 #: `p_census(log10 F_ref)`
 #: (a disc-and-envelope flux the IMF over photospheric mass does not
-#: constrain, spec sec 1.4/5.5 "Template weights"). The view built at
-#: `sky.derived.dunham_yso`: area/source/quantity/granule for
-#: `config_module.product_path`.
-DUNHAM2015_CENSUS_PATH_ARGS = ("sky/derived", "dunham2015", "yso", "survey")
+#: constrain, spec sec 1.4/5.5 "Template weights"). The unified census
+#: product built at `sky.derived.yso_census` (owner's 2026-10-20 ruling,
+#: which retired the single-survey `sky.derived.dunham_yso` this path
+#: used to name): area/source/quantity/granule for
+#: `config_module.product_path`; `_dunham_census_brightness_histogram`
+#: selects this census's own `SOURCE == "Dunham2015"` rows out of it.
+DUNHAM2015_CENSUS_PATH_ARGS = ("sky/derived", "yso_census", "census", "survey")
 
 #: `population/yso/law_yso_region.hdf5`'s own path args (W83's schema):
 #: the source of the evolutionary-class shares `CLASS_SHARE_PROTO`/
@@ -473,10 +476,22 @@ def _dunham_census_brightness_histogram(config):
     catalogue's 2,966 rows with a finite 4.5 micron flux (every row is an
     excess-selected YSO, the law's own definition; no class cut), binned
     on the grid's own `LOG10_F45_EDGES` (110 cells of `YSO_F45_BIN_DEX`)
-    and normalised to sum 1. Returns `(p_census, n_finite)`."""
+    and normalised to sum 1. Returns `(p_census, n_finite)`.
+
+    Read from the unified census product (`sesnaimpute.sky.derived.
+    yso_census`, owner's 2026-10-20 ruling, which retired the single-
+    survey `dunham_yso` view this function used to read), `SOURCE ==
+    "Dunham2015"` rows only -- this statement is still Dunham et al.
+    2015's own census alone (W83's own ruling, unchanged by C10/C11);
+    the other seven censuses the 2026-10-20 ruling added feed
+    `population.yso_law`'s per-region fit, not this survey-wide
+    template-weight statement."""
     path = config_module.product_path(config, *DUNHAM2015_CENSUS_PATH_ARGS)
     with h5py.File(path, "r") as f:
+        source = np.array([v.decode("utf-8") if isinstance(v, bytes) else str(v)
+                            for v in f["SOURCE"][:]])
         log10_f45_ref = f["LOG10_F45_REF"][:].astype(np.float64)
+    log10_f45_ref = log10_f45_ref[source == "Dunham2015"]
     finite = np.isfinite(log10_f45_ref)
     counts, _ = np.histogram(log10_f45_ref[finite], bins=grid.LOG10_F45_EDGES)
     n_finite = int(finite.sum())
@@ -666,9 +681,10 @@ def build_yso(config, region):
 
         factors = {
             "population": (population_w, c_theta, "", True,
-                            "sky/derived/dunham2015/yso_dunham2015_survey.hdf5 LOG10_F45_REF "
-                            "census; yso_register.hdf5 models/INCL inclination; "
-                            "Dunham et al. 2014 class census; sample_cloud.shift_kernel "
+                            "sky/derived/yso_census/census_yso_census_survey.hdf5 "
+                            "SOURCE=Dunham2015 LOG10_F45_REF census; yso_register.hdf5 "
+                            "models/INCL inclination; Dunham et al. 2014 class census; "
+                            "sample_cloud.shift_kernel "
                             f"at d_r={r.d_r_pc:.1f} pc"),
         }
         path = _write_library(config, "yso", "region", names, c_theta, log10_f45_centers, factors,

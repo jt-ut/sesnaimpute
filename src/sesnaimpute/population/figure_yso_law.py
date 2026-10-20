@@ -78,9 +78,18 @@ def _read_law(config):
 
 
 def _read_census(config):
-    path = config_module.product_path(config, "sky/derived", "dunham2015", "yso", "survey")
+    """Dunham et al. 2015's own `LOG10_F45_REF` (the right panel's
+    census side, module docstring), read from the unified census product
+    (`sesnaimpute.sky.derived.yso_census`, owner's 2026-10-20 ruling,
+    which retired the single-survey `dunham_yso` view this used to read)
+    at its own `SOURCE == "Dunham2015"` rows -- the other seven censuses
+    the ruling added are not this panel's subject, Dunham's own
+    brightness marginal against the library (module docstring)."""
+    path = config_module.product_path(config, "sky/derived", "yso_census", "census", "survey")
     with h5py.File(path, "r") as f:
-        log10_f45_ref = np.asarray(f["LOG10_F45_REF"][:], dtype=np.float64)
+        source = np.array([v.decode("utf-8") if isinstance(v, bytes) else str(v)
+                            for v in f["SOURCE"][:]])
+        log10_f45_ref = np.asarray(f["LOG10_F45_REF"][:], dtype=np.float64)[source == "Dunham2015"]
     return dict(log10_f45_ref=log10_f45_ref, path=path)
 
 
