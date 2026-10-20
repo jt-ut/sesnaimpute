@@ -1977,6 +1977,50 @@ REGISTRY = {
         "quantity catalog.completeness's 2MASS CURVE_J/H/Ks tabulation "
         "reads, beside F50_2MASS_MJY."),
 
+    # catalog.depths -- depths_sesna_hpx128: beside the region-wide fit
+    # above, this region's own per-nside-128-pixel 2MASS fit (briefs/
+    # round4_2026-10-20/C6_twomass_pixel_depths.md): one row per nside-128
+    # NESTED pixel (catalog.depth_grid.admitted_pixels_512's own (lon,
+    # lat) pair, GAL_L_DEG/GAL_B_DEG) that holds at least one catalogue
+    # source, any band. F50_2MASS_MJY/WIDTH_DEX/FIT_RESIDUAL_2MASS always
+    # carry a usable value -- this pixel's own fit where it clears every
+    # gate in catalog/depths.py's own module docstring, the region's own
+    # depths_sesna_region row copied in verbatim otherwise (FROM_REGIONAL
+    # true there). catalog.completeness folds this product's rows
+    # straight into completeness_sesna_source's own CURVE_J/H/Ks tables.
+    ("depths_sesna_hpx128", "HPX_PIX_128"): ("nested HEALPix pixel, nside 128",
+        "This region's own nside-128 pixel numbers (nested ordering), "
+        "ascending: every pixel holding at least one catalogue source "
+        "(any band). Row i here is row i of every other dataset in this "
+        "file, and the row catalog.completeness's own CURVE_J/H/Ks tables "
+        "copy for this pixel's children."),
+    ("depths_sesna_hpx128", "F50_2MASS_MJY"): ("mJy",
+        "For each of the three 2MASS bands (J, H, Ks, this dataset's own "
+        "column order), this pixel's own fitted 50%-completeness flux "
+        "where FROM_REGIONAL is false, this region's depths_sesna_region "
+        "value copied in verbatim where it is true."),
+    ("depths_sesna_hpx128", "WIDTH_DEX"): ("dex",
+        "Same meaning as depths_sesna_region's own WIDTH_DEX, at this "
+        "pixel's own fit (or the region's, where FROM_REGIONAL is true)."),
+    ("depths_sesna_hpx128", "FIT_RESIDUAL_2MASS"): ("dimensionless",
+        "Same meaning as depths_sesna_region's own FIT_RESIDUAL_2MASS, "
+        "at this pixel's own fit (or the region's, where FROM_REGIONAL is "
+        "true)."),
+    ("depths_sesna_hpx128", "N_DETECTED"): ("count",
+        "For each of the three 2MASS bands, how many ORIGIN_FNU == 1 "
+        "(detected) catalogue sources fall in this pixel -- the number "
+        "the >= 300 gate is checked against, recorded whether or not "
+        "this pixel's own fit was used."),
+    ("depths_sesna_hpx128", "FROM_REGIONAL"): ("boolean",
+        "For each of the three 2MASS bands, true where this pixel's own "
+        "fit failed at least one of the four gates in catalog/depths.py's "
+        "own module docstring (fewer than 300 detections in that band; "
+        "the fit did not converge; its own 50% point more than 1.0 mag "
+        "from the region's; its own fitted width not strictly inside "
+        "_W_BOUNDS) and F50_2MASS_MJY/WIDTH_DEX/FIT_RESIDUAL_2MASS carry "
+        "the region's own depths_sesna_region row instead of this "
+        "pixel's own fit."),
+
 
     # catalog.completeness -- completeness_sesna_source: Rob Gutermuth's
     # own measured completeness curves, per region (COMPLETENESS_2026-10-
