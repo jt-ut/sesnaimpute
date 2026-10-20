@@ -357,6 +357,12 @@ CLASSES = (
     ModelClass("GAL",  "Unresolved background galaxy (extragalactic contaminant)",         "#12966B"),
     ModelClass("H2S",  "Shocked molecular hydrogen (H2) emission knot in a protostellar outflow", "#5E3AA8"),
     ModelClass("PAHC", "Field star whose aperture contains extended PAH emission",         "#E0499C"),
+    # PAHN (owner ruling, 2026-10-20): PAHC's own R -> infinity limit, no
+    # star in the aperture. Colour sits NEXT TO PAHC's magenta in the same
+    # hue family (#A8377A -- one step darker/cooler, not a new hue): the
+    # two are the same emission, one with a star and one without, so the
+    # plot should read them as a pair rather than as unrelated classes.
+    ModelClass("PAHN", "Extended PAH nebular emission with no star in the aperture (a patch of PAH-bright nebulosity extracted as a point source)", "#A8377A"),
     # Stage B / AGB-ext (agb_decisions.md B-10): dusty evolved-star
     # contaminant library from GRAMS. A new hue family (brown/dust-gold),
     # distinct from the warm reds/oranges of YSO, the blues of STAR, the
@@ -429,6 +435,13 @@ CLASSMAP = (
     # PAHC -- deliberately unpartitioned. "NONE" rather than "all": there
     # are no subclasses, not many.
     ModelSubclass("PAHC", "NONE", "No subclass: one population, distinguished only by grid axes", "#E0499C", "PAH_APERTURE"),
+    # PAHN -- deliberately unpartitioned, same reasoning as PAHC. No
+    # Gutermuth counterpart: his cascade has no rule for PAH emission with
+    # no star present -- these sources are called Class 0/I protostars by
+    # his scheme and by the fitter before this ruling (the defect this
+    # class exists to fix), so gutermuth_nominal is None rather than
+    # pointing at DEEPLY_EMBEDDED/CLASS_I.
+    ModelSubclass("PAHN", "NONE", "No subclass: one population, distinguished only by grid axes", "#A8377A", None),
     # AGB -- chemistry (agb_decisions.md B-10/B-5). SUBCLASS 'O' does NOT
     # collide with STAR:'O' (O-type star): every consumer keys on the
     # (cls, name) pair (constants.CLASSMAP_DF is indexed on ["cls","name"];
