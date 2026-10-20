@@ -376,33 +376,20 @@ def _lse_others(ev):
     return out
 
 
-def _prior_terms(class_files, density_file, start, stop):
+def _prior_terms(class_files, start, stop):
     """`(ln_m, ln_s)`, each `(m, 6)` in CLASSES order: the ln prior mass of
     each class at each source, and the ln summed prior mass of the other
-    five. Read from each fit file's own `LN_PRIOR_MASS` (the class's prior
-    integrated over every template, brightness and extinction) where the
-    fit carries it. Otherwise from `bmstp.density`'s `DENSITY_<C>`, which is
-    that same mass for every class whose prior shape and template weights
-    sum to one -- all but STAR and PAHC, which share one stellar density
-    split by a brightness-dependent factor: there the stellar density
-    enters the other classes' sums once, and STAR's and PAHC's own columns
-    are NaN."""
-    if all("LN_PRIOR_MASS" in class_files[c] for c in CLASSES):
-        ln_m = np.stack([np.asarray(class_files[c]["LN_PRIOR_MASS"][start:stop], dtype=np.float64)
-                         for c in CLASSES], axis=1)
-        return ln_m, _lse_others(ln_m)
-    d = {c: np.asarray(density_file["DENSITY_" + c][start:stop], dtype=np.float64) for c in CLASSES}
-    with np.errstate(divide="ignore", invalid="ignore"):
-        ln_m = np.stack([np.log(d[c]) for c in CLASSES], axis=1)
-        nonstellar = [c for c in CLASSES if c not in ("STAR", "PAHC")]
-        ln_s = np.empty_like(ln_m)
-        for ci, c in enumerate(CLASSES):
-            if c in ("STAR", "PAHC"):
-                ln_s[:, ci] = np.nan
-                ln_m[:, ci] = np.nan
-            else:
-                ln_s[:, ci] = np.log(sum(d[k] for k in nonstellar if k != c) + d["STAR"])
-    return ln_m, ln_s
+    five. Read straight from each fit file's own `LN_PRIOR_MASS` (C7 brief
+    Part B: the expected count of class-C objects the catalogue would hold
+    at this source -- every class's templates, brightness and extinction,
+    with the survey's own completeness curves at the source's position;
+    no photometry). Every class's fit file carries it now, computed the
+    same way, so there is no DENSITY fallback and no STAR/PAHC special
+    case left (CODING_RULES.md rule 6: a fit file missing it fails on the
+    missing column, never a silent recompute)."""
+    ln_m = np.stack([np.asarray(class_files[c]["LN_PRIOR_MASS"][start:stop], dtype=np.float64)
+                     for c in CLASSES], axis=1)
+    return ln_m, _lse_others(ln_m)
 
 
 def _stage_evidence(class_files, start, stop):
@@ -418,8 +405,7 @@ def _stage_evidence(class_files, start, stop):
                           axis=1) for k in ("LN_EVIDENCE_MEASURED", "LN_EVIDENCE_NONDET"))
 
 
-def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals,
-                    density_file):
+def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals):
     """One ROW_BYTES batch's own P8 rows (rule 10b): a batch-sized array
     only, never a region-sized one."""
     m = stop - start
@@ -543,7 +529,7 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     # against the prior-weighted alternative, computed directly.
     ev = _class_ln_evidence(ln_ev)
     lse_other = _lse_others(ev)
-    ln_m, ln_s = _prior_terms(class_files, density_file, start, stop)
+    ln_m, ln_s = _prior_terms(class_files, start, stop)
     with np.errstate(divide="ignore", invalid="ignore"):
         log_odds = ev - lse_other
         log_odds_prior = ln_m - ln_s
@@ -649,11 +635,9 @@ def build_region(config, region, st, beta):
 
     cat_path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
 
-    density_path = config_module.product_path(config, "bmstp", "density", "table", "source", region=region)
-    density_file = h5py.File(density_path, "r")
-    if not np.array_equal(density_file["NAME"][:], names):
-        raise ValueError("fittp.classify [%s]: bmstp.density's NAME does not row-align "
-                          "with the fit files' own" % region)
+    # C7 brief Part B: bmstp.density's own table is no longer read here --
+    # `_prior_terms` reads LN_PRIOR_MASS straight off every class's own fit
+    # file now, so this build opens nothing it does not use.
 
     n = names.shape[0]
     path = config_module.product_path(config, "fittp", "classification", "posterior",
@@ -666,8 +650,7 @@ def build_region(config, region, st, beta):
     n_prior_vetoed = 0
     bounds = list(batches(n, ROW_BYTES))
     for bi, (start, stop) in enumerate(bounds):
-        batch = _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals,
-                               density_file)
+        batch = _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, sigma_lib_vals)
         batch["name"] = names[start:stop]
         part_path = _part_path(path, bi)
         _write_classify_part(part_path, batch)
@@ -681,7 +664,6 @@ def build_region(config, region, st, beta):
         f.close()
     if psi_file is not None:
         psi_file.close()
-    density_file.close()
 
     return dict(path=path, part_paths=part_paths, n_source=n,
                 imputed_identity_err=imputed_identity_err, n_flagged=n_flagged,

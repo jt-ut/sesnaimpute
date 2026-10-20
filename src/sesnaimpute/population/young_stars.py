@@ -645,15 +645,17 @@ def _weighted_hist(values, weights, edges):
     return counts, faint_overflow, bright_overflow
 
 
-def _pixel_block(piece, pixels, a_pix, sl_pix_sorted, xi_edges_sl, mass_sl, cloud_frac_sl,
+def _pixel_block(piece, pixels, a_pix, m10_pix, sl_pix_sorted, xi_edges_sl, mass_sl, cloud_frac_sl,
                   n_young_total_whole_column, region,
                   mass_grid, mass_weight, ks_abs_1myr, g_abs_1myr,
                   mu, g_edges, ks_edges, k_g_diffuse, k_g_dense, r_diffuse, r_dense):
     """One piece's own contiguous block of pixel indices (owner ruling
     2026-10-09: within a region, many small pieces on one pool, never a
     stage's own `joblib.Parallel` -- the region-wide arrays `pixels`/
-    `a_pix`/`sl_pix_sorted`/`xi_edges_sl`/`mass_sl`/`cloud_frac_sl`/
-    `n_young_total_whole_column` are bound by `build_region`'s own
+    `a_pix`/`m10_pix` (C7 brief Part A: `anchor_tiles.gaia_selection`'s
+    own M10 map, indexed once by this region's own pixels at their
+    NESTED nside-128 parent)/`sl_pix_sorted`/`xi_edges_sl`/`mass_sl`/
+    `cloud_frac_sl`/`n_young_total_whole_column` are bound by `build_region`'s own
     `functools.partial`, pickled once per batch of tasks by `pieces.
     run`'s shared loky pool, not once per piece): the `(N_G_YOUNG,
     N_KS_YOUNG)` and the 1 Myr Ks acceptance pieces, vectorised over
@@ -673,6 +675,7 @@ def _pixel_block(piece, pixels, a_pix, sl_pix_sorted, xi_edges_sl, mass_sl, clou
     lo, hi = piece
     pixels_blk = pixels[lo:hi]
     a_pix_blk = a_pix[lo:hi]
+    m10_pix_blk = m10_pix[lo:hi]
     xi_edges_blk, mass_blk, cloud_frac_blk = anchor_pixel_lookup(
         sl_pix_sorted, xi_edges_sl, mass_sl, cloud_frac_sl, pixels_blk, region)
     # the model's own young-star density (sec. 5.5 "Sky density"): the
@@ -700,7 +703,9 @@ def _pixel_block(piece, pixels, a_pix, sl_pix_sorted, xi_edges_sl, mass_sl, clou
         a_rep[:, None, :], g_app_1myr[None, :, None], ks_app_1myr[None, :, None],
         k_g_diffuse[None, :, None], k_g_dense[None, :, None], r_diffuse, r_dense)
 
-    p_g = anchor_tiles.gaia_detection_weight(g_obs)
+    # C7 brief Part A: this block's own per-pixel M10, broadcast against
+    # (n_blk, n_mass, n_u) like a_rep/g_app_1myr already are.
+    p_g = anchor_tiles.gaia_detection_weight(g_obs, m10_pix_blk[:, None, None])
     n_g, _, _ = _weighted_hist(g_obs, weight * p_g, g_edges)
     n_ks, ks_faint, ks_bright = _weighted_hist(ks_obs_1myr, weight, ks_edges)
 
@@ -729,6 +734,11 @@ def build_region(config, region):
         omega_pix_deg2 = np.asarray(f["OMEGA_PIX_DEG2"][:], dtype=np.float64)
         g_edges = np.asarray(f["G_EDGES"][:], dtype=np.float64)
         ks_edges = np.asarray(f["KS_EDGES"][:], dtype=np.float64)
+
+    # C7 brief Part A: each pixel's own M10 (`anchor_tiles.gaia_selection`'s
+    # own module-level cache, read once here), at its NESTED nside-128
+    # parent (`pix512 >> 4`).
+    m10_pix = anchor_tiles.gaia_selection(config)[pixels >> 4]
 
     d_front, d_back = yso.cloud_interval_pc(config, region)
     n_young_source_mean = law_count_per_pixel(config, region, pixels) * omega_pix_deg2
@@ -771,7 +781,7 @@ def build_region(config, region):
     block_size = pixel_block_size(n_u)
     pixel_pieces = [(s, min(s + block_size, n_pix)) for s in range(0, n_pix, block_size)]
     fn = functools.partial(
-        _pixel_block, pixels=pixels, a_pix=a_pix, sl_pix_sorted=sl_pix_sorted,
+        _pixel_block, pixels=pixels, a_pix=a_pix, m10_pix=m10_pix, sl_pix_sorted=sl_pix_sorted,
         xi_edges_sl=xi_edges_sl, mass_sl=mass_sl, cloud_frac_sl=cloud_frac_sl,
         n_young_total_whole_column=n_young_total_whole_column, region=region,
         mass_grid=mass_grid, mass_weight=mass_weight, ks_abs_1myr=ks_abs_1myr, g_abs_1myr=g_abs_1myr,

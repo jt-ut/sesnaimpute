@@ -87,12 +87,56 @@ NSIDE = 512
 #: SPEC_PRIORS.md section 2.1, anchor-counts row: "Gaia DR3 at G < 19".
 GAIA_G_CUT_MAG = 19.0
 
-#: Cantat-Gaudin et al. 2023's own published Gaia DR3 50%-completeness
-#: limit and sigmoid roll-off width, applied as the anchor's detection
-#: probability (spec 2.1: "the published 50% completeness limit ... and
-#: roll-off width ... applied as a sigmoid p_G(m)").
-GAIA_G_LIM_MAG = 20.5
-GAIA_G_ROLLOFF_MAG = 0.5
+#: C7 brief Part A: Cantat-Gaudin et al. 2023 (A&A 669, A55) eq. 1-4,
+#: Table 1 -- the published, POSITION-DEPENDENT Gaia DR3 selection
+#: function `S(G | M10)`, replacing the one survey-wide sigmoid this
+#: module used before (`GAIA_G_LIM_MAG`/`GAIA_G_ROLLOFF_MAG`, now gone).
+#: The paper's own eq. 1, typeset literally, is `1 - 0.5 x [tanh((x - G)
+#: / y) + 1]^z` -- verified 2026-10-20 to be monotonically INCREASING in
+#: G for every (M10, G) the paper calibrates (it does not satisfy S -> 1
+#: bright, S -> 0 faint, and contradicts the paper's own prose, "y
+#: controls how steeply the completeness DROPS", "z < 1 means flatter at
+#: BRIGHT magnitudes"). The paper's own authors' reference
+#: implementation (the `gaiaunlimited`/`gaiasf` package the paper itself
+#: cites, `surveyTCG.sigmoid`/`m10_to_completeness`) computes `S = 1 -
+#: (0.5 x (tanh((G - x) / y) + 1))^z` instead: `delta = G - x`, not `x -
+#: G`, and the 0.5 factor INSIDE the power, not outside it -- this DOES
+#: satisfy S -> 1 bright, S -> 0 faint, and is what `gaia_detection_
+#: weight` below implements. The brief's own sketch already had this
+#: form; the paper's typeset eq. 1 does not, and the paper's own code is
+#: the deciding vote (owner: the paper wins on a mismatch, say so).
+_M_BREAK = 20.519
+_AX, _BX, _CX = 0.985, 0.649, 0.693
+_AY, _BY, _CY = -0.004, 0.223, -0.093
+_AZ, _BZ, _CZ = 0.006, 0.034, 0.351
+
+#: eq. 2-4's own calibration range for M10 (the paper's Table 1 /
+#: section 2.4): outside it, M10 is clipped to the nearest edge before
+#: `x`/`y`/`z` are formed -- never extrapolated (C7 brief Part A).
+M10_MIN, M10_MAX = 19.11, 21.23
+#: the paper's own calibration range for G (0.2 mag bins, 15 to 23):
+#: brighter than this, S is read as 1 exactly, never through the
+#: sigmoid (C7 brief Part A, "S = 1 brighter than 15").
+G_FLOOR_MAG = 15.0
+
+#: Zenodo 10.5281/zenodo.8063930's `allsky_M10_hpx7.hdf5`: HEALPix order
+#: 7, nside 128.
+_M10_NSIDE = 128
+_M10_N_PIX = 12 * _M10_NSIDE ** 2
+
+#: 47 Tucanae (NGC 104) core, ICRS -- `gaia_selection`'s own "known
+#: dense field" check (module docstring; C7 brief Part A, "never
+#: assume"): verified 2026-10-20, this position's own M10 sits in the
+#: faintest (most crowded) ~0.005th percentile of the whole map read
+#: NESTED (M10 = 19.29), and at an unremarkable ~50th percentile read
+#: RING (M10 = 20.85) -- the file carries no ordering metadata of its
+#: own (an empty attrs dict), so this is the one fact that tells NESTED
+#: from RING apart.
+_DENSE_FIELD_RA_DEG = 6.0236
+_DENSE_FIELD_DEC_DEG = -72.0813
+_DENSE_FIELD_PERCENTILE_MAX = 0.01
+
+_GAIA_SELECTION_CACHE = {}
 
 #: SPEC_PRIORS.md section 2.1, anchor-counts row: "2MASS PSC at
 #: Ks < 14.3" -- must equal `sky.derived.twomass_counts.MAG_EDGES[-1]`.
@@ -129,21 +173,123 @@ _CANDIDATE_TILE_NSIDES = np.array([1 << k for k in range(10)], dtype=np.int64)
 # the anchor observables: a raw star's own magnitude at a pixel's column
 # ---------------------------------------------------------------------------
 
-def gaia_detection_weight(g_obs):
-    """`p_G(G_obs)`, Cantat-Gaudin et al. 2023's published 50% limit and
-    roll-off width as a sigmoid (SPEC_PRIORS.md section 2.1).
+def _assert_nested(m10_in_file_order):
+    """C7 brief Part A: confirms `allsky_M10_hpx7.hdf5`'s own row order
+    is NESTED, never assumed -- the file carries no ordering metadata
+    (an empty attrs dict), so the one check is a known, extremely
+    crowded field: 47 Tucanae's core, read at its NESTED nside-128
+    pixel, must fall in the faintest (most crowded) `_DENSE_FIELD_
+    PERCENTILE_MAX` of the whole map's own M10 values (constants block).
+    Raises, naming both percentiles, if it does not -- the file is not
+    what C7 verified on 2026-10-20, never read silently as if it still
+    were."""
+    ipix = hp.ang2pix(_M10_NSIDE, _DENSE_FIELD_RA_DEG, _DENSE_FIELD_DEC_DEG,
+                       lonlat=True, nest=True)
+    pctl_nested = float(np.mean(m10_in_file_order < m10_in_file_order[ipix]))
+    if pctl_nested <= _DENSE_FIELD_PERCENTILE_MAX:
+        return
+    ipix_ring = hp.ang2pix(_M10_NSIDE, _DENSE_FIELD_RA_DEG, _DENSE_FIELD_DEC_DEG,
+                            lonlat=True, nest=False)
+    pctl_ring = float(np.mean(m10_in_file_order < m10_in_file_order[ipix_ring]))
+    raise ValueError(
+        "anchor_tiles.gaia_selection: 47 Tucanae's core reads M10=%.3f at percentile "
+        "%.5f read NESTED (expected <= %.3f, the crowded-field check) and M10=%.3f at "
+        "percentile %.5f read RING -- this file's own row order is neither what C7 "
+        "verified 2026-10-20 (NESTED) nor a RING file this check would also catch; "
+        "read it some other way, never assume"
+        % (m10_in_file_order[ipix], pctl_nested, _DENSE_FIELD_PERCENTILE_MAX,
+           m10_in_file_order[ipix_ring], pctl_ring))
 
-    A source far past the roll-off (very faint `g_obs`) drives the
-    sigmoid's own exponent to a large positive number; `exp` of that
-    overflows to `inf` before the reciprocal folds it back down to the
-    correct answer, 0. Clipping the exponent's argument at 700 (`exp`'s
-    own overflow threshold is just under 710) reaches the same double-
-    precision answer -- the sigmoid is already 0 to machine precision out
-    there -- without ever asking `exp` to overflow.
+
+def gaia_selection(config):
+    """`(196608,)` float64 M10, indexed by NESTED nside-128 HEALPix pixel
+    (0..196607) -- Cantat-Gaudin et al. 2023's own all-sky map
+    (`sky.download.gaia_selection`, Zenodo 10.5281/zenodo.8063930), read
+    once per process and cached (module global, like `selection.
+    LAW_RAMP_LO`): a pure function of the download, no region, so one
+    array serves every caller, every region and every forked worker that
+    binds this return value into its own `functools.partial` BEFORE the
+    pool forks (`pieces.py`'s own memory-map rule: a plain numpy array
+    bound into `fn` is memory-mapped to every worker, never pickled per
+    piece) -- never call this once per piece or per worker.
+
+    The file's own `data` dataset is `(196608, 3)`: column 0 the HEALPix
+    order (always 7), column 1 the pixel index, column 2 M10 -- already
+    one row per pixel, in pixel order 0..196607 (asserted below), so
+    column 2 alone, in its stored row order, already IS the per-pixel
+    array this function returns, once `_assert_nested` confirms that
+    stored order is NESTED (module docstring)."""
+    path = f"{config.data_root}/sky/download/gaia_selection/allsky_M10_hpx7.hdf5"
+    cached = _GAIA_SELECTION_CACHE.get(path)
+    if cached is not None:
+        return cached
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "anchor_tiles.gaia_selection: missing %s -- run RUNBOOKtp.sh's "
+            "'PY sesnaimpute.sky.download.gaia_selection.build' line first" % path)
+    with h5py.File(path, "r") as f:
+        data = f["data"][:]
+    if data.shape != (_M10_N_PIX, 3):
+        raise ValueError(
+            "anchor_tiles.gaia_selection: %s holds %r, not (%d, 3) -- wrong file or a "
+            "different HEALPix order" % (path, data.shape, _M10_N_PIX))
+    ipix = data[:, 1].astype(np.int64)
+    m10 = np.ascontiguousarray(data[:, 2], dtype=np.float64)
+    if not np.array_equal(ipix, np.arange(_M10_N_PIX)):
+        raise ValueError(
+            "anchor_tiles.gaia_selection: %s's own pixel column is not 0..%d in row "
+            "order -- cannot read column 2 alone as the per-pixel array" % (path, _M10_N_PIX - 1))
+    _assert_nested(m10)
+    _GAIA_SELECTION_CACHE[path] = m10
+    return m10
+
+
+def _piecewise(m10, a, b, c):
+    """One of Cantat-Gaudin et al. 2023 eq. 2-4's own broken-slope
+    relations (`a`, `b`, `c`, `_M_BREAK` shared by `x`/`y`/`z`): linear
+    in `m10` below `_M_BREAK`, continuing from the same value at the
+    break with slope `c` above it."""
+    below = a * m10 + b
+    above = c * m10 + (a - c) * _M_BREAK + b
+    return np.where(m10 < _M_BREAK, below, above)
+
+
+def gaia_xyz_from_m10(m10):
+    """`(x, y, z)`, Cantat-Gaudin et al. 2023's own fitted sigmoid
+    parameters at `m10` (eq. 2-4, Table 1): `m10` clipped to
+    `[M10_MIN, M10_MAX]` first (the paper's own calibration range,
+    never extrapolated past it, C7 brief Part A). The one place this
+    model's three piecewise relations are evaluated -- `gaia_detection_
+    weight` (vectorised, numpy) and `fittp.gaia.GaiaTerm` (once per
+    source, feeding the per-cell numba read in `fittp.prior_reader.
+    _gaia_h`) both call this, never duplicate the coefficients."""
+    m10 = np.clip(np.asarray(m10, dtype=np.float64), M10_MIN, M10_MAX)
+    return (_piecewise(m10, _AX, _BX, _CX),
+            _piecewise(m10, _AY, _BY, _CY),
+            _piecewise(m10, _AZ, _BZ, _CZ))
+
+
+def gaia_detection_weight(g_obs, m10):
+    """`S(G_obs | M10)`, Cantat-Gaudin et al. 2023's published,
+    position-dependent Gaia DR3 selection function (eq. 1-4, Table 1;
+    C7 brief Part A) -- the generalised sigmoid `1 - (0.5 x (tanh((G -
+    x(M10)) / y(M10)) + 1))^z(M10)` (constants block: verified against
+    the paper's own reference implementation to satisfy S -> 1 bright,
+    S -> 0 faint). `g_obs` below `G_FLOOR_MAG` reads S = 1 exactly,
+    never through the sigmoid (brighter than the paper's own
+    calibration). Broadcasts `g_obs` against `m10` (a scalar M10 shared
+    by every star in one pixel, or a per-star array -- ordinary numpy
+    broadcasting either way).
+
+    No exponent-overflow guard is needed (the old sigmoid's own `exp`
+    could overflow before the reciprocal folded it back to 0): `tanh`
+    is bounded in [-1, 1] for any finite argument, so `(0.5 * (tanh(u) +
+    1))**z` is already bounded in [0, 1] and never calls `exp` at all.
     """
     g_obs = np.asarray(g_obs, dtype=np.float64)
-    arg = -(GAIA_G_LIM_MAG - g_obs) / GAIA_G_ROLLOFF_MAG
-    return 1.0 / (1.0 + np.exp(np.minimum(arg, 700.0)))
+    x, y, z = gaia_xyz_from_m10(m10)
+    s = 1.0 - (0.5 * (np.tanh((g_obs - x) / y) + 1.0)) ** z
+    return np.where(g_obs < G_FLOOR_MAG, 1.0, s)
 
 
 def magnitudes_at_extinction(a_local, g_proxy, ks_mag, k_g_diffuse, k_g_dense,
@@ -556,7 +702,7 @@ def _magnitudes_from_pieces(a_pix_k, inside, a_edge, tail, g_proxy, ks_mag,
 
 
 def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, r_dense,
-                  parent256, a_pix, pixel_pointing, pointing_bounds, n_bin_g, n_bin_ks):
+                  parent256, a_pix, m10_pix, pixel_pointing, pointing_bounds, n_bin_g, n_bin_ks):
     """One piece's own contiguous block of pixel indices (owner ruling
     2026-10-09: within a region, many small pieces on one pool, never a
     thread per pixel): each pixel's `(N_G, N_KS, N_GK)` exactly as a
@@ -594,6 +740,7 @@ def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, 
     for j, i in enumerate(range(lo_pix, hi_pix)):
         parent = int(parent256[i])
         a_p = float(a_pix[i])
+        m10_p = float(m10_pix[i])
         lo, hi = pointing_bounds[int(pixel_pointing[i])]
         key = (lo, hi, parent)
         if key != cache_key:
@@ -608,22 +755,26 @@ def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, 
             g_obs, ks_obs = _magnitudes_from_pieces(
                 a_p, inside, a_edge, tail, g_proxy[s], ks_mag[s],
                 k_g_diffuse[s], k_g_dense[s], r_diffuse, r_dense)
-            p_g = gaia_detection_weight(g_obs)
+            p_g = gaia_detection_weight(g_obs, m10_p)
             n_g_block[j] += np.histogram(g_obs, bins=g_edges, weights=p_g)[0]
             n_ks_block[j] += np.histogram(ks_obs, bins=ks_edges)[0]
             n_gk_block[j] += np.histogram2d(g_obs, ks_obs, bins=[g_edges, ks_edges], weights=p_g)[0]
     return n_g_block, n_ks_block, n_gk_block
 
 
-def _predicted_histograms(config, profile_obj, parent256, a_pix, raw, g_edges, ks_edges,
+def _predicted_histograms(config, profile_obj, parent256, a_pix, m10_pix, raw, g_edges, ks_edges,
                            r_diffuse, r_dense, pixel_pointing, pointing_bounds, weight_pix):
     """`(N_G_PRED, N_KS_PRED, N_GK_PRED)`: each pixel's own nearest
     pointing's raw stars only (`pixel_pointing`, `pointing_bounds`'
     contiguous slice), their anchor observables at the pixel's own
     column and parent sightline (`anchor_observables`), binned and
-    weighted by the Gaia detection probability (Ks carries none here --
-    `anchor_weights.p_ks` corrects this axis's own 2MASS/UKIDSS
-    incompleteness later, against these raw counts), then scaled by
+    weighted by the Gaia detection probability (C7 brief Part A:
+    `gaia_detection_weight`'s own position-dependent read, at `m10_pix`'s
+    own per-pixel M10 -- `gaia_selection`'s return, indexed once per
+    pixel by the caller, `build_region`, and bound into this call's own
+    `functools.partial` below like `a_pix`, never recomputed per piece;
+    Ks carries none here -- `anchor_weights.p_ks` corrects this axis's
+    own 2MASS/UKIDSS incompleteness later, against these raw counts), then scaled by
     that pixel's own `Ω_pix/area_deg2[pointing]` share (`weight_pix`,
     one value per pixel -- SPEC_BMSTP_DRAFT.md section 5.1). `N_GK_PRED`
     (n_pix, n_G_bin, n_Ks_bin) is the same population, same Gaia-weight,
@@ -653,7 +804,8 @@ def _predicted_histograms(config, profile_obj, parent256, a_pix, raw, g_edges, k
     fn = functools.partial(
         _pixel_block, config=config, profile_obj=profile_obj, raw=raw,
         g_edges=g_edges, ks_edges=ks_edges, r_diffuse=r_diffuse, r_dense=r_dense,
-        parent256=parent256[order], a_pix=a_pix[order], pixel_pointing=pixel_pointing[order],
+        parent256=parent256[order], a_pix=a_pix[order], m10_pix=m10_pix[order],
+        pixel_pointing=pixel_pointing[order],
         pointing_bounds=pointing_bounds, n_bin_g=n_bin_g, n_bin_ks=n_bin_ks)
     pixel_pieces = pieces_module.slices(n_pix, config.n_jobs)
     blocks = pieces_module.run(fn, pixel_pieces, config.n_jobs)
@@ -663,7 +815,7 @@ def _predicted_histograms(config, profile_obj, parent256, a_pix, raw, g_edges, k
     return n_g_pred, n_ks_pred, n_gk_pred
 
 
-def _acceptance_check_one_pixel(profile_obj, parent256, a_pix, raw, g_edges, r_diffuse, r_dense,
+def _acceptance_check_one_pixel(profile_obj, parent256, a_pix, m10_pix, raw, g_edges, r_diffuse, r_dense,
                                  weight_pix0, pointing_slice0, n_g_pred_row, pixel_index=0):
     """CODING_RULES.md rule 11: the algebraic identity the brief names,
     on one pixel -- the stored histogram must equal a direct re-sum of
@@ -675,7 +827,7 @@ def _acceptance_check_one_pixel(profile_obj, parent256, a_pix, raw, g_edges, r_d
     g_obs, _ = anchor_observables(
         raw["dist_pc"][s], raw["g_proxy"][s], raw["ks_mag"][s], raw["k_g_diffuse"][s], raw["k_g_dense"][s],
         profile_obj, int(parent256[pixel_index]), float(a_pix[pixel_index]), r_diffuse, r_dense)
-    p_g = gaia_detection_weight(g_obs)
+    p_g = gaia_detection_weight(g_obs, float(m10_pix[pixel_index]))
     in_range = (g_obs >= g_edges[0]) & (g_obs < GAIA_G_CUT_MAG)
     direct_sum = float(np.sum(p_g[in_range]) * weight_pix0)
     stored_sum = float(n_g_pred_row.sum())
@@ -689,6 +841,11 @@ def build_region(config, region):
     raw, omega_sim_deg2 = _read_field_stars_raw(config, region)
     pixels, parent256, a_pix = _region_pixel_columns(config, region)
     g_edges, n_g_obs, ks_edges, n_ks_obs, ks_source, deep_covered = _read_anchor_counts(config, region, pixels)
+    # C7 brief Part A: each pixel's own M10, read once (`gaia_selection`'s
+    # own module-level cache) and indexed by this region's own nside-512
+    # pixels at their NESTED nside-128 parent (`pix512 >> 4`, two HEALPix
+    # orders down: nside 512 = 2**9, nside 128 = 2**7).
+    m10_pix = gaia_selection(config)[pixels.astype(np.int64) >> 4]
 
     profile_obj = profile_module.read(config, region)
     r_diffuse = float(selection.ak_per_av(config, 0.0))
@@ -718,7 +875,7 @@ def build_region(config, region):
     weight_pix = omega_pix_deg2 / pointing_area_deg2[pixel_pointing]
 
     n_g_pred, n_ks_pred, n_gk_pred = _predicted_histograms(
-        config, profile_obj, parent256, a_pix, raw, g_edges, ks_edges, r_diffuse, r_dense,
+        config, profile_obj, parent256, a_pix, m10_pix, raw, g_edges, ks_edges, r_diffuse, r_dense,
         pixel_pointing, pointing_bounds, weight_pix)
     # the deep bins (14.0 and past, W46: KS_SHARED_END_MAG) are measured
     # only where the deep survey covers the pixel: elsewhere both sides
@@ -736,7 +893,7 @@ def build_region(config, region):
         n_gk_pred = np.where(drop[:, None, :], 0.0, n_gk_pred)
 
     rel_dev, n_below_g10 = _acceptance_check_one_pixel(
-        profile_obj, parent256, a_pix, raw, g_edges, r_diffuse, r_dense,
+        profile_obj, parent256, a_pix, m10_pix, raw, g_edges, r_diffuse, r_dense,
         float(weight_pix[0]), slice(*pointing_bounds[int(pixel_pointing[0])]), n_g_pred[0])
 
     n_obs_pooled = np.concatenate([n_g_obs, n_ks_obs], axis=1)

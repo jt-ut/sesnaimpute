@@ -71,6 +71,11 @@ from sesnaimpute.population import kernel as kernel_module
 _STORAGE_SCALE = completeness_module.STORAGE_SCALE
 _C_CAP = completeness_module.C_CAP
 
+#: C7 brief Part A: Cantat-Gaudin et al. 2023's own calibration floor
+#: (`gaia.G_FLOOR_MAG`), a bare module global for the same reason --
+#: `_gaia_h` needs it inside a numba `njit` function.
+_G_FLOOR_MAG = gaia_module.G_FLOOR_MAG
+
 #: class -> (shape-grid source, its dataset, template-weight library, its
 #: granule) -- IMPLEMENTATION_BMSTP_DRAFT.md section 1.2 P2-P5.
 _SHAPE = {
@@ -721,141 +726,50 @@ def _law_dense_weight_scalar(a_val, ramp_lo, ramp_hi):
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy")
 def _gaia_h(a_val, g0_mag, kg_draine, kg_whitney, base, sl, r_diffuse, r_dense,
-            ramp_lo, ramp_hi, g_lim, g_rolloff):
-    """`H(a) = sigmoid((G_LIM - Gmag(a)) / TAU_G)` (`gaia.py`'s module
-    docstring, NONDET2 section 1): `Gmag(a) = G0MAG - 2.5 log10_B(a) +
-    kappa_G(a) a`, `log10_B(a) = base + sl * a` the fit's own conditional
-    ridge (the same `base`, `sl` `_cell_sum` already forms for the
-    non-detection factor), `kappa_G(a)` the KG_DRAINE/KG_WHITNEY blend at
-    the law-dense ramp weight AT THIS a (`_law_dense_weight_scalar`) --
-    `gaia.GaiaTerm.ln_gamma`'s own algebra, evaluated at an arbitrary `a`
-    instead of the fitted mark alone."""
+            ramp_lo, ramp_hi, x_s, y_s, z_s):
+    """`H(a) = S(Gmag(a) | M10_s)`, Cantat-Gaudin et al. 2023's published,
+    position-dependent Gaia DR3 selection function (`gaia.py`'s module
+    docstring, NONDET2 section 1, C7 brief Part A): `Gmag(a) = G0MAG -
+    2.5 log10_B(a) + kappa_G(a) a`, `log10_B(a) = base + sl * a` the
+    fit's own conditional ridge (the same `base`, `sl` `_cell_sum`
+    already forms for the non-detection factor), `kappa_G(a)` the
+    KG_DRAINE/KG_WHITNEY blend at the law-dense ramp weight AT THIS a
+    (`_law_dense_weight_scalar`) -- `gaia.GaiaTerm.ln_gamma`'s own
+    algebra, evaluated at an arbitrary `a` instead of the fitted mark
+    alone. `x_s`/`y_s`/`z_s` are THIS SOURCE's own sigmoid parameters
+    (`population.anchor_tiles.gaia_xyz_from_m10` at its own sky pixel's
+    M10, `gaia.GaiaTerm._xyz_block`), replacing the old survey-wide
+    `(g_lim, g_rolloff)`. No overflow guard: `tanh` is bounded in
+    [-1, 1] for any finite argument."""
     log10b = base + sl * a_val
     w = _law_dense_weight_scalar(a_val, ramp_lo, ramp_hi)
     kappa_g = (1.0 - w) * (kg_draine / r_diffuse) + w * (kg_whitney / r_dense)
     gmag = g0_mag - 2.5 * log10b + a_val * kappa_g
-    arg = -(g_lim - gmag) / g_rolloff
-    if arg > 700.0:
-        arg = 700.0
-    elif arg < -700.0:
-        arg = -700.0
-    return 1.0 / (1.0 + math.exp(arg))
+    if gmag < _G_FLOOR_MAG:
+        return 1.0
+    t = math.tanh((gmag - x_s) / y_s)
+    return 1.0 - (0.5 * (t + 1.0)) ** z_s
 
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy")
 def _gaia_ln_gamma(a_val, g0_mag, kg_draine, kg_whitney, base, sl, r_diffuse, r_dense,
-                    ramp_lo, ramp_hi, g_s, a_x, g_lim, g_rolloff):
-    """`ln Gamma(a) = ln[G_S H(a) A_X + (1 - G_S)(1 - H(a))]` at ONE
-    extinction value (a cell's own `a*`, or a single-point fallback's one
-    substitute), `G_S`/`A_X` per source and class, outside (NONDET2
-    section 1; `gaia.py` module docstring)."""
+                    ramp_lo, ramp_hi, matched_s, g_s, a_x, x_s, y_s, z_s):
+    """`ln Gamma(a)` at ONE extinction value (a cell's own `a*`, or a
+    single-point fallback's one substitute): matched,
+    `ln[G_S H(a) A_X + (1 - G_S)(1 - H(a))]`, `G_S`/`A_X` per source and
+    class, outside (NONDET2 section 1; `gaia.py` module docstring);
+    unmatched, `ln[1 - min(H(a), C_CAP)]` -- scored as a non-detection
+    against this source's own position (C7 brief Part A)."""
     h = _gaia_h(a_val, g0_mag, kg_draine, kg_whitney, base, sl, r_diffuse, r_dense,
-                ramp_lo, ramp_hi, g_lim, g_rolloff)
-    gamma = g_s * h * a_x + (1.0 - g_s) * (1.0 - h)
+                ramp_lo, ramp_hi, x_s, y_s, z_s)
+    if matched_s:
+        gamma = g_s * h * a_x + (1.0 - g_s) * (1.0 - h)
+    else:
+        h_capped = h if h < _C_CAP else _C_CAP
+        gamma = 1.0 - h_capped
     if gamma < 1e-300:
         gamma = 1e-300
     return math.log(gamma)
-
-
-@numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
-def _factor_ln_accumulate(total, w_theta, c_f, shift, b_cells, b0, dlb_f):
-    """`total[t, j] += ln PI[t](b_cells[j] + shift[t] + c_f[t])`: one factor
-    table's linear interpolation and edge clamp, exactly `_factor_ln`'s."""
-    n_t, n_b = total.shape
-    n_k = w_theta.shape[1]
-    for t in numba.prange(n_t):
-        for j in range(n_b):
-            pos = (b_cells[j] + shift[t] + c_f[t] - b0) / dlb_f
-            if pos < 0.0:
-                pos = 0.0
-            elif pos > n_k - 1:
-                pos = float(n_k - 1)
-            j0 = int(math.floor(pos))
-            if j0 > n_k - 2:
-                j0 = n_k - 2
-            frac = pos - j0
-            if frac < 0.0:
-                frac = 0.0
-            elif frac > 1.0:
-                frac = 1.0
-            v = w_theta[t, j0] * (1.0 - frac) + w_theta[t, j0 + 1] * frac
-            if v < 1e-300:
-                v = 1e-300
-            total[t, j] += math.log(v)
-
-
-def _factor_weight_sum(reader, model_index, d_values, chunk=20000):
-    """`G(b) = Sum_theta Pi_f PI_f[theta](b - C_theta[theta] + C_F_f[theta] +
-    D_F_f)` on the shape grid's own brightness cell centres `b` (`(n_b,)`
-    float64): the class's factor-table weights summed over every template,
-    read at the template's own brightness (the shape grid's `b` less the
-    template's `C_THETA`, the same shift `_cell_sum` applies the other way).
-    Linear interpolation and edge clamp are `_factor_ln`'s own. `d_values`
-    maps a factor's `D_F` column name to the source's scalar (none needed
-    for a factor without one). A class with no factor tables sums to the
-    template count."""
-    n_b = reader.b_edges.size - 1
-    b_cells = reader.b_origin + (np.arange(n_b) + 0.5) * reader.dlb
-    m = model_index.size
-    c_theta = (np.asarray(reader.c_theta[model_index], dtype=np.float64)
-               if reader.c_theta.size else np.zeros(m))
-    g = np.zeros(n_b, dtype=np.float64)
-    for s0 in range(0, m, chunk):
-        sl = slice(s0, min(s0 + chunk, m))
-        idx = model_index[sl]
-        total = np.zeros((idx.size, n_b), dtype=np.float64)
-        for f in reader.factors:
-            c_f = np.asarray(f["C_F"][idx], dtype=np.float64)
-            d_f = d_values[f["D_F"]] if f["D_F"] else 0.0
-            b_centers = f["b_centers"]
-            _factor_ln_accumulate(total, np.ascontiguousarray(f["W"][idx], dtype=np.float64),
-                                  c_f, d_f - c_theta[sl], b_cells,
-                                  float(b_centers[0]), float(b_centers[1] - b_centers[0]))
-        g += np.exp(total).sum(axis=0)
-    return g
-
-
-def prior_mass_keys(reader, rows):
-    """`(names, keys)`: the per-source factor columns this class's factors
-    read (`D_F`), and the sorted distinct value tuples among `rows` -- one
-    `G` table per key (`((),)` for a class whose factors read no column)."""
-    rows = np.asarray(rows)
-    names = sorted(set(f["D_F"] for f in reader.factors if f["D_F"]))
-    if not names:
-        return names, [()]
-    cols = np.stack([np.asarray(reader.p1_columns[nm][rows], dtype=np.float64) for nm in names], axis=1)
-    return names, sorted(set(map(tuple, np.unique(cols, axis=0))))
-
-
-def prior_mass_table(reader, names, key, model_index):
-    """The `G` table (`_factor_weight_sum`) for one key of `prior_mass_keys`."""
-    return _factor_weight_sum(reader, np.asarray(model_index), dict(zip(names, key)))
-
-
-def set_prior_mass_tables(reader, names, table):
-    """Hold the gathered `{key: G}` on `reader` for `ln_prior_mass`'s lookups."""
-    reader.__dict__["_g_table"] = (names, table)
-
-
-def ln_prior_mass(reader, rows, h):
-    """`(n,)` float64: `ln` of the class's prior integrated over every
-    template, every brightness and every extinction cell at each source,
-    with no likelihood -- what `ln_lambda0`'s logsumexp over templates
-    would be if the measured-band likelihood were 1 everywhere. It is
-    `ln density[s] + ln Sum_b hb[b] G(b)`: `hb` is the source's blurred
-    shape `h` summed over the extinction cells (it sums to one; the two
-    designs' cell weights sum to one in every cell), and `G` is
-    `_factor_weight_sum`, looked up in the tables the sweep formed
-    (`set_prior_mass_tables`) before the source tasks (a missing entry is an error, never a recompute)."""
-    rows = np.asarray(rows)
-    names, table = reader.__dict__["_g_table"]
-    out = np.empty(rows.size, dtype=np.float64)
-    for k in range(rows.size):
-        key = tuple(float(reader.p1_columns[nm][rows[k]]) for nm in names)
-        hb = h[k].astype(np.float64).sum(axis=0)
-        with np.errstate(divide="ignore"):
-            out[k] = np.log(reader.density[rows[k]]) + np.log(float((hb * table[key]).sum()))
-    return out
 
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy", parallel=True)
@@ -864,7 +778,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
               template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask,
               gaia_matched, g_s, a_x, g0_mag, kg_draine, kg_whitney,
-              r_diffuse, r_dense, ramp_lo, ramp_hi, g_lim, g_rolloff,
+              r_diffuse, r_dense, ramp_lo, ramp_hi, x_s_all, y_s_all, z_s_all,
               out_s0, out_s1, a_post_out, a2_post_out):
     """The cell sum of SPEC_BMSTP_DRAFT.md section 4.2, per source and
     template. NONDET2 brief section 2: the sum accumulates THREE totals,
@@ -876,6 +790,22 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     `S1 = out_s1 + ln_l` per law before mixing), and `out` (the function's
     own return, `S2`'s own un-mixed half) exactly as before NONDET2 --
     every other caller of this function still reads one array.
+
+    C7 rework (2026-10-20): the brief's first try at `LN_PRIOR_MASS`
+    added a fourth, per-cell `out_cat`/`_p_cat` accumulator here. Reverted
+    by owner ruling: that read runs over the FIT's own +/-5 sigma window,
+    so it depends on the data through the window's own position, and
+    where the only templates that could fit a source need extinction the
+    window never reaches a catalogued cell, `LN_PRIOR_MASS` read `-inf`
+    for most of a class's own sources (measured: AGB 300 -> 4 finite,
+    H2S 300 -> 259, on the C7 slice) -- wrong, and the honest fix (the
+    full-extinction-support integral, no likelihood anywhere) costs
+    ~8 curve reads x 96 cells x every template per source, unaffordable
+    (~2 s/source measured for YSO). `LN_PRIOR_MASS` is now read straight
+    off `bmstp.atlas`'s own prior atlas instead (`fittp.sweep._source_task`),
+    which already prices exactly this quantity once per admitted pixel,
+    not once per source; this function carries no prior-mass term at all
+    any more.
 
     NONDET brief section 1 (section 6.2, amended; COMPLETENESS_2026-10-20.md):
     the survey's completeness term for this source's own undetected,
@@ -1005,6 +935,9 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
         matched_s = gaia_matched[s]
         g_s_s = g_s[s]
         a_x_s = a_x[s]
+        x_s_s = x_s_all[s]
+        y_s_s = y_s_all[s]
+        z_s_s = z_s_all[s]
         for th in numba.prange(m):
             ah = a_hat[s, th]
             lo_a = ah - 5.0 * sig
@@ -1050,17 +983,21 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
             kgw = kg_whitney[th]
             gaia_do_percell = False
             gaia_const_exp = 1.0
-            if matched_s and in_grid:
+            # C7 brief Part A: an unmatched source's own Gamma = 1 -
+            # min(H, C_CAP) now varies with `a` too (through H), so this
+            # prefilter -- and the per-cell read it guards -- runs for
+            # every source the window covers, matched or not.
+            if in_grid:
                 h_lo = _gaia_h(lo_a, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
-                               ramp_lo, ramp_hi, g_lim, g_rolloff)
+                               ramp_lo, ramp_hi, x_s_s, y_s_s, z_s_s)
                 h_hi = _gaia_h(hi_a, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
-                               ramp_lo, ramp_hi, g_lim, g_rolloff)
+                               ramp_lo, ramp_hi, x_s_s, y_s_s, z_s_s)
                 both_low = h_lo < _GAIA_PREFILTER_EPS and h_hi < _GAIA_PREFILTER_EPS
                 both_high = h_lo > 1.0 - _GAIA_PREFILTER_EPS and h_hi > 1.0 - _GAIA_PREFILTER_EPS
                 if both_low or both_high:
                     gaia_const_exp = math.exp(_gaia_ln_gamma(
                         ah, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
-                        ramp_lo, ramp_hi, g_s_s, a_x_s, g_lim, g_rolloff))
+                        ramp_lo, ramp_hi, matched_s, g_s_s, a_x_s, x_s_s, y_s_s, z_s_s))
                 else:
                     gaia_do_percell = True
             if not in_grid:
@@ -1109,7 +1046,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         if gaia_do_percell:
                             gaia_ln = _gaia_ln_gamma(a_star, g0m, kgd, kgw, base, sl,
                                                       r_diffuse, r_dense, ramp_lo, ramp_hi,
-                                                      g_s_s, a_x_s, g_lim, g_rolloff)
+                                                      matched_s, g_s_s, a_x_s, x_s_s, y_s_s, z_s_s)
                             term2 = term1 * math.exp(gaia_ln)
                         else:
                             term2 = term1 * gaia_const_exp
@@ -1157,7 +1094,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         if gaia_do_percell:
                             gaia_ln = _gaia_ln_gamma(a_star, g0m, kgd, kgw, base, sl,
                                                       r_diffuse, r_dense, ramp_lo, ramp_hi,
-                                                      g_s_s, a_x_s, g_lim, g_rolloff)
+                                                      matched_s, g_s_s, a_x_s, x_s_s, y_s_s, z_s_s)
                             term2 = term1 * math.exp(gaia_ln)
                         else:
                             term2 = term1 * gaia_const_exp
@@ -1207,9 +1144,8 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     nondet_ln = _nondet_ln_sum(a_top, active_full, base, slope_b,
                                                 template_log[th], curve_rows[s], band_a, band_c, band_n)
                     s1 = s0 + nondet_ln
-                    gaia_ln = (_gaia_ln_gamma(a_top, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
-                                               ramp_lo, ramp_hi, g_s_s, a_x_s, g_lim, g_rolloff)
-                               if matched_s else 0.0)
+                    gaia_ln = _gaia_ln_gamma(a_top, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
+                                              ramp_lo, ramp_hi, matched_s, g_s_s, a_x_s, x_s_s, y_s_s, z_s_s)
                     out_s0[s, th] = s0
                     out_s1[s, th] = s1
                     out[s, th] = s1 + gaia_ln
@@ -1249,9 +1185,8 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     nondet_ln = _nondet_ln_sum(a_c0, active_full, base, slope_b,
                                                 template_log[th], curve_rows[s], band_a, band_c, band_n)
                     s1 = s0 + nondet_ln
-                    gaia_ln = (_gaia_ln_gamma(a_c0, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
-                                               ramp_lo, ramp_hi, g_s_s, a_x_s, g_lim, g_rolloff)
-                               if matched_s else 0.0)
+                    gaia_ln = _gaia_ln_gamma(a_c0, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
+                                              ramp_lo, ramp_hi, matched_s, g_s_s, a_x_s, x_s_s, y_s_s, z_s_s)
                     out_s0[s, th] = s0
                     out_s1[s, th] = s1
                     out[s, th] = s1 + gaia_ln
@@ -1318,13 +1253,20 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
     the top-K record's own reporting value -- here read at every cell
     instead, inside `_cell_sum`.
 
-    NONDET2 brief section 1: `gaia_inputs` is `gaia.GaiaTerm.cell_inputs`'s
-    own return for this block's `rows` and `model_index` -- `(matched, g_s,
-    a_x, g0_mag, kg_draine, kg_whitney, r_diffuse, r_dense)` -- unpacked and
-    handed to `_cell_sum` with the two law-ramp edges and the Gaia anchor's
-    own limit/roll-off (`gaia.LAW_RAMP_LO`/`LAW_RAMP_HI`, `gaia.
-    GAIA_G_LIM_MAG`/`GAIA_G_ROLLOFF_MAG`), so the Gaia factor is read per
-    cell, at that cell's own `a*`, exactly as the non-detection factor is."""
+    NONDET2 brief section 1 (C7 brief Part A amended): `gaia_inputs` is
+    `gaia.GaiaTerm.cell_inputs`'s own return for this block's `rows` and
+    `model_index` -- `(matched, g_s, a_x, g0_mag, kg_draine, kg_whitney,
+    r_diffuse, r_dense, x_s, y_s, z_s)`, `x_s`/`y_s`/`z_s` this block's
+    own sources' Cantat-Gaudin et al. 2023 sigmoid parameters at their
+    own sky pixel's M10 -- unpacked and handed to `_cell_sum` with the
+    two law-ramp edges (`gaia.LAW_RAMP_LO`/`LAW_RAMP_HI`), so the Gaia
+    factor is read per cell, at that cell's own `a*`, exactly as the
+    non-detection factor is.
+
+    C7 rework (2026-10-20): this call no longer forms any prior-mass
+    term at all -- `LN_PRIOR_MASS` is read straight off `bmstp.atlas`'s
+    own prior atlas in `fittp.sweep._source_task`, not from this
+    reader (see `_cell_sum`'s own module-level note)."""
     rows = np.asarray(rows)
     # `reader.a_col` is memory-mapped, native float32 (section 2); cast to
     # float64 here, at the numba kernel's own call below, rather than at
@@ -1349,7 +1291,8 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
     a2_post = np.full((n, m), np.nan, dtype=np.float64)
     out_s0 = np.full((n, m), -np.inf, dtype=np.float32)
     out_s1 = np.full((n, m), -np.inf, dtype=np.float32)
-    (matched, g_s, a_x, g0_mag, kg_draine, kg_whitney, r_diffuse, r_dense) = gaia_inputs
+    (matched, g_s, a_x, g0_mag, kg_draine, kg_whitney, r_diffuse, r_dense,
+     x_s_all, y_s_all, z_s_all) = gaia_inputs
     core = _cell_sum(a_col, reader.xi_edges, sigma_a,
                       a_hat64, np.asarray(log10_b_hat, dtype=np.float64),
                       np.asarray(slope, dtype=np.float64), np.asarray(c_theta, dtype=np.float64),
@@ -1369,7 +1312,9 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
                       np.ascontiguousarray(kg_whitney, dtype=np.float64),
                       float(r_diffuse), float(r_dense),
                       float(gaia_module.LAW_RAMP_LO), float(gaia_module.LAW_RAMP_HI),
-                      float(gaia_module.GAIA_G_LIM_MAG), float(gaia_module.GAIA_G_ROLLOFF_MAG),
+                      np.ascontiguousarray(x_s_all, dtype=np.float64),
+                      np.ascontiguousarray(y_s_all, dtype=np.float64),
+                      np.ascontiguousarray(z_s_all, dtype=np.float64),
                       out_s0, out_s1, a_post, a2_post)
     with np.errstate(divide="ignore"):
         ln_density = np.log(density)[:, None]
