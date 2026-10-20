@@ -89,7 +89,6 @@ from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
-from sesnaimpute.catalog import completeness as completeness_module
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.population.selection import MIN_BANDS
 from sesnaimpute.sky.download.trilegal import build as trilegal_download
@@ -408,24 +407,23 @@ def detection_probability(flux, reader):
     """`(n, 8)`: the detection probability of each star in `flux` (n, 8,
     `BAND_KEYS` order), per band -- Rob Gutermuth's own measured curve,
     POSITION-INDEPENDENT (module docstring: no synthetic star carries a
-    sky position of its own): the region's own ENVELOPE curve for the
-    five Spitzer bands (`reader.envelope_fraction`, the max over every
-    on-map pixel of the measured curve, clamped to the curve's own first
-    plane brightward and to 0 beyond its own last measured plane, no
-    width-model margin -- COMPLETENESS_2026-10-20.md: "the curve is used
-    AS MEASURED") and the region's one all-sky erf curve for 2MASS
-    (`reader.fraction`, already position-independent) -- `catalog.limits.
+    sky position of its own): every one of the eight bands' own region-
+    wide ENVELOPE curve (`reader.envelope_fraction`, the max over every
+    pixel of the measured curve, clamped to the curve's own first plane
+    brightward and to 0 beyond its own last measured plane, no width-
+    model margin -- COMPLETENESS_2026-10-20.md: "the curve is used AS
+    MEASURED"); 2MASS's own ENVELOPE curve is the max over its own
+    nside-128 pixels' fits, the SAME construction as the five Spitzer
+    bands (briefs/round4_2026-10-20/C6_twomass_pixel_depths.md), so no
+    band-specific branch is needed here any more -- `catalog.limits.
     completeness`'s reader object, the one place this module reads a
     STORED completeness product.
     """
     flux = np.asarray(flux, dtype=np.float64)
     n = flux.shape[0]
     out = np.zeros((n, len(BAND_KEYS)), dtype=np.float64)
-    for j, band in enumerate(("J", "H", "Ks")):
-        out[:, j] = reader.fraction(band, flux[:, j], 0)
-    for j, band in enumerate(completeness_module.IRAC_MIPS_KEYS):
-        col = 3 + j
-        out[:, col] = reader.envelope_fraction(band, flux[:, col])
+    for j, band in enumerate(BAND_KEYS):
+        out[:, j] = reader.envelope_fraction(band, flux[:, j])
     return out
 
 

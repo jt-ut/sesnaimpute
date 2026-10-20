@@ -52,10 +52,12 @@ own `Prior` reader (`prior_reader.load`, this class's only -- the prior
 read applies no floor, so no other class's grid is read) and the region's
 whole catalogue (`_load_region_catalog`: fluxes, uncertainties,
 `ORIGIN_FNU`, `NAME`, and COMPLETENESS_2026-10-20.md's own measured
-completeness curves -- `curve_tables`, `source_row5`, `band_a`/`band_c`/
-`band_n`, read whole off `catalog.limits.completeness`'s product into
-plain arrays rather than kept as that reader's own h5py handle, unsafe to
-share across this stage's fork). These are stashed in `_WORKER` and a
+completeness curves -- `curve_tables`, `source_row8` (one row per source
+per one of the eight bands, `BAND_KEYS` order, C6_twomass_pixel_depths.md:
+2MASS's own column is never -1), `band_a`/`band_c`/`band_n`, read whole
+off `catalog.limits.completeness`'s product into plain arrays rather than
+kept as that reader's own h5py handle, unsafe to share across this
+stage's fork). These are stashed in `_WORKER` and a
 `multiprocessing.get_context("fork").Pool` is created AFTER that load, and
 after one warm source has compiled every numba kernel in the parent so the
 workers inherit the compiled code rather than each paying for it -- the
@@ -362,12 +364,12 @@ def _load_region_catalog(config, region):
         band_a[b], band_c[b] = a, c
         band_n[b] = comp._mag_grid_band[band].size
         curve_tables[band] = prior_reader.mmap_dataset(comp._f, "CURVE_%s" % band)
-    source_row5 = np.asarray(comp.source_row, dtype=np.int64)
+    source_row8 = np.asarray(comp.source_row, dtype=np.int64)
     max_n = int(band_n.max())
     comp._f.close()
 
     return dict(flux=flux, sigma=sigma, origin=origin, name=name,
-                curve_tables=curve_tables, source_row5=source_row5,
+                curve_tables=curve_tables, source_row8=source_row8,
                 band_a=band_a, band_c=band_c, band_n=band_n, max_n=max_n)
 
 
@@ -500,27 +502,23 @@ def _source_task(i):
         sigma = w["sigma"][i]
         origin = w["origin"][i]
 
-        # COMPLETENESS_2026-10-20.md "Per-source access in the fitter":
-        # this source's own five Spitzer rows (one per band, -1 off-map)
-        # into `catalog.limits.completeness`'s own region-wide CURVE_<B>
-        # tables (`w["curve_tables"]`, fork-inherited plain arrays, never
-        # re-read from disk), the three 2MASS bands' one shared row,
-        # gathered ONCE into one (8, max_n) array before the template
-        # loop (`likelihood.prepare`/`_ln_nondet`,
-        # `prior_reader._cell_sum`).
-        row5 = w["source_row5"][i]
+        # COMPLETENESS_2026-10-20.md "Per-source access in the fitter",
+        # amended by C6_twomass_pixel_depths.md: this source's own eight
+        # rows (one per band, BAND_KEYS order; 2MASS's own column is
+        # never -1, C6_twomass_pixel_depths.md) into `catalog.limits.
+        # completeness`'s own CURVE_<B> tables (`w["curve_tables"]`,
+        # fork-inherited plain arrays, never re-read from disk), gathered
+        # ONCE into one (8, max_n) array before the template loop
+        # (`likelihood.prepare`/`_ln_nondet`, `prior_reader._cell_sum`).
+        row8 = w["source_row8"][i]
         curve_rows = np.zeros((N_BANDS, w["max_n"]), dtype=np.float64)
         covered = np.empty(N_BANDS, dtype=bool)
         for b, band in enumerate(BAND_KEYS):
             n_b = w["band_n"][b]
-            if band in catalog_limits.TWOMASS_KEYS:
-                curve_rows[b, :n_b] = w["curve_tables"][band][0]
-                covered[b] = True
-            else:
-                r = row5[catalog_limits.IRAC_MIPS_KEYS.index(band)]
-                covered[b] = r >= 0
-                if r >= 0:
-                    curve_rows[b, :n_b] = w["curve_tables"][band][r]
+            r = row8[b]
+            covered[b] = r >= 0
+            if r >= 0:
+                curve_rows[b, :n_b] = w["curve_tables"][band][r]
 
         batch = likelihood.prepare(w["config"], flux, sigma, origin,
                                     w["sigma_lib_l"], curve_rows, covered,
@@ -1184,7 +1182,7 @@ def build_region_class(config, region, cls, st, reader, catalog,
                        topk=topk, n_model=n_model,
                        sigma_lib_l=sigma_lib_l,
                        flux=catalog["flux"], sigma=catalog["sigma"], origin=catalog["origin"],
-                       curve_tables=catalog["curve_tables"], source_row5=catalog["source_row5"],
+                       curve_tables=catalog["curve_tables"], source_row8=catalog["source_row8"],
                        band_a=catalog["band_a"], band_c=catalog["band_c"], band_n=catalog["band_n"],
                        max_n=catalog["max_n"])
 
@@ -1228,7 +1226,7 @@ def build_region_class(config, region, cls, st, reader, catalog,
                        topk=topk, n_model=n_model,
                        sigma_lib_l=sigma_lib_l,
                        flux=catalog["flux"], sigma=catalog["sigma"], origin=catalog["origin"],
-                       curve_tables=catalog["curve_tables"], source_row5=catalog["source_row5"],
+                       curve_tables=catalog["curve_tables"], source_row8=catalog["source_row8"],
                        band_a=catalog["band_a"], band_c=catalog["band_c"], band_n=catalog["band_n"],
                        max_n=catalog["max_n"])
     with _make_pool(ctx, n_workers) as pool:

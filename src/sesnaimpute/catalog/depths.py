@@ -27,14 +27,53 @@ Supplement section VI.5a.i, Table 2 and Figures 3-5; Cutri et al. 2006) --
 0.095 / 0.10 / 0.074 dex for J / H / Ks -- since an effective width cannot
 be narrower than the survey's own roll-off; a region-band below that
 floor is flagged in the build's printout.
+
+Beside the region-wide fit, this module also fits every 2MASS band's OWN
+free Poisson fit (the same `_fit_twomass_band`) per NESTED nside-128
+HEALPix pixel of the region (briefs/round4_2026-10-20/C6_twomass_pixel_
+depths.md "Why": a single region-wide 2MASS depth misses a pixel-to-pixel
+spread of up to +-0.27 mag at the extremes measured for Perseus, and runs
+away entirely inside Orion A's cluster core). A pixel's own fit replaces
+the region's only where it clears four gates (`_pixel_fit_piece`): at
+least `MIN_PIXEL_DETECTIONS` detections in that band in that pixel; the
+fit converged (enough populated histogram bins, L-BFGS-B success); its
+own 50%-completeness magnitude within `MAX_PIXEL_REGIONAL_DELTA_MAG` mag
+of the region's; its own fitted width strictly inside `_W_BOUNDS` (pinned
+to either edge of the optimizer's own box means the free optimum wanted
+to leave the physically sane range, not a genuine interior fit). A pixel
+failing any gate carries the region's own `F50_2MASS_MJY`/`WIDTH_DEX`/
+`FIT_RESIDUAL_2MASS` copied in verbatim (`FROM_REGIONAL` true there), so
+every pixel in the output always carries a usable value.
+
+The per-source pixel id is `healpy.ang2pix(128, GAL_L_DEG, GAL_B_DEG,
+nest=True, lonlat=True)` -- the catalogue's own galactic columns, the
+SAME (lon, lat) pair `catalog.depth_grid.admitted_pixels_512` and
+`granules/build.py` pixelise every other HEALPix axis in this package
+with, not the catalogue's RA_DEG/DEC_DEG: `catalog.completeness`'s own
+`PIXEL_CURVE_<J|H|Ks>` needs each admitted nside-512 pixel's PARENT
+nside-128 pixel by a plain bit shift (`pix512 >> 4`), and that shift is
+the correct parent only when both nsides are pixelised from the same
+(lon, lat) pair (verified here: `hp.ang2pix(512, gl, gb, nest=True,
+lonlat=True) >> 4 == hp.ang2pix(128, gl, gb, nest=True, lonlat=True)` for
+every one of 2000 random positions; not true mixing galactic and
+equatorial pairs across the two sides, since the two frames tile the
+sphere differently).
 """
 
+import functools
 import os
 
 import h5py
 import numpy as np
 from scipy.optimize import minimize
 from scipy.special import erfc
+# healpy's own import, AFTER scipy.special (measured 2026-10-20: importing
+# healpy before `scipy.special.erfc` corrupts loky's pickling of that ufunc
+# across worker processes -- BrokenProcessPool, "Can't get attribute 'erfc'
+# on <module 'joblib.externals.loky.backend.popen_loky_posix'>" -- import
+# order the only variable reproducing it; harmless once erfc is imported
+# first).
+import healpy as hp
 
 from sesnaimpute import config as config_module
 from sesnaimpute import pieces as pieces_module
@@ -42,7 +81,7 @@ from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute import tables as tables_module
 from sesnaimpute.attrs_registry import REGISTRY
-from sesnaimpute.build import run
+from sesnaimpute.build import run, write_dataset
 
 _STEM = "depths_sesna_region"
 _READINGS = {name: value for (stem, name), value in REGISTRY.items() if stem == _STEM}
@@ -70,6 +109,24 @@ _W_BOUNDS = (0.02, 3.0)
 # Ks): the floor a region's fitted 2MASS width is checked against, since
 # an effective roll-off cannot be narrower than the survey's own.
 TWOMASS_INTRINSIC_WIDTH_DEX = (0.095, 0.10, 0.074)
+
+# --- Per-nside-128-pixel 2MASS fit (C6_twomass_pixel_depths.md) ---
+
+NSIDE_128 = 128
+
+#: Gate 1: a pixel's own fit is not attempted below this many detections
+#: in that band in that pixel (measured 2026-10-20 by the coordinator:
+#: a histogram this thin cannot constrain the free Poisson fit's three
+#: shape parameters at pixel scale the way it can at region scale).
+MIN_PIXEL_DETECTIONS = 300
+
+#: Gate 3: a pixel's own fitted 50%-completeness magnitude must sit
+#: within this many magnitudes of the region's own fitted 50% point, or
+#: the fit is treated as a fluke and the regional curve is kept instead.
+MAX_PIXEL_REGIONAL_DELTA_MAG = 1.0
+
+_STEM_HPX128 = "depths_sesna_hpx128"
+_READINGS_HPX128 = {name: value for (stem, name), value in REGISTRY.items() if stem == _STEM_HPX128}
 
 
 def _completeness(m, m50, w):
@@ -173,6 +230,99 @@ def _region_detected_twomass(curated_path):
     return [fnu[origin[:, bands.index(key)] == 1, bands.index(key)] for key in TWOMASS_KEYS]
 
 
+def _region_pixel128_arrays(curated_path):
+    """This region's own per-source nside-128 pixel id (module docstring:
+    `GAL_L_DEG`/`GAL_B_DEG`, the same (lon, lat) pair every other HEALPix
+    axis in this package uses) and the three 2MASS bands' own flux and
+    `ORIGIN_FNU` columns, `TWOMASS_KEYS` order."""
+    with h5py.File(curated_path, "r") as f:
+        gl = np.asarray(f["GAL_L_DEG"][:], dtype=np.float64)
+        gb = np.asarray(f["GAL_B_DEG"][:], dtype=np.float64)
+        fnu = np.asarray(f["FNU_MJY"][:], dtype=np.float64)
+        origin = np.asarray(f["ORIGIN_FNU"][:], dtype=np.int64)
+        bands = [b.decode() if isinstance(b, bytes) else b for b in f.attrs["BANDS"]]
+    cols = [bands.index(key) for key in TWOMASS_KEYS]
+    pix = hp.ang2pix(NSIDE_128, gl, gb, nest=True, lonlat=True).astype(np.int64)
+    return pix, fnu[:, cols], origin[:, cols]
+
+
+def _pixel_fit_piece(det_flux_sorted_by_band, f50_region, residual_region,
+                      width_dex_region, m50_region, piece):
+    """One (pixel, band) piece: `piece = (band_idx, start, stop)`, `start`/
+    `stop` bounding this pixel's own slice of `det_flux_sorted_by_band[
+    band_idx]` (that band's detected flux, sorted by pixel so every
+    pixel's own detections sit in one contiguous run -- the caller's own
+    `np.searchsorted` bounds). Returns `(f50, residual, width_dex,
+    n_detected, from_regional)`: the region's own three values, copied in
+    verbatim, unless all four gates hold (module docstring), in which
+    case this pixel's own fit replaces them.
+    """
+    band_idx, start, stop = piece
+    n_detected = stop - start
+    f50 = float(f50_region[band_idx])
+    residual = float(residual_region[band_idx])
+    width_dex = float(width_dex_region[band_idx])
+    from_regional = True
+    if n_detected >= MIN_PIXEL_DETECTIONS:
+        fit = _fit_twomass_band(det_flux_sorted_by_band[band_idx][start:stop])
+        if np.isfinite(fit["f50"]):
+            m50_pixel = -2.5 * np.log10(fit["f50"])  # invert f50 = 10**(-0.4 m50)
+            w_hat = fit["w"]
+            if (abs(m50_pixel - float(m50_region[band_idx])) <= MAX_PIXEL_REGIONAL_DELTA_MAG
+                    and _W_BOUNDS[0] < w_hat < _W_BOUNDS[1]):
+                from_regional = False
+                f50, residual, width_dex = fit["f50"], fit["residual"], DEX_PER_MAG * w_hat
+    return f50, residual, width_dex, int(n_detected), from_regional
+
+
+def _build_pixel_product(config, region, f50_region, residual_region, width_dex_region, st):
+    """This region's own per-nside-128-pixel 2MASS depths: every pixel
+    that holds at least one catalogue source (any band), the three 2MASS
+    bands' own fit or the region's (`_pixel_fit_piece`), pieces over
+    `(pixel, band)` on the shared pool (module docstring)."""
+    curated_path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
+    pix, fnu, origin = _region_pixel128_arrays(curated_path)
+    pixel_axis = np.unique(pix)
+    n_pix = pixel_axis.size
+    m50_region = -2.5 * np.log10(np.asarray(f50_region, dtype=np.float64))
+
+    det_flux_sorted_by_band = []
+    starts_by_band = []
+    stops_by_band = []
+    for j in range(len(TWOMASS_KEYS)):
+        detected = origin[:, j] == 1
+        det_pix = pix[detected]
+        det_flux = fnu[detected, j]
+        order = np.argsort(det_pix, kind="stable")
+        det_pix_sorted = det_pix[order]
+        det_flux_sorted_by_band.append(det_flux[order])
+        starts_by_band.append(np.searchsorted(det_pix_sorted, pixel_axis, side="left"))
+        stops_by_band.append(np.searchsorted(det_pix_sorted, pixel_axis, side="right"))
+
+    pieces = [(j, int(starts_by_band[j][k]), int(stops_by_band[j][k]))
+              for j in range(len(TWOMASS_KEYS)) for k in range(n_pix)]
+    fn = functools.partial(_pixel_fit_piece, det_flux_sorted_by_band,
+                            f50_region, residual_region, width_dex_region, m50_region)
+    results = pieces_module.run(fn, pieces, config.n_jobs, st, unit="pixel fits")
+
+    f50_out = np.empty((n_pix, len(TWOMASS_KEYS)), dtype=np.float64)
+    residual_out = np.empty((n_pix, len(TWOMASS_KEYS)), dtype=np.float64)
+    width_out = np.empty((n_pix, len(TWOMASS_KEYS)), dtype=np.float64)
+    n_detected_out = np.empty((n_pix, len(TWOMASS_KEYS)), dtype=np.int32)
+    from_regional_out = np.empty((n_pix, len(TWOMASS_KEYS)), dtype=bool)
+    idx = 0
+    for j in range(len(TWOMASS_KEYS)):
+        for k in range(n_pix):
+            f50, residual, width_dex, n_det, from_regional = results[idx]
+            f50_out[k, j] = f50
+            residual_out[k, j] = residual
+            width_out[k, j] = width_dex
+            n_detected_out[k, j] = n_det
+            from_regional_out[k, j] = from_regional
+            idx += 1
+    return pixel_axis, f50_out, residual_out, width_out, n_detected_out, from_regional_out
+
+
 def build(config, regions=None):
     """Builds the region-granule 2MASS survey-depths product for the given
     regions (default: every region in `regions.REGIONS`). Reads the curated
@@ -180,7 +330,10 @@ def build(config, regions=None):
     process), then fits every region's three 2MASS bands as one flat set
     of pieces on the shared pool (`pieces.run`, capped at `config.n_jobs`
     workers). Updates only the given regions' rows of the product
-    (`tables.update_rows`).
+    (`tables.update_rows`). Beside that region-wide product, also builds
+    each given region's own per-nside-128-pixel product (module docstring,
+    `_build_pixel_product`), one file per region
+    (`depths_sesna_hpx128__<Region>.hdf5`).
     """
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
@@ -242,6 +395,36 @@ def build(config, regions=None):
                 median_f50_mjy=float(np.nanmedian(f50_2mass)),
                 median_width_dex=float(np.nanmedian(width_dex_2mass)),
                 below_intrinsic_floor=int(below_floor.sum()))
+
+        for r, region in enumerate(regions):
+            pix128, f50_pix, residual_pix, width_pix, n_det_pix, from_regional_pix = _build_pixel_product(
+                config, region, f50_2mass[r], fit_residual_2mass[r], width_dex_2mass[r], st)
+            out_path_128 = config_module.product_path(
+                config, "catalog", "sesna", "depths", "hpx128", region=region)
+            with h5py.File(out_path_128, "w") as f:
+                f.attrs["GRANULE"] = "hpx128"
+                f.attrs["REGION"] = region
+                write_dataset(f, "HPX_PIX_128", pix128, *_READINGS_HPX128["HPX_PIX_128"])
+                write_dataset(f, "F50_2MASS_MJY", f50_pix, *_READINGS_HPX128["F50_2MASS_MJY"])
+                write_dataset(f, "WIDTH_DEX", width_pix, *_READINGS_HPX128["WIDTH_DEX"])
+                write_dataset(f, "FIT_RESIDUAL_2MASS", residual_pix, *_READINGS_HPX128["FIT_RESIDUAL_2MASS"])
+                write_dataset(f, "N_DETECTED", n_det_pix, *_READINGS_HPX128["N_DETECTED"])
+                write_dataset(f, "FROM_REGIONAL", from_regional_pix, *_READINGS_HPX128["FROM_REGIONAL"])
+
+            fitted = ~from_regional_pix
+            for j, key in enumerate(TWOMASS_KEYS):
+                n_fitted = int(fitted[:, j].sum())
+                n_fallback = int(from_regional_pix[:, j].sum())
+                if n_fitted:
+                    delta = (-2.5 * np.log10(f50_pix[fitted[:, j], j])
+                             - (-2.5 * np.log10(f50_2mass[r, j])))
+                    lo, hi = np.percentile(delta, [16.0, 84.0])
+                    spread = "m50_pixel - m50_regional 16-84%% = %.3f..%.3f mag" % (lo, hi)
+                else:
+                    spread = "no fitted pixels"
+                print("catalog.depths: %s %s hpx128: %d/%d pixels fitted their own curve, "
+                      "%d fell back to the regional curve, %s"
+                      % (region, key, n_fitted, n_fitted + n_fallback, n_fallback, spread))
 
 
 if __name__ == "__main__":

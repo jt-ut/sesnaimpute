@@ -145,11 +145,17 @@ CLASS_REGISTER = {
 
 # --- (c) Granules ---
 #
-# The six storage resolutions, from IMPLEMENTATION.md section 1.
-GRANULES = ("source", "hpx512", "sightline", "tile", "region", "survey")
+# The six storage resolutions, from IMPLEMENTATION.md section 1, plus
+# "hpx128" (briefs/round4_2026-10-20/C6_twomass_pixel_depths.md): one
+# nside-128 pixel of a region, the resolution `catalog.depths`' own
+# per-pixel 2MASS fit (`depths_sesna_hpx128__<Region>.hdf5`) is stored at
+# -- coarser than `hpx512` on purpose, since a 2MASS fit needs hundreds of
+# detections per pixel to clear its own detection-count gate.
+GRANULES = ("source", "hpx512", "hpx128", "sightline", "tile", "region", "survey")
 GRANULE_DEFINITIONS = {
     "source": "one SESNA catalogue row",
     "hpx512": "one nside-512 HEALPix pixel",
+    "hpx128": "one nside-128 HEALPix pixel of a region that holds at least one catalogue source",
     "sightline": "one nside-256 HEALPix pixel that contains at least one catalogue source",
     "tile": "a group of hpx512 pixels, 0.5-0.7 degrees across",
     "region": "one of the 29 named star-forming regions",
