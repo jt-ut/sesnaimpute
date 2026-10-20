@@ -25,6 +25,15 @@ angle and `cloud_frac**2` and `FRAC`, summed -- not the region's
 catalogued sources' mean law density times a fixed area, which under-runs
 the integral because sources avoid the densest gas (a convex, squared law).
 
+`region_predicted_yso` reads the EXCESS-SELECTED law only (owner's ruling
+2026-10-20, `bms_review/briefs/round4_2026-10-20/
+C11_yso_class3_population.md`): UWISH2's knots are a signpost of the
+excess-selected population's own accretion/outflow activity, not of the
+diskless Class III members a region's own published disk fraction adds
+to the TOTAL young-star level (`population.yso_law.N_LAW_TOTAL_FACTOR`),
+so `law_area_integral` is called with this region's own `KAPPA_USED`
+passed EXPLICITLY, bypassing that factor's `kappa=None` path.
+
 `fitted` turns those into a depth-corrected knot rate per field, against
 whichever `KAPPA_USED` the law product currently carries. `pooled` is the
 rate reported to every region without its own knot survey: the geometric
@@ -243,17 +252,35 @@ def knots_corrected(config, region):
 # ====================================================================
 
 def region_predicted_yso(config, region):
-    """The law's own predicted young-star count on `region`'s knot-survey
-    footprint, EXACTLY `population.yso_law._fit_region`'s own per-pixel
-    expression (module docstring), with the region's own coefficient
-    (`kappa=None` makes `population.yso.law_area_integral` read the law
-    product's own `KAPPA_USED`), summed over the footprint's own pixels
-    (`footprint_pixels`) instead of the fit footprint."""
+    """The law's own predicted EXCESS-SELECTED young-star count on
+    `region`'s knot-survey footprint, EXACTLY `population.yso_law.
+    _fit_region`'s own per-pixel expression (module docstring), summed
+    over the footprint's own pixels (`footprint_pixels`) instead of the
+    fit footprint.
+
+    The knot rate `eta_r` is calibrated per EXCESS-SELECTED young star
+    (module docstring: UWISH2's own outflow-knot census is a signpost of
+    active accretion/outflow, the excess-selected population's own
+    activity, not the diskless Class III members a region's published
+    disk fraction adds to the TOTAL level, owner's ruling 2026-10-20).
+    `kappa` is passed EXPLICITLY here (the region's own `KAPPA_USED`,
+    `yso._kappa_used`) rather than left `None`: `population.yso.
+    law_area_integral`'s `kappa=None` path now reads the TOTAL level
+    (times `N_LAW_TOTAL_FACTOR`, C11 brief item 2), and an explicit
+    `kappa` is the one way to keep reading the EXCESS-ONLY law here,
+    the same bypass `population.yso_law._fit_region`'s own `kappa=1.0`
+    fit-integral call uses, just at the region's own fitted coefficient
+    instead of 1.0. No number here changes for today's three
+    knot-surveyed regions (Cygnus X, North America Nebula, Vela D):
+    none carries a measured `disk_fraction` yet (`regions.py`), so each
+    one's own `N_LAW_TOTAL_FACTOR` reads 1.0 either way -- but this
+    function must not drift from excess-only once one of them does."""
     pix512, frac = footprint_pixels(config, region)
     d_front, d_back = yso_module.cloud_interval_pc(config, region)
     _xi, _mass, cloud_frac, _removed = young_stars_module.sightline_lookup(
         config, region, pix512, d_front, d_back)
-    n_per_pix = (yso_module.law_area_integral(config, region, pix512, kappa=None)
+    kappa_excess = yso_module._kappa_used(config, region)
+    n_per_pix = (yso_module.law_area_integral(config, region, pix512, kappa=kappa_excess)
                  * yso_law_module.OMEGA_PIX_512_DEG2 * cloud_frac ** 2 * frac)
     return float(n_per_pix.sum())
 
