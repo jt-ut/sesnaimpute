@@ -22,6 +22,15 @@ unnecessary: every consumer now reads the MEASURED curve at its own
 source's or pixel's own position directly, so the five Spitzer bands'
 `limits()` callers all need rewiring to this object (this unit's own
 report lists every call site the change breaks).
+
+Since briefs/round4_2026-10-20/C6_twomass_pixel_depths.md, J/H/Ks carry
+the SAME per-pixel `CURVE_<band>`/`PIXEL_CURVE_<band>`/`MAG_GRID_<band>`/
+`COMPLETED_FROM_<band>`/`ENVELOPE_<band>` layout as I1-M1 (one row per
+nside-128 pixel instead of per 30-arcsec pixel; `SOURCE_ROW` one
+(n_source, 8) table, `ALL_BAND_KEYS` column order, never -1 in its 2MASS
+columns since 2MASS is all-sky), so every method below reads all eight
+bands through the exact same code path -- no `if band in TWOMASS_KEYS`
+branch anywhere in this class any more.
 """
 
 import os
@@ -34,6 +43,7 @@ from sesnaimpute.catalog import completeness as completeness_module
 
 IRAC_MIPS_KEYS = completeness_module.IRAC_MIPS_KEYS
 TWOMASS_KEYS = completeness_module.TWOMASS_KEYS
+ALL_BAND_KEYS = completeness_module.ALL_BAND_KEYS
 
 
 def _band_ac(mag0, dmag, zero_point_jy):
@@ -77,8 +87,11 @@ class Completeness:
         self._envelope = {}
         # Corrections 2026-10-20.md item 1: ONE canonical grid PER BAND
         # (no grid shared across bands any more), read from that band's
-        # own MAG_GRID_<band>.
-        for band in IRAC_MIPS_KEYS:
+        # own MAG_GRID_<band>. All eight bands (J, H, Ks, I1, I2, I3, I4,
+        # M1) share this one loop: 2MASS carries every one of these
+        # datasets too, at nside-128 pixel resolution instead of
+        # 30-arcsec (C6_twomass_pixel_depths.md).
+        for band in ALL_BAND_KEYS:
             zp = h5file[f"CURVE_{band}"].attrs["ZERO_POINT_JY"]
             grid = np.asarray(h5file[f"MAG_GRID_{band}"][:], dtype=np.float64)
             self._mag_grid_band[band] = grid
@@ -88,41 +101,31 @@ class Completeness:
             self._pixel_curve[band] = h5file[f"PIXEL_CURVE_{band}"]
             self._completed_from[band] = np.asarray(h5file[f"COMPLETED_FROM_{band}"][:], dtype=np.float32)
             self._envelope[band] = np.asarray(h5file[f"ENVELOPE_{band}"][:])
-        for band in TWOMASS_KEYS:
-            zp = h5file[f"CURVE_{band}"].attrs["ZERO_POINT_JY"]
-            grid = np.asarray(h5file[f"MAG_GRID_{band}"][:], dtype=np.float64)
-            self._mag_grid_band[band] = grid
-            self._zero_point_jy[band] = float(zp)
-            self._ac[band] = _band_ac(float(grid[0]), float(grid[1] - grid[0]), zp)
-            self._curve[band] = h5file[f"CURVE_{band}"]
 
     def _grid_params(self, band):
         grid = self._mag_grid_band[band]
         return float(grid[0]), float(grid[1] - grid[0])
 
     def _row_for(self, band, source_index):
-        if band in TWOMASS_KEYS:
-            return np.zeros(np.atleast_1d(source_index).shape, dtype=np.int64)
-        return np.atleast_1d(self.source_row[source_index, IRAC_MIPS_KEYS.index(band)])
+        return np.atleast_1d(self.source_row[source_index, ALL_BAND_KEYS.index(band)])
 
     def covered(self, band):
         """This region's own per-source boolean: `True` where the source
-        has a completeness curve in `band` (Spitzer: `SOURCE_ROW >= 0`;
-        2MASS: always `True`, no off-map concept for a survey-wide
-        bound)."""
-        if band in TWOMASS_KEYS:
-            return np.ones(self.source_row.shape[0], dtype=bool)
-        return self.source_row[:, IRAC_MIPS_KEYS.index(band)] >= 0
+        has a completeness curve in `band` (Spitzer: `SOURCE_ROW >= 0`,
+        off every field's map otherwise; 2MASS: always `True`, its
+        SOURCE_ROW column never -1, no off-map concept for an all-sky
+        survey, C6_twomass_pixel_depths.md)."""
+        return self.source_row[:, ALL_BAND_KEYS.index(band)] >= 0
 
     def completed_from(self, band, row):
         """`band`'s own `COMPLETED_FROM_<band>` at `row` (a row into
         `CURVE_<band>`, e.g. from `source_row`): the magnitude of the
         first plane that is the band's own template continuation rather
         than Rob's own measurement, `NaN` where nothing was completed
-        (Corrections 2026-10-20.md item 2). 2MASS carries no such
-        column (its one curve is tabulated whole, never cut off)."""
-        if band in TWOMASS_KEYS:
-            return np.full(np.atleast_1d(row).shape, np.nan)
+        (Corrections 2026-10-20.md item 2). Always `NaN` for 2MASS (its
+        own tabulated erf curve is never cut off the way a measured
+        field cube can be), stored as a real column of that constant so
+        this method needs no band-specific branch."""
         return self._completed_from[band][np.atleast_1d(row)]
 
     def fraction(self, band, flux_mjy, source_index):
@@ -155,17 +158,15 @@ class Completeness:
     def envelope_fraction(self, band, flux_mjy):
         """The completeness fraction at `flux_mjy`'s own values (mJy), read
         from this region's own ENVELOPE_<band> curve (`catalog.
-        completeness.build`'s max, over every on-map pixel, of CURVE_<band>
-        at each magnitude): the deepest completeness ANYWHERE in the
+        completeness.build`'s max, over every pixel, of CURVE_<band> at
+        each magnitude): the deepest completeness ANYWHERE in the
         region's own footprint for `band`, position-independent --
         `population.field_stars`'s retention test, since no synthetic
         field star carries a sky position of its own (SPEC_PRIORS.md
-        section 1.5). 2MASS has no per-pixel map at all (module docstring),
-        so its own region-wide tabulated curve (`fraction` at row 0) IS
-        already position-independent and is read the same way here, never
-        a second curve."""
-        if band in TWOMASS_KEYS:
-            return self.fraction(band, flux_mjy, 0)
+        section 1.5). 2MASS's own ENVELOPE_<band> is the max over its own
+        nside-128 pixels' curves, the same construction as the five
+        Spitzer bands (C6_twomass_pixel_depths.md), so no band-specific
+        branch is needed here."""
         log10_f = np.log10(np.asarray(flux_mjy, dtype=np.float64))
         g0, dm = self._grid_params(band)
         n = self._envelope[band].shape[0]
@@ -174,47 +175,39 @@ class Completeness:
 
     def pixel_fraction_params(self, band):
         """`(curve, g0, dm, n, a, c, scale)`: this band's own completeness
-        table as a plain in-memory array (`PIXEL_CURVE_<band>`, or row 0 of
-        `CURVE_<band>` for 2MASS -- the SAME table and row convention
-        `fraction_pixel` reads) plus the grid parameters `catalog.
-        completeness.completeness_many` needs, for a caller that evaluates
-        many `(pixel_row, flux)` pairs across many separate calls in one
+        table as a plain in-memory array (`PIXEL_CURVE_<band>`, the SAME
+        table and row convention `fraction_pixel` reads, every one of the
+        eight bands) plus the grid parameters `catalog.completeness.
+        completeness_many` needs, for a caller that evaluates many
+        `(pixel_row, flux)` pairs across many separate calls in one
         worker's lifetime (`bmstp.atlas`'s per-tile/per-sightline member
         quadrature) and would otherwise pay `fraction_pixel`'s own
         per-call table read (`curves[:]`) again on every one of them: read
         ONCE here and cached by the caller (`pieces.py`'s per-process
         cache convention, `bmstp.sample_star`'s own pattern) for its own
-        worker process's lifetime."""
+        worker process's lifetime. `scale` is always 1.0: `PIXEL_CURVE_
+        <band>` is float32, already a plain fraction, for every band."""
         g0, dm = self._grid_params(band)
         a, c = self._ac[band]
-        if band in TWOMASS_KEYS:
-            curves = self._curve[band]
-            return (np.asarray(curves[:]), g0, dm, curves.shape[1], a, c,
-                    float(completeness_module.STORAGE_SCALE))
         curves = self._pixel_curve[band]
         return np.asarray(curves[:]), g0, dm, curves.shape[1], a, c, 1.0
 
     def fraction_pixel(self, band, flux_mjy, pixel_row):
         """The completeness fraction at each of `pixel_row`'s own rows (a
-        row index into `PIXEL_CURVE_<band>`, not a HEALPix pixel number;
-        2MASS ignores it, one shared curve), `band`, evaluated at
-        `flux_mjy`'s own flux (mJy, broadcast to `pixel_row`'s shape) --
-        the vectorised kernel, over arrays of `(row, magnitude)` pairs.
+        row index into `PIXEL_CURVE_<band>`, not a HEALPix pixel number),
+        `band`, evaluated at `flux_mjy`'s own flux (mJy, broadcast to
+        `pixel_row`'s shape) -- the vectorised kernel, over arrays of
+        `(row, magnitude)` pairs, the same `PIXEL_CURVE_<band>` table
+        every one of the eight bands carries.
         """
-        if band in TWOMASS_KEYS:
-            rows = np.zeros(np.atleast_1d(pixel_row).shape, dtype=np.int64)
-            curves = self._curve[band]
-            scale = completeness_module.STORAGE_SCALE
-        else:
-            rows = np.ascontiguousarray(np.atleast_1d(pixel_row).astype(np.int64))
-            curves = self._pixel_curve[band]
-            scale = 1.0  # PIXEL_CURVE_<band> is float32, already a plain fraction
+        rows = np.ascontiguousarray(np.atleast_1d(pixel_row).astype(np.int64))
+        curves = self._pixel_curve[band]
         log10_f = np.ascontiguousarray(
             np.broadcast_to(np.log10(np.asarray(flux_mjy, dtype=np.float64)), rows.shape))
         g0, dm = self._grid_params(band)
         n = curves.shape[1]
         a, c = self._ac[band]
-        return completeness_module.completeness_many(curves[:], rows, g0, dm, n, log10_f, a, c, scale)
+        return completeness_module.completeness_many(curves[:], rows, g0, dm, n, log10_f, a, c, 1.0)
 
     def _crossing_mag(self, band, rows, target_c):
         """`(n,)` magnitude where `band`'s own measured curve, at each of
@@ -258,13 +251,11 @@ class Completeness:
 
     def _crossing_mag_pixel(self, band, pixel_row, target_c):
         """`_crossing_mag`'s own twin for `PIXEL_CURVE_<band>`: a plain
-        float32 fraction (an area average, module docstring), not a
-        value-x-`STORAGE_SCALE` table, so the crossing search runs on
-        the raw fraction directly rather than sharing `_crossing_mag`'s
-        own `/STORAGE_SCALE` step. 2MASS has one region-wide row (index
-        0, `_row_for`'s own convention) -- `local_width_dex_pixel` and
-        `fifty_percent_pixel` both resolve there to `_local_width_dex`/
-        `_crossing_mag`, the SAME per-row search `fraction` itself uses."""
+        float32 fraction (an area average for Spitzer, a direct per-pixel
+        read for 2MASS -- module docstrings), not a value-x-`STORAGE_
+        SCALE` table, so the crossing search runs on the raw fraction
+        directly rather than sharing `_crossing_mag`'s own `/STORAGE_
+        SCALE` step."""
         rows = np.ascontiguousarray(np.atleast_1d(pixel_row).astype(np.int64))
         curve_table = self._pixel_curve[band]
         g0, dm = self._grid_params(band)
@@ -289,11 +280,7 @@ class Completeness:
         `pixel_row`'s own rows crosses completeness = 0.5 -- the one
         number a per-pixel consumer that used to read the retired
         `F_LIM_50_PIX_MJY` gets instead."""
-        if band in TWOMASS_KEYS:
-            rows = np.zeros(np.atleast_1d(pixel_row).shape, dtype=np.int64)
-            mag = self._crossing_mag(band, rows, 0.5)
-        else:
-            mag = self._crossing_mag_pixel(band, pixel_row, 0.5)
+        mag = self._crossing_mag_pixel(band, pixel_row, 0.5)
         return self._mag_to_flux_mjy(band, mag)
 
     def _local_width_dex(self, band, rows):
@@ -321,9 +308,6 @@ class Completeness:
         """`(n,)` dex: `_local_width_dex`'s own pixel-curve form, read only
         by `catalog.figure_depth`'s disclosed Gaussian approximation
         (this class's own docstring: never by a probability computation)."""
-        if band in TWOMASS_KEYS:
-            rows = np.zeros(np.atleast_1d(pixel_row).shape, dtype=np.int64)
-            return self._local_width_dex(band, rows)
         w_mag = (self._crossing_mag_pixel(band, pixel_row, 0.1587)
                  - self._crossing_mag_pixel(band, pixel_row, 0.8413)) / 2.0
         return 0.4 * w_mag
