@@ -30,6 +30,7 @@ from sesnaimpute import config as config_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.batches import batches
+from sesnaimpute.catalog import depth_grid as depth_grid_module
 from sesnaimpute.fittp.classify import CLASSES, YSO_INDEX
 
 #: Per-row working set for the batch loop (rule 10b): HPX_512 (int64) and
@@ -45,11 +46,13 @@ def _require(path, region, runbook_line):
 
 
 def build_region(config, region, st):
-    depth_path = _require(
-        config_module.product_path(config, "catalog", "sesna", "depth-grid", "hpx512", region=region),
-        region, "PY sesnaimpute.catalog.depth_grid")
-    with h5py.File(depth_path, "r") as f:
-        pix = np.sort(np.asarray(f["HPX_PIX_512"][:], dtype=np.int64))
+    # the admitted nside-512 pixel axis is computed directly from the
+    # curated catalogue's own positions (catalog.depth_grid.
+    # admitted_pixels_512), not read off a product file: the old
+    # depth-grid/hpx512 product (a region-wide Spitzer counts fit's limit
+    # and width) is deleted outright (COMPLETENESS_2026-10-20.md), and the
+    # pixel axis itself never depended on that fit.
+    pix = np.sort(depth_grid_module.admitted_pixels_512(config, region))
     n_pix = pix.size
 
     density_path = _require(

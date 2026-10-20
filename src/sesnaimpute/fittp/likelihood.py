@@ -30,16 +30,15 @@ at those clamped marks; the design's own parameter covariance
 `within` term.
 """
 
-import math
 from collections import namedtuple
 from functools import lru_cache
 
 import h5py
-import numba
 import numpy as np
 
 from sesnaimpute import constants
 from sesnaimpute import definitions
+from sesnaimpute.catalog import completeness as completeness_module
 from sesnaimpute.population import selection as population_selection
 
 #: The eight SESNA bands, in the order every array here uses
@@ -71,8 +70,6 @@ ORIGIN_UNOBSERVED = 91
 #: by the source's own (A_K/A_V).
 AV_CLAMP_MAX_AK = 75.0
 
-_SQRT2 = np.float32(np.sqrt(2.0))
-
 #: The per-source working set this module holds at its own peak, in
 #: float32-`(n_model, 8)` equivalents (PARALLEL brief item 8's memory
 #: disclosure, `fittp.sweep.build_region_class`'s printed line): `r`
@@ -92,93 +89,51 @@ _SQRT2 = np.float32(np.sqrt(2.0))
 WORKER_WORKING_SET_EQUIV = 10
 
 
-#: SPEC_BMSTP_DRAFT.md section 6.2 -- above this `z`, `_ln_one_minus_c_kernel`
-#: switches from the direct `ln erfc(z)` (exact, no underflow risk yet: erfc
-#: does not underflow to zero until z ~ 27) to the asymptotic series, so the
-#: switch is a speed/simplicity choice, not a stability one.
-_ERFC_DIRECT_MAX_Z = 5.0
-
-
-@numba.njit(parallel=True, cache=True)
-def _ln_one_minus_c_kernel(z_flat, out):
-    """`ln[1 - C(z)]` for every element of the flattened `z` (section 6.2's
-    erf roll-off, `z = (log10 f_hat - log10 F_lim50) / (sqrt(2) w)`),
-    `@njit(parallel=True)` over templates via `prange`: for `z < 0` (fainter
-    than the limit) `log1p(-0.5 erfc(-z))` has no cancellation to guard
-    against; for `0 <= z < 5`, `math.erfc` itself has not yet underflowed,
-    so `ln(1/2) + ln erfc(z)` is exact; beyond that, the scaled
-    complementary error function's own asymptotic series, `ln erfcx(z) ~=
-    -ln(z sqrt(pi)) - ln(1 + 1/(2 z^2))`, avoids `erfc`'s eventual
-    underflow (z ~ 27) with the leading-order tail term the spec's own
-    "ten times the limit costs about 5 nats" case sits well inside.
-    `z_flat` is float32 (this module's own working dtype); each element is
-    cast to float64 here, per scalar, so the z=0 identity keeps double
-    precision without a separate float64 copy of the whole array. `prange`
-    parallelises over templates within one source's own call; the fitter's
-    parallel axis is now the source (a multiprocessing pool over sources,
-    `fittp.sweep`), so each worker pins `numba.set_num_threads(1)` before
-    its first task and this loop runs single-threaded there -- oversub-
-    scription, not this kernel, decides whether it threads at all.
-    """
-    n = z_flat.shape[0]
-    ln_half = -0.6931471805599453
-    sqrt_pi = 1.7724538509055159
-    for i in numba.prange(n):
-        zi = np.float64(z_flat[i])
-        if zi < 0.0:
-            out[i] = math.log1p(-0.5 * math.erfc(-zi))
-        elif zi < _ERFC_DIRECT_MAX_Z:
-            out[i] = ln_half + math.log(math.erfc(zi))
-        else:
-            ln_erfcx = -math.log(zi * sqrt_pi) - math.log(1.0 + 1.0 / (2.0 * zi * zi))
-            out[i] = ln_half + ln_erfcx - zi * zi
-    return out
-
-
-def _ln_one_minus_c(z):
-    """`ln[1 - C(z)]`, section 6.2 (`_ln_one_minus_c_kernel`'s docstring for
-    the three branches), on an array of any shape: at `z = 0` this is
-    `ln(1/2)` to float64 precision (`math.erfc(0.0) == 1.0` exactly
-    regardless of `z`'s own dtype), so the identity check holds to 1e-10
-    with no float32 rounding in the way. `z` keeps its own dtype (float32)
-    into the kernel -- only the kernel's per-element arithmetic and its
-    output are float64, so no full-array float64 copy of `z` is made here.
-    """
-    z = np.asarray(z)
-    shape = z.shape
-    z_flat = np.ascontiguousarray(z.reshape(-1))
-    out = np.empty(z_flat.shape, dtype=np.float64)
-    _ln_one_minus_c_kernel(z_flat, out)
-    return out.reshape(shape)
-
-
 def _ln_nondet(ext_col32, log10_f_ref, av_clamped32, sc_clamped32,
-               log10_f_lim50, width_dex, nondet_mask):
+               curve_rows, band_a, band_c, band_n, nondet_mask):
     """The non-detection term of section 6.2 at the CLAMPED marks, for one
-    source's own `m` templates: the predicted log-flux in every band
-    (float32) for every template, masked to this source's own undetected,
-    limited bands and summed. `ext_col32` is the extinction-law solve's own
-    converged design column for this source, `(8,)` float32 (section 2).
-    One batched call into `_ln_one_minus_c`'s numba kernel beats a
-    per-template Python-level call (measured on the block form this
-    replaces: ~2.5x slower -- the per-call overhead dominates the kernel's
-    own, embarrassingly parallel, per-element cost).
+    source's own `m` templates: the predicted log-flux in every band for
+    every template, masked to this source's own undetected, covered bands
+    and summed. `ext_col32` is the extinction-law solve's own converged
+    design column for this source, `(8,)` float32 (section 2).
+
+    COMPLETENESS_2026-10-20.md "The reader": one call per masked band into
+    `catalog.completeness.ln_one_minus_completeness` -- the SAME measured-
+    curve kernel `catalog.limits.Completeness.ln_one_minus_fraction` uses --
+    at this source's own curve row (`curve_rows[b]`, `prepare`'s own
+    per-source gather, uint16, value x `catalog.completeness.
+    STORAGE_SCALE`) and this band's own index parameters (`band_a[b]`,
+    `band_c[b]` fold in the zero point and `MAG_GRID_<B>`; `band_n[b]` is
+    that band's own plane count): `idx = band_a[b] * log10_fhat + band_c[b]`,
+    clamped and linearly interpolated, floored at `catalog.completeness.
+    C_CAP`. Replaces the erf roll-off this module used before
+    COMPLETENESS_2026-10-20.md (`_ln_one_minus_c_kernel`, deleted): no
+    `F_LIM_50`/`WIDTH_DEX` read anywhere in this module any more.
     """
-    log10_fhat = (log10_f_ref
-                  + ext_col32[None, :] * av_clamped32[:, None]
-                  + np.float32(GRAY_COLUMN) * sc_clamped32[:, None])       # (m, 8)
-    z = (log10_fhat - log10_f_lim50[None, :]) / (_SQRT2 * width_dex[None, :])
-    term = _ln_one_minus_c(z)
-    term = np.where(nondet_mask[None, :], term, 0.0)
-    return term.sum(axis=1).astype(np.float32)
+    log10_fhat = (log10_f_ref.astype(np.float64)
+                  + ext_col32.astype(np.float64)[None, :] * av_clamped32.astype(np.float64)[:, None]
+                  + GRAY_COLUMN * sc_clamped32.astype(np.float64)[:, None])       # (m, 8) float64
+    m = log10_fhat.shape[0]
+    total = np.zeros(m, dtype=np.float64)
+    for b in range(N_BANDS):
+        if not nondet_mask[b]:
+            continue
+        total += completeness_module.ln_one_minus_completeness(
+            curve_rows[b], 0.0, 0.0, int(band_n[b]),
+            np.ascontiguousarray(log10_fhat[:, b]), float(band_a[b]), float(band_c[b]))
+    return total.astype(np.float32)
 
 
 class Batch:
     """One source's own quantities the closed form and the non-detection
     term need: `log10_f_obs` (`(8,)` float64, section 6.1) and its weight,
     `flagged` (fewer than two valid detections, or a non-finite sigma on a
-    detected band, section 6.1/16), the per-band `F_LIM_50` and roll-off
-    width `WIDTH_DEX` (`(8,)`, section 6.2), `ln_norm_term` (section 6.1's
+    detected band, section 6.1/16), `curve_rows` (`(8, max_n)` float64,
+    this source's own measured completeness curve per band, zero-padded
+    past that band's own plane count -- COMPLETENESS_2026-10-20.md "The
+    reader"; replaces `F_LIM_50`/`WIDTH_DEX`) with the region-wide
+    `band_a`/`band_c`/`band_n` (`(8,)`) that convert a log10 flux to a
+    fractional plane index in each band, `ln_norm_term` (section 6.1's
     per-source Gaussian normalisation, over only the bands with a finite
     variance), and `config` (`fit`'s own need, the design's law). `fit`
     never mutates this object: everything a design's own call produces
@@ -188,7 +143,7 @@ class Batch:
     """
 
     __slots__ = ("log10_f_obs", "weight", "config",
-                 "log10_f_lim50", "width_dex", "nondet_mask",
+                 "curve_rows", "band_a", "band_c", "band_n", "nondet_mask",
                  "n_detected", "flagged", "ln_norm_term")
 
     def __init__(self, **kw):
@@ -239,16 +194,24 @@ def sigma_lib_by_class(path):
     return {lib: sigma[i] for i, lib in enumerate(libs.tolist())}
 
 
-def prepare(config, flux, sigma, origin, sigma_lib_l, f_lim50, width_dex):
+def prepare(config, flux, sigma, origin, sigma_lib_l, curve_rows, covered,
+            band_a, band_c, band_n):
     """One source's own fit inputs (SPEC_BMSTP_DRAFT.md section 6.1): its
     fluxes, uncertainties and `ORIGIN_FNU` (the same read `fittp.cascade`
     uses, each `(8,)`), this class's own per-band `sigma_lib,L` vector
-    `(8,)` (`sigma_lib_by_class`, read once in the parent) and this
-    source's own `F_LIM_50` and region roll-off width `WIDTH_DEX` (`(8,)`,
-    sliced once from the region-wide arrays the caller loaded, never read
-    from disk here). Builds the per-band weight, the non-detection mask
-    (undetected, limited, and observed: `ORIGIN_UNOBSERVED` bands carry no
-    term) and the fit's other design-independent numbers. The extinction-law design itself is not
+    `(8,)` (`sigma_lib_by_class`, read once in the parent), this source's
+    own measured completeness curve per band (`curve_rows`, `(8, max_n)`,
+    `fittp.sweep`'s own per-source gather off `catalog.limits.
+    Completeness.source_row`/the region's `CURVE_<B>` tables, zero-padded
+    past each band's own plane count) and whether the band has a curve at
+    all (`covered`, `(8,)` bool -- `catalog.limits.Completeness.covered`'s
+    own per-source value: a Spitzer band is covered where `SOURCE_ROW >=
+    0`, a 2MASS band always). `band_a`/`band_c`/`band_n` are the region-wide
+    index parameters `catalog.limits._band_ac` would hand a reader, read
+    once in the parent and shared by every source. Builds the per-band
+    weight, the non-detection mask (undetected, covered, and observed:
+    `ORIGIN_UNOBSERVED` bands carry no term) and the fit's other
+    design-independent numbers. The extinction-law design itself is not
     built here: it depends on the fit's own extinction mark (section 2), so
     `fit` builds and converges it once the per-template residual exists.
     """
@@ -290,26 +253,27 @@ def prepare(config, flux, sigma, origin, sigma_lib_l, f_lim50, width_dex):
     n_detected = int(detected.sum())
     flagged = (n_detected < MIN_DETECTED_BANDS) or flagged_sigma
 
-    f_lim50 = np.asarray(f_lim50, dtype=np.float64)
-    log10_f_lim50 = np.log10(f_lim50)
-    width = np.asarray(width_dex, dtype=np.float64)
-    # section 6.2: a band with no measurement and no limit is excluded.
-    # Two ways a band has no limit: a non-finite F_LIM_50 (section 3.3's
-    # unsurveyed band), and ORIGIN_UNOBSERVED -- the survey never observed
-    # the band at this source (outside that band's mosaic, or masked), and
-    # the curation filled in a neighbour's depth, which is no limit on
-    # this source. Charging it as a non-detection priced a photosphere
-    # detected at 3.6 um for its absence from an unobserved 4.5 um at
-    # tens of nats and handed those sources to the largest library
-    # (studies/open_yso_excess_2026-09-16.md section 8). Row 15's
-    # unmeasured detections fall in here too, since `detected` already
-    # excludes them.
+    # section 6.2: a band with no measurement and no curve of its own is
+    # excluded. Two ways a band has no curve: not `covered` (off-map for a
+    # Spitzer band, COMPLETENESS_2026-10-20.md rule 2's `ORIGIN_UNOBSERVED`
+    # case), and ORIGIN_UNOBSERVED itself -- the survey never observed the
+    # band at this source (outside that band's mosaic, or masked), and the
+    # curation filled in a neighbour's depth, which is no limit on this
+    # source. Charging it as a non-detection priced a photosphere detected
+    # at 3.6 um for its absence from an unobserved 4.5 um at tens of nats
+    # and handed those sources to the largest library (studies/
+    # open_yso_excess_2026-09-16.md section 8). Row 15's unmeasured
+    # detections fall in here too, since `detected` already excludes them.
+    covered = np.asarray(covered, dtype=bool)
     unobserved = np.asarray(origin) == ORIGIN_UNOBSERVED
-    nondet_mask = (~detected) & np.isfinite(f_lim50) & ~unobserved
+    nondet_mask = (~detected) & covered & ~unobserved
 
     return Batch(log10_f_obs=log10_f_obs, weight=weight, config=config,
-                 log10_f_lim50=log10_f_lim50.astype(np.float32),
-                 width_dex=width.astype(np.float32), nondet_mask=nondet_mask,
+                 curve_rows=np.asarray(curve_rows, dtype=np.float64),
+                 band_a=np.asarray(band_a, dtype=np.float64),
+                 band_c=np.asarray(band_c, dtype=np.float64),
+                 band_n=np.asarray(band_n, dtype=np.int64),
+                 nondet_mask=nondet_mask,
                  n_detected=n_detected, flagged=flagged,
                  ln_norm_term=ln_norm_term)
 
@@ -340,10 +304,11 @@ def fit(batch, log10_f_ref, w):
       `S0 = sum_b W_b X_b0`. `FRAC_CLAMPED` is the fraction of `m`
       templates where the clamp engaged.
     - The non-detection term of section 6.2 AT THE CLAMPED MARKS: the
-      template's model flux `f_hat_i` in every undetected, limited band,
-      compared to this source's own `F_LIM_50,i` through the region-band
-      roll-off width `WIDTH_DEX`, `ln[1 - C_i(f_hat_i)]` via the scaled
-      complementary error function (`_ln_one_minus_c`), gathered to only
+      template's model flux `f_hat_i` in every undetected, covered band,
+      read against SESNA's own measured differential completeness curve
+      at this source's position (COMPLETENESS_2026-10-20.md; `batch.
+      curve_rows`/`band_a`/`band_c`/`band_n`), `ln[1 - C_i(f_hat_i)]` via
+      `catalog.completeness.ln_one_minus_completeness`, gathered to only
       this source's own undetected bands (`_ln_nondet`), plus
       `batch.ln_norm_term` (section 6.1's `-1/2 Sum_i ln sigma_i^2`, one
       number): `ln_nondet` is the maximum-likelihood-point quantity
@@ -430,7 +395,8 @@ def fit(batch, log10_f_ref, w):
     av_clamped32 = av_clamped.astype(np.float32)
     sc_clamped32 = sc_clamped.astype(np.float32)
     ln_nondet = _ln_nondet(ext_col32, log10_f_ref, av_clamped32, sc_clamped32,
-                            batch.log10_f_lim50, batch.width_dex, batch.nondet_mask)
+                            batch.curve_rows, batch.band_a, batch.band_c, batch.band_n,
+                            batch.nondet_mask)
     ln_nondet = ln_nondet + np.float32(batch.ln_norm_term)
 
     if source_flagged:
