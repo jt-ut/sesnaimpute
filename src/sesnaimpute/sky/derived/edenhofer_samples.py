@@ -295,6 +295,14 @@ def build(config, regions=None):
     inner_samples_path = f"{input_dir}/{SAMPLES_INNER_NAME}"
     outer_samples_path = f"{input_dir}/{SAMPLES_OUTER_NAME}"
     if not os.path.exists(inner_samples_path):
+        existing = [name for name in names
+                    if os.path.exists(product_path(config, "sky/derived", "edenhofer",
+                                                    "profile-sigma-samples", "sightline", region=name))]
+        if len(existing) == len(names):
+            print("edenhofer_samples.build: %s absent from disk and every named region already has its "
+                  "SIGMA_RATIO_SAMPLES product -- passing over this line (RUNBOOKtp.sh comment, this "
+                  "product depends only on the cubes and the sightline set)" % inner_samples_path)
+            return
         raise FileNotFoundError(
             "edenhofer_samples.build: samples input missing at %s -- run the "
             "sesnaimpute.sky.download.edenhofer2023.build RUNBOOK line for it" % inner_samples_path)
