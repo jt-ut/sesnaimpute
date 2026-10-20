@@ -632,13 +632,17 @@ def pahc_limit_grid_mjy(config, region):
     (`catalog.limits.completeness`'s reader object, `fifty_percent` --
     the curve's own completeness=0.5 crossing at each source's own row),
     at the eight percentiles PAHC's shape is tabulated on. A source off
-    the I4 map (`fifty_percent` NaN) carries `+inf` here (`catalog.
-    depth_grid`'s own never-NaN convention), or every percentile would
-    be NaN."""
+    the I4 map (`fifty_percent` NaN) is dropped before the percentile,
+    not carried as `+inf`: `np.percentile`'s own linear interpolation
+    between two order statistics that are BOTH `+inf` is `inf - inf`,
+    NaN (measured: NGC 7129's top two of eight quantile nodes, 517 of
+    2643 sources off the I4 map) -- the never-NaN substitution that
+    serves a single per-pixel/source number (`bmstp.atlas._depth_grid`
+    etc.) does not serve an order statistic over many of them."""
     reader = limits_module.completeness(config, region)
     n_source = reader.source_row.shape[0]
     f_lim_i4 = reader.fifty_percent("I4", np.arange(n_source))
-    f_lim_i4 = np.where(np.isfinite(f_lim_i4), f_lim_i4, np.inf)
+    f_lim_i4 = f_lim_i4[np.isfinite(f_lim_i4)]
     return np.percentile(f_lim_i4, PAHC_LIMIT_QUANTILES)
 
 
