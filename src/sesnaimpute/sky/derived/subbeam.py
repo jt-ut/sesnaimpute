@@ -985,8 +985,14 @@ if __name__ == "__main__":
     parser.add_argument("--fit-only", action="store_true",
                         help="fit the noise-separated mixture from the "
                              "persisted histograms only; no map is read")
+    # the runbook's own worker count, exactly as `sesnaimpute.build.run`
+    # takes it (this module keeps its own parser for `--fit-only`)
+    parser.add_argument("--n-jobs", type=int, default=None)
     args = parser.parse_args()
     cfg = config_module.load(args.config)
+    if args.n_jobs is not None:
+        import dataclasses
+        cfg = dataclasses.replace(cfg, n_jobs=args.n_jobs)
     if args.fit_only:
         fit_only(cfg, regions=args.regions)
     else:
