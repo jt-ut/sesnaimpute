@@ -4,8 +4,8 @@ sum of section 4.2. A library module: no `progress` use, no runbook line
 (IMPLEMENTATION_BMSTP_DRAFT.md section 4 row 2.1).
 
 `load` opens one region's class: P1's per-source rows, the class's shape
-grid (P2 for STAR/AGB, P2's STAR grid for PAHC, P3 for YSO/H2S, P4 for
-GAL), the class's template weights (P5) and `C_THETA`, and the population
+grid (P2 for STAR/AGB, P2's STAR grid for PAHC, P3 for YSO/H2S/PAHN, P4
+for GAL), the class's template weights (P5) and `C_THETA`, and the population
 column kernel (`population.kernel.Kernel`, section 2 "the column kernel").
 Every one of those arrays is read-only and never written, so `load` reads
 it as a `numpy.memmap` wherever the dataset is stored contiguous and
@@ -45,6 +45,11 @@ within-beam tilt (`population.kernel.Kernel.cloud_gamma_herschel`, a 2-D
 joint fit against the sub-beam width on the HOPS/eHOPS protostars --
 the published star-gas law exponent is measured at the maps' resolution,
 not within a beam); every other class reads it plain (`CLOUD`, below).
+PAHN sits on the same cloud grid as YSO/H2S (C15, 2026-10-20) but is one
+of the "every other class" reading it plain: it has no star, and the
+star-gas column law this reweighting extrapolates was fitted on
+protostars, not on illuminated surface emission (`CLOUD`'s own PAHN
+comment).
 """
 
 import math
@@ -84,10 +89,17 @@ _SHAPE = {
     "PAHC": ("star", "GRID_STAR"),
     "YSO": ("cloud", "GRID_YSO"),
     "H2S": ("cloud", "GRID_H2S"),  # on the common grid since the common-axis rule, section 4.1 P3
+    # PAHN (C15 ruling, 2026-10-20): on the common cloud grid beside H2S's
+    # own, C14's own shape product (`GRID_PAHN`) -- no star, so no star
+    # shape of its own; its density, weights and factor-free library are
+    # C14/C13's, read through the same generic dispatch every other class
+    # uses here.
+    "PAHN": ("cloud", "GRID_PAHN"),
     "GAL": ("gal", "GRID"),
 }
 _LIB = {"STAR": ("sps", "region"), "AGB": ("agb", "region"), "PAHC": ("pahc", "region"),
-        "YSO": ("yso", "region"), "H2S": ("h2shock", "region"), "GAL": ("galz", "survey")}
+        "YSO": ("yso", "region"), "H2S": ("h2shock", "region"), "PAHN": ("pahn", "region"),
+        "GAL": ("galz", "survey")}
 
 _SQRT2 = float(np.sqrt(2.0))
 _SQRT2PI = float(np.sqrt(2.0 * np.pi))
@@ -143,7 +155,19 @@ N_BANDS = len(definitions.BANDS)
 #: reads the fitted `Kernel.cloud_gamma_herschel` (`population.kernel`'s
 #: own 2-D joint fit on the HOPS/eHOPS protostars, zero if that fit's own
 #: 68% interval for gamma includes 0), `False` reads `exponent = 0.0`.
-CLOUD = {"STAR": False, "AGB": False, "PAHC": False, "GAL": False, "YSO": True, "H2S": True}
+#: PAHN (C15, 2026-10-20) sits on the cloud grid beside H2S but reads the
+#: kernel PLAIN, not reweighted: the published star-gas column relation
+#: this flag applies is a star-FORMATION law (Pokhrel+2020, Lada+2013),
+#: measured on young stars and the shocked gas their outflows drive --
+#: not on illuminated surface emission, which is what a star-less PAH
+#: nebular source is (C14's own placement, at the cloud's front surface).
+#: Extending a star-formation column law to a class defined by having no
+#: star is the same unsupported extrapolation the module docstring above
+#: already declines for YSO/H2S within a beam; this flag is `False`
+#: rather than silently defaulting one way, so the choice is a stated
+#: design call, not an oversight.
+CLOUD = {"STAR": False, "AGB": False, "PAHC": False, "GAL": False, "YSO": True, "H2S": True,
+         "PAHN": False}
 
 
 #: NONDET brief section 2: a nondet band whose charge, `ln[1 - C_b(z_b)]`,
