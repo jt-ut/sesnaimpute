@@ -43,6 +43,7 @@ import os
 
 import h5py
 import healpy as hp
+import numba
 import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
@@ -262,6 +263,111 @@ def _to_uint16(fraction):
     build's own round-trip check), unlike float16 (COMPLETENESS_2026-10-
     20.md: "float16 is not: 2.4e-4")."""
     return np.rint(np.clip(fraction, 0.0, 1.0) * STORAGE_SCALE).astype(np.uint16)
+
+
+# --- The kernel (COMPLETENESS_2026-10-20.md "The reader: layout and
+# kernel"): used by every consumer through `catalog.limits.completeness`'s
+# reader object, never called directly outside this module and that one. ---
+
+#: OWNER DECISION 2026-10-20 (COMPLETENESS_2026-10-20.md "The reader"):
+#: the measurement's own resolution -- about 100 injected-source trials
+#: per pixel and magnitude bin -- means a stored completeness of 1.00
+#: (every trial recovered) still carries a non-detection probability
+#: below ~1/200, not 0. `ln_one_minus_completeness` floors its result at
+#: `LN_ONE_MINUS_C_FLOOR` so a template that predicts a bright flux in an
+#: empty but COVERED band is heavily disfavoured by the fitter, never
+#: given an infinite (impossible) penalty: a single empty band must
+#: never veto an otherwise-good fit by itself.
+C_CAP = 1.0 - 1.0 / 200.0
+LN_ONE_MINUS_C_FLOOR = float(np.log(1.0 - C_CAP))  # ln(0.005) = -5.2983...
+
+
+@numba.njit(cache=True)
+def completeness(curve_row, m0, dm, n, log10_f, a, c):
+    """`idx = a * log10_f + c` (a fractional plane index into `curve_row`,
+    uint16, value x `STORAGE_SCALE`); `idx <= 0` clamps to `curve_row[0]`
+    (brightward of the grid); `idx >= n - 1` returns 0 (faintward of the
+    last plane: the measured curve has already reached 0 there);
+    otherwise linear between the two bracketing planes, divided by
+    `STORAGE_SCALE` once. `m0`/`dm` are not read in the hot path (the
+    caller's own `a`/`c` already fold them in); kept in the signature so
+    a caller can assert them against the band's own grid. Two gathers,
+    four flops per evaluation.
+    """
+    out = np.empty(log10_f.shape[0], dtype=np.float64)
+    for i in range(log10_f.shape[0]):
+        idx = a * log10_f[i] + c
+        if idx <= 0.0:
+            out[i] = curve_row[0] / STORAGE_SCALE
+        elif idx >= n - 1:
+            out[i] = 0.0
+        else:
+            j = int(idx)
+            t = idx - j
+            out[i] = (np.float64(curve_row[j]) + t * (np.float64(curve_row[j + 1]) - np.float64(curve_row[j]))) / STORAGE_SCALE
+    return out
+
+
+@numba.njit(cache=True)
+def ln_one_minus_completeness(curve_row, m0, dm, n, log10_f, a, c):
+    """The fitter's own non-detection form: `ln(1 - C)`, `C` the same
+    piecewise-linear lookup as `completeness`, floored at `C_CAP` so the
+    result never falls below `LN_ONE_MINUS_C_FLOOR` (the `OWNER DECISION`
+    above).
+    """
+    out = np.empty(log10_f.shape[0], dtype=np.float64)
+    for i in range(log10_f.shape[0]):
+        idx = a * log10_f[i] + c
+        if idx <= 0.0:
+            cval = curve_row[0] / STORAGE_SCALE
+        elif idx >= n - 1:
+            cval = 0.0
+        else:
+            j = int(idx)
+            t = idx - j
+            cval = (np.float64(curve_row[j]) + t * (np.float64(curve_row[j + 1]) - np.float64(curve_row[j]))) / STORAGE_SCALE
+        if cval > C_CAP:
+            cval = C_CAP
+        out[i] = np.log(1.0 - cval)
+    return out
+
+
+@numba.njit(cache=True, parallel=True)
+def completeness_many(curves, rows, m0, dm, n, log10_f, a, c, scale):
+    """The vectorised twin of `completeness` over `(row, log10_f)` pairs
+    (`rows`/`log10_f` the same length): one band's own `curves` table,
+    `rows[i]` the source's or pixel's own row for pair `i`. `rows[i] < 0`
+    (off-map, no curve) returns 0 -- the design's own "no non-detection
+    term" for an off-map band is a caller-side skip (`ORIGIN_FNU == 91`
+    or `PIXEL_COVERED_FRAC == 0`), not a value this kernel fabricates; 0
+    is a safe default for a caller that reduces by summing this
+    function's own output. `scale` is `STORAGE_SCALE` for a uint16,
+    value-x-`STORAGE_SCALE` table (`CURVE_<band>`) and 1.0 for a float32,
+    already-a-fraction table (`PIXEL_CURVE_<band>`: an area AVERAGE over
+    one or more 30-arcsec pixels, module docstring -- not itself an
+    exact multiple of `1 / STORAGE_SCALE`, so it is stored as the plain
+    fraction, not quantized); the design note's own signature omits this
+    (it covers only the uint16 case), added here since this one kernel
+    reads both of this module's own curve tables. `numba.prange` over
+    blocks, each the same four flops as the scalar kernel -- used inside
+    `pieces.run` pieces.
+    """
+    out = np.empty(rows.shape[0], dtype=np.float64)
+    for i in numba.prange(rows.shape[0]):
+        row = rows[i]
+        if row < 0:
+            out[i] = 0.0
+            continue
+        idx = a * log10_f[i] + c
+        if idx <= 0.0:
+            out[i] = curves[row, 0] / scale
+        elif idx >= n - 1:
+            out[i] = 0.0
+        else:
+            j = int(idx)
+            t = idx - j
+            out[i] = (np.float64(curves[row, j]) + t * (np.float64(curves[row, j + 1]) - np.float64(curves[row, j]))) / scale
+    return out
 
 
 def _resample_field_cube(field_map):
