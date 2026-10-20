@@ -135,10 +135,18 @@ def _kappa_used(config, region):
 def law_count(config, region, a_col, provenance):
     """`N_law`, young stars deg^-2, for arrays of adopted column and arm
     (`_W83_design.md`): the region's own `KAPPA_USED` (`_kappa_used`, the
-    Dunham-census law product), at every arm's own 36" resolution.
+    Dunham-census law product), at every arm's own 36" resolution, times
+    `N_LAW_TOTAL_FACTOR` (owner's ruling 2026-10-20, `population.yso_law`
+    module docstring): `KAPPA_USED` alone is the EXCESS-SELECTED law;
+    this is the TOTAL young-star level every caller of this function
+    reads (`bmstp.density`'s `DENSITY_YSO`, `population.young_stars`'s
+    anchor subtraction and `bmstp.atlas`), the diskless Class III members
+    the region's own published disk fraction implies included. 1.0 (no
+    change) at the identity case (`DISK_FRACTION` not applied for this
+    region).
 
-        N_law = KAPPA_USED[region] * (d_r*pi/180)^2 * a_col^2          (Herschel)
-        N_law = KAPPA_USED[region] * (d_r*pi/180)^2 * E[T^2 | a_col]   (Planck)
+        N_law = KAPPA_USED[region] * N_LAW_TOTAL_FACTOR[region] * (d_r*pi/180)^2 * a_col^2          (Herschel)
+        N_law = KAPPA_USED[region] * N_LAW_TOTAL_FACTOR[region] * (d_r*pi/180)^2 * E[T^2 | a_col]   (Planck)
 
     the source's whole adopted column, no pedestal; the Planck arm reads
     the kernel's own second moment (`_kernel_second_moment_planck`), the
@@ -146,11 +154,12 @@ def law_count(config, region, a_col, provenance):
     never the raw column squared, since the Planck beam already hides
     that sub-beam structure.
     """
+    from sesnaimpute.population import yso_law
     a_col = np.asarray(a_col, dtype=float)
     provenance = np.asarray(provenance)
     d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
     pc2 = pc2_per_deg2(d_r_pc)
-    kappa = _kappa_used(config, region)
+    kappa = _kappa_used(config, region) * yso_law.n_law_total_factor(config, region)
     herschel_value = kappa * pc2 * a_col ** 2
     planck_value = kappa * pc2 * _kernel_second_moment_planck(config, a_col)
     return np.where(provenance == PROVENANCE_HERSCHEL, herschel_value, planck_value)
@@ -404,6 +413,19 @@ def law_area_integral(config, region, hpx_pix_512, kappa=None):
     second, beam-transferred coefficient would double it.
 
         kappa_H * E[T^2 | A_P]
+
+    `kappa=None` (every caller but the law fit itself) also multiplies by
+    `N_LAW_TOTAL_FACTOR` (owner's ruling 2026-10-20, `population.yso_law`
+    module docstring): this is then the TOTAL young-star level, excess-
+    selected plus the diskless Class III members the region's own
+    published disk fraction implies -- `population.young_stars`'s anchor
+    subtraction and `population.knot_rate`'s own `region_predicted_yso`
+    both call this form. An explicit `kappa` (the law fit's own `kappa=
+    1.0`, `population.yso_law._fit_region`'s coefficient-free integral)
+    is the fit's own EXCESS-ONLY geometric integral and never carries
+    this factor: `KAPPA_USED`/`KAPPA_REGION` must stay the excess-
+    selected coefficient (item 1's own ruling), not shrink because a
+    region's disk fraction was applied.
     """
     hpx_pix_512 = np.asarray(hpx_pix_512, dtype=np.int64)
     order = np.argsort(hpx_pix_512)
@@ -413,7 +435,12 @@ def law_area_integral(config, region, hpx_pix_512, kappa=None):
     pc2 = pc2_per_deg2(d_r_pc)
     # `kappa`, when given, replaces the region's fitted coefficient: the
     # law fit passes 1.0 to obtain the coefficient-free integral it solves for
-    kappa_h_full = (_kappa_used(config, region) if kappa is None else float(kappa)) * pc2
+    if kappa is None:
+        from sesnaimpute.population import yso_law
+        total_factor = yso_law.n_law_total_factor(config, region)
+    else:
+        total_factor = 1.0
+    kappa_h_full = (_kappa_used(config, region) if kappa is None else float(kappa)) * pc2 * total_factor
 
     sum_sq, count = _herschel_pixel_stats(config, pix_sorted)
     herschel_covered = count > 0
