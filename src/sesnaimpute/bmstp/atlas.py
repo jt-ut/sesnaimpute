@@ -101,7 +101,7 @@ BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
 IDX_I4 = BAND_KEYS.index("I4")
 IDX_I2 = BAND_KEYS.index("I2")
-CLASSES = ("STAR", "AGB", "PAHC", "GAL", "YSO", "H2S", "PAHN")
+CLASSES = ("STAR", "AGB", "PAHC", "PAHN", "GAL", "YSO", "H2S")
 
 #: The bright-end count check's two multiples of the pixel's own 4.5 um
 #: 50% limit (SPEC_BMSTP_DRAFT.md sec. 9 "the bright-end count ratio"):
