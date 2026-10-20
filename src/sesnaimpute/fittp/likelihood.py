@@ -42,7 +42,8 @@ from sesnaimpute.catalog import completeness as completeness_module
 from sesnaimpute.population import selection as population_selection
 
 #: The eight SESNA bands, in the order every array here uses
-#: (`definitions.BANDS`; matches `catalog.limits.limits`'s column order).
+#: (`definitions.BANDS`; the same order `catalog.limits.Completeness`'s
+#: `fraction`/`ln_one_minus_fraction`/`covered` key by `band`).
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
 

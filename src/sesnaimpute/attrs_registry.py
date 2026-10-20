@@ -2691,9 +2691,15 @@ _SWEEP_FIT_READINGS = {
     "LN_EVIDENCE_NONDET": ("nats",
         "This class's evidence once the undetected bands are also included (Gaia "
         "not yet), as a natural logarithm summed over every model and over "
-        "extinction. Never above LN_EVIDENCE_MEASURED: a band the source was not "
-        "detected in can only count against a class. The class's full evidence "
-        "adds Gaia to this."),
+        "extinction. Each undetected but covered band's own chance of being "
+        "missed reads SESNA's own measured completeness at the source's position: "
+        "the fraction of injected sources of that brightness the survey recovered "
+        "there, linear between the measurement's magnitude steps and continued "
+        "along that band's typical falloff shape where the measurement itself "
+        "stops, never letting a band be charged as more than 99.5 percent certain "
+        "to have been missed. Never above LN_EVIDENCE_MEASURED: a band the source "
+        "was not detected in can only count against a class. The class's full "
+        "evidence adds Gaia to this."),
     "LN_PRIOR_MASS": ("natural log of objects per square degree",
         "This class's prior at the source's position, before any photometry is "
         "used, as the natural logarithm of an expected number of objects per "
@@ -2740,8 +2746,14 @@ _SWEEP_FIT_READINGS = {
         "part and a fit part."),
     "TOPK_LN_UNSEEN": ("nats",
         "What the bands observed but not detected contributed, as a log factor "
-        "given the prior and the measured fit, integrated over extinction; reduces "
-        "to the point value when the fit pins the extinction."),
+        "given the prior and the measured fit, integrated over extinction; each "
+        "such band's own contribution reads SESNA's own measured completeness at "
+        "the source's position (the fraction of injected sources of that "
+        "brightness the survey recovered there, linear between the measurement's "
+        "magnitude steps and continued along that band's typical falloff shape "
+        "where the measurement itself stops, never more than 99.5 percent certain "
+        "a band was missed); reduces to the point value when the fit pins the "
+        "extinction."),
     "TOPK_LN_GAIA": ("nats",
         "What the Gaia detection and parallax contributed, as a log factor given "
         "the rest, integrated over extinction."),
