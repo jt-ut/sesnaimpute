@@ -565,6 +565,34 @@ REGISTRY = {
         "offset: a correction applied to the template's weight at read "
         "time, beyond the per-cell table in W."),
 
+    ("pahn_weights_region", "MODEL_NAME"): ("source name",
+        "This PAHN template's own identifier, in this file's row order. "
+        "No PAHN SED register exists on this branch: these are stand-in "
+        "names (PAHN_STAND_IN_<i>), not a register's own model names."),
+    ("pahn_weights_region", "C_THETA"): ("log10 mJy at 1 kpc",
+        "This PAHN stand-in template's own offset onto the common "
+        "brightness axis. Unlike every other library's C_THETA (a "
+        "register's own F_REF_I2, survey-wide), this is one of n_model "
+        "equally spaced quantiles of THIS REGION's own pattern-source "
+        "brightness population (population.pahn.pattern_f45_1kpc) -- "
+        "region-specific, a disclosed placeholder for the missing "
+        "register's own per-template brightness."),
+    ("pahn_weights_region", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
+        "The centers of the 110 common brightness cells every factor "
+        "table in this file is tabulated on."),
+    ("pahn_weights_region", "W"): ("dimensionless",
+        "For every PAHN template and every cell of LOG10_F45_CENTERS, "
+        "this factor's own per-template weight: uniform, 1/n_model at "
+        "every cell alike (one population, no axis the census can "
+        "weight). Which population statement this factor encodes is "
+        "named by this dataset's own enclosing group's NAME attribute."),
+    ("pahn_weights_region", "C_F"): ("dimensionless",
+        "For every PAHN template, this factor's own per-template "
+        "offset: a correction applied to the template's weight at read "
+        "time, beyond the per-cell table in W. Equal to C_THETA here "
+        "(PAHN's single factor carries no second offset), the same "
+        "convention h2shock's own single factor uses."),
+
     # bmstp.shapes -- star_shape_tile (P2, per tile), cloud_shape_sightline
     # (P3, per sightline) and gal_shape_survey (P4, survey-wide): each
     # class's population sample binned onto the common (log10 xi,
