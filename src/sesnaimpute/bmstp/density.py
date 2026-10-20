@@ -82,6 +82,7 @@ from sesnaimpute.granules import access
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.population import knot_rate
 from sesnaimpute.population import yso as yso_module
+from sesnaimpute.population import yso_law as yso_law_module
 from sesnaimpute.population.yso import PROVENANCE_HERSCHEL, law_count, pc2_per_deg2
 
 _STEM = "table_density_source"
@@ -500,6 +501,14 @@ def build(config, regions=None):
             # profile products (full float64, independent of `a_col`'s
             # float32 storage cast and of `_cloud_column_fraction`'s own
             # code path) -- `law_count(A_cloud) x ON_GRID_YSO`, bar 1e-9.
+            # `law_count` itself now reads the TOTAL young-star level
+            # (owner's ruling 2026-10-20, C11 brief item 2: excess law x
+            # N_LAW_TOTAL_FACTOR = 1/DISK_FRACTION), so this hand
+            # derivation multiplies by the SAME factor
+            # (`population.yso_law.n_law_total_factor`) or it is checking
+            # `law_count` against its own superseded formula, not against
+            # what `law_count` actually computes -- 1.0 (no change) at
+            # the identity case (DISK_FRACTION = 1).
             n_check = min(10, result["n"])
             if n_check:
                 col_path_h = config_module.product_path(
@@ -519,6 +528,7 @@ def build(config, regions=None):
                     a_inf_h = np.asarray(f["A_INF_K"][:], dtype=np.float64)[rows_h]
                 d_front_h = result["d_front"]
                 pc2_h = float(pc2_per_deg2(result["d_r_pc"]))
+                total_factor_h = yso_law_module.n_law_total_factor(config, region)
                 hand_yso = np.empty(n_check, dtype=np.float64)
                 for k in range(n_check):
                     u_row = a_cum_h[k] / a_inf_h[k]
@@ -531,7 +541,8 @@ def build(config, regions=None):
                         a_sq = a_cloud_h ** 2
                     else:
                         a_sq = float(yso_module._kernel_second_moment_planck(config, np.array([a_cloud_h]))[0])
-                    hand_yso[k] = result["kappa_used"] * pc2_h * a_sq * result["on_grid_yso"][k]
+                    hand_yso[k] = (result["kappa_used"] * total_factor_h * pc2_h * a_sq
+                                   * result["on_grid_yso"][k])
                 hand_dev = float(np.max(np.abs(hand_yso - result["density_yso"][:n_check])))
             else:
                 hand_dev = float("nan")

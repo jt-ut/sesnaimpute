@@ -625,7 +625,16 @@ REGISTRY = {
         "density on the common (log10 xi, log10 F_4.5) grid, restricted "
         "to this region's own cloud interval: integrating over a cell "
         "gives that cell's own share of the sightline's YSO population, "
-        "up to the floor ON_GRID_YSO leaves out."),
+        "up to the floor ON_GRID_YSO leaves out. A two-component mixture "
+        "(owner's ruling 2026-10-20): the excess-selected census's own "
+        "brightness marginal (bmstp.sample_cloud.p_ref_f45) at weight "
+        "DISK_FRACTION (this region's own row in population/yso/"
+        "law_yso_region.hdf5), plus the diskless Class III members' "
+        "photospheric brightness marginal (bmstp.sample_cloud."
+        "photosphere_f45_marginal) at weight 1 - DISK_FRACTION; the "
+        "depth placement, shift kernel and normalisation are identical "
+        "for both components. Bit-identical to the single-component "
+        "census grid where DISK_FRACTION = 1 (the identity case)."),
     ("cloud_shape_sightline", "XI_MARGINAL"): ("dimensionless",
         "For the matching sightline in HPX_PIX_256, GRID_YSO summed over "
         "the brightness axis: the YSO population's own depth-fraction "
@@ -1224,13 +1233,69 @@ REGISTRY = {
     ("law_yso_region", "CLASS_SHARE_PROTO"): ("dimensionless",
         "The fraction of the whole Dunham et al. (2015) census (every "
         "region) with an infrared spectral index alpha0 >= -0.3 "
-        "(protostellar), independent of region."),
+        "(protostellar), independent of region: a share of the EXCESS-"
+        "SELECTED census alone, unaffected by DISK_FRACTION (see "
+        "CLASS_SHARE_WEAK's own reading for how this and the diskless "
+        "share connect)."),
     ("law_yso_region", "CLASS_SHARE_DISK"): ("dimensionless",
         "The fraction of the whole Dunham et al. (2015) census with "
-        "-1.6 <= alpha0 < -0.3 (disk-bearing), independent of region."),
+        "-1.6 <= alpha0 < -0.3 (disk-bearing), independent of region: a "
+        "share of the EXCESS-SELECTED census alone, unaffected by "
+        "DISK_FRACTION (see CLASS_SHARE_WEAK's own reading)."),
     ("law_yso_region", "CLASS_SHARE_WEAK"): ("dimensionless",
         "The fraction of the whole Dunham et al. (2015) census with "
-        "alpha0 < -1.6 (weak or no disk), independent of region."),
+        "alpha0 < -1.6 (weak or no disk), independent of region. This "
+        "and CLASS_SHARE_PROTO/DISK are shares of the EXCESS-SELECTED "
+        "census alone (the three sum to 1 by themselves); the fourth, "
+        "diskless share, CLASS_SHARE_DISKLESS, is not part of this "
+        "census-internal split -- the two bookkeeping schemes are "
+        "connected only through DISK_FRACTION, below."),
+    ("law_yso_region", "DISK_FRACTION"): ("dimensionless",
+        "This region's own disk fraction (owner's ruling 2026-10-20): "
+        "the fraction of the region's young stars that still carry an "
+        "infrared excess at the region's own published age -- MEASURED "
+        "from an excess-independent membership census where one covers "
+        "the field, else the Richert et al. 2018 relation at the "
+        "region's age (regions.Region.disk_fraction, .age_myr, "
+        ".disk_fraction_source cites which and the paper). WHICH YOUNG "
+        "STARS this fraction counts (whether protostars sit in its own "
+        "numerator and denominator, or are excluded from both) is "
+        "regions.Region.disk_fraction_definition ('all' or 'disks'), "
+        "read by N_LAW_TOTAL_FACTOR's own formula, not by this dataset. "
+        "1.0 (the identity case) for a region with no published age or "
+        "disk fraction applied yet: every number downstream (N_LAW_"
+        "TOTAL_FACTOR, CLASS_SHARE_DISKLESS, and every reader of the "
+        "young-star law's level) is then unchanged from this ruling's "
+        "own branch."),
+    ("law_yso_region", "N_LAW_TOTAL_FACTOR"): ("dimensionless",
+        "The factor population.yso.law_count and population.yso."
+        "law_area_integral multiply the excess-selected young-star law "
+        "by to recover the TOTAL young-star count, excess-selected "
+        "members plus the diskless Class III members the excess count "
+        "implies at this region's own disk fraction (never applied by "
+        "population.knot_rate.region_predicted_yso, which stays excess-"
+        "only by design). The formula depends on this region's own "
+        "regions.Region.disk_fraction_definition: '1 / DISK_FRACTION' "
+        "where the published fraction counts protostars in both its "
+        "own numerator and denominator ('all'); 'CLASS_SHARE_PROTO + "
+        "(1 - CLASS_SHARE_PROTO) / DISK_FRACTION' where protostars are "
+        "excluded from both ('disks') -- the excess law's own "
+        "protostar share then stays a share of the excess-selected "
+        "count, and only the remaining disk-or-diskless share is "
+        "inflated by 1 / DISK_FRACTION. Both give 1.0 (no change) where "
+        "DISK_FRACTION is the identity case."),
+    ("law_yso_region", "CLASS_SHARE_DISKLESS"): ("dimensionless",
+        "1 - 1/N_LAW_TOTAL_FACTOR: this region's own diskless Class III "
+        "members as a share of the TOTAL young-star population (not of "
+        "the excess-selected census: CLASS_SHARE_PROTO/DISK/WEAK, each "
+        "divided by N_LAW_TOTAL_FACTOR, together with this share sum to "
+        "1 over the total population, in both the 'all' and 'disks' "
+        "disk_fraction_definition cases alike). 0.0 where DISK_FRACTION "
+        "is the identity case -- no diskless members are added. Feeds "
+        "bmstp.template_weights' own fourth {CIII} census group, "
+        "region by region, on top of (not in place of) the survey-wide "
+        "CLASS_SHARE_WEAK group, and bmstp.atlas's own YSO member draw "
+        "(_yso_region_weight)."),
 
     # population.pahc_curve -- curve_pahc_survey: the PAH-contamination
     # probability curve P(q), one row per region (WP-POP-4, ledger C7:
