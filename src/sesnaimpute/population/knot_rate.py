@@ -9,8 +9,7 @@ independent of the law -- completeness (Cygnus X, North America Nebula) or
 `eps_lim` depth factor (Vela D) from Froebrich et al. 2015 (UWISH2) and
 Giannini et al. 2013 (Vela D). The footprint itself is no longer a fixed
 literal area: it is carried as nside-512 pixels (`footprint_pixels`), the
-region's own admitted pixels (`catalog/sesna/depth-grid_sesna_hpx512__<R>.
-hdf5`'s `HPX_PIX_512`, reused from `population.yso_law._admitted_pix512`)
+region's own admitted pixels (`catalog.depth_grid.admitted_pixels_512`)
 weighted by their `sky/derived/spitzer/coverage_spitzer_hpx512__<R>.hdf5`
 any-IRAC union fraction (`_coverage_frac`),
 restricted for Cygnus X and North America Nebula to pixels whose centre
@@ -49,6 +48,7 @@ from scipy.spatial import cKDTree
 
 from sesnaimpute import config as config_module
 from sesnaimpute import regions as regions_module
+from sesnaimpute.catalog import depth_grid as depth_grid_module
 from sesnaimpute.population import yso as yso_module
 from sesnaimpute.population import yso_law as yso_law_module
 from sesnaimpute.population import young_stars as young_stars_module
@@ -171,14 +171,13 @@ def _coverage_frac(config, region, pix512):
 
 def footprint_pixels(config, region):
     """`(pix512, frac)`: `region`'s knot-survey footprint as nside-512
-    pixels -- the region's own admitted pixels (`population.yso_law.
-    _admitted_pix512`, `catalog/sesna/depth-grid_sesna_hpx512__<R>.
-    hdf5`'s `HPX_PIX_512`), each with its own any-IRAC union coverage
+    pixels -- the region's own admitted pixels (`catalog.depth_grid.
+    admitted_pixels_512`), each with its own any-IRAC union coverage
     fraction (`_coverage_frac`). Cygnus X and North America Nebula are further
     restricted to pixels whose centre falls inside at least one UWISH2
     image square (`_in_uwish2_footprint`); Vela D keeps every admitted
     pixel (Giannini's search covers the same Spitzer mosaic)."""
-    pix512 = yso_law_module._admitted_pix512(config, region)
+    pix512 = depth_grid_module.admitted_pixels_512(config, region)
     frac = _coverage_frac(config, region, pix512)
     if region in _UWISH2_REGIONS:
         lon_deg, lat_deg = hp.pix2ang(512, pix512, nest=True, lonlat=True)
