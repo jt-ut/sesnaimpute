@@ -61,6 +61,17 @@ _cell_sum`, through `cell_inputs` below rather than through `ln_gamma`.
 `ln_gamma` stays exactly as it was -- one point, the fitted mark -- for the
 two report-only uses that still want that one point: `TOPK_LN_GAMMA_ML`
 and `PSI_VOTES`' Gaia reading.
+
+PAHN (C15 ruling, 2026-10-20) carries no astrometric model at all: a
+star-less PAH nebular source has no star to anchor a parallax Normal on,
+so it is neither cloud-anchored nor a field-star class
+(`CLOUD_ANCHORED_CLASSES`, `STAR_MARGINAL_CLASSES` both exclude it).
+Every one of its templates is Gaia-dark (G0_FLUX = 0), so `H_h = 0`
+identically and `Gamma_h` reduces to the chance-match term `1 - G_S`
+(matched) or `1` (unmatched) regardless of `A_X` -- exactly what any
+other Gaia-dark template already reads, for any class. `_g_s_and_a_x_block`
+carries an explicit `"pahn"` branch (an arbitrary, unread `A_X`) so this
+is a stated design call, not a silent default or an unknown-class error.
 """
 
 import math
@@ -394,6 +405,21 @@ class GaiaTerm:
                 z = (bins_mas[None, :] - plx[:, None]) / sigma_eff[:, None]
                 pdf = np.exp(-0.5 * z * z) / (sigma_eff[:, None] * _SQRT_2PI)
                 a_x_good = pdf @ p_bin
+            elif cls == "pahn":
+                # C15 ruling, 2026-10-20: PAHN has no star and so no
+                # astrometric model -- it belongs to NEITHER
+                # CLOUD_ANCHORED_CLASSES nor STAR_MARGINAL_CLASSES. Every
+                # one of its templates is Gaia-dark (G0_FLUX = 0 in the
+                # register, C13's own darkness rule), which drives H = 0
+                # identically (`_gaia_h_kernel`/`prior_reader._gaia_h`):
+                # `gamma_matched = g_s * h * a_x + (1 - g_s) * (1 - h)`
+                # reduces to `1 - g_s` and `gamma_unmatched = 1 - min(h,
+                # C_CAP)` reduces to 1, in both cases with A_X's own value
+                # never read. This branch exists only so the lookup is
+                # explicit and documented, not a silent fall-through to
+                # the "no branch defined" error below; the value itself
+                # is arbitrary and unused.
+                a_x_good = np.ones_like(plx)
             else:
                 raise ValueError(f"GaiaTerm: no A_X branch defined for class {cls!r}")
         a_x[good] = a_x_good[good]
