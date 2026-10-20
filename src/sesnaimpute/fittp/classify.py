@@ -2,7 +2,7 @@
 the imputed flux of SPEC_BMSTP_DRAFT.md section 7.1
 (IMPLEMENTATION_BMSTP_DRAFT.md section 1.3 P8, section 4 row 2.5b).
 
-Per source, the six classes' own `LN_EVIDENCE` columns (P7, one file per
+Per source, the seven classes' own `LN_EVIDENCE` columns (P7, one file per
 class) are laid into one (n, 25) array at `definitions.CLASSMAP`'s fixed
 per-class blocks (CLASSMAP groups its 25 rows by class in exactly
 `CLASSES` order, so each class occupies one contiguous slice). The cascade
@@ -83,7 +83,7 @@ from sesnaimpute.population import selection as population_selection
 _POSTERIOR_STEM = "posterior_classification_source"
 _SENSITIVITY_STEM = "sensitivity_classification_region"
 
-#: The fitter's six classes, in the order every P-product's class axis
+#: The fitter's seven classes, in the order every P-product's class axis
 #: uses (IMPLEMENTATION_BMSTP_DRAFT.md section 1) -- the same order
 #: `definitions.CLASSMAP` groups its subclass rows in.
 CLASSES = tuple(c.code for c in definitions.CLASSES)
@@ -121,7 +121,7 @@ def _class_slices():
 CLASS_SLICES = _class_slices()
 SUBCLASS_LABELS = tuple("%s:%s" % (s.cls, s.name) for s in _SUBCLASS_NAMES)
 
-#: Per-row working set for the batch loop (rule 10b): six classes' own
+#: Per-row working set for the batch loop (rule 10b): seven classes' own
 #: LN_EVIDENCE (<=9 cols), LOG10_FLUX_MEAN (8) and LOG10_FLUX_COV (8x8)
 #: float32 rows, plus the measured flux/sigma/origin and the global (25)
 #: and (6,8,8) intermediates, at a generous margin.
@@ -247,7 +247,7 @@ def _fit_path(config, region, cls):
 
 
 def _require_fit_files(config, region):
-    """Rule 5b: the only existence check. `classify` needs all six
+    """Rule 5b: the only existence check. `classify` needs all seven
     classes' P7 files; a missing one fails with the one RUNBOOK line that
     makes it, nothing more."""
     for cls in CLASSES:
@@ -303,7 +303,7 @@ def _part_path(path, bi):
 
 #: The datasets every P8 part file and the joined product carry. `A_K_POST`/
 #: `A_K_POST_SIG` are `(n, 6)` in `CLASSES` order (module docstring), read
-#: off the six fit files' own columns of the same name exactly as
+#: off the seven fit files' own columns of the same name exactly as
 #: `LN_EVIDENCE` -- no MAP-class column: a reader picks the class it wants
 #: and divides `A_K_POST` by P1's own `A_COL_K`.
 _CLASSIFY_PART_KEYS = ("NAME", "CLASS_SESNA", "P_CLASS", "P_SUBCLASS", "P_YSO", "MAP_CLASS", "N_DETECTED",
@@ -433,7 +433,7 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     # Row 13's fix: `~isfinite(ln_ev).any(axis=1)` alone conflates a source
     # the FIT flagged (fewer than two detections, a non-finite sigma, a
     # singular design -- `sweep.py`'s `good = False` in every one of the
-    # six class files) with a source the PRIOR vetoes in every class (every
+    # seven class files) with a source the PRIOR vetoes in every class (every
     # one of the 25 subclass evidences `-inf`, while every class's own fit
     # was perfectly valid). `flagged` (MAP_CLASS = -1) is the first case
     # alone; `prior_vetoed` (MAP_CLASS = -2, a new state, NOT counted in
@@ -517,7 +517,7 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
         ent_s = -np.sum(np.where(p_sub > 0, p_sub * np.log(p_sub), 0.0), axis=1) / np.log(N_SUBCLASS)
 
     # A_K_POST/A_K_POST_SIG, (m, 6) in CLASSES order (module docstring):
-    # read off the six fit files' own columns, transposed to a row per
+    # read off the seven fit files' own columns, transposed to a row per
     # source -- no MAP-class reduction, unlike LOG10_CANDIDATE_FLUX/
     # LOG10_FLUX_IMPUTED above.
     a_k_post = np.ascontiguousarray(a_k_post_stack.T)

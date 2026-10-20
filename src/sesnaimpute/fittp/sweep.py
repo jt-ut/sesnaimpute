@@ -171,7 +171,7 @@ from sesnaimpute.granules import access as granule_access
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
 
-#: the six classes, in the fitter's own class-axis order
+#: the seven classes, in the fitter's own class-axis order
 #: (IMPLEMENTATION_BMSTP_DRAFT.md section 1).
 CLASSES = tuple(c.code for c in definitions.CLASSES)
 
@@ -233,7 +233,7 @@ _PART_KEYS = ("NAME", "LN_EVIDENCE", "LOG10_FLUX_MEAN", "LOG10_FLUX_COV", "TOPK_
 #: (join-time only, not a `_PART_KEYS` member), has its `UNITS`/`READING`
 #: (CODING_RULES_BMSTP.md rule 5) in `attrs_registry.REGISTRY`, keyed by
 #: `(cls + "_fit_source", name)` -- `_STEM`, below -- the same text
-#: repeated for every one of the six classes' own files.
+#: repeated for every one of the seven classes' own files.
 def _STEM(cls):
     return "%s_fit_source" % cls
 
@@ -1392,7 +1392,7 @@ def join_parts(summary, topk):
 def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=None,
           join=True, join_only=False):
     """Writes `fittp/fit/<CLS>_fit_source__R.hdf5` for every {region,
-    class} pair (default all thirty regions, all six classes; section
+    class} pair (default all thirty regions, all seven classes; section
     1.3, IMPLEMENTATION_BMSTP_DRAFT.md P7). `limit` restricts every
     region to its first `limit` catalogue rows -- a timing/acceptance
     device for a class whose prior read does not fit the run budget on
@@ -1459,7 +1459,7 @@ if __name__ == "__main__":
     parser.add_argument("config")
     parser.add_argument("--regions", nargs="+", default=None)
     parser.add_argument("--classes", nargs="+", default=None,
-                        help="default: all six -- every {region, class} pair is swept")
+                        help="default: all seven -- every {region, class} pair is swept")
     parser.add_argument("--limit", type=int, default=None,
                          help="sweep only the first LIMIT catalogue rows of each region "
                               "(a timing/acceptance device, never a default)")
