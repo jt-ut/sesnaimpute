@@ -65,6 +65,7 @@ class Completeness:
         self._curve = {}
         self._pixel_curve = {}
         self._mag_grid_band = {}
+        self._completed_from = {}
         # Corrections 2026-10-20.md item 1: ONE canonical grid PER BAND
         # (no grid shared across bands any more), read from that band's
         # own MAG_GRID_<band>.
@@ -75,6 +76,7 @@ class Completeness:
             self._ac[band] = _band_ac(float(grid[0]), float(grid[1] - grid[0]), zp)
             self._curve[band] = h5file[f"CURVE_{band}"]
             self._pixel_curve[band] = h5file[f"PIXEL_CURVE_{band}"]
+            self._completed_from[band] = np.asarray(h5file[f"COMPLETED_FROM_{band}"][:], dtype=np.float32)
         for band in TWOMASS_KEYS:
             zp = h5file[f"CURVE_{band}"].attrs["ZERO_POINT_JY"]
             grid = np.asarray(h5file[f"MAG_GRID_{band}"][:], dtype=np.float64)
@@ -99,6 +101,17 @@ class Completeness:
         if band in TWOMASS_KEYS:
             return np.ones(self.source_row.shape[0], dtype=bool)
         return self.source_row[:, IRAC_MIPS_KEYS.index(band)] >= 0
+
+    def completed_from(self, band, row):
+        """`band`'s own `COMPLETED_FROM_<band>` at `row` (a row into
+        `CURVE_<band>`, e.g. from `source_row`): the magnitude of the
+        first plane that is the band's own template continuation rather
+        than Rob's own measurement, `NaN` where nothing was completed
+        (Corrections 2026-10-20.md item 2). 2MASS carries no such
+        column (its one curve is tabulated whole, never cut off)."""
+        if band in TWOMASS_KEYS:
+            return np.full(np.atleast_1d(row).shape, np.nan)
+        return self._completed_from[band][np.atleast_1d(row)]
 
     def fraction(self, band, flux_mjy, source_index):
         """The completeness fraction at one source's own row (`band`,

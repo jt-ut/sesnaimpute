@@ -19,15 +19,18 @@ and its plane count vary FIELD BY FIELD, even within one region and band
 pair among their own fields), so `field_maps` reads each field's own grid
 from its own header rather than assuming a single survey-wide one.
 
-(COMPLETENESS_2026-10-20.md's own layout section states a single, fixed
-29-plane grid at CRVAL3=4.75 for the whole product -- a measured fact the
-design note rests on. It does not hold for the raw FITS headers in general:
-a single grid wide enough to cover the survey's own full observed range
-(CRVAL3 0.25 to a faint edge of 19.75) needs 40 planes, not 29, and no
-single (CRVAL3, NAXIS3) pair covers even one region-band's own fields
-without clipping one of them. `build` below instead forms, per region and
-band, the union of that region's own fields' grids -- wide enough to hold
-every field's own measured range without loss -- and reports its own size.)
+(COMPLETENESS_2026-10-20.md's own layout section originally stated a
+single, fixed 29-plane grid at CRVAL3=4.75 for the whole product -- read
+off four files, not measured survey-wide, a mistake this module's own
+first pass caught and that file's own "Corrections 2026-10-20" section
+replaced: ONE canonical grid PER BAND, spanning that band's own
+survey-wide range (`BAND_MAG_RANGE` below, confirmed independently here
+over all 440 cube files), each field placed onto it by EXACT plane
+alignment -- CRPIX3=1.0/CD3_3=0.5 everywhere means a field's own grid
+always shares the band grid's phase, so no interpolation is needed or
+done. A field whose own cube is cut off before reaching 0 (97 of 440,
+Rob cannot regenerate them) is completed along the band's own measured
+roll-off template, `_measure_band_template`/`_complete_field` below.)
 
 A field's `INSTRUME`/`CHNLNUM` header keys are not a reliable band
 identity either: every one of the survey's 80 MIPS cube files carries
@@ -501,6 +504,114 @@ def _tabulate_twomass_band(f50_mjy, width_dex, zero_point_jy):
     return _to_uint16(fraction)[None, :], mag_grid
 
 
+#: Rule 9: a fixed-seed subsample of each field's own COMPLETE pixels
+#: (its own curve already at 0 by its own last native plane) is all the
+#: band template's own median needs -- the template is one shape for the
+#: whole survey, not a per-field statistic, so no field should dominate
+#: the sample just because it has more on-map pixels than another.
+TEMPLATE_MAX_PIXELS_PER_FIELD = 2000
+TEMPLATE_SEED = 20261020
+
+
+def _measure_band_template(config, band, regions):
+    """The band's own survey-wide median roll-off shape (Corrections
+    2026-10-20.md item 2): completeness `C` versus magnitude offset from
+    each COMPLETE pixel's own 50% point (`_m50_per_pixel`), measured from
+    every COMPLETE on-map pixel (one whose own last native plane has
+    already reached exactly 0) in every one of `regions`' own fields for
+    `band` -- the whole survey, not merely the regions a given `build`
+    call is writing a product for, since the template is one shape
+    shared by every region. A fixed-seed subsample of each field's own
+    complete pixels (`TEMPLATE_MAX_PIXELS_PER_FIELD`, rule 9) keeps the
+    scan's own cost bounded; each sampled pixel contributes every one of
+    its own native planes (not a second subsample), so the median at an
+    offset near the 50% point rests on many more samples than one near
+    either plateau. Returns `(offsets (k,) float64, ascending, median_c
+    (k,) float64)`.
+    """
+    rng = np.random.default_rng(TEMPLATE_SEED)
+    offset_chunks, c_chunks = [], []
+    for region in regions:
+        for m in field_maps(config, region, band):
+            iy_on, ix_on = np.where(m.on_map)
+            if iy_on.size == 0:
+                continue
+            last_vals = m.cube[-1, iy_on, ix_on]
+            complete_idx = np.flatnonzero(last_vals == 0.0)
+            if complete_idx.size == 0:
+                continue
+            if complete_idx.size > TEMPLATE_MAX_PIXELS_PER_FIELD:
+                complete_idx = rng.choice(complete_idx, size=TEMPLATE_MAX_PIXELS_PER_FIELD, replace=False)
+            y, x = iy_on[complete_idx], ix_on[complete_idx]
+            m50 = _m50_per_pixel(m)
+            this_m50 = m50[y, x]
+            ok = np.isfinite(this_m50)
+            if not ok.any():
+                continue
+            y, x, this_m50 = y[ok], x[ok], this_m50[ok]
+            native_mags = m.mag0 + m.dmag * np.arange(m.n_mag)
+            offs = native_mags[:, None] - this_m50[None, :]  # (n_native, n_sel)
+            cvals = m.cube[:, y, x]  # (n_native, n_sel)
+            offset_chunks.append(offs.ravel())
+            c_chunks.append(cvals.ravel())
+    if not offset_chunks:
+        return np.array([0.0]), np.array([0.0])
+    offs = np.concatenate(offset_chunks)
+    cs = np.concatenate(c_chunks)
+    lo = CANON_DMAG * np.floor(offs.min() / CANON_DMAG)
+    hi = CANON_DMAG * np.ceil(offs.max() / CANON_DMAG)
+    edges = np.arange(lo - CANON_DMAG / 2, hi + CANON_DMAG, CANON_DMAG)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    bin_idx = np.clip(np.digitize(offs, edges) - 1, 0, centers.size - 1)
+    median_c = np.full(centers.size, np.nan)
+    counts = np.bincount(bin_idx, minlength=centers.size)
+    for b in np.flatnonzero(counts > 0):
+        median_c[b] = np.median(cs[bin_idx == b])
+    valid = np.isfinite(median_c)
+    first, last = int(np.argmax(valid)), valid.size - 1 - int(np.argmax(valid[::-1]))
+    return centers[first:last + 1], median_c[first:last + 1]
+
+
+def _complete_field(placed, field_map, band, grid, template_offsets, template_c):
+    """Replaces `placed`'s own faintward-of-the-field's-own-last-plane
+    zeros (left there by `_place_field_cube`) with `band`'s own template,
+    continued from each needing pixel's own last measured value, aligned
+    so the template passes through it (Corrections 2026-10-20.md item 2);
+    a pixel whose own curve already reached 0 is untouched. Returns
+    `(placed, completed_from (ny, nx) float32, NaN where nothing was
+    completed)`.
+    """
+    n_band = grid.size
+    offset = int(round((field_map.mag0 - grid[0]) / CANON_DMAG))
+    n_native = field_map.n_mag
+    n_synth = n_band - offset - n_native
+    completed_from = np.full(field_map.cube.shape[1:], np.nan, dtype=np.float32)
+    if n_synth <= 0:
+        return placed, completed_from
+    last_val = field_map.cube[-1]
+    needs = field_map.on_map & (last_val > 0.0)
+    if not needs.any():
+        return placed, completed_from
+    iy, ix = np.where(needs)
+    c_last = last_val[iy, ix].astype(np.float64)
+
+    # Invert the template (ascending offset, roughly descending C): np.interp
+    # needs its own xp ascending, so query on C with both arrays reversed
+    # together (same permutation keeps the (offset, C) pairing correct).
+    c_asc, off_corresponding = template_c[::-1], template_offsets[::-1]
+    offset_star = np.interp(c_last, c_asc, off_corresponding)
+
+    steps = CANON_DMAG * np.arange(1, n_synth + 1)
+    query_offsets = offset_star[None, :] + steps[:, None]  # (n_synth, n_needing)
+    tmpl_vals = np.interp(query_offsets.ravel(), template_offsets, template_c,
+                           left=1.0, right=0.0).reshape(query_offsets.shape)
+    tmpl_vals = np.clip(tmpl_vals, 0.0, 1.0).astype(np.float32)
+
+    placed[offset + n_native:offset + n_native + n_synth, iy, ix] = tmpl_vals
+    completed_from[iy, ix] = grid[offset + n_native]
+    return placed, completed_from
+
+
 def build(config, regions=None):
     """Builds the per-region completeness product (COMPLETENESS_2026-10-
     20.md "The reader: layout and kernel"): per Spitzer band, the on-map
@@ -513,6 +624,19 @@ def build(config, regions=None):
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
     band_keys = {b.key: b for b in definitions.BANDS}
+
+    # The band template is one shape for the whole survey (Corrections
+    # 2026-10-20.md item 2), so it is measured once here, over every
+    # region in regions_module.REGIONS -- not merely the regions this
+    # call is writing a product for -- and reused for all of them.
+    all_regions = [r.name for r in regions_module.REGIONS]
+    templates = {}
+    for band in IRAC_MIPS_KEYS:
+        offs, med_c = _measure_band_template(config, band, all_regions)
+        templates[band] = (offs, med_c)
+        print("catalog.completeness: %s band template (C at magnitude offset from 50%% point, "
+              "%.1f..%.1f mag in %.1f steps): %s"
+              % (band, offs[0], offs[-1], CANON_DMAG, np.round(med_c, 3).tolist()))
 
     with progress_module.Stage("catalog.completeness") as st:
         n_done = 0
@@ -542,26 +666,36 @@ def build(config, regions=None):
 
                 corr_lengths = {}
                 n_pix_total = 0
+                n_completed_total = {}
                 for bi, band in enumerate(IRAC_MIPS_KEYS):
                     grid = _band_mag_grid(band)
                     n_band = grid.size
+                    template_offs, template_c = templates[band]
                     maps = field_maps(config, region, band)
-                    row_chunks, row_index_maps = [], []
+                    row_chunks, completed_chunks, row_index_maps = [], [], []
                     offset = 0
                     field_corrs = []
+                    n_completed = 0
                     for m in maps:
                         placed = _place_field_cube(m, band)
+                        placed, completed_from = _complete_field(
+                            placed, m, band, grid, template_offs, template_c)
                         iy_on, ix_on = np.where(m.on_map)
                         row_chunks.append(placed[:, iy_on, ix_on].T)
+                        completed_chunks.append(completed_from[iy_on, ix_on])
+                        n_completed += int(np.isfinite(completed_from[iy_on, ix_on]).sum())
                         row_map = np.full((m.ny, m.nx), -1, dtype=np.int64)
                         row_map[iy_on, ix_on] = offset + np.arange(iy_on.size)
                         row_index_maps.append(row_map)
                         offset += iy_on.size
                         field_corrs.append(_correlation_length(m))
                     corr_lengths[band] = float(np.nanmean(field_corrs)) if field_corrs else float("nan")
+                    n_completed_total[band] = n_completed
 
                     curve_vals = (np.concatenate(row_chunks, axis=0) if row_chunks
                                   else np.empty((0, n_band), dtype=np.float32))
+                    completed_from_vals = (np.concatenate(completed_chunks) if completed_chunks
+                                            else np.empty(0, dtype=np.float32))
                     n_pix_total += curve_vals.shape[0]
                     dset = build_module.write_dataset(
                         f, f"CURVE_{band}", _to_uint16(curve_vals),
@@ -569,6 +703,9 @@ def build(config, regions=None):
                     dset.attrs["ZERO_POINT_JY"] = band_keys[band].vega_zero_point_jy
                     build_module.write_dataset(f, f"MAG_GRID_{band}", grid,
                                                 *REGISTRY[("completeness_sesna_source", f"MAG_GRID_{band}")])
+                    build_module.write_dataset(
+                        f, f"COMPLETED_FROM_{band}", completed_from_vals,
+                        *REGISTRY[("completeness_sesna_source", f"COMPLETED_FROM_{band}")])
 
                     field_idx, iy, ix = lookup(config, region, band, ra_deg, dec_deg,
                                                 n_jobs=config.n_jobs, maps=maps)
@@ -608,6 +745,8 @@ def build(config, regions=None):
 
             print("catalog.completeness: %s pixel-to-pixel 50%% correlation by band: %s"
                   % (region, {k: round(v, 3) for k, v in corr_lengths.items()}))
+            print("catalog.completeness: %s on-map pixels completed (cut off before reaching 0) by band: %s"
+                  % (region, n_completed_total))
             out_paths.append(out_path)
             n_done += 1
             st.tick(n_done, len(regions), "regions")
