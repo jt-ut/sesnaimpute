@@ -26,21 +26,24 @@ cell within one step on every axis; only where no such cell exists does
 the star fall back to the atmosphere template's own `G - Ks`. The
 proxy's colour is TRILEGAL's own.
 
-Retention keeps every star clearing SESNA's own two-of-eight-band cut
-undimmed, at the region's DEEPEST limits (the 1st percentile, per band,
-of the real catalogue's own per-source 50%-completeness limits) lowered
-by `ROLL_OFF_WIDTHS` roll-off widths in each band (`10**(-ROLL_OFF_WIDTHS
-* W_DEX[b])` times the deepest limit, `W_DEX` the region's own effective
-roll-off width per band, `catalog.depth_grid`'s per-source limits
-product): the catalogue holds sources to well below its own 50%
-completeness point, and the retention must not truncate the population
-there (coordinator's ruling 2026-09-10) -- three widths is the roll-off's
-own scale where the completeness model's acceptance is already below 1%,
-so nothing the catalogue could plausibly hold is cut by this floor. The
-stored sample must serve every source's own limits, including the
-region's deepest ones lowered this way, or a source deeper than some
-coarser reference would be missing stars its own depth admits (reading
-note 04, section A).
+Retention keeps every star with a nonzero detection probability
+(COMPLETENESS_2026-10-20.md: "the curve is used AS MEASURED") in at
+least two of the eight bands, undimmed: Rob Gutermuth's own measured
+completeness curve, evaluated at the star's own pointing position and
+own apparent magnitude (Spitzer, `catalog.completeness.field_maps`/
+`lookup`, since no synthetic star is a SESNA source with a stored row)
+or at the region's one region-wide erf curve (2MASS, `catalog.limits.
+completeness`'s reader object). The curve's own faint end already
+reaches exactly 0 (measured, or completed to 0 along the band's own
+template, COMPLETENESS_2026-10-20.md "Corrections" item 2), so "nonzero
+probability" is the non-truncating floor the retired region-wide
+roll-off-width margin (`ROLL_OFF_WIDTHS`, a Gaussian-model device this
+design note's rule 5 retires) stood in for: the catalogue holds sources
+to well below the 50% completeness point, and the retention must not
+truncate the population there (coordinator's ruling 2026-09-10). The
+stored sample must serve every star's own position, or a star in a
+field deeper than some coarser reference would be missing from the
+stored sample its own position admits (reading note 04, section A).
 
 What this module does NOT do (IMPLEMENTATION.md section 6, stage 5;
 reading note 04, section A). No placement on the region's extinction
@@ -69,6 +72,8 @@ import re
 import h5py
 import numpy as np
 import pandas as pd
+from astropy import units as u
+from astropy.coordinates import SkyCoord
 from scipy.spatial import cKDTree
 
 from sesnaimpute import build as build_module
@@ -80,6 +85,7 @@ from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+from sesnaimpute.catalog import completeness as completeness_module
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.population.selection import MIN_BANDS
 from sesnaimpute.sky.download.trilegal import build as trilegal_download
@@ -122,20 +128,6 @@ SCALE_MH = 0.5
 #: SESNA's own catalogue rule (SPEC_PRIORS.md section 1.3): at least this
 #: many of the eight bands must clear a source's detection limit.
 RETENTION_MIN_BANDS = MIN_BANDS
-
-#: The percentile of the real catalogue's per-source 50%-completeness
-#: limits that stands in for "the region's deepest limits"
-#: (SPEC_PRIORS.md section 1.5).
-DEEPEST_LIMIT_PERCENTILE = 1.0
-
-#: How many roll-off widths below the region's deepest per-source limit
-#: the retention floor sits (coordinator's ruling 2026-09-10, module
-#: docstring): the completeness model's own acceptance is already under
-#: 1% this far below the 50% point, so lowering the floor this much
-#: costs nothing the catalogue could plausibly hold while guaranteeing
-#: the retained sample is not truncated above where the real catalogue
-#: still carries sources.
-ROLL_OFF_WIDTHS = 3.0
 
 #: TRILEGAL's distance-modulus output step, 0.1 mag (Girardi et al. 2005,
 #: A&A 436, 895): the service places every synthetic star on this fixed
@@ -299,9 +291,11 @@ def _read_trilegal_part(path):
 
 def _region_pointing_plan(config, region):
     """Which pointing(s) to read for `region` and their file names, without
-    reading any of their data: `(pointing_specs, area_deg2,
-    n_pointings_grid, n_pointings_on_disk)`, `pointing_specs` a list of
-    `(p_idx, file_names)`. The pointing grid, its file names, and each
+    reading any of their data: `(pointing_specs, pointing_centers,
+    area_deg2, n_pointings_grid, n_pointings_on_disk)`, `pointing_specs` a
+    list of `(p_idx, file_names)` and `pointing_centers` the SAME `p_idx`'s
+    own `(l_deg, b_deg)` (retention's own completeness lookup, below, reads
+    each pointing's one sky position from this). The pointing grid, its file names, and each
     pointing's galactic (l, b) and simulated solid angle come from
     `sky.download.trilegal.build.region_pointings`, the one place this
     project's TRILEGAL acquisition is described. Area convention (owner
@@ -338,6 +332,7 @@ def _region_pointing_plan(config, region):
     if all(_present(names) for names in grid_file_names):
         n_pointings_on_disk = n_pointings_grid
         specs = list(enumerate(grid_file_names))
+        centers = [(p["l_deg"], p["b_deg"]) for p in pointings]
         area_deg2 = n_pointings_grid * float(pointings[0]["area_deg2"])
     elif _present(single_file_names):
         n_pointings_on_disk = 1
@@ -345,13 +340,14 @@ def _region_pointing_plan(config, region):
               f"not on disk; reading the single historical pointing {single_file_names} "
               f"as one pointing (index 0), area {info['area_deg2']} deg2")
         specs = [(0, single_file_names)]
+        centers = [(info["l_deg"], info["b_deg"])]
         area_deg2 = float(info["area_deg2"])
     else:
         raise FileNotFoundError(
             f"field_stars: {region!r}: neither the pointing grid's files nor the single "
             f"historical pointing's files are on disk under {trilegal_dir!r} -- run "
             f"sesnaimpute.sky.download.trilegal.build for this region")
-    return specs, area_deg2, n_pointings_grid, n_pointings_on_disk
+    return specs, centers, area_deg2, n_pointings_grid, n_pointings_on_disk
 
 
 def _read_pointing(trilegal_dir, file_names, p_idx):
@@ -399,50 +395,108 @@ def distance_pc(df):
 # retention: the region's deepest limits, two of eight undimmed
 # ---------------------------------------------------------------------------
 
-def _region_width_dex(config, region):
-    """`(8,)`: the region's own effective roll-off width per band
-    (`catalog.depth_grid`'s per-source limits product, `W_DEX` -- the
-    region counts fit's width for the five Spitzer bands, `catalog.depths`'
-    fitted width for the three 2MASS bands, module docstring)."""
-    path = config_module.product_path(config, "catalog", "sesna", "limits", "source", region=region)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "field_stars: no per-source limits product at %r -- run the "
-            "'sesnaimpute.catalog.depth_grid' RUNBOOK line first" % path)
-    with h5py.File(path, "r") as f:
-        return np.asarray(f["W_DEX"][:], dtype=np.float64)
+def _pointing_positions(centers):
+    """ICRS `(ra_deg, dec_deg)`, one per pointing, from each pointing's
+    own galactic `(l_deg, b_deg)` (`_region_pointing_plan`'s own
+    `pointing_centers`): the sky position `catalog.completeness.lookup`
+    needs, Spitzer's own fields being catalogued in ICRS."""
+    l = np.array([c[0] for c in centers], dtype=np.float64)
+    b = np.array([c[1] for c in centers], dtype=np.float64)
+    icrs = SkyCoord(l=l * u.deg, b=b * u.deg, frame="galactic").icrs
+    return icrs.ra.deg, icrs.dec.deg
 
 
-def deepest_limits(config, region):
-    """`(8,)` mJy: the region's deepest per-source 50%-completeness limit
-    in each band, the `DEEPEST_LIMIT_PERCENTILE`-th percentile over the
-    real catalogue's own sources (SPEC_PRIORS.md section 1.5), lowered by
-    `ROLL_OFF_WIDTHS` roll-off widths (module docstring) -- so the
-    retained sample serves every source's own limits, not only a typical
-    one, and is not truncated at the catalogue's own 50% point where the
-    real catalogue still holds sources well below it.
+def _pointing_spitzer_curves(config, region, centers):
+    """`{band: [(native_mag (n_mag,), native_c (n_mag,)) or None, ...]}`,
+    one entry per pointing, for the five Spitzer bands: each pointing's
+    own on-map field's native differential-completeness curve (Rob
+    Gutermuth's own measured cube, `catalog.completeness.field_maps`),
+    looked up once per pointing (`catalog.completeness.lookup`;
+    COMPLETENESS_2026-10-20.md: no synthetic star is a SESNA source with
+    a stored `SOURCE_ROW`, so the per-source reader object does not apply
+    here). `None` where the pointing's own position is off every field in
+    that band -- no detection probability anywhere in that band.
     """
-    f_lim = limits_module.limits(config, region)
-    deepest = np.percentile(f_lim, DEEPEST_LIMIT_PERCENTILE, axis=0)
-    w_dex = _region_width_dex(config, region)
-    return deepest * 10.0 ** (-ROLL_OFF_WIDTHS * w_dex)
+    ra_deg, dec_deg = _pointing_positions(centers)
+    out = {}
+    for band in completeness_module.IRAC_MIPS_KEYS:
+        maps = completeness_module.field_maps(config, region, band)
+        field_idx, iy, ix = completeness_module.lookup(config, region, band, ra_deg, dec_deg, maps=maps)
+        curves = []
+        for fidx, y, x in zip(field_idx, iy, ix):
+            if fidx < 0:
+                curves.append(None)
+                continue
+            m = maps[int(fidx)]
+            native_mags = m.mag0 + m.dmag * np.arange(m.n_mag)
+            curves.append((native_mags, m.cube[:, int(y), int(x)].astype(np.float64)))
+        out[band] = curves
+    return out
 
 
-def passes_two_of_eight(flux, f_lim, min_bands=RETENTION_MIN_BANDS):
-    """Which rows of `flux` (n, 8) clear at least `min_bands` of `f_lim`
-    (8,) -- undimmed, by construction: this module carries no per-star
-    extinction (see module docstring)."""
+def detection_probability(flux, pointing_index, pointing_curves, reader):
+    """`(n, 8)`: the detection probability of each star in `flux` (n, 8,
+    `BAND_KEYS` order), per band -- Rob Gutermuth's own measured curve
+    evaluated at the star's own pointing (Spitzer: `pointing_curves`'s
+    own native curve for that pointing and band, linearly interpolated at
+    the star's own apparent magnitude, clamped to the curve's own first
+    plane brightward and to 0 beyond its own last measured plane, no
+    width-model margin -- COMPLETENESS_2026-10-20.md: "the curve is used
+    AS MEASURED") or at the region's one all-sky erf curve (2MASS,
+    `reader.fraction`, position-independent -- `catalog.limits.
+    completeness`'s reader object, the one place this module reads a
+    STORED completeness product).
+    """
     flux = np.asarray(flux, dtype=np.float64)
-    n_clear = np.sum(flux >= np.asarray(f_lim, dtype=np.float64)[None, :], axis=1)
-    return n_clear >= min_bands
+    n = flux.shape[0]
+    out = np.zeros((n, len(BAND_KEYS)), dtype=np.float64)
+    for j, band in enumerate(("J", "H", "Ks")):
+        out[:, j] = reader.fraction(band, flux[:, j], 0)
+    for j, band in enumerate(completeness_module.IRAC_MIPS_KEYS):
+        col = 3 + j
+        mag = -2.5 * np.log10(flux[:, col] / constants.VEGA_ZERO_POINT_MJY[band])
+        curves = pointing_curves[band]
+        for p_idx in np.unique(pointing_index):
+            curve = curves[int(p_idx)]
+            if curve is None:
+                continue
+            native_mags, native_c = curve
+            sel = pointing_index == p_idx
+            out[sel, col] = np.interp(mag[sel], native_mags, native_c, left=native_c[0], right=0.0)
+    return out
+
+
+def passes_two_of_eight(prob, min_bands=RETENTION_MIN_BANDS):
+    """Which rows of `prob` (n, 8) have a nonzero detection probability in
+    at least `min_bands` bands: the measured curve's own faint-end zero
+    (module docstring) already does the truncation the retired region-
+    wide roll-off-width margin stood in for -- undimmed, by construction
+    (this module carries no per-star extinction, see module docstring)."""
+    return np.sum(np.asarray(prob) > 0.0, axis=1) >= min_bands
 
 
 # ---------------------------------------------------------------------------
 # per-region build
 # ---------------------------------------------------------------------------
 
-def _process_block(piece, flux, log_teff, logg, mh, log_l, ks_mag, dist_pc,
-                    pointing_index, atmosphere, colour_table, f_lim_deep):
+#: One `catalog.limits.completeness` reader per worker process (its own
+#: open h5py file is not shared across a process boundary, `catalog.
+#: limits.completeness`'s own docstring), built lazily on first use and
+#: cleared on region change -- the same per-process cache pattern
+#: `bmstp.sample_star._cached_profile` uses.
+_READER_CACHE = {}
+
+
+def _cached_reader(config, region):
+    key = (config.data_root, region)
+    if key not in _READER_CACHE:
+        _READER_CACHE.clear()  # one region's reader per worker at a time
+        _READER_CACHE[key] = limits_module.completeness(config, region)
+    return _READER_CACHE[key]
+
+
+def _process_block(piece, config, region, flux, log_teff, logg, mh, log_l, ks_mag, dist_pc,
+                    pointing_index, atmosphere, colour_table, pointing_curves):
     """One block of this pointing's own stars (COMMON.md 2026-10-19
     ruling: the piece is a block of synthetic stars, not a pointing --
     the retention test and the colour/magnitude work are row-local). The
@@ -478,7 +532,9 @@ def _process_block(piece, flux, log_teff, logg, mh, log_l, ks_mag, dist_pc,
     g_minus_ks_table, colour_matched = lookup_colour(log_teff_b, logg_b, mh_b, colour_table)
     g_minus_ks = np.where(colour_matched, g_minus_ks_table, atmosphere["g_minus_ks"][idx])
     g_proxy = ks_b + g_minus_ks
-    keep = passes_two_of_eight(flux_b, f_lim_deep)
+    reader = _cached_reader(config, region)
+    prob = detection_probability(flux_b, pointing_b, pointing_curves, reader)
+    keep = passes_two_of_eight(prob)
 
     raw = dict(
         g_proxy=g_proxy, ks_mag=ks_b, dist_pc=dist_b,
@@ -510,9 +566,12 @@ def build_region(config, region, atmosphere, colour_table, n_jobs, st=None):
     concatenating them in piece order reproduces exactly what deriving
     them from the whole-region frame in one pass would give.
     """
-    specs, area_deg2, n_pointings_grid, n_pointings_on_disk = _region_pointing_plan(config, region)
+    specs, centers, area_deg2, n_pointings_grid, n_pointings_on_disk = _region_pointing_plan(config, region)
     trilegal_dir = f"{config.data_root}/sky/download/trilegal"
-    f_lim_deep = deepest_limits(config, region)
+    # Retention's own completeness lookup (module docstring): one native
+    # Spitzer curve per pointing and band, read once here (not once per
+    # star, not once per block) and bound into every block's own task.
+    pointing_curves = _pointing_spitzer_curves(config, region, centers)
 
     raw_parts, ret_parts = [], []
     n_raw = 0
@@ -537,9 +596,9 @@ def build_region(config, region, atmosphere, colour_table, n_jobs, st=None):
         del df_p  # the ascii frame is not needed past this pointing's own columns
 
         fn = functools.partial(
-            _process_block, flux=flux, log_teff=log_teff, logg=logg, mh=mh, log_l=log_l,
-            ks_mag=ks_mag, dist_pc=dist_pc, pointing_index=pointing_index,
-            atmosphere=atmosphere, colour_table=colour_table, f_lim_deep=f_lim_deep)
+            _process_block, config=config, region=region, flux=flux, log_teff=log_teff, logg=logg, mh=mh,
+            log_l=log_l, ks_mag=ks_mag, dist_pc=dist_pc, pointing_index=pointing_index,
+            atmosphere=atmosphere, colour_table=colour_table, pointing_curves=pointing_curves)
         # the per-star cost here is uniform (no row costs more than
         # another), so this pointing's own stars are cut into one block
         # per worker, not `pieces.PIECES_PER_WORKER` times that many: a

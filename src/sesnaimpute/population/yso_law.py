@@ -54,6 +54,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute import tables as tables_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+from sesnaimpute.catalog import depth_grid as depth_grid_module
 from sesnaimpute.population import yso as yso_module
 from sesnaimpute.population import young_stars as young_stars_module
 
@@ -129,17 +130,6 @@ def _cloud_survey_map(config):
 # ====================================================================
 # per-region fit footprint
 # ====================================================================
-
-def _admitted_pix512(config, region):
-    path = config_module.product_path(config, "catalog", "sesna", "depth-grid",
-                                       "hpx512", region=region)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "population.yso_law: no depth-grid product for region %r at %s -- run the "
-            "'sesnaimpute.catalog.depth_grid' RUNBOOK line first" % (region, path))
-    with h5py.File(path, "r") as f:
-        return np.sort(np.asarray(f["HPX_PIX_512"][:], dtype=np.int64))
-
 
 _COLUMN_SIGHTLINE_CACHE = {}
 
@@ -222,7 +212,7 @@ def _fit_region(config, region, census, survey_map):
     d_r_pc = regions_module.REGIONS_BY_NAME[region].d_r_pc
     pc2 = float(yso_module.pc2_per_deg2(d_r_pc))
 
-    admitted = _admitted_pix512(config, region)
+    admitted = depth_grid_module.admitted_pixels_512(config, region)
     fit_a_k_min = _fit_a_k_min(census, survey_map, admitted)
 
     row = dict(d_r_pc=float(d_r_pc), pc2_per_deg2=pc2,

@@ -80,7 +80,6 @@ from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.catalog import limits as limits_module
-from sesnaimpute.population import field_stars
 from sesnaimpute.population import knot_rate
 from sesnaimpute.population import yso as yso_module
 from sesnaimpute.population.yso import PROVENANCE_HERSCHEL, law_count, pc2_per_deg2
@@ -94,8 +93,6 @@ from sesnaimpute.bmstp import sample_gal
 #: catalogues -- cross-matches against five knot surveys (section 5.6).
 EPS_EXT = 0.25
 
-_I4_INDEX = [b.key for b in definitions.BANDS].index("I4")
-
 #: Per-source working-set estimate for the batch loop (rule 10b): the
 #: column, limit and index columns this stage reads and writes, well
 #: under the batch budget even at 100,000 sources.
@@ -105,6 +102,24 @@ ROW_BYTES = 256
 #: over the whole sky, 12*nside^2 equal-area pixels) -- used only for the
 #: report-only area estimate behind the level check (section 8).
 _HPX512_PIXEL_DEG2 = 41252.96 / (12 * 512 ** 2)
+
+
+def _deepest_limits_mjy(reader):
+    """`(8,)` mJy: this region's own deepest (most sensitive) measured
+    50%-completeness flux per band -- the minimum of `fifty_percent_pixel`
+    over every admitted nside-512 pixel (COMPLETENESS_2026-10-20.md: Rob
+    Gutermuth's own measured maps, not the retired region-wide counts fit
+    `catalog.depth_grid` used). `RETENTION_LIMITS_MJY`'s own disclosure
+    number (section 4.2, below): replaces `population.field_stars.
+    deepest_limits`'s retired region-wide proxy."""
+    rows = np.arange(reader.hpx_pix_512.shape[0])
+    out = np.full(len(definitions.BANDS), np.nan, dtype=np.float64)
+    for j, band in enumerate(b.key for b in definitions.BANDS):
+        vals = reader.fifty_percent_pixel(band, rows)
+        finite = np.isfinite(vals)
+        if finite.any():
+            out[j] = float(np.min(vals[finite]))
+    return out
 
 
 def _tile_membership(config, region):
@@ -254,8 +269,16 @@ def build_region(config, region, st, fitted_rates=None, pooled_eta=None):
     if a_col_gas.shape[0] != n:
         raise ValueError("bmstp.density: %s row count disagrees with the catalogue" % gas_path)
 
-    f_lim = limits_module.limits(config, region).astype(np.float32)
-    d_pahc = (-np.log10(f_lim[:, _I4_INDEX])).astype(np.float32)
+    # D_PAHC, sec. 5.3: each source's own measured 8 um (I4) 50%-
+    # completeness flux (COMPLETENESS_2026-10-20.md), from the reader
+    # object -- not the retired region-wide counts-fit product. A source
+    # off the I4 map (`fifty_percent` NaN) carries `+inf` (`catalog.
+    # depth_grid`'s own never-NaN convention), so D_PAHC is -inf there
+    # rather than NaN.
+    reader = limits_module.completeness(config, region)
+    f_lim_i4 = reader.fifty_percent("I4", np.arange(n))
+    f_lim_i4 = np.where(np.isfinite(f_lim_i4), f_lim_i4, np.inf)
+    d_pahc = (-np.log10(f_lim_i4)).astype(np.float32)
 
     p2_path = config_module.product_path(config, "bmstp", "shape", "star", "tile", region=region)
     with h5py.File(p2_path, "r") as f:
@@ -390,12 +413,12 @@ def build_region(config, region, st, fitted_rates=None, pooled_eta=None):
     density_h2s = l_of_s * eta_r * EPS_EXT * on_grid_h2s
     st.tick(4, 4, "batches")
 
-    retention_limits = field_stars.deepest_limits(config, region).astype(np.float64)
+    retention_limits = _deepest_limits_mjy(reader)
 
     return dict(
         name=name, a_col=a_col.astype(np.float32), a_col_sig=a_col_sig, arm=arm, zp_sig=zp_sig,
         tile=tile_row, sightline_row=sightline_row, hpx512=hpx512.astype(np.int64),
-        f_lim=f_lim, d_pahc=d_pahc, a_cloud=a_cloud.astype(np.float32), cloud_frac=cloud_frac,
+        d_pahc=d_pahc, a_cloud=a_cloud.astype(np.float32), cloud_frac=cloud_frac,
         density_star=density_star, density_agb=density_agb, density_pahc=density_pahc,
         density_gal=density_gal, density_yso=density_yso, density_h2s=density_h2s,
         density_star_raw=density_star_raw, density_agb_raw=density_agb_raw,

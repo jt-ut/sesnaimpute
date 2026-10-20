@@ -55,7 +55,14 @@ class Completeness:
     """The reader object `completeness(config, region)` returns: the
     memory-mapped `catalog.completeness` tables for `region`, plus one
     `fraction`/`fraction_pixel`/`ln_one_minus_fraction`/`covered` call per
-    band, each resolving to `catalog.completeness`'s own kernels."""
+    band, each resolving to `catalog.completeness`'s own kernels, and the
+    single-number methods (`fifty_percent*`, `local_width_dex*`) a pixel-
+    or source-level consumer that still wants one flux and one width per
+    band gets from the SAME stored curve, by the same linear
+    interpolation `fraction` uses, never a second stored statistic
+    (briefs/round4_2026-10-20/C4_coverage_readers.md: "A reader that needs
+    a single number per pixel or source (the 50% crossing) gets it from
+    one reader method, computed from the curve, never stored twice")."""
 
     def __init__(self, h5file):
         self._f = h5file
@@ -66,6 +73,7 @@ class Completeness:
         self._pixel_curve = {}
         self._mag_grid_band = {}
         self._completed_from = {}
+        self._zero_point_jy = {}
         # Corrections 2026-10-20.md item 1: ONE canonical grid PER BAND
         # (no grid shared across bands any more), read from that band's
         # own MAG_GRID_<band>.
@@ -73,6 +81,7 @@ class Completeness:
             zp = h5file[f"CURVE_{band}"].attrs["ZERO_POINT_JY"]
             grid = np.asarray(h5file[f"MAG_GRID_{band}"][:], dtype=np.float64)
             self._mag_grid_band[band] = grid
+            self._zero_point_jy[band] = float(zp)
             self._ac[band] = _band_ac(float(grid[0]), float(grid[1] - grid[0]), zp)
             self._curve[band] = h5file[f"CURVE_{band}"]
             self._pixel_curve[band] = h5file[f"PIXEL_CURVE_{band}"]
@@ -81,6 +90,7 @@ class Completeness:
             zp = h5file[f"CURVE_{band}"].attrs["ZERO_POINT_JY"]
             grid = np.asarray(h5file[f"MAG_GRID_{band}"][:], dtype=np.float64)
             self._mag_grid_band[band] = grid
+            self._zero_point_jy[band] = float(zp)
             self._ac[band] = _band_ac(float(grid[0]), float(grid[1] - grid[0]), zp)
             self._curve[band] = h5file[f"CURVE_{band}"]
 
@@ -161,6 +171,119 @@ class Completeness:
         n = curves.shape[1]
         a, c = self._ac[band]
         return completeness_module.completeness_many(curves[:], rows, g0, dm, n, log10_f, a, c, scale)
+
+    def _crossing_mag(self, band, rows, target_c):
+        """`(n,)` magnitude where `band`'s own measured curve, at each of
+        `rows`'s own rows, crosses `target_c` (the FIRST crossing from
+        the bright end, `catalog.completeness._m50_per_pixel`'s own
+        convention): linear interpolation between the two bracketing
+        planes, `NaN` where `rows < 0` (off-map) or the curve never
+        reaches `target_c` brightward of its own last plane."""
+        g0, dm = self._grid_params(band)
+        curve_table = self._curve[band]
+        rows = np.atleast_1d(rows)
+        out = np.full(rows.shape, np.nan, dtype=np.float64)
+        valid = rows >= 0
+        if not valid.any():
+            return out
+        sub = curve_table[:][rows[valid]].astype(np.float64) / completeness_module.STORAGE_SCALE
+        below = sub < target_c
+        first_below = np.argmax(below, axis=1)
+        never_below = ~below.any(axis=1)
+        j = np.clip(first_below - 1, 0, sub.shape[1] - 2)
+        c0 = np.take_along_axis(sub, j[:, None], axis=1)[:, 0]
+        c1 = np.take_along_axis(sub, (j + 1)[:, None], axis=1)[:, 0]
+        denom = np.where(c0 != c1, c0 - c1, 1.0)
+        t = np.where(c0 != c1, (c0 - target_c) / denom, 0.0)
+        mag = g0 + dm * (j.astype(np.float64) + t)
+        mag = np.where(never_below | (first_below == 0), np.nan, mag)
+        out[valid] = mag
+        return out
+
+    def _mag_to_flux_mjy(self, band, mag):
+        return 10.0 ** (np.log10(self._zero_point_jy[band] * 1000.0) - mag / 2.5)
+
+    def fifty_percent(self, band, source_index):
+        """`(n,)` mJy: the flux where this source's own curve (`band`)
+        crosses completeness = 0.5 -- the one number a per-source
+        consumer that used to read the retired `F_LIM_50`/`F_LIM_50_MJY`
+        gets instead, from the SAME stored curve `fraction` reads."""
+        rows = self._row_for(band, source_index)
+        mag = self._crossing_mag(band, rows, 0.5)
+        return self._mag_to_flux_mjy(band, mag)
+
+    def _crossing_mag_pixel(self, band, pixel_row, target_c):
+        """`_crossing_mag`'s own twin for `PIXEL_CURVE_<band>`: a plain
+        float32 fraction (an area average, module docstring), not a
+        value-x-`STORAGE_SCALE` table, so the crossing search runs on
+        the raw fraction directly rather than sharing `_crossing_mag`'s
+        own `/STORAGE_SCALE` step. 2MASS has one region-wide row (index
+        0, `_row_for`'s own convention) -- `local_width_dex_pixel` and
+        `fifty_percent_pixel` both resolve there to `_local_width_dex`/
+        `_crossing_mag`, the SAME per-row search `fraction` itself uses."""
+        rows = np.ascontiguousarray(np.atleast_1d(pixel_row).astype(np.int64))
+        curve_table = self._pixel_curve[band]
+        g0, dm = self._grid_params(band)
+        out = np.full(rows.shape, np.nan, dtype=np.float64)
+        valid = rows >= 0
+        if valid.any():
+            sub = curve_table[:][rows[valid]].astype(np.float64)
+            below = sub < target_c
+            first_below = np.argmax(below, axis=1)
+            never_below = ~below.any(axis=1)
+            j = np.clip(first_below - 1, 0, sub.shape[1] - 2)
+            c0 = np.take_along_axis(sub, j[:, None], axis=1)[:, 0]
+            c1 = np.take_along_axis(sub, (j + 1)[:, None], axis=1)[:, 0]
+            denom = np.where(c0 != c1, c0 - c1, 1.0)
+            t = np.where(c0 != c1, (c0 - target_c) / denom, 0.0)
+            mag = g0 + dm * (j.astype(np.float64) + t)
+            out[valid] = np.where(never_below | (first_below == 0), np.nan, mag)
+        return out
+
+    def fifty_percent_pixel(self, band, pixel_row):
+        """`(n,)` mJy: the flux where `PIXEL_CURVE_<band>` at each of
+        `pixel_row`'s own rows crosses completeness = 0.5 -- the one
+        number a per-pixel consumer that used to read the retired
+        `F_LIM_50_PIX_MJY` gets instead."""
+        if band in TWOMASS_KEYS:
+            rows = np.zeros(np.atleast_1d(pixel_row).shape, dtype=np.int64)
+            mag = self._crossing_mag(band, rows, 0.5)
+        else:
+            mag = self._crossing_mag_pixel(band, pixel_row, 0.5)
+        return self._mag_to_flux_mjy(band, mag)
+
+    def _local_width_dex(self, band, rows):
+        """`(n,)` dex: this row's own measured local roll-off width, the
+        per-row analogue of `catalog.depths`' region-wide fitted
+        `WIDTH_DEX` (COMPLETENESS_2026-10-20.md rule 5: the Gaussian
+        model is not used for the completeness term itself, but the
+        erf-parametrised consumers this unit leaves unchanged
+        (`bmstp.atlas`/`bmstp.template_weights`) still need one width
+        number; this is the SAME erf-width definition depths.py uses
+        (`WIDTH_DEX = 0.4 * w_mag`), with `w_mag` now the row's own
+        measured half-distance between its C=0.8413 and C=0.1587
+        crossings (one sigma either side of the row's own measured 50%
+        point, the convention `catalog.depths.build`'s own fit used) --
+        a per-row MEASUREMENT, not a second region-wide fit."""
+        mag_bright = self._crossing_mag(band, rows, 0.8413)  # one sigma brighter than 50%
+        mag_faint = self._crossing_mag(band, rows, 0.1587)   # one sigma fainter than 50%
+        w_mag = (mag_faint - mag_bright) / 2.0
+        return 0.4 * w_mag
+
+    def local_width_dex(self, band, source_index):
+        """`(n,)` dex: `_local_width_dex` at each of `source_index`'s own
+        rows in `band`."""
+        rows = self._row_for(band, source_index)
+        return self._local_width_dex(band, rows)
+
+    def local_width_dex_pixel(self, band, pixel_row):
+        """`(n,)` dex: the pixel-curve analogue of `local_width_dex`."""
+        if band in TWOMASS_KEYS:
+            rows = np.zeros(np.atleast_1d(pixel_row).shape, dtype=np.int64)
+            return self._local_width_dex(band, rows)
+        w_mag = (self._crossing_mag_pixel(band, pixel_row, 0.1587)
+                 - self._crossing_mag_pixel(band, pixel_row, 0.8413)) / 2.0
+        return 0.4 * w_mag
 
 
 def completeness(config, region):
