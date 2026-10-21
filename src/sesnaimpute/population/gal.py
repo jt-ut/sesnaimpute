@@ -1324,7 +1324,13 @@ def build(config, regions=None):
     # fit's own input), SWIRE (star-subtracted, the adopted split), and
     # S-COSMOS 4.5um (`flux_c2_2`, RAW -- no native stellarity, module
     # docstring, so never star-subtracted; a level cross-check only).
-    report_edges = np.arange(np.log10(0.006), np.log10(1.0) + 0.251, SEDS_FIT_BIN_WIDTH_DEX)
+    # The edges are phase-locked to multiples of SEDS_FIT_BIN_WIDTH_DEX
+    # (floor/ceil, not `log10(0.006)` itself) so these bin centers land
+    # exactly on `seds_differential_counts`'s own bin centers -- any other
+    # phase never matches them and every SEDS lookup below reads NaN.
+    report_lo = np.floor(np.log10(0.006) / SEDS_FIT_BIN_WIDTH_DEX) * SEDS_FIT_BIN_WIDTH_DEX
+    report_hi = np.ceil(np.log10(1.0) / SEDS_FIT_BIN_WIDTH_DEX) * SEDS_FIT_BIN_WIDTH_DEX
+    report_edges = np.arange(report_lo, report_hi + SEDS_FIT_BIN_WIDTH_DEX / 2.0, SEDS_FIT_BIN_WIDTH_DEX)
     report_centers = 0.5 * (report_edges[:-1] + report_edges[1:])
     s_report = 10.0 ** report_centers
     d_s_report = s_report * np.log(10.0) * SEDS_FIT_BIN_WIDTH_DEX
