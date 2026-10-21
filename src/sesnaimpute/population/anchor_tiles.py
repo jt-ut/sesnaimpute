@@ -66,6 +66,7 @@ import numpy as np
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
+from sesnaimpute import definitions
 from sesnaimpute import pieces as pieces_module
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
@@ -773,36 +774,53 @@ def _pointing_bounds(sorted_pointing_index, present_pointings):
 
 
 def _sightline_profile_pieces(profile_obj, parent, d_pc):
-    """`(inside, a_edge, tail)`: the two per-star profile quantities
-    `profile_obj.a_of_d` folds into `a_local`, computed from the
-    pointing's own distance slice `d_pc` and the pixel's parent nside-256
-    sightline `parent` ALONE -- never from the pixel's own column
-    `A_PIX_K` (`sky.derived.profile._RegionProfile.a_of_d`: `inside =
-    interp(d, self.dist, self.a_cum[row])` and `tail = self.tail_shape(d,
-    hpx_pix)` are both evaluated before `total_column_ak` ever enters the
-    formula). `_magnitudes_from_pieces` below rebuilds `a_of_d`'s exact
-    output from these two arrays plus a scalar column, so sibling
-    nside-512 pixels sharing one nside-256 sightline (round 3 T2) compute
-    them once instead of once per sibling."""
+    """`(inside, a_edge, tail_or_far, covered)`: the per-star profile
+    quantities `profile_obj.a_of_d` folds into `a_local`, computed from
+    the pointing's own distance slice `d_pc` and the pixel's parent
+    nside-256 sightline `parent` ALONE -- never from the pixel's own
+    column `A_PIX_K` (`sky.derived.profile._RegionProfile.a_of_d`: every
+    one of these is evaluated before `total_column_ak` ever enters the
+    formula). C25 (briefs/round4_2026-10-20/C25_far_column.md): on a
+    COVERED sightline, `tail_or_far` is Marshall et al. 2006's own
+    increment past the map's edge, `max(0, M(d) - M(d_edge))` -- already
+    independent of any pixel's own column, exactly like `inside`/`tail`
+    were, so it is cached here too, once per sightline rather than once
+    per sibling pixel; on an uncovered sightline it is `tail_shape(d)`,
+    unchanged. `_magnitudes_from_pieces` below rebuilds `a_of_d`'s exact
+    output from these plus a scalar column, so sibling nside-512 pixels
+    sharing one nside-256 sightline (round 3 T2) compute them once
+    instead of once per sibling."""
     row = int(np.asarray(profile_obj.sightline_row(parent)))
     inside = np.interp(d_pc, profile_obj.dist, profile_obj.a_cum[row])
     a_edge = float(profile_obj.a_cum[row, -1])
-    tail = profile_obj.tail_shape(d_pc, hpx_pix=parent)
-    return inside, a_edge, tail
+    covered = bool(profile_obj.covered[row])
+    if covered:
+        m_d = np.interp(d_pc, profile_obj.marshall_dist, profile_obj.marshall_a_k[row])
+        m_edge = float(np.interp(profile_obj.d_edge, profile_obj.marshall_dist, profile_obj.marshall_a_k[row]))
+        tail_or_far = np.maximum(0.0, m_d - m_edge)
+    else:
+        tail_or_far = profile_obj.tail_shape(d_pc, hpx_pix=parent)
+    return inside, a_edge, tail_or_far, covered
 
 
-def _magnitudes_from_pieces(a_pix_k, inside, a_edge, tail, g_proxy, ks_mag,
+def _magnitudes_from_pieces(a_pix_k, inside, a_edge, tail_or_far, covered, g_proxy, ks_mag,
                              k_g_diffuse, k_g_dense, r_diffuse, r_dense):
     """`(G_obs, Ks_obs)` from `_sightline_profile_pieces`'s cached
-    `(inside, a_edge, tail)` and one pixel's own `A_PIX_K`: `a_of_d`'s
-    exact algebra (`scale`/`residual` against `total_column_ak`) with
-    `inside`/`tail` held fixed, then `magnitudes_at_extinction` as
+    `(inside, a_edge, tail_or_far, covered)` and one pixel's own
+    `A_PIX_K`: `a_of_d`'s exact algebra (`scale` against
+    `total_column_ak`, and -- on a COVERED sightline -- Marshall's own
+    increment added uncapped, with no `residual` multiply; on an
+    uncovered one, `residual * tail_or_far` exactly as before) with
+    `inside`/`tail_or_far` held fixed, then `magnitudes_at_extinction` as
     everywhere else in this module -- the same `a_local` a direct
     `anchor_observables` call would give, to float64 bit-identity."""
     total = float(a_pix_k)
     scale = min(1.0, total / a_edge) if a_edge > 0 else 1.0
-    residual = max(0.0, total - a_edge * scale)
-    a_local = inside * scale + residual * tail
+    if covered:
+        a_local = inside * scale + tail_or_far
+    else:
+        residual = max(0.0, total - a_edge * scale)
+        a_local = inside * scale + residual * tail_or_far
     return magnitudes_at_extinction(a_local, g_proxy, ks_mag, k_g_diffuse, k_g_dense,
                                      r_diffuse, r_dense)
 
@@ -842,7 +860,7 @@ def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, 
     n_ks_block = np.zeros((n, n_bin_ks), dtype=np.float64)
     n_gk_block = np.zeros((n, n_bin_g, n_bin_ks), dtype=np.float64)
     cache_key = None
-    cache_batches = None  # [(blo, bhi, inside, a_edge, tail), ...]
+    cache_batches = None  # [(blo, bhi, inside, a_edge, tail_or_far, covered), ...]
     for j, i in enumerate(range(lo_pix, hi_pix)):
         parent = int(parent256[i])
         a_p = float(a_pix[i])
@@ -854,12 +872,12 @@ def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, 
             cache_batches = []
             for blo, bhi in batches(hi - lo, row_bytes=72 * config.n_jobs):
                 s = slice(lo + blo, lo + bhi)
-                inside, a_edge, tail = _sightline_profile_pieces(profile_obj, parent, dist_pc[s])
-                cache_batches.append((blo, bhi, inside, a_edge, tail))
-        for blo, bhi, inside, a_edge, tail in cache_batches:
+                inside, a_edge, tail_or_far, covered = _sightline_profile_pieces(profile_obj, parent, dist_pc[s])
+                cache_batches.append((blo, bhi, inside, a_edge, tail_or_far, covered))
+        for blo, bhi, inside, a_edge, tail_or_far, covered in cache_batches:
             s = slice(lo + blo, lo + bhi)
             g_obs, ks_obs = _magnitudes_from_pieces(
-                a_p, inside, a_edge, tail, g_proxy[s], ks_mag[s],
+                a_p, inside, a_edge, tail_or_far, covered, g_proxy[s], ks_mag[s],
                 k_g_diffuse[s], k_g_dense[s], r_diffuse, r_dense)
             p_g = gaia_detection_weight(g_obs, m10_p)
             n_g_block[j] += np.histogram(g_obs, bins=g_edges, weights=p_g)[0]
@@ -1069,6 +1087,154 @@ def write_histograms(config, region, result):
             ("KS_SOURCE", result["ks_source"].astype(np.int8)),
         ):
             build_module.write_dataset(f, name, data, *REGISTRY[(_HIST_STEM, name)])
+
+
+# ---------------------------------------------------------------------------
+# C25 item 5 (briefs/round4_2026-10-20/C25_far_column.md): the red-tail
+# check, patched into this SAME product once star_population has built the
+# region's population (the model side needs it) -- no new product.
+# ---------------------------------------------------------------------------
+
+_BAND_KEYS = tuple(b.key for b in definitions.BANDS)
+_IDX_J = _BAND_KEYS.index("J")
+_IDX_KS = _BAND_KEYS.index("Ks")
+_ZP_J_JY = definitions.BANDS_BY_KEY["J"].vega_zero_point_jy
+_ZP_KS_JY = definitions.BANDS_BY_KEY["Ks"].vega_zero_point_jy
+
+#: C24's own red-tail definition (briefs/round4_2026-10-20/C24_locate_red_tail.md):
+#: 2MASS Ks 12-14, J-Ks > 1.5.
+RED_TAIL_KS_LO_MAG, RED_TAIL_KS_HI_MAG = 12.0, 14.0
+RED_TAIL_JK_CUT_MAG = 1.5
+
+
+def _ejk_per_ak(config, a_local):
+    """`kappa_J(a) - kappa_Ks(a)`, the hybrid law's own J-Ks reddening per
+    unit A_K (`c18_diag/c24_tests.py`'s `ejk_per_ak`, reused exactly)."""
+    k = selection.kappa_hybrid(config, selection.law_dense_weight(a_local))
+    return k[..., _IDX_J] - k[..., _IDX_KS]
+
+
+def _red_tail_share_obs(config, region, pix):
+    """The observed share: SESNA 2MASS sources in the region's own anchor
+    pixels (`pix`, this product's own HPX_PIX_512) with a measured Ks in
+    12-14 and a measured J, J-Ks > 1.5 (`c18_diag/c24_tests.py`'s own
+    construction, reused exactly). Returns `(share, n)`."""
+    cat_path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
+    with h5py.File(cat_path, "r") as f:
+        gl = np.asarray(f["GAL_L_DEG"][:], dtype=np.float64)
+        gb = np.asarray(f["GAL_B_DEG"][:], dtype=np.float64)
+        fnu = np.asarray(f["FNU_MJY"][:], dtype=np.float64)
+        origin = np.asarray(f["ORIGIN_FNU"][:], dtype=np.int64)
+    fk, okk = fnu[:, _IDX_KS], origin[:, _IDX_KS] == 1
+    fj, okj = fnu[:, _IDX_J], origin[:, _IDX_J] == 1
+    ks = np.where(okk, -2.5 * np.log10(np.where(okk, fk, 1.0) / (_ZP_KS_JY * 1.0e3)), np.nan)
+    if pix.size == 0:
+        in_anchor = np.zeros(gl.size, dtype=bool)
+    else:
+        sp = hp.ang2pix(NSIDE, gl, gb, nest=True, lonlat=True)
+        loc = np.minimum(np.searchsorted(pix, sp), pix.size - 1)
+        in_anchor = pix[loc] == sp
+    sel = in_anchor & okk & okj & (ks >= RED_TAIL_KS_LO_MAG) & (ks < RED_TAIL_KS_HI_MAG)
+    n = int(np.count_nonzero(sel))
+    if n == 0:
+        return float("nan"), 0
+    jk = 2.5 * np.log10(fk[sel] / fj[sel] * (_ZP_J_JY / _ZP_KS_JY))
+    return float(np.mean(jk > RED_TAIL_JK_CUT_MAG)), n
+
+
+def _red_tail_share_model(config, region):
+    """The modelled share: `population.star_population`'s own built
+    population, each star re-dimmed at its own drawn pixel
+    (`HPX_PIX_512`) with `sky.derived.profile.a_of_d`, UNCLIPPED -- the
+    Marshall-informed column (C25), not the stored, depth-mark-clipped
+    `XI` (`population.star_population`'s own module docstring). Area-
+    weighted, `OMEGA_POINTING_DEG2 / n_star` per star of a tile (every
+    retained star of one tile drawn uniformly over that tile's own
+    pixels, `_build_one_tile`), so a tile's own share of the total
+    weight is its own real sky area, independent of how many stars
+    TRILEGAL happened to retain there. Returns `(share, n_tile)`."""
+    pop_path = config_module.product_path(config, "population", "star", "population", "tile", region=region)
+    field_path = config_module.product_path(config, "population", "trilegal", "field-stars", "region", region=region)
+    for path, module in ((pop_path, "sesnaimpute.population.star_population"),
+                         (field_path, "sesnaimpute.population.field_stars")):
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                "anchor_tiles.red_tail_shares: %s missing -- run the %r RUNBOOK line "
+                "for this region first" % (path, module))
+    with h5py.File(field_path, "r") as f:
+        dist_pc_all = np.asarray(f["DIST_PC"][:], dtype=np.float64)
+        ks_mag_all = np.asarray(f["KS_MAG"][:], dtype=np.float64)
+        fnu_all = np.asarray(f["FNU_MJY"][:], dtype=np.float64)
+    jk0_all = 2.5 * np.log10(fnu_all[:, _IDX_KS] / fnu_all[:, _IDX_J] * (_ZP_J_JY / _ZP_KS_JY))
+
+    pixels2, parent256, a_pix = _region_pixel_columns(config, region)
+    pix_index = {int(p): i for i, p in enumerate(pixels2)}
+    profile_obj = profile_module.read(config, region)
+
+    w_sum, w_red, n_tile = 0.0, 0.0, 0
+    with h5py.File(pop_path, "r") as f:
+        for key in f.keys():
+            if not (key.startswith("tile_") and key[len("tile_"):].isdigit()):
+                continue
+            g = f[key]
+            star_index = np.asarray(g["STAR_INDEX"][()], dtype=np.int64)
+            n_star = star_index.size
+            if n_star == 0:
+                continue
+            n_tile += 1
+            omega_t = float(g.attrs["OMEGA_POINTING_DEG2"])
+            hpx512 = np.asarray(g["HPX_PIX_512"][()], dtype=np.int64)
+            pi = np.array([pix_index.get(int(p), -1) for p in hpx512])
+            keep = pi >= 0
+            if not np.all(keep):
+                star_index, hpx512, pi = star_index[keep], hpx512[keep], pi[keep]
+            if star_index.size == 0:
+                continue
+            dist = dist_pc_all[star_index]
+            ks0 = ks_mag_all[star_index]
+            jk0 = jk0_all[star_index]
+            parent_of_star = parent256[pi]
+            a_pix_of_star = a_pix[pi]
+            a_local = np.empty(star_index.size, dtype=np.float64)
+            groups, inv = np.unique(parent_of_star, return_inverse=True)
+            for gi, parent in enumerate(groups):
+                m = inv == gi
+                a_local[m] = profile_obj.a_of_d(dist[m], hpx_pix=int(parent), total_column_ak=a_pix_of_star[m])
+            ks_obs = ks0 + a_local
+            jk = jk0 + a_local * _ejk_per_ak(config, a_local)
+            area_w = np.full(star_index.size, omega_t / n_star, dtype=np.float64)
+            sel_m = (ks_obs >= RED_TAIL_KS_LO_MAG) & (ks_obs < RED_TAIL_KS_HI_MAG)
+            w_sum += float(area_w[sel_m].sum())
+            w_red += float(area_w[sel_m & (jk > RED_TAIL_JK_CUT_MAG)].sum())
+    share = w_red / w_sum if w_sum > 0 else float("nan")
+    return share, n_tile
+
+
+def red_tail_shares(config, region):
+    """Writes `RED_TAIL_SHARE_OBS`/`RED_TAIL_SHARE_MODEL` into this
+    region's EXISTING `histograms_anchors_hpx512` product (item 5, C25,
+    briefs/round4_2026-10-20/C25_far_column.md) -- called once `population.
+    star_population` has built the region (the model side reads that
+    product): the share of Ks 12-14 anchor stars with J-Ks > 1.5,
+    observed and modelled, the same construction `c18_diag/c24_tests.py`'s
+    T4 measured. An uncovered region's own construction is unchanged
+    (`sky.derived.profile`), so its own RED_TAIL_SHARE_MODEL reads this
+    region's PRE-C25 value still."""
+    hist_path = config_module.product_path(
+        config, "population", "anchors", "histograms", "hpx512", region=region)
+    with h5py.File(hist_path, "r") as f:
+        pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
+    share_obs, n_obs = _red_tail_share_obs(config, region, pix)
+    share_model, n_tile = _red_tail_share_model(config, region)
+    with h5py.File(hist_path, "a") as f:
+        for name, value in (("RED_TAIL_SHARE_OBS", share_obs), ("RED_TAIL_SHARE_MODEL", share_model)):
+            if name in f:
+                del f[name]
+            build_module.write_dataset(f, name, np.float64(value), *REGISTRY[(_HIST_STEM, name)])
+    print("anchor_tiles.red_tail_shares: %s: RED_TAIL_SHARE_OBS=%.3f (n=%d) "
+          "RED_TAIL_SHARE_MODEL=%.3f (%d tiles) -> %s"
+          % (region, share_obs, n_obs, share_model, n_tile, hist_path))
+    return share_obs, share_model
 
 
 def build(config, regions=None):
