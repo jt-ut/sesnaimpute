@@ -2273,48 +2273,80 @@ REGISTRY = {
         "The tail e-folding distance (TAIL_EFOLD_PC) evaluated at this "
         "region's source-weighted mean sky direction."),
 
-    # sky.derived.marshall_extinction -- extinction_marshall_sightline (C25,
-    # briefs/round4_2026-10-20/C25_far_column.md): Marshall et al. 2006's own
-    # measured K-band extinction to a star, by distance, carried onto this
-    # region's own admitted sightlines -- the far-field curve a covered
-    # sightline's column follows beyond the Edenhofer 2023 cube's own edge,
-    # in place of the exponential dust-disc tail (sky.derived.profile) there.
-    ("extinction_marshall_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
-        "This region's own admitted nside-256 pixel numbers, the same "
-        "pixels and the same row order as sky.derived.profile's own "
-        "profile_edenhofer_sightline product for this region."),
-    ("extinction_marshall_sightline", "DIST_PC"): ("pc",
-        "The distance grid along the line of sight that A_K is tabulated "
-        "on: sky.derived.profile's own profile_edenhofer_sightline "
-        "product's DIST_PC for this region (so the two products agree "
-        "exactly inside the Edenhofer map's own edge), extended past "
-        "that edge by a log-spaced grid out to Marshall et al. 2006's "
-        "own ~10,000 pc reach -- profile_edenhofer_sightline's own "
-        "DIST_PC stops at the map's edge and carries no point past it, "
-        "so a star at 4-8 kpc needs this product's own, longer axis."),
-    ("extinction_marshall_sightline", "A_K"): ("mag A_K",
+    # sky.derived.profile -- profile_adopted_sightline (C26, owner ruling
+    # 2026-10-21, briefs/round4_2026-10-20/C26_profile_adopted.md): the ONE
+    # canonical cumulative K-band extinction curve per admitted sightline,
+    # on the 2MASS stellar scale, every consumer now reads. Edenhofer et al.
+    # 2023's own shape inside their 3-D map's edge, rescaled to this
+    # sightline's own adopted extinction column; beyond the map's edge,
+    # Combined19's (Bovy et al. 2016, mwdust) own measured INCREMENT --
+    # Marshall et al. 2006 (2MASS red giants) where its own survey box
+    # covers the sightline, Bayestar19 (Green et al. 2019) elsewhere it
+    # reaches, Drimmel et al. 2003 only where neither exists. Replaces the
+    # retired extinction_marshall_sightline product and the per-read
+    # residual/tail-shape/scale algebra it fed (C25 and earlier): a reader
+    # rescales the in-cube part by its own column over this file's
+    # A_EDGE_K and adds the far part unscaled (sky.derived.profile.
+    # _RegionProfile.a_of_d).
+    ("profile_adopted_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
+        "This region's own admitted nside-256 pixel numbers (nested "
+        "ordering). Row i here is row i of every other per-sightline "
+        "dataset in this file."),
+    ("profile_adopted_sightline", "GAL_L_DEG"): ("deg",
+        "Galactic longitude of the matching pixel's center in HPX_PIX_256."),
+    ("profile_adopted_sightline", "GAL_B_DEG"): ("deg",
+        "Galactic latitude of the matching pixel's center in HPX_PIX_256."),
+    ("profile_adopted_sightline", "DIST_PC"): ("pc",
+        "The distance grid along the line of sight, starting at 0 pc, "
+        "that A_CUM_K is tabulated on for every sightline in this file: "
+        "the Edenhofer 3-D map's own in-cube points out to its edge "
+        "(D_EDGE_PC), then a log-spaced grid out to Combined19's own "
+        "~10,000 pc reach."),
+    ("profile_adopted_sightline", "A_CUM_K"): ("mag A_K",
         "For the matching pixel in HPX_PIX_256 and each distance in "
-        "DIST_PC, Marshall et al. 2006's own measured K-band extinction "
-        "to a star at that distance, from their 2MASS-red-giant survey: "
-        "linear interpolation, in distance, between their nearest cell's "
-        "own measured points, held flat past their farthest measured "
-        "point. All zero where COVERED is False -- an outside reader "
-        "measuring the column beyond the Edenhofer map's own edge should "
-        "read this value only on a covered sightline."),
-    ("extinction_marshall_sightline", "COVERED"): ("boolean",
-        "For the matching pixel in HPX_PIX_256, whether this sightline "
-        "sits inside Marshall et al. 2006's own measured survey area "
-        "(within 100 degrees of the Galactic centre in longitude, within "
-        "10 degrees of the Galactic plane in latitude) AND has a measured "
-        "cell within one cell width (15 arcmin) of it. False everywhere "
-        "for a region outside their survey, or at a sightline their grid "
-        "does not reach even inside it; A_K is exactly zero wherever this "
-        "is False."),
-    ("extinction_marshall_sightline", "SEPARATION_DEG"): ("deg",
-        "For the matching pixel in HPX_PIX_256, the angular separation to "
-        "the nearest cell of Marshall et al. 2006's own measured grid used "
-        "for A_K -- NaN where this sightline sits outside their survey "
-        "area entirely (no separation was measured)."),
+        "DIST_PC, this sightline's own cumulative K-band extinction from "
+        "the observer out to that distance. Inside the Edenhofer map's "
+        "own edge (distance <= D_EDGE_PC): the map's own measured shape, "
+        "rescaled so its value AT the edge equals this sightline's own "
+        "adopted extinction column (the catalogue's own extinction_"
+        "adopted_sightline product) -- capped so it never exceeds that "
+        "column where the map's own raw edge value would overshoot it. "
+        "Beyond the edge: that edge value (A_EDGE_K) plus Combined19's "
+        "own measured INCREMENT past the edge along this same sightline "
+        "-- never Combined19's own absolute value, and never capped at "
+        "any column: a reader's own total column, divided into this "
+        "number, can exceed 1 out here (the far reddening really is more "
+        "than a near pixel's own cloud column implies)."),
+    ("profile_adopted_sightline", "A_EDGE_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256, A_CUM_K's own value at "
+        "D_EDGE_PC: the Edenhofer map's own measured column at its edge, "
+        "after the same rescaling A_CUM_K's in-cube part carries. A "
+        "reader rescales the in-cube part of A_CUM_K by its own total "
+        "column divided by this number."),
+    ("profile_adopted_sightline", "D_EDGE_PC"): ("pc",
+        "The Edenhofer 3-D map's own edge distance, ONE number shared by "
+        "every sightline of every region (the map's own fixed radial "
+        "grid): the distance A_CUM_K's in-cube, Edenhofer-measured part "
+        "ends and Combined19's own far increment begins."),
+    ("profile_adopted_sightline", "FAR_MAP"): ("code",
+        "For the matching pixel in HPX_PIX_256, which of Combined19's "
+        "own three constituent surveys supplies the far column beyond "
+        "D_EDGE_PC along this sightline, by Combined19's own published "
+        "build rule (computed from this sightline's own sky position and "
+        "the Bayestar19 survey's own footprint, never guessed): 1 "
+        "Marshall et al. 2006 (2MASS red giants, within 100 degrees of "
+        "the Galactic centre in longitude and 10 degrees of the plane in "
+        "latitude), 2 Bayestar19 (Green et al. 2019, wherever it has a "
+        "measured pixel outside that box), 3 Drimmel et al. 2003 (an "
+        "all-sky smooth dust-disc model, wherever neither of the above "
+        "reaches)."),
+    ("profile_adopted_sightline", "FAR_RELIABLE_PC"): ("pc",
+        "For the matching pixel in HPX_PIX_256, Bayestar19's own "
+        "per-pixel reliable-distance limit (their own quoted maximum "
+        "distance modulus with a converged fit, converted to a distance) "
+        "where FAR_MAP is 2 (Bayestar19 supplies the far column); NaN "
+        "everywhere else, including a Bayestar19-covered sightline whose "
+        "own pixel carries no such limit in their published file."),
 
     ("depth_edenhofer_region", "REGION"): ("region name",
         "The name of the region this row describes, in the fixed thirty-"
