@@ -26,7 +26,28 @@ its own tiles reaches `MIN_COUNTS` and the cell was therefore actually
 fitted (`USE_JOINT` means fitted, not merely a nonzero observed count in
 one tile); every other star takes the marginal weight, which by the same
 ruling is never left at the uncalibrated 1.0 either (no star ever carries
-that unfitted TRILEGAL-level weight). Each axis is fitted the SAME way: the
+that unfitted TRILEGAL-level weight).
+
+C21 (2026-10-20): "the region's pooled count across its own tiles" above
+was, until now, only ever a single tile's own count -- `fit_tile_weights`
+gates each tile on ITS OWN low-count mask, and no joint `w_pool` was ever
+passed in, so a joint cell with no ONE tile clearing `MIN_COUNTS` alone
+was left unfitted even where the region's tiles, summed, clearly did
+(a joint cell is two-dimensional and sparse; almost no single tile's own
+crossmatch count reaches 25 in one `(G, Ks)` bin). `region_pooled_ratio`
+now sums every unexcluded tile's own `N_GK_OBS`/`N_GK_PRED` first and
+gates ONLY the pooled total, and `build_region` passes that as the
+joint fit's own `w_pool` -- the same slot `fit_tile_weights` already
+uses for the marginals' SURVEY-wide pool, here filled with this ONE
+region's own pooled joint histogram instead (a survey-wide joint pool
+has no counterpart; item 1 asks for the region level only). `JOINT_SOURCE`
+records, per joint cell, which level actually supplied `W_JOINT`: 0 none,
+1 a tile of this region on its own, 2 this region's tiles pooled. A cell
+unmeasured at BOTH levels is where `population.star_population`'s
+placement rule (owner ruling 2026-09-06, item 2) is actually reached now
+-- previously it was reached far more often, at every joint cell no
+single tile's own crossmatch count happened to clear the floor. Each
+axis is fitted the SAME way: the
 sky's own per-tile, per-bin counts (aggregated from `population.anchor_tiles`'
 per-pixel `N_G_PRED`/`N_KS_PRED`/`N_GK_PRED` and `population.anchor_observed`'s
 young-star-subtracted `N_G_SUB`/`N_KS_SUB`/`N_GK_SUB`) over the model's
@@ -107,7 +128,10 @@ counting floor falls back to the transported slope the same way.
 Product, per region, `bms/anchors/weights_anchors_tile__<Region>.hdf5`:
 `W_JOINT`/`USE_JOINT` (n_tile, n_G, n_Ks), `W_G` (n_tile, n_G), `W_KS`
 (n_tile, n_Ks), `W_REGION_JOINT` (n_G, n_Ks), `W_REGION_G` (n_G),
-`W_REGION_KS` (n_Ks), `EXCLUDED` (n_tile, bool), `G_EDGES`, `KS_EDGES`,
+`W_REGION_KS` (n_Ks), `JOINT_SOURCE` (n_G, n_Ks, int8 -- C21: 0 no joint
+evidence at any level, 1 at least one tile of this region cleared
+`MIN_COUNTS` on its own, 2 no tile did but this region's tiles pooled
+did), `EXCLUDED` (n_tile, bool), `G_EDGES`, `KS_EDGES`,
 `P_KS` (n_tile, n_Ks), `KS_M50` (n_tile), `KS_SCALE` (scalar -- the one
 fixed instrument width every tile fits with, W38); root attrs
 `GRANULE="tile"`, `FAINT_TREND_G_DEX_PER_MAG`, `FAINT_TREND_KS_DEX_PER_MAG`,
@@ -360,6 +384,33 @@ def pooled_tile_log_ratio(n_obs_by_axis, n_pred_by_axis, min_counts=MIN_COUNTS):
     region_log_ratio = (float(np.median(tile_log_ratio[has_evidence]))
                          if np.any(has_evidence) else 0.0)
     return tile_log_ratio, tile_precision, has_evidence, region_log_ratio
+
+
+def region_pooled_ratio(n_obs, n_pred, excluded, min_counts=MIN_COUNTS):
+    """C21 item 1: per bin, the REGION-pooled observed-over-predicted
+    ratio and whether it clears the counting floor -- every unexcluded
+    tile's own count summed FIRST, with no per-tile `low_counts` gate
+    (unlike `fit_tile_weights`' own per-tile mask): a joint `(G, Ks)`
+    cell is two-dimensional and sparse, so almost no single tile's own
+    crossmatch count ever reaches `min_counts` alone while the region's
+    tiles, summed, regularly do. Passed as `fit_tile_weights`' `w_pool`
+    argument for the joint fit (`build_region`), filling the SAME
+    all-tiles-masked fallback slot the marginals' SURVEY-wide pool fills,
+    with this ONE region's own pooled joint histogram instead -- a
+    joint cell has no survey-wide pooled counterpart (item 1 asks for
+    the region level only). Returns `(ratio, populated)`, `(n_bin,)`
+    each; `ratio` is NaN wherever `populated` is False, so a caller that
+    forgets the flag still gets `fit_tile_weights`' own not-finite
+    convention rather than a silently wrong number."""
+    keep = ~np.asarray(excluded, dtype=bool)
+    n_obs = np.asarray(n_obs, dtype=np.float64)
+    n_pred = np.asarray(n_pred, dtype=np.float64)
+    sum_obs = np.where(keep[:, None], n_obs, 0.0).sum(axis=0)
+    sum_pred = np.where(keep[:, None], n_pred, 0.0).sum(axis=0)
+    populated = (sum_obs >= min_counts) & (sum_pred >= min_counts)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(populated, sum_obs / np.where(sum_pred > 0, sum_pred, 1.0), np.nan)
+    return ratio, populated
 
 
 def cluster_excluded_by_ratio(n_obs_gaia, n_pred_gaia, n_obs_ks, n_pred_ks,
@@ -932,7 +983,7 @@ def deep_slope_dex_per_mag(w_region_ks, ks_edges, ks_source, populated_ks,
 
 
 def _extend_shallow_ks_axis(ks_edges, w_ks, w_region_ks, populated_ks, measured_ks,
-                             w_joint, use_joint, w_region_joint, p_ks,
+                             w_joint, use_joint, w_region_joint, p_ks, joint_source,
                              slope_dex_per_mag, n_tile,
                              target_mag=KS_DEEP_CUT_MAG,
                              step_mag=KS_FAINT_EXTENSION_STEP_MAG):
@@ -944,11 +995,12 @@ def _extend_shallow_ks_axis(ks_edges, w_ks, w_region_ks, populated_ks, measured_
     TRANSPORTED survey-wide deep-region slope (module docstring).
     `populated_ks`/`measured_ks`/`use_joint` are False at every new bin
     (no tile or region evidence of its own there -- a disclosed
-    extrapolation, never a fit); `w_joint`/`w_region_joint` are padded
+    extrapolation, never a fit), `joint_source` is 0 (none) there for
+    the same reason (C21); `w_joint`/`w_region_joint` are padded
     with the same Ks marginal value at every Gaia bin, never read since
     `use_joint` stays False.
 
-    Returns the nine Ks-indexed arrays unchanged where the axis already
+    Returns the ten Ks-indexed arrays unchanged where the axis already
     reaches `target_mag` or no transported slope is available (this
     region's own faint edge, or `nan`, respectively) -- the no-op path
     `build_region` also takes for a region with its own deep coverage.
@@ -956,7 +1008,7 @@ def _extend_shallow_ks_axis(ks_edges, w_ks, w_region_ks, populated_ks, measured_
     edge0 = float(ks_edges[-1])
     if edge0 >= target_mag - 1e-9 or not np.isfinite(slope_dex_per_mag):
         return (ks_edges, w_ks, w_region_ks, populated_ks, measured_ks,
-                w_joint, use_joint, w_region_joint, p_ks)
+                w_joint, use_joint, w_region_joint, p_ks, joint_source)
 
     ref_candidates = np.flatnonzero(populated_ks)
     ref_idx = int(ref_candidates[-1]) if ref_candidates.size else int(populated_ks.size - 1)
@@ -966,7 +1018,7 @@ def _extend_shallow_ks_axis(ks_edges, w_ks, w_region_ks, populated_ks, measured_
         # neither this region nor the survey pool has a usable value at
         # its own faint edge either -- nothing to step the slope from.
         return (ks_edges, w_ks, w_region_ks, populated_ks, measured_ks,
-                w_joint, use_joint, w_region_joint, p_ks)
+                w_joint, use_joint, w_region_joint, p_ks, joint_source)
     ref_w_tile = w_ks[:, ref_idx]
 
     n_new = max(1, int(np.ceil((target_mag - edge0) / step_mag)))
@@ -993,6 +1045,7 @@ def _extend_shallow_ks_axis(ks_edges, w_ks, w_region_ks, populated_ks, measured_
             [w_region_joint, np.broadcast_to(new_w_region[None, :], (n_g, n_new_bins))],
             axis=1),
         np.concatenate([p_ks, np.ones((n_tile, n_new_bins), dtype=np.float64)], axis=1),
+        np.concatenate([joint_source, np.zeros((n_g, n_new_bins), dtype=np.int8)], axis=1),
     )
 
 
@@ -1120,21 +1173,36 @@ def build_region(config, region, clusters, members_all, w_pool_g, w_pool_ks, ks_
 
     n_obs_joint_flat = n_obs_joint.reshape(n_tile, n_g * n_ks)
     n_pred_joint_flat = n_pred_joint.reshape(n_tile, n_g * n_ks)
-    # the joint grid has no survey-pooled counterpart (item 1 asks for the
-    # G/Ks marginals only); an all-masked joint bin is left NOT FINITE
-    # (`fit_tile_weights`' no-pool branch), and `use_joint` below never
-    # selects it anyway -- the marginal weights are what a star actually
-    # falls back to (star_population.star_weights), the joint table is a
-    # refinement only where the region's own crossmatch cleared
-    # MIN_COUNTS and the cell was fitted.
-    fit_joint = fit_tile_weights(n_obs_joint_flat, n_pred_joint_flat, excluded)
+    # C21 item 1: the joint grid has no SURVEY-wide pooled counterpart
+    # (item 1 asks for the region level only), but it DOES now have a
+    # REGION-pooled one -- every unexcluded tile's own N_GK_OBS/N_GK_PRED
+    # summed first, gated only at the pooled total
+    # (`region_pooled_ratio`), filling the all-tiles-masked fallback
+    # `fit_tile_weights` already has a slot for. A joint cell unmeasured
+    # at BOTH levels is left NOT FINITE exactly as before.
+    w_pool_joint_region, _ = region_pooled_ratio(n_obs_joint_flat, n_pred_joint_flat, excluded)
+    fit_joint = fit_tile_weights(n_obs_joint_flat, n_pred_joint_flat, excluded, w_pool=w_pool_joint_region)
     w_joint = fit_joint["w"].reshape(n_tile, n_g, n_ks)
     w_region_joint = fit_joint["w_region"].reshape(n_g, n_ks)
-    joint_fitted = fit_joint["populated"].reshape(n_g, n_ks)
-    # decision 3: the joint cell is used only where it was fitted -- a
-    # nonzero observed count alone is not enough, since 1-24 crossmatched
-    # sources, or n_pred < MIN_COUNTS, leave the cell unfitted.
-    use_joint = (n_obs_joint > 0.0) & joint_fitted[None, :, :]
+    # per-bin source code (item 1): 0 none, 1 at least one tile of this
+    # region cleared MIN_COUNTS on its own, 2 no tile did but this
+    # region's tiles pooled did (`fit_tile_weights`' own `populated`/
+    # `pooled` flags, mutually exclusive by construction).
+    joint_tile_fitted = fit_joint["populated"].reshape(n_g, n_ks)
+    joint_pool_fitted = fit_joint["pooled"].reshape(n_g, n_ks)
+    joint_source = np.where(joint_tile_fitted, 1, np.where(joint_pool_fitted, 2, 0)).astype(np.int8)
+    # decision 3, extended (C21 item 1): a TILE-fitted cell is used only
+    # where this tile's own observed count is positive too (unchanged --
+    # 1-24 crossmatched sources at a single tile, or n_pred < MIN_COUNTS
+    # region-wide, still leave it unfitted at that level). A POOL-fitted
+    # cell (no single tile cleared the floor, the region's tiles summed
+    # did) is read by EVERY tile in the region regardless of its own
+    # count: a tile's own zero crossmatch stars there is not evidence
+    # against a value the region's own tiles, pooled, DID measure -- the
+    # placement branch (star_population.star_weights' rule 5) is then
+    # reached only where no joint information exists at any level.
+    use_joint = np.where(joint_pool_fitted[None, :, :], True,
+                          (n_obs_joint > 0.0) & joint_tile_fitted[None, :, :])
 
     faint_g = faint_trend_dex_per_mag(fit_g["w_region"], hist["g_edges"], fit_g["populated"])
 
@@ -1151,9 +1219,9 @@ def build_region(config, region, clusters, members_all, w_pool_g, w_pool_ks, ks_
     # a region whose own KS_EDGES already reaches KS_DEEP_CUT_MAG, or
     # when no transported slope is available at all.
     (ks_edges_out, w_ks_out, w_region_ks_out, populated_ks_out, measured_ks_out,
-     w_joint_out, use_joint_out, w_region_joint_out, p_ks_out) = _extend_shallow_ks_axis(
+     w_joint_out, use_joint_out, w_region_joint_out, p_ks_out, joint_source_out) = _extend_shallow_ks_axis(
         hist["ks_edges"], fit_ks["w"], fit_ks["w_region"], fit_ks["populated"], measured_ks,
-        w_joint, use_joint, w_region_joint, p_ks, faint_ks, n_tile)
+        w_joint, use_joint, w_region_joint, p_ks, joint_source, faint_ks, n_tile)
     n_ks_added = int(ks_edges_out.size) - int(hist["ks_edges"].size)
 
     # acceptance (CODING_RULES.md rule 11): the raw ratio, before
@@ -1188,7 +1256,10 @@ def build_region(config, region, clusters, members_all, w_pool_g, w_pool_ks, ks_
         n_obs_ks=n_obs_ks, n_pred_ks=n_pred_ks, w_ks=w_ks_out, b_ks=fit_ks["b"], w_region_ks=w_region_ks_out,
         populated_ks=populated_ks_out, pooled_ks=fit_ks["pooled"], measured_ks=measured_ks_out,
         n_obs_joint=n_obs_joint, n_pred_joint=n_pred_joint, w_joint=w_joint_out,
-        w_region_joint=w_region_joint_out, use_joint=use_joint_out,
+        w_region_joint=w_region_joint_out, use_joint=use_joint_out, joint_source=joint_source_out,
+        n_joint_tile_fitted=int(np.count_nonzero(joint_tile_fitted)),
+        n_joint_pool_fitted=int(np.count_nonzero(joint_pool_fitted)),
+        n_joint_bins=int(joint_tile_fitted.size),
         excluded=excluded, reason=reason, nearest_cluster=nearest_cluster,
         n_excluded_ratio=int(np.count_nonzero(excluded_ratio)),
         # the old rule's tile count, for the report only (module
@@ -1237,6 +1308,7 @@ def _write_product(config, region, result):
             ("W_JOINT", result["w_joint"]),
             ("USE_JOINT", result["use_joint"]),
             ("W_REGION_JOINT", result["w_region_joint"]),
+            ("JOINT_SOURCE", result["joint_source"]),
             ("EXCLUDED", result["excluded"]),
             ("P_KS", result["p_ks"]),
             ("KS_M50", result["ks_m50"]),
@@ -1324,6 +1396,17 @@ def build(config, regions=None):
                                    ks_pool_lower, ks_pool_upper, transported_ks_slope, cache=cache)
             path = _write_product(config, region, result)
             st.done(path, n_tile=result["n_tile"], max_identity_dev=result["max_identity_dev"])
+
+        # C21 item 1: how many of the joint (G, Ks) cells carry evidence
+        # at each level -- a tile of this region on its own, this
+        # region's tiles pooled, or neither (where star_population's
+        # placement rule, item 2, is actually reached).
+        print(
+            "prior.anchor_weights: %s JOINT_SOURCE over %d cells: tile-fitted=%d "
+            "pool-fitted=%d none=%d"
+            % (region, result["n_joint_bins"], result["n_joint_tile_fitted"],
+               result["n_joint_pool_fitted"],
+               result["n_joint_bins"] - result["n_joint_tile_fitted"] - result["n_joint_pool_fitted"]))
 
         w_all = np.concatenate([result["w_g"].ravel(), result["w_ks"].ravel()])
         print(

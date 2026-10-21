@@ -1045,21 +1045,37 @@ REGISTRY = {
         "KS_EDGES, the anchor reweighting factor on the joint (G, Ks) "
         "grid: the sky's own observed star count over the model's "
         "predicted count in that joint cell, shrunk toward the region-"
-        "pooled value in the log. Read only where USE_JOINT is True for "
-        "that tile and bin; a star without a usable joint cell takes "
-        "the marginal weight instead."),
+        "pooled value in the log, or, where no tile of this region "
+        "cleared the fitting floor on its own but this region's tiles "
+        "pooled did (JOINT_SOURCE 2), the one region-pooled value every "
+        "tile shares there. Read only where USE_JOINT is True for that "
+        "tile and bin; a star without a usable joint cell takes the "
+        "marginal weight instead."),
     ("weights_anchors_tile", "USE_JOINT"): ("boolean",
         "For each tile, each Gaia G bin of G_EDGES and each Ks bin of "
-        "KS_EDGES, True where this region's pooled count in that joint "
-        "cell reached the fitting floor and W_JOINT is therefore an "
-        "actual fit rather than an unfitted placeholder, and the "
-        "matching joint observed count for this tile is positive."),
+        "KS_EDGES, True where this joint cell carries evidence at "
+        "either level (JOINT_SOURCE 1 or 2) and W_JOINT is therefore an "
+        "actual fit rather than an unfitted placeholder -- at level 1 "
+        "(a tile of this region cleared the floor on its own) also "
+        "requiring this tile's own observed joint count to be positive; "
+        "at level 2 (no tile did, but this region's tiles pooled did) "
+        "every tile of the region reads it, since a tile's own zero "
+        "crossmatch stars there is not evidence against a value the "
+        "region's own tiles, summed, did measure (C21 item 1)."),
     ("weights_anchors_tile", "W_REGION_JOINT"): ("dimensionless",
         "One value per joint (G, Ks) cell (shared by every tile): the "
         "region-pooled joint reweighting factor, or, where no tile in "
         "this region has usable evidence in that cell, the survey-"
         "pooled value, or NaN where neither this region nor the survey "
         "has any."),
+    ("weights_anchors_tile", "JOINT_SOURCE"): ("category (0/1/2)",
+        "One value per joint (G, Ks) cell (shared by every tile; C21 "
+        "item 1): 0 no joint evidence at any level (a star landing here "
+        "falls to the marginal/placement rule, population.star_"
+        "population.star_weights' WEIGHT_RULE 5); 1 at least one tile "
+        "of this region cleared MIN_COUNTS on its own; 2 no single tile "
+        "did, but this region's own tiles, summed (region_pooled_"
+        "ratio), did."),
     ("weights_anchors_tile", "EXCLUDED"): ("boolean",
         "One value per tile: True where this tile's own pooled observed-"
         "over-predicted ratio departs from the region's median by more "
