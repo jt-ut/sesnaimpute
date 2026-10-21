@@ -772,6 +772,12 @@ class _RegionProfile:
             self.fb_b = float(fb["GAL_B_DEG"][()])
         with h5py.File(marshall_path, "r") as f:
             m_hpx = f["HPX_PIX_256"][:].astype(np.int64)
+            # this product's OWN distance axis (sky.derived.marshall_
+            # extinction's module docstring): the in-cube points match
+            # `self.dist` exactly, but it continues past the cube's edge
+            # to Marshall's own ~10 kpc reach, where `self.dist` carries
+            # no point -- never assumed equal to `self.dist`.
+            self.marshall_dist = f["DIST_PC"][:].astype(float)
             self.covered = f["COVERED"][:].astype(bool)
             self.marshall_a_k = f["A_K"][:].astype(float)
         if not np.array_equal(m_hpx, self.hpx):
@@ -857,8 +863,8 @@ class _RegionProfile:
         total = np.asarray(total_column_ak, dtype=float)
         scale = np.minimum(1.0, total / a_edge) if a_edge > 0 else np.ones_like(total)
         if covered:
-            m_d = np.interp(d, self.dist, self.marshall_a_k[row])
-            m_edge = float(self.marshall_a_k[row, -1])
+            m_d = np.interp(d, self.marshall_dist, self.marshall_a_k[row])
+            m_edge = float(np.interp(self.d_edge, self.marshall_dist, self.marshall_a_k[row]))
             far = np.maximum(0.0, m_d - m_edge)
             return inside * scale + far
         residual = np.maximum(0.0, total - a_edge * scale)

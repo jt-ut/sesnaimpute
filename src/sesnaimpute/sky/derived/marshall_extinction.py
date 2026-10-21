@@ -10,14 +10,22 @@ what a star at 4-8 kpc really sees. Marshall et al. 2006 (2MASS red giants,
 VizieR J/A+A/453/635, `sky.download.marshall2006`) measured `A_Ks(d)` to
 ~10 kpc on a 15-arcmin grid covering `|l| <= 100`, `|b| <= 10`; this module
 reads that table once and, for every region's own admitted nside-256
-sightline (`sky.derived.profile`'s own product, read for its `DIST_PC`
-grid and sky position so this module never re-derives admission), carries
-the nearest cell's curve onto the SAME distance grid `sky.derived.profile`
-is tabulated on -- linear in distance between Marshall's own bins (plus
-the implicit origin `A_Ks(0) = 0`), held at the last bin's own value past
-it, so `sky.derived.profile._RegionProfile.a_of_d` can read `A_KS` and
-`DIST_PC` off this file row for row with `A_CUM_K`, no re-interpolation
-there.
+sightline (`sky.derived.profile`'s own product, read for its sky position
+so this module never re-derives admission), carries the nearest cell's
+curve onto a distance grid of its own: `sky.derived.profile`'s own
+in-cube `DIST_PC` points (so the two products agree exactly inside the
+cube), extended past the cube's edge by the SAME log-spaced tail
+convention `population.star_population.shared_distance_grid` already
+uses (`TAIL_MAX_PC`, `TAIL_N_NODES`, replicated here rather than imported
+across the sky/population layering) -- `sky.derived.profile`'s own
+`DIST_PC` stops AT the cube's edge, so a star at 4-8 kpc needs grid points
+Marshall's own curve actually varies on, out to Marshall's own ~10 kpc
+reach; linear in distance between Marshall's own bins (plus the implicit
+origin `A_Ks(0) = 0`), held at the last bin's own value past it, so
+`sky.derived.profile._RegionProfile.a_of_d` can read `A_K` off this
+file's own `DIST_PC` for row row -- its OWN axis, distinct from
+`sky.derived.profile`'s `DIST_PC`, which this product never reuses past
+the cube's edge.
 
 `COVERED` is 0 (and `A_KS` all zero) wherever the sightline sits outside
 Marshall's own box (`|l| <= 100`, `|b| <= 10`) OR its nearest cell is
@@ -57,6 +65,15 @@ CELL_DEG = 15.0 / 60.0
 #: `table1.dat`'s own `nb` column, 1-33 -- `c18_diag/c24_tests.py`'s T3/T4
 #: construction, reused exactly).
 _N_BIN_MAX = 33
+
+#: `population.star_population.shared_distance_grid`'s own tail
+#: constants, replicated here (not imported: `sky` never imports
+#: `population`) -- the log-spaced distance axis past the cube's edge
+#: that a star at 4-8 kpc, and Marshall's own ~10 kpc reach, both need
+#: grid points on; `sky.derived.profile`'s own `DIST_PC` stops at the
+#: cube's edge and carries none.
+TAIL_MAX_PC = 10_000.0
+TAIL_N_NODES = 64
 
 
 def _input_dir(config):
@@ -152,9 +169,18 @@ def _build_one_region(config, region, cell_l, cell_b, r_kpc, a_ks):
             "(this module reads its own DIST_PC grid and admitted sightlines)" % profile_path)
     with h5py.File(profile_path, "r") as f:
         hpx = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)
-        dist_pc = np.asarray(f["DIST_PC"][:], dtype=np.float64)
+        profile_dist_pc = np.asarray(f["DIST_PC"][:], dtype=np.float64)
         gl = np.asarray(f["GAL_L_DEG"][:], dtype=np.float64)
         gb = np.asarray(f["GAL_B_DEG"][:], dtype=np.float64)
+
+    # this product's own distance axis: sky.derived.profile's in-cube
+    # points (so the two products agree exactly inside the cube), then a
+    # log-spaced tail out to Marshall's own ~10 kpc reach (module
+    # docstring) -- profile's own DIST_PC stops at the cube's edge and
+    # carries no point past it.
+    d_edge = float(profile_dist_pc[-1])
+    tail = np.geomspace(d_edge, TAIL_MAX_PC, TAIL_N_NODES)[1:]
+    dist_pc = np.concatenate([profile_dist_pc, tail])
 
     in_box = _in_box(gl, gb)
     cell_idx = np.full(hpx.size, -1, dtype=np.int64)

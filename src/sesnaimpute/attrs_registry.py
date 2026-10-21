@@ -2285,8 +2285,13 @@ REGISTRY = {
         "profile_edenhofer_sightline product for this region."),
     ("extinction_marshall_sightline", "DIST_PC"): ("pc",
         "The distance grid along the line of sight that A_K is tabulated "
-        "on: the same grid, the same values, as sky.derived.profile's own "
-        "profile_edenhofer_sightline product's DIST_PC for this region."),
+        "on: sky.derived.profile's own profile_edenhofer_sightline "
+        "product's DIST_PC for this region (so the two products agree "
+        "exactly inside the Edenhofer map's own edge), extended past "
+        "that edge by a log-spaced grid out to Marshall et al. 2006's "
+        "own ~10,000 pc reach -- profile_edenhofer_sightline's own "
+        "DIST_PC stops at the map's edge and carries no point past it, "
+        "so a star at 4-8 kpc needs this product's own, longer axis."),
     ("extinction_marshall_sightline", "A_K"): ("mag A_K",
         "For the matching pixel in HPX_PIX_256 and each distance in "
         "DIST_PC, Marshall et al. 2006's own measured K-band extinction "

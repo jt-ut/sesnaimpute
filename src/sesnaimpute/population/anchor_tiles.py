@@ -795,8 +795,8 @@ def _sightline_profile_pieces(profile_obj, parent, d_pc):
     a_edge = float(profile_obj.a_cum[row, -1])
     covered = bool(profile_obj.covered[row])
     if covered:
-        m_d = np.interp(d_pc, profile_obj.dist, profile_obj.marshall_a_k[row])
-        m_edge = float(profile_obj.marshall_a_k[row, -1])
+        m_d = np.interp(d_pc, profile_obj.marshall_dist, profile_obj.marshall_a_k[row])
+        m_edge = float(np.interp(profile_obj.d_edge, profile_obj.marshall_dist, profile_obj.marshall_a_k[row]))
         tail_or_far = np.maximum(0.0, m_d - m_edge)
     else:
         tail_or_far = profile_obj.tail_shape(d_pc, hpx_pix=parent)
