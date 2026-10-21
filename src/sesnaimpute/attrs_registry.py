@@ -909,6 +909,28 @@ REGISTRY = {
         "contaminated by PAH nebular emission at that assumed 8 micron "
         "completeness limit, from the PAH-contamination probability "
         "curve P(q) read at this star's own tile-dimmed 8 micron flux."),
+    ("population_star_tile", "RULE_COUNT"): ("star count",
+        "C21 item 2: this tile's own star count under each of the six "
+        "WEIGHT_RULE codes (module docstring: 0 joint, 1 G marginal "
+        "only, 2 Ks marginal only, 3 faint end, 4 bright end, 5 both "
+        "marginals, placement-selected) -- the same code every one of "
+        "this tile's stars was assigned by star_weights, counted rather "
+        "than stored star by star."),
+    ("population_star_tile", "RULE_WEIGHT"): ("dimensionless",
+        "C21 item 2: this tile's own sum of W under each of the six "
+        "WEIGHT_RULE codes -- RULE_WEIGHT.sum() equals W.sum() for this "
+        "tile exactly."),
+    ("population_star_tile", "RULE_COUNT_FRAC"): ("dimensionless",
+        "C21 item 2: this region's own star-count share under each of "
+        "the six WEIGHT_RULE codes -- the sum, over every tile_<id> "
+        "group's own RULE_COUNT, normalised to 1 -- so the share of the "
+        "population the placement rule (code 5) decides is a plain "
+        "number in this product, not something a reader has to sum "
+        "RULE_COUNT themselves to see."),
+    ("population_star_tile", "RULE_WEIGHT_FRAC"): ("dimensionless",
+        "C21 item 2: this region's own WEIGHT share under each of the "
+        "six WEIGHT_RULE codes -- the sum, over every tile_<id> group's "
+        "own RULE_WEIGHT, normalised to 1."),
 
     # population.field_stars -- field-stars_trilegal_region: the synthetic
     # TRILEGAL field-star population, retained sample and pre-retention

@@ -865,12 +865,21 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     p_pahc = pahc_contamination_weight(
         stars["fnu_mjy"][star_index][:, IDX_I4], a_i, stars["limit_grid_mjy"], config, curve)
 
+    # C21 item 2: the per-tile count and total weight under each
+    # WEIGHT_RULE code -- the owner ruling 2026-09-06 item 2 placement
+    # rule itself is untouched; this only makes the share of the
+    # population it decides a number in the product.
+    rule_count = np.bincount(rule, minlength=N_WEIGHT_RULES).astype(np.int64)
+    rule_weight = np.zeros(N_WEIGHT_RULES, dtype=np.float64)
+    np.add.at(rule_weight, rule, w.astype(np.float64))
+
     return dict(
         tile=t, n_sightlines=int(sightlines.size), a_tile=a_tile,
         pointing_index=p_idx, tile_l=tile_l, tile_b=tile_b,
         star_index=star_index,
         u=u_i.astype(np.float32), u_front=u_front_tile,
         w=w.astype(np.float32), rule=rule,
+        rule_count=rule_count, rule_weight=rule_weight,
         w_star=w_star.astype(np.float32), w_agb=w_agb.astype(np.float32),
         p_pahc=p_pahc.astype(np.float32),
         mean_u=mean_u, use_joint_any=bool(weights["use_joint"][t].any()),
@@ -996,6 +1005,8 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c):
         f.attrs["F_C"] = F_C
         build_module.write_dataset(f, "LIMIT8_GRID_MJY", result["limit_grid_mjy"],
                                     *REGISTRY[(_STEM, "LIMIT8_GRID_MJY")])
+        total_rule_count = np.zeros(N_WEIGHT_RULES, dtype=np.int64)
+        total_rule_weight = np.zeros(N_WEIGHT_RULES, dtype=np.float64)
         for tile_result in result["tiles"]:
             grp = f.create_group("tile_%d" % tile_result["tile"])
             # section 5.1's Omega_sim = n_pointings * Omega_pointing: the
@@ -1017,8 +1028,25 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c):
                 ("LOG10_B_AGB_C", result["log10_b_agb_c"][si].astype(np.float32)),
                 ("LOG10_B_AGB_O", result["log10_b_agb_o"][si].astype(np.float32)),
                 ("P_PAHC", tile_result["p_pahc"]),
+                # C21 item 2: per-tile count and total weight under each
+                # WEIGHT_RULE code (module docstring's codes 0-5).
+                ("RULE_COUNT", tile_result["rule_count"]),
+                ("RULE_WEIGHT", tile_result["rule_weight"]),
             ):
                 build_module.write_dataset(grp, name, data, *REGISTRY[(_STEM, name)])
+            total_rule_count += tile_result["rule_count"]
+            total_rule_weight += tile_result["rule_weight"]
+
+        # C21 item 2: the region-wide share of the population under each
+        # WEIGHT_RULE code, as a plain number in the product -- the sum
+        # of every tile's own RULE_COUNT/RULE_WEIGHT above, normalised.
+        build_module.write_dataset(f, "RULE_COUNT_FRAC",
+                                    total_rule_count / max(int(total_rule_count.sum()), 1),
+                                    *REGISTRY[(_STEM, "RULE_COUNT_FRAC")])
+        build_module.write_dataset(
+            f, "RULE_WEIGHT_FRAC",
+            total_rule_weight / max(float(total_rule_weight.sum()), 1e-300),
+            *REGISTRY[(_STEM, "RULE_WEIGHT_FRAC")])
     return path
 
 
@@ -1035,6 +1063,12 @@ def _report(result):
 
     all_rule = np.concatenate([t["rule"] for t in tiles])
     rule_frac = np.bincount(all_rule, minlength=N_WEIGHT_RULES) / all_rule.size
+    # C21 item 2: the WEIGHT share under each rule code (sigma RULE_WEIGHT
+    # over sigma W), not just the star-count share above -- the two
+    # already differ (a star under one rule can carry a systematically
+    # higher or lower W than the region average).
+    total_rule_weight_report = np.sum([t["rule_weight"] for t in tiles], axis=0)
+    rule_weight_frac = total_rule_weight_report / total_rule_weight_report.sum()
 
     sigma_w = np.array([float(t["w"].sum()) for t in tiles])
     ratio_per_tile = sigma_w / result["n_raw"]
@@ -1117,7 +1151,7 @@ def _report(result):
         n_tile=n_tile, a_tile_min=float(a_tile.min()), a_tile_max=float(a_tile.max()),
         n_pointing=result["n_pointing"], frac_pointing_changed=frac_pointing_changed,
         u300_median=float(np.median(u300)), u1000_median=float(np.median(u1000)),
-        rule_frac=rule_frac, sigma_w_over_n_raw=sigma_w_over_n_raw,
+        rule_frac=rule_frac, rule_weight_frac=rule_weight_frac, sigma_w_over_n_raw=sigma_w_over_n_raw,
         region_anchor_ratio=result["region_anchor_ratio"],
         max_decrease=max_decrease, max_over_one=max_over_one,
         n_no_joint_tiles=len(no_joint_tiles), n_marginal_checked=n_marginal_checked,
@@ -1186,6 +1220,8 @@ def build(config, regions=None):
                rep["n_no_joint_tiles"], rep["n_marginal_checked"], rep["max_marginal_dev"],
                rep["frac_no_joint_non_marginal"],
                path))
+        weight_rule_str = " ".join("%d=%.3f" % (k, rep["rule_weight_frac"][k]) for k in range(N_WEIGHT_RULES))
+        print("star_population: %s: weight_rule_weight_frac(0-5)=[%s]" % (region, weight_rule_str))
         print(
             "star_population: %s: STAR/deg2=%.3f AGB/deg2=%.3f PAHC/deg2@median_limit=%.3f "
             "evolved_frac(stars)=%.4f evolved_frac(weight)=%.4f "
