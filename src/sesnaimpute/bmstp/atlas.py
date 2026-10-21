@@ -83,6 +83,7 @@ from sesnaimpute.build import run
 from sesnaimpute.catalog import completeness as completeness_module
 from sesnaimpute.catalog import limits as limits_module
 from sesnaimpute.granules import access
+from sesnaimpute.population import column_nodes as column_nodes_module
 from sesnaimpute.population import h2s as h2s_module
 from sesnaimpute.population import knot_rate
 from sesnaimpute.population import pahc_curve
@@ -767,6 +768,68 @@ def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, pixel_row, band_p
             frac_b, frac_bright3_b, frac_bright10_b, s_member)
 
 
+def catalogued_fraction_nodes(a_col_nodes, u, flux0, w, f_lim, pixel_row, band_params, config,
+                               weight_pix, tick=None):
+    """C23 (within-pixel column): `catalogued_fraction`'s own quadrature,
+    averaged with equal weight `1/N_COL_NODES` over each pixel's own
+    column nodes (`population.column_nodes`, `a_col_nodes` (n_pix,
+    n_nodes)) instead of over the pixel's single column value --
+    STAR/AGB/PAHC's own member quadrature (`_build_one_tile`), the only
+    classes this brief moves onto the node representation. Runs
+    `catalogued_fraction` once per node -- the SAME existing pixel-batch/
+    member-chunk machinery `catalogued_fraction` already is, not a new
+    one -- since a member's own catalogued probability is linear in
+    which single column value dims it, so this is `E[p_cat | Q_pix]`'s
+    own discrete quadrature, exact up to the node count's own
+    resolution, never a draw. At `n_nodes == 1` this is one
+    `catalogued_fraction` call, bit for bit (`1.0 * x == x`)."""
+    n_nodes = a_col_nodes.shape[1]
+    inv_n = 1.0 / n_nodes
+    frac = np.zeros(a_col_nodes.shape[0])
+    frac_bright3 = np.zeros(a_col_nodes.shape[0])
+    frac_bright10 = np.zeros(a_col_nodes.shape[0])
+    s_member = np.zeros(u.size)
+    for k in range(n_nodes):
+        f, f3, f10, s = catalogued_fraction(
+            a_col_nodes[:, k], u, flux0, w, f_lim, pixel_row, band_params, config, weight_pix,
+            tick=(tick if k == n_nodes - 1 else None))
+        frac += inv_n * f
+        frac_bright3 += inv_n * f3
+        frac_bright10 += inv_n * f10
+        s_member += inv_n * s
+    return frac, frac_bright3, frac_bright10, s_member
+
+
+def catalogued_fraction_pair_nodes(a_col_nodes, u, flux0, w_a, w_b, f_lim, pixel_row, band_params,
+                                    config, weight_pix):
+    """C23: `catalogued_fraction_pair`'s own quadrature, averaged with
+    equal weight `1/N_COL_NODES` over each pixel's own column nodes --
+    STAR/PAHC's own shared-member quadrature (`_build_one_tile`), the
+    SAME averaging `catalogued_fraction_nodes` does for AGB."""
+    n_nodes = a_col_nodes.shape[1]
+    inv_n = 1.0 / n_nodes
+    n_pix = a_col_nodes.shape[0]
+    frac_a = np.zeros(n_pix)
+    frac_bright3_a = np.zeros(n_pix)
+    frac_bright10_a = np.zeros(n_pix)
+    frac_b = np.zeros(n_pix)
+    frac_bright3_b = np.zeros(n_pix)
+    frac_bright10_b = np.zeros(n_pix)
+    s_member = np.zeros(u.size)
+    for k in range(n_nodes):
+        (fa, f3a, f10a, fb, f3b, f10b, s) = catalogued_fraction_pair(
+            a_col_nodes[:, k], u, flux0, w_a, w_b, f_lim, pixel_row, band_params, config, weight_pix)
+        frac_a += inv_n * fa
+        frac_bright3_a += inv_n * f3a
+        frac_bright10_a += inv_n * f10a
+        frac_b += inv_n * fb
+        frac_bright3_b += inv_n * f3b
+        frac_bright10_b += inv_n * f10b
+        s_member += inv_n * s
+    return (frac_a, frac_bright3_a, frac_bright10_a,
+            frac_b, frac_bright3_b, frac_bright10_b, s_member)
+
+
 def _pahc_weight(limit8_grid, p_pahc, x):
     """`P_PAHC` interpolated to the flux limit `x` (a scalar mJy, the
     tile's own mean I4 limit -- an approximation of sec. 4's per-pixel
@@ -840,7 +903,7 @@ def _collapse_star_members(u, flux0, w_star, w_star_only, w_pahc_only):
     return u_cell, flux0_cell, w_cell_star_only, w_cell_pahc_only, n_before, n_after
 
 
-def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_in_tile, pixel_row_in_tile,
+def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_nodes_in_tile, f_lim_in_tile, pixel_row_in_tile,
                      agb_pool, coverage_in_tile):
     """One tile's `{cls: (frac, density, frac_bright3, frac_bright10,
     n_cat_cell_tile, n_cell_tile)}` for STAR/AGB/PAHC, over its own admitted pixels,
@@ -857,7 +920,21 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     with every shell template of THEIR OWN chemistry (sec. 5.2: the
     star's own `F_4.5` is the shell flux, not TRILEGAL's photosphere),
     each template's eight `F_REF` rescaled so its own 4.5 um reference
-    flux equals the star's `F_4.5`. `pixel_row_in_tile` (n_pix_in_tile,)
+    flux equals the star's `F_4.5`.
+
+    `a_col_nodes_in_tile` (n_pix_in_tile, N_COL_NODES) (C23, within-pixel
+    column): each admitted pixel's own column-distribution nodes
+    (`population.column_nodes`), replacing the single per-pixel column
+    `bmstp.atlas._pixel_column` used to supply here -- STAR/AGB/PAHC's
+    own member quadrature (`catalogued_fraction_nodes`/
+    `catalogued_fraction_pair_nodes`) now averages over them with weight
+    `1/N_COL_NODES`, the catalogued probability, the bright tests and the
+    N_CELL/N_CAT_CELL sums alike (everything built from `frac`/
+    `frac_bright3`/`frac_bright10`/`s_member` below). GAL/YSO/H2S/PAHN
+    are unaffected (they place in the cloud their own way and keep
+    reading the pixel's single column, `a_col`/`a_col_gas`, unchanged).
+
+    `pixel_row_in_tile` (n_pix_in_tile,)
     is this tile's own slice of `bmstp.atlas._depth_grid`'s row index
     into `PIXEL_CURVE_<band>` (`catalogued_probability`'s own docstring):
     opened once here (`_completeness_band_params`, this worker's
@@ -952,8 +1029,8 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         w_star_u, w_pahc_u = w_star_c[m_union], w_pahc_c[m_union]
         log10_f45_u = np.log10(flux0_u[:, IDX_I2])
         (frac_star, fb3_star, fb10_star,
-         frac_pahc, fb3_pahc, fb10_pahc, s_member) = catalogued_fraction_pair(
-            a_col_in_tile, u_u, flux0_u, w_star_u, w_pahc_u, f_lim_in_tile,
+         frac_pahc, fb3_pahc, fb10_pahc, s_member) = catalogued_fraction_pair_nodes(
+            a_col_nodes_in_tile, u_u, flux0_u, w_star_u, w_pahc_u, f_lim_in_tile,
             pixel_row_in_tile, band_params, config, weight_pix)
         for cls, density, w_u, frac, frac_bright3, frac_bright10 in (
                 ("STAR", density_star, w_star_u, frac_star, fb3_star, fb10_star),
@@ -1020,8 +1097,8 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         flux0_agb = np.concatenate(flux0_parts, axis=0)
         w_agb_member = np.concatenate(w_parts)
         f45_agb_member = np.concatenate(f45_parts)
-        frac_agb, frac_agb_bright3, frac_agb_bright10, s_member_agb = catalogued_fraction(
-            a_col_in_tile, u_agb, flux0_agb, w_agb_member, f_lim_in_tile,
+        frac_agb, frac_agb_bright3, frac_agb_bright10, s_member_agb = catalogued_fraction_nodes(
+            a_col_nodes_in_tile, u_agb, flux0_agb, w_agb_member, f_lim_in_tile,
             pixel_row_in_tile, band_params, config, weight_pix)
         w_sum_agb = float(w_agb_member.sum())
         c_m_agb = density_agb * (w_agb_member / w_sum_agb) * s_member_agb
@@ -1953,6 +2030,15 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         coverage = _coverage(config, region, pix)
         a_col, arm = _pixel_column(config, region, pix)
         a_col_gas = _pixel_gas_column(config, region, pix)
+        # C23 (within-pixel column): every admitted pixel's own column
+        # nodes -- STAR/AGB/PAHC's own member quadrature averages over
+        # these instead of the single `a_col` above (`_build_one_tile`'s
+        # own docstring); GAL/YSO/H2S/PAHN keep reading `a_col`/
+        # `a_col_gas` unchanged. `population.column_nodes` is built over
+        # a superset of this module's own admitted pixel set (the SAME
+        # `catalog.limits.completeness` reader both read), so every row
+        # resolves.
+        a_col_nodes = column_nodes_module.nodes_for_pixels(config, region, pix)
         tile_of_pix, n_tile_filled = _pixel_tile(config, region, pix)
 
         n_cat = {c: np.full(n_pix, np.nan, dtype=np.float64) for c in CLASSES}
@@ -2206,7 +2292,7 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
                 tile_id = piece[1]
                 m = usable & (tile_of_pix == tile_id)
                 return piece, (m, _build_one_tile(
-                    config, region, tile_id, pix[m], a_col[m], f_lim[m], pixel_row[m], agb_pool,
+                    config, region, tile_id, pix[m], a_col_nodes[m], f_lim[m], pixel_row[m], agb_pool,
                     coverage[m]))
             if kind == "GAL":
                 idx = gal_idx_chunks[piece[1]]

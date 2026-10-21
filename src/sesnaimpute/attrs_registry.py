@@ -180,7 +180,12 @@ REGISTRY = {
         "in this file."),
     ("prior_atlas_hpx512", "A_COL_K"): ("mag A_K",
         "For the matching pixel in HPX_PIX_512, the adopted extinction "
-        "column every class's density is dimmed by."),
+        "column: the single value GAL, YSO, H2S and PAHN are still "
+        "dimmed by (they place a member in the cloud their own way, not "
+        "by this pixel's own column alone). STAR, AGB and PAHC instead "
+        "average over the pixel's own column nodes (C23, population/"
+        "anchors/column-nodes), which are spread around this same value "
+        "but are not read from this column."),
     ("prior_atlas_hpx512", "COVERAGE"): ("dimensionless",
         "For the matching pixel in HPX_PIX_512, the catalog's own "
         "observed footprint fraction (the catalog coverage product): "
