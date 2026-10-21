@@ -88,11 +88,14 @@ from sesnaimpute.sky.derived import column as column_module
 _STEM = "column-nodes_anchors_hpx512"
 
 #: The brief proposes 8 and asks for the smaller of 8/16 that passes the
-#: tail-share identity at 1e-3 -- measured on Vela D (coordinator's own
-#: convergence check, this unit's report): 8 and 16 nodes gave the same
-#: tail shares to well inside 1e-3, so 8 is kept (the smaller node count
-#: that passes).
-N_COL_NODES = 8
+#: tail-share identity at 1e-3, measured on Vela D. Measured (this unit's
+#: convergence check, population.anchor_tiles + population.star_population
+#: rebuilt at each node count): the model's Ks 12-14 share with
+#: a_local*kappa_g > 5 mag is 0.0000 at both 8 and 16; the share with
+#: J-Ks > 1.5 is 0.0439 at 8 against 0.0458 at 16, a difference of 0.0019
+#: -- past the brief's own 1e-3 bar. 8 does NOT pass, so 16 is kept (the
+#: next node count the brief named, not a further search past it).
+N_COL_NODES = 16
 
 
 def _equal_weight_quantiles(n):
