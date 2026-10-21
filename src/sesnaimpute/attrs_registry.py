@@ -875,16 +875,26 @@ REGISTRY = {
     ("population_star_tile", "XI"): ("dimensionless, 0 to 1",
         "For every star this tile draws, its placement fraction along "
         "its own drawn pixel's (HPX_PIX_512) extinction profile: "
-        "u = A(d)/A(inf) at the star's own distance, on that pixel's own "
-        "parent sightline, clipped at 1 (the far wall of the pencil "
-        "beam). A consumer forms the star's own extinction as a real "
-        "source's adopted column times this fraction. On a sightline "
-        "covered by Marshall et al. 2006 (briefs/round4_2026-10-20/"
-        "C25_far_column.md), a star beyond the Edenhofer map's own edge "
-        "can genuinely see more extinction than this pixel's own column "
-        "implies -- that extra reddening is already in this star's own "
-        "weight (W) and magnitudes, not in XI, which this product always "
-        "keeps at or below 1."),
+        "u = A(d)/(its own drawn pixel's column) at the star's own "
+        "distance, on that pixel's own parent sightline, clipped at 1 "
+        "(the far wall of the pencil beam) -- a DEPTH coordinate, read "
+        "by bmstp as the star's own placement mark, never the "
+        "extinction itself. A star beyond the Edenhofer map's own edge "
+        "(C26 owner ruling 2026-10-21, briefs/round4_2026-10-20/"
+        "C26_profile_adopted.md) can genuinely see more extinction than "
+        "this pixel's own column implies -- that extra reddening is in "
+        "A_STAR_K, this star's own stored extinction, not in XI, which "
+        "this product always keeps at or below 1."),
+    ("population_star_tile", "A_STAR_K"): ("mag A_K",
+        "For every star this tile draws, its own local K-band extinction "
+        "at its own distance, on its own drawn pixel's (HPX_PIX_512) "
+        "extinction profile: the number this star's own predicted "
+        "magnitudes, weight and PAHC contamination probability are all "
+        "formed from (C26 owner ruling 2026-10-21). A reader never "
+        "reconstructs this by multiplying a column from elsewhere by "
+        "XI: beyond the Edenhofer map's own edge this star's own far-"
+        "field reddening can exceed what any single pixel's own column "
+        "times XI would give."),
     ("population_star_tile", "W"): ("dimensionless",
         "For every star this tile draws, its total anchor reweighting "
         "factor: the STAR anchor's own Gaia/2MASS joint or marginal "
@@ -2273,48 +2283,121 @@ REGISTRY = {
         "The tail e-folding distance (TAIL_EFOLD_PC) evaluated at this "
         "region's source-weighted mean sky direction."),
 
-    # sky.derived.marshall_extinction -- extinction_marshall_sightline (C25,
-    # briefs/round4_2026-10-20/C25_far_column.md): Marshall et al. 2006's own
-    # measured K-band extinction to a star, by distance, carried onto this
-    # region's own admitted sightlines -- the far-field curve a covered
-    # sightline's column follows beyond the Edenhofer 2023 cube's own edge,
-    # in place of the exponential dust-disc tail (sky.derived.profile) there.
-    ("extinction_marshall_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
-        "This region's own admitted nside-256 pixel numbers, the same "
-        "pixels and the same row order as sky.derived.profile's own "
-        "profile_edenhofer_sightline product for this region."),
-    ("extinction_marshall_sightline", "DIST_PC"): ("pc",
-        "The distance grid along the line of sight that A_K is tabulated "
-        "on: sky.derived.profile's own profile_edenhofer_sightline "
-        "product's DIST_PC for this region (so the two products agree "
-        "exactly inside the Edenhofer map's own edge), extended past "
-        "that edge by a log-spaced grid out to Marshall et al. 2006's "
-        "own ~10,000 pc reach -- profile_edenhofer_sightline's own "
-        "DIST_PC stops at the map's edge and carries no point past it, "
-        "so a star at 4-8 kpc needs this product's own, longer axis."),
-    ("extinction_marshall_sightline", "A_K"): ("mag A_K",
+    # sky.derived.profile -- profile_adopted_sightline (C26, owner ruling
+    # 2026-10-21, briefs/round4_2026-10-20/C26_profile_adopted.md): the ONE
+    # canonical cumulative K-band extinction curve per admitted sightline,
+    # on the 2MASS stellar scale, every consumer now reads. Edenhofer et al.
+    # 2023's own shape inside their 3-D map's edge, rescaled to this
+    # sightline's own adopted extinction column; beyond the map's edge,
+    # Combined19's (Bovy et al. 2016, mwdust) own measured INCREMENT --
+    # Marshall et al. 2006 (2MASS red giants) where its own survey box
+    # covers the sightline, Bayestar19 (Green et al. 2019) elsewhere it
+    # reaches, Drimmel et al. 2003 only where neither exists. Replaces the
+    # retired extinction_marshall_sightline product and the per-read
+    # residual/tail-shape/scale algebra it fed (C25 and earlier): a reader
+    # rescales the in-cube part by its own column over this file's
+    # A_EDGE_K and adds the far part unscaled (sky.derived.profile.
+    # _RegionProfile.a_of_d). C26b (owner ruling 2026-10-21b): the far
+    # curve is the MEAN over a sightline's 16 nside-1024 child-pixel
+    # centres, never a point lookup at the sightline's own centre (an
+    # exact HEALPix hierarchy vertex, a genuine implementation-dependent
+    # degeneracy C26's own identity 1 found); the in-cube amplitude is
+    # partitioned against the far map's own measurement of the far part,
+    # never capped at 1 (the retired module's down-branch is gone:
+    # Edenhofer's own column always stands at least).
+    ("profile_adopted_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
+        "This region's own admitted nside-256 pixel numbers (nested "
+        "ordering). Row i here is row i of every other per-sightline "
+        "dataset in this file. Each one is a WHOLE pixel, not a point: "
+        "several datasets below (DIST_PC's far part, A_CUM_K's far "
+        "part, FAR_MAP, FAR_RELIABLE_PC) are the MEAN or majority over "
+        "the pixel's own 16 nside-1024 sub-pixels, not a single lookup "
+        "at the pixel's own centre."),
+    ("profile_adopted_sightline", "GAL_L_DEG"): ("deg",
+        "Galactic longitude of the matching pixel's center in HPX_PIX_256."),
+    ("profile_adopted_sightline", "GAL_B_DEG"): ("deg",
+        "Galactic latitude of the matching pixel's center in HPX_PIX_256."),
+    ("profile_adopted_sightline", "DIST_PC"): ("pc",
+        "The distance grid along the line of sight, starting at 0 pc, "
+        "that A_CUM_K is tabulated on for every sightline in this file: "
+        "the Edenhofer 3-D map's own in-cube points out to its edge "
+        "(D_EDGE_PC), then a log-spaced grid out to Combined19's own "
+        "~10,000 pc reach."),
+    ("profile_adopted_sightline", "A_CUM_K"): ("mag A_K",
         "For the matching pixel in HPX_PIX_256 and each distance in "
-        "DIST_PC, Marshall et al. 2006's own measured K-band extinction "
-        "to a star at that distance, from their 2MASS-red-giant survey: "
-        "linear interpolation, in distance, between their nearest cell's "
-        "own measured points, held flat past their farthest measured "
-        "point. All zero where COVERED is False -- an outside reader "
-        "measuring the column beyond the Edenhofer map's own edge should "
-        "read this value only on a covered sightline."),
-    ("extinction_marshall_sightline", "COVERED"): ("boolean",
-        "For the matching pixel in HPX_PIX_256, whether this sightline "
-        "sits inside Marshall et al. 2006's own measured survey area "
-        "(within 100 degrees of the Galactic centre in longitude, within "
-        "10 degrees of the Galactic plane in latitude) AND has a measured "
-        "cell within one cell width (15 arcmin) of it. False everywhere "
-        "for a region outside their survey, or at a sightline their grid "
-        "does not reach even inside it; A_K is exactly zero wherever this "
-        "is False."),
-    ("extinction_marshall_sightline", "SEPARATION_DEG"): ("deg",
-        "For the matching pixel in HPX_PIX_256, the angular separation to "
-        "the nearest cell of Marshall et al. 2006's own measured grid used "
-        "for A_K -- NaN where this sightline sits outside their survey "
-        "area entirely (no separation was measured)."),
+        "DIST_PC, this sightline's own cumulative K-band extinction from "
+        "the observer out to that distance. Inside the Edenhofer map's "
+        "own edge (distance <= D_EDGE_PC): the map's own measured shape, "
+        "scaled so its value AT the edge equals A_EDGE_K -- A_EDGE_K is "
+        "never below the map's own raw (unscaled) column there, only at "
+        "or above it (see A_EDGE_K's own reading for the rule that sets "
+        "it). Beyond the edge: A_EDGE_K plus Combined19's own measured "
+        "INCREMENT past the edge along this same sightline's 16 child "
+        "pixels' own mean curve -- never Combined19's own absolute "
+        "value, and never capped at any column: a reader's own total "
+        "column, divided into this number, can exceed 1 out here (the "
+        "far reddening really is more than a near pixel's own cloud "
+        "column implies)."),
+    ("profile_adopted_sightline", "A_EDGE_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256, A_CUM_K's own value at "
+        "D_EDGE_PC: the LARGER of (a) the Edenhofer map's own raw "
+        "(unscaled) column at its edge and (b) this sightline's own "
+        "adopted extinction column (the catalogue's own extinction_"
+        "adopted_sightline product) minus the far map's own measured "
+        "reach beyond the edge (IN_CUBE_EXCESS_K's own construction) -- "
+        "the owner's precedence rule (the emission column over the "
+        "cube's own integral), with the far map's own measurement "
+        "deciding how much of any excess the cube must carry versus the "
+        "far field already accounts for. A reader rescales the in-cube "
+        "part of A_CUM_K by its own total column divided by this "
+        "number, capped at 1 (so u <= 1 inside the cube for that "
+        "reader's own column)."),
+    ("profile_adopted_sightline", "D_EDGE_PC"): ("pc",
+        "The Edenhofer 3-D map's own edge distance, ONE number shared by "
+        "every sightline of every region (the map's own fixed radial "
+        "grid): the distance A_CUM_K's in-cube, Edenhofer-measured part "
+        "ends and Combined19's own far increment begins."),
+    ("profile_adopted_sightline", "IN_CUBE_EXCESS_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256, A_EDGE_K minus the "
+        "Edenhofer map's own raw (unscaled) column at the cube's edge: "
+        "how much of this sightline's own adopted extinction column was "
+        "placed INSIDE the cube because the far map's own measurement "
+        "beyond the edge did not account for it all (owner ruling "
+        "2026-10-21b) -- zero where the far map alone already covers "
+        "the sightline's own excess (typically the Galactic plane, "
+        "where Marshall or Bayestar measures the far column directly), "
+        "positive at high Galactic latitude where the far map goes "
+        "flat well short of the sightline's own total column."),
+    ("profile_adopted_sightline", "FAR_MAP"): ("code",
+        "For the matching pixel in HPX_PIX_256, which of Combined19's "
+        "own three constituent surveys supplies the far column beyond "
+        "D_EDGE_PC along this sightline: the code the MAJORITY of its "
+        "16 nside-1024 child pixels share (see FAR_MAP_MIXED where they "
+        "do not all agree), by Combined19's own published build rule "
+        "(computed from each child's own sky position and the "
+        "Bayestar19 survey's own footprint, never guessed): 1 Marshall "
+        "et al. 2006 (2MASS red giants, within 100 degrees of the "
+        "Galactic centre in longitude and 10 degrees of the plane in "
+        "latitude), 2 Bayestar19 (Green et al. 2019, wherever it has a "
+        "measured pixel outside that box), 3 Drimmel et al. 2003 (an "
+        "all-sky smooth dust-disc model, wherever neither of the above "
+        "reaches)."),
+    ("profile_adopted_sightline", "FAR_MAP_MIXED"): ("boolean",
+        "For the matching pixel in HPX_PIX_256, True where this "
+        "sightline's own 16 nside-1024 child pixels do not all share "
+        "the same FAR_MAP code -- the sightline straddles a boundary of "
+        "Combined19's own build rule (almost always Marshall's own box "
+        "edge). FAR_MAP itself is still the majority code among the 16; "
+        "this flag says that majority was not unanimous."),
+    ("profile_adopted_sightline", "FAR_RELIABLE_PC"): ("pc",
+        "For the matching pixel in HPX_PIX_256, the MEDIAN, over "
+        "whichever of its 16 child pixels FAR_MAP's own majority code "
+        "classifies Bayestar, of Bayestar19's own per-pixel "
+        "reliable-distance limit (their own quoted maximum distance "
+        "modulus with a converged fit, converted to a distance); NaN "
+        "where FAR_MAP's majority is not Bayestar, or where none of the "
+        "Bayestar-classified children carries such a limit in their "
+        "published file."),
 
     ("depth_edenhofer_region", "REGION"): ("region name",
         "The name of the region this row describes, in the fixed thirty-"

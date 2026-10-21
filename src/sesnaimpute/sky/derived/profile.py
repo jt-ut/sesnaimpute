@@ -13,32 +13,65 @@ read off the same profiles: the half-width between the 16th/84th percentile
 of extinction-weighted distance inside the structure nearest the region's
 canon distance.
 
-`read(config, region)` returns the evaluator: `a_of_d(d_pc, hpx_pix=None,
-*, total_column_ak)` is the cumulative extinction to distance `d_pc`, with
-the tail's amplitude set by the caller's own total column (never a value
-read out of the file); `u(d_pc, ...)` is `A(d)/A(inf)` per spec 1.4 -- it
-divides by the sightline's total column, never by the profile's measured
-back edge. Per spec 1.4's last paragraph, where the map's own cumulative
-extinction at its edge exceeds the caller's total column, `a_of_d` scales
-the in-map profile down to that column and zeroes the tail, so `u <= 1`
-everywhere; the same rule is applied once already at build time (the
-stored profile and `TAIL_RESIDUAL_K`), so a read against the sightline's
-own build-time column and a read against a source's own adopted column
-agree. `tail_shape`, `sightline_row`, `distance_knots_pc` and
-`cloud_back_edge_pc` are the supporting pieces a class shape needs.
+`read(config, region)` returns the evaluator (`_RegionProfile`, C26
+below): `a_of_d(d_pc, hpx_pix, *, total_column_ak)` is the cumulative
+extinction to distance `d_pc`; `u(d_pc, ...)` is `A(d)/total_column_ak`.
 
-C25 (briefs/round4_2026-10-20/C25_far_column.md): on a sightline
-`sky.derived.marshall_extinction` marks COVERED, the far column beyond
-the map's own edge follows Marshall et al. 2006's own measured A_Ks(d)
-instead of the exponential dust-disc tail -- uncapped at the caller's
-`total_column_ak`, so `u` CAN exceed 1 there (the located cause of the
-missing red tail of distant background stars, C24
-briefs/round4_2026-10-20/C24_locate_red_tail.md: beyond the Edenhofer
-cube's edge, capping a star's column at the pixel's own cloud column
-undercounts a plane sightline's real total line-of-sight column by a
-factor of ~2). An uncovered sightline (most regions outside the Galactic
-plane) keeps today's construction, `u <= 1`, unchanged. See
-`_RegionProfile.a_of_d`'s own docstring for the exact formula.
+C25 (briefs/round4_2026-10-20/C25_far_column.md) located the missing red
+tail of distant background stars (beyond the Edenhofer cube's edge,
+capping a star's column at the pixel's own cloud column undercounts a
+plane sightline's real total line-of-sight column by a factor of ~2) and
+repaired it with Marshall et al. 2006's own measured far column on
+covered sightlines; C25's own report found the repair still left the
+atlas's STAR/AGB members and `population.detection_correlation` reading
+a CLIPPED placement fraction, never seeing the far reddening a star
+beyond the map's edge really carries.
+
+C26 (owner ruling 2026-10-21, briefs/round4_2026-10-20/
+C26_profile_adopted.md): ONE canonical 3-D extinction curve per admitted
+sightline, built once here and read everywhere, replaces C25's per-read
+residual/tail/scale algebra outright. `profile_adopted_sightline`
+(`build`'s second product, `_build_adopted_one_region`) stores, per
+sightline, Edenhofer's own in-cube shape rescaled so its edge value
+equals the sightline's own adopted extinction column (the same `min(1,
+total/a_edge)` rule the retired algebra applied), and beyond the cube's
+edge Combined19's (Bovy et al. 2016, mwdust) own INCREMENT past that
+edge -- Marshall 2006 where its own box covers the sightline, Bayestar19
+(Green et al. 2019) elsewhere it reaches, Drimmel 2003 only where
+neither exists, `FAR_MAP` recording which, computed from Combined19's
+own build rule, never guessed. A reader (`_RegionProfile.a_of_d`) does
+one thing: rescale the in-cube part by its own total column over the
+sightline's, add the far part unscaled -- `u = A(d) / total` can exceed
+1 beyond the edge, same as C25, now on EVERY sightline rather than only
+a Marshall-covered one. `profile_edenhofer_sightline` (`build`'s first
+product, `_build_one_region`, UNCHANGED by C26) stays exactly as it
+was: the raw Edenhofer map's own extraction, the input view this
+module's own depth measurement (and a handful of consumers that only
+need the map's own in-cube shape, `bmstp.shapes`/`sample_cloud`/
+`population.yso`'s cloud-interval construction -- the cloud interval
+sits well inside the cube, so they read nothing new) still use;
+`profile_adopted_sightline` is the canonical product every OTHER
+consumer (population, bmstp's atlas/density/shapes member placement)
+reads now. `sky.download.marshall2006` and `sky.derived.
+marshall_extinction` are RETIRED (Combined19 already contains
+Marshall's own table).
+
+C26b (owner ruling 2026-10-21b, two repairs at the source). (1) A
+sightline's far curve is never read at the sightline's own CENTRE --
+that point is an exact HEALPix hierarchy vertex at every nside finer
+than 256, where independent `ang2pix` implementations (healpy here,
+mwdust's own bespoke C binding at its own query time) can legitimately
+disagree (C26's own identity-1 finding). `pixel_mean_far_curve` instead
+reads the sightline's 16 nside-1024 CHILD-pixel centres (Combined19's
+own finest level, so never a vertex of anything) and means them;
+`FAR_MAP` is the children's own majority code, `FAR_MAP_MIXED` flags a
+sightline whose children disagree, `FAR_RELIABLE_PC` is the Bayestar-
+classified children's own median. (2) The in-cube amplitude is no
+longer capped at 1 (the retired module's own `down`-branch): the far
+map's own measurement of the column beyond the cube's edge decides how
+much of the sightline's adopted column the cube must carry instead --
+`A_CUM_K(d_edge) = max(a_edge_raw, total - far_total)`, never below the
+map's own raw column, `IN_CUBE_EXCESS_K` recording the difference.
 """
 
 import os
@@ -48,8 +81,10 @@ import healpy as hp
 import numpy as np
 from astropy.io import fits
 from joblib import Parallel, delayed
+from scipy.interpolate import InterpolatedUnivariateSpline
 
 from sesnaimpute import build as build_module
+from sesnaimpute import constants
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute import tables as tables_module
@@ -59,6 +94,10 @@ from sesnaimpute.config import product_path
 _PROFILE_STEM = "profile_edenhofer_sightline"
 _DEPTH_STEM = "depth_edenhofer_region"
 _DEPTH_READINGS = {name: value for (stem, name), value in REGISTRY.items() if stem == _DEPTH_STEM}
+
+#: C26 (owner ruling 2026-10-21): the canonical adopted-profile product's
+#: own file stem (`sky/derived/adopted/profile_adopted_sightline__<R>.hdf5`).
+_ADOPTED_STEM = "profile_adopted_sightline"
 
 # --- the unit chain (spec 1.4) -------------------------------------------
 #
@@ -619,6 +658,19 @@ def _join_total_column(config, region, admitted_pix):
     return a_inf[order][capped]
 
 
+def sightline_total_column(config, region, hpx_pix):
+    """This one sightline's own adopted extinction column (`sky/derived/
+    adopted/extinction/sightline`'s own `A_K`) -- the `total` `_build_
+    adopted_one_region` rescales its in-cube profile against at build
+    time. C26 (owner ruling 2026-10-21): `_RegionProfile` no longer
+    stores this per sightline itself (the far column beyond the cube's
+    edge is baked into `A_CUM_K` already, so a caller needing THIS
+    sightline's own column as its own `total_column_ak` -- rather than a
+    pixel's or a source's own, different column -- reads it here,
+    directly off the same product `_build_adopted_one_region` read."""
+    return float(_join_total_column(config, region, np.asarray([hpx_pix]))[0])
+
+
 def _build_one_region(config, region, canon, input_dir):
     admitted_pix, nsrc = _admitted_sightlines(config, region)
     a_inf = _join_total_column(config, region, admitted_pix)
@@ -638,6 +690,13 @@ def _build_one_region(config, region, canon, input_dir):
     weight = region_weight(nsrc)
     measured = measure_region(canon.d_r_pc, inner, splice, dist_new, rho_dist_new, weight)
     a_out, depth = measured["a_out"], measured["depth"]
+    # C26 (owner ruling 2026-10-21): the RAW, unscaled splice-grid profile
+    # -- `_build_adopted_one_region` rescales it its own way, by the
+    # sightline's own adopted column alone, never through the residual/
+    # tail-shape algebra below (which stays, unchanged, for this file's
+    # own profile_edenhofer_sightline output). A plain copy, captured
+    # before that algebra mutates `a_out` in place two lines down.
+    a_out_raw_for_adopted = a_out.copy()
 
     d_edge = dist_new[-1]
     a_edge_raw = a_out[:, -1]
@@ -706,22 +765,357 @@ def _build_one_region(config, region, canon, input_dir):
     return dict(region=region, d_r_pc=canon.d_r_pc, sigma_d_pc=canon.sigma_pc,
                 d_peak_pc=depth["d_peak_pc"], d_lo_pc=depth["d_lo_pc"], d_hi_pc=depth["d_hi_pc"],
                 sigma_depth_pc=depth["sigma_depth_pc"], fwhm_pc=depth["fwhm_pc"], depth_ok=bool(depth["ok"]),
-                rescaled_frac=rescaled_frac)
+                rescaled_frac=rescaled_frac,
+                # C26: the pieces `_build_adopted_one_region` needs, so it
+                # builds the canonical profile from the SAME one pass over
+                # the Edenhofer maps instead of re-reading them.
+                admitted_pix=admitted_pix, gl=gl, gb=gb, dist_new=dist_new,
+                a_out_raw=a_out_raw_for_adopted, a_inf=a_inf)
+
+
+
+# ---------------------------------------------------------------------------
+# C26 (owner ruling 2026-10-21): the canonical adopted-profile product --
+# Combined19's hierarchical-HEALPix pixel lookup and linear-in-distance-
+# modulus interpolation, reproduced with h5py+healpy alone (no mwdust
+# import at run time, this module's own docstring).
+# ---------------------------------------------------------------------------
+
+#: Bovy et al. 2016's own 120-node distance-modulus grid (mwdust's
+#: `Combined19.__init__`'s own `self._distmods`): the SAME grid
+#: Bayestar19's `bayestar2019.h5` names in its `DM_bin_edges` attribute --
+#: one shared axis for both files this module reads.
+_DISTMODS_120 = np.linspace(4.0, 18.875, 120)
+
+#: The far-field tail's own log-spaced grid past the Edenhofer cube's
+#: edge, out to Combined19/Marshall's own ~10 kpc reach -- C25's
+#: `sky.derived.marshall_extinction`'s own `TAIL_MAX_PC`/`TAIL_N_NODES`,
+#: and (C26) `population.star_population.shared_distance_grid`'s own
+#: former tail, now built ONCE here: both read `profile_adopted_
+#: sightline`'s own `DIST_PC` instead of reconstructing it.
+ADOPTED_TAIL_MAX_PC = 10_000.0
+ADOPTED_TAIL_N_NODES = 64
+
+#: Combined19's own build rule (mwdust/util/combine_dustmaps19.py:
+#: `inMar`), reproduced here so `FAR_MAP` is COMPUTED, never guessed: the
+#: box Marshall et al. 2006's own survey covers (their sec. 2, widened by
+#: half a Combined19 nside-512 cell to the exact box the build script
+#: tests on that grid).
+FAR_MAP_L_MAX_DEG = 100.125
+FAR_MAP_B_MAX_DEG = 10.125
+
+#: `FAR_MAP` codes (module docstring, C26 "The product"): which of
+#: Combined19's own three constituents supplies a sightline's far column.
+FAR_MAP_MARSHALL = 1
+FAR_MAP_BAYESTAR = 2
+FAR_MAP_DRIMMEL = 3
+
+#: C26b (owner ruling 2026-10-21b, item 1): a sightline is the WHOLE
+#: nside-256 pixel, not its centre point; its own centre is an exact
+#: HEALPix hierarchy VERTEX (where several finer pixels meet) at every
+#: nside finer than 256, a genuine implementation-dependent degeneracy
+#: (C26's own identity-1 finding). Combined19's own finest level is
+#: nside 1024 (`_hierarchical_lookup_rows` never sees anything finer),
+#: so the sightline's 16 nside-1024 CHILD-pixel centres (NESTED: 1024 /
+#: 256 = 4, so 4**2 = 16 children) are never a vertex of any Combined19
+#: pixel at any level -- the degeneracy disappears by construction. The
+#: far curve this module reads is these 16 points' own mean.
+CHILD_NSIDE = 1024
+CHILDREN_PER_SIGHTLINE = (CHILD_NSIDE // NSIDE) ** 2
+
+
+def _hierarchical_lookup_rows(pixel_info, l_deg, b_deg):
+    """Row index into `pixel_info` (a `(nside, healpix_index, ...)`
+    recarray, Bovy's own hierarchical-HEALPix layout) for each `(l_deg,
+    b_deg)`, NESTED ordering, finest `nside` tried first --
+    `mwdust.HierarchicalHealpixMap._lbIndx`'s own algorithm, reproduced
+    with h5py+healpy alone (module docstring: no mwdust import at run
+    time). `-1` where no level of the hierarchy carries a pixel there."""
+    l_deg = np.atleast_1d(np.asarray(l_deg, dtype=np.float64))
+    b_deg = np.atleast_1d(np.asarray(b_deg, dtype=np.float64))
+    nsides = np.unique(np.asarray(pixel_info["nside"]))[::-1]
+    row = np.full(l_deg.size, -1, dtype=np.int64)
+    found = np.zeros(l_deg.size, dtype=bool)
+    for nside in nsides:
+        sel = pixel_info["nside"] == nside
+        hidx = np.asarray(pixel_info["healpix_index"])[sel].astype(np.int64)
+        rows = np.flatnonzero(sel)
+        if hidx.size == 0:
+            continue
+        order = np.argsort(hidx)
+        hidx_sorted = hidx[order]
+        rows_sorted = rows[order]
+        pidx = hp.ang2pix(int(nside), l_deg, b_deg, nest=True, lonlat=True)
+        j = np.searchsorted(hidx_sorted, pidx)
+        j_clamped = np.minimum(j, hidx_sorted.size - 1)
+        ok = (~found) & (hidx_sorted[j_clamped] == pidx)
+        row[ok] = rows_sorted[j_clamped[ok]]
+        found |= ok
+    return row
+
+
+def _dist_kpc_to_distmod(d_kpc):
+    """Bovy's own distance-modulus convention (mwdust `_evaluate`):
+    `distmod = 5 log10(d_kpc) + 10`."""
+    return 5.0 * np.log10(np.asarray(d_kpc, dtype=np.float64)) + 10.0
+
+
+def _spline_curve_ak(ebv_row, dm_query):
+    """mwdust's own `interpk=1` reconstruction
+    (`scipy.interpolate.InterpolatedUnivariateSpline(distmods, best_fit[i],
+    k=1)`, `mwdust.HierarchicalHealpixMap._evaluate`) at `dm_query`,
+    converted from Combined19's own E(B-V) (SFD scale) to K-band
+    extinction (`constants.AK_PER_EBV_SFD_KS`): the SAME scipy spline
+    mwdust itself calls, so this reproduces its interpolation exactly;
+    only the pixel LOOKUP above is this module's own code."""
+    spline = InterpolatedUnivariateSpline(_DISTMODS_120, ebv_row, k=1)
+    return spline(dm_query) * constants.AK_PER_EBV_SFD_KS
+
+
+def combined19_curve_ak(combined19_path, l_deg, b_deg, dm_query):
+    """`(n_sightline, n_query)` A_Ks, Combined19's own value at each
+    `(l_deg[i], b_deg[i])` and each distance modulus in `dm_query`,
+    read from the root's own `combine19.h5` (`sky.download.combined19`)
+    by h5py alone: `pixel_info` (small, read whole) locates each
+    sightline's own row by `_hierarchical_lookup_rows`; `best_fit` (the
+    3.9 GB array) is read only at the DISTINCT rows this region's own
+    sightlines actually need (module docstring: never the whole array)."""
+    l_deg = np.atleast_1d(np.asarray(l_deg, dtype=np.float64))
+    b_deg = np.atleast_1d(np.asarray(b_deg, dtype=np.float64))
+    with h5py.File(combined19_path, "r") as f:
+        pixel_info = f["pixel_info"][:]
+        rows = _hierarchical_lookup_rows(pixel_info, l_deg, b_deg)
+        if np.any(rows < 0):
+            bad = np.flatnonzero(rows < 0)[:5]
+            raise ValueError(
+                "sky.derived.profile: %d sightline(s) have no Combined19 pixel at any "
+                "hierarchy level, e.g. (l=%r, b=%r)"
+                % (int(np.count_nonzero(rows < 0)), l_deg[bad].tolist(), b_deg[bad].tolist()))
+        uniq_rows, inverse = np.unique(rows, return_inverse=True)
+        best_fit = f["best_fit"]
+        curves = np.empty((uniq_rows.size, dm_query.size), dtype=np.float64)
+        for i, r in enumerate(uniq_rows):
+            ebv_row = np.asarray(best_fit[int(r), :], dtype=np.float64)
+            curves[i] = _spline_curve_ak(ebv_row, dm_query)
+    return curves[inverse]
+
+
+def bayestar_lookup(bayestar_path, l_deg, b_deg):
+    """`(row, far_reliable_pc)`: each `(l_deg, b_deg)`'s own row into
+    Bayestar19's `bayestar2019.h5` pixel_info (same hierarchical lookup,
+    its own native pixelization -- a DIFFERENT file from Combined19's),
+    `-1` where it carries none, and that row's own `DM_reliable_max`
+    converted to pc (`10**(DM/5 + 1)`, the ordinary distance-modulus
+    inverse) -- NaN where the row is `-1`."""
+    l_deg = np.atleast_1d(np.asarray(l_deg, dtype=np.float64))
+    b_deg = np.atleast_1d(np.asarray(b_deg, dtype=np.float64))
+    with h5py.File(bayestar_path, "r") as f:
+        pixel_info = f["pixel_info"][:]
+        rows = _hierarchical_lookup_rows(pixel_info, l_deg, b_deg)
+        reliable_pc = np.full(l_deg.size, np.nan, dtype=np.float64)
+        ok = rows >= 0
+        dm_reliable_max = np.asarray(pixel_info["DM_reliable_max"])[rows[ok]].astype(np.float64)
+        reliable_pc[ok] = 10.0 ** (dm_reliable_max / 5.0 + 1.0)
+    return rows, reliable_pc
+
+
+def a_local_from_pieces(inside, far, a_edge, total_column_ak):
+    """The one expression `_RegionProfile.a_of_d` and `population.
+    anchor_tiles._magnitudes_from_pieces` both call (C26 item 3: "no
+    second derivation"): `inside` is `A_CUM_K` interpolated at
+    `min(d, D_EDGE)`, `far` is `max(0, A_CUM_K(d) - A_EDGE_K)` (already
+    0 for `d <= D_EDGE`) -- both cached per sightline by the caller,
+    since neither depends on the pixel's own `total_column_ak`;
+    `a_edge` is `A_EDGE_K` for that sightline. Returns `inside *
+    min(1, total/a_edge) + far`."""
+    total = np.asarray(total_column_ak, dtype=float)
+    scale = np.minimum(1.0, total / a_edge) if a_edge > 0 else np.ones_like(total)
+    return inside * scale + far
+
+
+def far_map_codes(l_deg, b_deg, bayestar_rows):
+    """`FAR_MAP` (module docstring): Combined19's own build rule --
+    Marshall's box first, else Bayestar where `bayestar_rows >= 0`
+    (`bayestar_lookup`'s own row), else Drimmel."""
+    l_deg = np.asarray(l_deg, dtype=np.float64)
+    b_deg = np.asarray(b_deg, dtype=np.float64)
+    in_marshall = ((np.abs(b_deg) < FAR_MAP_B_MAX_DEG)
+                   & ((l_deg < FAR_MAP_L_MAX_DEG) | (l_deg > 360.0 - FAR_MAP_L_MAX_DEG)))
+    return np.where(in_marshall, FAR_MAP_MARSHALL,
+                     np.where(np.asarray(bayestar_rows) >= 0, FAR_MAP_BAYESTAR,
+                              FAR_MAP_DRIMMEL)).astype(np.int8)
+
+
+def sightline_children_lb(admitted_pix):
+    """`(l_deg, b_deg)`, each `(n_sightline, CHILDREN_PER_SIGHTLINE)`:
+    every admitted nside-256 sightline's own nside-`CHILD_NSIDE`
+    child-pixel centres (NESTED), module docstring item 1 above."""
+    children = (np.asarray(admitted_pix, dtype=np.int64)[:, np.newaxis] * CHILDREN_PER_SIGHTLINE
+                + np.arange(CHILDREN_PER_SIGHTLINE, dtype=np.int64)[np.newaxis, :])
+    l, b = hp.pix2ang(CHILD_NSIDE, children.ravel(), nest=True, lonlat=True)
+    return l.reshape(children.shape), b.reshape(children.shape)
+
+
+def pixel_mean_far_curve(combined19_path, bayestar_path, admitted_pix, dm_query):
+    """`(curve_mean, far_map, far_map_mixed, far_reliable_pc)` for every
+    admitted sightline (C26b owner ruling 2026-10-21b, item 1): the
+    sightline's own far curve is the MEAN, over its 16 child-pixel
+    centres (`sightline_children_lb`), of each centre's own Combined19
+    curve (`combined19_curve_ak`) at `dm_query` -- never a single point
+    lookup at the sightline's own (degenerate) centre.
+
+    `far_map` is the map code the MAJORITY of the 16 children share;
+    `far_map_mixed` is True where they do not all agree (a sightline
+    straddling Marshall's own box edge). `far_reliable_pc` is the MEDIAN
+    of `bayestar_lookup`'s own per-child reliable distance, over only
+    the children the majority vote itself classifies Bayestar -- NaN
+    where the majority is not Bayestar, or where none of those children
+    carries a Bayestar pixel of its own."""
+    l_children, b_children = sightline_children_lb(admitted_pix)
+    n_sl, n_child = l_children.shape
+    flat_l, flat_b = l_children.ravel(), b_children.ravel()
+
+    curves_flat = combined19_curve_ak(combined19_path, flat_l, flat_b, dm_query)
+    curve_mean = curves_flat.reshape(n_sl, n_child, dm_query.size).mean(axis=1)
+
+    bayestar_rows_flat, reliable_flat = bayestar_lookup(bayestar_path, flat_l, flat_b)
+    far_map_children = far_map_codes(flat_l, flat_b, bayestar_rows_flat).reshape(n_sl, n_child)
+    reliable_children = reliable_flat.reshape(n_sl, n_child)
+
+    far_map = np.empty(n_sl, dtype=np.int8)
+    far_map_mixed = np.zeros(n_sl, dtype=np.int8)
+    far_reliable_pc = np.full(n_sl, np.nan, dtype=np.float64)
+    for i in range(n_sl):
+        codes, counts = np.unique(far_map_children[i], return_counts=True)
+        majority = codes[np.argmax(counts)]
+        far_map[i] = majority
+        far_map_mixed[i] = int(codes.size > 1)
+        if majority == FAR_MAP_BAYESTAR:
+            bay_mask = far_map_children[i] == FAR_MAP_BAYESTAR
+            vals = reliable_children[i][bay_mask]
+            vals = vals[np.isfinite(vals)]
+            if vals.size:
+                far_reliable_pc[i] = float(np.median(vals))
+    return curve_mean, far_map, far_map_mixed, far_reliable_pc
+
+
+def _build_adopted_one_region(config, region, admitted_pix, gl, gb, dist_new, a_out_raw, a_inf,
+                               dustmaps_dir):
+    """Writes `profile_adopted_sightline` for `region` (C26 owner ruling
+    2026-10-21, C26b 2026-10-21b, module docstring): `a_out_raw`/
+    `dist_new`/`a_inf` are `_build_one_region`'s own raw splice-grid
+    profile, distance grid and sightline total column -- the SAME one
+    pass over the Edenhofer maps, never re-read. `gl`/`gb` (the
+    sightline's own CENTRE) are kept only for GAL_L_DEG/GAL_B_DEG and
+    `row_of_lb`; the far curve itself never samples the centre (C26b
+    item 1: it is an exact HEALPix hierarchy vertex at every nside finer
+    than 256, a genuine degeneracy between independent implementations
+    -- `pixel_mean_far_curve` reads the sightline's 16 nside-1024 CHILD
+    centres instead, never a vertex of anything, and means them).
+
+    In-cube amplitude (C26b item 2, owner ruling 2026-10-21b): the
+    owner's precedence rule is the emission column over the cube's own
+    integral; the far map's own measurement of the far part decides how
+    much of the sightline's adopted column belongs inside the cube.
+    `far_total = C19(10,000 pc) - C19(d_edge)` (the pixel-mean curve's
+    own total reach beyond the edge); `A_CUM_K(d_edge) = max(a_edge_raw,
+    a_inf - far_total)` -- where the far map already carries the excess
+    (the Galactic plane), the cube keeps Edenhofer's own raw column
+    exactly; where it does not (high latitude, the far map flat), the
+    excess the far map cannot account for is placed inside the cube
+    instead, in Edenhofer's own shape, scaled up by `A_CUM_K(d_edge) /
+    a_edge_raw` -- never scaled DOWN any more (the retired module's
+    `down`-branch; Edenhofer's own column always stands at least). Past
+    the edge the far increment is added exactly as before."""
+    d_edge = float(dist_new[-1])
+    a_edge_raw = a_out_raw[:, -1]
+
+    tail = np.geomspace(d_edge, ADOPTED_TAIL_MAX_PC, ADOPTED_TAIL_N_NODES)[1:]
+    dist_incube = np.concatenate([[0.0], dist_new])
+    dist_pc = np.concatenate([dist_incube, tail])
+
+    dm_query = _dist_kpc_to_distmod(np.concatenate([[d_edge], tail]) / 1000.0)
+    combined19_path = os.path.join(dustmaps_dir, "combined19", "combine19.h5")
+    bayestar_path = os.path.join(dustmaps_dir, "bayestar", "bayestar2019.h5")
+    curves_ak, far_map, far_map_mixed, far_reliable_pc = pixel_mean_far_curve(
+        combined19_path, bayestar_path, admitted_pix, dm_query)
+
+    far_total = np.maximum(0.0, curves_ak[:, -1] - curves_ak[:, 0])
+    a_edge_k = np.maximum(a_edge_raw, a_inf - far_total)
+    in_cube_excess_k = a_edge_k - a_edge_raw
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scale_build = np.where(a_edge_raw > 0.0, a_edge_k / a_edge_raw, 1.0)
+    a_cum_incube = np.concatenate(
+        [np.zeros((admitted_pix.size, 1)), a_out_raw * scale_build[:, np.newaxis]], axis=1)
+    # a_cum_incube[:, -1] equals a_edge_k by construction (the scale was
+    # built from it); re-derived from the concatenation, not reassigned,
+    # so a build bug in the concatenation would show up as a mismatch.
+    assert np.allclose(a_cum_incube[:, -1], a_edge_k, rtol=1e-10, atol=1e-12), \
+        "profile.build: A_CUM_K's own in-cube edge value disagrees with A_EDGE_K"
+
+    far_increment = np.maximum(0.0, curves_ak[:, 1:] - curves_ak[:, :1])
+    a_cum_tail = a_edge_k[:, np.newaxis] + far_increment
+    a_cum_k = np.concatenate([a_cum_incube, a_cum_tail], axis=1)
+
+    out_path = product_path(config, "sky/derived", "adopted", "profile", "sightline", region=region)
+    real_root = os.path.realpath(config.data_root)
+    if not os.path.realpath(out_path).startswith(real_root + os.sep):
+        raise ValueError("profile.build: refusing to write outside the data root %s: %s"
+                          % (real_root, out_path))
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with h5py.File(out_path, "w") as f:
+        f.attrs["GRANULE"] = "sightline"
+        for name, data in (
+            ("HPX_PIX_256", admitted_pix),
+            ("GAL_L_DEG", gl),
+            ("GAL_B_DEG", gb),
+            ("DIST_PC", dist_pc),
+            ("A_CUM_K", a_cum_k),
+            ("A_EDGE_K", a_edge_k),
+            ("D_EDGE_PC", d_edge),
+            ("IN_CUBE_EXCESS_K", in_cube_excess_k),
+            ("FAR_MAP", far_map),
+            ("FAR_MAP_MIXED", far_map_mixed),
+            ("FAR_RELIABLE_PC", far_reliable_pc),
+        ):
+            build_module.write_dataset(f, name, data, *REGISTRY[(_ADOPTED_STEM, name)])
+
+    n_sl = admitted_pix.size
+    frac_marshall = float(np.mean(far_map == FAR_MAP_MARSHALL))
+    frac_bayestar = float(np.mean(far_map == FAR_MAP_BAYESTAR))
+    frac_drimmel = float(np.mean(far_map == FAR_MAP_DRIMMEL))
+    in_cube_share = float(np.sum(in_cube_excess_k) / np.sum(a_inf))
+    print("profile.build_adopted: %s: %d sightlines, far map Marshall %.1f%% / Bayestar %.1f%% / "
+          "Drimmel %.1f%% (%d mixed), FAR_RELIABLE_PC present for %d/%d Bayestar sightline(s), "
+          "in-cube excess share of the adopted column=%.4f"
+          % (region, n_sl, 100.0 * frac_marshall, 100.0 * frac_bayestar, 100.0 * frac_drimmel,
+             int(np.sum(far_map_mixed)), int(np.count_nonzero(np.isfinite(far_reliable_pc))),
+             int(np.count_nonzero(far_map == FAR_MAP_BAYESTAR)), in_cube_share))
+    return dict(region=region, frac_marshall=frac_marshall, frac_bayestar=frac_bayestar,
+                frac_drimmel=frac_drimmel, in_cube_share=in_cube_share)
 
 
 def build(config, regions=None):
-    """Writes each region's sightline profile and one survey-wide depth
-    file (spec 1.4). Regions run in a joblib pool; each worker streams
-    the two Edenhofer maps once, for its own region's occupied pixels."""
+    """Writes each region's sightline profile (`profile_edenhofer_
+    sightline`, unchanged by C26), its canonical adopted profile
+    (`profile_adopted_sightline`, C26 owner ruling 2026-10-21 -- see the
+    module docstring), and one survey-wide depth file (spec 1.4). Regions
+    run in a joblib pool; each worker streams the two Edenhofer maps once,
+    for its own region's occupied pixels, and builds BOTH products from
+    that one pass."""
     names = regions or [r.name for r in regions_module.REGIONS]
     canon_by_name = regions_module.REGIONS_BY_NAME
     input_dir = _input_dir(config)
+    dustmaps_dir = config.inputs["dustmaps_data"]
     with progress_module.Stage("sky.derived.profile") as st:
         n_regions = len(names)
         n_done = [0]
 
         def _one(name):
             r = _build_one_region(config, name, canon_by_name[name], input_dir)
+            _build_adopted_one_region(
+                config, name, r["admitted_pix"], r["gl"], r["gb"], r["dist_new"],
+                r["a_out_raw"], r["a_inf"], dustmaps_dir)
             n_done[0] += 1
             st.tick(n_done[0], n_regions, "regions")
             return r
@@ -745,56 +1139,30 @@ def build(config, regions=None):
 
 
 class _RegionProfile:
-    """One region's evaluator, loaded from its `profile_edenhofer_sightline`,
-    `extinction_marshall_sightline` and `depth_edenhofer_region` files.
+    """One region's evaluator (C26 owner ruling 2026-10-21, briefs/
+    round4_2026-10-20/C26_profile_adopted.md), loaded from its canonical
+    `profile_adopted_sightline` and `depth_edenhofer_region` files. The
+    retired per-read residual/tail-shape/scale algebra (C25 and earlier)
+    is gone: the adopted product already carries the sightline's own
+    in-cube scale and far-field increment baked in; a read rescales the
+    in-cube part by its own caller's total column and adds the far part
+    unscaled -- see `a_of_d`'s own docstring for the one expression."""
 
-    C25 (briefs/round4_2026-10-20/C25_far_column.md): `marshall_path`'s own
-    `COVERED`/`A_K`, row-for-row the SAME sightlines in the SAME order as
-    `profile_path`'s own `HPX_PIX_256` (`sky.derived.marshall_extinction`
-    builds it directly off this region's own profile file, never
-    re-deriving admission) -- asserted, never assumed."""
-
-    def __init__(self, profile_path, marshall_path, back_edge_pc, front_edge_pc):
+    def __init__(self, profile_path, back_edge_pc, front_edge_pc):
         with h5py.File(profile_path, "r") as f:
             self.dist = f["DIST_PC"][:].astype(float)
             self.a_cum = f["A_CUM_K"][:].astype(float)
-            self.a_inf = f["A_INF_K"][:].astype(float)
+            self.a_edge = f["A_EDGE_K"][:].astype(float)
             self.hpx = f["HPX_PIX_256"][:].astype(np.int64)
             self.gl = f["GAL_L_DEG"][:].astype(float)
             self.gb = f["GAL_B_DEG"][:].astype(float)
-            self.tail_mode = f["TAIL_MODE"][:].astype(int)
-            self.tail_scale = f["TAIL_SCALE_PC"][:].astype(float)
-            fb = f["fallback"]
-            self.fb_a_cum = fb["A_CUM_K"][:].astype(float)
-            self.fb_mode = int(fb["TAIL_MODE"][()])
-            self.fb_scale = float(fb["TAIL_SCALE_PC"][()])
-            self.fb_l = float(fb["GAL_L_DEG"][()])
-            self.fb_b = float(fb["GAL_B_DEG"][()])
-        with h5py.File(marshall_path, "r") as f:
-            m_hpx = f["HPX_PIX_256"][:].astype(np.int64)
-            # this product's OWN distance axis (sky.derived.marshall_
-            # extinction's module docstring): the in-cube points match
-            # `self.dist` exactly, but it continues past the cube's edge
-            # to Marshall's own ~10 kpc reach, where `self.dist` carries
-            # no point -- never assumed equal to `self.dist`.
-            self.marshall_dist = f["DIST_PC"][:].astype(float)
-            self.covered = f["COVERED"][:].astype(bool)
-            self.marshall_a_k = f["A_K"][:].astype(float)
-        if not np.array_equal(m_hpx, self.hpx):
-            raise ValueError(
-                "profile.read: %r's own HPX_PIX_256 disagrees with %r's -- the Marshall "
-                "product was not built from this region's own profile file" % (marshall_path, profile_path))
+            self.far_map = f["FAR_MAP"][:].astype(np.int8)
+            self.far_reliable_pc = f["FAR_RELIABLE_PC"][:].astype(float)
+            self.d_edge = float(f["D_EDGE_PC"][()])
         self.order = np.argsort(self.hpx)
         self.hpx_sorted = self.hpx[self.order]
-        self.d_edge = float(self.dist[-1])
         self.back_edge_pc = back_edge_pc
         self.front_edge_pc = front_edge_pc
-        self._quad_cache = {}
-
-    def _quad(self, key, l_deg, b_deg):
-        if key not in self._quad_cache:
-            self._quad_cache[key] = disc_quadrature(l_deg, b_deg, self.d_edge)
-        return self._quad_cache[key]
 
     def sightline_row(self, hpx_pix):
         """Row index/indices into this region's profile for `hpx_pix`
@@ -807,78 +1175,44 @@ class _RegionProfile:
                              % np.unique(p[bad])[:5].tolist())
         return self.order[j]
 
-    def tail_shape(self, d_pc, hpx_pix=None):
-        """The dimensionless tail shape: 0 at the profile edge, 1 at
-        infinity, geometry only (no amplitude)."""
-        d = np.asarray(d_pc, dtype=float)
-        if hpx_pix is None:
-            if self.fb_mode == MODE_VERTICAL:
-                return tail_shape_vertical(d, self.d_edge, self.fb_scale)
-            s, f = self._quad("fallback", self.fb_l, self.fb_b)
-            return np.clip(np.interp(d, s, f, left=0.0, right=1.0), 0.0, 1.0)
+    def a_of_d(self, d_pc, hpx_pix, *, total_column_ak):
+        """Cumulative extinction A_K from 0 to `d_pc` (C26 owner ruling
+        2026-10-21): `A_CUM_K(min(d, D_EDGE)) * min(1, total/A_EDGE_K) +
+        max(0, A_CUM_K(d) - A_EDGE_K)` -- one expression, interpolated on
+        `DIST_PC`, valid for `d_pc` in or beyond the cube without a
+        separate branch.
+
+        The in-cube term rescales the stored, already-edge-normalised
+        profile by the CALLER's own total column over the stored
+        `A_EDGE_K` -- the same sightline value at the common call (a
+        source or pixel reading its own sightline's column back), a
+        DIFFERENT value where a caller's own column differs from the
+        sightline's (a pixel's own mean column, C26 identity 2). The
+        `min(1, ...)` keeps the in-cube part at or below what the
+        caller's own total column implies -- the same "so u <= 1 inside
+        the cube" invariant every design through C25 kept, now against
+        `A_EDGE_K` rather than a second, raw edge value.
+
+        The second term is Combined19's own INCREMENT past the cube's
+        edge (already baked into `A_CUM_K` beyond `D_EDGE_PC` at build
+        time, `_build_adopted_one_region`): `A_CUM_K(d) - A_EDGE_K` is
+        exactly 0 for `d <= D_EDGE_PC` (the in-cube profile is
+        non-decreasing and reaches `A_EDGE_K` exactly at the edge), so
+        `max(0, ...)` contributes nothing there and the far increment
+        unscaled beyond it -- `u = A(d)/total` CAN exceed 1 beyond the
+        edge (owner ruling: Combined19's own measurement there is not
+        capped at any pixel's or source's own column), on every
+        sightline now, not only a Marshall-covered one (C25)."""
         row = int(np.asarray(self.sightline_row(hpx_pix)))
-        if int(self.tail_mode[row]) == MODE_VERTICAL:
-            return tail_shape_vertical(d, self.d_edge, float(self.tail_scale[row]))
-        s, f = self._quad(row, self.gl[row], self.gb[row])
-        return np.clip(np.interp(d, s, f, left=0.0, right=1.0), 0.0, 1.0)
-
-    def a_of_d(self, d_pc, hpx_pix=None, *, total_column_ak):
-        """Cumulative extinction A_K from 0 to `d_pc`.
-
-        Inside the map's edge (`d_pc <= d_edge`), unchanged (spec 1.4):
-        the measured in-map profile scaled by `scale = min(1,
-        total_column_ak / A_edge)` -- where the stored `A_edge` exceeds
-        the caller's own `total_column_ak`, the in-map profile is scaled
-        down so `u <= 1` there.
-
-        Beyond it, on a COVERED sightline (C25, briefs/round4_2026-10-20/
-        C25_far_column.md: `self.covered`, from `sky.derived.
-        marshall_extinction`), the far column follows Marshall et al.
-        2006's own measured `A_Ks(d)` instead of the exponential dust-disc
-        tail: `A_edge * scale + max(0, M(d) - M(d_edge))`, Marshall's own
-        increment past the map's edge, uncapped at `total_column_ak` and
-        never multiplied by `tail_shape` -- `max(0, ...)` is also exactly
-        0 for `d <= d_edge`, since `M` is non-decreasing, so this one
-        expression is valid for any `d_pc`, in or beyond the cube, without
-        a separate branch on `d`. `u = A(d)/A(inf)` CAN exceed 1 here
-        (C25 item 4): a covered sightline's own adopted total column,
-        `total_column_ak`, can understate what Marshall's own measurement
-        implies a star beyond the map's edge really sees.
-
-        On an UNCOVERED sightline (or the no-`hpx_pix` fallback, which
-        carries no Marshall curve of its own), unchanged: `A_edge * scale
-        + residual * tail_shape(d)`, `residual = max(0, total_column_ak -
-        A_edge * scale)`, the exponential dust-disc tail -- `u <= 1`
-        exactly as before."""
         d = np.asarray(d_pc, dtype=float)
-        if hpx_pix is None:
-            inside = np.interp(d, self.dist, self.fb_a_cum)
-            a_edge = float(self.fb_a_cum[-1])
-            covered, row = False, None
-        else:
-            row = int(np.asarray(self.sightline_row(hpx_pix)))
-            inside = np.interp(d, self.dist, self.a_cum[row])
-            a_edge = float(self.a_cum[row, -1])
-            covered = bool(self.covered[row])
-        total = np.asarray(total_column_ak, dtype=float)
-        scale = np.minimum(1.0, total / a_edge) if a_edge > 0 else np.ones_like(total)
-        if covered:
-            m_d = np.interp(d, self.marshall_dist, self.marshall_a_k[row])
-            m_edge = float(np.interp(self.d_edge, self.marshall_dist, self.marshall_a_k[row]))
-            far = np.maximum(0.0, m_d - m_edge)
-            return inside * scale + far
-        residual = np.maximum(0.0, total - a_edge * scale)
-        return inside * scale + residual * self.tail_shape(d, hpx_pix)
+        a_edge = float(self.a_edge[row])
+        inside = np.interp(np.minimum(d, self.d_edge), self.dist, self.a_cum[row])
+        far = np.maximum(0.0, np.interp(d, self.dist, self.a_cum[row]) - a_edge)
+        return a_local_from_pieces(inside, far, a_edge, total_column_ak)
 
-    def u(self, d_pc, hpx_pix=None, *, total_column_ak):
-        """`u(d) = A(d) / A(inf)` (spec 1.4): divides by the sightline's
-        total column, never by the measured profile's back edge. On an
-        uncovered sightline `a_of_d` already scales the in-map profile
-        down to `total_column_ak` where the map's own edge would
-        otherwise exceed it, so `u <= 1` holds there by construction; on
-        a COVERED sightline beyond the map's edge (C25), `u` can exceed 1
-        -- Marshall et al. 2006's own measured column there is not capped
-        at `total_column_ak` (`a_of_d`'s own docstring)."""
+    def u(self, d_pc, hpx_pix, *, total_column_ak):
+        """`u(d) = A(d) / total_column_ak`: divides by the CALLER's own
+        total column, never by the stored profile's own edge value."""
         a = self.a_of_d(d_pc, hpx_pix, total_column_ak=total_column_ak)
         return a / np.asarray(total_column_ak, dtype=float)
 
@@ -895,10 +1229,6 @@ class _RegionProfile:
         row = int(np.argmax(cos_sep))
         return row, int(self.hpx[row])
 
-    def distance_knots_pc(self):
-        """The reconstruction's own spliced radial shell boundaries, pc."""
-        return np.array(self.dist[1:], dtype=float)
-
     def cloud_back_edge_pc(self):
         """The region's measured cloud back edge, pc (`D_HI_PC` of the
         structure `structure_depth` found nearest the canon distance)."""
@@ -914,26 +1244,24 @@ class _RegionProfile:
 
 
 def read(config, region):
-    """The region's profile evaluator (see `_RegionProfile`). C25: also
-    reads `sky.derived.marshall_extinction`'s own product for the region
-    (`COVERED`/`A_K`) -- written for every region, covered or not, so this
-    never branches on whether a region sits inside Marshall's survey box."""
-    profile_path = product_path(config, "sky/derived", "edenhofer", "profile", "sightline", region=region)
+    """The region's profile evaluator (see `_RegionProfile`): C26 owner
+    ruling 2026-10-21 reads `profile_adopted_sightline`, the canonical
+    curve, and `depth_edenhofer_region`'s own cloud front/back edges --
+    `sky.derived.marshall_extinction` is retired and read no more."""
+    profile_path = product_path(config, "sky/derived", "adopted", "profile", "sightline", region=region)
     depth_path = product_path(config, "sky/derived", "edenhofer", "depth", "region")
-    marshall_path = product_path(config, "sky/derived", "marshall", "extinction", "sightline", region=region)
-    for path, module in ((profile_path, "sesnaimpute.sky.derived.profile"),
-                          (depth_path, "sesnaimpute.sky.derived.profile"),
-                          (marshall_path, "sesnaimpute.sky.derived.marshall_extinction")):
+    for path in (profile_path, depth_path):
         if not os.path.exists(path):
             raise FileNotFoundError(
-                "profile.read: product missing at %r -- run the %r RUNBOOK line for it" % (path, module))
+                "profile.read: product missing at %r -- run the "
+                "sesnaimpute.sky.derived.profile RUNBOOK line for it" % path)
     with h5py.File(depth_path, "r") as f:
         names = [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in f["REGION"][:]]
         if region not in names:
             raise ValueError("profile.read: region %r has no row in %s" % (region, depth_path))
         back_edge_pc = float(f["D_HI_PC"][names.index(region)])
         front_edge_pc = float(f["D_LO_PC"][names.index(region)])
-    return _RegionProfile(profile_path, marshall_path, back_edge_pc, front_edge_pc)
+    return _RegionProfile(profile_path, back_edge_pc, front_edge_pc)
 
 
 if __name__ == "__main__":

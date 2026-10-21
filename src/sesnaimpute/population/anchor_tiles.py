@@ -774,53 +774,37 @@ def _pointing_bounds(sorted_pointing_index, present_pointings):
 
 
 def _sightline_profile_pieces(profile_obj, parent, d_pc):
-    """`(inside, a_edge, tail_or_far, covered)`: the per-star profile
-    quantities `profile_obj.a_of_d` folds into `a_local`, computed from
-    the pointing's own distance slice `d_pc` and the pixel's parent
-    nside-256 sightline `parent` ALONE -- never from the pixel's own
-    column `A_PIX_K` (`sky.derived.profile._RegionProfile.a_of_d`: every
-    one of these is evaluated before `total_column_ak` ever enters the
-    formula). C25 (briefs/round4_2026-10-20/C25_far_column.md): on a
-    COVERED sightline, `tail_or_far` is Marshall et al. 2006's own
-    increment past the map's edge, `max(0, M(d) - M(d_edge))` -- already
-    independent of any pixel's own column, exactly like `inside`/`tail`
-    were, so it is cached here too, once per sightline rather than once
-    per sibling pixel; on an uncovered sightline it is `tail_shape(d)`,
-    unchanged. `_magnitudes_from_pieces` below rebuilds `a_of_d`'s exact
-    output from these plus a scalar column, so sibling nside-512 pixels
-    sharing one nside-256 sightline (round 3 T2) compute them once
-    instead of once per sibling."""
+    """`(inside, far, a_edge)`: the per-star profile quantities
+    `profile_obj.a_of_d` folds into `a_local` (C26 owner ruling
+    2026-10-21, briefs/round4_2026-10-20/C26_profile_adopted.md),
+    computed from the pointing's own distance slice `d_pc` and the
+    pixel's parent nside-256 sightline `parent` ALONE -- never from the
+    pixel's own column `A_PIX_K` (`sky.derived.profile._RegionProfile.
+    a_of_d`: every one of these is evaluated before `total_column_ak`
+    ever enters the formula), so they are cached here once per sightline
+    rather than once per sibling pixel. `_magnitudes_from_pieces` below
+    calls `profile.a_local_from_pieces` -- the SAME one expression
+    `a_of_d` itself calls -- on these plus a scalar column, no second
+    derivation of the algebra; sibling nside-512 pixels sharing one
+    nside-256 sightline (round 3 T2) compute `inside`/`far` once instead
+    of once per sibling."""
     row = int(np.asarray(profile_obj.sightline_row(parent)))
-    inside = np.interp(d_pc, profile_obj.dist, profile_obj.a_cum[row])
-    a_edge = float(profile_obj.a_cum[row, -1])
-    covered = bool(profile_obj.covered[row])
-    if covered:
-        m_d = np.interp(d_pc, profile_obj.marshall_dist, profile_obj.marshall_a_k[row])
-        m_edge = float(np.interp(profile_obj.d_edge, profile_obj.marshall_dist, profile_obj.marshall_a_k[row]))
-        tail_or_far = np.maximum(0.0, m_d - m_edge)
-    else:
-        tail_or_far = profile_obj.tail_shape(d_pc, hpx_pix=parent)
-    return inside, a_edge, tail_or_far, covered
+    a_edge = float(profile_obj.a_edge[row])
+    inside = np.interp(np.minimum(d_pc, profile_obj.d_edge), profile_obj.dist, profile_obj.a_cum[row])
+    far = np.maximum(0.0, np.interp(d_pc, profile_obj.dist, profile_obj.a_cum[row]) - a_edge)
+    return inside, far, a_edge
 
 
-def _magnitudes_from_pieces(a_pix_k, inside, a_edge, tail_or_far, covered, g_proxy, ks_mag,
+def _magnitudes_from_pieces(a_pix_k, inside, far, a_edge, g_proxy, ks_mag,
                              k_g_diffuse, k_g_dense, r_diffuse, r_dense):
     """`(G_obs, Ks_obs)` from `_sightline_profile_pieces`'s cached
-    `(inside, a_edge, tail_or_far, covered)` and one pixel's own
-    `A_PIX_K`: `a_of_d`'s exact algebra (`scale` against
-    `total_column_ak`, and -- on a COVERED sightline -- Marshall's own
-    increment added uncapped, with no `residual` multiply; on an
-    uncovered one, `residual * tail_or_far` exactly as before) with
-    `inside`/`tail_or_far` held fixed, then `magnitudes_at_extinction` as
-    everywhere else in this module -- the same `a_local` a direct
-    `anchor_observables` call would give, to float64 bit-identity."""
-    total = float(a_pix_k)
-    scale = min(1.0, total / a_edge) if a_edge > 0 else 1.0
-    if covered:
-        a_local = inside * scale + tail_or_far
-    else:
-        residual = max(0.0, total - a_edge * scale)
-        a_local = inside * scale + residual * tail_or_far
+    `(inside, far, a_edge)` and one pixel's own `A_PIX_K`: ONE call into
+    `profile_module.a_local_from_pieces` -- the exact same function
+    `_RegionProfile.a_of_d` itself calls, no second derivation of the
+    algebra -- then `magnitudes_at_extinction` as everywhere else in this
+    module: the same `a_local` a direct `anchor_observables` call would
+    give, to float64 bit-identity."""
+    a_local = profile_module.a_local_from_pieces(inside, far, a_edge, a_pix_k)
     return magnitudes_at_extinction(a_local, g_proxy, ks_mag, k_g_diffuse, k_g_dense,
                                      r_diffuse, r_dense)
 
@@ -860,7 +844,7 @@ def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, 
     n_ks_block = np.zeros((n, n_bin_ks), dtype=np.float64)
     n_gk_block = np.zeros((n, n_bin_g, n_bin_ks), dtype=np.float64)
     cache_key = None
-    cache_batches = None  # [(blo, bhi, inside, a_edge, tail_or_far, covered), ...]
+    cache_batches = None  # [(blo, bhi, inside, far, a_edge), ...]
     for j, i in enumerate(range(lo_pix, hi_pix)):
         parent = int(parent256[i])
         a_p = float(a_pix[i])
@@ -872,12 +856,12 @@ def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, 
             cache_batches = []
             for blo, bhi in batches(hi - lo, row_bytes=72 * config.n_jobs):
                 s = slice(lo + blo, lo + bhi)
-                inside, a_edge, tail_or_far, covered = _sightline_profile_pieces(profile_obj, parent, dist_pc[s])
-                cache_batches.append((blo, bhi, inside, a_edge, tail_or_far, covered))
-        for blo, bhi, inside, a_edge, tail_or_far, covered in cache_batches:
+                inside, far, a_edge = _sightline_profile_pieces(profile_obj, parent, dist_pc[s])
+                cache_batches.append((blo, bhi, inside, far, a_edge))
+        for blo, bhi, inside, far, a_edge in cache_batches:
             s = slice(lo + blo, lo + bhi)
             g_obs, ks_obs = _magnitudes_from_pieces(
-                a_p, inside, a_edge, tail_or_far, covered, g_proxy[s], ks_mag[s],
+                a_p, inside, far, a_edge, g_proxy[s], ks_mag[s],
                 k_g_diffuse[s], k_g_dense[s], r_diffuse, r_dense)
             p_g = gaia_detection_weight(g_obs, m10_p)
             n_g_block[j] += np.histogram(g_obs, bins=g_edges, weights=p_g)[0]
