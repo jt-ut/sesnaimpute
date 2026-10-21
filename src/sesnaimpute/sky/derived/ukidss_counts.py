@@ -1,10 +1,31 @@
 """UKIDSS GPS point-source counts per nside-512 HEALPix pixel
 (SPEC_BMSTP_DRAFT.md 5.1's STAR anchor: this is the 2MASS anchor
 counts product's own shape, `sky.derived.twomass_counts`, carried past
-its 14.3 cut to K = 17.0 -- W38 reads this to extend the STAR weight's
-faint 2MASS bins with GPS's deeper reach where GPS covers the region
-(Lucas et al. 2008, MNRAS 391, 136: K approx 18 5-sigma, |b| lesssim
-5 deg, l 15-107 deg and 141-230 deg)).
+its 14.3 cut to K = 18.0 at most -- W38/C28 read this to extend the
+STAR weight's faint 2MASS bins with GPS's deeper reach where GPS covers
+the region (Lucas et al. 2008, MNRAS 391, 136: K approx 18 5-sigma,
+|b| lesssim 5 deg, l 15-107 deg and 141-230 deg)).
+
+C28 (2026-10-21, "the deep Ks anchor reaches the faint bin's own
+stars"): the 18-56 uJy STAR members sit at Ks 17-18.3 (C24f/g), beyond
+the old 17.0 anchor edge. The download now reaches K < 18.5
+(`sky.download.ukidss_gps.build.K_CEILING`) and `MAG_EDGES` extends to
+18.5 to match (half a bin of headroom past the new 18.0 anchor
+ceiling, same convention as the old 17.0/17.5 pair). This module also
+now measures, rather than assumes, where ITS OWN counts turn over past
+`TURNOVER_LOWER_MAG`: `differential_turnover_mag` fits the pooled,
+deep-covered-pixel log10 differential count's trend one half-mag bin
+at a time and calls the first bin that falls below that trend by more
+than its own Poisson scatter the turnover; `KS_COMPLETE_TO` is the
+bright edge of the last bin still consistent with the trend (this
+product's own faint edge, 18.5, if no bin ever falls below it).
+`population.anchor_tiles` takes the region's own deep anchor edge as
+`min(18.0, floor_half_mag(KS_COMPLETE_TO))` -- never past the
+published depth even where this measurement is ambiguous.
+`quartile_turnover_mags` repeats the same test within each quartile of
+the deep-covered pixels' own total detection count (a crowding proxy),
+reported but not stored: a pooled turnover driven by the crowded
+quartile alone shows up as a spread across the four numbers.
 
 C19 (2026-10-21). `sky.download.ukidss_gps.build` no longer applies
 W34's own post-processing error-bit cut or narrow class cut at query
@@ -78,11 +99,23 @@ NSIDE = 512
 #: whole. The histogram accumulation (`np.add.at`) is exact and
 #: order-free, so batching changes nothing it computes.
 ROW_BATCH_BUDGET_BYTES = 512 << 20
-#: Sixteen half-magnitude bins, 9.0-17.0: the download's own K < 17.5
-#: cut (`sky.download.ukidss_gps.build.K_CEILING`) gives this top edge a
+#: Nineteen half-magnitude bins, 9.0-18.5 (C28, 2026-10-21: raised from
+#: 17.0): the download's own K < 18.5 cut
+#: (`sky.download.ukidss_gps.build.K_CEILING`) gives this top edge a
 #: half-bin of headroom, as `twomass_counts.MAG_EDGES` does against its
 #: 14.3 cut.
-MAG_EDGES = np.arange(9.0, 17.0001, 0.5)
+MAG_EDGES = np.arange(9.0, 18.5001, 0.5)
+
+#: C28 item 3: the turnover test's own bright edge -- the differential
+#: count's log slope is measured from here to this product's own faint
+#: edge (MAG_EDGES[-1]), pooled over deep-covered pixels and per
+#: pixel-density quartile.
+TURNOVER_LOWER_MAG = 15.0
+#: C28 item 3: a bin counts as turned over when its own pooled log10
+#: differential count falls below the brighter, already-accepted bins'
+#: fitted trend by more than this many Poisson sigma on its own count
+#: (the brief's "more than the Poisson scatter").
+TURNOVER_SIGMA = 1.0
 
 #: C19: the archive's own point-like `mergedClass` codes this module
 #: counts (module docstring) -- `-3` (probable galaxy) is on the
@@ -204,7 +237,129 @@ def calibration_ratio(n_2mass_overlap, n_ukidss_overlap, deep_covered):
     return ratio, ratio * np.exp(-sigma_ln), ratio * np.exp(sigma_ln)
 
 
-def _write_region(config, region, pixels, n, calibration):
+def _floor_half_mag(mag):
+    """`mag` rounded DOWN to the nearest half-magnitude grid point (the
+    grid `MAG_EDGES` itself sits on) -- never up, so a measured turnover
+    never grants the anchor a bin it did not actually clear."""
+    return float(np.floor(mag * 2.0 + 1e-9) / 2.0)
+
+
+def _wls_predict(x, y, sigma_y, x0):
+    """Weighted least squares `y = a*x + b` on `(x, y)` with per-point
+    sigma `sigma_y` (standard heteroscedastic-error propagation, valid
+    down to two points since the weights come from the DATA's own known
+    measurement scatter, not the fit's residuals): returns
+    `(predicted_y0, sigma_y0)`, the fit's own predictive value and
+    uncertainty at `x0` (excluding `x0`'s own measurement scatter, which
+    the caller adds in quadrature separately)."""
+    w = 1.0 / sigma_y ** 2
+    s = w.sum()
+    sx = (w * x).sum()
+    sy = (w * y).sum()
+    sxx = (w * x * x).sum()
+    sxy = (w * x * y).sum()
+    delta = s * sxx - sx * sx
+    slope = (s * sxy - sx * sy) / delta
+    intercept = (sxx * sy - sx * sxy) / delta
+    predicted = slope * x0 + intercept
+    var_pred = (sxx - 2.0 * x0 * sx + x0 * x0 * s) / delta
+    return predicted, np.sqrt(max(var_pred, 0.0))
+
+
+def differential_turnover_mag(n, deep_covered, mag_edges=None,
+                               lower_mag=TURNOVER_LOWER_MAG, sigma=TURNOVER_SIGMA):
+    """C28 item 3, MEASURED not assumed: the deep survey's own
+    completeness turnover. Pools `n`'s counts over `deep_covered` pixels
+    into one differential count per half-mag bin from `lower_mag` to
+    `mag_edges`'s own faint edge; the first two such bins seed a trend
+    (weighted least squares, log10 count vs bin centre, each point
+    weighted by its own inverse Poisson variance in log10 count), and
+    each next bin is tested against that trend extrapolated from every
+    bin accepted so far: a bin whose own log10 count falls below the
+    prediction by more than `sigma` combined sigma -- the fit's own
+    predictive uncertainty at that bin (`_wls_predict`) and the bin's
+    own Poisson scatter, added in quadrature -- is the turnover, and
+    every bin from there on is left untested (once the survey has
+    turned over, a brighter trend fit through it is no longer
+    meaningful). Combining the fit's own uncertainty in quadrature
+    (rather than testing against the tested bin's Poisson scatter
+    alone) keeps a two-point seed from reading its own Poisson noise as
+    a real trend and then crying wolf on the very next, unremarkable
+    bin. An empty bin cannot be log10'd and counts as turned over
+    outright -- no detections is the strongest possible falloff.
+
+    Returns `(complete_to, centres, counts, turned)`: `complete_to` is
+    the bright edge of the first turned-over bin, or `mag_edges[-1]`
+    (this product's own faint edge) if no bin ever falls below the
+    trend -- the survey is then read as complete to its own available
+    depth, never beyond it. `centres`/`counts`/`turned` are the window's
+    own per-bin arrays, for the crowding check and the report. `nan` (and
+    empty `centres`/`counts`/`turned`) where `deep_covered` holds no
+    pixel at all -- nothing to measure, the same convention
+    `calibration_ratio` uses for no coverage."""
+    edges = MAG_EDGES if mag_edges is None else np.asarray(mag_edges, dtype=np.float64)
+    if not np.any(deep_covered):
+        return float("nan"), np.zeros(0), np.zeros(0), np.zeros(0, dtype=bool)
+    lo_bin = max(int(np.searchsorted(edges, lower_mag + 1e-9)) - 1, 0)
+    edges_sub = edges[lo_bin:]
+    counts = n[deep_covered][:, lo_bin:].sum(axis=0).astype(np.float64)
+    centres = 0.5 * (edges_sub[:-1] + edges_sub[1:])
+    n_bins = counts.size
+    turned = np.zeros(n_bins, dtype=bool)
+    if n_bins < 3:
+        return float(edges_sub[-1]), centres, counts, turned
+    good = [0, 1]
+    first_turn = None
+    for i in range(2, n_bins):
+        if counts[i] <= 0.0 or np.any(counts[good] <= 0.0):
+            turned[i] = True
+            first_turn = i if first_turn is None else first_turn
+            continue
+        log_counts_good = np.log10(counts[good])
+        sigma_good = 1.0 / (np.sqrt(counts[good]) * np.log(10.0))
+        predicted, sigma_fit = _wls_predict(centres[good], log_counts_good, sigma_good, centres[i])
+        actual = np.log10(counts[i])
+        sigma_actual = 1.0 / (np.sqrt(counts[i]) * np.log(10.0))
+        sigma_total = np.sqrt(sigma_fit ** 2 + sigma_actual ** 2)
+        if (predicted - actual) > sigma * sigma_total:
+            turned[i] = True
+            first_turn = i if first_turn is None else first_turn
+        else:
+            good.append(i)
+    complete_to = float(edges_sub[first_turn]) if first_turn is not None else float(edges_sub[-1])
+    return complete_to, centres, counts, turned
+
+
+def quartile_turnover_mags(n, deep_covered, mag_edges=None,
+                           lower_mag=TURNOVER_LOWER_MAG, sigma=TURNOVER_SIGMA):
+    """C28 item 3's own crowding check: `differential_turnover_mag`
+    repeated within each quartile of the deep-covered pixels' own total
+    detection count (`n.sum(axis=1)`, a crowding proxy -- every nside-512
+    pixel has the same solid angle, so a higher total count is a denser
+    field). Four independent turnover reads instead of one pooled read:
+    a turnover driven by the crowded quartile alone, rather than the
+    whole deep-covered set, shows up as a spread across the four
+    numbers (reported, never stored -- `KS_COMPLETE_TO` is the pooled
+    read alone)."""
+    idx_covered = np.flatnonzero(deep_covered)
+    if idx_covered.size < 8:
+        return []
+    density = n[idx_covered].sum(axis=1).astype(np.float64)
+    q_edges = np.percentile(density, [25.0, 50.0, 75.0])
+    q_of = np.searchsorted(q_edges, density, side="right")
+    out = []
+    for q in range(4):
+        mask = np.zeros(deep_covered.shape, dtype=bool)
+        mask[idx_covered[q_of == q]] = True
+        if mask.sum() < 4:
+            out.append(float("nan"))
+            continue
+        complete_to, _, _, _ = differential_turnover_mag(n, mask, mag_edges, lower_mag, sigma)
+        out.append(complete_to)
+    return out
+
+
+def _write_region(config, region, pixels, n, calibration, ks_complete_to):
     out_path = config_module.product_path(config, "sky/derived", "ukidss", "counts", "hpx512", region=region)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
@@ -215,6 +370,7 @@ def _write_region(config, region, pixels, n, calibration):
             ("MAG_EDGES", MAG_EDGES.astype(np.float64)),
             ("N", n.astype(np.int64)),
             ("CALIBRATION", np.asarray(calibration, dtype=np.float64)),
+            ("KS_COMPLETE_TO", np.float64(ks_complete_to)),
         ):
             build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
 
@@ -242,7 +398,10 @@ def build(config, regions=None):
             n, n_overlap = _counts_matrix(pixels, _download_path(config, region), overlap_edges)
             deep_covered = n.sum(axis=1) > 0
             calibration = calibration_ratio(n_2mass_overlap, n_overlap, deep_covered)
-            _write_region(config, region, pixels, n, calibration)
+            complete_to_raw, centres, counts, turned = differential_turnover_mag(n, deep_covered)
+            ks_complete_to = _floor_half_mag(complete_to_raw) if np.isfinite(complete_to_raw) else float("nan")
+            quartiles = quartile_turnover_mags(n, deep_covered)
+            _write_region(config, region, pixels, n, calibration, ks_complete_to)
             written.append(region)
             total_counts += int(n.sum())
             ratio, lo, hi = calibration
@@ -250,6 +409,16 @@ def build(config, regions=None):
                   f"{int(deep_covered.sum())} deep-covered, calibration (2MASS/UKIDSS, Ks "
                   f"{OVERLAP_LOWER_MAG:.1f}-{overlap_edges[-1]:.1f}) = {ratio:.4f} "
                   f"[{lo:.4f}, {hi:.4f}]")
+            if np.isfinite(complete_to_raw):
+                bin_report = ", ".join(
+                    f"{centres[j]:.2f}:{counts[j]:.0f}{'*' if turned[j] else ''}"
+                    for j in range(centres.size))
+                print(f"ukidss_counts derive: {region}: turnover measured at {complete_to_raw:.2f} "
+                      f"(KS_COMPLETE_TO {ks_complete_to:.1f}, anchor edge min(18.0, this) applies "
+                      f"downstream); bins (centre:count, * turned over): {bin_report}; "
+                      f"pixel-density-quartile turnovers: {quartiles}")
+            else:
+                print(f"ukidss_counts derive: {region}: no deep coverage at all -- KS_COMPLETE_TO nan")
             st.tick(i + 1, n_regions, "regions")
         st.done(None, regions=n_regions, total_counts=total_counts)
     return dict(regions_written=written)
