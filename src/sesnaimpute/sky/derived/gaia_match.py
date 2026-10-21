@@ -75,6 +75,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.granules import access as granule_access
+from sesnaimpute.sky.download.gaia_crossmatch import build as crossmatch_module
 
 _STEM = "match_gaia_source"
 
@@ -332,13 +333,33 @@ def _read_candidates(config, region, name_to_row):
             f"sky.derived.gaia_match.build: Gaia crossmatch candidates missing for region {region!r} at "
             f"{path!r} -- run the 'sesnaimpute.sky.download.gaia_crossmatch' RUNBOOK line first")
     df = pd.read_csv(path)
+    # The candidates file's own definition is the source list it was
+    # uploaded from (sky.download.gaia_crossmatch, 2026-10-22). A catalogue
+    # source that was never uploaded has no candidates by construction and
+    # would be scored as a Gaia non-detection: that is a stale crossmatch,
+    # re-pulled by the download line, never papered over here. A candidate
+    # whose source curation has since removed matches nothing and is dropped.
+    upload_path = crossmatch_module.uploaded_names_path(config, region)
+    if os.path.exists(upload_path):
+        uploaded = crossmatch_module.read_uploaded_names(upload_path)
+        missing = [n for n in name_to_row.index if n not in uploaded]
+        if missing:
+            raise ValueError(
+                f"sky.derived.gaia_match.build: {region}: {len(missing)} curated source(s) were never "
+                f"uploaded to the Gaia crossmatch (e.g. {missing[0]!r}) -- the candidates file predates "
+                f"the catalogue; rerun the 'sesnaimpute.sky.download.gaia_crossmatch' RUNBOOK line")
+    else:
+        print(f"gaia_match derive: {region}: candidates file carries no upload record "
+              f"(pulled before 2026-10-22); coverage of the catalogue cannot be verified")
     if df.empty:
         return None
     req_idx = df["NAME"].map(name_to_row)
-    if req_idx.isna().any():
-        raise ValueError(
-            f"sky.derived.gaia_match.build: {region}: {int(req_idx.isna().sum())} candidate row(s) "
-            "carry a NAME absent from the curated catalogue")
+    n_absent = int(req_idx.isna().sum())
+    if n_absent:
+        print(f"gaia_match derive: {region}: {n_absent} candidate row(s) belong to sources the "
+              f"curated catalogue no longer holds; dropped")
+        df = df[~req_idx.isna()]
+        req_idx = req_idx[~req_idx.isna()]
     df = df.assign(REQ_IDX=req_idx.astype(np.int64))
     return df
 

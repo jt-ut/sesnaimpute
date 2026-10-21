@@ -128,6 +128,34 @@ def _pull_region(positions, region):
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
+def uploaded_names_path(config, region):
+    """The record of the SESNA NAMEs uploaded for `region`'s candidates file,
+    one per line, beside it: the candidates' own definition, read by
+    `build` (skip only when it equals the catalogue) and by
+    `sky.derived.gaia_match` (every catalogue source must have been
+    uploaded)."""
+    return f"{config.data_root}/sky/download/gaia_crossmatch/uploaded_gaia_source__{region}.txt"
+
+
+def read_uploaded_names(path):
+    with open(path) as fh:
+        return set(line.rstrip("\n") for line in fh if line.strip())
+
+
+def _stale_reason(dest_path, upload_path, names_now):
+    """None when the candidates file can stand; else why it must be re-pulled."""
+    if not os.path.exists(dest_path):
+        return "no candidates file"
+    if not os.path.exists(upload_path):
+        return "candidates file carries no record of the sources it was uploaded from"
+    uploaded = read_uploaded_names(upload_path)
+    now = set(names_now.tolist())
+    if uploaded == now:
+        return None
+    return (f"the curated catalogue changed since the pull: {len(now - uploaded)} source(s) "
+            f"never uploaded, {len(uploaded - now)} uploaded source(s) no longer in the catalogue")
+
+
 def build(config, regions=None):
     """Uploads each region's SESNA positions to Gaia DR3 X-Match and writes
     every returned candidate, verbatim, to
@@ -140,12 +168,22 @@ def build(config, regions=None):
         n_regions = len(regions)
         for i, region in enumerate(regions):
             dest_path = f"{dest_dir}/candidates_gaia_source__{region}.csv"
-            if os.path.exists(dest_path):
-                print(f"gaia_crossmatch build: {dest_path} present, skipped")
+            upload_path = uploaded_names_path(config, region)
+            positions = _read_positions(config, region)
+            # The product's own definition is the source list it was uploaded
+            # from (2026-10-22): a present file is kept only when that record
+            # exists and names exactly the curated catalogue's sources now on
+            # disk; a catalogue re-curated since the pull re-pulls itself.
+            reason = _stale_reason(dest_path, upload_path, positions["NAME"])
+            if reason is None:
+                print(f"gaia_crossmatch build: {dest_path} present and uploaded from the "
+                      f"current catalogue, skipped")
             else:
-                positions = _read_positions(config, region)
+                print(f"gaia_crossmatch build: {region}: {reason}; pulling")
                 candidates = _pull_region(positions, region)
                 candidates.to_csv(dest_path, index=False)
+                with open(upload_path, "w") as fh:
+                    fh.write("\n".join(positions["NAME"].tolist()) + "\n")
                 n_sources = len(positions)
                 n_candidates = len(candidates)
                 per_source = n_candidates / n_sources if n_sources else float("nan")
