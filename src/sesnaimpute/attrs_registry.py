@@ -1114,10 +1114,10 @@ REGISTRY = {
     ("histograms_anchors_hpx512", "G_EDGES"): ("mag Gaia G",
         "The edges of the Gaia G magnitude bins N_G_OBS, N_G_PRED and "
         "N_GK_PRED are tabulated on."),
-    ("histograms_anchors_hpx512", "KS_EDGES"): ("mag 2MASS/UKIDSS Ks",
+    ("histograms_anchors_hpx512", "KS_EDGES"): ("mag 2MASS/UKIDSS/VHS Ks",
         "The edges of the Ks magnitude bins N_KS_OBS, N_KS_PRED and "
-        "N_GK_PRED are tabulated on, on the shared 2MASS/UKIDSS scale "
-        "KS_SOURCE names per bin."),
+        "N_GK_PRED are tabulated on, on the shared 2MASS/UKIDSS/VHS "
+        "scale KS_SOURCE names per bin."),
     ("histograms_anchors_hpx512", "N_G_OBS"): ("stars",
         "For the matching pixel in HPX_PIX_512 and each Gaia G bin of "
         "G_EDGES, the observed Gaia anchor star count, from the external "
@@ -1130,8 +1130,10 @@ REGISTRY = {
         "pointing's own solid angle."),
     ("histograms_anchors_hpx512", "N_KS_OBS"): ("stars",
         "For the matching pixel in HPX_PIX_512 and each Ks bin of "
-        "KS_EDGES, the observed 2MASS/UKIDSS anchor star count, from the "
-        "external anchor-count products KS_SOURCE names per bin."),
+        "KS_EDGES, the observed 2MASS/UKIDSS/VHS anchor star count, from "
+        "the external anchor-count products KS_SOURCE names per bin "
+        "(UKIDSS and VHS counts already multiplied by their own "
+        "CALIBRATION[0] against 2MASS, C19)."),
     ("histograms_anchors_hpx512", "N_KS_PRED"): ("stars",
         "For the matching pixel in HPX_PIX_512 and each Ks bin of "
         "KS_EDGES, the model's predicted anchor star count: the nearest "
@@ -1146,15 +1148,17 @@ REGISTRY = {
         "binned jointly in (G, Ks) rather than in each magnitude "
         "marginally."),
     ("histograms_anchors_hpx512", "DEEP_COVERED"): ("boolean",
-        "For the matching pixel in HPX_PIX_512, True where the region's "
-        "deeper UKIDSS GPS survey reaches that pixel, so KS_EDGES runs "
-        "past the 2MASS-only cut and KS_SOURCE marks the UKIDSS-only "
-        "bins for it."),
+        "For the matching pixel in HPX_PIX_512, True where EITHER deeper "
+        "survey -- UKIDSS GPS or VHS (C19 Part B) -- reaches that pixel, "
+        "so KS_EDGES runs past the 2MASS-only cut and KS_SOURCE marks "
+        "the deep bins for it."),
     ("histograms_anchors_hpx512", "KS_SOURCE"): ("code",
         "For each Ks bin of KS_EDGES (one value per bin, shared by every "
-        "pixel), which survey that bin's counts come from: 0 2MASS, 1 "
-        "UKIDSS. Every bin past the 2MASS cut is 1; a region with no "
-        "UKIDSS coverage at all has every bin 0."),
+        "pixel), which survey that bin's counts actually came from: 0 "
+        "2MASS, 1 UKIDSS, 2 VHS (C19 Part B) -- UKIDSS is taken on a "
+        "pixel it covers, VHS only where UKIDSS does not; the code names "
+        "whichever side contributed the larger measured count to that "
+        "bin. A region with no deep coverage at all has every bin 0."),
 
     # population.gal -- counts_gal_survey: the background-galaxy number-
     # counts law, survey-wide.
