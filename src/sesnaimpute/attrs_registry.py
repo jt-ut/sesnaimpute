@@ -1237,6 +1237,34 @@ REGISTRY = {
     ("weights_anchors_tile", "KS_SCALE"): ("mag",
         "The fixed roll-off width of the 2MASS completeness sigmoid P_KS "
         "is evaluated with, the same value for every tile in this file."),
+    ("weights_anchors_tile", "W_GIANT"): ("dimensionless",
+        "C30 (briefs/round4_2026-10-20/C30_population_anchor.md): one value "
+        "for this whole region -- TRILEGAL's model error against the "
+        "independent anchors is per POPULATION, not per Ks magnitude alone "
+        "(distant red giants over-produced, dwarfs close to right), so the "
+        "2MASS colour cells at Ks 12.0-14.3 are fit jointly for a giant "
+        "weight (LOG_G < 3.5, population.selection.is_giant) and this "
+        "file's own per-tile, per-bin W_KS/W_REGION_KS there read as the "
+        "dwarf weight. NaN where SPLIT is False: the region's own giant "
+        "model count never cleared N_GIANT_MIN, and a giant star reads its "
+        "bin's W_KS/W_REGION_KS exactly like a dwarf (population."
+        "star_population)."),
+    ("weights_anchors_tile", "W_GIANT_ERR"): ("dimensionless",
+        "The joint weighted-least-squares fit's own formal error on "
+        "W_GIANT (sigma^2 = max(observed colour-cell count, 1), no "
+        "completeness factor). NaN where SPLIT is False."),
+    ("weights_anchors_tile", "N_GIANT_MODEL"): ("stars",
+        "The region's own model giant count summed over the 2MASS colour "
+        "cells (Ks 12.0-14.3, every J-Ks bin), non-excluded tiles only -- "
+        "the number SPLIT's own N_GIANT_MIN floor is measured against, "
+        "printed in this module's own report regardless of whether the "
+        "floor was cleared."),
+    ("weights_anchors_tile", "SPLIT"): ("boolean",
+        "True where this region's own N_GIANT_MODEL cleared N_GIANT_MIN "
+        "and W_GIANT/W_GIANT_ERR are a real fit; False where there is no "
+        "split at all (W_GIANT/W_GIANT_ERR are NaN and every star, giant "
+        "or dwarf, reads this file's own per-bin W_KS/W_REGION_KS exactly "
+        "as the pre-C30 construction did)."),
 
     # population.anchor_tiles -- tiles_anchors_hpx512 and
     # histograms_anchors_hpx512: the STAR anchor tiling and the two
