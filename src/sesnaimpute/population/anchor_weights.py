@@ -633,13 +633,18 @@ def _read_twomass_cells(config, region, pixels):
     `CELL_KS_EDGES`, `CELL_JK_EDGES`): the observed side of the giant/
     dwarf split. Fails if this product's own pixel set disagrees with
     `pixels` (the tiles/histograms products' own set, already cross-
-    checked against each other)."""
+    checked against each other). Returns `None` (never a KeyError) where
+    this region's own 2MASS counts product predates C30 and carries no
+    `N_CELL` at all -- C30b, the same "reader must not require a dataset
+    the product may lack" rule `_read_histograms` applies."""
     path = config_module.product_path(config, "sky/derived", "twomass", "counts", "hpx512", region=region)
     if not os.path.exists(path):
         raise FileNotFoundError(
             f"prior.anchor_weights: 2MASS counts missing for region {region!r} at {path} "
             "-- run `sesnaimpute.sky.derived.twomass_counts` first")
     with h5py.File(path, "r") as f:
+        if "N_CELL" not in f:
+            return None, None, None, None
         tm_pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
         cell_ks_edges = np.asarray(f["CELL_KS_EDGES"][:], dtype=np.float64)
         cell_jk_edges = np.asarray(f["CELL_JK_EDGES"][:], dtype=np.float64)
@@ -700,10 +705,25 @@ def fit_population_split(config, region, tiles, hist, excluded, n_obs_ks, n_pred
     completeness factor, not a stellar-population one), so splitting
     AFTER that scaling keeps every number on `fit_ks`'s own scale.
     """
+    # C30b: this region's own anchor_tiles product predates C30 (no
+    # colour cells at all, `_read_histograms`'s own optional read) -- no
+    # split is possible, and that is not an error: report it exactly as
+    # "below the floor" reads, N_GIANT_MODEL 0.0 (there is no model count
+    # to report, never NaN -- NaN here would read as "not measured" where
+    # this region's own upstream product simply predates the feature).
+    if hist["cell_ks_edges"] is None or hist["n_giant_cell"] is None:
+        return float("nan"), float("nan"), 0.0, False, None
+
     pixels = hist["pixels"]
     tile_of_pix = tiles["tile_of_pix"]
     n_tile = tiles["tile_l_deg"].size
     cell_ks_edges, cell_jk_edges, obs_cell_pix, cell_complete_pix = _read_twomass_cells(config, region, pixels)
+    if cell_ks_edges is None:
+        # the model side (anchor_tiles) has colour cells but the observed
+        # side (twomass_counts) does not -- should not happen for a
+        # region built by the same C30 pass, but the rule is the same:
+        # no split, not an error.
+        return float("nan"), float("nan"), 0.0, False, None
     n_cell_k = cell_ks_edges.size - 1
     if not (np.array_equal(hist["cell_ks_edges"], cell_ks_edges)
             and np.array_equal(hist["cell_jk_edges"], cell_jk_edges)):
@@ -1269,6 +1289,16 @@ def _read_histograms(config, region):
             f"prior.anchor_weights: histograms product missing for region {region!r} at "
             f"{path} -- run `sesnaimpute.population.anchor_tiles` first")
     with h5py.File(path, "r") as f:
+        # C30b: this region's own anchor_tiles product may predate C30
+        # (every region this brief's own five do not touch) and carry
+        # none of the colour-cell datasets at all -- the reader must not
+        # require a dataset the product may lack, so their absence reads
+        # as None here, never a KeyError that `survey_pooled_weights`'
+        # own broad except would otherwise have to swallow by dropping
+        # the WHOLE region (its ordinary G/Ks/joint marginal evidence
+        # too) out of the survey pool. `fit_population_split` reads a
+        # None here as "no split possible for this region", not an error.
+        has_cells = "CELL_KS_EDGES" in f
         return dict(
             pixels=np.asarray(f["HPX_PIX_512"][:], dtype=np.int64),
             g_edges=np.asarray(f["G_EDGES"][:], dtype=np.float64),
@@ -1281,11 +1311,11 @@ def _read_histograms(config, region):
             n_ks_obs=np.asarray(f["N_KS_OBS"][:], dtype=np.float64),
             # C30 item 3: the model's per-population colour-cell split
             # (population.anchor_tiles item 2), read alongside everything
-            # else this one open already serves.
-            cell_ks_edges=np.asarray(f["CELL_KS_EDGES"][:], dtype=np.float64),
-            cell_jk_edges=np.asarray(f["CELL_JK_EDGES"][:], dtype=np.float64),
-            n_giant_cell=np.asarray(f["N_GIANT_CELL"][:], dtype=np.float64),
-            n_dwarf_cell=np.asarray(f["N_DWARF_CELL"][:], dtype=np.float64),
+            # else this one open already serves -- optional, C30b above.
+            cell_ks_edges=np.asarray(f["CELL_KS_EDGES"][:], dtype=np.float64) if has_cells else None,
+            cell_jk_edges=np.asarray(f["CELL_JK_EDGES"][:], dtype=np.float64) if has_cells else None,
+            n_giant_cell=np.asarray(f["N_GIANT_CELL"][:], dtype=np.float64) if has_cells else None,
+            n_dwarf_cell=np.asarray(f["N_DWARF_CELL"][:], dtype=np.float64) if has_cells else None,
         )
 
 
