@@ -943,27 +943,20 @@ REGISTRY = {
         "C21 item 2: this region's own WEIGHT share under each of the "
         "six WEIGHT_RULE codes -- the sum, over every tile_<id> group's "
         "own RULE_WEIGHT, normalised to 1."),
-    ("population_star_tile", "KS_EDGES_2MASS"): ("mag 2MASS/UKIDSS Ks",
-        "C21 item 3: the edges of the Ks bins N_KS_OBS_2MASS and "
-        "FINAL_POP_KS_HIST are tabulated on -- population.anchor_tiles' "
-        "own (un-extended) KS_EDGES for this region, read off the "
-        "histograms product directly."),
-    ("population_star_tile", "N_KS_OBS_2MASS"): ("star count",
-        "C21 item 3: this region's own observed 2MASS (and, on a deep-"
-        "covered region, UKIDSS) Ks histogram -- population.anchor_"
-        "tiles' own per-pixel N_KS_OBS, summed over every one of this "
-        "region's admitted anchor pixels -- the stage's own '2MASS "
-        "anchor' reference for FINAL_POP_KS_HIST below."),
-    ("population_star_tile", "FINAL_POP_KS_HIST"): ("dimensionless",
-        "C21 item 3: the final field-star population's own Ks "
-        "histogram (every retained star, STAR and AGB alike, at W), on "
-        "KS_EDGES_2MASS, split by WEIGHT_RULE code (six rows, module "
-        "docstring's codes 0-5) -- built at this module's own per-tile-"
-        "mean placement, the same approximation star_weights itself "
-        "reads its G/Ks bins off, not the C18 diagnosis's own atlas-"
-        "grounded external check. Summed over all six rows and compared "
-        "to N_KS_OBS_2MASS, this is the stage's own build-time version "
-        "of the C18 'final population / own 2MASS anchor' check."),
+    # C21's own KS_EDGES_2MASS/N_KS_OBS_2MASS/FINAL_POP_KS_HIST build-time
+    # check (commit 701fe92) is removed (C23 item 4, owner ruling): it
+    # dimmed every star at its tile's own MEAN column and summed W
+    # without solid-angle weighting, so it read 1.0 where the atlas-
+    # grounded check (bmstp.atlas, real per-pixel columns, solid-angle
+    # weighted) read 0.63 -- a check that cannot see the defect it was
+    # meant to catch is worse than none.
+    ("population_star_tile", "A_STAR_K"): ("mag A_K",
+        "For every star this tile draws (C23): the column of the one "
+        "node its own drawn pixel's column distribution gave it "
+        "(population/anchors/column-nodes), the same role A_PIX_K "
+        "played for every star of a pixel before C23. This is the value "
+        "XI's own placement fraction is measured against: the star's "
+        "own local extinction is A_STAR_K times XI."),
 
     # population.field_stars -- field-stars_trilegal_region: the synthetic
     # TRILEGAL field-star population, retained sample and pre-retention
@@ -1196,9 +1189,11 @@ REGISTRY = {
     ("histograms_anchors_hpx512", "N_G_PRED"): ("stars",
         "For the matching pixel in HPX_PIX_512 and each Gaia G bin of "
         "G_EDGES, the model's predicted Gaia anchor star count: the "
-        "nearest TRILEGAL pointing's raw stars, dereddened by A_PIX_K and "
-        "weighted by the Gaia detection probability, divided by that "
-        "pointing's own solid angle."),
+        "nearest TRILEGAL pointing's raw stars, dereddened by the "
+        "pixel's own column nodes (population/anchors/column-nodes, "
+        "averaged, not the single A_PIX_K mean) and weighted by the Gaia "
+        "detection probability, divided by that pointing's own solid "
+        "angle."),
     ("histograms_anchors_hpx512", "N_KS_OBS"): ("stars",
         "For the matching pixel in HPX_PIX_512 and each Ks bin of "
         "KS_EDGES, the observed 2MASS/UKIDSS/VHS anchor star count, from "
@@ -1208,16 +1203,18 @@ REGISTRY = {
     ("histograms_anchors_hpx512", "N_KS_PRED"): ("stars",
         "For the matching pixel in HPX_PIX_512 and each Ks bin of "
         "KS_EDGES, the model's predicted anchor star count: the nearest "
-        "TRILEGAL pointing's raw stars, dereddened by A_PIX_K, divided by "
-        "that pointing's own solid angle."),
+        "TRILEGAL pointing's raw stars, dereddened by the pixel's own "
+        "column nodes (population/anchors/column-nodes, averaged, not "
+        "the single A_PIX_K mean), divided by that pointing's own solid "
+        "angle."),
     ("histograms_anchors_hpx512", "N_GK_PRED"): ("stars",
         "For the matching pixel in HPX_PIX_512, each Gaia G bin of "
         "G_EDGES and each Ks bin of KS_EDGES, the model's predicted "
         "joint count: the nearest TRILEGAL pointing's raw stars, "
-        "dereddened by A_PIX_K and weighted by the Gaia detection "
-        "probability, divided by that pointing's own solid angle and "
-        "binned jointly in (G, Ks) rather than in each magnitude "
-        "marginally."),
+        "dereddened by the pixel's own column nodes (averaged) and "
+        "weighted by the Gaia detection probability, divided by that "
+        "pointing's own solid angle and binned jointly in (G, Ks) rather "
+        "than in each magnitude marginally."),
     ("histograms_anchors_hpx512", "DEEP_COVERED"): ("boolean",
         "For the matching pixel in HPX_PIX_512, True where EITHER deeper "
         "survey -- UKIDSS GPS or VHS (C19 Part B) -- reaches that pixel, "
@@ -1230,6 +1227,37 @@ REGISTRY = {
         "pixel it covers, VHS only where UKIDSS does not; the code names "
         "whichever side contributed the larger measured count to that "
         "bin. A region with no deep coverage at all has every bin 0."),
+
+    # population.column_nodes -- column-nodes_anchors_hpx512: the per-pixel
+    # extinction-column distribution a star placed in that pixel actually
+    # sees, represented as a small set of equal-weight nodes (C23, this
+    # replaces dimming every star at one pixel-mean column).
+    ("column-nodes_anchors_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "This region's own pixel numbers this file covers (nested "
+        "ordering): every pixel with a SESNA source of its own, plus "
+        "every further pixel the prior atlas admits. Row i here is row "
+        "i of every other dataset in this file."),
+    ("column-nodes_anchors_hpx512", "A_PIX_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_512, the single extinction "
+        "value that stands for the pixel as a whole: the mean column of "
+        "its own SESNA sources where it has any, else the extinction of "
+        "its wider surrounding sightline. The node columns in NODE_A_K "
+        "are spread around this value, not equal to it (except where "
+        "this file's own N_COL_NODES is 1)."),
+    ("column-nodes_anchors_hpx512", "HERSCHEL_COVERED"): ("boolean",
+        "For the matching pixel in HPX_PIX_512, True where a Herschel "
+        "Gould Belt Survey column map actually measures this pixel's "
+        "own small-scale structure, so NODE_A_K's own spread there comes "
+        "from the map's measured cells rather than from a smooth model "
+        "fitted around A_PIX_K."),
+    ("column-nodes_anchors_hpx512", "NODE_A_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_512, a small number of "
+        "extinction values (this file's own N_COL_NODES attribute says "
+        "how many) that stand in for the full range of columns a star "
+        "placed somewhere in this pixel actually sees, each one equally "
+        "likely. Averaging a quantity over these values in place of "
+        "using A_PIX_K alone is how this project now accounts for the "
+        "pixel's own internal structure."),
 
     # population.gal -- counts_gal_survey: the background-galaxy number-
     # counts law, survey-wide.

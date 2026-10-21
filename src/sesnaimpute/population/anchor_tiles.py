@@ -73,7 +73,7 @@ from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.batches import batches
 from sesnaimpute.build import run
 from sesnaimpute.granules import access
-from sesnaimpute.population import selection
+from sesnaimpute.population import column_nodes, selection
 from sesnaimpute.sky.derived import profile as profile_module
 from sesnaimpute.sky.download.trilegal import build as trilegal_download
 
@@ -808,7 +808,7 @@ def _magnitudes_from_pieces(a_pix_k, inside, a_edge, tail, g_proxy, ks_mag,
 
 
 def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, r_dense,
-                  parent256, a_pix, m10_pix, pixel_pointing, pointing_bounds, n_bin_g, n_bin_ks):
+                  parent256, a_pix_nodes, m10_pix, pixel_pointing, pointing_bounds, n_bin_g, n_bin_ks):
     """One piece's own contiguous block of pixel indices (owner ruling
     2026-10-09: within a region, many small pieces on one pool, never a
     thread per pixel): each pixel's `(N_G, N_KS, N_GK)` exactly as a
@@ -830,7 +830,15 @@ def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, 
     nside-512 child of one nside-256 sightline shares the same
     interpolated profile) -- only the per-pixel re-extinction and
     histogram (this module's own per-pixel arithmetic, unchanged) still
-    runs once per pixel."""
+    runs once per pixel.
+
+    C23: `a_pix_nodes` (n_pix_in_region, N_COL_NODES) replaces the single
+    `A_PIX_K` this function used to dim every raw star at -- a pixel's
+    predicted counts now average over its own column nodes
+    (`population.column_nodes`), each dimmed and histogrammed exactly as
+    the old single-column pass was, then combined with weight
+    `1/N_COL_NODES`. At `N_COL_NODES == 1` this is the old pass again,
+    bit for bit (`1.0 * x == x`)."""
     lo_pix, hi_pix = piece
     dist_pc = raw["dist_pc"]
     g_proxy = raw["g_proxy"]
@@ -838,6 +846,8 @@ def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, 
     k_g_diffuse = raw["k_g_diffuse"]
     k_g_dense = raw["k_g_dense"]
     n = hi_pix - lo_pix
+    n_node = a_pix_nodes.shape[1]
+    inv_n_node = 1.0 / n_node
     n_g_block = np.zeros((n, n_bin_g), dtype=np.float64)
     n_ks_block = np.zeros((n, n_bin_ks), dtype=np.float64)
     n_gk_block = np.zeros((n, n_bin_g, n_bin_ks), dtype=np.float64)
@@ -845,7 +855,6 @@ def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, 
     cache_batches = None  # [(blo, bhi, inside, a_edge, tail), ...]
     for j, i in enumerate(range(lo_pix, hi_pix)):
         parent = int(parent256[i])
-        a_p = float(a_pix[i])
         m10_p = float(m10_pix[i])
         lo, hi = pointing_bounds[int(pixel_pointing[i])]
         key = (lo, hi, parent)
@@ -856,19 +865,22 @@ def _pixel_block(piece, config, profile_obj, raw, g_edges, ks_edges, r_diffuse, 
                 s = slice(lo + blo, lo + bhi)
                 inside, a_edge, tail = _sightline_profile_pieces(profile_obj, parent, dist_pc[s])
                 cache_batches.append((blo, bhi, inside, a_edge, tail))
-        for blo, bhi, inside, a_edge, tail in cache_batches:
-            s = slice(lo + blo, lo + bhi)
-            g_obs, ks_obs = _magnitudes_from_pieces(
-                a_p, inside, a_edge, tail, g_proxy[s], ks_mag[s],
-                k_g_diffuse[s], k_g_dense[s], r_diffuse, r_dense)
-            p_g = gaia_detection_weight(g_obs, m10_p)
-            n_g_block[j] += np.histogram(g_obs, bins=g_edges, weights=p_g)[0]
-            n_ks_block[j] += np.histogram(ks_obs, bins=ks_edges)[0]
-            n_gk_block[j] += np.histogram2d(g_obs, ks_obs, bins=[g_edges, ks_edges], weights=p_g)[0]
+        for node_k in range(n_node):
+            a_p = float(a_pix_nodes[i, node_k])
+            for blo, bhi, inside, a_edge, tail in cache_batches:
+                s = slice(lo + blo, lo + bhi)
+                g_obs, ks_obs = _magnitudes_from_pieces(
+                    a_p, inside, a_edge, tail, g_proxy[s], ks_mag[s],
+                    k_g_diffuse[s], k_g_dense[s], r_diffuse, r_dense)
+                p_g = gaia_detection_weight(g_obs, m10_p)
+                n_g_block[j] += inv_n_node * np.histogram(g_obs, bins=g_edges, weights=p_g)[0]
+                n_ks_block[j] += inv_n_node * np.histogram(ks_obs, bins=ks_edges)[0]
+                n_gk_block[j] += inv_n_node * np.histogram2d(
+                    g_obs, ks_obs, bins=[g_edges, ks_edges], weights=p_g)[0]
     return n_g_block, n_ks_block, n_gk_block
 
 
-def _predicted_histograms(config, profile_obj, parent256, a_pix, m10_pix, raw, g_edges, ks_edges,
+def _predicted_histograms(config, profile_obj, parent256, a_pix_nodes, m10_pix, raw, g_edges, ks_edges,
                            r_diffuse, r_dense, pixel_pointing, pointing_bounds, weight_pix):
     """`(N_G_PRED, N_KS_PRED, N_GK_PRED)`: each pixel's own nearest
     pointing's raw stars only (`pixel_pointing`, `pointing_bounds`'
@@ -910,7 +922,7 @@ def _predicted_histograms(config, profile_obj, parent256, a_pix, m10_pix, raw, g
     fn = functools.partial(
         _pixel_block, config=config, profile_obj=profile_obj, raw=raw,
         g_edges=g_edges, ks_edges=ks_edges, r_diffuse=r_diffuse, r_dense=r_dense,
-        parent256=parent256[order], a_pix=a_pix[order], m10_pix=m10_pix[order],
+        parent256=parent256[order], a_pix_nodes=a_pix_nodes[order], m10_pix=m10_pix[order],
         pixel_pointing=pixel_pointing[order],
         pointing_bounds=pointing_bounds, n_bin_g=n_bin_g, n_bin_ks=n_bin_ks)
     pixel_pieces = pieces_module.slices(n_pix, config.n_jobs)
@@ -921,31 +933,42 @@ def _predicted_histograms(config, profile_obj, parent256, a_pix, m10_pix, raw, g
     return n_g_pred, n_ks_pred, n_gk_pred
 
 
-def _acceptance_check_one_pixel(profile_obj, parent256, a_pix, m10_pix, raw, g_edges, r_diffuse, r_dense,
+def _acceptance_check_one_pixel(profile_obj, parent256, a_pix_nodes, m10_pix, raw, g_edges, r_diffuse, r_dense,
                                  weight_pix0, pointing_slice0, n_g_pred_row, pixel_index=0):
     """CODING_RULES.md rule 11: the algebraic identity the brief names,
     on one pixel -- the stored histogram must equal a direct re-sum of
-    `1[10 <= G_obs < 19] * p_G * Ω_pix/area_deg2[pointing]` over pixel
-    0's own pointing slice, to 1e-9 relative. Returns
+    `1[10 <= G_obs < 19] * p_G * Ω_pix/area_deg2[pointing]`, averaged with
+    weight `1/N_COL_NODES` over the pixel's own column nodes (C23), over
+    pixel 0's own pointing slice, to 1e-9 relative. Returns
     `(max_abs_rel_dev, n_stars_below_g10)`.
     """
     s = pointing_slice0
-    g_obs, _ = anchor_observables(
-        raw["dist_pc"][s], raw["g_proxy"][s], raw["ks_mag"][s], raw["k_g_diffuse"][s], raw["k_g_dense"][s],
-        profile_obj, int(parent256[pixel_index]), float(a_pix[pixel_index]), r_diffuse, r_dense)
-    p_g = gaia_detection_weight(g_obs, float(m10_pix[pixel_index]))
-    in_range = (g_obs >= g_edges[0]) & (g_obs < GAIA_G_CUT_MAG)
-    direct_sum = float(np.sum(p_g[in_range]) * weight_pix0)
+    n_node = a_pix_nodes.shape[1]
+    direct_sum = 0.0
+    n_below = 0
+    for node_k in range(n_node):
+        g_obs, _ = anchor_observables(
+            raw["dist_pc"][s], raw["g_proxy"][s], raw["ks_mag"][s], raw["k_g_diffuse"][s], raw["k_g_dense"][s],
+            profile_obj, int(parent256[pixel_index]), float(a_pix_nodes[pixel_index, node_k]), r_diffuse, r_dense)
+        p_g = gaia_detection_weight(g_obs, float(m10_pix[pixel_index]))
+        in_range = (g_obs >= g_edges[0]) & (g_obs < GAIA_G_CUT_MAG)
+        direct_sum += float(np.sum(p_g[in_range]) * weight_pix0) / n_node
+        n_below = max(n_below, int(np.count_nonzero(g_obs < g_edges[0])))
     stored_sum = float(n_g_pred_row.sum())
     denom = max(abs(stored_sum), 1e-30)
     rel_dev = abs(direct_sum - stored_sum) / denom
-    n_below = int(np.count_nonzero(g_obs < g_edges[0]))
     return rel_dev, n_below
 
 
 def build_region(config, region):
     raw, omega_sim_deg2 = _read_field_stars_raw(config, region)
     pixels, parent256, a_pix = _region_pixel_columns(config, region)
+    # C23: each pixel's own column-distribution nodes (`population.
+    # column_nodes`), read once per region and joined onto this module's
+    # own pixel order -- every anchor pixel here is in that product's
+    # wider admitted set (a measured subset relation), so every row
+    # resolves.
+    a_pix_nodes = column_nodes.nodes_for_pixels(config, region, pixels)
     g_edges, n_g_obs, ks_edges, n_ks_obs, ks_source, deep_covered = _read_anchor_counts(config, region, pixels)
     # C7 brief Part A: each pixel's own M10, read once (`gaia_selection`'s
     # own module-level cache) and indexed by this region's own nside-512
@@ -981,7 +1004,7 @@ def build_region(config, region):
     weight_pix = omega_pix_deg2 / pointing_area_deg2[pixel_pointing]
 
     n_g_pred, n_ks_pred, n_gk_pred = _predicted_histograms(
-        config, profile_obj, parent256, a_pix, m10_pix, raw, g_edges, ks_edges, r_diffuse, r_dense,
+        config, profile_obj, parent256, a_pix_nodes, m10_pix, raw, g_edges, ks_edges, r_diffuse, r_dense,
         pixel_pointing, pointing_bounds, weight_pix)
     # the deep bins (14.0 and past, W46: KS_SHARED_END_MAG) are measured
     # only where the deep survey covers the pixel: elsewhere both sides
@@ -999,7 +1022,7 @@ def build_region(config, region):
         n_gk_pred = np.where(drop[:, None, :], 0.0, n_gk_pred)
 
     rel_dev, n_below_g10 = _acceptance_check_one_pixel(
-        profile_obj, parent256, a_pix, m10_pix, raw, g_edges, r_diffuse, r_dense,
+        profile_obj, parent256, a_pix_nodes, m10_pix, raw, g_edges, r_diffuse, r_dense,
         float(weight_pix[0]), slice(*pointing_bounds[int(pixel_pointing[0])]), n_g_pred[0])
 
     n_obs_pooled = np.concatenate([n_g_obs, n_ks_obs], axis=1)

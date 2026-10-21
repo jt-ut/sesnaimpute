@@ -300,23 +300,26 @@ def _region_bbox_icrs(hpx_pix_512):
     return float(ra.min()), float(ra.max()), float(dec.min()), float(dec.max())
 
 
-def _herschel_pixel_stats(config, pix_sorted):
-    """`(sum_sq, count)`, each `(n_pix,)`, aligned to `pix_sorted`
-    (ascending): the sum and count of `A_cell^2` over every
-    HGBS map cell (`_map_block_a_k`) whose own nside-512 pixel is in the
-    set, over every map overlapping the set's own footprint, each map
-    read only as the FITS section covering that footprint (`_map_window`
-    / `_map_block_a_k`), never the whole mosaic. The joblib pool is
-    capped at `floor(_HERSCHEL_POOL_BUDGET_BYTES / (_HERSCHEL_ARRAYS_PER_
-    WORKER * max_cutout_bytes))` workers -- 6 GB / (4 x the largest
-    candidate cutout, known from `_map_window` before any data is read)
-    -- so the worst case (every worker mid-reduction on its own cutout at
-    once) stays under 6 GB regardless of `config.n_jobs` or how large the
+def _herschel_cell_matches(config, pix_sorted):
+    """`(idx, a_k)`: every HGBS 36" map cell (`_map_block_a_k`) whose own
+    nside-512 pixel is in `pix_sorted` (ascending), `idx` that pixel's
+    own position in `pix_sorted` and `a_k` the cell's own column value --
+    the one shared read `_herschel_pixel_stats` (the law integral's
+    per-pixel sum_sq/count) and `population.column_nodes` (C23: the
+    column-nodes product's own HGBS-covered branch, the cell reader this
+    module's own law integral already built) both reduce from, so the
+    two never re-open or re-window the same maps separately. Every map
+    overlapping the set's own footprint is read only as the FITS section
+    covering that footprint (`_map_window`/`_map_block_a_k`), never the
+    whole mosaic. The joblib pool is capped at
+    `floor(_HERSCHEL_POOL_BUDGET_BYTES / (_HERSCHEL_ARRAYS_PER_WORKER *
+    max_cutout_bytes))` workers -- 6 GB / (4 x the largest candidate
+    cutout, known from `_map_window` before any data is read) -- so the
+    worst case (every worker mid-reduction on its own cutout at once)
+    stays under 6 GB regardless of `config.n_jobs` or how large the
     overlapping mosaics are. A pixel that two overlapping map reductions
     both touch is not deduplicated -- disclosed: HGBS reductions rarely
-    overlap, and the effect on a pixel mean is second order against the
-    gain this area integral makes over the source-sampled mean it
-    replaces."""
+    overlap."""
     maps = sky_herschel_column._map_list(config)
     headers = {m["name"]: sky_herschel_column._map_header(m["path"]) for m in maps}
     rbox = _region_bbox_icrs(pix_sorted)
@@ -335,8 +338,7 @@ def _herschel_pixel_stats(config, pix_sorted):
         delayed(_map_block_a_k)(m["path"], w) for m, w in zip(candidates, windows))
 
     n_pix = pix_sorted.size
-    sum_sq = np.zeros(n_pix)
-    count = np.zeros(n_pix)
+    idx_parts, a_k_parts = [], []
     for hpx, a_k in results:
         if hpx.size == 0:
             continue
@@ -345,9 +347,24 @@ def _herschel_pixel_stats(config, pix_sorted):
         matched = (n_pix > 0) & (pix_sorted[capped] == hpx)
         if not matched.any():
             continue
-        idx = capped[matched]
-        sum_sq += np.bincount(idx, weights=a_k[matched] ** 2, minlength=n_pix)
-        count += np.bincount(idx, weights=np.ones(idx.size), minlength=n_pix)
+        idx_parts.append(capped[matched])
+        a_k_parts.append(a_k[matched])
+    if not idx_parts:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float64)
+    return np.concatenate(idx_parts), np.concatenate(a_k_parts)
+
+
+def _herschel_pixel_stats(config, pix_sorted):
+    """`(sum_sq, count)`, each `(n_pix,)`, aligned to `pix_sorted`
+    (ascending): the sum and count of `A_cell^2` over every HGBS map cell
+    matched to the set (`_herschel_cell_matches`) -- the gain this area
+    integral makes over the source-sampled mean it replaces."""
+    idx, a_k = _herschel_cell_matches(config, pix_sorted)
+    n_pix = pix_sorted.size
+    if idx.size == 0:
+        return np.zeros(n_pix), np.zeros(n_pix)
+    sum_sq = np.bincount(idx, weights=a_k ** 2, minlength=n_pix)
+    count = np.bincount(idx, weights=np.ones(idx.size), minlength=n_pix)
     return sum_sq, count
 
 
