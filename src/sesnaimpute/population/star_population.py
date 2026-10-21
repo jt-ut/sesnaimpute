@@ -11,24 +11,32 @@ on a tile's own line of sight, and what per-star anchor weight
 PAHC, the brightness unit `B`, and PAHC's contamination weight are a
 second, later module.
 
-Placement (spec section 2.2, "Per tile"; C22 fix, round 4 2026-10-20). A
-field star carries a distance but no sky position of its own
-(`population.field_stars`'s one TRILEGAL pointing per region). Each
-retained field star is placed on one of its own tile's anchor pixels
-(`population.anchor_tiles`' own nside-512 grid), drawn with probability
-proportional to the pixel's own solid angle -- every nside-512 pixel
-shares one solid angle by construction (HEALPix is equal-area), so the
-draw is uniform over the tile's own occupied pixels (`_build_one_tile`)
--- and dimmed at THAT pixel's own column `A_PIX_K` on its own parent
-nside-256 sightline's profile, `u(d) = a_of_d(d, pix, A_pix) / A_pix`
+Placement (spec section 2.2, "Per tile"; C22 fix, round 4 2026-10-20;
+C23, within-pixel column, same round). A field star carries a distance
+but no sky position of its own (`population.field_stars`'s one TRILEGAL
+pointing per region). Each retained field star is placed on one of its
+own tile's anchor pixels (`population.anchor_tiles`' own nside-512
+grid), drawn with probability proportional to the pixel's own solid
+angle -- every nside-512 pixel shares one solid angle by construction
+(HEALPix is equal-area), so the draw is uniform over the tile's own
+occupied pixels (`_build_one_tile`). Since C23 the star then draws, with
+equal probability, one of THAT pixel's own column-distribution nodes
+(`population.column_nodes`: real Ks 12-14 stars see the pixel's own
+internal structure, not just its mean column) -- a second, independent
+draw, seeded separately from the pixel draw -- and is dimmed at the
+drawn node's own column `A_STAR_K` on its own parent nside-256
+sightline's profile, `u(d) = a_of_d(d, pix, A_node) / A_node`
 (`sky.derived.profile.read(...)`), the SAME construction
-`anchor_tiles.anchor_observables` fits the anchor weights on. The fit and
-the assignment now share one construction (C18 follow-up 5/6: the joint
-and marginal weights were FITTED per pixel but ASSIGNED at the tile
-mean, so a star placed below or above its own pixel's column read the
-wrong side of a steep G/Ks cell). `a_i`, a star's own local extinction,
-is its own drawn pixel's `A_PIX_K` times `u_i`, its own placement
-fraction on that SAME pixel's profile. The tile's own mean profile (the
+`anchor_tiles.anchor_observables` fits the anchor weights on (C23
+extends that pixel-level construction to the pixel's own nodes,
+`anchor_tiles._pixel_block`'s own averaging). The fit and the assignment
+share one construction (C18 follow-up 5/6: the joint and marginal
+weights were FITTED per pixel but ASSIGNED at the tile mean, so a star
+placed below or above its own pixel's column read the wrong side of a
+steep G/Ks cell; C23 carries this down to the pixel's own column
+structure, not just its mean). `a_i`, a star's own local extinction, is
+its own drawn node's `A_STAR_K` times `u_i`, its own placement fraction
+on that SAME node's profile. The tile's own mean profile (the
 source-weighted mean, over the tile's distinct nside-256 sightlines,
 `tile_mean_u`) and mean column (`a_tile`) remain, report-only, for
 `_report`'s own shape diagnostics (u(300 pc)/u(1 kpc), the monotonic-
@@ -121,19 +129,23 @@ attrs `GRANULE="tile"`, `OMEGA_SIM_DEG2`, `F_DUSTY_O`, `F_DUSTY_C`,
 limit grid; one HDF5 group `tile_<id>` per tile, attr
 `OMEGA_POINTING_DEG2`, with datasets `STAR_INDEX` (row into
 `population.field_stars`' retained group), `HPX_PIX_512` (the star's own
-drawn anchor pixel, C22), `XI`, `W`, `W_STAR`, `W_AGB`,
+drawn anchor pixel, C22), `XI`, `A_STAR_K` (C23), `W`, `W_STAR`, `W_AGB`,
 `IS_EVOLVED`, `LOG10_B`, `LOG10_B_PAHC`, `LOG10_B_AGB_C`, `LOG10_B_AGB_O`,
 `P_PAHC` (n_star, 8). The population stores each
 star's placement fraction `XI` alone (owner, 2026-09-06): a star's own
 extinction is `A_s * XI`, `A_s` a real source's own adopted column, formed
 at read time by the consumer that has a source to apply it to; this
-module never stores a tile-mean extinction. `XI` is now (C22) the star's
-own placement fraction on its own DRAWN pixel's profile, `A_PIX_K` that
-SAME pixel's own column -- what this module itself uses, in memory, to
-place each simulated star's predicted magnitude for the anchor-weight
-lookup and the PAHC contamination weight; the tile's own mean column
-(`a_tile`) and mean profile (`tile_mean_u`) are report-only (module
-docstring, "Placement").
+module never stores a tile-mean extinction. `XI` is the star's own
+placement fraction on its own DRAWN pixel's profile (C22); since C23 the
+total column that placement is measured against is no longer that
+pixel's own mean `A_PIX_K`, but the one node its own drawn pixel's column
+DISTRIBUTION gave it (`population.column_nodes`, drawn with equal
+probability among the pixel's own nodes) -- stored per star as
+`A_STAR_K`, the same role `A_PIX_K` played before C23. This is what the
+module itself uses, in memory, to place each simulated star's predicted
+magnitude for the anchor-weight lookup and the PAHC contamination
+weight; the tile's own mean column (`a_tile`) and mean profile
+(`tile_mean_u`) are report-only (module docstring, "Placement").
 """
 
 import functools
