@@ -48,11 +48,13 @@ Products, per region:
   (n_pix, n_G_bins, n_Ks_bins) -- the same raw stars, same weights and
   Gaia detection weight as `N_G_PRED`, 2-D digitised on `(G_obs, Ks_obs)`
   onto `G_EDGES`/`KS_EDGES` (SPEC_PRIORS.md section 2.1, "joint and
-  marginal bins"); `KS_SOURCE` (n_ks_bin, W46: which survey each Ks bin
-  takes on this region's shared 9.0-14.0 grid, 0=2MASS/1=UKIDSS -- 1 on
-  every bin past 14.0, where UKIDSS's own bins are the only ones there;
-  all 0 where the region carries no deep survey and the axis is
-  2MASS's own to `KS_CUT_MAG`); root attr `GRANULE="hpx512"`.
+  marginal bins"); `KS_SOURCE` (n_ks_bin, W46, extended C19 Part B item
+  6: which survey each Ks bin takes on this region's shared 9.0-14.0
+  grid, 0=2MASS/1=UKIDSS/2=VHS -- past 14.0 the axis is the deep
+  surveys' own bins (UKIDSS's own count taken on a pixel it covers,
+  VHS's only where UKIDSS does not); all 0 where the region carries no
+  deep survey at all and the axis is 2MASS's own to `KS_CUT_MAG`); root
+  attr `GRANULE="hpx512"`.
 """
 
 import functools
@@ -539,49 +541,117 @@ def _region_pixel_columns(config, region):
     return pixels, parent256, a_pix
 
 
-def _combine_ks_axis(ks_edges_2mass, n_ks_obs_2mass, ukidss_edges, n_ukidss_obs, deep_covered):
-    """W46: no split magnitude. On the shared grid 9.0-`KS_SHARED_END_MAG`
-    (2MASS's own regular half-magnitude bins; the odd trailing 14.0-14.3
-    bin is dropped, replaced by UKIDSS's own 14.0-14.5 bin) each bin
-    takes, for every pixel, whichever survey's region-summed count over
-    the deep-covered pixels alone is larger; a UKIDSS-chosen bin falls
-    back to 2MASS's own count on a pixel the deep survey does not cover.
-    From `KS_SHARED_END_MAG` to `KS_DEEP_CUT_MAG` the axis is UKIDSS's
-    own bins, zero (unmeasured, not measured-and-empty) on pixels it
-    does not cover. Returns `(ks_edges, n_ks_obs, ks_source)`, `ks_source`
-    0=2MASS/1=UKIDSS per returned bin; the 2MASS axis unchanged, source
-    all 0, where UKIDSS carries no coverage for this region at all.
+#: C19 Part B item 6: the per-bin `KS_SOURCE` disclosure codes -- which
+#: survey a bin's own counts came from, 0 2MASS / 1 UKIDSS / 2 VHS.
+KS_SOURCE_2MASS = 0
+KS_SOURCE_UKIDSS = 1
+KS_SOURCE_VHS = 2
+
+
+def _combine_ks_axis(ks_edges_2mass, n_ks_obs_2mass, deep_sources):
+    """W46, extended C19 Part B item 6: no split magnitude. `deep_sources`
+    is an ordered sequence of `(code, edges, n_obs, covered)` -- one
+    entry per deep survey this region's root carries (`KS_SOURCE_UKIDSS`
+    first, `KS_SOURCE_VHS` second: UKIDSS's own count is taken on a
+    pixel it covers, VHS's only where UKIDSS does not). On the shared
+    grid 9.0-`KS_SHARED_END_MAG` (2MASS's own regular half-magnitude
+    bins; the odd trailing 14.0-14.3 bin is dropped, replaced by the
+    deep surveys' own 14.0-14.5 bin) each bin takes, for every pixel,
+    whichever side -- 2MASS, or the deep surveys combined by that same
+    priority -- has the larger region-summed count over the pixels any
+    deep survey covers; a deep-chosen bin falls back to 2MASS's own
+    count on a pixel no deep survey covers. From `KS_SHARED_END_MAG` to
+    `KS_DEEP_CUT_MAG` the axis is the deep surveys' own bins, combined
+    by the same per-pixel priority, zero (unmeasured, not measured-and-
+    empty) on a pixel neither covers. Each returned bin's `KS_SOURCE`
+    code is whichever source (2MASS, or the deep survey whose own
+    pixels contributed the larger summed count to that bin -- the
+    per-pixel priority already makes every pixel's count belong to
+    exactly one source, so this is a real measured majority, never a
+    fabricated split) the bin's own counts actually came from. Returns
+    `(ks_edges, n_ks_obs, ks_source)`; the 2MASS axis unchanged, source
+    all 0, where no deep survey carries any coverage for this region at
+    all.
     """
-    if not np.any(n_ukidss_obs):
+    active = [d for d in deep_sources if np.any(d[2])]
+    if not active:
         return ks_edges_2mass, n_ks_obs_2mass, np.zeros(n_ks_obs_2mass.shape[1], dtype=np.int8)
+
+    ref_edges = active[0][1]
+    for code, edges, n_obs, covered in active[1:]:
+        if not np.array_equal(edges, ref_edges):
+            raise ValueError(
+                "anchor_tiles: deep survey MAG_EDGES disagree (code %d vs code %d) -- "
+                "their products' binning has drifted apart" % (active[0][0], code))
 
     n_shared = n_ks_obs_2mass.shape[1] - 1  # drop 2MASS's own odd 14.0-14.3 bin
     shared_edges = ks_edges_2mass[: n_shared + 1]
     n_2mass_shared = n_ks_obs_2mass[:, :n_shared]
 
-    ukidss_lower = ukidss_edges[:-1]
+    deep_lower = ref_edges[:-1]
     shared_lower = shared_edges[:-1]
-    match = np.isclose(shared_lower[:, None], ukidss_lower[None, :], atol=1e-6)
+    match = np.isclose(shared_lower[:, None], deep_lower[None, :], atol=1e-6)
     if not np.all(match.any(axis=1)):
         raise ValueError(
-            "anchor_tiles: the shared 9.0-%.1f Ks grid does not land on UKIDSS's own "
-            "bin edges -- the two products' MAG_EDGES have drifted apart" % KS_SHARED_END_MAG)
-    n_ukidss_shared = n_ukidss_obs[:, np.argmax(match, axis=1)]
+            "anchor_tiles: the shared 9.0-%.1f Ks grid does not land on the deep "
+            "surveys' own bin edges -- the products' MAG_EDGES have drifted apart" % KS_SHARED_END_MAG)
+    shared_cols = np.argmax(match, axis=1)
+    is_deep = deep_lower >= shared_edges[-1] - 1e-9
 
-    sum_2mass = n_2mass_shared[deep_covered].sum(axis=0)
-    sum_ukidss = n_ukidss_shared[deep_covered].sum(axis=0)
-    ks_source_shared = (sum_ukidss > sum_2mass).astype(np.int8)
+    def _combine(col_select):
+        """Per-pixel priority combine over `active` on the bin columns
+        `col_select` picks out of each source's own `n_obs`: the first
+        source wins on a pixel it covers, the next only where it does
+        not, and so on. Returns `(combined, covered_any, contrib_by_code)`
+        -- `contrib_by_code` a disjoint partition of `combined` (no
+        pixel's count is split between two codes), so summing any one
+        entry is a real count, not an estimate."""
+        n_pix = n_2mass_shared.shape[0]
+        n_bin = active[0][2][:, col_select].shape[1]
+        combined = np.zeros((n_pix, n_bin))
+        covered_any = np.zeros(n_pix, dtype=bool)
+        contrib_by_code = []
+        for code, edges, n_obs, covered in active:
+            take = covered & ~covered_any
+            contrib = np.where(take[:, None], n_obs[:, col_select], 0.0)
+            combined = combined + contrib
+            contrib_by_code.append((code, contrib))
+            covered_any = covered_any | covered
+        return combined, covered_any, contrib_by_code
 
-    take_ukidss = ks_source_shared[None, :].astype(bool)
+    def _dominant_code(contrib_by_code, default_code, restrict=None):
+        """Per bin, the code whose own contribution summed the largest
+        (restricted to `restrict` pixels if given) -- ties keep the
+        earlier (higher-priority) code; `default_code` where every
+        source summed exactly zero."""
+        n_bin = contrib_by_code[0][1].shape[1]
+        best_code = np.full(n_bin, default_code, dtype=np.int8)
+        best_sum = np.zeros(n_bin)
+        for code, contrib in contrib_by_code:
+            s = contrib[restrict].sum(axis=0) if restrict is not None else contrib.sum(axis=0)
+            better = s > best_sum
+            best_code = np.where(better, code, best_code)
+            best_sum = np.where(better, s, best_sum)
+        return best_code.astype(np.int8)
+
+    combined_shared, covered_any_shared, contrib_shared = _combine(shared_cols)
+    sum_2mass = n_2mass_shared[covered_any_shared].sum(axis=0)
+    sum_combined = combined_shared[covered_any_shared].sum(axis=0)
+    take_deep_shared = sum_combined > sum_2mass
+    code_shared = np.where(
+        take_deep_shared, _dominant_code(contrib_shared, KS_SOURCE_2MASS, covered_any_shared),
+        KS_SOURCE_2MASS).astype(np.int8)
     n_shared_out = np.where(
-        take_ukidss, np.where(deep_covered[:, None], n_ukidss_shared, n_2mass_shared),
+        take_deep_shared[None, :],
+        np.where(covered_any_shared[:, None], combined_shared, n_2mass_shared),
         n_2mass_shared)
 
-    is_deep = ukidss_lower >= shared_edges[-1] - 1e-9
-    n_deep = n_ukidss_obs[:, is_deep]
-    edges = np.concatenate([shared_edges, ukidss_edges[1:][is_deep]])
-    n_ks = np.concatenate([n_shared_out, n_deep], axis=1)
-    ks_source = np.concatenate([ks_source_shared, np.ones(n_deep.shape[1], dtype=np.int8)])
+    combined_deep, covered_any_deep, contrib_deep = _combine(is_deep)
+    code_deep = _dominant_code(contrib_deep, active[0][0], covered_any_deep)
+
+    edges = np.concatenate([shared_edges, ref_edges[1:][is_deep]])
+    n_ks = np.concatenate([n_shared_out, combined_deep], axis=1)
+    ks_source = np.concatenate([code_shared, code_deep])
     return edges, n_ks, ks_source
 
 
@@ -590,7 +660,11 @@ def _read_anchor_counts(config, region, pixels):
     module's magnitude cuts: Gaia's bins with upper edge <= 19
     (`GAIA_G_CUT_MAG`), 2MASS's whole grid (already built to close at
     `KS_CUT_MAG`) extended by UKIDSS's deep counts where a region has
-    them (W46: `_combine_ks_axis`'s per-bin selection). Fails if any
+    them (W46: `_combine_ks_axis`'s per-bin selection). C19: UKIDSS's own
+    counts are read already multiplied by `sky.derived.ukidss_counts`'
+    own `CALIBRATION[0]` (2MASS count / UKIDSS count over their shared
+    Ks 13.0-14.3 overlap window) before `_combine_ks_axis` ever sees
+    them -- 2MASS is the reference, UKIDSS the extension. Fails if any
     product's own pixel set disagrees with the granule map's
     (`_region_pixel_columns`) -- the join every later array in this
     module assumes.
@@ -622,16 +696,39 @@ def _read_anchor_counts(config, region, pixels):
         ukidss_pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
         ukidss_edges = np.asarray(f["MAG_EDGES"][:], dtype=np.float64)
         ukidss_n = np.asarray(f["N"][:], dtype=np.float64)
+        ukidss_calibration_ratio = float(np.asarray(f["CALIBRATION"][:], dtype=np.float64)[0])
+    vhs_path = config_module.product_path(config, "sky/derived", "vhs", "counts", "hpx512", region=region)
+    if not os.path.exists(vhs_path):
+        raise FileNotFoundError(
+            f"anchor_tiles: VHS counts missing for region {region!r} at {vhs_path} "
+            "-- run `sesnaimpute.sky.derived.vhs_counts` first")
+    with h5py.File(vhs_path, "r") as f:
+        vhs_pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
+        vhs_edges = np.asarray(f["MAG_EDGES"][:], dtype=np.float64)
+        vhs_n = np.asarray(f["N"][:], dtype=np.float64)
+        vhs_calibration_ratio = float(np.asarray(f["CALIBRATION"][:], dtype=np.float64)[0])
+    # C19 Part A item 3 / Part B item 5: 2MASS is the reference survey,
+    # UKIDSS and VHS the extensions -- each deep survey's own counts
+    # product's own CALIBRATION[0] (2MASS count / that survey's count,
+    # external to external, no SESNA count in it) is applied before
+    # `_combine_ks_axis` ever sees them. NaN (no coverage for this
+    # region at all) leaves N unmultiplied -- it is already all zero
+    # there, so there is nothing to calibrate.
+    if np.isfinite(ukidss_calibration_ratio):
+        ukidss_n = ukidss_n * ukidss_calibration_ratio
+    if np.isfinite(vhs_calibration_ratio):
+        vhs_n = vhs_n * vhs_calibration_ratio
     if not (np.array_equal(pixels, gaia_pix) and np.array_equal(pixels, ks_pix)):
         raise ValueError(
             f"anchor_tiles: {region!r}'s granule-map pixel set disagrees with the "
             "gaia_counts/twomass_counts products' own pixel set -- rerun those two "
             "RUNBOOK lines for this region")
-    if not np.array_equal(ks_pix, ukidss_pix):
+    if not (np.array_equal(ks_pix, ukidss_pix) and np.array_equal(ks_pix, vhs_pix)):
         raise ValueError(
-            f"anchor_tiles: {region!r}'s 2MASS and UKIDSS counts disagree on their own "
-            "pixel set -- rerun the `sesnaimpute.sky.derived.twomass_counts` and "
-            "`sesnaimpute.sky.derived.ukidss_counts` RUNBOOK lines for this region")
+            f"anchor_tiles: {region!r}'s 2MASS, UKIDSS and VHS counts disagree on their "
+            "own pixel set -- rerun the `sesnaimpute.sky.derived.twomass_counts`, "
+            "`sesnaimpute.sky.derived.ukidss_counts` and `sesnaimpute.sky.derived."
+            "vhs_counts` RUNBOOK lines for this region")
     if abs(float(ks_edges_2mass[-1]) - KS_CUT_MAG) > 1e-6:
         raise ValueError(
             f"anchor_tiles: {twomass_path!r}'s MAG_EDGES ends at {ks_edges_2mass[-1]!r}, "
@@ -640,11 +737,20 @@ def _read_anchor_counts(config, region, pixels):
     g_edges = gaia_edges_full[:n_g_edges]
     n_g_obs = gaia_n[:, : n_g_edges - 1]
 
-    # a pixel the deep survey covers holds at least one of its sources;
-    # where it holds none the deep bins are unmeasured, not empty, and
-    # the predicted counts there are dropped to match (`build_region`)
-    deep_covered = ukidss_n.sum(axis=1) > 0
-    ks_edges, ks_n, ks_source = _combine_ks_axis(ks_edges_2mass, ks_n_2mass, ukidss_edges, ukidss_n, deep_covered)
+    # a pixel a deep survey covers holds at least one of its sources;
+    # where neither holds any the deep bins are unmeasured, not empty,
+    # and the predicted counts there are dropped to match (`build_region`).
+    # C19 Part B item 6: UKIDSS takes priority per pixel, VHS fills only
+    # where UKIDSS does not cover -- `_combine_ks_axis`'s own per-pixel
+    # priority combine.
+    ukidss_covered = ukidss_n.sum(axis=1) > 0
+    vhs_covered = vhs_n.sum(axis=1) > 0
+    deep_covered = ukidss_covered | vhs_covered
+    deep_sources = (
+        (KS_SOURCE_UKIDSS, ukidss_edges, ukidss_n, ukidss_covered),
+        (KS_SOURCE_VHS, vhs_edges, vhs_n, vhs_covered),
+    )
+    ks_edges, ks_n, ks_source = _combine_ks_axis(ks_edges_2mass, ks_n_2mass, deep_sources)
     has_deep = abs(float(ks_edges[-1]) - KS_DEEP_CUT_MAG) < 1e-6
     if not has_deep and abs(float(ks_edges[-1]) - KS_CUT_MAG) > 1e-6:
         raise ValueError(
@@ -944,8 +1050,10 @@ def write_histograms(config, region, result):
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "hpx512"
         # W46: KS_SOURCE records which survey each Ks bin takes
-        # (0=2MASS/1=UKIDSS), replacing the single KS_SPLIT_MAG attr --
-        # downstream (`anchor_weights.ks_served_mask`) reads this per bin.
+        # (0=2MASS/1=UKIDSS/2=VHS, C19 Part B item 6), replacing the
+        # single KS_SPLIT_MAG attr -- downstream (`anchor_weights.
+        # ks_served_mask`) reads this per bin (its own `== 0` test is
+        # unaffected by the third code: UKIDSS and VHS are both "deep").
         for name, data in (
             ("HPX_PIX_512", result["pixels"].astype(np.int64)),
             ("A_PIX_K", result["a_pix"].astype(np.float32)),
