@@ -1253,18 +1253,27 @@ REGISTRY = {
         "exactly as it was before C25."),
 
     # population.gal -- counts_gal_survey: the background-galaxy number-
-    # counts law, survey-wide.
+    # counts law, survey-wide. The law is fitted JOINTLY to Fazio et al.
+    # (2004, ApJS 154, 39, Table 1, the wide-area bright end) and Ashby et
+    # al. (2013) SEDS (ApJ 769, 80, the deep faint end, star-subtracted),
+    # each weighted by its own Poisson error plus its own field-to-field
+    # (cosmic-variance) scatter (owner ruling 2026-10-21, review ledger
+    # C27, overruling C3's "SEDS beside, never fit"); see
+    # FIT_LOG10_S_MIN/MAX (Fazio's own constraining range) and
+    # FIT_LOG10_S_SEDS_MIN/MAX (SEDS's own constraining range) below for
+    # which dataset constrains which flux range.
     ("counts_gal_survey", "LOG10_A"): ("log10(deg^-2 mJy^-1)",
         "The fitted broken power law's own normalization: log10 of the "
         "DIFFERENTIAL galaxy count per square degree per mJy, phi(S), at "
-        "the break flux LOG10_S_BREAK. Fitted directly to Fazio et al. "
-        "(2004)'s own tabulated differential counts, never through an "
-        "intermediate cumulative fit."),
+        "the break flux LOG10_S_BREAK. Fitted jointly to Fazio et al. "
+        "(2004)'s and Ashby et al. (2013) SEDS's own tabulated "
+        "differential counts (each star-subtracted, each weighted by its "
+        "own error), never through an intermediate cumulative fit."),
     ("counts_gal_survey", "LOG10_S_BREAK"): ("log10 mJy",
         "The fitted broken power law's own break flux at 4.5 micron: "
-        "10**x is a flux in mJy. Free to land anywhere the differential "
-        "counts data support, not constrained to Fazio's own tabulated "
-        "flux range."),
+        "10**x is a flux in mJy. Free to land anywhere the joint Fazio+"
+        "SEDS differential-counts data support, not constrained to "
+        "either dataset's own tabulated flux range."),
     ("counts_gal_survey", "ALPHA_FAINT"): ("dimensionless",
         "The fitted broken power law's own faint-end slope of log10 "
         "phi(S) (the differential counts) against log10 S."),
@@ -1279,13 +1288,18 @@ REGISTRY = {
         "The 4.5 micron flux grid PHI_S, P_POINT and PHI_S_POINT are "
         "tabulated on: 10**x is a flux in mJy."),
     ("counts_gal_survey", "PHI_S"): ("deg^-2 mJy^-1",
-        "Fazio et al. (2004)'s intrinsic galaxy differential number-"
-        "counts law, phi(S) = -dN/dS, at each flux in LOG10_S_GRID: the "
-        "number of galaxies per square degree per mJy of flux at 4.5 "
-        "micron. Fitted directly to Fazio's own tabulated differential "
-        "counts (never a cumulative fit then differentiated); its level "
-        "agrees with a direct integral of that same table to within 0.01 "
-        "dex over this grid."),
+        "The intrinsic galaxy differential number-counts law, "
+        "phi(S) = -dN/dS, at each flux in LOG10_S_GRID: the number of "
+        "galaxies per square degree per mJy of flux at 4.5 micron. "
+        "Fitted jointly to Fazio et al. (2004)'s wide-area bright-end "
+        "counts and Ashby et al. (2013) SEDS's deep, star-subtracted "
+        "faint-end counts (never a cumulative fit then differentiated), "
+        "each weighted by its own Poisson error plus its own field-to-"
+        "field scatter (owner ruling 2026-10-21). Its level against a "
+        "direct integral of Fazio's own table alone is no longer held to "
+        "the earlier 0.01 dex bound (the law also answers to SEDS now); "
+        "`gal.build()`'s own \"IDENTITY C3\" print reports the current "
+        "difference."),
     ("counts_gal_survey", "P_POINT"): ("dimensionless",
         "The fraction of galaxies at each flux in LOG10_S_GRID retained "
         "as IRAC point sources rather than resolved and excluded. "
@@ -1298,21 +1312,59 @@ REGISTRY = {
         "PHI_S times P_POINT: the point-source-corrected galaxy counts "
         "law every consumer of this product reads."),
     ("counts_gal_survey", "COSMIC_VARIANCE_DEX"): ("dex",
-        "The root-mean-square, in dex, of the counts-law fit's own "
-        "field-to-field scatter over its candidate fitting variants: the "
-        "cosmic-variance uncertainty on PHI_S and PHI_S_POINT."),
+        "Fazio et al. (2004)'s OWN field-to-field scatter, dex: the "
+        "root-mean-square spread in log10 phi(S) between its two field-"
+        "preferred fitting variants (egs/qso1700). Part of the joint "
+        "fit's own Fazio-side weighting (`cv_fazio_dex` alongside Fazio's "
+        "own published per-row error); SEDS's own, separately measured "
+        "field-to-field scatter is SEDS_FIELD_SCATTER_DEX below, not this "
+        "attribute."),
+    ("counts_gal_survey", "SEDS_FIELD_SCATTER_DEX"): ("dex",
+        "Ashby et al. (2013) SEDS's OWN field-to-field (cosmic-variance) "
+        "scatter, dex, re-measured here (review ledger C27, owner ruling "
+        "2026-10-21) across its five fields' own star-subtracted "
+        "differential counts: a raw-count-weighted root-mean-square, "
+        "over the fit's own 0.25 dex bins, of each bin's own per-field "
+        "log10 density spread around its five-field mean (bins needing "
+        "at least 3 fields with at least 50 raw sources each). Part of "
+        "the joint fit's own SEDS-side weighting, alongside SEDS's own "
+        "per-bin Poisson error."),
     ("counts_gal_survey", "FIT_LOG10_S_MIN"): ("log10 mJy",
         "The faintest flux Fazio et al. (2004)'s own tabulated bins "
         "reach: 10**x is a flux in mJy. Descriptive only -- the fitted "
-        "break is free and not constrained to this range."),
+        "break is free and not constrained to this range. (In this "
+        "fit, SEDS's own faint cut sits brighter than Fazio's faintest "
+        "tabulated row, so this remains Fazio's own range -- see "
+        "FIT_LOG10_S_SEDS_MIN/MAX for SEDS's own constraining range.)"),
     ("counts_gal_survey", "FIT_LOG10_S_MAX"): ("log10 mJy",
         "The brightest flux Fazio et al. (2004)'s own tabulated bins "
         "reach: 10**x is a flux in mJy. Descriptive only -- the fitted "
         "break is free and not constrained to this range."),
     ("counts_gal_survey", "FIT_RMS_DEX"): ("dex",
-        "The root-mean-square residual, in dex, of the fitted broken "
-        "power law against Fazio et al. (2004)'s own tabulated "
-        "DIFFERENTIAL counts (the quantity actually fitted)."),
+        "The root-mean-square residual, in dex (unweighted), of the "
+        "fitted broken power law against the JOINT Fazio+SEDS "
+        "differential-counts data it was fitted to (the quantity "
+        "actually fitted); `gal.build()` also prints the dimensionless "
+        "weighted (own-error-normalized) rms beside it."),
+    ("counts_gal_survey", "FIT_N_FAZIO_ROWS"): ("rows",
+        "How many of Fazio et al. (2004)'s own pooled differential-"
+        "counts rows entered the joint fit (review ledger C27)."),
+    ("counts_gal_survey", "FIT_N_SEDS_BINS"): ("bins",
+        "How many of Ashby et al. (2013) SEDS's own 0.25 dex, star-"
+        "subtracted differential-counts bins entered the joint fit "
+        "(review ledger C27): only bins at or brighter than LOG10_S_"
+        "GRID's own faint edge, with a positive star-subtracted count."),
+    ("counts_gal_survey", "FIT_LOG10_S_SEDS_MIN"): ("log10 mJy",
+        "The faintest flux SEDS's own bins actually entered the joint "
+        "fit at: 10**x is a flux in mJy -- by construction, LOG10_S_"
+        "GRID's own faint edge (SWIRE's I2 5-sigma depth), well above "
+        "SEDS's own completeness turnover (`gal.build_joint_counts_law` "
+        "prints the turnover flux measured directly on SEDS's own pooled "
+        "raw counts)."),
+    ("counts_gal_survey", "FIT_LOG10_S_SEDS_MAX"): ("log10 mJy",
+        "The brightest flux SEDS's own bins actually entered the joint "
+        "fit at: 10**x is a flux in mJy -- set by where SEDS's own star-"
+        "subtracted count last stays positive, not a fixed bound."),
     ("counts_gal_survey", "POINT_FRACTION_LOG10_S_CENTERS"): ("log10 mJy",
         "The 4.5 micron flux bin centers the measured point-like "
         "fraction (POINT_FRACTION_MEASURED) is tabulated on, over SWIRE's "

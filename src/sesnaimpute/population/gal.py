@@ -2,25 +2,44 @@
 
 This module builds the one survey-wide, region-independent piece of the
 background-galaxy prior that a consumer reads: `phi(S)`, the intrinsic
-4.5um galaxy DIFFERENTIAL number-counts law (Fazio et al. 2004, ApJS 154,
-39, Table 1) -- one smooth broken power law fitted directly to Fazio's
-own tabulated differential counts (`fit_counts_differential`, break
-free), never through an intermediate cumulative fit and derivative
-(review ledger C3: the earlier fit was to cumulative N(>S), consumed as
-the differential `phi(S) = -dN/dS`, with the break bounded to the data's
-own range -- which is why it always landed on that range's edge). The
-fit is written to the `counts_gal_survey` product's
+4.5um galaxy DIFFERENTIAL number-counts law -- one smooth broken power
+law, break free, fitted directly to the differential counts themselves
+(`fit_counts_differential`), never through an intermediate cumulative
+fit and derivative (review ledger C3: the earlier fit was to cumulative
+N(>S), consumed as the differential `phi(S) = -dN/dS`, with the break
+bounded to the data's own range -- which is why it always landed on
+that range's edge).
+
+Owner ruling 2026-10-21 (review ledger C27, overruling C3's "SEDS
+beside, never fit"): the law is fitted jointly to BOTH tabulations it
+has -- Fazio et al. (2004, ApJS 154, 39, Table 1)'s wide-area bright end
+and Ashby et al. (2013)'s SEDS (ApJ 769, 80, five full-depth fields,
+1.46 deg^2) deep faint end, each star-subtracted, each weighted by its
+own Poisson error plus its own measured field-to-field (cosmic-variance)
+scatter -- never one dataset weighted down by hand (`build_joint_counts_
+law`). SEDS carries no native star/galaxy classification (the ReadMe's
+own byte-by-byte description has none), so its counts are star-
+subtracted by Fazio's own star columns transported to each SEDS field's
+own Galactic latitude, exactly as `expected_star_count` already
+transports them to SWIRE's fields (`expected_star_phi_at_latitude`,
+differential form). The two datasets are complementary, not redundant:
+Fazio's three wide fields anchor the bright end SEDS's 1.46 deg^2 cannot
+reach at adequate numbers, while SEDS's ~100x the source count anchors
+the faint end at far smaller Poisson error than Fazio's own few-field
+tabulation carries there -- so the weighting alone, with no hand
+adjustment, lets each dataset govern where it is actually informative.
+
+The fit is written to the `counts_gal_survey` product's
 `LOG10_S_GRID`/`PHI_S`, alongside `PHI_S_POINT = PHI_S * P_POINT`, the
 IRAC point-source retention `p(S)` MEASURED directly on SWIRE's own
 per-band extended-source flag over 0.3-20mJy (`measure_point_fraction`,
 review ledger C4: the earlier `p(S)` was calibrated over 0.056-0.28mJy
 only and extrapolated 1.8 dex beyond it as an unmeasured power law) --
-`bmstp.sample_gal`, `bmstp.density` and `bmstp.template_weights` read
-the point-source-corrected law. Ashby et al. (2013)'s SEDS source counts
-(ApJ 769, 80, on disk) are read as a cross-check beside the Fazio fit's
-own level, never fit to it. The full selection shape `r(a, log10 S) =
-phi(S) . S . eps(a, S)` assembles this law with the extinction/selection
-term elsewhere; this module never evaluates `eps`.
+`bmstp.sample_gal` and `bmstp.density` read the point-source-corrected
+law (`bmstp.template_weights` does not read this product). The full
+selection shape `r(a, log10 S) = phi(S) . S . eps(a, S)` assembles this
+law with the extinction/selection term elsewhere; this module never
+evaluates `eps`.
 
 The star-galaxy split itself is chosen once, survey-wide
 (`select_star_galaxy_split`): among the candidate rules, the one whose
@@ -204,15 +223,28 @@ SPLIT_CRITERION_STAR_S_MJY = (0.045, 0.071, 0.113, 0.179)
 #: Ashby et al. (2013, ApJ 769, 80)'s five SEDS fields: the per-source
 #: fixed-width catalogue file (Ashby et al. 2013 ReadMe, "table[789].dat
 #: table1[01].dat") and the field's own area, deg^2 (Table 1: UDS, ECDFS,
-#: COSMOS, HDFN, EGS), read only as a level cross-check beside the Fazio
-#: fit (C3), never fit to it -- the release carries no star-galaxy
-#: separation (module docstring), so it over-counts by whatever stellar
-#: contamination its deep fields still carry at the flux read.
+#: COSMOS, HDFN, EGS), now one of the counts law's own fit inputs
+#: (review ledger C27, owner ruling 2026-10-21, overruling C3's "SEDS
+#: beside, never fit"): the release carries no star-galaxy separation
+#: (module docstring), so its counts are star-subtracted here before
+#: entering the fit (`expected_star_phi_at_latitude`), never used raw.
 ASHBY_SEDS_FIELDS = (
     ("table7.dat.gz", 0.32), ("table8.dat.gz", 0.35), ("table9.dat.gz", 0.19),
     ("table10.dat.gz", 0.25), ("table11.dat.gz", 0.35),
 )
 ASHBY_SEDS_AREA_DEG2 = float(sum(area for _name, area in ASHBY_SEDS_FIELDS))
+
+#: `ASHBY_SEDS_FIELDS`'s own names, same order (Ashby et al. 2013 Table 1:
+#: UDS, ECDFS, COSMOS, HDFN, EGS) -- the star subtraction's per-field key.
+ASHBY_SEDS_FIELD_NAMES = ("UDS", "ECDFS", "COSMOS", "HDFN", "EGS")
+
+#: `ASHBY_SEDS_FIELD_NAMES`'s own |Galactic latitude|, deg -- each field's
+#: own centre (Ashby et al. 2013 ReadMe `table1.dat`: RA/Dec J2000,
+#: "02 18 00 -05 10 17" etc.) transformed ICRS -> Galactic once, the
+#: target latitude the Fazio star-count law is transported to here
+#: (`expected_star_phi_at_latitude`), mirroring what `expected_star_count`
+#: already does for `SWIRE_FIELD_ABS_B_DEG`.
+ASHBY_SEDS_FIELD_ABS_B_DEG = (59.88, 54.44, 42.10, 54.80, 59.81)
 
 #: Byte-offset columns (0-indexed, half-open) of the SEDS per-source
 #: fixed-width table (Ashby et al. 2013 ReadMe, bytes 100-104 "[4.5]psf",
@@ -225,6 +257,28 @@ ASHBY_SEDS_COLUMN_NAMES = ("mag45psf", "f45")
 #: al. (2013)'s own magnitude convention (ReadMe byte-by-byte
 #: description, "mag"), never Fazio's Vega system.
 ASHBY_SEDS_AB_ZP_JY = 3631.0
+
+#: Fazio Table 1's own published per-row uncertainty on that field's
+#: `*_total` column, dex -- `FIELD_COLUMNS`/`STAR_FIELD_COLUMNS` row order,
+#: no separate `_galaxies`-only error tabulated. Used as the nearest
+#: stored uncertainty for the star-subtracted galaxy row too (disclosed,
+#: `fazio_mean_variant_with_sigma`), rather than fabricating one.
+FAZIO_ERR_COLUMNS = ("bootes_err", "egs_err", "qso1700_err")
+
+#: The SEDS fit input's own bin width, log10 S dex (the owner's own
+#: choice, review ledger C27).
+SEDS_FIT_BIN_WIDTH_DEX = 0.25
+
+#: A SEDS field-to-field-scatter bin needs at least this many RAW
+#: (pre-subtraction) sources in a field before that field's own log10
+#: density there is trusted for the scatter measurement -- too few and
+#: the estimate is small-number noise, not real field-to-field spread.
+SEDS_SCATTER_MIN_N_FIELD = 50
+
+#: ...and needs at least this many of the five fields passing that count
+#: (with a positive star-subtracted count) before the bin contributes an
+#: RMS to `seds_differential_counts`'s own pooled scatter estimate at all.
+SEDS_SCATTER_MIN_FIELDS = 3
 
 
 # ---------------------------------------------------------------------------
@@ -360,53 +414,69 @@ _SLOPE_STARTS = ((0.3, 1.2), (0.6, 1.8), (1.0, 2.5), (1.5, 3.2))
 _BREAK_FREE_MARGIN_DEX = 6.0
 
 
-def fit_counts_differential(log10_S, log10_phi):
-    """Least-squares fit of `BrokenPowerLaw` directly to Fazio et al.
-    (2004)'s own tabulated DIFFERENTIAL galaxy counts phi(S) (review
-    ledger C3: never through an intermediate cumulative fit), break free
-    of any bound to the data's own tabulated range: multi-start over
-    `_BREAK_START_N` log-spaced break starts (spanning the data's own
-    range plus `_BREAK_FREE_MARGIN_DEX` dex on each side) times
-    `_SLOPE_STARTS` slope-pair starts, keeping the lowest-rms result.
+def fit_counts_differential(log10_S, log10_phi, sigma=None):
+    """Least-squares fit of `BrokenPowerLaw` directly to DIFFERENTIAL
+    galaxy counts phi(S) (review ledger C3: never through an intermediate
+    cumulative fit), break free of any bound to the data's own tabulated
+    range: multi-start over `_BREAK_START_N` log-spaced break starts
+    (spanning the data's own range plus `_BREAK_FREE_MARGIN_DEX` dex on
+    each side) times `_SLOPE_STARTS` slope-pair starts, keeping the
+    lowest-cost result.
 
-    Returns `(fit, stats)`, `stats` carrying the fit's own rms, max
-    residual, Fazio's own tabulated flux range (descriptive -- the fit is
-    not bounded to it), and whether the fitted break landed inside that
+    `sigma`, one per point, dex: each point's residual is divided by its
+    own `sigma` before the sum of squares is formed (review ledger C27,
+    owner ruling 2026-10-21 -- the joint Fazio+SEDS fit's own weighting,
+    each point by its own error, no dataset weighted down by hand).
+    Defaults to all ones (every earlier, single-dataset caller of this
+    function, unweighted, unchanged).
+
+    Returns `(fit, stats)`, `stats` carrying the fit's own weighted
+    ("chi-like", dimensionless) and unweighted (dex) rms, max unweighted
+    residual, the data's own flux range (descriptive -- the fit is not
+    bounded to it), and whether the fitted break landed inside that
     range.
     """
     x, y = np.asarray(log10_S, dtype=float), np.asarray(log10_phi, dtype=float)
+    s = np.ones_like(x) if sigma is None else np.asarray(sigma, dtype=float)
     x_lo, x_hi = float(x.min()), float(x.max())
     lo_bound, hi_bound = x_lo - _BREAK_FREE_MARGIN_DEX, x_hi + _BREAK_FREE_MARGIN_DEX
 
     def resid(p):
-        return BrokenPowerLaw(p).log10_value(x) - y
+        return (BrokenPowerLaw(p).log10_value(x) - y) / s
 
     break_starts = np.linspace(x_lo, x_hi, _BREAK_START_N)
-    best_params, best_rms = None, np.inf
+    best_params, best_cost = None, np.inf
     for logSb0 in break_starts:
         for af0, ab0 in _SLOPE_STARTS:
             p0 = [float(y.max()), float(logSb0), float(af0), float(ab0), 0.5]
             sol = least_squares(resid, p0, bounds=(
                 [0.0, lo_bound, -3.0, 0.1, 0.02], [12.0, hi_bound, 6.0, 8.0, 4.0]))
             r = resid(sol.x)
-            rms = float(np.sqrt(np.mean(r ** 2)))
-            if rms < best_rms:
-                best_params, best_rms = sol.x, rms
+            cost = float(np.sum(r ** 2))
+            if cost < best_cost:
+                best_params, best_cost = sol.x, cost
 
     fit = BrokenPowerLaw(best_params)
-    r = resid(best_params)
-    return fit, {"rms_dex": float(np.sqrt(np.mean(r ** 2))), "max_abs_dex": float(np.max(np.abs(r))),
+    r_weighted = resid(best_params)
+    r_unweighted = BrokenPowerLaw(best_params).log10_value(x) - y
+    return fit, {"rms_dex": float(np.sqrt(np.mean(r_unweighted ** 2))),
+                "rms_weighted": float(np.sqrt(np.mean(r_weighted ** 2))),
+                "max_abs_dex": float(np.max(np.abs(r_unweighted))),
                 "log10_s_lo": x_lo, "log10_s_hi": x_hi,
                 "break_inside_data": bool(x_lo <= best_params[1] <= x_hi)}
 
 
 def fit_all_variants(path):
-    """The central (all-fields-pooled) fit and the two field-preferred
-    variants, each `(fit, stats, (log10_S, log10_phi))`. "mean" averages
+    """The Fazio-alone central (all-fields-pooled) fit and the two
+    field-preferred variants, each `(fit, stats, (log10_S, log10_phi))`,
+    each unweighted (`fit_counts_differential`'s default). "mean" averages
     log10 of whichever galaxy columns are populated per magnitude row --
-    the pooled fit `build_counts_law` adopts. "egs"/"qso1700" prefer that
-    field, falling back to Bootes where it is silent -- their spread is
-    the cosmic-variance measurement (`cosmic_variance_dex`). Each variant
+    the pooled fit `build_joint_counts_law` weights and adds SEDS to
+    (review ledger C27); kept here as the Fazio-only comparator
+    (`build()`'s "IDENTITY C3" print) and as the input the field-preferred
+    variants below still fit. "egs"/"qso1700" prefer that field, falling
+    back to Bootes where it is silent -- their spread is the
+    cosmic-variance measurement (`cosmic_variance_dex`). Each variant
     is fitted directly to the differential counts (`fazio_differential_phi`,
     `fit_counts_differential`; review ledger C3).
     """
@@ -425,6 +495,40 @@ def fit_all_variants(path):
         fit, stats = fit_counts_differential(log10_S, log10_phi)
         out[key] = (fit, stats, (log10_S, log10_phi))
     return out
+
+
+def fazio_mean_variant_with_sigma(path):
+    """Fazio's pooled ("mean") differential counts AND that pooled row's
+    own published uncertainty, row-aligned: `(log10_S, log10_phi,
+    sigma_dex)`, ascending in `log10_S` -- `build_joint_counts_law`'s own
+    Fazio-side fit input (review ledger C27). `sigma_dex` propagates
+    `FAZIO_ERR_COLUMNS`'s own per-field, per-row published error (on that
+    field's `*_total` column -- the nearest stored uncertainty for the
+    star-subtracted `*_galaxies` column plotted here; no separate
+    galaxy-only error is tabulated, disclosed, not fabricated) through the
+    SAME arithmetic mean `fit_all_variants`'s "mean" variant forms:
+    `sigma_row = sqrt(sum_i err_i^2) / n_populated`, over the fields
+    populated at that row (error propagation of an arithmetic mean of
+    independent fields).
+    """
+    mag, cols = read_fazio_table(path)
+    df = pd.read_csv(path)
+    blk = df[df["band_um"] == COORD_BAND_UM].sort_values("mag")
+    val_stack = np.vstack([cols[c] for c in FIELD_COLUMNS])
+    err_stack = np.vstack([blk[c].to_numpy(dtype=float) for c in FAZIO_ERR_COLUMNS])
+    with np.errstate(invalid="ignore"):
+        mean_log = np.nanmean(val_stack, axis=0)
+        n_populated = np.sum(np.isfinite(val_stack), axis=0)
+        sigma_row = np.sqrt(np.nansum(err_stack ** 2, axis=0)) / n_populated
+    log10_S, log10_phi = fazio_differential_phi(mag, mean_log)
+    # Reproduce fazio_differential_phi's own mask (isfinite(mean_log)) and
+    # sort (ascending log10_S) so sigma_row lines up with (log10_S, log10_phi).
+    ok = np.isfinite(mean_log)
+    zp_mjy = FAZIO_VEGA_ZP_JY[COORD_BAND_UM] * 1e3
+    log10_S_unsorted = np.log10(zp_mjy * 10.0 ** (-0.4 * np.asarray(mag, dtype=float)[ok]))
+    order = np.argsort(log10_S_unsorted)
+    sigma_dex = sigma_row[ok][order]
+    return log10_S, log10_phi, sigma_dex
 
 
 def cosmic_variance_dex(variants):
@@ -508,22 +612,29 @@ def point_source_retention_measured(log10_s_grid, log10_centers, p_point, s_lo_m
     return np.where(grid < np.log10(s_lo_mjy), 1.0, interp)
 
 
-def build_counts_law(fazio_path):
-    """The pooled fit, its cosmic-variance band and PHI_S on
-    LOG10_S_GRID (review ledger C3: fitted directly to the differential
-    counts). The point-source correction PHI_S_POINT = PHI_S * p(S) is
-    added afterward in `build`, once SWIRE's own rows are read
+def build_counts_law(fazio_path, config):
+    """The joint Fazio+SEDS fit (review ledger C27, owner ruling
+    2026-10-21), its cosmic-variance bands and PHI_S on LOG10_S_GRID. The
+    point-source correction PHI_S_POINT = PHI_S * p(S) is added
+    afterward in `build`, once SWIRE's own rows are read
     (`measure_point_fraction`; review ledger C4) -- this function never
     reads SWIRE. Returns a dict ready for `write_counts` once `p_point`/
     `phi_s_point` and the measured curve are added to it.
+
+    `variants` (the Fazio-alone "mean"/"egs"/"qso1700" fits,
+    unweighted) is still returned: `cosmic_variance_dex` (Fazio's own
+    field-to-field spread) reads it, and `build()`'s "IDENTITY C3" print
+    compares the joint fit's level against the Fazio-alone "mean" fit and
+    a direct integral of Fazio's own table.
     """
     variants = fit_all_variants(fazio_path)
-    fit, stats, _ = variants["mean"]
     cv_dex = cosmic_variance_dex(variants)
+    fit, stats, seds_result, cv_fazio_dex = build_joint_counts_law(fazio_path, config)
     log10_s_grid = build_log10_s_grid(fazio_path)
     phi_s = fit.value(10.0 ** log10_s_grid)
     return dict(fit=fit, stats=stats, cosmic_variance_dex=cv_dex,
-                log10_s_grid=log10_s_grid, phi_s=phi_s, variants=variants)
+                log10_s_grid=log10_s_grid, phi_s=phi_s, variants=variants,
+                seds_result=seds_result)
 
 
 def write_counts(path, result):
@@ -543,6 +654,11 @@ def write_counts(path, result):
             ("FIT_LOG10_S_MIN", np.float64(result["stats"]["log10_s_lo"])),
             ("FIT_LOG10_S_MAX", np.float64(result["stats"]["log10_s_hi"])),
             ("FIT_RMS_DEX", np.float64(result["stats"]["rms_dex"])),
+            ("SEDS_FIELD_SCATTER_DEX", np.float64(result["stats"]["seds_field_scatter_dex"])),
+            ("FIT_N_FAZIO_ROWS", np.int64(result["stats"]["n_fazio"])),
+            ("FIT_N_SEDS_BINS", np.int64(result["stats"]["n_seds"])),
+            ("FIT_LOG10_S_SEDS_MIN", np.float64(result["stats"]["log10_s_seds_min"])),
+            ("FIT_LOG10_S_SEDS_MAX", np.float64(result["stats"]["log10_s_seds_max"])),
             ("POINT_FRACTION_LOG10_S_CENTERS", result["point_log10_centers"].astype(np.float64)),
             ("POINT_FRACTION_MEASURED", result["point_measured"].astype(np.float64)),
             ("POINT_FRACTION_N_SWIRE", result["point_n_swire"].astype(np.int64)),
@@ -681,6 +797,43 @@ def expected_star_count(fazio_path, s_mjy):
     return float(np.sum(density_field * area_field))
 
 
+def fazio_star_differential_phi(fazio_path):
+    """Fazio's pooled (mean-of-three-fields) star DIFFERENTIAL counts,
+    phi_star(S), deg^-2 mJy^-1 -- the star-count analogue of
+    `fazio_pooled_star_counts` (cumulative) matching the quantity the
+    counts-law fit actually uses (differential, review ledger C3):
+    `fazio_differential_phi` applied to `STAR_FIELD_COLUMNS`'s own pooled
+    mean. `expected_star_phi_at_latitude` transports this to a SEDS
+    field's own latitude (review ledger C27), exactly as
+    `expected_star_count` transports the cumulative form to SWIRE's.
+    """
+    mag, cols = read_fazio_table(fazio_path, columns=STAR_FIELD_COLUMNS)
+    stack = np.vstack([cols[c] for c in STAR_FIELD_COLUMNS])
+    with np.errstate(invalid="ignore"):
+        mean_log = np.nanmean(stack, axis=0)
+    return fazio_differential_phi(mag, mean_log)
+
+
+def expected_star_phi_at_latitude(fazio_path, log10_s, abs_b_deg):
+    """phi_star(S) at `log10_s` (array or scalar), transported from
+    Fazio's own three fields' mean latitude to `abs_b_deg` by
+    `STAR_COUNT_LATITUDE_GRADIENT_DEX_PER_DEG` -- the differential
+    analogue of `expected_star_count`'s transport, read by
+    `seds_differential_counts` for each SEDS field's own star
+    subtraction (review ledger C27). Held at `fazio_star_differential_
+    phi`'s own edge value beyond its tabulated range (no measurement
+    either side of it), the same held-edge convention
+    `point_source_retention_measured` uses.
+    """
+    log10_s_star, log10_phi_star = fazio_star_differential_phi(fazio_path)
+    lo, hi = float(log10_s_star.min()), float(log10_s_star.max())
+    clipped = np.clip(np.asarray(log10_s, dtype=float), lo, hi)
+    interp = np.interp(clipped, log10_s_star, log10_phi_star)
+    b_fazio_mean = float(np.mean(FAZIO_FIELD_ABS_B_DEG))
+    shift = STAR_COUNT_LATITUDE_GRADIENT_DEX_PER_DEG * (float(abs_b_deg) - b_fazio_mean)
+    return 10.0 ** (interp + shift)
+
+
 def select_star_galaxy_split(flux_mjy_i2, stell, ext_fl, fazio_path, tolerance_dex,
                               s_values=SPLIT_CRITERION_STAR_S_MJY):
     """Grades every `candidate_star_galaxy_splits` candidate on absolute
@@ -770,51 +923,216 @@ def star_ratio_per_field(flux_mjy_i2, is_star, field, fazio_path, s_mjy):
     return rows
 
 
-def scosmos_8um_cumulative(config, threshold_mjy):
-    """S-COSMOS's own measured 8um N(>S) at `threshold_mjy`, deg^-2, over
+def _scosmos_flux_mjy(config, column):
+    """S-COSMOS's own measured flux, mJy, one IRAC channel column, over
     rows the release's own overall quality flag passes (`flag == 0`) --
-    S-COSMOS carries no native stellarity (S-L5), so no star-galaxy
-    separation is applied here; it is the deep single-field cross-check,
-    not the selection population.
+    the one read `scosmos_8um_cumulative` (8um, `flux_c4_2`) and the
+    per-bin 4.5um check in `build()` (`flux_c2_2`) both share.
     """
     path = f"{config.data_root}/sky/download/scosmos/scosmos_irac.csv"
     if not os.path.exists(path):
         raise FileNotFoundError(
             f"gal: no S-COSMOS catalogue at {path!r} -- run the "
             f"'sesnaimpute.sky.download.scosmos.build' RUNBOOK line")
-    df = pd.read_csv(path, usecols=["flux_c4_2", "flag"])
-    flux_mjy = df["flux_c4_2"].to_numpy(dtype=float) / 1000.0
-    good = (df["flag"].to_numpy(dtype=float) == 0) & np.isfinite(flux_mjy) & (flux_mjy >= threshold_mjy)
-    return float(np.sum(good)) / SCOSMOS_AREA_DEG2
+    df = pd.read_csv(path, usecols=[column, "flag"])
+    flux_mjy = df[column].to_numpy(dtype=float) / 1000.0
+    good = (df["flag"].to_numpy(dtype=float) == 0) & np.isfinite(flux_mjy)
+    return flux_mjy[good]
 
 
-def ashby_seds_cumulative(config, threshold_mjy):
-    """Ashby et al. (2013, ApJ 769, 80) SEDS's own measured total 4.5um
-    source count N(>`threshold_mjy`) over its five full-depth fields
-    (`ASHBY_SEDS_AREA_DEG2` = 1.46 deg^2 combined), galaxies deg^-2 -- a
-    level cross-check reported beside the Fazio fit (review ledger C3),
-    never fit to it. The release carries no star-galaxy separation
-    (module docstring), so this over-counts by whatever stellar
-    contamination its deep, high-latitude fields still carry at the flux
-    read; rows failing the per-source quality-flag sum (`f45 != 0`) are
-    dropped, never kept as a detection.
+def scosmos_8um_cumulative(config, threshold_mjy):
+    """S-COSMOS's own measured 8um N(>S) at `threshold_mjy`, deg^-2 --
+    S-COSMOS carries no native stellarity (S-L5), so no star-galaxy
+    separation is applied here; it is the deep single-field cross-check,
+    not the selection population.
+    """
+    flux_mjy = _scosmos_flux_mjy(config, "flux_c4_2")
+    return float(np.sum(flux_mjy >= threshold_mjy)) / SCOSMOS_AREA_DEG2
+
+
+def _read_ashby_seds_field_flux_mjy(path):
+    """One SEDS field file's own quality-passing 4.5um fluxes, mJy (AB
+    system, `ASHBY_SEDS_AB_ZP_JY`): rows whose per-source quality-flag
+    sum reads clean (`f45 == 0`) and whose PSF magnitude is a valid
+    detection (`mag45psf > 0` -- the release's own "0.00" code for no
+    valid detection, ReadMe note 1). The one read `ashby_seds_field_
+    fluxes` shares between the pooled cumulative check and the
+    differential fit input (review ledger C27: no second copy of the
+    binning).
+    """
+    with gzip.open(path, "rt") as fh:
+        df = pd.read_fwf(fh, colspecs=list(ASHBY_SEDS_COLSPECS), names=list(ASHBY_SEDS_COLUMN_NAMES))
+    good = (df["f45"] == 0) & (df["mag45psf"] > 0)
+    mag = df.loc[good, "mag45psf"].to_numpy(dtype=float)
+    return ASHBY_SEDS_AB_ZP_JY * 10.0 ** (-0.4 * mag) * 1e3
+
+
+def ashby_seds_field_fluxes(config):
+    """`{field_name: flux_mjy}`, `ASHBY_SEDS_FIELD_NAMES` keys -- each
+    SEDS field's own quality-passing 4.5um fluxes
+    (`_read_ashby_seds_field_flux_mjy`), the one read `ashby_seds_
+    cumulative` (pooled total-count check) and `seds_differential_counts`
+    (the fit's own per-bin, per-field input) both build on.
     """
     base = f"{config.data_root}/sky/download/ashby2013_seds"
-    mags = []
-    for name, _area in ASHBY_SEDS_FIELDS:
+    out = {}
+    for (name, _area), field_name in zip(ASHBY_SEDS_FIELDS, ASHBY_SEDS_FIELD_NAMES):
         path = f"{base}/{name}"
         if not os.path.exists(path):
             raise FileNotFoundError(
                 f"gal: no Ashby 2013 SEDS table at {path!r} -- made by the "
                 f"RUNBOOKtp.sh line sesnaimpute.sky.download.ashby2013_seds.build")
-        with gzip.open(path, "rt") as fh:
-            df = pd.read_fwf(fh, colspecs=list(ASHBY_SEDS_COLSPECS), names=list(ASHBY_SEDS_COLUMN_NAMES))
-        good = (df["f45"] == 0) & (df["mag45psf"] > 0)
-        mags.append(df.loc[good, "mag45psf"].to_numpy(dtype=float))
-    mag = np.concatenate(mags)
-    flux_mjy = ASHBY_SEDS_AB_ZP_JY * 10.0 ** (-0.4 * mag) * 1e3
+        out[field_name] = _read_ashby_seds_field_flux_mjy(path)
+    return out
+
+
+def ashby_seds_cumulative(config, threshold_mjy):
+    """Ashby et al. (2013, ApJ 769, 80) SEDS's own measured total 4.5um
+    source count N(>`threshold_mjy`) over its five full-depth fields
+    (`ASHBY_SEDS_AREA_DEG2` = 1.46 deg^2 combined), galaxies deg^-2 -- the
+    RAW (star+galaxy) level, printed beside the fit as a sanity check on
+    the catalogue read itself (its own published total source density at
+    0.1mJy is about 1,709 deg^-2, review ledger C27). The release carries
+    no star-galaxy separation (module docstring), so this over-counts by
+    whatever stellar contamination its deep, high-latitude fields still
+    carry at the flux read -- `seds_differential_counts` is the star-
+    subtracted, differential form the fit itself uses (review ledger C27,
+    overruling C3's "SEDS beside, never fit").
+    """
+    flux_mjy = np.concatenate(list(ashby_seds_field_fluxes(config).values()))
     n = int(np.sum(flux_mjy >= threshold_mjy))
     return n / ASHBY_SEDS_AREA_DEG2, n
+
+
+def seds_differential_counts(config, fazio_path, bin_width_dex=SEDS_FIT_BIN_WIDTH_DEX):
+    """SEDS's own star-subtracted differential galaxy counts, pooled over
+    its five fields, in `bin_width_dex`-wide log10 S bins spanning the
+    data's own observed flux range (review ledger C27, the counts law's
+    joint-fit input).
+
+    Per field: the RAW (star+galaxy) count per bin
+    (`ashby_seds_field_fluxes`'s own selection); the expected star count
+    per bin from Fazio's own star law transported to that field's own
+    latitude (`expected_star_phi_at_latitude`, `ASHBY_SEDS_FIELD_ABS_B_
+    DEG`), subtracted. Pooled across the five fields' combined area
+    (`ASHBY_SEDS_AREA_DEG2`) for `phi_pool`, the star-subtracted
+    differential density.
+
+    `sigma_poisson_dex` is the POOLED RAW count's own Poisson error
+    (`1 / (ln10 sqrt(N))`) -- never the star-subtracted count's: the
+    expected-star term is a deterministic transport, not an independent
+    draw, so it carries no counting noise of its own. `seds_field_
+    scatter_dex` is the field-to-field (cosmic-variance) scatter the
+    joint fit's own weighting needs (owner ruling 2026-10-21): at each
+    bin where at least `SEDS_SCATTER_MIN_FIELDS` fields each carry at
+    least `SEDS_SCATTER_MIN_N_FIELD` raw sources and a positive star-
+    subtracted count, the RMS of that bin's own per-field log10 density
+    around their mean; pooled into one scalar by a raw-count-weighted RMS
+    over those bins (`per_bin_scatter_dex`/`per_bin_n_fields` carry every
+    bin's own value for inspection, printed by `build()`).
+
+    Returns a dict: `log10_s_centers`, `phi_pool`, `n_raw_pool`,
+    `n_gal_pool`, `sigma_poisson_dex`, `seds_field_scatter_dex`,
+    `per_bin_scatter_dex`, `per_bin_n_fields`, `bin_width_dex`.
+    """
+    field_fluxes = ashby_seds_field_fluxes(config)
+    area_by_field = dict(zip(ASHBY_SEDS_FIELD_NAMES, (a for _n, a in ASHBY_SEDS_FIELDS)))
+    all_flux = np.concatenate(list(field_fluxes.values()))
+    lo = np.floor(np.log10(all_flux.min()) / bin_width_dex) * bin_width_dex
+    hi = np.ceil(np.log10(all_flux.max()) / bin_width_dex) * bin_width_dex
+    edges = np.arange(lo, hi + bin_width_dex / 2.0, bin_width_dex)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    s_center = 10.0 ** centers
+    d_s = s_center * np.log(10.0) * bin_width_dex
+
+    n_raw, n_star = {}, {}
+    for field_name, abs_b in zip(ASHBY_SEDS_FIELD_NAMES, ASHBY_SEDS_FIELD_ABS_B_DEG):
+        n_raw[field_name], _ = np.histogram(np.log10(field_fluxes[field_name]), bins=edges)
+        phi_star_field = expected_star_phi_at_latitude(fazio_path, centers, abs_b)
+        n_star[field_name] = phi_star_field * d_s * area_by_field[field_name]
+
+    n_raw_pool = sum(n_raw.values())
+    n_star_pool = sum(n_star.values())
+    n_gal_pool = n_raw_pool - n_star_pool
+    with np.errstate(divide="ignore", invalid="ignore"):
+        phi_pool = n_gal_pool / ASHBY_SEDS_AREA_DEG2 / d_s
+    sigma_poisson_dex = 1.0 / (np.log(10.0) * np.sqrt(np.maximum(n_raw_pool, 1)))
+
+    per_bin_scatter_dex = np.full(centers.size, np.nan)
+    per_bin_n_fields = np.zeros(centers.size, dtype=np.int64)
+    for i in range(centers.size):
+        log_phis = []
+        for field_name in ASHBY_SEDS_FIELD_NAMES:
+            n_r = n_raw[field_name][i]
+            n_g = n_r - n_star[field_name][i]
+            if n_r >= SEDS_SCATTER_MIN_N_FIELD and n_g > 0:
+                log_phis.append(np.log10(n_g / area_by_field[field_name] / d_s[i]))
+        if len(log_phis) >= SEDS_SCATTER_MIN_FIELDS:
+            arr = np.asarray(log_phis, dtype=float)
+            per_bin_scatter_dex[i] = float(np.sqrt(np.mean((arr - arr.mean()) ** 2)))
+            per_bin_n_fields[i] = len(log_phis)
+
+    usable = np.isfinite(per_bin_scatter_dex)
+    if usable.any():
+        w = n_raw_pool[usable].astype(float)
+        seds_field_scatter_dex = float(np.sqrt(np.sum(w * per_bin_scatter_dex[usable] ** 2) / np.sum(w)))
+    else:
+        seds_field_scatter_dex = 0.0
+
+    return dict(log10_s_centers=centers, phi_pool=phi_pool, n_raw_pool=n_raw_pool,
+                n_gal_pool=n_gal_pool, sigma_poisson_dex=sigma_poisson_dex,
+                seds_field_scatter_dex=seds_field_scatter_dex,
+                per_bin_scatter_dex=per_bin_scatter_dex, per_bin_n_fields=per_bin_n_fields,
+                bin_width_dex=bin_width_dex)
+
+
+def build_joint_counts_law(fazio_path, config):
+    """The ONE counts-law fit this product adopts (owner ruling
+    2026-10-21, review ledger C27, overruling C3's "SEDS beside, never
+    fit"): Fazio et al. (2004)'s pooled differential counts (`fazio_mean_
+    variant_with_sigma`) AND Ashby et al. (2013) SEDS's star-subtracted,
+    pooled differential counts (`seds_differential_counts`, restricted to
+    `LOG10_S_GRID`'s own faint edge and brighter -- SWIRE's I2 5-sigma
+    depth, itself a decade or more brighter than SEDS's own completeness
+    turnover, measured directly below as the peak of its pooled raw
+    counts; the law is read only inside the tabulated grid in any case,
+    module docstring), each point weighted by its own Poisson error PLUS
+    that dataset's own field-to-field (cosmic-variance) scatter (Fazio:
+    `cosmic_variance_dex`'s existing egs/qso1700 spread; SEDS: `seds_
+    differential_counts`'s own re-measured five-field spread) -- no hand
+    weighting of one dataset against the other.
+
+    Returns `(fit, stats, seds_result, cv_fazio_dex)`; `stats` extends
+    `fit_counts_differential`'s own dict with `n_fazio`, `n_seds`,
+    `cv_fazio_dex`, `seds_field_scatter_dex` and `log10_s_lo_fit` (the
+    SEDS-side faint cut actually applied).
+    """
+    log10_s_fazio, log10_phi_fazio, sigma_fazio_err = fazio_mean_variant_with_sigma(fazio_path)
+    cv_fazio_dex = cosmic_variance_dex(fit_all_variants(fazio_path))
+    sigma_fazio = np.sqrt(sigma_fazio_err ** 2 + cv_fazio_dex ** 2)
+
+    seds_result = seds_differential_counts(config, fazio_path)
+    log10_s_lo_fit = np.log10(SWIRE_5SIGMA_UJY["I2"] / 1000.0)
+    turnover_log10_s = float(seds_result["log10_s_centers"][np.argmax(seds_result["n_raw_pool"])])
+    print(f"gal: SEDS own pooled raw-count turnover (completeness) peaks at "
+          f"S={1e3 * 10 ** turnover_log10_s:.3f}uJy; the fit's own SEDS-side faint cut sits at "
+          f"S={1e3 * 10 ** log10_s_lo_fit:.3f}uJy ({log10_s_lo_fit - turnover_log10_s:+.2f} dex brighter)")
+    valid = (seds_result["n_gal_pool"] > 0) & (seds_result["log10_s_centers"] >= log10_s_lo_fit)
+    log10_s_seds = seds_result["log10_s_centers"][valid]
+    log10_phi_seds = np.log10(seds_result["phi_pool"][valid])
+    sigma_seds = np.sqrt(seds_result["sigma_poisson_dex"][valid] ** 2
+                          + seds_result["seds_field_scatter_dex"] ** 2)
+
+    x = np.concatenate([log10_s_fazio, log10_s_seds])
+    y = np.concatenate([log10_phi_fazio, log10_phi_seds])
+    sigma = np.concatenate([sigma_fazio, sigma_seds])
+    fit, stats = fit_counts_differential(x, y, sigma=sigma)
+    stats.update(n_fazio=int(log10_s_fazio.size), n_seds=int(log10_s_seds.size),
+                 cv_fazio_dex=float(cv_fazio_dex),
+                 seds_field_scatter_dex=float(seds_result["seds_field_scatter_dex"]),
+                 log10_s_seds_min=float(log10_s_seds.min()) if log10_s_seds.size else float("nan"),
+                 log10_s_seds_max=float(log10_s_seds.max()) if log10_s_seds.size else float("nan"))
+    return fit, stats, seds_result, cv_fazio_dex
 
 
 # ---------------------------------------------------------------------------
@@ -823,11 +1141,13 @@ def ashby_seds_cumulative(config, threshold_mjy):
 
 def build(config, regions=None):
     """Writes the survey-wide galaxy number-counts law (`phi(S)` on
-    `LOG10_S_GRID`, fitted directly to Fazio's own differential counts,
-    review ledger C3) and the measured IRAC point-source retention
-    `P_POINT` (review ledger C4), and prints the star-galaxy split with
-    its consistency checks against SWIRE, S-COSMOS and Ashby et al.
-    (2013) SEDS. Survey-wide; `regions` is accepted and ignored.
+    `LOG10_S_GRID`, fitted jointly to Fazio et al. (2004)'s and Ashby et
+    al. (2013) SEDS's own differential counts, each star-subtracted and
+    weighted by its own error, review ledger C27, owner ruling
+    2026-10-21, overruling C3's "SEDS beside, never fit") and the
+    measured IRAC point-source retention `P_POINT` (review ledger C4),
+    and prints the star-galaxy split with its consistency checks against
+    SWIRE and S-COSMOS. Survey-wide; `regions` is accepted and ignored.
     """
     st = progress.Stage("population.gal")
 
@@ -838,20 +1158,39 @@ def build(config, regions=None):
             f"'sky/download/fazio2004' RUNBOOK comment line: manual "
             f"acquisition, no reachable download URL")
 
-    counts_result = build_counts_law(fazio_path)
+    counts_result = build_counts_law(fazio_path, config)
     fit = counts_result["fit"]
     stats = counts_result["stats"]
-    print(f"gal: counts law (fitted DIRECTLY to Fazio's own differential counts, break free, C3): "
+    seds_result = counts_result["seds_result"]
+    print(f"gal: counts law (fitted JOINTLY to Fazio's and SEDS's own differential counts, break "
+          f"free, review ledger C27): "
           f"log10_A={fit.params[0]:.4f} log10_S_break={fit.params[1]:.4f} "
           f"alpha_faint={fit.params[2]:.4f} alpha_bright={fit.params[3]:.4f} "
-          f"smoothness={fit.params[4]:.4f} rms={stats['rms_dex']:.4f} dex "
-          f"data_range=[{stats['log10_s_lo']:.4f}, {stats['log10_s_hi']:.4f}] "
-          f"break_inside_data={stats['break_inside_data']} "
-          f"cosmic_variance={counts_result['cosmic_variance_dex']:.4f} dex")
+          f"smoothness={fit.params[4]:.4f} rms={stats['rms_dex']:.4f} dex (unweighted), "
+          f"{stats['rms_weighted']:.4f} (weighted, dimensionless) "
+          f"combined_data_range=[{stats['log10_s_lo']:.4f}, {stats['log10_s_hi']:.4f}] "
+          f"break_inside_data={stats['break_inside_data']}")
+    print(f"gal: joint fit provenance: Fazio rows={stats['n_fazio']} (own published *_err + "
+          f"cv_fazio={stats['cv_fazio_dex']:.4f} dex), SEDS bins={stats['n_seds']} "
+          f"(own Poisson + seds_field_scatter={stats['seds_field_scatter_dex']:.4f} dex), "
+          f"SEDS's own fit-constrained flux range=[{stats['log10_s_seds_min']:.4f}, "
+          f"{stats['log10_s_seds_max']:.4f}] log10 mJy")
+    print("gal: SEDS field-to-field scatter, per bin (n_fields>=%d, n_raw>=%d per field; "
+          "bins below are from seds_differential_counts, same bins the fit itself is built on):"
+          % (SEDS_SCATTER_MIN_FIELDS, SEDS_SCATTER_MIN_N_FIELD))
+    for i in range(seds_result["log10_s_centers"].size):
+        if np.isfinite(seds_result["per_bin_scatter_dex"][i]):
+            s_c = 1e3 * 10 ** seds_result["log10_s_centers"][i]
+            print(f"gal:   S={s_c:8.2f}uJy  n_fields={int(seds_result['per_bin_n_fields'][i])}  "
+                  f"scatter={seds_result['per_bin_scatter_dex'][i]:.4f} dex")
 
-    # --- C3 identity: the fit's own level against a direct integral of
-    # Fazio's tabulated differential counts, over the same grid the
-    # product is actually read on (never the fit's own data range).
+    # --- C3 identity, now read as a disclosure rather than an acceptance
+    # bound: the joint fit also answers to SEDS (review ledger C27), so
+    # its level is no longer expected to match a direct integral of
+    # Fazio's OWN table to the earlier 0.01 dex (a Fazio-only-fit bound).
+    # Reported beside the Fazio-ALONE "mean" fit's own identical check
+    # (still exact to 0.01 dex, since that fit answers to Fazio alone),
+    # to isolate how much of any difference is the SEDS pull.
     mag_tbl, cols_tbl = read_fazio_table(fazio_path)
     stack_tbl = np.vstack([cols_tbl[c] for c in FIELD_COLUMNS])
     with np.errstate(invalid="ignore"):
@@ -864,20 +1203,35 @@ def build(config, regions=None):
     a_gal_fit = float(np.sum(counts_result["phi_s"] * s_grid * d_log10_s * np.log(10.0)))
     a_gal_direct = float(np.sum(10.0 ** log10_phi_direct * s_grid * d_log10_s * np.log(10.0)))
     identity_c3_dex = float(np.log10(a_gal_fit / a_gal_direct))
-    print(f"gal: IDENTITY C3: A_GAL from the fit over LOG10_S_GRID = {a_gal_fit:.1f} deg^-2; "
+    fazio_only_fit, _fazio_only_stats, _ = counts_result["variants"]["mean"]
+    a_gal_fazio_only = float(np.sum(fazio_only_fit.value(s_grid) * s_grid * d_log10_s * np.log(10.0)))
+    identity_c3_fazio_only_dex = float(np.log10(a_gal_fazio_only / a_gal_direct))
+    print(f"gal: IDENTITY C3: A_GAL from the JOINT fit over LOG10_S_GRID = {a_gal_fit:.1f} deg^-2; "
           f"from a direct integral of Fazio Table 1's own tabulated differential counts over the "
           f"same grid = {a_gal_direct:.1f} deg^-2; level difference = {identity_c3_dex:+.4f} dex "
-          f"(acceptance: within 0.01 dex)")
+          f"(the Fazio-ALONE fit's own identical check: {identity_c3_fazio_only_dex:+.4f} dex, "
+          f"acceptance 0.01 dex -- the joint fit is not held to that bound, since it also answers "
+          f"to SEDS)")
 
-    # --- Ashby et al. (2013) SEDS, reported beside the Fazio fit's own
-    # level -- a cross-check, never a fit input (C3).
+    # --- Ashby et al. (2013) SEDS, reported beside the joint fit's own
+    # level, both RAW (sanity check on the catalogue read: SEDS's own
+    # published total source density at 0.1mJy is about 1,709 deg^-2) and
+    # star-subtracted (the fit's own input quantity, review ledger C27).
+    ashby_density_by_check = {}
     for s_check in (0.1, 1.0):
         ashby_density, ashby_n = ashby_seds_cumulative(config, s_check)
+        ashby_density_by_check[s_check] = ashby_density
         fazio_cum = float(fit.cumulative_numeric(s_check, stats["log10_s_hi"]))
-        print(f"gal: Ashby 2013 SEDS beside Fazio fit, N(>{s_check}mJy): "
-              f"ashby={ashby_density:.1f} deg^-2 (n={ashby_n} of {ASHBY_SEDS_AREA_DEG2:.2f} deg^2, "
-              f"no star-galaxy separation) fazio_fit={fazio_cum:.1f} deg^-2 "
-              f"ratio(fazio/ashby)={fazio_cum / ashby_density:.3f}")
+        print(f"gal: SEDS RAW beside joint fit, N(>{s_check}mJy): "
+              f"seds_raw={ashby_density:.1f} deg^-2 (n={ashby_n} of {ASHBY_SEDS_AREA_DEG2:.2f} deg^2, "
+              f"no star-galaxy separation) joint_fit={fazio_cum:.1f} deg^-2 "
+              f"ratio(fit/seds_raw)={fazio_cum / ashby_density:.3f}")
+    seds_centers = seds_result["log10_s_centers"]
+    seds_above = seds_centers >= np.log10(0.1)
+    seds_n_gal_above_01 = float(np.sum(seds_result["n_gal_pool"][seds_above]))
+    print(f"gal: SEDS star-subtracted N(>0.1mJy) = {seds_n_gal_above_01 / ASHBY_SEDS_AREA_DEG2:.1f} "
+          f"deg^-2 (galaxy-only; compare to the RAW 1,709 deg^-2 catalogue-level check above, which "
+          f"includes stars)")
 
     flux_mjy_all, stell_all, ext_fl_all, field_all = read_swire_catalogue(config)
     print("gal: SWIRE pull carries no optical stellarity column (sky.download.swire.build.COLUMNS); "
@@ -951,18 +1305,115 @@ def build(config, regions=None):
 
     swire_45_01 = swire_band_cumulative(flux_mjy_all[:, IRAC_BAND_KEYS.index("I2")], is_galaxy_all, 0.1)
     swire_45_1 = swire_band_cumulative(flux_mjy_all[:, IRAC_BAND_KEYS.index("I2")], is_galaxy_all, 1.0)
-    fazio_45_01 = float(fit.cumulative_numeric(0.1, stats["log10_s_hi"]))
-    fazio_45_1 = float(fit.cumulative_numeric(1.0, stats["log10_s_hi"]))
-    print(f"gal: Fazio/SWIRE 4.5um N(>0.1mJy): fazio={fazio_45_01:.1f} swire={swire_45_01:.1f} "
-          f"ratio={fazio_45_01 / swire_45_01:.3f}")
-    print(f"gal: Fazio/SWIRE 4.5um N(>1mJy): fazio={fazio_45_1:.1f} swire={swire_45_1:.1f} "
-          f"ratio={fazio_45_1 / swire_45_1:.3f}")
+    law_45_01 = float(fit.cumulative_numeric(0.1, stats["log10_s_hi"]))
+    law_45_1 = float(fit.cumulative_numeric(1.0, stats["log10_s_hi"]))
+    print(f"gal: law/SWIRE 4.5um N(>0.1mJy): law={law_45_01:.1f} swire={swire_45_01:.1f} "
+          f"ratio={law_45_01 / swire_45_01:.3f}")
+    print(f"gal: law/SWIRE 4.5um N(>1mJy): law={law_45_1:.1f} swire={swire_45_1:.1f} "
+          f"ratio={law_45_1 / swire_45_1:.3f}")
 
     swire_80_01 = swire_band_cumulative(flux_mjy_all[:, IRAC_BAND_KEYS.index("I4")], is_galaxy_all, 0.1)
     scosmos_80_01 = scosmos_8um_cumulative(config, 0.1)
     print(f"gal: S-COSMOS/SWIRE 8um N(>0.1mJy): scosmos={scosmos_80_01:.1f} swire={swire_80_01:.1f} "
           f"ratio={scosmos_80_01 / swire_80_01:.3f}" if swire_80_01 > 0 else
           "gal: S-COSMOS/SWIRE 8um N(>0.1mJy): swire count is zero, ratio undefined")
+
+    # --- Every bin's own residual (law/data), 0.25 dex, 6uJy to 1mJy
+    # (the brief's own identities table): Fazio (its own tabulated
+    # differential counts, interpolated), SEDS (star-subtracted, this
+    # fit's own input), SWIRE (star-subtracted, the adopted split), and
+    # S-COSMOS 4.5um (`flux_c2_2`, RAW -- no native stellarity, module
+    # docstring, so never star-subtracted; a level cross-check only).
+    report_edges = np.arange(np.log10(0.006), np.log10(1.0) + 0.251, SEDS_FIT_BIN_WIDTH_DEX)
+    report_centers = 0.5 * (report_edges[:-1] + report_edges[1:])
+    s_report = 10.0 ** report_centers
+    d_s_report = s_report * np.log(10.0) * SEDS_FIT_BIN_WIDTH_DEX
+    law_report = fit.value(s_report)
+
+    log10_phi_fazio_report = np.interp(report_centers, log10_s_tbl, log10_phi_tbl,
+                                        left=np.nan, right=np.nan)
+    phi_fazio_report = 10.0 ** log10_phi_fazio_report
+
+    swire_i2 = flux_mjy_all[:, IRAC_BAND_KEYS.index("I2")]
+    swire_counts, _ = np.histogram(np.log10(swire_i2[is_galaxy_all & np.isfinite(swire_i2)]), bins=report_edges)
+    phi_swire_report = swire_counts / SWIRE_AREA_DEG2 / d_s_report
+
+    scosmos_flux_45 = _scosmos_flux_mjy(config, "flux_c2_2")
+    scosmos_counts, _ = np.histogram(np.log10(scosmos_flux_45[scosmos_flux_45 > 0]), bins=report_edges)
+    phi_scosmos_report = scosmos_counts / SCOSMOS_AREA_DEG2 / d_s_report
+
+    seds_centers_all = seds_result["log10_s_centers"]
+    phi_seds_report = np.full(report_centers.size, np.nan)
+    for i, rc in enumerate(report_centers):
+        j = int(np.argmin(np.abs(seds_centers_all - rc)))
+        if abs(seds_centers_all[j] - rc) < 1e-6 and seds_result["n_gal_pool"][j] > 0:
+            phi_seds_report[i] = seds_result["phi_pool"][j]
+
+    print("gal: law vs data, per 0.25 dex bin, 6uJy-1mJy (ratio = law / data):")
+    print("gal:   S(uJy)       law         fazio   ratio   seds(sub)  ratio   swire(sub)  ratio   "
+          "scosmos(raw)  ratio")
+    for i, rc in enumerate(report_centers):
+        def _r(val):
+            return f"{law_report[i] / val:7.3f}" if (np.isfinite(val) and val > 0) else "    -- "
+        print(f"gal:   {1e3 * s_report[i]:8.2f}  {law_report[i]:10.4g}  "
+              f"{phi_fazio_report[i]:10.4g} {_r(phi_fazio_report[i])}  "
+              f"{phi_seds_report[i]:10.4g} {_r(phi_seds_report[i])}  "
+              f"{phi_swire_report[i]:10.4g} {_r(phi_swire_report[i])}  "
+              f"{phi_scosmos_report[i]:10.4g} {_r(phi_scosmos_report[i])}")
+
+    # --- N(>0.1mJy), star-subtracted SEDS, vs SEDS's own published
+    # total (RAW, 1,709 deg^-2) check above.
+    print(f"gal: SEDS N(>0.1mJy): law={float(fit.cumulative_numeric(0.1, stats['log10_s_hi'])):.1f} "
+          f"deg^-2; seds_star_subtracted={seds_n_gal_above_01 / ASHBY_SEDS_AREA_DEG2:.1f} deg^-2; "
+          f"seds_raw={ashby_density_by_check[0.1]:.1f} deg^-2 (SEDS's own published total, for "
+          f"reference, ~1709 deg^-2)")
+
+    # --- The owner's own standard 0.5 dex bins (18-56uJy and its two
+    # neighbours, matching c18_diag/reproduce.py's edges) and the
+    # second-break decision: a second break is added ONLY if the 18-56uJy
+    # bin's own residual exceeds its data's own combined (Poisson +
+    # field-scatter) band with one break (the brief's own trigger).
+    std_edges = np.arange(-2.25, 1.01, 0.5)
+    std_centers = 0.5 * (std_edges[:-1] + std_edges[1:])
+    s_std = 10.0 ** std_centers
+    d_s_std = s_std * np.log(10.0) * 0.5
+    law_std = fit.value(s_std)
+
+    field_fluxes_for_std = ashby_seds_field_fluxes(config)
+    n_raw_std = {}
+    for field_name in ASHBY_SEDS_FIELD_NAMES:
+        n_raw_std[field_name], _ = np.histogram(np.log10(field_fluxes_for_std[field_name]), bins=std_edges)
+    n_raw_std_pool = sum(n_raw_std.values())
+    n_star_std_pool = np.zeros_like(n_raw_std_pool, dtype=float)
+    for field_name, abs_b in zip(ASHBY_SEDS_FIELD_NAMES, ASHBY_SEDS_FIELD_ABS_B_DEG):
+        area_f = dict(zip(ASHBY_SEDS_FIELD_NAMES, (a for _n, a in ASHBY_SEDS_FIELDS)))[field_name]
+        phi_star_f = expected_star_phi_at_latitude(fazio_path, std_centers, abs_b)
+        n_star_std_pool += phi_star_f * d_s_std * area_f
+    n_gal_std_pool = n_raw_std_pool - n_star_std_pool
+    phi_std = n_gal_std_pool / ASHBY_SEDS_AREA_DEG2 / d_s_std
+    sigma_poisson_std = 1.0 / (np.log(10.0) * np.sqrt(np.maximum(n_raw_std_pool, 1)))
+    sigma_std_total = np.sqrt(sigma_poisson_std ** 2 + stats["seds_field_scatter_dex"] ** 2)
+
+    print("gal: owner's standard 0.5 dex bins, law (after the joint fit) vs SEDS star-subtracted "
+          "(18-56uJy and its two neighbours are the C16/C24f disclosure bins):")
+    resid_18_56 = None
+    sigma_18_56 = None
+    for i in range(std_centers.size):
+        lo_u, hi_u = 1e3 * 10 ** std_edges[i], 1e3 * 10 ** std_edges[i + 1]
+        resid_dex = float(np.log10(law_std[i]) - np.log10(phi_std[i])) if phi_std[i] > 0 else float("nan")
+        print(f"gal:   {lo_u:7.1f}-{hi_u:7.1f}uJy  law={law_std[i]:.4g}  seds_sub={phi_std[i]:.4g}  "
+              f"sigma_seds={sigma_std_total[i]:.4f} dex  resid(law/seds)={resid_dex:+.4f} dex")
+        if np.isclose(std_edges[i], np.log10(0.0178), atol=0.01):
+            resid_18_56 = resid_dex
+            sigma_18_56 = sigma_std_total[i]
+    if resid_18_56 is not None:
+        exceeds = abs(resid_18_56) > sigma_18_56
+        print(f"gal: SECOND-BREAK CHECK at 18-56uJy: residual={resid_18_56:+.4f} dex, "
+              f"SEDS's own band={sigma_18_56:.4f} dex -- "
+              f"{'EXCEEDS the band' if exceeds else 'within the band'}; "
+              f"{'a second break would be considered' if exceeds else 'no second break added (parsimony)'}")
+    else:
+        print("gal: SECOND-BREAK CHECK: could not locate the 18-56uJy standard bin edge; skipped")
 
     st.done(counts_path, rms_dex=stats["rms_dex"], cosmic_variance_dex=counts_result["cosmic_variance_dex"],
             identity_c3_dex=identity_c3_dex)
