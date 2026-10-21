@@ -574,8 +574,18 @@ def build(config, regions=None, _limit=None):
     `sky.download.trilegal.convert`, run by hand.
     """
     with progress_module.Stage("sky.download.trilegal") as st:
-        version, action_url, defaults = read_form()
-        print(f"trilegal build: form version {version!r}, POST target {action_url}")
+        # The query form is read from the server only when a part is actually
+        # missing (2026-10-22): a rebuild with every part present must never
+        # touch the network -- the earlier unconditional read_form() here
+        # stalled the whole runbook whenever the Padova server was down.
+        form = {}
+
+        def _form():
+            if not form:
+                version, action_url, defaults = read_form()
+                print(f"trilegal build: form version {version!r}, POST target {action_url}")
+                form["action_url"], form["defaults"] = action_url, defaults
+            return form["defaults"], form["action_url"]
 
         dest_dir = f"{config.data_root}/sky/download/trilegal"
         names = sorted(REGION_POINTINGS) if regions is None else regions
@@ -612,6 +622,7 @@ def build(config, regions=None, _limit=None):
                     print(f"trilegal build: {dest_path} present, skipped "
                           f"(delete it to draw a new realisation)")
                 else:
+                    defaults, action_url = _form()
                     n_out, wall_time_s = fetch_region_part(
                         pt["l_deg"], pt["b_deg"], area_per_part, dest_path, defaults, action_url)
                     n_files += 1
