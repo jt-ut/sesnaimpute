@@ -872,12 +872,19 @@ REGISTRY = {
         "pixels). XI and W are both formed at this SAME pixel's own "
         "extinction column and sightline, not at a tile average: the "
         "weight fit and the weight assignment read one construction."),
-    ("population_star_tile", "XI"): ("dimensionless",
+    ("population_star_tile", "XI"): ("dimensionless, 0 to 1",
         "For every star this tile draws, its placement fraction along "
         "its own drawn pixel's (HPX_PIX_512) extinction profile: "
         "u = A(d)/A(inf) at the star's own distance, on that pixel's own "
-        "parent sightline. A consumer forms the star's own extinction "
-        "as a real source's adopted column times this fraction."),
+        "parent sightline, clipped at 1 (the far wall of the pencil "
+        "beam). A consumer forms the star's own extinction as a real "
+        "source's adopted column times this fraction. On a sightline "
+        "covered by Marshall et al. 2006 (briefs/round4_2026-10-20/"
+        "C25_far_column.md), a star beyond the Edenhofer map's own edge "
+        "can genuinely see more extinction than this pixel's own column "
+        "implies -- that extra reddening is already in this star's own "
+        "weight (W) and magnitudes, not in XI, which this product always "
+        "keeps at or below 1."),
     ("population_star_tile", "W"): ("dimensionless",
         "For every star this tile draws, its total anchor reweighting "
         "factor: the STAR anchor's own Gaia/2MASS joint or marginal "
@@ -1216,6 +1223,24 @@ REGISTRY = {
         "pixel it covers, VHS only where UKIDSS does not; the code names "
         "whichever side contributed the larger measured count to that "
         "bin. A region with no deep coverage at all has every bin 0."),
+    ("histograms_anchors_hpx512", "RED_TAIL_SHARE_OBS"): ("dimensionless",
+        "C25 item 5 (briefs/round4_2026-10-20/C25_far_column.md), a check, "
+        "not a model input: the region-wide share of SESNA sources in "
+        "this product's own anchor pixels with a measured 2MASS Ks in "
+        "12-14 and a measured 2MASS J whose J-Ks exceeds 1.5 -- the "
+        "missing 'red tail' of distant, deeply reddened background stars "
+        "C24 located (briefs/round4_2026-10-20/C24_locate_red_tail.md). "
+        "Written once population.star_population has built this region "
+        "(a later stage than this product's own build)."),
+    ("histograms_anchors_hpx512", "RED_TAIL_SHARE_MODEL"): ("dimensionless",
+        "C25 item 5, the same check's model side: the built population's "
+        "own area-weighted share of Ks 12-14 stars with J-Ks > 1.5, each "
+        "star re-dimmed at its own drawn anchor pixel with sky.derived."
+        "profile.a_of_d, uncapped at that pixel's own column -- the "
+        "Marshall-informed far-field column (C25) on a covered sightline, "
+        "unchanged on one Marshall does not reach. Compare to "
+        "RED_TAIL_SHARE_OBS; an uncovered region's own construction is "
+        "exactly as it was before C25."),
 
     # population.gal -- counts_gal_survey: the background-galaxy number-
     # counts law, survey-wide.
@@ -2247,6 +2272,44 @@ REGISTRY = {
     ("profile_edenhofer_sightline", "fallback/TAIL_EFOLD_PC"): ("pc",
         "The tail e-folding distance (TAIL_EFOLD_PC) evaluated at this "
         "region's source-weighted mean sky direction."),
+
+    # sky.derived.marshall_extinction -- extinction_marshall_sightline (C25,
+    # briefs/round4_2026-10-20/C25_far_column.md): Marshall et al. 2006's own
+    # measured K-band extinction to a star, by distance, carried onto this
+    # region's own admitted sightlines -- the far-field curve a covered
+    # sightline's column follows beyond the Edenhofer 2023 cube's own edge,
+    # in place of the exponential dust-disc tail (sky.derived.profile) there.
+    ("extinction_marshall_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
+        "This region's own admitted nside-256 pixel numbers, the same "
+        "pixels and the same row order as sky.derived.profile's own "
+        "profile_edenhofer_sightline product for this region."),
+    ("extinction_marshall_sightline", "DIST_PC"): ("pc",
+        "The distance grid along the line of sight that A_K is tabulated "
+        "on: the same grid, the same values, as sky.derived.profile's own "
+        "profile_edenhofer_sightline product's DIST_PC for this region."),
+    ("extinction_marshall_sightline", "A_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256 and each distance in "
+        "DIST_PC, Marshall et al. 2006's own measured K-band extinction "
+        "to a star at that distance, from their 2MASS-red-giant survey: "
+        "linear interpolation, in distance, between their nearest cell's "
+        "own measured points, held flat past their farthest measured "
+        "point. All zero where COVERED is False -- an outside reader "
+        "measuring the column beyond the Edenhofer map's own edge should "
+        "read this value only on a covered sightline."),
+    ("extinction_marshall_sightline", "COVERED"): ("boolean",
+        "For the matching pixel in HPX_PIX_256, whether this sightline "
+        "sits inside Marshall et al. 2006's own measured survey area "
+        "(within 100 degrees of the Galactic centre in longitude, within "
+        "10 degrees of the Galactic plane in latitude) AND has a measured "
+        "cell within one cell width (15 arcmin) of it. False everywhere "
+        "for a region outside their survey, or at a sightline their grid "
+        "does not reach even inside it; A_K is exactly zero wherever this "
+        "is False."),
+    ("extinction_marshall_sightline", "SEPARATION_DEG"): ("deg",
+        "For the matching pixel in HPX_PIX_256, the angular separation to "
+        "the nearest cell of Marshall et al. 2006's own measured grid used "
+        "for A_K -- NaN where this sightline sits outside their survey "
+        "area entirely (no separation was measured)."),
 
     ("depth_edenhofer_region", "REGION"): ("region name",
         "The name of the region this row describes, in the fixed thirty-"
