@@ -864,15 +864,27 @@ REGISTRY = {
     ("population_star_tile", "STAR_INDEX"): ("row index",
         "For every star this tile draws, its own row in this region's "
         "field-star product's retained group."),
+    ("population_star_tile", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "For every star this tile draws, the one anchor pixel of this "
+        "tile it is placed on, drawn with probability proportional to "
+        "the pixel's own solid angle (every nside-512 pixel shares one "
+        "solid angle, so this is a uniform draw over the tile's own "
+        "pixels). XI and W are both formed at this SAME pixel's own "
+        "extinction column and sightline, not at a tile average: the "
+        "weight fit and the weight assignment read one construction."),
     ("population_star_tile", "XI"): ("dimensionless",
         "For every star this tile draws, its placement fraction along "
-        "this tile's own mean extinction profile: u = A(d)/A(inf) at the "
-        "star's own distance. A consumer forms the star's own extinction "
+        "its own drawn pixel's (HPX_PIX_512) extinction profile: "
+        "u = A(d)/A(inf) at the star's own distance, on that pixel's own "
+        "parent sightline. A consumer forms the star's own extinction "
         "as a real source's adopted column times this fraction."),
     ("population_star_tile", "W"): ("dimensionless",
         "For every star this tile draws, its total anchor reweighting "
         "factor: the STAR anchor's own Gaia/2MASS joint or marginal "
-        "weight at the star's own placement and predicted magnitude. "
+        "weight at the star's own placement and predicted magnitude, "
+        "both formed at its own drawn pixel's (HPX_PIX_512) extinction "
+        "column and sightline -- the same construction the anchor "
+        "weights were fitted on, not a tile-mean approximation. "
         "W_STAR plus W_AGB equals this value exactly, row by row."),
     ("population_star_tile", "W_STAR"): ("dimensionless",
         "The non-evolved share of W for every star this tile draws: W "
