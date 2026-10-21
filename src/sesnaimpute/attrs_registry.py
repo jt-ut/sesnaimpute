@@ -1336,6 +1336,43 @@ REGISTRY = {
         "unchanged on one Marshall does not reach. Compare to "
         "RED_TAIL_SHARE_OBS; an uncovered region's own construction is "
         "exactly as it was before C25."),
+    ("histograms_anchors_hpx512", "CELL_KS_EDGES"): ("mag 2MASS Ks",
+        "C30 (briefs/round4_2026-10-20/C30_population_anchor.md): the "
+        "five half-mag Ks bins N_GIANT_CELL/N_DWARF_CELL are tabulated "
+        "on, 12.0 to 14.3 -- the SAME grid sky.derived.twomass_counts' "
+        "own CELL_KS_EDGES carries, read from there so the two never "
+        "drift apart."),
+    ("histograms_anchors_hpx512", "CELL_JK_EDGES"): ("mag J-Ks (2MASS)",
+        "C30: the three interior J-Ks colour edges N_GIANT_CELL/"
+        "N_DWARF_CELL's own last axis is tabulated on -- the SAME values "
+        "sky.derived.twomass_counts' own CELL_JK_EDGES carries."),
+    ("histograms_anchors_hpx512", "N_GIANT_CELL"): ("stars",
+        "C30 item 2: for the matching pixel in HPX_PIX_512, each Ks bin "
+        "of CELL_KS_EDGES and each J-Ks colour bin of CELL_JK_EDGES, the "
+        "model's predicted GIANT (LOG_G < 3.5, population.selection."
+        "is_giant) star count in that cell -- the retained field-star "
+        "table's own population at this pixel's own column (NOT the RAW "
+        "group N_KS_PRED reads: that group carries no LOG_G or flux, "
+        "module docstring above '_acceptance_check_one_pixel'), nearest-"
+        "pointing placed and weighted exactly as N_KS_PRED, but over a "
+        "detection-filtered (retained) sample -- its own sum over both "
+        "populations and all four colour bins is NOT bit-comparable to "
+        "N_KS_PRED at the same Ks bin. Read by population.anchor_weights "
+        "to fit a separate W_GIANT."),
+    ("histograms_anchors_hpx512", "N_DWARF_CELL"): ("stars",
+        "C30 item 2: the same cell and construction as N_GIANT_CELL, the "
+        "model's predicted DWARF (LOG_G >= 3.5) star count instead."),
+    ("histograms_anchors_hpx512", "N_GIANT_KS"): ("stars",
+        "C30 item 3: one value per Ks bin of KS_EDGES (region-summed, "
+        "not per pixel): the model's predicted GIANT star count on the "
+        "SAME full Ks grid N_KS_PRED is tabulated on (not just the "
+        "colour-cell range), from the SAME retained-table population as "
+        "N_GIANT_CELL -- read only to disclose the deep bins' (Ks >= "
+        "KS_SHARED_END_MAG) giant share, the assumption the deep bins "
+        "stay dwarf-only by the model's own content rests on."),
+    ("histograms_anchors_hpx512", "N_DWARF_KS"): ("stars",
+        "C30 item 3: the same construction as N_GIANT_KS, the DWARF "
+        "star count instead."),
 
     # population.gal -- counts_gal_survey: the background-galaxy number-
     # counts law, survey-wide.

@@ -161,8 +161,8 @@ KS_SHARED_END_MAG = 14.0
 #: 2008, MNRAS 391, 136; Gonzalez-Fernandez et al. 2018, MNRAS 474,
 #: 5459). Raised from 17.0 (W38): the 18-56 uJy STAR members sit at Ks
 #: 17-18.3 (C24f/g), beyond the old edge. The region's OWN deep edge,
-#: used everywhere below, is `_region_ks_deep_cut`'s
-#: `min(KS_DEEP_CUT_MAG, that region's measured KS_COMPLETE_TO)` --
+#: used everywhere below, is `_measure_ks_complete_to`'s own model-based
+#: measurement (C30, replacing C28's survey-only slope-trend test),
 #: never this ceiling alone, and never past the survey's own measured
 #: turnover.
 KS_DEEP_CUT_MAG = 18.0
@@ -557,25 +557,42 @@ KS_SOURCE_UKIDSS = 1
 KS_SOURCE_VHS = 2
 
 
-def _region_ks_deep_cut(ukidss_complete_to, vhs_complete_to, ukidss_covered, vhs_covered):
-    """C28 item 3: this region's OWN deep Ks edge -- `min(KS_DEEP_CUT_MAG`
-    (the ceiling), the FAINTEST this region's own covering deep survey or
-    surveys were measured complete to (each already rounded down to the
-    half-magnitude grid by `sky.derived.ukidss_counts`/`vhs_counts`
-    before it ever reaches here). The SHALLOWER of the two where both
-    cover this region (never the deeper one -- a bin only one survey
-    actually measured complete is not complete region-wide). Returns
-    `KS_DEEP_CUT_MAG` itself where neither survey covers this region at
-    all -- irrelevant in that case, since `_combine_ks_axis` never
-    enters its deep branch without an active, covering source."""
-    candidates = []
-    if np.any(ukidss_covered) and np.isfinite(ukidss_complete_to):
-        candidates.append(float(ukidss_complete_to))
-    if np.any(vhs_covered) and np.isfinite(vhs_complete_to):
-        candidates.append(float(vhs_complete_to))
-    if not candidates:
-        return KS_DEEP_CUT_MAG
-    return min(KS_DEEP_CUT_MAG, min(candidates))
+def _measure_ks_complete_to(ks_edges, n_ks_obs, n_ks_pred, ks_source, deep_covered,
+                            ceiling_mag=KS_DEEP_CUT_MAG, norm_lo_mag=16.0):
+    """C30 item 2 (briefs/round4_2026-10-20/C30_population_anchor.md),
+    replacing C28's own turnover test (`sky.derived.ukidss_counts.
+    differential_turnover_mag`/`vhs_counts`'s sibling, a slope-trend test
+    on the deep survey's OWN counts alone): this region's own deep Ks
+    edge is now measured against the MODEL (C24h's own construction,
+    `c18_diag/c24h_deep_slope.py` -- "is the faint-end W extrapolation
+    right where a deep download reaches it?"), not the deep survey's
+    counts in isolation. Over the deep-covered pixels (`deep_covered`),
+    each half-mag bin at or past `norm_lo_mag` on a deep-sourced bin
+    (`ks_source != 0`) up to `ceiling_mag`, the observed-over-predicted-
+    raw ratio is formed and normalised to its own value at the first such
+    bin (`norm_lo_mag` to `norm_lo_mag + 0.5`); the first bin whose own
+    normalised ratio falls below 0.90 ends the anchored range -- that
+    bin's own bright edge is the region's own `KS_COMPLETE_TO`. Returns
+    `ceiling_mag` where no bin ever falls below 0.90 (the survey is read
+    complete to its own available reach) or where this region has no
+    deep-sourced bin at or past `norm_lo_mag` at all (nothing measurable;
+    `_combine_ks_axis` never enters its deep branch without one, so this
+    is never reached from `build_region` without `deep_covered` already
+    true somewhere). This is ALWAYS capped at `ceiling_mag` by
+    construction (the search never looks past it), matching C28's own
+    "never past the published depth" rule."""
+    bin_lo, bin_hi = ks_edges[:-1], ks_edges[1:]
+    in_range = (bin_lo >= norm_lo_mag - 1e-9) & (bin_hi <= ceiling_mag + 1e-9) & (ks_source != KS_SOURCE_2MASS)
+    idx = np.flatnonzero(in_range)
+    if idx.size == 0:
+        return ceiling_mag
+    obs = n_ks_obs[deep_covered][:, idx].sum(axis=0)
+    mod = n_ks_pred[deep_covered][:, idx].sum(axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.where(mod > 0, obs / np.where(mod > 0, mod, 1.0), np.nan)
+    ratio_norm = ratio / ratio[0]
+    bad = np.flatnonzero(ratio_norm < 0.90)
+    return float(bin_lo[idx[bad[0]]]) if bad.size else ceiling_mag
 
 
 def _combine_ks_axis(ks_edges_2mass, n_ks_obs_2mass, deep_sources, deep_cut_mag=KS_DEEP_CUT_MAG):
@@ -591,9 +608,11 @@ def _combine_ks_axis(ks_edges_2mass, n_ks_obs_2mass, deep_sources, deep_cut_mag=
     surveys combined by that same priority -- has the larger
     region-summed count over the pixels any deep survey covers; a
     deep-chosen bin falls back to 2MASS's own count on a pixel no deep
-    survey covers. From `KS_SHARED_END_MAG` to `deep_cut_mag` (C28: this
-    region's OWN measured-complete edge, `_region_ks_deep_cut`, never
-    past `KS_DEEP_CUT_MAG`) the axis is the deep surveys' own bins,
+    survey covers. From `KS_SHARED_END_MAG` to `deep_cut_mag` (`_read_
+    anchor_counts` always passes `KS_DEEP_CUT_MAG` here now -- C30's own
+    model-based edge, `_measure_ks_complete_to`, truncates the combined
+    arrays AFTER this call, once `N_KS_PRED` exists to measure against)
+    the axis is the deep surveys' own bins,
     combined by the same per-pixel priority, zero (unmeasured, not
     measured-and-empty) on a pixel neither covers; a deep survey's own
     bins PAST `deep_cut_mag` (it may carry more, out to its own product's
@@ -707,6 +726,16 @@ def _read_anchor_counts(config, region, pixels):
     product's own pixel set disagrees with the granule map's
     (`_region_pixel_columns`) -- the join every later array in this
     module assumes.
+
+    C30 item 2: the deep axis is always combined out to the ceiling
+    (`KS_DEEP_CUT_MAG`), never truncated here any more -- this region's
+    own measured-complete edge is now read off the MODEL
+    (`_measure_ks_complete_to`), which needs `N_KS_PRED` on the full
+    ceiling grid first; `build_region` truncates after that measurement.
+    `sky.derived.ukidss_counts`/`vhs_counts`'s own `KS_COMPLETE_TO`
+    attrs (C28's slope-trend test) are still read and returned here,
+    report-only, for the before/after comparison in the printed report --
+    no longer used to decide where this axis ends.
     """
     gaia_path = config_module.product_path(config, "sky/derived", "gaia", "counts", "hpx512", region=region)
     twomass_path = config_module.product_path(config, "sky/derived", "twomass", "counts", "hpx512", region=region)
@@ -791,19 +820,18 @@ def _read_anchor_counts(config, region, pixels):
         (KS_SOURCE_UKIDSS, ukidss_edges, ukidss_n, ukidss_covered),
         (KS_SOURCE_VHS, vhs_edges, vhs_n, vhs_covered),
     )
-    # C28 item 4: this region's OWN deep edge -- never past KS_DEEP_CUT_MAG
-    # (the ceiling) or past what either covering survey was actually
-    # measured complete to (sky.derived.ukidss_counts/vhs_counts's own
-    # KS_COMPLETE_TO, `_region_ks_deep_cut`).
-    deep_cut_mag = _region_ks_deep_cut(ukidss_complete_to, vhs_complete_to, ukidss_covered, vhs_covered)
-    ks_edges, ks_n, ks_source = _combine_ks_axis(ks_edges_2mass, ks_n_2mass, deep_sources, deep_cut_mag)
-    has_deep = abs(float(ks_edges[-1]) - deep_cut_mag) < 1e-6
+    # C30 item 2: always combine out to the ceiling now -- the region's
+    # own measured-complete edge is a MODEL-based measurement
+    # (`_measure_ks_complete_to`) `build_region` makes once it has
+    # `N_KS_PRED` on this full grid, and truncates to afterward.
+    ks_edges, ks_n, ks_source = _combine_ks_axis(ks_edges_2mass, ks_n_2mass, deep_sources, KS_DEEP_CUT_MAG)
+    has_deep = abs(float(ks_edges[-1]) - KS_DEEP_CUT_MAG) < 1e-6
     if not has_deep and abs(float(ks_edges[-1]) - KS_CUT_MAG) > 1e-6:
         raise ValueError(
             f"anchor_tiles: {region!r}'s combined Ks edges end at {ks_edges[-1]!r}, "
-            f"not {deep_cut_mag} (this region's own deep edge) or {KS_CUT_MAG} "
-            "(no deep survey)")
-    return g_edges, n_g_obs, ks_edges, ks_n, ks_source, deep_covered
+            f"not {KS_DEEP_CUT_MAG} (the ceiling) or {KS_CUT_MAG} (no deep survey)")
+    return (g_edges, n_g_obs, ks_edges, ks_n, ks_source, deep_covered,
+            ukidss_complete_to, vhs_complete_to)
 
 
 def _pointing_bounds(sorted_pointing_index, present_pointings):
@@ -969,6 +997,146 @@ def _predicted_histograms(config, profile_obj, parent256, a_pix, m10_pix, raw, g
     return n_g_pred, n_ks_pred, n_gk_pred
 
 
+# ---------------------------------------------------------------------------
+# C30 item 2 (briefs/round4_2026-10-20/C30_population_anchor.md): the
+# model's per-(J-Ks, Ks) cell counts, SPLIT by population -- giants
+# (LOG_G < 3.5, `selection.is_giant`) and dwarfs -- at the STAR anchor's
+# 2MASS-only range (`twomass_counts_module.CELL_KS_EDGES`, Ks 12.0-14.3).
+#
+# This reads the field-star product's own RETAINED (top-level) group, not
+# the RAW group `_read_field_stars_raw` above reads: the RAW group
+# (`field_stars.write_region`'s own docstring) carries only the five
+# columns the Gaia/Ks anchor histograms need (position, magnitude, Gaia
+# dimming) -- no LOG_G, no flux -- because retention bias would corrupt a
+# raw-count prediction, and extending it would mean rebuilding
+# population.field_stars for every region, a product this brief's own
+# snapshot list (population/anchors, population/star, bmstp/...) does not
+# name and so is never rewritten here. The retained group DOES carry
+# LOG_G and FNU_MJY already (it is what population.star_population itself
+# reads, `_read_field_stars`), so the colour-cell split reads that table
+# instead, same per-pixel nearest-pointing placement as everywhere else in
+# this module. This is a detection-filtered subset of the true raw
+# population -- NOT bit-comparable to N_KS_PRED's own per-bin totals at
+# the same Ks range -- a limitation the C30 report states, not one this
+# code silently smooths over.
+# ---------------------------------------------------------------------------
+
+def _read_retained_for_colour(config, region):
+    """The retained field-star table's own DIST_PC, KS_MAG, LOG_G and
+    zero-extinction J-Ks (from FNU_MJY's J and Ks columns -- this product
+    carries no J magnitude on its own, so J-Ks is derived here exactly as
+    `c18_diag/c24e_colour_cells.py`/`c24i_population_weights.py` did:
+    `2.5 * log10(F_Ks/F_J * zp_J/zp_Ks)`), sorted once by POINTING_INDEX
+    (`_read_field_stars_raw`'s own stable-sort convention, so one
+    pointing's own star block is one contiguous slice)."""
+    path = config_module.product_path(config, "population", "trilegal", "field-stars", "region", region=region)
+    with h5py.File(path, "r") as f:
+        pointing_index = f["POINTING_INDEX"][:].astype(np.int64)
+        order = np.argsort(pointing_index, kind="stable")
+        fnu_j = f["FNU_MJY"][:, _IDX_J][order].astype(np.float64)
+        fnu_ks = f["FNU_MJY"][:, _IDX_KS][order].astype(np.float64)
+        out = dict(
+            dist_pc=f["DIST_PC"][:].astype(np.float64)[order],
+            ks_mag=f["KS_MAG"][:].astype(np.float64)[order],
+            is_giant=selection.is_giant(f["LOG_G"][:][order]),
+            jk0=2.5 * np.log10(fnu_ks / fnu_j * (_ZP_J_JY / _ZP_KS_JY)),
+            pointing_index=pointing_index[order],
+        )
+    return out
+
+
+def _colour_cell_block(piece, config, profile_obj, raw, full_ks_edges, cell_ks_edges, cell_jk_edges,
+                        parent256, a_pix, weight_pix, pixel_pointing, pointing_bounds):
+    """One piece's own contiguous block of pixel indices (owner ruling
+    2026-10-09): for each pixel, the retained population at its own
+    pointing, re-dimmed at this pixel's own column exactly as `_pixel_block`
+    dims the RAW population (`_sightline_profile_pieces`/
+    `profile_module.a_local_from_pieces`). Returns four arrays: the two
+    per-pixel colour-cell blocks (giant, dwarf; Ks 12.0-14.3 only) and the
+    two region-wide (summed over every pixel in this piece, not stored
+    per pixel) full-Ks-grid histograms used only for the deep-bin giant-
+    share disclosure (item 3's "assert the giant share there < 5%").
+    Every star's own contribution is weighted by its own pixel's
+    `weight_pix` here (unlike `_pixel_block`, which defers that multiply
+    to its caller): the region-wide accumulators sum across pixels within
+    one piece, so the weight must already be folded in before that sum.
+    """
+    lo_pix, hi_pix = piece
+    dist_pc, ks_mag, jk0, is_giant = raw["dist_pc"], raw["ks_mag"], raw["jk0"], raw["is_giant"]
+    n = hi_pix - lo_pix
+    n_full = full_ks_edges.size - 1
+    n_cell_k = cell_ks_edges.size - 1
+    n_cell_c = cell_jk_edges.size + 1
+    giant_cell = np.zeros((n, n_cell_k, n_cell_c), dtype=np.float64)
+    dwarf_cell = np.zeros((n, n_cell_k, n_cell_c), dtype=np.float64)
+    giant_ks = np.zeros(n_full, dtype=np.float64)
+    dwarf_ks = np.zeros(n_full, dtype=np.float64)
+    cache_key = None
+    cache_batches = None
+    for j, i in enumerate(range(lo_pix, hi_pix)):
+        parent = int(parent256[i])
+        a_p = float(a_pix[i])
+        w_i = float(weight_pix[i])
+        lo, hi = pointing_bounds[int(pixel_pointing[i])]
+        key = (lo, hi, parent)
+        if key != cache_key:
+            cache_key = key
+            cache_batches = []
+            for blo, bhi in batches(hi - lo, row_bytes=40 * config.n_jobs):
+                s = slice(lo + blo, lo + bhi)
+                inside, far, a_edge = _sightline_profile_pieces(profile_obj, parent, dist_pc[s])
+                cache_batches.append((blo, bhi, inside, far, a_edge))
+        for blo, bhi, inside, far, a_edge in cache_batches:
+            s = slice(lo + blo, lo + bhi)
+            a_local = profile_module.a_local_from_pieces(inside, far, a_edge, a_p)
+            ks_obs = ks_mag[s] + a_local
+            jk_obs = jk0[s] + a_local * _ejk_per_ak(config, a_local)
+            g = is_giant[s]
+            hb = np.searchsorted(full_ks_edges, ks_obs, side="right") - 1
+            mh = (hb >= 0) & (hb < n_full)
+            np.add.at(giant_ks, hb[mh & g], w_i)
+            np.add.at(dwarf_ks, hb[mh & ~g], w_i)
+            kb = np.searchsorted(cell_ks_edges, ks_obs, side="right") - 1
+            mk = (kb >= 0) & (kb < n_cell_k)
+            cb = np.minimum(np.searchsorted(cell_jk_edges, jk_obs, side="right"), n_cell_c - 1)
+            mg, md = mk & g, mk & ~g
+            np.add.at(giant_cell[j], (kb[mg], cb[mg]), w_i)
+            np.add.at(dwarf_cell[j], (kb[md], cb[md]), w_i)
+    return giant_cell, dwarf_cell, giant_ks, dwarf_ks
+
+
+def _colour_cell_histograms(config, profile_obj, parent256, a_pix, retained, full_ks_edges,
+                             pixel_pointing, weight_pix):
+    """`(N_GIANT_CELL, N_DWARF_CELL, N_GIANT_KS, N_DWARF_KS)`: the retained
+    population's own per-pixel colour-cell counts (Ks 12.0-14.3,
+    `twomass_counts_module.CELL_KS_EDGES`/`CELL_JK_EDGES`) and its region-
+    wide full-Ks-grid population split (`full_ks_edges`, the SAME grid
+    `N_KS_PRED` is tabulated on, for the deep-bin giant-share disclosure).
+    Same piece/pool pattern as `_predicted_histograms` (owner ruling
+    2026-10-09); `pointing_bounds` is built fresh from the RETAINED
+    population's own sorted POINTING_INDEX (a different, smaller star
+    table than the RAW group `_predicted_histograms` bounds)."""
+    n_pix = parent256.size
+    order = np.lexsort((parent256, pixel_pointing))
+    inverse = np.argsort(order)
+    present = np.unique(pixel_pointing)
+    pointing_bounds = _pointing_bounds(retained["pointing_index"], present)
+    cell_ks_edges = twomass_counts_module.CELL_KS_EDGES
+    cell_jk_edges = twomass_counts_module.CELL_JK_EDGES
+    fn = functools.partial(
+        _colour_cell_block, config=config, profile_obj=profile_obj, raw=retained,
+        full_ks_edges=full_ks_edges, cell_ks_edges=cell_ks_edges, cell_jk_edges=cell_jk_edges,
+        parent256=parent256[order], a_pix=a_pix[order], weight_pix=weight_pix[order],
+        pixel_pointing=pixel_pointing[order], pointing_bounds=pointing_bounds)
+    pixel_pieces = pieces_module.slices(n_pix, config.n_jobs)
+    blocks = pieces_module.run(fn, pixel_pieces, config.n_jobs)
+    n_giant_cell = np.concatenate([b[0] for b in blocks], axis=0)[inverse]
+    n_dwarf_cell = np.concatenate([b[1] for b in blocks], axis=0)[inverse]
+    n_giant_ks = np.sum([b[2] for b in blocks], axis=0)
+    n_dwarf_ks = np.sum([b[3] for b in blocks], axis=0)
+    return n_giant_cell, n_dwarf_cell, n_giant_ks, n_dwarf_ks
+
+
 def _acceptance_check_one_pixel(profile_obj, parent256, a_pix, m10_pix, raw, g_edges, r_diffuse, r_dense,
                                  weight_pix0, pointing_slice0, n_g_pred_row, pixel_index=0):
     """CODING_RULES.md rule 11: the algebraic identity the brief names,
@@ -994,7 +1162,8 @@ def _acceptance_check_one_pixel(profile_obj, parent256, a_pix, m10_pix, raw, g_e
 def build_region(config, region):
     raw, omega_sim_deg2 = _read_field_stars_raw(config, region)
     pixels, parent256, a_pix = _region_pixel_columns(config, region)
-    g_edges, n_g_obs, ks_edges, n_ks_obs, ks_source, deep_covered = _read_anchor_counts(config, region, pixels)
+    (g_edges, n_g_obs, ks_edges, n_ks_obs, ks_source, deep_covered,
+     ukidss_complete_to_old, vhs_complete_to_old) = _read_anchor_counts(config, region, pixels)
     # C7 brief Part A: each pixel's own M10, read once (`gaia_selection`'s
     # own module-level cache) and indexed by this region's own nside-512
     # pixels at their NESTED nside-128 parent (`pix512 >> 4`, two HEALPix
@@ -1050,6 +1219,22 @@ def build_region(config, region):
         n_ks_pred = np.where(drop, 0.0, n_ks_pred)
         n_gk_pred = np.where(drop[:, None, :], 0.0, n_gk_pred)
 
+    # C30 item 4: this region's own measured-complete edge, against the
+    # MODEL (`_measure_ks_complete_to`), now that N_KS_PRED exists on the
+    # full ceiling grid `_read_anchor_counts` always combined to; then
+    # truncate every Ks-axis array down to it (the downstream contract
+    # `_combine_ks_axis` used to enforce by never combining past
+    # `deep_cut_mag` in the first place).
+    ks_complete_to = _measure_ks_complete_to(ks_edges, n_ks_obs, n_ks_pred, ks_source, deep_covered) \
+        if has_deep else KS_CUT_MAG
+    n_keep = int(np.searchsorted(ks_edges, ks_complete_to + 1e-9))
+    if n_keep < ks_edges.size - 1:
+        ks_edges = ks_edges[: n_keep + 1]
+        n_ks_obs = n_ks_obs[:, :n_keep]
+        n_ks_pred = n_ks_pred[:, :n_keep]
+        n_gk_pred = n_gk_pred[:, :, :n_keep]
+        ks_source = ks_source[:n_keep]
+
     rel_dev, n_below_g10 = _acceptance_check_one_pixel(
         profile_obj, parent256, a_pix, m10_pix, raw, g_edges, r_diffuse, r_dense,
         float(weight_pix[0]), slice(*pointing_bounds[int(pixel_pointing[0])]), n_g_pred[0])
@@ -1065,6 +1250,15 @@ def build_region(config, region):
     floor_deg = float(np.degrees(hp.nside2resol(NSIDE)))
     tiles = tiles_from_hpx512(pixels, sigma_obs_deg2, grad["g"], floor_deg, omega_pix_deg2)
 
+    # C30 item 2: the model's per-population (J-Ks, Ks) colour-cell
+    # counts, read from the retained field-star table (module docstring,
+    # "C30 item 2" section above `_acceptance_check_one_pixel`) rather
+    # than the RAW group `raw` above -- that group carries no LOG_G or
+    # flux at all.
+    retained = _read_retained_for_colour(config, region)
+    n_giant_cell, n_dwarf_cell, n_giant_ks, n_dwarf_ks = _colour_cell_histograms(
+        config, profile_obj, parent256, a_pix, retained, ks_edges, pixel_pointing, weight_pix)
+
     return dict(
         region=region, pixels=pixels, a_pix=a_pix, omega_pix_deg2=omega_pix_deg2,
         g_edges=g_edges, ks_edges=ks_edges,
@@ -1075,6 +1269,10 @@ def build_region(config, region):
         n_raw=raw["dist_pc"].size, omega_sim_deg2=omega_sim_deg2,
         acceptance_rel_dev=rel_dev, acceptance_n_below_g10=n_below_g10,
         pixel_pointing=pixel_pointing, ks_source=ks_source, deep_covered=deep_covered,
+        ks_complete_to=ks_complete_to, has_deep=has_deep,
+        ukidss_complete_to_old=ukidss_complete_to_old, vhs_complete_to_old=vhs_complete_to_old,
+        n_giant_cell=n_giant_cell, n_dwarf_cell=n_dwarf_cell,
+        n_giant_ks=n_giant_ks, n_dwarf_ks=n_dwarf_ks,
     )
 
 
@@ -1101,6 +1299,13 @@ def write_histograms(config, region, result):
     n_pix = result["pixels"].size
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "hpx512"
+        # C30 item 4: this region's own measured-complete deep edge
+        # (`_measure_ks_complete_to`, replacing C28's survey-only slope-
+        # trend test), and the two surveys' own now-unused prior
+        # measurement, for the before/after disclosure.
+        f.attrs["KS_COMPLETE_TO"] = result["ks_complete_to"]
+        f.attrs["KS_COMPLETE_TO_OLD_UKIDSS"] = result["ukidss_complete_to_old"]
+        f.attrs["KS_COMPLETE_TO_OLD_VHS"] = result["vhs_complete_to_old"]
         # W46: KS_SOURCE records which survey each Ks bin takes
         # (0=2MASS/1=UKIDSS/2=VHS, C19 Part B item 6), replacing the
         # single KS_SPLIT_MAG attr -- downstream (`anchor_weights.
@@ -1119,6 +1324,17 @@ def write_histograms(config, region, result):
             ("N_GK_PRED", result["n_gk_pred"]),
             ("DEEP_COVERED", result["deep_covered"].astype(np.bool_)),
             ("KS_SOURCE", result["ks_source"].astype(np.int8)),
+            # C30 item 2: the model's per-population colour-cell split
+            # (Ks 12.0-14.3, the STAR anchor's 2MASS-only range) and its
+            # region-wide full-Ks-grid giant/dwarf split (same grid as
+            # N_KS_PRED/N_KS_OBS above, for the deep-bin giant-share
+            # disclosure, item 3).
+            ("CELL_KS_EDGES", twomass_counts_module.CELL_KS_EDGES),
+            ("CELL_JK_EDGES", twomass_counts_module.CELL_JK_EDGES),
+            ("N_GIANT_CELL", result["n_giant_cell"]),
+            ("N_DWARF_CELL", result["n_dwarf_cell"]),
+            ("N_GIANT_KS", result["n_giant_ks"]),
+            ("N_DWARF_KS", result["n_dwarf_ks"]),
         ):
             build_module.write_dataset(f, name, data, *REGISTRY[(_HIST_STEM, name)])
 
@@ -1294,6 +1510,16 @@ def build(config, regions=None):
               f"({result['acceptance_n_below_g10']} raw stars brighter than G={result['g_edges'][0]}), "
               f"KS_SOURCE={ks_source.tolist()} KS_EDGES_end={result['ks_edges'][-1]:.2f} "
               f"deep_covered={int(result['deep_covered'].sum())}/{result['deep_covered'].size}")
+        if result["has_deep"]:
+            print(f"anchor_tiles: {region}: C30 item 4 KS_COMPLETE_TO={result['ks_complete_to']:.1f} "
+                  f"(model-based, replaces C28's survey-only turnover: UKIDSS was "
+                  f"{result['ukidss_complete_to_old']:.1f}, VHS was {result['vhs_complete_to_old']:.1f})")
+            deep_bin = result["ks_edges"][:-1] >= KS_SHARED_END_MAG - 1e-9
+            gd, dd = result["n_giant_ks"][deep_bin], result["n_dwarf_ks"][deep_bin]
+            giant_share_deep = float(gd.sum() / max((gd + dd).sum(), 1e-30))
+            print(f"anchor_tiles: {region}: C30 item 3 deep-bin (Ks >= {KS_SHARED_END_MAG:.1f}) giant "
+                  f"share of the model (by content, not colour-selected) = {giant_share_deep:.4f} "
+                  f"({'OK, < 5%' if giant_share_deep < 0.05 else 'ABOVE the 5% assumption -- check'})")
 
 
 if __name__ == "__main__":
