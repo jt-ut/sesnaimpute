@@ -931,6 +931,27 @@ REGISTRY = {
         "C21 item 2: this region's own WEIGHT share under each of the "
         "six WEIGHT_RULE codes -- the sum, over every tile_<id> group's "
         "own RULE_WEIGHT, normalised to 1."),
+    ("population_star_tile", "KS_EDGES_2MASS"): ("mag 2MASS/UKIDSS Ks",
+        "C21 item 3: the edges of the Ks bins N_KS_OBS_2MASS and "
+        "FINAL_POP_KS_HIST are tabulated on -- population.anchor_tiles' "
+        "own (un-extended) KS_EDGES for this region, read off the "
+        "histograms product directly."),
+    ("population_star_tile", "N_KS_OBS_2MASS"): ("star count",
+        "C21 item 3: this region's own observed 2MASS (and, on a deep-"
+        "covered region, UKIDSS) Ks histogram -- population.anchor_"
+        "tiles' own per-pixel N_KS_OBS, summed over every one of this "
+        "region's admitted anchor pixels -- the stage's own '2MASS "
+        "anchor' reference for FINAL_POP_KS_HIST below."),
+    ("population_star_tile", "FINAL_POP_KS_HIST"): ("dimensionless",
+        "C21 item 3: the final field-star population's own Ks "
+        "histogram (every retained star, STAR and AGB alike, at W), on "
+        "KS_EDGES_2MASS, split by WEIGHT_RULE code (six rows, module "
+        "docstring's codes 0-5) -- built at this module's own per-tile-"
+        "mean placement, the same approximation star_weights itself "
+        "reads its G/Ks bins off, not the C18 diagnosis's own atlas-"
+        "grounded external check. Summed over all six rows and compared "
+        "to N_KS_OBS_2MASS, this is the stage's own build-time version "
+        "of the C18 'final population / own 2MASS anchor' check."),
 
     # population.field_stars -- field-stars_trilegal_region: the synthetic
     # TRILEGAL field-star population, retained sample and pre-retention

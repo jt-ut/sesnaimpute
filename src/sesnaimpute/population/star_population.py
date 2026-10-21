@@ -758,6 +758,53 @@ def _read_anchor_ratio(config, region):
     return n_obs / n_pred if n_pred > 0 else float("nan")
 
 
+def _read_ks_obs_2mass(config, region):
+    """`(KS_EDGES, N_KS_OBS)`, the region's own observed 2MASS (and, on a
+    deep-covered region, UKIDSS) Ks histogram, summed over every one of
+    this region's own admitted anchor pixels (`population.anchor_tiles`'
+    histograms product's own `N_KS_OBS`, the same per-pixel field the
+    C18 diagnosis's `test2_anchors.py` sums per tile) -- C21 item 3's own
+    "2MASS anchor" reference, read directly here since this check needs
+    no tile breakdown of it."""
+    path = config_module.product_path(config, "population", "anchors", "histograms", "hpx512", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "prior.star_population: anchor histograms missing for region %r at %s -- "
+            "run the `prior.anchor_tiles` RUNBOOK line first" % (region, path))
+    with h5py.File(path, "r") as f:
+        ks_edges = np.asarray(f["KS_EDGES"][:], dtype=np.float64)
+        n_ks_obs = np.asarray(f["N_KS_OBS"][:], dtype=np.float64).sum(axis=0)
+    return ks_edges, n_ks_obs
+
+
+def final_pop_ks_hist_by_rule(tiles, n_bin):
+    """C21 item 3: the final field-star population's own Ks histogram
+    (every retained star, STAR and AGB alike, at `W`), split by
+    `WEIGHT_RULE` code, on `_read_ks_obs_2mass`'s own (un-extended)
+    `KS_EDGES` -- `bin_ks` shares that axis's prefix exactly, since the
+    C6 faint-end extension (`anchor_weights._extend_shallow_ks_axis`)
+    only APPENDS bins after it, so a star's own `bin_ks` needs no
+    re-digitizing here, only clipping to `n_bin` to drop the synthetic
+    extension's own stars (out of scope for a check against a real
+    2MASS/UKIDSS anchor). Built at THIS module's own per-tile-mean
+    placement -- the same approximation `star_weights` itself reads its
+    G/Ks bins off -- not the C18 diagnosis's own atlas-grounded external
+    check (`test2_anchors.py`/`test3_catalogue_side.py`, which re-dims
+    every admitted PIXEL by its own real column; this module never
+    reads `bmstp.atlas`, by the package's own layering). A departure
+    from 1 here is the weight-RULE mechanism's own footprint on the
+    model's predicted counts, not a pixel-level extinction effect --
+    the stage's OWN build-time check, printed and stored per region."""
+    hist = np.zeros((N_WEIGHT_RULES, n_bin), dtype=np.float64)
+    for t in tiles:
+        in_range = t["bin_ks"] < n_bin
+        if not np.any(in_range):
+            continue
+        np.add.at(hist, (t["rule"][in_range], t["bin_ks"][in_range]),
+                  t["w"][in_range].astype(np.float64))
+    return hist
+
+
 def _region_source_geometry(config, region, tiles):
     """Per-source `HPX_PIX_256`, extinction column, and tile assignment
     (module docstring's Inputs): the tiles product's own `HPX_PIX_512 ->
@@ -976,6 +1023,11 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
     region_centre_pointing = anchor_tiles.nearest_pointing(
         old_info["l_deg"], old_info["b_deg"], pointing_l, pointing_b)
 
+    # C21 item 3: the stage's own build-time check, against the region's
+    # own observed 2MASS/UKIDSS Ks histogram.
+    ks_edges_2mass, n_ks_obs_2mass = _read_ks_obs_2mass(config, region)
+    final_pop_ks_hist = final_pop_ks_hist_by_rule(results, ks_edges_2mass.size - 1)
+
     return dict(region=region, n_star=stars["dist_pc"].size, n_raw=n_raw,
                 omega_sim_deg2=omega_sim_deg2, dist_grid=dist_grid,
                 tiles=results, n_tile=tiles["n_tile"],
@@ -986,7 +1038,9 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
                 limit_grid_mjy=limit_grid_mjy, f_dusty_mean=f_dusty_mean,
                 n_pointing=len(pointings), pointing_l=pointing_l, pointing_b=pointing_b,
                 pointing_area=pointing_area,
-                region_centre_pointing=region_centre_pointing)
+                region_centre_pointing=region_centre_pointing,
+                ks_edges_2mass=ks_edges_2mass, n_ks_obs_2mass=n_ks_obs_2mass,
+                final_pop_ks_hist=final_pop_ks_hist)
 
 
 # ---------------------------------------------------------------------------
@@ -1047,6 +1101,15 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c):
             f, "RULE_WEIGHT_FRAC",
             total_rule_weight / max(float(total_rule_weight.sum()), 1e-300),
             *REGISTRY[(_STEM, "RULE_WEIGHT_FRAC")])
+
+        # C21 item 3: the stage's own build-time check against the
+        # region's observed 2MASS/UKIDSS Ks counts, by WEIGHT_RULE code.
+        build_module.write_dataset(f, "KS_EDGES_2MASS", result["ks_edges_2mass"],
+                                    *REGISTRY[(_STEM, "KS_EDGES_2MASS")])
+        build_module.write_dataset(f, "N_KS_OBS_2MASS", result["n_ks_obs_2mass"],
+                                    *REGISTRY[(_STEM, "N_KS_OBS_2MASS")])
+        build_module.write_dataset(f, "FINAL_POP_KS_HIST", result["final_pop_ks_hist"],
+                                    *REGISTRY[(_STEM, "FINAL_POP_KS_HIST")])
     return path
 
 
@@ -1147,6 +1210,15 @@ def _report(result):
     frac_pointing_changed = float(np.mean(
         [t["pointing_index"] != result["region_centre_pointing"] for t in tiles]))
 
+    # C21 item 3: Ks 12.0-14.0 (the C18 "final pop / own 2MASS anchor"
+    # range), total and by WEIGHT_RULE code.
+    ks_edges_2mass = result["ks_edges_2mass"]
+    sel_1214 = (ks_edges_2mass[:-1] >= 11.999) & (ks_edges_2mass[1:] <= 14.001)
+    obs_1214 = float(result["n_ks_obs_2mass"][sel_1214].sum())
+    pop_1214_by_rule = result["final_pop_ks_hist"][:, sel_1214].sum(axis=1)
+    pop_1214_total = float(pop_1214_by_rule.sum())
+    ks1214_ratio = pop_1214_total / obs_1214 if obs_1214 > 0 else float("nan")
+
     return dict(
         n_tile=n_tile, a_tile_min=float(a_tile.min()), a_tile_max=float(a_tile.max()),
         n_pointing=result["n_pointing"], frac_pointing_changed=frac_pointing_changed,
@@ -1161,6 +1233,8 @@ def _report(result):
         frac_evolved_stars=frac_evolved_stars, frac_evolved_weight=frac_evolved_weight,
         log10_b_median=log10_b_median, log10_b_p16=log10_b_p16, log10_b_p84=log10_b_p84,
         max_partition_dev=max_partition_dev,
+        ks1214_obs=obs_1214, ks1214_model=pop_1214_total, ks1214_ratio=ks1214_ratio,
+        ks1214_model_by_rule=pop_1214_by_rule,
     )
 
 
@@ -1231,6 +1305,17 @@ def build(config, regions=None):
                rep["frac_evolved_stars"], rep["frac_evolved_weight"],
                rep["log10_b_median"], rep["log10_b_p16"], rep["log10_b_p84"],
                rep["max_partition_dev"]))
+        # C21 item 3: the stage's own build-time check -- the final
+        # population's own Ks histogram, at this module's own per-tile-
+        # mean placement, against the region's observed 2MASS/UKIDSS Ks
+        # counts at Ks 12.0-14.0, by WEIGHT_RULE code (so a departure
+        # like Vela D's C18 finding is visible here, at build time).
+        by_rule_str = " ".join(
+            "%d=%.1f" % (k, rep["ks1214_model_by_rule"][k]) for k in range(N_WEIGHT_RULES))
+        print(
+            "star_population: %s: Ks12-14 2MASS_N_OBS=%.0f model_N=%.1f ratio=%.4f "
+            "model_N_by_rule(0-5)=[%s]"
+            % (region, rep["ks1214_obs"], rep["ks1214_model"], rep["ks1214_ratio"], by_rule_str))
 
 
 if __name__ == "__main__":
