@@ -13,12 +13,17 @@ the old 17.0 anchor edge. The download now reaches K < 18.5
 18.5 to match (half a bin of headroom past the new 18.0 anchor
 ceiling, same convention as the old 17.0/17.5 pair). This module also
 now measures, rather than assumes, where ITS OWN counts turn over past
-`TURNOVER_LOWER_MAG`: `differential_turnover_mag` fits the pooled,
-deep-covered-pixel log10 differential count's trend one half-mag bin
-at a time and calls the first bin that falls below that trend by more
-than its own Poisson scatter the turnover; `KS_COMPLETE_TO` is the
-bright edge of the last bin still consistent with the trend (this
-product's own faint edge, 18.5, if no bin ever falls below it).
+`TURNOVER_LOWER_MAG`: `differential_turnover_mag` tracks the pooled,
+deep-covered-pixel log10 differential count's own SLOPE (its bin-to-bin
+rate, not the count itself -- a real, still-complete luminosity
+function decelerates smoothly well before any hard depth limit, so the
+level itself is never log-linear; it is the slope's own trend that a
+genuine turnover breaks) one half-mag bin at a time, and calls the
+first bin whose own slope falls below the brighter bins' fitted slope
+trend by more than its own Poisson scatter the turnover; `KS_COMPLETE_TO`
+is the bright edge of the last bin still consistent with that slope
+trend (this product's own faint edge, 18.5, if no bin's slope ever
+falls below it).
 `population.anchor_tiles` takes the region's own deep anchor edge as
 `min(18.0, floor_half_mag(KS_COMPLETE_TO))` -- never past the
 published depth even where this measurement is ambiguous.
@@ -116,6 +121,15 @@ TURNOVER_LOWER_MAG = 15.0
 #: fitted trend by more than this many Poisson sigma on its own count
 #: (the brief's "more than the Poisson scatter").
 TURNOVER_SIGMA = 1.0
+
+#: C28 item 3's own escape clause: GPS's published 5-sigma depth (module
+#: docstring, Lucas et al. 2008, MNRAS 391, 136) -- used in place of a
+#: measured turnover the ambiguity check (`differential_turnover_mag`'s
+#: own `ambiguous` flag) rejects: a later bin's count exceeding the
+#: flagged bin's own count means the flagged deceleration did not hold,
+#: so the brief's own fallback is this published depth, never a
+#: silently patched measurement.
+PUBLISHED_DEPTH_MAG = 18.0
 
 #: C19: the archive's own point-like `mergedClass` codes this module
 #: counts (module docstring) -- `-3` (probable galaxy) is on the
@@ -271,63 +285,89 @@ def differential_turnover_mag(n, deep_covered, mag_edges=None,
     """C28 item 3, MEASURED not assumed: the deep survey's own
     completeness turnover. Pools `n`'s counts over `deep_covered` pixels
     into one differential count per half-mag bin from `lower_mag` to
-    `mag_edges`'s own faint edge; the first two such bins seed a trend
-    (weighted least squares, log10 count vs bin centre, each point
-    weighted by its own inverse Poisson variance in log10 count), and
-    each next bin is tested against that trend extrapolated from every
-    bin accepted so far: a bin whose own log10 count falls below the
-    prediction by more than `sigma` combined sigma -- the fit's own
-    predictive uncertainty at that bin (`_wls_predict`) and the bin's
-    own Poisson scatter, added in quadrature -- is the turnover, and
-    every bin from there on is left untested (once the survey has
+    `mag_edges`'s own faint edge, then tracks that count's own log10
+    SLOPE bin to bin -- never the level itself, which even a fully
+    complete luminosity function does not hold log-linear (it
+    decelerates smoothly well before any hard depth limit; testing the
+    LEVEL against a constant-slope trend reads that ordinary
+    deceleration as a false turnover at the very first tested bin,
+    measured against real GPS/VHS data). The first two slopes (between
+    bins 0-1 and 1-2) seed a trend in the slope itself (weighted least
+    squares, slope vs the bin centre it leads into, each point weighted
+    by its own propagated Poisson variance), and each next bin's own
+    slope is tested against that trend extrapolated from every slope
+    accepted so far: a slope that falls below the prediction by more
+    than `sigma` combined sigma -- the fit's own predictive uncertainty
+    at that point (`_wls_predict`) and the slope's own propagated
+    Poisson scatter, added in quadrature -- marks its bin turned over,
+    and its own slope is never added to the trend (once the survey has
     turned over, a brighter trend fit through it is no longer
-    meaningful). Combining the fit's own uncertainty in quadrature
-    (rather than testing against the tested bin's Poisson scatter
-    alone) keeps a two-point seed from reading its own Poisson noise as
-    a real trend and then crying wolf on the very next, unremarkable
-    bin. An empty bin cannot be log10'd and counts as turned over
-    outright -- no detections is the strongest possible falloff.
+    meaningful, though later bins are still tested against the last
+    good trend). An empty bin cannot be log10'd and marks its own bin,
+    and every bin after it, turned over outright -- no detections is
+    the strongest possible falloff.
 
-    Returns `(complete_to, centres, counts, turned)`: `complete_to` is
-    the bright edge of the first turned-over bin, or `mag_edges[-1]`
-    (this product's own faint edge) if no bin ever falls below the
-    trend -- the survey is then read as complete to its own available
-    depth, never beyond it. `centres`/`counts`/`turned` are the window's
-    own per-bin arrays, for the crowding check and the report. `nan` (and
-    empty `centres`/`counts`/`turned`) where `deep_covered` holds no
-    pixel at all -- nothing to measure, the same convention
-    `calibration_ratio` uses for no coverage."""
+    AMBIGUITY (the brief's own escape clause, "if the slope test is
+    ambiguous say so"): a slope deceleration can be flagged significant
+    at one bin and still be followed by the count rising again past
+    that very bin's own value -- a real, sustained turnover never does
+    that. Where some LATER bin's own count exceeds the first
+    flagged bin's count, the flag is ambiguous: `KS_COMPLETE_TO` is
+    measured here exactly as flagged (never silently patched), but
+    `ambiguous=True` tells the caller to report it and fall back to the
+    survey's own published depth instead, per the brief.
+
+    Returns `(complete_to, centres, counts, turned, ambiguous)`:
+    `complete_to` is the bright edge of the first turned-over bin, or
+    `mag_edges[-1]` (this product's own faint edge) if no bin's slope
+    ever falls below the trend -- the survey is then read as complete
+    to its own available depth, never beyond it. `centres`/`counts`/
+    `turned` are the window's own per-bin arrays, for the crowding
+    check and the report (`turned`'s first two entries are always
+    False: a bin's slope is only defined, and only tested, from the
+    third bin on). `ambiguous` is always False where no bin is flagged
+    at all, or where the flagged bin is the window's own last bin (no
+    later bin to contradict it). `nan` (and empty `centres`/`counts`/
+    `turned`, `ambiguous` False) where `deep_covered` holds no pixel at
+    all -- nothing to measure, the same convention `calibration_ratio`
+    uses for no coverage."""
     edges = MAG_EDGES if mag_edges is None else np.asarray(mag_edges, dtype=np.float64)
     if not np.any(deep_covered):
-        return float("nan"), np.zeros(0), np.zeros(0), np.zeros(0, dtype=bool)
+        return float("nan"), np.zeros(0), np.zeros(0), np.zeros(0, dtype=bool), False
     lo_bin = max(int(np.searchsorted(edges, lower_mag + 1e-9)) - 1, 0)
     edges_sub = edges[lo_bin:]
     counts = n[deep_covered][:, lo_bin:].sum(axis=0).astype(np.float64)
     centres = 0.5 * (edges_sub[:-1] + edges_sub[1:])
     n_bins = counts.size
     turned = np.zeros(n_bins, dtype=bool)
-    if n_bins < 3:
-        return float(edges_sub[-1]), centres, counts, turned
+    if n_bins < 4:
+        return float(edges_sub[-1]), centres, counts, turned, False
+    empty = np.flatnonzero(counts <= 0.0)
+    if empty.size:
+        first_empty = int(empty[0])
+        turned[first_empty:] = True
+        return float(edges_sub[first_empty]), centres, counts, turned, False
+    log_counts = np.log10(counts)
+    sigma_log = 1.0 / (np.sqrt(counts) * np.log(10.0))
+    dx = centres[1:] - centres[:-1]
+    slopes = (log_counts[1:] - log_counts[:-1]) / dx
+    sigma_slope = np.sqrt(sigma_log[1:] ** 2 + sigma_log[:-1] ** 2) / dx
+    x_slope = centres[1:]  # slope k (bin k -> bin k+1) is keyed to the bin it leads into, centres[k+1]
     good = [0, 1]
     first_turn = None
-    for i in range(2, n_bins):
-        if counts[i] <= 0.0 or np.any(counts[good] <= 0.0):
-            turned[i] = True
-            first_turn = i if first_turn is None else first_turn
-            continue
-        log_counts_good = np.log10(counts[good])
-        sigma_good = 1.0 / (np.sqrt(counts[good]) * np.log(10.0))
-        predicted, sigma_fit = _wls_predict(centres[good], log_counts_good, sigma_good, centres[i])
-        actual = np.log10(counts[i])
-        sigma_actual = 1.0 / (np.sqrt(counts[i]) * np.log(10.0))
-        sigma_total = np.sqrt(sigma_fit ** 2 + sigma_actual ** 2)
-        if (predicted - actual) > sigma * sigma_total:
-            turned[i] = True
-            first_turn = i if first_turn is None else first_turn
+    for k in range(2, slopes.size):
+        predicted, sigma_fit = _wls_predict(x_slope[good], slopes[good], sigma_slope[good], x_slope[k])
+        sigma_total = np.sqrt(sigma_fit ** 2 + sigma_slope[k] ** 2)
+        if (predicted - slopes[k]) > sigma * sigma_total:
+            turned[k + 1] = True
+            first_turn = (k + 1) if first_turn is None else first_turn
         else:
-            good.append(i)
-    complete_to = float(edges_sub[first_turn]) if first_turn is not None else float(edges_sub[-1])
-    return complete_to, centres, counts, turned
+            good.append(k)
+    if first_turn is None:
+        return float(edges_sub[-1]), centres, counts, turned, False
+    ambiguous = first_turn + 1 < n_bins and bool(np.max(counts[first_turn + 1:]) > counts[first_turn])
+    complete_to = float(edges_sub[first_turn])
+    return complete_to, centres, counts, turned, ambiguous
 
 
 def quartile_turnover_mags(n, deep_covered, mag_edges=None,
@@ -354,7 +394,7 @@ def quartile_turnover_mags(n, deep_covered, mag_edges=None,
         if mask.sum() < 4:
             out.append(float("nan"))
             continue
-        complete_to, _, _, _ = differential_turnover_mag(n, mask, mag_edges, lower_mag, sigma)
+        complete_to, _, _, _, _ = differential_turnover_mag(n, mask, mag_edges, lower_mag, sigma)
         out.append(complete_to)
     return out
 
@@ -398,8 +438,17 @@ def build(config, regions=None):
             n, n_overlap = _counts_matrix(pixels, _download_path(config, region), overlap_edges)
             deep_covered = n.sum(axis=1) > 0
             calibration = calibration_ratio(n_2mass_overlap, n_overlap, deep_covered)
-            complete_to_raw, centres, counts, turned = differential_turnover_mag(n, deep_covered)
-            ks_complete_to = _floor_half_mag(complete_to_raw) if np.isfinite(complete_to_raw) else float("nan")
+            complete_to_raw, centres, counts, turned, ambiguous = differential_turnover_mag(n, deep_covered)
+            if not np.isfinite(complete_to_raw):
+                ks_complete_to = float("nan")
+            elif ambiguous:
+                # the brief's own escape clause: a flagged deceleration a
+                # later bin's count goes on to exceed is not a sustained
+                # turnover -- fall back to the survey's own published
+                # depth (cited above), never silently patch the measurement.
+                ks_complete_to = PUBLISHED_DEPTH_MAG
+            else:
+                ks_complete_to = _floor_half_mag(complete_to_raw)
             quartiles = quartile_turnover_mags(n, deep_covered)
             _write_region(config, region, pixels, n, calibration, ks_complete_to)
             written.append(region)
@@ -413,7 +462,10 @@ def build(config, regions=None):
                 bin_report = ", ".join(
                     f"{centres[j]:.2f}:{counts[j]:.0f}{'*' if turned[j] else ''}"
                     for j in range(centres.size))
-                print(f"ukidss_counts derive: {region}: turnover measured at {complete_to_raw:.2f} "
+                amb_note = (f" -- AMBIGUOUS (a later bin's count exceeds the flagged bin's own "
+                            f"count): using the published depth {PUBLISHED_DEPTH_MAG:.1f} instead "
+                            f"(Lucas et al. 2008, MNRAS 391, 136)" if ambiguous else "")
+                print(f"ukidss_counts derive: {region}: turnover measured at {complete_to_raw:.2f}{amb_note} "
                       f"(KS_COMPLETE_TO {ks_complete_to:.1f}, anchor edge min(18.0, this) applies "
                       f"downstream); bins (centre:count, * turned over): {bin_report}; "
                       f"pixel-density-quartile turnovers: {quartiles}")

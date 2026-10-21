@@ -3036,16 +3036,21 @@ REGISTRY = {
         "no SESNA count enters this ratio on either side."),
     ("counts_ukidss_hpx512", "KS_COMPLETE_TO"): ("mag UKIRT K",
         "C28, 2026-10-21: this region's own MEASURED completeness turnover "
-        "-- the faint edge of the last half-magnitude bin whose own "
-        "deep-covered-pixel differential count still follows the "
-        "brighter bins' trend (sky.derived.ukidss_counts."
-        "differential_turnover_mag), rounded down to the half-magnitude "
-        "grid. This file's own faint edge (18.5) if no bin ever falls "
-        "below the trend within the measured range, never beyond it. NaN "
-        "where this region carries no UKIDSS coverage at all. "
-        "population.anchor_tiles takes the region's own deep anchor edge "
-        "as min(18.0, this number), never past the survey's own measured "
-        "depth or its published ceiling."),
+        "-- the faint edge of the half-magnitude bin whose own "
+        "deep-covered-pixel differential count SLOPE first falls below "
+        "the brighter bins' own fitted slope trend by more than one "
+        "Poisson sigma (sky.derived.ukidss_counts.differential_turnover_"
+        "mag), already rounded down to the half-magnitude grid. Where a "
+        "LATER bin's own count exceeds the flagged bin's (the flag did "
+        "not hold -- the brief's own ambiguous case), this is instead "
+        "PUBLISHED_DEPTH_MAG (18.0, Lucas et al. 2008, MNRAS 391, 136), "
+        "never a silently patched measurement. This file's own faint "
+        "edge (18.5) if no bin's slope ever falls below the trend within "
+        "the measured range, never beyond it. NaN where this region "
+        "carries no UKIDSS coverage at all. population.anchor_tiles "
+        "takes the region's own deep anchor edge as min(18.0, this "
+        "number), never past the survey's own measured depth or its "
+        "published ceiling."),
 
     # sky.derived.vhs_counts -- counts_vhs_hpx512: C19 Part B's VISTA
     # Hemisphere Survey sibling of counts_ukidss_hpx512, read where
@@ -3078,17 +3083,21 @@ REGISTRY = {
         "count enters this ratio on either side."),
     ("counts_vhs_hpx512", "KS_COMPLETE_TO"): ("mag VISTA Ks",
         "C28, 2026-10-21: this region's own MEASURED completeness turnover "
-        "-- the faint edge of the last half-magnitude bin whose own "
-        "deep-covered-pixel differential count still follows the "
-        "brighter bins' trend (sky.derived.vhs_counts."
-        "differential_turnover_mag, the same construction sky.derived."
-        "ukidss_counts uses), rounded down to the half-magnitude grid. "
-        "This file's own faint edge (18.5) if no bin ever falls below "
-        "the trend within the measured range, never beyond it. NaN where "
-        "this region carries no VHS coverage at all. population."
-        "anchor_tiles takes the region's own deep anchor edge as "
-        "min(18.0, this number), never past the survey's own measured "
-        "depth or its published ceiling."),
+        "-- the faint edge of the half-magnitude bin whose own "
+        "deep-covered-pixel differential count SLOPE first falls below "
+        "the brighter bins' own fitted slope trend by more than one "
+        "Poisson sigma (sky.derived.vhs_counts.differential_turnover_mag, "
+        "the same construction sky.derived.ukidss_counts uses), already "
+        "rounded down to the half-magnitude grid. Where a LATER bin's own "
+        "count exceeds the flagged bin's (the flag did not hold -- the "
+        "brief's own ambiguous case), this is instead PUBLISHED_DEPTH_MAG "
+        "(18.0, McMahon et al. 2013, The Messenger 154, 35), never a "
+        "silently patched measurement. This file's own faint edge (18.5) "
+        "if no bin's slope ever falls below the trend within the "
+        "measured range, never beyond it. NaN where this region carries "
+        "no VHS coverage at all. population.anchor_tiles takes the "
+        "region's own deep anchor edge as min(18.0, this number), never "
+        "past the survey's own measured depth or its published ceiling."),
 
     ("colours_knots_survey", "LOG10_RATIO"): ("dex",
         "log10(F_IRAC_band / F_2.12um) for every Giannini et al. (2013) knot "

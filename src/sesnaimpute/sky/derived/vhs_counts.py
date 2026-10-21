@@ -76,6 +76,14 @@ MAG_EDGES = np.arange(9.0, 18.5001, 0.5)
 TURNOVER_LOWER_MAG = 15.0
 TURNOVER_SIGMA = 1.0
 
+#: C28 item 3's own escape clause: VHS's published 5-sigma depth for the
+#: main/wide survey component (McMahon et al. 2013, The Messenger 154,
+#: 35, sec. 2 survey design table) -- used in place of a measured
+#: turnover the ambiguity check (`differential_turnover_mag`'s own
+#: `ambiguous` flag) rejects, the same construction
+#: `sky.derived.ukidss_counts.PUBLISHED_DEPTH_MAG` uses for GPS.
+PUBLISHED_DEPTH_MAG = 18.0
+
 #: The archive's own point-like `mergedClass` codes this module counts
 #: (module docstring) -- the same two `sky.derived.ukidss_counts.
 #: POINT_LIKE_CLASSES` uses; `-3` (probable galaxy) is on the
@@ -221,40 +229,49 @@ def _wls_predict(x, y, sigma_y, x0):
 def differential_turnover_mag(n, deep_covered, mag_edges=None,
                                lower_mag=TURNOVER_LOWER_MAG, sigma=TURNOVER_SIGMA):
     """`sky.derived.ukidss_counts.differential_turnover_mag`'s own
-    construction (that module's own docstring, including the weighted
-    predictive-sigma test `_wls_predict` runs), against this module's
-    `MAG_EDGES`."""
+    construction (that module's own docstring: tracks the pooled count's
+    own log10 SLOPE bin to bin, never the level, since even a fully
+    complete luminosity function decelerates smoothly well before any
+    hard depth limit; the ambiguity check below, same construction),
+    against this module's `MAG_EDGES`. Returns `(complete_to, centres,
+    counts, turned, ambiguous)`."""
     edges = MAG_EDGES if mag_edges is None else np.asarray(mag_edges, dtype=np.float64)
     if not np.any(deep_covered):
-        return float("nan"), np.zeros(0), np.zeros(0), np.zeros(0, dtype=bool)
+        return float("nan"), np.zeros(0), np.zeros(0), np.zeros(0, dtype=bool), False
     lo_bin = max(int(np.searchsorted(edges, lower_mag + 1e-9)) - 1, 0)
     edges_sub = edges[lo_bin:]
     counts = n[deep_covered][:, lo_bin:].sum(axis=0).astype(np.float64)
     centres = 0.5 * (edges_sub[:-1] + edges_sub[1:])
     n_bins = counts.size
     turned = np.zeros(n_bins, dtype=bool)
-    if n_bins < 3:
-        return float(edges_sub[-1]), centres, counts, turned
+    if n_bins < 4:
+        return float(edges_sub[-1]), centres, counts, turned, False
+    empty = np.flatnonzero(counts <= 0.0)
+    if empty.size:
+        first_empty = int(empty[0])
+        turned[first_empty:] = True
+        return float(edges_sub[first_empty]), centres, counts, turned, False
+    log_counts = np.log10(counts)
+    sigma_log = 1.0 / (np.sqrt(counts) * np.log(10.0))
+    dx = centres[1:] - centres[:-1]
+    slopes = (log_counts[1:] - log_counts[:-1]) / dx
+    sigma_slope = np.sqrt(sigma_log[1:] ** 2 + sigma_log[:-1] ** 2) / dx
+    x_slope = centres[1:]
     good = [0, 1]
     first_turn = None
-    for i in range(2, n_bins):
-        if counts[i] <= 0.0 or np.any(counts[good] <= 0.0):
-            turned[i] = True
-            first_turn = i if first_turn is None else first_turn
-            continue
-        log_counts_good = np.log10(counts[good])
-        sigma_good = 1.0 / (np.sqrt(counts[good]) * np.log(10.0))
-        predicted, sigma_fit = _wls_predict(centres[good], log_counts_good, sigma_good, centres[i])
-        actual = np.log10(counts[i])
-        sigma_actual = 1.0 / (np.sqrt(counts[i]) * np.log(10.0))
-        sigma_total = np.sqrt(sigma_fit ** 2 + sigma_actual ** 2)
-        if (predicted - actual) > sigma * sigma_total:
-            turned[i] = True
-            first_turn = i if first_turn is None else first_turn
+    for k in range(2, slopes.size):
+        predicted, sigma_fit = _wls_predict(x_slope[good], slopes[good], sigma_slope[good], x_slope[k])
+        sigma_total = np.sqrt(sigma_fit ** 2 + sigma_slope[k] ** 2)
+        if (predicted - slopes[k]) > sigma * sigma_total:
+            turned[k + 1] = True
+            first_turn = (k + 1) if first_turn is None else first_turn
         else:
-            good.append(i)
-    complete_to = float(edges_sub[first_turn]) if first_turn is not None else float(edges_sub[-1])
-    return complete_to, centres, counts, turned
+            good.append(k)
+    if first_turn is None:
+        return float(edges_sub[-1]), centres, counts, turned, False
+    ambiguous = first_turn + 1 < n_bins and bool(np.max(counts[first_turn + 1:]) > counts[first_turn])
+    complete_to = float(edges_sub[first_turn])
+    return complete_to, centres, counts, turned, ambiguous
 
 
 def quartile_turnover_mags(n, deep_covered, mag_edges=None,
@@ -274,7 +291,7 @@ def quartile_turnover_mags(n, deep_covered, mag_edges=None,
         if mask.sum() < 4:
             out.append(float("nan"))
             continue
-        complete_to, _, _, _ = differential_turnover_mag(n, mask, mag_edges, lower_mag, sigma)
+        complete_to, _, _, _, _ = differential_turnover_mag(n, mask, mag_edges, lower_mag, sigma)
         out.append(complete_to)
     return out
 
@@ -319,8 +336,13 @@ def build(config, regions=None):
             n, n_overlap = _counts_matrix(pixels, _download_path(config, region), overlap_edges)
             deep_covered = n.sum(axis=1) > 0
             calibration = calibration_ratio(n_2mass_overlap, n_overlap, deep_covered)
-            complete_to_raw, centres, counts, turned = differential_turnover_mag(n, deep_covered)
-            ks_complete_to = _floor_half_mag(complete_to_raw) if np.isfinite(complete_to_raw) else float("nan")
+            complete_to_raw, centres, counts, turned, ambiguous = differential_turnover_mag(n, deep_covered)
+            if not np.isfinite(complete_to_raw):
+                ks_complete_to = float("nan")
+            elif ambiguous:
+                ks_complete_to = PUBLISHED_DEPTH_MAG
+            else:
+                ks_complete_to = _floor_half_mag(complete_to_raw)
             quartiles = quartile_turnover_mags(n, deep_covered)
             _write_region(config, region, pixels, n, calibration, ks_complete_to)
             written.append(region)
@@ -334,7 +356,10 @@ def build(config, regions=None):
                 bin_report = ", ".join(
                     f"{centres[j]:.2f}:{counts[j]:.0f}{'*' if turned[j] else ''}"
                     for j in range(centres.size))
-                print(f"vhs_counts derive: {region}: turnover measured at {complete_to_raw:.2f} "
+                amb_note = (f" -- AMBIGUOUS (a later bin's count exceeds the flagged bin's own "
+                            f"count): using the published depth {PUBLISHED_DEPTH_MAG:.1f} instead "
+                            f"(McMahon et al. 2013, The Messenger 154, 35)" if ambiguous else "")
+                print(f"vhs_counts derive: {region}: turnover measured at {complete_to_raw:.2f}{amb_note} "
                       f"(KS_COMPLETE_TO {ks_complete_to:.1f}, anchor edge min(18.0, this) applies "
                       f"downstream); bins (centre:count, * turned over): {bin_report}; "
                       f"pixel-density-quartile turnovers: {quartiles}")
