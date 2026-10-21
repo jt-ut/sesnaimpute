@@ -1045,6 +1045,29 @@ REGISTRY = {
         "C21 item 2: this region's own WEIGHT share under each of the "
         "six WEIGHT_RULE codes -- the sum, over every tile_<id> group's "
         "own RULE_WEIGHT, normalised to 1."),
+    ("population_star_tile", "POP"): ("category (0/1)",
+        "C30 (briefs/round4_2026-10-20/C30_population_anchor.md) item 5: "
+        "this star's own Galactic field-star population, population."
+        "selection.is_giant's own HR-diagram cut on its TRILEGAL LOG_G -- "
+        "0 dwarf, 1 giant. Independent of IS_EVOLVED (an AGB star can be "
+        "a giant or not; a giant need not be evolved)."),
+    ("population_star_tile", "RULE_COUNT_POP"): ("star count",
+        "C30 item 5: this tile's own RULE_COUNT, split by POP -- shape "
+        "(2, 6), row 0 dwarf stars, row 1 giant stars; RULE_COUNT_POP."
+        "sum(axis=0) equals RULE_COUNT exactly."),
+    ("population_star_tile", "RULE_WEIGHT_POP"): ("dimensionless",
+        "C30 item 5: this tile's own RULE_WEIGHT, split by POP -- shape "
+        "(2, 6); RULE_WEIGHT_POP.sum(axis=0) equals RULE_WEIGHT exactly."),
+    ("population_star_tile", "RULE_COUNT_FRAC_POP"): ("dimensionless",
+        "C30 item 5: this region's own RULE_COUNT_POP, summed over every "
+        "tile_<id> group and normalised WITHIN each population row (each "
+        "row sums to 1 over that population's own stars, not over the "
+        "region total) -- so a giant's own rule-code share and a dwarf's "
+        "are each read on their own population's own 100%."),
+    ("population_star_tile", "RULE_WEIGHT_FRAC_POP"): ("dimensionless",
+        "C30 item 5: the same construction as RULE_COUNT_FRAC_POP, on "
+        "RULE_WEIGHT_POP (each row normalised within its own population's "
+        "own total weight) instead of the star count."),
     # C21's own KS_EDGES_2MASS/N_KS_OBS_2MASS/FINAL_POP_KS_HIST build-time
     # check (commit 701fe92) is removed (C23 brief item 4, owner ruling):
     # it dimmed every star at its tile's own MEAN column and summed W
