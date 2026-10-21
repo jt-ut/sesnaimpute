@@ -60,6 +60,7 @@ import numba
 import numpy as np
 
 from sesnaimpute import config as config_module
+from sesnaimpute import constants
 from sesnaimpute import definitions
 from sesnaimpute.bmstp import grid
 from sesnaimpute.catalog import completeness as completeness_module
@@ -699,27 +700,60 @@ def _ln_one_minus_c_curve(log10_fhat, curve_row, n, a, c):
 
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy")
-def _nondet_ln_sum(a_val, active, base, slope_b, template_row, curve_rows_s, band_a, band_c, band_n):
-    """NONDET brief section 1: `Sum_{b in active} ln[1 - C_b(f_hat_b(a_val))]`,
-    the non-detection factor's own log at ONE extinction value `a_val` --
-    a cell's own `a*` (the per-cell, per-template callers below) or a
-    single-point fallback's one substitute extinction (where `active` is
-    every `nondet_mask` band, the window prefilter not applying to a
-    single point). `active` is a bitmask over the 8 bands (`1 << b`),
-    already restricted to this source's own undetected, covered, observed
-    bands by the caller. `template_row` is `template_log[th]`,
-    `curve_rows_s` is this source's own `(8, max_n)` measured completeness
-    curve (COMPLETENESS_2026-10-20.md), `band_a`/`band_c`/`band_n` the
-    region-wide per-band index parameters -- the same measured curve
-    `fittp.likelihood._ln_nondet` reads at the clamped mark, read here at
-    an arbitrary `a` instead."""
+def _log_mix(ln_indep, ln_comon, lam):
+    """`ln[(1 - lam) * exp(ln_indep) + lam * exp(ln_comon)]`, the one
+    log-sum-exp combine `_nondet_ln_sum` below needs (C20 brief): callers
+    never reach this with `lam` at 0 or 1 (both branched to return the
+    bare term directly, no log/exp at all), so this path only runs for an
+    interior `lam`, where both weights are strictly positive."""
+    la = math.log(1.0 - lam) + ln_indep
+    lb = math.log(lam) + ln_comon
+    m = la if la > lb else lb
+    return m + math.log(math.exp(la - m) + math.exp(lb - m))
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _nondet_ln_sum(a_val, active, base, slope_b, template_row, curve_rows_s, band_a, band_c, band_n, lam):
+    """NONDET brief section 1, mixed per C20 (briefs/round4_2026-10-20/
+    C20_detection_correlation.md): `Sum_{b in active} ln[1 - C_b(f_hat_b(
+    a_val))]` is the non-detection factor's own log, independent model, at
+    ONE extinction value `a_val` -- a cell's own `a*` (the per-cell,
+    per-template callers below) or a single-point fallback's one
+    substitute extinction (where `active` is every `nondet_mask` band, the
+    window prefilter not applying to a single point). `active` is a
+    bitmask over the 8 bands (`1 << b`), already restricted to this
+    source's own undetected, covered, observed bands by the caller.
+    `template_row` is `template_log[th]`, `curve_rows_s` is this source's
+    own `(8, max_n)` measured completeness curve (COMPLETENESS_2026-10-
+    20.md), `band_a`/`band_c`/`band_n` the region-wide per-band index
+    parameters -- the same measured curve `fittp.likelihood._ln_nondet`
+    reads at the clamped mark, read here at an arbitrary `a` instead.
+
+    The comonotone half of the C20 mixture, `1 - max_{b in active} p_b ==
+    min_{b in active} (1 - p_b)`, is the running minimum of the SAME
+    per-band `ln[1-p_b]` the independent sum already evaluates -- no
+    extra curve read, matching the brief's own cost constraint. `lam <=
+    0.0` returns the independent sum exactly as before NONDET2 (today's
+    own code path, not a limit of `_log_mix`); `lam >= 1.0` returns the
+    comonotone minimum exactly; an interior `lam` combines the two via
+    `_log_mix`. `min_total`'s own `0.0` start (never updated when
+    `active` is empty) is `ln(1)`, matching `total`'s own `0.0` there: no
+    nondet band active means no penalty under EITHER half of the mixture."""
     total = 0.0
+    min_total = 0.0
     for b in range(N_BANDS):
         if not ((active >> b) & 1):
             continue
         log10_fhat = template_row[b] + base + slope_b[b] * a_val
-        total += _ln_one_minus_c_curve(log10_fhat, curve_rows_s[b], band_n[b], band_a[b], band_c[b])
-    return total
+        ln_one_minus_p = _ln_one_minus_c_curve(log10_fhat, curve_rows_s[b], band_n[b], band_a[b], band_c[b])
+        total += ln_one_minus_p
+        if ln_one_minus_p < min_total:
+            min_total = ln_one_minus_p
+    if lam <= 0.0:
+        return total
+    if lam >= 1.0:
+        return min_total
+    return _log_mix(total, min_total, lam)
 
 
 #: NONDET2 brief section 1 (NONDET.md section 8): a Gaia H(a) within this
@@ -800,12 +834,18 @@ def _gaia_ln_gamma(a_val, g0_mag, kg_draine, kg_whitney, base, sl, r_diffuse, r_
 def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               b_origin, dlb, dlx, a_edges_buf, cell_weight,
               m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
-              template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask,
+              template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask, lam,
               gaia_matched, g_s, a_x, g0_mag, kg_draine, kg_whitney,
               r_diffuse, r_dense, ramp_lo, ramp_hi, x_s_all, y_s_all, z_s_all,
               out_s0, out_s1, a_post_out, a2_post_out):
     """The cell sum of SPEC_BMSTP_DRAFT.md section 4.2, per source and
-    template. NONDET2 brief section 2: the sum accumulates THREE totals,
+    template. `lam` (C20 brief, briefs/round4_2026-10-20/
+    C20_detection_correlation.md): `constants.LAMBDA`, the one survey-wide
+    share of comonotone detection, threaded straight to `_nondet_ln_sum`
+    (every one of its four callers below) -- `_cell_sum` itself never
+    reads it directly.
+
+    NONDET2 brief section 2: the sum accumulates THREE totals,
     not one -- `total0` (the prior read along the fit's ridge alone),
     `total1` (`total0` times the non-detection factor, NONDET brief
     section 1), `total2` (`total1` times the Gaia factor, NONDET2 section
@@ -1063,7 +1103,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         # NONDET brief section 1: this cell's own non-detection
                         # factor, at ITS OWN a_star.
                         nondet_ln = _nondet_ln_sum(a_star, active, base, slope_b,
-                                                    template_log[th], curve_rows[s], band_a, band_c, band_n)
+                                                    template_log[th], curve_rows[s], band_a, band_c, band_n, lam)
                         term1 = term0 * math.exp(nondet_ln)
                         # NONDET2 section 1: this cell's own Gaia factor, at
                         # ITS OWN a_star, or the window's own constant value.
@@ -1112,7 +1152,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         term0 = dens * mi * cell_weight[s, i]
                         # NONDET brief section 1: see the table path above.
                         nondet_ln = _nondet_ln_sum(a_star, active, base, slope_b,
-                                                    template_log[th], curve_rows[s], band_a, band_c, band_n)
+                                                    template_log[th], curve_rows[s], band_a, band_c, band_n, lam)
                         term1 = term0 * math.exp(nondet_ln)
                         # NONDET2 section 1: see the table path above.
                         if gaia_do_percell:
@@ -1166,7 +1206,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 if dens > 0.0 and w_edge > 0.0:
                     s0 = math.log(dens * w_edge / a_top) + ln_tail
                     nondet_ln = _nondet_ln_sum(a_top, active_full, base, slope_b,
-                                                template_log[th], curve_rows[s], band_a, band_c, band_n)
+                                                template_log[th], curve_rows[s], band_a, band_c, band_n, lam)
                     s1 = s0 + nondet_ln
                     gaia_ln = _gaia_ln_gamma(a_top, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
                                               ramp_lo, ramp_hi, matched_s, g_s_s, a_x_s, x_s_s, y_s_s, z_s_s)
@@ -1207,7 +1247,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 if dens > 0.0 and w_edge > 0.0:
                     s0 = math.log(dens * w_edge / a_c0) + ln_tail
                     nondet_ln = _nondet_ln_sum(a_c0, active_full, base, slope_b,
-                                                template_log[th], curve_rows[s], band_a, band_c, band_n)
+                                                template_log[th], curve_rows[s], band_a, band_c, band_n, lam)
                     s1 = s0 + nondet_ln
                     gaia_ln = _gaia_ln_gamma(a_c0, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
                                               ramp_lo, ramp_hi, matched_s, g_s_s, a_x_s, x_s_s, y_s_s, z_s_s)
@@ -1328,7 +1368,7 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
                       np.asarray(band_a, dtype=np.float64),
                       np.asarray(band_c, dtype=np.float64),
                       np.asarray(band_n, dtype=np.int64),
-                      np.ascontiguousarray(np.asarray(nondet_mask)),
+                      np.ascontiguousarray(np.asarray(nondet_mask)), float(constants.LAMBDA),
                       np.ascontiguousarray(matched), np.ascontiguousarray(g_s, dtype=np.float64),
                       np.ascontiguousarray(a_x, dtype=np.float64),
                       np.ascontiguousarray(g0_mag, dtype=np.float64),

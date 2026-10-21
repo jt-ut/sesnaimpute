@@ -7,8 +7,12 @@ law (`population.selection.kappa_hybrid`), weighted by each member's
 probability of being catalogued (sec. 8, sec. 6.2): per band the
 completeness `C_i(f)` at the pixel's own marginalised 50% limit
 (`catalog.depth_grid`'s `F_LIM_50_PIX_MJY`) and its own marginalised width
-(`W_DEX_PIX`), and `P(>=2 of 8)` from the eight bands' independent
-non-detection probabilities -- the same completeness model `fittp.likelihood`
+(`W_DEX_PIX`), and `P(>=2 of 8)` a mixture of the eight bands' independent
+non-detection probabilities and a fully comonotone model, by `constants.
+LAMBDA` (C20 brief, briefs/round4_2026-10-20/C20_detection_correlation.md:
+bands observed at the same position share the local background and
+confusion, so independence alone under-predicted SESNA's own measured
+catalogued fraction) -- the same completeness model `fittp.likelihood`
 prices, never a step at the 50% limit. The selection appears here and nowhere
 else in the atlas (sec. 1.2): the prior itself is unthinned.
 
@@ -69,6 +73,7 @@ from scipy.special import ndtri
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
+from sesnaimpute import constants
 from sesnaimpute import definitions
 from sesnaimpute import pieces
 from sesnaimpute import progress
@@ -443,14 +448,28 @@ def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
     Gaussian roll-off fit to it -- zero where the member carries no flux
     in that band (GAL's 2MASS/24um, H2S's J/H/24um).
 
-    `p_cat` (n_pix, n_mem): `P(>=2 of 8) = 1 - Prod_i(1-p_i)
-    - Sum_i p_i Prod_{j!=i}(1-p_j)` (bands independent given the fluxes).
+    `p_cat` (n_pix, n_mem) (C20 brief, briefs/round4_2026-10-20/
+    C20_detection_correlation.md): `(1 - LAMBDA) * P_indep + LAMBDA *
+    p_(2)`, a mixture of SESNA's independent band-detection model,
+    `P_indep = P(>=2 of 8) = 1 - Prod_i(1-p_i) - Sum_i p_i Prod_{j!=i}
+    (1-p_j)` (bands independent given the fluxes -- today's closed form,
+    LAMBDA=0), and a fully comonotone model, `p_(2)` the SECOND-largest
+    of the eight `p_b` (one latent uniform draw per member, shared by
+    every band: at least two bands clear iff the draw is below the
+    second-largest `p_b`). `constants.LAMBDA` is the one survey-wide
+    share (`population.detection_correlation`'s own measurement,
+    against UKIDSS stars matched to SESNA in North America Nebula and
+    Perseus): bands observed at the same position share the local
+    background and confusion, so independence is not the whole story.
 
-    `p_cat_i2` (n_pix, n_mem) (sec. 9 "the bright-end count ratio"): each
-    member's own probability of being catalogued WITH I2 (4.5 um) ITSELF
-    MEASURED, `p_I2 * (1 - prod_{i!=I2}(1-p_i))` -- the exact condition
-    the catalogue side applies to a catalogued source (`ORIGIN_FNU[:, I2]
-    == 1`, `_observed_bright_counts`).
+    `p_cat_i2` (n_pix, n_mem) (sec. 9 "the bright-end count ratio"): the
+    SAME mixture for each member's own probability of being catalogued
+    WITH I2 (4.5 um) ITSELF MEASURED -- independent, `p_I2 * (1 -
+    prod_{i!=I2}(1-p_i))` -- the exact condition the catalogue side
+    applies to a catalogued source (`ORIGIN_FNU[:, I2] == 1`,
+    `_observed_bright_counts`); comonotone, `min(p_I2, max_{i!=I2} p_i)`
+    (I2 and at least one other band both clear iff the one draw is below
+    both p_I2 and the brightest of the other seven).
 
     `flux_i2` (n_pix, n_mem): the dimmed I2 flux, for the bright tests
     (compared there to 3x/10x the pixel's own I2 50% limit).
@@ -551,7 +570,16 @@ def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
         sum_term = np.zeros_like(prod_all)
         for i in range(N_BANDS):
             sum_term += p[:, :, i] * loo[i]
-        p_cat[:, mstart:mstop] = 1.0 - prod_all - sum_term
+        p_indep = 1.0 - prod_all - sum_term
+        # C20 brief: p_(2), the second-largest of the eight p_b (the
+        # comonotone model's own P(>=2 of 8)); `np.partition` finds it
+        # without fully sorting the short band axis. At LAMBDA=0.0 exactly,
+        # `(1.0 - 0.0) * p_indep + 0.0 * p2 == p_indep` bit for bit (`1.0 *
+        # x == x`, `0.0 * finite == 0.0`, `x + 0.0 == x` in IEEE754), so
+        # this reproduces today's p_cat bit-identically (the brief's own
+        # identity, proved on NGC 7129).
+        p2 = np.partition(p, -2, axis=2)[:, :, -2]
+        p_cat[:, mstart:mstop] = (1.0 - constants.LAMBDA) * p_indep + constants.LAMBDA * p2
 
         # the bright-end check (sec. 9): a member counts as bright only if
         # it would be CATALOGUED WITH I2 ITSELF MEASURED (its own I2
@@ -559,9 +587,16 @@ def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
         # also clears, `1 - prod_{i!=I2}(1-p_i)`); `flux_i2` lets the
         # caller apply the 3x/10x test against this pixel's own I2 50%
         # limit. `loo[IDX_I2]` is already exactly that leave-I2-out
-        # product, computed once above.
+        # product, computed once above. The SAME LAMBDA mixture as
+        # `p_cat` above, the comonotone term now `min(p_I2, max_{i!=I2}
+        # p_i)` (C20 brief): `np.delete` here mirrors the ONE already paid
+        # in `_collapse_star_members`'s own kind of per-band exclusion,
+        # not a new cost class on this already O(8)-per-band path.
         prob_other_detect = 1.0 - loo[IDX_I2]
-        p_cat_i2[:, mstart:mstop] = p[:, :, IDX_I2] * prob_other_detect
+        p_i2_indep = p[:, :, IDX_I2] * prob_other_detect
+        max_other = np.max(np.delete(p, IDX_I2, axis=2), axis=2)
+        p_i2_comon = np.minimum(p[:, :, IDX_I2], max_other)
+        p_cat_i2[:, mstart:mstop] = (1.0 - constants.LAMBDA) * p_i2_indep + constants.LAMBDA * p_i2_comon
         flux_i2[:, mstart:mstop] = flux[:, :, IDX_I2]  # (n_pix, n_sub)
     return p_cat, p_cat_i2, flux_i2
 

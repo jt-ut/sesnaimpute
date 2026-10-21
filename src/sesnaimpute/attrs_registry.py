@@ -3129,10 +3129,15 @@ _SWEEP_FIT_READINGS = {
         "there, linear between the measurement's magnitude steps and continued "
         "along that band's typical falloff shape where the measurement itself "
         "stops, never letting a band be charged as more than 99.5 percent certain "
-        "to have been missed. Never above LN_EVIDENCE_MEASURED: a band the source "
-        "was not detected in can only count against a class. The class's full "
-        "evidence adds Gaia to this: Gaia DR3's published completeness at the "
-        "source's sky pixel; an unmatched source is scored as a non-detection."),
+        "to have been missed. Bands observed at the same place share the same "
+        "local background and confusion, so their own chances of being missed are "
+        "not treated as fully separate: this blends treating them as separate "
+        "with treating them as moving together (missed or not, as one), by one "
+        "survey-wide share measured against real stars. Never above "
+        "LN_EVIDENCE_MEASURED: a band the source was not detected in can only "
+        "count against a class. The class's full evidence adds Gaia to this: "
+        "Gaia DR3's published completeness at the source's sky pixel; an "
+        "unmatched source is scored as a non-detection."),
     "LN_PRIOR_MASS": ("natural log of objects per square degree",
         "The ln of the expected number per square degree of this class's objects "
         "the survey would catalogue at the source's sky pixel, from the prior "
