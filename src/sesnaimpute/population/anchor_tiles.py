@@ -76,6 +76,7 @@ from sesnaimpute.build import run
 from sesnaimpute.granules import access
 from sesnaimpute.population import selection
 from sesnaimpute.sky.derived import profile as profile_module
+from sesnaimpute.sky.derived import twomass_counts as twomass_counts_module
 from sesnaimpute.sky.download.trilegal import build as trilegal_download
 
 _TILES_STEM = "tiles_anchors_hpx512"
