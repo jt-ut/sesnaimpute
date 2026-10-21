@@ -2821,6 +2821,35 @@ REGISTRY = {
         "them -- 2MASS is the reference survey, UKIDSS the extension, and "
         "no SESNA count enters this ratio on either side."),
 
+    # sky.derived.vhs_counts -- counts_vhs_hpx512: C19 Part B's VISTA
+    # Hemisphere Survey sibling of counts_ukidss_hpx512, read where
+    # UKIDSS does not cover a pixel.
+    ("counts_vhs_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "The region's own occupied nside-512 pixel numbers (nested ordering), "
+        "ascending. Row i here is row i of N."),
+    ("counts_vhs_hpx512", "MAG_EDGES"): ("mag VISTA Ks",
+        "The edges of the half-magnitude VHS Ks bins (VISTA photometric "
+        "system) this file counts stars in, 9.0 to 17.0: bin j runs from "
+        "MAG_EDGES[j] to MAG_EDGES[j+1]."),
+    ("counts_vhs_hpx512", "N"): ("stars",
+        "For the matching pixel in HPX_PIX_512 and each magnitude bin in "
+        "MAG_EDGES, how many point-like (mergedClass -1 or -2) VHS "
+        "detections fall in that pixel and bin, with no cut on the "
+        "archive's own error-bits column."),
+    ("counts_vhs_hpx512", "CALIBRATION"): ("dimensionless",
+        "Three numbers, this region's own overlap-window ratio and its "
+        "combined-Poisson interval: [0] the ratio of 2MASS's own point "
+        "count to this file's own N, summed over the Ks bins from "
+        "OVERLAP_LOWER_MAG (13.0) to the 2MASS anchor's own faint edge "
+        "(14.3) and over the pixels this file's N shows any VHS coverage "
+        "in at all; [1] and [2] that ratio's lower and upper bound under "
+        "combined Poisson shot noise on both counts. All three NaN where "
+        "this region's download carries no VHS rows at all. population."
+        "anchor_tiles multiplies this file's own deep (Ks past 14.0) "
+        "counts by CALIBRATION[0] before anything else reads them -- "
+        "2MASS is the reference survey, VHS the extension, and no SESNA "
+        "count enters this ratio on either side."),
+
     ("colours_knots_survey", "LOG10_RATIO"): ("dex",
         "log10(F_IRAC_band / F_2.12um) for every Giannini et al. (2013) knot "
         "with a measured, non-upper-limit flux in both the 2.12 micron line "
