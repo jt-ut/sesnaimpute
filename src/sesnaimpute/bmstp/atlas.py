@@ -7,8 +7,12 @@ law (`population.selection.kappa_hybrid`), weighted by each member's
 probability of being catalogued (sec. 8, sec. 6.2): per band the
 completeness `C_i(f)` at the pixel's own marginalised 50% limit
 (`catalog.depth_grid`'s `F_LIM_50_PIX_MJY`) and its own marginalised width
-(`W_DEX_PIX`), and `P(>=2 of 8)` from the eight bands' independent
-non-detection probabilities -- the same completeness model `fittp.likelihood`
+(`W_DEX_PIX`), and `P(>=2 of 8)` a mixture of the eight bands' independent
+non-detection probabilities and a fully comonotone model, by `constants.
+LAMBDA` (C20 brief, briefs/round4_2026-10-20/C20_detection_correlation.md:
+bands observed at the same position share the local background and
+confusion, so independence alone under-predicted SESNA's own measured
+catalogued fraction) -- the same completeness model `fittp.likelihood`
 prices, never a step at the 50% limit. The selection appears here and nowhere
 else in the atlas (sec. 1.2): the prior itself is unthinned.
 
