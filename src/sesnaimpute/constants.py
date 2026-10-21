@@ -86,3 +86,42 @@ SIGMA_CAL_DEX = np.array([b.sigma_cal_dex for b in definitions.BANDS], dtype=np.
 #: chosen by analogy to this one without re-deriving the bound at the new
 #: `d`: the knee between 1.44 % and 22.3 % is one more sigma away.
 LIBRARY_SAMPLING_SIGMA_LOG_DEX = 2.0 * SIGMA_CAL_DEX
+
+#: C20 brief (briefs/round4_2026-10-20/C20_detection_correlation.md): the
+#: share of comonotone detection in the mixture between SESNA's
+#: independent band-detection model (today's closed form, `P(>=2 of 8) =
+#: 1 - Prod_i(1-p_i) - Sum_i p_i Prod_{j!=i}(1-p_j)`) and a fully
+#: comonotone model (one latent uniform draw per source, shared by every
+#: band: `P(>=2 of 8) = p_(2)`, the SECOND-largest of the eight p_b) --
+#: `bmstp.atlas.catalogued_probability`, `fittp.likelihood._ln_nondet`,
+#: `fittp.prior_reader._cell_sum`'s non-detection branch.
+#:
+#: Measured (`population.detection_correlation.main`, 2026-10-20) against
+#: UKIDSS GPS clean-stellar stars matched to SESNA within 1'' in clean,
+#: deep-covered pixels: maximum likelihood over each star's own matched/
+#: unmatched outcome wants LAMBDA > 1 in BOTH regions checked -- North
+#: America Nebula (uncapped 1.32-1.36, depending on whether the fit keeps
+#: Ks bins where the independent model already saturates near 1) and
+#: Perseus (uncapped 0.96-1.59) -- so this constant is the capped value,
+#: 1.0 exactly, not a fitted interior point. The brief anticipated this
+#: outcome for the fit region alone ("UKIDSS clean stars favour isolated
+#: stars"); seeing it in BOTH regions is a disclosure this constant's own
+#: citation carries rather than hides: North America Nebula's own
+#: matched/unmatched outcomes, restricted to the four Ks bins (15.5-17.5)
+#: where the independent model is not already within 2% of its own
+#: ceiling, still want LAMBDA = 1.32, and Perseus's own three such bins
+#: (16.0-17.5) put the empirical catalogued fraction within 1% of p_(2)
+#: in every one of them -- not the "no difference" a coarser, bin-
+#: averaged ratio check (C18's test1b) suggested. A later re-measurement
+#: that wants an interior value should replace this constant outright,
+#: not add a second one: LAMBDA is ONE survey-wide number.
+LAMBDA = 1.0
+
+#: Combined19 (Bovy et al. 2016, mwdust; `sky.download.combined19`,
+#: `sky.derived.profile`'s canonical far-field column, owner ruling
+#: 2026-10-21) stores E(B-V) on the SFD scale; mwdust's own
+#: `aebv('2MASS Ks', sf10=True)` (Schlafly & Finkbeiner 2011, Table 6,
+#: R_V = 3.1) converts it to K-band extinction: `A_Ks = AK_PER_EBV_SFD_KS
+#: * E(B-V)_SFD`. Verified against mwdust 1.8's own table
+#: (`mwdust.util.extCurves.aebv`) to the value stored here.
+AK_PER_EBV_SFD_KS = 0.3100

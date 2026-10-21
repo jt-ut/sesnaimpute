@@ -276,81 +276,166 @@ REGISTRY = {
         "For the matching pixel in HPX_PIX_512, the background-galaxy "
         "population's own expected cataloged count on the common "
         "(log10 xi, log10 F_4.5) grid: summing every cell gives this "
-        "pixel's own RATIO_GAL times the region's source count."),
+        "pixel's own RATIO_GAL times the region's source count. The "
+        "log10 F_4.5 position is each member's own DIMMED 4.5 micron "
+        "flux at the pixel being counted (the same dimming its catalog "
+        "probability already applies), not its dereddened flux: the "
+        "cell a member's expected catalog count lands in is the cell "
+        "the sky would actually catalog it in, so this array compares "
+        "like with like against sky sources, themselves binned by "
+        "measured flux (C29, briefs/round4_2026-10-20/"
+        "C29_atlas_check_dimmed_axis.md). Read only by this check "
+        "(atlas.shapes's own diagnostic page, and the external "
+        "diagnostic script it matches); never by bmstp or fittp."),
     ("prior_atlas_hpx512", "N_CAT_CELL_STAR"): ("objects",
         "For the matching pixel in HPX_PIX_512, the STAR population's "
         "own expected cataloged count on the common (log10 xi, "
         "log10 F_4.5) grid: summing every cell gives this pixel's own "
-        "RATIO_STAR times the region's source count."),
+        "RATIO_STAR times the region's source count. The log10 F_4.5 "
+        "position is each member's own DIMMED 4.5 micron flux at the "
+        "pixel being counted (the same dimming its catalog probability "
+        "already applies), not its dereddened flux (C29, briefs/"
+        "round4_2026-10-20/C29_atlas_check_dimmed_axis.md). Read only "
+        "by this check (atlas.shapes's own diagnostic page, and the "
+        "external diagnostic script it matches); never by bmstp or "
+        "fittp."),
     ("prior_atlas_hpx512", "N_CAT_CELL_PAHC"): ("objects",
         "For the matching pixel in HPX_PIX_512, the PAHC population's "
         "own expected cataloged count on the common (log10 xi, "
         "log10 F_4.5) grid: summing every cell gives this pixel's own "
-        "RATIO_PAHC times the region's source count."),
+        "RATIO_PAHC times the region's source count. The log10 F_4.5 "
+        "position is each member's own DIMMED 4.5 micron flux at the "
+        "pixel being counted (the same dimming its catalog probability "
+        "already applies), not its dereddened flux (C29, briefs/"
+        "round4_2026-10-20/C29_atlas_check_dimmed_axis.md). Read only "
+        "by this check (atlas.shapes's own diagnostic page, and the "
+        "external diagnostic script it matches); never by bmstp or "
+        "fittp."),
     ("prior_atlas_hpx512", "N_CAT_CELL_AGB"): ("objects",
         "For the matching pixel in HPX_PIX_512, the AGB population's own "
         "expected cataloged count on the common (log10 xi, log10 F_4.5) "
         "grid: summing every cell gives this pixel's own RATIO_AGB times "
-        "the region's source count."),
+        "the region's source count. The log10 F_4.5 position is each "
+        "member's own DIMMED 4.5 micron flux at the pixel being counted "
+        "(the same dimming its catalog probability already applies), "
+        "not its dereddened flux (C29, briefs/round4_2026-10-20/"
+        "C29_atlas_check_dimmed_axis.md). Read only by this check "
+        "(atlas.shapes's own diagnostic page, and the external "
+        "diagnostic script it matches); never by bmstp or fittp."),
     ("prior_atlas_hpx512", "N_CAT_CELL_YSO"): ("objects",
         "For the matching pixel in HPX_PIX_512, the YSO population's own "
         "expected cataloged count on the common (log10 xi, log10 F_4.5) "
         "grid: summing every cell gives this pixel's own RATIO_YSO times "
-        "the region's source count."),
+        "the region's source count. The log10 F_4.5 position is each "
+        "member's own DIMMED 4.5 micron flux at the pixel being counted "
+        "(the same dimming its catalog probability already applies), "
+        "not its dereddened flux (C29, briefs/round4_2026-10-20/"
+        "C29_atlas_check_dimmed_axis.md). Read only by this check "
+        "(atlas.shapes's own diagnostic page, and the external "
+        "diagnostic script it matches); never by bmstp or fittp."),
     ("prior_atlas_hpx512", "N_CAT_CELL_H2S"): ("objects",
         "For the matching pixel in HPX_PIX_512, the H2-shock "
         "population's own expected cataloged count on the common "
         "(log10 xi, log10 F_4.5) grid: summing every cell gives this "
-        "pixel's own RATIO_H2S times the region's source count."),
+        "pixel's own RATIO_H2S times the region's source count. The "
+        "log10 F_4.5 position is each member's own DIMMED 4.5 micron "
+        "flux at the pixel being counted (the same dimming its catalog "
+        "probability already applies), not its dereddened flux (C29, "
+        "briefs/round4_2026-10-20/C29_atlas_check_dimmed_axis.md). Read "
+        "only by this check (atlas.shapes's own diagnostic page, and "
+        "the external diagnostic script it matches); never by bmstp or "
+        "fittp."),
     ("prior_atlas_hpx512", "N_CAT_CELL_PAHN"): ("objects",
         "For the matching pixel in HPX_PIX_512, the PAHN population's "
         "own expected cataloged count on the common (log10 xi, "
         "log10 F_4.5) grid: summing every cell gives this pixel's own "
-        "RATIO_PAHN times the region's source count."),
+        "RATIO_PAHN times the region's source count. The log10 F_4.5 "
+        "position is each member's own DIMMED 4.5 micron flux at the "
+        "pixel being counted (the same dimming its catalog probability "
+        "already applies), not its dereddened flux (C29, briefs/"
+        "round4_2026-10-20/C29_atlas_check_dimmed_axis.md). Read only "
+        "by this check (atlas.shapes's own diagnostic page, and the "
+        "external diagnostic script it matches); never by bmstp or "
+        "fittp."),
     ("prior_atlas_hpx512", "N_CELL_STAR"): ("objects",
         "For the matching pixel in HPX_PIX_512, the STAR population's "
         "own unthinned intrinsic count on the common (log10 xi, "
         "log10 F_4.5) grid: the expected count with every member's own "
         "probability of being cataloged set to one (no flux cut, no "
-        "dimming), so N_CAT_CELL_STAR never exceeds this cell by cell."),
+        "dimming) -- the log10 F_4.5 position here is still each "
+        "member's own UNDIMMED (dereddened) flux, unchanged by C29 "
+        "(briefs/round4_2026-10-20/C29_atlas_check_dimmed_axis.md): "
+        "since the two arrays' log10 F_4.5 axes now differ, N_CAT_CELL_"
+        "STAR no longer stays beneath this cell by cell, only in total "
+        "(N_CAT_CELL_STAR.sum() <= this array's own sum)."),
     ("prior_atlas_hpx512", "N_CELL_AGB"): ("objects",
         "For the matching pixel in HPX_PIX_512, the AGB population's own "
         "unthinned intrinsic count on the common (log10 xi, log10 F_4.5) "
         "grid: the expected count with every member's own probability "
-        "of being cataloged set to one (no flux cut, no dimming), so "
-        "N_CAT_CELL_AGB never exceeds this cell by cell."),
+        "of being cataloged set to one (no flux cut, no dimming) -- the "
+        "log10 F_4.5 position here is still each member's own UNDIMMED "
+        "(dereddened) flux, unchanged by C29 (briefs/round4_2026-10-20/"
+        "C29_atlas_check_dimmed_axis.md): since the two arrays' log10 "
+        "F_4.5 axes now differ, N_CAT_CELL_AGB no longer stays beneath "
+        "this cell by cell, only in total (N_CAT_CELL_AGB.sum() <= "
+        "this array's own sum)."),
     ("prior_atlas_hpx512", "N_CELL_PAHC"): ("objects",
         "For the matching pixel in HPX_PIX_512, the PAHC population's "
         "own unthinned intrinsic count on the common (log10 xi, "
         "log10 F_4.5) grid: the expected count with every member's own "
         "probability of being cataloged set to one (no flux cut, no "
-        "dimming), so N_CAT_CELL_PAHC never exceeds this cell by cell."),
+        "dimming) -- the log10 F_4.5 position here is still each "
+        "member's own UNDIMMED (dereddened) flux, unchanged by C29 "
+        "(briefs/round4_2026-10-20/C29_atlas_check_dimmed_axis.md): "
+        "since the two arrays' log10 F_4.5 axes now differ, N_CAT_CELL_"
+        "PAHC no longer stays beneath this cell by cell, only in total "
+        "(N_CAT_CELL_PAHC.sum() <= this array's own sum)."),
     ("prior_atlas_hpx512", "N_CELL_GAL"): ("objects",
         "For the matching pixel in HPX_PIX_512, the background-galaxy "
         "population's own unthinned intrinsic count on the common "
         "(log10 xi, log10 F_4.5) grid: the expected count with every "
         "member's own probability of being cataloged set to one (no "
-        "flux cut, no dimming), so N_CAT_CELL_GAL never exceeds this "
-        "cell by cell."),
+        "flux cut, no dimming) -- the log10 F_4.5 position here is "
+        "still each member's own UNDIMMED (dereddened) flux, unchanged "
+        "by C29 (briefs/round4_2026-10-20/"
+        "C29_atlas_check_dimmed_axis.md): since the two arrays' log10 "
+        "F_4.5 axes now differ, N_CAT_CELL_GAL no longer stays beneath "
+        "this cell by cell, only in total (N_CAT_CELL_GAL.sum() <= "
+        "this array's own sum)."),
     ("prior_atlas_hpx512", "N_CELL_YSO"): ("objects",
         "For the matching pixel in HPX_PIX_512, the YSO population's own "
         "unthinned intrinsic count on the common (log10 xi, log10 F_4.5) "
         "grid: the expected count with every member's own probability "
-        "of being cataloged set to one (no flux cut, no dimming), so "
-        "N_CAT_CELL_YSO never exceeds this cell by cell."),
+        "of being cataloged set to one (no flux cut, no dimming) -- the "
+        "log10 F_4.5 position here is still each member's own UNDIMMED "
+        "(dereddened) flux, unchanged by C29 (briefs/round4_2026-10-20/"
+        "C29_atlas_check_dimmed_axis.md): since the two arrays' log10 "
+        "F_4.5 axes now differ, N_CAT_CELL_YSO no longer stays beneath "
+        "this cell by cell, only in total (N_CAT_CELL_YSO.sum() <= "
+        "this array's own sum)."),
     ("prior_atlas_hpx512", "N_CELL_H2S"): ("objects",
         "For the matching pixel in HPX_PIX_512, the H2-shock "
         "population's own unthinned intrinsic count on the common "
         "(log10 xi, log10 F_4.5) grid: the expected count with every "
         "member's own probability of being cataloged set to one (no "
-        "flux cut, no dimming), so N_CAT_CELL_H2S never exceeds this "
-        "cell by cell."),
+        "flux cut, no dimming) -- the log10 F_4.5 position here is "
+        "still each member's own UNDIMMED (dereddened) flux, unchanged "
+        "by C29 (briefs/round4_2026-10-20/"
+        "C29_atlas_check_dimmed_axis.md): since the two arrays' log10 "
+        "F_4.5 axes now differ, N_CAT_CELL_H2S no longer stays beneath "
+        "this cell by cell, only in total (N_CAT_CELL_H2S.sum() <= "
+        "this array's own sum)."),
     ("prior_atlas_hpx512", "N_CELL_PAHN"): ("objects",
         "For the matching pixel in HPX_PIX_512, the PAHN population's "
         "own unthinned intrinsic count on the common (log10 xi, "
         "log10 F_4.5) grid: the expected count with every member's own "
         "probability of being cataloged set to one (no flux cut, no "
-        "dimming), so N_CAT_CELL_PAHN never exceeds this cell by cell."),
+        "dimming) -- the log10 F_4.5 position here is still each "
+        "member's own UNDIMMED (dereddened) flux, unchanged by C29 "
+        "(briefs/round4_2026-10-20/C29_atlas_check_dimmed_axis.md): "
+        "since the two arrays' log10 F_4.5 axes now differ, N_CAT_CELL_"
+        "PAHN no longer stays beneath this cell by cell, only in total "
+        "(N_CAT_CELL_PAHN.sum() <= this array's own sum)."),
     ("prior_atlas_hpx512", "SHARE_STAR"): ("dimensionless",
         "For the matching pixel in HPX_PIX_512, the STAR population's "
         "own share of this pixel's total cataloged density: N_CAT_STAR "
@@ -864,15 +949,44 @@ REGISTRY = {
     ("population_star_tile", "STAR_INDEX"): ("row index",
         "For every star this tile draws, its own row in this region's "
         "field-star product's retained group."),
-    ("population_star_tile", "XI"): ("dimensionless",
+    ("population_star_tile", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "For every star this tile draws, the one anchor pixel of this "
+        "tile it is placed on, drawn with probability proportional to "
+        "the pixel's own solid angle (every nside-512 pixel shares one "
+        "solid angle, so this is a uniform draw over the tile's own "
+        "pixels). XI and W are both formed at this SAME pixel's own "
+        "extinction column and sightline, not at a tile average: the "
+        "weight fit and the weight assignment read one construction."),
+    ("population_star_tile", "XI"): ("dimensionless, 0 to 1",
         "For every star this tile draws, its placement fraction along "
-        "this tile's own mean extinction profile: u = A(d)/A(inf) at the "
-        "star's own distance. A consumer forms the star's own extinction "
-        "as a real source's adopted column times this fraction."),
+        "its own drawn pixel's (HPX_PIX_512) extinction profile: "
+        "u = A(d)/(its own drawn pixel's column) at the star's own "
+        "distance, on that pixel's own parent sightline, clipped at 1 "
+        "(the far wall of the pencil beam) -- a DEPTH coordinate, read "
+        "by bmstp as the star's own placement mark, never the "
+        "extinction itself. A star beyond the Edenhofer map's own edge "
+        "(C26 owner ruling 2026-10-21, briefs/round4_2026-10-20/"
+        "C26_profile_adopted.md) can genuinely see more extinction than "
+        "this pixel's own column implies -- that extra reddening is in "
+        "A_STAR_K, this star's own stored extinction, not in XI, which "
+        "this product always keeps at or below 1."),
+    ("population_star_tile", "A_STAR_K"): ("mag A_K",
+        "For every star this tile draws, its own local K-band extinction "
+        "at its own distance, on its own drawn pixel's (HPX_PIX_512) "
+        "extinction profile: the number this star's own predicted "
+        "magnitudes, weight and PAHC contamination probability are all "
+        "formed from (C26 owner ruling 2026-10-21). A reader never "
+        "reconstructs this by multiplying a column from elsewhere by "
+        "XI: beyond the Edenhofer map's own edge this star's own far-"
+        "field reddening can exceed what any single pixel's own column "
+        "times XI would give."),
     ("population_star_tile", "W"): ("dimensionless",
         "For every star this tile draws, its total anchor reweighting "
         "factor: the STAR anchor's own Gaia/2MASS joint or marginal "
-        "weight at the star's own placement and predicted magnitude. "
+        "weight at the star's own placement and predicted magnitude, "
+        "both formed at its own drawn pixel's (HPX_PIX_512) extinction "
+        "column and sightline -- the same construction the anchor "
+        "weights were fitted on, not a tile-mean approximation. "
         "W_STAR plus W_AGB equals this value exactly, row by row."),
     ("population_star_tile", "W_STAR"): ("dimensionless",
         "The non-evolved share of W for every star this tile draws: W "
@@ -909,6 +1023,58 @@ REGISTRY = {
         "contaminated by PAH nebular emission at that assumed 8 micron "
         "completeness limit, from the PAH-contamination probability "
         "curve P(q) read at this star's own tile-dimmed 8 micron flux."),
+    ("population_star_tile", "RULE_COUNT"): ("star count",
+        "C21 item 2: this tile's own star count under each of the six "
+        "WEIGHT_RULE codes (module docstring: 0 joint, 1 G marginal "
+        "only, 2 Ks marginal only, 3 faint end, 4 bright end, 5 both "
+        "marginals, placement-selected) -- the same code every one of "
+        "this tile's stars was assigned by star_weights, counted rather "
+        "than stored star by star."),
+    ("population_star_tile", "RULE_WEIGHT"): ("dimensionless",
+        "C21 item 2: this tile's own sum of W under each of the six "
+        "WEIGHT_RULE codes -- RULE_WEIGHT.sum() equals W.sum() for this "
+        "tile exactly."),
+    ("population_star_tile", "RULE_COUNT_FRAC"): ("dimensionless",
+        "C21 item 2: this region's own star-count share under each of "
+        "the six WEIGHT_RULE codes -- the sum, over every tile_<id> "
+        "group's own RULE_COUNT, normalised to 1 -- so the share of the "
+        "population the placement rule (code 5) decides is a plain "
+        "number in this product, not something a reader has to sum "
+        "RULE_COUNT themselves to see."),
+    ("population_star_tile", "RULE_WEIGHT_FRAC"): ("dimensionless",
+        "C21 item 2: this region's own WEIGHT share under each of the "
+        "six WEIGHT_RULE codes -- the sum, over every tile_<id> group's "
+        "own RULE_WEIGHT, normalised to 1."),
+    ("population_star_tile", "POP"): ("category (0/1)",
+        "C30 (briefs/round4_2026-10-20/C30_population_anchor.md) item 5: "
+        "this star's own Galactic field-star population, population."
+        "selection.is_giant's own HR-diagram cut on its TRILEGAL LOG_G -- "
+        "0 dwarf, 1 giant. Independent of IS_EVOLVED (an AGB star can be "
+        "a giant or not; a giant need not be evolved)."),
+    ("population_star_tile", "RULE_COUNT_POP"): ("star count",
+        "C30 item 5: this tile's own RULE_COUNT, split by POP -- shape "
+        "(2, 6), row 0 dwarf stars, row 1 giant stars; RULE_COUNT_POP."
+        "sum(axis=0) equals RULE_COUNT exactly."),
+    ("population_star_tile", "RULE_WEIGHT_POP"): ("dimensionless",
+        "C30 item 5: this tile's own RULE_WEIGHT, split by POP -- shape "
+        "(2, 6); RULE_WEIGHT_POP.sum(axis=0) equals RULE_WEIGHT exactly."),
+    ("population_star_tile", "RULE_COUNT_FRAC_POP"): ("dimensionless",
+        "C30 item 5: this region's own RULE_COUNT_POP, summed over every "
+        "tile_<id> group and normalised WITHIN each population row (each "
+        "row sums to 1 over that population's own stars, not over the "
+        "region total) -- so a giant's own rule-code share and a dwarf's "
+        "are each read on their own population's own 100%."),
+    ("population_star_tile", "RULE_WEIGHT_FRAC_POP"): ("dimensionless",
+        "C30 item 5: the same construction as RULE_COUNT_FRAC_POP, on "
+        "RULE_WEIGHT_POP (each row normalised within its own population's "
+        "own total weight) instead of the star count."),
+    # C21's own KS_EDGES_2MASS/N_KS_OBS_2MASS/FINAL_POP_KS_HIST build-time
+    # check (commit 701fe92) is removed (C23 brief item 4, owner ruling):
+    # it dimmed every star at its tile's own MEAN column and summed W
+    # without solid-angle weighting, so it read 1.0 where the atlas-
+    # grounded check (bmstp.atlas, real per-pixel columns, solid-angle
+    # weighted) read 0.63 -- a check that cannot see the defect it was
+    # meant to catch is worse than none.
 
     # population.field_stars -- field-stars_trilegal_region: the synthetic
     # TRILEGAL field-star population, retained sample and pre-retention
@@ -1045,21 +1211,37 @@ REGISTRY = {
         "KS_EDGES, the anchor reweighting factor on the joint (G, Ks) "
         "grid: the sky's own observed star count over the model's "
         "predicted count in that joint cell, shrunk toward the region-"
-        "pooled value in the log. Read only where USE_JOINT is True for "
-        "that tile and bin; a star without a usable joint cell takes "
-        "the marginal weight instead."),
+        "pooled value in the log, or, where no tile of this region "
+        "cleared the fitting floor on its own but this region's tiles "
+        "pooled did (JOINT_SOURCE 2), the one region-pooled value every "
+        "tile shares there. Read only where USE_JOINT is True for that "
+        "tile and bin; a star without a usable joint cell takes the "
+        "marginal weight instead."),
     ("weights_anchors_tile", "USE_JOINT"): ("boolean",
         "For each tile, each Gaia G bin of G_EDGES and each Ks bin of "
-        "KS_EDGES, True where this region's pooled count in that joint "
-        "cell reached the fitting floor and W_JOINT is therefore an "
-        "actual fit rather than an unfitted placeholder, and the "
-        "matching joint observed count for this tile is positive."),
+        "KS_EDGES, True where this joint cell carries evidence at "
+        "either level (JOINT_SOURCE 1 or 2) and W_JOINT is therefore an "
+        "actual fit rather than an unfitted placeholder -- at level 1 "
+        "(a tile of this region cleared the floor on its own) also "
+        "requiring this tile's own observed joint count to be positive; "
+        "at level 2 (no tile did, but this region's tiles pooled did) "
+        "every tile of the region reads it, since a tile's own zero "
+        "crossmatch stars there is not evidence against a value the "
+        "region's own tiles, summed, did measure (C21 item 1)."),
     ("weights_anchors_tile", "W_REGION_JOINT"): ("dimensionless",
         "One value per joint (G, Ks) cell (shared by every tile): the "
         "region-pooled joint reweighting factor, or, where no tile in "
         "this region has usable evidence in that cell, the survey-"
         "pooled value, or NaN where neither this region nor the survey "
         "has any."),
+    ("weights_anchors_tile", "JOINT_SOURCE"): ("category (0/1/2)",
+        "One value per joint (G, Ks) cell (shared by every tile; C21 "
+        "item 1): 0 no joint evidence at any level (a star landing here "
+        "falls to the marginal/placement rule, population.star_"
+        "population.star_weights' WEIGHT_RULE 5); 1 at least one tile "
+        "of this region cleared MIN_COUNTS on its own; 2 no single tile "
+        "did, but this region's own tiles, summed (region_pooled_"
+        "ratio), did."),
     ("weights_anchors_tile", "EXCLUDED"): ("boolean",
         "One value per tile: True where this tile's own pooled observed-"
         "over-predicted ratio departs from the region's median by more "
@@ -1078,6 +1260,34 @@ REGISTRY = {
     ("weights_anchors_tile", "KS_SCALE"): ("mag",
         "The fixed roll-off width of the 2MASS completeness sigmoid P_KS "
         "is evaluated with, the same value for every tile in this file."),
+    ("weights_anchors_tile", "W_GIANT"): ("dimensionless",
+        "C30 (briefs/round4_2026-10-20/C30_population_anchor.md): one value "
+        "for this whole region -- TRILEGAL's model error against the "
+        "independent anchors is per POPULATION, not per Ks magnitude alone "
+        "(distant red giants over-produced, dwarfs close to right), so the "
+        "2MASS colour cells at Ks 12.0-14.3 are fit jointly for a giant "
+        "weight (LOG_G < 3.5, population.selection.is_giant) and this "
+        "file's own per-tile, per-bin W_KS/W_REGION_KS there read as the "
+        "dwarf weight. NaN where SPLIT is False: the region's own giant "
+        "model count never cleared N_GIANT_MIN, and a giant star reads its "
+        "bin's W_KS/W_REGION_KS exactly like a dwarf (population."
+        "star_population)."),
+    ("weights_anchors_tile", "W_GIANT_ERR"): ("dimensionless",
+        "The joint weighted-least-squares fit's own formal error on "
+        "W_GIANT (sigma^2 = max(observed colour-cell count, 1), no "
+        "completeness factor). NaN where SPLIT is False."),
+    ("weights_anchors_tile", "N_GIANT_MODEL"): ("stars",
+        "The region's own model giant count summed over the 2MASS colour "
+        "cells (Ks 12.0-14.3, every J-Ks bin), non-excluded tiles only -- "
+        "the number SPLIT's own N_GIANT_MIN floor is measured against, "
+        "printed in this module's own report regardless of whether the "
+        "floor was cleared."),
+    ("weights_anchors_tile", "SPLIT"): ("boolean",
+        "True where this region's own N_GIANT_MODEL cleared N_GIANT_MIN "
+        "and W_GIANT/W_GIANT_ERR are a real fit; False where there is no "
+        "split at all (W_GIANT/W_GIANT_ERR are NaN and every star, giant "
+        "or dwarf, reads this file's own per-bin W_KS/W_REGION_KS exactly "
+        "as the pre-C30 construction did)."),
 
     # population.anchor_tiles -- tiles_anchors_hpx512 and
     # histograms_anchors_hpx512: the STAR anchor tiling and the two
@@ -1114,10 +1324,10 @@ REGISTRY = {
     ("histograms_anchors_hpx512", "G_EDGES"): ("mag Gaia G",
         "The edges of the Gaia G magnitude bins N_G_OBS, N_G_PRED and "
         "N_GK_PRED are tabulated on."),
-    ("histograms_anchors_hpx512", "KS_EDGES"): ("mag 2MASS/UKIDSS Ks",
+    ("histograms_anchors_hpx512", "KS_EDGES"): ("mag 2MASS/UKIDSS/VHS Ks",
         "The edges of the Ks magnitude bins N_KS_OBS, N_KS_PRED and "
-        "N_GK_PRED are tabulated on, on the shared 2MASS/UKIDSS scale "
-        "KS_SOURCE names per bin."),
+        "N_GK_PRED are tabulated on, on the shared 2MASS/UKIDSS/VHS "
+        "scale KS_SOURCE names per bin."),
     ("histograms_anchors_hpx512", "N_G_OBS"): ("stars",
         "For the matching pixel in HPX_PIX_512 and each Gaia G bin of "
         "G_EDGES, the observed Gaia anchor star count, from the external "
@@ -1130,8 +1340,10 @@ REGISTRY = {
         "pointing's own solid angle."),
     ("histograms_anchors_hpx512", "N_KS_OBS"): ("stars",
         "For the matching pixel in HPX_PIX_512 and each Ks bin of "
-        "KS_EDGES, the observed 2MASS/UKIDSS anchor star count, from the "
-        "external anchor-count products KS_SOURCE names per bin."),
+        "KS_EDGES, the observed 2MASS/UKIDSS/VHS anchor star count, from "
+        "the external anchor-count products KS_SOURCE names per bin "
+        "(UKIDSS and VHS counts already multiplied by their own "
+        "CALIBRATION[0] against 2MASS, C19)."),
     ("histograms_anchors_hpx512", "N_KS_PRED"): ("stars",
         "For the matching pixel in HPX_PIX_512 and each Ks bin of "
         "KS_EDGES, the model's predicted anchor star count: the nearest "
@@ -1146,15 +1358,72 @@ REGISTRY = {
         "binned jointly in (G, Ks) rather than in each magnitude "
         "marginally."),
     ("histograms_anchors_hpx512", "DEEP_COVERED"): ("boolean",
-        "For the matching pixel in HPX_PIX_512, True where the region's "
-        "deeper UKIDSS GPS survey reaches that pixel, so KS_EDGES runs "
-        "past the 2MASS-only cut and KS_SOURCE marks the UKIDSS-only "
-        "bins for it."),
+        "For the matching pixel in HPX_PIX_512, True where EITHER deeper "
+        "survey -- UKIDSS GPS or VHS (C19 Part B) -- reaches that pixel, "
+        "so KS_EDGES runs past the 2MASS-only cut and KS_SOURCE marks "
+        "the deep bins for it."),
     ("histograms_anchors_hpx512", "KS_SOURCE"): ("code",
         "For each Ks bin of KS_EDGES (one value per bin, shared by every "
-        "pixel), which survey that bin's counts come from: 0 2MASS, 1 "
-        "UKIDSS. Every bin past the 2MASS cut is 1; a region with no "
-        "UKIDSS coverage at all has every bin 0."),
+        "pixel), which survey that bin's counts actually came from: 0 "
+        "2MASS, 1 UKIDSS, 2 VHS (C19 Part B) -- UKIDSS is taken on a "
+        "pixel it covers, VHS only where UKIDSS does not; the code names "
+        "whichever side contributed the larger measured count to that "
+        "bin. A region with no deep coverage at all has every bin 0."),
+    ("histograms_anchors_hpx512", "RED_TAIL_SHARE_OBS"): ("dimensionless",
+        "C25 item 5 (briefs/round4_2026-10-20/C25_far_column.md), a check, "
+        "not a model input: the region-wide share of SESNA sources in "
+        "this product's own anchor pixels with a measured 2MASS Ks in "
+        "12-14 and a measured 2MASS J whose J-Ks exceeds 1.5 -- the "
+        "missing 'red tail' of distant, deeply reddened background stars "
+        "C24 located (briefs/round4_2026-10-20/C24_locate_red_tail.md). "
+        "Written once population.star_population has built this region "
+        "(a later stage than this product's own build)."),
+    ("histograms_anchors_hpx512", "RED_TAIL_SHARE_MODEL"): ("dimensionless",
+        "C25 item 5, the same check's model side: the built population's "
+        "own area-weighted share of Ks 12-14 stars with J-Ks > 1.5, each "
+        "star re-dimmed at its own drawn anchor pixel with sky.derived."
+        "profile.a_of_d, uncapped at that pixel's own column -- the "
+        "Marshall-informed far-field column (C25) on a covered sightline, "
+        "unchanged on one Marshall does not reach. Compare to "
+        "RED_TAIL_SHARE_OBS; an uncovered region's own construction is "
+        "exactly as it was before C25."),
+    ("histograms_anchors_hpx512", "CELL_KS_EDGES"): ("mag 2MASS Ks",
+        "C30 (briefs/round4_2026-10-20/C30_population_anchor.md): the "
+        "five half-mag Ks bins N_GIANT_CELL/N_DWARF_CELL are tabulated "
+        "on, 12.0 to 14.3 -- the SAME grid sky.derived.twomass_counts' "
+        "own CELL_KS_EDGES carries, read from there so the two never "
+        "drift apart."),
+    ("histograms_anchors_hpx512", "CELL_JK_EDGES"): ("mag J-Ks (2MASS)",
+        "C30: the three interior J-Ks colour edges N_GIANT_CELL/"
+        "N_DWARF_CELL's own last axis is tabulated on -- the SAME values "
+        "sky.derived.twomass_counts' own CELL_JK_EDGES carries."),
+    ("histograms_anchors_hpx512", "N_GIANT_CELL"): ("stars",
+        "C30 item 2: for the matching pixel in HPX_PIX_512, each Ks bin "
+        "of CELL_KS_EDGES and each J-Ks colour bin of CELL_JK_EDGES, the "
+        "model's predicted GIANT (LOG_G < 3.5, population.selection."
+        "is_giant) star count in that cell -- the retained field-star "
+        "table's own population at this pixel's own column (NOT the RAW "
+        "group N_KS_PRED reads: that group carries no LOG_G or flux, "
+        "module docstring above '_acceptance_check_one_pixel'), nearest-"
+        "pointing placed and weighted exactly as N_KS_PRED, but over a "
+        "detection-filtered (retained) sample -- its own sum over both "
+        "populations and all four colour bins is NOT bit-comparable to "
+        "N_KS_PRED at the same Ks bin. Read by population.anchor_weights "
+        "to fit a separate W_GIANT."),
+    ("histograms_anchors_hpx512", "N_DWARF_CELL"): ("stars",
+        "C30 item 2: the same cell and construction as N_GIANT_CELL, the "
+        "model's predicted DWARF (LOG_G >= 3.5) star count instead."),
+    ("histograms_anchors_hpx512", "N_GIANT_KS"): ("stars",
+        "C30 item 3: one value per Ks bin of KS_EDGES (region-summed, "
+        "not per pixel): the model's predicted GIANT star count on the "
+        "SAME full Ks grid N_KS_PRED is tabulated on (not just the "
+        "colour-cell range), from the SAME retained-table population as "
+        "N_GIANT_CELL -- read only to disclose the deep bins' (Ks >= "
+        "KS_SHARED_END_MAG) giant share, the assumption the deep bins "
+        "stay dwarf-only by the model's own content rests on."),
+    ("histograms_anchors_hpx512", "N_DWARF_KS"): ("stars",
+        "C30 item 3: the same construction as N_GIANT_KS, the DWARF "
+        "star count instead."),
 
     # population.gal -- counts_gal_survey: the background-galaxy number-
     # counts law, survey-wide.
@@ -2187,6 +2456,122 @@ REGISTRY = {
         "The tail e-folding distance (TAIL_EFOLD_PC) evaluated at this "
         "region's source-weighted mean sky direction."),
 
+    # sky.derived.profile -- profile_adopted_sightline (C26, owner ruling
+    # 2026-10-21, briefs/round4_2026-10-20/C26_profile_adopted.md): the ONE
+    # canonical cumulative K-band extinction curve per admitted sightline,
+    # on the 2MASS stellar scale, every consumer now reads. Edenhofer et al.
+    # 2023's own shape inside their 3-D map's edge, rescaled to this
+    # sightline's own adopted extinction column; beyond the map's edge,
+    # Combined19's (Bovy et al. 2016, mwdust) own measured INCREMENT --
+    # Marshall et al. 2006 (2MASS red giants) where its own survey box
+    # covers the sightline, Bayestar19 (Green et al. 2019) elsewhere it
+    # reaches, Drimmel et al. 2003 only where neither exists. Replaces the
+    # retired extinction_marshall_sightline product and the per-read
+    # residual/tail-shape/scale algebra it fed (C25 and earlier): a reader
+    # rescales the in-cube part by its own column over this file's
+    # A_EDGE_K and adds the far part unscaled (sky.derived.profile.
+    # _RegionProfile.a_of_d). C26b (owner ruling 2026-10-21b): the far
+    # curve is the MEAN over a sightline's 16 nside-1024 child-pixel
+    # centres, never a point lookup at the sightline's own centre (an
+    # exact HEALPix hierarchy vertex, a genuine implementation-dependent
+    # degeneracy C26's own identity 1 found); the in-cube amplitude is
+    # partitioned against the far map's own measurement of the far part,
+    # never capped at 1 (the retired module's down-branch is gone:
+    # Edenhofer's own column always stands at least).
+    ("profile_adopted_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
+        "This region's own admitted nside-256 pixel numbers (nested "
+        "ordering). Row i here is row i of every other per-sightline "
+        "dataset in this file. Each one is a WHOLE pixel, not a point: "
+        "several datasets below (DIST_PC's far part, A_CUM_K's far "
+        "part, FAR_MAP, FAR_RELIABLE_PC) are the MEAN or majority over "
+        "the pixel's own 16 nside-1024 sub-pixels, not a single lookup "
+        "at the pixel's own centre."),
+    ("profile_adopted_sightline", "GAL_L_DEG"): ("deg",
+        "Galactic longitude of the matching pixel's center in HPX_PIX_256."),
+    ("profile_adopted_sightline", "GAL_B_DEG"): ("deg",
+        "Galactic latitude of the matching pixel's center in HPX_PIX_256."),
+    ("profile_adopted_sightline", "DIST_PC"): ("pc",
+        "The distance grid along the line of sight, starting at 0 pc, "
+        "that A_CUM_K is tabulated on for every sightline in this file: "
+        "the Edenhofer 3-D map's own in-cube points out to its edge "
+        "(D_EDGE_PC), then a log-spaced grid out to Combined19's own "
+        "~10,000 pc reach."),
+    ("profile_adopted_sightline", "A_CUM_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256 and each distance in "
+        "DIST_PC, this sightline's own cumulative K-band extinction from "
+        "the observer out to that distance. Inside the Edenhofer map's "
+        "own edge (distance <= D_EDGE_PC): the map's own measured shape, "
+        "scaled so its value AT the edge equals A_EDGE_K -- A_EDGE_K is "
+        "never below the map's own raw (unscaled) column there, only at "
+        "or above it (see A_EDGE_K's own reading for the rule that sets "
+        "it). Beyond the edge: A_EDGE_K plus Combined19's own measured "
+        "INCREMENT past the edge along this same sightline's 16 child "
+        "pixels' own mean curve -- never Combined19's own absolute "
+        "value, and never capped at any column: a reader's own total "
+        "column, divided into this number, can exceed 1 out here (the "
+        "far reddening really is more than a near pixel's own cloud "
+        "column implies)."),
+    ("profile_adopted_sightline", "A_EDGE_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256, A_CUM_K's own value at "
+        "D_EDGE_PC: the LARGER of (a) the Edenhofer map's own raw "
+        "(unscaled) column at its edge and (b) this sightline's own "
+        "adopted extinction column (the catalogue's own extinction_"
+        "adopted_sightline product) minus the far map's own measured "
+        "reach beyond the edge (IN_CUBE_EXCESS_K's own construction) -- "
+        "the owner's precedence rule (the emission column over the "
+        "cube's own integral), with the far map's own measurement "
+        "deciding how much of any excess the cube must carry versus the "
+        "far field already accounts for. A reader rescales the in-cube "
+        "part of A_CUM_K by its own total column divided by this "
+        "number, capped at 1 (so u <= 1 inside the cube for that "
+        "reader's own column)."),
+    ("profile_adopted_sightline", "D_EDGE_PC"): ("pc",
+        "The Edenhofer 3-D map's own edge distance, ONE number shared by "
+        "every sightline of every region (the map's own fixed radial "
+        "grid): the distance A_CUM_K's in-cube, Edenhofer-measured part "
+        "ends and Combined19's own far increment begins."),
+    ("profile_adopted_sightline", "IN_CUBE_EXCESS_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256, A_EDGE_K minus the "
+        "Edenhofer map's own raw (unscaled) column at the cube's edge: "
+        "how much of this sightline's own adopted extinction column was "
+        "placed INSIDE the cube because the far map's own measurement "
+        "beyond the edge did not account for it all (owner ruling "
+        "2026-10-21b) -- zero where the far map alone already covers "
+        "the sightline's own excess (typically the Galactic plane, "
+        "where Marshall or Bayestar measures the far column directly), "
+        "positive at high Galactic latitude where the far map goes "
+        "flat well short of the sightline's own total column."),
+    ("profile_adopted_sightline", "FAR_MAP"): ("code",
+        "For the matching pixel in HPX_PIX_256, which of Combined19's "
+        "own three constituent surveys supplies the far column beyond "
+        "D_EDGE_PC along this sightline: the code the MAJORITY of its "
+        "16 nside-1024 child pixels share (see FAR_MAP_MIXED where they "
+        "do not all agree), by Combined19's own published build rule "
+        "(computed from each child's own sky position and the "
+        "Bayestar19 survey's own footprint, never guessed): 1 Marshall "
+        "et al. 2006 (2MASS red giants, within 100 degrees of the "
+        "Galactic centre in longitude and 10 degrees of the plane in "
+        "latitude), 2 Bayestar19 (Green et al. 2019, wherever it has a "
+        "measured pixel outside that box), 3 Drimmel et al. 2003 (an "
+        "all-sky smooth dust-disc model, wherever neither of the above "
+        "reaches)."),
+    ("profile_adopted_sightline", "FAR_MAP_MIXED"): ("boolean",
+        "For the matching pixel in HPX_PIX_256, True where this "
+        "sightline's own 16 nside-1024 child pixels do not all share "
+        "the same FAR_MAP code -- the sightline straddles a boundary of "
+        "Combined19's own build rule (almost always Marshall's own box "
+        "edge). FAR_MAP itself is still the majority code among the 16; "
+        "this flag says that majority was not unanimous."),
+    ("profile_adopted_sightline", "FAR_RELIABLE_PC"): ("pc",
+        "For the matching pixel in HPX_PIX_256, the MEDIAN, over "
+        "whichever of its 16 child pixels FAR_MAP's own majority code "
+        "classifies Bayestar, of Bayestar19's own per-pixel "
+        "reliable-distance limit (their own quoted maximum distance "
+        "modulus with a converged fit, converted to a distance); NaN "
+        "where FAR_MAP's majority is not Bayestar, or where none of the "
+        "Bayestar-classified children carries such a limit in their "
+        "published file."),
+
     ("depth_edenhofer_region", "REGION"): ("region name",
         "The name of the region this row describes, in the fixed thirty-"
         "region order every region-axis product in this package shares."),
@@ -2792,18 +3177,134 @@ REGISTRY = {
         "For the matching pixel in HPX_PIX_512 and each magnitude bin in "
         "MAG_EDGES, how many 2MASS Point Source Catalog detections fall in "
         "that pixel and bin."),
+    ("counts_twomass_hpx512", "CELL_KS_EDGES"): ("mag 2MASS Ks",
+        "The edges of the five half-magnitude Ks bins N_CELL/CELL_COMPLETE "
+        "are tabulated on, 12.0 to 14.3 -- the STAR anchor's own 2MASS-only "
+        "range (C30, briefs/round4_2026-10-20/C30_population_anchor.md): "
+        "bin k runs from CELL_KS_EDGES[k] to CELL_KS_EDGES[k+1]."),
+    ("counts_twomass_hpx512", "CELL_JK_EDGES"): ("mag J-Ks (2MASS)",
+        "The three interior J-Ks colour edges N_CELL/CELL_COMPLETE's own "
+        "last axis is tabulated on (C30): bin 0 is J-Ks < CELL_JK_EDGES[0] "
+        "(0.6), bins 1 and 2 the two intervals between, and bin 3 (the "
+        "reddest) is J-Ks > CELL_JK_EDGES[-1] (1.5) -- a 2MASS row with no "
+        "usable J (ph_qual's J character 'U' or 'X', or no J measurement "
+        "at all) is counted in this reddest bin, never assumed blue."),
+    ("counts_twomass_hpx512", "N_CELL"): ("stars",
+        "For the matching pixel in HPX_PIX_512, each Ks bin of "
+        "CELL_KS_EDGES and each J-Ks colour bin of CELL_JK_EDGES, how many "
+        "2MASS Point Source Catalog detections in Ks 12.0-14.3 fall in "
+        "that pixel, Ks bin and colour bin (C30) -- the SAME rows N counts "
+        "in its own four Ks bins over this range, split further by J-Ks; "
+        "read by population.anchor_tiles/anchor_weights to fit a separate "
+        "weight for the model's giant and dwarf populations, since "
+        "TRILEGAL's own error in the Galactic plane is per population, "
+        "not per Ks magnitude alone."),
+    ("counts_twomass_hpx512", "CELL_COMPLETE"): ("boolean",
+        "For the matching pixel in HPX_PIX_512, each Ks bin of "
+        "CELL_KS_EDGES and each J-Ks colour bin of CELL_JK_EDGES, True "
+        "where this pixel's own 2MASS J 50%-completeness magnitude "
+        "(catalog.depths' per-pixel product) clears the cell's own "
+        "faintest possible J -- the Ks bin's own faint edge plus the "
+        "colour bin's own faint edge, the reddest bin standing in its own "
+        "last finite edge, 1.5 -- by 0.3 mag (C24e's own margin, "
+        "c18_diag/c24e_colour_cells.py) -- read by nothing downstream "
+        "(every cell in the five C30 regions measured 2026-10-21 was "
+        "already complete), kept because it is a measured fact about the "
+        "pixel, not an assumption the fit silently makes."),
 
     ("counts_ukidss_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
         "The region's own occupied nside-512 pixel numbers (nested ordering), "
         "ascending. Row i here is row i of N."),
     ("counts_ukidss_hpx512", "MAG_EDGES"): ("mag UKIRT K",
         "The edges of the half-magnitude UKIDSS GPS K bins (UKIRT "
-        "photometric system) this file counts stars in, 9.0 to 17.0: bin j "
-        "runs from MAG_EDGES[j] to MAG_EDGES[j+1]."),
+        "photometric system) this file counts stars in, 9.0 to 18.5 (C28, "
+        "2026-10-21: raised from 17.0, a half-bin of headroom past the "
+        "18.0 anchor ceiling): bin j runs from MAG_EDGES[j] to "
+        "MAG_EDGES[j+1]."),
     ("counts_ukidss_hpx512", "N"): ("stars",
         "For the matching pixel in HPX_PIX_512 and each magnitude bin in "
-        "MAG_EDGES, how many clean-photometry UKIDSS GPS detections fall in "
-        "that pixel and bin."),
+        "MAG_EDGES, how many point-like (mergedClass -1 or -2) UKIDSS GPS "
+        "detections fall in that pixel and bin, with no cut on the "
+        "archive's own error-bits column (C19, 2026-10-21: the download's "
+        "own former error-bit and narrow-class cut undercounted real stars "
+        "by a measured 21-23% at Ks 12-14)."),
+    ("counts_ukidss_hpx512", "CALIBRATION"): ("dimensionless",
+        "Three numbers, this region's own overlap-window ratio and its "
+        "combined-Poisson interval: [0] the ratio of 2MASS's own point "
+        "count to this file's own N, summed over the Ks bins from "
+        "OVERLAP_LOWER_MAG (13.0) to the 2MASS anchor's own faint edge "
+        "(14.3) and over the pixels this file's N shows any UKIDSS "
+        "coverage in at all; [1] and [2] that ratio's lower and upper "
+        "bound under combined Poisson shot noise on both counts. All "
+        "three NaN where this region's download carries no UKIDSS rows at "
+        "all. population.anchor_tiles multiplies this file's own deep (Ks "
+        "past 14.0) counts by CALIBRATION[0] before anything else reads "
+        "them -- 2MASS is the reference survey, UKIDSS the extension, and "
+        "no SESNA count enters this ratio on either side."),
+    ("counts_ukidss_hpx512", "KS_COMPLETE_TO"): ("mag UKIRT K",
+        "C28, 2026-10-21: this region's own MEASURED completeness turnover "
+        "-- the faint edge of the half-magnitude bin whose own "
+        "deep-covered-pixel differential count SLOPE first falls below "
+        "the brighter bins' own fitted slope trend by more than one "
+        "Poisson sigma (sky.derived.ukidss_counts.differential_turnover_"
+        "mag), already rounded down to the half-magnitude grid. Where a "
+        "LATER bin's own count exceeds the flagged bin's (the flag did "
+        "not hold -- the brief's own ambiguous case), this is instead "
+        "PUBLISHED_DEPTH_MAG (18.0, Lucas et al. 2008, MNRAS 391, 136), "
+        "never a silently patched measurement. This file's own faint "
+        "edge (18.5) if no bin's slope ever falls below the trend within "
+        "the measured range, never beyond it. NaN where this region "
+        "carries no UKIDSS coverage at all. population.anchor_tiles "
+        "takes the region's own deep anchor edge as min(18.0, this "
+        "number), never past the survey's own measured depth or its "
+        "published ceiling."),
+
+    # sky.derived.vhs_counts -- counts_vhs_hpx512: C19 Part B's VISTA
+    # Hemisphere Survey sibling of counts_ukidss_hpx512, read where
+    # UKIDSS does not cover a pixel.
+    ("counts_vhs_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "The region's own occupied nside-512 pixel numbers (nested ordering), "
+        "ascending. Row i here is row i of N."),
+    ("counts_vhs_hpx512", "MAG_EDGES"): ("mag VISTA Ks",
+        "The edges of the half-magnitude VHS Ks bins (VISTA photometric "
+        "system) this file counts stars in, 9.0 to 18.5 (C28, 2026-10-21: "
+        "raised from 17.0, a half-bin of headroom past the 18.0 anchor "
+        "ceiling): bin j runs from MAG_EDGES[j] to MAG_EDGES[j+1]."),
+    ("counts_vhs_hpx512", "N"): ("stars",
+        "For the matching pixel in HPX_PIX_512 and each magnitude bin in "
+        "MAG_EDGES, how many point-like (mergedClass -1 or -2) VHS "
+        "detections fall in that pixel and bin, with no cut on the "
+        "archive's own error-bits column."),
+    ("counts_vhs_hpx512", "CALIBRATION"): ("dimensionless",
+        "Three numbers, this region's own overlap-window ratio and its "
+        "combined-Poisson interval: [0] the ratio of 2MASS's own point "
+        "count to this file's own N, summed over the Ks bins from "
+        "OVERLAP_LOWER_MAG (13.0) to the 2MASS anchor's own faint edge "
+        "(14.3) and over the pixels this file's N shows any VHS coverage "
+        "in at all; [1] and [2] that ratio's lower and upper bound under "
+        "combined Poisson shot noise on both counts. All three NaN where "
+        "this region's download carries no VHS rows at all. population."
+        "anchor_tiles multiplies this file's own deep (Ks past 14.0) "
+        "counts by CALIBRATION[0] before anything else reads them -- "
+        "2MASS is the reference survey, VHS the extension, and no SESNA "
+        "count enters this ratio on either side."),
+    ("counts_vhs_hpx512", "KS_COMPLETE_TO"): ("mag VISTA Ks",
+        "C28, 2026-10-21: this region's own MEASURED completeness turnover "
+        "-- the faint edge of the half-magnitude bin whose own "
+        "deep-covered-pixel differential count SLOPE first falls below "
+        "the brighter bins' own fitted slope trend by more than one "
+        "Poisson sigma (sky.derived.vhs_counts.differential_turnover_mag, "
+        "the same construction sky.derived.ukidss_counts uses), already "
+        "rounded down to the half-magnitude grid. Where a LATER bin's own "
+        "count exceeds the flagged bin's (the flag did not hold -- the "
+        "brief's own ambiguous case), this is instead PUBLISHED_DEPTH_MAG "
+        "(18.0, McMahon et al. 2013, The Messenger 154, 35), never a "
+        "silently patched measurement. This file's own faint edge (18.5) "
+        "if no bin's slope ever falls below the trend within the "
+        "measured range, never beyond it. NaN where this region carries "
+        "no VHS coverage at all. population.anchor_tiles takes the "
+        "region's own deep anchor edge as min(18.0, this number), never "
+        "past the survey's own measured depth or its published ceiling."),
 
     ("colours_knots_survey", "LOG10_RATIO"): ("dex",
         "log10(F_IRAC_band / F_2.12um) for every Giannini et al. (2013) knot "
@@ -3080,10 +3581,15 @@ _SWEEP_FIT_READINGS = {
         "there, linear between the measurement's magnitude steps and continued "
         "along that band's typical falloff shape where the measurement itself "
         "stops, never letting a band be charged as more than 99.5 percent certain "
-        "to have been missed. Never above LN_EVIDENCE_MEASURED: a band the source "
-        "was not detected in can only count against a class. The class's full "
-        "evidence adds Gaia to this: Gaia DR3's published completeness at the "
-        "source's sky pixel; an unmatched source is scored as a non-detection."),
+        "to have been missed. Bands observed at the same place share the same "
+        "local background and confusion, so their own chances of being missed are "
+        "not treated as fully separate: this blends treating them as separate "
+        "with treating them as moving together (missed or not, as one), by one "
+        "survey-wide share measured against real stars. Never above "
+        "LN_EVIDENCE_MEASURED: a band the source was not detected in can only "
+        "count against a class. The class's full evidence adds Gaia to this: "
+        "Gaia DR3's published completeness at the source's sky pixel; an "
+        "unmatched source is scored as a non-detection."),
     "LN_PRIOR_MASS": ("natural log of objects per square degree",
         "The ln of the expected number per square degree of this class's objects "
         "the survey would catalogue at the source's sky pixel, from the prior "

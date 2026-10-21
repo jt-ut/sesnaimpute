@@ -110,19 +110,41 @@ def _ln_nondet(ext_col32, log10_f_ref, av_clamped32, sc_clamped32,
     C_CAP`. Replaces the erf roll-off this module used before
     COMPLETENESS_2026-10-20.md (`_ln_one_minus_c_kernel`, deleted): no
     `F_LIM_50`/`WIDTH_DEX` read anywhere in this module any more.
+
+    C20 brief (briefs/round4_2026-10-20/C20_detection_correlation.md): the
+    non-detection factor `Prod_u (1-p_u)` this loop sums in log is now the
+    independent HALF of a mixture with a fully comonotone model, `(1 -
+    LAMBDA) * Prod_u (1-p_u) + LAMBDA * (1 - max_u p_u)`; `1 - max_u p_u
+    == min_u (1-p_u)`, the SAME monotone per-band `ln[1-p_u]` this loop
+    already computes, so the running minimum across the masked bands
+    costs no extra curve read -- only the one `np.logaddexp` combine at
+    the end. `constants.LAMBDA <= 0.0` (today's production path at
+    LAMBDA=0 is reached by the owner's own measurement never going
+    negative) returns `total` exactly as before, never entering the
+    mixture arithmetic at all: the brief's own identity (LAMBDA=0
+    reproduces today's numbers bit-identically) by code path, not by
+    relying on `logaddexp`'s `-inf` handling.
     """
     log10_fhat = (log10_f_ref.astype(np.float64)
                   + ext_col32.astype(np.float64)[None, :] * av_clamped32.astype(np.float64)[:, None]
                   + GRAY_COLUMN * sc_clamped32.astype(np.float64)[:, None])       # (m, 8) float64
     m = log10_fhat.shape[0]
     total = np.zeros(m, dtype=np.float64)
+    min_total = np.zeros(m, dtype=np.float64)
     for b in range(N_BANDS):
         if not nondet_mask[b]:
             continue
-        total += completeness_module.ln_one_minus_completeness(
+        ln_one_minus_p = completeness_module.ln_one_minus_completeness(
             curve_rows[b], 0.0, 0.0, int(band_n[b]),
             np.ascontiguousarray(log10_fhat[:, b]), float(band_a[b]), float(band_c[b]))
-    return total.astype(np.float32)
+        total += ln_one_minus_p
+        min_total = np.minimum(min_total, ln_one_minus_p)
+    lam = constants.LAMBDA
+    if lam <= 0.0:
+        return total.astype(np.float32)
+    ln_one_minus_lam = np.log(1.0 - lam) if lam < 1.0 else -np.inf
+    mixed = np.logaddexp(ln_one_minus_lam + total, np.log(lam) + min_total)
+    return mixed.astype(np.float32)
 
 
 class Batch:

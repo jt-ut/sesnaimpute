@@ -31,19 +31,44 @@ Query, per Galactic-latitude strip (`{l0}`/`{l1}`/`{b0}`/`{b1}` from
 
     SELECT l, b, k_1AperMag3, k_1ppErrBits, mergedClass FROM gpsSource
     WHERE {l clause} AND b BETWEEN {b0} AND {b1}
-      AND k_1AperMag3 > 0 AND k_1AperMag3 < 17.5
-      AND k_1ppErrBits < 256 AND mergedClass IN (-1, -2) AND priOrSec <= 0
+      AND k_1AperMag3 > 0 AND k_1AperMag3 < 18.5
+      AND mergedClass IN (-1, -2, -3) AND priOrSec <= 0
 
-`priOrSec <= 0` keeps one row per source where WFCAM frame sets overlap (the archive's own primary-detection flag; the secondaries were 7 % of the rows in the probe's Cygnus X box); `k_1AperMag3 > 0` drops the WFCAM null-value sentinel (measured
--999999.5, W34 section 2b: 14.7% of an unfiltered test box). `< 17.5`
-gives the derive step's last half-mag bin edge (17.0) a half-bin of
-headroom, as `twomass_counts` does against its own 14.3 cut. The quality
-cut -- `k_1ppErrBits < 256` (WFCAM pipeline post-processing flag
-threshold) and `mergedClass IN (-1, -2)` (stellar / probably stellar) --
-is the cut W34 section 2b ran and confirmed returns real data (WSA's own
-schema documentation did not carry these thresholds in fetchable form,
-W34's "what could not be established"; this is the working values a
-real query against the archive verified).
+`priOrSec <= 0` keeps one row per source where WFCAM frame sets overlap
+(the archive's own primary-detection flag; the secondaries were 7 % of
+the rows in the probe's Cygnus X box); `k_1AperMag3 > 0` drops the WFCAM
+null-value sentinel (measured -999999.5, W34 section 2b: 14.7% of an
+unfiltered test box). C28 (2026-10-21): the 18-56 uJy STAR members sit
+at Ks 17-18.3, beyond the old 17.0 anchor edge and its 17.5 pull cut
+(C24f/g). `< 18.5` gives the derive step's new last half-mag bin edge
+(18.0) a half-bin of headroom, the same buffer `twomass_counts` keeps
+against its own 14.3 cut and this module kept against its own old 17.0
+edge.
+
+C28: strips are submitted CONCURRENTLY, a pool of `N_CONCURRENT_STRIPS`
+at a time (the archive throttles one client, never a per-strip rate),
+each result CSV fetched as soon as its own query answers. A strip
+refused with a load/limit message still halves and retries exactly as
+before (`_strip_rows`); the pool's own width does not change on a
+refusal, only the one strip's own split. Rows are written to the
+region's file in `twomass_counts.build.region_strip_boxes`' own strip
+order (not completion order), so this module's own output keeps the
+same row order it always has -- concurrency changes only how fast the
+strips arrive, never the file this module writes.
+
+C19 (2026-10-21): the download no longer applies W34's own post-
+processing error-bit cut (`k_1ppErrBits < 256`) or its narrow class cut
+(`mergedClass IN (-1, -2)`) -- C18's diagnosis found that cut holding
+only 0.77-0.79 of the stars SESNA's own 2MASS photometry shows at Ks
+12-14, in the North America Nebula and in Perseus alike, which the
+anchor fit then read as a real deficit in the sky rather than in the
+cut. `mergedClass` now widens to the archive's own `-1` (star), `-2`
+(probable star) and `-3` (probable galaxy) -- never the unambiguous
+galaxy/noise codes -- and both `k_1ppErrBits` and `mergedClass` are
+still carried through verbatim (the SELECT list and CSV header,
+unchanged) so `sky.derived.ukidss_counts`, not this download, selects
+the point-like classes at derive time, with no error-bit cut at all
+(that module's own docstring).
 
 W34 section 4: no per-query row cap was hit and paging was not needed at
 this endpoint's scale; this module still splits a strip in half and
@@ -52,6 +77,7 @@ comes back with no results link (a real refusal or a timeout) rather
 than assuming the endpoint never throttles.
 """
 
+import concurrent.futures
 import os
 import re
 import time
@@ -68,14 +94,26 @@ DATABASE = "UKIDSSDR11PLUS"
 TABLE = "gpsSource"
 #: Null-value sentinel floor (W34 section 2b: WFCAM's own -999999.5).
 K_FLOOR = 0.0
-#: Half a bin past `sky.derived.ukidss_counts.MAG_EDGES`'s top (17.0), the
-#: same headroom `twomass_counts` keeps against its own 14.3 cut.
-K_CEILING = 17.5
-#: WFCAM pipeline post-processing error-bits threshold, and the
-#: stellar/probably-stellar merged-class values (W34 section 2b, run and
-#: confirmed against the live archive).
-ERR_BITS_MAX = 256
-MERGED_CLASS_VALUES = (-1, -2)
+#: Half a bin past `sky.derived.ukidss_counts.MAG_EDGES`'s top (18.0), the
+#: same headroom `twomass_counts` keeps against its own 14.3 cut (C28,
+#: 2026-10-21: raised from 17.5 -- the 18-56 uJy STAR members sit at Ks
+#: 17-18.3, beyond the old 17.0 anchor edge, C24f/g).
+K_CEILING = 18.5
+#: C28: strips queried at once, a pool of this width (the archive throttles
+#: one client, never a per-strip rate -- the halving-on-refusal rule below
+#: is unchanged per strip; this is concurrency across DIFFERENT strips'
+#: queries only).
+N_CONCURRENT_STRIPS = 6
+#: C19 (2026-10-21): the WFCAM pipeline post-processing error-bits
+#: threshold W34 section 2b measured (`ERR_BITS_MAX = 256`) is retired
+#: from the download query -- C18 found it holding only 0.77-0.79 of
+#: SESNA's own 2MASS-measured stars at Ks 12-14 -- and the class cut
+#: widens from the two stellar-only codes to every one of the archive's
+#: own classes except the unambiguous galaxy/noise ones: `-1` star, `-2`
+#: probable star, `-3` probable galaxy. Both columns are still pulled
+#: through verbatim so `sky.derived.ukidss_counts` can select the
+#: point-like classes itself, with no error-bit cut at all.
+MERGED_CLASS_VALUES = (-1, -2, -3)
 #: Query timeout requested from the server (seconds) and the local
 #: socket timeout around it (server timeout plus transfer headroom).
 QUERY_TIMEOUT_S = 250
@@ -107,7 +145,7 @@ def strip_query(l0, l1, b0, b1):
         "SELECT l, b, k_1AperMag3, k_1ppErrBits, mergedClass FROM "
         f"{TABLE} WHERE {_l_clause(l0, l1)} AND b BETWEEN {b0:.6f} AND {b1:.6f} "
         f"AND k_1AperMag3 > {K_FLOOR:.1f} AND k_1AperMag3 < {K_CEILING:.1f} "
-        f"AND priOrSec <= 0 AND k_1ppErrBits < {ERR_BITS_MAX} AND mergedClass IN "
+        f"AND priOrSec <= 0 AND mergedClass IN "
         f"({', '.join(str(v) for v in MERGED_CLASS_VALUES)})"
     )
 
@@ -204,10 +242,19 @@ def build(config, regions=None):
                 try:
                     with open(tmp_path, "w") as f:
                         f.write(CSV_HEADER + "\n")
-                        for l0, l1, b0, b1 in boxes:
-                            for line in _strip_rows(region, l0, l1, b0, b1):
-                                f.write(line + "\n")
-                                n_rows += 1
+                        # C28: the strips are submitted concurrently (a pool
+                        # of N_CONCURRENT_STRIPS at a time), but
+                        # `ThreadPoolExecutor.map` hands results back in the
+                        # SAME order as `boxes` regardless of which strip's
+                        # query answers first, so this file's own row order
+                        # (strip by strip, in `boxes`' own order) is exactly
+                        # what the sequential pull wrote.
+                        n_workers = max(1, min(N_CONCURRENT_STRIPS, len(boxes)))
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+                            for rows in pool.map(lambda box: _strip_rows(region, *box), boxes):
+                                for line in rows:
+                                    f.write(line + "\n")
+                                    n_rows += 1
                     os.replace(tmp_path, dest_path)
                 except BaseException:
                     if os.path.exists(tmp_path):

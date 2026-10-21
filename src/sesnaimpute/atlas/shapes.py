@@ -758,10 +758,17 @@ def build(config, regions=None):
 # atlas` P6's own per-cell region grid read verbatim (rule 5: no
 # recomputation of the sums the product carries) -- `N_CAT_CELL_<C>`,
 # the region's expected number of selected objects of class C per
-# parameter cell, summing over cells to `RATIO_C * TOTAL_OBSERVED`.
+# parameter cell, summing over cells to `RATIO_C * TOTAL_OBSERVED`. Its
+# own `log10 F_4.5` cell position is each member's DIMMED flux at the
+# pixel being counted, not its dereddened flux (C29, briefs/
+# round4_2026-10-20/C29_atlas_check_dimmed_axis.md): the cell this page
+# draws is the cell the sky would actually catalog a member in.
 # `N_CELL_<C>`'s own total sets the catalogable fraction the caption and
-# the printed numbers carry; its per-cell array is not drawn. Never read
-# by `bmstp`/`fittp` (module docstring's own rule).
+# the printed numbers carry; its per-cell array is not drawn (its own
+# `log10 F_4.5` axis is still the UNDIMMED flux, unchanged by C29 -- the
+# two arrays' per-cell values are no longer comparable cell by cell,
+# only in total, which is all this page ever reads from N_CELL_<C>).
+# Never read by `bmstp`/`fittp` (module docstring's own rule).
 # ====================================================================
 
 def _read_prior_atlas(config, region):

@@ -22,6 +22,25 @@ BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 #: SESNA's catalog inclusion rule: >= 2 of 8 bands above the local limit.
 MIN_BANDS = 2
 
+#: C30 (briefs/round4_2026-10-20/C30_population_anchor.md): the Galactic
+#: field-star population split the STAR anchor weight now fits and
+#: carries separately -- TRILEGAL's own error against the independent
+#: anchors is PER POPULATION (distant red giants over-produced, dwarfs
+#: close to right), not per Ks magnitude alone. A raw TRILEGAL star is a
+#: "giant" by this one HR-diagram cut on its own surface gravity, else a
+#: "dwarf" -- shared by `population.anchor_tiles` (the model's per-
+#: population colour-cell counts), `population.anchor_weights` (the
+#: joint W_GIANT/W_DWARF fit) and `population.star_population` (which
+#: weight a star's own population reads), so the one number lives here,
+#: not duplicated at each call site.
+GIANT_LOG_G_MAX = 3.5
+
+
+def is_giant(log_g):
+    """True where a raw star's own TRILEGAL `log g` reads as the giant
+    population (C30, `GIANT_LOG_G_MAX`), element-wise."""
+    return np.asarray(log_g, dtype=np.float64) < GIANT_LOG_G_MAX
+
 #: SPEC_PRIORS.md 1.3 -- the two named laws the ramp blends between.
 #: `draine_rv3.1` is Weingartner & Draine (2001) / Draine (2003), R_V = 3.1.
 #: `chapman2009_dense` is the KMH94 R_V = 5.5 curve (`whitney.r550`) with

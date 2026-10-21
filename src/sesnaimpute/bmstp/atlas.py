@@ -7,8 +7,12 @@ law (`population.selection.kappa_hybrid`), weighted by each member's
 probability of being catalogued (sec. 8, sec. 6.2): per band the
 completeness `C_i(f)` at the pixel's own marginalised 50% limit
 (`catalog.depth_grid`'s `F_LIM_50_PIX_MJY`) and its own marginalised width
-(`W_DEX_PIX`), and `P(>=2 of 8)` from the eight bands' independent
-non-detection probabilities -- the same completeness model `fittp.likelihood`
+(`W_DEX_PIX`), and `P(>=2 of 8)` a mixture of the eight bands' independent
+non-detection probabilities and a fully comonotone model, by `constants.
+LAMBDA` (C20 brief, briefs/round4_2026-10-20/C20_detection_correlation.md:
+bands observed at the same position share the local background and
+confusion, so independence alone under-predicted SESNA's own measured
+catalogued fraction) -- the same completeness model `fittp.likelihood`
 prices, never a step at the 50% limit. The selection appears here and nowhere
 else in the atlas (sec. 1.2): the prior itself is unthinned.
 
@@ -42,8 +46,32 @@ class's own expected number of catalogued objects per parameter cell, summing
 over cells to `RATIO_<C> * N_source`; and `N_CELL_<C>` (same axes, sec. 8's
 intrinsic population), the SAME members quadrature as `N_CAT_CELL_<C>` with
 every member's own probability of being catalogued set to one (no flux cut,
-no dimming enters that one factor), so `N_CAT_CELL_<C> <= N_CELL_<C>` cell by
-cell by construction and their ratio is the class's surviving fraction.
+no dimming enters that one factor).
+
+`N_CAT_CELL_<C>`'s own `log10 F_4.5` bin position is the member's DIMMED flux
+at the pixel compared -- `catalogued_probability`'s own `flux0 * 10**(-0.4 a
+kappa_band)`, the same dimming the catalogued probability itself already
+evaluates there -- so the cell a member's expected catalogued count lands in
+is the cell the sky would actually catalogue it in (C29, briefs/
+round4_2026-10-20/C29_atlas_check_dimmed_axis.md): the per-bin check this
+builds for (`atlas.shapes`'s own page, and `c18_diag/reproduce.py`'s own
+construction outside this package) compares predicted counts against
+observed sky counts, themselves necessarily binned by their OWN measured
+(dimmed) flux, never the undimmed flux no sky measurement ever sees.
+`N_CELL_<C>`'s own bin position is UNCHANGED, still the member's UNDIMMED
+flux: it carries no selection and no dimming at all (every member's
+probability of being catalogued is one), so there is no pixel-dependent
+flux to bin it by, and the GRID this density lives on (`grid.LOG10_F45_EDGES`
+itself, the axis every other stored shape in this package shares) is not
+touched by C29 -- only this ONE class's own check histogram moved. The two
+axes now differing means `N_CAT_CELL_<C> <= N_CELL_<C>` cell BY CELL no
+longer holds by construction (a cell N_CAT_CELL_<C> now reaches by a
+member's dimmed flux can differ from the cell N_CELL_<C> holds that SAME
+member's weight in, undimmed) -- only their TOTALS keep the old relation
+(`N_CAT_CELL_<C>.sum() <= N_CELL_<C>.sum()`, RATIO_<C> is axis-free). Never
+read by `bmstp`/`fittp` (`atlas.shapes`'s own module docstring): no consumer
+outside this check and the external diagnostic scripts it matches reads
+either array.
 
 Every module on this atlas's worker path (this module, `knot_field`,
 `sample_gal`, `sample_star`, `sample_cloud`, `grid`, `density`,
@@ -69,6 +97,7 @@ from scipy.special import ndtri
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
+from sesnaimpute import constants
 from sesnaimpute import definitions
 from sesnaimpute import pieces
 from sesnaimpute import progress
@@ -443,14 +472,28 @@ def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
     Gaussian roll-off fit to it -- zero where the member carries no flux
     in that band (GAL's 2MASS/24um, H2S's J/H/24um).
 
-    `p_cat` (n_pix, n_mem): `P(>=2 of 8) = 1 - Prod_i(1-p_i)
-    - Sum_i p_i Prod_{j!=i}(1-p_j)` (bands independent given the fluxes).
+    `p_cat` (n_pix, n_mem) (C20 brief, briefs/round4_2026-10-20/
+    C20_detection_correlation.md): `(1 - LAMBDA) * P_indep + LAMBDA *
+    p_(2)`, a mixture of SESNA's independent band-detection model,
+    `P_indep = P(>=2 of 8) = 1 - Prod_i(1-p_i) - Sum_i p_i Prod_{j!=i}
+    (1-p_j)` (bands independent given the fluxes -- today's closed form,
+    LAMBDA=0), and a fully comonotone model, `p_(2)` the SECOND-largest
+    of the eight `p_b` (one latent uniform draw per member, shared by
+    every band: at least two bands clear iff the draw is below the
+    second-largest `p_b`). `constants.LAMBDA` is the one survey-wide
+    share (`population.detection_correlation`'s own measurement,
+    against UKIDSS stars matched to SESNA in North America Nebula and
+    Perseus): bands observed at the same position share the local
+    background and confusion, so independence is not the whole story.
 
-    `p_cat_i2` (n_pix, n_mem) (sec. 9 "the bright-end count ratio"): each
-    member's own probability of being catalogued WITH I2 (4.5 um) ITSELF
-    MEASURED, `p_I2 * (1 - prod_{i!=I2}(1-p_i))` -- the exact condition
-    the catalogue side applies to a catalogued source (`ORIGIN_FNU[:, I2]
-    == 1`, `_observed_bright_counts`).
+    `p_cat_i2` (n_pix, n_mem) (sec. 9 "the bright-end count ratio"): the
+    SAME mixture for each member's own probability of being catalogued
+    WITH I2 (4.5 um) ITSELF MEASURED -- independent, `p_I2 * (1 -
+    prod_{i!=I2}(1-p_i))` -- the exact condition the catalogue side
+    applies to a catalogued source (`ORIGIN_FNU[:, I2] == 1`,
+    `_observed_bright_counts`); comonotone, `min(p_I2, max_{i!=I2} p_i)`
+    (I2 and at least one other band both clear iff the one draw is below
+    both p_I2 and the brightest of the other seven).
 
     `flux_i2` (n_pix, n_mem): the dimmed I2 flux, for the bright tests
     (compared there to 3x/10x the pixel's own I2 50% limit).
@@ -551,7 +594,16 @@ def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
         sum_term = np.zeros_like(prod_all)
         for i in range(N_BANDS):
             sum_term += p[:, :, i] * loo[i]
-        p_cat[:, mstart:mstop] = 1.0 - prod_all - sum_term
+        p_indep = 1.0 - prod_all - sum_term
+        # C20 brief: p_(2), the second-largest of the eight p_b (the
+        # comonotone model's own P(>=2 of 8)); `np.partition` finds it
+        # without fully sorting the short band axis. At LAMBDA=0.0 exactly,
+        # `(1.0 - 0.0) * p_indep + 0.0 * p2 == p_indep` bit for bit (`1.0 *
+        # x == x`, `0.0 * finite == 0.0`, `x + 0.0 == x` in IEEE754), so
+        # this reproduces today's p_cat bit-identically (the brief's own
+        # identity, proved on NGC 7129).
+        p2 = np.partition(p, -2, axis=2)[:, :, -2]
+        p_cat[:, mstart:mstop] = (1.0 - constants.LAMBDA) * p_indep + constants.LAMBDA * p2
 
         # the bright-end check (sec. 9): a member counts as bright only if
         # it would be CATALOGUED WITH I2 ITSELF MEASURED (its own I2
@@ -559,22 +611,103 @@ def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
         # also clears, `1 - prod_{i!=I2}(1-p_i)`); `flux_i2` lets the
         # caller apply the 3x/10x test against this pixel's own I2 50%
         # limit. `loo[IDX_I2]` is already exactly that leave-I2-out
-        # product, computed once above.
+        # product, computed once above. The SAME LAMBDA mixture as
+        # `p_cat` above, the comonotone term now `min(p_I2, max_{i!=I2}
+        # p_i)` (C20 brief): `np.delete` here mirrors the ONE already paid
+        # in `_collapse_star_members`'s own kind of per-band exclusion,
+        # not a new cost class on this already O(8)-per-band path.
         prob_other_detect = 1.0 - loo[IDX_I2]
-        p_cat_i2[:, mstart:mstop] = p[:, :, IDX_I2] * prob_other_detect
+        p_i2_indep = p[:, :, IDX_I2] * prob_other_detect
+        max_other = np.max(np.delete(p, IDX_I2, axis=2), axis=2)
+        p_i2_comon = np.minimum(p[:, :, IDX_I2], max_other)
+        p_cat_i2[:, mstart:mstop] = (1.0 - constants.LAMBDA) * p_i2_indep + constants.LAMBDA * p_i2_comon
         flux_i2[:, mstart:mstop] = flux[:, :, IDX_I2]  # (n_pix, n_sub)
     return p_cat, p_cat_i2, flux_i2
 
 
+def _xi_bin_index(u):
+    """`(idx, valid)`, a member's own xi-bin index on `grid.LOG10_XI_EDGES`
+    for its placement fraction `u` (C29, briefs/round4_2026-10-20/
+    C29_atlas_check_dimmed_axis.md): the SAME `nextafter` edge nudge
+    `grid.bin` applies to its own `log10 xi` samples, so a member sitting
+    exactly at THE EDGE xi = 1 (GAL's `u = 1`, sec. 5.4) lands in the
+    SAME cell `grid.bin` would put it in -- this index is pixel-
+    independent (xi = a/T = u exactly, `catalogued_probability`'s own
+    docstring), computed once per member here rather than once per pixel
+    batch. `valid` is False only for a `u` whose nudged `log10 xi` falls
+    outside the array's own `[-3.0, +1.0)` extent -- never true for any
+    member this build draws (`x = u <= 1` is the whole prior's own
+    support, `bmstp.grid`'s own module docstring), kept so a future caller
+    cannot silently mis-bin one that does; the returned `idx` is clipped
+    into range regardless, so the caller must still gate on `valid`.
+
+    `np.searchsorted` against the edges array directly, NOT a floor-
+    divide from `LOG10_XI_EDGES[0]` (a first implementation's own bug,
+    caught by this function's own test against `u = 1` exactly): at
+    `u = 1`, `log10 xi` nudges to a value so close to `0.0` that `0.0 -
+    LOG10_XI_EDGES[0]` (`3.0`) swallows the nudge in double precision
+    (`3.0 - 5e-324 == 3.0` exactly) and a floor-divide would silently
+    place the member in the WRONG cell -- the edge ξ = 1's own cell,
+    never the one below it the module docstring's edge convention
+    requires. `searchsorted` instead COMPARES the nudged value against
+    each edge directly (no subtraction, no cancellation), the same
+    comparison `np.histogram2d` performs internally, so this index
+    always agrees with `grid.bin`'s own binning bit for bit."""
+    with np.errstate(divide="ignore"):
+        log10_xi = np.log10(u)
+    log10_xi = np.nextafter(log10_xi, -np.inf)
+    n_x = grid.LOG10_XI_EDGES.size - 1
+    idx = np.searchsorted(grid.LOG10_XI_EDGES, log10_xi, side="right") - 1
+    valid = np.isfinite(log10_xi) & (idx >= 0) & (idx < n_x)
+    return np.clip(idx, 0, n_x - 1), valid
+
+
+def _accumulate_dimmed_hist(hist, x_idx_c, valid_x_c, flux_i2, p_cat, w_c):
+    """Add one pixel-batch/member-chunk's own contribution to `hist`
+    (n_x, n_b), in place -- C29's dimmed-axis check, computed inside the
+    SAME member batches `catalogued_fraction`'s caller already runs, no
+    second pass over members. For every (pixel, member) pair in this
+    chunk, `weight_pix[pix] * p_cat[pix, m] * w_c[m]` lands at the
+    member's own xi-bin (`x_idx_c[m]`, pixel-independent, `_xi_bin_
+    index`) and THIS PIXEL's own dimmed I2 flux bin -- `flux_i2`, the
+    SAME dimmed flux `catalogued_probability` already formed for the
+    bright-end check (sec. 9), never a second dimming computation. A
+    non-finite or non-positive dimmed flux (a member with no I2 flux at
+    all, or one whose bin falls outside the array's own `log10 F_4.5`
+    extent) drops that pair's weight silently, the same convention
+    `grid.bin`'s own `np.histogram2d` applies to a raw mark outside its
+    array; `weight_pix` is the caller's own argument to `catalogued_
+    fraction`, already multiplied in by the caller (`p_cat` alone here,
+    not `weight_pix @ p_cat` -- the caller passes this function `p_cat`
+    broadcast by `weight_pix` already, see the call site). The y-bin
+    index uses `np.searchsorted` against `grid.LOG10_F45_EDGES` directly,
+    the same `np.histogram2d` convention `_xi_bin_index`'s own docstring
+    explains (no edge nudge on this axis: `grid.bin` never nudges its own
+    `log10_f45` samples either, so none is needed here)."""
+    n_b = grid.LOG10_F45_EDGES.size - 1
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log10_f45 = np.log10(flux_i2)
+    y_idx = np.searchsorted(grid.LOG10_F45_EDGES, log10_f45, side="right") - 1
+    valid = np.isfinite(log10_f45) & (y_idx >= 0) & (y_idx < n_b) & valid_x_c[None, :]
+    if not np.any(valid):
+        return
+    x_bcast = np.broadcast_to(x_idx_c[None, :], flux_i2.shape)
+    weight = p_cat * w_c[None, :]
+    packed = x_bcast[valid] * n_b + y_idx[valid]
+    counts = np.bincount(packed, weights=weight[valid], minlength=hist.size)
+    hist += counts.reshape(hist.shape)
+
+
 def catalogued_fraction(a_col, u, flux0, w, f_lim, pixel_row, band_params, config, weight_pix, tick=None):
-    """`(frac, frac_bright3, frac_bright10, s_member)`: the weighted, deterministic
-    quadrature over a class's WHOLE population (SPEC_BMSTP_DRAFT.md sec. 8) -- exact
-    up to the population's own binning, for every class (GAL first, sec. 5.4). `w`
-    (n_mem,) is each member's own population weight, on any positive scale; every
-    mean below normalises by `w.sum()`. `catalogued_probability` supplies the
-    per-pixel, per-member catalogued probability (`p_cat`) and the I2-measured
-    probability and dimmed I2 flux for the bright tests (sec. 9); this function forms
-    the weighted sums over the class's whole population.
+    """`(frac, frac_bright3, frac_bright10, s_member, dimmed_hist)`: the weighted,
+    deterministic quadrature over a class's WHOLE population (SPEC_BMSTP_DRAFT.md
+    sec. 8) -- exact up to the population's own binning, for every class (GAL
+    first, sec. 5.4). `w` (n_mem,) is each member's own population weight, on any
+    positive scale; every mean below normalises by `w.sum()`. `catalogued_
+    probability` supplies the per-pixel, per-member catalogued probability
+    (`p_cat`) and the I2-measured probability and dimmed I2 flux for the bright
+    tests (sec. 9); this function forms the weighted sums over the class's whole
+    population.
 
     `frac` (n_pix,) = `(p_cat @ w) / w.sum()`; `frac_bright3`/`frac_bright10` (sec. 9
     "the bright-end count ratio") the same weighted mean restricted to members whose
@@ -584,6 +717,21 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, pixel_row, band_params, confi
     probability of that member over the whole region, exact per member (a region
     total built from `density * (w / w.sum()) @ s_member` needs no further error
     term: the quadrature is exact, not a draw).
+
+    `dimmed_hist` (n_x, n_b), RAW (unsmoothed, unnormalised) weighted counts (C29):
+    every (pixel, member) pair's own `weight_pix[pix] * p_cat[pix, m] * w[m]` binned
+    at the member's own xi cell and THIS PIXEL's own DIMMED I2 flux cell -- the
+    per-bin predicted-catalogued-count CHECK's own histogram, which (unlike
+    `s_member`) cannot collapse to one point per member, since dimming (and so the
+    bin a member's own catalogued probability lands in) varies pixel to pixel. The
+    caller still forms its own `n_cat_cell` from this the same way it forms one
+    from `s_member` today -- `_safe_cell_bin_counts` in place of `_safe_cell_bin` --
+    scaling by whatever per-class, per-member-independent factor (`density /
+    w.sum()`, or just `1 / w.sum()` where density is already folded into
+    `weight_pix`) it already applies to `s_member`-based `c_m`. No second pass over
+    members: `_accumulate_dimmed_hist` reads the SAME `p_cat`/`flux_i2` this
+    function's own pixel-batch/member-chunk loop already computed for `frac`/
+    `s_member`.
 
     Processed in pixel batches of `_pixel_batch_size` (rule 10b): each batch is the
     same elementwise-per-pixel computation on a slice of `a_col`/`f_lim`/`pixel_row`,
@@ -596,7 +744,8 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, pixel_row, band_params, confi
     member axis is chunked too, sized to the batch's own pixel count). Each chunk's
     weighted sum accumulates into `frac`/`frac_bright3`/`frac_bright10` (a sum over
     disjoint member chunks is exact, no result changes for a member set that fit
-    before) and fills its own slice of `s_member` directly."""
+    before) and fills its own slice of `s_member` directly; `dimmed_hist` accumulates
+    the same way, in place, across every batch and chunk."""
     n_mem = u.size
     n_pix = a_col.size
     w_sum = float(w.sum())
@@ -604,6 +753,9 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, pixel_row, band_params, confi
     frac_bright3 = np.empty(n_pix, dtype=np.float64)
     frac_bright10 = np.empty(n_pix, dtype=np.float64)
     s_member = np.zeros(n_mem, dtype=np.float64)
+    n_x, n_b = grid.LOG10_XI_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1
+    dimmed_hist = np.zeros((n_x, n_b), dtype=np.float64)
+    x_idx, valid_x = _xi_bin_index(u)
     batch = _pixel_batch_size(n_mem)
     n_batches = (n_pix + batch - 1) // batch
     for b, start in enumerate(range(0, n_pix, batch)):
@@ -634,19 +786,23 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, pixel_row, band_params, confi
             weighted_bright10 += (catalogued_i2_measured * bright10) @ w_c
 
             s_member[mstart:mstop] += weight_pix[start:stop] @ p_cat
+            _accumulate_dimmed_hist(
+                dimmed_hist, x_idx[mstart:mstop], valid_x[mstart:mstop], flux_i2,
+                weight_pix[start:stop, None] * p_cat, w_c)
         frac[start:stop] = weighted_sum / w_sum
         frac_bright3[start:stop] = weighted_bright3 / w_sum
         frac_bright10[start:stop] = weighted_bright10 / w_sum
         if tick is not None:
             tick(b + 1, n_batches)
-    return frac, frac_bright3, frac_bright10, s_member
+    return frac, frac_bright3, frac_bright10, s_member, dimmed_hist
 
 
 def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, pixel_row, band_params, config, weight_pix):
     """`(frac_a, frac_bright3_a, frac_bright10_a, frac_b, frac_bright3_b,
-    frac_bright10_b, s_member)`: `catalogued_fraction`'s own quadrature,
-    run ONCE for two classes that share one member set (STAR/PAHC,
-    `_build_one_tile`, F4 2026-10-09 'change C') instead of once each.
+    frac_bright10_b, s_member, dimmed_hist_a, dimmed_hist_b)`:
+    `catalogued_fraction`'s own quadrature, run ONCE for two classes that
+    share one member set (STAR/PAHC, `_build_one_tile`, F4 2026-10-09
+    'change C') instead of once each.
     `u`/`flux0` are the two classes' shared collapsed cells (their
     weights' own UNION support); `w_a`/`w_b` are each class's own weight
     over that SAME union, zero wherever a cell belongs to the other
@@ -664,7 +820,14 @@ def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, pixel_row, band_p
     separately is NOT claimed (the union's member count sets different
     pixel-batch/member-chunk boundaries than each class's own former,
     smaller compacted count would), only mathematically exact; measured
-    against the un-shared baseline (brief's 1e-13 bar)."""
+    against the un-shared baseline (brief's 1e-13 bar).
+
+    `dimmed_hist_a`/`dimmed_hist_b` (n_x, n_b) are C29's own raw
+    dimmed-axis check histogram (`catalogued_fraction`'s own docstring),
+    one per class since they differ in their member WEIGHT (`w_a`/`w_b`)
+    even though they share one `p_cat`/`flux_i2` evaluation -- the same
+    `_accumulate_dimmed_hist` call, run twice per chunk (once per class's
+    own weight), no second `catalogued_probability` evaluation."""
     n_mem = u.size
     n_pix = a_col.size
     w_a_sum = float(w_a.sum())
@@ -684,6 +847,10 @@ def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, pixel_row, band_p
     frac_bright3_b = np.empty(n_pix, dtype=np.float64)
     frac_bright10_b = np.empty(n_pix, dtype=np.float64)
     s_member = np.zeros(n_mem, dtype=np.float64)
+    n_x, n_b = grid.LOG10_XI_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1
+    dimmed_hist_a = np.zeros((n_x, n_b), dtype=np.float64)
+    dimmed_hist_b = np.zeros((n_x, n_b), dtype=np.float64)
+    x_idx, valid_x = _xi_bin_index(u)
     batch = _pixel_batch_size(n_mem)
     for start in range(0, n_pix, batch):
         stop = min(start + batch, n_pix)
@@ -722,6 +889,10 @@ def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, pixel_row, band_p
             weighted_bright10_b += cat_bright10 @ wb_c
 
             s_member[mstart:mstop] += weight_pix[start:stop] @ p_cat
+            weighted_pix_p_cat = weight_pix[start:stop, None] * p_cat
+            x_idx_c, valid_x_c = x_idx[mstart:mstop], valid_x[mstart:mstop]
+            _accumulate_dimmed_hist(dimmed_hist_a, x_idx_c, valid_x_c, flux_i2, weighted_pix_p_cat, wa_c)
+            _accumulate_dimmed_hist(dimmed_hist_b, x_idx_c, valid_x_c, flux_i2, weighted_pix_p_cat, wb_c)
         frac_a[start:stop] = weighted_sum_a / w_a_sum_safe
         frac_bright3_a[start:stop] = weighted_bright3_a / w_a_sum_safe
         frac_bright10_a[start:stop] = weighted_bright10_a / w_a_sum_safe
@@ -729,7 +900,8 @@ def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, pixel_row, band_p
         frac_bright3_b[start:stop] = weighted_bright3_b / w_b_sum_safe
         frac_bright10_b[start:stop] = weighted_bright10_b / w_b_sum_safe
     return (frac_a, frac_bright3_a, frac_bright10_a,
-            frac_b, frac_bright3_b, frac_bright10_b, s_member)
+            frac_b, frac_bright3_b, frac_bright10_b, s_member,
+            dimmed_hist_a, dimmed_hist_b)
 
 
 def _pahc_weight(limit8_grid, p_pahc, x):
@@ -749,7 +921,7 @@ def _pahc_weight(limit8_grid, p_pahc, x):
     return p_pahc[:, lo] + frac * (p_pahc[:, hi] - p_pahc[:, lo])
 
 
-def _collapse_star_members(u, flux0, w_star, w_star_only, w_pahc_only):
+def _collapse_star_members(u, flux0, w_star, w_star_only, w_pahc_only, a_star_k):
     """Collapse the tile's field-star members into cells before
     `catalogued_fraction` (`_build_one_tile`, rule 9): a member enters
     `catalogued_probability` only through its placement fraction `u`, its
@@ -772,13 +944,22 @@ def _collapse_star_members(u, flux0, w_star, w_star_only, w_pahc_only):
     key itself, still one vectorised grouping with no Python loop over
     stars.
 
-    Returns the cell's `u`/`flux0` (the ORIGINAL per-star weight
-    `w_star`-weighted mean within the cell -- each star's own population
-    weight, before the STAR/PAHC split) and the cell's summed STAR-only
-    and PAHC-only weights (the SAME cell grouping serves both classes,
-    sec. 5.1/5.3, since a star's placement/colour does not depend on
-    which class it falls in), plus the member counts before/after for
-    the build's own report."""
+    Returns the cell's `u`/`flux0`/`a_star_k` (the ORIGINAL per-star
+    weight `w_star`-weighted mean within the cell -- each star's own
+    population weight, before the STAR/PAHC split) and the cell's summed
+    STAR-only and PAHC-only weights (the SAME cell grouping serves both
+    classes, sec. 5.1/5.3, since a star's placement/colour does not
+    depend on which class it falls in), plus the member counts
+    before/after for the build's own report. `a_star_k` (C26 owner
+    ruling 2026-10-21, briefs/round4_2026-10-20/C26_profile_adopted.md):
+    each member's own cell-mean of `population_star_tile`'s own
+    `A_STAR_K` -- the star's own UNCLIPPED local extinction at its own
+    drawn pixel, collapsed at the SAME `log10 u` cell width as `u`
+    itself (far below the completeness roll-off), so the quadrature
+    reads each member's OWN column directly (`catalogued_probability`
+    called with `a_col` fixed at 1 and `u` replaced by this array, the
+    caller's docstring) instead of recombining a DIFFERENT pixel's own
+    column with this member's clipped placement fraction."""
     n_before = int(u.size)
     tiny = np.finfo(np.float64).tiny
     log10_u = np.log10(np.maximum(u, tiny))
@@ -799,10 +980,11 @@ def _collapse_star_members(u, flux0, w_star, w_star_only, w_pahc_only):
     w_cell_pahc_only = np.bincount(inverse, weights=w_pahc_only, minlength=n_after)
     safe_w = np.where(w_cell > 0, w_cell, 1.0)
     u_cell = np.bincount(inverse, weights=w_star * u, minlength=n_after) / safe_w
+    a_star_cell = np.bincount(inverse, weights=w_star * a_star_k, minlength=n_after) / safe_w
     flux0_cell = np.empty((n_after, N_BANDS), dtype=np.float64)
     for k in range(N_BANDS):
         flux0_cell[:, k] = np.bincount(inverse, weights=w_star * flux0[:, k], minlength=n_after) / safe_w
-    return u_cell, flux0_cell, w_cell_star_only, w_cell_pahc_only, n_before, n_after
+    return u_cell, flux0_cell, a_star_cell, w_cell_star_only, w_cell_pahc_only, n_before, n_after
 
 
 def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_in_tile, pixel_row_in_tile,
@@ -830,17 +1012,23 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     the measured curve now feeds `catalogued_probability` directly.
     `n_cat_cell_tile` (128, 110) is this tile's own contribution to the
     region's expected catalogued count per parameter cell (module
-    docstring's `N_CAT_CELL_GAL`, the same construction here): `grid.bin`
-    on the class's own members at their own `x`/`log10 F_4.5`, weighted
-    by each member's own expected catalogued count (`density * (w /
-    w.sum()) * s_member`, `s_member` `catalogued_fraction`'s exact
-    pixel-area-weighted catalogued probability per member). `n_cell_tile`
-    (128, 110) is the SAME members quadrature with the tile's own
-    pixel-area total (`weight_pix.sum()`) standing in for `s_member` --
-    every member's own probability of being catalogued set to one, no
-    flux cut, no dimming: `c_m_all = density * (w / w.sum()) *
-    weight_pix.sum()`, the same `_safe_cell_bin(u, log10 F_4.5, c_m_all)`,
-    so `n_cat_cell_tile <= n_cell_tile` cell by cell.
+    docstring's `N_CAT_CELL_GAL`, the same construction here): the class's
+    members at their own `x`, binned at EACH PIXEL's own DIMMED I2 flux
+    (C29, module docstring) rather than one undimmed point per member --
+    `catalogued_fraction_pair`'s own `dimmed_hist`, a per-(pixel, member)
+    weighted accumulation inside its existing member batches, rescaled
+    here by this call's one per-member-independent factor `density /
+    w.sum()` (`_safe_cell_bin_counts`, in place of `_safe_cell_bin`).
+    `n_cell_tile` (128, 110) is the SAME members quadrature with the
+    tile's own pixel-area total (`weight_pix.sum()`) standing in for
+    `s_member` -- every member's own probability of being catalogued set
+    to one, no flux cut, no dimming, STILL binned at the member's own
+    UNDIMMED `log10 F_4.5` (module docstring): `c_m_all = density * (w /
+    w.sum()) * weight_pix.sum()`, the same `_safe_cell_bin(u, log10
+    F_4.5, c_m_all)` as before C29. The two axes now differing, `n_cat_
+    cell_tile <= n_cell_tile` cell by cell no longer holds by
+    construction (module docstring) -- only `n_cat_cell_tile.sum() <=
+    n_cell_tile.sum()` does.
 
     The returned dict also carries `"_FIELD_STAR_DENSITY"`, the tile's
     own UNSPLIT field-star level `w_star.sum() / omega_t` (`density.
@@ -868,8 +1056,10 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         omega_t = float(grp.attrs["OMEGA_POINTING_DEG2"])
         star_index = np.asarray(grp["STAR_INDEX"][()], dtype=np.int64)
         u = np.asarray(grp["XI"][()], dtype=np.float64)
+        a_star_k = np.asarray(grp["A_STAR_K"][()], dtype=np.float64)
         w_star = np.asarray(grp["W_STAR"][()], dtype=np.float64)
         p_pahc_grid = np.asarray(grp["P_PAHC"][()], dtype=np.float64)  # (n_star, 8)
+        evolved_for_agb = np.asarray(grp["IS_EVOLVED"][()], dtype=bool)
     with h5py.File(field_path, "r") as f:
         flux0_all = np.asarray(f["FNU_MJY"][star_index], dtype=np.float64)  # (n_star, 8)
 
@@ -893,8 +1083,8 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     # (`_collapse_star_members`, rule 9): the SAME collapsed cells serve both
     # classes, since a star's placement/colour does not depend on which class
     # it falls in, only its STAR-only/PAHC-only weight does.
-    u_c, flux0_c, w_star_c, w_pahc_c, n_members_before, n_members_after = (
-        _collapse_star_members(u, flux0_all, w_star, w_star_only, w_pahc_only))
+    u_c, flux0_c, a_star_c, w_star_c, w_pahc_c, n_members_before, n_members_after = (
+        _collapse_star_members(u, flux0_all, w_star, w_star_only, w_pahc_only, a_star_k))
 
     weight_pix_total = float(weight_pix.sum())
     density_star = float(w_star_only.sum()) / omega_t  # objects deg^-2, sec. 5.1/5.2's Omega_pointing
@@ -913,23 +1103,39 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
             out[cls] = (np.zeros(pix_in_tile.size), density, np.zeros(pix_in_tile.size),
                         np.zeros(pix_in_tile.size), np.zeros((n_x, n_b)), np.zeros((n_x, n_b)))
     else:
-        u_u, flux0_u = u_c[m_union], flux0_c[m_union]
+        u_u, flux0_u, a_star_u = u_c[m_union], flux0_c[m_union], a_star_c[m_union]
         w_star_u, w_pahc_u = w_star_c[m_union], w_pahc_c[m_union]
         log10_f45_u = np.log10(flux0_u[:, IDX_I2])
+        # C26 (owner ruling 2026-10-21): each member's own A_STAR_K is
+        # already its own absolute local extinction -- `a_col` fixed at 1
+        # so `catalogued_probability`'s `a = a_col * u` becomes `a_star_u`
+        # unchanged, broadcast identically to every pixel in the tile,
+        # instead of recombined with THIS tile's own per-pixel A_COL_K
+        # (the retired pattern: beyond the Edenhofer cube's edge that
+        # recombination would silently drop the far-field reddening XI's
+        # own clip discards). `u_u` (XI, clipped) still only sets the
+        # cell's grid position (`_safe_cell_bin` below), never the dimming.
         (frac_star, fb3_star, fb10_star,
-         frac_pahc, fb3_pahc, fb10_pahc, s_member) = catalogued_fraction_pair(
-            a_col_in_tile, u_u, flux0_u, w_star_u, w_pahc_u, f_lim_in_tile,
+         frac_pahc, fb3_pahc, fb10_pahc, s_member,
+         dimmed_hist_star, dimmed_hist_pahc) = catalogued_fraction_pair(
+            np.ones_like(a_col_in_tile), a_star_u, flux0_u, w_star_u, w_pahc_u, f_lim_in_tile,
             pixel_row_in_tile, band_params, config, weight_pix)
-        for cls, density, w_u, frac, frac_bright3, frac_bright10 in (
-                ("STAR", density_star, w_star_u, frac_star, fb3_star, fb10_star),
-                ("PAHC", density_pahc, w_pahc_u, frac_pahc, fb3_pahc, fb10_pahc)):
+        for cls, density, w_u, frac, frac_bright3, frac_bright10, dimmed_hist in (
+                ("STAR", density_star, w_star_u, frac_star, fb3_star, fb10_star, dimmed_hist_star),
+                ("PAHC", density_pahc, w_pahc_u, frac_pahc, fb3_pahc, fb10_pahc, dimmed_hist_pahc)):
             w_sum = float(w_u.sum())
             if w_sum == 0:
                 n_cat_cell_tile = np.zeros((n_x, n_b))
                 n_cell_tile = np.zeros((n_x, n_b))
             else:
-                c_m = density * (w_u / w_sum) * s_member
-                n_cat_cell_tile = _safe_cell_bin(u_u, log10_f45_u, c_m)
+                # C29: the CHECK's own histogram (N_CAT_CELL_<C>) bins each
+                # member's catalogued probability at its DIMMED I2 flux
+                # (`dimmed_hist`, `catalogued_fraction_pair`'s own per-
+                # (pixel, member) accumulation) -- N_CELL_<C> below is
+                # UNCHANGED, still the member's own UNDIMMED flux
+                # (`log10_f45_u`), sec. 8's intrinsic population, never
+                # thinned by dimming or a flux cut at all.
+                n_cat_cell_tile = _safe_cell_bin_counts(dimmed_hist, density / w_sum)
                 c_m_all = density * (w_u / w_sum) * weight_pix_total
                 n_cell_tile = _safe_cell_bin(u_u, log10_f45_u, c_m_all)
             out[cls] = (frac, density, frac_bright3, frac_bright10, n_cat_cell_tile, n_cell_tile)
@@ -948,7 +1154,13 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     n_evolved = x_a.size // 2
     is_c = np.arange(x_a.size) >= n_evolved
     density_agb = float(w_a.sum()) / omega_t
-    u_parts, flux0_parts, w_parts, f45_parts = [], [], [], []
+    # C26 (owner ruling 2026-10-21): `sample_agb`'s own `x_a` is this
+    # SAME tile's evolved stars' XI, each repeated once per chemistry
+    # (O-rich first half, C-rich second half) -- `a_star_k[evolved_for_agb]`
+    # duplicated the SAME way lines up a_star_dup[k] with x_a[k] exactly.
+    a_star_evolved = a_star_k[evolved_for_agb]
+    a_star_dup = np.concatenate([a_star_evolved, a_star_evolved])
+    u_parts, flux0_parts, w_parts, f45_parts, a_star_parts = [], [], [], [], []
     for label, chem_mask in (("O", ~is_c), ("C", is_c)):
         star_idx = np.flatnonzero(chem_mask & (w_a > 0))
         if star_idx.size == 0:
@@ -960,6 +1172,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         tmpl_rep = np.tile(np.arange(n_tmpl), star_idx.size)
 
         u_m = x_a[star_rep]
+        a_star_m = a_star_dup[star_rep]
         f45_m = f45_a[star_rep]  # already log10 F_4.5 (mJy)
         f_ref_i2 = np.maximum(pool["f_ref"]["I2"][tmpl_rep], pool["floor_linear"][tmpl_rep])
         scale = (10.0 ** f45_m) / f_ref_i2  # rescales the WHOLE shell SED
@@ -970,6 +1183,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         w_m = w_a[star_rep] * pool["weight"][tmpl_rep] / pool_weight_sum
 
         u_parts.append(u_m)
+        a_star_parts.append(a_star_m)
         flux0_parts.append(flux0_m)
         w_parts.append(w_m)
         f45_parts.append(f45_m)
@@ -982,15 +1196,19 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         n_cell_agb = np.zeros((n_x, n_b))
     else:
         u_agb = np.concatenate(u_parts)
+        a_star_agb = np.concatenate(a_star_parts)
         flux0_agb = np.concatenate(flux0_parts, axis=0)
         w_agb_member = np.concatenate(w_parts)
         f45_agb_member = np.concatenate(f45_parts)
-        frac_agb, frac_agb_bright3, frac_agb_bright10, s_member_agb = catalogued_fraction(
-            a_col_in_tile, u_agb, flux0_agb, w_agb_member, f_lim_in_tile,
+        # C26: each AGB member's own shell carries its OWN star's A_STAR_K
+        # (absolute), not a_col_in_tile's per-pixel column times XI.
+        frac_agb, frac_agb_bright3, frac_agb_bright10, s_member_agb, dimmed_hist_agb = catalogued_fraction(
+            np.ones_like(a_col_in_tile), a_star_agb, flux0_agb, w_agb_member, f_lim_in_tile,
             pixel_row_in_tile, band_params, config, weight_pix)
         w_sum_agb = float(w_agb_member.sum())
-        c_m_agb = density_agb * (w_agb_member / w_sum_agb) * s_member_agb
-        n_cat_cell_agb = _safe_cell_bin(u_agb, f45_agb_member, c_m_agb)
+        # C29: N_CAT_CELL_AGB bins at the dimmed I2 flux; N_CELL_AGB is
+        # unchanged (undimmed, no selection).
+        n_cat_cell_agb = _safe_cell_bin_counts(dimmed_hist_agb, density_agb / w_sum_agb)
         c_m_agb_all = density_agb * (w_agb_member / w_sum_agb) * weight_pix_total
         n_cell_agb = _safe_cell_bin(u_agb, f45_agb_member, c_m_agb_all)
     out["AGB"] = (frac_agb, density_agb, frac_agb_bright3, frac_agb_bright10, n_cat_cell_agb, n_cell_agb)
@@ -1235,6 +1453,30 @@ def _safe_cell_bin(u, log10_f45, c_m):
     return H * total
 
 
+def _safe_cell_bin_counts(raw_hist, scale):
+    """`grid.bin_counts(raw_hist, raw_hist.sum()) * raw_hist.sum() * scale`
+    (C29, briefs/round4_2026-10-20/C29_atlas_check_dimmed_axis.md):
+    `_safe_cell_bin`'s own pattern, for a caller that has already
+    accumulated its own (n_x, n_b) weighted histogram (`catalogued_
+    fraction`'s own `dimmed_hist`, one raw weighted count per (pixel,
+    member) pair -- no single per-member point, since the dimmed flux a
+    pair lands at varies pixel to pixel) instead of one point per
+    member. `scale` is the ONE per-class, per-member-independent factor
+    (`density / w.sum()`, or `1 / w.sum()` where density is already
+    folded into `weight_pix` before `catalogued_fraction` ever saw it)
+    `_safe_cell_bin`'s own caller already multiplies into its `c_m`
+    before binning -- deferred here since it is a single scalar for the
+    whole array (linear), never per-member, so applying it after
+    smoothing changes nothing `grid.bin_counts` itself would see.
+    Guarded against `raw_hist.sum() == 0` the same way `_safe_cell_bin`
+    guards `c_m.sum() == 0` (an empty tile/sightline/region slice)."""
+    total = float(raw_hist.sum())
+    if total <= 0.0:
+        return np.zeros_like(raw_hist)
+    H, _out = grid.bin_counts(raw_hist, total)
+    return H * total * scale
+
+
 def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, arm_in_sl, f_lim_in_sl,
                           loaded_profile, flux0_ts, w_ts, cloud_frac_sl, d_front, d_back,
                           flux0_br, w_br, pixel_row_in_sl,
@@ -1296,22 +1538,24 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
     xi_centers, w_depth = _depth_nodes(loaded_profile, sl_row, d_front, d_back)
 
     u_yso, flux0_yso_full, w_yso_full = _combine_with_depth(flux0_ts, w_ts, xi_centers, w_depth)
-    frac_yso, frac_yso_bright3, frac_yso_bright10, s_member_yso = catalogued_fraction(
+    frac_yso, frac_yso_bright3, frac_yso_bright10, s_member_yso, dimmed_hist_yso = catalogued_fraction(
         a_col_in_sl, u_yso, flux0_yso_full, w_yso_full, f_lim_in_sl, pixel_row_in_sl, band_params, config,
         weight_pix=density_yso * weight_pix)
-    c_m_yso = (w_yso_full / w_yso_full.sum()) * s_member_yso
-    n_cat_cell_yso = _safe_cell_bin(u_yso, np.log10(flux0_yso_full[:, IDX_I2]), c_m_yso)
+    # C29: N_CAT_CELL_YSO bins at the dimmed I2 flux (`dimmed_hist_yso`,
+    # density already folded into `weight_pix` above, so `scale` here is
+    # just `1 / w.sum()`); N_CELL_YSO is unchanged (undimmed, no
+    # selection).
+    n_cat_cell_yso = _safe_cell_bin_counts(dimmed_hist_yso, 1.0 / w_yso_full.sum())
     weight_pix_yso_total = float(np.sum(density_yso * weight_pix))
     c_m_yso_all = (w_yso_full / w_yso_full.sum()) * weight_pix_yso_total
     n_cell_yso = _safe_cell_bin(u_yso, np.log10(flux0_yso_full[:, IDX_I2]), c_m_yso_all)
 
     u_h2s, flux0_h2s_full, w_h2s_full = _combine_with_depth(flux0_br, w_br, xi_centers, w_depth)
     weight_h2s = l_of_pix_in_sl * eta_r * density_module.EPS_EXT * weight_pix
-    frac_h2s, frac_h2s_bright3, frac_h2s_bright10, s_member_h2s = catalogued_fraction(
+    frac_h2s, frac_h2s_bright3, frac_h2s_bright10, s_member_h2s, dimmed_hist_h2s = catalogued_fraction(
         a_col_in_sl, u_h2s, flux0_h2s_full, w_h2s_full, f_lim_in_sl, pixel_row_in_sl, band_params, config,
         weight_pix=weight_h2s)
-    c_m_h2s = (w_h2s_full / w_h2s_full.sum()) * s_member_h2s
-    n_cat_cell_h2s = _safe_cell_bin(u_h2s, np.log10(flux0_h2s_full[:, IDX_I2]), c_m_h2s)
+    n_cat_cell_h2s = _safe_cell_bin_counts(dimmed_hist_h2s, 1.0 / w_h2s_full.sum())
     weight_pix_h2s_total = float(weight_h2s.sum())
     c_m_h2s_all = (w_h2s_full / w_h2s_full.sum()) * weight_pix_h2s_total
     n_cell_h2s = _safe_cell_bin(u_h2s, np.log10(flux0_h2s_full[:, IDX_I2]), c_m_h2s_all)
@@ -1586,10 +1830,13 @@ def _gal_reduce(gal_members, chunk_results, weight_pix_all):
     frac_bright3 = np.concatenate([r[1] for r in chunk_results])
     frac_bright10 = np.concatenate([r[2] for r in chunk_results])
     s_member = sum(r[3] for r in chunk_results)
+    dimmed_hist = sum(r[4] for r in chunk_results)
 
     w_sum = float(w.sum())
-    c_m = density * (w / w_sum) * s_member
-    n_cat_cell = _safe_cell_bin(u, log10_s, c_m)
+    # C29: N_CAT_CELL_GAL bins at the dimmed I2 flux (`dimmed_hist`,
+    # summed across chunks exactly as `s_member` is); N_CELL_GAL is
+    # unchanged (undimmed, no selection).
+    n_cat_cell = _safe_cell_bin_counts(dimmed_hist, density / w_sum)
     c_m_all = density * (w / w_sum) * float(weight_pix_all.sum())
     n_cell = _safe_cell_bin(u, log10_s, c_m_all)
     return (frac, frac_bright3, frac_bright10, n_cat_cell, n_cell, density,
@@ -1699,11 +1946,16 @@ def _pahn_reduce(pahn_members, chunk_results, density_pahn_pix, weight_pix_all):
     frac_bright3 = np.concatenate([r[1] for r in chunk_results])
     frac_bright10 = np.concatenate([r[2] for r in chunk_results])
     s_member = sum(r[3] for r in chunk_results)
+    dimmed_hist = sum(r[4] for r in chunk_results)
 
     w_sum = float(w_pahn.sum())
     log10_f_i2 = np.log10(flux0_pahn[:, IDX_I2])
-    c_m = (w_pahn / w_sum) * s_member
-    n_cat_cell = _safe_cell_bin(u_pahn, log10_f_i2, c_m)
+    # C29: N_CAT_CELL_PAHN bins at the dimmed I2 flux (`dimmed_hist`,
+    # already density-weighted exactly as `s_member` is, `_pahn_chunk_
+    # result`'s own `weight_pix`, so `scale` is just `1/w.sum()`
+    # unlike `_gal_reduce`'s own `density/w.sum()`); N_CELL_PAHN is
+    # unchanged (undimmed, no selection).
+    n_cat_cell = _safe_cell_bin_counts(dimmed_hist, 1.0 / w_sum)
     total_density_area = float(np.sum(density_pahn_pix * weight_pix_all))
     c_m_all = (w_pahn / w_sum) * total_density_area
     n_cell = _safe_cell_bin(u_pahn, log10_f_i2, c_m_all)
