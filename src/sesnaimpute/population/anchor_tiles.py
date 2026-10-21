@@ -55,6 +55,18 @@ Products, per region:
   VHS's only where UKIDSS does not); all 0 where the region carries no
   deep survey at all and the axis is 2MASS's own to `KS_CUT_MAG`); root
   attr `GRANULE="hpx512"`.
+
+  C30 (briefs/round4_2026-10-20/C30_population_anchor.md) adds, to the
+  same `histograms_anchors_hpx512__<Region>.hdf5`: `CELL_KS_EDGES`/
+  `CELL_JK_EDGES` (the STAR anchor's 2MASS-only colour-cell grid, Ks
+  12.0-14.3), `N_GIANT_CELL`/`N_DWARF_CELL` (n_pix, 5, 4 -- the model's
+  per-population colour-cell counts item 2 adds) and `N_GIANT_KS`/
+  `N_DWARF_KS` (n_ks_bin -- the SAME population split on the full
+  `KS_EDGES` grid, item 3's deep-bin giant-share disclosure); root attrs
+  `KS_COMPLETE_TO` (this region's own model-based deep edge, item 4,
+  replacing the survey-only turnover test `sky.derived.ukidss_counts`/
+  `vhs_counts` still compute but this module no longer reads) and, report
+  only, `KS_COMPLETE_TO_OLD_UKIDSS`/`KS_COMPLETE_TO_OLD_VHS`.
 """
 
 import functools
