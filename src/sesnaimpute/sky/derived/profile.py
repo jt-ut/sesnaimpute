@@ -26,6 +26,19 @@ stored profile and `TAIL_RESIDUAL_K`), so a read against the sightline's
 own build-time column and a read against a source's own adopted column
 agree. `tail_shape`, `sightline_row`, `distance_knots_pc` and
 `cloud_back_edge_pc` are the supporting pieces a class shape needs.
+
+C25 (briefs/round4_2026-10-20/C25_far_column.md): on a sightline
+`sky.derived.marshall_extinction` marks COVERED, the far column beyond
+the map's own edge follows Marshall et al. 2006's own measured A_Ks(d)
+instead of the exponential dust-disc tail -- uncapped at the caller's
+`total_column_ak`, so `u` CAN exceed 1 there (the located cause of the
+missing red tail of distant background stars, C24
+briefs/round4_2026-10-20/C24_locate_red_tail.md: beyond the Edenhofer
+cube's edge, capping a star's column at the pixel's own cloud column
+undercounts a plane sightline's real total line-of-sight column by a
+factor of ~2). An uncovered sightline (most regions outside the Galactic
+plane) keeps today's construction, `u <= 1`, unchanged. See
+`_RegionProfile.a_of_d`'s own docstring for the exact formula.
 """
 
 import os
@@ -732,10 +745,16 @@ def build(config, regions=None):
 
 
 class _RegionProfile:
-    """One region's evaluator, loaded from its `profile_edenhofer_sightline`
-    and `depth_edenhofer_region` files."""
+    """One region's evaluator, loaded from its `profile_edenhofer_sightline`,
+    `extinction_marshall_sightline` and `depth_edenhofer_region` files.
 
-    def __init__(self, profile_path, back_edge_pc, front_edge_pc):
+    C25 (briefs/round4_2026-10-20/C25_far_column.md): `marshall_path`'s own
+    `COVERED`/`A_K`, row-for-row the SAME sightlines in the SAME order as
+    `profile_path`'s own `HPX_PIX_256` (`sky.derived.marshall_extinction`
+    builds it directly off this region's own profile file, never
+    re-deriving admission) -- asserted, never assumed."""
+
+    def __init__(self, profile_path, marshall_path, back_edge_pc, front_edge_pc):
         with h5py.File(profile_path, "r") as f:
             self.dist = f["DIST_PC"][:].astype(float)
             self.a_cum = f["A_CUM_K"][:].astype(float)
@@ -751,6 +770,14 @@ class _RegionProfile:
             self.fb_scale = float(fb["TAIL_SCALE_PC"][()])
             self.fb_l = float(fb["GAL_L_DEG"][()])
             self.fb_b = float(fb["GAL_B_DEG"][()])
+        with h5py.File(marshall_path, "r") as f:
+            m_hpx = f["HPX_PIX_256"][:].astype(np.int64)
+            self.covered = f["COVERED"][:].astype(bool)
+            self.marshall_a_k = f["A_K"][:].astype(float)
+        if not np.array_equal(m_hpx, self.hpx):
+            raise ValueError(
+                "profile.read: %r's own HPX_PIX_256 disagrees with %r's -- the Marshall "
+                "product was not built from this region's own profile file" % (marshall_path, profile_path))
         self.order = np.argsort(self.hpx)
         self.hpx_sorted = self.hpx[self.order]
         self.d_edge = float(self.dist[-1])
@@ -790,35 +817,62 @@ class _RegionProfile:
         return np.clip(np.interp(d, s, f, left=0.0, right=1.0), 0.0, 1.0)
 
     def a_of_d(self, d_pc, hpx_pix=None, *, total_column_ak):
-        """Cumulative extinction A_K from 0 to `d_pc`: the measured
-        profile inside the map's edge, `A_edge + residual * tail_shape(d)`
-        beyond it, with `residual = max(0, total_column_ak - A_edge)`.
+        """Cumulative extinction A_K from 0 to `d_pc`.
 
-        Spec 1.4, last paragraph: where the stored `A_edge` exceeds the
-        caller's own `total_column_ak`, the in-map profile is scaled down
-        by `total_column_ak / A_edge` and the residual is zero, so
-        `u = A(d)/A(inf) <= 1` on every sightline -- the same rule the
-        build already applied once against the sightline's own column,
-        re-applied here against whatever column the caller supplies."""
+        Inside the map's edge (`d_pc <= d_edge`), unchanged (spec 1.4):
+        the measured in-map profile scaled by `scale = min(1,
+        total_column_ak / A_edge)` -- where the stored `A_edge` exceeds
+        the caller's own `total_column_ak`, the in-map profile is scaled
+        down so `u <= 1` there.
+
+        Beyond it, on a COVERED sightline (C25, briefs/round4_2026-10-20/
+        C25_far_column.md: `self.covered`, from `sky.derived.
+        marshall_extinction`), the far column follows Marshall et al.
+        2006's own measured `A_Ks(d)` instead of the exponential dust-disc
+        tail: `A_edge * scale + max(0, M(d) - M(d_edge))`, Marshall's own
+        increment past the map's edge, uncapped at `total_column_ak` and
+        never multiplied by `tail_shape` -- `max(0, ...)` is also exactly
+        0 for `d <= d_edge`, since `M` is non-decreasing, so this one
+        expression is valid for any `d_pc`, in or beyond the cube, without
+        a separate branch on `d`. `u = A(d)/A(inf)` CAN exceed 1 here
+        (C25 item 4): a covered sightline's own adopted total column,
+        `total_column_ak`, can understate what Marshall's own measurement
+        implies a star beyond the map's edge really sees.
+
+        On an UNCOVERED sightline (or the no-`hpx_pix` fallback, which
+        carries no Marshall curve of its own), unchanged: `A_edge * scale
+        + residual * tail_shape(d)`, `residual = max(0, total_column_ak -
+        A_edge * scale)`, the exponential dust-disc tail -- `u <= 1`
+        exactly as before."""
         d = np.asarray(d_pc, dtype=float)
         if hpx_pix is None:
             inside = np.interp(d, self.dist, self.fb_a_cum)
             a_edge = float(self.fb_a_cum[-1])
+            covered, row = False, None
         else:
             row = int(np.asarray(self.sightline_row(hpx_pix)))
             inside = np.interp(d, self.dist, self.a_cum[row])
             a_edge = float(self.a_cum[row, -1])
+            covered = bool(self.covered[row])
         total = np.asarray(total_column_ak, dtype=float)
         scale = np.minimum(1.0, total / a_edge) if a_edge > 0 else np.ones_like(total)
+        if covered:
+            m_d = np.interp(d, self.dist, self.marshall_a_k[row])
+            m_edge = float(self.marshall_a_k[row, -1])
+            far = np.maximum(0.0, m_d - m_edge)
+            return inside * scale + far
         residual = np.maximum(0.0, total - a_edge * scale)
         return inside * scale + residual * self.tail_shape(d, hpx_pix)
 
     def u(self, d_pc, hpx_pix=None, *, total_column_ak):
         """`u(d) = A(d) / A(inf)` (spec 1.4): divides by the sightline's
-        total column, never by the measured profile's back edge. `a_of_d`
-        already scales the in-map profile down to `total_column_ak` where
-        the map's own edge would otherwise exceed it, so `u <= 1` holds
-        here by construction."""
+        total column, never by the measured profile's back edge. On an
+        uncovered sightline `a_of_d` already scales the in-map profile
+        down to `total_column_ak` where the map's own edge would
+        otherwise exceed it, so `u <= 1` holds there by construction; on
+        a COVERED sightline beyond the map's edge (C25), `u` can exceed 1
+        -- Marshall et al. 2006's own measured column there is not capped
+        at `total_column_ak` (`a_of_d`'s own docstring)."""
         a = self.a_of_d(d_pc, hpx_pix, total_column_ak=total_column_ak)
         return a / np.asarray(total_column_ak, dtype=float)
 
@@ -854,21 +908,26 @@ class _RegionProfile:
 
 
 def read(config, region):
-    """The region's profile evaluator (see `_RegionProfile`)."""
+    """The region's profile evaluator (see `_RegionProfile`). C25: also
+    reads `sky.derived.marshall_extinction`'s own product for the region
+    (`COVERED`/`A_K`) -- written for every region, covered or not, so this
+    never branches on whether a region sits inside Marshall's survey box."""
     profile_path = product_path(config, "sky/derived", "edenhofer", "profile", "sightline", region=region)
     depth_path = product_path(config, "sky/derived", "edenhofer", "depth", "region")
-    for path in (profile_path, depth_path):
+    marshall_path = product_path(config, "sky/derived", "marshall", "extinction", "sightline", region=region)
+    for path, module in ((profile_path, "sesnaimpute.sky.derived.profile"),
+                          (depth_path, "sesnaimpute.sky.derived.profile"),
+                          (marshall_path, "sesnaimpute.sky.derived.marshall_extinction")):
         if not os.path.exists(path):
             raise FileNotFoundError(
-                "profile.read: product missing at %r -- run the "
-                "sesnaimpute.sky.derived.profile RUNBOOK line for it" % path)
+                "profile.read: product missing at %r -- run the %r RUNBOOK line for it" % (path, module))
     with h5py.File(depth_path, "r") as f:
         names = [v.decode("utf-8") if isinstance(v, bytes) else str(v) for v in f["REGION"][:]]
         if region not in names:
             raise ValueError("profile.read: region %r has no row in %s" % (region, depth_path))
         back_edge_pc = float(f["D_HI_PC"][names.index(region)])
         front_edge_pc = float(f["D_LO_PC"][names.index(region)])
-    return _RegionProfile(profile_path, back_edge_pc, front_edge_pc)
+    return _RegionProfile(profile_path, marshall_path, back_edge_pc, front_edge_pc)
 
 
 if __name__ == "__main__":
