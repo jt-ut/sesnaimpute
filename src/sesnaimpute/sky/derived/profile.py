@@ -641,6 +641,19 @@ def _join_total_column(config, region, admitted_pix):
     return a_inf[order][capped]
 
 
+def sightline_total_column(config, region, hpx_pix):
+    """This one sightline's own adopted extinction column (`sky/derived/
+    adopted/extinction/sightline`'s own `A_K`) -- the `total` `_build_
+    adopted_one_region` rescales its in-cube profile against at build
+    time. C26 (owner ruling 2026-10-21): `_RegionProfile` no longer
+    stores this per sightline itself (the far column beyond the cube's
+    edge is baked into `A_CUM_K` already, so a caller needing THIS
+    sightline's own column as its own `total_column_ak` -- rather than a
+    pixel's or a source's own, different column -- reads it here,
+    directly off the same product `_build_adopted_one_region` read."""
+    return float(_join_total_column(config, region, np.asarray([hpx_pix]))[0])
+
+
 def _build_one_region(config, region, canon, input_dir):
     admitted_pix, nsrc = _admitted_sightlines(config, region)
     a_inf = _join_total_column(config, region, admitted_pix)
