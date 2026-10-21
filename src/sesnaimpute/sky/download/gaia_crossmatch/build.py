@@ -143,11 +143,12 @@ def read_uploaded_names(path):
 
 
 def _stale_reason(dest_path, upload_path, names_now):
-    """None when the candidates file can stand; else why it must be re-pulled."""
+    """None when the candidates file was uploaded from the catalogue now on
+    disk; else a sentence saying how it differs (reported, never acted on)."""
     if not os.path.exists(dest_path):
         return "no candidates file"
     if not os.path.exists(upload_path):
-        return "candidates file carries no record of the sources it was uploaded from"
+        return "no record of the sources it was uploaded from (pulled before 2026-10-22)"
     uploaded = read_uploaded_names(upload_path)
     now = set(names_now.tolist())
     if uploaded == now:
@@ -170,16 +171,17 @@ def build(config, regions=None):
             dest_path = f"{dest_dir}/candidates_gaia_source__{region}.csv"
             upload_path = uploaded_names_path(config, region)
             positions = _read_positions(config, region)
-            # The product's own definition is the source list it was uploaded
-            # from (2026-10-22): a present file is kept only when that record
-            # exists and names exactly the curated catalogue's sources now on
-            # disk; a catalogue re-curated since the pull re-pulls itself.
-            reason = _stale_reason(dest_path, upload_path, positions["NAME"])
-            if reason is None:
-                print(f"gaia_crossmatch build: {dest_path} present and uploaded from the "
-                      f"current catalogue, skipped")
+            # A present candidates file is used as it is (owner ruling
+            # 2026-10-22: the data on disk is not re-queried). The upload
+            # record beside it, where one exists, only REPORTS how the curated
+            # catalogue differs from the uploaded list; it never triggers a
+            # pull. A missing file is pulled and its record written.
+            if os.path.exists(dest_path):
+                note = _stale_reason(dest_path, upload_path, positions["NAME"])
+                print(f"gaia_crossmatch build: {dest_path} present, skipped"
+                      + (f" ({note})" if note else " (uploaded from the current catalogue)"))
             else:
-                print(f"gaia_crossmatch build: {region}: {reason}; pulling")
+                print(f"gaia_crossmatch build: {region}: no candidates file; pulling")
                 candidates = _pull_region(positions, region)
                 candidates.to_csv(dest_path, index=False)
                 with open(upload_path, "w") as fh:

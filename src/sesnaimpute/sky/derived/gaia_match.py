@@ -339,18 +339,20 @@ def _read_candidates(config, region, name_to_row):
     # would be scored as a Gaia non-detection: that is a stale crossmatch,
     # re-pulled by the download line, never papered over here. A candidate
     # whose source curation has since removed matches nothing and is dropped.
+    # Owner ruling 2026-10-22: the crossmatch on disk is used as it is, never
+    # refused. Where an upload record exists, the number of current sources it
+    # never uploaded is PRINTED (those sources carry no Gaia candidate and are
+    # scored as unmatched); without a record the fact is stated.
     upload_path = crossmatch_module.uploaded_names_path(config, region)
     if os.path.exists(upload_path):
         uploaded = crossmatch_module.read_uploaded_names(upload_path)
-        missing = [n for n in name_to_row.index if n not in uploaded]
-        if missing:
-            raise ValueError(
-                f"sky.derived.gaia_match.build: {region}: {len(missing)} curated source(s) were never "
-                f"uploaded to the Gaia crossmatch (e.g. {missing[0]!r}) -- the candidates file predates "
-                f"the catalogue; rerun the 'sesnaimpute.sky.download.gaia_crossmatch' RUNBOOK line")
+        n_missing = int(sum(1 for n in name_to_row.index if n not in uploaded))
+        if n_missing:
+            print(f"gaia_match derive: {region}: {n_missing} curated source(s) were not in the "
+                  f"crossmatch upload; they carry no Gaia candidate")
     else:
         print(f"gaia_match derive: {region}: candidates file carries no upload record "
-              f"(pulled before 2026-10-22); coverage of the catalogue cannot be verified")
+              f"(pulled before 2026-10-22); its coverage of the catalogue is not recorded")
     if df.empty:
         return None
     req_idx = df["NAME"].map(name_to_row)
