@@ -116,3 +116,12 @@ LIBRARY_SAMPLING_SIGMA_LOG_DEX = 2.0 * SIGMA_CAL_DEX
 #: that wants an interior value should replace this constant outright,
 #: not add a second one: LAMBDA is ONE survey-wide number.
 LAMBDA = 1.0
+
+#: Combined19 (Bovy et al. 2016, mwdust; `sky.download.combined19`,
+#: `sky.derived.profile`'s canonical far-field column, owner ruling
+#: 2026-10-21) stores E(B-V) on the SFD scale; mwdust's own
+#: `aebv('2MASS Ks', sf10=True)` (Schlafly & Finkbeiner 2011, Table 6,
+#: R_V = 3.1) converts it to K-band extinction: `A_Ks = AK_PER_EBV_SFD_KS
+#: * E(B-V)_SFD`. Verified against mwdust 1.8's own table
+#: (`mwdust.util.extCurves.aebv`) to the value stored here.
+AK_PER_EBV_SFD_KS = 0.3100
