@@ -359,9 +359,12 @@ def completeness_many(curves, rows, m0, dm, n, log10_f, a, c, scale):
     is a safe default for a caller that reduces by summing this
     function's own output. `scale` is `STORAGE_SCALE` for a uint16,
     value-x-`STORAGE_SCALE` table (`CURVE_<band>`) and 1.0 for a float32,
-    already-a-fraction table (`PIXEL_CURVE_<band>`: an area AVERAGE over
-    one or more 30-arcsec pixels, module docstring -- not itself an
-    exact multiple of `1 / STORAGE_SCALE`, so it is stored as the plain
+    already-a-fraction table (`PIXEL_CURVE_<band>`: the curve of the ONE
+    30-arcsec pixel nearest the nside-512 pixel's centre, as `build` and
+    `lookup` form it -- a centre sample, not an area average; measured
+    unbiased against the on-map area mean at I2 20-50 uJy, applied/mean
+    1.02 Musca, 0.99 Perseus, C24k 2026-10-21 -- not itself an exact
+    multiple of `1 / STORAGE_SCALE`, so it is stored as the plain
     fraction, not quantized); the design note's own signature omits this
     (it covers only the uint16 case), added here since this one kernel
     reads both of this module's own curve tables. `numba.prange` over
