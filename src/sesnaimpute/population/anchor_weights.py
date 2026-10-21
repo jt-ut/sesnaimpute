@@ -100,8 +100,10 @@ luminosity-function slope there (`studies/faint_end_excess.md`),
 predicting 1.6 to 4 times the observed count at one to three times a
 pixel's own depth limit, STAR carrying 83 to 96 percent of the excess.
 A region whose `KS_SOURCE` reaches 1 (`population.anchor_tiles`'
-UKIDSS GPS or VVV extension to `KS_DEEP_CUT_MAG`, about Ks 17) HAS a
-real anchor out there; this module's `deep_slope_dex_per_mag` fits the
+UKIDSS GPS or VHS extension to that region's own measured deep edge,
+`_region_ks_deep_cut`, at most `KS_DEEP_CUT_MAG` -- about Ks 18, C28
+2026-10-21, raised from 17) HAS a real anchor out there; this module's
+`deep_slope_dex_per_mag` fits the
 log10 region-pooled weight's slope across exactly those deep-sourced,
 counting-floor-cleared bins (never the Gaia-axis rule's generic
 "faintest three populated bins", which for a region with no deep
@@ -831,8 +833,12 @@ def survey_pooled_weights(config, region_names, clusters, members_all, min_count
     anchor products, never per region.
 
     The Gaia axis is shared by every region (one `G_EDGES` grid) and
-    pools by array position. The Ks axis is not (W46: fifteen regions
-    reach 17.0, fifteen reach 2MASS's own 14.3) -- each Ks bin is keyed
+    pools by array position. The Ks axis is not (W46; C28, 2026-10-21:
+    a region's own deep edge is now ITS OWN measured completeness
+    turnover, capped at `anchor_tiles.KS_DEEP_CUT_MAG` -- no two
+    deep-covered regions need reach the same bin any more, and a region
+    with no deep survey at all still reaches only 2MASS's own 14.3) --
+    each Ks bin is keyed
     by its own `(lower, upper)` edge and summed over exactly the regions
     whose axis carries it (`_pool_bins_by_edge`), never by array
     position, so no region is skipped for its Ks axis length. `skipped`
@@ -1221,7 +1227,8 @@ def build_region(config, region, clusters, members_all, w_pool_g, w_pool_ks, ks_
     (ks_edges_out, w_ks_out, w_region_ks_out, populated_ks_out, measured_ks_out,
      w_joint_out, use_joint_out, w_region_joint_out, p_ks_out, joint_source_out) = _extend_shallow_ks_axis(
         hist["ks_edges"], fit_ks["w"], fit_ks["w_region"], fit_ks["populated"], measured_ks,
-        w_joint, use_joint, w_region_joint, p_ks, joint_source, faint_ks, n_tile)
+        w_joint, use_joint, w_region_joint, p_ks, joint_source, faint_ks, n_tile,
+        target_mag=KS_DEEP_CUT_MAG)
     n_ks_added = int(ks_edges_out.size) - int(hist["ks_edges"].size)
 
     # acceptance (CODING_RULES.md rule 11): the raw ratio, before

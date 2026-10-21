@@ -3095,8 +3095,10 @@ REGISTRY = {
         "ascending. Row i here is row i of N."),
     ("counts_ukidss_hpx512", "MAG_EDGES"): ("mag UKIRT K",
         "The edges of the half-magnitude UKIDSS GPS K bins (UKIRT "
-        "photometric system) this file counts stars in, 9.0 to 17.0: bin j "
-        "runs from MAG_EDGES[j] to MAG_EDGES[j+1]."),
+        "photometric system) this file counts stars in, 9.0 to 18.5 (C28, "
+        "2026-10-21: raised from 17.0, a half-bin of headroom past the "
+        "18.0 anchor ceiling): bin j runs from MAG_EDGES[j] to "
+        "MAG_EDGES[j+1]."),
     ("counts_ukidss_hpx512", "N"): ("stars",
         "For the matching pixel in HPX_PIX_512 and each magnitude bin in "
         "MAG_EDGES, how many point-like (mergedClass -1 or -2) UKIDSS GPS "
@@ -3117,6 +3119,23 @@ REGISTRY = {
         "past 14.0) counts by CALIBRATION[0] before anything else reads "
         "them -- 2MASS is the reference survey, UKIDSS the extension, and "
         "no SESNA count enters this ratio on either side."),
+    ("counts_ukidss_hpx512", "KS_COMPLETE_TO"): ("mag UKIRT K",
+        "C28, 2026-10-21: this region's own MEASURED completeness turnover "
+        "-- the faint edge of the half-magnitude bin whose own "
+        "deep-covered-pixel differential count SLOPE first falls below "
+        "the brighter bins' own fitted slope trend by more than one "
+        "Poisson sigma (sky.derived.ukidss_counts.differential_turnover_"
+        "mag), already rounded down to the half-magnitude grid. Where a "
+        "LATER bin's own count exceeds the flagged bin's (the flag did "
+        "not hold -- the brief's own ambiguous case), this is instead "
+        "PUBLISHED_DEPTH_MAG (18.0, Lucas et al. 2008, MNRAS 391, 136), "
+        "never a silently patched measurement. This file's own faint "
+        "edge (18.5) if no bin's slope ever falls below the trend within "
+        "the measured range, never beyond it. NaN where this region "
+        "carries no UKIDSS coverage at all. population.anchor_tiles "
+        "takes the region's own deep anchor edge as min(18.0, this "
+        "number), never past the survey's own measured depth or its "
+        "published ceiling."),
 
     # sky.derived.vhs_counts -- counts_vhs_hpx512: C19 Part B's VISTA
     # Hemisphere Survey sibling of counts_ukidss_hpx512, read where
@@ -3126,8 +3145,9 @@ REGISTRY = {
         "ascending. Row i here is row i of N."),
     ("counts_vhs_hpx512", "MAG_EDGES"): ("mag VISTA Ks",
         "The edges of the half-magnitude VHS Ks bins (VISTA photometric "
-        "system) this file counts stars in, 9.0 to 17.0: bin j runs from "
-        "MAG_EDGES[j] to MAG_EDGES[j+1]."),
+        "system) this file counts stars in, 9.0 to 18.5 (C28, 2026-10-21: "
+        "raised from 17.0, a half-bin of headroom past the 18.0 anchor "
+        "ceiling): bin j runs from MAG_EDGES[j] to MAG_EDGES[j+1]."),
     ("counts_vhs_hpx512", "N"): ("stars",
         "For the matching pixel in HPX_PIX_512 and each magnitude bin in "
         "MAG_EDGES, how many point-like (mergedClass -1 or -2) VHS "
@@ -3146,6 +3166,23 @@ REGISTRY = {
         "counts by CALIBRATION[0] before anything else reads them -- "
         "2MASS is the reference survey, VHS the extension, and no SESNA "
         "count enters this ratio on either side."),
+    ("counts_vhs_hpx512", "KS_COMPLETE_TO"): ("mag VISTA Ks",
+        "C28, 2026-10-21: this region's own MEASURED completeness turnover "
+        "-- the faint edge of the half-magnitude bin whose own "
+        "deep-covered-pixel differential count SLOPE first falls below "
+        "the brighter bins' own fitted slope trend by more than one "
+        "Poisson sigma (sky.derived.vhs_counts.differential_turnover_mag, "
+        "the same construction sky.derived.ukidss_counts uses), already "
+        "rounded down to the half-magnitude grid. Where a LATER bin's own "
+        "count exceeds the flagged bin's (the flag did not hold -- the "
+        "brief's own ambiguous case), this is instead PUBLISHED_DEPTH_MAG "
+        "(18.0, McMahon et al. 2013, The Messenger 154, 35), never a "
+        "silently patched measurement. This file's own faint edge (18.5) "
+        "if no bin's slope ever falls below the trend within the "
+        "measured range, never beyond it. NaN where this region carries "
+        "no VHS coverage at all. population.anchor_tiles takes the "
+        "region's own deep anchor edge as min(18.0, this number), never "
+        "past the survey's own measured depth or its published ceiling."),
 
     ("colours_knots_survey", "LOG10_RATIO"): ("dex",
         "log10(F_IRAC_band / F_2.12um) for every Giannini et al. (2013) knot "

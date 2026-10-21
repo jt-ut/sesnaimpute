@@ -35,6 +35,12 @@ this download carries Ks alone, not J or H, so the term cannot be
 evaluated per source and is left unapplied for the same reason
 `ukidss_counts` leaves its own term unapplied: a few percent of one
 0.5-mag bin width, not a correction the counts feel.
+
+C28 (2026-10-21): `MAG_EDGES` extends to 18.5 against the download's
+own new `Ks < 18.5` cut, and this module measures its own completeness
+turnover the same way `ukidss_counts.differential_turnover_mag` does --
+see that module's own docstring for the construction and
+`KS_COMPLETE_TO`'s own reading below.
 """
 
 import os
@@ -59,10 +65,24 @@ NSIDE = 512
 #: Row-batch memory budget (rule 10b): one row per VHS detection, as
 #: `ukidss_counts.ROW_BATCH_BUDGET_BYTES` is for its own download.
 ROW_BATCH_BUDGET_BYTES = 512 << 20
-#: Sixteen half-magnitude bins, 9.0-17.0 -- the same grid
-#: `sky.derived.ukidss_counts.MAG_EDGES` uses, against this download's
-#: own `Ks < 17.5` cut (`sky.download.vhs.build.K_CEILING`).
-MAG_EDGES = np.arange(9.0, 17.0001, 0.5)
+#: Nineteen half-magnitude bins, 9.0-18.5 (C28, 2026-10-21: raised from
+#: 17.0) -- the same grid `sky.derived.ukidss_counts.MAG_EDGES` uses,
+#: against this download's own `Ks < 18.5` cut
+#: (`sky.download.vhs.build.K_CEILING`).
+MAG_EDGES = np.arange(9.0, 18.5001, 0.5)
+
+#: C28 item 3: the same turnover-test constants
+#: `sky.derived.ukidss_counts` uses.
+TURNOVER_LOWER_MAG = 15.0
+TURNOVER_SIGMA = 1.0
+
+#: C28 item 3's own escape clause: VHS's published 5-sigma depth for the
+#: main/wide survey component (McMahon et al. 2013, The Messenger 154,
+#: 35, sec. 2 survey design table) -- used in place of a measured
+#: turnover the ambiguity check (`differential_turnover_mag`'s own
+#: `ambiguous` flag) rejects, the same construction
+#: `sky.derived.ukidss_counts.PUBLISHED_DEPTH_MAG` uses for GPS.
+PUBLISHED_DEPTH_MAG = 18.0
 
 #: The archive's own point-like `mergedClass` codes this module counts
 #: (module docstring) -- the same two `sky.derived.ukidss_counts.
@@ -183,7 +203,100 @@ def calibration_ratio(n_2mass_overlap, n_vhs_overlap, deep_covered):
     return ratio, ratio * np.exp(-sigma_ln), ratio * np.exp(sigma_ln)
 
 
-def _write_region(config, region, pixels, n, calibration):
+def _floor_half_mag(mag):
+    """`mag` rounded DOWN to the nearest half-magnitude grid point --
+    `sky.derived.ukidss_counts._floor_half_mag`, lifted verbatim."""
+    return float(np.floor(mag * 2.0 + 1e-9) / 2.0)
+
+
+def _wls_predict(x, y, sigma_y, x0):
+    """`sky.derived.ukidss_counts._wls_predict`, lifted verbatim (that
+    module's own docstring)."""
+    w = 1.0 / sigma_y ** 2
+    s = w.sum()
+    sx = (w * x).sum()
+    sy = (w * y).sum()
+    sxx = (w * x * x).sum()
+    sxy = (w * x * y).sum()
+    delta = s * sxx - sx * sx
+    slope = (s * sxy - sx * sy) / delta
+    intercept = (sxx * sy - sx * sxy) / delta
+    predicted = slope * x0 + intercept
+    var_pred = (sxx - 2.0 * x0 * sx + x0 * x0 * s) / delta
+    return predicted, np.sqrt(max(var_pred, 0.0))
+
+
+def differential_turnover_mag(n, deep_covered, mag_edges=None,
+                               lower_mag=TURNOVER_LOWER_MAG, sigma=TURNOVER_SIGMA):
+    """`sky.derived.ukidss_counts.differential_turnover_mag`'s own
+    construction (that module's own docstring: tracks the pooled count's
+    own log10 SLOPE bin to bin, never the level, since even a fully
+    complete luminosity function decelerates smoothly well before any
+    hard depth limit; the ambiguity check below, same construction),
+    against this module's `MAG_EDGES`. Returns `(complete_to, centres,
+    counts, turned, ambiguous)`."""
+    edges = MAG_EDGES if mag_edges is None else np.asarray(mag_edges, dtype=np.float64)
+    if not np.any(deep_covered):
+        return float("nan"), np.zeros(0), np.zeros(0), np.zeros(0, dtype=bool), False
+    lo_bin = max(int(np.searchsorted(edges, lower_mag + 1e-9)) - 1, 0)
+    edges_sub = edges[lo_bin:]
+    counts = n[deep_covered][:, lo_bin:].sum(axis=0).astype(np.float64)
+    centres = 0.5 * (edges_sub[:-1] + edges_sub[1:])
+    n_bins = counts.size
+    turned = np.zeros(n_bins, dtype=bool)
+    if n_bins < 4:
+        return float(edges_sub[-1]), centres, counts, turned, False
+    empty = np.flatnonzero(counts <= 0.0)
+    if empty.size:
+        first_empty = int(empty[0])
+        turned[first_empty:] = True
+        return float(edges_sub[first_empty]), centres, counts, turned, False
+    log_counts = np.log10(counts)
+    sigma_log = 1.0 / (np.sqrt(counts) * np.log(10.0))
+    dx = centres[1:] - centres[:-1]
+    slopes = (log_counts[1:] - log_counts[:-1]) / dx
+    sigma_slope = np.sqrt(sigma_log[1:] ** 2 + sigma_log[:-1] ** 2) / dx
+    x_slope = centres[1:]
+    good = [0, 1]
+    first_turn = None
+    for k in range(2, slopes.size):
+        predicted, sigma_fit = _wls_predict(x_slope[good], slopes[good], sigma_slope[good], x_slope[k])
+        sigma_total = np.sqrt(sigma_fit ** 2 + sigma_slope[k] ** 2)
+        if (predicted - slopes[k]) > sigma * sigma_total:
+            turned[k + 1] = True
+            first_turn = (k + 1) if first_turn is None else first_turn
+        else:
+            good.append(k)
+    if first_turn is None:
+        return float(edges_sub[-1]), centres, counts, turned, False
+    ambiguous = first_turn + 1 < n_bins and bool(np.max(counts[first_turn + 1:]) > counts[first_turn])
+    complete_to = float(edges_sub[first_turn])
+    return complete_to, centres, counts, turned, ambiguous
+
+
+def quartile_turnover_mags(n, deep_covered, mag_edges=None,
+                           lower_mag=TURNOVER_LOWER_MAG, sigma=TURNOVER_SIGMA):
+    """`sky.derived.ukidss_counts.quartile_turnover_mags`'s own
+    construction, against this module's `MAG_EDGES`."""
+    idx_covered = np.flatnonzero(deep_covered)
+    if idx_covered.size < 8:
+        return []
+    density = n[idx_covered].sum(axis=1).astype(np.float64)
+    q_edges = np.percentile(density, [25.0, 50.0, 75.0])
+    q_of = np.searchsorted(q_edges, density, side="right")
+    out = []
+    for q in range(4):
+        mask = np.zeros(deep_covered.shape, dtype=bool)
+        mask[idx_covered[q_of == q]] = True
+        if mask.sum() < 4:
+            out.append(float("nan"))
+            continue
+        complete_to, _, _, _, _ = differential_turnover_mag(n, mask, mag_edges, lower_mag, sigma)
+        out.append(complete_to)
+    return out
+
+
+def _write_region(config, region, pixels, n, calibration, ks_complete_to):
     out_path = config_module.product_path(config, "sky/derived", "vhs", "counts", "hpx512", region=region)
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with h5py.File(out_path, "w") as f:
@@ -194,6 +307,7 @@ def _write_region(config, region, pixels, n, calibration):
             ("MAG_EDGES", MAG_EDGES.astype(np.float64)),
             ("N", n.astype(np.int64)),
             ("CALIBRATION", np.asarray(calibration, dtype=np.float64)),
+            ("KS_COMPLETE_TO", np.float64(ks_complete_to)),
         ):
             build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
 
@@ -222,7 +336,15 @@ def build(config, regions=None):
             n, n_overlap = _counts_matrix(pixels, _download_path(config, region), overlap_edges)
             deep_covered = n.sum(axis=1) > 0
             calibration = calibration_ratio(n_2mass_overlap, n_overlap, deep_covered)
-            _write_region(config, region, pixels, n, calibration)
+            complete_to_raw, centres, counts, turned, ambiguous = differential_turnover_mag(n, deep_covered)
+            if not np.isfinite(complete_to_raw):
+                ks_complete_to = float("nan")
+            elif ambiguous:
+                ks_complete_to = PUBLISHED_DEPTH_MAG
+            else:
+                ks_complete_to = _floor_half_mag(complete_to_raw)
+            quartiles = quartile_turnover_mags(n, deep_covered)
+            _write_region(config, region, pixels, n, calibration, ks_complete_to)
             written.append(region)
             total_counts += int(n.sum())
             ratio, lo, hi = calibration
@@ -230,6 +352,19 @@ def build(config, regions=None):
                   f"{int(deep_covered.sum())} deep-covered, calibration (2MASS/VHS, Ks "
                   f"{OVERLAP_LOWER_MAG:.1f}-{overlap_edges[-1]:.1f}) = {ratio:.4f} "
                   f"[{lo:.4f}, {hi:.4f}]")
+            if np.isfinite(complete_to_raw):
+                bin_report = ", ".join(
+                    f"{centres[j]:.2f}:{counts[j]:.0f}{'*' if turned[j] else ''}"
+                    for j in range(centres.size))
+                amb_note = (f" -- AMBIGUOUS (a later bin's count exceeds the flagged bin's own "
+                            f"count): using the published depth {PUBLISHED_DEPTH_MAG:.1f} instead "
+                            f"(McMahon et al. 2013, The Messenger 154, 35)" if ambiguous else "")
+                print(f"vhs_counts derive: {region}: turnover measured at {complete_to_raw:.2f}{amb_note} "
+                      f"(KS_COMPLETE_TO {ks_complete_to:.1f}, anchor edge min(18.0, this) applies "
+                      f"downstream); bins (centre:count, * turned over): {bin_report}; "
+                      f"pixel-density-quartile turnovers: {quartiles}")
+            else:
+                print(f"vhs_counts derive: {region}: no deep coverage at all -- KS_COMPLETE_TO nan")
             st.tick(i + 1, n_regions, "regions")
         st.done(None, regions=n_regions, total_counts=total_counts)
     return dict(regions_written=written)

@@ -154,10 +154,17 @@ KS_CUT_MAG = 14.3
 #: `KS_DEEP_CUT_MAG`.
 KS_SHARED_END_MAG = 14.0
 
-#: W38: one magnitude inside the UKIDSS GPS 5-sigma depth (Lucas et al.
-#: 2008, MNRAS 391, 136) -- the Ks axis's own deep edge wherever a
-#: region's split exists.
-KS_DEEP_CUT_MAG = 17.0
+#: C28 (2026-10-21): the Ks axis's own deep edge CEILING, never exceeded
+#: regardless of what a region's own measured completeness supports --
+#: one magnitude inside the UKIDSS GPS / VHS 5-sigma depth (Lucas et al.
+#: 2008, MNRAS 391, 136; Gonzalez-Fernandez et al. 2018, MNRAS 474,
+#: 5459). Raised from 17.0 (W38): the 18-56 uJy STAR members sit at Ks
+#: 17-18.3 (C24f/g), beyond the old edge. The region's OWN deep edge,
+#: used everywhere below, is `_region_ks_deep_cut`'s
+#: `min(KS_DEEP_CUT_MAG, that region's measured KS_COMPLETE_TO)` --
+#: never this ceiling alone, and never past the survey's own measured
+#: turnover.
+KS_DEEP_CUT_MAG = 18.0
 
 #: The tile-size bias-variance optimum's own constant (quarry
 #: `zone_grid.l_star_optimum`): counting noise on a tile's ratio goes as
@@ -549,30 +556,55 @@ KS_SOURCE_UKIDSS = 1
 KS_SOURCE_VHS = 2
 
 
-def _combine_ks_axis(ks_edges_2mass, n_ks_obs_2mass, deep_sources):
-    """W46, extended C19 Part B item 6: no split magnitude. `deep_sources`
-    is an ordered sequence of `(code, edges, n_obs, covered)` -- one
-    entry per deep survey this region's root carries (`KS_SOURCE_UKIDSS`
-    first, `KS_SOURCE_VHS` second: UKIDSS's own count is taken on a
-    pixel it covers, VHS's only where UKIDSS does not). On the shared
-    grid 9.0-`KS_SHARED_END_MAG` (2MASS's own regular half-magnitude
-    bins; the odd trailing 14.0-14.3 bin is dropped, replaced by the
-    deep surveys' own 14.0-14.5 bin) each bin takes, for every pixel,
-    whichever side -- 2MASS, or the deep surveys combined by that same
-    priority -- has the larger region-summed count over the pixels any
-    deep survey covers; a deep-chosen bin falls back to 2MASS's own
-    count on a pixel no deep survey covers. From `KS_SHARED_END_MAG` to
-    `KS_DEEP_CUT_MAG` the axis is the deep surveys' own bins, combined
-    by the same per-pixel priority, zero (unmeasured, not measured-and-
-    empty) on a pixel neither covers. Each returned bin's `KS_SOURCE`
-    code is whichever source (2MASS, or the deep survey whose own
-    pixels contributed the larger summed count to that bin -- the
-    per-pixel priority already makes every pixel's count belong to
-    exactly one source, so this is a real measured majority, never a
-    fabricated split) the bin's own counts actually came from. Returns
-    `(ks_edges, n_ks_obs, ks_source)`; the 2MASS axis unchanged, source
-    all 0, where no deep survey carries any coverage for this region at
-    all.
+def _region_ks_deep_cut(ukidss_complete_to, vhs_complete_to, ukidss_covered, vhs_covered):
+    """C28 item 3: this region's OWN deep Ks edge -- `min(KS_DEEP_CUT_MAG`
+    (the ceiling), the FAINTEST this region's own covering deep survey or
+    surveys were measured complete to (each already rounded down to the
+    half-magnitude grid by `sky.derived.ukidss_counts`/`vhs_counts`
+    before it ever reaches here). The SHALLOWER of the two where both
+    cover this region (never the deeper one -- a bin only one survey
+    actually measured complete is not complete region-wide). Returns
+    `KS_DEEP_CUT_MAG` itself where neither survey covers this region at
+    all -- irrelevant in that case, since `_combine_ks_axis` never
+    enters its deep branch without an active, covering source."""
+    candidates = []
+    if np.any(ukidss_covered) and np.isfinite(ukidss_complete_to):
+        candidates.append(float(ukidss_complete_to))
+    if np.any(vhs_covered) and np.isfinite(vhs_complete_to):
+        candidates.append(float(vhs_complete_to))
+    if not candidates:
+        return KS_DEEP_CUT_MAG
+    return min(KS_DEEP_CUT_MAG, min(candidates))
+
+
+def _combine_ks_axis(ks_edges_2mass, n_ks_obs_2mass, deep_sources, deep_cut_mag=KS_DEEP_CUT_MAG):
+    """W46, extended C19 Part B item 6, extended C28 item 4: no split
+    magnitude. `deep_sources` is an ordered sequence of `(code, edges,
+    n_obs, covered)` -- one entry per deep survey this region's root
+    carries (`KS_SOURCE_UKIDSS` first, `KS_SOURCE_VHS` second: UKIDSS's
+    own count is taken on a pixel it covers, VHS's only where UKIDSS
+    does not). On the shared grid 9.0-`KS_SHARED_END_MAG` (2MASS's own
+    regular half-magnitude bins; the odd trailing 14.0-14.3 bin is
+    dropped, replaced by the deep surveys' own 14.0-14.5 bin) each bin
+    takes, for every pixel, whichever side -- 2MASS, or the deep
+    surveys combined by that same priority -- has the larger
+    region-summed count over the pixels any deep survey covers; a
+    deep-chosen bin falls back to 2MASS's own count on a pixel no deep
+    survey covers. From `KS_SHARED_END_MAG` to `deep_cut_mag` (C28: this
+    region's OWN measured-complete edge, `_region_ks_deep_cut`, never
+    past `KS_DEEP_CUT_MAG`) the axis is the deep surveys' own bins,
+    combined by the same per-pixel priority, zero (unmeasured, not
+    measured-and-empty) on a pixel neither covers; a deep survey's own
+    bins PAST `deep_cut_mag` (it may carry more, out to its own product's
+    faint edge) are never read at all, by construction. Each returned
+    bin's `KS_SOURCE` code is whichever source (2MASS, or the deep
+    survey whose own pixels contributed the larger summed count to that
+    bin -- the per-pixel priority already makes every pixel's count
+    belong to exactly one source, so this is a real measured majority,
+    never a fabricated split) the bin's own counts actually came from.
+    Returns `(ks_edges, n_ks_obs, ks_source)`; the 2MASS axis unchanged,
+    source all 0, where no deep survey carries any coverage for this
+    region at all.
     """
     active = [d for d in deep_sources if np.any(d[2])]
     if not active:
@@ -597,7 +629,12 @@ def _combine_ks_axis(ks_edges_2mass, n_ks_obs_2mass, deep_sources):
             "anchor_tiles: the shared 9.0-%.1f Ks grid does not land on the deep "
             "surveys' own bin edges -- the products' MAG_EDGES have drifted apart" % KS_SHARED_END_MAG)
     shared_cols = np.argmax(match, axis=1)
-    is_deep = deep_lower >= shared_edges[-1] - 1e-9
+    # C28: deep bins run from the shared grid's own faint edge out to
+    # THIS REGION's own measured-complete edge, never past it -- a deep
+    # survey's own product may carry bins fainter than that (it measures
+    # out to its own product's faint edge regardless of where THIS
+    # region turned over), and those are never read here.
+    is_deep = (deep_lower >= shared_edges[-1] - 1e-9) & (deep_lower < deep_cut_mag - 1e-9)
 
     def _combine(col_select):
         """Per-pixel priority combine over `active` on the bin columns
@@ -698,6 +735,7 @@ def _read_anchor_counts(config, region, pixels):
         ukidss_edges = np.asarray(f["MAG_EDGES"][:], dtype=np.float64)
         ukidss_n = np.asarray(f["N"][:], dtype=np.float64)
         ukidss_calibration_ratio = float(np.asarray(f["CALIBRATION"][:], dtype=np.float64)[0])
+        ukidss_complete_to = float(np.asarray(f["KS_COMPLETE_TO"][()], dtype=np.float64))
     vhs_path = config_module.product_path(config, "sky/derived", "vhs", "counts", "hpx512", region=region)
     if not os.path.exists(vhs_path):
         raise FileNotFoundError(
@@ -708,6 +746,7 @@ def _read_anchor_counts(config, region, pixels):
         vhs_edges = np.asarray(f["MAG_EDGES"][:], dtype=np.float64)
         vhs_n = np.asarray(f["N"][:], dtype=np.float64)
         vhs_calibration_ratio = float(np.asarray(f["CALIBRATION"][:], dtype=np.float64)[0])
+        vhs_complete_to = float(np.asarray(f["KS_COMPLETE_TO"][()], dtype=np.float64))
     # C19 Part A item 3 / Part B item 5: 2MASS is the reference survey,
     # UKIDSS and VHS the extensions -- each deep survey's own counts
     # product's own CALIBRATION[0] (2MASS count / that survey's count,
@@ -751,12 +790,18 @@ def _read_anchor_counts(config, region, pixels):
         (KS_SOURCE_UKIDSS, ukidss_edges, ukidss_n, ukidss_covered),
         (KS_SOURCE_VHS, vhs_edges, vhs_n, vhs_covered),
     )
-    ks_edges, ks_n, ks_source = _combine_ks_axis(ks_edges_2mass, ks_n_2mass, deep_sources)
-    has_deep = abs(float(ks_edges[-1]) - KS_DEEP_CUT_MAG) < 1e-6
+    # C28 item 4: this region's OWN deep edge -- never past KS_DEEP_CUT_MAG
+    # (the ceiling) or past what either covering survey was actually
+    # measured complete to (sky.derived.ukidss_counts/vhs_counts's own
+    # KS_COMPLETE_TO, `_region_ks_deep_cut`).
+    deep_cut_mag = _region_ks_deep_cut(ukidss_complete_to, vhs_complete_to, ukidss_covered, vhs_covered)
+    ks_edges, ks_n, ks_source = _combine_ks_axis(ks_edges_2mass, ks_n_2mass, deep_sources, deep_cut_mag)
+    has_deep = abs(float(ks_edges[-1]) - deep_cut_mag) < 1e-6
     if not has_deep and abs(float(ks_edges[-1]) - KS_CUT_MAG) > 1e-6:
         raise ValueError(
             f"anchor_tiles: {region!r}'s combined Ks edges end at {ks_edges[-1]!r}, "
-            f"not {KS_DEEP_CUT_MAG} (deep) or {KS_CUT_MAG} (no deep survey)")
+            f"not {deep_cut_mag} (this region's own deep edge) or {KS_CUT_MAG} "
+            "(no deep survey)")
     return g_edges, n_g_obs, ks_edges, ks_n, ks_source, deep_covered
 
 
@@ -993,7 +1038,11 @@ def build_region(config, region):
     # UKIDSS never needs this: its own count already fell back to
     # 2MASS's on an uncovered pixel (`_combine_ks_axis`), so the
     # predicted side stays comparable to real observed evidence there.
-    has_deep = abs(float(ks_edges[-1]) - KS_DEEP_CUT_MAG) < 1e-6
+    # C28: the region's own deep edge varies (`_region_ks_deep_cut`), so
+    # "has a deep extension at all" is read off `ks_edges` itself -- past
+    # KS_CUT_MAG (14.3) only when `_combine_ks_axis` actually took one,
+    # never the fixed ceiling.
+    has_deep = float(ks_edges[-1]) > KS_CUT_MAG + 1e-6
     if has_deep:
         deep_bin = ks_edges[:-1] >= KS_SHARED_END_MAG - 1e-9
         drop = ~deep_covered[:, None] & deep_bin[None, :]
