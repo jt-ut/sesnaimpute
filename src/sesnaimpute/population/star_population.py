@@ -11,33 +11,44 @@ on a tile's own line of sight, and what per-star anchor weight
 PAHC, the brightness unit `B`, and PAHC's contamination weight are a
 second, later module.
 
-Placement (spec section 2.2, "Per tile"). A field star carries a distance
-but no sky position of its own (`population.field_stars`'s one TRILEGAL
-pointing per region); a tile's own extinction profile is therefore
-approximated by ONE mean profile: the source-weighted mean, over the
-tile's own distinct nside-256 sightlines, of that sightline's own
-`u(d) = a_of_d(d, pix, A_pix) / A_pix` (`sky.derived.profile.read(...)`),
-on one shared distance grid (the profile product's own `DIST_PC` plus a
-log-spaced tail from the map's edge to 10 kpc, spec section 1.4's far-
-field tail). Every retained field star's `u_i` is then read off that ONE
-mean profile at its own distance; `a_i = A_tile * u_i`, `A_tile` the mean
-adopted column of the tile's own sources. One tile, one mean profile, one
-column: the approximation this module makes.
+Placement (spec section 2.2, "Per tile"; C22 fix, round 4 2026-10-20). A
+field star carries a distance but no sky position of its own
+(`population.field_stars`'s one TRILEGAL pointing per region). Each
+retained field star is placed on one of its own tile's anchor pixels
+(`population.anchor_tiles`' own nside-512 grid), drawn with probability
+proportional to the pixel's own solid angle -- every nside-512 pixel
+shares one solid angle by construction (HEALPix is equal-area), so the
+draw is uniform over the tile's own occupied pixels (`_build_one_tile`)
+-- and dimmed at THAT pixel's own column `A_PIX_K` on its own parent
+nside-256 sightline's profile, `u(d) = a_of_d(d, pix, A_pix) / A_pix`
+(`sky.derived.profile.read(...)`), the SAME construction
+`anchor_tiles.anchor_observables` fits the anchor weights on. The fit and
+the assignment now share one construction (C18 follow-up 5/6: the joint
+and marginal weights were FITTED per pixel but ASSIGNED at the tile
+mean, so a star placed below or above its own pixel's column read the
+wrong side of a steep G/Ks cell). `a_i`, a star's own local extinction,
+is its own drawn pixel's `A_PIX_K` times `u_i`, its own placement
+fraction on that SAME pixel's profile. The tile's own mean profile (the
+source-weighted mean, over the tile's distinct nside-256 sightlines,
+`tile_mean_u`) and mean column (`a_tile`) remain, report-only, for
+`_report`'s own shape diagnostics (u(300 pc)/u(1 kpc), the monotonic-
+and-<=1 checks); no star's own weight reads either any more.
 
 Per-star weight (spec section 2.1's `star_reweight_factor`). Every
-retained field star, placed at this tile's own `a_i`, predicts its own
-observed `(G_obs, Ks_obs)` (`anchor_tiles.magnitudes_at_extinction`, the
-project's one place a local column becomes the two anchor magnitudes);
-the tile's own `W_JOINT` table (`population.anchor_weights`) supplies the
-weight where the bin is populated by a real crossmatch (`USE_JOINT`),
-else the `G` or `Ks` marginal the star's own predicted magnitude falls
-inside. Where BOTH marginals apply and the joint bin does not, the star's
-own PLACEMENT decides which one anchor stands in (owner ruling
-2026-09-06, item 2, replacing the geometric mean this module used to
-cite to a §2.1 phrase that is not there): a star in front of the cloud
-(its own `u = A(d)/A(inf)` below `u_front`, this tile's mean profile
-read at the cloud's own measured near edge, `profile.
-cloud_front_edge_pc`) takes the Gaia weight at its own magnitude, a
+retained field star, placed at its own drawn pixel's `a_i`, predicts its
+own observed `(G_obs, Ks_obs)` (`anchor_tiles.magnitudes_at_extinction`,
+the project's one place a local column becomes the two anchor
+magnitudes); the tile's own `W_JOINT` table (`population.anchor_weights`)
+supplies the weight where the bin is populated by a real crossmatch
+(`USE_JOINT`), else the `G` or `Ks` marginal the star's own predicted
+magnitude falls inside. Where BOTH marginals apply and the joint bin
+does not, the star's own PLACEMENT decides which one anchor stands in
+(owner ruling 2026-09-06, item 2, replacing the geometric mean this
+module used to cite to a §2.1 phrase that is not there): a star in
+front of the cloud (its own `u = A(d)/A(inf)` below `u_front`, its own
+drawn pixel's profile read at the cloud's own measured near edge,
+`profile.cloud_front_edge_pc` -- per star now, C22, not one tile-mean
+value) takes the Gaia weight at its own magnitude, a
 star behind the cloud takes the 2MASS weight, and where that side's own
 bin carries no finite weight at all -- unmeasured even after
 `population.anchor_weights`' survey-pooled fallback -- the star takes the
@@ -109,17 +120,20 @@ attrs `GRANULE="tile"`, `OMEGA_SIM_DEG2`, `F_DUSTY_O`, `F_DUSTY_C`,
 `F_DUSTY_MEAN`, `F_C`; a `LIMIT8_GRID_MJY` (8,) dataset, the region's PAHC
 limit grid; one HDF5 group `tile_<id>` per tile, attr
 `OMEGA_POINTING_DEG2`, with datasets `STAR_INDEX` (row into
-`population.field_stars`' retained group), `XI`, `W`, `W_STAR`, `W_AGB`,
+`population.field_stars`' retained group), `HPX_PIX_512` (the star's own
+drawn anchor pixel, C22), `XI`, `W`, `W_STAR`, `W_AGB`,
 `IS_EVOLVED`, `LOG10_B`, `LOG10_B_PAHC`, `LOG10_B_AGB_C`, `LOG10_B_AGB_O`,
 `P_PAHC` (n_star, 8). The population stores each
 star's placement fraction `XI` alone (owner, 2026-09-06): a star's own
 extinction is `A_s * XI`, `A_s` a real source's own adopted column, formed
 at read time by the consumer that has a source to apply it to; this
-module never stores a tile-mean extinction. The tile's own mean column
-(`a_tile`, computed below) is still used internally, unstored, to place
-each simulated star's predicted magnitude for the anchor-weight lookup
-and the PAHC contamination weight -- the same per-tile approximation the
-module docstring above already describes for `XI` itself.
+module never stores a tile-mean extinction. `XI` is now (C22) the star's
+own placement fraction on its own DRAWN pixel's profile, `A_PIX_K` that
+SAME pixel's own column -- what this module itself uses, in memory, to
+place each simulated star's predicted magnitude for the anchor-weight
+lookup and the PAHC contamination weight; the tile's own mean column
+(`a_tile`) and mean profile (`tile_mean_u`) are report-only (module
+docstring, "Placement").
 """
 
 import functools
@@ -164,6 +178,16 @@ TAIL_MAX_PC = 10_000.0
 #: or vertical model, `sky.derived.profile`), so a modest sampling between
 #: the map edge and `TAIL_MAX_PC` suffices.
 TAIL_N_NODES = 64
+
+#: C22 fix (round 4, 2026-10-20): the per-star anchor-pixel draw's own
+#: seed (module docstring, "Placement"). Every nside-512 pixel shares one
+#: solid angle by construction (HEALPix is equal-area), so drawing
+#: "proportional to the pixel's own solid angle" reduces to a uniform
+#: draw over a tile's own occupied pixels; `_build_one_tile` seeds its own
+#: `np.random.default_rng((PIXEL_ASSIGNMENT_SEED, tile_id))`, so the draw
+#: is deterministic and independent of a tile's own processing order or
+#: `n_jobs`.
+PIXEL_ASSIGNMENT_SEED = 22
 
 #: WEIGHT_RULE codes (module docstring).
 WEIGHT_RULE_JOINT = 0
@@ -239,7 +263,13 @@ def tile_mean_u(profile_obj, dist_grid, pix256, a_pix, n_src):
     (`pix256`, each's own source count `n_src`), of that sightline's own
     `u(d) = a_of_d(d, pix, A_pix) / A_pix` (spec section 1.4's `u`,
     section 2.2's "Per tile"). One `profile.u` call per sightline, over
-    the whole grid at once -- never per star (module docstring)."""
+    the whole grid at once -- never per star (module docstring).
+
+    C22 (round 4, 2026-10-20): report-only now. `_report` still reads
+    this for its own shape diagnostics (u(300 pc)/u(1 kpc), the
+    monotonic-and-<=1 checks); no star's own placement or weight is
+    built from it any more (`_build_one_tile` draws each star its own
+    anchor pixel instead)."""
     weight = n_src.astype(np.float64) / n_src.sum()
     mean_u = np.zeros(dist_grid.size, dtype=np.float64)
     for j in range(pix256.size):
@@ -274,11 +304,11 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
     did or did not populate a bin, independent of exclusion).
     `populated_g`/`populated_ks` are this tile's table's own explicit
     per-bin evidence flag (item 3); `u_star` is the star's own placement
-    `A(d)/A(inf)` on this tile's mean profile (`tile_mean_u`); `u_front`
-    is that SAME mean profile's own value at the cloud's measured near
-    edge (`profile.cloud_front_edge_pc`, `_build_one_tile`'s
-    `u_front_tile`) -- the front/behind boundary a star's own placement is
-    compared against.
+    `A(d)/A(inf)` on its own drawn anchor pixel's profile (C22,
+    `_build_one_tile`); `u_front` is that SAME pixel's own profile value
+    at the cloud's measured near edge (`profile.cloud_front_edge_pc`) --
+    per star now, not one tile-mean value -- the front/behind boundary a
+    star's own placement is compared against.
 
     Owner ruling 2026-09-06, item 2: where both marginals are in range
     but the joint bin is not populated, the geometric mean is replaced by
@@ -758,6 +788,53 @@ def _read_anchor_ratio(config, region):
     return n_obs / n_pred if n_pred > 0 else float("nan")
 
 
+def _read_ks_obs_2mass(config, region):
+    """`(KS_EDGES, N_KS_OBS)`, the region's own observed 2MASS (and, on a
+    deep-covered region, UKIDSS) Ks histogram, summed over every one of
+    this region's own admitted anchor pixels (`population.anchor_tiles`'
+    histograms product's own `N_KS_OBS`, the same per-pixel field the
+    C18 diagnosis's `test2_anchors.py` sums per tile) -- C21 item 3's own
+    "2MASS anchor" reference, read directly here since this check needs
+    no tile breakdown of it."""
+    path = config_module.product_path(config, "population", "anchors", "histograms", "hpx512", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            "prior.star_population: anchor histograms missing for region %r at %s -- "
+            "run the `prior.anchor_tiles` RUNBOOK line first" % (region, path))
+    with h5py.File(path, "r") as f:
+        ks_edges = np.asarray(f["KS_EDGES"][:], dtype=np.float64)
+        n_ks_obs = np.asarray(f["N_KS_OBS"][:], dtype=np.float64).sum(axis=0)
+    return ks_edges, n_ks_obs
+
+
+def final_pop_ks_hist_by_rule(tiles, n_bin):
+    """C21 item 3: the final field-star population's own Ks histogram
+    (every retained star, STAR and AGB alike, at `W`), split by
+    `WEIGHT_RULE` code, on `_read_ks_obs_2mass`'s own (un-extended)
+    `KS_EDGES` -- `bin_ks` shares that axis's prefix exactly, since the
+    C6 faint-end extension (`anchor_weights._extend_shallow_ks_axis`)
+    only APPENDS bins after it, so a star's own `bin_ks` needs no
+    re-digitizing here, only clipping to `n_bin` to drop the synthetic
+    extension's own stars (out of scope for a check against a real
+    2MASS/UKIDSS anchor). Built at THIS module's own per-star, per-drawn-
+    pixel placement (C22) -- the same construction `star_weights` itself
+    reads its G/Ks bins off -- not the C18 diagnosis's own atlas-grounded external
+    check (`test2_anchors.py`/`test3_catalogue_side.py`, which re-dims
+    every admitted PIXEL by its own real column; this module never
+    reads `bmstp.atlas`, by the package's own layering). A departure
+    from 1 here is the weight-RULE mechanism's own footprint on the
+    model's predicted counts, not a pixel-level extinction effect --
+    the stage's OWN build-time check, printed and stored per region."""
+    hist = np.zeros((N_WEIGHT_RULES, n_bin), dtype=np.float64)
+    for t in tiles:
+        in_range = t["bin_ks"] < n_bin
+        if not np.any(in_range):
+            continue
+        np.add.at(hist, (t["rule"][in_range], t["bin_ks"][in_range]),
+                  t["w"][in_range].astype(np.float64))
+    return hist
+
+
 def _region_source_geometry(config, region, tiles):
     """Per-source `HPX_PIX_256`, extinction column, and tile assignment
     (module docstring's Inputs): the tiles product's own `HPX_PIX_512 ->
@@ -800,7 +877,7 @@ def tile_centre_lb(pix256_t):
     return float(np.mean(l)), float(np.mean(b))
 
 
-def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, curve,
+def _build_one_tile(config, t, geom, stars, weights, pixel_table, profile_obj, dist_grid, curve,
                      pointing_l, pointing_b, present_pointings, front_edge_pc, region):
     """One tile's placement, weight, partition and brightness units, built
     from ONE pointing's simulated stars only (owner ruling 2026-09-06:
@@ -818,7 +895,15 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     cells, so a tile assigned to an absent grid cell would draw an empty
     sample and every downstream quantity here would be built from zero
     stars. With every grid cell on disk, `present_pointings` is the whole
-    grid and the mapping is unchanged."""
+    grid and the mapping is unchanged.
+
+    `pixel_table` (C22, `build_region`'s own region-wide read, bound in
+    once by `functools.partial` like `geom`/`stars`/`weights`): the
+    region's own occupied nside-512 anchor pixels, aligned 1:1 with the
+    tiles product's own `HPX_PIX_512`/`TILE_ID` -- `pix512`, each pixel's
+    parent nside-256 sightline `parent256`, and each pixel's own mean
+    extinction column `a_pix` (`A_PIX_K`), the SAME three arrays
+    `anchor_tiles.anchor_observables` fits the anchor weights on."""
     in_tile = geom["tile"] == t
     pix256_t = geom["pix256"][in_tile]
     a_col_t = geom["a_col"][in_tile]
@@ -838,8 +923,38 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     p_idx = int(present_pointings[p_local])
     star_index = np.flatnonzero(stars["pointing_index"] == p_idx).astype(np.int32)
 
-    u_i = np.interp(stars["dist_pc"][star_index], dist_grid, mean_u)
-    a_i = a_tile * u_i
+    # C22 fix: each simulated star is placed on one of THIS tile's own
+    # anchor pixels (`pixel_table`), drawn with probability proportional
+    # to the pixel's own solid angle -- every nside-512 pixel shares one
+    # solid angle by construction (HEALPix is equal-area), so the draw
+    # is a uniform choice over the tile's own occupied pixels. Seeded by
+    # (PIXEL_ASSIGNMENT_SEED, tile id): deterministic, independent of
+    # processing order or n_jobs.
+    pp = np.flatnonzero(pixel_table["tile_of_pix"] == t)
+    n_star = star_index.size
+    rng = np.random.default_rng((PIXEL_ASSIGNMENT_SEED, t))
+    star_pix512_idx = pp[rng.integers(0, pp.size, size=n_star)]
+    star_pix512 = pixel_table["pix512"][star_pix512_idx]
+    star_parent256 = pixel_table["parent256"][star_pix512_idx]
+    star_a_pix = pixel_table["a_pix"][star_pix512_idx]
+
+    # dimmed at THAT pixel's own column and its own parent sightline's
+    # profile -- the SAME construction `anchor_tiles.anchor_observables`
+    # fits the anchor weights on, so the fit and the assignment now share
+    # one construction. `profile_obj.u`/`.a_of_d` take one scalar
+    # `hpx_pix` per call, so stars are grouped by their drawn pixel's
+    # parent nside-256 sightline (typically one or a handful per tile);
+    # `total_column_ak` still varies star by star within a group, its own
+    # drawn pixel's `A_PIX_K`.
+    dist_i = stars["dist_pc"][star_index]
+    u_i = np.empty(n_star, dtype=np.float64)
+    u_front_i = np.empty(n_star, dtype=np.float64)
+    parent_groups, inv_parent = np.unique(star_parent256, return_inverse=True)
+    for gi, parent in enumerate(parent_groups):
+        m = inv_parent == gi
+        u_i[m] = profile_obj.u(dist_i[m], hpx_pix=int(parent), total_column_ak=star_a_pix[m])
+        u_front_i[m] = profile_obj.u(front_edge_pc, hpx_pix=int(parent), total_column_ak=star_a_pix[m])
+    a_i = star_a_pix * u_i
 
     excluded = bool(weights["excluded"][t])
     w_joint = weights["w_region_joint"] if excluded else weights["w_joint"][t]
@@ -853,7 +968,7 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     w, rule, bin_g, bin_ks = star_weights(
         g_obs, ks_obs, weights["g_edges"], weights["ks_edges"],
         w_joint, weights["use_joint"][t], w_g, w_ks,
-        weights["populated_g"], weights["populated_ks"] & weights["measured_ks"][t], u_i, u_front_tile,
+        weights["populated_g"], weights["populated_ks"] & weights["measured_ks"][t], u_i, u_front_i,
         region)
 
     # the partition (spec section 3): a REWEIGHTING of this tile's own W,
@@ -865,12 +980,21 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     p_pahc = pahc_contamination_weight(
         stars["fnu_mjy"][star_index][:, IDX_I4], a_i, stars["limit_grid_mjy"], config, curve)
 
+    # C21 item 2: the per-tile count and total weight under each
+    # WEIGHT_RULE code -- the owner ruling 2026-09-06 item 2 placement
+    # rule itself is untouched; this only makes the share of the
+    # population it decides a number in the product.
+    rule_count = np.bincount(rule, minlength=N_WEIGHT_RULES).astype(np.int64)
+    rule_weight = np.zeros(N_WEIGHT_RULES, dtype=np.float64)
+    np.add.at(rule_weight, rule, w.astype(np.float64))
+
     return dict(
         tile=t, n_sightlines=int(sightlines.size), a_tile=a_tile,
         pointing_index=p_idx, tile_l=tile_l, tile_b=tile_b,
-        star_index=star_index,
+        star_index=star_index, pix512=star_pix512.astype(np.int64),
         u=u_i.astype(np.float32), u_front=u_front_tile,
         w=w.astype(np.float32), rule=rule,
+        rule_count=rule_count, rule_weight=rule_weight,
         w_star=w_star.astype(np.float32), w_agb=w_agb.astype(np.float32),
         p_pahc=p_pahc.astype(np.float32),
         mean_u=mean_u, use_joint_any=bool(weights["use_joint"][t].any()),
@@ -878,7 +1002,7 @@ def _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, cur
     )
 
 
-def _tile_piece(piece, config, geom, stars, weights, profile_obj, dist_grid, curve,
+def _tile_piece(piece, config, geom, stars, weights, pixel_table, profile_obj, dist_grid, curve,
                  pointing_l, pointing_b, present_pointings, front_edge_pc, region):
     """One piece's own contiguous block of tile ids (owner ruling
     2026-10-09: within a region, many small pieces on one pool, never a
@@ -888,7 +1012,7 @@ def _tile_piece(piece, config, geom, stars, weights, profile_obj, dist_grid, cur
     once per tile."""
     lo, hi = piece
     return [
-        _build_one_tile(config, t, geom, stars, weights, profile_obj, dist_grid, curve,
+        _build_one_tile(config, t, geom, stars, weights, pixel_table, profile_obj, dist_grid, curve,
                          pointing_l, pointing_b, present_pointings, front_edge_pc, region)
         for t in range(lo, hi)
     ]
@@ -923,6 +1047,24 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
     weights = _read_weights(config, region)
     geom = _region_source_geometry(config, region, tiles)
 
+    # C22 fix: the region's own anchor-pixel table -- `pix512`, each
+    # pixel's parent nside-256 sightline, and its own mean extinction
+    # column `A_PIX_K` -- the SAME construction `anchor_tiles.
+    # _region_pixel_columns` builds for the weight FIT, read here so the
+    # per-star ASSIGNMENT below uses that one construction, not a
+    # separately recomputed approximation. `_region_pixel_columns`'s own
+    # deterministic sorted-unique `pixels` is bit-identical to what the
+    # tiles product's own `HPX_PIX_512` already stores (both built from
+    # the same region_slice pass); asserted, not assumed.
+    pix512_region, parent256_region, a_pix_region = anchor_tiles._region_pixel_columns(config, region)
+    if not np.array_equal(pix512_region, tiles["pix512"]):
+        raise ValueError(
+            "prior.star_population: %r's recomputed anchor pixel set disagrees with its "
+            "tiles product's own HPX_PIX_512 -- rerun `prior.anchor_tiles` for this region"
+            % region)
+    pixel_table = dict(pix512=pix512_region, parent256=parent256_region, a_pix=a_pix_region,
+                        tile_of_pix=tiles["tile_of_pix"])
+
     profile_obj = profile_module.read(config, region)
     dist_grid = shared_distance_grid(profile_obj)
     front_edge_pc = profile_obj.cloud_front_edge_pc()
@@ -947,11 +1089,12 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
     n_tile_total = tiles["n_tile"]
     # owner ruling 2026-10-09 (pieces.py): one pool over many small
     # pieces of tile ids, in place of a thread per tile -- the region-wide
-    # inputs (`geom`, `stars`, `weights`, `profile_obj`, ...) are bound by
-    # `functools.partial`, pickled once per batch by `pieces.run`'s loky
-    # pool, not once per piece.
+    # inputs (`geom`, `stars`, `weights`, `pixel_table`, `profile_obj`,
+    # ...) are bound by `functools.partial`, pickled once per batch by
+    # `pieces.run`'s loky pool, not once per piece.
     fn = functools.partial(
         _tile_piece, config=config, geom=geom, stars=stars, weights=weights,
+        pixel_table=pixel_table,
         profile_obj=profile_obj, dist_grid=dist_grid, curve=curve,
         pointing_l=pointing_l, pointing_b=pointing_b, present_pointings=present_pointings,
         front_edge_pc=front_edge_pc, region=region)
@@ -967,6 +1110,11 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
     region_centre_pointing = anchor_tiles.nearest_pointing(
         old_info["l_deg"], old_info["b_deg"], pointing_l, pointing_b)
 
+    # C21 item 3: the stage's own build-time check, against the region's
+    # own observed 2MASS/UKIDSS Ks histogram.
+    ks_edges_2mass, n_ks_obs_2mass = _read_ks_obs_2mass(config, region)
+    final_pop_ks_hist = final_pop_ks_hist_by_rule(results, ks_edges_2mass.size - 1)
+
     return dict(region=region, n_star=stars["dist_pc"].size, n_raw=n_raw,
                 omega_sim_deg2=omega_sim_deg2, dist_grid=dist_grid,
                 tiles=results, n_tile=tiles["n_tile"],
@@ -977,7 +1125,9 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
                 limit_grid_mjy=limit_grid_mjy, f_dusty_mean=f_dusty_mean,
                 n_pointing=len(pointings), pointing_l=pointing_l, pointing_b=pointing_b,
                 pointing_area=pointing_area,
-                region_centre_pointing=region_centre_pointing)
+                region_centre_pointing=region_centre_pointing,
+                ks_edges_2mass=ks_edges_2mass, n_ks_obs_2mass=n_ks_obs_2mass,
+                final_pop_ks_hist=final_pop_ks_hist)
 
 
 # ---------------------------------------------------------------------------
@@ -996,6 +1146,8 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c):
         f.attrs["F_C"] = F_C
         build_module.write_dataset(f, "LIMIT8_GRID_MJY", result["limit_grid_mjy"],
                                     *REGISTRY[(_STEM, "LIMIT8_GRID_MJY")])
+        total_rule_count = np.zeros(N_WEIGHT_RULES, dtype=np.int64)
+        total_rule_weight = np.zeros(N_WEIGHT_RULES, dtype=np.float64)
         for tile_result in result["tiles"]:
             grp = f.create_group("tile_%d" % tile_result["tile"])
             # section 5.1's Omega_sim = n_pointings * Omega_pointing: the
@@ -1007,6 +1159,7 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c):
             si = tile_result["star_index"]
             for name, data in (
                 ("STAR_INDEX", tile_result["star_index"]),
+                ("HPX_PIX_512", tile_result["pix512"]),
                 ("XI", tile_result["u"]),
                 ("W", tile_result["w"]),
                 ("W_STAR", tile_result["w_star"]),
@@ -1017,8 +1170,34 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c):
                 ("LOG10_B_AGB_C", result["log10_b_agb_c"][si].astype(np.float32)),
                 ("LOG10_B_AGB_O", result["log10_b_agb_o"][si].astype(np.float32)),
                 ("P_PAHC", tile_result["p_pahc"]),
+                # C21 item 2: per-tile count and total weight under each
+                # WEIGHT_RULE code (module docstring's codes 0-5).
+                ("RULE_COUNT", tile_result["rule_count"]),
+                ("RULE_WEIGHT", tile_result["rule_weight"]),
             ):
                 build_module.write_dataset(grp, name, data, *REGISTRY[(_STEM, name)])
+            total_rule_count += tile_result["rule_count"]
+            total_rule_weight += tile_result["rule_weight"]
+
+        # C21 item 2: the region-wide share of the population under each
+        # WEIGHT_RULE code, as a plain number in the product -- the sum
+        # of every tile's own RULE_COUNT/RULE_WEIGHT above, normalised.
+        build_module.write_dataset(f, "RULE_COUNT_FRAC",
+                                    total_rule_count / max(int(total_rule_count.sum()), 1),
+                                    *REGISTRY[(_STEM, "RULE_COUNT_FRAC")])
+        build_module.write_dataset(
+            f, "RULE_WEIGHT_FRAC",
+            total_rule_weight / max(float(total_rule_weight.sum()), 1e-300),
+            *REGISTRY[(_STEM, "RULE_WEIGHT_FRAC")])
+
+        # C21 item 3: the stage's own build-time check against the
+        # region's observed 2MASS/UKIDSS Ks counts, by WEIGHT_RULE code.
+        build_module.write_dataset(f, "KS_EDGES_2MASS", result["ks_edges_2mass"],
+                                    *REGISTRY[(_STEM, "KS_EDGES_2MASS")])
+        build_module.write_dataset(f, "N_KS_OBS_2MASS", result["n_ks_obs_2mass"],
+                                    *REGISTRY[(_STEM, "N_KS_OBS_2MASS")])
+        build_module.write_dataset(f, "FINAL_POP_KS_HIST", result["final_pop_ks_hist"],
+                                    *REGISTRY[(_STEM, "FINAL_POP_KS_HIST")])
     return path
 
 
@@ -1035,6 +1214,12 @@ def _report(result):
 
     all_rule = np.concatenate([t["rule"] for t in tiles])
     rule_frac = np.bincount(all_rule, minlength=N_WEIGHT_RULES) / all_rule.size
+    # C21 item 2: the WEIGHT share under each rule code (sigma RULE_WEIGHT
+    # over sigma W), not just the star-count share above -- the two
+    # already differ (a star under one rule can carry a systematically
+    # higher or lower W than the region average).
+    total_rule_weight_report = np.sum([t["rule_weight"] for t in tiles], axis=0)
+    rule_weight_frac = total_rule_weight_report / total_rule_weight_report.sum()
 
     sigma_w = np.array([float(t["w"].sum()) for t in tiles])
     ratio_per_tile = sigma_w / result["n_raw"]
@@ -1113,11 +1298,20 @@ def _report(result):
     frac_pointing_changed = float(np.mean(
         [t["pointing_index"] != result["region_centre_pointing"] for t in tiles]))
 
+    # C21 item 3: Ks 12.0-14.0 (the C18 "final pop / own 2MASS anchor"
+    # range), total and by WEIGHT_RULE code.
+    ks_edges_2mass = result["ks_edges_2mass"]
+    sel_1214 = (ks_edges_2mass[:-1] >= 11.999) & (ks_edges_2mass[1:] <= 14.001)
+    obs_1214 = float(result["n_ks_obs_2mass"][sel_1214].sum())
+    pop_1214_by_rule = result["final_pop_ks_hist"][:, sel_1214].sum(axis=1)
+    pop_1214_total = float(pop_1214_by_rule.sum())
+    ks1214_ratio = pop_1214_total / obs_1214 if obs_1214 > 0 else float("nan")
+
     return dict(
         n_tile=n_tile, a_tile_min=float(a_tile.min()), a_tile_max=float(a_tile.max()),
         n_pointing=result["n_pointing"], frac_pointing_changed=frac_pointing_changed,
         u300_median=float(np.median(u300)), u1000_median=float(np.median(u1000)),
-        rule_frac=rule_frac, sigma_w_over_n_raw=sigma_w_over_n_raw,
+        rule_frac=rule_frac, rule_weight_frac=rule_weight_frac, sigma_w_over_n_raw=sigma_w_over_n_raw,
         region_anchor_ratio=result["region_anchor_ratio"],
         max_decrease=max_decrease, max_over_one=max_over_one,
         n_no_joint_tiles=len(no_joint_tiles), n_marginal_checked=n_marginal_checked,
@@ -1127,6 +1321,8 @@ def _report(result):
         frac_evolved_stars=frac_evolved_stars, frac_evolved_weight=frac_evolved_weight,
         log10_b_median=log10_b_median, log10_b_p16=log10_b_p16, log10_b_p84=log10_b_p84,
         max_partition_dev=max_partition_dev,
+        ks1214_obs=obs_1214, ks1214_model=pop_1214_total, ks1214_ratio=ks1214_ratio,
+        ks1214_model_by_rule=pop_1214_by_rule,
     )
 
 
@@ -1186,6 +1382,8 @@ def build(config, regions=None):
                rep["n_no_joint_tiles"], rep["n_marginal_checked"], rep["max_marginal_dev"],
                rep["frac_no_joint_non_marginal"],
                path))
+        weight_rule_str = " ".join("%d=%.3f" % (k, rep["rule_weight_frac"][k]) for k in range(N_WEIGHT_RULES))
+        print("star_population: %s: weight_rule_weight_frac(0-5)=[%s]" % (region, weight_rule_str))
         print(
             "star_population: %s: STAR/deg2=%.3f AGB/deg2=%.3f PAHC/deg2@median_limit=%.3f "
             "evolved_frac(stars)=%.4f evolved_frac(weight)=%.4f "
@@ -1195,6 +1393,17 @@ def build(config, regions=None):
                rep["frac_evolved_stars"], rep["frac_evolved_weight"],
                rep["log10_b_median"], rep["log10_b_p16"], rep["log10_b_p84"],
                rep["max_partition_dev"]))
+        # C21 item 3: the stage's own build-time check -- the final
+        # population's own Ks histogram, at this module's own per-tile-
+        # mean placement, against the region's observed 2MASS/UKIDSS Ks
+        # counts at Ks 12.0-14.0, by WEIGHT_RULE code (so a departure
+        # like Vela D's C18 finding is visible here, at build time).
+        by_rule_str = " ".join(
+            "%d=%.1f" % (k, rep["ks1214_model_by_rule"][k]) for k in range(N_WEIGHT_RULES))
+        print(
+            "star_population: %s: Ks12-14 2MASS_N_OBS=%.0f model_N=%.1f ratio=%.4f "
+            "model_N_by_rule(0-5)=[%s]"
+            % (region, rep["ks1214_obs"], rep["ks1214_model"], rep["ks1214_ratio"], by_rule_str))
 
 
 if __name__ == "__main__":

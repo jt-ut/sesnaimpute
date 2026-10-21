@@ -864,15 +864,27 @@ REGISTRY = {
     ("population_star_tile", "STAR_INDEX"): ("row index",
         "For every star this tile draws, its own row in this region's "
         "field-star product's retained group."),
+    ("population_star_tile", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
+        "For every star this tile draws, the one anchor pixel of this "
+        "tile it is placed on, drawn with probability proportional to "
+        "the pixel's own solid angle (every nside-512 pixel shares one "
+        "solid angle, so this is a uniform draw over the tile's own "
+        "pixels). XI and W are both formed at this SAME pixel's own "
+        "extinction column and sightline, not at a tile average: the "
+        "weight fit and the weight assignment read one construction."),
     ("population_star_tile", "XI"): ("dimensionless",
         "For every star this tile draws, its placement fraction along "
-        "this tile's own mean extinction profile: u = A(d)/A(inf) at the "
-        "star's own distance. A consumer forms the star's own extinction "
+        "its own drawn pixel's (HPX_PIX_512) extinction profile: "
+        "u = A(d)/A(inf) at the star's own distance, on that pixel's own "
+        "parent sightline. A consumer forms the star's own extinction "
         "as a real source's adopted column times this fraction."),
     ("population_star_tile", "W"): ("dimensionless",
         "For every star this tile draws, its total anchor reweighting "
         "factor: the STAR anchor's own Gaia/2MASS joint or marginal "
-        "weight at the star's own placement and predicted magnitude. "
+        "weight at the star's own placement and predicted magnitude, "
+        "both formed at its own drawn pixel's (HPX_PIX_512) extinction "
+        "column and sightline -- the same construction the anchor "
+        "weights were fitted on, not a tile-mean approximation. "
         "W_STAR plus W_AGB equals this value exactly, row by row."),
     ("population_star_tile", "W_STAR"): ("dimensionless",
         "The non-evolved share of W for every star this tile draws: W "
@@ -909,6 +921,49 @@ REGISTRY = {
         "contaminated by PAH nebular emission at that assumed 8 micron "
         "completeness limit, from the PAH-contamination probability "
         "curve P(q) read at this star's own tile-dimmed 8 micron flux."),
+    ("population_star_tile", "RULE_COUNT"): ("star count",
+        "C21 item 2: this tile's own star count under each of the six "
+        "WEIGHT_RULE codes (module docstring: 0 joint, 1 G marginal "
+        "only, 2 Ks marginal only, 3 faint end, 4 bright end, 5 both "
+        "marginals, placement-selected) -- the same code every one of "
+        "this tile's stars was assigned by star_weights, counted rather "
+        "than stored star by star."),
+    ("population_star_tile", "RULE_WEIGHT"): ("dimensionless",
+        "C21 item 2: this tile's own sum of W under each of the six "
+        "WEIGHT_RULE codes -- RULE_WEIGHT.sum() equals W.sum() for this "
+        "tile exactly."),
+    ("population_star_tile", "RULE_COUNT_FRAC"): ("dimensionless",
+        "C21 item 2: this region's own star-count share under each of "
+        "the six WEIGHT_RULE codes -- the sum, over every tile_<id> "
+        "group's own RULE_COUNT, normalised to 1 -- so the share of the "
+        "population the placement rule (code 5) decides is a plain "
+        "number in this product, not something a reader has to sum "
+        "RULE_COUNT themselves to see."),
+    ("population_star_tile", "RULE_WEIGHT_FRAC"): ("dimensionless",
+        "C21 item 2: this region's own WEIGHT share under each of the "
+        "six WEIGHT_RULE codes -- the sum, over every tile_<id> group's "
+        "own RULE_WEIGHT, normalised to 1."),
+    ("population_star_tile", "KS_EDGES_2MASS"): ("mag 2MASS/UKIDSS Ks",
+        "C21 item 3: the edges of the Ks bins N_KS_OBS_2MASS and "
+        "FINAL_POP_KS_HIST are tabulated on -- population.anchor_tiles' "
+        "own (un-extended) KS_EDGES for this region, read off the "
+        "histograms product directly."),
+    ("population_star_tile", "N_KS_OBS_2MASS"): ("star count",
+        "C21 item 3: this region's own observed 2MASS (and, on a deep-"
+        "covered region, UKIDSS) Ks histogram -- population.anchor_"
+        "tiles' own per-pixel N_KS_OBS, summed over every one of this "
+        "region's admitted anchor pixels -- the stage's own '2MASS "
+        "anchor' reference for FINAL_POP_KS_HIST below."),
+    ("population_star_tile", "FINAL_POP_KS_HIST"): ("dimensionless",
+        "C21 item 3: the final field-star population's own Ks "
+        "histogram (every retained star, STAR and AGB alike, at W), on "
+        "KS_EDGES_2MASS, split by WEIGHT_RULE code (six rows, module "
+        "docstring's codes 0-5) -- built at this module's own per-tile-"
+        "mean placement, the same approximation star_weights itself "
+        "reads its G/Ks bins off, not the C18 diagnosis's own atlas-"
+        "grounded external check. Summed over all six rows and compared "
+        "to N_KS_OBS_2MASS, this is the stage's own build-time version "
+        "of the C18 'final population / own 2MASS anchor' check."),
 
     # population.field_stars -- field-stars_trilegal_region: the synthetic
     # TRILEGAL field-star population, retained sample and pre-retention
@@ -1045,21 +1100,37 @@ REGISTRY = {
         "KS_EDGES, the anchor reweighting factor on the joint (G, Ks) "
         "grid: the sky's own observed star count over the model's "
         "predicted count in that joint cell, shrunk toward the region-"
-        "pooled value in the log. Read only where USE_JOINT is True for "
-        "that tile and bin; a star without a usable joint cell takes "
-        "the marginal weight instead."),
+        "pooled value in the log, or, where no tile of this region "
+        "cleared the fitting floor on its own but this region's tiles "
+        "pooled did (JOINT_SOURCE 2), the one region-pooled value every "
+        "tile shares there. Read only where USE_JOINT is True for that "
+        "tile and bin; a star without a usable joint cell takes the "
+        "marginal weight instead."),
     ("weights_anchors_tile", "USE_JOINT"): ("boolean",
         "For each tile, each Gaia G bin of G_EDGES and each Ks bin of "
-        "KS_EDGES, True where this region's pooled count in that joint "
-        "cell reached the fitting floor and W_JOINT is therefore an "
-        "actual fit rather than an unfitted placeholder, and the "
-        "matching joint observed count for this tile is positive."),
+        "KS_EDGES, True where this joint cell carries evidence at "
+        "either level (JOINT_SOURCE 1 or 2) and W_JOINT is therefore an "
+        "actual fit rather than an unfitted placeholder -- at level 1 "
+        "(a tile of this region cleared the floor on its own) also "
+        "requiring this tile's own observed joint count to be positive; "
+        "at level 2 (no tile did, but this region's tiles pooled did) "
+        "every tile of the region reads it, since a tile's own zero "
+        "crossmatch stars there is not evidence against a value the "
+        "region's own tiles, summed, did measure (C21 item 1)."),
     ("weights_anchors_tile", "W_REGION_JOINT"): ("dimensionless",
         "One value per joint (G, Ks) cell (shared by every tile): the "
         "region-pooled joint reweighting factor, or, where no tile in "
         "this region has usable evidence in that cell, the survey-"
         "pooled value, or NaN where neither this region nor the survey "
         "has any."),
+    ("weights_anchors_tile", "JOINT_SOURCE"): ("category (0/1/2)",
+        "One value per joint (G, Ks) cell (shared by every tile; C21 "
+        "item 1): 0 no joint evidence at any level (a star landing here "
+        "falls to the marginal/placement rule, population.star_"
+        "population.star_weights' WEIGHT_RULE 5); 1 at least one tile "
+        "of this region cleared MIN_COUNTS on its own; 2 no single tile "
+        "did, but this region's own tiles, summed (region_pooled_"
+        "ratio), did."),
     ("weights_anchors_tile", "EXCLUDED"): ("boolean",
         "One value per tile: True where this tile's own pooled observed-"
         "over-predicted ratio departs from the region's median by more "
