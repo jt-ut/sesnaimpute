@@ -590,7 +590,11 @@ def _read_anchor_counts(config, region, pixels):
     module's magnitude cuts: Gaia's bins with upper edge <= 19
     (`GAIA_G_CUT_MAG`), 2MASS's whole grid (already built to close at
     `KS_CUT_MAG`) extended by UKIDSS's deep counts where a region has
-    them (W46: `_combine_ks_axis`'s per-bin selection). Fails if any
+    them (W46: `_combine_ks_axis`'s per-bin selection). C19: UKIDSS's own
+    counts are read already multiplied by `sky.derived.ukidss_counts`'
+    own `CALIBRATION[0]` (2MASS count / UKIDSS count over their shared
+    Ks 13.0-14.3 overlap window) before `_combine_ks_axis` ever sees
+    them -- 2MASS is the reference, UKIDSS the extension. Fails if any
     product's own pixel set disagrees with the granule map's
     (`_region_pixel_columns`) -- the join every later array in this
     module assumes.
@@ -622,6 +626,16 @@ def _read_anchor_counts(config, region, pixels):
         ukidss_pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
         ukidss_edges = np.asarray(f["MAG_EDGES"][:], dtype=np.float64)
         ukidss_n = np.asarray(f["N"][:], dtype=np.float64)
+        ukidss_calibration_ratio = float(np.asarray(f["CALIBRATION"][:], dtype=np.float64)[0])
+    # C19 Part A item 3: 2MASS is the reference survey, UKIDSS the
+    # extension -- `sky.derived.ukidss_counts.calibration_ratio`'s own
+    # overlap-window ratio (2MASS count / UKIDSS count, external to
+    # external, no SESNA count in it) is applied to every UKIDSS count
+    # before anything else in this module reads it. NaN (no UKIDSS
+    # coverage for this region at all) leaves N unmultiplied -- it is
+    # already all zero there, so there is nothing to calibrate.
+    if np.isfinite(ukidss_calibration_ratio):
+        ukidss_n = ukidss_n * ukidss_calibration_ratio
     if not (np.array_equal(pixels, gaia_pix) and np.array_equal(pixels, ks_pix)):
         raise ValueError(
             f"anchor_tiles: {region!r}'s granule-map pixel set disagrees with the "
