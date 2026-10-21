@@ -34,6 +34,18 @@ source-weighted mean, over the tile's distinct nside-256 sightlines,
 `_report`'s own shape diagnostics (u(300 pc)/u(1 kpc), the monotonic-
 and-<=1 checks); no star's own weight reads either any more.
 
+C25 (briefs/round4_2026-10-20/C25_far_column.md): on a covered sightline
+beyond the Edenhofer cube's edge, `u_i` can now exceed 1 (`sky.derived.
+profile`'s own module docstring) -- Marshall et al. 2006's own measured
+column there is not capped at the star's drawn pixel's `A_PIX_K`. `a_i`
+(and so `G_obs`/`Ks_obs`, `W`, `P_PAHC`) uses `u_i` UNCLIPPED: the whole
+point of the fix is that these distant stars really are this much more
+reddened. The STORED `XI` is `u_i` clipped to 1 instead (`_build_one_tile`):
+read downstream as `bmstp`'s own depth-placement mark, whose common grid
+(`bmstp.grid`) takes `x <= 1` as a physical wall, never a value its own
+kernel-overflow handling (`fold_wall`) should reflect a real, unsmoothed
+population across.
+
 Per-star weight (spec section 2.1's `star_reweight_factor`). Every
 retained field star, placed at its own drawn pixel's `a_i`, predicts its
 own observed `(G_obs, Ks_obs)` (`anchor_tiles.magnitudes_at_extinction`,
@@ -941,11 +953,28 @@ def _build_one_tile(config, t, geom, stars, weights, pixel_table, profile_obj, d
     rule_weight = np.zeros(N_WEIGHT_RULES, dtype=np.float64)
     np.add.at(rule_weight, rule, w.astype(np.float64))
 
+    # C25 (briefs/round4_2026-10-20/C25_far_column.md): on a covered
+    # sightline beyond the Edenhofer cube's edge, u_i (above, used
+    # unclipped for a_i/g_obs/ks_obs/star_weights -- the star's own
+    # Marshall-informed extinction, the whole point of the fix) can now
+    # exceed 1. The STORED XI, read downstream as `bmstp`'s depth MARK
+    # `x = a / T` (bmstp/grid.py's module docstring: "x <= 1 BY
+    # DEFINITION... a cell with log10 xi > 0 is never part of the prior's
+    # support"), is clipped to 1 here instead: a star beyond the map's
+    # edge genuinely sees more extinction than its drawn pixel's A_PIX_K,
+    # but that excess is a MAGNITUDE fact (already in a_i/W/RULE/P_PAHC),
+    # not a DEPTH fact past the far wall of the pencil beam -- clipped at
+    # the wall, exactly like a galaxy or any other fully-extincted member
+    # already reads there (bmstp/grid.py), rather than silently reflected
+    # onto the near side of the cloud by that module's own `fold_wall`
+    # (built for its kernels' own smoothing overflow, never for a real,
+    # unsmoothed population sitting past xi = 1).
+    xi = np.minimum(u_i, 1.0)
     return dict(
         tile=t, n_sightlines=int(sightlines.size), a_tile=a_tile,
         pointing_index=p_idx, tile_l=tile_l, tile_b=tile_b,
         star_index=star_index, pix512=star_pix512.astype(np.int64),
-        u=u_i.astype(np.float32), u_front=u_front_tile,
+        u=xi.astype(np.float32), u_front=u_front_tile,
         w=w.astype(np.float32), rule=rule,
         rule_count=rule_count, rule_weight=rule_weight,
         w_star=w_star.astype(np.float32), w_agb=w_agb.astype(np.float32),
@@ -1164,7 +1193,11 @@ def _report(result):
     sigma_w_over_n_raw = float(np.sum(ratio_per_tile * omega) / np.sum(omega))
 
     # algebraic acceptance 1: u non-decreasing and <= 1 on every tile's
-    # own mean profile (spec section 1.4).
+    # own mean profile (spec section 1.4) -- on a tile whose sightlines
+    # are COVERED (C25), max_over_one is now expected to read nonzero
+    # beyond the Edenhofer cube's edge (disclosure, not a defect: this
+    # report-only mean profile is never clipped, unlike the stored XI
+    # each star reads, `_build_one_tile`'s own docstring).
     max_decrease = max(
         float(np.max(-np.diff(t["mean_u"]))) if t["mean_u"].size > 1 else 0.0
         for t in tiles)
@@ -1291,6 +1324,11 @@ def build(config, regions=None):
             rep = _report(result)
             st.done(path, n_tile=rep["n_tile"], n_pointing=rep["n_pointing"],
                     star_per_deg2=rep["star_per_deg2"])
+        # C25 item 5 (briefs/round4_2026-10-20/C25_far_column.md): the
+        # red-tail check, patched into population.anchor_tiles' own
+        # histograms product now that this region's population exists --
+        # no new product, no new RUNBOOK line.
+        anchor_tiles.red_tail_shares(config, region)
         rule_str = " ".join("%d=%.3f" % (k, rep["rule_frac"][k]) for k in range(N_WEIGHT_RULES))
         print(
             "star_population: %s: n_tile=%d n_pointing=%d frac_pointing_changed=%.4f "
