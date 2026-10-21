@@ -2802,8 +2802,24 @@ REGISTRY = {
         "runs from MAG_EDGES[j] to MAG_EDGES[j+1]."),
     ("counts_ukidss_hpx512", "N"): ("stars",
         "For the matching pixel in HPX_PIX_512 and each magnitude bin in "
-        "MAG_EDGES, how many clean-photometry UKIDSS GPS detections fall in "
-        "that pixel and bin."),
+        "MAG_EDGES, how many point-like (mergedClass -1 or -2) UKIDSS GPS "
+        "detections fall in that pixel and bin, with no cut on the "
+        "archive's own error-bits column (C19, 2026-10-21: the download's "
+        "own former error-bit and narrow-class cut undercounted real stars "
+        "by a measured 21-23% at Ks 12-14)."),
+    ("counts_ukidss_hpx512", "CALIBRATION"): ("dimensionless",
+        "Three numbers, this region's own overlap-window ratio and its "
+        "combined-Poisson interval: [0] the ratio of 2MASS's own point "
+        "count to this file's own N, summed over the Ks bins from "
+        "OVERLAP_LOWER_MAG (13.0) to the 2MASS anchor's own faint edge "
+        "(14.3) and over the pixels this file's N shows any UKIDSS "
+        "coverage in at all; [1] and [2] that ratio's lower and upper "
+        "bound under combined Poisson shot noise on both counts. All "
+        "three NaN where this region's download carries no UKIDSS rows at "
+        "all. population.anchor_tiles multiplies this file's own deep (Ks "
+        "past 14.0) counts by CALIBRATION[0] before anything else reads "
+        "them -- 2MASS is the reference survey, UKIDSS the extension, and "
+        "no SESNA count enters this ratio on either side."),
 
     ("colours_knots_survey", "LOG10_RATIO"): ("dex",
         "log10(F_IRAC_band / F_2.12um) for every Giannini et al. (2013) knot "
