@@ -3089,6 +3089,40 @@ REGISTRY = {
         "For the matching pixel in HPX_PIX_512 and each magnitude bin in "
         "MAG_EDGES, how many 2MASS Point Source Catalog detections fall in "
         "that pixel and bin."),
+    ("counts_twomass_hpx512", "CELL_KS_EDGES"): ("mag 2MASS Ks",
+        "The edges of the five half-magnitude Ks bins N_CELL/CELL_COMPLETE "
+        "are tabulated on, 12.0 to 14.3 -- the STAR anchor's own 2MASS-only "
+        "range (C30, briefs/round4_2026-10-20/C30_population_anchor.md): "
+        "bin k runs from CELL_KS_EDGES[k] to CELL_KS_EDGES[k+1]."),
+    ("counts_twomass_hpx512", "CELL_JK_EDGES"): ("mag J-Ks (2MASS)",
+        "The three interior J-Ks colour edges N_CELL/CELL_COMPLETE's own "
+        "last axis is tabulated on (C30): bin 0 is J-Ks < CELL_JK_EDGES[0] "
+        "(0.6), bins 1 and 2 the two intervals between, and bin 3 (the "
+        "reddest) is J-Ks > CELL_JK_EDGES[-1] (1.5) -- a 2MASS row with no "
+        "usable J (ph_qual's J character 'U' or 'X', or no J measurement "
+        "at all) is counted in this reddest bin, never assumed blue."),
+    ("counts_twomass_hpx512", "N_CELL"): ("stars",
+        "For the matching pixel in HPX_PIX_512, each Ks bin of "
+        "CELL_KS_EDGES and each J-Ks colour bin of CELL_JK_EDGES, how many "
+        "2MASS Point Source Catalog detections in Ks 12.0-14.3 fall in "
+        "that pixel, Ks bin and colour bin (C30) -- the SAME rows N counts "
+        "in its own four Ks bins over this range, split further by J-Ks; "
+        "read by population.anchor_tiles/anchor_weights to fit a separate "
+        "weight for the model's giant and dwarf populations, since "
+        "TRILEGAL's own error in the Galactic plane is per population, "
+        "not per Ks magnitude alone."),
+    ("counts_twomass_hpx512", "CELL_COMPLETE"): ("boolean",
+        "For the matching pixel in HPX_PIX_512, each Ks bin of "
+        "CELL_KS_EDGES and each J-Ks colour bin of CELL_JK_EDGES, True "
+        "where this pixel's own 2MASS J 50%-completeness magnitude "
+        "(catalog.depths' per-pixel product) clears the cell's own "
+        "faintest possible J -- the Ks bin's own faint edge plus the "
+        "colour bin's own faint edge, the reddest bin standing in its own "
+        "last finite edge, 1.5 -- by 0.3 mag (C24e's own margin, "
+        "c18_diag/c24e_colour_cells.py) -- read by nothing downstream "
+        "(every cell in the five C30 regions measured 2026-10-21 was "
+        "already complete), kept because it is a measured fact about the "
+        "pixel, not an assumption the fit silently makes."),
 
     ("counts_ukidss_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
         "The region's own occupied nside-512 pixel numbers (nested ordering), "
