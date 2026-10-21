@@ -784,7 +784,7 @@ def _pahc_weight(limit8_grid, p_pahc, x):
     return p_pahc[:, lo] + frac * (p_pahc[:, hi] - p_pahc[:, lo])
 
 
-def _collapse_star_members(u, flux0, w_star, w_star_only, w_pahc_only):
+def _collapse_star_members(u, flux0, w_star, w_star_only, w_pahc_only, a_star_k):
     """Collapse the tile's field-star members into cells before
     `catalogued_fraction` (`_build_one_tile`, rule 9): a member enters
     `catalogued_probability` only through its placement fraction `u`, its
@@ -807,13 +807,22 @@ def _collapse_star_members(u, flux0, w_star, w_star_only, w_pahc_only):
     key itself, still one vectorised grouping with no Python loop over
     stars.
 
-    Returns the cell's `u`/`flux0` (the ORIGINAL per-star weight
-    `w_star`-weighted mean within the cell -- each star's own population
-    weight, before the STAR/PAHC split) and the cell's summed STAR-only
-    and PAHC-only weights (the SAME cell grouping serves both classes,
-    sec. 5.1/5.3, since a star's placement/colour does not depend on
-    which class it falls in), plus the member counts before/after for
-    the build's own report."""
+    Returns the cell's `u`/`flux0`/`a_star_k` (the ORIGINAL per-star
+    weight `w_star`-weighted mean within the cell -- each star's own
+    population weight, before the STAR/PAHC split) and the cell's summed
+    STAR-only and PAHC-only weights (the SAME cell grouping serves both
+    classes, sec. 5.1/5.3, since a star's placement/colour does not
+    depend on which class it falls in), plus the member counts
+    before/after for the build's own report. `a_star_k` (C26 owner
+    ruling 2026-10-21, briefs/round4_2026-10-20/C26_profile_adopted.md):
+    each member's own cell-mean of `population_star_tile`'s own
+    `A_STAR_K` -- the star's own UNCLIPPED local extinction at its own
+    drawn pixel, collapsed at the SAME `log10 u` cell width as `u`
+    itself (far below the completeness roll-off), so the quadrature
+    reads each member's OWN column directly (`catalogued_probability`
+    called with `a_col` fixed at 1 and `u` replaced by this array, the
+    caller's docstring) instead of recombining a DIFFERENT pixel's own
+    column with this member's clipped placement fraction."""
     n_before = int(u.size)
     tiny = np.finfo(np.float64).tiny
     log10_u = np.log10(np.maximum(u, tiny))
@@ -834,10 +843,11 @@ def _collapse_star_members(u, flux0, w_star, w_star_only, w_pahc_only):
     w_cell_pahc_only = np.bincount(inverse, weights=w_pahc_only, minlength=n_after)
     safe_w = np.where(w_cell > 0, w_cell, 1.0)
     u_cell = np.bincount(inverse, weights=w_star * u, minlength=n_after) / safe_w
+    a_star_cell = np.bincount(inverse, weights=w_star * a_star_k, minlength=n_after) / safe_w
     flux0_cell = np.empty((n_after, N_BANDS), dtype=np.float64)
     for k in range(N_BANDS):
         flux0_cell[:, k] = np.bincount(inverse, weights=w_star * flux0[:, k], minlength=n_after) / safe_w
-    return u_cell, flux0_cell, w_cell_star_only, w_cell_pahc_only, n_before, n_after
+    return u_cell, flux0_cell, a_star_cell, w_cell_star_only, w_cell_pahc_only, n_before, n_after
 
 
 def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_in_tile, pixel_row_in_tile,
@@ -903,8 +913,10 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         omega_t = float(grp.attrs["OMEGA_POINTING_DEG2"])
         star_index = np.asarray(grp["STAR_INDEX"][()], dtype=np.int64)
         u = np.asarray(grp["XI"][()], dtype=np.float64)
+        a_star_k = np.asarray(grp["A_STAR_K"][()], dtype=np.float64)
         w_star = np.asarray(grp["W_STAR"][()], dtype=np.float64)
         p_pahc_grid = np.asarray(grp["P_PAHC"][()], dtype=np.float64)  # (n_star, 8)
+        evolved_for_agb = np.asarray(grp["IS_EVOLVED"][()], dtype=bool)
     with h5py.File(field_path, "r") as f:
         flux0_all = np.asarray(f["FNU_MJY"][star_index], dtype=np.float64)  # (n_star, 8)
 
@@ -928,8 +940,8 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     # (`_collapse_star_members`, rule 9): the SAME collapsed cells serve both
     # classes, since a star's placement/colour does not depend on which class
     # it falls in, only its STAR-only/PAHC-only weight does.
-    u_c, flux0_c, w_star_c, w_pahc_c, n_members_before, n_members_after = (
-        _collapse_star_members(u, flux0_all, w_star, w_star_only, w_pahc_only))
+    u_c, flux0_c, a_star_c, w_star_c, w_pahc_c, n_members_before, n_members_after = (
+        _collapse_star_members(u, flux0_all, w_star, w_star_only, w_pahc_only, a_star_k))
 
     weight_pix_total = float(weight_pix.sum())
     density_star = float(w_star_only.sum()) / omega_t  # objects deg^-2, sec. 5.1/5.2's Omega_pointing
@@ -948,12 +960,21 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
             out[cls] = (np.zeros(pix_in_tile.size), density, np.zeros(pix_in_tile.size),
                         np.zeros(pix_in_tile.size), np.zeros((n_x, n_b)), np.zeros((n_x, n_b)))
     else:
-        u_u, flux0_u = u_c[m_union], flux0_c[m_union]
+        u_u, flux0_u, a_star_u = u_c[m_union], flux0_c[m_union], a_star_c[m_union]
         w_star_u, w_pahc_u = w_star_c[m_union], w_pahc_c[m_union]
         log10_f45_u = np.log10(flux0_u[:, IDX_I2])
+        # C26 (owner ruling 2026-10-21): each member's own A_STAR_K is
+        # already its own absolute local extinction -- `a_col` fixed at 1
+        # so `catalogued_probability`'s `a = a_col * u` becomes `a_star_u`
+        # unchanged, broadcast identically to every pixel in the tile,
+        # instead of recombined with THIS tile's own per-pixel A_COL_K
+        # (the retired pattern: beyond the Edenhofer cube's edge that
+        # recombination would silently drop the far-field reddening XI's
+        # own clip discards). `u_u` (XI, clipped) still only sets the
+        # cell's grid position (`_safe_cell_bin` below), never the dimming.
         (frac_star, fb3_star, fb10_star,
          frac_pahc, fb3_pahc, fb10_pahc, s_member) = catalogued_fraction_pair(
-            a_col_in_tile, u_u, flux0_u, w_star_u, w_pahc_u, f_lim_in_tile,
+            np.ones_like(a_col_in_tile), a_star_u, flux0_u, w_star_u, w_pahc_u, f_lim_in_tile,
             pixel_row_in_tile, band_params, config, weight_pix)
         for cls, density, w_u, frac, frac_bright3, frac_bright10 in (
                 ("STAR", density_star, w_star_u, frac_star, fb3_star, fb10_star),
@@ -983,7 +1004,13 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     n_evolved = x_a.size // 2
     is_c = np.arange(x_a.size) >= n_evolved
     density_agb = float(w_a.sum()) / omega_t
-    u_parts, flux0_parts, w_parts, f45_parts = [], [], [], []
+    # C26 (owner ruling 2026-10-21): `sample_agb`'s own `x_a` is this
+    # SAME tile's evolved stars' XI, each repeated once per chemistry
+    # (O-rich first half, C-rich second half) -- `a_star_k[evolved_for_agb]`
+    # duplicated the SAME way lines up a_star_dup[k] with x_a[k] exactly.
+    a_star_evolved = a_star_k[evolved_for_agb]
+    a_star_dup = np.concatenate([a_star_evolved, a_star_evolved])
+    u_parts, flux0_parts, w_parts, f45_parts, a_star_parts = [], [], [], [], []
     for label, chem_mask in (("O", ~is_c), ("C", is_c)):
         star_idx = np.flatnonzero(chem_mask & (w_a > 0))
         if star_idx.size == 0:
@@ -995,6 +1022,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         tmpl_rep = np.tile(np.arange(n_tmpl), star_idx.size)
 
         u_m = x_a[star_rep]
+        a_star_m = a_star_dup[star_rep]
         f45_m = f45_a[star_rep]  # already log10 F_4.5 (mJy)
         f_ref_i2 = np.maximum(pool["f_ref"]["I2"][tmpl_rep], pool["floor_linear"][tmpl_rep])
         scale = (10.0 ** f45_m) / f_ref_i2  # rescales the WHOLE shell SED
@@ -1005,6 +1033,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         w_m = w_a[star_rep] * pool["weight"][tmpl_rep] / pool_weight_sum
 
         u_parts.append(u_m)
+        a_star_parts.append(a_star_m)
         flux0_parts.append(flux0_m)
         w_parts.append(w_m)
         f45_parts.append(f45_m)
@@ -1017,11 +1046,14 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         n_cell_agb = np.zeros((n_x, n_b))
     else:
         u_agb = np.concatenate(u_parts)
+        a_star_agb = np.concatenate(a_star_parts)
         flux0_agb = np.concatenate(flux0_parts, axis=0)
         w_agb_member = np.concatenate(w_parts)
         f45_agb_member = np.concatenate(f45_parts)
+        # C26: each AGB member's own shell carries its OWN star's A_STAR_K
+        # (absolute), not a_col_in_tile's per-pixel column times XI.
         frac_agb, frac_agb_bright3, frac_agb_bright10, s_member_agb = catalogued_fraction(
-            a_col_in_tile, u_agb, flux0_agb, w_agb_member, f_lim_in_tile,
+            np.ones_like(a_col_in_tile), a_star_agb, flux0_agb, w_agb_member, f_lim_in_tile,
             pixel_row_in_tile, band_params, config, weight_pix)
         w_sum_agb = float(w_agb_member.sum())
         c_m_agb = density_agb * (w_agb_member / w_sum_agb) * s_member_agb

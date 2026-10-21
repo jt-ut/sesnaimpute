@@ -875,16 +875,26 @@ REGISTRY = {
     ("population_star_tile", "XI"): ("dimensionless, 0 to 1",
         "For every star this tile draws, its placement fraction along "
         "its own drawn pixel's (HPX_PIX_512) extinction profile: "
-        "u = A(d)/A(inf) at the star's own distance, on that pixel's own "
-        "parent sightline, clipped at 1 (the far wall of the pencil "
-        "beam). A consumer forms the star's own extinction as a real "
-        "source's adopted column times this fraction. On a sightline "
-        "covered by Marshall et al. 2006 (briefs/round4_2026-10-20/"
-        "C25_far_column.md), a star beyond the Edenhofer map's own edge "
-        "can genuinely see more extinction than this pixel's own column "
-        "implies -- that extra reddening is already in this star's own "
-        "weight (W) and magnitudes, not in XI, which this product always "
-        "keeps at or below 1."),
+        "u = A(d)/(its own drawn pixel's column) at the star's own "
+        "distance, on that pixel's own parent sightline, clipped at 1 "
+        "(the far wall of the pencil beam) -- a DEPTH coordinate, read "
+        "by bmstp as the star's own placement mark, never the "
+        "extinction itself. A star beyond the Edenhofer map's own edge "
+        "(C26 owner ruling 2026-10-21, briefs/round4_2026-10-20/"
+        "C26_profile_adopted.md) can genuinely see more extinction than "
+        "this pixel's own column implies -- that extra reddening is in "
+        "A_STAR_K, this star's own stored extinction, not in XI, which "
+        "this product always keeps at or below 1."),
+    ("population_star_tile", "A_STAR_K"): ("mag A_K",
+        "For every star this tile draws, its own local K-band extinction "
+        "at its own distance, on its own drawn pixel's (HPX_PIX_512) "
+        "extinction profile: the number this star's own predicted "
+        "magnitudes, weight and PAHC contamination probability are all "
+        "formed from (C26 owner ruling 2026-10-21). A reader never "
+        "reconstructs this by multiplying a column from elsewhere by "
+        "XI: beyond the Edenhofer map's own edge this star's own far-"
+        "field reddening can exceed what any single pixel's own column "
+        "times XI would give."),
     ("population_star_tile", "W"): ("dimensionless",
         "For every star this tile draws, its total anchor reweighting "
         "factor: the STAR anchor's own Gaia/2MASS joint or marginal "

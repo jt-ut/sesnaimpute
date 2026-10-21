@@ -133,19 +133,22 @@ attrs `GRANULE="tile"`, `OMEGA_SIM_DEG2`, `F_DUSTY_O`, `F_DUSTY_C`,
 limit grid; one HDF5 group `tile_<id>` per tile, attr
 `OMEGA_POINTING_DEG2`, with datasets `STAR_INDEX` (row into
 `population.field_stars`' retained group), `HPX_PIX_512` (the star's own
-drawn anchor pixel, C22), `XI`, `W`, `W_STAR`, `W_AGB`,
+drawn anchor pixel, C22), `XI`, `A_STAR_K` (C26), `W`, `W_STAR`, `W_AGB`,
 `IS_EVOLVED`, `LOG10_B`, `LOG10_B_PAHC`, `LOG10_B_AGB_C`, `LOG10_B_AGB_O`,
-`P_PAHC` (n_star, 8). The population stores each
-star's placement fraction `XI` alone (owner, 2026-09-06): a star's own
-extinction is `A_s * XI`, `A_s` a real source's own adopted column, formed
-at read time by the consumer that has a source to apply it to; this
-module never stores a tile-mean extinction. `XI` is now (C22) the star's
-own placement fraction on its own DRAWN pixel's profile, `A_PIX_K` that
-SAME pixel's own column -- what this module itself uses, in memory, to
-place each simulated star's predicted magnitude for the anchor-weight
-lookup and the PAHC contamination weight; the tile's own mean column
-(`a_tile`) and mean profile (`tile_mean_u`) are report-only (module
-docstring, "Placement").
+`P_PAHC` (n_star, 8). `XI` is the star's own placement fraction on its
+own DRAWN pixel's profile (C22), clipped to 1 (`bmstp`'s own depth mark,
+never the extinction itself); `A_STAR_K` (C26, owner ruling 2026-10-21,
+briefs/round4_2026-10-20/C26_profile_adopted.md) is that SAME star's own
+UNCLIPPED local extinction at its own drawn pixel, `A_PIX_K` that SAME
+pixel's own column times XI's own unclipped placement fraction --
+stored directly now rather than left for a consumer to reconstruct as
+some OTHER column times the clipped `XI` (the retired `a_col * XI`
+pattern: beyond the Edenhofer map's own edge that reconstruction would
+silently drop the far-field reddening XI's own clip discards). Both are
+what this module itself uses, in memory, to place each simulated star's
+predicted magnitude for the anchor-weight lookup and the PAHC
+contamination weight; the tile's own mean column (`a_tile`) and mean
+profile (`tile_mean_u`) are report-only (module docstring, "Placement").
 """
 
 import functools
@@ -177,19 +180,6 @@ from sesnaimpute.sky.download.trilegal import build as trilegal_download
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
 # ---------------------------------------------------------------------------
-
-#: The shared distance grid's far tail (module docstring, spec 1.4's tail):
-#: the profile product's own map edge falls well short of TRILEGAL's
-#: simulated depth, so the mean profile is extended by the profile
-#: reader's own analytic far-field tail, sampled out to 10 kpc -- past
-#: every region's own cloud distance and simulated population.
-TAIL_MAX_PC = 10_000.0
-
-#: Log-spaced tail node count: a resolution choice, not a physical
-#: constant. The tail is one smooth analytic shape (an exponential disc
-#: or vertical model, `sky.derived.profile`), so a modest sampling between
-#: the map edge and `TAIL_MAX_PC` suffices.
-TAIL_N_NODES = 64
 
 #: C22 fix (round 4, 2026-10-20): the per-star anchor-pixel draw's own
 #: seed (module docstring, "Placement"). Every nside-512 pixel shares one
@@ -259,14 +249,14 @@ PAHC_LIMIT_MEDIAN_INDEX = PAHC_LIMIT_QUANTILES.index(50.0)
 # ---------------------------------------------------------------------------
 
 def shared_distance_grid(profile_obj):
-    """The common distance grid (module docstring): the profile product's
-    own `DIST_PC` (`distance_knots_pc`, plus the implicit `d=0` origin
-    every profile starts at), extended by a log-spaced tail from the
-    map's own edge to `TAIL_MAX_PC`."""
-    knots = profile_obj.distance_knots_pc()
-    d_edge = float(knots[-1])
-    tail = np.geomspace(d_edge, TAIL_MAX_PC, TAIL_N_NODES)[1:]
-    return np.concatenate([[0.0], knots, tail])
+    """The common distance grid (module docstring): C26 (owner ruling
+    2026-10-21, briefs/round4_2026-10-20/C26_profile_adopted.md) reads it
+    directly off `profile_adopted_sightline`'s own `DIST_PC` -- the
+    Edenhofer in-cube points out to the map's own edge, then the
+    log-spaced tail to Combined19's own ~10,000 pc reach, built ONCE by
+    `sky.derived.profile._build_adopted_one_region` instead of
+    reconstructed here."""
+    return profile_obj.dist.copy()
 
 
 def tile_mean_u(profile_obj, dist_grid, pix256, a_pix, n_src):
@@ -956,9 +946,10 @@ def _build_one_tile(config, t, geom, stars, weights, pixel_table, profile_obj, d
     # C25 (briefs/round4_2026-10-20/C25_far_column.md): on a covered
     # sightline beyond the Edenhofer cube's edge, u_i (above, used
     # unclipped for a_i/g_obs/ks_obs/star_weights -- the star's own
-    # Marshall-informed extinction, the whole point of the fix) can now
-    # exceed 1. The STORED XI, read downstream as `bmstp`'s depth MARK
-    # `x = a / T` (bmstp/grid.py's module docstring: "x <= 1 BY
+    # far-field-informed extinction, the whole point of the fix) can now
+    # exceed 1 (C26, owner ruling 2026-10-21: on EVERY sightline, not only
+    # a Marshall-covered one). The STORED XI, read downstream as `bmstp`'s
+    # depth MARK `x = a / T` (bmstp/grid.py's module docstring: "x <= 1 BY
     # DEFINITION... a cell with log10 xi > 0 is never part of the prior's
     # support"), is clipped to 1 here instead: a star beyond the map's
     # edge genuinely sees more extinction than its drawn pixel's A_PIX_K,
@@ -968,13 +959,21 @@ def _build_one_tile(config, t, geom, stars, weights, pixel_table, profile_obj, d
     # already reads there (bmstp/grid.py), rather than silently reflected
     # onto the near side of the cloud by that module's own `fold_wall`
     # (built for its kernels' own smoothing overflow, never for a real,
-    # unsmoothed population sitting past xi = 1).
+    # unsmoothed population sitting past xi = 1). C26 item 4 (the
+    # inconsistency C25's own report flagged): `a_i`, this star's own
+    # UNCLIPPED local extinction at its own drawn pixel, is now STORED as
+    # `A_STAR_K` beside the clipped `XI` -- `bmstp.atlas`'s STAR/PAHC/AGB
+    # members and `population.detection_correlation` read it directly
+    # instead of reconstructing an approximation from a DIFFERENT pixel's
+    # own `A_COL_K` times this clipped `XI` (the `a_col * XI` pattern C26
+    # retires for every one of those readers).
     xi = np.minimum(u_i, 1.0)
     return dict(
         tile=t, n_sightlines=int(sightlines.size), a_tile=a_tile,
         pointing_index=p_idx, tile_l=tile_l, tile_b=tile_b,
         star_index=star_index, pix512=star_pix512.astype(np.int64),
         u=xi.astype(np.float32), u_front=u_front_tile,
+        a_star_k=a_i.astype(np.float32),
         w=w.astype(np.float32), rule=rule,
         rule_count=rule_count, rule_weight=rule_weight,
         w_star=w_star.astype(np.float32), w_agb=w_agb.astype(np.float32),
@@ -1136,6 +1135,7 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c):
                 ("STAR_INDEX", tile_result["star_index"]),
                 ("HPX_PIX_512", tile_result["pix512"]),
                 ("XI", tile_result["u"]),
+                ("A_STAR_K", tile_result["a_star_k"]),
                 ("W", tile_result["w"]),
                 ("W_STAR", tile_result["w_star"]),
                 ("W_AGB", tile_result["w_agb"]),

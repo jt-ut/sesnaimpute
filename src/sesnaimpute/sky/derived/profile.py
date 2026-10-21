@@ -876,6 +876,20 @@ def bayestar_lookup(bayestar_path, l_deg, b_deg):
     return rows, reliable_pc
 
 
+def a_local_from_pieces(inside, far, a_edge, total_column_ak):
+    """The one expression `_RegionProfile.a_of_d` and `population.
+    anchor_tiles._magnitudes_from_pieces` both call (C26 item 3: "no
+    second derivation"): `inside` is `A_CUM_K` interpolated at
+    `min(d, D_EDGE)`, `far` is `max(0, A_CUM_K(d) - A_EDGE_K)` (already
+    0 for `d <= D_EDGE`) -- both cached per sightline by the caller,
+    since neither depends on the pixel's own `total_column_ak`;
+    `a_edge` is `A_EDGE_K` for that sightline. Returns `inside *
+    min(1, total/a_edge) + far`."""
+    total = np.asarray(total_column_ak, dtype=float)
+    scale = np.minimum(1.0, total / a_edge) if a_edge > 0 else np.ones_like(total)
+    return inside * scale + far
+
+
 def far_map_codes(l_deg, b_deg, bayestar_rows):
     """`FAR_MAP` (module docstring): Combined19's own build rule --
     Marshall's box first, else Bayestar where `bayestar_rows >= 0`
@@ -1077,14 +1091,10 @@ class _RegionProfile:
         sightline now, not only a Marshall-covered one (C25)."""
         row = int(np.asarray(self.sightline_row(hpx_pix)))
         d = np.asarray(d_pc, dtype=float)
-        d_capped = np.minimum(d, self.d_edge)
-        inside = np.interp(d_capped, self.dist, self.a_cum[row])
-        full = np.interp(d, self.dist, self.a_cum[row])
         a_edge = float(self.a_edge[row])
-        total = np.asarray(total_column_ak, dtype=float)
-        scale = np.minimum(1.0, total / a_edge) if a_edge > 0 else np.ones_like(total)
-        far = np.maximum(0.0, full - a_edge)
-        return inside * scale + far
+        inside = np.interp(np.minimum(d, self.d_edge), self.dist, self.a_cum[row])
+        far = np.maximum(0.0, np.interp(d, self.dist, self.a_cum[row]) - a_edge)
+        return a_local_from_pieces(inside, far, a_edge, total_column_ak)
 
     def u(self, d_pc, hpx_pix, *, total_column_ak):
         """`u(d) = A(d) / total_column_ak`: divides by the CALLER's own

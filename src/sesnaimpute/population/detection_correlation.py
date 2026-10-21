@@ -215,7 +215,9 @@ def _population_bin_table(config, region, pix, good, bp, f_lim):
     weighted and binned by the member's own dimmed Ks magnitude before
     being averaged -- never the other way around (module docstring's
     disclosure)."""
-    a_col, _ = atlas._pixel_column(config, region, pix)
+    # C26 (owner ruling 2026-10-21): no longer reads a_col here -- each
+    # member's own dimming comes from its own stored A_STAR_K now, not a
+    # pixel's own A_COL_K times this member's placement fraction.
     tile_of_pix, _ = atlas._pixel_tile(config, region, pix)
     star_path = config_module.product_path(
         config, "population", "star", "population", "tile", region=region)
@@ -240,21 +242,29 @@ def _population_bin_table(config, region, pix, good, bp, f_lim):
             om = float(g.attrs["OMEGA_POINTING_DEG2"])
             si = g["STAR_INDEX"][()]
             u = g["XI"][()].astype(float)
+            a_star_k = g["A_STAR_K"][()].astype(float)
             ws = g["W_STAR"][()].astype(float)
             ppahc = atlas._pahc_weight(
                 limit8, g["P_PAHC"][()].astype(float),
                 float(np.mean(f_lim[pp_all, atlas.IDX_I4])))
             f0all = fnu_field[si].astype(float)
-            uc, f0c, wsc, _, _, _ = atlas._collapse_star_members(
-                u, f0all, ws, ws * (1.0 - ppahc), ws * ppahc)
+            _uc, f0c, a_starc, wsc, _, _, _ = atlas._collapse_star_members(
+                u, f0all, ws, ws * (1.0 - ppahc), ws * ppahc, a_star_k)
             keep = wsc > 0
-            uc, f0c, wsc = uc[keep], f0c[keep], wsc[keep]
-            if uc.size == 0:
+            f0c, a_starc, wsc = f0c[keep], a_starc[keep], wsc[keep]
+            if a_starc.size == 0:
                 continue
-            batch = max(1, _MEMBER_ROWS_BUDGET // uc.size)
+            batch = max(1, _MEMBER_ROWS_BUDGET // a_starc.size)
             for s0 in range(0, pp.size, batch):
                 p_ = pp[s0:s0 + batch]
-                a = a_col[p_][:, None] * uc[None, :]
+                # C26 (owner ruling 2026-10-21): each member's own A_STAR_K
+                # (its own local extinction at its own drawn pixel) is
+                # ALREADY absolute -- broadcast to every pixel in this
+                # batch rather than recombined with a DIFFERENT pixel's
+                # own A_COL_K (the retired a_col * XI pattern; beyond the
+                # Edenhofer cube's edge that reconstruction would silently
+                # drop the far-field reddening XI's own clip discards).
+                a = np.broadcast_to(a_starc[None, :], (p_.size, a_starc.size))
                 kap = selection_module.kappa_hybrid(config, selection_module.law_dense_weight(a))
                 flux = f0c[None] * 10.0 ** (-0.4 * a[:, :, None] * kap)
                 p = np.empty_like(flux)
