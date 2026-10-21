@@ -1239,13 +1239,26 @@ def build_region(config, region):
     # `deep_cut_mag` in the first place).
     ks_complete_to = _measure_ks_complete_to(ks_edges, n_ks_obs, n_ks_pred, ks_source, deep_covered) \
         if has_deep else KS_CUT_MAG
-    n_keep = int(np.searchsorted(ks_edges, ks_complete_to + 1e-9))
-    if n_keep < ks_edges.size - 1:
-        ks_edges = ks_edges[: n_keep + 1]
-        n_ks_obs = n_ks_obs[:, :n_keep]
-        n_ks_pred = n_ks_pred[:, :n_keep]
-        n_gk_pred = n_gk_pred[:, :, :n_keep]
-        ks_source = ks_source[:n_keep]
+    # C30b fix (bug found 2026-10-21, both NAN and Musca's own real
+    # products): `searchsorted(ks_edges, ks_complete_to + eps)` already IS
+    # the number of EDGES to keep (every edge at or before ks_complete_to,
+    # which is always one of this array's own grid points) -- the prior
+    # `[: n_keep + 1]` kept one half-mag bin PAST ks_complete_to on every
+    # region whose own edge fell short of the ceiling (NAN's own KS_EDGES
+    # ran to 17.0 for a measured 16.5; Musca's to 17.5 for a measured
+    # 17.0 -- both silently one bin deep into territory `_measure_ks_
+    # complete_to` itself had just ruled incomplete). A region whose own
+    # edge equals the ceiling (Perseus, Vela D/NGC 7129 with no deep
+    # survey at all) was never touched by this bug, since `n_keep` there
+    # already equals the array's own full length.
+    n_edges_keep = int(np.searchsorted(ks_edges, ks_complete_to + 1e-9))
+    if n_edges_keep < ks_edges.size:
+        n_bins_keep = n_edges_keep - 1
+        ks_edges = ks_edges[: n_edges_keep]
+        n_ks_obs = n_ks_obs[:, :n_bins_keep]
+        n_ks_pred = n_ks_pred[:, :n_bins_keep]
+        n_gk_pred = n_gk_pred[:, :, :n_bins_keep]
+        ks_source = ks_source[:n_bins_keep]
 
     rel_dev, n_below_g10 = _acceptance_check_one_pixel(
         profile_obj, parent256, a_pix, m10_pix, raw, g_edges, r_diffuse, r_dense,
