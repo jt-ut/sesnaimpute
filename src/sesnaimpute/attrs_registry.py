@@ -1124,21 +1124,6 @@ REGISTRY = {
         "For every simulated star before the retention cut, its own "
         "TRILEGAL pointing, as a position in this region's list of "
         "simulated sky pointings."),
-    ("field-stars_trilegal_region", "RAW/LOG_G"): ("log10(cm/s^2)",
-        "C30 (2026-10-21): for every simulated star before the retention "
-        "cut, its surface gravity: 10**x is a gravity in cm/s^2. The "
-        "model's own population split for the STAR anchor's giant/dwarf "
-        "correction (population.anchor_tiles): a star with this below 3.5 "
-        "is a giant, at or above it a dwarf."),
-    ("field-stars_trilegal_region", "RAW/FNU_MJY"): ("mJy",
-        "C30 (2026-10-21): for every simulated star before the retention "
-        "cut, its intrinsic (undimmed) flux density in each of the eight "
-        "bands (J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 micron, this file's "
-        "own band order), TRILEGAL's own simulated 2MASS+Spitzer output. "
-        "Read for the J band alone, dimmed the same way Ks is "
-        "(population.anchor_tiles.magnitudes_at_extinction's own J "
-        "coefficient), to form the STAR anchor's observed J-Ks colour "
-        "per raw star."),
 
     # population.anchor_weights -- weights_anchors_tile: the STAR
     # per-tile-and-bin anchor reweighting factor W, per region.

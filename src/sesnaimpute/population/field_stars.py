@@ -64,24 +64,11 @@ bookkeeping the science does not need.
 
 Writes one product per region: `field-stars_trilegal_region.hdf5`, root
 datasets the retained sample (one row per star clearing retention), plus
-a `RAW` group carrying the pre-retention population's own columns
+a `RAW` group carrying the pre-retention population's own five columns
 (position, magnitude, and the per-star Gaia dimming coefficients) --
 what SPEC_PRIORS.md section 2.1's anchor prediction needs, since
 retention itself biases that prediction (reading note 04, section A,
 `raw_anchor_columns`).
-
-C30 (briefs/round4_2026-10-20/C30_population_anchor.md, 2026-10-21): the
-STAR anchor's per-population (giant/dwarf) split needs each RAW row's own
-surface gravity and its own J (and other band) flux -- `population.
-anchor_tiles` predicts the anchor counts from this RAW group alone (the
-retained group is a detection-filtered subset, never a stand-in for a
-per-pixel, nearest-pointing count), so the split cannot be read off the
-retained group's own `LOG_G`/`FNU_MJY`. Both are already computed for
-every raw row, before the retention filter, inside `_process_block`
-(`logg_b`, `flux_b`); this just carries them into the `raw` dict and
-`RAW/LOG_G`/`RAW/FNU_MJY` alongside the five pre-existing RAW columns,
-with no change to what the retention cut keeps or how any other reader
-of this product behaves.
 """
 
 import functools
@@ -513,12 +500,6 @@ def _process_block(piece, config, region, flux, log_teff, logg, mh, log_l, ks_ma
     raw = dict(
         g_proxy=g_proxy, ks_mag=ks_b, dist_pc=dist_b,
         k_g_diffuse=kg_diffuse, k_g_dense=kg_dense, pointing_index=pointing_b,
-        # C30: already computed for every raw row above (`logg_b`,
-        # `flux_b`), just not carried past this point before -- the STAR
-        # anchor's per-population split (`population.anchor_tiles`) reads
-        # these two off the RAW group, never the retained one (module
-        # docstring).
-        log_g=logg_b, fnu_mjy=flux_b,
     )
     ret = dict(
         dist_pc=dist_b[keep], log_teff=log_teff_b[keep], log_g=logg_b[keep],
@@ -649,12 +630,6 @@ def write_region(path, region, result):
             ("K_G_DIFFUSE", raw["k_g_diffuse"].astype(np.float32)),
             ("K_G_DENSE", raw["k_g_dense"].astype(np.float32)),
             ("POINTING_INDEX", raw["pointing_index"].astype(np.int16)),
-            # C30: the STAR anchor's per-population (giant/dwarf) split --
-            # `population.anchor_tiles` reads these to classify a raw row
-            # (LOG_G < 3.5, module docstring's "C30") and to form its J
-            # observable the same way `anchor_observables` forms Ks/G.
-            ("LOG_G", raw["log_g"].astype(np.float32)),
-            ("FNU_MJY", raw["fnu_mjy"].astype(np.float32)),
         ):
             build_module.write_dataset(raw_group, name, data, *REGISTRY[(_STEM, f"RAW/{name}")])
 
