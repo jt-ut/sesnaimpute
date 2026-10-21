@@ -115,6 +115,18 @@ def update_rows(path, regions, rows, granule="region", attrs=None, readings=None
                 f.create_dataset("REGION", data=region_data)
         for name, values in rows.items():
             values = np.asarray(values)
+            if name in f and (f[name].shape[1:] != values.shape[1:] or f[name].dtype != values.dtype):
+                # The writer's row layout changed since this dataset was
+                # created (e.g. catalog.depths went from eight bands to the
+                # three 2MASS bands, 2026-10-20): a stale layout is replaced,
+                # every region's row reset to the placeholder, and only the
+                # given regions' rows then written -- never a broadcast error
+                # that stops a rebuild on a product the stage itself owns.
+                print(f"tables.update_rows: {path}: dataset {name!r} layout "
+                      f"{f[name].shape[1:]} {f[name].dtype} -> {values.shape[1:]} "
+                      f"{values.dtype}; recreated, other regions' rows reset to "
+                      f"the placeholder")
+                del f[name]
             if name not in f:
                 shape = (len(ALL_REGIONS),) + values.shape[1:]
                 fill = np.full(shape, _fill_value(values.dtype), dtype=values.dtype)
