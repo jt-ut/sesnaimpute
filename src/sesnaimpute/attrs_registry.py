@@ -1045,6 +1045,29 @@ REGISTRY = {
         "C21 item 2: this region's own WEIGHT share under each of the "
         "six WEIGHT_RULE codes -- the sum, over every tile_<id> group's "
         "own RULE_WEIGHT, normalised to 1."),
+    ("population_star_tile", "POP"): ("category (0/1)",
+        "C30 (briefs/round4_2026-10-20/C30_population_anchor.md) item 5: "
+        "this star's own Galactic field-star population, population."
+        "selection.is_giant's own HR-diagram cut on its TRILEGAL LOG_G -- "
+        "0 dwarf, 1 giant. Independent of IS_EVOLVED (an AGB star can be "
+        "a giant or not; a giant need not be evolved)."),
+    ("population_star_tile", "RULE_COUNT_POP"): ("star count",
+        "C30 item 5: this tile's own RULE_COUNT, split by POP -- shape "
+        "(2, 6), row 0 dwarf stars, row 1 giant stars; RULE_COUNT_POP."
+        "sum(axis=0) equals RULE_COUNT exactly."),
+    ("population_star_tile", "RULE_WEIGHT_POP"): ("dimensionless",
+        "C30 item 5: this tile's own RULE_WEIGHT, split by POP -- shape "
+        "(2, 6); RULE_WEIGHT_POP.sum(axis=0) equals RULE_WEIGHT exactly."),
+    ("population_star_tile", "RULE_COUNT_FRAC_POP"): ("dimensionless",
+        "C30 item 5: this region's own RULE_COUNT_POP, summed over every "
+        "tile_<id> group and normalised WITHIN each population row (each "
+        "row sums to 1 over that population's own stars, not over the "
+        "region total) -- so a giant's own rule-code share and a dwarf's "
+        "are each read on their own population's own 100%."),
+    ("population_star_tile", "RULE_WEIGHT_FRAC_POP"): ("dimensionless",
+        "C30 item 5: the same construction as RULE_COUNT_FRAC_POP, on "
+        "RULE_WEIGHT_POP (each row normalised within its own population's "
+        "own total weight) instead of the star count."),
     # C21's own KS_EDGES_2MASS/N_KS_OBS_2MASS/FINAL_POP_KS_HIST build-time
     # check (commit 701fe92) is removed (C23 brief item 4, owner ruling):
     # it dimmed every star at its tile's own MEAN column and summed W
@@ -1237,6 +1260,34 @@ REGISTRY = {
     ("weights_anchors_tile", "KS_SCALE"): ("mag",
         "The fixed roll-off width of the 2MASS completeness sigmoid P_KS "
         "is evaluated with, the same value for every tile in this file."),
+    ("weights_anchors_tile", "W_GIANT"): ("dimensionless",
+        "C30 (briefs/round4_2026-10-20/C30_population_anchor.md): one value "
+        "for this whole region -- TRILEGAL's model error against the "
+        "independent anchors is per POPULATION, not per Ks magnitude alone "
+        "(distant red giants over-produced, dwarfs close to right), so the "
+        "2MASS colour cells at Ks 12.0-14.3 are fit jointly for a giant "
+        "weight (LOG_G < 3.5, population.selection.is_giant) and this "
+        "file's own per-tile, per-bin W_KS/W_REGION_KS there read as the "
+        "dwarf weight. NaN where SPLIT is False: the region's own giant "
+        "model count never cleared N_GIANT_MIN, and a giant star reads its "
+        "bin's W_KS/W_REGION_KS exactly like a dwarf (population."
+        "star_population)."),
+    ("weights_anchors_tile", "W_GIANT_ERR"): ("dimensionless",
+        "The joint weighted-least-squares fit's own formal error on "
+        "W_GIANT (sigma^2 = max(observed colour-cell count, 1), no "
+        "completeness factor). NaN where SPLIT is False."),
+    ("weights_anchors_tile", "N_GIANT_MODEL"): ("stars",
+        "The region's own model giant count summed over the 2MASS colour "
+        "cells (Ks 12.0-14.3, every J-Ks bin), non-excluded tiles only -- "
+        "the number SPLIT's own N_GIANT_MIN floor is measured against, "
+        "printed in this module's own report regardless of whether the "
+        "floor was cleared."),
+    ("weights_anchors_tile", "SPLIT"): ("boolean",
+        "True where this region's own N_GIANT_MODEL cleared N_GIANT_MIN "
+        "and W_GIANT/W_GIANT_ERR are a real fit; False where there is no "
+        "split at all (W_GIANT/W_GIANT_ERR are NaN and every star, giant "
+        "or dwarf, reads this file's own per-bin W_KS/W_REGION_KS exactly "
+        "as the pre-C30 construction did)."),
 
     # population.anchor_tiles -- tiles_anchors_hpx512 and
     # histograms_anchors_hpx512: the STAR anchor tiling and the two
@@ -1336,6 +1387,43 @@ REGISTRY = {
         "unchanged on one Marshall does not reach. Compare to "
         "RED_TAIL_SHARE_OBS; an uncovered region's own construction is "
         "exactly as it was before C25."),
+    ("histograms_anchors_hpx512", "CELL_KS_EDGES"): ("mag 2MASS Ks",
+        "C30 (briefs/round4_2026-10-20/C30_population_anchor.md): the "
+        "five half-mag Ks bins N_GIANT_CELL/N_DWARF_CELL are tabulated "
+        "on, 12.0 to 14.3 -- the SAME grid sky.derived.twomass_counts' "
+        "own CELL_KS_EDGES carries, read from there so the two never "
+        "drift apart."),
+    ("histograms_anchors_hpx512", "CELL_JK_EDGES"): ("mag J-Ks (2MASS)",
+        "C30: the three interior J-Ks colour edges N_GIANT_CELL/"
+        "N_DWARF_CELL's own last axis is tabulated on -- the SAME values "
+        "sky.derived.twomass_counts' own CELL_JK_EDGES carries."),
+    ("histograms_anchors_hpx512", "N_GIANT_CELL"): ("stars",
+        "C30 item 2: for the matching pixel in HPX_PIX_512, each Ks bin "
+        "of CELL_KS_EDGES and each J-Ks colour bin of CELL_JK_EDGES, the "
+        "model's predicted GIANT (LOG_G < 3.5, population.selection."
+        "is_giant) star count in that cell -- the retained field-star "
+        "table's own population at this pixel's own column (NOT the RAW "
+        "group N_KS_PRED reads: that group carries no LOG_G or flux, "
+        "module docstring above '_acceptance_check_one_pixel'), nearest-"
+        "pointing placed and weighted exactly as N_KS_PRED, but over a "
+        "detection-filtered (retained) sample -- its own sum over both "
+        "populations and all four colour bins is NOT bit-comparable to "
+        "N_KS_PRED at the same Ks bin. Read by population.anchor_weights "
+        "to fit a separate W_GIANT."),
+    ("histograms_anchors_hpx512", "N_DWARF_CELL"): ("stars",
+        "C30 item 2: the same cell and construction as N_GIANT_CELL, the "
+        "model's predicted DWARF (LOG_G >= 3.5) star count instead."),
+    ("histograms_anchors_hpx512", "N_GIANT_KS"): ("stars",
+        "C30 item 3: one value per Ks bin of KS_EDGES (region-summed, "
+        "not per pixel): the model's predicted GIANT star count on the "
+        "SAME full Ks grid N_KS_PRED is tabulated on (not just the "
+        "colour-cell range), from the SAME retained-table population as "
+        "N_GIANT_CELL -- read only to disclose the deep bins' (Ks >= "
+        "KS_SHARED_END_MAG) giant share, the assumption the deep bins "
+        "stay dwarf-only by the model's own content rests on."),
+    ("histograms_anchors_hpx512", "N_DWARF_KS"): ("stars",
+        "C30 item 3: the same construction as N_GIANT_KS, the DWARF "
+        "star count instead."),
 
     # population.gal -- counts_gal_survey: the background-galaxy number-
     # counts law, survey-wide.
@@ -3089,6 +3177,40 @@ REGISTRY = {
         "For the matching pixel in HPX_PIX_512 and each magnitude bin in "
         "MAG_EDGES, how many 2MASS Point Source Catalog detections fall in "
         "that pixel and bin."),
+    ("counts_twomass_hpx512", "CELL_KS_EDGES"): ("mag 2MASS Ks",
+        "The edges of the five half-magnitude Ks bins N_CELL/CELL_COMPLETE "
+        "are tabulated on, 12.0 to 14.3 -- the STAR anchor's own 2MASS-only "
+        "range (C30, briefs/round4_2026-10-20/C30_population_anchor.md): "
+        "bin k runs from CELL_KS_EDGES[k] to CELL_KS_EDGES[k+1]."),
+    ("counts_twomass_hpx512", "CELL_JK_EDGES"): ("mag J-Ks (2MASS)",
+        "The three interior J-Ks colour edges N_CELL/CELL_COMPLETE's own "
+        "last axis is tabulated on (C30): bin 0 is J-Ks < CELL_JK_EDGES[0] "
+        "(0.6), bins 1 and 2 the two intervals between, and bin 3 (the "
+        "reddest) is J-Ks > CELL_JK_EDGES[-1] (1.5) -- a 2MASS row with no "
+        "usable J (ph_qual's J character 'U' or 'X', or no J measurement "
+        "at all) is counted in this reddest bin, never assumed blue."),
+    ("counts_twomass_hpx512", "N_CELL"): ("stars",
+        "For the matching pixel in HPX_PIX_512, each Ks bin of "
+        "CELL_KS_EDGES and each J-Ks colour bin of CELL_JK_EDGES, how many "
+        "2MASS Point Source Catalog detections in Ks 12.0-14.3 fall in "
+        "that pixel, Ks bin and colour bin (C30) -- the SAME rows N counts "
+        "in its own four Ks bins over this range, split further by J-Ks; "
+        "read by population.anchor_tiles/anchor_weights to fit a separate "
+        "weight for the model's giant and dwarf populations, since "
+        "TRILEGAL's own error in the Galactic plane is per population, "
+        "not per Ks magnitude alone."),
+    ("counts_twomass_hpx512", "CELL_COMPLETE"): ("boolean",
+        "For the matching pixel in HPX_PIX_512, each Ks bin of "
+        "CELL_KS_EDGES and each J-Ks colour bin of CELL_JK_EDGES, True "
+        "where this pixel's own 2MASS J 50%-completeness magnitude "
+        "(catalog.depths' per-pixel product) clears the cell's own "
+        "faintest possible J -- the Ks bin's own faint edge plus the "
+        "colour bin's own faint edge, the reddest bin standing in its own "
+        "last finite edge, 1.5 -- by 0.3 mag (C24e's own margin, "
+        "c18_diag/c24e_colour_cells.py) -- read by nothing downstream "
+        "(every cell in the five C30 regions measured 2026-10-21 was "
+        "already complete), kept because it is a measured fact about the "
+        "pixel, not an assumption the fit silently makes."),
 
     ("counts_ukidss_hpx512", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
         "The region's own occupied nside-512 pixel numbers (nested ordering), "

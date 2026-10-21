@@ -192,6 +192,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.population.anchor_tiles import KS_DEEP_CUT_MAG
+from sesnaimpute.sky.derived import twomass_counts as twomass_counts_module
 
 _STEM = "weights_anchors_tile"
 
@@ -269,6 +270,19 @@ KS_FAINT_EXTENSION_STEP_MAG = 0.5
 #: cleared bins a region's own Ks axis needs for `deep_slope_dex_per_mag`
 #: to fit a line through them at all.
 DEEP_SLOPE_MIN_BINS = 2
+
+#: C30 (briefs/round4_2026-10-20/C30_population_anchor.md) item 3: the
+#: region's own 2MASS colour-cell giant model count (summed over the
+#: five Ks bins and four J-Ks bins, non-excluded tiles) must clear this
+#: floor before W_GIANT is fitted at all -- below it there is no split,
+#: and a giant reads its bin's W_DWARF exactly like a dwarf (today's
+#: construction). The brief's own proposal: 500, from C24i's diagnostic
+#: (c18_diag/c24i_population_weights.py) finding Perseus and NGC 7129's
+#: giant fits (W_GIANT errors 5-8% of the value there, vs <2% in the
+#: regions with thousands of giant counts) unstable at a few hundred
+#: giant counts -- measured per region and cited in this module's own
+#: printed report (N_GIANT_MODEL), not re-derived here.
+N_GIANT_MIN = 500.0
 
 
 # ---------------------------------------------------------------------------
@@ -583,6 +597,179 @@ def fit_tile_weights(n_obs, n_pred, excluded, min_counts=MIN_COUNTS,
         w_region[k] = pooled_fit["mu_factor"]
     return dict(w=w, b=b, w_region=w_region, ratio=ratio, populated=populated,
                 pooled=pooled)
+
+
+# ---------------------------------------------------------------------------
+# C30 (briefs/round4_2026-10-20/C30_population_anchor.md) item 3: the
+# per-population (giant/dwarf) split of the 2MASS colour-cell range,
+# Ks 12.0-14.3 -- TWO unknown families, W_GIANT (one value per region)
+# and W_DWARF (per tile and per Ks bin, through the SAME fit_tile_weights
+# pooling/shrinkage `fit_ks` above already runs). Below N_GIANT_MIN there
+# is no split: a giant reads its bin's W_KS exactly like a dwarf, and
+# `fit_ks` (the ordinary, unsplit fit over the WHOLE Ks axis, computed
+# first in every case) is never touched -- the identity the brief asks
+# for (bit-identical to the baseline with the split disabled) holds by
+# construction, not by a separate code path.
+# ---------------------------------------------------------------------------
+
+def _colour_cell_wls(obs, model_giant, model_dwarf):
+    """Weighted least squares `obs = W_giant * model_giant + W_dwarf *
+    model_dwarf` over flattened (Ks bin, J-Ks bin) cells, `sigma^2 =
+    max(obs, 1)` (C24i's own construction, `c18_diag/
+    c24i_population_weights.py`'s `wls`, reused exactly). Returns
+    `(w_giant, w_dwarf, sigma_giant, sigma_dwarf)`."""
+    s2 = np.maximum(obs, 1.0)
+    a = np.column_stack([model_giant, model_dwarf]) / np.sqrt(s2)[:, None]
+    y = obs / np.sqrt(s2)
+    cov = np.linalg.inv(a.T @ a)
+    w = cov @ a.T @ y
+    e = np.sqrt(np.diag(cov))
+    return float(w[0]), float(w[1]), float(e[0]), float(e[1])
+
+
+def _read_twomass_cells(config, region, pixels):
+    """The region's own 2MASS (J-Ks, Ks) colour-cell counts
+    (`sky.derived.twomass_counts`'s `N_CELL`, `CELL_COMPLETE`,
+    `CELL_KS_EDGES`, `CELL_JK_EDGES`): the observed side of the giant/
+    dwarf split. Fails if this product's own pixel set disagrees with
+    `pixels` (the tiles/histograms products' own set, already cross-
+    checked against each other). Returns `None` (never a KeyError) where
+    this region's own 2MASS counts product predates C30 and carries no
+    `N_CELL` at all -- C30b, the same "reader must not require a dataset
+    the product may lack" rule `_read_histograms` applies."""
+    path = config_module.product_path(config, "sky/derived", "twomass", "counts", "hpx512", region=region)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"prior.anchor_weights: 2MASS counts missing for region {region!r} at {path} "
+            "-- run `sesnaimpute.sky.derived.twomass_counts` first")
+    with h5py.File(path, "r") as f:
+        if "N_CELL" not in f:
+            return None, None, None, None
+        tm_pix = np.asarray(f["HPX_PIX_512"][:], dtype=np.int64)
+        cell_ks_edges = np.asarray(f["CELL_KS_EDGES"][:], dtype=np.float64)
+        cell_jk_edges = np.asarray(f["CELL_JK_EDGES"][:], dtype=np.float64)
+        n_cell = np.asarray(f["N_CELL"][:], dtype=np.float64)
+        cell_complete = np.asarray(f["CELL_COMPLETE"][:], dtype=bool)
+    if not np.array_equal(tm_pix, pixels):
+        raise ValueError(
+            f"prior.anchor_weights: {region!r}'s 2MASS counts pixel set disagrees "
+            "with the tiles/histograms products' own set -- rerun "
+            "`sesnaimpute.sky.derived.twomass_counts` for this region")
+    return cell_ks_edges, cell_jk_edges, n_cell, cell_complete
+
+
+def _cell_bins_to_ks_columns(ks_edges, cell_ks_edges):
+    """`(cols, matched)`, each `(n_cell_k,)`: for every CELL_KS_EDGES bin,
+    the column index into `ks_edges`'s own bin array whose (lower, upper)
+    edge matches it exactly, or `-1`/`False` where none does (bug found
+    2026-10-21: a region WITH deep (UKIDSS/VHS) coverage never carries a
+    literal 12.0-14.3 prefix on its own combined `KS_EDGES` -- `anchor_
+    tiles._combine_ks_axis` drops the 2MASS-only closing 14.0-14.3 bin
+    from the shared grid and replaces it with the deep survey's own
+    wider 14.0-14.5 bin, so CELL_KS_EDGES's own last bin has no
+    counterpart there at all; a region with no deep survey carries the
+    whole 12.0-14.3 prefix unchanged). The giant-subtracted per-tile
+    refit below applies only at the bins this function actually
+    matches -- never a positional `[:n_cell_k]` slice, which silently
+    read the WRONG bin on every deep-covered region."""
+    lo, hi = np.asarray(ks_edges[:-1]), np.asarray(ks_edges[1:])
+    cols = np.full(cell_ks_edges.size - 1, -1, dtype=np.int64)
+    for k in range(cell_ks_edges.size - 1):
+        hit = np.flatnonzero(np.isclose(lo, cell_ks_edges[k], atol=1e-6)
+                              & np.isclose(hi, cell_ks_edges[k + 1], atol=1e-6))
+        if hit.size:
+            cols[k] = int(hit[0])
+    return cols, cols >= 0
+
+
+def fit_population_split(config, region, tiles, hist, excluded, n_obs_ks, n_pred_ks,
+                          n_giant_min=N_GIANT_MIN):
+    """`(w_giant, w_giant_err, n_giant_model, split, dwarf5)`: this
+    region's own W_GIANT (a single scalar fit, C24i's region-pooled
+    colour-cell construction) and, where `n_giant_model` (the region's
+    own giant model count over the colour-cell range, non-excluded
+    tiles) clears `n_giant_min`, the giant-corrected per-tile inputs
+    `fit_tile_weights` re-fits the Ks bins `_cell_bins_to_ks_columns`
+    actually matches (`dwarf5`, a dict with `n_obs_dwarf`/`n_pred_dwarf`/
+    `n_clamped`/`cols` -- `cols` the matching column index into this
+    region's own `KS_EDGES` for each matched row) -- `None` where `split`
+    is False, in which case the CALLER makes no further change to its
+    own, already-computed unsplit `fit_ks`. A region whose own combined
+    `KS_EDGES` carries no match at all for the colour-cell range (should
+    not happen: every region's shared 2MASS grid covers 9.0-14.0 at
+    least) is read as no usable bins, not an error.
+
+    `n_pred_ks`/`n_obs_ks` are `build_region`'s own already-tile-
+    aggregated, P_KS-scaled arrays (the SAME inputs the unsplit `fit_ks`
+    call uses) -- giants and dwarfs share one P_KS (a 2MASS-detection
+    completeness factor, not a stellar-population one), so splitting
+    AFTER that scaling keeps every number on `fit_ks`'s own scale.
+    """
+    # C30b: this region's own anchor_tiles product predates C30 (no
+    # colour cells at all, `_read_histograms`'s own optional read) -- no
+    # split is possible, and that is not an error: report it exactly as
+    # "below the floor" reads, N_GIANT_MODEL 0.0 (there is no model count
+    # to report, never NaN -- NaN here would read as "not measured" where
+    # this region's own upstream product simply predates the feature).
+    if hist["cell_ks_edges"] is None or hist["n_giant_cell"] is None:
+        return float("nan"), float("nan"), 0.0, False, None
+
+    pixels = hist["pixels"]
+    tile_of_pix = tiles["tile_of_pix"]
+    n_tile = tiles["tile_l_deg"].size
+    cell_ks_edges, cell_jk_edges, obs_cell_pix, cell_complete_pix = _read_twomass_cells(config, region, pixels)
+    if cell_ks_edges is None:
+        # the model side (anchor_tiles) has colour cells but the observed
+        # side (twomass_counts) does not -- should not happen for a
+        # region built by the same C30 pass, but the rule is the same:
+        # no split, not an error.
+        return float("nan"), float("nan"), 0.0, False, None
+    n_cell_k = cell_ks_edges.size - 1
+    if not (np.array_equal(hist["cell_ks_edges"], cell_ks_edges)
+            and np.array_equal(hist["cell_jk_edges"], cell_jk_edges)):
+        raise ValueError(
+            f"prior.anchor_weights: {region!r}'s model colour cells "
+            "(population.anchor_tiles) and observed colour cells "
+            "(sky.derived.twomass_counts) disagree on their own grid")
+
+    obs_cell_pix = np.where(cell_complete_pix, obs_cell_pix, 0.0)
+    obs_cell_tile = _aggregate_to_tiles(obs_cell_pix, tile_of_pix, n_tile)
+    giant_cell_tile = _aggregate_to_tiles(hist["n_giant_cell"], tile_of_pix, n_tile)
+    dwarf_cell_tile = _aggregate_to_tiles(hist["n_dwarf_cell"], tile_of_pix, n_tile)
+
+    keep = ~excluded
+    obs_cell_region = obs_cell_tile[keep].sum(axis=0)
+    giant_cell_region = giant_cell_tile[keep].sum(axis=0)
+    dwarf_cell_region = dwarf_cell_tile[keep].sum(axis=0)
+    n_giant_model = float(giant_cell_region.sum())
+    split = n_giant_model > n_giant_min
+    if not split:
+        return float("nan"), float("nan"), n_giant_model, False, None
+
+    w_giant, _w_dwarf0, e_giant, _e_dwarf0 = _colour_cell_wls(
+        obs_cell_region.ravel(), giant_cell_region.ravel(), dwarf_cell_region.ravel())
+
+    cols, matched = _cell_bins_to_ks_columns(hist["ks_edges"], cell_ks_edges)
+    n_unmatched = int(np.count_nonzero(~matched))
+    if n_unmatched:
+        print(f"prior.anchor_weights: {region!r}: C30 item 3: {n_unmatched}/{n_cell_k} colour-cell "
+              "Ks bin(s) have no exact counterpart on this region's own combined KS_EDGES (a deep "
+              "survey's own wider bin replaced it) -- those bins keep the UNSPLIT fit, never a "
+              "silently misaligned column")
+    cols_m = cols[matched]
+
+    giant_tile_bin = giant_cell_tile.sum(axis=2)[:, matched]
+    dwarf_tile_bin = dwarf_cell_tile.sum(axis=2)[:, matched]
+    total_tile_bin = giant_tile_bin + dwarf_tile_bin
+    giant_share = np.where(total_tile_bin > 0, giant_tile_bin / np.where(total_tile_bin > 0, total_tile_bin, 1.0), 0.0)
+    n_pred_giant = n_pred_ks[:, cols_m] * giant_share
+    n_pred_dwarf = n_pred_ks[:, cols_m] - n_pred_giant
+    n_obs_dwarf_raw = n_obs_ks[:, cols_m] - w_giant * n_pred_giant
+    n_clamped = int(np.count_nonzero(n_obs_dwarf_raw < 0.0))
+    n_obs_dwarf = np.maximum(n_obs_dwarf_raw, 0.0)
+    dwarf5 = dict(n_obs_dwarf=n_obs_dwarf, n_pred_dwarf=n_pred_dwarf,
+                  n_clamped=n_clamped, cols=cols_m)
+    return w_giant, e_giant, n_giant_model, True, dwarf5
 
 
 # ---------------------------------------------------------------------------
@@ -1102,6 +1289,16 @@ def _read_histograms(config, region):
             f"prior.anchor_weights: histograms product missing for region {region!r} at "
             f"{path} -- run `sesnaimpute.population.anchor_tiles` first")
     with h5py.File(path, "r") as f:
+        # C30b: this region's own anchor_tiles product may predate C30
+        # (every region this brief's own five do not touch) and carry
+        # none of the colour-cell datasets at all -- the reader must not
+        # require a dataset the product may lack, so their absence reads
+        # as None here, never a KeyError that `survey_pooled_weights`'
+        # own broad except would otherwise have to swallow by dropping
+        # the WHOLE region (its ordinary G/Ks/joint marginal evidence
+        # too) out of the survey pool. `fit_population_split` reads a
+        # None here as "no split possible for this region", not an error.
+        has_cells = "CELL_KS_EDGES" in f
         return dict(
             pixels=np.asarray(f["HPX_PIX_512"][:], dtype=np.int64),
             g_edges=np.asarray(f["G_EDGES"][:], dtype=np.float64),
@@ -1112,6 +1309,13 @@ def _read_histograms(config, region):
             n_gk_pred=np.asarray(f["N_GK_PRED"][:], dtype=np.float64),
             n_g_obs=np.asarray(f["N_G_OBS"][:], dtype=np.float64),
             n_ks_obs=np.asarray(f["N_KS_OBS"][:], dtype=np.float64),
+            # C30 item 3: the model's per-population colour-cell split
+            # (population.anchor_tiles item 2), read alongside everything
+            # else this one open already serves -- optional, C30b above.
+            cell_ks_edges=np.asarray(f["CELL_KS_EDGES"][:], dtype=np.float64) if has_cells else None,
+            cell_jk_edges=np.asarray(f["CELL_JK_EDGES"][:], dtype=np.float64) if has_cells else None,
+            n_giant_cell=np.asarray(f["N_GIANT_CELL"][:], dtype=np.float64) if has_cells else None,
+            n_dwarf_cell=np.asarray(f["N_DWARF_CELL"][:], dtype=np.float64) if has_cells else None,
         )
 
 
@@ -1176,6 +1380,32 @@ def build_region(config, region, clusters, members_all, w_pool_g, w_pool_ks, ks_
 
     fit_g = fit_tile_weights(n_obs_g, n_pred_g, excluded, w_pool=w_pool_g)
     fit_ks = fit_tile_weights(n_obs_ks, n_pred_ks, excluded, w_pool=w_pool_ks_region)
+
+    # C30 item 3: the giant/dwarf split, Ks 12.0-14.3 only. `fit_ks` above
+    # is the ordinary, unsplit fit over the WHOLE Ks axis -- computed
+    # first, in every case, and never touched below unless `split` is
+    # True: the brief's own "bit-identical with the split disabled"
+    # identity holds by construction, not a separate code path.
+    w_giant, w_giant_err, n_giant_model, split, dwarf5 = fit_population_split(
+        config, region, tiles, hist, excluded, n_obs_ks, n_pred_ks)
+    if split:
+        # `cols`: the matched colour-cell bins' own column index into
+        # THIS region's combined KS_EDGES -- never a positional
+        # `[:n_cell_k]` slice (bug found 2026-10-21: a deep-covered
+        # region's combined axis does not open on a literal 12.0-14.3
+        # prefix, `_cell_bins_to_ks_columns`'s own docstring).
+        cols = dwarf5["cols"]
+        fit_dwarf = fit_tile_weights(dwarf5["n_obs_dwarf"], dwarf5["n_pred_dwarf"], excluded,
+                                      w_pool=w_pool_ks_region[cols])
+        fit_ks["w"][:, cols] = fit_dwarf["w"]
+        fit_ks["b"][:, cols] = fit_dwarf["b"]
+        fit_ks["w_region"][cols] = fit_dwarf["w_region"]
+        fit_ks["ratio"][:, cols] = fit_dwarf["ratio"]
+        fit_ks["populated"][cols] = fit_dwarf["populated"]
+        fit_ks["pooled"][cols] = fit_dwarf["pooled"]
+        n_dwarf_clamped = dwarf5["n_clamped"]
+    else:
+        n_dwarf_clamped = 0
 
     n_obs_joint_flat = n_obs_joint.reshape(n_tile, n_g * n_ks)
     n_pred_joint_flat = n_pred_joint.reshape(n_tile, n_g * n_ks)
@@ -1281,6 +1511,8 @@ def build_region(config, region, clusters, members_all, w_pool_g, w_pool_ks, ks_
         scatter_observed=scatter_obs, scatter_expected=scatter_expected,
         frac_disagree_2sigma=frac_disagree_2sigma,
         ks_m50=ks_m50, ks_own_fit=ks_own_fit, p_ks=p_ks_out, ks_source=ks_source,
+        w_giant=w_giant, w_giant_err=w_giant_err, n_giant_model=n_giant_model,
+        split=bool(split), n_dwarf_clamped=n_dwarf_clamped,
     )
 
 
@@ -1320,6 +1552,16 @@ def _write_product(config, region, result):
             ("P_KS", result["p_ks"]),
             ("KS_M50", result["ks_m50"]),
             ("KS_SCALE", np.float64(KS_SCALE_MAG)),
+            # C30 item 3: the per-population (giant/dwarf) split at the
+            # 2MASS colour-cell range -- one value per region, SPLIT False
+            # (W_GIANT/W_GIANT_ERR NaN) where the region's own giant model
+            # count never clears N_GIANT_MIN, in which case a giant reads
+            # its bin's W_KS exactly like a dwarf (module docstring above
+            # `fit_population_split`).
+            ("W_GIANT", np.float64(result["w_giant"])),
+            ("W_GIANT_ERR", np.float64(result["w_giant_err"])),
+            ("N_GIANT_MODEL", np.float64(result["n_giant_model"])),
+            ("SPLIT", np.bool_(result["split"])),
         ):
             build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)])
     return path
@@ -1445,6 +1687,20 @@ def build(config, regions=None):
                float(np.median(result["ks_m50"])),
                float(result["ks_m50"].min()), float(result["ks_m50"].max()),
                KS_SCALE_MAG, n_at_bound, result["n_tile"]))
+        # C30 item 3: the giant/dwarf split -- W_GIANT a single region
+        # scalar, W_DWARF the (now possibly giant-corrected) matched
+        # CELL_KS_EDGES bins of W_REGION_KS (`_cell_bins_to_ks_columns`:
+        # never a positional prefix -- a deep-covered region's own
+        # combined KS_EDGES does not open on a literal 12.0-14.3 run).
+        cell_ks_edges = twomass_counts_module.CELL_KS_EDGES
+        cols_report, matched_report = _cell_bins_to_ks_columns(result["ks_edges"], cell_ks_edges)
+        w_dwarf_cells = result["w_region_ks"][cols_report[matched_report]]
+        print(
+            "anchor_weights: %s C30 SPLIT=%s N_GIANT_MODEL=%.1f (floor %.0f) W_GIANT=%.3f+-%.3f "
+            "W_DWARF(Ks 12.0-14.3)=%s n_dwarf_clamped_to_zero=%d"
+            % (region, result["split"], result["n_giant_model"], N_GIANT_MIN,
+               result["w_giant"], result["w_giant_err"],
+               np.round(w_dwarf_cells, 3).tolist(), result["n_dwarf_clamped"]))
 
 
 if __name__ == "__main__":

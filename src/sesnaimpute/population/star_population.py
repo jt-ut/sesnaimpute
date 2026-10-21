@@ -175,6 +175,7 @@ from sesnaimpute.granules import access
 _STEM = "population_star_tile"
 from sesnaimpute.population import anchor_tiles, pahc_curve, selection
 from sesnaimpute.sky.derived import profile as profile_module
+from sesnaimpute.sky.derived import twomass_counts as twomass_counts_module
 from sesnaimpute.sky.download.trilegal import build as trilegal_download
 
 # ---------------------------------------------------------------------------
@@ -199,6 +200,33 @@ WEIGHT_RULE_FAINT_END = 3
 WEIGHT_RULE_BRIGHT_END = 4
 WEIGHT_RULE_BOTH_MARGINAL = 5
 N_WEIGHT_RULES = 6
+
+#: C30 (briefs/round4_2026-10-20/C30_population_anchor.md) item 5: POP
+#: codes, per star -- owner names the terms; these are the pipeline's own
+#: population.selection.is_giant cut, not a new concept of this module's
+#: own.
+POP_DWARF = 0
+POP_GIANT = 1
+
+
+def _cell_ks_bin_mask(ks_edges, cell_ks_edges=twomass_counts_module.CELL_KS_EDGES):
+    """`(n_ks,)` bool: which bins of THIS tile's own `ks_edges` are one of
+    `sky.derived.twomass_counts.CELL_KS_EDGES`'s own colour-cell bins
+    (Ks 12.0-14.3), matched by (lower, upper) edge value -- never a
+    positional `bin_ks < n_cell_k` test (bug found 2026-10-21,
+    `population.anchor_weights._cell_bins_to_ks_columns`'s own
+    docstring): a region's combined `KS_EDGES` always opens at 9.0, so
+    the colour-cell range sits at bins 6-9, not 0-4, and a deep-covered
+    region's own combined axis does not even carry an exact 14.0-14.3
+    bin at all (replaced by the deep survey's own wider 14.0-14.5 one) --
+    that one colour-cell bin is then never True here, exactly as
+    `anchor_weights.fit_population_split` leaves it on the unsplit fit."""
+    lo, hi = np.asarray(ks_edges[:-1]), np.asarray(ks_edges[1:])
+    mask = np.zeros(lo.size, dtype=bool)
+    for k in range(cell_ks_edges.size - 1):
+        hit = np.isclose(lo, cell_ks_edges[k], atol=1e-6) & np.isclose(hi, cell_ks_edges[k + 1], atol=1e-6)
+        mask |= hit
+    return mask
 
 #: The project's own eight census bands, in the order every register and
 #: `catalog.limits` share (module docstring, "Brightness units").
@@ -298,7 +326,8 @@ def _populated_edge_indices(populated, n_bin):
 
 
 def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
-                  w_g, w_ks, populated_g, populated_ks, u_star, u_front, region):
+                  w_g, w_ks, populated_g, populated_ks, u_star, u_front, region,
+                  is_giant=None, w_giant=float("nan"), split=False, is_cell_bin=None):
     """Per star, `(W, WEIGHT_RULE)` (module docstring). `w_joint`/`w_g`/
     `w_ks` are the tables this tile actually reads from -- its own, or
     (an excluded tile) the region-pooled `W_REGION_*`, chosen by the
@@ -354,6 +383,25 @@ def star_weights(g_obs, ks_obs, g_edges, ks_edges, w_joint, use_joint,
     both_in_range = in_range_g & in_range_ks
     g_val = w_g[bin_g]
     ks_val = w_ks[bin_ks]
+    # C30 (briefs/round4_2026-10-20/C30_population_anchor.md) item 5: a
+    # giant star at the 2MASS colour-cell range (Ks 12.0-14.3,
+    # `is_cell_bin` -- this tile's own `ks_edges` matched against
+    # `sky.derived.twomass_counts.CELL_KS_EDGES` by (lower, upper) edge
+    # value, `_cell_ks_bin_mask`; NEVER a positional `bin_ks < n` test --
+    # a region's combined `KS_EDGES` always opens at Ks 9.0, so the
+    # colour-cell range sits at bins 6-9, not 0-4, and a deep-covered
+    # region does not even carry an exact 14.0-14.3 bin at all) reads
+    # W_GIANT in place of its bin's own W_KS, where this region's own
+    # giant model count cleared N_GIANT_MIN (`split`); a dwarf, or a
+    # giant outside that range or where `split` is False, is untouched
+    # (today's construction, unchanged). Applied to `ks_val` itself,
+    # BEFORE every rule branch below reads it, so the joint rule
+    # (`joint_val`, never touched by C30) and every marginal/placement/
+    # faint-end path that DOES read `ks_val` all carry the population
+    # routing the same way, with no second branch to keep in sync.
+    if split and is_giant is not None:
+        giant_here = np.asarray(is_giant) & is_cell_bin[bin_ks]
+        ks_val = np.where(giant_here, w_giant, ks_val)
     joint_val = w_joint[bin_g, bin_ks]
 
     # placement-selected marginal (item 2): front of the cloud reads
@@ -750,6 +798,7 @@ def _read_weights(config, region):
             "prior.star_population: anchor weight table missing for region %r at %s "
             "-- run the `prior.anchor_weights` RUNBOOK line first" % (region, path))
     with h5py.File(path, "r") as f:
+        ks_edges = np.asarray(f["KS_EDGES"][:], dtype=np.float64)
         return dict(
             w_joint=np.asarray(f["W_JOINT"][:], dtype=np.float64),
             use_joint=np.asarray(f["USE_JOINT"][:], dtype=bool),
@@ -769,7 +818,18 @@ def _read_weights(config, region):
             measured_ks=np.asarray(f["MEASURED_KS"][:], dtype=bool),
             excluded=np.asarray(f["EXCLUDED"][:], dtype=bool),
             g_edges=np.asarray(f["G_EDGES"][:], dtype=np.float64),
-            ks_edges=np.asarray(f["KS_EDGES"][:], dtype=np.float64),
+            ks_edges=ks_edges,
+            # C30 item 5: the region-wide giant/dwarf split this tile's
+            # own W_KS/W_REGION_KS already carry at the colour-cell
+            # range where SPLIT is True (population.anchor_weights
+            # item 3) -- W_GIANT/SPLIT are single values for the whole
+            # file, not per tile. `is_cell_bin`: THIS region's own
+            # KS_EDGES bins matched against CELL_KS_EDGES by edge value
+            # (`_cell_ks_bin_mask`), computed once per region rather
+            # than once per star.
+            w_giant=float(np.asarray(f["W_GIANT"][()], dtype=np.float64)),
+            split=bool(np.asarray(f["SPLIT"][()])),
+            is_cell_bin=_cell_ks_bin_mask(ks_edges),
         )
 
 
@@ -920,11 +980,17 @@ def _build_one_tile(config, t, geom, stars, weights, pixel_table, profile_obj, d
         a_i, stars["g_proxy"][star_index], stars["ks_mag"][star_index],
         stars["k_g_diffuse"][star_index], stars["k_g_dense"][star_index],
         stars["r_diffuse"], stars["r_dense"])
+    # C30 item 5: this tile's own stars' population (0 dwarf, 1 giant,
+    # population.selection.is_giant) -- a giant reads W_GIANT in place of
+    # its bin's own W_KS at the colour-cell range, where this region's
+    # own SPLIT is True (`star_weights`' own docstring).
+    pop_i = stars["is_giant"][star_index]
     w, rule, bin_g, bin_ks = star_weights(
         g_obs, ks_obs, weights["g_edges"], weights["ks_edges"],
         w_joint, weights["use_joint"][t], w_g, w_ks,
         weights["populated_g"], weights["populated_ks"] & weights["measured_ks"][t], u_i, u_front_i,
-        region)
+        region, is_giant=pop_i, w_giant=weights["w_giant"], split=weights["split"],
+        is_cell_bin=weights["is_cell_bin"])
 
     # the partition (spec section 3): a REWEIGHTING of this tile's own W,
     # never a filter -- w_star + w_agb == w row by row.
@@ -942,6 +1008,13 @@ def _build_one_tile(config, t, geom, stars, weights, pixel_table, profile_obj, d
     rule_count = np.bincount(rule, minlength=N_WEIGHT_RULES).astype(np.int64)
     rule_weight = np.zeros(N_WEIGHT_RULES, dtype=np.float64)
     np.add.at(rule_weight, rule, w.astype(np.float64))
+    # C30 item 5: the same two sums, split by population (POP_DWARF/
+    # POP_GIANT) -- shape (2, N_WEIGHT_RULES).
+    rule_count_pop = np.zeros((2, N_WEIGHT_RULES), dtype=np.int64)
+    rule_weight_pop = np.zeros((2, N_WEIGHT_RULES), dtype=np.float64)
+    pop_idx = pop_i.astype(np.int64)
+    np.add.at(rule_count_pop, (pop_idx, rule), 1)
+    np.add.at(rule_weight_pop, (pop_idx, rule), w.astype(np.float64))
 
     # C25 (briefs/round4_2026-10-20/C25_far_column.md): on a covered
     # sightline beyond the Edenhofer cube's edge, u_i (above, used
@@ -974,8 +1047,9 @@ def _build_one_tile(config, t, geom, stars, weights, pixel_table, profile_obj, d
         star_index=star_index, pix512=star_pix512.astype(np.int64),
         u=xi.astype(np.float32), u_front=u_front_tile,
         a_star_k=a_i.astype(np.float32),
-        w=w.astype(np.float32), rule=rule,
+        w=w.astype(np.float32), rule=rule, pop=pop_i.astype(np.int8),
         rule_count=rule_count, rule_weight=rule_weight,
+        rule_count_pop=rule_count_pop, rule_weight_pop=rule_weight_pop,
         w_star=w_star.astype(np.float32), w_agb=w_agb.astype(np.float32),
         p_pahc=p_pahc.astype(np.float32),
         mean_u=mean_u, use_joint_any=bool(weights["use_joint"][t].any()),
@@ -1010,6 +1084,11 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
     # tile, since neither the HR-diagram cut nor a unit-change ratio
     # depends on where a star sits on a tile's own profile.
     is_evolved = evolved_selector(stars_raw["log_g"], stars_raw["log_teff"], stars_raw["log_l"])
+    # C30 item 5: the Galactic field-star population split every giant/
+    # dwarf anchor weight reads (population.selection.is_giant, LOG_G <
+    # 3.5) -- an independent HR-diagram cut from `is_evolved` above (an
+    # AGB star can be a giant or not; a giant need not be evolved).
+    is_giant = selection.is_giant(stars_raw["log_g"])
     f_dusty_mean = (1.0 - F_C) * f_dusty_o + F_C * f_dusty_c
     log10_b = star_brightness_log10_b(stars_raw["fnu_mjy"], stars_raw["template_index"], f_ref_sps)
     log10_b_pahc = pahc_brightness_log10_b(stars_raw["fnu_mjy"], stars_raw["log_teff"],
@@ -1019,7 +1098,7 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
     limit_grid_mjy = pahc_limit_grid_mjy(config, region)
 
     stars = dict(stars_raw, r_diffuse=r_diffuse, r_dense=r_dense,
-                 is_evolved=is_evolved, f_dusty_mean=f_dusty_mean,
+                 is_evolved=is_evolved, is_giant=is_giant, f_dusty_mean=f_dusty_mean,
                  log10_b=log10_b, log10_b_pahc=log10_b_pahc,
                  log10_b_agb_c=log10_b_agb_c, log10_b_agb_o=log10_b_agb_o,
                  limit_grid_mjy=limit_grid_mjy)
@@ -1096,7 +1175,7 @@ def build_region(config, region, f_dusty_o, f_dusty_c, l_o_lsun,
                 tiles=results, n_tile=tiles["n_tile"],
                 tile_omega_deg2=tiles["tile_omega_deg2"],
                 region_anchor_ratio=_read_anchor_ratio(config, region),
-                is_evolved=is_evolved, log10_b=log10_b, log10_b_pahc=log10_b_pahc,
+                is_evolved=is_evolved, is_giant=is_giant, log10_b=log10_b, log10_b_pahc=log10_b_pahc,
                 log10_b_agb_c=log10_b_agb_c, log10_b_agb_o=log10_b_agb_o,
                 limit_grid_mjy=limit_grid_mjy, f_dusty_mean=f_dusty_mean,
                 n_pointing=len(pointings), pointing_l=pointing_l, pointing_b=pointing_b,
@@ -1122,6 +1201,8 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c):
                                     *REGISTRY[(_STEM, "LIMIT8_GRID_MJY")])
         total_rule_count = np.zeros(N_WEIGHT_RULES, dtype=np.int64)
         total_rule_weight = np.zeros(N_WEIGHT_RULES, dtype=np.float64)
+        total_rule_count_pop = np.zeros((2, N_WEIGHT_RULES), dtype=np.int64)
+        total_rule_weight_pop = np.zeros((2, N_WEIGHT_RULES), dtype=np.float64)
         for tile_result in result["tiles"]:
             grp = f.create_group("tile_%d" % tile_result["tile"])
             # section 5.1's Omega_sim = n_pointings * Omega_pointing: the
@@ -1145,14 +1226,23 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c):
                 ("LOG10_B_AGB_C", result["log10_b_agb_c"][si].astype(np.float32)),
                 ("LOG10_B_AGB_O", result["log10_b_agb_o"][si].astype(np.float32)),
                 ("P_PAHC", tile_result["p_pahc"]),
+                # C30 item 5: this star's own Galactic field-star
+                # population (0 dwarf, 1 giant).
+                ("POP", tile_result["pop"]),
                 # C21 item 2: per-tile count and total weight under each
                 # WEIGHT_RULE code (module docstring's codes 0-5).
                 ("RULE_COUNT", tile_result["rule_count"]),
                 ("RULE_WEIGHT", tile_result["rule_weight"]),
+                # C30 item 5: the same two sums, split by POP (shape
+                # (2, N_WEIGHT_RULES): row 0 dwarf, row 1 giant).
+                ("RULE_COUNT_POP", tile_result["rule_count_pop"]),
+                ("RULE_WEIGHT_POP", tile_result["rule_weight_pop"]),
             ):
                 build_module.write_dataset(grp, name, data, *REGISTRY[(_STEM, name)])
             total_rule_count += tile_result["rule_count"]
             total_rule_weight += tile_result["rule_weight"]
+            total_rule_count_pop += tile_result["rule_count_pop"]
+            total_rule_weight_pop += tile_result["rule_weight_pop"]
 
         # C21 item 2: the region-wide share of the population under each
         # WEIGHT_RULE code, as a plain number in the product -- the sum
@@ -1164,6 +1254,17 @@ def write_region(config, region, result, f_dusty_o, f_dusty_c):
             f, "RULE_WEIGHT_FRAC",
             total_rule_weight / max(float(total_rule_weight.sum()), 1e-300),
             *REGISTRY[(_STEM, "RULE_WEIGHT_FRAC")])
+        # C30 item 5: the same two region-wide shares, split by POP --
+        # normalised within each population row (so each row sums to 1
+        # over its own stars), not over the region total.
+        build_module.write_dataset(
+            f, "RULE_COUNT_FRAC_POP",
+            total_rule_count_pop / np.maximum(total_rule_count_pop.sum(axis=1, keepdims=True), 1),
+            *REGISTRY[(_STEM, "RULE_COUNT_FRAC_POP")])
+        build_module.write_dataset(
+            f, "RULE_WEIGHT_FRAC_POP",
+            total_rule_weight_pop / np.maximum(total_rule_weight_pop.sum(axis=1, keepdims=True), 1e-300),
+            *REGISTRY[(_STEM, "RULE_WEIGHT_FRAC_POP")])
     return path
 
 
