@@ -36,7 +36,7 @@ pull reuses)::
 
     SELECT l, b, ksAperMag3, ksppErrBits, mergedClass FROM vhsSource
     WHERE {l clause} AND b BETWEEN {b0} AND {b1}
-      AND ksAperMag3 > 0 AND ksAperMag3 < 17.5
+      AND ksAperMag3 > 0 AND ksAperMag3 < 18.5
       AND mergedClass IN (-1, -2, -3) AND priOrSec <= 0
 
 The same query shape C19 Part A gives the UKIDSS pull (never the old,
@@ -45,13 +45,20 @@ stars): `priOrSec <= 0` keeps one row per source where VIRCAM frame
 sets overlap; `ksAperMag3 > 0` drops the archive's own null-value
 sentinel (measured -9.999995E8 against the live table, the same
 magnitude as WSA's own -999999.5, just carried in `vhsSource`'s own
-column precision); `< 17.5` gives `sky.derived.vhs_counts`' own last
-half-mag bin edge (17.0) a half-bin of headroom; `mergedClass IN
-(-1, -2, -3)` keeps the archive's own star / probable star / probable
-galaxy codes, never the unambiguous galaxy ones, with `ksppErrBits`
-and `mergedClass` both carried through verbatim so `sky.derived.
-vhs_counts`, not this download, selects the point-like classes with no
-error-bit cut, exactly as `sky.derived.ukidss_counts` now does.
+column precision); `< 18.5` gives `sky.derived.vhs_counts`' own new
+last half-mag bin edge (18.0, C28 2026-10-21: raised from 17.0 -- the
+18-56 uJy STAR members sit at Ks 17-18.3, C24f/g) a half-bin of
+headroom; `mergedClass IN (-1, -2, -3)` keeps the archive's own star /
+probable star / probable galaxy codes, never the unambiguous galaxy
+ones, with `ksppErrBits` and `mergedClass` both carried through
+verbatim so `sky.derived.vhs_counts`, not this download, selects the
+point-like classes with no error-bit cut, exactly as `sky.derived.
+ukidss_counts` now does.
+
+C28: strips are submitted CONCURRENTLY, the same `N_CONCURRENT_STRIPS`-
+wide pool and the same row-order guarantee `sky.download.ukidss_gps.
+build` now uses (that module's own docstring) -- a strip's own halving-
+on-refusal rule is unchanged.
 
 Footprint (this session, 2026-10-21): a `COUNT(*)` probe query (no
 row-returning SELECT, so no results-file round trip) run against each
@@ -68,6 +75,7 @@ a real, header-only results file -- the coverage record itself, the
 same convention `sky.download.ukidss_gps.build` uses.
 """
 
+import concurrent.futures
 import os
 import re
 import time
@@ -89,9 +97,13 @@ TABLE = "vhsSource"
 #: -9.999995E8, the same WFCAM/VIRCAM-pipeline sentinel magnitude as
 #: WSA's gpsSource, measured against the live table).
 K_FLOOR = 0.0
-#: Half a bin past `sky.derived.vhs_counts.MAG_EDGES`'s top (17.0), the
-#: same headroom `sky.download.ukidss_gps.build.K_CEILING` keeps.
-K_CEILING = 17.5
+#: Half a bin past `sky.derived.vhs_counts.MAG_EDGES`'s top (18.0), the
+#: same headroom `sky.download.ukidss_gps.build.K_CEILING` keeps (C28,
+#: 2026-10-21: raised from 17.5).
+K_CEILING = 18.5
+#: C28: the same strip-concurrency pool width as `sky.download.
+#: ukidss_gps.build.N_CONCURRENT_STRIPS`.
+N_CONCURRENT_STRIPS = 6
 #: C19 Part A's own widened class set (that module's own docstring):
 #: star, probable star, probable galaxy -- never the unambiguous
 #: galaxy/noise codes. The same query shape as the UKIDSS pull.
@@ -228,10 +240,16 @@ def build(config, regions=None):
                 try:
                     with open(tmp_path, "w") as f:
                         f.write(CSV_HEADER + "\n")
-                        for l0, l1, b0, b1 in boxes:
-                            for line in _strip_rows(region, l0, l1, b0, b1):
-                                f.write(line + "\n")
-                                n_rows += 1
+                        # C28: concurrent strips, written back in `boxes`'
+                        # own order (`sky.download.ukidss_gps.build`'s own
+                        # construction) so the file's row order is
+                        # unaffected by which strip's query answers first.
+                        n_workers = max(1, min(N_CONCURRENT_STRIPS, len(boxes)))
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+                            for rows in pool.map(lambda box: _strip_rows(region, *box), boxes):
+                                for line in rows:
+                                    f.write(line + "\n")
+                                    n_rows += 1
                     os.replace(tmp_path, dest_path)
                 except BaseException:
                     if os.path.exists(tmp_path):
