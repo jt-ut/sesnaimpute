@@ -276,81 +276,166 @@ REGISTRY = {
         "For the matching pixel in HPX_PIX_512, the background-galaxy "
         "population's own expected cataloged count on the common "
         "(log10 xi, log10 F_4.5) grid: summing every cell gives this "
-        "pixel's own RATIO_GAL times the region's source count."),
+        "pixel's own RATIO_GAL times the region's source count. The "
+        "log10 F_4.5 position is each member's own DIMMED 4.5 micron "
+        "flux at the pixel being counted (the same dimming its catalog "
+        "probability already applies), not its dereddened flux: the "
+        "cell a member's expected catalog count lands in is the cell "
+        "the sky would actually catalog it in, so this array compares "
+        "like with like against sky sources, themselves binned by "
+        "measured flux (C29, briefs/round4_2026-10-20/"
+        "C29_atlas_check_dimmed_axis.md). Read only by this check "
+        "(atlas.shapes's own diagnostic page, and the external "
+        "diagnostic script it matches); never by bmstp or fittp."),
     ("prior_atlas_hpx512", "N_CAT_CELL_STAR"): ("objects",
         "For the matching pixel in HPX_PIX_512, the STAR population's "
         "own expected cataloged count on the common (log10 xi, "
         "log10 F_4.5) grid: summing every cell gives this pixel's own "
-        "RATIO_STAR times the region's source count."),
+        "RATIO_STAR times the region's source count. The log10 F_4.5 "
+        "position is each member's own DIMMED 4.5 micron flux at the "
+        "pixel being counted (the same dimming its catalog probability "
+        "already applies), not its dereddened flux (C29, briefs/"
+        "round4_2026-10-20/C29_atlas_check_dimmed_axis.md). Read only "
+        "by this check (atlas.shapes's own diagnostic page, and the "
+        "external diagnostic script it matches); never by bmstp or "
+        "fittp."),
     ("prior_atlas_hpx512", "N_CAT_CELL_PAHC"): ("objects",
         "For the matching pixel in HPX_PIX_512, the PAHC population's "
         "own expected cataloged count on the common (log10 xi, "
         "log10 F_4.5) grid: summing every cell gives this pixel's own "
-        "RATIO_PAHC times the region's source count."),
+        "RATIO_PAHC times the region's source count. The log10 F_4.5 "
+        "position is each member's own DIMMED 4.5 micron flux at the "
+        "pixel being counted (the same dimming its catalog probability "
+        "already applies), not its dereddened flux (C29, briefs/"
+        "round4_2026-10-20/C29_atlas_check_dimmed_axis.md). Read only "
+        "by this check (atlas.shapes's own diagnostic page, and the "
+        "external diagnostic script it matches); never by bmstp or "
+        "fittp."),
     ("prior_atlas_hpx512", "N_CAT_CELL_AGB"): ("objects",
         "For the matching pixel in HPX_PIX_512, the AGB population's own "
         "expected cataloged count on the common (log10 xi, log10 F_4.5) "
         "grid: summing every cell gives this pixel's own RATIO_AGB times "
-        "the region's source count."),
+        "the region's source count. The log10 F_4.5 position is each "
+        "member's own DIMMED 4.5 micron flux at the pixel being counted "
+        "(the same dimming its catalog probability already applies), "
+        "not its dereddened flux (C29, briefs/round4_2026-10-20/"
+        "C29_atlas_check_dimmed_axis.md). Read only by this check "
+        "(atlas.shapes's own diagnostic page, and the external "
+        "diagnostic script it matches); never by bmstp or fittp."),
     ("prior_atlas_hpx512", "N_CAT_CELL_YSO"): ("objects",
         "For the matching pixel in HPX_PIX_512, the YSO population's own "
         "expected cataloged count on the common (log10 xi, log10 F_4.5) "
         "grid: summing every cell gives this pixel's own RATIO_YSO times "
-        "the region's source count."),
+        "the region's source count. The log10 F_4.5 position is each "
+        "member's own DIMMED 4.5 micron flux at the pixel being counted "
+        "(the same dimming its catalog probability already applies), "
+        "not its dereddened flux (C29, briefs/round4_2026-10-20/"
+        "C29_atlas_check_dimmed_axis.md). Read only by this check "
+        "(atlas.shapes's own diagnostic page, and the external "
+        "diagnostic script it matches); never by bmstp or fittp."),
     ("prior_atlas_hpx512", "N_CAT_CELL_H2S"): ("objects",
         "For the matching pixel in HPX_PIX_512, the H2-shock "
         "population's own expected cataloged count on the common "
         "(log10 xi, log10 F_4.5) grid: summing every cell gives this "
-        "pixel's own RATIO_H2S times the region's source count."),
+        "pixel's own RATIO_H2S times the region's source count. The "
+        "log10 F_4.5 position is each member's own DIMMED 4.5 micron "
+        "flux at the pixel being counted (the same dimming its catalog "
+        "probability already applies), not its dereddened flux (C29, "
+        "briefs/round4_2026-10-20/C29_atlas_check_dimmed_axis.md). Read "
+        "only by this check (atlas.shapes's own diagnostic page, and "
+        "the external diagnostic script it matches); never by bmstp or "
+        "fittp."),
     ("prior_atlas_hpx512", "N_CAT_CELL_PAHN"): ("objects",
         "For the matching pixel in HPX_PIX_512, the PAHN population's "
         "own expected cataloged count on the common (log10 xi, "
         "log10 F_4.5) grid: summing every cell gives this pixel's own "
-        "RATIO_PAHN times the region's source count."),
+        "RATIO_PAHN times the region's source count. The log10 F_4.5 "
+        "position is each member's own DIMMED 4.5 micron flux at the "
+        "pixel being counted (the same dimming its catalog probability "
+        "already applies), not its dereddened flux (C29, briefs/"
+        "round4_2026-10-20/C29_atlas_check_dimmed_axis.md). Read only "
+        "by this check (atlas.shapes's own diagnostic page, and the "
+        "external diagnostic script it matches); never by bmstp or "
+        "fittp."),
     ("prior_atlas_hpx512", "N_CELL_STAR"): ("objects",
         "For the matching pixel in HPX_PIX_512, the STAR population's "
         "own unthinned intrinsic count on the common (log10 xi, "
         "log10 F_4.5) grid: the expected count with every member's own "
         "probability of being cataloged set to one (no flux cut, no "
-        "dimming), so N_CAT_CELL_STAR never exceeds this cell by cell."),
+        "dimming) -- the log10 F_4.5 position here is still each "
+        "member's own UNDIMMED (dereddened) flux, unchanged by C29 "
+        "(briefs/round4_2026-10-20/C29_atlas_check_dimmed_axis.md): "
+        "since the two arrays' log10 F_4.5 axes now differ, N_CAT_CELL_"
+        "STAR no longer stays beneath this cell by cell, only in total "
+        "(N_CAT_CELL_STAR.sum() <= this array's own sum)."),
     ("prior_atlas_hpx512", "N_CELL_AGB"): ("objects",
         "For the matching pixel in HPX_PIX_512, the AGB population's own "
         "unthinned intrinsic count on the common (log10 xi, log10 F_4.5) "
         "grid: the expected count with every member's own probability "
-        "of being cataloged set to one (no flux cut, no dimming), so "
-        "N_CAT_CELL_AGB never exceeds this cell by cell."),
+        "of being cataloged set to one (no flux cut, no dimming) -- the "
+        "log10 F_4.5 position here is still each member's own UNDIMMED "
+        "(dereddened) flux, unchanged by C29 (briefs/round4_2026-10-20/"
+        "C29_atlas_check_dimmed_axis.md): since the two arrays' log10 "
+        "F_4.5 axes now differ, N_CAT_CELL_AGB no longer stays beneath "
+        "this cell by cell, only in total (N_CAT_CELL_AGB.sum() <= "
+        "this array's own sum)."),
     ("prior_atlas_hpx512", "N_CELL_PAHC"): ("objects",
         "For the matching pixel in HPX_PIX_512, the PAHC population's "
         "own unthinned intrinsic count on the common (log10 xi, "
         "log10 F_4.5) grid: the expected count with every member's own "
         "probability of being cataloged set to one (no flux cut, no "
-        "dimming), so N_CAT_CELL_PAHC never exceeds this cell by cell."),
+        "dimming) -- the log10 F_4.5 position here is still each "
+        "member's own UNDIMMED (dereddened) flux, unchanged by C29 "
+        "(briefs/round4_2026-10-20/C29_atlas_check_dimmed_axis.md): "
+        "since the two arrays' log10 F_4.5 axes now differ, N_CAT_CELL_"
+        "PAHC no longer stays beneath this cell by cell, only in total "
+        "(N_CAT_CELL_PAHC.sum() <= this array's own sum)."),
     ("prior_atlas_hpx512", "N_CELL_GAL"): ("objects",
         "For the matching pixel in HPX_PIX_512, the background-galaxy "
         "population's own unthinned intrinsic count on the common "
         "(log10 xi, log10 F_4.5) grid: the expected count with every "
         "member's own probability of being cataloged set to one (no "
-        "flux cut, no dimming), so N_CAT_CELL_GAL never exceeds this "
-        "cell by cell."),
+        "flux cut, no dimming) -- the log10 F_4.5 position here is "
+        "still each member's own UNDIMMED (dereddened) flux, unchanged "
+        "by C29 (briefs/round4_2026-10-20/"
+        "C29_atlas_check_dimmed_axis.md): since the two arrays' log10 "
+        "F_4.5 axes now differ, N_CAT_CELL_GAL no longer stays beneath "
+        "this cell by cell, only in total (N_CAT_CELL_GAL.sum() <= "
+        "this array's own sum)."),
     ("prior_atlas_hpx512", "N_CELL_YSO"): ("objects",
         "For the matching pixel in HPX_PIX_512, the YSO population's own "
         "unthinned intrinsic count on the common (log10 xi, log10 F_4.5) "
         "grid: the expected count with every member's own probability "
-        "of being cataloged set to one (no flux cut, no dimming), so "
-        "N_CAT_CELL_YSO never exceeds this cell by cell."),
+        "of being cataloged set to one (no flux cut, no dimming) -- the "
+        "log10 F_4.5 position here is still each member's own UNDIMMED "
+        "(dereddened) flux, unchanged by C29 (briefs/round4_2026-10-20/"
+        "C29_atlas_check_dimmed_axis.md): since the two arrays' log10 "
+        "F_4.5 axes now differ, N_CAT_CELL_YSO no longer stays beneath "
+        "this cell by cell, only in total (N_CAT_CELL_YSO.sum() <= "
+        "this array's own sum)."),
     ("prior_atlas_hpx512", "N_CELL_H2S"): ("objects",
         "For the matching pixel in HPX_PIX_512, the H2-shock "
         "population's own unthinned intrinsic count on the common "
         "(log10 xi, log10 F_4.5) grid: the expected count with every "
         "member's own probability of being cataloged set to one (no "
-        "flux cut, no dimming), so N_CAT_CELL_H2S never exceeds this "
-        "cell by cell."),
+        "flux cut, no dimming) -- the log10 F_4.5 position here is "
+        "still each member's own UNDIMMED (dereddened) flux, unchanged "
+        "by C29 (briefs/round4_2026-10-20/"
+        "C29_atlas_check_dimmed_axis.md): since the two arrays' log10 "
+        "F_4.5 axes now differ, N_CAT_CELL_H2S no longer stays beneath "
+        "this cell by cell, only in total (N_CAT_CELL_H2S.sum() <= "
+        "this array's own sum)."),
     ("prior_atlas_hpx512", "N_CELL_PAHN"): ("objects",
         "For the matching pixel in HPX_PIX_512, the PAHN population's "
         "own unthinned intrinsic count on the common (log10 xi, "
         "log10 F_4.5) grid: the expected count with every member's own "
         "probability of being cataloged set to one (no flux cut, no "
-        "dimming), so N_CAT_CELL_PAHN never exceeds this cell by cell."),
+        "dimming) -- the log10 F_4.5 position here is still each "
+        "member's own UNDIMMED (dereddened) flux, unchanged by C29 "
+        "(briefs/round4_2026-10-20/C29_atlas_check_dimmed_axis.md): "
+        "since the two arrays' log10 F_4.5 axes now differ, N_CAT_CELL_"
+        "PAHN no longer stays beneath this cell by cell, only in total "
+        "(N_CAT_CELL_PAHN.sum() <= this array's own sum)."),
     ("prior_atlas_hpx512", "SHARE_STAR"): ("dimensionless",
         "For the matching pixel in HPX_PIX_512, the STAR population's "
         "own share of this pixel's total cataloged density: N_CAT_STAR "

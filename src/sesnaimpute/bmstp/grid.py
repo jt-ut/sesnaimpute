@@ -142,6 +142,44 @@ def fold_wall(H):
     return H
 
 
+def _smooth_and_fold(H, total_weight):
+    """The post-histogram processing `bin()` and `bin_counts()` share
+    (C29, briefs/round4_2026-10-20/C29_atlas_check_dimmed_axis.md):
+    normalise an already-FORMED (n_x, n_b) weighted histogram `H` by
+    `total_weight`, smooth by exactly one cell along EACH axis
+    (sec. 2, "minimum widths") with `mode="constant"` (zero beyond the
+    array's own edges), tracking what that smoothing pushes past the
+    array's true `log10 ξ`/`log10 F_4.5` edges as `mass_outside_delta`,
+    then fold THE EDGE ξ = 1 (module docstring) -- whatever of that
+    smoothed mass sits at `log10 ξ > 0` -- back onto the support
+    (`fold_wall`) instead of dropping it. Returns `(H, mass_outside_delta)`,
+    `mass_outside_delta` the fraction (of `total_weight`) the SMOOTHING
+    step alone drops; a caller whose own histogram-formation step (e.g.
+    `np.histogram2d`, or a per-pixel bincount) already dropped mass past
+    the array's extent tracks THAT loss itself before calling here, as
+    `bin()` below does -- this function only ever sees the already-
+    formed `H`, never the raw samples, so it cannot see that first drop.
+    No `total_weight <= 0` guard here, by design: `bin()` below never
+    called this with one before this refactor (its own 0/0 would have
+    surfaced as NaN, unguarded, exactly as it does now), and
+    `bin_counts`'s own caller in `bmstp.atlas` (`_safe_cell_bin_counts`)
+    guards it the same way `_safe_cell_bin` already guards `bin()`'s own
+    caller -- adding a guard here instead would silently change `bin()`'s
+    own long-standing zero-weight behaviour, never asked for."""
+    H = H / total_weight
+    mass_before = float(H.sum())
+    H = gaussian_filter1d(H, sigma=1.0, axis=0, mode="constant",
+                           truncate=_truncate_for(1.0, _N_X))
+    H = gaussian_filter1d(H, sigma=1.0, axis=1, mode="constant",
+                           truncate=_truncate_for(1.0, _N_B))
+    mass_outside_delta = mass_before - float(H.sum())
+    # THE EDGE ξ = 1: `log10 ξ = 0` reflects, it does not drop -- the one-cell
+    # x smoothing's own mass above it is folded back onto the support,
+    # never counted in `mass_outside_delta`.
+    H = fold_wall(H)
+    return H.astype(np.float64), mass_outside_delta
+
+
 def bin(x, log10_f45, w):
     """The weighted 2-D histogram `(H, mass_outside)` of a population
     sample on the common grid (sec. 2): `x` the sample's scaled
@@ -175,22 +213,29 @@ def bin(x, log10_f45, w):
         log10_xi, log10_f45, bins=[LOG10_XI_EDGES, LOG10_F45_EDGES], weights=w
     )
     mass_outside = float((total_weight - H.sum()) / total_weight)
-    H = H / total_weight
-    # `mode="constant"` (zero beyond the edges) on both axes: mass the
-    # one-cell smoothing pushes past `log10 ξ = -3.0`/`+1.0`, or past
-    # `log10 F_4.5 = -4.0`/`+7.0`, is mass outside the grid -- folded into
-    # `mass_outside` below, not reappeared at the opposite edge.
-    mass_before = float(H.sum())
-    H = gaussian_filter1d(H, sigma=1.0, axis=0, mode="constant",
-                           truncate=_truncate_for(1.0, _N_X))
-    H = gaussian_filter1d(H, sigma=1.0, axis=1, mode="constant",
-                           truncate=_truncate_for(1.0, _N_B))
-    mass_outside += mass_before - float(H.sum())
-    # THE EDGE ξ = 1: `log10 ξ = 0` reflects, it does not drop -- the one-cell
-    # x smoothing's own mass above it is folded back onto the support,
-    # never counted in `mass_outside`.
-    H = fold_wall(H)
-    return H.astype(np.float64), mass_outside
+    H, mass_outside_delta = _smooth_and_fold(H, total_weight)
+    mass_outside += mass_outside_delta
+    return H, mass_outside
+
+
+def bin_counts(H_raw, total_weight):
+    """Like `bin()`, but for a caller that has already FORMED its own
+    (n_x, n_b) weighted histogram -- `bmstp.atlas`'s per-pixel dimmed-
+    flux check (C29): there, a single "member" no longer lands at one
+    `log10 F_4.5` (its bin position varies pixel to pixel, since dimming
+    does), so the caller accumulates its own weighted bincount over
+    (pixel, member) pairs across its own batches, inside the SAME member
+    loop `bin()`'s own per-member caller would otherwise run once, and
+    hands the finished (n_x, n_b) array here for the one shared
+    normalise/smooth/THE EDGE ξ = 1-fold pass `bin()` applies to its own
+    freshly-formed histogram. `mass_outside` here is `_smooth_and_fold`'s
+    own delta alone: whatever the caller's own binning already dropped
+    past the array's extent (e.g. a non-finite or non-positive flux) is
+    the caller's own loss to track, never seen here, so the two sources
+    of loss are never added twice and never conflated into one number
+    the caller did not itself measure."""
+    H_raw = np.asarray(H_raw, dtype=np.float64)
+    return _smooth_and_fold(H_raw, float(total_weight))
 
 
 def bin_star_widths(x, log10_f45, w, width_class, sigma_classes_cells):

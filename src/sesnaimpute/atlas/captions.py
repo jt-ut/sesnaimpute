@@ -101,9 +101,12 @@ SHAPES_REGION_ROW1 = (
     "Each panel: N_C(cell), the number of selected objects of class C the "
     "prior expects in the region per parameter cell (ξ, F_4.5), summed "
     "over the region's sources; one log color scale for the seven panels, "
-    "white at one millionth of the row's peak. The dotted line is the "
-    "region's median 4.5 µm 50 % completeness limit; the dashed line "
-    "is ξ = 1.")
+    "white at one millionth of the row's peak. F_4.5 here is each "
+    "member's own DIMMED flux at the pixel being counted, the flux the "
+    "sky would actually catalog it at, not its dereddened flux (C29, "
+    "briefs/round4_2026-10-20/C29_atlas_check_dimmed_axis.md). The "
+    "dotted line is the region's median 4.5 µm 50 % completeness limit; "
+    "the dashed line is ξ = 1.")
 #: The region totals line, one per class (rule 7a): `{n_cat}` = sum
 #: N_CAT_CELL_C = the class's selected count, `{n_cell}` = sum N_CELL_C =
 #: its count before selection, `{ratio}` their ratio = the class's
