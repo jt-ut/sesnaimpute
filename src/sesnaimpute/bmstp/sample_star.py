@@ -29,8 +29,6 @@ from sesnaimpute import definitions
 from sesnaimpute.bmstp import grid
 from sesnaimpute.sky.derived import profile as profile_module
 
-_SKIP_KEYS = ("DIST_GRID", "LIMIT8_GRID_MJY")
-
 #: 4.5 micron's index in the eight-band order every register and product
 #: shares (J H Ks I1 I2 I3 I4 M1, sec. 2's `F_4.5`).
 IDX_I2 = tuple(b.key for b in definitions.BANDS).index("I2")
@@ -79,9 +77,25 @@ def _field_star_arrays(config, region):
 def tile_ids(config, region):
     """The region's tile ids (the root groups `tile_<id>` of the per-tile
     star population product), sorted -- one grain axis for P2, read once
-    per region without loading any tile's arrays."""
+    per region without loading any tile's arrays.
+
+    Identified by the group's own name pattern (`tile_` followed by
+    nothing but digits), never by a skip-list of the product's other,
+    non-tile top-level names: C21 (commit 4f66043, `RULE_COUNT_FRAC`/
+    `RULE_WEIGHT_FRAC`) and C21 item 3 (commit 701fe92, `KS_EDGES_2MASS`/
+    `N_KS_OBS_2MASS`/`FINAL_POP_KS_HIST`, removed again by C23) each added
+    a further root-level name to `population/star/population_star_tile__
+    R.hdf5` that this function's own skip-list (`DIST_GRID`,
+    `LIMIT8_GRID_MJY`) never learned about, so `int(name.split('_')[1])`
+    broke on the first one of those (`'RULE_COUNT_FRAC'.split('_')[1] ==
+    'COUNT'`) the moment the product was rebuilt (C23, found running the
+    baseline before this brief's own change). `bmstp.atlas` and `bmstp.
+    template_weights` already read this SAME product's own tile axis this
+    way (`k.startswith('tile_')`); this is that one correct pattern, not
+    a third one."""
     with h5py.File(_tile_path(config, region), "r") as f:
-        ids = sorted(int(name.split("_")[1]) for name in f.keys() if name not in _SKIP_KEYS)
+        ids = sorted(int(name[len("tile_"):]) for name in f.keys()
+                     if name.startswith("tile_") and name[len("tile_"):].isdigit())
     return np.array(ids, dtype=np.int64)
 
 
