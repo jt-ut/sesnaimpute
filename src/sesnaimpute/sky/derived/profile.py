@@ -55,6 +55,23 @@ consumer (population, bmstp's atlas/density/shapes member placement)
 reads now. `sky.download.marshall2006` and `sky.derived.
 marshall_extinction` are RETIRED (Combined19 already contains
 Marshall's own table).
+
+C26b (owner ruling 2026-10-21b, two repairs at the source). (1) A
+sightline's far curve is never read at the sightline's own CENTRE --
+that point is an exact HEALPix hierarchy vertex at every nside finer
+than 256, where independent `ang2pix` implementations (healpy here,
+mwdust's own bespoke C binding at its own query time) can legitimately
+disagree (C26's own identity-1 finding). `pixel_mean_far_curve` instead
+reads the sightline's 16 nside-1024 CHILD-pixel centres (Combined19's
+own finest level, so never a vertex of anything) and means them;
+`FAR_MAP` is the children's own majority code, `FAR_MAP_MIXED` flags a
+sightline whose children disagree, `FAR_RELIABLE_PC` is the Bayestar-
+classified children's own median. (2) The in-cube amplitude is no
+longer capped at 1 (the retired module's own `down`-branch): the far
+map's own measurement of the column beyond the cube's edge decides how
+much of the sightline's adopted column the cube must carry instead --
+`A_CUM_K(d_edge) = max(a_edge_raw, total - far_total)`, never below the
+map's own raw column, `IN_CUBE_EXCESS_K` recording the difference.
 """
 
 import os
@@ -793,6 +810,19 @@ FAR_MAP_MARSHALL = 1
 FAR_MAP_BAYESTAR = 2
 FAR_MAP_DRIMMEL = 3
 
+#: C26b (owner ruling 2026-10-21b, item 1): a sightline is the WHOLE
+#: nside-256 pixel, not its centre point; its own centre is an exact
+#: HEALPix hierarchy VERTEX (where several finer pixels meet) at every
+#: nside finer than 256, a genuine implementation-dependent degeneracy
+#: (C26's own identity-1 finding). Combined19's own finest level is
+#: nside 1024 (`_hierarchical_lookup_rows` never sees anything finer),
+#: so the sightline's 16 nside-1024 CHILD-pixel centres (NESTED: 1024 /
+#: 256 = 4, so 4**2 = 16 children) are never a vertex of any Combined19
+#: pixel at any level -- the degeneracy disappears by construction. The
+#: far curve this module reads is these 16 points' own mean.
+CHILD_NSIDE = 1024
+CHILDREN_PER_SIGHTLINE = (CHILD_NSIDE // NSIDE) ** 2
+
 
 def _hierarchical_lookup_rows(pixel_info, l_deg, b_deg):
     """Row index into `pixel_info` (a `(nside, healpix_index, ...)`
@@ -916,49 +946,116 @@ def far_map_codes(l_deg, b_deg, bayestar_rows):
                               FAR_MAP_DRIMMEL)).astype(np.int8)
 
 
+def sightline_children_lb(admitted_pix):
+    """`(l_deg, b_deg)`, each `(n_sightline, CHILDREN_PER_SIGHTLINE)`:
+    every admitted nside-256 sightline's own nside-`CHILD_NSIDE`
+    child-pixel centres (NESTED), module docstring item 1 above."""
+    children = (np.asarray(admitted_pix, dtype=np.int64)[:, np.newaxis] * CHILDREN_PER_SIGHTLINE
+                + np.arange(CHILDREN_PER_SIGHTLINE, dtype=np.int64)[np.newaxis, :])
+    l, b = hp.pix2ang(CHILD_NSIDE, children.ravel(), nest=True, lonlat=True)
+    return l.reshape(children.shape), b.reshape(children.shape)
+
+
+def pixel_mean_far_curve(combined19_path, bayestar_path, admitted_pix, dm_query):
+    """`(curve_mean, far_map, far_map_mixed, far_reliable_pc)` for every
+    admitted sightline (C26b owner ruling 2026-10-21b, item 1): the
+    sightline's own far curve is the MEAN, over its 16 child-pixel
+    centres (`sightline_children_lb`), of each centre's own Combined19
+    curve (`combined19_curve_ak`) at `dm_query` -- never a single point
+    lookup at the sightline's own (degenerate) centre.
+
+    `far_map` is the map code the MAJORITY of the 16 children share;
+    `far_map_mixed` is True where they do not all agree (a sightline
+    straddling Marshall's own box edge). `far_reliable_pc` is the MEDIAN
+    of `bayestar_lookup`'s own per-child reliable distance, over only
+    the children the majority vote itself classifies Bayestar -- NaN
+    where the majority is not Bayestar, or where none of those children
+    carries a Bayestar pixel of its own."""
+    l_children, b_children = sightline_children_lb(admitted_pix)
+    n_sl, n_child = l_children.shape
+    flat_l, flat_b = l_children.ravel(), b_children.ravel()
+
+    curves_flat = combined19_curve_ak(combined19_path, flat_l, flat_b, dm_query)
+    curve_mean = curves_flat.reshape(n_sl, n_child, dm_query.size).mean(axis=1)
+
+    bayestar_rows_flat, reliable_flat = bayestar_lookup(bayestar_path, flat_l, flat_b)
+    far_map_children = far_map_codes(flat_l, flat_b, bayestar_rows_flat).reshape(n_sl, n_child)
+    reliable_children = reliable_flat.reshape(n_sl, n_child)
+
+    far_map = np.empty(n_sl, dtype=np.int8)
+    far_map_mixed = np.zeros(n_sl, dtype=np.int8)
+    far_reliable_pc = np.full(n_sl, np.nan, dtype=np.float64)
+    for i in range(n_sl):
+        codes, counts = np.unique(far_map_children[i], return_counts=True)
+        majority = codes[np.argmax(counts)]
+        far_map[i] = majority
+        far_map_mixed[i] = int(codes.size > 1)
+        if majority == FAR_MAP_BAYESTAR:
+            bay_mask = far_map_children[i] == FAR_MAP_BAYESTAR
+            vals = reliable_children[i][bay_mask]
+            vals = vals[np.isfinite(vals)]
+            if vals.size:
+                far_reliable_pc[i] = float(np.median(vals))
+    return curve_mean, far_map, far_map_mixed, far_reliable_pc
+
+
 def _build_adopted_one_region(config, region, admitted_pix, gl, gb, dist_new, a_out_raw, a_inf,
                                dustmaps_dir):
     """Writes `profile_adopted_sightline` for `region` (C26 owner ruling
-    2026-10-21, module docstring): `a_out_raw`/`dist_new`/`a_inf` are
-    `_build_one_region`'s own raw splice-grid profile, distance grid and
-    sightline total column -- the SAME one pass over the Edenhofer maps,
-    never re-read.
+    2026-10-21, C26b 2026-10-21b, module docstring): `a_out_raw`/
+    `dist_new`/`a_inf` are `_build_one_region`'s own raw splice-grid
+    profile, distance grid and sightline total column -- the SAME one
+    pass over the Edenhofer maps, never re-read. `gl`/`gb` (the
+    sightline's own CENTRE) are kept only for GAL_L_DEG/GAL_B_DEG and
+    `row_of_lb`; the far curve itself never samples the centre (C26b
+    item 1: it is an exact HEALPix hierarchy vertex at every nside finer
+    than 256, a genuine degeneracy between independent implementations
+    -- `pixel_mean_far_curve` reads the sightline's 16 nside-1024 CHILD
+    centres instead, never a vertex of anything, and means them).
 
-    In-cube: `A_CUM_K = a_out_raw * min(1, a_inf / a_edge_raw)` -- today's
-    `a_of_d`'s own scale rule (identity 2), applied once here instead of
-    once per read. `A_EDGE_K` is that scaled profile's own edge value.
-
-    Beyond the cube's edge: Combined19's own A_Ks, read at the cube's edge
-    and at each of `ADOPTED_TAIL_N_NODES` log-spaced tail nodes out to
-    `ADOPTED_TAIL_MAX_PC` (the SAME two endpoints for every sightline of
-    the region, since the cube's edge distance is one number shared by
-    every sightline in the survey) -- `A_CUM_K` there is `A_EDGE_K +
-    max(0, C19(d) - C19(d_edge))`, Combined19's own INCREMENT, never its
-    absolute value (owner ruling: "beyond the edge Combined19's own
-    increment (never its absolute value)")."""
+    In-cube amplitude (C26b item 2, owner ruling 2026-10-21b): the
+    owner's precedence rule is the emission column over the cube's own
+    integral; the far map's own measurement of the far part decides how
+    much of the sightline's adopted column belongs inside the cube.
+    `far_total = C19(10,000 pc) - C19(d_edge)` (the pixel-mean curve's
+    own total reach beyond the edge); `A_CUM_K(d_edge) = max(a_edge_raw,
+    a_inf - far_total)` -- where the far map already carries the excess
+    (the Galactic plane), the cube keeps Edenhofer's own raw column
+    exactly; where it does not (high latitude, the far map flat), the
+    excess the far map cannot account for is placed inside the cube
+    instead, in Edenhofer's own shape, scaled up by `A_CUM_K(d_edge) /
+    a_edge_raw` -- never scaled DOWN any more (the retired module's
+    `down`-branch; Edenhofer's own column always stands at least). Past
+    the edge the far increment is added exactly as before."""
     d_edge = float(dist_new[-1])
     a_edge_raw = a_out_raw[:, -1]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        scale_build = np.where(a_edge_raw > 0.0, np.minimum(1.0, a_inf / a_edge_raw), 1.0)
-    dist_incube = np.concatenate([[0.0], dist_new])
-    a_cum_incube = np.concatenate(
-        [np.zeros((admitted_pix.size, 1)), a_out_raw * scale_build[:, np.newaxis]], axis=1)
-    a_edge_k = a_cum_incube[:, -1]
 
     tail = np.geomspace(d_edge, ADOPTED_TAIL_MAX_PC, ADOPTED_TAIL_N_NODES)[1:]
+    dist_incube = np.concatenate([[0.0], dist_new])
     dist_pc = np.concatenate([dist_incube, tail])
 
     dm_query = _dist_kpc_to_distmod(np.concatenate([[d_edge], tail]) / 1000.0)
     combined19_path = os.path.join(dustmaps_dir, "combined19", "combine19.h5")
     bayestar_path = os.path.join(dustmaps_dir, "bayestar", "bayestar2019.h5")
-    curves_ak = combined19_curve_ak(combined19_path, gl, gb, dm_query)
+    curves_ak, far_map, far_map_mixed, far_reliable_pc = pixel_mean_far_curve(
+        combined19_path, bayestar_path, admitted_pix, dm_query)
+
+    far_total = np.maximum(0.0, curves_ak[:, -1] - curves_ak[:, 0])
+    a_edge_k = np.maximum(a_edge_raw, a_inf - far_total)
+    in_cube_excess_k = a_edge_k - a_edge_raw
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scale_build = np.where(a_edge_raw > 0.0, a_edge_k / a_edge_raw, 1.0)
+    a_cum_incube = np.concatenate(
+        [np.zeros((admitted_pix.size, 1)), a_out_raw * scale_build[:, np.newaxis]], axis=1)
+    # a_cum_incube[:, -1] equals a_edge_k by construction (the scale was
+    # built from it); re-derived from the concatenation, not reassigned,
+    # so a build bug in the concatenation would show up as a mismatch.
+    assert np.allclose(a_cum_incube[:, -1], a_edge_k, rtol=1e-10, atol=1e-12), \
+        "profile.build: A_CUM_K's own in-cube edge value disagrees with A_EDGE_K"
+
     far_increment = np.maximum(0.0, curves_ak[:, 1:] - curves_ak[:, :1])
     a_cum_tail = a_edge_k[:, np.newaxis] + far_increment
     a_cum_k = np.concatenate([a_cum_incube, a_cum_tail], axis=1)
-
-    bayestar_rows, far_reliable_all = bayestar_lookup(bayestar_path, gl, gb)
-    far_map = far_map_codes(gl, gb, bayestar_rows)
-    far_reliable_pc = np.where(far_map == FAR_MAP_BAYESTAR, far_reliable_all, np.nan)
 
     out_path = product_path(config, "sky/derived", "adopted", "profile", "sightline", region=region)
     real_root = os.path.realpath(config.data_root)
@@ -976,7 +1073,9 @@ def _build_adopted_one_region(config, region, admitted_pix, gl, gb, dist_new, a_
             ("A_CUM_K", a_cum_k),
             ("A_EDGE_K", a_edge_k),
             ("D_EDGE_PC", d_edge),
+            ("IN_CUBE_EXCESS_K", in_cube_excess_k),
             ("FAR_MAP", far_map),
+            ("FAR_MAP_MIXED", far_map_mixed),
             ("FAR_RELIABLE_PC", far_reliable_pc),
         ):
             build_module.write_dataset(f, name, data, *REGISTRY[(_ADOPTED_STEM, name)])
@@ -985,13 +1084,15 @@ def _build_adopted_one_region(config, region, admitted_pix, gl, gb, dist_new, a_
     frac_marshall = float(np.mean(far_map == FAR_MAP_MARSHALL))
     frac_bayestar = float(np.mean(far_map == FAR_MAP_BAYESTAR))
     frac_drimmel = float(np.mean(far_map == FAR_MAP_DRIMMEL))
+    in_cube_share = float(np.sum(in_cube_excess_k) / np.sum(a_inf))
     print("profile.build_adopted: %s: %d sightlines, far map Marshall %.1f%% / Bayestar %.1f%% / "
-          "Drimmel %.1f%%, FAR_RELIABLE_PC present for %d/%d Bayestar sightline(s)"
+          "Drimmel %.1f%% (%d mixed), FAR_RELIABLE_PC present for %d/%d Bayestar sightline(s), "
+          "in-cube excess share of the adopted column=%.4f"
           % (region, n_sl, 100.0 * frac_marshall, 100.0 * frac_bayestar, 100.0 * frac_drimmel,
-             int(np.count_nonzero(np.isfinite(far_reliable_pc))),
-             int(np.count_nonzero(far_map == FAR_MAP_BAYESTAR))))
+             int(np.sum(far_map_mixed)), int(np.count_nonzero(np.isfinite(far_reliable_pc))),
+             int(np.count_nonzero(far_map == FAR_MAP_BAYESTAR)), in_cube_share))
     return dict(region=region, frac_marshall=frac_marshall, frac_bayestar=frac_bayestar,
-                frac_drimmel=frac_drimmel)
+                frac_drimmel=frac_drimmel, in_cube_share=in_cube_share)
 
 
 def build(config, regions=None):

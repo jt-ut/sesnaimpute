@@ -2297,11 +2297,22 @@ REGISTRY = {
     # residual/tail-shape/scale algebra it fed (C25 and earlier): a reader
     # rescales the in-cube part by its own column over this file's
     # A_EDGE_K and adds the far part unscaled (sky.derived.profile.
-    # _RegionProfile.a_of_d).
+    # _RegionProfile.a_of_d). C26b (owner ruling 2026-10-21b): the far
+    # curve is the MEAN over a sightline's 16 nside-1024 child-pixel
+    # centres, never a point lookup at the sightline's own centre (an
+    # exact HEALPix hierarchy vertex, a genuine implementation-dependent
+    # degeneracy C26's own identity 1 found); the in-cube amplitude is
+    # partitioned against the far map's own measurement of the far part,
+    # never capped at 1 (the retired module's down-branch is gone:
+    # Edenhofer's own column always stands at least).
     ("profile_adopted_sightline", "HPX_PIX_256"): ("nested HEALPix pixel, nside 256",
         "This region's own admitted nside-256 pixel numbers (nested "
         "ordering). Row i here is row i of every other per-sightline "
-        "dataset in this file."),
+        "dataset in this file. Each one is a WHOLE pixel, not a point: "
+        "several datasets below (DIST_PC's far part, A_CUM_K's far "
+        "part, FAR_MAP, FAR_RELIABLE_PC) are the MEAN or majority over "
+        "the pixel's own 16 nside-1024 sub-pixels, not a single lookup "
+        "at the pixel's own centre."),
     ("profile_adopted_sightline", "GAL_L_DEG"): ("deg",
         "Galactic longitude of the matching pixel's center in HPX_PIX_256."),
     ("profile_adopted_sightline", "GAL_B_DEG"): ("deg",
@@ -2317,46 +2328,76 @@ REGISTRY = {
         "DIST_PC, this sightline's own cumulative K-band extinction from "
         "the observer out to that distance. Inside the Edenhofer map's "
         "own edge (distance <= D_EDGE_PC): the map's own measured shape, "
-        "rescaled so its value AT the edge equals this sightline's own "
-        "adopted extinction column (the catalogue's own extinction_"
-        "adopted_sightline product) -- capped so it never exceeds that "
-        "column where the map's own raw edge value would overshoot it. "
-        "Beyond the edge: that edge value (A_EDGE_K) plus Combined19's "
-        "own measured INCREMENT past the edge along this same sightline "
-        "-- never Combined19's own absolute value, and never capped at "
-        "any column: a reader's own total column, divided into this "
-        "number, can exceed 1 out here (the far reddening really is more "
-        "than a near pixel's own cloud column implies)."),
+        "scaled so its value AT the edge equals A_EDGE_K -- A_EDGE_K is "
+        "never below the map's own raw (unscaled) column there, only at "
+        "or above it (see A_EDGE_K's own reading for the rule that sets "
+        "it). Beyond the edge: A_EDGE_K plus Combined19's own measured "
+        "INCREMENT past the edge along this same sightline's 16 child "
+        "pixels' own mean curve -- never Combined19's own absolute "
+        "value, and never capped at any column: a reader's own total "
+        "column, divided into this number, can exceed 1 out here (the "
+        "far reddening really is more than a near pixel's own cloud "
+        "column implies)."),
     ("profile_adopted_sightline", "A_EDGE_K"): ("mag A_K",
         "For the matching pixel in HPX_PIX_256, A_CUM_K's own value at "
-        "D_EDGE_PC: the Edenhofer map's own measured column at its edge, "
-        "after the same rescaling A_CUM_K's in-cube part carries. A "
-        "reader rescales the in-cube part of A_CUM_K by its own total "
-        "column divided by this number."),
+        "D_EDGE_PC: the LARGER of (a) the Edenhofer map's own raw "
+        "(unscaled) column at its edge and (b) this sightline's own "
+        "adopted extinction column (the catalogue's own extinction_"
+        "adopted_sightline product) minus the far map's own measured "
+        "reach beyond the edge (IN_CUBE_EXCESS_K's own construction) -- "
+        "the owner's precedence rule (the emission column over the "
+        "cube's own integral), with the far map's own measurement "
+        "deciding how much of any excess the cube must carry versus the "
+        "far field already accounts for. A reader rescales the in-cube "
+        "part of A_CUM_K by its own total column divided by this "
+        "number, capped at 1 (so u <= 1 inside the cube for that "
+        "reader's own column)."),
     ("profile_adopted_sightline", "D_EDGE_PC"): ("pc",
         "The Edenhofer 3-D map's own edge distance, ONE number shared by "
         "every sightline of every region (the map's own fixed radial "
         "grid): the distance A_CUM_K's in-cube, Edenhofer-measured part "
         "ends and Combined19's own far increment begins."),
+    ("profile_adopted_sightline", "IN_CUBE_EXCESS_K"): ("mag A_K",
+        "For the matching pixel in HPX_PIX_256, A_EDGE_K minus the "
+        "Edenhofer map's own raw (unscaled) column at the cube's edge: "
+        "how much of this sightline's own adopted extinction column was "
+        "placed INSIDE the cube because the far map's own measurement "
+        "beyond the edge did not account for it all (owner ruling "
+        "2026-10-21b) -- zero where the far map alone already covers "
+        "the sightline's own excess (typically the Galactic plane, "
+        "where Marshall or Bayestar measures the far column directly), "
+        "positive at high Galactic latitude where the far map goes "
+        "flat well short of the sightline's own total column."),
     ("profile_adopted_sightline", "FAR_MAP"): ("code",
         "For the matching pixel in HPX_PIX_256, which of Combined19's "
         "own three constituent surveys supplies the far column beyond "
-        "D_EDGE_PC along this sightline, by Combined19's own published "
-        "build rule (computed from this sightline's own sky position and "
-        "the Bayestar19 survey's own footprint, never guessed): 1 "
-        "Marshall et al. 2006 (2MASS red giants, within 100 degrees of "
-        "the Galactic centre in longitude and 10 degrees of the plane in "
+        "D_EDGE_PC along this sightline: the code the MAJORITY of its "
+        "16 nside-1024 child pixels share (see FAR_MAP_MIXED where they "
+        "do not all agree), by Combined19's own published build rule "
+        "(computed from each child's own sky position and the "
+        "Bayestar19 survey's own footprint, never guessed): 1 Marshall "
+        "et al. 2006 (2MASS red giants, within 100 degrees of the "
+        "Galactic centre in longitude and 10 degrees of the plane in "
         "latitude), 2 Bayestar19 (Green et al. 2019, wherever it has a "
         "measured pixel outside that box), 3 Drimmel et al. 2003 (an "
         "all-sky smooth dust-disc model, wherever neither of the above "
         "reaches)."),
+    ("profile_adopted_sightline", "FAR_MAP_MIXED"): ("boolean",
+        "For the matching pixel in HPX_PIX_256, True where this "
+        "sightline's own 16 nside-1024 child pixels do not all share "
+        "the same FAR_MAP code -- the sightline straddles a boundary of "
+        "Combined19's own build rule (almost always Marshall's own box "
+        "edge). FAR_MAP itself is still the majority code among the 16; "
+        "this flag says that majority was not unanimous."),
     ("profile_adopted_sightline", "FAR_RELIABLE_PC"): ("pc",
-        "For the matching pixel in HPX_PIX_256, Bayestar19's own "
-        "per-pixel reliable-distance limit (their own quoted maximum "
-        "distance modulus with a converged fit, converted to a distance) "
-        "where FAR_MAP is 2 (Bayestar19 supplies the far column); NaN "
-        "everywhere else, including a Bayestar19-covered sightline whose "
-        "own pixel carries no such limit in their published file."),
+        "For the matching pixel in HPX_PIX_256, the MEDIAN, over "
+        "whichever of its 16 child pixels FAR_MAP's own majority code "
+        "classifies Bayestar, of Bayestar19's own per-pixel "
+        "reliable-distance limit (their own quoted maximum distance "
+        "modulus with a converged fit, converted to a distance); NaN "
+        "where FAR_MAP's majority is not Bayestar, or where none of the "
+        "Bayestar-classified children carries such a limit in their "
+        "published file."),
 
     ("depth_edenhofer_region", "REGION"): ("region name",
         "The name of the region this row describes, in the fixed thirty-"
