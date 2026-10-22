@@ -864,6 +864,22 @@ def build(config, regions=None):
                 # keeps all-zero curves.
                 irac_union = np.logical_or.reduce([pixel_on[b] for b in IRAC_KEYS])
                 n_union = irac_union.sum(axis=1).astype(np.float64)
+
+                # Defect 1 (bms_review/briefs/round6_2026-10-22/U13_limit_coverage.md):
+                # PIXEL_CURVE_<B> above is the mean over the UNION's own sample
+                # points with this band's off-map points at zero, so a pixel
+                # whose own band-b share of the union is < 1 never reaches
+                # completeness 0.5 even where the band's OWN on-map area is
+                # fully complete -- fifty_percent_pixel (catalog.limits) divides
+                # PIXEL_CURVE_<B> back by this pixel's own on-map share within
+                # the union (PIXEL_COVERED_FRAC_<B> / PIXEL_UNION_FRAC) to
+                # recover that on-map curve; PIXEL_UNION_FRAC is this one
+                # number per pixel, independent of band.
+                pixel_union_frac = (n_union / float(n_sub)).astype(np.float32)
+                build_module.write_dataset(
+                    f, "PIXEL_UNION_FRAC", pixel_union_frac,
+                    *REGISTRY[("completeness_sesna_source", "PIXEL_UNION_FRAC")])
+
                 for band in IRAC_MIPS_KEYS:
                     pixel_curve = np.zeros_like(pixel_sum[band], dtype=np.float32)
                     has = n_union > 0

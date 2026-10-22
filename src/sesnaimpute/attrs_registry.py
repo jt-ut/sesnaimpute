@@ -1775,21 +1775,38 @@ REGISTRY = {
     # source population's own sky density DENSITY_PAHN(limit), one row
     # per region, bins on one shared axis (C14_pahn_population.md).
     ("density_pahn_region", "LOG10_LIM_EDGES"): ("log10 mJy",
-        "The edges of the bins this density is tabulated on, in "
-        "log10(the pixel's own 8 micron 50%-completeness flux, mJy): "
-        "bin j runs from LOG10_LIM_EDGES[j] to LOG10_LIM_EDGES[j+1], 0.1 "
-        "dex wide, one shared axis for every region in this file."),
+        "The edges of the RAW, fixed-width bins every region's own "
+        "per-pixel counting starts from, in log10(the pixel's own 8 "
+        "micron 50%-completeness flux, mJy): bin j runs from "
+        "LOG10_LIM_EDGES[j] to LOG10_LIM_EDGES[j+1], 0.1 dex wide, one "
+        "shared axis for every region in this file -- kept for "
+        "provenance; no per-bin dataset below is tabulated on this axis "
+        "any more (MERGED_LOG10_LIM_EDGES is, DEFECT 2, bms_review/"
+        "briefs/round6_2026-10-22/U13_limit_coverage.md)."),
     ("density_pahn_region", "REGION"): ("name",
         "The region name of each row of every per-region array in this "
         "product, in the order those arrays are indexed on their first "
         "axis."),
+    ("density_pahn_region", "MERGED_LOG10_LIM_EDGES"): ("log10 mJy",
+        "For each region (REGION), its OWN merged-bin edges -- adjacent "
+        "LOG10_LIM_EDGES bins merged forward until each holds at least "
+        "PAHN_MIN_PER_BIN (10) raw pattern sources (population.pahn."
+        "merge_region_bins, DEFECT 2: a raw 0.1-dex bin with too few "
+        "sources is small-number noise, not a real dip in DENSITY_PAHN). "
+        "A RAGGED dataset: one variable-length row per region, since one "
+        "region's own merged-bin count differs from another's -- row i "
+        "has length (number of that region's own merged bins) + 1, and "
+        "is the axis every OTHER per-bin dataset below (DENSITY_PAHN, "
+        "DENSITY_PAHN_CATALOGUED, N_PER_BIN, POISSON_LO, POISSON_HI, "
+        "AREA_DEG2_PER_BIN) shares its own row i's length with."),
     ("density_pahn_region", "DENSITY_PAHN"): ("objects per square degree",
-        "For each region (rows, REGION) and bin of LOG10_LIM_EDGES "
-        "(columns): the INTRINSIC sky density of the PAHN pattern -- a "
-        "catalogued source with a measured 5.8 and 8 micron flux and no "
-        "measured 3.6 or 4.5 micron flux -- among this region's own "
-        "admitted pixels whose own 8 micron 50%-completeness limit "
-        "falls in this bin: each such pattern source's own weight, the "
+        "For each region (rows, REGION), one value per its own MERGED "
+        "bin (MERGED_LOG10_LIM_EDGES's own row, a ragged dataset): the "
+        "INTRINSIC sky density of the PAHN pattern -- a catalogued "
+        "source with a measured 5.8 and 8 micron flux and no measured "
+        "3.6 or 4.5 micron flux -- among this region's own admitted "
+        "pixels whose own 8 micron 50%-completeness limit falls in this "
+        "merged bin: each such pattern source's own weight, the "
         "inverse of its own probability of the catalogued event -- its "
         "own 5.8 and 8 micron flux both detected (weight_pahn_source's "
         "own P_CAT/WEIGHT, the same survey detection-probability mixture "
@@ -1799,46 +1816,62 @@ REGISTRY = {
         "so a consumer that separately applies that same probability (as "
         "bmstp.atlas/the fitter do for a drawn member) applies it exactly "
         "once in total, not twice -- intrinsic for the PATTERN population "
-        "only. NaN in a bin no admitted pixel's own limit reaches. Still "
-        "an upper bound, in both directions: the pattern count also "
-        "contains any true protostar too faint at 3.6 and 4.5 to detect, "
-        "and "
-        "artefacts -- this division corrects only for the pattern's own "
-        "catalogued fraction, not for those two."),
+        "only. A merged bin still at exactly zero (every one of its own "
+        "raw bins empty, even after merging) is filled by log-linear "
+        "interpolation if interior, held as measured at either end "
+        "(DEFECT 2's own residual case). Still an upper bound, in both "
+        "directions: the pattern count also contains any true protostar "
+        "too faint at 3.6 and 4.5 to detect, and artefacts -- this "
+        "division corrects only for the pattern's own catalogued "
+        "fraction, not for those two."),
     ("density_pahn_region", "DENSITY_PAHN_CATALOGUED"): ("objects per square degree",
-        "For each region (rows, REGION) and bin of LOG10_LIM_EDGES "
-        "(columns): the MEASURED sky density of the PAHN pattern -- a "
-        "catalogued source with a measured 5.8 and 8 micron flux and no "
-        "measured 3.6 or 4.5 micron flux -- among this region's own "
-        "admitted pixels whose own 8 micron 50%-completeness limit "
-        "falls in this bin: the total pattern count there divided by "
-        "the total covered area there, with no correction for any "
-        "source's own chance of being catalogued. NaN in a bin no "
-        "admitted pixel's own limit reaches. An upper bound: the "
-        "pattern count also contains any true protostar too faint at "
-        "3.6 and 4.5 to detect, and artefacts."),
+        "For each region (rows, REGION), one value per its own MERGED "
+        "bin (MERGED_LOG10_LIM_EDGES): the MEASURED sky density of the "
+        "PAHN pattern -- a catalogued source with a measured 5.8 and 8 "
+        "micron flux and no measured 3.6 or 4.5 micron flux -- among "
+        "this region's own admitted pixels whose own 8 micron "
+        "50%-completeness limit falls in this merged bin: the total "
+        "pattern count there divided by the total covered area there, "
+        "with no correction for any source's own chance of being "
+        "catalogued. A merged bin still at exactly zero is filled by "
+        "log-linear interpolation if interior, held as measured at "
+        "either end (DEFECT 2's own residual case, same rule as "
+        "DENSITY_PAHN). An upper bound: the pattern count also contains "
+        "any true protostar too faint at 3.6 and 4.5 to detect, and "
+        "artefacts."),
     ("density_pahn_region", "N_PER_BIN"): ("sources",
-        "For each region and bin of LOG10_LIM_EDGES, the total pattern "
-        "count DENSITY_PAHN_CATALOGUED in that bin rests on. An upper "
-        "bound: the pattern count also contains any true protostar too "
-        "faint at 3.6 and 4.5 to detect, and artefacts."),
+        "For each region, one value per its own MERGED bin "
+        "(MERGED_LOG10_LIM_EDGES): the total RAW pattern count "
+        "DENSITY_PAHN_CATALOGUED in that merged bin rests on, before any "
+        "log-linear interpolation (so a 0 here with a nonzero DENSITY_"
+        "PAHN_CATALOGUED means that merged bin's own density was "
+        "interpolated, DEFECT 2's own residual case). Every merged bin "
+        "holds at least PAHN_MIN_PER_BIN (10) unless the region's own "
+        "whole reached span holds fewer pattern sources than that in "
+        "total. An upper bound: the pattern count also contains any "
+        "true protostar too faint at 3.6 and 4.5 to detect, and "
+        "artefacts."),
     ("density_pahn_region", "POISSON_LO"): ("objects per square degree",
         "The lower edge of the standard 68% (Garwood) Poisson confidence "
-        "interval on DENSITY_PAHN_CATALOGUED, from N_PER_BIN's own raw "
-        "count, on the same density scale."),
+        "interval on DENSITY_PAHN_CATALOGUED, from N_PER_BIN's own "
+        "merged-bin raw count, on the same density scale (computed fresh "
+        "on the merged count, never averaged from the raw bins' own "
+        "intervals)."),
     ("density_pahn_region", "POISSON_HI"): ("objects per square degree",
         "The upper edge of the standard 68% (Garwood) Poisson confidence "
-        "interval on DENSITY_PAHN_CATALOGUED, from N_PER_BIN's own raw "
-        "count, on the same density scale."),
+        "interval on DENSITY_PAHN_CATALOGUED, from N_PER_BIN's own "
+        "merged-bin raw count, on the same density scale (computed fresh "
+        "on the merged count, never averaged from the raw bins' own "
+        "intervals)."),
     ("density_pahn_region", "AREA_DEG2_PER_BIN"): ("square degrees",
-        "For each region and bin of LOG10_LIM_EDGES, the total covered "
-        "area (the any-IRAC union coverage fraction times the nside-512 "
-        "pixel area, summed over every admitted pixel in that bin) both "
-        "DENSITY_PAHN and DENSITY_PAHN_CATALOGUED divide their own "
-        "numerator by."),
+        "For each region, one value per its own MERGED bin "
+        "(MERGED_LOG10_LIM_EDGES): the total covered area (the any-IRAC "
+        "union coverage fraction times the nside-512 pixel area, summed "
+        "over every admitted pixel in that merged bin) both DENSITY_PAHN "
+        "and DENSITY_PAHN_CATALOGUED divide their own numerator by."),
     ("density_pahn_region", "PATTERN_COUNT_REGION"): ("sources",
         "For each region, the total pattern count over every admitted "
-        "pixel, before binning: N_PER_BIN's own column sum. An upper "
+        "pixel, before binning: N_PER_BIN's own row sum. An upper "
         "bound: the pattern count also contains any true protostar too "
         "faint at 3.6 and 4.5 to detect, and artefacts."),
 
@@ -2838,7 +2871,18 @@ REGISTRY = {
         "mean over the on-map 30-arcsec completeness pixels inside this "
         "nside-512 pixel (256 sample points per pixel, each at its nearest "
         "30-arcsec pixel's CURVE_I1 row, averaged over the points that fall "
-        "on a map); all zero where PIXEL_COVERED_FRAC_I1 is 0."),
+        "on a map); all zero where PIXEL_COVERED_FRAC_I1 is 0. This is the "
+        "IRAC-UNION average: a pixel only partly covered by I1 within the "
+        "four bands' own union (PIXEL_COVERED_FRAC_I1 < PIXEL_UNION_FRAC) "
+        "reads a curve diluted toward zero by the union's off-I1 points, so "
+        "it never reaches completeness 0.5 even where I1's own on-map area "
+        "is fully complete. The catalogued-probability readers (fraction_"
+        "pixel, pixel_fraction_params) use this union average AS STORED, "
+        "unchanged; the 50%-limit readers (catalog.limits._crossing_mag_"
+        "pixel/fifty_percent_pixel/local_width_dex_pixel) instead divide it "
+        "back by PIXEL_COVERED_FRAC_I1 / PIXEL_UNION_FRAC (this pixel's own "
+        "I1 on-map share WITHIN the union) to recover the on-map curve "
+        "before finding the crossing -- see PIXEL_UNION_FRAC."),
     ("completeness_sesna_source", "PIXEL_CURVE_I2"): ("dimensionless (completeness fraction, 0..1)",
         "Same meaning as PIXEL_CURVE_I1, for I2 (4.5 micron)."),
     ("completeness_sesna_source", "PIXEL_CURVE_I3"): ("dimensionless (completeness fraction, 0..1)",
@@ -2899,6 +2943,26 @@ REGISTRY = {
         "Same meaning as ENVELOPE_I1, for I4 (8.0 micron) (MAG_GRID_I4)."),
     ("completeness_sesna_source", "ENVELOPE_M1"): ("completeness fraction x600, uint16",
         "Same meaning as ENVELOPE_I1, for M1 (24 micron) (MAG_GRID_M1)."),
+    ("completeness_sesna_source", "PIXEL_UNION_FRAC"): ("dimensionless (area fraction, 0..1)",
+        "For each admitted nside-512 pixel in HPX_PIX_512, the IRAC-UNION "
+        "on-map share of its own 256 sample points: the fraction of those "
+        "points that fall on ANY of the four IRAC bands' (I1-I4) own field "
+        "maps (I1 or I2 or I3 or I4), the same union PIXEL_CURVE_<band>'s "
+        "own mean is taken over for I1/I2/I3/I4/M1; 0.0 where no IRAC band "
+        "covers the pixel at all. Always >= PIXEL_COVERED_FRAC_<band> for "
+        "each of I1-I4 (that band's own on-map share is a subset of the "
+        "union's), equal to it wherever the four footprints coincide. One "
+        "number per pixel, not per band -- M1's own curve shares this same "
+        "union denominator too (module docstring: 'M1 last: the build "
+        "masks it to the IRAC union the four have established'). Read by "
+        "catalog.limits's 50%-limit readers (_crossing_mag_pixel/fifty_"
+        "percent_pixel/local_width_dex_pixel) to divide PIXEL_COVERED_FRAC_"
+        "<band> / PIXEL_UNION_FRAC back out of PIXEL_CURVE_<band> and "
+        "recover the band's own on-map curve for a pixel only partly "
+        "covered within the union (DEFECT 1, bms_review/briefs/"
+        "round6_2026-10-22/U13_limit_coverage.md); not used for 2MASS "
+        "(J/H/Ks), which carries no union-average dilution of its own "
+        "(PIXEL_COVERED_FRAC_J/H/Ks is always 1.0, an all-sky survey)."),
     ("completeness_sesna_source", "HPX_PIX_512"): ("nested HEALPix pixel, nside 512",
         "This region's own admitted nside-512 pixel numbers (nested "
         "ordering), ascending -- the same admission rule as "

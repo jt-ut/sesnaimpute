@@ -81,6 +81,7 @@ class Completeness:
         self._ac = {}
         self._curve = {}
         self._pixel_curve = {}
+        self._pixel_covered_frac = {}
         self._mag_grid_band = {}
         self._completed_from = {}
         self._zero_point_jy = {}
@@ -99,8 +100,25 @@ class Completeness:
             self._ac[band] = _band_ac(float(grid[0]), float(grid[1] - grid[0]), zp)
             self._curve[band] = h5file[f"CURVE_{band}"]
             self._pixel_curve[band] = h5file[f"PIXEL_CURVE_{band}"]
+            self._pixel_covered_frac[band] = np.asarray(h5file[f"PIXEL_COVERED_FRAC_{band}"][:], dtype=np.float32)
             self._completed_from[band] = np.asarray(h5file[f"COMPLETED_FROM_{band}"][:], dtype=np.float32)
             self._envelope[band] = np.asarray(h5file[f"ENVELOPE_{band}"][:])
+        # DEFECT 1 (bms_review/briefs/round6_2026-10-22/U13_limit_coverage.md):
+        # catalog.completeness's own PIXEL_CURVE_<band> (I1-M1) is the mean
+        # over the IRAC union's sample points, so a pixel only partly
+        # covered by one band WITHIN that union never reaches 0.5 there.
+        # PIXEL_UNION_FRAC is that union's own on-map share (one number per
+        # pixel, not per band -- no "no PIXEL_UNION_FRAC" existence check
+        # here: a product without it has not been rebuilt since Defect 1,
+        # rule 5b's own existence-check form, run the 'sesnaimpute.catalog.
+        # completeness' RUNBOOK line first). Not used for J/H/Ks (no union
+        # dilution there, module docstring's rule, `_on_map_scale` below).
+        if "PIXEL_UNION_FRAC" not in h5file:
+            raise KeyError(
+                "catalog.limits.Completeness: no PIXEL_UNION_FRAC in %r -- run the "
+                "'sesnaimpute.catalog.completeness' RUNBOOK line first (Defect 1, "
+                "bms_review/briefs/round6_2026-10-22/U13_limit_coverage.md)" % h5file.filename)
+        self._pixel_union_frac = np.asarray(h5file["PIXEL_UNION_FRAC"][:], dtype=np.float32)
 
     def _grid_params(self, band):
         grid = self._mag_grid_band[band]
@@ -186,11 +204,67 @@ class Completeness:
         ONCE here and cached by the caller (`pieces.py`'s per-process
         cache convention, `bmstp.sample_star`'s own pattern) for its own
         worker process's lifetime. `scale` is always 1.0: `PIXEL_CURVE_
-        <band>` is float32, already a plain fraction, for every band."""
+        <band>` is float32, already a plain fraction, for every band.
+        UNCHANGED BY DESIGN under DEFECT 1 (U13_limit_coverage.md): this
+        is the catalogued-probability reader (`bmstp.atlas.
+        catalogued_probability`), whose own `x COVERAGE` weighting
+        already accounts for a partly-covered pixel's own area -- it
+        keeps the stored IRAC-union average, never the on-map curve
+        `catalog.limits._on_map_scale`/`fraction_pixel_onmap` recover for
+        the 50%-limit and non-detection-at-a-covered-pixel readers."""
         g0, dm = self._grid_params(band)
         a, c = self._ac[band]
         curves = self._pixel_curve[band]
         return np.asarray(curves[:]), g0, dm, curves.shape[1], a, c, 1.0
+
+    def _on_map_scale(self, band, rows):
+        """`(n,)` float64: the multiplier that turns `PIXEL_CURVE_<band>`'s
+        own IRAC-union average back into the on-map curve for `band` at
+        each of `rows` (DEFECT 1, bms_review/briefs/round6_2026-10-22/
+        U13_limit_coverage.md) -- `1 / s_b`, `s_b = PIXEL_COVERED_FRAC_
+        <band> / PIXEL_UNION_FRAC` (this pixel's own on-map share WITHIN
+        the union). `1.0` (no rescale) where `rows < 0` (off-map, the
+        caller's own skip), where `PIXEL_UNION_FRAC == 0` (truly
+        uncovered: the union itself never reaches this pixel,
+        `PIXEL_CURVE_<band>` is already all zero there, so the crossing
+        search sees the same never-reaches-0.5 curve either way), or for
+        J/H/Ks (2MASS keeps no union average of its own to undo --
+        `PIXEL_COVERED_FRAC_J/H/Ks` is always 1 and `PIXEL_UNION_FRAC`
+        plays no part there)."""
+        rows = np.atleast_1d(rows)
+        scale = np.ones(rows.shape, dtype=np.float64)
+        if band not in IRAC_MIPS_KEYS:
+            return scale
+        valid = rows >= 0
+        if not valid.any():
+            return scale
+        union = np.zeros(rows.shape, dtype=np.float64)
+        covered = np.zeros(rows.shape, dtype=np.float64)
+        union[valid] = self._pixel_union_frac[rows[valid]].astype(np.float64)
+        covered[valid] = self._pixel_covered_frac[band][rows[valid]].astype(np.float64)
+        has_union = valid & (union > 0)
+        s_b = np.zeros(rows.shape, dtype=np.float64)
+        s_b[has_union] = covered[has_union] / union[has_union]
+        on = has_union & (s_b > 0)
+        scale[on] = 1.0 / s_b[on]
+        return scale
+
+    def fraction_pixel_onmap(self, band, flux_mjy, pixel_row):
+        """`fraction_pixel`'s own value, divided back by this pixel's own
+        on-map share within the IRAC union (`_on_map_scale`, DEFECT 1) --
+        the completeness a non-detection term AT A COVERED PIXEL should
+        read (`atlas.protostars`'s own per-protostar likelihood,
+        coordinator's correction: `fraction_pixel`'s union average
+        understates a partly-covered pixel's own on-map completeness the
+        same way `fifty_percent_pixel` did), rather than the union
+        average `fraction_pixel`/`pixel_fraction_params` keep as stored
+        for the catalogued-probability readers (`bmstp.atlas.
+        catalogued_probability`'s own `x COVERAGE` weighting already
+        accounts for the partly-covered area, so it reads the union
+        average unchanged, by design)."""
+        rows = np.ascontiguousarray(np.atleast_1d(pixel_row).astype(np.int64))
+        base = self.fraction_pixel(band, flux_mjy, rows)
+        return base * self._on_map_scale(band, rows)
 
     def fraction_pixel(self, band, flux_mjy, pixel_row):
         """The completeness fraction at each of `pixel_row`'s own rows (a
@@ -260,7 +334,13 @@ class Completeness:
         read for 2MASS -- module docstrings), not a value-x-`STORAGE_
         SCALE` table, so the crossing search runs on the raw fraction
         directly rather than sharing `_crossing_mag`'s own `/STORAGE_
-        SCALE` step."""
+        SCALE` step. DEFECT 1 (U13_limit_coverage.md): the stored curve is
+        the IRAC-UNION average, so the crossing search first divides it
+        back by this pixel's own on-map share within the union
+        (`_on_map_scale`) to find the crossing on the on-map curve, not
+        the union-diluted one -- a pixel covered only s_b < 0.5 of the
+        union otherwise never reaches 0.5 and reads +inf (`fifty_percent_
+        pixel`) even where it is, itself, fully complete."""
         rows = np.ascontiguousarray(np.atleast_1d(pixel_row).astype(np.int64))
         curve_table = self._pixel_curve[band]
         g0, dm = self._grid_params(band)
@@ -268,6 +348,7 @@ class Completeness:
         valid = rows >= 0
         if valid.any():
             sub = curve_table[:][rows[valid]].astype(np.float64)
+            sub = sub * self._on_map_scale(band, rows[valid])[:, None]
             below = sub < target_c
             first_below = np.argmax(below, axis=1)
             never_below = ~below.any(axis=1)

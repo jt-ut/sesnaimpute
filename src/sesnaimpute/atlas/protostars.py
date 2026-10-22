@@ -574,11 +574,18 @@ def _likelihood_factor(f45_mjy, e_f45_mjy, measured, a_p, kappa_i2, reader, pixe
 
     The non-detection term reads Rob Gutermuth's own MEASURED I2
     completeness curve directly, at each protostar's own matched admitted
-    pixel (`reader.fraction_pixel`, `pixel_row_i2` -- `catalog.limits.
-    completeness`'s one reader, COMPLETENESS_2026-10-20.md), never a
-    Gaussian fit to it: `L = 1 - C(F(b))`, capped at the owner's `C_CAP`
+    pixel (`reader.fraction_pixel_onmap`, `pixel_row_i2` -- `catalog.
+    limits.completeness`'s one reader, COMPLETENESS_2026-10-20.md), never
+    a Gaussian fit to it: `L = 1 - C(F(b))`, capped at the owner's `C_CAP`
     (`catalog.completeness.C_CAP`, the measurement's own ~1/200
-    resolution floor)."""
+    resolution floor). A protostar's own matched pixel is covered by
+    construction (it carries a catalogued I2 row there), so this reads
+    the pixel's own ON-MAP curve (`fraction_pixel_onmap`, DEFECT 1 --
+    bms_review/briefs/round6_2026-10-22/U13_limit_coverage.md), not the
+    IRAC-union average `fraction_pixel` itself keeps for the catalogued-
+    probability readers: a pixel only partly covered by I2 within the
+    union otherwise understates how complete it is at this protostar's
+    own position, inflating the non-detection term."""
     log10_f_b = b_centers[None, :] - 0.4 * a_p[:, None] * kappa_i2[:, None]  # (n, n_b)
 
     safe_f45 = np.where(measured, f45_mjy, 1.0)
@@ -590,7 +597,7 @@ def _likelihood_factor(f45_mjy, e_f45_mjy, measured, a_p, kappa_i2, reader, pixe
 
     flux_b_mjy = 10.0 ** log10_f_b  # (n, n_b)
     rows_2d = np.broadcast_to(pixel_row_i2[:, None], flux_b_mjy.shape)
-    c_vals = reader.fraction_pixel("I2", flux_b_mjy, rows_2d)
+    c_vals = reader.fraction_pixel_onmap("I2", flux_b_mjy, rows_2d)
     l_not_measured = 1.0 - np.minimum(c_vals, completeness_module.C_CAP)
 
     return np.where(measured[:, None], l_measured, l_not_measured)
