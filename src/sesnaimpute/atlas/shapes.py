@@ -290,12 +290,10 @@ def _panel_shape(config, region, cls, idx_median, reader=None):
     return density, mass, reader
 
 
-#: `_factor_marginal`'s own (n_query, n_model, n_b) working set for
-#: STAR/PAHC (arg, p_val, term, the `pi_theta_f * term` product) -- the
-#: same 512 MB budget and array count `bmstp.atlas._above_factor_batch_size`
-#: applies to the identical call, so many rows at once (rule 10b) rather
-#: than the whole `rows` axis, which for a template register of several
-#: thousand can otherwise exceed the machine's ceiling.
+#: A conservative (n_query, n_model, n_b) bound for STAR/PAHC (arg, p_val,
+#: term, the `pi_theta_f * term` product) on the `_factor_marginal` call
+#: (which no longer builds that tensor), 512 MB, so many rows at once
+#: (rule 10b) rather than the whole `rows` axis.
 _LAMBDA_BATCH_BUDGET_BYTES = 512 * 1024 * 1024
 _N_FACTOR_TEMP_ARRAYS = 4
 

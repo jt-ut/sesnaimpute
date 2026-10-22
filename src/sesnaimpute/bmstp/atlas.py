@@ -2129,27 +2129,12 @@ def _observed_bright_counts(config, region, pix, f_lim):
 _ABOVE_BATCH_BUDGET_BYTES = 512 * 1024 * 1024
 _N_ABOVE_TEMP_ARRAYS = 6
 
-#: STAR/PAHC's own template-weight factor (`_factor_marginal`) has an
-#: (n_pixel_batch, n_model, n_b) working set instead -- the register's
-#: model count can run to several hundred, far larger than the shape
-#: grid's own n_x (128), so it is its own bound (`arg`, `p_val`, `term`
-#: and the `pi_theta_f * term` product).
-_N_FACTOR_TEMP_ARRAYS = 4
-
 
 def _above_batch_size(n_x, n_b):
     """Pixels per batch so `n_pixel_batch * n_x * n_b * 8 bytes *
     _N_ABOVE_TEMP_ARRAYS` stays under `_ABOVE_BATCH_BUDGET_BYTES`
     (CODING_RULES_BMSTP.md rule 10b)."""
     row_bytes = n_x * n_b * 8 * _N_ABOVE_TEMP_ARRAYS
-    return max(1, _ABOVE_BATCH_BUDGET_BYTES // row_bytes)
-
-
-def _above_factor_batch_size(n_model, n_b):
-    """Pixels per batch for STAR/PAHC's own `_factor_marginal` working
-    set, the same 512 MB budget (rule 10b) applied to its `(n_pixel_batch,
-    n_model, n_b)` shape rather than the shape grid's `(n_x, n_b)`."""
-    row_bytes = n_model * n_b * 8 * _N_FACTOR_TEMP_ARRAYS
     return max(1, _ABOVE_BATCH_BUDGET_BYTES // row_bytes)
 
 
@@ -2169,8 +2154,8 @@ def _above_shared(config, reader, a_col, f0):
     caller already opened first). Computed once for the WHOLE region's
     pixel axis, unbatched: `(n_pix, n_x, n_b)` bool is a few tens of MB
     even on the largest region (nowhere near the rule 10b 512 MB budget,
-    which exists for the per-class `(n_pixel_batch, n_model, n_b)`
-    `_factor_marginal` working set below, not for this), and every step
+    which exists for the per-class `(n_pixel_batch, n_x, n_b)` working
+    set below, not for this), and every step
     here is elementwise with no reduction across the pixel axis, so no
     batch boundary -- one call here, or the six per-class batched calls
     this replaces -- can move a bit."""
@@ -2202,13 +2187,13 @@ def _above_fraction(reader, cls, grain_of_pix, above, d_pahc, curve):
     mask -- identical whichever class computed it, so it is computed once
     by the caller and passed in here, never recomputed per class.
     Batched over the pixel axis: each batch holds one `(n_pixel_batch,
-    n_x, n_b)` working set (`_above_batch_size`) and, for STAR/PAHC, one
-    `(n_pixel_batch, n_model, n_b)` working set for `_factor_marginal`
-    (`_above_factor_batch_size`) -- evaluated for the BATCH's own pixels
-    only, never the whole admitted-pixel axis at once (a per-source-style
-    call over every pixel at once ran 8.6 GB, Orion A PAHC, to 27 GB,
-    Cygnus X, since the model axis can run to several hundred
-    templates)."""
+    n_x, n_b)` working set (`_above_batch_size`). For STAR/PAHC
+    `_factor_marginal` reduces the model axis from sorted cumulative sums
+    and one `searchsorted` per curve knot, so its own working set is
+    `(n_pixel_batch, n_b)` arrays per knot, never `(n_pixel_batch,
+    n_model, n_b)` (a per-source-style evaluation of that tensor over every
+    pixel at once ran 8.6 GB, Orion A PAHC, to 27 GB, Cygnus X, since the
+    model axis can run to tens of thousands of templates)."""
     b_centers = 0.5 * (reader.b_edges[:-1] + reader.b_edges[1:])  # log10 F_4.5
     n_x, n_b = above.shape[1], above.shape[2]
     n_pix = above.shape[0]
@@ -2216,8 +2201,6 @@ def _above_fraction(reader, cls, grain_of_pix, above, d_pahc, curve):
 
     is_factor_cls = cls in ("STAR", "PAHC")
     batch = _above_batch_size(n_x, n_b)
-    if is_factor_cls:
-        batch = min(batch, _above_factor_batch_size(reader.c_theta.size, n_b))
     for start in range(0, n_pix, batch):
         stop = min(start + batch, n_pix)
         h_b = reader.grid_all[grain_of_pix[start:stop]].astype(np.float64)  # (n_p, n_x, n_b)

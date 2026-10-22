@@ -2058,13 +2058,59 @@ def _factor_marginal(b_centers, reader, cls, d_pahc, curve):
     `axis=-2` rather than a hardcoded `0`, serving both callers with one
     definition."""
     type_factor, contrast_factor = reader.factors[0], reader.factors[1]
-    pi_theta_f = type_factor["W"]          # (n_model, n_b), sum_theta = 1 at every F
-    c_theta = reader.c_theta               # (n_model,)
-    c_f = contrast_factor["C_F"]           # (n_model,)
-    arg = b_centers[None, :] - c_theta[:, None] + c_f[:, None] + d_pahc
-    p_val = curve(-arg)                    # curve's own x-axis is log10 q, arg is -log10 q
-    term = (1.0 - p_val) if cls == "STAR" else p_val
-    return (pi_theta_f * term).sum(axis=-2)
+    pi_theta_f = np.asarray(type_factor["W"], dtype=np.float64)  # (n_model, n_b), sum_theta = 1 at every F
+    c_theta = np.asarray(reader.c_theta, dtype=np.float64)       # (n_model,)
+    c_f = np.asarray(contrast_factor["C_F"], dtype=np.float64)   # (n_model,)
+    n_b = b_centers.size
+    d = np.asarray(d_pahc, dtype=np.float64)
+
+    # `curve(-arg)` with `arg = b - C_THETA + C_F + d` is `curve(t - (b + d))`,
+    # `t = C_THETA - C_F` per model, the same for every brightness and every
+    # query. The curve is piecewise linear between its own knots and constant
+    # beyond them, so sorting the models by `t` once, the sum over models
+    # between two knots is linear in `b + d`: `Sum pi (y + slope (t - z - k))`
+    # from the cumulative sums of `pi` and `pi t` and one `searchsorted` per
+    # knot, exactly the same sum as evaluating the curve at every model
+    # (summed in a different order), without the `(n_query, n_model, n_b)`
+    # tensor.
+    t = c_theta - c_f
+    order = np.argsort(t, kind="stable")
+    t_sorted = t[order]
+    pi_sorted = pi_theta_f[order]
+    c0 = np.zeros((t.size + 1, n_b))
+    c1 = np.zeros((t.size + 1, n_b))
+    np.cumsum(pi_sorted, axis=0, out=c0[1:])
+    np.cumsum(pi_sorted * t_sorted[:, None], axis=0, out=c1[1:])
+
+    knots = np.asarray(curve.x, dtype=np.float64)
+    y_knot = np.asarray(curve.y, dtype=np.float64)
+    fill_left, fill_right = (float(v) for v in curve.fill_value)
+    if cls == "STAR":                      # 1 - P is linear in the same knots
+        y_knot, fill_left, fill_right = 1.0 - y_knot, 1.0 - fill_left, 1.0 - fill_right
+
+    z = b_centers[None, :] + d.reshape(-1, 1)          # (n_query, n_b): b + d
+    cols = np.arange(n_b)[None, :]
+    # models with t - z < knot[0] sit on the left fill, t - z > knot[-1] on
+    # the right fill (a model exactly on the last knot reads the curve there)
+    pos = [np.searchsorted(t_sorted, knots[0] + z, side="left")]
+    for k in knots[1:-1]:
+        pos.append(np.searchsorted(t_sorted, k + z, side="left"))
+    pos.append(np.searchsorted(t_sorted, knots[-1] + z, side="right"))
+    pos = [p.reshape(z.shape) for p in pos]
+    cum0 = [c0[p, cols] for p in pos]
+    cum1 = [c1[p, cols] for p in pos]
+    out = fill_left * cum0[0] + fill_right * (c0[-1][None, :] - cum0[-1])
+    # an infinite `b + d` (a pixel with no 8 um limit) puts every model on one
+    # fill, so its interval sums are empty; a finite stand-in keeps `inf * 0`
+    # out of the coefficients, and a NaN `d` stays NaN as the curve gives it
+    z_safe = np.where(np.isfinite(z), z, 0.0)
+    for j in range(knots.size - 1):
+        slope = (y_knot[j + 1] - y_knot[j]) / (knots[j + 1] - knots[j])
+        s0 = cum0[j + 1] - cum0[j]
+        s1 = cum1[j + 1] - cum1[j]
+        out += (y_knot[j] - slope * (z_safe + knots[j])) * s0 + slope * s1
+    out[np.isnan(z)] = np.nan
+    return out.reshape(d.shape[:-2] + (n_b,)) if d.ndim >= 3 else out.reshape(n_b)
 
 
 # ---------------------------------------------------------------------------
