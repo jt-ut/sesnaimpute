@@ -1844,69 +1844,205 @@ def _gal_reduce(gal_members, chunk_results, weight_pix_all):
 
 
 # ---------------------------------------------------------------------------
-# PAHN: region-wide members (like GAL's own, not tile/sightline-grouped --
-# C14_pahn_population.md, owner's 2026-10-20 ruling "H2S is the pattern")
+# PAHN: brightness is region-wide (S11), depth is now PER SIGHTLINE (S08,
+# round-1 reviewer reply, `bms_review/review_2026-10-22/FINDINGS.md`) --
+# the SAME sightline-grouped assembly YSO/H2S use, not GAL-style pixel
+# chunks any more.
 # ---------------------------------------------------------------------------
 
-def _pahn_depth_nodes():
+def _pahn_sightline_a_col_k(config, region, hpx_pix_256):
+    """This region's own `A_COL_K` at arbitrary `hpx_pix_256` values --
+    duplicated from `bmstp.shapes._sightline_a_col_k` rather than
+    imported (this package's own convention for a small per-position
+    lookup, e.g. `population.pahn`'s module docstring on
+    `_coverage_frac`), needed here for the PATTERN sources' own
+    sightlines (S11 dereddening, below), not P3's full `HPX_PIX_256`
+    axis."""
+    path = config_module.product_path(config, "sky/derived", "adopted", "extinction", "sightline")
+    with h5py.File(path, "r") as f:
+        mine = np.asarray(f["REGION_CODE"][:]) == column_module._region_codes(config, [region])[region]
+        pix_all = np.asarray(f["HPX_PIX_256"][:], dtype=np.int64)[mine]
+        a_k_all = np.asarray(f["A_K"][:], dtype=np.float64)[mine]
+    order = np.argsort(pix_all)
+    pix_sorted = pix_all[order]
+    a_k_sorted = a_k_all[order]
+    loc = np.searchsorted(pix_sorted, hpx_pix_256)
+    capped = np.minimum(loc, pix_sorted.size - 1) if pix_sorted.size else loc
+    ok = pix_sorted.size > 0 and np.all(pix_sorted[capped] == hpx_pix_256)
+    if not ok:
+        missing = hpx_pix_256[pix_sorted[capped] != hpx_pix_256] if pix_sorted.size else hpx_pix_256
+        raise ValueError("bmstp.atlas: PAHN pattern sightline pixel(s) %r missing from %s"
+                          % (missing[:5].tolist(), path))
+    return a_k_sorted[capped]
+
+
+def _pahn_depth_nodes(loaded_profile, sl_row, d_front):
     """`(xi_centers, weight)`: `N_DEPTH_NODES` equally spaced quantiles of
-    PAHN's own `p(x)` (`sample_cloud.pahn_front_marginal`, the SAME
-    front-surface marginal `bmstp.shapes.build_cloud` places `GRID_PAHN`'s
-    own x-axis with) -- unlike YSO/H2S's own `_depth_nodes`, this is NOT a
-    function of the sightline: PAHN's own placement does not depend on
-    one, so this is computed once per region, not once per sightline."""
-    p_x, _mo_x = sample_cloud.pahn_front_marginal()
-    mask = p_x > 0
+    THIS SIGHTLINE's own `p(x)` (S08 fix, round-1 reviewer reply,
+    `bms_review/review_2026-10-22/FINDINGS.md`): `sample_cloud.
+    pahn_front_marginal` at this sightline's own `u_front` (the
+    foreground share of the column at the cloud's front edge, read off
+    this sightline's own `xi_edges`/`d_edges`, interpolated at
+    `d_front` -- the SAME value a foreground STAR on this sightline sits
+    at, `bmstp.shapes._star_depth_mark`), each node at its own cell
+    centre (`_quantile_nodes_from_weight`), weight `1/N_DEPTH_NODES` --
+    the SAME per-sightline pattern YSO/H2S's own `_depth_nodes` uses.
+    UNLIKE the retired region-wide floor placement (and the region-wide
+    AVERAGE this replaces), two sightlines with different `u_front`
+    place these nodes at different `xi` (the identity the brief asks
+    for); at `u_front = 0` this reproduces the grid-floor marginal
+    exactly."""
+    u_front = float(np.interp(d_front, loaded_profile["d_edges"][sl_row],
+                               loaded_profile["xi_edges"][sl_row]))
+    p_x, _mo_x = sample_cloud.pahn_front_marginal(u_front)
     width = grid.LOG10_XI_EDGES[1] - grid.LOG10_XI_EDGES[0]
     centers = grid.LOG10_XI_EDGES[:-1] + 0.5 * width
+    mask = p_x > 0
     log10_xi_nodes = _quantile_nodes_from_weight(centers[mask], p_x[mask], N_DEPTH_NODES)
     xi_centers = 10.0 ** log10_xi_nodes
     return xi_centers, np.full(N_DEPTH_NODES, 1.0 / N_DEPTH_NODES)
 
 
 def _pahn_region_nodes(config, region, reader_pahn, d_r_pc):
-    """`(flux0_pahn, u_pahn, w_pahn)`: PAHN's own region-wide deterministic
-    quadrature (the brief: "the member draw from the PAHN shape and
-    weights") -- the brightness PLACEMENT is `bmstp.template_weights.
-    build_pahn`'s own `n_model` nodes (`reader_pahn.c_theta`, `bmstp.
-    template_weights`'s product already read through `prior_reader.load`,
-    uniform weight `1/n_model` each -- the SAME nodes WEIGHTS wrote, never
-    recomputed here), PLACED AT THIS REGION's own distance (`delta = -2
-    log10(d_r_pc / 1 kpc)`, the SAME shift every other class's `C_THETA`
-    is placed by): `log10 F_I2 = C_THETA + delta` undimmed I2 flux at the
-    region. The SHAPE (I1, I3, I4, M1, J, H, Ks, all relative to I2) is
-    the register's own 33 templates' 8-band reference fluxes (C17
-    2026-10-20, the same register `template_weights._read_register`
-    reads for every other class), row i's own template matched to
-    `C_THETA`'s i-th placement node by row position (both are the
-    register's own row order: `build_pahn` reads `n_model` and
-    `MODEL_NAME` straight off it) -- an arbitrary but uniform pairing,
-    harmless to the member set's own marginal distribution, since every
-    node already carries the same weight `1/n_model` regardless of which
-    register row supplies its shape. This recovers I1/I3/M1 as the
-    template's own PAH fluxes (the 3.3 um feature, the 6.2/7.7 complex,
-    the 24 um aperture growth) instead of the retired all-zero stand-in.
-    Crossed with PAHN's own depth nodes (`_pahn_depth_nodes`, region-wide,
-    not per-sightline) via `_combine_with_depth`, the SAME generic
-    combiner YSO/H2S use."""
+    """`(flux0_br, w_br)`: PAHN's own region-wide BRIGHTNESS x TEMPLATE
+    quadrature only (S11 fix, `bms_review/review_2026-10-22/
+    FINDINGS.md`) -- the depth placement is no longer crossed in here
+    (S08's round-1 reviewer reply: depth is now per sightline,
+    `_pahn_depth_nodes`, crossed in once per sightline by the caller via
+    `_combine_with_depth`, the SAME division of labour `_yso_region_
+    nodes`/`_h2s_region_nodes` (brightness, region-wide) and
+    `_depth_nodes` (per sightline) already carry).
+
+    Brightness PLACEMENT: no longer `reader_pahn.c_theta` (that table
+    now carries each template's OWN stored register amplitude, the
+    fitter's own coordinate -- `template_weights.build_pahn`'s
+    docstring -- not a population placement). The nodes are `n_model`
+    equally spaced quantiles of the ONE shared brightness marginal, the
+    pattern sources' own I2 fluxes, DEREDDENED at each pattern source's
+    OWN foreground column before anything else (round-1 reviewer reply:
+    S08 now places PAHN behind that same foreground column, so the
+    brightness axis must not also carry it, or the model dims an
+    already-attenuated flux a second time) -- `u_front * A_COL_K` at
+    that source's own sightline (`_pahn_sightline_a_col_k`, the SAME
+    `u_front` construction `_pahn_depth_nodes` uses), through
+    `population.selection.law_dense_weight`/`kappa_hybrid`'s own I4
+    entry (the SAME dimming law `population.star_population.
+    pahc_contamination_weight` inverts the same way for its own
+    8 um correction), the inverse of `flux_dimmed = flux_true *
+    10**(-0.4 * A_col * kappa)`: `log10 F_true = log10 F_obs + 0.4 *
+    A_fg * kappa_I4(A_fg)`. THEN the register's own 1 kpc reference
+    shift is undone by `delta = -2 log10(d_r_pc / 1 kpc)` -- the SAME
+    coordinate `bmstp.shapes.build_cloud` bins its own `GRID_PAHN`
+    brightness axis in, rather than one route at 1 kpc and the other at
+    the region's distance.
+
+    Each pattern source is weighted by U06's own per-source PAHN
+    pattern-weight table (`population/pahn`'s `NAME`/`P_CAT`/`WEIGHT`
+    dataset, `1/p_cat` floored at `C_CAP`) if this root already has it;
+    until then every source weighs 1, no further fallback.
+
+    Crossed with EVERY template's own shape at UNIFORM weight
+    `1/(n_model * n_model)` (no row-to-quantile pairing: a node's
+    placement no longer determines which register row supplies its
+    shape) -- and invariant to rescaling any one template's own stored
+    `F_REF` by a constant (the per-band ratio to `F_REF_I2` below
+    cancels it exactly, the SAME gray-parameter invariance the fitter's
+    own `log10 B_hat + C_THETA` carries). `reader_pahn.c_theta.size` is
+    read only to check WEIGHTS and the register still agree on
+    `n_model`."""
     reg = template_weights._read_register(config, "pahn")
-    n_model = reader_pahn.c_theta.size
-    if reg["names"].size != n_model:
+    n_model = reg["names"].size
+    if reader_pahn.c_theta.size != n_model:
         raise ValueError(
             "bmstp.atlas: PAHN register has %d templates, WEIGHTS' own C_THETA "
             "has %d -- template_weights.build_pahn must place exactly the "
-            "register's own rows" % (reg["names"].size, n_model))
-    w_pre = np.full(n_model, 1.0 / n_model, dtype=np.float64)
-    delta = -2.0 * np.log10(d_r_pc / 1000.0)
-    flux0_i2 = 10.0 ** (reader_pahn.c_theta + delta)
+            "register's own rows" % (n_model, reader_pahn.c_theta.size))
+
+    cat_path = config_module.product_path(
+        config, "catalog", "sesna", "sources", "source", region=region)
+    with h5py.File(cat_path, "r") as f:
+        fnu = f["FNU_MJY"][:]
+        origin = f["ORIGIN_FNU"][:]
+        names_cat = f["NAME"][:]
+    if fnu.shape[0] != access.region_slice(config, region)["n_sources"]:
+        raise ValueError("bmstp.atlas: %s row count disagrees with the granule map's "
+                          "region slice" % cat_path)
+    pattern = pahn_module.pattern_mask(fnu, origin)
+
+    pahn_log10_ratio = template_weights.pahn_i2_i4_log10_ratio(config)
+    log10_f_ref_i2_1kpc, _log10_f_ref_i4 = pahn_module.pattern_f45_1kpc(
+        config, region, pahn_log10_ratio)
+
+    if log10_f_ref_i2_1kpc.size:
+        # S11 (round-1 reviewer reply): deredden each pattern source's
+        # own I4-derived flux at its own sightline's foreground column.
+        rs = access.region_slice(config, region)
+        hpx_pix_256_pattern = rs["hpx_pix_256"][pattern]
+        loaded_profile = sample_cloud._region_profile(config, region)
+        sl_axis = loaded_profile["hpx_pix_256"]
+        order_sl = np.argsort(sl_axis)
+        loc_sl = order_sl[np.minimum(np.searchsorted(sl_axis[order_sl], hpx_pix_256_pattern),
+                                      sl_axis.size - 1)]
+        if not np.all(sl_axis[loc_sl] == hpx_pix_256_pattern):
+            raise ValueError("bmstp.atlas: a PAHN pattern source's sightline is absent from "
+                              "the region's own cloud profile")
+        d_front, _d_back = sample_cloud.cloud_interval_pc(config, region)
+        u_front_pattern = np.array(
+            [np.interp(d_front, loaded_profile["d_edges"][r], loaded_profile["xi_edges"][r])
+             for r in loc_sl], dtype=np.float64)
+        a_col_k_pattern = _pahn_sightline_a_col_k(config, region, hpx_pix_256_pattern)
+        a_fg_pattern = u_front_pattern * a_col_k_pattern
+        w_ramp_fg = selection_module.law_dense_weight(a_fg_pattern)
+        kappa_i4_fg = selection_module.kappa_hybrid(config, w_ramp_fg)[:, IDX_I4]
+        log10_f_ref_i2_1kpc = log10_f_ref_i2_1kpc + 0.4 * a_fg_pattern * kappa_i4_fg
+
+        # S11 item 3: U06's own per-source PAHN pattern-weight table
+        # (`population/pahn/weight_pahn_source.hdf5`, NAME/REGION/
+        # LOG10_F_I4_MJY/P_CAT/WEIGHT, branch r6_pahn_level commit
+        # 4888baa, survey-wide), if this root already has it -- not yet
+        # in this root, so every pattern source weighs 1, no fallback
+        # beyond that.
+        level_path = config_module.product_path(config, "population", "pahn", "weight", "source")
+        if os.path.exists(level_path):
+            with h5py.File(level_path, "r") as f:
+                region_w = np.asarray([v.decode("utf-8") if isinstance(v, bytes) else str(v)
+                                        for v in f["REGION"][:]])
+                mine_w = region_w == region
+                names_w = np.asarray(f["NAME"][:])[mine_w]
+                weight_w = np.asarray(f["WEIGHT"][:], dtype=np.float64)[mine_w]
+            names_pattern = names_cat[pattern]
+            order_w = np.argsort(names_w)
+            loc_w = np.minimum(np.searchsorted(names_w[order_w], names_pattern), order_w.size - 1)
+            if not (names_w.size and np.all(names_w[order_w][loc_w] == names_pattern)):
+                raise ValueError("bmstp.atlas: a PAHN pattern source is absent from %s" % level_path)
+            w_pattern_cat = weight_w[order_w][loc_w]
+        else:
+            w_pattern_cat = np.ones(log10_f_ref_i2_1kpc.size, dtype=np.float64)
+
+        delta_f45 = -2.0 * np.log10(d_r_pc / 1000.0)
+        log10_f_ref_i2_region = log10_f_ref_i2_1kpc + delta_f45
+        brightness_nodes = _quantile_nodes_from_weight(log10_f_ref_i2_region, w_pattern_cat, n_model)
+    else:
+        # no pattern source in this region (`template_weights.build_pahn`'s
+        # own retired fallback comment): the common grid's own evenly
+        # spaced brightness range, a neutral disclosure -- N_CAT_PAHN/
+        # N_CAT_CELL_PAHN still come out exactly zero here since
+        # DENSITY_PAHN is zero everywhere in this same case.
+        b_edges = grid.LOG10_F45_EDGES
+        q = (np.arange(n_model) + 0.5) / n_model
+        brightness_nodes = b_edges[0] + q * (b_edges[-1] - b_edges[0])
+    n_bright = brightness_nodes.size
+    flux0_i2 = 10.0 ** brightness_nodes
+
+    # Crossed with every template's own shape, uniform weight (S11: no
+    # row-to-quantile pairing).
     f_i2_reg = np.maximum(reg["f_ref"]["I2"], reg["floor_linear"])
-    flux0_pre = np.empty((n_model, N_BANDS), dtype=np.float64)
+    flux0_pre = np.empty((n_bright * n_model, N_BANDS), dtype=np.float64)
     for j, bkey in enumerate(BAND_KEYS):
         band_ratio = np.maximum(reg["f_ref"][bkey], reg["floor_linear"]) / f_i2_reg
-        flux0_pre[:, j] = flux0_i2 * band_ratio
-
-    xi_centers, w_depth = _pahn_depth_nodes()
-    return _combine_with_depth(flux0_pre, w_pre, xi_centers, w_depth)
+        flux0_pre[:, j] = np.repeat(flux0_i2, n_model) * np.tile(band_ratio, n_bright)
+    w_pre = np.full(n_bright * n_model, 1.0 / (n_bright * n_model), dtype=np.float64)
+    return flux0_pre, w_pre
 
 
 def _pahn_chunk_result(config, region, pahn_members, density_pahn_pix, idx, a_col, f_lim, pixel_row,
@@ -2214,9 +2350,9 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         # own probability of being catalogued set to one (module
         # docstring's `N_CELL_<C>`).
         n_cat_cell = {c: np.zeros((grid.LOG10_XI_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1))
-                      for c in ("STAR", "PAHC", "AGB", "YSO", "H2S")}
+                      for c in ("STAR", "PAHC", "AGB", "YSO", "H2S", "PAHN")}
         n_cell = {c: np.zeros((grid.LOG10_XI_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1))
-                  for c in ("STAR", "PAHC", "AGB", "YSO", "H2S")}
+                  for c in ("STAR", "PAHC", "AGB", "YSO", "H2S", "PAHN")}
 
         # ONE pool, one flat list of pieces across tiles, GAL, sightlines
         # and the tail (owner's ruling 2026-10-09): every piece below is
@@ -2399,15 +2535,16 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         # eps_ext, no on-grid retention here (sec. 4.1: the atlas's own
         # intrinsic page is pre-retention everywhere, the SAME convention
         # YSO/H2S's own `density_yso`/`density_h2s_law_pooled_pix` use).
-        # Its own region-wide member quadrature (`_pahn_region_nodes`)
-        # reads WEIGHTS' own placement templates (`readers_by_cls["PAHN"]
-        # .c_theta`) straight off disk -- "the member draw from the PAHN
-        # shape and weights" (brief) -- placed at this region's own
-        # distance, with the PAHN register's own 8-band SHAPE (C17
-        # 2026-10-20), not a single global ratio.
+        # Its own region-wide BRIGHTNESS x TEMPLATE quadrature
+        # (`_pahn_region_nodes`, S11) -- the PAHN register's own 8-band
+        # SHAPE (C17 2026-10-20), not a single global ratio. The DEPTH
+        # half is no longer region-wide (S08, round-1 reviewer reply):
+        # it is crossed in per sightline, below, the SAME division YSO's
+        # `flux0_ts`/`w_ts` (region-wide) and `_depth_nodes` (per
+        # sightline) already carry.
         density_pahn_pix = pahn_module.read(config, region)(np.log10(f_lim[:, IDX_I4]))
         intensity["PAHN"] = density_pahn_pix
-        pahn_members = _pahn_region_nodes(config, region, readers_by_cls["PAHN"], d_r_pc)
+        pahn_flux0_br, pahn_w_br = _pahn_region_nodes(config, region, readers_by_cls["PAHN"], d_r_pc)
 
         # the N_ABOVE tail's own "brighter than the pixel's own limit"
         # mask (`_above_shared`'s docstring): depends only on `a_col`/
@@ -2429,10 +2566,21 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
                 idx = gal_idx_chunks[piece[1]]
                 return piece, _gal_chunk_result(
                     config, region, gal_members, idx, a_col, f_lim, pixel_row, weight_pix_all)
-            if kind == "PAHN":
-                idx = gal_idx_chunks[piece[1]]
-                return piece, _pahn_chunk_result(
-                    config, region, pahn_members, density_pahn_pix, idx, a_col, f_lim, pixel_row,
+            if kind == "PAHN_SL":
+                # S08 (round-1 reviewer reply): PAHN's own depth placement
+                # is per sightline now, so its members are grouped by
+                # sightline exactly as "SL" groups YSO/H2S, not GAL-style
+                # pixel chunks -- this sightline's own depth nodes
+                # (`_pahn_depth_nodes`) crossed with the region-wide
+                # brightness x template nodes (`pahn_flux0_br`/`pahn_w_br`,
+                # closed over above).
+                sl_row = piece[1]
+                m = sl_row_of_pix == sl_row
+                idx = np.flatnonzero(m)
+                xi_centers, w_depth = _pahn_depth_nodes(loaded_profile, sl_row, d_front)
+                pahn_members_sl = _combine_with_depth(pahn_flux0_br, pahn_w_br, xi_centers, w_depth)
+                return piece, (m,) + _pahn_chunk_result(
+                    config, region, pahn_members_sl, density_pahn_pix, idx, a_col, f_lim, pixel_row,
                     weight_pix_all)
             if kind == "SL":
                 sl_row = piece[1]
@@ -2460,7 +2608,7 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         flat_pieces = (
             [("TILE", t) for t in tiles_here]
             + [("GAL", i) for i in range(len(gal_idx_chunks))]
-            + [("PAHN", i) for i in range(len(gal_idx_chunks))]
+            + [("PAHN_SL", r) for r in sls_here]
             + [("SL", r) for r in sls_here]
             + tail_split_pieces
             + [("TAIL_WHOLE", cls) for cls in ("AGB", "GAL", "YSO", "H2S", "PAHN")])
@@ -2478,8 +2626,6 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         # fixed order, never because of anything outside it.
         gal_chunk_results = [None] * len(gal_idx_chunks)
         n_gal_seen = 0
-        pahn_chunk_results = [None] * len(gal_idx_chunks)
-        n_pahn_seen = 0
         frac_h2s_pix = np.full(n_pix, np.nan, dtype=np.float64)
         frac_h2s_bright3_pix = np.full(n_pix, np.nan, dtype=np.float64)
         frac_h2s_bright10_pix = np.full(n_pix, np.nan, dtype=np.float64)
@@ -2521,18 +2667,28 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
                     n_cat_bright10["GAL"] = density_gal * frac_gal_bright10
                     n_cat_cell["GAL"] = n_cat_cell_gal
                     n_cell["GAL"] = n_cell_gal
-            elif kind == "PAHN":
-                pahn_chunk_results[piece[1]] = data
-                n_pahn_seen += 1
-                if n_pahn_seen == len(gal_idx_chunks):
-                    (frac_pahn, frac_pahn_bright3, frac_pahn_bright10,
-                     n_cat_cell_pahn, n_cell_pahn) = _pahn_reduce(
-                        pahn_members, pahn_chunk_results, density_pahn_pix, weight_pix_all)
-                    n_cat["PAHN"] = density_pahn_pix * frac_pahn
-                    n_cat_bright3["PAHN"] = density_pahn_pix * frac_pahn_bright3
-                    n_cat_bright10["PAHN"] = density_pahn_pix * frac_pahn_bright10
-                    n_cat_cell["PAHN"] = n_cat_cell_pahn
-                    n_cell["PAHN"] = n_cell_pahn
+            elif kind == "PAHN_SL":
+                # S08 (round-1 reviewer reply): reduced per sightline now,
+                # like "SL" below, not deferred until every GAL-style
+                # chunk arrives -- each sightline's own members
+                # (`pahn_members_sl`, built in `_dispatch` above) supply
+                # its own `density_pahn_pix[idx]`-weighted cell grid,
+                # summed into the region-wide `N_CAT_CELL_PAHN`/
+                # `N_CELL_PAHN` the SAME way YSO/H2S's own per-sightline
+                # grids already accumulate below.
+                sl_row = piece[1]
+                m, chunk_result = data[0], data[1:]
+                idx = np.flatnonzero(m)
+                xi_centers, w_depth = _pahn_depth_nodes(loaded_profile, sl_row, d_front)
+                pahn_members_sl = _combine_with_depth(pahn_flux0_br, pahn_w_br, xi_centers, w_depth)
+                frac_pahn, frac_pahn_bright3, frac_pahn_bright10, n_cat_cell_pahn, n_cell_pahn = (
+                    _pahn_reduce(pahn_members_sl, [chunk_result], density_pahn_pix[idx],
+                                 weight_pix_all[idx]))
+                n_cat["PAHN"][m] = density_pahn_pix[idx] * frac_pahn
+                n_cat_bright3["PAHN"][m] = density_pahn_pix[idx] * frac_pahn_bright3
+                n_cat_bright10["PAHN"][m] = density_pahn_pix[idx] * frac_pahn_bright10
+                n_cat_cell["PAHN"] += n_cat_cell_pahn
+                n_cell["PAHN"] += n_cell_pahn
             elif kind == "SL":
                 sl_row = piece[1]
                 (m, f_y, d_y, fb3_y, fb10_y, ncc_y, ncl_y,

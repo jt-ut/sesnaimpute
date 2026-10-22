@@ -44,6 +44,7 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.bmstp import grid, sample_cloud, sample_gal, sample_star, template_weights
+from sesnaimpute.granules import access
 from sesnaimpute.population import h2s as h2s_module
 from sesnaimpute.population import pahn as pahn_module
 from sesnaimpute.population import selection as population_selection
@@ -544,15 +545,19 @@ def build_cloud(config, region):
     (sec. 5.6 "Marks": separable, `XI_MARGINAL` times this Gaussian, formed
     at read on the common `LOG10_F45_EDGES` through the template's own
     `C_THETA` offset, never a class-specific origin), and PAHN's own
-    `GRID_PAHN`/`MASS_OUTSIDE_PAHN`/`ON_GRID_PAHN` (C14_pahn_population.md):
-    separable the other way round -- a region-wide brightness marginal
-    from the pattern sources' own measured I4 flux (`population.pahn.
-    pattern_f45_1kpc`, converted to the 4.5um axis through the PAHN
-    register's own median I2/I4 band ratio, `bmstp.template_weights.
-    pahn_i2_i4_log10_ratio`) times a region-wide `log10 ξ = 0`
-    front-surface marginal (`sample_cloud.
-    pahn_front_marginal`), broadcast over every sightline the other way
-    round from H2S. None of the three grids carries an `N_EFF` dataset or
+    `GRID_PAHN`/`MASS_OUTSIDE_PAHN`/`ON_GRID_PAHN` (C14_pahn_population.md,
+    S08/S11 fixes, `bms_review/review_2026-10-22/FINDINGS.md`): a
+    region-wide brightness marginal from the pattern sources' own measured
+    I4 flux (`population.pahn.pattern_f45_1kpc`, converted to the 4.5um
+    axis through the PAHN register's own median I2/I4 band ratio,
+    `bmstp.template_weights.pahn_i2_i4_log10_ratio`, undone back to this
+    region's own flux coordinate -- the SAME coordinate `bmstp.atlas.
+    _pahn_region_nodes` places its own brightness nodes at) times, PER
+    SIGHTLINE, that sightline's own foreground share of the column at the
+    cloud's front edge (`sample_cloud.pahn_front_marginal` at this
+    sightline's own `u_front`, the SAME value a foreground STAR there
+    sits at, `_star_depth_mark`) -- no longer one row broadcast over
+    every sightline. None of the three grids carries an `N_EFF` dataset or
     a `FLOOR` attribute, per `bmstp.grid`'s module docstring."""
     p3_path = config_module.product_path(config, "bmstp", "shape", "cloud", "sightline", region=region)
 
@@ -688,28 +693,94 @@ def build_cloud(config, region):
         # PAHN (C14_pahn_population.md, owner's 2026-10-20 ruling "H2S is
         # the pattern"): on the cloud grid like H2S, but placed at the
         # cloud's FRONT surface (PAH emission is the illuminated face --
-        # foreground extinction only), not YSO's own depth mark: every
-        # member sits at `u = 0`, blurred by the SAME one-cell kernel every
-        # `log10 ξ` axis in this package carries (`sample_cloud.
-        # pahn_front_marginal`) -- region-wide, not per-sightline, so
-        # `xi_marginal_pahn` is this one row tiled over every sightline
-        # (the mirror image of H2S's own construction, which tiles a
-        # region-wide BRIGHTNESS marginal over YSO's per-sightline `xi`).
-        # Brightness: the pattern sources' own I4 fluxes, converted to the
-        # grid's 4.5 um axis through the PAHN register's own median I2/I4
-        # band ratio (`bmstp.template_weights.pahn_i2_i4_log10_ratio`,
-        # the register's own filter-convolved fluxes, C17 2026-10-20 --
-        # supersedes the retired `population.pahn.dl21_i2_i4_log10_ratio`
-        # point-sampled DL21 fallback, written before a register existed),
-        # each pattern source placed at the register's 1 kpc reference
-        # convention (`population.pahn.pattern_f45_1kpc`) the same way
-        # every other class's `C_THETA` is.
+        # foreground extinction only), not YSO's own depth mark. S08 fix
+        # (`bms_review/review_2026-10-22/FINDINGS.md`): every member sits
+        # at `u = u_front`, THIS SIGHTLINE's own foreground share of the
+        # column at the front edge (the SAME value a foreground STAR on
+        # this sightline sits at, `_star_depth_mark`), blurred by the SAME
+        # one-cell kernel every `log10 ξ` axis in this package carries
+        # (`sample_cloud.pahn_front_marginal`) -- per sightline, like
+        # YSO's own `XI_MARGINAL`, no longer one row broadcast over every
+        # sightline.
+        # Brightness (S11 fix, `bms_review/review_2026-10-22/FINDINGS.md`,
+        # round-1 reviewer reply): the pattern sources' own I4 fluxes,
+        # converted to the grid's 4.5 um axis through the PAHN register's
+        # own median I2/I4 band ratio (`bmstp.template_weights.
+        # pahn_i2_i4_log10_ratio`, the register's own filter-convolved
+        # fluxes, C17 2026-10-20 -- supersedes the retired `population.
+        # pahn.dl21_i2_i4_log10_ratio` point-sampled DL21 fallback,
+        # written before a register existed). DEREDDENED at each pattern
+        # source's OWN foreground column (its own sightline's `u_front *
+        # A_COL_K`, through `population.selection.law_dense_weight`/
+        # `kappa_hybrid`'s own I4 entry) BEFORE anything else -- S08 now
+        # places PAHN behind that same foreground column, so the
+        # brightness axis must not also carry it, or the model dims an
+        # already-attenuated flux a second time -- then binned in THIS
+        # REGION's own flux coordinate: `population.pahn.
+        # pattern_f45_1kpc` places each pattern source at the register's
+        # 1 kpc reference convention first (every other class's own
+        # `C_THETA` convention); that shift is undone here (`delta = -2
+        # log10(d_r_pc / 1 kpc)`, the SAME shift `bmstp.atlas.
+        # _pahn_region_nodes` applies to its own brightness nodes) so this
+        # marginal and the atlas's own nodes share ONE coordinate, rather
+        # than one binning at 1 kpc and the other at the region's distance.
+        # Each source weighs 1/p_cat off U06's own per-source PAHN
+        # pattern-weight table (`population/pahn`'s `NAME`/`P_CAT`/
+        # `WEIGHT` dataset) if this root already has it; until then every
+        # source weighs 1, no fallback beyond that.
+        pahn_cat_path = config_module.product_path(
+            config, "catalog", "sesna", "sources", "source", region=region)
+        with h5py.File(pahn_cat_path, "r") as f_cat:
+            pahn_fnu = f_cat["FNU_MJY"][:]
+            pahn_origin = f_cat["ORIGIN_FNU"][:]
+            pahn_names_cat = f_cat["NAME"][:]
+        pahn_pattern = pahn_module.pattern_mask(pahn_fnu, pahn_origin)
         pahn_log10_ratio = template_weights.pahn_i2_i4_log10_ratio(config)
-        log10_f_ref_i2_pahn, _log10_f_ref_i4_pahn = pahn_module.pattern_f45_1kpc(
+        log10_f_ref_i2_pahn_1kpc, _log10_f_ref_i4_pahn = pahn_module.pattern_f45_1kpc(
             config, region, pahn_log10_ratio)
-        n_pattern_pahn = log10_f_ref_i2_pahn.size
+        n_pattern_pahn = log10_f_ref_i2_pahn_1kpc.size
         if n_pattern_pahn:
-            w_pattern = np.ones(n_pattern_pahn, dtype=np.float64)
+            rs_pahn = access.region_slice(config, region)
+            hpx_pix_256_pattern = rs_pahn["hpx_pix_256"][pahn_pattern]
+            sl_axis_pahn = loaded["hpx_pix_256"]
+            order_sl_pahn = np.argsort(sl_axis_pahn)
+            loc_sl_pahn = order_sl_pahn[np.minimum(
+                np.searchsorted(sl_axis_pahn[order_sl_pahn], hpx_pix_256_pattern), sl_axis_pahn.size - 1)]
+            u_front_pattern = np.array(
+                [np.interp(d_front, loaded["d_edges"][row], loaded["xi_edges"][row])
+                 for row in loc_sl_pahn], dtype=np.float64)
+            a_col_k_pattern = _sightline_a_col_k(config, region, hpx_pix_256_pattern)
+            a_fg_pattern = u_front_pattern * a_col_k_pattern
+            w_ramp_fg_pahn = population_selection.law_dense_weight(a_fg_pattern)
+            kappa_i4_fg_pahn = population_selection.kappa_hybrid(config, w_ramp_fg_pahn)[:, pahn_module.IDX_I4]
+            log10_f_ref_i2_pahn_1kpc = log10_f_ref_i2_pahn_1kpc + 0.4 * a_fg_pattern * kappa_i4_fg_pahn
+
+            # U06's own per-source PAHN pattern-weight table
+            # (`population/pahn/weight_pahn_source.hdf5`, NAME/REGION/
+            # LOG10_F_I4_MJY/P_CAT/WEIGHT, branch r6_pahn_level commit
+            # 4888baa, survey-wide): not yet in this root, so every
+            # source weighs 1 until it is -- no fallback beyond that.
+            pahn_level_path = config_module.product_path(config, "population", "pahn", "weight", "source")
+            if os.path.exists(pahn_level_path):
+                with h5py.File(pahn_level_path, "r") as f_lvl:
+                    region_w_pahn = np.asarray([v.decode("utf-8") if isinstance(v, bytes) else str(v)
+                                                 for v in f_lvl["REGION"][:]])
+                    mine_w_pahn = region_w_pahn == region
+                    names_w_pahn = np.asarray(f_lvl["NAME"][:])[mine_w_pahn]
+                    weight_w_pahn = np.asarray(f_lvl["WEIGHT"][:], dtype=np.float64)[mine_w_pahn]
+                names_pattern_pahn = pahn_names_cat[pahn_pattern]
+                order_w_pahn = np.argsort(names_w_pahn)
+                loc_w_pahn = np.minimum(
+                    np.searchsorted(names_w_pahn[order_w_pahn], names_pattern_pahn), order_w_pahn.size - 1)
+                if not (names_w_pahn.size and np.all(names_w_pahn[order_w_pahn][loc_w_pahn] == names_pattern_pahn)):
+                    raise ValueError("bmstp.shapes.build_cloud: a PAHN pattern source is absent "
+                                      "from %s" % pahn_level_path)
+                w_pattern = weight_w_pahn[order_w_pahn][loc_w_pahn]
+            else:
+                w_pattern = np.ones(n_pattern_pahn, dtype=np.float64)
+
+            delta_f45_pahn = -2.0 * np.log10(r.d_r_pc / 1000.0)
+            log10_f_ref_i2_pahn = log10_f_ref_i2_pahn_1kpc + delta_f45_pahn
             h_f45_pahn, _ = np.histogram(log10_f_ref_i2_pahn, bins=grid.LOG10_F45_EDGES, weights=w_pattern)
             total_w_pahn = float(w_pattern.sum())
             mass_outside_pahn_hist = float((total_w_pahn - h_f45_pahn.sum()) / total_w_pahn)
@@ -723,9 +794,29 @@ def build_cloud(config, region):
         mass_outside_pahn_hist += mass_before_pahn - float(h_f45_pahn.sum())
         f45_marginal_pahn = h_f45_pahn
 
-        p_x_pahn, mass_outside_x_pahn = sample_cloud.pahn_front_marginal()
-        xi_marginal_pahn = (np.tile(p_x_pahn[None, :], (n_sl, 1)) if n_sl
-                            else np.zeros((0, n_x), dtype=np.float64))
+        # S08 fix: PAHN's own x-placement is now per sightline, its own
+        # `u_front` at this sightline's own front edge -- the SAME
+        # embedding arrays `sample_x`/`_cell_subsamples` read
+        # (`loaded["xi_edges"]`/`loaded["d_edges"]`, interpolated at
+        # `d_front`), the identical construction `bmstp.sample_star.
+        # tile_width_classes` uses for a foreground STAR on this SAME
+        # sightline (`_star_depth_mark`), read here directly off this
+        # module's own `loaded` rather than through a tile's
+        # representative sightline. No longer one row broadcast over
+        # every sightline (brief: "the marginal becomes per-sightline
+        # like YSO's").
+        if n_sl:
+            u_front_pahn = np.array(
+                [np.interp(d_front, loaded["d_edges"][row], loaded["xi_edges"][row])
+                 for row in range(n_sl)], dtype=np.float64)
+            xi_marginal_pahn = np.empty((n_sl, n_x), dtype=np.float64)
+            mass_outside_x_pahn = np.empty(n_sl, dtype=np.float64)
+            for row in range(n_sl):
+                xi_marginal_pahn[row], mass_outside_x_pahn[row] = sample_cloud.pahn_front_marginal(
+                    u_front_pahn[row])
+        else:
+            xi_marginal_pahn = np.zeros((0, n_x), dtype=np.float64)
+            mass_outside_x_pahn = np.zeros((0,), dtype=np.float64)
 
         grid_pahn = (xi_marginal_pahn[:, :, None] * f45_marginal_pahn[None, None, :]).astype(np.float32)
         on_grid_frac_pahn = float(f45_marginal_pahn.sum())

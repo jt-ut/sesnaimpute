@@ -314,25 +314,28 @@ def sample_x(loaded, row, d_front, d_back):
     return p_x, mass_outside, removed_frac
 
 
-def pahn_front_marginal():
-    """`(p_x, mass_outside)`: PAHN's own `p(x)` (C14_pahn_population.md,
-    owner's 2026-10-20 ruling "H2S is the pattern"), on the cloud grid
-    like H2S but placed at the cloud's FRONT surface rather than YSO's
-    own depth mark -- PAH emission is the illuminated face, foreground
-    extinction only, so every member sits at `u = 0` (`x = a/T = 0`, the
-    grid's own `log10 ξ` floor, `grid.LOG10_XI_EDGES[0]`), blurred by the
-    SAME one-cell kernel every `log10 ξ` axis in this package carries
-    (sec. 2 "minimum widths", `_bin1d`'s own `sigma_cells=1.0`) -- never
-    a delta narrower than the fit's own uncertainty. Unlike `sample_x`,
-    this is NOT a function of the sightline or the cloud interval: the
-    front surface is a fixed location on the common grid, so this one
-    marginal is the SAME for every sightline of every region (`bmstp.
-    shapes.build_cloud` broadcasts it, exactly as H2S's own region-wide
-    brightness marginal is broadcast over `XI_MARGINAL` the other way
-    round)."""
-    log10_xi_floor = np.array([grid.LOG10_XI_EDGES[0]], dtype=np.float64)
+def pahn_front_marginal(u_front):
+    """`(p_x, mass_outside)`: PAHN's own `p(x)` AT ONE SIGHTLINE's own
+    foreground share of the column at the cloud's front edge, `u_front`
+    (S08 fix, `bms_review/review_2026-10-22/FINDINGS.md`: `bmstp.shapes.
+    _star_depth_mark` places a foreground STAR at this SAME value on the
+    SAME sightline) -- PAH emission is the illuminated face, foreground
+    extinction only, so every member sits at `x = u_front` (the grid's
+    own `log10 ξ` cell nearest it, never below the grid's own floor,
+    `grid.LOG10_XI_EDGES[0]`), blurred by the SAME one-cell kernel every
+    `log10 ξ` axis in this package carries (sec. 2 "minimum widths",
+    `_bin1d`'s own `sigma_cells=1.0`) -- never a delta narrower than the
+    fit's own uncertainty. UNLIKE the retired region-wide floor
+    placement, this IS now a function of the sightline: the caller
+    (`bmstp.shapes.build_cloud`, `bmstp.atlas._pahn_region_nodes`) reads
+    this sightline's own `u_front` off the SAME embedding arrays
+    `sample_x` reads (`_region_profile`'s `xi_edges`/`d_edges`,
+    interpolated at `d_front`) and calls this once per sightline rather
+    than broadcasting one row (brief identity 2: at `u_front = 0` this
+    reproduces the old grid-floor marginal exactly)."""
+    log10_xi_front = np.array([np.log10(max(float(u_front), _X_FLOOR))], dtype=np.float64)
     w = np.array([1.0], dtype=np.float64)
-    return _bin1d(log10_xi_floor, w, grid.LOG10_XI_EDGES, sigma_cells=1.0)
+    return _bin1d(log10_xi_front, w, grid.LOG10_XI_EDGES, sigma_cells=1.0)
 
 
 
