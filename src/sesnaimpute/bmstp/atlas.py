@@ -1197,21 +1197,37 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     # `x_a`/`f45_a`/`template_index_a` row for row (C26 owner ruling
     # 2026-10-21: each member's own absolute extinction, not a second
     # mark derived from a_col_in_tile).
-    x_a, f45_a, w_a, template_index_a = sample_star.sample_agb(config, region, tile_id)
-    density_agb = float(w_a.sum()) / omega_t
     a_star_evolved = a_star_k[evolved_for_agb]
     names_a, chem_a, _log10_r_a = sample_star.agb_log10_ratio_per_template(config.inputs["sed_models"])
     n_o_a, n_c_a = int(np.sum(chem_a == "O")), int(np.sum(chem_a == "C"))
-    a_star_rows = np.concatenate([np.repeat(a_star_evolved, n_o_a), np.repeat(a_star_evolved, n_c_a)])
-
-    keep = w_a > 0
-    if not np.any(keep):
-        frac_agb = np.zeros(pix_in_tile.size)
-        frac_agb_bright3 = np.zeros(pix_in_tile.size)
-        frac_agb_bright10 = np.zeros(pix_in_tile.size)
-        n_cat_cell_agb = np.zeros((n_x, n_b))
-        n_cell_agb = np.zeros((n_x, n_b))
-    else:
+    # The members stream in blocks of evolved stars (P05): one block's
+    # rows (`sample_agb`'s four arrays, the star rows, the masked copies
+    # and the eight-band flux, ~256 bytes per (star, template) row) stay
+    # within the same 512 MB budget `_PIXEL_BATCH_BUDGET_BYTES`, whatever
+    # the tile's evolved-star count. Every output is a sum over members,
+    # so the blocks' weighted sums add exactly (in real arithmetic):
+    # `catalogued_fraction`'s means are rescaled by the block's own weight
+    # sum and the cell histograms are linear in the weights, both divided
+    # by the tile's total weight only at the end.
+    n_evolved = a_star_evolved.size
+    stars_per_block = max(1, _PIXEL_BATCH_BUDGET_BYTES // (256 * names_a.size))
+    w_total_all = 0.0  # sum of every row's `w` (density_agb)
+    w_sum_agb = 0.0  # sum of the kept rows' `w` (w > 0)
+    wfrac_agb = np.zeros(pix_in_tile.size)
+    wfrac_agb_bright3 = np.zeros(pix_in_tile.size)
+    wfrac_agb_bright10 = np.zeros(pix_in_tile.size)
+    dimmed_hist_agb = np.zeros((n_x, n_b))
+    n_cell_agb_w = np.zeros((n_x, n_b))  # N_CELL_AGB per unit (density * weight_pix_total / w_sum_agb)
+    for s_start in range(0, n_evolved, stars_per_block):
+        s_stop = min(s_start + stars_per_block, n_evolved)
+        x_a, f45_a, w_a, template_index_a = sample_star.sample_agb(
+            config, region, tile_id, star_block=(s_start, s_stop))
+        w_total_all += float(w_a.sum())
+        a_star_block = a_star_evolved[s_start:s_stop]
+        a_star_rows = np.concatenate([np.repeat(a_star_block, n_o_a), np.repeat(a_star_block, n_c_a)])
+        keep = w_a > 0
+        if not np.any(keep):
+            continue
         u_agb = x_a[keep]
         a_star_agb = a_star_rows[keep]
         w_agb_member = w_a[keep]
@@ -1225,15 +1241,34 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
             flux0_agb[:, k] = f_band * scale
         # C26: each AGB member's own shell carries its OWN star's A_STAR_K
         # (absolute), not a_col_in_tile's per-pixel column times XI.
-        frac_agb, frac_agb_bright3, frac_agb_bright10, dimmed_hist_agb = catalogued_fraction(
+        frac_b, frac_b3, frac_b10, dimmed_hist_b = catalogued_fraction(
             np.ones_like(a_col_in_tile), a_star_agb, u_agb, flux0_agb, w_agb_member, f_lim_in_tile,
             pixel_row_in_tile, band_params, config, weight_pix)
-        w_sum_agb = float(w_agb_member.sum())
+        w_sum_b = float(w_agb_member.sum())
+        wfrac_agb += frac_b * w_sum_b
+        wfrac_agb_bright3 += frac_b3 * w_sum_b
+        wfrac_agb_bright10 += frac_b10 * w_sum_b
+        dimmed_hist_agb += dimmed_hist_b
+        n_cell_agb_w += _safe_cell_bin(u_agb, f45_agb_member, w_agb_member)
+        w_sum_agb += w_sum_b
+    density_agb = w_total_all / omega_t
+
+    if w_sum_agb == 0.0:
+        frac_agb = np.zeros(pix_in_tile.size)
+        frac_agb_bright3 = np.zeros(pix_in_tile.size)
+        frac_agb_bright10 = np.zeros(pix_in_tile.size)
+        n_cat_cell_agb = np.zeros((n_x, n_b))
+        n_cell_agb = np.zeros((n_x, n_b))
+    else:
+        frac_agb = wfrac_agb / w_sum_agb
+        frac_agb_bright3 = wfrac_agb_bright3 / w_sum_agb
+        frac_agb_bright10 = wfrac_agb_bright10 / w_sum_agb
         # C29: N_CAT_CELL_AGB bins at the dimmed I2 flux; N_CELL_AGB is
-        # unchanged (undimmed, no selection).
+        # unchanged (undimmed, no selection): `_safe_cell_bin` is linear
+        # in its weights, so the blocks' bins at the raw `w` rescale to
+        # `c_m = density * (w / w_sum) * weight_pix_total` at the end.
         n_cat_cell_agb = _safe_cell_bin_counts(dimmed_hist_agb, density_agb / w_sum_agb)
-        c_m_agb_all = density_agb * (w_agb_member / w_sum_agb) * weight_pix_total
-        n_cell_agb = _safe_cell_bin(u_agb, f45_agb_member, c_m_agb_all)
+        n_cell_agb = n_cell_agb_w * (density_agb * weight_pix_total / w_sum_agb)
     out["AGB"] = (frac_agb, density_agb, frac_agb_bright3, frac_agb_bright10, n_cat_cell_agb, n_cell_agb)
     # sec. 5.3's shared field-star intensity (`build_one_tile`'s own
     # docstring paragraph): the UNSPLIT field-star level, before the
