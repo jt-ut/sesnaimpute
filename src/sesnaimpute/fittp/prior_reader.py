@@ -1270,6 +1270,25 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     return out
 
 
+#: P02 (round 6 review): one slot per worker PROCESS, mirroring
+#: `fittp.likelihood._F_REF64_CACHE` -- `template_log` is the same
+#: immutable `(n_model, 8)` library array object for every source and
+#: every design of one {region, class} sweep (`fittp.sweep`'s own
+#: `w["template_log"]`), so this widens it to float64 once, on the first
+#: call after a class change (a new array, a new `id`), and reads the
+#: cached copy every call after instead of paying the same widening again
+#: per source and law (FINDINGS.md P02).
+_TEMPLATE_LOG64_CACHE = [None, None]
+
+
+def _widened_template_log64(template_log):
+    key = id(template_log)
+    if _TEMPLATE_LOG64_CACHE[0] != key:
+        _TEMPLATE_LOG64_CACHE[0] = key
+        _TEMPLATE_LOG64_CACHE[1] = np.asarray(template_log, dtype=np.float64)
+    return _TEMPLATE_LOG64_CACHE[1]
+
+
 def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, cell_weight,
              template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask, gaia_inputs):
     """`(ln_lambda2, ln_lambda0, ln_lambda1, a_post, a2_post)`: `ln <Lambda_C>_s
@@ -1369,7 +1388,7 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
                       np.asarray(slope, dtype=np.float64), np.asarray(c_theta, dtype=np.float64),
                       h, reader.b_origin, reader.dlb, reader.dlx, a_edges_buf, cell_weight,
                       m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
-                      np.asarray(template_log, dtype=np.float64),
+                      _widened_template_log64(template_log),
                       np.asarray(ext_col_ak, dtype=np.float64),
                       np.asarray(curve_rows, dtype=np.float64),
                       np.asarray(band_a, dtype=np.float64),
