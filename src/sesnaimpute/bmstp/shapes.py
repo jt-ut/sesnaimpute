@@ -97,7 +97,13 @@ def _build_one_tile(config, region, tile_id):
     `MASS_OUTSIDE_*`, which also counts the mass the retention limit
     drops at the bottom edge)."""
     x_s, f45_s, w_s = sample_star.sample_star(config, region, tile_id)
-    x_a, f45_a, w_a = sample_star.sample_agb(config, region, tile_id)
+    # the brightness shape is this joint measure's own MARGINAL over
+    # template (FINDINGS.md S10, coordinator's joint-measure ruling):
+    # every evolved star pushed through every AGB template's OWN
+    # flux-to-luminosity ratio, weighted by that template's population
+    # share, summed here over `template_index` (unused -- `sample_agb`'s
+    # own docstring names the other reads of this SAME measure).
+    x_a, f45_a, w_a, _template_index_a = sample_star.sample_agb(config, region, tile_id)
 
     # (sec. 2 "minimum widths", sec. 5.1 "Marks"): the field-star
     # depth mark's own width is the map's propagated column sigma at the
@@ -229,8 +235,14 @@ def build_star_family(config, region):
                 print(f"bmstp.shapes.star_family: {region}: AGB chemistry={chem} "
                       f"flux-to-luminosity ratio spread {agb_ratio[chem]['spread_dex']:.3f} dex "
                       f"exceeds the {sample_star.AGB_RATIO_SPREAD_FLAG_DEX} dex flag bar "
-                      f"(n={agb_ratio[chem]['n']}); the chemistry median is used anyway "
-                      f"(sec. 5.2)")
+                      f"(n={agb_ratio[chem]['n']}); GRID_AGB above is built from each "
+                      f"template's OWN ratio (sample_agb_shape, sec. 5.2, FINDINGS.md S10), "
+                      f"not this chemistry median -- the spread reported here is a "
+                      f"diagnostic only. The shell optical-depth census behind both this "
+                      f"ratio and GRID_AGB's own population weight (Riebel et al. 2012 "
+                      f"GRAMS, by chemistry) is LMC-derived, transferred to this Galactic "
+                      f"survey without recalibration, and carries no AGB time variability; "
+                      f"neither is modelled here (the review's disclosure)")
 
         st.done(path, n_tile=int(n_tile),
                 mass_outside_star_max=float(mass_outside_star.max()) if n_tile else 0.0,

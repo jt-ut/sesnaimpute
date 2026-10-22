@@ -637,11 +637,22 @@ REGISTRY = {
         "The centers of the 110 common brightness cells every factor "
         "table in this file is tabulated on."),
     ("agb_weights_region", "W"): ("dimensionless",
-        "For every AGB template and every cell of LOG10_F45_CENTERS, "
-        "this factor's own per-template weight: the Riebel et al. (2012) "
-        "GRAMS optical-depth census, by dust chemistry, reweighting that "
-        "template relative to the library's own optical-depth density. "
-        "Which population statement this factor encodes is named by this "
+        "For every AGB template and every cell of LOG10_F45_CENTERS, the "
+        "chance that template is the one responsible for a star observed "
+        "at that brightness: the region's own evolved-star population "
+        "(luminosity and distance) pushed through every template's own "
+        "flux-to-luminosity ratio and its own share of the Riebel et al. "
+        "(2012) GRAMS optical-depth census (by dust chemistry), then "
+        "normalised over template at each brightness cell -- a thick "
+        "shell's templates dominate where that population lands bright, "
+        "a thin shell's where it lands faint, rather than every template "
+        "carrying the same share at every brightness. The SAME population "
+        "and census also build population/star/star_shape_tile's "
+        "GRID_AGB (summed over template there instead of kept): one "
+        "measure, read two ways. The underlying census is LMC-derived, "
+        "applied to this Galactic survey without recalibration, and "
+        "carries no AGB time variability; neither is modelled. Which "
+        "population statement this factor encodes is named by this "
         "dataset's own enclosing group's NAME attribute."),
     ("agb_weights_region", "C_F"): ("dimensionless",
         "For every AGB template, this factor's own per-template offset: "
@@ -758,7 +769,15 @@ REGISTRY = {
         "own population density on the common (log10 xi, log10 F_4.5) "
         "grid: integrating over a cell gives that cell's own share of "
         "the tile's AGB population, up to the floor ON_GRID_AGB leaves "
-        "out."),
+        "out. Each star's own luminosity and distance is pushed through "
+        "EVERY AGB shell template's own flux-to-luminosity ratio, "
+        "weighted by that template's own share of its dust chemistry's "
+        "population (an optical-depth census, Riebel et al. 2012), then "
+        "summed over templates -- a thick shell lands bright and a thin "
+        "shell faint, rather than every template sharing one pooled "
+        "brightness. That census is LMC-derived, carried over to this "
+        "Galactic survey without recalibration, and includes no AGB "
+        "time variability; neither is modelled here."),
     ("star_shape_tile", "MASS_OUTSIDE_STAR"): ("dimensionless",
         "For the matching tile in TILE_ID, the fraction of this tile's "
         "own STAR population weight that falls outside the common grid "

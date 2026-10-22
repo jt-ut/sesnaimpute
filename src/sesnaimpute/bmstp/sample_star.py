@@ -265,33 +265,19 @@ def star_distances(config, region, tile_id):
     return dist_pc[star_index]
 
 
-def agb_star_distances(config, region, tile_id):
-    """AGB's own distance array row-aligned with `sample_agb`'s
-    `(x, log10_f45, w)`: the evolved subset's own distance, duplicated
-    (O-rich draw, then C-rich) the same way `sample_agb` duplicates `u`
-    (AGB follows STAR, sec. 5.2)."""
-    with h5py.File(_tile_path(config, region), "r") as f:
-        grp = f[f"tile_{tile_id}"]
-        evolved = grp["IS_EVOLVED"][()].astype(bool)
-        star_index = grp["STAR_INDEX"][()].astype(np.int64)[evolved]
-    _log10_f45, dist_pc_all, _log_l = _field_star_arrays(config, region)
-    d = dist_pc_all[star_index]
-    return np.concatenate([d, d])
-
-
-@functools.lru_cache(maxsize=None)
-def agb_log10_ratio_stats(sed_models):
-    """Per chemistry, the AGB library's own ratio of its 4.5 micron
-    reference flux (`F_REF_I2`, mJy at the register's 1 kpc reference) to
-    its bolometric luminosity (`L_SUN`, `sed_models/agb/parameters.fits`,
-    sec. 5.2): the median `log10` ratio (`F_4.5 = L (1kpc/d)^2 * r_chem`
-    needs a point value, and a median commutes with `log10`), and the
-    16th-84th percentile half-width in dex -- the spread the brief asks to
-    be measured and stored (P2 attrs `F45_PER_L_SPREAD_DEX_O/C`). A join
-    by `MODEL_NAME` between the register and the library's own curated
-    parameters table, vectorised (`np.searchsorted` on the sorted
-    parameters table, never a per-template python loop, rule 8), cached:
-    survey-wide, the same for every region and tile."""
+def _agb_register_log10_ratio(sed_models):
+    """`(names, chem, log10_r)` in the AGB register's own row order: every
+    template's own `log10(F_REF_I2 / L_SUN)` join (`F_REF_I2` the
+    register's 4.5 micron reference flux at 1 kpc, floor-free here --
+    the register's own rows are already the curated, non-zero set;
+    `L_SUN` from `sed_models/agb/parameters.fits`'s curated parameters
+    table, sec. 5.2). A join by `MODEL_NAME`, vectorised
+    (`np.searchsorted` on the sorted parameters table, never a
+    per-template python loop, rule 8). Shared by `agb_log10_ratio_stats`
+    (the per-chemistry median/spread, reporting only) and
+    `agb_log10_ratio_per_template` (every row kept, the spec's
+    template-dependent offset, sec. 5.2, FINDINGS.md S10) so the join
+    itself lives in exactly one place."""
     register_path = f"{sed_models}/registers/agb_register.hdf5"
     with h5py.File(register_path, "r") as f:
         reg_names = np.char.decode(f["models/MODEL_NAME"][:].astype("S"), "utf-8")
@@ -309,14 +295,30 @@ def agb_log10_ratio_stats(sed_models):
     matched = p_sorted[pos] == reg_names
     if not matched.all():
         raise ValueError(
-            "sample_star.agb_log10_ratio_stats: %d/%d AGB register templates "
+            "sample_star._agb_register_log10_ratio: %d/%d AGB register templates "
             "have no row in %s by MODEL_NAME"
             % (int((~matched).sum()), matched.size, params_path))
 
     l_sun_matched = l_sun[order][pos]
     chem_matched = chem[order][pos]
     log10_r = np.log10(f_ref_i2) - np.log10(l_sun_matched)
+    return reg_names, chem_matched, log10_r
 
+
+@functools.lru_cache(maxsize=None)
+def agb_log10_ratio_stats(sed_models):
+    """Per chemistry, the AGB library's own ratio of its 4.5 micron
+    reference flux (`F_REF_I2`, mJy at the register's 1 kpc reference) to
+    its bolometric luminosity (`L_SUN`, `sed_models/agb/parameters.fits`,
+    sec. 5.2): the median `log10` ratio (`F_4.5 = L (1kpc/d)^2 * r_chem`
+    needs a point value, and a median commutes with `log10`), and the
+    16th-84th percentile half-width in dex -- the spread the brief asks to
+    be measured and stored (P2 attrs `F45_PER_L_SPREAD_DEX_O/C`), REPORTING
+    ONLY (FINDINGS.md S10): `sample_agb_shape` below carries each
+    template's OWN ratio into the brightness shape itself, this function's
+    median is no longer the brightness construction's input. Cached:
+    survey-wide, the same for every region and tile."""
+    _reg_names, chem_matched, log10_r = _agb_register_log10_ratio(sed_models)
     stats = {}
     for label in ("O", "C"):
         sel = chem_matched == label
@@ -328,18 +330,82 @@ def agb_log10_ratio_stats(sed_models):
     return stats
 
 
+@functools.lru_cache(maxsize=None)
+def agb_log10_ratio_per_template(sed_models):
+    """`(names, chem, log10_r)` at full AGB-register resolution, in the
+    register's own row order -- the SAME order `bmstp.template_weights.
+    agb_tau_ratio` returns its per-template population weight in (both
+    read the register directly, sec 1.4), so `sample_agb_shape` can pair
+    a template's own flux-to-luminosity ratio with its own population
+    weight by position, no second join. The spec's template-dependent
+    offset (SPEC_BMSTP_DRAFT.md sec 5.2; FINDINGS.md S10: "the coupling
+    enters through the template's own F/L, never a separate factor")."""
+    return _agb_register_log10_ratio(sed_models)
+
+
+def agb_star_distances(config, region, tile_id):
+    """AGB's own distance array row-aligned with `sample_agb`'s
+    `(x, log10_f45, w, template_index)`: the evolved subset's own
+    distance, repeated once per AGB template within each chemistry, in
+    the SAME row order `sample_agb` builds (all O-rich templates for
+    every evolved star, then all C-rich -- `agb_log10_ratio_per_template`'s
+    own per-chemistry row order) -- AGB follows STAR on distance (sec.
+    5.2). `bmstp.atlas`'s own AGB member assembly reads this the same way
+    `bmstp.shapes._build_one_tile` does."""
+    with h5py.File(_tile_path(config, region), "r") as f:
+        grp = f[f"tile_{tile_id}"]
+        evolved = grp["IS_EVOLVED"][()].astype(bool)
+        star_index = grp["STAR_INDEX"][()].astype(np.int64)[evolved]
+    _log10_f45, dist_pc_all, _log_l = _field_star_arrays(config, region)
+    d = dist_pc_all[star_index]
+    _names, chem, _log10_r = agb_log10_ratio_per_template(config.inputs["sed_models"])
+    n_o = int(np.sum(chem == "O"))
+    n_c = int(np.sum(chem == "C"))
+    return np.concatenate([np.repeat(d, n_o), np.repeat(d, n_c)])
+
+
 def sample_agb(config, region, tile_id):
-    """AGB's `(x, log10 F_4.5, w)` on tile `tile_id` (sec. 5.2 "Marks",
-    "Weight"): the evolved subset only, each star's `x = U` placed twice
-    -- once at the O-rich chemistry's implied shell flux, once at the
-    C-rich -- weighted by the DUSTY subset's carbon share,
-    `f_C F_dusty,C / (f_C F_dusty,C + (1 - f_C) F_dusty,O)` (sec. 5.2, not
-    the bare carbon fraction `F_C`: `W_AGB` is already the dusty subset,
-    whose chemistry mix is `F_dusty` by chemistry). `F_4.5 = L_i (1 kpc /
-    d_i)^2 * r_chem`, `L_i`/`d_i` the star's own TRILEGAL luminosity and
-    distance (the retained field-stars product's `LOG_L`/`DIST_PC`, read
-    through `STAR_INDEX`), `r_chem` this chemistry's own median flux-to-
-    luminosity ratio (`agb_log10_ratio_stats`)."""
+    """AGB's JOINT measure over (template, brightness) on tile `tile_id`,
+    as `(x, log10 F_4.5, w, template_index)` (sec. 5.2 "Marks", "Weight";
+    FINDINGS.md S10, coordinator's joint-measure ruling): the evolved
+    subset only, each star's `x = U` placed once per AGB template of a
+    chemistry -- never a single chemistry-median point -- at THAT
+    TEMPLATE's own implied shell flux, `template_index` naming which
+    register row (so a caller can read that template's own `F_REF`/
+    `FLOOR_LINEAR` straight off the register, no second lookup table).
+    `F_4.5 = L_i (1 kpc / d_i)^2 * r_chem,theta`, `L_i`/`d_i` the star's
+    own TRILEGAL luminosity and distance (the retained field-stars
+    product's `LOG_L`/`DIST_PC`, read through `STAR_INDEX`), `r_chem,theta`
+    THIS TEMPLATE's own flux-to-luminosity ratio
+    (`agb_log10_ratio_per_template`) -- identity: at fixed `L_i`/`d_i`,
+    two templates' own rows differ in `log10 F_4.5` by EXACTLY their own
+    `log10_r` difference. Mass is the star's own AGB weight times the
+    chemistry's own dusty-mix share times that template's own population
+    share within its chemistry (`template_weights.agb_tau_ratio`'s
+    `ratio`, the shell optical-depth weight -- unchanged, reused here,
+    never recomputed: "the shell weights stay what they are"); summed
+    over one chemistry's templates this recovers exactly that chemistry's
+    own share of `w_agb` (`ratio` sums to 1 within each chemistry, sec.
+    5.2), so the population total is unchanged (identity 2).
+
+    This ONE measure is read two ways by its two callers, the joint's
+    marginal and its conditional, never a second crossing of either
+    against the other:
+    `bmstp.shapes._build_one_tile` sums it over template (keeping `x`,
+    `log10_f45`, `w`) into the brightness SHAPE, `GRID_AGB`;
+    `bmstp.template_weights.build_agb` sums the SAME measure, region-wide
+    over every tile, over EVERYTHING BUT template and brightness bin,
+    then normalises over template at each bin (`_normalise_over_theta`)
+    into the brightness-CONDITIONAL template weight, P5's `W`;
+    `bmstp.atlas`'s AGB member assembly reads every row directly as one
+    catalogued-count member (`x`, `log10_f45`, `w`, and `template_index`
+    for its own `F_REF` rescaling) -- no cross product left to build
+    there (coordinator's ruling: "no second crossing")."""
+    # local import: `template_weights` imports this module at its own top
+    # level (`agb_tau_ratio`'s row-order check against the register), so
+    # importing it back at module scope here would be circular.
+    from sesnaimpute.bmstp import template_weights as template_weights_module
+
     with h5py.File(_tile_path(config, region), "r") as f:
         f_c = float(f.attrs["F_C"])
         f_dusty_c = float(f.attrs["F_DUSTY_C"])
@@ -353,13 +419,36 @@ def sample_agb(config, region, tile_id):
     dist_pc = dist_pc_all[star_index]
     log_l = log_l_all[star_index]
 
-    ratio = agb_log10_ratio_stats(config.inputs["sed_models"])
-    two_log_inv_d = 2.0 * np.log10(1000.0 / dist_pc)
-    log10_f45_o = log_l + two_log_inv_d + ratio["O"]["log10_r"]
-    log10_f45_c = log_l + two_log_inv_d + ratio["C"]["log10_r"]
+    names, chem, log10_r = agb_log10_ratio_per_template(config.inputs["sed_models"])
+    names_pop, chem_pop, _log10_tau, pop_ratio = template_weights_module.agb_tau_ratio(config)
+    if not (names_pop.size == names.size and np.array_equal(names_pop, names)
+            and np.array_equal(chem_pop, chem)):
+        raise ValueError(
+            "sample_star.sample_agb: template_weights.agb_tau_ratio's row "
+            "order disagrees with agb_log10_ratio_per_template's AGB register join")
+    model_row = np.arange(names.size, dtype=np.int64)
 
+    two_log_inv_d = 2.0 * np.log10(1000.0 / dist_pc)
     carbon_share = f_c * f_dusty_c / f_dusty_mean
-    x = np.concatenate([u, u])
-    log10_f45 = np.concatenate([log10_f45_o, log10_f45_c])
-    w = np.concatenate([w_agb * (1.0 - carbon_share), w_agb * carbon_share])
-    return x, log10_f45, w
+
+    x_parts, f45_parts, w_parts, idx_parts = [], [], [], []
+    for label, chem_share in (("O", 1.0 - carbon_share), ("C", carbon_share)):
+        sel = chem == label
+        n_tmpl = int(sel.sum())
+        # (n_star, n_tmpl): star index varies down the rows, template
+        # index across the columns -- `.ravel()` (C order) then walks
+        # template-fastest within a star, the SAME order
+        # `agb_star_distances`'s `np.repeat(d, n_tmpl)` repeats `d` in.
+        log10_f45_tmpl = log_l[:, None] + two_log_inv_d[:, None] + log10_r[sel][None, :]
+        w_tmpl = (w_agb * chem_share)[:, None] * pop_ratio[sel][None, :]
+        n_star = u.size
+        x_parts.append(np.repeat(u, n_tmpl))
+        f45_parts.append(log10_f45_tmpl.ravel())
+        w_parts.append(w_tmpl.ravel())
+        idx_parts.append(np.tile(model_row[sel], n_star))
+
+    x = np.concatenate(x_parts)
+    log10_f45 = np.concatenate(f45_parts)
+    w = np.concatenate(w_parts)
+    template_index = np.concatenate(idx_parts)
+    return x, log10_f45, w, template_index
