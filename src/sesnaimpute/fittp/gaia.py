@@ -17,7 +17,7 @@ the Normal's mass in the wrong tail wherever the two distances disagree
                                                          Cantat-Gaudin et al. 2023's published,
                                                          position-dependent selection function (C7
                                                          brief Part A), M10_s the source's own sky pixel
-    Gamma_h  = G_s * H_h * A_X  +  (1 - G_s) * (1 - H_h)         -- matched
+    Gamma_h  = G_s * H_h * A_X  +  (1 - G_s) * (1 - H_h) * A_FIELD    -- matched
     Gamma_h  = 1 - min(H_h, C_CAP)                               -- unmatched (C7 brief Part A)
 
 `Gmag_h` is the model's own predicted Gaia G magnitude at its fitted
@@ -35,8 +35,34 @@ no information, at any position -- 72% of Perseus's own sources said
 nothing), capped at `C_CAP` (COMPLETENESS_2026-10-20.md's own cap on the
 band curves) so one unmatched read can never veto a fit by itself, `ln
 Gamma >= ln(1/200)`; a matched source with no usable astrometric solution
-still degrades to A_X = 1, the "toward no information, never a cliff"
-rule for the no-parallax branch.
+still degrades to A_X = 1 (and, by the same rule, A_FIELD = 1), the
+"toward no information, never a cliff" rule for the no-parallax branch.
+
+FINDINGS.md S04 (round6 U04, briefs/round6_2026-10-22/U04_gaia_units.md):
+`A_X` is a parallax DENSITY (mas^-1), but the old chance branch `(1 - G_s)
+(1 - H_h)` was dimensionless, so rescaling the parallax unit (mas <->
+arcsec) moved the balance between the two terms -- material for the 71%
+of Orion A's matches with G_s < 0.05. `A_FIELD` is the SAME kind of
+quantity as `A_X`: the parallax likelihood under CHANCE alignment with an
+ordinary field star, evaluated at the source's own `plx_mas`/`sigma_eff`.
+Reviewer round 2: `A_FIELD` must be ONE common chance-counterpart parallax
+distribution at the source -- the SAME marginal for every candidate class
+and nuisance state, never each class's own marginal (that would break the
+density/ratio equivalence this fix exists to restore) -- so it is always
+`_star_marginal("star")` (`_CHANCE_MARGINAL_CLASS`), the region's
+simulated field-star population's own parallax distribution, the SAME
+histogram-and-Gaussian-smoothing construction already built there,
+regardless of the class actually being fit (a chance Gaia neighbour is
+unrelated to whatever class the infrared source is being fit against, so
+it is never cloud-anchored or zero-parallax the way a genuine association
+would be). DISCLOSURE: the simulated stellar population stands in for the
+Gaia-detected chance-counterpart population itself, which the survey does
+not separately catalogue. Both branches are now densities in the same
+unit, so `Gamma` rescales by one common factor with the parallax unit and
+class odds at a source are unchanged. PAHN (G0_FLUX = 0, H_h = 0
+identically) reduces to `(1 - G_s) * A_FIELD` for a matched source --
+A_FIELD, unlike A_X, IS read there, since it is the chance branch the
+whole reduction is.
 
 The field-star classes' marginal is the same per-star reweighting every
 other reader of the population applies (`population.star_population.
@@ -146,6 +172,18 @@ STAR_MARGINAL_CLASSES = ("star", "agb", "pahc")
 #: STAR's for STAR and PAHC alike (STAR_MARGINAL_CLASSES' comment).
 _MARGINAL_WEIGHT_KEY = {"star": "W_STAR", "pahc": "W_STAR", "agb": "W_AGB"}
 
+#: FINDINGS.md S04 (round6 U04), reviewer round 2: the chance-alignment
+#: branch's own background parallax marginal is ONE common distribution
+#: at every source, read for every candidate class alike (never each
+#: class's own marginal, which would break the density/ratio equivalence
+#: the fix exists to restore) -- the region's simulated field-star
+#: population's own parallax distribution, exactly `_star_marginal`
+#: already builds it for STAR (`_MARGINAL_WEIGHT_KEY["star"]`). The
+#: simulated stellar population stands in for the Gaia-detected chance-
+#: counterpart population itself, which the survey does not separately
+#: catalogue (disclosure).
+_CHANCE_MARGINAL_CLASS = "star"
+
 #: Bin width for the field-star parallax marginal, mas: narrow enough that
 #: the midpoint rule's discretisation error stays small even at the
 #: smallest disclosed sigma_eff a matched source can carry (0.05 mas),
@@ -248,18 +286,25 @@ def _load_source_xyz(config, region):
 
 
 def _build_star_marginal(config, region, cls, bin_width_mas=STAR_MARGINAL_BIN_WIDTH_MAS):
-    """`(bin_centres_mas, p_bin)`: STAR/AGB/PAHC's binned parallax marginal
-    off the region's simulated field-star population (10_POSTERIOR.md's
-    STAR/AGB row; `SPEC_PRIORS.md` section 4's PAHC row, same parent
-    population as STAR) -- `1000/DIST_PC` for every retained field star,
-    weighted by the same per-tile reweighting every other reader of this
-    population applies (`population.star_population.partition_weights`'s
+    """`(bin_centres_mas, p_bin)`: a binned parallax marginal off the
+    region's simulated field-star population (10_POSTERIOR.md's STAR/AGB
+    row; `SPEC_PRIORS.md` section 4's PAHC row, same parent population as
+    STAR) -- `1000/DIST_PC` for every retained field star, weighted by the
+    same per-tile reweighting every other reader of this population
+    applies (`population.star_population.partition_weights`'s
     `W_STAR`/`W_AGB`, `_MARGINAL_WEIGHT_KEY`), not an unweighted count
     partitioned by `evolved_selector` (R4 D3): a star's weight already
     carries its class partition (`W_AGB` is zero off the evolved rows,
     `W_STAR` is the non-evolved complement plus the evolved rows' own
     non-dusty remainder), summed by `STAR_INDEX` over every tile a
-    retained star's row falls in.
+    retained star's row falls in. `cls="star"/"agb"/"pahc"` give each
+    class's own partitioned marginal, each its own `A_X` anchor.
+    `cls="star"` (`_CHANCE_MARGINAL_CLASS`) doubles as FINDINGS.md S04's
+    chance-alignment background density, read for EVERY class alike
+    (`_g_s_and_a_x_block`'s `a_field`) -- the SAME cached object `A_X`
+    itself reads when the class being fit is STAR, never a separate,
+    unpartitioned population (reviewer round 2: one common distribution
+    at the source, for every class).
     """
     field_stars_path = config_module.product_path(
         config, "population", "trilegal", "field-stars", "region", region=region)
@@ -367,10 +412,17 @@ class GaiaTerm:
         of one file instead of one. Call this in the PARENT, on the one
         class this call's pool will sweep, before the pool forks; the
         warmed cache then reaches every worker by fork, copy-on-write.
+        FINDINGS.md S04 (round6 U04): the chance-alignment background
+        marginal is `_star_marginal(_CHANCE_MARGINAL_CLASS)` ("star"),
+        read for every class's own chance branch, not only the field-star
+        classes', so it is warmed here unconditionally -- the SAME cached
+        object STAR's own `warm("star")` call already warms, never a
+        second, separate population read.
         """
         self._register(cls)
         if cls in STAR_MARGINAL_CLASSES:
             self._star_marginal(cls)
+        self._star_marginal(_CHANCE_MARGINAL_CLASS)
 
     def _g_s_and_a_x_block(self, rows, cls):
         """The source-and-class-level factors `ln_gamma` needs, vectorised
@@ -378,12 +430,41 @@ class GaiaTerm:
         (`(n_block,)` bool, `False` where the source has no Gaia
         counterpart at all -- the caller's signal to return the neutral
         ln Gamma = 0 for that row without touching a model), `g_s`
-        (`(n_block,)`, only meaningful where `matched`) and `A_X`
+        (`(n_block,)`, only meaningful where `matched`), `A_X`
         (`(n_block,)`, 10_POSTERIOR.md T13): `1` where the source is
         matched but carries no usable parallax (`NO_PM`, a non-finite
         `PLX_MAS`, or a degenerate `sigma_eff`); else the cloud-anchored
         Normal (depth added in quadrature), the zero-parallax Normal
-        (GAL), or the field-star marginal (STAR/AGB/PAHC).
+        (GAL), or the field-star marginal (STAR/AGB/PAHC) -- and `A_FIELD`
+        (`(n_block,)`, FINDINGS.md S04, round6 U04).
+
+        Matched: the old chance branch `(1 - G_S)(1 - H)` carried no
+        density at all, so rescaling the parallax unit (mas <-> arcsec)
+        rescaled `A_X` alone and moved the balance between the two terms
+        for every uncertain match (71% of Orion A's matches have
+        G_S < 0.05). `A_FIELD` gives the chance branch the SAME kind of
+        quantity as `A_X`: the parallax likelihood under chance alignment
+        with an ordinary field star, evaluated at this source's own
+        `plx_mas`/`sigma_eff`. Reviewer round 2: `A_FIELD` must be ONE
+        common chance-counterpart parallax distribution at the source,
+        the same for every candidate class and nuisance state -- never
+        each class's own marginal in the chance branch, which would break
+        the density/ratio equivalence this fix exists to restore -- so it
+        always reads `_star_marginal(_CHANCE_MARGINAL_CLASS)` ("star"),
+        the region's simulated field-star population's own parallax
+        distribution (the SAME histogram-and-Gaussian-smoothing
+        construction the STAR branch above uses for ITS OWN `A_X`),
+        regardless of `cls`: a chance Gaia neighbour is an ordinary field
+        star, unrelated to whatever class the infrared source is being
+        fit against, so it is never anchored to the cloud, to zero
+        parallax, or to AGB's own dusty partition the way a genuine
+        association would be. DISCLOSURE: the simulated stellar
+        population stands in for the Gaia-detected chance-counterpart
+        population itself, which the survey does not separately
+        catalogue. `A_FIELD` is `1` wherever `A_X` is `1` for the same
+        reason (no usable parallax solution): the two terms' ratio for
+        those rows is then unchanged from before this fix, by
+        construction.
         """
         matched = self._gaia["matched"][rows]
         g_s = self._gaia["g_s"][rows]
@@ -412,18 +493,36 @@ class GaiaTerm:
                 # one of its templates is Gaia-dark (G0_FLUX = 0 in the
                 # register, C13's own darkness rule), which drives H = 0
                 # identically (`_gaia_h_kernel`/`prior_reader._gaia_h`):
-                # `gamma_matched = g_s * h * a_x + (1 - g_s) * (1 - h)`
-                # reduces to `1 - g_s` and `gamma_unmatched = 1 - min(h,
-                # C_CAP)` reduces to 1, in both cases with A_X's own value
-                # never read. This branch exists only so the lookup is
+                # `gamma_matched = g_s * h * a_x + (1 - g_s) * (1 - h) *
+                # a_field` reduces to `(1 - g_s) * a_field` and
+                # `gamma_unmatched = 1 - min(h, C_CAP)` reduces to 1, in
+                # both cases with A_X's own value never read (A_FIELD,
+                # unlike A_X, IS read here: FINDINGS.md S04's fix gives
+                # the chance branch a density for every class, and PAHN's
+                # matched-but-dark reduction is exactly that chance
+                # branch, with no genuine-association term to compete
+                # against it). This branch exists only so the lookup is
                 # explicit and documented, not a silent fall-through to
-                # the "no branch defined" error below; the value itself
-                # is arbitrary and unused.
+                # the "no branch defined" error below; A_X's own value
+                # here is arbitrary and unused.
                 a_x_good = np.ones_like(plx)
             else:
                 raise ValueError(f"GaiaTerm: no A_X branch defined for class {cls!r}")
         a_x[good] = a_x_good[good]
-        return matched, g_s, a_x
+
+        # FINDINGS.md S04, reviewer round 2: the chance branch's own
+        # background density, ONE common marginal for every class (no
+        # per-class branch) -- the SAME field-star parallax distribution
+        # `A_X` itself reads for `cls == "star"` -- see the docstring
+        # above.
+        a_field = np.ones(rows.shape[0], dtype=np.float64)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            field_bins, field_p = self._star_marginal(_CHANCE_MARGINAL_CLASS)
+            z_field = (field_bins[None, :] - plx[:, None]) / sigma_eff[:, None]
+            pdf_field = np.exp(-0.5 * z_field * z_field) / (sigma_eff[:, None] * _SQRT_2PI)
+            a_field_good = pdf_field @ field_p
+        a_field[good] = a_field_good[good]
+        return matched, g_s, a_x, a_field
 
     def _xyz_block(self, rows):
         """C7 brief Part A: `(x_s, y_s, z_s)` for `rows`, straight off
@@ -436,22 +535,23 @@ class GaiaTerm:
     def cell_inputs(self, rows, model_index, cls):
         """NONDET2 brief section 1 (NONDET.md section 8): everything
         `prior_reader._cell_sum` needs to evaluate `ln Gamma` at EACH
-        CELL'S own `a*` rather than once at the fitted mark -- `G_S`/`A_X`
-        stay per source and class, outside the per-cell evaluation
-        (`_g_s_and_a_x_block`, unchanged); `G0MAG`/`KG_DRAINE`/`KG_WHITNEY`
-        stay per template, off this class's own register
-        (`_register`, unchanged); `r_diffuse`/`r_dense` are the two
-        extinction curves' own `(A_K/A_V)` ratios the per-cell ramp blend
-        needs (`selection.ak_per_av` at the ramp's two ends). `x_s`/`y_s`/
-        `z_s` (C7 brief Part A, `_xyz_block`) are this block's own sources'
-        Cantat-Gaudin parameters, replacing the old survey-wide `(g_lim,
-        g_rolloff)` scalars. Returns a plain tuple of arrays/floats,
-        numba-ready: `(matched, g_s, a_x, g0_mag, kg_draine, kg_whitney,
-        r_diffuse, r_dense, x_s, y_s, z_s)`.
+        CELL'S own `a*` rather than once at the fitted mark -- `G_S`/`A_X`/
+        `A_FIELD` stay per source and class, outside the per-cell
+        evaluation (`_g_s_and_a_x_block`, unchanged in that respect;
+        `A_FIELD` is FINDINGS.md S04's chance-branch density, round6 U04);
+        `G0MAG`/`KG_DRAINE`/`KG_WHITNEY` stay per template, off this
+        class's own register (`_register`, unchanged); `r_diffuse`/
+        `r_dense` are the two extinction curves' own `(A_K/A_V)` ratios
+        the per-cell ramp blend needs (`selection.ak_per_av` at the ramp's
+        two ends). `x_s`/`y_s`/`z_s` (C7 brief Part A, `_xyz_block`) are
+        this block's own sources' Cantat-Gaudin parameters, replacing the
+        old survey-wide `(g_lim, g_rolloff)` scalars. Returns a plain
+        tuple of arrays/floats, numba-ready: `(matched, g_s, a_x, a_field,
+        g0_mag, kg_draine, kg_whitney, r_diffuse, r_dense, x_s, y_s, z_s)`.
         """
         rows = np.asarray(rows)
         model_index = np.asarray(model_index)
-        matched, g_s, a_x = self._g_s_and_a_x_block(rows, cls)
+        matched, g_s, a_x, a_field = self._g_s_and_a_x_block(rows, cls)
         x_s, y_s, z_s = self._xyz_block(rows)
         reg = self._register(cls)
         g0_mag = reg["g0_mag"][model_index]
@@ -466,7 +566,8 @@ class GaiaTerm:
         r_diffuse = float(selection.ak_per_av(self.config, 0.0))
         r_dense = float(selection.ak_per_av(self.config, 1.0))
         return (np.ascontiguousarray(matched), np.ascontiguousarray(g_s),
-                np.ascontiguousarray(a_x), np.ascontiguousarray(g0_mag, dtype=np.float64),
+                np.ascontiguousarray(a_x), np.ascontiguousarray(a_field),
+                np.ascontiguousarray(g0_mag, dtype=np.float64),
                 np.ascontiguousarray(kg_draine, dtype=np.float64),
                 np.ascontiguousarray(kg_whitney, dtype=np.float64), r_diffuse, r_dense,
                 np.ascontiguousarray(x_s, dtype=np.float64),
@@ -489,7 +590,7 @@ class GaiaTerm:
         rows = np.asarray(rows)
         model_index = np.asarray(model_index)
         n_model = model_index.shape[0]
-        matched, g_s, a_x = self._g_s_and_a_x_block(rows, cls)
+        matched, g_s, a_x, a_field = self._g_s_and_a_x_block(rows, cls)
         x_s, y_s, z_s = self._xyz_block(rows)
 
         reg = self._register(cls)
@@ -532,7 +633,12 @@ class GaiaTerm:
         # and H to 0 through the sigmoid's own limit, no special case.
         h = np.where(np.isnan(g0)[None, :], 0.0, h)
 
-        gamma_matched = g_s[:, None] * h * a_x[:, None] + (1.0 - g_s[:, None]) * (1.0 - h)
+        # FINDINGS.md S04 (round6 U04): the chance branch now carries the
+        # SAME kind of quantity (a parallax density) as the matched
+        # branch, `A_FIELD` in place of the old bare `1`, so rescaling the
+        # parallax unit no longer moves the balance between the two terms.
+        gamma_matched = (g_s[:, None] * h * a_x[:, None]
+                          + (1.0 - g_s[:, None]) * (1.0 - h) * a_field[:, None])
         # C7 brief Part A: an unmatched source is scored as a
         # non-detection against this position's own completeness, capped
         # at C_CAP the same way the band curves are, so ln Gamma never
