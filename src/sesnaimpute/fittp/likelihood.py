@@ -91,7 +91,7 @@ WORKER_WORKING_SET_EQUIV = 10
 
 
 def _ln_nondet(ext_col32, log10_f_ref, av_clamped32, sc_clamped32,
-               curve_rows, band_a, band_c, band_n, nondet_mask):
+               curve_rows, band_a, band_c, band_n, nondet_mask, detected_mask):
     """The non-detection term of section 6.2 at the CLAMPED marks, for one
     source's own `m` templates: the predicted log-flux in every band for
     every template, masked to this source's own undetected, covered bands
@@ -111,19 +111,46 @@ def _ln_nondet(ext_col32, log10_f_ref, av_clamped32, sc_clamped32,
     COMPLETENESS_2026-10-20.md (`_ln_one_minus_c_kernel`, deleted): no
     `F_LIM_50`/`WIDTH_DEX` read anywhere in this module any more.
 
-    C20 brief (briefs/round4_2026-10-20/C20_detection_correlation.md): the
-    non-detection factor `Prod_u (1-p_u)` this loop sums in log is now the
-    independent HALF of a mixture with a fully comonotone model, `(1 -
-    LAMBDA) * Prod_u (1-p_u) + LAMBDA * (1 - max_u p_u)`; `1 - max_u p_u
-    == min_u (1-p_u)`, the SAME monotone per-band `ln[1-p_u]` this loop
-    already computes, so the running minimum across the masked bands
-    costs no extra curve read -- only the one `np.logaddexp` combine at
-    the end. `constants.LAMBDA <= 0.0` (today's production path at
-    LAMBDA=0 is reached by the owner's own measurement never going
-    negative) returns `total` exactly as before, never entering the
-    mixture arithmetic at all: the brief's own identity (LAMBDA=0
-    reproduces today's numbers bit-identically) by code path, not by
-    relying on `logaddexp`'s `-inf` handling.
+    FINDINGS.md S03 / `briefs/round6_2026-10-22/U02_nondet_conditional.md`
+    (supersedes the C20 brief's marginal comonotone half,
+    briefs/round4_2026-10-20/C20_detection_correlation.md) -- the
+    reviewer-reply revision: the comonotone half is no longer the
+    MARGINAL event `1 - max_u p_u` that all undetected bands fail, but
+    that event CONDITIONAL on the detected bands having cleared, and the
+    two submodels are mixed as JOINT probabilities before conditioning,
+    never as the two submodels' own conditionals directly (that second
+    form only agrees with the first at `lam` in `{0, 1}`; worked example
+    in `fittp.prior_reader._nondet_ln_sum`'s own docstring, the scalar
+    per-cell twin of this function -- read it for the derivation, kept
+    here only once since both carry the identical algebra). `A = prod_d
+    p_d`, `B = min_d p_d`, `Q = prod_u (1-p_u)` (`= exp(total)`, `total`
+    this loop already forms, unchanged), `R = max(0, B - max_u p_u)`:
+    `P(undetected fail | detected cleared) = [(1-lam) A Q + lam R] /
+    [(1-lam) A + lam B]`. `ln_a = ln A = sum_d ln(p_d)`, `max_det = ln(1
+    - B) = max_d ln(1-p_d)` run the companion loop over the DETECTED
+    bands, the same curve read. `B <= max_u p_u` (`R = 0`) is exactly
+    `max_det >= min_total`, and since `A <= B` always, this SAME
+    condition also catches `A = B = 0` (a detected band predicted
+    undetectable, `max_det = 0`) -- the reviewer-reply's "or the
+    denominator 0" case, one flag for both, floored at
+    `LN_ONE_MINUS_C_FLOOR` (the SAME floor `catalog.completeness`'s
+    OWNER DECISION already applies to every per-band `ln[1-p]`, never a
+    new constant: a pattern the comonotone model forbids is penalised at
+    the measurement's own 1/200 resolution, never vetoed to `-inf`,
+    identity 3). Off that boundary `ln_a`/`ln_b` (`= ln B`) are never
+    `-inf`, so the two `np.logaddexp` combines below never see a `-inf`
+    pair. `constants.LAMBDA <= 0.0` returns `total` (`= ln Q`) exactly,
+    before the detected-band loop runs at all -- the C20-era identity
+    (LAMBDA=0 bit-identical) by code path, and the mixture's own exact
+    limit (`A` cancels). `LAMBDA >= 1.0` returns `ln R - ln B` exactly,
+    the `A`/`Q` terms dropping out the same way. An interior `LAMBDA`
+    forms `ln[(1-lam) A Q + lam R]` and `ln[(1-lam) A + lam B]` via
+    `np.logaddexp` and subtracts. Where every detected band's `p_d` is 1
+    exactly (`A = B = 1`), the whole expression collapses to `(1-lam) Q
+    + lam R` at every `lam` -- today's C20-era marginal mixture exactly
+    (identity 2); the real curves cap `p_d` at `C_CAP`, short of 1, so
+    the collapse is to float64 precision there, not bit-exact -- the
+    brief's report has the measured residual.
     """
     log10_fhat = (log10_f_ref.astype(np.float64)
                   + ext_col32.astype(np.float64)[None, :] * av_clamped32.astype(np.float64)[:, None]
@@ -142,9 +169,33 @@ def _ln_nondet(ext_col32, log10_f_ref, av_clamped32, sc_clamped32,
     lam = constants.LAMBDA
     if lam <= 0.0:
         return total.astype(np.float32)
-    ln_one_minus_lam = np.log(1.0 - lam) if lam < 1.0 else -np.inf
-    mixed = np.logaddexp(ln_one_minus_lam + total, np.log(lam) + min_total)
-    return mixed.astype(np.float32)
+    ln_a = np.zeros(m, dtype=np.float64)
+    max_det = np.full(m, -np.inf, dtype=np.float64)
+    for b in range(N_BANDS):
+        if not detected_mask[b]:
+            continue
+        ln_one_minus_pd = completeness_module.ln_one_minus_completeness(
+            curve_rows[b], 0.0, 0.0, int(band_n[b]),
+            np.ascontiguousarray(log10_fhat[:, b]), float(band_a[b]), float(band_c[b]))
+        with np.errstate(invalid="ignore", divide="ignore"):
+            ln_a = ln_a + np.log1p(-np.exp(ln_one_minus_pd))
+        max_det = np.maximum(max_det, ln_one_minus_pd)
+    degenerate = max_det >= min_total
+    floor = completeness_module.LN_ONE_MINUS_C_FLOOR
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        ln_b = np.log1p(-np.exp(max_det))
+        ln_r = min_total + np.log1p(-np.exp(max_det - min_total))
+        if lam >= 1.0:
+            ln_comon = ln_r - ln_b
+            ln_comon = np.where(degenerate | ~np.isfinite(ln_comon) | (ln_comon < floor), floor, ln_comon)
+            return ln_comon.astype(np.float32)
+        ln_one_minus_lam = np.log(1.0 - lam)
+        ln_lam = np.log(lam)
+        ln_num = np.logaddexp(ln_one_minus_lam + ln_a + total, ln_lam + ln_r)
+        ln_den = np.logaddexp(ln_one_minus_lam + ln_a, ln_lam + ln_b)
+        ln_p = ln_num - ln_den
+    ln_p = np.where(degenerate | ~np.isfinite(ln_p) | (ln_p < floor), floor, ln_p)
+    return ln_p.astype(np.float32)
 
 
 class Batch:
@@ -163,11 +214,20 @@ class Batch:
     (`ext_col`, `sigma_a_ak`, `slope_sc_av`, `ak_per_av`, `xtwx_inv`) comes
     back on its own `Fit`, so the two designs `fittp.sweep._source_task`
     fits from the SAME `Batch` never clobber each other's.
+
+    `detected_mask` (`(8,)` bool, FINDINGS.md S03 / `briefs/round6_2026-
+    10-22/U02_nondet_conditional.md`): `prepare`'s own `detected` array
+    (origin-flagged and flux > 0, the same test that excludes a band from
+    `nondet_mask`), kept so `_ln_nondet` -- and, threaded through
+    `fittp.sweep`/`fittp.prior_reader.ln_prior`/`_cell_sum`, the per-cell
+    `_nondet_ln_sum` -- can read the DETECTED bands' own completeness
+    `p_d` at the template's predicted flux, which the conditional
+    comonotone term needs beside the undetected bands' `p_u`.
     """
 
     __slots__ = ("log10_f_obs", "weight", "config",
                  "curve_rows", "band_a", "band_c", "band_n", "nondet_mask",
-                 "n_detected", "flagged", "ln_norm_term")
+                 "detected_mask", "n_detected", "flagged", "ln_norm_term")
 
     def __init__(self, **kw):
         for key, value in kw.items():
@@ -296,7 +356,7 @@ def prepare(config, flux, sigma, origin, sigma_lib_l, curve_rows, covered,
                  band_a=np.asarray(band_a, dtype=np.float64),
                  band_c=np.asarray(band_c, dtype=np.float64),
                  band_n=np.asarray(band_n, dtype=np.int64),
-                 nondet_mask=nondet_mask,
+                 nondet_mask=nondet_mask, detected_mask=detected,
                  n_detected=n_detected, flagged=flagged,
                  ln_norm_term=ln_norm_term)
 
@@ -440,7 +500,7 @@ def fit(batch, log10_f_ref, w):
     sc_clamped32 = sc_clamped.astype(np.float32)
     ln_nondet = _ln_nondet(ext_col32, log10_f_ref, av_clamped32, sc_clamped32,
                             batch.curve_rows, batch.band_a, batch.band_c, batch.band_n,
-                            batch.nondet_mask)
+                            batch.nondet_mask, batch.detected_mask)
     ln_nondet = ln_nondet + np.float32(batch.ln_norm_term)
 
     if source_flagged:
