@@ -2534,11 +2534,24 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
         # `_above_fraction`.
         above_pix, _b_centers_shared = _above_shared(config, readers_by_cls["STAR"], a_col, f0_pix)
 
+        # each tile's and sightline's admitted-pixel indices (ascending),
+        # grouped once by a stable sort, so a task neither scans the
+        # region's pixel axis for its own membership nor returns a
+        # region-sized mask.
+        def _groups(key, keep):
+            at = np.flatnonzero(keep)
+            order = at[np.argsort(key[at], kind="stable")]
+            ids, first = np.unique(key[order], return_index=True)
+            return dict(zip((int(i) for i in ids), np.split(order, first[1:])))
+
+        idx_of_tile = _groups(tile_of_pix, usable)
+        idx_of_sl = _groups(sl_row_of_pix, np.ones(n_pix, dtype=bool))
+
         def _dispatch(piece):
             kind = piece[0]
             if kind == "TILE":
                 tile_id = piece[1]
-                m = usable & (tile_of_pix == tile_id)
+                m = idx_of_tile[tile_id]
                 return piece, (m, _build_one_tile(
                     config, region, tile_id, pix[m], a_col[m], f_lim[m], pixel_row[m], agb_pool,
                     coverage[m]))
@@ -2555,16 +2568,15 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
                 # brightness x template nodes (`pahn_flux0_br`/`pahn_w_br`,
                 # closed over above).
                 sl_row = piece[1]
-                m = sl_row_of_pix == sl_row
-                idx = np.flatnonzero(m)
+                idx = idx_of_sl[sl_row]
                 xi_centers, w_depth = _pahn_depth_nodes(loaded_profile, sl_row, d_front)
                 pahn_members_sl = _combine_with_depth(pahn_flux0_br, pahn_w_br, xi_centers, w_depth)
-                return piece, (m,) + _pahn_chunk_result(
+                return piece, (idx,) + _pahn_chunk_result(
                     config, region, pahn_members_sl, density_pahn_pix, idx, a_col, f_lim, pixel_row,
                     weight_pix_all)
             if kind == "SL":
                 sl_row = piece[1]
-                m = sl_row_of_pix == sl_row
+                m = idx_of_sl[sl_row]
                 out = _build_one_sightline(
                     config, region, sl_row, a_col[m], a_col_gas[m], arm[m], f_lim[m],
                     loaded_profile, flux0_ts, w_ts, float(cloud_frac_by_sl[sl_row]), d_front, d_back,
@@ -2658,7 +2670,7 @@ def build_region(config, region, agb_pool, gal_members, giannini_ratios, yso_reg
                 # grids already accumulate below.
                 sl_row = piece[1]
                 m, chunk_result = data[0], data[1:]
-                idx = np.flatnonzero(m)
+                idx = m
                 xi_centers, w_depth = _pahn_depth_nodes(loaded_profile, sl_row, d_front)
                 pahn_members_sl = _combine_with_depth(pahn_flux0_br, pahn_w_br, xi_centers, w_depth)
                 frac_pahn, frac_pahn_bright3, frac_pahn_bright10, n_cat_cell_pahn, n_cell_pahn = (
