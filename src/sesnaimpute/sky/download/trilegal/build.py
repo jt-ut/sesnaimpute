@@ -48,6 +48,7 @@ from sesnaimpute import build as build_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+from sesnaimpute import regions as regions_module
 from sesnaimpute.granules import access as granules_access
 
 FORM_URL = "http://stev.oapd.inaf.it/cgi-bin/trilegal"
@@ -567,8 +568,10 @@ def build(config, regions=None, _limit=None):
     """Drives the TRILEGAL web form once per pointing (once per part, for a
     pointing whose area is split) and saves each reply, typed, at
     `<data_root>/sky/download/trilegal` (T6: `.h5`, `fetch_region_part`).
-    `regions` restricts which regions are queried (default: all 30 in
-    `REGION_POINTINGS`); `_limit` is a rehearsal knob capping the number
+    `regions` restricts which regions are queried (default: the survey's
+    own region list, `regions.REGIONS` -- `REGION_POINTINGS` also carries
+    BD+40o4124, which the survey excludes and the granule map does not
+    hold); `_limit` is a rehearsal knob capping the number
     of parts queried per pointing. DOES NOT RUN here (T6 ruling): the
     931 `.dat` files already on disk are converted instead, by
     `sky.download.trilegal.convert`, run by hand.
@@ -588,7 +591,8 @@ def build(config, regions=None, _limit=None):
             return form["defaults"], form["action_url"]
 
         dest_dir = f"{config.data_root}/sky/download/trilegal"
-        names = sorted(REGION_POINTINGS) if regions is None else regions
+        names = (sorted(r.name for r in regions_module.REGIONS) if regions is None
+                 else regions)
 
         # Plan every pointing/part's file name(s) first, so the tick below
         # knows the total unit count before touching the network.
