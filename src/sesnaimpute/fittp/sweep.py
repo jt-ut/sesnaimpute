@@ -661,6 +661,11 @@ def _source_task(i):
             # `ext_col`, EXACT_CODE_SITES), fed to the cell sum so it can
             # place the non-detection factor at each cell's own a*.
             ext_col_ak_k = fit_k.ext_col.astype(np.float64) / fit_k.ak_per_av
+            # FINDINGS.md S03 (briefs/round6_2026-10-22/
+            # U02_nondet_conditional.md): the conditional comonotone term
+            # needs the detected bands' own p_d beside the undetected
+            # bands' p_u, so `batch.detected_mask` rides beside
+            # `batch.nondet_mask` into the cell sum, argument-list only.
             ln_lambda2_k, ln_lambda0_k, ln_lambda1_k, a_post_k, a2_post_k = prior_reader.ln_prior(
                 w["reader"], rows, h, fit_k.a_hat[None, :], fit_k.log10_b_hat[None, :],
                 slope_log10b_per_ak, np.array([fit_k.sigma_a_ak]), model_index,
@@ -668,7 +673,7 @@ def _source_task(i):
                 w["template_log"], ext_col_ak_k,
                 batch.curve_rows[None, :, :],
                 batch.band_a, batch.band_c, batch.band_n,
-                batch.nondet_mask[None, :], gaia_inputs)
+                batch.nondet_mask[None, :], batch.detected_mask[None, :], gaia_inputs)
             ln_lambda2[k] = ln_lambda2_k[0]
             ln_lambda0[k] = ln_lambda0_k[0]
             ln_lambda1[k] = ln_lambda1_k[0]

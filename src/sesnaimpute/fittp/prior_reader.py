@@ -77,6 +77,13 @@ from sesnaimpute.population import kernel as kernel_module
 _STORAGE_SCALE = completeness_module.STORAGE_SCALE
 _C_CAP = completeness_module.C_CAP
 
+#: FINDINGS.md S03 / `briefs/round6_2026-10-22/U02_nondet_conditional.md`:
+#: the SAME floor the OWNER DECISION above applies to a single band's own
+#: `ln[1-p]`, reused (never a new constant) to floor the conditional
+#: comonotone term `_nondet_ln_sum` forms below, for the same reason --
+#: one band's pattern must never veto an otherwise-good fit outright.
+_LN_ONE_MINUS_C_FLOOR = completeness_module.LN_ONE_MINUS_C_FLOOR
+
 #: C7 brief Part A: Cantat-Gaudin et al. 2023's own calibration floor
 #: (`gaia.G_FLOOR_MAG`), a bare module global for the same reason --
 #: `_gaia_h` needs it inside a numba `njit` function.
@@ -713,32 +720,71 @@ def _log_mix(ln_indep, ln_comon, lam):
 
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy")
-def _nondet_ln_sum(a_val, active, base, slope_b, template_row, curve_rows_s, band_a, band_c, band_n, lam):
+def _nondet_ln_sum(a_val, active, detected, base, slope_b, template_row, curve_rows_s, band_a, band_c, band_n, lam):
     """NONDET brief section 1, mixed per C20 (briefs/round4_2026-10-20/
-    C20_detection_correlation.md): `Sum_{b in active} ln[1 - C_b(f_hat_b(
-    a_val))]` is the non-detection factor's own log, independent model, at
-    ONE extinction value `a_val` -- a cell's own `a*` (the per-cell,
-    per-template callers below) or a single-point fallback's one
-    substitute extinction (where `active` is every `nondet_mask` band, the
-    window prefilter not applying to a single point). `active` is a
-    bitmask over the 8 bands (`1 << b`), already restricted to this
-    source's own undetected, covered, observed bands by the caller.
-    `template_row` is `template_log[th]`, `curve_rows_s` is this source's
-    own `(8, max_n)` measured completeness curve (COMPLETENESS_2026-10-
-    20.md), `band_a`/`band_c`/`band_n` the region-wide per-band index
-    parameters -- the same measured curve `fittp.likelihood._ln_nondet`
-    reads at the clamped mark, read here at an arbitrary `a` instead.
+    C20_detection_correlation.md) and, as of FINDINGS.md S03 (`briefs/
+    round6_2026-10-22/U02_nondet_conditional.md`, the reviewer-reply
+    revision -- the brief's own first-draft formula mixed the two
+    submodels' CONDITIONAL probabilities directly, which is wrong for any
+    interior `lam`; this mixes the two submodels' JOINT probabilities
+    first and conditions once, at the end), the non-detection factor
+    CONDITIONAL on this source's own detected bands having cleared.
+    `active`/`detected` are bitmasks over the 8 bands (`1 << b`), already
+    restricted to this source's own undetected/detected, covered,
+    observed bands by the caller; `template_row` is `template_log[th]`,
+    `curve_rows_s` this source's own `(8, max_n)` measured completeness
+    curve (COMPLETENESS_2026-10-20.md), read at both bitmasks' bands --
+    `band_a`/`band_c`/`band_n` the region-wide per-band index parameters,
+    the same measured curve `fittp.likelihood._ln_nondet` reads at the
+    clamped mark, read here at an arbitrary `a` instead.
 
-    The comonotone half of the C20 mixture, `1 - max_{b in active} p_b ==
-    min_{b in active} (1 - p_b)`, is the running minimum of the SAME
-    per-band `ln[1-p_b]` the independent sum already evaluates -- no
-    extra curve read, matching the brief's own cost constraint. `lam <=
-    0.0` returns the independent sum exactly as before NONDET2 (today's
-    own code path, not a limit of `_log_mix`); `lam >= 1.0` returns the
-    comonotone minimum exactly; an interior `lam` combines the two via
-    `_log_mix`. `min_total`'s own `0.0` start (never updated when
-    `active` is empty) is `ln(1)`, matching `total`'s own `0.0` there: no
-    nondet band active means no penalty under EITHER half of the mixture."""
+    Four per-band-set quantities, `A = prod_d p_d`, `B = min_d p_d`
+    (independent/comonotone probability that every DETECTED band
+    clears), `Q = prod_u (1-p_u)`, `R = max(0, B - max_u p_u)`
+    (independent/comonotone probability of the FULL pattern: every
+    detected band clears AND every undetected band fails) -- the sought
+    quantity is `P(undetected fail | detected cleared) = [(1-lam) A Q +
+    lam R] / [(1-lam) A + lam B]`: mix the JOINT pattern/conditioning-
+    event probabilities, THEN divide, never mix the two submodels' own
+    conditionals (`(1-lam) Q + lam R/B`) directly -- that second form
+    only agrees with the first at `lam` in `{0, 1}` (reviewer-reply
+    worked example: detected `p = (.5, .5)`, missing `p = .4`, `lam =
+    .5` gives `1/3`, the wrong direct mix `.4`). `total = ln Q`,
+    `min_total = ln(1 - max_u p_u)` (`== min_u ln(1-p_u)`) are exactly
+    the C20-era accumulators, unchanged, over the UNDETECTED bands.
+    `ln_a = ln A = sum_d ln(p_d)`, `max_det = ln(1 - B) == max_d
+    ln(1-p_d)` (the weakest detected band's own survival is the LARGEST
+    such log) run the companion loop over the DETECTED bands, the SAME
+    curve read, no extra table. `R`'s own sign flip (`B <= max_u p_u`,
+    the detected bands less certain than an undetected one) is exactly
+    `max_det >= min_total`; wherever it holds, `R = 0` AND -- the exact
+    same condition, since `A <= B` always (a product of per-band
+    probabilities is never above their own minimum) -- `A = B = 0`
+    whenever `B` itself is 0 (a detected band predicted undetectable,
+    `max_det = 0`), the reviewer-reply's "or the denominator 0" case: a
+    single flag catches both model-contradicts-data patterns the
+    comonotone model forbids, floored at `_LN_ONE_MINUS_C_FLOOR` -- the
+    SAME floor `catalog.completeness`'s OWNER DECISION already applies
+    to every per-band `ln[1-p]`, never a new constant, penalising the
+    forbidden pattern at the measurement's own 1/200 resolution rather
+    than vetoing it to `-inf` (identity 3). Off that boundary, `max_det
+    < min_total` strictly, so neither `ln_a` nor `ln_b` (`= ln B`) is
+    `-inf` (the only way either reads `-inf` is `max_det == 0`, which is
+    inside the floored boundary) -- `_log_mix` below never sees a `-inf`
+    pair. `lam <= 0.0` returns `total` (`= ln Q`) exactly, before the
+    detected-band loop runs at all: the C20-era identity (LAMBDA=0
+    reproduces today's numbers bit-identically) by code path, and it is
+    also the mixture's own algebraic limit (`A` cancels). `lam >= 1.0`
+    returns `ln R - ln B` exactly, the `A`/`Q` terms dropping out the
+    same way. An interior `lam` forms `ln[(1-lam) A Q + lam R]` and
+    `ln[(1-lam) A + lam B]` via `_log_mix` (`ln_indep` = `ln_a + total`
+    or `ln_a`, `ln_comon` = `ln_r` or `ln_b`) and subtracts. Where every
+    detected band's own `p_d` is 1 exactly (`A = B = 1`, `ln_a = ln_b =
+    0`), the whole expression collapses to `(1-lam) Q + lam R` at every
+    `lam` -- today's C20-era marginal mixture exactly (identity 2); on
+    the real curves `p_d` never reaches 1 (`_C_CAP`'s own floor), so the
+    collapse is to float64 precision, not bit-exact, and the brief's
+    report has the measured residual at `p_d = _C_CAP`."""
     total = 0.0
     min_total = 0.0
     for b in range(N_BANDS):
@@ -751,9 +797,31 @@ def _nondet_ln_sum(a_val, active, base, slope_b, template_row, curve_rows_s, ban
             min_total = ln_one_minus_p
     if lam <= 0.0:
         return total
+    ln_a = 0.0
+    max_det = -math.inf
+    for b in range(N_BANDS):
+        if not ((detected >> b) & 1):
+            continue
+        log10_fhat = template_row[b] + base + slope_b[b] * a_val
+        ln_one_minus_pd = _ln_one_minus_c_curve(log10_fhat, curve_rows_s[b], band_n[b], band_a[b], band_c[b])
+        ln_a += math.log1p(-math.exp(ln_one_minus_pd))
+        if ln_one_minus_pd > max_det:
+            max_det = ln_one_minus_pd
+    if max_det >= min_total:
+        return _LN_ONE_MINUS_C_FLOOR
+    ln_b = math.log1p(-math.exp(max_det))
+    ln_r = min_total + math.log1p(-math.exp(max_det - min_total))
     if lam >= 1.0:
-        return min_total
-    return _log_mix(total, min_total, lam)
+        ln_comon = ln_r - ln_b
+        if ln_comon < _LN_ONE_MINUS_C_FLOOR:
+            ln_comon = _LN_ONE_MINUS_C_FLOOR
+        return ln_comon
+    ln_num = _log_mix(ln_a + total, ln_r, lam)
+    ln_den = _log_mix(ln_a, ln_b, lam)
+    ln_p = ln_num - ln_den
+    if ln_p < _LN_ONE_MINUS_C_FLOOR:
+        ln_p = _LN_ONE_MINUS_C_FLOOR
+    return ln_p
 
 
 #: NONDET2 brief section 1 (NONDET.md section 8): a Gaia H(a) within this
@@ -834,7 +902,8 @@ def _gaia_ln_gamma(a_val, g0_mag, kg_draine, kg_whitney, base, sl, r_diffuse, r_
 def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               b_origin, dlb, dlx, a_edges_buf, cell_weight,
               m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
-              template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask, lam,
+              template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask,
+              detected_mask, lam,
               gaia_matched, g_s, a_x, g0_mag, kg_draine, kg_whitney,
               r_diffuse, r_dense, ramp_lo, ramp_hi, x_s_all, y_s_all, z_s_all,
               out_s0, out_s1, a_post_out, a2_post_out):
@@ -843,7 +912,15 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     C20_detection_correlation.md): `constants.LAMBDA`, the one survey-wide
     share of comonotone detection, threaded straight to `_nondet_ln_sum`
     (every one of its four callers below) -- `_cell_sum` itself never
-    reads it directly.
+    reads it directly. `detected_mask` (`(n, 8)` bool, FINDINGS.md S03 /
+    `briefs/round6_2026-10-22/U02_nondet_conditional.md`): the companion
+    of `nondet_mask` the conditional comonotone term needs (`
+    fittp.likelihood.prepare`'s own `detected`, threaded here the same
+    way `nondet_mask` already is) -- reduced to a per-source bitmask,
+    `detected_full`, the same way `nondet_mask` reduces to `active_full`
+    below, and passed to every one of `_nondet_ln_sum`'s four callers
+    beside `active`/`active_full`; `_cell_sum` itself never reads a band
+    bit from it directly either.
 
     NONDET2 brief section 2: the sum accumulates THREE totals,
     not one -- `total0` (the prior read along the fit's ridge alone),
@@ -992,10 +1069,13 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
         sl = slope[s]
         slope_b = np.empty(N_BANDS, dtype=np.float64)
         active_full = 0
+        detected_full = 0
         for b in range(N_BANDS):
             slope_b[b] = ext_col_ak[b] + sl
             if nondet_mask[s, b]:
                 active_full |= (1 << b)
+            if detected_mask[s, b]:
+                detected_full |= (1 << b)
         matched_s = gaia_matched[s]
         g_s_s = g_s[s]
         a_x_s = a_x[s]
@@ -1102,7 +1182,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         term0 = dens * mi * cell_weight[s, i]
                         # NONDET brief section 1: this cell's own non-detection
                         # factor, at ITS OWN a_star.
-                        nondet_ln = _nondet_ln_sum(a_star, active, base, slope_b,
+                        nondet_ln = _nondet_ln_sum(a_star, active, detected_full, base, slope_b,
                                                     template_log[th], curve_rows[s], band_a, band_c, band_n, lam)
                         term1 = term0 * math.exp(nondet_ln)
                         # NONDET2 section 1: this cell's own Gaia factor, at
@@ -1151,7 +1231,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         dens = (h[s, i, j0] * (1.0 - frac) + h[s, i, j0 + 1] * frac) / (dlx * dlb)
                         term0 = dens * mi * cell_weight[s, i]
                         # NONDET brief section 1: see the table path above.
-                        nondet_ln = _nondet_ln_sum(a_star, active, base, slope_b,
+                        nondet_ln = _nondet_ln_sum(a_star, active, detected_full, base, slope_b,
                                                     template_log[th], curve_rows[s], band_a, band_c, band_n, lam)
                         term1 = term0 * math.exp(nondet_ln)
                         # NONDET2 section 1: see the table path above.
@@ -1205,7 +1285,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 w_edge = cell_weight[s, n_x - 1]
                 if dens > 0.0 and w_edge > 0.0:
                     s0 = math.log(dens * w_edge / a_top) + ln_tail
-                    nondet_ln = _nondet_ln_sum(a_top, active_full, base, slope_b,
+                    nondet_ln = _nondet_ln_sum(a_top, active_full, detected_full, base, slope_b,
                                                 template_log[th], curve_rows[s], band_a, band_c, band_n, lam)
                     s1 = s0 + nondet_ln
                     gaia_ln = _gaia_ln_gamma(a_top, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
@@ -1246,7 +1326,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                 w_edge = cell_weight[s, 0]
                 if dens > 0.0 and w_edge > 0.0:
                     s0 = math.log(dens * w_edge / a_c0) + ln_tail
-                    nondet_ln = _nondet_ln_sum(a_c0, active_full, base, slope_b,
+                    nondet_ln = _nondet_ln_sum(a_c0, active_full, detected_full, base, slope_b,
                                                 template_log[th], curve_rows[s], band_a, band_c, band_n, lam)
                     s1 = s0 + nondet_ln
                     gaia_ln = _gaia_ln_gamma(a_c0, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
@@ -1264,7 +1344,8 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
 
 
 def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, cell_weight,
-             template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask, gaia_inputs):
+             template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask,
+             detected_mask, gaia_inputs):
     """`(ln_lambda2, ln_lambda0, ln_lambda1, a_post, a2_post)`: `ln <Lambda_C>_s
     (theta)` of SPEC_BMSTP_DRAFT.md section 4.2, plus `ln A_C(s)` (section
     1.3) -- everything the fitter's evidence sum needs from the prior --
@@ -1312,10 +1393,13 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
     factor's own flux prediction at each cell's `a*`; `curve_rows`
     (`n, 8, max_n`, `likelihood.Batch`'s own per-source measured
     completeness curve), `band_a`/`band_c`/`band_n` (`8,`, region-wide)
-    and `nondet_mask` (`n, 8`) are the same completeness inputs
-    `fittp.likelihood.prepare`/`_ln_nondet` read, at the clamped mark, for
-    the top-K record's own reporting value -- here read at every cell
-    instead, inside `_cell_sum`.
+    and `nondet_mask`/`detected_mask` (`n, 8` each) are the same
+    completeness inputs `fittp.likelihood.prepare`/`_ln_nondet` read, at
+    the clamped mark, for the top-K record's own reporting value -- here
+    read at every cell instead, inside `_cell_sum`. `detected_mask`
+    (FINDINGS.md S03 / `briefs/round6_2026-10-22/
+    U02_nondet_conditional.md`) is the companion the conditional
+    comonotone term needs beside `nondet_mask`.
 
     NONDET2 brief section 1 (C7 brief Part A amended): `gaia_inputs` is
     `gaia.GaiaTerm.cell_inputs`'s own return for this block's `rows` and
@@ -1368,7 +1452,8 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
                       np.asarray(band_a, dtype=np.float64),
                       np.asarray(band_c, dtype=np.float64),
                       np.asarray(band_n, dtype=np.int64),
-                      np.ascontiguousarray(np.asarray(nondet_mask)), float(constants.LAMBDA),
+                      np.ascontiguousarray(np.asarray(nondet_mask)),
+                      np.ascontiguousarray(np.asarray(detected_mask)), float(constants.LAMBDA),
                       np.ascontiguousarray(matched), np.ascontiguousarray(g_s, dtype=np.float64),
                       np.ascontiguousarray(a_x, dtype=np.float64),
                       np.ascontiguousarray(g0_mag, dtype=np.float64),
