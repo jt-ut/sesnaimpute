@@ -3419,7 +3419,12 @@ REGISTRY = {
         "measured band the diagonal is the catalog error, recovered in mJy as 10**x "
         "times 2.3026 times s. An entry between a measured and an estimated band is "
         "not zero and is needed for a color across the pair; between two measured "
-        "bands it is zero."),
+        "bands it is zero. This is the fit's own uncertainty: the prior enters only "
+        "through the weight each model carries, never by moving a predicted flux, "
+        "so it is not a credible interval over the true brightness. It carries no "
+        "uncertainty between classes, since it is built from the one class the "
+        "source was assigned to, and it is a local approximation at that class's "
+        "own fixed weights, not an exact uncertainty under every reweighting."),
     ("posterior_classification_source", "LOG10_CANDIDATE_FLUX"): ("log10 of flux in mJy",
         "The same spectrum under each class in turn, CLASSES order then band order. "
         "A measured band holds log10 of the catalog flux; the rest hold that "
@@ -3544,12 +3549,18 @@ _SWEEP_FIT_READINGS = {
     "LOG10_FLUX_MEAN": ("log10 of flux in mJy",
         "This class's estimate of the eight-band spectrum, band order J, H, Ks, "
         "3.6, 4.5, 5.8, 8.0 and 24 micron, averaging its models by their share of "
-        "the support for the source. 10**x is a flux in mJy."),
+        "the support for the source. 10**x is a flux in mJy. The prior enters only "
+        "through each model's share of the support, never by moving a model's own "
+        "predicted flux, so this is the fit's own weighted prediction, not a "
+        "posterior mean of the true brightness."),
     "LOG10_FLUX_COV": ("squared dex",
         "Covariance of those eight values, one dex being a factor of 10. It "
         "combines disagreement between this class's models with the precision of "
         "the fitted brightness and extinction. sqrt(diagonal) is the uncertainty in "
-        "log flux."),
+        "log flux. This is the fit's own uncertainty, with the prior entering only "
+        "through the model weights, not a posterior credible interval; it is a "
+        "local approximation at those weights' own fixed values, not an exact "
+        "uncertainty under every reweighting."),
     "A_K_POST": ("magnitudes of K-band extinction",
         "The fitted extinction in front of the source if it belongs to this class, "
         "averaging each model's own fitted range over all models and both "
