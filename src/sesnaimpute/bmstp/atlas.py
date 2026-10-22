@@ -518,6 +518,14 @@ def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
     p_cat = np.empty((n_pix, n_mem), dtype=np.float64)
     p_cat_i2 = np.empty((n_pix, n_mem), dtype=np.float64)
     flux_i2 = np.empty((n_pix, n_mem), dtype=np.float64)
+    # a column constant across the call's pixels (STAR/PAHC/AGB pass
+    # `a_col` all ones, C26) makes `a`, the dimming and the attenuated flux
+    # identical for every pixel: they are formed for ONE pixel row and
+    # broadcast, the same elementwise arithmetic on the same values done
+    # once instead of `n_pix` times. Only the completeness lookups (per
+    # pixel row) stay per pixel.
+    const_col = n_pix > 0 and bool(np.all(a_col == a_col[0]))
+    a_src = a_col[:1] if const_col else a_col
     # member sub-blocks of `_MEMBER_SUBBLOCK` (F4 2026-10-09 "change B"):
     # every array below is the SAME elementwise-per-(pixel,member)
     # computation on a slice of the member axis, so splitting it changes
@@ -544,14 +552,14 @@ def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
         # a bit-identical reorganisation of the same arithmetic, not an
         # approximation.
         u_unique, inverse = np.unique(u_s, return_inverse=True)
-        a_unique = a_col[:, None] * u_unique[None, :]  # (n_pix, n_unique)
+        a_unique = a_src[:, None] * u_unique[None, :]  # (n_pix or 1, n_unique)
         w_ramp_unique = selection_module.law_dense_weight(a_unique)
         kappa_unique = selection_module.kappa_hybrid(config, w_ramp_unique)  # (n_pix, n_unique, 8)
         dimming_unique = 0.4 * a_unique[:, :, None] * kappa_unique  # (n_pix, n_unique, 8)
         # exponentiated on the distinct values, THEN gathered: the same
         # elementwise `10.0 ** (-x)` on the same floats, bit-identical
         attenuation = (10.0 ** (-dimming_unique))[:, inverse, :]  # (n_pix, n_sub, 8): gathered to the sub-block
-        flux = flux0_s[None, :, :] * attenuation  # (n_pix, n_sub, 8)
+        flux = flux0_s[None, :, :] * attenuation  # (n_pix or 1, n_sub, 8)
         has_flux = flux0_s[None, :, :] > 0.0  # (1, n_sub, 8), broadcasts
         # per band, the MEASURED completeness curve at this pixel's own
         # row (`catalog.completeness.completeness_many`, the design's one
@@ -559,12 +567,13 @@ def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
         # band over the sub-block's own (pixel, member) flux pairs,
         # capped at the owner's `C_CAP` (`catalogued_probability`'s own
         # docstring).
-        p = np.empty_like(flux)
+        pair_shape = (n_pix, mstop - mstart)
+        p = np.empty(pair_shape + (N_BANDS,), dtype=np.float64)
         rows_flat = np.ascontiguousarray(
-            np.broadcast_to(pixel_row[:, None], flux.shape[:2])).ravel()  # one per sub-block
+            np.broadcast_to(pixel_row[:, None], pair_shape)).ravel()  # one per sub-block
         for bi, band in enumerate(BAND_KEYS):
             curve_b, g0_b, dm_b, n_b, a_b, c_b, scale_b = band_params[band]
-            flux_b = flux[:, :, bi]
+            flux_b = flux[:, :, bi]  # (n_pix or 1, n_sub)
             has_b = has_flux[:, :, bi]
             if not has_b.any():  # no member carries flux here: p is exactly 0.0 (the `np.where` below)
                 p[:, :, bi] = 0.0
@@ -572,8 +581,8 @@ def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
             log10_f_b = np.log10(np.where(has_b, flux_b, 1.0))
             c_vals = completeness_module.completeness_many(
                 curve_b, rows_flat, g0_b, dm_b, n_b,
-                np.ascontiguousarray(log10_f_b).ravel(), a_b, c_b, scale_b
-            ).reshape(flux_b.shape)
+                np.ascontiguousarray(np.broadcast_to(log10_f_b, pair_shape)).ravel(), a_b, c_b, scale_b
+            ).reshape(pair_shape)
             p[:, :, bi] = np.where(has_b, np.minimum(c_vals, completeness_module.C_CAP), 0.0)
         # the one survey-wide mixture weight: LAMBDA = 1.0 (comonotone) and
         # LAMBDA = 0.0 (independent) are exact endpoints, so each computes
@@ -689,7 +698,24 @@ def _xi_bin_index(u):
     return np.clip(idx, 0, n_x - 1), valid
 
 
-def _accumulate_dimmed_hist(hist, x_idx_c, valid_x_c, flux_i2, p_cat, w_c):
+def _dimmed_hist_indices(x_idx_c, valid_x_c, flux_i2):
+    """`(valid, packed)` or `None`: the class-independent half of
+    `_accumulate_dimmed_hist` -- the (pixel, member) pairs that land inside the
+    array and their packed cell indices, formed once per chunk and reused
+    for every class weight (STAR/PAHC share one `flux_i2`). `None` when no
+    pair lands."""
+    n_b = grid.LOG10_F45_EDGES.size - 1
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log10_f45 = np.log10(flux_i2)
+    y_idx = np.searchsorted(grid.LOG10_F45_EDGES, log10_f45, side="right") - 1
+    valid = np.isfinite(log10_f45) & (y_idx >= 0) & (y_idx < n_b) & valid_x_c[None, :]
+    if not np.any(valid):
+        return None
+    x_bcast = np.broadcast_to(x_idx_c[None, :], flux_i2.shape)
+    return valid, x_bcast[valid] * n_b + y_idx[valid]
+
+
+def _accumulate_dimmed_hist(hist, indices, p_cat, w_c):
     """Add one pixel-batch/member-chunk's own contribution to `hist`
     (n_x, n_b), in place -- C29's dimmed-axis check, computed inside the
     SAME member batches `catalogued_fraction`'s caller already runs, no
@@ -710,17 +736,12 @@ def _accumulate_dimmed_hist(hist, x_idx_c, valid_x_c, flux_i2, p_cat, w_c):
     index uses `np.searchsorted` against `grid.LOG10_F45_EDGES` directly,
     the same `np.histogram2d` convention `_xi_bin_index`'s own docstring
     explains (no edge nudge on this axis: `grid.bin` never nudges its own
-    `log10_f45` samples either, so none is needed here)."""
-    n_b = grid.LOG10_F45_EDGES.size - 1
-    with np.errstate(divide="ignore", invalid="ignore"):
-        log10_f45 = np.log10(flux_i2)
-    y_idx = np.searchsorted(grid.LOG10_F45_EDGES, log10_f45, side="right") - 1
-    valid = np.isfinite(log10_f45) & (y_idx >= 0) & (y_idx < n_b) & valid_x_c[None, :]
-    if not np.any(valid):
+    `log10_f45` samples either, so none is needed here). `indices` is
+    `_dimmed_hist_indices`' own result for this chunk (class-independent)."""
+    if indices is None:
         return
-    x_bcast = np.broadcast_to(x_idx_c[None, :], flux_i2.shape)
+    valid, packed = indices
     weight = p_cat * w_c[None, :]
-    packed = x_bcast[valid] * n_b + y_idx[valid]
     counts = np.bincount(packed, weights=weight[valid], minlength=hist.size)
     hist += counts.reshape(hist.shape)
 
@@ -813,7 +834,8 @@ def catalogued_fraction(a_col, u, xi, flux0, w, f_lim, pixel_row, band_params, c
             weighted_bright10 += (catalogued_i2_measured * bright10) @ w_c
 
             _accumulate_dimmed_hist(
-                dimmed_hist, x_idx[mstart:mstop], valid_x[mstart:mstop], flux_i2,
+                dimmed_hist,
+                _dimmed_hist_indices(x_idx[mstart:mstop], valid_x[mstart:mstop], flux_i2),
                 weight_pix[start:stop, None] * p_cat, w_c)
         frac[start:stop] = weighted_sum / w_sum
         frac_bright3[start:stop] = weighted_bright3 / w_sum
@@ -850,7 +872,8 @@ def catalogued_fraction_pair(a_col, u, xi, flux0, w_a, w_b, f_lim, pixel_row, ba
     one per class since they differ in their member WEIGHT (`w_a`/`w_b`)
     even though they share one `p_cat`/`flux_i2` evaluation -- the same
     `_accumulate_dimmed_hist` call, run twice per chunk (once per class's
-    own weight), no second `catalogued_probability` evaluation."""
+    own weight) on ONE `_dimmed_hist_indices` result, no second
+    `catalogued_probability` evaluation."""
     n_mem = u.size
     n_pix = a_col.size
     w_a_sum = float(w_a.sum())
@@ -912,8 +935,9 @@ def catalogued_fraction_pair(a_col, u, xi, flux0, w_a, w_b, f_lim, pixel_row, ba
 
             weighted_pix_p_cat = weight_pix[start:stop, None] * p_cat
             x_idx_c, valid_x_c = x_idx[mstart:mstop], valid_x[mstart:mstop]
-            _accumulate_dimmed_hist(dimmed_hist_a, x_idx_c, valid_x_c, flux_i2, weighted_pix_p_cat, wa_c)
-            _accumulate_dimmed_hist(dimmed_hist_b, x_idx_c, valid_x_c, flux_i2, weighted_pix_p_cat, wb_c)
+            hist_indices = _dimmed_hist_indices(x_idx_c, valid_x_c, flux_i2)  # shared by both classes
+            _accumulate_dimmed_hist(dimmed_hist_a, hist_indices, weighted_pix_p_cat, wa_c)
+            _accumulate_dimmed_hist(dimmed_hist_b, hist_indices, weighted_pix_p_cat, wb_c)
         frac_a[start:stop] = weighted_sum_a / w_a_sum_safe
         frac_bright3_a[start:stop] = weighted_bright3_a / w_a_sum_safe
         frac_bright10_a[start:stop] = weighted_bright10_a / w_a_sum_safe
