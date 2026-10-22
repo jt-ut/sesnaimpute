@@ -701,8 +701,8 @@ def _accumulate_dimmed_hist(hist, x_idx_c, valid_x_c, flux_i2, p_cat, w_c):
     hist += counts.reshape(hist.shape)
 
 
-def catalogued_fraction(a_col, u, flux0, w, f_lim, pixel_row, band_params, config, weight_pix, tick=None):
-    """`(frac, frac_bright3, frac_bright10, s_member, dimmed_hist)`: the weighted,
+def catalogued_fraction(a_col, u, xi, flux0, w, f_lim, pixel_row, band_params, config, weight_pix, tick=None):
+    """`(frac, frac_bright3, frac_bright10, dimmed_hist)`: the weighted,
     deterministic quadrature over a class's WHOLE population (SPEC_BMSTP_DRAFT.md
     sec. 8) -- exact up to the population's own binning, for every class (GAL
     first, sec. 5.4). `w` (n_mem,) is each member's own population weight, on any
@@ -715,26 +715,27 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, pixel_row, band_params, confi
     `frac` (n_pix,) = `(p_cat @ w) / w.sum()`; `frac_bright3`/`frac_bright10` (sec. 9
     "the bright-end count ratio") the same weighted mean restricted to members whose
     dimmed I2 flux exceeds 3x/10x the pixel's own I2 50% limit -- the exact condition
-    the catalogue side applies to a catalogued source. `s_member` (n_mem,) =
-    `sum_pix weight_pix[pix] * p_cat[pix, m]`, the pixel-area-weighted catalogued
-    probability of that member over the whole region, exact per member (a region
-    total built from `density * (w / w.sum()) @ s_member` needs no further error
-    term: the quadrature is exact, not a draw).
+    the catalogue side applies to a catalogued source.
+
+    `u` (n_mem,) is the member's own dimming input: `catalogued_probability`
+    forms `a = a_col * u` from it (C26: STAR/PAHC/AGB pass `a_col` fixed at 1
+    and `u` the member's absolute A_STAR_K; the other classes pass the real
+    column and `u` = XI). `xi` (n_mem,) is the member's own XI, used ONLY to
+    place it in `dimmed_hist`'s XI axis (the same axis `N_CELL` is binned on);
+    where `u` already is XI the caller passes the same array for both.
 
     `dimmed_hist` (n_x, n_b), RAW (unsmoothed, unnormalised) weighted counts (C29):
     every (pixel, member) pair's own `weight_pix[pix] * p_cat[pix, m] * w[m]` binned
-    at the member's own xi cell and THIS PIXEL's own DIMMED I2 flux cell -- the
-    per-bin predicted-catalogued-count CHECK's own histogram, which (unlike
-    `s_member`) cannot collapse to one point per member, since dimming (and so the
-    bin a member's own catalogued probability lands in) varies pixel to pixel. The
-    caller still forms its own `n_cat_cell` from this the same way it forms one
-    from `s_member` today -- `_safe_cell_bin_counts` in place of `_safe_cell_bin` --
-    scaling by whatever per-class, per-member-independent factor (`density /
-    w.sum()`, or just `1 / w.sum()` where density is already folded into
-    `weight_pix`) it already applies to `s_member`-based `c_m`. No second pass over
-    members: `_accumulate_dimmed_hist` reads the SAME `p_cat`/`flux_i2` this
-    function's own pixel-batch/member-chunk loop already computed for `frac`/
-    `s_member`.
+    at the member's own `xi` cell and THIS PIXEL's own DIMMED I2 flux cell -- the
+    per-bin predicted-catalogued-count CHECK's own histogram, which cannot
+    collapse to one point per member, since dimming (and so the bin a member's
+    own catalogued probability lands in) varies pixel to pixel. The caller forms
+    its own `n_cat_cell` from this with `_safe_cell_bin_counts`, scaling by
+    whatever per-class, per-member-independent factor (`density / w.sum()`, or
+    just `1 / w.sum()` where density is already folded into `weight_pix`) applies.
+    No second pass over members: `_accumulate_dimmed_hist` reads the SAME
+    `p_cat`/`flux_i2` this function's own pixel-batch/member-chunk loop already
+    computed for `frac`.
 
     Processed in pixel batches of `_pixel_batch_size` (rule 10b): each batch is the
     same elementwise-per-pixel computation on a slice of `a_col`/`f_lim`/`pixel_row`,
@@ -747,18 +748,17 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, pixel_row, band_params, confi
     member axis is chunked too, sized to the batch's own pixel count). Each chunk's
     weighted sum accumulates into `frac`/`frac_bright3`/`frac_bright10` (a sum over
     disjoint member chunks is exact, no result changes for a member set that fit
-    before) and fills its own slice of `s_member` directly; `dimmed_hist` accumulates
-    the same way, in place, across every batch and chunk."""
+    before); `dimmed_hist` accumulates the same way, in place, across every batch
+    and chunk."""
     n_mem = u.size
     n_pix = a_col.size
     w_sum = float(w.sum())
     frac = np.empty(n_pix, dtype=np.float64)
     frac_bright3 = np.empty(n_pix, dtype=np.float64)
     frac_bright10 = np.empty(n_pix, dtype=np.float64)
-    s_member = np.zeros(n_mem, dtype=np.float64)
     n_x, n_b = grid.LOG10_XI_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1
     dimmed_hist = np.zeros((n_x, n_b), dtype=np.float64)
-    x_idx, valid_x = _xi_bin_index(u)
+    x_idx, valid_x = _xi_bin_index(xi)
     batch = _pixel_batch_size(n_mem)
     n_batches = (n_pix + batch - 1) // batch
     for b, start in enumerate(range(0, n_pix, batch)):
@@ -788,7 +788,6 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, pixel_row, band_params, confi
             weighted_bright3 += (catalogued_i2_measured * bright3) @ w_c
             weighted_bright10 += (catalogued_i2_measured * bright10) @ w_c
 
-            s_member[mstart:mstop] += weight_pix[start:stop] @ p_cat
             _accumulate_dimmed_hist(
                 dimmed_hist, x_idx[mstart:mstop], valid_x[mstart:mstop], flux_i2,
                 weight_pix[start:stop, None] * p_cat, w_c)
@@ -797,28 +796,25 @@ def catalogued_fraction(a_col, u, flux0, w, f_lim, pixel_row, band_params, confi
         frac_bright10[start:stop] = weighted_bright10 / w_sum
         if tick is not None:
             tick(b + 1, n_batches)
-    return frac, frac_bright3, frac_bright10, s_member, dimmed_hist
+    return frac, frac_bright3, frac_bright10, dimmed_hist
 
 
-def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, pixel_row, band_params, config, weight_pix):
+def catalogued_fraction_pair(a_col, u, xi, flux0, w_a, w_b, f_lim, pixel_row, band_params, config, weight_pix):
     """`(frac_a, frac_bright3_a, frac_bright10_a, frac_b, frac_bright3_b,
-    frac_bright10_b, s_member, dimmed_hist_a, dimmed_hist_b)`:
+    frac_bright10_b, dimmed_hist_a, dimmed_hist_b)`:
     `catalogued_fraction`'s own quadrature, run ONCE for two classes that
     share one member set (STAR/PAHC, `_build_one_tile`, F4 2026-10-09
     'change C') instead of once each.
-    `u`/`flux0` are the two classes' shared collapsed cells (their
-    weights' own UNION support); `w_a`/`w_b` are each class's own weight
+    `u`/`xi`/`flux0` are the two classes' shared collapsed cells (their
+    weights' own UNION support); `u` is the dimming input and `xi` the XI that
+    places a cell in the dimmed histograms (`catalogued_fraction`'s own
+    docstring); `w_a`/`w_b` are each class's own weight
     over that SAME union, zero wherever a cell belongs to the other
     class only. `catalogued_probability` depends on `a_col`/`u`/`flux0`/
     `pixel_row`/`band_params` only, never on the weight, so it is evaluated
     once per pixel batch/member chunk and both classes' weighted sums
     are formed from that ONE evaluation (a zero weight contributes
-    exactly 0.0 to a dot product, `x + w*0 == x`). `s_member` -- `sum_pix
-    weight_pix[pix] * p_cat[pix, m]` -- does not depend on either
-    weight at all, so it is the SAME single array for both classes (not
-    one each): a cell both classes share gets one `s_member` value,
-    read by both classes' own `c_m = density * (w / w.sum()) *
-    s_member` downstream. Chunked exactly as `catalogued_fraction`, over
+    exactly 0.0 to a dot product, `x + w*0 == x`). Chunked exactly as `catalogued_fraction`, over
     the union's own member count -- bit-identical to summing `w_a`/`w_b`
     separately is NOT claimed (the union's member count sets different
     pixel-batch/member-chunk boundaries than each class's own former,
@@ -849,11 +845,10 @@ def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, pixel_row, band_p
     frac_b = np.empty(n_pix, dtype=np.float64)
     frac_bright3_b = np.empty(n_pix, dtype=np.float64)
     frac_bright10_b = np.empty(n_pix, dtype=np.float64)
-    s_member = np.zeros(n_mem, dtype=np.float64)
     n_x, n_b = grid.LOG10_XI_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1
     dimmed_hist_a = np.zeros((n_x, n_b), dtype=np.float64)
     dimmed_hist_b = np.zeros((n_x, n_b), dtype=np.float64)
-    x_idx, valid_x = _xi_bin_index(u)
+    x_idx, valid_x = _xi_bin_index(xi)
     batch = _pixel_batch_size(n_mem)
     for start in range(0, n_pix, batch):
         stop = min(start + batch, n_pix)
@@ -891,7 +886,6 @@ def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, pixel_row, band_p
             weighted_bright3_b += cat_bright3 @ wb_c
             weighted_bright10_b += cat_bright10 @ wb_c
 
-            s_member[mstart:mstop] += weight_pix[start:stop] @ p_cat
             weighted_pix_p_cat = weight_pix[start:stop, None] * p_cat
             x_idx_c, valid_x_c = x_idx[mstart:mstop], valid_x[mstart:mstop]
             _accumulate_dimmed_hist(dimmed_hist_a, x_idx_c, valid_x_c, flux_i2, weighted_pix_p_cat, wa_c)
@@ -903,7 +897,7 @@ def catalogued_fraction_pair(a_col, u, flux0, w_a, w_b, f_lim, pixel_row, band_p
         frac_bright3_b[start:stop] = weighted_bright3_b / w_b_sum_safe
         frac_bright10_b[start:stop] = weighted_bright10_b / w_b_sum_safe
     return (frac_a, frac_bright3_a, frac_bright10_a,
-            frac_b, frac_bright3_b, frac_bright10_b, s_member,
+            frac_b, frac_bright3_b, frac_bright10_b,
             dimmed_hist_a, dimmed_hist_b)
 
 
@@ -1025,9 +1019,8 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     here by this call's one per-member-independent factor `density /
     w.sum()` (`_safe_cell_bin_counts`, in place of `_safe_cell_bin`).
     `n_cell_tile` (128, 110) is the SAME members quadrature with the
-    tile's own pixel-area total (`weight_pix.sum()`) standing in for
-    `s_member` -- every member's own probability of being catalogued set
-    to one, no flux cut, no dimming, STILL binned at the member's own
+    tile's own pixel-area total (`weight_pix.sum()`) -- every member's
+    own probability of being catalogued set to one, no flux cut, no dimming, STILL binned at the member's own
     UNDIMMED `log10 F_4.5` (module docstring): `c_m_all = density * (w /
     w.sum()) * weight_pix.sum()`, the same `_safe_cell_bin(u, log10
     F_4.5, c_m_all)` as before C29. The two axes now differing, `n_cat_
@@ -1079,8 +1072,7 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     w_pahc_only = w_star * p_pahc
 
     # each pixel's own share of the tile's admitted area (sec. 8): the
-    # coefficient `catalogued_fraction`'s `s_member` and the cell grid's
-    # own catalogued count per member are built from.
+    # coefficient the cell grid's own count per member is built from.
     weight_pix = coverage_in_tile * _HPX512_PIXEL_DEG2
     n_x, n_b = grid.LOG10_XI_EDGES.size - 1, grid.LOG10_F45_EDGES.size - 1
 
@@ -1119,11 +1111,12 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
         # (the retired pattern: beyond the Edenhofer cube's edge that
         # recombination would silently drop the far-field reddening XI's
         # own clip discards). `u_u` (XI, clipped) still only sets the
-        # cell's grid position (`_safe_cell_bin` below), never the dimming.
+        # cell's grid position (`_safe_cell_bin` below and the dimmed
+        # histogram's XI axis, passed as `xi`), never the dimming.
         (frac_star, fb3_star, fb10_star,
-         frac_pahc, fb3_pahc, fb10_pahc, s_member,
+         frac_pahc, fb3_pahc, fb10_pahc,
          dimmed_hist_star, dimmed_hist_pahc) = catalogued_fraction_pair(
-            np.ones_like(a_col_in_tile), a_star_u, flux0_u, w_star_u, w_pahc_u, f_lim_in_tile,
+            np.ones_like(a_col_in_tile), a_star_u, u_u, flux0_u, w_star_u, w_pahc_u, f_lim_in_tile,
             pixel_row_in_tile, band_params, config, weight_pix)
         for cls, density, w_u, frac, frac_bright3, frac_bright10, dimmed_hist in (
                 ("STAR", density_star, w_star_u, frac_star, fb3_star, fb10_star, dimmed_hist_star),
@@ -1184,8 +1177,8 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
             flux0_agb[:, k] = f_band * scale
         # C26: each AGB member's own shell carries its OWN star's A_STAR_K
         # (absolute), not a_col_in_tile's per-pixel column times XI.
-        frac_agb, frac_agb_bright3, frac_agb_bright10, s_member_agb, dimmed_hist_agb = catalogued_fraction(
-            np.ones_like(a_col_in_tile), a_star_agb, flux0_agb, w_agb_member, f_lim_in_tile,
+        frac_agb, frac_agb_bright3, frac_agb_bright10, dimmed_hist_agb = catalogued_fraction(
+            np.ones_like(a_col_in_tile), a_star_agb, u_agb, flux0_agb, w_agb_member, f_lim_in_tile,
             pixel_row_in_tile, band_params, config, weight_pix)
         w_sum_agb = float(w_agb_member.sum())
         # C29: N_CAT_CELL_AGB bins at the dimmed I2 flux; N_CELL_AGB is
@@ -1483,7 +1476,7 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
     caller), crossed with YSO's own depth nodes (the same `p(x)`, no
     second depth quadrature). H2S's own density is `l_of_pix_in_sl *
     eta_r * eps_ext` (sec. 5.6 "Sky density"), folded directly into the
-    `weight_pix` `catalogued_fraction` receives, so its own `s_member`
+    `weight_pix` `catalogued_fraction` receives, so its own `dimmed_hist`
     already carries the density factor.
 
     `pixel_row_in_sl` (n_pix_in_sl,) is this sightline's own slice of
@@ -1492,23 +1485,19 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
     `catalogued_fraction` directly, never a region-wide width. `weight_pix`
     (n_pix_in_sl,) is this sightline's own pixels' coverage times pixel area.
 
-    Cell grids (W67c's own construction): `c_m = (w_m/w.sum()) *
-    s_member[m]`, `s_member` `catalogued_fraction`'s own pixel-area-
-    weighted catalogued probability per member -- for YSO the `weight_pix`
+    Cell grids (W67c's own construction): for YSO the `weight_pix`
     argument passed to `catalogued_fraction` already carries
     `density_yso` (per pixel, since the young-star law varies pixel to
     pixel even within one sightline), and for H2S it already carries
-    `l_of_pix_in_sl * eta_r * eps_ext`, so `s_member` in both cases is
-    already density-weighted and no second multiply is needed;
-    `grid.bin(u, log10 F_4.5, c_m) * c_m.sum()` with `log10 F_4.5` the
-    member's own undimmed `log10 flux0[:, IDX_I2]`. `n_cell_yso`/
-    `n_cell_h2s` are the SAME members quadrature with every member's own
-    probability of being catalogued set to one: `s_member`'s pixel sum
-    (`sum_pix weight_pix[pix] * p_cat[pix, m]`) is the same for every
-    member once `p_cat` is one, so it collapses to the sightline's own
-    density-weighted pixel-area total (`(density_yso * weight_pix).sum()`
-    for YSO, `weight_h2s.sum()` for H2S) -- `c_m_all = (w / w.sum()) *
-    that total`, binned the same way. No `rng`, no `seed`:
+    `l_of_pix_in_sl * eta_r * eps_ext`, so `dimmed_hist` in both cases is
+    already density-weighted and no second multiply is needed.
+    `n_cell_yso`/`n_cell_h2s` are the SAME members quadrature with every
+    member's own probability of being catalogued set to one, binned at the
+    member's own undimmed `log10 flux0[:, IDX_I2]`: the pixel sum
+    (`sum_pix weight_pix[pix]`) is the same for every member, so it
+    collapses to the sightline's own density-weighted pixel-area total
+    (`(density_yso * weight_pix).sum()` for YSO, `weight_h2s.sum()` for
+    H2S) -- `c_m_all = (w / w.sum()) * that total`. No `rng`, no `seed`:
     every factor here is a deterministic quadrature, so this call induces
     no correlation between sightlines and no error term of its own."""
     band_params = _completeness_band_params(config, region)
@@ -1518,8 +1507,8 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
     xi_centers, w_depth = _depth_nodes(loaded_profile, sl_row, d_front, d_back)
 
     u_yso, flux0_yso_full, w_yso_full = _combine_with_depth(flux0_ts, w_ts, xi_centers, w_depth)
-    frac_yso, frac_yso_bright3, frac_yso_bright10, s_member_yso, dimmed_hist_yso = catalogued_fraction(
-        a_col_in_sl, u_yso, flux0_yso_full, w_yso_full, f_lim_in_sl, pixel_row_in_sl, band_params, config,
+    frac_yso, frac_yso_bright3, frac_yso_bright10, dimmed_hist_yso = catalogued_fraction(
+        a_col_in_sl, u_yso, u_yso, flux0_yso_full, w_yso_full, f_lim_in_sl, pixel_row_in_sl, band_params, config,
         weight_pix=density_yso * weight_pix)
     # C29: N_CAT_CELL_YSO bins at the dimmed I2 flux (`dimmed_hist_yso`,
     # density already folded into `weight_pix` above, so `scale` here is
@@ -1532,8 +1521,8 @@ def _build_one_sightline(config, region, sl_row, a_col_in_sl, a_col_gas_in_sl, a
 
     u_h2s, flux0_h2s_full, w_h2s_full = _combine_with_depth(flux0_br, w_br, xi_centers, w_depth)
     weight_h2s = l_of_pix_in_sl * eta_r * density_module.EPS_EXT * weight_pix
-    frac_h2s, frac_h2s_bright3, frac_h2s_bright10, s_member_h2s, dimmed_hist_h2s = catalogued_fraction(
-        a_col_in_sl, u_h2s, flux0_h2s_full, w_h2s_full, f_lim_in_sl, pixel_row_in_sl, band_params, config,
+    frac_h2s, frac_h2s_bright3, frac_h2s_bright10, dimmed_hist_h2s = catalogued_fraction(
+        a_col_in_sl, u_h2s, u_h2s, flux0_h2s_full, w_h2s_full, f_lim_in_sl, pixel_row_in_sl, band_params, config,
         weight_pix=weight_h2s)
     n_cat_cell_h2s = _safe_cell_bin_counts(dimmed_hist_h2s, 1.0 / w_h2s_full.sum())
     weight_pix_h2s_total = float(weight_h2s.sum())
@@ -1739,7 +1728,7 @@ def _gal_pixel_chunks(config, n_pix):
     (`np.array_split`): GAL's own pieces in `build_region`'s one flat piece
     list (owner's ruling: one pool, one flat list across tiles, GAL,
     sightlines and the tail, parent reduces in a fixed order). Kept at
-    exactly `config.n_jobs` chunks: `catalogued_fraction`'s own `s_member`
+    exactly `config.n_jobs` chunks: `catalogued_fraction`'s own `dimmed_hist`
     sums across chunks exactly wherever the chunk boundaries are these
     same ones (F4 risk 2), so a different chunk count would move the
     region's GAL numbers at their last bit."""
@@ -1762,7 +1751,7 @@ def _gal_chunk_result(config, region, gal_members, idx, a_col, f_lim, pixel_row,
     flux0, u, w, _log10_s, _density, _n_before, _n_after = gal_members
     band_params = _completeness_band_params(config, region)
     return catalogued_fraction(
-        a_col[idx], u, flux0, w, f_lim[idx], pixel_row[idx], band_params, config,
+        a_col[idx], u, u, flux0, w, f_lim[idx], pixel_row[idx], band_params, config,
         weight_pix=weight_pix_all[idx])
 
 
@@ -1776,26 +1765,22 @@ def _gal_reduce(gal_members, chunk_results, weight_pix_all):
     `_gal_pixel_chunks` built them -- this reduction is exactly what the
     former `_gal_catalogued_fraction` did with its own `Parallel` call's
     results). `frac`/`frac_bright3`/`frac_bright10` concatenate in pixel
-    order (contiguous chunks keep the axis ordered); `s_member` values are
-    SUMMED (`catalogued_fraction`'s own docstring: `s_member` is a sum
-    over pixels, so splitting the pixel axis and adding the pieces back is
-    exact). The cell grid below is formed once from that summed
-    `s_member`, exactly as when one call held every pixel.
+    order (contiguous chunks keep the axis ordered); `dimmed_hist` values are
+    SUMMED (a sum over pixels, so splitting the pixel axis and adding the
+    pieces back is exact). The cell grid below is formed once from that
+    summed `dimmed_hist`, exactly as when one call held every pixel.
 
     `n_cat_cell` (128, 110): the region's expected number of catalogued
     GAL objects per parameter cell (module docstring), the same one-cell
     smoothing and wall fold every stored shape carries (`grid.bin`), so
-    the region grid and the shapes share one convention. Each member's own
-    expected catalogued count in the region is `c_m = density * (w_m /
-    w.sum()) * s_member[m]` (the population's own weight share times its
-    pixel-area-weighted catalogued probability over the region,
-    `catalogued_fraction`'s `s_member`); `_safe_cell_bin(u, log10_s, c_m)`
-    guards the `c_m.sum() == 0` case the same way as every other class's
-    own cell grid (`_safe_cell_bin`'s own docstring). The mass `grid.bin`'s
+    the region grid and the shapes share one convention. `n_cat_cell` is the
+    summed `dimmed_hist` scaled by `density / w.sum()` (`_safe_cell_bin_counts`,
+    which guards the empty case the same way `_safe_cell_bin` does for every
+    other class's own cell grid). The mass `grid.bin`'s
     own edges drop is not stored (expected ~= 0 for GAL, sec. 5.4's
     population sitting well inside the grid). `n_cell` (128, 110) is the
     SAME quadrature with every member's own probability of being
-    catalogued set to one: `s_member`'s pixel sum collapses to the
+    catalogued set to one: the pixel sum collapses to the
     region's own coverage-weighted pixel-area total (`weight_pix_all.
     sum()`, the same for every member), `c_m_all = density * (w / w.sum())
     * weight_pix_all.sum()`, `_safe_cell_bin(u, log10_s, c_m_all)`.
@@ -1809,12 +1794,11 @@ def _gal_reduce(gal_members, chunk_results, weight_pix_all):
     frac = np.concatenate([r[0] for r in chunk_results])
     frac_bright3 = np.concatenate([r[1] for r in chunk_results])
     frac_bright10 = np.concatenate([r[2] for r in chunk_results])
-    s_member = sum(r[3] for r in chunk_results)
-    dimmed_hist = sum(r[4] for r in chunk_results)
+    dimmed_hist = sum(r[3] for r in chunk_results)
 
     w_sum = float(w.sum())
     # C29: N_CAT_CELL_GAL bins at the dimmed I2 flux (`dimmed_hist`,
-    # summed across chunks exactly as `s_member` is); N_CELL_GAL is
+    # summed across chunks); N_CELL_GAL is
     # unchanged (undimmed, no selection).
     n_cat_cell = _safe_cell_bin_counts(dimmed_hist, density / w_sum)
     c_m_all = density * (w / w_sum) * float(weight_pix_all.sum())
@@ -2031,14 +2015,14 @@ def _pahn_chunk_result(config, region, pahn_members, density_pahn_pix, idx, a_co
     pattern (`_gal_chunk_result`), but with `weight_pix` already carrying
     this chunk's own INTRINSIC density (`density_pahn_pix[idx]`), the
     SAME construction `_build_one_sightline` uses for H2S's own
-    density-weighted `s_member` (PAHN's own density varies pixel to
+    density-weighted `dimmed_hist` (PAHN's own density varies pixel to
     pixel, unlike GAL's one survey-wide scalar, so it cannot be folded
     in only at the reduction step the way `_gal_reduce` does)."""
     u_pahn, flux0_pahn, w_pahn = pahn_members
     band_params = _completeness_band_params(config, region)
     weight_pix = density_pahn_pix[idx] * weight_pix_all[idx]
     return catalogued_fraction(
-        a_col[idx], u_pahn, flux0_pahn, w_pahn, f_lim[idx], pixel_row[idx], band_params, config,
+        a_col[idx], u_pahn, u_pahn, flux0_pahn, w_pahn, f_lim[idx], pixel_row[idx], band_params, config,
         weight_pix=weight_pix)
 
 
@@ -2046,14 +2030,13 @@ def _pahn_reduce(pahn_members, chunk_results, density_pahn_pix, weight_pix_all):
     """`(frac, frac_bright3, frac_bright10, n_cat_cell, n_cell)` for
     PAHN's own region-wide deterministic quadrature, reduced from
     `_pahn_chunk_result`'s own per-chunk pieces in chunk order (the SAME
-    `_gal_reduce` pattern) -- but `s_member` already carries PAHN's own
-    per-pixel density (`_pahn_chunk_result`'s own `weight_pix`), so `c_m`
-    needs no further density multiply here, unlike `_gal_reduce`'s own
-    `density * (w/w_sum) * s_member` (GAL's one scalar density is never
-    folded into `weight_pix`): `c_m = (w/w_sum) * s_member` directly, the
-    SAME form `_build_one_sightline` uses for H2S's own `c_m_h2s`.
+    `_gal_reduce` pattern) -- but `dimmed_hist` already carries PAHN's own
+    per-pixel density (`_pahn_chunk_result`'s own `weight_pix`), so
+    `n_cat_cell` needs no further density multiply here, unlike
+    `_gal_reduce`'s own `density / w.sum()` (GAL's one scalar density is
+    never folded into `weight_pix`).
     `n_cell` is the SAME quadrature with every member's own probability
-    of being catalogued set to one: `s_member`'s pixel sum collapses to
+    of being catalogued set to one: the pixel sum collapses to
     the region's own density-weighted pixel-area total, `(density_pahn_
     pix * weight_pix_all).sum()`, the SAME construction `_build_one_
     sightline`'s own `weight_pix_yso_total`/`weight_pix_h2s_total` use."""
@@ -2061,13 +2044,12 @@ def _pahn_reduce(pahn_members, chunk_results, density_pahn_pix, weight_pix_all):
     frac = np.concatenate([r[0] for r in chunk_results])
     frac_bright3 = np.concatenate([r[1] for r in chunk_results])
     frac_bright10 = np.concatenate([r[2] for r in chunk_results])
-    s_member = sum(r[3] for r in chunk_results)
-    dimmed_hist = sum(r[4] for r in chunk_results)
+    dimmed_hist = sum(r[3] for r in chunk_results)
 
     w_sum = float(w_pahn.sum())
     log10_f_i2 = np.log10(flux0_pahn[:, IDX_I2])
     # C29: N_CAT_CELL_PAHN bins at the dimmed I2 flux (`dimmed_hist`,
-    # already density-weighted exactly as `s_member` is, `_pahn_chunk_
+    # already density-weighted, `_pahn_chunk_
     # result`'s own `weight_pix`, so `scale` is just `1/w.sum()`
     # unlike `_gal_reduce`'s own `density/w.sum()`); N_CELL_PAHN is
     # unchanged (undimmed, no selection).
