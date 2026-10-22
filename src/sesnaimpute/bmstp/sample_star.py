@@ -369,7 +369,7 @@ def agb_star_distances(config, region, tile_id):
     return np.concatenate([np.repeat(d, n_o), np.repeat(d, n_c)])
 
 
-def sample_agb(config, region, tile_id):
+def sample_agb(config, region, tile_id, star_block=None):
     """AGB's JOINT measure over (template, brightness) on tile `tile_id`,
     as `(x, log10 F_4.5, w, template_index)` (sec. 5.2 "Marks", "Weight";
     FINDINGS.md S10, coordinator's joint-measure ruling): the evolved
@@ -405,7 +405,13 @@ def sample_agb(config, region, tile_id):
     `bmstp.atlas`'s AGB member assembly reads every row directly as one
     catalogued-count member (`x`, `log10_f45`, `w`, and `template_index`
     for its own `F_REF` rescaling) -- no cross product left to build
-    there (coordinator's ruling: "no second crossing")."""
+    there (coordinator's ruling: "no second crossing").
+
+    `star_block`, `(start, stop)` over this tile's EVOLVED stars in their
+    own order (default None = all of them), returns only those stars' rows
+    -- the same rows, chemistry-major within the block, so a caller can
+    stream a tile in bounded blocks of stars (`bmstp.atlas`'s AGB block)
+    and combine the blocks' sums."""
     # local import: `template_weights` imports this module at its own top
     # level (`agb_tau_ratio`'s row-order check against the register), so
     # importing it back at module scope here would be circular.
@@ -420,6 +426,9 @@ def sample_agb(config, region, tile_id):
         star_index = grp["STAR_INDEX"][()].astype(np.int64)[evolved]
         u = grp["XI"][()].astype(np.float64)[evolved]
         w_agb = grp["W_AGB"][()].astype(np.float64)[evolved]
+    if star_block is not None:
+        blk = slice(*star_block)
+        star_index, u, w_agb = star_index[blk], u[blk], w_agb[blk]
     dist_pc_all = _field_star_column(config, region, "DIST_PC")
     log_l_all = _field_star_column(config, region, "LOG_L")
     dist_pc = dist_pc_all[star_index]
