@@ -253,22 +253,37 @@ _FIELD_OF_KEY = {
 }
 
 
-def _register(config, cls):
+def _register(config, cls, region):
     """`(template_log, n_sub, subclass_prob)` for `cls`'s own library
     register (`definitions.CLASS_REGISTER`): `template_log` is `(n_model,
     8)` float32 `log10 F_REF` (floored at the register's own
     `FLOOR_LINEAR`, its FREFRAW convention -- a genuinely dark band is not
     `-inf`), in `definitions.BANDS` order. `subclass_prob` is `(n_model,
     n_sub)` float64, every row summing to 1, in `definitions.
-    SUBCLASSES_OF[cls]`'s own order (P7's `LN_EVIDENCE` column order):
-    the register's own `subclass_prob` group's per-template stage
-    fractions where the register carries one (today, YSO only --
-    WP-PRIOR-1's "ALSO" finding, ledger C1: the register's own evidence
-    that a kept template represents a mixed-stage set, non-one-hot on
-    about 46% of rows); a one-hot row at the register's hard `SUBCLASS`
-    label otherwise, so the subclass evidence below reduces exactly to
-    today's hard-label partition for every class without a
+    SUBCLASSES_OF[cls]`'s own order (P7's `LN_EVIDENCE` column order).
+
+    For every class but YSO: the register's own `subclass_prob` group's
+    per-template stage fractions where the register carries one (no
+    class but YSO does today); a one-hot row at the register's hard
+    `SUBCLASS` label otherwise, so the subclass evidence below reduces
+    exactly to today's hard-label partition for every class without a
     `subclass_prob` group.
+
+    For YSO (S16, round 6 brief U08, FINDINGS.md): the register's own
+    raw `subclass_prob` (WP-PRIOR-1's "ALSO" finding, ledger C1: about
+    46% of rows are a mixed-stage set, non-one-hot) is no longer the
+    conditional subclass probability once `bmstp.template_weights.
+    yso_population_weight` has reweighted the templates across the three
+    census groups -- a template mixed across two DIFFERENT groups must
+    split by the groups' own survey shares, not by its raw register
+    ratio (S16's worked example: register (.5,.5), requested group
+    shares (.9,.1), must split (.9,.1)). `SUBCLASS_PROB_POP`, this
+    region's own `bmstp/weights/yso_weights_region[__<region>].hdf5`
+    (`template_weights.build_yso`, `yso_subclass_prob_pop`), is read
+    instead, in place of the register's own group here, for YSO only.
+    No fallback to the register's raw fraction if that dataset is
+    absent (coding rule 5b): this raises, naming the RUNBOOK line that
+    builds it.
     """
     key = definitions.CLASS_REGISTER[cls]
     path = os.path.join(config.inputs["sed_models"], "registers", "%s_register.hdf5" % key)
@@ -289,7 +304,7 @@ def _register(config, cls):
                               % (path, sorted(unknown), cls, subclass_order))
         subclass_idx = np.array([sub_to_idx[s] for s in subclass_names], dtype=np.intp)
 
-        if "subclass_prob" in f:
+        if cls != "YSO" and "subclass_prob" in f:
             missing = [s for s in subclass_order if s not in f["subclass_prob"]]
             if missing:
                 raise ValueError(
@@ -303,7 +318,35 @@ def _register(config, cls):
             subclass_prob = None
     template_log = np.log10(np.maximum(f_ref, floor_linear[:, None])).astype(np.float32)
 
-    if subclass_prob is None:
+    if cls == "YSO":
+        # S16: the population-reweighted conditional, never the
+        # register's own raw group above (left unread for YSO on
+        # purpose -- `subclass_prob` is forced to `None` there so this
+        # is the only source for YSO).
+        w_path = config_module.product_path(config, "bmstp", "weights", "yso", "region",
+                                             region=region)
+        if not os.path.exists(w_path):
+            raise FileNotFoundError(
+                "fittp.sweep: YSO's SUBCLASS_PROB_POP is missing at %s -- run the "
+                "'sesnaimpute.bmstp.template_weights' RUNBOOK line first" % w_path)
+        with h5py.File(w_path, "r") as wf:
+            if "SUBCLASS_PROB_POP" not in wf:
+                raise KeyError(
+                    "fittp.sweep: %s lacks SUBCLASS_PROB_POP -- run the "
+                    "'sesnaimpute.bmstp.template_weights' RUNBOOK line first" % w_path)
+            subclass_prob = np.asarray(wf["SUBCLASS_PROB_POP"][:], dtype=np.float64)
+        if subclass_prob.shape != (n_model, len(subclass_order)):
+            raise ValueError(
+                "fittp.sweep: %s SUBCLASS_PROB_POP has shape %r, expected (%d, %d)"
+                % (w_path, subclass_prob.shape, n_model, len(subclass_order)))
+        row_sum = subclass_prob.sum(axis=1)
+        bad = ~np.isclose(row_sum, 1.0, atol=1e-6)
+        if bad.any():
+            raise ValueError(
+                "fittp.sweep: %s SUBCLASS_PROB_POP rows do not sum to 1 (max |sum-1|=%.3g "
+                "on %d/%d rows)" % (w_path, float(np.max(np.abs(row_sum[bad] - 1.0))),
+                                     int(bad.sum()), n_model))
+    elif subclass_prob is None:
         # no register carries a per-template stage-fraction table for
         # this class: a one-hot row at the hard label, exactly today's
         # partition (built this way so the fitter's own formula, not a
@@ -1196,7 +1239,7 @@ def build_region_class(config, region, cls, st, reader, catalog,
     `catalog` is `_load_region_catalog`'s one whole-region read,
     also loaded once by `build` and shared across classes.
     """
-    template_log, n_sub, subclass_prob = _register(config, cls)
+    template_log, n_sub, subclass_prob = _register(config, cls, region)
     n_model = template_log.shape[0]
     # computed once, in the parent, never per source (rule 8): `ln
     # p_theta,k`, `-inf` where a template carries no mass in that
@@ -1424,7 +1467,8 @@ def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=N
                     n_source = _n_sources(config, region)
                     if limit is not None:
                         n_source = min(n_source, limit)
-                    summary = _summary(config, region, cls, n_source, _register(config, cls)[0].shape[0])
+                    summary = _summary(config, region, cls, n_source,
+                                       _register(config, cls, region)[0].shape[0])
                 else:
                     reader = prior_reader.load(config, region, cls)
                     summary = build_region_class(config, region, cls, st, reader,

@@ -408,10 +408,14 @@ def _floor_probability(p):
 # ---------------------------------------------------------------------------
 
 def _write_library(config, lib, granule, names, c_theta, log10_f45_centers, factors,
-                    region=None, extra_attrs=None):
+                    region=None, extra_attrs=None, extra_datasets=None):
     """One `bmstp/weights/<lib>_weights_<granule>[__R].hdf5` file (P5):
     `MODEL_NAME`, `C_THETA`, `LOG10_F45_CENTERS`, one `factor_<k>/` group per
-    entry of `factors` (`name -> (W, C_F, D_F, normalised, source)`)."""
+    entry of `factors` (`name -> (W, C_F, D_F, normalised, source)`), plus
+    any top-level dataset in `extra_datasets` (`name -> array`, S16's
+    `SUBCLASS_PROB_POP` today -- a quantity that does not fit the
+    per-template/per-brightness-cell `factor_<k>` shape at all, so it is
+    never forced into one)."""
     path = config_module.product_path(config, "bmstp", "weights", lib, granule, region=region)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     stem = f"{lib}_weights_{granule}"
@@ -425,6 +429,9 @@ def _write_library(config, lib, granule, names, c_theta, log10_f45_centers, fact
             ("LOG10_F45_CENTERS", log10_f45_centers.astype(np.float64)),
         ):
             build_module.write_dataset(f, name, data, *REGISTRY[(stem, name)])
+        for name, data in (extra_datasets or {}).items():
+            build_module.write_dataset(f, name, np.asarray(data, dtype=np.float64),
+                                        *REGISTRY[(stem, name)])
         for i, (name, (w, c_f, d_f, normalised, source)) in enumerate(factors.items()):
             grp = f.create_group(f"factor_{i}")
             build_module.write_dataset(grp, "W", w.astype(np.float32), *REGISTRY[(stem, "W")])
@@ -551,6 +558,60 @@ def _yso_class_shares(config):
     return share_proto, share_disk, share_weak
 
 
+def _yso_population_weight_parts(config):
+    """Shared state for `yso_population_weight` and `yso_subclass_prob_pop`
+    (S16, round 6 brief U08): `(names, w_pre_census, frac, sub_idx,
+    census_groups)` -- the register's own row order, the (i)x(ii) pre-
+    census weight, the register's own soft `/subclass_prob` fractions,
+    the subclass-name-to-column map, and the three `(labels, share)`
+    census groups (`YSO_CENSUS_GROUPS` paired with `_yso_class_shares`).
+    Factored out of `yso_population_weight` so the population weight and
+    its population-reweighted CONDITIONAL subclass split read the exact
+    same census density, inclination join and group shares -- never two
+    independent derivations of the same survey-wide numbers. (i) Dunham
+    et al. 2015's own census density at each template's `log10
+    f_ref,4.5,theta` (`C_THETA`, floored the same way `_c_theta` floors
+    it), `_dunham_census_brightness_histogram`'s per-cell value -- zero
+    where the census does not populate the cell, the census being
+    complete there -- divided by the library's density of templates in
+    the SAME quantity (`_fixed_width_binned_density`, `YSO_F45_BIN_DEX`
+    bins floored at `LIBRARY_DENSITY_MIN_COUNT`, EVERY YSO template
+    including Class III, never `RHO_KDE1`): a disc-and-envelope flux the
+    IMF over photospheric mass does not constrain, so no IMF over mass
+    enters. The census's own brightness histogram already carries the
+    Class III objects' fluxes (no class cut on the catalogue), so the
+    library side matches it template for template. (ii) The viewing
+    angle, uniform in cos i (the existing sin i factor)."""
+    reg = _read_register(config, "yso")
+    names = reg["names"]
+    n_model = names.size
+    c_theta = _c_theta(reg)  # log10 f_ref,4.5,theta, floored (sec 4.1)
+
+    incl_names, incl_deg = _yso_inclination(config)
+    n_matched_incl = int(np.sum(incl_names == names)) if incl_names.size == n_model else 0
+    if n_matched_incl != n_model:
+        raise ValueError(
+            f"template_weights._yso_population_weight_parts: inclination join "
+            f"n_matched={n_matched_incl} != n_register={n_model}")
+
+    incl_raw = np.sin(np.radians(incl_deg))                    # uniform in cos i (spec sec 5.5)
+
+    p_census, _n_census = _dunham_census_brightness_histogram(config)
+    bin_idx = np.digitize(c_theta, grid.LOG10_F45_EDGES) - 1
+    in_range = (bin_idx >= 0) & (bin_idx < p_census.size)
+    p_at_theta = np.zeros(n_model, dtype=np.float64)
+    p_at_theta[in_range] = p_census[np.clip(bin_idx[in_range], 0, p_census.size - 1)]
+
+    n_lib = _fixed_width_binned_density(c_theta, YSO_F45_BIN_DEX, LIBRARY_DENSITY_MIN_COUNT)
+    w_pre_census = p_at_theta * incl_raw / n_lib                # (i) x (ii), sec 1.4's division
+
+    frac = _read_subclass_prob(config, "YSO")       # (n_model, n_sub), SUBCLASSES_OF["YSO"] order
+    sub_idx = {s: i for i, s in enumerate(definitions.SUBCLASSES_OF["YSO"])}
+    share_proto, share_disk, share_weak = _yso_class_shares(config)
+    census_groups = tuple(zip(YSO_CENSUS_GROUPS, (share_proto, share_disk, share_weak)))
+    return names, w_pre_census, frac, sub_idx, census_groups
+
+
 def yso_population_weight(config):
     """The YSO `population` weight `w_theta` (spec sec 5.5 "Template
     weights", W83 "the young-star population redefined on the Dunham
@@ -558,21 +619,9 @@ def yso_population_weight(config):
     verbatim by `build_yso` below, `sample_cloud.p_ref_f45` and
     `bmstp.atlas._yso_register` -- called by all three rather than
     re-derived, so the class census and the brightness density live in
-    exactly one place. (i) Dunham et al. 2015's own census density at
-    each template's `log10 f_ref,4.5,theta` (`C_THETA`, floored the same
-    way `_c_theta` floors it), `_dunham_census_brightness_histogram`'s
-    per-cell value -- zero where the census does not populate the cell,
-    the census being complete there -- divided by the library's density
-    of templates in the SAME quantity (`_fixed_width_binned_density`,
-    `YSO_F45_BIN_DEX` bins floored at `LIBRARY_DENSITY_MIN_COUNT`, EVERY
-    YSO template including Class III, never `RHO_KDE1`): a disc-and-
-    envelope flux the IMF over photospheric mass does not constrain, so
-    no IMF over mass enters. The census's own brightness histogram already
-    carries the Class III objects' fluxes (no class cut on the
-    catalogue), so the library side matches it template for template.
-    (ii) The viewing angle, uniform in cos i (the existing sin i
-    factor). (iii) The evolutionary-class census: three groups fitted on
-    the census's own slopes (`_yso_class_shares`,
+    exactly one place. (i) and (ii) are `_yso_population_weight_parts`'s
+    own `w_pre_census`. (iii) The evolutionary-class census: three groups
+    fitted on the census's own slopes (`_yso_class_shares`,
     `population/yso/law_yso_region.hdf5`'s `CLASS_SHARE_PROTO`/
     `CLASS_SHARE_DISK`/`CLASS_SHARE_WEAK`) -- Class 0 + Class I + Flat
     together, Class II + transition disk together, Class III alone
@@ -587,46 +636,8 @@ def yso_population_weight(config):
     since `FRAC_<subclass>` sums to 1 over all six subclasses) by
     construction. Returns `(names, w_theta)` in the register's own row
     order."""
-    reg = _read_register(config, "yso")
-    names = reg["names"]
+    names, w_pre_census, frac, sub_idx, census_groups = _yso_population_weight_parts(config)
     n_model = names.size
-    c_theta = _c_theta(reg)  # log10 f_ref,4.5,theta, floored (sec 4.1)
-
-    incl_names, incl_deg = _yso_inclination(config)
-    n_matched_incl = int(np.sum(incl_names == names)) if incl_names.size == n_model else 0
-    if n_matched_incl != n_model:
-        raise ValueError(
-            f"template_weights.yso_population_weight: inclination join "
-            f"n_matched={n_matched_incl} != n_register={n_model}")
-
-    incl_raw = np.sin(np.radians(incl_deg))                    # uniform in cos i (spec sec 5.5)
-
-    # (i) the census density over the constrained quantity, log10 F_ref
-    # (spec sec 5.5 "Template weights"): the library's density is
-    # measured over EVERY YSO template, Class III included --
-    # `definitions.py`'s own CIII is Stage III ("M_env < 0.1 Msun, no
-    # disc; not a bare photosphere"), a real member of the population,
-    # and the census's own brightness histogram already carries its
-    # objects' fluxes (W83).
-    p_census, _n_census = _dunham_census_brightness_histogram(config)
-    bin_idx = np.digitize(c_theta, grid.LOG10_F45_EDGES) - 1
-    in_range = (bin_idx >= 0) & (bin_idx < p_census.size)
-    p_at_theta = np.zeros(n_model, dtype=np.float64)
-    p_at_theta[in_range] = p_census[np.clip(bin_idx[in_range], 0, p_census.size - 1)]
-
-    n_lib = _fixed_width_binned_density(c_theta, YSO_F45_BIN_DEX, LIBRARY_DENSITY_MIN_COUNT)
-    w_pre_census = p_at_theta * incl_raw / n_lib                # (i) x (ii), sec 1.4's division
-
-    # (iii) the evolutionary-class census: three groups fitted on Dunham
-    # et al. 2015's own slopes (W83, `_yso_class_shares`); within each
-    # group the split is w_pre_census's own share, apportioned by the
-    # template's own SOFT group fraction (WP-PRIOR-8's members-group
-    # ruling), not a hard SUBCLASS mask -- `N_MEMBERS` enters nothing
-    # here, only the register's own `/subclass_prob` fractions.
-    frac = _read_subclass_prob(config, "YSO")       # (n_model, n_sub), SUBCLASSES_OF["YSO"] order
-    sub_idx = {s: i for i, s in enumerate(definitions.SUBCLASSES_OF["YSO"])}
-    share_proto, share_disk, share_weak = _yso_class_shares(config)
-    census_groups = tuple(zip(YSO_CENSUS_GROUPS, (share_proto, share_disk, share_weak)))
     w_theta = np.zeros(n_model, dtype=np.float64)
     for labels, share in census_groups:
         frac_group = frac[:, [sub_idx[s] for s in labels]].sum(axis=1)   # soft group fraction
@@ -634,6 +645,84 @@ def yso_population_weight(config):
         if group_sum > 0:
             w_theta += share * w_pre_census * frac_group / group_sum
     return names, w_theta
+
+
+def yso_subclass_prob_pop(config, region, census_share_region, diskless_result):
+    """`SUBCLASS_PROB_POP`, THIS REGION's own population-reweighted
+    CONDITIONAL subclass probability `(n_model, n_sub)` (S16, round 6
+    brief U08, FINDINGS.md, REVISED per the round 1 reviewer reply: the
+    first try reweighted the three census groups alone, omitting the
+    region's own diskless component; `J(theta, k) = J_census(theta, k) *
+    census_share_region + J_diskless(theta, k)`, `P(k | theta) =
+    J(theta, k) / Sigma_j J(theta, j)`, `census_share_region` and
+    `w_diskless` the CALLER's own already-computed `1 / N_LAW_TOTAL_
+    FACTOR` and `yso_diskless_weight(config, region)` -- passed in
+    rather than re-derived, so this function's own denominator is
+    EXACTLY `build_yso`'s own per-template region weight `w_theta =
+    census_share_region * w_theta_census + w_diskless` (the same P5
+    template marginal the reviewer asked this split to use), never a
+    second, possibly-diverging copy of it.
+
+    `J_census(theta, k) ~ share_g * w_pre_census[theta] * frac[theta, k]
+    / Z_g` for subclass `k` in census group `g` (`Z_g` the SAME
+    `group_sum` `yso_population_weight` computes) -- summed over a
+    group's own subclasses this reduces to that group's own share of
+    `w_theta_census[theta]` exactly, so `Sigma_k J_census(theta, k) =
+    w_theta_census[theta]` (`yso_population_weight`'s own return) by
+    construction; within one group the split is exactly the register's
+    own ratio between that group's subclasses (`frac[theta, k]` for k in
+    g, scaled by the one `share_g / Z_g` common to the whole group) --
+    only a template mixed ACROSS groups changes from the register's raw
+    ratio (the (.5,.5) -> (.9,.1) worked example in S16).
+    `J_diskless(theta, k)`: `YSO_CENSUS_GROUP_DISKLESS` is the single
+    subclass CIII, and `w_diskless[theta]` (`yso_diskless_weight`'s own
+    per-template return) is already that template's own COMPLETE
+    diskless mass, with nothing left to split across subclasses within
+    that one-member group -- `J_diskless(theta, CIII) = w_diskless
+    [theta]`, 0 for every other subclass. A theta with `Sigma_j J(theta,
+    j) = 0` (no survey mass reaches it through either term) falls back
+    to the register's own `frac` row verbatim (a well-formed
+    distribution that still sums to 1, never 0/0) -- the caller
+    (`build_yso`) reports how many rows this is. `diskless_result` is
+    `yso_diskless_weight(config, region)`'s own `(names, w_diskless)`
+    return, passed straight through rather than called a second time
+    here. Returns `(names, subclass_prob_pop, n_fallback)` in the
+    register's own row order, `definitions.SUBCLASSES_OF["YSO"]` column
+    order, every row summing to 1 to machine precision."""
+    names, w_pre_census, frac, sub_idx, census_groups = _yso_population_weight_parts(config)
+    n_model = names.size
+    n_sub = frac.shape[1]
+
+    names_d, w_diskless = diskless_result
+    if not (names_d.size == n_model and np.array_equal(names_d, names)):
+        raise ValueError("template_weights.yso_subclass_prob_pop: yso_diskless_weight's "
+                          "row order disagrees with the yso register")
+
+    j_census_raw = np.zeros((n_model, n_sub), dtype=np.float64)
+    for labels, share in census_groups:
+        idxs = [sub_idx[s] for s in labels]
+        frac_group = frac[:, idxs].sum(axis=1)
+        group_sum = (w_pre_census * frac_group).sum()
+        if group_sum > 0:
+            for j in idxs:
+                j_census_raw[:, j] = share * w_pre_census * frac[:, j] / group_sum
+
+    diskless_idx = [sub_idx[s] for s in YSO_CENSUS_GROUP_DISKLESS]
+    if len(diskless_idx) != 1:
+        raise ValueError(
+            "template_weights.yso_subclass_prob_pop: YSO_CENSUS_GROUP_DISKLESS is no "
+            "longer a single subclass -- the diskless mass needs its own per-subclass "
+            "split before it can be placed in J(theta, k) by column")
+
+    j_theta_k = j_census_raw * census_share_region
+    j_theta_k[:, diskless_idx[0]] += w_diskless
+
+    row_sum = j_theta_k.sum(axis=1)
+    ok = row_sum > 0.0
+    n_fallback = int(np.count_nonzero(~ok))
+    subclass_prob_pop = frac.copy()
+    subclass_prob_pop[ok] = j_theta_k[ok] / row_sum[ok, None]
+    return names, subclass_prob_pop, n_fallback
 
 
 def yso_diskless_weight(config, region):
@@ -732,28 +821,37 @@ def build_yso(config, region):
                               "order disagrees with the yso register")
 
         # the diskless Class III members, per region (owner's ruling
-        # 2026-10-20, C11 brief items 1 and 4): `w_theta` above is
-        # `yso_population_weight`'s own SURVEY-WIDE, three-group census
-        # weight (left untouched -- `bmstp.atlas._yso_register` reads
-        # that same function once for the whole build and must keep
-        # seeing it unchanged). CLASS_SHARE_PROTO/DISK/WEAK (already
-        # inside `w_theta`) become shares of THIS region's own TOTAL
-        # population by the one uniform factor DISK_FRACTION; the
-        # diskless members' own share, CLASS_SHARE_DISKLESS, is added on
-        # top from `yso_diskless_weight` (a region-specific construction
-        # that borrows this function's own register/c_theta read rather
-        # than re-deriving them). `Sigma w_theta_region = DISK_FRACTION +
-        # CLASS_SHARE_DISKLESS = DISK_FRACTION + (1 - DISK_FRACTION) = 1`
-        # exactly. Bit-identical to `w_theta` alone at the identity case
-        # (DISK_FRACTION = 1, CLASS_SHARE_DISKLESS = 0, `yso_diskless_
-        # weight` returns all zeros without even reading the region's
-        # own age).
-        disk_frac_region = yso_law_module.disk_fraction(config, region)
+        # 2026-10-20, C11 brief items 1 and 4, CORRECTED by S16 round 6
+        # brief U08): `w_theta` above is `yso_population_weight`'s own
+        # SURVEY-WIDE, three-group census weight (left untouched --
+        # `bmstp.atlas._yso_register` reads that same function once for
+        # the whole build and must keep seeing it unchanged).
+        # CLASS_SHARE_PROTO/DISK/WEAK (already inside `w_theta`) become
+        # shares of THIS region's own TOTAL population by the census
+        # share `1 / N_LAW_TOTAL_FACTOR` (`population.yso_law.
+        # n_law_total_factor`), NOT the raw `DISK_FRACTION` (S15: the
+        # published disk fraction and the population's own census share
+        # agree only under the "all" definition, where `N_LAW_TOTAL_
+        # FACTOR = 1 / DISK_FRACTION` makes the two identical; under the
+        # "disks" definition -- Chameleon, CrA, Lupus, NGC 7129 -- they
+        # differ, and the raw `DISK_FRACTION` is the wrong one here); the
+        # diskless members' own share, CLASS_SHARE_DISKLESS = 1 - 1 /
+        # N_LAW_TOTAL_FACTOR (already computed that way, `yso_law.
+        # class_share_diskless`), is added on top from `yso_diskless_
+        # weight` (a region-specific construction that borrows this
+        # function's own register/c_theta read rather than re-deriving
+        # them). `Sigma w_theta_region = 1/F + CLASS_SHARE_DISKLESS =
+        # 1/F + (1 - 1/F) = 1` exactly. Bit-identical to `w_theta` alone
+        # at the identity case (`N_LAW_TOTAL_FACTOR = 1`, `CLASS_SHARE_
+        # DISKLESS = 0`, `yso_diskless_weight` returns all zeros without
+        # even reading the region's own age) -- also bit-identical, by
+        # the same algebra, for every "all"-definition region.
+        census_share_region = 1.0 / yso_law_module.n_law_total_factor(config, region)
         names_d, w_diskless = yso_diskless_weight(config, region)
         if not (names_d.size == n_model and np.array_equal(names_d, names)):
             raise ValueError("template_weights.yso: yso_diskless_weight's row "
                               "order disagrees with the yso register")
-        w_theta = disk_frac_region * w_theta + w_diskless
+        w_theta = census_share_region * w_theta + w_diskless
 
         # the region's own shift kernel (sec 5.5 "Template weights"
         # ruling 1 and 3): `K` carries the region-distance placement AND
@@ -813,8 +911,33 @@ def build_yso(config, region):
                             "sample_cloud.shift_kernel "
                             f"at d_r={r.d_r_pc:.1f} pc"),
         }
+
+        # S16, round 6 brief U08 (REVISED per the round 1 reviewer reply):
+        # the population-reweighted CONDITIONAL subclass split
+        # (`yso_subclass_prob_pop`), genuinely region-specific now --
+        # its own joint mass J(theta, k) includes THIS region's own
+        # `census_share_region` and `w_diskless` above, the SAME two
+        # terms `w_theta` was just built from, so its denominator is
+        # exactly that `w_theta` (the P5 template marginal). Stored per
+        # region alongside `population` for that reason, not merely
+        # because this is the one file `fittp.sweep` already reads per
+        # {region, class}. `fittp.sweep._register` reads this dataset
+        # for YSO's own per-source subclass evidence split in place of
+        # the register's raw `subclass_prob` (S16's finding: the raw
+        # fraction is no longer the conditional subclass probability
+        # once the groups carry different survey shares).
+        names_sp, subclass_prob_pop, n_fallback_sp = yso_subclass_prob_pop(
+            config, region, census_share_region, (names_d, w_diskless))
+        if not (names_sp.size == n_model and np.array_equal(names_sp, names)):
+            raise ValueError("template_weights.yso: yso_subclass_prob_pop's row "
+                              "order disagrees with the yso register")
+        print(f"template_weights.yso [{region}]: SUBCLASS_PROB_POP zero-mass "
+              f"fallback rows (register's own frac kept verbatim)="
+              f"{n_fallback_sp}/{n_model}", flush=True)
+
         path = _write_library(config, "yso", "region", names, c_theta, log10_f45_centers, factors,
-                               region=region, extra_attrs={"COMPONENTS": "imf,inclination"})
+                               region=region, extra_attrs={"COMPONENTS": "imf,inclination"},
+                               extra_datasets={"SUBCLASS_PROB_POP": subclass_prob_pop})
 
         col_sum = population_w.sum(axis=0)
         max_colsum_dev = float(np.max(np.abs(col_sum - 1.0)))

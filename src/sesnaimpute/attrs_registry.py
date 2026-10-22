@@ -569,6 +569,21 @@ REGISTRY = {
         "For every YSO template, this factor's own per-template offset: "
         "a correction applied to the template's weight at read time, "
         "beyond the per-cell table in W."),
+    ("yso_weights_region", "SUBCLASS_PROB_POP"): ("probability, each row summing to 1",
+        "For every YSO template (row) and each of the six young-star "
+        "evolutionary stages (column, same order as this survey's YSO "
+        "stage list), the probability that a source truly at this "
+        "template's spot in the model grid is that stage, once the "
+        "model library has been reweighted to match this region's own "
+        "measured mix of stages, including its diskless members (the "
+        "'population' factor in this same file). A template that the "
+        "model grid alone could not assign to a single stage keeps a "
+        "split between stages here too, but rebalanced to the measured "
+        "mix; a template the grid assigns to one stage outright keeps "
+        "that single stage. This is the number the fit's own per-stage "
+        "breakdown is built from for YSO sources; unlike the other "
+        "datasets in this file it depends on the region, through its "
+        "own disk fraction and age."),
 
     ("galz_weights_survey", "MODEL_NAME"): ("source name",
         "This galaxy template's own identifier, in this file's row "
