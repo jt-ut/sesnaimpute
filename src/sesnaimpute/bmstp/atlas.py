@@ -33,11 +33,14 @@ sample_x`'s binned return) -- each template's own eight `F_REF` scaled by
 quadrature over the region's 2.12 um lognormal cells crossed with each IRAC
 band's own `N_RATIO_NODES`-quantile colour-ratio cells and YSO's own depth
 cells, the bands carried by the measured knot line-to-band ratios). AGB's
-members are the star-family sampler's own evolved stars (`bmstp.sample_star.
-sample_agb`), each carrying one shell template of its own drawn chemistry
-(Riebel+2012's optical-depth distribution, `bmstp.template_weights.build_agb`'s
-`tau` factor construction) whose eight `F_REF` are scaled so its own 4.5 um
-flux equals the star's `F_4.5`. All six classes enter the total-count check.
+members are the star-family sampler's own JOINT measure over evolved star
+and shell template (`bmstp.sample_star.sample_agb`, FINDINGS.md S10,
+coordinator's joint-measure ruling: every evolved star crossed with every
+template of its drawn chemistry, Riebel+2012's optical-depth distribution
+as that template's own share of the mass), read here directly, no second
+crossing -- each member's own template's eight `F_REF` scaled so its own
+4.5 um flux equals that member's OWN joint-measure brightness (`log10_f45`),
+never a chemistry-pooled anchor. All six classes enter the total-count check.
 
 Every class's catalogued density is a weighted quadrature over its own whole
 population (sec. 8): alongside it this build writes `N_CAT_CELL_<C>` (128, 110,
@@ -1000,11 +1003,13 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
     the seven flux ratios to I2 at `STAR_COLOUR_CELL_DEX` -- all far below
     the completeness roll-off, so the collapse moves `catalogued_fraction`
     by much less than the roll-off itself resolves). AGB's members are
-    the cross product of `sample_star.sample_agb`'s own evolved stars
-    with every shell template of THEIR OWN chemistry (sec. 5.2: the
-    star's own `F_4.5` is the shell flux, not TRILEGAL's photosphere),
-    each template's eight `F_REF` rescaled so its own 4.5 um reference
-    flux equals the star's `F_4.5`. `pixel_row_in_tile` (n_pix_in_tile,)
+    `sample_star.sample_agb`'s own JOINT measure of evolved star and
+    shell template (FINDINGS.md S10, coordinator's joint-measure ruling;
+    sec. 5.2: the member's own `F_4.5` is the shell flux, not TRILEGAL's
+    photosphere), read directly -- no second crossing against a template
+    pool -- each member's own template's eight `F_REF` rescaled so its
+    own 4.5 um reference flux equals that member's OWN joint-measure
+    `F_4.5`. `pixel_row_in_tile` (n_pix_in_tile,)
     is this tile's own slice of `bmstp.atlas._depth_grid`'s row index
     into `PIXEL_CURVE_<band>` (`catalogued_probability`'s own docstring):
     opened once here (`_completeness_band_params`, this worker's
@@ -1140,66 +1145,43 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
                 n_cell_tile = _safe_cell_bin(u_u, log10_f45_u, c_m_all)
             out[cls] = (frac, density, frac_bright3, frac_bright10, n_cat_cell_tile, n_cell_tile)
 
-    # AGB (sec. 5.2): every evolved star with positive weight
-    # (`sample_star.sample_agb`'s `w_a`; `x_a`'s first half O-rich,
-    # second half C-rich) crossed with every shell template of ITS OWN
-    # chemistry (`agb_pool[label]`), the cross product built with
-    # `np.repeat`/`np.tile` (rule 8: no Python loop over stars). A
-    # member's own weight is `w_a[star] * pool["weight"][template] /
-    # pool["weight"].sum()` (the within-chemistry template distribution,
-    # sec. 5.2's template-weights paragraph); summed over one star's own
-    # templates this recovers `w_a[star]` exactly, so `density_agb` still
-    # reads the star population's own `w_a.sum()`.
-    x_a, f45_a, w_a = sample_star.sample_agb(config, region, tile_id)
-    n_evolved = x_a.size // 2
-    is_c = np.arange(x_a.size) >= n_evolved
+    # AGB (sec. 5.2, FINDINGS.md S10, coordinator's joint-measure ruling):
+    # `sample_star.sample_agb` already places one member per (evolved
+    # star, own-chemistry template) pair -- the joint measure's own
+    # sample, mass `w_a[row]` already resolved -- so there is no second
+    # crossing against a template pool left to build here. Each row's
+    # `template_index_a` names its own register row directly;
+    # `agb_star_distances` repeats this tile's evolved stars' A_STAR_K
+    # the SAME way it repeats their distance, so it lines up with
+    # `x_a`/`f45_a`/`template_index_a` row for row (C26 owner ruling
+    # 2026-10-21: each member's own absolute extinction, not a second
+    # mark derived from a_col_in_tile).
+    x_a, f45_a, w_a, template_index_a = sample_star.sample_agb(config, region, tile_id)
     density_agb = float(w_a.sum()) / omega_t
-    # C26 (owner ruling 2026-10-21): `sample_agb`'s own `x_a` is this
-    # SAME tile's evolved stars' XI, each repeated once per chemistry
-    # (O-rich first half, C-rich second half) -- `a_star_k[evolved_for_agb]`
-    # duplicated the SAME way lines up a_star_dup[k] with x_a[k] exactly.
     a_star_evolved = a_star_k[evolved_for_agb]
-    a_star_dup = np.concatenate([a_star_evolved, a_star_evolved])
-    u_parts, flux0_parts, w_parts, f45_parts, a_star_parts = [], [], [], [], []
-    for label, chem_mask in (("O", ~is_c), ("C", is_c)):
-        star_idx = np.flatnonzero(chem_mask & (w_a > 0))
-        if star_idx.size == 0:
-            continue
-        pool = agb_pool[label]
-        n_tmpl = pool["weight"].size
-        pool_weight_sum = float(pool["weight"].sum())
-        star_rep = np.repeat(star_idx, n_tmpl)
-        tmpl_rep = np.tile(np.arange(n_tmpl), star_idx.size)
+    names_a, chem_a, _log10_r_a = sample_star.agb_log10_ratio_per_template(config.inputs["sed_models"])
+    n_o_a, n_c_a = int(np.sum(chem_a == "O")), int(np.sum(chem_a == "C"))
+    a_star_rows = np.concatenate([np.repeat(a_star_evolved, n_o_a), np.repeat(a_star_evolved, n_c_a)])
 
-        u_m = x_a[star_rep]
-        a_star_m = a_star_dup[star_rep]
-        f45_m = f45_a[star_rep]  # already log10 F_4.5 (mJy)
-        f_ref_i2 = np.maximum(pool["f_ref"]["I2"][tmpl_rep], pool["floor_linear"][tmpl_rep])
-        scale = (10.0 ** f45_m) / f_ref_i2  # rescales the WHOLE shell SED
-        flux0_m = np.empty((star_rep.size, N_BANDS), dtype=np.float64)
-        for k, key in enumerate(BAND_KEYS):
-            f_band = np.maximum(pool["f_ref"][key][tmpl_rep], pool["floor_linear"][tmpl_rep])
-            flux0_m[:, k] = f_band * scale
-        w_m = w_a[star_rep] * pool["weight"][tmpl_rep] / pool_weight_sum
-
-        u_parts.append(u_m)
-        a_star_parts.append(a_star_m)
-        flux0_parts.append(flux0_m)
-        w_parts.append(w_m)
-        f45_parts.append(f45_m)
-
-    if not u_parts:
+    keep = w_a > 0
+    if not np.any(keep):
         frac_agb = np.zeros(pix_in_tile.size)
         frac_agb_bright3 = np.zeros(pix_in_tile.size)
         frac_agb_bright10 = np.zeros(pix_in_tile.size)
         n_cat_cell_agb = np.zeros((n_x, n_b))
         n_cell_agb = np.zeros((n_x, n_b))
     else:
-        u_agb = np.concatenate(u_parts)
-        a_star_agb = np.concatenate(a_star_parts)
-        flux0_agb = np.concatenate(flux0_parts, axis=0)
-        w_agb_member = np.concatenate(w_parts)
-        f45_agb_member = np.concatenate(f45_parts)
+        u_agb = x_a[keep]
+        a_star_agb = a_star_rows[keep]
+        w_agb_member = w_a[keep]
+        f45_agb_member = f45_a[keep]  # already log10 F_4.5 (mJy)
+        tmpl_agb = template_index_a[keep]
+        f_ref_i2 = np.maximum(agb_pool["f_ref"]["I2"][tmpl_agb], agb_pool["floor_linear"][tmpl_agb])
+        scale = (10.0 ** f45_agb_member) / f_ref_i2  # rescales the WHOLE shell SED
+        flux0_agb = np.empty((tmpl_agb.size, N_BANDS), dtype=np.float64)
+        for k, key in enumerate(BAND_KEYS):
+            f_band = np.maximum(agb_pool["f_ref"][key][tmpl_agb], agb_pool["floor_linear"][tmpl_agb])
+            flux0_agb[:, k] = f_band * scale
         # C26: each AGB member's own shell carries its OWN star's A_STAR_K
         # (absolute), not a_col_in_tile's per-pixel column times XI.
         frac_agb, frac_agb_bright3, frac_agb_bright10, s_member_agb, dimmed_hist_agb = catalogued_fraction(
@@ -1222,33 +1204,21 @@ def _build_one_tile(config, region, tile_id, pix_in_tile, a_col_in_tile, f_lim_i
 
 
 def _agb_shell_pool(config):
-    """`{"O": {...}, "C": {...}}`, the AGB library's own shell-template
-    pool by chemistry (sec. 5.2, sec 1.4, owner's ruling 2026-09-09):
-    `template_weights.agb_tau_ratio`'s `p_chem(tau) / n_chem(tau)`
-    WITHOUT the carbon-fraction admixture (`sample_star.sample_agb`
-    already resolves which chemistry a given draw is, so only the
-    WITHIN-chemistry template distribution is needed here) -- called
-    directly rather than re-derived, the one place the Riebel fit and the
-    density-of-templates-in-tau construction live -- plus that
-    chemistry's own templates' eight `F_REF` and `FLOOR_LINEAR` (sec.
-    3.5's FREFRAW convention). Survey-wide, independent of region -- the
-    caller computes this once and reuses it, rather than this function
-    caching on an unhashable `Config` (its `inputs` mapping)."""
+    """The AGB register's own eight `F_REF` and `FLOOR_LINEAR` (sec.
+    3.5's FREFRAW convention), in the register's OWN row order -- the
+    SAME order `sample_star.sample_agb`'s own `template_index` indexes
+    into (both read the register directly, sec 1.4). `build_one_tile`'s
+    AGB block (FINDINGS.md S10, coordinator's joint-measure ruling) reads
+    `sample_agb`'s joint-measure rows directly and indexes this dict by
+    their own `template_index`, row for row -- there is no chemistry
+    pool or population weight kept here any more: `sample_agb`'s own
+    `w` already carries the fully-resolved per-(star, template) mass,
+    so there is no second crossing against a template pool left to do.
+    Survey-wide, independent of region -- the caller computes this once
+    and reuses it, rather than this function caching on an unhashable
+    `Config` (its `inputs` mapping)."""
     reg = template_weights._read_register(config, "agb")
-    f_ref, floor_linear = reg["f_ref"], reg["floor_linear"]
-    names_r, chem, _log10_tau, ratio = template_weights.agb_tau_ratio(config)
-    if names_r.size != reg["names"].size or not np.all(names_r == reg["names"]):
-        raise ValueError("bmstp.atlas: agb_tau_ratio's row order disagrees "
-                          "with the agb register")
-
-    pools = {}
-    for label in ("O", "C"):
-        sel = chem == label
-        pools[label] = dict(
-            f_ref={k: v[sel] for k, v in f_ref.items()},
-            floor_linear=floor_linear[sel],
-            weight=ratio[sel])
-    return pools
+    return dict(f_ref=reg["f_ref"], floor_linear=reg["floor_linear"])
 
 
 def _yso_register(config):

@@ -1275,6 +1275,21 @@ def _agb_dusty_shares(config, region):
 
 
 def build_agb(config, region):
+    """This factor's `tau_w` is now the brightness-CONDITIONAL of the
+    SAME joint measure `bmstp.sample_star.sample_agb` places and
+    `bmstp.shapes`'s `GRID_AGB` sums over template (FINDINGS.md S10,
+    coordinator's joint-measure ruling): region-wide, over every tile's
+    evolved stars, each (star, template) row's own mass
+    (`agb_tau_ratio`'s `ratio` -- the shell optical-depth weight, UNCHANGED,
+    read here exactly as before, never recomputed: "the shell weights
+    stay what they are") is binned at THAT TEMPLATE's own `log10_f45`,
+    never redistributed uniformly across brightness. Normalising that
+    2-D (template, bin) mass table over the template axis
+    (`_normalise_over_theta`) gives `W(theta | brightness cell)`, the
+    conditional this factor is read as (`fittp.prior_reader._factor_ln`).
+    Disclosure: the census behind `ratio` is LMC-derived (Riebel et al.
+    2012), applied to this Galactic survey without recalibration, and
+    carries no AGB time variability -- neither is modelled."""
     with progress.Stage("bmstp.template_weights.agb", region) as st:
         reg = _read_register(config, "agb")
         names = reg["names"]
@@ -1285,18 +1300,11 @@ def build_agb(config, region):
             raise ValueError("template_weights.agb: agb_tau_ratio's row order "
                               "disagrees with the agb register")
         f_c, f_dusty_o, f_dusty_c = _agb_dusty_shares(config, region)
-        # the class-wide `tau` factor mixes both chemistries by the same
-        # O:C weight the shape/density/atlas stages put on the population
-        # (spec sec 5.2): (1-F_C) f_dusty,O for oxygen-rich, F_C f_dusty,C
-        # for carbon-rich -- not the bare carbon fraction alone, since
-        # each chemistry's own dusty share is unequal (Riebel+2012, two
-        # different fitted floors).
         is_o, is_c = chem == "O", chem == "C"
         pool_sum_o = float(ratio[is_o].sum())
         pool_sum_c = float(ratio[is_c].sum())
         n_nonzero_o = int(np.sum(ratio[is_o] > 0.0))
         n_nonzero_c = int(np.sum(ratio[is_c] > 0.0))
-        p_mix = np.where(chem == "O", (1.0 - f_c) * f_dusty_o * ratio, f_c * f_dusty_c * ratio)
         n_template_o = int(np.sum(is_o))
         n_template_c = int(np.sum(is_c))
         gcl, _riebel_tau = star_population.read_riebel_optical_depths(config)
@@ -1305,7 +1313,42 @@ def build_agb(config, region):
 
         log10_f45_centers = _log10_f45_centers()
         n_b = log10_f45_centers.size
-        tau_w = _normalise_over_theta(_broadcast(p_mix, n_b))
+        edges = grid.LOG10_F45_EDGES
+
+        # the joint measure's own CONDITIONAL (coordinator's joint-measure
+        # ruling): region-wide over every tile -- `sample_star.sample_agb`'s
+        # own per-(star, template) rows, the SAME measure `bmstp.shapes`
+        # sums over template for `GRID_AGB`; this sums it over every star
+        # instead, keeping template and brightness bin, so the two
+        # products are the one measure's marginal and conditional, never
+        # a second, independently-built brightness-independent factor
+        # (spec sec 5.2: "(1-F_C) f_dusty,O for oxygen-rich, F_C f_dusty,C
+        # for carbon-rich" is carried automatically here -- it is exactly
+        # `sample_agb`'s own chemistry mix, not re-applied a second time).
+        ids = sample_star.tile_ids(config, region)
+        f45_parts, w_parts, idx_parts = [], [], []
+        for tile_id in ids:
+            _x_t, f45_t, w_t, idx_t = sample_star.sample_agb(config, region, int(tile_id))
+            f45_parts.append(f45_t)
+            w_parts.append(w_t)
+            idx_parts.append(idx_t)
+        log10_f45_all = np.concatenate(f45_parts) if f45_parts else np.zeros(0, dtype=np.float64)
+        w_all = np.concatenate(w_parts) if w_parts else np.zeros(0, dtype=np.float64)
+        tmpl_idx_all = np.concatenate(idx_parts) if idx_parts else np.zeros(0, dtype=np.int64)
+
+        # identity (b), coordinator's ruling: the intrinsic mass this
+        # factor's own input carries, split by whether it lands on the
+        # SAME finite grid GRID_AGB shares (`LOG10_F45_EDGES`) -- reported,
+        # never silently dropped or clipped back onto an edge bin.
+        in_range = (log10_f45_all >= edges[0]) & (log10_f45_all < edges[-1])
+        mass_total = float(w_all.sum()) if w_all.size else 0.0
+        mass_in = float(w_all[in_range].sum()) if w_all.size else 0.0
+        mass_out = mass_total - mass_in
+        bin_idx = np.clip(np.searchsorted(edges, log10_f45_all, side="right") - 1, 0, n_b - 1)
+        tau_raw = np.zeros((n_model, n_b), dtype=np.float64)
+        if np.any(in_range):
+            np.add.at(tau_raw, (tmpl_idx_all[in_range], bin_idx[in_range]), w_all[in_range])
+        tau_w = _normalise_over_theta(tau_raw)
         tau_w, frac_zero = _floor_normalised(tau_w)
 
         factors = {
@@ -1316,10 +1359,13 @@ def build_agb(config, region):
         path = _write_library(config, "agb", "region", names, c_theta, log10_f45_centers, factors,
                                region=region)
         col_sum = tau_w.sum(axis=0)
-        # the check the spec's rule asks for: the mix REALISED by the
-        # finished table (post-floor, from the written factor itself)
-        # against the mix the attributes state.
-        realised_co = float(tau_w[is_c, 0].sum() / tau_w[is_o, 0].sum())
+        # the check the spec's rule asks for: the O:C mix REALISED by the
+        # joint measure's own sample (mass, not the post-floor table,
+        # since the table is now bin-dependent by design) against the
+        # mix the attributes state.
+        mass_o = float(w_all[in_range & ~is_c[tmpl_idx_all]].sum()) if w_all.size else 0.0
+        mass_c = float(w_all[in_range & is_c[tmpl_idx_all]].sum()) if w_all.size else 0.0
+        realised_co = mass_c / mass_o if mass_o > 0 else float("nan")
         attrs_co = (f_c * f_dusty_c) / ((1.0 - f_c) * f_dusty_o)
         print(f"template_weights.agb [{region}]: n_riebel_o={n_riebel_o} n_riebel_c={n_riebel_c} "
               f"n_template_o={n_template_o} n_template_c={n_template_c} "
@@ -1327,13 +1373,15 @@ def build_agb(config, region):
               f"pool_sum_o(post-normalisation)={pool_sum_o:.6f} pool_sum_c={pool_sum_c:.6f} "
               f"max|colsum-1|={float(np.max(np.abs(col_sum - 1.0))):.3g} "
               f"floored_fraction={frac_zero:.4f} "
+              f"mass_total={mass_total:.6g} mass_in_grid={mass_in:.6g} mass_off_grid={mass_out:.6g} "
               f"F_C={f_c:.4f} F_DUSTY_O={f_dusty_o:.4f} F_DUSTY_C={f_dusty_c:.4f} "
-              f"C:O mix realised(from finished table)={realised_co:.4f} "
+              f"C:O mix realised(from joint-measure mass)={realised_co:.4f} "
               f"vs attributes' F_C*F_DUSTY_C/((1-F_C)*F_DUSTY_O)={attrs_co:.4f} "
               f"C_THETA range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
               f"max={c_theta.max():.4f}",
               flush=True)
-        st.done(path, n_model=n_model, floored_fraction=frac_zero)
+        st.done(path, n_model=n_model, floored_fraction=frac_zero,
+                mass_in_grid=mass_in, mass_off_grid=mass_out)
 
 
 # ---------------------------------------------------------------------------
