@@ -96,25 +96,35 @@ LIBRARY_SAMPLING_SIGMA_LOG_DEX = 2.0 * SIGMA_CAL_DEX
 #: `bmstp.atlas.catalogued_probability`, `fittp.likelihood._ln_nondet`,
 #: `fittp.prior_reader._cell_sum`'s non-detection branch.
 #:
-#: Measured (`population.detection_correlation.main`, 2026-10-20) against
+#: Measured (`population.detection_correlation.main`, 2026-10-22, U03/S03
+#: fix): the module's own predictions were corrected to match the outcome
+#: it actually scores -- I1 AND I2 both detected (`_match_outcomes`), not
+#: the eight-band `P(>=2 of 8)`/`p_(2)` this constant feeds elsewhere --
+#: independent `p_I1 * p_I2`, comonotone `min(p_I1, p_I2)`. Against
 #: UKIDSS GPS clean-stellar stars matched to SESNA within 1'' in clean,
-#: deep-covered pixels: maximum likelihood over each star's own matched/
-#: unmatched outcome wants LAMBDA > 1 in BOTH regions checked -- North
-#: America Nebula (uncapped 1.32-1.36, depending on whether the fit keeps
-#: Ks bins where the independent model already saturates near 1) and
-#: Perseus (uncapped 0.96-1.59) -- so this constant is the capped value,
-#: 1.0 exactly, not a fitted interior point. The brief anticipated this
-#: outcome for the fit region alone ("UKIDSS clean stars favour isolated
-#: stars"); seeing it in BOTH regions is a disclosure this constant's own
-#: citation carries rather than hides: North America Nebula's own
-#: matched/unmatched outcomes, restricted to the four Ks bins (15.5-17.5)
-#: where the independent model is not already within 2% of its own
-#: ceiling, still want LAMBDA = 1.32, and Perseus's own three such bins
-#: (16.0-17.5) put the empirical catalogued fraction within 1% of p_(2)
-#: in every one of them -- not the "no difference" a coarser, bin-
-#: averaged ratio check (C18's test1b) suggested. A later re-measurement
-#: that wants an interior value should replace this constant outright,
-#: not add a second one: LAMBDA is ONE survey-wide number.
+#: deep-covered pixels, maximum likelihood over each star's own matched/
+#: unmatched outcome STILL wants LAMBDA > 1 in BOTH regions checked under
+#: the corrected (event-matched) predictions: North America Nebula
+#: (678,057 stars, 404,233 catalogued; uncapped 1.2959, 68% interval
+#: [1.2937, 1.2979]) and Perseus (13,653 stars, 13,047 catalogued;
+#: uncapped 1.6838, 68% interval [1.6417, 1.7250]) -- both intervals sit
+#: entirely above 1, so this constant remains the capped value, 1.0
+#: exactly, not a fitted interior point. Matching the predicted event to
+#: the observed one did not bring either region inside [0, 1]: the
+#: earlier (pre-fix) measurement's event mismatch is not the explanation
+#: for the >1 result; the disclosure already on record -- UKIDSS's
+#: clean-stellar cut favours isolated stars over the crowded population
+#: this module's own field-star quadrature integrates over -- remains the
+#: more likely source of the gap. Per-Ks-bin, the two ends of North
+#: America Nebula's own table disagree in SIGN: its brightest bins (Ks
+#: 13.0-16.0) have empirical catalogued fractions ABOVE even the fully
+#: comonotone model there (e.g. 0.987 observed vs 0.956 at LAMBDA=1 in
+#: 13.0-13.5), while its faintest bin (17.0-17.5) sits BELOW it (0.187 vs
+#: 0.270) -- a single survey-wide LAMBDA cannot fit both signs from one
+#: mixture weight, consistent with a selection effect rather than an
+#: interior mixture value. A later re-measurement that wants an interior
+#: value should replace this constant outright, not add a second one:
+#: LAMBDA is ONE survey-wide number.
 LAMBDA = 1.0
 
 #: Combined19 (Bovy et al. 2016, mwdust; `sky.download.combined19`,

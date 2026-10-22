@@ -27,9 +27,12 @@ constant false-positive floor on the match probability, `P(match) =
 P_cat + (1 - P_cat) * chance_rate`, rather than subtracted bin by bin from
 a mean.
 
-Each star's own model inputs -- `P_indep` (the independent closed form)
-and `p_(2)` (the second-largest of the eight `p_b`, the comonotone bound)
--- are read off `_population_bin_table`: the SAME field-star population
+Each star's own model inputs -- `P_indep` (now `p_I1 * p_I2`, the
+independent probability of the OBSERVED outcome `_match_outcomes` scores:
+I1 AND I2 both detected) and `p_(2)` (now `min(p_I1, p_I2)`, that same
+event's comonotone counterpart -- under one shared latent uniform, I1
+AND I2 both clear iff the draw is below the SMALLER of the two) -- are
+read off `_population_bin_table`: the SAME field-star population
 quadrature C18's test1b runs (every STAR member of the region's own
 `good`-pixel tiles, `W_STAR * (1 - P_PAHC)` weighted, dimmed through the
 atlas's own column and hybrid law, evaluated against the SAME `PIXEL_
@@ -68,6 +71,25 @@ UKIDSS's clean-stellar cut itself favouring isolated stars over the
 crowded population the model integrates over), this module reports the
 uncapped maximum-likelihood value as a disclosure and returns LAMBDA
 capped at 1.
+
+S03 (round6 review, 2026-10-22): an earlier version of this module scored
+the OBSERVED outcome as I1-and-I2-both-detected (`_match_outcomes`'s own
+`y`, unchanged by this fix) but predicted the eight-band atlas event
+`P(>=2 of 8)`/`p_(2)` (the second-largest of the eight `p_b`) -- a
+mismatched event pair. At eight bands with moderate per-band
+probabilities, `P(>=2 of 8)` and its comonotone bound both run far above
+the two-band I1-and-I2 probabilities, which pushed the maximum-likelihood
+fit out of `[0, 1]` on BOTH regions and left LAMBDA capped at 1 with no
+interior value ever reachable. `_population_bin_table` now predicts the
+SAME I1-and-I2 event the data score: independent `p_I1 * p_I2`, comonotone
+`min(p_I1, p_I2)`. This is a correction to the measurement's own event
+definition, not a change to the atlas/likelihood mixture model that
+LAMBDA still feeds (that model's own event is, and remains, `P(>=2 of
+8)`/`p_(2)` over all eight bands) -- a two-band proxy measurement of a
+one-parameter mixture weight that the model then applies at eight-band
+scale, on the ordinary assumption that one survey-wide LAMBDA governs the
+same underlying band-correlation mechanism regardless of which bands are
+used to measure it.
 """
 
 import argparse
@@ -89,7 +111,6 @@ BAND_KEYS = atlas.BAND_KEYS
 IDX_K = BAND_KEYS.index("Ks")
 IDX_I1 = BAND_KEYS.index("I1")
 IDX_I2 = atlas.IDX_I2
-N_BANDS = len(BAND_KEYS)
 
 #: Cohen, Wheaton & Megeath 2003, AJ 126, 1090 (`definitions.BANDS`'s own
 #: Ks row): the same zero point C18's test1b used as a bare literal
@@ -117,17 +138,6 @@ _DELTA_NLL_68 = 0.5
 def _uvec(l_deg, b_deg):
     l, b = np.radians(l_deg), np.radians(b_deg)
     return np.column_stack([np.cos(b) * np.cos(l), np.cos(b) * np.sin(l), np.sin(b)])
-
-
-def _p_cat_independent(p):
-    """`P(>= 2 of 8)` (`bmstp.atlas.catalogued_probability`'s own closed
-    form), over an `(n, 8)` array of per-band probabilities."""
-    q = 1.0 - p
-    prod_all = np.prod(q, axis=1)
-    sum_term = np.zeros(p.shape[0], dtype=np.float64)
-    for i in range(p.shape[1]):
-        sum_term += p[:, i] * np.prod(np.delete(q, i, axis=1), axis=1)
-    return 1.0 - prod_all - sum_term
 
 
 def _region_pixels(config, region):
@@ -208,13 +218,14 @@ def _match_outcomes(gl, gb, org, ul, ub):
 
 def _population_bin_table(config, region, pix, good, bp, f_lim):
     """`(p_indep_bin, p2_bin, n_eff_bin)`, one triple per `KS_EDGES` bin:
-    C18's test1b model computation (module docstring), extended with
-    `p_(2)` -- the SAME per-member `(n_pix_batch, n_mem_batch, 8)` `p`
-    array test1b forms, reduced here to `_p_cat_independent(p)` AND
-    `np.sort(p, axis=-1)[..., -2]`, both pixel-area- and population-
-    weighted and binned by the member's own dimmed Ks magnitude before
-    being averaged -- never the other way around (module docstring's
-    disclosure)."""
+    C18's test1b model computation (module docstring), reduced to the
+    SAME I1-and-I2 event `_match_outcomes` scores (S03 fix) -- the SAME
+    per-member `(n_pix_batch, n_mem_batch, 8)` `p` array test1b forms,
+    reduced here to `p[..., IDX_I1] * p[..., IDX_I2]` (independent) AND
+    `np.minimum(p[..., IDX_I1], p[..., IDX_I2])` (comonotone), both
+    pixel-area- and population-weighted and binned by the member's own
+    dimmed Ks magnitude before being averaged -- never the other way
+    around (module docstring's disclosure)."""
     # C26 (owner ruling 2026-10-21): no longer reads a_col here -- each
     # member's own dimming comes from its own stored A_STAR_K now, not a
     # pixel's own A_COL_K times this member's placement fraction.
@@ -278,8 +289,14 @@ def _population_bin_table(config, region, pix, good, bp, f_lim):
                         curve, rows2, g0, dm, n, np.ascontiguousarray(lf).ravel(), aa, cc, scale
                     ).reshape(fb.shape)
                     p[:, :, bi] = np.where(hs, np.minimum(v, completeness_module.C_CAP), 0.0)
-                pc = _p_cat_independent(p.reshape(-1, N_BANDS)).reshape(p.shape[:2])
-                p2v = np.sort(p, axis=-1)[..., -2]
+                # S03 fix: predict the SAME I1-and-I2 event `_match_outcomes`
+                # scores as "catalogued" (y), not the atlas's eight-band
+                # P(>=2 of 8)/p_(2) -- those ran far above the two-band
+                # I1-and-I2 probabilities and pushed the fit out of [0, 1].
+                p_i1 = p[:, :, IDX_I1]
+                p_i2 = p[:, :, IDX_I2]
+                pc = p_i1 * p_i2
+                p2v = np.minimum(p_i1, p_i2)
                 wt = np.broadcast_to((wsc / om)[None, :] * atlas._HPX512_PIXEL_DEG2, pc.shape)
                 km = -2.5 * np.log10(flux[..., IDX_K] / ZP_K_MJY)
                 ib = np.digitize(km, KS_EDGES) - 1
@@ -293,10 +310,11 @@ def _population_bin_table(config, region, pix, good, bp, f_lim):
 
 
 def _p_cat_mix(p_indep, p2, lam):
-    """The C20 mixture: `(1 - LAMBDA) * P(>=2 of 8) + LAMBDA * p_(2)`,
-    `p_(2)` the second-largest of the eight `p_b` (the comonotone model's
-    own `P(>=2 of 8)`: under one shared latent uniform, at least two bands
-    clear iff the draw is below the SECOND-largest `p_b`)."""
+    """The C20 mixture, evaluated at the OBSERVED I1-and-I2 event (S03
+    fix): `(1 - LAMBDA) * p_I1 * p_I2 + LAMBDA * min(p_I1, p_I2)`. `p2`
+    (named for the general atlas mixture's `p_(2)`) carries `min(p_I1,
+    p_I2)` here: under one shared latent uniform, I1 AND I2 both clear
+    iff the draw is below the smaller of the two."""
     return (1.0 - lam) * p_indep + lam * p2
 
 
