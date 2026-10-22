@@ -207,7 +207,12 @@ class Completeness:
         g0, dm = self._grid_params(band)
         n = curves.shape[1]
         a, c = self._ac[band]
-        return completeness_module.completeness_many(curves[:], rows, g0, dm, n, log10_f, a, c, 1.0)
+        # `completeness_many` walks one flat axis of (row, flux) pairs;
+        # a caller's own (n, n_b) grid (`atlas.protostars`'s per-protostar
+        # brightness cells) goes through flat and comes back in its shape.
+        out = completeness_module.completeness_many(
+            curves[:], rows.reshape(-1), g0, dm, n, log10_f.reshape(-1), a, c, 1.0)
+        return out.reshape(rows.shape)
 
     def _crossing_mag(self, band, rows, target_c):
         """`(n,)` magnitude where `band`'s own measured curve, at each of
