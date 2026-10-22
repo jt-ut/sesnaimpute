@@ -512,22 +512,31 @@ def photosphere_f45_marginal(config, region):
 
 def p_ref_f45_mixture(config, region):
     """`P_ref`, the two-component mixture `p_ref_f45` (the census, weight
-    `DISK_FRACTION`) and `photosphere_f45_marginal` (the diskless Class
-    III members, weight `1 - DISK_FRACTION`) are blended into (owner's
-    ruling 2026-10-20, C11 brief item 3): depth placement, the shift
-    kernel and normalisation are identical for both components (both are
-    `P_ref`-shaped marginals on the SAME `LOG10_F45_EDGES` axis, mixed
-    BEFORE `shift_kernel`'s own per-sightline convolution, not after), so
-    this is the ONE place `bmstp.shapes.build_cloud` reads `P_ref` from.
-    Bit-identical to `p_ref_f45(config)` alone where `DISK_FRACTION = 1`
-    (the identity case): the diskless term's own weight is then exactly
-    0, and `photosphere_f45_marginal` is never evaluated."""
-    disk_frac = yso_law_module.disk_fraction(config, region)
+    `1 / N_LAW_TOTAL_FACTOR`, the population's own census share) and
+    `photosphere_f45_marginal` (the diskless Class III members, weight
+    `1 - 1 / N_LAW_TOTAL_FACTOR`) are blended into (owner's ruling
+    2026-10-20, C11 brief item 3; CORRECTED by S15, round 6 brief U08:
+    the raw `DISK_FRACTION` is the published disk fraction, not the
+    population's own census share -- the two agree only under the "all"
+    disk-fraction definition, where `N_LAW_TOTAL_FACTOR = 1 /
+    DISK_FRACTION`; the four "disks"-definition regions, Chameleon, CrA,
+    Lupus, NGC 7129, differ, and this function must use the same `1/F`,
+    `1 - 1/F` pair `template_weights.build_yso` now uses, not a THIRD
+    mixture): depth placement, the shift kernel and normalisation are
+    identical for both components (both are `P_ref`-shaped marginals on
+    the SAME `LOG10_F45_EDGES` axis, mixed BEFORE `shift_kernel`'s own
+    per-sightline convolution, not after), so this is the ONE place
+    `bmstp.shapes.build_cloud` reads `P_ref` from. Bit-identical to
+    `p_ref_f45(config)` alone where `N_LAW_TOTAL_FACTOR = 1` (the
+    identity case, and every "all"-definition region): the diskless
+    term's own weight is then exactly 0, and `photosphere_f45_marginal`
+    is never evaluated."""
+    census_share = 1.0 / yso_law_module.n_law_total_factor(config, region)
     p_census = p_ref_f45(config)
-    if disk_frac >= 1.0:
+    if census_share >= 1.0:
         return p_census
     p_photo = photosphere_f45_marginal(config, region)
-    return disk_frac * p_census + (1.0 - disk_frac) * p_photo
+    return census_share * p_census + (1.0 - census_share) * p_photo
 
 
 def _fallback_profile(config, region):

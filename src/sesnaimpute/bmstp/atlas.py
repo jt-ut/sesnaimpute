@@ -1275,7 +1275,8 @@ def _yso_register(config):
 def _yso_region_weight(config, region, reg):
     """`reg`'s own survey-wide `weight` (`_yso_register`, cached,
     computed once for the whole build), scaled by this region's own
-    `DISK_FRACTION` plus its own diskless Class III members' share
+    census share `1 / N_LAW_TOTAL_FACTOR` (`population.yso_law.
+    n_law_total_factor`) plus its own diskless Class III members' share
     added on top (`template_weights.yso_diskless_weight`, the photospheric
     brightness density, not the census's) -- owner's ruling 2026-10-20:
     "the atlas needs no change" (this unit's own earlier report) was
@@ -1285,14 +1286,22 @@ def _yso_region_weight(config, region, reg):
     atlas's own `N_CAT_CELL_YSO` total scales up (through `DENSITY_YSO`'s
     corrected level) while every one of those extra members is still
     drawn from the OLD, census-only brightness distribution -- measured
-    and reported, C11 brief round 2. `Sigma weight_region = DISK_FRACTION
-    + CLASS_SHARE_DISKLESS = 1` exactly, same identity `build_yso` keeps.
-    Bit-identical to `reg["weight"]` alone at the identity case
-    (DISK_FRACTION = 1): `yso_diskless_weight` returns all zeros without
-    reading the region's own age."""
-    disk_frac = yso_law_module.disk_fraction(config, region)
+    and reported, C11 brief round 2. CORRECTED by S15 (round 6 brief
+    U08, reviewer round 1): this used the raw published `DISK_FRACTION`,
+    not the population's own census share -- the two agree only under
+    the "all" disk-fraction definition; under "disks" (Chameleon, CrA,
+    Lupus, NGC 7129) they differ, and `template_weights.build_yso` and
+    `sample_cloud.p_ref_f45_mixture` now both read `1 / N_LAW_TOTAL_
+    FACTOR` instead, so the atlas must too, or its own Monte Carlo draw
+    mixes the two components in a THIRD, inconsistent proportion.
+    `Sigma weight_region = 1/F + CLASS_SHARE_DISKLESS = 1/F + (1 - 1/F)
+    = 1` exactly, same identity `build_yso` keeps. Bit-identical to
+    `reg["weight"]` alone at the identity case (`N_LAW_TOTAL_FACTOR = 1`,
+    also every "all"-definition region): `yso_diskless_weight` returns
+    all zeros without reading the region's own age."""
+    census_share_region = 1.0 / yso_law_module.n_law_total_factor(config, region)
     _names_d, w_diskless = template_weights.yso_diskless_weight(config, region)
-    return disk_frac * reg["weight"] + w_diskless
+    return census_share_region * reg["weight"] + w_diskless
 
 
 def _quantile_nodes_from_weight(values, weight, n):
@@ -1328,13 +1337,14 @@ def _yso_region_nodes(reg, config, region, d_front, d_back):
     flux0_template * 10**delta`, `w_ts = w_template * w_shift`.
 
     `weight_t` is this REGION's own weight (`_yso_region_weight`, owner's
-    ruling 2026-10-20): `reg["weight"]` (the cached, survey-wide census
-    weight) times `DISK_FRACTION` plus this region's own diskless Class
-    III share added on top, exactly what `template_weights.build_yso`
-    does for the P5 table -- so the templates these quantile nodes draw
-    from, and therefore `flux0_ts`'s own brightness distribution, carry
-    the SAME two-component mixture `GRID_YSO` does. Bit-identical to the
-    census-only draw at the identity case (`DISK_FRACTION = 1`)."""
+    ruling 2026-10-20, S15-corrected): `reg["weight"]` (the cached,
+    survey-wide census weight) times the census share `1 / N_LAW_TOTAL_
+    FACTOR` plus this region's own diskless Class III share added on
+    top, exactly what `template_weights.build_yso` does for the P5
+    table -- so the templates these quantile nodes draw from, and
+    therefore `flux0_ts`'s own brightness distribution, carry the SAME
+    two-component mixture `GRID_YSO` does. Bit-identical to the
+    census-only draw at the identity case (`N_LAW_TOTAL_FACTOR = 1`)."""
     f_ref, floor_linear = reg["f_ref"], reg["floor_linear"]
     weight_t = _yso_region_weight(config, region, reg)
     csum = np.cumsum(weight_t) / weight_t.sum()
