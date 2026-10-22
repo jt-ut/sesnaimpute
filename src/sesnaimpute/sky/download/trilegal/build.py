@@ -280,7 +280,7 @@ def read_ascii_table(path):
         raise ValueError(f"{path}: {exc}") from exc
 
 
-def write_ascii_table_h5(dest_path, header_line, names, df):
+def write_ascii_table_h5(dest_path, header_line, names, df, query=None):
     """Writes one TRILEGAL ascii table's columns as typed HDF5 datasets,
     named exactly as the header names them (sanitised,
     `sanitize_column_name`), plus the verbatim header line as a file
@@ -288,10 +288,14 @@ def write_ascii_table_h5(dest_path, header_line, names, df):
     `sky.download.trilegal.convert` (the 931 files already on disk) both
     write (T6 items 1-2). Download never computes (CODING_RULES_BMSTP.md
     5a): every dataset is one ascii column, cast to its stored dtype,
-    nothing derived."""
+    nothing derived. `query` (a fresh pull only) is the query that drew
+    the file, written as one `QUERY_<FIELD>` attr per entry: provenance,
+    read by nothing -- a present file is still never re-queried."""
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     with h5py.File(dest_path, "w") as f:
         f.attrs["HEADER"] = header_line.rstrip("\n")
+        for key, value in (query or {}).items():
+            f.attrs[f"QUERY_{key.upper()}"] = str(value)
         for name in names:
             clean = sanitize_column_name(name)
             data = df[name].to_numpy(dtype=column_dtype(clean))
@@ -494,13 +498,22 @@ def _query_fields(defaults, l_deg, b_deg, area_deg2):
     return fields
 
 
-def fetch_region_part(l_deg, b_deg, area_deg2, dest_path, defaults, action_url):
+#: The submitted form fields a fresh pull records on its own file
+#: (`write_ascii_table_h5`'s `query`): the pointing, the area, the
+#: service's version and every field this module sets itself.
+QUERY_RECORD_FIELDS = ("trilegal_version", "gc_l", "gc_b", "field", "photsys_file",
+                       "icm_lim", "mag_lim", "extinction_kind", "imf_file")
+
+
+def fetch_region_part(l_deg, b_deg, area_deg2, dest_path, defaults, action_url,
+                      pointing_idx=None, part_idx=None, n_parts=None):
     """Runs one TRILEGAL query (one region, or one part of a region split
     into `n_parts`) and saves it, typed, at `dest_path` (T6: `.h5`, the
     `write_ascii_table_h5` schema `sky.download.trilegal.convert` also
     writes for the ascii already on disk) -- the reply's own values,
-    nothing derived. Returns `(n_rows, wall_time_s)` from POST to the
-    file being saved.
+    nothing derived, plus the query itself (`QUERY_RECORD_FIELDS`, and
+    the pointing/part indices) as attrs. Returns `(n_rows, wall_time_s)`
+    from POST to the file being saved.
     """
     fields = _query_fields(defaults, l_deg, b_deg, area_deg2)
     output_url, status_fields, submitted_at = submit_query(action_url, fields)
@@ -508,7 +521,9 @@ def fetch_region_part(l_deg, b_deg, area_deg2, dest_path, defaults, action_url):
     data = fetch_output(output_url)
     wall_time_s = time.time() - submitted_at
     header_line, names, df = _parse_ascii_table(data.decode("iso-8859-1"))
-    write_ascii_table_h5(dest_path, header_line, names, df)
+    query = {k: fields.get(k, "") for k in QUERY_RECORD_FIELDS}
+    query.update(pointing_index=pointing_idx, part_index=part_idx, n_parts=n_parts)
+    write_ascii_table_h5(dest_path, header_line, names, df, query=query)
     return len(df), wall_time_s
 
 
@@ -633,7 +648,7 @@ def build(config, regions=None, _limit=None):
         n_rows = 0
         n_done = 0
         for region, p_idx, pt, area_per_part, file_names in plan:
-            for name in file_names:
+            for part_idx, name in enumerate(file_names, start=1):
                 dest_path = f"{dest_dir}/{name}"
                 if os.path.exists(dest_path):
                     print(f"trilegal build: {dest_path} present, skipped "
@@ -641,7 +656,8 @@ def build(config, regions=None, _limit=None):
                 else:
                     defaults, action_url = _form()
                     n_out, wall_time_s = fetch_region_part(
-                        pt["l_deg"], pt["b_deg"], area_per_part, dest_path, defaults, action_url)
+                        pt["l_deg"], pt["b_deg"], area_per_part, dest_path, defaults, action_url,
+                        pointing_idx=p_idx, part_idx=part_idx, n_parts=pt["n_parts"])
                     n_files += 1
                     n_rows += n_out
                     print(f"trilegal build: {region!r} pointing {p_idx} "
