@@ -3523,14 +3523,17 @@ REGISTRY = {
         "this source's sky pixel (the pixel's mean column, not the source's own), "
         "the prior odds of this class against the other six, before this "
         "source's own measurements are used. LOG_ODDS_PRIOR + LOG_ODDS_DATA = "
-        "LOG_ODDS."),
+        "LOG_ODDS. Not a number for a class whose models carry no flux in any band "
+        "observed at this pixel (galaxies and shocked-gas knots outside the Spitzer "
+        "IRAC coverage): the class cannot be catalogued there under the model as "
+        "built, which is not a defect."),
     ("posterior_classification_source", "LOG_ODDS_DATA"): ("nats",
         "The part of LOG_ODDS that comes from this source itself: the photometry's "
         "Bayes factor against the prior atlas at this source's sky pixel, how well "
         "each class's population of model spectra, with the prior's spread in "
         "brightness and extinction, explains its measured fluxes, its "
         "non-detections and its Gaia measurement. Positive means the source's own "
-        "data favour the class."),
+        "data favour the class. Not a number where LOG_ODDS_PRIOR is (see there)."),
     ("posterior_classification_source", "LOG_ODDS_MEASURED"): ("nats",
         "The part of LOG_ODDS_DATA that comes from the bands the source was measured "
         "in: how much they move each class's log odds, measured against the prior "
@@ -3791,7 +3794,10 @@ _SWEEP_FIT_READINGS = {
         "weighted by its probability of clearing two of eight bands at the "
         "pixel's own completeness curves; the pixel's mean column, not the "
         "source's own. No photometry. Divided across the seven classes it gives "
-        "each class's prior probability."),
+        "each class's prior probability. Minus infinity for a class whose models "
+        "carry no flux in any band observed at this pixel (galaxies and shocked-gas "
+        "knots outside the Spitzer IRAC coverage): the class cannot be catalogued "
+        "there under the model as built, which is not a defect."),
     "FRAC_CLAMPED": ("fraction",
         "The support-weighted fraction of this class's models whose best fit called "
         "for negative extinction and was held at zero."),
