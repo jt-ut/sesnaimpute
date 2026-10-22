@@ -548,8 +548,10 @@ def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
         w_ramp_unique = selection_module.law_dense_weight(a_unique)
         kappa_unique = selection_module.kappa_hybrid(config, w_ramp_unique)  # (n_pix, n_unique, 8)
         dimming_unique = 0.4 * a_unique[:, :, None] * kappa_unique  # (n_pix, n_unique, 8)
-        dimming = dimming_unique[:, inverse, :]  # (n_pix, n_sub, 8): gathered to the sub-block
-        flux = flux0_s[None, :, :] * 10.0 ** (-dimming)  # (n_pix, n_sub, 8)
+        # exponentiated on the distinct values, THEN gathered: the same
+        # elementwise `10.0 ** (-x)` on the same floats, bit-identical
+        attenuation = (10.0 ** (-dimming_unique))[:, inverse, :]  # (n_pix, n_sub, 8): gathered to the sub-block
+        flux = flux0_s[None, :, :] * attenuation  # (n_pix, n_sub, 8)
         has_flux = flux0_s[None, :, :] > 0.0  # (1, n_sub, 8), broadcasts
         # per band, the MEASURED completeness curve at this pixel's own
         # row (`catalog.completeness.completeness_many`, the design's one
@@ -558,14 +560,18 @@ def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
         # capped at the owner's `C_CAP` (`catalogued_probability`'s own
         # docstring).
         p = np.empty_like(flux)
-        rows_2d = np.broadcast_to(pixel_row[:, None], flux.shape[:2])
+        rows_flat = np.ascontiguousarray(
+            np.broadcast_to(pixel_row[:, None], flux.shape[:2])).ravel()  # one per sub-block
         for bi, band in enumerate(BAND_KEYS):
             curve_b, g0_b, dm_b, n_b, a_b, c_b, scale_b = band_params[band]
             flux_b = flux[:, :, bi]
             has_b = has_flux[:, :, bi]
+            if not has_b.any():  # no member carries flux here: p is exactly 0.0 (the `np.where` below)
+                p[:, :, bi] = 0.0
+                continue
             log10_f_b = np.log10(np.where(has_b, flux_b, 1.0))
             c_vals = completeness_module.completeness_many(
-                curve_b, np.ascontiguousarray(rows_2d).ravel(), g0_b, dm_b, n_b,
+                curve_b, rows_flat, g0_b, dm_b, n_b,
                 np.ascontiguousarray(log10_f_b).ravel(), a_b, c_b, scale_b
             ).reshape(flux_b.shape)
             p[:, :, bi] = np.where(has_b, np.minimum(c_vals, completeness_module.C_CAP), 0.0)
