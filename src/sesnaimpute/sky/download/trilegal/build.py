@@ -602,6 +602,19 @@ def build(config, regions=None, _limit=None):
             n_pointings = len(pointings)
             print(f"trilegal build: {region!r}: {n_pointings} pointing(s) on the "
                   f"{POINTING_GRID_DEG} deg grid")
+            # A region is PRESENT when either its full grid set or its single
+            # historical pointing's set is on disk -- the same test
+            # `population.field_stars` reads by (it falls back to the single
+            # pointing and never reads a partial grid) -- and is then skipped
+            # whole: only a region with neither set is fetched.
+            grid_names = [_file_names(region, n_pointings, p_idx, pt["n_parts"])
+                          for p_idx, pt in enumerate(pointings)]
+            single_names = _file_names(region, 1, 0, REGION_POINTINGS[region]["n_parts"])
+            if (all(os.path.exists(f"{dest_dir}/{n}") for names_ in grid_names for n in names_)
+                    or all(os.path.exists(f"{dest_dir}/{n}") for n in single_names)):
+                print(f"trilegal build: {region!r} present, skipped "
+                      f"(delete its files to draw a new realisation)")
+                continue
             for p_idx, pt in enumerate(pointings):
                 n_parts = pt["n_parts"]
                 area_per_part = pt["area_deg2"] / n_parts
