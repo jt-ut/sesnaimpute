@@ -3539,6 +3539,10 @@ _SWEEP_FIT_READINGS = {
         "model of that subclass under both extinction laws, the measured and "
         "undetected bands and Gaia: Gaia DR3's published completeness at the "
         "source's sky pixel; an unmatched source is scored as a non-detection. "
+        "It includes how wide a range of brightness and extinction the fit to "
+        "the measured bands alone leaves plausible: a class whose measured-band "
+        "errors are larger leaves a wider range and is marked down for it, "
+        "separately from how well its single best-fitting value matches. "
         "Minus infinity means the subclass has no models, or the class cannot "
         "explain the source, or the source could not be fitted."),
     "LOG10_FLUX_MEAN": ("log10 of flux in mJy",
@@ -3571,9 +3575,11 @@ _SWEEP_FIT_READINGS = {
     "LN_EVIDENCE_MEASURED": ("nats",
         "This class's evidence from its prior and the measured bands only, as a "
         "natural logarithm, summed over every model in its library and over "
-        "extinction; the undetected bands and Gaia are not yet included. "
-        "LN_EVIDENCE_MEASURED minus LN_PRIOR_MASS is how much the measured bands "
-        "raise or lower the class."),
+        "extinction; the undetected bands and Gaia are not yet included. It "
+        "includes how wide a range of brightness and extinction the measured-"
+        "band fit alone leaves plausible, carried through to LN_EVIDENCE_NONDET "
+        "and LN_EVIDENCE as well. LN_EVIDENCE_MEASURED minus LN_PRIOR_MASS is "
+        "how much the measured bands raise or lower the class."),
     "LN_EVIDENCE_NONDET": ("nats",
         "This class's evidence once the undetected bands are also included (Gaia "
         "not yet), as a natural logarithm summed over every model and over "

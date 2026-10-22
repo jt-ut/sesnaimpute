@@ -631,13 +631,17 @@ def _source_task(i):
         ln_lambda2 = [None, None]      # float32 (m,) per design -- S2, no ln_l
         a_post_t = [None, None]        # float64 (m,) per design
         a2_post_t = [None, None]
-        # ln_l: chi2 plus the per-source normalisation ONLY (NONDET brief
+        # ln_l: chi2 plus the per-source normalisation (NONDET brief
         # section 1 -- the non-detection band charge no longer rides here,
         # it is already folded into ln_lambda, inside the prior's own cell
-        # sum). ln_l_report keeps the OLD full quantity (chi2 plus the
-        # non-detection charge AT THE CLAMPED MARK, likelihood.fit's own
-        # `ln_nondet`) for TOPK_LN_L alone, which stays the maximum-
-        # likelihood-point quantity it has always been (brief section 1).
+        # sum), PLUS, since S01 (review_2026-10-22/FINDINGS.md), the
+        # evidence's own nuisance-integration volume (added below, once
+        # per design k, never per template). ln_l_report keeps the OLD
+        # full quantity (chi2 plus the non-detection charge AT THE CLAMPED
+        # MARK, likelihood.fit's own `ln_nondet`), with NO volume term,
+        # for TOPK_LN_L alone, which stays the maximum-likelihood-point
+        # diagnostic it has always been (brief section 1; S01's reviewer
+        # reply keeps this diagnostic untouched).
         ln_l = [None, None]             # float64 (m,) per design
         ln_l_report = [None, None]      # float64 (m,) per design
         # NONDET2 section 1: the Gaia term now rides inside ln_lambda2 (per
@@ -684,6 +688,37 @@ def _source_task(i):
             # rides on which one this reads.
             ln_l[k] = -0.5 * fit_k.chi2_min.astype(np.float64) + np.float64(np.float32(batch.ln_norm_term))
             ln_l_report[k] = -0.5 * fit_k.chi2_min.astype(np.float64) + fit_k.ln_nondet.astype(np.float64)
+
+            # S01 (review_2026-10-22/FINDINGS.md; reviewer reply narrowed
+            # this to the EVIDENCE alone, not the peak-likelihood
+            # diagnostic -- see TOPK_LN_L's own reading, unchanged): the
+            # evidence's own nuisance-integration volume, `2 pi sqrt(det
+            # Sigma_ab)`, Sigma_ab the likelihood's covariance in the
+            # fitter's own (a, log10 B) coordinates, not its (A_V, SC)
+            # ones. T = diag(ak_per_av, GRAY_COLUMN) maps (A_V, SC) ->
+            # (a, log10_B) = (ak_per_av*A_V, GRAY_COLUMN*SC) (likelihood.
+            # fit's own docstring, SPEC_BMSTP_DRAFT.md section 1.3), so
+            # Sigma_ab = T xtwx_inv T^T and det Sigma_ab =
+            # (ak_per_av*GRAY_COLUMN)^2 * det(xtwx_inv). This is one
+            # scalar per (source, class, law k): `design` (and so
+            # `xtwx_inv`/`ak_per_av`) carries no template axis in
+            # likelihood.fit, so it is added once here to the whole (m,)
+            # array, never per template. A flagged design (fewer than two
+            # detected bands, or the eye(2) det<=0 substitute, `fit_k.
+            # flagged`) gets 0 added -- chi2_min is already NaN there, as
+            # today's code treats it. Added to `ln_l` (and so to every S0/
+            # S1/S2 that sums it in) ONLY, never to `ln_l_report`: that
+            # field stays TOPK_LN_L, the maximum-likelihood-point
+            # diagnostic its own reading already describes, which this
+            # finding does not touch.
+            if fit_k.flagged:
+                ln_vol_k = 0.0
+            else:
+                det_xtwx_inv = (fit_k.xtwx_inv[0, 0] * fit_k.xtwx_inv[1, 1]
+                                 - fit_k.xtwx_inv[0, 1] * fit_k.xtwx_inv[1, 0])
+                det_sigma_ab = (fit_k.ak_per_av * likelihood.GRAY_COLUMN) ** 2 * det_xtwx_inv
+                ln_vol_k = float(np.log(2.0 * np.pi) + 0.5 * np.log(det_sigma_ab))
+            ln_l[k] = ln_l[k] + ln_vol_k
 
             # Gamma reads this design's own unclamped optimum a_hat/log10_b_hat;
             # report-only now (NONDET2 section 1) -- the clamped marks stay
