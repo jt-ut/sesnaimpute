@@ -169,7 +169,7 @@ def build_star_family(config, region):
         # `functools.partial`, a piece carries only its own slice bounds
         # (`sesnaimpute.pieces`'s module docstring). The per-tile field-star
         # catalogue reads this used to repeat per tile are now a
-        # once-per-worker-process cache (`sample_star._field_star_arrays`),
+        # once-per-worker-process cache (`sample_star._field_star_column`),
         # which is what brought the stage's own 14.3 GB peak down.
         n_jobs = int(config.n_jobs)
         bounds = pieces.slices(n_tile, n_jobs)
