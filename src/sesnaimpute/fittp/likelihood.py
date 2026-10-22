@@ -301,6 +301,27 @@ def prepare(config, flux, sigma, origin, sigma_lib_l, curve_rows, covered,
                  ln_norm_term=ln_norm_term)
 
 
+#: P02 (round 6 review): one slot per worker PROCESS, not per call -- holds
+#: the single immutable per-class library (`log10_f_ref`, `fittp.sweep`'s
+#: own `w["template_log"]`, the SAME array object for every source and
+#: every design of one {region, class} sweep) already widened to float64,
+#: keyed by `id()` of the float32 array handed in. `fit` runs this widening
+#: on the first call it sees after a class change (a new array object, a
+#: new `id`, from the new pool `fittp.sweep.build_region_class` forks per
+#: class) and reads the cached copy on every call after, instead of paying
+#: the same ~25 MB widening again for every source and both extinction-law
+#: designs (FINDINGS.md P02).
+_F_REF64_CACHE = [None, None]
+
+
+def _widened_f_ref64(log10_f_ref):
+    key = id(log10_f_ref)
+    if _F_REF64_CACHE[0] != key:
+        _F_REF64_CACHE[0] = key
+        _F_REF64_CACHE[1] = log10_f_ref.astype(np.float64)
+    return _F_REF64_CACHE[1]
+
+
 def fit(batch, log10_f_ref, w):
     """The closed-form fit of SPEC_BMSTP_DRAFT.md section 6.1 over every
     template of `log10_f_ref` (`(m, 8)` float32, this class's shared
@@ -354,7 +375,7 @@ def fit(batch, log10_f_ref, w):
     """
     config = batch.config
     log10_f_ref = np.asarray(log10_f_ref, dtype=np.float32)
-    log10_f_ref64 = log10_f_ref.astype(np.float64)
+    log10_f_ref64 = _widened_f_ref64(log10_f_ref)
     r = batch.log10_f_obs[None, :] - log10_f_ref64     # (m, 8) float64
     m = r.shape[0]
     weight = batch.weight                              # (8,) float64

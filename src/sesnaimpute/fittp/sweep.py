@@ -1045,87 +1045,95 @@ def _discover_parts(path):
     return found
 
 
-def _assemble_batch(results, name_slice, n_sub, topk):
-    """Folds one batch's own per-source task results (already in catalogue
-    order, `build_region_class`'s own `imap` consumption) into the batch-
-    sized arrays `_write_part` writes -- a batch-sized array, never a
-    region-sized one (rule 10b)."""
-    m = len(results)
-    ln_evidence = np.empty((m, n_sub), dtype=np.float32)
-    log10_flux_mean = np.empty((m, N_BANDS), dtype=np.float32)
-    log10_flux_cov = np.empty((m, N_BANDS, N_BANDS), dtype=np.float32)
-    topk_model = np.empty((m, topk), dtype=np.int32)
-    topk_a_k = np.empty((m, topk), dtype=np.float32)
-    topk_log10_b = np.empty((m, topk), dtype=np.float32)
-    topk_chi2 = np.empty((m, topk), dtype=np.float32)
-    topk_ln_l = np.empty((m, topk), dtype=np.float32)
-    topk_ln_prior_fit = np.empty((m, topk), dtype=np.float32)
-    topk_ln_unseen = np.empty((m, topk), dtype=np.float32)
-    topk_ln_gaia = np.empty((m, topk), dtype=np.float32)
-    topk_ln_prior_ml = np.empty((m, topk), dtype=np.float32)
-    topk_ln_gamma_ml = np.empty((m, topk), dtype=np.float32)
-    topk_flux = np.empty((m, topk, N_BANDS), dtype=np.float32)
-    topk_law = np.empty((m, topk), dtype=np.int8)
-    occam_gap = np.empty(m, dtype=np.float32)
-    ln_evidence_measured = np.empty(m, dtype=np.float32)
-    ln_evidence_nondet = np.empty(m, dtype=np.float32)
-    ln_prior_mass = np.empty(m, dtype=np.float32)
-    a_k_post = np.empty(m, dtype=np.float32)
-    a_k_post_sig = np.empty(m, dtype=np.float32)
-    p_dense = np.empty(m, dtype=np.float32)
-    frac_clamped = np.empty(m, dtype=np.float32)
-    n_detected = np.empty(m, dtype=np.int8)
-    failed = np.zeros(m, dtype=bool)
-    zero_ext_count = 0
-    n_templates_checked = 0
-    id1_max_err, id1_sum_err, id1_n_checked, id1_n_undefined = 0.0, 0.0, 0, 0
-    for k, r in enumerate(results):
-        ln_evidence[k] = r["ln_evidence"]
-        log10_flux_mean[k] = r["log10_flux_mean"]
-        log10_flux_cov[k] = r["log10_flux_cov"]
-        topk_model[k] = r["topk_model"]
-        topk_a_k[k] = r["topk_a_k"]
-        topk_log10_b[k] = r["topk_log10_b"]
-        topk_chi2[k] = r["topk_chi2"]
-        topk_ln_l[k] = r["topk_ln_l"]
-        topk_ln_prior_fit[k] = r["topk_ln_prior_fit"]
-        topk_ln_unseen[k] = r["topk_ln_unseen"]
-        topk_ln_gaia[k] = r["topk_ln_gaia"]
-        topk_ln_prior_ml[k] = r["topk_ln_prior_ml"]
-        topk_ln_gamma_ml[k] = r["topk_ln_gamma_ml"]
-        topk_flux[k] = r["topk_flux"]
-        topk_law[k] = r["topk_law"]
-        occam_gap[k] = r["occam_gap"]
-        ln_evidence_measured[k] = r["ln_evidence_measured"]
-        ln_evidence_nondet[k] = r["ln_evidence_nondet"]
-        ln_prior_mass[k] = r["ln_prior_mass"]
-        a_k_post[k] = r["a_k_post"]
-        a_k_post_sig[k] = r["a_k_post_sig"]
-        p_dense[k] = r["p_dense"]
-        frac_clamped[k] = r["frac_clamped"]
-        n_detected[k] = r["n_detected"]
-        failed[k] = r["failed"]
-        zero_ext_count += r["zero_ext_count"]
-        n_templates_checked += r["n_templates_checked"]
-        id1_max_err = max(id1_max_err, r["id1_max_err"])
-        id1_sum_err += r["id1_sum_err"]
-        id1_n_checked += r["id1_n_checked"]
-        id1_n_undefined += r["id1_n_undefined"]
-    return dict(name=name_slice, ln_evidence=ln_evidence, log10_flux_mean=log10_flux_mean, log10_flux_cov=log10_flux_cov,
-                topk_model=topk_model, topk_a_k=topk_a_k, topk_log10_b=topk_log10_b,
-                topk_chi2=topk_chi2, topk_ln_l=topk_ln_l,
-                topk_ln_prior_fit=topk_ln_prior_fit, topk_ln_unseen=topk_ln_unseen,
-                topk_ln_gaia=topk_ln_gaia, topk_ln_prior_ml=topk_ln_prior_ml,
-                topk_ln_gamma_ml=topk_ln_gamma_ml,
-                topk_flux=topk_flux, topk_law=topk_law, occam_gap=occam_gap,
-                ln_evidence_measured=ln_evidence_measured, ln_evidence_nondet=ln_evidence_nondet,
-                ln_prior_mass=ln_prior_mass,
-                a_k_post=a_k_post, a_k_post_sig=a_k_post_sig, p_dense=p_dense,
-                frac_clamped=frac_clamped,
-                n_detected=n_detected, failed=failed,
-                zero_ext_count=zero_ext_count, n_templates_checked=n_templates_checked,
-                id1_max_err=id1_max_err, id1_sum_err=id1_sum_err,
-                id1_n_checked=id1_n_checked, id1_n_undefined=id1_n_undefined)
+def _new_batch_arrays(m, n_sub, topk):
+    """P02 (round 6 review): one batch's own arrays, preallocated BEFORE
+    the imap loop starts, so `_fill_batch_row` can write each source's own
+    task result straight into its row as it arrives -- instead of the
+    loop first gathering every one of the batch's `m` per-source dicts
+    into a list (a second, duplicate parent-side payload) and only then
+    copying each field out of that list into these same arrays. A batch-
+    sized set of arrays, never a region-sized one (rule 10b)."""
+    return dict(
+        ln_evidence=np.empty((m, n_sub), dtype=np.float32),
+        log10_flux_mean=np.empty((m, N_BANDS), dtype=np.float32),
+        log10_flux_cov=np.empty((m, N_BANDS, N_BANDS), dtype=np.float32),
+        topk_model=np.empty((m, topk), dtype=np.int32),
+        topk_a_k=np.empty((m, topk), dtype=np.float32),
+        topk_log10_b=np.empty((m, topk), dtype=np.float32),
+        topk_chi2=np.empty((m, topk), dtype=np.float32),
+        topk_ln_l=np.empty((m, topk), dtype=np.float32),
+        topk_ln_prior_fit=np.empty((m, topk), dtype=np.float32),
+        topk_ln_unseen=np.empty((m, topk), dtype=np.float32),
+        topk_ln_gaia=np.empty((m, topk), dtype=np.float32),
+        topk_ln_prior_ml=np.empty((m, topk), dtype=np.float32),
+        topk_ln_gamma_ml=np.empty((m, topk), dtype=np.float32),
+        topk_flux=np.empty((m, topk, N_BANDS), dtype=np.float32),
+        topk_law=np.empty((m, topk), dtype=np.int8),
+        occam_gap=np.empty(m, dtype=np.float32),
+        ln_evidence_measured=np.empty(m, dtype=np.float32),
+        ln_evidence_nondet=np.empty(m, dtype=np.float32),
+        ln_prior_mass=np.empty(m, dtype=np.float32),
+        a_k_post=np.empty(m, dtype=np.float32),
+        a_k_post_sig=np.empty(m, dtype=np.float32),
+        p_dense=np.empty(m, dtype=np.float32),
+        frac_clamped=np.empty(m, dtype=np.float32),
+        n_detected=np.empty(m, dtype=np.int8),
+        failed=np.zeros(m, dtype=bool),
+        zero_ext_count=0, n_templates_checked=0,
+        id1_max_err=0.0, id1_sum_err=0.0, id1_n_checked=0, id1_n_undefined=0,
+    )
+
+
+def _fill_batch_row(arrays, r, k):
+    """Writes one source's own `_source_task` result `r` into row `k` of
+    `arrays` (`_new_batch_arrays`'s own preallocated dict), in source
+    order, as `build_region_class`'s own `imap` loop consumes it -- the
+    same fields `_assemble_batch` has always copied, one source at a time
+    instead of all `m` after a list of every result was gathered first
+    (P02, round 6 review). The four running totals (`zero_ext_count`,
+    `n_templates_checked`, `id1_sum_err`, `id1_n_checked`, `id1_n_undefined`)
+    accumulate in the same source order as before (`imap` yields in input
+    order), so no reduction-order tolerance is needed; `id1_max_err` is a
+    commutative max."""
+    arrays["ln_evidence"][k] = r["ln_evidence"]
+    arrays["log10_flux_mean"][k] = r["log10_flux_mean"]
+    arrays["log10_flux_cov"][k] = r["log10_flux_cov"]
+    arrays["topk_model"][k] = r["topk_model"]
+    arrays["topk_a_k"][k] = r["topk_a_k"]
+    arrays["topk_log10_b"][k] = r["topk_log10_b"]
+    arrays["topk_chi2"][k] = r["topk_chi2"]
+    arrays["topk_ln_l"][k] = r["topk_ln_l"]
+    arrays["topk_ln_prior_fit"][k] = r["topk_ln_prior_fit"]
+    arrays["topk_ln_unseen"][k] = r["topk_ln_unseen"]
+    arrays["topk_ln_gaia"][k] = r["topk_ln_gaia"]
+    arrays["topk_ln_prior_ml"][k] = r["topk_ln_prior_ml"]
+    arrays["topk_ln_gamma_ml"][k] = r["topk_ln_gamma_ml"]
+    arrays["topk_flux"][k] = r["topk_flux"]
+    arrays["topk_law"][k] = r["topk_law"]
+    arrays["occam_gap"][k] = r["occam_gap"]
+    arrays["ln_evidence_measured"][k] = r["ln_evidence_measured"]
+    arrays["ln_evidence_nondet"][k] = r["ln_evidence_nondet"]
+    arrays["ln_prior_mass"][k] = r["ln_prior_mass"]
+    arrays["a_k_post"][k] = r["a_k_post"]
+    arrays["a_k_post_sig"][k] = r["a_k_post_sig"]
+    arrays["p_dense"][k] = r["p_dense"]
+    arrays["frac_clamped"][k] = r["frac_clamped"]
+    arrays["n_detected"][k] = r["n_detected"]
+    arrays["failed"][k] = r["failed"]
+    arrays["zero_ext_count"] += r["zero_ext_count"]
+    arrays["n_templates_checked"] += r["n_templates_checked"]
+    arrays["id1_max_err"] = max(arrays["id1_max_err"], r["id1_max_err"])
+    arrays["id1_sum_err"] += r["id1_sum_err"]
+    arrays["id1_n_checked"] += r["id1_n_checked"]
+    arrays["id1_n_undefined"] += r["id1_n_undefined"]
+
+
+def _assemble_batch(arrays, name_slice):
+    """Folds one batch's own arrays -- `_new_batch_arrays`'s preallocated
+    dict, filled in place by `_fill_batch_row` as `build_region_class`'s
+    own `imap` loop consumed it -- into the one dict `_write_part` writes,
+    plus the batch's own `NAME` slice."""
+    return dict(name=name_slice, **arrays)
 
 
 def _write_part(part_path, batch, cls):
@@ -1329,10 +1337,10 @@ def build_region_class(config, region, cls, st, reader, catalog,
             if selected is not None and bi not in selected:
                 continue
             m = bstop - bstart
-            results = [None] * m
+            arrays = _new_batch_arrays(m, n_sub, topk)
             for r in pool.imap(_source_task, range(bstart, bstop), chunksize=_IMAP_CHUNKSIZE):
-                results[r["i"] - bstart] = r
-            batch = _assemble_batch(results, catalog["name"][bstart:bstop], n_sub, topk)
+                _fill_batch_row(arrays, r, r["i"] - bstart)
+            batch = _assemble_batch(arrays, catalog["name"][bstart:bstop])
             _write_part(_part_path(path, bi), batch, cls)
             st.tick(bi + 1, len(batch_bounds), "batches")
 
