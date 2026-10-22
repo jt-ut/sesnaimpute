@@ -275,13 +275,19 @@ def _extract_uwish2_tablec1(pdf_path):
 
 def _write_uwish2_tablec1(dest_dir):
     """Extracts UWISH2 Table C1 from the raw PDF appendix and writes
-    `uwish2/uwish2_tablec1.csv`. Returns `(out_path, n_rows)`."""
+    `uwish2/uwish2_tablec1.csv`. A file already present is left as it is
+    and the PDF is not opened. Returns `(out_path, n_rows)`."""
+    out_path = f"{dest_dir}/uwish2/uwish2_tablec1.csv"
+    if os.path.exists(out_path):
+        with open(out_path) as fh:
+            n_present = sum(1 for _ in fh) - 1
+        print(f"h2_knot_surveys uwish2 Table C1: {out_path} present, skipped")
+        return out_path, n_present
     pdf_path = f"{dest_dir}/uwish2/appendix_large.pdf"
     if not os.path.isfile(pdf_path):
         raise FileNotFoundError(
             "h2_knot_surveys: hand-placed input missing -- acquire it by hand "
             f"(see this module's docstring) and place it at {pdf_path!r}")
-    out_path = f"{dest_dir}/uwish2/uwish2_tablec1.csv"
     uniq, pages_hit, sep = _extract_uwish2_tablec1(pdf_path)
     with open(out_path, "w", newline="") as fh:
         w = csv.writer(fh)

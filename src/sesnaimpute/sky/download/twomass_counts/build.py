@@ -227,28 +227,14 @@ def _strip_rows(config, region, l0, l1, b0, b1):
     return lines[1:]
 
 
-def _header_line(path):
-    with open(path, "r") as f:
-        return f.readline().strip()
-
-
-def _needs_refetch(dest_path):
-    """A file predates this widened query (SPEC_BMSTP_DRAFT.md 5.1's
-    anchor row) when its own header lacks `rd_flg` -- the one column no
-    earlier query carried. No stamp, no version: the file's own header
-    is the only thing consulted (the same rule the sibling UKIDSS
-    module used for its own newly added column)."""
-    return not os.path.exists(dest_path) or "rd_flg" not in _header_line(dest_path).split(",")
-
-
 def build(config, regions=None):
     """Writes `sky/download/twomass_counts/counts_twomass_hpx512__<Region>.csv`
     for each requested region (default: all thirty): one clean-photometry
     row query per Galactic-latitude strip of the region's box (see
     `region_strip_boxes`), concatenated under one header (see module
     docstring for why this is per-source rows, not per-pixel counts). A
-    file already present whose header carries `j_m` is skipped; one
-    lacking it (predating the widened query) is refetched."""
+    file already present is skipped unconditionally: nothing is read
+    from it and no query is made."""
     if regions is None:
         regions = [r.name for r in regions_module.REGIONS]
     dest_dir = f"{config.data_root}/sky/download/twomass_counts"
@@ -257,11 +243,9 @@ def build(config, regions=None):
         n_regions = len(regions)
         for i, region in enumerate(regions):
             dest_path = f"{dest_dir}/counts_twomass_hpx512__{region}.csv"
-            if not _needs_refetch(dest_path):
+            if os.path.exists(dest_path):
                 print(f"twomass_counts build: {dest_path} present, skipped")
             else:
-                if os.path.exists(dest_path):
-                    print(f"twomass_counts build: {region} header lacks rd_flg, refetching")
                 boxes = region_strip_boxes(config, region)
                 rows = []
                 for l0, l1, b0, b1 in boxes:

@@ -123,16 +123,34 @@ def check_listing(config, regions=None):
     return counts
 
 
+def _region_present(dest_dir, name):
+    """True if `dest_dir/<name>/` holds at least one diffcomp FITS and every
+    one is non-empty; decided from the local disk alone."""
+    local = _local_listing(dest_dir, name)
+    return bool(local) and all(size > 0 for size in local.values())
+
+
 def build(config, regions=None):
-    """Pulls every requested region's diffcomp FITS to
-    `sky/download/sesna_completeness/`, then runs `check_listing` and
-    prints its per-region file count and byte total."""
-    _require_rclone()
+    """Skips every region whose diffcomp FITS are already under
+    `sky/download/sesna_completeness/` (decided from the disk alone, no
+    rclone). Pulls only the missing regions, then runs `check_listing` on
+    them; prints each region's file count and byte total."""
     names = _region_names(regions)
     dest_dir = f"{config.data_root}/sky/download/sesna_completeness"
+    counts = {}
+    missing = []
+    for name in names:
+        if _region_present(dest_dir, name):
+            local = _local_listing(dest_dir, name)
+            counts[name] = (len(local), sum(local.values()))
+            print(f"sky.download.sesna_completeness: {name}: present, skipped")
+        else:
+            missing.append(name)
     with progress_module.Stage("sky.download.sesna_completeness") as st:
-        _copy(dest_dir, names, st)
-        counts = check_listing(config, regions=names)
+        if missing:
+            _require_rclone()
+            _copy(dest_dir, missing, st)
+            counts.update(check_listing(config, regions=missing))
         for name in names:
             n_files, n_bytes = counts[name]
             print(f"sky.download.sesna_completeness: {name}: {n_files} files, {n_bytes} bytes")
