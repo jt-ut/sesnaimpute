@@ -569,44 +569,55 @@ def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
                 np.ascontiguousarray(log10_f_b).ravel(), a_b, c_b, scale_b
             ).reshape(flux_b.shape)
             p[:, :, bi] = np.where(has_b, np.minimum(c_vals, completeness_module.C_CAP), 0.0)
-        one_minus_p = 1.0 - p  # (n_pix, n_sub, 8)
-        # the leave-one-out products (F4 2026-10-09 "change A", the single
-        # largest kernel cost: 9 `np.delete` copies of this whole (n_pix,
-        # n_sub, 7) array plus 9 strided `np.prod` reductions). `prefix[k]`
-        # is the LEFT FOLD of bands `0..k-1` on the band-major views
-        # `one_minus_p[:, :, k]` (no copy): `prefix[N_BANDS]` is therefore
-        # the same left-to-right fold of all 8 bands `np.prod(one_minus_p,
-        # axis=2)` performs along its own short contiguous last axis, and
-        # leaving band `i` out continues that SAME fold from `prefix[i]`
-        # through bands `i+1..N_BANDS-1` one band at a time -- the exact
-        # continuation of the one left fold `np.prod(np.delete(...))` used
-        # to perform on the remaining 7 bands in their original order,
-        # never a separately-folded suffix (a suffix product folds
-        # right-to-left, a different association that can move the last
-        # bit, F4 risk 1/3).
-        prefix = [np.ones(one_minus_p.shape[:2], dtype=one_minus_p.dtype)]
-        for k in range(N_BANDS):
-            prefix.append(prefix[-1] * one_minus_p[:, :, k])
-        prod_all = prefix[N_BANDS]
-        loo = []
-        for i in range(N_BANDS):
-            term = prefix[i]
-            for k in range(i + 1, N_BANDS):
-                term = term * one_minus_p[:, :, k]
-            loo.append(term)
-        sum_term = np.zeros_like(prod_all)
-        for i in range(N_BANDS):
-            sum_term += p[:, :, i] * loo[i]
-        p_indep = 1.0 - prod_all - sum_term
-        # C20 brief: p_(2), the second-largest of the eight p_b (the
-        # comonotone model's own P(>=2 of 8)); `np.partition` finds it
-        # without fully sorting the short band axis. At LAMBDA=0.0 exactly,
-        # `(1.0 - 0.0) * p_indep + 0.0 * p2 == p_indep` bit for bit (`1.0 *
-        # x == x`, `0.0 * finite == 0.0`, `x + 0.0 == x` in IEEE754), so
-        # this reproduces today's p_cat bit-identically (the brief's own
-        # identity, proved on NGC 7129).
-        p2 = np.partition(p, -2, axis=2)[:, :, -2]
-        p_cat[:, mstart:mstop] = (1.0 - constants.LAMBDA) * p_indep + constants.LAMBDA * p2
+        # the one survey-wide mixture weight: LAMBDA = 1.0 (comonotone) and
+        # LAMBDA = 0.0 (independent) are exact endpoints, so each computes
+        # only the term it keeps. `(1.0 - 1.0) * x + 1.0 * y == y` and
+        # `(1.0 - 0.0) * x + 0.0 * y == x` bit for bit for finite `x`, `y`
+        # (`1.0 * x == x`, `0.0 * finite == 0.0`, `x + 0.0 == x` in
+        # IEEE754), so the endpoints reproduce the full mixture exactly;
+        # strictly between, both terms are formed and mixed.
+        lam = constants.LAMBDA
+        if lam < 1.0:
+            one_minus_p = 1.0 - p  # (n_pix, n_sub, 8)
+            # the leave-one-out products (F4 2026-10-09 "change A", the single
+            # largest kernel cost: 9 `np.delete` copies of this whole (n_pix,
+            # n_sub, 7) array plus 9 strided `np.prod` reductions). `prefix[k]`
+            # is the LEFT FOLD of bands `0..k-1` on the band-major views
+            # `one_minus_p[:, :, k]` (no copy): `prefix[N_BANDS]` is therefore
+            # the same left-to-right fold of all 8 bands `np.prod(one_minus_p,
+            # axis=2)` performs along its own short contiguous last axis, and
+            # leaving band `i` out continues that SAME fold from `prefix[i]`
+            # through bands `i+1..N_BANDS-1` one band at a time -- the exact
+            # continuation of the one left fold `np.prod(np.delete(...))` used
+            # to perform on the remaining 7 bands in their original order,
+            # never a separately-folded suffix (a suffix product folds
+            # right-to-left, a different association that can move the last
+            # bit, F4 risk 1/3).
+            prefix = [np.ones(one_minus_p.shape[:2], dtype=one_minus_p.dtype)]
+            for k in range(N_BANDS):
+                prefix.append(prefix[-1] * one_minus_p[:, :, k])
+            prod_all = prefix[N_BANDS]
+            loo = []
+            for i in range(N_BANDS):
+                term = prefix[i]
+                for k in range(i + 1, N_BANDS):
+                    term = term * one_minus_p[:, :, k]
+                loo.append(term)
+            sum_term = np.zeros_like(prod_all)
+            for i in range(N_BANDS):
+                sum_term += p[:, :, i] * loo[i]
+            p_indep = 1.0 - prod_all - sum_term
+        if lam > 0.0:
+            # C20 brief: p_(2), the second-largest of the eight p_b (the
+            # comonotone model's own P(>=2 of 8)); `np.partition` finds it
+            # without fully sorting the short band axis.
+            p2 = np.partition(p, -2, axis=2)[:, :, -2]
+        if lam >= 1.0:
+            p_cat[:, mstart:mstop] = p2
+        elif lam <= 0.0:
+            p_cat[:, mstart:mstop] = p_indep
+        else:
+            p_cat[:, mstart:mstop] = (1.0 - lam) * p_indep + lam * p2
 
         # the bright-end check (sec. 9): a member counts as bright only if
         # it would be CATALOGUED WITH I2 ITSELF MEASURED (its own I2
@@ -614,16 +625,23 @@ def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
         # also clears, `1 - prod_{i!=I2}(1-p_i)`); `flux_i2` lets the
         # caller apply the 3x/10x test against this pixel's own I2 50%
         # limit. `loo[IDX_I2]` is already exactly that leave-I2-out
-        # product, computed once above. The SAME LAMBDA mixture as
-        # `p_cat` above, the comonotone term now `min(p_I2, max_{i!=I2}
-        # p_i)` (C20 brief): `np.delete` here mirrors the ONE already paid
+        # product, computed once above (when LAMBDA < 1). The SAME LAMBDA
+        # mixture as `p_cat` above, the comonotone term now `min(p_I2,
+        # max_{i!=I2} p_i)` (C20 brief): `np.delete` here mirrors the ONE already paid
         # in `_collapse_star_members`'s own kind of per-band exclusion,
         # not a new cost class on this already O(8)-per-band path.
-        prob_other_detect = 1.0 - loo[IDX_I2]
-        p_i2_indep = p[:, :, IDX_I2] * prob_other_detect
-        max_other = np.max(np.delete(p, IDX_I2, axis=2), axis=2)
-        p_i2_comon = np.minimum(p[:, :, IDX_I2], max_other)
-        p_cat_i2[:, mstart:mstop] = (1.0 - constants.LAMBDA) * p_i2_indep + constants.LAMBDA * p_i2_comon
+        if lam < 1.0:
+            prob_other_detect = 1.0 - loo[IDX_I2]
+            p_i2_indep = p[:, :, IDX_I2] * prob_other_detect
+        if lam > 0.0:
+            max_other = np.max(np.delete(p, IDX_I2, axis=2), axis=2)
+            p_i2_comon = np.minimum(p[:, :, IDX_I2], max_other)
+        if lam >= 1.0:
+            p_cat_i2[:, mstart:mstop] = p_i2_comon
+        elif lam <= 0.0:
+            p_cat_i2[:, mstart:mstop] = p_i2_indep
+        else:
+            p_cat_i2[:, mstart:mstop] = (1.0 - lam) * p_i2_indep + lam * p_i2_comon
         flux_i2[:, mstart:mstop] = flux[:, :, IDX_I2]  # (n_pix, n_sub)
     return p_cat, p_cat_i2, flux_i2
 
