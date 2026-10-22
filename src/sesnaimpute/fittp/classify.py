@@ -39,23 +39,27 @@ every class, not only the MAP one (each class's own `LOG10_FLUX_MEAN` with
 the measured bands restored).
 
 `LOG10_FLUX_IMPUTED_COV` (n, 8, 8), section 6.1's `m`/`u` block structure
-(measured bands `m`, imputed bands `u`): on `[m, m]` the catalogue's own
-variance in log10 flux, `(SIGMA_FNU_MJY / (FNU_MJY ln 10))^2`, diagonal,
-zero off-diagonal (two catalogue errors are independent by band); on
-`[u, u']` the MAP class's own `LOG10_FLUX_COV` (P7) unchanged, between plus
-within; on `[m, u]` (and its transpose `[u, m]`) the fit's own
-cross-covariance between a measured and an imputed band, `sum_k P_k (D_k
-Sigma_k D_k^T)[m, u]`, `P_k` the MAP class's stored `P_DENSE` (and `1 -
-P_DENSE`) and `Sigma_k = (X^T W X)^-1` rebuilt here (never stored) from the
-catalogue's own measured-band weights (`constants.SIGMA_CAL_DEX`, this
-source's MAP class's own `sigma_lib,L`) and `D_k`'s design from `config`
-at law `k` (`population.selection.kappa_hybrid`/`ak_per_av`, `likelihood
-.GRAY_COLUMN`) -- the same two matrix products `likelihood.fit` forms per
-source and design, since neither depends on which template is being
-scored, so no template loop is needed to rebuild it. This block is `Sigma_k
-= (X^T W X)^-1` itself, not a per-template quantity (section 6.1): the
-between-template term contributes nothing to `[m, u]`, since a measured
-band's own datum does not vary across templates.
+(measured bands `m`, imputed bands `u`), is the covariance of the ACTUAL
+hybrid estimator (S06 fix, FINDINGS.md round6 2026-10-22, U10) under ONE
+error model, not a splice of blocks from different ones (`_cross_cov_by_law`'s
+docstring has the full derivation, R/V/H named there): on `[m, m]` the
+catalogue's own variance in log10 flux `R`, `(SIGMA_FNU_MJY / (FNU_MJY ln
+10))^2`, diagonal, zero off-diagonal (the catalogue states no cross-term
+between two measured bands); on `[u, u']` the MAP class's own
+`LOG10_FLUX_COV` (P7) unchanged, `H V H^T` plus the between-template
+spread, `V` the fit's total per-band variance (photometric + calibration +
+library); on `[m, u]` (and its transpose `[u, m]`) `R H^T`, `H` the fit's
+own linear map from measured log fluxes to the predicted flux at every
+band, mixed over the two extinction-law designs `k` with the SAME
+`P_DENSE`/`1 - P_DENSE` weights as `[u, u']` (`population.selection
+.kappa_hybrid`/`ak_per_av`, `likelihood.GRAY_COLUMN`, `constants
+.SIGMA_CAL_DEX`, this source's MAP class's own `sigma_lib,L`, rebuilt here
+per source and design, never stored, since no quantity here depends on
+which template is being scored). The Schur complement of this block
+structure is `H (V - R) H^T >= 0`, so the assembled matrix is positive
+semidefinite; this is a LOCAL, FIXED-WEIGHT approximation to the
+estimator's covariance (`H` and the mixture weights are themselves
+data-dependent), not its exact sampling covariance.
 """
 
 import argparse
@@ -319,18 +323,57 @@ _CLASSIFY_PART_KEYS = ("NAME", "CLASS_SESNA", "P_CLASS", "P_SUBCLASS", "P_YSO", 
 _LN10 = np.log(10.0)
 
 
-def _cross_cov_by_law(config, weight):
-    """`[D_k Sigma_k D_k^T]` for both extinction-law designs, `k = 0`
-    (diffuse) and `k = 1` (dense), vectorised over the batch's own `m`
-    sources at once (module docstring): `Sigma_k = (X^T W X)^-1` is this
-    design's `(2, 2)` parameter covariance, `weight` (m, 8) the per-source,
-    per-band measurement weight already carrying the catalogue sigma, the
-    calibration floor and each source's own MAP-class `sigma_lib,L`
-    (`likelihood.prepare`'s own formula). `D_k = [ext_col_k, GRAY_COLUMN]` does not depend on the
-    source (`likelihood.fit`'s own `ext_col`/`GRAY_COLUMN`), so it is built
-    once per design and broadcast, never recomputed per source. Returns
-    `(cross_0, cross_1)`, each `(m, 8, 8)`.
+def _cross_cov_by_law(config, weight, measured_var):
+    """The (measured, imputed) cross-covariance block of `LOG10_FLUX_IMPUTED_COV`,
+    for both extinction-law designs `k = 0` (diffuse) and `k = 1` (dense),
+    vectorised over the batch's own `m` sources at once.
+
+    Derivation (S06 fix, FINDINGS.md review_2026-10-22, round6 U10). The
+    hybrid estimator keeps, for every MEASURED band `m`, the raw catalogue
+    value `y_m` (true variance `R_m` = `measured_var`, the catalogue's own
+    log10-flux variance; no cross-term between two measured bands, since
+    the catalogue states none). For every IMPUTED band it keeps the
+    template fit's own weighted-least-squares prediction `U = H y`, where
+    `H = D (D^T W D)^-1 D^T W` is the fit's linear map from the measured log
+    fluxes to the predicted flux at every band (`W = diag(weight)`,
+    `weight` the fit's own per-band weight = `1 / V`, `V` the TOTAL fit
+    variance -- photometric + calibration + library -- the same weight
+    `likelihood.prepare` fits with; `D = [ext_col_k, GRAY_COLUMN]`; `W` is
+    zero on every non-detected band, so only the measured bands enter `H`).
+
+    `y_m` is the raw catalogue number, not a fit output, so its true
+    covariance with an imputed `U_u` is
+    `Cov(y_m, U_u) = Cov(y_m, sum_c H[u, c] y_c) = H[u, m] R_m`
+    (`R` diagonal: only the `c = m` term survives) -- the cross block is
+    `R H^T`. The within-imputed block stays `H V H^T` (today's
+    `LOG10_FLUX_COV`, untouched here) plus the between-template spread, SAME
+    mixture weights (`p_theta`, `p_k`) as the cross block below. The Schur
+    complement of that 2x2 block structure is `H (V - R) H^T`, positive
+    semidefinite because `V - R` = calibration + library variance is >= 0
+    band by band -- a congruence transform of a PSD diagonal matrix, so the
+    assembled covariance is PSD. This is a LOCAL, FIXED-WEIGHT construction:
+    `H`, the mixture weights and the detected-band clamps are themselves
+    data-dependent, so it is not the exact sampling covariance of the full
+    estimator under every reweighting, only the fit's own local
+    approximation to it (FINDINGS.md S05/S06 round-1 reply).
+
+    In code: `G_k = D_k A_k D_k^T` (`A_k = (D_k^T W D_k)^-1`) is the
+    `(m, 8, 8)` quadratic form the pre-fix code returned directly as the
+    (invalid) cross block; `H_k[b, c] = G_k[b, c] * weight[c]` is the hat
+    matrix above, `G_k` column-scaled by `weight`. The returned
+    `cross_k = H_k diag(measured_var) + (H_k diag(measured_var))^T` is
+    symmetric and equals `H_k[u, m] * measured_var[m]` at every `(u, m)` /
+    `(m, u)` pair with exactly one of the two bands detected -- the only
+    entries `_classify_batch` reads off this result, since it masks every
+    other entry away. Returns `(cross_0, cross_1)`, each `(m, 8, 8)`.
     """
+    # weight * measured_var, law-independent; guarded by `weight > 0` rather
+    # than relying on `0 * measured_var == 0`, since a non-detected band's
+    # `measured_var` entry can itself be NaN (the catalogue's own sigma is
+    # not always finite off a detection) -- `np.where` below discards that
+    # value outright rather than multiplying by it.
+    with np.errstate(invalid="ignore"):
+        wr = np.where(weight > 0, weight * measured_var, 0.0)     # (m, 8)
     gray = np.full(N_BANDS, likelihood.GRAY_COLUMN, dtype=np.float64)
     cross = []
     for k in (0, 1):
@@ -346,7 +389,9 @@ def _cross_cov_by_law(config, weight):
         xtwx_inv[:, 1, 1] = xtwx[:, 0, 0] / safe_det
         xtwx_inv[:, 0, 1] = -xtwx[:, 0, 1] / safe_det
         xtwx_inv[:, 1, 0] = -xtwx[:, 1, 0] / safe_det
-        cross.append(np.einsum("bi,mij,cj->mbc", design_k, xtwx_inv, design_k))
+        g_k = np.einsum("bi,mij,cj->mbc", design_k, xtwx_inv, design_k)   # D_k A_k D_k^T
+        cross_col = g_k * wr[:, None, :]                          # H_k diag(R), columns scaled by weight*R
+        cross.append(cross_col + np.transpose(cross_col, (0, 2, 1)))
     return cross[0], cross[1]
 
 
@@ -476,13 +521,19 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     imputed = cflux[row_idx, map_c_safe, :]
     imputed_cov = flux_cov_stack[map_c_safe, row_idx]
 
-    # LOG10_FLUX_IMPUTED_COV (module docstring, SPEC_BMSTP_DRAFT.md 6.1):
-    # [u, u'] (both imputed) keeps the MAP class's own LOG10_FLUX_COV
-    # untouched; [m, m'] (both measured) is zeroed, [m, m] (the diagonal)
-    # is overwritten by the catalogue's own log10-flux variance below; and
-    # the mixed block [m, u] carries the fit's own cross-covariance,
-    # rebuilt here from the MAP class's own sigma_lib,L and its stored
-    # P_DENSE split between the two extinction-law designs.
+    # LOG10_FLUX_IMPUTED_COV (module docstring, SPEC_BMSTP_DRAFT.md 6.1;
+    # S06 fix, FINDINGS.md round6 2026-10-22, U10). The hybrid estimator's
+    # own covariance from ONE error model (`_cross_cov_by_law`'s docstring
+    # has the full derivation; R, V, H named there): [m, m] (a measured
+    # diagonal) is the catalogue's own log10-flux variance R; [m, m']
+    # (between two measured bands) is zero, since the catalogue states no
+    # such cross-term; [u, u'] (both imputed) keeps the MAP class's own
+    # LOG10_FLUX_COV untouched -- H V H^T plus the between-template spread,
+    # V the fit's total variance; and the mixed block [m, u] is R H^T, the
+    # SAME H and the SAME P_DENSE mixture weights as the [u, u'] block, so
+    # the assembled 8x8 matrix is the Schur-complement-PSD construction
+    # `_cross_cov_by_law` derives -- a LOCAL, FIXED-WEIGHT approximation to
+    # this estimator's covariance, not its exact sampling covariance.
     mm_either = detected[:, :, None] | detected[:, None, :]
     cross_mask = detected[:, :, None] ^ detected[:, None, :]
     imputed_cov = np.where(mm_either, 0.0, imputed_cov)
@@ -490,17 +541,22 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     safe_flux = np.where(detected, flux, 1.0)
     with np.errstate(divide="ignore", invalid="ignore"):
         sigma_log = sigma / (safe_flux * _LN10)
+    # R: the catalogue's own log10-flux variance (measured_var below).
+    # Using `safe_flux` keeps this finite everywhere (never inf/nan from a
+    # zero or non-positive catalogue flux); it is bit-identical to
+    # `(sigma / (flux * _LN10)) ** 2` on every DETECTED row, the only rows
+    # this value is ever read from (the `diag` line and `_cross_cov_by_law`
+    # both discard or zero-weight it elsewhere).
+    catalogue_var_log10 = sigma_log ** 2
     sigma_lib_map = sigma_lib_vals[map_c_safe]                        # (m, 8), WP-PRIOR-8: per band
-    sigma2 = sigma_log ** 2 + SIGMA_CAL_DEX[None, :] ** 2 + sigma_lib_map ** 2
-    weight = np.where(detected & (sigma_log > 0), 1.0 / sigma2, 0.0)  # (m, 8)
-    cross_0, cross_1 = _cross_cov_by_law(config, weight)
+    sigma2 = catalogue_var_log10 + SIGMA_CAL_DEX[None, :] ** 2 + sigma_lib_map ** 2
+    weight = np.where(detected & (sigma_log > 0), 1.0 / sigma2, 0.0)  # (m, 8): 1 / V
+    cross_0, cross_1 = _cross_cov_by_law(config, weight, catalogue_var_log10)
     p_dense_map = p_dense_stack[map_c_safe, row_idx]                  # (m,)
     cross_total = (1.0 - p_dense_map)[:, None, None] * cross_0 + p_dense_map[:, None, None] * cross_1
     imputed_cov = np.where(cross_mask, cross_total, imputed_cov)
 
     band_idx = np.arange(N_BANDS)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        catalogue_var_log10 = (sigma / (flux * _LN10)) ** 2
     diag = np.where(detected, catalogue_var_log10, imputed_cov[:, band_idx, band_idx])
     imputed_cov[:, band_idx, band_idx] = diag
 
