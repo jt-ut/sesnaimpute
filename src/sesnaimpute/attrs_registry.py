@@ -693,13 +693,14 @@ REGISTRY = {
         "other class uses)."),
     ("pahn_weights_region", "C_THETA"): ("log10 mJy at 1 kpc",
         "This PAHN template's own offset onto the common brightness "
-        "axis. Unlike every other library's C_THETA (a register's own "
-        "F_REF_I2, survey-wide), this is one of n_model equally spaced "
-        "quantiles of THIS REGION's own pattern-source brightness "
-        "population (population.pahn.pattern_f45_1kpc) -- region-specific, "
-        "because the register carries no absolute flux scale of its own, "
-        "only the per-template shape bmstp.atlas._pahn_region_nodes reads "
-        "directly, matched to this row's own template by row position."),
+        "axis: the register's own F_REF_I2, floored at FLOOR_LINEAR, the "
+        "SAME convention every other library but h2shock uses (survey-"
+        "wide, not region-specific) -- the amplitude the fitter's own "
+        "fitted log10 B is relative to, so log10 B_hat + C_THETA recovers "
+        "the source's own I2 flux. The population-level brightness "
+        "placement (the pattern sources' own measured flux) lives "
+        "separately, in bmstp.shapes.build_cloud's GRID_PAHN and "
+        "bmstp.atlas._pahn_region_nodes, independent of this table."),
     ("pahn_weights_region", "LOG10_F45_CENTERS"): ("log10 mJy at 1 kpc",
         "The centers of the 110 common brightness cells every factor "
         "table in this file is tabulated on."),
@@ -816,17 +817,19 @@ REGISTRY = {
         "For the matching sightline in HPX_PIX_256, the PAHN (star-less "
         "PAH nebular source) population density on the common (log10 xi, "
         "log10 F_4.5) grid: separable, a region-wide brightness marginal "
-        "from the pattern sources' own measured I4 flux (population.pahn) "
-        "times a region-wide front-surface (log10 xi = 0) marginal, "
-        "broadcast over every sightline alike -- integrating over a cell "
-        "gives that cell's own share of the region's PAHN population, up "
-        "to the floor ON_GRID_PAHN leaves out."),
+        "from the pattern sources' own measured I4 flux (population.pahn), "
+        "in this region's own flux coordinate, times THIS SIGHTLINE's own "
+        "front-surface marginal (its own foreground share of the column "
+        "at the cloud's front edge, u_front -- the same value a "
+        "foreground star on this sightline sits at) -- integrating over a "
+        "cell gives that cell's own share of the region's PAHN population, "
+        "up to the floor ON_GRID_PAHN leaves out."),
     ("cloud_shape_sightline", "MASS_OUTSIDE_PAHN"): ("dimensionless",
-        "For the matching sightline in HPX_PIX_256, the fraction of the "
-        "region's own PAHN population weight that falls outside the "
-        "common grid, not stored in GRID_PAHN. The same value at every "
-        "sightline of a region: PAHN's own placement does not depend on "
-        "the sightline."),
+        "For the matching sightline in HPX_PIX_256, the fraction of this "
+        "sightline's own PAHN population weight that falls outside the "
+        "common grid, not stored in GRID_PAHN -- varies by sightline "
+        "(each sightline's own front-edge foreground column, u_front, "
+        "differs)."),
     ("cloud_shape_sightline", "ON_GRID_PAHN"): ("dimensionless",
         "1 minus MASS_OUTSIDE_PAHN: the fraction of the region's own PAHN "
         "population weight that GRID_PAHN actually holds."),

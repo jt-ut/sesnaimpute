@@ -1809,52 +1809,29 @@ def build_pahn(config, region):
     `PI[theta, k] = 1/n_model` at every brightness cell `k` alike,
     independent of both `theta` and `k`. `n_model` and `MODEL_NAME` are
     the PAHN register's own row count and names (`_read_register`, the
-    same register read every other class uses); `bmstp.atlas.
-    _pahn_region_nodes` reads this file's own `C_THETA` for PLACEMENT and
-    the register directly for each row's own 8-band SHAPE, matched by
-    row position (`C17_pahn_integration.md`: both axes are the register's
-    own row order, so row i's template is placed at this file's i-th
-    `C_THETA`).
+    same register read every other class uses).
 
-    Lacking a survey-wide absolute flux scale of its own (the register's
-    templates carry no distance or luminosity calibration against the
-    real PAHN population, only relative SED shape), `C_THETA` is placed
-    at `n_model` equally spaced quantiles of THIS REGION's own pattern-
-    source brightness population (`population.pahn.pattern_f45_1kpc`,
-    converted from the pattern's own measured I4 through
-    `pahn_i2_i4_log10_ratio` -- the SAME population `bmstp.shapes.
-    build_cloud`'s own GRID_PAHN brightness marginal is built from, so
-    WEIGHTS and SHAPE share one empirical basis) -- UNLIKE every other
-    library, whose own `C_THETA` is survey-wide (the register's own
-    `F_REF_I2`, independent of region): PAHN's own `C_THETA` is
-    region-specific because the empirical anchor for its absolute
-    brightness is."""
+    `C_THETA` (S11 fix, `bms_review/review_2026-10-22/FINDINGS.md`): each
+    template's OWN stored register amplitude, `_c_theta(reg)` -- `log10
+    F_REF_I2` floored at `FLOOR_LINEAR`, the SAME convention every other
+    library but h2shock uses. `fittp.sweep` fits `log10 B` per template
+    against the register's OWN stored flux rows, so this amplitude is the
+    only coordinate-invariant conversion back to the source's own I2 flux
+    (`log10 B_hat + C_THETA`); permuting the register's rows now permutes
+    `C_THETA` the same way, so every downstream PAHN number is unchanged
+    (brief identity 1: the template's own shape and its own amplitude
+    move together). This retires the previous placement at `n_model`
+    quantiles of THIS REGION's own pattern-source brightness population
+    (`population.pahn.pattern_f45_1kpc`) -- that population is now read
+    only for the ONE shared brightness marginal `bmstp.shapes.
+    build_cloud` and `bmstp.atlas._pahn_region_nodes` both bin in the
+    region's own flux coordinate, independent of this table's C_THETA and
+    of template row order."""
     with progress.Stage("bmstp.template_weights.pahn", region) as st:
         reg = _read_register(config, "pahn")
         n_model = reg["names"].size
         names = reg["names"]
-        pahn_log10_ratio = pahn_i2_i4_log10_ratio(config)
-        log10_f_ref_i2, _log10_f_ref_i4 = pahn_module.pattern_f45_1kpc(config, region, pahn_log10_ratio)
-        if log10_f_ref_i2.size == 0:
-            # no pattern source anywhere in this region (e.g. the
-            # identity check that forces the pattern to admit none,
-            # C14_pahn_population.md): no empirical basis to place
-            # C_THETA at, so this falls back to evenly spaced quantiles
-            # of the common grid's own brightness range -- a neutral
-            # disclosure (every downstream N_CAT_PAHN/N_CAT_CELL_PAHN
-            # still comes out exactly zero, since DENSITY_PAHN is zero
-            # everywhere in this same case, module docstring's own
-            # `pattern_mask`), never a module-wide hard failure for one
-            # class with no sources this region.
-            print(f"template_weights.pahn [{region}]: WARNING no pattern source in this region -- "
-                  "C_THETA falls back to the common grid's own brightness range, since there is "
-                  "no empirical brightness to place the register's own templates at", flush=True)
-            b_edges = grid.LOG10_F45_EDGES
-            q = (np.arange(n_model) + 0.5) / n_model
-            c_theta = b_edges[0] + q * (b_edges[-1] - b_edges[0])
-        else:
-            q = (np.arange(n_model) + 0.5) / n_model
-            c_theta = np.quantile(log10_f_ref_i2, q)
+        c_theta = _c_theta(reg)
 
         log10_f45_centers = _log10_f45_centers()
         n_b = log10_f45_centers.size
@@ -1869,17 +1846,16 @@ def build_pahn(config, region):
         path = _write_library(
             config, "pahn", "region", names, c_theta, log10_f45_centers, factors, region=region,
             extra_attrs={"N_MODEL_SOURCE": "register",
-                         "C_THETA_SOURCE": ("n_model equally spaced quantiles of this region's own "
-                                            "pattern-source brightness population "
-                                            "(population.pahn.pattern_f45_1kpc), not the register's "
-                                            "own F_REF_I2: the register carries no absolute flux "
-                                            "scale of its own, only the per-template SHAPE "
-                                            "bmstp.atlas._pahn_region_nodes reads directly")})
+                         "C_THETA_SOURCE": ("each template's own stored register amplitude, log10 "
+                                            "F_REF_I2 floored at FLOOR_LINEAR -- the amplitude the "
+                                            "fitted log10 B is relative to (S11 fix); no longer this "
+                                            "region's pattern-source quantiles, and so invariant to "
+                                            "the register's own row order")})
         st.done(path, n_model=n_model, n_model_source="register",
                 c_theta_range=(float(c_theta.min()), float(c_theta.max())))
         print(f"template_weights.pahn [{region}]: n_model={n_model} (source=register) "
-              f"uniform weight=1/{n_model}={1.0 / n_model:.4g}; C_THETA (this region's own pattern "
-              f"quantiles) range min={c_theta.min():.4f} median={float(np.median(c_theta)):.4f} "
+              f"uniform weight=1/{n_model}={1.0 / n_model:.4g}; C_THETA (register's own F_REF_I2) "
+              f"range min={c_theta.min():.4f} median={float(np.median(c_theta)):.4f} "
               f"max={c_theta.max():.4f}", flush=True)
 
 
