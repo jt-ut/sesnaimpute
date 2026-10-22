@@ -2100,11 +2100,16 @@ def _factor_marginal(b_centers, reader, cls, d_pahc, curve):
     cum0 = [c0[p, cols] for p in pos]
     cum1 = [c1[p, cols] for p in pos]
     out = fill_left * cum0[0] + fill_right * (c0[-1][None, :] - cum0[-1])
+    # an infinite `b + d` (a pixel with no 8 um limit) puts every model on one
+    # fill, so its interval sums are empty; a finite stand-in keeps `inf * 0`
+    # out of the coefficients, and a NaN `d` stays NaN as the curve gives it
+    z_safe = np.where(np.isfinite(z), z, 0.0)
     for j in range(knots.size - 1):
         slope = (y_knot[j + 1] - y_knot[j]) / (knots[j + 1] - knots[j])
         s0 = cum0[j + 1] - cum0[j]
         s1 = cum1[j + 1] - cum1[j]
-        out += (y_knot[j] - slope * (z + knots[j])) * s0 + slope * s1
+        out += (y_knot[j] - slope * (z_safe + knots[j])) * s0 + slope * s1
+    out[np.isnan(z)] = np.nan
     return out.reshape(d.shape[:-2] + (n_b,)) if d.ndim >= 3 else out.reshape(n_b)
 
 
