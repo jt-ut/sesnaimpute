@@ -295,17 +295,36 @@ def build(config, regions=None):
     inner_samples_path = f"{input_dir}/{SAMPLES_INNER_NAME}"
     outer_samples_path = f"{input_dir}/{SAMPLES_OUTER_NAME}"
     if not os.path.exists(inner_samples_path):
-        existing = [name for name in names
-                    if os.path.exists(product_path(config, "sky/derived", "edenhofer",
-                                                    "profile-sigma-samples", "sightline", region=name))]
-        if len(existing) == len(names):
-            print("edenhofer_samples.build: %s absent from disk and every named region already has its "
-                  "SIGMA_RATIO_SAMPLES product -- passing over this line (RUNBOOKtp.sh comment, this "
-                  "product depends only on the cubes and the sightline set)" % inner_samples_path)
+        # The cubes are deleted once every region's product exists, so this
+        # line passes over when each named region's product already covers
+        # its CURRENT sightline set -- the set the profile product (rebuilt
+        # every run) holds. A region whose catalogue changed since the product
+        # was built (Cepheus Flare, 2026-10-19) has sightlines with no row; that
+        # is stated here with the cube named, never passed over silently
+        # (2026-10-22: bmstp.shapes failed on such a sightline downstream).
+        stale = []
+        for name in names:
+            sigma_path = product_path(config, "sky/derived", "edenhofer",
+                                      "profile-sigma-samples", "sightline", region=name)
+            prof_path = product_path(config, "sky/derived", "edenhofer",
+                                     "profile", "sightline", region=name)
+            if not os.path.exists(sigma_path):
+                stale.append(f"{name}: no product"); continue
+            with h5py.File(prof_path, "r") as fp, h5py.File(sigma_path, "r") as fs:
+                missing = np.setdiff1d(fp["HPX_PIX_256"][()], fs["HPX_PIX_256"][()])
+            if missing.size:
+                stale.append(f"{name}: {missing.size} current sightline(s) without a row")
+        if not stale:
+            print("edenhofer_samples.build: %s absent from disk and every named region's "
+                  "SIGMA_RATIO_SAMPLES product covers its current sightline set -- passing over "
+                  "this line (this product depends only on the cubes and the sightline set)"
+                  % inner_samples_path)
             return
         raise FileNotFoundError(
-            "edenhofer_samples.build: samples input missing at %s -- run the "
-            "sesnaimpute.sky.download.edenhofer2023.build RUNBOOK line for it" % inner_samples_path)
+            "edenhofer_samples.build: samples input missing at %s and these regions' products do not "
+            "cover their current sightlines: %s -- the cubes must be on disk to rebuild them (the "
+            "sky/download/edenhofer2023/pull_samples.sh byte-range pull, then this line for those "
+            "regions)" % (inner_samples_path, "; ".join(stale)))
     outer_present = os.path.exists(outer_samples_path)
 
     inner_mean_path = f"{input_dir}/{profile_module.MAP_INNER_NAME}"
