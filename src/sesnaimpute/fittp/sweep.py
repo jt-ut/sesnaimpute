@@ -983,24 +983,66 @@ def _source_task(i):
 # the parent side: load once, dispatch the pool, write parts, join
 # ---------------------------------------------------------------------------
 
+#: A02's coordinator revision (2026-10-22): NAME/index agreement alone
+#: cannot tell a stale part of an EARLIER run from this run's own, when
+#: both cover the same source range (the region/class/batch_size triple is
+#: unchanged between runs -- the common case). RUNBOOKtp.sh exports
+#: `SESNA_RUN_ID` once per invocation (date, time to the second, pid: the
+#: same id names that invocation's own run record) and every part file
+#: this process writes carries it, so a join only ever discovers parts of
+#: its OWN run id -- a part from another run, or another concurrent one,
+#: is a different filename entirely and is never a candidate. Invoked
+#: outside the runbook (no variable set), a part keeps today's plain stem,
+#: with one printed notice (not a silent fallback) that this invocation is
+#: not run-scoped.
+_RUN_ID_WARNED = False
+
+
+def _run_id():
+    global _RUN_ID_WARNED
+    run_id = os.environ.get("SESNA_RUN_ID")
+    if not run_id and not _RUN_ID_WARNED:
+        print("fittp.sweep: SESNA_RUN_ID not set -- part files use the plain, "
+              "un-run-scoped stem (today's behaviour outside RUNBOOKtp.sh); a part "
+              "left by a different bare invocation sharing this path is indistinguishable "
+              "from this one's own (A02 2026-10-22 revision)", flush=True)
+        _RUN_ID_WARNED = True
+    return run_id
+
+
 def _part_path(path, bi):
+    run_id = _run_id()
+    if run_id:
+        return "%s.%s.part%d" % (path, run_id, bi)
     return "%s.part%d" % (path, bi)
 
 
 def _discover_parts(path):
-    """Every `<path>.partN` file already on disk, sorted by `N` (item 9): a
-    restart's own re-run (`--batches`) writes only the batches it names,
-    and `join_parts` re-discovers every part present -- from this run or an
-    earlier one -- rather than trusting an in-memory list a crash would
-    have lost.
+    """Every `<path>[.run_id].partN` file already on disk for THIS process's
+    own run id (`_run_id`), keyed by `N` (item 9): a restart's own re-run
+    (`--batches`) writes only the batches it names, and `join_parts`
+    re-discovers every part present -- from this run or an earlier call
+    within it -- rather than trusting an in-memory list a crash would have
+    lost. Returns a dict `{N: part_path}`, not a list: `join_parts` (A02)
+    needs the index set itself, to tell a genuinely missing batch from an
+    extra, stale one of the same count. Scoped to `_run_id()`'s own value
+    (A02 revision): a part written under a different run id -- or no run
+    id at all -- is a different filename and is never discovered here,
+    however many of its rows' NAMEs happen to match this run's own.
     """
-    pattern = re.compile(re.escape(path) + r"\.part(\d+)$")
+    run_id = _run_id()
+    if run_id:
+        glob_pattern = glob.escape(path) + "." + glob.escape(run_id) + ".part*"
+        pattern = re.compile(re.escape(path) + r"\." + re.escape(run_id) + r"\.part(\d+)$")
+    else:
+        glob_pattern = glob.escape(path) + ".part*"
+        pattern = re.compile(re.escape(path) + r"\.part(\d+)$")
     found = {}
-    for p in glob.glob(glob.escape(path) + ".part*"):
+    for p in glob.glob(glob_pattern):
         m = pattern.match(p)
         if m:
             found[int(m.group(1))] = p
-    return [found[k] for k in sorted(found)]
+    return found
 
 
 def _assemble_batch(results, name_slice, n_sub, topk):
@@ -1312,7 +1354,7 @@ def _summary(config, region, cls, n_source, n_model, n_prior_mass_unmapped=None)
         config, "bmstp", "weights", lib, granule, region=(region if granule == "region" else None))
     batch_size = config.batch_size
     return dict(
-        path=path, n_source=n_source, n_model=n_model,
+        path=path, region=region, n_source=n_source, n_model=n_model,
         n_batches=(n_source + batch_size - 1) // batch_size,
         subclasses=definitions.SUBCLASSES_OF[cls], library=definitions.CLASS_REGISTER[cls],
         density_file=density_file, weights_file=weights_file,
@@ -1320,44 +1362,104 @@ def _summary(config, region, cls, n_source, n_model, n_prior_mass_unmapped=None)
     )
 
 
-def join_parts(summary, topk):
+def join_parts(summary, topk, config):
     """Joins one {region, class}'s part files into the final P7 product,
     one part's rows at a time, dataset by dataset (rule 10b: never a
-    region-sized array); removes the part files once written. Item 9:
-    the part list comes from `_discover_parts`, not an in-memory record
-    of what THIS call wrote, so a join after a restart picks up parts an
-    earlier, crashed run already left on disk. Raises if any batch's part
-    file is still missing -- rule 6, fail on the impossible, naming what
-    to rerun rather than joining a silently incomplete product. Also folds
-    every part's own `ZERO_EXT_COUNT`/`N_TEMPLATES_CHECKED` (for the
-    report's `zero_ext_frac`) and `FAILED` column (item 7's `FAILED_ROWS`,
-    the count reported as `n_failed`) across every part, present or
-    reproduced.
+    region-sized array); removes the part files once the join has landed.
+    Item 9: the part list comes from `_discover_parts`, not an in-memory
+    record of what THIS call wrote, so a join after a restart (`--batches`
+    naming just the missing indices, same `SESNA_RUN_ID`) picks up parts
+    an earlier, crashed call of the SAME run already left on disk.
+
+    A02 (review ledger, FINDINGS.md; coordinator's same-day revision): a
+    correct join requires more than a part COUNT, and a NAME/index check
+    alone cannot tell a stale part of an EARLIER run from this run's own
+    when both cover the same source range. Four checks, each naming what
+    is wrong rather than joining a silently incomplete or incompatible
+    product:
+      0. (`_discover_parts`/`_part_path`, above) only parts carrying THIS
+         process's own `SESNA_RUN_ID` (or, outside the runbook, the plain
+         stem) are even discovered -- a part from a different run id is a
+         different filename, never a candidate, however many of its rows'
+         NAMEs happen to match;
+      1. the discovered indices are exactly `{0 .. n_batches-1}` -- any
+         missing or extra index (e.g. a stale part left by a since-changed
+         `[fit] batch_size`) is named and raises;
+      2. each part's own `NAME` column is bit-identical to the catalogue's
+         own slice for that batch's bounds (`_load_region_catalog`'s same
+         source order, re-opened here by its own memory-mapped `NAME`
+         dataset rather than the full catalogue) -- a part from the wrong
+         region, the wrong batch position, or a stale run under a
+         different source order is named and raises, rather than being
+         silently spliced in because its row count alone happened to match;
+      3. the joined row total equals `n_source` exactly.
+    The join itself writes `<path>.tmp` and `os.replace`s it into place
+    (the part writes already do this, `_write_part`), so a join that
+    raises or is killed partway leaves the PRIOR joined file (if any)
+    untouched and every part file still on disk for the next attempt --
+    the part files are removed only after the replace has landed.
+
+    Also folds every part's own `ZERO_EXT_COUNT`/`N_TEMPLATES_CHECKED`
+    (for the report's `zero_ext_frac`) and `FAILED` column (item 7's
+    `FAILED_ROWS`, the count reported as `n_failed`) across every part,
+    present or reproduced.
     """
     path = summary["path"]
+    region = summary["region"]
     n_source = summary["n_source"]
     n_batches = summary["n_batches"]
-    part_paths = _discover_parts(path)
-    if len(part_paths) != n_batches:
+    found = _discover_parts(path)
+    expected = set(range(n_batches))
+    missing = sorted(expected - found.keys())
+    extra = sorted(found.keys() - expected)
+    if missing or extra:
+        bits = []
+        if missing:
+            bits.append("missing index/indices %s" % missing)
+        if extra:
+            bits.append("extra index/indices %s" % extra)
         raise RuntimeError(
-            "fittp.sweep.join_parts [%s]: %d of %d batch part files present for %s -- "
+            "fittp.sweep.join_parts [%s]: %s of %d expected batch part files for %s -- "
             "rerun with --batches naming the missing indices before joining"
-            % (summary.get("cls"), len(part_paths), n_batches, path))
+            % (summary.get("cls"), " and ".join(bits), n_batches, path))
+    part_paths = [found[k] for k in range(n_batches)]
+
+    batch_size = config.batch_size
+    batch_bounds = [(s, min(s + batch_size, n_source)) for s in range(0, n_source, batch_size)]
+    cat_path = config_module.product_path(config, "catalog", "sesna", "sources", "source", region=region)
+    with h5py.File(cat_path, "r") as cf:
+        catalog_name = prior_reader.mmap_dataset(cf, "NAME")
+
     stem = _STEM(summary.get("cls"))
     zero_ext_count = 0
     n_templates_checked = 0
     id1_max_err, id1_sum_err, id1_n_checked, id1_n_undefined = 0.0, 0.0, 0, 0
     failed_chunks = []
-    with h5py.File(path, "w") as out:
+    tmp_path = path + ".tmp"
+    with h5py.File(tmp_path, "w") as out:
         for key in _PART_KEYS:
             with h5py.File(part_paths[0], "r") as pf0:
                 shape = (n_source,) + pf0[key].shape[1:]
                 dtype = pf0[key].dtype
             build_module.write_dataset(out, key, None, *REGISTRY[(stem, key)], shape=shape, dtype=dtype)
         offset = 0
-        for part_path in part_paths:
+        for bi, part_path in enumerate(part_paths):
+            bstart, bstop = batch_bounds[bi]
             with h5py.File(part_path, "r") as pf:
                 m = pf["NAME"].shape[0]
+                if m != bstop - bstart:
+                    raise RuntimeError(
+                        "fittp.sweep.join_parts [%s]: part %d (%s) has %d rows, expected %d "
+                        "for the catalogue slice [%d:%d) of %s -- rerun that batch before joining"
+                        % (summary.get("cls"), bi, part_path, m, bstop - bstart, bstart, bstop, region))
+                part_name = pf["NAME"][:]
+                expected_name = np.asarray(catalog_name[bstart:bstop])
+                if not np.array_equal(part_name, expected_name):
+                    raise RuntimeError(
+                        "fittp.sweep.join_parts [%s]: part %d (%s) NAME does not match %s's own "
+                        "catalogue slice [%d:%d) -- stale or mismatched part file, rerun that "
+                        "batch before joining"
+                        % (summary.get("cls"), bi, part_path, region, bstart, bstop))
                 for key in _PART_KEYS:
                     out[key][offset:offset + m] = pf[key][:]
                 failed_here = np.nonzero(pf["FAILED"][:])[0]
@@ -1369,6 +1471,10 @@ def join_parts(summary, topk):
                 id1_n_checked += int(pf.attrs["ID1_N_CHECKED"])
                 id1_n_undefined += int(pf.attrs["ID1_N_UNDEFINED"])
             offset += m
+        if offset != n_source:
+            raise RuntimeError(
+                "fittp.sweep.join_parts [%s]: joined %d rows, expected n_source=%d for %s"
+                % (summary.get("cls"), offset, n_source, path))
         failed_rows = (np.concatenate(failed_chunks) if failed_chunks
                         else np.array([], dtype=np.int64)).astype(np.int64)
         build_module.write_dataset(out, "FAILED_ROWS", failed_rows, *REGISTRY[(stem, "FAILED_ROWS")])
@@ -1380,6 +1486,7 @@ def join_parts(summary, topk):
         out.attrs["K"] = topk
         out.attrs["WEIGHTS_FILE"] = summary["weights_file"]
         out.attrs["DENSITY_FILE"] = summary["density_file"]
+    os.replace(tmp_path, path)
     for part_path in part_paths:
         os.remove(part_path)
     zero_ext_frac = zero_ext_count / n_templates_checked if n_templates_checked else float("nan")
@@ -1436,7 +1543,7 @@ def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=N
                             parts_written=(len(batches) if batches is not None else summary["n_batches"]),
                             joined="no (--no-join)")
                     continue
-                joined = join_parts(summary, config.topk)
+                joined = join_parts(summary, config.topk, config)
                 with h5py.File(summary["path"], "r") as f:
                     occam = np.asarray(f["OCCAM_GAP"][:])
                 occam_finite = occam[np.isfinite(occam)]
