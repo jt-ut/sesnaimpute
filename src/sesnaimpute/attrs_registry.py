@@ -2732,10 +2732,11 @@ REGISTRY = {
     ("completeness_sesna_source", "PIXEL_CURVE_I1"): ("dimensionless (completeness fraction, 0..1)",
         "For each of this region's admitted nside-512 pixels (HPX_PIX_512, "
         "nested ordering, this file's own admitted-pixel axis), the I1 (3.6 "
-        "micron) completeness curve at MAG_GRID_I1's own magnitudes of the "
-        "one 30-arcsec completeness pixel whose own footprint contains this "
-        "nside-512 pixel's centre (CURVE_I1's own row, read directly, cast "
-        "to a float fraction); all zero where PIXEL_COVERED_FRAC_I1 is 0."),
+        "micron) completeness curve at MAG_GRID_I1's own magnitudes, the "
+        "mean over the on-map 30-arcsec completeness pixels inside this "
+        "nside-512 pixel (256 sample points per pixel, each at its nearest "
+        "30-arcsec pixel's CURVE_I1 row, averaged over the points that fall "
+        "on a map); all zero where PIXEL_COVERED_FRAC_I1 is 0."),
     ("completeness_sesna_source", "PIXEL_CURVE_I2"): ("dimensionless (completeness fraction, 0..1)",
         "Same meaning as PIXEL_CURVE_I1, for I2 (4.5 micron)."),
     ("completeness_sesna_source", "PIXEL_CURVE_I3"): ("dimensionless (completeness fraction, 0..1)",
@@ -2744,19 +2745,20 @@ REGISTRY = {
         "Same meaning as PIXEL_CURVE_I1, for I4 (8.0 micron)."),
     ("completeness_sesna_source", "PIXEL_CURVE_M1"): ("dimensionless (completeness fraction, 0..1)",
         "Same meaning as PIXEL_CURVE_I1, for M1 (24 micron)."),
-    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_I1"): ("boolean (0.0 or 1.0)",
-        "For each admitted nside-512 pixel in HPX_PIX_512, 1.0 where its "
-        "own centre falls on a 30-arcsec I1 (3.6 micron) completeness "
-        "pixel's own on-map footprint (PIXEL_CURVE_I1 is that pixel's own "
-        "curve), 0.0 where it falls off every I1 field's map (PIXEL_CURVE_I1 "
-        "is all zero there)."),
-    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_I2"): ("boolean (0.0 or 1.0)",
+    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_I1"): ("dimensionless (area fraction, 0..1)",
+        "For each admitted nside-512 pixel in HPX_PIX_512, the fraction of "
+        "its own area that falls on an I1 (3.6 micron) completeness field's "
+        "on-map footprint (the share of 256 sample points per pixel whose "
+        "nearest 30-arcsec pixel is on a map; the same sampling as the "
+        "coverage product's FRAC); 0.0 where the pixel falls off every I1 "
+        "field's map (PIXEL_CURVE_I1 is all zero there)."),
+    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_I2"): ("dimensionless (area fraction, 0..1)",
         "Same meaning as PIXEL_COVERED_FRAC_I1, for I2 (4.5 micron)."),
-    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_I3"): ("boolean (0.0 or 1.0)",
+    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_I3"): ("dimensionless (area fraction, 0..1)",
         "Same meaning as PIXEL_COVERED_FRAC_I1, for I3 (5.8 micron)."),
-    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_I4"): ("boolean (0.0 or 1.0)",
+    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_I4"): ("dimensionless (area fraction, 0..1)",
         "Same meaning as PIXEL_COVERED_FRAC_I1, for I4 (8.0 micron)."),
-    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_M1"): ("boolean (0.0 or 1.0)",
+    ("completeness_sesna_source", "PIXEL_COVERED_FRAC_M1"): ("dimensionless (area fraction, 0..1)",
         "Same meaning as PIXEL_COVERED_FRAC_I1, for M1 (24 micron)."),
     ("completeness_sesna_source", "MAG_GRID_I1"): ("mag, Vega",
         "The magnitudes CURVE_I1 and PIXEL_CURVE_I1's own column order are "

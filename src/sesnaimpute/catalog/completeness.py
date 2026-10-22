@@ -81,7 +81,8 @@ _BAND_FILE = {
     "I4": ("IRAC", 4, "i4"), "M1": ("MIPS", 1, "m1"),
 }
 
-IRAC_MIPS_KEYS = ("I1", "I2", "I3", "I4", "M1")
+IRAC_KEYS = ("I1", "I2", "I3", "I4")
+IRAC_MIPS_KEYS = IRAC_KEYS + ("M1",)   # M1 last: the build masks it to the IRAC union the four have established
 
 #: All eight bands, `definitions.BANDS`' own fixed order (J, H, Ks, I1-I4,
 #: M1): the one column order `completeness_sesna_source`'s own SOURCE_ROW
@@ -227,6 +228,36 @@ def lookup(config, region, band, ra_deg, dec_deg, n_jobs=1, maps=None):
 # --- The stage: catalog.completeness.build (COMPLETENESS_2026-10-20.md
 # "The reader: layout and kernel") ---
 
+#: Each admitted nside-512 pixel's own `PIXEL_CURVE_<B>` and
+#: `PIXEL_COVERED_FRAC_<B>` are the AREA AVERAGE over the pixel's own
+#: footprint (COMPLETENESS_2026-10-20.md "The reader": "per admitted
+#: nside-512 pixel the area-averaged curve, from the 30'' pixels inside
+#: it", and `PIXEL_COVERED_FRAC_<B>` its on-map share): the pixel is
+#: supersampled at this many nested children per side (16: 256 points,
+#: the SAME density `sky.derived.coverage` measures the atlas's COVERAGE
+#: with, so this product's covered fraction and that product's FRAC are
+#: one number), every point looked up at its nearest 30-arcsec pixel
+#: (rule 1), the curve averaged over the on-map points, the fraction the
+#: on-map share. The centre sample the 2026-10-21 code took instead (one
+#: lookup at the pixel's centre) zeroed every partly covered pixel whose
+#: centre fell off-map, and with it N_CAT_GAL/N_CAT_H2S/N_CAT_PAHN in
+#: about half of every region's pixels (DEFECT_ATLAS_NCAT_ZEROS_2026-10-22).
+PIXEL_SUPERSAMPLE_PER_SIDE = 16
+
+
+def _admitted_sample_points(admitted):
+    """`(ra_deg, dec_deg, n_sub)`: the nested nside-(512 x
+    `PIXEL_SUPERSAMPLE_PER_SIDE`) children of every admitted pixel, pixel-
+    major with `n_sub` points per pixel, in ICRS -- the one sample set
+    `build` evaluates each band's own footprint and curves on."""
+    n_sub = PIXEL_SUPERSAMPLE_PER_SIDE ** 2
+    hi = (np.asarray(admitted, dtype=np.int64)[:, None] * n_sub
+          + np.arange(n_sub, dtype=np.int64)[None, :]).ravel()
+    gl, gb = hp.pix2ang(512 * PIXEL_SUPERSAMPLE_PER_SIDE, hi, nest=True, lonlat=True)
+    ra, dec = _galactic_to_icrs(gl, gb)
+    return ra, dec, n_sub
+
+
 TWOMASS_KEYS = ("J", "H", "Ks")
 
 #: Corrections 2026-10-20 (COMPLETENESS_2026-10-20.md "Corrections", item
@@ -360,10 +391,9 @@ def completeness_many(curves, rows, m0, dm, n, log10_f, a, c, scale):
     function's own output. `scale` is `STORAGE_SCALE` for a uint16,
     value-x-`STORAGE_SCALE` table (`CURVE_<band>`) and 1.0 for a float32,
     already-a-fraction table (`PIXEL_CURVE_<band>`: the curve of the ONE
-    30-arcsec pixel nearest the nside-512 pixel's centre, as `build` and
-    `lookup` form it -- a centre sample, not an area average; measured
-    unbiased against the on-map area mean at I2 20-50 uJy, applied/mean
-    1.02 Musca, 0.99 Perseus, C24k 2026-10-21 -- not itself an exact
+    30-arcsec pixels' curves area-averaged over the nside-512 pixel's own
+    on-map footprint, as `build` forms it on `_admitted_sample_points`
+    (`PIXEL_SUPERSAMPLE_PER_SIDE`) -- not itself an exact
     multiple of `1 / STORAGE_SCALE`, so it is stored as the plain
     fraction, not quantized); the design note's own signature omits this
     (it covers only the uint16 case), added here since this one kernel
@@ -714,7 +744,7 @@ def build(config, regions=None):
 
             admitted = np.sort(depth_grid_module.admitted_pixels_512(config, region))
             admitted_gl, admitted_gb = hp.pix2ang(512, admitted, nest=True, lonlat=True)
-            admitted_ra, admitted_dec = _galactic_to_icrs(admitted_gl, admitted_gb)
+            sample_ra, sample_dec, n_sub = _admitted_sample_points(admitted)
 
             src_path = config_module.product_path(
                 config, "catalog", "sesna", "sources", "source", region=region
@@ -734,6 +764,7 @@ def build(config, regions=None):
                 corr_lengths = {}
                 n_pix_total = 0
                 n_completed_total = {}
+                pixel_on, pixel_sum = {}, {}
                 for band in IRAC_MIPS_KEYS:
                     grid = _band_mag_grid(band)
                     n_band = grid.size
@@ -794,14 +825,50 @@ def build(config, regions=None):
                     source_row[:, ALL_BAND_KEYS.index(band)] = _row_for_positions(
                         field_idx, iy, ix, row_index_maps)
 
-                    pfield_idx, piy, pix_ = lookup(config, region, band, admitted_ra, admitted_dec,
+                    # each admitted pixel's own sample points
+                    # (`_admitted_sample_points`), looked up on this band's
+                    # own maps: which points are on-map in this band, and
+                    # the sum of this band's curve over them (an off-map
+                    # point contributes zero). The per-pixel curve is
+                    # formed after the loop, over the IRAC union (see
+                    # there), so M1 -- the last key -- masks its sum to the
+                    # union the four IRAC bands have established by then.
+                    pfield_idx, piy, pix_ = lookup(config, region, band, sample_ra, sample_dec,
                                                     n_jobs=config.n_jobs, maps=maps)
                     prows = _row_for_positions(pfield_idx, piy, pix_, row_index_maps)
+                    prows = prows.reshape(admitted.size, n_sub)
                     pon = prows >= 0
-                    pixel_curve = np.zeros((admitted.size, n_band), dtype=np.float32)
-                    if pon.any():
-                        pixel_curve[pon] = curve_vals[prows[pon]]
-                    pixel_frac = pon.astype(np.float32)
+                    pixel_on[band] = pon
+                    if band == "M1":
+                        irac_union = np.logical_or.reduce([pixel_on[b] for b in IRAC_KEYS])
+                        pon = pon & irac_union
+                    psum = np.zeros((admitted.size, n_band), dtype=np.float64)
+                    for i in np.flatnonzero(pon.any(axis=1)):
+                        psum[i] = curve_vals[prows[i, pon[i]]].sum(axis=0)
+                    pixel_sum[band] = psum
+
+                # The per-pixel curve and covered fraction, over the IRAC
+                # union: the atlas weights every admitted pixel by its
+                # COVERAGE, the any-IRAC fraction (`bmstp.atlas._coverage`,
+                # max over I1-I4 of `sky.derived.coverage`'s FRAC, within
+                # 1 % of the union's own area on every region measured),
+                # so a band's own curve here is its mean over the union's
+                # points with the band's off-map points at zero -- then
+                # `PIXEL_CURVE_<B>` x COVERAGE x area is that band's
+                # expected detections over the pixel's covered area, for
+                # every band including one (I2 at a mosaic edge, M1) whose
+                # own footprint is only part of the union. The fraction is
+                # the band's own on-map share of the whole pixel (the
+                # design's PIXEL_COVERED_FRAC, equal to the coverage
+                # product's FRAC). A pixel with no IRAC point on any map
+                # keeps all-zero curves.
+                irac_union = np.logical_or.reduce([pixel_on[b] for b in IRAC_KEYS])
+                n_union = irac_union.sum(axis=1).astype(np.float64)
+                for band in IRAC_MIPS_KEYS:
+                    pixel_curve = np.zeros_like(pixel_sum[band], dtype=np.float32)
+                    has = n_union > 0
+                    pixel_curve[has] = (pixel_sum[band][has] / n_union[has, None]).astype(np.float32)
+                    pixel_frac = (pixel_on[band].sum(axis=1) / float(n_sub)).astype(np.float32)
                     build_module.write_dataset(
                         f, f"PIXEL_CURVE_{band}", pixel_curve,
                         *REGISTRY[("completeness_sesna_source", f"PIXEL_CURVE_{band}")])

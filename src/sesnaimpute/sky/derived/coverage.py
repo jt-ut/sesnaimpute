@@ -62,7 +62,7 @@ NSIDE_HPX512 = 512
 # overlap to <0.1% on every region checked, half that density already.
 CANDIDATE_PAD_FACTOR = 1.1
 CANDIDATE_PAD_MARGIN_DEG = 0.75
-_SUPERSAMPLE_PER_SIDE = 16
+_SUPERSAMPLE_PER_SIDE = completeness_module.PIXEL_SUPERSAMPLE_PER_SIDE  # one number with catalog.completeness
 SAMPLING_NSIDE = NSIDE_HPX512 * _SUPERSAMPLE_PER_SIDE
 
 # Batches candidate nside-256 grains so one region's supersample array
