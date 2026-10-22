@@ -502,7 +502,7 @@ def _factor_ln(reader, rows, a_hat, log10_b_hat, slope, sigma_a, model_index):
     b_star = log10_b_hat + slope[:, None] * (a_star - a_hat)
     total = np.zeros((n, m), dtype=np.float64)
     for f in reader.factors:
-        w_theta = f["W"][model_index]          # (m, 120)
+        w_mapped = f["W"]                      # bind the mapped (n_model, 120) table -- never fancy-index all rows
         c_f = f["C_F"][model_index]            # (m,)
         b_centers = f["b_centers"]
         d_f = 0.0
@@ -525,9 +525,16 @@ def _factor_ln(reader, rows, a_hat, log10_b_hat, slope, sigma_a, model_index):
         pos = np.clip(pos, 0.0, b_centers.size - 1)
         j0 = np.clip(np.floor(pos).astype(np.int64), 0, b_centers.size - 2)
         frac = np.clip(pos - j0, 0.0, 1.0)
-        rows_idx = np.arange(m)[None, :]
-        v0 = w_theta[rows_idx, j0]
-        v1 = w_theta[rows_idx, j0 + 1]
+        # P01 (round 6 review): a direct two-column gather on the mapped
+        # table itself, paired with `j0`/`j0 + 1` (numpy broadcasts the
+        # (1, m) row index against j0's (n, m)) -- `model_index` is this
+        # template's actual row in the class's weight-factor table, so
+        # this reads exactly the two cells each template needs instead of
+        # `f["W"][model_index]` copying the whole (n_model, 120) table (all
+        # cells, every template) before the same two columns were picked.
+        rows_idx = model_index[None, :]
+        v0 = w_mapped[rows_idx, j0]
+        v1 = w_mapped[rows_idx, j0 + 1]
         pi = np.maximum(v0 * (1.0 - frac) + v1 * frac, 1e-300)
         total += np.log(pi)
     return total
