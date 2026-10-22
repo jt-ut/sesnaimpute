@@ -1748,38 +1748,103 @@ REGISTRY = {
         "axis."),
     ("density_pahn_region", "DENSITY_PAHN"): ("objects per square degree",
         "For each region (rows, REGION) and bin of LOG10_LIM_EDGES "
-        "(columns): the sky density of the PAHN pattern -- a catalogued "
-        "source with a measured 5.8 and 8 micron flux and no measured "
-        "3.6 or 4.5 micron flux -- among this region's own admitted "
-        "pixels whose own 8 micron 50%-completeness limit falls in this "
-        "bin: the total pattern count there divided by the total "
-        "covered area there. NaN in a bin no admitted pixel's own limit "
-        "reaches. An upper bound: the pattern count also contains any "
-        "true protostar too faint at 3.6 and 4.5 to detect, and "
-        "artefacts."),
-    ("density_pahn_region", "N_PER_BIN"): ("sources",
-        "For each region and bin of LOG10_LIM_EDGES, the total pattern "
-        "count DENSITY_PAHN in that bin rests on. An upper bound: the "
+        "(columns): the INTRINSIC sky density of the PAHN pattern -- a "
+        "catalogued source with a measured 5.8 and 8 micron flux and no "
+        "measured 3.6 or 4.5 micron flux -- among this region's own "
+        "admitted pixels whose own 8 micron 50%-completeness limit "
+        "falls in this bin: each such pattern source's own weight, the "
+        "inverse of its own probability of the catalogued event -- its "
+        "own 5.8 and 8 micron flux both detected (weight_pahn_source's "
+        "own P_CAT/WEIGHT, the same survey detection-probability mixture "
+        "bmstp.atlas uses) -- summed there and divided by the total "
+        "covered area there: the catalogued pattern count (DENSITY_PAHN_"
+        "CATALOGUED) divided once by selection INTO THE PATTERN ITSELF, "
+        "so a consumer that separately applies that same probability (as "
+        "bmstp.atlas/the fitter do for a drawn member) applies it exactly "
+        "once in total, not twice -- intrinsic for the PATTERN population "
+        "only. NaN in a bin no admitted pixel's own limit reaches. Still "
+        "an upper bound, in both directions: the pattern count also "
+        "contains any true protostar too faint at 3.6 and 4.5 to detect, "
+        "and "
+        "artefacts -- this division corrects only for the pattern's own "
+        "catalogued fraction, not for those two."),
+    ("density_pahn_region", "DENSITY_PAHN_CATALOGUED"): ("objects per square degree",
+        "For each region (rows, REGION) and bin of LOG10_LIM_EDGES "
+        "(columns): the MEASURED sky density of the PAHN pattern -- a "
+        "catalogued source with a measured 5.8 and 8 micron flux and no "
+        "measured 3.6 or 4.5 micron flux -- among this region's own "
+        "admitted pixels whose own 8 micron 50%-completeness limit "
+        "falls in this bin: the total pattern count there divided by "
+        "the total covered area there, with no correction for any "
+        "source's own chance of being catalogued. NaN in a bin no "
+        "admitted pixel's own limit reaches. An upper bound: the "
         "pattern count also contains any true protostar too faint at "
         "3.6 and 4.5 to detect, and artefacts."),
+    ("density_pahn_region", "N_PER_BIN"): ("sources",
+        "For each region and bin of LOG10_LIM_EDGES, the total pattern "
+        "count DENSITY_PAHN_CATALOGUED in that bin rests on. An upper "
+        "bound: the pattern count also contains any true protostar too "
+        "faint at 3.6 and 4.5 to detect, and artefacts."),
     ("density_pahn_region", "POISSON_LO"): ("objects per square degree",
         "The lower edge of the standard 68% (Garwood) Poisson confidence "
-        "interval on DENSITY_PAHN, from N_PER_BIN's own raw count, on "
-        "the same density scale."),
+        "interval on DENSITY_PAHN_CATALOGUED, from N_PER_BIN's own raw "
+        "count, on the same density scale."),
     ("density_pahn_region", "POISSON_HI"): ("objects per square degree",
         "The upper edge of the standard 68% (Garwood) Poisson confidence "
-        "interval on DENSITY_PAHN, from N_PER_BIN's own raw count, on "
-        "the same density scale."),
+        "interval on DENSITY_PAHN_CATALOGUED, from N_PER_BIN's own raw "
+        "count, on the same density scale."),
     ("density_pahn_region", "AREA_DEG2_PER_BIN"): ("square degrees",
         "For each region and bin of LOG10_LIM_EDGES, the total covered "
         "area (the any-IRAC union coverage fraction times the nside-512 "
-        "pixel area, summed over every admitted pixel in that bin) "
-        "DENSITY_PAHN divides N_PER_BIN by."),
+        "pixel area, summed over every admitted pixel in that bin) both "
+        "DENSITY_PAHN and DENSITY_PAHN_CATALOGUED divide their own "
+        "numerator by."),
     ("density_pahn_region", "PATTERN_COUNT_REGION"): ("sources",
         "For each region, the total pattern count over every admitted "
         "pixel, before binning: N_PER_BIN's own column sum. An upper "
         "bound: the pattern count also contains any true protostar too "
         "faint at 3.6 and 4.5 to detect, and artefacts."),
+
+    # population.pahn -- weight_pahn_source: one row per PAHN pattern
+    # source survey-wide, its own probability of the catalogued event
+    # (5.8 and 8 micron both detected) and the inverse weight DENSITY_PAHN
+    # sums into its bins (owner's 2026-10-22 ruling, FINDINGS.md S07),
+    # for pattern_f45_1kpc's own downstream consumer (the PAHN brightness
+    # marginal) to weight by the identical quantity.
+    ("weight_pahn_source", "NAME"): ("name",
+        "The catalogue NAME of this PAHN pattern source (a catalogued "
+        "source with a measured 5.8 and 8 micron flux and no measured "
+        "3.6 or 4.5 micron flux)."),
+    ("weight_pahn_source", "REGION"): ("name",
+        "The region this pattern source belongs to."),
+    ("weight_pahn_source", "LOG10_F_I4_MJY"): ("log10 mJy",
+        "This pattern source's own measured 8 micron flux, as observed "
+        "(not placed at any reference distance) -- the SAME flux "
+        "pattern_f45_1kpc places at the register's 1 kpc convention."),
+    ("weight_pahn_source", "P_CAT"): ("probability",
+        "This pattern source's own probability of the catalogued event "
+        "-- its own 5.8 and 8 micron flux both detected (its 3.6 and "
+        "4.5 micron flux and both 2MASS and 24 micron flux are zero by "
+        "the pattern's own definition, so they do not enter this "
+        "probability): the survey's detection-probability mixture "
+        "(independent, the product of each band's own completeness; "
+        "comonotone, the smaller of the two; the measured LAMBDA share "
+        "between them) at this source's own pixel and its own measured "
+        "flux, floored at 1 minus the measurement's own completeness "
+        "cap (about 1/200) so WEIGHT below is never a division by "
+        "zero. This is selection into the pattern itself, not a general "
+        "completeness for a star-less PAH nebular source: the pattern's "
+        "own contamination (a true protostar too faint at 3.6 and 4.5 "
+        "to detect; artefacts) and incompleteness (true PAHN outside "
+        "the pattern) are a separate, undivided-out, two-directional "
+        "upper-bound disclosure, carried by DENSITY_PAHN/DENSITY_PAHN_"
+        "CATALOGUED alike."),
+    ("weight_pahn_source", "WEIGHT"): ("sources per pattern source",
+        "1 / P_CAT: this pattern source's own share of DENSITY_PAHN's "
+        "numerator in whichever bin its own pixel's 8 micron 50%-"
+        "completeness limit falls in (DENSITY_PAHN sums this over a "
+        "bin's own pattern sources and divides by the bin's own total "
+        "covered area) -- always >= 1, never larger than about 200."),
 
     # sky.derived.column -- the adopted (gas) column and the extinction
     # (star-light) column, each at source and sightline granule, plus the

@@ -28,32 +28,70 @@ own `surveyed_area_deg2` use, so a partially-mosaicked pixel is not
 counted as fully surveyed), binned by the pixel's own I4 50%-completeness
 limit (`catalog.limits.Completeness.fifty_percent_pixel`, log10 mJy, 0.1
 dex bins, ONE shared axis across every region this build call covers --
-`population.pahc_curve`'s own `REGION` convention). The per-bin density
-is the TOTAL pattern count over the TOTAL covered area of every admitted
-pixel in that bin, objects per square degree, with the standard 68%
-Garwood Poisson interval (Gehrels 1986) on the bin's own raw count,
-carried onto the density scale by the same division. `DENSITY_PAHN`,
-`read()`'s own callable, is that binned curve, linear between the
-bins a region actually populates and held flat beyond the first/last
-one -- `population.pahc_curve.read`'s own convention, restated here
-rather than imported (a population module duplicates another's small
-read-time convenience rather than reaching into it, the same rule
-`population.knot_rate`'s own docstring states for `bmstp.atlas`'s
-`_coverage`/this module's `_coverage_frac`).
+`population.pahc_curve`'s own `REGION` convention). The per-bin
+CATALOGUED density, `DENSITY_PAHN_CATALOGUED`, is the TOTAL pattern count
+over the TOTAL covered area of every admitted pixel in that bin, objects
+per square degree, with the standard 68% Garwood Poisson interval
+(Gehrels 1986) on the bin's own raw count, carried onto the density
+scale by the same division -- `population.pahc_curve.read`'s own
+held-at-the-ends convention, restated here rather than imported (a
+population module duplicates another's small read-time convenience
+rather than reaching into it, the same rule `population.knot_rate`'s own
+docstring states for `bmstp.atlas`'s `_coverage`/this module's
+`_coverage_frac`).
 
-`bmstp.density` reads this curve at each source's own pixel limit, times
-`bmstp.shapes`' own `ON_GRID_PAHN` (the shape's own retained fraction on
-the common depth axis) -- no further factor: PAHN carries no external
-survey calibration of its own (unlike H2S's `population.knot_rate.eta_
-for_region`), so its density is the measured curve and the shape's own
-retention alone.
+THE INTRINSIC LEVEL (owner's 2026-10-22 ruling, FINDINGS.md S07,
+briefs/round6_2026-10-22/U06_pahn_level.md): `DENSITY_PAHN_CATALOGUED`
+stays the measurement and stays an upper bound WITHIN the pattern (a
+catalogued count per area, already run once through the catalogue's own
+selection), but `bmstp.atlas`/the fitter apply the catalogued probability
+to a member a SECOND time on top of it -- so the stored density must
+divide that selection back out, once. Per region and per limit bin,
+`DENSITY_PAHN` is each pattern source's own OBSERVED weight, `1 /
+p_cat,i`, summed over the bin's own pattern sources and divided by the
+SAME total covered area `DENSITY_PAHN_CATALOGUED` uses -- `p_cat,i` the
+two-of-eight mixture `bmstp.atlas.catalogued_probability`'s own rule and
+`constants.LAMBDA` give a member, evaluated at this pattern source's OWN
+measured I3/I4 flux and its own admitted pixel (I1, I2, both 2MASS bands
+and M1 fixed at zero flux, `pattern_catalogued_probability` below --
+population may not import bmstp, so this is that rule's own arithmetic,
+copied, never a call into `bmstp.atlas`). `p_cat,i`'s own per-band terms
+are each already capped at `catalog.completeness.C_CAP` (that rule's own
+cap, inherited unchanged here); `p_cat,i` itself is additionally floored
+at `1 - C_CAP` (the SAME measurement's ~1/200 resolution limit, THE
+RULING's own "floored at C_CAP" -- `pattern_catalogued_probability`'s
+own docstring derives why that floor is read at `1 - C_CAP`, not `C_CAP`
+literally), so every source's own weight is finite and `>= 1`, never
+larger than `1 / (1 - C_CAP)` (~200) and never a windfall for a source
+already essentially certain to be catalogued. `read()`'s own callable
+(unchanged) is this
+intrinsic curve, linear between the bins a region actually populates and
+held flat beyond the first/last one, the same convention
+`DENSITY_PAHN_CATALOGUED` uses. `N_PER_BIN` (the plain pattern count) is
+unaffected by this division: it is `DENSITY_PAHN_CATALOGUED`'s own
+numerator, not `DENSITY_PAHN`'s.
 
-Writes `population/pahn/density_pahn_region.hdf5`. No register is read
-here: this module reads only the curated catalogue and the measured
-completeness product, both already built -- population may not import
-bmstp (this module's own docstring rule, repeated above), and the
-register read `bmstp.template_weights`/`bmstp.atlas` do for PAHN's own
-SHAPE and WEIGHTS lives there instead (`C17_pahn_integration.md`).
+`bmstp.density` reads `DENSITY_PAHN` (now the intrinsic curve) at each
+source's own pixel limit, times `bmstp.shapes`' own `ON_GRID_PAHN` (the
+shape's own retained fraction on the common depth axis) -- no further
+factor: PAHN carries no external survey calibration of its own (unlike
+H2S's `population.knot_rate.eta_for_region`), so its density is the
+intrinsic curve and the shape's own retention alone; `bmstp.atlas` then
+applies the catalogued probability to a drawn PAHN member exactly once,
+on top of this already-divided-out level.
+
+Writes `population/pahn/density_pahn_region.hdf5` and `population/pahn/
+weight_pahn_source.hdf5` (the second, `write_source_table`, one row per
+pattern source survey-wide: the coordinator's 2026-10-22 correction, so
+`pattern_f45_1kpc`'s own downstream consumer -- the PAHN brightness
+marginal, `bmstp.shapes`/`bmstp.template_weights` -- can weight by the
+SAME `1 / p_cat` `DENSITY_PAHN` sums into its bins, not a uniform
+count). No register is read here: this module reads only the curated
+catalogue and the measured completeness product, both already built --
+population may not import bmstp (this module's own docstring rule,
+repeated above), and the register read `bmstp.template_weights`/
+`bmstp.atlas` do for PAHN's own SHAPE and WEIGHTS lives there instead
+(`C17_pahn_integration.md`).
 """
 
 import os
@@ -66,14 +104,22 @@ from scipy.stats import chi2
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
+from sesnaimpute import constants as constants_module
 from sesnaimpute import definitions
 from sesnaimpute import progress
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
+from sesnaimpute.catalog import completeness as completeness_module
 from sesnaimpute.catalog import limits as limits_module
 
 _STEM = "density_pahn_region"
+#: `weight_pahn_source`'s own granule (the coordinator's 2026-10-22
+#: correction under FINDINGS.md S07, "write the per-source inverse
+#: weights into the product"): one row per pattern source, survey-wide,
+#: for `pattern_f45_1kpc`'s own downstream consumer (U07) to weight its
+#: brightness marginal by the SAME `1 / p_cat` `DENSITY_PAHN` divides by.
+_STEM_SOURCE = "weight_pahn_source"
 
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
@@ -157,25 +203,21 @@ def _coverage_frac(config, region, pix512):
 # 3. one region's own per-pixel measurement
 # ---------------------------------------------------------------------------
 
-def region_measurement(config, region):
-    """`(i4_limit_mjy, area_deg2, pattern_count)`, one row per admitted
-    pixel (`catalog.limits.completeness`'s own `HPX_PIX_512` axis, the
-    same "admitted pixel axis" `bmstp.atlas._depth_grid` reads): each
-    pixel's own I4 50%-completeness limit, its own covered solid angle
-    (`_coverage_frac` times `_HPX512_PIXEL_DEG2`), and the pattern count
-    whose own nside-512 NESTED pixel (`catalog.sesna`'s `GAL_L_DEG`/
-    `GAL_B_DEG`) is that pixel. Every pattern source lands on an admitted
-    pixel by construction (the admitted set is every pixel carrying a
-    catalogued source, `catalog.depth_grid.admitted_pixels_512`'s own
-    docstring) -- checked here, not assumed, rule 6's "no silent
-    fallback"."""
-    reader = limits_module.completeness(config, region)
-    pix512 = reader.hpx_pix_512
-    rows = np.arange(pix512.shape[0])
-    i4_limit_mjy = reader.fifty_percent_pixel("I4", rows)
-    coverage = _coverage_frac(config, region, pix512)
-    area_deg2 = coverage * _HPX512_PIXEL_DEG2
-
+def _pattern_match(config, region, pix512):
+    """`(hit, flux_i3_mjy, flux_i4_mjy, name)`, one row per PATTERN SOURCE
+    (not per pixel): each pattern source's own row into `pix512` (`reader.
+    hpx_pix_512`, the admitted pixel axis -- the SAME row convention
+    `bmstp.atlas._depth_grid`'s own `pixel_row` carries, so this is a
+    valid row into `reader.pixel_fraction_params`'s own `PIXEL_CURVE_
+    <band>` table too), its own measured I3/I4 flux (mJy), and its own
+    catalogue `NAME` (for `weight_pahn_source`'s own per-source product
+    below). Every pattern source lands on an admitted pixel by
+    construction (the admitted set is every pixel carrying a catalogued
+    source, `catalog.depth_grid.admitted_pixels_512`'s own docstring) --
+    checked here, not assumed, rule 6's "no silent fallback". The one
+    place `region_measurement`'s per-pixel bincount and `pattern_
+    catalogued_probability`'s per-source weighting both start from, so
+    the two never see a different match."""
     cat_path = config_module.product_path(
         config, "catalog", "sesna", "sources", "source", region=region)
     if not os.path.exists(cat_path):
@@ -187,6 +229,7 @@ def region_measurement(config, region):
         origin = f["ORIGIN_FNU"][:]
         gl = np.asarray(f["GAL_L_DEG"][:], dtype=np.float64)
         gb = np.asarray(f["GAL_B_DEG"][:], dtype=np.float64)
+        name = np.asarray(f["NAME"][:])
 
     pattern = pattern_mask(fnu, origin)
     src_pix = hp.ang2pix(512, gl, gb, nest=True, lonlat=True).astype(np.int64)
@@ -204,9 +247,114 @@ def region_measurement(config, region):
             "population.pahn [%s]: pattern source's own nside-512 pixel %d is absent "
             "from the admitted pixel axis -- the admitted set should carry every "
             "catalogued source's pixel" % (region, bad))
+    name_pattern = np.array(
+        [n.decode("utf-8") if isinstance(n, bytes) else n for n in name[pattern]], dtype=object)
+    return hit, fnu[pattern, IDX_I3], fnu[pattern, IDX_I4], name_pattern
+
+
+def region_measurement(config, region):
+    """`(i4_limit_mjy, area_deg2, pattern_count, n_pattern_total, hit,
+    flux_i3_mjy, flux_i4_mjy, name)`: the first four, one row per admitted
+    pixel (`catalog.limits.completeness`'s own `HPX_PIX_512` axis, the
+    same "admitted pixel axis" `bmstp.atlas._depth_grid` reads) -- each
+    pixel's own I4 50%-completeness limit, its own covered solid angle
+    (`_coverage_frac` times `_HPX512_PIXEL_DEG2`), the pattern count
+    whose own nside-512 NESTED pixel (`catalog.sesna`'s `GAL_L_DEG`/
+    `GAL_B_DEG`) is that pixel, and the region's own total pattern count.
+    The last four, one row per PATTERN SOURCE (`_pattern_match`): its own
+    row into the pixel axis above, its own measured I3/I4 flux and its
+    own catalogue NAME -- `pattern_catalogued_probability`'s own inputs
+    plus `weight_pahn_source`'s own key."""
+    reader = limits_module.completeness(config, region)
+    pix512 = reader.hpx_pix_512
+    rows = np.arange(pix512.shape[0])
+    i4_limit_mjy = reader.fifty_percent_pixel("I4", rows)
+    coverage = _coverage_frac(config, region, pix512)
+    area_deg2 = coverage * _HPX512_PIXEL_DEG2
+
+    hit, flux_i3_mjy, flux_i4_mjy, name = _pattern_match(config, region, pix512)
     pattern_count = np.bincount(hit, minlength=pix512.size).astype(np.int64)
 
-    return i4_limit_mjy, area_deg2, pattern_count, int(pattern.sum())
+    return (i4_limit_mjy, area_deg2, pattern_count, int(hit.size), hit, flux_i3_mjy, flux_i4_mjy,
+            name)
+
+
+# ---------------------------------------------------------------------------
+# 3b. the intrinsic weight -- divide out each pattern source's own
+# catalogued probability once (owner's 2026-10-22 ruling, FINDINGS.md
+# S07, U06 brief)
+# ---------------------------------------------------------------------------
+
+def pattern_catalogued_probability(config, region, hit, flux_i3_mjy, flux_i4_mjy):
+    """`(n,)` `p_cat`: each pattern source's own probability of THE
+    CATALOGUED EVENT -- "I3 and I4 both detected" (coordinator's 2026-
+    10-22 reply under FINDINGS.md S07: THE PATTERN's own I1, I2, both
+    2MASS bands and M1 are zero by the class definition, module
+    docstring's `pattern_mask`, so they never enter this event at all --
+    not a `>= 2 of 8` test narrowed by zeros, the exact two-band event),
+    under `bmstp.atlas.catalogued_probability`'s own mixture rule and
+    `constants.LAMBDA`, evaluated at the source's OWN admitted-pixel row
+    (`hit`, `_pattern_match`'s own output, a row into `reader.
+    pixel_fraction_params`'s `PIXEL_CURVE_<band>` table) and its own
+    MEASURED I3/I4 flux. `population` may not import `bmstp` (module
+    docstring), so this is that rule's own arithmetic, copied here rather
+    than called into (the same duplication convention `_coverage_frac`
+    above states): `p3 = C_I3(f_I3)`, `p4 = C_I4(f_I4)` (`catalog.
+    completeness.completeness_many` at this pixel's own row, each capped
+    at `catalog.completeness.C_CAP`, that rule's own cap); independent,
+    `p3 * p4`; comonotone (one shared latent draw, `bmstp.atlas.
+    catalogued_probability`'s own `p_(2)` specialised to two bands),
+    `min(p3, p4)`; `p_cat = (1 - LAMBDA) * p3 * p4 + LAMBDA * min(p3,
+    p4)`.
+
+    This is selection INTO THE PATTERN ITSELF (I3-and-I4-detected,
+    I1-and-I2-undetected), so dividing by it makes `DENSITY_PAHN`
+    intrinsic for the PATTERN population only: contaminants (a true
+    protostar too faint at I1/I2 to detect; artefacts) and incompleteness
+    OF THE PATTERN'S OWN DEFINITION outside this one selection act in
+    both directions and stay the disclosed upper-bound caveat on
+    `DENSITY_PAHN`/`DENSITY_PAHN_CATALOGUED` alike (module docstring,
+    `_UPPER_BOUND_READING`) -- this function corrects only for the
+    pattern's own catalogued fraction.
+
+    Both `p3` and `p4` are capped at `C_CAP < 1` before combining (never
+    `>= C_CAP`), so a combined `p_cat` of exactly 0 does occur in real
+    product data: a pattern source whose own measured flux lands
+    faintward of its own pixel's last measured plane in BOTH I3 and I4
+    (`catalog.completeness.completeness_many`'s own `idx >= n - 1`
+    branch returns the curve's own stored 0.0 there, module docstring --
+    the measured curve, not a resolution artefact), so `min(p3, p4)` is
+    exactly 0 too (LAMBDA=1.0 today) -- observed in NGC 7129's own
+    29-region sibling run (Cygnus X, Pipe). `1 / p_cat` DIVIDES BY ZERO
+    there unfloored: THE RULING's own "floored at C_CAP" (U06 brief,
+    coordinator's correction) floors `p_cat` FROM BELOW at `1 - C_CAP`
+    (~1/200, `catalog.completeness`'s own measurement-resolution limit
+    -- `C_CAP` itself caps completeness FROM ABOVE, so a literal
+    `max(p_cat, C_CAP)` floor would force every source's own `p3`/`p4`,
+    already `<= C_CAP` by construction above, to exactly `C_CAP`, and
+    `DENSITY_PAHN` to a constant `1 / C_CAP` rescale of `DENSITY_PAHN_
+    CATALOGUED` in every bin -- not a source-by-source division by its
+    own probability at all), so `1 / p_cat` (the intrinsic weight,
+    `binned_density_weighted`/`weight_pahn_source` below) is always
+    finite and never larger than `1 / (1 - C_CAP)` (= 200) -- "an
+    inverse weight is at most 200, never 1.005", the coordinator's own
+    correction of this function's first draft."""
+    reader = limits_module.completeness(config, region)
+    hit64 = np.ascontiguousarray(hit, dtype=np.int64)
+
+    def _p(band, flux_mjy):
+        curve_b, g0_b, dm_b, n_b, a_b, c_b, scale_b = reader.pixel_fraction_params(band)
+        log10_f_b = np.ascontiguousarray(np.log10(np.asarray(flux_mjy, dtype=np.float64)))
+        c_vals = completeness_module.completeness_many(
+            curve_b, hit64, g0_b, dm_b, n_b, log10_f_b, a_b, c_b, scale_b)
+        return np.minimum(c_vals, completeness_module.C_CAP)
+
+    p3 = _p("I3", flux_i3_mjy)
+    p4 = _p("I4", flux_i4_mjy)
+    p_indep = p3 * p4
+    p_comon = np.minimum(p3, p4)
+    p_cat = (1.0 - constants_module.LAMBDA) * p_indep + constants_module.LAMBDA * p_comon
+    return np.maximum(p_cat, 1.0 - completeness_module.C_CAP)
 
 
 # ---------------------------------------------------------------------------
@@ -275,21 +423,36 @@ def pattern_f45_1kpc(config, region, log10_ratio_i2_i4):
     return log10_f_ref_i2_1kpc, log10_f_ref_i4_1kpc
 
 
+def _pixel_bin_assignment(i4_limit_mjy, area_deg2, edges):
+    """`(finite, bin_idx, area)`: the ONE per-admitted-pixel bin
+    assignment `binned_density` and `binned_density_weighted` both build
+    on (so `DENSITY_PAHN_CATALOGUED` and `DENSITY_PAHN` divide by the
+    identical per-bin area, never two independently written copies that
+    could drift apart) -- `finite` is this pixel's own I4 50% limit and
+    covered area both finite and positive (module docstring's own gate),
+    `bin_idx` its bin of `edges` (log10 I4 50% limit, mJy) among the
+    `finite` pixels alone, `area` those pixels' own covered area."""
+    finite = np.isfinite(i4_limit_mjy) & np.isfinite(area_deg2) & (area_deg2 > 0)
+    log10_lim = np.log10(i4_limit_mjy[finite])
+    area = area_deg2[finite]
+    n_bin = edges.size - 1
+    bin_idx = np.clip(np.searchsorted(edges, log10_lim, side="right") - 1, 0, n_bin - 1)
+    return finite, bin_idx, area
+
+
 def binned_density(i4_limit_mjy, area_deg2, pattern_count, edges):
     """`(density, poisson_lo, poisson_hi, n_per_bin, area_per_bin)`, each
     `(n_bin,)`: per bin of `edges` (log10 I4 50% limit, mJy), the TOTAL
     pattern count over the TOTAL covered area of every admitted pixel
-    whose own limit lands there (module docstring) -- objects per square
-    degree -- with the 68% Garwood Poisson interval on the bin's own raw
-    count, carried onto the density scale by the same division. A bin no
-    admitted pixel's own limit reaches (`area_per_bin == 0`) is NaN, read
-    by nothing (`read`'s own knots are the populated bins alone)."""
-    finite = np.isfinite(i4_limit_mjy) & np.isfinite(area_deg2) & (area_deg2 > 0)
-    log10_lim = np.log10(i4_limit_mjy[finite])
-    area = area_deg2[finite]
+    whose own limit lands there (module docstring's `DENSITY_PAHN_
+    CATALOGUED`) -- objects per square degree -- with the 68% Garwood
+    Poisson interval on the bin's own raw count, carried onto the density
+    scale by the same division. A bin no admitted pixel's own limit
+    reaches (`area_per_bin == 0`) is NaN, read by nothing (`read`'s own
+    knots are the populated bins alone)."""
+    finite, bin_idx, area = _pixel_bin_assignment(i4_limit_mjy, area_deg2, edges)
     count = pattern_count[finite].astype(np.float64)
     n_bin = edges.size - 1
-    bin_idx = np.clip(np.searchsorted(edges, log10_lim, side="right") - 1, 0, n_bin - 1)
 
     n_per_bin_f = np.bincount(bin_idx, weights=count, minlength=n_bin)
     area_per_bin = np.bincount(bin_idx, weights=area, minlength=n_bin)
@@ -307,12 +470,38 @@ def binned_density(i4_limit_mjy, area_deg2, pattern_count, edges):
     return density, poisson_lo, poisson_hi, n_per_bin, area_per_bin
 
 
+def binned_density_weighted(i4_limit_mjy, area_deg2, weight_per_pixel, edges):
+    """`(density_intrinsic,)` `(n_bin,)`: the SAME per-admitted-pixel bin
+    assignment and per-bin TOTAL covered area `binned_density` uses
+    (`_pixel_bin_assignment`), but summing each admitted pixel's own
+    TOTAL intrinsic weight (`weight_per_pixel`, `build`'s own `np.
+    bincount(hit, weights=1/p_cat)` over the pattern sources landing on
+    that pixel) in place of the plain pattern count -- `DENSITY_PAHN`,
+    the module docstring's "each source weighted by the inverse of its
+    own catalogued probability", over the identical area denominator
+    `DENSITY_PAHN_CATALOGUED` uses, bin for bin. NaN wherever `binned_
+    density` is NaN (no admitted pixel's own limit reached that bin); no
+    Poisson interval -- `weight_per_pixel` is a sum of unequal real
+    weights, not a Poisson count."""
+    finite, bin_idx, area = _pixel_bin_assignment(i4_limit_mjy, area_deg2, edges)
+    weight = weight_per_pixel[finite]
+    n_bin = edges.size - 1
+
+    weight_per_bin = np.bincount(bin_idx, weights=weight, minlength=n_bin)
+    area_per_bin = np.bincount(bin_idx, weights=area, minlength=n_bin)
+
+    density = np.full(n_bin, np.nan, dtype=np.float64)
+    populated = area_per_bin > 0
+    density[populated] = weight_per_bin[populated] / area_per_bin[populated]
+    return density
+
+
 # ---------------------------------------------------------------------------
 # 5. write, read
 # ---------------------------------------------------------------------------
 
-def write_region_table(path, edges, region_names, density, n_per_bin, poisson_lo, poisson_hi,
-                        area_per_bin, pattern_count_total):
+def write_region_table(path, edges, region_names, density, density_cat, n_per_bin, poisson_lo,
+                        poisson_hi, area_per_bin, pattern_count_total):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "region"
@@ -321,6 +510,7 @@ def write_region_table(path, edges, region_names, density, n_per_bin, poisson_lo
             ("REGION", np.array(region_names, dtype=object),
              dict(dtype=h5py.string_dtype(encoding="utf-8"))),
             ("DENSITY_PAHN", density.astype(np.float64), {}),
+            ("DENSITY_PAHN_CATALOGUED", density_cat.astype(np.float64), {}),
             ("N_PER_BIN", n_per_bin.astype(np.int64), {}),
             ("POISSON_LO", poisson_lo.astype(np.float64), {}),
             ("POISSON_HI", poisson_hi.astype(np.float64), {}),
@@ -328,6 +518,30 @@ def write_region_table(path, edges, region_names, density, n_per_bin, poisson_lo
             ("PATTERN_COUNT_REGION", np.asarray(pattern_count_total, dtype=np.int64), {}),
         ):
             build_module.write_dataset(f, name, data, *REGISTRY[(_STEM, name)], **extra)
+
+
+def write_source_table(path, name, region, log10_f_i4_mjy, p_cat, weight):
+    """`weight_pahn_source.hdf5`: one row per pattern source, survey-wide
+    (the coordinator's 2026-10-22 correction under FINDINGS.md S07) --
+    `NAME`/`REGION` (the catalogue identity), `LOG10_F_I4_MJY` (the SAME
+    measured flux `pattern_f45_1kpc` places at 1 kpc), `P_CAT`
+    (`pattern_catalogued_probability`'s own output) and `WEIGHT` (`1 /
+    P_CAT`, `DENSITY_PAHN`'s own per-source numerator before binning) --
+    so `pattern_f45_1kpc`'s own downstream consumer (U07) can weight the
+    brightness marginal by the identical `WEIGHT` `DENSITY_PAHN` divides
+    by, rather than the uniform count that marginal used before this
+    ruling."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with h5py.File(path, "w") as f:
+        f.attrs["GRANULE"] = "source"
+        for col, data, extra in (
+            ("NAME", np.asarray(name, dtype=object), dict(dtype=h5py.string_dtype(encoding="utf-8"))),
+            ("REGION", np.asarray(region, dtype=object), dict(dtype=h5py.string_dtype(encoding="utf-8"))),
+            ("LOG10_F_I4_MJY", np.asarray(log10_f_i4_mjy, dtype=np.float64), {}),
+            ("P_CAT", np.asarray(p_cat, dtype=np.float64), {}),
+            ("WEIGHT", np.asarray(weight, dtype=np.float64), {}),
+        ):
+            build_module.write_dataset(f, col, data, *REGISTRY[(_STEM_SOURCE, col)], **extra)
 
 
 def _region_row(config, region, caller):
@@ -415,14 +629,39 @@ def build(config, regions=None):
     """Measures the pattern's own sky density per region over `regions`
     (default: all thirty), writes `population/pahn/density_pahn_region.
     hdf5` with one row per region, bins on one shared axis (module
-    docstring)."""
+    docstring): `DENSITY_PAHN_CATALOGUED` (the measured pattern, unchanged
+    from the pre-2026-10-22 product) and `DENSITY_PAHN` (that same
+    pattern, each source weighted by `1 / p_cat,i`,
+    `pattern_catalogued_probability` -- the owner's ruling). Also writes
+    `population/pahn/weight_pahn_source.hdf5`, one row per pattern
+    source survey-wide (`write_source_table`, the coordinator's 2026-
+    10-22 correction) -- the SAME per-source `WEIGHT` `DENSITY_PAHN`
+    sums into its bins, for `pattern_f45_1kpc`'s own downstream consumer
+    (U07) to weight the brightness marginal by instead of a uniform
+    count."""
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     st = progress.Stage("population.pahn")
 
     per_region = {}
+    source_name, source_region, source_log10_f_i4, source_p_cat, source_weight = [], [], [], [], []
     for i_region, region in enumerate(region_names, start=1):
-        i4_limit_mjy, area_deg2, pattern_count, n_pattern_total = region_measurement(config, region)
-        per_region[region] = (i4_limit_mjy, area_deg2, pattern_count, n_pattern_total)
+        i4_limit_mjy, area_deg2, pattern_count, n_pattern_total, hit, flux_i3_mjy, flux_i4_mjy, name = \
+            region_measurement(config, region)
+        if n_pattern_total:
+            p_cat = pattern_catalogued_probability(config, region, hit, flux_i3_mjy, flux_i4_mjy)
+            weight = 1.0 / p_cat
+        else:
+            p_cat = np.empty(0, dtype=np.float64)
+            weight = np.empty(0, dtype=np.float64)
+        weight_per_pixel = np.bincount(hit, weights=weight, minlength=i4_limit_mjy.size)
+        per_region[region] = (i4_limit_mjy, area_deg2, pattern_count, n_pattern_total,
+                               weight_per_pixel, p_cat)
+        if n_pattern_total:
+            source_name.append(name)
+            source_region.append(np.full(n_pattern_total, region, dtype=object))
+            source_log10_f_i4.append(np.log10(flux_i4_mjy))
+            source_p_cat.append(p_cat)
+            source_weight.append(weight)
         st.tick(i_region, len(region_names), "regions (measurement)")
 
     log10_limits_by_region = [np.log10(v[0][np.isfinite(v[0])]) for v in per_region.values()]
@@ -432,6 +671,7 @@ def build(config, regions=None):
 
     n_region = len(region_names)
     density = np.full((n_region, n_bin), np.nan, dtype=np.float64)
+    density_cat = np.full((n_region, n_bin), np.nan, dtype=np.float64)
     n_per_bin = np.zeros((n_region, n_bin), dtype=np.int64)
     poisson_lo = np.full((n_region, n_bin), np.nan, dtype=np.float64)
     poisson_hi = np.full((n_region, n_bin), np.nan, dtype=np.float64)
@@ -439,27 +679,48 @@ def build(config, regions=None):
     pattern_count_total = np.zeros(n_region, dtype=np.int64)
 
     for i, region in enumerate(region_names):
-        i4_limit_mjy, area_deg2, pattern_count, n_pattern_total = per_region[region]
+        i4_limit_mjy, area_deg2, pattern_count, n_pattern_total, weight_per_pixel, p_cat = per_region[region]
         d_r, lo_r, hi_r, n_r, a_r = binned_density(i4_limit_mjy, area_deg2, pattern_count, edges)
-        density[i], n_per_bin[i], poisson_lo[i], poisson_hi[i], area_per_bin[i] = d_r, n_r, lo_r, hi_r, a_r
+        d_intrinsic = binned_density_weighted(i4_limit_mjy, area_deg2, weight_per_pixel, edges)
+        density[i], density_cat[i] = d_intrinsic, d_r
+        n_per_bin[i], poisson_lo[i], poisson_hi[i], area_per_bin[i] = n_r, lo_r, hi_r, a_r
         pattern_count_total[i] = n_pattern_total
 
         populated = np.isfinite(d_r) & (n_r > 0)
-        median_density = float(np.median(d_r[populated])) if np.any(populated) else float("nan")
+        median_density_cat = float(np.median(d_r[populated])) if np.any(populated) else float("nan")
+        median_density = float(np.median(d_intrinsic[populated])) if np.any(populated) else float("nan")
+        ratio = median_density / median_density_cat if median_density_cat else float("nan")
+        p_cat_report = (f"p_cat min={float(p_cat.min()):.4g} median={float(np.median(p_cat)):.4g} "
+                         f"max={float(p_cat.max()):.4g}") if p_cat.size else "p_cat n/a (no pattern source)"
         print(f"population.pahn {region}: pattern_count={n_pattern_total} "
               f"n_bin_populated={int(populated.sum())}/{n_bin} "
-              f"DENSITY_PAHN median={median_density:.6g} deg^-2", flush=True)
+              f"DENSITY_PAHN_CATALOGUED median={median_density_cat:.6g} deg^-2 "
+              f"DENSITY_PAHN median={median_density:.6g} deg^-2 "
+              f"ratio(intrinsic/catalogued)={ratio:.6g} {p_cat_report}", flush=True)
         bin_report = ", ".join(
-            f"[{centers[b]:.2f}: N={n_r[b]} rho={d_r[b]:.4g} ({poisson_lo[i,b]:.4g}-{poisson_hi[i,b]:.4g})]"
+            f"[{centers[b]:.2f}: N={n_r[b]} rho_cat={d_r[b]:.4g} rho_intrinsic={d_intrinsic[b]:.4g} "
+            f"({poisson_lo[i,b]:.4g}-{poisson_hi[i,b]:.4g})]"
             for b in np.flatnonzero(populated))
-        print(f"population.pahn {region}: bins (log10 I4-lim-mJy center: N, density deg^-2, "
-              f"68% Poisson interval) {bin_report}", flush=True)
+        print(f"population.pahn {region}: bins (log10 I4-lim-mJy center: N, catalogued and intrinsic "
+              f"density deg^-2, catalogued's 68% Poisson interval) {bin_report}", flush=True)
 
     out_path = config_module.product_path(config, "population", "pahn", "density", "region")
-    write_region_table(out_path, edges, region_names, density, n_per_bin, poisson_lo, poisson_hi,
-                        area_per_bin, pattern_count_total)
+    write_region_table(out_path, edges, region_names, density, density_cat, n_per_bin, poisson_lo,
+                        poisson_hi, area_per_bin, pattern_count_total)
+
+    source_out_path = config_module.product_path(config, "population", "pahn", "weight", "source")
+    if source_name:
+        write_source_table(source_out_path, np.concatenate(source_name), np.concatenate(source_region),
+                            np.concatenate(source_log10_f_i4), np.concatenate(source_p_cat),
+                            np.concatenate(source_weight))
+    else:
+        write_source_table(source_out_path, np.empty(0, dtype=object), np.empty(0, dtype=object),
+                            np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64),
+                            np.empty(0, dtype=np.float64))
+
     st.done(out_path, n_region=n_region, n_bin=n_bin,
-            pattern_count_total=int(pattern_count_total.sum()))
+            pattern_count_total=int(pattern_count_total.sum()),
+            source_out_path=source_out_path, n_pattern_source=int(pattern_count_total.sum()))
 
 
 if __name__ == "__main__":
