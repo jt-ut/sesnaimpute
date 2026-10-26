@@ -80,27 +80,66 @@ def canonical_grid():
 
 def cell_fits(tile, ids, seed):
     """Forced fits at N_POS uniform positions in each cell of `ids` on `tile`. Returns b (flux
-    mJy), gain, pixel sigma (propagated), valid, each (n_cell, N_POS)."""
+    mJy), gain, pixel sigma (propagated), valid, clean (farther than one beam from every bright
+    neighbour), each (n_cell, N_POS)."""
     x, y = tile.grid.sample_pixels(ids, N_POS, seed)
     fit = tile.fit_positions(x.ravel(), y.ravel())
     shape = x.shape
     valid = (fit.covered & np.isfinite(fit.flux) & np.isfinite(fit.gain) & (fit.gain > 0)).reshape(shape)
-    return (fit.flux.reshape(shape), fit.gain.reshape(shape), fit.sigma.reshape(shape), valid)
+    clean = ~tile.near_bright(x, y)
+    return (fit.flux.reshape(shape), fit.gain.reshape(shape), fit.sigma.reshape(shape), valid, clean)
 
 
-def cell_statistics(b, gain, pixel_sigma, valid):
-    """Per cell: n_valid, cell sigma (1.4826 MAD of b over the valid positions), median gain,
-    median propagated pixel sigma, and the threshold flux (5 sigma - b)/g of every position
-    (NaN where invalid)."""
-    bb = np.where(valid, b, np.nan)
-    n_valid = valid.sum(axis=1)
+#: the cell sigma needs this many clean positions, else it is borrowed from the neighbouring cells
+MIN_CLEAN_POSITIONS = 50
+
+
+def cell_statistics(b, gain, pixel_sigma, valid, clean):
+    """Per cell: n_valid, n_clean, clean sigma (1.4826 MAD of b over the valid positions farther than
+    one beam from every bright neighbour, so a real source in the cell does not set the noise),
+    median gain, median propagated pixel sigma."""
+    use = valid & clean
+    bb = np.where(use, b, np.nan)
     with np.errstate(all="ignore"):
         med = np.nanmedian(bb, axis=1)
         sigma = MAD_TO_SIGMA * np.nanmedian(np.abs(bb - med[:, None]), axis=1)
         g = np.nanmedian(np.where(valid, gain, np.nan), axis=1)
         ps = np.nanmedian(np.where(valid, pixel_sigma, np.nan), axis=1)
-        threshold = (pacs_fit.DETECTION_SNR * sigma[:, None] - bb) / np.where(valid, gain, np.nan)
-    return n_valid, sigma, g, ps, threshold
+    return valid.sum(axis=1), use.sum(axis=1), sigma, g, ps
+
+
+def thresholds(b, gain, valid, sigma):
+    """(5 sigma - b)/g at every position, NaN where invalid. The curve uses ALL valid positions."""
+    with np.errstate(all="ignore"):
+        return (pacs_fit.DETECTION_SNR * sigma[:, None] - np.where(valid, b, np.nan)) / np.where(valid, gain, np.nan)
+
+
+_TILE_SIGMA = {}
+
+
+def _tile_median_sigma(tile, record):
+    """Median clean sigma of 400 evenly spread cells of the tile (the last-resort fallback)."""
+    key = record.path
+    if key not in _TILE_SIGMA:
+        ids = np.unique(np.linspace(0, tile.grid.n_cells - 1, 400).astype(np.int64))
+        _, n_clean, sigma, _, _ = cell_statistics(*cell_fits(tile, ids, 0))
+        good = (n_clean >= MIN_CLEAN_POSITIONS) & np.isfinite(sigma) & (sigma > 0)
+        _TILE_SIGMA[key] = float(np.median(sigma[good])) if good.any() else np.nan
+    return _TILE_SIGMA[key]
+
+
+def _fallback_sigma(tile, record, ids):
+    """Median clean sigma of each cell's 8 neighbours, else the tile's median."""
+    grid = tile.grid
+    out = np.empty(ids.size)
+    for k, c in enumerate(ids):
+        cy, cx = divmod(int(c), grid.nx)
+        nb = [(cy + dy) * grid.nx + cx + dx for dy in (-1, 0, 1) for dx in (-1, 0, 1)
+              if (dx or dy) and 0 <= cy + dy < grid.ny and 0 <= cx + dx < grid.nx]
+        _, n_clean, sig, _, _ = cell_statistics(*cell_fits(tile, np.array(nb), 7))
+        good = (n_clean >= MIN_CLEAN_POSITIONS) & np.isfinite(sig) & (sig > 0)
+        out[k] = np.median(sig[good]) if good.any() else _tile_median_sigma(tile, record)
+    return out
 
 
 def curve_counts(threshold, flux_grid):
@@ -120,12 +159,17 @@ def _piece(piece, config, records, flux_grid):
     tile_index, ids = piece
     record = records[tile_index]
     tile = pacs_fit.cached_tile(config, record)
-    b, gain, pixel_sigma, valid = cell_fits(tile, ids, tile_index + 1)
-    n_valid, sigma, g, ps, threshold = cell_statistics(b, gain, pixel_sigma, valid)
+    fits_ = cell_fits(tile, ids, tile_index + 1)
+    b, gain, _ps, valid, _clean = fits_
+    n_valid, n_clean, sigma, g, ps = cell_statistics(*fits_)
+    fallback = (n_clean < MIN_CLEAN_POSITIONS) | ~np.isfinite(sigma) | (sigma <= 0)
+    if fallback.any():
+        sigma[fallback] = _fallback_sigma(tile, record, ids[fallback])
     covered = (n_valid >= MIN_VALID_POSITIONS) & np.isfinite(sigma) & (sigma > 0) & np.isfinite(g)
-    curve = encode_curves(curve_counts(threshold, flux_grid), n_valid)
+    curve = encode_curves(curve_counts(thresholds(b, gain, valid, sigma), flux_grid), n_valid)
     ra, dec = tile.grid.centres_icrs(ids)
     return dict(tile=tile_index, ids=ids, covered=covered, n_valid=n_valid.astype(np.int16),
+                n_sigma=n_clean.astype(np.int16), fallback=fallback,
                 sigma=sigma, gain=g, pixel_sigma=ps, curve=curve, ra=ra, dec=dec)
 
 
@@ -164,7 +208,7 @@ def _band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage
     for t, (_s, _p, cells) in enumerate(geometry):
         mine = [r for r in results if r["tile"] == t]
         out = {k: (np.concatenate([r[k] for r in mine]) if mine else None) for k in
-               ("covered", "n_valid", "sigma", "gain", "pixel_sigma", "curve", "ra", "dec")}
+               ("covered", "n_valid", "n_sigma", "fallback", "sigma", "gain", "pixel_sigma", "curve", "ra", "dec")}
         tile_data.append(out)
     # deepest map at every source and every sample point
     sel_src_t = np.full(n_src, -1, np.int32)
@@ -203,7 +247,7 @@ def _band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage
     tile_of_row = (keys >> 40).astype(np.int64)
     cell_of_row = keys & ((1 << 40) - 1)
     curve = np.zeros((n_row, n_plane), np.uint16)
-    cols = {k: np.zeros(n_row, dt) for k, dt in (("n_valid", np.int16), ("sigma", np.float32),
+    cols = {k: np.zeros(n_row, dt) for k, dt in (("n_valid", np.int16), ("n_sigma", np.int16), ("fallback", bool), ("sigma", np.float32),
                                                   ("gain", np.float32), ("pixel_sigma", np.float32),
                                                   ("ra", np.float64), ("dec", np.float64))}
     for t, (_s, _p, cells) in enumerate(geometry):
@@ -227,7 +271,7 @@ def _band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage
     obsid = np.array([",".join(records[t].obsids) for t in tile_of_row], dtype="S64")
     map_id = np.array([records[t].map_id for t in tile_of_row], dtype="S96")
     return dict(curve=curve, source_row=src_row.astype(np.int32), pixel_curve=pixel_curve,
-                covered_frac=covered_frac, envelope=envelope, n_pos=cols["n_valid"],
+                covered_frac=covered_frac, envelope=envelope, n_pos=cols["n_valid"], n_sigma=cols["n_sigma"], fallback=cols["fallback"],
                 cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=cols["sigma"],
                 cell_gain=cols["gain"], cell_pixel_sigma=cols["pixel_sigma"],
                 cell_obsid=obsid, cell_map=map_id, n_candidate=sum(g[2].size for g in geometry))
@@ -237,7 +281,7 @@ def _empty_band(n_src, n_adm, n_plane):
     return dict(curve=np.zeros((0, n_plane), np.uint16), source_row=np.full(n_src, -1, np.int32),
                 pixel_curve=np.zeros((n_adm, n_plane), np.float32),
                 covered_frac=np.zeros(n_adm, np.float32), envelope=np.zeros(n_plane, np.uint16),
-                n_pos=np.zeros(0, np.int16), cell_ra=np.zeros(0), cell_dec=np.zeros(0),
+                n_pos=np.zeros(0, np.int16), n_sigma=np.zeros(0, np.int16), fallback=np.zeros(0, bool), cell_ra=np.zeros(0), cell_dec=np.zeros(0),
                 cell_sigma=np.zeros(0, np.float32), cell_gain=np.zeros(0, np.float32),
                 cell_pixel_sigma=np.zeros(0, np.float32), cell_obsid=np.zeros(0, "S64"),
                 cell_map=np.zeros(0, "S96"), n_candidate=0)
@@ -265,6 +309,7 @@ def write_product(path, region, admitted, mag, bands):
             w("ENVELOPE_" + b, d["envelope"])
             w("COMPLETED_FROM_" + b, np.full(d["curve"].shape[0], np.nan, np.float32))
             w("N_POS_" + b, d["n_pos"])
+            w("N_SIGMA_POS_" + b, d["n_sigma"])
             w("CELL_RA_" + b, d["cell_ra"])
             w("CELL_DEC_" + b, d["cell_dec"])
             w("CELL_OBSID_" + b, d["cell_obsid"])

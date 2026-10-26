@@ -4034,6 +4034,10 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
     "N_POS_{b}": ("positions",
         "For each row of CURVE_{b}, the number of random positions in the cell that lay on valid data "
         "and entered its curve and noise (at most {n})."),
+    "N_SIGMA_POS_{b}": ("positions",
+        "For each row of CURVE_{b}, how many of the cell's random positions set its noise: those on "
+        "valid data farther than one beam from every bright source of the map. Under 50 means the noise "
+        "is borrowed from the neighbouring cells."),
     "CELL_RA_{b}": ("deg ICRS", "Right ascension of the centre of each cell of CURVE_{b}, in the same row order."),
     "CELL_DEC_{b}": ("deg ICRS", "Declination of the centre of each cell of CURVE_{b}, in the same row order."),
     "CELL_OBSID_{b}": ("observation identifier(s)",
@@ -4043,8 +4047,8 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "The archive file name of the {w} micron map each cell of CURVE_{b} was measured on."),
     "CELL_SIGMA_{b}_MJY": ("mJy",
         "The one-sigma uncertainty of a {w} micron point-source flux measured in each cell of CURVE_{b}: "
-        "1.4826 times the median absolute deviation of the fluxes measured at {n} random positions of "
-        "the cell. A source is called detected at 5 times this value."),
+        "1.4826 times the median absolute deviation of the fluxes measured at the random positions of "
+        "the cell that lie farther than one beam from every bright source (N_SIGMA_POS_{b} of them). A source is called detected at 5 times this value."),
     "CELL_GAIN_{b}": ("dimensionless",
         "The median fraction of an injected point source's flux that the measurement returns in each "
         "cell of CURVE_{b} (1 when the fit recovers it fully)."),

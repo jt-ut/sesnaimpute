@@ -690,6 +690,15 @@ class Tile:
             out[i] = np.hypot(self.beam_arcsec, 2.3548 * best * self.pixel_arcsec)
         return out
 
+    def near_bright(self, x, y):
+        """True where a position lies within one beam of a bright-neighbour peak (step 1 list)."""
+        x = np.asarray(x, float)
+        if self._tree is None:
+            return np.zeros(x.shape, dtype=bool)
+        d, _ = self._tree.query(np.c_[x.ravel(), np.asarray(y, float).ravel()], k=1,
+                                distance_upper_bound=self.beam_px)
+        return (d < self.beam_px).reshape(x.shape)
+
     def pixel_sigma(self, x, y):
         """Error-layer value (mJy/pixel) at the nearest pixel, NaN off the data."""
         cx = np.rint(np.asarray(x)).astype(np.int64)
