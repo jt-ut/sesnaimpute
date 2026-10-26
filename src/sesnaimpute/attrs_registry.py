@@ -3900,111 +3900,9 @@ for _lib in ("sps", "agb", "pahc", "galz", "yso", "h2shock", "pahn"):
     for _name, _rd in _EMISSION_READINGS.items():
         REGISTRY[(_stem, _name)] = _rd
 
-# Local PACS map index: one row per logical map, shared by the two stages
-# that measure sources and recovery probabilities without archive queries.
-_PACS_INDEX_READINGS = {
-    "MAP_ID": ("identifier", "The logical PACS map represented by this row; a combined mosaic is one map even when several observations contributed."),
-    "OBSIDS": ("JSON list of observation identifiers", "The Herschel observation identifiers contributing to this map, encoded as a JSON list of strings."),
-    "BAND": ("band key", "The map's photometric band: P70 is PACS 70 micron and P100 is PACS 100 micron."),
-    "PATH": ("relative path", "The FITS map path relative to sky/download/herschel_pacs under the configured data root."),
-    "IMAGE_HDU": ("zero-based HDU index", "The FITS extension containing this map's calibrated science image."),
-    "ERROR_HDU": ("zero-based HDU index", "The FITS extension containing the error layer; ERROR_KIND and ERROR_UNIT state how to interpret its values."),
-    "COVERAGE_HDU": ("zero-based HDU index", "The FITS extension containing the map's coverage layer, on the same pixel grid as the science image."),
-    "SHAPE": ("JSON list of pixel counts", "The map shape encoded as [number of rows, number of columns], matching each of its science, error and coverage layers."),
-    "UNIT": ("unit string", "The physical unit recorded for the map's science image; this is not an implicit conversion to mJy."),
-    "WCS_HEADER": ("FITS header text", "The map header containing the world-coordinate transformation and its coordinate-frame declaration."),
-    "MODE": ("HSA observing-mode code", "The Herschel observing-mode code: 1 for PACS photometer scan maps or 31 for PACS/SPIRE parallel observations."),
-    "LEVEL": ("archive processing level", "The Herschel archive processing level of the map in this row."),
-    "MAPPER": ("processing label", "The map processing label obtained from archive metadata; unknown means the mapper has not been established."),
-    "SCAN_SPEED": ("arcsec/s", "The documented observing scan speed for PSF selection; NaN means it has not been established."),
-    "SCAN_ANGLES": ("JSON list of angles in degrees", "The scan angles encoded as a JSON list, interpreted in SCAN_ANGLE_FRAME; an empty list means they have not been established."),
-    "POSITION_ANGLE": ("deg", "The archive POSANGLE value, whose axis and reference-frame convention must be established before rotating a PSF; NaN means the value is absent."),
-    "POLYGON": ("ICRS radians", "The observation footprint as supplied by HSA, using pairs of right ascension and declination in radians; an empty string means none is available."),
-    "ERROR_UNIT": ("unit string", "The physical unit recorded for the error layer; an empty string means its unit has not been established."),
-    "ERROR_KIND": ("error interpretation", "The error layer's established statistical meaning, such as standard deviation; unknown means it cannot yet be used as a calibrated pixel uncertainty."),
-    "SCAN_ANGLE_FRAME": ("coordinate-frame label", "The reference frame of SCAN_ANGLES; unknown means they cannot yet determine the PSF's orientation on the map."),
-}
-for _name, _rd in _PACS_INDEX_READINGS.items():
-    REGISTRY[("index_pacs_region", _name)] = _rd
-
-# PACS source measurements, empirical recovery curves and their geometry.
-REGISTRY[("photometry_pacs_source", "NAME")] = ("source identifier",
-    "SESNA source identifier, in exactly the region's sources_sesna_source NAME order.")
-REGISTRY[("completeness_pacs_source", "SOURCE_ROW")] = ("zero-based curve row",
-    "For each SESNA source and band in P70,P100 order, the applicable CURVE row; -1 means no applicable curve, including unseparable groups whose stored bounds the current fitter cannot score.")
-REGISTRY[("completeness_pacs_source", "HPX_PIX_512")] = ("nested HEALPix pixel, nside 512",
-    "The region's admitted Galactic-frame pixels, copied in the exact order of the SESNA completeness product; each row corresponds to the pixel-curve and pixel-area arrays.")
-_PACS_PHOTOMETRY_READINGS = {
-    "FNU_{b}_MJY": ("mJy", "Paired-template source flux, including negative forced measurements; for origin 2 this instead stores max(0, group flux) plus five times the full group uncertainty, for future fitter use only. NaN means no measurement."),
-    "SIGMA_{b}_MJY": ("mJy or upper-limit sentinel", "Total source uncertainty from propagated pixel noise and cell-level extracted-flux scatter; origin 2 stores the dimensionless UPPER_LIMIT_SIGMA sentinel instead. NaN means no measurement."),
-    "ORIGIN_{b}": ("origin code", "1 is a measured detection; 90 is observed but undetected; 91 is not covered by usable data; 2 is a stored unseparable-group bound with SOURCE_ROW=-1, so the current fitter excludes this band."),
-    "FIRST_PASS_DETECTED_{b}": ("boolean", "Frozen calibrated singleton detection used to define detected-neighbour grouping and completeness exclusions; later joint refits may change ORIGIN without changing this mask."),
-    "LOCAL_RMS_{b}_MJY": ("mJy", "Calibrated measurement uncertainty before any upper-limit sentinel is substituted; for an unseparable group this is its total-flux uncertainty. NaN means no usable measurement."),
-    "OBSID_{b}": ("observation identifier(s)", "Contributing Herschel observation identifiers for the selected logical map; an empty string means no selected observation."),
-    "N_BLEND_{b}": ("physical source count", "Number of physical SESNA sources in this source's fitted group, including itself; paired PSF columns are not separate sources."),
-    "BLEND_GROUP_{b}": ("group identifier", "Region-local detected-neighbour group identifier; -1 identifies a singleton or a source without a fitted group."),
-    "EXTENDED_{b}": ("boolean", "Whether an implemented morphology check identifies resolved emission; false does not establish that an untested source is unresolved. See product validation before interpreting this diagnostic."),
-}
-_PACS_COMPLETENESS_READINGS = {
-    "CURVE_{b}": ("probability times 600", "Empirical threshold-recovery probability, with one row per measured singleton cell or target-specific joint-group curve and one column per MAG_GRID value; measured floors and ceilings are not rescaled."),
-    "MAG_GRID_{b}": ("mag relative to 1 Jy", "Fixed survey-wide magnitude planes, increasing from bright to faint, with zero-point flux 1 Jy; stored faint values retain the measurement even though the existing reader clamps at its faint boundary."),
-    "PIXEL_CURVE_{b}": ("probability", "Mean singleton-cell recovery curve over covered positions outside first-pass detected-PACS exclusions in each admitted pixel; an uncovered pixel has a zero curve, while covered but entirely excluded area has no conditional curve and is NaN."),
-    "PIXEL_COVERED_FRAC_{b}": ("fraction", "Fraction of each entire admitted pixel covered by usable PACS measurements, independent of the detected-source exclusion mask."),
-    "PIXEL_EXCLUDED_FRAC_{b}": ("fraction of covered area", "Fraction of the covered portion of each admitted pixel excluded by first-pass detected PACS sources; NaN means no covered area. This fraction does not scale the conditional curve."),
-    "ENVELOPE_{b}": ("probability times 600", "Per-plane maximum of measured curve rows in this region; no extrapolated endpoint or endpoint rescaling is added."),
-    "COMPLETED_FROM_{b}": ("mag", "All NaN: these measured PACS curves have no appended or extrapolated segment."),
-    "N_POS_{b}": ("accepted positions", "Number of covered, eligible positions contributing to each CURVE row after detected-PACS exclusion; excluded positions are not failures or denominator entries."),
-}
-_PACS_GEOMETRY_READINGS = {
-    "CALIBRATION_SEED_{b}": ("random seed", "Unsigned seed defining the deterministic empty-sky calibration stream; distinct from the held-out recovery stream."),
-    "CURVE_SEED_{b}": ("random seed", "Unsigned seed defining the independent held-out completeness recovery stream."),
-    "EMPTY_CERTIFIED_{b}": ("boolean", "True only where geometry proves no covered, eligible position exists in this native cell; zero accepted draws alone cannot certify emptiness."),
-    "CELL_ID_{b}": ("native map cell identifier", "Native y-major 30-arcsec cell identifier, interpreted together with MAP_ID; rows include cells without a measured curve."),
-    "CURVE_ROW_{b}": ("zero-based curve row", "Row of this native cell's singleton curve in CURVE; -1 means no measured singleton curve."),
-    "RA_DEG_{b}": ("deg ICRS", "ICRS right ascension of the native cell centre."),
-    "DEC_DEG_{b}": ("deg ICRS", "ICRS declination of the native cell centre."),
-    "MAP_ID_{b}": ("logical map identifier", "Logical map supplying the native cell, matching the regional PACS index."),
-    "OBSID_{b}": ("observation identifier(s)", "Herschel observations contributing to the cell's selected logical map."),
-    "LOCAL_RMS_{b}_MJY": ("mJy", "Root-mean-square calibrated source-flux uncertainty over accepted singleton trials in the cell; NaN means no measured value."),
-    "GAIN_{b}": ("dimensionless", "Mean measured response of the singleton physical-source flux functional to unit injected total flux; NaN means no valid measured gain."),
-    "BACKGROUND_MEAN_{b}_MJY": ("mJy", "Mean paired-source flux in the final empty-sky calibration pool, reported without subtracting it from source measurements."),
-    "CELL_SCATTER_{b}_MJY": ("mJy", "Sample standard deviation of extracted source flux on the final empty-sky calibration pool, frozen and combined in quadrature with propagated pixel noise."),
-    "AREA_N_CANDIDATE_{b}": ("positions", "Number of positions in the fixed uniform pre-exclusion area pool; this pool is independent of the stopping point used to collect accepted recovery trials."),
-    "AREA_N_COVERED_{b}": ("positions", "Number of fixed area-pool positions covered by usable PACS data before detected-source exclusion."),
-    "AREA_N_EXCLUDED_{b}": ("positions", "Number of covered fixed area-pool positions within the exclusion radius of a frozen first-pass PACS detection."),
-    "AREA_COVERED_FRAC_{b}": ("fraction of cell area", "Covered positions divided by all positions in the fixed area pool; not a completeness probability."),
-    "AREA_EXCLUDED_FRAC_{b}": ("fraction of covered cell area", "Detected-PACS-excluded covered positions divided by covered positions in the fixed area pool; NaN means no covered sample."),
-    "GROUP_CURVE_ROW_{b}": ("zero-based curve row", "CURVE row for this target-specific joint-group measurement; -1 records an inseparable group audit with no individual curve. Singleton pixel averages do not use these rows."),
-    "GROUP_ID_{b}": ("group identifier", "Detected-neighbour physical group associated with this target-specific curve."),
-    "GROUP_MAP_ID_{b}": ("logical map identifier", "Selected logical map supplying this joint-group measurement; interprets the local GROUP_ANCHOR_CELL_ID and matches the regional PACS index."),
-    "GROUP_TARGET_SOURCE_ROW_{b}": ("zero-based regional source row", "Target member's row in the regional SESNA source table and PACS photometry product."),
-    "GROUP_ANCHOR_CELL_ID_{b}": ("native map cell identifier", "Cell within which the target member is drawn uniformly while translating the complete group geometry rigidly."),
-    "GROUP_N_MEMBER_{b}": ("physical source count", "Number of physical sources in the joint fit, excluding the distinction between paired PSF columns."),
-    "GROUP_REAL_SIGMA_{b}_MJY": ("mJy", "Calibrated uncertainty in the actual joint fit, using full pixel and background covariance: target-member uncertainty for a measured curve, or group-total uncertainty when GROUP_CURVE_ROW is -1."),
-    "GROUP_RANDOM_SIGMA_MIN_{b}_MJY": ("mJy", "Minimum calibrated uncertainty across accepted translated joint-fit trials: target-member uncertainty, or group-total uncertainty when GROUP_CURVE_ROW is -1."),
-    "GROUP_RANDOM_SIGMA_MAX_{b}_MJY": ("mJy", "Maximum calibrated uncertainty across accepted translated joint-fit trials: target-member uncertainty, or group-total uncertainty when GROUP_CURVE_ROW is -1."),
-    "GROUP_GAIN_{b}": ("dimensionless", "Mean target-member response to a unit-flux injection in accepted translated joint fits; NaN when GROUP_CURVE_ROW is -1 and no individual curve exists."),
-    "GROUP_BACKGROUND_MEAN_{b}_MJY": ("mJy", "Mean extracted flux on the translated empty-sky joint-calibration pool: target-member flux, or the sum of member means when GROUP_CURVE_ROW is -1."),
-    "GROUP_AREA_N_CANDIDATE_{b}": ("positions", "Fixed number of attempted group translations used to measure joint-fit support and exclusion area."),
-    "GROUP_AREA_N_COVERED_{b}": ("positions", "Fixed-pool translations with usable measurement support for every group member."),
-    "GROUP_AREA_N_EXCLUDED_{b}": ("positions", "Covered fixed-pool translations with at least one member inside a frozen first-pass detected-source exclusion."),
-    "GROUP_MEMBER_OFFSET_{b}": ("flat-array offset", "Offsets delimiting each target-curve row's members in GROUP_MEMBER_SOURCE_ROW and GROUP_MEMBER_CATALOGUE; the last value is the flat-array length."),
-    "GROUP_MEMBER_SOURCE_ROW_{b}": ("zero-based catalogue source row", "Flat list of physical group members' source rows, interpreted in the corresponding GROUP_MEMBER_CATALOGUE entry."),
-    "GROUP_MEMBER_CATALOGUE_{b}": ("catalogue filename", "SESNA source catalogue containing each flat group-member row; resolves neighbours from another region without relabelling them as local rows."),
-    "GROUP_COVARIANCE_OFFSET_{b}": ("flat-array offset", "Offsets delimiting row-major square background-covariance matrices, one per target-specific group calibration."),
-    "GROUP_CELL_COVARIANCE_{b}_MJY2": ("mJy squared", "Full empirical covariance of joint-fit physical-source fluxes on accepted empty-sky translations, including cross terms; reshape each segment to GROUP_N_MEMBER squared."),
-}
-for _band in ("P70", "P100"):
-    for _stem, _readings in (("photometry_pacs_source", _PACS_PHOTOMETRY_READINGS),
-                             ("completeness_pacs_source", _PACS_COMPLETENESS_READINGS),
-                             ("geometry_pacs_region", _PACS_GEOMETRY_READINGS)):
-        for _name, _rd in _readings.items():
-            REGISTRY[(_stem, _name.format(b=_band))] = _rd
-
 
 # sky.derived.pacs_completeness -- completeness_pacs_source (2026-10-26 repair): the PACS 70 and 100
-# micron completeness in the layout of completeness_sesna_source, plus per-cell columns. This block
-# replaces the completeness entries of the _PACS_* blocks above for the same keys.
+# micron completeness in the layout of completeness_sesna_source, plus per-cell columns.
 _PACS_COMPLETENESS_CELLS_READINGS = {
     "CURVE_{b}": ("completeness fraction x600, uint16",
         "One row per 30-arcsec cell of a Herschel PACS {w} micron map that is the deepest map at some "
@@ -4065,3 +3963,30 @@ for _band, _w in (("P70", "70"), ("P100", "100")):
     for _name, (_u, _r) in _PACS_COMPLETENESS_CELLS_READINGS.items():
         REGISTRY[("completeness_pacs_source", _name.format(b=_band))] = (
             _u, _r.format(b=_band, w=_w, n=200, mmin="-3.5", mmax="5.5", dm="0.25"))
+
+# PACS source photometry (sky.derived.pacs_photometry).
+_PHOTOMETRY_PACS_READINGS = {
+    "NAME": ("source identifier",
+        "The SESNA source identifier of each row, in exactly the order of the region's SESNA source catalogue."),
+    "FNU_{b}_MJY": ("mJy",
+        "Flux of the source in the Herschel PACS {w} micron band, measured at its catalogue position on the map that is deepest there; it can be negative or small when nothing is seen, and is NaN where the band does not cover the source. Where ORIGIN is 2 it is instead an upper bound: the combined flux of the blended group plus five times its uncertainty."),
+    "SIGMA_{b}_MJY": ("mJy, or 0.99 for an upper bound",
+        "Uncertainty of the flux: the scatter of the same measurement at random empty-sky positions in the source's 30-arcsecond cell, enlarged for a source blended with a neighbour. Where ORIGIN is 2 it holds the value 0.99 that the source table uses to mark an upper bound; NaN where the band does not cover the source."),
+    "ORIGIN_{b}": ("origin code",
+        "1 means the source is detected, with a flux at least five times its uncertainty; 90 means the band covers the source but nothing is detected at five times the uncertainty; 2 means the source is blended with a neighbour so closely that the two cannot be separated and the flux is an upper bound for the pair; 91 means the band does not cover the source."),
+    "LOCAL_RMS_{b}_MJY": ("mJy",
+        "Noise of the 30-arcsecond cell containing the source: the scatter of the flux measured at random empty-sky positions in that cell. Five times this value is the faintest flux that would be called a detection there. NaN where the band does not cover the source."),
+    "OBSID_{b}": ("observation identifier(s)",
+        "The Herschel observation identifier(s), comma separated, of the map the flux was measured on; empty where the band does not cover the source."),
+    "N_BLEND_{b}": ("number of SESNA sources",
+        "How many SESNA sources, including this one, were fitted together because they lie within one beam width of a source detected in this band; 1 for a source fitted alone, 0 where the band does not cover the source."),
+    "BLEND_GROUP_{b}": ("row number, or -1",
+        "Sources fitted together share this number, which is the row of the first of them in the catalogue; -1 for a source fitted alone or not covered."),
+    "EXTENDED_{b}": ("true or false",
+        "True for a detected source whose measured width is more than 1.5 times the beam width, a sign that the emission is extended rather than a point source; false otherwise, including for every source that is not detected."),
+}
+for _band, _wave in (("P70", "70"), ("P100", "100")):
+    for _name, (_units, _reading) in _PHOTOMETRY_PACS_READINGS.items():
+        REGISTRY[("photometry_pacs_source", _name.format(b=_band))] = (
+            _units, _reading.format(w=_wave))
+
