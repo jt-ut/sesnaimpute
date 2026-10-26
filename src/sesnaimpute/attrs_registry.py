@@ -3946,12 +3946,16 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "The archive file name of the {w} micron map each cell of CURVE_{b} was measured on."),
     "CELL_SIGMA_{b}_MJY": ("mJy",
         "The one-sigma uncertainty of a {w} micron point-source flux measured in each cell of CURVE_{b}: "
-        "the median, over the 3 x 3 block of cells around it, of 1.4826 times the median absolute value "
-        "of the fluxes measured at each cell's random positions farther than one beam from every bright "
-        "source (their scatter about zero, background offsets included; one cell alone holds only about "
-        "ten independent beams), scaled by "
+        "the median, over the 3 x 3 block of cells around it, of 1.4826 times the median absolute deviation "
+        "about CELL_OFFSET_{b}_MJY of the fluxes measured at each cell's random positions farther than one "
+        "beam from every bright source (one cell alone holds only about ten independent beams), scaled by "
         "one factor per map so that negative excursions on empty sky are no more frequent than for Gaussian "
-        "noise (the map noise has heavier tails than a Gaussian). A source is called detected at 5 times this value."),
+        "noise. A source is called detected at 5 times this value."),
+    "CELL_OFFSET_{b}_MJY": ("mJy",
+        "For each row of CURVE_{b}: the median {w} micron flux measured at the cell's random positions "
+        "farther than one beam from every bright source -- local sky structure the measurement's "
+        "constant background does not remove. It is subtracted from every flux measured in the cell, "
+        "for catalogue sources (the photometry) and for the random positions (the curve) alike."),
     "CELL_GAIN_{b}": ("dimensionless",
         "The median fraction of an injected point source's flux that the measurement returns in each "
         "cell of CURVE_{b} (1 when the fit recovers it fully)."),
@@ -3976,7 +3980,7 @@ _PHOTOMETRY_PACS_READINGS = {
     "NAME": ("source identifier",
         "The SESNA source identifier of each row, in exactly the order of the region's SESNA source catalogue."),
     "FNU_{b}_MJY": ("mJy",
-        "Flux of the source in the Herschel PACS {w} micron band, measured at its catalogue position on the map that is deepest there; it can be negative or small when nothing is seen, and is NaN where the band does not cover the source. Where ORIGIN is 2 it is instead an upper bound: the combined flux of the blended group plus five times its uncertainty."),
+        "Flux of the source in the Herschel PACS {w} micron band, measured at its catalogue position on the map that is deepest there, with the local sky offset of its 30-arcsecond cell (CELL_OFFSET in the completeness product) subtracted; it can be negative or small when nothing is seen, and is NaN where the band does not cover the source. Where ORIGIN is 2 it is instead an upper bound: the combined flux of the blended group plus five times its uncertainty."),
     "SIGMA_{b}_MJY": ("mJy, or 0.99 for an upper bound",
         "Uncertainty of the flux: the scatter of the same measurement at random empty-sky positions in the source's 30-arcsecond cell, enlarged for a source blended with a neighbour. Where ORIGIN is 2 it holds the value 0.99 that the source table uses to mark an upper bound; NaN where the band does not cover the source. For a source fitted together with a neighbour the uncertainty is enlarged by the overlap, but its completeness curve is still its cell's single-source curve, so for such a source the curve somewhat overstates the chance of detection."),
     "ORIGIN_{b}": ("origin code",

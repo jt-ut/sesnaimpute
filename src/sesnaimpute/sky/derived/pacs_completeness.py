@@ -14,13 +14,15 @@ position p is measured as g F + b_p, where g is the fit's gain and b_p its value
 map there (background, confusion and noise together). Per 30-arcsec cell on each map tile, 200
 positions are drawn uniformly (no exclusion of real sources: confusion is part of the completeness),
 each gets one forced fit with the bright neighbours of the tile as nuisance columns, and:
-  cell sigma = the median over the cell's 3 x 3 block of 1.4826 x the median of |b_p| (scatter about
-  zero, since a detection counts from zero) over each cell's clean positions (one cell holds only ~10 independent beams), times one factor per
+  cell offset = the median of b_p over the cell's clean positions: sky structure the fit's constant
+  background does not absorb, subtracted from every flux measured in the cell (sources and positions);
+  cell sigma = the median over the cell's 3 x 3 block of 1.4826 x the median absolute deviation of b_p
+  about each cell's offset (one cell holds only ~10 independent beams), times one factor per
   map tile that matches the negative tail of b_p / sigma over the tile's empty sky to a
   Gaussian's (the noise IS the scatter of the extracted flux on empty sky, not added to the propagated
   pixel noise; the factor corrects the MAD for the noise's heavier-than-Gaussian tails);
-  completeness at flux F = the fraction of positions with g F + b_p >= 5 x cell sigma, i.e. the
-  empirical distribution of (5 sigma - b_p)/g evaluated at every plane of the grid.
+  completeness at flux F = the fraction of positions with g F + b_p - offset >= 5 x cell sigma, i.e.
+  the empirical distribution of (5 sigma + offset - b_p)/g evaluated at every plane of the grid.
 The sigma of a cell is what the photometry stage calls the uncertainty of a source in that cell, so a
 measured source and its completeness curve use one noise.
 
@@ -104,25 +106,29 @@ MIN_CLEAN_POSITIONS = 50
 
 
 def cell_statistics(b, gain, pixel_sigma, valid, clean):
-    """Per cell: n_valid, n_clean, clean sigma, median gain, median propagated pixel sigma. The clean
-    sigma is 1.4826 x the median of |b| over the valid positions farther than one beam from every bright
-    neighbour (so a real source in the cell does not set the noise): the scatter about ZERO, not about
-    the cell's own median, because a detection is counted from zero and each cell's empty-sky fluxes
-    carry a background offset of their own (Musca P70: +-0.5 sigma, 16-84 %), which is part of a
-    source's error."""
+    """Per cell: n_valid, n_clean, clean sigma, median gain, median propagated pixel sigma, offset. Over
+    the valid positions farther than one beam from every bright neighbour (so a real source in the cell
+    sets neither): the offset is the median of b, the sigma 1.4826 x the median absolute deviation about
+    it. The offset is sky structure on the 30-arcsec scale that the fit's constant background does not
+    absorb (planner's split-half test, Musca P70: the two halves' offsets correlate at 0.93 across
+    cells, rms 0.57 sigma), so it is a bias, subtracted from every flux in the cell, not noise."""
     use = valid & clean
     bb = np.where(use, b, np.nan)
     with np.errstate(all="ignore"):
-        sigma = MAD_TO_SIGMA * np.nanmedian(np.abs(bb), axis=1)
+        offset = np.nanmedian(bb, axis=1)
+        sigma = MAD_TO_SIGMA * np.nanmedian(np.abs(bb - offset[:, None]), axis=1)
         g = np.nanmedian(np.where(valid, gain, np.nan), axis=1)
         ps = np.nanmedian(np.where(valid, pixel_sigma, np.nan), axis=1)
-    return valid.sum(axis=1), use.sum(axis=1), sigma, g, ps
+    return valid.sum(axis=1), use.sum(axis=1), sigma, g, ps, offset
 
 
-def thresholds(b, gain, valid, sigma):
-    """(5 sigma - b)/g at every position, NaN where invalid. The curve uses ALL valid positions."""
+def thresholds(b, gain, valid, sigma, offset):
+    """(5 sigma + offset - b)/g at every position, NaN where invalid: a source of that flux there is
+    measured g F + b - offset, the cell's offset subtracted as for a real source. The curve uses ALL
+    valid positions."""
     with np.errstate(all="ignore"):
-        return (pacs_fit.DETECTION_SNR * sigma[:, None] - np.where(valid, b, np.nan)) / np.where(valid, gain, np.nan)
+        return ((pacs_fit.DETECTION_SNR * sigma[:, None] + offset[:, None] - np.where(valid, b, np.nan))
+                / np.where(valid, gain, np.nan))
 
 
 def ring(grid, ids):
@@ -154,23 +160,71 @@ def block_sigma(grid, ids, all_ids, mad_sigma, n_clean):
     return sigma, np.where(good, n_clean[k], 0).sum(axis=1)
 
 
+def cell_offset(grid, ids, all_ids, offset, n_clean):
+    """Offset of each cell of `ids`: its own clean median (the offsets are local: 0.93 split-half
+    correlation), or, with fewer than MIN_CLEAN_POSITIONS clean positions, the median of its 3 x 3
+    block's qualifying cells, else 0."""
+    k = np.searchsorted(all_ids, ids)
+    own = np.where((n_clean[k] >= MIN_CLEAN_POSITIONS) & np.isfinite(offset[k]), offset[k], np.nan)
+    if np.isnan(own).any():
+        cy, cx = np.divmod(np.asarray(ids, np.int64), grid.nx)
+        ny = cy[:, None] + np.repeat([-1, 0, 1], 3)[None, :]
+        nx = cx[:, None] + np.tile([-1, 0, 1], 3)[None, :]
+        inside = (ny >= 0) & (ny < grid.ny) & (nx >= 0) & (nx < grid.nx)
+        nbid = np.where(inside, ny * grid.nx + nx, -1)
+        kk = np.clip(np.searchsorted(all_ids, nbid), 0, all_ids.size - 1)
+        good = inside & (all_ids[kk] == nbid) & (n_clean[kk] >= MIN_CLEAN_POSITIONS) & np.isfinite(offset[kk])
+        with np.errstate(all="ignore"):
+            block = np.nanmedian(np.where(good, offset[kk], np.nan), axis=1)
+        own = np.where(np.isnan(own), np.nan_to_num(block, nan=0.0), own)
+    return own
+
+
 def _tile_tail_factor(piece, config, records):
     """(k, the tile's median block sigma before k) for one map tile, one pieces.run piece per tile
     before the cell blocks. k scales the block-median sigma so that the negative tail of b / sigma
     over the tile's clean empty-sky positions matches a Gaussian's (real sources only ADD flux, so the
     negative side is pure noise): k = -q / 3, q the TAIL_PROBABILITY quantile over the clean positions
-    of TAIL_CELLS evenly spread cells (their 3 x 3 blocks fitted too). Musca: P70 1.07, P100 1.01-1.12."""
-    tile = pacs_fit.cached_tile(config, records[piece])
-    centres = np.unique(np.linspace(0, tile.grid.n_cells - 1, TAIL_CELLS).astype(np.int64))
+    of up to TAIL_CELLS cells spread evenly over the cells this region USES on the tile (those holding a
+    source or an admitted sample point; their 3 x 3 blocks fitted too) -- not over the whole map, whose
+    scan turnarounds and edges outside the survey have heavier tails (Musca P100: 1.37 map-wide against
+    1.13 on the used cells), and only over the used cells wholly on valid data. `piece = (tile index,
+    used cells)`."""
+    t, used = piece
+    tile = pacs_fit.cached_tile(config, records[t])
+    centres = used[np.unique(np.linspace(0, used.size - 1, min(TAIL_CELLS, used.size)).astype(np.int64))]
     all_ids = ring(tile.grid, centres)
     b, gain, ps, valid, clean = cell_fits(tile, all_ids, 0)
-    _, n_clean, mad, _, _ = cell_statistics(b, gain, ps, valid, clean)
+    _, n_clean, mad, _, _, off = cell_statistics(b, gain, ps, valid, clean)
     sigma, _ = block_sigma(tile.grid, centres, all_ids, mad, n_clean)
+    offset = cell_offset(tile.grid, centres, all_ids, off, n_clean)
     c = np.searchsorted(all_ids, centres)
-    good = np.isfinite(sigma) & (sigma > 0)
-    z = (b[c][good] / sigma[good, None])[(valid & clean)[c][good]]
-    return (float(-np.quantile(z, TAIL_PROBABILITY) / 3.0) if z.size else 1.0,
-            float(np.median(sigma[good])) if good.any() else np.nan)
+    # only cells wholly on valid data: partly covered edge cells have far heavier tails (Musca P100
+    # small maps: k 1.6-1.7 on edge cells against 1.1-1.2 inside, where the sources agree)
+    good = np.isfinite(sigma) & (sigma > 0) & (valid[c].sum(axis=1) == N_POS)
+    z = ((b[c][good] - offset[good, None]) / sigma[good, None])[(valid & clean)[c][good]]
+    # the lowest 1 % of z is enough to read the 0.135 % quantile again after pooling small maps
+    return dict(n_used=int(used.size), n=int(z.size), zlow=np.sort(z)[:int(np.ceil(0.01 * z.size))],
+                median=float(np.median(sigma[good])) if good.any() else np.nan)
+
+
+def tail_factors(stats, records):
+    """{tile: (k, median sigma)}. A map with at least TAIL_CELLS used cells gets its own k; a smaller
+    one (Orion A's ~100 small HOPS fields) the k of all maps of the band in the region with the same
+    observing mode and scan speed, pooled -- a few hundred cells cannot pin a 0.135 % quantile."""
+    def k_of(group):
+        n = sum(stats[t]["n"] for t in group)
+        z = np.sort(np.concatenate([stats[t]["zlow"] for t in group]))
+        r = int(TAIL_PROBABILITY * n)
+        return float(-z[min(r, z.size - 1)] / 3.0) if z.size else 1.0
+    out = {}
+    for t, st in stats.items():
+        if st["n_used"] >= TAIL_CELLS:
+            out[t] = (k_of([t]), st["median"])
+        else:
+            kind = (records[t].mode, records[t].scan_speed)
+            out[t] = (k_of([u for u in stats if (records[u].mode, records[u].scan_speed) == kind]), st["median"])
+    return out
 
 
 def curve_counts(threshold, flux_grid):
@@ -193,8 +247,9 @@ def _piece(piece, config, records, flux_grid, tails):
     tile = pacs_fit.cached_tile(config, record)
     all_ids = ring(tile.grid, ids)
     b, gain, ps, valid, clean = cell_fits(tile, all_ids, tile_index + 1)
-    n_valid, n_clean, mad, g, pps = cell_statistics(b, gain, ps, valid, clean)
+    n_valid, n_clean, mad, g, pps, off = cell_statistics(b, gain, ps, valid, clean)
     sigma, n_sigma = block_sigma(tile.grid, ids, all_ids, mad, n_clean)
+    offset = cell_offset(tile.grid, ids, all_ids, off, n_clean)
     tail, tile_median = tails[tile_index]
     # a block with no clean cell (wholly within a beam of bright sources) takes the tile's median noise;
     # N_SIGMA_POS 0 marks it
@@ -202,11 +257,11 @@ def _piece(piece, config, records, flux_grid, tails):
     k = np.searchsorted(all_ids, ids)
     b, gain, valid, n_valid, g, pps = b[k], gain[k], valid[k], n_valid[k], g[k], pps[k]
     covered = (n_valid >= MIN_VALID_POSITIONS) & np.isfinite(sigma) & (sigma > 0) & np.isfinite(g)
-    curve = encode_curves(curve_counts(thresholds(b, gain, valid, sigma), flux_grid), n_valid)
+    curve = encode_curves(curve_counts(thresholds(b, gain, valid, sigma, offset), flux_grid), n_valid)
     ra, dec = tile.grid.centres_icrs(ids)
     return dict(tile=tile_index, ids=ids, covered=covered, n_valid=n_valid.astype(np.int16),
                 n_sigma=np.minimum(n_sigma, np.iinfo(np.int16).max).astype(np.int16), tail=tail,
-                sigma=sigma, gain=g, pixel_sigma=pps, curve=curve, ra=ra, dec=dec)
+                sigma=sigma, offset=offset, gain=g, pixel_sigma=pps, curve=curve, ra=ra, dec=dec)
 
 
 # ----------------------------------------------------------------------------
@@ -239,9 +294,10 @@ def _band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage
             pieces.append((t, cells[block == blk]))
     if not pieces:
         return None
+    used = [(t, geometry[t][2]) for t in sorted({t for t, _ in pieces})]
     tails = pieces_module.run(functools.partial(_tile_tail_factor, config=config, records=records),
-                              sorted({t for t, _ in pieces}), n_jobs, stage=stage, unit="tiles")
-    tails = dict(zip(sorted({t for t, _ in pieces}), tails))
+                              used, n_jobs, stage=stage, unit="tiles")
+    tails = tail_factors(dict(zip([t for t, _ in used], tails)), records)
     fn = functools.partial(_piece, config=config, records=records, flux_grid=flux_grid, tails=tails)
     results = pieces_module.run(fn, pieces, n_jobs, stage=stage, unit="cell blocks")
     # per tile arrays over its candidate cells
@@ -252,7 +308,7 @@ def _band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage
         # sorted order of `cells`, which the searchsorted lookups below rely on
         order = np.argsort(np.concatenate([r["ids"] for r in mine])) if mine else None
         out = {k: (np.concatenate([r[k] for r in mine])[order] if mine else None) for k in
-               ("covered", "n_valid", "n_sigma", "sigma", "gain", "pixel_sigma", "curve", "ra", "dec")}
+               ("covered", "n_valid", "n_sigma", "sigma", "offset", "gain", "pixel_sigma", "curve", "ra", "dec")}
         tile_data.append(out)
         if mine:
             print("  %s: noise tail factor %.3f" % (records[t].map_id, mine[0]["tail"]), flush=True)
@@ -294,7 +350,7 @@ def _band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage
     cell_of_row = keys & ((1 << 40) - 1)
     curve = np.zeros((n_row, n_plane), np.uint16)
     cols = {k: np.zeros(n_row, dt) for k, dt in (("n_valid", np.int16), ("n_sigma", np.int16), ("sigma", np.float32),
-                                                  ("gain", np.float32), ("pixel_sigma", np.float32),
+                                                  ("offset", np.float32), ("gain", np.float32), ("pixel_sigma", np.float32),
                                                   ("ra", np.float64), ("dec", np.float64))}
     for t, (_s, _p, cells) in enumerate(geometry):
         r = np.flatnonzero(tile_of_row == t)
@@ -318,7 +374,7 @@ def _band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage
     map_id = np.array([records[t].map_id for t in tile_of_row], dtype="S96")
     return dict(curve=curve, source_row=src_row.astype(np.int32), pixel_curve=pixel_curve,
                 covered_frac=covered_frac, envelope=envelope, n_pos=cols["n_valid"], n_sigma=cols["n_sigma"],
-                cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=cols["sigma"],
+                cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=cols["sigma"], cell_offset=cols["offset"],
                 cell_gain=cols["gain"], cell_pixel_sigma=cols["pixel_sigma"],
                 cell_obsid=obsid, cell_map=map_id, n_candidate=sum(g[2].size for g in geometry))
 
@@ -328,7 +384,7 @@ def _empty_band(n_src, n_adm, n_plane):
                 pixel_curve=np.zeros((n_adm, n_plane), np.float32),
                 covered_frac=np.zeros(n_adm, np.float32), envelope=np.zeros(n_plane, np.uint16),
                 n_pos=np.zeros(0, np.int16), n_sigma=np.zeros(0, np.int16), cell_ra=np.zeros(0), cell_dec=np.zeros(0),
-                cell_sigma=np.zeros(0, np.float32), cell_gain=np.zeros(0, np.float32),
+                cell_sigma=np.zeros(0, np.float32), cell_offset=np.zeros(0, np.float32), cell_gain=np.zeros(0, np.float32),
                 cell_pixel_sigma=np.zeros(0, np.float32), cell_obsid=np.zeros(0, "S64"),
                 cell_map=np.zeros(0, "S96"), n_candidate=0)
 
@@ -361,6 +417,7 @@ def write_product(path, region, admitted, mag, bands):
             w("CELL_OBSID_" + b, d["cell_obsid"])
             w("CELL_MAP_" + b, d["cell_map"])
             w("CELL_SIGMA_%s_MJY" % b, d["cell_sigma"])
+            w("CELL_OFFSET_%s_MJY" % b, d["cell_offset"])
             w("CELL_GAIN_" + b, d["cell_gain"])
         w = lambda name, data: build_module.write_dataset(f, name, data, *REGISTRY[(stem, name)])
         w("SOURCE_ROW", np.stack([bands[b]["source_row"] for b in BANDS], axis=1).astype(np.int32))
