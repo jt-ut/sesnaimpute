@@ -333,11 +333,9 @@ def fetch_hsa(config, item):
     os.remove(tar_path)
 
 
-def build(config, regions=None, fetch_maps=True):
+def build(config, regions=None):
     """See the module docstring. `regions` is a list of names (default: all
-    in `regions.REGIONS`). `fetch_maps=False` queries, plans, prints the
-    projection and writes the index from what is on disk, fetching no map.
-    Returns one summary dict per region."""
+    in `regions.REGIONS`). Returns one summary dict per region."""
     names = [r.name for r in regions_module.REGIONS] if regions is None else (
         [regions] if isinstance(regions, str) else [getattr(r, "name", r) for r in regions])
     root = index_module.maps_root(config)
@@ -363,7 +361,7 @@ def build(config, regions=None, fetch_maps=True):
                   f"{summary['gb_p100']:.2f} GB at 100 um, {todo / 1e9:.2f} GB still to fetch", flush=True)
             if todo > MAX_REGION_BYTES:
                 print(f"{region}: STOP, projection above {MAX_REGION_BYTES / 1e9:.0f} GB; nothing fetched")
-            elif fetch_maps:
+            else:
                 for p in plan:
                     if p["source"] == "IRSA":
                         stream_to(p["url"], f"{root}/{p['relpath']}", p["bytes"])

@@ -48,13 +48,9 @@ from scipy.spatial import cKDTree
 from scipy.special import erfc  # import before healpy for native-library initialisation order
 import healpy as hp
 
-# TEMPORARY (unit DOWNLOAD and unit PSF have not landed): the old package supplies
-# the map record, the index reader and the PSF. Replace these two lines by
-#   from sesnaimpute.sky.download.herschel_pacs.index import MapRecord, read_index, maps_root
-#   from sesnaimpute.sky.derived.pacs_psf import (CachedPairedPSF, published_components_for_map,
-#                                                 beam_fwhm_arcsec)
-from sesnaimpute.farIRcomp.maps import MapRecord, read_index  # noqa: F401
-from sesnaimpute.farIRcomp.psf import CachedPairedPSF, published_components_for_map
+from sesnaimpute.sky.derived.pacs_psf import (CachedPairedPSF, beam_fwhm_arcsec,
+                                              published_components_for_map)
+from sesnaimpute.sky.download.herschel_pacs.index import MapRecord, maps_root, read_index  # noqa: F401
 
 #: detection threshold in sigma (owner 2026-10-24); defines recovery in the completeness
 DETECTION_SNR = 5.0
@@ -88,20 +84,6 @@ PSF_SUBPIXEL_STEPS = 8
 PSF_SPATIAL_NODES = 3
 #: a fit is trusted only if this fraction of the target beam lies on valid pixels
 MIN_BEAM_FRACTION = 0.9
-#: beam FWHM, arcsec, used only until unit PSF's `beam_fwhm_arcsec` lands:
-#: PICC-ME-TN-033 v2.2 Table 5 widest P70 parallel-60 scan major axis; P100 by ratio of wavelengths
-_FALLBACK_BEAM = {"P70": 12.74, "P100": 12.74 * 100.0 / 70.0}
-
-
-def beam_fwhm_arcsec(record):
-    """Beam FWHM of a map's band and mode, arcsec (unit PSF's function once it lands)."""
-    return _FALLBACK_BEAM[record.band]
-
-
-def maps_root(config):
-    """Directory of the downloaded PACS maps: config [inputs] herschel_pacs_maps, no fallback."""
-    return Path(config.inputs["herschel_pacs_maps"])
-
 
 # ----------------------------------------------------------------------------
 # results
@@ -443,7 +425,7 @@ class OpenMap:
 def open_map(config, record):
     """Open a map read-only and memory-mapped; the three layers are borrowed views valid
     only inside the context."""
-    path = maps_root(config) / record.path
+    path = Path(maps_root(config)) / record.path
     if path.suffix.lower() in (".gz", ".zip"):
         raise ValueError("compressed maps must be unpacked before memory-mapped access")
     with fits.open(path, mode="readonly", memmap=True) as hdus:
