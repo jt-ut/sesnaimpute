@@ -3933,9 +3933,10 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "For each row of CURVE_{b}, the number of random positions in the cell that lay on valid data "
         "and entered its curve and noise (at most {n})."),
     "N_SIGMA_POS_{b}": ("positions",
-        "For each row of CURVE_{b}, how many of the cell's random positions set its noise: those on "
-        "valid data farther than one beam from every bright source of the map. Under 50 means the noise "
-        "is borrowed from the neighbouring cells."),
+        "For each row of CURVE_{b}, how many random positions set its noise: the positions on valid data "
+        "farther than one beam from every bright source, summed over the cells of the 3 x 3 block of "
+        "cells around it whose noise entered the median. 0 means no cell of the block was clean and "
+        "the map's median noise was used."),
     "CELL_RA_{b}": ("deg ICRS", "Right ascension of the centre of each cell of CURVE_{b}, in the same row order."),
     "CELL_DEC_{b}": ("deg ICRS", "Declination of the centre of each cell of CURVE_{b}, in the same row order."),
     "CELL_OBSID_{b}": ("observation identifier(s)",
@@ -3945,8 +3946,10 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "The archive file name of the {w} micron map each cell of CURVE_{b} was measured on."),
     "CELL_SIGMA_{b}_MJY": ("mJy",
         "The one-sigma uncertainty of a {w} micron point-source flux measured in each cell of CURVE_{b}: "
-        "1.4826 times the median absolute deviation of the fluxes measured at the random positions of "
-        "the cell that lie farther than one beam from every bright source (N_SIGMA_POS_{b} of them), scaled by "
+        "the median, over the 3 x 3 block of cells around it, of 1.4826 times the median absolute value "
+        "of the fluxes measured at each cell's random positions farther than one beam from every bright "
+        "source (their scatter about zero, background offsets included; one cell alone holds only about "
+        "ten independent beams), scaled by "
         "one factor per map so that negative excursions on empty sky are no more frequent than for Gaussian "
         "noise (the map noise has heavier tails than a Gaussian). A source is called detected at 5 times this value."),
     "CELL_GAIN_{b}": ("dimensionless",
@@ -3955,7 +3958,9 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
     "SOURCE_ROW": ("row index into CURVE_<band>",
         "For each curated source, in the order of the region's source table, and the bands P70 then P100: "
         "the row of CURVE_P70 / CURVE_P100 for the cell the source falls in on the deepest map covering "
-        "it; -1 where no map covers the source in that band."),
+        "it; -1 where no map covers the source in that band. A source near a map edge can have a row "
+        "here yet be marked not covered (ORIGIN 91) in the photometry, because its own measurement needs "
+        "most of its beam on valid data; the photometry's ORIGIN decides."),
     "HPX_PIX_512": ("nested HEALPix pixel, nside 512",
         "The region's admitted sky pixels (Galactic frame, nested ordering), copied from the SESNA "
         "completeness product in the same order; PIXEL_CURVE_<band> and PIXEL_COVERED_FRAC_<band> have "
@@ -3973,7 +3978,7 @@ _PHOTOMETRY_PACS_READINGS = {
     "FNU_{b}_MJY": ("mJy",
         "Flux of the source in the Herschel PACS {w} micron band, measured at its catalogue position on the map that is deepest there; it can be negative or small when nothing is seen, and is NaN where the band does not cover the source. Where ORIGIN is 2 it is instead an upper bound: the combined flux of the blended group plus five times its uncertainty."),
     "SIGMA_{b}_MJY": ("mJy, or 0.99 for an upper bound",
-        "Uncertainty of the flux: the scatter of the same measurement at random empty-sky positions in the source's 30-arcsecond cell, enlarged for a source blended with a neighbour. Where ORIGIN is 2 it holds the value 0.99 that the source table uses to mark an upper bound; NaN where the band does not cover the source."),
+        "Uncertainty of the flux: the scatter of the same measurement at random empty-sky positions in the source's 30-arcsecond cell, enlarged for a source blended with a neighbour. Where ORIGIN is 2 it holds the value 0.99 that the source table uses to mark an upper bound; NaN where the band does not cover the source. For a source fitted together with a neighbour the uncertainty is enlarged by the overlap, but its completeness curve is still its cell's single-source curve, so for such a source the curve somewhat overstates the chance of detection."),
     "ORIGIN_{b}": ("origin code",
         "1 means the source is detected, with a flux at least five times its uncertainty; 90 means the band covers the source but nothing is detected at five times the uncertainty; 2 means the source is blended with a neighbour so closely that the two cannot be separated and the flux is an upper bound for the pair; 91 means the band does not cover the source."),
     "LOCAL_RMS_{b}_MJY": ("mJy",
