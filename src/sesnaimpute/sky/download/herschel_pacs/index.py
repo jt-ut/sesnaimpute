@@ -148,8 +148,8 @@ def inspect_map(path, root, source=""):
         eh, kind = None, "unknown"
         if "stdev" in names:
             eh = names["stdev"]
-            if str(hdus[eh].header.get("META_1", "")).strip().lower() == STDEV_DOC:
-                kind = "standard_deviation_of_mean"
+            # Level 3 files name the layer stDev without its META_1 description
+            kind = "standard_deviation_of_mean"
         elif "error" in names:
             eh = names["error"]
         if eh is None:
@@ -199,13 +199,15 @@ def inspect_map(path, root, source=""):
 
 
 def map_rank(rec):
-    """Preference among maps of one observation (spec 11.2): 0 JScanam L2.5,
-    1 Unimap L2.5, 2 everything else (the L2 / L3 photProject maps)."""
-    if rec.level == "L25" and rec.mapper.lower().startswith("jscanam"):
-        return 0
-    if rec.level == "L25" and rec.mapper.lower().startswith("unimap"):
-        return 1
-    return 2
+    """Preference among maps of one observation (spec 11.2): 0 JScanam Level 3 (the stack of several
+    observations: at least as deep everywhere, deeper where they overlap), 1 JScanam L2.5, 2 Unimap,
+    3 everything else (the L2 photProject maps)."""
+    m = rec.mapper.lower()
+    if m.startswith("jscanam"):
+        return 0 if rec.level == "L30" else 1 if rec.level == "L25" else 3
+    if m.startswith("unimap"):
+        return 2
+    return 3
 
 
 def choose(obs_ids, candidates):

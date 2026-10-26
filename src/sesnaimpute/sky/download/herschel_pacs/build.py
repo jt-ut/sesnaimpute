@@ -26,6 +26,7 @@ request) are cached beside the maps, and nothing cached is asked for again.
 Maps land at `<herschel_pacs_maps>/<obsid>/<level>/<product>/<file>`.
 """
 
+import glob
 import os
 import re
 import shutil
@@ -240,7 +241,12 @@ def map_header(config, entry):
 
 
 def _rank(entry):
-    return 0 if entry["level"] == "L25" and entry["mapper"].startswith("HPPJS") else 2
+    """Preference among the maps holding an observation: a JScanam Level 3 stack (the same
+    observations combined, so at least as deep everywhere and deeper where they overlap), then the
+    JScanam Level 2.5 scan pair, then anything else."""
+    if entry["mapper"].startswith("HPPJS"):
+        return 0 if entry["level"] == "L30" else 1 if entry["level"] == "L25" else 2
+    return 2
 
 
 # ----- planning a region ---------------------------------------------------
@@ -282,7 +288,7 @@ def plan_region(config, region, obs):
         est = int(1.1 * BYTES_PER_PIXEL * area / PIXEL_ARCSEC[o["mode"]] ** 2)
         level = HSA_LEVEL.get(o["state"], "LEVEL2")
         hsa[f"HSA:{oid}"] = dict(obsid=oid, level=level, est=est, band="P70" if oid in p70 else "P100?")
-        cands.append((f"HSA:{oid}", 1 if level == "LEVEL2_5" else 2, (oid,)))
+        cands.append((f"HSA:{oid}", {"LEVEL3": 0, "LEVEL2_5": 1}.get(level, 2), (oid,)))
     chosen, unserved = index_module.choose(set(by_id), cands)
     plan = []
     for key in chosen:
@@ -330,7 +336,17 @@ def fetch_hsa(config, item):
                 with gzip.open(dest, "rb") as src, open(dest[:-3] + ".part", "wb") as out:
                     shutil.copyfileobj(src, out, 1 << 22)
                 os.replace(dest[:-3] + ".part", dest[:-3])
+                os.remove(dest)                    # the compressed copy this call just wrote
     os.remove(tar_path)
+    # keep one product: JScanam over Unimap over photProject (spec 11.2); the others are files this
+    # call just fetched
+    level_dir = f"{root}/{oid}/{LEVEL_DIR[{'LEVEL2': 'L20', 'LEVEL2_5': 'L25', 'LEVEL3': 'L30'}[item['level']]]}"
+    present = [p for p in ("HPPJSMAPB", "HPPUNIMAPB", "HPPPMAPB") if glob.glob(f"{level_dir}/{p}/*.fits")]
+    for p in present[1:]:
+        shutil.rmtree(f"{level_dir}/{p}")
+    # the observations the kept map contains (a Level 3 stack holds many): they need no fetch of their own
+    kept = glob.glob(f"{level_dir}/{present[0]}/*.fits") if present else []
+    return set(index_module.inspect_map(kept[0], root).obsids) if kept else {oid}
 
 
 def build(config, regions=None):
@@ -341,6 +357,8 @@ def build(config, regions=None):
     root = index_module.maps_root(config)
     os.makedirs(root, exist_ok=True)
     summaries = []
+    # observations already inside a map on disk need no HSA fetch of their own
+    served = {o for r in index_module.disk_maps(config) for o in r.obsids}
     with progress_module.Stage("sky.download.herschel_pacs") as st:
         for i, region in enumerate(names):
             query_region(config, region)
@@ -365,8 +383,10 @@ def build(config, regions=None):
                 for p in plan:
                     if p["source"] == "IRSA":
                         stream_to(p["url"], f"{root}/{p['relpath']}", p["bytes"])
-                    elif not _hsa_on_disk(root, p):
-                        fetch_hsa(config, p)
+                    elif p["obsids"][0] not in served and not _hsa_on_disk(root, p):
+                        # one HSA Level 3 tar per observation can hold the same combined map
+                        # (Orion A: one stack, nine times); fetch it once
+                        served |= fetch_hsa(config, p)
             records = index_module.region_index_records(config, region)
             path = index_module.write_index(config, region, records)
             summary["n_indexed"] = len(records)
