@@ -4000,3 +4000,68 @@ for _band in ("P70", "P100"):
                              ("geometry_pacs_region", _PACS_GEOMETRY_READINGS)):
         for _name, _rd in _readings.items():
             REGISTRY[(_stem, _name.format(b=_band))] = _rd
+
+
+# sky.derived.pacs_completeness -- completeness_pacs_source (2026-10-26 repair): the PACS 70 and 100
+# micron completeness in the layout of completeness_sesna_source, plus per-cell columns. This block
+# replaces the completeness entries of the _PACS_* blocks above for the same keys.
+_PACS_COMPLETENESS_CELLS_READINGS = {
+    "CURVE_{b}": ("completeness fraction x600, uint16",
+        "One row per 30-arcsec cell of a Herschel PACS {w} micron map that is the deepest map at some "
+        "source or sky pixel of this region: the probability that a point source of the flux in "
+        "MAG_GRID_{b} placed anywhere in the cell is detected at 5 sigma or better, stored as the "
+        "probability times 600. Measured by forced fits at {n} random positions per cell on the real map, "
+        "so real background structure and neighbouring sources are included; sources fainter than the "
+        "last plane are treated as undetected. Rows are ordered by map and then cell."),
+    "MAG_GRID_{b}": ("mag relative to 1 Jy",
+        "The magnitudes CURVE_{b} and PIXEL_CURVE_{b} are tabulated at: m = -2.5 log10(flux / 1 Jy), "
+        "{mmin} to {mmax} in steps of {dm}, bright to faint (the same grid for every region). The "
+        "zero point is 1 Jy, stored on CURVE_{b} as ZERO_POINT_JY."),
+    "PIXEL_CURVE_{b}": ("dimensionless (completeness fraction, 0..1)",
+        "For each admitted nside-512 pixel of HPX_PIX_512, the {w} micron completeness curve at the "
+        "magnitudes of MAG_GRID_{b}, averaged over the pixel's area that a PACS map covers (256 sample "
+        "points per pixel, each taking its cell's curve); all zero where PIXEL_COVERED_FRAC_{b} is 0."),
+    "PIXEL_COVERED_FRAC_{b}": ("dimensionless (area fraction, 0..1)",
+        "For each admitted nside-512 pixel of HPX_PIX_512, the fraction of its area that falls on valid "
+        "{w} micron data (256 sample points per pixel); 0 where no map covers it."),
+    "ENVELOPE_{b}": ("completeness fraction x600, uint16",
+        "At each magnitude of MAG_GRID_{b}, the largest value of CURVE_{b} over all rows: the deepest "
+        "{w} micron completeness anywhere in this region, stored as the probability times 600; all zero "
+        "where the region has no {w} micron coverage."),
+    "COMPLETED_FROM_{b}": ("mag",
+        "All NaN: every {w} micron curve is measured over its whole range; nothing is extrapolated. Kept "
+        "so the layout matches completeness_sesna_source."),
+    "N_POS_{b}": ("positions",
+        "For each row of CURVE_{b}, the number of random positions in the cell that lay on valid data "
+        "and entered its curve and noise (at most {n})."),
+    "N_SIGMA_POS_{b}": ("positions",
+        "For each row of CURVE_{b}, how many of the cell's random positions set its noise: those on "
+        "valid data farther than one beam from every bright source of the map. Under 50 means the noise "
+        "is borrowed from the neighbouring cells."),
+    "CELL_RA_{b}": ("deg ICRS", "Right ascension of the centre of each cell of CURVE_{b}, in the same row order."),
+    "CELL_DEC_{b}": ("deg ICRS", "Declination of the centre of each cell of CURVE_{b}, in the same row order."),
+    "CELL_OBSID_{b}": ("observation identifier(s)",
+        "The Herschel observation identifier(s), comma separated, of the map each cell of CURVE_{b} was "
+        "measured on."),
+    "CELL_MAP_{b}": ("map identifier",
+        "The archive file name of the {w} micron map each cell of CURVE_{b} was measured on."),
+    "CELL_SIGMA_{b}_MJY": ("mJy",
+        "The one-sigma uncertainty of a {w} micron point-source flux measured in each cell of CURVE_{b}: "
+        "1.4826 times the median absolute deviation of the fluxes measured at the random positions of "
+        "the cell that lie farther than one beam from every bright source (N_SIGMA_POS_{b} of them). A source is called detected at 5 times this value."),
+    "CELL_GAIN_{b}": ("dimensionless",
+        "The median fraction of an injected point source's flux that the measurement returns in each "
+        "cell of CURVE_{b} (1 when the fit recovers it fully)."),
+    "SOURCE_ROW": ("row index into CURVE_<band>",
+        "For each curated source, in the order of the region's source table, and the bands P70 then P100: "
+        "the row of CURVE_P70 / CURVE_P100 for the cell the source falls in on the deepest map covering "
+        "it; -1 where no map covers the source in that band."),
+    "HPX_PIX_512": ("nested HEALPix pixel, nside 512",
+        "The region's admitted sky pixels (Galactic frame, nested ordering), copied from the SESNA "
+        "completeness product in the same order; PIXEL_CURVE_<band> and PIXEL_COVERED_FRAC_<band> have "
+        "one row per entry."),
+}
+for _band, _w in (("P70", "70"), ("P100", "100")):
+    for _name, (_u, _r) in _PACS_COMPLETENESS_CELLS_READINGS.items():
+        REGISTRY[("completeness_pacs_source", _name.format(b=_band))] = (
+            _u, _r.format(b=_band, w=_w, n=200, mmin="-3.5", mmax="5.5", dm="0.25"))
