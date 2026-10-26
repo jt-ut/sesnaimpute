@@ -62,7 +62,9 @@ MODE_DIR = {1: "PacsPhoto", 31: "PacsParallel"}
 LEVEL_DIR = {"L20": "level2", "L25": "level2_5", "L30": "level3"}
 HSA_LEVEL = {"LEVEL2_5_PROCESSED": "LEVEL2_5", "LEVEL3_PROCESSED": "LEVEL3",
              "LEVEL2_PROCESSED": "LEVEL2"}
-BLUE_PRODUCT = re.compile(r"(HPPJSMAPB|HPPUNIMAPB|HPPPMAPB).*\.fits(\.gz)?$")
+# the blue camera's maps: suffix B, except that the archive names the 100 um ("green") Level 3 stack G
+# (HPPJSMAPG); red-camera products end in R and are never taken
+BLUE_PRODUCT = re.compile(r"(HPPJSMAP[BG]|HPPUNIMAP[BG]|HPPPMAP[BG]).*\.fits(\.gz)?$")
 _LISTING_ROW = re.compile(
     r'href="((\d{4})([pm])(\d{4})_(\d+)_(Pacs\w+?)_L(\d\d)_(HPP\w+?)B_SPG[\d.]+\.fits)">'
     r"[^<]*</a>\s+\S+\s+\S+\s+([\d.]+)([KMG]?)")
@@ -341,7 +343,8 @@ def fetch_hsa(config, item):
     # keep one product: JScanam over Unimap over photProject (spec 11.2); the others are files this
     # call just fetched
     level_dir = f"{root}/{oid}/{LEVEL_DIR[{'LEVEL2': 'L20', 'LEVEL2_5': 'L25', 'LEVEL3': 'L30'}[item['level']]]}"
-    present = [p for p in ("HPPJSMAPB", "HPPUNIMAPB", "HPPPMAPB") if glob.glob(f"{level_dir}/{p}/*.fits")]
+    present = [p for p in ("HPPJSMAPB", "HPPJSMAPG", "HPPUNIMAPB", "HPPUNIMAPG", "HPPPMAPB", "HPPPMAPG")
+               if glob.glob(f"{level_dir}/{p}/*.fits")]
     for p in present[1:]:
         shutil.rmtree(f"{level_dir}/{p}")
     # the observations the kept map contains (a Level 3 stack holds many): they need no fetch of their own
