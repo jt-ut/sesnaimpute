@@ -3946,7 +3946,9 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
     "CELL_SIGMA_{b}_MJY": ("mJy",
         "The one-sigma uncertainty of a {w} micron point-source flux measured in each cell of CURVE_{b}: "
         "1.4826 times the median absolute deviation of the fluxes measured at the random positions of "
-        "the cell that lie farther than one beam from every bright source (N_SIGMA_POS_{b} of them). A source is called detected at 5 times this value."),
+        "the cell that lie farther than one beam from every bright source (N_SIGMA_POS_{b} of them), scaled by "
+        "one factor per map so that negative excursions on empty sky are no more frequent than for Gaussian "
+        "noise (the map noise has heavier tails than a Gaussian). A source is called detected at 5 times this value."),
     "CELL_GAIN_{b}": ("dimensionless",
         "The median fraction of an injected point source's flux that the measurement returns in each "
         "cell of CURVE_{b} (1 when the fit recovers it fully)."),

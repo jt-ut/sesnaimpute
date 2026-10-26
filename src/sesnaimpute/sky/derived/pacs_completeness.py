@@ -14,8 +14,10 @@ position p is measured as g F + b_p, where g is the fit's gain and b_p its value
 map there (background, confusion and noise together). Per 30-arcsec cell on each map tile, 200
 positions are drawn uniformly (no exclusion of real sources: confusion is part of the completeness),
 each gets one forced fit with the bright neighbours of the tile as nuisance columns, and:
-  cell sigma = 1.4826 x the median absolute deviation of b_p over the cell's positions
-  (the noise IS the scatter of the extracted flux on empty sky, not added to the propagated pixel noise);
+  cell sigma = 1.4826 x the median absolute deviation of b_p over the cell's clean positions, times one
+  factor per map tile that matches the negative tail of b_p / sigma over the tile's empty sky to a
+  Gaussian's (the noise IS the scatter of the extracted flux on empty sky, not added to the propagated
+  pixel noise; the factor corrects the MAD for the noise's heavier-than-Gaussian tails);
   completeness at flux F = the fraction of positions with g F + b_p >= 5 x cell sigma, i.e. the
   empirical distribution of (5 sigma - b_p)/g evaluated at every plane of the grid.
 The sigma of a cell is what the photometry stage calls the uncertainty of a source in that cell, so a
@@ -66,6 +68,11 @@ MAG_STEP = 0.25
 #: cells per piece (a piece is one tile's block of cells: 250 x 200 fits, about 1 s)
 CELLS_PER_PIECE = 250
 MAD_TO_SIGMA = 1.4826
+#: the noise's tail correction is measured on this many evenly spread cells of each tile
+TAIL_CELLS = 2000
+#: one-sided Gaussian probability beyond 3 sigma: the negative tail of b / sigma over a tile's clean
+#: positions is matched to it (real sources only ADD flux, so the negative side is pure noise)
+TAIL_PROBABILITY = 0.00135
 
 
 def canonical_grid():
@@ -115,6 +122,24 @@ def thresholds(b, gain, valid, sigma):
 
 
 _TILE_SIGMA = {}
+_TILE_TAIL = {}
+
+
+def _tile_tail_factor(tile, record):
+    """One factor per map tile scaling the median-based cell sigma to the noise's real tails: PACS
+    empty-sky fluxes are heavier-tailed than a Gaussian, so 5 x the MAD-based sigma is crossed far more
+    often than a 5-sigma Gaussian event (Musca P70: 9 sources at <= -5 sigma against 21 at >= +5).
+    k = -q / 3 with q the TAIL_PROBABILITY quantile of b / sigma over the clean positions of TAIL_CELLS
+    evenly spread cells (deterministic, so every worker gets the same k). Measured on Musca P70: 1.18."""
+    key = record.path
+    if key not in _TILE_TAIL:
+        ids = np.unique(np.linspace(0, tile.grid.n_cells - 1, TAIL_CELLS).astype(np.int64))
+        b, gain, ps, valid, clean = cell_fits(tile, ids, 0)
+        _, n_clean, sigma, _, _ = cell_statistics(b, gain, ps, valid, clean)
+        good = (n_clean >= MIN_CLEAN_POSITIONS) & np.isfinite(sigma) & (sigma > 0)
+        z = (b[good] / sigma[good, None])[(valid & clean)[good]]
+        _TILE_TAIL[key] = float(-np.quantile(z, TAIL_PROBABILITY) / 3.0) if z.size else 1.0
+    return _TILE_TAIL[key]
 
 
 def _tile_median_sigma(tile, record):
@@ -165,11 +190,13 @@ def _piece(piece, config, records, flux_grid):
     fallback = (n_clean < MIN_CLEAN_POSITIONS) | ~np.isfinite(sigma) | (sigma <= 0)
     if fallback.any():
         sigma[fallback] = _fallback_sigma(tile, record, ids[fallback])
+    tail = _tile_tail_factor(tile, record)
+    sigma = sigma * tail
     covered = (n_valid >= MIN_VALID_POSITIONS) & np.isfinite(sigma) & (sigma > 0) & np.isfinite(g)
     curve = encode_curves(curve_counts(thresholds(b, gain, valid, sigma), flux_grid), n_valid)
     ra, dec = tile.grid.centres_icrs(ids)
     return dict(tile=tile_index, ids=ids, covered=covered, n_valid=n_valid.astype(np.int16),
-                n_sigma=n_clean.astype(np.int16), fallback=fallback,
+                n_sigma=n_clean.astype(np.int16), fallback=fallback, tail=tail,
                 sigma=sigma, gain=g, pixel_sigma=ps, curve=curve, ra=ra, dec=dec)
 
 
@@ -210,6 +237,8 @@ def _band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage
         out = {k: (np.concatenate([r[k] for r in mine]) if mine else None) for k in
                ("covered", "n_valid", "n_sigma", "fallback", "sigma", "gain", "pixel_sigma", "curve", "ra", "dec")}
         tile_data.append(out)
+        if mine:
+            print("  %s: noise tail factor %.3f" % (records[t].map_id, mine[0]["tail"]), flush=True)
     # deepest map at every source and every sample point
     sel_src_t = np.full(n_src, -1, np.int32)
     sel_src_r = np.full(n_src, np.inf)
