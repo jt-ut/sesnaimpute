@@ -4000,3 +4000,31 @@ for _band in ("P70", "P100"):
                              ("geometry_pacs_region", _PACS_GEOMETRY_READINGS)):
         for _name, _rd in _readings.items():
             REGISTRY[(_stem, _name.format(b=_band))] = _rd
+
+# PACS source photometry (sky.derived.pacs_photometry). These entries replace the
+# earlier photometry_pacs_source readings above, which belong to the retired package.
+_PHOTOMETRY_PACS_READINGS = {
+    "NAME": ("source identifier",
+        "The SESNA source identifier of each row, in exactly the order of the region's SESNA source catalogue."),
+    "FNU_{b}_MJY": ("mJy",
+        "Flux of the source in the Herschel PACS {w} micron band, measured at its catalogue position on the map that is deepest there; it can be negative or small when nothing is seen, and is NaN where the band does not cover the source. Where ORIGIN is 2 it is instead an upper bound: the combined flux of the blended group plus five times its uncertainty."),
+    "SIGMA_{b}_MJY": ("mJy, or 0.99 for an upper bound",
+        "Uncertainty of the flux: the scatter of the same measurement at random empty-sky positions in the source's 30-arcsecond cell, enlarged for a source blended with a neighbour. Where ORIGIN is 2 it holds the value 0.99 that the source table uses to mark an upper bound; NaN where the band does not cover the source."),
+    "ORIGIN_{b}": ("origin code",
+        "1 means the source is detected, with a flux at least five times its uncertainty; 90 means the band covers the source but nothing is detected at five times the uncertainty; 2 means the source is blended with a neighbour so closely that the two cannot be separated and the flux is an upper bound for the pair; 91 means the band does not cover the source."),
+    "LOCAL_RMS_{b}_MJY": ("mJy",
+        "Noise of the 30-arcsecond cell containing the source: the scatter of the flux measured at random empty-sky positions in that cell. Five times this value is the faintest flux that would be called a detection there. NaN where the band does not cover the source."),
+    "OBSID_{b}": ("observation identifier(s)",
+        "The Herschel observation identifier(s), comma separated, of the map the flux was measured on; empty where the band does not cover the source."),
+    "N_BLEND_{b}": ("number of SESNA sources",
+        "How many SESNA sources, including this one, were fitted together because they lie within one beam width of a source detected in this band; 1 for a source fitted alone, 0 where the band does not cover the source."),
+    "BLEND_GROUP_{b}": ("row number, or -1",
+        "Sources fitted together share this number, which is the row of the first of them in the catalogue; -1 for a source fitted alone or not covered."),
+    "EXTENDED_{b}": ("true or false",
+        "True for a detected source whose measured width is more than 1.5 times the beam width, a sign that the emission is extended rather than a point source; false otherwise, including for every source that is not detected."),
+}
+for _band, _wave in (("P70", "70"), ("P100", "100")):
+    for _name, (_units, _reading) in _PHOTOMETRY_PACS_READINGS.items():
+        REGISTRY[("photometry_pacs_source", _name.format(b=_band))] = (
+            _units, _reading.format(w=_wave))
+
