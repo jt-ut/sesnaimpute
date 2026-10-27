@@ -14,8 +14,13 @@ by nothing (a matched-star count is already a weight per template); agb
 templates in the constrained quantity (tau by chemistry; `log10
 f_ref,4.5,theta`), bins wide enough to hold the floor count, linearly
 interpolated;
-galz `colour` divides by a Gaussian KDE of the library's own templates in
-colour, the same bandwidth as the galaxy KDE. pahc `type` is sps's own
+galz `colour` is the joint (colour, far-infrared ratio) factor: SWIRE's
+galaxies' density in `log10 F3.6 - log10 F4.5` and `r = log10(F70 / F4.5)`
+(non-detections at 70 micron censored below their limit,
+`_censored_r_density`) divided by a product Gaussian KDE of the library's
+own templates in the same two quantities; the YSO class factor gains `r`
+per census group the same way (`_yso_farir`, HOPS and eHOPS,
+`sky.derived.farir_census`). pahc `type` is sps's own
 matched-star count folded, per template, against the measured 8 micron
 excess-amplitude distribution of contaminated sources (review ledger C8:
 PAHC's own amplitude parameter `R` is a grid spanning three decades
@@ -102,6 +107,7 @@ import os
 import h5py
 import numpy as np
 from astropy.io import fits
+from scipy.ndimage import gaussian_filter1d
 from scipy.spatial import cKDTree
 
 from sesnaimpute import build as build_module
@@ -118,6 +124,7 @@ from sesnaimpute.population import h2s as h2s_module
 from sesnaimpute.population import pahc_curve
 from sesnaimpute.population import pahn as pahn_module
 from sesnaimpute.population import yso_law as yso_law_module
+from sesnaimpute.sed_models import constants as sed_constants
 
 # ---------------------------------------------------------------------------
 # constants block -- every number cited
@@ -268,7 +275,7 @@ def _fixed_width_binned_density(x, bin_width, min_count):
 # registers and grids
 # ---------------------------------------------------------------------------
 
-def _read_register(config, cls):
+def _read_register(config, cls, extra_bands=()):
     """The register's `MODEL_NAME`, `SUBCLASS` (yso: C0/CI/CII/CIII/TD, the
     evolutionary-class census's own label, sec 5.5), `FLOOR_LINEAR` (the
     register's own raw-flux floor, sec 3.5's FREFRAW convention: a
@@ -277,7 +284,8 @@ def _read_register(config, cls):
     fluxes in every band, in the register's own row order. `RHO_KDE1` (the
     library's density in eight-band SED space) is never read here: no
     class's template weight divides by it (sec 1.4, owner's ruling
-    2026-09-09).
+    2026-09-09). `extra_bands` names further bands whose reference fluxes
+    to read (the far-infrared factors read `P70`).
     """
     path = f"{config.inputs['sed_models']}/registers/{_REGISTER_FILE[cls]}"
     with h5py.File(path, "r") as f:
@@ -286,7 +294,7 @@ def _read_register(config, cls):
         subclass = np.char.decode(m["SUBCLASS"][:].astype("S"), "utf-8")
         floor_linear = m["FLOOR_LINEAR"][:].astype(np.float64)
         f_ref = {b: m[f"F_REF_{b}"][:].astype(np.float64)
-                 for b in ("I1", "I2", "I3", "I4", "J", "H", "Ks", "M1")}
+                 for b in ("I1", "I2", "I3", "I4", "J", "H", "Ks", "M1") + tuple(extra_bands)}
     return dict(names=names, f_ref=f_ref, subclass=subclass, floor_linear=floor_linear)
 
 
@@ -558,13 +566,142 @@ def _yso_class_shares(config):
     return share_proto, share_disk, share_weak
 
 
-def _yso_population_weight_parts(config):
+#: The far-infrared census of the young stars (`sky.derived.farir_census`):
+#: path args for `config_module.product_path`.
+FARIR_CENSUS_PATH_ARGS = ("sky/derived", "hops", "farir", "survey")
+
+#: Which of the census's classes carry the far-infrared ratio of each
+#: `YSO_CENSUS_GROUPS` group, in the same order: the protostellar group's
+#: Class 0, Class I and flat-spectrum sources, the disc-bearing group's
+#: Class II (HOPS and eHOPS publish no transition-disk class), and none for
+#: Class III (no Class III source in either survey): that group's templates
+#: carry no far-infrared statement and are weighted as before.
+YSO_FARIR_CENSUS_CLASSES = (("C0", "CI", "FLAT"), ("CII",), ())
+
+#: The quantiles of a far-infrared distribution printed against each other.
+FARIR_PRINT_QUANTILES = (0.16, 0.5, 0.84)
+
+
+def _farir_census(config):
+    """`(klass, log10_r, detected, log10_r_limit)` of the HOPS and eHOPS
+    sources (`sky.derived.farir_census`): the class label, `LOG10_R` (NaN
+    where not detected at 70 micron), the detection flag and `LOG10_R_LIMIT`
+    (the ratio a non-detection lies below)."""
+    path = config_module.product_path(config, *FARIR_CENSUS_PATH_ARGS)
+    with h5py.File(path, "r") as f:
+        klass = np.char.decode(f["CLASS"][:].astype("S"), "utf-8")
+        return (klass, f["LOG10_R"][:].astype(np.float64), f["DETECTED_P70"][:] == 1,
+                f["LOG10_R_LIMIT"][:].astype(np.float64))
+
+
+def _silverman_bandwidth(x):
+    """Silverman's (1986, Density Estimation, eq. 3.31) rule-of-thumb kernel
+    bandwidth `0.9 min(sigma, IQR / 1.34) n^(-1/5)` for the detections `x`."""
+    iqr = np.subtract(*np.percentile(x, [75, 25]))
+    return 0.9 * min(np.std(x), iqr / 1.34) * x.size ** (-0.2)
+
+
+def _weighted_quantiles(x, w, q):
+    order = np.argsort(x)
+    cum = np.cumsum(w[order])
+    return np.interp(np.asarray(q) * cum[-1], cum, x[order])
+
+
+def _yso_farir(config, reg, frac, sub_idx, w_pre):
+    """Per census group, the far-infrared factor of every YSO template (spec
+    sec 1.4, 5.5): `f_g(theta) = p_g(r_theta) / n_g(r_theta)`, `p_g` the
+    censored kernel density estimate (`_censored_r_density`, Silverman
+    bandwidth on the group's detections) of `r = log10(F70 / F4.5)` over the
+    group's HOPS and eHOPS sources (`YSO_FARIR_CENSUS_CLASSES`) and `n_g` the
+    library's density of templates in `r`, each template counted by its soft
+    fraction in the group (`FRAC_<subclass>`) and by its brightness-and-
+    viewing-angle weight `w_pre` (the other two population statements, which
+    already select on `r`: counting the templates as they will be weighted
+    makes the weighted library's `r` distribution the census's), the same
+    Gaussian kernel. A
+    group with no census has `f = 1`. A template whose `r` is undefined (zero
+    or non-finite `F_REF_P70`, or `F_REF_I2` not positive) is left out of `n_g`
+    and given the mean `f_g` of the group's defined templates (no
+    far-infrared evidence either way): a placeholder until the owner rules.
+    Returns `(f, info)`: `f` `(n_model, 3)`; `info` one dict per group with
+    the numbers `yso_farir_report` prints."""
+    r_theta, defined = _template_log10_r(reg)
+    klass, log10_r, detected, r_limit = _farir_census(config)
+    n_model = r_theta.size
+    f = np.ones((n_model, len(YSO_CENSUS_GROUPS)))
+    info = []
+    for g, (labels, codes) in enumerate(zip(YSO_CENSUS_GROUPS, YSO_FARIR_CENSUS_CLASSES)):
+        frac_g = frac[:, [sub_idx[sub] for sub in labels]].sum(axis=1)
+        entry = dict(labels=sorted(labels), codes=codes, n_undefined=int(((frac_g > 0.5) & ~defined).sum()),
+                     n_group=int((frac_g > 0.5).sum()))
+        if codes:
+            in_group = np.isin(klass, codes)
+            r_det, limit = log10_r[in_group & detected], r_limit[in_group & ~detected]
+            h = _silverman_bandwidth(r_det)
+            grid = _r_grid(min(np.nanmin(r_theta), r_det.min(), limit.min()),
+                           max(np.nanmax(r_theta), r_det.max()), h)
+            q, cdf, n_iter = _censored_r_density(grid, r_det, np.full(r_det.size, h), limit)
+            step = grid[1] - grid[0]
+            weight = np.where(defined, frac_g * w_pre, 0.0)
+            edges = np.append(grid - 0.5 * step, grid[-1] + 0.5 * step)
+            counts, _ = np.histogram(np.where(defined, r_theta, grid[0]), bins=edges, weights=weight)
+            n_g = gaussian_filter1d(counts, h / step, mode="constant") / (step * weight.sum())
+            ratio = (np.interp(r_theta, grid, q) / np.maximum(np.interp(r_theta, grid, n_g), 1e-300))
+            f[:, g] = np.where(defined, ratio, (weight * np.where(defined, ratio, 0.0)).sum() / weight.sum())
+            entry.update(n_det=int(r_det.size), n_cens=int(limit.size), bandwidth=float(h),
+                         n_iter=n_iter, grid=grid, q=q, cdf=cdf, r_det=r_det)
+        info.append(entry)
+    return f, info
+
+
+def yso_farir_report(config):
+    """Prints the far-infrared factor's own numbers (spec sec 5.5): per
+    group, the templates with undefined `r` (kept out of the library density,
+    given a placeholder weight), the census size and bandwidth, and the
+    group's `r` quantiles under the census's censored estimate against the
+    weighted library's. The weighted library is each template's survey-wide
+    census weight times its soft group fraction (`yso_population_weight`
+    without the diskless group); it equals the census only as far as the
+    brightness statement does not itself select on `r`."""
+    reg = _read_register(config, "yso", extra_bands=(FARIR_BAND,))
+    names, w_pre, frac, sub_idx, census_groups, f = _yso_population_weight_parts(config, use_r=True)
+    r_theta, defined = _template_log10_r(reg)
+    _, info = _yso_farir(config, reg, frac, sub_idx, w_pre)
+    for g, ((labels, share), entry) in enumerate(zip(census_groups, info)):
+        frac_g = frac[:, [sub_idx[sub] for sub in labels]].sum(axis=1)
+        print(f"template_weights.yso FAR-INFRARED: group {'+'.join(entry['labels'])}: "
+              f"{entry['n_undefined']} of {entry['n_group']} templates have undefined r (zero or non-finite "
+              f"F_REF_P70), left out of the library r density and given the group's mean factor "
+              f"(PLACEHOLDER pending the owner's rule)", flush=True)
+        if not entry["codes"]:
+            print(f"template_weights.yso FAR-INFRARED: group {'+'.join(entry['labels'])}: no census class, "
+                  f"factor 1", flush=True)
+            continue
+        w = np.where(defined, w_pre * frac_g * f[:, g], 0.0)
+        lib = _weighted_quantiles(r_theta[defined], w[defined], FARIR_PRINT_QUANTILES)
+        w0 = np.where(defined, w_pre * frac_g, 0.0)
+        lib0 = _weighted_quantiles(r_theta[defined], w0[defined], FARIR_PRINT_QUANTILES)
+        grid, cdf = entry["grid"], entry["cdf"]
+        cen = np.interp(FARIR_PRINT_QUANTILES, cdf, grid)
+        print(f"template_weights.yso FAR-INFRARED [PROVISIONAL: undefined-r templates not yet repaired]: "
+              f"group {'+'.join(entry['labels'])} census classes {','.join(entry['codes'])}: "
+              f"{entry['n_det']} detected + {entry['n_cens']} censored, bandwidth {entry['bandwidth']:.3f} dex, "
+              f"iterations {entry['n_iter']}; r quantiles (16/50/84%) census "
+              + "/".join(f"{x:.2f}" for x in cen) + "; weighted library with factor "
+              + "/".join(f"{x:.2f}" for x in lib) + "; weighted library without "
+              + "/".join(f"{x:.2f}" for x in lib0), flush=True)
+
+
+def _yso_population_weight_parts(config, use_r=True):
     """Shared state for `yso_population_weight` and `yso_subclass_prob_pop`
     (S16, round 6 brief U08): `(names, w_pre_census, frac, sub_idx,
-    census_groups)` -- the register's own row order, the (i)x(ii) pre-
+    census_groups, f_far_infrared)` -- the register's own row order, the (i)x(ii) pre-
     census weight, the register's own soft `/subclass_prob` fractions,
-    the subclass-name-to-column map, and the three `(labels, share)`
-    census groups (`YSO_CENSUS_GROUPS` paired with `_yso_class_shares`).
+    the subclass-name-to-column map, the three `(labels, share)`
+    census groups (`YSO_CENSUS_GROUPS` paired with `_yso_class_shares`) and
+    the `(n_model, 3)` far-infrared factor of each group (`_yso_farir`;
+    all ones with `use_r` False, the check that the factor changes nothing
+    else).
     Factored out of `yso_population_weight` so the population weight and
     its population-reweighted CONDITIONAL subclass split read the exact
     same census density, inclination join and group shares -- never two
@@ -582,7 +719,7 @@ def _yso_population_weight_parts(config):
     Class III objects' fluxes (no class cut on the catalogue), so the
     library side matches it template for template. (ii) The viewing
     angle, uniform in cos i (the existing sin i factor)."""
-    reg = _read_register(config, "yso")
+    reg = _read_register(config, "yso", extra_bands=(FARIR_BAND,))
     names = reg["names"]
     n_model = names.size
     c_theta = _c_theta(reg)  # log10 f_ref,4.5,theta, floored (sec 4.1)
@@ -609,10 +746,14 @@ def _yso_population_weight_parts(config):
     sub_idx = {s: i for i, s in enumerate(definitions.SUBCLASSES_OF["YSO"])}
     share_proto, share_disk, share_weak = _yso_class_shares(config)
     census_groups = tuple(zip(YSO_CENSUS_GROUPS, (share_proto, share_disk, share_weak)))
-    return names, w_pre_census, frac, sub_idx, census_groups
+    if use_r:
+        f_far_infrared, _ = _yso_farir(config, reg, frac, sub_idx, w_pre_census)
+    else:
+        f_far_infrared = np.ones((n_model, len(YSO_CENSUS_GROUPS)))
+    return names, w_pre_census, frac, sub_idx, census_groups, f_far_infrared
 
 
-def yso_population_weight(config):
+def yso_population_weight(config, use_r=True):
     """The YSO `population` weight `w_theta` (spec sec 5.5 "Template
     weights", W83 "the young-star population redefined on the Dunham
     census"): three population statements and one division, shared
@@ -630,24 +771,27 @@ def yso_population_weight(config):
     group's subclasses (`_read_subclass_prob`), not a hard `SUBCLASS`
     mask, because a kept template is a class mixture of however many raw
     grid points collapsed onto it; the split within a group is the
-    templates' own (i)x(ii) weight times that fraction. `Sigma w_theta` is
+    templates' own (i)x(ii) weight times that fraction times the group's
+    far-infrared factor (`_yso_farir`: the census's density of the group in
+    `log10(F70 / F4.5)` over the library's). `Sigma w_theta` is
     exactly 1 (the three shares sum to 1, the schema's own invariant, and
     every template's own group fractions sum to 1 over the three groups
     since `FRAC_<subclass>` sums to 1 over all six subclasses) by
     construction. Returns `(names, w_theta)` in the register's own row
     order."""
-    names, w_pre_census, frac, sub_idx, census_groups = _yso_population_weight_parts(config)
+    names, w_pre_census, frac, sub_idx, census_groups, f_far = _yso_population_weight_parts(config, use_r)
     n_model = names.size
     w_theta = np.zeros(n_model, dtype=np.float64)
-    for labels, share in census_groups:
+    for g, (labels, share) in enumerate(census_groups):
         frac_group = frac[:, [sub_idx[s] for s in labels]].sum(axis=1)   # soft group fraction
-        group_sum = (w_pre_census * frac_group).sum()
+        w_group = w_pre_census * frac_group * f_far[:, g]
+        group_sum = w_group.sum()
         if group_sum > 0:
-            w_theta += share * w_pre_census * frac_group / group_sum
+            w_theta += share * w_group / group_sum
     return names, w_theta
 
 
-def yso_subclass_prob_pop(config, region, census_share_region, diskless_result):
+def yso_subclass_prob_pop(config, region, census_share_region, diskless_result, use_r=True):
     """`SUBCLASS_PROB_POP`, THIS REGION's own population-reweighted
     CONDITIONAL subclass probability `(n_model, n_sub)` (S16, round 6
     brief U08, FINDINGS.md, REVISED per the round 1 reviewer reply: the
@@ -689,7 +833,7 @@ def yso_subclass_prob_pop(config, region, census_share_region, diskless_result):
     here. Returns `(names, subclass_prob_pop, n_fallback)` in the
     register's own row order, `definitions.SUBCLASSES_OF["YSO"]` column
     order, every row summing to 1 to machine precision."""
-    names, w_pre_census, frac, sub_idx, census_groups = _yso_population_weight_parts(config)
+    names, w_pre_census, frac, sub_idx, census_groups, f_far = _yso_population_weight_parts(config, use_r)
     n_model = names.size
     n_sub = frac.shape[1]
 
@@ -699,13 +843,14 @@ def yso_subclass_prob_pop(config, region, census_share_region, diskless_result):
                           "row order disagrees with the yso register")
 
     j_census_raw = np.zeros((n_model, n_sub), dtype=np.float64)
-    for labels, share in census_groups:
+    for g, (labels, share) in enumerate(census_groups):
         idxs = [sub_idx[s] for s in labels]
         frac_group = frac[:, idxs].sum(axis=1)
-        group_sum = (w_pre_census * frac_group).sum()
+        w_pre_group = w_pre_census * f_far[:, g]
+        group_sum = (w_pre_group * frac_group).sum()
         if group_sum > 0:
             for j in idxs:
-                j_census_raw[:, j] = share * w_pre_census * frac[:, j] / group_sum
+                j_census_raw[:, j] = share * w_pre_group * frac[:, j] / group_sum
 
     diskless_idx = [sub_idx[s] for s in YSO_CENSUS_GROUP_DISKLESS]
     if len(diskless_idx) != 1:
@@ -791,7 +936,7 @@ def yso_diskless_weight(config, region):
     return names, w_diskless
 
 
-def build_yso(config, region):
+def build_yso(config, region, use_r=True):
     """P5's YSO table, one per region (spec sec 5.5 "Template weights",
     REWRITTEN the shift-kernel rule): `PI[theta, k] = w_theta K(F_k - c_theta) / p(F_k)`,
     `w_theta` `yso_population_weight`'s survey-wide census weight,
@@ -815,7 +960,7 @@ def build_yso(config, region):
         n_b = log10_f45_centers.size
         c_theta = _c_theta(reg)
 
-        names_w, w_theta = yso_population_weight(config)
+        names_w, w_theta = yso_population_weight(config, use_r)
         if not (names_w.size == n_model and np.array_equal(names_w, names)):
             raise ValueError("template_weights.yso: yso_population_weight's row "
                               "order disagrees with the yso register")
@@ -927,7 +1072,7 @@ def build_yso(config, region):
         # fraction is no longer the conditional subclass probability
         # once the groups carry different survey shares).
         names_sp, subclass_prob_pop, n_fallback_sp = yso_subclass_prob_pop(
-            config, region, census_share_region, (names_d, w_diskless))
+            config, region, census_share_region, (names_d, w_diskless), use_r)
         if not (names_sp.size == n_model and np.array_equal(names_sp, names)):
             raise ValueError("template_weights.yso: yso_subclass_prob_pop's row "
                               "order disagrees with the yso register")
@@ -1073,146 +1218,352 @@ def _node_kde(colour_theta_f32, c_gal, s_gal):
     return dens / n_gal, min_z
 
 
-def _galz_node_piece(colour, sigma, node, finite, colour_theta_f32, bounds):
-    """One `pieces.run` piece for P4/galz's colour KDE: every S node in
-    `range(start, stop)` (`bounds`), in order -- `colour`/`sigma`/`node`/
-    `finite`/`colour_theta_f32` (the region-wide, read-only galaxy and
-    template arrays) are bound by the caller's `functools.partial`, so a
-    piece itself carries only its own node-range bounds, not data
-    (`sesnaimpute.pieces`'s module docstring); no `backend="threading"`
-    (COMMON.md: no stage keeps a thread pool of its own). Returns one
-    `(dens, beyond3_fraction, n_gal)` per node, `n_gal` this node's own
-    galaxy count (for the caller's empty-node borrowing, sec 5.4's own
-    nearest-node rule, review ledger C16)."""
+# ---------------------------------------------------------------------------
+# the far-infrared ratio r = log10(F_P70 / F_I2), shared by GAL and YSO
+# (spec sec 1.4, 5.4, 5.5)
+# ---------------------------------------------------------------------------
+
+#: The ratio is the register's own `F_REF_P70` over `F_REF_I2` (the template's
+#: reference fluxes, no zero points in the chain).
+FARIR_BAND = "P70"
+
+#: Numerical constants of the censored density estimate (no science in them):
+#: the grid step as a fraction of the kernel bandwidth, the margin around the
+#: data in bandwidths, the expectation-maximisation iteration limit and its
+#: relative stopping tolerance.
+FARIR_GRID_STEP_FRACTION = 0.5
+FARIR_GRID_PAD_BANDWIDTHS = 4.0
+FARIR_EM_MAX_ITER = 5000
+FARIR_EM_TOL = 1.0e-7
+
+#: The quantity named in a template's table of weights below which its far-
+#: infrared ratio is read as "r >= this" in the printed before/after share
+#: (the 2026-10-24 measurement's own cut, the red tail of the galaxy library).
+GALZ_RED_R = 2.5
+
+#: The two flux cells of the GAL weights the red-tail share is printed at, mJy
+#: (the faint end where SESNA's galaxies are most numerous).
+GALZ_SHARE_FLUX_MJY = (0.13, 0.3)
+
+
+def _template_log10_r(reg):
+    """`(r, defined)` for a register read with `extra_bands=("P70",)`:
+    `r = log10(F_REF_P70 / F_REF_I2)`, NaN and `defined` False for a template
+    whose P70 or I2 reference flux is zero, negative or not finite (an
+    undefined sample of the model, not a measurement of zero)."""
+    f70, f2 = reg["f_ref"][FARIR_BAND], reg["f_ref"]["I2"]
+    defined = np.isfinite(f70) & (f70 > 0) & np.isfinite(f2) & (f2 > 0)
+    r = np.full(f70.size, np.nan)
+    r[defined] = np.log10(f70[defined] / f2[defined])
+    return r, defined
+
+
+def _r_grid(lo, hi, bandwidth):
+    """The grid the censored density is estimated on: `lo` to `hi` padded by
+    `FARIR_GRID_PAD_BANDWIDTHS` bandwidths, step `FARIR_GRID_STEP_FRACTION`
+    of a bandwidth."""
+    step = FARIR_GRID_STEP_FRACTION * bandwidth
+    lo, hi = lo - FARIR_GRID_PAD_BANDWIDTHS * bandwidth, hi + FARIR_GRID_PAD_BANDWIDTHS * bandwidth
+    return lo + step * np.arange(int(np.ceil((hi - lo) / step)) + 1)
+
+
+def _censored_r_density(grid, r_det, sigma_det, limit):
+    """The density of `r` on `grid` (a regular grid) from detections with
+    their errors and from non-detections known only to lie below `limit`
+    (spec sec 5.4, 5.5): a kernel density estimate of the detections (one
+    Gaussian per detection, width its own `sigma_det`) in which each
+    non-detection's unit of mass is spread below its limit in proportion to
+    the density itself -- the self-consistency (expectation-maximisation)
+    estimator of Turnbull (1976, JRSS B 38, 290) for left-censored data, started
+    from a uniform density over the grid. Where the detections lie above every
+    limit (the usual case here) the data fix how much mass lies below the
+    limits and say nothing of its shape, so that mass stays uniform below each
+    limit: the estimate adds no structure the data do not carry. In one
+    dimension with right censoring the same iteration is Efron's (1967)
+    redistribute-to-the-right form of the Kaplan and Meier (1958, JASA 53, 457)
+    product-limit estimator, which the detections' kernels then smooth (the
+    censored kernel density estimators of Padgett 1986, Marron and Padgett
+    1987). Returns `(q, Q, n_iter)`: `q` the density (integral 1), `Q` its
+    cumulative distribution on the grid, `n_iter` the iterations used."""
+    step = grid[1] - grid[0]
+    n_det, n_cens = r_det.size, limit.size
+    detections = np.zeros(grid.size)
+    if n_det:
+        z = (grid[None, :] - r_det[:, None]) / sigma_det[:, None]
+        detections = (np.exp(-0.5 * z * z) / (sigma_det[:, None] * _SQRT_2PI)).sum(axis=0)
+    if n_cens == 0:
+        q = detections / n_det
+        return q, np.cumsum(q) * step, 0
+    at_limit = np.bincount(
+        np.clip(np.rint((limit - grid[0]) / step).astype(np.int64), 0, grid.size - 1),
+        minlength=grid.size)
+    q = np.full(grid.size, 1.0 / (grid.size * step))
+    n_iter = 0
+    for n_iter in range(1, FARIR_EM_MAX_ITER + 1):
+        cdf = np.maximum(np.cumsum(q) * step, 1e-300)
+        mass_above = np.cumsum((at_limit / cdf)[::-1])[::-1]
+        q_new = (detections + q * mass_above) / (n_det + n_cens)
+        converged = np.max(np.abs(q_new - q)) <= FARIR_EM_TOL * np.max(q_new)
+        q = q_new
+        if converged:
+            break
+    return q, np.cumsum(q) * step, n_iter
+
+
+def _node_kde_far_infrared(colour_theta_f32, r_theta_f32, c_gal, s_gal, r_det, sigma_r, limit,
+                            q, cdf, grid):
+    """One node's `(joint, colour_only, min_z)` over every template (spec sec
+    5.4): the density of the node's galaxies in (colour, r) evaluated at the
+    template's own values, a product Gaussian kernel -- colour bandwidth `s_gal`
+    per galaxy as `_node_kde`, r for a detection (`r_det` finite) its own
+    `sigma_r`; for a non-detection the colour kernel times the censored
+    estimate `q` of r restricted to below its `limit` and renormalised to that
+    mass (`cdf` its cumulative on `grid`), so a template redder in r than a
+    galaxy's limit takes nothing from that galaxy. `colour_only` is the same
+    node's density in colour alone (`_node_kde`'s own number), the factor the
+    joint replaces. `min_z` as `_node_kde`'s. float32 blocks, rule 10b."""
+    n_model = colour_theta_f32.size
+    n_gal = c_gal.size
+    c_gal = c_gal.astype(np.float32)
+    s_gal = s_gal.astype(np.float32)
+    detected = np.isfinite(r_det)
+    joint = np.zeros(n_model, dtype=np.float64)
+    colour_only = np.zeros(n_model, dtype=np.float64)
+    cens_joint = np.zeros(n_model, dtype=np.float64)
+    min_z = np.full(n_model, np.inf, dtype=np.float32)
+    r_det32 = r_det.astype(np.float32)
+    sigma_r32 = sigma_r.astype(np.float32)
+    limit32 = limit.astype(np.float32)
+    inv_cdf = (1.0 / np.maximum(np.interp(limit, grid, cdf), 1e-300)).astype(np.float32)
+    # up to four nodes run concurrently (rule 10a): four same-shaped float32
+    # arrays alive at once, 512 MB across the four workers
+    batch_gal = max(1, int((512 << 20) // (4 * n_model * 4 * 4)))
+    ct = colour_theta_f32[:, None]
+    rt = r_theta_f32[:, None]
+    for g0 in range(0, n_gal, batch_gal):
+        g1 = min(g0 + batch_gal, n_gal)
+        sb = s_gal[None, g0:g1]
+        z = (ct - c_gal[None, g0:g1]) / sb
+        gauss = np.exp(-0.5 * z * z, dtype=np.float32)
+        gauss /= (sb * np.float32(_SQRT_2PI))
+        colour_only += gauss.sum(axis=1, dtype=np.float64)
+        np.abs(z, out=z)
+        np.minimum(min_z, z.min(axis=1), out=min_z)
+        det = detected[g0:g1]
+        if det.any():
+            sr = sigma_r32[None, g0:g1][:, det]
+            zr = (rt - r_det32[None, g0:g1][:, det]) / sr
+            kernel = np.exp(-0.5 * zr * zr, dtype=np.float32) / (sr * np.float32(_SQRT_2PI))
+            joint += (gauss[:, det] * kernel).sum(axis=1, dtype=np.float64)
+        cens = ~det
+        if cens.any():
+            below = rt < limit32[None, g0:g1][:, cens]
+            weight = gauss[:, cens] * below * inv_cdf[None, g0:g1][:, cens]
+            cens_joint += weight.sum(axis=1, dtype=np.float64)
+    q_theta = np.interp(r_theta_f32.astype(np.float64), grid, q, left=0.0, right=0.0)
+    joint += q_theta * cens_joint
+    return joint / n_gal, colour_only / n_gal, min_z
+
+
+def _template_density_far_infrared(colour_theta_f32, r_theta_f32, bandwidth_r):
+    """The library's own density of templates in (colour, r) at each template
+    (sec 1.4's `n`): the same product kernel, colour bandwidth
+    `GALZ_COLOUR_BANDWIDTH_DEX`, r bandwidth `bandwidth_r`, summed over the
+    templates themselves (rule 9: one block of templates at a time)."""
+    n_model = colour_theta_f32.size
+    ct = colour_theta_f32.astype(np.float32)
+    rt = r_theta_f32.astype(np.float32)
+    h_c, h_r = np.float32(GALZ_COLOUR_BANDWIDTH_DEX), np.float32(bandwidth_r)
+    out = np.zeros(n_model, dtype=np.float64)
+    block = max(1, int((512 << 20) // (4 * n_model * 4 * 4)))
+    for t0 in range(0, n_model, block):
+        t1 = min(t0 + block, n_model)
+        zc = (ct[:, None] - ct[None, t0:t1]) / h_c
+        zr = (rt[:, None] - rt[None, t0:t1]) / h_r
+        kernel = np.exp(-0.5 * (zc * zc + zr * zr), dtype=np.float32)
+        out += kernel.sum(axis=1, dtype=np.float64)
+    return out / (n_model * float(h_c) * float(h_r) * 2.0 * np.pi)
+
+
+def _galz_node_piece(colour, sigma, node, finite, r_det, sigma_r, limit, grid, colour_theta_f32,
+                      r_theta_f32, bounds):
+    """One `pieces.run` piece for P4/galz's (colour, r) KDE: every S node in
+    `range(start, stop)` (`bounds`), in order -- the region-wide, read-only
+    galaxy and template arrays are bound by the caller's `functools.partial`,
+    so a piece itself carries only its own node-range bounds, not data
+    (`sesnaimpute.pieces`'s module docstring). Returns one `(joint,
+    colour_only, beyond3_fraction, n_gal, n_det, n_iter)` per node: `n_gal`
+    this node's own galaxy count (for the caller's empty-node borrowing, sec
+    5.4's own nearest-node rule, review ledger C16)."""
     start, stop = bounds
     out = []
     for k in range(start, stop):
         sel = finite & (node == k)
-        c_gal = colour[sel]
-        s_gal = sigma[sel]
-        dens, min_z = _node_kde(colour_theta_f32, c_gal, s_gal)
-        beyond3 = 1.0 if c_gal.size == 0 else float(np.mean(min_z > 3.0))
-        out.append((dens, beyond3, int(c_gal.size)))
+        c_gal, s_gal = colour[sel], sigma[sel]
+        if c_gal.size == 0:
+            ones = np.ones(colour_theta_f32.size, dtype=np.float64)
+            out.append((ones, ones, 1.0, 0, 0, 0))
+            continue
+        r_k, sr_k, lim_k = r_det[sel], sigma_r[sel], limit[sel]
+        det = np.isfinite(r_k)
+        q, cdf, n_iter = _censored_r_density(grid, r_k[det], sr_k[det], lim_k[~det])
+        joint, colour_only, min_z = _node_kde_far_infrared(
+            colour_theta_f32, r_theta_f32, c_gal, s_gal, r_k, sr_k, lim_k, q, cdf, grid)
+        out.append((joint, colour_only, float(np.mean(min_z > 3.0)), int(c_gal.size),
+                    int(det.sum()), n_iter))
     return out
+
+
+def _galz_tables(config, st):
+    """Everything `build_galz` stores and prints, as a dict: the joint
+    (colour, r) weights `w`, the colour-only weights `w_colour_only` they
+    replace (the same SWIRE sample and the same kernels with the r kernel
+    left out), and the diagnostics. `st` is the caller's `progress.Stage`. No
+    file is written."""
+    reg = _read_register(config, "galz", extra_bands=(FARIR_BAND,))
+    names = reg["names"]
+    n_model = names.size
+    colour_theta = np.log10(reg["f_ref"]["I1"]) - np.log10(reg["f_ref"]["I2"])
+    colour_theta_f32 = colour_theta.astype(np.float32)
+    c_theta = _c_theta(reg)
+    r_theta, r_defined = _template_log10_r(reg)
+
+    swire_path = config_module.product_path(config, "sky/derived", "swire", "galaxies", "survey")
+    with h5py.File(swire_path, "r") as f:
+        node = f["NODE"][:]
+        colour = f["COLOUR_I1I2"][:].astype(np.float64)
+        sigma = f["SIGMA_COLOUR_I1I2"][:].astype(np.float64)
+        log10_s_grid = f["LOG10_S_GRID"][:].astype(np.float64)
+        log10_s = f["LOG10_S"][:].astype(np.float64)
+        flux70 = f["FLUX_P70_MJY"][:].astype(np.float64)
+        sigma70 = f["SIGMA_FLUX_P70_MJY"][:].astype(np.float64)
+        limit70 = f["LIMIT_P70_MJY"][:].astype(np.float64)
+    n_node = log10_s_grid.size
+    finite = np.isfinite(colour) & np.isfinite(sigma) & (sigma > 0)
+
+    # r of each galaxy from its own 4.5 micron flux (LOG10_S): a detection's r and
+    # its error from the 70 micron error alone (the 4.5 micron error is a few
+    # per cent against the 70 micron error's ten), a non-detection's upper limit
+    detected = np.isfinite(flux70) & (flux70 > 0) & np.isfinite(sigma70) & (sigma70 > 0)
+    r_det = np.where(detected, np.log10(np.where(detected, flux70, 1.0)) - log10_s, np.nan)
+    sigma_r = np.where(detected, sigma70 / (np.where(detected, flux70, 1.0) * np.log(10.0)), np.nan)
+    r_limit = np.log10(limit70) - log10_s
+    use = detected & finite
+    bandwidth_r = float(np.median(sigma_r[use]))
+    r_lo = float(min(np.nanmin(r_theta), r_limit[finite].min(), r_det[use].min()))
+    r_hi = float(max(np.nanmax(r_theta), r_det[use].max()))
+    grid_r = _r_grid(r_lo, r_hi, bandwidth_r)
+    print(f"template_weights.galz: r bandwidth (median 70 um error of {int(use.sum())} detected galaxies)="
+          f"{bandwidth_r:.4f} dex; r grid {grid_r[0]:.2f}..{grid_r[-1]:.2f} ({grid_r.size} cells); "
+          f"templates with undefined r={int((~r_defined).sum())}/{n_model}", flush=True)
+
+    # the library's own density of templates in (colour, r) and, for the
+    # colour-only factor, in colour alone (sec 1.4, sec 5.4)
+    ok = r_defined
+    template_joint = np.ones(n_model)
+    template_joint[ok] = _template_density_far_infrared(
+        colour_theta_f32[ok], r_theta[ok].astype(np.float32), bandwidth_r)
+    template_bandwidth = np.full(n_model, GALZ_COLOUR_BANDWIDTH_DEX, dtype=np.float32)
+    template_colour, _ = _node_kde(colour_theta_f32, colour_theta_f32, template_bandwidth)
+
+    r_theta_f32 = np.where(ok, r_theta, 0.0).astype(np.float32)
+    n_jobs = int(config.n_jobs)
+    bounds = pieces.slices(n_node, n_jobs)
+    fn = functools.partial(_galz_node_piece, colour, sigma, node, finite, r_det, sigma_r, r_limit,
+                           grid_r, colour_theta_f32, r_theta_f32)
+    piece_results = pieces.run(fn, bounds, n_jobs, stage=st, unit="S nodes")
+    results = [r for chunk in piece_results for r in chunk]
+    node_joint = np.empty((n_node, n_model))
+    node_colour = np.empty((n_node, n_model))
+    beyond3_fraction = np.empty(n_node)
+    n_gal_node = np.empty(n_node, dtype=np.int64)
+    n_det_node = np.empty(n_node, dtype=np.int64)
+    n_iter_node = np.empty(n_node, dtype=np.int64)
+    for k, (jt, co, b3, n_k, nd_k, it_k) in enumerate(results):
+        node_joint[k], node_colour[k], beyond3_fraction[k] = jt, co, b3
+        n_gal_node[k], n_det_node[k], n_iter_node[k] = n_k, nd_k, it_k
+    has_gal = n_gal_node > 0
+
+    # a node SWIRE's own pooling (`sky.derived.swire_galaxies._pool_bright_nodes`)
+    # left with none of its own galaxies reads its nearest populated node's
+    # density (review ledger C16), the same borrowing `bmstp.atlas._gal_members`
+    # applies to an empty counts-law node
+    if not has_gal.all():
+        node_ids = np.arange(n_node)
+        have_idx, empty_idx = node_ids[has_gal], node_ids[~has_gal]
+        nearest = have_idx[np.argmin(np.abs(empty_idx[:, None] - have_idx[None, :]), axis=1)]
+        for arr in (node_joint, node_colour, beyond3_fraction):
+            arr[empty_idx] = arr[nearest]
+        print(f"template_weights.galz: {empty_idx.size} empty S node(s) borrowed "
+              f"from their nearest populated node: "
+              + ",".join(f"{k}<-{n}" for k, n in zip(empty_idx.tolist(), nearest.tolist())), flush=True)
+
+    # a template with undefined r has no far-infrared evidence: its ratio is
+    # set to the mean over the templates that have one, at each node, so it
+    # is neither raised nor lowered against them
+    ratio = node_joint / template_joint[None, :]
+    if not ok.all():
+        ratio[:, ~ok] = ratio[:, ok].mean(axis=1, keepdims=True)
+    node_w = _normalise_over_theta(ratio.T).T
+    node_w_colour = _normalise_over_theta((node_colour / template_colour[None, :]).T).T
+
+    # onto the common brightness axis: a convex combination of the two
+    # bracketing nodes, clamped at the node edges (sec 5.4)
+    log10_f45_centers = _log10_f45_centers()
+    s_query = np.clip(log10_f45_centers, log10_s_grid[0], log10_s_grid[-1])
+    hi = np.clip(np.searchsorted(log10_s_grid, s_query), 1, n_node - 1)
+    lo = hi - 1
+    frac = (s_query - log10_s_grid[lo]) / (log10_s_grid[hi] - log10_s_grid[lo])
+
+    def on_axis(nw):
+        return ((1.0 - frac)[:, None] * nw[lo] + frac[:, None] * nw[hi]).T
+
+    w, frac_zero = _floor_normalised(on_axis(node_w))
+    w_colour_only, _ = _floor_normalised(on_axis(node_w_colour))
+    return dict(names=names, c_theta=c_theta, r_theta=r_theta, r_defined=r_defined, w=w,
+                w_colour_only=w_colour_only, frac_zero=frac_zero, centers=log10_f45_centers,
+                beyond3_fraction=beyond3_fraction, n_gal_node=n_gal_node, n_det_node=n_det_node,
+                n_iter_node=n_iter_node, log10_s_grid=log10_s_grid, bandwidth_r=bandwidth_r)
 
 
 def build_galz(config):
     with progress.Stage("bmstp.template_weights.galz") as st:
-        reg = _read_register(config, "galz")
-        names = reg["names"]
-        n_model = names.size
-        colour_theta = np.log10(reg["f_ref"]["I1"]) - np.log10(reg["f_ref"]["I2"])
-        colour_theta_f32 = colour_theta.astype(np.float32)
-        c_theta = _c_theta(reg)
-
-        # the library's density of templates in colour (sec 1.4, sec 5.4:
-        # "a kernel density of the templates' colours at the same
-        # bandwidth"): the SAME `_node_kde` Gaussian-KDE construction the
-        # galaxy nodes use below, run once on the templates against
-        # themselves at the fixed bandwidth the galaxy KDE uses -- never
-        # `RHO_KDE1`.
-        template_bandwidth = np.full(n_model, GALZ_COLOUR_BANDWIDTH_DEX, dtype=np.float32)
-        template_density, _ = _node_kde(colour_theta_f32, colour_theta_f32, template_bandwidth)
-
-        swire_path = config_module.product_path(config, "sky/derived", "swire", "galaxies", "survey")
-        with h5py.File(swire_path, "r") as f:
-            node = f["NODE"][:]
-            colour = f["COLOUR_I1I2"][:].astype(np.float64)
-            sigma = f["SIGMA_COLOUR_I1I2"][:].astype(np.float64)
-            log10_s_grid = f["LOG10_S_GRID"][:].astype(np.float64)
-        n_node = log10_s_grid.size
-        finite = np.isfinite(colour) & np.isfinite(sigma) & (sigma > 0)
-
-        # the common F_4.5 axis IS the absolute galaxy flux S (sec 5.4
-        # "Marks"): no per-shape origin lookup is needed any more (W25),
-        # unlike the pre-4.5B gray-factor axis this replaced.
-        log10_f45_centers = _log10_f45_centers()
-        n_b = log10_f45_centers.size
-
-        # one (n_model x galaxy-batch) KDE block per node (sec 5.4): the
-        # 61 nodes are independent, cut into pieces far more numerous than
-        # `n_jobs` (owner ruling 2026-10-09, `sesnaimpute.pieces`) rather
-        # than a stage-owned thread pool -- `colour`/`sigma`/`node`/
-        # `finite`/`colour_theta_f32` (region-wide, read-only) are bound
-        # into the piece function by `functools.partial`; each piece still
-        # batches its own galaxies under the 512 MB block (rule 10b).
-        n_jobs = int(config.n_jobs)
-        bounds = pieces.slices(n_node, n_jobs)
-        fn = functools.partial(_galz_node_piece, colour, sigma, node, finite, colour_theta_f32)
-        piece_results = pieces.run(fn, bounds, n_jobs, stage=st, unit="S nodes")
-        results = [r for chunk in piece_results for r in chunk]
-        node_density = np.empty((n_node, n_model), dtype=np.float64)
-        beyond3_fraction = np.empty(n_node, dtype=np.float64)
-        has_gal = np.empty(n_node, dtype=bool)
-        for k, (dens, beyond3, n_gal_k) in enumerate(results):
-            node_density[k] = dens
-            beyond3_fraction[k] = beyond3
-            has_gal[k] = n_gal_k > 0
-
-        # a node this build's own SWIRE pooling (`sky.derived.swire_galaxies.
-        # _pool_bright_nodes`) left with none of its own galaxies reads its
-        # nearest populated node's density instead of the flat "no galaxies"
-        # default `_node_kde` returns (review ledger C16): the SAME nearest-
-        # node borrowing `bmstp.atlas._gal_members` already applies to an
-        # empty counts-law node, so an empty colour node is never read as
-        # uniform here either (`has_gal`, from each piece's own `n_gal`,
-        # computed above).
-        if not has_gal.all():
-            node_ids = np.arange(n_node)
-            have_idx = node_ids[has_gal]
-            empty_idx = node_ids[~has_gal]
-            nearest = have_idx[np.argmin(np.abs(empty_idx[:, None] - have_idx[None, :]), axis=1)]
-            node_density[empty_idx] = node_density[nearest]
-            beyond3_fraction[empty_idx] = beyond3_fraction[nearest]
-            print(f"template_weights.galz: {empty_idx.size} empty S node(s) borrowed "
-                  f"from their nearest populated node: "
-                  + ",".join(f"{k}<-{n}" for k, n in zip(empty_idx.tolist(), nearest.tolist())),
-                  flush=True)
-
-        node_w = _normalise_over_theta((node_density / template_density[None, :]).T).T  # (n_node, n_model)
-
-        # interpolate the per-node, per-template normalised density onto
-        # log10_f45_centers (the common, absolute-flux axis, sec 2),
-        # vectorised over every template at once: a linear combination of
-        # the two bracketing nodes' own theta-normalised vectors, clamped
-        # at the node edges (which keeps the per-cell sum at 1, sec 5.4's
-        # "normalised over theta at each S": a convex combination of two
-        # vectors that each already sum to 1 sums to 1 too).
-        s_query = np.clip(log10_f45_centers, log10_s_grid[0], log10_s_grid[-1])
-        hi = np.clip(np.searchsorted(log10_s_grid, s_query), 1, n_node - 1)
-        lo = hi - 1
-        frac = (s_query - log10_s_grid[lo]) / (log10_s_grid[hi] - log10_s_grid[lo])
-        w = ((1.0 - frac)[:, None] * node_w[lo] + frac[:, None] * node_w[hi]).T  # (n_model, n_b)
-        w, frac_zero = _floor_normalised(w)
-
-        # the varying-cell range (brief item 1's check): a cell whose
-        # s_query clips to a grid edge repeats that edge node's
-        # per-template vector exactly, so it is identical across the
-        # brightness axis to the first (or last) cell; the varying span
-        # is the cells that differ from both edges.
-        same_lo = np.all(w == w[:, [0]], axis=0)
-        same_hi = np.all(w == w[:, [-1]], axis=0)
-        varying = np.where(~(same_lo | same_hi))[0]
-        varying_range = (int(varying.min()), int(varying.max())) if varying.size else (-1, -1)
-
+        t = _galz_tables(config, st)
+        w, w_colour_only, centers, r_theta = t["w"], t["w_colour_only"], t["centers"], t["r_theta"]
+        names, c_theta = t["names"], t["c_theta"]
         factors = {
             "colour": (w, c_theta, "", True,
-                       "sky/derived/swire/galaxies_swire_survey.hdf5 COLOUR_I1I2 KDE "
-                       "/ library colour KDE, bandwidth "
-                       f"{GALZ_COLOUR_BANDWIDTH_DEX:.2f} dex"),
+                       "sky/derived/swire/galaxies_swire_survey.hdf5 joint (COLOUR_I1I2, 70 micron "
+                       "over 4.5 micron) density, non-detections censored at their 70 micron limit "
+                       "/ library joint density, colour bandwidth "
+                       f"{GALZ_COLOUR_BANDWIDTH_DEX:.2f} dex, r bandwidth {t['bandwidth_r']:.3f} dex"),
         }
-        path = _write_library(config, "galz", "survey", names, c_theta, log10_f45_centers, factors)
+        path = _write_library(config, "galz", "survey", names, c_theta, centers, factors)
+
         col_sum = w.sum(axis=0)
-        print(f"template_weights.galz: max|colsum-1|="
-              f"{float(np.max(np.abs(col_sum - 1.0))):.3g}; "
-              f"floored_fraction={frac_zero:.4f}; varying cells={varying_range[0]}-{varying_range[1]}; "
+        varying_cells = np.where(~(np.all(w == w[:, [0]], axis=0) | np.all(w == w[:, [-1]], axis=0)))[0]
+        varying_range = ((int(varying_cells.min()), int(varying_cells.max()))
+                         if varying_cells.size else (-1, -1))
+        print(f"template_weights.galz: max|colsum-1|={float(np.max(np.abs(col_sum - 1.0))):.3g}; "
+              f"floored_fraction={t['frac_zero']:.4f}; varying cells={varying_range[0]}-{varying_range[1]}; "
               f"C_THETA range min={c_theta.min():.4f} median={np.median(c_theta):.4f} "
-              f"max={c_theta.max():.4f}; "
-              "beyond-3-bandwidths fraction per node: "
-              + ",".join(f"{v:.3f}" for v in beyond3_fraction), flush=True)
-        st.done(path, n_model=n_model, n_node=n_node,
-                 beyond3_mean=float(np.mean(beyond3_fraction)), floored_fraction=frac_zero)
-    return beyond3_fraction
+              f"max={c_theta.max():.4f}; beyond-3-bandwidths fraction per node: "
+              + ",".join(f"{v:.3f}" for v in t["beyond3_fraction"]), flush=True)
+        print("template_weights.galz: detections per S node (of galaxies): "
+              + ",".join(f"{d}/{n}" for d, n in zip(t["n_det_node"].tolist(), t["n_gal_node"].tolist())),
+              flush=True)
+        print(f"template_weights.galz: censored-density iterations per node max={int(t['n_iter_node'].max())}",
+              flush=True)
+        red = r_theta >= GALZ_RED_R
+        for flux in GALZ_SHARE_FLUX_MJY:
+            cell = int(np.argmin(np.abs(centers - np.log10(flux))))
+            print(f"template_weights.galz: weight share of templates with r>={GALZ_RED_R} at "
+                  f"{flux} mJy (cell {cell}): colour-only {float(w_colour_only[red, cell].sum()):.4f} "
+                  f"-> joint {float(w[red, cell].sum()):.4f} "
+                  f"(unweighted library share {float(red.mean()):.4f})", flush=True)
+        st.done(path, n_model=names.size, n_node=t["log10_s_grid"].size,
+                 beyond3_mean=float(np.mean(t["beyond3_fraction"])), floored_fraction=t["frac_zero"])
+    return t["beyond3_fraction"]
 
 
 # ---------------------------------------------------------------------------
@@ -1382,6 +1733,46 @@ def agb_tau_ratio(config):
         ratio_at_tau = cell_mass / counts
         ratio[sel] = ratio_at_tau[inverse] / np.sum(ratio_at_tau[inverse])
     return names, chem, log10_tau, ratio
+
+
+def agb_farir_check(config):
+    """Does the existing AGB factor already fix the far-infrared axis (spec
+    sec 5.2, brief unit 9)? That factor constrains the shell optical depth
+    `tau` per chemistry; this prints, per chemistry, how much `r =
+    log10(F70 / F4.5)` varies between templates of the same `tau` (the
+    root-mean-square deviation from each `tau`'s own mean, over every `tau`
+    holding more than one template) against the library sampling scale of
+    the two bands in quadrature (`sed_models.constants.
+    LIBRARY_SAMPLING_SIGMA_LOG_DEX`), with the mean `r` at a few `tau`.
+    Returns the per-chemistry within-`tau` scatter in dex."""
+    reg = _read_register(config, "agb", extra_bands=(FARIR_BAND,))
+    path = f"{config.inputs['sed_models']}/registers/{_REGISTER_FILE['agb']}"
+    with h5py.File(path, "r") as f:
+        tau = f["models/TAU"][:].astype(np.float64)
+        chem = np.char.decode(f["models/CHEM"][:].astype("S"), "utf-8")
+    r, defined = _template_log10_r(reg)
+    sampling = sed_constants.LIBRARY_SAMPLING_SIGMA_LOG_DEX
+    scale = float(np.hypot(sampling[FARIR_BAND], sampling["I2"]))
+    print(f"template_weights.agb FAR-INFRARED: templates with undefined r="
+          f"{int((~defined).sum())}/{r.size}; sampling scale of r={scale:.4f} dex", flush=True)
+    scatter = {}
+    for label in np.unique(chem):
+        sel = (chem == label) & defined
+        tau_u, inverse = np.unique(tau[sel], return_inverse=True)
+        n_at = np.bincount(inverse)
+        mean_at = np.bincount(inverse, weights=r[sel]) / n_at
+        resid = r[sel] - mean_at[inverse]
+        multi = n_at[inverse] > 1
+        rms = float(np.sqrt(np.mean(resid[multi] ** 2))) if multi.any() else float("nan")
+        scatter[label] = rms
+        pick = np.linspace(0, tau_u.size - 1, 5).astype(int)
+        print(f"template_weights.agb FAR-INFRARED: chemistry {label}: {sel.sum()} templates, "
+              f"{tau_u.size} distinct tau, total r spread (16/50/84%) "
+              + "/".join(f"{x:.2f}" for x in np.percentile(r[sel], [16, 50, 84]))
+              + f"; within-tau rms {rms:.4f} dex vs sampling scale {scale:.4f} -> "
+              + ("below, tau fixes r" if rms < scale else "ABOVE, tau does not fix r")
+              + "; mean r at tau " + ", ".join(f"{tau_u[i]:.3g}:{mean_at[i]:.2f}" for i in pick), flush=True)
+    return scatter
 
 
 def _agb_dusty_shares(config, region):
@@ -2127,6 +2518,7 @@ def build(config, regions=None):
     region_list = regions if regions else [r.name for r in regions_module.REGIONS]
 
     build_galz(config)
+    yso_farir_report(config)
     for region in region_list:
         build_h2shock(config, region)
         build_pahn(config, region)

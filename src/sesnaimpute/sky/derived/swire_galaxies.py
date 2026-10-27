@@ -35,6 +35,10 @@ module's acceptance check evaluates those two up to that sign flip, not a
 literal equality of the raw arrays. `UNIT`/`DEFINITION` attrs on every
 COLOUR_*/SIGMA_COLOUR_* dataset say so for a reader of the file alone.
 
+Each galaxy also carries its 70 um flux, uncertainty and detection flag
+from the SWIRE MIPS 70 um catalogue (`_match_70um`): a galaxy with no 70 um
+source is a non-detection below its field's `LIMIT_P70_MJY`.
+
 A band is missing when its flux or its uncertainty is absent or a sentinel
 (flux <= 0 or uncertainty <= 0, the SWIRE -99 sentinel included; no
 bandwidth is ever formed from a sentinel): both the colour and the sigma
@@ -49,6 +53,7 @@ import os
 import h5py
 import numpy as np
 import pandas as pd
+from scipy.spatial import cKDTree
 
 from sesnaimpute import build as build_module
 from sesnaimpute import config as config_module
@@ -74,6 +79,31 @@ SWIRE_FIELD_FILES = (
 #: (`sky.download.swire.build.COLUMNS`), uJy as distributed.
 SWIRE_FLUX_COLUMNS = ("flux_ap2_36", "flux_ap2_45", "flux_ap2_58", "flux_ap2_80")
 SWIRE_FLUX_ERR_COLUMNS = ("uncf_ap2_36", "uncf_ap2_45", "uncf_ap2_58", "uncf_ap2_80")
+
+#: SWIRE's MIPS 70 um catalogue files (`sky.download.swire.build.FIELDS_70`),
+#: one per field in `SWIRE_FIELD_FILES`' own order, with the columns this view
+#: reads: the position and its 1-sigma uncertainty (arcsec), the
+#: point-response-function flux and uncertainty (mJy) and the release's own
+#: signal-to-noise.
+SWIRE70_FIELD_FILES = (
+    "swire70_elaisn1.csv", "swire70_elaisn2.csv", "swire70_elaiss1.csv",
+    "swire70_lockman.csv", "swire70_xmmlss.csv", "swire70_cdfs.csv",
+)
+
+#: The signal-to-noise every source in the six SWIRE 70 um catalogue files
+#: clears (the release's own detection rule: the smallest `snr` in all six
+#: files is 7.0). A source's noise is its flux over this `snr` (the
+#: catalogue's `uncf_prf` is the fit error alone, several times smaller than
+#: the flux over `snr`). A galaxy with no 70 um source is a non-detection:
+#: its flux lies below the field's own cut, the median flux of the catalogued
+#: sources within `SWIRE70_SNR_WINDOW` of `SWIRE70_SNR_MIN`.
+SWIRE70_SNR_MIN = 7.0
+SWIRE70_SNR_WINDOW = 1.0
+
+#: A 70 um source belongs to the nearest SWIRE row within this many of its own
+#: 1-sigma position uncertainties (3 sigma, the usual association radius of a
+#: Gaussian position error).
+SWIRE70_MATCH_SIGMAS = 3.0
 
 #: The adopted star-galaxy split (module docstring): IRAC 3.6um stellarity
 #: (`prior.gal`'s `stell_36` column) at or above this threshold is a star.
@@ -134,6 +164,42 @@ def _pool_bright_nodes(node, n_node, min_count):
     return node_pooled, counts_pooled
 
 
+def _match_70um(path70, ra, dec, keep):
+    """The 70 um flux of each SWIRE row of one field, by position (the 70 um
+    table has its own source key and none of the IRAC table's, so the two
+    are joined on the sky): each 70 um source goes to the nearest SWIRE row
+    within `SWIRE70_MATCH_SIGMAS` of its own position uncertainty, and a row
+    claimed twice keeps the higher-signal source. Returns `(flux, sigma,
+    limit, n_catalogued, n_matched_galaxy)` per row, flux and sigma NaN where
+    the row has no 70 um source (sigma the flux over the catalogue's own
+    signal-to-noise), `limit` the field's 70 um flux below which nothing is
+    catalogued (`SWIRE70_SNR_WINDOW`, above), on every row. A 70 um source whose nearest SWIRE row is a star or has no
+    4.5 um flux (`keep` False) is not any galaxy's."""
+    d70 = pd.read_csv(path70)
+    n_row = ra.size
+    flux = np.full(n_row, np.nan)
+    sigma = np.full(n_row, np.nan)
+
+    def unit_vector(r, d):
+        r, d = np.radians(r), np.radians(d)
+        return np.column_stack([np.cos(d) * np.cos(r), np.cos(d) * np.sin(r), np.sin(d)])
+
+    tree = cKDTree(unit_vector(ra, dec))
+    sep, row = tree.query(unit_vector(d70["ra"].to_numpy(float), d70["dec"].to_numpy(float)))
+    sep_arcsec = np.degrees(2.0 * np.arcsin(np.minimum(sep, 2.0) / 2.0)) * 3600.0
+    pos_sigma = np.maximum(d70["unc_ra"].to_numpy(float), d70["unc_dec"].to_numpy(float))
+    ok = (sep_arcsec <= SWIRE70_MATCH_SIGMAS * pos_sigma) & keep[row]
+    # visit sources faintest-signal first so the highest-signal source claims a shared row last
+    order = np.argsort(d70["snr"].to_numpy(float))
+    for j in order[ok[order]]:
+        i = row[j]
+        flux[i] = d70["flux_prf"].iat[j]
+        sigma[i] = d70["flux_prf"].iat[j] / d70["snr"].iat[j]
+    at_cut = d70["snr"].to_numpy(float) < SWIRE70_SNR_MIN + SWIRE70_SNR_WINDOW
+    limit = float(np.median(d70["flux_prf"].to_numpy(float)[at_cut]))
+    return flux, sigma, limit, int(len(d70)), int(np.isfinite(flux[keep]).sum())
+
+
 def _read_field(path, field_index, log10_s_grid):
     """One SWIRE field CSV -> the surviving galaxies' rows (rule 10b: the
     catalogue is read one field at a time, never all six loaded together).
@@ -141,7 +207,7 @@ def _read_field(path, field_index, log10_s_grid):
     4.5um (I2) flux is measured and positive -- the same population
     `prior.gal.build_colour_cdf_tables` tabulates the CDF axes on.
     """
-    cols = list(SWIRE_FLUX_COLUMNS) + list(SWIRE_FLUX_ERR_COLUMNS) + ["stell_36"]
+    cols = list(SWIRE_FLUX_COLUMNS) + list(SWIRE_FLUX_ERR_COLUMNS) + ["stell_36", "ra", "dec"]
     df = pd.read_csv(path, usecols=cols)
     flux_mjy = df[list(SWIRE_FLUX_COLUMNS)].to_numpy(dtype=float) / 1000.0
     err_mjy = df[list(SWIRE_FLUX_ERR_COLUMNS)].to_numpy(dtype=float) / 1000.0
@@ -152,6 +218,13 @@ def _read_field(path, field_index, log10_s_grid):
     valid_i2 = np.isfinite(f2) & (f2 > 0)
     keep = (~is_star) & valid_i2
     idx = np.flatnonzero(keep)
+
+    # the 70 um flux of each surviving galaxy, by position (`_match_70um`)
+    f70, s70, limit70, n_cat70, n_match70 = _match_70um(
+        os.path.join(os.path.dirname(path), SWIRE70_FIELD_FILES[field_index]),
+        df["ra"].to_numpy(float), df["dec"].to_numpy(float), keep)
+    print(f"swire_galaxies: field {field_index}: 70 um catalogue {n_cat70} sources, "
+          f"{n_match70} matched to galaxies; limit {limit70:.2f} mJy")
 
     f1k, f2k, f3k, f4k = f1[idx], f2[idx], f3[idx], f4[idx]
     e1, e2, e3, e4 = err_mjy[idx, 0], err_mjy[idx, 1], err_mjy[idx, 2], err_mjy[idx, 3]
@@ -207,6 +280,10 @@ def _read_field(path, field_index, log10_s_grid):
         SIGMA_COLOUR_I2I3=np.sqrt(sigma2 ** 2 + sigma3 ** 2).astype(np.float32),
         SIGMA_COLOUR_I2I4=np.sqrt(sigma2 ** 2 + sigma4 ** 2).astype(np.float32),
         FIELD=np.full(idx.size, field_index, dtype=np.int8),
+        FLUX_P70_MJY=f70[idx].astype(np.float32),
+        SIGMA_FLUX_P70_MJY=s70[idx].astype(np.float32),
+        LIMIT_P70_MJY=np.full(idx.size, limit70, dtype=np.float32),
+        DETECTED_P70=np.isfinite(f70[idx]).astype(np.int8),
     ), int(is_star.sum()), int(df.shape[0])
 
 

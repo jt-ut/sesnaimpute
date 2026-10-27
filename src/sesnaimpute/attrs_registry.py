@@ -4160,3 +4160,77 @@ REGISTRY[("completeness_sesna_source", "SOURCE_ROW")] = (
     "falls in on the deepest PACS map covering it, copied from the PACS completeness file; -1 where no map "
     "covers the source in that band. A source near a map edge can have a row here yet be marked not covered "
     "(ORIGIN 91) in the PACS photometry; the photometry's ORIGIN decides.")
+
+
+# ---------------------------------------------------------------------------
+# Unit 9
+# ---------------------------------------------------------------------------
+REGISTRY[("galaxies_swire_survey", "FLUX_P70_MJY")] = (
+    "mJy",
+    "This galaxy's 70 micron flux density from the SWIRE MIPS 70 micron catalogue, for a galaxy that has a "
+    "source in that catalogue within three position-uncertainties of it; NaN for a galaxy with none, which is "
+    "a non-detection (read LIMIT_P70_MJY for how faint it could have been). The 70 micron and the 3.6-8.0 "
+    "micron catalogues carry no common source key, so the two are joined by position.")
+REGISTRY[("galaxies_swire_survey", "SIGMA_FLUX_P70_MJY")] = (
+    "mJy",
+    "The 1-sigma uncertainty of FLUX_P70_MJY: the flux divided by the catalogue's own signal-to-noise for that "
+    "source (not the smaller point-source fit error the catalogue also lists); NaN where FLUX_P70_MJY is NaN.")
+REGISTRY[("galaxies_swire_survey", "LIMIT_P70_MJY")] = (
+    "mJy",
+    "For every galaxy, the 70 micron flux density of its SWIRE field below which the catalogue lists no "
+    "source: the median flux of the field's catalogued sources whose signal-to-noise is within one of the "
+    "catalogue's cut of seven (every catalogued source has a signal-to-noise of at least seven). A galaxy with "
+    "no 70 micron source has 70 micron flux below this number.")
+REGISTRY[("galaxies_swire_survey", "DETECTED_P70")] = (
+    "flag, 1 detected, 0 not",
+    "1 where this galaxy has a source in the SWIRE 70 micron catalogue (FLUX_P70_MJY is finite), 0 where it "
+    "has none (its 70 micron flux is only known to lie below LIMIT_P70_MJY).")
+for _name, _units, _reading in (
+    ("SURVEY", "survey index, 0 HOPS, 1 eHOPS",
+     "For each source in the table, which published survey it comes from: 0 the Herschel Orion Protostar Survey "
+     "(Furlan et al. 2016), 1 its Aquila extension (Pokhrel et al. 2023). These are published HOPS and eHOPS data, "
+     "so a comparison of a classification with HOPS and eHOPS is not independent of anything built from this table."),
+    ("CLASS", "evolutionary class, C0 Class 0, CI Class I, FLAT flat spectrum, CII Class II",
+     "The source's own Spitzer-classified evolutionary class as the survey publishes it."),
+    ("FLUX_P70_MJY", "mJy",
+     "The source's published 70 micron flux density; NaN where the survey observed the source at 70 micron and did "
+     "not detect it (DETECTED_P70 is 0)."),
+    ("SIGMA_FLUX_P70_MJY", "mJy",
+     "The published 1-sigma uncertainty of FLUX_P70_MJY; NaN where FLUX_P70_MJY is NaN."),
+    ("FLUX_I2_MJY", "mJy",
+     "The source's published measured 4.5 micron flux density."),
+    ("DETECTED_P70", "flag, 1 detected, 0 not",
+     "1 where the source is detected at 70 micron, 0 where it was observed and not detected (its ratio is then "
+     "only known to lie below LOG10_R_LIMIT). A source the survey did not observe at 70 micron, and for eHOPS a "
+     "source with no 70 micron entry (its table does not say whether it was undetected or off the map), is not in "
+     "the table."),
+    ("LIMIT_P70_MJY", "mJy",
+     "For every source, the faintest 70 micron flux its survey publishes for any detected source (HOPS and eHOPS "
+     "separately): the stand-in for the survey's depth, since neither table gives a limit for a non-detection."),
+    ("LOG10_R", "dex",
+     "log10 of the source's 70 micron flux over its 4.5 micron flux: how much brighter it is in the far-infrared "
+     "than in the mid-infrared. NaN where the source was not detected at 70 micron."),
+    ("SIGMA_LOG10_R", "dex",
+     "The 1-sigma uncertainty of LOG10_R from the two fluxes' published uncertainties; NaN where LOG10_R is NaN."),
+    ("LOG10_R_LIMIT", "dex",
+     "For every source, log10 of LIMIT_P70_MJY over its 4.5 micron flux. For a source not detected at 70 micron "
+     "its LOG10_R is below this number."),
+):
+    REGISTRY[("farir_hops_survey", _name)] = (_units, _reading)
+REGISTRY[("galz_weights_survey", "W")] = (
+    "dimensionless",
+    "For every galaxy template and every cell of LOG10_F45_CENTERS, how common galaxies like this template are "
+    "among the SWIRE galaxies of that 4.5 micron brightness, relative to how many templates of the library look "
+    "like it: 'like it' means both its 3.6 minus 4.5 micron colour and its far-infrared ratio, 70 micron flux over "
+    "4.5 micron flux (as log10). Galaxies SWIRE did not detect at 70 micron count as lying below their own 70 "
+    "micron limit, so a template redder in the far-infrared than a galaxy's limit takes nothing from that "
+    "galaxy. Each cell sums to 1 over templates. Which population statement this factor encodes is named by "
+    "this dataset's own enclosing group's NAME attribute.")
+REGISTRY[("yso_weights_region", "W")] = (
+    "dimensionless",
+    "For every YSO template and every cell of LOG10_F45_CENTERS, this factor's own per-template weight: how the "
+    "published young-star census (its brightness density, its mix of evolutionary classes, and for the protostar "
+    "and Class II classes its far-infrared ratio, 70 micron flux over 4.5 micron flux, from the HOPS and eHOPS "
+    "surveys) or, for a template-matched factor, the region's own shift kernel, reweights that template relative "
+    "to the library's own template density, at that brightness. Which population statement this factor encodes "
+    "is named by this dataset's own enclosing group's NAME attribute.")

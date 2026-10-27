@@ -11,6 +11,11 @@ Table names were discovered against IRSA's TAP_SCHEMA (the per-field
 scan-listed name for the fully band-merged catalogue, as opposed to the
 per-band 24/70/160um tables): `chandra_cat_f05` (CDFS), `elaisn1_cat_s05`,
 `elaisn2_cat_s05`, `elaiss1_cat_f05`, `lockman_cat_s05`, `xmm_cat_s05`.
+
+The MIPS 70 um catalogue of the same six fields (`<field>_70_cat_*`) is pulled
+the same way into `swire70_<field>.csv`, beside the IRAC files and never
+rewriting them (the IRAC table has no 70 um column and the 70 um table no IRAC
+key; `sky.derived.swire_galaxies` matches them by position).
 """
 
 import os
@@ -42,6 +47,27 @@ COLUMNS = (
     "ext_fl_36", "ext_fl_45", "ext_fl_58", "ext_fl_80",
 )
 
+# Field name -> IRSA TAP table for the SWIRE MIPS 70 um single-band catalogue
+# (the band-merged IRAC tables above carry no 70 um column and the 70 um tables
+# carry no IRAC key, so the 70 um rows are their own sibling file per field,
+# matched to the IRAC rows by position downstream).
+FIELDS_70 = {
+    "ELAIS-N1": "elaisn1_70_cat_s05",
+    "ELAIS-N2": "elaisn2_70_cat_s05",
+    "ELAIS-S1": "elaiss1_70_cat_f05",
+    "Lockman": "lockman_70_cat_s05",
+    "XMM-LSS": "xmm_70_cat_s05",
+    "CDFS": "chandra_70_cat_f05",
+}
+
+# cntr (the page cursor, the 70 um table's own source key), position and its
+# uncertainty, the point-response-function flux and its uncertainty (mJy), the
+# release's own signal-to-noise, and its extraction flag.
+COLUMNS_70 = (
+    "cntr", "ra", "dec", "unc_ra", "unc_dec",
+    "flux_prf", "uncf_prf", "snr", "flag",
+)
+
 
 def build(config, regions=None):
     """Writes `sky/download/swire/swire_<field>.csv` for each of the six
@@ -53,6 +79,11 @@ def build(config, regions=None):
     os.makedirs(dest_dir, exist_ok=True)
     fields = list(FIELDS.items())
     with progress_module.Stage("sky.download.swire") as st:
+        for field_name, table in FIELDS_70.items():
+            slug = field_name.lower().replace("-", "")
+            dest_path = f"{dest_dir}/swire70_{slug}.csv"
+            n_rows, n_bytes = _tap.query_csv(table, COLUMNS_70, "cntr", dest_path)
+            print(f"swire build: {field_name} ({table}) -> {dest_path}: {n_rows} rows, {n_bytes} bytes")
         for i, (field_name, table) in enumerate(fields):
             slug = field_name.lower().replace("-", "")
             dest_path = f"{dest_dir}/swire_{slug}.csv"
