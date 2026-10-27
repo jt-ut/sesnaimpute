@@ -4048,11 +4048,14 @@ _PHOTOMETRY_PACS_READINGS = {
     "EXTENDED_{b}": ("true or false",
         "True for a detected source whose measured width is more than 1.5 times the beam width, a sign that the emission is extended rather than a point source; false otherwise, including for every source that is not detected."),
 }
-_P160_NOTE = (" At 160 micron, with the normalisation difference allowed for, these fluxes sit about 20 % below "
-              "eHOPS's published 160 micron fluxes for the same protostars (Aquila, 117 sources), while 70 and 100 "
-              "micron agree with eHOPS within 1 %; the difference grows with the annulus's closeness to the source "
-              "and most likely lies in the maps. The 160 micron band also "
-              "contains the [C II] 158 micron line, and its beam is about 12 arcsec, so neighbours blend more.")
+_P160_NOTE = (" At 160 micron: this is the Pokhrel et al. 2023 Table 1 recipe (12.8 arcsec aperture, 16.0-22.4 "
+              "arcsec annulus, clipped-mode sky, correction to total flux from the PACS red encircled-energy tables) on "
+              "the archive's SPG v14 JScanam maps; the same recipe on the Herschel Gould Belt Survey team's Scanamorphos "
+              "maps agrees within 1 per cent, and at 70 micron both agree with eHOPS's published values within 0-2.5 "
+              "per cent. At 160 micron eHOPS's published values are 1.22 times what their Table 1 recipe yields on either "
+              "map production; the cause cannot be determined from the paper (a wider sky annulus, a different "
+              "correction, or a different combination of maps), and the question is with the eHOPS authors. The 160 "
+              "micron band also contains the [C II] 158 micron line, and its beam is about 12 arcsec.")
 for _band, _wave in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_units, _reading) in _PHOTOMETRY_PACS_READINGS.items():
         _text = _reading.format(w=_wave, b=_band)
