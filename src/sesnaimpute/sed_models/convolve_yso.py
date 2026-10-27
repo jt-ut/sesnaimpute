@@ -104,11 +104,17 @@ MIN_FINITE_WEIGHT_FRAC = 0.5
 # PART 1 -- THE CONVOLUTION (YSO)
 # ==========================================================================
 
-def convolve_cube(flux_fits, filt, chunk=CHUNK_MODELS):
+def convolve_cube(flux_fits, filt, chunk=CHUNK_MODELS, limit=None):
     """(n_model, n_ap) band flux and flux_err in mJy of every model of a
     flux.fits cube through sedfitter Filter `filt` (already normalised),
     undefined (model, aperture) cells NaN rather than 0 -- see module
     docstring for the exact formula and the UNDEFINED rule.
+
+    `limit`, if given, processes only the FIRST `limit` models of the raw
+    cube (by its own row order) -- actually bounds the compute, not just
+    the returned array, so a timing/verification slice of a 720k-model
+    geometry (e.g. spubsmi) costs proportionally to `limit`, not to the
+    whole cube.
 
     Returns (flux, flux_err, undefined, fully_finite, names, ap_au).
     flux_err is None if the cube carries no UNCERTAINTIES extension.
@@ -125,6 +131,8 @@ def convolve_cube(flux_fits, filt, chunk=CHUNK_MODELS):
     unc_factor = cube.unc.unit.to(u.mJy) if has_unc else None
 
     n, n_ap = cube.n_models, cube.n_ap
+    if limit is not None:
+        n = min(n, limit)
     flux = np.full((n, n_ap), np.nan, dtype=np.float64)
     flux_err = np.full((n, n_ap), np.nan, dtype=np.float64) if has_unc else None
     undefined = np.zeros((n, n_ap), dtype=bool)
@@ -152,7 +160,7 @@ def convolve_cube(flux_fits, filt, chunk=CHUNK_MODELS):
                     fe = weighted_s.sum(axis=1) / sum_finite_r * sum_all_r
                 flux_err[lo:hi, i_ap] = np.where(bad, np.nan, fe)
 
-    names = np.asarray(cube.names)
+    names = np.asarray(cube.names)[:n]
     ap_au = np.asarray(cube.apertures.to(u.au).value
                        if hasattr(cube.apertures, "unit") else cube.apertures, dtype=float)
     return flux, flux_err, undefined, fully_finite, names, ap_au
@@ -174,35 +182,48 @@ def _release_band_flux(geometry_dir, band, ref_names):
 def convolve_geometry(geometry_dir, out_dir, bands=YSO_BANDS, chunk=CHUNK_MODELS,
                       limit=None, verify_against_release=False, log=print):
     """Convolve one YSO geometry's raw flux.fits into `<out_dir>/<band>.fits`
-    for every band in `bands` -- rows written in the geometry's OWN
-    parameters.fits order (the join key is MODEL_NAME, never position).
-    `limit`, if given, convolves only the first `limit` models (by raw
-    flux.fits row order) -- a timing/verification slice, never a
-    scientific subset. Returns {band: path}."""
+    for every band in `bands`.
+
+    With `limit=None` (the normal, full-geometry case): rows are written
+    in the geometry's OWN parameters.fits order (the join key is
+    MODEL_NAME, never position -- flux.fits and parameters.fits are not
+    guaranteed to agree row-for-row).
+
+    With `limit` given (a timing/verification slice, never a scientific
+    subset -- the brief's own "first N models, your choice"): the
+    alignment to parameters.fits is skipped and the first `limit` models
+    are taken in the raw flux.fits cube's OWN row order instead, so the
+    actual CONVOLUTION compute is bounded to `limit` models (`convolve_
+    cube`'s own `limit`), not merely the returned array -- a 720k-model
+    geometry sliced to 20,000 costs proportionally to 20,000, not 720k.
+    Returns {band: path}."""
     flux_fits = os.path.join(geometry_dir, "flux.fits")
     assert os.path.exists(flux_fits), f"{flux_fits} missing"
-    ref_names = np.char.strip(np.asarray(
-        fits.getdata(os.path.join(geometry_dir, "parameters.fits"), 1)["MODEL_NAME"]).astype(str))
-    if limit is not None:
-        ref_names = ref_names[:limit]
+    ref_names = None
+    if limit is None:
+        ref_names = np.char.strip(np.asarray(
+            fits.getdata(os.path.join(geometry_dir, "parameters.fits"), 1)["MODEL_NAME"]).astype(str))
 
     # Filters first: a missing curve stops the run before any work.
     filters = {b: mc.build_sedfitter_filter(b) for b in bands}
     os.makedirs(out_dir, exist_ok=True)
     written = {}
+    final_names = None
     for b in bands:
         t0 = time.perf_counter()
-        flux, flux_err, undefined, fully_finite, names, ap_au = convolve_cube(flux_fits, filters[b], chunk=chunk)
-        if limit is not None:
-            flux = flux[:limit]
-            flux_err = flux_err[:limit] if flux_err is not None else None
-            undefined, fully_finite, names = undefined[:limit], fully_finite[:limit], names[:limit]
-        order = align_by_name(ref_names, names)
-        flux, undefined, fully_finite = flux[order], undefined[order], fully_finite[order]
-        flux_err = flux_err[order] if flux_err is not None else None
+        flux, flux_err, undefined, fully_finite, names, ap_au = convolve_cube(
+            flux_fits, filters[b], chunk=chunk, limit=limit)
+        if ref_names is None:
+            out_names = names  # limited/slice run: raw cube order, no parameters.fits join
+        else:
+            order = align_by_name(ref_names, names)
+            flux, undefined, fully_finite = flux[order], undefined[order], fully_finite[order]
+            flux_err = flux_err[order] if flux_err is not None else None
+            out_names = ref_names
+        final_names = out_names
 
         written[b] = mc.write_convolved_band_fits(
-            None, b, ref_names, flux, ap_au,
+            None, b, out_names, flux, ap_au,
             filter_wavelength_um=mc.filter_central_wavelength_um(b),
             total_flux_err_mjy=flux_err, convmeth="sedfitter",
             convmeth_note="YSO raw flux.fits, NaN-aware (owner 2026-10-27)",
@@ -215,7 +236,7 @@ def convolve_geometry(geometry_dir, out_dir, bands=YSO_BANDS, chunk=CHUNK_MODELS
                f"[{elapsed:.1f}s]  undefined(model,ap) cells={n_undefined}")
 
         if verify_against_release:
-            release_flux = _release_band_flux(geometry_dir, b, ref_names)
+            release_flux = _release_band_flux(geometry_dir, b, out_names)
             zero_mismatch = int(((release_flux == 0) & np.isfinite(flux)).sum())
             ratio_mask = fully_finite & (release_flux != 0) & np.isfinite(flux)
             if ratio_mask.any():
@@ -226,6 +247,8 @@ def convolve_geometry(geometry_dir, out_dir, bands=YSO_BANDS, chunk=CHUNK_MODELS
             msg += (f"  release_zero_ours_finite={zero_mismatch}  "
                    f"median_ratio_ours/release(fully-finite,n={int(ratio_mask.sum())})={median_ratio:.6f}")
         log(msg)
+
+    mc.verify_convolved_band_fits(None, bands, final_names, out_dir=out_dir, allow_nan=True)
     return written
 
 
