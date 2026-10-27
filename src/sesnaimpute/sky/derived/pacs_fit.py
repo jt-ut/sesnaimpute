@@ -48,8 +48,8 @@ from scipy.spatial import cKDTree
 from scipy.special import erfc  # import before healpy for native-library initialisation order
 import healpy as hp
 
-from sesnaimpute.sky.derived.pacs_psf import (APERTURES, CachedPairedPSF, aperture_fraction, beam_fwhm_arcsec,
-                                              published_components_for_map)
+from sesnaimpute.sky.derived.pacs_psf import (APERTURES, CachedPairedPSF, aperture_eef, aperture_fraction,
+                                              beam_fwhm_arcsec, published_components_for_map)
 from sesnaimpute.sky.download.herschel_pacs.index import MapRecord, maps_root, read_index  # noqa: F401
 
 #: detection threshold in sigma (owner 2026-10-24); defines recovery in the completeness
@@ -680,10 +680,50 @@ class Tile:
         self._psf = CachedPairedPSF.from_map(
             omap.wcs, self.shape, components, half_size=self.table_half, integration_order=8,
             spatial_nodes=PSF_SPATIAL_NODES, subpixel_steps=PSF_SUBPIXEL_STEPS)
+        # one normalisation for every use of the table (fit amplitude, artificial source): the release EEF's
+        # total-flux fraction inside the aperture radius, the one the aperture photometry divides by
+        self.psf_scale = 1.0 / self._enclosed_over_eef(config)
+        self._psf = self._psf.scaled(self.psf_scale)
         self._tree = None
         self.neighbours = self._find_neighbours()
         if self.neighbours.x.size:
             self._tree = cKDTree(np.c_[self.neighbours.x, self.neighbours.y])
+
+    def _enclosed_over_eef(self, config):
+        """The point-spread table's flux inside the aperture radius (no sky subtracted), for a source of unit
+        amplitude on an empty image, over the release EEF's total-flux fraction there (`pacs_psf.aperture_eef`):
+        the mean over a 3 x 3 sub-pixel lattice at the valid position nearest the map centre whose aperture and
+        annulus lie wholly on valid data. The table is divided by it (P70 scan maps: 0.996)."""
+        r_ap, r_in, r_out = (r / self.pixel_arcsec for r in APERTURES[self.record.band])
+        reach = int(np.ceil(r_out)) + 2
+        h = int(np.ceil(self._psf.extent)) + 1
+        margin = max(reach, h)
+        ny, nx = self.shape
+        valid = np.isfinite(self.error)
+        cy, cx = np.mgrid[margin:ny - margin:2, margin:nx - margin:2]
+        order = np.argsort(np.hypot(cy - ny / 2, cx - nx / 2), axis=None)
+        for k in order:
+            y0, x0 = int(cy.ravel()[k]), int(cx.ravel()[k])
+            if valid[y0 - reach:y0 + reach + 1, x0 - reach:x0 + reach + 1].all():
+                break
+        else:
+            raise ValueError("%s: no position with a wholly valid aperture and annulus" % self.record.map_id)
+        sub = np.arange(3) / 3.0
+        x = (x0 + sub[None, :] + 0 * sub[:, None]).ravel()
+        y = (y0 + sub[:, None] + 0 * sub[None, :]).ravel()
+        real = self.image
+        enclosed = []
+        try:
+            for i in range(x.size):            # one source at a time: the nine positions overlap
+                self.image = np.zeros_like(real)
+                self._add_sources(x[i:i + 1], y[i:i + 1], 1.0)
+                f, sky, _sd, area, cov = _aperture_core(self.image, self.error, x[i:i + 1], y[i:i + 1], r_ap, r_in, r_out, 5)
+                if not cov.all():
+                    raise ValueError("%s: the normalisation position is not covered" % self.record.map_id)
+                enclosed.append(float((f + sky * area)[0]))
+        finally:
+            self.image = real
+        return float(np.mean(enclosed)) / aperture_eef(config, self.record)
 
     # -- geometry ---------------------------------------------------------
     def xy(self, ra_deg, dec_deg):

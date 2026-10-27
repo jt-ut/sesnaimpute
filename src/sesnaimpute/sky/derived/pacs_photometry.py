@@ -22,8 +22,7 @@ products:
   source of its flux in its cell, by recovering artificial sources of known flux injected into the map:
   `SCATTER_<B>_MJY` (aperture, METHOD 1) or `SCATTER_BLEND_<B>_MJY` (joint fit, METHOD 2) of the cell's
   row, interpolated in flux (log-linear) between the two planes bracketing FNU - CELL_OFFSET (a joint-fit source
-  whose cell has no SCATTER_BLEND takes the nearest cell's within three pooling radii and of similar noise, else
-  its own aperture value). A source
+  whose cell has no SCATTER_BLEND takes its own aperture value). A source
   that is not detected carries the noise of its 30-arcsec cell, `CELL_SIGMA_<B>_MJY`, the same number
   the detection rule below uses; the fit's propagated pixel noise is never added to either.
 - detection: flux - CELL_OFFSET >= 5 x CELL_SIGMA (origin 1), else origin 90, for the aperture flux and for
@@ -334,40 +333,13 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
 
 
 def _blend_fallback(f, band, scatter, scatter_blend):
-    """SCATTER_BLEND of every row for the photometry: the row's own where it holds a measurement; otherwise the
-    nearest row of the same map with one within three times the pooling radius whose CELL_SIGMA is within the
-    pooling noise factor of its own; otherwise the row's aperture SCATTER (printed counts)."""
-    attrs = f["CURVE_" + band].attrs
-    radius, factor = 3.0 * float(attrs["POOL_ARCSEC"]), float(attrs["NOISE_POOL_FACTOR"])
+    """SCATTER_BLEND of every row for the photometry: the row's own where it holds a measurement (the completeness
+    stage pools the blend injections in S/N over up to three pooling radii already); otherwise the row's aperture
+    SCATTER (printed count)."""
     have = np.isfinite(scatter_blend).any(axis=1)
-    eff = scatter_blend.copy()
-    ra, dec = f["CELL_RA_" + band][:], f["CELL_DEC_" + band][:]
-    cell_map, log_sigma = f["CELL_MAP_INDEX_" + band][:], np.log(np.maximum(f["CELL_SIGMA_%s_MJY" % band][:], 1e-30))
-    xyz = _unit_vectors(ra, dec)
-    chord = 2.0 * np.sin(np.radians(radius / 3600.0) / 2.0)
-    n_near = n_own = 0
-    for m in np.unique(cell_map):
-        rows = np.flatnonzero(cell_map == m)
-        fin, need = rows[have[rows]], rows[~have[rows]]
-        if need.size == 0:
-            continue
-        pick = np.full(need.size, -1, np.int64)
-        if fin.size:
-            k = min(16, fin.size)
-            dist, idx = cKDTree(xyz[fin]).query(xyz[need], k=k, distance_upper_bound=chord)
-            dist, idx = dist.reshape(need.size, k), idx.reshape(need.size, k)
-            cand = fin[np.minimum(idx, fin.size - 1)]
-            good = np.isfinite(dist) & (np.abs(log_sigma[cand] - log_sigma[need][:, None]) <= np.log(factor))
-            first = good.argmax(axis=1)
-            take = good.any(axis=1)
-            pick[take] = cand[np.arange(need.size), first][take]
-        near = pick >= 0
-        eff[need[near]] = scatter_blend[pick[near]]
-        eff[need[~near]] = scatter[need[~near]]
-        n_near += int(near.sum())
-        n_own += int((~near).sum())
-    print("  %s: %d cells have no measured joint-fit error: %d take the nearest cell's within %.0f arcsec, %d their own "
-          "aperture error" % (band, int((~have).sum()), n_near, radius, n_own), flush=True)
+    eff = np.where(have[:, None], scatter_blend, scatter)
+    print("  %s: %d of %d cells have no measured joint-fit error and use their own aperture error"
+          % (band, int((~have).sum()), have.size), flush=True)
     return eff
 
 

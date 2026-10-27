@@ -41,6 +41,7 @@ local background. This confirms the old code's 0.911 for P70 parallel 60"/s
 (it came from EEF_blu_60para_21.txt) and extends it: P100 is 0.906.
 """
 
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -156,6 +157,20 @@ def aperture_fraction(config, record):
                              "single-template aperture fraction is unverified at that band")
         return _single_template_fraction(config, record, single)
     return physical_aperture_fraction(config, record, "total", True)
+
+
+def aperture_eef(config, record):
+    """The fraction of a point source's total flux inside the eHOPS aperture radius, with no sky
+    subtraction, from the same release EEF table (or one-direction template) `aperture_fraction` reads:
+    the normalisation the map's point-spread table is held to (`pacs_fit.Tile`), so that a PSF fit's
+    amplitude, an injected artificial source and the aperture photometry all mean the same total flux."""
+    single = _single_direction_tag(config, record)
+    if single is not None:
+        if record.band == "P100":
+            raise ValueError("the +42 and -42 P100 templates differ by about 3 percent inside 8 arcsec, so the "
+                             "single-template aperture fraction is unverified at that band")
+        return _single_template_fraction(config, record, single, annulus_share=False)
+    return physical_aperture_fraction(config, record, "total", False)
 
 
 def _single_template_fraction(config, record, tag, annulus_share=True):
@@ -414,6 +429,12 @@ class CachedPairedPSF:
                                     integration_order)[0]
         table.flags.writeable = False
         return cls(table, tuple(shape), extent, subpixel_steps, integration_order)
+
+    def scaled(self, factor):
+        """The same cache with every response multiplied by `factor` (a normalisation, `pacs_fit.Tile`)."""
+        table = (self.table * self.table.dtype.type(factor)).astype(self.table.dtype)
+        table.flags.writeable = False
+        return dataclasses.replace(self, table=table)
 
     def evaluate_xy(self, source_x, source_y, pixel_x, pixel_y):
         sx, sy = np.asarray(source_x, dtype=float), np.asarray(source_y, dtype=float)

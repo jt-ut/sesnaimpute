@@ -3907,37 +3907,61 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
     "CURVE_{b}": ("completeness fraction x600, uint16",
         "One row per covered 30-arcsec cell of every Herschel PACS {w} micron map, for all cells inside the "
         "region's source bounding box padded by about 7 arcmin (overlapping maps each keep their cells; "
-        "SOURCE_ROW points at the deepest one): the probability that a point source of the flux in "
-        "MAG_GRID_{b} placed anywhere in the cell is detected at 5 sigma or better, stored as the "
-        "probability times 600. Measured by forced fits at {n} random positions per cell on the real map, "
-        "so real background structure and neighbouring sources are included; sources fainter than the "
-        "last plane are treated as undetected. Rows are ordered by map and then cell."),
-    "MAG_GRID_{b}": ("mag relative to 1 Jy",
-        "The magnitudes CURVE_{b} and PIXEL_CURVE_{b} are tabulated at: m = -2.5 log10(flux / 1 Jy), "
-        "{mmin} to {mmax} in steps of {dm}, bright to faint (the same grid for every region). The "
-        "zero point is 1 Jy, stored on CURVE_{b} as ZERO_POINT_JY."),
-    "ENVELOPE_{b}": ("completeness fraction x600, uint16",
-        "At each magnitude of MAG_GRID_{b}, the largest value of CURVE_{b} over all rows: the deepest "
-        "{w} micron completeness anywhere in this region, stored as the probability times 600; all zero "
-        "where the region has no {w} micron coverage."),
-    "COMPLETED_FROM_{b}": ("mag",
-        "All NaN: every {w} micron curve is measured over its whole range; nothing is extrapolated. Kept "
-        "so the layout matches completeness_sesna_source."),
-    "N_POS_{b}": ("positions",
-        "For each row of CURVE_{b}, the number of random positions in the cell that lay on valid data "
-        "and entered its curve and noise (at most {n})."),
-    "N_SIGMA_POS_{b}": ("positions",
-        "For each row of CURVE_{b}, how many random positions set its noise: the positions on valid data "
-        "farther than one beam from every bright source, summed over the cells of the 3 x 3 block of "
-        "cells around it whose noise entered the median. 0 means no cell of the block was clean and "
-        "the map's median noise was used."),
-    "CELL_RA_{b}": ("deg ICRS", "Right ascension of the centre of each cell of CURVE_{b}, in the same row order."),
-    "CELL_DEC_{b}": ("deg ICRS", "Declination of the centre of each cell of CURVE_{b}, in the same row order."),
-    "CELL_OBSID_{b}": ("observation identifier(s)",
-        "The Herschel observation identifier(s), comma separated, of the map each cell of CURVE_{b} was "
-        "measured on."),
-    "CELL_MAP_{b}": ("map identifier",
-        "The archive file name of the {w} micron map each cell of CURVE_{b} was measured on."),
+        "SOURCE_ROW points at the deepest one). Each value is the fraction of artificial point sources of the "
+        "flux in MAG_GRID_{b} that the catalogue recovers as detections at that cell, stored as the fraction "
+        "times 600. The artificial sources are the band's point-spread pattern added to a copy of the real map at "
+        "random positions, never two close enough for one's light to reach the other's aperture or sky annulus, "
+        "measured exactly as a catalogue source at that position is (aperture photometry, or the joint fit where a "
+        "detected source lies within one beam), and counted as recovered when their flux minus "
+        "CELL_OFFSET_{b}_MJY reaches 5 times CELL_SIGMA_{b}_MJY, whatever the flux error. Artificial sources are injected at fixed multiples of each cell's own noise (CELL_SIGMA_{b}_MJY), from 0.3 to 1000 times it in steps of 0.1 in the logarithm, and the counts of the cells whose centres lie within 120 arcsec of the cell on the same map are added at each multiple (widened to 240, then 360 arcsec where fewer than 100 result). The value at a flux is read at that flux over the cell's own CELL_SIGMA_{b}_MJY, interpolating linearly in the logarithm between the two nearest multiples: the shape comes from the neighbourhood, the scale and the offset are the cell's own. The value at "
+        "the faintest fluxes is not zero: it is the chance that the rule fires on a position with almost no source "
+        "flux (see CONTAMINATION_{b}). Rows are ordered by map and then cell."),
+    "N_POS_{b}": ("injections",
+        "For each row of CURVE_{b}, the number of artificial sources behind its value at the faintest plane of "
+        "MAG_GRID_{b}: those injected at the two multiples of the noise that bracket that flux, in the cells within "
+        "the pooling radius (120 arcsec, widened where too few) on its map, on valid data, not counting those within "
+        "half a beam of a detected source (the smaller of the two counts)."),
+    "FLUX90_{b}_MJY": ("mJy",
+        "For each row of CURVE_{b}, the faintest flux at which the recovered fraction of the artificial sources is "
+        "still at least 0.9: the grid read from its bright end, interpolated linearly in the logarithm of the flux "
+        "to where the fraction crosses 0.9. NaN where even the brightest plane does not reach 0.9; the faintest "
+        "plane's flux if no plane falls below it."),
+    "BIAS_{b}_MJY": ("mJy",
+        "For each row of CURVE_{b} and each plane of MAG_GRID_{b}: the median of (recovered flux minus injected "
+        "flux) over all the artificial sources measured by aperture photometry, detected or not. "
+        "It is measured in units of each injection's own cell noise, pooled and read as CURVE_{b} is, and multiplied "
+        "by the row's CELL_SIGMA_{b}_MJY; above 1000 times the noise it grows in proportion to the flux. The "
+        "recovered flux is the flux the catalogue reports, without CELL_OFFSET_{b}_MJY subtracted. NaN where "
+        "fewer than 100 artificial sources are in reach."),
+    "SCATTER_{b}_MJY": ("mJy",
+        "For each row of CURVE_{b} and each plane of MAG_GRID_{b}: the photometric error of a detected {w} micron "
+        "source of that flux at that cell, 1.4826 times the median absolute deviation about the median of "
+        "(recovered flux minus injected flux) over all the artificial sources measured by aperture photometry, "
+        "detected or not (a detection's error must not be conditioned on the detection itself, which would cut "
+        "off the downward fluctuations near the threshold), measured in units of each injection's own cell noise, pooled and read as CURVE_{b} is, and "
+        "multiplied by the row's CELL_SIGMA_{b}_MJY (above 1000 times the noise it grows in proportion to the "
+        "flux). This is the uncertainty the photometry product assigns to a detected, isolated source. It "
+        "describes the core of the error distribution; the rarer large excesses from unrelated objects in the "
+        "aperture are given by CONTAMINATION_{b}. NaN where fewer than 100 artificial sources are in reach."),
+    "SCATTER_BLEND_{b}_MJY": ("mJy",
+        "The same as SCATTER_{b}_MJY for a source fitted jointly with a detected neighbour within one beam (the "
+        "artificial source is one more member of the fitted group). It comes from a separate set of artificial sources: "
+        "for every detected source of the map, 40 at each multiple of the noise in the ring from half a beam to one "
+        "beam around it, all those the joint fit could separate (detected or not), pooled and read as SCATTER_{b}_MJY "
+        "is. NaN where fewer than 30 are in reach "
+        "within 360 arcsec, which is most cells far from a detected source; the photometry then uses the cell's "
+        "SCATTER_{b}_MJY."),
+    "CONTAMINATION_{b}": ("probability",
+        "For each row of CURVE_{b}: the chance that the detection rule fires at a position in that cell where the "
+        "source itself contributes almost nothing, because unrelated emission (a compact cloud core, a background "
+        "galaxy, a sharp structure in the sky) lies inside the aperture. Measured as the fraction of artificial "
+        "sources at 0.3 times the cell noise that were counted as detections. The cells of each map are ranked by "
+        "their sky brightness (the clipped sky in the annulus; PACS maps have no absolute zero level, so the "
+        "ranking is within a map) and cut into 5 equal groups; each group's value pools those injections over "
+        "every map of the band in the region (attributes BIN_VALUES and BIN_INJECTIONS, faint to bright sky). "
+        "It describes the purity of the cell's detections: summed over the covered sources of a region it is the "
+        "number of detections expected to come from unrelated flux. It is already inside CURVE_{b} at the faintest "
+        "fluxes. It cannot be applied to a single source: it does not say whether a given detection is affected."),
     "CELL_SIGMA_{b}_MJY": ("mJy",
         "The one-sigma uncertainty of a {w} micron point-source flux measured in each cell of CURVE_{b}: "
         "the median, over the 3 x 3 block of cells around it, of 1.4826 times the median absolute deviation "
@@ -4157,8 +4181,7 @@ for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
         "(METHOD 1) or for the joint fit with a close neighbour (METHOD 2), interpolated in the logarithm of the "
         "flux between the two flux steps that bracket the source's flux minus its cell's empty-sky offset "
         "(SCATTER and SCATTER_BLEND of the completeness product; for a jointly fitted source whose cell has no SCATTER_BLEND, "
-        "that of the nearest cell within 360 arcsec on the same map with similar noise, else the aperture SCATTER of its "
-        "own cell). For a source that is covered but not detected "
+        "the aperture SCATTER of its own cell). For a source that is covered but not detected "
         "(ORIGIN 90) it is the noise of its cell, LOCAL_RMS. Where ORIGIN is 2 it holds 0.99, the value the source "
         "table uses to mark an upper bound; NaN where the band does not cover the source, and where the "
         "completeness product has no measurement for the cell at any flux.")
