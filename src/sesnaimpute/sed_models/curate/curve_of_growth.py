@@ -119,7 +119,9 @@ def peak_and_floor(flux_cubes, dex_below_peak=FLOOR_DEX_BELOW_PEAK):
     n = flux_cubes[bands[0]].shape[0]
     peak_row = np.zeros(n)
     for band in bands:
-        peak_row = np.maximum(peak_row, np.asarray(flux_cubes[band]).max(axis=1))
+        # the cube carries NaN where the release left an aperture undefined (convolve_yso); the peak is
+        # over the defined apertures, so one unresolved aperture never darkens a whole model
+        peak_row = np.fmax(peak_row, np.nanmax(np.asarray(flux_cubes[band]), axis=1))
     all_zero_flux = peak_row <= 0
     # log10(0) = -inf on all-zero rows: guarded rather than left to warn.
     with np.errstate(divide="ignore"):
