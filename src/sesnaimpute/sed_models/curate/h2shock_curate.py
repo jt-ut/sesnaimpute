@@ -1082,8 +1082,8 @@ def write_models_conf(out_path, name=DEFAULT_MODEL_SET_NAME):
 # no position on where `sigma_log` comes from. The current driver
 # (build/h2shock.py) calls `build_quotient_space()` with NO `sigma_log`
 # argument at all, taking its default: `constants.
-# LIBRARY_SAMPLING_SIGMA_LOG_VECTOR`, twice the surveys' own published
-# absolute-calibration floor (owner's ruling) -- not the
+# LIBRARY_SAMPLING_SIGMA_LOG_VECTOR`, the precision of a 5-sigma
+# detection in every band (owner's ruling 2026-10-27) -- not the
 # catalogue-measured `sed_models_register.noise` product an earlier
 # build used, which is being retired.
 #

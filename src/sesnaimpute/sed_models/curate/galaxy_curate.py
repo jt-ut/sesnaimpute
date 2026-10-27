@@ -17,8 +17,8 @@ three parts, and the pipeline below is organised around them:
      unchanged from the earlier 2026-10-09 curation session.
 
   2. SAMPLING AT THE FITTER'S RESOLUTION -- one global r-net, at one noise
-     length (SIGEFF -- twice the surveys' published absolute-calibration
-     floor, a literature constant; see read_sampling_quotient_space),
+     length (SIGEFF -- from a 5-sigma detection's precision in every band;
+     see read_sampling_quotient_space),
      over the WHOLE capped raw set, pooled across all three sources: every raw (template,
      z) row within SIGEFF of a kept representative, no two kept
      representatives closer than SIGEFF. The kept count is whatever this
@@ -1429,28 +1429,12 @@ def read_sampling_quotient_space(laws=None):
     SIGMA_LOG this used to read via sed_models_register.noise.read, and
     an intermediate draft that sampled at the bare survey calibration
     floor): sigma_log is sesnacomplete.constants.
-    LIBRARY_SAMPLING_SIGMA_LOG_VECTOR -- TWICE the survey teams' own
-    published absolute-calibration floor (2MASS J/H/Ks 0.010 dex,
-    Skrutskie et al. 2006 AJ 131,1163; IRAC I1-I4 0.013 dex, Reach et al.
-    2005 PASP 117,978; MIPS 24um 0.017 dex, Engelbracht et al. 2007 PASP
-    119,994 -- so 0.020/0.026/0.034 dex respectively).
+    LIBRARY_SAMPLING_SIGMA_LOG_VECTOR -- the precision of a 5-sigma
+    detection, 0.0869 dex in every band (owner's ruling 2026-10-27; the
+    derivation is at that constant).
 
-    The factor of 2 (constants.LIBRARY_SAMPLING_SIGMA_FACTOR) is derived,
-    not tuned: a grid of spacing d sampling a chi2 Gaussian of width sigma
-    reproduces the evidence integral (sum of exp(-chi2/2) over templates)
-    to 2*exp(-2*pi^2*sigma^2/d^2); at d=2*sigma that error is 0.0144
-    (1.4%, 0.015 nat), and it applies only to the best-measured ~1% of
-    the catalogue (sources whose error reaches the calibration floor
-    itself) -- for a typical detection (0.017-0.035 dex statistical
-    error, so d~1*sigma there) the same expression is below 1e-4.
-    Sampling at the bare floor (d=1*sigma) was tried and rejected: it
-    implies template counts not a believable count of distinguishable
-    SED shapes (constants.LIBRARY_SAMPLING_SIGMA_FACTOR's own docstring
-    carries the full derivation).
-
-    SIGEFF at this scale is 0.055853 dex -- sed_models_register.density.
-    build_quotient_space's own new DEFAULT (confirmed by calling it with
-    no sigma_log argument at all), passed explicitly here anyway so this
+    This vector is sed_models_register.density.build_quotient_space's
+    own DEFAULT, passed explicitly here anyway so this
     function, and the report it feeds, name the vector without relying
     on reaching into the register's default.
 
@@ -1464,7 +1448,7 @@ def read_sampling_quotient_space(laws=None):
     return register_density.build_quotient_space(
         sigma_log=np.asarray(LIBRARY_SAMPLING_SIGMA_LOG_VECTOR, dtype=float),
         sigma_source="sesnacomplete.constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR "
-                     "(2x survey absolute-calibration floor, not catalogue-measured)",
+                     "(0.0869 dex in every band, a 5-sigma detection's precision)",
         **kwargs)
 
 

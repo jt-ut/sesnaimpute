@@ -71,11 +71,9 @@ DEFAULT_LAWS = ("draine_rv3.1", "whitney.r550")
 #: register header as SIGLGSRC. A citation, not a path and mtime: the
 #: vector is a literature constant, so its provenance cannot go stale.
 SIGMA_LOG_CITATION = (
-    "constants.LIBRARY_SAMPLING_SIGMA_LOG_DEX = 2 x the calibration "
-    "floor -- "
-    "systematics: 2MASS Skrutskie+2006 AJ 131,1163 (0.010 dex); IRAC "
-    "Reach+2005 PASP 117,978 (0.013); MIPS24 Engelbracht+2007 PASP "
-    "119,994 (0.017)")
+    "constants.LIBRARY_SAMPLING_SIGMA_LOG_DEX = 0.2/ln(10) = 0.0869 dex in "
+    "every band, the precision of a 5-sigma detection (owner's ruling "
+    "2026-10-27)")
 
 
 @dataclass(frozen=True)
@@ -119,10 +117,10 @@ def build_quotient_space(laws=DEFAULT_LAWS, sigma_log=None, sigma_source="", ban
     """Build the projector once; share it across every consumer.
 
     `sigma_log` is the per-band photometric sigma in dex. It defaults to
-    `constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR` -- twice the surveys'
-    published absolute-calibration floor, which is the model libraries'
-    sampling scale (see that constant for the derivation of the factor 2). They are
-    literature constants with citations, not a quantity measured from our
+    `constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR` -- 0.0869 dex in every
+    band, the precision of a 5-sigma detection, which is the model libraries'
+    sampling scale (see that constant for the derivation). It is a
+    constant, not a quantity measured from our
     own catalogue, so there is no placeholder mode and no artifact to
     read: the default IS the shipping configuration.
 

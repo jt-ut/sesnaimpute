@@ -59,33 +59,20 @@ GAIA_G_VEGA_ZP_MJY = 3_228_750.0
 #: Engelbracht et al. 2007, PASP 119, 994 (0.017 dex).
 SIGMA_CAL_DEX = np.array([b.sigma_cal_dex for b in definitions.BANDS], dtype=np.float64)
 
-#: WP-PRIOR-8 -- the curated SED-model library's own sampling scale per
-#: band, dex: twice `SIGMA_CAL_DEX`, the same whitening the curation's own
-#: template resampling (`sed_models_register`) uses, so a kept library's
-#: template spacing and `fittp.library_resolution`'s `sigma_lib,L` read it
-#: in one unit by construction (`fittp.likelihood.prepare`'s own quadrature
-#: sum, section 6.1).
+#: The curated SED-model library's own sampling scale per band, dex: the
+#: precision of a 5-sigma detection, 0.2/ln(10) = 0.0869 dex in every band
+#: (owner's ruling 2026-10-27, SAMPLING_WIDTH_RULING_2026-10-27.md; the same
+#: number as `sed_models.constants.LIBRARY_SAMPLING_SIGMA_LOG_DEX`), so a
+#: kept library's template spacing and `fittp.library_resolution`'s
+#: `sigma_lib,L` read it in one unit by construction. `SIGMA_CAL_DEX` stays
+#: the fitter's calibration term and is no longer the sampling scale.
 #:
-#: Derivation. A sum over templates spaced `d` apart in a band reproduces
-#: that band's own Gaussian evidence integral (width `sigma`, a source's
-#: per-band uncertainty) to relative error `2 exp(-2 pi^2 sigma^2 / d^2)`
-#: (the quadrature-resolution bound for locally uniform node spacing).
-#: Measured at three spacings:
-#:
-#:   d = 1 sigma: 5.4e-09
-#:   d = 2 sigma: 1.44 %
-#:   d = 3 sigma: 22.3 %
-#:
-#: The bound is this steep because it is an exponential in `-1/d^2`:
-#: `d = 2 sigma` (this constant, with `sigma = SIGMA_CAL_DEX`) sits at the
-#: EDGE of the acceptable region, not in the middle of it, and even the
-#: 1.44 % figure applies only to the best-measured sources -- those sitting
-#: at the calibration floor `sigma`; a typical detection's own larger
-#: `sigma` makes the exponent more negative and the bound smaller still.
-#: No later proposal to coarsen the library spacing further should be
-#: chosen by analogy to this one without re-deriving the bound at the new
-#: `d`: the knee between 1.44 % and 22.3 % is one more sigma away.
-LIBRARY_SAMPLING_SIGMA_LOG_DEX = 2.0 * SIGMA_CAL_DEX
+#: Derivation. A sum over templates spaced `d` apart reproduces a band's
+#: Gaussian evidence integral (width `sigma`) to relative error
+#: `2 exp(-2 pi^2 sigma^2 / d^2)`. The narrowest kernel a detected source
+#: has is the 5-sigma one (`sigma` = this constant); at `d = sigma` the
+#: error is 5.4e-09, and smaller for every brighter source.
+LIBRARY_SAMPLING_SIGMA_LOG_DEX = np.full(SIGMA_CAL_DEX.shape, 0.2 / np.log(10.0))
 
 #: C20 brief (briefs/round4_2026-10-20/C20_detection_correlation.md): the
 #: share of comonotone detection in the mixture between SESNA's

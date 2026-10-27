@@ -3671,8 +3671,8 @@ REGISTRY = {
 
     # fittp.library_resolution -- library-resolution_check_survey: whether
     # each class's library samples spectral shape finely enough, against
-    # the library's own fixed sampling scale (twice the survey's
-    # calibration precision, `constants.LIBRARY_SAMPLING_SIGMA_LOG_DEX`),
+    # the library's own fixed sampling scale (a 5-sigma detection's
+    # precision, `constants.LIBRARY_SAMPLING_SIGMA_LOG_DEX`),
     # one survey-wide file (WP-PRIOR-8; moved from fittp/
     # library_resolution.py's own _READINGS, READINGS brief section 3).
     ("library-resolution_check_survey", "LIBRARY"): ("library name",
@@ -3683,9 +3683,9 @@ REGISTRY = {
         "How many models that library holds."),
     ("library-resolution_check_survey", "D50"): ("sampling lengths",
         "Median distance from a model of that library to its nearest neighbor, in "
-        "units of the library's own fixed sampling scale (twice the survey's "
-        "calibration precision, per band, combined into one dimensionless shape "
-        "space)."),
+        "units of the library's own fixed sampling scale (the precision of a 5-sigma "
+        "detection, 0.087 dex or a 20 percent flux error, in every band, combined "
+        "into one dimensionless shape space)."),
     ("library-resolution_check_survey", "D90"): ("sampling lengths",
         "The same distance at the ninetieth percentile: the spacing of that "
         "library's most isolated models. Reported alongside D50 but does not enter "

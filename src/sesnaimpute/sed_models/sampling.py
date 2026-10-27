@@ -18,9 +18,9 @@ columns {gray, draine_rv3.1, whitney.r550}, giving the complement of
 BOTH extinction laws (the fit marginalises over which law is right, so
 both reddening directions are nuisance to it). That is the wrong space
 for SAMPLING: the r-net's job is to decide how finely the SED shape
-needs to be gridded given the SURVEY's per-band calibration floor, and
-mixing eleven bands of different floor (2MASS 0.010 dex, IRAC 0.013,
-MIPS24 0.017, PACS 0.021, doubled -- `constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR`)
+needs to be gridded given the per-band sampling width
+(`constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR`, a 5-sigma detection's precision), and
+mixing eleven bands
 through an UN-whitened projector under one isotropic radius (what the
 duplicated r-nets above did, radius = SIGEFF, a single scalar) measures
 distance in units that are too fine in the best-calibrated bands and
@@ -108,8 +108,8 @@ def quotient_space():
     """`(sigma_vec, projector)`.
 
     `sigma_vec` : `constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR` as an
-    (11,) float array -- the per-band sampling sigma (twice the surveys'
-    published absolute-calibration floor; see that constant).
+    (11,) float array -- the per-band sampling sigma (0.0869 dex in every
+    band, a 5-sigma detection's precision; see that constant).
 
     `projector` : the (11, 11) orthogonal projector onto the complement of
     {gray, `_SAMPLING_LAW`} IN THE WHITENED space, i.e. built from those

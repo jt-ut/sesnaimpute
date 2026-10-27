@@ -1557,37 +1557,14 @@ def _read_full_sps_library(full_root, convolved_bands=CONVOLVED_BANDS_TO_BUILD):
 def build_sps_quotient_space(verbose=True):
     """The SED-space quotient projector the sampling runs in.
 
-    Owner's ruling (2026-10-10, two revisions, both superseding this
-    function's original catalogue-derived design): the sampling scale is
-    `constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR` -- TWICE the surveys'
-    own published ABSOLUTE-CALIBRATION floor (2MASS J/H/Ks 0.010 dex,
-    Skrutskie et al. 2006 AJ 131,1163; IRAC I1-I4 0.013 dex, Reach et al.
-    2005 PASP 117,978; MIPS M1 0.017 dex, Engelbracht et al. 2007 PASP
-    119,994 -- i.e. 0.020/0.026/0.034 dex per band at this factor), NOT
-    the catalogue-derived `sigma_log` this function used to read via
-    `sed_models_register.noise.read`. That product is RETIRED as an
-    input here: its own raw files have been deleted, so it is a stale
-    artefact, and this module no longer opens it.
+    The sampling scale is `constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR`: the
+    precision of a 5-sigma detection, 0.0869 dex in every band (owner's
+    ruling 2026-10-27; derivation at that constant). `constants.
+    SURVEY_CALIB_SIGMA_LOG_VECTOR` (the calibration floor) is the fitter's
+    calibration term, not the sampling scale.
 
-    THE FACTOR OF 2 IS DERIVED, NOT A KNOB (`constants.py`'s own
-    derivation, repeated here because it is the reason this library's
-    count is what it is): a grid of spacing d sampling a class's
-    exp(-chi2/2) evidence against a source of photometric error sigma
-    reproduces the integral to 2*exp(-2*pi^2*sigma^2/d^2) (Poisson
-    summation). At d = 2*sigma that is 0.0144 -- 1.4% of the evidence,
-    0.015 nats -- and only for the best-measured ~1% of the catalogue
-    (the sources whose error reaches the calibration floor); for a
-    typical detection (statistical error 0.017-0.035 dex, so d is about
-    one sigma there) the same expression is below 1e-4. Sampling at the
-    bare floor instead of twice it was tried and rejected (constants.py):
-    it implies an unbelievable template count. `constants.
-    SURVEY_CALIB_SIGMA_LOG_VECTOR` (the bare floor, no factor) was this
-    function's intermediate design, briefly in place and superseded
-    before any product shipped at that scale.
-
-    `constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR` is a survey PROPERTY
-    (instrument calibration, published by the survey teams, times a
-    derived evidence-resolution factor) -- not a population/prior/Gaia
+    `constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR` is a measurement
+    property (a 5-sigma detection's precision) -- not a population/prior/Gaia
     quantity, so reading it does not violate spec item 4 (independence).
 
     `sed_models_register.density.build_quotient_space` is still the
@@ -1601,12 +1578,12 @@ def build_sps_quotient_space(verbose=True):
     sigma_log = np.asarray(_LIBRARY_SAMPLING_SIGMA_LOG_VECTOR, dtype=float)
     space = _register_density.build_quotient_space(
         sigma_log=sigma_log,
-        sigma_source="constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR (2x the literature "
-                     "survey calibration floor; 2MASS/IRAC/MIPS, see constants.py)")
+        sigma_source="constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR (0.0869 dex in "
+                     "every band, a 5-sigma detection's precision; see constants.py)")
     if verbose:
         print(f"    quotient space: d={space.d}, SIGEFF=sigma_eff="
               f"{space.sigma_eff:.6f} dex (sigma_log source: "
-              "constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR, 2x literature calibration floor)")
+              "constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR, a 5-sigma detection's precision)")
     return space
 
 
@@ -1791,8 +1768,8 @@ def build_sps_sampled_library(full_root, sampled_root,
          from `full_root` -- no physics is re-derived.
       2. The project-wide quotient space (5-D; removes gray/scale and
          both Av laws) from the library sampling scale
-         (`constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR`, 2x the literature
-         survey calibration floor), fed to
+         (`constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR`, a 5-sigma
+         detection's precision), fed to
          `sed_models_register.density.build_quotient_space`
          (`build_sps_quotient_space`) -- no register is read, written or
          rebuilt.
@@ -1838,7 +1815,7 @@ def build_sps_sampled_library(full_root, sampled_root,
 
     if verbose:
         print("  sampled-library stage 2  quotient space (library sampling scale "
-             "= 2x literature calibration floor; READ-ONLY density.build_quotient_space)")
+             "= a 5-sigma detection's precision; READ-ONLY density.build_quotient_space)")
     space = build_sps_quotient_space(verbose=verbose)
     sigma_eff = float(space.sigma_eff)
 
@@ -1940,9 +1917,7 @@ def build_sps_sampled_library(full_root, sampled_root,
             ("COVER_RAD_FRAC", f"{covering_radius_fraction:.6f}"),
             ("MIN_PW_FRAC", f"{min_pairwise_fraction:.6f}"),
             ("COVERAGE_FRAC", f"{coverage_fraction:.6f}"),
-            # Owner's 2026-10-10 ruling: 2x the literature survey
-            # calibration floor, NOT the retired catalogue-derived
-            # sigma_log.
+            # Owner's 2026-10-27 ruling: a 5-sigma detection's precision.
             ("SIGMA_LOG_SRC", "constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR"),
         ),
         overwrite=overwrite)

@@ -26,6 +26,7 @@ already contained. Widening it is a correction, not a loosening.
 
 from dataclasses import dataclass
 
+import math
 import numpy as np
 import pandas as pd
 
@@ -193,41 +194,30 @@ SURVEY_CALIB_SIGMA_LOG_VECTOR = tuple(
 
 
 # --- The model-library sampling scale ---
-# TWICE the calibration floor above, per band. This factor is recorded
-# here WITH ITS DERIVATION so that it is a derived quantity rather than a
-# tuning knob, and so nobody re-tunes it.
+# The precision of a 5-sigma detection, the same in every band (owner's
+# ruling 2026-10-27, bms_review/briefs/redesign_2026-10-27/
+# SAMPLING_WIDTH_RULING_2026-10-27.md):
 #
-# DERIVATION. A class's evidence is a sum over templates of
-# exp(-chi2/2). A grid of spacing d sampling that Gaussian, against a
-# source of photometric error sigma, reproduces the integral to a
-# relative error of 2*exp(-2*pi^2*sigma^2/d^2) (Poisson summation; the
-# trapezoid rule superconverges on a Gaussian). Evaluated at d = 2*sigma:
+#   sigma_log = 0.2 / ln(10) = 0.0869 dex   (a 20% flux error)
 #
-#   2*exp(-2*pi^2/4) = 0.0144, i.e. 1.4% of the evidence, 0.015 nats
-#
-# and that applies only to the BEST-measured sources -- roughly 1% of the
-# catalogue, the ones whose errors reach the calibration floor. For a
-# typical detection (statistical error 0.017-0.035 dex, so d is about one
-# sigma there) the same expression is below 1e-4. The library-resolution
-# term in the fit covers the residual for the best sources by design.
-#
-# So templates closer together than this are not distinguished by ANY
-# source the survey holds, and sampling finer than it buys resolution no
-# datum can use. Sampling at the bare floor instead of twice it was tried
-# and rejected: it implies a YSO library of order 800,000 templates, which
-# is not a believable count of distinguishable SED shapes.
-LIBRARY_SAMPLING_SIGMA_FACTOR = 2.0
+# WHY. The library is a quadrature of the likelihood over model space; its
+# spacing must match the likelihood kernel of a source, and the narrowest
+# kernel a DETECTED source can have is the 5-sigma one. A grid of spacing d
+# sampling a Gaussian of width sigma reproduces its integral to a relative
+# error of 2*exp(-2*pi^2*sigma^2/d^2); at d = sigma (radius 1.0 in units of
+# this width) that is 5e-9 for a 5-sigma source and smaller for every
+# brighter one. The calibration floor above is finer than the error of any
+# real source, so sampling at (twice) it separated models no measurement
+# can tell apart; it stays only as the fitter's calibration term.
+LIBRARY_SAMPLING_SIGMA_LOG_DEX_ONE = 0.2 / math.log(10.0)
 
 LIBRARY_SAMPLING_SIGMA_LOG_DEX = {
-    _b: LIBRARY_SAMPLING_SIGMA_FACTOR * _s
-    for _b, _s in SURVEY_CALIB_SIGMA_LOG_DEX.items()
+    _b: LIBRARY_SAMPLING_SIGMA_LOG_DEX_ONE for _b in SURVEY_CALIB_SIGMA_LOG_DEX
 }
 
 #: The sampling scale as an array in CONVOLVED_BAND_NAMES order -- the
 #: form sed_models_register.density.build_quotient_space() takes, and the
-#: vector every library's sampling uses. 2MASS 0.020, IRAC 0.026,
-#: MIPS24 0.034, PACS 0.042 dex; the eight-band projection through the 5-D quotient space gave
-#: sigma_eff = 0.055852 dex.
+#: vector every library's sampling uses: 0.0869 dex in all eleven bands.
 LIBRARY_SAMPLING_SIGMA_LOG_VECTOR = tuple(
     LIBRARY_SAMPLING_SIGMA_LOG_DEX[_b] for _b in CONVOLVED_BAND_NAMES)
 

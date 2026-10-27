@@ -79,14 +79,9 @@ this project shares):
                             space (gray/scale + both Av laws removed).
                             sigma_eff is built from
                             constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR --
-                            TWICE the surveys' own published
-                            absolute-calibration systematics floor (2MASS
-                            0.010->0.020 dex, IRAC 0.013->0.026 dex,
-                            MIPS24 0.017->0.034 dex; factor of 2 derived,
-                            not tuned: a d=2*sigma grid reproduces a
-                            class's evidence integral to 1.4%/0.015 nats
-                            for the best ~1% of sources, below 1e-4 for a
-                            typical detection -- see constants.py). This
+                            the precision of a 5-sigma detection, 0.0869
+                            dex in every band (owner's ruling 2026-10-27;
+                            derivation in constants.py). This
                             IS `build_quotient_space`'s own default now.
                             Supersedes an earlier catalogue-derived
                             SIGMA_LOG scale that stage used at first (0.6%
@@ -1009,9 +1004,8 @@ def sample_agb_templates(rows, wave_um_desc, sigma_log_by_band, bands=CONVOLVED_
 
     `sigma_log_by_band` is the SAMPLING-SCALE vector the caller supplies
     -- `constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR` in production (owner
-    ruling, 2026-10-08): TWICE the surveys' own published
-    absolute-calibration systematics floor, a derived literature constant
-    (see that constant's docstring for the factor-of-2 derivation), NOT
+    ruling, 2026-10-27): the precision of a 5-sigma detection, 0.0869 dex
+    in every band (see that constant's docstring for the derivation), NOT
     read from any sed_models_register product (an earlier catalogue-
     derived SIGMA_LOG read was retired by the same ruling -- its source
     files no longer exist). This function is agnostic to where the vector
@@ -1057,8 +1051,8 @@ def sample_agb_templates(rows, wave_um_desc, sigma_log_by_band, bands=CONVOLVED_
 
     space = _density.build_quotient_space(
         laws=_density.DEFAULT_LAWS, sigma_log=sigma_log_by_band, bands=bands,
-        sigma_source="constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR (2x survey "
-                     "absolute-calibration systematics, literature + derivation) -- "
+        sigma_source="constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR (0.0869 dex "
+                     "in every band, a 5-sigma detection's precision) -- "
                      "sed_models_curate.build.agb's sigma_log_vector()")
     coords = space.project(log10_flux8)
     radius = space.sigma_eff
@@ -1636,10 +1630,9 @@ def curate_agb_model_set(grams_o_path, grams_c_path, output_root, overwrite=True
 
     `sigma_log_by_band` : the per-band sampling-scale sigma_log in dex, in
     CONVOLVED_BAND_NAMES order -- `constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR` in
-    production (owner ruling, 2026-10-08): TWICE the surveys' own
-    published absolute-calibration systematics floor (a derived literature
-    constant -- see that constant's docstring for the factor-of-2
-    derivation), supplied by the caller. This is also
+    production (owner ruling, 2026-10-27): the precision of a 5-sigma
+    detection, 0.0869 dex in every band (see that constant's docstring),
+    supplied by the caller. This is also
     `sed_models_register.density.build_quotient_space`'s own default as
     of the same ruling. REQUIRED here -- no placeholder is invented if
     omitted. [Supersedes an earlier catalogue-derived

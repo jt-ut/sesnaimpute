@@ -6,8 +6,8 @@ two nuisances, extinction and gray scale; sec 3.5: the six registers). A
 quadrature over templates resolves the likelihood it integrates only while
 neighbouring nodes sit closer than the kernel it approximates -- here each
 band's own library SAMPLING scale, `constants.LIBRARY_SAMPLING_SIGMA_LOG_DEX`
-(twice the survey's absolute-calibration precision, `constants.
-SIGMA_CAL_DEX`; see that constant's own derivation), not a measured survey
+(the precision of a 5-sigma detection, 0.2/ln(10) = 0.0869 dex in every band;
+see that constant's own derivation), not a measured survey
 photometric error: the curated register's own resampling
 (`sed_models_register`) already whitens by the same scale, so this check
 and a library's own template spacing are in one unit by construction
@@ -100,7 +100,7 @@ def _read_register(config, cls):
 def _shape_space(log10_f_ref, kappa_prime):
     """The library's shapes in units of its own sampling scale (WP-PRIOR-8):
     reference log fluxes whitened by `constants.LIBRARY_SAMPLING_SIGMA_LOG_DEX`
-    -- twice the survey's own calibration precision per band, the SAME
+    -- 0.0869 dex per band (a 5-sigma detection's precision), the SAME
     scale the curation's own template resampling whitens by, so a nearest-
     neighbour spacing measured here is dimensionless, in units of that one
     sampling length -- with the two nuisance directions (the blended
@@ -123,7 +123,7 @@ def _sigma_lib_dex(d50):
     """WP-PRIOR-8's per-band conversion, the formula alone (planner's
     correction: the thickness guard is removed): a library's own measured
     `d50` (dimensionless, sampling lengths) back to a per-band dex offset,
-    `d50 * (2 sigma_b) / (2 sqrt(6))` -- distributed over the 6-D shape
+    `d50 * sigma_b / (2 sqrt(6))` -- distributed over the 6-D shape
     space's dimensions (dividing by `sqrt(6)`) and halved (a source midway
     between two neighbours sits at `d50/2` from each). No fallback: the
     curated registers are built by a sampler that asserts packing >= 1 and
