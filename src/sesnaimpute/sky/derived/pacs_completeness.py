@@ -65,6 +65,7 @@ from sesnaimpute.build import run
 from sesnaimpute.config import product_path
 from sesnaimpute.sky.derived import pacs_fit
 from sesnaimpute.sky.derived.pacs_photometry import BLEND_RADIUS_BEAMS, BLEND_RHO_LIMIT, _blend_components, singleton_pass
+from sesnaimpute.sky.derived import pacs_psf
 from sesnaimpute.sky.derived.pacs_psf import APERTURES
 
 BANDS = ("P70", "P100", "P160")
@@ -96,7 +97,17 @@ DROP_BEAMS = 0.5
 #: a cell's counts are pooled over cells whose centres lie within this radius of its own; every
 #: (cell, plane) of the build half has at least MIN_INJECTIONS injections behind it
 POOL_ARCSEC = 120.0
+#: only cells whose CELL_SIGMA is within this factor of the cell's own are pooled with it; where the pooled count
+#: is still short the radius is widened to 2 x, then 3 x POOL_ARCSEC (never the noise window)
+NOISE_POOL_FACTOR = 1.5
+POOL_WIDENINGS = (1, 2, 3)
 MIN_INJECTIONS = 100
+#: the blend path: per detected source, this many injections per plane and half, uniform in the ring from DROP_BEAMS
+#: to BLEND_RADIUS_BEAMS beams around it, measured through the group path; they set SCATTER_BLEND only. A cell's
+#: SCATTER_BLEND needs this many recovered ones in its pool (one source's worth: MIN_INJECTIONS would leave it
+#: empty almost everywhere, the group path being rare)
+BLEND_TARGETED = 40
+MIN_BLEND_INJECTIONS = 30
 #: the first round of batches per plane and half aims at this multiple of MIN_INJECTIONS in the pooled
 #: interior; further batches, restricted to the cells whose pooled count is short, follow until none is
 INTERIOR_SAFETY = 1.3
@@ -253,29 +264,39 @@ def cell_centres_arcsec(grid, ids):
     return np.c_[(x0 + x1) / 2 * (pacs_fit.CELL_ARCSEC / grid.step_x), (y0 + y1) / 2 * (pacs_fit.CELL_ARCSEC / grid.step_y)]
 
 
-def pool_matrix(centres_arcsec, radius_arcsec=None):
-    """Sparse (n, n) 0/1 matrix: entry (i, j) is 1 where cell j's centre lies within POOL_ARCSEC of cell i's
-    (a cell pools with itself). Cells of different maps must be given far-apart centres."""
-    radius = POOL_ARCSEC if radius_arcsec is None else radius_arcsec
+def pool_matrices(centres_arcsec, sigma):
+    """The pooling matrices for radius POOL_ARCSEC x each of POOL_WIDENINGS: sparse (n, n) 0/1, entry (i, j) 1 where
+    cell j's centre lies within the radius of cell i's AND CELL_SIGMA_j is within NOISE_POOL_FACTOR of
+    CELL_SIGMA_i (a cell pools with itself). Cells of different maps must be given far-apart centres."""
     n = len(centres_arcsec)
-    pairs = cKDTree(centres_arcsec).query_pairs(radius, output_type="ndarray").reshape(-1, 2)
-    r = np.concatenate([np.arange(n), pairs[:, 0], pairs[:, 1]])
-    c = np.concatenate([np.arange(n), pairs[:, 1], pairs[:, 0]])
-    return csr_matrix((np.ones(r.size), (r, c)), shape=(n, n))
+    tree = cKDTree(centres_arcsec)
+    log_sigma = np.log(np.maximum(np.asarray(sigma, float), 1e-30))
+    out = []
+    for k in POOL_WIDENINGS:
+        pairs = tree.query_pairs(k * POOL_ARCSEC, output_type="ndarray").reshape(-1, 2)
+        pairs = pairs[np.abs(log_sigma[pairs[:, 0]] - log_sigma[pairs[:, 1]]) <= np.log(NOISE_POOL_FACTOR)]
+        r = np.concatenate([np.arange(n), pairs[:, 0], pairs[:, 1]])
+        c = np.concatenate([np.arange(n), pairs[:, 1], pairs[:, 0]])
+        out.append(csr_matrix((np.ones(r.size), (r, c)), shape=(n, n)))
+    return out
 
 
-def pooled_counts(W, row, plane, recovered, n_row, n_plane):
-    """The pooled number of injections and of recovered injections at every (cell, plane): sums, over the
-    cells W pools with each, of the counts of the injections (`row` the cell's row, `plane`, `recovered`)."""
+def pooled_counts(Ws, row, plane, recovered, n_row, n_plane):
+    """The pooled number of injections and of recovered injections at every (cell, plane): sums over the cells
+    pooled with each (`row` the injection's cell row, `plane`, `recovered`), on the narrowest of the matrices
+    `Ws` whose total reaches MIN_INJECTIONS, else the widest."""
     key = row.astype(np.int64) * n_plane + plane
     tot = np.bincount(key, minlength=n_row * n_plane).reshape(n_row, n_plane).astype(np.float64)
     rec = np.bincount(key[recovered], minlength=n_row * n_plane).reshape(n_row, n_plane).astype(np.float64)
-    return W @ tot, W @ rec
+    pt, pr = Ws[-1] @ tot, Ws[-1] @ rec
+    for W in reversed(Ws[:-1]):
+        t, r = W @ tot, W @ rec
+        use = t >= MIN_INJECTIONS
+        pt, pr = np.where(use, t, pt), np.where(use, r, pr)
+    return pt, pr
 
 
-def pooled_median_scatter(W, row, value, n_row, min_n=MIN_INJECTIONS):
-    """Per cell, the median and 1.4826 x the median absolute deviation about it of the `value`s of the
-    records (at cell `row`) of the cells W pools with it; NaN where fewer than `min_n` records."""
+def _pooled_median_scatter_one(W, row, value, n_row, min_n):
     out_med = np.full(n_row, np.nan)
     out_sc = np.full(n_row, np.nan)
     if row.size == 0:
@@ -308,6 +329,19 @@ def pooled_median_scatter(W, row, value, n_row, min_n=MIN_INJECTIONS):
     out_med[good] = med[good]
     out_sc[good] = MAD_TO_SIGMA * mad[good]
     return out_med, out_sc
+
+
+def pooled_median_scatter(Ws, row, value, n_row, min_n=MIN_INJECTIONS):
+    """Per cell, the median and 1.4826 x the median absolute deviation about it of the `value`s of the records
+    (at cell `row`) of the cells pooled with it, on the narrowest of `Ws` that holds at least `min_n` records;
+    NaN where none does."""
+    med = np.full(n_row, np.nan)
+    sc = np.full(n_row, np.nan)
+    for W in Ws:
+        m, s_ = _pooled_median_scatter_one(W, row, value, n_row, min_n)
+        fill = np.isnan(med) & np.isfinite(m)
+        med[fill], sc[fill] = m[fill], s_[fill]
+    return med, sc
 
 
 def flux90(fraction, flux_grid, level=FLUX90_FRACTION):
@@ -357,6 +391,7 @@ class Injector:
         self.separation_px = APERTURES[tile.record.band][2] / tile.pixel_arcsec
         # the real detections: the photometry's own singleton pass on the sources it measures on this tile
         self.det_tree = None
+        self.det_xy = np.zeros((0, 2))
         self.det_label = np.zeros(0, np.int64)
         self.members = {}
         self.src_xy = np.zeros((0, 2))
@@ -367,7 +402,8 @@ class Injector:
             self.n_detected = int(det.sum())
             self.src_xy = np.c_[x, y]
             if det.any():
-                self.det_tree = cKDTree(self.src_xy[det])
+                self.det_xy = self.src_xy[det]
+                self.det_tree = cKDTree(self.det_xy)
             # blend groups of the real sources, as the photometry forms them
             label, _size = _blend_components(inp["src_ra"], inp["src_dec"], det, BLEND_RADIUS_BEAMS * tile.beam_arcsec)
             self.det_label = label[det]
@@ -434,13 +470,39 @@ class Injector:
         far = d >= DROP_BEAMS * self.beam_px
         return x[far], y[far], d[far]
 
+    def blend_positions(self, rng):
+        """The targeted blend set of one round: one position per detected source, uniform in area in the ring
+        from DROP_BEAMS to BLEND_RADIUS_BEAMS beams around it, on valid pixels, at most one inside any
+        separation disc, none within DROP_BEAMS of any detected source. Returns (x, y, distance to the nearest
+        detected source in pixels)."""
+        n = self.det_xy.shape[0]
+        if n == 0:
+            return np.zeros(0), np.zeros(0), np.zeros(0)
+        r = self.beam_px * np.sqrt(rng.uniform(DROP_BEAMS ** 2, BLEND_RADIUS_BEAMS ** 2, n))
+        th = rng.uniform(0, 2 * np.pi, n)
+        x, y = self.det_xy[:, 0] + r * np.cos(th), self.det_xy[:, 1] + r * np.sin(th)
+        ok = self._valid(x, y)
+        x, y = x[ok], y[ok]
+        perm = rng.permutation(x.size)
+        x, y = x[perm], y[perm]
+        keep = self._thin(x, y, x.size)
+        x, y = x[keep], y[keep]
+        d, _ = self.det_tree.query(np.c_[x, y])
+        far = d >= DROP_BEAMS * self.beam_px
+        return x[far], y[far], d[far]
+
     def batch(self, rng, rows, flux):
-        """Injects one batch of `flux` (mJy) sources, measures each through the catalogue's own path, restores
-        the map. Returns dict(row, path (1 aperture, 2 group), recovered, dflux (recovered - injected flux, mJy)
-        for the injections that lie on covered data; n; the seconds spent in each step and the number of
-        injections on each path)."""
-        tile = self.tile
+        """Injects one batch of `flux` (mJy) sources at random positions of the cells of `rows`, measures each
+        through the catalogue's own path, restores the map (`measure_positions`)."""
         x, y, d = self.positions(rng, rows)
+        return self.measure_positions(x, y, d, flux)
+
+    def measure_positions(self, x, y, d, flux):
+        """Injects `flux` (mJy) at the map pixels (x, y), `d` the distance (pixels) of each to the nearest detected
+        source, measures each through the catalogue's own path, restores the map. Returns dict(row, path (1
+        aperture, 2 group), recovered, dflux (recovered - injected flux, mJy) for the injections on covered
+        data; n; the seconds spent in each step and the number of injections on each path)."""
+        tile = self.tile
         n = x.size
         out = dict(row=np.zeros(0, np.int32), path=np.zeros(0, np.int8), recovered=np.zeros(0, bool),
                    dflux=np.zeros(0, np.float32), n=0, seconds=dict(inject=0.0, aperture=0.0, group=0.0),
@@ -499,11 +561,12 @@ class Injector:
         return out
 
 
-def _inject_half(injector, W, plane, flux, half, n_row, interior_pooled):
+def _inject_half(injector, Ws, plane, flux, half, n_row, interior_pooled):
     """Batches of one plane and one half (0 build, 1 held out: the seed's parity), enough that every cell's
     pooled count reaches MIN_INJECTIONS where the cells allow: a first round sized for the interior, then
     batches restricted to the cells within the pooling radius of a short cell. Returns the injections, the
     seconds spent and the injections per path."""
+    W = Ws[0]
     first = int(np.ceil(INTERIOR_SAFETY * MIN_INJECTIONS / max(interior_pooled, 1e-9)))
     rows_all = np.arange(n_row)
     recs = []
@@ -530,68 +593,109 @@ def _inject_half(injector, W, plane, flux, half, n_row, interior_pooled):
                  dflux=cat("dflux", np.float32)), seconds, n_by_path)
 
 
-def pool_product(W, rec, flux_grid, n_row):
-    """The pooled recovered fraction (encoded), its 0.9 flux, the pooled injection count at the faintest
-    plane and the pooled photometric bias and scatter of the injections `rec` (dict row, plane, path,
-    recovered, dflux) on the cells W pools."""
+def _inject_blend(injector, plane, flux, half):
+    """The targeted blend set of one plane and one half: BLEND_TARGETED rounds, each one position per detected
+    source in the ring around it, measured through the group path. Returns the injections (row, recovered,
+    dflux), the seconds spent in the group fits and how many were made."""
+    recs = []
+    seconds = 0.0
+    for k in range(BLEND_TARGETED):
+        rng = np.random.default_rng([injector.seed_key, plane, 2 * (1000 + k) + half])
+        x, y, d = injector.blend_positions(rng)
+        r = injector.measure_positions(x, y, d, flux)
+        recs.append(r)
+        seconds += r["seconds"]["group"]
+    cat = lambda key, dt: np.concatenate([r[key] for r in recs]) if recs else np.zeros(0, dt)
+    return dict(row=cat("row", np.int32), recovered=cat("recovered", bool), dflux=cat("dflux", np.float32)), seconds
+
+
+def pool_product(Ws, rec, blend, flux_grid, n_row):
+    """The pooled recovered fraction (encoded), its 0.9 flux, the pooled injection count at the faintest plane,
+    the pooled photometric bias and scatter of the aperture-path injections `rec` (dict row, plane, path,
+    recovered, dflux), and the scatter of the targeted blend injections `blend` (row, plane, recovered, dflux),
+    each on the narrowest pool that holds enough of them."""
     n_plane = flux_grid.size
-    tot, got = pooled_counts(W, rec["row"], rec["plane"].astype(np.int64), rec["recovered"], n_row, n_plane)
+    tot, got = pooled_counts(Ws, rec["row"], rec["plane"].astype(np.int64), rec["recovered"], n_row, n_plane)
     with np.errstate(all="ignore"):
         fraction = np.where(tot > 0, got / tot, 0.0)
     bias = np.full((n_row, n_plane), np.nan, np.float32)
     scatter = np.full((n_row, n_plane), np.nan, np.float32)
     scatter_blend = np.full((n_row, n_plane), np.nan, np.float32)
     for p in range(n_plane):
-        here = (rec["plane"] == p) & rec["recovered"]
-        for path, med_out, sc_out in ((1, bias, scatter), (2, None, scatter_blend)):
-            sel = here & (rec["path"] == path)
-            med, sc = pooled_median_scatter(W, rec["row"][sel], rec["dflux"][sel], n_row)
-            if med_out is not None:
-                med_out[:, p] = med
-            sc_out[:, p] = sc
+        sel = (rec["plane"] == p) & rec["recovered"] & (rec["path"] == 1)
+        bias[:, p], scatter[:, p] = pooled_median_scatter(Ws, rec["row"][sel], rec["dflux"][sel], n_row)
+        sel = (blend["plane"] == p) & blend["recovered"]
+        _, scatter_blend[:, p] = pooled_median_scatter(Ws, blend["row"][sel], blend["dflux"][sel], n_row, MIN_BLEND_INJECTIONS)
     return dict(curve=encode_curves(got, tot), flux90=flux90(fraction, flux_grid).astype(np.float32),
                 n_pos=tot[:, -1].astype(np.int32), bias=bias, scatter=scatter, scatter_blend=scatter_blend,
                 pooled_total=tot)
 
 
-SELF_CHECK_FLUX_MJY = 500.0
-SELF_CHECK_POSITIONS = 20
-SELF_CHECK_TOLERANCE = 0.01
+# ----------------------------------------------------------------------------
+# self-checks
+
+ZERO_CHECK_FLUX_MJY = 500.0
+ZERO_CHECK_POSITIONS = 20
+ZERO_CHECK_TOLERANCE = 0.005
+#: C3: expected false detections over detected sources, per band over the region
+C3_LIMIT = 0.02
+REAL_CHECK_POSITIONS = 200
+REAL_CHECK_TOLERANCE = 0.01
 
 
-def self_check(config, record, strict=True):
-    """Injects SELF_CHECK_FLUX_MJY at SELF_CHECK_POSITIONS empty-sky positions of `record`'s map into a ZERO
-    image (not the real one) and measures them through the aperture path: every recovered flux must be within
-    1 % of the injected flux, else the template's normalisation and the aperture fraction disagree. Prints the
-    worst ratio; raises ValueError if the check fails and `strict`, else prints that it failed."""
+def self_check(config, record):
+    """The template's normalisation, on a ZERO image: ZERO_CHECK_FLUX_MJY injected at ZERO_CHECK_POSITIONS empty-sky
+    positions of `record`'s map, the aperture SUM with no sky subtraction divided by the injected flux times the
+    map's encircled-energy fraction at the aperture radius (total-flux normalisation): every position must be
+    within 0.5 %, else the template is not normalised to total flux. Prints the worst ratios and, for
+    information, the share of the aperture flux the sky term of the catalogue's own measurement removes on a
+    zero image (the clipped mode of the monotonic wing, not the mean the aperture fraction assumes). Raises
+    ValueError on failure."""
     tile = pacs_fit.cached_tile(config, record)
     rng = np.random.default_rng(0)
     ny, nx = tile.shape
     margin = tile.injection_half_width() + 2
-    sep = APERTURES[record.band][2] / tile.pixel_arcsec
-    reach = int(np.ceil(APERTURES[record.band][2] / tile.pixel_arcsec)) + 2
+    r_ap, r_in, r_out = (r / tile.pixel_arcsec for r in APERTURES[record.band])
+    reach = int(np.ceil(r_out)) + 2
     xs, ys = [], []
     for _ in range(100000):
         x, y = rng.uniform(margin, nx - margin), rng.uniform(margin, ny - margin)
         iy, ix = int(round(y)), int(round(x))
         # empty sky: the whole aperture and annulus on valid data
-        if np.isfinite(tile.error[iy - reach:iy + reach + 1, ix - reach:ix + reach + 1]).all() and all(np.hypot(x - a, y - b) > sep for a, b in zip(xs, ys)):
+        if np.isfinite(tile.error[iy - reach:iy + reach + 1, ix - reach:ix + reach + 1]).all() and all(np.hypot(x - a, y - b) > r_out for a, b in zip(xs, ys)):
             xs.append(x)
             ys.append(y)
-            if len(xs) == SELF_CHECK_POSITIONS:
+            if len(xs) == ZERO_CHECK_POSITIONS:
                 break
     x, y = np.array(xs), np.array(ys)
-    with tile.blank_image(), tile.injected(x, y, SELF_CHECK_FLUX_MJY):
-        m = tile.measure(x, y)
-    ratio = m.flux[m.covered] / SELF_CHECK_FLUX_MJY
-    print("  self-check %s: %g mJy injected at %d empty-sky positions of a zero image, aperture flux / injected: "
-          "min %.4f max %.4f (%d of %d on covered data)"
-          % (record.map_id, SELF_CHECK_FLUX_MJY, x.size, ratio.min(), ratio.max(), ratio.size, x.size), flush=True)
-    if ratio.size == 0 or np.abs(ratio - 1).max() > SELF_CHECK_TOLERANCE:
-        if strict:
-            raise ValueError("the injected template and the aperture fraction disagree by more than 1 %")
-        print("  self-check %s FAILED: the injected template and the aperture fraction disagree by more than 1 %%"
-              % record.band, flush=True)
+    with tile.blank_image(), tile.injected(x, y, ZERO_CHECK_FLUX_MJY):
+        f, sky, _sd, area, cov = pacs_fit._aperture_core(tile.image, tile.error, x, y, r_ap, r_in, r_out, 5)
+    eef = pacs_psf.physical_aperture_fraction(config, record, "total", False)
+    expected = ZERO_CHECK_FLUX_MJY * eef
+    ratio = (f + sky * area)[cov] / expected
+    sky_share = (sky * area)[cov] / expected
+    print("  self-check (zero image) %s %s: %d positions, aperture sum / (injected x EEF_total(r_ap) = %.4f): min %.4f "
+          "max %.4f; the catalogue's sky term on a zero image removes %.2f %% of it (information only)"
+          % (record.band, record.map_id, ratio.size, eef, ratio.min() if ratio.size else np.nan,
+             ratio.max() if ratio.size else np.nan, 100 * sky_share.mean() if ratio.size else np.nan), flush=True)
+    if ratio.size == 0 or np.abs(ratio - 1).max() > ZERO_CHECK_TOLERANCE:
+        raise ValueError("%s: the injected template is not normalised to total flux within 0.5 %%" % record.band)
+
+
+def _real_check(injector, flux_mjy, half):
+    """The catalogue's own measurement in its own regime: REAL_CHECK_POSITIONS empty-sky positions of the real map
+    (farther than one beam from every detected source), the aperture flux after injecting `flux_mjy` minus before,
+    over `flux_mjy`. Returns the ratios."""
+    tile = injector.tile
+    rng = np.random.default_rng([injector.seed_key, 99999, half])
+    x, y, d = injector.positions(rng, np.arange(injector.ids.size))
+    far = d >= BLEND_RADIUS_BEAMS * injector.beam_px
+    x, y = x[far][:REAL_CHECK_POSITIONS], y[far][:REAL_CHECK_POSITIONS]
+    before = tile.measure(x, y)
+    with tile.injected(x, y, flux_mjy):
+        after = tile.measure(x, y)
+    ok = before.covered & after.covered
+    return (after.flux[ok] - before.flux[ok]) / flux_mjy
 
 
 def _inject_tile(piece, config, records, flux_grid):
@@ -602,16 +706,32 @@ def _inject_tile(piece, config, records, flux_grid):
     tile = pacs_fit.cached_tile(config, records[t])
     inj = Injector(tile, inp, t + 1)
     n_row = inj.ids.size
-    W = pool_matrix(cell_centres_arcsec(tile.grid, inj.ids))
+    Ws = pool_matrices(cell_centres_arcsec(tile.grid, inj.ids), inj.sigma[inj.ids])
+    # the self-check on the real map: F = 10 x the map's median 5-sigma flux; the mean ratio within 1 % in both halves
+    f_check = 10.0 * pacs_fit.DETECTION_SNR * float(np.median(inj.sigma[inj.ids]))
+    check = []
+    for half in (0, 1):
+        r = _real_check(inj, f_check, half)
+        check.append(r)
+        print("  self-check (real map) %s %s half %d: %d empty positions, F = %.0f mJy, injected-minus-before / F: mean %.4f, "
+              "16/50/84 %%: %.4f %.4f %.4f" % (tile.record.band, records[t].map_id, half, r.size, f_check, r.mean(),
+                                                *np.percentile(r, [16, 50, 84])), flush=True)
+        if r.size == 0 or abs(r.mean() - 1) > REAL_CHECK_TOLERANCE:
+            raise ValueError("%s: on the real map %s the mean recovered flux is %.4f of the injected flux (bar: within 1 %%)"
+                             % (tile.record.band, records[t].map_id, r.mean() if r.size else np.nan))
     # injections one batch puts into the pool of an interior cell: density x the pool's cell count
-    interior = (inj.cell_px * inj.valid_fraction / (SPARSE_BEAM_AREAS * inj.beam_area_px)) * float(np.median(np.diff(W.indptr)))
+    interior = (inj.cell_px * inj.valid_fraction / (SPARSE_BEAM_AREAS * inj.beam_area_px)) * float(np.median(np.diff(Ws[0].indptr)))
     keys = ("row", "plane", "path", "recovered", "dflux")
+    bkeys = ("row", "plane", "recovered", "dflux")
     stores = ({k: [] for k in keys}, {k: [] for k in keys})
+    bstores = ({k: [] for k in bkeys}, {k: [] for k in bkeys})
     seconds = dict(inject=0.0, aperture=0.0, group=0.0)
     n_by_path = dict(aperture=0, group=0)
+    blend_seconds = 0.0
+    blend_plane = np.zeros((2, flux_grid.size, 2))
     for p in range(flux_grid.size):
         for half in (0, 1):
-            r, sec, cnt = _inject_half(inj, W, p, flux_grid[p], half, n_row, interior)
+            r, sec, cnt = _inject_half(inj, Ws, p, flux_grid[p], half, n_row, interior)
             for k in ("row", "path", "recovered", "dflux"):
                 stores[half][k].append(r[k])
             stores[half]["plane"].append(np.full(r["row"].size, p, np.int8))
@@ -619,14 +739,25 @@ def _inject_tile(piece, config, records, flux_grid):
                 seconds[k] += sec[k]
             for k in n_by_path:
                 n_by_path[k] += cnt[k]
+            b, bsec = _inject_blend(inj, p, flux_grid[p], half)
+            for k in ("row", "recovered", "dflux"):
+                bstores[half][k].append(b[k])
+            bstores[half]["plane"].append(np.full(b["row"].size, p, np.int8))
+            blend_seconds += bsec
+            blend_plane[half, p] = (b["row"].size, b["recovered"].sum())
     build, held = ({k: np.concatenate(v) for k, v in s.items()} for s in stores)
-    out = pool_product(W, build, flux_grid, n_row)
+    blend_build, blend_held = ({k: np.concatenate(v) for k, v in s.items()} for s in bstores)
+    out = pool_product(Ws, build, blend_build, flux_grid, n_row)
     tot = out.pop("pooled_total")
+    held["blend"] = blend_held
     out["held"] = held
     out["stats"] = dict(map_id=records[t].map_id, n_row=n_row, n_detected=inj.n_detected,
                         n_build=int(build["row"].size), n_held=int(held["row"].size),
                         min_pool=float(tot.min()), median_pool=float(np.median(tot)),
-                        short=float((tot < MIN_INJECTIONS).mean()), seconds=seconds, n_by_path=n_by_path)
+                        short=float((tot < MIN_INJECTIONS).mean()), seconds=seconds, n_by_path=n_by_path,
+                        blend_seconds=blend_seconds, blend_plane=blend_plane,
+                        blend_built=int(blend_build["row"].size), blend_held=int(blend_held["row"].size),
+                        check=[float(c.mean()) for c in check])
     return t, out
 
 
@@ -663,15 +794,24 @@ def tile_inputs(cell_map, cell_id, sigma, offset, source_row, shift, ra, dec):
     return out
 
 
-def _print_tile_stats(s):
+def _print_tile_stats(s, flux_grid):
     sec, n = s["seconds"], s["n_by_path"]
     per = lambda k, c: 1e4 * sec[k] / max(c, 1)
-    print("  %s: %d cells, %d detected sources; injections build %d held-out %d; pooled per (cell, plane) over %g arcsec: "
-          "min %d median %d (%.1f %% of (cell, plane) below %d); seconds per 10000 injections: aperture %.1f group %.1f "
-          "(%d aperture, %d group injections) adding and restoring %.1f"
-          % (s["map_id"], s["n_row"], s["n_detected"], s["n_build"], s["n_held"], POOL_ARCSEC, s["min_pool"],
+    print("  %s: %d cells, %d detected sources; injections build %d held-out %d; pooled per (cell, plane): "
+          "min %d median %d (%.1f %% of (cell, plane) below %d after widening); seconds per 10000 injections: aperture "
+          "%.1f group %.1f (%d aperture, %d group injections) adding and restoring %.1f; real-map self-check mean ratio "
+          "%.4f / %.4f"
+          % (s["map_id"], s["n_row"], s["n_detected"], s["n_build"], s["n_held"], s["min_pool"],
              s["median_pool"], 100 * s["short"], MIN_INJECTIONS, per("aperture", n["aperture"]), per("group", n["group"]),
-             n["aperture"], n["group"], per("inject", n["aperture"] + n["group"])), flush=True)
+             n["aperture"], n["group"], per("inject", n["aperture"] + n["group"]), s["check"][0], s["check"][1]), flush=True)
+    bp = s["blend_plane"].sum(axis=0)
+    if bp[:, 0].sum():
+        every = range(0, flux_grid.size, 4)
+        print("      blend path: %d targeted injections build, %d held-out, %.1f s in group fits (%.1f s per 10000); "
+              "recovered fraction by flux (mJy): %s"
+              % (s["blend_built"], s["blend_held"], s["blend_seconds"],
+                 1e4 * s["blend_seconds"] / max(s["blend_built"] + s["blend_held"], 1),
+                 " ".join("%.3g:%.2f" % (flux_grid[p], bp[p, 1] / max(bp[p, 0], 1)) for p in every)), flush=True)
 
 
 def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
@@ -774,6 +914,7 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
     flux90_ = np.full(n_row, np.nan, np.float32)
     bias, scatter, scatter_blend = (np.full((n_row, n_plane), np.nan, np.float32) for _ in range(3))
     held = {k: [] for k in ("row", "plane", "path", "recovered", "dflux")}
+    held_blend = {k: [] for k in ("row", "plane", "recovered", "dflux")}
     stats = []
     for t, out in injected:
         r0 = inputs[t]["row0"]
@@ -782,10 +923,13 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
         bias[sl], scatter[sl], scatter_blend[sl] = out["bias"], out["scatter"], out["scatter_blend"]
         for k in held:
             held[k].append(out["held"][k] + r0 if k == "row" else out["held"][k])
+        for k in held_blend:
+            held_blend[k].append(out["held"]["blend"][k] + r0 if k == "row" else out["held"]["blend"][k])
         stats.append(out["stats"])
     held = {k: (np.concatenate(v) if v else np.zeros(0)) for k, v in held.items()}
-    for s in stats:
-        _print_tile_stats(s)
+    held["blend"] = {k: (np.concatenate(v) if v else np.zeros(0)) for k, v in held_blend.items()}
+    for s_ in stats:
+        _print_tile_stats(s_, flux_grid)
     envelope = curve.max(axis=0).astype(np.uint16) if n_row else np.zeros(n_plane, np.uint16)
     return dict(curve=curve, source_row=src_row.astype(np.int32), envelope=envelope, n_pos=n_pos,
                 n_sigma=cols["n_sigma"].astype(np.int16), flux90=flux90_, bias=bias, scatter=scatter,
@@ -839,6 +983,8 @@ def write_product(path, region, mag, bands):
             w = lambda name, data, **kw: build_module.write_dataset(f, name, data, *REGISTRY[(stem, name)], **kw)
             ds = w("CURVE_" + b, d["curve"])
             ds.attrs["ZERO_POINT_JY"] = ZERO_POINT_JY
+            ds.attrs["POOL_ARCSEC"] = POOL_ARCSEC
+            ds.attrs["NOISE_POOL_FACTOR"] = NOISE_POOL_FACTOR
             w("MAG_GRID_" + b, mag)
             w("ENVELOPE_" + b, d["envelope"])
             w("COMPLETED_FROM_" + b, np.full(d["curve"].shape[0], np.nan, np.float32))
@@ -877,8 +1023,8 @@ def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None, maps=No
         records = [r for r in pacs_fit.read_index(config, region) if r.band == b
                    and (maps is None or any(str(o) in maps for o in r.obsids))]
         scan = [r for r in records if r.mode == 1]
-        if scan:
-            self_check(config, scan[0], strict=b != "P160")
+        if records:
+            self_check(config, (scan or records)[0])
         out[b] = _band_product(config, records, ra, dec, n_jobs, stage, flux_grid) if records else None
         if out[b] is None:
             out[b] = _empty_band(ra.size, mag.size)
@@ -930,7 +1076,7 @@ def _read_band(f, band):
             grid = pacs_fit.MapGrid.from_wcs(WCS(fits.Header.fromstring(d["map_wcs"][m].decode())).celestial,
                                              tuple(d["map_shape"][m]))
             xy[rows] = cell_centres_arcsec(grid, d["cell_id"][rows]) + np.array([m * 1e7, 0.0])
-    d["W"] = pool_matrix(xy)
+    d["Ws"] = pool_matrices(xy, d["sigma"])
     return d
 
 
@@ -940,65 +1086,94 @@ def _binomial_error(fraction, n):
     return np.sqrt(p * (1 - p) / np.maximum(n, 1))
 
 
+def _verdict(value, low, high=None):
+    return "pass" if value >= low and (high is None or value <= high) else "FAIL"
+
+
 def _acceptance_c1(band, d, held):
+    """C1 (restated bars): of the (cell, plane) with at least MIN_INJECTIONS in both halves, the share within the
+    held-out half's 1-sigma binomial error of the stored fraction (60-75 %; 68 % expected), within 2 sigma (>= 93 %),
+    within 0.03 absolute (>= 95 %), and the share of cells whose FLUX90 of the two halves agree within 10 % (>= 90 %)."""
     n_row, n_plane = d["curve"].shape
-    tot, got = pooled_counts(d["W"], held["row"], held["plane"].astype(np.int64), held["recovered"], n_row, n_plane)
+    tot, got = pooled_counts(d["Ws"], held["row"], held["plane"].astype(np.int64), held["recovered"], n_row, n_plane)
     with np.errstate(all="ignore"):
         fh = np.where(tot > 0, got / tot, np.nan)
     fb = d["curve"].astype(float) / STORAGE_SCALE
     use = (tot >= MIN_INJECTIONS) & (d["n_pos"][:, None] >= MIN_INJECTIONS)
     diff = np.abs(fb - fh)
     sig = _binomial_error(fh, tot)
-    sig_both = np.sqrt(sig ** 2 + _binomial_error(fb, d["n_pos"][:, None].astype(float)) ** 2)
     n = int(use.sum())
     if n == 0:
         print("  C1 %s: no (cell, plane) has %d injections in both halves" % (band, MIN_INJECTIONS))
         return
-    within_error, within_abs = use & (diff <= sig), use & (diff <= 0.03)
-    print("  C1 %s: %d (cell, plane) with >= %d injections in both halves (%.1f %% of all): within the held-out half's "
-          "binomial error %.1f %%, within 0.03 absolute %.1f %%, both %.1f %%; within the two halves' combined "
-          "error %.1f %% (about 68 %% for an exact curve)"
-          % (band, n, MIN_INJECTIONS, 100 * n / diff.size, 100 * within_error.sum() / n, 100 * within_abs.sum() / n,
-             100 * (within_error & within_abs).sum() / n, 100 * (use & (diff <= sig_both)).sum() / n))
+    p1, p2, pa = (100 * (use & c).sum() / n for c in (diff <= sig, diff <= 2 * sig, diff <= 0.03))
+    print("  C1 %s: %d (cell, plane) with >= %d injections in both halves (%.1f %% of all): within 1 sigma %.1f %% (bar 60-75: %s), "
+          "within 2 sigma %.1f %% (bar >= 93: %s), within 0.03 absolute %.1f %% (bar >= 95: %s)"
+          % (band, n, MIN_INJECTIONS, 100 * n / diff.size, p1, _verdict(p1, 60, 75), p2, _verdict(p2, 93), pa, _verdict(pa, 95)))
     worst = np.argsort(np.where(use, diff / np.maximum(sig, 1e-9), -1).ravel())[::-1][:5]
     for k in worst:
         r, p = divmod(int(k), n_plane)
         print("      worst: map %s cell %d plane m=%.2f: curve %.3f held-out %.3f (%d injections)"
               % (d["map_id"][d["cell_map"][r]].decode(), d["cell_id"][r], d["mag"][p], fb[r, p], fh[r, p], tot[r, p]))
     f90 = flux90(np.where(tot > 0, got / np.maximum(tot, 1), 0.0), d["flux"])
-    both = np.isfinite(f90) & np.isfinite(d["flux90"])
+    ok = np.isfinite(f90) & np.isfinite(d["flux90"]) & (tot[:, -1] >= MIN_INJECTIONS)
     rel = np.abs(f90 - d["flux90"]) / d["flux90"]
-    ok = both & (tot[:, -1] >= MIN_INJECTIONS)
-    print("      FLUX90 of the two halves within 10 %%: %.1f %% of %d cells (median difference %.1f %%)"
-          % (100 * np.mean(rel[ok] <= 0.10) if ok.any() else np.nan, int(ok.sum()), 100 * np.median(rel[ok]) if ok.any() else np.nan))
+    pf = 100 * np.mean(rel[ok] <= 0.10) if ok.any() else np.nan
+    print("      FLUX90 of the two halves within 10 %%: %.1f %% of %d cells (bar >= 90: %s; median difference %.1f %%)"
+          % (pf, int(ok.sum()), _verdict(pf, 90) if ok.any() else "no cells", 100 * np.median(rel[ok]) if ok.any() else np.nan))
     for k in np.argsort(np.where(ok, rel, -1))[::-1][:5]:
         if ok[k]:
             print("      worst FLUX90: map %s cell %d: %.1f vs %.1f mJy"
                   % (d["map_id"][d["cell_map"][k]].decode(), d["cell_id"][k], d["flux90"][k], f90[k]))
 
 
+def _robust(v):
+    return MAD_TO_SIGMA * np.median(np.abs(v - np.median(v))) if v.size else np.nan
+
+
 def _acceptance_c2(band, d, held):
+    """C2: the held-out recovered injections above each cell's own FLUX90: median (recovered - injected)/injected
+    (bar < 2 %) and the robust scatter of (recovered - injected)/SCATTER (bar 1.0 +/- 0.05), per path and noise class;
+    the bias between 0.5 x FLUX90 and FLUX90 (the selection bias of detected fluxes, expected positive) separately;
+    and the blend path's targeted injections against SCATTER_BLEND."""
     row, plane = held["row"], held["plane"].astype(np.int64)
     rec = held["recovered"]
     flux = d["flux"][plane]
     median_sigma = np.array([np.median(d["sigma"][d["cell_map"] == m]) if (d["cell_map"] == m).any() else np.nan
                              for m in range(d["map_id"].size)])
     noisy = d["sigma"] > 2 * median_sigma[d["cell_map"]]
-    above = rec & np.isfinite(d["flux90"][row]) & (flux > d["flux90"][row])
-    for path, name, table in ((1, "aperture", d["scatter"]), (2, "group fit", d["scatter_blend"])):
-        for label, cls in (("quiet cells", ~noisy[row]), ("noisy cells (CELL_SIGMA > 2 x map median)", noisy[row])):
-            sel = above & (held["path"] == path) & cls
-            allrec = rec & (held["path"] == path) & cls & np.isfinite(table[row, plane])
-            if sel.sum() < 30:
-                print("  C2 %s %s, %s: %d recovered injections above FLUX90 (too few)" % (band, name, label, int(sel.sum())))
-                continue
-            bias = np.median(held["dflux"][sel] / flux[sel])
-            z = held["dflux"][allrec] / table[row, plane][allrec]
-            za = held["dflux"][sel & np.isfinite(table[row, plane])] / table[row, plane][sel & np.isfinite(table[row, plane])]
-            robust = lambda v: MAD_TO_SIGMA * np.median(np.abs(v - np.median(v))) if v.size else np.nan
-            print("  C2 %s %s, %s: %d recovered above FLUX90, median (recovered - injected)/injected %+.2f %%; "
-                  "(recovered - injected)/SCATTER: %d injections, robust scatter %.3f (above FLUX90 %.3f), median %+.3f"
-                  % (band, name, label, int(sel.sum()), 100 * bias, int(allrec.sum()), robust(z), robust(za), np.median(z) if z.size else np.nan))
+    f90 = d["flux90"][row]
+    above = rec & np.isfinite(f90) & (flux > f90)
+    near = rec & np.isfinite(f90) & (flux > 0.5 * f90) & (flux <= f90)
+    for label, cls in (("quiet cells", ~noisy[row]), ("noisy cells (CELL_SIGMA > 2 x map median)", noisy[row])):
+        sel = above & (held["path"] == 1) & cls
+        nr = near & (held["path"] == 1) & cls
+        ok = sel & np.isfinite(d["scatter"][row, plane])
+        if sel.sum() < 30:
+            print("  C2 %s aperture, %s: %d recovered injections above the cell's FLUX90 (too few)" % (band, label, int(sel.sum())))
+            continue
+        bias = 100 * np.median(held["dflux"][sel] / flux[sel])
+        z = held["dflux"][ok] / d["scatter"][row, plane][ok]
+        print("  C2 %s aperture, %s: %d recovered above the cell's FLUX90: median (recovered - injected)/injected %+.2f %% "
+              "(bar < 2 %%: %s); normalised scatter %.3f (bar 1.0 +/- 0.05: %s); near threshold (0.5-1 x FLUX90) %d injections, "
+              "bias %+.2f %% (information)"
+              % (band, label, int(sel.sum()), bias, _verdict(-abs(bias), -2), _robust(z), _verdict(_robust(z), 0.95, 1.05),
+                 int(nr.sum()), 100 * np.median(held["dflux"][nr] / flux[nr]) if nr.any() else np.nan))
+    b = held["blend"]
+    if b["row"].size:
+        bf = d["flux"][b["plane"].astype(np.int64)]
+        br, bp = b["row"], b["plane"].astype(np.int64)
+        ok = b["recovered"] & np.isfinite(d["scatter_blend"][br, bp])
+        z = b["dflux"][ok] / d["scatter_blend"][br, bp][ok]
+        print("  C2 %s blend path (held-out targeted injections): %d, recovered fraction %.3f; %d recovered with a stored "
+              "SCATTER_BLEND: median (recovered - injected)/SCATTER_BLEND %+.3f, robust scatter %.3f (bar 1.0 +/- 0.05: %s)"
+              % (band, b["row"].size, b["recovered"].mean(), int(ok.sum()), np.median(z) if z.size else np.nan, _robust(z),
+                 _verdict(_robust(z), 0.95, 1.05) if z.size else "no data"))
+        for lo, hi in ((0, 6), (6, 12), (12, 18), (18, 24), (24, 30), (30, 37)):
+            k = (bp >= lo) & (bp < hi)
+            if k.any():
+                print("      blend recovered fraction at %.3g-%.3g mJy: %.3f (%d)"
+                      % (d["flux"][min(hi, d["flux"].size) - 1], d["flux"][lo], b["recovered"][k].mean(), int(k.sum())))
 
 
 def _inverted_tile(piece, config, records):
@@ -1036,14 +1211,22 @@ def _acceptance_c3(config, region, band, f, d, records, n_jobs):
                          d["map_shift"], ra, dec)
     res = pieces_module.run(functools.partial(_inverted_tile, config=config, records=maps),
                             sorted(inputs.items()), n_jobs)
+    expected_total = detected_total = 0.0
     for r in res:
         rate_r = r["random_pass"] / max(r["n_random"], 1)
         rate_s = r["sesna_pass"] / max(r["n_sesna"], 1)
+        expected = rate_r * r["n_undetected"]
+        expected_total += expected
+        detected_total += r["n_detected"]
+        share = expected / max(r["n_detected"], 1)
         print("  C3 %s %s: inverted map: %d random positions, %.4f %% pass the rule; %d SESNA positions, %.4f %% pass; "
-              "covered undetected %d, detected %d: rate x undetected / detected = %.4f (random), %.4f (SESNA positions)"
+              "covered undetected %d, detected %d: expected false detections %.2f = %.2f %% of the detected%s"
               % (band, r["map_id"], r["n_random"], 100 * rate_r, r["n_sesna"], 100 * rate_s, r["n_undetected"],
-                 r["n_detected"], rate_r * r["n_undetected"] / max(r["n_detected"], 1),
-                 rate_s * r["n_undetected"] / max(r["n_detected"], 1)))
+                 r["n_detected"], expected, 100 * share,
+                 "  DISCLOSURE: above %.0f %% on this map" % (100 * C3_LIMIT) if share > C3_LIMIT else ""))
+    share = expected_total / max(detected_total, 1)
+    print("  C3 %s region-wide: expected false detections %.1f of %d detected = %.2f %% (bar < %.0f %%): %s"
+          % (band, expected_total, int(detected_total), 100 * share, 100 * C3_LIMIT, "PASS" if share < C3_LIMIT else "FAIL"))
 
 
 def acceptance(config, region, held_out):
