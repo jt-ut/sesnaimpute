@@ -144,6 +144,12 @@ BANDS = {
 # library emits exactly these eleven filenames.
 CONVOLVED_BAND_NAMES = tuple(BANDS)
 
+# The bands every library is SAMPLED and de-duplicated in (curation gates, quotient space, members):
+# the eight SESNA bands, at the fitter's resolution. The convolved outputs and registers carry all
+# eleven (CONVOLVED_BAND_NAMES); eleven-band sampling is a later owner decision (planner ruling
+# 2026-10-27), so library members are unchanged by the PACS bands.
+SAMPLING_BANDS = ("J", "H", "Ks", "I1", "I2", "I3", "I4", "M1")
+
 # --- Survey absolute-calibration precision, dex of log10 flux ---
 # The sampling scale for every model library (see sed_models_curate: one
 # noise length per band is the number below, and the whitened SED-space

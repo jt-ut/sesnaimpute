@@ -33,7 +33,7 @@ try:
 except ImportError:
     fits = None
 
-from sesnaimpute.sed_models.constants import C_UM_S, LOGD_STEP, L_SUN_ERG_S, MJY_TO_CGS
+from sesnaimpute.sed_models.constants import BANDS, C_UM_S, LOGD_STEP, L_SUN_ERG_S, MJY_TO_CGS
 
 
 @dataclass
@@ -433,7 +433,9 @@ def bracket_sed_block(ms: ModelSet, au_range):
 # Deliberately NOT wired into the writers: this validates the artifact on
 # disk, so it stays honest even if a writer is bypassed or hand-edited.
 
-CONVOLVED_BANDS = ("J", "H", "Ks", "I1", "I2", "I3", "I4", "M1")
+# The output contract is the SED: every library carries one convolved file per
+# band of the eleven-band SED (not the eight selection bands).
+CONVOLVED_BANDS = tuple(BANDS)
 MODELS_CONF_REQUIRED_KEYS = ("name", "length_subdir", "aperture_dependent", "logd_step")
 
 # Per-library deviations from the contract. Every entry is a DECISION with

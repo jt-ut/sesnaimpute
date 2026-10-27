@@ -166,7 +166,7 @@ from sesnaimpute.sed_models.curate.yso_assembly import (
     _read_reference_constants,
 )
 from sesnaimpute.sed_models.curate.yso_labeling import (
-    BAND_ORDER,
+    BAND_ORDER, ASSEMBLY_BANDS,
     compute_row_features_from_cubes,
     compute_td_fraction,
     read_geometry_flux_cubes,
@@ -540,7 +540,7 @@ def run_dedup(model_id, mu, dark_mask, dedup_source, radius=R_NET_RADIUS, verbos
     # (YSO - matched SPS) difference onto that direction's own unit
     # vector is negative exactly when the implied A_V is negative.
     sigma_vec, _ = sampling.quotient_space()
-    av_law_whitened = density._av_law(sampling._SAMPLING_LAW) / sigma_vec
+    av_law_whitened = density._av_law(sampling._SAMPLING_LAW, sampling.SAMPLING_BANDS) / sigma_vec
     av_dir = av_law_whitened / np.linalg.norm(av_law_whitened)
     diff = (mu[dup] / sigma_vec) - (sps_mu[nearest[dup]] / sigma_vec)
     n_bluer = int(np.sum((diff @ av_dir) < 0)) if dup.any() else 0
@@ -620,8 +620,8 @@ def build_members_and_library(model_id, model_name, label, params, coords,
     n_k = len(kept_index)
     values = np.zeros((n_k, N_APERTURES, N_WAVELENGTHS), dtype=np.float32)
     uncertainties = np.zeros((n_k, N_APERTURES, N_WAVELENGTHS), dtype=np.float32)
-    convolved_flux = {b: np.zeros((n_k, N_APERTURES), dtype=np.float64) for b in BAND_ORDER}
-    convolved_err = {b: np.zeros((n_k, N_APERTURES), dtype=np.float64) for b in BAND_ORDER}
+    convolved_flux = {b: np.zeros((n_k, N_APERTURES), dtype=np.float64) for b in ASSEMBLY_BANDS}
+    convolved_err = {b: np.zeros((n_k, N_APERTURES), dtype=np.float64) for b in ASSEMBLY_BANDS}
 
     order_df = pd.DataFrame({"pos": np.arange(n_k), "geom": kept_geom, "row": kept_row_index,
                              "name": kept_model_name})
@@ -638,7 +638,7 @@ def build_members_and_library(model_id, model_name, label, params, coords,
         uncertainties[positions_sorted] = flux_unc
 
         model_names_here = sub["name"].to_numpy()[row_index_sorted_order]
-        for band in BAND_ORDER:
+        for band in ASSEMBLY_BANDS:
             flux_b, err_b = _extract_convolved_band_rows(geometry_dir, band, model_names_here)
             convolved_flux[band][positions_sorted] = flux_b
             convolved_err[band][positions_sorted] = err_b
@@ -657,7 +657,7 @@ def build_members_and_library(model_id, model_name, label, params, coords,
         band: dict(total_flux_mjy=convolved_flux[band], apertures_au=ref["aperture_au"],
                   filter_wavelength_um=float(BANDS[band].wvl_effective_um),
                   total_flux_err_mjy=convolved_err[band])
-        for band in BAND_ORDER
+        for band in ASSEMBLY_BANDS
     }
     models_conf_kwargs = dict(name="yso", aperture_dependent=True)
 
@@ -827,11 +827,11 @@ def build(data_root, radius=R_NET_RADIUS, verbose=True):
         assert np.allclose(sp_sum, 1.0), "/subclass_prob rows do not sum to one"
 
         assert "bands" in h and "VEGA_ZP_MJY" in h["bands"], "no /bands VEGA_ZP_MJY"
-        assert h["bands"]["VEGA_ZP_MJY"].shape[0] == 8, "/bands does not carry 8 zero points"
+        assert h["bands"]["VEGA_ZP_MJY"].shape[0] == 11, "/bands does not carry 11 zero points"
     assert n_model_reg == len(kept_index), (
         f"register n_model {n_model_reg} != kept count {len(kept_index)}")
     _log("[accept] register /models A12 physical columns, /subclass_prob (6, sum=1), "
-        "/bands 8 zero points: PASS")
+        "/bands 11 zero points: PASS")
 
     stage_real = os.path.realpath(stage_dir)
     out_real = os.path.realpath(p["out_lib_dir"])

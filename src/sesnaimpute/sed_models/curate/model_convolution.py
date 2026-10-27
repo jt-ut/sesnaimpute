@@ -31,8 +31,18 @@ from astropy.io import fits
 from sedfitter.filter import Filter
 from sedfitter.convolve import convolve_model_dir
 
-from sesnaimpute.sed_models.data_loader import load_filter_curve
+from sesnaimpute.sed_models.data_loader import load_filter_curve as _load_filter_curve
 from sesnaimpute.sed_models.constants import BANDS, C_UM_S, SPEED_OF_LIGHT_CM_S
+
+
+def load_filter_curve(name):
+    """data_loader.load_filter_curve, failing loudly and by file name when the
+    band's curve file is absent (the PACS curves P70/P100/P160 are inputs
+    placed by hand; nothing here fetches, synthesises or approximates one)."""
+    try:
+        return _load_filter_curve(name)
+    except FileNotFoundError as err:
+        raise FileNotFoundError(f"filter curve {name}.dat missing ({err})") from None
 
 
 def pivot_wavelength_um(wave_um, response):
@@ -49,9 +59,10 @@ def build_sedfitter_filter(name):
     convolution but is easy to forget since Filter.read() doesn't do it
     automatically -- so it's always called out loud here, never buried.
 
-    central_wavelength: BANDS[name].wvl_effective_um for the 8 SESNA bands
-    (already-documented instrument-handbook values), computed pivot
-    wavelength for anything not in BANDS (currently just Gaia G).
+    central_wavelength: BANDS[name].wvl_effective_um for the eleven SED bands
+    (the eight SESNA bands' handbook values; PACS P70/P100/P160: the PACS
+    reference wavelengths), computed pivot wavelength for anything not in
+    BANDS (currently just Gaia G).
     """
     fc = load_filter_curve(name)
 

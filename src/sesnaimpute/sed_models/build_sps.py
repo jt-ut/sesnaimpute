@@ -80,7 +80,8 @@ import numpy as np
 from astropy.table import Table
 
 from sesnaimpute.sed_models import paths
-from sesnaimpute.sed_models.constants import POINT_SOURCE_APERTURE_AU, BANDS
+from sesnaimpute import definitions
+from sesnaimpute.sed_models.constants import POINT_SOURCE_APERTURE_AU, BANDS, SAMPLING_BANDS
 from sesnaimpute.sed_models import sampling, library
 from sesnaimpute.sed_models.curate import curve_of_growth as cog
 from sesnaimpute.sed_models.curate.sps_curate import (
@@ -251,7 +252,7 @@ def build(root_arg):
         teff, logg, zh = raw_data["teff"], raw_data["logg"], raw_data["zh"]
         source = raw_data["source"]
         subclass = raw_data["subclass"]
-        f_ref = raw_data["f_ref"]                       # (n_raw, 8) mJy
+        f_ref = raw_data["f_ref"]                       # (n_raw, 11) mJy
         wave_um_desc = raw_data["wave_um_desc"]
         freq_hz_desc = raw_data["freq_hz_desc"]
         values = raw_data["values"]                     # (n_raw, 1, n_wav)
@@ -266,14 +267,17 @@ def build(root_arg):
 
         # ---- Stage 3: the shared sampler ----------------------------------
         sigma_vec, projector = sampling.quotient_space()
-        flux_cubes = {band: f_ref[:, j:j + 1]
-                      for j, band in enumerate(CONVOLVED_BANDS_TO_BUILD)}
+        # Sampling is in the eight SESNA bands (the curation space); the
+        # PACS columns of f_ref are carried to the library, not sampled.
+        sel = [CONVOLVED_BANDS_TO_BUILD.index(b) for b in SAMPLING_BANDS]
+        f_ref_samp = f_ref[:, sel]
+        flux_cubes = {CONVOLVED_BANDS_TO_BUILD[j]: f_ref[:, j:j + 1] for j in sel}
         peak, floor_dex, floor_linear, all_zero = cog.peak_and_floor(flux_cubes)
         assert not np.any(all_zero), (
             "build_sps: a raw model has zero flux in every band -- no "
             "B0 floor to anchor to; refusing to sample")
-        dark_mask = f_ref < floor_linear[:, None]
-        log10_flux = np.log10(np.maximum(f_ref, floor_linear[:, None]))
+        dark_mask = f_ref_samp < floor_linear[:, None]
+        log10_flux = np.log10(np.maximum(f_ref_samp, floor_linear[:, None]))
         n_dark_rows = int(np.any(dark_mask, axis=1).sum())
         print(f"B0 floor: {n_dark_rows} of {n_raw} raw rows have >=1 band "
               f"at the per-model floor (expect 0 -- no SPS photosphere is "
