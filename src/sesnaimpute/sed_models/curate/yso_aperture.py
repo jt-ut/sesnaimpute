@@ -1,67 +1,40 @@
 """
 yso_aperture.py
 ====================================================================
-The aperture gate: for every model in the grid, the minimum source
-distance at which the survey's photometric apertures fall inside the
-range the radiative transfer actually resolved.
+The aperture gate: a model enters the library only where its own
+radiative transfer resolves the survey apertures, band by band, each
+band at its own survey aperture (`BANDS[band].aperture_arcsec`) at the
+nearest region's distance D_NEAR.
 
-**The problem this exists to solve.** R17/Richardson's `flux.fits` carries
-**NaN** at small apertures for essentially every medium-bearing geometry
--- the RT did not resolve them. The released `convolved/{band}.fits` files
-encode that NaN as `0`, which is indistinguishable from a real measurement
-of "no flux". Downstream, labeling interpolates its survey-matched mu-SED
-between the two grid apertures bracketing the survey aperture, clamps any
-zero to the per-model flux floor, and produces a finite, plausible-looking
-number with no data behind it.
+**The physical reason.** Each model's SED was computed in the model's
+own aperture set and interpolated onto the release's 20-aperture grid;
+a grid aperture below the model's resolution has no prediction and is
+NaN in the release (Richardson et al. 2024, ApJ 961, 2, sec. III.7).
+The models unresolved at SESNA's apertures are those with outer radii
+of 1-13 million AU (5-60 pc; resolved models 1,000-600,000 AU), whose
+grid first resolves their own 24 um at 20,000-1,000,000 AU. They have
+no prediction at a 300-1,500 AU aperture (and a sky-subtracted aperture
+removes a uniform medium anyway), so they are not admitted. Measured
+2026-10-27: 13-14 % of s-p-hmi / s-p-smi, 1.6 % of spubsmi.
 
-Measured on the shipped library before this gate existed: **26.3% of the
-199,999 selected models carried at least one fabricated band**, and where
-one bracket was undefined but the other real, the fabricated value sat a
-median **1168x** below the true flux -- ~3 dex against a 0.015-0.034 dex
-metric. Those models therefore carry meaningless labels of their own: within
-`spubhmi` alone the fabrication rate ran 59.9% for cIII against 0.9% for cII,
-and where clean models' labels reproduce Richardson's Stage almost exactly,
-fabricated ones do not.
+**What counts as resolved.** This package convolves all eleven bands
+itself from each geometry's raw `flux.fits` (`convolve_yso.py`; the
+release's own convolved files are not read). A wavelength sample left
+undefined above the model's all-wavelength-undefined prefix is filled
+from the model's own curve of growth only inside the measured range:
+from the nearest defined aperture at most two grid steps out, or, beyond
+30 um, from further out where the model's own 24 um is defined at that
+aperture (the far-infrared-faint case). Filled samples count as
+resolved. A band is undefined at an aperture (NaN) if any sample its
+filter covers is still undefined; `undefined_apertures` is per band
+(`~isfinite`), and `d_min_from_undefined` requires each band's OWN two
+bracket apertures finite at that band's survey aperture.
 
-**Scope of the harm, measured rather than assumed.** Fabricated models cluster
-in SED space (floor-dominated SEDs are all alike), so they become each other's
-nearest neighbours -- but in the fixed-sigma metric they sit astronomically far
-from genuine models and carry ~zero kernel weight. Gating before vs. after
-labeling changes the surviving models' labels not at all: **99.965% identical
-argmax** over the 1,642,685 labeled in both runs, median change in max(p) of
-0.0000. So the damage is to the fabricated models' own labels, not to their
-neighbours'.
-
-This still runs **before labeling**, for three ordinary reasons: `K = ceil(sqrt(N))`
-then tracks the real pool, the ANN index is not padded with 246k junk vectors,
-and the labeling pass is not spent on models about to be discarded.
-
-**What "undefined" means, and how it is detected (as of 2026-10-27).**
-Before this date, this module could only infer "undefined" indirectly:
-the release's own `convolved/{band}.fits` files zero-filled a NaN raw
-sample, so an aperture was called undefined iff all 8 convolved bands
-read exactly `0` there (validated against the raw `flux.fits` NaN mask
-on 400 models x 20 apertures: precision 1.0000, recall 1.0000; a model
-with a central star always emits *something* within 100 AU, so
-all-8-bands-zero never occurred as a real measurement -- checked
-directly on 1,885 models whose smallest aperture IS defined, of which
-exactly zero were all-band zero).
-
-Owner's ruling 2026-10-27 (bms_review/briefs/yso_reconvolve_2026-10-27/
-BRIEF.md): this package now convolves all eleven bands itself, directly
-from each geometry's raw `flux.fits`, storing an undefined (model,
-aperture, band) cell as NaN -- a real missing-data marker, never a
-fabricated 0 (see `convolve_yso.py`). That makes the old all-8-bands-0
-heuristic unnecessary and, for the three PACS bands specifically, wrong
-in the OTHER direction too: PACS-only noise-flagged SAMPLES at an
-otherwise-defined aperture (interleaved with finite ones, ~0.7% MC
-uncertainty) now read as a real but UNDEFINED band at that one aperture,
-which the old all-8-zero rule could never detect (it only caught an
-aperture undefined in literally every band at once). `undefined_apertures`
-below is therefore PER BAND now (`~isfinite(flux_cubes[band])`
-directly), and the gate (`d_min_from_undefined`) requires each band's
-OWN two brackets finite at the survey's own aperture for that band --
-not one shared all-bands test.
+**Why before labeling.** Labeling interpolates a survey-matched SED
+between the two grid apertures bracketing the survey aperture; an
+undefined bracket gives a number with no prediction behind it. The gate
+runs before labeling so `K = ceil(sqrt(N))` tracks the real pool and no
+labeling is spent on models about to be discarded.
 
 This module computes and returns; `yso_curate.run_aperture` decides the
 threshold and writes the registry.
@@ -358,8 +331,8 @@ def scan_geometries(yso_root, geometries, buffer_frac=D_BUFFER_FRAC, verbose=Tru
     resulting `D_NEAR`, per-band brackets and boundary margins, per-geometry
     pass rates, and the non-contiguity tally.
 
-    Reads only `convolved/{band}.fits` and `parameters.fits` -- never
-    `flux.fits`, consistent with the rest of the pipeline. (`info.fits`
+    Reads this package's own convolved bands (`yso_convolved` family) and
+    `parameters.fits`. (`info.fits`
     is also read now, for the old-vs-new gate comparison's loss-by-Stage
     print -- `info.fits` is column-only and cheap, the same file `build_yso`'s
     own ingest stage already reads.)
@@ -414,8 +387,12 @@ def scan_geometries(yso_root, geometries, buffer_frac=D_BUFFER_FRAC, verbose=Tru
         "n_valid_aperture": int((d_min["d_min_kpc"] < d_near).sum()),
         "n_noncontiguous_undefined": n_noncontiguous,
         "n_all_apertures_undefined": n_all_undefined,
-        "undefined_signature": "per band, this package's own reconvolved flux is NaN "
-                              "(owner's ruling 2026-10-27; was: all 8 convolved bands "
-                              "exactly 0 at that aperture)",
+        "reading": "A model enters the library only where its own radiative transfer resolves the "
+                   "survey apertures, band by band, each band at its own survey aperture at the nearest "
+                   "region's distance D_NEAR. Models unresolved there (outer radii of millions of AU, whose "
+                   "grid first resolves 24 um at 20,000 AU and beyond) have no prediction at a 300-1,500 AU "
+                   "aperture. A sample filled from the model's own curve of growth within two grid steps, or "
+                   "beyond 30 um where the model's 24 um is defined at that aperture, counts as resolved "
+                   "(Richardson et al. 2024, ApJ 961, 2, sec. III.7).",
     }
     return d_min, run_info
