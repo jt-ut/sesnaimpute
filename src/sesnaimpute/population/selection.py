@@ -19,8 +19,10 @@ from sesnaimpute import definitions
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 
-#: SESNA's catalog inclusion rule: >= 2 of 8 bands above the local limit.
-MIN_BANDS = 2
+#: SESNA's catalog inclusion rule, read from `definitions.SELECTION`.
+#: Alias kept for one merge cycle; it retires (readers use
+#: `definitions.SELECTION.min_bands`).
+MIN_BANDS = definitions.SELECTION.min_bands
 
 #: C30 (briefs/round4_2026-10-20/C30_population_anchor.md): the Galactic
 #: field-star population split the STAR anchor weight now fits and
@@ -117,8 +119,10 @@ def _load_law_curve(law):
 
 
 def extinction_k(config, law):
-    """`k_i = chi(lambda_i) / chi(0.55um)` for the 8 census bands, from
-    the law's own tabulated curve, linear interpolation in wavelength.
+    """`k_i = chi(lambda_i) / chi(0.55um)` for the eleven SED bands
+    (`definitions.BANDS`), from the law's own tabulated curve, linear
+    interpolation in wavelength (the tables reach 1 cm, so 70-160 um are
+    small positive values; see `kappa_ak` for the printed vectors).
     `config` is unused -- the law is package data, not a data-root product.
     """
     if law not in _K_CACHE:
@@ -130,8 +134,14 @@ def extinction_k(config, law):
 
 
 def kappa_ak(config, law):
-    """`kappa_i = k_i / k_Ks` -- the K-currency per-band dimming vector;
-    `kappa_Ks == 1` exactly.
+    """`kappa_i = k_i / k_Ks` -- the K-currency per-band dimming vector
+    over the eleven BANDS; `kappa_Ks == 1` exactly.
+
+    Measured (band order J H Ks I1 I2 I3 I4 M1 P70 P100 P160); the PACS
+    entries are the law curves interpolated at 70/100/160 um:
+      draine_rv3.1:      P70 0.019887  P100 0.008893  P160 0.003341
+      chapman2009_dense: P70 0.015624  P100 0.007174  P160 0.002911
+    The first eight entries are the former eight-band vector, unchanged.
     """
     k = extinction_k(config, law)
     return k / k[BAND_KEYS.index("Ks")]
@@ -168,6 +178,18 @@ def kappa_hybrid(config, w):
     kd = kappa_ak(config, LAW_DIFFUSE)
     kw = kappa_ak(config, LAW_DENSE)
     return (1.0 - w)[..., None] * kd + w[..., None] * kw
+
+
+def kappa_selection(config, w=None, law=None):
+    """The same dimming vectors restricted to the eight SELECTION bands
+    (`definitions.SELECTION_INDEX`), for the prior-chain callers. Give
+    `law` for `kappa_ak(config, law)` or `w` for `kappa_hybrid(config, w)`.
+    """
+    idx = list(definitions.SELECTION_INDEX)
+    if (w is None) == (law is None):
+        raise ValueError("kappa_selection: give exactly one of w (hybrid) or law")
+    k = kappa_hybrid(config, w) if law is None else kappa_ak(config, law)
+    return np.asarray(k)[..., idx]
 
 
 def ak_per_av(config, w):

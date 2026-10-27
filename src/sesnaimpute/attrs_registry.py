@@ -4064,3 +4064,10 @@ for _band, _wave in (("P70", "70"), ("P100", "100"), ("P160", "160")):
             _text += _P160_NOTE
         REGISTRY[("photometry_pacs_source", _name.format(b=_band))] = (_units, _text)
 
+
+
+# Unit 0: PACS bands
+# Nothing is registered here. The datasets that carry the three PACS bands
+# (curated source table, completeness product, the four libraries' P70/P100/P160
+# columns, the PACS far-infrared census) are registered by the units that build
+# them, each in its own block; their UNITS and READING are those units'.

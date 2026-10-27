@@ -107,6 +107,12 @@ class Band:
     apertures array as radii, and Models.read converts it to a physical
     radius in AU as aperture_arcsec * d_pc.
 
+    For PACS the aperture is Pokhrel et al. 2023 Table 1 (9.6 / 8.0 /
+    12.8 arcsec at 70 / 100 / 160 um), the aperture the model libraries
+    are interpolated to; the libraries carry TOTAL flux, the same
+    convention as the stored PACS photometry, with no normalisation
+    constant.
+
     This value is the single authority for the aperture every model
     library is interpolated to (sedfitter Models.read) AND for any
     survey-matched hybrid SED built during curation. The two must agree;
@@ -129,10 +135,13 @@ BANDS = {
     "I3": Band("I3", "IRAC",  5.8,   5.731, 2.4),
     "I4": Band("I4", "IRAC",  8.0,   7.872, 2.4),
     "M1": Band("M1", "MIPS",  24.0,  23.68, 7.6),
+    "P70":  Band("P70",  "PACS", 70.0,  70.0,  9.6),
+    "P100": Band("P100", "PACS", 100.0, 100.0, 8.0),
+    "P160": Band("P160", "PACS", 160.0, 160.0, 12.8),
 }
 
 # The project-wide convolved/{band}.fits naming, in BANDS order. Every
-# library emits exactly these eight filenames.
+# library emits exactly these eleven filenames.
 CONVOLVED_BAND_NAMES = tuple(BANDS)
 
 # --- Survey absolute-calibration precision, dex of log10 flux ---
@@ -158,6 +167,7 @@ CONVOLVED_BAND_NAMES = tuple(BANDS)
 #   2MASS J/H/Ks  0.010 dex (2.3%)  Skrutskie et al. 2006, AJ 131, 1163
 #   IRAC I1-I4    0.013 dex (3.0%)  Reach et al. 2005, PASP 117, 978
 #   MIPS 24um     0.017 dex (4.0%)  Engelbracht et al. 2007, PASP 119, 994
+#   PACS 70/100/160  0.021 dex (5%)  Balog et al. 2014, Exp. Astron. 37, 129
 #
 # The downstream pipeline carries the same eight numbers in its own
 # constants table. The two are reported as equal by each library's curation
@@ -171,9 +181,12 @@ SURVEY_CALIB_SIGMA_LOG_DEX = {
     "I3": 0.013,
     "I4": 0.013,
     "M1": 0.017,
+    "P70":  0.021,
+    "P100": 0.021,
+    "P160": 0.021,
 }
 
-#: The same eight values as an array in CONVOLVED_BAND_NAMES order -- the
+#: The same eleven values as an array in CONVOLVED_BAND_NAMES order -- the
 #: form sed_models_register.density.build_quotient_space() takes.
 SURVEY_CALIB_SIGMA_LOG_VECTOR = tuple(
     SURVEY_CALIB_SIGMA_LOG_DEX[_b] for _b in CONVOLVED_BAND_NAMES)
@@ -213,7 +226,7 @@ LIBRARY_SAMPLING_SIGMA_LOG_DEX = {
 #: The sampling scale as an array in CONVOLVED_BAND_NAMES order -- the
 #: form sed_models_register.density.build_quotient_space() takes, and the
 #: vector every library's sampling uses. 2MASS 0.020, IRAC 0.026,
-#: MIPS24 0.034 dex; projected through the 5-D quotient space this gives
+#: MIPS24 0.034, PACS 0.042 dex; the eight-band projection through the 5-D quotient space gave
 #: sigma_eff = 0.055852 dex.
 LIBRARY_SAMPLING_SIGMA_LOG_VECTOR = tuple(
     LIBRARY_SAMPLING_SIGMA_LOG_DEX[_b] for _b in CONVOLVED_BAND_NAMES)

@@ -11,6 +11,12 @@ from dataclasses import dataclass
 
 # --- (a) Bands ---
 #
+# BANDS is the SED: eleven bands, the eight SESNA bands (J H Ks I1 I2 I3 I4
+# M1) followed by the three Herschel PACS bands (P70 P100 P160), measured by
+# the pipeline's own PACS stages at the SESNA positions. It means "the SED"
+# everywhere. Which sources enter the catalogue is a separate rule, SELECTION
+# below; PACS bands never count toward it.
+#
 # The eight SESNA bands, transcribed from sesnacomplete.constants.BANDS.
 # wvl_um is the precise in-flight-calibrated effective wavelength (matches
 # the old BANDS[...].wvl_effective_um). vega_zero_point_jy is the Vega-system
@@ -30,6 +36,11 @@ from dataclasses import dataclass
 #   2MASS J/H/Ks: Skrutskie et al. 2006, AJ 131, 1163; 0.010 dex.
 #   IRAC I1-I4: Reach et al. 2005, astro-ph/0507139; 0.013 dex.
 #   MIPS M1: Engelbracht et al. 2007, PASP 119, 994; 0.017 dex.
+#   PACS P70/P100/P160: Balog et al. 2014, Exp. Astron. 37, 129; 5 %, 0.021 dex.
+#
+# PACS: wvl_um is the PACS reference wavelength (Herschel PACS Observer's
+# Manual). PACS has no Vega system; the zero point is 1 Jy so that
+# m = -2.5 log10(F / 1 Jy), the convention of the PACS completeness files.
 @dataclass(frozen=True)
 class Band:
     key: str
@@ -58,8 +69,32 @@ BANDS = (
          0.013, "Reach et al. 2005, astro-ph/0507139"),
     Band("M1", "MIPS", 23.68, 7.17, "Rieke et al. 2008, ApJ 135, 2245",
          0.017, "Engelbracht et al. 2007, PASP 119, 994"),
+    Band("P70", "PACS", 70.0, 1.0, "Herschel PACS Observer's Manual (reference wavelength; zero point 1 Jy by convention)",
+         0.021, "Balog et al. 2014, Exp. Astron. 37, 129"),
+    Band("P100", "PACS", 100.0, 1.0, "Herschel PACS Observer's Manual (reference wavelength; zero point 1 Jy by convention)",
+         0.021, "Balog et al. 2014, Exp. Astron. 37, 129"),
+    Band("P160", "PACS", 160.0, 1.0, "Herschel PACS Observer's Manual (reference wavelength; zero point 1 Jy by convention)",
+         0.021, "Balog et al. 2014, Exp. Astron. 37, 129"),
 )
 BANDS_BY_KEY = {b.key: b for b in BANDS}
+
+
+@dataclass(frozen=True)
+class Selection:
+    """SESNA's own catalogue rule: a source is in the catalogue if it is
+    detected in at least `min_bands` of the bands named in `bands` (two
+    detections among SESNA's eight bands; Pokhrel et al. 2023, SESNA;
+    SPEC_PRIORS 1.3). It is a rule about inclusion only. PACS bands are
+    never in it and never count toward it."""
+    min_bands: int
+    bands: tuple
+
+
+SELECTION = Selection(min_bands=2, bands=("J", "H", "Ks", "I1", "I2", "I3", "I4", "M1"))
+
+#: Integer positions of the SELECTION bands in BANDS: what a numpy consumer
+#: indexes with.
+SELECTION_INDEX = tuple(i for i, b in enumerate(BANDS) if b.key in SELECTION.bands)
 
 
 # --- (b) Classes and subclasses ---
