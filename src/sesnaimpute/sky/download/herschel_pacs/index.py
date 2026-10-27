@@ -49,7 +49,7 @@ STDEV_DOC = "the standard deviation of the pixel mean flux."
 class MapRecord:
     map_id: str            # the archive's own FILENAME of the map
     obsids: tuple          # every observation merged into the map
-    band: str              # "P70" or "P100", from BLUEBAND / WAVELNTH
+    band: str              # "P70", "P100" or "P160", from WAVELNTH / the product name / BLUEBAND
     path: str              # relative to maps_root
     image_hdu: int
     error_hdu: int         # the documented stDev layer, else an "error" layer
@@ -172,7 +172,9 @@ def inspect_map(path, root, source=""):
         head0, himg = hdus[0].header, hdus[ih].header
         wave = head0.get("WAVELNTH")
         blue = str(head0.get("BLUEBAND", "")).lower()
-        if wave in (70, 100):
+        if wave == 160 or re.search(r"MAPR", os.path.basename(path)):
+            band = "P160"                          # the red camera (its header also carries BLUEBAND)
+        elif wave in (70, 100):
             band = f"P{int(wave)}"
         elif blue == "blue1":
             band = "P70"
@@ -263,8 +265,12 @@ def region_index_records(config, region):
     """The maps on disk that serve the region's observations."""
     obs = {o["obsid"] for o in region_observations(config, region)}
     recs = {r.path: r for r in disk_maps(config)}
-    chosen, _ = choose(obs, [(r.path, map_rank(r), r.obsids) for r in recs.values()])
-    return [recs[k] for k in chosen]
+    out = []
+    for red in (False, True):                     # one map per observation per camera
+        cands = [(r.path, map_rank(r), r.obsids) for r in recs.values() if (r.band == "P160") == red]
+        chosen, _ = choose(obs, cands)
+        out += [recs[k] for k in chosen]
+    return out
 
 
 # ----- the region's observations -------------------------------------------

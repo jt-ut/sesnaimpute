@@ -62,11 +62,15 @@ MODE_DIR = {1: "PacsPhoto", 31: "PacsParallel"}
 LEVEL_DIR = {"L20": "level2", "L25": "level2_5", "L30": "level3"}
 HSA_LEVEL = {"LEVEL2_5_PROCESSED": "LEVEL2_5", "LEVEL3_PROCESSED": "LEVEL3",
              "LEVEL2_PROCESSED": "LEVEL2"}
-# the blue camera's maps: suffix B, except that the archive names the 100 um ("green") Level 3 stack G
-# (HPPJSMAPG); red-camera products end in R and are never taken
-BLUE_PRODUCT = re.compile(r"(HPPJSMAP[BG]|HPPUNIMAP[BG]|HPPPMAP[BG]).*\.fits(\.gz)?$")
+# the two cameras (final ruling 2026-10-27, spec 12: P160 too): the mirror's band directories, and the
+# product names -- blue maps end in B (the archive names the 100 um Level 3 stack G, HPPJSMAPG), red maps in R
+CHANNELS = {"blue": (70, 100), "red": (160,)}
+PRODUCT = {"blue": re.compile(r"(HPPJSMAP[BG]|HPPUNIMAP[BG]|HPPPMAP[BG]).*\.fits(\.gz)?$"),
+           "red": re.compile(r"(HPPJSMAPR|HPPUNIMAPR|HPPPMAPR).*\.fits(\.gz)?$")}
+PRODUCT_ORDER = {"blue": ("HPPJSMAPB", "HPPJSMAPG", "HPPUNIMAPB", "HPPUNIMAPG", "HPPPMAPB", "HPPPMAPG"),
+                 "red": ("HPPJSMAPR", "HPPUNIMAPR", "HPPPMAPR")}
 _LISTING_ROW = re.compile(
-    r'href="((\d{4})([pm])(\d{4})_(\d+)_(Pacs\w+?)_L(\d\d)_(HPP\w+?)B_SPG[\d.]+\.fits)">'
+    r'href="((\d{4})([pm])(\d{4})_(\d+)_(Pacs\w+?)_L(\d\d)_(HPP\w+?)([BR])_SPG[\d.]+\.fits)">'
     r"[^<]*</a>\s+\S+\s+\S+\s+([\d.]+)([KMG]?)")
 
 
@@ -226,10 +230,11 @@ def listing(config, hour, sign, mode, band):
             _atomic_write(path, b"NOT FOUND")
     out = []
     for m in _LISTING_ROW.finditer(open(path, errors="replace").read()):
-        fn, hhmm, sg, ddmm, primary, _, lvl, mapper, num, unit = m.groups()
+        fn, hhmm, sg, ddmm, primary, _, lvl, mapper, cam, num, unit = m.groups()
         ra = (int(hhmm[:2]) + int(hhmm[2:]) / 60.0) * 15.0
         dec = (int(ddmm[:2]) + int(ddmm[2:]) / 60.0) * (1 if sg == "p" else -1)
         out.append(dict(file=fn, primary=primary, level="L" + lvl, mapper=mapper,
+                        channel="red" if cam == "R" else "blue",
                         ra=ra, dec=dec, mode=mode, band=f"P{band}", dir=f"{name}/{MODE_DIR[mode]}/{band}",
                         listed=int(float(num) * {"": 1, "K": 1e3, "M": 1e6, "G": 1e9}[unit])))
     return out
@@ -269,14 +274,23 @@ def _rank(entry):
 # ----- planning a region ---------------------------------------------------
 
 def plan_region(config, region, obs):
-    """What serves the region's observations: a list of maps, each a dict
-    (key, source IRSA/HSA, band, bytes, estimated, obsids, relpath, url).
-    Also returns the observations nothing serves."""
+    """What serves the region's observations, per camera: a list of maps, each a dict (key, source
+    IRSA/HSA, channel, band, bytes, estimated, obsids, relpath, url), and the observations nothing
+    serves, per camera. Each observation needs one blue map and one red map."""
+    plan, unserved = [], {}
+    for channel in CHANNELS:
+        p, u = _plan_channel(config, region, obs, channel)
+        plan += p
+        unserved[channel] = u
+    return plan, unserved
+
+
+def _plan_channel(config, region, obs, channel):
     by_id = {o["obsid"]: o for o in obs}
     files = {}                                   # file name -> mirror entry
     for o in obs:
         for h, s in _hours(o["ra"], o["dec"]):
-            for band in (70, 100):
+            for band in CHANNELS[channel]:
                 for e in listing(config, h, s, o["mode"], band):
                     files[e["file"]] = e
     cands, info = [], {}
@@ -296,7 +310,7 @@ def plan_region(config, region, obs):
     hsa = {}
     covered = {o for _, _, ids in cands for o in ids}
     missing = [o for o in by_id if o not in covered]
-    p70 = hsa_p70_ids(config, region, set(missing))
+    p70 = hsa_p70_ids(config, region, set(missing)) if channel == "blue" else set()
     for oid in missing:
         o = by_id[oid]
         px, py = index_module._plane(o["polygon"][:, 0], o["polygon"][:, 1], o["ra"], o["dec"]) \
@@ -304,20 +318,21 @@ def plan_region(config, region, obs):
         area = (px.max() - px.min()) * (py.max() - py.min()) * 3600.0 ** 2
         est = int(1.1 * BYTES_PER_PIXEL * area / PIXEL_ARCSEC[o["mode"]] ** 2)
         level = HSA_LEVEL.get(o["state"], "LEVEL2")
-        hsa[f"HSA:{oid}"] = dict(obsid=oid, level=level, est=est, band="P70" if oid in p70 else "P100?")
-        cands.append((f"HSA:{oid}", {"LEVEL3": 0, "LEVEL2_5": 1}.get(level, 2), (oid,)))
+        band = "P160" if channel == "red" else "P70" if oid in p70 else "P100?"
+        hsa[f"HSA:{channel}:{oid}"] = dict(obsid=oid, level=level, est=est, band=band)
+        cands.append((f"HSA:{channel}:{oid}", {"LEVEL3": 0, "LEVEL2_5": 1}.get(level, 2), (oid,)))
     chosen, unserved = index_module.choose(set(by_id), cands)
     plan = []
     for key in chosen:
         if key in hsa:
             h = hsa[key]
-            plan.append(dict(key=key, source="HSA", band=h["band"], bytes=h["est"], estimated=True,
+            plan.append(dict(key=key, source="HSA", channel=channel, band=h["band"], bytes=h["est"], estimated=True,
                              obsids=(h["obsid"],), relpath=None, level=h["level"]))
         else:
             e = files[key]
             ids, total = info[key]
             rel = f"{e['primary']}/{LEVEL_DIR[e['level']]}/{e['file'].split('_')[4]}/{e['file']}"
-            plan.append(dict(key=key, source="IRSA", band=e["band"], bytes=total, estimated=False,
+            plan.append(dict(key=key, source="IRSA", channel=channel, band=e["band"], bytes=total, estimated=False,
                              obsids=ids, relpath=rel, url=f"{IRSA_URL}/{e['dir']}/{e['file']}"))
     return plan, unserved
 
@@ -338,9 +353,10 @@ def fetch_hsa(config, item):
     with tarfile.open(tar_path) as tar:
         for m in tar:
             parts = m.name.split("/")
-            if not m.isfile() or ".." in parts or m.name.startswith("/") or not BLUE_PRODUCT.search(parts[-1]):
+            match = PRODUCT[item["channel"]].search(parts[-1])
+            if not m.isfile() or ".." in parts or m.name.startswith("/") or not match:
                 continue
-            product = BLUE_PRODUCT.search(parts[-1]).group(1)
+            product = match.group(1)
             dest = f"{root}/{oid}/{LEVEL_DIR[{'LEVEL2': 'L20', 'LEVEL2_5': 'L25', 'LEVEL3': 'L30'}[item['level']]]}/{product}/{parts[-1]}"
             if os.path.exists(dest.removesuffix(".gz")):
                 continue
@@ -358,13 +374,44 @@ def fetch_hsa(config, item):
     # keep one product: JScanam over Unimap over photProject (spec 11.2); the others are files this
     # call just fetched
     level_dir = f"{root}/{oid}/{LEVEL_DIR[{'LEVEL2': 'L20', 'LEVEL2_5': 'L25', 'LEVEL3': 'L30'}[item['level']]]}"
-    present = [p for p in ("HPPJSMAPB", "HPPJSMAPG", "HPPUNIMAPB", "HPPUNIMAPG", "HPPPMAPB", "HPPPMAPG")
-               if glob.glob(f"{level_dir}/{p}/*.fits")]
+    present = [p for p in PRODUCT_ORDER[item["channel"]] if glob.glob(f"{level_dir}/{p}/*.fits")]
     for p in present[1:]:
         shutil.rmtree(f"{level_dir}/{p}")
     # the observations the kept map contains (a Level 3 stack holds many): they need no fetch of their own
     kept = glob.glob(f"{level_dir}/{present[0]}/*.fits") if present else []
     return set(index_module.inspect_map(kept[0], root).obsids) if kept else {oid}
+
+
+def projection(config, region):
+    """The region's plan and what it would still fetch, printed per band; nothing is fetched. Returns
+    (observations, plan, unserved, summary, bytes still to fetch)."""
+    root = index_module.maps_root(config)
+    query_region(config, region)
+    obs = index_module.region_observations(config, region)
+    query_scans(config, region, {o["obsid"] for o in obs})
+    plan, unserved = plan_region(config, region, obs) if obs else ([], {})
+    gb = {"P70": 0.0, "P100": 0.0, "P100?": 0.0, "P160": 0.0}
+    todo = {"P70": 0, "P100": 0, "P100?": 0, "P160": 0}
+    for p in plan:
+        gb[p["band"]] += p["bytes"] / 1e9
+        if not (p["relpath"] and os.path.exists(f"{root}/{p['relpath']}")) and not (
+                p["source"] == "HSA" and _hsa_on_disk(root, p)):
+            todo[p["band"]] += p["bytes"]
+    total = sum(todo.values())
+    summary = dict(region=region, n_obs=len(obs), n_maps=len(plan),
+                   n_hsa=sum(p["source"] == "HSA" for p in plan), unserved=unserved,
+                   gb_p70=gb["P70"], gb_p100=gb["P100"] + gb["P100?"], gb_p160=gb["P160"], gb_to_fetch=total / 1e9)
+    print(f"{region}: {len(obs)} observations -> {len(plan)} maps ({summary['n_hsa']} from the HSA); projected "
+          f"{gb['P70']:.2f} / {summary['gb_p100']:.2f} / {gb['P160']:.2f} GB at 70 / 100 / 160 um; still to fetch "
+          f"{todo['P70'] / 1e9:.2f} / {(todo['P100'] + todo['P100?']) / 1e9:.2f} / {todo['P160'] / 1e9:.2f} GB", flush=True)
+    return obs, plan, unserved, summary, total
+
+
+def project(config, regions=None):
+    """Print every region's projection (the volume each band would add) without fetching anything."""
+    names = [r.name for r in regions_module.REGIONS] if regions is None else (
+        [regions] if isinstance(regions, str) else [getattr(r, "name", r) for r in regions])
+    return [projection(config, region)[3] for region in names]
 
 
 def build(config, regions=None):
@@ -376,26 +423,12 @@ def build(config, regions=None):
     os.makedirs(root, exist_ok=True)
     summaries = []
     # observations already inside a map on disk need no HSA fetch of their own
-    served = {o for r in index_module.disk_maps(config) for o in r.obsids}
+    served = {"blue": set(), "red": set()}
+    for r in index_module.disk_maps(config):
+        served["red" if r.band == "P160" else "blue"] |= set(r.obsids)
     with progress_module.Stage("sky.download.herschel_pacs") as st:
         for i, region in enumerate(names):
-            query_region(config, region)
-            obs = index_module.region_observations(config, region)
-            query_scans(config, region, {o["obsid"] for o in obs})
-            plan, unserved = plan_region(config, region, obs) if obs else ([], [])
-            gb = {"P70": 0.0, "P100": 0.0, "P100?": 0.0}
-            todo = 0
-            for p in plan:
-                gb[p["band"]] += p["bytes"] / 1e9
-                if not (p["relpath"] and os.path.exists(f"{root}/{p['relpath']}")) and not (
-                        p["source"] == "HSA" and _hsa_on_disk(root, p)):
-                    todo += p["bytes"]
-            summary = dict(region=region, n_obs=len(obs), n_maps=len(plan),
-                           n_hsa=sum(p["source"] == "HSA" for p in plan), unserved=unserved,
-                           gb_p70=gb["P70"], gb_p100=gb["P100"] + gb["P100?"], gb_to_fetch=todo / 1e9)
-            print(f"{region}: {len(obs)} observations -> {len(plan)} maps "
-                  f"({summary['n_hsa']} from the HSA); projected {gb['P70']:.2f} GB at 70 um, "
-                  f"{summary['gb_p100']:.2f} GB at 100 um, {todo / 1e9:.2f} GB still to fetch", flush=True)
+            obs, plan, unserved, summary, todo = projection(config, region)
             if todo > MAX_REGION_BYTES:
                 print(f"{region}: STOP, projection above {MAX_REGION_BYTES / 1e9:.0f} GB; nothing fetched")
             else:
@@ -409,11 +442,11 @@ def build(config, regions=None):
                             # the mirror refuses or lacks this file (Cygnus X 1342257519, 2026-10-26: 401);
                             # one unavailable map (any 4xx) does not stop the survey
                             print(f"{region}: REFUSED ({exc.code}) {p['url']}", flush=True)
-                    elif p["obsids"][0] not in served and not _hsa_on_disk(root, p):
+                    elif p["obsids"][0] not in served[p["channel"]] and not _hsa_on_disk(root, p):
                         # one HSA Level 3 tar per observation can hold the same combined map
                         # (Orion A: one stack, nine times); fetch it once
                         try:
-                            served |= fetch_hsa(config, p)
+                            served[p["channel"]] |= fetch_hsa(config, p)
                         except urllib.error.HTTPError as exc:
                             if not 400 <= exc.code < 500:
                                 raise
@@ -428,8 +461,7 @@ def build(config, regions=None):
 
 
 def _hsa_on_disk(root, p):
-    import glob
-    return bool(glob.glob(f"{root}/{p['obsids'][0]}/level*/*/*.fits"))
+    return any(glob.glob(f"{root}/{p['obsids'][0]}/level*/{prod}/*.fits") for prod in PRODUCT_ORDER[p["channel"]])
 
 
 if __name__ == "__main__":

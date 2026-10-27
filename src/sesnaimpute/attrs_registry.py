@@ -3952,10 +3952,10 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "one factor per map so that negative excursions on empty sky are no more frequent than for Gaussian "
         "noise. A source is called detected at 5 times this value."),
     "CELL_OFFSET_{b}_MJY": ("mJy",
-        "For each row of CURVE_{b}: the median flux measured at the cell's random positions farther than one beam from "
-        "every bright source -- sky structure the annulus sky leaves at this scale. The detection of a source in the cell, "
-        "and the completeness curve, count from this level; the reported flux (FNU in the photometry product) does not "
-        "subtract it."),
+        "For each row of CURVE_{b}: the median flux the measurement returns at the cell's random positions farther "
+        "than one beam from every bright source -- sky structure the annulus sky leaves at this scale. Detection of a "
+        "source in the cell, and the completeness curve, count from this level; the reported flux (FNU in the "
+        "photometry product, the eHOPS-convention flux) does not subtract it, so the two differ by this value."),
     "CELL_TAIL_FACTOR_{b}": ("dimensionless",
         "For each row of CURVE_{b}: the factor by which the cell's noise was raised so that, among the cells of its "
         "map at a similar noise level, negative excursions on empty sky are no more frequent than for Gaussian noise, "
@@ -3976,8 +3976,8 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "The median fraction of an injected point source's flux that the measurement returns in each "
         "cell of CURVE_{b} (1 when the fit recovers it fully)."),
     "SOURCE_ROW": ("row index into CURVE_<band>",
-        "For each curated source, in the order of the region's source table, and the bands P70 then P100: "
-        "the row of CURVE_P70 / CURVE_P100 for the cell the source falls in on the deepest map covering "
+        "For each curated source, in the order of the region's source table, and the bands P70, P100, P160: "
+        "the row of CURVE_P70 / CURVE_P100 / CURVE_P160 for the cell the source falls in on the deepest map covering "
         "it; -1 where no map covers the source in that band. A source near a map edge can have a row "
         "here yet be marked not covered (ORIGIN 91) in the photometry, because its own measurement needs "
         "most of its beam on valid data; the photometry's ORIGIN decides."),
@@ -3986,7 +3986,7 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "completeness product in the same order; PIXEL_CURVE_<band> and PIXEL_COVERED_FRAC_<band> have "
         "one row per entry."),
 }
-for _band, _w in (("P70", "70"), ("P100", "100")):
+for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_u, _r) in _PACS_COMPLETENESS_CELLS_READINGS.items():
         REGISTRY[("completeness_pacs_source", _name.format(b=_band))] = (
             _u, _r.format(b=_band, w=_w, n=200, mmin="-3.5", mmax="5.5", dm="0.25"))
@@ -3996,17 +3996,32 @@ _PHOTOMETRY_PACS_READINGS = {
     "NAME": ("source identifier",
         "The SESNA source identifier of each row, in exactly the order of the region's SESNA source catalogue."),
     "FNU_{b}_MJY": ("mJy",
-        "Flux of the source in the Herschel PACS {w} micron band, in the convention of the HOPS and eHOPS protostar "
-        "surveys: a point-source fit at the catalogue position (moved by the map's astrometric shift, MAP_SHIFT in the "
-        "completeness product) on the map that is deepest there, after subtracting the local sky measured in the eHOPS "
-        "sky annulus around the source (12.8-25.6 arcsec at 70 micron, 9.6-16.0 at 100 micron, a clipped mode); the "
-        "fitted point-source model is the total flux. A neighbour inside the fitting region adds to it; one in the annulus "
-        "is removed with the sky. It can be negative or small when nothing is seen, and is NaN where the band does not "
-        "cover the source. Where ORIGIN is 2 it is instead an upper bound: the combined flux of the blended group plus "
-        "five times its uncertainty. Against the Herschel PACS point-source catalogue the scale agrees within its 5 % "
-        "calibration; that catalogue's faintest entries are boosted near its own detection limit."),
+        "Flux of the source in the Herschel PACS {w} micron band, measured as the eHOPS survey measured its protostars "
+        "(Pokhrel et al. 2023): aperture photometry at the catalogue position (moved by the map's astrometric shift, "
+        "MAP_SHIFT in the completeness product) on the map that is deepest there, aperture radius 9.6 / 8.0 / 12.8 "
+        "arcsec at 70 / 100 / 160 micron, sky from a clipped mode in the annulus 12.8-25.6 / 9.6-16.0 / 16.0-22.4 "
+        "arcsec, divided by eHOPS's aperture correction 0.798 / 0.729 / 0.735. That correction is the fraction of a "
+        "point source's flux within the aperture on the PSF release's within-60-arcsec normalisation, so these "
+        "fluxes are about 9 % (70 micron) below total point-source fluxes such as the Herschel PACS point-source "
+        "catalogue's; the exact factor depends on the observing mode (a table is in DATA.md). Where METHOD is 2 the "
+        "source has a neighbour within one beam of a detected source and its flux comes from a joint point-source fit "
+        "put on the same normalisation, as eHOPS did for sources too close for aperture photometry. It can be negative "
+        "or small when nothing is seen and is NaN where the band does not cover the source. Where ORIGIN is 2 it is an "
+        "upper bound: the combined flux of the blended group plus five times its uncertainty."),
+    "SIGMA_ANNULUS_{b}_MJY": ("mJy",
+        "eHOPS's own per-source uncertainty statistic: the scatter of the sky-annulus pixels times the square root of "
+        "the aperture area, divided by the aperture correction. Kept for comparison with their tables; detection uses "
+        "SIGMA_{b}_MJY."),
+    "METHOD_{b}": ("code",
+        "1: aperture photometry (the source is isolated); 2: joint point-source fit with its close neighbours; "
+        "0: not measured (not covered)."),
     "SIGMA_{b}_MJY": ("mJy, or 0.99 for an upper bound",
-        "Uncertainty of the flux: the scatter of the same measurement at random empty-sky positions in the source's 30-arcsecond cell, enlarged for a source blended with a neighbour. Where ORIGIN is 2 it holds the value 0.99 that the source table uses to mark an upper bound; NaN where the band does not cover the source. For a source fitted together with a neighbour the uncertainty is enlarged by the overlap, but its completeness curve is still its cell's single-source curve, so for such a source the curve somewhat overstates the chance of detection."),
+        "Uncertainty of the flux: the scatter of the same measurement at random empty-sky positions in the source's "
+        "30-arcsecond cell (the median over the 3 x 3 cells around it, raised by the tail factor of the cell's noise "
+        "level), enlarged for a source fitted jointly with a neighbour. Where ORIGIN is 2 it holds 0.99, the value the "
+        "source table uses to mark an upper bound; NaN where the band does not cover the source. For a jointly fitted "
+        "source the uncertainty is enlarged by the overlap but its completeness curve is still its cell's curve, so "
+        "the curve somewhat overstates its chance of detection."),
     "ORIGIN_{b}": ("origin code",
         "1 means the source is detected: its flux minus the typical empty-sky flux of its 30-arcsecond cell "
         "(CELL_OFFSET in the completeness product) is at least five times its uncertainty -- the same rule the "
@@ -4024,8 +4039,8 @@ _PHOTOMETRY_PACS_READINGS = {
     "EXTENDED_{b}": ("true or false",
         "True for a detected source whose measured width is more than 1.5 times the beam width, a sign that the emission is extended rather than a point source; false otherwise, including for every source that is not detected."),
 }
-for _band, _wave in (("P70", "70"), ("P100", "100")):
+for _band, _wave in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_units, _reading) in _PHOTOMETRY_PACS_READINGS.items():
         REGISTRY[("photometry_pacs_source", _name.format(b=_band))] = (
-            _units, _reading.format(w=_wave))
+            _units, _reading.format(w=_wave, b=_band))
 

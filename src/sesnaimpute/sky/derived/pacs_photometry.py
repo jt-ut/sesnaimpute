@@ -61,7 +61,7 @@ from sesnaimpute.sky.derived.pacs_fit import DETECTION_SNR
 from sesnaimpute.sky.derived.pacs_psf import beam_fwhm_arcsec
 from sesnaimpute.sky.download.herschel_pacs.index import read_index
 
-BANDS = ("P70", "P100")
+BANDS = ("P70", "P100", "P160")
 
 #: the pipeline's origin codes for a flux (`ORIGIN_FNU` in the source table)
 ORIGIN_DETECTED, ORIGIN_UPPER_BOUND, ORIGIN_UNDETECTED, ORIGIN_NOT_COVERED = 1, 2, 90, 91
@@ -126,12 +126,16 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
     n_blend = np.zeros(n, dtype=np.int16)
     group_id = np.full(n, -1, dtype=np.int32)
     extended = np.zeros(n, dtype=bool)
+    sigma_annulus = np.full(n, np.nan)
+    method = np.zeros(n, dtype=np.int8)
 
     with pacs_fit.open_tile(config, record) as tile:
         # the map's registration to SESNA, as the completeness stage measured and stored it
         shift = shifts.get((BANDS[band], _tile_key(record)), (0.0, 0.0))
         x, y = tile.xy(*pacs_fit.to_map_frame(ra[rows], dec[rows], shift))
-        single = tile.fit_positions(x, y)
+        # eHOPS aperture photometry for every source (final ruling, spec 12); blend members are refitted below
+        single = tile.measure(x, y)
+        sigma_annulus = single.sigma
         ok = single.covered & np.isfinite(sigma_cell) & (sigma_cell > 0)
         # FNU is the HOPS/eHOPS-convention flux (annulus sky, owner ruling 2026-10-27); the detection
         # is decided on it minus the cell's empty-sky offset, the statistic the noise and the
@@ -141,6 +145,7 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
         detected = ok & (flux - offset >= DETECTION_SNR * sigma_cell)
         origin[ok] = np.where(detected[ok], ORIGIN_DETECTED, ORIGIN_UNDETECTED)
         n_blend[ok] = 1
+        method[ok] = 1
 
         # Blend groups around the sources detected in the singleton pass.
         label, size = _blend_components(ra[rows], dec[rows], detected, BLEND_RADIUS_BEAMS * beam)
@@ -156,13 +161,15 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
             good = gfit.covered & ok[g]
             # the empirical-over-propagated noise ratio of each member's singleton
             # fit, averaged over the group, scales the group-total sigma the same way
-            ratio = np.where(ok[g], sigma_cell[g] / np.where(single.sigma[g] > 0, single.sigma[g], np.nan), np.nan)
+            psf_single = tile.fit_positions(x[g], y[g])     # the PSF-fit noise scale of the group's members
+            ratio = np.where(ok[g], sigma_cell[g] / np.where(psf_single.sigma > 0, psf_single.sigma, np.nan), np.nan)
             ratio_sum = np.bincount(label[g], weights=np.nan_to_num(ratio))
             ratio_n = np.bincount(label[g], weights=np.isfinite(ratio).astype(float))
             ratio_mean = (ratio_sum / np.maximum(ratio_n, 1))[label[g]]
             member_sigma = sigma_cell[g] * gfit.inflation
             unseparable = good & (gfit.max_abs_rho > BLEND_RHO_LIMIT)
             separable = good & ~unseparable
+            method[g[good]] = 2
             gi = g[separable]
             flux[gi] = gfit.flux[separable]
             sigma[gi] = member_sigma[separable]
@@ -179,6 +186,7 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
             extended[det] = tile.fitted_fwhm(x[det], y[det]) > EXTENDED_BEAM_FACTOR * beam
 
     columns = dict(FNU=flux, SIGMA=sigma, ORIGIN=origin, LOCAL_RMS=sigma_cell.astype(np.float32),
+                   SIGMA_ANNULUS=np.asarray(sigma_annulus, np.float32), METHOD=method,
                    N_BLEND=n_blend, BLEND_GROUP=group_id, EXTENDED=extended)
     # a source with no usable fit keeps the cell noise only where a cell exists
     columns["LOCAL_RMS"][origin == ORIGIN_NOT_COVERED] = np.nan
@@ -200,11 +208,12 @@ def _runs(rows):
 
 
 _DTYPES = dict(FNU=np.float64, SIGMA=np.float64, ORIGIN=np.int8, LOCAL_RMS=np.float32,
-               N_BLEND=np.int16, BLEND_GROUP=np.int32, EXTENDED=bool)
+               N_BLEND=np.int16, BLEND_GROUP=np.int32, EXTENDED=bool, SIGMA_ANNULUS=np.float32, METHOD=np.int8)
 _FILL = dict(FNU=np.nan, SIGMA=np.nan, ORIGIN=ORIGIN_NOT_COVERED, LOCAL_RMS=np.nan,
-             N_BLEND=0, BLEND_GROUP=-1, EXTENDED=False)
+             N_BLEND=0, BLEND_GROUP=-1, EXTENDED=False, SIGMA_ANNULUS=np.nan, METHOD=0)
 _NAMES = dict(FNU="FNU_{b}_MJY", SIGMA="SIGMA_{b}_MJY", ORIGIN="ORIGIN_{b}", LOCAL_RMS="LOCAL_RMS_{b}_MJY",
-              N_BLEND="N_BLEND_{b}", BLEND_GROUP="BLEND_GROUP_{b}", EXTENDED="EXTENDED_{b}")
+              N_BLEND="N_BLEND_{b}", BLEND_GROUP="BLEND_GROUP_{b}", EXTENDED="EXTENDED_{b}",
+              SIGMA_ANNULUS="SIGMA_ANNULUS_{b}_MJY", METHOD="METHOD_{b}")
 
 
 def _tile_key(record):

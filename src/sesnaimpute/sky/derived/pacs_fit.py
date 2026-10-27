@@ -785,6 +785,14 @@ class Tile:
         sky, one inside the fitting box adds to the flux -- disclosed)."""
         return self._fit(x, y, use_nuisance=False, batch=batch)
 
+    def measure(self, x, y):
+        """The measurement of isolated sources and of the completeness positions (final ruling, spec
+        section 12): eHOPS aperture photometry -> PositionFit (flux mJy on eHOPS's normalisation, gain 1,
+        sigma = the annulus scatter statistic, covered, no nuisance)."""
+        a = self.aperture(x, y)
+        return PositionFit(a.flux, np.where(a.covered, 1.0, np.nan), a.annulus_sigma, a.covered,
+                           np.zeros(a.flux.size, dtype=np.int64))
+
     def aperture(self, x, y):
         """Forced aperture photometry at each (x, y) -> ApertureFit (the eHOPS convention: the
         photometry of isolated sources and the completeness positions alike). Linear in the map
@@ -807,7 +815,7 @@ class Tile:
         n = x.size
         res = {k: np.full(n, np.nan) for k in ("flux", "sigma", "rho", "gflux", "gsigma")}
         covered = np.zeros(n, dtype=bool)
-        single = self._fit(x, y)
+        single = self._fit(x, y, use_nuisance=False)
         _, inverse = np.unique(group, return_inverse=True)
         order = np.argsort(inverse, kind="stable")
         starts = np.r_[0, np.flatnonzero(np.diff(inverse[order])) + 1, n]
@@ -824,8 +832,8 @@ class Tile:
                 half = self.half + int(spread[sel].max())
                 cxg = np.rint(gx[sel]).astype(np.int64)
                 cyg = np.rint(gy[sel]).astype(np.int64)
-                ux, uy, un = self._nuisance(gx[sel], gy[sel],
-                                            own_exclude=[(x[mem[:, k]], y[mem[:, k]]) for k in range(size)])
+                # no nuisance columns (final ruling, spec 12: nothing of ours in the flux)
+                ux, uy, un = (np.zeros((len(mem), 1)), np.zeros((len(mem), 1)), np.zeros(len(mem), dtype=np.int64))
                 flux, gain, cov, valid = self._call(x[mem], y[mem], np.full(len(mem), size, dtype=np.int64),
                                                     ux, uy, un, cxg, cyg, half)
                 sd = np.sqrt(np.maximum(np.diagonal(cov, axis1=1, axis2=2), 0))

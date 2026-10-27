@@ -53,7 +53,7 @@ from sesnaimpute.build import run
 from sesnaimpute.config import product_path
 from sesnaimpute.sky.derived import pacs_fit
 
-BANDS = ("P70", "P100")
+BANDS = ("P70", "P100", "P160")
 #: positions per cell (spec section 5)
 N_POS = 200
 #: a cell needs this many valid positions to get a curve; fewer means the cell is not covered
@@ -102,7 +102,7 @@ def cell_fits(tile, ids, seed):
     mJy), gain, pixel sigma (propagated), valid, clean (farther than one beam from every bright
     neighbour), each (n_cell, N_POS)."""
     x, y = tile.grid.sample_pixels(ids, N_POS, seed)
-    fit = tile.fit_positions(x.ravel(), y.ravel())
+    fit = tile.measure(x.ravel(), y.ravel())
     shape = x.shape
     valid = (fit.covered & np.isfinite(fit.flux) & np.isfinite(fit.gain) & (fit.gain > 0)).reshape(shape)
     clean = ~tile.near_bright(x, y)
