@@ -3982,25 +3982,6 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
     "MAP_CELL_STEP_{b}": ("pixels (x, y)",
         "For each row of MAP_ID_{b}: the cell size in the map's pixels along x and y (30 arcsec over the "
         "pixel scale); edge cells are clipped to the image."),
-    "CURVE_PSF_{b}": ("completeness fraction x600, uint16",
-        "Same layout as CURVE_{b} (same rows, same MAG_GRID_{b}), but for a source measured by the joint point-source "
-        "fit (METHOD 2) instead of the aperture: the probability that a point source of the flux in MAG_GRID_{b} "
-        "placed in the cell is detected at 5 sigma or better when measured by that fit, judged against "
-        "CELL_OFFSET_PSF_{b}_MJY and CELL_SIGMA_PSF_{b}_MJY."),
-    "CELL_OFFSET_PSF_{b}_MJY": ("mJy",
-        "For each row of CURVE_{b}: the median flux the joint point-source fit returns at the cell's random empty-sky "
-        "positions farther than one beam from every bright source. The fit's counterpart of CELL_OFFSET_{b}_MJY."),
-    "CELL_SIGMA_PSF_{b}_MJY": ("mJy",
-        "For each row of CURVE_{b}: the one-sigma uncertainty of a {w} micron flux measured by the joint point-source "
-        "fit, found from the same empty-sky positions in the same way as CELL_SIGMA_{b}_MJY (tail factor included). "
-        "A source measured by the fit is called detected at 5 times this value."),
-    "CELL_TAIL_FACTOR_PSF_{b}": ("dimensionless",
-        "For each row of CURVE_{b}: the factor by which the joint fit's noise in the cell was raised so that negative "
-        "excursions on empty sky are no more frequent than for Gaussian noise; the counterpart of "
-        "CELL_TAIL_FACTOR_{b}. CELL_SIGMA_PSF_{b}_MJY already includes it."),
-    "CELL_GAIN_PSF_{b}": ("dimensionless",
-        "For each row of CURVE_{b}: the median fraction of an injected point source's flux that the joint "
-        "point-source fit returns in the cell (1 when it recovers it fully)."),
     "CELL_GAIN_{b}": ("dimensionless",
         "The median fraction of an injected point source's flux that the measurement returns in each "
         "cell of CURVE_{b} (1 when the fit recovers it fully)."),
@@ -4127,16 +4108,34 @@ REGISTRY[("sources_sesna_source", "ORIGIN_FNU")] = ("code",
 # Unit 3: completeness_sesna_source grows to eleven bands (P70, P100, P160 copied from the PACS input)
 for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_u, _r) in _PACS_COMPLETENESS_CELLS_READINGS.items():
-        if _name == "SOURCE_ROW":
+        if _name in ("SOURCE_ROW", "CELL_GAIN_{b}", "CELL_TAIL_FACTOR_{b}"):
             continue
         REGISTRY[("completeness_sesna_source", _name.format(b=_band))] = (
             _u, _r.format(b=_band, w=_w, n=200, mmin="-3.5", mmax="5.5", dm="0.25"))
-    REGISTRY[("completeness_sesna_source", "METHOD_%s" % _band)] = (
-        "code",
-        "For each curated source, in the order of the region's source table: how its %s micron flux was measured, "
-        "1 aperture photometry (the source is isolated), 2 a joint point-source fit with its close neighbours, "
-        "0 not measured (no %s micron map covers it). A source with 2 has its %s micron completeness taken from "
-        "CURVE_PSF_%s, any other from CURVE_%s." % (_w, _w, _w, _band, _band))
+    # Unit 3c: the PACS curve is the measured recovered fraction of artificial point sources
+    REGISTRY[("completeness_sesna_source", "CURVE_%s" % _band)] = (
+        "completeness fraction x600, uint16",
+        "One row per covered 30-arcsec cell of every Herschel PACS %s micron map, for all cells inside the "
+        "region's source bounding box padded by about 7 arcmin (overlapping maps each keep their cells; "
+        "SOURCE_ROW points at the deepest one). Each value is the measured fraction of artificial point sources of "
+        "the flux in MAG_GRID_%s that were recovered as detections at that cell, stored as the fraction times 600. "
+        "The artificial sources were added to a copy of the real map at random positions and measured exactly as "
+        "a catalogue source is; a source counts as recovered when its flux minus CELL_OFFSET_%s_MJY reaches 5 times "
+        "CELL_SIGMA_%s_MJY. The counts of all cells whose centres lie within 120 arcsec are added before the "
+        "fraction is taken. The fraction at the faintest planes is the false-positive floor of the 5-sigma rule as "
+        "measured, not zero. Rows are ordered by map and then cell." % (_w, _band, _band, _band))
+    REGISTRY[("completeness_sesna_source", "N_POS_%s" % _band)] = (
+        "injections",
+        "For each row of CURVE_%s, the number of artificial sources behind its value at the faintest plane of "
+        "MAG_GRID_%s: those that fell in the cells within 120 arcsec of the row's cell and lay on valid data. Rows "
+        "near a map's edge have fewer." % (_band, _band))
+    REGISTRY[("completeness_sesna_source", "CELL_SIGMA_%s_MJY" % _band)] = (
+        "mJy",
+        "The noise of a %s micron flux measured in each cell of CURVE_%s, used only to decide detection: the "
+        "median, over the 3 x 3 block of cells around it, of 1.4826 times the median absolute deviation about "
+        "CELL_OFFSET_%s_MJY of the fluxes measured at each cell's random positions farther than one beam from "
+        "every bright source. A flux is a detection when it minus CELL_OFFSET_%s_MJY is at least 5 times this "
+        "value. No tail correction is applied." % (_w, _band, _band, _band))
     REGISTRY[("completeness_sesna_source", "PIXEL_CURVE_%s" % _band)] = (
         "dimensionless (completeness fraction, 0..1)",
         "For each admitted nside-512 pixel in HPX_PIX_512, the %s micron completeness curve at "
