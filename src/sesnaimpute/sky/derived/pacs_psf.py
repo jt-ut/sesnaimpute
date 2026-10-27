@@ -396,15 +396,41 @@ def published_components_for_map(config, record):
         angle = float(np.mean(angles))
         return tuple(PublishedPSF.read(config, record, a, position_angle_deg=angle)
                      for a in _ARRAY_TO_MAP_ANGLES)
+    # every contributing observation's (direction, angle); a Level 3 stack of several parallel pairs
+    # holds several angles per direction (Cepheus Flare: 235.7 and 208.4 deg)
     orientations = {}
     for direction, angle, source in [(str(header.get('SCANDIR', '')).strip().lower(),
                                       float(header.get('POSANGLE', np.nan)), 'map header')] + contexts:
         if direction not in ('nominal', 'orthogonal') or not np.isfinite(angle):
             raise ValueError(f'Missing scan direction/position angle in {source}')
-        if direction in orientations and abs(orientations[direction] - angle) > 1e-8:
-            raise ValueError(f'Ambiguous {direction} scan orientation in retained metadata')
-        orientations[direction] = angle
+        angles = orientations.setdefault(direction, [])
+        if not any(abs(angle - a) < 1e-6 for a in angles):
+            angles.append(angle)
     if set(orientations) != {'nominal', 'orthogonal'}:
         raise ValueError('Both original nominal/orthogonal orientations must be retained')
-    return tuple(PublishedPSF.read(config, record, a, position_angle_deg=orientations[d])
-                 for d, a in (('nominal', '+42'), ('orthogonal', '-42')))
+    return tuple(_direction_component(config, record, tag, orientations[d])
+                 for d, tag in (('nominal', '+42'), ('orthogonal', '-42')))
+
+
+def _direction_component(config, record, tag, angles):
+    """One scan direction's template: the release image at the direction's one angle, or, for a stack
+    whose observations of that direction were taken at several angles, the mean of the template rotated
+    to each, expressed in the frame of the first angle (the map is the mean of its observations; their
+    coverages are about equal). Samples beyond the released +-100 arcsec are zero."""
+    first = PublishedPSF.read(config, record, tag, position_angle_deg=angles[0])
+    if len(angles) == 1:
+        return first
+    yy, xx = np.indices(first.image.shape, dtype=float)
+    east0, north0 = _CENTRE - xx, yy - _CENTRE
+    a0 = np.deg2rad(angles[0])
+    east = east0 * np.cos(a0) + north0 * np.sin(a0)       # invert the first angle's rotation
+    north = -east0 * np.sin(a0) + north0 * np.cos(a0)
+    image = np.zeros_like(first.image)
+    for angle in angles:
+        a = np.deg2rad(angle)
+        e = east * np.cos(a) - north * np.sin(a)
+        n = east * np.sin(a) + north * np.cos(a)
+        image += map_coordinates(first.image, [_CENTRE + n, _CENTRE - e], order=1, mode='constant', cval=0.0)
+    image /= len(angles)
+    image.flags.writeable = False
+    return PublishedPSF(image, first.path, float(angles[0]), first.total_flux_factor)
