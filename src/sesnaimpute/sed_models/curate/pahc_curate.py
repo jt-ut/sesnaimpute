@@ -40,6 +40,9 @@ banners and the spec's "Building the library" list use):
    outside each source's native coverage -- never extrapolated.
 
 4. Composite physics (compute_composite_sed, band_aperture_scaling):
+   Beyond 40 um the aperture ramp runs log-linear through the three PACS band
+   centres, exact at each centre; band-weighted factors stay within 0.02 dex of
+   the pivot values.
 
        M(lambda) = s(lambda)
                    + R * s(8um) * [P_hat(lambda)/P_hat(8um)] * a(lambda)

@@ -368,9 +368,9 @@ def build():
     reg_path = library.write_register(registers_dir(), REGISTER_KEY, out)
     print(f"register   : {reg_path}")
     pdc.write_far_ir_disclosure(reg_path)
-    pacs = pdc.pacs_effective_flux(reg_path)
-    print(f"PACS bands : no flux in any passband; every template sits at its register floor "
-          f"({', '.join(pacs)}); bands group READING: {pdc.H2SHOCK_FAR_IR_DISCLOSURE}")
+    pacs = pdc.pacs_max_flux(reg_path)
+    print(f"PACS bands : max F_REF over all templates (mJy) {pacs}; "
+          f"bands group READING: {pdc.H2SHOCK_FAR_IR_DISCLOSURE}")
 
     # ---- register identities (Unit S round 2, curation-s 29228b4: A12
     # join, per-band Vega zero points, members-sourced subclass_prob) ----

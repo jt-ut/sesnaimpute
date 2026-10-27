@@ -89,8 +89,6 @@ from sesnaimpute.sed_models.curate.model_convolution import (
     build_band_response_weights,
     build_line_deposition_matrix,
     write_convolved_band_fits_from_analytic,
-    write_convolved_band_fits,
-    filter_central_wavelength_um,
     verify_convolved_band_fits,
 )
 
@@ -988,24 +986,10 @@ def build_convolved_bands(model_dir, model_names, lines, line_fluxes_mjy, bands,
     foregone for every model and band -- so it is not run at all here.
     write_convolved_band_fits_from_analytic is the only writer.
     """
-    pacs = [b for b in bands if b in PACS_BANDS]
-    others = [b for b in bands if b not in PACS_BANDS]
     write_convolved_band_fits_from_analytic(
-        model_dir, lines, line_fluxes_mjy, others,
+        model_dir, lines, line_fluxes_mjy, bands,
         model_names=model_names,
         apertures_au=np.array([aperture_au]))
-    # PACS: the line list (0.2-45 um) has no line inside any PACS passband
-    # (54-274 um), so the band flux is exactly zero. The ESA filter files carry
-    # a calibration blue tail of at most 4e-7 of peak below 50 um, which would
-    # pick up the 2-28 um lines at up to 2e-3 mJy; that is the file's noise,
-    # not a response, and is not integrated: PACS is written as exact zero.
-    for band in pacs:
-        write_convolved_band_fits(
-            model_dir, band, model_names=model_names,
-            total_flux_mjy=np.zeros(len(model_names)),
-            apertures_au=np.array([aperture_au]),
-            filter_wavelength_um=filter_central_wavelength_um(band),
-            convmeth="analytic", convmeth_note="no line in the passband: exactly zero")
     verify_convolved_band_fits(model_dir, bands, model_names)
 
 
@@ -1016,29 +1000,20 @@ PACS_BANDS = ("P70", "P100", "P160")
 #: who sees the three far-infrared columns at the floor knows why.
 H2SHOCK_FAR_IR_DISCLOSURE = (
     "H2 shock templates carry no far-infrared continuum or lines in the PACS "
-    "passbands; a PACS detection excludes the class; the [C II] 158 um line in "
-    "P160 is not modelled")
+    "passbands; their PACS fluxes are the convolution of the 2-28 um lines "
+    "through the filters' published response tails, below PACS detectability; "
+    "a PACS detection excludes the class; the [C II] 158 um line in P160 is "
+    "not modelled")
 
 
-def pacs_effective_flux(register_path):
-    """The PACS flux the fit sees for every template, from the written
-    register: `F_REF_<band>` is the raw convolved value, which is exactly
-    zero because the line list has no line in a PACS passband, and consumers
-    take np.maximum(F_REF, FLOOR_LINEAR), so the effective flux is the
-    template's own floor. Asserts both facts and returns
-    {band: np.maximum(F_REF, FLOOR_LINEAR)}."""
+def pacs_max_flux(register_path):
+    """Largest PACS F_REF (mJy) over all templates, per band, from the written
+    register. The value is the honest convolution of the 2-28 um lines through
+    the ESA response tails; consumers floor it as for every band."""
     import h5py
     with h5py.File(register_path, "r") as f:
         m = f["models"]
-        floor = np.asarray(m["FLOOR_LINEAR"], dtype=float)
-        out = {}
-        for band in PACS_BANDS:
-            f_ref = np.asarray(m["F_REF_" + band], dtype=float)
-            assert np.all(f_ref == 0.0), f"{band}: a template has flux in the passband"
-            assert np.all(floor > 0.0), "a template has no floor"
-            out[band] = np.maximum(f_ref, floor)
-            assert np.array_equal(out[band], floor)
-    return out
+        return {b: float(np.max(m["F_REF_" + b])) for b in PACS_BANDS}
 
 
 def write_far_ir_disclosure(register_path):
