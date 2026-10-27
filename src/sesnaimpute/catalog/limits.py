@@ -30,7 +30,8 @@ nside-128 pixel instead of per 30-arcsec pixel; `SOURCE_ROW` one
 (n_source, 11) table, `ALL_BAND_KEYS` column order, never -1 in its 2MASS
 columns since 2MASS is all-sky), so every method below reads all eleven
 bands (the three PACS bands carry the same datasets, copied from the PACS input;
-SOURCE_ROW is -1 where no PACS map covers a source) through the exact same code path -- no `if band in TWOMASS_KEYS`
+SOURCE_ROW is -1 where no PACS map covers a source; a PACS source whose stored METHOD_<band> is 2 is
+evaluated on CURVE_PSF_<band>, the others on CURVE_<band>, same kernel) through the exact same code path -- no `if band in TWOMASS_KEYS`
 branch anywhere in this class any more.
 """
 
@@ -105,6 +106,13 @@ class Completeness:
             self._pixel_covered_frac[band] = np.asarray(h5file[f"PIXEL_COVERED_FRAC_{band}"][:], dtype=np.float32)
             self._completed_from[band] = np.asarray(h5file[f"COMPLETED_FROM_{band}"][:], dtype=np.float32)
             self._envelope[band] = np.asarray(h5file[f"ENVELOPE_{band}"][:])
+        # A PACS band also carries the curve of the joint point-source fit (CURVE_PSF_<band>, row-aligned with
+        # CURVE_<band>) and each source's METHOD_<band>; a source with METHOD 2 is judged on that curve.
+        self._curve_psf = {}
+        self._method = {}
+        for band in PACS_KEYS:
+            self._curve_psf[band] = h5file[f"CURVE_PSF_{band}"]
+            self._method[band] = np.asarray(h5file[f"METHOD_{band}"][:])
         # DEFECT 1 (bms_review/briefs/round6_2026-10-22/U13_limit_coverage.md):
         # catalog.completeness's own PIXEL_CURVE_<band> (I1-M1) is the mean
         # over the IRAC union's sample points, so a pixel only partly
@@ -125,6 +133,13 @@ class Completeness:
     def _grid_params(self, band):
         grid = self._mag_grid_band[band]
         return float(grid[0]), float(grid[1] - grid[0])
+
+    def _curve_for(self, band, source_index):
+        """`(table, use_psf)` for one source: `CURVE_PSF_<band>` where the band is PACS and the source's
+        stored METHOD is 2 (a joint-fit measurement), else `CURVE_<band>`."""
+        if band in PACS_KEYS and int(self._method[band][int(np.atleast_1d(source_index)[0])]) == 2:
+            return self._curve_psf[band]
+        return self._curve[band]
 
     def _row_for(self, band, source_index):
         return np.atleast_1d(self.source_row[source_index, ALL_BAND_KEYS.index(band)])
@@ -155,11 +170,12 @@ class Completeness:
         log10_f = np.log10(np.asarray(flux_mjy, dtype=np.float64))
         row = int(self._row_for(band, source_index)[0])
         g0, dm = self._grid_params(band)
-        n = self._curve[band].shape[1]
+        table = self._curve_for(band, source_index)
+        n = table.shape[1]
         a, c = self._ac[band]
         if row < 0:
             return np.zeros(log10_f.shape[0], dtype=np.float64)
-        return completeness_module.completeness(self._curve[band][row], g0, dm, n, log10_f, a, c)
+        return completeness_module.completeness(table[row], g0, dm, n, log10_f, a, c)
 
     def ln_one_minus_fraction(self, band, flux_mjy, source_index):
         """The fitter's non-detection form (`ln_one_minus_completeness`)
@@ -168,12 +184,13 @@ class Completeness:
         log10_f = np.log10(np.asarray(flux_mjy, dtype=np.float64))
         row = int(self._row_for(band, source_index)[0])
         g0, dm = self._grid_params(band)
-        n = self._curve[band].shape[1]
+        table = self._curve_for(band, source_index)
+        n = table.shape[1]
         a, c = self._ac[band]
         if row < 0:
             return np.full(log10_f.shape[0], completeness_module.LN_ONE_MINUS_C_FLOOR)
         return completeness_module.ln_one_minus_completeness(
-            self._curve[band][row], g0, dm, n, log10_f, a, c)
+            table[row], g0, dm, n, log10_f, a, c)
 
     def envelope_fraction(self, band, flux_mjy):
         """The completeness fraction at `flux_mjy`'s own values (mJy), read
@@ -292,7 +309,7 @@ class Completeness:
             curves[:], rows.reshape(-1), g0, dm, n, log10_f.reshape(-1), a, c, 1.0)
         return out.reshape(rows.shape)
 
-    def _crossing_mag(self, band, rows, target_c):
+    def _crossing_mag(self, band, rows, target_c, curve_table=None):
         """`(n,)` magnitude where `band`'s own measured curve, at each of
         `rows`'s own rows, crosses `target_c` (the FIRST crossing from
         the bright end, `catalog.completeness._m50_per_pixel`'s own
@@ -300,7 +317,8 @@ class Completeness:
         planes, `NaN` where `rows < 0` (off-map) or the curve never
         reaches `target_c` brightward of its own last plane."""
         g0, dm = self._grid_params(band)
-        curve_table = self._curve[band]
+        if curve_table is None:
+            curve_table = self._curve[band]
         rows = np.atleast_1d(rows)
         out = np.full(rows.shape, np.nan, dtype=np.float64)
         valid = rows >= 0
@@ -330,6 +348,10 @@ class Completeness:
         gets instead, from the SAME stored curve `fraction` reads."""
         rows = self._row_for(band, source_index)
         mag = self._crossing_mag(band, rows, 0.5)
+        if band in PACS_KEYS:
+            psf = self._method[band][np.atleast_1d(source_index)] == 2
+            if psf.any():
+                mag[psf] = self._crossing_mag(band, rows[psf], 0.5, self._curve_psf[band])
         return self._mag_to_flux_mjy(band, mag)
 
     def _crossing_mag_pixel(self, band, pixel_row, target_c):
