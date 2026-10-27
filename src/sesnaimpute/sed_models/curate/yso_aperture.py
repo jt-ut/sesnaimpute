@@ -65,7 +65,7 @@ from sesnaimpute.sed_models.constants import APERTURE_GRID_AU, BANDS, REGIONS
 # reader, NOT read_geometry_flux_cubes, which clamps negatives to 0 -- that
 # clamp would turn a band sitting at float noise (~-1e-11) into an exact
 # zero and could mark a defined aperture undefined.
-from sesnaimpute.sed_models.curate.yso_labeling import BAND_ORDER, _read_band_flux
+from sesnaimpute.sed_models.curate.yso_labeling import BAND_ORDER, ASSEMBLY_BANDS, _read_band_flux
 
 # Fraction below the nearest region distance at which the gate is set.
 #
@@ -109,7 +109,7 @@ def _band_brackets(d_near, apertures_au):
     aperture, i.e. `ap[j] / (arcsec * 1000)` kpc.
     """
     out = {}
-    for band in BAND_ORDER:
+    for band in ASSEMBLY_BANDS:
         arcsec = BANDS[band].aperture_arcsec
         au = arcsec * d_near * 1000.0
         k = int(np.searchsorted(apertures_au, au))
@@ -129,14 +129,14 @@ def _band_brackets(d_near, apertures_au):
 
 
 def undefined_apertures(flux_cubes):
-    """(n_models, n_apertures) bool: True where all 8 bands are exactly 0.
+    """(n_models, n_apertures) bool: True where all eleven bands are exactly 0.
 
     `flux_cubes` is {band: (n, n_ap)} as returned per geometry. ANDed band
     by band so only one band's array is resident at a time -- the largest
     geometry is 720k x 20 per band.
     """
     undefined = None
-    for band in BAND_ORDER:
+    for band in ASSEMBLY_BANDS:
         is_zero = (flux_cubes[band] == 0)
         undefined = is_zero if undefined is None else (undefined & is_zero)
     return undefined
@@ -176,7 +176,7 @@ def d_min_from_undefined(undefined, apertures_au):
     f_safe = np.minimum(f, n_ap - 1)
 
     d_min = np.zeros(n_models, dtype=float)
-    for band in BAND_ORDER:
+    for band in ASSEMBLY_BANDS:
         scale = BANDS[band].aperture_arcsec * 1000.0
         d_min = np.maximum(d_min, apertures_au[f_safe] / scale)
     d_min[all_undefined] = np.inf
@@ -215,7 +215,7 @@ def scan_geometry(geometry_dir, geometry, apertures_au=None):
 
     ref_names = np.char.strip(np.asarray(
         fits.getdata(os.path.join(geometry_dir, "parameters.fits"), 1)["MODEL_NAME"]).astype(str))
-    flux_cubes = {band: _read_band_flux(geometry_dir, band, ref_names) for band in BAND_ORDER}
+    flux_cubes = {band: _read_band_flux(geometry_dir, band, ref_names) for band in ASSEMBLY_BANDS}
 
     undefined = undefined_apertures(flux_cubes)
     d_min = d_min_from_undefined(undefined, apertures_au)

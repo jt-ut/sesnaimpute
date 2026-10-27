@@ -375,6 +375,23 @@ def run_gates(ingest, yso_root, pms_data_root, verbose=True):
         _log(f"    stage={s:2d}  n={n_s:8d}  fail_star={n_fail_star:7d}  "
             f"fail_aperture={n_fail_ap:7d}  fail_pms={n_fail_pms:7d}  pass_all={n_pass:7d}")
 
+    # aperture gate (all eleven bands) per geometry and per stage
+    geom_arr = ingest["geometry_folder"].to_numpy()
+    drop_ap = valid_star & valid_stage & ~valid_aperture
+    _log("[gates] aperture gate (eleven bands) drops, per geometry and stage "
+         "(n_drop / n_stage = fraction):")
+    for g in GEOMETRIES:
+        for s in (0, 1, 2, 3):
+            m = (geom_arr == g) & (stage == s)
+            if m.any():
+                _log(f"    {g}  stage={s}  {int((m & drop_ap).sum())} / {int(m.sum())} "
+                     f"= {(m & drop_ap).sum() / m.sum():.4f}")
+    for s in (0, 1, 2, 3):
+        m = stage == s
+        if m.any():
+            _log(f"    ALL  stage={s}  {int((m & drop_ap).sum())} / {int(m.sum())} "
+                 f"= {(m & drop_ap).sum() / m.sum():.4f}")
+
     eligible_pregate = valid_star & valid_stage & valid_aperture & valid_pms
     _log(f"[gates] D_NEAR={aperture_info['d_near_kpc']:.4f} kpc; "
         f"PMS tol={pms.PMS_TOL_DEX:.4f} dex, m_top_bhac15={track.m_top:.3f}, "
@@ -403,7 +420,7 @@ def run_labeling_and_features(ingest, eligible_pregate, pms_mass, yso_root, verb
     the member-parameter columns (MEMBER_PARAM_COLUMNS + mass).
 
     ALSO the dark-band gate (coordinator finding, 2026-10-08): a model
-    dark in ALL EIGHT bands at the survey aperture (mu at its own floor
+    dark in ALL ELEVEN bands at the survey aperture (mu at its own floor
     in every band, i.e. dark_mask.all(axis=1)) whitens to the origin of
     the quotient space -- gray, no SED shape at all. One such model
     became the nearest representative of 23,317 others (kept template
@@ -429,9 +446,9 @@ def run_labeling_and_features(ingest, eligible_pregate, pms_mass, yso_root, verb
         geometry_dir = os.path.join(yso_root, geom)
 
         ref_names = sub["model_name"].to_numpy()
-        flux_cubes = read_geometry_flux_cubes(geometry_dir, ref_names)
+        flux_cubes = read_geometry_flux_cubes(geometry_dir, ref_names, ASSEMBLY_BANDS)
         mu, _clamp, floor_dex_row, all_zero = compute_row_features_from_cubes(
-            flux_cubes, aperture_au, distance_cm)
+            flux_cubes, aperture_au, distance_cm, ASSEMBLY_BANDS)
         td_frac, _n_usable = compute_td_fraction(flux_cubes)
         del flux_cubes
 
@@ -439,7 +456,7 @@ def run_labeling_and_features(ingest, eligible_pregate, pms_mass, yso_root, verb
         sed_linear = 10.0 ** mu
         dark_mask = np.isclose(sed_linear, floor_linear_row[:, None], rtol=1e-6)
 
-        # Dark-band gate: drop every row dark in all 8 bands, BEFORE it
+        # Dark-band gate: drop every row dark in all 11 bands, BEFORE it
         # ever reaches dedup or the r-net. stage recorded here (on the
         # full sub, pre-filter) for the per-stage fail_dark tally.
         stage_arr = sub["stage"].to_numpy()
@@ -486,7 +503,7 @@ def run_labeling_and_features(ingest, eligible_pregate, pms_mass, yso_root, verb
         param_blocks.append(pd.DataFrame(prow))
         if verbose:
             _log(f"[labeling] {geom}: {len(sub)} gated rows (dropped "
-                f"{int(all_dark.sum())} all-8-dark), all_zero_flux={int(np.sum(all_zero))}")
+                f"{int(all_dark.sum())} all-11-dark), all_zero_flux={int(np.sum(all_zero))}")
 
     model_id = np.concatenate(id_blocks)
     model_name = np.concatenate(name_blocks)
@@ -495,7 +512,7 @@ def run_labeling_and_features(ingest, eligible_pregate, pms_mass, yso_root, verb
     label = np.concatenate(label_blocks)
     params = pd.concat(param_blocks, axis=0, ignore_index=True)
 
-    _log("\n[gates] dark-band gate (all 8 bands at floor at the survey "
+    _log("\n[gates] dark-band gate (all 11 bands at floor at the survey "
         "aperture), removals per stage:")
     for s in sorted(fail_dark_by_stage):
         _log(f"    stage={s:2d}  fail_dark={fail_dark_by_stage[s]:7d}")
@@ -548,7 +565,7 @@ def run_dedup(model_id, mu, dark_mask, dedup_source, radius=R_NET_RADIUS, verbos
     # (YSO - matched SPS) difference onto that direction's own unit
     # vector is negative exactly when the implied A_V is negative.
     sigma_vec, _ = sampling.quotient_space()
-    av_law_whitened = density._av_law(sampling._SAMPLING_LAW, BAND_ORDER) / sigma_vec
+    av_law_whitened = density._av_law(sampling._SAMPLING_LAW, ASSEMBLY_BANDS) / sigma_vec
     av_dir = av_law_whitened / np.linalg.norm(av_law_whitened)
     diff = (mu[dup] / sigma_vec) - (sps_mu[nearest[dup]] / sigma_vec)
     n_bluer = int(np.sum((diff @ av_dir) < 0)) if dup.any() else 0

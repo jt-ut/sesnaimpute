@@ -90,12 +90,11 @@ from sesnaimpute.sed_models.curate.model_io import align_by_name, read_flux_meta
 # Band order fixed throughout this module -- must match the index convention
 # used to pack feature vectors (indices 0-7 = mu, pre-scaled by
 # 1/FIXED_SIGMA_BY_BAND; see _pack_vectors) and FIXED_SIGMA_ARRAY.
-# Derived from definitions.SELECTION (the eight SESNA bands), not from the
-# eleven-band SED: the YSO curation (labeling, dedup, sampling) is done in the
-# space the catalogue is selected in, FRACERR below is the median fractional
+# The LABELLING (hard label, FRACERR/FIXED_SIGMA, kNN packing) stays on the eight
+# SESNA bands (planner ruling 2026-10-27); the aperture gate, dedup and sampling run
+# on ASSEMBLY_BANDS, all eleven. FRACERR below is the median fractional
 # error of the SESNA catalogue's own eight bands (no PACS value exists for it).
-# The release's own PACS convolutions join at assembly (ASSEMBLY_BANDS).
-BAND_ORDER = tuple(definitions.SESNA_BANDS)   # PENDING the ruling on the PACS FRACERR entries; becomes the eleven
+BAND_ORDER = tuple(definitions.SESNA_BANDS)
 
 # Where each band's convolved photometry file lives, relative to a
 # geometry's directory (geometry_dir/convolved/<survey_subdir>/<filename>).
@@ -109,10 +108,9 @@ _CONVOLVED_FILENAME = {"J": "2MASS.J.fits", "H": "2MASS.H.fits", "Ks": "2MASS.Ks
                        "P70": "Pacs.blue.fits", "P100": "Pacs.green.fits",
                        "P160": "Pacs.red.fits"}
 
-#: The bands the library is ASSEMBLED with: the eight curation bands plus the
-#: release's own PACS convolutions (blue/green/red = 70/100/160 um), read by
-#: model name exactly like the eight. Curation (labeling, dedup, sampling)
-#: stays on BAND_ORDER.
+#: All eleven bands (the release's own PACS convolutions blue/green/red = 70/100/160 um
+#: read by model name like the eight): the aperture gate, features for dedup/sampling
+#: and assembly. Only the labelling stays on BAND_ORDER.
 ASSEMBLY_BANDS = tuple(BANDS)
 
 # Vega zero points, Jy -- read from constants.VEGA_ZERO_POINT_MJY (their
@@ -247,8 +245,8 @@ def _read_band_flux(geometry_dir, band, ref_names):
 # FEATURES (mu only -- sigma is FIXED_SIGMA_BY_BAND, a constant) -- spec 4.1
 # ==========================================================================
 
-def read_geometry_flux_cubes(geometry_dir, ref_names):
-    """Read all 8 bands' raw (n,20) flux cubes for one geometry -- the
+def read_geometry_flux_cubes(geometry_dir, ref_names, bands=BAND_ORDER):
+    """Read the `bands` (default the eight labelling bands; the build passes ASSEMBLY_BANDS) raw (n,20) flux cubes for one geometry -- the
     single disk-read pass per geometry. Flux is physically non-negative;
     a handful of raw values across the grid are tiny negative floating-
     point artifacts (confirmed: ~1e-11 to 1e-10 mJy magnitude, ~40 orders
@@ -258,10 +256,10 @@ def read_geometry_flux_cubes(geometry_dir, ref_names):
     by one noisy aperture and no downstream step needs to special-case it.
     Returns {band: flux_20ap}."""
     return {band: np.maximum(_read_band_flux(geometry_dir, band, ref_names), 0.0)
-           for band in BAND_ORDER}
+           for band in bands}
 
 
-def compute_row_features_from_cubes(flux_cubes, aperture_au, distance_cm):
+def compute_row_features_from_cubes(flux_cubes, aperture_au, distance_cm, bands=BAND_ORDER):
     """mu (n,8) in log10(mJy) ONLY -- this module uses FIXED_SIGMA_BY_BAND (a
     constant), not a per-model aperture-variance sigma, so there is no sigma
     to compute, no degeneracy to detect, and no imputation of any kind. From
@@ -281,10 +279,10 @@ def compute_row_features_from_cubes(flux_cubes, aperture_au, distance_cm):
     seed time).
     """
     sed_linear, floor_linear_row, all_zero_flux = cog.survey_matched_sed(
-        flux_cubes, aperture_au, distance_cm, BAND_ORDER)
+        flux_cubes, aperture_au, distance_cm, bands)
 
     clamp_report = {}
-    for band in BAND_ORDER:
+    for band in bands:
         flux_n_ap = flux_cubes[band]
         clamp_report[band] = dict(
             n_clamped=int((flux_n_ap < floor_linear_row[:, None]).sum()),
