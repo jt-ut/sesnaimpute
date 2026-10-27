@@ -3956,6 +3956,17 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "farther than one beam from every bright source -- local sky structure the measurement's "
         "constant background does not remove. It is subtracted from every flux measured in the cell, "
         "for catalogue sources (the photometry) and for the random positions (the curve) alike."),
+    "MAP_ID_{b}": ("map identifier",
+        "One row per {w} micron map of the region: its archive file name. CELL_MAP_{b} names one of these for each cell."),
+    "MAP_OBSID_{b}": ("observation identifier(s)",
+        "For each row of MAP_ID_{b}: the Herschel observation identifier(s) the map combines, comma separated."),
+    "MAP_SHIFT_{b}_ARCSEC": ("arcsec (east, north)",
+        "For each row of MAP_ID_{b}: how far the map's own astrometry sits from the SESNA positions, east then north "
+        "(map minus SESNA), the median over the map's bright point sources paired one-to-one with a SESNA source within "
+        "one beam; 0, 0 when fewer than 10 pairs exist. Every catalogue position is moved by this shift before it is "
+        "measured on the map, so a source is measured where the map puts it."),
+    "MAP_N_PAIRS_{b}": ("pairs",
+        "For each row of MAP_ID_{b}: the number of bright-source pairs MAP_SHIFT_{b}_ARCSEC was measured from (below 10: no shift applied)."),
     "CELL_GAIN_{b}": ("dimensionless",
         "The median fraction of an injected point source's flux that the measurement returns in each "
         "cell of CURVE_{b} (1 when the fit recovers it fully)."),
@@ -3980,7 +3991,7 @@ _PHOTOMETRY_PACS_READINGS = {
     "NAME": ("source identifier",
         "The SESNA source identifier of each row, in exactly the order of the region's SESNA source catalogue."),
     "FNU_{b}_MJY": ("mJy",
-        "Flux of the source in the Herschel PACS {w} micron band, measured at its catalogue position on the map that is deepest there, with the local sky offset of its 30-arcsecond cell (CELL_OFFSET in the completeness product) subtracted; it can be negative or small when nothing is seen, and is NaN where the band does not cover the source. Where ORIGIN is 2 it is instead an upper bound: the combined flux of the blended group plus five times its uncertainty."),
+        "Flux of the source in the Herschel PACS {w} micron band: a point-source fit at its catalogue position (moved by the map's astrometric shift, MAP_SHIFT in the completeness product) on the map that is deepest there, with the local sky offset of its 30-arcsecond cell (CELL_OFFSET in the completeness product) subtracted. It is the flux of a point source above its local background at the beam scale; on bright structured backgrounds it sits about 10-15 % below catalogues measured in wide apertures (Cygnus X, 100-500 mJy: 0.84 of the Herschel PACS point-source catalogue), and overall about 4 % below that catalogue, within the 5 % calibration. That catalogue's faintest entries are boosted near its own detection limit, so comparisons with it at 40-200 mJy read low; it can be negative or small when nothing is seen, and is NaN where the band does not cover the source. Where ORIGIN is 2 it is instead an upper bound: the combined flux of the blended group plus five times its uncertainty."),
     "SIGMA_{b}_MJY": ("mJy, or 0.99 for an upper bound",
         "Uncertainty of the flux: the scatter of the same measurement at random empty-sky positions in the source's 30-arcsecond cell, enlarged for a source blended with a neighbour. Where ORIGIN is 2 it holds the value 0.99 that the source table uses to mark an upper bound; NaN where the band does not cover the source. For a source fitted together with a neighbour the uncertainty is enlarged by the overlap, but its completeness curve is still its cell's single-source curve, so for such a source the curve somewhat overstates the chance of detection."),
     "ORIGIN_{b}": ("origin code",

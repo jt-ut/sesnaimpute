@@ -106,7 +106,7 @@ def _blend_components(ra_deg, dec_deg, detected, radius_arcsec):
 # ---------------------------------------------------------------------------
 # one tile
 
-def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset):
+def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shifts):
     """All of one map tile's sources: `piece = (band, map_index, rows)`, the
     source rows (ascending) the completeness stage assigned to that map.
     Returns `(band, map_index, rows, columns)`, `columns` the product's
@@ -128,7 +128,9 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset):
     extended = np.zeros(n, dtype=bool)
 
     with pacs_fit.open_tile(config, record) as tile:
-        x, y = tile.xy(ra[rows], dec[rows])
+        # the map's registration to SESNA, as the completeness stage measured and stored it
+        shift = shifts.get((BANDS[band], _tile_key(record)), (0.0, 0.0))
+        x, y = tile.xy(*pacs_fit.to_map_frame(ra[rows], dec[rows], shift))
         single = tile.fit_positions(x, y)
         ok = single.covered & np.isfinite(sigma_cell) & (sigma_cell > 0)
         flux[ok] = single.flux[ok] - offset[ok]
@@ -207,7 +209,8 @@ def _tile_key(record):
     return ",".join(str(o) for o in record.obsids)
 
 
-def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_obsid, config, n_jobs, stage=None):
+def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_obsid, config, n_jobs, stage=None,
+                 shifts=None):
     """Measures every source on its cell's map and writes the product at
     `out_path`. `cell_sigma[b]` (n,) float64 is the source's cell noise (NaN:
     no cell, not covered) and `cell_obsid[b]` (n,) bytes the cell's map, the
@@ -247,7 +250,7 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
             counts[band] = {code: 0 for code in (1, 2, 90, 91)}
             counts[band][ORIGIN_NOT_COVERED] = n
         fn_args = dict(config=config, records=records, ra=ra, dec=dec, cell_sigma=np.vstack(cell_sigma),
-                       cell_offset=np.vstack(cell_offset))
+                       cell_offset=np.vstack(cell_offset), shifts=shifts or {})
         fn = functools.partial(_measure_tile, **fn_args)
         for band_index, map_index, rows, cols in pieces_module.iterate(fn, pieces, n_jobs, stage=stage, unit="map tiles"):
             band = BANDS[band_index]
@@ -270,6 +273,7 @@ def _read_cells(config, region, n_source):
     path = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
     sigma = [np.full(n_source, np.nan) for _ in BANDS]
     offset = [np.zeros(n_source) for _ in BANDS]
+    shifts = {}
     obsid = [np.full(n_source, b"", dtype="S1") for _ in BANDS]
     if not os.path.exists(path):
         raise FileNotFoundError("pacs_photometry needs the completeness product first: %s" % path)
@@ -286,8 +290,10 @@ def _read_cells(config, region, n_source):
             cell_obs = f["CELL_OBSID_%s" % band][:]
             sigma[b][have] = cell_sigma[rows[have]]
             offset[b][have] = f["CELL_OFFSET_%s_MJY" % band][:][rows[have]]
+            for key, sh in zip(f["MAP_OBSID_" + band][:], f["MAP_SHIFT_%s_ARCSEC" % band][:]):
+                shifts[(band, key.decode())] = (float(sh[0]), float(sh[1]))
             obsid[b] = np.where(have, cell_obs[np.where(have, rows, 0)], b"")
-    return sigma, offset, obsid
+    return sigma, offset, obsid, shifts
 
 
 def _build_one_region(config, region, st):
@@ -299,14 +305,15 @@ def _build_one_region(config, region, st):
     out_path = product_path(config, "sky/derived", "pacs", "photometry", "source", region=region)
     records = read_index(config, region)
     if records:
-        cell_sigma, cell_offset, cell_obsid = _read_cells(config, region, names.size)
+        cell_sigma, cell_offset, cell_obsid, shifts = _read_cells(config, region, names.size)
     else:
         cell_sigma = [np.full(names.size, np.nan) for _ in BANDS]
         cell_offset = [np.zeros(names.size) for _ in BANDS]
+        shifts = {}
         cell_obsid = [np.full(names.size, b"", dtype="S1") for _ in BANDS]
     t0 = time.time()
     counts = write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_obsid,
-                          config, config.n_jobs, stage=st)
+                          config, config.n_jobs, stage=st, shifts=shifts)
     wall = time.time() - t0
     numbers = {"sources": int(names.size), "sources_per_s": names.size / max(wall, 1e-9)}
     for band in BANDS:

@@ -191,10 +191,12 @@ def _tile_tail_factor(piece, config, records):
     of up to TAIL_CELLS cells spread evenly over the cells this region USES on the tile (those holding a
     source or an admitted sample point; their 3 x 3 blocks fitted too) -- not over the whole map, whose
     scan turnarounds and edges outside the survey have heavier tails (Musca P100: 1.37 map-wide against
-    1.13 on the used cells), and only over the used cells wholly on valid data. `piece = (tile index,
-    used cells)`."""
-    t, used = piece
+    1.13 on the used cells), and only over the used cells wholly on valid data. The same piece measures
+    the map's registration to SESNA (`pacs_fit.registration`). `piece = (tile index, used cells, SESNA
+    ra, dec on the tile)`."""
+    t, used, sra, sdec = piece
     tile = pacs_fit.cached_tile(config, records[t])
+    shift = pacs_fit.registration(tile, sra, sdec)
     centres = used[np.unique(np.linspace(0, used.size - 1, min(TAIL_CELLS, used.size)).astype(np.int64))]
     all_ids = ring(tile.grid, centres)
     b, gain, ps, valid, clean = cell_fits(tile, all_ids, 0)
@@ -207,12 +209,12 @@ def _tile_tail_factor(piece, config, records):
     good = np.isfinite(sigma) & (sigma > 0) & (valid[c].sum(axis=1) == N_POS)
     z = ((b[c][good] - offset[good, None]) / sigma[good, None])[(valid & clean)[c][good]]
     # the lowest 1 % of z is enough to read the 0.135 % quantile again after pooling small maps
-    return dict(n_used=int(used.size), n=int(z.size), zlow=np.sort(z)[:int(np.ceil(0.01 * z.size))],
+    return dict(n_used=int(used.size), n=int(z.size), zlow=np.sort(z)[:int(np.ceil(0.01 * z.size))], shift=shift,
                 median=float(np.median(sigma[good])) if good.any() else np.nan)
 
 
 def tail_factors(stats, records):
-    """{tile: (k, median sigma)}. A map with at least TAIL_CELLS used cells gets its own k; a smaller
+    """{tile: (k, median sigma, registration shift)}. A map with at least TAIL_CELLS used cells gets its own k; a smaller
     one (Orion A's ~100 small HOPS fields) the k of all maps of the band in the region with the same
     observing mode and scan speed, pooled -- a few hundred cells cannot pin a 0.135 % quantile."""
     def k_of(group):
@@ -223,10 +225,11 @@ def tail_factors(stats, records):
     out = {}
     for t, st in stats.items():
         if st["n_used"] >= TAIL_CELLS:
-            out[t] = (k_of([t]), st["median"])
+            out[t] = (k_of([t]), st["median"], st["shift"])
         else:
             kind = (records[t].mode, records[t].scan_speed)
-            out[t] = (k_of([u for u in stats if (records[u].mode, records[u].scan_speed) == kind]), st["median"])
+            out[t] = (k_of([u for u in stats if (records[u].mode, records[u].scan_speed) == kind]), st["median"],
+                      st["shift"])
     return out
 
 
@@ -253,7 +256,7 @@ def _piece(piece, config, records, flux_grid, tails):
     n_valid, n_clean, mad, g, pps, off = cell_statistics(b, gain, ps, valid, clean)
     sigma, n_sigma = block_sigma(tile.grid, ids, all_ids, mad, n_clean)
     offset = cell_offset(tile.grid, ids, all_ids, off, n_clean)
-    tile_tail, tile_median = tails[tile_index]
+    tile_tail, tile_median, shift = tails[tile_index]
     # a block with no clean cell (wholly within a beam of bright sources) takes the tile's median noise;
     # N_SIGMA_POS 0 marks it
     sigma = np.where(np.isfinite(sigma), sigma, tile_median)
@@ -270,7 +273,7 @@ def _piece(piece, config, records, flux_grid, tails):
     sigma = sigma * tail
     covered = (n_valid >= MIN_VALID_POSITIONS) & np.isfinite(sigma) & (sigma > 0) & np.isfinite(g)
     curve = encode_curves(curve_counts(thresholds(b, gain, valid, sigma, offset), flux_grid), n_valid)
-    ra, dec = tile.grid.centres_icrs(ids)
+    ra, dec = pacs_fit.from_map_frame(*tile.grid.centres_icrs(ids), shift[:2])
     return dict(tile=tile_index, ids=ids, covered=covered, n_valid=n_valid.astype(np.int16),
                 n_sigma=np.minimum(n_sigma, np.iinfo(np.int16).max).astype(np.int16), tail=tail,
                 sigma=sigma, offset=offset, gain=g, pixel_sigma=pps, curve=curve, ra=ra, dec=dec)
@@ -291,25 +294,39 @@ def _band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage
     n_plane = flux_grid.size
     n_adm = sample_ra.shape[0]
     sample_ra, sample_dec = sample_ra.ravel(), sample_dec.ravel()
-    # candidate cells of each tile: those holding a source or an admitted sample point
-    pieces, geometry = [], []
-    for t, record in enumerate(records):
+    def tile_cells(record, shift):
+        # a tile's cells holding a source or an admitted sample point, positions in the map's own frame
         grid, wcs = _tile_geometry(record)
-        sx, sy = (np.asarray(v) for v in wcs.all_world2pix(ra, dec, 0))
-        px, py = (np.asarray(v) for v in wcs.all_world2pix(sample_ra, sample_dec, 0))
+        sx, sy = (np.asarray(v) for v in wcs.all_world2pix(*pacs_fit.to_map_frame(ra, dec, shift), 0))
+        px, py = (np.asarray(v) for v in wcs.all_world2pix(*pacs_fit.to_map_frame(sample_ra, sample_dec, shift), 0))
         src_cell, smp_cell = grid.cell_ids(sx, sy), grid.cell_ids(px, py)
         cells = np.unique(np.concatenate([src_cell[src_cell >= 0], smp_cell[smp_cell >= 0]]))
+        return grid, src_cell, smp_cell, cells
+
+    # first pass, unregistered: the cells each tile uses, for its tail factor and its registration
+    first = [tile_cells(r, (0.0, 0.0)) for r in records]
+    used = [(t, first[t][3], ra[first[t][1] >= 0], dec[first[t][1] >= 0])
+            for t in range(len(records)) if first[t][3].size]
+    if not used:
+        return None
+    tails = pieces_module.run(functools.partial(_tile_tail_factor, config=config, records=records),
+                              used, n_jobs, stage=stage, unit="tiles")
+    tails = tail_factors(dict(zip([u[0] for u in used], tails)), records)
+    for t in sorted(tails):
+        e, n, k = tails[t][2]
+        print("  %s: registration east %+.2f north %+.2f arcsec from %d pairs%s"
+              % (records[t].map_id, e, n, k, "  ABOVE 1.5 ARCSEC" if np.hypot(e, n) > 1.5 else ""), flush=True)
+    # second pass, registered: the cells, the pieces
+    pieces, geometry = [], []
+    for t, record in enumerate(records):
+        grid, src_cell, smp_cell, cells = tile_cells(record, tails[t][2][:2] if t in tails else (0.0, 0.0))
         geometry.append((src_cell, smp_cell, cells))
+        if t not in tails:
+            continue
         cy, cx = np.divmod(cells, grid.nx)
         block = (cy // BLOCK_CELLS) * (grid.nx // BLOCK_CELLS + 1) + cx // BLOCK_CELLS
         for blk in np.unique(block):
             pieces.append((t, cells[block == blk]))
-    if not pieces:
-        return None
-    used = [(t, geometry[t][2]) for t in sorted({t for t, _ in pieces})]
-    tails = pieces_module.run(functools.partial(_tile_tail_factor, config=config, records=records),
-                              used, n_jobs, stage=stage, unit="tiles")
-    tails = tail_factors(dict(zip([t for t, _ in used], tails)), records)
     fn = functools.partial(_piece, config=config, records=records, flux_grid=flux_grid, tails=tails)
     results = pieces_module.run(fn, pieces, n_jobs, stage=stage, unit="cell blocks")
     # per tile arrays over its candidate cells
@@ -386,13 +403,17 @@ def _band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage
     envelope = curve.max(axis=0) if n_row else np.zeros(n_plane, np.uint16)
     # widths from the longest entry: a Level 3 stack lists up to ~20 observations (an S64 field cut
     # Orion A's two stacks short, and the photometry could not find their cells' map)
+    shifts = np.array([tails[t][2] if t in tails else (0.0, 0.0, 0) for t in range(len(records))], dtype=float)
     obsid = np.array([",".join(records[t].obsids) for t in tile_of_row] or [""], dtype="S")[:n_row]
     map_id = np.array([records[t].map_id for t in tile_of_row] or [""], dtype="S")[:n_row]
     return dict(curve=curve, source_row=src_row.astype(np.int32), pixel_curve=pixel_curve,
                 covered_frac=covered_frac, envelope=envelope, n_pos=cols["n_valid"], n_sigma=cols["n_sigma"],
                 cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=cols["sigma"], cell_offset=cols["offset"],
                 cell_gain=cols["gain"], cell_pixel_sigma=cols["pixel_sigma"],
-                cell_obsid=obsid, cell_map=map_id, n_candidate=sum(g[2].size for g in geometry))
+                cell_obsid=obsid, cell_map=map_id, n_candidate=sum(g[2].size for g in geometry),
+                map_id=np.array([r.map_id for r in records], dtype="S"),
+                map_obsid=np.array([",".join(r.obsids) for r in records], dtype="S"),
+                map_shift=shifts[:, :2].astype(np.float32), map_pairs=shifts[:, 2].astype(np.int32))
 
 
 def _empty_band(n_src, n_adm, n_plane):
@@ -402,7 +423,8 @@ def _empty_band(n_src, n_adm, n_plane):
                 n_pos=np.zeros(0, np.int16), n_sigma=np.zeros(0, np.int16), cell_ra=np.zeros(0), cell_dec=np.zeros(0),
                 cell_sigma=np.zeros(0, np.float32), cell_offset=np.zeros(0, np.float32), cell_gain=np.zeros(0, np.float32),
                 cell_pixel_sigma=np.zeros(0, np.float32), cell_obsid=np.zeros(0, "S64"),
-                cell_map=np.zeros(0, "S96"), n_candidate=0)
+                cell_map=np.zeros(0, "S96"), n_candidate=0, map_id=np.zeros(0, "S1"), map_obsid=np.zeros(0, "S1"),
+                map_shift=np.zeros((0, 2), np.float32), map_pairs=np.zeros(0, np.int32))
 
 
 # ----------------------------------------------------------------------------
@@ -435,6 +457,10 @@ def write_product(path, region, admitted, mag, bands):
             w("CELL_SIGMA_%s_MJY" % b, d["cell_sigma"])
             w("CELL_OFFSET_%s_MJY" % b, d["cell_offset"])
             w("CELL_GAIN_" + b, d["cell_gain"])
+            w("MAP_ID_" + b, d["map_id"])
+            w("MAP_OBSID_" + b, d["map_obsid"])
+            w("MAP_SHIFT_%s_ARCSEC" % b, d["map_shift"])
+            w("MAP_N_PAIRS_" + b, d["map_pairs"])
         w = lambda name, data: build_module.write_dataset(f, name, data, *REGISTRY[(stem, name)])
         w("SOURCE_ROW", np.stack([bands[b]["source_row"] for b in BANDS], axis=1).astype(np.int32))
         w("HPX_PIX_512", np.asarray(admitted, dtype=np.int64))

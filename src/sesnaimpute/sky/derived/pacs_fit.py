@@ -85,6 +85,55 @@ PSF_SPATIAL_NODES = 3
 #: a fit is trusted only if this fraction of the target beam lies on valid pixels
 MIN_BEAM_FRACTION = 0.9
 
+#: a map is registered to SESNA only with at least this many unique bright-peak / SESNA pairs
+MIN_REGISTRATION_PAIRS = 10
+
+
+def to_map_frame(ra_deg, dec_deg, shift):
+    """SESNA positions in a map's own astrometric frame: plus the map's registration shift
+    (`shift` = (east, north) arcsec, PACS minus SESNA; see `registration`)."""
+    east, north = shift
+    dec_deg = np.asarray(dec_deg, float)
+    return (np.asarray(ra_deg, float) + east / 3600.0 / np.cos(np.radians(dec_deg)),
+            dec_deg + north / 3600.0)
+
+
+def from_map_frame(ra_deg, dec_deg, shift):
+    """The inverse of `to_map_frame`: a position in the map's frame back to the SESNA frame."""
+    east, north = shift
+    dec_deg = np.asarray(dec_deg, float) - north / 3600.0
+    return np.asarray(ra_deg, float) - east / 3600.0 / np.cos(np.radians(dec_deg)), dec_deg
+
+
+def registration(tile, ra_deg, dec_deg):
+    """The map's astrometric offset from SESNA, (east arcsec, north arcsec, n_pairs): the median, over
+    the tile's blind bright peaks (S/N >= 5) paired one-to-one with their nearest SESNA position within
+    one beam (each the other's nearest), of PACS minus SESNA. Fewer than MIN_REGISTRATION_PAIRS pairs:
+    no shift. Planner 2026-10-27: Mon OB1's map 0640_p0927 sat 3.3 arcsec west of SESNA and a
+    fixed-position fit there lost half the flux of its 6-arcsec beam; one shift per map keeps the fit
+    fixed-position and linear."""
+    nb = tile.neighbours
+    ra_deg, dec_deg = np.asarray(ra_deg, float), np.asarray(dec_deg, float)
+    if nb.x.size == 0 or ra_deg.size == 0:
+        return 0.0, 0.0, 0
+    sky = tile.wcs.pixel_to_world(nb.x, nb.y).icrs
+    pra, pde = sky.ra.deg, sky.dec.deg
+    ra0, de0 = np.median(pra), np.median(pde)
+    def plane(r, d):
+        return np.c_[((r - ra0 + 180.0) % 360.0 - 180.0) * np.cos(np.radians(de0)) * 3600.0, (d - de0) * 3600.0]
+    peaks, sesna = plane(pra, pde), plane(ra_deg, dec_deg)
+    d1, i1 = cKDTree(sesna).query(peaks, distance_upper_bound=tile.beam_arcsec)
+    ok = np.isfinite(d1)
+    if not ok.any():
+        return 0.0, 0.0, 0
+    _, back = cKDTree(peaks).query(sesna[i1[ok]])
+    mutual = np.flatnonzero(ok)[back == np.flatnonzero(ok)]
+    if mutual.size < MIN_REGISTRATION_PAIRS:
+        return 0.0, 0.0, int(mutual.size)
+    delta = peaks[mutual] - sesna[i1[mutual]]
+    return float(np.median(delta[:, 0])), float(np.median(delta[:, 1])), int(mutual.size)
+
+
 # ----------------------------------------------------------------------------
 # results
 
