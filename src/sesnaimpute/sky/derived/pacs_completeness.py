@@ -313,25 +313,38 @@ def _tile_geometry(record):
     return pacs_fit.MapGrid.from_wcs(wcs, record.shape), wcs
 
 
-def _band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage, flux_grid):
-    """Measure every candidate cell of every map of one band and choose the deepest. Returns a dict
-    of the band's datasets, or None when the band has no map."""
+#: the cells kept per map: every cell inside the region's source bounding box padded by one nside-512
+#: pixel (planner 2026-10-27: catalog.completeness maps the admitted pixels' sample points to cells itself)
+REGION_PAD_ARCSEC = 412.0
+
+
+def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
+    """Measure every covered cell of every map of one band inside the region's padded source bounding box;
+    choose each source's deepest map. Returns the band's datasets, or None when no map reaches a source."""
     n_src = ra.size
     n_plane = flux_grid.size
-    n_adm = sample_ra.shape[0]
-    sample_ra, sample_dec = sample_ra.ravel(), sample_dec.ravel()
+
     def tile_cells(record, shift):
-        # a tile's cells holding a source or an admitted sample point, positions in the map's own frame
+        # the map's cells inside the sources' bounding box (map frame), and each source's cell
         grid, wcs = _tile_geometry(record)
         sx, sy = (np.asarray(v) for v in wcs.all_world2pix(*pacs_fit.to_map_frame(ra, dec, shift), 0))
-        px, py = (np.asarray(v) for v in wcs.all_world2pix(*pacs_fit.to_map_frame(sample_ra, sample_dec, shift), 0))
-        src_cell, smp_cell = grid.cell_ids(sx, sy), grid.cell_ids(px, py)
-        cells = np.unique(np.concatenate([src_cell[src_cell >= 0], smp_cell[smp_cell >= 0]]))
-        return grid, src_cell, smp_cell, cells
+        src_cell = grid.cell_ids(sx, sy)
+        on = np.isfinite(sx) & np.isfinite(sy)
+        pad = REGION_PAD_ARCSEC / (abs(wcs.proj_plane_pixel_scales()[0].to_value("arcsec")))
+        if not on.any():
+            return grid, wcs, src_cell, np.empty(0, np.int64)
+        x0 = max(int(np.floor((sx[on].min() - pad + 0.5) / grid.step_x)), 0)
+        x1 = min(int(np.floor((sx[on].max() + pad + 0.5) / grid.step_x)), grid.nx - 1)
+        y0 = max(int(np.floor((sy[on].min() - pad + 0.5) / grid.step_y)), 0)
+        y1 = min(int(np.floor((sy[on].max() + pad + 0.5) / grid.step_y)), grid.ny - 1)
+        if x1 < x0 or y1 < y0 or not (src_cell >= 0).any():
+            return grid, wcs, src_cell, np.empty(0, np.int64)
+        cy, cx = np.meshgrid(np.arange(y0, y1 + 1), np.arange(x0, x1 + 1), indexing="ij")
+        return grid, wcs, src_cell, (cy * grid.nx + cx).ravel().astype(np.int64)
 
-    # first pass, unregistered: the cells each tile uses, for its tail factor and its registration
+    # first pass, unregistered: the cells and sources of each tile, for its noise reference and registration
     first = [tile_cells(r, (0.0, 0.0)) for r in records]
-    used = [(t, first[t][3], ra[first[t][1] >= 0], dec[first[t][1] >= 0])
+    used = [(t, first[t][3], ra[first[t][2] >= 0], dec[first[t][2] >= 0])
             for t in range(len(records)) if first[t][3].size]
     if not used:
         return None
@@ -345,14 +358,16 @@ def _band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage
     # second pass, registered: the cells, the pieces
     pieces, geometry = [], []
     for t, record in enumerate(records):
-        grid, src_cell, smp_cell, cells = tile_cells(record, refs[t]["shift"][:2] if t in refs else (0.0, 0.0))
-        geometry.append((src_cell, smp_cell, cells))
-        if t not in refs:
+        grid, wcs, src_cell, cells = tile_cells(record, refs[t]["shift"][:2] if t in refs else (0.0, 0.0))
+        geometry.append((src_cell, cells, grid, wcs))
+        if t not in refs or cells.size == 0:
             continue
         cy, cx = np.divmod(cells, grid.nx)
         block = (cy // BLOCK_CELLS) * (grid.nx // BLOCK_CELLS + 1) + cx // BLOCK_CELLS
         for blk in np.unique(block):
             pieces.append((t, cells[block == blk]))
+    if not pieces:
+        return None
     # pass 1: each map's per-noise-group tail statistics; then one factor per group
     first_pass = pieces_module.run(functools.partial(_piece, config=config, records=records, flux_grid=flux_grid,
                                                      refs=refs), pieces, n_jobs, stage=stage, unit="cell blocks (tails)")
@@ -372,107 +387,82 @@ def _band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage
     # pass 2: the curves, sigma scaled by the cell's group factor (the same random positions)
     fn = functools.partial(_piece, config=config, records=records, flux_grid=flux_grid, refs=refs, factors=factors)
     results = pieces_module.run(fn, pieces, n_jobs, stage=stage, unit="cell blocks")
-    # per tile arrays over its candidate cells
-    tile_data = []
-    for t, (_s, _p, cells) in enumerate(geometry):
+    names = ("covered", "n_valid", "n_sigma", "sigma", "offset", "gain", "pixel_sigma", "curve", "ra", "dec", "tail")
+    # the rows: every covered cell of every map, ordered by (map, cell id)
+    parts = []
+    for t in range(len(records)):
         mine = [r for r in results if r["tile"] == t]
-        # pieces are square blocks, so their cells interleave: put the tile's arrays back in the
-        # sorted order of `cells`, which the searchsorted lookups below rely on
-        order = np.argsort(np.concatenate([r["ids"] for r in mine])) if mine else None
-        out = {k: (np.concatenate([r[k] for r in mine])[order] if mine else None) for k in
-               ("covered", "n_valid", "n_sigma", "sigma", "offset", "gain", "pixel_sigma", "curve", "ra", "dec", "tail")}
-        tile_data.append(out)
-    # deepest map at every source and every sample point
-    sel_src_t = np.full(n_src, -1, np.int32)
-    sel_src_r = np.full(n_src, np.inf)
-    sel_smp_t = np.full(n_adm * 256, -1, np.int32)
-    sel_smp_r = np.full(n_adm * 256, np.inf)
-    for t, (src_cell, smp_cell, cells) in enumerate(geometry):
-        d = tile_data[t]
-        if d["covered"] is None:
+        if not mine:
             continue
-        for cell_of, sel_t, sel_r in ((src_cell, sel_src_t, sel_src_r), (smp_cell, sel_smp_t, sel_smp_r)):
-            idx = np.flatnonzero(cell_of >= 0)
-            k = np.searchsorted(cells, cell_of[idx])
-            pacs_fit.select_deeper(t, idx, d["sigma"][k], d["covered"][k], sel_t, sel_r)
-    # the rows: cells that win at least one source or sample, ordered by (tile, cell)
-    keys = []
-    for t, (src_cell, smp_cell, cells) in enumerate(geometry):
-        for cell_of, sel_t in ((src_cell, sel_src_t), (smp_cell, sel_smp_t)):
-            w = np.flatnonzero(sel_t == t)
-            keys.append(np.int64(t) * (1 << 40) + cell_of[w])
-    keys = np.unique(np.concatenate(keys)) if keys else np.empty(0, np.int64)
-
-    def rows_of(cell_of, sel_t):
-        out = np.full(sel_t.size, -1, dtype=np.int64)
-        w = np.flatnonzero(sel_t >= 0)
-        out[w] = np.searchsorted(keys, sel_t[w].astype(np.int64) * (1 << 40) + cell_of[w])
-        return out
-
-    src_row = np.full(n_src, -1, dtype=np.int64)
-    smp_row = np.full(n_adm * 256, -1, dtype=np.int64)
-    for t, (src_cell, smp_cell, _c) in enumerate(geometry):
-        for cell_of, sel_t, row in ((src_cell, sel_src_t, src_row), (smp_cell, sel_smp_t, smp_row)):
-            w = np.flatnonzero(sel_t == t)
-            row[w] = np.searchsorted(keys, np.int64(t) * (1 << 40) + cell_of[w])
-    n_row = keys.size
-    tile_of_row = (keys >> 40).astype(np.int64)
-    cell_of_row = keys & ((1 << 40) - 1)
-    curve = np.zeros((n_row, n_plane), np.uint16)
-    cols = {k: np.zeros(n_row, dt) for k, dt in (("n_valid", np.int16), ("n_sigma", np.int16), ("sigma", np.float32),
-                                                  ("offset", np.float32), ("tail", np.float32), ("gain", np.float32), ("pixel_sigma", np.float32),
-                                                  ("ra", np.float64), ("dec", np.float64))}
-    for t, (_s, _p, cells) in enumerate(geometry):
-        r = np.flatnonzero(tile_of_row == t)
-        if r.size == 0:
+        ids = np.concatenate([r["ids"] for r in mine])
+        order = np.argsort(ids)
+        d = {k: np.concatenate([r[k] for r in mine])[order] for k in names}
+        keep = d["covered"]
+        parts.append((t, ids[order][keep], {k: v[keep] for k, v in d.items()}))
+    cell_map = np.concatenate([np.full(c.size, t, np.int32) for t, c, _ in parts]) if parts else np.zeros(0, np.int32)
+    cell_id = np.concatenate([c for _, c, _ in parts]) if parts else np.zeros(0, np.int64)
+    cols = {k: (np.concatenate([d[k] for _, _, d in parts]) if parts else np.zeros(0)) for k in names}
+    n_row = cell_id.size
+    # each source's deepest covering map (lowest cell sigma), and its row
+    keys = cell_map.astype(np.int64) * (1 << 40) + cell_id
+    sel_t = np.full(n_src, -1, np.int32)
+    sel_r = np.full(n_src, np.inf)
+    for t, (src_cell, cells, _g, _w) in enumerate(geometry):
+        idx = np.flatnonzero(src_cell >= 0)
+        if idx.size == 0 or n_row == 0:
             continue
-        k = np.searchsorted(cells, cell_of_row[r])
-        curve[r] = tile_data[t]["curve"][k]
-        for name in cols:
-            cols[name][r] = tile_data[t][name][k]
-    # area-averaged curve over each admitted nside-512 pixel
-    rows2d = smp_row.reshape(n_adm, 256)
-    pixel_curve = np.zeros((n_adm, n_plane), np.float32)
-    covered_frac = (rows2d >= 0).mean(axis=1).astype(np.float32)
-    for lo in range(0, n_adm, 400):
-        r = rows2d[lo:lo + 400]
-        ok = r >= 0
-        total = (curve[np.where(ok, r, 0)].astype(np.float32) * ok[:, :, None]).sum(axis=1)
-        pixel_curve[lo:lo + 400] = total / (STORAGE_SCALE * np.maximum(ok.sum(axis=1), 1)[:, None])
-    envelope = curve.max(axis=0) if n_row else np.zeros(n_plane, np.uint16)
-    # widths from the longest entry: a Level 3 stack lists up to ~20 observations (an S64 field cut
-    # Orion A's two stacks short, and the photometry could not find their cells' map)
+        q = np.int64(t) * (1 << 40) + src_cell[idx]
+        k = np.clip(np.searchsorted(keys, q), 0, n_row - 1)
+        hit = keys[k] == q
+        sig = np.where(hit, cols["sigma"][k], np.nan)
+        pacs_fit.select_deeper(t, idx, sig, hit, sel_t, sel_r)
+    src_row = np.full(n_src, -1, np.int64)
+    w = np.flatnonzero(sel_t >= 0)
+    src_row[w] = np.searchsorted(keys, sel_t[w].astype(np.int64) * (1 << 40) + geometry_cells(geometry, sel_t, w))
+    envelope = cols["curve"].max(axis=0).astype(np.uint16) if n_row else np.zeros(n_plane, np.uint16)
     shifts = np.array([refs[t]["shift"] if t in refs else (0.0, 0.0, 0) for t in range(len(records))], dtype=float)
-    obsid = np.array([",".join(records[t].obsids) for t in tile_of_row] or [""], dtype="S")[:n_row]
-    map_id = np.array([records[t].map_id for t in tile_of_row] or [""], dtype="S")[:n_row]
-    return dict(curve=curve, source_row=src_row.astype(np.int32), pixel_curve=pixel_curve,
-                covered_frac=covered_frac, envelope=envelope, n_pos=cols["n_valid"], n_sigma=cols["n_sigma"],
-                cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=cols["sigma"], cell_offset=cols["offset"],
-                cell_gain=cols["gain"], cell_pixel_sigma=cols["pixel_sigma"], cell_tail=cols["tail"],
-                cell_obsid=obsid, cell_map=map_id, n_candidate=sum(g[2].size for g in geometry),
+    return dict(curve=cols["curve"].astype(np.uint16).reshape(n_row, n_plane), source_row=src_row.astype(np.int32),
+                envelope=envelope, n_pos=cols["n_valid"].astype(np.int16), n_sigma=cols["n_sigma"].astype(np.int16),
+                cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=cols["sigma"].astype(np.float32),
+                cell_offset=cols["offset"].astype(np.float32), cell_gain=cols["gain"].astype(np.float32),
+                cell_tail=cols["tail"].astype(np.float32), cell_id=cell_id, cell_map_index=cell_map,
+                cell_obsid=np.array([",".join(records[t].obsids) for t in cell_map] or [""], dtype="S")[:n_row],
+                cell_map=np.array([records[t].map_id for t in cell_map] or [""], dtype="S")[:n_row],
+                n_candidate=sum(g[1].size for g in geometry),
                 map_id=np.array([r.map_id for r in records], dtype="S"),
                 map_obsid=np.array([",".join(r.obsids) for r in records], dtype="S"),
-                map_shift=shifts[:, :2].astype(np.float32), map_pairs=shifts[:, 2].astype(np.int32))
+                map_shift=shifts[:, :2].astype(np.float32), map_pairs=shifts[:, 2].astype(np.int32),
+                map_wcs=np.array([g[3].to_header_string() for g in geometry], dtype="S"),
+                map_shape=np.array([g[2].shape for g in geometry], dtype=np.int32).reshape(len(records), 2),
+                map_cell_step=np.array([(g[2].step_x, g[2].step_y) for g in geometry], dtype=np.float64).reshape(len(records), 2))
 
 
-def _empty_band(n_src, n_adm, n_plane):
+def geometry_cells(geometry, sel_t, w):
+    """The selected map's cell id of each source in `w`."""
+    out = np.empty(w.size, np.int64)
+    for t in np.unique(sel_t[w]):
+        k = sel_t[w] == t
+        out[k] = geometry[t][0][w[k]]
+    return out
+
+
+def _empty_band(n_src, n_plane):
+    z = lambda dt: np.zeros(0, dt)
     return dict(curve=np.zeros((0, n_plane), np.uint16), source_row=np.full(n_src, -1, np.int32),
-                pixel_curve=np.zeros((n_adm, n_plane), np.float32),
-                covered_frac=np.zeros(n_adm, np.float32), envelope=np.zeros(n_plane, np.uint16),
-                n_pos=np.zeros(0, np.int16), n_sigma=np.zeros(0, np.int16), cell_ra=np.zeros(0), cell_dec=np.zeros(0),
-                cell_sigma=np.zeros(0, np.float32), cell_offset=np.zeros(0, np.float32), cell_tail=np.zeros(0, np.float32), cell_gain=np.zeros(0, np.float32),
-                cell_pixel_sigma=np.zeros(0, np.float32), cell_obsid=np.zeros(0, "S64"),
-                cell_map=np.zeros(0, "S96"), n_candidate=0, map_id=np.zeros(0, "S1"), map_obsid=np.zeros(0, "S1"),
-                map_shift=np.zeros((0, 2), np.float32), map_pairs=np.zeros(0, np.int32))
+                envelope=np.zeros(n_plane, np.uint16), n_pos=z(np.int16), n_sigma=z(np.int16), cell_ra=z(float),
+                cell_dec=z(float), cell_sigma=z(np.float32), cell_offset=z(np.float32), cell_tail=z(np.float32),
+                cell_gain=z(np.float32), cell_id=z(np.int64), cell_map_index=z(np.int32), cell_obsid=z("S1"),
+                cell_map=z("S1"), n_candidate=0, map_id=z("S1"), map_obsid=z("S1"), map_shift=np.zeros((0, 2), np.float32),
+                map_pairs=z(np.int32), map_wcs=z("S1"), map_shape=np.zeros((0, 2), np.int32),
+                map_cell_step=np.zeros((0, 2)))
 
 
 # ----------------------------------------------------------------------------
 # writing
 
-def write_product(path, region, admitted, mag, bands):
+def write_product(path, region, mag, bands):
     """Write the region product at `path` (the final shapes are known here: nothing grows)."""
     stem = "completeness_pacs_source"
-    n_src = bands[BANDS[0]]["source_row"].size
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "source"
@@ -483,14 +473,14 @@ def write_product(path, region, admitted, mag, bands):
             ds = w("CURVE_" + b, d["curve"])
             ds.attrs["ZERO_POINT_JY"] = ZERO_POINT_JY
             w("MAG_GRID_" + b, mag)
-            w("PIXEL_CURVE_" + b, d["pixel_curve"])
-            w("PIXEL_COVERED_FRAC_" + b, d["covered_frac"])
             w("ENVELOPE_" + b, d["envelope"])
             w("COMPLETED_FROM_" + b, np.full(d["curve"].shape[0], np.nan, np.float32))
             w("N_POS_" + b, d["n_pos"])
             w("N_SIGMA_POS_" + b, d["n_sigma"])
             w("CELL_RA_" + b, d["cell_ra"])
             w("CELL_DEC_" + b, d["cell_dec"])
+            w("CELL_ID_" + b, d["cell_id"])
+            w("CELL_MAP_INDEX_" + b, d["cell_map_index"])
             w("CELL_OBSID_" + b, d["cell_obsid"])
             w("CELL_MAP_" + b, d["cell_map"])
             w("CELL_SIGMA_%s_MJY" % b, d["cell_sigma"])
@@ -501,33 +491,32 @@ def write_product(path, region, admitted, mag, bands):
             w("MAP_OBSID_" + b, d["map_obsid"])
             w("MAP_SHIFT_%s_ARCSEC" % b, d["map_shift"])
             w("MAP_N_PAIRS_" + b, d["map_pairs"])
+            w("MAP_WCS_" + b, d["map_wcs"])
+            w("MAP_SHAPE_" + b, d["map_shape"])
+            w("MAP_CELL_STEP_" + b, d["map_cell_step"])
         w = lambda name, data: build_module.write_dataset(f, name, data, *REGISTRY[(stem, name)])
         w("SOURCE_ROW", np.stack([bands[b]["source_row"] for b in BANDS], axis=1).astype(np.int32))
-        w("HPX_PIX_512", np.asarray(admitted, dtype=np.int64))
 
 
-def _build_region(config, region, out_path, ra, dec, admitted, n_jobs, stage=None):
-    """Measure and write one region. `ra`/`dec` are the region's source positions, `admitted` its
-    nside-512 pixels. Returns the per-band products (for the caller's checks)."""
+def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None):
+    """Measure and write one region. `ra`/`dec` are the region's source positions in the curated order.
+    Returns the per-band products (for the caller's checks)."""
     mag, flux_grid = canonical_grid()
-    sample_ra, sample_dec = pacs_fit.admitted_sample_points(admitted)
     out = {}
     for b in BANDS:
         records = [r for r in pacs_fit.read_index(config, region) if r.band == b]
-        out[b] = (_band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage, flux_grid)
-                  if records else None)
+        out[b] = _band_product(config, records, ra, dec, n_jobs, stage, flux_grid) if records else None
         if out[b] is None:
-            out[b] = _empty_band(ra.size, len(admitted), mag.size)
-    write_product(out_path, region, admitted, mag, out)
+            out[b] = _empty_band(ra.size, mag.size)
+    write_product(out_path, region, mag, out)
     return out
 
 
 def _region_inputs(config, region):
+    """The region's source positions (NAME order of the curated source table; the redesign's
+    catalog.curated.read_positions gives the same rows from the delivery)."""
     with h5py.File(product_path(config, "catalog", "sesna", "sources", "source", region=region), "r") as f:
-        ra, dec = f["RA_DEG"][:], f["DEC_DEG"][:]
-    with h5py.File(product_path(config, "catalog", "sesna", "completeness", "source", region=region), "r") as f:
-        admitted = f["HPX_PIX_512"][:]
-    return ra, dec, admitted
+        return f["RA_DEG"][:], f["DEC_DEG"][:]
 
 
 def build(config, regions=None):
@@ -536,9 +525,9 @@ def build(config, regions=None):
     t0 = __import__("time").time()
     for region in names:
         with progress_module.Stage("sky.derived.pacs_completeness", region) as st:
-            ra, dec, admitted = _region_inputs(config, region)
+            ra, dec = _region_inputs(config, region)
             path = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
-            bands = _build_region(config, region, path, ra, dec, admitted, config.n_jobs, st)
+            bands = _build_region(config, region, path, ra, dec, config.n_jobs, st)
             st.done(path, **{"cells_" + b: int(bands[b]["curve"].shape[0]) for b in BANDS})
     progress_module.summary("sky.derived.pacs_completeness", len(names), t0)
 

@@ -3905,8 +3905,9 @@ for _lib in ("sps", "agb", "pahc", "galz", "yso", "h2shock", "pahn"):
 # micron completeness in the layout of completeness_sesna_source, plus per-cell columns.
 _PACS_COMPLETENESS_CELLS_READINGS = {
     "CURVE_{b}": ("completeness fraction x600, uint16",
-        "One row per 30-arcsec cell of a Herschel PACS {w} micron map that is the deepest map at some "
-        "source or sky pixel of this region: the probability that a point source of the flux in "
+        "One row per covered 30-arcsec cell of every Herschel PACS {w} micron map, for all cells inside the "
+        "region's source bounding box padded by about 7 arcmin (overlapping maps each keep their cells; "
+        "SOURCE_ROW points at the deepest one): the probability that a point source of the flux in "
         "MAG_GRID_{b} placed anywhere in the cell is detected at 5 sigma or better, stored as the "
         "probability times 600. Measured by forced fits at {n} random positions per cell on the real map, "
         "so real background structure and neighbouring sources are included; sources fainter than the "
@@ -3915,13 +3916,6 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "The magnitudes CURVE_{b} and PIXEL_CURVE_{b} are tabulated at: m = -2.5 log10(flux / 1 Jy), "
         "{mmin} to {mmax} in steps of {dm}, bright to faint (the same grid for every region). The "
         "zero point is 1 Jy, stored on CURVE_{b} as ZERO_POINT_JY."),
-    "PIXEL_CURVE_{b}": ("dimensionless (completeness fraction, 0..1)",
-        "For each admitted nside-512 pixel of HPX_PIX_512, the {w} micron completeness curve at the "
-        "magnitudes of MAG_GRID_{b}, averaged over the pixel's area that a PACS map covers (256 sample "
-        "points per pixel, each taking its cell's curve); all zero where PIXEL_COVERED_FRAC_{b} is 0."),
-    "PIXEL_COVERED_FRAC_{b}": ("dimensionless (area fraction, 0..1)",
-        "For each admitted nside-512 pixel of HPX_PIX_512, the fraction of its area that falls on valid "
-        "{w} micron data (256 sample points per pixel); 0 where no map covers it."),
     "ENVELOPE_{b}": ("completeness fraction x600, uint16",
         "At each magnitude of MAG_GRID_{b}, the largest value of CURVE_{b} over all rows: the deepest "
         "{w} micron completeness anywhere in this region, stored as the probability times 600; all zero "
@@ -3972,6 +3966,21 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "measured on the map, so a source is measured where the map puts it."),
     "MAP_N_PAIRS_{b}": ("pairs",
         "For each row of MAP_ID_{b}: the number of bright-source pairs MAP_SHIFT_{b}_ARCSEC was measured from (below 10: no shift applied)."),
+    "CELL_ID_{b}": ("cell id",
+        "For each row of CURVE_{b}: the cell's identifier within its map, row-major from the map's first pixel "
+        "row (id = iy x n_cells_x + ix, with ix = floor((x + 0.5) / step_x), iy likewise, x and y the map's own "
+        "0-based pixel coordinates, step from MAP_CELL_STEP_{b}; n_cells_x = ceil(MAP_SHAPE x / step_x))."),
+    "CELL_MAP_INDEX_{b}": ("row of MAP_ID_{b}",
+        "For each row of CURVE_{b}: which map (row of the MAP_* datasets) the cell belongs to."),
+    "MAP_WCS_{b}": ("FITS header text",
+        "For each row of MAP_ID_{b}: the map's celestial world-coordinate header, as text (astropy "
+        "WCS(fits.Header.fromstring(...))). A sky position is moved by MAP_SHIFT_{b}_ARCSEC before this "
+        "header turns it into map pixels."),
+    "MAP_SHAPE_{b}": ("pixels (ny, nx)",
+        "For each row of MAP_ID_{b}: the map's image size, rows then columns."),
+    "MAP_CELL_STEP_{b}": ("pixels (x, y)",
+        "For each row of MAP_ID_{b}: the cell size in the map's pixels along x and y (30 arcsec over the "
+        "pixel scale); edge cells are clipped to the image."),
     "CELL_GAIN_{b}": ("dimensionless",
         "The median fraction of an injected point source's flux that the measurement returns in each "
         "cell of CURVE_{b} (1 when the fit recovers it fully)."),
@@ -3981,10 +3990,6 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "it; -1 where no map covers the source in that band. A source near a map edge can have a row "
         "here yet be marked not covered (ORIGIN 91) in the photometry, because its own measurement needs "
         "most of its beam on valid data; the photometry's ORIGIN decides."),
-    "HPX_PIX_512": ("nested HEALPix pixel, nside 512",
-        "The region's admitted sky pixels (Galactic frame, nested ordering), copied from the SESNA "
-        "completeness product in the same order; PIXEL_CURVE_<band> and PIXEL_COVERED_FRAC_<band> have "
-        "one row per entry."),
 }
 for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_u, _r) in _PACS_COMPLETENESS_CELLS_READINGS.items():
@@ -3996,18 +4001,19 @@ _PHOTOMETRY_PACS_READINGS = {
     "NAME": ("source identifier",
         "The SESNA source identifier of each row, in exactly the order of the region's SESNA source catalogue."),
     "FNU_{b}_MJY": ("mJy",
-        "Flux of the source in the Herschel PACS {w} micron band, measured as the eHOPS survey measured its protostars "
-        "(Pokhrel et al. 2023): aperture photometry at the catalogue position (moved by the map's astrometric shift, "
-        "MAP_SHIFT in the completeness product) on the map that is deepest there, aperture radius 9.6 / 8.0 / 12.8 "
-        "arcsec at 70 / 100 / 160 micron, sky from a clipped mode in the annulus 12.8-25.6 / 9.6-16.0 / 16.0-22.4 "
-        "arcsec, divided by eHOPS's aperture correction 0.798 / 0.729 / 0.735. That correction is the fraction of a "
-        "point source's flux within the aperture on the PSF release's within-60-arcsec normalisation, so these "
-        "fluxes are about 9 % (70 micron) below total point-source fluxes such as the Herschel PACS point-source "
-        "catalogue's; the exact factor depends on the observing mode (a table is in DATA.md). Where METHOD is 2 the "
-        "source has a neighbour within one beam of a detected source and its flux comes from a joint point-source fit "
-        "put on the same normalisation, as eHOPS did for sources too close for aperture photometry. It can be negative "
-        "or small when nothing is seen and is NaN where the band does not cover the source. Where ORIGIN is 2 it is an "
-        "upper bound: the combined flux of the blended group plus five times its uncertainty."),
+        "Total flux of the source in the Herschel PACS {w} micron band (the PACS calibration's definition of a "
+        "point source's flux), measured with the eHOPS survey's apertures (Pokhrel et al. 2023): aperture "
+        "photometry at the catalogue position (moved by the map's astrometric shift, MAP_SHIFT in the completeness "
+        "product) on the map that is deepest there, aperture radius 9.6 / 8.0 / 12.8 arcsec at 70 / 100 / 160 "
+        "micron, sky from a clipped mode in the annulus 12.8-25.6 / 9.6-16.0 / 16.0-22.4 arcsec, divided by the "
+        "fraction of a point source's total flux that this aperture and annulus return for the map's observing "
+        "mode and scan speed (PACS encircled-energy tables; 0.71-0.76 at 70, 0.55-0.63 at 100, 0.64-0.65 at 160 "
+        "micron). eHOPS's published fluxes are on a within-60-arcsec normalisation with one constant per band and "
+        "sit about 9 % lower at 70 micron, and more at 100 micron on fast-scan maps. Where METHOD is 2 the source has "
+        "a neighbour within one beam of a detected source and its flux is the total flux of a joint point-source "
+        "fit. It can be negative or small when nothing is seen and is NaN where the band does not cover the source. "
+        "Where ORIGIN is 2 it is an upper bound: the combined flux of the blended group plus five times its "
+        "uncertainty."),
     "SIGMA_ANNULUS_{b}_MJY": ("mJy",
         "eHOPS's own per-source uncertainty statistic: the scatter of the sky-annulus pixels times the square root of "
         "the aperture area, divided by the aperture correction. Kept for comparison with their tables; detection uses "
@@ -4042,10 +4048,10 @@ _PHOTOMETRY_PACS_READINGS = {
     "EXTENDED_{b}": ("true or false",
         "True for a detected source whose measured width is more than 1.5 times the beam width, a sign that the emission is extended rather than a point source; false otherwise, including for every source that is not detected."),
 }
-_P160_NOTE = (" At 160 micron these fluxes sit at about 0.80 of eHOPS's published 160 micron fluxes for the same "
-              "protostars (Aquila, 117 sources), although the aperture, annulus, sky estimate and correction are "
-              "eHOPS's own and 70 and 100 micron agree with eHOPS within 1 per cent; the difference grows with "
-              "the annulus's closeness to the source and most likely lies in the maps. The 160 micron band also "
+_P160_NOTE = (" At 160 micron, with the normalisation difference allowed for, these fluxes sit about 20 % below "
+              "eHOPS's published 160 micron fluxes for the same protostars (Aquila, 117 sources), while 70 and 100 "
+              "micron agree with eHOPS within 1 %; the difference grows with the annulus's closeness to the source "
+              "and most likely lies in the maps. The 160 micron band also "
               "contains the [C II] 158 micron line, and its beam is about 12 arcsec, so neighbours blend more.")
 for _band, _wave in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_units, _reading) in _PHOTOMETRY_PACS_READINGS.items():

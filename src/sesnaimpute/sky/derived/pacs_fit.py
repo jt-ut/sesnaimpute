@@ -49,7 +49,6 @@ from scipy.special import erfc  # import before healpy for native-library initia
 import healpy as hp
 
 from sesnaimpute.sky.derived.pacs_psf import (APERTURES, CachedPairedPSF, aperture_fraction, beam_fwhm_arcsec,
-                                              psf_flux_scale,
                                               published_components_for_map)
 from sesnaimpute.sky.download.herschel_pacs.index import MapRecord, maps_root, read_index  # noqa: F401
 
@@ -645,9 +644,8 @@ class Tile:
         self.beam_arcsec = beam_fwhm_arcsec(record)
         self.record = record
         self.aperture_fraction = aperture_fraction(config, record)
-        # the flux normalisation the owner rules (pacs_psf.APERTURE_NORMALISATION): PSF-fit fluxes and
-        # their errors are reported on it; 1 for total flux
-        self.flux_scale = psf_flux_scale(config, record)
+        # the PSF fit's amplitude is already the total flux, the products' convention (owner 2026-10-27)
+        self.flux_scale = 1.0
         self.beam_px = self.beam_arcsec / self.pixel_arcsec
         # the box holds the eHOPS sky annulus (pacs_psf.APERTURES) and at least FIT_BOX_FWHM beams
         _, ann_in, ann_out = APERTURES[record.band]

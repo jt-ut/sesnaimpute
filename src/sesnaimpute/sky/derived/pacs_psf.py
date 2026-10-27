@@ -124,10 +124,10 @@ def psf_directory(config):
     return Path(config.inputs["herschel_pacs_maps"]) / "calibration" / "psf"
 
 
-# The eHOPS photometry (Pokhrel et al. 2023, ApJS 266, 32, Table 1; final owner ruling 2026-10-27, spec
-# section 12): aperture radius, sky annulus inner and outer radius (arcsec), and their aperture correction,
-# the fraction of a point source's flux within the aperture on the release's within-60-arcsec
-# normalisation, one constant per band regardless of observing mode and with no annulus share.
+# The eHOPS apertures (Pokhrel et al. 2023, ApJS 266, 32, Table 1; owner ruling 2026-10-27, spec section 12):
+# aperture radius, sky annulus inner and outer radius (arcsec). EHOPS_CORRECTION are eHOPS's own aperture
+# corrections, on the release's within-60-arcsec normalisation and one per band; the products do NOT use them
+# (they divide by aperture_fraction, the exact total-flux fraction per mode) -- kept for comparisons only.
 APERTURES = {"P70": (9.6, 12.8, 25.6), "P100": (8.0, 9.6, 16.0), "P160": (12.8, 16.0, 22.4)}
 EHOPS_CORRECTION = {"P70": 0.798, "P100": 0.729, "P160": 0.735}
 
@@ -140,8 +140,11 @@ def _eef_columns(eef_path):
 
 
 def aperture_fraction(config, record):
-    """The aperture correction the measurement divides by: eHOPS's constant for the band."""
-    return EHOPS_CORRECTION[record.band]
+    """The aperture correction the measurement divides by (owner ruling 2026-10-27: one canonical flux,
+    the TOTAL flux of a point source, the PACS calibration's own definition): the fraction of a point
+    source's total flux the eHOPS aperture returns after the annulus sky, from the release EEF table of
+    this map's band, mode and speed (e.g. P70 parallel-60 0.712, scan-20 0.756; P100 0.545 / 0.632)."""
+    return physical_aperture_fraction(config, record, "total", True)
 
 
 def physical_aperture_fraction(config, record, normalisation, annulus_share):
@@ -156,13 +159,6 @@ def physical_aperture_fraction(config, record, normalisation, annulus_share):
     if annulus_share:
         frac -= r_ap ** 2 / (r_out ** 2 - r_in ** 2) * (ee(r_out) - ee(r_in))
     return frac
-
-
-def psf_flux_scale(config, record):
-    """The factor putting a total-flux PSF-fit amplitude (the blend path) on eHOPS's within-60-arcsec
-    normalisation, so blend members and isolated sources share one scale: the release's own total-flux
-    factor of the map's EEF table (0.911 at 70 um, 0.906 at 100 um)."""
-    return total_flux_factor(psf_directory(config) / _COMBINATIONS[_key(record)][2])
 
 
 def total_flux_factor(eef_path):
