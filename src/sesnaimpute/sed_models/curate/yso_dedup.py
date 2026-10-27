@@ -67,7 +67,7 @@ the same constant `yso_labeling.compute_row_features_from_cubes` and
 library (`aperture_dependent = no`, confirmed on disk -- one trivial
 aperture, `TOTAL_FLUX` carries no aperture axis), so there is no
 curve-of-growth interpolation to do; each row's own floor is simply
-its own peak flux across the 8 bands, ten dex down, and any band at or
+its own peak flux across the 8 SESNA bands, ten dex down, and any band at or
 below that floor is "dark" in the same sense `yso_labeling`/`sampling`
 already use.
 ====================================================================
@@ -82,29 +82,29 @@ from scipy.spatial import cKDTree
 from sesnaimpute.sed_models import sampling
 from sesnaimpute.sed_models.curate import curve_of_growth as cog
 from sesnaimpute.sed_models.curate.model_io import align_by_name
-from sesnaimpute.sed_models.curate.yso_labeling import BAND_ORDER
+from sesnaimpute.sed_models.curate.yso_labeling import ASSEMBLY_BANDS
 
 MODEL_LIB_NAME = "SPS"
 
 
 def read_sps_flux(sps_raw_dir):
-    """Every `sps/_raw/` model's MODEL_NAME and (n, 8) raw per-band flux
-    in mJy (BAND_ORDER order), clamped at 0 for the same tiny-negative-
+    """Every `sps/_raw/` model's MODEL_NAME and (n, 11) raw per-band flux
+    in mJy (ASSEMBLY_BANDS order), clamped at 0 for the same tiny-negative-
     float-noise reason `yso_labeling.read_geometry_flux_cubes` clamps
     raw cubes. One read per band's flat `convolved/{band}.fits`
-    (confirmed on disk: no survey subdirectory, BAND_ORDER's own short
+    (confirmed on disk: no survey subdirectory, ASSEMBLY_BANDS's own short
     names -- the post-rewrite SPS layout, not the historical 2J/2H/2K
     convention), aligned to the first band's MODEL_NAME order."""
     names = None
     flux = None
-    for i, band in enumerate(BAND_ORDER):
+    for i, band in enumerate(ASSEMBLY_BANDS):
         path = os.path.join(sps_raw_dir, "convolved", f"{band}.fits")
         with fits.open(path, memmap=True) as h:
             band_names = np.asarray(h[1].data["MODEL_NAME"]).astype(str)
             band_flux = np.asarray(h[1].data["TOTAL_FLUX"], dtype=np.float64).reshape(-1)
         if names is None:
             names = band_names
-            flux = np.empty((names.size, len(BAND_ORDER)), dtype=np.float64)
+            flux = np.empty((names.size, len(ASSEMBLY_BANDS)), dtype=np.float64)
             flux[:, i] = np.maximum(band_flux, 0.0)
         else:
             order = align_by_name(names, band_names)
@@ -120,8 +120,8 @@ def sps_quotient_coords(sps_raw_dir):
     global r-net uses, so a YSO candidate's distance to the nearest of
     these is directly comparable to `R_NET_RADIUS`."""
     names, flux = read_sps_flux(sps_raw_dir)
-    peak = flux.max(axis=1)
-    floor_linear = peak / (10.0 ** cog.FLOOR_DEX_BELOW_PEAK)
+    # peak over the eight SESNA bands only (peak_and_floor), as every library's floor
+    _, _, floor_linear, _ = cog.peak_and_floor({b: flux[:, i:i + 1] for i, b in enumerate(ASSEMBLY_BANDS)})
     sed_linear = np.maximum(flux, floor_linear[:, None])
     mu = np.log10(sed_linear)
     dark_mask = np.isclose(sed_linear, floor_linear[:, None], rtol=1e-6)

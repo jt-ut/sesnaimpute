@@ -146,6 +146,7 @@ import pandas as pd
 from astropy.io import fits
 from astropy.table import Table
 
+from sesnaimpute import definitions
 from sesnaimpute.sed_models import paths
 from sesnaimpute.sed_models.constants import BANDS
 from sesnaimpute.sed_models import library, sampling
@@ -177,6 +178,7 @@ from sesnaimpute.sed_models.curate.yso_labeling import (
 # this line makes, matching sampling.py's own single such import.
 from sesnaimpute.sed_models.register import density
 
+_SESNA_COLS = [i for i, b in enumerate(ASSEMBLY_BANDS) if b in definitions.SESNA_BANDS]
 ALL_GEOMETRIES = regstate.GEOMETRIES
 GEOMETRIES = ALL_GEOMETRIES   # main(--geometries) narrows this for the timing run only
 
@@ -420,7 +422,7 @@ def run_labeling_and_features(ingest, eligible_pregate, pms_mass, yso_root, verb
     the member-parameter columns (MEMBER_PARAM_COLUMNS + mass).
 
     ALSO the dark-band gate (coordinator finding, 2026-10-08): a model
-    dark in ALL ELEVEN bands at the survey aperture (mu at its own floor
+    dark in ALL EIGHT SESNA bands at the survey aperture (mu at its own floor
     in every band, i.e. dark_mask.all(axis=1)) whitens to the origin of
     the quotient space -- gray, no SED shape at all. One such model
     became the nearest representative of 23,317 others (kept template
@@ -456,11 +458,11 @@ def run_labeling_and_features(ingest, eligible_pregate, pms_mass, yso_root, verb
         sed_linear = 10.0 ** mu
         dark_mask = np.isclose(sed_linear, floor_linear_row[:, None], rtol=1e-6)
 
-        # Dark-band gate: drop every row dark in all 11 bands, BEFORE it
+        # Dark-band gate: drop every row dark in all eight SESNA bands, BEFORE it
         # ever reaches dedup or the r-net. stage recorded here (on the
         # full sub, pre-filter) for the per-stage fail_dark tally.
         stage_arr = sub["stage"].to_numpy()
-        all_dark = dark_mask.all(axis=1)
+        all_dark = dark_mask[:, _SESNA_COLS].all(axis=1)   # admissibility: dark in the eight SESNA bands
         n_dark_total += int(all_dark.sum())
         n_kept_rows_total += int((~all_dark).sum())
         for s in np.unique(stage_arr[all_dark]):
@@ -503,7 +505,7 @@ def run_labeling_and_features(ingest, eligible_pregate, pms_mass, yso_root, verb
         param_blocks.append(pd.DataFrame(prow))
         if verbose:
             _log(f"[labeling] {geom}: {len(sub)} gated rows (dropped "
-                f"{int(all_dark.sum())} all-11-dark), all_zero_flux={int(np.sum(all_zero))}")
+                f"{int(all_dark.sum())} all-SESNA-dark), all_zero_flux={int(np.sum(all_zero))}")
 
     model_id = np.concatenate(id_blocks)
     model_name = np.concatenate(name_blocks)
@@ -512,7 +514,7 @@ def run_labeling_and_features(ingest, eligible_pregate, pms_mass, yso_root, verb
     label = np.concatenate(label_blocks)
     params = pd.concat(param_blocks, axis=0, ignore_index=True)
 
-    _log("\n[gates] dark-band gate (all 11 bands at floor at the survey "
+    _log("\n[gates] dark-band gate (all eight SESNA bands at floor at the survey "
         "aperture), removals per stage:")
     for s in sorted(fail_dark_by_stage):
         _log(f"    stage={s:2d}  fail_dark={fail_dark_by_stage[s]:7d}")
