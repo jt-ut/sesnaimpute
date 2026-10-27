@@ -94,6 +94,21 @@ def tap_path(config, region):
     return f"{maps_root(config)}/tap_pacs_obs__{safe_name(region)}.csv"
 
 
+def scan_path(config, region):
+    return f"{maps_root(config)}/tap_pacs_scan__{safe_name(region)}.csv"
+
+
+def scan_angles(config):
+    """{obsid: (scan direction, position angle deg)} from every region's cached scan table."""
+    out = {}
+    for path in sorted(glob.glob(f"{maps_root(config)}/tap_pacs_scan__*.csv")):
+        with open(path, newline="") as f:
+            for row in csv.DictReader(f):
+                if row["scandir"] and row["posangle"]:
+                    out[row["observation_id"]] = (row["scandir"].strip().lower(), float(row["posangle"]))
+    return out
+
+
 def write_index(config, region, records):
     """Writes the region's index; an empty record list writes the header only."""
     names = [f.name for f in dataclasses.fields(MapRecord)]

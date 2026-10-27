@@ -158,6 +158,21 @@ def _tap_csv(adql, path, first_column):
     return path
 
 
+def query_scans(config, region, obsids):
+    """Each observation's scan direction (nominal/orthogonal) and spacecraft position angle, from the
+    HSA's per-observation metadata, cached as CSV and never asked for again while present. The PSF of a
+    parallel-mode map needs both of its scans' angles and the map header carries only one
+    (pacs_psf.published_components_for_map)."""
+    path = index_module.scan_path(config, region)
+    if os.path.exists(path) or not obsids:
+        return path
+    ids = ",".join(f"'{o}'" for o in sorted(obsids))
+    adql = ("SELECT o.observation_id, m.scandir, m.posangle, m.scanvelo FROM hsa.v_active_observation o "
+            "JOIN hsa.metadata_expert_panels m ON o.observation_oid = m.observation_oid "
+            f"WHERE o.instrument_oid = 1 AND m.scandir IS NOT NULL AND o.observation_id IN ({ids})")
+    return _tap_csv(adql, path, "observation_id")
+
+
 def hsa_p70_ids(config, region, obsids):
     """Which of `obsids` carry 70 um data per the HSA point-source table, a
     hint for projecting HSA fetches only (the map header decides the band).
@@ -366,6 +381,7 @@ def build(config, regions=None):
         for i, region in enumerate(names):
             query_region(config, region)
             obs = index_module.region_observations(config, region)
+            query_scans(config, region, {o["obsid"] for o in obs})
             plan, unserved = plan_region(config, region, obs) if obs else ([], [])
             gb = {"P70": 0.0, "P100": 0.0, "P100?": 0.0}
             todo = 0
@@ -385,7 +401,14 @@ def build(config, regions=None):
             else:
                 for p in plan:
                     if p["source"] == "IRSA":
-                        stream_to(p["url"], f"{root}/{p['relpath']}", p["bytes"])
+                        try:
+                            stream_to(p["url"], f"{root}/{p['relpath']}", p["bytes"])
+                        except urllib.error.HTTPError as exc:
+                            if exc.code not in (401, 403):
+                                raise
+                            # the mirror refuses this file (Cygnus X 1342257519, 2026-10-26: 401);
+                            # one refused map does not stop the survey
+                            print(f"{region}: REFUSED ({exc.code}) {p['url']}", flush=True)
                     elif p["obsids"][0] not in served and not _hsa_on_disk(root, p):
                         # one HSA Level 3 tar per observation can hold the same combined map
                         # (Orion A: one stack, nine times); fetch it once

@@ -360,13 +360,24 @@ def _map_header(config, record):
     return header
 
 
+_SCANS = {}
+
+
+def _scan_angles(config):
+    key = config.inputs["herschel_pacs_maps"]
+    if key not in _SCANS:
+        from sesnaimpute.sky.download.herschel_pacs.index import scan_angles
+        _SCANS[key] = scan_angles(config)
+    return _SCANS[key]
+
+
 def published_components_for_map(config, record):
     """The two release templates (+42 and -42 scan) for this map, each placed
     at the spacecraft position angle of its own scan.
 
     Parallel maps: the map header gives one SCANDIR (nominal/orthogonal) and
-    POSANGLE, the retained observation contexts (maps_root/<obsid>/hpacs*obs*)
-    the other; nominal is the +42 template, orthogonal the -42. Scan-map
+    POSANGLE, the HSA's per-observation metadata (the download's cached
+    tap_pacs_scan__<Region>.csv) both; nominal is the +42 template, orthogonal the -42. Scan-map
     maps carry no scan-direction label: both templates take the mean position
     angle of the contributing observations. A mismatch of the map's PIXFRAC
     with the templates' 0.1, a missing context, or an ambiguous angle fails
@@ -376,16 +387,10 @@ def published_components_for_map(config, record):
     header = _map_header(config, record)
     if not np.isclose(float(header.get('PIXFRAC', np.nan)), .1):
         raise ValueError('Published templates are for pixfrac=.1 maps')
-    root = Path(config.inputs["herschel_pacs_maps"])
-    contexts = []
-    for obsid in record.obsids:
-        for path in sorted((root / str(obsid)).glob(f'hpacs{obsid}obs*.fits.gz')):
-            with fits.open(path, mode='readonly') as hdus:
-                h = hdus[0].header
-                if str(h.get('OBS_ID', h.get('OBSID', ''))) != str(obsid):
-                    raise ValueError(f'Observation context ID differs from indexed scan: {path}')
-                contexts.append((str(h.get('SCANDIR', '')).strip().lower(),
-                                 float(h.get('POSANGLE', np.nan)), path))
+    # each contributing observation's scan direction and angle, from the download's cached HSA metadata
+    # table (the IRSA map header names only one scan of a parallel pair)
+    scans = _scan_angles(config)
+    contexts = [scans[str(o)] + (f"HSA metadata of {o}",) for o in record.obsids if str(o) in scans]
     if key[1] == 1:
         angles = [a for _, a, _ in contexts] or [float(header.get('POSANGLE', np.nan))]
         angle = float(np.mean(angles))
