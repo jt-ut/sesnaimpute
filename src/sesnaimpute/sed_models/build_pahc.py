@@ -125,14 +125,18 @@ from astropy.io import fits
 from astropy.table import Table
 
 from sesnaimpute.sed_models import paths
-from sesnaimpute.sed_models.constants import POINT_SOURCE_APERTURE_AU
+from sesnaimpute.sed_models.constants import BANDS, POINT_SOURCE_APERTURE_AU
 from sesnaimpute.sed_models import library, sampling
 from sesnaimpute.sed_models.curate import model_io
 from sesnaimpute.sed_models.curate import pahc_curate as pc
 from sesnaimpute.sed_models.curate.curve_of_growth import peak_and_floor
 from sesnaimpute.sed_models.curate.model_convolution import build_convolved_band_fits
 
-CONVOLVED_BANDS = pc.PAHC_BAND_ORDER   # ("J","H","Ks","I1","I2","I3","I4","M1")
+# The sampling gate, the host photospheres, the pedestal table and pahc_fstar stay on
+# the eight SESNA bands. The library's own convolved/ set (what the register reads)
+# is all eleven bands.
+SAMPLING_BANDS = pc.PAHC_BAND_ORDER   # ("J","H","Ks","I1","I2","I3","I4","M1")
+CONVOLVED_BANDS = tuple(BANDS)        # the eleven bands, in definitions order
 R_NET_RADIUS = 1.0
 
 # --- host specification (owner library spec, this brief) ---
@@ -237,7 +241,7 @@ def _load_sps_raw_splice_z0(sps):
     return hosts, host_name, report
 
 
-def _host_band_flux(hosts, sps, wave_um, bands=CONVOLVED_BANDS):
+def _host_band_flux(hosts, sps, wave_um, bands=SAMPLING_BANDS):
     """(n_host, len(bands)) convolved flux of the BARE photosphere at
     each host -- the same per-host loop `pc.build_pahc_raw_band_flux`
     already runs internally (`load_sps_stellar_sed` + `resample_sed_log_log`
@@ -255,7 +259,7 @@ def _host_band_flux(hosts, sps, wave_um, bands=CONVOLVED_BANDS):
     return out
 
 
-def _whiten_flux(flux, bands=CONVOLVED_BANDS):
+def _whiten_flux(flux, bands=SAMPLING_BANDS):
     """log10(floored flux) + dark mask -> `sampling.whiten` coords, via
     the shared per-model floor (`curve_of_growth.peak_and_floor`, 10 dex
     below each row's OWN peak across these bands) -- the same B0/B0.1
@@ -382,7 +386,7 @@ def _host_sed_values(hosts, sps, wave_um):
     return out
 
 
-def build_host_fstar(hosts, host_name, sps, wave_um, bands=CONVOLVED_BANDS, log=print):
+def build_host_fstar(hosts, host_name, sps, wave_um, bands=SAMPLING_BANDS, log=print):
     """`library/pahc_fstar`: one row per host, HOST (sps/_raw/
     MODEL_NAME) + T_EFF + LOGG + Z_H + the eight REAL convolved band
     fluxes of the bare photosphere -- the exact construction the
@@ -429,7 +433,7 @@ def build_host_fstar(hosts, host_name, sps, wave_um, bands=CONVOLVED_BANDS, log=
     return table, host_s8, host_band
 
 
-def build_pedestal_table(dl21, wave_um, bands=CONVOLVED_BANDS,
+def build_pedestal_table(dl21, wave_um, bands=SAMPLING_BANDS,
                          alphas=None, pah_sizes=None, log=print):
     """The 33 (ALPHA x PAH_SIZE) unit-pedestal spectra -- `P(lambda;
     alpha, size)` in `compute_composite_sed`'s own notation, i.e.
@@ -477,7 +481,7 @@ def build_pedestal_table(dl21, wave_um, bands=CONVOLVED_BANDS,
 
 
 def check_linear_identity(model_set, host_band, host_s8, pedestal_band, lib_dir,
-                          bands=CONVOLVED_BANDS, n_sample=200, tol=1e-4, log=print):
+                          bands=SAMPLING_BANDS, n_sample=200, tol=1e-4, log=print):
     """Stage 9, replacing the deleted `sed_models_register/pahc.py` fit:
     on a FIXED sample of `n_sample` kept templates, convolution is
     linear, so
@@ -533,7 +537,7 @@ def _build_grid_and_sample(hosts, sps, dl21, wave_um, log=print):
     flux = pc.build_pahc_raw_band_flux(
         hosts, host_idx, alpha_idx, pah_idx, r_idx,
         pc.PAHC_ALPHA_VALUES, pc.PAHC_PAH_SIZE_VALUES, pc.PAHC_R_VALUES,
-        sps, dl21, wave_um, bands=CONVOLVED_BANDS)
+        sps, dl21, wave_um, bands=SAMPLING_BANDS)
     coords = _whiten_flux(flux)
 
     t0 = time.time()
@@ -779,14 +783,15 @@ def build():
         assert "SUBCLASS" in models_cols, "models group missing SUBCLASS"
         assert no_bracket_subgroup, "models group has a '[Z' subgroup -- an unsafe column name leaked through"
         assert "VEGA_ZP_MJY" in bands_cols, "bands group missing VEGA_ZP_MJY"
-        assert vega_zp.shape == (8,), f"VEGA_ZP_MJY has {vega_zp.shape} values, expected 8"
+        assert vega_zp.shape == (len(CONVOLVED_BANDS),), (
+            f"VEGA_ZP_MJY has {vega_zp.shape} values, expected {len(CONVOLVED_BANDS)}")
         assert has_subclass_prob, "register carries no subclass_prob group"
         assert sp_cols == ["NONE"], f"subclass_prob columns {sp_cols} != ['NONE'] (PAHC has no subclass)"
         assert np.allclose(sp_values.sum(axis=1), 1.0), "subclass_prob rows do not sum to one"
         assert has_pahc_fstar, "register carries no library/pahc_fstar table"
         assert n_fstar_rows == len(hosts), (
             f"library/pahc_fstar has {n_fstar_rows} rows, expected {len(hosts)} hosts")
-        expected_fstar_cols = {"HOST", "T_EFF", "LOGG", "Z_H"} | set(CONVOLVED_BANDS)
+        expected_fstar_cols = {"HOST", "T_EFF", "LOGG", "Z_H"} | set(SAMPLING_BANDS)
         assert fstar_cols == expected_fstar_cols, (
             f"library/pahc_fstar columns {sorted(fstar_cols)} != "
             f"{sorted(expected_fstar_cols)}")
@@ -795,7 +800,7 @@ def build():
         log(f"\nmodels group columns ({len(models_cols)}): {sorted(models_cols)}")
         log(f"models group carries {sorted(required_param_cols)} and SUBCLASS, "
            f"no '[Z' subgroup: confirmed")
-        log(f"bands group VEGA_ZP_MJY (8 per-band Vega zero points, mJy): "
+        log(f"bands group VEGA_ZP_MJY (per-band Vega zero points, mJy): "
            f"{dict(zip(CONVOLVED_BANDS, vega_zp.tolist()))}")
         log(f"subclass_prob: one column {sp_cols}, every row sums to "
            f"{float(sp_values.sum(axis=1).mean()):.6f}")

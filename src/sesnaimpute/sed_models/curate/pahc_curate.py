@@ -234,11 +234,16 @@ SUBCLASS_LEGEND = (
 # photosphere is fully sampled there, and the DL21 excess is exactly
 # zero below 1.0056 um. In the G band a PAH-C source IS its star.
 PAHC_WAVE_MIN_UM = 0.2
-PAHC_WAVE_MAX_UM = 45.0
-# 403 points holds the log step at the calibrated 0.0135 in ln(lambda)
-# across the wider range -- the same sampling density as the previous
-# 300 points over 0.8-45 um, not a coarser grid stretched over it.
-PAHC_N_WAVE = 403
+# The grid reaches the far infrared: the PACS 160 um passband's red edge is
+# near 210 um. The grid keeps the calibrated log step of 0.0135 in ln(lambda)
+# (403 points over 0.2-45 um) and simply continues at that step past 45 um
+# until 250 um is covered, so the points inside 0.2-45 um are exactly the
+# ones the eight SESNA bands were always convolved on: 403 + 128 = 531
+# points, the last at 252.2 um. DL21's raw spectra run to 8000 um (grid
+# 1.0056-8000 um, 1973 points), so the excess is sampled, not extrapolated.
+PAHC_WAVE_MAX_UM = 250.0
+PAHC_N_WAVE_SESNA = 403            # the 0.2-45 um grid of the eight-band library
+PAHC_WAVE_SESNA_MAX_UM = 45.0
 
 # --- aperture-growth curve (spec section 2.3) ---
 # ---------------------------------------------------------------------
@@ -691,14 +696,26 @@ def load_sps_stellar_sed(sps_dir, t_eff, log_g, z):
 def build_pahc_wavelength_grid():
     """Full-resolution model wavelength grid, log-spaced ASCENDING (only
     flipped to descending when writing flux.fits -- see module
-    docstring). 0.2-45um brackets the 8 SESNA filters AND Gaia G with
-    margin; 403 points amply resolve a smooth continuum + broad PAH
+    docstring). 0.2-250um brackets the 8 SESNA filters, the 3 PACS filters AND Gaia G with
+    margin; 531 points amply resolve a smooth continuum + broad PAH
     features (spec section 3.1) -- no fine spike-sampling needed, unlike
     H2-shock's line spectra. Takes no arguments: the grid is fixed by
     calibration (measured: rebuilding at four times the sampling density
     moves the IRAC composite colours by at most 0.006 mag), not a knob."""
-    return np.logspace(np.log10(PAHC_WAVE_MIN_UM), np.log10(PAHC_WAVE_MAX_UM),
-                       PAHC_N_WAVE)
+    return extended_log_grid(PAHC_WAVE_MIN_UM, PAHC_WAVE_SESNA_MAX_UM,
+                             PAHC_N_WAVE_SESNA, PAHC_WAVE_MAX_UM)
+
+
+def extended_log_grid(wave_min_um, wave_max_old_um, n_old, wave_max_um):
+    """Log-spaced ascending grid that is the (wave_min_um, wave_max_old_um,
+    n_old) grid bit for bit, continued at the same ln(lambda) step until
+    wave_max_um is covered (the last point is the first one at or past it)."""
+    log_min, log_old = np.log10(wave_min_um), np.log10(wave_max_old_um)
+    step = (log_old - log_min) / (n_old - 1)
+    n_extra = int(np.ceil((np.log10(wave_max_um) - log_old) / step - 1e-9))
+    old = np.logspace(log_min, log_old, n_old)
+    extra = 10.0 ** (log_min + step * np.arange(n_old, n_old + n_extra))
+    return np.concatenate([old, extra])
 
 
 def resample_sed_log_log(wave_native_um, flux_native, wave_target_um, flux_floor=FLUX_FLOOR):

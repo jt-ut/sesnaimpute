@@ -76,13 +76,13 @@ import numpy as np
 from astropy.table import Table
 
 from sesnaimpute.sed_models import paths
-from sesnaimpute.sed_models.constants import POINT_SOURCE_APERTURE_AU, REFERENCE_DISTANCE_CM
+from sesnaimpute.sed_models.constants import BANDS, POINT_SOURCE_APERTURE_AU, REFERENCE_DISTANCE_CM
 from sesnaimpute.sed_models import library, sampling
 from sesnaimpute.sed_models.curate import h2shock_curate as pdc
 from sesnaimpute.sed_models.curate import model_io
 
 CONTRACT_PROFILE = "h2shock"
-CONVOLVED_BANDS = ("J", "H", "Ks", "I1", "I2", "I3", "I4", "M1")
+CONVOLVED_BANDS = tuple(BANDS)   # all eleven; the sampling gate stays on pdc.SAMPLING_BANDS (eight)
 RADIUS = 1.0
 REGISTER_KEY = "h2shock"
 
@@ -367,6 +367,10 @@ def build():
     # ---- register, in one act, from the now-live library directory ----
     reg_path = library.write_register(registers_dir(), REGISTER_KEY, out)
     print(f"register   : {reg_path}")
+    pdc.write_far_ir_disclosure(reg_path)
+    pacs = pdc.pacs_effective_flux(reg_path)
+    print(f"PACS bands : no flux in any passband; every template sits at its register floor "
+          f"({', '.join(pacs)}); bands group READING: {pdc.H2SHOCK_FAR_IR_DISCLOSURE}")
 
     # ---- register identities (Unit S round 2, curation-s 29228b4: A12
     # join, per-band Vega zero points, members-sourced subclass_prob) ----
@@ -394,8 +398,8 @@ def build():
     print(f"register check: /models carries all {len(param_cols_expected)} "
           f"parameters.fits columns (incl. I_H2_1_0_S1) plus SUBCLASS")
 
-    assert len(band_names) == 8 and vega_zp.shape == (8,), (
-        f"register /bands does not carry 8 VEGA_ZP_MJY entries: {vega_zp.shape}")
+    assert len(band_names) == len(BANDS) and vega_zp.shape == (len(BANDS),), (
+        f"register /bands does not carry {len(BANDS)} VEGA_ZP_MJY entries: {vega_zp.shape}")
     assert np.all(np.isfinite(vega_zp)) and np.all(vega_zp > 0), (
         "register /bands VEGA_ZP_MJY has a non-finite or non-positive entry")
     print(f"register check: /bands carries {vega_zp.size} VEGA_ZP_MJY zero points "
