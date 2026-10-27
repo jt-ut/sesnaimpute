@@ -82,12 +82,15 @@ from astropy.io import fits
 from scipy.spatial import cKDTree
 
 from sesnaimpute.sed_models.constants import PLANCK_H, SPEED_OF_LIGHT_CM_S, C_UM_S, BANDS
+from sesnaimpute.sed_models.constants import SAMPLING_BANDS
 from sesnaimpute.sed_models.curate import model_io
 from sesnaimpute.sed_models.curate.pahc_curate import extended_log_grid
 from sesnaimpute.sed_models.curate.model_convolution import (
     build_band_response_weights,
     build_line_deposition_matrix,
     write_convolved_band_fits_from_analytic,
+    write_convolved_band_fits,
+    filter_central_wavelength_um,
     verify_convolved_band_fits,
 )
 
@@ -985,10 +988,24 @@ def build_convolved_bands(model_dir, model_names, lines, line_fluxes_mjy, bands,
     foregone for every model and band -- so it is not run at all here.
     write_convolved_band_fits_from_analytic is the only writer.
     """
+    pacs = [b for b in bands if b in PACS_BANDS]
+    others = [b for b in bands if b not in PACS_BANDS]
     write_convolved_band_fits_from_analytic(
-        model_dir, lines, line_fluxes_mjy, bands,
+        model_dir, lines, line_fluxes_mjy, others,
         model_names=model_names,
         apertures_au=np.array([aperture_au]))
+    # PACS: the line list (0.2-45 um) has no line inside any PACS passband
+    # (54-274 um), so the band flux is exactly zero. The ESA filter files carry
+    # a calibration blue tail of at most 4e-7 of peak below 50 um, which would
+    # pick up the 2-28 um lines at up to 2e-3 mJy; that is the file's noise,
+    # not a response, and is not integrated: PACS is written as exact zero.
+    for band in pacs:
+        write_convolved_band_fits(
+            model_dir, band, model_names=model_names,
+            total_flux_mjy=np.zeros(len(model_names)),
+            apertures_au=np.array([aperture_au]),
+            filter_wavelength_um=filter_central_wavelength_um(band),
+            convmeth="analytic", convmeth_note="no line in the passband: exactly zero")
     verify_convolved_band_fits(model_dir, bands, model_names)
 
 
@@ -1138,10 +1155,6 @@ def write_models_conf(out_path, name=DEFAULT_MODEL_SET_NAME):
 #: sed_models_register quotient space is built over. This library's
 #: convolved/ set already matches it exactly (CONVOLVED_BANDS in
 #: build/h2shock.py), so no band is excluded from the sampling space.
-#: The sampling gate stays on the eight SESNA bands: the PACS columns are a
-#: constant floor for every model of this library (no continuum, no lines),
-#: so they carry no information for telling templates apart.
-SAMPLING_BANDS = ("J", "H", "Ks", "I1", "I2", "I3", "I4", "M1")
 
 #: The six grid axes plus the thirteen DERIVED_SPECS quantities plus
 #: I_H2_1_0_S1 -- exactly spec item 3's "parameter ranges (min, median,

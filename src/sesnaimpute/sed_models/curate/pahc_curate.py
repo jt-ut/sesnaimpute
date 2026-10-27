@@ -144,7 +144,7 @@ from scipy.spatial import cKDTree
 from astropy.io import fits
 
 from sesnaimpute.sed_models.astro_utils import vega_color, color_error, reddening_vector_per_ak
-from sesnaimpute.sed_models.constants import (APERTURE_GRID_AU, BANDS, C_UM_S, GUTERMUTH_LABELS,
+from sesnaimpute.sed_models.constants import (SAMPLING_BANDS, APERTURE_GRID_AU, BANDS, C_UM_S, GUTERMUTH_LABELS,
                                      POINT_SOURCE_APERTURE_AU,
                                      PC_CM, REFERENCE_DISTANCE_CM)
 from sesnaimpute.sed_models.data_loader import load_filter_curve
@@ -757,6 +757,8 @@ def resample_sed_log_log(wave_native_um, flux_native, wave_target_um, flux_floor
 # discontinuity and the step is exact rather than approximate. Re-measure
 # these if the filter set ever changes.
 BAND_APERTURE_EDGES_UM = (2.728, 14.723)
+#: Past the MIPS24 passband (ends near 30 um); the PACS apertures take over from here.
+PACS_APERTURE_RAMP_START_UM = 40.0
 
 
 def band_aperture_scaling(wave_um, alpha):
@@ -782,6 +784,19 @@ def band_aperture_scaling(wave_um, alpha):
         BANDS["J"].aperture_arcsec / BANDS["I1"].aperture_arcsec)
     theta_ratio[wave_um > BAND_APERTURE_EDGES_UM[1]] = (
         BANDS["M1"].aperture_arcsec / BANDS["I1"].aperture_arcsec)
+    # PACS: the three filters overlap (P70 55-108, P100 61-142, P160 113-274 um), so no
+    # single-valued function of wavelength can give each band exactly its own aperture.
+    # The aperture is held at M1's out to PACS_APERTURE_RAMP_START_UM (beyond the M1
+    # passband, so the eight SESNA columns are untouched), then follows the three PACS
+    # apertures (constants.BANDS) linearly in log wavelength through the band centres,
+    # flat redward of P160. Each PACS band then sees its own aperture at its centre.
+    far = wave_um > PACS_APERTURE_RAMP_START_UM
+    if np.any(far):
+        nodes = [(PACS_APERTURE_RAMP_START_UM, BANDS["M1"].aperture_arcsec)] + [
+            (BANDS[b].wvl_effective_um, BANDS[b].aperture_arcsec) for b in ("P70", "P100", "P160")]
+        theta_ratio[far] = np.interp(
+            np.log10(wave_um[far]), np.log10([n[0] for n in nodes]),
+            np.array([n[1] for n in nodes]) / BANDS["I1"].aperture_arcsec)
     return theta_ratio ** alpha
 
 
@@ -818,7 +833,7 @@ def compute_composite_sed(s_resampled_mjy, p_hat_resampled, wave_um_ascending,
 # The 8 SESNA bands, in sed_models_register.density's own order
 # (constants.BANDS' key order -- density.py projects an 8-vector
 # indexed this way, so the convolved fluxes fed to it MUST agree).
-PAHC_BAND_ORDER = ("J", "H", "Ks", "I1", "I2", "I3", "I4", "M1")
+PAHC_BAND_ORDER = SAMPLING_BANDS
 
 # Minimum distinct SPS sources required to accept sps_dir as the RAW
 # splice rather than a down-sampled class library -- the splice is

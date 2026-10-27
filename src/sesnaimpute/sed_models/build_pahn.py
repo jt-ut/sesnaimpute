@@ -96,7 +96,7 @@ from sesnaimpute.sed_models.curate import pahc_curate as pc
 from sesnaimpute.sed_models.constants import BANDS
 from sesnaimpute.sed_models.curate.model_convolution import build_convolved_band_fits
 
-SAMPLING_BANDS = pc.PAHC_BAND_ORDER   # the eight SESNA bands (diagnostic table)
+SAMPLING_BANDS = pc.SAMPLING_BANDS   # the eight SESNA bands (constants)
 CONVOLVED_BANDS = tuple(BANDS)        # convolved/ carries all eleven bands
 R_NET_RADIUS = 1.0
 

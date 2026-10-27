@@ -135,7 +135,7 @@ from sesnaimpute.sed_models.curate.model_convolution import build_convolved_band
 # The sampling gate, the host photospheres, the pedestal table and pahc_fstar stay on
 # the eight SESNA bands. The library's own convolved/ set (what the register reads)
 # is all eleven bands.
-SAMPLING_BANDS = pc.PAHC_BAND_ORDER   # ("J","H","Ks","I1","I2","I3","I4","M1")
+SAMPLING_BANDS = pc.SAMPLING_BANDS   # the eight SESNA bands (constants)
 CONVOLVED_BANDS = tuple(BANDS)        # the eleven bands, in definitions order
 R_NET_RADIUS = 1.0
 
