@@ -3949,7 +3949,7 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "For each row of CURVE_{b}: the median flux the measurement returns at the cell's random positions farther "
         "than one beam from every bright source -- sky structure the annulus sky leaves at this scale. Detection of a "
         "source in the cell, and the completeness curve, count from this level; the reported flux (FNU in the "
-        "photometry product, the eHOPS-convention flux) does not subtract it, so the two differ by this value. A parallel-mode map that holds only one "
+        "photometry product, the total flux) does not subtract it, so the two differ by this value. A parallel-mode map that holds only one "
         "scan direction is measured with that direction's own point-spread template and aperture fraction (not at 100 micron)."),
     "CELL_TAIL_FACTOR_{b}": ("dimensionless",
         "For each row of CURVE_{b}: the factor by which the cell's noise was raised so that, among the cells of its "
