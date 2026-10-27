@@ -3956,6 +3956,11 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "farther than one beam from every bright source -- local sky structure the measurement's "
         "constant background does not remove. It is subtracted from every flux measured in the cell, "
         "for catalogue sources (the photometry) and for the random positions (the curve) alike."),
+    "CELL_TAIL_FACTOR_{b}": ("dimensionless",
+        "For each row of CURVE_{b}: the factor by which the cell's noise was raised so that, among the cells of its "
+        "map at a similar noise level, negative excursions on empty sky are no more frequent than for Gaussian noise, "
+        "matched as far into the tail as those cells' sample allows (the map noise has heavier tails than a Gaussian, "
+        "most in the noisiest cells). CELL_SIGMA_{b}_MJY already includes it."),
     "MAP_ID_{b}": ("map identifier",
         "One row per {w} micron map of the region: its archive file name. CELL_MAP_{b} names one of these for each cell."),
     "MAP_OBSID_{b}": ("observation identifier(s)",
