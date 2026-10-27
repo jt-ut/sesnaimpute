@@ -3942,7 +3942,9 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "The one-sigma uncertainty of a {w} micron point-source flux measured in each cell of CURVE_{b}: "
         "the median, over the 3 x 3 block of cells around it, of 1.4826 times the median absolute deviation "
         "about CELL_OFFSET_{b}_MJY of the fluxes measured at each cell's random positions farther than one "
-        "beam from every bright source (one cell alone holds only about ten independent beams), scaled by "
+        "beam from every bright source (one cell alone holds only about ten independent beams; a cell whose own "
+        "scatter exceeds that median by more than a factor of 1.81 -- three times the one-cell sampling error -- "
+        "keeps its own scatter instead), scaled by "
         "one factor per map so that negative excursions on empty sky are no more frequent than for Gaussian "
         "noise. A source is called detected at 5 times this value."),
     "CELL_OFFSET_{b}_MJY": ("mJy",
@@ -3951,6 +3953,31 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "source in the cell, and the completeness curve, count from this level; the reported flux (FNU in the "
         "photometry product, the total flux) does not subtract it, so the two differ by this value. A parallel-mode map that holds only one "
         "scan direction is measured with that direction's own point-spread template and aperture fraction (not at 100 micron)."),
+    "CURVE_PSF_{b}": ("completeness fraction x600, uint16",
+        "Same layout, rows and flux grid as CURVE_{b}, for a {w} micron source that is fitted jointly with close "
+        "neighbours instead of measured alone: the probability that such a fit returns a flux at least five "
+        "uncertainties above the empty-sky level, measured at the same random positions as CURVE_{b} but with the "
+        "joint-fit measurement and judged on CELL_OFFSET_PSF_{b}_MJY and CELL_SIGMA_PSF_{b}_MJY. Stored as the "
+        "probability times 600."),
+    "CELL_OFFSET_PSF_{b}_MJY": ("mJy",
+        "For each row of CURVE_{b}: the median flux the point-source fit (the measurement used for sources with "
+        "close neighbours) returns at the cell's random positions farther than one beam from every bright source "
+        "-- the empty-sky level of that measurement. A source fitted with neighbours is called detected when its "
+        "flux minus this value reaches five times CELL_SIGMA_PSF_{b}_MJY (times the overlap enlargement); the "
+        "reported flux does not subtract it."),
+    "CELL_SIGMA_PSF_{b}_MJY": ("mJy",
+        "For each row of CURVE_{b}: the one-sigma uncertainty of a {w} micron flux from the point-source fit used "
+        "for sources with close neighbours, found as CELL_SIGMA_{b}_MJY is (block median of the scatter about "
+        "CELL_OFFSET_PSF_{b}_MJY, the cell's own scatter where it exceeds that median by more than a factor of "
+        "1.81, scaled by the tail factor CELL_TAIL_FACTOR_PSF_{b}) but from this measurement's own empty-sky "
+        "scatter."),
+    "CELL_TAIL_FACTOR_PSF_{b}": ("dimensionless",
+        "For each row of CURVE_{b}: the factor by which the point-source fit's cell noise was raised so that "
+        "negative excursions on empty sky are no more frequent than for Gaussian noise, found among the cells of "
+        "its map at a similar noise level as CELL_TAIL_FACTOR_{b} is. CELL_SIGMA_PSF_{b}_MJY already includes it."),
+    "CELL_GAIN_PSF_{b}": ("dimensionless",
+        "The median fraction of an injected point source's flux that the point-source fit returns in each cell of "
+        "CURVE_{b}; the curve CURVE_PSF_{b} divides by it position by position."),
     "CELL_TAIL_FACTOR_{b}": ("dimensionless",
         "For each row of CURVE_{b}: the factor by which the cell's noise was raised so that, among the cells of its "
         "map at a similar noise level, negative excursions on empty sky are no more frequent than for Gaussian noise, "
@@ -4027,7 +4054,9 @@ _PHOTOMETRY_PACS_READINGS = {
     "SIGMA_{b}_MJY": ("mJy, or 0.99 for an upper bound",
         "Uncertainty of the flux: the scatter of the same measurement at random empty-sky positions in the source's "
         "30-arcsecond cell (the median over the 3 x 3 cells around it, raised by the tail factor of the cell's noise "
-        "level), enlarged for a source fitted jointly with a neighbour. Where ORIGIN is 2 it holds 0.99, the value the "
+        "level), enlarged for a source fitted jointly with a neighbour; a source fitted jointly (METHOD 2) takes the noise and "
+        "empty-sky level of the point-source fit itself (CELL_SIGMA_PSF in the completeness product), not of the "
+        "aperture measurement. Where ORIGIN is 2 it holds 0.99, the value the "
         "source table uses to mark an upper bound; NaN where the band does not cover the source. For a jointly fitted "
         "source the uncertainty is enlarged by the overlap but its completeness curve is still its cell's curve, so "
         "the curve somewhat overstates its chance of detection. The noise has heavier tails than a Gaussian; it is "
@@ -4039,7 +4068,8 @@ _PHOTOMETRY_PACS_READINGS = {
         "(CELL_OFFSET in the completeness product) is at least five times its uncertainty -- the same rule the "
         "completeness curve uses; 90 means the band covers the source but it is not detected; 2 means the source is "
         "blended with a neighbour so closely that the two cannot be separated and the flux is an upper bound for the "
-        "pair; 91 means the band does not cover the source."),
+        "pair; 91 means the band does not cover the source. A source fitted jointly with a neighbour (METHOD 2) is judged "
+        "the same way on the point-source fit's own empty-sky level and noise (CELL_OFFSET_PSF and CELL_SIGMA_PSF)."),
     "LOCAL_RMS_{b}_MJY": ("mJy",
         "Noise of the 30-arcsecond cell containing the source: the scatter of the flux measured at random empty-sky positions in that cell. Five times this value is the faintest flux that would be called a detection there. NaN where the band does not cover the source."),
     "OBSID_{b}": ("observation identifier(s)",

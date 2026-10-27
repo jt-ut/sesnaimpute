@@ -20,11 +20,15 @@ products:
 
 - noise: a source's sigma is the noise of its 30-arcsec cell,
   `CELL_SIGMA_<B>_MJY` of the completeness product (the scatter of the same
-  fit at random empty-sky positions in the cell); the fit's propagated pixel
-  noise is never added to it. A member of a blend group carries the cell
-  noise times the ratio of its propagated error in the group fit to that of a
-  singleton fit at the same position (the correlation inflation).
-- detection: flux >= 5 sigma (origin 1), else origin 90; a source the
+  measurement at random empty-sky positions in the cell); the fit's propagated
+  pixel noise is never added to it. A separable member of a blend group
+  (METHOD 2) is judged on the single PSF fit's own statistics,
+  `CELL_SIGMA_PSF_<B>_MJY` and `CELL_OFFSET_PSF_<B>_MJY`, not the aperture's:
+  its sigma is the PSF cell noise times the ratio of its propagated error in
+  the group fit to that of a singleton fit at the same position (the
+  correlation inflation).
+- detection: (flux - cell offset) >= 5 sigma (origin 1), else origin 90, the
+  offset and sigma those of the estimator that measured the flux; a source the
   completeness stage found no cell for, or whose fit has no data, is 91.
 - blends: SESNA sources within one beam of a source detected in the singleton
   pass are fitted together with it; a member whose fitted flux has
@@ -106,7 +110,7 @@ def _blend_components(ra_deg, dec_deg, detected, radius_arcsec):
 # ---------------------------------------------------------------------------
 # one tile
 
-def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shifts):
+def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shifts, cell_sigma_psf, cell_offset_psf):
     """All of one map tile's sources: `piece = (band, map_index, rows)`, the
     source rows (ascending) the completeness stage assigned to that map.
     Returns `(band, map_index, rows, columns)`, `columns` the product's
@@ -118,6 +122,9 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
     # the cell's empty-sky offset (sky structure the fit's background term leaves), subtracted from
     # every flux measured in the cell, exactly as the completeness stage does for its positions
     offset = cell_offset[band][rows]
+    # the single PSF fit's own cell statistics, for the separable members of blend groups
+    sigma_psf = cell_sigma_psf[band][rows]
+    offset_psf = cell_offset_psf[band][rows]
     beam = beam_fwhm_arcsec(record)
 
     flux = np.full(n, np.nan)
@@ -158,7 +165,7 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
             np.minimum.at(lowest, label[g], rows[g])
             group_id[g] = lowest[label[g]]
             n_blend[g] = size[g]
-            good = gfit.covered & ok[g]
+            good = gfit.covered & ok[g] & np.isfinite(sigma_psf[g]) & (sigma_psf[g] > 0)
             # the empirical-over-propagated noise ratio of each member's singleton
             # fit, averaged over the group, scales the group-total sigma the same way
             psf_single = tile.fit_positions(x[g], y[g])     # the PSF-fit noise scale of the group's members
@@ -166,14 +173,14 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
             ratio_sum = np.bincount(label[g], weights=np.nan_to_num(ratio))
             ratio_n = np.bincount(label[g], weights=np.isfinite(ratio).astype(float))
             ratio_mean = (ratio_sum / np.maximum(ratio_n, 1))[label[g]]
-            member_sigma = sigma_cell[g] * gfit.inflation
+            member_sigma = sigma_psf[g] * gfit.inflation
             unseparable = good & (gfit.max_abs_rho > BLEND_RHO_LIMIT)
             separable = good & ~unseparable
             method[g[good]] = 2
             gi = g[separable]
             flux[gi] = gfit.flux[separable]
             sigma[gi] = member_sigma[separable]
-            origin[gi] = np.where(flux[gi] - offset[gi] >= DETECTION_SNR * sigma[gi], ORIGIN_DETECTED, ORIGIN_UNDETECTED)
+            origin[gi] = np.where(flux[gi] - offset_psf[gi] >= DETECTION_SNR * sigma[gi], ORIGIN_DETECTED, ORIGIN_UNDETECTED)
             gu = g[unseparable]
             flux[gu] = (np.maximum(0.0, gfit.group_flux[unseparable])
                         + DETECTION_SNR * gfit.group_sigma[unseparable] * ratio_mean[unseparable])
@@ -221,9 +228,10 @@ def _tile_key(record):
 
 
 def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_obsid, config, n_jobs, stage=None,
-                 shifts=None):
+                 shifts=None, cell_sigma_psf=None, cell_offset_psf=None):
     """Measures every source on its cell's map and writes the product at
-    `out_path`. `cell_sigma[b]` (n,) float64 is the source's cell noise (NaN:
+    `out_path`. `cell_sigma_psf[b]`, `cell_offset_psf[b]` are the same for the single PSF fit (blend
+    members; default: the aperture's). `cell_sigma[b]` (n,) float64 is the source's cell noise (NaN:
     no cell, not covered) and `cell_obsid[b]` (n,) bytes the cell's map, the
     comma-joined observation ids of the `records` entry that holds it. Returns
     the per-band origin counts."""
@@ -261,7 +269,9 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
             counts[band] = {code: 0 for code in (1, 2, 90, 91)}
             counts[band][ORIGIN_NOT_COVERED] = n
         fn_args = dict(config=config, records=records, ra=ra, dec=dec, cell_sigma=np.vstack(cell_sigma),
-                       cell_offset=np.vstack(cell_offset), shifts=shifts or {})
+                       cell_offset=np.vstack(cell_offset), shifts=shifts or {},
+                       cell_sigma_psf=np.vstack(cell_sigma if cell_sigma_psf is None else cell_sigma_psf),
+                       cell_offset_psf=np.vstack(cell_offset if cell_offset_psf is None else cell_offset_psf))
         fn = functools.partial(_measure_tile, **fn_args)
         for band_index, map_index, rows, cols in pieces_module.iterate(fn, pieces, n_jobs, stage=stage, unit="map tiles"):
             band = BANDS[band_index]
@@ -279,11 +289,14 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
 
 def _read_cells(config, region, n_source):
     """The completeness stage's per-source cell noise, cell offset and map, per
-    band: `(cell_sigma, cell_offset, cell_obsid)` lists over BANDS. A source
+    band: `(cell_sigma, cell_offset, cell_obsid, shifts, cell_sigma_psf,
+    cell_offset_psf)`, lists over BANDS (the PSF pair for blend members). A source
     with `SOURCE_ROW` -1 has no cell (noise NaN, offset 0)."""
     path = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
     sigma = [np.full(n_source, np.nan) for _ in BANDS]
     offset = [np.zeros(n_source) for _ in BANDS]
+    sigma_psf = [np.full(n_source, np.nan) for _ in BANDS]
+    offset_psf = [np.zeros(n_source) for _ in BANDS]
     shifts = {}
     obsid = [np.full(n_source, b"", dtype="S1") for _ in BANDS]
     if not os.path.exists(path):
@@ -301,10 +314,12 @@ def _read_cells(config, region, n_source):
             cell_obs = f["CELL_OBSID_%s" % band][:]
             sigma[b][have] = cell_sigma[rows[have]]
             offset[b][have] = f["CELL_OFFSET_%s_MJY" % band][:][rows[have]]
+            sigma_psf[b][have] = f["CELL_SIGMA_PSF_%s_MJY" % band][:][rows[have]]
+            offset_psf[b][have] = f["CELL_OFFSET_PSF_%s_MJY" % band][:][rows[have]]
             for key, sh in zip(f["MAP_OBSID_" + band][:], f["MAP_SHIFT_%s_ARCSEC" % band][:]):
                 shifts[(band, key.decode())] = (float(sh[0]), float(sh[1]))
             obsid[b] = np.where(have, cell_obs[np.where(have, rows, 0)], b"")
-    return sigma, offset, obsid, shifts
+    return sigma, offset, obsid, shifts, sigma_psf, offset_psf
 
 
 def _build_one_region(config, region, st):
@@ -316,15 +331,17 @@ def _build_one_region(config, region, st):
     out_path = product_path(config, "sky/derived", "pacs", "photometry", "source", region=region)
     records = read_index(config, region)
     if records:
-        cell_sigma, cell_offset, cell_obsid, shifts = _read_cells(config, region, names.size)
+        cell_sigma, cell_offset, cell_obsid, shifts, cell_sigma_psf, cell_offset_psf = _read_cells(config, region, names.size)
     else:
         cell_sigma = [np.full(names.size, np.nan) for _ in BANDS]
         cell_offset = [np.zeros(names.size) for _ in BANDS]
+        cell_sigma_psf, cell_offset_psf = cell_sigma, cell_offset
         shifts = {}
         cell_obsid = [np.full(names.size, b"", dtype="S1") for _ in BANDS]
     t0 = time.time()
     counts = write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_obsid,
-                          config, config.n_jobs, stage=st, shifts=shifts)
+                          config, config.n_jobs, stage=st, shifts=shifts,
+                          cell_sigma_psf=cell_sigma_psf, cell_offset_psf=cell_offset_psf)
     wall = time.time() - t0
     numbers = {"sources": int(names.size), "sources_per_s": names.size / max(wall, 1e-9)}
     for band in BANDS:

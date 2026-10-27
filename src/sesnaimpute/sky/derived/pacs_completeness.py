@@ -7,7 +7,10 @@
 (`CURVE_<B>`, `MAG_GRID_<B>`, `SOURCE_ROW`, `PIXEL_CURVE_<B>`, `PIXEL_COVERED_FRAC_<B>`,
 `ENVELOPE_<B>`, `COMPLETED_FROM_<B>`, `N_POS_<B>`, `HPX_PIX_512`), plus per-cell columns aligned
 with the CURVE rows (`CELL_RA_<B>`, `CELL_DEC_<B>`, `CELL_OBSID_<B>`, `CELL_MAP_<B>`,
-`CELL_SIGMA_<B>_MJY`, `CELL_GAIN_<B>`) that the photometry stage reads.
+`CELL_SIGMA_<B>_MJY`, `CELL_GAIN_<B>`) that the photometry stage reads, and the same cell statistics of
+the single PSF fit, the estimator the photometry uses for the members of blend groups
+(`CELL_OFFSET_PSF_<B>_MJY`, `CELL_SIGMA_PSF_<B>_MJY`, `CELL_TAIL_FACTOR_PSF_<B>`, `CELL_GAIN_PSF_<B>`,
+`CURVE_PSF_<B>`, rows aligned with the CURVE rows).
 
 Method. The PACS measurement (`pacs_fit`) is linear in the map, so a point source of flux F at a
 position p is measured as g F + b_p, where g is the fit's gain and b_p its value on the real, un-injected
@@ -17,7 +20,8 @@ each gets one forced fit with the bright neighbours of the tile as nuisance colu
   cell offset = the median of b_p over the cell's clean positions: sky structure the fit's constant
   background does not absorb, subtracted from every flux measured in the cell (sources and positions);
   cell sigma = the median over the cell's 3 x 3 block of 1.4826 x the median absolute deviation of b_p
-  about each cell's offset, times the tail factor of the cell's noise-state group (cells of the map at a
+  about each cell's offset (or the cell's own such sigma when it exceeds the block median by more than
+  OWN_SIGMA_FACTOR, so a lone structured cell is not given its quiet neighbours' noise), times the tail factor of the cell's noise-state group (cells of the map at a
   similar sigma / map median), matched as deep in the negative tail as the group's sample allows (one cell holds only ~10 independent beams), times one factor per
   map tile that matches the negative tail of b_p / sigma over the tile's empty sky to a
   Gaussian's (the noise IS the scatter of the extracted flux on empty sky, not added to the propagated
@@ -26,6 +30,12 @@ each gets one forced fit with the bright neighbours of the tile as nuisance colu
   the empirical distribution of (5 sigma + offset - b_p)/g evaluated at every plane of the grid.
 The sigma of a cell is what the photometry stage calls the uncertainty of a source in that cell, so a
 measured source and its completeness curve use one noise.
+
+Two estimators, each with its own offset, sigma, tail factors and curve, from the SAME random positions:
+the aperture (`Tile.measure`, isolated sources) and the single PSF fit (`Tile.fit_positions`, the members
+of blend groups, whose joint fit carries its own background). A PSF fit absorbs part of the structure that
+the aperture leaves in its offset, so a blend member is judged on the PSF estimator's offset and noise
+(the `_PSF_` datasets), an isolated source on the aperture's.
 
 Where maps overlap, each source and each of the 256 sample points per admitted pixel takes the cell of
 the deepest map (lowest cell sigma); only cells that win somewhere get a CURVE row. The flux grid is one
@@ -97,18 +107,22 @@ def canonical_grid():
 # ----------------------------------------------------------------------------
 # the cell statistic
 
-def cell_fits(tile, ids, seed):
-    """Forced fits at N_POS uniform positions in each cell of `ids` on `tile`. Returns b (flux
-    mJy), gain, pixel sigma (propagated), valid, clean (farther than one beam from every bright
-    neighbour), each (n_cell, N_POS)."""
+def cell_fits(tile, ids, seed, estimator="measure"):
+    """Forced measurements at N_POS uniform positions in each cell of `ids` on `tile`: the aperture
+    (`estimator` "measure") or the single PSF fit ("fit_positions"), at the same positions (the seed
+    fixes them). Returns b (flux mJy), gain, pixel sigma (propagated), valid, clean (farther than one beam
+    from every bright neighbour), each (n_cell, N_POS)."""
     x, y = tile.grid.sample_pixels(ids, N_POS, seed)
-    fit = tile.measure(x.ravel(), y.ravel())
+    fit = getattr(tile, estimator)(x.ravel(), y.ravel())
     shape = x.shape
     valid = (fit.covered & np.isfinite(fit.flux) & np.isfinite(fit.gain) & (fit.gain > 0)).reshape(shape)
     clean = ~tile.near_bright(x, y)
     return (fit.flux.reshape(shape), fit.gain.reshape(shape), fit.sigma.reshape(shape), valid, clean)
 
 
+#: a cell takes its own clean MAD sigma instead of its block's median when it exceeds the block median by
+#: more than this factor: 1 + 3 x 0.27, three of the one-cell MAD's ~27 % sampling errors (see block_sigma)
+OWN_SIGMA_FACTOR = 1.81
 #: a cell's own noise estimate counts in its block's median only with this many clean positions
 MIN_CLEAN_POSITIONS = 50
 
@@ -168,6 +182,21 @@ def block_sigma(grid, ids, all_ids, mad_sigma, n_clean):
     return sigma, np.where(good, n_clean[k], 0).sum(axis=1)
 
 
+def cell_sigma(grid, ids, all_ids, mad_sigma, n_clean):
+    """Noise of each cell of `ids`: its block median (`block_sigma`), or its own clean MAD sigma when that
+    exceeds the block median by more than OWN_SIGMA_FACTOR (a lone structured cell: its neighbours' median
+    would understate it, a two-sided excess and false detections). A cell with fewer than
+    MIN_CLEAN_POSITIONS clean positions keeps the block value. Returns (sigma, positions behind the block,
+    number of cells that took their own)."""
+    block, n_block = block_sigma(grid, ids, all_ids, mad_sigma, n_clean)
+    k = np.searchsorted(all_ids, ids)
+    own = np.where((n_clean[k] >= MIN_CLEAN_POSITIONS) & np.isfinite(mad_sigma[k]) & (mad_sigma[k] > 0),
+                   mad_sigma[k], np.nan)
+    with np.errstate(invalid="ignore"):
+        switch = np.isfinite(block) & np.isfinite(own) & (own > OWN_SIGMA_FACTOR * block)
+    return np.where(switch, own, block), n_block, int(switch.sum())
+
+
 def cell_offset(grid, ids, all_ids, offset, n_clean):
     """Offset of each cell of `ids`: its own clean median (the offsets are local: 0.93 split-half
     correlation), or, with fewer than MIN_CLEAN_POSITIONS clean positions, the median of its 3 x 3
@@ -200,10 +229,17 @@ def _tile_reference(piece, config, records):
     all_ids = ring(tile.grid, centres)
     b, gain, ps, valid, clean = cell_fits(tile, all_ids, 0)
     _, n_clean, mad, _, _, _ = cell_statistics(b, gain, ps, valid, clean)
-    sigma, _ = block_sigma(tile.grid, centres, all_ids, mad, n_clean)
+    sigma, _, _ = cell_sigma(tile.grid, centres, all_ids, mad, n_clean)
     c = np.searchsorted(all_ids, centres)
     good = np.isfinite(sigma) & (sigma > 0) & (valid[c].sum(axis=1) == N_POS)
-    return dict(n_used=int(used.size), shift=shift, median=float(np.median(sigma[good])) if good.any() else np.nan)
+    median = float(np.median(sigma[good])) if good.any() else np.nan
+    # the PSF estimator's own reference, from the same cells
+    b, gain, ps, valid, clean = cell_fits(tile, all_ids, 0, "fit_positions")
+    _, n_clean, mad, _, _, _ = cell_statistics(b, gain, ps, valid, clean)
+    sigma, _, _ = cell_sigma(tile.grid, centres, all_ids, mad, n_clean)
+    good = np.isfinite(sigma) & (sigma > 0) & (valid[c].sum(axis=1) == N_POS)
+    return dict(n_used=int(used.size), shift=shift, median=median,
+                median_psf=float(np.median(sigma[good])) if good.any() else np.nan)
 
 
 def noise_group(sigma, median):
@@ -265,44 +301,72 @@ def encode_curves(counts, n_valid):
     return np.rint(counts * STORAGE_SCALE / np.maximum(n_valid, 1)[:, None]).astype(np.uint16)
 
 
-def _piece(piece, config, records, flux_grid, refs, factors=None):
-    """One tile's square block of cells. First pass (`factors` None): the per-noise-group statistics of
-    (b - offset) / sigma over the block's clean positions in wholly valid cells -- the count and the
-    TAIL_MIN_BEYOND * 4 lowest values. Second pass: the arrays the parent assembles, sigma scaled by
-    the cell's group factor. Both passes draw the same random positions (seeded per cell). The block's
-    border cells are fitted too, only for the noise median."""
+def _estimator(tile, ids, all_ids, seed, estimator, median):
+    """One estimator's cell statistics for the block `ids` (`all_ids` its ring): the arrays of its fits and
+    its sigma (rule B, then the tile median where no cell is clean), offset and group."""
+    b, gain, ps, valid, clean = cell_fits(tile, all_ids, seed, estimator)
+    n_valid, n_clean, mad, g, pps, off = cell_statistics(b, gain, ps, valid, clean)
+    sigma, n_sigma, n_switch = cell_sigma(tile.grid, ids, all_ids, mad, n_clean)
+    offset = cell_offset(tile.grid, ids, all_ids, off, n_clean)
+    # a block with no clean cell (wholly within a beam of bright sources) takes the tile's median noise;
+    # N_SIGMA_POS 0 marks it
+    sigma = np.where(np.isfinite(sigma), sigma, median)
+    k = np.searchsorted(all_ids, ids)
+    return dict(b=b[k], gain=gain[k], valid=valid[k], clean=clean[k], n_valid=n_valid[k], g=g[k], pps=pps[k],
+                sigma=sigma, n_sigma=n_sigma, offset=offset, n_switch=n_switch, group=noise_group(sigma, median))
+
+
+def _first_pass(e):
+    """The per-noise-group statistics of (b - offset) / sigma over one estimator's clean positions in wholly
+    valid cells: the count and the TAIL_MIN_BEYOND * 4 lowest values."""
+    whole = e["valid"].sum(axis=1) == N_POS
+    z = (e["b"] - e["offset"][:, None]) / e["sigma"][:, None]
+    n, low = [], []
+    for gr in range(len(NOISE_BIN_EDGES) + 1):
+        zz = z[(e["group"] == gr) & whole][(e["valid"] & e["clean"])[(e["group"] == gr) & whole]]
+        n.append(int(zz.size))
+        low.append(np.sort(zz)[:TAIL_MIN_BEYOND * 4])
+    return n, low
+
+
+def _second_pass(e, tail_by_group, flux_grid):
+    """One estimator's arrays for the parent: sigma scaled by the cell's group factor, offset, gain, curve."""
+    tail = tail_by_group[e["group"]]
+    sigma = e["sigma"] * tail
+    curve = encode_curves(curve_counts(thresholds(e["b"], e["gain"], e["valid"], sigma, e["offset"]), flux_grid),
+                          e["n_valid"])
+    return dict(sigma=sigma, offset=e["offset"], gain=e["g"], curve=curve, tail=tail.astype(np.float32))
+
+
+def _piece(piece, config, records, flux_grid, refs, factors=None, factors_psf=None):
+    """One tile's square block of cells, for both estimators (aperture, and the single PSF fit at the same
+    random positions). First pass (`factors` None): the per-noise-group statistics of (b - offset) / sigma
+    over the block's clean positions in wholly valid cells -- the count and the TAIL_MIN_BEYOND * 4 lowest
+    values -- for each estimator. Second pass: the arrays the parent assembles, sigma scaled by the cell's
+    group factor. Both passes draw the same random positions (seeded per cell). The block's border cells
+    are fitted too, only for the noise median."""
     tile_index, ids = piece
     record = records[tile_index]
     tile = pacs_fit.cached_tile(config, record)
     all_ids = ring(tile.grid, ids)
-    b, gain, ps, valid, clean = cell_fits(tile, all_ids, tile_index + 1)
-    n_valid, n_clean, mad, g, pps, off = cell_statistics(b, gain, ps, valid, clean)
-    sigma, n_sigma = block_sigma(tile.grid, ids, all_ids, mad, n_clean)
-    offset = cell_offset(tile.grid, ids, all_ids, off, n_clean)
     ref = refs[tile_index]
-    # a block with no clean cell (wholly within a beam of bright sources) takes the tile's median noise;
-    # N_SIGMA_POS 0 marks it
-    sigma = np.where(np.isfinite(sigma), sigma, ref["median"])
-    k = np.searchsorted(all_ids, ids)
-    b, gain, valid, clean, n_valid, g, pps = b[k], gain[k], valid[k], clean[k], n_valid[k], g[k], pps[k]
-    group = noise_group(sigma, ref["median"])
+    ap = _estimator(tile, ids, all_ids, tile_index + 1, "measure", ref["median"])
+    psf = _estimator(tile, ids, all_ids, tile_index + 1, "fit_positions", ref["median_psf"])
     if factors is None:
-        whole = valid.sum(axis=1) == N_POS
-        z = (b - offset[:, None]) / sigma[:, None]
-        n, low = [], []
-        for gr in range(len(NOISE_BIN_EDGES) + 1):
-            zz = z[(group == gr) & whole][(valid & clean)[(group == gr) & whole]]
-            n.append(int(zz.size))
-            low.append(np.sort(zz)[:TAIL_MIN_BEYOND * 4])
-        return dict(tile=tile_index, n=n, low=low)
-    tail = factors[tile_index][group]
-    sigma = sigma * tail
-    covered = (n_valid >= MIN_VALID_POSITIONS) & np.isfinite(sigma) & (sigma > 0) & np.isfinite(g)
-    curve = encode_curves(curve_counts(thresholds(b, gain, valid, sigma, offset), flux_grid), n_valid)
+        n, low = _first_pass(ap)
+        n_psf, low_psf = _first_pass(psf)
+        return dict(tile=tile_index, n=n, low=low, n_psf=n_psf, low_psf=low_psf,
+                    n_switch=ap["n_switch"], n_switch_psf=psf["n_switch"], n_cell=int(ids.size))
+    a = _second_pass(ap, factors[tile_index], flux_grid)
+    p = _second_pass(psf, factors_psf[tile_index], flux_grid)
+    sigma, g = a["sigma"], a["gain"]
+    covered = (ap["n_valid"] >= MIN_VALID_POSITIONS) & np.isfinite(sigma) & (sigma > 0) & np.isfinite(g)
     ra, dec = pacs_fit.from_map_frame(*tile.grid.centres_icrs(ids), ref["shift"][:2])
-    return dict(tile=tile_index, ids=ids, covered=covered, n_valid=n_valid.astype(np.int16),
-                n_sigma=np.minimum(n_sigma, np.iinfo(np.int16).max).astype(np.int16), tail=tail.astype(np.float32),
-                sigma=sigma, offset=offset, gain=g, pixel_sigma=pps, curve=curve, ra=ra, dec=dec)
+    return dict(tile=tile_index, ids=ids, covered=covered, n_valid=ap["n_valid"].astype(np.int16),
+                n_sigma=np.minimum(ap["n_sigma"], np.iinfo(np.int16).max).astype(np.int16), tail=a["tail"],
+                sigma=sigma, offset=a["offset"], gain=g, pixel_sigma=ap["pps"], curve=a["curve"], ra=ra, dec=dec,
+                sigma_psf=p["sigma"], offset_psf=p["offset"], gain_psf=p["gain"], curve_psf=p["curve"],
+                tail_psf=p["tail"])
 
 
 # ----------------------------------------------------------------------------
@@ -372,22 +436,31 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
     first_pass = pieces_module.run(functools.partial(_piece, config=config, records=records, flux_grid=flux_grid,
                                                      refs=refs), pieces, n_jobs, stage=stage, unit="cell blocks (tails)")
     n_group = len(NOISE_BIN_EDGES) + 1
-    stats = {}
-    for r in first_pass:
-        st = stats.setdefault(r["tile"], dict(n=[0] * n_group, low=[np.zeros(0)] * n_group))
-        for gr in range(n_group):
-            st["n"][gr] += r["n"][gr]
-            st["low"][gr] = np.sort(np.r_[st["low"][gr], r["low"][gr]])[:TAIL_MIN_BEYOND * 4]
-    factors, rows = tail_factors(stats, refs, records)
     edges = ("<1",) + tuple("%g-%g" % e for e in zip(NOISE_BIN_EDGES[:-1], NOISE_BIN_EDGES[1:])) + (">%g" % NOISE_BIN_EDGES[-1],)
-    for t, members, n, zlev, k in rows:
-        print("  %s: noise group %s (sigma/median %s): N %d, matched at %.2f sigma, k %.3f%s"
-              % (records[t].map_id, members, ",".join(edges[m] for m in members), n, zlev, k,
-                 "  (pooled by mode)" if refs[t]["n_used"] < TAIL_CELLS else ""), flush=True)
+    out_factors = []
+    for label, kn, kl in (("aperture", "n", "low"), ("PSF fit", "n_psf", "low_psf")):
+        stats = {}
+        for r in first_pass:
+            st = stats.setdefault(r["tile"], dict(n=[0] * n_group, low=[np.zeros(0)] * n_group))
+            for gr in range(n_group):
+                st["n"][gr] += r[kn][gr]
+                st["low"][gr] = np.sort(np.r_[st["low"][gr], r[kl][gr]])[:TAIL_MIN_BEYOND * 4]
+        factors_e, rows = tail_factors(stats, refs, records)
+        out_factors.append(factors_e)
+        for t, members, n, zlev, k in rows:
+            print("  %s (%s): noise group %s (sigma/median %s): N %d, matched at %.2f sigma, k %.3f%s"
+                  % (records[t].map_id, label, members, ",".join(edges[m] for m in members), n, zlev, k,
+                     "  (pooled by mode)" if refs[t]["n_used"] < TAIL_CELLS else ""), flush=True)
+    factors, factors_psf = out_factors
+    print("  cells on their own noise (rule B): aperture %d, PSF fit %d of %d"
+          % (sum(r["n_switch"] for r in first_pass), sum(r["n_switch_psf"] for r in first_pass),
+             sum(r["n_cell"] for r in first_pass)), flush=True)
     # pass 2: the curves, sigma scaled by the cell's group factor (the same random positions)
-    fn = functools.partial(_piece, config=config, records=records, flux_grid=flux_grid, refs=refs, factors=factors)
+    fn = functools.partial(_piece, config=config, records=records, flux_grid=flux_grid, refs=refs, factors=factors,
+                           factors_psf=factors_psf)
     results = pieces_module.run(fn, pieces, n_jobs, stage=stage, unit="cell blocks")
-    names = ("covered", "n_valid", "n_sigma", "sigma", "offset", "gain", "pixel_sigma", "curve", "ra", "dec", "tail")
+    names = ("covered", "n_valid", "n_sigma", "sigma", "offset", "gain", "pixel_sigma", "curve", "ra", "dec", "tail",
+             "sigma_psf", "offset_psf", "gain_psf", "curve_psf", "tail_psf")
     # the rows: every covered cell of every map, ordered by (map, cell id)
     parts = []
     for t in range(len(records)):
@@ -425,7 +498,10 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
                 envelope=envelope, n_pos=cols["n_valid"].astype(np.int16), n_sigma=cols["n_sigma"].astype(np.int16),
                 cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=cols["sigma"].astype(np.float32),
                 cell_offset=cols["offset"].astype(np.float32), cell_gain=cols["gain"].astype(np.float32),
-                cell_tail=cols["tail"].astype(np.float32), cell_id=cell_id, cell_map_index=cell_map,
+                cell_tail=cols["tail"].astype(np.float32), cell_id=cell_id,
+                curve_psf=cols["curve_psf"].astype(np.uint16).reshape(n_row, n_plane),
+                cell_sigma_psf=cols["sigma_psf"].astype(np.float32), cell_offset_psf=cols["offset_psf"].astype(np.float32),
+                cell_gain_psf=cols["gain_psf"].astype(np.float32), cell_tail_psf=cols["tail_psf"].astype(np.float32), cell_map_index=cell_map,
                 cell_obsid=np.array([",".join(records[t].obsids) for t in cell_map] or [""], dtype="S")[:n_row],
                 cell_map=np.array([records[t].map_id for t in cell_map] or [""], dtype="S")[:n_row],
                 n_candidate=sum(g[1].size for g in geometry),
@@ -451,7 +527,9 @@ def _empty_band(n_src, n_plane):
     return dict(curve=np.zeros((0, n_plane), np.uint16), source_row=np.full(n_src, -1, np.int32),
                 envelope=np.zeros(n_plane, np.uint16), n_pos=z(np.int16), n_sigma=z(np.int16), cell_ra=z(float),
                 cell_dec=z(float), cell_sigma=z(np.float32), cell_offset=z(np.float32), cell_tail=z(np.float32),
-                cell_gain=z(np.float32), cell_id=z(np.int64), cell_map_index=z(np.int32), cell_obsid=z("S1"),
+                cell_gain=z(np.float32), curve_psf=np.zeros((0, n_plane), np.uint16), cell_sigma_psf=z(np.float32),
+                cell_offset_psf=z(np.float32), cell_gain_psf=z(np.float32), cell_tail_psf=z(np.float32),
+                cell_id=z(np.int64), cell_map_index=z(np.int32), cell_obsid=z("S1"),
                 cell_map=z("S1"), n_candidate=0, map_id=z("S1"), map_obsid=z("S1"), map_shift=np.zeros((0, 2), np.float32),
                 map_pairs=z(np.int32), map_wcs=z("S1"), map_shape=np.zeros((0, 2), np.int32),
                 map_cell_step=np.zeros((0, 2)))
@@ -487,6 +565,12 @@ def write_product(path, region, mag, bands):
             w("CELL_OFFSET_%s_MJY" % b, d["cell_offset"])
             w("CELL_TAIL_FACTOR_" + b, d["cell_tail"])
             w("CELL_GAIN_" + b, d["cell_gain"])
+            ds = w("CURVE_PSF_" + b, d["curve_psf"])
+            ds.attrs["ZERO_POINT_JY"] = ZERO_POINT_JY
+            w("CELL_SIGMA_PSF_%s_MJY" % b, d["cell_sigma_psf"])
+            w("CELL_OFFSET_PSF_%s_MJY" % b, d["cell_offset_psf"])
+            w("CELL_TAIL_FACTOR_PSF_" + b, d["cell_tail_psf"])
+            w("CELL_GAIN_PSF_" + b, d["cell_gain_psf"])
             w("MAP_ID_" + b, d["map_id"])
             w("MAP_OBSID_" + b, d["map_obsid"])
             w("MAP_SHIFT_%s_ARCSEC" % b, d["map_shift"])
