@@ -22,11 +22,15 @@ products:
   `CELL_SIGMA_<B>_MJY` of the completeness product (the scatter of the same
   measurement at random empty-sky positions in the cell); the fit's propagated
   pixel noise is never added to it. A separable member of a blend group
-  (METHOD 2) is judged on the single PSF fit's own statistics,
-  `CELL_SIGMA_PSF_<B>_MJY` and `CELL_OFFSET_PSF_<B>_MJY`, not the aperture's:
-  its sigma is the PSF cell noise times the ratio of its propagated error in
-  the group fit to that of a singleton fit at the same position (the
-  correlation inflation).
+  (METHOD 2) is judged on the single PSF fit's own statistics, not the
+  aperture's: its sigma is the product of three factors, the measured null of
+  the estimator at this cell (`CELL_SIGMA_PSF_<B>_MJY`), the overlap
+  degeneracy of the group (its propagated error in the group fit over that of
+  a singleton fit at the same position, the inflation) and the group's own
+  misfit (sqrt(max(1, chi2_red)), chi2_red the group fit's reduced chi-square
+  over its box, stored as `CHI2_RED_<B>`). chi2_red spreads the neighbour's
+  model mismatch over the member in proportion to its degeneracy, the
+  standard crowded-field scaling.
 - detection: (flux - cell offset) >= 5 sigma (origin 1), else origin 90, the
   offset and sigma those of the estimator that measured the flux; a source the
   completeness stage found no cell for, or whose fit has no data, is 91.
@@ -135,6 +139,7 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
     extended = np.zeros(n, dtype=bool)
     sigma_annulus = np.full(n, np.nan)
     method = np.zeros(n, dtype=np.int8)
+    chi2_red = np.full(n, np.nan, dtype=np.float32)
 
     with pacs_fit.open_tile(config, record) as tile:
         # the map's registration to SESNA, as the completeness stage measured and stored it
@@ -173,10 +178,11 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
             ratio_sum = np.bincount(label[g], weights=np.nan_to_num(ratio))
             ratio_n = np.bincount(label[g], weights=np.isfinite(ratio).astype(float))
             ratio_mean = (ratio_sum / np.maximum(ratio_n, 1))[label[g]]
-            member_sigma = sigma_psf[g] * gfit.inflation
+            member_sigma = sigma_psf[g] * gfit.inflation * np.sqrt(np.maximum(1.0, gfit.chi2_red))
             unseparable = good & (gfit.max_abs_rho > BLEND_RHO_LIMIT)
             separable = good & ~unseparable
             method[g[good]] = 2
+            chi2_red[g[good]] = gfit.chi2_red[good]
             gi = g[separable]
             flux[gi] = gfit.flux[separable]
             sigma[gi] = member_sigma[separable]
@@ -194,7 +200,7 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
 
     columns = dict(FNU=flux, SIGMA=sigma, ORIGIN=origin, LOCAL_RMS=sigma_cell.astype(np.float32),
                    SIGMA_ANNULUS=np.asarray(sigma_annulus, np.float32), METHOD=method,
-                   N_BLEND=n_blend, BLEND_GROUP=group_id, EXTENDED=extended)
+                   N_BLEND=n_blend, BLEND_GROUP=group_id, EXTENDED=extended, CHI2_RED=chi2_red)
     # a source with no usable fit keeps the cell noise only where a cell exists
     columns["LOCAL_RMS"][origin == ORIGIN_NOT_COVERED] = np.nan
     return band, map_index, rows, columns
@@ -215,12 +221,12 @@ def _runs(rows):
 
 
 _DTYPES = dict(FNU=np.float64, SIGMA=np.float64, ORIGIN=np.int8, LOCAL_RMS=np.float32,
-               N_BLEND=np.int16, BLEND_GROUP=np.int32, EXTENDED=bool, SIGMA_ANNULUS=np.float32, METHOD=np.int8)
+               N_BLEND=np.int16, BLEND_GROUP=np.int32, EXTENDED=bool, SIGMA_ANNULUS=np.float32, METHOD=np.int8, CHI2_RED=np.float32)
 _FILL = dict(FNU=np.nan, SIGMA=np.nan, ORIGIN=ORIGIN_NOT_COVERED, LOCAL_RMS=np.nan,
-             N_BLEND=0, BLEND_GROUP=-1, EXTENDED=False, SIGMA_ANNULUS=np.nan, METHOD=0)
+             N_BLEND=0, BLEND_GROUP=-1, EXTENDED=False, SIGMA_ANNULUS=np.nan, METHOD=0, CHI2_RED=np.nan)
 _NAMES = dict(FNU="FNU_{b}_MJY", SIGMA="SIGMA_{b}_MJY", ORIGIN="ORIGIN_{b}", LOCAL_RMS="LOCAL_RMS_{b}_MJY",
               N_BLEND="N_BLEND_{b}", BLEND_GROUP="BLEND_GROUP_{b}", EXTENDED="EXTENDED_{b}",
-              SIGMA_ANNULUS="SIGMA_ANNULUS_{b}_MJY", METHOD="METHOD_{b}")
+              SIGMA_ANNULUS="SIGMA_ANNULUS_{b}_MJY", METHOD="METHOD_{b}", CHI2_RED="CHI2_RED_{b}")
 
 
 def _tile_key(record):

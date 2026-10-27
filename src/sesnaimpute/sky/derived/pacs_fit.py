@@ -155,12 +155,14 @@ class PositionFit:
     sigma      (n,) propagated pixel noise on `flux`, mJy
     covered    (n,) bool, the position lies on valid data and the fit is well posed
     n_nuisance (n,) int, bright-neighbour sources included as nuisance columns
+    chi2_red   (n,) reduced chi-square of the fit over its box (None for aperture measurements)
     """
     flux: np.ndarray
     gain: np.ndarray
     sigma: np.ndarray
     covered: np.ndarray
     n_nuisance: np.ndarray
+    chi2_red: np.ndarray = None
 
 
 @dataclass(frozen=True)
@@ -195,6 +197,7 @@ class GroupFit:
     group_flux  (n,) sum of the group's member fluxes (same on every member)
     group_sigma (n,) propagated pixel noise of that sum (full covariance)
     covered     (n,) bool
+    chi2_red    (n,) the group fit's reduced chi-square over its box, the same on every member
     """
     flux: np.ndarray
     sigma: np.ndarray
@@ -203,6 +206,7 @@ class GroupFit:
     group_flux: np.ndarray
     group_sigma: np.ndarray
     covered: np.ndarray
+    chi2_red: np.ndarray = None
 
 
 # ----------------------------------------------------------------------------
@@ -245,7 +249,8 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
     the valid pixels in the annulus r_in..r_out (pixels) around the first target, subtracted from the
     data; every PSF column has its own mean over the same annulus subtracted, so a point source returns
     its full flux (the share of its wing the annulus removes is in the model); no free constant.
-    Returns per-member flux, gain, covariance and a validity flag."""
+    Returns per-member flux, gain, covariance, a validity flag and the fit's reduced chi-square over the
+    valid pixels of its box (error layer as the weights; degrees of freedom = valid pixels - columns)."""
     n, mmax = tx.shape
     side = 2 * half + 1
     npix = side * side
@@ -258,13 +263,14 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
     gain = np.full((n, mmax), np.nan)
     cov = np.full((n, mmax, mmax), np.nan)
     valid = np.zeros(n, dtype=np.bool_)
+    chi2 = np.full(n, np.nan)
     X = np.empty((cmax, npix))
     w = np.empty(npix)
     d = np.empty(npix)
     e = np.empty(npix)
     ok = np.zeros(npix, dtype=np.bool_)
     A = np.empty((cmax, cmax))
-    B = np.empty((cmax, mmax))
+    B = np.empty((cmax, mmax + 1))
     L = np.empty((mmax, npix))
     scale = np.empty(cmax)
     for i in range(n):
@@ -368,6 +374,12 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
         for m in range(mt):
             for q in range(nk):
                 B[nk * m + q, m] = 1.0 / scale[nk * m + q]
+        # one more right-hand side: the data, so the elimination also returns every column's coefficient
+        for a in range(nc):
+            s = 0.0
+            for p in range(npix):
+                s += w[p] * X[a, p] * d[p]
+            B[a, mt] = s / scale[a]
         # Gauss-Jordan with partial pivoting on the equilibrated normal matrix
         singular = False
         for c in range(nc):
@@ -385,14 +397,14 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
                     t = A[c, q]
                     A[c, q] = A[piv, q]
                     A[piv, q] = t
-                for q in range(mt):
+                for q in range(mt + 1):
                     t = B[c, q]
                     B[c, q] = B[piv, q]
                     B[piv, q] = t
             inv = 1.0 / A[c, c]
             for q in range(nc):
                 A[c, q] *= inv
-            for q in range(mt):
+            for q in range(mt + 1):
                 B[c, q] *= inv
             for r in range(nc):
                 if r != c:
@@ -400,7 +412,7 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
                     if f != 0.0:
                         for q in range(nc):
                             A[r, q] -= f * A[c, q]
-                        for q in range(mt):
+                        for q in range(mt + 1):
                             B[r, q] -= f * B[c, q]
         if singular:
             continue
@@ -427,8 +439,18 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
                     c2 += L[m, p] * L[m2, p] * e[p] * e[p]
                 cov[i, m, m2] = c2
                 cov[i, m2, m] = c2
+        n_ok = 0
+        sq = 0.0
+        for p in range(npix):
+            if ok[p]:
+                n_ok += 1
+                mod = 0.0
+                for a in range(nc):
+                    mod += B[a, mt] / scale[a] * X[a, p]
+                sq += w[p] * (d[p] - mod) ** 2
+        chi2[i] = sq / max(n_ok - nc, 1)
         valid[i] = True
-    return flux, gain, cov, valid
+    return flux, gain, cov, valid, chi2
 
 
 # ----------------------------------------------------------------------------
@@ -761,7 +783,7 @@ class Tile:
         y = np.asarray(y, dtype=float)
         n = x.size
         out = [np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan),
-               np.zeros(n, dtype=bool), np.zeros(n, dtype=np.int64)]
+               np.zeros(n, dtype=bool), np.zeros(n, dtype=np.int64), np.full(n, np.nan)]
         ny, nx = self.shape
         cx = np.rint(x).astype(np.int64)
         cy = np.rint(y).astype(np.int64)
@@ -774,13 +796,14 @@ class Tile:
                 ux, uy, un = self._nuisance(x[r], y[r], own_exclude=[(x[r], y[r])])
             else:
                 ux, uy, un = np.zeros((m, 1)), np.zeros((m, 1)), np.zeros(m, dtype=np.int64)
-            flux, gain, cov, valid = self._call(x[r, None], y[r, None], np.ones(m, dtype=np.int64),
+            flux, gain, cov, valid, chi2 = self._call(x[r, None], y[r, None], np.ones(m, dtype=np.int64),
                                                 ux, uy, un, cx[r], cy[r], self.half)
             out[0][r] = flux[:, 0] * self.flux_scale
             out[1][r] = gain[:, 0]
             out[2][r] = np.sqrt(np.maximum(cov[:, 0, 0], 0)) * self.flux_scale
             out[3][r] = valid
             out[4][r] = un
+            out[5][r] = chi2
         return PositionFit(*out)
 
     def fit_positions(self, x, y, batch=512):
@@ -820,6 +843,7 @@ class Tile:
         n = x.size
         res = {k: np.full(n, np.nan) for k in ("flux", "sigma", "rho", "gflux", "gsigma")}
         covered = np.zeros(n, dtype=bool)
+        res["chi2"] = np.full(n, np.nan)
         single = self._fit(x, y, use_nuisance=False)
         _, inverse = np.unique(group, return_inverse=True)
         order = np.argsort(inverse, kind="stable")
@@ -839,7 +863,7 @@ class Tile:
                 cyg = np.rint(gy[sel]).astype(np.int64)
                 # no nuisance columns (final ruling, spec 12: nothing of ours in the flux)
                 ux, uy, un = (np.zeros((len(mem), 1)), np.zeros((len(mem), 1)), np.zeros(len(mem), dtype=np.int64))
-                flux, gain, cov, valid = self._call(x[mem], y[mem], np.full(len(mem), size, dtype=np.int64),
+                flux, gain, cov, valid, chi2 = self._call(x[mem], y[mem], np.full(len(mem), size, dtype=np.int64),
                                                     ux, uy, un, cxg, cyg, half)
                 sd = np.sqrt(np.maximum(np.diagonal(cov, axis1=1, axis2=2), 0))
                 with np.errstate(all="ignore"):
@@ -857,12 +881,13 @@ class Tile:
                     res["gflux"][i] = np.where(valid, gsum, np.nan)
                     res["gsigma"][i] = np.where(valid, gsig, np.nan)
                     covered[i] = valid
+                    res["chi2"][i] = np.where(valid, chi2, np.nan)
         for key in ("flux", "sigma", "gflux", "gsigma"):
             res[key] = res[key] * self.flux_scale
         with np.errstate(all="ignore"):
             inflation = res["sigma"] / single.sigma
         return GroupFit(res["flux"], res["sigma"], inflation, res["rho"],
-                        res["gflux"], res["gsigma"], covered)
+                        res["gflux"], res["gsigma"], covered, res["chi2"])
 
     def fitted_fwhm(self, x, y):
         """Best-fit total FWHM (arcsec) of a source at each position (NaN where the fit is not

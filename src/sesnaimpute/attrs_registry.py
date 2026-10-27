@@ -4048,6 +4048,12 @@ _PHOTOMETRY_PACS_READINGS = {
         "eHOPS's own per-source uncertainty statistic: the scatter of the sky-annulus pixels times the square root of "
         "the aperture area, divided by the aperture correction. Kept for comparison with their tables; detection uses "
         "SIGMA_{b}_MJY."),
+    "CHI2_RED_{b}": ("dimensionless",
+        "For a source fitted jointly with its close neighbours (METHOD 2): the reduced chi-square of that joint "
+        "fit over the map pixels around the group, using the map's own pixel errors -- about 1 where the fit "
+        "describes the map as well as the map's errors imply, larger where a bright neighbour is poorly matched. The same "
+        "value for every member of a group; NaN for sources not fitted jointly or not covered. The uncertainty of "
+        "a jointly fitted source is raised by its square root when it exceeds 1."),
     "METHOD_{b}": ("code",
         "1: aperture photometry (the source is isolated); 2: joint point-source fit with its close neighbours; "
         "0: not measured (not covered)."),
@@ -4056,7 +4062,10 @@ _PHOTOMETRY_PACS_READINGS = {
         "30-arcsecond cell (the median over the 3 x 3 cells around it, raised by the tail factor of the cell's noise "
         "level), enlarged for a source fitted jointly with a neighbour; a source fitted jointly (METHOD 2) takes the noise and "
         "empty-sky level of the point-source fit itself (CELL_SIGMA_PSF in the completeness product), not of the "
-        "aperture measurement. Where ORIGIN is 2 it holds 0.99, the value the "
+        "aperture measurement, times the overlap enlargement and times the square root of CHI2_RED_{b} (at least 1), "
+        "so its uncertainty is the measured empty-sky noise of that fit, enlarged for the degeneracy with its "
+        "neighbours and for how badly the joint fit matches the map. CHI2_RED spreads the neighbour's model mismatch "
+        "over the member in proportion to its degeneracy, the standard crowded-field scaling. Where ORIGIN is 2 it holds 0.99, the value the "
         "source table uses to mark an upper bound; NaN where the band does not cover the source. For a jointly fitted "
         "source the uncertainty is enlarged by the overlap but its completeness curve is still its cell's curve, so "
         "the curve somewhat overstates its chance of detection. The noise has heavier tails than a Gaussian; it is "
@@ -4069,7 +4078,7 @@ _PHOTOMETRY_PACS_READINGS = {
         "completeness curve uses; 90 means the band covers the source but it is not detected; 2 means the source is "
         "blended with a neighbour so closely that the two cannot be separated and the flux is an upper bound for the "
         "pair; 91 means the band does not cover the source. A source fitted jointly with a neighbour (METHOD 2) is judged "
-        "the same way on the point-source fit's own empty-sky level and noise (CELL_OFFSET_PSF and CELL_SIGMA_PSF)."),
+        "the same way on the point-source fit's own empty-sky level (CELL_OFFSET_PSF) and its uncertainty as described for SIGMA."),
     "LOCAL_RMS_{b}_MJY": ("mJy",
         "Noise of the 30-arcsecond cell containing the source: the scatter of the flux measured at random empty-sky positions in that cell. Five times this value is the faintest flux that would be called a detection there. NaN where the band does not cover the source."),
     "OBSID_{b}": ("observation identifier(s)",
