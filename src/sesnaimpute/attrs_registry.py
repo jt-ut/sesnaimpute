@@ -4188,7 +4188,16 @@ for _name, _units, _reading in (
     ("SURVEY", "survey index, 0 HOPS, 1 eHOPS",
      "For each source in the table, which published survey it comes from: 0 the Herschel Orion Protostar Survey "
      "(Furlan et al. 2016), 1 its Aquila extension (Pokhrel et al. 2023). These are published HOPS and eHOPS data, "
-     "so a comparison of a classification with HOPS and eHOPS is not independent of anything built from this table."),
+     "so a comparison of a classification with HOPS and eHOPS is not independent of anything built from this "
+     "table on the far-infrared axis. Every ratio is built from the two surveys' own published 70 and 4.5 micron "
+     "fluxes (never SESNA's). A source observed at 70 micron and not detected is kept as a ratio below a limit, "
+     "taken as its survey's faintest published 70 micron detection (HOPS 8.2 mJy, eHOPS 157 mJy), since neither "
+     "table gives a limit; the 43 eHOPS sources with no 70 micron entry are left out (the table does not say "
+     "whether they were undetected or off the map). The table holds 446 sources, 423 detected: Class 0, I and "
+     "flat 430 (409 detected, 21 not), Class II 16 (14 detected, 2 not). Neither survey has a Class III or "
+     "transition-disk class, so the YSO weights give those classes no far-infrared statement: their templates are "
+     "weighted as before, and a template with an undefined far-infrared ratio is given its group's mean factor "
+     "(a placeholder)."),
     ("CLASS", "evolutionary class, C0 Class 0, CI Class I, FLAT flat spectrum, CII Class II",
      "The source's own Spitzer-classified evolutionary class as the survey publishes it."),
     ("FLUX_P70_MJY", "mJy",
@@ -4231,5 +4240,14 @@ REGISTRY[("yso_weights_region", "W")] = (
     "published young-star census (its brightness density, its mix of evolutionary classes, and for the protostar "
     "and Class II classes its far-infrared ratio, 70 micron flux over 4.5 micron flux, from the HOPS and eHOPS "
     "surveys) or, for a template-matched factor, the region's own shift kernel, reweights that template relative "
-    "to the library's own template density, at that brightness. Which population statement this factor encodes "
+    "to the library's own template density, at that brightness. Class III and transition-disk templates have no "
+    "far-infrared census, and a template whose model has no defined 70 micron flux gets its class's mean "
+    "far-infrared factor, a placeholder. Which population statement this factor encodes "
     "is named by this dataset's own enclosing group's NAME attribute.")
+_agb_w_units, _agb_w_reading = REGISTRY[("agb_weights_region", "W")]
+REGISTRY[("agb_weights_region", "W")] = (
+    _agb_w_units,
+    _agb_w_reading + " The far-infrared axis is not constrained by this weight: at one optical depth the "
+    "library's templates still differ in their 70 over 4.5 micron ratio by 0.25 dex (root mean square), five "
+    "times the library's sampling scale of 0.049 dex, so the optical depth does not fix it and no far-infrared "
+    "factor is applied.")

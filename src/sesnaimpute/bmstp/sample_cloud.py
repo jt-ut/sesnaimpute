@@ -57,6 +57,8 @@ the same `K`.
 import h5py
 import healpy as hp
 import numpy as np
+from astropy.io import fits
+from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
 from scipy.ndimage import gaussian_filter1d
 from scipy.special import ndtr
 
@@ -425,25 +427,61 @@ def _isochrone_teff_logg(config, age_gyr, mass_grid):
     return teff_at_mass, logg_at_mass
 
 
-_SPS_REGISTER_I2_KS_CACHE = {}
+_RAW_SPS_COLOUR_CACHE = {}
+
+#: The metallicity [M/H] of the raw atmospheres whose colour is read: solar,
+#: the value `young_stars._young_star_kg_by_mass` and this module's match
+#: use for a young star.
+RAW_SPS_SOLAR_Z_H = 0.0
 
 
-def _sps_register_i2_ks(config):
-    """`(grid, f_ref_i2, f_ref_ks)`: the STAR library's own sps register
-    (`field_stars.load_atmosphere_grid`'s row order, Teff/logg/[M/H]),
-    and that SAME row order's own `F_REF_I2`/`F_REF_Ks` (mJy, at the
-    register's own fixed reference distance) -- read directly, since
-    `load_atmosphere_grid` itself returns only `F_REF_Ks` (its own Gaia-
-    colour construction)."""
-    key = config.data_root
-    if key not in _SPS_REGISTER_I2_KS_CACHE:
-        path = f"{config.inputs['sed_models']}/registers/sps_register.hdf5"
-        atmosphere = field_stars_module.load_atmosphere_grid(path)
-        with h5py.File(path, "r") as f:
-            f_ref_i2 = np.asarray(f["models"]["F_REF_I2"][:], dtype=np.float64)
-            f_ref_ks = np.asarray(f["models"]["F_REF_Ks"][:], dtype=np.float64)
-        _SPS_REGISTER_I2_KS_CACHE[key] = (atmosphere["grid"], f_ref_i2, f_ref_ks)
-    return _SPS_REGISTER_I2_KS_CACHE[key]
+def _raw_sps_colour(config):
+    """`colour(teff_k, logg)`: the [4.5]-[Ks] colour in magnitudes (AB 4.5
+    um minus Vega Ks, the convention `photosphere_f45_marginal` adds to the
+    isochrone's Ks) of the RAW stellar atmosphere grid, interpolated
+    linearly in (log10 T_eff, log g) on the same scaled axes
+    `field_stars.match_templates` uses, and the nearest raw model outside
+    the grid's hull. The raw grid is `sed_models/sps/_raw`, the full
+    atmosphere set before sampling (the one `sed_models.curate.yso_dedup`
+    reads), solar [M/H] only, its own convolved I2 and Ks fluxes (both at
+    the one fixed reference, so the colour is distance-independent); two raw
+    models at one (T_eff, log g) from different atmosphere families are
+    averaged. A smooth physical function of the star is read from the full
+    grid, never from the sampled register, so it does not change when the
+    register is resampled."""
+    raw_dir = f"{config.inputs['sed_models']}/sps/_raw"
+    if raw_dir not in _RAW_SPS_COLOUR_CACHE:
+        with fits.open(f"{raw_dir}/parameters.fits") as h:
+            d = h[1].data
+            names, teff, logg, z_h = (np.asarray(d["MODEL_NAME"]).astype(str),
+                                      np.asarray(d["T_EFF"], dtype=np.float64),
+                                      np.asarray(d["LOGG"], dtype=np.float64),
+                                      np.asarray(d["Z_H"], dtype=np.float64))
+        flux = {}
+        for band in ("I2", "Ks"):
+            with fits.open(f"{raw_dir}/convolved/{band}.fits") as h:
+                if not np.array_equal(np.asarray(h[1].data["MODEL_NAME"]).astype(str), names):
+                    raise ValueError(f"sample_cloud._raw_sps_colour: {band} model order differs "
+                                     f"from parameters.fits")
+                flux[band] = np.asarray(h[1].data["TOTAL_FLUX"], dtype=np.float64).reshape(-1)
+        keep = (z_h == RAW_SPS_SOLAR_Z_H) & (flux["I2"] > 0) & (flux["Ks"] > 0)
+        colour = (-2.5 * np.log10(flux["I2"][keep] / young_stars_module.AB_ZERO_POINT_MJY)
+                  + 2.5 * np.log10(flux["Ks"][keep] / constants.VEGA_ZERO_POINT_MJY["Ks"]))
+        x = np.column_stack([np.log10(teff[keep]) / field_stars_module.SCALE_LOG_TEFF,
+                             logg[keep] / field_stars_module.SCALE_LOG_G])
+        x_unique, inverse = np.unique(np.round(x, 9), axis=0, return_inverse=True)
+        mean = np.bincount(inverse.ravel(), weights=colour) / np.bincount(inverse.ravel())
+        linear = LinearNDInterpolator(x_unique, mean)
+        nearest = NearestNDInterpolator(x_unique, mean)
+
+        def colour_at(teff_k, logg_q):
+            q = np.column_stack([np.log10(teff_k) / field_stars_module.SCALE_LOG_TEFF,
+                                 np.asarray(logg_q, dtype=np.float64) / field_stars_module.SCALE_LOG_G])
+            out = linear(q)
+            return np.where(np.isfinite(out), out, nearest(q))
+
+        _RAW_SPS_COLOUR_CACHE[raw_dir] = colour_at
+    return _RAW_SPS_COLOUR_CACHE[raw_dir]
 
 
 #: BHAC15's own absolute magnitudes are quoted at the IAU standard 10 pc;
@@ -471,13 +509,11 @@ def photosphere_f45_marginal(config, region):
     Each mass's Ks at this region's own published age (`regions.Region.
     age_myr`, snapped to the nearest BHAC15-tabulated row, `nearest_
     bhac15_age_gyr` -- no age interpolation), converted to 4.5 um
-    through the STAR library's own photospheres: the SPS register
-    template nearest this mass's own (Teff, logg) on the isochrone
-    (`field_stars.match_templates`, the SAME nearest-neighbour
-    construction `young_stars._young_star_kg_by_mass` uses for its own
-    extinction-law match), that template's own [4.5]-[Ks] colour
-    (`F_REF_I2`/`F_REF_Ks`, both at the register's one fixed reference,
-    so the colour is distance-independent) ADDED to the isochrone's OWN
+    through the STAR library's own photospheres: the [4.5]-[Ks] colour of
+    the raw atmosphere grid at this mass's own (Teff, logg) on the
+    isochrone, interpolated (`_raw_sps_colour`; never the sampled sps
+    register, so the weight does not move when the register is resampled),
+    ADDED to the isochrone's OWN
     Ks: the result is scaled to the isochrone's own luminosity (BHAC15's
     Ks already carries it), never a fixed colour -- a young star's 4.5
     um brightness borrows the matched photosphere's own SED SHAPE, not
@@ -490,16 +526,7 @@ def photosphere_f45_marginal(config, region):
         config, age_gyr, mass_grid)[:, young_stars_module.BAND_KEYS.index("Ks")]
     teff_at_mass, logg_at_mass = _isochrone_teff_logg(config, age_gyr, mass_grid)
 
-    grid_tl, f_ref_i2, f_ref_ks = _sps_register_i2_ks(config)
-    idx, _dist = field_stars_module.match_templates(
-        teff_at_mass, logg_at_mass, np.zeros_like(teff_at_mass), grid_tl)
-    if not (np.all(f_ref_i2[idx] > 0) and np.all(f_ref_ks[idx] > 0)):
-        raise ValueError(
-            "bmstp.sample_cloud.photosphere_f45_marginal: a matched sps template's "
-            "F_REF_I2 or F_REF_Ks is not positive -- the [4.5]-[Ks] colour is undefined")
-    m_i2_template = -2.5 * np.log10(f_ref_i2[idx] / young_stars_module.AB_ZERO_POINT_MJY)
-    m_ks_template = -2.5 * np.log10(f_ref_ks[idx] / constants.VEGA_ZERO_POINT_MJY["Ks"])
-    delta_i2_minus_ks = m_i2_template - m_ks_template
+    delta_i2_minus_ks = _raw_sps_colour(config)(teff_at_mass, logg_at_mass)
 
     i2_abs_10pc = ks_abs_10pc + delta_i2_minus_ks
     m_i2_at_1kpc = i2_abs_10pc + _ABS_MAG_10PC_TO_1KPC
