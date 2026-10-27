@@ -27,9 +27,10 @@ Since briefs/round4_2026-10-20/C6_twomass_pixel_depths.md, J/H/Ks carry
 the SAME per-pixel `CURVE_<band>`/`PIXEL_CURVE_<band>`/`MAG_GRID_<band>`/
 `COMPLETED_FROM_<band>`/`ENVELOPE_<band>` layout as I1-M1 (one row per
 nside-128 pixel instead of per 30-arcsec pixel; `SOURCE_ROW` one
-(n_source, 8) table, `ALL_BAND_KEYS` column order, never -1 in its 2MASS
-columns since 2MASS is all-sky), so every method below reads all eight
-bands through the exact same code path -- no `if band in TWOMASS_KEYS`
+(n_source, 11) table, `ALL_BAND_KEYS` column order, never -1 in its 2MASS
+columns since 2MASS is all-sky), so every method below reads all eleven
+bands (the three PACS bands carry the same datasets, copied from the PACS input;
+SOURCE_ROW is -1 where no PACS map covers a source) through the exact same code path -- no `if band in TWOMASS_KEYS`
 branch anywhere in this class any more.
 """
 
@@ -43,6 +44,7 @@ from sesnaimpute.catalog import completeness as completeness_module
 
 IRAC_MIPS_KEYS = completeness_module.IRAC_MIPS_KEYS
 TWOMASS_KEYS = completeness_module.TWOMASS_KEYS
+PACS_KEYS = completeness_module.PACS_KEYS
 ALL_BAND_KEYS = completeness_module.ALL_BAND_KEYS
 
 
@@ -228,12 +230,14 @@ class Completeness:
         uncovered: the union itself never reaches this pixel,
         `PIXEL_CURVE_<band>` is already all zero there, so the crossing
         search sees the same never-reaches-0.5 curve either way), or for
-        J/H/Ks (2MASS keeps no union average of its own to undo --
-        `PIXEL_COVERED_FRAC_J/H/Ks` is always 1 and `PIXEL_UNION_FRAC`
+        J/H/Ks and P70/P100/P160 (2MASS and PACS keep no union average of its own to undo --
+        `PIXEL_COVERED_FRAC_J/H/Ks` is always 1, a PACS band's is its own coverage, and `PIXEL_UNION_FRAC`
         plays no part there)."""
         rows = np.atleast_1d(rows)
         scale = np.ones(rows.shape, dtype=np.float64)
-        if band not in IRAC_MIPS_KEYS:
+        # by survey: only the Spitzer bands I1-M1 carry the IRAC-union average; 2MASS and PACS
+        # curves are their own on-map curves, no union dilution
+        if band in TWOMASS_KEYS or band in PACS_KEYS or band not in IRAC_MIPS_KEYS:
             return scale
         valid = rows >= 0
         if not valid.any():

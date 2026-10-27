@@ -59,10 +59,11 @@ _SQRT2 = float(np.sqrt(2.0))
 #: area print multiplies the admitted footprint's own union fraction by.
 _HPX512_PIXEL_DEG2 = 41252.96 / (12 * 512 ** 2)
 
-#: The eight bands, `definitions.BANDS`' own fixed order (J, H, Ks, I1-I4,
-#: M1), each with the plain wavelength word this page's direct labels use.
+#: The eight SELECTION bands (`definitions.SELECTION.bands`, in `definitions.BANDS`'
+#: order: J, H, Ks, I1-I4, M1; the three PACS bands are not part of the selection and
+#: are not drawn), each with the plain wavelength word this page's direct labels use.
 _BAND_LABELS = ("J", "H", "Ks", "3.6", "4.5", "5.8", "8.0", "24")
-_I2_INDEX = tuple(b.key for b in definitions.BANDS).index("I2")
+_I2_INDEX = definitions.SELECTION.bands.index("I2")
 
 _STATEMENT = (
     "Left: the probability that a source of a given flux is detected in each band at a "
@@ -113,7 +114,7 @@ def _read_depth_pixels(config, region):
     reader = limits_module.completeness(config, region)
     pix = reader.hpx_pix_512
     rows = np.arange(pix.shape[0])
-    band_keys = tuple(b.key for b in definitions.BANDS)
+    band_keys = definitions.SELECTION.bands
     f_lim = np.empty((pix.shape[0], len(band_keys)), dtype=np.float64)
     w_dex = np.empty((pix.shape[0], len(band_keys)), dtype=np.float64)
     for j, band in enumerate(band_keys):

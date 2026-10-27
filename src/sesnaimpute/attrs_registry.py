@@ -4102,3 +4102,33 @@ REGISTRY[("sources_sesna_source", "ORIGIN_FNU")] = ("code",
     "90%-completeness flux at the source's pixel; for the PACS bands: observed and undetected), 91 off-map or not "
     "covered -- no completeness value and no non-detection term (COMPLETENESS_2026-10-20.md rule 2, the same "
     "meaning Pokhrel et al. 2023, eHOPS I, ApJS 266, 32, gave the old catalogue column)." + _PACS_TAIL)
+# Unit 3: completeness_sesna_source grows to eleven bands (P70, P100, P160 copied from the PACS input)
+for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
+    for _name, (_u, _r) in _PACS_COMPLETENESS_CELLS_READINGS.items():
+        if _name == "SOURCE_ROW":
+            continue
+        REGISTRY[("completeness_sesna_source", _name.format(b=_band))] = (
+            _u, _r.format(b=_band, w=_w, n=200, mmin="-3.5", mmax="5.5", dm="0.25"))
+    REGISTRY[("completeness_sesna_source", "PIXEL_CURVE_%s" % _band)] = (
+        "dimensionless (completeness fraction, 0..1)",
+        "For each admitted nside-512 pixel in HPX_PIX_512, the %s micron completeness curve at "
+        "MAG_GRID_%s's magnitudes: the mean of CURVE_%s over the cells that the pixel's 256 sample points fall "
+        "in (each point on the deepest %s micron map that holds a cell there, positions moved by the map's "
+        "registration shift), as a fraction (not times 600). Averaged over the covered points only, so it is "
+        "the curve where the band has data; all zero where the pixel has no %s micron coverage "
+        "(PIXEL_COVERED_FRAC_%s is 0)." % (_w, _band, _band, _w, _w, _band))
+    REGISTRY[("completeness_sesna_source", "PIXEL_COVERED_FRAC_%s" % _band)] = (
+        "dimensionless (area fraction, 0..1)",
+        "For each admitted nside-512 pixel in HPX_PIX_512, the fraction of its 256 sample points that fall in a "
+        "stored %s micron cell. A PACS band's coverage is this number; PIXEL_UNION_FRAC concerns the IRAC "
+        "bands only and PACS bands are not part of that union." % _w)
+REGISTRY[("completeness_sesna_source", "SOURCE_ROW")] = (
+    "row index into CURVE_<band>",
+    "For every curated source and each of the eleven bands, definitions.BANDS' own order (J, H, Ks, I1, I2, I3, "
+    "I4, M1, P70, P100, P160 -- the same order fittp.sweep's BAND_KEYS uses): the row of that band's own "
+    "CURVE_<band> holding this source's completeness curve. For I1-M1, its nearest on-map 30-arcsec pixel, -1 "
+    "where the source is off every field's map in that band. For J/H/Ks, the row of the nside-128 pixel the "
+    "source falls in, never -1 (2MASS is all-sky). For P70/P100/P160, the row of the 30-arcsec cell the source "
+    "falls in on the deepest PACS map covering it, copied from the PACS completeness file; -1 where no map "
+    "covers the source in that band. A source near a map edge can have a row here yet be marked not covered "
+    "(ORIGIN 91) in the PACS photometry; the photometry's ORIGIN decides.")
