@@ -4087,6 +4087,79 @@ for _band, _wave in (("P70", "70"), ("P100", "100"), ("P160", "160")):
         REGISTRY[("photometry_pacs_source", _name.format(b=_band))] = (_units, _text)
 
 
+# PACS completeness and photometric error measured by recovering artificial sources (2026-10-27,
+# PACS_COMPLETENESS_PLAN.md v2). These entries replace the ones above for the datasets whose meaning
+# changed, add the four measured-calibration datasets, and drop the two datasets the measurement no
+# longer writes (the noise tail factor and the gain).
+_PACS_INJECTION_READINGS = {
+    "CURVE_{b}": ("completeness fraction x600, uint16",
+        "One row per covered 30-arcsec cell of every Herschel PACS {w} micron map, for all cells inside the "
+        "region's source bounding box padded by about 7 arcmin (overlapping maps each keep their cells; "
+        "SOURCE_ROW points at the deepest one). Each value is the fraction of artificial point sources of the "
+        "flux in MAG_GRID_{b} that the catalogue recovers as detections at that cell, stored as the fraction "
+        "times 600. The artificial sources are the band's point-spread pattern added to a copy of the real map at "
+        "random positions, one per about 50 beam areas at a time, measured exactly as a catalogue source at that "
+        "position is (aperture photometry, or the joint fit where a detected source lies within one beam), and "
+        "counted as recovered when their flux minus CELL_OFFSET_{b}_MJY reaches 5 times CELL_SIGMA_{b}_MJY, "
+        "whatever the flux error. The counts of all cells whose centres lie within 120 arcsec of the cell are added "
+        "before the fraction is taken, so each value rests on at least 100 injections where the map allows (N_POS_{b} "
+        "gives the number at the faintest plane). The fraction at the faintest planes is the false-positive floor of "
+        "the 5-sigma rule as measured, not zero. Rows are ordered by map and then cell."),
+    "N_POS_{b}": ("injections",
+        "For each row of CURVE_{b}, the number of artificial sources behind its value at the faintest plane of "
+        "MAG_GRID_{b}: the injections that fell in the cells within 120 arcsec of the row's cell on its map and "
+        "lay on valid data, not counting those within half a beam of a detected source. Rows near a map's edge "
+        "have fewer, so can fall below the 100 aimed at."),
+    "FLUX90_{b}_MJY": ("mJy",
+        "For each row of CURVE_{b}, the faintest flux at which the recovered fraction of the artificial sources is "
+        "still at least 0.9: the grid read from its bright end, interpolated linearly in the logarithm of the flux "
+        "to where the fraction crosses 0.9. NaN where even the brightest plane does not reach 0.9; the faintest "
+        "plane's flux if no plane falls below it."),
+    "BIAS_{b}_MJY": ("mJy",
+        "For each row of CURVE_{b} and each plane of MAG_GRID_{b}: the median of (recovered flux minus injected "
+        "flux) over the recovered artificial sources (those counted as detections) measured by aperture photometry "
+        "in the cells within 120 arcsec of the row's cell. The recovered flux is the flux the catalogue reports, "
+        "without CELL_OFFSET_{b}_MJY subtracted. NaN where fewer than 100 recovered sources lie in the "
+        "neighbourhood at that plane."),
+    "SCATTER_{b}_MJY": ("mJy",
+        "For each row of CURVE_{b} and each plane of MAG_GRID_{b}: the photometric error of a detected {w} micron "
+        "source of that flux at that cell, 1.4826 times the median absolute deviation about the median of "
+        "(recovered flux minus injected flux) over the recovered artificial sources measured by aperture "
+        "photometry in the cells within 120 arcsec. This is the uncertainty the photometry product assigns to a "
+        "detected, isolated source. NaN where fewer than 100 recovered sources lie in the neighbourhood at that "
+        "plane."),
+    "SCATTER_BLEND_{b}_MJY": ("mJy",
+        "The same as SCATTER_{b}_MJY for a source fitted jointly with a detected neighbour within one beam (the "
+        "artificial source is one more member of the fitted group): 1.4826 times the median absolute deviation "
+        "of (recovered flux minus injected flux) over the recovered artificial sources measured by the joint fit. "
+        "NaN where fewer than 100 such sources lie in the neighbourhood at that plane, which is common: close "
+        "neighbours of detected sources are rare."),
+    "CELL_SIGMA_{b}_MJY": ("mJy",
+        "The noise of a {w} micron flux measured in each cell of CURVE_{b}, used only to decide detection: the "
+        "median, over the 3 x 3 block of cells around it, of 1.4826 times the median absolute deviation about "
+        "CELL_OFFSET_{b}_MJY of the fluxes measured at each cell's random positions farther than one beam from "
+        "every bright source (one cell alone holds only about ten independent beams). A flux is a detection when "
+        "it minus CELL_OFFSET_{b}_MJY is at least 5 times this value. It is not the uncertainty of a detected "
+        "source (that is SCATTER_{b}_MJY) and no tail correction is applied."),
+}
+for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
+    for _name, (_u, _r) in _PACS_INJECTION_READINGS.items():
+        REGISTRY[("completeness_pacs_source", _name.format(b=_band))] = (_u, _r.format(b=_band, w=_w))
+    for _gone in ("CELL_TAIL_FACTOR_{b}", "CELL_GAIN_{b}"):
+        REGISTRY.pop(("completeness_pacs_source", _gone.format(b=_band)), None)
+    REGISTRY[("photometry_pacs_source", "SIGMA_%s_MJY" % _band)] = (
+        "mJy, or 0.99 for an upper bound",
+        "Uncertainty of the flux. For a detected source (ORIGIN 1) it is the photometric error measured by "
+        "recovering artificial sources of known flux injected into the map: the scatter of (recovered minus injected "
+        "flux) at the source's own flux, in its 30-arcsecond cell's neighbourhood, for the aperture measurement "
+        "(METHOD 1) or for the joint fit with a close neighbour (METHOD 2), interpolated in the logarithm of the "
+        "flux between the two flux steps that bracket the source's flux minus its cell's empty-sky offset "
+        "(SCATTER and SCATTER_BLEND of the completeness product). For a source that is covered but not detected "
+        "(ORIGIN 90) it is the noise of its cell, LOCAL_RMS. Where ORIGIN is 2 it holds 0.99, the value the source "
+        "table uses to mark an upper bound; NaN where the band does not cover the source, and where the "
+        "completeness product has no measurement for the cell at any flux.")
+
+
 
 # Unit 0: PACS bands
 # Nothing is registered here. The datasets that carry the three PACS bands

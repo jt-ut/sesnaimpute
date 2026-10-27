@@ -918,6 +918,81 @@ class Tile:
         out[ok] = self.error[cy[ok], cx[ok]]
         return out
 
+    # -- artificial sources (the completeness stage's injection) ------------
+    def injection_half_width(self):
+        """Half-width in pixels of the square patch an artificial source is added on: the fitting box
+        plus one beam (the box of every fit and aperture of a source reaches this far), never beyond the
+        point-spread table's support."""
+        return int(min(self.table_half, self.half + np.ceil(self.beam_px)))
+
+    def _add_sources(self, x, y, flux, chunk=256):
+        """Adds, for each (x, y) in map pixels, `flux` (mJy) times the band's point-spread template to
+        the image in place (the mean of the template's scan columns, whose total over the plane is 1,
+        evaluated by `CachedPairedPSF.evaluate_xy`, the table the fit's own columns come from). Returns
+        the original pixels as `(x0, y0, patch)` triples so `_restore` can put them back."""
+        x = np.asarray(x, float)
+        y = np.asarray(y, float)
+        flux = np.broadcast_to(np.asarray(flux, float), x.shape)
+        h = self.injection_half_width()
+        side = 2 * h + 1
+        ny, nx = self.shape
+        offs = np.arange(side, dtype=float)
+        saved = []
+        for lo in range(0, x.size, chunk):
+            sl = slice(lo, lo + chunk)
+            cx = np.rint(x[sl]).astype(np.int64) - h
+            cy = np.rint(y[sl]).astype(np.int64) - h
+            px = np.broadcast_to(cx[:, None, None] + offs[None, None, :], (cx.size, side, side))
+            py = np.broadcast_to(cy[:, None, None] + offs[None, :, None], (cx.size, side, side))
+            resp = self._psf.evaluate_xy(x[sl], y[sl], px, py).mean(axis=1) * flux[sl][:, None, None]
+            for i in range(cx.size):
+                a0, b0 = max(cx[i], 0), max(cy[i], 0)
+                a1, b1 = min(cx[i] + side, nx), min(cy[i] + side, ny)
+                if a1 <= a0 or b1 <= b0:
+                    continue
+                saved.append((a0, b0, self.image[b0:b1, a0:a1].copy()))
+                self.image[b0:b1, a0:a1] += resp[i, b0 - cy[i]:b1 - cy[i], a0 - cx[i]:a1 - cx[i]].astype(np.float32)
+        return saved
+
+    def _restore(self, saved):
+        for a0, b0, patch in reversed(saved):          # last added, first undone: patches may overlap
+            self.image[b0:b0 + patch.shape[0], a0:a0 + patch.shape[1]] = patch
+
+    @contextmanager
+    def injected(self, x, y, flux):
+        """Inside the context the tile's image holds artificial point sources of total flux `flux` (mJy,
+        scalar or per source) at the map pixels (x, y), each the band's point-spread template; on exit the
+        real image is back, pixel for pixel. Every measurement made inside (`measure`, `fit_groups`, ...)
+        sees the sources, because they all read the tile's image."""
+        saved = self._add_sources(x, y, flux)
+        try:
+            yield self
+        finally:
+            self._restore(saved)
+
+    @contextmanager
+    def blank_image(self):
+        """Inside the context the tile's image is zero everywhere (the error layer is untouched), for
+        measuring what the machinery returns for a source on empty sky; restored on exit."""
+        real = self.image
+        self.image = np.zeros_like(real)
+        try:
+            yield self
+        finally:
+            self.image = real
+
+    @contextmanager
+    def inverted(self):
+        """Inside the context the tile's image is negated (the error layer untouched): a measurement made on
+        it is the measurement's response to the map's noise with every real positive source turned into a
+        negative one; restored on exit."""
+        real = self.image
+        self.image = -real
+        try:
+            yield self
+        finally:
+            self.image = real
+
 
 @contextmanager
 def open_tile(config, record):
