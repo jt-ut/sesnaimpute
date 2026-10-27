@@ -237,7 +237,7 @@ def derive(lib, laws=DEFAULT_LAWS, aperture_au=G_APERTURE_AU,
         "g_coverage_fraction": frac,
         "weighting": "response-weighted mean of F_nu in frequency "
                      "(matches sedfitter's band convention)",
-        "darkness_reference": "peak of the 8 bands synthesized at the G aperture",
+        "darkness_reference": "peak of SESNA's eight bands (definitions.SESNA_BANDS) synthesized at the G aperture",
         "dark_fraction_threshold": DARK_FRACTION,
     }
 
@@ -258,10 +258,12 @@ def derive(lib, laws=DEFAULT_LAWS, aperture_au=G_APERTURE_AU,
     g0 = _avg(sed, resp_g)
     g0_comp = _avg(sed_companion, resp_g) if sed_companion is not None else None
 
-    # Darkness reference: the eight bands at the SAME aperture, so the
-    # numerator and its reference share a beam (see module docstring).
+    # Darkness reference: SESNA's eight bands at the SAME aperture, so the
+    # numerator and its reference share a beam (see module docstring); never
+    # the PACS bands (planner ruling 2026-10-27, as curve_of_growth.peak_and_floor).
+    from sesnaimpute.definitions import SESNA_BANDS
     band_peak = np.zeros_like(g0)
-    for b in _BAND_KEYS:
+    for b in SESNA_BANDS:
         r = _response_on(nu_s, load_filter_curve(b))
         if np.trapz(r, nu_s) <= 0:
             continue

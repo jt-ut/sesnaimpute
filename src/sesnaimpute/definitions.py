@@ -90,7 +90,12 @@ class Selection:
     bands: tuple
 
 
-SELECTION = Selection(min_bands=2, bands=("J", "H", "Ks", "I1", "I2", "I3", "I4", "M1"))
+#: SESNA's own eight bands (2MASS J H Ks, IRAC I1-I4, MIPS M1): the bands the catalogue is built from.
+#: One name for one thing: SELECTION counts detections in them; the library flux floor and darkness
+#: reference take their peak over them (planner ruling 2026-10-27).
+SESNA_BANDS = ("J", "H", "Ks", "I1", "I2", "I3", "I4", "M1")
+
+SELECTION = Selection(min_bands=2, bands=SESNA_BANDS)
 
 #: Integer positions of the SELECTION bands in BANDS: what a numpy consumer
 #: indexes with.

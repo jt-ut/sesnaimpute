@@ -100,7 +100,7 @@ def peak_and_floor(flux_cubes, dex_below_peak=FLOOR_DEX_BELOW_PEAK):
     """Per-model flux floor from an ALREADY-READ {band: (n, n_ap)} dict
     -- no I/O.
 
-    `peak_i` is the max over model i's OWN full cube (every band, every
+    `peak_i` is the max over model i's OWN cube in SESNA's eight bands (every
     aperture), so the floor is scale-invariant and independent of the
     rest of the grid. Consumers that need "dark band" to mean the same
     thing must share this function rather than re-deriving it.
@@ -111,7 +111,11 @@ def peak_and_floor(flux_cubes, dex_below_peak=FLOOR_DEX_BELOW_PEAK):
     excluded upstream on other grounds; the flag is returned so a caller
     can assert rather than silently propagate a meaningless floor.
     """
-    bands = list(flux_cubes)
+    # the peak is taken over SESNA's eight bands only (planner ruling 2026-10-27): the floor is a numerical
+    # guard for the grid, and a far-infrared peak must not raise the floor -- or darken -- the near-infrared
+    # bands; the PACS bands take their floor from the same eight-band peak
+    from sesnaimpute.definitions import SESNA_BANDS
+    bands = [b for b in flux_cubes if b in SESNA_BANDS]
     n = flux_cubes[bands[0]].shape[0]
     peak_row = np.zeros(n)
     for band in bands:
