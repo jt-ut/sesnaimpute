@@ -4021,7 +4021,10 @@ _PHOTOMETRY_PACS_READINGS = {
         "level), enlarged for a source fitted jointly with a neighbour. Where ORIGIN is 2 it holds 0.99, the value the "
         "source table uses to mark an upper bound; NaN where the band does not cover the source. For a jointly fitted "
         "source the uncertainty is enlarged by the overlap but its completeness curve is still its cell's curve, so "
-        "the curve somewhat overstates its chance of detection."),
+        "the curve somewhat overstates its chance of detection. The noise has heavier tails than a Gaussian; it is "
+        "scaled so that 5-sigma excursions on empty sky are as rare as for Gaussian noise, which makes it conservative "
+        "in the core (on Musca, empty-sky excursions beyond -3 sigma occur at 0.6 / 0.9 / 0.9 of the Gaussian rate at "
+        "70 / 100 / 160 micron)."),
     "ORIGIN_{b}": ("origin code",
         "1 means the source is detected: its flux minus the typical empty-sky flux of its 30-arcsecond cell "
         "(CELL_OFFSET in the completeness product) is at least five times its uncertainty -- the same rule the "
@@ -4039,8 +4042,15 @@ _PHOTOMETRY_PACS_READINGS = {
     "EXTENDED_{b}": ("true or false",
         "True for a detected source whose measured width is more than 1.5 times the beam width, a sign that the emission is extended rather than a point source; false otherwise, including for every source that is not detected."),
 }
+_P160_NOTE = (" At 160 micron these fluxes sit at about 0.80 of eHOPS's published 160 micron fluxes for the same "
+              "protostars (Aquila, 117 sources), although the aperture, annulus, sky estimate and correction are "
+              "eHOPS's own and 70 and 100 micron agree with eHOPS within 1 per cent; the difference grows with "
+              "the annulus's closeness to the source and most likely lies in the maps. The 160 micron band also "
+              "contains the [C II] 158 micron line, and its beam is about 12 arcsec, so neighbours blend more.")
 for _band, _wave in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_units, _reading) in _PHOTOMETRY_PACS_READINGS.items():
-        REGISTRY[("photometry_pacs_source", _name.format(b=_band))] = (
-            _units, _reading.format(w=_wave, b=_band))
+        _text = _reading.format(w=_wave, b=_band)
+        if _band == "P160" and _name == "FNU_{b}_MJY":
+            _text += _P160_NOTE
+        REGISTRY[("photometry_pacs_source", _name.format(b=_band))] = (_units, _text)
 
