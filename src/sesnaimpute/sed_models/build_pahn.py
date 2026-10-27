@@ -52,7 +52,7 @@ PAHC_ALPHA_VALUES was calibrated (pahc_curate.py's own module header,
 spec section 7) to the fitter's resolution on composite colour, so
 every step across it is already a meaningful distinction, not a
 duplicate to merge away. This driver still computes the whitened
-8-band coordinates (`sampling.whiten`, the same per-band sampling
+11-band coordinates (`sampling.whiten`, the same per-band sampling
 sigma every library uses) and reports the minimum pairwise distance as
 a diagnostic -- never as a filter; see `build()`'s own printout.
 
@@ -96,8 +96,7 @@ from sesnaimpute.sed_models.curate import pahc_curate as pc
 from sesnaimpute.sed_models.constants import BANDS
 from sesnaimpute.sed_models.curate.model_convolution import build_convolved_band_fits
 
-SAMPLING_BANDS = pc.SAMPLING_BANDS   # the eight SESNA bands (constants)
-CONVOLVED_BANDS = tuple(BANDS)        # convolved/ carries all eleven bands
+CONVOLVED_BANDS = tuple(BANDS)        # all eleven: the convolved set and the sampling space
 R_NET_RADIUS = 1.0
 
 MODEL_CLASS = "PAHN"
@@ -200,7 +199,7 @@ def build_pahn_model_arrays(grid, wave_um, dl21):
     )
 
 
-def _approx_band_fluxes(wave_um_asc, values_asc, bands=SAMPLING_BANDS):
+def _approx_band_fluxes(wave_um_asc, values_asc, bands=CONVOLVED_BANDS):
     """Fast, independent per-band flux (n_models, len(bands)) for the
     in-process diagnostic table only -- pahc_curate._independent_band_flux,
     the same approximate convolution PAHC's own host-selection step uses

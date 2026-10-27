@@ -40,10 +40,10 @@ derivations):
   4. SED-space sampling: `sesnacomplete.sed_models.sampling` (Unit S's
      ONE shared whitened quotient-space r-net), replacing this driver's
      former private `quotient_space()`/`greedy_coverage_r_net()` call --
-     8-band log10 flux, divided per band by the project's sampling sigma
+     11-band log10 flux, divided per band by the project's sampling sigma
      (`constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR`), radius 1.0 in that
      whitened space. DARK_BANDS is 0 for every template in this library
-     (a pure line spectrum has positive flux in all 8 bands at every
+     (a pure line spectrum has positive flux in all 11 bands at every
      raw model, verified below), so `dark_mask` is all-False and no
      floor branch is exercised.
   5. assemble flux/parameters/classmap/members/models.conf for the KEPT
@@ -82,7 +82,7 @@ from sesnaimpute.sed_models.curate import h2shock_curate as pdc
 from sesnaimpute.sed_models.curate import model_io
 
 CONTRACT_PROFILE = "h2shock"
-CONVOLVED_BANDS = tuple(BANDS)   # all eleven; the sampling gate stays on pdc.SAMPLING_BANDS (eight)
+CONVOLVED_BANDS = tuple(BANDS)   # all eleven: the convolved set and the sampling space
 RADIUS = 1.0
 REGISTER_KEY = "h2shock"
 
@@ -205,8 +205,8 @@ def build():
           " (unbounded by design -- SESNA spans quiescent and OB-irradiated clouds alike)")
 
     # ---- Stage 4: SED-space sampling via the ONE shared sampler ----
-    band_fluxes = pdc.compute_band_fluxes(subset, level_index, grid, pdc.SAMPLING_BANDS)
-    stacked = np.column_stack([band_fluxes[b][idx_keep] for b in pdc.SAMPLING_BANDS])
+    band_fluxes = pdc.compute_band_fluxes(subset, level_index, grid, CONVOLVED_BANDS)
+    stacked = np.column_stack([band_fluxes[b][idx_keep] for b in CONVOLVED_BANDS])
     bad = ~np.isfinite(stacked) | (stacked <= 0)
     assert not np.any(bad), (
         f"{int(bad.sum())} of {stacked.size} raw-population band-flux entries are "

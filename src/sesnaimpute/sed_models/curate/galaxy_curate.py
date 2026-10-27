@@ -189,7 +189,7 @@ from scipy.spatial import cKDTree
 
 from sesnaimpute.sed_models.constants import (
     BANDS, C_UM_S, LIBRARY_SAMPLING_SIGMA_LOG_VECTOR, LOGD_STEP, MJY_TO_CGS,
-    POINT_SOURCE_APERTURE_AU, REFERENCE_DISTANCE_CM, SAMPLING_BANDS,
+    POINT_SOURCE_APERTURE_AU, REFERENCE_DISTANCE_CM, CONVOLVED_BAND_NAMES,
 )
 from sesnaimpute.sed_models.curate import model_io
 from sesnaimpute.sed_models.curate.model_convolution import (
@@ -1147,10 +1147,10 @@ class RawGridPhotometry:
 
 
 def compute_raw_grid_photometry(redshifted_dir, master_wave_um, band_filters,
-                                band_order=tuple(SAMPLING_BANDS)):
-    """The dense raw set's 8-band photometry, computed WITHOUT ever
+                                band_order=tuple(CONVOLVED_BAND_NAMES)):
+    """The dense raw set's 11-band photometry, computed WITHOUT ever
     materializing a (n_templates, n_z, n_wave) cube for a whole source:
-    one template's (n_z_kept, n_wave) block is built, convolved to 8
+    one template's (n_z_kept, n_wave) block is built, convolved to 11
     numbers per row, and discarded before the next template starts. Peak
     memory stays at one template's block, not the whole raw set's.
 

@@ -113,7 +113,7 @@ from astropy.table import Table
 from sesnaimpute.sed_models import paths
 from sesnaimpute.sed_models.constants import (
     CONVOLVED_BAND_NAMES, LOGD_STEP, POINT_SOURCE_APERTURE_AU,
-    REFERENCE_DISTANCE_CM, SAMPLING_BANDS,
+    REFERENCE_DISTANCE_CM,
 )
 from sesnaimpute.sed_models import library, sampling
 from sesnaimpute.sed_models.curate import curve_of_growth as cog
@@ -217,14 +217,14 @@ def _raw_model_name(tag, name, z):
 
 
 def _raw_grid_photometry(templates_by_tag, z_grid_by_tag, master_wave_um):
-    """The dense raw set's sampling-band (the eight SESNA bands) photometry -- THIS line's grid, driven
+    """The dense raw set's sampling-band (all eleven bands) photometry -- THIS line's grid, driven
     through galaxy_curate's fast internal convolution primitives
     (reused, not reimplemented). One parent template's (n_z, n_wave)
     block is built and discarded before the next starts.
 
-    Returns (tags, names, redshifts, band_flux_mjy[n, 8], band_order).
+    Returns (tags, names, redshifts, band_flux_mjy[n, 11], band_order).
     """
-    band_order = SAMPLING_BANDS
+    band_order = CONVOLVED_BAND_NAMES
     band_filters = gc.build_fast_band_filters(band_order, master_wave_um)
     tags, names, zs, blocks = [], [], [], []
     for tag in gc.SOURCE_TAGS:
@@ -249,7 +249,7 @@ def _floor_and_dark(band_flux, band_order):
     """The register's own B0/B0.1 convention (curve_of_growth.
     peak_and_floor: per-MODEL floor, 10 dex below that model's own peak
     flux over every band) -- reused, not a second floor invented for
-    sampling. Returns (log10_flux, dark_mask), both (n, 8), ready for
+    sampling. Returns (log10_flux, dark_mask), both (n, 11), ready for
     `sampling.whiten`."""
     flux_cubes = {b: band_flux[:, i:i + 1] for i, b in enumerate(band_order)}
     _peak, _floor_dex, floor_linear, all_zero = cog.peak_and_floor(flux_cubes)

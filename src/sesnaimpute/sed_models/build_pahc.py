@@ -132,10 +132,8 @@ from sesnaimpute.sed_models.curate import pahc_curate as pc
 from sesnaimpute.sed_models.curate.curve_of_growth import peak_and_floor
 from sesnaimpute.sed_models.curate.model_convolution import build_convolved_band_fits
 
-# The sampling gate, the host photospheres, the pedestal table and pahc_fstar stay on
-# the eight SESNA bands. The library's own convolved/ set (what the register reads)
-# is all eleven bands.
-SAMPLING_BANDS = pc.SAMPLING_BANDS   # the eight SESNA bands (constants)
+# The sampling gate, the host photospheres, the pedestal table, pahc_fstar and the
+# library's own convolved/ set are all the eleven bands.
 CONVOLVED_BANDS = tuple(BANDS)        # the eleven bands, in definitions order
 R_NET_RADIUS = 1.0
 
@@ -241,7 +239,7 @@ def _load_sps_raw_splice_z0(sps):
     return hosts, host_name, report
 
 
-def _host_band_flux(hosts, sps, wave_um, bands=SAMPLING_BANDS):
+def _host_band_flux(hosts, sps, wave_um, bands=CONVOLVED_BANDS):
     """(n_host, len(bands)) convolved flux of the BARE photosphere at
     each host -- the same per-host loop `pc.build_pahc_raw_band_flux`
     already runs internally (`load_sps_stellar_sed` + `resample_sed_log_log`
@@ -259,7 +257,7 @@ def _host_band_flux(hosts, sps, wave_um, bands=SAMPLING_BANDS):
     return out
 
 
-def _whiten_flux(flux, bands=SAMPLING_BANDS):
+def _whiten_flux(flux, bands=CONVOLVED_BANDS):
     """log10(floored flux) + dark mask -> `sampling.whiten` coords, via
     the shared per-model floor (`curve_of_growth.peak_and_floor`, 10 dex
     below each row's OWN peak across these bands) -- the same B0/B0.1
@@ -386,9 +384,9 @@ def _host_sed_values(hosts, sps, wave_um):
     return out
 
 
-def build_host_fstar(hosts, host_name, sps, wave_um, bands=SAMPLING_BANDS, log=print):
+def build_host_fstar(hosts, host_name, sps, wave_um, bands=CONVOLVED_BANDS, log=print):
     """`library/pahc_fstar`: one row per host, HOST (sps/_raw/
-    MODEL_NAME) + T_EFF + LOGG + Z_H + the eight REAL convolved band
+    MODEL_NAME) + T_EFF + LOGG + Z_H + the eleven REAL convolved band
     fluxes of the bare photosphere -- the exact construction the
     coordinator's ruling specifies, replacing the deleted
     `sed_models_register/pahc.py` fit.
@@ -433,7 +431,7 @@ def build_host_fstar(hosts, host_name, sps, wave_um, bands=SAMPLING_BANDS, log=p
     return table, host_s8, host_band
 
 
-def build_pedestal_table(dl21, wave_um, bands=SAMPLING_BANDS,
+def build_pedestal_table(dl21, wave_um, bands=CONVOLVED_BANDS,
                          alphas=None, pah_sizes=None, log=print):
     """The 33 (ALPHA x PAH_SIZE) unit-pedestal spectra -- `P(lambda;
     alpha, size)` in `compute_composite_sed`'s own notation, i.e.
@@ -481,7 +479,7 @@ def build_pedestal_table(dl21, wave_um, bands=SAMPLING_BANDS,
 
 
 def check_linear_identity(model_set, host_band, host_s8, pedestal_band, lib_dir,
-                          bands=SAMPLING_BANDS, n_sample=200, tol=1e-4, log=print):
+                          bands=CONVOLVED_BANDS, n_sample=200, tol=1e-4, log=print):
     """Stage 9, replacing the deleted `sed_models_register/pahc.py` fit:
     on a FIXED sample of `n_sample` kept templates, convolution is
     linear, so
@@ -537,7 +535,7 @@ def _build_grid_and_sample(hosts, sps, dl21, wave_um, log=print):
     flux = pc.build_pahc_raw_band_flux(
         hosts, host_idx, alpha_idx, pah_idx, r_idx,
         pc.PAHC_ALPHA_VALUES, pc.PAHC_PAH_SIZE_VALUES, pc.PAHC_R_VALUES,
-        sps, dl21, wave_um, bands=SAMPLING_BANDS)
+        sps, dl21, wave_um, bands=CONVOLVED_BANDS)
     coords = _whiten_flux(flux)
 
     t0 = time.time()
@@ -791,7 +789,7 @@ def build():
         assert has_pahc_fstar, "register carries no library/pahc_fstar table"
         assert n_fstar_rows == len(hosts), (
             f"library/pahc_fstar has {n_fstar_rows} rows, expected {len(hosts)} hosts")
-        expected_fstar_cols = {"HOST", "T_EFF", "LOGG", "Z_H"} | set(SAMPLING_BANDS)
+        expected_fstar_cols = {"HOST", "T_EFF", "LOGG", "Z_H"} | set(CONVOLVED_BANDS)
         assert fstar_cols == expected_fstar_cols, (
             f"library/pahc_fstar columns {sorted(fstar_cols)} != "
             f"{sorted(expected_fstar_cols)}")

@@ -147,7 +147,7 @@ from scipy.spatial import cKDTree
 from astropy.io import fits
 
 from sesnaimpute.sed_models.astro_utils import vega_color, color_error, reddening_vector_per_ak
-from sesnaimpute.sed_models.constants import (SAMPLING_BANDS, APERTURE_GRID_AU, BANDS, C_UM_S, GUTERMUTH_LABELS,
+from sesnaimpute.sed_models.constants import (APERTURE_GRID_AU, BANDS, C_UM_S, GUTERMUTH_LABELS,
                                      POINT_SOURCE_APERTURE_AU,
                                      PC_CM, REFERENCE_DISTANCE_CM)
 from sesnaimpute.sed_models.data_loader import load_filter_curve
@@ -833,10 +833,10 @@ def compute_composite_sed(s_resampled_mjy, p_hat_resampled, wave_um_ascending,
 # parameter grid crossing it against the host-free axes above.
 # ====================================================================
 
-# The 8 SESNA bands, in sed_models_register.density's own order
-# (constants.BANDS' key order -- density.py projects an 8-vector
+# The eleven bands, in sed_models_register.density's own order
+# (constants.BANDS' key order -- density.py projects an 11-vector
 # indexed this way, so the convolved fluxes fed to it MUST agree).
-PAHC_BAND_ORDER = SAMPLING_BANDS
+PAHC_BAND_ORDER = tuple(BANDS)
 
 # Minimum distinct SPS sources required to accept sps_dir as the RAW
 # splice rather than a down-sampled class library -- the splice is
@@ -932,7 +932,7 @@ def build_pahc_raw_grid(hosts, alphas=PAHC_ALPHA_VALUES, pah_sizes=PAHC_PAH_SIZE
 def build_pahc_raw_band_flux(hosts, host_idx, alpha_idx, pah_idx, r_idx,
                              alphas, pah_sizes, r_values,
                              sps_dir, dl21_dir, wave_um, bands=PAHC_BAND_ORDER):
-    """The 8-band convolved flux (n_raw, len(bands)) of EVERY raw grid
+    """The 11-band convolved flux (n_raw, len(bands)) of EVERY raw grid
     model, computed WITHOUT building or convolving 338,976 individual
     403-point SEDs.
 

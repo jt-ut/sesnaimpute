@@ -177,7 +177,8 @@ from sesnaimpute.sed_models.curate.yso_labeling import (
 # this line makes, matching sampling.py's own single such import.
 from sesnaimpute.sed_models.register import density
 
-GEOMETRIES = regstate.GEOMETRIES
+ALL_GEOMETRIES = regstate.GEOMETRIES
+GEOMETRIES = ALL_GEOMETRIES   # main(--geometries) narrows this for the timing run only
 
 MODEL_CLASS = "YSO"
 CLASS_LEGEND = (("YSO", "Young stellar object (Richardson 2024 / Robitaille 2017 RT grid)"),)
@@ -302,11 +303,18 @@ def resolve_paths(root_arg):
     pms_data_root = os.path.dirname(data_root.rstrip("/"))
     out_lib_dir = os.path.join(data_root, "yso")
     registers_dir = os.path.join(data_root, "registers")
+    if GEOMETRIES != ALL_GEOMETRIES:
+        # a restricted (timing) run never touches the real library or register
+        timing_root = os.path.join(data_root, "_yso_timing")
+        out_lib_dir = os.path.join(timing_root, "yso")
+        registers_dir = os.path.join(timing_root, "registers")
     # Sibling of yso/, NOT nested under it: `build`'s swap does
     # `rmtree(out_lib_dir)` before moving the staged build into place, so a
     # work_dir nested under out_lib_dir would delete the very staged build
     # it is about to move (the bug the SPS unit's line hit twice).
     work_dir = os.path.join(data_root, "_yso_build_work")
+    if GEOMETRIES != ALL_GEOMETRIES:
+        work_dir = os.path.join(timing_root, "_yso_build_work")
     return dict(data_root=data_root, yso_root=yso_root, sps_lib_dir=sps_lib_dir,
                dedup_source=dedup_source, pms_data_root=pms_data_root,
                out_lib_dir=out_lib_dir, registers_dir=registers_dir, work_dir=work_dir)
@@ -540,7 +548,7 @@ def run_dedup(model_id, mu, dark_mask, dedup_source, radius=R_NET_RADIUS, verbos
     # (YSO - matched SPS) difference onto that direction's own unit
     # vector is negative exactly when the implied A_V is negative.
     sigma_vec, _ = sampling.quotient_space()
-    av_law_whitened = density._av_law(sampling._SAMPLING_LAW, sampling.SAMPLING_BANDS) / sigma_vec
+    av_law_whitened = density._av_law(sampling._SAMPLING_LAW, BAND_ORDER) / sigma_vec
     av_dir = av_law_whitened / np.linalg.norm(av_law_whitened)
     diff = (mu[dup] / sigma_vec) - (sps_mu[nearest[dup]] / sigma_vec)
     n_bluer = int(np.sum((diff @ av_dir) < 0)) if dup.any() else 0
@@ -757,28 +765,29 @@ def build(data_root, radius=R_NET_RADIUS, verbose=True):
         "N_MEMBERS_PHOTOSPHERE_DUPLICATE does not sum to the gated pool's own dup count")
     _log("[accept] coverage/packing/FRAC/N_MEMBERS/parameters/dup-count asserts: PASS")
 
-    # Two targeted acceptance checks for the dark-band gate itself
-    # (coordinator's instruction): wXx3OKex_03 is a LEGITIMATE bright
-    # gray model (F_nu 35-45 mJy at every aperture, 1.2-24um) -- gray,
-    # not dark -- so the gate must NOT have removed it, and it should
-    # keep the single-digit N_MEMBERS its gray neighbours K8lVjk47_03
-    # and fTAkps5d_04 (N_MEMBERS=7) have, now that the 23,317 all-dark
-    # rows that whitened to the same origin-adjacent point are gone.
-    member_names = np.char.strip(np.asarray(members["MODEL_NAME"]).astype(str))
-    sentinel_row = np.flatnonzero(member_names == "wXx3OKex_03")
-    assert sentinel_row.size == 1, (
-        "wXx3OKex_03 is not a kept template after the dark-band gate -- "
-        "the gate removed a legitimate bright gray model, not only dark ones")
-    sentinel_n = int(members["N_MEMBERS"][sentinel_row[0]])
-    assert sentinel_n < 10, (
-        f"wXx3OKex_03 still has N_MEMBERS={sentinel_n} (expected single-digit, "
-        f"like K8lVjk47_03/fTAkps5d_04) -- the dark-band gate did not remove "
-        f"the all-dark rows that were inflating it")
-    sentinel_frac = {c[len('FRAC_'):]: float(members[c][sentinel_row[0]]) for c in frac_cols}
-    protostellar_like = sentinel_frac.get("C0", 0.0) + sentinel_frac.get("CI", 0.0) > 0.5
-    _log(f"[accept] wXx3OKex_03 kept, N_MEMBERS={sentinel_n} (was 23,317); "
-        f"FRAC={sentinel_frac}; still reads protostellar (C0+CI>0.5)? "
-        f"{protostellar_like} -- {'SECOND PROBLEM, reported not fixed' if protostellar_like else 'reads as a passive-disc star, as expected'}")
+    if GEOMETRIES == ALL_GEOMETRIES:   # the sentinel model lives in one geometry; a restricted run has no verdict on it
+        # Two targeted acceptance checks for the dark-band gate itself
+        # (coordinator's instruction): wXx3OKex_03 is a LEGITIMATE bright
+        # gray model (F_nu 35-45 mJy at every aperture, 1.2-24um) -- gray,
+        # not dark -- so the gate must NOT have removed it, and it should
+        # keep the single-digit N_MEMBERS its gray neighbours K8lVjk47_03
+        # and fTAkps5d_04 (N_MEMBERS=7) have, now that the 23,317 all-dark
+        # rows that whitened to the same origin-adjacent point are gone.
+        member_names = np.char.strip(np.asarray(members["MODEL_NAME"]).astype(str))
+        sentinel_row = np.flatnonzero(member_names == "wXx3OKex_03")
+        assert sentinel_row.size == 1, (
+            "wXx3OKex_03 is not a kept template after the dark-band gate -- "
+            "the gate removed a legitimate bright gray model, not only dark ones")
+        sentinel_n = int(members["N_MEMBERS"][sentinel_row[0]])
+        assert sentinel_n < 10, (
+            f"wXx3OKex_03 still has N_MEMBERS={sentinel_n} (expected single-digit, "
+            f"like K8lVjk47_03/fTAkps5d_04) -- the dark-band gate did not remove "
+            f"the all-dark rows that were inflating it")
+        sentinel_frac = {c[len('FRAC_'):]: float(members[c][sentinel_row[0]]) for c in frac_cols}
+        protostellar_like = sentinel_frac.get("C0", 0.0) + sentinel_frac.get("CI", 0.0) > 0.5
+        _log(f"[accept] wXx3OKex_03 kept, N_MEMBERS={sentinel_n} (was 23,317); "
+            f"FRAC={sentinel_frac}; still reads protostellar (C0+CI>0.5)? "
+            f"{protostellar_like} -- {'SECOND PROBLEM, reported not fixed' if protostellar_like else 'reads as a passive-disc star, as expected'}")
 
     kept_subclass = lib_payload["classmap"]["subclass"]
     n_c0 = int(np.sum(kept_subclass == "C0"))
@@ -862,7 +871,17 @@ def main(argv=None):
     parser.add_argument("data_root", help="sed_models data root "
                         "(e.g. .../SESNA_Complete/sed_models)")
     parser.add_argument("--radius", type=float, default=R_NET_RADIUS)
+    parser.add_argument("--geometries", nargs="+", default=None, metavar="GEOMETRY",
+                        help="TIMING RUN: read only these geometry folders (names from "
+                             "curate.yso_curation_state.GEOMETRIES); the library and register "
+                             "are written under <sed_models>/_yso_timing/, never over yso/")
     args = parser.parse_args(raw_args)
+    if args.geometries:
+        unknown = [g for g in args.geometries if g not in ALL_GEOMETRIES]
+        if unknown:
+            raise SystemExit(f"unknown geometries {unknown}; choose from {list(ALL_GEOMETRIES)}")
+        global GEOMETRIES
+        GEOMETRIES = tuple(g for g in ALL_GEOMETRIES if g in args.geometries)
     build(args.data_root, radius=args.radius)
     return 0
 

@@ -82,7 +82,7 @@ from astropy.io import fits
 from scipy.spatial import cKDTree
 
 from sesnaimpute.sed_models.constants import PLANCK_H, SPEED_OF_LIGHT_CM_S, C_UM_S, BANDS
-from sesnaimpute.sed_models.constants import SAMPLING_BANDS
+from sesnaimpute.sed_models.constants import CONVOLVED_BAND_NAMES
 from sesnaimpute.sed_models.curate import model_io
 from sesnaimpute.sed_models.curate.pahc_curate import extended_log_grid
 from sesnaimpute.sed_models.curate.model_convolution import (
@@ -1070,7 +1070,7 @@ def write_models_conf(out_path, name=DEFAULT_MODEL_SET_NAME):
 # WHAT THIS STAGE DOES. The physical cuts (Stage 5) answer "which raw
 # Paris-Durham models are physical"; this stage answers "how many of
 # those does sedfitter actually need to tell them apart." Two raw models
-# whose 8-band SEDs sit within one noise length of each other are
+# whose 11-band SEDs sit within one noise length of each other are
 # indistinguishable to the fit, so shipping both as separate templates
 # adds nothing but chi^2-grid size. This is NOT a strata budget, NOT an
 # interpolation, and NOT a weight -- it is a single global r-net in the
@@ -1126,7 +1126,7 @@ def write_models_conf(out_path, name=DEFAULT_MODEL_SET_NAME):
 # Gaia quantity -- it is purely geometric bookkeeping of which raw
 # models a kept template stands in for.
 
-#: The register's own 8-band order -- the same bands every
+#: The register's own 11-band order -- the same bands every
 #: sed_models_register quotient space is built over. This library's
 #: convolved/ set already matches it exactly (CONVOLVED_BANDS in
 #: build/h2shock.py), so no band is excluded from the sampling space.
@@ -1140,7 +1140,7 @@ SAMPLING_PARAM_AXES = PARAM_COLUMNS[:6]
 
 
 def raw_model_sed_coordinates(lines, level_index, grid, keep_idx, quotient_space,
-                              bands=SAMPLING_BANDS):
+                              bands=CONVOLVED_BAND_NAMES):
     """Quotient-space coordinates for every model in `keep_idx` (an
     integer row-index array into the full `grid`), via the SAME exact
     line-spectrum band-flux weights `compute_band_fluxes` uses

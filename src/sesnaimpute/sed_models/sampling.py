@@ -19,8 +19,8 @@ BOTH extinction laws (the fit marginalises over which law is right, so
 both reddening directions are nuisance to it). That is the wrong space
 for SAMPLING: the r-net's job is to decide how finely the SED shape
 needs to be gridded given the SURVEY's per-band calibration floor, and
-mixing eight bands of different floor (2MASS 0.010 dex, IRAC 0.013,
-MIPS24 0.017, doubled -- `constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR`)
+mixing eleven bands of different floor (2MASS 0.010 dex, IRAC 0.013,
+MIPS24 0.017, PACS 0.021, doubled -- `constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR`)
 through an UN-whitened projector under one isotropic radius (what the
 duplicated r-nets above did, radius = SIGEFF, a single scalar) measures
 distance in units that are too fine in the best-calibrated bands and
@@ -36,7 +36,7 @@ is enough to state "two SEDs differing only by scale and reddening
 along this law are not what the r-net should distinguish"; the
 SECOND law in `density.DEFAULT_LAWS` is the FITTER's law-choice
 uncertainty, not a sampling nuisance, so it stays IN this module's
-6-D space (d = 8 - 2 = 6, not density.py's d = 5). The construction
+9-D space (d = 11 - 2 = 9, not density.py's d = 8). The construction
 method is reused verbatim from `density.build_quotient_space` (SVD of
 the nuisance columns, not Gram-Schmidt -- the two laws are nearly
 collinear, cos 0.999337, so Gram-Schmidt loses orthogonality there;
@@ -84,15 +84,13 @@ import numpy as np
 from astropy.table import Column, Table
 from scipy.spatial import cKDTree
 
-from sesnaimpute import definitions
 from sesnaimpute.sed_models.constants import LIBRARY_SAMPLING_SIGMA_LOG_VECTOR
-from sesnaimpute.sed_models.constants import SAMPLING_BANDS as _CONST_SAMPLING_BANDS
+from sesnaimpute.sed_models.constants import CONVOLVED_BAND_NAMES
 
-#: The library sampler works in the eight SESNA bands (definitions.SELECTION),
-#: the curation space every library was curated in; the PACS bands are
-#: convolved onto the curated models afterwards and do not move the sample.
-SAMPLING_BANDS = _CONST_SAMPLING_BANDS
-BANDS_ORDER = tuple(definitions.BANDS_BY_KEY)
+#: The library sampler works in all eleven bands (2MASS, IRAC, MIPS, PACS) at the sampling
+#: scale `LIBRARY_SAMPLING_SIGMA_LOG_DEX` per band; templates that differ only in the far
+#: infrared stay distinct.
+N_BANDS = len(CONVOLVED_BAND_NAMES)
 from sesnaimpute.sed_models.register import density
 
 __all__ = ["quotient_space", "whiten", "r_net", "assign", "coverage",
@@ -110,22 +108,21 @@ def quotient_space():
     """`(sigma_vec, projector)`.
 
     `sigma_vec` : `constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR` as an
-    (8,) float array -- the per-band sampling sigma (twice the surveys'
+    (11,) float array -- the per-band sampling sigma (twice the surveys'
     published absolute-calibration floor; see that constant).
 
-    `projector` : the (8, 8) orthogonal projector onto the complement of
+    `projector` : the (11, 11) orthogonal projector onto the complement of
     {gray, `_SAMPLING_LAW`} IN THE WHITENED space, i.e. built from those
     two nuisance columns divided by `sigma_vec` -- `density.
     build_quotient_space`'s SVD construction, reused verbatim, applied
     to the whitened columns rather than the raw ones. Rank-checked
-    rather than assumed: a projector onto fewer than 6 dimensions would
+    rather than assumed: a projector onto fewer than 9 dimensions would
     mean the two whitened nuisance columns had become linearly
     dependent, which should not happen for two different directions.
     """
-    sigma_vec = np.asarray(LIBRARY_SAMPLING_SIGMA_LOG_VECTOR, dtype=float)[
-        [list(BANDS_ORDER).index(b) for b in SAMPLING_BANDS]]
+    sigma_vec = np.asarray(LIBRARY_SAMPLING_SIGMA_LOG_VECTOR, dtype=float)
     gray = np.ones(sigma_vec.shape[0])
-    av_law = density._av_law(_SAMPLING_LAW, SAMPLING_BANDS)
+    av_law = density._av_law(_SAMPLING_LAW, CONVOLVED_BAND_NAMES)
     nuisance = np.column_stack([gray, av_law]) / sigma_vec[:, None]
 
     # SVD, not Gram-Schmidt: see module header and density.py's own note
@@ -138,20 +135,20 @@ def quotient_space():
             f"columns (gray, {_SAMPLING_LAW}) to have rank 2, got {rank} "
             f"(singular values {s.tolist()})"
         )
-    basis = U[:, rank:]          # (8, 6) orthonormal columns, the kept space
-    projector = basis @ basis.T  # (8, 8), onto the 6-D complement
+    basis = U[:, rank:]          # (11, 9) orthonormal columns, the kept space
+    projector = basis @ basis.T  # (11, 11), onto the 9-D complement
     return sigma_vec, projector
 
 
 def whiten(log10_flux, dark_mask):
-    """`log10_flux` (n, 8), `dark_mask` (n, 8) -> `coords` (n, 8).
+    """`log10_flux` (n, 11), `dark_mask` (n, 11) -> `coords` (n, 11).
 
     Divides by `sigma_vec` per band, then applies the projector from
-    `quotient_space()`. The result stays (n, 8): the projector removes
+    `quotient_space()`. The result stays (n, 11): the projector removes
     two dimensions' worth of VARIANCE, not two columns, so two models
     differing only in scale/reddening along `_SAMPLING_LAW` land at the
     same point rather than at a shorter vector -- distances computed on
-    the full 8 columns equal distances computed on a 6-D basis for the
+    the full 11 columns equal distances computed on a 9-D basis for the
     kept subspace, with no reduction step needed before `r_net`.
 
     `dark_mask` is validated for shape parity and otherwise unused here
@@ -160,8 +157,8 @@ def whiten(log10_flux, dark_mask):
     """
     log10_flux = np.asarray(log10_flux, dtype=float)
     dark_mask = np.asarray(dark_mask, dtype=bool)
-    if log10_flux.ndim != 2 or log10_flux.shape[1] != 8:
-        raise ValueError(f"whiten: log10_flux must be (n, 8), got {log10_flux.shape}")
+    if log10_flux.ndim != 2 or log10_flux.shape[1] != N_BANDS:
+        raise ValueError(f"whiten: log10_flux must be (n, {N_BANDS}), got {log10_flux.shape}")
     if dark_mask.shape != log10_flux.shape:
         raise ValueError(
             f"whiten: dark_mask shape {dark_mask.shape} != "

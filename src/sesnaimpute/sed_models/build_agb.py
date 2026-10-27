@@ -95,11 +95,10 @@ from sesnaimpute.sed_models.curate.agb_curate import (
     AGB_PROVENANCE_FILT_ZP,
     AGB_SUBCLASS_LEGEND,
     AGB_ZH,
-    BANDS8,
     CONVMETH_NOTE,
     GRAMS_LICENSE,
     MODELS_CONF_NAME,
-    agb_band8_log10_fluxes,
+    agb_band_log10_fluxes,
     apply_evolved_teff_cut,
     assign_agb_names,
     build_agb_rows,
@@ -226,9 +225,9 @@ def build(root):
           "spacing is 200 K so this is sub-node)")
 
     print("stage 4  sample (shared whitened quotient space, radius=1.0)")
-    log10_raw = agb_band8_log10_fluxes(rows, wave_um_desc, bands=BANDS8)
+    log10_raw = agb_band_log10_fluxes(rows, wave_um_desc, bands=CONVOLVED_BAND_NAMES)
     linear_raw = 10.0 ** log10_raw
-    flux_cubes = {b: linear_raw[:, i:i + 1] for i, b in enumerate(BANDS8)}
+    flux_cubes = {b: linear_raw[:, i:i + 1] for i, b in enumerate(CONVOLVED_BAND_NAMES)}
     _, _, floor_linear_row, all_zero = peak_and_floor(flux_cubes)
     if all_zero.any():
         raise AssertionError(

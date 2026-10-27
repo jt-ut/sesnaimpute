@@ -913,12 +913,12 @@ def apply_evolved_teff_cut(rows, teff_max=AGB_EVOLVED_TEFF_MAX_K, verbose=True):
 # ====================================================================
 
 
-def agb_band8_log10_fluxes(rows, wave_um_desc, bands=BANDS8):
-    """(n, 8) log10 band flux array, one row per element of `rows`, in
+def agb_band_log10_fluxes(rows, wave_um_desc, bands=CONVOLVED_BAND_NAMES):
+    """(n, 11) log10 band flux array, one row per element of `rows`, in
     `bands` order -- `reference_convolve` applied to each row's own
     common-grid spectrum (`values_desc`), the SAME convolution Stage 5's
     validator and the register's own reference pipeline use. This is the
-    "8 log10 band fluxes" the owner's sampling spec projects into the
+    "11 log10 band fluxes" the owner's sampling spec projects into the
     quotient space; it is computed directly from the curated spectra, not
     from any already-written convolved/*.fits (none exist yet at this
     point in the pipeline -- Stage 2.75 runs before Stage 4/5)."""
@@ -932,7 +932,7 @@ def agb_band8_log10_fluxes(rows, wave_um_desc, bands=BANDS8):
     if bad.any():
         bad_names = [rows[i].get("name", rows[i]["source_row"]) for i in np.flatnonzero(bad)[:5]]
         raise ValueError(
-            f"agb_band8_log10_fluxes: {int(bad.sum())} row(s) have a non-finite or "
+            f"agb_band_log10_fluxes: {int(bad.sum())} row(s) have a non-finite or "
             f"non-positive band flux, e.g. {bad_names}; cannot take log10")
     return np.log10(out)
 
@@ -997,7 +997,7 @@ def greedy_rnet(coords, radius):
     return np.sort(np.asarray(kept, dtype=int))
 
 
-def sample_agb_templates(rows, wave_um_desc, sigma_log_by_band, bands=BANDS8, verbose=True):
+def sample_agb_templates(rows, wave_um_desc, sigma_log_by_band, bands=CONVOLVED_BAND_NAMES, verbose=True):
     """Stage 2.75: the owner library spec's sampling step (2026-10-08
     greedy-maximum-coverage correction -- see `greedy_rnet`'s docstring
     for why there is no medoid-repair pass and no seed).
@@ -1015,13 +1015,13 @@ def sample_agb_templates(rows, wave_um_desc, sigma_log_by_band, bands=BANDS8, ve
     read from any sed_models_register product (an earlier catalogue-
     derived SIGMA_LOG read was retired by the same ruling -- its source
     files no longer exist). This function is agnostic to where the vector
-    came from; it only requires BANDS8 order and shape.
+    came from; it only requires CONVOLVED_BAND_NAMES order and shape.
 
     Builds the 5-D quotient space from `sigma_log_by_band`
     (`sed_models_register.density.build_quotient_space` -- READ-ONLY use
     of the register's own projector/basis machinery; no register product
     is read or written here), projects every one of the 1,892 curated
-    rows' 8 log10 band fluxes into it, runs `greedy_rnet` at radius
+    rows' 11 log10 band fluxes into it, runs `greedy_rnet` at radius
     `space.sigma_eff` -- one noise length -- to get the KEPT templates
     (centrally placed in their eventual represented sets by construction,
     since each is chosen while it still has the most uncovered
@@ -1053,7 +1053,7 @@ def sample_agb_templates(rows, wave_um_desc, sigma_log_by_band, bands=BANDS8, ve
             f"sigma_log_by_band must be shape ({len(bands)},) in {bands} order, "
             f"got {sigma_log_by_band.shape}")
 
-    log10_flux8 = agb_band8_log10_fluxes(rows, wave_um_desc, bands=bands)
+    log10_flux8 = agb_band_log10_fluxes(rows, wave_um_desc, bands=bands)
 
     space = _density.build_quotient_space(
         laws=_density.DEFAULT_LAWS, sigma_log=sigma_log_by_band, bands=bands,
@@ -1635,7 +1635,7 @@ def curate_agb_model_set(grams_o_path, grams_c_path, output_root, overwrite=True
     metadata for all 1,892 curated rows.
 
     `sigma_log_by_band` : the per-band sampling-scale sigma_log in dex, in
-    BANDS8 order -- `constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR` in
+    CONVOLVED_BAND_NAMES order -- `constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR` in
     production (owner ruling, 2026-10-08): TWICE the surveys' own
     published absolute-calibration systematics floor (a derived literature
     constant -- see that constant's docstring for the factor-of-2
@@ -1661,7 +1661,7 @@ def curate_agb_model_set(grams_o_path, grams_c_path, output_root, overwrite=True
         raise ValueError(
             "curate_agb_model_set requires sigma_log_by_band -- the sampling-scale "
             "per-band sigma_log vector (constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR "
-            "in production), in BANDS8 J,H,Ks,I1,I2,I3,I4,M1 order. No placeholder "
+            "in production), in CONVOLVED_BAND_NAMES order (the eleven bands). No placeholder "
             "is invented here.")
     if convolved_bands is None:
         convolved_bands = CONVOLVED_BAND_NAMES
