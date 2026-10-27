@@ -202,7 +202,7 @@ _TWOMASS_ROW_COLUMNS = (
 #: `.SPITZER` (the two files are calibrated differently and are
 #: converted to flux through the zero point that matches each one's own
 #: system).
-BAND_KEYS = tuple(b.key for b in definitions.BANDS)
+BAND_KEYS = definitions.SELECTION.bands
 N_BANDS = len(BAND_KEYS)
 _BAND_SOURCE = {
     "J": ("2mass", "MJ"), "H": ("2mass", "MH"), "Ks": ("2mass", "MK"),

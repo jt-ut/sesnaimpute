@@ -1370,7 +1370,8 @@ def write_histograms(config, region, result):
 # region's population (the model side needs it) -- no new product.
 # ---------------------------------------------------------------------------
 
-_BAND_KEYS = tuple(b.key for b in definitions.BANDS)
+_BAND_KEYS = definitions.SELECTION.bands
+_SEL = list(definitions.SELECTION_INDEX)
 _IDX_J = _BAND_KEYS.index("J")
 _IDX_KS = _BAND_KEYS.index("Ks")
 _ZP_J_JY = definitions.BANDS_BY_KEY["J"].vega_zero_point_jy
@@ -1385,7 +1386,7 @@ RED_TAIL_JK_CUT_MAG = 1.5
 def _ejk_per_ak(config, a_local):
     """`kappa_J(a) - kappa_Ks(a)`, the hybrid law's own J-Ks reddening per
     unit A_K (`c18_diag/c24_tests.py`'s `ejk_per_ak`, reused exactly)."""
-    k = selection.kappa_hybrid(config, selection.law_dense_weight(a_local))
+    k = selection.kappa_selection(config, w=selection.law_dense_weight(a_local))
     return k[..., _IDX_J] - k[..., _IDX_KS]
 
 
@@ -1398,8 +1399,8 @@ def _red_tail_share_obs(config, region, pix):
     with h5py.File(cat_path, "r") as f:
         gl = np.asarray(f["GAL_L_DEG"][:], dtype=np.float64)
         gb = np.asarray(f["GAL_B_DEG"][:], dtype=np.float64)
-        fnu = np.asarray(f["FNU_MJY"][:], dtype=np.float64)
-        origin = np.asarray(f["ORIGIN_FNU"][:], dtype=np.int64)
+        fnu = np.asarray(f["FNU_MJY"][:], dtype=np.float64)[:, _SEL]
+        origin = np.asarray(f["ORIGIN_FNU"][:], dtype=np.int64)[:, _SEL]
     fk, okk = fnu[:, _IDX_KS], origin[:, _IDX_KS] == 1
     fj, okj = fnu[:, _IDX_J], origin[:, _IDX_J] == 1
     ks = np.where(okk, -2.5 * np.log10(np.where(okk, fk, 1.0) / (_ZP_KS_JY * 1.0e3)), np.nan)

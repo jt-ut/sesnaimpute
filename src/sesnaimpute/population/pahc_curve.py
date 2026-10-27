@@ -200,7 +200,8 @@ _STEM = "curve_pahc_survey"
 # constants block -- every number cited
 # ---------------------------------------------------------------------------
 
-BAND_KEYS = tuple(b.key for b in definitions.BANDS)
+BAND_KEYS = definitions.SELECTION.bands
+_SEL = list(definitions.SELECTION_INDEX)
 IDX_I1, IDX_I2, IDX_I4 = BAND_KEYS.index("I1"), BAND_KEYS.index("I2"), BAND_KEYS.index("I4")
 ZERO_POINT_MJY = np.array([constants.VEGA_ZERO_POINT_MJY[k] for k in BAND_KEYS], dtype=np.float64)
 
@@ -470,9 +471,9 @@ def region_measurement(config, region, colour_knots, colour45_median):
             f"population.pahc_curve: curated catalogue missing for region {region!r} "
             f"at {src_path!r} -- run the 'catalog.curated' RUNBOOK line first")
     with h5py.File(src_path, "r") as f:
-        fnu = f["FNU_MJY"][:]
-        sigma = f["SIGMA_FNU_MJY"][:]
-        origin = f["ORIGIN_FNU"][:]
+        fnu = f["FNU_MJY"][:][:, _SEL]
+        sigma = f["SIGMA_FNU_MJY"][:][:, _SEL]
+        origin = f["ORIGIN_FNU"][:][:, _SEL]
 
     measured = np.all(origin[:, ELIGIBLE_BAND_IDX] == 1, axis=1)
     flux2 = fnu[:, ELIGIBLE_BAND_IDX]
@@ -504,7 +505,7 @@ def region_measurement(config, region, colour_knots, colour45_median):
         config, "sky/derived", "adopted", "extinction", "source", region=region)
     a_col_all = access.per_source(config, region, a_col_path, ["A_COL_K"])["A_COL_K"]
     a_col = np.asarray(a_col_all, dtype=np.float64)[eligible]
-    kappa = selection_module.kappa_hybrid(config, selection_module.law_dense_weight(a_col))
+    kappa = selection_module.kappa_selection(config, w=selection_module.law_dense_weight(a_col))
     kappa1, kappa2, kappa4 = kappa[:, IDX_I1], kappa[:, IDX_I2], kappa[:, IDX_I4]
 
     # q reads the predicted photospheric 8 micron flux, never the

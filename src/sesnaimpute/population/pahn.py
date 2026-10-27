@@ -137,7 +137,8 @@ _STEM_SOURCE = "weight_pahn_source"
 # constants block -- every number cited
 # ---------------------------------------------------------------------------
 
-BAND_KEYS = tuple(b.key for b in definitions.BANDS)
+BAND_KEYS = definitions.SELECTION.bands
+_SEL = list(definitions.SELECTION_INDEX)
 IDX_I1, IDX_I2, IDX_I3, IDX_I4 = (BAND_KEYS.index(k) for k in ("I1", "I2", "I3", "I4"))
 
 #: The pattern's own bin width in log10(I4 50%-completeness limit, mJy)
@@ -245,8 +246,8 @@ def _pattern_match(config, region, pix512):
             "population.pahn: no curated catalogue for %r at %s -- run the "
             "'sesnaimpute.catalog.curated' RUNBOOK line first" % (region, cat_path))
     with h5py.File(cat_path, "r") as f:
-        fnu = f["FNU_MJY"][:]
-        origin = f["ORIGIN_FNU"][:]
+        fnu = f["FNU_MJY"][:][:, _SEL]
+        origin = f["ORIGIN_FNU"][:][:, _SEL]
         gl = np.asarray(f["GAL_L_DEG"][:], dtype=np.float64)
         gb = np.asarray(f["GAL_B_DEG"][:], dtype=np.float64)
         name = np.asarray(f["NAME"][:])
@@ -458,8 +459,8 @@ def pattern_f45_1kpc(config, region, log10_ratio_i2_i4):
             "population.pahn: no curated catalogue for %r at %s -- run the "
             "'sesnaimpute.catalog.curated' RUNBOOK line first" % (region, cat_path))
     with h5py.File(cat_path, "r") as f:
-        fnu = f["FNU_MJY"][:]
-        origin = f["ORIGIN_FNU"][:]
+        fnu = f["FNU_MJY"][:][:, _SEL]
+        origin = f["ORIGIN_FNU"][:][:, _SEL]
     pattern = pattern_mask(fnu, origin)
     f_i4_obs_mjy = fnu[pattern, IDX_I4]
     log10_f_ref_i4_1kpc = np.log10(f_i4_obs_mjy * scale_1kpc)
