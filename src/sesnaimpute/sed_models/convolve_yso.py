@@ -14,21 +14,23 @@ uses, 32% of spubsmi models and 37% of s-p-hmi models carried a PACS
 160 flux of exactly zero (13-25% P70/P100, 1.4-18% MIPS 24, 0.2-13%
 IRAC 8) -- a fabricated measurement, not a real zero.
 
-THE CONVOLUTION (`convolve_cube`): per model, aperture and band,
-    flux = sum_finite(F * R) / sum_finite(R) * sum_all(R)
-with R the sedfitter-normalised filter rebinned onto the cube's own
-frequency grid (exactly as the old PACS-only `convolve_cube` did), the
-sums over wavelength samples. A cell is UNDEFINED (NaN) when
-sum_finite(R) < 0.5 * sum_all(R) (less than half the filter's weight
-sits on finite samples) -- which also covers "no sample finite at all"
-as a special case. Where every in-band sample is finite this reduces
-exactly to sum_finite(R) == sum_all(R), so flux == sum(F*R): today's
-plain sedfitter sum. TOTAL_FLUX_ERR mirrors the SAME arithmetic with
-UNCERTAINTIES' sigma in place of F (summed, not quadrature -- that is
-what the release itself did), using F's own finite mask, NaN wherever
-flux is NaN. Negative raw samples (float noise, ~1e-11 mJy) are kept
-as-is; no clamp lives here -- the per-model flux floor clamp downstream
-(`curve_of_growth`) is unchanged.
+THE FILL, THEN THE CONVOLUTION (amendment 2026-10-27, owner YES;
+AMENDMENT_fill_rule.md). An undefined aperture is a resolution limit of
+the model's own aperture set, not absent flux (Richardson et al. 2024,
+ApJ 961, 2, sec. III.7; the original release filled it with the closest
+valid flux, which artificially brightened inner apertures). Per model and
+wavelength sample, apertures ABOVE the model's all-wavelength-undefined
+prefix that are undefined are filled by inward power-law extrapolation of
+the model's own curve of growth from the two nearest defined apertures
+above (slope clamped to [0, 3]; fewer than two -> stays undefined) --
+`fill_apertures`. The completed SED is then convolved over ALL samples,
+flux = sum(F * R), no renormalisation; a (model, aperture, band) cell is
+NaN only if a sample the filter covers is still undefined after the fill.
+TOTAL_FLUX_ERR is the same sum of the UNCERTAINTIES (summed, as the
+release did), NaN where flux is NaN or a covered sample was filled.
+Negative raw samples (float noise, ~1e-11 mJy) are kept as-is; the clamp
+lives downstream (`curve_of_growth`). Where every covered raw sample is
+finite the value equals the release's sedfitter sum.
 
 Read-only input: each geometry's own raw `flux.fits` (VALUES +
 UNCERTAINTIES), nothing else from the release. Output: one file per
@@ -89,81 +91,154 @@ PACS_BANDS = tuple(b for b in BANDS if BANDS[b].survey == "PACS")
 #: `yso_labeling.ASSEMBLY_BANDS`.
 YSO_BANDS = tuple(BANDS)
 
-#: Models per chunk: 20000 x 200 wavelengths x 4 bytes = 16 MB per read
-#: (doubled when UNCERTAINTIES is also read).
-CHUNK_MODELS = 20000
+#: Models per chunk: 5000 x 20 apertures x 200 wavelengths x 8 bytes
+#: (float64) = 160 MB per working array; the fill and the eleven-band
+#: convolution run on the whole (model, aperture, wavelength) block at once.
+CHUNK_MODELS = 5000
 
-#: Fraction of the filter's total response weight that must sit on
-#: finite samples for a (model, aperture) cell to be DEFINED; below
-#: this (including zero, i.e. no finite sample at all) the cell is
-#: UNDEFINED, stored as NaN (brief Part 1).
-MIN_FINITE_WEIGHT_FRAC = 0.5
+#: Clamp on the inward power-law slope of a model's curve of growth: a
+#: curve of growth cannot fall outward (0); 2 is uniform surface
+#: brightness, 3 the ceiling against a noisy pair (amendment, 2026-10-27).
+SLOPE_MIN, SLOPE_MAX = 0.0, 3.0
+
+FILL_RULE_SENTENCE = (
+    "A model's aperture that its radiative transfer could not resolve at one wavelength, "
+    "but resolved at others, is filled at that wavelength by extending the model's own "
+    "curve of growth inward as a power law through its two nearest defined larger apertures "
+    "(slope limited to 0 to 3), as in Richardson et al. 2024, ApJ 961, 2, sec. III.7, "
+    "without the original release's brightening; apertures undefined at every wavelength "
+    "stay undefined, and a band is NaN only if a sample it covers is still undefined.")
 
 
 # ==========================================================================
-# PART 1 -- THE CONVOLUTION (YSO)
+# PART 1 -- THE FILL AND THE CONVOLUTION (YSO)
 # ==========================================================================
 
-def convolve_cube(flux_fits, filt, chunk=CHUNK_MODELS, limit=None):
-    """(n_model, n_ap) band flux and flux_err in mJy of every model of a
-    flux.fits cube through sedfitter Filter `filt` (already normalised),
-    undefined (model, aperture) cells NaN rather than 0 -- see module
-    docstring for the exact formula and the UNDEFINED rule.
+def fill_apertures(v, log_ap):
+    """Fill, IN PLACE, the undefined cells of `v` (n, n_ap, n_wav), float64,
+    that lie above each model's all-wavelength-undefined PREFIX, by inward
+    power-law extrapolation of the model's own curve of growth at that
+    wavelength (amendment 2026-10-27; Richardson et al. 2024 sec. III.7).
 
-    `limit`, if given, processes only the FIRST `limit` models of the raw
-    cube (by its own row order) -- actually bounds the compute, not just
-    the returned array, so a timing/verification slice of a 720k-model
-    geometry (e.g. spubsmi) costs proportionally to `limit`, not to the
-    whole cube.
+    Defined = finite and > 0; sources are ORIGINALLY defined cells only
+    (a filled cell is never a source). For an undefined cell (k, w) with
+    the two nearest defined apertures above it j1 < j2:
+        s = log10(F(j2)/F(j1)) / log10(a_j2/a_j1),  clamped to [0, 3]
+        log10 F(k) = log10 F(j1) - s * log10(a_j1 / a_k)
+    Fewer than two defined above -> the cell stays undefined. The prefix
+    is the leading run of apertures with NO finite sample at any
+    wavelength; it is never filled.
 
-    Returns (flux, flux_err, undefined, fully_finite, names, ap_au).
-    flux_err is None if the cube carries no UNCERTAINTIES extension.
-    fully_finite (n, n_ap) bool: True where every in-band (R>0) sample
-    was finite -- a strict subset of ~undefined, used only to restrict
-    the release ratio-check to cells with no missing sample at all.
-    """
+    Returns (filled (n,n_ap,n_wav) bool, steps (n,n_ap,n_wav) int8: the
+    aperture-index distance k -> j1 of every filled cell (0 elsewhere),
+    left (n,n_ap,n_wav) bool: undefined above the prefix and not filled).
+    Vectorised over models and wavelengths; one backward pass over the
+    apertures."""
+    n, n_ap, n_wav = v.shape
+    has_fin = np.isfinite(v).any(axis=2)
+    first_fin = np.where(has_fin.any(axis=1), has_fin.argmax(axis=1), n_ap)
+    prefix = np.arange(n_ap)[None, :] < first_fin[:, None]          # (n, n_ap)
+
+    filled = np.zeros(v.shape, dtype=bool)
+    steps = np.zeros(v.shape, dtype=np.int8)
+    left = np.zeros(v.shape, dtype=bool)
+    l1 = np.zeros((n, n_wav)); l2 = np.zeros((n, n_wav))
+    a1 = np.zeros((n, n_wav)); a2 = np.zeros((n, n_wav))
+    j1 = np.zeros((n, n_wav), dtype=np.int16)
+    have1 = np.zeros((n, n_wav), dtype=bool)
+    have2 = np.zeros((n, n_wav), dtype=bool)
+    for k in range(n_ap - 1, -1, -1):
+        vk = v[:, k, :]
+        defined = np.isfinite(vk) & (vk > 0)
+        undef = ~np.isfinite(vk) & ~prefix[:, k][:, None]
+        tgt = undef & have2
+        left[:, k, :] = undef & ~have2
+        if tgt.any():
+            with np.errstate(invalid="ignore", divide="ignore"):
+                s = np.clip((l2 - l1) / (a2 - a1), SLOPE_MIN, SLOPE_MAX)
+            lf = l1 - s * (a1 - log_ap[k])
+            vk[tgt] = 10.0 ** lf[tgt]
+            filled[:, k, :] = tgt
+            steps[:, k, :] = np.where(tgt, np.minimum(j1 - k, 127), 0)
+        # push this aperture into the "nearest defined above" state
+        with np.errstate(invalid="ignore", divide="ignore"):
+            lk = np.log10(np.where(defined, vk, 1.0))
+        l2 = np.where(defined, l1, l2); a2 = np.where(defined, a1, a2)
+        have2 = np.where(defined, have1, have2)
+        l1 = np.where(defined, lk, l1); a1 = np.where(defined, log_ap[k], a1)
+        j1 = np.where(defined, k, j1); have1 = have1 | defined
+    return filled, steps, left
+
+
+def convolve_cube(flux_fits, filters, chunk=CHUNK_MODELS, limit=None):
+    """Fill the model's undefined apertures (`fill_apertures`), then convolve
+    the completed SED through every sedfitter Filter in `filters` ({band:
+    Filter}, already normalised), reading each chunk of the raw cube ONCE.
+
+        flux = sum_all(F * R)             (no renormalisation)
+
+    with R the filter rebinned onto the cube's own frequency grid. A
+    (model, aperture, band) cell is UNDEFINED (NaN) iff some sample the
+    filter covers (R > 0) is still undefined after the fill. TOTAL_FLUX_ERR
+    is the same sum over the UNCERTAINTIES cube (summed, as the release
+    did), NaN where flux is NaN or a covered sample was filled (a filled
+    sample has no Monte Carlo uncertainty of its own).
+
+    `limit` bounds the compute to the first `limit` models of the raw cube.
+
+    Returns (per_band, names, ap_au, stats): per_band[band] = (flux,
+    flux_err or None, undefined, fully_finite) with fully_finite True where
+    every covered RAW sample was finite (no fill involved); stats counts the
+    fill (cells filled by 1, 2, >=3 steps; cells left undefined above the
+    prefix)."""
     cube = SEDCube.read(flux_fits, order="nu", memmap=True)
-    binned = filt.rebin(cube.nu)
-    resp = np.asarray(binned.response, dtype=np.float64)
-    sum_all_r = float(resp.sum())
+    bands = list(filters)
+    resp = np.stack([np.asarray(filters[b].rebin(cube.nu).response, dtype=np.float64)
+                     for b in bands], axis=1)                       # (n_wav, n_band)
+    inband = (resp > 0).astype(np.float64)
     val_factor = cube.val.unit.to(u.mJy)
     has_unc = cube.unc is not None
     unc_factor = cube.unc.unit.to(u.mJy) if has_unc else None
 
+    ap_au = np.asarray(cube.apertures.to(u.au).value
+                       if hasattr(cube.apertures, "unit") else cube.apertures, dtype=float)
+    log_ap = np.log10(ap_au)
     n, n_ap = cube.n_models, cube.n_ap
     if limit is not None:
         n = min(n, limit)
-    flux = np.full((n, n_ap), np.nan, dtype=np.float64)
-    flux_err = np.full((n, n_ap), np.nan, dtype=np.float64) if has_unc else None
-    undefined = np.zeros((n, n_ap), dtype=bool)
-    fully_finite = np.zeros((n, n_ap), dtype=bool)
+    nb = len(bands)
+    flux = np.full((n, n_ap, nb), np.nan)
+    flux_err = np.full((n, n_ap, nb), np.nan) if has_unc else None
+    fully_finite = np.zeros((n, n_ap, nb), dtype=bool)
+    stats = {"filled_1": 0, "filled_2": 0, "filled_3plus": 0, "left_undefined": 0}
 
-    tol = 1e-9 * max(sum_all_r, 1.0)
-    for i_ap in range(n_ap):
-        for lo in range(0, n, chunk):
-            hi = min(lo + chunk, n)
-            v = np.asarray(cube.val[lo:hi, i_ap, :], dtype=np.float64) * val_factor
-            fin = np.isfinite(v)
-            sum_finite_r = fin.astype(np.float64) @ resp
-            bad = sum_finite_r < MIN_FINITE_WEIGHT_FRAC * sum_all_r
-            weighted = np.where(fin, v, 0.0) * resp[None, :]
-            with np.errstate(invalid="ignore", divide="ignore"):
-                f = weighted.sum(axis=1) / sum_finite_r * sum_all_r
-            flux[lo:hi, i_ap] = np.where(bad, np.nan, f)
-            undefined[lo:hi, i_ap] = bad
-            fully_finite[lo:hi, i_ap] = sum_finite_r >= (sum_all_r - tol)
+    for lo in range(0, n, chunk):
+        hi = min(lo + chunk, n)
+        m = hi - lo
+        v = np.array(cube.val[lo:hi], dtype=np.float64) * val_factor     # (m, n_ap, n_wav)
+        raw_nonfinite = (~np.isfinite(v)).reshape(m * n_ap, -1).astype(np.float64)
+        fully_finite[lo:hi] = ((raw_nonfinite @ inband) == 0).reshape(m, n_ap, nb)
 
-            if has_unc:
-                s = np.asarray(cube.unc[lo:hi, i_ap, :], dtype=np.float64) * unc_factor
-                weighted_s = np.where(fin, s, 0.0) * resp[None, :]
-                with np.errstate(invalid="ignore", divide="ignore"):
-                    fe = weighted_s.sum(axis=1) / sum_finite_r * sum_all_r
-                flux_err[lo:hi, i_ap] = np.where(bad, np.nan, fe)
+        filled, steps, left = fill_apertures(v, log_ap)
+        stats["filled_1"] += int((steps == 1).sum())
+        stats["filled_2"] += int((steps == 2).sum())
+        stats["filled_3plus"] += int((steps >= 3).sum())
+        stats["left_undefined"] += int(left.sum())
+
+        still_bad = (~np.isfinite(v)).reshape(m * n_ap, -1).astype(np.float64) @ inband > 0
+        f = np.where(np.isfinite(v), v, 0.0).reshape(m * n_ap, -1) @ resp
+        flux[lo:hi] = np.where(still_bad, np.nan, f).reshape(m, n_ap, nb)
+        if has_unc:
+            s = np.array(cube.unc[lo:hi], dtype=np.float64) * unc_factor
+            s_bad = (~np.isfinite(s) | filled).reshape(m * n_ap, -1).astype(np.float64) @ inband > 0
+            fe = np.where(np.isfinite(s), s, 0.0).reshape(m * n_ap, -1) @ resp
+            flux_err[lo:hi] = np.where(still_bad | s_bad, np.nan, fe).reshape(m, n_ap, nb)
 
     names = np.asarray(cube.names)[:n]
-    ap_au = np.asarray(cube.apertures.to(u.au).value
-                       if hasattr(cube.apertures, "unit") else cube.apertures, dtype=float)
-    return flux, flux_err, undefined, fully_finite, names, ap_au
+    per_band = {b: (flux[:, :, i], None if flux_err is None else flux_err[:, :, i],
+                    ~np.isfinite(flux[:, :, i]), fully_finite[:, :, i])
+                for i, b in enumerate(bands)}
+    return per_band, names, ap_au, stats
 
 
 def _release_band_flux(geometry_dir, band, ref_names):
@@ -181,22 +256,14 @@ def _release_band_flux(geometry_dir, band, ref_names):
 
 def convolve_geometry(geometry_dir, out_dir, bands=YSO_BANDS, chunk=CHUNK_MODELS,
                       limit=None, verify_against_release=False, log=print):
-    """Convolve one YSO geometry's raw flux.fits into `<out_dir>/<band>.fits`
-    for every band in `bands`.
+    """Fill and convolve one YSO geometry's raw flux.fits into
+    `<out_dir>/<band>.fits` for every band in `bands`, prints the fill
+    counts and the per-band NaN fraction. Returns {band: path}.
 
-    With `limit=None` (the normal, full-geometry case): rows are written
-    in the geometry's OWN parameters.fits order (the join key is
-    MODEL_NAME, never position -- flux.fits and parameters.fits are not
-    guaranteed to agree row-for-row).
-
-    With `limit` given (a timing/verification slice, never a scientific
-    subset -- the brief's own "first N models, your choice"): the
-    alignment to parameters.fits is skipped and the first `limit` models
-    are taken in the raw flux.fits cube's OWN row order instead, so the
-    actual CONVOLUTION compute is bounded to `limit` models (`convolve_
-    cube`'s own `limit`), not merely the returned array -- a 720k-model
-    geometry sliced to 20,000 costs proportionally to 20,000, not 720k.
-    Returns {band: path}."""
+    With `limit=None`: rows are written in the geometry's OWN
+    parameters.fits order (join key MODEL_NAME, never position). With
+    `limit` (a timing/verification slice, never a scientific subset): the
+    first `limit` models in the raw cube's OWN row order, no alignment."""
     flux_fits = os.path.join(geometry_dir, "flux.fits")
     assert os.path.exists(flux_fits), f"{flux_fits} missing"
     ref_names = None
@@ -204,51 +271,50 @@ def convolve_geometry(geometry_dir, out_dir, bands=YSO_BANDS, chunk=CHUNK_MODELS
         ref_names = np.char.strip(np.asarray(
             fits.getdata(os.path.join(geometry_dir, "parameters.fits"), 1)["MODEL_NAME"]).astype(str))
 
-    # Filters first: a missing curve stops the run before any work.
     filters = {b: mc.build_sedfitter_filter(b) for b in bands}
     os.makedirs(out_dir, exist_ok=True)
+    t0 = time.perf_counter()
+    per_band, names, ap_au, stats = convolve_cube(flux_fits, filters, chunk=chunk, limit=limit)
+    t_conv = time.perf_counter() - t0
+    order = None
+    if ref_names is None:
+        out_names = names
+    else:
+        order = align_by_name(ref_names, names)
+        out_names = ref_names
+    n_models = len(out_names)
+    log(f"  fill: models={n_models} filled_1step={stats['filled_1']} filled_2steps={stats['filled_2']} "
+        f"filled_3plus={stats['filled_3plus']} left_undefined_above_prefix={stats['left_undefined']}  "
+        f"fill+convolve all {len(bands)} bands [{t_conv:.1f}s]")
+
     written = {}
-    final_names = None
     for b in bands:
-        t0 = time.perf_counter()
-        flux, flux_err, undefined, fully_finite, names, ap_au = convolve_cube(
-            flux_fits, filters[b], chunk=chunk, limit=limit)
-        if ref_names is None:
-            out_names = names  # limited/slice run: raw cube order, no parameters.fits join
-        else:
-            order = align_by_name(ref_names, names)
+        flux, flux_err, undefined, fully_finite = per_band[b]
+        if order is not None:
             flux, undefined, fully_finite = flux[order], undefined[order], fully_finite[order]
             flux_err = flux_err[order] if flux_err is not None else None
-            out_names = ref_names
-        final_names = out_names
-
         written[b] = mc.write_convolved_band_fits(
             None, b, out_names, flux, ap_au,
             filter_wavelength_um=mc.filter_central_wavelength_um(b),
             total_flux_err_mjy=flux_err, convmeth="sedfitter",
-            convmeth_note="YSO raw flux.fits, NaN-aware (owner 2026-10-27)",
+            convmeth_note="YSO raw flux.fits, filled (owner 2026-10-27)",
             out_dir=out_dir)
-
-        n_models = flux.shape[0]
+        with fits.open(written[b], mode="update") as h:
+            h[0].header["READING"] = FILL_RULE_SENTENCE
         n_undefined = int(undefined.sum())
-        elapsed = time.perf_counter() - t0
-        msg = (f"  {b}: {n_models} models x {ap_au.size} apertures "
-               f"[{elapsed:.1f}s]  undefined(model,ap) cells={n_undefined}")
-
+        msg = (f"  {b}: undefined(model,ap) cells={n_undefined} "
+               f"({100 * n_undefined / undefined.size:.2f}% NaN)")
         if verify_against_release:
             release_flux = _release_band_flux(geometry_dir, b, out_names)
             zero_mismatch = int(((release_flux == 0) & np.isfinite(flux)).sum())
             ratio_mask = fully_finite & (release_flux != 0) & np.isfinite(flux)
             if ratio_mask.any():
                 ratio = flux[ratio_mask] / release_flux[ratio_mask]
-                median_ratio = float(np.median(ratio))
-            else:
-                median_ratio = float("nan")
-            msg += (f"  release_zero_ours_finite={zero_mismatch}  "
-                   f"median_ratio_ours/release(fully-finite,n={int(ratio_mask.sum())})={median_ratio:.6f}")
+                msg += (f"  release_zero_ours_finite={zero_mismatch}  fully-finite n={int(ratio_mask.sum())} "
+                        f"median_ratio={float(np.median(ratio)):.6f} max|ratio-1|={float(np.abs(ratio - 1).max()):.2e}")
         log(msg)
 
-    mc.verify_convolved_band_fits(None, bands, final_names, out_dir=out_dir, allow_nan=True)
+    mc.verify_convolved_band_fits(None, bands, out_names, out_dir=out_dir, allow_nan=True)
     return written
 
 
@@ -257,7 +323,7 @@ def convolve_geometry(geometry_dir, out_dir, bands=YSO_BANDS, chunk=CHUNK_MODELS
 # (sps/agb/galz/pahn -- not yso any more, see main())
 # ==========================================================================
 
-def _pacs_convolve_cube(flux_fits, filt, chunk=CHUNK_MODELS):
+def _pacs_convolve_cube(flux_fits, filt, chunk=20000):
     """The original (pre-2026-10-27), PACS-only, no-NaN-handling
     convolution: `sum(F * R) * val_factor`, exactly sedfitter's own sum.
     Kept unchanged for sps/agb/galz/pahn, whose cubes carry no NaN -- the
@@ -277,7 +343,7 @@ def _pacs_convolve_cube(flux_fits, filt, chunk=CHUNK_MODELS):
                                                    else cube.apertures, dtype=float)
 
 
-def convolve_library(lib_dir, bands=PACS_BANDS, chunk=CHUNK_MODELS, log=print):
+def convolve_library(lib_dir, bands=PACS_BANDS, chunk=20000, log=print):
     """Write convolved/<band>.fits for each PACS band of a continuum
     library (sps/agb/galz/pahn) at `lib_dir` from its flux.fits, then
     verify the files. Returns {band: path}."""
