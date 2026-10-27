@@ -84,9 +84,13 @@ _BAND_FILE = {
 IRAC_KEYS = ("I1", "I2", "I3", "I4")
 IRAC_MIPS_KEYS = IRAC_KEYS + ("M1",)   # M1 last: the build masks it to the IRAC union the four have established
 
-#: All eight bands, `definitions.BANDS`' own fixed order (J, H, Ks, I1-I4,
-#: M1): the one column order `completeness_sesna_source`'s own SOURCE_ROW
-#: shares with `fittp.sweep`'s `BAND_KEYS` (same tuple, same order), so a
+#: The three Herschel PACS bands, whose curves this stage COPIES from the PACS
+#: stage's own input file (`_write_pacs_band`), not measures.
+PACS_KEYS = ("P70", "P100", "P160")
+
+#: All eleven bands, `definitions.BANDS`' own fixed order (J, H, Ks, I1-I4,
+#: M1, P70, P100, P160): the one column order `completeness_sesna_source`'s own
+#: SOURCE_ROW shares with `fittp.sweep`'s `BAND_KEYS` (same tuple, same order), so a
 #: band's position in `definitions.BANDS` is directly its own column --
 #: no per-band index lookup needed at either end.
 ALL_BAND_KEYS = tuple(b.key for b in definitions.BANDS)
@@ -702,6 +706,136 @@ def _complete_field(placed, field_map, band, grid, template_offsets, template_c)
     return placed, completed_from
 
 
+# --- The PACS path (redesign 2026-10-27): P70/P100/P160 come from the PACS stage's own
+# per-cell input file; this stage copies its cell tables and builds the admitted pixels' own
+# curves from them. ---
+
+#: Sample points mapped to PACS cells per block (memory bound only).
+_PACS_POINT_BLOCK = 2_000_000
+#: Admitted pixels per block when the pixel curves are summed.
+_PACS_PIXEL_BLOCK = 1000
+
+#: Datasets of the input file copied verbatim for each PACS band (name templates).
+_PACS_COPIED = (
+    "CURVE_{b}", "MAG_GRID_{b}", "COMPLETED_FROM_{b}", "ENVELOPE_{b}",
+    "CELL_ID_{b}", "CELL_MAP_INDEX_{b}", "CELL_MAP_{b}", "CELL_RA_{b}", "CELL_DEC_{b}",
+    "CELL_SIGMA_{b}_MJY", "CELL_OFFSET_{b}_MJY", "CELL_GAIN_{b}", "CELL_TAIL_FACTOR_{b}",
+    "CELL_OBSID_{b}", "N_POS_{b}", "N_SIGMA_POS_{b}",
+    "MAP_ID_{b}", "MAP_OBSID_{b}", "MAP_WCS_{b}", "MAP_SHAPE_{b}", "MAP_CELL_STEP_{b}",
+    "MAP_SHIFT_{b}_ARCSEC", "MAP_N_PAIRS_{b}",
+)
+
+
+def _pacs_input_path(config, region):
+    return config_module.product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
+
+
+class _PacsBand:
+    """One PACS band's cell table, read from the PACS input file, with the lookup from a sky
+    point to its cell row: for every map the point is moved by the map's registration shift
+    (east, north arcsec, applied to the world position exactly as the PACS stage does), turned
+    into 0-based map pixels by the map's stored celestial header, and given the cell id the PACS
+    stage's own rule assigns; among the maps holding a stored cell there, the one with the
+    smallest `CELL_SIGMA` (the deepest map) wins."""
+
+    def __init__(self, h5file, band):
+        self.band = band
+        g = lambda tmpl: h5file[tmpl.format(b=band)][()]
+        self.cell_id = g("CELL_ID_{b}").astype(np.int64)
+        self.cell_map = g("CELL_MAP_INDEX_{b}").astype(np.int64)
+        self.sigma = g("CELL_SIGMA_{b}_MJY").astype(np.float64)
+        self.shape = g("MAP_SHAPE_{b}")                       # (n_map, 2): ny, nx
+        self.step = g("MAP_CELL_STEP_{b}").astype(np.float64)  # (n_map, 2): x, y
+        self.shift = g("MAP_SHIFT_{b}_ARCSEC").astype(np.float64)  # (n_map, 2): east, north
+        self.wcs = [WCS(fits.Header.fromstring(t.decode())).celestial for t in g("MAP_WCS_{b}")]
+        key = self.cell_map * (1 << 40) + self.cell_id
+        self._order = np.argsort(key, kind="stable")
+        self._key_sorted = key[self._order]
+
+    def rows(self, ra_deg, dec_deg):
+        """Row into CURVE_<band> for each position, -1 where no map holds a stored cell there."""
+        ra = np.asarray(ra_deg, dtype=np.float64)
+        dec = np.asarray(dec_deg, dtype=np.float64)
+        best = np.full(ra.shape, -1, dtype=np.int64)
+        best_sigma = np.full(ra.shape, np.inf)
+        for m, wcs in enumerate(self.wcs):
+            east, north = self.shift[m]
+            dec_m = dec + north / 3600.0
+            ra_m = ra + east / 3600.0 / np.cos(np.radians(dec))
+            x, y = wcs.all_world2pix(ra_m, dec_m, 0)
+            ny, nx = int(self.shape[m, 0]), int(self.shape[m, 1])
+            sx, sy = self.step[m]
+            inside = (np.isfinite(x) & np.isfinite(y) & (x >= -0.5) & (x < nx - 0.5)
+                      & (y >= -0.5) & (y < ny - 0.5))
+            if not inside.any():
+                continue
+            n_cells_x = int(np.ceil(nx / sx))
+            cid = (np.floor((y[inside] + 0.5) / sy).astype(np.int64) * n_cells_x
+                   + np.floor((x[inside] + 0.5) / sx).astype(np.int64))
+            key = m * (1 << 40) + cid
+            j = np.clip(np.searchsorted(self._key_sorted, key), 0, self._key_sorted.size - 1)
+            hit = self._key_sorted[j] == key
+            idx = np.flatnonzero(inside)[hit]
+            row = self._order[j[hit]]
+            better = self.sigma[row] < best_sigma[idx]
+            best[idx[better]] = row[better]
+            best_sigma[idx[better]] = self.sigma[row[better]]
+        return best
+
+
+def _pacs_rows_blocked(pb, ra, dec):
+    out = np.empty(ra.size, dtype=np.int64)
+    for start in range(0, ra.size, _PACS_POINT_BLOCK):
+        stop = start + _PACS_POINT_BLOCK
+        out[start:stop] = pb.rows(ra[start:stop], dec[start:stop])
+    return out
+
+
+def _write_pacs_band(f, fin, band, n_source, sample_ra, sample_dec, n_admitted, n_sub, source_row):
+    """Writes band `band`'s datasets into `f`: the input's cell tables copied as stored, the
+    band's SOURCE_ROW column (copied from the input), and `PIXEL_CURVE_<band>` /
+    `PIXEL_COVERED_FRAC_<band>` over this product's admitted pixels: each pixel's sample
+    points are moved to the deepest map's cell (`_PacsBand.rows`), the covered fraction is the
+    share of points with a stored cell, and the curve is the mean of those cells' curves (no
+    union dilution: a PACS band's own coverage is its covered fraction)."""
+    for tmpl in _PACS_COPIED:
+        name = tmpl.format(b=band)
+        data = fin[name][()]
+        dset = build_module.write_dataset(f, name, data, *REGISTRY[("completeness_sesna_source", name)])
+        if name == "CURVE_%s" % band:
+            dset.attrs["ZERO_POINT_JY"] = fin[name].attrs["ZERO_POINT_JY"]
+    k = ALL_BAND_KEYS.index(band)
+    pacs_k = PACS_KEYS.index(band)
+    in_row = fin["SOURCE_ROW"][:, pacs_k]
+    if in_row.shape[0] != n_source:
+        raise ValueError("catalog.completeness: the PACS input has %d source rows, this product has %d"
+                         % (in_row.shape[0], n_source))
+    source_row[:, k] = in_row
+
+    pb = _PacsBand(fin, band)
+    curve = fin["CURVE_%s" % band][()]
+    prow = _pacs_rows_blocked(pb, sample_ra, sample_dec).reshape(n_admitted, n_sub)
+    n_plane = curve.shape[1]
+    pixel_curve = np.zeros((n_admitted, n_plane), dtype=np.float32)
+    covered = (prow >= 0)
+    for start in range(0, n_admitted, _PACS_PIXEL_BLOCK):
+        stop = min(start + _PACS_PIXEL_BLOCK, n_admitted)
+        r = prow[start:stop]
+        on = covered[start:stop]
+        vals = curve[np.where(on, r, 0)].astype(np.float64) * on[:, :, None]
+        n_on = on.sum(axis=1)
+        mean = np.zeros((stop - start, n_plane))
+        has = n_on > 0
+        mean[has] = vals.sum(axis=1)[has] / n_on[has, None]
+        pixel_curve[start:stop] = (mean / STORAGE_SCALE).astype(np.float32)
+    frac = (covered.sum(axis=1) / float(n_sub)).astype(np.float32)
+    build_module.write_dataset(f, "PIXEL_CURVE_%s" % band, pixel_curve,
+                               *REGISTRY[("completeness_sesna_source", "PIXEL_CURVE_%s" % band)])
+    build_module.write_dataset(f, "PIXEL_COVERED_FRAC_%s" % band, frac,
+                               *REGISTRY[("completeness_sesna_source", "PIXEL_COVERED_FRAC_%s" % band)])
+    return frac
+
+
 def build(config, regions=None):
     """Builds the per-region completeness product (COMPLETENESS_2026-10-
     20.md "The reader: layout and kernel"): per Spitzer band, the on-map
@@ -712,8 +846,8 @@ def build(config, regions=None):
     (briefs/round4_2026-10-20/C6_twomass_pixel_depths.md): `catalog.
     depths`' own per-pixel fit (`_twomass_pixel_params`), tabulated on
     one shared grid (`_tabulate_twomass_pixel_table`). `SOURCE_ROW` is
-    one (n_source, 8) table, `ALL_BAND_KEYS` column order, shared by
-    both band families -- 2MASS's own column is never -1 (all-sky).
+    one (n_source, 11) table, `ALL_BAND_KEYS` column order, shared by
+    the three band families (the PACS columns copied from the PACS input) -- 2MASS's own column is never -1 (all-sky).
     `catalog.limits.completeness` is the one reader.
     """
     if regions is None:
@@ -934,6 +1068,18 @@ def build(config, regions=None):
                         f, f"PIXEL_COVERED_FRAC_{key}", np.ones(admitted.size, dtype=np.float32),
                         *REGISTRY[("completeness_sesna_source", f"PIXEL_COVERED_FRAC_{key}")])
 
+                # PACS: the input file's cell tables, copied, and this product's own admitted-pixel curves
+                pacs_in = _pacs_input_path(config, region)
+                if not os.path.exists(pacs_in):
+                    raise FileNotFoundError(
+                        "catalog.completeness: no PACS completeness input at %r -- the PACS stages "
+                        "build it first" % pacs_in)
+                pacs_frac = {}
+                with h5py.File(pacs_in, "r") as fin:
+                    for band in PACS_KEYS:
+                        pacs_frac[band] = _write_pacs_band(
+                            f, fin, band, n_source, sample_ra, sample_dec, admitted.size, n_sub, source_row)
+
                 build_module.write_dataset(f, "SOURCE_ROW", source_row,
                                             *REGISTRY[("completeness_sesna_source", "SOURCE_ROW")])
                 build_module.write_dataset(f, "HPX_PIX_512", admitted,
@@ -942,6 +1088,9 @@ def build(config, regions=None):
                 n_fallback_2mass = {key: int(from_regional_2mass[:, tk].sum())
                                     for tk, key in enumerate(TWOMASS_KEYS)}
 
+            print("catalog.completeness: %s PACS PIXEL_COVERED_FRAC by band (min/median/max, share >0): %s"
+                  % (region, {b: (float(v.min()), float(np.median(v)), float(v.max()), float((v > 0).mean()))
+                              for b, v in pacs_frac.items()}))
             print("catalog.completeness: %s pixel-to-pixel 50%% correlation by band: %s"
                   % (region, {k: round(v, 3) for k, v in corr_lengths.items()}))
             print("catalog.completeness: %s on-map pixels completed (cut off before reaching 0) by band: %s"
