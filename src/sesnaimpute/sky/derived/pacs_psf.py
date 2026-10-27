@@ -204,7 +204,8 @@ class PublishedPSF:
             raise ValueError(f"Unexpected published PSF geometry: {path}")
         yy, xx = np.indices(data.shape)
         inside = np.hypot(xx - _CENTRE, yy - _CENTRE) <= _NORMALISATION_RADIUS
-        if not np.isclose(data[inside].sum(), 1., atol=2e-4):
+        # the release images sum to 1 within 60 arcsec to +-5e-4 (red: 0.9995-1.0003); +-1e-3 accepts them
+        if not np.isclose(data[inside].sum(), 1., atol=1e-3):
             raise ValueError(f"Release 60 arcsec normalization not satisfied: {path}")
         factor = total_flux_factor(folder / eef_name)
         data *= factor
