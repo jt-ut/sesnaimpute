@@ -224,8 +224,9 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
             continue
         for key in np.unique(cell_obsid[b][sel]):
             i = key_to_map.get((band, key.decode()))
-            if i is not None:
-                pieces.append((b, i, sel[cell_obsid[b][sel] == key]))
+            if i is None:
+                raise ValueError("pacs_photometry: completeness cell map %r is not in the %s index" % (key, band))
+            pieces.append((b, i, sel[cell_obsid[b][sel] == key]))
     obsid_len = max([len(_tile_key(r)) for r in records] + [1])
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)

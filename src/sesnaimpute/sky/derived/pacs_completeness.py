@@ -370,8 +370,10 @@ def _band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage
         total = (curve[np.where(ok, r, 0)].astype(np.float32) * ok[:, :, None]).sum(axis=1)
         pixel_curve[lo:lo + 400] = total / (STORAGE_SCALE * np.maximum(ok.sum(axis=1), 1)[:, None])
     envelope = curve.max(axis=0) if n_row else np.zeros(n_plane, np.uint16)
-    obsid = np.array([",".join(records[t].obsids) for t in tile_of_row], dtype="S64")
-    map_id = np.array([records[t].map_id for t in tile_of_row], dtype="S96")
+    # widths from the longest entry: a Level 3 stack lists up to ~20 observations (an S64 field cut
+    # Orion A's two stacks short, and the photometry could not find their cells' map)
+    obsid = np.array([",".join(records[t].obsids) for t in tile_of_row] or [""], dtype="S")[:n_row]
+    map_id = np.array([records[t].map_id for t in tile_of_row] or [""], dtype="S")[:n_row]
     return dict(curve=curve, source_row=src_row.astype(np.int32), pixel_curve=pixel_curve,
                 covered_frac=covered_frac, envelope=envelope, n_pos=cols["n_valid"], n_sigma=cols["n_sigma"],
                 cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=cols["sigma"], cell_offset=cols["offset"],
