@@ -3949,7 +3949,8 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "For each row of CURVE_{b}: the median flux the measurement returns at the cell's random positions farther "
         "than one beam from every bright source -- sky structure the annulus sky leaves at this scale. Detection of a "
         "source in the cell, and the completeness curve, count from this level; the reported flux (FNU in the "
-        "photometry product, the eHOPS-convention flux) does not subtract it, so the two differ by this value."),
+        "photometry product, the eHOPS-convention flux) does not subtract it, so the two differ by this value. A parallel-mode map that holds only one "
+        "scan direction is measured with that direction's own point-spread template and aperture fraction (not at 100 micron)."),
     "CELL_TAIL_FACTOR_{b}": ("dimensionless",
         "For each row of CURVE_{b}: the factor by which the cell's noise was raised so that, among the cells of its "
         "map at a similar noise level, negative excursions on empty sky are no more frequent than for Gaussian noise, "
@@ -4008,7 +4009,9 @@ _PHOTOMETRY_PACS_READINGS = {
         "micron, sky from a clipped mode in the annulus 12.8-25.6 / 9.6-16.0 / 16.0-22.4 arcsec, divided by the "
         "fraction of a point source's total flux that this aperture and annulus return for the map's observing "
         "mode and scan speed (PACS encircled-energy tables; 0.71-0.76 at 70, 0.55-0.63 at 100, 0.64-0.65 at 160 "
-        "micron). eHOPS's published fluxes are on a within-60-arcsec normalisation with one constant per band and "
+        "micron; for a parallel-mode map that holds only one scan direction, the fraction is computed from that "
+        "direction's own point-spread template, at 70 and 160 micron only: at 100 micron the two templates differ by about 3 "
+        "per cent inside 8 arcsec, so such a map is refused there). eHOPS's published fluxes are on a within-60-arcsec normalisation with one constant per band and "
         "sit about 9 % lower at 70 micron, and more at 100 micron on fast-scan maps. Where METHOD is 2 the source has "
         "a neighbour within one beam of a detected source and its flux is the total flux of a joint point-source "
         "fit. It can be negative or small when nothing is seen and is NaN where the band does not cover the source. "

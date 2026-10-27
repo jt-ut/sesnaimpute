@@ -13,7 +13,9 @@ What a map needs is a pair of templates, one per scan direction, each placed
 on the sky at the spacecraft position angle of the observation that made it.
 A parallel map that holds only one scan direction (Taurus: two Level 2 maps of one
 observation each) is fitted with that direction's template alone, at its own
-position angle.
+position angle, and its aperture fraction comes from that template's own cumulative V(r) with the
+band's a and c (P70 and P160; a one-direction P100 map raises, the two P100 templates differing by
+about 3 per cent inside 8 arcsec).
 `published_components_for_map(config, record)` returns that pair (or the one);
 `CachedPairedPSF.from_map(...)` integrates the pair over the map's pixels on a
 grid of source positions and pixel offsets once per map, and
@@ -147,7 +149,36 @@ def aperture_fraction(config, record):
     the TOTAL flux of a point source, the PACS calibration's own definition): the fraction of a point
     source's total flux the eHOPS aperture returns after the annulus sky, from the release EEF table of
     this map's band, mode and speed (e.g. P70 parallel-60 0.712, scan-20 0.756; P100 0.545 / 0.632)."""
+    single = _single_direction_tag(config, record)
+    if single is not None:
+        if record.band == "P100":
+            raise ValueError("the +42 and -42 P100 templates differ by about 3 percent inside 8 arcsec, so the "
+                             "single-template aperture fraction is unverified at that band")
+        return _single_template_fraction(config, record, single)
     return physical_aperture_fraction(config, record, "total", True)
+
+
+def _single_template_fraction(config, record, tag, annulus_share=True):
+    """The aperture fraction of a one-direction parallel map: the band's a and c (the EEF least squares
+    of total_flux_factor) applied to this template's OWN cumulative V(r) (the release image summed within
+    r on its 1-arcsec grid, bilinear on an 8x finer sampling so sub-pixel radii are smooth),
+    EEF(r) = a V(r) + c pi r^2, then the eHOPS aperture and annulus share exactly as
+    physical_aperture_fraction does."""
+    r_ap, r_in, r_out = APERTURES[record.band]
+    eef_path = psf_directory(config) / _COMBINATIONS[_key(record)][2]
+    a, c = _eef_factors(eef_path)
+    template = PublishedPSF.read(config, record, tag, position_angle_deg=0.0)
+    raw = template.image / template.total_flux_factor
+    n = 8
+    grid = np.linspace(-.5 + .5 / n, 2 * _CENTRE + .5 - .5 / n, _SIZE * n)
+    yy, xx = np.meshgrid(grid, grid, indexing="ij")
+    fine = map_coordinates(raw, [yy, xx], order=1, mode="nearest", prefilter=False)
+    rr = np.hypot(xx - _CENTRE, yy - _CENTRE)
+    ee = lambda r: a * float(fine[rr <= r].sum()) / n ** 2 + c * np.pi * r ** 2
+    frac = ee(r_ap)
+    if annulus_share:
+        frac -= r_ap ** 2 / (r_out ** 2 - r_in ** 2) * (ee(r_out) - ee(r_in))
+    return frac
 
 
 def physical_aperture_fraction(config, record, normalisation, annulus_share):
@@ -169,13 +200,18 @@ def total_flux_factor(eef_path):
     docstring): least squares of the EEF (column 3, total-flux fraction) on
     the Vesta cumulative (column 5) and pi r^2, over the radii <= 60 arcsec.
     """
+    return _eef_factors(eef_path)[0]
+
+
+def _eef_factors(eef_path):
+    """(a, c) of the same least squares: EEF(r) = a V(r) + c pi r^2 (band-level, see module docstring)."""
     rows = [line.split() for line in Path(eef_path).read_text().splitlines()
             if line.strip() and not line.startswith("#")]
     table = np.array([[float(v) for v in row] for row in rows if len(row) == 5])
     radius, eef, vesta = table[:, 0], table[:, 2], table[:, 4]
     design = np.column_stack([vesta, np.pi * radius ** 2])
-    (factor, _), *_ = np.linalg.lstsq(design, eef, rcond=None)
-    return float(factor)
+    (factor, pedestal), *_ = np.linalg.lstsq(design, eef, rcond=None)
+    return float(factor), float(pedestal)
 
 
 @dataclass(frozen=True)
@@ -442,6 +478,17 @@ def _parallel_orientations(config, record, header):
 
 
 _DIRECTION_TAGS = (('nominal', '+42'), ('orthogonal', '-42'))
+
+
+def _single_direction_tag(config, record):
+    """The release template tag ("+42" nominal, "-42" orthogonal) when this is a parallel map holding
+    ONE scan direction, else None (a two-direction parallel map or a scan map)."""
+    if _key(record)[1] == 1:
+        return None
+    orientations = _parallel_orientations(config, record, _map_header(config, record))
+    if len(orientations) != 1:
+        return None
+    return dict(_DIRECTION_TAGS)[next(iter(orientations))]
 
 
 def published_components_for_map(config, record):
