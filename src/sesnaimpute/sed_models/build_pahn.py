@@ -93,9 +93,11 @@ from astropy.table import Table
 from sesnaimpute.sed_models import paths, library, sampling
 from sesnaimpute.sed_models.curate import model_io
 from sesnaimpute.sed_models.curate import pahc_curate as pc
+from sesnaimpute.sed_models.constants import BANDS
 from sesnaimpute.sed_models.curate.model_convolution import build_convolved_band_fits
 
-CONVOLVED_BANDS = pc.PAHC_BAND_ORDER   # ("J","H","Ks","I1","I2","I3","I4","M1")
+SAMPLING_BANDS = pc.SAMPLING_BANDS   # the eight SESNA bands (constants)
+CONVOLVED_BANDS = tuple(BANDS)        # convolved/ carries all eleven bands
 R_NET_RADIUS = 1.0
 
 MODEL_CLASS = "PAHN"
@@ -198,7 +200,7 @@ def build_pahn_model_arrays(grid, wave_um, dl21):
     )
 
 
-def _approx_band_fluxes(wave_um_asc, values_asc, bands=CONVOLVED_BANDS):
+def _approx_band_fluxes(wave_um_asc, values_asc, bands=SAMPLING_BANDS):
     """Fast, independent per-band flux (n_models, len(bands)) for the
     in-process diagnostic table only -- pahc_curate._independent_band_flux,
     the same approximate convolution PAHC's own host-selection step uses

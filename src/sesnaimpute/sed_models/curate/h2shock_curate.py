@@ -82,11 +82,15 @@ from astropy.io import fits
 from scipy.spatial import cKDTree
 
 from sesnaimpute.sed_models.constants import PLANCK_H, SPEED_OF_LIGHT_CM_S, C_UM_S, BANDS
+from sesnaimpute.sed_models.constants import SAMPLING_BANDS
 from sesnaimpute.sed_models.curate import model_io
+from sesnaimpute.sed_models.curate.pahc_curate import extended_log_grid
 from sesnaimpute.sed_models.curate.model_convolution import (
     build_band_response_weights,
     build_line_deposition_matrix,
     write_convolved_band_fits_from_analytic,
+    write_convolved_band_fits,
+    filter_central_wavelength_um,
     verify_convolved_band_fits,
 )
 
@@ -784,10 +788,17 @@ DEFAULT_MODEL_SET_NAME = (
     "(Paris-Durham grid, Kristensen+ 2023; Roueff+ 2019 line data)")
 
 
+#: The grid continues, at the same log step, past the last line to cover the
+#: PACS 160 um passband (red edge near 210 um). There are no H2 lines there.
+PD_WAVE_MAX_FAR_IR_UM = 250.0
+
+
 def build_pd_wavelength_grid(wave_min_um=0.2, wave_max_um=45.0, n_wave=1350):
     """Log-spaced wavelength grid for flux.fits, ASCENDING.
 
-    Range: 0.2-45 um. The red end brackets the MIPS24 response tail with
+    Range: 0.2-45 um for the lines (1,350 points), continued at the same
+    log step to 250 um (the PACS 160 um passband) with no lines in it.
+    The red end brackets the MIPS24 response tail with
     margin; the blue end reaches past Gaia G (0.33-1.05 um) so a G
     convolution can be run later against the stored SEDs without
     rebuilding the library. H2 genuinely emits there -- 492 quadrupole
@@ -805,7 +816,7 @@ def build_pd_wavelength_grid(wave_min_um=0.2, wave_max_um=45.0, n_wave=1350):
     profiles are grid-set rather than velocity-set. That affects only
     flux.fits: the convolved band fluxes come from the analytic path and
     do not depend on the deposition width at all."""
-    return np.logspace(np.log10(wave_min_um), np.log10(wave_max_um), n_wave)
+    return extended_log_grid(wave_min_um, wave_max_um, n_wave, PD_WAVE_MAX_FAR_IR_UM)
 
 
 @dataclass
@@ -977,11 +988,64 @@ def build_convolved_bands(model_dir, model_names, lines, line_fluxes_mjy, bands,
     foregone for every model and band -- so it is not run at all here.
     write_convolved_band_fits_from_analytic is the only writer.
     """
+    pacs = [b for b in bands if b in PACS_BANDS]
+    others = [b for b in bands if b not in PACS_BANDS]
     write_convolved_band_fits_from_analytic(
-        model_dir, lines, line_fluxes_mjy, bands,
+        model_dir, lines, line_fluxes_mjy, others,
         model_names=model_names,
         apertures_au=np.array([aperture_au]))
+    # PACS: the line list (0.2-45 um) has no line inside any PACS passband
+    # (54-274 um), so the band flux is exactly zero. The ESA filter files carry
+    # a calibration blue tail of at most 4e-7 of peak below 50 um, which would
+    # pick up the 2-28 um lines at up to 2e-3 mJy; that is the file's noise,
+    # not a response, and is not integrated: PACS is written as exact zero.
+    for band in pacs:
+        write_convolved_band_fits(
+            model_dir, band, model_names=model_names,
+            total_flux_mjy=np.zeros(len(model_names)),
+            apertures_au=np.array([aperture_au]),
+            filter_wavelength_um=filter_central_wavelength_um(band),
+            convmeth="analytic", convmeth_note="no line in the passband: exactly zero")
     verify_convolved_band_fits(model_dir, bands, model_names)
+
+
+#: The PACS bands, in definitions order.
+PACS_BANDS = ("P70", "P100", "P160")
+
+#: Said once, in the register's bands group (attribute READING), so a reader
+#: who sees the three far-infrared columns at the floor knows why.
+H2SHOCK_FAR_IR_DISCLOSURE = (
+    "H2 shock templates carry no far-infrared continuum or lines in the PACS "
+    "passbands; a PACS detection excludes the class; the [C II] 158 um line in "
+    "P160 is not modelled")
+
+
+def pacs_effective_flux(register_path):
+    """The PACS flux the fit sees for every template, from the written
+    register: `F_REF_<band>` is the raw convolved value, which is exactly
+    zero because the line list has no line in a PACS passband, and consumers
+    take np.maximum(F_REF, FLOOR_LINEAR), so the effective flux is the
+    template's own floor. Asserts both facts and returns
+    {band: np.maximum(F_REF, FLOOR_LINEAR)}."""
+    import h5py
+    with h5py.File(register_path, "r") as f:
+        m = f["models"]
+        floor = np.asarray(m["FLOOR_LINEAR"], dtype=float)
+        out = {}
+        for band in PACS_BANDS:
+            f_ref = np.asarray(m["F_REF_" + band], dtype=float)
+            assert np.all(f_ref == 0.0), f"{band}: a template has flux in the passband"
+            assert np.all(floor > 0.0), "a template has no floor"
+            out[band] = np.maximum(f_ref, floor)
+            assert np.array_equal(out[band], floor)
+    return out
+
+
+def write_far_ir_disclosure(register_path):
+    """Attach H2SHOCK_FAR_IR_DISCLOSURE to the register's /bands group."""
+    import h5py
+    with h5py.File(register_path, "a") as f:
+        f["bands"].attrs["READING"] = H2SHOCK_FAR_IR_DISCLOSURE
 
 
 def write_classmap_fits(model_set, out_path, model_dir=None):
@@ -1091,7 +1155,6 @@ def write_models_conf(out_path, name=DEFAULT_MODEL_SET_NAME):
 #: sed_models_register quotient space is built over. This library's
 #: convolved/ set already matches it exactly (CONVOLVED_BANDS in
 #: build/h2shock.py), so no band is excluded from the sampling space.
-SAMPLING_BANDS = tuple(BANDS)
 
 #: The six grid axes plus the thirteen DERIVED_SPECS quantities plus
 #: I_H2_1_0_S1 -- exactly spec item 3's "parameter ranges (min, median,

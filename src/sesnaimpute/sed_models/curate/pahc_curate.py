@@ -144,7 +144,7 @@ from scipy.spatial import cKDTree
 from astropy.io import fits
 
 from sesnaimpute.sed_models.astro_utils import vega_color, color_error, reddening_vector_per_ak
-from sesnaimpute.sed_models.constants import (APERTURE_GRID_AU, BANDS, C_UM_S, GUTERMUTH_LABELS,
+from sesnaimpute.sed_models.constants import (SAMPLING_BANDS, APERTURE_GRID_AU, BANDS, C_UM_S, GUTERMUTH_LABELS,
                                      POINT_SOURCE_APERTURE_AU,
                                      PC_CM, REFERENCE_DISTANCE_CM)
 from sesnaimpute.sed_models.data_loader import load_filter_curve
@@ -234,11 +234,16 @@ SUBCLASS_LEGEND = (
 # photosphere is fully sampled there, and the DL21 excess is exactly
 # zero below 1.0056 um. In the G band a PAH-C source IS its star.
 PAHC_WAVE_MIN_UM = 0.2
-PAHC_WAVE_MAX_UM = 45.0
-# 403 points holds the log step at the calibrated 0.0135 in ln(lambda)
-# across the wider range -- the same sampling density as the previous
-# 300 points over 0.8-45 um, not a coarser grid stretched over it.
-PAHC_N_WAVE = 403
+# The grid reaches the far infrared: the PACS 160 um passband's red edge is
+# near 210 um. The grid keeps the calibrated log step of 0.0135 in ln(lambda)
+# (403 points over 0.2-45 um) and simply continues at that step past 45 um
+# until 250 um is covered, so the points inside 0.2-45 um are exactly the
+# ones the eight SESNA bands were always convolved on: 403 + 128 = 531
+# points, the last at 252.2 um. DL21's raw spectra run to 8000 um (grid
+# 1.0056-8000 um, 1973 points), so the excess is sampled, not extrapolated.
+PAHC_WAVE_MAX_UM = 250.0
+PAHC_N_WAVE_SESNA = 403            # the 0.2-45 um grid of the eight-band library
+PAHC_WAVE_SESNA_MAX_UM = 45.0
 
 # --- aperture-growth curve (spec section 2.3) ---
 # ---------------------------------------------------------------------
@@ -691,14 +696,26 @@ def load_sps_stellar_sed(sps_dir, t_eff, log_g, z):
 def build_pahc_wavelength_grid():
     """Full-resolution model wavelength grid, log-spaced ASCENDING (only
     flipped to descending when writing flux.fits -- see module
-    docstring). 0.2-45um brackets the 8 SESNA filters AND Gaia G with
-    margin; 403 points amply resolve a smooth continuum + broad PAH
+    docstring). 0.2-250um brackets the 8 SESNA filters, the 3 PACS filters AND Gaia G with
+    margin; 531 points amply resolve a smooth continuum + broad PAH
     features (spec section 3.1) -- no fine spike-sampling needed, unlike
     H2-shock's line spectra. Takes no arguments: the grid is fixed by
     calibration (measured: rebuilding at four times the sampling density
     moves the IRAC composite colours by at most 0.006 mag), not a knob."""
-    return np.logspace(np.log10(PAHC_WAVE_MIN_UM), np.log10(PAHC_WAVE_MAX_UM),
-                       PAHC_N_WAVE)
+    return extended_log_grid(PAHC_WAVE_MIN_UM, PAHC_WAVE_SESNA_MAX_UM,
+                             PAHC_N_WAVE_SESNA, PAHC_WAVE_MAX_UM)
+
+
+def extended_log_grid(wave_min_um, wave_max_old_um, n_old, wave_max_um):
+    """Log-spaced ascending grid that is the (wave_min_um, wave_max_old_um,
+    n_old) grid bit for bit, continued at the same ln(lambda) step until
+    wave_max_um is covered (the last point is the first one at or past it)."""
+    log_min, log_old = np.log10(wave_min_um), np.log10(wave_max_old_um)
+    step = (log_old - log_min) / (n_old - 1)
+    n_extra = int(np.ceil((np.log10(wave_max_um) - log_old) / step - 1e-9))
+    old = np.logspace(log_min, log_old, n_old)
+    extra = 10.0 ** (log_min + step * np.arange(n_old, n_old + n_extra))
+    return np.concatenate([old, extra])
 
 
 def resample_sed_log_log(wave_native_um, flux_native, wave_target_um, flux_floor=FLUX_FLOOR):
@@ -740,6 +757,8 @@ def resample_sed_log_log(wave_native_um, flux_native, wave_target_um, flux_floor
 # discontinuity and the step is exact rather than approximate. Re-measure
 # these if the filter set ever changes.
 BAND_APERTURE_EDGES_UM = (2.728, 14.723)
+#: Past the MIPS24 passband (ends near 30 um); the PACS apertures take over from here.
+PACS_APERTURE_RAMP_START_UM = 40.0
 
 
 def band_aperture_scaling(wave_um, alpha):
@@ -765,6 +784,19 @@ def band_aperture_scaling(wave_um, alpha):
         BANDS["J"].aperture_arcsec / BANDS["I1"].aperture_arcsec)
     theta_ratio[wave_um > BAND_APERTURE_EDGES_UM[1]] = (
         BANDS["M1"].aperture_arcsec / BANDS["I1"].aperture_arcsec)
+    # PACS: the three filters overlap (P70 55-108, P100 61-142, P160 113-274 um), so no
+    # single-valued function of wavelength can give each band exactly its own aperture.
+    # The aperture is held at M1's out to PACS_APERTURE_RAMP_START_UM (beyond the M1
+    # passband, so the eight SESNA columns are untouched), then follows the three PACS
+    # apertures (constants.BANDS) linearly in log wavelength through the band centres,
+    # flat redward of P160. Each PACS band then sees its own aperture at its centre.
+    far = wave_um > PACS_APERTURE_RAMP_START_UM
+    if np.any(far):
+        nodes = [(PACS_APERTURE_RAMP_START_UM, BANDS["M1"].aperture_arcsec)] + [
+            (BANDS[b].wvl_effective_um, BANDS[b].aperture_arcsec) for b in ("P70", "P100", "P160")]
+        theta_ratio[far] = np.interp(
+            np.log10(wave_um[far]), np.log10([n[0] for n in nodes]),
+            np.array([n[1] for n in nodes]) / BANDS["I1"].aperture_arcsec)
     return theta_ratio ** alpha
 
 
@@ -801,7 +833,7 @@ def compute_composite_sed(s_resampled_mjy, p_hat_resampled, wave_um_ascending,
 # The 8 SESNA bands, in sed_models_register.density's own order
 # (constants.BANDS' key order -- density.py projects an 8-vector
 # indexed this way, so the convolved fluxes fed to it MUST agree).
-PAHC_BAND_ORDER = ("J", "H", "Ks", "I1", "I2", "I3", "I4", "M1")
+PAHC_BAND_ORDER = SAMPLING_BANDS
 
 # Minimum distinct SPS sources required to accept sps_dir as the RAW
 # splice rather than a down-sampled class library -- the splice is
