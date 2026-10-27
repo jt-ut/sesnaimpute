@@ -4056,7 +4056,9 @@ _PHOTOMETRY_PACS_READINGS = {
         "a jointly fitted source is raised by its square root when it exceeds 1."),
     "METHOD_{b}": ("code",
         "1: aperture photometry (the source is isolated); 2: joint point-source fit with its close neighbours; "
-        "0: not measured (not covered)."),
+        "0: not measured (not covered). A source is fitted jointly only when a detected source lies within one beam, "
+        "so a faint source's method -- and with it its flux, aperture or joint-fit -- can differ between builds whose "
+        "detections differ."),
     "SIGMA_{b}_MJY": ("mJy, or 0.99 for an upper bound",
         "Uncertainty of the flux: the scatter of the same measurement at random empty-sky positions in the source's "
         "30-arcsecond cell (the median over the 3 x 3 cells around it, raised by the tail factor of the cell's noise "
