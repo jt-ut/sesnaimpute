@@ -404,10 +404,10 @@ def build(config, regions=None):
                         try:
                             stream_to(p["url"], f"{root}/{p['relpath']}", p["bytes"])
                         except urllib.error.HTTPError as exc:
-                            if exc.code not in (401, 403):
+                            if not 400 <= exc.code < 500:
                                 raise
-                            # the mirror refuses this file (Cygnus X 1342257519, 2026-10-26: 401);
-                            # one refused map does not stop the survey
+                            # the mirror refuses or lacks this file (Cygnus X 1342257519, 2026-10-26: 401);
+                            # one unavailable map (any 4xx) does not stop the survey
                             print(f"{region}: REFUSED ({exc.code}) {p['url']}", flush=True)
                     elif p["obsids"][0] not in served and not _hsa_on_disk(root, p):
                         # one HSA Level 3 tar per observation can hold the same combined map
@@ -415,7 +415,7 @@ def build(config, regions=None):
                         try:
                             served |= fetch_hsa(config, p)
                         except urllib.error.HTTPError as exc:
-                            if exc.code not in (401, 403):
+                            if not 400 <= exc.code < 500:
                                 raise
                             print(f"{region}: REFUSED ({exc.code}) HSA observation {p['obsids'][0]}", flush=True)
             records = index_module.region_index_records(config, region)
