@@ -133,9 +133,12 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
         x, y = tile.xy(*pacs_fit.to_map_frame(ra[rows], dec[rows], shift))
         single = tile.fit_positions(x, y)
         ok = single.covered & np.isfinite(sigma_cell) & (sigma_cell > 0)
-        flux[ok] = single.flux[ok] - offset[ok]
+        # FNU is the HOPS/eHOPS-convention flux (annulus sky, owner ruling 2026-10-27); the detection
+        # is decided on it minus the cell's empty-sky offset, the statistic the noise and the
+        # completeness curve are calibrated on (planner 2026-10-27)
+        flux[ok] = single.flux[ok]
         sigma[ok] = sigma_cell[ok]
-        detected = ok & (flux >= DETECTION_SNR * sigma_cell)
+        detected = ok & (flux - offset >= DETECTION_SNR * sigma_cell)
         origin[ok] = np.where(detected[ok], ORIGIN_DETECTED, ORIGIN_UNDETECTED)
         n_blend[ok] = 1
 
@@ -161,12 +164,11 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
             unseparable = good & (gfit.max_abs_rho > BLEND_RHO_LIMIT)
             separable = good & ~unseparable
             gi = g[separable]
-            flux[gi] = gfit.flux[separable] - offset[g][separable]
+            flux[gi] = gfit.flux[separable]
             sigma[gi] = member_sigma[separable]
-            origin[gi] = np.where(flux[gi] >= DETECTION_SNR * sigma[gi], ORIGIN_DETECTED, ORIGIN_UNDETECTED)
+            origin[gi] = np.where(flux[gi] - offset[gi] >= DETECTION_SNR * sigma[gi], ORIGIN_DETECTED, ORIGIN_UNDETECTED)
             gu = g[unseparable]
-            group_offset = np.bincount(label[g], weights=np.nan_to_num(offset[g]))[label[g]]
-            flux[gu] = (np.maximum(0.0, gfit.group_flux[unseparable] - group_offset[unseparable])
+            flux[gu] = (np.maximum(0.0, gfit.group_flux[unseparable])
                         + DETECTION_SNR * gfit.group_sigma[unseparable] * ratio_mean[unseparable])
             sigma[gu] = UPPER_LIMIT_SIGMA
             origin[gu] = ORIGIN_UPPER_BOUND

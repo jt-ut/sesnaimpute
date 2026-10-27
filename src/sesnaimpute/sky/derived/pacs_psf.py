@@ -115,6 +115,50 @@ def psf_directory(config):
     return Path(config.inputs["herschel_pacs_maps"]) / "calibration" / "psf"
 
 
+# Aperture photometry at the eHOPS apertures (Pokhrel et al. 2023, ApJS 266, 32, Table 1; owner ruling
+# 2026-10-27: the PACS flux convention is the HOPS/eHOPS aperture photometry): radius, sky annulus inner
+# and outer radius, arcsec.
+APERTURES = {"P70": (9.6, 12.8, 25.6), "P100": (8.0, 9.6, 16.0)}
+#: which flux the aperture correction restores: "total" (the EEF to 1000 arcsec, the PACS calibration's
+#: own point-source definition and the scale of the PSF fit) or "60arcsec" (the release images' own
+#: normalisation within 60 arcsec, which eHOPS's 0.798 at 70 um matches). PENDING the planner's ruling.
+APERTURE_NORMALISATION = "total"
+#: the correction includes the PSF wing the sky annulus removes (aperture area x the annulus mean of the PSF)
+APERTURE_ANNULUS_SHARE = True
+
+
+def _eef_columns(eef_path):
+    rows = [line.split() for line in Path(eef_path).read_text().splitlines()
+            if line.strip() and not line.startswith("#")]
+    table = np.array([[float(v) for v in row] for row in rows if len(row) == 5])
+    return table[:, 0], table[:, 2], table[:, 4]       # radius, total-flux EEF, 60-arcsec-normalised EEF
+
+
+def aperture_fraction(config, record):
+    """The fraction of a point source's flux (as APERTURE_NORMALISATION defines it) that the aperture
+    sum minus the annulus sky returns, from the release EEF table of the map's band, mode and speed:
+    EE(r_ap) - (r_ap^2 / (r_out^2 - r_in^2)) (EE(r_out) - EE(r_in)) (the annulus term when
+    APERTURE_ANNULUS_SHARE). The measured aperture flux divided by it is the flux."""
+    r_ap, r_in, r_out = APERTURES[record.band]
+    radius, eef_total, eef_60 = _eef_columns(psf_directory(config) / _COMBINATIONS[_key(record)][2])
+    eef = eef_total if APERTURE_NORMALISATION == "total" else eef_60
+    ee = lambda r: float(np.interp(np.log(r), np.log(radius), eef))
+    frac = ee(r_ap)
+    if APERTURE_ANNULUS_SHARE:
+        frac -= r_ap ** 2 / (r_out ** 2 - r_in ** 2) * (ee(r_out) - ee(r_in))
+    return frac
+
+
+def psf_flux_scale(config, record):
+    """The factor turning a total-flux PSF-fit amplitude into APERTURE_NORMALISATION's flux (1 for
+    "total"; the total-flux EEF at 60 arcsec otherwise), so the blend path and the aperture path share
+    one scale."""
+    if APERTURE_NORMALISATION == "total":
+        return 1.0
+    radius, eef_total, _ = _eef_columns(psf_directory(config) / _COMBINATIONS[_key(record)][2])
+    return float(1.0 / np.interp(np.log(60.0), np.log(radius), eef_total))
+
+
 def total_flux_factor(eef_path):
     """The factor a that turns a release image into total flux (see module
     docstring): least squares of the EEF (column 3, total-flux fraction) on

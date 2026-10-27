@@ -3952,10 +3952,10 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "one factor per map so that negative excursions on empty sky are no more frequent than for Gaussian "
         "noise. A source is called detected at 5 times this value."),
     "CELL_OFFSET_{b}_MJY": ("mJy",
-        "For each row of CURVE_{b}: the median {w} micron flux measured at the cell's random positions "
-        "farther than one beam from every bright source -- local sky structure the measurement's "
-        "constant background does not remove. It is subtracted from every flux measured in the cell, "
-        "for catalogue sources (the photometry) and for the random positions (the curve) alike."),
+        "For each row of CURVE_{b}: the median flux measured at the cell's random positions farther than one beam from "
+        "every bright source -- sky structure the annulus sky leaves at this scale. The detection of a source in the cell, "
+        "and the completeness curve, count from this level; the reported flux (FNU in the photometry product) does not "
+        "subtract it."),
     "CELL_TAIL_FACTOR_{b}": ("dimensionless",
         "For each row of CURVE_{b}: the factor by which the cell's noise was raised so that, among the cells of its "
         "map at a similar noise level, negative excursions on empty sky are no more frequent than for Gaussian noise, "
@@ -3996,11 +3996,23 @@ _PHOTOMETRY_PACS_READINGS = {
     "NAME": ("source identifier",
         "The SESNA source identifier of each row, in exactly the order of the region's SESNA source catalogue."),
     "FNU_{b}_MJY": ("mJy",
-        "Flux of the source in the Herschel PACS {w} micron band: a point-source fit at its catalogue position (moved by the map's astrometric shift, MAP_SHIFT in the completeness product) on the map that is deepest there, with the local sky offset of its 30-arcsecond cell (CELL_OFFSET in the completeness product) subtracted. It is the flux of a point source above its local background at the beam scale; on bright structured backgrounds it sits about 10-15 % below catalogues measured in wide apertures (Cygnus X, 100-500 mJy: 0.84 of the Herschel PACS point-source catalogue), and overall about 4 % below that catalogue, within the 5 % calibration. That catalogue's faintest entries are boosted near its own detection limit, so comparisons with it at 40-200 mJy read low; it can be negative or small when nothing is seen, and is NaN where the band does not cover the source. Where ORIGIN is 2 it is instead an upper bound: the combined flux of the blended group plus five times its uncertainty."),
+        "Flux of the source in the Herschel PACS {w} micron band, in the convention of the HOPS and eHOPS protostar "
+        "surveys: a point-source fit at the catalogue position (moved by the map's astrometric shift, MAP_SHIFT in the "
+        "completeness product) on the map that is deepest there, after subtracting the local sky measured in the eHOPS "
+        "sky annulus around the source (12.8-25.6 arcsec at 70 micron, 9.6-16.0 at 100 micron, a clipped mode); the "
+        "fitted point-source model is the total flux. A neighbour inside the fitting region adds to it; one in the annulus "
+        "is removed with the sky. It can be negative or small when nothing is seen, and is NaN where the band does not "
+        "cover the source. Where ORIGIN is 2 it is instead an upper bound: the combined flux of the blended group plus "
+        "five times its uncertainty. Against the Herschel PACS point-source catalogue the scale agrees within its 5 % "
+        "calibration; that catalogue's faintest entries are boosted near its own detection limit."),
     "SIGMA_{b}_MJY": ("mJy, or 0.99 for an upper bound",
         "Uncertainty of the flux: the scatter of the same measurement at random empty-sky positions in the source's 30-arcsecond cell, enlarged for a source blended with a neighbour. Where ORIGIN is 2 it holds the value 0.99 that the source table uses to mark an upper bound; NaN where the band does not cover the source. For a source fitted together with a neighbour the uncertainty is enlarged by the overlap, but its completeness curve is still its cell's single-source curve, so for such a source the curve somewhat overstates the chance of detection."),
     "ORIGIN_{b}": ("origin code",
-        "1 means the source is detected, with a flux at least five times its uncertainty; 90 means the band covers the source but nothing is detected at five times the uncertainty; 2 means the source is blended with a neighbour so closely that the two cannot be separated and the flux is an upper bound for the pair; 91 means the band does not cover the source."),
+        "1 means the source is detected: its flux minus the typical empty-sky flux of its 30-arcsecond cell "
+        "(CELL_OFFSET in the completeness product) is at least five times its uncertainty -- the same rule the "
+        "completeness curve uses; 90 means the band covers the source but it is not detected; 2 means the source is "
+        "blended with a neighbour so closely that the two cannot be separated and the flux is an upper bound for the "
+        "pair; 91 means the band does not cover the source."),
     "LOCAL_RMS_{b}_MJY": ("mJy",
         "Noise of the 30-arcsecond cell containing the source: the scatter of the flux measured at random empty-sky positions in that cell. Five times this value is the faintest flux that would be called a detection there. NaN where the band does not cover the source."),
     "OBSID_{b}": ("observation identifier(s)",

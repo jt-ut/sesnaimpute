@@ -48,7 +48,8 @@ from scipy.spatial import cKDTree
 from scipy.special import erfc  # import before healpy for native-library initialisation order
 import healpy as hp
 
-from sesnaimpute.sky.derived.pacs_psf import (CachedPairedPSF, beam_fwhm_arcsec,
+from sesnaimpute.sky.derived.pacs_psf import (APERTURES, CachedPairedPSF, aperture_fraction, beam_fwhm_arcsec,
+                                              psf_flux_scale,
                                               published_components_for_map)
 from sesnaimpute.sky.download.herschel_pacs.index import MapRecord, maps_root, read_index  # noqa: F401
 
@@ -164,6 +165,25 @@ class PositionFit:
 
 
 @dataclass(frozen=True)
+class ApertureFit:
+    """Forced aperture photometry at n positions (the eHOPS apertures, pacs_psf.APERTURES).
+    Rows with covered False carry NaN.
+
+    flux        (n,) mJy: aperture sum minus the annulus sky, divided by the aperture fraction
+                (pacs_psf.aperture_fraction), so a point source returns its flux (gain 1)
+    sky         (n,) mJy per pixel, the clipped annulus sky (IDL mmm)
+    annulus_sigma (n,) mJy: the annulus pixel scatter (after clipping) x sqrt(aperture area in pixels),
+                corrected like the flux -- the per-source noise eHOPS-style tools quote; not used for
+                detection
+    covered     (n,) bool: >= 90 % of the aperture weight and >= half of the annulus on valid pixels
+    """
+    flux: np.ndarray
+    sky: np.ndarray
+    annulus_sigma: np.ndarray
+    covered: np.ndarray
+
+
+@dataclass(frozen=True)
 class GroupFit:
     """Simultaneous fits of blend groups, one row per member (input order).
 
@@ -218,16 +238,21 @@ def _box_templates(table, extent, steps, map_nx, map_ny, sx, sy, x0, y0, side, o
 
 
 @numba.njit(cache=True)
-def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, half, min_beam):
+def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, half, min_beam, r_in, r_out):
     """Weighted linear fits, one per row. Row i: tn[i] target sources at (tx, ty), un[i]
     nuisance sources at (ux, uy), box centred on pixel (cx[i], cy[i]) of half-width `half`.
+    The background is the HOPS/eHOPS convention (owner ruling 2026-10-27): the clipped (IDL mmm) sky of
+    the valid pixels in the annulus r_in..r_out (pixels) around the first target, subtracted from the
+    data; every PSF column has its own mean over the same annulus subtracted, so a point source returns
+    its full flux (the share of its wing the annulus removes is in the model); no free constant.
     Returns per-member flux, gain, covariance and a validity flag."""
     n, mmax = tx.shape
     side = 2 * half + 1
     npix = side * side
     map_ny, map_nx = img.shape
     kmax = ux.shape[1]
-    cmax = 2 * (mmax + kmax) + 1
+    cmax = 2 * (mmax + kmax)
+    abuf = np.empty(npix)
     flux = np.full((n, mmax), np.nan)
     gain = np.full((n, mmax), np.nan)
     cov = np.full((n, mmax, mmax), np.nan)
@@ -244,7 +269,7 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
     for i in range(n):
         mt = tn[i]
         kn = un[i]
-        nc = 2 * (mt + kn) + 1
+        nc = 2 * (mt + kn)
         x0 = cx[i] - half
         y0 = cy[i] - half
         for m in range(mt):
@@ -252,8 +277,6 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
         for k in range(kn):
             _box_templates(table, extent, steps, map_nx, map_ny, ux[i, k], uy[i, k], x0, y0, side, X,
                            2 * (mt + k))
-        for p in range(npix):
-            X[nc - 1, p] = 1.0
         for j in range(side):
             yy = y0 + j
             for ii in range(side):
@@ -287,6 +310,37 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
                 enough = False
         if not enough:
             continue
+        # the annulus around the first target: clipped sky of the data, plain mean of each column
+        ax = tx[i, 0]
+        ay = ty[i, 0]
+        na = 0
+        n_ann = 0
+        for j in range(side):
+            for ii in range(side):
+                dd = np.hypot(x0 + ii - ax, y0 + j - ay)
+                if r_in <= dd <= r_out:
+                    n_ann += 1
+                    p = j * side + ii
+                    if ok[p]:
+                        abuf[na] = d[p]
+                        na += 1
+        if na < 10 or 2 * na < n_ann:
+            continue
+        sky, _ = _mmm_sky(abuf[:na])
+        for c in range(nc):
+            sm = 0.0
+            for j in range(side):
+                for ii in range(side):
+                    dd = np.hypot(x0 + ii - ax, y0 + j - ay)
+                    p = j * side + ii
+                    if r_in <= dd <= r_out and ok[p]:
+                        sm += X[c, p]
+            mean = sm / na
+            for p in range(npix):
+                X[c, p] -= mean
+        for p in range(npix):
+            if ok[p]:
+                d[p] -= sky
         for a in range(nc):
             for b in range(a, nc):
                 s = 0.0
@@ -490,19 +544,115 @@ def open_map(config, record):
 # ----------------------------------------------------------------------------
 # the tile
 
+@numba.njit(cache=True)
+def _mmm_sky(v):
+    """The IDL mmm sky of the values v: 3-sigma clipping about the median to convergence (at most 20
+    passes), then 3 median - 2 mean where the mean exceeds the median (a positively skewed sky, as
+    from faint sources), else the mean. Returns (sky, clipped standard deviation)."""
+    v = np.sort(v)
+    lo, hi = 0, v.size
+    for _ in range(20):
+        w = v[lo:hi]
+        if w.size < 3:
+            break
+        med = w[w.size // 2]
+        sd = np.std(w)
+        nlo = lo + np.searchsorted(w, med - 3.0 * sd)
+        nhi = lo + np.searchsorted(w, med + 3.0 * sd, side="right")
+        if nlo == lo and nhi == hi:
+            break
+        lo, hi = nlo, nhi
+    w = v[lo:hi]
+    med = np.median(w)
+    mean = np.mean(w)
+    sky = 3.0 * med - 2.0 * mean if mean > med else mean
+    return sky, np.std(w)
+
+
+@numba.njit(cache=True)
+def _aperture_core(img, err, xs, ys, r_ap, r_in, r_out, nsub):
+    """Aperture sum (sub-pixel weights, nsub x nsub samples per pixel) minus the mmm annulus sky (pixel
+    centres in the annulus), at each (x, y) in pixels. Returns raw flux, sky, annulus scatter, aperture
+    area (pixels), covered."""
+    n = xs.size
+    ny, nx = img.shape
+    out_f = np.full(n, np.nan)
+    out_s = np.full(n, np.nan)
+    out_r = np.full(n, np.nan)
+    out_a = np.full(n, np.nan)
+    cov = np.zeros(n, dtype=np.bool_)
+    rb = int(np.ceil(r_out)) + 1
+    buf = np.empty((2 * rb + 1) ** 2)
+    for i in range(n):
+        x0 = xs[i]
+        y0 = ys[i]
+        cx = int(np.floor(x0 + 0.5))
+        cy = int(np.floor(y0 + 0.5))
+        total_w = 0.0
+        good_w = 0.0
+        acc = 0.0
+        nb = 0
+        n_ann = 0
+        for yy in range(cy - rb, cy + rb + 1):
+            for xx in range(cx - rb, cx + rb + 1):
+                dc = np.hypot(xx - x0, yy - y0)
+                inside = 0 <= xx < nx and 0 <= yy < ny
+                valid = False
+                if inside:
+                    v = img[yy, xx]
+                    e = err[yy, xx]
+                    valid = np.isfinite(v) and np.isfinite(e) and e > 0
+                if dc <= r_ap + 0.75:
+                    if dc <= r_ap - 0.75:
+                        wgt = 1.0
+                    else:
+                        c = 0
+                        for a in range(nsub):
+                            for b in range(nsub):
+                                if np.hypot(xx - 0.5 + (a + 0.5) / nsub - x0, yy - 0.5 + (b + 0.5) / nsub - y0) <= r_ap:
+                                    c += 1
+                        wgt = c / (nsub * nsub)
+                    total_w += wgt
+                    if valid:
+                        good_w += wgt
+                        acc += wgt * img[yy, xx]
+                if r_in <= dc <= r_out:
+                    n_ann += 1
+                    if valid:
+                        buf[nb] = img[yy, xx]
+                        nb += 1
+        if total_w <= 0 or good_w < 0.9 * total_w or nb < max(10, n_ann // 2):
+            continue
+        sky, sd = _mmm_sky(buf[:nb])
+        # the missing aperture weight is filled at the sky level (at most 10 per cent of the aperture)
+        out_f[i] = acc * total_w / good_w - sky * total_w
+        out_s[i] = sky
+        out_r[i] = sd
+        out_a[i] = total_w
+        cov[i] = True
+    return out_f, out_s, out_r, out_a, cov
+
+
 class Tile:
     """One open map tile with its fitting machinery (build with `open_tile`)."""
 
     def __init__(self, omap, config):
         record = omap.record
-        self.record = record
         self.wcs = omap.wcs
         self.shape = tuple(record.shape)
         scale = proj_plane_pixel_scales(omap.wcs)
         self.pixel_arcsec = float(np.mean(scale)) * 3600.0
         self.beam_arcsec = beam_fwhm_arcsec(record)
+        self.record = record
+        self.aperture_fraction = aperture_fraction(config, record)
+        # the flux normalisation the owner rules (pacs_psf.APERTURE_NORMALISATION): PSF-fit fluxes and
+        # their errors are reported on it; 1 for total flux
+        self.flux_scale = psf_flux_scale(config, record)
         self.beam_px = self.beam_arcsec / self.pixel_arcsec
-        self.half = int(np.ceil(FIT_BOX_FWHM * self.beam_px))
+        # the box holds the eHOPS sky annulus (pacs_psf.APERTURES) and at least FIT_BOX_FWHM beams
+        _, ann_in, ann_out = APERTURES[record.band]
+        self.ann_in_px, self.ann_out_px = ann_in / self.pixel_arcsec, ann_out / self.pixel_arcsec
+        self.half = int(np.ceil(max(FIT_BOX_FWHM * self.beam_px, self.ann_out_px + 1.0)))
         self.table_half = int(min(self.half + np.ceil(NEIGHBOUR_REACH_FWHM * self.beam_px),
                                   PSF_TABLE_HALF_ARCSEC // self.pixel_arcsec))
         self.reach = float(self.table_half)            # nuisance inclusion radius, pixels
@@ -539,7 +689,8 @@ class Tile:
     def _call(self, tx, ty, tn, ux, uy, un, cx, cy, half):
         psf = self._psf
         return _fit_core(self.image, self.error, psf.table, psf.extent, psf.subpixel_steps,
-                         tx, ty, tn, ux, uy, un, cx, cy, half, MIN_BEAM_FRACTION)
+                         tx, ty, tn, ux, uy, un, cx, cy, half, MIN_BEAM_FRACTION,
+                         self.ann_in_px, self.ann_out_px)
 
     # -- bright neighbours (11.3 step 1) -------------------------------------
     def _find_neighbours(self):
@@ -620,17 +771,30 @@ class Tile:
                 ux, uy, un = np.zeros((m, 1)), np.zeros((m, 1)), np.zeros(m, dtype=np.int64)
             flux, gain, cov, valid = self._call(x[r, None], y[r, None], np.ones(m, dtype=np.int64),
                                                 ux, uy, un, cx[r], cy[r], self.half)
-            out[0][r] = flux[:, 0]
+            out[0][r] = flux[:, 0] * self.flux_scale
             out[1][r] = gain[:, 0]
-            out[2][r] = np.sqrt(np.maximum(cov[:, 0, 0], 0))
+            out[2][r] = np.sqrt(np.maximum(cov[:, 0, 0], 0)) * self.flux_scale
             out[3][r] = valid
             out[4][r] = un
         return PositionFit(*out)
 
     def fit_positions(self, x, y, batch=512):
         """Forced fit at each (x, y) -> PositionFit. The same code for real sources and for
-        random completeness positions; bright neighbours enter as nuisance columns."""
-        return self._fit(x, y, use_nuisance=True, batch=batch)
+        random completeness positions: the PSF fit on the eHOPS annulus-sky convention, with no
+        nuisance columns (HOPS/eHOPS had none; a neighbour in the annulus is removed by the clipped
+        sky, one inside the fitting box adds to the flux -- disclosed)."""
+        return self._fit(x, y, use_nuisance=False, batch=batch)
+
+    def aperture(self, x, y):
+        """Forced aperture photometry at each (x, y) -> ApertureFit (the eHOPS convention: the
+        photometry of isolated sources and the completeness positions alike). Linear in the map
+        except through the clipped sky, which a point source barely enters (its wing in the annulus is
+        part of the aperture fraction)."""
+        r_ap, r_in, r_out = (r / self.pixel_arcsec for r in APERTURES[self.record.band])
+        f, sky, sd, area, cov = _aperture_core(self.image, self.error, np.asarray(x, float).ravel(),
+                                               np.asarray(y, float).ravel(), r_ap, r_in, r_out, 5)
+        frac = self.aperture_fraction
+        return ApertureFit(f / frac, sky, sd * np.sqrt(area) / frac, cov)
 
     def fit_groups(self, x, y, group):
         """Simultaneous fit of blend groups -> GroupFit. `group` (n,) holds an integer label
@@ -680,6 +844,8 @@ class Tile:
                     res["gflux"][i] = np.where(valid, gsum, np.nan)
                     res["gsigma"][i] = np.where(valid, gsig, np.nan)
                     covered[i] = valid
+        for key in ("flux", "sigma", "gflux", "gsigma"):
+            res[key] = res[key] * self.flux_scale
         with np.errstate(all="ignore"):
             inflation = res["sigma"] / single.sigma
         return GroupFit(res["flux"], res["sigma"], inflation, res["rho"],
