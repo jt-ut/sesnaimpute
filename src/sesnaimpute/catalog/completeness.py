@@ -723,7 +723,14 @@ _PACS_COPIED = (
     "CELL_OBSID_{b}", "N_POS_{b}", "N_SIGMA_POS_{b}",
     "MAP_ID_{b}", "MAP_OBSID_{b}", "MAP_WCS_{b}", "MAP_SHAPE_{b}", "MAP_CELL_STEP_{b}",
     "MAP_SHIFT_{b}_ARCSEC", "MAP_N_PAIRS_{b}",
+    # the null calibration of the joint point-source fit that measures blended sources (METHOD 2)
+    "CURVE_PSF_{b}", "CELL_OFFSET_PSF_{b}_MJY", "CELL_SIGMA_PSF_{b}_MJY",
+    "CELL_TAIL_FACTOR_PSF_{b}", "CELL_GAIN_PSF_{b}",
 )
+
+
+def _pacs_photometry_path(config, region):
+    return config_module.product_path(config, "sky/derived", "pacs", "photometry", "source", region=region)
 
 
 def _pacs_input_path(config, region):
@@ -802,7 +809,7 @@ def _write_pacs_band(f, fin, band, n_source, sample_ra, sample_dec, n_admitted, 
         name = tmpl.format(b=band)
         data = fin[name][()]
         dset = build_module.write_dataset(f, name, data, *REGISTRY[("completeness_sesna_source", name)])
-        if name == "CURVE_%s" % band:
+        if name in ("CURVE_%s" % band, "CURVE_PSF_%s" % band):
             dset.attrs["ZERO_POINT_JY"] = fin[name].attrs["ZERO_POINT_JY"]
     k = ALL_BAND_KEYS.index(band)
     pacs_k = PACS_KEYS.index(band)
@@ -1075,6 +1082,19 @@ def build(config, regions=None):
                         "catalog.completeness: no PACS completeness input at %r -- the PACS stages "
                         "build it first" % pacs_in)
                 pacs_frac = {}
+                with h5py.File(config_module.product_path(
+                        config, "catalog", "sesna", "sources", "source", region=region), "r") as fs, \
+                        h5py.File(_pacs_photometry_path(config, region), "r") as fph:
+                    cur_name = np.asarray(fs["NAME"][()]).astype(str)
+                    ph_name = np.asarray(fph["NAME"][()]).astype(str)
+                    if not np.array_equal(ph_name, cur_name):
+                        raise ValueError(
+                            "catalog.completeness: PACS photometry NAME does not match the curated sources "
+                            "for %r (%d vs %d rows)" % (region, ph_name.size, cur_name.size))
+                    for band in PACS_KEYS:
+                        build_module.write_dataset(
+                            f, "METHOD_%s" % band, fph["METHOD_%s" % band][()],
+                            *REGISTRY[("completeness_sesna_source", "METHOD_%s" % band)])
                 with h5py.File(pacs_in, "r") as fin:
                     for band in PACS_KEYS:
                         pacs_frac[band] = _write_pacs_band(
