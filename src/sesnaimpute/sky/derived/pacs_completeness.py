@@ -74,6 +74,9 @@ BLOCK_CELLS = 16
 MAD_TO_SIGMA = 1.4826
 #: the noise's tail correction is measured on this many evenly spread cells (with their 3 x 3 blocks) of each tile
 TAIL_CELLS = 400
+#: a block's own tail factor needs at least this many of its clean positions beyond the quantile
+#: (~37,000 positions, about 185 cells of 200): below it the block takes the tile's factor
+BLOCK_TAIL_MIN_TAIL = 50
 #: one-sided Gaussian probability beyond 3 sigma: the negative tail of b / sigma over a tile's clean
 #: positions is matched to it (real sources only ADD flux, so the negative side is pure noise)
 TAIL_PROBABILITY = 0.00135
@@ -250,12 +253,21 @@ def _piece(piece, config, records, flux_grid, tails):
     n_valid, n_clean, mad, g, pps, off = cell_statistics(b, gain, ps, valid, clean)
     sigma, n_sigma = block_sigma(tile.grid, ids, all_ids, mad, n_clean)
     offset = cell_offset(tile.grid, ids, all_ids, off, n_clean)
-    tail, tile_median = tails[tile_index]
+    tile_tail, tile_median = tails[tile_index]
     # a block with no clean cell (wholly within a beam of bright sources) takes the tile's median noise;
     # N_SIGMA_POS 0 marks it
-    sigma = np.where(np.isfinite(sigma), sigma, tile_median) * tail
+    sigma = np.where(np.isfinite(sigma), sigma, tile_median)
     k = np.searchsorted(all_ids, ids)
-    b, gain, valid, n_valid, g, pps = b[k], gain[k], valid[k], n_valid[k], g[k], pps[k]
+    b, gain, valid, clean, n_valid, g, pps = b[k], gain[k], valid[k], clean[k], n_valid[k], g[k], pps[k]
+    # the tail factor of THIS block of cells (planner 2026-10-27: one per map left bright cores, e.g. Cygnus X,
+    # with 271 sources at <= -5 sigma): the TAIL_PROBABILITY quantile of (b - offset) / sigma over the block's
+    # clean positions, when at least BLOCK_TAIL_MIN_TAIL positions lie beyond it; else the tile's (or the
+    # mode-pooled) factor
+    use = valid & clean & np.isfinite(sigma)[:, None] & (sigma > 0)[:, None]
+    z = ((b - offset[:, None]) / sigma[:, None])[use]
+    tail = (float(-np.quantile(z, TAIL_PROBABILITY) / 3.0)
+            if z.size * TAIL_PROBABILITY >= BLOCK_TAIL_MIN_TAIL else tile_tail)
+    sigma = sigma * tail
     covered = (n_valid >= MIN_VALID_POSITIONS) & np.isfinite(sigma) & (sigma > 0) & np.isfinite(g)
     curve = encode_curves(curve_counts(thresholds(b, gain, valid, sigma, offset), flux_grid), n_valid)
     ra, dec = tile.grid.centres_icrs(ids)
@@ -311,7 +323,9 @@ def _band_product(config, records, ra, dec, sample_ra, sample_dec, n_jobs, stage
                ("covered", "n_valid", "n_sigma", "sigma", "offset", "gain", "pixel_sigma", "curve", "ra", "dec")}
         tile_data.append(out)
         if mine:
-            print("  %s: noise tail factor %.3f" % (records[t].map_id, mine[0]["tail"]), flush=True)
+            kb = np.array([r["tail"] for r in mine])
+            print("  %s: tile tail factor %.3f; block factors %d blocks, median %.3f, range %.3f-%.3f"
+                  % (records[t].map_id, tails[t][0], kb.size, np.median(kb), kb.min(), kb.max()), flush=True)
     # deepest map at every source and every sample point
     sel_src_t = np.full(n_src, -1, np.int32)
     sel_src_r = np.full(n_src, np.inf)
