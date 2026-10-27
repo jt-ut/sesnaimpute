@@ -286,11 +286,11 @@ class ModelLibrary:
         return out
 
     def convolved_all(self):
-        """All 8 bands, in BANDS order."""
+        """All eleven bands, in BANDS order."""
         return [self.convolved(b) for b in _BAND_KEYS]
 
     def filtwav(self):
-        """The 8 FILTWAV values in BANDS order (microns)."""
+        """The eleven FILTWAV values in BANDS order (microns)."""
         return np.array([self.convolved(b).filtwav_um for b in _BAND_KEYS],
                         dtype=float)
 

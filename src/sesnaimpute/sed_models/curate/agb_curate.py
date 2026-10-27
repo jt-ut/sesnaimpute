@@ -1056,7 +1056,7 @@ def sample_agb_templates(rows, wave_um_desc, sigma_log_by_band, bands=BANDS8, ve
     log10_flux8 = agb_band8_log10_fluxes(rows, wave_um_desc, bands=bands)
 
     space = _density.build_quotient_space(
-        laws=_density.DEFAULT_LAWS, sigma_log=sigma_log_by_band,
+        laws=_density.DEFAULT_LAWS, sigma_log=sigma_log_by_band, bands=bands,
         sigma_source="constants.LIBRARY_SAMPLING_SIGMA_LOG_VECTOR (2x survey "
                      "absolute-calibration systematics, literature + derivation) -- "
                      "sed_models_curate.build.agb's sigma_log_vector()")

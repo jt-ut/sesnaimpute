@@ -99,7 +99,7 @@ class QuotientSpace:
         return np.asarray(x, dtype=float) @ self.basis.T
 
 
-def _av_law(law_name):
+def _av_law(law_name, bands=None):
     """-0.4 * chi(lambda)/chi(0.55um) at the BANDS wavelengths.
 
     Computed from constants.BANDS rather than from a loaded Fitter, so
@@ -110,12 +110,12 @@ def _av_law(law_name):
     law = load_extinction_law(law_name)
     order = np.argsort(law.wave_um)
     w, chi = law.wave_um[order], law.opacity_cm2_per_g[order]
-    wav = np.array([BANDS[b].wvl_effective_um for b in _BAND_KEYS])
+    wav = np.array([BANDS[b].wvl_effective_um for b in (bands or _BAND_KEYS)])
     chi_v = np.interp(_V_BAND_UM, w, chi)
     return -0.4 * np.interp(wav, w, chi) / chi_v
 
 
-def build_quotient_space(laws=DEFAULT_LAWS, sigma_log=None, sigma_source=""):
+def build_quotient_space(laws=DEFAULT_LAWS, sigma_log=None, sigma_source="", bands=None):
     """Build the projector once; share it across every consumer.
 
     `sigma_log` is the per-band photometric sigma in dex. It defaults to
@@ -129,18 +129,23 @@ def build_quotient_space(laws=DEFAULT_LAWS, sigma_log=None, sigma_source=""):
     `sigma_source` is a free string identifying where the vector came
     from; it is carried to the container header and never interpreted
     here. It defaults to the citation.
+
+    `bands` is the band-key tuple the space is built over (default: every
+    band of the SED, the eleven). The curation samplers pass the eight
+    SESNA bands they select on.
     """
+    bands = tuple(bands) if bands is not None else tuple(_BAND_KEYS)
     if sigma_log is None:
         sigma_log = np.asarray(LIBRARY_SAMPLING_SIGMA_LOG_VECTOR, float)
         sigma_source = sigma_source or SIGMA_LOG_CITATION
     else:
         sigma_log = np.asarray(sigma_log, float)
     placeholder = False
-    if sigma_log.shape != (len(_BAND_KEYS),):
-        raise ValueError(f"sigma_log must be ({len(_BAND_KEYS)},), got {sigma_log.shape}")
+    if sigma_log.shape != (len(bands),):
+        raise ValueError(f"sigma_log must be ({len(bands)},), got {sigma_log.shape}")
 
-    av = np.array([_av_law(name) for name in laws])
-    M = np.column_stack([np.ones(len(_BAND_KEYS))] + [av[i] for i in range(len(laws))])
+    av = np.array([_av_law(name, bands) for name in laws])
+    M = np.column_stack([np.ones(len(bands))] + [av[i] for i in range(len(laws))])
 
     # SVD rather than Gram-Schmidt: see module header.
     U, s, _ = np.linalg.svd(M, full_matrices=True)

@@ -77,7 +77,7 @@ TWO CONVENTIONS WORTH KNOWING BEFORE READING A COLUMN:
   fail a healthy library in I3. The B0 numerical floor travels beside it
   as FLOOR_LINEAR, and consumers taking a log apply
   np.maximum(F_REF, FLOOR_LINEAR) themselves. DARK_BANDS records, per
-  model, which bands were below it -- one uint8, bit i = band i.
+  model, which bands were below it -- one uint16, bit i = band i.
 
   EVERY STORED VALUE IS FINITE (B0.1). Substitutes are chosen to be
   arithmetically correct rather than convenient -- G0 = 0 for a dark
@@ -99,7 +99,8 @@ inputs never had. Library-level scalars stay float64.
 import h5py
 import numpy as np
 
-from sesnaimpute.sed_models.constants import BANDS, VEGA_ZERO_POINT_MJY
+from sesnaimpute import definitions
+from sesnaimpute.sed_models.constants import BANDS
 
 from . import library as _modlib
 from .darkness import pack_dark_bands, unpack_dark_bands
@@ -132,7 +133,7 @@ def final_filename(library_key):
 _SCHEMA_VERSION = "3"
 
 #: Chunked + deflate above this many elements. Below it the filter
-#: overhead exceeds the payload, and the band/legend tables are 8 rows.
+#: overhead exceeds the payload, and the band/legend tables are 11 rows.
 _COMPRESS_MIN = 4096
 _COMPRESSION = dict(compression="gzip", compression_opts=4, shuffle=True)
 
@@ -320,7 +321,7 @@ def _band_columns(*, lib, reference_state, quotient_space):
     rs = reference_state
     ap = np.array([BANDS[b].aperture_arcsec for b in _BAND_KEYS], float)
     band_cols = [
-        ("BAND", np.array(_BAND_KEYS, dtype="U3")),
+        ("BAND", np.array(_BAND_KEYS, dtype="U4")),
         # Filter-curve identity: which survey/instrument this band's
         # curve belongs to, and the two wavelengths constants.py
         # distinguishes (the nominal/rounded "channel" name vs the
@@ -335,12 +336,13 @@ def _band_columns(*, lib, reference_state, quotient_space):
         ("FILTWAV_UM", lib.filtwav()),
         ("APERTURE_ARCSEC", ap),
         ("APERTURE_AU_AT_D_REF",
-         rs.aperture_au if rs.aperture_dependent else np.full(8, np.nan)),
+         rs.aperture_au if rs.aperture_dependent else np.full(len(_BAND_KEYS), np.nan)),
         # The Vega-system zero-point flux density per band, mJy
-        # (constants.VEGA_ZERO_POINT_MJY) -- needed to go from a stored
+        # (definitions.BANDS; PACS: 1 Jy by convention, m = -2.5 log10(F / 1 Jy)) -- needed to go from a stored
         # mJy flux to a Vega magnitude without a consumer re-deriving or
         # re-citing the literature table.
-        ("VEGA_ZP_MJY", np.array([VEGA_ZERO_POINT_MJY[b] for b in _BAND_KEYS], float)),
+        ("VEGA_ZP_MJY", np.array([round(definitions.BANDS_BY_KEY[b].vega_zero_point_jy * 1000.0, 6)
+                                  for b in _BAND_KEYS], float)),
     ]
     for j, law in enumerate(_law_names(quotient_space.laws)):
         band_cols.append((f"AV_LAW_{law}", np.asarray(quotient_space.av_law[j])))

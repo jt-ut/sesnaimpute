@@ -66,7 +66,7 @@ models group, by MODEL_NAME (`sed_models.library.write_register`'s A12
 join, `curation-s` round 2, `29228b4`); TAU is on the models group and
 groupable by SUBCLASS, with min(TAU) per SUBCLASS (the dusty-floor
 number the pipeline reads) finite and positive for both O and C;
-the bands group carries exactly 8 finite, positive VEGA_ZP_MJY zero
+the bands group carries exactly 11 finite, positive VEGA_ZP_MJY zero
 points; every `subclass_prob` row (O/C) sums to 1.0.
 ====================================================================
 """
@@ -403,7 +403,8 @@ def build(root):
         min_tau_by_subclass[code] = float(vals.min())
 
     assert "VEGA_ZP_MJY" in band_cols, "build_agb: register bands group lacks VEGA_ZP_MJY"
-    assert vega_zp.size == 8, f"build_agb: bands group has {vega_zp.size} zero points, not 8"
+    assert vega_zp.size == len(CONVOLVED_BAND_NAMES), (
+        f"build_agb: bands group has {vega_zp.size} zero points, not {len(CONVOLVED_BAND_NAMES)}")
     assert np.all(np.isfinite(vega_zp)) and np.all(vega_zp > 0), (
         "build_agb: a band zero point is non-finite or non-positive")
 

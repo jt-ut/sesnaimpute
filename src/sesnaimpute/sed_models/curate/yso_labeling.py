@@ -78,6 +78,7 @@ try:
 except ImportError:
     faiss = None
 
+from sesnaimpute import definitions
 from sesnaimpute.sed_models.constants import BANDS, PC_CM, VEGA_ZERO_POINT_MJY
 from sesnaimpute.sed_models.curate import curve_of_growth as cog
 from sesnaimpute.sed_models.curate.model_io import align_by_name, read_flux_metadata
@@ -89,19 +90,30 @@ from sesnaimpute.sed_models.curate.model_io import align_by_name, read_flux_meta
 # Band order fixed throughout this module -- must match the index convention
 # used to pack feature vectors (indices 0-7 = mu, pre-scaled by
 # 1/FIXED_SIGMA_BY_BAND; see _pack_vectors) and FIXED_SIGMA_ARRAY.
-# Derived from constants.BANDS (the single source of truth for band order)
-# rather than hardcoded, so the YSO side can never silently drift out of
-# sync with the SPS/fitter side.
-BAND_ORDER = tuple(BANDS)
+# Derived from definitions.SELECTION (the eight SESNA bands), not from the
+# eleven-band SED: the YSO curation (labeling, dedup, sampling) is done in the
+# space the catalogue is selected in, FRACERR below is the median fractional
+# error of the SESNA catalogue's own eight bands (no PACS value exists for it).
+# The release's own PACS convolutions join at assembly (ASSEMBLY_BANDS).
+BAND_ORDER = tuple(definitions.SELECTION.bands)
 
 # Where each band's convolved photometry file lives, relative to a
 # geometry's directory (geometry_dir/convolved/<survey_subdir>/<filename>).
 _CONVOLVED_SUBDIR = {"J": "2MASS", "H": "2MASS", "Ks": "2MASS",
                      "I1": "Spitzer", "I2": "Spitzer", "I3": "Spitzer",
-                     "I4": "Spitzer", "M1": "Spitzer"}
+                     "I4": "Spitzer", "M1": "Spitzer",
+                     "P70": "Herschel", "P100": "Herschel", "P160": "Herschel"}
 _CONVOLVED_FILENAME = {"J": "2MASS.J.fits", "H": "2MASS.H.fits", "Ks": "2MASS.Ks.fits",
                        "I1": "IRAC.I1.fits", "I2": "IRAC.I2.fits", "I3": "IRAC.I3.fits",
-                       "I4": "IRAC.I4.fits", "M1": "MIPS.24mu.fits"}
+                       "I4": "IRAC.I4.fits", "M1": "MIPS.24mu.fits",
+                       "P70": "Pacs.blue.fits", "P100": "Pacs.green.fits",
+                       "P160": "Pacs.red.fits"}
+
+#: The bands the library is ASSEMBLED with: the eight curation bands plus the
+#: release's own PACS convolutions (blue/green/red = 70/100/160 um), read by
+#: model name exactly like the eight. Curation (labeling, dedup, sampling)
+#: stays on BAND_ORDER.
+ASSEMBLY_BANDS = tuple(BANDS)
 
 # Vega zero points, Jy -- read from constants.VEGA_ZERO_POINT_MJY (their
 # single home) and converted from this project's mJy convention. Needed
