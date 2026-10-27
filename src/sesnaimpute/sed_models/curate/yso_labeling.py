@@ -79,7 +79,7 @@ except ImportError:
     faiss = None
 
 from sesnaimpute import definitions
-from sesnaimpute.sed_models.constants import BANDS, PC_CM, VEGA_ZERO_POINT_MJY
+from sesnaimpute.sed_models.constants import BANDS, PC_CM, SAMPLING_BANDS, VEGA_ZERO_POINT_MJY
 from sesnaimpute.sed_models.curate import curve_of_growth as cog
 from sesnaimpute.sed_models.curate.model_io import align_by_name, read_flux_metadata
 
@@ -95,7 +95,7 @@ from sesnaimpute.sed_models.curate.model_io import align_by_name, read_flux_meta
 # space the catalogue is selected in, FRACERR below is the median fractional
 # error of the SESNA catalogue's own eight bands (no PACS value exists for it).
 # The release's own PACS convolutions join at assembly (ASSEMBLY_BANDS).
-BAND_ORDER = tuple(definitions.SELECTION.bands)
+BAND_ORDER = tuple(SAMPLING_BANDS)
 
 # Where each band's convolved photometry file lives, relative to a
 # geometry's directory (geometry_dir/convolved/<survey_subdir>/<filename>).

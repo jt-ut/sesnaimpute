@@ -81,7 +81,7 @@ from astropy.table import Table
 
 from sesnaimpute.sed_models import paths
 from sesnaimpute import definitions
-from sesnaimpute.sed_models.constants import POINT_SOURCE_APERTURE_AU, BANDS
+from sesnaimpute.sed_models.constants import POINT_SOURCE_APERTURE_AU, BANDS, SAMPLING_BANDS
 from sesnaimpute.sed_models import sampling, library
 from sesnaimpute.sed_models.curate import curve_of_growth as cog
 from sesnaimpute.sed_models.curate.sps_curate import (
@@ -269,7 +269,7 @@ def build(root_arg):
         sigma_vec, projector = sampling.quotient_space()
         # Sampling is in the eight SESNA bands (the curation space); the
         # PACS columns of f_ref are carried to the library, not sampled.
-        sel = list(definitions.SELECTION_INDEX)
+        sel = [CONVOLVED_BANDS_TO_BUILD.index(b) for b in SAMPLING_BANDS]
         f_ref_samp = f_ref[:, sel]
         flux_cubes = {CONVOLVED_BANDS_TO_BUILD[j]: f_ref[:, j:j + 1] for j in sel}
         peak, floor_dex, floor_linear, all_zero = cog.peak_and_floor(flux_cubes)
