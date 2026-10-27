@@ -3904,64 +3904,6 @@ for _lib in ("sps", "agb", "pahc", "galz", "yso", "h2shock", "pahn"):
 # sky.derived.pacs_completeness -- completeness_pacs_source (2026-10-26 repair): the PACS 70 and 100
 # micron completeness in the layout of completeness_sesna_source, plus per-cell columns.
 _PACS_COMPLETENESS_CELLS_READINGS = {
-    "CURVE_{b}": ("completeness fraction x600, uint16",
-        "One row per covered 30-arcsec cell of every Herschel PACS {w} micron map, for all cells inside the "
-        "region's source bounding box padded by about 7 arcmin (overlapping maps each keep their cells; "
-        "SOURCE_ROW points at the deepest one). Each value is the fraction of artificial point sources of the "
-        "flux in MAG_GRID_{b} that the catalogue recovers as detections at that cell, stored as the fraction "
-        "times 600. The artificial sources are the band's point-spread pattern added to a copy of the real map at "
-        "random positions, never two close enough for one's light to reach the other's aperture or sky annulus, "
-        "measured exactly as a catalogue source at that position is (aperture photometry, or the joint fit where a "
-        "detected source lies within one beam), and counted as recovered when their flux minus "
-        "CELL_OFFSET_{b}_MJY reaches 5 times CELL_SIGMA_{b}_MJY, whatever the flux error. Artificial sources are injected at fixed multiples of each cell's own noise (CELL_SIGMA_{b}_MJY), from 0.3 to 1000 times it in steps of 0.1 in the logarithm, and the counts of the cells whose centres lie within 120 arcsec of the cell on the same map are added at each multiple (widened to 240, then 360 arcsec where fewer than 100 result). The value at a flux is read at that flux over the cell's own CELL_SIGMA_{b}_MJY, interpolating linearly in the logarithm between the two nearest multiples: the shape comes from the neighbourhood, the scale and the offset are the cell's own. The value at "
-        "the faintest fluxes is not zero: it is the chance that the rule fires on a position with almost no source "
-        "flux (see CONTAMINATION_{b}). Rows are ordered by map and then cell."),
-    "N_POS_{b}": ("injections",
-        "For each row of CURVE_{b}, the number of artificial sources behind its value at the faintest plane of "
-        "MAG_GRID_{b}: those injected at the two multiples of the noise that bracket that flux, in the cells within "
-        "the pooling radius (120 arcsec, widened where too few) on its map, on valid data, not counting those within "
-        "half a beam of a detected source (the smaller of the two counts)."),
-    "FLUX90_{b}_MJY": ("mJy",
-        "For each row of CURVE_{b}, the faintest flux at which the recovered fraction of the artificial sources is "
-        "still at least 0.9: the grid read from its bright end, interpolated linearly in the logarithm of the flux "
-        "to where the fraction crosses 0.9. NaN where even the brightest plane does not reach 0.9; the faintest "
-        "plane's flux if no plane falls below it."),
-    "BIAS_{b}_MJY": ("mJy",
-        "For each row of CURVE_{b} and each plane of MAG_GRID_{b}: the median of (recovered flux minus injected "
-        "flux) over all the artificial sources measured by aperture photometry, detected or not. "
-        "It is measured in units of each injection's own cell noise, pooled and read as CURVE_{b} is, and multiplied "
-        "by the row's CELL_SIGMA_{b}_MJY; above 1000 times the noise it grows in proportion to the flux. The "
-        "recovered flux is the flux the catalogue reports, without CELL_OFFSET_{b}_MJY subtracted. NaN where "
-        "fewer than 100 artificial sources are in reach."),
-    "SCATTER_{b}_MJY": ("mJy",
-        "For each row of CURVE_{b} and each plane of MAG_GRID_{b}: the photometric error of a detected {w} micron "
-        "source of that flux at that cell, 1.4826 times the median absolute deviation about the median of "
-        "(recovered flux minus injected flux) over all the artificial sources measured by aperture photometry, "
-        "detected or not (a detection's error must not be conditioned on the detection itself, which would cut "
-        "off the downward fluctuations near the threshold), measured in units of each injection's own cell noise, pooled and read as CURVE_{b} is, and "
-        "multiplied by the row's CELL_SIGMA_{b}_MJY (above 1000 times the noise it grows in proportion to the "
-        "flux). This is the uncertainty the photometry product assigns to a detected, isolated source. It "
-        "describes the core of the error distribution; the rarer large excesses from unrelated objects in the "
-        "aperture are given by CONTAMINATION_{b}. NaN where fewer than 100 artificial sources are in reach."),
-    "SCATTER_BLEND_{b}_MJY": ("mJy",
-        "The same as SCATTER_{b}_MJY for a source fitted jointly with a detected neighbour within one beam (the "
-        "artificial source is one more member of the fitted group). It comes from a separate set of artificial sources: "
-        "for every detected source of the map, 40 at each multiple of the noise in the ring from half a beam to one "
-        "beam around it, all those the joint fit could separate (detected or not), pooled and read as SCATTER_{b}_MJY "
-        "is. NaN where fewer than 30 are in reach "
-        "within 360 arcsec, which is most cells far from a detected source; the photometry then uses the cell's "
-        "SCATTER_{b}_MJY."),
-    "CONTAMINATION_{b}": ("probability",
-        "For each row of CURVE_{b}: the chance that the detection rule fires at a position in that cell where the "
-        "source itself contributes almost nothing, because unrelated emission (a compact cloud core, a background "
-        "galaxy, a sharp structure in the sky) lies inside the aperture. Measured as the fraction of artificial "
-        "sources at 0.3 times the cell noise that were counted as detections. The cells of each map are ranked by "
-        "their sky brightness (the clipped sky in the annulus; PACS maps have no absolute zero level, so the "
-        "ranking is within a map) and cut into 5 equal groups; each group's value pools those injections over "
-        "every map of the band in the region (attributes BIN_VALUES and BIN_INJECTIONS, faint to bright sky). "
-        "It describes the purity of the cell's detections: summed over the covered sources of a region it is the "
-        "number of detections expected to come from unrelated flux. It is already inside CURVE_{b} at the faintest "
-        "fluxes. It cannot be applied to a single source: it does not say whether a given detection is affected."),
     "CELL_SIGMA_{b}_MJY": ("mJy",
         "The one-sigma uncertainty of a {w} micron point-source flux measured in each cell of CURVE_{b}: "
         "the median, over the 3 x 3 block of cells around it, of 1.4826 times the median absolute deviation "
@@ -4049,15 +3991,20 @@ _PHOTOMETRY_PACS_READINGS = {
         "point source's flux), measured with the eHOPS survey's apertures (Pokhrel et al. 2023): aperture "
         "photometry at the catalogue position (moved by the map's astrometric shift, MAP_SHIFT in the completeness "
         "product) on the map that is deepest there, aperture radius 9.6 / 8.0 / 12.8 arcsec at 70 / 100 / 160 "
-        "micron, sky from a clipped mode in the annulus 12.8-25.6 / 9.6-16.0 / 16.0-22.4 arcsec, divided by the "
-        "fraction of a point source's total flux that this aperture and annulus return for the map's observing "
+        "micron, sky from a clipped mode in the annulus 12.8-25.6 / 9.6-16.0 / 16.0-22.4 arcsec taken after the "
+        "source's own outer light (the point-spread pattern scaled to its flux) is removed from the annulus, so "
+        "that a bright source's light is not partly rejected by the clipping, divided by the fraction of a point "
+        "source's total flux inside the aperture radius for the map's observing "
         "mode and scan speed (PACS encircled-energy tables; 0.71-0.76 at 70, 0.55-0.63 at 100, 0.64-0.65 at 160 "
         "micron; for a parallel-mode map that holds only one scan direction, the fraction is computed from that "
         "direction's own point-spread template, at 70 and 160 micron only: at 100 micron the two templates differ by about 3 "
         "per cent inside 8 arcsec, so such a map is refused there). eHOPS's published fluxes are on a within-60-arcsec normalisation with one constant per band and "
         "sit about 9 % lower at 70 micron, and more at 100 micron on fast-scan maps. Where METHOD is 2 the source has "
         "a neighbour within one beam of a detected source and its flux is the total flux of a joint point-source "
-        "fit. It can be negative or small when nothing is seen and is NaN where the band does not cover the source. "
+        "fit. The cell's empty-sky offset of the same measurement (CELL_OFFSET for the aperture, CELL_OFFSET_PSF for "
+        "the joint fit, in the completeness product: the typical flux that measurement returns at empty positions of "
+        "the 30-arcsecond cell, from sky structure it does not remove) is subtracted. It can be negative or small when nothing is seen and is NaN where the band does not "
+        "cover the source. "
         "Where ORIGIN is 2 it is an upper bound: the combined flux of the blended group plus five times its "
         "uncertainty."),
     "SIGMA_ANNULUS_{b}_MJY": ("mJy",
@@ -4122,44 +4069,65 @@ _PACS_INJECTION_READINGS = {
         "SOURCE_ROW points at the deepest one). Each value is the fraction of artificial point sources of the "
         "flux in MAG_GRID_{b} that the catalogue recovers as detections at that cell, stored as the fraction "
         "times 600. The artificial sources are the band's point-spread pattern added to a copy of the real map at "
-        "random positions, one per about 50 beam areas at a time, measured exactly as a catalogue source at that "
-        "position is (aperture photometry, or the joint fit where a detected source lies within one beam), and "
-        "counted as recovered when their flux minus CELL_OFFSET_{b}_MJY reaches 5 times CELL_SIGMA_{b}_MJY, "
-        "whatever the flux error. The counts of all cells whose centres lie within 120 arcsec of the cell and of similar noise (CELL_SIGMA within a factor 1.5 of its own) are added "
-        "before the fraction is taken, so each value rests on at least 100 injections where the map allows (where fewer result the radius is widened to 240, then 360 arcsec, never the noise window) (N_POS_{b} "
-        "gives the number at the faintest plane). The fraction at the faintest planes is the false-positive floor of "
-        "the 5-sigma rule as measured, not zero. Rows are ordered by map and then cell."),
+        "random positions, never two close enough for one's light to reach the other's aperture or sky annulus, "
+        "measured exactly as a catalogue source at that position is (aperture photometry, or the joint fit where a "
+        "detected source lies within one beam), and counted as recovered when their flux minus "
+        "CELL_OFFSET_{b}_MJY reaches 5 times CELL_SIGMA_{b}_MJY, whatever the flux error. Artificial sources are injected at fixed multiples of each cell's own noise (CELL_SIGMA_{b}_MJY), from 0.3 to 1000 times it in steps of 0.1 in the logarithm, and the counts of the cells whose centres lie within 120 arcsec of the cell on the same map are added at each multiple (widened to 240, then 360 arcsec where fewer than 100 result). The value at a flux is read at that flux over the cell's own CELL_SIGMA_{b}_MJY, interpolating linearly in the logarithm between the two nearest multiples: the shape comes from the neighbourhood, the scale and the offset are the cell's own. The value at "
+        "the faintest fluxes is not zero: it is the chance that the rule fires on a position with almost no source "
+        "flux (see CONTAMINATION_{b}). Rows are ordered by map and then cell."),
     "N_POS_{b}": ("injections",
         "For each row of CURVE_{b}, the number of artificial sources behind its value at the faintest plane of "
-        "MAG_GRID_{b}: the injections that fell in the cells within 120 arcsec of the row's cell and of similar noise (CELL_SIGMA within a factor 1.5 of its own) on its map and "
-        "lay on valid data, not counting those within half a beam of a detected source. Rows near a map's edge "
-        "have fewer, so can fall below the 100 aimed at."),
+        "MAG_GRID_{b}: those injected at the two multiples of the noise that bracket that flux, in the cells within "
+        "the pooling radius (120 arcsec, widened where too few) on its map, on valid data, not counting those within "
+        "half a beam of a detected source (the smaller of the two counts)."),
     "FLUX90_{b}_MJY": ("mJy",
         "For each row of CURVE_{b}, the faintest flux at which the recovered fraction of the artificial sources is "
         "still at least 0.9: the grid read from its bright end, interpolated linearly in the logarithm of the flux "
         "to where the fraction crosses 0.9. NaN where even the brightest plane does not reach 0.9; the faintest "
         "plane's flux if no plane falls below it."),
     "BIAS_{b}_MJY": ("mJy",
-        "For each row of CURVE_{b} and each plane of MAG_GRID_{b}: the median of (recovered flux minus injected "
-        "flux) over the recovered artificial sources (those counted as detections) measured by aperture photometry "
-        "in the cells within 120 arcsec of the row's cell and of similar noise (CELL_SIGMA within a factor 1.5 of its own). The recovered flux is the flux the catalogue reports, "
-        "without CELL_OFFSET_{b}_MJY subtracted. NaN where fewer than 100 recovered sources lie in the "
-        "neighbourhood at that plane."),
+        "For each row of CURVE_{b} and each plane of MAG_GRID_{b}: the median of (measured flux minus "
+        "CELL_OFFSET_{b}_MJY minus injected flux) over all the artificial sources measured by aperture photometry, "
+        "detected or not, measured in units of each injection's own cell noise, pooled and read as CURVE_{b} is, "
+        "and multiplied by the row's CELL_SIGMA_{b}_MJY. Stored as a disclosure and applied to nothing."),
     "SCATTER_{b}_MJY": ("mJy",
-        "For each row of CURVE_{b} and each plane of MAG_GRID_{b}: the photometric error of a detected {w} micron "
-        "source of that flux at that cell, 1.4826 times the median absolute deviation about the median of "
-        "(recovered flux minus injected flux) over the recovered artificial sources measured by aperture "
-        "photometry in the cells within 120 arcsec and of similar noise (CELL_SIGMA within a factor 1.5 of its own). This is the uncertainty the photometry product assigns to a "
-        "detected, isolated source. NaN where fewer than 100 recovered sources lie in the neighbourhood at that "
-        "plane."),
-    "SCATTER_BLEND_{b}_MJY": ("mJy",
-        "The same as SCATTER_{b}_MJY for a source fitted jointly with a detected neighbour within one beam (the "
-        "artificial source is one more member of the fitted group). It comes from a separate set of artificial sources: "
-        "for every detected source of the map, 40 per flux step in the ring from half a beam to one beam around it. "
-        "1.4826 times the median absolute deviation about the median of (recovered flux minus injected flux) over the "
-        "recovered ones in the cells within 120 arcsec (240 or 360 where too few) of the row's cell and of similar noise. "
-        "NaN where fewer than 30 recovered ones are in reach, which is most cells: only cells near a detected source "
-        "have a value, and the photometry uses the nearest such cell."),
+        "For each row of CURVE_{b} and each plane of MAG_GRID_{b}: the photometric error of a {w} micron flux "
+        "measured by aperture photometry in that cell at that flux, 1.4826 times the median absolute deviation "
+        "about the median of (measured flux minus CELL_OFFSET_{b}_MJY minus injected flux) over all the artificial "
+        "sources, detected or not (a detection's error must not be conditioned on the detection). It is measured "
+        "in units of each injection's own cell noise at each multiple of the noise, pooled over the cells within "
+        "120 arcsec on the same map (widened where fewer than 100), read at the flux over the row's own "
+        "CELL_SIGMA_{b}_MJY and multiplied by it; above 1000 times the noise it grows in proportion to the flux. "
+        "The artificial sources are at random positions; a real source sits where it sits, and equating the two "
+        "is the standard assumption of every artificial-source test. The rarer large excesses from unrelated "
+        "objects in the aperture are given by CONTAMINATION_{b}."),
+    "SCATTER_BLEND_{b}": ("multiple of the fit's formal error",
+        "One row per map (MAP_ID_{b}) and one column per bin of signal-to-noise as in SCATTER_{b}_MJY: for a source "
+        "fitted jointly with a detected neighbour within one beam (METHOD 2), the factor by which the true error of "
+        "its flux exceeds the joint fit's own formal error. Measured from artificial sources placed in the ring "
+        "from half a beam to one beam around every detected source of the map, as the robust scatter of (fitted "
+        "flux minus CELL_OFFSET_PSF_{b}_MJY minus injected flux) over the fit's formal error, over all those the fit "
+        "could separate (N_SCATTER_BLEND_{b}). The photometry's uncertainty of such a source is its formal error "
+        "times this factor at its own signal-to-noise."),
+    "N_SCATTER_BLEND_{b}": ("artificial sources",
+        "For each map and S/N bin, the number of separable joint-fit artificial sources behind SCATTER_BLEND_{b}."),
+    "CELL_OFFSET_PSF_{b}_MJY": ("mJy",
+        "For each row of CURVE_{b}: the typical flux a single point-spread-function fit returns at empty positions "
+        "of the cell (the median over the same random positions, farther than one beam from bright sources, that "
+        "CELL_OFFSET_{b}_MJY uses for the aperture). It is the joint fit's own empty-sky offset: a jointly fitted "
+        "source's flux has it subtracted, and is a detection when that flux is at least 5 times "
+        "CELL_SIGMA_{b}_MJY. The aperture and the fit respond differently to the same sky, so each has its own."),
+    "CONTAMINATION_{b}": ("probability",
+        "For each row of CURVE_{b}: the chance that the detection rule fires at a position in that cell where the "
+        "source itself contributes almost nothing, because unrelated emission (a compact cloud core, a background "
+        "galaxy, a sharp structure in the sky) lies inside the aperture. Measured as the fraction of artificial "
+        "sources at 0.3 times the cell noise that were counted as detections. The cells of each map are ranked by "
+        "their sky brightness (the clipped sky in the annulus; PACS maps have no absolute zero level, so the "
+        "ranking is within a map) and cut into 5 equal groups; each group's value pools those injections over "
+        "every map of the band in the region (attributes BIN_VALUES and BIN_INJECTIONS, faint to bright sky). "
+        "It describes the purity of the cell's detections: summed over the covered sources of a region it is the "
+        "number of detections expected to come from unrelated flux. It is already inside CURVE_{b} at the faintest "
+        "fluxes. It cannot be applied to a single source: it does not say whether a given detection is affected."),
     "CELL_SIGMA_{b}_MJY": ("mJy",
         "The noise of a {w} micron flux measured in each cell of CURVE_{b}, used only to decide detection: the "
         "median, over the 3 x 3 block of cells around it, of 1.4826 times the median absolute deviation about "
@@ -4176,12 +4144,11 @@ for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     REGISTRY[("photometry_pacs_source", "SIGMA_%s_MJY" % _band)] = (
         "mJy, or 0.99 for an upper bound",
         "Uncertainty of the flux. For a detected source (ORIGIN 1) it is the photometric error measured by "
-        "recovering artificial sources of known flux injected into the map: the scatter of (recovered minus injected "
-        "flux) at the source's own flux, in its 30-arcsecond cell's neighbourhood, for the aperture measurement "
-        "(METHOD 1) or for the joint fit with a close neighbour (METHOD 2), interpolated in the logarithm of the "
-        "flux between the two flux steps that bracket the source's flux minus its cell's empty-sky offset "
-        "(SCATTER and SCATTER_BLEND of the completeness product; for a jointly fitted source whose cell has no SCATTER_BLEND, "
-        "the aperture SCATTER of its own cell). For a source that is covered but not detected "
+        "recovering artificial sources of known flux injected into the map, at the source's own signal-to-noise "
+        "(FNU over its cell noise): for the aperture measurement (METHOD 1) the scatter measured in its "
+        "30-arcsecond cell (SCATTER of the completeness product); for the joint fit with a close neighbour "
+        "(METHOD 2) the fit's formal error times its map's measured factor (SCATTER_BLEND). For a source that is "
+        "covered but not detected "
         "(ORIGIN 90) it is the noise of its cell, LOCAL_RMS. Where ORIGIN is 2 it holds 0.99, the value the source "
         "table uses to mark an upper bound; NaN where the band does not cover the source, and where the "
         "completeness product has no measurement for the cell at any flux.")

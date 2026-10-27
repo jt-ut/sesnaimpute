@@ -168,8 +168,9 @@ class ApertureFit:
     """Forced aperture photometry at n positions (the eHOPS apertures, pacs_psf.APERTURES).
     Rows with covered False carry NaN.
 
-    flux        (n,) mJy: aperture sum minus the annulus sky, divided by the aperture fraction
-                (pacs_psf.aperture_fraction), so a point source returns its flux (gain 1)
+    flux        (n,) mJy: aperture sum minus the annulus sky (taken after the source's own point-spread outer
+                light is removed from the annulus), divided by the fraction of the total flux inside the
+                aperture radius (pacs_psf.aperture_eef), so a point source returns its flux (gain 1)
     sky         (n,) mJy per pixel, the clipped annulus sky (IDL mmm)
     annulus_sigma (n,) mJy: the annulus pixel scatter (after clipping) x sqrt(aperture area in pixels),
                 corrected like the flux -- the per-source noise eHOPS-style tools quote; not used for
@@ -580,6 +581,15 @@ def _aperture_core(img, err, xs, ys, r_ap, r_in, r_out, nsub):
     """Aperture sum (sub-pixel weights, nsub x nsub samples per pixel) minus the mmm annulus sky (pixel
     centres in the annulus), at each (x, y) in pixels. Returns raw flux, sky, annulus scatter, aperture
     area (pixels), covered."""
+    return _aperture_core_wing(img, err, xs, ys, r_ap, r_in, r_out, nsub, np.zeros((1, 1, 1)), np.zeros(xs.size))
+
+
+@numba.njit(cache=True)
+def _aperture_core_wing(img, err, xs, ys, r_ap, r_in, r_out, nsub, model, amp):
+    """`_aperture_core` with the source's own outer light removed from the annulus before the sky is taken: the
+    annulus pixel at (yy, xx) enters as img - amp[i] x model[i, yy - cy + rb, xx - cx + rb] (`model` the unit-flux
+    point-spread response on the (2 rb + 1)^2 box around the pixel (cx, cy) nearest the position, rb =
+    ceil(r_out) + 1; not read where amp[i] is 0)."""
     n = xs.size
     ny, nx = img.shape
     out_f = np.full(n, np.nan)
@@ -625,7 +635,10 @@ def _aperture_core(img, err, xs, ys, r_ap, r_in, r_out, nsub):
                 if r_in <= dc <= r_out:
                     n_ann += 1
                     if valid:
-                        buf[nb] = img[yy, xx]
+                        v = img[yy, xx]
+                        if amp[i] != 0.0:
+                            v -= amp[i] * model[i, yy - cy + rb, xx - cx + rb]
+                        buf[nb] = v
                         nb += 1
         if total_w <= 0 or good_w < 0.9 * total_w or nb < max(10, n_ann // 2):
             continue
@@ -651,6 +664,9 @@ class Tile:
         self.beam_arcsec = beam_fwhm_arcsec(record)
         self.record = record
         self.aperture_fraction = aperture_fraction(config, record)
+        # the fraction of the total flux inside the aperture radius (the measurement removes the source's own
+        # outer light from the annulus, so no annulus share is taken off)
+        self.enclosed_fraction = aperture_eef(config, record)
         # the PSF fit's amplitude is already the total flux, the products' convention (owner 2026-10-27)
         self.flux_scale = 1.0
         self.beam_px = self.beam_arcsec / self.pixel_arcsec
@@ -838,16 +854,74 @@ class Tile:
         return PositionFit(a.flux, np.where(a.covered, 1.0, np.nan), a.annulus_sigma, a.covered,
                            np.zeros(a.flux.size, dtype=np.int64))
 
-    def aperture(self, x, y):
-        """Forced aperture photometry at each (x, y) -> ApertureFit (the eHOPS convention: the
-        photometry of isolated sources and the completeness positions alike). Linear in the map
-        except through the clipped sky, which a point source barely enters (its wing in the annulus is
-        part of the aperture fraction)."""
+    def aperture(self, x, y, chunk=2048):
+        """Forced aperture photometry at each (x, y) -> ApertureFit (the eHOPS apertures; the photometry of
+        isolated sources and the completeness positions alike). The clipped (mmm) annulus sky rejects the
+        pixels where a bright source's own outer light stands above the noise, so the annulus would remove
+        less of that light than the encircled-energy table's average and bright sources would read up to
+        2.5 % high, by an amount set by the local noise. So the sky is taken from the annulus after the
+        source's own point-spread outer light, scaled to its flux, is subtracted (the flux from the previous
+        pass: first with the table's aperture-and-annulus fraction, then twice with the outer light removed),
+        and the sum is divided by the fraction of the total flux inside the aperture radius alone."""
         r_ap, r_in, r_out = (r / self.pixel_arcsec for r in APERTURES[self.record.band])
-        f, sky, sd, area, cov = _aperture_core(self.image, self.error, np.asarray(x, float).ravel(),
-                                               np.asarray(y, float).ravel(), r_ap, r_in, r_out, 5)
-        frac = self.aperture_fraction
-        return ApertureFit(f / frac, sky, sd * np.sqrt(area) / frac, cov)
+        x = np.asarray(x, float).ravel()
+        y = np.asarray(y, float).ravel()
+        n = x.size
+        rb = int(np.ceil(r_out)) + 1
+        offs = np.arange(-rb, rb + 1, dtype=float)
+        eef = self.enclosed_fraction
+        flux = np.full(n, np.nan)
+        sky = np.full(n, np.nan)
+        sd = np.full(n, np.nan)
+        area = np.full(n, np.nan)
+        cov = np.zeros(n, bool)
+        for lo in range(0, n, chunk):
+            sl = slice(lo, lo + chunk)
+            xs, ys = x[sl], y[sl]
+            f, s_, d_, a_, c_ = _aperture_core(self.image, self.error, xs, ys, r_ap, r_in, r_out, 5)
+            amp = np.where(c_, f / self.aperture_fraction, 0.0)
+            if not c_.any():
+                cov[sl] = c_
+                continue
+            model = self._outer_light(xs, ys, rb)
+            for _ in range(2):
+                f, s_, d_, a_, c_ = _aperture_core_wing(self.image, self.error, xs, ys, r_ap, r_in, r_out, 5,
+                                                        model, np.where(c_ & np.isfinite(amp), amp, 0.0))
+                amp = np.where(c_, f / eef, 0.0)
+            flux[sl], sky[sl], sd[sl], area[sl], cov[sl] = f / eef, s_, d_, a_, c_
+        return ApertureFit(flux, sky, sd * np.sqrt(area) / eef, cov)
+
+    #: sub-pixel steps per pixel of the cached outer-light patterns
+    OUTER_LIGHT_STEPS = 16
+
+    def _outer_light(self, x, y, rb):
+        """The unit-flux point-spread response on the (2 rb + 1)^2 pixel box around the pixel nearest each (x, y)
+        (the box `_aperture_core_wing` reads), looked up from patterns computed once per map: on a
+        OUTER_LIGHT_STEPS x OUTER_LIGHT_STEPS lattice of sub-pixel positions, in each third x third of the map
+        (the table's own spatial nodes). The lattice step (1/16 pixel) moves the pattern in the annulus by far
+        less than the noise; it enters only the sky estimate."""
+        steps = self.OUTER_LIGHT_STEPS
+        ny, nx = self.shape
+        if getattr(self, "_outer_cache", None) is None or self._outer_cache[0] != rb:
+            offs = np.arange(-rb, rb + 1, dtype=float)
+            u = (np.arange(steps) + 0.5) / steps - 0.5
+            cache = np.empty((9, steps, steps, offs.size, offs.size))
+            for node in range(9):
+                cy0 = float(np.floor((node // 3 + 0.5) / 3 * ny))
+                cx0 = float(np.floor((node % 3 + 0.5) / 3 * nx))
+                sx = np.repeat(cx0 + u[None, :], steps, axis=0).ravel()      # [b, a] -> x offset u[a]
+                sy = np.repeat(cy0 + u[:, None], steps, axis=1).ravel()      # [b, a] -> y offset u[b]
+                px = np.broadcast_to(cx0 + offs[None, None, :], (sx.size, offs.size, offs.size))
+                py = np.broadcast_to(cy0 + offs[None, :, None], (sx.size, offs.size, offs.size))
+                cache[node] = self._psf.evaluate_xy(sx, sy, px, py).mean(axis=1).reshape(steps, steps, offs.size, offs.size)
+            self._outer_cache = (rb, cache)
+        cache = self._outer_cache[1]
+        cx = np.floor(x + 0.5)
+        cy = np.floor(y + 0.5)
+        a = np.clip(np.floor((x - cx + 0.5) * steps).astype(np.int64), 0, steps - 1)
+        b = np.clip(np.floor((y - cy + 0.5) * steps).astype(np.int64), 0, steps - 1)
+        node = 3 * np.clip((3 * y / ny).astype(np.int64), 0, 2) + np.clip((3 * x / nx).astype(np.int64), 0, 2)
+        return cache[node, b, a]
 
     def fit_groups(self, x, y, group):
         """Simultaneous fit of blend groups -> GroupFit. `group` (n,) holds an integer label
