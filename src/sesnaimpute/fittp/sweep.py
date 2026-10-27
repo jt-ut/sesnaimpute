@@ -52,8 +52,8 @@ own `Prior` reader (`prior_reader.load`, this class's only -- the prior
 read applies no floor, so no other class's grid is read) and the region's
 whole catalogue (`_load_region_catalog`: fluxes, uncertainties,
 `ORIGIN_FNU`, `NAME`, and COMPLETENESS_2026-10-20.md's own measured
-completeness curves -- `curve_tables`, `source_row8` (one row per source
-per one of the eight bands, `BAND_KEYS` order, C6_twomass_pixel_depths.md:
+completeness curves -- `curve_tables`, `source_row` (one row per source
+per one of the eleven bands, `BAND_KEYS` order, C6_twomass_pixel_depths.md:
 2MASS's own column is never -1), `band_a`/`band_c`/`band_n`, read whole
 off `catalog.limits.completeness`'s product into plain arrays rather than
 kept as that reader's own h5py handle, unsafe to share across this
@@ -130,8 +130,8 @@ of the same `(template, design)` pairs' log10 flux about `LOG10_FLUX_MEAN`
 (the spread across templates AND designs); `within` is `sum_k P_k * D_k
 Sigma_k D_k^T`, `P_k` each design's own total posterior weight
 (`sum_theta p_theta * p_k(theta)`), `D_k = [ext_col_k, GRAY_COLUMN]` that
-design's own `(8, 2)` design and `Sigma_k = xtwx_inv_k` its own `(2, 2)`
-parameter covariance (`likelihood.fit`'s own return) -- one `(8, 8)`
+design's own `(N_BANDS, 2)` design and `Sigma_k = xtwx_inv_k` its own `(2, 2)`
+parameter covariance (`likelihood.fit`'s own return) -- one `(N_BANDS, N_BANDS)`
 matrix per design, not per template, since `D_k Sigma_k D_k^T` does not
 depend on the template. `TOPK_FLUX` stays linear mJy, the top-K record's
 own per-template value, unaffected by either rename.
@@ -170,6 +170,15 @@ from sesnaimpute.granules import access as granule_access
 
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
+
+#: TEST SWITCH for the coordinator's identity B (redesign_2026-10-27, unit 8):
+#: `--pacs-off` forces ORIGIN 91 (not covered) on every non-SELECTION band
+#: (the PACS columns) before `likelihood.prepare`, so the eleven-band fit
+#: reproduces the eight-band fit. REMOVED IN THE MERGE after identity B
+#: passes. Set by `build(pacs_off=...)` in the parent, inherited by the fork.
+_PACS_OFF = [False]
+_PACS_INDEX = np.array([i for i, k in enumerate(BAND_KEYS) if k not in definitions.SESNA_BANDS],
+                       dtype=np.int64)
 
 #: the seven classes, in the fitter's own class-axis order
 #: (IMPLEMENTATION_BMSTP_DRAFT.md section 1).
@@ -478,12 +487,12 @@ def _load_region_catalog(config, region):
         band_a[b], band_c[b] = a, c
         band_n[b] = comp._mag_grid_band[band].size
         curve_tables[band] = prior_reader.mmap_dataset(comp._f, "CURVE_%s" % band)
-    source_row8 = np.asarray(comp.source_row, dtype=np.int64)
+    source_row = np.asarray(comp.source_row, dtype=np.int64)
     max_n = int(band_n.max())
     comp._f.close()
 
     return dict(flux=flux, sigma=sigma, origin=origin, name=name,
-                curve_tables=curve_tables, source_row8=source_row8,
+                curve_tables=curve_tables, source_row=source_row,
                 band_a=band_a, band_c=band_c, band_n=band_n, max_n=max_n)
 
 
@@ -608,21 +617,24 @@ def _source_task(i):
         flux = w["flux"][i]
         sigma = w["sigma"][i]
         origin = w["origin"][i]
+        if _PACS_OFF[0]:                        # identity-B test switch, removed in the merge
+            origin = np.array(origin, copy=True)
+            origin[_PACS_INDEX] = 91
 
         # COMPLETENESS_2026-10-20.md "Per-source access in the fitter",
-        # amended by C6_twomass_pixel_depths.md: this source's own eight
+        # amended by C6_twomass_pixel_depths.md: this source's own eleven
         # rows (one per band, BAND_KEYS order; 2MASS's own column is
         # never -1, C6_twomass_pixel_depths.md) into `catalog.limits.
         # completeness`'s own CURVE_<B> tables (`w["curve_tables"]`,
         # fork-inherited plain arrays, never re-read from disk), gathered
-        # ONCE into one (8, max_n) array before the template loop
+        # ONCE into one (N_BANDS, max_n) array before the template loop
         # (`likelihood.prepare`/`_ln_nondet`, `prior_reader._cell_sum`).
-        row8 = w["source_row8"][i]
+        row_s = w["source_row"][i]
         curve_rows = np.zeros((N_BANDS, w["max_n"]), dtype=np.float64)
         covered = np.empty(N_BANDS, dtype=bool)
         for b, band in enumerate(BAND_KEYS):
             n_b = w["band_n"][b]
-            r = row8[b]
+            r = row_s[b]
             covered[b] = r >= 0
             if r >= 0:
                 curve_rows[b, :n_b] = w["curve_tables"][band][r]
@@ -903,7 +915,7 @@ def _source_task(i):
             log10_flux_by_law[k] = (
                 w["template_log"].astype(np.float64)
                 + fit_k.ext_col.astype(np.float64)[None, :] * av_clamped_k[:, None]
-                + fit_k.log10_b_hat_clamped.astype(np.float64)[:, None])              # (m, 8)
+                + fit_k.log10_b_hat_clamped.astype(np.float64)[:, None])              # (m, N_BANDS)
 
         sort_idx = np.argsort(order)
         sorted_order = order[sort_idx].astype(np.int64)
@@ -931,7 +943,7 @@ def _source_task(i):
         between = m2_log10 - np.outer(mean_log10, mean_log10)
 
         # the within term: sum_k P_k * D_k Sigma_k D_k^T, P_k each design's
-        # own total posterior weight, one (8, 8) matrix per design (D_k
+        # own total posterior weight, one (N_BANDS, N_BANDS) matrix per design (D_k
         # Sigma_k D_k^T does not depend on the template). A design left out
         # of `active_laws` carries P_k = 0 exactly (its own ln_w_k is -inf
         # everywhere, so p_k is 0 everywhere), so it contributes nothing and
@@ -1396,7 +1408,7 @@ def build_region_class(config, region, cls, st, reader, catalog,
                        topk=topk, n_model=n_model,
                        sigma_lib_l=sigma_lib_l,
                        flux=catalog["flux"], sigma=catalog["sigma"], origin=catalog["origin"],
-                       curve_tables=catalog["curve_tables"], source_row8=catalog["source_row8"],
+                       curve_tables=catalog["curve_tables"], source_row=catalog["source_row"],
                        band_a=catalog["band_a"], band_c=catalog["band_c"], band_n=catalog["band_n"],
                        max_n=catalog["max_n"])
 
@@ -1588,7 +1600,7 @@ def join_parts(summary, topk, config):
 
 
 def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=None,
-          join=True, join_only=False):
+          join=True, join_only=False, pacs_off=False):
     """Writes `fittp/fit/<CLS>_fit_source__R.hdf5` for every {region,
     class} pair (default all thirty regions, all seven classes; section
     1.3, IMPLEMENTATION_BMSTP_DRAFT.md P7). `limit` restricts every
@@ -1613,6 +1625,7 @@ def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=N
     """
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     class_codes = classes if classes is not None else list(CLASSES)
+    _PACS_OFF[0] = bool(pacs_off)
     t0 = time.time()
     for region in region_names:
         catalog = None if join_only else _load_region_catalog(config, region)
@@ -1678,6 +1691,9 @@ if __name__ == "__main__":
     parser.add_argument("--join-only", action="store_true",
                          help="sweep nothing; join every part file on disk into the class's "
                               "product (run once, after every part job of a split class has ended)")
+    parser.add_argument("--pacs-off", action="store_true",
+                         help="TEST SWITCH (identity B; removed in the merge): force ORIGIN 91 on the "
+                              "PACS columns so the eleven-band fit reproduces the eight-band fit")
     #: applied to config.n_jobs only; the sweep's own pool is --workers / fittp_workers, unchanged
     parser.add_argument("--n-jobs", type=int, default=None)
     args = parser.parse_args()
@@ -1691,4 +1707,4 @@ if __name__ == "__main__":
     n_workers = args.workers if args.workers is not None else cfg.fittp_workers
     build(cfg, regions=args.regions, classes=args.classes, limit=args.limit,
           n_workers=n_workers, batches=args.batches,
-          join=not args.no_join, join_only=args.join_only)
+          join=not args.no_join, join_only=args.join_only, pacs_off=args.pacs_off)
