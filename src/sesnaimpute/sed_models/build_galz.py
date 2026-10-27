@@ -217,12 +217,12 @@ def _raw_model_name(tag, name, z):
 
 
 def _raw_grid_photometry(templates_by_tag, z_grid_by_tag, master_wave_um):
-    """The dense raw set's 8-band photometry -- THIS line's grid, driven
+    """The dense raw set's eleven-band photometry -- THIS line's grid, driven
     through galaxy_curate's fast internal convolution primitives
     (reused, not reimplemented). One parent template's (n_z, n_wave)
     block is built and discarded before the next starts.
 
-    Returns (tags, names, redshifts, band_flux_mjy[n, 8], band_order).
+    Returns (tags, names, redshifts, band_flux_mjy[n, 11], band_order).
     """
     band_order = CONVOLVED_BAND_NAMES
     band_filters = gc.build_fast_band_filters(band_order, master_wave_um)
@@ -291,6 +291,12 @@ def build():
         n_templates = {tag: len(t) for tag, t in templates_by_tag.items()}
         print(f"sources   : pol07={n_templates['pol07']} ber13={n_templates['ber13']} "
               f"bro14={n_templates['bro14']} (185 total expected)")
+
+        # ---- Brown far-infrared anchors (IRAS 60/100 um; galaxy_curate.choose_iras_anchor) ----
+        anchors = gc.brown_far_infrared_anchors(download_dir, templates_by_tag["bro14"])
+        counts = {k: sum(1 for a in anchors.values() if a[0] == k)
+                  for k in ("RBGS", "PSC", "FSC", "LIMIT", "NONE")}
+        print(f"brown FIR : anchored by {counts} (NONE = no IRAS entry, spectrum ends at 35 um)")
 
         # ---- THE RAW SET, defined in this line ----
         z_grid_by_tag = {tag: redshift_grid(cap) for tag, cap in SOURCE_REDSHIFT_CAP.items()}

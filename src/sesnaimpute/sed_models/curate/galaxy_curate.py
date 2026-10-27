@@ -733,13 +733,124 @@ def load_berta_rest_frame_templates(download_dir):
     return templates
 
 
-def load_brown_rest_frame_templates(download_dir):
+# --- Brown 2014 far-infrared extension (IRAS 60/100 um anchors) --------------
+#
+# Brown's spectra end at ~35 um (their red end is Spitzer IRS; there is no
+# model fill beyond). The PACS bands need the galaxy's own far infrared, so
+# each spectrum is continued from its last point to the galaxy's IRAS 60 um
+# flux, through its IRAS 100 um flux, then on to 250 um with the 60-100 um
+# slope. All three legs are straight lines in log F_lambda vs log lambda --
+# exactly what resample_one_sed_onto_master_grid interpolates between
+# nodes -- so three nodes (60, 100, 250 um) carry the whole extension. A
+# modified-blackbody tail past 100 um is NOT used: at this order (a power
+# law through the two IRAS points) the extension fixes the spectrum's level
+# at 70 and 100 um and its slope into 160 um, nothing finer.
+#
+# IRAS fluxes are observed values; the atlas spectra are rest-wavelength
+# columns of observed flux, so the anchors sit at rest = 60/(1+z) and
+# 100/(1+z), z = cz/c from the atlas summary catalogue.
+#
+# Which IRAS value anchors a galaxy (choose_iras_anchor): the RBGS
+# integrated totals if present, else the PSC if both bands have quality
+# >= 2, else the FSC likewise, else the PSC (then FSC) upper limits taken
+# as the values and flagged. A galaxy with no entry in any of the three
+# catalogues (22 of 129: the Virgo/Coma early types and dwarfs) has no
+# value and no catalogued limit; its spectrum is left unextended. The Brown source-flag column marks the added
+# nodes: 0 (model-filled, Brown's own code for a fill) for a detected
+# anchor, 4 (this module's code: IRAS upper limit used as the value) for a
+# limit anchor.
+
+IRAS_TABLE_NAME = "iras_fluxes.csv"       # written by sed_models.download_iras_atlas
+IRAS_QUALITY_MIN = 2                      # PSC/FSC quality 1 is an upper limit
+BROWN_FIR_ANCHOR_UM = (60.0, 100.0)
+BROWN_FIR_END_UM = 250.0
+BROWN_FLAG_MODEL_FILL = 0
+BROWN_FLAG_IRAS_LIMIT = 4
+SPEED_OF_LIGHT_KMS = 299792.458
+ANGSTROM_PER_UM = 1e4
+JY_TO_CGS = 1e-23                         # erg/s/cm^2/Hz per Jy
+
+
+def _float_or_none(text):
+    text = text.strip()
+    return float(text) if text else None
+
+
+def read_iras_table(download_dir):
+    """{slug: row dict} from the IRAS download line's table."""
+    path = os.path.join(download_dir, "brown2014_galsedatlas", IRAS_TABLE_NAME)
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"{path} missing: run python3.9 -m sesnaimpute.sed_models.download_iras_atlas <root.cfg>")
+    with open(path) as f:
+        return {row["SLUG"]: row for row in csv.DictReader(f)}
+
+
+def choose_iras_anchor(row):
+    """One galaxy's anchor. Returns (kind, f60_jy, f100_jy); kind is "RBGS",
+    "PSC", "FSC" (detected anchors), "LIMIT" (PSC, else FSC upper limits
+    as the values) or "NONE" (no IRAS value at all; f60 = f100 = None)."""
+    rbgs60, rbgs100 = _float_or_none(row["RBGS_F60_JY"]), _float_or_none(row["RBGS_F100_JY"])
+    if rbgs60 is not None and rbgs100 is not None:
+        return "RBGS", rbgs60, rbgs100
+    pairs = {}
+    for cat in ("PSC", "FSC"):
+        f60, f100 = _float_or_none(row[f"{cat}_F60_JY"]), _float_or_none(row[f"{cat}_F100_JY"])
+        q60, q100 = _float_or_none(row[f"{cat}_Q60"]), _float_or_none(row[f"{cat}_Q100"])
+        if f60 is None or f100 is None or f60 <= 0 or f100 <= 0:
+            continue
+        pairs[cat] = (f60, f100, min(q60, q100))
+        if min(q60, q100) >= IRAS_QUALITY_MIN:
+            return cat, f60, f100
+    for cat in ("PSC", "FSC"):
+        if cat in pairs:
+            return "LIMIT", pairs[cat][0], pairs[cat][1]
+    return "NONE", None, None
+
+
+def extend_brown_template(wave_rest_um, flux, source_flag, kind, f60_jy, f100_jy, z):
+    """Continue one Brown spectrum to BROWN_FIR_END_UM through its IRAS
+    anchors (see the block comment above). Nodes below the last original
+    point are returned untouched (same arrays, byte for byte)."""
+    if kind == "NONE":
+        raise ValueError("no IRAS anchor for this galaxy")
+    anchors_rest = np.array(BROWN_FIR_ANCHOR_UM) / (1.0 + z)
+    if wave_rest_um[-1] >= anchors_rest[0]:
+        raise ValueError(f"spectrum already reaches {wave_rest_um[-1]} um")
+    obs_a = np.array(BROWN_FIR_ANCHOR_UM) * ANGSTROM_PER_UM
+    fnu_cgs = np.array([f60_jy, f100_jy]) * JY_TO_CGS
+    flam = fnu_cgs * (C_UM_S * ANGSTROM_PER_UM) / obs_a ** 2     # erg/s/cm^2/Angstrom
+    slope = np.log(flam[1] / flam[0]) / np.log(anchors_rest[1] / anchors_rest[0])
+    flam_end = flam[1] * (BROWN_FIR_END_UM / anchors_rest[1]) ** slope
+    add_wave = np.array([anchors_rest[0], anchors_rest[1], BROWN_FIR_END_UM])
+    add_flux = np.array([flam[0], flam[1], flam_end])
+    flag = BROWN_FLAG_IRAS_LIMIT if kind == "LIMIT" else BROWN_FLAG_MODEL_FILL
+    return (np.concatenate([wave_rest_um, add_wave]),
+            np.concatenate([flux, add_flux]),
+            np.concatenate([source_flag, np.full(3, float(flag))]))
+
+
+def brown_far_infrared_anchors(download_dir, slugs):
+    """{slug: (kind, f60_jy, f100_jy, z)} for the given atlas slugs."""
+    table = read_iras_table(download_dir)
+    out = {}
+    for slug in slugs:
+        row = table[slug]
+        kind, f60, f100 = choose_iras_anchor(row)
+        out[slug] = (kind, f60, f100, float(row["CZ_KMS"]) / SPEED_OF_LIGHT_KMS)
+    return out
+
+
+def load_brown_rest_frame_templates(download_dir, extend=True):
     """
     Brown 2014 GALSEDATLAS. Column 1 is explicitly "Restframe Wavelength
     (Angstrom)" in the file header -- de-redshifting from each galaxy's true
     (small, verified via cz) recession redshift is already done for us by
     the data provider. Column 4 (source flag: 0=model/1=optical/2=Akari/
     3=Spitzer IRS) is preserved as provenance metadata for later filtering.
+
+    With extend=True (the build) each spectrum is continued to 250 um
+    through the galaxy's IRAS 60 and 100 um anchors (extend_brown_template).
 
     Returns {name: (wave_rest_um, flux, source_flag)}.
     """
@@ -753,6 +864,15 @@ def load_brown_rest_frame_templates(download_dir):
         name = name.replace("hlsp_galsedatlas_multi_multi_", "").replace("_multi_v1_spec.dat", "")
         wave_a, flux, _obs_wave_a, source_flag = np.loadtxt(path, unpack=True)
         templates[name] = (wave_a * ANGSTROM_TO_UM, flux, source_flag)
+    if extend:
+        anchors = brown_far_infrared_anchors(download_dir, templates)
+        for name, (kind, f60, f100, z) in anchors.items():
+            if kind == "NONE":
+                # no IRAS PSC/FSC/RBGS entry within 90 arcsec: nothing to anchor on, and the
+                # catalogues carry no upper limit for an unlisted position. Left at Brown's
+                # own end (zero past it); build_galz prints the count. COORDINATOR RULING NEEDED.
+                continue
+            templates[name] = extend_brown_template(*templates[name], kind, f60, f100, z)
     return templates
 
 
@@ -784,20 +904,31 @@ def save_rest_frame_template_archive(out_dir, out_name, templates, z_grid, has_s
 # Stage 2: master wavelength grid
 # ====================================================================
 
-def build_master_wavelength_grid(wave_min_um=0.3, wave_max_um=35.0, n_wave=3360):
+def build_master_wavelength_grid(wave_min_um=0.3, wave_max_um=250.0, base_max_um=35.0, n_base=3360):
     """Shared master wavelength grid definition, observed-frame, for the
-    combined galaxy template library. The red edge of 35um clears MIPS-24's
-    full response with margin: the measured 8-band bandpass footprint is
-    1.066-32.207um, and 10.1% of MIPS-24's integrated response lies beyond
-    26.5um, so a red edge chosen from a nominal band-centre span would have
-    truncated it. No coverage is needed past MIPS-24's response. The blue
-    edge is extended down to 0.3um to also cover a future Gaia G-band need
-    (true blue edge 0.32um; a 0.5um floor would have clipped ~20% of its
-    total integrated response).
+    combined galaxy template library.
+
+    The BASE grid is the one the eight SESNA bands were always convolved
+    on: 0.3-35 um, n_base log-uniform points. The red edge of 35um clears
+    MIPS-24's full response with margin: the measured 8-band bandpass
+    footprint is 1.066-32.207um, and 10.1% of MIPS-24's integrated response
+    lies beyond 26.5um. The blue edge is extended down to 0.3um to also
+    cover a future Gaia G-band need (true blue edge 0.32um; a 0.5um floor
+    would have clipped ~20% of its total integrated response).
     Resolution: ~1626 points/decade, close to Berta's native ~2075/decade,
     so extending the blue edge doesn't wash out PAH/silicate feature
-    resolution."""
-    return np.logspace(np.log10(wave_min_um), np.log10(wave_max_um), n_wave)
+    resolution.
+
+    The grid is then CONTINUED at the same log step to the last point at or
+    below wave_max_um (250 um: the P160 passband's red edge is ~210 um in
+    the observed frame). The base points are returned untouched, so every
+    spectrum resampled on them -- and every eight-band convolution -- is
+    byte-identical to what the 35 um grid gave."""
+    base = np.logspace(np.log10(wave_min_um), np.log10(base_max_um), n_base)
+    step = (np.log10(base_max_um) - np.log10(wave_min_um)) / (n_base - 1)
+    n_ext = int(np.floor((np.log10(wave_max_um) - np.log10(base_max_um)) / step + 1e-9))
+    ext = 10.0 ** (np.log10(base_max_um) + step * np.arange(1, n_ext + 1))
+    return np.concatenate([base, ext])
 
 
 # ====================================================================
