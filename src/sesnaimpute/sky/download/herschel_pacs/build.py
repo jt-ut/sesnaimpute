@@ -412,7 +412,12 @@ def build(config, regions=None):
                     elif p["obsids"][0] not in served and not _hsa_on_disk(root, p):
                         # one HSA Level 3 tar per observation can hold the same combined map
                         # (Orion A: one stack, nine times); fetch it once
-                        served |= fetch_hsa(config, p)
+                        try:
+                            served |= fetch_hsa(config, p)
+                        except urllib.error.HTTPError as exc:
+                            if exc.code not in (401, 403):
+                                raise
+                            print(f"{region}: REFUSED ({exc.code}) HSA observation {p['obsids'][0]}", flush=True)
             records = index_module.region_index_records(config, region)
             path = index_module.write_index(config, region, records)
             summary["n_indexed"] = len(records)
