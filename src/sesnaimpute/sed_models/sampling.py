@@ -84,7 +84,15 @@ import numpy as np
 from astropy.table import Column, Table
 from scipy.spatial import cKDTree
 
+from sesnaimpute import definitions
 from sesnaimpute.sed_models.constants import LIBRARY_SAMPLING_SIGMA_LOG_VECTOR
+from sesnaimpute.sed_models.constants import SAMPLING_BANDS as _CONST_SAMPLING_BANDS
+
+#: The library sampler works in the eight SESNA bands (definitions.SELECTION),
+#: the curation space every library was curated in; the PACS bands are
+#: convolved onto the curated models afterwards and do not move the sample.
+SAMPLING_BANDS = _CONST_SAMPLING_BANDS
+BANDS_ORDER = tuple(definitions.BANDS_BY_KEY)
 from sesnaimpute.sed_models.register import density
 
 __all__ = ["quotient_space", "whiten", "r_net", "assign", "coverage",
@@ -114,9 +122,10 @@ def quotient_space():
     mean the two whitened nuisance columns had become linearly
     dependent, which should not happen for two different directions.
     """
-    sigma_vec = np.asarray(LIBRARY_SAMPLING_SIGMA_LOG_VECTOR, dtype=float)
+    sigma_vec = np.asarray(LIBRARY_SAMPLING_SIGMA_LOG_VECTOR, dtype=float)[
+        [list(BANDS_ORDER).index(b) for b in SAMPLING_BANDS]]
     gray = np.ones(sigma_vec.shape[0])
-    av_law = density._av_law(_SAMPLING_LAW)
+    av_law = density._av_law(_SAMPLING_LAW, SAMPLING_BANDS)
     nuisance = np.column_stack([gray, av_law]) / sigma_vec[:, None]
 
     # SVD, not Gram-Schmidt: see module header and density.py's own note

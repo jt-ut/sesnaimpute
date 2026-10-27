@@ -30,7 +30,7 @@ specifies two thresholds and they are not interchangeable:
                       Job: stop log10 ever seeing a zero. Used by
                       reference.py (f_ref) and density.py (B3's
                       quotient space). NOT this module.
-    SEMANTIC TEST     1e-6 x the peak over the 8 BANDS, this module.
+    SEMANTIC TEST     1e-6 x the peak over the eleven BANDS, this module.
                       Job: decide whether a band carries usable
                       signal. Used by synth.py for G0's
                       detectability rule (B1).
@@ -192,23 +192,23 @@ def log10_floored(flux, axis=-1, bands=None):
 
 
 def pack_dark_bands(mask):
-    """Pack an (n_models, n_band<=8) dark mask into one uint8 per model.
+    """Pack an (n_models, n_band<=16) dark mask into one uint16 per model.
 
     Bit i is band i, in the caller's band order. This is the B0.1
-    per-model record: one byte per model makes every substituted entry
+    per-model record: one word per model makes every substituted entry
     exactly recoverable instead of merely inferable from an aggregate.
     """
     mask = np.asarray(mask, dtype=bool)
-    if mask.ndim != 2 or mask.shape[1] > 8:
+    if mask.ndim != 2 or mask.shape[1] > 16:
         raise ValueError(
-            f"expected (n_models, n_band<=8), got {mask.shape}"
+            f"expected (n_models, n_band<=16), got {mask.shape}"
         )
     weights = (1 << np.arange(mask.shape[1], dtype=np.uint16)).astype(np.uint16)
-    return (mask * weights).sum(axis=1).astype(np.uint8)
+    return (mask * weights).sum(axis=1).astype(np.uint16)
 
 
-def unpack_dark_bands(packed, n_band=8):
+def unpack_dark_bands(packed, n_band=11):
     """Inverse of `pack_dark_bands`."""
-    packed = np.asarray(packed, dtype=np.uint8)[:, None]
+    packed = np.asarray(packed, dtype=np.uint16)[:, None]
     bits = (1 << np.arange(n_band, dtype=np.uint16)).astype(np.uint16)
     return (packed & bits) != 0
