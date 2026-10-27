@@ -77,6 +77,51 @@ def _query(vizier, coords, cat, tries=4):
             time.sleep(5 * (k + 1))
 
 
+README_NAME = "README_iras_fluxes.txt"
+README_TEXT = """iras_fluxes.csv -- IRAS 60 and 100 um fluxes of the Brown et al. 2014 atlas galaxies
+
+WHAT IT IS
+One row per atlas galaxy (129, the summary catalogue's order). For each of the IRAS Point Source
+Catalog (PSC, VizieR II/125), Faint Source Catalog (FSC, II/156A) and the Revised Bright Galaxy
+Sample (RBGS, J/AJ/126/1607, Sanders et al. 2003): the nearest entry within 90 arcsec, its
+separation, and the 60 and 100 um fluxes in Jy. PSC and FSC quality: 1 = upper limit, 2 = moderate,
+3 = high. RBGS flags ":" a confusion-uncertain value. An empty field means no entry.
+
+HOW THE GALAXY'S ANCHOR IS CHOSEN (sed_models/curate/galaxy_curate.py, choose_iras_anchor)
+RBGS if present; else PSC if both bands have quality >= 2; else FSC likewise; else the catalogued PSC
+(then FSC) upper limits; else the survey limit below. Of the 128 spectra: RBGS 75, PSC 20, FSC 4,
+catalogued upper limit 7, survey limit 22.
+
+SURVEY LIMITS USED FOR THE 22 GALAXIES WITH NO IRAS ENTRY (Jy)
+                      60 um   100 um
+  FSC sky (|b|>=20)    0.2     1.0
+  PSC (all other sky)  0.5     1.5
+FSC: Moshir et al. 1992, Explanatory Supplement to the IRAS Faint Source Survey, version 2
+(JPL D-10015 8/92): "flux densities typically above 0.2 Jy at 12, 25, and 60 microns, and above
+1.0 Jy at 100 microns"; the FSC is limited to |b| >= 20 deg at 60 microns.
+PSC: IRAS Catalogs and Atlases, Explanatory Supplement (Beichman et al. 1988, NASA RP-1190),
+Chapter I, section A.1: "about 0.5 Jy at 12, 25 and 60 microns and about 1.5 Jy at 100 microns for
+point sources", away from confused regions.
+Caution: these are the documents' stated typical/limiting flux densities, not a measured completeness
+curve. The IRAS PSC summary page (IPAC/LAMBDA) quotes the PSC as "complete to about 0.4, 0.5, 0.6 and
+1.0 Jy at 12, 25, 60 and 100 microns"; this table uses the Explanatory Supplement's own figures above.
+
+READING
+29 of 128 Brown templates carry far-infrared upper limits, 7 catalogued and 22 at the survey limit.
+Those templates use the median dust temperature of the other 99 and the 100 um limit as their 100 um
+flux; the 60 um limit is not used.
+"""
+
+
+def write_readme(directory):
+    path = os.path.join(directory, README_NAME)
+    if not os.path.exists(path):
+        assert os.path.realpath(path).startswith(os.path.realpath(paths.input_dir("sed_models"))), path
+        with open(path, "w") as f:
+            f.write(README_TEXT)
+    return path
+
+
 def downloads_dir():
     return os.path.join(paths.input_dir("sed_models"), "downloads", "galaxy",
                         "brown2014_galsedatlas")
@@ -104,6 +149,7 @@ def fetch_iras_table():
     returned untouched with no query."""
     directory = downloads_dir()
     out_path = os.path.join(directory, OUT_NAME)
+    write_readme(directory)
     if os.path.exists(out_path):
         return out_path
     from astroquery.vizier import Vizier

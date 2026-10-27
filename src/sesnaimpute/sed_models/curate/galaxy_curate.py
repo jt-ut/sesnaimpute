@@ -189,7 +189,7 @@ from scipy.spatial import cKDTree
 
 from sesnaimpute.sed_models.constants import (
     BANDS, C_UM_S, LIBRARY_SAMPLING_SIGMA_LOG_VECTOR, LOGD_STEP, MJY_TO_CGS,
-    POINT_SOURCE_APERTURE_AU, REFERENCE_DISTANCE_CM,
+    POINT_SOURCE_APERTURE_AU, REFERENCE_DISTANCE_CM, SAMPLING_BANDS,
 )
 from sesnaimpute.sed_models.curate import model_io
 from sesnaimpute.sed_models.curate.model_convolution import (
@@ -737,38 +737,53 @@ def load_berta_rest_frame_templates(download_dir):
 #
 # Brown's spectra end at ~35 um (their red end is Spitzer IRS; there is no
 # model fill beyond). The PACS bands need the galaxy's own far infrared, so
-# each spectrum is continued from its last point to the galaxy's IRAS 60 um
-# flux, through its IRAS 100 um flux, then on to 250 um with the 60-100 um
-# slope. All three legs are straight lines in log F_lambda vs log lambda --
-# exactly what resample_one_sed_onto_master_grid interpolates between
-# nodes -- so three nodes (60, 100, 250 um) carry the whole extension. A
-# modified-blackbody tail past 100 um is NOT used: at this order (a power
-# law through the two IRAS points) the extension fixes the spectrum's level
-# at 70 and 100 um and its slope into 160 um, nothing finer.
+# each spectrum is continued from its last point to 250 um:
+#   35 um -> 60 um : a straight line in log F_lambda vs log lambda from the
+#                    spectrum's last point to the 60 um value;
+#   60 um -> 250 um: a single-temperature modified blackbody, F_nu ~ nu^2 B_nu(T)
+#                    (beta = 2 fixed), through the galaxy's IRAS 60 and 100 um
+#                    fluxes -- the two anchors fix T and the normalisation, so
+#                    the curve is continuous at 60 um and exact at 100 um.
+# A single T through 60 and 100 um runs hot (60 um carries warm dust), so the
+# 160/100 um ratio comes out lower than for galaxies with measured 160 um.
 #
 # IRAS fluxes are observed values; the atlas spectra are rest-wavelength
 # columns of observed flux, so the anchors sit at rest = 60/(1+z) and
-# 100/(1+z), z = cz/c from the atlas summary catalogue.
+# 100/(1+z), z = cz/c from the atlas summary catalogue, and the blackbody is
+# evaluated at the observed wavelength rest*(1+z).
 #
 # Which IRAS value anchors a galaxy (choose_iras_anchor): the RBGS
 # integrated totals if present, else the PSC if both bands have quality
-# >= 2, else the FSC likewise, else the PSC (then FSC) upper limits taken
-# as the values and flagged. A galaxy with no entry in any of the three
-# catalogues (22 of 129: the Virgo/Coma early types and dwarfs) has no
-# value and no catalogued limit; its spectrum is left unextended. The Brown source-flag column marks the added
-# nodes: 0 (model-filled, Brown's own code for a fill) for a detected
-# anchor, 4 (this module's code: IRAS upper limit used as the value) for a
-# limit anchor.
+# >= 2, else the FSC likewise (kind RBGS / PSC / FSC); else the PSC (then FSC)
+# upper limits (kind LIMIT, catalogued); else -- no entry in any catalogue --
+# the completeness limit of the deepest IRAS catalogue covering the position
+# (kind SURVEY: FSC where |b| >= 20 deg, else PSC; IRAS_SURVEY_LIMIT_JY).
+# Upper-limit templates (LIMIT and SURVEY) carry the 100 um limit as the 100
+# um flux with the median T of the detected-anchor set. The Brown source-flag
+# column marks the added nodes: 0 (model-filled, Brown's own code for a
+# fill) for a detected anchor, 4 (this module's code: IRAS upper limit used
+# as the value) for an upper-limit anchor.
 
 IRAS_TABLE_NAME = "iras_fluxes.csv"       # written by sed_models.download_iras_atlas
 IRAS_QUALITY_MIN = 2                      # PSC/FSC quality 1 is an upper limit
+# Completeness limits (Jy) at 60 and 100 um. FSC: Moshir et al. 1992, Explanatory
+# Supplement to the IRAS Faint Source Survey v2 -- "flux densities typically above
+# 0.2 Jy at 12, 25 and 60 um and above 1.0 Jy at 100 um". PSC: IRAS Explanatory
+# Supplement (Beichman et al. 1988) Ch. I, sec. A.1 -- "about 0.5 Jy at 12, 25 and
+# 60 um and about 1.5 Jy at 100 um for point sources". See the download README.
+IRAS_SURVEY_LIMIT_JY = {"FSC": (0.2, 1.0), "PSC": (0.5, 1.5)}
+FSC_MIN_ABS_B_DEG = 20.0                  # FSC covers |b| >= 20 deg at 60 um
 BROWN_FIR_ANCHOR_UM = (60.0, 100.0)
 BROWN_FIR_END_UM = 250.0
+BROWN_FIR_N_NODES = 200                   # log-spaced nodes 60 -> 250 um
+BROWN_BETA = 2.0
+HC_OVER_K_UM_K = 14387.77                 # h c / k, um K
 BROWN_FLAG_MODEL_FILL = 0
 BROWN_FLAG_IRAS_LIMIT = 4
 SPEED_OF_LIGHT_KMS = 299792.458
 ANGSTROM_PER_UM = 1e4
 JY_TO_CGS = 1e-23                         # erg/s/cm^2/Hz per Jy
+UPPER_LIMIT_KINDS = ("LIMIT", "SURVEY")
 
 
 def _float_or_none(text):
@@ -786,10 +801,17 @@ def read_iras_table(download_dir):
         return {row["SLUG"]: row for row in csv.DictReader(f)}
 
 
+def _galactic_latitude_deg(ra_deg, dec_deg):
+    from astropy.coordinates import SkyCoord
+    import astropy.units as u
+    return float(SkyCoord(ra_deg * u.deg, dec_deg * u.deg).galactic.b.deg)
+
+
 def choose_iras_anchor(row):
     """One galaxy's anchor. Returns (kind, f60_jy, f100_jy); kind is "RBGS",
-    "PSC", "FSC" (detected anchors), "LIMIT" (PSC, else FSC upper limits
-    as the values) or "NONE" (no IRAS value at all; f60 = f100 = None)."""
+    "PSC", "FSC" (detected anchors), "LIMIT" (catalogued PSC, else FSC upper
+    limits) or "SURVEY" (no catalogue entry: the completeness limit of the
+    deepest IRAS catalogue covering the position)."""
     rbgs60, rbgs100 = _float_or_none(row["RBGS_F60_JY"]), _float_or_none(row["RBGS_F100_JY"])
     if rbgs60 is not None and rbgs100 is not None:
         return "RBGS", rbgs60, rbgs100
@@ -799,35 +821,53 @@ def choose_iras_anchor(row):
         q60, q100 = _float_or_none(row[f"{cat}_Q60"]), _float_or_none(row[f"{cat}_Q100"])
         if f60 is None or f100 is None or f60 <= 0 or f100 <= 0:
             continue
-        pairs[cat] = (f60, f100, min(q60, q100))
+        pairs[cat] = (f60, f100)
         if min(q60, q100) >= IRAS_QUALITY_MIN:
             return cat, f60, f100
     for cat in ("PSC", "FSC"):
         if cat in pairs:
             return "LIMIT", pairs[cat][0], pairs[cat][1]
-    return "NONE", None, None
+    b = _galactic_latitude_deg(float(row["RA_DEG"]), float(row["DEC_DEG"]))
+    cat = "FSC" if abs(b) >= FSC_MIN_ABS_B_DEG else "PSC"
+    return "SURVEY", IRAS_SURVEY_LIMIT_JY[cat][0], IRAS_SURVEY_LIMIT_JY[cat][1]
 
 
-def extend_brown_template(wave_rest_um, flux, source_flag, kind, f60_jy, f100_jy, z):
-    """Continue one Brown spectrum to BROWN_FIR_END_UM through its IRAS
-    anchors (see the block comment above). Nodes below the last original
-    point are returned untouched (same arrays, byte for byte)."""
-    if kind == "NONE":
-        raise ValueError("no IRAS anchor for this galaxy")
-    anchors_rest = np.array(BROWN_FIR_ANCHOR_UM) / (1.0 + z)
-    if wave_rest_um[-1] >= anchors_rest[0]:
+def _mbb_shape(wave_um, temp_k):
+    """F_nu(lambda) up to a constant: nu^beta B_nu(T), beta = BROWN_BETA."""
+    return wave_um ** -(BROWN_BETA + 3.0) / np.expm1(HC_OVER_K_UM_K / (wave_um * temp_k))
+
+
+def mbb_temperature(f60_jy, f100_jy):
+    """T (K) of the beta = 2 modified blackbody with F_nu(60)/F_nu(100) = f60/f100
+    (observed wavelengths); the ratio rises monotonically with T."""
+    from scipy.optimize import brentq
+    target = np.log(f60_jy / f100_jy)
+    lo, hi = BROWN_FIR_ANCHOR_UM
+    return brentq(lambda t: np.log(_mbb_shape(lo, t) / _mbb_shape(hi, t)) - target, 3.0, 2000.0)
+
+
+def extend_brown_template(wave_rest_um, flux, source_flag, kind, f60_jy, f100_jy, z, median_temp_k):
+    """Continue one Brown spectrum to BROWN_FIR_END_UM (see the block comment
+    above). Original nodes are returned untouched (byte for byte)."""
+    lam60_obs, lam100_obs = BROWN_FIR_ANCHOR_UM
+    if wave_rest_um[-1] >= lam60_obs / (1.0 + z):
         raise ValueError(f"spectrum already reaches {wave_rest_um[-1]} um")
-    obs_a = np.array(BROWN_FIR_ANCHOR_UM) * ANGSTROM_PER_UM
-    fnu_cgs = np.array([f60_jy, f100_jy]) * JY_TO_CGS
-    flam = fnu_cgs * (C_UM_S * ANGSTROM_PER_UM) / obs_a ** 2     # erg/s/cm^2/Angstrom
-    slope = np.log(flam[1] / flam[0]) / np.log(anchors_rest[1] / anchors_rest[0])
-    flam_end = flam[1] * (BROWN_FIR_END_UM / anchors_rest[1]) ** slope
-    add_wave = np.array([anchors_rest[0], anchors_rest[1], BROWN_FIR_END_UM])
-    add_flux = np.array([flam[0], flam[1], flam_end])
-    flag = BROWN_FLAG_IRAS_LIMIT if kind == "LIMIT" else BROWN_FLAG_MODEL_FILL
+    if kind in UPPER_LIMIT_KINDS:
+        temp = median_temp_k
+        fnu_100 = f100_jy                      # the limit, scaled shape through it
+        flag = BROWN_FLAG_IRAS_LIMIT
+    else:
+        temp = mbb_temperature(f60_jy, f100_jy)
+        fnu_100 = f100_jy
+        flag = BROWN_FLAG_MODEL_FILL
+    # observed wavelengths of the nodes: 60 -> 250 um rest-end, log-spaced
+    obs = np.logspace(np.log10(lam60_obs), np.log10(BROWN_FIR_END_UM * (1.0 + z)), BROWN_FIR_N_NODES)
+    fnu = fnu_100 * JY_TO_CGS * _mbb_shape(obs, temp) / _mbb_shape(lam100_obs, temp)
+    flam = fnu * (C_UM_S * ANGSTROM_PER_UM) / (obs * ANGSTROM_PER_UM) ** 2   # erg/s/cm^2/Angstrom
+    add_wave = obs / (1.0 + z)
     return (np.concatenate([wave_rest_um, add_wave]),
-            np.concatenate([flux, add_flux]),
-            np.concatenate([source_flag, np.full(3, float(flag))]))
+            np.concatenate([flux, flam]),
+            np.concatenate([source_flag, np.full(add_wave.size, float(flag))]))
 
 
 def brown_far_infrared_anchors(download_dir, slugs):
@@ -839,6 +879,13 @@ def brown_far_infrared_anchors(download_dir, slugs):
         kind, f60, f100 = choose_iras_anchor(row)
         out[slug] = (kind, f60, f100, float(row["CZ_KMS"]) / SPEED_OF_LIGHT_KMS)
     return out
+
+
+def brown_median_temperature(anchors):
+    """Median mbb_temperature over the detected-anchor templates."""
+    return float(np.median([mbb_temperature(f60, f100)
+                            for kind, f60, f100, _z in anchors.values()
+                            if kind not in UPPER_LIMIT_KINDS]))
 
 
 def load_brown_rest_frame_templates(download_dir, extend=True):
@@ -866,13 +913,9 @@ def load_brown_rest_frame_templates(download_dir, extend=True):
         templates[name] = (wave_a * ANGSTROM_TO_UM, flux, source_flag)
     if extend:
         anchors = brown_far_infrared_anchors(download_dir, templates)
+        t_med = brown_median_temperature(anchors)
         for name, (kind, f60, f100, z) in anchors.items():
-            if kind == "NONE":
-                # no IRAS PSC/FSC/RBGS entry within 90 arcsec: nothing to anchor on, and the
-                # catalogues carry no upper limit for an unlisted position. Left at Brown's
-                # own end (zero past it); build_galz prints the count. COORDINATOR RULING NEEDED.
-                continue
-            templates[name] = extend_brown_template(*templates[name], kind, f60, f100, z)
+            templates[name] = extend_brown_template(*templates[name], kind, f60, f100, z, t_med)
     return templates
 
 
@@ -1104,7 +1147,7 @@ class RawGridPhotometry:
 
 
 def compute_raw_grid_photometry(redshifted_dir, master_wave_um, band_filters,
-                                band_order=tuple(BANDS)):
+                                band_order=tuple(SAMPLING_BANDS)):
     """The dense raw set's 8-band photometry, computed WITHOUT ever
     materializing a (n_templates, n_z, n_wave) cube for a whole source:
     one template's (n_z_kept, n_wave) block is built, convolved to 8
