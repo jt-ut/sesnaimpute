@@ -4029,7 +4029,7 @@ _PHOTOMETRY_PACS_READINGS = {
         "source the uncertainty is enlarged by the overlap but its completeness curve is still its cell's curve, so "
         "the curve somewhat overstates its chance of detection. The noise has heavier tails than a Gaussian; it is "
         "scaled so that 5-sigma excursions on empty sky are as rare as for Gaussian noise, which makes it conservative "
-        "in the core (on Musca, empty-sky excursions beyond -3 sigma occur at 0.6 / 0.9 / 0.9 of the Gaussian rate at "
+        "in the core (on Musca, empty-sky excursions beyond -3 sigma occur at 0.46 / 0.78 / 0.76 of the Gaussian rate at "
         "70 / 100 / 160 micron)."),
     "ORIGIN_{b}": ("origin code",
         "1 means the source is detected: its flux minus the typical empty-sky flux of its 30-arcsecond cell "
