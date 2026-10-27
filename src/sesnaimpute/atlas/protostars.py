@@ -76,7 +76,7 @@ MATCH_RADIUS_ARCSEC = 2.0
 #: (sec. 5.6) treats as a constant.
 DUNHAM2014_PROTOSTELLAR_FRACTION = 0.27
 
-BAND_KEYS = tuple(b.key for b in definitions.BANDS)
+BAND_KEYS = tuple(definitions.SELECTION.bands)  # the catalogue bands
 IDX_I2 = BAND_KEYS.index("I2")
 
 _SQRT2 = float(np.sqrt(2.0))
@@ -169,7 +169,7 @@ def _read_depth_grid_pix(config, region):
     reader = limits_module.completeness(config, region)
     pix = reader.hpx_pix_512
     rows = np.arange(pix.shape[0])
-    band_keys = tuple(b.key for b in definitions.BANDS)
+    band_keys = tuple(definitions.SELECTION.bands)
     f_lim_pix = np.empty((pix.shape[0], len(band_keys)), dtype=np.float64)
     for j, band in enumerate(band_keys):
         flux50 = reader.fifty_percent_pixel(band, rows)
@@ -679,7 +679,7 @@ def _verdict(config, region, protostars, used, density_row, idx_median):
     n_top_clipped = int(np.count_nonzero(log10_xi_hat[~no_fg] > grid.LOG10_XI_EDGES[-1]))
 
     w_ramp_p = population_selection.law_dense_weight(a_p)
-    kappa_i2 = population_selection.kappa_hybrid(config, w_ramp_p)[:, IDX_I2]
+    kappa_i2 = population_selection.kappa_selection(config, w=w_ramp_p)[:, IDX_I2]
     f_lim_i2 = f_lim_dens[rows_u, IDX_I2]
     pixel_row_i2 = pixel_row_dens[rows_u]
 

@@ -107,7 +107,7 @@ _HPX512_PIXEL_DEG2 = 41252.96 / (12 * 512 ** 2)
 
 
 def _deepest_limits_mjy(reader):
-    """`(8,)` mJy: this region's own deepest (most sensitive) measured
+    """`(len(SELECTION.bands),)` mJy, in SELECTION order: this region's own deepest (most sensitive) measured
     50%-completeness flux per band -- the minimum of `fifty_percent_pixel`
     over every admitted nside-512 pixel (COMPLETENESS_2026-10-20.md: Rob
     Gutermuth's own measured maps, not the retired region-wide counts fit
@@ -115,8 +115,8 @@ def _deepest_limits_mjy(reader):
     number (section 4.2, below): replaces `population.field_stars.
     deepest_limits`'s retired region-wide proxy."""
     rows = np.arange(reader.hpx_pix_512.shape[0])
-    out = np.full(len(definitions.BANDS), np.nan, dtype=np.float64)
-    for j, band in enumerate(b.key for b in definitions.BANDS):
+    out = np.full(len(definitions.SELECTION.bands), np.nan, dtype=np.float64)
+    for j, band in enumerate(definitions.SELECTION.bands):
         vals = reader.fifty_percent_pixel(band, rows)
         finite = np.isfinite(vals)
         if finite.any():

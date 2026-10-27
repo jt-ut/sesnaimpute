@@ -42,6 +42,7 @@ from sesnaimpute.definitions import BANDS_BY_KEY
 
 # The five Spitzer bands the completeness maps carry; the three 2MASS bands
 # are all-sky (fraction 1 everywhere) and are not columns of this product.
+# The five Spitzer bands are a subset of definitions.SELECTION.bands.
 SPITZER_BANDS = ("I1", "I2", "I3", "I4", "M1")
 for _band in SPITZER_BANDS:
     assert BANDS_BY_KEY[_band].survey in ("IRAC", "MIPS")

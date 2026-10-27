@@ -69,10 +69,10 @@ SIGMA_BINDINGS = {
     "none": {"C2_1": {}, "C2_2": {}, "C2_3": {}, "C2_4": {}},
 }
 
-# The catalogue's own eight-band order (sesnaimpute.definitions.BANDS),
+# The catalogue's own eight-band order (sesnaimpute.definitions.SELECTION.bands),
 # not a copy: this scheme reads whichever bands its host project measures
 # in that same order.
-BAND_ORDER = tuple(b.key for b in definitions.BANDS)
+BAND_ORDER = tuple(definitions.SELECTION.bands)
 
 # Features that are piecewise-linear in the band magnitudes (dereddening
 # branch chosen per source), so they carry no fixed `mags` expansion.

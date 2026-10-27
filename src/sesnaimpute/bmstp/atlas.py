@@ -3,11 +3,11 @@ sec. 1.2 P6, sec. 3 row 1.9).
 
 Per admitted nside-512 pixel, a deterministic weighted quadrature over each
 class's own population, dimmed at the pixel's own column through the blended
-law (`population.selection.kappa_hybrid`), weighted by each member's
+law (`population.selection.kappa_selection`), weighted by each member's
 probability of being catalogued (sec. 8, sec. 6.2): per band the
 completeness `C_i(f)` at the pixel's own marginalised 50% limit
 (`catalog.depth_grid`'s `F_LIM_50_PIX_MJY`) and its own marginalised width
-(`W_DEX_PIX`), and `P(>=2 of 8)` a mixture of the eight bands' independent
+(`W_DEX_PIX`), and `P(>=2 of SELECTION)` (two of its eight bands) a mixture of the bands' independent
 non-detection probabilities and a fully comonotone model, by `constants.
 LAMBDA` (C20 brief, briefs/round4_2026-10-20/C20_detection_correlation.md:
 bands observed at the same position share the local background and
@@ -129,7 +129,9 @@ from sesnaimpute.bmstp import template_weights
 from sesnaimpute.fittp import prior_reader
 from sesnaimpute.sky.derived import column as column_module
 
-BAND_KEYS = tuple(b.key for b in definitions.BANDS)
+#: The catalogue bands: `definitions.SELECTION.bands` (SESNA's eight), not the
+#: eleven-band SED; every array below is (.., N_BANDS) over these.
+BAND_KEYS = tuple(definitions.SELECTION.bands)
 N_BANDS = len(BAND_KEYS)
 IDX_I4 = BAND_KEYS.index("I4")
 IDX_I2 = BAND_KEYS.index("I2")
@@ -143,9 +145,9 @@ CLASSES = ("STAR", "AGB", "PAHC", "PAHN", "GAL", "YSO", "H2S")
 #: wrong faint extrapolation.
 BRIGHT_MULT_3, BRIGHT_MULT_10 = 3.0, 10.0
 
-#: Two of eight bands clear -- the survey's own catalogue rule (sec. 1.2),
-#: the same constant `population.selection.MIN_BANDS` sets.
-MIN_BANDS_CLEAR = selection_module.MIN_BANDS
+#: Two of the SELECTION bands (its eight) clear -- the survey's own catalogue
+#: rule (sec. 1.2), `definitions.SELECTION.min_bands`.
+MIN_BANDS_CLEAR = definitions.SELECTION.min_bands
 
 #: GAL member colour-collapse cell (`_gal_members`, rule 9): the width, in
 #: dex, within which two "galz" templates' three colour log-ratios
@@ -554,7 +556,7 @@ def catalogued_probability(a_col, u, flux0, pixel_row, band_params, config):
         u_unique, inverse = np.unique(u_s, return_inverse=True)
         a_unique = a_src[:, None] * u_unique[None, :]  # (n_pix or 1, n_unique)
         w_ramp_unique = selection_module.law_dense_weight(a_unique)
-        kappa_unique = selection_module.kappa_hybrid(config, w_ramp_unique)  # (n_pix, n_unique, 8)
+        kappa_unique = selection_module.kappa_selection(config, w=w_ramp_unique)  # (n_pix, n_unique, N_BANDS)
         dimming_unique = 0.4 * a_unique[:, :, None] * kappa_unique  # (n_pix, n_unique, 8)
         # exponentiated on the distinct values, THEN gathered: the same
         # elementwise `10.0 ** (-x)` on the same floats, bit-identical

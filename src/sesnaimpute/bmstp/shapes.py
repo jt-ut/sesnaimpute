@@ -764,7 +764,7 @@ def build_cloud(config, region):
             a_col_k_pattern = _sightline_a_col_k(config, region, hpx_pix_256_pattern)
             a_fg_pattern = u_front_pattern * a_col_k_pattern
             w_ramp_fg_pahn = population_selection.law_dense_weight(a_fg_pattern)
-            kappa_i4_fg_pahn = population_selection.kappa_hybrid(config, w_ramp_fg_pahn)[:, pahn_module.IDX_I4]
+            kappa_i4_fg_pahn = population_selection.kappa_selection(config, w=w_ramp_fg_pahn)[:, pahn_module.IDX_I4]
             log10_f_ref_i2_pahn_1kpc = log10_f_ref_i2_pahn_1kpc + 0.4 * a_fg_pattern * kappa_i4_fg_pahn
 
             # U06's own per-source PAHN pattern-weight table
