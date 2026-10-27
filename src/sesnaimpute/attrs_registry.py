@@ -4071,3 +4071,34 @@ for _band, _wave in (("P70", "70"), ("P100", "100"), ("P160", "160")):
 # (curated source table, completeness product, the four libraries' P70/P100/P160
 # columns, the PACS far-infrared census) are registered by the units that build
 # them, each in its own block; their UNITS and READING are those units'.
+
+
+# Unit 2: catalog.curated, the eleven-band source table (replaces the eight-band readings above)
+_PACS_TAIL = (" The last three columns are the Herschel PACS bands P70, P100, P160, taken from the PACS "
+              "photometry file of the same region (see its readings for FNU_P70_MJY etc.).")
+REGISTRY[("sources_sesna_source", "FNU_MJY")] = ("mJy",
+    "The flux in each of the eleven bands, in the band order this file's BANDS attribute gives (J, H, Ks, I1, I2, "
+    "I3, I4, M1, P70, P100, P160). Where there is no detection in the first eight the value is filled: the 2MASS "
+    "bands (J, H, Ks) take the survey's fixed detection bound, and the three IRAC bands and the one MIPS band take "
+    "the source's own 90%-completeness flux read off Rob Gutermuth's measured completeness map at the source's "
+    "nearest pixel, or NaN where the source's own pixel is off every field's map. The three PACS columns are total "
+    "flux (the PACS calibration's definition), as measured by the PACS stages; an upper bound or an uncovered band "
+    "is as that file records it. ORIGIN_FNU in this file says which bands were filled and how." + _PACS_TAIL)
+REGISTRY[("sources_sesna_source", "SIGMA_FNU_MJY")] = ("mJy",
+    "The 1-sigma flux uncertainty for a measured detection in FNU_MJY, in each of the eleven bands, on the same mJy "
+    "scale. Where FNU_MJY was filled instead of measured (see ORIGIN_FNU), or is a PACS upper bound, this is the "
+    "fixed value 0.99 (a flag the SED fitter reads as an upper limit, not a real measurement uncertainty), or NaN "
+    "where ORIGIN_FNU is 91 (off-map or not covered, no fill at all)." + _PACS_TAIL)
+REGISTRY[("sources_sesna_source", "DCOMP90_MJY")] = ("mJy",
+    "The flux a source at this position and band would need to be detected at 90% completeness, in each of the "
+    "eleven bands: the survey's fixed bound for the 2MASS bands (J, H, Ks), or, for the three IRAC bands and the "
+    "one MIPS band, Rob Gutermuth's measured completeness map value at the source's nearest pixel, NaN where the "
+    "source's own pixel is off every field's map for that band. NaN in the three PACS columns: the PACS 90% flux "
+    "is in the PACS completeness product, not here.")
+REGISTRY[("sources_sesna_source", "ORIGIN_FNU")] = ("code",
+    "How FNU_MJY and DCOMP90_MJY in each of the eleven bands were obtained, one integer per band: 1 a measured "
+    "detection, 2 the fixed 2MASS survey detection bound (for the PACS bands: an upper bound from a blend that "
+    "cannot be separated), 90 covered but undetected (FNU_MJY filled from the completeness map's own "
+    "90%-completeness flux at the source's pixel; for the PACS bands: observed and undetected), 91 off-map or not "
+    "covered -- no completeness value and no non-detection term (COMPLETENESS_2026-10-20.md rule 2, the same "
+    "meaning Pokhrel et al. 2023, eHOPS I, ApJS 266, 32, gave the old catalogue column)." + _PACS_TAIL)
