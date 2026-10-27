@@ -290,7 +290,7 @@ def build(root_arg):
         min_kept_dist = sampling.packing(coords, kept_index)
 
         n_kept = int(kept_index.size)
-        print(f"sampling: whitened quotient space d=6, radius=1.0 -- "
+        print(f"sampling: whitened quotient space d=9, radius=1.0 -- "
               f"kept {n_kept} of {n_raw} raw models")
         print(f"coverage: max_dist={max_dist:.6f} (< 1.0 required), "
               f"n_uncovered={n_uncovered} (0 required)")
