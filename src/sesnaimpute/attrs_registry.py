@@ -4054,7 +4054,8 @@ _P160_NOTE = (" At 160 micron: this is the Pokhrel et al. 2023 Table 1 recipe (1
               "maps agrees within 1 per cent, and at 70 micron both agree with eHOPS's published values within 0-2.5 "
               "per cent. At 160 micron eHOPS's published values are 1.22 times what their Table 1 recipe yields on either "
               "map production; the cause cannot be determined from the paper (a wider sky annulus, a different "
-              "correction, or a different combination of maps), and the question is with the eHOPS authors. The 160 "
+              "correction, or a different combination of maps). The band is included in the fit on this convention; the "
+              "question to the eHOPS authors is open. The 160 "
               "micron band also contains the [C II] 158 micron line, and its beam is about 12 arcsec.")
 for _band, _wave in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_units, _reading) in _PHOTOMETRY_PACS_READINGS.items():
