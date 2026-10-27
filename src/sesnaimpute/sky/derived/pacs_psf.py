@@ -11,7 +11,10 @@ release below; derived stages run without network).
 
 What a map needs is a pair of templates, one per scan direction, each placed
 on the sky at the spacecraft position angle of the observation that made it.
-`published_components_for_map(config, record)` returns that pair;
+A parallel map that holds only one scan direction (Taurus: two Level 2 maps of one
+observation each) is fitted with that direction's template alone, at its own
+position angle.
+`published_components_for_map(config, record)` returns that pair (or the one);
 `CachedPairedPSF.from_map(...)` integrates the pair over the map's pixels on a
 grid of source positions and pixel offsets once per map, and
 `CachedPairedPSF.evaluate_xy(...)` interpolates it for any set of sources. The
@@ -262,7 +265,7 @@ def _paired_quadrature(east, north, images, cosine, sine, nodes, weights):
 class PairedPSF:
     """Separate published component columns with shared quadrature geometry.
 
-    Output is (n_position, n_component, ny, nx), without mixture weights or
+    Output is (n_position, n_component, ny, nx), n_component 1 or 2, without mixture weights or
     renormalization: each pixel holds the template's flux integrated over the
     pixel by Gauss-Legendre quadrature on the pixel's corner-interpolated sky
     offsets.
@@ -270,9 +273,9 @@ class PairedPSF:
     components: tuple
 
     def __post_init__(self):
-        if len(self.components) != 2 or not all(isinstance(c, PublishedPSF)
+        if len(self.components) not in (1, 2) or not all(isinstance(c, PublishedPSF)
                                                for c in self.components):
-            raise ValueError('PairedPSF requires two published components')
+            raise ValueError('PairedPSF requires one or two published components')
 
     def __call__(self, wcs, source, pixel_x, pixel_y, integration_order):
         if not isinstance(integration_order, int) or integration_order < 1:
@@ -293,14 +296,15 @@ class PairedPSF:
         images = np.stack([c.image for c in self.components])
         out = _paired_quadrature(east, north, images, np.cos(angles), np.sin(angles),
                                  nodes / 2, weights / 2)
-        return out.reshape((x.shape[0], 2, x.shape[1], x.shape[2]))
+        return out.reshape((x.shape[0], len(self.components), x.shape[1], x.shape[2]))
 
 
 @njit(cache=True)
 def _cached_responses(table, source_x, source_y, pixel_x, pixel_y,
                       map_nx, map_ny, extent, steps):
     n_source, n_pixel = pixel_x.shape
-    out = np.empty((n_source, 2, n_pixel), dtype=np.float64)
+    n_component = table.shape[2]
+    out = np.empty((n_source, n_component, n_pixel), dtype=np.float64)
     spatial_ny, spatial_nx = table.shape[:2]
     last = table.shape[-1] - 1
     for row in range(n_source):
@@ -318,7 +322,7 @@ def _cached_responses(table, source_x, source_y, pixel_x, pixel_y,
                 raise ValueError('Cutout exceeds response-cache displacement support')
             jx, jy = min(int(dx), last - 1), min(int(dy), last - 1)
             ux, uy = dx - jx, dy - jy
-            for member in range(2):
+            for member in range(n_component):
                 value = 0.0
                 for cy in range(2):
                     wy = fy if cy else 1 - fy
@@ -360,12 +364,12 @@ class CachedPairedPSF:
             raise ValueError('Cache requires at least two spatial nodes and a positive map shape')
         extent = half_size + .5
         count = int(2 * extent * subpixel_steps) + 1
-        nbytes = spatial_nodes ** 2 * 2 * count ** 2 * np.dtype(dtype).itemsize
+        nbytes = spatial_nodes ** 2 * len(components) * count ** 2 * np.dtype(dtype).itemsize
         if nbytes > 1024 ** 3:
             raise ValueError('Response table exceeds 1 GiB budget')
         offsets = np.linspace(-extent, extent, count)
         yy, xx = np.meshgrid(offsets, offsets, indexing='ij')
-        table = np.empty((spatial_nodes, spatial_nodes, 2, count, count), dtype=dtype)
+        table = np.empty((spatial_nodes, spatial_nodes, len(components), count, count), dtype=dtype)
         psf = PairedPSF(tuple(components))
         for iy, sy in enumerate(np.linspace(-.5, shape[0] - .5, spatial_nodes)):
             for ix, sx in enumerate(np.linspace(-.5, shape[1] - .5, spatial_nodes)):
@@ -382,10 +386,10 @@ class CachedPairedPSF:
                 or not all(np.all(np.isfinite(a)) for a in (sx, sy, x, y))):
             raise ValueError('Expected finite source vectors and (n,ny,nx) pixel coordinates')
         if not sx.size:
-            return np.empty((0, 2, *x.shape[1:]), dtype=np.float64)
+            return np.empty((0, self.table.shape[2], *x.shape[1:]), dtype=np.float64)
         out = _cached_responses(self.table, sx, sy, x.reshape(sx.size, -1), y.reshape(sx.size, -1),
                                 self.shape[1], self.shape[0], self.extent, self.subpixel_steps)
-        return out.reshape((sx.size, 2, *x.shape[1:]))
+        return out.reshape((sx.size, self.table.shape[2], *x.shape[1:]))
 
     def __call__(self, wcs, source, pixel_x, pixel_y, integration_order):
         if integration_order != self.integration_order:
@@ -418,9 +422,32 @@ def _scan_angles(config):
     return _SCANS[key]
 
 
+def _parallel_orientations(config, record, header):
+    """Every contributing observation's (direction, angle) of a parallel map: {'nominal'|'orthogonal':
+    [angles]}. A Level 3 stack of several parallel pairs holds several angles per direction (Cepheus
+    Flare: 235.7 and 208.4 deg). Fails if a direction or angle is missing or none is found."""
+    scans = _scan_angles(config)
+    contexts = [scans[str(o)] + (f"HSA metadata of {o}",) for o in record.obsids if str(o) in scans]
+    orientations = {}
+    for direction, angle, source in [(str(header.get('SCANDIR', '')).strip().lower(),
+                                      float(header.get('POSANGLE', np.nan)), 'map header')] + contexts:
+        if direction not in ('nominal', 'orthogonal') or not np.isfinite(angle):
+            raise ValueError(f'Missing scan direction/position angle in {source}')
+        angles = orientations.setdefault(direction, [])
+        if not any(abs(angle - a) < 1e-6 for a in angles):
+            angles.append(angle)
+    if not orientations:
+        raise ValueError('No scan direction found for this parallel map')
+    return orientations
+
+
+_DIRECTION_TAGS = (('nominal', '+42'), ('orthogonal', '-42'))
+
+
 def published_components_for_map(config, record):
-    """The two release templates (+42 and -42 scan) for this map, each placed
-    at the spacecraft position angle of its own scan.
+    """The release templates for this map, each placed at the spacecraft position angle of its own
+    scan: the +42 and -42 pair, or for a parallel map holding only one scan direction (nominal or
+    orthogonal) that direction's template alone (one-tuple).
 
     Parallel maps: the map header gives one SCANDIR (nominal/orthogonal) and
     POSANGLE, the HSA's per-observation metadata (the download's cached
@@ -434,29 +461,18 @@ def published_components_for_map(config, record):
     header = _map_header(config, record)
     if not np.isclose(float(header.get('PIXFRAC', np.nan)), .1):
         raise ValueError('Published templates are for pixfrac=.1 maps')
-    # each contributing observation's scan direction and angle, from the download's cached HSA metadata
-    # table (the IRSA map header names only one scan of a parallel pair)
-    scans = _scan_angles(config)
-    contexts = [scans[str(o)] + (f"HSA metadata of {o}",) for o in record.obsids if str(o) in scans]
     if key[1] == 1:
+        # each contributing observation's scan direction and angle, from the download's cached HSA
+        # metadata table (the IRSA map header names only one scan of a parallel pair)
+        scans = _scan_angles(config)
+        contexts = [scans[str(o)] + (f"HSA metadata of {o}",) for o in record.obsids if str(o) in scans]
         angles = [a for _, a, _ in contexts] or [float(header.get('POSANGLE', np.nan))]
         angle = float(np.mean(angles))
         return tuple(PublishedPSF.read(config, record, a, position_angle_deg=angle)
                      for a in _ARRAY_TO_MAP_ANGLES)
-    # every contributing observation's (direction, angle); a Level 3 stack of several parallel pairs
-    # holds several angles per direction (Cepheus Flare: 235.7 and 208.4 deg)
-    orientations = {}
-    for direction, angle, source in [(str(header.get('SCANDIR', '')).strip().lower(),
-                                      float(header.get('POSANGLE', np.nan)), 'map header')] + contexts:
-        if direction not in ('nominal', 'orthogonal') or not np.isfinite(angle):
-            raise ValueError(f'Missing scan direction/position angle in {source}')
-        angles = orientations.setdefault(direction, [])
-        if not any(abs(angle - a) < 1e-6 for a in angles):
-            angles.append(angle)
-    if set(orientations) != {'nominal', 'orthogonal'}:
-        raise ValueError('Both original nominal/orthogonal orientations must be retained')
+    orientations = _parallel_orientations(config, record, header)
     return tuple(_direction_component(config, record, tag, orientations[d])
-                 for d, tag in (('nominal', '+42'), ('orthogonal', '-42')))
+                 for d, tag in _DIRECTION_TAGS if d in orientations)
 
 
 def _direction_component(config, record, tag, angles):

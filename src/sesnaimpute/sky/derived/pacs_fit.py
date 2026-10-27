@@ -150,7 +150,7 @@ class Neighbours:
 class PositionFit:
     """Forced fits at n positions.  Rows with covered False carry NaN.
 
-    flux       (n,) mJy, summed amplitude of the two scan columns
+    flux       (n,) mJy, summed amplitude of the scan columns (two; one for a one-direction map)
     gain       (n,) response of `flux` to a unit-flux injected beam (50/50 scan mix)
     sigma      (n,) propagated pixel noise on `flux`, mJy
     covered    (n,) bool, the position lies on valid data and the fit is well posed
@@ -210,10 +210,11 @@ class GroupFit:
 
 @numba.njit(cache=True)
 def _box_templates(table, extent, steps, map_nx, map_ny, sx, sy, x0, y0, side, out, row):
-    """Pixel response of the two scan columns of a source at (sx, sy) on the box whose
-    lower-left pixel is (x0, y0): nearest spatial node of the response table, bilinear
-    in pixel displacement. Writes out[row], out[row+1]; zero beyond the table."""
+    """Pixel response of the scan columns (one or two, table.shape[2]) of a source at (sx, sy) on the
+    box whose lower-left pixel is (x0, y0): nearest spatial node of the response table, bilinear
+    in pixel displacement. Writes out[row .. row+n_component-1]; zero beyond the table."""
     nsy, nsx = table.shape[0], table.shape[1]
+    nk = table.shape[2]
     last = table.shape[-1] - 1
     ix = min(max(int(round((sx + 0.5) / map_nx * (nsx - 1))), 0), nsx - 1)
     iy = min(max(int(round((sy + 0.5) / map_ny * (nsy - 1))), 0), nsy - 1)
@@ -223,14 +224,14 @@ def _box_templates(table, extent, steps, map_nx, map_ny, sx, sy, x0, y0, side, o
             p = j * side + i
             dx = (x0 + i - sx + extent) * steps
             if dx < 0 or dx > last or dy < 0 or dy > last:
-                out[row, p] = 0.0
-                out[row + 1, p] = 0.0
+                for m in range(nk):
+                    out[row + m, p] = 0.0
                 continue
             jx = min(int(dx), last - 1)
             jy = min(int(dy), last - 1)
             ux = dx - jx
             uy = dy - jy
-            for m in range(2):
+            for m in range(nk):
                 im = table[iy, ix, m]
                 out[row + m, p] = ((1 - ux) * (1 - uy) * im[jy, jx] + ux * (1 - uy) * im[jy, jx + 1]
                                    + ux * uy * im[jy + 1, jx + 1] + (1 - ux) * uy * im[jy + 1, jx])
@@ -250,7 +251,8 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
     npix = side * side
     map_ny, map_nx = img.shape
     kmax = ux.shape[1]
-    cmax = 2 * (mmax + kmax)
+    nk = table.shape[2]                  # scan columns per source: 1 (one-direction map) or 2
+    cmax = nk * (mmax + kmax)
     abuf = np.empty(npix)
     flux = np.full((n, mmax), np.nan)
     gain = np.full((n, mmax), np.nan)
@@ -268,14 +270,14 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
     for i in range(n):
         mt = tn[i]
         kn = un[i]
-        nc = 2 * (mt + kn)
+        nc = nk * (mt + kn)
         x0 = cx[i] - half
         y0 = cy[i] - half
         for m in range(mt):
-            _box_templates(table, extent, steps, map_nx, map_ny, tx[i, m], ty[i, m], x0, y0, side, X, 2 * m)
+            _box_templates(table, extent, steps, map_nx, map_ny, tx[i, m], ty[i, m], x0, y0, side, X, nk * m)
         for k in range(kn):
             _box_templates(table, extent, steps, map_nx, map_ny, ux[i, k], uy[i, k], x0, y0, side, X,
-                           2 * (mt + k))
+                           nk * (mt + k))
         for j in range(side):
             yy = y0 + j
             for ii in range(side):
@@ -301,7 +303,9 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
             tot = 0.0
             got = 0.0
             for p in range(npix):
-                t = X[2 * m, p] + X[2 * m + 1, p]
+                t = X[nk * m, p]
+                for q in range(1, nk):
+                    t += X[nk * m + q, p]
                 tot += t
                 if ok[p]:
                     got += t
@@ -362,8 +366,8 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
             for m in range(mt):
                 B[a, m] = 0.0
         for m in range(mt):
-            B[2 * m, m] = 1.0 / scale[2 * m]
-            B[2 * m + 1, m] = 1.0 / scale[2 * m + 1]
+            for q in range(nk):
+                B[nk * m + q, m] = 1.0 / scale[nk * m + q]
         # Gauss-Jordan with partial pivoting on the equilibrated normal matrix
         singular = False
         for c in range(nc):
@@ -411,7 +415,10 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
             g = 0.0
             for p in range(npix):
                 f += L[m, p] * d[p]
-                g += L[m, p] * 0.5 * (X[2 * m, p] + X[2 * m + 1, p])
+                t = X[nk * m, p]
+                for q in range(1, nk):
+                    t += X[nk * m + q, p]
+                g += L[m, p] * (1.0 / nk) * t
             flux[i, m] = f
             gain[i, m] = g
             for m2 in range(m, mt):
@@ -879,13 +886,13 @@ class Tile:
             ok = np.isfinite(d) & np.isfinite(e)
             if ok.sum() < 0.8 * d.size:
                 continue
-            t = np.zeros((2, side * side))
+            t = np.zeros((psf.table.shape[2], side * side))
             _box_templates(psf.table, psf.extent, psf.subpixel_steps, self.shape[1], self.shape[0],
                            x[i], y[i], x0, y0, side, t, 0)
             best, best_chi = np.nan, np.inf
             for s in widths:
                 cols = [gaussian_filter(c.reshape(side, side), s).ravel() if s > 0 else c for c in t]
-                M = np.c_[cols[0], cols[1], np.ones(side * side)][ok] / e[ok, None]
+                M = np.c_[(*cols, np.ones(side * side))][ok] / e[ok, None]
                 coef = np.linalg.lstsq(M, d[ok] / e[ok], rcond=None)[0]
                 chi = np.sum((M @ coef - d[ok] / e[ok]) ** 2)
                 if chi < best_chi:
