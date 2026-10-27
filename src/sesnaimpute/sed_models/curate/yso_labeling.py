@@ -79,6 +79,7 @@ except ImportError:
     faiss = None
 
 from sesnaimpute import definitions
+from sesnaimpute.sed_models import paths
 from sesnaimpute.sed_models.constants import BANDS, PC_CM, VEGA_ZERO_POINT_MJY
 from sesnaimpute.sed_models.curate import curve_of_growth as cog
 from sesnaimpute.sed_models.curate.model_io import align_by_name, read_flux_metadata
@@ -96,8 +97,17 @@ from sesnaimpute.sed_models.curate.model_io import align_by_name, read_flux_meta
 # error of the SESNA catalogue's own eight bands (no PACS value exists for it).
 BAND_ORDER = tuple(definitions.SESNA_BANDS)
 
-# Where each band's convolved photometry file lives, relative to a
-# geometry's directory (geometry_dir/convolved/<survey_subdir>/<filename>).
+# Where each band's RELEASE-OWN convolved photometry file lives, relative
+# to a geometry's directory (geometry_dir/convolved/<survey_subdir>/
+# <filename>). Owner's ruling 2026-10-27: these files are no longer read
+# as a data source by `_read_band_flux` below (see `convolve_yso.py` --
+# this package now convolves all eleven bands itself, from each
+# geometry's raw flux.fits, with undefined SED samples as NaN rather than
+# the release's own zero-fill). Kept here because the two diagnostic
+# readers that still legitimately open the release's own files for
+# comparison printing only (`convolve_yso._release_band_flux`,
+# `yso_aperture`'s old-vs-new gate comparison) import this exact mapping
+# rather than duplicating it.
 _CONVOLVED_SUBDIR = {"J": "2MASS", "H": "2MASS", "Ks": "2MASS",
                      "I1": "Spitzer", "I2": "Spitzer", "I3": "Spitzer",
                      "I4": "Spitzer", "M1": "Spitzer",
@@ -229,11 +239,18 @@ def _read_stage_and_validity(geometry_dir, ref_names):
 
 
 def _read_band_flux(geometry_dir, band, ref_names):
-    """(n_rows, 20) mJy TOTAL_FLUX for one band, aligned to ref_names."""
+    """(n_rows, 20) mJy TOTAL_FLUX for one band, aligned to ref_names --
+    from this package's OWN eleven-band reconvolution (the `yso_convolved`
+    family; `convolve_yso.py`), NOT the release's own convolved files
+    (owner's ruling 2026-10-27: those carry a fabricated zero wherever a
+    sample was undefined; ours carries NaN there instead, genuinely
+    missing, never a measurement). `geometry_dir` is always
+    `<yso_root>/<geometry>` by this pipeline's own convention, so the
+    geometry name -- `path_for`'s placeholder -- is its basename."""
     if fits is None:
         raise RuntimeError("astropy is required to read FITS files.")
-    path = os.path.join(geometry_dir, "convolved", _CONVOLVED_SUBDIR[band],
-                        _CONVOLVED_FILENAME[band])
+    geometry = os.path.basename(os.path.normpath(geometry_dir))
+    path = os.path.join(paths.path_for("yso_convolved", geometry=geometry), f"{band}.fits")
     with fits.open(path, memmap=True) as h:
         names = np.asarray(h[1].data["MODEL_NAME"]).astype(str)
         flux = np.asarray(h[1].data["TOTAL_FLUX"], dtype=np.float64)
@@ -254,7 +271,13 @@ def read_geometry_flux_cubes(geometry_dir, ref_names, bands=BAND_ORDER):
     the single point flux enters this module, so peak_row (see
     compute_row_features_from_cubes) is never spuriously dragged negative
     by one noisy aperture and no downstream step needs to special-case it.
-    Returns {band: flux_20ap}."""
+
+    An UNDEFINED (model, aperture) cell is NaN, from `_read_band_flux`'s
+    own reconvolution (owner's ruling 2026-10-27) -- `np.maximum` with a
+    NaN operand returns NaN (confirmed: `np.maximum(np.nan, 0.0)` is
+    `nan`, not `0.0`), so this clamp propagates an undefined cell as NaN
+    rather than silently turning it into a real-looking zero. Returns
+    {band: flux_20ap}."""
     return {band: np.maximum(_read_band_flux(geometry_dir, band, ref_names), 0.0)
            for band in bands}
 
@@ -277,9 +300,29 @@ def compute_row_features_from_cubes(flux_cubes, aperture_au, distance_cm, bands=
     the labeling spec's per-band clamped-fraction diagnostic.
     `all_zero_flux` is (n,) bool where peak_i == 0 (build_grid drops those at
     seed time).
-    """
+
+    ASSERT (owner's ruling 2026-10-27, brief Part 2): `curve_of_growth.
+    interp_at_aperture` (called inside `survey_matched_sed` below) linearly
+    interpolates each band between the two grid apertures bracketing the
+    survey aperture; if EITHER bracket cell is undefined (NaN, from
+    `read_geometry_flux_cubes`'s own NaN-propagating clamp), the
+    interpolated raw value -- and so `sed_linear` after the floor's
+    `np.maximum` (which also propagates NaN) -- comes out NaN. This module
+    is NOT curve_of_growth.py's owner, so rather than edit that shared,
+    library-agnostic function, the check is made HERE, in interp_at_
+    aperture's one caller path specific to the YSO library: if the
+    aperture gate (`yso_aperture`) upstream has done its job, every row
+    reaching this function already has both brackets of every band
+    finite at its own distance, so `sed_linear` must come out finite.
+    A NaN here means a model with an undefined bracket reached labeling
+    without being gated -- fail loudly, never interpolate across it."""
     sed_linear, floor_linear_row, all_zero_flux = cog.survey_matched_sed(
         flux_cubes, aperture_au, distance_cm, bands)
+    assert np.all(np.isfinite(sed_linear)), (
+        "compute_row_features_from_cubes: interp_at_aperture produced a "
+        "non-finite (NaN) survey-matched flux -- a model with an undefined "
+        "aperture bracket reached labeling; the aperture gate should have "
+        "excluded it before this call")
 
     clamp_report = {}
     for band in bands:

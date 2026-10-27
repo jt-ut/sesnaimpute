@@ -47,7 +47,7 @@ from sesnaimpute.sed_models.curate.model_io import (
     write_flux_cube, write_models_conf,
 )
 from sesnaimpute.sed_models.curate.yso_fps import STRATUM_LABELS, STRATUM_OUTPUT_FOLDER
-from sesnaimpute.sed_models.curate.yso_labeling import BAND_ORDER, _CONVOLVED_FILENAME, _CONVOLVED_SUBDIR
+from sesnaimpute.sed_models.curate.yso_labeling import BAND_ORDER
 from sesnaimpute.sed_models.curate import yso_pms as pms
 
 # ==========================================================================
@@ -433,11 +433,20 @@ def _extract_convolved_band_rows(geometry_dir, band, ref_names):
     MODEL_NAME (spec SS6.2) -- convolved files can carry their own
     internal row order, the same reason `yso_labeling._read_band_flux`
     already aligns by name rather than position. Mirrors `_read_band_flux`
-    exactly, plus TOTAL_FLUX_ERR
-    (which that function doesn't need for its own purpose).
+    exactly, plus TOTAL_FLUX_ERR (which that function doesn't need for
+    its own purpose).
+
+    Reads this package's OWN `yso_convolved` family (`convolve_yso.py`),
+    NOT the release's own convolved files -- owner's ruling 2026-10-27:
+    those fabricate a 0 at every undefined sample; ours stores NaN there
+    instead. `geometry_dir` is always `<yso_root>/<geometry>` by this
+    pipeline's own convention (the raw release directory), so the
+    geometry name is its basename -- exactly as `_read_band_flux` does.
     """
-    path = os.path.join(geometry_dir, "convolved", _CONVOLVED_SUBDIR[band],
-                        _CONVOLVED_FILENAME[band])
+    from sesnaimpute.sed_models import paths
+
+    geometry = os.path.basename(os.path.normpath(geometry_dir))
+    path = os.path.join(paths.path_for("yso_convolved", geometry=geometry), f"{band}.fits")
     with fits.open(path, memmap=True) as h:
         names = np.asarray(h[1].data["MODEL_NAME"]).astype(str)
         flux = np.asarray(h[1].data["TOTAL_FLUX"], dtype=np.float64)

@@ -30,9 +30,18 @@ FAMILIES = {
     "sed_models_pahc": "pahc",
     "sed_models_pahn": "pahn",
     "sed_models_yso": "yso",
+    # This package's own eleven-band convolution of the YSO release's raw
+    # flux.fits, one directory per RAW geometry (owner's ruling 2026-10-27:
+    # the release's own convolved/ files are no longer read by anything --
+    # see convolve_yso.py). A directory, not a file -- the band filename
+    # (<band>.fits) is appended by the caller, the same convention
+    # `sed_models_<key>` directories already use for flux.fits/parameters.fits/etc.
+    "yso_convolved": "yso_convolved/{geometry}",
 }
 
-# Every family is relative to the `[inputs] sed_models` area.
+# Every family is relative to the `[inputs] sed_models` area, `yso_convolved`
+# included (it is this package's own output, same area as every other
+# sed_models_* build product).
 FAMILIES_AREA = {name: "sed_models" for name in FAMILIES}
 
 FUTURE_FAMILIES = frozenset()

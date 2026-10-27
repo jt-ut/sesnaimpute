@@ -282,7 +282,7 @@ def build_band_response_weights(bands, lines):
 def write_convolved_band_fits(model_dir, band, model_names, total_flux_mjy, apertures_au,
                               filter_wavelength_um, total_flux_err_mjy=None,
                               convmeth=None, convmeth_note="", convmeth_error=None,
-                              model_name_format="30A"):
+                              model_name_format="30A", out_dir=None):
     """Write one convolved/{band}.fits in the project's model-directory
     convention -- THE single writer for that file.
 
@@ -314,7 +314,14 @@ def write_convolved_band_fits(model_dir, band, model_names, total_flux_mjy, aper
     library honestly (no stochastic noise) and is accepted by sedfitter --
     Robitaille's own YSO flux.fits carries millions of exact zeros. It is
     also never read by the fit: chi_squared() takes its errors from the
-    source, not the model."""
+    source, not the model.
+
+    `out_dir`, if given, is used VERBATIM as the output directory (the
+    file lands at `<out_dir>/<band>.fits`) instead of the usual
+    `<model_dir>/convolved/<band>.fits` -- for a caller whose family path
+    is not `<library root>/convolved/`, e.g. the YSO reconvolution's own
+    per-geometry `yso_convolved/<geometry>/` directory (`convolve_yso.py`).
+    `model_dir` is then unused. Every other caller is unaffected."""
     total_flux_mjy = np.atleast_1d(np.asarray(total_flux_mjy, dtype=np.float64))
     if total_flux_err_mjy is None:
         total_flux_err_mjy = np.zeros_like(total_flux_mjy)
@@ -343,9 +350,9 @@ def write_convolved_band_fits(model_dir, band, model_names, total_flux_mjy, aper
         fits.Column(name="APERTURE", format="D", unit="AU", array=apertures_au),
     ], name="APERTURES")
 
-    out_dir = os.path.join(model_dir, "convolved")
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{band}.fits")
+    write_dir = out_dir if out_dir is not None else os.path.join(model_dir, "convolved")
+    os.makedirs(write_dir, exist_ok=True)
+    out_path = os.path.join(write_dir, f"{band}.fits")
     fits.HDUList([primary, fluxes, apertures]).writeto(out_path, overwrite=True)
     return out_path
 
@@ -401,7 +408,7 @@ def write_convolved_band_fits_from_analytic(model_dir, lines, line_fluxes_by_mod
     return written
 
 
-def verify_convolved_band_fits(model_dir, bands, model_names):
+def verify_convolved_band_fits(model_dir, bands, model_names, out_dir=None, allow_nan=False):
     """Read convolved/{band}.fits back off disk and confirm each is
     structurally sound and consistent with the model list it claims to
     describe. Raises AssertionError on the first failure.
@@ -411,10 +418,21 @@ def verify_convolved_band_fits(model_dir, bands, model_names):
     construction, so checking them against that same analytic value would
     be circular and would trivially pass. What is worth checking after any
     write is that the files exist, carry the expected model count and
-    order, and hold finite fluxes. Returns {band: n_models}."""
+    order, and hold finite fluxes. Returns {band: n_models}.
+
+    `out_dir`, as in `write_convolved_band_fits`: read `<out_dir>/<band>.fits`
+    instead of `<model_dir>/convolved/<band>.fits`.
+
+    `allow_nan`: the YSO reconvolution stores an UNDEFINED (model,
+    aperture) cell as NaN, never 0 (owner's ruling 2026-10-27) -- every
+    other caller's flux is a sampled continuum or analytic line spectrum
+    with no such concept, so the default stays finite-only; only a caller
+    that passes `allow_nan=True` is allowed to ship NaN, and even then a
+    non-finite, non-NaN value (e.g. +-inf) still fails."""
     counts = {}
     for band in bands:
-        path = os.path.join(model_dir, "convolved", f"{band}.fits")
+        path = os.path.join(out_dir, f"{band}.fits") if out_dir is not None \
+            else os.path.join(model_dir, "convolved", f"{band}.fits")
         assert os.path.exists(path), f"{path} was not written"
         with fits.open(path) as hdul:
             header, data = hdul[0].header, hdul["CONVOLVED FLUXES"].data
@@ -426,7 +444,12 @@ def verify_convolved_band_fits(model_dir, bands, model_names):
             assert np.array_equal(written, np.asarray(model_names)), (
                 f"{band}: MODEL_NAME order does not match the model list")
             flux = data["TOTAL_FLUX"]
-            assert np.all(np.isfinite(flux)), f"{band}: non-finite TOTAL_FLUX"
+            if allow_nan:
+                assert np.all(np.isfinite(flux) | np.isnan(flux)), (
+                    f"{band}: TOTAL_FLUX has a value that is neither finite nor NaN "
+                    f"(e.g. +-inf) -- undefined cells must be NaN, nothing else")
+            else:
+                assert np.all(np.isfinite(flux)), f"{band}: non-finite TOTAL_FLUX"
             counts[band] = len(written)
     return counts
 
