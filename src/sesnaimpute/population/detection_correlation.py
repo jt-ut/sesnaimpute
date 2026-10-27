@@ -107,7 +107,8 @@ from sesnaimpute.bmstp import atlas
 from sesnaimpute.catalog import completeness as completeness_module
 from sesnaimpute.population import selection as selection_module
 
-BAND_KEYS = atlas.BAND_KEYS
+BAND_KEYS = definitions.SELECTION.bands
+_SEL = list(definitions.SELECTION_INDEX)
 IDX_K = BAND_KEYS.index("Ks")
 IDX_I1 = BAND_KEYS.index("I1")
 IDX_I2 = atlas.IDX_I2
@@ -175,7 +176,7 @@ def _sesna_outcomes(config, region, pix):
     with h5py.File(src_path, "r") as f:
         gl = np.asarray(f["GAL_L_DEG"][:])
         gb = np.asarray(f["GAL_B_DEG"][:])
-        org = np.asarray(f["ORIGIN_FNU"][:])
+        org = np.asarray(f["ORIGIN_FNU"][:])[:, _SEL]
     s_pix = hp.ang2pix(512, gl, gb, nest=True, lonlat=True)
     keep = np.isin(s_pix, pix)
     return gl[keep], gb[keep], org[keep]
@@ -276,7 +277,7 @@ def _population_bin_table(config, region, pix, good, bp, f_lim):
                 # Edenhofer cube's edge that reconstruction would silently
                 # drop the far-field reddening XI's own clip discards).
                 a = np.broadcast_to(a_starc[None, :], (p_.size, a_starc.size))
-                kap = selection_module.kappa_hybrid(config, selection_module.law_dense_weight(a))
+                kap = selection_module.kappa_selection(config, w=selection_module.law_dense_weight(a))
                 flux = f0c[None] * 10.0 ** (-0.4 * a[:, :, None] * kap)
                 p = np.empty_like(flux)
                 rows2 = np.ascontiguousarray(np.broadcast_to(p_[:, None], flux.shape[:2])).ravel()

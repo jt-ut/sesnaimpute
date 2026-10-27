@@ -90,7 +90,6 @@ from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.catalog import limits as limits_module
-from sesnaimpute.population.selection import MIN_BANDS
 from sesnaimpute.sky.download.trilegal import build as trilegal_download
 
 _STEM = "field-stars_trilegal_region"
@@ -110,7 +109,7 @@ TRILEGAL_COLUMNS = (
 
 #: TRILEGAL's own band columns, in `definitions.BANDS` order (2MASS J, H,
 #: Ks then IRAC I1-I4 then MIPS M1).
-BAND_KEYS = tuple(b.key for b in definitions.BANDS)
+BAND_KEYS = definitions.SELECTION.bands
 TRILEGAL_BAND_COLUMNS = ("J", "H", "Ks", "[3.6]", "[4.5]", "[5.8]", "[8.0]", "[24]")
 
 #: The atmosphere register's `MODEL_NAME` grammar: `kt<Teff_K>g<logg>z<[M/H]>`,
@@ -130,7 +129,7 @@ SCALE_MH = 0.5
 
 #: SESNA's own catalogue rule (SPEC_PRIORS.md section 1.3): at least this
 #: many of the eight bands must clear a source's detection limit.
-RETENTION_MIN_BANDS = MIN_BANDS
+RETENTION_MIN_BANDS = definitions.SELECTION.min_bands
 
 #: TRILEGAL's distance-modulus output step, 0.1 mag (Girardi et al. 2005,
 #: A&A 436, 895): the service places every synthetic star on this fixed

@@ -230,7 +230,7 @@ def _cell_ks_bin_mask(ks_edges, cell_ks_edges=twomass_counts_module.CELL_KS_EDGE
 
 #: The project's own eight census bands, in the order every register and
 #: `catalog.limits` share (module docstring, "Brightness units").
-BAND_KEYS = tuple(b.key for b in definitions.BANDS)
+BAND_KEYS = definitions.SELECTION.bands
 IDX_I4 = BAND_KEYS.index("I4")
 IDX_JHK = tuple(BAND_KEYS.index(k) for k in ("J", "H", "Ks"))
 
@@ -731,7 +731,7 @@ def pahc_contamination_weight(fnu_8um, a_i, limit_grid_mjy, config, curve):
     `q = F_lim,8 / (F_i(8um)` dimmed by the star's own tile extinction`)`,
     `P(q)` read off the measured curve (`population.pahc_curve.read`)."""
     w_dense = selection.law_dense_weight(a_i)
-    kappa_8 = selection.kappa_hybrid(config, w_dense)[:, IDX_I4]
+    kappa_8 = selection.kappa_selection(config, w=w_dense)[:, IDX_I4]
     dimmed_flux_8 = fnu_8um * 10.0 ** (-0.4 * a_i * kappa_8)
     q = limit_grid_mjy[None, :] / dimmed_flux_8[:, None]
     return curve(np.log10(q))
