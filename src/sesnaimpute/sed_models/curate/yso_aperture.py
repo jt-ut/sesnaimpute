@@ -374,6 +374,8 @@ def scan_geometries(yso_root, geometries, buffer_frac=D_BUFFER_FRAC, verbose=Tru
               f"gate's strictness. Margins: "
               f"{ {b: round(m, 4) for b, m in sorted(tight.items())} }", flush=True)
 
+    nearest_band = min(brackets, key=lambda b: brackets[b]["fractional_margin_to_boundary"])
+    nearest_margin = brackets[nearest_band]["fractional_margin_to_boundary"]
     run_info = {
         "d_lo_region_kpc": d_lo,
         "d_hi_region_kpc": d_hi,
@@ -393,6 +395,10 @@ def scan_geometries(yso_root, geometries, buffer_frac=D_BUFFER_FRAC, verbose=Tru
                    "grid first resolves 24 um at 20,000 AU and beyond) have no prediction at a 300-1,500 AU "
                    "aperture. A sample filled from the model's own curve of growth within two grid steps, or "
                    "beyond 30 um where the model's 24 um is defined at that aperture, counts as resolved "
-                   "(Richardson et al. 2024, ApJ 961, 2, sec. III.7).",
+                   "(Richardson et al. 2024, ApJ 961, 2, sec. III.7). "
+                   f"The binding distance is D_NEAR = {d_near:.4f} kpc (the nearest region's distance less "
+                   f"{buffer_frac:.0%}); the nearest aperture-bracket boundary is {nearest_band}'s, "
+                   f"{nearest_margin:.1%} away, so a revision of the nearest region's distance by more "
+                   "than that changes which models pass.",
     }
     return d_min, run_info
