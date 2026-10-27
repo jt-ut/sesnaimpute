@@ -31,6 +31,20 @@ the map's 90%-completeness flux at the source's own pixel for every
 source in the five Spitzer bands (detected or not), `NaN` where off-map;
 `catalog.limits.completeness` reads the map's own curves directly for
 every consumer's non-detection term, not this column.
+
+This table is the SED: eleven bands in `definitions.BANDS` order, the eight
+SESNA bands from the delivery and the three Herschel PACS bands (P70, P100,
+P160) from the PACS photometry input
+`sky/derived/pacs/photometry_pacs_source__<Region>.hdf5`, taken as written
+(total flux, the 0.99 upper-bound sentinel and ORIGIN codes 1, 2, 90, 91 are
+the PACS stages' own). Catalogue INCLUSION is a separate rule,
+`definitions.SELECTION`, applied downstream, never here. The PACS input is
+joined row for row on NAME after this stage's "SESNA "-strip and
+duplicate-drop; a mismatch is an error naming the first differing row. A
+region with no PACS input file is an error, not a fallback: the PACS stages
+write an all-91 file for every region, so the file always exists.
+`read_positions` and `n_sources` give the PACS stages this stage's rows
+without reading this product (which depends on them).
 """
 
 import functools
@@ -157,8 +171,42 @@ def _raw_catalog_path(config, region):
     return os.path.join(config.inputs["raw_catalogs"], f"{region}_catalog_ipac1.txt")
 
 
+_DELIVERY_BANDS = tuple(b for b in definitions.BANDS if b.survey != "PACS")
+_PACS_BANDS = tuple(b for b in definitions.BANDS if b.survey == "PACS")
+
+
+def _strip_and_dedup(df):
+    """The delivery's rows as this product has them: duplicate SESNA_NAME rows
+    dropped (first kept), then the names with the "SESNA " prefix stripped."""
+    dup = df["SESNA_NAME"].duplicated()
+    if dup.any():
+        df = df[~dup]
+    name = df["SESNA_NAME"].str.replace("SESNA ", "", regex=False).str.strip().to_numpy()
+    return df, name
+
+
+def read_positions(config, region):
+    """Returns (name, ra_deg, dec_deg) for the region's curated rows, in the
+    curated product's own row order: the delivery read at these three
+    columns only, through the same fixed-width reader and the same
+    "SESNA "-strip and duplicate-drop this stage applies."""
+    df, _ = _read_raw_delivery(_raw_catalog_path(config, region), ["SESNA_NAME", "ra", "dec"],
+                               n_jobs=config.n_jobs)
+    df, name = _strip_and_dedup(df)
+    return name, df["ra"].to_numpy(dtype=np.float64), df["dec"].to_numpy(dtype=np.float64)
+
+
+def n_sources(config, region):
+    """The number of rows of the region's curated product."""
+    return len(read_positions(config, region)[0])
+
+
+def _pacs_path(config, region):
+    return config_module.product_path(config, "sky/derived", "pacs", "photometry", "source", region=region)
+
+
 def _assemble_region(config, region):
-    bands = definitions.BANDS
+    bands = _DELIVERY_BANDS
     select_columns = ["SESNA_NAME", "ra", "dec", "L", "B", "CLASS", "AK"]
     for b in bands:
         if b.survey == "2MASS":
@@ -171,12 +219,9 @@ def _assemble_region(config, region):
 
     df, navals = _read_raw_delivery(_raw_catalog_path(config, region), select_columns, n_jobs=config.n_jobs)
 
-    dup = df["SESNA_NAME"].duplicated()
-    if dup.any():
-        df = df[~dup]
+    df, name = _strip_and_dedup(df)
 
     n = len(df)
-    name = df["SESNA_NAME"].str.replace("SESNA ", "", regex=False).str.strip().to_numpy()
     ra_deg = df["ra"].to_numpy(dtype=np.float64)
     dec_deg = df["dec"].to_numpy(dtype=np.float64)
     gal_l_deg = df["L"].to_numpy(dtype=np.float64)
@@ -184,7 +229,7 @@ def _assemble_region(config, region):
     class_ = df["CLASS"].to_numpy()
     ak_sesna = df["AK"].to_numpy(dtype=np.float64)
 
-    n_bands = len(bands)
+    n_bands = len(definitions.BANDS)
     fnu = np.empty((n, n_bands), dtype=np.float64)
     sigma_fnu = np.empty((n, n_bands), dtype=np.float64)
     dcomp90 = np.empty((n, n_bands), dtype=np.float64)
@@ -249,6 +294,32 @@ def _assemble_region(config, region):
 
         fnu[:, j] = fnu_j
         sigma_fnu[:, j] = sigma_j
+
+    # The three PACS bands, taken as the PACS stages wrote them.
+    pacs_path = _pacs_path(config, region)
+    if not os.path.exists(pacs_path):
+        raise FileNotFoundError(
+            f"catalog.curated: PACS photometry input missing for region {region!r} at {pacs_path!r} "
+            f"-- the PACS stages write one (all-91 where nothing is covered) for every region")
+    keys = [x.key for x in definitions.BANDS]
+    with h5py.File(pacs_path, "r") as f:
+        pacs_name = np.asarray(f["NAME"][()]).astype(str)
+        cur_name = name.astype(str)
+        if len(pacs_name) != n or not np.array_equal(pacs_name, cur_name):
+            k = min(len(pacs_name), n)
+            bad = np.nonzero(pacs_name[:k] != cur_name[:k])[0]
+            row = int(bad[0]) if len(bad) else k
+            raise ValueError(
+                f"catalog.curated: PACS NAME does not match the delivery for {region!r}: "
+                f"{len(pacs_name)} PACS rows vs {n} curated rows; first differing row {row}: "
+                f"PACS {pacs_name[row] if row < len(pacs_name) else None!r} vs "
+                f"curated {cur_name[row] if row < n else None!r}")
+        for b in _PACS_BANDS:
+            j = keys.index(b.key)
+            fnu[:, j] = f[f"FNU_{b.key}_MJY"][()]
+            sigma_fnu[:, j] = f[f"SIGMA_{b.key}_MJY"][()]
+            origin[:, j] = f[f"ORIGIN_{b.key}"][()]
+            dcomp90[:, j] = np.nan
 
     return {
         "n": n, "name": name, "ra_deg": ra_deg, "dec_deg": dec_deg,
