@@ -101,12 +101,22 @@ CHUNK_MODELS = 5000
 #: brightness, 3 the ceiling against a noisy pair (amendment, 2026-10-27).
 SLOPE_MIN, SLOPE_MAX = 0.0, 3.0
 
+#: Fill reach (amendment 2, 2026-10-27): a fill from the nearest defined
+#: aperture more than MAX_FILL_STEPS grid steps out is validated only for
+#: far-infrared samples (> FAR_IR_UM) at an aperture where the model's own
+#: 24 um sample is defined (the far-IR-faint case, 1-1.5 dex below 24 um).
+MAX_FILL_STEPS = 2
+FAR_IR_UM = 30.0
+ANCHOR_UM = 24.0
+
 FILL_RULE_SENTENCE = (
     "A model's aperture that its radiative transfer could not resolve at one wavelength, "
     "but resolved at others, is filled at that wavelength by extending the model's own "
     "curve of growth inward as a power law through its two nearest defined larger apertures "
     "(slope limited to 0 to 3), as in Richardson et al. 2024, ApJ 961, 2, sec. III.7, "
-    "without the original release's brightening; apertures undefined at every wavelength "
+    "without the original release's brightening; the nearest defined aperture must lie within "
+    "two grid steps, except beyond 30 um where the model's 24 um flux is defined at that "
+    "aperture; apertures undefined at every wavelength "
     "stay undefined, and a band is NaN only if a sample it covers is still undefined.")
 
 
@@ -114,7 +124,7 @@ FILL_RULE_SENTENCE = (
 # PART 1 -- THE FILL AND THE CONVOLUTION (YSO)
 # ==========================================================================
 
-def fill_apertures(v, log_ap):
+def fill_apertures(v, log_ap, wav_um):
     """Fill, IN PLACE, the undefined cells of `v` (n, n_ap, n_wav), float64,
     that lie above each model's all-wavelength-undefined PREFIX, by inward
     power-law extrapolation of the model's own curve of growth at that
@@ -125,7 +135,10 @@ def fill_apertures(v, log_ap):
     the two nearest defined apertures above it j1 < j2:
         s = log10(F(j2)/F(j1)) / log10(a_j2/a_j1),  clamped to [0, 3]
         log10 F(k) = log10 F(j1) - s * log10(a_j1 / a_k)
-    Fewer than two defined above -> the cell stays undefined. The prefix
+    Fewer than two defined above -> the cell stays undefined. Reach
+    (amendment 2): the fill needs j1 - k <= MAX_FILL_STEPS, except for
+    samples beyond FAR_IR_UM where the raw sample nearest ANCHOR_UM is
+    finite at aperture k; otherwise the cell stays undefined. The prefix
     is the leading run of apertures with NO finite sample at any
     wavelength; it is never filled.
 
@@ -147,12 +160,17 @@ def fill_apertures(v, log_ap):
     j1 = np.zeros((n, n_wav), dtype=np.int16)
     have1 = np.zeros((n, n_wav), dtype=bool)
     have2 = np.zeros((n, n_wav), dtype=bool)
+    wav_um = np.asarray(wav_um, dtype=float)
+    far_ir = (wav_um > FAR_IR_UM)[None, :]
+    i_anchor = int(np.argmin(np.abs(wav_um - ANCHOR_UM)))
     for k in range(n_ap - 1, -1, -1):
         vk = v[:, k, :]
         defined = np.isfinite(vk) & (vk > 0)
         undef = ~np.isfinite(vk) & ~prefix[:, k][:, None]
-        tgt = undef & have2
-        left[:, k, :] = undef & ~have2
+        anchor_defined = np.isfinite(vk[:, i_anchor])[:, None]          # raw, before any fill at k
+        in_reach = ((j1 - k) <= MAX_FILL_STEPS) | (far_ir & anchor_defined)
+        tgt = undef & have2 & in_reach
+        left[:, k, :] = undef & ~tgt
         if tgt.any():
             with np.errstate(invalid="ignore", divide="ignore"):
                 s = np.clip((l2 - l1) / (a2 - a1), SLOPE_MIN, SLOPE_MAX)
@@ -203,6 +221,7 @@ def convolve_cube(flux_fits, filters, chunk=CHUNK_MODELS, limit=None):
     ap_au = np.asarray(cube.apertures.to(u.au).value
                        if hasattr(cube.apertures, "unit") else cube.apertures, dtype=float)
     log_ap = np.log10(ap_au)
+    wav_um = np.asarray(cube.wav.to(u.micron).value if hasattr(cube.wav, "unit") else cube.wav, dtype=float)
     n, n_ap = cube.n_models, cube.n_ap
     if limit is not None:
         n = min(n, limit)
@@ -219,7 +238,7 @@ def convolve_cube(flux_fits, filters, chunk=CHUNK_MODELS, limit=None):
         raw_nonfinite = (~np.isfinite(v)).reshape(m * n_ap, -1).astype(np.float64)
         fully_finite[lo:hi] = ((raw_nonfinite @ inband) == 0).reshape(m, n_ap, nb)
 
-        filled, steps, left = fill_apertures(v, log_ap)
+        filled, steps, left = fill_apertures(v, log_ap, wav_um)
         stats["filled_1"] += int((steps == 1).sum())
         stats["filled_2"] += int((steps == 2).sum())
         stats["filled_3plus"] += int((steps >= 3).sum())
