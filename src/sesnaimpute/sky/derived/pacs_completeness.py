@@ -306,15 +306,15 @@ def cell_centres_arcsec(grid, ids):
     return np.c_[(x0 + x1) / 2 * (pacs_fit.CELL_ARCSEC / grid.step_x), (y0 + y1) / 2 * (pacs_fit.CELL_ARCSEC / grid.step_y)]
 
 
-def pool_matrices(centres_arcsec):
-    """The pooling matrices for radius POOL_ARCSEC x each of POOL_WIDENINGS: sparse (n, n) 0/1, entry (i, j) 1 where
+def pool_matrices(centres_arcsec, widenings=POOL_WIDENINGS):
+    """The pooling matrices for radius POOL_ARCSEC x each of `widenings`: sparse (n, n) 0/1, entry (i, j) 1 where
     cell j's centre lies within the radius of cell i's (a cell pools with itself). No noise window: the counts are
     pooled in S/N, where cells of different noise share one curve. Cells of different maps must be given far-apart
     centres."""
     n = len(centres_arcsec)
     tree = cKDTree(centres_arcsec)
     out = []
-    for k in POOL_WIDENINGS:
+    for k in widenings:
         pairs = tree.query_pairs(k * POOL_ARCSEC, output_type="ndarray").reshape(-1, 2)
         r = np.concatenate([np.arange(n), pairs[:, 0], pairs[:, 1]])
         c = np.concatenate([np.arange(n), pairs[:, 1], pairs[:, 0]])
@@ -831,31 +831,73 @@ def _real_check(injector, flux_mjy, half):
     return (after.flux[ok] - before.flux[ok]) / flux_mjy
 
 
-def _inject_tile(piece, config, records, flux_grid, cells=None):
-    """Everything the injection measures on one map tile: `piece = (tile index, inputs)` (see `Injector`).
+#: the injection work of a map is cut into pieces of its (S/N plane, half) pairs, about INJECTION_PIECE_ROWS rows x
+#: all pairs of work each (a map of that many rows is one piece; the largest maps one pair per piece), so a large
+#: mosaic spreads over every worker; every pair keeps its own seeds, so the injections do not depend on the cut
+INJECTION_PIECE_ROWS = 512
+
+_INJECTION_STATE = {}
+
+
+def _injection_state(config, record, inp, t):
+    """The process-local Injector of map `t`, its pooling matrix (POOL_ARCSEC) over all rows and the first round's
+    expected pooled count of an interior cell: built on the first piece of the map a worker takes, kept (one map at
+    a time) for the map's further pieces."""
+    key = record.path
+    if key not in _INJECTION_STATE:
+        _INJECTION_STATE.clear()
+        tile = pacs_fit.cached_tile(config, record)
+        inj = Injector(tile, inp, t + 1)
+        Ws = pool_matrices(cell_centres_arcsec(tile.grid, inj.ids), widenings=POOL_WIDENINGS[:1])
+        # injections one batch puts into the pool of an interior cell: density x the pool's cell count
+        interior = (inj.cell_px * inj.valid_fraction / (SEPARATION_AREAS * inj.separation_px ** 2)) * float(np.median(np.diff(Ws[0].indptr)))
+        _INJECTION_STATE[key] = (inj, Ws, interior)
+    return _INJECTION_STATE[key]
+
+
+def _inject_pairs(piece, config, records):
+    """The injections of one piece: `piece = (tile index, inputs, [(S/N plane, half), ...], real check?)` (see
+    `Injector`, `injection_pieces`): for each pair, the batches over the map's cells (`_inject_half`) and around
+    its detected sources (`_inject_blend`); on the piece flagged for it, the real-map self-check. Returns
+    `(tile index, dict)`."""
+    t, inp, pairs, do_check = piece
+    record = records[t]
+    inj, Ws, interior = _injection_state(config, record, inp, t)
+    n_row = inj.ids.size
+    snr = snr_grid()
+    check = None
+    if do_check:
+        # the self-check on the real map: F = 10 x the map's median 5-sigma flux; the mean ratio within 1 % in both halves
+        f_check = 10.0 * pacs_fit.DETECTION_SNR * float(np.median(inj.sigma[inj.ids]))
+        check = []
+        for half in (0, 1):
+            r = _real_check(inj, f_check, half)
+            check.append(float(r.mean()) if r.size else np.nan)
+            print("  self-check (real map) %s %s half %d: %d empty positions, F = %.0f mJy, injected-minus-before / F: mean %.4f, "
+                  "16/50/84 %%: %.4f %.4f %.4f" % (record.band, record.map_id, half, r.size, f_check, r.mean(),
+                                                    *np.percentile(r, [16, 50, 84])), flush=True)
+            if r.size == 0 or abs(r.mean() - 1) > REAL_CHECK_TOLERANCE:
+                raise ValueError("%s: on the real map %s the mean recovered flux is %.4f of the injected flux (bar: within 1 %%)"
+                                 % (record.band, record.map_id, r.mean() if r.size else np.nan))
+    done = []
+    for p, half in pairs:
+        r, sec, cnt = _inject_half(inj, Ws, p, snr[p], half, n_row, interior)
+        b, bsec = _inject_blend(inj, p, snr[p], half)
+        done.append((p, half, r, sec, cnt, b, bsec))
+    return t, dict(pairs=done, check=check, n_detected=inj.n_detected)
+
+
+def _finish_tile(piece, records, flux_grid):
+    """A map's product from its pieces' injections: `piece = (tile index, inputs, [the pieces' outputs])`, taken in
+    (S/N plane, half) order as one process makes them, pooled (`pool_product`, `cell_errors`) over the map's rows.
     Returns `(tile index, dict)`: the pooled arrays of the tile's rows for the product (the build half), the
     held-out half's injections, and the statistics the parent prints."""
-    t, inp = piece
-    tile = pacs_fit.cached_tile(config, records[t])
-    inj = Injector(tile, inp, t + 1)
-    n_row = inj.ids.size
-    sigma_rows = inj.sigma[inj.ids]
-    Ws = pool_matrices(cell_centres_arcsec(tile.grid, inj.ids))
+    t, inp, parts = piece
+    ids = np.asarray(inp["ids"], np.int64)
+    n_row = ids.size
+    sigma_rows = np.asarray(inp["sigma"], np.float64)
+    Ws = pool_matrices(cell_centres_arcsec(_tile_geometry(records[t])[0], ids))
     snr = snr_grid()
-    # the self-check on the real map: F = 10 x the map's median 5-sigma flux; the mean ratio within 1 % in both halves
-    f_check = 10.0 * pacs_fit.DETECTION_SNR * float(np.median(inj.sigma[inj.ids]))
-    check = []
-    for half in (0, 1):
-        r = _real_check(inj, f_check, half)
-        check.append(r)
-        print("  self-check (real map) %s %s half %d: %d empty positions, F = %.0f mJy, injected-minus-before / F: mean %.4f, "
-              "16/50/84 %%: %.4f %.4f %.4f" % (tile.record.band, records[t].map_id, half, r.size, f_check, r.mean(),
-                                                *np.percentile(r, [16, 50, 84])), flush=True)
-        if r.size == 0 or abs(r.mean() - 1) > REAL_CHECK_TOLERANCE:
-            raise ValueError("%s: on the real map %s the mean recovered flux is %.4f of the injected flux (bar: within 1 %%)"
-                             % (tile.record.band, records[t].map_id, r.mean() if r.size else np.nan))
-    # injections one batch puts into the pool of an interior cell: density x the pool's cell count
-    interior = (inj.cell_px * inj.valid_fraction / (SEPARATION_AREAS * inj.separation_px ** 2)) * float(np.median(np.diff(Ws[0].indptr)))
     keys = ("row", "plane", "path", "recovered", "separable", "dflux", "flux", "sigma_formal")
     bkeys = ("row", "plane", "recovered", "separable", "dflux", "flux", "sigma_formal")
     stores = ({k: [] for k in keys}, {k: [] for k in keys})
@@ -864,9 +906,11 @@ def _inject_tile(piece, config, records, flux_grid, cells=None):
     n_by_path = dict(aperture=0, group=0)
     blend_seconds = 0.0
     blend_plane = np.zeros((2, snr.size, 2))
+    by_pair = {(p, h): (r, sec, cnt, b, bsec) for part in parts for p, h, r, sec, cnt, b, bsec in part["pairs"]}
+    assert len(by_pair) == 2 * snr.size
     for p in range(snr.size):
         for half in (0, 1):
-            r, sec, cnt = _inject_half(inj, Ws, p, snr[p], half, n_row, interior)
+            r, sec, cnt, b, bsec = by_pair[(p, half)]
             for k in ("row", "path", "recovered", "separable", "dflux", "flux", "sigma_formal"):
                 stores[half][k].append(r[k])
             stores[half]["plane"].append(np.full(r["row"].size, p, np.int8))
@@ -874,12 +918,11 @@ def _inject_tile(piece, config, records, flux_grid, cells=None):
                 seconds[k] += sec[k]
             for k in n_by_path:
                 n_by_path[k] += cnt[k]
-            b, bsec = _inject_blend(inj, p, snr[p], half)
             for k in ("row", "recovered", "separable", "dflux", "flux", "sigma_formal"):
                 bstores[half][k].append(b[k])
             bstores[half]["plane"].append(np.full(b["row"].size, p, np.int8))
             blend_seconds += bsec
-            blend_plane[half, p] = (b["row"].size, b["recovered"].sum())
+            blend_plane[half, p] += (b["row"].size, b["recovered"].sum())
     build, held = ({k: np.concatenate(v) for k, v in s.items()} for s in stores)
     blend_build, blend_held = ({k: np.concatenate(v) for k, v in s.items()} for s in bstores)
     out = pool_product(Ws, build, flux_grid, sigma_rows, n_row)
@@ -893,15 +936,38 @@ def _inject_tile(piece, config, records, flux_grid, cells=None):
     # the faintest S/N plane of the build half: the rule firing on a source of almost no flux (CONTAMINATION)
     floor = build["plane"] == 0
     out["floor"] = dict(row=build["row"][floor], recovered=build["recovered"][floor])
-    out["stats"] = dict(map_id=records[t].map_id, n_row=n_row, n_detected=inj.n_detected,
+    check = next(part["check"] for part in parts if part["check"] is not None)
+    out["stats"] = dict(map_id=records[t].map_id, n_row=n_row, n_detected=parts[0]["n_detected"],
                         n_build=int(build["row"].size), n_held=int(held["row"].size),
                         n_source=int(inp["src_ra"].size),
                         min_pool=float(tot.min()), median_pool=float(np.median(tot)),
                         short=float((tot < MIN_INJECTIONS).mean()), seconds=seconds, n_by_path=n_by_path,
                         blend_seconds=blend_seconds, blend_plane=blend_plane,
                         blend_built=int(blend_build["row"].size), blend_held=int(blend_held["row"].size),
-                        check=[float(c.mean()) for c in check])
+                        check=check)
     return t, out
+
+
+def injection_pieces(records, inputs):
+    """The injection pieces of a band, map by map from the largest (`(tile index, inputs, pairs, real check?)`, the
+    check on each map's first piece), and each map's piece count."""
+    pairs = [(p, half) for p in range(snr_grid().size) for half in (0, 1)]
+    todo, counts = [], {}
+    for t, inp in sorted(inputs.items(), key=lambda kv: -kv[1]["ids"].size):
+        k = int(min(len(pairs), max(1, np.ceil(np.asarray(inp["ids"]).size / INJECTION_PIECE_ROWS))))
+        chunks = [c for c in np.array_split(np.arange(len(pairs)), k) if c.size]
+        counts[t] = len(chunks)
+        todo += [(t, inp, [pairs[i] for i in c], j == 0) for j, c in enumerate(chunks)]
+    return todo, counts
+
+
+def _inject_tile(piece, config, records, flux_grid, cells=None):
+    """Everything the injection measures on one map tile, in this process: `piece = (tile index, inputs)`.
+    Returns `(tile index, dict)` as `_finish_tile`."""
+    t, inp = piece
+    todo, _ = injection_pieces(records, {t: inp})
+    parts = [_inject_pairs(p, config, records)[1] for p in todo]
+    return _finish_tile((t, inp, parts), records, flux_grid)
 
 
 # ----------------------------------------------------------------------------
@@ -1050,11 +1116,19 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
     cell_offset = cols["offset"].astype(np.float32)
     cell_offset_psf = cols["offset_psf"].astype(np.float32)
 
-    # artificial sources: one piece per map tile, the biggest first
+    # artificial sources: each map cut into pieces of its (S/N plane, half) pairs, map by map from the biggest;
+    # then each map pooled whole
     inputs = tile_inputs(cell_map, cell_id, cell_sigma, cell_offset, cell_offset_psf, src_row, shifts, ra, dec)
-    todo = sorted(inputs.items(), key=lambda kv: -kv[1]["ids"].size)
-    injected = pieces_module.run(functools.partial(_inject_tile, config=config, records=records, flux_grid=flux_grid),
-                                 todo, n_jobs, stage=stage, unit="maps (artificial sources)")
+    todo, counts = injection_pieces(records, inputs)
+    done = pieces_module.run(functools.partial(_inject_pairs, config=config, records=records),
+                             todo, n_jobs, stage=stage, unit="map pieces (artificial sources)")
+    by_tile = {}
+    for t, part in done:
+        by_tile.setdefault(t, []).append(part)
+    assert all(len(by_tile[t]) == counts[t] for t in counts)
+    injected = pieces_module.run(functools.partial(_finish_tile, records=records, flux_grid=flux_grid),
+                                 [(t, inputs[t], by_tile[t]) for t in counts], n_jobs, stage=stage,
+                                 unit="maps (pooling)")
     curve = np.zeros((n_row, n_plane), np.uint16)
     n_pos = np.zeros(n_row, np.int32)
     flux90_ = np.full(n_row, np.nan, np.float32)
