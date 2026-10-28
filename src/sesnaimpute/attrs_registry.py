@@ -3993,10 +3993,22 @@ _PHOTOMETRY_PACS_READINGS = {
         "a neighbour within one beam of a detected source and its flux is the total flux of a joint point-source "
         "fit. The cell's empty-sky offset of the same measurement (CELL_OFFSET for the aperture, CELL_OFFSET_PSF for "
         "the joint fit, in the completeness product: the typical flux that measurement returns at empty positions of "
-        "the 30-arcsecond cell, from sky structure it does not remove) is subtracted. It can be negative or small when nothing is seen and is NaN where the band does not "
+        "the 30-arcsecond cell, from sky structure it does not remove) is subtracted; the value for this source is CELL_OFFSET_{b}_MJY, and adding it back gives the convention of HOPS and eHOPS, which subtract no such offset. It can be negative or small when nothing is seen and is NaN where the band does not "
         "cover the source. "
         "Where ORIGIN is 2 it is an upper bound: the combined flux of the blended group plus five times its "
         "uncertainty."),
+    "CELL_OFFSET_{b}_MJY": ("mJy",
+        "The empty-sky offset subtracted from FNU_{b}_MJY for this source: the median flux the same measurement "
+        "returns at random empty positions of the source's 30-arcsecond cell (sky structure the background does "
+        "not remove; CELL_OFFSET_{b}_MJY of the completeness product for the aperture, METHOD 1, and "
+        "CELL_OFFSET_PSF_{b}_MJY for the joint fit, METHOD 2). The same offset enters the detection rule and the "
+        "completeness curve, and artificial sources show the flux minus it is unbiased. FNU_{b}_MJY plus this "
+        "value is the flux on the convention of catalogues that subtract no such offset, as HOPS and eHOPS do; "
+        "in bright cloud it is several per cent of a bright source's flux. A source sits on structure, so the "
+        "emission under it that is not the source is, if anything, above its cell's typical level: the "
+        "cell's offset is the smallest correction the data justify, and what remains is emission local to the "
+        "source (at 70 micron, its warm envelope). NaN where no flux is reported or FNU_{b}_MJY is an upper "
+        "bound (ORIGIN 2)."),
     "SIGMA_ANNULUS_{b}_MJY": ("mJy",
         "eHOPS's own per-source uncertainty statistic: the scatter of the sky-annulus pixels times the square root of "
         "the aperture area, divided by the aperture correction. Kept for comparison with their tables; detection uses "

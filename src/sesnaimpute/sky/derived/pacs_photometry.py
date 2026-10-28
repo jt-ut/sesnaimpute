@@ -267,7 +267,11 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
         sigma[det2] = formal[det2] * interpolate_bins(scatter_blend[det2], flux[det2] / sigma_cell[det2])
         n_nan += int(np.isnan(sigma[det2]).sum())
 
-    columns = dict(FNU=flux, SIGMA=sigma, ORIGIN=origin, LOCAL_RMS=sigma_cell.astype(np.float32),
+    # the offset subtracted from each reported flux (adding it back gives the HOPS/eHOPS convention)
+    subtracted = np.full(flux.size, np.nan)
+    subtracted[m1] = offset[m1]
+    subtracted[m2] = offset_psf[m2]
+    columns = dict(FNU=flux, SIGMA=sigma, ORIGIN=origin, LOCAL_RMS=sigma_cell.astype(np.float32), CELL_OFFSET=subtracted,
                    SIGMA_ANNULUS=np.asarray(sigma_annulus, np.float32), METHOD=method,
                    N_BLEND=n_blend, BLEND_GROUP=group_id, EXTENDED=extended)
     # a source with no usable fit keeps the cell noise only where a cell exists
@@ -289,11 +293,11 @@ def _runs(rows):
     return [(int(rows[a]), int(rows[b - 1]) + 1, int(a)) for a, b in zip(starts, stops)]
 
 
-_DTYPES = dict(FNU=np.float64, SIGMA=np.float64, ORIGIN=np.int8, LOCAL_RMS=np.float32,
+_DTYPES = dict(FNU=np.float64, SIGMA=np.float64, CELL_OFFSET=np.float64, ORIGIN=np.int8, LOCAL_RMS=np.float32,
                N_BLEND=np.int16, BLEND_GROUP=np.int32, EXTENDED=bool, SIGMA_ANNULUS=np.float32, METHOD=np.int8)
-_FILL = dict(FNU=np.nan, SIGMA=np.nan, ORIGIN=ORIGIN_NOT_COVERED, LOCAL_RMS=np.nan,
+_FILL = dict(FNU=np.nan, SIGMA=np.nan, CELL_OFFSET=np.nan, ORIGIN=ORIGIN_NOT_COVERED, LOCAL_RMS=np.nan,
              N_BLEND=0, BLEND_GROUP=-1, EXTENDED=False, SIGMA_ANNULUS=np.nan, METHOD=0)
-_NAMES = dict(FNU="FNU_{b}_MJY", SIGMA="SIGMA_{b}_MJY", ORIGIN="ORIGIN_{b}", LOCAL_RMS="LOCAL_RMS_{b}_MJY",
+_NAMES = dict(FNU="FNU_{b}_MJY", SIGMA="SIGMA_{b}_MJY", CELL_OFFSET="CELL_OFFSET_{b}_MJY", ORIGIN="ORIGIN_{b}", LOCAL_RMS="LOCAL_RMS_{b}_MJY",
               N_BLEND="N_BLEND_{b}", BLEND_GROUP="BLEND_GROUP_{b}", EXTENDED="EXTENDED_{b}",
               SIGMA_ANNULUS="SIGMA_ANNULUS_{b}_MJY", METHOD="METHOD_{b}")
 
@@ -511,10 +515,13 @@ def _region_positions(config, region):
 
 def _c4_ratio(config, region, path):
     """Median (our 70 micron flux / HOPS's) over the HOPS targets of at least C4_MIN_F70_MJY that the product
-    at `path` detects (ORIGIN 1), and how many."""
+    at `path` detects (ORIGIN 1), and how many. The flux is put on HOPS's convention (no empty-sky offset
+    subtracted): FNU plus the product's CELL_OFFSET where it stores one (an earlier product subtracted none)."""
     h, row, f70 = _match_hops(config, region)
     with h5py.File(path, "r") as f:
         flux, origin = f["FNU_P70_MJY"][:][row], f["ORIGIN_P70"][:][row]
+        if "CELL_OFFSET_P70_MJY" in f:
+            flux = flux + f["CELL_OFFSET_P70_MJY"][:][row]
     use = (f70[h] >= C4_MIN_F70_MJY) & (origin == ORIGIN_DETECTED) & np.isfinite(flux)
     return float(np.median(flux[use] / f70[h][use])) if use.any() else float("nan"), int(use.sum()), int(((f70[h] >= C4_MIN_F70_MJY)).sum())
 
@@ -528,11 +535,12 @@ def acceptance(config, region, reference_product=None):
     source's cell and their flux, with binomial errors. Nothing is written."""
     path = product_path(config, "sky/derived", "pacs", "photometry", "source", region=region)
     ratio, n, n_all = _c4_ratio(config, region, path)
-    print("C4 %s: median ours / HOPS at 70 micron, HOPS targets >= %g mJy detected by us: %.4f (%d of %d targets)"
+    print("C4 %s: median (ours + CELL_OFFSET) / HOPS at 70 micron (HOPS's convention), HOPS targets >= %g mJy detected by us: %.4f (%d of %d targets)"
           % (region, C4_MIN_F70_MJY, ratio, n, n_all))
     if reference_product is not None:
         old, n_old, _ = _c4_ratio(config, region, reference_product)
-        print("   the reference product: %.4f (%d targets); difference %+.2f %%" % (old, n_old, 100 * (ratio / old - 1)))
+        print("   the reference product: %.4f (%d targets); difference %+.2f %% (bar: within 2 %%: %s)"
+              % (old, n_old, 100 * (ratio / old - 1), "pass" if abs(ratio / old - 1) <= 0.02 else "FAIL"))
     h, row, f70 = _match_hops(config, region)
     comp = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
     with h5py.File(path, "r") as f:
