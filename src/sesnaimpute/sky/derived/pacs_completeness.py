@@ -338,15 +338,17 @@ def pooled_counts(Ws, row, plane, recovered, n_row, n_plane):
 
 
 def _pooled_median_scatter_one(W, row, value, n_row, min_n):
-    out_med = np.full(n_row, np.nan)
-    out_sc = np.full(n_row, np.nan)
+    """The pooled median and scatter (`pooled_median_scatter`) of each row of `W` (m rows over the n_row cells)."""
+    n_out = W.shape[0]
+    out_med = np.full(n_out, np.nan)
+    out_sc = np.full(n_out, np.nan)
     if row.size == 0:
         return out_med, out_sc
     order = np.argsort(row, kind="stable")
     r, v = row[order], value[order].astype(np.float64)
     count = np.bincount(r, minlength=n_row)
     start = np.cumsum(count) - count
-    pair_c = np.repeat(np.arange(n_row), np.diff(W.indptr))
+    pair_c = np.repeat(np.arange(n_out), np.diff(W.indptr))
     pair_n = W.indices
     k = count[pair_n]
     total = int(k.sum())
@@ -355,7 +357,7 @@ def _pooled_median_scatter_one(W, row, value, n_row, min_n):
     seg = np.repeat(pair_c, k)
     within = np.arange(total) - np.repeat(np.cumsum(k) - k, k)
     vals = v[np.repeat(start[pair_n], k) + within]
-    n_c = np.bincount(seg, minlength=n_row)
+    n_c = np.bincount(seg, minlength=n_out)
     first = np.cumsum(n_c) - n_c
 
     def segmented_median(x):
@@ -379,9 +381,13 @@ def pooled_median_scatter(Ws, row, value, n_row, min_n=MIN_INJECTIONS):
     med = np.full(n_row, np.nan)
     sc = np.full(n_row, np.nan)
     for W in Ws:
-        m, s_ = _pooled_median_scatter_one(W, row, value, n_row, min_n)
-        fill = np.isnan(med) & np.isfinite(m)
-        med[fill], sc[fill] = m[fill], s_[fill]
+        # a wider radius only for the cells the narrower ones left without a value
+        need = np.flatnonzero(np.isnan(med))
+        if need.size == 0:
+            break
+        m, s_ = _pooled_median_scatter_one(W[need], row, value, n_row, min_n)
+        fill = np.isfinite(m)
+        med[need[fill]], sc[need[fill]] = m[fill], s_[fill]
     return med, sc
 
 
