@@ -3901,6 +3901,20 @@ for _lib in ("sps", "agb", "pahc", "galz", "yso", "h2shock", "pahn"):
         REGISTRY[(_stem, _name)] = _rd
 
 
+# Datasets of the PACS completeness product copied verbatim into completeness_sesna_source for each PACS band
+# (name templates; catalog.completeness writes them, and each takes the completeness_pacs_source reading).
+PACS_COPIED = (
+    "CURVE_{b}", "MAG_GRID_{b}", "COMPLETED_FROM_{b}", "ENVELOPE_{b}",
+    "CELL_ID_{b}", "CELL_MAP_INDEX_{b}", "CELL_MAP_{b}", "CELL_RA_{b}", "CELL_DEC_{b}",
+    "CELL_SIGMA_{b}_MJY", "CELL_OFFSET_{b}_MJY",
+    "CELL_OBSID_{b}", "N_POS_{b}", "N_SIGMA_POS_{b}",
+    "MAP_ID_{b}", "MAP_OBSID_{b}", "MAP_WCS_{b}", "MAP_SHAPE_{b}", "MAP_CELL_STEP_{b}",
+    "MAP_SHIFT_{b}_ARCSEC", "MAP_N_PAIRS_{b}",
+    # the joint point-source fit's empty-sky offset (a blended source's flux has it subtracted)
+    "CELL_OFFSET_PSF_{b}_MJY",
+)
+
+
 # sky.derived.pacs_completeness -- completeness_pacs_source (2026-10-26 repair): the PACS 70 and 100
 # micron completeness in the layout of completeness_sesna_source, plus per-cell columns.
 _PACS_COMPLETENESS_CELLS_READINGS = {
@@ -3917,11 +3931,6 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "source in the cell, and the completeness curve, count from this level; the reported flux (FNU in the "
         "photometry product, the total flux) does not subtract it, so the two differ by this value. A parallel-mode map that holds only one "
         "scan direction is measured with that direction's own point-spread template and aperture fraction (not at 100 micron)."),
-    "CELL_TAIL_FACTOR_{b}": ("dimensionless",
-        "For each row of CURVE_{b}: the factor by which the cell's noise was raised so that, among the cells of its "
-        "map at a similar noise level, negative excursions on empty sky are no more frequent than for Gaussian noise, "
-        "matched as far into the tail as those cells' sample allows (the map noise has heavier tails than a Gaussian, "
-        "most in the noisiest cells). CELL_SIGMA_{b}_MJY already includes it."),
     "MAP_ID_{b}": ("map identifier",
         "One row per {w} micron map of the region: its archive file name. CELL_MAP_{b} names one of these for each cell."),
     "MAP_OBSID_{b}": ("observation identifier(s)",
@@ -3948,28 +3957,9 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
     "MAP_CELL_STEP_{b}": ("pixels (x, y)",
         "For each row of MAP_ID_{b}: the cell size in the map's pixels along x and y (30 arcsec over the "
         "pixel scale); edge cells are clipped to the image."),
-    "CURVE_PSF_{b}": ("completeness fraction x600, uint16",
-        "Same layout as CURVE_{b} (same rows, same MAG_GRID_{b}), but for a source measured by the joint point-source "
-        "fit (METHOD 2) instead of the aperture: the probability that a point source of the flux in MAG_GRID_{b} "
-        "placed in the cell is detected at 5 sigma or better when measured by that fit, judged against "
-        "CELL_OFFSET_PSF_{b}_MJY and CELL_SIGMA_PSF_{b}_MJY."),
     "CELL_OFFSET_PSF_{b}_MJY": ("mJy",
         "For each row of CURVE_{b}: the median flux the joint point-source fit returns at the cell's random empty-sky "
         "positions farther than one beam from every bright source. The fit's counterpart of CELL_OFFSET_{b}_MJY."),
-    "CELL_SIGMA_PSF_{b}_MJY": ("mJy",
-        "For each row of CURVE_{b}: the one-sigma uncertainty of a {w} micron flux measured by the joint point-source "
-        "fit, found from the same empty-sky positions in the same way as CELL_SIGMA_{b}_MJY (tail factor included). "
-        "A source measured by the fit is called detected at 5 times this value."),
-    "CELL_TAIL_FACTOR_PSF_{b}": ("dimensionless",
-        "For each row of CURVE_{b}: the factor by which the joint fit's noise in the cell was raised so that negative "
-        "excursions on empty sky are no more frequent than for Gaussian noise; the counterpart of "
-        "CELL_TAIL_FACTOR_{b}. CELL_SIGMA_PSF_{b}_MJY already includes it."),
-    "CELL_GAIN_PSF_{b}": ("dimensionless",
-        "For each row of CURVE_{b}: the median fraction of an injected point source's flux that the joint "
-        "point-source fit returns in the cell (1 when it recovers it fully)."),
-    "CELL_GAIN_{b}": ("dimensionless",
-        "The median fraction of an injected point source's flux that the measurement returns in each "
-        "cell of CURVE_{b} (1 when the fit recovers it fully)."),
     "SOURCE_ROW": ("row index into CURVE_<band>",
         "For each curated source, in the order of the region's source table, and the bands P70, P100, P160: "
         "the row of CURVE_P70 / CURVE_P100 / CURVE_P160 for the cell the source falls in on the deepest map covering "
@@ -4161,8 +4151,6 @@ _PACS_INJECTION_READINGS = {
 for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_u, _r) in _PACS_INJECTION_READINGS.items():
         REGISTRY[("completeness_pacs_source", _name.format(b=_band))] = (_u, _r.format(b=_band, w=_w))
-    for _gone in ("CELL_TAIL_FACTOR_{b}", "CELL_GAIN_{b}"):
-        REGISTRY.pop(("completeness_pacs_source", _gone.format(b=_band)), None)
     REGISTRY[("photometry_pacs_source", "SIGMA_%s_MJY" % _band)] = (
         "mJy, or 0.99 for an upper bound",
         "Uncertainty of the flux. For a detected source (ORIGIN 1) it is the photometric error measured by "
@@ -4215,17 +4203,9 @@ REGISTRY[("sources_sesna_source", "ORIGIN_FNU")] = ("code",
     "meaning Pokhrel et al. 2023, eHOPS I, ApJS 266, 32, gave the old catalogue column)." + _PACS_TAIL)
 # Unit 3: completeness_sesna_source grows to eleven bands (P70, P100, P160 copied from the PACS input)
 for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
-    for _name, (_u, _r) in _PACS_COMPLETENESS_CELLS_READINGS.items():
-        if _name == "SOURCE_ROW":
-            continue
-        REGISTRY[("completeness_sesna_source", _name.format(b=_band))] = (
-            _u, _r.format(b=_band, w=_w, n=200, mmin="-3.5", mmax="5.5", dm="0.25"))
-    REGISTRY[("completeness_sesna_source", "METHOD_%s" % _band)] = (
-        "code",
-        "For each curated source, in the order of the region's source table: how its %s micron flux was measured, "
-        "1 aperture photometry (the source is isolated), 2 a joint point-source fit with its close neighbours, "
-        "0 not measured (no %s micron map covers it). A source with 2 has its %s micron completeness taken from "
-        "CURVE_PSF_%s, any other from CURVE_%s." % (_w, _w, _w, _band, _band))
+    for _tmpl in PACS_COPIED:
+        _name = _tmpl.format(b=_band)
+        REGISTRY[("completeness_sesna_source", _name)] = REGISTRY[("completeness_pacs_source", _name)]
     REGISTRY[("completeness_sesna_source", "PIXEL_CURVE_%s" % _band)] = (
         "dimensionless (completeness fraction, 0..1)",
         "For each admitted nside-512 pixel in HPX_PIX_512, the %s micron completeness curve at "
