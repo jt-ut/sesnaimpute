@@ -22,11 +22,9 @@ the measurements into products:
 - noise: a detected source's sigma is the photometric error the completeness stage MEASURED for a source of
   its flux in its cell, by recovering artificial sources of known flux injected into the map: the cell's
   `SCATTER_<B>_MJY` at the source's flux (log-linear between the flux steps). A source that is not detected
-  carries the noise of its 30-arcsec cell, `CELL_SIGMA_<B>_MJY`.
-- detection: flux - CELL_OFFSET >= THRESHOLD of the source's cell (origin 1), else origin 90: a false-alarm
-  probability of 3e-4, the threshold read from the completeness stage's own empty-sky positions per sky-brightness
-  bin (planner R3, owner-approved 2026-10-28); a source the completeness stage found no cell for, or whose
-  aperture has too little valid data, is 91.
+  carries the noise of its 30-arcsec cell, `CELL_SIGMA_<B>_MJY`, the same number the detection rule uses.
+- detection: flux - CELL_OFFSET >= 5 x CELL_SIGMA (origin 1), else origin 90; a source the completeness stage
+  found no cell for, or whose aperture has too little valid data, is 91.
 - blends (the far-infrared survey convention; planner ruling, owner-approved 2026-10-28): a source within one
   beam of another source detected on the map is an unseparable blend, origin 2, its own aperture flux (offset
   subtracted, so it holds the neighbour's light) as the upper bound and the pipeline's upper-limit sentinel as
@@ -91,17 +89,16 @@ SNR_BIN_EDGES = (8.0, 30.0, 120.0)
 SNR_BIN_CENTRES = (5.7, 15.5, 60.0, 240.0)
 
 
-def singleton_pass(tile, ra, dec, shift, sigma_cell, offset, threshold):
+def singleton_pass(tile, ra, dec, shift, sigma_cell, offset):
     """The aperture measurement of every source of `ra`, `dec` on `tile` and the catalogue's detection of
     it: returns `(x, y, single, ok, detected)`, the map pixels (the map's registration `shift` applied),
     the aperture fit, whether the source has a usable cell noise and fit, and whether its flux minus the
-    cell's empty-sky offset reaches the cell's false-alarm THRESHOLD (`pacs_completeness.detection_thresholds`).
-    The completeness stage runs this same function on the same inputs to know which sources the catalogue
-    detects."""
+    cell's empty-sky offset reaches DETECTION_SNR x the cell noise. The completeness stage runs this same
+    function on the same inputs to know which sources the catalogue detects."""
     x, y = tile.xy(*pacs_fit.to_map_frame(ra, dec, shift))
     single = tile.measure(x, y)
-    ok = single.covered & np.isfinite(sigma_cell) & (sigma_cell > 0) & np.isfinite(threshold)
-    detected = ok & (single.flux - offset >= threshold)
+    ok = single.covered & np.isfinite(sigma_cell) & (sigma_cell > 0)
+    detected = ok & (single.flux - offset >= DETECTION_SNR * sigma_cell)
     return x, y, single, ok, detected
 
 
@@ -132,12 +129,11 @@ def calibrated_sigma(scatter, flux_grid, flux):
 # ---------------------------------------------------------------------------
 # one tile
 
-def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, cell_threshold, shifts, flux_grid):
+def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shifts, flux_grid):
     """All of one map tile's sources: `piece = (band, map_index, rows, scatter)`, the source rows (ascending) the
     completeness stage assigned to that map and, for each, its cell's measured aperture SCATTER (n, n_plane, mJy).
-    Returns `(band, map_index, rows, columns, n_nan, n_demoted, n_depth)`: the product's per-source arrays for those
-    rows, the detections with no measured error, the detections turned into upper bounds by the blend rule, and the
-    sources a fixed 5 x CELL_SIGMA rule would have detected that fall below the false-alarm threshold."""
+    Returns `(band, map_index, rows, columns, n_nan, n_demoted)`: the product's per-source arrays for those rows,
+    the detections with no measured error, and the detections turned into upper bounds by the blend rule."""
     band, map_index, rows, scatter = piece
     record = records[map_index]
     n = rows.size
@@ -145,7 +141,6 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, cell
     # the cell's empty-sky offset (sky structure the aperture's sky leaves), subtracted from every flux measured
     # in the cell, exactly as the completeness stage does for its positions
     offset = cell_offset[band][rows]
-    threshold = cell_threshold[band][rows]
 
     flux = np.full(n, np.nan)
     sigma = np.full(n, np.nan)
@@ -161,9 +156,7 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, cell
         shift = shifts.get((BANDS[band], _tile_key(record)), (0.0, 0.0))
         # eHOPS aperture photometry for every source (HOPS/eHOPS-convention annulus sky); FNU is it minus the
         # cell's empty-sky offset, and the detection is decided on that, the statistic the completeness measures
-        x, y, single, ok, detected = singleton_pass(tile, ra[rows], dec[rows], shift, sigma_cell, offset, threshold)
-        with np.errstate(invalid="ignore"):
-            n_depth = int((ok & ~detected & (single.flux - offset >= DETECTION_SNR * sigma_cell)).sum())
+        x, y, single, ok, detected = singleton_pass(tile, ra[rows], dec[rows], shift, sigma_cell, offset)
         sigma_annulus = single.sigma
         flux[ok] = single.flux[ok] - offset[ok]
         # an undetected source carries its cell's noise; a detected one gets the measured error below
@@ -210,7 +203,7 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, cell
                    N_BLEND=n_blend, BLEND_GROUP=group_id, EXTENDED=extended)
     # a source with no usable measurement keeps the cell noise only where a cell exists
     columns["LOCAL_RMS"][origin == ORIGIN_NOT_COVERED] = np.nan
-    return band, map_index, rows, columns, n_nan, n_demoted, n_depth
+    return band, map_index, rows, columns, n_nan, n_demoted
 
 
 # ---------------------------------------------------------------------------
@@ -241,15 +234,14 @@ def _tile_key(record):
 
 
 def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_obsid, config, n_jobs, stage=None,
-                 shifts=None, cell_row=None, scatter=None, flux_grid=None, cell_threshold=None):
+                 shifts=None, cell_row=None, scatter=None, flux_grid=None):
     """Measures every source on its cell's map and writes the product at
     `out_path`. `cell_sigma[b]` (n,) float64 is the source's cell noise (NaN:
     no cell, not covered) and `cell_obsid[b]` (n,) bytes the cell's map, the
     comma-joined observation ids of the `records` entry that holds it;
     `cell_row[b]` (n,) is the source's row in the completeness product (-1: none) and
-    `scatter[b]` (n_cell, n_plane) that product's measured aperture error per cell and flux plane (mJy);
-    `cell_threshold[b]` (n,) the source's cell's false-alarm detection threshold (mJy). Returns the per-band origin
-    counts."""
+    `scatter[b]` (n_cell, n_plane) that product's measured aperture error per cell and flux plane (mJy). Returns
+    the per-band origin counts."""
     n = names.size
     key_to_map = {}
     for i, rec in enumerate(records):
@@ -285,17 +277,15 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
             counts[band] = {code: 0 for code in (1, 2, 90, 91)}
             counts[band][ORIGIN_NOT_COVERED] = n
         fn_args = dict(config=config, records=records, ra=ra, dec=dec, cell_sigma=np.vstack(cell_sigma),
-                       cell_offset=np.vstack(cell_offset), cell_threshold=np.vstack(cell_threshold),
+                       cell_offset=np.vstack(cell_offset),
                        shifts=shifts or {}, flux_grid=flux_grid)
         fn = functools.partial(_measure_tile, **fn_args)
         n_nan = {band: 0 for band in BANDS}
         demoted = {band: 0 for band in BANDS}
-        depth = {band: 0 for band in BANDS}
-        for band_index, map_index, rows, cols, nan_sigma, n_dem, n_dep in pieces_module.iterate(fn, pieces, n_jobs, stage=stage, unit="map tiles"):
+        for band_index, map_index, rows, cols, nan_sigma, n_dem in pieces_module.iterate(fn, pieces, n_jobs, stage=stage, unit="map tiles"):
             band = BANDS[band_index]
             n_nan[band] += nan_sigma
             demoted[band] += n_dem
-            depth[band] += n_dep
             obsid = _tile_key(records[map_index]).encode()
             for start, stop, off in _runs(rows):
                 width = stop - start
@@ -309,8 +299,6 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
         print("  %s: %d sources are unseparable blends (ORIGIN 2: within %.1f beam of a detection and not its brighter "
               "member), %d of them passing the detection rule on their own" % (band, counts[band][ORIGIN_UPPER_BOUND],
                                                                                  BLEND_RADIUS_BEAMS, demoted[band]), flush=True)
-        print("  %s: depth cost of the false-alarm rule: %d sources reach 5 x CELL_SIGMA but fall below the threshold "
-              "(report)" % (band, depth[band]), flush=True)
         if n_nan[band]:
             print("  %s: %d detected sources have no measured photometric error in their cell (SIGMA NaN)"
                   % (band, n_nan[band]), flush=True)
@@ -320,12 +308,11 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
 def _read_cells(config, region, n_source):
     """The completeness stage's per-source cell noise, cell offset, map and cell row, per band, and the
     cells' measured photometric errors: `(cell_sigma, cell_offset, cell_obsid, shifts, cell_row,
-    scatter, flux_grid, threshold)`, lists over BANDS (`shifts` a dict, `flux_grid` the one grid in
+    scatter, flux_grid)`, lists over BANDS (`shifts` a dict, `flux_grid` the one grid in
     mJy). A source with `SOURCE_ROW` -1 has no cell (noise NaN, offset 0)."""
     path = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
     sigma = [np.full(n_source, np.nan) for _ in BANDS]
     offset = [np.zeros(n_source) for _ in BANDS]
-    threshold = [np.full(n_source, np.nan) for _ in BANDS]
     row = [np.full(n_source, -1, dtype=np.int64) for _ in BANDS]
     shifts = {}
     obsid = [np.full(n_source, b"", dtype="S1") for _ in BANDS]
@@ -348,13 +335,12 @@ def _read_cells(config, region, n_source):
             cell_obs = f["CELL_OBSID_%s" % band][:]
             sigma[b][have] = cell_sigma[rows[have]]
             offset[b][have] = f["CELL_OFFSET_%s_MJY" % band][:][rows[have]]
-            threshold[b][have] = f["THRESHOLD_%s_MJY" % band][:][rows[have]]
             row[b] = np.where(have, rows, -1).astype(np.int64)
             scatter[b] = f["SCATTER_%s_MJY" % band][:]
             for key, sh in zip(f["MAP_OBSID_" + band][:], f["MAP_SHIFT_%s_ARCSEC" % band][:]):
                 shifts[(band, key.decode())] = (float(sh[0]), float(sh[1]))
             obsid[b] = np.where(have, cell_obs[np.where(have, rows, 0)], b"")
-    return sigma, offset, obsid, shifts, row, scatter, flux_grid, threshold
+    return sigma, offset, obsid, shifts, row, scatter, flux_grid
 
 
 def _build_one_region(config, region, st):
@@ -366,12 +352,11 @@ def _build_one_region(config, region, st):
     out_path = product_path(config, "sky/derived", "pacs", "photometry", "source", region=region)
     records = read_index(config, region)
     if records:
-        cell_sigma, cell_offset, cell_obsid, shifts, cell_row, scatter, flux_grid, cell_threshold = _read_cells(
+        cell_sigma, cell_offset, cell_obsid, shifts, cell_row, scatter, flux_grid = _read_cells(
             config, region, names.size)
     else:
         cell_sigma = [np.full(names.size, np.nan) for _ in BANDS]
         cell_offset = [np.zeros(names.size) for _ in BANDS]
-        cell_threshold = [np.full(names.size, np.nan) for _ in BANDS]
         shifts = {}
         cell_obsid = [np.full(names.size, b"", dtype="S1") for _ in BANDS]
         cell_row = [np.full(names.size, -1, dtype=np.int64) for _ in BANDS]
@@ -380,7 +365,7 @@ def _build_one_region(config, region, st):
     t0 = time.time()
     counts = write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_obsid,
                           config, config.n_jobs, stage=st, shifts=shifts, cell_row=cell_row, scatter=scatter,
-                          flux_grid=flux_grid, cell_threshold=cell_threshold)
+                          flux_grid=flux_grid)
     wall = time.time() - t0
     numbers = {"sources": int(names.size), "sources_per_s": names.size / max(wall, 1e-9)}
     for band in BANDS:

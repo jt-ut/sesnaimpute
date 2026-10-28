@@ -16,11 +16,8 @@ point sources injected into the real map and measured by the catalogue's own rul
    (real sources are not excluded) and measured with the catalogue's aperture photometry (`pacs_fit`).
    CELL_OFFSET is the median flux over the cell's clean positions (sky structure the aperture's sky
    leaves), CELL_SIGMA the median over the cell's 3 x 3 block of 1.4826 x the median absolute deviation
-   about each cell's offset. THRESHOLD, the detection rule, is a false-alarm probability (FALSE_ALARM_P): the 1 - p
-   quantile of flux - CELL_OFFSET over the positions of the cells in the same within-map sky bin that no bright
-   source's light reaches (farther than the injection separation from every bright neighbour), per map
-   where the map holds enough of them, else over the band's maps (`detection_thresholds`). A flux is a detection
-   when flux - CELL_OFFSET >= THRESHOLD of its cell; the photometry stage applies exactly this rule.
+   about each cell's offset. They have one use: a flux is a detection when flux - CELL_OFFSET >= 5 x
+   CELL_SIGMA of the cell. The photometry stage applies exactly this rule to the SESNA sources.
 2. The real detections. On each map tile the SESNA sources it measures (the deepest map of each source)
    are measured and the rule applied (`pacs_photometry.singleton_pass`, the photometry's own pass).
 3. Injection, in signal-to-noise. For each plane of the S/N grid (`snr_grid`: 0.3 to 1000 x CELL_SIGMA, 0.1 dex),
@@ -28,8 +25,8 @@ point sources injected into the real map and measured by the catalogue's own rul
    normalisation by `pacs_fit.Tile`) of flux S/N x CELL_SIGMA of the cell each lands in are added to a copy of the
    map at positions uniform over the tile's valid pixels inside the region's cells, no two closer than the injected
    patch's half-width plus the sky annulus's outer radius (no injected light in another's aperture or annulus),
-   and measured by the catalogue's aperture photometry and its rule. RECOVERED means flux - CELL_OFFSET >= THRESHOLD
-   of the injected position's cell (no flux tolerance) and, within BLEND_RADIUS_BEAMS x beam of a detected
+   and measured by the catalogue's aperture photometry and its rule. RECOVERED means flux - CELL_OFFSET >= 5
+   CELL_SIGMA of the injected position's cell (no flux tolerance) and, within BLEND_RADIUS_BEAMS x beam of a detected
    source, that the injection is also the brighter of the two (the far-infrared survey convention: a source within
    a beam of a detection is an unseparable blend, reported as an upper bound, unless it is the brighter member).
    Batches alternate by seed
@@ -119,12 +116,6 @@ MIN_INJECTIONS = 100
 #: interior; further batches, restricted to the cells whose pooled count is short, follow until none is
 INTERIOR_SAFETY = 1.3
 MAX_EXTRA_BATCHES = 40
-#: the detection rule is a false-alarm probability (planner R3, owner-approved 2026-10-28): a flux minus its cell offset
-#: is a detection when it reaches THRESHOLD, the 1 - FALSE_ALARM_P quantile of the same statistic at the completeness
-#: stage's own random positions that no bright source's light reaches (`cell_fits` empty), per band and within-map sky bin, pooled per map where the map holds at least
-#: MIN_THRESHOLD_POSITIONS positions in the bin, else over the region's maps of the band
-FALSE_ALARM_P = 3e-4
-MIN_THRESHOLD_POSITIONS = int(np.ceil(10.0 / FALSE_ALARM_P))
 #: the recovered fraction FLUX90 is read at
 FLUX90_FRACTION = 0.9
 
@@ -157,22 +148,15 @@ def canonical_grid():
 def cell_fits(tile, ids, seed):
     """The catalogue's aperture measurement at N_POS uniform positions in each cell of `ids` on `tile`. Returns
     b (flux mJy), gain (1 where covered), the annulus sigma, valid, clean (farther than one beam from every bright
-    neighbour: the cell's offset and noise), the annulus sky (mJy per pixel) and empty (farther than the injection
-    separation, the point-spread patch's half-width plus the annulus's outer radius, from every bright neighbour: no
-    bright source's light reaches the aperture or annulus; the false-alarm threshold's null), each (n_cell, N_POS)."""
+    neighbour) and the annulus sky (mJy per pixel), each (n_cell, N_POS)."""
     x, y = tile.grid.sample_pixels(ids, N_POS, seed)
     a = tile.aperture(x.ravel(), y.ravel())
     shape = x.shape
     gain = np.where(a.covered, 1.0, np.nan)
     valid = (a.covered & np.isfinite(a.flux)).reshape(shape)
     clean = ~tile.near_bright(x, y)
-    empty = np.ones(shape, bool)
-    if tile._tree is not None:
-        separation = tile.injection_half_width() + APERTURES[tile.record.band][2] / tile.pixel_arcsec
-        d, _ = tile._tree.query(np.c_[x.ravel(), y.ravel()], k=1, distance_upper_bound=separation)
-        empty = (d >= separation).reshape(shape)
     return (a.flux.reshape(shape), gain.reshape(shape), a.annulus_sigma.reshape(shape), valid, clean,
-            a.sky.reshape(shape), empty)
+            a.sky.reshape(shape))
 
 
 #: a cell's own noise estimate counts in its block's median only with this many clean positions
@@ -255,7 +239,7 @@ def _tile_reference(piece, config, records):
     shift = pacs_fit.registration(tile, sra, sdec)
     centres = used[np.unique(np.linspace(0, used.size - 1, min(REFERENCE_CELLS, used.size)).astype(np.int64))]
     all_ids = ring(tile.grid, centres)
-    b, gain, ps, valid, clean, _sky, _empty = cell_fits(tile, all_ids, 0)
+    b, gain, ps, valid, clean, _sky = cell_fits(tile, all_ids, 0)
     _, n_clean, mad, _, _, _ = cell_statistics(b, gain, ps, valid, clean)
     sigma, _ = block_sigma(tile.grid, centres, all_ids, mad, n_clean)
     c = np.searchsorted(all_ids, centres)
@@ -275,7 +259,7 @@ def _piece(piece, config, records, refs):
     record = records[tile_index]
     tile = pacs_fit.cached_tile(config, record)
     all_ids = ring(tile.grid, ids)
-    b, gain, ps, valid, clean, sky, empty = cell_fits(tile, all_ids, tile_index + 1)
+    b, gain, ps, valid, clean, sky = cell_fits(tile, all_ids, tile_index + 1)
     n_valid, n_clean, mad, g, pps, off = cell_statistics(b, gain, ps, valid, clean)
     sigma, n_sigma = block_sigma(tile.grid, ids, all_ids, mad, n_clean)
     offset = cell_offset(tile.grid, ids, all_ids, off, n_clean)
@@ -288,15 +272,10 @@ def _piece(piece, config, records, refs):
     with np.errstate(all="ignore"):
         cell_sky = np.nanmedian(np.where(valid, sky, np.nan), axis=1)[k]
     covered = (n_valid >= MIN_VALID_POSITIONS) & np.isfinite(sigma) & (sigma > 0)
-    # the detection statistic (flux minus the cell's offset) at the cell's random positions that no bright source's
-    # light reaches: the null the false-alarm threshold is read from (within one beam of a bright source is not
-    # empty enough at a 3e-4 tail: there the top values are real sources' light)
-    with np.errstate(invalid="ignore"):
-        null = np.where(valid[k] & empty[k], b[k] - offset[:, None], np.nan).astype(np.float32)
     ra, dec = pacs_fit.from_map_frame(*tile.grid.centres_icrs(ids), ref["shift"][:2])
     return dict(tile=tile_index, ids=ids, covered=covered,
                 n_sigma=np.minimum(n_sigma, np.iinfo(np.int16).max).astype(np.int16),
-                sigma=sigma, offset=offset, sky=cell_sky, ra=ra, dec=dec, null=null)
+                sigma=sigma, offset=offset, sky=cell_sky, ra=ra, dec=dec)
 
 
 # ----------------------------------------------------------------------------
@@ -492,8 +471,6 @@ class Injector:
         self.offset = np.full(grid.n_cells, np.nan)
         self.sigma[self.ids] = inp["sigma"]
         self.offset[self.ids] = inp["offset"]
-        self.threshold = np.full(grid.n_cells, np.nan)
-        self.threshold[self.ids] = inp["threshold"]
         self.beam_px = tile.beam_px
         self.beam_area_px = np.pi / (4 * np.log(2)) * tile.beam_px ** 2
         self.separation_px = tile.injection_half_width() + APERTURES[tile.record.band][2] / tile.pixel_arcsec
@@ -506,7 +483,7 @@ class Injector:
         self.n_detected = 0
         if inp["src_ra"].size:
             x, y, single, _ok, det = singleton_pass(tile, inp["src_ra"], inp["src_dec"], inp["shift"],
-                                                    inp["src_sigma"], inp["src_offset"], inp["src_threshold"])
+                                                    inp["src_sigma"], inp["src_offset"])
             self.n_detected = int(det.sum())
             self.src_xy = np.c_[x, y]
             if det.any():
@@ -629,7 +606,7 @@ class Injector:
             t_inject += time.time() - t0
         with np.errstate(invalid="ignore"):
             recovered = (covered & np.isfinite(sigma) & (sigma > 0) & brighter
-                         & (flux_out - offset >= self.threshold[cid]))
+                         & (flux_out - offset >= pacs_fit.DETECTION_SNR * sigma))
         keep = covered
         out.update(row=self.row_of_cell[cid[keep]], near=near[keep], recovered=recovered[keep],
                    dflux=(flux_out - offset - flux).astype(np.float32)[keep],
@@ -898,9 +875,9 @@ def _tile_geometry(record):
 REGION_PAD_ARCSEC = 412.0
 
 
-def tile_inputs(cell_map, cell_id, sigma, offset, threshold, source_row, shift, ra, dec):
+def tile_inputs(cell_map, cell_id, sigma, offset, source_row, shift, ra, dec):
     """What `Injector` needs per map tile, from the band's rows: `{tile: dict}` for the tiles that hold rows.
-    `cell_map`, `cell_id`, `sigma`, `offset`, `threshold` are the rows' map index, cell id and the detection rule's inputs
+    `cell_map`, `cell_id`, `sigma`, `offset` are the rows' map index, cell id and the detection rule's inputs
     (float32 as stored), `source_row` (n_source,) each source's row (-1 none), `shift[t]` the map's
     registration (as stored: float32), `ra`, `dec` the SESNA positions. The sources of a tile are the ones
     whose deepest map it is: the ones the photometry stage measures there, in its order."""
@@ -912,10 +889,8 @@ def tile_inputs(cell_map, cell_id, sigma, offset, threshold, source_row, shift, 
         rows = np.flatnonzero(cell_map == t)
         s = np.flatnonzero(source_tile == t)
         out[int(t)] = dict(ids=cell_id[rows], sigma=sigma[rows].astype(np.float64), offset=offset[rows].astype(np.float64),
-                           threshold=threshold[rows].astype(np.float64),
                            src_ra=ra[s], src_dec=dec[s], src_sigma=sigma[source_row[s]].astype(np.float64),
                            src_offset=offset[source_row[s]].astype(np.float64),
-                           src_threshold=threshold[source_row[s]].astype(np.float64),
                            shift=(float(np.float32(shift[t][0])), float(np.float32(shift[t][1]))), row0=int(rows[0]))
     return out
 
@@ -992,7 +967,7 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
     # the detection rule's inputs: cell offset and noise
     results = pieces_module.run(functools.partial(_piece, config=config, records=records, refs=refs),
                                 pieces, n_jobs, stage=stage, unit="cell blocks")
-    names = ("covered", "n_sigma", "sigma", "offset", "sky", "ra", "dec", "null")
+    names = ("covered", "n_sigma", "sigma", "offset", "sky", "ra", "dec")
     # the rows: every covered cell of every map, ordered by (map, cell id)
     parts = []
     for t in range(len(records)):
@@ -1027,29 +1002,10 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
     shifts = np.array([refs[t]["shift"] if t in refs else (0.0, 0.0, 0) for t in range(len(records))], dtype=float)
     cell_sigma = cols["sigma"].astype(np.float32)
     cell_offset = cols["offset"].astype(np.float32)
-    # the detection rule: the false-alarm threshold per sky bin, read from the null at the cells' clean positions
-    cell_bin = sky_bins(cell_map, cols["sky"])
-    null = cols.pop("null")
-    threshold, regional, n_regional, n_own = detection_thresholds(cell_map, cell_bin, null)
-    threshold = threshold.astype(np.float32)
-    ratio = (threshold / (pacs_fit.DETECTION_SNR * cell_sigma)).astype(np.float32)
-    # what the faintest injection plane should give: the null's share at or above T minus that plane's flux
-    faint = snr_grid()[0] * cell_sigma.astype(np.float64)
-    with np.errstate(invalid="ignore"):
-        above = null >= (threshold.astype(np.float64) - faint)[:, None]
-    have = np.isfinite(null)
-    expected_floor = np.array([above[cell_bin == j].sum() / max(have[cell_bin == j].sum(), 1) for j in range(SKY_BINS)])
-    del null, above, have
-    print("  detection threshold (false-alarm probability %.0e) by within-map sky bin, faint to bright: %s"
-          % (FALSE_ALARM_P, "  ".join("T / 5 sigma median %.2f (regional T %.1f mJy from %d positions; %d maps own)"
-                                      % (np.nanmedian(ratio[cell_bin == j]), regional[j], n_regional[j], n_own[j])
-                                      for j in range(SKY_BINS))), flush=True)
-    print("  expected faint-end floor (the null at or above T minus the faintest plane's flux), by sky bin: %s"
-          % "  ".join("%.5f" % v for v in expected_floor), flush=True)
 
     # artificial sources: each map cut into pieces of its (S/N plane, half) pairs, map by map from the biggest;
     # then each map pooled whole
-    inputs = tile_inputs(cell_map, cell_id, cell_sigma, cell_offset, threshold, src_row, shifts, ra, dec)
+    inputs = tile_inputs(cell_map, cell_id, cell_sigma, cell_offset, src_row, shifts, ra, dec)
     todo, counts = injection_pieces(records, inputs)
     done = pieces_module.run(functools.partial(_inject_pairs, config=config, records=records),
                              todo, n_jobs, stage=stage, unit="map pieces (artificial sources)")
@@ -1094,7 +1050,6 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
     envelope = curve.max(axis=0).astype(np.uint16) if n_row else np.zeros(n_plane, np.uint16)
     return dict(curve=curve, source_row=src_row.astype(np.int32), envelope=envelope, n_pos=n_pos,
                 contamination=contamination, contamination_bins=bin_values, contamination_counts=bin_counts,
-                threshold=threshold, threshold_ratio=ratio, expected_floor=expected_floor, sky_bin=cell_bin,
                 n_sigma=cols["n_sigma"].astype(np.int16), flux90=flux90_, bias=errors["bias"], scatter=errors["scatter"],
                 held=held, stats=stats,
                 cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=cell_sigma, cell_offset=cell_offset,
@@ -1110,61 +1065,17 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
                 map_cell_step=np.array([(g[2].step_x, g[2].step_y) for g in geometry], dtype=np.float64).reshape(len(records), 2))
 
 
-def sky_bins(cell_map, cell_sky):
-    """Per row, its within-map sky bin: the cells of each map cut into SKY_BINS equal bins by rank of their annulus
-    sky (PACS maps have no absolute zero level), 0 faintest."""
-    bins = np.zeros(cell_map.size, np.int64)
+def _contamination(cell_map, cell_sky, row, recovered):
+    """CONTAMINATION per row: the cells of each map cut into SKY_BINS equal bins by rank of their annulus sky (PACS
+    maps have no absolute zero level); per bin, over every map of the band, the fraction of the faintest-S/N
+    artificial sources (`row`, `recovered`) the rule counted as detections. Returns (per row, per bin, injections
+    per bin)."""
+    n_row = cell_map.size
+    bins = np.zeros(n_row, np.int64)
     for m in np.unique(cell_map):
         rows = np.flatnonzero(cell_map == m)
         rank = np.argsort(np.argsort(np.nan_to_num(cell_sky[rows], nan=np.nanmedian(cell_sky[rows])), kind="stable"))
         bins[rows] = np.minimum(rank * SKY_BINS // max(rows.size, 1), SKY_BINS - 1)
-    return bins
-
-
-def detection_thresholds(cell_map, bins, null, p=FALSE_ALARM_P):
-    """THRESHOLD per row: the 1 - p quantile of `null` (n_row, N_POS: flux minus the cell offset at the cell's clean
-    random positions, NaN elsewhere) over the rows of the same map and sky bin where those hold at least
-    MIN_THRESHOLD_POSITIONS values, else over the rows of that sky bin on every map of the band, else (the region's
-    bin itself short of them) over every row of the band. Returns (threshold per row, per bin the regional threshold
-    and its count, per bin how many maps had their own)."""
-    out = np.full(cell_map.size, np.nan)
-    regional = np.full(SKY_BINS, np.nan)
-    n_regional = np.zeros(SKY_BINS, np.int64)
-    n_own = np.zeros(SKY_BINS, np.int64)
-    every = null.ravel()
-    every = every[np.isfinite(every)]
-    whole = np.quantile(every, 1.0 - p) if every.size else np.nan
-    if every.size < MIN_THRESHOLD_POSITIONS:
-        print("  WARNING: the band holds only %d empty positions in all, fewer than the %d a threshold at p = %.0e "
-              "needs; its threshold is %.1f mJy from them" % (every.size, MIN_THRESHOLD_POSITIONS, p, whole), flush=True)
-    for j in range(SKY_BINS):
-        rows_j = np.flatnonzero(bins == j)
-        v = null[rows_j].ravel()
-        v = v[np.isfinite(v)]
-        n_regional[j] = v.size
-        if v.size >= MIN_THRESHOLD_POSITIONS:
-            regional[j] = np.quantile(v, 1.0 - p)
-        else:
-            regional[j] = whole
-            print("  sky bin %d: %d empty positions over the region's maps, fewer than %d: the band's whole pool is used "
-                  "(%.1f mJy)" % (j, v.size, MIN_THRESHOLD_POSITIONS, whole), flush=True)
-        for m in np.unique(cell_map[rows_j]):
-            r = rows_j[cell_map[rows_j] == m]
-            vm = null[r].ravel()
-            vm = vm[np.isfinite(vm)]
-            if vm.size >= MIN_THRESHOLD_POSITIONS:
-                out[r] = np.quantile(vm, 1.0 - p)
-                n_own[j] += 1
-            else:
-                out[r] = regional[j]
-    return out, regional, n_regional, n_own
-
-
-def _contamination(cell_map, cell_sky, row, recovered):
-    """CONTAMINATION per row: per within-map sky bin (`sky_bins`), over every map of the band, the fraction of the
-    faintest-S/N artificial sources (`row`, `recovered`) the rule counted as detections. Returns (per row, per bin,
-    injections per bin)."""
-    bins = sky_bins(cell_map, cell_sky)
     n = np.bincount(bins[row], minlength=SKY_BINS).astype(np.float64)
     k = np.bincount(bins[row][recovered], minlength=SKY_BINS).astype(np.float64)
     with np.errstate(all="ignore"):
@@ -1189,8 +1100,7 @@ def _empty_band(n_src, n_plane):
                 contamination_counts=np.zeros(SKY_BINS, np.int64),
                 envelope=np.zeros(n_plane, np.uint16), n_pos=z(np.int32), n_sigma=z(np.int16), flux90=z(np.float32),
                 bias=nan(), scatter=nan(),
-                threshold=z(np.float32), threshold_ratio=z(np.float32), expected_floor=np.full(SKY_BINS, np.nan),
-                sky_bin=z(np.int8), held=None, stats=[], cell_ra=z(float),
+                held=None, stats=[], cell_ra=z(float),
                 cell_dec=z(float), cell_sigma=z(np.float32), cell_offset=z(np.float32), cell_id=z(np.int64),
                 cell_map_index=z(np.int32), cell_obsid=z("S1"), cell_map=z("S1"), n_candidate=0, map_id=z("S1"),
                 map_obsid=z("S1"), map_shift=np.zeros((0, 2), np.float32), map_pairs=z(np.int32), map_wcs=z("S1"),
@@ -1227,12 +1137,6 @@ def write_product(path, region, mag, bands):
             ds.attrs["SKY_BINS"] = SKY_BINS
             ds.attrs["BIN_VALUES"] = np.asarray(d["contamination_bins"], np.float64)
             ds.attrs["BIN_INJECTIONS"] = np.asarray(d["contamination_counts"], np.int64)
-            ds.attrs["EXPECTED_FLOOR"] = np.asarray(d["expected_floor"], np.float64)
-            ds = w("THRESHOLD_%s_MJY" % b, d["threshold"])
-            ds.attrs["FALSE_ALARM_P"] = FALSE_ALARM_P
-            ds.attrs["MIN_THRESHOLD_POSITIONS"] = MIN_THRESHOLD_POSITIONS
-            w("THRESHOLD_RATIO_" + b, d["threshold_ratio"])
-            w("SKY_BIN_" + b, d["sky_bin"].astype(np.int8))
             w("CELL_RA_" + b, d["cell_ra"])
             w("CELL_DEC_" + b, d["cell_dec"])
             w("CELL_ID_" + b, d["cell_id"])
@@ -1304,13 +1208,11 @@ def _read_band(f, band):
     d = dict(curve=g("CURVE_" + band), mag=g("MAG_GRID_" + band), flux90=g("FLUX90_%s_MJY" % band),
              n_pos=g("N_POS_" + band), scatter=g("SCATTER_%s_MJY" % band),
              bias=g("BIAS_%s_MJY" % band), sigma=g("CELL_SIGMA_%s_MJY" % band), offset=g("CELL_OFFSET_%s_MJY" % band),
-             contamination=g("CONTAMINATION_" + band), threshold=g("THRESHOLD_%s_MJY" % band),
-             sky_bin=g("SKY_BIN_" + band).astype(np.int64), cell_id=g("CELL_ID_" + band), cell_map=g("CELL_MAP_INDEX_" + band),
+             contamination=g("CONTAMINATION_" + band), cell_id=g("CELL_ID_" + band), cell_map=g("CELL_MAP_INDEX_" + band),
              map_id=g("MAP_ID_" + band), map_wcs=g("MAP_WCS_" + band), map_shape=g("MAP_SHAPE_" + band),
              map_shift=g("MAP_SHIFT_%s_ARCSEC" % band), source_row=g("SOURCE_ROW")[:, BANDS.index(band)])
     d["contamination_bins"] = f["CONTAMINATION_" + band].attrs["BIN_VALUES"]
     d["contamination_counts"] = f["CONTAMINATION_" + band].attrs["BIN_INJECTIONS"]
-    d["expected_floor"] = f["CONTAMINATION_" + band].attrs["EXPECTED_FLOOR"]
     d["flux"] = 1000.0 * ZERO_POINT_JY * 10.0 ** (-d["mag"].astype(np.float64) / 2.5)
     xy = np.zeros((d["cell_id"].size, 2))
     for m in range(d["map_id"].size):
@@ -1420,38 +1322,15 @@ def _acceptance_c2(band, d, held):
 
 
 def _report_c3(band, d, held):
-    """C3 (planner R3 bars): the faint-end floor (CONTAMINATION per sky bin, the faintest plane's recovered fraction)
-    against FALSE_ALARM_P and against what the null itself gives at that plane (EXPECTED_FLOOR: the faintest plane
-    carries 0.3 x CELL_SIGMA, so the floor is the null's share at or above T minus that), each within two binomial
-    sigma; and the expected share of the region's detections that are unrelated flux, measured (CONTAMINATION summed
-    over the covered SESNA sources) against the construction R p / (1 + R p), R the undetected : detected ratio, and
-    against the same with the null-derived floor."""
-    p = FALSE_ALARM_P
-    for j, (v, n, e) in enumerate(zip(d["contamination_bins"], d["contamination_counts"], d["expected_floor"])):
-        sd = np.sqrt(max(v, 1.0 / max(n, 1)) * (1 - v) / max(n, 1)) if n else np.nan
-        print("  C3 %s sky bin %d: faint-end floor %.5f +/- %.5f (%d injections); p = %.5f: %s; null-derived %.5f: %s"
-              % (band, j, v, sd, n, p, "within 2 sigma" if abs(v - p) <= 2 * sd else "OUTSIDE 2 sigma",
-                 e, "within 2 sigma" if abs(v - e) <= 2 * sd else "OUTSIDE 2 sigma"))
+    """C3 (a report, no bar): CONTAMINATION by sky bin, and the number of the region's detections expected to be
+    unrelated flux: the sum of CONTAMINATION over the covered SESNA sources against the detected count."""
+    print("  C3 %s: CONTAMINATION by within-map sky bin, faint to bright: %s"
+          % (band, "  ".join("%.4f (%d injections)" % (v, c) for v, c in zip(d["contamination_bins"], d["contamination_counts"]))))
     covered = d["source_row"] >= 0
-    rows = d["source_row"][covered]
-    expected = float(np.nansum(d["contamination"][rows]))
-    expected_null = float(np.nansum(d["expected_floor"][d["sky_bin"][rows]]))
+    expected = float(np.nansum(d["contamination"][d["source_row"][covered]]))
     detected = sum(s["n_detected"] for s in held.get("stats", []))
-    n_cov = int(covered.sum())
-    r = (n_cov - detected) / max(detected, 1)
-    var = 0.0
-    for j, (v, n) in enumerate(zip(d["contamination_bins"], d["contamination_counts"])):
-        k = int((d["sky_bin"][rows] == j).sum())
-        if n:
-            var += (k ** 2) * max(v, 1.0 / n) * (1 - v) / n
-    share, err = expected / max(detected, 1), np.sqrt(var) / max(detected, 1)
-    construct = r * p / (1 + r * p)
-    print("  C3 %s: %d covered SESNA sources, %d detected (R = %.0f); expected detections from unrelated flux %.1f = "
-          "%.2f +/- %.2f %% of the detected; construction R p / (1 + R p) = %.2f %%: %s; with the null-derived floor "
-          "%.2f %%: %s" % (band, n_cov, detected, r, expected, 100 * share, 100 * err, 100 * construct,
-                           "within 2 sigma" if abs(share - construct) <= 2 * err else "OUTSIDE 2 sigma",
-                           100 * expected_null / max(detected, 1),
-                           "within 2 sigma" if abs(share - expected_null / max(detected, 1)) <= 2 * err else "OUTSIDE 2 sigma"))
+    print("  C3 %s: %d covered SESNA sources, %d detected; expected detections from unrelated flux %.1f = %.2f %% of the "
+          "detected (report)" % (band, int(covered.sum()), detected, expected, 100 * expected / max(detected, 1)))
 
 
 def acceptance(config, region, held_out):
