@@ -4063,6 +4063,28 @@ for _band, _wave in (("P70", "70"), ("P100", "100"), ("P160", "160")):
 # changed, add the four measured-calibration datasets, and drop the two datasets the measurement no
 # longer writes (the noise tail factor and the gain).
 _PACS_INJECTION_READINGS = {
+    "MAG_GRID_{b}": ("mag relative to 1 Jy",
+        "The magnitudes CURVE_{b} and the per-plane columns are tabulated at: m = -2.5 log10(flux / 1 Jy), -3.5 "
+        "to 5.5 in steps of 0.25, bright to faint (the same grid for every region). The zero point is 1 Jy, "
+        "stored on CURVE_{b} as ZERO_POINT_JY."),
+    "ENVELOPE_{b}": ("completeness fraction x600, uint16",
+        "At each magnitude of MAG_GRID_{b}, the largest value of CURVE_{b} over all rows: the deepest {w} micron "
+        "completeness anywhere in this region, stored as the fraction times 600; all zero where the region has "
+        "no {w} micron coverage."),
+    "COMPLETED_FROM_{b}": ("mag",
+        "All NaN: every {w} micron curve is measured over its whole range; nothing is extrapolated. Kept so the "
+        "layout matches completeness_sesna_source."),
+    "N_SIGMA_POS_{b}": ("positions",
+        "For each row of CURVE_{b}, how many random positions set its noise CELL_SIGMA_{b}_MJY: the positions on "
+        "valid data farther than one beam from every bright source, summed over the cells of the 3 x 3 block of "
+        "cells around it whose noise entered the median. 0 means no cell of the block was clean and the map's "
+        "median noise was used."),
+    "CELL_RA_{b}": ("deg ICRS", "Right ascension of the centre of each cell of CURVE_{b}, in the same row order."),
+    "CELL_DEC_{b}": ("deg ICRS", "Declination of the centre of each cell of CURVE_{b}, in the same row order."),
+    "CELL_OBSID_{b}": ("observation identifier(s)",
+        "The Herschel observation identifier(s), comma separated, of the map each cell of CURVE_{b} was measured on."),
+    "CELL_MAP_{b}": ("map identifier",
+        "The archive file name of the {w} micron map each cell of CURVE_{b} was measured on."),
     "CURVE_{b}": ("completeness fraction x600, uint16",
         "One row per covered 30-arcsec cell of every Herschel PACS {w} micron map, for all cells inside the "
         "region's source bounding box padded by about 7 arcmin (overlapping maps each keep their cells; "
