@@ -93,17 +93,14 @@ def from_map_frame(ra_deg, dec_deg, shift):
     return np.asarray(ra_deg, float) - east / 3600.0 / np.cos(np.radians(dec_deg)), dec_deg
 
 
-def registration(tile, ra_deg, dec_deg):
-    """The map's astrometric offset from SESNA, (east arcsec, north arcsec, n_pairs): the median, over
-    the tile's blind bright peaks (S/N >= 5) paired one-to-one with their nearest SESNA position within
-    one beam (each the other's nearest), of PACS minus SESNA. Fewer than MIN_REGISTRATION_PAIRS pairs:
-    no shift. Planner 2026-10-27: Mon OB1's map 0640_p0927 sat 3.3 arcsec west of SESNA and a
-    fixed-position fit there lost half the flux of its 6-arcsec beam; one shift per map keeps the fit
-    fixed-position and linear."""
+def registration_pairs(tile, ra_deg, dec_deg):
+    """The pairs `registration` uses: the tile's blind bright peaks (S/N >= 5) paired one-to-one with their nearest
+    SESNA position within one beam (each the other's nearest). Returns PACS minus SESNA (n_pairs, 2), east and
+    north arcsec."""
     nb = tile.neighbours
     ra_deg, dec_deg = np.asarray(ra_deg, float), np.asarray(dec_deg, float)
     if nb.x.size == 0 or ra_deg.size == 0:
-        return 0.0, 0.0, 0
+        return np.zeros((0, 2))
     sky = tile.wcs.pixel_to_world(nb.x, nb.y).icrs
     pra, pde = sky.ra.deg, sky.dec.deg
     ra0, de0 = np.median(pra), np.median(pde)
@@ -113,13 +110,21 @@ def registration(tile, ra_deg, dec_deg):
     d1, i1 = cKDTree(sesna).query(peaks, distance_upper_bound=tile.beam_arcsec)
     ok = np.isfinite(d1)
     if not ok.any():
-        return 0.0, 0.0, 0
+        return np.zeros((0, 2))
     _, back = cKDTree(peaks).query(sesna[i1[ok]])
     mutual = np.flatnonzero(ok)[back == np.flatnonzero(ok)]
-    if mutual.size < MIN_REGISTRATION_PAIRS:
-        return 0.0, 0.0, int(mutual.size)
-    delta = peaks[mutual] - sesna[i1[mutual]]
-    return float(np.median(delta[:, 0])), float(np.median(delta[:, 1])), int(mutual.size)
+    return peaks[mutual] - sesna[i1[mutual]]
+
+
+def registration(tile, ra_deg, dec_deg):
+    """The map's astrometric offset from SESNA, (east arcsec, north arcsec, n_pairs): the median of PACS minus
+    SESNA over `registration_pairs`. Fewer than MIN_REGISTRATION_PAIRS pairs: no shift. Planner 2026-10-27:
+    Mon OB1's map 0640_p0927 sat 3.3 arcsec west of SESNA and a fixed-position fit there lost half the flux of
+    its 6-arcsec beam; one shift per map keeps the fit fixed-position and linear."""
+    delta = registration_pairs(tile, ra_deg, dec_deg)
+    if delta.shape[0] < MIN_REGISTRATION_PAIRS:
+        return 0.0, 0.0, int(delta.shape[0])
+    return float(np.median(delta[:, 0])), float(np.median(delta[:, 1])), int(delta.shape[0])
 
 
 # ----------------------------------------------------------------------------

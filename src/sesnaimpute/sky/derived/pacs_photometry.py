@@ -129,81 +129,79 @@ def calibrated_sigma(scatter, flux_grid, flux):
 # ---------------------------------------------------------------------------
 # one tile
 
-def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shifts, flux_grid):
-    """All of one map tile's sources: `piece = (band, map_index, rows, scatter)`, the source rows (ascending) the
-    completeness stage assigned to that map and, for each, its cell's measured aperture SCATTER (n, n_plane, mJy).
-    Returns `(band, map_index, rows, columns, n_nan, n_demoted)`: the product's per-source arrays for those rows,
-    the detections with no measured error, and the detections turned into upper bounds by the blend rule."""
-    band, map_index, rows, scatter = piece
+def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shifts, flux_grid, r_match):
+    """All of one map tile's SESNA sources: `piece = (band, map_index, rows, scatter, peaks)`, the source rows
+    (ascending) the completeness stage assigned to that map, their cells' SCATTER, and the PACS sources the blind
+    detection found on that map (`peaks`: x, y, fnu, sigma, offset, index into the band's PACS source table, and the
+    map's matching radius r_match in arcsec).
+    The cross-match (RULINGS_5, the only place SESNA enters): a source with exactly one PACS source within
+    `r_match[band]` arcsec, of which it is the only SESNA claimant, is ORIGIN 1 with that source's flux; a PACS source
+    with two or more claimants makes every claimant ORIGIN 2 (an unseparable blend), the bound its flux; no PACS
+    source: ORIGIN 90 with the forced aperture flux at its position, or 91 where not covered. Returns `(band,
+    map_index, rows, columns)`."""
+    band, map_index, rows, scatter, peaks = piece
     record = records[map_index]
     n = rows.size
     sigma_cell = cell_sigma[band][rows]
-    # the cell's empty-sky offset (sky structure the aperture's sky leaves), subtracted from every flux measured
-    # in the cell, exactly as the completeness stage does for its positions
     offset = cell_offset[band][rows]
 
     flux = np.full(n, np.nan)
     sigma = np.full(n, np.nan)
     origin = np.full(n, ORIGIN_NOT_COVERED, dtype=np.int8)
     n_blend = np.zeros(n, dtype=np.int16)
-    group_id = np.full(n, -1, dtype=np.int32)
+    pacs_source = np.full(n, -1, dtype=np.int32)
+    separation = np.full(n, np.nan, dtype=np.float32)
     extended = np.zeros(n, dtype=bool)
     sigma_annulus = np.full(n, np.nan)
-    n_demoted = 0
+    subtracted = np.full(n, np.nan)
 
     with pacs_fit.open_tile(config, record) as tile:
         # the map's registration to SESNA, as the completeness stage measured and stored it
         shift = shifts.get((BANDS[band], _tile_key(record)), (0.0, 0.0))
-        # eHOPS aperture photometry for every source (HOPS/eHOPS-convention annulus sky); FNU is it minus the
-        # cell's empty-sky offset, and the detection is decided on that, the statistic the completeness measures
-        x, y, single, ok, detected = singleton_pass(tile, ra[rows], dec[rows], shift, sigma_cell, offset)
+        # the forced aperture flux at every source (the value an ORIGIN 90 source carries)
+        x, y, single, ok, _floor = singleton_pass(tile, ra[rows], dec[rows], shift, sigma_cell, offset)
         sigma_annulus = single.sigma
         flux[ok] = single.flux[ok] - offset[ok]
-        # an undetected source carries its cell's noise; a detected one gets the measured error below
         sigma[ok] = sigma_cell[ok]
-        origin[ok] = np.where(detected[ok], ORIGIN_DETECTED, ORIGIN_UNDETECTED)
-
-        # Blends (the far-infrared survey convention): a source within BLEND_RADIUS_BEAMS of another source detected
-        # here is an unseparable blend, ORIGIN 2 with its own aperture flux as the upper bound, unless it is itself
-        # detected and the brightest of the detections within that radius.
-        d_idx = np.flatnonzero(detected)
-        if d_idx.size:
-            tree = cKDTree(np.c_[x[d_idx], y[d_idx]])
-            near_lists = tree.query_ball_point(np.c_[x, y], BLEND_RADIUS_BEAMS * tile.beam_px)
+        origin[ok] = ORIGIN_UNDETECTED
+        subtracted[ok] = offset[ok]
+        if peaks["x"].size:
+            r_px = peaks.get("r_match", r_match[BANDS[band]]) / tile.pixel_arcsec
+            pxy = np.c_[peaks["x"], peaks["y"]]
+            # the claimants of each PACS source: every SESNA source of the region within the radius on this map
+            ax, ay = tile.xy(*pacs_fit.to_map_frame(ra, dec, shift))
+            on = np.isfinite(ax) & np.isfinite(ay)
+            claims = np.array([len(v) for v in cKDTree(np.c_[ax[on], ay[on]]).query_ball_point(pxy, r_px)]) \
+                if on.any() else np.zeros(pxy.shape[0], int)
+            near = cKDTree(pxy).query_ball_point(np.c_[x, y], r_px)
             for i in np.flatnonzero(ok):
-                others = [d_idx[j] for j in near_lists[i] if d_idx[j] != i]
-                if not others:
+                lst = near[i]
+                if not lst:
                     continue
-                n_blend[i] = len(others)
-                brightest = max(others, key=lambda j: flux[j])
-                group_id[i] = rows[brightest]
-                if detected[i] and flux[i] >= flux[brightest]:
-                    continue
-                n_demoted += int(detected[i])
-                origin[i] = ORIGIN_UPPER_BOUND
-                sigma[i] = UPPER_LIMIT_SIGMA
-
-        # Extended: detections only.
+                j = max(lst, key=lambda k: peaks["fnu"][k])
+                pacs_source[i] = peaks["index"][j]
+                separation[i] = np.hypot(peaks["x"][j] - x[i], peaks["y"][j] - y[i]) * tile.pixel_arcsec
+                n_blend[i] = int(claims[lst].max())
+                flux[i] = peaks["fnu"][j]
+                subtracted[i] = peaks["offset"][j]
+                if len(lst) == 1 and claims[j] == 1:
+                    origin[i] = ORIGIN_DETECTED
+                    sigma[i] = peaks["sigma"][j]
+                else:
+                    origin[i] = ORIGIN_UPPER_BOUND
+                    sigma[i] = UPPER_LIMIT_SIGMA
+        # Extended: detections only, at the PACS source's position.
         det = np.flatnonzero(origin == ORIGIN_DETECTED)
         if det.size:
-            extended[det] = tile.fitted_fwhm(x[det], y[det]) > EXTENDED_BEAM_FACTOR * tile.beam_arcsec
+            k = np.searchsorted(peaks["index"], pacs_source[det])
+            extended[det] = tile.fitted_fwhm(peaks["x"][k], peaks["y"][k]) > EXTENDED_BEAM_FACTOR * tile.beam_arcsec
 
-    # a detected source's error, measured by injection: its cell's SCATTER at its flux (log-linear between the
-    # flux steps)
-    n_nan = 0
-    det = np.flatnonzero(origin == ORIGIN_DETECTED)
-    if det.size:
-        sigma[det] = calibrated_sigma(scatter[det], flux_grid, flux[det])
-        n_nan += int(np.isnan(sigma[det]).sum())
-
-    # the offset subtracted from each reported flux (adding it back gives the HOPS/eHOPS convention)
-    subtracted = np.where(ok, offset, np.nan)
     columns = dict(FNU=flux, SIGMA=sigma, ORIGIN=origin, LOCAL_RMS=sigma_cell.astype(np.float32), CELL_OFFSET=subtracted,
-                   SIGMA_ANNULUS=np.asarray(sigma_annulus, np.float32),
-                   N_BLEND=n_blend, BLEND_GROUP=group_id, EXTENDED=extended)
+                   SIGMA_ANNULUS=np.asarray(sigma_annulus, np.float32), N_BLEND=n_blend, PACS_SOURCE=pacs_source,
+                   MATCH_SEPARATION=separation, EXTENDED=extended)
     # a source with no usable measurement keeps the cell noise only where a cell exists
     columns["LOCAL_RMS"][origin == ORIGIN_NOT_COVERED] = np.nan
-    return band, map_index, rows, columns, n_nan, n_demoted
+    return band, map_index, rows, columns
 
 
 # ---------------------------------------------------------------------------
@@ -221,11 +219,12 @@ def _runs(rows):
 
 
 _DTYPES = dict(FNU=np.float64, SIGMA=np.float64, CELL_OFFSET=np.float64, ORIGIN=np.int8, LOCAL_RMS=np.float32,
-               N_BLEND=np.int16, BLEND_GROUP=np.int32, EXTENDED=bool, SIGMA_ANNULUS=np.float32)
+               N_BLEND=np.int16, PACS_SOURCE=np.int32, MATCH_SEPARATION=np.float32, EXTENDED=bool, SIGMA_ANNULUS=np.float32)
 _FILL = dict(FNU=np.nan, SIGMA=np.nan, CELL_OFFSET=np.nan, ORIGIN=ORIGIN_NOT_COVERED, LOCAL_RMS=np.nan,
-             N_BLEND=0, BLEND_GROUP=-1, EXTENDED=False, SIGMA_ANNULUS=np.nan)
+             N_BLEND=0, PACS_SOURCE=-1, MATCH_SEPARATION=np.nan, EXTENDED=False, SIGMA_ANNULUS=np.nan)
 _NAMES = dict(FNU="FNU_{b}_MJY", SIGMA="SIGMA_{b}_MJY", CELL_OFFSET="CELL_OFFSET_{b}_MJY", ORIGIN="ORIGIN_{b}", LOCAL_RMS="LOCAL_RMS_{b}_MJY",
-              N_BLEND="N_BLEND_{b}", BLEND_GROUP="BLEND_GROUP_{b}", EXTENDED="EXTENDED_{b}",
+              N_BLEND="N_BLEND_{b}", PACS_SOURCE="PACS_SOURCE_{b}", MATCH_SEPARATION="MATCH_SEPARATION_{b}_ARCSEC",
+              EXTENDED="EXTENDED_{b}",
               SIGMA_ANNULUS="SIGMA_ANNULUS_{b}_MJY")
 
 
@@ -234,14 +233,17 @@ def _tile_key(record):
 
 
 def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_obsid, config, n_jobs, stage=None,
-                 shifts=None, cell_row=None, scatter=None, flux_grid=None):
+                 shifts=None, cell_row=None, scatter=None, flux_grid=None, peaks=None):
     """Measures every source on its cell's map and writes the product at
     `out_path`. `cell_sigma[b]` (n,) float64 is the source's cell noise (NaN:
     no cell, not covered) and `cell_obsid[b]` (n,) bytes the cell's map, the
     comma-joined observation ids of the `records` entry that holds it;
     `cell_row[b]` (n,) is the source's row in the completeness product (-1: none) and
-    `scatter[b]` (n_cell, n_plane) that product's measured aperture error per cell and flux plane (mJy). Returns
-    the per-band origin counts."""
+    `scatter[b]` (n_cell, n_plane) that product's measured aperture error per cell and flux plane (mJy); `peaks`
+    the PACS source table (`_read_peaks`). Returns the per-band origin counts."""
+    peaks = peaks or dict(r_match={band: np.nan for band in BANDS}, by_map={}, chance={band: 0.0 for band in BANDS})
+    none = dict(x=np.zeros(0), y=np.zeros(0), fnu=np.zeros(0), sigma=np.zeros(0), offset=np.zeros(0),
+                index=np.zeros(0, np.int64))
     n = names.size
     key_to_map = {}
     for i, rec in enumerate(records):
@@ -256,7 +258,7 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
             if i is None:
                 raise ValueError("pacs_photometry: completeness cell map %r is not in the %s index" % (key, band))
             rows = sel[cell_obsid[b][sel] == key]
-            pieces.append((b, i, rows, scatter[b][cell_row[b][rows]]))
+            pieces.append((b, i, rows, scatter[b][cell_row[b][rows]], peaks["by_map"].get((band, records[i].map_id), none)))
     obsid_len = max([len(_tile_key(r)) for r in records] + [1])
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -278,14 +280,10 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
             counts[band][ORIGIN_NOT_COVERED] = n
         fn_args = dict(config=config, records=records, ra=ra, dec=dec, cell_sigma=np.vstack(cell_sigma),
                        cell_offset=np.vstack(cell_offset),
-                       shifts=shifts or {}, flux_grid=flux_grid)
+                       shifts=shifts or {}, flux_grid=flux_grid, r_match=peaks["r_match"])
         fn = functools.partial(_measure_tile, **fn_args)
-        n_nan = {band: 0 for band in BANDS}
-        demoted = {band: 0 for band in BANDS}
-        for band_index, map_index, rows, cols, nan_sigma, n_dem in pieces_module.iterate(fn, pieces, n_jobs, stage=stage, unit="map tiles"):
+        for band_index, map_index, rows, cols in pieces_module.iterate(fn, pieces, n_jobs, stage=stage, unit="map tiles"):
             band = BANDS[band_index]
-            n_nan[band] += nan_sigma
-            demoted[band] += n_dem
             obsid = _tile_key(records[map_index]).encode()
             for start, stop, off in _runs(rows):
                 width = stop - start
@@ -296,12 +294,13 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
             for code in (1, 2, 90, 91):
                 counts[band][code] += int(np.sum(cols["ORIGIN"] == code))
     for band in BANDS:
-        print("  %s: %d sources are unseparable blends (ORIGIN 2: within %.1f beam of a detection and not its brighter "
-              "member), %d of them passing the detection rule on their own" % (band, counts[band][ORIGIN_UPPER_BOUND],
-                                                                                 BLEND_RADIUS_BEAMS, demoted[band]), flush=True)
-        if n_nan[band]:
-            print("  %s: %d detected sources have no measured photometric error in their cell (SIGMA NaN)"
-                  % (band, n_nan[band]), flush=True)
+        print("  %s: cross-match within the maps' matching radii (median %.2f arcsec): ORIGIN 1 %d, ORIGIN 2 (blends) %d, ORIGIN 90 %d, ORIGIN 91 %d; "
+              "expected chance matches over the region's PACS sources %.1f" % (band, peaks["r_match"][band],
+                                                                               counts[band][ORIGIN_DETECTED],
+                                                                               counts[band][ORIGIN_UPPER_BOUND],
+                                                                               counts[band][ORIGIN_UNDETECTED],
+                                                                               counts[band][ORIGIN_NOT_COVERED],
+                                                                               peaks["chance"][band]), flush=True)
     return counts
 
 
@@ -343,6 +342,32 @@ def _read_cells(config, region, n_source):
     return sigma, offset, obsid, shifts, row, scatter, flux_grid
 
 
+def _read_peaks(config, region, records):
+    """The region's PACS source table (`pacs_completeness.write_sources`), grouped by (band, map id) for the
+    photometry's map tiles: x, y, fnu, sigma, the offset of their cell, and their index in the band's table; the
+    matching radius and the expected chance matches per band."""
+    path = product_path(config, "sky/derived", "pacs", "sources", "region", region=region)
+    comp = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
+    out = dict(r_match={}, by_map={}, chance={})
+    with h5py.File(path, "r") as f, h5py.File(comp, "r") as fc:
+        for band in BANDS:
+            map_r = fc["MAP_R_MATCH_%s_ARCSEC" % band][:]
+            out["r_match"][band] = float(np.nanmedian(map_r)) if np.isfinite(map_r).any() else float("nan")
+            m = f["MAP_INDEX_" + band][:]
+            out["chance"][band] = float(np.nansum(f["CHANCE_" + band][:]))
+            if m.size == 0:
+                continue
+            map_ids = fc["MAP_ID_" + band][:]
+            off = fc["CELL_OFFSET_%s_MJY" % band][:][f["CELL_ROW_" + band][:]]
+            cols = dict(x=f["PIX_X_" + band][:], y=f["PIX_Y_" + band][:], fnu=f["FNU_%s_MJY" % band][:],
+                        sigma=f["SIGMA_%s_MJY" % band][:], offset=off, index=np.arange(m.size))
+            for t in np.unique(m):
+                sel = m == t
+                out["by_map"][(band, map_ids[t].decode())] = dict({k: v[sel] for k, v in cols.items()},
+                                                                  r_match=float(map_r[t]))
+    return out
+
+
 def _build_one_region(config, region, st):
     src_path = product_path(config, "catalog", "sesna", "sources", "source", region=region)
     with h5py.File(src_path, "r") as f:
@@ -354,6 +379,7 @@ def _build_one_region(config, region, st):
     if records:
         cell_sigma, cell_offset, cell_obsid, shifts, cell_row, scatter, flux_grid = _read_cells(
             config, region, names.size)
+        peaks = _read_peaks(config, region, records)
     else:
         cell_sigma = [np.full(names.size, np.nan) for _ in BANDS]
         cell_offset = [np.zeros(names.size) for _ in BANDS]
@@ -362,10 +388,11 @@ def _build_one_region(config, region, st):
         cell_row = [np.full(names.size, -1, dtype=np.int64) for _ in BANDS]
         scatter = [np.zeros((0, 1), np.float32) for _ in BANDS]
         flux_grid = None
+        peaks = None
     t0 = time.time()
     counts = write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_obsid,
                           config, config.n_jobs, stage=st, shifts=shifts, cell_row=cell_row, scatter=scatter,
-                          flux_grid=flux_grid)
+                          flux_grid=flux_grid, peaks=peaks)
     wall = time.time() - t0
     numbers = {"sources": int(names.size), "sources_per_s": names.size / max(wall, 1e-9)}
     for band in BANDS:
@@ -465,6 +492,16 @@ def acceptance(config, region, reference_product=None):
         print("   the reference product: %.4f (%d targets); difference %+.2f %% (bar: within 2 %%: %s)"
               % (old, n_old, 100 * (ratio / old - 1), "pass" if abs(ratio / old - 1) <= 0.02 else "FAIL"))
     h, row, f70 = _match_hops(config, region)
+    with h5py.File(path, "r") as f:
+        o70 = f["ORIGIN_P70"][:][row]
+    bright = f70[h] >= C4_MIN_F70_MJY
+    print("   HOPS targets >= %g mJy by final 70 micron ORIGIN: %s"
+          % (C4_MIN_F70_MJY, "  ".join("%d: %d" % (c, int((o70[bright] == c).sum())) for c in (1, 2, 90, 91))))
+    # the stop condition (RULINGS_5): of the bright HOPS targets the band covers that are not blends, ORIGIN 1 >= 95 %
+    pool = bright & (o70 != ORIGIN_NOT_COVERED) & (o70 != ORIGIN_UPPER_BOUND)
+    frac = float((o70[pool] == ORIGIN_DETECTED).mean()) if pool.any() else float("nan")
+    print("   STOP CONDITION: HOPS >= %g mJy covered and not blends that are ORIGIN 1: %.3f of %d (bar >= 0.95: %s)"
+          % (C4_MIN_F70_MJY, frac, int(pool.sum()), "pass" if frac >= 0.95 else "FAIL: a peak-finder or matcher defect"))
     comp = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
     with h5py.File(path, "r") as f:
         origin = f["ORIGIN_P70"][:][row]
