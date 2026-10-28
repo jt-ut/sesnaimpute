@@ -860,8 +860,8 @@ class Tile:
 
     def fit_positions(self, x, y, batch=512):
         """Forced single-source fit at each (x, y) -> PositionFit, the PSF-fit path's singleton: the same
-        estimator as `fit_groups` (one free constant background, no annulus sky, no nuisance columns), so its
-        median at a cell's clean random positions is the group path's own empty-sky null (CELL_OFFSET_PSF).
+        estimator as `fit_groups` (one free constant background, no annulus sky, no nuisance columns); the
+        photometry takes a group's noise scale from it.
         A neighbour inside the fitting box adds to the flux -- disclosed."""
         return self._fit(x, y, use_nuisance=False, batch=batch, free_bg=True)
 

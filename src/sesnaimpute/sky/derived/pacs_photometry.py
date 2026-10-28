@@ -23,7 +23,7 @@ products:
   measured by injection: METHOD 1 the cell's `SCATTER_<B>_MJY` at the source's flux (log-linear between the flux
   steps); METHOD 2 the joint fit's formal error times the map's `SCATTER_BLEND_<B>` at the source's S/N
   (FNU / CELL_SIGMA, interpolated in log S/N between four bins). FNU is the measured flux minus its own estimator's empty-sky offset in the cell
-  (CELL_OFFSET for the aperture, CELL_OFFSET_PSF for the joint fit). A source
+  (CELL_OFFSET of the cell for the aperture, CELL_OFFSET_BLEND of the map for the joint fit). A source
   that is not detected carries the noise of its 30-arcsec cell, `CELL_SIGMA_<B>_MJY`, the same number
   the detection rule below uses; the fit's propagated pixel noise is never added to either.
 - detection: flux - CELL_OFFSET >= 5 x CELL_SIGMA (origin 1), else origin 90, for the aperture flux and for
@@ -168,11 +168,11 @@ def calibrated_sigma(scatter, flux_grid, flux):
 # ---------------------------------------------------------------------------
 # one tile
 
-def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shifts, flux_grid, cell_offset_psf=None):
+def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shifts, flux_grid, cell_offset_blend=None):
     """All of one map tile's sources: `piece = (band, map_index, rows, scatter, scatter_blend)`, the
     source rows (ascending) the completeness stage assigned to that map and, for each, the measured error per S/N
     bin (n, 4): its cell's aperture SCATTER (mJy) and its map's joint-fit SCATTER_BLEND (a multiplier of the fit's
-    formal error). `cell_offset_psf` is the joint PSF fit's own empty-sky offset per source. Returns `(band,
+    formal error). `cell_offset_blend` is the joint fit's own empty-sky null per source (its map's ring null). Returns `(band,
     map_index, rows, columns)`, `columns` the product's per-source arrays for those rows."""
     band, map_index, rows, scatter, scatter_blend = piece
     record = records[map_index]
@@ -181,7 +181,7 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
     # the cell's empty-sky offset (sky structure the fit's background term leaves), subtracted from
     # every flux measured in the cell, exactly as the completeness stage does for its positions
     offset = cell_offset[band][rows]
-    offset_psf = cell_offset_psf[band][rows]
+    offset_blend = cell_offset_blend[band][rows]
     formal = np.full(n, np.nan)
     beam = beam_fwhm_arcsec(record)
 
@@ -236,7 +236,7 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
             formal[gi] = gfit.sigma[separable]
             sigma[gi] = sigma_cell[gi]
             # the joint fit's flux is judged against its own estimator's empty-sky offset
-            origin[gi] = np.where(flux[gi] - offset_psf[gi] >= DETECTION_SNR * sigma_cell[gi], ORIGIN_DETECTED, ORIGIN_UNDETECTED)
+            origin[gi] = np.where(flux[gi] - offset_blend[gi] >= DETECTION_SNR * sigma_cell[gi], ORIGIN_DETECTED, ORIGIN_UNDETECTED)
             gu = g[unseparable]
             flux[gu] = (np.maximum(0.0, gfit.group_flux[unseparable])
                         + DETECTION_SNR * gfit.group_sigma[unseparable] * ratio_mean[unseparable])
@@ -254,7 +254,7 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
     m1 = (origin != ORIGIN_UPPER_BOUND) & (method == 1)
     m2 = (origin != ORIGIN_UPPER_BOUND) & (method == 2)
     flux[m1] = flux[m1] - offset[m1]
-    flux[m2] = flux[m2] - offset_psf[m2]
+    flux[m2] = flux[m2] - offset_blend[m2]
     # a detected source's error, measured by injection: METHOD 1 its cell's SCATTER at its flux (log-linear between
     # the flux steps); METHOD 2 the fit's formal error x its map's SCATTER_BLEND at its S/N (FNU / CELL_SIGMA)
     n_nan = 0
@@ -270,7 +270,7 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
     # the offset subtracted from each reported flux (adding it back gives the HOPS/eHOPS convention)
     subtracted = np.full(flux.size, np.nan)
     subtracted[m1] = offset[m1]
-    subtracted[m2] = offset_psf[m2]
+    subtracted[m2] = offset_blend[m2]
     columns = dict(FNU=flux, SIGMA=sigma, ORIGIN=origin, LOCAL_RMS=sigma_cell.astype(np.float32), CELL_OFFSET=subtracted,
                    SIGMA_ANNULUS=np.asarray(sigma_annulus, np.float32), METHOD=method,
                    N_BLEND=n_blend, BLEND_GROUP=group_id, EXTENDED=extended)
@@ -307,7 +307,7 @@ def _tile_key(record):
 
 
 def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_obsid, config, n_jobs, stage=None,
-                 cell_offset_psf=None,
+                 cell_offset_blend=None,
                  shifts=None, cell_row=None, scatter=None, scatter_blend=None, flux_grid=None):
     """Measures every source on its cell's map and writes the product at
     `out_path`. `cell_sigma[b]` (n,) float64 is the source's cell noise (NaN:
@@ -315,8 +315,8 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
     comma-joined observation ids of the `records` entry that holds it;
     `cell_row[b]` (n,) is the source's row in the completeness product (-1: none) and
     `scatter[b]`, `scatter_blend[b]` (n_cell, 4) that product's measured errors per cell and S/N bin (the cell's
-    aperture SCATTER in mJy; its map's joint-fit SCATTER_BLEND multiplier); `cell_offset_psf[b]` (n,) the joint
-    PSF fit's empty-sky offset per source. Returns the per-band origin counts."""
+    aperture SCATTER in mJy; its map's joint-fit SCATTER_BLEND multiplier); `cell_offset_blend[b]` (n,) the joint
+    fit's empty-sky null per source (its map's ring null, CELL_OFFSET_BLEND). Returns the per-band origin counts."""
     n = names.size
     key_to_map = {}
     for i, rec in enumerate(records):
@@ -353,7 +353,7 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
             counts[band][ORIGIN_NOT_COVERED] = n
         fn_args = dict(config=config, records=records, ra=ra, dec=dec, cell_sigma=np.vstack(cell_sigma),
                        cell_offset=np.vstack(cell_offset),
-                       cell_offset_psf=np.vstack(cell_offset_psf if cell_offset_psf is not None else cell_offset),
+                       cell_offset_blend=np.vstack(cell_offset_blend if cell_offset_blend is not None else cell_offset),
                        shifts=shifts or {}, flux_grid=flux_grid)
         fn = functools.partial(_measure_tile, **fn_args)
         n_nan = {band: 0 for band in BANDS}
@@ -384,7 +384,7 @@ def _read_cells(config, region, n_source):
     path = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
     sigma = [np.full(n_source, np.nan) for _ in BANDS]
     offset = [np.zeros(n_source) for _ in BANDS]
-    offset_psf = [np.zeros(n_source) for _ in BANDS]
+    offset_blend = [np.zeros(n_source) for _ in BANDS]
     row = [np.full(n_source, -1, dtype=np.int64) for _ in BANDS]
     shifts = {}
     obsid = [np.full(n_source, b"", dtype="S1") for _ in BANDS]
@@ -409,13 +409,14 @@ def _read_cells(config, region, n_source):
             sigma[b][have] = cell_sigma[rows[have]]
             offset[b][have] = f["CELL_OFFSET_%s_MJY" % band][:][rows[have]]
             row[b] = np.where(have, rows, -1).astype(np.int64)
-            offset_psf[b][have] = f["CELL_OFFSET_PSF_%s_MJY" % band][:][rows[have]]
+            # the joint fit's null is its map's ring null (CELL_OFFSET_BLEND, one per map)
+            offset_blend[b][have] = f["CELL_OFFSET_BLEND_%s_MJY" % band][:][f["CELL_MAP_INDEX_" + band][:][rows[have]]]
             scatter[b] = f["SCATTER_%s_MJY" % band][:]
             scatter_blend[b] = f["SCATTER_BLEND_" + band][:][f["CELL_MAP_INDEX_" + band][:]]
             for key, sh in zip(f["MAP_OBSID_" + band][:], f["MAP_SHIFT_%s_ARCSEC" % band][:]):
                 shifts[(band, key.decode())] = (float(sh[0]), float(sh[1]))
             obsid[b] = np.where(have, cell_obs[np.where(have, rows, 0)], b"")
-    return sigma, offset, obsid, shifts, row, scatter, scatter_blend, flux_grid, offset_psf
+    return sigma, offset, obsid, shifts, row, scatter, scatter_blend, flux_grid, offset_blend
 
 
 def _build_one_region(config, region, st):
@@ -427,12 +428,12 @@ def _build_one_region(config, region, st):
     out_path = product_path(config, "sky/derived", "pacs", "photometry", "source", region=region)
     records = read_index(config, region)
     if records:
-        cell_sigma, cell_offset, cell_obsid, shifts, cell_row, scatter, scatter_blend, flux_grid, cell_offset_psf = _read_cells(
+        cell_sigma, cell_offset, cell_obsid, shifts, cell_row, scatter, scatter_blend, flux_grid, cell_offset_blend = _read_cells(
             config, region, names.size)
     else:
         cell_sigma = [np.full(names.size, np.nan) for _ in BANDS]
         cell_offset = [np.zeros(names.size) for _ in BANDS]
-        cell_offset_psf = [np.zeros(names.size) for _ in BANDS]
+        cell_offset_blend = [np.zeros(names.size) for _ in BANDS]
         shifts = {}
         cell_obsid = [np.full(names.size, b"", dtype="S1") for _ in BANDS]
         cell_row = [np.full(names.size, -1, dtype=np.int64) for _ in BANDS]
@@ -441,7 +442,7 @@ def _build_one_region(config, region, st):
         flux_grid = None
     t0 = time.time()
     counts = write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_obsid,
-                          config, config.n_jobs, stage=st, cell_offset_psf=cell_offset_psf, shifts=shifts, cell_row=cell_row, scatter=scatter,
+                          config, config.n_jobs, stage=st, cell_offset_blend=cell_offset_blend, shifts=shifts, cell_row=cell_row, scatter=scatter,
                           scatter_blend=scatter_blend, flux_grid=flux_grid)
     wall = time.time() - t0
     numbers = {"sources": int(names.size), "sources_per_s": names.size / max(wall, 1e-9)}

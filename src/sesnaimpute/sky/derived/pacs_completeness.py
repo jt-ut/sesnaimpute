@@ -272,16 +272,10 @@ def _piece(piece, config, records, refs):
     record = records[tile_index]
     tile = pacs_fit.cached_tile(config, record)
     all_ids = ring(tile.grid, ids)
-    b, gain, ps, valid, clean, sky, psf_flux = cell_fits(tile, all_ids, tile_index + 1, psf=True)
+    b, gain, ps, valid, clean, sky, _ = cell_fits(tile, all_ids, tile_index + 1)
     n_valid, n_clean, mad, g, pps, off = cell_statistics(b, gain, ps, valid, clean)
     sigma, n_sigma = block_sigma(tile.grid, ids, all_ids, mad, n_clean)
     offset = cell_offset(tile.grid, ids, all_ids, off, n_clean)
-    # the joint PSF fit's own empty-sky offset, built exactly as the aperture's (its clean positions' median); the two
-    # estimators have different nulls, so each flux has its own offset subtracted
-    psf_use = clean & np.isfinite(psf_flux)
-    with np.errstate(all="ignore"):
-        off_psf = np.nanmedian(np.where(psf_use, psf_flux, np.nan), axis=1)
-    offset_psf = cell_offset(tile.grid, ids, all_ids, off_psf, psf_use.sum(axis=1))
     ref = refs[tile_index]
     # a block with no clean cell (wholly within a beam of bright sources) takes the tile's median noise;
     # N_SIGMA_POS 0 marks it
@@ -294,7 +288,7 @@ def _piece(piece, config, records, refs):
     ra, dec = pacs_fit.from_map_frame(*tile.grid.centres_icrs(ids), ref["shift"][:2])
     return dict(tile=tile_index, ids=ids, covered=covered,
                 n_sigma=np.minimum(n_sigma, np.iinfo(np.int16).max).astype(np.int16),
-                sigma=sigma, offset=offset, offset_psf=offset_psf, sky=cell_sky, ra=ra, dec=dec)
+                sigma=sigma, offset=offset, sky=cell_sky, ra=ra, dec=dec)
 
 
 # ----------------------------------------------------------------------------
@@ -488,10 +482,8 @@ class Injector:
         self.row_of_cell[self.ids] = np.arange(n, dtype=np.int32)
         self.sigma = np.full(grid.n_cells, np.nan)
         self.offset = np.full(grid.n_cells, np.nan)
-        self.offset_psf = np.full(grid.n_cells, np.nan)
         self.sigma[self.ids] = inp["sigma"]
         self.offset[self.ids] = inp["offset"]
-        self.offset_psf[self.ids] = inp["offset_psf"]
         self.beam_px = tile.beam_px
         self.beam_area_px = np.pi / (4 * np.log(2)) * tile.beam_px ** 2
         self.separation_px = tile.injection_half_width() + APERTURES[tile.record.band][2] / tile.pixel_arcsec
@@ -501,14 +493,16 @@ class Injector:
         self.det_label = np.zeros(0, np.int64)
         self.members = {}
         self.src_xy = np.zeros((0, 2))
+        self.det_flux = np.zeros(0)
         self.n_detected = 0
         if inp["src_ra"].size:
-            x, y, _single, _ok, det = singleton_pass(tile, inp["src_ra"], inp["src_dec"], inp["shift"],
-                                                     inp["src_sigma"], inp["src_offset"])
+            x, y, single, _ok, det = singleton_pass(tile, inp["src_ra"], inp["src_dec"], inp["shift"],
+                                                    inp["src_sigma"], inp["src_offset"])
             self.n_detected = int(det.sum())
             self.src_xy = np.c_[x, y]
             if det.any():
                 self.det_xy = self.src_xy[det]
+                self.det_flux = (single.flux - inp["src_offset"])[det]
                 self.det_tree = cKDTree(self.det_xy)
             # blend groups of the real sources, as the photometry forms them
             label, _size = _blend_components(inp["src_ra"], inp["src_dec"], det, BLEND_RADIUS_BEAMS * tile.beam_arcsec)
@@ -521,6 +515,64 @@ class Injector:
         self.valid_fraction = 1.0
         probe = self._draw(np.random.default_rng(0), np.arange(n), 20000)
         self.valid_fraction = float(self._valid(*probe).mean()) if n else 0.0
+        self._blend_null()
+
+    def _blend_null(self):
+        """The joint fit's own empty-sky null on this map, CELL_OFFSET_BLEND: the median group-fit flux, with NO
+        injection, at BLEND_TARGETED rounds of the targeted ring positions (DROP_BEAMS to BLEND_RADIUS_BEAMS from each detected
+        source, valid pixels; `blend_positions`, own seeds), each fitted as a member of the real group it would
+        join, separable fits only. The joint fit's sources sit next to detected sources, so its null is taken
+        there, not at clean positions. Also the disclosure: the same medians split by the brightness of the
+        nearest detected source (above / below the map's median detected flux) and by ring half (inner / outer
+        in area), `blend_split` (2, 2) [bright, faint] x [inner, outer] with counts `blend_n`. NaN without
+        detections."""
+        self.blend_offset = np.nan
+        self.blend_split = np.full((2, 2), np.nan)
+        self.blend_n = np.zeros((2, 2), np.int64)
+        if self.det_tree is None:
+            return
+        vals, near, dist = [], [], []
+        for k in range(BLEND_TARGETED):
+            x, y, d = self.blend_positions(np.random.default_rng([self.seed_key, 88888, k]))
+            if x.size == 0:
+                continue
+            f, _sf, cov, sep = self._group_fit(x, y, np.arange(x.size))
+            use = cov & sep & np.isfinite(f)
+            _, j = self.det_tree.query(np.c_[x[use], y[use]])
+            vals.append(f[use])
+            near.append(j)
+            dist.append(d[use])
+        if not vals:
+            return
+        v, j, d = np.concatenate(vals), np.concatenate(near), np.concatenate(dist)
+        if v.size == 0:
+            return
+        self.blend_offset = float(np.median(v))
+        bright = self.det_flux[j] >= np.median(self.det_flux)
+        outer = d >= self.beam_px * np.sqrt((DROP_BEAMS ** 2 + BLEND_RADIUS_BEAMS ** 2) / 2.0)
+        for a, sa in enumerate((bright, ~bright)):
+            for b, sb in enumerate((~outer, outer)):
+                m = sa & sb
+                self.blend_n[a, b] = int(m.sum())
+                if m.any():
+                    self.blend_split[a, b] = float(np.median(v[m]))
+
+    def _group_fit(self, x, y, gr):
+        """The group fit of positions `gr` of (x, y), each fitted as one more member of the group of the real sources
+        the photometry would fit together with the detected sources within the blend radius of it. Returns
+        (flux, formal sigma, covered, separable), each (gr.size,)."""
+        xs, ys, lab, last, used = [], [], [], [], 0
+        for j in gr:
+            near = self.det_tree.query_ball_point([x[j], y[j]], BLEND_RADIUS_BEAMS * self.beam_px)
+            mem = np.concatenate([self.members[int(l)] for l in np.unique(self.det_label[near])])
+            xs += [self.src_xy[mem, 0], [x[j]]]
+            ys += [self.src_xy[mem, 1], [y[j]]]
+            lab.append(np.full(mem.size + 1, j))
+            used += mem.size + 1
+            last.append(used - 1)
+        gfit = self.tile.fit_groups(np.concatenate(xs), np.concatenate(ys), np.concatenate(lab))
+        last = np.asarray(last)
+        return (gfit.flux[last], gfit.sigma[last], gfit.covered[last], gfit.max_abs_rho[last] <= BLEND_RHO_LIMIT)
 
     def _draw(self, rng, rows, n):
         """n positions, each uniform inside the cell of a randomly chosen row of `rows`."""
@@ -628,8 +680,8 @@ class Injector:
         cid = tile.grid.cell_ids(x, y)
         sigma = self.sigma[cid]
         group = d < BLEND_RADIUS_BEAMS * self.beam_px
-        # each path's flux minus its own estimator's empty-sky offset (aperture; joint PSF fit)
-        offset = np.where(group, self.offset_psf[cid], self.offset[cid])
+        # each path's flux minus its own estimator's empty-sky null (aperture: the cell's; joint fit: the map's ring null)
+        offset = np.where(group, self.blend_offset, self.offset[cid])
         sigma_formal = np.full(n, np.nan)
         flux_out = np.full(n, np.nan)
         covered = np.zeros(n, bool)
@@ -650,21 +702,7 @@ class Injector:
                 # each injected source is one more member of the group of the real sources the photometry
                 # would fit together with the detected sources within the blend radius of it
                 t0 = time.time()
-                xs, ys, lab, last, used = [], [], [], [], 0
-                for j in gr:
-                    near = self.det_tree.query_ball_point([x[j], y[j]], BLEND_RADIUS_BEAMS * self.beam_px)
-                    mem = np.concatenate([self.members[int(l)] for l in np.unique(self.det_label[near])])
-                    xs += [self.src_xy[mem, 0], [x[j]]]
-                    ys += [self.src_xy[mem, 1], [y[j]]]
-                    lab.append(np.full(mem.size + 1, j))
-                    used += mem.size + 1
-                    last.append(used - 1)
-                gfit = tile.fit_groups(np.concatenate(xs), np.concatenate(ys), np.concatenate(lab))
-                last = np.asarray(last)
-                flux_out[gr] = gfit.flux[last]
-                sigma_formal[gr] = gfit.sigma[last]
-                covered[gr] = gfit.covered[last]
-                separable[gr] = gfit.max_abs_rho[last] <= BLEND_RHO_LIMIT
+                flux_out[gr], sigma_formal[gr], covered[gr], separable[gr] = self._group_fit(x, y, gr)
                 t_gr = time.time() - t0
         finally:
             t0 = time.time()
@@ -889,7 +927,8 @@ def _inject_pairs(piece, config, records):
         r, sec, cnt = _inject_half(inj, Ws, p, snr[p], half, n_row, interior)
         b, bsec = _inject_blend(inj, p, snr[p], half)
         done.append((p, half, r, sec, cnt, b, bsec))
-    return t, dict(pairs=done, check=check, n_detected=inj.n_detected)
+    return t, dict(pairs=done, check=check, n_detected=inj.n_detected,
+                   blend_null=(inj.blend_offset, inj.blend_split, inj.blend_n))
 
 
 def _finish_tile(piece, records, flux_grid):
@@ -942,7 +981,9 @@ def _finish_tile(piece, records, flux_grid):
     floor = build["plane"] == 0
     out["floor"] = dict(row=build["row"][floor], recovered=build["recovered"][floor])
     check = next(part["check"] for part in parts if part["check"] is not None)
+    out["blend_null"] = parts[0]["blend_null"]
     out["stats"] = dict(map_id=records[t].map_id, n_row=n_row, n_detected=parts[0]["n_detected"],
+                        blend_null=parts[0]["blend_null"],
                         n_build=int(build["row"].size), n_held=int(held["row"].size),
                         n_source=int(inp["src_ra"].size),
                         min_pool=float(tot.min()), median_pool=float(np.median(tot)),
@@ -988,7 +1029,7 @@ def _tile_geometry(record):
 REGION_PAD_ARCSEC = 412.0
 
 
-def tile_inputs(cell_map, cell_id, sigma, offset, offset_psf, source_row, shift, ra, dec):
+def tile_inputs(cell_map, cell_id, sigma, offset, source_row, shift, ra, dec):
     """What `Injector` needs per map tile, from the band's rows: `{tile: dict}` for the tiles that hold rows.
     `cell_map`, `cell_id`, `sigma`, `offset` are the rows' map index, cell id and the detection rule's inputs
     (float32 as stored), `source_row` (n_source,) each source's row (-1 none), `shift[t]` the map's
@@ -1002,7 +1043,6 @@ def tile_inputs(cell_map, cell_id, sigma, offset, offset_psf, source_row, shift,
         rows = np.flatnonzero(cell_map == t)
         s = np.flatnonzero(source_tile == t)
         out[int(t)] = dict(ids=cell_id[rows], sigma=sigma[rows].astype(np.float64), offset=offset[rows].astype(np.float64),
-                           offset_psf=offset_psf[rows].astype(np.float64),
                            src_ra=ra[s], src_dec=dec[s], src_sigma=sigma[source_row[s]].astype(np.float64),
                            src_offset=offset[source_row[s]].astype(np.float64),
                            shift=(float(np.float32(shift[t][0])), float(np.float32(shift[t][1]))), row0=int(rows[0]))
@@ -1011,6 +1051,12 @@ def tile_inputs(cell_map, cell_id, sigma, offset, offset_psf, source_row, shift,
 
 def _print_tile_stats(s, flux_grid):
     sec, n = s["seconds"], s["n_by_path"]
+    off, split, cnt = s["blend_null"]
+    if np.isfinite(off):
+        print("  %s: joint-fit ring null %.1f mJy; by nearest detection bright / faint x ring inner / outer: "
+              "%.1f / %.1f / %.1f / %.1f mJy (%d / %d / %d / %d positions)"
+              % (s["map_id"], off, split[0, 0], split[0, 1], split[1, 0], split[1, 1],
+                 cnt[0, 0], cnt[0, 1], cnt[1, 0], cnt[1, 1]), flush=True)
     per = lambda k, c: 1e4 * sec[k] / max(c, 1)
     print("  %s: %d cells, %d detected sources; injections build %d held-out %d; pooled per (cell, plane): "
           "min %d median %d (%.1f %% of (cell, plane) below %d after widening); seconds per 10000 injections: aperture "
@@ -1084,7 +1130,7 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
     # the detection rule's inputs: cell offset and noise
     results = pieces_module.run(functools.partial(_piece, config=config, records=records, refs=refs),
                                 pieces, n_jobs, stage=stage, unit="cell blocks")
-    names = ("covered", "n_sigma", "sigma", "offset", "offset_psf", "sky", "ra", "dec")
+    names = ("covered", "n_sigma", "sigma", "offset", "sky", "ra", "dec")
     # the rows: every covered cell of every map, ordered by (map, cell id)
     parts = []
     for t in range(len(records)):
@@ -1119,11 +1165,10 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
     shifts = np.array([refs[t]["shift"] if t in refs else (0.0, 0.0, 0) for t in range(len(records))], dtype=float)
     cell_sigma = cols["sigma"].astype(np.float32)
     cell_offset = cols["offset"].astype(np.float32)
-    cell_offset_psf = cols["offset_psf"].astype(np.float32)
 
     # artificial sources: each map cut into pieces of its (S/N plane, half) pairs, map by map from the biggest;
     # then each map pooled whole
-    inputs = tile_inputs(cell_map, cell_id, cell_sigma, cell_offset, cell_offset_psf, src_row, shifts, ra, dec)
+    inputs = tile_inputs(cell_map, cell_id, cell_sigma, cell_offset, src_row, shifts, ra, dec)
     todo, counts = injection_pieces(records, inputs)
     done = pieces_module.run(functools.partial(_inject_pairs, config=config, records=records),
                              todo, n_jobs, stage=stage, unit="map pieces (artificial sources)")
@@ -1144,6 +1189,9 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
     build_errors = {k: np.full((n_row, n_plane), np.nan, np.float32) for k in cell_keys}
     errors.update({k: np.full((len(records), n_bin), np.nan, np.float32) for k in map_keys})
     build_errors.update({k: np.full((len(records), n_bin), np.nan, np.float32) for k in map_keys})
+    blend_offset = np.full(len(records), np.nan, np.float32)
+    blend_split = np.full((len(records), 2, 2), np.nan, np.float32)
+    blend_n = np.zeros((len(records), 2, 2), np.int32)
     held = {k: [] for k in ("row", "plane", "path", "recovered", "separable", "dflux", "flux")}
     held_blend = {k: [] for k in ("row", "plane", "recovered", "separable", "dflux", "flux", "sigma_formal")}
     floor_row, floor_rec = [], []
@@ -1155,6 +1203,7 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
         for k in cell_keys:
             errors[k][sl] = out["errors"][k]
             build_errors[k][sl] = out["held"]["build_errors"][k]
+        blend_offset[t], blend_split[t], blend_n[t] = out["blend_null"]
         for k in map_keys:
             errors[k][t] = out["errors"][k]
             build_errors[k][t] = out["held"]["build_errors"][k]
@@ -1179,7 +1228,8 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
     envelope = curve.max(axis=0).astype(np.uint16) if n_row else np.zeros(n_plane, np.uint16)
     return dict(curve=curve, source_row=src_row.astype(np.int32), envelope=envelope, n_pos=n_pos,
                 n_scatter_blend=errors["n_scatter_blend"].astype(np.int32),
-                cell_offset_psf=cell_offset_psf, contamination=contamination, contamination_bins=bin_values, contamination_counts=bin_counts,
+                cell_offset_blend=blend_offset, blend_null_split=blend_split, n_blend_null=blend_n,
+                contamination=contamination, contamination_bins=bin_values, contamination_counts=bin_counts,
                 n_sigma=cols["n_sigma"].astype(np.int16), flux90=flux90_, bias=errors["bias"], scatter=errors["scatter"],
                 scatter_blend=errors["scatter_blend"], held=held, stats=stats,
                 cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=cell_sigma, cell_offset=cell_offset,
@@ -1231,7 +1281,8 @@ def _empty_band(n_src, n_plane):
                 envelope=np.zeros(n_plane, np.uint16), n_pos=z(np.int32), n_sigma=z(np.int16), flux90=z(np.float32),
                 bias=nan(), scatter=nan(),
                 scatter_blend=np.zeros((0, 4), np.float32),
-                n_scatter_blend=np.zeros((0, 4), np.int32), cell_offset_psf=z(np.float32), held=None, stats=[], cell_ra=z(float),
+                n_scatter_blend=np.zeros((0, 4), np.int32), cell_offset_blend=z(np.float32),
+                blend_null_split=np.zeros((0, 2, 2), np.float32), n_blend_null=np.zeros((0, 2, 2), np.int32), held=None, stats=[], cell_ra=z(float),
                 cell_dec=z(float), cell_sigma=z(np.float32), cell_offset=z(np.float32), cell_id=z(np.int64),
                 cell_map_index=z(np.int32), cell_obsid=z("S1"), cell_map=z("S1"), n_candidate=0, map_id=z("S1"),
                 map_obsid=z("S1"), map_shift=np.zeros((0, 2), np.float32), map_pairs=z(np.int32), map_wcs=z("S1"),
@@ -1268,7 +1319,11 @@ def write_product(path, region, mag, bands):
             ds.attrs["SNR_BIN_EDGES"] = np.asarray(SNR_BIN_EDGES)
             ds.attrs["SNR_BIN_CENTRES"] = np.asarray(SNR_BIN_CENTRES)
             w("N_SCATTER_BLEND_" + b, d["n_scatter_blend"])
-            w("CELL_OFFSET_PSF_%s_MJY" % b, d["cell_offset_psf"])
+            w("CELL_OFFSET_BLEND_%s_MJY" % b, d["cell_offset_blend"])
+            ds = w("BLEND_NULL_SPLIT_%s_MJY" % b, d["blend_null_split"])
+            ds.attrs["AXIS_1"] = "nearest detected source above, below the map's median detected flux"
+            ds.attrs["AXIS_2"] = "ring half (in area): inner, outer"
+            w("N_BLEND_NULL_" + b, d["n_blend_null"])
             ds = w("CONTAMINATION_" + b, d["contamination"])
             ds.attrs["SKY_BINS"] = SKY_BINS
             ds.attrs["BIN_VALUES"] = np.asarray(d["contamination_bins"], np.float64)
@@ -1344,7 +1399,7 @@ def _read_band(f, band):
     d = dict(curve=g("CURVE_" + band), mag=g("MAG_GRID_" + band), flux90=g("FLUX90_%s_MJY" % band),
              n_pos=g("N_POS_" + band), scatter=g("SCATTER_%s_MJY" % band), scatter_blend=g("SCATTER_BLEND_" + band),
              bias=g("BIAS_%s_MJY" % band), sigma=g("CELL_SIGMA_%s_MJY" % band), offset=g("CELL_OFFSET_%s_MJY" % band),
-             contamination=g("CONTAMINATION_" + band), offset_psf=g("CELL_OFFSET_PSF_%s_MJY" % band), cell_id=g("CELL_ID_" + band), cell_map=g("CELL_MAP_INDEX_" + band),
+             contamination=g("CONTAMINATION_" + band), cell_id=g("CELL_ID_" + band), cell_map=g("CELL_MAP_INDEX_" + band),
              map_id=g("MAP_ID_" + band), map_wcs=g("MAP_WCS_" + band), map_shape=g("MAP_SHAPE_" + band),
              map_shift=g("MAP_SHIFT_%s_ARCSEC" % band), source_row=g("SOURCE_ROW")[:, BANDS.index(band)])
     d["contamination_bins"] = f["CONTAMINATION_" + band].attrs["BIN_VALUES"]

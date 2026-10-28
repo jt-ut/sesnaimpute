@@ -3910,8 +3910,8 @@ PACS_COPIED = (
     "CELL_OBSID_{b}", "N_POS_{b}", "N_SIGMA_POS_{b}",
     "MAP_ID_{b}", "MAP_OBSID_{b}", "MAP_WCS_{b}", "MAP_SHAPE_{b}", "MAP_CELL_STEP_{b}",
     "MAP_SHIFT_{b}_ARCSEC", "MAP_N_PAIRS_{b}",
-    # the joint point-source fit's empty-sky offset (a blended source's flux has it subtracted)
-    "CELL_OFFSET_PSF_{b}_MJY",
+    # the joint fit's empty-sky null per map (a blended source's flux has it subtracted)
+    "CELL_OFFSET_BLEND_{b}_MJY",
 )
 
 
@@ -3957,9 +3957,6 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
     "MAP_CELL_STEP_{b}": ("pixels (x, y)",
         "For each row of MAP_ID_{b}: the cell size in the map's pixels along x and y (30 arcsec over the "
         "pixel scale); edge cells are clipped to the image."),
-    "CELL_OFFSET_PSF_{b}_MJY": ("mJy",
-        "For each row of CURVE_{b}: the median flux the joint point-source fit returns at the cell's random empty-sky "
-        "positions farther than one beam from every bright source. The fit's counterpart of CELL_OFFSET_{b}_MJY."),
     "SOURCE_ROW": ("row index into CURVE_<band>",
         "For each curated source, in the order of the region's source table, and the bands P70, P100, P160: "
         "the row of CURVE_P70 / CURVE_P100 / CURVE_P160 for the cell the source falls in on the deepest map covering "
@@ -3992,17 +3989,19 @@ _PHOTOMETRY_PACS_READINGS = {
         "sit about 9 % lower at 70 micron, and more at 100 micron on fast-scan maps. Where METHOD is 2 the source has "
         "a neighbour within one beam of a detected source and its flux is the total flux of a joint point-source "
         "fit, every member's point-spread pattern plus one free constant background over the fitting box (no annulus "
-        "sky: the clipped sky of a neighbour's annulus would take part of a member's light, non-linearly). The cell's empty-sky offset of the same measurement (CELL_OFFSET for the aperture, CELL_OFFSET_PSF for "
-        "the joint fit, in the completeness product: the typical flux that measurement returns at empty positions of "
-        "the 30-arcsecond cell, from sky structure it does not remove) is subtracted; the value for this source is CELL_OFFSET_{b}_MJY, and adding it back gives the convention of HOPS and eHOPS, which subtract no such offset. It can be negative or small when nothing is seen and is NaN where the band does not "
+        "sky: the clipped sky of a neighbour's annulus would take part of a member's light, non-linearly). The empty-sky offset of the same measurement is subtracted (in the completeness product: CELL_OFFSET for the "
+        "aperture, the typical flux it returns at empty positions of the 30-arcsecond cell; CELL_OFFSET_BLEND for the "
+        "joint fit, the typical flux the joint fit returns with no source, at positions beside the map's detected "
+        "sources where its members sit; sky structure each does not remove); the value for this source is CELL_OFFSET_{b}_MJY, and adding it back gives the convention of HOPS and eHOPS, which subtract no such offset. It can be negative or small when nothing is seen and is NaN where the band does not "
         "cover the source. "
         "Where ORIGIN is 2 it is an upper bound: the combined flux of the blended group plus five times its "
         "uncertainty."),
     "CELL_OFFSET_{b}_MJY": ("mJy",
         "The empty-sky offset subtracted from FNU_{b}_MJY for this source: the median flux the same measurement "
-        "returns at random empty positions of the source's 30-arcsecond cell (sky structure the background does "
-        "not remove; CELL_OFFSET_{b}_MJY of the completeness product for the aperture, METHOD 1, and "
-        "CELL_OFFSET_PSF_{b}_MJY for the joint fit, METHOD 2). The same offset enters the detection rule and the "
+        "returns with no source present (sky structure the background does not remove): for the aperture, METHOD 1, "
+        "CELL_OFFSET_{b}_MJY of the completeness product, at random empty positions of the source's 30-arcsecond "
+        "cell; for the joint fit, METHOD 2, CELL_OFFSET_BLEND_{b}_MJY, one value for the map, at positions beside its "
+        "detected sources. The same offset enters the detection rule and the "
         "completeness curve, and artificial sources show the flux minus it is unbiased. FNU_{b}_MJY plus this "
         "value is the flux on the convention of catalogues that subtract no such offset, as HOPS and eHOPS do; "
         "in bright cloud it is several per cent of a bright source's flux. A source sits on structure, so the "
@@ -4131,17 +4130,28 @@ _PACS_INJECTION_READINGS = {
         "fitted jointly with a detected neighbour within one beam (METHOD 2), the factor by which the true error of "
         "its flux exceeds the joint fit's own formal error. Measured from artificial sources placed in the ring "
         "from half a beam to one beam around every detected source of the map, as the robust scatter of (fitted "
-        "flux minus CELL_OFFSET_PSF_{b}_MJY minus injected flux) over the fit's formal error, over all those the fit "
+        "flux minus CELL_OFFSET_BLEND_{b}_MJY minus injected flux) over the fit's formal error, over all those the fit "
         "could separate (N_SCATTER_BLEND_{b}). The photometry's uncertainty of such a source is its formal error "
         "times this factor at its own signal-to-noise."),
     "N_SCATTER_BLEND_{b}": ("artificial sources",
         "For each map and S/N bin, the number of separable joint-fit artificial sources behind SCATTER_BLEND_{b}."),
-    "CELL_OFFSET_PSF_{b}_MJY": ("mJy",
-        "For each row of CURVE_{b}: the typical flux a single point-spread-function fit with one free constant "
-        "background (the joint fit's own estimator) returns at empty positions of the cell (the median over the same random positions, farther than one beam from bright sources, that "
-        "CELL_OFFSET_{b}_MJY uses for the aperture). It is the joint fit's own empty-sky offset: a jointly fitted "
-        "source's flux has it subtracted, and is a detection when that flux is at least 5 times "
-        "CELL_SIGMA_{b}_MJY. The aperture and the fit respond differently to the same sky, so each has its own."),
+    "CELL_OFFSET_BLEND_{b}_MJY": ("mJy",
+        "One value per map (MAP_ID_{b}): the joint fit's own empty-sky offset. The median flux the joint fit "
+        "(every member's point-spread pattern plus one free constant background) returns with NO source present, at "
+        "positions half a beam to one beam from each detected source of the map, on valid data, each fitted as one "
+        "more member of the real group it would join; 40 rounds of one position per detected source, separable fits "
+        "only. A source measured by the joint fit (METHOD 2) has it subtracted and is a detection when its flux minus "
+        "it is at least 5 times CELL_SIGMA_{b}_MJY. Real members sit around the same detections these positions are "
+        "drawn around, so this is the null of their kind of position; one value per map averages over neighbours of "
+        "different brightness and over distance from them (BLEND_NULL_SPLIT_{b}_MJY shows how much), and it does "
+        "not capture emission local to a particular member. NaN for a map with no detected source."),
+    "BLEND_NULL_SPLIT_{b}_MJY": ("mJy",
+        "Disclosure for CELL_OFFSET_BLEND_{b}_MJY, per map (n_map, 2, 2): the same median taken separately for "
+        "positions whose nearest detected source is brighter / fainter than the map's median detected flux "
+        "(axis 1) and that lie in the inner / outer half, by area, of the ring (axis 2). Read by nothing; the spread "
+        "of the four values is how much the single per-map value averages over."),
+    "N_BLEND_NULL_{b}": ("positions",
+        "The number of positions behind each value of BLEND_NULL_SPLIT_{b}_MJY."),
     "CONTAMINATION_{b}": ("probability",
         "For each row of CURVE_{b}: the chance that the detection rule fires at a position in that cell where the "
         "source itself contributes almost nothing, because unrelated emission (a compact cloud core, a background "
