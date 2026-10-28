@@ -10,30 +10,25 @@ writes `sky/derived/pacs/photometry_pacs_source__<Region>.hdf5`: one row per
 source in the catalogue's own order, with its flux, its noise, the origin
 code the fitter reads (1 detected, 2 upper bound from an unseparable blend,
 90 observed but not detected, 91 not covered), the contributing observation
-ids, the blend bookkeeping and the extended-source flag.
+ids, the blend bookkeeping (how many detections lie within a beam, and the
+brightest of them) and the extended-source flag.
 
-Everything numerical is `sky.derived.pacs_fit`'s: the forced two-column PSF
-fit with the bright neighbours as nuisance columns, the blend-group fit, the
-fitted width. This stage only decides which sources go to which map tile,
-runs the singleton pass, forms the blend groups and turns the fits into
-products:
+Everything numerical is `sky.derived.pacs_fit`'s: the eHOPS aperture photometry and the fitted width. This
+stage only decides which sources go to which map tile, runs the singleton pass, applies the blend rule and turns
+the measurements into products:
 
-- noise: a detected source's sigma is the photometric error the completeness stage MEASURED for a
-  source of its flux in its cell, by recovering artificial sources of known flux injected into the map:
-  measured by injection: METHOD 1 the cell's `SCATTER_<B>_MJY` at the source's flux (log-linear between the flux
-  steps); METHOD 2 the joint fit's formal error times the map's `SCATTER_BLEND_<B>` at the source's S/N
-  (FNU / CELL_SIGMA, interpolated in log S/N between four bins). FNU is the measured flux minus its own estimator's empty-sky offset in the cell
-  (CELL_OFFSET of the cell for the aperture, CELL_OFFSET_BLEND of the map for the joint fit). A source
-  that is not detected carries the noise of its 30-arcsec cell, `CELL_SIGMA_<B>_MJY`, the same number
-  the detection rule below uses; the fit's propagated pixel noise is never added to either.
-- detection: flux - CELL_OFFSET >= 5 x CELL_SIGMA (origin 1), else origin 90, for the aperture flux and for
-  a blend member's group flux alike; a source the completeness stage found no cell for, or whose fit has
-  no data, is 91.
-- blends: SESNA sources within one beam of a source detected in the singleton
-  pass are fitted together with it; a member whose fitted flux has
-  |correlation| > 0.9 with another member's cannot be separated and gets
-  origin 2, flux = max(0, group flux) + 5 x group sigma, and the pipeline's
-  upper-limit sentinel as its sigma.
+- flux: FNU is the aperture flux minus its cell's empty-sky offset, `CELL_OFFSET_<B>_MJY` (stored per source;
+  adding it back gives the HOPS/eHOPS convention).
+- noise: a detected source's sigma is the photometric error the completeness stage MEASURED for a source of
+  its flux in its cell, by recovering artificial sources of known flux injected into the map: the cell's
+  `SCATTER_<B>_MJY` at the source's flux (log-linear between the flux steps). A source that is not detected
+  carries the noise of its 30-arcsec cell, `CELL_SIGMA_<B>_MJY`, the same number the detection rule uses.
+- detection: flux - CELL_OFFSET >= 5 x CELL_SIGMA (origin 1), else origin 90; a source the completeness stage
+  found no cell for, or whose aperture has too little valid data, is 91.
+- blends (the far-infrared survey convention; planner ruling, owner-approved 2026-10-28): a source within one
+  beam of another source detected on the map is an unseparable blend, origin 2, its own aperture flux (offset
+  subtracted, so it holds the neighbour's light) as the upper bound and the pipeline's upper-limit sentinel as
+  its sigma, unless it is itself detected and the brightest of the detections within that beam.
 - extended: a detected source whose fitted width exceeds 1.5 x the beam.
 
 Work is split by map tile (one piece per band and map), the tile's sources
@@ -47,8 +42,6 @@ import time
 
 import h5py
 import numpy as np
-from scipy.sparse import coo_matrix
-from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 
 from sesnaimpute import build as build_module
@@ -61,7 +54,6 @@ from sesnaimpute.catalog.curated import UPPER_LIMIT_SIGMA
 from sesnaimpute.config import product_path
 from sesnaimpute.sky.derived import pacs_fit
 from sesnaimpute.sky.derived.pacs_fit import DETECTION_SNR
-from sesnaimpute.sky.derived.pacs_psf import beam_fwhm_arcsec
 from sesnaimpute.sky.download.herschel_pacs.index import read_index
 
 BANDS = ("P70", "P100", "P160")
@@ -69,63 +61,32 @@ BANDS = ("P70", "P100", "P160")
 #: the pipeline's origin codes for a flux (`ORIGIN_FNU` in the source table)
 ORIGIN_DETECTED, ORIGIN_UPPER_BOUND, ORIGIN_UNDETECTED, ORIGIN_NOT_COVERED = 1, 2, 90, 91
 
-#: two members of a blend group whose fitted fluxes correlate more strongly than
-#: this cannot be told apart (owner 2026-10-26, SPEC 11.1 item 4c)
-BLEND_RHO_LIMIT = 0.9
 #: a detection fitted wider than this many beam widths is flagged extended
 #: (SPEC 11.3 step 3); the width is `pacs_fit.Tile.fitted_fwhm`, the beam
 #: broadened by a Gaussian chosen by chi-square
 EXTENDED_BEAM_FACTOR = 1.5
-#: a source's group neighbours are the sources within one beam FWHM of a
-#: detected source (SPEC 4: "within one beam of each other")
+#: a source within this many beam FWHM of another source's detection is an unseparable blend (ORIGIN 2) unless it is
+#: the brighter member: the far-infrared survey convention (HOPS/eHOPS flag close pairs the same way; planner ruling,
+#: owner-approved 2026-10-28)
 BLEND_RADIUS_BEAMS = 1.0
 
 
 # ---------------------------------------------------------------------------
-# blend groups
+# positions
 
 def _unit_vectors(ra_deg, dec_deg):
     ra, dec = np.radians(ra_deg), np.radians(dec_deg)
     return np.column_stack([np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)])
 
 
-def _blend_components(ra_deg, dec_deg, detected, radius_arcsec):
-    """Connected components of the graph that joins two sources closer than
-    `radius_arcsec` when at least one of them is detected. Returns `(label,
-    size)` per source: label is the component number, size how many sources
-    share it (1 for a source with no detected source within the radius)."""
-    n = ra_deg.size
-    chord = 2.0 * np.sin(np.radians(radius_arcsec / 3600.0) / 2.0)
-    tree = cKDTree(_unit_vectors(ra_deg, dec_deg))
-    pairs = tree.query_pairs(chord, output_type="ndarray")
-    if pairs.size:
-        pairs = pairs[detected[pairs[:, 0]] | detected[pairs[:, 1]]]
-    graph = coo_matrix((np.ones(len(pairs), dtype=np.int8), (pairs[:, 0], pairs[:, 1])), shape=(n, n))
-    _, label = connected_components(graph, directed=False)
-    size = np.bincount(label)[label]
-    return label, size
-
 
 # ---------------------------------------------------------------------------
 # the singleton pass and the calibrated sigma
 
-#: the error of a detection is measured per bin of injected S/N (F / CELL_SIGMA): < 8, 8-30, 30-120, >= 120; the
-#: photometry interpolates in log S/N between the bins' geometric centres
+#: bins of injected S/N (F / CELL_SIGMA) in which the completeness stage's C2 checks the measured error: < 8, 8-30,
+#: 30-120, >= 120
 SNR_BIN_EDGES = (8.0, 30.0, 120.0)
 SNR_BIN_CENTRES = (5.7, 15.5, 60.0, 240.0)
-
-
-def interpolate_bins(values, snr):
-    """`values` (n, 4) per S/N bin read at each row's `snr` (n,), linear in log S/N between the bins' geometric
-    centres, clamped at the end bins; NaN bins are skipped (the nearest finite one is used)."""
-    lc = np.log10(SNR_BIN_CENTRES)
-    out = np.full(len(snr), np.nan)
-    ls = np.log10(np.maximum(np.asarray(snr, float), 1e-300))
-    for i in range(len(snr)):
-        ok = np.isfinite(values[i])
-        if ok.any():
-            out[i] = np.interp(ls[i], lc[ok], values[i][ok])
-    return out
 
 
 def singleton_pass(tile, ra, dec, shift, sigma_cell, offset):
@@ -168,22 +129,18 @@ def calibrated_sigma(scatter, flux_grid, flux):
 # ---------------------------------------------------------------------------
 # one tile
 
-def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shifts, flux_grid, cell_offset_blend=None):
-    """All of one map tile's sources: `piece = (band, map_index, rows, scatter, scatter_blend)`, the
-    source rows (ascending) the completeness stage assigned to that map and, for each, the measured error per S/N
-    bin (n, 4): its cell's aperture SCATTER (mJy) and its map's joint-fit SCATTER_BLEND (a multiplier of the fit's
-    formal error). `cell_offset_blend` is the joint fit's own empty-sky null per source (its map's ring null). Returns `(band,
-    map_index, rows, columns)`, `columns` the product's per-source arrays for those rows."""
-    band, map_index, rows, scatter, scatter_blend = piece
+def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shifts, flux_grid):
+    """All of one map tile's sources: `piece = (band, map_index, rows, scatter)`, the source rows (ascending) the
+    completeness stage assigned to that map and, for each, its cell's measured aperture SCATTER (n, n_plane, mJy).
+    Returns `(band, map_index, rows, columns, n_nan, n_demoted)`: the product's per-source arrays for those rows,
+    the detections with no measured error, and the detections turned into upper bounds by the blend rule."""
+    band, map_index, rows, scatter = piece
     record = records[map_index]
     n = rows.size
     sigma_cell = cell_sigma[band][rows]
-    # the cell's empty-sky offset (sky structure the fit's background term leaves), subtracted from
-    # every flux measured in the cell, exactly as the completeness stage does for its positions
+    # the cell's empty-sky offset (sky structure the aperture's sky leaves), subtracted from every flux measured
+    # in the cell, exactly as the completeness stage does for its positions
     offset = cell_offset[band][rows]
-    offset_blend = cell_offset_blend[band][rows]
-    formal = np.full(n, np.nan)
-    beam = beam_fwhm_arcsec(record)
 
     flux = np.full(n, np.nan)
     sigma = np.full(n, np.nan)
@@ -192,91 +149,61 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
     group_id = np.full(n, -1, dtype=np.int32)
     extended = np.zeros(n, dtype=bool)
     sigma_annulus = np.full(n, np.nan)
-    method = np.zeros(n, dtype=np.int8)
+    n_demoted = 0
 
     with pacs_fit.open_tile(config, record) as tile:
         # the map's registration to SESNA, as the completeness stage measured and stored it
         shift = shifts.get((BANDS[band], _tile_key(record)), (0.0, 0.0))
-        # eHOPS aperture photometry for every source (final ruling, spec 12); blend members are refitted below.
-        # FNU is the HOPS/eHOPS-convention flux (annulus sky, owner ruling 2026-10-27); the detection is
-        # decided on it minus the cell's empty-sky offset, the statistic the completeness curve is measured on
+        # eHOPS aperture photometry for every source (HOPS/eHOPS-convention annulus sky); FNU is it minus the
+        # cell's empty-sky offset, and the detection is decided on that, the statistic the completeness measures
         x, y, single, ok, detected = singleton_pass(tile, ra[rows], dec[rows], shift, sigma_cell, offset)
         sigma_annulus = single.sigma
-        flux[ok] = single.flux[ok]
+        flux[ok] = single.flux[ok] - offset[ok]
         # an undetected source carries its cell's noise; a detected one gets the measured error below
         sigma[ok] = sigma_cell[ok]
         origin[ok] = np.where(detected[ok], ORIGIN_DETECTED, ORIGIN_UNDETECTED)
-        n_blend[ok] = 1
-        method[ok] = 1
 
-        # Blend groups around the sources detected in the singleton pass.
-        label, size = _blend_components(ra[rows], dec[rows], detected, BLEND_RADIUS_BEAMS * beam)
-        grouped = size > 1
-        if grouped.any():
-            g = np.flatnonzero(grouped)
-            gfit = tile.fit_groups(x[g], y[g], label[g])
-            # the group's identifier is the lowest catalogue row among its members
-            lowest = np.full(label.max() + 1, np.iinfo(np.int64).max)
-            np.minimum.at(lowest, label[g], rows[g])
-            group_id[g] = lowest[label[g]]
-            n_blend[g] = size[g]
-            good = gfit.covered & ok[g]
-            # the empirical-over-propagated noise ratio of each member's singleton
-            # fit, averaged over the group, scales the group-total sigma the same way
-            psf_single = tile.fit_positions(x[g], y[g])     # the PSF-fit noise scale of the group's members
-            ratio = np.where(ok[g], sigma_cell[g] / np.where(psf_single.sigma > 0, psf_single.sigma, np.nan), np.nan)
-            ratio_sum = np.bincount(label[g], weights=np.nan_to_num(ratio))
-            ratio_n = np.bincount(label[g], weights=np.isfinite(ratio).astype(float))
-            ratio_mean = (ratio_sum / np.maximum(ratio_n, 1))[label[g]]
-            unseparable = good & (gfit.max_abs_rho > BLEND_RHO_LIMIT)
-            separable = good & ~unseparable
-            method[g[good]] = 2
-            gi = g[separable]
-            flux[gi] = gfit.flux[separable]
-            formal[gi] = gfit.sigma[separable]
-            sigma[gi] = sigma_cell[gi]
-            # the joint fit's flux is judged against its own estimator's empty-sky offset
-            origin[gi] = np.where(flux[gi] - offset_blend[gi] >= DETECTION_SNR * sigma_cell[gi], ORIGIN_DETECTED, ORIGIN_UNDETECTED)
-            gu = g[unseparable]
-            flux[gu] = (np.maximum(0.0, gfit.group_flux[unseparable])
-                        + DETECTION_SNR * gfit.group_sigma[unseparable] * ratio_mean[unseparable])
-            sigma[gu] = UPPER_LIMIT_SIGMA
-            origin[gu] = ORIGIN_UPPER_BOUND
+        # Blends (the far-infrared survey convention): a source within BLEND_RADIUS_BEAMS of another source detected
+        # here is an unseparable blend, ORIGIN 2 with its own aperture flux as the upper bound, unless it is itself
+        # detected and the brightest of the detections within that radius.
+        d_idx = np.flatnonzero(detected)
+        if d_idx.size:
+            tree = cKDTree(np.c_[x[d_idx], y[d_idx]])
+            near_lists = tree.query_ball_point(np.c_[x, y], BLEND_RADIUS_BEAMS * tile.beam_px)
+            for i in np.flatnonzero(ok):
+                others = [d_idx[j] for j in near_lists[i] if d_idx[j] != i]
+                if not others:
+                    continue
+                n_blend[i] = len(others)
+                brightest = max(others, key=lambda j: flux[j])
+                group_id[i] = rows[brightest]
+                if detected[i] and flux[i] >= flux[brightest]:
+                    continue
+                n_demoted += int(detected[i])
+                origin[i] = ORIGIN_UPPER_BOUND
+                sigma[i] = UPPER_LIMIT_SIGMA
 
-        # Extended: detections only (a group's separable detections included).
+        # Extended: detections only.
         det = np.flatnonzero(origin == ORIGIN_DETECTED)
         if det.size:
-            extended[det] = tile.fitted_fwhm(x[det], y[det]) > EXTENDED_BEAM_FACTOR * beam
+            extended[det] = tile.fitted_fwhm(x[det], y[det]) > EXTENDED_BEAM_FACTOR * tile.beam_arcsec
 
-    # the reported flux is the measurement minus its own estimator's empty-sky offset in the cell (a bias of the
-    # cell, not noise): the aperture's for METHOD 1, the joint PSF fit's for METHOD 2; an upper bound keeps its own
-    # construction. These are the quantities the detection rule and the injection test use.
-    m1 = (origin != ORIGIN_UPPER_BOUND) & (method == 1)
-    m2 = (origin != ORIGIN_UPPER_BOUND) & (method == 2)
-    flux[m1] = flux[m1] - offset[m1]
-    flux[m2] = flux[m2] - offset_blend[m2]
-    # a detected source's error, measured by injection: METHOD 1 its cell's SCATTER at its flux (log-linear between
-    # the flux steps); METHOD 2 the fit's formal error x its map's SCATTER_BLEND at its S/N (FNU / CELL_SIGMA)
+    # a detected source's error, measured by injection: its cell's SCATTER at its flux (log-linear between the
+    # flux steps)
     n_nan = 0
-    det1 = np.flatnonzero((origin == ORIGIN_DETECTED) & (method == 1))
-    if det1.size:
-        sigma[det1] = calibrated_sigma(scatter[det1], flux_grid, flux[det1])
-        n_nan += int(np.isnan(sigma[det1]).sum())
-    det2 = np.flatnonzero((origin == ORIGIN_DETECTED) & (method == 2))
-    if det2.size:
-        sigma[det2] = formal[det2] * interpolate_bins(scatter_blend[det2], flux[det2] / sigma_cell[det2])
-        n_nan += int(np.isnan(sigma[det2]).sum())
+    det = np.flatnonzero(origin == ORIGIN_DETECTED)
+    if det.size:
+        sigma[det] = calibrated_sigma(scatter[det], flux_grid, flux[det])
+        n_nan += int(np.isnan(sigma[det]).sum())
 
     # the offset subtracted from each reported flux (adding it back gives the HOPS/eHOPS convention)
-    subtracted = np.full(flux.size, np.nan)
-    subtracted[m1] = offset[m1]
-    subtracted[m2] = offset_blend[m2]
+    subtracted = np.where(ok, offset, np.nan)
     columns = dict(FNU=flux, SIGMA=sigma, ORIGIN=origin, LOCAL_RMS=sigma_cell.astype(np.float32), CELL_OFFSET=subtracted,
-                   SIGMA_ANNULUS=np.asarray(sigma_annulus, np.float32), METHOD=method,
+                   SIGMA_ANNULUS=np.asarray(sigma_annulus, np.float32),
                    N_BLEND=n_blend, BLEND_GROUP=group_id, EXTENDED=extended)
-    # a source with no usable fit keeps the cell noise only where a cell exists
+    # a source with no usable measurement keeps the cell noise only where a cell exists
     columns["LOCAL_RMS"][origin == ORIGIN_NOT_COVERED] = np.nan
-    return band, map_index, rows, columns, n_nan
+    return band, map_index, rows, columns, n_nan, n_demoted
 
 
 # ---------------------------------------------------------------------------
@@ -294,12 +221,12 @@ def _runs(rows):
 
 
 _DTYPES = dict(FNU=np.float64, SIGMA=np.float64, CELL_OFFSET=np.float64, ORIGIN=np.int8, LOCAL_RMS=np.float32,
-               N_BLEND=np.int16, BLEND_GROUP=np.int32, EXTENDED=bool, SIGMA_ANNULUS=np.float32, METHOD=np.int8)
+               N_BLEND=np.int16, BLEND_GROUP=np.int32, EXTENDED=bool, SIGMA_ANNULUS=np.float32)
 _FILL = dict(FNU=np.nan, SIGMA=np.nan, CELL_OFFSET=np.nan, ORIGIN=ORIGIN_NOT_COVERED, LOCAL_RMS=np.nan,
-             N_BLEND=0, BLEND_GROUP=-1, EXTENDED=False, SIGMA_ANNULUS=np.nan, METHOD=0)
+             N_BLEND=0, BLEND_GROUP=-1, EXTENDED=False, SIGMA_ANNULUS=np.nan)
 _NAMES = dict(FNU="FNU_{b}_MJY", SIGMA="SIGMA_{b}_MJY", CELL_OFFSET="CELL_OFFSET_{b}_MJY", ORIGIN="ORIGIN_{b}", LOCAL_RMS="LOCAL_RMS_{b}_MJY",
               N_BLEND="N_BLEND_{b}", BLEND_GROUP="BLEND_GROUP_{b}", EXTENDED="EXTENDED_{b}",
-              SIGMA_ANNULUS="SIGMA_ANNULUS_{b}_MJY", METHOD="METHOD_{b}")
+              SIGMA_ANNULUS="SIGMA_ANNULUS_{b}_MJY")
 
 
 def _tile_key(record):
@@ -307,16 +234,14 @@ def _tile_key(record):
 
 
 def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_obsid, config, n_jobs, stage=None,
-                 cell_offset_blend=None,
-                 shifts=None, cell_row=None, scatter=None, scatter_blend=None, flux_grid=None):
+                 shifts=None, cell_row=None, scatter=None, flux_grid=None):
     """Measures every source on its cell's map and writes the product at
     `out_path`. `cell_sigma[b]` (n,) float64 is the source's cell noise (NaN:
     no cell, not covered) and `cell_obsid[b]` (n,) bytes the cell's map, the
     comma-joined observation ids of the `records` entry that holds it;
     `cell_row[b]` (n,) is the source's row in the completeness product (-1: none) and
-    `scatter[b]`, `scatter_blend[b]` (n_cell, 4) that product's measured errors per cell and S/N bin (the cell's
-    aperture SCATTER in mJy; its map's joint-fit SCATTER_BLEND multiplier); `cell_offset_blend[b]` (n,) the joint
-    fit's empty-sky null per source (its map's ring null, CELL_OFFSET_BLEND). Returns the per-band origin counts."""
+    `scatter[b]` (n_cell, n_plane) that product's measured aperture error per cell and flux plane (mJy). Returns
+    the per-band origin counts."""
     n = names.size
     key_to_map = {}
     for i, rec in enumerate(records):
@@ -331,7 +256,7 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
             if i is None:
                 raise ValueError("pacs_photometry: completeness cell map %r is not in the %s index" % (key, band))
             rows = sel[cell_obsid[b][sel] == key]
-            pieces.append((b, i, rows, scatter[b][cell_row[b][rows]], scatter_blend[b][cell_row[b][rows]]))
+            pieces.append((b, i, rows, scatter[b][cell_row[b][rows]]))
     obsid_len = max([len(_tile_key(r)) for r in records] + [1])
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -353,13 +278,14 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
             counts[band][ORIGIN_NOT_COVERED] = n
         fn_args = dict(config=config, records=records, ra=ra, dec=dec, cell_sigma=np.vstack(cell_sigma),
                        cell_offset=np.vstack(cell_offset),
-                       cell_offset_blend=np.vstack(cell_offset_blend if cell_offset_blend is not None else cell_offset),
                        shifts=shifts or {}, flux_grid=flux_grid)
         fn = functools.partial(_measure_tile, **fn_args)
         n_nan = {band: 0 for band in BANDS}
-        for band_index, map_index, rows, cols, nan_sigma in pieces_module.iterate(fn, pieces, n_jobs, stage=stage, unit="map tiles"):
+        demoted = {band: 0 for band in BANDS}
+        for band_index, map_index, rows, cols, nan_sigma, n_dem in pieces_module.iterate(fn, pieces, n_jobs, stage=stage, unit="map tiles"):
             band = BANDS[band_index]
             n_nan[band] += nan_sigma
+            demoted[band] += n_dem
             obsid = _tile_key(records[map_index]).encode()
             for start, stop, off in _runs(rows):
                 width = stop - start
@@ -370,6 +296,9 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
             for code in (1, 2, 90, 91):
                 counts[band][code] += int(np.sum(cols["ORIGIN"] == code))
     for band in BANDS:
+        print("  %s: %d sources are unseparable blends (ORIGIN 2: within %.1f beam of a detection and not its brighter "
+              "member), %d of them passing the detection rule on their own" % (band, counts[band][ORIGIN_UPPER_BOUND],
+                                                                                 BLEND_RADIUS_BEAMS, demoted[band]), flush=True)
         if n_nan[band]:
             print("  %s: %d detected sources have no measured photometric error in their cell (SIGMA NaN)"
                   % (band, n_nan[band]), flush=True)
@@ -379,17 +308,15 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
 def _read_cells(config, region, n_source):
     """The completeness stage's per-source cell noise, cell offset, map and cell row, per band, and the
     cells' measured photometric errors: `(cell_sigma, cell_offset, cell_obsid, shifts, cell_row,
-    scatter, scatter_blend, flux_grid)`, lists over BANDS (`shifts` a dict, `flux_grid` the one grid in
+    scatter, flux_grid)`, lists over BANDS (`shifts` a dict, `flux_grid` the one grid in
     mJy). A source with `SOURCE_ROW` -1 has no cell (noise NaN, offset 0)."""
     path = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
     sigma = [np.full(n_source, np.nan) for _ in BANDS]
     offset = [np.zeros(n_source) for _ in BANDS]
-    offset_blend = [np.zeros(n_source) for _ in BANDS]
     row = [np.full(n_source, -1, dtype=np.int64) for _ in BANDS]
     shifts = {}
     obsid = [np.full(n_source, b"", dtype="S1") for _ in BANDS]
     scatter = [np.zeros((0, 1), np.float32) for _ in BANDS]
-    scatter_blend = [np.zeros((0, 4), np.float32) for _ in BANDS]
     flux_grid = None
     if not os.path.exists(path):
         raise FileNotFoundError("pacs_photometry needs the completeness product first: %s" % path)
@@ -409,14 +336,11 @@ def _read_cells(config, region, n_source):
             sigma[b][have] = cell_sigma[rows[have]]
             offset[b][have] = f["CELL_OFFSET_%s_MJY" % band][:][rows[have]]
             row[b] = np.where(have, rows, -1).astype(np.int64)
-            # the joint fit's null is its map's ring null (CELL_OFFSET_BLEND, one per map)
-            offset_blend[b][have] = f["CELL_OFFSET_BLEND_%s_MJY" % band][:][f["CELL_MAP_INDEX_" + band][:][rows[have]]]
             scatter[b] = f["SCATTER_%s_MJY" % band][:]
-            scatter_blend[b] = f["SCATTER_BLEND_" + band][:][f["CELL_MAP_INDEX_" + band][:]]
             for key, sh in zip(f["MAP_OBSID_" + band][:], f["MAP_SHIFT_%s_ARCSEC" % band][:]):
                 shifts[(band, key.decode())] = (float(sh[0]), float(sh[1]))
             obsid[b] = np.where(have, cell_obs[np.where(have, rows, 0)], b"")
-    return sigma, offset, obsid, shifts, row, scatter, scatter_blend, flux_grid, offset_blend
+    return sigma, offset, obsid, shifts, row, scatter, flux_grid
 
 
 def _build_one_region(config, region, st):
@@ -428,22 +352,20 @@ def _build_one_region(config, region, st):
     out_path = product_path(config, "sky/derived", "pacs", "photometry", "source", region=region)
     records = read_index(config, region)
     if records:
-        cell_sigma, cell_offset, cell_obsid, shifts, cell_row, scatter, scatter_blend, flux_grid, cell_offset_blend = _read_cells(
+        cell_sigma, cell_offset, cell_obsid, shifts, cell_row, scatter, flux_grid = _read_cells(
             config, region, names.size)
     else:
         cell_sigma = [np.full(names.size, np.nan) for _ in BANDS]
         cell_offset = [np.zeros(names.size) for _ in BANDS]
-        cell_offset_blend = [np.zeros(names.size) for _ in BANDS]
         shifts = {}
         cell_obsid = [np.full(names.size, b"", dtype="S1") for _ in BANDS]
         cell_row = [np.full(names.size, -1, dtype=np.int64) for _ in BANDS]
         scatter = [np.zeros((0, 1), np.float32) for _ in BANDS]
-        scatter_blend = [np.zeros((0, 4), np.float32) for _ in BANDS]
         flux_grid = None
     t0 = time.time()
     counts = write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_obsid,
-                          config, config.n_jobs, stage=st, cell_offset_blend=cell_offset_blend, shifts=shifts, cell_row=cell_row, scatter=scatter,
-                          scatter_blend=scatter_blend, flux_grid=flux_grid)
+                          config, config.n_jobs, stage=st, shifts=shifts, cell_row=cell_row, scatter=scatter,
+                          flux_grid=flux_grid)
     wall = time.time() - t0
     numbers = {"sources": int(names.size), "sources_per_s": names.size / max(wall, 1e-9)}
     for band in BANDS:
