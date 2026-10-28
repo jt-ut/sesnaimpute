@@ -3991,7 +3991,8 @@ _PHOTOMETRY_PACS_READINGS = {
         "per cent inside 8 arcsec, so such a map is refused there). eHOPS's published fluxes are on a within-60-arcsec normalisation with one constant per band and "
         "sit about 9 % lower at 70 micron, and more at 100 micron on fast-scan maps. Where METHOD is 2 the source has "
         "a neighbour within one beam of a detected source and its flux is the total flux of a joint point-source "
-        "fit. The cell's empty-sky offset of the same measurement (CELL_OFFSET for the aperture, CELL_OFFSET_PSF for "
+        "fit, every member's point-spread pattern plus one free constant background over the fitting box (no annulus "
+        "sky: the clipped sky of a neighbour's annulus would take part of a member's light, non-linearly). The cell's empty-sky offset of the same measurement (CELL_OFFSET for the aperture, CELL_OFFSET_PSF for "
         "the joint fit, in the completeness product: the typical flux that measurement returns at empty positions of "
         "the 30-arcsecond cell, from sky structure it does not remove) is subtracted; the value for this source is CELL_OFFSET_{b}_MJY, and adding it back gives the convention of HOPS and eHOPS, which subtract no such offset. It can be negative or small when nothing is seen and is NaN where the band does not "
         "cover the source. "
@@ -4136,8 +4137,8 @@ _PACS_INJECTION_READINGS = {
     "N_SCATTER_BLEND_{b}": ("artificial sources",
         "For each map and S/N bin, the number of separable joint-fit artificial sources behind SCATTER_BLEND_{b}."),
     "CELL_OFFSET_PSF_{b}_MJY": ("mJy",
-        "For each row of CURVE_{b}: the typical flux a single point-spread-function fit returns at empty positions "
-        "of the cell (the median over the same random positions, farther than one beam from bright sources, that "
+        "For each row of CURVE_{b}: the typical flux a single point-spread-function fit with one free constant "
+        "background (the joint fit's own estimator) returns at empty positions of the cell (the median over the same random positions, farther than one beam from bright sources, that "
         "CELL_OFFSET_{b}_MJY uses for the aperture). It is the joint fit's own empty-sky offset: a jointly fitted "
         "source's flux has it subtracted, and is a detection when that flux is at least 5 times "
         "CELL_SIGMA_{b}_MJY. The aperture and the fit respond differently to the same sky, so each has its own."),

@@ -239,13 +239,53 @@ def _box_templates(table, extent, steps, map_nx, map_ny, sx, sy, x0, y0, side, o
 
 
 @numba.njit(cache=True)
-def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, half, min_beam, r_in, r_out):
+def _annulus_sky(X, d, ok, abuf, nc, ax, ay, x0, y0, side, npix, r_in, r_out):
+    """The HOPS/eHOPS background of `_fit_core`: the clipped (IDL mmm) sky of the valid pixels in the annulus
+    r_in..r_out around (ax, ay) subtracted from the data `d`, each of the `nc` columns of `X` less its plain mean
+    over the same pixels (in place). Returns nc, or -1 where the annulus holds too few valid pixels."""
+    na = 0
+    n_ann = 0
+    for j in range(side):
+        for ii in range(side):
+            dd = np.hypot(x0 + ii - ax, y0 + j - ay)
+            if r_in <= dd <= r_out:
+                n_ann += 1
+                p = j * side + ii
+                if ok[p]:
+                    abuf[na] = d[p]
+                    na += 1
+    if na < 10 or 2 * na < n_ann:
+        return -1
+    sky, _ = _mmm_sky(abuf[:na])
+    for c in range(nc):
+        sm = 0.0
+        for j in range(side):
+            for ii in range(side):
+                dd = np.hypot(x0 + ii - ax, y0 + j - ay)
+                p = j * side + ii
+                if r_in <= dd <= r_out and ok[p]:
+                    sm += X[c, p]
+        mean = sm / na
+        for p in range(npix):
+            X[c, p] -= mean
+    for p in range(npix):
+        if ok[p]:
+            d[p] -= sky
+    return nc
+
+
+@numba.njit(cache=True)
+def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, half, min_beam, r_in, r_out, free_bg):
     """Weighted linear fits, one per row. Row i: tn[i] target sources at (tx, ty), un[i]
     nuisance sources at (ux, uy), box centred on pixel (cx[i], cy[i]) of half-width `half`.
     The background is the HOPS/eHOPS convention (owner ruling 2026-10-27): the clipped (IDL mmm) sky of
     the valid pixels in the annulus r_in..r_out (pixels) around the first target, subtracted from the
     data; every PSF column has its own mean over the same annulus subtracted, so a point source returns
     its full flux (the share of its wing the annulus removes is in the model); no free constant.
+    With `free_bg` (the PSF-fit path: the blend group and its own empty-sky null; owner/planner R2 2026-10-28)
+    the background is instead one free constant column of the linear fit and no annulus sky is taken: the
+    fit is then exactly linear in every member's flux (the clipped annulus sky is not, where a member's light
+    falls in the first target's annulus).
     Returns per-member flux, gain, covariance and a validity flag."""
     n, mmax = tx.shape
     side = 2 * half + 1
@@ -253,7 +293,7 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
     map_ny, map_nx = img.shape
     kmax = ux.shape[1]
     nk = table.shape[2]                  # scan columns per source: 1 (one-direction map) or 2
-    cmax = nk * (mmax + kmax)
+    cmax = nk * (mmax + kmax) + 1
     abuf = np.empty(npix)
     flux = np.full((n, mmax), np.nan)
     gain = np.full((n, mmax), np.nan)
@@ -314,37 +354,16 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
                 enough = False
         if not enough:
             continue
-        # the annulus around the first target: clipped sky of the data, plain mean of each column
-        ax = tx[i, 0]
-        ay = ty[i, 0]
-        na = 0
-        n_ann = 0
-        for j in range(side):
-            for ii in range(side):
-                dd = np.hypot(x0 + ii - ax, y0 + j - ay)
-                if r_in <= dd <= r_out:
-                    n_ann += 1
-                    p = j * side + ii
-                    if ok[p]:
-                        abuf[na] = d[p]
-                        na += 1
-        if na < 10 or 2 * na < n_ann:
-            continue
-        sky, _ = _mmm_sky(abuf[:na])
-        for c in range(nc):
-            sm = 0.0
-            for j in range(side):
-                for ii in range(side):
-                    dd = np.hypot(x0 + ii - ax, y0 + j - ay)
-                    p = j * side + ii
-                    if r_in <= dd <= r_out and ok[p]:
-                        sm += X[c, p]
-            mean = sm / na
+        if free_bg:
+            # one free constant: a column of ones (weights already zero off valid pixels)
             for p in range(npix):
-                X[c, p] -= mean
-        for p in range(npix):
-            if ok[p]:
-                d[p] -= sky
+                X[nc, p] = 1.0
+            nc += 1
+        else:
+            # the annulus around the first target: clipped sky of the data, plain mean of each column
+            nc = _annulus_sky(X, d, ok, abuf, nc, tx[i, 0], ty[i, 0], x0, y0, side, npix, r_in, r_out)
+            if nc < 0:
+                continue
         for a in range(nc):
             for b in range(a, nc):
                 s = 0.0
@@ -747,11 +766,11 @@ class Tile:
         x, y = self.wcs.all_world2pix(np.asarray(ra_deg, float), np.asarray(dec_deg, float), 0)
         return np.asarray(x), np.asarray(y)
 
-    def _call(self, tx, ty, tn, ux, uy, un, cx, cy, half):
+    def _call(self, tx, ty, tn, ux, uy, un, cx, cy, half, free_bg=False):
         psf = self._psf
         return _fit_core(self.image, self.error, psf.table, psf.extent, psf.subpixel_steps,
                          tx, ty, tn, ux, uy, un, cx, cy, half, MIN_BEAM_FRACTION,
-                         self.ann_in_px, self.ann_out_px)
+                         self.ann_in_px, self.ann_out_px, free_bg)
 
     # -- bright neighbours (11.3 step 1) -------------------------------------
     def _find_neighbours(self):
@@ -812,7 +831,7 @@ class Tile:
         uy[:, :k] = np.where(use, ny_[safe], 0.0)
         return ux, uy, use.sum(axis=1)
 
-    def _fit(self, x, y, use_nuisance=True, batch=512):
+    def _fit(self, x, y, use_nuisance=True, batch=512, free_bg=False):
         x = np.asarray(x, dtype=float)
         y = np.asarray(y, dtype=float)
         n = x.size
@@ -831,7 +850,7 @@ class Tile:
             else:
                 ux, uy, un = np.zeros((m, 1)), np.zeros((m, 1)), np.zeros(m, dtype=np.int64)
             flux, gain, cov, valid = self._call(x[r, None], y[r, None], np.ones(m, dtype=np.int64),
-                                                ux, uy, un, cx[r], cy[r], self.half)
+                                                ux, uy, un, cx[r], cy[r], self.half, free_bg)
             out[0][r] = flux[:, 0] * self.flux_scale
             out[1][r] = gain[:, 0]
             out[2][r] = np.sqrt(np.maximum(cov[:, 0, 0], 0)) * self.flux_scale
@@ -840,11 +859,11 @@ class Tile:
         return PositionFit(*out)
 
     def fit_positions(self, x, y, batch=512):
-        """Forced fit at each (x, y) -> PositionFit. The same code for real sources and for
-        random completeness positions: the PSF fit on the eHOPS annulus-sky convention, with no
-        nuisance columns (HOPS/eHOPS had none; a neighbour in the annulus is removed by the clipped
-        sky, one inside the fitting box adds to the flux -- disclosed)."""
-        return self._fit(x, y, use_nuisance=False, batch=batch)
+        """Forced single-source fit at each (x, y) -> PositionFit, the PSF-fit path's singleton: the same
+        estimator as `fit_groups` (one free constant background, no annulus sky, no nuisance columns), so its
+        median at a cell's clean random positions is the group path's own empty-sky null (CELL_OFFSET_PSF).
+        A neighbour inside the fitting box adds to the flux -- disclosed."""
+        return self._fit(x, y, use_nuisance=False, batch=batch, free_bg=True)
 
     def measure(self, x, y):
         """The measurement of isolated sources and of the completeness positions (final ruling, spec
@@ -926,15 +945,15 @@ class Tile:
     def fit_groups(self, x, y, group):
         """Simultaneous fit of blend groups -> GroupFit. `group` (n,) holds an integer label
         per row; rows sharing a label are fitted together, every member at its own fixed
-        position with two free scan columns, plus nuisance columns for the tile's bright
-        neighbours that are not within one beam of any member."""
+        position with two free scan columns, and one free constant background for the group's box
+        (no annulus sky, no nuisance columns): exactly linear in every member's flux."""
         x = np.asarray(x, float)
         y = np.asarray(y, float)
         group = np.asarray(group)
         n = x.size
         res = {k: np.full(n, np.nan) for k in ("flux", "sigma", "rho", "gflux", "gsigma")}
         covered = np.zeros(n, dtype=bool)
-        single = self._fit(x, y, use_nuisance=False)
+        single = self._fit(x, y, use_nuisance=False, free_bg=True)
         _, inverse = np.unique(group, return_inverse=True)
         order = np.argsort(inverse, kind="stable")
         starts = np.r_[0, np.flatnonzero(np.diff(inverse[order])) + 1, n]
@@ -954,7 +973,7 @@ class Tile:
                 # no nuisance columns (final ruling, spec 12: nothing of ours in the flux)
                 ux, uy, un = (np.zeros((len(mem), 1)), np.zeros((len(mem), 1)), np.zeros(len(mem), dtype=np.int64))
                 flux, gain, cov, valid = self._call(x[mem], y[mem], np.full(len(mem), size, dtype=np.int64),
-                                                    ux, uy, un, cxg, cyg, half)
+                                                    ux, uy, un, cxg, cyg, half, free_bg=True)
                 sd = np.sqrt(np.maximum(np.diagonal(cov, axis1=1, axis2=2), 0))
                 with np.errstate(all="ignore"):
                     corr = np.abs(cov / (sd[:, :, None] * sd[:, None, :]))
