@@ -4001,6 +4001,12 @@ _PHOTOMETRY_PACS_READINGS = {
         "emission under it that is not the source is, if anything, above its cell's typical level: the "
         "cell's offset is the smallest correction the data justify, and what remains is emission local to the "
         "source (at 70 micron, its warm envelope). NaN where the band does not cover the source."),
+    "RELIABILITY_{b}": ("probability",
+        "For a source whose flux reaches 5 times its cell noise: the chance that the flux is its own rather than "
+        "the field's (other sources, cloud structure in the aperture), from the measured densities of the two in its "
+        "cell's sky-brightness bin (RELIABILITY_GRID in the completeness product; Sutherland & Saunders 1992). The "
+        "source is detected (ORIGIN 1) when this is at least 0.8; below 0.8 its flux is an upper bound (ORIGIN 2). "
+        "NaN for a source below the 5-sigma floor or not covered."),
     "SIGMA_ANNULUS_{b}_MJY": ("mJy",
         "eHOPS's own per-source uncertainty statistic: the scatter of the sky-annulus pixels times the square root of "
         "the aperture area, divided by the aperture correction. Kept for comparison with their tables; detection uses "
@@ -4008,9 +4014,11 @@ _PHOTOMETRY_PACS_READINGS = {
     "ORIGIN_{b}": ("origin code",
         "1 means the source is detected: its flux minus the typical empty-sky flux of its 30-arcsecond cell "
         "(CELL_OFFSET in the completeness product) is at least five times its uncertainty -- the same rule the "
-        "completeness curve uses; 90 means the band covers the source but it is not detected; 2 means the source lies "
-        "within one beam of another source detected in this band and is not the brighter of the two (an unseparable "
-        "blend, the convention of HOPS and eHOPS): its flux is an upper bound; 91 means the band does not cover the source."),
+        "completeness curve uses, and RELIABILITY is at least 0.8 (the flux is probably the source's own); 90 means the "
+        "band covers the source and its flux is below that floor; 2 means the flux is an upper bound, either because "
+        "it reaches the floor but is probably not the source's own (RELIABILITY below 0.8), or because the source lies "
+        "within one beam of another detection and is not the brighter of the two (an unseparable blend, the "
+        "convention of HOPS and eHOPS); 91 means the band does not cover the source."),
     "LOCAL_RMS_{b}_MJY": ("mJy",
         "Noise of the 30-arcsecond cell containing the source: the scatter of the flux measured at random empty-sky positions in that cell. Five times this value is the faintest flux that would be called a detection there. NaN where the band does not cover the source."),
     "OBSID_{b}": ("observation identifier(s)",
@@ -4074,7 +4082,8 @@ _PACS_INJECTION_READINGS = {
         "times 600. The artificial sources are the band's point-spread pattern added to a copy of the real map at "
         "random positions, never two close enough for one's light to reach the other's aperture or sky annulus, "
         "measured exactly as a catalogue source at that position is (aperture photometry), and counted as recovered "
-        "when their flux minus CELL_OFFSET_{b}_MJY reaches 5 times CELL_SIGMA_{b}_MJY, whatever the flux error, and, "
+        "when their flux minus CELL_OFFSET_{b}_MJY reaches 5 times CELL_SIGMA_{b}_MJY with a reliability of at least "
+        "0.8 at that flux (RELIABILITY_GRID_{b} of the cell's table), whatever the flux error, and, "
         "within one beam of a detected source, only if they are also the brighter of the two (the catalogue reports the "
         "fainter member of such a pair as an upper bound): the curve is the chance of a detection under the "
         "catalogue's own rule, so within a beam of a detection it is zero except for sources brighter than it. Artificial sources are injected at fixed multiples of each cell's own noise (CELL_SIGMA_{b}_MJY), from 0.3 to 1000 times it in steps of 0.1 in the logarithm, and the counts of the cells whose centres lie within 120 arcsec of the cell on the same map are added at each multiple (widened to 240, then 360 arcsec where fewer than 100 result). The value at a flux is read at that flux over the cell's own CELL_SIGMA_{b}_MJY, interpolating linearly in the logarithm between the two nearest multiples: the shape comes from the neighbourhood, the scale and the offset are the cell's own. The value at "
@@ -4124,6 +4133,35 @@ _PACS_INJECTION_READINGS = {
         "every bright source (one cell alone holds only about ten independent beams). A flux is a detection when "
         "it minus CELL_OFFSET_{b}_MJY is at least 5 times this value. It is not the uncertainty of a detected "
         "source (that is SCATTER_{b}_MJY) and no tail correction is applied."),
+    "SKY_BIN_{b}": ("bin index, 0-4",
+        "For each row of CURVE_{b}: the cell's within-map sky-brightness bin, the cells of each map cut into 5 equal "
+        "groups by the clipped sky in their annulus (0 faintest). CONTAMINATION_{b} and the reliability tables are "
+        "per bin."),
+    "CELL_TABLE_{b}": ("row index into the reliability tables",
+        "For each row of CURVE_{b}: which row of RELIABILITY_GRID_{b} (and N_DENSITY_{b}) decides the reliability "
+        "of a flux in this cell: the cell's map's own table for its sky bin where the map holds at least 10,000 random "
+        "positions in that bin, else the region's table for the bin (rows 0-4)."),
+    "LOGF_EDGES_{b}": ("log10 mJy",
+        "The edges of the flux bins of the reliability tables (N_DENSITY_{b}, Q_DENSITY_{b}, RELIABILITY_GRID_{b}), "
+        "in the logarithm of the flux minus the cell offset; attribute R_MIN the reliability a detection needs."),
+    "N_DENSITY_{b}": ("per aperture per dex",
+        "One row per reliability table (TABLE_MAP_{b}, TABLE_BIN_{b}): the density of empty-position fluxes, the "
+        "measured flux minus the cell offset at the completeness stage's random positions (uniform over valid data, "
+        "those within half a beam of a source above the floor left out) that reach their cell's 5 x CELL_SIGMA, per "
+        "random position and per dex of flux. It is how often an aperture with no catalogued source in it shows a "
+        "flux that bright: the field's rate (Sutherland & Saunders 1992)."),
+    "Q_DENSITY_{b}": ("per source per dex",
+        "One row per sky bin, over the region: the density of the fluxes that belong to the catalogued sources, "
+        "the histogram of the covered SESNA sources' fluxes above their floor less what N_DENSITY_{b} predicts for "
+        "that many apertures (never negative), per source and per dex, smoothed over three flux bins."),
+    "RELIABILITY_GRID_{b}": ("probability",
+        "One row per reliability table: Q / (Q + N) on the flux bins, the chance that a flux in that bin measured at "
+        "a catalogued source is the source's own rather than the field's (1 where the field never reaches it)."),
+    "TABLE_MAP_{b}": ("map index, or -1",
+        "For each reliability table, the map (row of MAP_ID_{b}) it was measured on; -1 for the region's tables."),
+    "TABLE_BIN_{b}": ("bin index, 0-4", "For each reliability table, its sky bin (SKY_BIN_{b})."),
+    "TABLE_POSITIONS_{b}": ("random positions", "For each reliability table, the random positions behind N_DENSITY_{b}."),
+    "TABLE_SOURCES_{b}": ("SESNA sources", "For each reliability table, the covered SESNA sources whose cells use it."),
 }
 for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_u, _r) in _PACS_INJECTION_READINGS.items():

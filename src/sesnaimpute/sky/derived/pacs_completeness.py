@@ -70,7 +70,8 @@ from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.config import product_path
 from sesnaimpute.sky.derived import pacs_fit
-from sesnaimpute.sky.derived.pacs_photometry import (BLEND_RADIUS_BEAMS, SNR_BIN_CENTRES, SNR_BIN_EDGES,
+from sesnaimpute.sky.derived.pacs_photometry import (BLEND_RADIUS_BEAMS, LOGF_STEP, R_MIN, SNR_BIN_CENTRES,
+                                                     SNR_BIN_EDGES, blend_rule, logf_bin, logf_edges, reliability,
                                                      singleton_pass)
 from sesnaimpute.sky.derived import pacs_psf
 from sesnaimpute.sky.derived.pacs_psf import APERTURES
@@ -118,6 +119,11 @@ INTERIOR_SAFETY = 1.3
 MAX_EXTRA_BATCHES = 40
 #: the recovered fraction FLUX90 is read at
 FLUX90_FRACTION = 0.9
+#: the reliability rule's empty-sky density (RULINGS_4): a map's own table for a sky bin needs this many random
+#: positions in it, else the region's; positions within this many beams of a 5-sigma detection are left out (the
+#: injection population's exclusion)
+MIN_TABLE_POSITIONS = 10000
+EXCLUDE_BEAMS = 0.5
 
 
 def snr_bin(snr):
@@ -272,10 +278,14 @@ def _piece(piece, config, records, refs):
     with np.errstate(all="ignore"):
         cell_sky = np.nanmedian(np.where(valid, sky, np.nan), axis=1)[k]
     covered = (n_valid >= MIN_VALID_POSITIONS) & np.isfinite(sigma) & (sigma > 0)
+    # the detection statistic at every valid random position (flux minus the cell's offset): the empty-sky flux
+    # population of the reliability rule (positions regenerated from the cell id and seed for the exclusion)
+    with np.errstate(invalid="ignore"):
+        fnu_pos = np.where(valid[k], b[k] - offset[:, None], np.nan).astype(np.float32)
     ra, dec = pacs_fit.from_map_frame(*tile.grid.centres_icrs(ids), ref["shift"][:2])
     return dict(tile=tile_index, ids=ids, covered=covered,
                 n_sigma=np.minimum(n_sigma, np.iinfo(np.int16).max).astype(np.int16),
-                sigma=sigma, offset=offset, sky=cell_sky, ra=ra, dec=dec)
+                sigma=sigma, offset=offset, sky=cell_sky, ra=ra, dec=dec, fnu_pos=fnu_pos)
 
 
 # ----------------------------------------------------------------------------
@@ -471,6 +481,9 @@ class Injector:
         self.offset = np.full(grid.n_cells, np.nan)
         self.sigma[self.ids] = inp["sigma"]
         self.offset[self.ids] = inp["offset"]
+        self.table = np.full(grid.n_cells, -1, np.int64)
+        self.table[self.ids] = inp["cell_table"]
+        self.r_grid = inp["r_grid"]
         self.beam_px = tile.beam_px
         self.beam_area_px = np.pi / (4 * np.log(2)) * tile.beam_px ** 2
         self.separation_px = tile.injection_half_width() + APERTURES[tile.record.band][2] / tile.pixel_arcsec
@@ -482,8 +495,10 @@ class Injector:
         self.det_offset = np.zeros(0)
         self.n_detected = 0
         if inp["src_ra"].size:
-            x, y, single, _ok, det = singleton_pass(tile, inp["src_ra"], inp["src_dec"], inp["shift"],
-                                                    inp["src_sigma"], inp["src_offset"])
+            x, y, single, _ok, _floor = singleton_pass(tile, inp["src_ra"], inp["src_dec"], inp["shift"],
+                                                       inp["src_sigma"], inp["src_offset"])
+            # the catalogue's detections (ORIGIN 1: floor, reliability, blend rule), decided by the parent
+            det = np.asarray(inp["src_detected"], bool)
             self.n_detected = int(det.sum())
             self.src_xy = np.c_[x, y]
             if det.any():
@@ -606,7 +621,8 @@ class Injector:
             t_inject += time.time() - t0
         with np.errstate(invalid="ignore"):
             recovered = (covered & np.isfinite(sigma) & (sigma > 0) & brighter
-                         & (flux_out - offset >= pacs_fit.DETECTION_SNR * sigma))
+                         & (flux_out - offset >= pacs_fit.DETECTION_SNR * sigma)
+                         & (reliability(flux_out - offset, self.table[cid], self.r_grid) >= R_MIN))
         keep = covered
         out.update(row=self.row_of_cell[cid[keep]], near=near[keep], recovered=recovered[keep],
                    dflux=(flux_out - offset - flux).astype(np.float32)[keep],
@@ -891,7 +907,8 @@ def tile_inputs(cell_map, cell_id, sigma, offset, source_row, shift, ra, dec):
         out[int(t)] = dict(ids=cell_id[rows], sigma=sigma[rows].astype(np.float64), offset=offset[rows].astype(np.float64),
                            src_ra=ra[s], src_dec=dec[s], src_sigma=sigma[source_row[s]].astype(np.float64),
                            src_offset=offset[source_row[s]].astype(np.float64),
-                           shift=(float(np.float32(shift[t][0])), float(np.float32(shift[t][1]))), row0=int(rows[0]))
+                           shift=(float(np.float32(shift[t][0])), float(np.float32(shift[t][1]))), row0=int(rows[0]),
+                           src_index=s)
     return out
 
 
@@ -967,7 +984,7 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
     # the detection rule's inputs: cell offset and noise
     results = pieces_module.run(functools.partial(_piece, config=config, records=records, refs=refs),
                                 pieces, n_jobs, stage=stage, unit="cell blocks")
-    names = ("covered", "n_sigma", "sigma", "offset", "sky", "ra", "dec")
+    names = ("covered", "n_sigma", "sigma", "offset", "sky", "ra", "dec", "fnu_pos")
     # the rows: every covered cell of every map, ordered by (map, cell id)
     parts = []
     for t in range(len(records)):
@@ -1002,10 +1019,23 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
     shifts = np.array([refs[t]["shift"] if t in refs else (0.0, 0.0, 0) for t in range(len(records))], dtype=float)
     cell_sigma = cols["sigma"].astype(np.float32)
     cell_offset = cols["offset"].astype(np.float32)
+    inputs = tile_inputs(cell_map, cell_id, cell_sigma, cell_offset, src_row, shifts, ra, dec)
+
+    # the catalogue's detections: every SESNA source measured on its map, the reliability tables, the blend rule
+    passes = dict(pieces_module.run(functools.partial(_source_pass, config=config, records=records),
+                                    sorted(inputs.items()), n_jobs, stage=stage, unit="maps (sources)"))
+    cell_bin = sky_bins(cell_map, cols["sky"])
+    fnu_pos = cols.pop("fnu_pos")
+    tables, detected = reliability_tables(records, inputs, passes, cell_bin, cell_sigma, fnu_pos, src_row,
+                                          records[0].band)
+    del fnu_pos
+    for t, inp in inputs.items():
+        inp["src_detected"] = detected[t]
+        inp["cell_table"] = tables["cell_table"][inp["row0"] + np.arange(inp["ids"].size)]
+        inp["r_grid"] = tables["r_grid"]
 
     # artificial sources: each map cut into pieces of its (S/N plane, half) pairs, map by map from the biggest;
     # then each map pooled whole
-    inputs = tile_inputs(cell_map, cell_id, cell_sigma, cell_offset, src_row, shifts, ra, dec)
     todo, counts = injection_pieces(records, inputs)
     done = pieces_module.run(functools.partial(_inject_pairs, config=config, records=records),
                              todo, n_jobs, stage=stage, unit="map pieces (artificial sources)")
@@ -1050,7 +1080,7 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
     envelope = curve.max(axis=0).astype(np.uint16) if n_row else np.zeros(n_plane, np.uint16)
     return dict(curve=curve, source_row=src_row.astype(np.int32), envelope=envelope, n_pos=n_pos,
                 contamination=contamination, contamination_bins=bin_values, contamination_counts=bin_counts,
-                n_sigma=cols["n_sigma"].astype(np.int16), flux90=flux90_, bias=errors["bias"], scatter=errors["scatter"],
+                tables=tables, n_sigma=cols["n_sigma"].astype(np.int16), flux90=flux90_, bias=errors["bias"], scatter=errors["scatter"],
                 held=held, stats=stats,
                 cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=cell_sigma, cell_offset=cell_offset,
                 cell_id=cell_id, cell_map_index=cell_map,
@@ -1065,17 +1095,150 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
                 map_cell_step=np.array([(g[2].step_x, g[2].step_y) for g in geometry], dtype=np.float64).reshape(len(records), 2))
 
 
-def _contamination(cell_map, cell_sky, row, recovered):
-    """CONTAMINATION per row: the cells of each map cut into SKY_BINS equal bins by rank of their annulus sky (PACS
-    maps have no absolute zero level); per bin, over every map of the band, the fraction of the faintest-S/N
-    artificial sources (`row`, `recovered`) the rule counted as detections. Returns (per row, per bin, injections
-    per bin)."""
-    n_row = cell_map.size
-    bins = np.zeros(n_row, np.int64)
+def _source_pass(piece, config, records):
+    """The catalogue's own aperture measurement of the SESNA sources whose deepest map is tile `t` (`piece = (t,
+    inputs)`, see `tile_inputs`): returns `(t, dict)` with fnu (flux minus the cell offset), ok, floor (fnu >= 5
+    CELL_SIGMA), the map pixels x, y and the beam in pixels."""
+    t, inp = piece
+    tile = pacs_fit.cached_tile(config, records[t])
+    if inp["src_ra"].size == 0:
+        z = np.zeros(0)
+        return t, dict(fnu=z, ok=z.astype(bool), floor=z.astype(bool), x=z, y=z, beam_px=tile.beam_px)
+    x, y, single, ok, floor = singleton_pass(tile, inp["src_ra"], inp["src_dec"], inp["shift"], inp["src_sigma"],
+                                             inp["src_offset"])
+    return t, dict(fnu=single.flux - inp["src_offset"], ok=ok, floor=floor, x=x, y=y, beam_px=tile.beam_px)
+
+
+def sky_bins(cell_map, cell_sky):
+    """Per row, its within-map sky bin: the cells of each map cut into SKY_BINS equal bins by rank of their annulus
+    sky (PACS maps have no absolute zero level), 0 faintest."""
+    bins = np.zeros(cell_map.size, np.int64)
     for m in np.unique(cell_map):
         rows = np.flatnonzero(cell_map == m)
         rank = np.argsort(np.argsort(np.nan_to_num(cell_sky[rows], nan=np.nanmedian(cell_sky[rows])), kind="stable"))
         bins[rows] = np.minimum(rank * SKY_BINS // max(rows.size, 1), SKY_BINS - 1)
+    return bins
+
+
+def reliability_tables(records, inputs, passes, cell_bin, cell_sigma, fnu_pos, source_row, band):
+    """The reliability rule's tables (RULINGS_4) and the catalogue's detections, for one band.
+
+    n: per (map, sky bin) with at least MIN_TABLE_POSITIONS random positions, else per (region, sky bin), the density
+    per aperture and per dex of the empty-position flux FNU (`fnu_pos`, the completeness stage's random positions,
+    those within EXCLUDE_BEAMS of a 5-sigma source left out) at or above its cell's 5 CELL_SIGMA. q: per sky bin over
+    the region, the density per SESNA source and per dex of the true-counterpart flux, max(0, N_SESNA(f) - N_src
+    n(f) df) / (N_src df) with N_src the covered sources and N_SESNA the histogram of their FNU above the floor,
+    smoothed by a 3-bin running mean. RELIABILITY = q / (q + n) per table on the log-flux grid (1 where n is 0).
+    A source is ORIGIN 1 when above the floor with RELIABILITY >= R_MIN and not a blend (`blend_rule`).
+    Returns the tables, each row's table, each map's detections (keyed by tile) and prints the internal check."""
+    edges = logf_edges()
+    n_f = edges.size - 1
+    n_map = len(records)
+    npos = np.zeros((n_map, SKY_BINS), np.int64)
+    hist = np.zeros((n_map, SKY_BINS, n_f))
+    for t, inp in inputs.items():
+        rows = inp["row0"] + np.arange(inp["ids"].size)
+        fp = fnu_pos[rows]
+        x, y = _tile_geometry(records[t])[0].sample_pixels(inp["ids"], N_POS, t + 1)
+        keep = np.isfinite(fp)
+        ps = passes[t]
+        if ps["floor"].any():
+            d, _ = cKDTree(np.c_[ps["x"][ps["floor"]], ps["y"][ps["floor"]]]).query(np.c_[x.ravel(), y.ravel()])
+            keep &= (d >= EXCLUDE_BEAMS * ps["beam_px"]).reshape(x.shape)
+        with np.errstate(invalid="ignore"):
+            above = keep & (fp >= pacs_fit.DETECTION_SNR * cell_sigma[rows].astype(np.float64)[:, None])
+        b = cell_bin[rows]
+        for j in range(SKY_BINS):
+            m = b == j
+            npos[t, j] = int(keep[m].sum())
+            hist[t, j] = np.bincount(logf_bin(fp[m][above[m]]), minlength=n_f)[:n_f]
+    # the tables: the region's per sky bin first, then each (map, bin) with enough positions of its own
+    table_map, table_bin = [-1] * SKY_BINS, list(range(SKY_BINS))
+    t_hist, t_pos = [hist.sum(axis=0)[j] for j in range(SKY_BINS)], [int(npos.sum(axis=0)[j]) for j in range(SKY_BINS)]
+    cell_table = cell_bin.astype(np.int64).copy()
+    for t in sorted(inputs):
+        rows = inputs[t]["row0"] + np.arange(inputs[t]["ids"].size)
+        for j in range(SKY_BINS):
+            if npos[t, j] >= MIN_TABLE_POSITIONS:
+                cell_table[rows[cell_bin[rows] == j]] = len(table_map)
+                table_map.append(t)
+                table_bin.append(j)
+                t_hist.append(hist[t, j])
+                t_pos.append(int(npos[t, j]))
+    table_map, table_bin, t_pos = np.array(table_map), np.array(table_bin), np.array(t_pos)
+    n_dens = np.array(t_hist) / np.maximum(t_pos, 1)[:, None] / LOGF_STEP
+    # the sources: covered (ok), above the floor, and their bins and tables
+    s_all = np.concatenate([inputs[t]["src_index"] for t in sorted(inputs)])
+    s_ok = np.concatenate([passes[t]["ok"] for t in sorted(inputs)])
+    s_floor = np.concatenate([passes[t]["floor"] for t in sorted(inputs)])
+    s_fnu = np.concatenate([passes[t]["fnu"] for t in sorted(inputs)])
+    s_bin = cell_bin[source_row[s_all]]
+    s_table = cell_table[source_row[s_all]]
+    q = np.zeros((SKY_BINS, n_f))
+    excess = np.zeros(SKY_BINS)
+    n_src = np.zeros(SKY_BINS, np.int64)
+    for j in range(SKY_BINS):
+        n_src[j] = int((s_ok & (s_bin == j)).sum())
+        h = np.bincount(logf_bin(s_fnu[s_floor & (s_bin == j)]), minlength=n_f)[:n_f].astype(float)
+        raw = np.maximum(0.0, h - n_src[j] * n_dens[j] * LOGF_STEP)
+        excess[j] = raw.sum()
+        q[j] = np.convolve(raw / max(n_src[j] * LOGF_STEP, 1e-300), np.ones(3) / 3.0, mode="same")
+    qt = q[table_bin]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r_grid = np.where(n_dens > 0, qt / (qt + n_dens), 1.0)
+    rel = np.full(s_all.size, np.nan)
+    rel[s_floor] = reliability(s_fnu[s_floor], s_table[s_floor], r_grid)
+    pre = s_floor & (rel >= R_MIN)
+    # the blend rule on the ORIGIN 1 sources, per map
+    detected = {}
+    k0 = 0
+    for t in sorted(inputs):
+        n_t = inputs[t]["src_index"].size
+        sl = slice(k0, k0 + n_t)
+        ps = passes[t]
+        blend, _, _ = blend_rule(ps["x"], ps["y"], s_fnu[sl], pre[sl], s_ok[sl], ps["beam_px"])
+        detected[t] = pre[sl] & ~blend
+        k0 += n_t
+    # the internal check (RULINGS_4 section 4): sum over ORIGIN 1 of (1 - R) against N_src x the integral of n over
+    # {R >= R_MIN}, per sky bin; the achieved purity; the depth (flux above which R >= R_MIN) per sky bin
+    t_src = np.bincount(s_table[s_ok & (s_table >= 0)], minlength=table_map.size)
+    print("  %s reliability (R_MIN %.1f): %d tables (%d of maps' own); per sky bin, faint to bright:" %
+          (band, R_MIN, table_map.size, int((table_map >= 0).sum())), flush=True)
+    tot_obs = tot_exp = 0.0
+    for j in range(SKY_BINS):
+        e_obs = float(np.sum(1.0 - rel[pre & (s_bin == j)]))
+        tabs = np.flatnonzero(table_bin == j)
+        e_exp = float(sum(t_src[i] * np.sum(n_dens[i][r_grid[i] >= R_MIN]) * LOGF_STEP for i in tabs))
+        depths = []
+        for i in tabs:
+            data = (n_dens[i] > 0) | (q[j] > 0)
+            bad = np.flatnonzero(data & (r_grid[i] < R_MIN))
+            k = bad.max() + 1 if bad.size else (np.flatnonzero(data)[0] if data.any() else n_f)
+            depths.append(10 ** (0.5 * (edges[min(k, n_f - 1)] + edges[min(k, n_f - 1) + 1])) if k < n_f else np.inf)
+        tot_obs += e_obs
+        tot_exp += e_exp
+        print("    bin %d: %d covered sources, %d above the floor, %d ORIGIN 1 before blends; excess %.0f; %d positions "
+              "(region); contaminated ORIGIN 1 sum(1 - R) %.1f vs N_src x integral of n over R >= R_MIN %.1f +/- %.1f; "
+              "median depth (flux above which R >= R_MIN) %.0f mJy"
+              % (j, n_src[j], int((s_floor & (s_bin == j)).sum()), int((pre & (s_bin == j)).sum()), excess[j],
+                 t_pos[j], e_obs, e_exp, np.sqrt(max(e_exp, 1.0)), np.median(depths)), flush=True)
+    n1 = int(pre.sum())
+    print("    all bins: ORIGIN 1 before blends %d, after %d; identity %.1f vs %.1f +/- %.1f (%s); achieved purity %.3f"
+          % (n1, int(sum(v.sum() for v in detected.values())), tot_obs, tot_exp, np.sqrt(max(tot_exp, 1.0)),
+             "within 2 sigma" if abs(tot_obs - tot_exp) <= 2 * np.sqrt(max(tot_exp, 1.0)) else "OUTSIDE 2 sigma",
+             1.0 - tot_obs / max(n1, 1)), flush=True)
+    return dict(edges=edges, n_density=n_dens.astype(np.float32), q_density=q.astype(np.float32),
+                r_grid=r_grid.astype(np.float32), table_map=table_map.astype(np.int32),
+                table_bin=table_bin.astype(np.int8), table_positions=t_pos.astype(np.int64),
+                table_sources=t_src.astype(np.int64), cell_table=cell_table.astype(np.int32),
+                sky_bin=cell_bin.astype(np.int8)), detected
+
+
+def _contamination(cell_map, cell_sky, row, recovered):
+    """CONTAMINATION per row: per within-map sky bin (`sky_bins`), over every map of the band, the fraction of the
+    faintest-S/N artificial sources (`row`, `recovered`) the rule counted as detections. Returns (per row, per bin,
+    injections per bin)."""
+    bins = sky_bins(cell_map, cell_sky)
     n = np.bincount(bins[row], minlength=SKY_BINS).astype(np.float64)
     k = np.bincount(bins[row][recovered], minlength=SKY_BINS).astype(np.float64)
     with np.errstate(all="ignore"):
@@ -1100,6 +1263,11 @@ def _empty_band(n_src, n_plane):
                 contamination_counts=np.zeros(SKY_BINS, np.int64),
                 envelope=np.zeros(n_plane, np.uint16), n_pos=z(np.int32), n_sigma=z(np.int16), flux90=z(np.float32),
                 bias=nan(), scatter=nan(),
+                tables=dict(sky_bin=z(np.int8), cell_table=z(np.int32), edges=logf_edges(),
+                            n_density=np.zeros((0, logf_edges().size - 1), np.float32),
+                            q_density=np.zeros((SKY_BINS, logf_edges().size - 1), np.float32),
+                            r_grid=np.zeros((0, logf_edges().size - 1), np.float32), table_map=z(np.int32),
+                            table_bin=z(np.int8), table_positions=z(np.int64), table_sources=z(np.int64)),
                 held=None, stats=[], cell_ra=z(float),
                 cell_dec=z(float), cell_sigma=z(np.float32), cell_offset=z(np.float32), cell_id=z(np.int64),
                 cell_map_index=z(np.int32), cell_obsid=z("S1"), cell_map=z("S1"), n_candidate=0, map_id=z("S1"),
@@ -1137,6 +1305,18 @@ def write_product(path, region, mag, bands):
             ds.attrs["SKY_BINS"] = SKY_BINS
             ds.attrs["BIN_VALUES"] = np.asarray(d["contamination_bins"], np.float64)
             ds.attrs["BIN_INJECTIONS"] = np.asarray(d["contamination_counts"], np.int64)
+            tb = d["tables"]
+            w("SKY_BIN_" + b, tb["sky_bin"])
+            w("CELL_TABLE_" + b, tb["cell_table"])
+            ds = w("LOGF_EDGES_" + b, tb["edges"])
+            ds.attrs["R_MIN"] = R_MIN
+            w("N_DENSITY_" + b, tb["n_density"])
+            w("Q_DENSITY_" + b, tb["q_density"])
+            w("RELIABILITY_GRID_" + b, tb["r_grid"])
+            w("TABLE_MAP_" + b, tb["table_map"])
+            w("TABLE_BIN_" + b, tb["table_bin"])
+            w("TABLE_POSITIONS_" + b, tb["table_positions"])
+            w("TABLE_SOURCES_" + b, tb["table_sources"])
             w("CELL_RA_" + b, d["cell_ra"])
             w("CELL_DEC_" + b, d["cell_dec"])
             w("CELL_ID_" + b, d["cell_id"])
