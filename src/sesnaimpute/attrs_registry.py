@@ -3906,7 +3906,7 @@ for _lib in ("sps", "agb", "pahc", "galz", "yso", "h2shock", "pahn"):
 PACS_COPIED = (
     "CURVE_{b}", "MAG_GRID_{b}", "COMPLETED_FROM_{b}", "ENVELOPE_{b}",
     "CELL_ID_{b}", "CELL_MAP_INDEX_{b}", "CELL_MAP_{b}", "CELL_RA_{b}", "CELL_DEC_{b}",
-    "CELL_SIGMA_{b}_MJY", "CELL_OFFSET_{b}_MJY",
+    "CELL_SIGMA_{b}_MJY", "CELL_OFFSET_{b}_MJY", "THRESHOLD_{b}_MJY",
     "CELL_OBSID_{b}", "N_POS_{b}", "N_SIGMA_POS_{b}",
     "MAP_ID_{b}", "MAP_OBSID_{b}", "MAP_WCS_{b}", "MAP_SHAPE_{b}", "MAP_CELL_STEP_{b}",
     "MAP_SHIFT_{b}_ARCSEC", "MAP_N_PAIRS_{b}",
@@ -4007,12 +4007,12 @@ _PHOTOMETRY_PACS_READINGS = {
         "SIGMA_{b}_MJY."),
     "ORIGIN_{b}": ("origin code",
         "1 means the source is detected: its flux minus the typical empty-sky flux of its 30-arcsecond cell "
-        "(CELL_OFFSET in the completeness product) is at least five times its uncertainty -- the same rule the "
-        "completeness curve uses; 90 means the band covers the source but it is not detected; 2 means the source lies "
+        "(CELL_OFFSET in the completeness product) reaches its cell's detection threshold (THRESHOLD in the completeness "
+        "product: a false-alarm probability of 3e-4 on that sky) -- the same rule the completeness curve uses; 90 means the band covers the source but it is not detected; 2 means the source lies "
         "within one beam of another source detected in this band and is not the brighter of the two (an unseparable "
         "blend, the convention of HOPS and eHOPS): its flux is an upper bound; 91 means the band does not cover the source."),
     "LOCAL_RMS_{b}_MJY": ("mJy",
-        "Noise of the 30-arcsecond cell containing the source: the scatter of the flux measured at random empty-sky positions in that cell. Five times this value is the faintest flux that would be called a detection there. NaN where the band does not cover the source."),
+        "Noise of the 30-arcsecond cell containing the source: the scatter of the flux measured at random empty-sky positions in that cell. The detection threshold is set separately, as a false-alarm probability (THRESHOLD in the completeness product). NaN where the band does not cover the source."),
     "OBSID_{b}": ("observation identifier(s)",
         "The Herschel observation identifier(s), comma separated, of the map the flux was measured on; empty where the band does not cover the source."),
     "N_BLEND_{b}": ("number of SESNA sources",
@@ -4074,7 +4074,7 @@ _PACS_INJECTION_READINGS = {
         "times 600. The artificial sources are the band's point-spread pattern added to a copy of the real map at "
         "random positions, never two close enough for one's light to reach the other's aperture or sky annulus, "
         "measured exactly as a catalogue source at that position is (aperture photometry), and counted as recovered "
-        "when their flux minus CELL_OFFSET_{b}_MJY reaches 5 times CELL_SIGMA_{b}_MJY, whatever the flux error, and, "
+        "when their flux minus CELL_OFFSET_{b}_MJY reaches THRESHOLD_{b}_MJY, whatever the flux error, and, "
         "within one beam of a detected source, only if they are also the brighter of the two (the catalogue reports the "
         "fainter member of such a pair as an upper bound): the curve is the chance of a detection under the "
         "catalogue's own rule, so within a beam of a detection it is zero except for sources brighter than it. Artificial sources are injected at fixed multiples of each cell's own noise (CELL_SIGMA_{b}_MJY), from 0.3 to 1000 times it in steps of 0.1 in the logarithm, and the counts of the cells whose centres lie within 120 arcsec of the cell on the same map are added at each multiple (widened to 240, then 360 arcsec where fewer than 100 result). The value at a flux is read at that flux over the cell's own CELL_SIGMA_{b}_MJY, interpolating linearly in the logarithm between the two nearest multiples: the shape comes from the neighbourhood, the scale and the offset are the cell's own. The value at "
@@ -4118,12 +4118,29 @@ _PACS_INJECTION_READINGS = {
         "number of detections expected to come from unrelated flux. It is already inside CURVE_{b} at the faintest "
         "fluxes. It cannot be applied to a single source: it does not say whether a given detection is affected."),
     "CELL_SIGMA_{b}_MJY": ("mJy",
-        "The noise of a {w} micron flux measured in each cell of CURVE_{b}, used only to decide detection: the "
+        "The noise of a {w} micron flux measured in each cell of CURVE_{b}: the "
         "median, over the 3 x 3 block of cells around it, of 1.4826 times the median absolute deviation about "
         "CELL_OFFSET_{b}_MJY of the fluxes measured at each cell's random positions farther than one beam from "
-        "every bright source (one cell alone holds only about ten independent beams). A flux is a detection when "
-        "it minus CELL_OFFSET_{b}_MJY is at least 5 times this value. It is not the uncertainty of a detected "
-        "source (that is SCATTER_{b}_MJY) and no tail correction is applied."),
+        "every bright source (one cell alone holds only about ten independent beams). It sets the signal-to-noise "
+        "axis the artificial sources are injected on and the uncertainty of an undetected source; detection is "
+        "THRESHOLD_{b}_MJY. It is not the uncertainty of a detected source (that is SCATTER_{b}_MJY)."),
+    "THRESHOLD_{b}_MJY": ("mJy",
+        "For each row of CURVE_{b}: the detection threshold. A flux minus CELL_OFFSET_{b}_MJY is a detection when it "
+        "reaches this value. It is a false-alarm probability (attribute FALSE_ALARM_P, 3e-4): the 1 - 3e-4 quantile "
+        "of that same statistic at the random positions of the cells that no bright source's light reaches (farther "
+        "from every bright source than the point-spread patch's half-width plus the sky annulus's outer radius) in the "
+        "same within-map sky-brightness bin (SKY_BIN_{b}), over the cell's own map where that map "
+        "holds at least MIN_THRESHOLD_POSITIONS such positions in the bin, else over every map of the band in the "
+        "region. So on any sky the rule fires on sky structure at about the same rate; where the cloud is bright and "
+        "structured the threshold is higher than a fixed multiple of the noise would be. False detections from the "
+        "outer light of a bright source a few beams away are not set by it; CONTAMINATION_{b} measures them."),
+    "THRESHOLD_RATIO_{b}": ("dimensionless",
+        "THRESHOLD_{b}_MJY over 5 times CELL_SIGMA_{b}_MJY: how far the false-alarm threshold sits above the 5-sigma "
+        "rule it replaces (above 1 where the sky's excursions are heavier-tailed than Gaussian). Disclosure."),
+    "SKY_BIN_{b}": ("bin index, 0-4",
+        "For each row of CURVE_{b}: the cell's within-map sky-brightness bin, the cells of each map cut into 5 equal "
+        "groups by the clipped sky in their annulus (0 faintest). THRESHOLD_{b}_MJY and CONTAMINATION_{b} are set "
+        "per bin."),
 }
 for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_u, _r) in _PACS_INJECTION_READINGS.items():
