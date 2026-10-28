@@ -3936,8 +3936,11 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
     "MAP_SHIFT_{b}_ARCSEC": ("arcsec (east, north)",
         "For each row of MAP_ID_{b}: how far the map's own astrometry sits from the SESNA positions, east then north "
         "(map minus SESNA), the median over the map's bright point sources paired one-to-one with a SESNA source within "
-        "one beam; 0, 0 when fewer than 10 pairs exist. Every catalogue position is moved by this shift before it is "
-        "measured on the map, so a source is measured where the map puts it."),
+        "one beam; 0, 0 when fewer than 10 pairs exist. A 160 micron map takes the shift (and pairs) of the same "
+        "observation's blue map (70 or 100 micron), which observes through the same pointing and whose bright sources "
+        "are mostly the young stars themselves; a 160 micron map with no blue partner keeps its own. Every catalogue "
+        "position is moved by this shift before it is measured on the map, so a source is measured where the map puts "
+        "it."),
     "MAP_N_PAIRS_{b}": ("pairs",
         "For each row of MAP_ID_{b}: the number of bright-source pairs MAP_SHIFT_{b}_ARCSEC was measured from (below 10: no shift applied)."),
     "CELL_ID_{b}": ("cell id",
@@ -3969,35 +3972,38 @@ for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
 
 # sky.derived.pacs_completeness -- sources_pacs_region (RULINGS_5): the blind PACS source table.
 _PACS_SOURCES_READINGS = {
-    "RA_{b}_DEG": ("deg ICRS",
-        "One row per PACS source found by the blind detection on every {w} micron map of the region: right "
-        "ascension of the source (its map position moved back by the map's registration to SESNA). A PACS source is "
-        "a peak (higher than its 8 neighbouring pixels) of the PSF-matched map (the map correlated with the band's "
-        "own point-spread template) reaching 5 times that map's own noise in its cell above that map's offset there "
-        "(CELL_SIGMA_MATCHED and CELL_OFFSET_MATCHED of the completeness product), its position the parabolic "
-        "sub-pixel peak. Overlapping maps each list their own sources. Attribute SPURIOUS_BY_SKY_BIN: the number of "
-        "peaks the same detection finds on the negated maps over the number of sources, per sky bin."),
-    "DEC_{b}_DEG": ("deg ICRS", "Declination of each PACS source, as RA_{b}_DEG."),
+    "RA_DEG": ("deg ICRS",
+        "One row per PACS source of the region: the bands' blind detections (peaks of each map correlated with its "
+        "band's point-spread template, at least 5 times that map's own noise in the cell) merged across bands: "
+        "detections of two bands closer than the pair's merge radius (3 times the measured position scatter between "
+        "the bands for bright common sources; attributes MERGE_RADIUS_<band>_<band>_ARCSEC) are one source. Its "
+        "position is the sharpest detecting band's (POSITION_BAND), moved back by that map's registration to SESNA. "
+        "Costs, stated: a 70 micron source takes the 160 micron flux of a core within the merge radius; a source "
+        "seen only at 160 micron has a position good to about 2 arcsec, so in clusters it is often a blend; the "
+        "bands' detections are treated as independent. Attributes also: SPURIOUS_BY_SKY_BIN_<band>, peaks the same "
+        "detection finds on the negated maps over the band's detections, per sky bin; N_160_ONLY."),
+    "DEC_DEG": ("deg ICRS", "Declination of each PACS source, as RA_DEG."),
+    "POSITION_BAND": ("band index", "The band whose detection gives the position: 0 = 70, 1 = 100, 2 = 160 micron."),
+    "R_MATCH_ARCSEC": ("arcsec",
+        "The radius within which a SESNA source is matched to this PACS source: 3 times the combined positional "
+        "scatter of the position band (injected artificial sources found by the same detection, and the map's "
+        "registration pairs against SESNA); for a source seen only at 160 micron, with the 70-160 merge radius added "
+        "in quadrature."),
+    "CHANCE": ("expected SESNA sources",
+        "The number of SESNA sources expected within R_MATCH_ARCSEC of this PACS source by chance: the local SESNA "
+        "density (within 60 arcsec) times the radius's area. Summed, the expected number of chance matches."),
+    "DETECTED_{b}": ("true or false", "Whether the {w} micron blind detection found this source (merged into it)."),
     "FNU_{b}_MJY": ("mJy",
-        "Total flux of each PACS source: the catalogue's aperture estimator at the source's position minus its "
-        "cell's empty-sky offset (as FNU in the photometry product)."),
+        "The {w} micron flux at the source's position where DETECTED_{b}: the catalogue's aperture estimator on the "
+        "detecting {w} micron map minus the cell's empty-sky offset (as FNU in the photometry product); NaN where "
+        "the band does not detect the source."),
     "SIGMA_{b}_MJY": ("mJy",
         "Uncertainty of FNU_{b}_MJY: the scatter of recovered minus injected flux of artificial sources of that flux "
-        "in the source's cell (SCATTER of the completeness product)."),
-    "SNR_{b}": ("dimensionless", "FNU_{b}_MJY over the noise of the source's cell."),
-    "MAP_INDEX_{b}": ("map index", "The map (row of MAP_ID_{b} in the completeness product) the source was found on."),
-    "CELL_ROW_{b}": ("row index into CURVE_{b}", "The completeness product's row for the source's cell."),
-    "PIX_X_{b}": ("map pixel", "Zero-based x pixel position of the source on its map (fast axis)."),
-    "PIX_Y_{b}": ("map pixel", "Zero-based y pixel position of the source on its map."),
-    "SKY_BIN_SOURCE_{b}": ("bin index, 0-4", "The within-map sky-brightness bin of the source's cell (SKY_BIN_{b})."),
-    "R_MATCH_{b}_ARCSEC": ("arcsec",
-        "The matching radius of the source's map: a SESNA source within it is matched to this PACS source. It is 3 "
-        "times the combined positional scatter of injected artificial sources found by the same detection and of the "
-        "map's registration pairs against SESNA (the map's own where it has at least 10 pairs, else the band's)."),
-    "CHANCE_{b}": ("expected SESNA sources",
-        "The number of SESNA sources expected within the matching radius of this PACS source by chance: the local "
-        "SESNA density (within 60 arcsec) times the radius's area. Summed over the table, the expected number of "
-        "chance matches."),
+        "in the cell (SCATTER of the completeness product)."),
+    "CELL_OFFSET_{b}_MJY": ("mJy", "The empty-sky offset subtracted from FNU_{b}_MJY (CELL_OFFSET of the cell)."),
+    "SNR_{b}": ("dimensionless", "The S/N of the {w} micron detection: its own flux over its cell's noise."),
+    "MAP_INDEX_{b}": ("map index, or -1", "The {w} micron map (row of MAP_ID_{b} in the completeness product) that detects the source."),
+    "EXTENDED_{b}": ("true or false", "Where DETECTED_{b}: whether the fitted width at the position exceeds 1.5 times the beam."),
 }
 for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_u, _r) in _PACS_SOURCES_READINGS.items():
@@ -4024,11 +4030,10 @@ _PHOTOMETRY_PACS_READINGS = {
         "aperture in the source's 30-arcsecond cell (CELL_OFFSET in the completeness product: the typical flux it "
         "returns at empty positions there, sky structure the annulus does not remove) is subtracted; the value for this source is CELL_OFFSET_{b}_MJY, and adding it back gives the convention of HOPS and eHOPS, which subtract no such offset. It can be negative or small when nothing is seen and is NaN where the band does not "
         "cover the source. "
-        "Where ORIGIN is 1 or 2 the flux is that of the PACS source the blind detection found within the matching "
-        "radius of this source (PACS_SOURCE, the PACS source table sources_pacs_region): the same aperture estimator "
-        "at that source's peak; where ORIGIN is 2 it is an upper bound, that PACS source having two or more SESNA "
-        "sources within the radius (a blend the beam cannot split). Where ORIGIN is 90 it is the aperture flux at "
-        "this source's own position."),
+        "Where ORIGIN is 1 or 2 the flux is that of the matched PACS source (PACS_SOURCE, the region's PACS source "
+        "table sources_pacs_region): the same aperture estimator at that source's position, which is the sharpest "
+        "band's detection; where ORIGIN is 2 it is an upper bound (a blend the beam cannot split). Where ORIGIN is 90 "
+        "it is the aperture flux at this source's own position."),
     "CELL_OFFSET_{b}_MJY": ("mJy",
         "The empty-sky offset subtracted from FNU_{b}_MJY for this source: the median flux the same measurement "
         "returns with no source present (sky structure the background does not remove): CELL_OFFSET_{b}_MJY of the "
@@ -4045,12 +4050,13 @@ _PHOTOMETRY_PACS_READINGS = {
         "the aperture area, divided by the aperture correction. Kept for comparison with their tables; detection uses "
         "SIGMA_{b}_MJY."),
     "ORIGIN_{b}": ("origin code",
-        "1 means a PACS source lies within the matching radius of this source (the blind detection: a peak of the "
-        "PSF-matched map at least 5 times its own cell noise; the radius is R_MATCH in the PACS source table, per map) and "
-        "this is the only SESNA source within the radius of it; "
-        "2 means that PACS source has two or more SESNA sources within the radius, so its flux is an upper bound for "
-        "each (an unseparable blend); 90 means the band covers the source and no PACS source lies within the radius; "
-        "91 means the band does not cover the source."),
+        "1 means a PACS source of the region (sources_pacs_region: the bands' blind detections merged across bands) "
+        "detected in this band lies within that source's matching radius (R_MATCH_ARCSEC) of this source, and this is "
+        "the only SESNA source within it; 2 means that PACS source has two or more SESNA sources within the radius (or "
+        "this source lies within the radius of several), so the flux is an upper bound (an unseparable blend); 90 "
+        "means the band covers the source and no PACS source detected in this band is matched to it (its "
+        "completeness curve gives the chance of that; the three bands' detections are independent); 91 means the "
+        "band does not cover the source."),
     "LOCAL_RMS_{b}_MJY": ("mJy",
         "Noise of the 30-arcsecond cell containing the source: the scatter of the flux measured at random empty-sky positions in that cell. A PACS source is detected where the aperture-filtered map peaks at five times this value above the cell's empty-sky level. NaN where the band does not cover the source."),
     "OBSID_{b}": ("observation identifier(s)",
@@ -4058,7 +4064,7 @@ _PHOTOMETRY_PACS_READINGS = {
     "N_BLEND_{b}": ("number of SESNA sources",
         "For a source matched to a PACS source (ORIGIN 1 or 2): how many SESNA sources lie within the matching radius of that PACS source (1 for ORIGIN 1); 0 otherwise."),
     "PACS_SOURCE_{b}": ("row number, or -1",
-        "The row of the matched PACS source in the band's PACS source table (sources_pacs_region); -1 where none lies within the matching radius."),
+        "The row of the matched PACS source in the region's PACS source table (sources_pacs_region); -1 where none is matched in this band."),
     "MATCH_SEPARATION_{b}_ARCSEC": ("arcsec",
         "The distance between this source (moved by the map's registration) and the matched PACS source; NaN where none."),
     "EXTENDED_{b}": ("true or false",

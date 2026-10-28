@@ -1115,25 +1115,6 @@ def _assemble_peaks(found, records, geometry, shifts, keys, cell_sigma, cell_bin
                 inverted_by_bin=inv)
 
 
-def _chance(peaks, records, geometry, shifts, ra, dec, r_match):
-    """Per PACS source, the expected number of SESNA sources within the matching radius by chance: the local SESNA
-    density (within LOCAL_DENSITY_ARCSEC) times pi r_match^2 (`r_match` per map, arcsec)."""
-    out = np.zeros(peaks["fnu"].size)
-    for t in np.unique(peaks["map"]):
-        sel = np.flatnonzero(peaks["map"] == t)
-        _src_cell, _cells, grid, wcs = geometry[t]
-        pix = pacs_fit.CELL_ARCSEC / grid.step_x
-        sx, sy = (np.asarray(v) for v in wcs.all_world2pix(*pacs_fit.to_map_frame(ra, dec, shifts[t][:2]), 0))
-        on = np.isfinite(sx) & np.isfinite(sy)
-        if not on.any():
-            continue
-        tree = cKDTree(np.c_[sx[on], sy[on]])
-        n = np.array([len(v) for v in tree.query_ball_point(np.c_[peaks["x"][sel], peaks["y"][sel]],
-                                                             LOCAL_DENSITY_ARCSEC / pix)])
-        out[sel] = n / (np.pi * LOCAL_DENSITY_ARCSEC ** 2) * np.pi * r_match[t] ** 2
-    return out
-
-
 def _calibrate(piece, config, records):
     """The injected-vs-detected position scatter on one map (`piece = (tile index, inputs)`): one batch at each S/N
     of CALIBRATION_SNR (own seeds, positions farther than a beam from every PACS source of the map), the blind
@@ -1183,10 +1164,12 @@ def _print_tile_stats(s, flux_grid):
               % " ".join("%.3g:%.2f" % (snr[p], bp[p, 1] / max(bp[p, 0], 1)) for p in every), flush=True)
 
 
-def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
+def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs=None):
     """Measure every covered cell of every map of one band inside the region's padded source bounding box;
     choose each source's deepest map; inject artificial sources on every map. Returns the band's datasets
-    (and the held-out half, the printed statistics), or None when no map reaches a source."""
+    (and the held-out half, the printed statistics), or None when no map reaches a source. `blue_refs`: the blue
+    maps' registrations by observation ids; a 160 micron map takes its observation's blue map's shift and pair
+    scatter (the two bands share the pointing; planner ruling, owner-approved 2026-10-28)."""
     n_src = ra.size
     n_plane = flux_grid.size
 
@@ -1217,10 +1200,17 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
     refs = pieces_module.run(functools.partial(_tile_reference, config=config, records=records),
                              used, n_jobs, stage=stage, unit="tiles")
     refs = dict(zip([u[0] for u in used], refs))
+    for t in refs:
+        key = tuple(records[t].obsids)
+        if records[t].band == "P160" and blue_refs and key in blue_refs:
+            refs[t]["shift"] = blue_refs[key]["shift"]
+            refs[t]["align_residual"] = blue_refs[key]["align_residual"]
+            refs[t]["shared"] = True
     for t in sorted(refs):
         e, n, k = refs[t]["shift"]
-        print("  %s: registration east %+.2f north %+.2f arcsec from %d pairs%s"
-              % (records[t].map_id, e, n, k, "  ABOVE 1.5 ARCSEC" if np.hypot(e, n) > 1.5 else ""), flush=True)
+        print("  %s: registration east %+.2f north %+.2f arcsec from %d pairs%s%s"
+              % (records[t].map_id, e, n, k, "  ABOVE 1.5 ARCSEC" if np.hypot(e, n) > 1.5 else "",
+                 " (the observation's blue map's)" if refs[t].get("shared") else ""), flush=True)
     # second pass, registered: the cells, the pieces
     pieces, geometry = [], []
     for t, record in enumerate(records):
@@ -1325,12 +1315,11 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
                                     int(used.sum()), rms_pool, pooled.shape[0],
                                     sum(1 for v in res.values() if v.shape[0] >= MIN_ALIGN_PAIRS), MIN_ALIGN_PAIRS,
                                     d_inj.size), flush=True)
-    peaks["chance"] = _chance(peaks, records, geometry, shifts, ra, dec, r_match)
     peaks["r_match"] = r_match[peaks["map"]] if peaks["map"].size else np.zeros(0)
     spurious = np.array([peaks["inverted_by_bin"][j] / max(int((peaks["bin"] == j).sum()), 1) for j in range(SKY_BINS)])
-    print("  PACS sources %d; by sky bin (faint to bright) %s; SPURIOUS (inverted-map peaks / peaks) %s; expected chance "
-          "SESNA matches %.1f" % (peaks["fnu"].size, [int((peaks["bin"] == j).sum()) for j in range(SKY_BINS)],
-                                  "  ".join("%.3f" % v for v in spurious), float(np.nansum(peaks["chance"]))), flush=True)
+    print("  PACS detections %d; by sky bin (faint to bright) %s; SPURIOUS (inverted-map peaks / peaks) %s"
+          % (peaks["fnu"].size, [int((peaks["bin"] == j).sum()) for j in range(SKY_BINS)],
+             "  ".join("%.3f" % v for v in spurious)), flush=True)
 
     # artificial sources: each map cut into pieces of its (S/N plane, half) pairs, map by map from the biggest;
     # then each map pooled whole
@@ -1383,6 +1372,7 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid):
                 map_id=np.array([r.map_id for r in records], dtype="S"),
                 map_obsid=np.array([",".join(r.obsids) for r in records], dtype="S"),
                 map_shift=shifts[:, :2].astype(np.float32), map_pairs=shifts[:, 2].astype(np.int32),
+                refs_by_obs={tuple(records[t].obsids): refs[t] for t in refs}, records=records,
                 map_wcs=np.array([g[3].to_header_string() for g in geometry], dtype="S"),
                 map_shape=np.array([g[2].shape for g in geometry], dtype=np.int32).reshape(len(records), 2),
                 map_cell_step=np.array([(g[2].step_x, g[2].step_y) for g in geometry], dtype=np.float64).reshape(len(records), 2))
@@ -1415,7 +1405,7 @@ def _empty_band(n_src, n_plane):
                 peaks=dict(map=z(np.int32), x=z(float), y=z(float), fnu=z(float), row=z(np.int64), snr=z(float),
                            bin=z(np.int8), ra=z(float), dec=z(float), sigma=z(float), chance=z(float), r_match=z(float)),
                 spurious=np.full(SKY_BINS, np.nan), r_match=z(np.float32), rms_inj=np.nan, rms_align=np.nan, sky_bin=z(np.int8),
-                cell_m_sigma=z(np.float32), cell_m_offset=z(np.float32),
+                cell_m_sigma=z(np.float32), cell_m_offset=z(np.float32), records=[], refs_by_obs={},
                 envelope=np.zeros(n_plane, np.uint16), n_pos=z(np.int32), n_sigma=z(np.int16), flux90=z(np.float32),
                 bias=nan(), scatter=nan(),
                 held=None, stats=[], cell_ra=z(float),
@@ -1476,32 +1466,192 @@ def write_product(path, region, mag, bands):
         w("SOURCE_ROW", np.stack([bands[b]["source_row"] for b in BANDS], axis=1).astype(np.int32))
 
 
-def write_sources(path, region, bands):
-    """Write the region's PACS source table (the blind detection, RULINGS_5) at `path`: per band one row per PACS
-    source, its position, flux and uncertainty, map, CURVE row, S/N, sky bin and expected chance SESNA matches; the
-    spurious rate per sky bin and the matching radius as attributes."""
+#: the cross-band merge (planner ruling, owner-approved 2026-10-28): detections of two bands closer than MERGE_SIGMAS x
+#: the measured per-source position scatter between those bands (bright common sources, S/N >= MERGE_MIN_SNR, paired
+#: within half the redder beam) are one PACS source; fewer than MERGE_MIN_PAIRS pairs: half the redder beam
+MERGE_SIGMAS = 3.0
+MERGE_MIN_SNR = 20.0
+MERGE_MIN_PAIRS = 5
+BEAM_ARCSEC = {"P70": 5.6, "P100": 6.8, "P160": 11.4}
+
+
+def _unit(ra_deg, dec_deg):
+    ra, dec = np.radians(np.asarray(ra_deg, float)), np.radians(np.asarray(dec_deg, float))
+    return np.column_stack([np.cos(dec) * np.cos(ra), np.cos(dec) * np.sin(ra), np.sin(dec)])
+
+
+def _chord(arcsec):
+    return 2.0 * np.sin(np.radians(np.asarray(arcsec, float) / 3600.0) / 2.0)
+
+
+def _sep_arcsec(u, v):
+    return np.degrees(2.0 * np.arcsin(np.clip(np.linalg.norm(u - v, axis=-1) / 2.0, 0.0, 1.0))) * 3600.0
+
+
+def _pair_scatter(pa, pb, beam_red):
+    """The per-source position scatter (2-D rms, robust, arcsec) between two bands' bright detections (S/N >=
+    MERGE_MIN_SNR) paired within half the redder beam, and the number of pairs."""
+    a = pa["snr"] >= MERGE_MIN_SNR
+    b = pb["snr"] >= MERGE_MIN_SNR
+    if not a.any() or not b.any():
+        return np.nan, 0
+    ua, ub = _unit(pa["ra"][a], pa["dec"][a]), _unit(pb["ra"][b], pb["dec"][b])
+    d, j = cKDTree(ub).query(ua, distance_upper_bound=_chord(beam_red / 2.0))
+    ok = np.isfinite(d)
+    if not ok.any():
+        return np.nan, 0
+    sep = _sep_arcsec(ua[ok], ub[j[ok]])
+    return float(np.sqrt(np.median(sep ** 2) / np.log(2.0))), int(ok.sum())
+
+
+def _measure_at(piece, config, records):
+    """The catalogue's flux of PACS sources at given sky positions on one map of one band (`piece = (band, tile index,
+    ra, dec, shift, offset per grid cell)`): the aperture estimator minus the cell offset, the cell id, and whether
+    the fitted width exceeds 1.5 beams. Returns (band, tile index, fnu, cell id, extended)."""
+    band, t, ra, dec, shift, offset_cell = piece
+    tile = pacs_fit.cached_tile(config, records[band][t])
+    x, y = tile.xy(*pacs_fit.to_map_frame(ra, dec, shift))
+    fnu = filtered(tile, x, y, offset_cell)
+    ext = tile.fitted_fwhm(x, y) > 1.5 * tile.beam_arcsec
+    return band, t, fnu, tile.grid.cell_ids(x, y), ext
+
+
+def merge_sources(config, bands, ra, dec, n_jobs, stage, flux_grid):
+    """The region's PACS sources: the bands' blind detections merged across bands (planner ruling 2026-10-28).
+    Detections of two bands within the pair's merge radius are one source (each band at most once, nearest first,
+    brightest detections first); the position is the sharpest detecting band's (70, else 100, else 160); every
+    detecting band's flux is the aperture estimator at that position on that band's detecting map; the SESNA
+    matching radius is the position band's map radius, a 160-only source's with the 70-160 merge radius in
+    quadrature; CHANCE the SESNA density within LOCAL_DENSITY_ARCSEC times the radius's area. Returns the table."""
+    pk = {b: bands[b]["peaks"] for b in BANDS}
+    radius = {}
+    for a, b in (("P70", "P100"), ("P70", "P160"), ("P100", "P160")):
+        rms, n = _pair_scatter(pk[a], pk[b], BEAM_ARCSEC[b])
+        radius[(a, b)] = MERGE_SIGMAS * rms if n >= MERGE_MIN_PAIRS else BEAM_ARCSEC[b] / 2.0
+        print("  merge radius %s-%s: %.2f arcsec (%s)" % (a, b, radius[(a, b)], "3 x rms %.2f from %d pairs" % (rms, n)
+              if n >= MERGE_MIN_PAIRS else "half the redder beam: %d pairs" % n), flush=True)
+    pos_band, members, pos_u = [], [], []
+    for bi, b in enumerate(BANDS):
+        p = pk[b]
+        if p["fnu"].size == 0:
+            continue
+        u = _unit(p["ra"], p["dec"])
+        order = np.argsort(-p["snr"])
+        tree = cKDTree(np.array(pos_u)) if pos_u else None
+        for i in order:
+            best = None
+            if tree is not None:
+                rmax = max(radius.get((BANDS[a], b), 0.0) for a in range(bi)) if bi else 0.0
+                for k in tree.query_ball_point(u[i], _chord(rmax)):
+                    if b in members[k] or radius.get((BANDS[pos_band[k]], b)) is None:
+                        continue
+                    sep = _sep_arcsec(u[i], pos_u[k])
+                    if sep <= radius[(BANDS[pos_band[k]], b)] and (best is None or sep < best[1]):
+                        best = (k, sep)
+            if best is not None:
+                members[best[0]][b] = int(i)
+            else:
+                pos_band.append(bi)
+                members.append({b: int(i)})
+                pos_u.append(u[i])
+    n = len(members)
+    pos_band = np.array(pos_band, np.int8)
+    src = {b: np.array([m.get(b, -1) for m in members], np.int64) for b in BANDS}
+    pra = np.array([pk[BANDS[pb]]["ra"][src[BANDS[pb]][k]] for k, pb in enumerate(pos_band)]) if n else np.zeros(0)
+    pde = np.array([pk[BANDS[pb]]["dec"][src[BANDS[pb]][k]] for k, pb in enumerate(pos_band)]) if n else np.zeros(0)
+    # each detecting band's flux at the merged position, on that band's detecting map
+    recs = {b: bands[b].get("records", []) for b in BANDS}
+    pieces, want = [], {}
+    for b in BANDS:
+        det = np.flatnonzero(src[b] >= 0)
+        maps = pk[b]["map"][src[b][det]] if det.size else np.zeros(0, np.int32)
+        cm, cid, off = bands[b]["cell_map_index"], bands[b]["cell_id"], bands[b]["cell_offset"]
+        for t in np.unique(maps):
+            k = det[maps == t]
+            grid = _tile_geometry(recs[b][t])[0]
+            oc = np.full(grid.n_cells, np.nan)
+            rows = cm == t
+            oc[cid[rows]] = off[rows]
+            pieces.append((b, int(t), pra[k], pde[k], tuple(bands[b]["map_shift"][t]), oc))
+            want[(b, int(t))] = k
+    measured = pieces_module.run(functools.partial(_measure_at, config=config, records=recs), pieces, n_jobs,
+                                 stage=stage, unit="PACS sources (flux at the merged position)") if pieces else []
+    table = dict(ra=pra, dec=pde, position_band=pos_band, radius=radius, n=n)
+    for b in BANDS:
+        table["fnu_" + b] = np.full(n, np.nan)
+        table["sigma_" + b] = np.full(n, np.nan)
+        table["offset_" + b] = np.full(n, np.nan)
+        table["extended_" + b] = np.zeros(n, bool)
+        table["map_" + b] = np.where(src[b] >= 0, pk[b]["map"][np.maximum(src[b], 0)] if pk[b]["map"].size else -1, -1).astype(np.int32)
+        table["snr_" + b] = np.where(src[b] >= 0, pk[b]["snr"][np.maximum(src[b], 0)] if pk[b]["snr"].size else np.nan, np.nan)
+        table["detected_" + b] = src[b] >= 0
+    for b, t, fnu, cid, ext in measured:
+        k = want[(b, t)]
+        keys = bands[b]["cell_map_index"].astype(np.int64) * (1 << 40) + bands[b]["cell_id"]
+        q = np.int64(t) * (1 << 40) + cid
+        row = np.clip(np.searchsorted(keys, q), 0, max(keys.size - 1, 0))
+        hit = (cid >= 0) & (keys[row] == q)
+        table["fnu_" + b][k] = fnu
+        table["extended_" + b][k] = ext
+        table["offset_" + b][k[hit]] = bands[b]["cell_offset"][row[hit]]
+        if hit.any():
+            table["sigma_" + b][k[hit]] = calibrated_sigma(bands[b]["scatter"][row[hit]], flux_grid, fnu[hit])
+    # the SESNA matching radius of each source and the chance matches
+    rm = np.full(n, np.nan)
+    for k in range(n):
+        b = BANDS[pos_band[k]]
+        rm[k] = bands[b]["r_match"][table["map_" + b][k]]
+        if b == "P160" and not table["detected_P70"][k] and not table["detected_P100"][k]:
+            rm[k] = np.hypot(rm[k], radius[("P70", "P160")])
+    table["r_match"] = rm
+    chance = np.zeros(n)
+    if n:
+        su = _unit(ra, dec)
+        tree = cKDTree(su)
+        pu = _unit(pra, pde)
+        counts = np.array([len(v) for v in tree.query_ball_point(pu, _chord(LOCAL_DENSITY_ARCSEC))])
+        chance = counts / (np.pi * LOCAL_DENSITY_ARCSEC ** 2) * np.pi * rm ** 2
+    table["chance"] = chance
+    only160 = int(((pos_band == BANDS.index("P160"))).sum())
+    print("  PACS sources (merged) %d: position from P70 %d, P100 %d, P160 %d (160-only); detected in P70 %d, P100 %d, "
+          "P160 %d; SESNA matching radius median by position band %s; expected chance SESNA matches %.1f"
+          % (n, int((pos_band == 0).sum()), int((pos_band == 1).sum()), only160,
+             int(table["detected_P70"].sum()), int(table["detected_P100"].sum()), int(table["detected_P160"].sum()),
+             "  ".join("%s %.2f" % (b, np.nanmedian(rm[pos_band == i]) if (pos_band == i).any() else np.nan)
+                       for i, b in enumerate(BANDS)), float(chance.sum())), flush=True)
+    return table
+
+
+def write_sources(path, region, bands, merged):
+    """Write the region's PACS source table (the bands' blind detections merged across bands, `merge_sources`) at
+    `path`: one row per PACS source, its position (from the sharpest detecting band), the SESNA matching radius, the
+    expected chance matches, and per band whether it detects the source, the flux at the position and its
+    uncertainty, the offset subtracted, the detection's S/N, the map and the extended flag; the merge radii, each
+    band's spurious rate per sky bin and the 160-only count as attributes."""
     stem = "sources_pacs_region"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with h5py.File(path, "w") as f:
         f.attrs["GRANULE"] = "region"
         f.attrs["REGION"] = region
+        w = lambda name, data: build_module.write_dataset(f, name, data, *REGISTRY[(stem, name)])
+        ds = w("RA_DEG", np.asarray(merged["ra"], np.float64))
+        for (a, b), r in merged["radius"].items():
+            ds.attrs["MERGE_RADIUS_%s_%s_ARCSEC" % (a, b)] = float(r)
         for b in BANDS:
-            d = bands[b]
-            pk = d["peaks"]
-            w = lambda name, data: build_module.write_dataset(f, name, data, *REGISTRY[(stem, name)])
-            ds = w("RA_%s_DEG" % b, pk["ra"].astype(np.float64))
-            ds.attrs["SPURIOUS_BY_SKY_BIN"] = np.asarray(d["spurious"], np.float64)
-            w("DEC_%s_DEG" % b, pk["dec"].astype(np.float64))
-            w("FNU_%s_MJY" % b, pk["fnu"].astype(np.float64))
-            w("SIGMA_%s_MJY" % b, np.asarray(pk.get("sigma", np.full(pk["fnu"].size, np.nan)), np.float64))
-            w("SNR_" + b, pk["snr"].astype(np.float32))
-            w("MAP_INDEX_" + b, pk["map"].astype(np.int32))
-            w("CELL_ROW_" + b, pk["row"].astype(np.int64))
-            w("PIX_X_" + b, pk["x"].astype(np.float64))
-            w("PIX_Y_" + b, pk["y"].astype(np.float64))
-            w("SKY_BIN_SOURCE_" + b, pk["bin"].astype(np.int8))
-            w("CHANCE_" + b, np.asarray(pk.get("chance", np.zeros(pk["fnu"].size)), np.float32))
-            w("R_MATCH_%s_ARCSEC" % b, np.asarray(pk.get("r_match", np.zeros(pk["fnu"].size)), np.float32))
+            ds.attrs["SPURIOUS_BY_SKY_BIN_" + b] = np.asarray(bands[b]["spurious"], np.float64)
+        ds.attrs["N_160_ONLY"] = int((merged["position_band"] == BANDS.index("P160")).sum())
+        w("DEC_DEG", np.asarray(merged["dec"], np.float64))
+        w("POSITION_BAND", merged["position_band"].astype(np.int8))
+        w("R_MATCH_ARCSEC", np.asarray(merged["r_match"], np.float32))
+        w("CHANCE", np.asarray(merged["chance"], np.float32))
+        for b in BANDS:
+            w("DETECTED_" + b, merged["detected_" + b])
+            w("FNU_%s_MJY" % b, merged["fnu_" + b])
+            w("SIGMA_%s_MJY" % b, merged["sigma_" + b])
+            w("CELL_OFFSET_%s_MJY" % b, merged["offset_" + b])
+            w("SNR_" + b, np.asarray(merged["snr_" + b], np.float32))
+            w("MAP_INDEX_" + b, merged["map_" + b])
+            w("EXTENDED_" + b, merged["extended_" + b])
 
 
 def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None, maps=None):
@@ -1510,17 +1660,21 @@ def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None, maps=No
     Returns the per-band products (for the caller's checks, with each band's held-out half under "held")."""
     mag, flux_grid = canonical_grid()
     out = {}
+    blue_refs = {}
     for b in BANDS:
         records = [r for r in pacs_fit.read_index(config, region) if r.band == b
                    and (maps is None or any(str(o) in maps for o in r.obsids))]
         scan = [r for r in records if r.mode == 1]
         if records:
             self_check(config, (scan or records)[0])
-        out[b] = _band_product(config, records, ra, dec, n_jobs, stage, flux_grid) if records else None
+        out[b] = _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs) if records else None
         if out[b] is None:
             out[b] = _empty_band(ra.size, mag.size)
+        elif b in ("P70", "P100"):
+            blue_refs.update(out[b]["refs_by_obs"])
     write_product(out_path, region, mag, out)
-    write_sources(product_path(config, "sky/derived", "pacs", "sources", "region", region=region), region, out)
+    merged = merge_sources(config, out, ra, dec, n_jobs, stage, flux_grid)
+    write_sources(product_path(config, "sky/derived", "pacs", "sources", "region", region=region), region, out, merged)
     return out
 
 
