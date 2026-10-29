@@ -515,21 +515,34 @@ def matched_state(tile):
         fc = foot[::-1, ::-1].astype(float)
         s_full = float(((k[foot] - k[foot].mean()) ** 2).sum())
         valid = np.isfinite(tile.image) & np.isfinite(tile.error)
-        v = valid.astype(float)
-        iv = np.where(valid, tile.image, 0.0).astype(float)
 
         def corr(a, c):
             return fftconvolve(a, c, mode="same")
         # D = valid pixels in the footprint, B = sum of the template over them, E = of its square, A and C the
         # image's sums weighted by the template and plain: the zero-sum response is A - B C / D, its kernel's
-        # sum of squares E - B^2 / D (FFT round-off: D is a count, S_valid a sum of squares held >= 0)
+        # sum of squares E - B^2 / D (FFT round-off: D is a count, S_valid a sum of squares held >= 0). Each
+        # full-size intermediate is freed as soon as it is used: 96 workers each hold one map's (Vista job 1108388
+        # was killed at 2.9 GB per worker on a 29-megapixel 100 micron map)
+        v = valid.astype(float)
         d = np.rint(corr(v, fc))
         b = corr(v, kc)
-        s_valid = corr(v, kc * kc) - np.divide(b * b, d, out=np.zeros_like(b), where=d > 0)
+        s_valid = corr(v, kc * kc)
+        del v
+        s_valid -= np.divide(b * b, d, out=np.zeros_like(b), where=d > 0)
         ok = valid & (d >= 2) & (s_valid > 1e-9 * s_full)
         ratio = np.divide(b, d, out=np.zeros_like(b), where=ok)
-        norm = np.sqrt(np.divide(s_full, s_valid, out=np.zeros_like(b), where=ok))
-        m = np.where(ok, (corr(iv, kc) - ratio * corr(iv, fc)) * norm, np.nan)
+        del b, d
+        norm = np.sqrt(np.divide(s_full, s_valid, out=np.zeros_like(s_valid), where=ok))
+        del s_valid
+        iv = np.where(valid, tile.image, 0.0).astype(float)
+        m = corr(iv, kc)
+        c = corr(iv, fc)
+        del iv
+        c *= ratio
+        m -= c
+        del c
+        m *= norm
+        m = np.where(ok, m, np.nan)
         _MATCHED[key] = dict(h=h, kc=kc, fc=fc, m=m.astype(np.float32), valid=ok, pix_valid=valid,
                              ratio=ratio.astype(np.float32), norm=norm.astype(np.float32))
     return _MATCHED[key]
