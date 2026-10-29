@@ -491,9 +491,14 @@ def matched_state(tile):
     """The detection image of the tile's real image: the image correlated with the band's own point-spread template
     (`Tile._add_sources`'s, at the map centre) made zero-sum over its footprint (the template less its mean there,
     DAOFIND's lowered kernel), so that a smooth local background and its gradient give zero and a point source on
-    the slope of a ridge is still a peak; valid only where the whole footprint lies on valid data. Process-local, one
-    map at a time; built from the un-injected image. `m` the detection map (NaN where not valid), `kc` the kernel
-    as correlated."""
+    the slope of a ridge is still a peak. At map edges and gaps the kernel is the template on the footprint's VALID
+    pixels made zero-sum over those pixels, scaled by sqrt(S_full / S_valid) (S the kernel's sum of squares over the
+    footprint, over its valid pixels) so that white pixel noise gives the interior's noise there (the factor is 1 in the
+    interior, where the map is the full kernel's); defined at every valid pixel whose valid footprint holds at least
+    two pixels. Process-local, one map at a time; built from the un-injected image. `m` the detection map (NaN where
+    not defined), `kc` the template on the footprint as correlated, `fc` the footprint as correlated, `ratio` the
+    per-pixel valid-footprint mean factor B/D and `norm` the per-pixel scale (both 0 where not defined), `pix_valid`
+    the pixels that enter (`_injected_delta` applies the identical operator to an injection's template)."""
     key = tile.record.path
     if key not in _MATCHED:
         _MATCHED.clear()
@@ -505,13 +510,28 @@ def matched_state(tile):
         py = np.broadcast_to((cy - h + offs)[None, :, None], (1, side, side))
         k = tile._psf.evaluate_xy(np.array([float(cx)]), np.array([float(cy)]), px, py).mean(axis=1)[0]
         foot = k > ZERO_SUM_FOOTPRINT * k.max()
-        k0 = np.where(foot, k - k[foot].mean(), 0.0)
-        kc = k0[::-1, ::-1]
+        kf = np.where(foot, k, 0.0)
+        kc = kf[::-1, ::-1]
+        fc = foot[::-1, ::-1].astype(float)
+        s_full = float(((k[foot] - k[foot].mean()) ** 2).sum())
         valid = np.isfinite(tile.image) & np.isfinite(tile.error)
-        cover = fftconvolve(valid.astype(float), foot[::-1, ::-1].astype(float), mode="same")
-        full = valid & (cover >= foot.sum() - 0.5)
-        m = np.where(full, fftconvolve(np.where(valid, tile.image, 0.0), kc, mode="same"), np.nan)
-        _MATCHED[key] = dict(h=h, kc=kc, m=m.astype(np.float32), valid=full)
+        v = valid.astype(float)
+        iv = np.where(valid, tile.image, 0.0).astype(float)
+
+        def corr(a, c):
+            return fftconvolve(a, c, mode="same")
+        # D = valid pixels in the footprint, B = sum of the template over them, E = of its square, A and C the
+        # image's sums weighted by the template and plain: the zero-sum response is A - B C / D, its kernel's
+        # sum of squares E - B^2 / D (FFT round-off: D is a count, S_valid a sum of squares held >= 0)
+        d = np.rint(corr(v, fc))
+        b = corr(v, kc)
+        s_valid = corr(v, kc * kc) - np.divide(b * b, d, out=np.zeros_like(b), where=d > 0)
+        ok = valid & (d >= 2) & (s_valid > 1e-9 * s_full)
+        ratio = np.divide(b, d, out=np.zeros_like(b), where=ok)
+        norm = np.sqrt(np.divide(s_full, s_valid, out=np.zeros_like(b), where=ok))
+        m = np.where(ok, (corr(iv, kc) - ratio * corr(iv, fc)) * norm, np.nan)
+        _MATCHED[key] = dict(h=h, kc=kc, fc=fc, m=m.astype(np.float32), valid=ok, pix_valid=valid,
+                             ratio=ratio.astype(np.float32), norm=norm.astype(np.float32))
     return _MATCHED[key]
 
 
@@ -555,10 +575,12 @@ def _parabola(v, iy, ix):
 
 def _injected_delta(tile, x, y, flux, wpx, wpy):
     """The change of the detection map at the window pixels (wpx, wpy) (n, side, side) of each injection, from that
-    injection's own template (the detection map is linear: its change is the template correlated with the kernel)."""
+    injection's own template (the detection map is linear in the image: its change is the operator of `matched_state`,
+    with each pixel's own valid-footprint factors, applied to the template on the valid pixels)."""
     ms = matched_state(tile)
     h = ms["h"]
     side = 2 * h + 1
+    ny, nx = tile.shape
     offs = np.arange(side, dtype=float)
     cx = np.rint(x).astype(np.int64) - h
     cy = np.rint(y).astype(np.int64) - h
@@ -568,14 +590,23 @@ def _injected_delta(tile, x, y, flux, wpx, wpy):
         px = np.broadcast_to(cx[sl][:, None, None] + offs[None, None, :], (cx[sl].size, side, side))
         py = np.broadcast_to(cy[sl][:, None, None] + offs[None, :, None], (cx[sl].size, side, side))
         resp = tile._psf.evaluate_xy(x[sl], y[sl], px, py).mean(axis=1) * flux[sl][:, None, None]
-        full = fftconvolve(resp, ms["kc"][None], mode="full", axes=(1, 2))
+        # only the injected light on valid pixels enters, as for the real image
+        ipx, ipy = px.astype(np.int64), py.astype(np.int64)
+        on = (ipx >= 0) & (ipx < nx) & (ipy >= 0) & (ipy < ny)
+        pv = np.zeros(resp.shape, bool)
+        pv[on] = ms["pix_valid"][ipy[on], ipx[on]]
+        resp = np.where(pv, resp, 0.0)
+        full_k = fftconvolve(resp, ms["kc"][None], mode="full", axes=(1, 2))
+        full_f = fftconvolve(resp, ms["fc"][None], mode="full", axes=(1, 2))
         # full index of map pixel p: p - (patch origin) + h
         iy = wpy[sl] - cy[sl][:, None, None] + h
         ix = wpx[sl] - cx[sl][:, None, None] + h
-        inside = (iy >= 0) & (iy < full.shape[1]) & (ix >= 0) & (ix < full.shape[2])
+        inside = (iy >= 0) & (iy < full_k.shape[1]) & (ix >= 0) & (ix < full_k.shape[2])
+        inside &= (wpx[sl] >= 0) & (wpx[sl] < nx) & (wpy[sl] >= 0) & (wpy[sl] < ny)
         vals = np.zeros(iy.shape)
         k = np.nonzero(inside)
-        vals[k] = full[k[0], iy[k], ix[k]]
+        my, mx = wpy[sl][k], wpx[sl][k]
+        vals[k] = (full_k[k[0], iy[k], ix[k]] - ms["ratio"][my, mx] * full_f[k[0], iy[k], ix[k]]) * ms["norm"][my, mx]
         out[sl] = vals
     return out
 
