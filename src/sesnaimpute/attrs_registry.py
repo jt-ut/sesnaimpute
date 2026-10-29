@@ -4081,9 +4081,11 @@ _P160_NOTE = (" At 160 micron: this is the Pokhrel et al. 2023 Table 1 recipe (1
               "the archive's SPG v14 JScanam maps; the same recipe on the Herschel Gould Belt Survey team's Scanamorphos "
               "maps agrees within 1 per cent, and at 70 micron both agree with eHOPS's published values within 0-2.5 "
               "per cent. At 160 micron eHOPS's published values are 1.22 times what their Table 1 recipe yields on either "
-              "map production; the cause cannot be determined from the paper (a wider sky annulus, a different "
-              "correction, or a different combination of maps). The band is included in the fit on this convention; the "
-              "question to the eHOPS authors is open. The 160 "
+              "map production. 160 micron fluxes follow the published eHOPS aperture recipe (Pokhrel et al. 2023, Table 1) "
+              "and the PACS calibration, and agree with the HPPSC catalogue to 5 per cent. The eHOPS catalogue's own 160 "
+              "micron values are 1.22 times that recipe for a reason the paper does not state; we do not adopt an "
+              "unexplained factor. Any comparison with eHOPS at 160 micron therefore shows a 22 per cent scale offset, "
+              "which is a convention difference, not a photometric error. The 160 "
               "micron band also contains the [C II] 158 micron line, and its beam is about 12 arcsec.")
 for _band, _wave in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_units, _reading) in _PHOTOMETRY_PACS_READINGS.items():
@@ -4303,8 +4305,10 @@ for _name, _units, _reading in (
      "whether they were undetected or off the map). The table holds 446 sources, 423 detected: Class 0, I and "
      "flat 430 (409 detected, 21 not), Class II 16 (14 detected, 2 not). Neither survey has a Class III or "
      "transition-disk class, so the YSO weights give those classes no far-infrared statement: their templates are "
-     "weighted as before, and a template with an undefined far-infrared ratio is given its group's mean factor "
-     "(a placeholder)."),
+     "weighted as before (factor 1). The Dunham et al. 2015 census behind the brightness and class statements "
+     "is not used for this ratio: it gives a 70 micron flux (18 arcsec beam) for 618 of its 2966 young stars and "
+     "does not distinguish an undetected source from one not observed, so it cannot define the ratio's "
+     "distribution in any class."),
     ("CLASS", "evolutionary class, C0 Class 0, CI Class I, FLAT flat spectrum, CII Class II",
      "The source's own Spitzer-classified evolutionary class as the survey publishes it."),
     ("FLUX_P70_MJY", "mJy",
@@ -4348,8 +4352,9 @@ REGISTRY[("yso_weights_region", "W")] = (
     "and Class II classes its far-infrared ratio, 70 micron flux over 4.5 micron flux, from the HOPS and eHOPS "
     "surveys) or, for a template-matched factor, the region's own shift kernel, reweights that template relative "
     "to the library's own template density, at that brightness. Class III and transition-disk templates have no "
-    "far-infrared census, and a template whose model has no defined 70 micron flux gets its class's mean "
-    "far-infrared factor, a placeholder. Which population statement this factor encodes "
+    "far-infrared census (factor 1). Every template has a defined 70 micron flux; the 60 of 358677 templates "
+    "that are dark at 4.5 micron have no defined ratio and get their class's mean far-infrared factor (no "
+    "far-infrared evidence either way). Which population statement this factor encodes "
     "is named by this dataset's own enclosing group's NAME attribute.")
 _agb_w_units, _agb_w_reading = REGISTRY[("agb_weights_region", "W")]
 REGISTRY[("agb_weights_region", "W")] = (

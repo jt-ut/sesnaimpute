@@ -622,7 +622,8 @@ def _yso_farir(config, reg, frac, sub_idx, w_pre):
     group with no census has `f = 1`. A template whose `r` is undefined (zero
     or non-finite `F_REF_P70`, or `F_REF_I2` not positive) is left out of `n_g`
     and given the mean `f_g` of the group's defined templates (no
-    far-infrared evidence either way): a placeholder until the owner rules.
+    far-infrared evidence either way; owner 2026-10-29: every template has a defined 70 micron flux, so these are
+    the templates dark at 4.5 micron).
     Returns `(f, info)`: `f` `(n_model, 3)`; `info` one dict per group with
     the numbers `yso_farir_report` prints."""
     r_theta, defined = _template_log10_r(reg)
@@ -670,9 +671,9 @@ def yso_farir_report(config):
     for g, ((labels, share), entry) in enumerate(zip(census_groups, info)):
         frac_g = frac[:, [sub_idx[sub] for sub in labels]].sum(axis=1)
         print(f"template_weights.yso FAR-INFRARED: group {'+'.join(entry['labels'])}: "
-              f"{entry['n_undefined']} of {entry['n_group']} templates have undefined r (zero or non-finite "
-              f"F_REF_P70), left out of the library r density and given the group's mean factor "
-              f"(PLACEHOLDER pending the owner's rule)", flush=True)
+              f"{entry['n_undefined']} of {entry['n_group']} templates have undefined r (F_REF_I2 not positive, or "
+              f"F_REF_P70 zero or non-finite), left out of the library r density and given the group's mean "
+              f"factor", flush=True)
         if not entry["codes"]:
             print(f"template_weights.yso FAR-INFRARED: group {'+'.join(entry['labels'])}: no census class, "
                   f"factor 1", flush=True)
@@ -683,7 +684,7 @@ def yso_farir_report(config):
         lib0 = _weighted_quantiles(r_theta[defined], w0[defined], FARIR_PRINT_QUANTILES)
         grid, cdf = entry["grid"], entry["cdf"]
         cen = np.interp(FARIR_PRINT_QUANTILES, cdf, grid)
-        print(f"template_weights.yso FAR-INFRARED [PROVISIONAL: undefined-r templates not yet repaired]: "
+        print(f"template_weights.yso FAR-INFRARED: "
               f"group {'+'.join(entry['labels'])} census classes {','.join(entry['codes'])}: "
               f"{entry['n_det']} detected + {entry['n_cens']} censored, bandwidth {entry['bandwidth']:.3f} dex, "
               f"iterations {entry['n_iter']}; r quantiles (16/50/84%) census "
