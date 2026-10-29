@@ -808,7 +808,9 @@ def _write_pacs_band(f, fin, band, n_source, sample_ra, sample_dec, n_admitted, 
     n_plane = curve.shape[1]
     pixel_curve = np.zeros((n_admitted, n_plane), dtype=np.float32)
     covered = (prow >= 0)
-    for start in range(0, n_admitted, _PACS_PIXEL_BLOCK):
+    # a band with no stored cell anywhere in the region (curve has 0 rows) covers no pixel: the
+    # zeros above are the answer, and there is no row to index
+    for start in range(0, n_admitted if curve.shape[0] > 0 else 0, _PACS_PIXEL_BLOCK):
         stop = min(start + _PACS_PIXEL_BLOCK, n_admitted)
         r = prow[start:stop]
         on = covered[start:stop]

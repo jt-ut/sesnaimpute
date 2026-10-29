@@ -6,7 +6,7 @@ printed by `fittp.check`, not stored here.
 
 Gutermuth+2009's colour-cut cascade (`gutcolors.prob.classify_prob`) is run
 on every source's curated, measured photometry with both of its masks set
-to the real detection pattern (`valid = detected = ORIGIN_FNU == 1`, the
+to the real detection pattern (`valid = detected = ORIGIN_FNU == 1` over the eight SELECTION bands, the
 pattern `fit.psi.verdicts` reads): it may form colours only from measured
 fluxes, and it follows the branch logic the survey actually saw. The
 catalogue's own substitution scheme already carries a completeness-limit
@@ -88,6 +88,13 @@ def verdict_code(prob):
 #: intermediates (feature dict, 45-column gate table) at a generous margin.
 ROW_BYTES = 4096
 
+#: The cascade is Gutermuth+2009's: it reads SESNA's eight bands only
+#: (`gutcolors.BAND_ORDER` is `definitions.SELECTION.bands`). The curated
+#: table has eleven columns; these are the positions of the SELECTION bands in
+#: it, found by band key (`definitions.SELECTION_INDEX`), so the PACS columns
+#: never reach `classify_prob`.
+_SEL = list(definitions.SELECTION_INDEX)
+
 
 def build_region(config, region, st):
     """Runs the cascade on `region`'s curated, measured photometry in
@@ -107,9 +114,9 @@ def build_region(config, region, st):
     bounds = list(batches(n, ROW_BYTES))
     for i, (start, stop) in enumerate(bounds):
         with h5py.File(path, "r") as f:
-            flux = np.asarray(f["FNU_MJY"][start:stop], dtype=float)
-            sigma = np.asarray(f["SIGMA_FNU_MJY"][start:stop], dtype=float)
-            origin = np.asarray(f["ORIGIN_FNU"][start:stop])
+            flux = np.asarray(f["FNU_MJY"][start:stop], dtype=float)[:, _SEL]
+            sigma = np.asarray(f["SIGMA_FNU_MJY"][start:stop], dtype=float)[:, _SEL]
+            origin = np.asarray(f["ORIGIN_FNU"][start:stop])[:, _SEL]
         detected = origin == 1
         # the real pattern (fit.psi.verdicts): only the survey's own
         # detections may be used, and only they count as detected.
@@ -273,6 +280,8 @@ def build_region_imputed(config, region, st):
     for i, (start, stop) in enumerate(bounds):
         with h5py.File(path, "r") as f:
             log10_flux = np.asarray(f["LOG10_FLUX_IMPUTED"][start:stop], dtype=float)
+        if log10_flux.shape[1] == len(definitions.BANDS):
+            log10_flux = log10_flux[:, _SEL]
         # section 7.1's median flux, 10**x, where the linear mean was read
         # before (identity 7: the imputed cascade half's verdicts move).
         flux = 10.0 ** log10_flux

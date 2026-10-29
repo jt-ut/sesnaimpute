@@ -4025,7 +4025,7 @@ _PHOTOMETRY_PACS_READINGS = {
         "aperture in the source's 30-arcsecond cell (CELL_OFFSET in the completeness product: the typical flux it "
         "returns at empty positions there, sky structure the annulus does not remove) is subtracted; the value for this source is CELL_OFFSET_{b}_MJY, and adding it back gives the convention of HOPS and eHOPS, which subtract no such offset. It can be negative or small when nothing is seen and is NaN where the band does not "
         "cover the source. "
-        "Where ORIGIN is 1 or 2 the flux is that of the matched PACS source (PACS_SOURCE, the region's PACS source "
+        "Where ORIGIN is 1 the flux is that of the matched PACS source (PACS_SOURCE, the region's PACS source "
         "table sources_pacs_region): the same aperture estimator at the position of that source's detection in this "
         "band; where ORIGIN is 3 it is a bound (a blend the beam cannot split, or a confusion: see CONFUSED_{b}). Where ORIGIN is 90 "
         "it is the aperture flux at this source's own position."),
@@ -4214,13 +4214,15 @@ REGISTRY[("sources_sesna_source", "FNU_MJY")] = ("mJy",
     "bands (J, H, Ks) take the survey's fixed detection bound, and the three IRAC bands and the one MIPS band take "
     "the source's own 90%-completeness flux read off Rob Gutermuth's measured completeness map at the source's "
     "nearest pixel, or NaN where the source's own pixel is off every field's map. The three PACS columns are total "
-    "flux (the PACS calibration's definition), as measured by the PACS stages; an upper bound or an uncovered band "
-    "is as that file records it. ORIGIN_FNU in this file says which bands were filled and how." + _PACS_TAIL)
+    "flux (the PACS calibration's definition), as measured by the PACS stages; where ORIGIN_FNU is 3 the value is "
+    "the flux of a detection that cannot be assigned to this source alone, a ceiling on its flux, and an uncovered "
+    "band is as that file records it. ORIGIN_FNU in this file says which bands were filled and how." + _PACS_TAIL)
 REGISTRY[("sources_sesna_source", "SIGMA_FNU_MJY")] = ("mJy",
     "The 1-sigma flux uncertainty for a measured detection in FNU_MJY, in each of the eleven bands, on the same mJy "
-    "scale. Where FNU_MJY was filled instead of measured (see ORIGIN_FNU), or is a PACS upper bound, this is the "
+    "scale. Where FNU_MJY was filled instead of measured (see ORIGIN_FNU), this is the "
     "fixed value 0.99 (a flag the SED fitter reads as an upper limit, not a real measurement uncertainty), or NaN "
-    "where ORIGIN_FNU is 91 (off-map or not covered, no fill at all)." + _PACS_TAIL)
+    "where ORIGIN_FNU is 91 (off-map or not covered, no fill at all). Where ORIGIN_FNU is 3 (a PACS bound) it is "
+    "the error of the detection whose flux FNU_MJY holds, as the PACS photometry file gives it." + _PACS_TAIL)
 REGISTRY[("sources_sesna_source", "DCOMP90_MJY")] = ("mJy",
     "The flux a source at this position and band would need to be detected at 90% completeness, in each of the "
     "eleven bands: the survey's fixed bound for the 2MASS bands (J, H, Ks), or, for the three IRAC bands and the "
@@ -4229,8 +4231,11 @@ REGISTRY[("sources_sesna_source", "DCOMP90_MJY")] = ("mJy",
     "is in the PACS completeness product, not here.")
 REGISTRY[("sources_sesna_source", "ORIGIN_FNU")] = ("code",
     "How FNU_MJY and DCOMP90_MJY in each of the eleven bands were obtained, one integer per band: 1 a measured "
-    "detection, 2 the fixed 2MASS survey detection bound (for the PACS bands: an upper bound from a blend that "
-    "cannot be separated), 90 covered but undetected (FNU_MJY filled from the completeness map's own "
+    "detection, 2 the survey's own upper limit on an undetected source (the fixed 2MASS survey detection bound; "
+    "the PACS bands never use 2), 3 a bound: a detection within a beam whose flux cannot be assigned to this source "
+    "alone; FNU_MJY is that detection's flux and is a ceiling on this source's flux (the PACS bands only: a blend of "
+    "two or more SESNA sources, or a detection within one beam that no source claims); 3 is neither a detection of "
+    "this source nor a non-detection, 90 covered but undetected (FNU_MJY filled from the completeness map's own "
     "90%-completeness flux at the source's pixel; for the PACS bands: observed and undetected), 91 off-map or not "
     "covered -- no completeness value and no non-detection term (COMPLETENESS_2026-10-20.md rule 2, the same "
     "meaning Pokhrel et al. 2023, eHOPS I, ApJS 266, 32, gave the old catalogue column)." + _PACS_TAIL)
