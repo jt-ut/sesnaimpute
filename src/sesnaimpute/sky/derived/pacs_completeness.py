@@ -1609,7 +1609,7 @@ def merge_sources(config, bands, n_jobs, stage, flux_grid):
     """The region's PACS sources: the bands' blind detections merged across bands (planner ruling 2026-10-28).
     Detections of two bands within the pair's merge radius are one source (each band at most once, nearest first,
     brightest detections first); the position is the sharpest detecting band's (70, else 100, else 160); every
-    detecting band's flux is the aperture estimator at that position on that band's detecting map; the SESNA
+    detecting band's flux is the aperture estimator at that band's own detection position on its detecting map; the SESNA
     matching radius is the position band's map radius, a 160-only source's with the 70-160 merge radius in
     quadrature; CHANCE the SESNA density within LOCAL_DENSITY_ARCSEC times the radius's area. Returns the table."""
     pk = {b: bands[b]["peaks"] for b in BANDS}
@@ -1648,7 +1648,8 @@ def merge_sources(config, bands, n_jobs, stage, flux_grid):
     src = {b: np.array([m.get(b, -1) for m in members], np.int64) for b in BANDS}
     pra = np.array([pk[BANDS[pb]]["ra"][src[BANDS[pb]][k]] for k, pb in enumerate(pos_band)]) if n else np.zeros(0)
     pde = np.array([pk[BANDS[pb]]["dec"][src[BANDS[pb]][k]] for k, pb in enumerate(pos_band)]) if n else np.zeros(0)
-    # each detecting band's flux at the merged position, on that band's detecting map
+    # each detecting band's flux at that band's own detection position (as HPPSC measures it; owner-approved
+    # 2026-10-29), on that band's detecting map
     recs = {b: bands[b].get("records", []) for b in BANDS}
     pieces, want = [], {}
     for b in BANDS:
@@ -1661,7 +1662,8 @@ def merge_sources(config, bands, n_jobs, stage, flux_grid):
             oc = np.full(grid.n_cells, np.nan)
             rows = cm == t
             oc[cid[rows]] = off[rows]
-            pieces.append((b, int(t), pra[k], pde[k], tuple(bands[b]["map_shift"][t]), oc))
+            own = src[b][k]
+            pieces.append((b, int(t), pk[b]["ra"][own], pk[b]["dec"][own], tuple(bands[b]["map_shift"][t]), oc))
             want[(b, int(t))] = k
     measured = pieces_module.run(functools.partial(_measure_at, config=config, records=recs), pieces, n_jobs,
                                  stage=stage, unit="PACS sources (flux at the merged position)") if pieces else []
