@@ -633,7 +633,7 @@ class Tile:
     def __init__(self, record, wcs, config, image, error, psf=None, neighbours=None, image_path=None):
         """`image`, `error`: the map's layers in mJy per pixel with unusable pixels NaN in the error (`_load_layers`);
         `psf`, `neighbours`: the prepared point-spread cache and bright-neighbour list (`prepare_map`), built here when
-        None; `image_path`: the prepared image file, re-opened by `release_image`."""
+        None; `image_path`: the prepared image file, re-opened by `writable`."""
         self.wcs = wcs
         self.shape = tuple(record.shape)
         scale = proj_plane_pixel_scales(wcs)
@@ -673,11 +673,18 @@ class Tile:
         if self.neighbours.x.size:
             self._tree = cKDTree(np.c_[self.neighbours.x, self.neighbours.y])
 
-    def release_image(self):
-        """Re-open the prepared image (copy-on-write), dropping the private pages that adding and restoring
-        artificial sources leave behind, so a worker never holds more than its current batch's patches."""
-        if self._image_path is not None:
-            self.image = np.load(self._image_path, mmap_mode="c")
+    @contextmanager
+    def writable(self):
+        """Inside the context the tile's image is the prepared file memory-mapped copy-on-write, so that `injected`
+        can add sources to it (the prepared image is otherwise read-only, shared by every worker); the private pages
+        are dropped on exit. For the one-off real-map check; the injections of `Injector.measure_positions` work on
+        a private buffer of rows instead."""
+        real = self.image
+        self.image = np.load(self._image_path, mmap_mode="c")
+        try:
+            yield self
+        finally:
+            self.image = real
 
     def _enclosed_over_eef(self, config):
         """The point-spread table's flux inside the aperture radius (no sky subtracted), for a source of unit
@@ -851,15 +858,15 @@ class Tile:
             out[4][r] = un
         return PositionFit(*out)
 
-    def measure(self, x, y):
+    def measure(self, x, y, image=None, row0=0):
         """The measurement of isolated sources and of the completeness positions (final ruling, spec
         section 12): eHOPS aperture photometry -> PositionFit (flux mJy on eHOPS's normalisation, gain 1,
-        sigma = the annulus scatter statistic, covered, no nuisance)."""
-        a = self.aperture(x, y)
+        sigma = the annulus scatter statistic, covered, no nuisance). `image`, `row0`: see `aperture`."""
+        a = self.aperture(x, y, image=image, row0=row0)
         return PositionFit(a.flux, np.where(a.covered, 1.0, np.nan), a.annulus_sigma, a.covered,
                            np.zeros(a.flux.size, dtype=np.int64))
 
-    def aperture(self, x, y, chunk=2048):
+    def aperture(self, x, y, chunk=2048, image=None, row0=0):
         """Forced aperture photometry at each (x, y) -> ApertureFit (the eHOPS apertures; the photometry of
         isolated sources and the completeness positions alike). The clipped (mmm) annulus sky rejects the
         pixels where a bright source's own outer light stands above the noise, so the annulus would remove
@@ -867,7 +874,13 @@ class Tile:
         2.5 % high, by an amount set by the local noise. So the sky is taken from the annulus after the
         source's own point-spread outer light, scaled to its flux, is subtracted (the flux from the previous
         pass: first with the table's aperture-and-annulus fraction, then twice with the outer light removed),
-        and the sum is divided by the fraction of the total flux inside the aperture radius alone."""
+        and the sum is divided by the fraction of the total flux inside the aperture radius alone. `image`: the rows
+        `row0` onward of the map's image, a private buffer to measure on in place of the tile's (the error layer is
+        then the same rows, a view); positions are in map coordinates either way."""
+        if image is None:
+            image, error = self.image, self.error
+        else:
+            error = self.error[row0:row0 + image.shape[0]]
         r_ap, r_in, r_out = (r / self.pixel_arcsec for r in APERTURES[self.record.band])
         x = np.asarray(x, float).ravel()
         y = np.asarray(y, float).ravel()
@@ -883,14 +896,14 @@ class Tile:
         for lo in range(0, n, chunk):
             sl = slice(lo, lo + chunk)
             xs, ys = x[sl], y[sl]
-            f, s_, d_, a_, c_ = _aperture_core(self.image, self.error, xs, ys, r_ap, r_in, r_out, 5)
+            f, s_, d_, a_, c_ = _aperture_core(image, error, xs, ys - row0, r_ap, r_in, r_out, 5)
             amp = np.where(c_, f / self.aperture_fraction, 0.0)
             if not c_.any():
                 cov[sl] = c_
                 continue
             model = self._outer_light(xs, ys, rb)
             for _ in range(2):
-                f, s_, d_, a_, c_ = _aperture_core_wing(self.image, self.error, xs, ys, r_ap, r_in, r_out, 5,
+                f, s_, d_, a_, c_ = _aperture_core_wing(image, error, xs, ys - row0, r_ap, r_in, r_out, 5,
                                                         model, np.where(c_ & np.isfinite(amp), amp, 0.0))
                 amp = np.where(c_, f / eef, 0.0)
             flux[sl], sky[sl], sd[sl], area[sl], cov[sl] = f / eef, s_, d_, a_, c_
@@ -1145,14 +1158,14 @@ def prepare_map(config, record):
 
 def open_prepared(config, record):
     """The `Tile` of `record` from its prepared files (`prepare_map`): the layers memory-mapped (shared by every
-    worker; the image copy-on-write, so adding artificial sources touches only the patched pages), the point-spread
+    worker; the image read-only: injections work on private buffers of rows, `Tile.writable` is the one copy-on-write exception), the point-spread
     cache and neighbour list unpickled. Raises FileNotFoundError when the map was not prepared."""
     d = prepared_dir(config, record)
     with open(os.path.join(d, "tile.pkl"), "rb") as fh:
         state = pickle.load(fh)
     path = os.path.join(d, "image.npy")
     wcs = WCS(fits.Header.fromstring(record.wcs_header)).celestial
-    tile = Tile(record, wcs, config, np.load(path, mmap_mode="c"), np.load(os.path.join(d, "error.npy"), mmap_mode="r"),
+    tile = Tile(record, wcs, config, np.load(path, mmap_mode="r"), np.load(os.path.join(d, "error.npy"), mmap_mode="r"),
                 psf=state["psf"], neighbours=state["neighbours"], image_path=path)
     tile.psf_scale = state["psf_scale"]
     return tile

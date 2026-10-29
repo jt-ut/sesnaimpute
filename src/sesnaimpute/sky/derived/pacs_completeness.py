@@ -472,15 +472,15 @@ MIN_ALIGN_PAIRS = 10
 LOCAL_DENSITY_ARCSEC = 60.0
 
 
-def filtered(tile, x, y, offset_cell):
+def filtered(tile, x, y, offset_cell, image=None, row0=0):
     """The catalogue's flux at map pixels (x, y): the aperture estimator (aperture minus annulus sky, `Tile.aperture`)
     minus the CELL_OFFSET of the position's cell (`offset_cell`, per grid cell, NaN where the cell holds no row); NaN
-    where not covered."""
+    where not covered. `image`, `row0`: the buffer of rows to measure on (`Tile.aperture`)."""
     x = np.asarray(x, float).ravel()
     y = np.asarray(y, float).ravel()
     cid = tile.grid.cell_ids(x, y)
     off = np.where(cid >= 0, offset_cell[np.maximum(cid, 0)], np.nan)
-    a = tile.aperture(x, y)
+    a = tile.aperture(x, y, image=image, row0=row0)
     return np.where(a.covered, a.flux - off, np.nan)
 
 
@@ -668,13 +668,13 @@ def _injected_delta(tile, x, y, flux, wpx, wpy):
     return out
 
 
-def window_peaks(tile, x, y, radius_px, m_offset_cell, m_sigma_cell, offset_cell, flux=None):
+def window_peaks(tile, x, y, radius_px, m_offset_cell, m_sigma_cell, offset_cell, flux=None, image=None, row0=0):
     """For each map position (x, y): the PACS source the blind detection finds within `radius_px` of it, on the
     PSF-matched map (`matched_state`, plus each injection's own change when `flux` is given: the map then holds those
     injections) on the pixels within radius_px + 1.5 (enough for the 8-neighbour test): a local maximum reaching 5 x
     the matched map's own cell noise above its cell offset (`m_sigma_cell`, `m_offset_cell`), the nearest one, its
     position by the parabolic sub-pixel peak, its flux the catalogue's aperture estimator there (`filtered`, on the
-    tile's current image). Returns (found, xc, yc, fnu, distance)."""
+    tile's current image, or `image`, the buffer of rows from `row0` (`Tile.aperture`)). Returns (found, xc, yc, fnu, distance)."""
     x = np.asarray(x, float)
     y = np.asarray(y, float)
     n = x.size
@@ -708,7 +708,7 @@ def window_peaks(tile, x, y, radius_px, m_offset_cell, m_sigma_cell, offset_cell
         dy, dx = _parabola(v[i], iy, ix)
         xc[i], yc[i] = px[i, iy, ix] + dx, py[i, iy, ix] + dy
     if has.any():
-        fnu[has] = filtered(tile, xc[has], yc[has], offset_cell)
+        fnu[has] = filtered(tile, xc[has], yc[has], offset_cell, image=image, row0=row0)
         dd[has] = np.hypot(xc[has] - x[has], yc[has] - y[has])
         found[has] = dd[has] <= radius_px
     return found, xc, yc, fnu, dd
@@ -898,30 +898,34 @@ class Injector:
                     brighter[k] = flux[k] >= self.det_flux[l].max()
         # the batch is applied in bands of rows (pacs_fit.PREPARE_STRIP_ROWS): its positions are thinned so that no
         # injected light reaches another injection's aperture or annulus, so each band's sources measure exactly as
-        # with the whole batch in; after each band the image is restored and its private pages dropped, so a worker
-        # holds one band's patches whatever the map's size
+        # with the whole batch in. Each band works on a private copy of its rows widened by the reach of a patch,
+        # an aperture and annulus (the outer-light box included) at a found peak up to the recovery radius away,
+        # and the window of the peak search; the copy is dropped after the band, so a worker holds one band's rows
+        # whatever the map's size and never writes the shared image
         flux_out, covered = np.full(n, np.nan), np.zeros(n, bool)
         found, det_flux, det_dist = np.zeros(n, bool), np.full(n, np.nan), np.full(n, np.nan)
         t_inject = t_ap = 0.0
-        band = np.floor(y / pacs_fit.PREPARE_STRIP_ROWS).astype(np.int64)
+        strip = pacs_fit.PREPARE_STRIP_ROWS
+        ny = tile.shape[0]
+        mg = (tile.injection_half_width() + int(np.ceil(APERTURES[tile.record.band][2] / tile.pixel_arcsec)) + 1
+              + int(np.ceil(r)) + 2)
+        band = np.floor(y / strip).astype(np.int64)
         for b in np.unique(band):
             k = np.flatnonzero(band == b)
+            a0, a1 = max(int(b) * strip - mg, 0), min((int(b) + 1) * strip + mg, ny)
             t0 = time.time()
-            saved = tile._add_sources(x[k], y[k], flux[k])
+            buf = np.array(tile.image[a0:a1])
+            for cx, cy, resp in tile._template_patches(x[k], y[k], flux[k]):
+                for i in range(cx.size):
+                    pacs_fit._paste(buf, int(cx[i]), int(cy[i]) - a0, resp[i])
             t_inject += time.time() - t0
-            try:
-                t0 = time.time()
-                m = tile.measure(x[k], y[k])
-                flux_out[k], covered[k] = m.flux, m.covered
-                f_, _xc, _yc, df_, dd_ = window_peaks(tile, x[k], y[k], r, self.m_offset, self.m_sigma, self.offset,
-                                                      flux=flux[k])
-                found[k], det_flux[k], det_dist[k] = f_, df_, dd_
-                t_ap += time.time() - t0
-            finally:
-                t0 = time.time()
-                tile._restore(saved)
-                tile.release_image()
-                t_inject += time.time() - t0
+            t0 = time.time()
+            m = tile.measure(x[k], y[k], image=buf, row0=a0)
+            flux_out[k], covered[k] = m.flux, m.covered
+            f_, _xc, _yc, df_, dd_ = window_peaks(tile, x[k], y[k], r, self.m_offset, self.m_sigma, self.offset,
+                                                  flux=flux[k], image=buf, row0=a0)
+            found[k], det_flux[k], det_dist[k] = f_, df_, dd_
+            t_ap += time.time() - t0
         recovered = covered & found & brighter
         keep = covered
         out.update(row=self.row_of_cell[cid[keep]], near=near[keep], recovered=recovered[keep],
@@ -1047,9 +1051,8 @@ def _real_check(injector, flux_mjy, half):
     far = d >= BLEND_RADIUS_BEAMS * injector.beam_px
     x, y = x[far][:REAL_CHECK_POSITIONS], y[far][:REAL_CHECK_POSITIONS]
     before = tile.measure(x, y)
-    with tile.injected(x, y, flux_mjy):
+    with tile.writable(), tile.injected(x, y, flux_mjy):
         after = tile.measure(x, y)
-    tile.release_image()
     ok = before.covered & after.covered
     return (after.flux[ok] - before.flux[ok]) / flux_mjy
 
