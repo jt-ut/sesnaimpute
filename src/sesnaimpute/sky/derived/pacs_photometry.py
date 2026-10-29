@@ -180,8 +180,10 @@ def cross_match(path, config, region, ra, dec):
     `path` (rewritten in place). Each SESNA source takes the nearest PACS source within MATCH_RADIUS_ARCSEC. If that PACS
     source has this SESNA source alone within the radius: ORIGIN 1 in every band that detects it, FNU/SIGMA the PACS
     source's. If it has two or more SESNA sources within the radius (a blend): ORIGIN 2 in every detecting band, the
-    bound that band's flux. A band that does not detect the PACS source keeps the forced measurement (ORIGIN 90 or 91).
-    Returns per-band counts {m1, m2}, the expected chance coincidences (the local SESNA density within
+    bound that band's flux. A band that does not detect the PACS source keeps the forced measurement (ORIGIN 90 or 91),
+    unless a detection of that band lies within one beam of the SESNA source (the per-band confusion flag): then
+    ORIGIN 2 with the nearest such detection's flux as the bound. Returns per-band counts {m1, m2, confused}, the
+    expected chance coincidences (the local SESNA density within
     CHANCE_DENSITY_ARCSEC x the radius's area, summed over the PACS sources) and the per-observation median offsets
     PACS - SESNA (east, north arcsec) of the ORIGIN 1 pairs, keyed by (position band, map index): (n, east, north)."""
     src = product_path(config, "sky/derived", "pacs", "sources", "region", region=region)
@@ -189,9 +191,10 @@ def cross_match(path, config, region, ra, dec):
         n = f["RA_DEG"].shape[0]
         pra, pde, pb = f["RA_DEG"][:], f["DEC_DEG"][:], f["POSITION_BAND"][:].astype(int)
         cols = {b: dict(det=f["DETECTED_" + b][:], fnu=f["FNU_%s_MJY" % b][:], sig=f["SIGMA_%s_MJY" % b][:],
-                        off=f["CELL_OFFSET_%s_MJY" % b][:], ext=f["EXTENDED_" + b][:], map=f["MAP_INDEX_" + b][:])
+                        off=f["CELL_OFFSET_%s_MJY" % b][:], ext=f["EXTENDED_" + b][:], map=f["MAP_INDEX_" + b][:],
+                        ra=f["RA_%s_DEG" % b][:], dec=f["DEC_%s_DEG" % b][:])
                 for b in BANDS}
-    out = {b: dict(m1=0, m2=0) for b in BANDS}
+    out = {b: dict(m1=0, m2=0, confused=0) for b in BANDS}
     if n == 0 or ra.size == 0:
         return out, 0.0, {}
     su = _unit_vectors(ra, dec)
@@ -226,6 +229,24 @@ def cross_match(path, config, region, ra, dec):
                 else:
                     d["ORIGIN"][i], d["SIGMA"][i] = ORIGIN_UPPER_BOUND, UPPER_LIMIT_SIGMA
                     out[b]["m2"] += 1
+        # the per-band confusion flag (owner-approved 2026-10-29): a covered source with no detection of the band
+        # associated, but the band's detection (at its own position) within one beam of it, cannot be called
+        # undetected: ORIGIN 2, the nearest such detection's flux the bound
+        from sesnaimpute.sky.derived.pacs_completeness import BEAM_ARCSEC
+        for b in BANDS:
+            c, d = cols[b], data[b]
+            det = np.flatnonzero(c["det"])
+            out[b]["confused"] = 0
+            if det.size == 0:
+                continue
+            bu = _unit_vectors(c["ra"][det], c["dec"][det])
+            bd, bj = cKDTree(bu).query(su, distance_upper_bound=2.0 * np.sin(np.radians(BEAM_ARCSEC[b] / 3600.0) / 2.0))
+            for i in np.flatnonzero(np.isfinite(bd) & (d["ORIGIN"] == ORIGIN_UNDETECTED)):
+                k = int(det[bj[i]])
+                d["FNU"][i], d["CELL_OFFSET"][i], d["SIGMA"][i] = c["fnu"][k], c["off"][k], UPPER_LIMIT_SIGMA
+                d["ORIGIN"][i], d["PACS_SOURCE"][i], d["N_BLEND"][i] = ORIGIN_UPPER_BOUND, k, len(claim[k])
+                d["MATCH_SEPARATION"][i] = float(_sep_arcsec(su[i], bu[bj[i]]))
+                out[b]["confused"] += 1
         for b in BANDS:
             for c, v in data[b].items():
                 f[_NAMES[c].format(b=b)][...] = v
@@ -412,8 +433,9 @@ def _build_one_region(config, region, st):
             for b in BANDS:
                 o = f["ORIGIN_" + b][:]
                 counts[b] = {code: int((o == code).sum()) for code in (1, 2, 90, 91)}
-                print("  %s: association (%.1f arcsec): ORIGIN 1 %d, ORIGIN 2 (blends) %d, ORIGIN 90 %d, ORIGIN 91 %d" %
-                      (b, MATCH_RADIUS_ARCSEC, counts[b][1], counts[b][2], counts[b][90], counts[b][91]), flush=True)
+                print("  %s: association (%.1f arcsec): ORIGIN 1 %d, ORIGIN 2 %d (of which %d the band's detection within one "
+                      "beam, none associated), ORIGIN 90 %d, ORIGIN 91 %d" % (b, MATCH_RADIUS_ARCSEC, counts[b][1], counts[b][2],
+                                                                            matched[b]["confused"], counts[b][90], counts[b][91]), flush=True)
         print("  expected chance coincidences (local SESNA density x pi (%.1f arcsec)^2, summed over the region's PACS "
               "sources): %.1f" % (MATCH_RADIUS_ARCSEC, chance), flush=True)
         print_offsets(config, region, offsets)
@@ -555,21 +577,30 @@ HPPSC_FLUX_SNR = 10.0
 #: sources at or above our FLUX90 at their position at least 90 % within binomial error
 HPPSC_FLUX_BAR = 0.05
 HPPSC_RECOVERY_BAR = 0.90
+#: the recovery check counts HPPSC's point-like (fitted width at most this many of our beams) entries of HPPSC S/N at
+#: least HPPSC_RECOVERY_SNR (owner ruling 2026-10-29: HPPSC also lists cloud knots wider than the beam and entries of
+#: low significance that a point-source detection is not meant to find; the full list is printed as information)
+HPPSC_POINT_BEAMS = 1.5
+HPPSC_RECOVERY_SNR = 10.0
 
 
 def _read_hppsc(config, band):
-    """HPPSC's band list as arrays: ra, dec (deg), flux (mJy), snr (structure-noise S/N), edge flag; and the
-    observation table's obsids for the band."""
+    """HPPSC's band list as arrays: ra, dec (deg), flux (mJy), snr (structure-noise S/N), edge flag, fwhm (arcsec: the
+    geometric mean of its fitted widths, NaN where it gives none); and the observation table's obsids for the band."""
     import csv
     from sesnaimpute.sky.download.hppsc.build import download_dir
     name, colour = HPPSC_FILES[band]
     cols = {k: [] for k in ("ra", "dec", "flux", "snr", "edgeflag")}
+    widths = {"fwhmxfit": [], "fwhmyfit": []}
     with open(os.path.join(download_dir(config), name)) as fh:
         for r in csv.DictReader(fh):
             for k in cols:
                 cols[k].append(r[k])
+            for k in ("fwhmxfit", "fwhmyfit"):
+                widths[k].append(float(r[k]) if r[k] not in ("", None) else np.nan)
     out = {k: np.asarray(v, float) for k, v in cols.items() if k != "edgeflag"}
     out["edge"] = np.asarray(cols["edgeflag"]) == "t"
+    out["fwhm"] = np.sqrt(np.asarray(widths["fwhmxfit"]) * np.asarray(widths["fwhmyfit"]))
     with open(os.path.join(download_dir(config), "ppsc_obstbl.csv")) as fh:
         out["obsids"] = {int(r["obsid"]) for r in csv.DictReader(fh) if r["band"] == colour}
     return out
@@ -583,8 +614,9 @@ def hppsc_checks(config, region):
     (3) the median flux ratio ours / HPPSC over common sources (within one beam, HPPSC S/N >= HPPSC_FLUX_SNR), ours on
     HPPSC's convention (FNU plus the cell offset: HPPSC subtracts only its annulus sky), bar within HPPSC_FLUX_BAR;
     (4) of the HPPSC sources inside our footprint with flux at least our FLUX90 at their position (the completeness
-    product read as a function of position, `catalog.completeness._PacsBand`), the fraction our detection finds in the
-    band within one beam, bar HPPSC_RECOVERY_BAR within binomial error. Common sources are matched within one beam,
+    product read as a function of position, `catalog.completeness._PacsBand`), fitted width at most HPPSC_POINT_BEAMS
+    beams and HPPSC S/N at least HPPSC_RECOVERY_SNR, the fraction our detection finds in the band within one beam, bar
+    HPPSC_RECOVERY_BAR within binomial error (the same over all of them, and over the point-like ones, as information). Common sources are matched within one beam,
     not the association's 2 arcsec, so that the checks measure detection and not the two catalogues' astrometry
     (HPPSC's is 1.5-1.7 arcsec, and the 100 micron maps are separate observations; planner ruling, owner-approved
     2026-10-29). HPPSC states no reliability of its own: a false HPPSC source counts against (4). Nothing is written."""
@@ -646,17 +678,23 @@ def hppsc_checks(config, region):
                                                            "pass" if abs(ratio - 1.0) <= HPPSC_FLUX_BAR else "FAIL"))
             else:
                 print("HPPSC %s %s: no common sources with HPPSC S/N >= %g" % (region, b, HPPSC_FLUX_SNR))
-            pool = inside & np.isfinite(flux90) & (hflux >= flux90)
-            if pool.any():
+            above = inside & np.isfinite(flux90) & (hflux >= flux90)
+            point = h["fwhm"][box] <= HPPSC_POINT_BEAMS * BEAM_ARCSEC[b]
+            for label, pool, ruled in (("all", above, False), ("point-like", above & point, False),
+                                       ("point-like with HPPSC S/N >= %g" % HPPSC_RECOVERY_SNR,
+                                        above & point & (hsnr >= HPPSC_RECOVERY_SNR), True)):
+                if not pool.any():
+                    print("HPPSC %s %s: recovery (%s): no HPPSC source inside our footprint at or above our FLUX90"
+                          % (region, b, label))
+                    continue
                 n_pool = int(pool.sum())
                 frac = float(np.mean(common[pool]))
                 err = np.sqrt(HPPSC_RECOVERY_BAR * (1 - HPPSC_RECOVERY_BAR) / n_pool)
-                print("HPPSC %s %s: recovery of the %d HPPSC sources inside our footprint at or above our FLUX90 there: "
-                      "%.3f (binomial error at the bar %.3f; bar >= %.2f: %s); HPPSC edge-flagged among them %d"
-                      % (region, b, n_pool, frac, err, HPPSC_RECOVERY_BAR,
-                         "pass" if frac + err >= HPPSC_RECOVERY_BAR else "FAIL", int(np.sum(h["edge"][box][pool]))))
-            else:
-                print("HPPSC %s %s: no HPPSC source inside our footprint at or above our FLUX90" % (region, b))
+                verdict = ("bar >= %.2f: %s" % (HPPSC_RECOVERY_BAR, "pass" if frac + err >= HPPSC_RECOVERY_BAR else "FAIL")
+                           if ruled else "information")
+                print("HPPSC %s %s: recovery (%s) of the %d HPPSC sources inside our footprint at or above our FLUX90 "
+                      "there: %.3f (binomial error at the bar %.3f; %s); HPPSC edge-flagged among them %d"
+                      % (region, b, label, n_pool, frac, err, verdict, int(np.sum(h["edge"][box][pool]))))
 
 
 if __name__ == "__main__":

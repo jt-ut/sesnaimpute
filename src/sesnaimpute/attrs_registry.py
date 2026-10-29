@@ -3981,8 +3981,9 @@ _PACS_SOURCES_READINGS = {
     "POSITION_BAND": ("band index", "The band whose detection gives the position: 0 = 70, 1 = 100, 2 = 160 micron."),
     "DETECTED_{b}": ("true or false", "Whether the {w} micron blind detection found this source (merged into it)."),
     "FNU_{b}_MJY": ("mJy",
-        "The {w} micron flux at the source's position where DETECTED_{b}: the catalogue's aperture estimator on the "
-        "detecting {w} micron map minus the cell's empty-sky offset (as FNU in the photometry product); NaN where "
+        "The {w} micron flux where DETECTED_{b}: the catalogue's aperture estimator at the {w} micron detection's own "
+        "position (RA_{b}_DEG, DEC_{b}_DEG; as the Herschel PACS Point Source Catalogue measures each band) on the "
+        "detecting {w} micron map, minus the cell's empty-sky offset (as FNU in the photometry product); NaN where "
         "the band does not detect the source."),
     "SIGMA_{b}_MJY": ("mJy",
         "Uncertainty of FNU_{b}_MJY: the scatter of recovered minus injected flux of artificial sources of that flux "
@@ -4022,8 +4023,8 @@ _PHOTOMETRY_PACS_READINGS = {
         "returns at empty positions there, sky structure the annulus does not remove) is subtracted; the value for this source is CELL_OFFSET_{b}_MJY, and adding it back gives the convention of HOPS and eHOPS, which subtract no such offset. It can be negative or small when nothing is seen and is NaN where the band does not "
         "cover the source. "
         "Where ORIGIN is 1 or 2 the flux is that of the matched PACS source (PACS_SOURCE, the region's PACS source "
-        "table sources_pacs_region): the same aperture estimator at that source's position, which is the sharpest "
-        "band's detection; where ORIGIN is 2 it is an upper bound (a blend the beam cannot split). Where ORIGIN is 90 "
+        "table sources_pacs_region): the same aperture estimator at the position of that source's detection in this "
+        "band; where ORIGIN is 2 it is an upper bound (a blend the beam cannot split). Where ORIGIN is 90 "
         "it is the aperture flux at this source's own position."),
     "CELL_OFFSET_{b}_MJY": ("mJy",
         "The empty-sky offset subtracted from FNU_{b}_MJY for this source: the median flux the same measurement "
@@ -4048,7 +4049,14 @@ _PHOTOMETRY_PACS_READINGS = {
         "that PACS source has two or more SESNA sources within 2 arcsec, so the flux is an upper bound for each (an "
         "unseparable blend); 90 means the band covers the source and no PACS source detected in this band is "
         "associated with it (its completeness curve gives the chance of that; the three bands' detections are "
-        "independent); 91 means the band does not cover the source. The expected number of chance coincidences over "
+        "independent); 2 also means that no detection of this band is associated with the source but one lies within "
+        "one beam of it (the source cannot be called undetected; the flux is that detection's, as an upper bound); "
+        "91 means the band does not cover the source. Two limits of ORIGIN 90, stated: the completeness curve is "
+        "measured over the 30-arcsecond cell, so for a source on a local peak of cloud emission (a bright core or "
+        "filament crest) the true chance of detection can be lower than the curve says; and the detection filter "
+        "subtracts the local background within about 1.3 beams of each position, so a faint source right next to a much "
+        "brighter one can "
+        "be missed. The expected number of chance coincidences over "
         "the region (the local SESNA density times the area of the 2 arcsec circle, summed over the PACS sources) is "
         "the attribute EXPECTED_CHANCE_COINCIDENCES of ORIGIN_P70."),
     "LOCAL_RMS_{b}_MJY": ("mJy",
