@@ -1,16 +1,15 @@
 """Herschel PACS 70 and 100 micron flux at every SESNA source position
 (SPEC_PACS_FARIR_DRAFT.md sections 4, 7b and 11.3 step 3).
 
-`build(config, regions=None)` measures, for every source of
-`catalog/sesna/sources_sesna_source__<Region>.hdf5`, the flux in each PACS
-band on the map the region's completeness stage chose for the source's cell
-(`sky.derived.pacs_completeness`, the deepest map there), from the maps the
-download index lists (`sky.download.herschel_pacs.index.read_index`), and
+`build(config, regions=None, box=None)` measures, for every source of
+the curated positions of the region (`catalog.curated.read_positions`: the delivery's rows in the curated order), the flux in each PACS
+band on the band's one co-added mosaic of the region (`sky.derived.pacs_mosaic`; the map the completeness stage
+(`sky.derived.pacs_completeness`) chose for the source's cell, a row of its MAP_* tables; `box` opens a development
+slice of the mosaic), and
 writes `sky/derived/pacs/photometry_pacs_source__<Region>.hdf5`: one row per
 source in the catalogue's own order, with its flux, its noise, the origin
-code the fitter reads (1 detected, 2 upper bound from an unseparable blend,
-90 observed but not detected, 91 not covered), the contributing observation
-ids, the blend bookkeeping (how many detections lie within a beam, and the
+code the fitter reads (1 detected, 3 bound from a blend or a confusion,
+90 observed but not detected, 91 not covered), the blend bookkeeping (how many detections lie within a beam, and the
 brightest of them) and the extended-source flag.
 
 Everything numerical is `sky.derived.pacs_fit`'s: the eHOPS aperture photometry and the fitted width. This
@@ -26,12 +25,12 @@ the measurements into products:
 - detection: flux - CELL_OFFSET >= 5 x CELL_SIGMA (origin 1), else origin 90; a source the completeness stage
   found no cell for, or whose aperture has too little valid data, is 91.
 - blends (the far-infrared survey convention; planner ruling, owner-approved 2026-10-28): a source within one
-  beam of another source detected on the map is an unseparable blend, origin 2, its own aperture flux (offset
-  subtracted, so it holds the neighbour's light) as the upper bound and the pipeline's upper-limit sentinel as
+  beam of another source detected on the map is an unseparable blend, origin 3, its own aperture flux (offset
+  subtracted, so it holds the neighbour's light) as the bound and the measurement's own error as
   its sigma, unless it is itself detected and the brightest of the detections within that beam.
 - extended: a detected source whose fitted width exceeds 1.5 x the beam.
 
-Work is split by map tile (one piece per band and map), the tile's sources
+Work is split by map (one piece per band and map: one per band, rows cut in pieces by the pool), the tile's sources
 being transformed to map pixels in one call; the product is preallocated and
 each tile's rows are written as they arrive.
 """
@@ -50,7 +49,6 @@ from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.build import run
-from sesnaimpute.catalog.curated import UPPER_LIMIT_SIGMA
 from sesnaimpute.config import product_path
 from sesnaimpute.sky.derived import pacs_fit
 from sesnaimpute.sky.derived.pacs_fit import DETECTION_SNR
@@ -59,13 +57,13 @@ from sesnaimpute.sky.download.herschel_pacs.index import read_index
 BANDS = ("P70", "P100", "P160")
 
 #: the pipeline's origin codes for a flux (`ORIGIN_FNU` in the source table)
-ORIGIN_DETECTED, ORIGIN_UPPER_BOUND, ORIGIN_UNDETECTED, ORIGIN_NOT_COVERED = 1, 2, 90, 91
+ORIGIN_DETECTED, ORIGIN_BOUND, ORIGIN_UNDETECTED, ORIGIN_NOT_COVERED = 1, 3, 90, 91
 
 #: a detection fitted wider than this many beam widths is flagged extended
 #: (SPEC 11.3 step 3); the width is `pacs_fit.Tile.fitted_fwhm`, the beam
 #: broadened by a Gaussian chosen by chi-square
 EXTENDED_BEAM_FACTOR = 1.5
-#: a source within this many beam FWHM of another source's detection is an unseparable blend (ORIGIN 2) unless it is
+#: a source within this many beam FWHM of another source's detection is an unseparable blend (ORIGIN 3) unless it is
 #: the brighter member: the far-infrared survey convention (HOPS/eHOPS flag close pairs the same way; planner ruling,
 #: owner-approved 2026-10-28)
 BLEND_RADIUS_BEAMS = 1.0
@@ -77,7 +75,7 @@ BLEND_RADIUS_BEAMS = 1.0
 MATCH_RADIUS_ARCSEC = 2.0
 #: the SESNA density behind the expected chance coincidences is counted within this radius of each PACS source
 CHANCE_DENSITY_ARCSEC = 60.0
-#: an observation's median PACS - SESNA offset is printed where it holds at least this many associated pairs
+#: an input map's median PACS - SESNA offset is printed where it holds at least this many associated pairs
 MIN_OFFSET_PAIRS = 5
 
 
@@ -155,7 +153,7 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
     subtracted = np.full(n, np.nan)
     with pacs_fit.open_tile(config, record) as tile:
         # the map's registration to SESNA, as the completeness stage measured and stored it
-        shift = shifts.get((BANDS[band], _tile_key(record)), (0.0, 0.0))
+        shift = shifts.get((BANDS[band], map_index), (0.0, 0.0))
         x, y, single, ok, _floor = singleton_pass(tile, ra[rows], dec[rows], shift, sigma_cell, offset)
         sigma_annulus = single.sigma
         flux[ok] = single.flux[ok] - offset[ok]
@@ -165,7 +163,7 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
     columns = dict(FNU=flux, SIGMA=sigma, ORIGIN=origin, LOCAL_RMS=sigma_cell.astype(np.float32), CELL_OFFSET=subtracted,
                    SIGMA_ANNULUS=np.asarray(sigma_annulus, np.float32), N_BLEND=np.zeros(n, np.int16),
                    PACS_SOURCE=np.full(n, -1, np.int32), MATCH_SEPARATION=np.full(n, np.nan, np.float32),
-                   EXTENDED=np.zeros(n, bool))
+                   EXTENDED=np.zeros(n, bool), CONFUSED=np.zeros(n, bool))
     columns["LOCAL_RMS"][origin == ORIGIN_NOT_COVERED] = np.nan
     return band, map_index, rows, columns
 
@@ -179,13 +177,13 @@ def cross_match(path, config, region, ra, dec):
     owner-approved 2026-10-29: Rob Gutermuth's band-merging recipe as eHOPS applies it) on the photometry product at
     `path` (rewritten in place). Each SESNA source takes the nearest PACS source within MATCH_RADIUS_ARCSEC. If that PACS
     source has this SESNA source alone within the radius: ORIGIN 1 in every band that detects it, FNU/SIGMA the PACS
-    source's. If it has two or more SESNA sources within the radius (a blend): ORIGIN 2 in every detecting band, the
-    bound that band's flux. A band that does not detect the PACS source keeps the forced measurement (ORIGIN 90 or 91),
+    source's. If it has two or more SESNA sources within the radius (a blend): ORIGIN 3 in every detecting band, the
+    bound that band's flux and SIGMA that detection's own error. A band that does not detect the PACS source keeps the forced measurement (ORIGIN 90 or 91),
     unless a detection of that band lies within one beam of the SESNA source (the per-band confusion flag): then
-    ORIGIN 2 with the nearest such detection's flux as the bound. Returns per-band counts {m1, m2, confused}, the
+    ORIGIN 3 (CONFUSED true) with the nearest such detection's flux as the bound. Returns per-band counts {m1, m2, confused}, the
     expected chance coincidences (the local SESNA density within
-    CHANCE_DENSITY_ARCSEC x the radius's area, summed over the PACS sources) and the per-observation median offsets
-    PACS - SESNA (east, north arcsec) of the ORIGIN 1 pairs, keyed by (position band, map index): (n, east, north)."""
+    CHANCE_DENSITY_ARCSEC x the radius's area, summed over the PACS sources) and the ORIGIN 1 pairs' offsets PACS - SESNA
+    keyed by position band index: an (n, 4) array of east, north (arcsec) and the PACS position (ra, dec deg)."""
     src = product_path(config, "sky/derived", "pacs", "sources", "region", region=region)
     with h5py.File(src, "r") as f:
         n = f["RA_DEG"].shape[0]
@@ -208,15 +206,15 @@ def cross_match(path, config, region, ra, dec):
     pairs = {}
     with h5py.File(path, "r+") as f:
         data = {b: {c: f[_NAMES[c].format(b=b)][:] for c in ("FNU", "SIGMA", "ORIGIN", "CELL_OFFSET", "N_BLEND",
-                                                             "PACS_SOURCE", "MATCH_SEPARATION", "EXTENDED")} for b in BANDS}
+                                                             "PACS_SOURCE", "MATCH_SEPARATION", "EXTENDED", "CONFUSED")} for b in BANDS}
         for i in np.flatnonzero(np.isfinite(dist)):
             k = int(near[i])
             sole = len(claim[k]) == 1
             sep = float(_sep_arcsec(su[i], pu[k]))
             if sole:
                 cosd = np.cos(np.radians(dec[i]))
-                pairs.setdefault((int(pb[k]), int(cols[BANDS[pb[k]]]["map"][k])), []).append(
-                    ((pra[k] - ra[i]) * cosd * 3600.0, (pde[k] - dec[i]) * 3600.0))
+                pairs.setdefault(int(pb[k]), []).append(
+                    ((pra[k] - ra[i]) * cosd * 3600.0, (pde[k] - dec[i]) * 3600.0, pra[k], pde[k]))
             for b in BANDS:
                 c, d = cols[b], data[b]
                 if not c["det"][k]:
@@ -227,11 +225,11 @@ def cross_match(path, config, region, ra, dec):
                     d["ORIGIN"][i], d["SIGMA"][i], d["EXTENDED"][i] = ORIGIN_DETECTED, c["sig"][k], c["ext"][k]
                     out[b]["m1"] += 1
                 else:
-                    d["ORIGIN"][i], d["SIGMA"][i] = ORIGIN_UPPER_BOUND, UPPER_LIMIT_SIGMA
+                    d["ORIGIN"][i], d["SIGMA"][i] = ORIGIN_BOUND, c["sig"][k]
                     out[b]["m2"] += 1
         # the per-band confusion flag (owner-approved 2026-10-29): a covered source with no detection of the band
         # associated, but the band's detection (at its own position) within one beam of it, cannot be called
-        # undetected: ORIGIN 2, the nearest such detection's flux the bound
+        # undetected: ORIGIN 3, CONFUSED, the nearest such detection's flux the bound
         from sesnaimpute.sky.derived.pacs_completeness import BEAM_ARCSEC
         for b in BANDS:
             c, d = cols[b], data[b]
@@ -243,8 +241,9 @@ def cross_match(path, config, region, ra, dec):
             bd, bj = cKDTree(bu).query(su, distance_upper_bound=2.0 * np.sin(np.radians(BEAM_ARCSEC[b] / 3600.0) / 2.0))
             for i in np.flatnonzero(np.isfinite(bd) & (d["ORIGIN"] == ORIGIN_UNDETECTED)):
                 k = int(det[bj[i]])
-                d["FNU"][i], d["CELL_OFFSET"][i], d["SIGMA"][i] = c["fnu"][k], c["off"][k], UPPER_LIMIT_SIGMA
-                d["ORIGIN"][i], d["PACS_SOURCE"][i], d["N_BLEND"][i] = ORIGIN_UPPER_BOUND, k, len(claim[k])
+                d["FNU"][i], d["CELL_OFFSET"][i], d["SIGMA"][i] = c["fnu"][k], c["off"][k], c["sig"][k]
+                d["ORIGIN"][i], d["PACS_SOURCE"][i], d["N_BLEND"][i] = ORIGIN_BOUND, k, len(claim[k])
+                d["CONFUSED"][i] = True
                 d["MATCH_SEPARATION"][i] = float(_sep_arcsec(su[i], bu[bj[i]]))
                 out[b]["confused"] += 1
         for b in BANDS:
@@ -252,28 +251,41 @@ def cross_match(path, config, region, ra, dec):
                 f[_NAMES[c].format(b=b)][...] = v
             f["ORIGIN_" + b].attrs["MATCH_RADIUS_ARCSEC"] = MATCH_RADIUS_ARCSEC
         f["ORIGIN_P70"].attrs["EXPECTED_CHANCE_COINCIDENCES"] = chance
-    offsets = {key: (len(v), float(np.median([e for e, _ in v])), float(np.median([nn for _, nn in v])))
-               for key, v in pairs.items()}
+    offsets = {key: np.array(v, float) for key, v in pairs.items()}
     return out, chance, offsets
 
 
-def print_offsets(config, region, offsets):
-    """The per-observation median offsets PACS - SESNA of the associated pairs (the check eHOPS made, Pokhrel et al.
-    2023 Appendix C: a fraction of the 2 arcsec radius, so no registration is needed), per position band: each
-    observation with at least MIN_OFFSET_PAIRS pairs."""
-    comp = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
-    with h5py.File(comp, "r") as f:
-        obsid = {b: f["MAP_OBSID_" + b][:] if "MAP_OBSID_" + b in f else np.zeros(0, "S1") for b in BANDS}
+def print_offsets(config, region, offsets, box=None):
+    """The median offsets PACS - SESNA of the associated pairs, one line per INPUT map of each band's mosaic (the check
+    eHOPS made per observation, Pokhrel et al. 2023 Appendix C: a fraction of the 2 arcsec radius, so no registration
+    is needed): the pairs (`offsets`, from `cross_match`) whose PACS position falls inside the input map's footprint
+    (its WCS and image shape), for each input map with at least MIN_OFFSET_PAIRS of them. Information only."""
+    from astropy.io import fits
+    from astropy.wcs import WCS
+    from sesnaimpute.sky.derived import pacs_mosaic
+    index = {r.path: r for r in read_index(config, region)}
     for bi, b in enumerate(BANDS):
-        rows = sorted((key[1], v) for key, v in offsets.items() if key[0] == bi and v[0] >= MIN_OFFSET_PAIRS)
-        if not rows:
-            print("  %s-positioned: no observation with >= %d associated pairs" % (b, MIN_OFFSET_PAIRS), flush=True)
+        pairs = offsets.get(bi)
+        mdir = pacs_mosaic.product_dir(config, region, b, box)
+        if pairs is None or not os.path.exists(os.path.join(mdir, "mosaic.hdf5")):
+            print("  %s-positioned: no associated pairs" % b, flush=True)
             continue
-        mag = np.array([np.hypot(e, nn) for _, (_, e, nn) in rows])
-        print("  %s-positioned: per-observation median offset PACS - SESNA over %d observations: |offset| median %.2f, "
+        rows = []
+        for q in pacs_mosaic.Mosaic(mdir).meta["maps"]:
+            rec = index[q["path"]]
+            wcs = WCS(fits.Header.fromstring(rec.wcs_header)).celestial
+            x, y = wcs.all_world2pix(pairs[:, 2], pairs[:, 3], 0)
+            inside = (x >= -0.5) & (x < rec.shape[1] - 0.5) & (y >= -0.5) & (y < rec.shape[0] - 0.5)
+            if inside.sum() >= MIN_OFFSET_PAIRS:
+                rows.append((os.path.basename(q["path"]), int(inside.sum()), float(np.median(pairs[inside, 0])),
+                             float(np.median(pairs[inside, 1]))))
+        if not rows:
+            print("  %s-positioned: no input map with >= %d associated pairs" % (b, MIN_OFFSET_PAIRS), flush=True)
+            continue
+        mag = np.array([np.hypot(e, nn) for _, _, e, nn in rows])
+        print("  %s-positioned: median offset PACS - SESNA inside each of %d input maps of the mosaic: |offset| median %.2f, "
               "max %.2f arcsec (radius %.1f)" % (b, len(rows), np.median(mag), mag.max(), MATCH_RADIUS_ARCSEC), flush=True)
-        for (m, (npair, e, nn)), r in zip(rows, mag):
-            name = obsid[b][m].decode() if 0 <= m < obsid[b].size else str(m)
+        for (name, npair, e, nn), r in zip(rows, mag):
             print("    %s: %d pairs, east %+.2f north %+.2f (|%.2f|)" % (name, npair, e, nn, r), flush=True)
 
 
@@ -291,45 +303,36 @@ def _runs(rows):
     return [(int(rows[a]), int(rows[b - 1]) + 1, int(a)) for a, b in zip(starts, stops)]
 
 
-_DTYPES = dict(FNU=np.float64, SIGMA=np.float64, CELL_OFFSET=np.float64, ORIGIN=np.int8, LOCAL_RMS=np.float32,
+_DTYPES = dict(CONFUSED=bool, FNU=np.float64, SIGMA=np.float64, CELL_OFFSET=np.float64, ORIGIN=np.int8, LOCAL_RMS=np.float32,
                N_BLEND=np.int16, PACS_SOURCE=np.int32, MATCH_SEPARATION=np.float32, EXTENDED=bool, SIGMA_ANNULUS=np.float32)
-_FILL = dict(FNU=np.nan, SIGMA=np.nan, CELL_OFFSET=np.nan, ORIGIN=ORIGIN_NOT_COVERED, LOCAL_RMS=np.nan,
+_FILL = dict(CONFUSED=False, FNU=np.nan, SIGMA=np.nan, CELL_OFFSET=np.nan, ORIGIN=ORIGIN_NOT_COVERED, LOCAL_RMS=np.nan,
              N_BLEND=0, PACS_SOURCE=-1, MATCH_SEPARATION=np.nan, EXTENDED=False, SIGMA_ANNULUS=np.nan)
-_NAMES = dict(FNU="FNU_{b}_MJY", SIGMA="SIGMA_{b}_MJY", CELL_OFFSET="CELL_OFFSET_{b}_MJY", ORIGIN="ORIGIN_{b}", LOCAL_RMS="LOCAL_RMS_{b}_MJY",
+_NAMES = dict(CONFUSED="CONFUSED_{b}", FNU="FNU_{b}_MJY", SIGMA="SIGMA_{b}_MJY", CELL_OFFSET="CELL_OFFSET_{b}_MJY", ORIGIN="ORIGIN_{b}", LOCAL_RMS="LOCAL_RMS_{b}_MJY",
               N_BLEND="N_BLEND_{b}", PACS_SOURCE="PACS_SOURCE_{b}", MATCH_SEPARATION="MATCH_SEPARATION_{b}_ARCSEC",
               EXTENDED="EXTENDED_{b}",
               SIGMA_ANNULUS="SIGMA_ANNULUS_{b}_MJY")
 
 
-def _tile_key(record):
-    return ",".join(str(o) for o in record.obsids)
-
-
-def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_obsid, config, n_jobs, stage=None,
+def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_map, config, n_jobs, stage=None,
                  shifts=None, cell_row=None, scatter=None, flux_grid=None):
     """Measures every source on its cell's map and writes the product at
-    `out_path`. `cell_sigma[b]` (n,) float64 is the source's cell noise (NaN:
-    no cell, not covered) and `cell_obsid[b]` (n,) bytes the cell's map, the
-    comma-joined observation ids of the `records` entry that holds it;
+    `out_path`. `records` is the band's mosaics (one per band, `pacs_fit.mosaic_record`); `cell_sigma[b]` (n,) float64
+    is the source's cell noise (NaN: no cell, not covered) and `cell_map[b]` (n,) int the cell's map, its row in the
+    completeness product's MAP_* tables of the band (the band's `records` entries in order);
     `cell_row[b]` (n,) is the source's row in the completeness product (-1: none) and
     `scatter`, `flux_grid` are kept for the caller's interface. Returns the per-band origin counts of the forced
     measurement (the cross-match follows, `cross_match`)."""
     n = names.size
-    key_to_map = {}
-    for i, rec in enumerate(records):
-        key_to_map.setdefault((rec.band, _tile_key(rec)), i)
+    by_band = {band: [i for i, rec in enumerate(records) if rec.band == band] for band in BANDS}
     pieces = []
     for b, band in enumerate(BANDS):
         sel = np.flatnonzero(np.isfinite(cell_sigma[b]))
         if sel.size == 0:
             continue
-        for key in np.unique(cell_obsid[b][sel]):
-            i = key_to_map.get((band, key.decode()))
-            if i is None:
-                raise ValueError("pacs_photometry: completeness cell map %r is not in the %s index" % (key, band))
-            rows = sel[cell_obsid[b][sel] == key]
-            pieces.append((b, i, rows))
-    obsid_len = max([len(_tile_key(r)) for r in records] + [1])
+        for m in np.unique(cell_map[b][sel]):
+            if not 0 <= m < len(by_band[band]):
+                raise ValueError("pacs_photometry: completeness cell map %d is not among the %s mosaics" % (m, band))
+            pieces.append((b, by_band[band][m], sel[cell_map[b][sel] == m]))
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     counts = {}
@@ -342,11 +345,7 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
                 dsets[b, col] = build_module.write_dataset(
                     f, name, None, *REGISTRY[("photometry_pacs_source", name)],
                     shape=(n,), dtype=_DTYPES[col], fillvalue=_FILL[col], chunks=(min(n, 65536),) if n else None)
-            name = "OBSID_" + band
-            dsets[b, "OBSID"] = build_module.write_dataset(
-                f, name, None, *REGISTRY[("photometry_pacs_source", name)],
-                shape=(n,), dtype="S%d" % obsid_len, fillvalue=b"", chunks=(min(n, 65536),) if n else None)
-            counts[band] = {code: 0 for code in (1, 2, 90, 91)}
+            counts[band] = {code: 0 for code in (1, 3, 90, 91)}
             counts[band][ORIGIN_NOT_COVERED] = n
         fn_args = dict(config=config, records=records, ra=ra, dec=dec, cell_sigma=np.vstack(cell_sigma),
                        cell_offset=np.vstack(cell_offset),
@@ -354,21 +353,19 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
         fn = functools.partial(_measure_tile, **fn_args)
         for band_index, map_index, rows, cols in pieces_module.iterate(fn, pieces, n_jobs, stage=stage, unit="map tiles"):
             band = BANDS[band_index]
-            obsid = _tile_key(records[map_index]).encode()
             for start, stop, off in _runs(rows):
                 width = stop - start
                 for col, data in cols.items():
                     dsets[band_index, col][start:stop] = data[off:off + width]
-                dsets[band_index, "OBSID"][start:stop] = obsid
             counts[band][ORIGIN_NOT_COVERED] -= rows.size
-            for code in (1, 2, 90, 91):
+            for code in (1, 3, 90, 91):
                 counts[band][code] += int(np.sum(cols["ORIGIN"] == code))
     return counts
 
 
 def _read_cells(config, region, n_source):
     """The completeness stage's per-source cell noise, cell offset, map and cell row, per band, and the
-    cells' measured photometric errors: `(cell_sigma, cell_offset, cell_obsid, shifts, cell_row,
+    cells' measured photometric errors: `(cell_sigma, cell_offset, cell_map, shifts, cell_row,
     scatter, flux_grid)`, lists over BANDS (`shifts` a dict, `flux_grid` the one grid in
     mJy). A source with `SOURCE_ROW` -1 has no cell (noise NaN, offset 0)."""
     path = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
@@ -376,7 +373,7 @@ def _read_cells(config, region, n_source):
     offset = [np.zeros(n_source) for _ in BANDS]
     row = [np.full(n_source, -1, dtype=np.int64) for _ in BANDS]
     shifts = {}
-    obsid = [np.full(n_source, b"", dtype="S1") for _ in BANDS]
+    cell_map = [np.full(n_source, -1, dtype=np.int64) for _ in BANDS]
     scatter = [np.zeros((0, 1), np.float32) for _ in BANDS]
     flux_grid = None
     if not os.path.exists(path):
@@ -393,38 +390,39 @@ def _read_cells(config, region, n_source):
                 continue
             rows = source_row[:, b]
             have = rows >= 0
-            cell_obs = f["CELL_OBSID_%s" % band][:]
+            cell_map_index = f["CELL_MAP_INDEX_%s" % band][:]
             sigma[b][have] = cell_sigma[rows[have]]
             offset[b][have] = f["CELL_OFFSET_%s_MJY" % band][:][rows[have]]
             row[b] = np.where(have, rows, -1).astype(np.int64)
             scatter[b] = f["SCATTER_%s_MJY" % band][:]
-            for key, sh in zip(f["MAP_OBSID_" + band][:], f["MAP_SHIFT_%s_ARCSEC" % band][:]):
-                shifts[(band, key.decode())] = (float(sh[0]), float(sh[1]))
-            obsid[b] = np.where(have, cell_obs[np.where(have, rows, 0)], b"")
-    return sigma, offset, obsid, shifts, row, scatter, flux_grid
+            for m, sh in enumerate(f["MAP_SHIFT_%s_ARCSEC" % band][:]):
+                shifts[(band, m)] = (float(sh[0]), float(sh[1]))
+            cell_map[b] = np.where(have, cell_map_index[np.where(have, rows, 0)], -1).astype(np.int64)
+    return sigma, offset, cell_map, shifts, row, scatter, flux_grid
 
 
-def _build_one_region(config, region, st):
-    src_path = product_path(config, "catalog", "sesna", "sources", "source", region=region)
-    with h5py.File(src_path, "r") as f:
-        names = f["NAME"][:]
-        ra = f["RA_DEG"][:].astype(np.float64)
-        dec = f["DEC_DEG"][:].astype(np.float64)
+def _build_one_region(config, region, st, box=None):
+    from sesnaimpute.catalog import curated
+    names, ra, dec = curated.read_positions(config, region)
+    names = np.asarray(names).astype("S")
+    ra, dec = ra.astype(np.float64), dec.astype(np.float64)
     out_path = product_path(config, "sky/derived", "pacs", "photometry", "source", region=region)
-    records = read_index(config, region)
+    from sesnaimpute.sky.derived import pacs_mosaic
+    records = [pacs_fit.mosaic_record(config, region, b, box) for b in BANDS
+               if os.path.exists(os.path.join(pacs_mosaic.product_dir(config, region, b, box), "mosaic.hdf5"))]
     if records:
-        cell_sigma, cell_offset, cell_obsid, shifts, cell_row, scatter, flux_grid = _read_cells(
+        cell_sigma, cell_offset, cell_map, shifts, cell_row, scatter, flux_grid = _read_cells(
             config, region, names.size)
     else:
         cell_sigma = [np.full(names.size, np.nan) for _ in BANDS]
         cell_offset = [np.zeros(names.size) for _ in BANDS]
         shifts = {}
-        cell_obsid = [np.full(names.size, b"", dtype="S1") for _ in BANDS]
+        cell_map = [np.full(names.size, -1, dtype=np.int64) for _ in BANDS]
         cell_row = [np.full(names.size, -1, dtype=np.int64) for _ in BANDS]
         scatter = [np.zeros((0, 1), np.float32) for _ in BANDS]
         flux_grid = None
     t0 = time.time()
-    counts = write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_obsid,
+    counts = write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cell_map,
                           config, config.n_jobs, stage=st, shifts=shifts, cell_row=cell_row, scatter=scatter,
                           flux_grid=flux_grid)
     if records:
@@ -432,30 +430,31 @@ def _build_one_region(config, region, st):
         with h5py.File(out_path, "r") as f:
             for b in BANDS:
                 o = f["ORIGIN_" + b][:]
-                counts[b] = {code: int((o == code).sum()) for code in (1, 2, 90, 91)}
-                print("  %s: association (%.1f arcsec): ORIGIN 1 %d, ORIGIN 2 %d (of which %d the band's detection within one "
-                      "beam, none associated), ORIGIN 90 %d, ORIGIN 91 %d" % (b, MATCH_RADIUS_ARCSEC, counts[b][1], counts[b][2],
-                                                                            matched[b]["confused"], counts[b][90], counts[b][91]), flush=True)
+                counts[b] = {code: int((o == code).sum()) for code in (1, 3, 90, 91)}
+                print("  %s: association (%.1f arcsec): ORIGIN 1 %d, ORIGIN 3 %d (blend %d, confusion %d: the band's detection within one "
+                      "beam, none associated), ORIGIN 90 %d, ORIGIN 91 %d" % (b, MATCH_RADIUS_ARCSEC, counts[b][1], counts[b][3],
+                                                                            counts[b][3] - matched[b]["confused"], matched[b]["confused"],
+                                                                            counts[b][90], counts[b][91]), flush=True)
         print("  expected chance coincidences (local SESNA density x pi (%.1f arcsec)^2, summed over the region's PACS "
               "sources): %.1f" % (MATCH_RADIUS_ARCSEC, chance), flush=True)
-        print_offsets(config, region, offsets)
+        print_offsets(config, region, offsets, box)
     wall = time.time() - t0
     numbers = {"sources": int(names.size), "sources_per_s": names.size / max(wall, 1e-9)}
     for band in BANDS:
-        for code, label in ((1, "detected"), (2, "bound"), (90, "undetected"), (91, "uncovered")):
+        for code, label in ((1, "detected"), (3, "bound"), (90, "undetected"), (91, "uncovered")):
             numbers["%s_%s" % (band, label)] = counts[band][code]
     return out_path, numbers
 
 
-def build(config, regions=None):
+def build(config, regions=None, box=None):
     """Writes each region's `photometry_pacs_source` product (all-91 where no
-    PACS map covers the region). Regions run one after another; inside a
-    region the map tiles are the pieces."""
+    PACS map covers the region), on the band mosaics of the region (`box`: a development slice of them). Regions run
+    one after another; inside a region the pieces are the sources of a mosaic."""
     names = regions or [r.name for r in regions_module.REGIONS]
     t0 = time.time()
     for name in names:
         with progress_module.Stage("sky.derived.pacs_photometry", name) as st:
-            path, numbers = _build_one_region(config, name, st)
+            path, numbers = _build_one_region(config, name, st, box)
             st.done(path, **numbers)
     progress_module.summary("sky.derived.pacs_photometry", len(names), t0)
 
@@ -505,8 +504,9 @@ def _match_hops(config, region):
 
 
 def _region_positions(config, region):
-    with h5py.File(product_path(config, "catalog", "sesna", "sources", "source", region=region), "r") as f:
-        return f["RA_DEG"][:].astype(np.float64), f["DEC_DEG"][:].astype(np.float64)
+    from sesnaimpute.catalog import curated
+    _name, ra, dec = curated.read_positions(config, region)
+    return ra.astype(np.float64), dec.astype(np.float64)
 
 
 def _c4_ratio(config, region, path):
@@ -537,12 +537,17 @@ def acceptance(config, region, reference_product=None):
         old, n_old, _ = _c4_ratio(config, region, reference_product)
         print("   the reference product: %.4f (%d targets); difference %+.2f %% (bar: within 2 %%: %s)"
               % (old, n_old, 100 * (ratio / old - 1), "pass" if abs(ratio / old - 1) <= 0.02 else "FAIL"))
+    with h5py.File(path, "r") as f:
+        for b in BANDS:
+            o3 = f["ORIGIN_" + b][:] == ORIGIN_BOUND
+            conf = int(np.sum(o3 & f["CONFUSED_" + b][:]))
+            print("   %s ORIGIN 3: %d (blend %d, confusion %d)" % (b, int(o3.sum()), int(o3.sum()) - conf, conf))
     h, row, f70 = _match_hops(config, region)
     with h5py.File(path, "r") as f:
         o70 = f["ORIGIN_P70"][:][row]
     bright = f70[h] >= C4_MIN_F70_MJY
     print("   HOPS targets >= %g mJy by final 70 micron ORIGIN: %s"
-          % (C4_MIN_F70_MJY, "  ".join("%d: %d" % (c, int((o70[bright] == c).sum())) for c in (1, 2, 90, 91))))
+          % (C4_MIN_F70_MJY, "  ".join("%d: %d" % (c, int((o70[bright] == c).sum())) for c in (1, 3, 90, 91))))
     comp = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
     with h5py.File(path, "r") as f:
         origin = f["ORIGIN_P70"][:][row]
@@ -633,10 +638,9 @@ def hppsc_checks(config, region):
                 print("HPPSC %s %s: the band has no cells" % (region, b))
                 continue
             h = _read_hppsc(config, b)
-            ours = [set(int(o) for o in m.decode().split(",") if o) for m in fc["MAP_OBSID_" + b][:]]
-            n_in = sum(1 for o in ours if o & h["obsids"])
-            print("HPPSC %s %s: coverage: %d of our %d maps are among HPPSC's observations (its Table 8)"
-                  % (region, b, n_in, len(ours)))
+            ours = {int(o) for m in fc["MAP_OBSID_" + b][:] for o in m.decode().split(",") if o}
+            print("HPPSC %s %s: coverage: %d of the %d observations of our mosaic are among HPPSC's observations (its Table 8)"
+                  % (region, b, len(ours & h["obsids"]), len(ours)))
             cra, cde = fc["CELL_RA_" + b][:], fc["CELL_DEC_" + b][:]
             box = ((h["ra"] > cra.min() - 0.1) & (h["ra"] < cra.max() + 0.1) & (h["dec"] > cde.min() - 0.1)
                    & (h["dec"] < cde.max() + 0.1))

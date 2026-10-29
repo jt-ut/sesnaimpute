@@ -5,7 +5,7 @@ artificial point sources (PACS_COMPLETENESS_PLAN.md v2; SPEC_PACS_FARIR_DRAFT.md
 `sky/derived/pacs/completeness_pacs_source__<Region>.hdf5`, in EXACTLY the layout of
 `catalog/sesna/completeness_sesna_source__<Region>.hdf5` for the bands P70, P100 and P160
 (`CURVE_<B>`, `MAG_GRID_<B>`, `SOURCE_ROW`, `ENVELOPE_<B>`, `COMPLETED_FROM_<B>`, `N_POS_<B>`), plus per-cell
-columns aligned with the CURVE rows (`CELL_RA/DEC/ID/MAP_INDEX/OBSID/MAP_<B>`, `CELL_SIGMA_<B>_MJY`,
+columns aligned with the CURVE rows (`CELL_RA/DEC/ID/MAP_INDEX/MAP_<B>`, `CELL_SIGMA_<B>_MJY`,
 `CELL_OFFSET_<B>_MJY`, `N_SIGMA_POS_<B>`, `FLUX90_<B>_MJY`, `BIAS_<B>_MJY`, `SCATTER_<B>_MJY`, `SKY_BIN_<B>`) that
 the photometry stage reads; and the region's PACS source table, `sources_pacs_region__<Region>.hdf5` (RULINGS_5).
 
@@ -13,7 +13,7 @@ Method. Nothing here is derived from a noise model: completeness is the recovere
 point sources injected into the real map and found by the catalogue's own blind detection. No SESNA source enters
 the completeness; SESNA enters only the photometry's cross-match.
 
-1. The detection's inputs. Per 30-arcsec cell on each map tile, 200 positions are drawn uniformly and measured
+1. The detection's inputs. Per 30-arcsec cell of the mosaic, 200 positions are drawn uniformly and measured
    with the catalogue's aperture photometry (`pacs_fit`). CELL_OFFSET is the median flux over the cell's clean
    positions (sky structure the aperture's sky leaves), CELL_SIGMA the median over the cell's 3 x 3 block of
    1.4826 x the median absolute deviation about each cell's offset.
@@ -39,9 +39,12 @@ the completeness; SESNA enters only the photometry's cross-match.
    covered injections farther than BLEND_RADIUS_BEAMS from every PACS source of the real map, detected or not, read
    the same way and multiplied by the cell's CELL_SIGMA.
 
-Every covered cell of every map inside the region's padded source bounding box has a CURVE row (rows ordered
-by map, then cell); where maps overlap, SOURCE_ROW points each source at its cell on the deepest map (lowest
-cell sigma). The flux grid is one per band for the
+Each band's only map is its co-added mosaic of the region (`sky.derived.pacs_mosaic`, one map per band: every input map
+resampled onto one grid, so no position is detected or counted twice); the detection kernel is the mosaic's weight-mean
+point-spread function and the injections use the local mixture of the input maps' functions at each position
+(`pacs_psf.MosaicPSF`). `build(..., box=)` runs a slice of it. Every covered cell of the mosaic inside the region's padded
+source bounding box has a CURVE row (rows ordered by cell); SOURCE_ROW points each source at its cell. The observation
+ids of the mosaic's inputs are in MAP_OBSID_<B> (one row); there is no per-cell observation id. The flux grid is one per band for the
 whole survey: m = -2.5 log10(F / 1 Jy) from MAG_MIN to MAG_MAX in MAG_STEP, bright to faint. A region a band
 does not cover gets the same product with no rows and SOURCE_ROW -1.
 
@@ -509,15 +512,20 @@ def _detection_kernel(tile):
     return h, kf[::-1, ::-1], foot[::-1, ::-1].astype(float), s_full
 
 
+#: the detection image's strips: the stage cuts a map into at least this many strips per worker (see `detection_strips`)
+STRIPS_PER_WORKER = 4
+
 _DETECTION_LAYERS = (("m", np.float32), ("ratio", np.float32), ("norm", np.float32), ("valid", bool), ("pix_valid", bool))
 
 
-def detection_strips(tile):
-    """The strips `prepare_detection` computes (`(first row, last row + 1)`): PREPARE_STRIP_ROWS rows, at least 8 kernel
-    half-widths."""
+def detection_strips(tile, n_jobs=1):
+    """The strips `prepare_detection` computes (`(first row, last row + 1)`): at most PREPARE_STRIP_ROWS rows (a worker's
+    memory is a strip of the map's width, whatever the map's size), cut finer so that the map gives at least
+    STRIPS_PER_WORKER x `n_jobs` strips where it is tall enough, and never fewer than 8 kernel half-widths (the strip's
+    two overlap margins cost at most the strip itself)."""
     h = tile.injection_half_width()
-    rows = max(pacs_fit.PREPARE_STRIP_ROWS, 8 * h)
     ny = tile.shape[0]
+    rows = max(8 * h, min(pacs_fit.PREPARE_STRIP_ROWS, -(-ny // (STRIPS_PER_WORKER * max(int(n_jobs), 1)))))
     return [(s0, min(s0 + rows, ny)) for s0 in range(0, ny, rows)]
 
 
@@ -530,7 +538,7 @@ def open_detection(tile, config):
     np.savez(os.path.join(d, "kernel.npz"), h=h, kc=kc, fc=fc, s_full=s_full)
     for name, dt in _DETECTION_LAYERS:
         open_memmap(os.path.join(d, name + ".npy"), mode="w+", dtype=dt, shape=tile.shape).flush()
-    return detection_strips(tile)
+    return detection_strips(tile, config.n_jobs)
 
 
 def detection_strip(tile, config, s0, s1):
@@ -618,10 +626,17 @@ def matched_state(tile):
     return _MATCHED[key]
 
 
-def _prepare_piece(record, config):
-    """Prepare one map for the run (`pacs_fit.prepare_map`, then the detection layers' creation, `open_detection`).
-    Returns `(map index placeholder: the record, its detection strips)`."""
-    tile = pacs_fit.prepare_map(config, record)
+def _layer_strip(task, config):
+    """Rows of one mosaic's prepared layers (`pacs_fit.mosaic_layer_strip`)."""
+    record, a, b, floor, error_floor = task
+    pacs_fit.mosaic_layer_strip(config, record, a, b, floor, error_floor)
+    return record.map_id
+
+
+def _finish_piece(record, config):
+    """Finish one mosaic's preparation (`pacs_fit.finish_prepare`) and create its detection layers (`open_detection`).
+    Returns `(record, its detection strips)`."""
+    tile = pacs_fit.finish_prepare(config, record)
     strips = open_detection(tile, config)
     pacs_fit._CACHE.clear()
     return record, strips
@@ -635,10 +650,15 @@ def _strip_piece(task, config):
 
 
 def _prepare_stage(config, records, n_jobs, stage):
-    """Every map prepared for the run: its layers (one task per map, the largest first), then every map's detection
-    strips (one task per strip, over all the maps, so a single large map keeps every worker busy)."""
-    prepared = pieces_module.run(functools.partial(_prepare_piece, config=config), records, n_jobs, stage=stage,
-                                 unit="maps (prepared)")
+    """The band mosaics prepared for the run, every step in strips over all workers: the mosaic's layers in mJy (the
+    floors from a sample of rows, `pacs_fit.mosaic_layer_plan`; strips of PREPARE_STRIP_ROWS rows in parallel), the
+    point-spread cache and detection layers (one task per mosaic), then the detection strips (STRIPS_PER_WORKER x
+    n_jobs of them where the mosaic is tall enough, `detection_strips`)."""
+    plans = [(r, pacs_fit.mosaic_layer_plan(config, r)) for r in records]
+    tasks = [(r, a, b, fl, ef) for r, (fl, ef, strips) in plans for a, b in strips]
+    pieces_module.run(functools.partial(_layer_strip, config=config), tasks, n_jobs, stage=stage, unit="strips (mosaic layers)")
+    prepared = pieces_module.run(functools.partial(_finish_piece, config=config), records, n_jobs, stage=stage,
+                                 unit="mosaics (prepared)")
     strips = [(r, s0, s1) for r, ss in prepared for s0, s1 in ss]
     pieces_module.run(functools.partial(_strip_piece, config=config), strips, n_jobs, stage=stage,
                       unit="strips (detection image)")
@@ -1045,7 +1065,8 @@ REAL_CHECK_POSITIONS = 200
 def self_check(config, record):
     """The template's normalisation, on a ZERO image: ZERO_CHECK_FLUX_MJY injected at ZERO_CHECK_POSITIONS empty-sky
     positions of `record`'s map, the aperture SUM with no sky subtraction divided by the injected flux times the
-    map's encircled-energy fraction at the aperture radius (total-flux normalisation): every position must be
+    map's encircled-energy fraction at the aperture radius (total-flux normalisation; for a mosaic the local mixture
+    of its input maps', `MosaicPSF.enclosed_at`): every position must be
     within 0.5 %, else the template is not normalised to total flux. Prints the worst ratios and, for
     information, the share of the aperture flux the sky term of the catalogue's own measurement removes on a
     zero image (the clipped mode of the monotonic wing, not the mean the aperture fraction assumes). Raises
@@ -1071,13 +1092,18 @@ def self_check(config, record):
     x, y = np.array(xs), np.array(ys)
     with tile.blank_image(), tile.injected(x, y, ZERO_CHECK_FLUX_MJY):
         f, sky, _sd, area, cov = pacs_fit._aperture_core(tile.image, tile.error, x, y, r_ap, r_in, r_out, 5)
-    eef = pacs_psf.physical_aperture_fraction(config, record, "total", False)
+    if isinstance(tile._psf, pacs_psf.MosaicPSF):
+        # a mosaic has no single release table: the fraction at each position is the local mixture of its input maps'
+        eef = tile._psf.enclosed_at(x, y)
+    else:
+        eef = pacs_psf.physical_aperture_fraction(config, record, "total", False)
     expected = ZERO_CHECK_FLUX_MJY * eef
+    expected = (expected if np.ndim(expected) == 0 else expected[cov])
     ratio = (f + sky * area)[cov] / expected
     sky_share = (sky * area)[cov] / expected
-    print("  self-check (zero image) %s %s: %d positions, aperture sum / (injected x EEF_total(r_ap) = %.4f): min %.4f "
+    print("  self-check (zero image) %s %s: %d positions, aperture sum / (injected x EEF_total(r_ap) = %.4f on average): min %.4f "
           "max %.4f; the catalogue's sky term on a zero image removes %.2f %% of it (information only)"
-          % (record.band, record.map_id, ratio.size, eef, ratio.min() if ratio.size else np.nan,
+          % (record.band, record.map_id, ratio.size, float(np.mean(eef)), ratio.min() if ratio.size else np.nan,
              ratio.max() if ratio.size else np.nan, 100 * sky_share.mean() if ratio.size else np.nan), flush=True)
     if ratio.size == 0 or np.abs(ratio - 1).max() > ZERO_CHECK_TOLERANCE:
         raise ValueError("%s: the injected template is not normalised to total flux within 0.5 %%" % record.band)
@@ -1453,12 +1479,11 @@ def _print_tile_stats(s, flux_grid):
               % " ".join("%.3g:%.2f" % (snr[p], bp[p, 1] / max(bp[p, 0], 1)) for p in every), flush=True)
 
 
-def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs=None, detect_only=False):
+def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, detect_only=False):
     """Measure every covered cell of every map of one band inside the region's padded source bounding box;
     choose each source's deepest map; inject artificial sources on every map. Returns the band's datasets
-    (and the held-out half, the printed statistics), or None when no map reaches a source. `blue_refs`: the blue
-    maps' registrations by observation ids; a 160 micron map takes its observation's blue map's shift and pair
-    scatter (the two bands share the pointing; planner ruling, owner-approved 2026-10-28)."""
+    (and the held-out half, the printed statistics), or None when no map reaches a source. `records`: the band's
+    one mosaic (`_build_region`)."""
     n_src = ra.size
     n_plane = flux_grid.size
 
@@ -1479,16 +1504,10 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs=
     refs = pieces_module.run(functools.partial(_tile_reference, config=config, records=records),
                              used, n_jobs, stage=stage, unit="tiles")
     refs = dict(zip([u[0] for u in used], refs))
-    for t in refs:
-        key = tuple(records[t].obsids)
-        if records[t].band == "P160" and blue_refs and key in blue_refs:
-            refs[t]["shift"] = blue_refs[key]["shift"]
-            refs[t]["shared"] = True
     for t in sorted(refs):
         e, n, k = refs[t]["shift"]
         print("  %s: registration east %+.2f north %+.2f arcsec from %d pairs%s%s"
-              % (records[t].map_id, e, n, k, "  ABOVE 1.5 ARCSEC" if np.hypot(e, n) > 1.5 else "",
-                 " (the observation's blue map's)" if refs[t].get("shared") else ""), flush=True)
+              % (records[t].map_id, e, n, k, "  ABOVE 1.5 ARCSEC" if np.hypot(e, n) > 1.5 else "", ""), flush=True)
     # second pass, registered: the cells, the pieces
     pieces, geometry = [], []
     for t, record in enumerate(records):
@@ -1570,7 +1589,7 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs=
               % (peaks["fnu"].size, [int((peaks["bin"] == j).sum()) for j in range(SKY_BINS)]), flush=True)
         return dict(peaks=peaks, records=records, cell_map_index=cell_map, cell_id=cell_id, cell_offset=cell_offset,
                     map_shift=shifts[:, :2].astype(np.float32), scatter=np.full((n_row, n_plane), np.nan, np.float32),
-                    refs_by_obs={tuple(records[t].obsids): refs[t] for t in refs}, held=None,
+                    held=None,
                     curve=np.zeros((n_row, 0), np.uint16))
 
     # the matching radius: the injected-vs-detected position scatter (bright injections) and the real sources'
@@ -1645,13 +1664,12 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs=
                 held=held, stats=stats,
                 cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=cell_sigma, cell_offset=cell_offset,
                 cell_id=cell_id, cell_map_index=cell_map,
-                cell_obsid=np.array([",".join(records[t].obsids) for t in cell_map] or [""], dtype="S")[:n_row],
                 cell_map=np.array([records[t].map_id for t in cell_map] or [""], dtype="S")[:n_row],
                 n_candidate=sum(g[1].size for g in geometry),
                 map_id=np.array([r.map_id for r in records], dtype="S"),
                 map_obsid=np.array([",".join(r.obsids) for r in records], dtype="S"),
                 map_shift=shifts[:, :2].astype(np.float32), map_pairs=shifts[:, 2].astype(np.int32),
-                refs_by_obs={tuple(records[t].obsids): refs[t] for t in refs}, records=records,
+                records=records,
                 map_wcs=np.array([g[3].to_header_string() for g in geometry], dtype="S"),
                 map_shape=np.array([g[2].shape for g in geometry], dtype=np.int32).reshape(len(records), 2),
                 map_cell_step=np.array([(g[2].step_x, g[2].step_y) for g in geometry], dtype=np.float64).reshape(len(records), 2))
@@ -1684,12 +1702,12 @@ def _empty_band(n_src, n_plane):
                 peaks=dict(map=z(np.int32), x=z(float), y=z(float), fnu=z(float), row=z(np.int64), snr=z(float),
                            bin=z(np.int8), ra=z(float), dec=z(float), sigma=z(float), chance=z(float), r_match=z(float)),
                 r_match=z(np.float32), rms_inj=np.nan, rms_align=np.nan, sky_bin=z(np.int8),
-                cell_m_sigma=z(np.float32), cell_m_offset=z(np.float32), records=[], refs_by_obs={},
+                cell_m_sigma=z(np.float32), cell_m_offset=z(np.float32), records=[],
                 envelope=np.zeros(n_plane, np.uint16), n_pos=z(np.int32), n_sigma=z(np.int16), flux90=z(np.float32),
                 bias=nan(), scatter=nan(),
                 held=None, stats=[], cell_ra=z(float),
                 cell_dec=z(float), cell_sigma=z(np.float32), cell_offset=z(np.float32), cell_id=z(np.int64),
-                cell_map_index=z(np.int32), cell_obsid=z("S1"), cell_map=z("S1"), n_candidate=0, map_id=z("S1"),
+                cell_map_index=z(np.int32), cell_map=z("S1"), n_candidate=0, map_id=z("S1"),
                 map_obsid=z("S1"), map_shift=np.zeros((0, 2), np.float32), map_pairs=z(np.int32), map_wcs=z("S1"),
                 map_shape=np.zeros((0, 2), np.int32), map_cell_step=np.zeros((0, 2)))
 
@@ -1730,7 +1748,6 @@ def write_product(path, region, mag, bands):
             w("CELL_DEC_" + b, d["cell_dec"])
             w("CELL_ID_" + b, d["cell_id"])
             w("CELL_MAP_INDEX_" + b, d["cell_map_index"])
-            w("CELL_OBSID_" + b, d["cell_obsid"])
             w("CELL_MAP_" + b, d["cell_map"])
             w("CELL_SIGMA_%s_MJY" % b, d["cell_sigma"])
             w("CELL_OFFSET_%s_MJY" % b, d["cell_offset"])
@@ -1917,30 +1934,28 @@ def write_sources(path, region, bands, merged):
             w("DEC_%s_DEG" % b, np.asarray(merged["dec_" + b], np.float64))
 
 
-def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None, maps=None, detect_only=False):
-    """Measure and write one region. `ra`/`dec` are the region's source positions in the curated order; `maps`
-    (observation ids) restricts the maps used to the ones holding one of them (development on a few maps).
-    Returns the per-band products (for the caller's checks, with each band's held-out half under "held")."""
+def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None, box=None, detect_only=False):
+    """Measure and write one region. `ra`/`dec` are the region's source positions in the curated order. Each band's
+    only map is its co-added mosaic of the region (`pacs_mosaic.build_mosaic`, built here when absent; `box` (ra, dec,
+    width, height) deg cuts a slice of it, development). Returns the per-band products (for the caller's checks, with
+    each band's held-out half under "held")."""
+    from sesnaimpute.sky.derived import pacs_mosaic
     mag, flux_grid = canonical_grid()
-    # every map of the region prepared once, before any piece reads it (pieces are maps; each map's preparation
-    # works strip by strip)
-    to_prepare = [r for r in pacs_fit.read_index(config, region) if r.band in BANDS
-                  and (maps is None or any(str(o) in maps for o in r.obsids))]
-    to_prepare.sort(key=lambda r: -int(np.prod(r.shape)))
-    _prepare_stage(config, to_prepare, n_jobs, stage)
-    out = {}
-    blue_refs = {}
+    records = {}
     for b in BANDS:
-        records = [r for r in pacs_fit.read_index(config, region) if r.band == b
-                   and (maps is None or any(str(o) in maps for o in r.obsids))]
-        scan = [r for r in records if r.mode == 1]
-        if records:
-            self_check(config, (scan or records)[0])
-        out[b] = _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs, detect_only) if records else None
-        if out[b] is None:
+        if not os.path.exists(os.path.join(pacs_mosaic.product_dir(config, region, b, box), "mosaic.hdf5")):
+            if not [r for r in pacs_fit.read_index(config, region) if r.band == b]:
+                continue
+            pacs_mosaic.build_mosaic(config, region, b, box=box, n_jobs=n_jobs)
+        records[b] = [pacs_fit.mosaic_record(config, region, b, box)]
+    _prepare_stage(config, [r[0] for r in records.values()], n_jobs, stage)
+    out = {}
+    for b in BANDS:
+        if b in records:
+            self_check(config, records[b][0])
+            out[b] = _band_product(config, records[b], ra, dec, n_jobs, stage, flux_grid, detect_only)
+        if out.get(b) is None:
             out[b] = _empty_band(ra.size, mag.size)
-        elif b in ("P70", "P100"):
-            blue_refs.update(out[b]["refs_by_obs"])
     if not detect_only:
         write_product(out_path, region, mag, out)
     merged = merge_sources(config, out, n_jobs, stage, flux_grid)
@@ -1949,13 +1964,14 @@ def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None, maps=No
 
 
 def _region_inputs(config, region):
-    """The region's source positions (NAME order of the curated source table; the redesign's
-    catalog.curated.read_positions gives the same rows from the delivery)."""
-    with h5py.File(product_path(config, "catalog", "sesna", "sources", "source", region=region), "r") as f:
-        return f["RA_DEG"][:].astype(np.float64), f["DEC_DEG"][:].astype(np.float64)
+    """The region's source positions in the curated order, from `catalog.curated.read_positions` (the delivery: the
+    curated product is built after the PACS stages)."""
+    from sesnaimpute.catalog import curated
+    _name, ra, dec = curated.read_positions(config, region)
+    return ra.astype(np.float64), dec.astype(np.float64)
 
 
-def build(config, regions=None, maps=None, detect_only=False):
+def build(config, regions=None, box=None, detect_only=False):
     """Writes each region's `completeness_pacs_source` product, regions one after another. Returns
     `{region: {band: held-out injections}}` for `acceptance` (the command line discards it)."""
     names = regions or [r.name for r in regions_module.REGIONS]
@@ -1965,7 +1981,7 @@ def build(config, regions=None, maps=None, detect_only=False):
         with progress_module.Stage("sky.derived.pacs_completeness", region) as st:
             ra, dec = _region_inputs(config, region)
             path = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
-            bands = _build_region(config, region, path, ra, dec, config.n_jobs, st, maps, detect_only)
+            bands = _build_region(config, region, path, ra, dec, config.n_jobs, st, box, detect_only)
             held[region] = {b: bands[b]["held"] for b in BANDS}
             st.done(path, **{"cells_" + b: int(bands[b]["curve"].shape[0]) for b in BANDS})
     progress_module.summary("sky.derived.pacs_completeness", len(names), t0)

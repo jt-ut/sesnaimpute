@@ -1155,12 +1155,83 @@ def _load_layers(omap, out_image, out_error):
         out_error[a:b] = error
 
 
+def _is_mosaic(record):
+    return bool(getattr(record, "mosaic_dir", ""))
+
+
+#: a mosaic's usable-pixel floors are taken from about this many sampled pixels (whole rows at a regular stride), so
+#: that they do not cost a pass over a mosaic of any size
+MOSAIC_FLOOR_SAMPLE = 8_000_000
+
+
+def mosaic_layer_plan(config, record):
+    """The first step of a mosaic's `prepare_map`: creates the prepared `image.npy` and `error.npy` (memory-mapped, to be
+    filled by `mosaic_layer_strip`) and returns `(coverage floor, error floor, strips)`, the floors as `_load_layers`
+    defines them (a fraction of the median positive coverage, of the median usable error) but taken from whole
+    rows at a regular stride (MOSAIC_FLOOR_SAMPLE pixels), and the strips `(first row, last row + 1)` of
+    PREPARE_STRIP_ROWS rows. The mosaic is NOT copied serially: the strips are independent, any number run at once."""
+    from numpy.lib.format import open_memmap
+    d = prepared_dir(config, record)
+    os.makedirs(d, exist_ok=True)
+    shape = tuple(record.shape)
+    for name in ("image", "error"):
+        open_memmap(os.path.join(d, name + ".npy"), mode="w+", dtype=np.float32, shape=shape).flush()
+    ny, nx = shape
+    stride = max(1, int(ny * nx // MOSAIC_FLOOR_SAMPLE))
+    with open_map(config, record) as omap:
+        rows = np.arange(0, ny, stride)
+        cov = np.concatenate([np.asarray(omap.coverage[a:a + 1]).ravel() for a in rows])
+        err = np.concatenate([np.asarray(omap.error[a:a + 1], dtype=np.float32).ravel() for a in rows]) * np.float32(1e3)
+    positive = cov[cov > 0]
+    floor = MIN_COVERAGE_FRACTION * (np.median(positive) if positive.size else 0.0)
+    usable = err[(cov > floor) & (err > 0)]
+    error_floor = ERROR_FLOOR_FRACTION * (np.median(usable) if usable.size else 0.0)
+    return float(floor), float(error_floor), [(a, min(a + PREPARE_STRIP_ROWS, ny)) for a in range(0, ny, PREPARE_STRIP_ROWS)]
+
+
+def mosaic_layer_strip(config, record, a, b, floor, error_floor):
+    """Rows a..b of a mosaic's prepared layers (`mosaic_layer_plan`), the rule of `_load_layers` (mJy, error NaN where
+    unusable)."""
+    from numpy.lib.format import open_memmap
+    d = prepared_dir(config, record)
+    f32 = np.float32(1e3)
+    with open_map(config, record) as omap:
+        image = np.asarray(omap.image[a:b], dtype=np.float32) * f32
+        error = np.asarray(omap.error[a:b], dtype=np.float32) * f32
+        good = (np.asarray(omap.coverage[a:b]) > floor) & (error > 0)
+    error[~good | ~(error > error_floor) | ~np.isfinite(image)] = np.nan
+    for name, v in (("image", image), ("error", error)):
+        m = open_memmap(os.path.join(d, name + ".npy"), mode="r+")
+        m[a:b] = v
+        m.flush()
+        del m
+
+
+def finish_prepare(config, record):
+    """The last step of `prepare_map`: the tile's point-spread cache, normalisation and neighbour list as `tile.pkl`
+    (the layers are already written). Returns the prepared `Tile` (as `open_prepared`)."""
+    d = prepared_dir(config, record)
+    with open_map(config, record) as omap:
+        wcs = omap.wcs
+    tile = Tile(record, wcs, config, np.load(os.path.join(d, "image.npy"), mmap_mode="r"),
+                np.load(os.path.join(d, "error.npy"), mmap_mode="r"))
+    with open(os.path.join(d, "tile.pkl"), "wb") as fh:
+        pickle.dump(dict(psf=tile._psf, psf_scale=tile.psf_scale, neighbours=tile.neighbours), fh)
+    return open_prepared(config, record)
+
+
 def prepare_map(config, record):
     """Prepare `record`'s map once, for every worker of the run: its layers (`_load_layers`) as `image.npy` and
     `error.npy`, and its point-spread cache, normalisation and bright-neighbour list as `tile.pkl`, in
-    `prepared_dir`. Every full-map step works strip by strip, so the memory is the same for any map size. Returns
-    the prepared `Tile` (as `open_prepared`)."""
+    `prepared_dir`. Every full-map step works strip by strip, so the memory is the same for any map size. A mosaic is
+    prepared by `mosaic_layer_plan`, `mosaic_layer_strip` and `finish_prepare` (the completeness stage runs the strips in
+    parallel); here they run in this process. Returns the prepared `Tile` (as `open_prepared`)."""
     from numpy.lib.format import open_memmap
+    if _is_mosaic(record):
+        floor, error_floor, strips = mosaic_layer_plan(config, record)
+        for a, b in strips:
+            mosaic_layer_strip(config, record, a, b, floor, error_floor)
+        return finish_prepare(config, record)
     d = prepared_dir(config, record)
     os.makedirs(d, exist_ok=True)
     shape = tuple(record.shape)
@@ -1168,15 +1239,10 @@ def prepare_map(config, record):
     error = open_memmap(os.path.join(d, "error.npy"), mode="w+", dtype=np.float32, shape=shape)
     with open_map(config, record) as omap:
         _load_layers(omap, image, error)
-        wcs = omap.wcs
     image.flush()
     error.flush()
     del image, error
-    tile = Tile(record, wcs, config, np.load(os.path.join(d, "image.npy"), mmap_mode="r"),
-                np.load(os.path.join(d, "error.npy"), mmap_mode="r"))
-    with open(os.path.join(d, "tile.pkl"), "wb") as fh:
-        pickle.dump(dict(psf=tile._psf, psf_scale=tile.psf_scale, neighbours=tile.neighbours), fh)
-    return open_prepared(config, record)
+    return finish_prepare(config, record)
 
 
 def open_prepared(config, record):
@@ -1255,26 +1321,29 @@ def load_sesna_candidates(config, centre_ra_deg, centre_dec_deg, radius_deg, chu
                        np.cos(np.radians(centre_dec_deg)) * np.sin(np.radians(centre_ra_deg)),
                        np.sin(np.radians(centre_dec_deg))])
     chord = 2 * np.sin(np.radians(radius_deg) / 2)
-    paths = sorted((Path(config.data_root) / "catalog" / "sesna").glob("sources_sesna_source__*.hdf5"))
+    from sesnaimpute import regions as regions_module
+    from sesnaimpute.catalog import curated
     ras, decs, rows, names = [], [], [], []
     n_read = 0
-    for path in paths:
-        with h5py.File(path, "r") as handle:
-            ra, dec = handle["RA_DEG"], handle["DEC_DEG"]
-            n_read += ra.size
-            for start in range(0, ra.size, chunk_rows):
-                r, d = ra[start:start + chunk_rows], dec[start:start + chunk_rows]
-                v = np.c_[np.cos(np.radians(d)) * np.cos(np.radians(r)),
-                          np.cos(np.radians(d)) * np.sin(np.radians(r)), np.sin(np.radians(d))]
-                keep = np.linalg.norm(v - centre, axis=1) <= chord
-                ras.append(r[keep])
-                decs.append(d[keep])
-                rows.append(np.arange(start, start + r.size, dtype=np.int64)[keep])
-                names.append(np.full(int(keep.sum()), path.name, dtype=object))
+    for reg in regions_module.REGIONS:
+        # the curated rows' positions from the delivery (catalog.curated.read_positions), not from the curated product,
+        # which is built after the PACS stages
+        _name, ra, dec = curated.read_positions(config, reg.name)
+        fname = "sources_sesna_source__%s.hdf5" % reg.name.replace(" ", "_")
+        n_read += ra.size
+        for start in range(0, ra.size, chunk_rows):
+            r, d = ra[start:start + chunk_rows], dec[start:start + chunk_rows]
+            v = np.c_[np.cos(np.radians(d)) * np.cos(np.radians(r)),
+                      np.cos(np.radians(d)) * np.sin(np.radians(r)), np.sin(np.radians(d))]
+            keep = np.linalg.norm(v - centre, axis=1) <= chord
+            ras.append(r[keep])
+            decs.append(d[keep])
+            rows.append(np.arange(start, start + r.size, dtype=np.int64)[keep])
+            names.append(np.full(int(keep.sum()), fname, dtype=object))
     cat = lambda parts, empty: np.concatenate(parts) if parts else empty
     out = SourceCandidates(cat(ras, np.empty(0)), cat(decs, np.empty(0)),
                            cat(rows, np.empty(0, dtype=np.int64)), cat(names, np.empty(0, dtype=object)))
-    return out, {"catalogues": len(paths), "rows_read": n_read, "rows_retained": out.ra_deg.size}
+    return out, {"catalogues": len(regions_module.REGIONS), "rows_read": n_read, "rows_retained": out.ra_deg.size}
 
 
 # ----------------------------------------------------------------------------
@@ -1470,7 +1539,9 @@ def mosaic_record(config, region, band, box=None, rebuild_psf=False):
     import h5py
     with h5py.File(os.path.join(mdir, "mosaic.hdf5"), "r") as f:
         header = f["WCS_HEADER"][()].decode()
-    return MosaicRecord(map_id="mosaic_%s_%s" % (region.replace(" ", "_"), band), obsids=(), band=band,
+    paths = {q["path"] for q in m.meta["maps"]}
+    obsids = tuple(sorted({str(o) for r in read_index(config, region) if r.path in paths for o in r.obsids}))
+    return MosaicRecord(map_id="mosaic_%s_%s" % (region.replace(" ", "_"), band), obsids=obsids, band=band,
                         path=os.path.relpath(mdir, config.data_root) + "/mosaic", image_hdu=0, error_hdu=1, coverage_hdu=2,
                         shape=tuple(m.shape), unit="Jy/pixel", wcs_header=header, mode=1, level="L25", mapper="mosaic",
                         scan_speed=20.0, pixel_scale_arcsec=pacs_mosaic.PIXEL_ARCSEC[band], source="mosaic",
