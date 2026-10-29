@@ -6,25 +6,13 @@ For ONE map tile (one PACS map, one band):
   with open_tile(config, record) as tile:
       tile.xy(ra, dec)                   sky -> map pixel, one vectorised WCS call
       tile.neighbours                    blind bright sources (11.3 step 1)
-      tile.fit_positions(x, y)           forced fit, nuisance columns included
-      tile.fit_groups(x, y, group)       simultaneous fit of blend groups
       tile.fitted_fwhm(x, y)             width of a detection (EXTENDED flag)
       tile.grid                          the 30-arcsec cell grid on this map
 
-The fit at a position is a weighted linear least squares of two scan-direction
-PSF columns for the target (flux = the sum of their two amplitudes), two
-columns for every bright neighbour whose PSF reaches the fitting box (a
-nuisance, dropped where it lies within one beam of a target because that
-target's own column then carries it) and one constant background, on a square
-box of half-width FIT_BOX_FWHM x beam FWHM, weighted by the map's error layer.
-The sigma it returns is the PROPAGATED PIXEL NOISE only (the error layer carried
-through the linear operator). The cell sigma that sets detection is measured by
-the completeness stage from the scatter of these same fits at random empty-sky
-positions, never added to this term.
-
-Because the estimator is linear, an injected beam of flux F raises the fitted
-flux by exactly gain x F; `gain` is the response to a 50/50 mix of the two
-scan columns (the fit sums the two amplitudes, so the mix only enters the gain).
+The PSF fit at a position (used only to find the bright neighbours, `neighbours`, and the width of a detection) is
+a weighted linear least squares of the scan-direction PSF columns on a box around it, with the HOPS/eHOPS annulus
+sky subtracted. The catalogue's flux is the eHOPS aperture photometry (`measure`); there is no joint fit of close
+pairs: a source within one beam of a detection is an unseparable blend (`pacs_photometry`).
 
 All fluxes are mJy. Pixel coordinates are zero-origin map pixels (x along the
 fast axis). A tile holds native-byte-order float32 copies of the image and error
@@ -32,6 +20,8 @@ layers (the FITS data are big-endian and numba needs native order); the file
 itself is opened read-only and memory-mapped.
 """
 
+import os
+import pickle
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,12 +38,15 @@ from scipy.spatial import cKDTree
 from scipy.special import erfc  # import before healpy for native-library initialisation order
 import healpy as hp
 
-from sesnaimpute.sky.derived.pacs_psf import (APERTURES, CachedPairedPSF, aperture_fraction, beam_fwhm_arcsec,
-                                              published_components_for_map)
+from sesnaimpute.sky.derived.pacs_psf import (APERTURES, CachedPairedPSF, MosaicPSF, MosaicRecord, aperture_eef, aperture_fraction,
+                                              beam_fwhm_arcsec, published_components_for_map)
 from sesnaimpute.sky.download.herschel_pacs.index import MapRecord, maps_root, read_index  # noqa: F401
 
 #: detection threshold in sigma (owner 2026-10-24); defines recovery in the completeness
 DETECTION_SNR = 5.0
+#: rows per strip of the once-per-map preparation (`prepare_map`): every full-map operation runs strip by strip, so
+#: its memory is a few strips of the map's width, whatever the map's size
+PREPARE_STRIP_ROWS = 256
 #: completeness cell side, arcsec (owner 2026-10-24: SESNA's own)
 CELL_ARCSEC = 30.0
 #: fitting-box half-width in beam FWHM (spec 11.3 step 1)
@@ -105,17 +98,14 @@ def from_map_frame(ra_deg, dec_deg, shift):
     return np.asarray(ra_deg, float) - east / 3600.0 / np.cos(np.radians(dec_deg)), dec_deg
 
 
-def registration(tile, ra_deg, dec_deg):
-    """The map's astrometric offset from SESNA, (east arcsec, north arcsec, n_pairs): the median, over
-    the tile's blind bright peaks (S/N >= 5) paired one-to-one with their nearest SESNA position within
-    one beam (each the other's nearest), of PACS minus SESNA. Fewer than MIN_REGISTRATION_PAIRS pairs:
-    no shift. Planner 2026-10-27: Mon OB1's map 0640_p0927 sat 3.3 arcsec west of SESNA and a
-    fixed-position fit there lost half the flux of its 6-arcsec beam; one shift per map keeps the fit
-    fixed-position and linear."""
+def registration_pairs(tile, ra_deg, dec_deg):
+    """The pairs `registration` uses: the tile's blind bright peaks (S/N >= 5) paired one-to-one with their nearest
+    SESNA position within one beam (each the other's nearest). Returns PACS minus SESNA (n_pairs, 2), east and
+    north arcsec."""
     nb = tile.neighbours
     ra_deg, dec_deg = np.asarray(ra_deg, float), np.asarray(dec_deg, float)
     if nb.x.size == 0 or ra_deg.size == 0:
-        return 0.0, 0.0, 0
+        return np.zeros((0, 2))
     sky = tile.wcs.pixel_to_world(nb.x, nb.y).icrs
     pra, pde = sky.ra.deg, sky.dec.deg
     ra0, de0 = np.median(pra), np.median(pde)
@@ -125,13 +115,21 @@ def registration(tile, ra_deg, dec_deg):
     d1, i1 = cKDTree(sesna).query(peaks, distance_upper_bound=tile.beam_arcsec)
     ok = np.isfinite(d1)
     if not ok.any():
-        return 0.0, 0.0, 0
+        return np.zeros((0, 2))
     _, back = cKDTree(peaks).query(sesna[i1[ok]])
     mutual = np.flatnonzero(ok)[back == np.flatnonzero(ok)]
-    if mutual.size < MIN_REGISTRATION_PAIRS:
-        return 0.0, 0.0, int(mutual.size)
-    delta = peaks[mutual] - sesna[i1[mutual]]
-    return float(np.median(delta[:, 0])), float(np.median(delta[:, 1])), int(mutual.size)
+    return peaks[mutual] - sesna[i1[mutual]]
+
+
+def registration(tile, ra_deg, dec_deg):
+    """The map's astrometric offset from SESNA, (east arcsec, north arcsec, n_pairs): the median of PACS minus
+    SESNA over `registration_pairs`. Fewer than MIN_REGISTRATION_PAIRS pairs: no shift. Planner 2026-10-27:
+    Mon OB1's map 0640_p0927 sat 3.3 arcsec west of SESNA and a fixed-position fit there lost half the flux of
+    its 6-arcsec beam; one shift per map keeps the fit fixed-position and linear."""
+    delta = registration_pairs(tile, ra_deg, dec_deg)
+    if delta.shape[0] < MIN_REGISTRATION_PAIRS:
+        return 0.0, 0.0, int(delta.shape[0])
+    return float(np.median(delta[:, 0])), float(np.median(delta[:, 1])), int(delta.shape[0])
 
 
 # ----------------------------------------------------------------------------
@@ -168,8 +166,9 @@ class ApertureFit:
     """Forced aperture photometry at n positions (the eHOPS apertures, pacs_psf.APERTURES).
     Rows with covered False carry NaN.
 
-    flux        (n,) mJy: aperture sum minus the annulus sky, divided by the aperture fraction
-                (pacs_psf.aperture_fraction), so a point source returns its flux (gain 1)
+    flux        (n,) mJy: aperture sum minus the annulus sky (taken after the source's own point-spread outer
+                light is removed from the annulus), divided by the fraction of the total flux inside the
+                aperture radius (pacs_psf.aperture_eef), so a point source returns its flux (gain 1)
     sky         (n,) mJy per pixel, the clipped annulus sky (IDL mmm)
     annulus_sigma (n,) mJy: the annulus pixel scatter (after clipping) x sqrt(aperture area in pixels),
                 corrected like the flux -- the per-source noise eHOPS-style tools quote; not used for
@@ -179,29 +178,6 @@ class ApertureFit:
     flux: np.ndarray
     sky: np.ndarray
     annulus_sigma: np.ndarray
-    covered: np.ndarray
-
-
-@dataclass(frozen=True)
-class GroupFit:
-    """Simultaneous fits of blend groups, one row per member (input order).
-
-    flux        (n,) mJy per member
-    sigma       (n,) propagated pixel noise on each member's flux in the group fit
-    inflation   (n,) sigma / (propagated sigma of a singleton fit at the same
-                position): the correlation inflation photometry applies to the cell sigma
-    max_abs_rho (n,) largest |correlation| of the member's fitted flux with any other
-                member of its group (1.0 when the group fit is singular)
-    group_flux  (n,) sum of the group's member fluxes (same on every member)
-    group_sigma (n,) propagated pixel noise of that sum (full covariance)
-    covered     (n,) bool
-    """
-    flux: np.ndarray
-    sigma: np.ndarray
-    inflation: np.ndarray
-    max_abs_rho: np.ndarray
-    group_flux: np.ndarray
-    group_sigma: np.ndarray
     covered: np.ndarray
 
 
@@ -534,6 +510,12 @@ class OpenMap:
 def open_map(config, record):
     """Open a map read-only and memory-mapped; the three layers are borrowed views valid
     only inside the context."""
+    if getattr(record, "mosaic_dir", ""):         # a mosaic: its layers are the product's memory-mapped .npy files
+        arrays = [np.load(os.path.join(record.mosaic_dir, n + ".npy"), mmap_mode="r") for n in ("image", "error", "coverage")]
+        if any(a.shape != tuple(record.shape) for a in arrays):
+            raise ValueError("inconsistent mosaic layers: %s" % record.mosaic_dir)
+        yield OpenMap(*arrays, WCS(fits.Header.fromstring(record.wcs_header)).celestial, record)
+        return
     path = Path(maps_root(config)) / record.path
     if path.suffix.lower() in (".gz", ".zip"):
         raise ValueError("compressed maps must be unpacked before memory-mapped access")
@@ -580,6 +562,15 @@ def _aperture_core(img, err, xs, ys, r_ap, r_in, r_out, nsub):
     """Aperture sum (sub-pixel weights, nsub x nsub samples per pixel) minus the mmm annulus sky (pixel
     centres in the annulus), at each (x, y) in pixels. Returns raw flux, sky, annulus scatter, aperture
     area (pixels), covered."""
+    return _aperture_core_wing(img, err, xs, ys, r_ap, r_in, r_out, nsub, np.zeros((1, 1, 1)), np.zeros(xs.size))
+
+
+@numba.njit(cache=True)
+def _aperture_core_wing(img, err, xs, ys, r_ap, r_in, r_out, nsub, model, amp):
+    """`_aperture_core` with the source's own outer light removed from the annulus before the sky is taken: the
+    annulus pixel at (yy, xx) enters as img - amp[i] x model[i, yy - cy + rb, xx - cx + rb] (`model` the unit-flux
+    point-spread response on the (2 rb + 1)^2 box around the pixel (cx, cy) nearest the position, rb =
+    ceil(r_out) + 1; not read where amp[i] is 0)."""
     n = xs.size
     ny, nx = img.shape
     out_f = np.full(n, np.nan)
@@ -625,7 +616,10 @@ def _aperture_core(img, err, xs, ys, r_ap, r_in, r_out, nsub):
                 if r_in <= dc <= r_out:
                     n_ann += 1
                     if valid:
-                        buf[nb] = img[yy, xx]
+                        v = img[yy, xx]
+                        if amp[i] != 0.0:
+                            v -= amp[i] * model[i, yy - cy + rb, xx - cx + rb]
+                        buf[nb] = v
                         nb += 1
         if total_w <= 0 or good_w < 0.9 * total_w or nb < max(10, n_ann // 2):
             continue
@@ -642,15 +636,20 @@ def _aperture_core(img, err, xs, ys, r_ap, r_in, r_out, nsub):
 class Tile:
     """One open map tile with its fitting machinery (build with `open_tile`)."""
 
-    def __init__(self, omap, config):
-        record = omap.record
-        self.wcs = omap.wcs
+    def __init__(self, record, wcs, config, image, error, psf=None, neighbours=None, image_path=None):
+        """`image`, `error`: the map's layers in mJy per pixel with unusable pixels NaN in the error (`_load_layers`);
+        `psf`, `neighbours`: the prepared point-spread cache and bright-neighbour list (`prepare_map`), built here when
+        None; `image_path`: the prepared image file, re-opened by `writable`."""
+        self.wcs = wcs
         self.shape = tuple(record.shape)
-        scale = proj_plane_pixel_scales(omap.wcs)
+        scale = proj_plane_pixel_scales(wcs)
         self.pixel_arcsec = float(np.mean(scale)) * 3600.0
         self.beam_arcsec = beam_fwhm_arcsec(record)
         self.record = record
         self.aperture_fraction = aperture_fraction(config, record)
+        # the fraction of the total flux inside the aperture radius (the measurement removes the source's own
+        # outer light from the annulus, so no annulus share is taken off)
+        self.enclosed_fraction = aperture_eef(config, record)
         # the PSF fit's amplitude is already the total flux, the products' convention (owner 2026-10-27)
         self.flux_scale = 1.0
         self.beam_px = self.beam_arcsec / self.pixel_arcsec
@@ -661,29 +660,99 @@ class Tile:
         self.table_half = int(min(self.half + np.ceil(NEIGHBOUR_REACH_FWHM * self.beam_px),
                                   PSF_TABLE_HALF_ARCSEC // self.pixel_arcsec))
         self.reach = float(self.table_half)            # nuisance inclusion radius, pixels
-        self.grid = MapGrid.from_wcs(omap.wcs, self.shape)
-        # unit conversion to mJy; image and error layers share the unit
-        factor = {"jy/pixel": 1e3}.get(record.unit.strip().lower())
-        if factor is None:
-            raise ValueError("unexpected map unit %r" % record.unit)
-        cover = np.asarray(omap.coverage)
-        positive = cover[cover > 0]
-        floor = MIN_COVERAGE_FRACTION * (np.median(positive[::17]) if positive.size else 0.0)
-        image = np.asarray(omap.image, dtype=np.float32) * np.float32(factor)
-        error = np.asarray(omap.error, dtype=np.float32) * np.float32(factor)
-        usable = (cover > floor) & (error > 0)
-        error_floor = ERROR_FLOOR_FRACTION * (np.median(error[usable][::17]) if usable.any() else 0.0)
-        bad = ~usable | ~(error > error_floor) | ~np.isfinite(image)
-        error[bad] = np.nan
+        self.grid = MapGrid.from_wcs(wcs, self.shape)
         self.image, self.error = image, error
-        components = published_components_for_map(config, record)
-        self._psf = CachedPairedPSF.from_map(
-            omap.wcs, self.shape, components, half_size=self.table_half, integration_order=8,
-            spatial_nodes=PSF_SPATIAL_NODES, subpixel_steps=PSF_SUBPIXEL_STEPS)
+        self._image_path = image_path
+        if psf is None and getattr(record, "mosaic_dir", ""):
+            # the mosaic's mixture PSF (built by `build_mosaic_psf`) is already on the output grid and normalised
+            self._psf = MosaicPSF(record.mosaic_dir)
+            self.psf_scale = 1.0
+            if self._psf.extent != self.table_half + 0.5:
+                raise ValueError("the mosaic PSF table was built for another table half-width")
+        elif psf is None:
+            components = published_components_for_map(config, record)
+            self._psf = CachedPairedPSF.from_map(
+                wcs, self.shape, components, half_size=self.table_half, integration_order=8,
+                spatial_nodes=PSF_SPATIAL_NODES, subpixel_steps=PSF_SUBPIXEL_STEPS)
+            # one normalisation for every use of the table (fit amplitude, artificial source): the release EEF's
+            # total-flux fraction inside the aperture radius, the one the aperture photometry divides by
+            self.psf_scale = 1.0 / self._enclosed_over_eef(config)
+            self._psf = self._psf.scaled(self.psf_scale)
+        else:
+            self._psf = psf
         self._tree = None
-        self.neighbours = self._find_neighbours()
+        self.neighbours = self._find_neighbours() if neighbours is None else neighbours
         if self.neighbours.x.size:
             self._tree = cKDTree(np.c_[self.neighbours.x, self.neighbours.y])
+
+    @contextmanager
+    def writable(self):
+        """Inside the context the tile's image is the prepared file memory-mapped copy-on-write, so that `injected`
+        can add sources to it (the prepared image is otherwise read-only, shared by every worker); the private pages
+        are dropped on exit. For the one-off real-map check; the injections of `Injector.measure_positions` work on
+        a private buffer of rows instead."""
+        real = self.image
+        self.image = np.load(self._image_path, mmap_mode="c")
+        try:
+            yield self
+        finally:
+            self.image = real
+
+    def _enclosed_over_eef(self, config):
+        """The point-spread table's flux inside the aperture radius (no sky subtracted), for a source of unit
+        amplitude on an empty image, over the release EEF's total-flux fraction there (`pacs_psf.aperture_eef`):
+        the mean over a 3 x 3 sub-pixel lattice at the valid position nearest the map centre (on a step-2 lattice;
+        ties by row, then column) whose aperture and annulus lie wholly on valid data. The table is divided by it
+        (P70 scan maps: 0.996). Works on a window around that position only."""
+        r_ap, r_in, r_out = (r / self.pixel_arcsec for r in APERTURES[self.record.band])
+        reach = int(np.ceil(r_out)) + 2
+        h = int(np.ceil(self._psf.extent)) + 1
+        margin = max(reach, h)
+        ny, nx = self.shape
+        y0 = x0 = None
+        cy0, cx0 = ny / 2, nx / 2
+        # lattice points margin, margin + 2, ... in growing squares about the centre: within radius R of the centre
+        # every lattice point lies in the square of half-side R, so the first valid point found by distance inside
+        # it is the nearest valid point of the whole lattice
+        r_max = np.hypot(ny, nx)
+        R = 16.0
+        while y0 is None:
+            ys = np.arange(margin, ny - margin, 2)
+            xs = np.arange(margin, nx - margin, 2)
+            ys = ys[np.abs(ys - cy0) <= R]
+            xs = xs[np.abs(xs - cx0) <= R]
+            if ys.size and xs.size:
+                gy, gx = np.meshgrid(ys, xs, indexing="ij")
+                dist = np.hypot(gy - cy0, gx - cx0).ravel()
+                inside = dist <= R
+                order = np.lexsort((gx.ravel()[inside], gy.ravel()[inside], dist[inside]))
+                for k in order:
+                    yy, xx = int(gy.ravel()[inside][k]), int(gx.ravel()[inside][k])
+                    if np.isfinite(self.error[yy - reach:yy + reach + 1, xx - reach:xx + reach + 1]).all():
+                        y0, x0 = yy, xx
+                        break
+            if R > r_max:
+                break
+            R *= 2.0
+        if y0 is None:
+            raise ValueError("%s: no position with a wholly valid aperture and annulus" % self.record.map_id)
+        sub = np.arange(3) / 3.0
+        x = (x0 + sub[None, :] + 0 * sub[:, None]).ravel()
+        y = (y0 + sub[:, None] + 0 * sub[None, :]).ravel()
+        # a window holding each source's patch and the aperture and annulus around it
+        w = max(self.injection_half_width(), int(np.ceil(r_out)) + 1) + 3
+        ya, yb, xa, xb = max(y0 - w, 0), min(y0 + w + 1, ny), max(x0 - w, 0), min(x0 + w + 1, nx)
+        err = np.asarray(self.error[ya:yb, xa:xb])
+        enclosed = []
+        for i in range(x.size):            # one source at a time: the nine positions overlap
+            img = np.zeros((yb - ya, xb - xa), np.float32)
+            for cx, cy, resp in self._template_patches(x[i:i + 1], y[i:i + 1], 1.0):
+                _paste(img, int(cx[0]) - xa, int(cy[0]) - ya, resp[0])
+            f, sky, _sd, area, cov = _aperture_core(img, err, x[i:i + 1] - xa, y[i:i + 1] - ya, r_ap, r_in, r_out, 5)
+            if not cov.all():
+                raise ValueError("%s: the normalisation position is not covered" % self.record.map_id)
+            enclosed.append(float((f + sky * area)[0]))
+        return float(np.mean(enclosed)) / aperture_eef(config, self.record)
 
     # -- geometry ---------------------------------------------------------
     def xy(self, ra_deg, dec_deg):
@@ -703,20 +772,38 @@ class Tile:
         peak, position refined by a 3x3 parabola, reaches S/N >= NEIGHBOUR_SNR against the
         propagated pixel noise."""
         r = max(1, int(round(self.beam_px)))
-        img = np.where(np.isfinite(self.error), self.image, -np.inf).astype(np.float32)
-        peak = (img == maximum_filter(img, size=2 * r + 1, mode="constant", cval=-np.inf))
-        snr = np.zeros(img.shape, dtype=np.float32)
-        np.divide(img, self.error, out=snr, where=np.isfinite(self.error))
-        peak &= snr >= NEIGHBOUR_PEAK_SNR
-        peak[:1] = peak[-1:] = False
-        peak[:, :1] = peak[:, -1:] = False
-        py, px = np.nonzero(peak)
+        ny, nx = self.shape
+        cols = {k: [] for k in ("py", "px", "v0", "left", "right", "down", "up")}
+        # strip by strip, each with r + 1 rows of margin (the filter's reach and the 3 x 3 below): the same peaks
+        # and values as the whole map at once
+        for s0 in range(0, ny, PREPARE_STRIP_ROWS):
+            s1 = min(s0 + PREPARE_STRIP_ROWS, ny)
+            a0, a1 = max(s0 - r - 1, 0), min(s1 + r + 1, ny)
+            err = np.asarray(self.error[a0:a1])
+            img = np.where(np.isfinite(err), np.asarray(self.image[a0:a1]), -np.inf).astype(np.float32)
+            peak = (img == maximum_filter(img, size=2 * r + 1, mode="constant", cval=-np.inf))
+            snr = np.zeros(img.shape, dtype=np.float32)
+            np.divide(img, err, out=snr, where=np.isfinite(err))
+            peak &= snr >= NEIGHBOUR_PEAK_SNR
+            peak[:s0 - a0] = False
+            peak[s1 - a0:] = False
+            if s0 == 0:
+                peak[:1] = False
+            if s1 == ny:
+                peak[ny - 1 - a0:] = False
+            peak[:, :1] = peak[:, -1:] = False
+            qy, qx = np.nonzero(peak)
+            cols["py"].append(qy + a0)
+            cols["px"].append(qx)
+            cols["v0"].append(img[qy, qx].astype(float))
+            cols["left"].append(np.maximum(img[qy, qx - 1], 0))
+            cols["right"].append(np.maximum(img[qy, qx + 1], 0))
+            cols["down"].append(np.maximum(img[qy - 1, qx], 0))
+            cols["up"].append(np.maximum(img[qy + 1, qx], 0))
+        py, px, v0, left, right, down, up = (np.concatenate(cols[k]) for k in ("py", "px", "v0", "left", "right", "down", "up"))
         if px.size == 0:
             return Neighbours(*(np.empty(0) for _ in range(4)))
         # parabolic sub-pixel refinement from the 3x3 around each peak
-        v0 = img[py, px].astype(float)
-        left, right = np.maximum(img[py, px - 1], 0), np.maximum(img[py, px + 1], 0)
-        down, up = np.maximum(img[py - 1, px], 0), np.maximum(img[py + 1, px], 0)
         with np.errstate(all="ignore"):
             dx = 0.5 * (right - left) / (2 * v0 - left - right)
             dy = 0.5 * (up - down) / (2 * v0 - down - up)
@@ -783,86 +870,97 @@ class Tile:
             out[4][r] = un
         return PositionFit(*out)
 
-    def fit_positions(self, x, y, batch=512):
-        """Forced fit at each (x, y) -> PositionFit. The same code for real sources and for
-        random completeness positions: the PSF fit on the eHOPS annulus-sky convention, with no
-        nuisance columns (HOPS/eHOPS had none; a neighbour in the annulus is removed by the clipped
-        sky, one inside the fitting box adds to the flux -- disclosed)."""
-        return self._fit(x, y, use_nuisance=False, batch=batch)
-
-    def measure(self, x, y):
+    def measure(self, x, y, image=None, row0=0):
         """The measurement of isolated sources and of the completeness positions (final ruling, spec
         section 12): eHOPS aperture photometry -> PositionFit (flux mJy on eHOPS's normalisation, gain 1,
-        sigma = the annulus scatter statistic, covered, no nuisance)."""
-        a = self.aperture(x, y)
+        sigma = the annulus scatter statistic, covered, no nuisance). `image`, `row0`: see `aperture`."""
+        a = self.aperture(x, y, image=image, row0=row0)
         return PositionFit(a.flux, np.where(a.covered, 1.0, np.nan), a.annulus_sigma, a.covered,
                            np.zeros(a.flux.size, dtype=np.int64))
 
-    def aperture(self, x, y):
-        """Forced aperture photometry at each (x, y) -> ApertureFit (the eHOPS convention: the
-        photometry of isolated sources and the completeness positions alike). Linear in the map
-        except through the clipped sky, which a point source barely enters (its wing in the annulus is
-        part of the aperture fraction)."""
+    def aperture(self, x, y, chunk=2048, image=None, row0=0):
+        """Forced aperture photometry at each (x, y) -> ApertureFit (the eHOPS apertures; the photometry of
+        isolated sources and the completeness positions alike). The clipped (mmm) annulus sky rejects the
+        pixels where a bright source's own outer light stands above the noise, so the annulus would remove
+        less of that light than the encircled-energy table's average and bright sources would read up to
+        2.5 % high, by an amount set by the local noise. So the sky is taken from the annulus after the
+        source's own point-spread outer light, scaled to its flux, is subtracted (the flux from the previous
+        pass: first with the table's aperture-and-annulus fraction, then twice with the outer light removed),
+        and the sum is divided by the fraction of the total flux inside the aperture radius alone. `image`: the rows
+        `row0` onward of the map's image, a private buffer to measure on in place of the tile's (the error layer is
+        then the same rows, a view); positions are in map coordinates either way."""
+        if image is None:
+            image, error = self.image, self.error
+        else:
+            error = self.error[row0:row0 + image.shape[0]]
         r_ap, r_in, r_out = (r / self.pixel_arcsec for r in APERTURES[self.record.band])
-        f, sky, sd, area, cov = _aperture_core(self.image, self.error, np.asarray(x, float).ravel(),
-                                               np.asarray(y, float).ravel(), r_ap, r_in, r_out, 5)
-        frac = self.aperture_fraction
-        return ApertureFit(f / frac, sky, sd * np.sqrt(area) / frac, cov)
-
-    def fit_groups(self, x, y, group):
-        """Simultaneous fit of blend groups -> GroupFit. `group` (n,) holds an integer label
-        per row; rows sharing a label are fitted together, every member at its own fixed
-        position with two free scan columns, plus nuisance columns for the tile's bright
-        neighbours that are not within one beam of any member."""
-        x = np.asarray(x, float)
-        y = np.asarray(y, float)
-        group = np.asarray(group)
+        x = np.asarray(x, float).ravel()
+        y = np.asarray(y, float).ravel()
         n = x.size
-        res = {k: np.full(n, np.nan) for k in ("flux", "sigma", "rho", "gflux", "gsigma")}
-        covered = np.zeros(n, dtype=bool)
-        single = self._fit(x, y, use_nuisance=False)
-        _, inverse = np.unique(group, return_inverse=True)
-        order = np.argsort(inverse, kind="stable")
-        starts = np.r_[0, np.flatnonzero(np.diff(inverse[order])) + 1, n]
-        sizes = np.diff(starts)
-        for size in np.unique(sizes):
-            members = np.array([order[starts[g]:starts[g + 1]] for g in np.flatnonzero(sizes == size)])
-            # one box per group, centred on the group centroid, large enough for every member
-            gx = x[members].mean(axis=1)
-            gy = y[members].mean(axis=1)
-            spread = np.ceil(np.max(np.hypot(x[members] - gx[:, None], y[members] - gy[:, None]), axis=1))
-            for lo in range(0, len(members), 64):
-                sel = slice(lo, lo + 64)
-                mem = members[sel]
-                half = self.half + int(spread[sel].max())
-                cxg = np.rint(gx[sel]).astype(np.int64)
-                cyg = np.rint(gy[sel]).astype(np.int64)
-                # no nuisance columns (final ruling, spec 12: nothing of ours in the flux)
-                ux, uy, un = (np.zeros((len(mem), 1)), np.zeros((len(mem), 1)), np.zeros(len(mem), dtype=np.int64))
-                flux, gain, cov, valid = self._call(x[mem], y[mem], np.full(len(mem), size, dtype=np.int64),
-                                                    ux, uy, un, cxg, cyg, half)
-                sd = np.sqrt(np.maximum(np.diagonal(cov, axis1=1, axis2=2), 0))
-                with np.errstate(all="ignore"):
-                    corr = np.abs(cov / (sd[:, :, None] * sd[:, None, :]))
-                    corr[:, np.arange(size), np.arange(size)] = 0.0
-                    rho = np.nanmax(corr, axis=2) if size > 1 else np.zeros_like(sd)
-                rho = np.where(np.isfinite(rho), rho, 1.0)
-                gsum = np.nansum(flux, axis=1)
-                gsig = np.sqrt(np.maximum(np.nansum(cov, axis=(1, 2)), 0))
-                for k in range(size):
-                    i = mem[:, k]
-                    res["flux"][i] = flux[:, k]
-                    res["sigma"][i] = sd[:, k]
-                    res["rho"][i] = np.where(valid, rho[:, k], 1.0)
-                    res["gflux"][i] = np.where(valid, gsum, np.nan)
-                    res["gsigma"][i] = np.where(valid, gsig, np.nan)
-                    covered[i] = valid
-        for key in ("flux", "sigma", "gflux", "gsigma"):
-            res[key] = res[key] * self.flux_scale
-        with np.errstate(all="ignore"):
-            inflation = res["sigma"] / single.sigma
-        return GroupFit(res["flux"], res["sigma"], inflation, res["rho"],
-                        res["gflux"], res["gsigma"], covered)
+        rb = int(np.ceil(r_out)) + 1
+        offs = np.arange(-rb, rb + 1, dtype=float)
+        flux = np.full(n, np.nan)
+        sky = np.full(n, np.nan)
+        sd = np.full(n, np.nan)
+        area = np.full(n, np.nan)
+        cov = np.zeros(n, bool)
+        sd_eef = np.full(n, self.enclosed_fraction)
+        for lo in range(0, n, chunk):
+            sl = slice(lo, lo + chunk)
+            xs, ys = x[sl], y[sl]
+            f, s_, d_, a_, c_ = _aperture_core(image, error, xs, ys - row0, r_ap, r_in, r_out, 5)
+            eef, fraction = self._corrections_at(xs, ys)
+            amp = np.where(c_, f / fraction, 0.0)
+            if not c_.any():
+                cov[sl] = c_
+                continue
+            model = self._outer_light(xs, ys, rb)
+            for _ in range(2):
+                f, s_, d_, a_, c_ = _aperture_core_wing(image, error, xs, ys - row0, r_ap, r_in, r_out, 5,
+                                                        model, np.where(c_ & np.isfinite(amp), amp, 0.0))
+                amp = np.where(c_, f / eef, 0.0)
+            flux[sl], sky[sl], sd[sl], area[sl], cov[sl] = f / eef, s_, d_, a_, c_
+            sd_eef[sl] = eef
+        return ApertureFit(flux, sky, sd * np.sqrt(area) / sd_eef, cov)
+
+    def _corrections_at(self, xs, ys):
+        """(encircled-energy fraction, aperture fraction) that divide the aperture sum at these map positions:
+        the map's two constants, or for a mosaic the local mixture of its sub-groups' (`MosaicPSF`)."""
+        if isinstance(self._psf, MosaicPSF):
+            return self._psf.enclosed_at(xs, ys), self._psf.aperture_fraction_at(xs, ys)
+        return self.enclosed_fraction, self.aperture_fraction
+
+    #: sub-pixel steps per pixel of the cached outer-light patterns
+    OUTER_LIGHT_STEPS = 16
+
+    def _outer_light(self, x, y, rb):
+        """The unit-flux point-spread response on the (2 rb + 1)^2 pixel box around the pixel nearest each (x, y)
+        (the box `_aperture_core_wing` reads), looked up from patterns computed once per map: on a
+        OUTER_LIGHT_STEPS x OUTER_LIGHT_STEPS lattice of sub-pixel positions, in each third x third of the map
+        (the table's own spatial nodes). The lattice step (1/16 pixel) moves the pattern in the annulus by far
+        less than the noise; it enters only the sky estimate."""
+        steps = self.OUTER_LIGHT_STEPS
+        ny, nx = self.shape
+        if getattr(self, "_outer_cache", None) is None or self._outer_cache[0] != rb:
+            offs = np.arange(-rb, rb + 1, dtype=float)
+            u = (np.arange(steps) + 0.5) / steps - 0.5
+            cache = np.empty((9, steps, steps, offs.size, offs.size))
+            for node in range(9):
+                cy0 = float(np.floor((node // 3 + 0.5) / 3 * ny))
+                cx0 = float(np.floor((node % 3 + 0.5) / 3 * nx))
+                sx = np.repeat(cx0 + u[None, :], steps, axis=0).ravel()      # [b, a] -> x offset u[a]
+                sy = np.repeat(cy0 + u[:, None], steps, axis=1).ravel()      # [b, a] -> y offset u[b]
+                px = np.broadcast_to(cx0 + offs[None, None, :], (sx.size, offs.size, offs.size))
+                py = np.broadcast_to(cy0 + offs[None, :, None], (sx.size, offs.size, offs.size))
+                cache[node] = self._psf.evaluate_xy(sx, sy, px, py).mean(axis=1).reshape(steps, steps, offs.size, offs.size)
+            self._outer_cache = (rb, cache)
+        cache = self._outer_cache[1]
+        cx = np.floor(x + 0.5)
+        cy = np.floor(y + 0.5)
+        a = np.clip(np.floor((x - cx + 0.5) * steps).astype(np.int64), 0, steps - 1)
+        b = np.clip(np.floor((y - cy + 0.5) * steps).astype(np.int64), 0, steps - 1)
+        node = 3 * np.clip((3 * y / ny).astype(np.int64), 0, 2) + np.clip((3 * x / nx).astype(np.int64), 0, 2)
+        return cache[node, b, a]
 
     def fitted_fwhm(self, x, y):
         """Best-fit total FWHM (arcsec) of a source at each position (NaN where the fit is not
@@ -918,26 +1016,266 @@ class Tile:
         out[ok] = self.error[cy[ok], cx[ok]]
         return out
 
+    # -- artificial sources (the completeness stage's injection) ------------
+    def injection_half_width(self):
+        """Half-width in pixels of the square patch an artificial source is added on: the fitting box
+        plus one beam (the box of every fit and aperture of a source reaches this far), never beyond the
+        point-spread table's support."""
+        return int(min(self.table_half, self.half + np.ceil(self.beam_px)))
+
+    def _add_sources(self, x, y, flux, chunk=256):
+        """Adds, for each (x, y) in map pixels, `flux` (mJy) times the band's point-spread template to
+        the image in place (the mean of the template's scan columns, whose total over the plane is 1,
+        evaluated by `CachedPairedPSF.evaluate_xy`, the table the fit's own columns come from). Returns
+        the original pixels as `(x0, y0, patch)` triples so `_restore` can put them back."""
+        saved = []
+        for cx, cy, resp in self._template_patches(x, y, flux, chunk):
+            for i in range(cx.size):
+                r = _paste(self.image, int(cx[i]), int(cy[i]), resp[i], keep=True)
+                if r is not None:
+                    saved.append(r)
+        return saved
+
+    def _template_patches(self, x, y, flux, chunk=256):
+        """Per chunk of sources: the patches' lower-left pixels (cx, cy) and the template times `flux` on them,
+        (n, side, side), side = 2 x `injection_half_width` + 1."""
+        x = np.asarray(x, float)
+        y = np.asarray(y, float)
+        flux = np.broadcast_to(np.asarray(flux, float), x.shape)
+        h = self.injection_half_width()
+        side = 2 * h + 1
+        offs = np.arange(side, dtype=float)
+        for lo in range(0, x.size, chunk):
+            sl = slice(lo, lo + chunk)
+            cx = np.rint(x[sl]).astype(np.int64) - h
+            cy = np.rint(y[sl]).astype(np.int64) - h
+            px = np.broadcast_to(cx[:, None, None] + offs[None, None, :], (cx.size, side, side))
+            py = np.broadcast_to(cy[:, None, None] + offs[None, :, None], (cx.size, side, side))
+            yield cx, cy, self._psf.evaluate_xy(x[sl], y[sl], px, py).mean(axis=1) * flux[sl][:, None, None]
+
+    def _restore(self, saved):
+        for a0, b0, patch in reversed(saved):          # last added, first undone: patches may overlap
+            self.image[b0:b0 + patch.shape[0], a0:a0 + patch.shape[1]] = patch
+
+    @contextmanager
+    def injected(self, x, y, flux):
+        """Inside the context the tile's image holds artificial point sources of total flux `flux` (mJy,
+        scalar or per source) at the map pixels (x, y), each the band's point-spread template; on exit the
+        real image is back, pixel for pixel. Every measurement made inside (`measure`, ...)
+        sees the sources, because they all read the tile's image."""
+        saved = self._add_sources(x, y, flux)
+        try:
+            yield self
+        finally:
+            self._restore(saved)
+
+    @contextmanager
+    def blank_image(self):
+        """Inside the context the tile's image is zero everywhere (the error layer is untouched), for
+        measuring what the machinery returns for a source on empty sky; restored on exit."""
+        real = self.image
+        self.image = np.zeros_like(real)
+        try:
+            yield self
+        finally:
+            self.image = real
+
+    @contextmanager
+    def inverted(self):
+        """Inside the context the tile's image is negated (the error layer untouched): a measurement made on
+        it is the measurement's response to the map's noise with every real positive source turned into a
+        negative one; restored on exit."""
+        real = self.image
+        self.image = -real
+        try:
+            yield self
+        finally:
+            self.image = real
+
+
+def _paste(image, cx, cy, patch, keep=False):
+    """Add `patch` (side x side) into `image` with its lower-left pixel at (cx, cy), clipped to the image; with
+    `keep`, returns the original pixels as `(x0, y0, pixels)` for `Tile._restore` (None if nothing overlaps)."""
+    ny, nx = image.shape
+    side_y, side_x = patch.shape
+    a0, b0 = max(cx, 0), max(cy, 0)
+    a1, b1 = min(cx + side_x, nx), min(cy + side_y, ny)
+    if a1 <= a0 or b1 <= b0:
+        return None
+    saved = (a0, b0, np.array(image[b0:b1, a0:a1])) if keep else None
+    image[b0:b1, a0:a1] += patch[b0 - cy:b1 - cy, a0 - cx:a1 - cx].astype(np.float32)
+    return saved
+
+
+def prepared_dir(config, record):
+    """Where `prepare_map` writes the map's prepared layers and state: one directory per map FILE under the run's
+    PACS products, named from its path in the download area (`record.path`, unique; the map id is not: one map id
+    can name several files, e.g. a level-3 mosaic re-released with more observations)."""
+    return os.path.join(config.data_root, "sky", "derived", "pacs", "prepared",
+                        os.path.splitext(record.path)[0].replace("/", "__"))
+
+
+def _load_layers(omap, out_image, out_error):
+    """The map's image and error in mJy per pixel into `out_image`, `out_error` (float32, map shape; memory-mapped
+    files in `prepare_map`), the error NaN where a pixel is unusable: coverage at most MIN_COVERAGE_FRACTION of the
+    median positive coverage, error not above ERROR_FLOOR_FRACTION of the median usable error, or the image not
+    finite. The medians are over every 17th value in row order, as one pass over the map would take them; all of
+    it strip by strip (PREPARE_STRIP_ROWS)."""
+    record = omap.record
+    factor = {"jy/pixel": 1e3}.get(record.unit.strip().lower())
+    if factor is None:
+        raise ValueError("unexpected map unit %r" % record.unit)
+    f32 = np.float32(factor)
+    ny = record.shape[0]
+    strips = [(a, min(a + PREPARE_STRIP_ROWS, ny)) for a in range(0, ny, PREPARE_STRIP_ROWS)]
+
+    def every_17th(select):
+        picked, count = [], 0
+        for a, b in strips:
+            v = select(a, b)
+            k = (count + np.arange(v.size)) % 17 == 0
+            picked.append(v[k])
+            count += v.size
+        return np.concatenate(picked) if picked else np.zeros(0)
+    positive = every_17th(lambda a, b: (lambda c: c[c > 0])(np.asarray(omap.coverage[a:b])))
+    floor = MIN_COVERAGE_FRACTION * (np.median(positive) if positive.size else 0.0)
+
+    def usable_error(a, b):
+        err = np.asarray(omap.error[a:b], dtype=np.float32) * f32
+        return err[(np.asarray(omap.coverage[a:b]) > floor) & (err > 0)]
+    usable = every_17th(usable_error)
+    error_floor = ERROR_FLOOR_FRACTION * (np.median(usable) if usable.size else 0.0)
+    for a, b in strips:
+        image = np.asarray(omap.image[a:b], dtype=np.float32) * f32
+        error = np.asarray(omap.error[a:b], dtype=np.float32) * f32
+        good = (np.asarray(omap.coverage[a:b]) > floor) & (error > 0)
+        bad = ~good | ~(error > error_floor) | ~np.isfinite(image)
+        error[bad] = np.nan
+        out_image[a:b] = image
+        out_error[a:b] = error
+
+
+def _is_mosaic(record):
+    return bool(getattr(record, "mosaic_dir", ""))
+
+
+#: a mosaic's usable-pixel floors are taken from about this many sampled pixels (whole rows at a regular stride), so
+#: that they do not cost a pass over a mosaic of any size
+MOSAIC_FLOOR_SAMPLE = 8_000_000
+
+
+def mosaic_layer_plan(config, record):
+    """The first step of a mosaic's `prepare_map`: creates the prepared `image.npy` and `error.npy` (memory-mapped, to be
+    filled by `mosaic_layer_strip`) and returns `(coverage floor, error floor, strips)`, the floors as `_load_layers`
+    defines them (a fraction of the median positive coverage, of the median usable error) but taken from whole
+    rows at a regular stride (MOSAIC_FLOOR_SAMPLE pixels), and the strips `(first row, last row + 1)` of
+    PREPARE_STRIP_ROWS rows. The mosaic is NOT copied serially: the strips are independent, any number run at once."""
+    from numpy.lib.format import open_memmap
+    d = prepared_dir(config, record)
+    os.makedirs(d, exist_ok=True)
+    shape = tuple(record.shape)
+    for name in ("image", "error"):
+        open_memmap(os.path.join(d, name + ".npy"), mode="w+", dtype=np.float32, shape=shape).flush()
+    ny, nx = shape
+    stride = max(1, int(ny * nx // MOSAIC_FLOOR_SAMPLE))
+    with open_map(config, record) as omap:
+        rows = np.arange(0, ny, stride)
+        cov = np.concatenate([np.asarray(omap.coverage[a:a + 1]).ravel() for a in rows])
+        err = np.concatenate([np.asarray(omap.error[a:a + 1], dtype=np.float32).ravel() for a in rows]) * np.float32(1e3)
+    positive = cov[cov > 0]
+    floor = MIN_COVERAGE_FRACTION * (np.median(positive) if positive.size else 0.0)
+    usable = err[(cov > floor) & (err > 0)]
+    error_floor = ERROR_FLOOR_FRACTION * (np.median(usable) if usable.size else 0.0)
+    return float(floor), float(error_floor), [(a, min(a + PREPARE_STRIP_ROWS, ny)) for a in range(0, ny, PREPARE_STRIP_ROWS)]
+
+
+def mosaic_layer_strip(config, record, a, b, floor, error_floor):
+    """Rows a..b of a mosaic's prepared layers (`mosaic_layer_plan`), the rule of `_load_layers` (mJy, error NaN where
+    unusable)."""
+    from numpy.lib.format import open_memmap
+    d = prepared_dir(config, record)
+    f32 = np.float32(1e3)
+    with open_map(config, record) as omap:
+        image = np.asarray(omap.image[a:b], dtype=np.float32) * f32
+        error = np.asarray(omap.error[a:b], dtype=np.float32) * f32
+        good = (np.asarray(omap.coverage[a:b]) > floor) & (error > 0)
+    error[~good | ~(error > error_floor) | ~np.isfinite(image)] = np.nan
+    for name, v in (("image", image), ("error", error)):
+        m = open_memmap(os.path.join(d, name + ".npy"), mode="r+")
+        m[a:b] = v
+        m.flush()
+        del m
+
+
+def finish_prepare(config, record):
+    """The last step of `prepare_map`: the tile's point-spread cache, normalisation and neighbour list as `tile.pkl`
+    (the layers are already written). Returns the prepared `Tile` (as `open_prepared`)."""
+    d = prepared_dir(config, record)
+    with open_map(config, record) as omap:
+        wcs = omap.wcs
+    tile = Tile(record, wcs, config, np.load(os.path.join(d, "image.npy"), mmap_mode="r"),
+                np.load(os.path.join(d, "error.npy"), mmap_mode="r"))
+    with open(os.path.join(d, "tile.pkl"), "wb") as fh:
+        pickle.dump(dict(psf=tile._psf, psf_scale=tile.psf_scale, neighbours=tile.neighbours), fh)
+    return open_prepared(config, record)
+
+
+def prepare_map(config, record):
+    """Prepare `record`'s map once, for every worker of the run: its layers (`_load_layers`) as `image.npy` and
+    `error.npy`, and its point-spread cache, normalisation and bright-neighbour list as `tile.pkl`, in
+    `prepared_dir`. Every full-map step works strip by strip, so the memory is the same for any map size. A mosaic is
+    prepared by `mosaic_layer_plan`, `mosaic_layer_strip` and `finish_prepare` (the completeness stage runs the strips in
+    parallel); here they run in this process. Returns the prepared `Tile` (as `open_prepared`)."""
+    from numpy.lib.format import open_memmap
+    if _is_mosaic(record):
+        floor, error_floor, strips = mosaic_layer_plan(config, record)
+        for a, b in strips:
+            mosaic_layer_strip(config, record, a, b, floor, error_floor)
+        return finish_prepare(config, record)
+    d = prepared_dir(config, record)
+    os.makedirs(d, exist_ok=True)
+    shape = tuple(record.shape)
+    image = open_memmap(os.path.join(d, "image.npy"), mode="w+", dtype=np.float32, shape=shape)
+    error = open_memmap(os.path.join(d, "error.npy"), mode="w+", dtype=np.float32, shape=shape)
+    with open_map(config, record) as omap:
+        _load_layers(omap, image, error)
+    image.flush()
+    error.flush()
+    del image, error
+    return finish_prepare(config, record)
+
+
+def open_prepared(config, record):
+    """The `Tile` of `record` from its prepared files (`prepare_map`): the layers memory-mapped (shared by every
+    worker; the image read-only: injections work on private buffers of rows, `Tile.writable` is the one copy-on-write exception), the point-spread
+    cache and neighbour list unpickled. Raises FileNotFoundError when the map was not prepared."""
+    d = prepared_dir(config, record)
+    with open(os.path.join(d, "tile.pkl"), "rb") as fh:
+        state = pickle.load(fh)
+    path = os.path.join(d, "image.npy")
+    wcs = WCS(fits.Header.fromstring(record.wcs_header)).celestial
+    tile = Tile(record, wcs, config, np.load(path, mmap_mode="r"), np.load(os.path.join(d, "error.npy"), mmap_mode="r"),
+                psf=state["psf"], neighbours=state["neighbours"], image_path=path)
+    tile.psf_scale = state["psf_scale"]
+    return tile
+
 
 @contextmanager
 def open_tile(config, record):
-    """Open `record` read-only (memory-mapped), build the PSF response table, find the bright
-    neighbours, and yield a `Tile`."""
-    with open_map(config, record) as omap:
-        yield Tile(omap, config)
+    """The prepared `Tile` of `record` (`open_prepared`)."""
+    yield open_prepared(config, record)
 
 
 _CACHE = {}
 
 
 def cached_tile(config, record):
-    """The process-local Tile for `record`: built on the first call in a worker and kept (one tile
-    at a time) so the pieces of a tile share its PSF table and neighbour list."""
+    """The process-local prepared Tile for `record` (`open_prepared`), kept (one tile at a time) so the pieces of
+    a tile share it."""
     key = record.path
     if key not in _CACHE:
         _CACHE.clear()
-        with open_tile(config, record) as tile:
-            _CACHE[key] = tile        # arrays are native copies: valid after the file closes
+        _CACHE[key] = open_prepared(config, record)
     return _CACHE[key]
 
 
@@ -983,23 +1321,228 @@ def load_sesna_candidates(config, centre_ra_deg, centre_dec_deg, radius_deg, chu
                        np.cos(np.radians(centre_dec_deg)) * np.sin(np.radians(centre_ra_deg)),
                        np.sin(np.radians(centre_dec_deg))])
     chord = 2 * np.sin(np.radians(radius_deg) / 2)
-    paths = sorted((Path(config.data_root) / "catalog" / "sesna").glob("sources_sesna_source__*.hdf5"))
+    from sesnaimpute import regions as regions_module
+    from sesnaimpute.catalog import curated
     ras, decs, rows, names = [], [], [], []
     n_read = 0
-    for path in paths:
-        with h5py.File(path, "r") as handle:
-            ra, dec = handle["RA_DEG"], handle["DEC_DEG"]
-            n_read += ra.size
-            for start in range(0, ra.size, chunk_rows):
-                r, d = ra[start:start + chunk_rows], dec[start:start + chunk_rows]
-                v = np.c_[np.cos(np.radians(d)) * np.cos(np.radians(r)),
-                          np.cos(np.radians(d)) * np.sin(np.radians(r)), np.sin(np.radians(d))]
-                keep = np.linalg.norm(v - centre, axis=1) <= chord
-                ras.append(r[keep])
-                decs.append(d[keep])
-                rows.append(np.arange(start, start + r.size, dtype=np.int64)[keep])
-                names.append(np.full(int(keep.sum()), path.name, dtype=object))
+    for reg in regions_module.REGIONS:
+        # the curated rows' positions from the delivery (catalog.curated.read_positions), not from the curated product,
+        # which is built after the PACS stages
+        _name, ra, dec = curated.read_positions(config, reg.name)
+        fname = "sources_sesna_source__%s.hdf5" % reg.name.replace(" ", "_")
+        n_read += ra.size
+        for start in range(0, ra.size, chunk_rows):
+            r, d = ra[start:start + chunk_rows], dec[start:start + chunk_rows]
+            v = np.c_[np.cos(np.radians(d)) * np.cos(np.radians(r)),
+                      np.cos(np.radians(d)) * np.sin(np.radians(r)), np.sin(np.radians(d))]
+            keep = np.linalg.norm(v - centre, axis=1) <= chord
+            ras.append(r[keep])
+            decs.append(d[keep])
+            rows.append(np.arange(start, start + r.size, dtype=np.int64)[keep])
+            names.append(np.full(int(keep.sum()), fname, dtype=object))
     cat = lambda parts, empty: np.concatenate(parts) if parts else empty
     out = SourceCandidates(cat(ras, np.empty(0)), cat(decs, np.empty(0)),
                            cat(rows, np.empty(0, dtype=np.int64)), cat(names, np.empty(0, dtype=object)))
-    return out, {"catalogues": len(paths), "rows_read": n_read, "rows_retained": out.ra_deg.size}
+    return out, {"catalogues": len(regions_module.REGIONS), "rows_read": n_read, "rows_retained": out.ra_deg.size}
+
+
+# ----------------------------------------------------------------------------
+# the mosaic: its point-spread function and its map record
+
+def _bspline_box_kernel(u):
+    """Bilinear interpolation (triangle, half-width 1) convolved with the unit input-pixel box: the quadratic
+    B-spline, support +-1.5, unit integral."""
+    a = np.abs(u)
+    return np.where(a <= 0.5, 0.75 - a ** 2, np.where(a <= 1.5, 0.5 * (1.5 - a) ** 2, 0.0))
+
+
+def _kernel_weights(jac, steps, broad):
+    """Weights on the fine output-pixel lattice (step 1/steps) of the input pixel's footprint: `broad` = box +
+    bilinear triangle (the resampled map's response to a delta), else the box alone. `jac`: d(input pixel)/d(output
+    pixel). Sum 1."""
+    inv = np.linalg.inv(jac)
+    half = int(np.ceil(1.5 * np.abs(inv).sum(axis=1).max())) + 1
+    o = np.arange(-half * steps, half * steps + 1) / steps
+    yy, xx = np.meshgrid(o, o, indexing="ij")
+    u = jac[0, 0] * xx + jac[0, 1] * yy
+    v = jac[1, 0] * xx + jac[1, 1] * yy
+    if broad:
+        w = _bspline_box_kernel(u) * _bspline_box_kernel(v)
+    else:
+        delta = np.abs(jac).sum(axis=1) / steps / 2.0                 # anti-aliased box edge, one fine step wide
+        w = (np.clip((0.5 - np.abs(u)) / delta[0] + 0.5, 0, 1) * np.clip((0.5 - np.abs(v)) / delta[1] + 0.5, 0, 1))
+    return w / w.sum(), half
+
+
+def _template_density(components, east, north):
+    """Mean over the scan components of the template's flux per square arcsec at these sky offsets (arcsec;
+    east, north); zero beyond the released +-100 arcsec."""
+    from scipy.ndimage import map_coordinates
+    out = 0.0
+    for c in components:
+        a = np.deg2rad(c.position_angle_deg)
+        east0 = east * np.cos(a) - north * np.sin(a)
+        north0 = east * np.sin(a) + north * np.cos(a)
+        out = out + map_coordinates(c.image, [100.0 + north0, 100.0 - east0], order=1, mode="constant", cval=0.0,
+                                    prefilter=False)
+    return out / len(components)
+
+
+def _node_table(components, out_wcs, node, jac, extent, steps, out_area, broad):
+    """One spatial node's response, (count, count): the unit-flux template (mean of the scan columns) on the
+    north-up output grid around output pixel `node` = (x, y), convolved with the input footprint (`_kernel_weights`),
+    sampled at output-pixel offsets -extent..extent in 1/steps; per output pixel (flux)."""
+    from scipy.signal import fftconvolve
+    weights, half = _kernel_weights(jac, steps, broad)
+    count = int(2 * extent * steps) + 1
+    pad = half
+    big = count + 2 * pad * steps
+    o = (np.arange(big) - (big - 1) / 2) / steps
+    yy, xx = np.meshgrid(o, o, indexing="ij")
+    source = out_wcs.pixel_to_world(np.array([node[0]]), np.array([node[1]]))
+    east, north = source.spherical_offsets_to(out_wcs.pixel_to_world(xx + node[0], yy + node[1]))
+    density = _template_density(components, east.arcsec, north.arcsec)
+    conv = fftconvolve(density, weights, mode="same")
+    return conv[pad * steps:pad * steps + count, pad * steps:pad * steps + count] * out_area
+
+
+def _table_aperture(table, extent, steps, band, pixel_arcsec):
+    """The aperture sums of a unit-flux source of a one-node table `table` (count, count), as `Tile` takes them:
+    the mean over a 3 x 3 sub-pixel lattice of the aperture sum with the sky annulus's own scatter-free clipped
+    sky (`_aperture_core` on the noise-free image). Returns (enclosed: aperture sum before sky,
+    aperture_fraction: after sky)."""
+    from scipy.ndimage import map_coordinates
+    r_ap, r_in, r_out = (r / pixel_arcsec for r in APERTURES[band])
+    w = int(np.ceil(r_out)) + 3
+    offs = np.arange(-w, w + 1, dtype=float)
+    sub = np.arange(3) / 3.0
+    enclosed, fraction = [], []
+    for sy in sub:
+        for sx in sub:
+            yy, xx = np.meshgrid(offs - sy, offs - sx, indexing="ij")
+            img = map_coordinates(table, [(yy + extent) * steps, (xx + extent) * steps], order=1, mode="nearest",
+                                  prefilter=False).astype(np.float32)
+            f, s, _sd, area, cov = _aperture_core(img, np.ones_like(img), np.array([w + sx]), np.array([w + sy]),
+                                                  r_ap, r_in, r_out, 5)
+            if not cov.all():
+                raise ValueError("the aperture of the mosaic table is not covered")
+            enclosed.append(float((f + s * area)[0]))
+            fraction.append(float(f[0]))
+    return float(np.mean(enclosed)), float(np.mean(fraction))
+
+
+def _jacobian(out_wcs, in_wcs, x, y):
+    """d(input pixel)/d(output pixel) at output pixel (x, y), by central differences through the sky."""
+    cols = []
+    for dx, dy in ((1.0, 0.0), (0.0, 1.0)):
+        ra, dec = out_wcs.all_pix2world([x - dx / 2, x + dx / 2], [y - dy / 2, y + dy / 2], 0)
+        px, py = in_wcs.all_world2pix(ra, dec, 0)
+        cols.append([px[1] - px[0], py[1] - py[0]])
+    return np.array(cols).T
+
+
+def build_mosaic_psf(config, region, band, box=None):
+    """Writes `<mosaic>/_psf/` for the built mosaic (`pacs_mosaic.build_mosaic`): psf.json, one response table
+    per sub-group (`MosaicPSF`) and the weight-mean table `table.npy`. Sub-groups: the mosaic's PSF groups split
+    by input pixel scale and axis orientation (the kernel depends on both). Tables are float32, 3 x 3 spatial
+    nodes (PSF_SPATIAL_NODES) over the mosaic, PSF_SUBPIXEL_STEPS per pixel, the half-width `Tile` uses."""
+    import json
+    from sesnaimpute.sky.derived import pacs_mosaic
+    mdir = pacs_mosaic.product_dir(config, region, band, box)
+    pacs_mosaic._assert_inside_scratch_derived(config, mdir)
+    m = pacs_mosaic.Mosaic(mdir)
+    recs = {r.path: r for r in read_index(config, region)}
+    out_wcs = m.wcs.celestial
+    ny, nx = m.shape
+    pix = float(np.mean(proj_plane_pixel_scales(out_wcs))) * 3600.0       # as Tile takes it (sets the table size)
+    out_area = pacs_mosaic.pixel_area_arcsec2(out_wcs)
+    cx, cy = (nx - 1) / 2.0, (ny - 1) / 2.0
+    keys, entries = [], []
+    for q in m.meta["maps"]:
+        rec = recs[q["path"]]
+        in_wcs = pacs_mosaic._celestial(rec)
+        jac = _jacobian(out_wcs, in_wcs, cx, cy)
+        angle = float(np.degrees(np.arctan2(jac[1, 0], jac[0, 0])) % 90.0)
+        key = (q["group"], round(rec.pixel_scale_arcsec, 3), round(angle * 4) / 4 % 90.0)
+        if key not in keys:
+            keys.append(key)
+        bbox = pacs_mosaic._bbox_in_output(rec, in_wcs, out_wcs, m.shape) or (0, 0, 0, 0)
+        entries.append(dict(path=q["path"], wcs_header=rec.wcs_header, shape=list(rec.shape), lattice=q["lattice"],
+                            lattice_step=q["lattice_step"], scale=pacs_mosaic.pixel_area_arcsec2(out_wcs) / pacs_mosaic.pixel_area_arcsec2(in_wcs),
+                            sub=keys.index(key), bbox=[int(v) for v in bbox]))
+    n_sub = len(keys)
+    rep = [next(r for r, e in zip(m.meta["maps"], entries) if e["sub"] == k) for k in range(n_sub)]
+    rep_rec = [recs[q["path"]] for q in rep]
+    beams = np.array([beam_fwhm_arcsec(r) for r in rep_rec])
+    # stage 1: the mixture fractions over the mosaic (a regular sample of its pixels) -> mean beam and table size
+    pdir = os.path.join(mdir, "_psf")
+    os.makedirs(pdir, exist_ok=True)
+    meta = dict(shape=[ny, nx], n_sub=n_sub, keys=[list(k) for k in keys], maps=entries, out_header=m.wcs.to_header(relax=True).tostring(sep=""),
+                extent=0.0, subpixel_steps=PSF_SUBPIXEL_STEPS, integration_order=8, fbar=[1.0 / n_sub] * n_sub,
+                enclosed_sub=[1.0] * n_sub, aperture_fraction_sub=[1.0] * n_sub)
+    with open(os.path.join(pdir, "psf.json"), "w") as fh:
+        json.dump(meta, fh)
+    probe = MosaicPSF(mdir, tables=False)
+    gx, gy = np.meshgrid(np.linspace(0, nx - 1, 40), np.linspace(0, ny - 1, 40))
+    f = probe.weights(gx.ravel(), gy.ravel())
+    valid = np.isfinite(np.asarray(m.layers["image"])[np.rint(gy.ravel()).astype(int), np.rint(gx.ravel()).astype(int)])
+    fbar = f[valid].mean(axis=0) if valid.any() else f.mean(axis=0)
+    beam = float(fbar @ beams)
+    beam_px = beam / pix
+    half = int(np.ceil(max(FIT_BOX_FWHM * beam_px, APERTURES[band][2] / pix + 1.0)))
+    table_half = int(min(half + np.ceil(NEIGHBOUR_REACH_FWHM * beam_px), PSF_TABLE_HALF_ARCSEC // pix))
+    extent = table_half + 0.5
+    steps = PSF_SUBPIXEL_STEPS
+    count = int(2 * extent * steps) + 1
+    nodes = [(sx, sy) for sy in np.linspace(-.5, ny - .5, PSF_SPATIAL_NODES) for sx in np.linspace(-.5, nx - .5, PSF_SPATIAL_NODES)]
+    n_nodes = PSF_SPATIAL_NODES
+    mean_table = np.zeros((n_nodes, n_nodes, 1, count, count))
+    enclosed, aperture, totals = [], [], []
+    for k in range(n_sub):
+        rec = rep_rec[k]
+        in_wcs = pacs_mosaic._celestial(rec)
+        components = published_components_for_map(config, rec)
+        table = np.empty((n_nodes, n_nodes, 1, count, count), dtype=np.float32)
+        for i, node in enumerate(nodes):
+            jac = _jacobian(out_wcs, in_wcs, node[0], node[1])
+            broad = _node_table(components, out_wcs, node, jac, extent, steps, out_area, True)
+            if i == (n_nodes ** 2) // 2:
+                plain = _node_table(components, out_wcs, node, jac, extent, steps, out_area, False)
+                e_plain, _ = _table_aperture(plain, extent, steps, band, pix)
+                scale = aperture_eef(config, rec) / e_plain               # Tile's normalisation of an ordinary table
+                e_broad, a_broad = _table_aperture(broad, extent, steps, band, pix)
+                totals.append((float(broad.sum() / plain.sum())))
+            table[i // n_nodes, i % n_nodes, 0] = broad
+        table *= np.float32(scale)
+        enclosed.append(e_broad * scale)
+        aperture.append(a_broad * scale)
+        table.flags.writeable = True
+        np.save(os.path.join(pdir, f"sub{k}.npy"), table)
+        mean_table += fbar[k] * table
+    np.save(os.path.join(pdir, "table.npy"), mean_table.astype(np.float32))
+    meta.update(extent=extent, fbar=[float(v) for v in fbar], enclosed_sub=enclosed, aperture_fraction_sub=aperture,
+                beam_arcsec=beam, enclosed_fraction=float(fbar @ np.array(enclosed)),
+                aperture_fraction=float(fbar @ np.array(aperture)), broad_over_plain_total=totals, table_half=table_half)
+    with open(os.path.join(pdir, "psf.json"), "w") as fh:
+        json.dump(meta, fh)
+    return MosaicPSF(mdir)
+
+
+def mosaic_record(config, region, band, box=None, rebuild_psf=False):
+    """The `MosaicRecord` of the band's built mosaic of the region (builds its PSF when `_psf/` is absent or
+    `rebuild_psf`). `path` = the product folder under the data root + "/mosaic"."""
+    from sesnaimpute.sky.derived import pacs_mosaic
+    mdir = pacs_mosaic.product_dir(config, region, band, box)
+    m = pacs_mosaic.Mosaic(mdir)
+    if rebuild_psf or not os.path.exists(os.path.join(mdir, "_psf", "psf.json")):
+        build_mosaic_psf(config, region, band, box)
+    import h5py
+    with h5py.File(os.path.join(mdir, "mosaic.hdf5"), "r") as f:
+        header = f["WCS_HEADER"][()].decode()
+    paths = {q["path"] for q in m.meta["maps"]}
+    obsids = tuple(sorted({str(o) for r in read_index(config, region) if r.path in paths for o in r.obsids}))
+    return MosaicRecord(map_id="mosaic_%s_%s" % (region.replace(" ", "_"), band), obsids=obsids, band=band,
+                        path=os.path.relpath(mdir, config.data_root) + "/mosaic", image_hdu=0, error_hdu=1, coverage_hdu=2,
+                        shape=tuple(m.shape), unit="Jy/pixel", wcs_header=header, mode=1, level="L25", mapper="mosaic",
+                        scan_speed=20.0, pixel_scale_arcsec=pacs_mosaic.PIXEL_ARCSEC[band], source="mosaic",
+                        polygon=(), mosaic_dir=mdir)

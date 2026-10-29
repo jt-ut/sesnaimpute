@@ -41,6 +41,9 @@ local background. This confirms the old code's 0.911 for P70 parallel 60"/s
 (it came from EEF_blu_60para_21.txt) and extends it: P100 is 0.906.
 """
 
+import dataclasses
+import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,6 +51,8 @@ import numpy as np
 from astropy.io import fits
 from numba import njit
 from scipy.ndimage import map_coordinates
+
+from sesnaimpute.sky.download.herschel_pacs.index import MapRecord
 
 # The PACS team's release (Calzoletti, ESAC, 16 May 2017, HERSCHEL-HSC-DOC-2181
 # "PACS Photometer PSFs and EEFs as Ancillary Data Products: Release note"),
@@ -119,8 +124,10 @@ def beam_fwhm_arcsec(record):
     The geometric mean of the two fitted Gaussian axes of the combined beam
     (fast-scan beams are elongated, e.g. P70 parallel 60"/s is 8.80 x 9.60
     arcsec, 9.19 as returned); the axes and their tables are in the comment on
-    `_COMBINATIONS`.
+    `_COMBINATIONS`. A mosaic record: the mosaic's weight-mean beam.
     """
+    if getattr(record, "mosaic_dir", ""):
+        return mosaic_scalar(record, "beam_arcsec")
     return float(_COMBINATIONS[_key(record)][3])
 
 
@@ -149,6 +156,8 @@ def aperture_fraction(config, record):
     the TOTAL flux of a point source, the PACS calibration's own definition): the fraction of a point
     source's total flux the eHOPS aperture returns after the annulus sky, from the release EEF table of
     this map's band, mode and speed (e.g. P70 parallel-60 0.712, scan-20 0.756; P100 0.545 / 0.632)."""
+    if getattr(record, "mosaic_dir", ""):
+        return mosaic_scalar(record, "aperture_fraction")
     single = _single_direction_tag(config, record)
     if single is not None:
         if record.band == "P100":
@@ -156,6 +165,22 @@ def aperture_fraction(config, record):
                              "single-template aperture fraction is unverified at that band")
         return _single_template_fraction(config, record, single)
     return physical_aperture_fraction(config, record, "total", True)
+
+
+def aperture_eef(config, record):
+    """The fraction of a point source's total flux inside the eHOPS aperture radius, with no sky
+    subtraction, from the same release EEF table (or one-direction template) `aperture_fraction` reads:
+    the normalisation the map's point-spread table is held to (`pacs_fit.Tile`), so that a PSF fit's
+    amplitude, an injected artificial source and the aperture photometry all mean the same total flux."""
+    if getattr(record, "mosaic_dir", ""):
+        return mosaic_scalar(record, "enclosed_fraction")
+    single = _single_direction_tag(config, record)
+    if single is not None:
+        if record.band == "P100":
+            raise ValueError("the +42 and -42 P100 templates differ by about 3 percent inside 8 arcsec, so the "
+                             "single-template aperture fraction is unverified at that band")
+        return _single_template_fraction(config, record, single, annulus_share=False)
+    return physical_aperture_fraction(config, record, "total", False)
 
 
 def _single_template_fraction(config, record, tag, annulus_share=True):
@@ -415,6 +440,12 @@ class CachedPairedPSF:
         table.flags.writeable = False
         return cls(table, tuple(shape), extent, subpixel_steps, integration_order)
 
+    def scaled(self, factor):
+        """The same cache with every response multiplied by `factor` (a normalisation, `pacs_fit.Tile`)."""
+        table = (self.table * self.table.dtype.type(factor)).astype(self.table.dtype)
+        table.flags.writeable = False
+        return dataclasses.replace(self, table=table)
+
     def evaluate_xy(self, source_x, source_y, pixel_x, pixel_y):
         sx, sy = np.asarray(source_x, dtype=float), np.asarray(source_y, dtype=float)
         x, y = np.broadcast_arrays(np.asarray(pixel_x, dtype=float), np.asarray(pixel_y, dtype=float))
@@ -544,3 +575,121 @@ def _direction_component(config, record, tag, angles):
     image /= len(angles)
     image.flags.writeable = False
     return PublishedPSF(image, first.path, float(angles[0]), first.total_flux_factor)
+
+
+# ----------------------------------------------------------------------------
+# the mosaic's point-spread function (briefs/pacs_mosaic_2026-10-29/BRIEF.md sections 6-8)
+
+@dataclass(frozen=True)
+class MosaicRecord(MapRecord):
+    """The map record of one band's mosaic of a region (`pacs_fit.mosaic_record`): `Tile` opens it like any map.
+    `path` is a unique key (the product's folder + "/mosaic", relative to the data root, so `pacs_fit.prepared_dir`
+    is unique); `mosaic_dir` is the product folder."""
+    mosaic_dir: str = ""
+
+
+_MOSAIC_SCALARS = {}
+
+
+def mosaic_scalar(record, name):
+    """A weight-mean scalar of the mosaic PSF (beam_arcsec, aperture_fraction, enclosed_fraction) from its
+    `_psf/psf.json`."""
+    d = record.mosaic_dir
+    if d not in _MOSAIC_SCALARS:
+        with open(os.path.join(d, "_psf", "psf.json")) as fh:
+            _MOSAIC_SCALARS[d] = json.load(fh)
+    return float(_MOSAIC_SCALARS[d][name])
+
+
+class MosaicPSF:
+    """The point-spread function of a mosaic: at an output position the weight-fraction mixture over the input
+    maps valid there, sum_i f_i P_i, with f_i = w_i / sum w and w_i = 1 / (smoothed error_i)^2 (the mosaic's own
+    weights, evaluated from each map's stored smoothed-error lattice; no per-pixel layer is stored). P_i is map i's
+    published template pair (mean of the scan columns, as `Tile` injects it) expressed on the north-up output grid,
+    convolved with the input pixel's box and the bilinear interpolation kernel of the resampling (a separable
+    triangle of half-width one INPUT pixel along the input axes, so a quadratic B-spline once the box is in),
+    sampled at the output pixel centres, and normalised exactly as `Tile` normalises an ordinary map's table
+    (total-flux EEF inside the aperture radius). Maps of one template group, pixel scale and orientation share a
+    sub-group; each sub-group's response table lives in `<mosaic>/_psf/sub<k>.npy`, memory-mapped.
+
+    `table` (the weight-mean over the mosaic, one component) with `extent`, `subpixel_steps` serves the
+    fitting core as for `CachedPairedPSF`; `evaluate_xy` is the exact local mixture; `enclosed_at` and
+    `aperture_fraction_at` the same mixture of the sub-groups' enclosed fraction (no sky) and aperture fraction
+    (after the annulus sky). Build with `pacs_fit.build_mosaic_psf`."""
+
+    def __init__(self, directory, tables=True):
+        from astropy.wcs import WCS
+        self.directory = directory
+        pdir = os.path.join(directory, "_psf")
+        with open(os.path.join(pdir, "psf.json")) as fh:
+            self.meta = json.load(fh)
+        m = self.meta
+        self.shape = tuple(m["shape"])
+        self.extent, self.subpixel_steps, self.integration_order = m["extent"], m["subpixel_steps"], m["integration_order"]
+        self.n_sub = m["n_sub"]
+        self.out_wcs = WCS(fits.Header.fromstring(m["out_header"])).celestial
+        self._maps = []
+        for q in m["maps"]:
+            self._maps.append(dict(wcs=WCS(fits.Header.fromstring(q["wcs_header"])).celestial, shape=tuple(q["shape"]),
+                                   lat=np.load(os.path.join(directory, q["lattice"])), step=q["lattice_step"],
+                                   scale=q["scale"], sub=q["sub"], bbox=q["bbox"]))
+        self.fbar = np.array(m["fbar"])
+        self.enclosed = np.array(m["enclosed_sub"])
+        self.aperture_fraction_sub = np.array(m["aperture_fraction_sub"])
+        if tables:
+            self.subs = [np.load(os.path.join(pdir, f"sub{k}.npy"), mmap_mode="r") for k in range(self.n_sub)]
+            self.table = np.load(os.path.join(pdir, "table.npy"), mmap_mode="r")
+
+    def __getstate__(self):
+        return {"directory": self.directory, "tables": hasattr(self, "table")}
+
+    def __setstate__(self, state):
+        self.__init__(state["directory"], state["tables"])
+
+    def weights(self, source_x, source_y):
+        """(n, n_sub) mixture fractions f at output pixel positions (zero-origin x, y): the weight 1/(smoothed
+        error)^2 of every input map valid there (inside its footprint with a finite smoothed error), summed per
+        sub-group and normalised; a position no map covers gets the mosaic's mean fractions."""
+        from sesnaimpute.sky.derived.pacs_mosaic import _lattice_at
+        sx, sy = np.asarray(source_x, float), np.asarray(source_y, float)
+        w = np.zeros((sx.size, self.n_sub))
+        for q in self._maps:
+            x0, x1, y0, y1 = q["bbox"]
+            idx = np.flatnonzero((sx >= x0 - 1) & (sx <= x1) & (sy >= y0 - 1) & (sy <= y1))
+            if not idx.size:
+                continue
+            ra, dec = self.out_wcs.all_pix2world(sx[idx], sy[idx], 0)
+            px, py = q["wcs"].all_world2pix(ra, dec, 0)
+            ny, nx = q["shape"]
+            inside = np.isfinite(px) & np.isfinite(py) & (px >= 0) & (px <= nx - 1) & (py >= 0) & (py <= ny - 1)
+            lat = _lattice_at(q["lat"], q["step"], np.where(inside, px, 0.0), np.where(inside, py, 0.0)) * q["scale"]
+            ok = inside & np.isfinite(lat) & (lat > 0)
+            w[idx[ok], q["sub"]] += 1.0 / lat[ok] ** 2
+        total = w.sum(axis=1)
+        f = np.where(total[:, None] > 0, w / np.where(total > 0, total, 1.0)[:, None], self.fbar[None, :])
+        return f
+
+    def evaluate_xy(self, source_x, source_y, pixel_x, pixel_y):
+        sx, sy = np.asarray(source_x, dtype=float), np.asarray(source_y, dtype=float)
+        x, y = np.broadcast_arrays(np.asarray(pixel_x, dtype=float), np.asarray(pixel_y, dtype=float))
+        if (sx.ndim != 1 or sy.shape != sx.shape or x.ndim != 3 or x.shape[0] != sx.size
+                or not all(np.all(np.isfinite(a)) for a in (sx, sy, x, y))):
+            raise ValueError('Expected finite source vectors and (n,ny,nx) pixel coordinates')
+        if not sx.size:
+            return np.empty((0, 1, *x.shape[1:]), dtype=np.float64)
+        f = self.weights(sx, sy)
+        xr, yr = x.reshape(sx.size, -1), y.reshape(sx.size, -1)
+        out = np.zeros((sx.size, 1, xr.shape[1]))
+        for k in range(self.n_sub):
+            if f[:, k].any():
+                out += f[:, k, None, None] * _cached_responses(self.subs[k], sx, sy, xr, yr, self.shape[1],
+                                                               self.shape[0], self.extent, self.subpixel_steps)
+        return out.reshape((sx.size, 1, *x.shape[1:]))
+
+    def enclosed_at(self, source_x, source_y):
+        """The mixture's enclosed fraction inside the aperture radius (no sky) at each position."""
+        return self.weights(source_x, source_y) @ self.enclosed
+
+    def aperture_fraction_at(self, source_x, source_y):
+        """The mixture's aperture fraction (after the annulus sky) at each position."""
+        return self.weights(source_x, source_y) @ self.aperture_fraction_sub

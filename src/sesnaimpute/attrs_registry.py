@@ -3901,43 +3901,21 @@ for _lib in ("sps", "agb", "pahc", "galz", "yso", "h2shock", "pahn"):
         REGISTRY[(_stem, _name)] = _rd
 
 
+# Datasets of the PACS completeness product copied verbatim into completeness_sesna_source for each PACS band
+# (name templates; catalog.completeness writes them, and each takes the completeness_pacs_source reading).
+PACS_COPIED = (
+    "CURVE_{b}", "MAG_GRID_{b}", "COMPLETED_FROM_{b}", "ENVELOPE_{b}",
+    "CELL_ID_{b}", "CELL_MAP_INDEX_{b}", "CELL_MAP_{b}", "CELL_RA_{b}", "CELL_DEC_{b}",
+    "CELL_SIGMA_{b}_MJY", "CELL_OFFSET_{b}_MJY",
+    "N_POS_{b}", "N_SIGMA_POS_{b}",
+    "MAP_ID_{b}", "MAP_OBSID_{b}", "MAP_WCS_{b}", "MAP_SHAPE_{b}", "MAP_CELL_STEP_{b}",
+    "MAP_SHIFT_{b}_ARCSEC", "MAP_N_PAIRS_{b}",
+)
+
+
 # sky.derived.pacs_completeness -- completeness_pacs_source (2026-10-26 repair): the PACS 70 and 100
 # micron completeness in the layout of completeness_sesna_source, plus per-cell columns.
 _PACS_COMPLETENESS_CELLS_READINGS = {
-    "CURVE_{b}": ("completeness fraction x600, uint16",
-        "One row per covered 30-arcsec cell of every Herschel PACS {w} micron map, for all cells inside the "
-        "region's source bounding box padded by about 7 arcmin (overlapping maps each keep their cells; "
-        "SOURCE_ROW points at the deepest one): the probability that a point source of the flux in "
-        "MAG_GRID_{b} placed anywhere in the cell is detected at 5 sigma or better, stored as the "
-        "probability times 600. Measured by forced fits at {n} random positions per cell on the real map, "
-        "so real background structure and neighbouring sources are included; sources fainter than the "
-        "last plane are treated as undetected. Rows are ordered by map and then cell."),
-    "MAG_GRID_{b}": ("mag relative to 1 Jy",
-        "The magnitudes CURVE_{b} and PIXEL_CURVE_{b} are tabulated at: m = -2.5 log10(flux / 1 Jy), "
-        "{mmin} to {mmax} in steps of {dm}, bright to faint (the same grid for every region). The "
-        "zero point is 1 Jy, stored on CURVE_{b} as ZERO_POINT_JY."),
-    "ENVELOPE_{b}": ("completeness fraction x600, uint16",
-        "At each magnitude of MAG_GRID_{b}, the largest value of CURVE_{b} over all rows: the deepest "
-        "{w} micron completeness anywhere in this region, stored as the probability times 600; all zero "
-        "where the region has no {w} micron coverage."),
-    "COMPLETED_FROM_{b}": ("mag",
-        "All NaN: every {w} micron curve is measured over its whole range; nothing is extrapolated. Kept "
-        "so the layout matches completeness_sesna_source."),
-    "N_POS_{b}": ("positions",
-        "For each row of CURVE_{b}, the number of random positions in the cell that lay on valid data "
-        "and entered its curve and noise (at most {n})."),
-    "N_SIGMA_POS_{b}": ("positions",
-        "For each row of CURVE_{b}, how many random positions set its noise: the positions on valid data "
-        "farther than one beam from every bright source, summed over the cells of the 3 x 3 block of "
-        "cells around it whose noise entered the median. 0 means no cell of the block was clean and "
-        "the map's median noise was used."),
-    "CELL_RA_{b}": ("deg ICRS", "Right ascension of the centre of each cell of CURVE_{b}, in the same row order."),
-    "CELL_DEC_{b}": ("deg ICRS", "Declination of the centre of each cell of CURVE_{b}, in the same row order."),
-    "CELL_OBSID_{b}": ("observation identifier(s)",
-        "The Herschel observation identifier(s), comma separated, of the map each cell of CURVE_{b} was "
-        "measured on."),
-    "CELL_MAP_{b}": ("map identifier",
-        "The archive file name of the {w} micron map each cell of CURVE_{b} was measured on."),
     "CELL_SIGMA_{b}_MJY": ("mJy",
         "The one-sigma uncertainty of a {w} micron point-source flux measured in each cell of CURVE_{b}: "
         "the median, over the 3 x 3 block of cells around it, of 1.4826 times the median absolute deviation "
@@ -3951,44 +3929,38 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
         "source in the cell, and the completeness curve, count from this level; the reported flux (FNU in the "
         "photometry product, the total flux) does not subtract it, so the two differ by this value. A parallel-mode map that holds only one "
         "scan direction is measured with that direction's own point-spread template and aperture fraction (not at 100 micron)."),
-    "CELL_TAIL_FACTOR_{b}": ("dimensionless",
-        "For each row of CURVE_{b}: the factor by which the cell's noise was raised so that, among the cells of its "
-        "map at a similar noise level, negative excursions on empty sky are no more frequent than for Gaussian noise, "
-        "matched as far into the tail as those cells' sample allows (the map noise has heavier tails than a Gaussian, "
-        "most in the noisiest cells). CELL_SIGMA_{b}_MJY already includes it."),
     "MAP_ID_{b}": ("map identifier",
-        "One row per {w} micron map of the region: its archive file name. CELL_MAP_{b} names one of these for each cell."),
+        "One row per {w} micron map the region's cells were measured on: the region's one co-added {w} micron mosaic "
+        "(a single row; the mosaic is the product of sky/derived/pacs/mosaic, described in its own readings: every "
+        "{w} micron map of the region not contained in another, resampled onto one grid, each less its own zero "
+        "level, averaged with weights that follow how deep each map is). CELL_MAP_{b} names it for each cell."),
     "MAP_OBSID_{b}": ("observation identifier(s)",
-        "For each row of MAP_ID_{b}: the Herschel observation identifier(s) the map combines, comma separated."),
+        "For each row of MAP_ID_{b}: the Herschel observation identifier(s) of all the input maps of the mosaic, "
+        "comma separated, in increasing order. Which input maps contribute where is in the mosaic product."),
     "MAP_SHIFT_{b}_ARCSEC": ("arcsec (east, north)",
-        "For each row of MAP_ID_{b}: how far the map's own astrometry sits from the SESNA positions, east then north "
-        "(map minus SESNA), the median over the map's bright point sources paired one-to-one with a SESNA source within "
-        "one beam; 0, 0 when fewer than 10 pairs exist. Every catalogue position is moved by this shift before it is "
-        "measured on the map, so a source is measured where the map puts it."),
-    "MAP_N_PAIRS_{b}": ("pairs",
-        "For each row of MAP_ID_{b}: the number of bright-source pairs MAP_SHIFT_{b}_ARCSEC was measured from (below 10: no shift applied)."),
+        "For each row of MAP_ID_{b}: 0, 0. The mosaic keeps its input maps' own Herschel header astrometry, registered to "
+        "no other survey (as eHOPS does: its PACS-minus-Spitzer offsets are a fraction of its 2 arcsec association "
+        "radius, Pokhrel et al. 2023 Appendix C). Kept so that a position lookup reads the same columns."),
+    "MAP_N_PAIRS_{b}": ("pairs", "For each row of MAP_ID_{b}: 0 (no registration; see MAP_SHIFT_{b}_ARCSEC)."),
     "CELL_ID_{b}": ("cell id",
         "For each row of CURVE_{b}: the cell's identifier within its map, row-major from the map's first pixel "
         "row (id = iy x n_cells_x + ix, with ix = floor((x + 0.5) / step_x), iy likewise, x and y the map's own "
         "0-based pixel coordinates, step from MAP_CELL_STEP_{b}; n_cells_x = ceil(MAP_SHAPE x / step_x))."),
     "CELL_MAP_INDEX_{b}": ("row of MAP_ID_{b}",
-        "For each row of CURVE_{b}: which map (row of the MAP_* datasets) the cell belongs to."),
+        "For each row of CURVE_{b}: which map (row of the MAP_* datasets) the cell belongs to; always 0, the mosaic."),
     "MAP_WCS_{b}": ("FITS header text",
-        "For each row of MAP_ID_{b}: the map's celestial world-coordinate header, as text (astropy "
+        "For each row of MAP_ID_{b}: the mosaic's celestial world-coordinate header, as text (astropy "
         "WCS(fits.Header.fromstring(...))). A sky position is moved by MAP_SHIFT_{b}_ARCSEC before this "
         "header turns it into map pixels."),
     "MAP_SHAPE_{b}": ("pixels (ny, nx)",
-        "For each row of MAP_ID_{b}: the map's image size, rows then columns."),
+        "For each row of MAP_ID_{b}: the mosaic's image size, rows then columns."),
     "MAP_CELL_STEP_{b}": ("pixels (x, y)",
-        "For each row of MAP_ID_{b}: the cell size in the map's pixels along x and y (30 arcsec over the "
+        "For each row of MAP_ID_{b}: the cell size in the mosaic's pixels along x and y (30 arcsec over the "
         "pixel scale); edge cells are clipped to the image."),
-    "CELL_GAIN_{b}": ("dimensionless",
-        "The median fraction of an injected point source's flux that the measurement returns in each "
-        "cell of CURVE_{b} (1 when the fit recovers it fully)."),
     "SOURCE_ROW": ("row index into CURVE_<band>",
         "For each curated source, in the order of the region's source table, and the bands P70, P100, P160: "
-        "the row of CURVE_P70 / CURVE_P100 / CURVE_P160 for the cell the source falls in on the deepest map covering "
-        "it; -1 where no map covers the source in that band. A source near a map edge can have a row "
+        "the row of CURVE_P70 / CURVE_P100 / CURVE_P160 for the cell the source falls in on the band's mosaic; "
+        "-1 where the mosaic does not cover the source in that band. A source near a map edge can have a row "
         "here yet be marked not covered (ORIGIN 91) in the photometry, because its own measurement needs "
         "most of its beam on valid data; the photometry's ORIGIN decides."),
 }
@@ -3997,6 +3969,43 @@ for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
         REGISTRY[("completeness_pacs_source", _name.format(b=_band))] = (
             _u, _r.format(b=_band, w=_w, n=200, mmin="-3.5", mmax="5.5", dm="0.25"))
 
+# sky.derived.pacs_completeness -- sources_pacs_region (RULINGS_5): the blind PACS source table.
+_PACS_SOURCES_READINGS = {
+    "RA_DEG": ("deg ICRS",
+        "One row per PACS source of the region, from the PACS maps alone: the bands' blind detections (peaks of each "
+        "band's mosaic correlated with the mosaic's point-spread template made zero-sum, at least 5 times the mosaic's "
+        "noise in the cell) merged across bands: detections of two bands closer than the pair's merge radius (3 times the "
+        "measured position scatter between the bands for bright common sources; attributes "
+        "MERGE_RADIUS_<band>_<band>_ARCSEC) are one source. Its position is the sharpest detecting band's "
+        "(POSITION_BAND), on the Herschel header astrometry, not registered to any other survey. Costs, stated: a 70 "
+        "micron source takes the 160 micron flux of a core within the merge radius; a source seen only at 160 micron "
+        "has a position good to about 2 arcsec, so in clusters it is often a blend; the bands' detections are treated "
+        "as independent. Attribute also: N_160_ONLY."),
+    "DEC_DEG": ("deg ICRS", "Declination of each PACS source, as RA_DEG."),
+    "POSITION_BAND": ("band index", "The band whose detection gives the position: 0 = 70, 1 = 100, 2 = 160 micron."),
+    "DETECTED_{b}": ("true or false", "Whether the {w} micron blind detection found this source (merged into it)."),
+    "FNU_{b}_MJY": ("mJy",
+        "The {w} micron flux where DETECTED_{b}: the catalogue's aperture estimator at the {w} micron detection's own "
+        "position (RA_{b}_DEG, DEC_{b}_DEG; as the Herschel PACS Point Source Catalogue measures each band) on the "
+        "{w} micron mosaic, minus the cell's empty-sky offset (as FNU in the photometry product); NaN where "
+        "the band does not detect the source."),
+    "SIGMA_{b}_MJY": ("mJy",
+        "Uncertainty of FNU_{b}_MJY: the scatter of recovered minus injected flux of artificial sources of that flux "
+        "in the cell (SCATTER of the completeness product)."),
+    "CELL_OFFSET_{b}_MJY": ("mJy", "The empty-sky offset subtracted from FNU_{b}_MJY (CELL_OFFSET of the cell)."),
+    "SNR_{b}": ("dimensionless", "The S/N of the {w} micron detection: its own flux over its cell's noise."),
+    "MAP_INDEX_{b}": ("map index, or -1", "The {w} micron map (row of MAP_ID_{b} in the completeness product: 0, the mosaic) that detects the source."),
+    "EXTENDED_{b}": ("true or false", "Where DETECTED_{b}: whether the fitted width at the position exceeds 1.5 times the beam."),
+    "RA_{b}_DEG": ("deg ICRS",
+        "Where DETECTED_{b}: the position of the {w} micron detection itself (on the band's mosaic, which keeps its input maps' Herschel pointing; the "
+        "100 micron maps are separate observations from the 70 micron ones, so the two can differ by about a pointing "
+        "error); NaN where the band does not detect the source. RA_DEG is the sharpest detecting band's."),
+    "DEC_{b}_DEG": ("deg ICRS", "Declination of the {w} micron detection, as RA_{b}_DEG."),
+}
+for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
+    for _name, (_u, _r) in _PACS_SOURCES_READINGS.items():
+        REGISTRY[("sources_pacs_region", _name.format(b=_band))] = (_u, _r.format(b=_band, w=_w))
+
 # PACS source photometry (sky.derived.pacs_photometry).
 _PHOTOMETRY_PACS_READINGS = {
     "NAME": ("source identifier",
@@ -4004,50 +4013,66 @@ _PHOTOMETRY_PACS_READINGS = {
     "FNU_{b}_MJY": ("mJy",
         "Total flux of the source in the Herschel PACS {w} micron band (the PACS calibration's definition of a "
         "point source's flux), measured with the eHOPS survey's apertures (Pokhrel et al. 2023): aperture "
-        "photometry at the catalogue position (moved by the map's astrometric shift, MAP_SHIFT in the completeness "
-        "product) on the map that is deepest there, aperture radius 9.6 / 8.0 / 12.8 arcsec at 70 / 100 / 160 "
-        "micron, sky from a clipped mode in the annulus 12.8-25.6 / 9.6-16.0 / 16.0-22.4 arcsec, divided by the "
-        "fraction of a point source's total flux that this aperture and annulus return for the map's observing "
-        "mode and scan speed (PACS encircled-energy tables; 0.71-0.76 at 70, 0.55-0.63 at 100, 0.64-0.65 at 160 "
-        "micron; for a parallel-mode map that holds only one scan direction, the fraction is computed from that "
-        "direction's own point-spread template, at 70 and 160 micron only: at 100 micron the two templates differ by about 3 "
-        "per cent inside 8 arcsec, so such a map is refused there). eHOPS's published fluxes are on a within-60-arcsec normalisation with one constant per band and "
-        "sit about 9 % lower at 70 micron, and more at 100 micron on fast-scan maps. Where METHOD is 2 the source has "
-        "a neighbour within one beam of a detected source and its flux is the total flux of a joint point-source "
-        "fit. It can be negative or small when nothing is seen and is NaN where the band does not cover the source. "
-        "Where ORIGIN is 2 it is an upper bound: the combined flux of the blended group plus five times its "
-        "uncertainty."),
+        "photometry at the catalogue position on the band's co-added mosaic (every {w} micron map of the region resampled onto one grid and averaged), aperture radius 9.6 / 8.0 / 12.8 arcsec at 70 / 100 / 160 "
+        "micron, sky from a clipped mode in the annulus 12.8-25.6 / 9.6-16.0 / 16.0-22.4 arcsec taken after the "
+        "source's own outer light (the point-spread pattern scaled to its flux) is removed from the annulus, so "
+        "that a bright source's light is not partly rejected by the clipping, divided by the fraction of a point "
+        "source's total flux inside the aperture radius for the mosaic at that position (PACS encircled-energy tables "
+        "for each input map's observing mode, scan speed and scan direction, averaged with the weights the maps have in "
+        "the co-add there, and including the small broadening of the picture by the resampling; 0.71-0.76 at 70, "
+        "0.55-0.63 at 100, 0.64-0.65 at 160 micron). eHOPS's published fluxes are on a within-60-arcsec normalisation with one constant per band and "
+        "sit about 9 % lower at 70 micron, and more at 100 micron on fast-scan maps. The empty-sky offset of the "
+        "aperture in the source's 30-arcsecond cell (CELL_OFFSET in the completeness product: the typical flux it "
+        "returns at empty positions there, sky structure the annulus does not remove) is subtracted; the value for this source is CELL_OFFSET_{b}_MJY, and adding it back gives the convention of HOPS and eHOPS, which subtract no such offset. It can be negative or small when nothing is seen and is NaN where the band does not "
+        "cover the source. "
+        "Where ORIGIN is 1 or 2 the flux is that of the matched PACS source (PACS_SOURCE, the region's PACS source "
+        "table sources_pacs_region): the same aperture estimator at the position of that source's detection in this "
+        "band; where ORIGIN is 3 it is a bound (a blend the beam cannot split, or a confusion: see CONFUSED_{b}). Where ORIGIN is 90 "
+        "it is the aperture flux at this source's own position."),
+    "CELL_OFFSET_{b}_MJY": ("mJy",
+        "The empty-sky offset subtracted from FNU_{b}_MJY for this source: the median flux the same measurement "
+        "returns with no source present (sky structure the background does not remove): CELL_OFFSET_{b}_MJY of the "
+        "completeness product, at random empty positions of the 30-arcsecond cell the flux was measured in (the "
+        "matched PACS source's cell for ORIGIN 1 and 2). The same offset enters the detection rule and the "
+        "completeness curve, and artificial sources show the flux minus it is unbiased. FNU_{b}_MJY plus this "
+        "value is the flux on the convention of catalogues that subtract no such offset, as HOPS and eHOPS do; "
+        "in bright cloud it is several per cent of a bright source's flux. A source sits on structure, so the "
+        "emission under it that is not the source is, if anything, above its cell's typical level: the "
+        "cell's offset is the smallest correction the data justify, and what remains is emission local to the "
+        "source (at 70 micron, its warm envelope). NaN where the band does not cover the source."),
     "SIGMA_ANNULUS_{b}_MJY": ("mJy",
         "eHOPS's own per-source uncertainty statistic: the scatter of the sky-annulus pixels times the square root of "
         "the aperture area, divided by the aperture correction. Kept for comparison with their tables; detection uses "
         "SIGMA_{b}_MJY."),
-    "METHOD_{b}": ("code",
-        "1: aperture photometry (the source is isolated); 2: joint point-source fit with its close neighbours; "
-        "0: not measured (not covered)."),
-    "SIGMA_{b}_MJY": ("mJy, or 0.99 for an upper bound",
-        "Uncertainty of the flux: the scatter of the same measurement at random empty-sky positions in the source's "
-        "30-arcsecond cell (the median over the 3 x 3 cells around it, raised by the tail factor of the cell's noise "
-        "level), enlarged for a source fitted jointly with a neighbour. Where ORIGIN is 2 it holds 0.99, the value the "
-        "source table uses to mark an upper bound; NaN where the band does not cover the source. For a jointly fitted "
-        "source the uncertainty is enlarged by the overlap but its completeness curve is still its cell's curve, so "
-        "the curve somewhat overstates its chance of detection. The noise has heavier tails than a Gaussian; it is "
-        "scaled so that 5-sigma excursions on empty sky are as rare as for Gaussian noise, which makes it conservative "
-        "in the core (on Musca, empty-sky excursions beyond -3 sigma occur at 0.46 / 0.78 / 0.76 of the Gaussian rate at "
-        "70 / 100 / 160 micron)."),
     "ORIGIN_{b}": ("origin code",
-        "1 means the source is detected: its flux minus the typical empty-sky flux of its 30-arcsecond cell "
-        "(CELL_OFFSET in the completeness product) is at least five times its uncertainty -- the same rule the "
-        "completeness curve uses; 90 means the band covers the source but it is not detected; 2 means the source is "
-        "blended with a neighbour so closely that the two cannot be separated and the flux is an upper bound for the "
-        "pair; 91 means the band does not cover the source."),
+        "1 means a PACS source of the region (sources_pacs_region: the bands' blind detections merged across bands) "
+        "detected in this band is this source's nearest within 2 arcsec, and this is the only SESNA source within 2 "
+        "arcsec of it (the band-merging rule of the SESNA and eHOPS catalogues: nearest neighbour within a fixed "
+        "radius set by the two catalogues' astrometric accuracy; Gutermuth et al. 2009, Pokhrel et al. 2023); "
+        "ORIGIN 3: bound; a detection within a beam whose flux cannot be assigned to this source alone; FNU is that "
+        "detection's flux and is a ceiling on this source's flux (the two cases are told apart by CONFUSED_{b}: false "
+        "where that detection has two or more SESNA sources within 2 arcsec of it, true where no detection of this band is "
+        "associated with the source but one lies within one beam of it); 90 means the band covers the source and no PACS "
+        "source detected in this band is associated with it (its completeness curve gives the chance of that; the three "
+        "bands' detections are independent); 91 means the band does not cover the source. Two limits of ORIGIN 90, stated: "
+        "the completeness curve is measured over the 30-arcsecond cell, so for a source on a local peak of cloud emission "
+        "(a bright core or filament crest) the true chance of detection can be lower than the curve says; and the detection "
+        "filter subtracts the local background within about 1.3 beams of each position, so a faint source right next to a "
+        "much brighter one can be missed. The expected number of chance coincidences over "
+        "the region (the local SESNA density times the area of the 2 arcsec circle, summed over the PACS sources) is "
+        "the attribute EXPECTED_CHANCE_COINCIDENCES of ORIGIN_P70."),
+    "CONFUSED_{b}": ("true or false",
+        "True where ORIGIN_{b} is 3 because a {w} micron detection lies within one beam of the source but none is "
+        "associated with it within 2 arcsec (the source cannot be called undetected); false everywhere else, including "
+        "the ORIGIN 3 rows that come from a blend (a detection with two or more SESNA sources within 2 arcsec)."),
     "LOCAL_RMS_{b}_MJY": ("mJy",
-        "Noise of the 30-arcsecond cell containing the source: the scatter of the flux measured at random empty-sky positions in that cell. Five times this value is the faintest flux that would be called a detection there. NaN where the band does not cover the source."),
-    "OBSID_{b}": ("observation identifier(s)",
-        "The Herschel observation identifier(s), comma separated, of the map the flux was measured on; empty where the band does not cover the source."),
+        "Noise of the 30-arcsecond cell containing the source: the scatter of the flux measured at random empty-sky positions in that cell. A PACS source is detected where the aperture-filtered map peaks at five times this value above the cell's empty-sky level. NaN where the band does not cover the source."),
     "N_BLEND_{b}": ("number of SESNA sources",
-        "How many SESNA sources, including this one, were fitted together because they lie within one beam width of a source detected in this band; 1 for a source fitted alone, 0 where the band does not cover the source."),
-    "BLEND_GROUP_{b}": ("row number, or -1",
-        "Sources fitted together share this number, which is the row of the first of them in the catalogue; -1 for a source fitted alone or not covered."),
+        "For a source associated with a PACS source (ORIGIN 1 or 2): how many SESNA sources lie within 2 arcsec of that PACS source (1 for ORIGIN 1); 0 otherwise."),
+    "PACS_SOURCE_{b}": ("row number, or -1",
+        "The row of the matched PACS source in the region's PACS source table (sources_pacs_region); -1 where none is matched in this band."),
+    "MATCH_SEPARATION_{b}_ARCSEC": ("arcsec",
+        "The distance between this source and the PACS source it is associated with; NaN where none."),
     "EXTENDED_{b}": ("true or false",
         "True for a detected source whose measured width is more than 1.5 times the beam width, a sign that the emission is extended rather than a point source; false otherwise, including for every source that is not detected."),
 }
@@ -4065,7 +4090,111 @@ for _band, _wave in (("P70", "70"), ("P100", "100"), ("P160", "160")):
         _text = _reading.format(w=_wave, b=_band)
         if _band == "P160" and _name == "FNU_{b}_MJY":
             _text += _P160_NOTE
+        if _band == "P160" and _name == "ORIGIN_{b}":
+            _text += (" At 160 micron a peak of a cloud filament can fall within 2 arcsec of a young star by chance; "
+                      "such coincidences are counted in EXPECTED_CHANCE_COINCIDENCES.")
         REGISTRY[("photometry_pacs_source", _name.format(b=_band))] = (_units, _text)
+
+
+# PACS completeness and photometric error measured by recovering artificial sources (2026-10-27,
+# PACS_COMPLETENESS_PLAN.md v2). These entries replace the ones above for the datasets whose meaning
+# changed, add the four measured-calibration datasets, and drop the two datasets the measurement no
+# longer writes (the noise tail factor and the gain).
+_PACS_INJECTION_READINGS = {
+    "MAG_GRID_{b}": ("mag relative to 1 Jy",
+        "The magnitudes CURVE_{b} and the per-plane columns are tabulated at: m = -2.5 log10(flux / 1 Jy), -3.5 "
+        "to 5.5 in steps of 0.25, bright to faint (the same grid for every region). The zero point is 1 Jy, "
+        "stored on CURVE_{b} as ZERO_POINT_JY."),
+    "ENVELOPE_{b}": ("completeness fraction x600, uint16",
+        "At each magnitude of MAG_GRID_{b}, the largest value of CURVE_{b} over all rows: the deepest {w} micron "
+        "completeness anywhere in this region, stored as the fraction times 600; all zero where the region has "
+        "no {w} micron coverage."),
+    "COMPLETED_FROM_{b}": ("mag",
+        "All NaN: every {w} micron curve is measured over its whole range; nothing is extrapolated. Kept so the "
+        "layout matches completeness_sesna_source."),
+    "N_SIGMA_POS_{b}": ("positions",
+        "For each row of CURVE_{b}, how many random positions set its noise CELL_SIGMA_{b}_MJY: the positions on "
+        "valid data farther than one beam from every bright source, summed over the cells of the 3 x 3 block of "
+        "cells around it whose noise entered the median. 0 means no cell of the block was clean and the map's "
+        "median noise was used."),
+    "CELL_RA_{b}": ("deg ICRS", "Right ascension of the centre of each cell of CURVE_{b}, in the same row order."),
+    "CELL_DEC_{b}": ("deg ICRS", "Declination of the centre of each cell of CURVE_{b}, in the same row order."),
+    "CELL_MAP_{b}": ("map identifier",
+        "The archive file name of the {w} micron map each cell of CURVE_{b} was measured on."),
+    "CURVE_{b}": ("completeness fraction x600, uint16",
+        "One row per covered 30-arcsec cell of the region's co-added Herschel PACS {w} micron mosaic (one map: every "
+        "{w} micron map of the region resampled onto one grid and averaged, so no position is counted twice), for all cells inside the "
+        "region's source bounding box padded by about 7 arcmin. Each value is the fraction of artificial point sources of the "
+        "flux in MAG_GRID_{b} that the catalogue recovers as detections at that cell, stored as the fraction "
+        "times 600. The artificial sources are the mosaic's point-spread pattern at their position (the average of the input maps' patterns, weighted as the maps are averaged there) added to a copy of the mosaic at "
+        "random positions, never two close enough for one's light to reach the other's aperture or sky annulus, "
+        "and counted as recovered when the blind detection (a peak of the PSF-matched map reaching 5 times "
+        "CELL_SIGMA_MATCHED_{b} above CELL_OFFSET_MATCHED_{b}, as the PACS source table is built) finds a source within "
+        "the map's matching radius (MAP_R_MATCH_{b}_ARCSEC) of the injected position; where a PACS source of the real map "
+        "already lies within the radius, only if the artificial source is the brighter. No SESNA source enters: the "
+        "curve is the chance that a point source of that flux there is found by the detection. Artificial sources are injected at fixed multiples of each cell's own noise (CELL_SIGMA_{b}_MJY), from 0.3 to 1000 times it in steps of 0.1 in the logarithm, and the counts of the cells whose centres lie within 120 arcsec of the cell on the same map are added at each multiple (widened to 240, then 360 arcsec where fewer than 100 result). The value at a flux is read at that flux over the cell's own CELL_SIGMA_{b}_MJY, interpolating linearly in the logarithm between the two nearest multiples: the shape comes from the neighbourhood, the scale and the offset are the cell's own. The value at "
+        "the faintest fluxes is not zero: it is the chance that a position lies within the matching radius of a PACS "
+        "source already there, which the faint artificial source does not outshine. Rows are ordered by map and "
+        "then cell."),
+    "N_POS_{b}": ("injections",
+        "For each row of CURVE_{b}, the number of artificial sources behind its value at the faintest plane of "
+        "MAG_GRID_{b}: those injected at the two multiples of the noise that bracket that flux, in the cells within "
+        "the pooling radius (120 arcsec, widened where too few) on its map, on valid data (the smaller of the two "
+        "counts)."),
+    "FLUX90_{b}_MJY": ("mJy",
+        "For each row of CURVE_{b}, the faintest flux at which the recovered fraction of the artificial sources is "
+        "still at least 0.9: the grid read from its bright end, interpolated linearly in the logarithm of the flux "
+        "to where the fraction crosses 0.9. NaN where even the brightest plane does not reach 0.9; the faintest "
+        "plane's flux if no plane falls below it."),
+    "BIAS_{b}_MJY": ("mJy",
+        "For each row of CURVE_{b} and each plane of MAG_GRID_{b}: the median of (measured flux minus "
+        "CELL_OFFSET_{b}_MJY minus injected flux) over all the artificial sources measured by aperture photometry, "
+        "detected or not, measured in units of each injection's own cell noise, pooled and read as CURVE_{b} is, "
+        "and multiplied by the row's CELL_SIGMA_{b}_MJY. Stored as a disclosure and applied to nothing."),
+    "SCATTER_{b}_MJY": ("mJy",
+        "For each row of CURVE_{b} and each plane of MAG_GRID_{b}: the photometric error of a {w} micron flux "
+        "measured by aperture photometry in that cell at that flux, 1.4826 times the median absolute deviation "
+        "about the median of (measured flux minus CELL_OFFSET_{b}_MJY minus injected flux) over all the artificial "
+        "sources, detected or not (a detection's error must not be conditioned on the detection). It is measured "
+        "in units of each injection's own cell noise at each multiple of the noise, pooled over the cells within "
+        "120 arcsec on the same map (widened where fewer than 100), read at the flux over the row's own "
+        "CELL_SIGMA_{b}_MJY and multiplied by it; above 1000 times the noise it grows in proportion to the flux. "
+        "The artificial sources are at random positions; a real source sits where it sits, and equating the two "
+        "is the standard assumption of every artificial-source test."),
+    "CELL_SIGMA_{b}_MJY": ("mJy",
+        "The noise of a {w} micron flux measured in each cell of CURVE_{b}, used only to decide detection: the "
+        "median, over the 3 x 3 block of cells around it, of 1.4826 times the median absolute deviation about "
+        "CELL_OFFSET_{b}_MJY of the fluxes measured at each cell's random positions farther than one beam from "
+        "every bright source (one cell alone holds only about ten independent beams). A flux is a detection when "
+        "it minus CELL_OFFSET_{b}_MJY is at least 5 times this value. It is not the uncertainty of a detected "
+        "source (that is SCATTER_{b}_MJY) and no tail correction is applied."),
+    "SKY_BIN_{b}": ("bin index, 0-4",
+        "For each row of CURVE_{b}: the cell's within-map sky-brightness bin, the cells of each map cut into 5 equal "
+        "groups by the clipped sky in their annulus (0 faintest). The PACS source table's spurious rate is per bin."),
+    "CELL_SIGMA_MATCHED_{b}": ("map units (PSF-weighted mean surface brightness)",
+        "For each row of CURVE_{b}: the noise of the PSF-matched map (the detection image) in the cell, measured as "
+        "CELL_SIGMA_{b}_MJY is (1.4826 times the median absolute deviation at the cell's clean random positions, the "
+        "median over its 3 x 3 block). A PACS source is a peak of that map at least 5 times this above "
+        "CELL_OFFSET_MATCHED_{b}."),
+    "CELL_OFFSET_MATCHED_{b}": ("map units (PSF-weighted mean surface brightness)",
+        "For each row of CURVE_{b}: the median of the PSF-matched map at the cell's clean random positions (its level "
+        "there, which detection is counted from)."),
+    "MAP_R_MATCH_{b}_ARCSEC": ("arcsec",
+        "One value per map (MAP_ID_{b}, the mosaic): the matching radius (R_MATCH in the PACS source table) used for the map's "
+        "artificial sources and for the cross-match of the SESNA sources measured on it."),
+}
+for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
+    for _name, (_u, _r) in _PACS_INJECTION_READINGS.items():
+        REGISTRY[("completeness_pacs_source", _name.format(b=_band))] = (_u, _r.format(b=_band, w=_w))
+    REGISTRY[("photometry_pacs_source", "SIGMA_%s_MJY" % _band)] = (
+        "mJy",
+        "Uncertainty of the flux. For a detected source (ORIGIN 1) it is the photometric error measured by "
+        "recovering artificial sources of known flux injected into the map, at the source's own signal-to-noise "
+        "(FNU over its cell noise): the scatter measured in its 30-arcsecond cell (SCATTER of the completeness "
+        "product). For a source that is covered but not detected "
+        "(ORIGIN 90) it is the noise of its cell, LOCAL_RMS. Where ORIGIN is 3 it is the error of the detection "
+        "whose flux is the bound (the same calibrated error, at that detection's flux); NaN where the band does not cover the source, and where the "
+        "completeness product has no measurement for the cell at any flux.")
 
 
 
@@ -4107,41 +4236,14 @@ REGISTRY[("sources_sesna_source", "ORIGIN_FNU")] = ("code",
     "meaning Pokhrel et al. 2023, eHOPS I, ApJS 266, 32, gave the old catalogue column)." + _PACS_TAIL)
 # Unit 3: completeness_sesna_source grows to eleven bands (P70, P100, P160 copied from the PACS input)
 for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
-    for _name, (_u, _r) in _PACS_COMPLETENESS_CELLS_READINGS.items():
-        if _name in ("SOURCE_ROW", "CELL_GAIN_{b}", "CELL_TAIL_FACTOR_{b}"):
-            continue
-        REGISTRY[("completeness_sesna_source", _name.format(b=_band))] = (
-            _u, _r.format(b=_band, w=_w, n=200, mmin="-3.5", mmax="5.5", dm="0.25"))
-    # Unit 3c: the PACS curve is the measured recovered fraction of artificial point sources
-    REGISTRY[("completeness_sesna_source", "CURVE_%s" % _band)] = (
-        "completeness fraction x600, uint16",
-        "One row per covered 30-arcsec cell of every Herschel PACS %s micron map, for all cells inside the "
-        "region's source bounding box padded by about 7 arcmin (overlapping maps each keep their cells; "
-        "SOURCE_ROW points at the deepest one). Each value is the measured fraction of artificial point sources of "
-        "the flux in MAG_GRID_%s that were recovered as detections at that cell, stored as the fraction times 600. "
-        "The artificial sources were added to a copy of the real map at random positions and measured exactly as "
-        "a catalogue source is; a source counts as recovered when its flux minus CELL_OFFSET_%s_MJY reaches 5 times "
-        "CELL_SIGMA_%s_MJY. The counts of all cells whose centres lie within 120 arcsec are added before the "
-        "fraction is taken. The fraction at the faintest planes is the false-positive floor of the 5-sigma rule as "
-        "measured, not zero. Rows are ordered by map and then cell." % (_w, _band, _band, _band))
-    REGISTRY[("completeness_sesna_source", "N_POS_%s" % _band)] = (
-        "injections",
-        "For each row of CURVE_%s, the number of artificial sources behind its value at the faintest plane of "
-        "MAG_GRID_%s: those that fell in the cells within 120 arcsec of the row's cell and lay on valid data. Rows "
-        "near a map's edge have fewer." % (_band, _band))
-    REGISTRY[("completeness_sesna_source", "CELL_SIGMA_%s_MJY" % _band)] = (
-        "mJy",
-        "The noise of a %s micron flux measured in each cell of CURVE_%s, used only to decide detection: the "
-        "median, over the 3 x 3 block of cells around it, of 1.4826 times the median absolute deviation about "
-        "CELL_OFFSET_%s_MJY of the fluxes measured at each cell's random positions farther than one beam from "
-        "every bright source. A flux is a detection when it minus CELL_OFFSET_%s_MJY is at least 5 times this "
-        "value. No tail correction is applied." % (_w, _band, _band, _band))
+    for _tmpl in PACS_COPIED:
+        _name = _tmpl.format(b=_band)
+        REGISTRY[("completeness_sesna_source", _name)] = REGISTRY[("completeness_pacs_source", _name)]
     REGISTRY[("completeness_sesna_source", "PIXEL_CURVE_%s" % _band)] = (
         "dimensionless (completeness fraction, 0..1)",
         "For each admitted nside-512 pixel in HPX_PIX_512, the %s micron completeness curve at "
         "MAG_GRID_%s's magnitudes: the mean of CURVE_%s over the cells that the pixel's 256 sample points fall "
-        "in (each point on the deepest %s micron map that holds a cell there, positions moved by the map's "
-        "registration shift), as a fraction (not times 600). Averaged over the covered points only, so it is "
+        "in (each point on the %s micron mosaic, positions moved by its registration shift, none), as a fraction (not times 600). Averaged over the covered points only, so it is "
         "the curve where the band has data; all zero where the pixel has no %s micron coverage "
         "(PIXEL_COVERED_FRAC_%s is 0)." % (_w, _band, _band, _w, _w, _band))
     REGISTRY[("completeness_sesna_source", "PIXEL_COVERED_FRAC_%s" % _band)] = (
@@ -4156,8 +4258,8 @@ REGISTRY[("completeness_sesna_source", "SOURCE_ROW")] = (
     "CURVE_<band> holding this source's completeness curve. For I1-M1, its nearest on-map 30-arcsec pixel, -1 "
     "where the source is off every field's map in that band. For J/H/Ks, the row of the nside-128 pixel the "
     "source falls in, never -1 (2MASS is all-sky). For P70/P100/P160, the row of the 30-arcsec cell the source "
-    "falls in on the deepest PACS map covering it, copied from the PACS completeness file; -1 where no map "
-    "covers the source in that band. A source near a map edge can have a row here yet be marked not covered "
+    "falls in on the band's PACS mosaic, copied from the PACS completeness file; -1 where the mosaic does not "
+    "cover the source in that band. A source near a map edge can have a row here yet be marked not covered "
     "(ORIGIN 91) in the PACS photometry; the photometry's ORIGIN decides.")
 
 

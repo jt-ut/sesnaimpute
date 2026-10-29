@@ -63,7 +63,7 @@ from sesnaimpute import definitions
 from sesnaimpute import pieces as pieces_module
 from sesnaimpute import progress as progress_module
 from sesnaimpute import regions as regions_module
-from sesnaimpute.attrs_registry import REGISTRY
+from sesnaimpute.attrs_registry import PACS_COPIED as _PACS_COPIED, REGISTRY
 from sesnaimpute.build import run
 from sesnaimpute.catalog import depth_grid as depth_grid_module
 
@@ -714,16 +714,6 @@ def _complete_field(placed, field_map, band, grid, template_offsets, template_c)
 _PACS_POINT_BLOCK = 2_000_000
 #: Admitted pixels per block when the pixel curves are summed.
 _PACS_PIXEL_BLOCK = 1000
-
-#: Datasets of the input file copied verbatim for each PACS band (name templates).
-_PACS_COPIED = (
-    "CURVE_{b}", "MAG_GRID_{b}", "COMPLETED_FROM_{b}", "ENVELOPE_{b}",
-    "CELL_ID_{b}", "CELL_MAP_INDEX_{b}", "CELL_MAP_{b}", "CELL_RA_{b}", "CELL_DEC_{b}",
-    "CELL_SIGMA_{b}_MJY", "CELL_OFFSET_{b}_MJY",
-    "CELL_OBSID_{b}", "N_POS_{b}", "N_SIGMA_POS_{b}",
-    "MAP_ID_{b}", "MAP_OBSID_{b}", "MAP_WCS_{b}", "MAP_SHAPE_{b}", "MAP_CELL_STEP_{b}",
-    "MAP_SHIFT_{b}_ARCSEC", "MAP_N_PAIRS_{b}",
-)
 
 
 def _pacs_input_path(config, region):
