@@ -94,11 +94,6 @@ CLASSES = tuple(c.code for c in definitions.CLASSES)
 YSO_INDEX = CLASSES.index("YSO")
 N_BANDS = len(definitions.BANDS)
 
-#: TEST SWITCH for identity B (unit 8; REMOVED IN THE MERGE): `--pacs-off`
-#: forces ORIGIN 91 on the PACS columns, the same switch as `fittp.sweep`'s.
-_PACS_OFF = [False]
-_PACS_INDEX = np.array([i for i, k in enumerate(b.key for b in definitions.BANDS)
-                        if k not in definitions.SESNA_BANDS], dtype=np.int64)
 
 #: Each class's contiguous slice of `definitions.CLASSMAP`'s rows
 #: (verified against `SUBCLASSES_OF` below at import time, never assumed
@@ -504,8 +499,6 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
         flux = np.asarray(cf["FNU_MJY"][start:stop], dtype=np.float64)
         sigma = np.asarray(cf["SIGMA_FNU_MJY"][start:stop], dtype=np.float64)
         origin = np.array(cf["ORIGIN_FNU"][start:stop])
-        if _PACS_OFF[0]:                        # identity-B test switch, removed in the merge
-            origin[:, _PACS_INDEX] = 91
         # the class SESNA delivered for these sources, carried through so the
         # catalogue's own label is in the product the classification is read
         # from; nothing in the pipeline reads it (rule 7).
@@ -964,8 +957,6 @@ if __name__ == "__main__":
     parser.add_argument("--regions", nargs="+", default=None)
     parser.add_argument("--beta", type=float, default=None,
                          help="default: root.cfg's [fittp] beta (0.0 if absent)")
-    parser.add_argument("--pacs-off", action="store_true",
-                         help="TEST SWITCH (identity B; removed in the merge): force ORIGIN 91 on the PACS columns")
     parser.add_argument("--n-jobs", type=int, default=None)
     args = parser.parse_args()
     cfg = config_module.load(args.config)
@@ -979,5 +970,4 @@ if __name__ == "__main__":
         beta = ini.getfloat("fittp", "beta", fallback=0.0)
     else:
         beta = args.beta
-    _PACS_OFF[0] = args.pacs_off
     build(cfg, regions=args.regions, beta=beta)

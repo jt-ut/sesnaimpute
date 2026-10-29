@@ -58,6 +58,7 @@ GRAY_COLUMN = -2.0
 #: source fittable.
 MIN_DETECTED_BANDS = definitions.SELECTION.min_bands
 SELECTION_INDEX = np.array(definitions.SELECTION_INDEX, dtype=np.int64)
+_SELECTION_SET = frozenset(int(i) for i in definitions.SELECTION_INDEX)
 
 #: `catalog.curated`'s ORIGIN_FNU code for a band the survey never observed
 #: at the source's position: no flux and no completeness depth of its own,
@@ -69,13 +70,24 @@ SELECTION_INDEX = np.array(definitions.SELECTION_INDEX, dtype=np.int64)
 #: no non-detection term -- it is excluded, like a band with no limit.
 ORIGIN_UNOBSERVED = 91
 
+#: `catalog.curated`'s ORIGIN_FNU code 3, a PACS bound: a detection within a
+#: beam whose flux cannot be assigned to this source alone, so `FNU_MJY` is
+#: a CEILING on the source's own flux and `SIGMA_FNU_MJY` the detection's
+#: calibrated error (owner ruling 2026-10-29). Scored as a censored upper
+#: bound, `ln Phi((FNU - F_model) / SIGMA)` in linear flux (mJy), by
+#: `ln_bound`; never read against a completeness curve, never counted as
+#: detected or as a non-detection, never in the detected-band correlation
+#: term. ORIGIN 2 (the survey's own upper limit) is a different code with
+#: its own, unchanged path (not detected, scored through the curve).
+ORIGIN_BOUND = 3
+
 #: SPEC_BMSTP_DRAFT.md section 6.1 -- the reported mark's ceiling, in A_K
 #: magnitudes; the design's own A_V amplitude is clamped to this converted
 #: by the source's own (A_K/A_V).
 AV_CLAMP_MAX_AK = 75.0
 
 #: The per-source working set this module holds at its own peak, in
-#: float32-`(n_model, 8)` equivalents (PARALLEL brief item 8's memory
+#: float32-`(n_model, N_BANDS)` equivalents (PARALLEL brief item 8's memory
 #: disclosure, `fittp.sweep.build_region_class`'s printed line): `r`
 #: (float64, held across the chi2 and marks products, 2 equivalents) plus
 #: `r @ p_mat` (float64, transient during the chi2 product, 2) or, once
@@ -86,15 +98,29 @@ AV_CLAMP_MAX_AK = 75.0
 #: kernel output + masked copy). Ten in this table's own count: the
 #: register `log10_f_ref` (`(m, N_BANDS)` float32, shared read-only across every
 #: worker by fork, not a per-worker allocation) is excluded, matching
-#: `fittp.sweep`'s own disclosure formula (`n_model * 8 * 4 *
+#: `fittp.sweep`'s own disclosure formula (`n_model * N_BANDS * 4 *
 #: WORKER_WORKING_SET_EQUIV` bytes per worker, about 64 MB at YSO's
 #: 200,000 templates with one worker's own r/rp/nondet buffers live at
 #: once).
 WORKER_WORKING_SET_EQUIV = 10
 
 
+def ln_bound(log10_fhat, fnu, sigma):
+    """The PACS bound's censored term, `ln P(F_model + noise <= FNU) = ln
+    Phi((FNU - F_model) / SIGMA)`, in linear flux (mJy), for the array of
+    `log10_fhat` (the model's log10 flux in this band) against ONE band's
+    ceiling `fnu` and calibrated error `sigma` (both mJy). Reads no
+    completeness curve. `scipy.special.log_ndtr` is the stable log of the
+    normal CDF; the numba scalar twin in `fittp.prior_reader` is
+    `_ln_bound`."""
+    from scipy.special import log_ndtr
+    f_model = np.power(10.0, np.asarray(log10_fhat, dtype=np.float64))
+    return log_ndtr((fnu - f_model) / sigma)
+
+
 def _ln_nondet(ext_col32, log10_f_ref, av_clamped32, sc_clamped32,
-               curve_rows, band_a, band_c, band_n, nondet_mask, detected_mask):
+               curve_rows, band_a, band_c, band_n, nondet_mask, detected_mask,
+               bound_mask=None, bound_fnu=None, bound_sigma=None):
     """The non-detection term of section 6.2 at the CLAMPED marks, for one
     source's own `m` templates: the predicted log-flux in every band for
     every template, masked to this source's own undetected, covered bands
@@ -169,13 +195,25 @@ def _ln_nondet(ext_col32, log10_f_ref, av_clamped32, sc_clamped32,
             np.ascontiguousarray(log10_fhat[:, b]), float(band_a[b]), float(band_c[b]))
         total += ln_one_minus_p
         min_total = np.minimum(min_total, ln_one_minus_p)
+    # The PACS bound (ORIGIN 3): a censored upper-bound term per bound band,
+    # `ln Phi((FNU - F_model)/SIGMA)`, independent of the curve and of the
+    # correlation mixture below, so it adds to `total` AFTER the mixture
+    # (the mixture sees only the curve-scored undetected bands).
+    bound_sum = np.zeros(m, dtype=np.float64)
+    if bound_mask is not None:
+        for b in range(N_BANDS):
+            if bound_mask[b]:
+                bound_sum += ln_bound(log10_fhat[:, b], float(bound_fnu[b]), float(bound_sigma[b]))
     lam = constants.LAMBDA
     if lam <= 0.0:
-        return total.astype(np.float32)
+        return (total + bound_sum).astype(np.float32)
     ln_a = np.zeros(m, dtype=np.float64)
     max_det = np.full(m, -np.inf, dtype=np.float64)
     for b in range(N_BANDS):
-        if not detected_mask[b]:
+        # DEFECT 2: the detected-cleared term runs over the SELECTION bands
+        # only; LAMBDA was fitted on those (population/detection_correlation.py),
+        # so a PACS detection never enters it.
+        if not detected_mask[b] or b not in _SELECTION_SET:
             continue
         ln_one_minus_pd = completeness_module.ln_one_minus_completeness(
             curve_rows[b], 0.0, 0.0, int(band_n[b]),
@@ -191,14 +229,14 @@ def _ln_nondet(ext_col32, log10_f_ref, av_clamped32, sc_clamped32,
         if lam >= 1.0:
             ln_comon = ln_r - ln_b
             ln_comon = np.where(degenerate | ~np.isfinite(ln_comon) | (ln_comon < floor), floor, ln_comon)
-            return ln_comon.astype(np.float32)
+            return (ln_comon + bound_sum).astype(np.float32)
         ln_one_minus_lam = np.log(1.0 - lam)
         ln_lam = np.log(lam)
         ln_num = np.logaddexp(ln_one_minus_lam + ln_a + total, ln_lam + ln_r)
         ln_den = np.logaddexp(ln_one_minus_lam + ln_a, ln_lam + ln_b)
         ln_p = ln_num - ln_den
     ln_p = np.where(degenerate | ~np.isfinite(ln_p) | (ln_p < floor), floor, ln_p)
-    return ln_p.astype(np.float32)
+    return (ln_p + bound_sum).astype(np.float32)
 
 
 class Batch:
@@ -230,7 +268,8 @@ class Batch:
 
     __slots__ = ("log10_f_obs", "weight", "config",
                  "curve_rows", "band_a", "band_c", "band_n", "nondet_mask",
-                 "detected_mask", "n_detected", "flagged", "ln_norm_term")
+                 "detected_mask", "bound_mask", "bound_fnu", "bound_sigma",
+                 "n_detected", "flagged", "ln_norm_term")
 
     def __init__(self, **kw):
         for key, value in kw.items():
@@ -352,9 +391,18 @@ def prepare(config, flux, sigma, origin, sigma_lib_l, curve_rows, covered,
     # detections fall in here too, since `detected` already excludes them.
     covered = np.asarray(covered, dtype=bool)
     unobserved = np.asarray(origin) == ORIGIN_UNOBSERVED
-    nondet_mask = (~detected) & covered & ~unobserved
+    # ORIGIN 3, the PACS bound: its own mask. Neither detected (no Gaussian,
+    # not in the correlation term) nor a non-detection (no curve): `FNU` is a
+    # ceiling scored as a censored bound, `ln Phi((FNU - F_model)/SIGMA)`. A
+    # bound row without a finite positive ceiling and error carries no term.
+    is_bound = np.asarray(origin) == ORIGIN_BOUND
+    bound_mask = is_bound & np.isfinite(flux) & (flux > 0) & np.isfinite(sigma) & (sigma > 0)
+    nondet_mask = (~detected) & covered & ~unobserved & ~is_bound
 
-    return Batch(log10_f_obs=log10_f_obs, weight=weight, config=config,
+    return Batch(bound_mask=bound_mask,
+                 bound_fnu=np.where(bound_mask, flux, 0.0),
+                 bound_sigma=np.where(bound_mask, sigma, 1.0),
+                 log10_f_obs=log10_f_obs, weight=weight, config=config,
                  curve_rows=np.asarray(curve_rows, dtype=np.float64),
                  band_a=np.asarray(band_a, dtype=np.float64),
                  band_c=np.asarray(band_c, dtype=np.float64),
@@ -503,7 +551,8 @@ def fit(batch, log10_f_ref, w):
     sc_clamped32 = sc_clamped.astype(np.float32)
     ln_nondet = _ln_nondet(ext_col32, log10_f_ref, av_clamped32, sc_clamped32,
                             batch.curve_rows, batch.band_a, batch.band_c, batch.band_n,
-                            batch.nondet_mask, batch.detected_mask)
+                            batch.nondet_mask, batch.detected_mask,
+                            batch.bound_mask, batch.bound_fnu, batch.bound_sigma)
     ln_nondet = ln_nondet + np.float32(batch.ln_norm_term)
 
     if source_flagged:

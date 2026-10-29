@@ -171,15 +171,6 @@ from sesnaimpute.granules import access as granule_access
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 N_BANDS = len(BAND_KEYS)
 
-#: TEST SWITCH for the coordinator's identity B (redesign_2026-10-27, unit 8):
-#: `--pacs-off` forces ORIGIN 91 (not covered) on every non-SELECTION band
-#: (the PACS columns) before `likelihood.prepare`, so the eleven-band fit
-#: reproduces the eight-band fit. REMOVED IN THE MERGE after identity B
-#: passes. Set by `build(pacs_off=...)` in the parent, inherited by the fork.
-_PACS_OFF = [False]
-_PACS_INDEX = np.array([i for i, k in enumerate(BAND_KEYS) if k not in definitions.SESNA_BANDS],
-                       dtype=np.int64)
-
 #: the seven classes, in the fitter's own class-axis order
 #: (IMPLEMENTATION_BMSTP_DRAFT.md section 1).
 CLASSES = tuple(c.code for c in definitions.CLASSES)
@@ -265,7 +256,7 @@ _FIELD_OF_KEY = {
 def _register(config, cls, region):
     """`(template_log, n_sub, subclass_prob)` for `cls`'s own library
     register (`definitions.CLASS_REGISTER`): `template_log` is `(n_model,
-    8)` float32 `log10 F_REF` (floored at the register's own
+    N_BANDS)` float32 `log10 F_REF` (floored at the register's own
     `FLOOR_LINEAR`, its FREFRAW convention -- a genuinely dark band is not
     `-inf`), in `definitions.BANDS` order. `subclass_prob` is `(n_model,
     n_sub)` float64, every row summing to 1, in `definitions.
@@ -617,9 +608,6 @@ def _source_task(i):
         flux = w["flux"][i]
         sigma = w["sigma"][i]
         origin = w["origin"][i]
-        if _PACS_OFF[0]:                        # identity-B test switch, removed in the merge
-            origin = np.array(origin, copy=True)
-            origin[_PACS_INDEX] = 91
 
         # COMPLETENESS_2026-10-20.md "Per-source access in the fitter",
         # amended by C6_twomass_pixel_depths.md: this source's own eleven
@@ -732,7 +720,8 @@ def _source_task(i):
                 w["template_log"], ext_col_ak_k,
                 batch.curve_rows[None, :, :],
                 batch.band_a, batch.band_c, batch.band_n,
-                batch.nondet_mask[None, :], batch.detected_mask[None, :], gaia_inputs)
+                batch.nondet_mask[None, :], batch.detected_mask[None, :],
+                batch.bound_mask[None, :], batch.bound_fnu[None, :], batch.bound_sigma[None, :], gaia_inputs)
             ln_lambda2[k] = ln_lambda2_k[0]
             ln_lambda0[k] = ln_lambda0_k[0]
             ln_lambda1[k] = ln_lambda1_k[0]
@@ -1600,7 +1589,7 @@ def join_parts(summary, topk, config):
 
 
 def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=None,
-          join=True, join_only=False, pacs_off=False):
+          join=True, join_only=False):
     """Writes `fittp/fit/<CLS>_fit_source__R.hdf5` for every {region,
     class} pair (default all thirty regions, all seven classes; section
     1.3, IMPLEMENTATION_BMSTP_DRAFT.md P7). `limit` restricts every
@@ -1625,7 +1614,6 @@ def build(config, regions=None, classes=None, limit=None, n_workers=1, batches=N
     """
     region_names = regions if regions is not None else [r.name for r in regions_module.REGIONS]
     class_codes = classes if classes is not None else list(CLASSES)
-    _PACS_OFF[0] = bool(pacs_off)
     t0 = time.time()
     for region in region_names:
         catalog = None if join_only else _load_region_catalog(config, region)
@@ -1691,9 +1679,6 @@ if __name__ == "__main__":
     parser.add_argument("--join-only", action="store_true",
                          help="sweep nothing; join every part file on disk into the class's "
                               "product (run once, after every part job of a split class has ended)")
-    parser.add_argument("--pacs-off", action="store_true",
-                         help="TEST SWITCH (identity B; removed in the merge): force ORIGIN 91 on the "
-                              "PACS columns so the eleven-band fit reproduces the eight-band fit")
     #: applied to config.n_jobs only; the sweep's own pool is --workers / fittp_workers, unchanged
     parser.add_argument("--n-jobs", type=int, default=None)
     args = parser.parse_args()
@@ -1707,4 +1692,4 @@ if __name__ == "__main__":
     n_workers = args.workers if args.workers is not None else cfg.fittp_workers
     build(cfg, regions=args.regions, classes=args.classes, limit=args.limit,
           n_workers=n_workers, batches=args.batches,
-          join=not args.no_join, join_only=args.join_only, pacs_off=args.pacs_off)
+          join=not args.no_join, join_only=args.join_only)
