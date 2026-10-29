@@ -579,12 +579,15 @@ def hppsc_checks(config, region):
     """The external check of the region's PACS source list against HPPSC, per band (planner ruling, owner-approved
     2026-10-29; HPPSC enters no product): (1) how many of our maps HPPSC was built from (its observation table, the
     paper's Table 8); (2) the offsets of common sources, HPPSC to our nearest detection in the band within one beam,
-    at that band's own detection position (RA_<b>_DEG, on the same map's pointing as HPPSC's); (3) the median flux ratio ours / HPPSC over common sources (within MATCH_RADIUS_ARCSEC, HPPSC S/N >=
-    HPPSC_FLUX_SNR), ours on HPPSC's convention (FNU plus the cell offset: HPPSC subtracts only its annulus sky), bar
-    within HPPSC_FLUX_BAR; (4) of the HPPSC sources inside our footprint with flux at least our FLUX90 at their
-    position (the completeness product read as a function of position, `catalog.completeness._PacsBand`), the
-    fraction our detection finds in the band within MATCH_RADIUS_ARCSEC, bar HPPSC_RECOVERY_BAR within binomial error.
-    HPPSC states no reliability of its own: a false HPPSC source counts against (4). Nothing is written."""
+    at that band's own detection position (RA_<b>_DEG, on the same map's pointing as HPPSC's), as information;
+    (3) the median flux ratio ours / HPPSC over common sources (within one beam, HPPSC S/N >= HPPSC_FLUX_SNR), ours on
+    HPPSC's convention (FNU plus the cell offset: HPPSC subtracts only its annulus sky), bar within HPPSC_FLUX_BAR;
+    (4) of the HPPSC sources inside our footprint with flux at least our FLUX90 at their position (the completeness
+    product read as a function of position, `catalog.completeness._PacsBand`), the fraction our detection finds in the
+    band within one beam, bar HPPSC_RECOVERY_BAR within binomial error. Common sources are matched within one beam,
+    not the association's 2 arcsec, so that the checks measure detection and not the two catalogues' astrometry
+    (HPPSC's is 1.5-1.7 arcsec, and the 100 micron maps are separate observations; planner ruling, owner-approved
+    2026-10-29). HPPSC states no reliability of its own: a false HPPSC source counts against (4). Nothing is written."""
     from sesnaimpute.catalog.completeness import _PacsBand
     from sesnaimpute.sky.derived.pacs_completeness import BEAM_ARCSEC
     comp = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
@@ -632,7 +635,7 @@ def hppsc_checks(config, region):
                       % (region, b, int(near.sum()), BEAM_ARCSEC[b], np.median(sep[near]), np.percentile(sep[near], 68),
                          np.percentile(sep[near], 90), np.median(east[near]), np.median(north[near]), MATCH_RADIUS_ARCSEC,
                          float(np.mean(sep[near] <= MATCH_RADIUS_ARCSEC))))
-            common = near & (sep <= MATCH_RADIUS_ARCSEC)
+            common = near                   # within one beam (planner ruling, owner-approved 2026-10-29)
             ours_flux = mine[b]["fnu"][k] + np.nan_to_num(mine[b]["off"][k])
             use = common & (hsnr >= HPPSC_FLUX_SNR) & np.isfinite(ours_flux) & (hflux > 0)
             if use.any():
