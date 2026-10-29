@@ -9,7 +9,7 @@ use, no runbook line (IMPLEMENTATION_BMSTP_DRAFT.md section 4 row 2.2).
 per-band weight at variance `sigma_i^2 = sigma_log,i^2 + sigma_cal,i^2 +
 sigma_lib,L,i^2` (section 6.1; `sigma_lib,L`, one number PER BAND,
 WP-PRIOR-8, read once by the caller from `fittp.library_resolution`'s
-check product for the class named and handed in as an `(8,)` array), a
+check product for the class named and handed in as an `(N_BANDS,)` array), a
 band SESNA marks detected but whose flux is <= 0
 counted as unmeasured rather than a fabricated datum, and a non-finite
 sigma on a detected band flagging the source rather than carrying a NaN
@@ -41,7 +41,7 @@ from sesnaimpute import definitions
 from sesnaimpute.catalog import completeness as completeness_module
 from sesnaimpute.population import selection as population_selection
 
-#: The eight SESNA bands, in the order every array here uses
+#: The eleven SED bands, in the order every array here uses
 #: (`definitions.BANDS`; the same order `catalog.limits.Completeness`'s
 #: `fraction`/`ln_one_minus_fraction`/`covered` key by `band`).
 BAND_KEYS = tuple(b.key for b in definitions.BANDS)
@@ -51,10 +51,13 @@ N_BANDS = len(BAND_KEYS)
 #: gray-scale column.
 GRAY_COLUMN = -2.0
 
-#: SPEC_PRIORS.md 1.3 / `population.selection.MIN_BANDS` -- SESNA's own
+#: SPEC_PRIORS.md 1.3 / `definitions.SELECTION` -- SESNA's own
 #: two-of-eight catalogue-inclusion rule: a source with fewer detected
-#: bands has no two-parameter fit and is flagged, not fitted.
-MIN_DETECTED_BANDS = 2
+#: SELECTION bands has no two-parameter fit and is flagged, not fitted.
+#: Counted over `SELECTION_INDEX` only: PACS detections never make a
+#: source fittable.
+MIN_DETECTED_BANDS = definitions.SELECTION.min_bands
+SELECTION_INDEX = np.array(definitions.SELECTION_INDEX, dtype=np.int64)
 
 #: `catalog.curated`'s ORIGIN_FNU code for a band the survey never observed
 #: at the source's position: no flux and no completeness depth of its own,
@@ -81,7 +84,7 @@ AV_CLAMP_MAX_AK = 75.0
 #: z=0 identity needs) and its masked copy (2) -- 8 in all at the
 #: non-detection term's own peak (`r` still live, `log10_fhat` + `z` +
 #: kernel output + masked copy). Ten in this table's own count: the
-#: register `log10_f_ref` (`(m, 8)` float32, shared read-only across every
+#: register `log10_f_ref` (`(m, N_BANDS)` float32, shared read-only across every
 #: worker by fork, not a per-worker allocation) is excluded, matching
 #: `fittp.sweep`'s own disclosure formula (`n_model * 8 * 4 *
 #: WORKER_WORKING_SET_EQUIV` bytes per worker, about 64 MB at YSO's
@@ -96,7 +99,7 @@ def _ln_nondet(ext_col32, log10_f_ref, av_clamped32, sc_clamped32,
     source's own `m` templates: the predicted log-flux in every band for
     every template, masked to this source's own undetected, covered bands
     and summed. `ext_col32` is the extinction-law solve's own converged
-    design column for this source, `(8,)` float32 (section 2).
+    design column for this source, `(N_BANDS,)` float32 (section 2).
 
     COMPLETENESS_2026-10-20.md "The reader": one call per masked band into
     `catalog.completeness.ln_one_minus_completeness` -- the SAME measured-
@@ -154,7 +157,7 @@ def _ln_nondet(ext_col32, log10_f_ref, av_clamped32, sc_clamped32,
     """
     log10_fhat = (log10_f_ref.astype(np.float64)
                   + ext_col32.astype(np.float64)[None, :] * av_clamped32.astype(np.float64)[:, None]
-                  + GRAY_COLUMN * sc_clamped32.astype(np.float64)[:, None])       # (m, 8) float64
+                  + GRAY_COLUMN * sc_clamped32.astype(np.float64)[:, None])       # (m, N_BANDS) float64
     m = log10_fhat.shape[0]
     total = np.zeros(m, dtype=np.float64)
     min_total = np.zeros(m, dtype=np.float64)
@@ -200,13 +203,13 @@ def _ln_nondet(ext_col32, log10_f_ref, av_clamped32, sc_clamped32,
 
 class Batch:
     """One source's own quantities the closed form and the non-detection
-    term need: `log10_f_obs` (`(8,)` float64, section 6.1) and its weight,
+    term need: `log10_f_obs` (`(N_BANDS,)` float64, section 6.1) and its weight,
     `flagged` (fewer than two valid detections, or a non-finite sigma on a
-    detected band, section 6.1/16), `curve_rows` (`(8, max_n)` float64,
+    detected band, section 6.1/16), `curve_rows` (`(N_BANDS, max_n)` float64,
     this source's own measured completeness curve per band, zero-padded
     past that band's own plane count -- COMPLETENESS_2026-10-20.md "The
     reader"; replaces `F_LIM_50`/`WIDTH_DEX`) with the region-wide
-    `band_a`/`band_c`/`band_n` (`(8,)`) that convert a log10 flux to a
+    `band_a`/`band_c`/`band_n` (`(N_BANDS,)`) that convert a log10 flux to a
     fractional plane index in each band, `ln_norm_term` (section 6.1's
     per-source Gaussian normalisation, over only the bands with a finite
     variance), and `config` (`fit`'s own need, the design's law). `fit`
@@ -215,7 +218,7 @@ class Batch:
     back on its own `Fit`, so the two designs `fittp.sweep._source_task`
     fits from the SAME `Batch` never clobber each other's.
 
-    `detected_mask` (`(8,)` bool, FINDINGS.md S03 / `briefs/round6_2026-
+    `detected_mask` (`(N_BANDS,)` bool, FINDINGS.md S03 / `briefs/round6_2026-
     10-22/U02_nondet_conditional.md`): `prepare`'s own `detected` array
     (origin-flagged and flux > 0, the same test that excludes a band from
     `nondet_mask`), kept so `_ln_nondet` -- and, threaded through
@@ -251,7 +254,7 @@ Fit = namedtuple("Fit", (
                               # at each cell's own a*, never this field)
     "flagged",                # bool -- prepare's own flag widened by this design's
                               # own singular XtWX (never written back to Batch)
-    "ext_col",                # (8,) f4 -- this design's own column, section 1's D
+    "ext_col",                # (N_BANDS,) f4 -- this design's own column, section 1's D
     "ak_per_av",              # float -- (A_K/A_V) at this design's own blend weight
     "sigma_a_ak",             # float -- sigma_a in A_K at this design
     "slope_sc_av",            # float -- d(SC)/d(A_V) at this design
@@ -262,7 +265,7 @@ Fit = namedtuple("Fit", (
 
 @lru_cache(maxsize=None)
 def sigma_lib_by_class(path):
-    """`{class code: sigma_lib,L (8,) dex}`, section 6.1's one vector PER
+    """`{class code: sigma_lib,L (N_BANDS,) dex}`, section 6.1's one vector PER
     BAND per LIBRARY (WP-PRIOR-8), from `fittp.library_resolution`'s check
     product (its `LIBRARY`/`SIGMA_LIB_DEX` datasets, `SIGMA_LIB_DEX`'s
     second axis in `BAND_KEYS` order). Called once by `fittp.sweep` in the
@@ -281,13 +284,13 @@ def prepare(config, flux, sigma, origin, sigma_lib_l, curve_rows, covered,
             band_a, band_c, band_n):
     """One source's own fit inputs (SPEC_BMSTP_DRAFT.md section 6.1): its
     fluxes, uncertainties and `ORIGIN_FNU` (the same read `fittp.cascade`
-    uses, each `(8,)`), this class's own per-band `sigma_lib,L` vector
-    `(8,)` (`sigma_lib_by_class`, read once in the parent), this source's
-    own measured completeness curve per band (`curve_rows`, `(8, max_n)`,
+    uses, each `(N_BANDS,)`), this class's own per-band `sigma_lib,L` vector
+    `(N_BANDS,)` (`sigma_lib_by_class`, read once in the parent), this source's
+    own measured completeness curve per band (`curve_rows`, `(N_BANDS, max_n)`,
     `fittp.sweep`'s own per-source gather off `catalog.limits.
     Completeness.source_row`/the region's `CURVE_<B>` tables, zero-padded
     past each band's own plane count) and whether the band has a curve at
-    all (`covered`, `(8,)` bool -- `catalog.limits.Completeness.covered`'s
+    all (`covered`, `(N_BANDS,)` bool -- `catalog.limits.Completeness.covered`'s
     own per-source value: a Spitzer band is covered where `SOURCE_ROW >=
     0`, a 2MASS band always). `band_a`/`band_c`/`band_n` are the region-wide
     index parameters `catalog.limits._band_ac` would hand a reader, read
@@ -333,7 +336,7 @@ def prepare(config, flux, sigma, origin, sigma_lib_l, curve_rows, covered,
     flagged_sigma = bool((detected & ~finite_sigma2).any())
     ln_norm_term = float(-0.5 * np.where(detected & finite_sigma2, np.log(sigma2), 0.0).sum())
 
-    n_detected = int(detected.sum())
+    n_detected = int(detected[SELECTION_INDEX].sum())
     flagged = (n_detected < MIN_DETECTED_BANDS) or flagged_sigma
 
     # section 6.2: a band with no measurement and no curve of its own is
@@ -384,7 +387,7 @@ def _widened_f_ref64(log10_f_ref):
 
 def fit(batch, log10_f_ref, w):
     """The closed-form fit of SPEC_BMSTP_DRAFT.md section 6.1 over every
-    template of `log10_f_ref` (`(m, 8)` float32, this class's shared
+    template of `log10_f_ref` (`(m, N_BANDS)` float32, this class's shared
     register) at this ONE source and ONE fixed extinction-law design `w`
     (0 the diffuse design, 1 the dense one; section 2's two-design
     mixture -- `fittp.sweep._source_task` calls this twice, once per
@@ -398,8 +401,8 @@ def fit(batch, log10_f_ref, w):
       `P @ X` at ~1e-4 instead of ~0, which fails identity (i) -- measured):
       `a_hat`, `log10_b_hat` float64; `chi2_min` float32. The design solve
       is one plain 2x2 matrix inverse per source (`xtwx`, `(2, 2)`), and
-      the marks are one `(m, 8) @ (8, 2)` matmul -- no per-call transpose,
-      `M` stored `(2, 8)` so `r @ M.T` needs none either.
+      the marks are one `(m, N_BANDS) @ (N_BANDS, 2)` matmul -- no per-call transpose,
+      `M` stored `(2, N_BANDS)` so `r @ M.T` needs none either.
     - The CLAMPED marks, `Av` restricted to `[0, 75/(A_K/A_V)_s]`: because
       the gray column is one constant in every band, the least-squares
       residual is orthogonal to both design columns, so re-solving `SC` at
@@ -436,33 +439,33 @@ def fit(batch, log10_f_ref, w):
     config = batch.config
     log10_f_ref = np.asarray(log10_f_ref, dtype=np.float32)
     log10_f_ref64 = _widened_f_ref64(log10_f_ref)
-    r = batch.log10_f_obs[None, :] - log10_f_ref64     # (m, 8) float64
+    r = batch.log10_f_obs[None, :] - log10_f_ref64     # (m, N_BANDS) float64
     m = r.shape[0]
-    weight = batch.weight                              # (8,) float64
+    weight = batch.weight                              # (N_BANDS,) float64
     diag = np.arange(N_BANDS)
 
-    kappa_k = population_selection.kappa_hybrid(config, w)          # (8,)
+    kappa_k = population_selection.kappa_hybrid(config, w)          # (N_BANDS,)
     ak_per_av = float(population_selection.ak_per_av(config, w))
-    ext_col = -0.4 * kappa_k * ak_per_av                                 # (8,)
+    ext_col = -0.4 * kappa_k * ak_per_av                                 # (N_BANDS,)
 
     design = np.empty((N_BANDS, 2), dtype=np.float64)
     design[:, 0] = ext_col
     design[:, 1] = GRAY_COLUMN
 
-    wx = design * weight[:, None]                    # (8, 2)
+    wx = design * weight[:, None]                    # (N_BANDS, 2)
     xtwx = wx.T @ design                              # (2, 2)
     det_xtwx = xtwx[0, 0] * xtwx[1, 1] - xtwx[0, 1] * xtwx[1, 0]
     source_flagged = bool(batch.flagged) or det_xtwx <= 0.0
     xtwx_safe = xtwx if not source_flagged else np.eye(2)
     xtwx_inv = np.linalg.inv(xtwx_safe)
 
-    m_mat = xtwx_inv @ wx.T                           # (2, 8), (XtWX)^-1 XtW
+    m_mat = xtwx_inv @ wx.T                           # (2, N_BANDS), (XtWX)^-1 XtW
     marks = r @ m_mat.T                               # (m, 2)
     av_hat = marks[:, 0]
     sc_hat = marks[:, 1]
     a_hat = av_hat * ak_per_av                        # (m,)
 
-    p_mat = -(wx @ m_mat)                                 # (8, 8)
+    p_mat = -(wx @ m_mat)                                 # (N_BANDS, N_BANDS)
     p_mat[diag, diag] += weight
 
     # sigma_a^2 = [(XtWX)^-1]_aa (section 1.3), converted A_V -> A_K by the
@@ -494,7 +497,7 @@ def fit(batch, log10_f_ref, w):
     frac_clamped = np.float32(clamp_engaged.mean())
 
     # only the non-detection term's flux prediction needs float32 (its
-    # own (m, 8) working set, section 6.2) -- cast once here, not
+    # own (m, N_BANDS) working set, section 6.2) -- cast once here, not
     # threaded back through the clamp above.
     av_clamped32 = av_clamped.astype(np.float32)
     sc_clamped32 = sc_clamped.astype(np.float32)

@@ -68,8 +68,8 @@ def _register_path(config, cls):
 
 def _read_register(config, cls):
     """A library's `MODEL_NAME` and its templates' reference log-fluxes in
-    the eight SESNA bands (SPEC_BMSTP_DRAFT.md sec 3.5: "reference fluxes
-    in eight bands, at 1 kpc, zero extinction"), row-aligned in the
+    the eleven SED bands (SPEC_BMSTP_DRAFT.md sec 3.5: "reference fluxes
+    in eleven bands, at 1 kpc, zero extinction"), row-aligned in the
     register's own order. A minority of templates (the reddest of YSO's:
     up to 16% of one band, a genuine radiative-transfer underflow at 1 kpc
     with zero extinction, not a missing value) carry exactly zero in a
@@ -107,9 +107,9 @@ def _shape_space(log10_f_ref, kappa_prime):
     extinction law, `kappa_prime`, and the design's constant gray column,
     `fittp.likelihood.GRAY_COLUMN`), each whitened the same way, projected
     out by an orthonormal basis of their span (`np.linalg.qr`). The
-    residual lies exactly in the orthogonal 6-D complement, so Euclidean
-    distance among residuals kept in their ambient 8 coordinates already
-    equals distance in that 6-D space.
+    residual lies exactly in the orthogonal (N_BANDS - 2)-D complement, so Euclidean
+    distance among residuals kept in their ambient N_BANDS coordinates already
+    equals distance in that space.
     """
     scale = constants.LIBRARY_SAMPLING_SIGMA_LOG_DEX
     y = log10_f_ref / scale[None, :]

@@ -3581,12 +3581,12 @@ REGISTRY = {
         "covers both the precision of the fit and disagreement between the models "
         "that fit the source. It is not a formal fitting error."),
     ("posterior_classification_source", "LOG10_FLUX_IMPUTED"): ("log10 of flux in mJy",
-        "The eight-band spectrum, band order J, H, Ks, 3.6, 4.5, 5.8, 8.0 and 24 "
-        "micron. A measured band holds log10 of the catalog flux; the rest hold the "
+        "The eleven-band spectrum, band order J, H, Ks, 3.6, 4.5, 5.8, 8.0, 24, 70, 100 "
+        "and 160 micron (the PACS bands are total flux, like the rest). A measured band holds log10 of the catalog flux; the rest hold the "
         "support-weighted average over the models that fit the source. 10**x is a "
         "flux in mJy."),
     ("posterior_classification_source", "LOG10_FLUX_IMPUTED_COV"): ("squared dex",
-        "Covariance of those eight values, one dex being a factor of 10. On an "
+        "Covariance of those eleven values, one dex being a factor of 10. On an "
         "estimated band, s = sqrt(diagonal) is the uncertainty in log flux, so the "
         "flux spans 10**(x-s) to 10**(x+s) with 68 percent probability. On a "
         "measured band the diagonal is the catalog error, recovered in mJy as 10**x "
@@ -3678,7 +3678,7 @@ REGISTRY = {
     ("library-resolution_check_survey", "LIBRARY"): ("library name",
         "The model library this row describes, one per class."),
     ("library-resolution_check_survey", "BANDS"): ("band name",
-        "The eight SESNA bands, in SIGMA_LIB_DEX's column order."),
+        "The eleven bands (the eight SESNA bands then the three PACS bands), in SIGMA_LIB_DEX's column order."),
     ("library-resolution_check_survey", "N_TEMPLATES"): ("models",
         "How many models that library holds."),
     ("library-resolution_check_survey", "D50"): ("sampling lengths",
@@ -3724,14 +3724,14 @@ _SWEEP_FIT_READINGS = {
         "Minus infinity means the subclass has no models, or the class cannot "
         "explain the source, or the source could not be fitted."),
     "LOG10_FLUX_MEAN": ("log10 of flux in mJy",
-        "This class's estimate of the eight-band spectrum, band order J, H, Ks, "
-        "3.6, 4.5, 5.8, 8.0 and 24 micron, averaging its models by their share of "
+        "This class's estimate of the eleven-band spectrum, band order J, H, Ks, "
+        "3.6, 4.5, 5.8, 8.0, 24, 70, 100 and 160 micron (the PACS bands are total flux), averaging its models by their share of "
         "the support for the source. 10**x is a flux in mJy. The prior enters only "
         "through each model's share of the support, never by moving a model's own "
         "predicted flux, so this is the fit's own weighted prediction, not a "
         "posterior mean of the true brightness."),
     "LOG10_FLUX_COV": ("squared dex",
-        "Covariance of those eight values, one dex being a factor of 10. It "
+        "Covariance of those eleven values, one dex being a factor of 10. It "
         "combines disagreement between this class's models with the precision of "
         "the fitted brightness and extinction. sqrt(diagonal) is the uncertainty in "
         "log flux. This is the fit's own uncertainty, with the prior entering only "
@@ -3809,8 +3809,8 @@ _SWEEP_FIT_READINGS = {
         "positions in its model library. -1 where fewer were kept or the source "
         "could not be fitted. The other TOPK columns follow this same order."),
     "TOPK_FLUX": ("mJy",
-        "Each of those five models' eight-band spectrum, band order J, H, Ks, 3.6, "
-        "4.5, 5.8, 8.0 and 24 micron, at its own fitted brightness and extinction."),
+        "Each of those five models' eleven-band spectrum, band order J, H, Ks, 3.6, "
+        "4.5, 5.8, 8.0, 24, 70, 100 and 160 micron (PACS bands total flux), at its own fitted brightness and extinction."),
     "TOPK_A_K": ("magnitudes of K-band extinction",
         "The extinction fitted for each of those five models. A model whose best "
         "fit called for negative extinction is held at zero."),

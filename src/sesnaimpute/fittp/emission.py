@@ -48,12 +48,13 @@ LIBRARIES = ("sps", "agb", "pahc", "galz", "yso", "h2shock", "pahn")
 #: (`definitions.BANDS[4].wvl_um == 4.493`).
 _BAND_KEYS = tuple(b.key for b in definitions.BANDS)
 _I2 = _BAND_KEYS.index("I2")
+N_BANDS = len(_BAND_KEYS)
 N_LABELS = len(crisp.LABELS)
 _UNCLASSIFIED = crisp.LABEL_INDEX["UNCLASSIFIED"]
 
-#: Per-library working-set: one (n_model, 8) float64 flux array per bin,
+#: Per-library working-set: one (n_model, N_BANDS) float64 flux array per bin,
 #: rebuilt from the register's own F_REF each bin (rule 10b's per-batch
-#: estimate) -- 200,000 templates x 8 bands x 8 bytes is 12.8 MB, well
+#: estimate) -- 200,000 templates x 11 bands x 8 bytes is 17.6 MB, well
 #: under the ceiling, and the register itself (loaded once, not per bin)
 #: is the same size again.
 HAND_CHECK_N = 20
@@ -61,7 +62,7 @@ HAND_CHECK_SEED = 0
 
 
 def _read_register(config, key):
-    """This library's own reference SED: `F_REF` (n_model, 8) mJy in
+    """This library's own reference SED: `F_REF` (n_model, N_BANDS) mJy in
     `definitions.BANDS` order, `FLOOR_LINEAR` (the register's own raw-flux
     floor, `fittp.sweep._register`'s FREFRAW convention) and `SUBCLASS`,
     all in the register's own row order."""
@@ -88,7 +89,7 @@ def _subclass_order(subclass):
 
 
 def _scale_to_bin(f_ref, f45_floored, log10_target):
-    """The (n_model, 8) SED with every template's I2 (4.5 micron) flux
+    """The (n_model, N_BANDS) SED with every template's I2 (4.5 micron) flux
     scaled to sit at `10**log10_target` mJy:
     linear in the register's own F_REF, so every band moves by the same
     per-template factor and the SED's shape -- its subclass's colours --

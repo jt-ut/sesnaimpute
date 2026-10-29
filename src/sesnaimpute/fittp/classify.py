@@ -30,15 +30,15 @@ name, SPEC_BMSTP_DRAFT.md section 6.1) straight through, unreduced by
 `A_COL_K` (`bmstp/density/table_density_source__<R>.hdf5`) to form
 `XI_POST` itself.
 
-`LOG10_FLUX_IMPUTED` (n, 8), the one scale section 7.1 stores the imputed
+`LOG10_FLUX_IMPUTED` (n, N_BANDS), the one scale section 7.1 stores the imputed
 photometry on: the MAP class's own `LOG10_FLUX_MEAN` on the bands it did
 not measure, and `log10(FNU_MJY)` on the bands it did -- the catalogue's
 own measurement, recoverable to float32 with no join back to the
-catalogue. `LOG10_CANDIDATE_FLUX` (n, 6, 8) is the same construction for
+catalogue. `LOG10_CANDIDATE_FLUX` (n, 6, N_BANDS) is the same construction for
 every class, not only the MAP one (each class's own `LOG10_FLUX_MEAN` with
 the measured bands restored).
 
-`LOG10_FLUX_IMPUTED_COV` (n, 8, 8), section 6.1's `m`/`u` block structure
+`LOG10_FLUX_IMPUTED_COV` (n, N_BANDS, N_BANDS), section 6.1's `m`/`u` block structure
 (measured bands `m`, imputed bands `u`), is the covariance of the ACTUAL
 hybrid estimator (S06 fix, FINDINGS.md round6 2026-10-22, U10) under ONE
 error model, not a splice of blocks from different ones (`_cross_cov_by_law`'s
@@ -94,6 +94,12 @@ CLASSES = tuple(c.code for c in definitions.CLASSES)
 YSO_INDEX = CLASSES.index("YSO")
 N_BANDS = len(definitions.BANDS)
 
+#: TEST SWITCH for identity B (unit 8; REMOVED IN THE MERGE): `--pacs-off`
+#: forces ORIGIN 91 on the PACS columns, the same switch as `fittp.sweep`'s.
+_PACS_OFF = [False]
+_PACS_INDEX = np.array([i for i, k in enumerate(b.key for b in definitions.BANDS)
+                        if k not in definitions.SESNA_BANDS], dtype=np.int64)
+
 #: Each class's contiguous slice of `definitions.CLASSMAP`'s rows
 #: (verified against `SUBCLASSES_OF` below at import time, never assumed
 #: silently).
@@ -128,7 +134,7 @@ SUBCLASS_LABELS = tuple("%s:%s" % (s.cls, s.name) for s in _SUBCLASS_NAMES)
 #: Per-row working set for the batch loop (rule 10b): seven classes' own
 #: LN_EVIDENCE (<=9 cols), LOG10_FLUX_MEAN (8) and LOG10_FLUX_COV (8x8)
 #: float32 rows, plus the measured flux/sigma/origin and the global
-#: (N_SUBCLASS) and (6,8,8) intermediates, at a generous margin.
+#: (N_SUBCLASS) and (6, N_BANDS, N_BANDS) intermediates, at a generous margin.
 ROW_BYTES = 8192
 
 #: The literature-band sensitivity runs (spec sec 7.2, sec 10; P9's own
@@ -358,14 +364,14 @@ def _cross_cov_by_law(config, weight, measured_var):
     approximation to it (FINDINGS.md S05/S06 round-1 reply).
 
     In code: `G_k = D_k A_k D_k^T` (`A_k = (D_k^T W D_k)^-1`) is the
-    `(m, 8, 8)` quadratic form the pre-fix code returned directly as the
+    `(m, N_BANDS, N_BANDS)` quadratic form the pre-fix code returned directly as the
     (invalid) cross block; `H_k[b, c] = G_k[b, c] * weight[c]` is the hat
     matrix above, `G_k` column-scaled by `weight`. The returned
     `cross_k = H_k diag(measured_var) + (H_k diag(measured_var))^T` is
     symmetric and equals `H_k[u, m] * measured_var[m]` at every `(u, m)` /
     `(m, u)` pair with exactly one of the two bands detected -- the only
     entries `_classify_batch` reads off this result, since it masks every
-    other entry away. Returns `(cross_0, cross_1)`, each `(m, 8, 8)`.
+    other entry away. Returns `(cross_0, cross_1)`, each `(m, N_BANDS, N_BANDS)`.
     """
     # weight * measured_var, law-independent; guarded by `weight > 0` rather
     # than relying on `0 * measured_var == 0`, since a non-detected band's
@@ -373,13 +379,13 @@ def _cross_cov_by_law(config, weight, measured_var):
     # not always finite off a detection) -- `np.where` below discards that
     # value outright rather than multiplying by it.
     with np.errstate(invalid="ignore"):
-        wr = np.where(weight > 0, weight * measured_var, 0.0)     # (m, 8)
+        wr = np.where(weight > 0, weight * measured_var, 0.0)     # (m, N_BANDS)
     gray = np.full(N_BANDS, likelihood.GRAY_COLUMN, dtype=np.float64)
     cross = []
     for k in (0, 1):
         ext_col_k = -0.4 * population_selection.kappa_hybrid(config, float(k)) \
             * float(population_selection.ak_per_av(config, float(k)))
-        design_k = np.column_stack([ext_col_k, gray])            # (8, 2)
+        design_k = np.column_stack([ext_col_k, gray])            # (N_BANDS, 2)
         wx = design_k[None, :, :] * weight[:, :, None]            # (m, 8, 2)
         xtwx = np.einsum("mbi,bj->mij", wx, design_k)             # (m, 2, 2)
         det = xtwx[:, 0, 0] * xtwx[:, 1, 1] - xtwx[:, 0, 1] * xtwx[:, 1, 0]
@@ -497,7 +503,9 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     with h5py.File(cat_path, "r") as cf:
         flux = np.asarray(cf["FNU_MJY"][start:stop], dtype=np.float64)
         sigma = np.asarray(cf["SIGMA_FNU_MJY"][start:stop], dtype=np.float64)
-        origin = np.asarray(cf["ORIGIN_FNU"][start:stop])
+        origin = np.array(cf["ORIGIN_FNU"][start:stop])
+        if _PACS_OFF[0]:                        # identity-B test switch, removed in the merge
+            origin[:, _PACS_INDEX] = 91
         # the class SESNA delivered for these sources, carried through so the
         # catalogue's own label is in the product the classification is read
         # from; nothing in the pipeline reads it (rule 7).
@@ -510,7 +518,7 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
 
     with np.errstate(divide="ignore", invalid="ignore"):
         log10_flux_meas = np.log10(np.where(detected, flux, 1.0))
-    cflux = np.transpose(log10_flux_mean_stack, (1, 0, 2)).copy()  # (m, 6, 8)
+    cflux = np.transpose(log10_flux_mean_stack, (1, 0, 2)).copy()  # (m, 6, N_BANDS)
     mask = np.broadcast_to(detected[:, None, :], cflux.shape)
     cflux = np.where(mask, log10_flux_meas[:, None, :], cflux)
     row_idx = np.arange(m)
@@ -548,9 +556,9 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     # this value is ever read from (the `diag` line and `_cross_cov_by_law`
     # both discard or zero-weight it elsewhere).
     catalogue_var_log10 = sigma_log ** 2
-    sigma_lib_map = sigma_lib_vals[map_c_safe]                        # (m, 8), WP-PRIOR-8: per band
+    sigma_lib_map = sigma_lib_vals[map_c_safe]                        # (m, N_BANDS), WP-PRIOR-8: per band
     sigma2 = catalogue_var_log10 + SIGMA_CAL_DEX[None, :] ** 2 + sigma_lib_map ** 2
-    weight = np.where(detected & (sigma_log > 0), 1.0 / sigma2, 0.0)  # (m, 8): 1 / V
+    weight = np.where(detected & (sigma_log > 0), 1.0 / sigma2, 0.0)  # (m, N_BANDS): 1 / V
     cross_0, cross_1 = _cross_cov_by_law(config, weight, catalogue_var_log10)
     p_dense_map = p_dense_stack[map_c_safe, row_idx]                  # (m,)
     cross_total = (1.0 - p_dense_map)[:, None, None] * cross_0 + p_dense_map[:, None, None] * cross_1
@@ -617,7 +625,7 @@ def _classify_batch(config, class_files, psi_file, beta, cat_path, start, stop, 
     return dict(
         class_sesna=class_sesna.astype(np.int16),
         p_class=p_cls.astype(np.float32), p_subclass=p_sub.astype(np.float32),
-        map_class=map_c.astype(np.int8), n_detected=detected.sum(axis=1).astype(np.int8),
+        map_class=map_c.astype(np.int8), n_detected=detected[:, list(definitions.SELECTION_INDEX)].sum(axis=1).astype(np.int8),
         log10_candidate_flux=cflux.astype(np.float32), log10_flux_imputed=imputed.astype(np.float32),
         log10_flux_imputed_cov=imputed_cov.astype(np.float32),
         a_k_post=a_k_post, a_k_post_sig=a_k_post_sig,
@@ -657,14 +665,14 @@ def build_region(config, region, st, beta):
     joins the parts once every batch is done."""
     _require_fit_files(config, region)
 
-    # section 6.1's sigma_lib,L, one (8,) per-band vector per class's own
+    # section 6.1's sigma_lib,L, one (N_BANDS,) per-band vector per class's own
     # library (WP-PRIOR-8), gathered once here (never per batch or per
     # source) so `_classify_batch` rebuilds the MAP class's own
     # measurement weight exactly as `likelihood.prepare` built it at fit
     # time.
     lib_path = config_module.product_path(config, "fittp", "check", "library-resolution", "survey")
     sigma_lib_by_cls = likelihood.sigma_lib_by_class(lib_path)
-    sigma_lib_vals = np.stack([sigma_lib_by_cls[cls] for cls in CLASSES])  # (n_class, 8)
+    sigma_lib_vals = np.stack([sigma_lib_by_cls[cls] for cls in CLASSES])  # (n_class, N_BANDS)
 
     class_files = {}
     names = None
@@ -956,6 +964,8 @@ if __name__ == "__main__":
     parser.add_argument("--regions", nargs="+", default=None)
     parser.add_argument("--beta", type=float, default=None,
                          help="default: root.cfg's [fittp] beta (0.0 if absent)")
+    parser.add_argument("--pacs-off", action="store_true",
+                         help="TEST SWITCH (identity B; removed in the merge): force ORIGIN 91 on the PACS columns")
     parser.add_argument("--n-jobs", type=int, default=None)
     args = parser.parse_args()
     cfg = config_module.load(args.config)
@@ -969,4 +979,5 @@ if __name__ == "__main__":
         beta = ini.getfloat("fittp", "beta", fallback=0.0)
     else:
         beta = args.beta
+    _PACS_OFF[0] = args.pacs_off
     build(cfg, regions=args.regions, beta=beta)
