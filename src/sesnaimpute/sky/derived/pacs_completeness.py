@@ -229,16 +229,14 @@ def cell_offset(grid, ids, all_ids, offset, n_clean):
 
 
 def _tile_reference(piece, config, records):
-    """Per map tile, one pieces.run piece each, before the cell blocks: its registration to SESNA
-    (`pacs_fit.registration`) and its median cell sigma over up to REFERENCE_CELLS cells spread evenly over
+    """Per map tile, one pieces.run piece each, before the cell blocks: its median cell sigma over up to REFERENCE_CELLS cells spread evenly over
     the cells the region USES there (wholly on valid data), the fallback sigma of a block with no clean
     cell. `piece = (tile index, used cells, SESNA ra, dec on the tile)`."""
-    t, used, sra, sdec = piece
+    t, used, _sra, _sdec = piece
     tile = pacs_fit.cached_tile(config, records[t])
-    shift = pacs_fit.registration(tile, sra, sdec)
-    # the pairs' scatter about the shift (the alignment term of the matching radius)
-    pairs = pacs_fit.registration_pairs(tile, sra, sdec)
-    residual = pairs - np.array(shift[:2]) if pairs.shape[0] else pairs
+    # the PACS products keep Herschel's own astrometry: no registration to SESNA (the catalogue's cross-match fits
+    # the offset of each observation itself)
+    shift = (0.0, 0.0, 0)
     centres = used[np.unique(np.linspace(0, used.size - 1, min(REFERENCE_CELLS, used.size)).astype(np.int64))]
     all_ids = ring(tile.grid, centres)
     b, gain, ps, valid, clean, _sky = cell_fits(tile, all_ids, 0)
@@ -246,8 +244,7 @@ def _tile_reference(piece, config, records):
     sigma, _ = block_sigma(tile.grid, centres, all_ids, mad, n_clean)
     c = np.searchsorted(all_ids, centres)
     good = np.isfinite(sigma) & (sigma > 0) & (valid[c].sum(axis=1) == N_POS)
-    return dict(n_used=int(used.size), shift=shift, median=float(np.median(sigma[good])) if good.any() else np.nan,
-                align_residual=residual)
+    return dict(n_used=int(used.size), shift=shift, median=float(np.median(sigma[good])) if good.any() else np.nan)
 
 
 def encode_curves(counts, n_total):
@@ -263,11 +260,8 @@ def _piece(piece, config, records, refs):
     tile = pacs_fit.cached_tile(config, record)
     all_ids = ring(tile.grid, ids)
     b, gain, ps, valid, clean, sky = cell_fits(tile, all_ids, tile_index + 1)
-    # the PSF-matched map (the detection image) at the same positions: its own offset and noise per cell
-    px_, py_ = tile.grid.sample_pixels(all_ids, N_POS, tile_index + 1)
-    mb = matched_at(tile, px_, py_)
-    mvalid = np.isfinite(mb)
-    _, m_clean, m_mad, _, _, m_off = cell_statistics(mb, np.where(mvalid, 1.0, np.nan), np.ones_like(mb), mvalid, clean)
+    # the detection map's own level and noise per cell, from its pixels
+    m_off, m_mad, m_clean = detection_cell_stats(tile, all_ids)
     n_valid, n_clean, mad, g, pps, off = cell_statistics(b, gain, ps, valid, clean)
     sigma, n_sigma = block_sigma(tile.grid, ids, all_ids, mad, n_clean)
     offset = cell_offset(tile.grid, ids, all_ids, off, n_clean)
@@ -466,6 +460,8 @@ def flux90(fraction, flux_grid, level=FLUX90_FRACTION):
 # ----------------------------------------------------------------------------
 # blind detection (RULINGS_5): the catalogue's PACS sources are the peaks of the aperture-filtered map
 
+#: the detection kernel's footprint: where the template exceeds this fraction of its peak
+ZERO_SUM_FOOTPRINT = 0.01
 #: the matching radius is MATCH_SIGMAS x the rms offset of a detected position: the injections at CALIBRATION_SNR in
 #: quadrature with the alignment scatter of the map's registration pairs (`pacs_fit.registration_pairs`), the map's own
 #: where it has at least MIN_ALIGN_PAIRS pairs, else the band's pooled
@@ -492,10 +488,12 @@ _MATCHED = {}
 
 
 def matched_state(tile):
-    """The PSF-matched map of the tile's real image (RULINGS_5 amended: the detection image): the image correlated
-    with the band's own template (`Tile._add_sources`'s, at the map centre, normalised to unit sum), divided by the
-    same correlation of the valid-pixel mask (so edges and gaps are weighted means); NaN where under half the
-    template's weight is on valid data. Process-local, one map at a time; built from the un-injected image."""
+    """The detection image of the tile's real image: the image correlated with the band's own point-spread template
+    (`Tile._add_sources`'s, at the map centre) made zero-sum over its footprint (the template less its mean there,
+    DAOFIND's lowered kernel), so that a smooth local background and its gradient give zero and a point source on
+    the slope of a ridge is still a peak; valid only where the whole footprint lies on valid data. Process-local, one
+    map at a time; built from the un-injected image. `m` the detection map (NaN where not valid), `kc` the kernel
+    as correlated."""
     key = tile.record.path
     if key not in _MATCHED:
         _MATCHED.clear()
@@ -506,24 +504,34 @@ def matched_state(tile):
         px = np.broadcast_to((cx - h + offs)[None, None, :], (1, side, side))
         py = np.broadcast_to((cy - h + offs)[None, :, None], (1, side, side))
         k = tile._psf.evaluate_xy(np.array([float(cx)]), np.array([float(cy)]), px, py).mean(axis=1)[0]
-        kc = (k / k.sum())[::-1, ::-1]
+        foot = k > ZERO_SUM_FOOTPRINT * k.max()
+        k0 = np.where(foot, k - k[foot].mean(), 0.0)
+        kc = k0[::-1, ::-1]
         valid = np.isfinite(tile.image) & np.isfinite(tile.error)
-        w = fftconvolve(valid.astype(float), kc, mode="same")
-        with np.errstate(invalid="ignore", divide="ignore"):
-            m = np.where(valid & (w > 0.5), fftconvolve(np.where(valid, tile.image, 0.0), kc, mode="same") / w, np.nan)
-        _MATCHED[key] = dict(h=h, kc=kc, w=w, m=m.astype(np.float32))
+        cover = fftconvolve(valid.astype(float), foot[::-1, ::-1].astype(float), mode="same")
+        full = valid & (cover >= foot.sum() - 0.5)
+        m = np.where(full, fftconvolve(np.where(valid, tile.image, 0.0), kc, mode="same"), np.nan)
+        _MATCHED[key] = dict(h=h, kc=kc, m=m.astype(np.float32), valid=full)
     return _MATCHED[key]
 
 
-def matched_at(tile, x, y):
-    """The PSF-matched map at map pixels (x, y), nearest pixel; NaN off the map."""
+def detection_cell_stats(tile, ids):
+    """Per cell of `ids`: the detection map's level (median) and noise (1.4826 x the median absolute deviation) over
+    the cell's valid pixels, and how many pixels; the noise is the block median over the 3 x 3 cells (as CELL_SIGMA)."""
     ms = matched_state(tile)
-    ix, iy = np.rint(np.asarray(x, float)).astype(np.int64), np.rint(np.asarray(y, float)).astype(np.int64)
-    ny, nx = tile.shape
-    inside = (ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
-    out = np.full(ix.shape, np.nan)
-    out[inside] = ms["m"][iy[inside], ix[inside]]
-    return out
+    grid = tile.grid
+    x0, x1, y0, y1 = grid.bounds(ids)
+    level, mad, cnt = np.full(ids.size, np.nan), np.full(ids.size, np.nan), np.zeros(ids.size, np.int64)
+    for i in range(ids.size):
+        a0, a1 = max(int(np.ceil(x0[i])), 0), min(int(np.floor(x1[i])) + 1, tile.shape[1])
+        b0, b1 = max(int(np.ceil(y0[i])), 0), min(int(np.floor(y1[i])) + 1, tile.shape[0])
+        v = ms["m"][b0:b1, a0:a1]
+        v = v[np.isfinite(v)]
+        cnt[i] = v.size
+        if v.size >= 20:
+            level[i] = np.median(v)
+            mad[i] = MAD_TO_SIGMA * np.median(np.abs(v - level[i]))
+    return level, mad, cnt
 
 
 def _local_peaks(v, thr):
@@ -546,9 +554,8 @@ def _parabola(v, iy, ix):
 
 
 def _injected_delta(tile, x, y, flux, wpx, wpy):
-    """The change of the PSF-matched map at the window pixels (wpx, wpy) (n, side, side) of each injection, from
-    that injection's own template (the matched map is linear: its change is the template correlated with the
-    filter, over the valid weight)."""
+    """The change of the detection map at the window pixels (wpx, wpy) (n, side, side) of each injection, from that
+    injection's own template (the detection map is linear: its change is the template correlated with the kernel)."""
     ms = matched_state(tile)
     h = ms["h"]
     side = 2 * h + 1
@@ -556,7 +563,6 @@ def _injected_delta(tile, x, y, flux, wpx, wpy):
     cx = np.rint(x).astype(np.int64) - h
     cy = np.rint(y).astype(np.int64) - h
     out = np.zeros(wpx.shape)
-    ny, nx = tile.shape
     for lo in range(0, x.size, 256):
         sl = slice(lo, lo + 256)
         px = np.broadcast_to(cx[sl][:, None, None] + offs[None, None, :], (cx[sl].size, side, side))
@@ -570,10 +576,7 @@ def _injected_delta(tile, x, y, flux, wpx, wpy):
         vals = np.zeros(iy.shape)
         k = np.nonzero(inside)
         vals[k] = full[k[0], iy[k], ix[k]]
-        on = (wpx[sl] >= 0) & (wpx[sl] < nx) & (wpy[sl] >= 0) & (wpy[sl] < ny)
-        wv = np.ones(iy.shape)
-        wv[on] = ms["w"][wpy[sl][on], wpx[sl][on]]
-        out[sl] = vals / np.maximum(wv, 1e-12)
+        out[sl] = vals
     return out
 
 
@@ -625,11 +628,10 @@ def window_peaks(tile, x, y, radius_px, m_offset_cell, m_sigma_cell, offset_cell
 
 def _block_peaks(piece, config, records, cell_tables):
     """The blind detection on one block of cells of one map tile (`piece = (tile index, cell ids)`, the cell stage's
-    blocks): the local maxima of the PSF-matched map, less its cell offset, reaching 5 x its cell noise, inside the
-    block's cells; position by the parabolic sub-pixel peak; flux the catalogue's aperture estimator there; and the
-    same on the negated map (the matched map is linear: the local minima reaching -5 x the noise; the spurious rate).
-    `cell_tables[t]` = (offset, sigma, matched offset, matched sigma) per grid cell. Returns (tile, dict(x, y, fnu,
-    cell, inverted_cells))."""
+    blocks): the local maxima of the detection map (`matched_state`), less its cell level, reaching 5 x its cell
+    noise, inside the block's cells; position by the parabolic sub-pixel peak; flux the catalogue's aperture
+    estimator there. `cell_tables[t]` = (offset, sigma, detection level, detection noise) per grid cell. Returns
+    (tile, dict(x, y, fnu, cell))."""
     t, cells = piece
     tile = pacs_fit.cached_tile(config, records[t])
     offset_cell, _sigma_cell, m_off, m_sig = cell_tables[t]
@@ -660,10 +662,8 @@ def _block_peaks(piece, config, records, cell_tables):
         ys.append(gy[iy, ix] + dy)
     xs, ys = np.asarray(xs, float), np.asarray(ys, float)
     fnu = filtered(tile, xs, ys, offset_cell) if xs.size else np.zeros(0)
-    where_i = detect(-v)
-    inv_cells = cid[where_i[:, 0], where_i[:, 1]] if where_i.size else np.zeros(0, np.int64)
     ok = np.isfinite(fnu)
-    return t, dict(x=xs[ok], y=ys[ok], fnu=fnu[ok], cell=grid.cell_ids(xs[ok], ys[ok]), inverted_cells=inv_cells)
+    return t, dict(x=xs[ok], y=ys[ok], fnu=fnu[ok], cell=grid.cell_ids(xs[ok], ys[ok]))
 
 
 class Injector:
@@ -695,7 +695,7 @@ class Injector:
         self.beam_area_px = np.pi / (4 * np.log(2)) * tile.beam_px ** 2
         self.separation_px = tile.injection_half_width() + APERTURES[tile.record.band][2] / tile.pixel_arcsec
         # the PACS sources of the un-injected map (the blind detection), and the matching radius
-        self.r_match_px = float(inp.get("r_match_px", tile.beam_px))
+        self.pos_k_px = float(inp.get("pos_k_arcsec", np.nan)) / tile.pixel_arcsec
         self.det_tree = None
         self.det_xy = np.c_[np.asarray(inp.get("peak_x", np.zeros(0)), float), np.asarray(inp.get("peak_y", np.zeros(0)), float)]
         self.det_flux = np.asarray(inp.get("peak_fnu", np.zeros(0)), float)
@@ -770,13 +770,20 @@ class Injector:
         """Injects one batch of sources of S/N `snr` at random positions of the cells of `rows`, measures each
         through the catalogue's own path, restores the map (`measure_positions`)."""
         x, y, d = self.positions(rng, rows)
-        return self.measure_positions(x, y, d, self.flux_at(x, y, snr))
+        return self.measure_positions(x, y, d, self.flux_at(x, y, snr), radius_px=self.recovery_radius_px(snr))
+
+    def recovery_radius_px(self, snr):
+        """The recovery radius at injection S/N `snr`: MATCH_SIGMAS x the detection's measured position scatter there
+        (the scatter x S/N constant over S/N), between one pixel and half a beam."""
+        if not np.isfinite(self.pos_k_px):
+            return 0.5 * self.beam_px
+        return float(np.clip(MATCH_SIGMAS * self.pos_k_px / max(snr, 1e-3), 1.0, 0.5 * self.beam_px))
 
     def measure_positions(self, x, y, d, flux, radius_px=None):
         """Injects `flux` (mJy, scalar or one per position) at the map pixels (x, y), `d` the distance (pixels) of
         each to the nearest PACS source of the un-injected map, runs the blind detection around each
-        (`window_peaks` within the matching radius, or `radius_px`), restores the map. RECOVERED: a PACS source is
-        found within the radius, and where a source of the un-injected map lies within it the injection is the
+        (`window_peaks` within `radius_px`, the recovery radius at the batch's S/N; half a beam if None), restores the
+        map. RECOVERED: a PACS source is found within the radius, and where a source of the un-injected map lies within it the injection is the
         brighter (an injection on an existing peak counts only as the brighter member). Also the forced aperture
         flux at the injected position (the photometric error, SCATTER). Returns dict(row, near (within one
         BLEND_RADIUS_BEAMS of a PACS source of the un-injected map), recovered, dflux (forced flux minus the cell
@@ -789,7 +796,7 @@ class Injector:
                    det_dist=np.zeros(0, np.float32), n=0, seconds=dict(inject=0.0, aperture=0.0))
         if n == 0:
             return out
-        r = self.r_match_px if radius_px is None else float(radius_px)
+        r = 0.5 * self.beam_px if radius_px is None else float(radius_px)
         flux = np.broadcast_to(np.asarray(flux, float), x.shape)
         cid = tile.grid.cell_ids(x, y)
         offset = self.offset[cid]
@@ -1085,7 +1092,7 @@ REGION_PAD_ARCSEC = 412.0
 def _assemble_peaks(found, records, geometry, shifts, keys, cell_sigma, cell_bin, ra, dec):
     """The band's PACS sources from the blocks' detections: map index, pixel position, flux, the row of their cell
     (`keys` the rows' map x cell keys), S/N, sky bin, ICRS position; and the inverted-map peak count per sky bin."""
-    t_, x_, y_, f_, c_, inv = [], [], [], [], [], np.zeros(SKY_BINS, np.int64)
+    t_, x_, y_, f_, c_ = [], [], [], [], []
     n_row = keys.size
     for t, d in found:
         t_.append(np.full(d["x"].size, t, np.int32))
@@ -1093,11 +1100,6 @@ def _assemble_peaks(found, records, geometry, shifts, keys, cell_sigma, cell_bin
         y_.append(d["y"])
         f_.append(d["fnu"])
         c_.append(d["cell"])
-        if d["inverted_cells"].size:
-            q = np.int64(t) * (1 << 40) + d["inverted_cells"]
-            k = np.clip(np.searchsorted(keys, q), 0, n_row - 1)
-            hit = keys[k] == q
-            inv += np.bincount(cell_bin[k[hit]], minlength=SKY_BINS)[:SKY_BINS]
     cat = lambda v, dt: np.concatenate(v).astype(dt) if v else np.zeros(0, dt)
     m, x, y, f, c = cat(t_, np.int32), cat(x_, float), cat(y_, float), cat(f_, float), cat(c_, np.int64)
     q = m.astype(np.int64) * (1 << 40) + c
@@ -1111,14 +1113,14 @@ def _assemble_peaks(found, records, geometry, shifts, keys, cell_sigma, cell_bin
         _src_cell, _cells, grid, wcs = geometry[t]
         wr, wd = wcs.all_pix2world(x[sel], y[sel], 0)
         pra[sel], pde[sel] = pacs_fit.from_map_frame(np.asarray(wr), np.asarray(wd), shifts[t][:2])
-    return dict(map=m, x=x, y=y, fnu=f, row=row, snr=snr, bin=cell_bin[row], ra=pra, dec=pde,
-                inverted_by_bin=inv)
+    return dict(map=m, x=x, y=y, fnu=f, row=row, snr=snr, bin=cell_bin[row], ra=pra, dec=pde)
 
 
 def _calibrate(piece, config, records):
     """The injected-vs-detected position scatter on one map (`piece = (tile index, inputs)`): one batch at each S/N
     of CALIBRATION_SNR (own seeds, positions farther than a beam from every PACS source of the map), the blind
-    detection within one beam of each; returns (tile index, the found sources' distances in arcsec)."""
+    detection within one beam of each; returns (tile index, the found sources' distances in arcsec times their S/N, the
+    position-scatter constant)."""
     t, inp = piece
     tile = pacs_fit.cached_tile(config, records[t])
     inj = Injector(tile, inp, t + 1)
@@ -1130,7 +1132,7 @@ def _calibrate(piece, config, records):
         x, y, d = x[far], y[far], d[far]
         r = inj.measure_positions(x, y, d, inj.flux_at(x, y, snr), radius_px=inj.beam_px)
         good = np.isfinite(r["det_dist"])
-        out.append(r["det_dist"][good] * tile.pixel_arcsec)
+        out.append(r["det_dist"][good] * tile.pixel_arcsec * snr)
     return t, (np.concatenate(out) if out else np.zeros(0))
 
 
@@ -1164,7 +1166,7 @@ def _print_tile_stats(s, flux_grid):
               % " ".join("%.3g:%.2f" % (snr[p], bp[p, 1] / max(bp[p, 0], 1)) for p in every), flush=True)
 
 
-def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs=None):
+def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs=None, detect_only=False):
     """Measure every covered cell of every map of one band inside the region's padded source bounding box;
     choose each source's deepest map; inject artificial sources on every map. Returns the band's datasets
     (and the held-out half, the printed statistics), or None when no map reaches a source. `blue_refs`: the blue
@@ -1174,22 +1176,12 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs=
     n_plane = flux_grid.size
 
     def tile_cells(record, shift):
-        # the map's cells inside the sources' bounding box (map frame), and each source's cell
+        # every cell of the map (the PACS product's footprint is the maps' own coverage, no SESNA; the cell stage
+        # keeps the covered ones), and each SESNA source's cell (SOURCE_ROW only, the catalogue's lookup)
         grid, wcs = _tile_geometry(record)
         sx, sy = (np.asarray(v) for v in wcs.all_world2pix(*pacs_fit.to_map_frame(ra, dec, shift), 0))
         src_cell = grid.cell_ids(sx, sy)
-        on = np.isfinite(sx) & np.isfinite(sy)
-        pad = REGION_PAD_ARCSEC / (abs(wcs.proj_plane_pixel_scales()[0].to_value("arcsec")))
-        if not on.any():
-            return grid, wcs, src_cell, np.empty(0, np.int64)
-        x0 = max(int(np.floor((sx[on].min() - pad + 0.5) / grid.step_x)), 0)
-        x1 = min(int(np.floor((sx[on].max() + pad + 0.5) / grid.step_x)), grid.nx - 1)
-        y0 = max(int(np.floor((sy[on].min() - pad + 0.5) / grid.step_y)), 0)
-        y1 = min(int(np.floor((sy[on].max() + pad + 0.5) / grid.step_y)), grid.ny - 1)
-        if x1 < x0 or y1 < y0 or not (src_cell >= 0).any():
-            return grid, wcs, src_cell, np.empty(0, np.int64)
-        cy, cx = np.meshgrid(np.arange(y0, y1 + 1), np.arange(x0, x1 + 1), indexing="ij")
-        return grid, wcs, src_cell, (cy * grid.nx + cx).ravel().astype(np.int64)
+        return grid, wcs, src_cell, np.arange(grid.n_cells, dtype=np.int64)
 
     # first pass, unregistered: the cells and sources of each tile, for its noise reference and registration
     first = [tile_cells(r, (0.0, 0.0)) for r in records]
@@ -1204,7 +1196,6 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs=
         key = tuple(records[t].obsids)
         if records[t].band == "P160" and blue_refs and key in blue_refs:
             refs[t]["shift"] = blue_refs[key]["shift"]
-            refs[t]["align_residual"] = blue_refs[key]["align_residual"]
             refs[t]["shared"] = True
     for t in sorted(refs):
         e, n, k = refs[t]["shift"]
@@ -1286,40 +1277,34 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs=
     for t, inp in inputs.items():
         mine = peaks["map"] == t
         inp["peak_x"], inp["peak_y"], inp["peak_fnu"] = peaks["x"][mine], peaks["y"][mine], peaks["fnu"][mine]
+    if detect_only:
+        # the PACS source detection alone (no artificial sources): what the merge needs
+        print("  PACS detections %d; by sky bin (faint to bright) %s"
+              % (peaks["fnu"].size, [int((peaks["bin"] == j).sum()) for j in range(SKY_BINS)]), flush=True)
+        return dict(peaks=peaks, records=records, cell_map_index=cell_map, cell_id=cell_id, cell_offset=cell_offset,
+                    map_shift=shifts[:, :2].astype(np.float32), scatter=np.full((n_row, n_plane), np.nan, np.float32),
+                    refs_by_obs={tuple(records[t].obsids): refs[t] for t in refs}, held=None,
+                    curve=np.zeros((n_row, 0), np.uint16))
 
     # the matching radius: the injected-vs-detected position scatter (bright injections) and the real sources'
     # alignment scatter against SESNA, in quadrature
     calib = pieces_module.run(functools.partial(_calibrate, config=config, records=records),
                               sorted(inputs.items()), n_jobs, stage=stage, unit="maps (matching radius)")
     d_inj = np.concatenate([c for _, c in calib]) if calib else np.zeros(0)
-    rms_inj = np.sqrt(np.median(d_inj ** 2) / np.log(2.0)) if d_inj.size else np.nan
-    # the alignment term: the registration pairs' scatter about the map's shift, per map with at least
-    # MIN_ALIGN_PAIRS pairs, else pooled over the band's maps
-    res = {t: refs[t]["align_residual"] for t in inputs if t in refs}
-    pooled = np.concatenate([v for v in res.values() if v.shape[0]]) if any(v.shape[0] for v in res.values()) else np.zeros((0, 2))
-    rms2d = lambda v: np.sqrt(np.median(np.sum(v ** 2, axis=1)) / np.log(2.0)) if v.shape[0] else np.nan
-    rms_pool = rms2d(pooled)
+    # the recovery radius: 3 x the detection's own position scatter at the injection's S/N, measured on the bright
+    # injections as a scatter x S/N constant (the scatter goes as 1/S/N), between one pixel and half a beam
+    pos_k = np.sqrt(np.median(d_inj ** 2) / np.log(2.0)) if d_inj.size else np.nan
     r_match = np.full(len(records), np.nan)
-    rms_align_map = np.full(len(records), np.nan)
     for t, inp in inputs.items():
-        v = res.get(t, np.zeros((0, 2)))
-        rms_align_map[t] = rms2d(v) if v.shape[0] >= MIN_ALIGN_PAIRS else rms_pool
-        r_match[t] = MATCH_SIGMAS * np.sqrt(rms_inj ** 2 + np.nan_to_num(rms_align_map[t]) ** 2)
-        inp["r_match_px"] = r_match[t] / (pacs_fit.CELL_ARCSEC / geometry[t][2].step_x)
-    rms_align = rms_pool
-    used = np.isfinite(r_match)
-    print("  matching radius: %.1f x sqrt(injected %.2f^2 + alignment^2): median %.2f arcsec (range %.2f-%.2f) over %d maps; "
-          "alignment pooled %.2f arcsec from %d registration pairs (%d maps with >= %d pairs use their own); injected from "
-          "%d bright injections" % (MATCH_SIGMAS, rms_inj, np.nanmedian(r_match) if used.any() else np.nan,
-                                    np.nanmin(r_match) if used.any() else np.nan, np.nanmax(r_match) if used.any() else np.nan,
-                                    int(used.sum()), rms_pool, pooled.shape[0],
-                                    sum(1 for v in res.values() if v.shape[0] >= MIN_ALIGN_PAIRS), MIN_ALIGN_PAIRS,
-                                    d_inj.size), flush=True)
-    peaks["r_match"] = r_match[peaks["map"]] if peaks["map"].size else np.zeros(0)
-    spurious = np.array([peaks["inverted_by_bin"][j] / max(int((peaks["bin"] == j).sum()), 1) for j in range(SKY_BINS)])
-    print("  PACS detections %d; by sky bin (faint to bright) %s; SPURIOUS (inverted-map peaks / peaks) %s"
-          % (peaks["fnu"].size, [int((peaks["bin"] == j).sum()) for j in range(SKY_BINS)],
-             "  ".join("%.3f" % v for v in spurious)), flush=True)
+        inp["pos_k_arcsec"] = pos_k
+        r_match[t] = MATCH_SIGMAS * pos_k / 5.0
+    rms_inj = pos_k
+    rms_align = np.nan
+    print("  recovery radius: %.1f x position scatter, the scatter x S/N = %.2f arcsec from %d bright injections (radius "
+          "%.2f arcsec at S/N 5, %.2f at S/N 30; floor one pixel, cap half a beam)"
+          % (MATCH_SIGMAS, pos_k, d_inj.size, MATCH_SIGMAS * pos_k / 5.0, MATCH_SIGMAS * pos_k / 30.0), flush=True)
+    print("  PACS detections %d; by sky bin (faint to bright) %s"
+          % (peaks["fnu"].size, [int((peaks["bin"] == j).sum()) for j in range(SKY_BINS)]), flush=True)
 
     # artificial sources: each map cut into pieces of its (S/N plane, half) pairs, map by map from the biggest;
     # then each map pooled whole
@@ -1360,7 +1345,7 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs=
         _print_tile_stats(s_, flux_grid)
     envelope = curve.max(axis=0).astype(np.uint16) if n_row else np.zeros(n_plane, np.uint16)
     return dict(curve=curve, source_row=src_row.astype(np.int32), envelope=envelope, n_pos=n_pos,
-                peaks=peaks, spurious=spurious, r_match=r_match, rms_inj=rms_inj, rms_align=rms_align,
+                peaks=peaks, r_match=r_match, rms_inj=rms_inj, rms_align=rms_align,
                 cell_m_sigma=m_sigma_rows, cell_m_offset=m_offset_rows,
                 sky_bin=cell_bin.astype(np.int8), n_sigma=cols["n_sigma"].astype(np.int16), flux90=flux90_, bias=errors["bias"], scatter=errors["scatter"],
                 held=held, stats=stats,
@@ -1404,7 +1389,7 @@ def _empty_band(n_src, n_plane):
     return dict(curve=np.zeros((0, n_plane), np.uint16), source_row=np.full(n_src, -1, np.int32),
                 peaks=dict(map=z(np.int32), x=z(float), y=z(float), fnu=z(float), row=z(np.int64), snr=z(float),
                            bin=z(np.int8), ra=z(float), dec=z(float), sigma=z(float), chance=z(float), r_match=z(float)),
-                spurious=np.full(SKY_BINS, np.nan), r_match=z(np.float32), rms_inj=np.nan, rms_align=np.nan, sky_bin=z(np.int8),
+                r_match=z(np.float32), rms_inj=np.nan, rms_align=np.nan, sky_bin=z(np.int8),
                 cell_m_sigma=z(np.float32), cell_m_offset=z(np.float32), records=[], refs_by_obs={},
                 envelope=np.zeros(n_plane, np.uint16), n_pos=z(np.int32), n_sigma=z(np.int16), flux90=z(np.float32),
                 bias=nan(), scatter=nan(),
@@ -1516,7 +1501,7 @@ def _measure_at(piece, config, records):
     return band, t, fnu, tile.grid.cell_ids(x, y), ext
 
 
-def merge_sources(config, bands, ra, dec, n_jobs, stage, flux_grid):
+def merge_sources(config, bands, n_jobs, stage, flux_grid):
     """The region's PACS sources: the bands' blind detections merged across bands (planner ruling 2026-10-28).
     Detections of two bands within the pair's merge radius are one source (each band at most once, nearest first,
     brightest detections first); the position is the sharpest detecting band's (70, else 100, else 160); every
@@ -1596,29 +1581,11 @@ def merge_sources(config, bands, ra, dec, n_jobs, stage, flux_grid):
         table["offset_" + b][k[hit]] = bands[b]["cell_offset"][row[hit]]
         if hit.any():
             table["sigma_" + b][k[hit]] = calibrated_sigma(bands[b]["scatter"][row[hit]], flux_grid, fnu[hit])
-    # the SESNA matching radius of each source and the chance matches
-    rm = np.full(n, np.nan)
-    for k in range(n):
-        b = BANDS[pos_band[k]]
-        rm[k] = bands[b]["r_match"][table["map_" + b][k]]
-        if b == "P160" and not table["detected_P70"][k] and not table["detected_P100"][k]:
-            rm[k] = np.hypot(rm[k], radius[("P70", "P160")])
-    table["r_match"] = rm
-    chance = np.zeros(n)
-    if n:
-        su = _unit(ra, dec)
-        tree = cKDTree(su)
-        pu = _unit(pra, pde)
-        counts = np.array([len(v) for v in tree.query_ball_point(pu, _chord(LOCAL_DENSITY_ARCSEC))])
-        chance = counts / (np.pi * LOCAL_DENSITY_ARCSEC ** 2) * np.pi * rm ** 2
-    table["chance"] = chance
     only160 = int(((pos_band == BANDS.index("P160"))).sum())
     print("  PACS sources (merged) %d: position from P70 %d, P100 %d, P160 %d (160-only); detected in P70 %d, P100 %d, "
-          "P160 %d; SESNA matching radius median by position band %s; expected chance SESNA matches %.1f"
-          % (n, int((pos_band == 0).sum()), int((pos_band == 1).sum()), only160,
-             int(table["detected_P70"].sum()), int(table["detected_P100"].sum()), int(table["detected_P160"].sum()),
-             "  ".join("%s %.2f" % (b, np.nanmedian(rm[pos_band == i]) if (pos_band == i).any() else np.nan)
-                       for i, b in enumerate(BANDS)), float(chance.sum())), flush=True)
+          "P160 %d" % (n, int((pos_band == 0).sum()), int((pos_band == 1).sum()), only160,
+                       int(table["detected_P70"].sum()), int(table["detected_P100"].sum()), int(table["detected_P160"].sum())),
+          flush=True)
     return table
 
 
@@ -1637,13 +1604,9 @@ def write_sources(path, region, bands, merged):
         ds = w("RA_DEG", np.asarray(merged["ra"], np.float64))
         for (a, b), r in merged["radius"].items():
             ds.attrs["MERGE_RADIUS_%s_%s_ARCSEC" % (a, b)] = float(r)
-        for b in BANDS:
-            ds.attrs["SPURIOUS_BY_SKY_BIN_" + b] = np.asarray(bands[b]["spurious"], np.float64)
         ds.attrs["N_160_ONLY"] = int((merged["position_band"] == BANDS.index("P160")).sum())
         w("DEC_DEG", np.asarray(merged["dec"], np.float64))
         w("POSITION_BAND", merged["position_band"].astype(np.int8))
-        w("R_MATCH_ARCSEC", np.asarray(merged["r_match"], np.float32))
-        w("CHANCE", np.asarray(merged["chance"], np.float32))
         for b in BANDS:
             w("DETECTED_" + b, merged["detected_" + b])
             w("FNU_%s_MJY" % b, merged["fnu_" + b])
@@ -1654,7 +1617,7 @@ def write_sources(path, region, bands, merged):
             w("EXTENDED_" + b, merged["extended_" + b])
 
 
-def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None, maps=None):
+def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None, maps=None, detect_only=False):
     """Measure and write one region. `ra`/`dec` are the region's source positions in the curated order; `maps`
     (observation ids) restricts the maps used to the ones holding one of them (development on a few maps).
     Returns the per-band products (for the caller's checks, with each band's held-out half under "held")."""
@@ -1667,13 +1630,14 @@ def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None, maps=No
         scan = [r for r in records if r.mode == 1]
         if records:
             self_check(config, (scan or records)[0])
-        out[b] = _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs) if records else None
+        out[b] = _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs, detect_only) if records else None
         if out[b] is None:
             out[b] = _empty_band(ra.size, mag.size)
         elif b in ("P70", "P100"):
             blue_refs.update(out[b]["refs_by_obs"])
-    write_product(out_path, region, mag, out)
-    merged = merge_sources(config, out, ra, dec, n_jobs, stage, flux_grid)
+    if not detect_only:
+        write_product(out_path, region, mag, out)
+    merged = merge_sources(config, out, n_jobs, stage, flux_grid)
     write_sources(product_path(config, "sky/derived", "pacs", "sources", "region", region=region), region, out, merged)
     return out
 
@@ -1685,7 +1649,7 @@ def _region_inputs(config, region):
         return f["RA_DEG"][:].astype(np.float64), f["DEC_DEG"][:].astype(np.float64)
 
 
-def build(config, regions=None, maps=None):
+def build(config, regions=None, maps=None, detect_only=False):
     """Writes each region's `completeness_pacs_source` product, regions one after another. Returns
     `{region: {band: held-out injections}}` for `acceptance` (the command line discards it)."""
     names = regions or [r.name for r in regions_module.REGIONS]
@@ -1695,7 +1659,7 @@ def build(config, regions=None, maps=None):
         with progress_module.Stage("sky.derived.pacs_completeness", region) as st:
             ra, dec = _region_inputs(config, region)
             path = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
-            bands = _build_region(config, region, path, ra, dec, config.n_jobs, st, maps)
+            bands = _build_region(config, region, path, ra, dec, config.n_jobs, st, maps, detect_only)
             held[region] = {b: bands[b]["held"] for b in BANDS}
             st.done(path, **{"cells_" + b: int(bands[b]["curve"].shape[0]) for b in BANDS})
     progress_module.summary("sky.derived.pacs_completeness", len(names), t0)
