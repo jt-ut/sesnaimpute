@@ -484,57 +484,69 @@ def filtered(tile, x, y, offset_cell):
     return np.where(a.covered, a.flux - off, np.nan)
 
 
-_MATCHED = {}
+def _detection_kernel(tile):
+    """The detection kernel of the tile: the band's own point-spread template (`Tile._add_sources`'s, at the map
+    centre) on its footprint (where it exceeds ZERO_SUM_FOOTPRINT of its peak). Returns (h, kc, fc, s_full): the
+    half-width, the template on the footprint and the footprint as correlated (flipped), and the zero-sum template's
+    sum of squares over the footprint."""
+    h = tile.injection_half_width()
+    side = 2 * h + 1
+    cy, cx = tile.shape[0] // 2, tile.shape[1] // 2
+    offs = np.arange(side, dtype=float)
+    px = np.broadcast_to((cx - h + offs)[None, None, :], (1, side, side))
+    py = np.broadcast_to((cy - h + offs)[None, :, None], (1, side, side))
+    k = tile._psf.evaluate_xy(np.array([float(cx)]), np.array([float(cy)]), px, py).mean(axis=1)[0]
+    foot = k > ZERO_SUM_FOOTPRINT * k.max()
+    kf = np.where(foot, k, 0.0)
+    s_full = float(((k[foot] - k[foot].mean()) ** 2).sum())
+    return h, kf[::-1, ::-1], foot[::-1, ::-1].astype(float), s_full
 
 
-def matched_state(tile):
-    """The detection image of the tile's real image: the image correlated with the band's own point-spread template
-    (`Tile._add_sources`'s, at the map centre) made zero-sum over its footprint (the template less its mean there,
-    DAOFIND's lowered kernel), so that a smooth local background and its gradient give zero and a point source on
-    the slope of a ridge is still a peak. At map edges and gaps the kernel is the template on the footprint's VALID
-    pixels made zero-sum over those pixels, scaled by sqrt(S_full / S_valid) (S the kernel's sum of squares over the
-    footprint, over its valid pixels) so that white pixel noise gives the interior's noise there (the factor is 1 in the
-    interior, where the map is the full kernel's); defined at every valid pixel whose valid footprint holds at least
-    two pixels. Process-local, one map at a time; built from the un-injected image. `m` the detection map (NaN where
-    not defined), `kc` the template on the footprint as correlated, `fc` the footprint as correlated, `ratio` the
-    per-pixel valid-footprint mean factor B/D and `norm` the per-pixel scale (both 0 where not defined), `pix_valid`
-    the pixels that enter (`_injected_delta` applies the identical operator to an injection's template)."""
-    key = tile.record.path
-    if key not in _MATCHED:
-        _MATCHED.clear()
-        h = tile.injection_half_width()
-        side = 2 * h + 1
-        cy, cx = tile.shape[0] // 2, tile.shape[1] // 2
-        offs = np.arange(side, dtype=float)
-        px = np.broadcast_to((cx - h + offs)[None, None, :], (1, side, side))
-        py = np.broadcast_to((cy - h + offs)[None, :, None], (1, side, side))
-        k = tile._psf.evaluate_xy(np.array([float(cx)]), np.array([float(cy)]), px, py).mean(axis=1)[0]
-        foot = k > ZERO_SUM_FOOTPRINT * k.max()
-        kf = np.where(foot, k, 0.0)
-        kc = kf[::-1, ::-1]
-        fc = foot[::-1, ::-1].astype(float)
-        s_full = float(((k[foot] - k[foot].mean()) ** 2).sum())
-        valid = np.isfinite(tile.image) & np.isfinite(tile.error)
+def prepare_detection(tile, config):
+    """The detection image of the tile's real image, written once per map beside its prepared layers
+    (`pacs_fit.prepared_dir`): the image correlated with the band's own point-spread template made zero-sum over
+    its footprint (the template less its mean there, DAOFIND's lowered kernel), so that a smooth local background
+    and its gradient give zero and a point source on the slope of a ridge is still a peak. At map edges and gaps
+    the kernel is the template on the footprint's VALID pixels made zero-sum over those pixels, scaled by
+    sqrt(S_full / S_valid) (S the kernel's sum of squares over the footprint, over its valid pixels) so that white
+    pixel noise gives the interior's noise there (the factor is 1 in the interior); defined at every valid pixel
+    whose valid footprint holds at least two pixels. Written: `m.npy` (NaN where not defined), the per-pixel
+    valid-footprint mean factor `ratio.npy` and scale `norm.npy` (float32, 0 where not defined), `valid.npy` (where
+    m is defined), `pix_valid.npy` (the pixels that enter), `kernel.npz`. Computed strip by strip
+    (pacs_fit.PREPARE_STRIP_ROWS, at least 8 kernel half-widths), each strip with the kernel's half-width of rows
+    either side, so the memory is a few strips whatever the map's size."""
+    from numpy.lib.format import open_memmap
+    d = pacs_fit.prepared_dir(config, tile.record)
+    h, kc, fc, s_full = _detection_kernel(tile)
+    np.savez(os.path.join(d, "kernel.npz"), h=h, kc=kc, fc=fc, s_full=s_full)
+    ny, nx = tile.shape
+    out = {name: open_memmap(os.path.join(d, name + ".npy"), mode="w+", dtype=dt, shape=(ny, nx))
+           for name, dt in (("m", np.float32), ("ratio", np.float32), ("norm", np.float32), ("valid", bool),
+                            ("pix_valid", bool))}
+    rows = max(pacs_fit.PREPARE_STRIP_ROWS, 8 * h)
 
-        def corr(a, c):
-            return fftconvolve(a, c, mode="same")
+    def corr(a, c):
+        return fftconvolve(a, c, mode="same")
+    for s0 in range(0, ny, rows):
+        s1 = min(s0 + rows, ny)
+        a0, a1 = max(s0 - h, 0), min(s1 + h, ny)
+        image = np.asarray(tile.image[a0:a1])
+        valid = np.isfinite(image) & np.isfinite(np.asarray(tile.error[a0:a1]))
         # D = valid pixels in the footprint, B = sum of the template over them, E = of its square, A and C the
-        # image's sums weighted by the template and plain: the zero-sum response is A - B C / D, its kernel's
-        # sum of squares E - B^2 / D (FFT round-off: D is a count, S_valid a sum of squares held >= 0). Each
-        # full-size intermediate is freed as soon as it is used: 96 workers each hold one map's (Vista job 1108388
-        # was killed at 2.9 GB per worker on a 29-megapixel 100 micron map)
+        # image's sums weighted by the template and plain: the zero-sum response is A - B C / D, its kernel's sum of
+        # squares E - B^2 / D (FFT round-off: D is a count, S_valid a sum of squares held >= 0)
         v = valid.astype(float)
-        d = np.rint(corr(v, fc))
+        dd = np.rint(corr(v, fc))
         b = corr(v, kc)
         s_valid = corr(v, kc * kc)
         del v
-        s_valid -= np.divide(b * b, d, out=np.zeros_like(b), where=d > 0)
-        ok = valid & (d >= 2) & (s_valid > 1e-9 * s_full)
-        ratio = np.divide(b, d, out=np.zeros_like(b), where=ok)
-        del b, d
+        s_valid -= np.divide(b * b, dd, out=np.zeros_like(b), where=dd > 0)
+        ok = valid & (dd >= 2) & (s_valid > 1e-9 * s_full)
+        ratio = np.divide(b, dd, out=np.zeros_like(b), where=ok)
+        del b, dd
         norm = np.sqrt(np.divide(s_full, s_valid, out=np.zeros_like(s_valid), where=ok))
         del s_valid
-        iv = np.where(valid, tile.image, 0.0).astype(float)
+        iv = np.where(valid, image, 0.0).astype(float)
         m = corr(iv, kc)
         c = corr(iv, fc)
         del iv
@@ -543,9 +555,41 @@ def matched_state(tile):
         del c
         m *= norm
         m = np.where(ok, m, np.nan)
-        _MATCHED[key] = dict(h=h, kc=kc, fc=fc, m=m.astype(np.float32), valid=ok, pix_valid=valid,
-                             ratio=ratio.astype(np.float32), norm=norm.astype(np.float32))
+        r0, r1 = s0 - a0, s1 - a0
+        out["m"][s0:s1] = m[r0:r1]
+        out["ratio"][s0:s1] = ratio[r0:r1]
+        out["norm"][s0:s1] = norm[r0:r1]
+        out["valid"][s0:s1] = ok[r0:r1]
+        out["pix_valid"][s0:s1] = valid[r0:r1]
+    for a in out.values():
+        a.flush()
+
+
+_MATCHED = {}
+
+
+def matched_state(tile):
+    """The tile's detection image and its factors (`prepare_detection`), memory-mapped read-only: one copy per map
+    shared by every worker. Process-local, one map at a time. `m` the detection map (NaN where not valid), `kc` the
+    template on the footprint and `fc` the footprint as correlated, `ratio`, `norm`, `valid`, `pix_valid` as
+    written (`_injected_delta` applies the identical operator to an injection's template)."""
+    key = tile.record.path
+    if key not in _MATCHED:
+        _MATCHED.clear()
+        d = os.path.dirname(tile._image_path)
+        k = np.load(os.path.join(d, "kernel.npz"))
+        _MATCHED[key] = dict(h=int(k["h"]), kc=k["kc"], fc=k["fc"],
+                             **{name: np.load(os.path.join(d, name + ".npy"), mmap_mode="r")
+                                for name in ("m", "ratio", "norm", "valid", "pix_valid")})
     return _MATCHED[key]
+
+
+def _prepare_piece(record, config):
+    """Prepare one map for the run (`pacs_fit.prepare_map`, then `prepare_detection`). Returns the map id."""
+    tile = pacs_fit.prepare_map(config, record)
+    prepare_detection(tile, config)
+    pacs_fit._CACHE.clear()
+    return record.map_id
 
 
 def detection_cell_stats(tile, ids):
@@ -852,20 +896,32 @@ class Injector:
             for k, l in enumerate(lists):
                 if l:
                     brighter[k] = flux[k] >= self.det_flux[l].max()
-        t0 = time.time()
-        saved = tile._add_sources(x, y, flux)
-        t_inject = time.time() - t0
-        try:
+        # the batch is applied in bands of rows (pacs_fit.PREPARE_STRIP_ROWS): its positions are thinned so that no
+        # injected light reaches another injection's aperture or annulus, so each band's sources measure exactly as
+        # with the whole batch in; after each band the image is restored and its private pages dropped, so a worker
+        # holds one band's patches whatever the map's size
+        flux_out, covered = np.full(n, np.nan), np.zeros(n, bool)
+        found, det_flux, det_dist = np.zeros(n, bool), np.full(n, np.nan), np.full(n, np.nan)
+        t_inject = t_ap = 0.0
+        band = np.floor(y / pacs_fit.PREPARE_STRIP_ROWS).astype(np.int64)
+        for b in np.unique(band):
+            k = np.flatnonzero(band == b)
             t0 = time.time()
-            m = tile.measure(x, y)
-            flux_out, covered = m.flux, m.covered
-            found, _xc, _yc, det_flux, det_dist = window_peaks(tile, x, y, r, self.m_offset, self.m_sigma, self.offset,
-                                                               flux=flux)
-            t_ap = time.time() - t0
-        finally:
-            t0 = time.time()
-            tile._restore(saved)
+            saved = tile._add_sources(x[k], y[k], flux[k])
             t_inject += time.time() - t0
+            try:
+                t0 = time.time()
+                m = tile.measure(x[k], y[k])
+                flux_out[k], covered[k] = m.flux, m.covered
+                f_, _xc, _yc, df_, dd_ = window_peaks(tile, x[k], y[k], r, self.m_offset, self.m_sigma, self.offset,
+                                                      flux=flux[k])
+                found[k], det_flux[k], det_dist[k] = f_, df_, dd_
+                t_ap += time.time() - t0
+            finally:
+                t0 = time.time()
+                tile._restore(saved)
+                tile.release_image()
+                t_inject += time.time() - t0
         recovered = covered & found & brighter
         keep = covered
         out.update(row=self.row_of_cell[cid[keep]], near=near[keep], recovered=recovered[keep],
@@ -993,6 +1049,7 @@ def _real_check(injector, flux_mjy, half):
     before = tile.measure(x, y)
     with tile.injected(x, y, flux_mjy):
         after = tile.measure(x, y)
+    tile.release_image()
     ok = before.covered & after.covered
     return (after.flux[ok] - before.flux[ok]) / flux_mjy
 
@@ -1670,6 +1727,13 @@ def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None, maps=No
     (observation ids) restricts the maps used to the ones holding one of them (development on a few maps).
     Returns the per-band products (for the caller's checks, with each band's held-out half under "held")."""
     mag, flux_grid = canonical_grid()
+    # every map of the region prepared once, before any piece reads it (pieces are maps; each map's preparation
+    # works strip by strip)
+    to_prepare = [r for r in pacs_fit.read_index(config, region) if r.band in BANDS
+                  and (maps is None or any(str(o) in maps for o in r.obsids))]
+    to_prepare.sort(key=lambda r: -int(np.prod(r.shape)))
+    pieces_module.run(functools.partial(_prepare_piece, config=config), to_prepare, n_jobs, stage=stage,
+                      unit="maps (prepared)")
     out = {}
     blue_refs = {}
     for b in BANDS:
