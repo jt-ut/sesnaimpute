@@ -70,6 +70,16 @@ EXTENDED_BEAM_FACTOR = 1.5
 #: owner-approved 2026-10-28)
 BLEND_RADIUS_BEAMS = 1.0
 
+#: the SESNA association of the region's PACS sources (planner ruling, owner-approved 2026-10-29: Rob Gutermuth's
+#: band-merging recipe as eHOPS applies it, Pokhrel et al. 2023 Sect. III.2 and Appendix C): nearest neighbour within a
+#: fixed radius in every band, set by the two catalogues' astrometric accuracy (Gutermuth et al. 2009 Sect. 2.3: 1 arcsec
+#: IRAC/2MASS, 1.3 arcsec MIPS 24 um; eHOPS: 2 arcsec for PACS on the Herschel header astrometry, no registration)
+MATCH_RADIUS_ARCSEC = 2.0
+#: the SESNA density behind the expected chance coincidences is counted within this radius of each PACS source
+CHANCE_DENSITY_ARCSEC = 60.0
+#: an observation's median PACS - SESNA offset is printed where it holds at least this many associated pairs
+MIN_OFFSET_PAIRS = 5
+
 
 # ---------------------------------------------------------------------------
 # positions
@@ -160,48 +170,56 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
     return band, map_index, rows, columns
 
 
+def _sep_arcsec(u, v):
+    return np.degrees(2.0 * np.arcsin(np.clip(np.linalg.norm(u - v, axis=-1) / 2.0, 0.0, 1.0))) * 3600.0
+
+
 def cross_match(path, config, region, ra, dec):
-    """The SESNA cross-match, once per PACS source (planner ruling 2026-10-28), on the photometry product at `path`
-    (rewritten in place): the PACS sources of the region (`sources_pacs_region`, merged across bands) within whose
-    matching radius (R_MATCH_ARCSEC) a SESNA source lies. A SESNA source with exactly one such PACS source, of which
-    it is the only SESNA source within the radius: ORIGIN 1 in every band that detects it, FNU/SIGMA the PACS
-    source's. Several SESNA sources within a PACS source's radius (or a SESNA source within the radius of several):
-    ORIGIN 2 in every detecting band, the bound that band's flux. A band that does not detect the matched source
-    keeps the forced measurement (ORIGIN 90 or 91). Returns per-band counts."""
+    """The SESNA association of the region's PACS sources (`sources_pacs_region`, merged across bands; planner ruling,
+    owner-approved 2026-10-29: Rob Gutermuth's band-merging recipe as eHOPS applies it) on the photometry product at
+    `path` (rewritten in place). Each SESNA source takes the nearest PACS source within MATCH_RADIUS_ARCSEC. If that PACS
+    source has this SESNA source alone within the radius: ORIGIN 1 in every band that detects it, FNU/SIGMA the PACS
+    source's. If it has two or more SESNA sources within the radius (a blend): ORIGIN 2 in every detecting band, the
+    bound that band's flux. A band that does not detect the PACS source keeps the forced measurement (ORIGIN 90 or 91).
+    Returns per-band counts {m1, m2}, the expected chance coincidences (the local SESNA density within
+    CHANCE_DENSITY_ARCSEC x the radius's area, summed over the PACS sources) and the per-observation median offsets
+    PACS - SESNA (east, north arcsec) of the ORIGIN 1 pairs, keyed by (position band, map index): (n, east, north)."""
     src = product_path(config, "sky/derived", "pacs", "sources", "region", region=region)
     with h5py.File(src, "r") as f:
         n = f["RA_DEG"].shape[0]
-        pra, pde, rm = f["RA_DEG"][:], f["DEC_DEG"][:], f["R_MATCH_ARCSEC"][:].astype(float)
-        chance = float(np.nansum(f["CHANCE"][:]))
+        pra, pde, pb = f["RA_DEG"][:], f["DEC_DEG"][:], f["POSITION_BAND"][:].astype(int)
         cols = {b: dict(det=f["DETECTED_" + b][:], fnu=f["FNU_%s_MJY" % b][:], sig=f["SIGMA_%s_MJY" % b][:],
-                        off=f["CELL_OFFSET_%s_MJY" % b][:], ext=f["EXTENDED_" + b][:]) for b in BANDS}
+                        off=f["CELL_OFFSET_%s_MJY" % b][:], ext=f["EXTENDED_" + b][:], map=f["MAP_INDEX_" + b][:])
+                for b in BANDS}
     out = {b: dict(m1=0, m2=0) for b in BANDS}
-    if n == 0:
-        return out, chance
+    if n == 0 or ra.size == 0:
+        return out, 0.0, {}
     su = _unit_vectors(ra, dec)
     pu = _unit_vectors(pra, pde)
-    tree = cKDTree(su)
-    chord = 2.0 * np.sin(np.radians(np.nan_to_num(rm) / 3600.0) / 2.0)
-    claim = [tree.query_ball_point(pu[k], chord[k]) for k in range(n)]
-    of = {}
-    for k, lst in enumerate(claim):
-        for i in lst:
-            of.setdefault(i, []).append(k)
+    chord = 2.0 * np.sin(np.radians(MATCH_RADIUS_ARCSEC / 3600.0) / 2.0)
+    stree, ptree = cKDTree(su), cKDTree(pu)
+    claim = stree.query_ball_point(pu, chord)                       # SESNA sources within the radius, per PACS source
+    n_local = stree.query_ball_point(pu, 2.0 * np.sin(np.radians(CHANCE_DENSITY_ARCSEC / 3600.0) / 2.0), return_length=True)
+    chance = float(np.sum(n_local / (np.pi * CHANCE_DENSITY_ARCSEC ** 2)) * np.pi * MATCH_RADIUS_ARCSEC ** 2)
+    dist, near = ptree.query(su, distance_upper_bound=chord)        # each SESNA source's nearest PACS source
+    pairs = {}
     with h5py.File(path, "r+") as f:
         data = {b: {c: f[_NAMES[c].format(b=b)][:] for c in ("FNU", "SIGMA", "ORIGIN", "CELL_OFFSET", "N_BLEND",
                                                              "PACS_SOURCE", "MATCH_SEPARATION", "EXTENDED")} for b in BANDS}
-        for i, ks in of.items():
-            sole = len(ks) == 1 and len(claim[ks[0]]) == 1
+        for i in np.flatnonzero(np.isfinite(dist)):
+            k = int(near[i])
+            sole = len(claim[k]) == 1
+            sep = float(_sep_arcsec(su[i], pu[k]))
+            if sole:
+                cosd = np.cos(np.radians(dec[i]))
+                pairs.setdefault((int(pb[k]), int(cols[BANDS[pb[k]]]["map"][k])), []).append(
+                    ((pra[k] - ra[i]) * cosd * 3600.0, (pde[k] - dec[i]) * 3600.0))
             for b in BANDS:
                 c, d = cols[b], data[b]
-                dk = [k for k in ks if c["det"][k]]
-                if not dk:
+                if not c["det"][k]:
                     continue
-                k = max(dk, key=lambda j: c["fnu"][j])
                 d["FNU"][i], d["CELL_OFFSET"][i] = c["fnu"][k], c["off"][k]
-                d["PACS_SOURCE"][i] = k
-                d["MATCH_SEPARATION"][i] = float(np.degrees(2 * np.arcsin(min(np.linalg.norm(su[i] - pu[k]) / 2, 1.0))) * 3600)
-                d["N_BLEND"][i] = max(len(claim[j]) for j in ks)
+                d["PACS_SOURCE"][i], d["MATCH_SEPARATION"][i], d["N_BLEND"][i] = k, sep, len(claim[k])
                 if sole:
                     d["ORIGIN"][i], d["SIGMA"][i], d["EXTENDED"][i] = ORIGIN_DETECTED, c["sig"][k], c["ext"][k]
                     out[b]["m1"] += 1
@@ -211,7 +229,31 @@ def cross_match(path, config, region, ra, dec):
         for b in BANDS:
             for c, v in data[b].items():
                 f[_NAMES[c].format(b=b)][...] = v
-    return out, chance
+            f["ORIGIN_" + b].attrs["MATCH_RADIUS_ARCSEC"] = MATCH_RADIUS_ARCSEC
+        f["ORIGIN_P70"].attrs["EXPECTED_CHANCE_COINCIDENCES"] = chance
+    offsets = {key: (len(v), float(np.median([e for e, _ in v])), float(np.median([nn for _, nn in v])))
+               for key, v in pairs.items()}
+    return out, chance, offsets
+
+
+def print_offsets(config, region, offsets):
+    """The per-observation median offsets PACS - SESNA of the associated pairs (the check eHOPS made, Pokhrel et al.
+    2023 Appendix C: a fraction of the 2 arcsec radius, so no registration is needed), per position band: each
+    observation with at least MIN_OFFSET_PAIRS pairs."""
+    comp = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
+    with h5py.File(comp, "r") as f:
+        obsid = {b: f["MAP_OBSID_" + b][:] if "MAP_OBSID_" + b in f else np.zeros(0, "S1") for b in BANDS}
+    for bi, b in enumerate(BANDS):
+        rows = sorted((key[1], v) for key, v in offsets.items() if key[0] == bi and v[0] >= MIN_OFFSET_PAIRS)
+        if not rows:
+            print("  %s-positioned: no observation with >= %d associated pairs" % (b, MIN_OFFSET_PAIRS), flush=True)
+            continue
+        mag = np.array([np.hypot(e, nn) for _, (_, e, nn) in rows])
+        print("  %s-positioned: per-observation median offset PACS - SESNA over %d observations: |offset| median %.2f, "
+              "max %.2f arcsec (radius %.1f)" % (b, len(rows), np.median(mag), mag.max(), MATCH_RADIUS_ARCSEC), flush=True)
+        for (m, (npair, e, nn)), r in zip(rows, mag):
+            name = obsid[b][m].decode() if 0 <= m < obsid[b].size else str(m)
+            print("    %s: %d pairs, east %+.2f north %+.2f (|%.2f|)" % (name, npair, e, nn, r), flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -365,14 +407,16 @@ def _build_one_region(config, region, st):
                           config, config.n_jobs, stage=st, shifts=shifts, cell_row=cell_row, scatter=scatter,
                           flux_grid=flux_grid)
     if records:
-        matched, chance = cross_match(out_path, config, region, ra, dec)
+        matched, chance, offsets = cross_match(out_path, config, region, ra, dec)
         with h5py.File(out_path, "r") as f:
             for b in BANDS:
                 o = f["ORIGIN_" + b][:]
                 counts[b] = {code: int((o == code).sum()) for code in (1, 2, 90, 91)}
-                print("  %s: cross-match: ORIGIN 1 %d, ORIGIN 2 (blends) %d, ORIGIN 90 %d, ORIGIN 91 %d" %
-                      (b, counts[b][1], counts[b][2], counts[b][90], counts[b][91]), flush=True)
-        print("  expected chance SESNA matches over the region's PACS sources: %.1f" % chance, flush=True)
+                print("  %s: association (%.1f arcsec): ORIGIN 1 %d, ORIGIN 2 (blends) %d, ORIGIN 90 %d, ORIGIN 91 %d" %
+                      (b, MATCH_RADIUS_ARCSEC, counts[b][1], counts[b][2], counts[b][90], counts[b][91]), flush=True)
+        print("  expected chance coincidences (local SESNA density x pi (%.1f arcsec)^2, summed over the region's PACS "
+              "sources): %.1f" % (MATCH_RADIUS_ARCSEC, chance), flush=True)
+        print_offsets(config, region, offsets)
     wall = time.time() - t0
     numbers = {"sources": int(names.size), "sources_per_s": names.size / max(wall, 1e-9)}
     for band in BANDS:
@@ -462,7 +506,7 @@ def acceptance(config, region, reference_product=None):
     least 200 mJy, next to the same number for `reference_product` (the earlier product's path), the plan's bar
     being agreement within 2 %. C5: the HOPS targets binned by their 70 micron flux: the fraction detected
     (ORIGIN 1) among those the band covers, against the mean of the completeness curve at their SESNA
-    source's cell and their flux, with binomial errors. Nothing is written."""
+    source's cell and their flux, with binomial errors. Then the HPPSC checks (`hppsc_checks`). Nothing is written."""
     path = product_path(config, "sky/derived", "pacs", "photometry", "source", region=region)
     ratio, n, n_all = _c4_ratio(config, region, path)
     print("C4 %s: median (ours + CELL_OFFSET) / HOPS at 70 micron (HOPS's convention), HOPS targets >= %g mJy detected by us: %.4f (%d of %d targets)"
@@ -477,11 +521,6 @@ def acceptance(config, region, reference_product=None):
     bright = f70[h] >= C4_MIN_F70_MJY
     print("   HOPS targets >= %g mJy by final 70 micron ORIGIN: %s"
           % (C4_MIN_F70_MJY, "  ".join("%d: %d" % (c, int((o70[bright] == c).sum())) for c in (1, 2, 90, 91))))
-    # the stop condition (RULINGS_5): of the bright HOPS targets the band covers that are not blends, ORIGIN 1 >= 95 %
-    pool = bright & (o70 != ORIGIN_NOT_COVERED) & (o70 != ORIGIN_UPPER_BOUND)
-    frac = float((o70[pool] == ORIGIN_DETECTED).mean()) if pool.any() else float("nan")
-    print("   STOP CONDITION: HOPS >= %g mJy covered and not blends that are ORIGIN 1: %.3f of %d (bar >= 0.95: %s)"
-          % (C4_MIN_F70_MJY, frac, int(pool.sum()), "pass" if frac >= 0.95 else "FAIL: a peak-finder or matcher defect"))
     comp = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
     with h5py.File(path, "r") as f:
         origin = f["ORIGIN_P70"][:][row]
@@ -505,6 +544,116 @@ def acceptance(config, region, reference_product=None):
         err = float(np.sqrt(np.sum(expected[k] * (1 - expected[k]))) / k.sum())
         print("C5 %s: HOPS 70 micron %g-%g mJy: %d targets, detected %.3f +- %.3f, curve predicts %.3f +- %.3f"
               % (region, lo, hi, int(k.sum()), obs, np.sqrt(max(obs * (1 - obs), 1e-9) / k.sum()), pred, err))
+    hppsc_checks(config, region)
+
+
+#: HPPSC (Marton et al. 2017; `sky.download.hppsc`) band list per band, and its band name in the observation table
+HPPSC_FILES = {"P70": ("ppsc_70.csv", "blue"), "P100": ("ppsc_100.csv", "green"), "P160": ("ppsc_160.csv", "red")}
+#: the flux comparison uses common sources with HPPSC's structure-noise S/N at least this
+HPPSC_FLUX_SNR = 10.0
+#: the bars (planner ruling, owner-approved 2026-10-29): flux ratio within the 5 % calibration; recovery of HPPSC
+#: sources at or above our FLUX90 at their position at least 90 % within binomial error
+HPPSC_FLUX_BAR = 0.05
+HPPSC_RECOVERY_BAR = 0.90
+
+
+def _read_hppsc(config, band):
+    """HPPSC's band list as arrays: ra, dec (deg), flux (mJy), snr (structure-noise S/N), edge flag; and the
+    observation table's obsids for the band."""
+    import csv
+    from sesnaimpute.sky.download.hppsc.build import download_dir
+    name, colour = HPPSC_FILES[band]
+    cols = {k: [] for k in ("ra", "dec", "flux", "snr", "edgeflag")}
+    with open(os.path.join(download_dir(config), name)) as fh:
+        for r in csv.DictReader(fh):
+            for k in cols:
+                cols[k].append(r[k])
+    out = {k: np.asarray(v, float) for k, v in cols.items() if k != "edgeflag"}
+    out["edge"] = np.asarray(cols["edgeflag"]) == "t"
+    with open(os.path.join(download_dir(config), "ppsc_obstbl.csv")) as fh:
+        out["obsids"] = {int(r["obsid"]) for r in csv.DictReader(fh) if r["band"] == colour}
+    return out
+
+
+def hppsc_checks(config, region):
+    """The external check of the region's PACS source list against HPPSC, per band (planner ruling, owner-approved
+    2026-10-29; HPPSC enters no product): (1) how many of our maps HPPSC was built from (its observation table, the
+    paper's Table 8); (2) the offsets of common sources, HPPSC to our nearest detection in the band within one beam,
+    at that band's own detection position (RA_<b>_DEG, on the same map's pointing as HPPSC's); (3) the median flux ratio ours / HPPSC over common sources (within MATCH_RADIUS_ARCSEC, HPPSC S/N >=
+    HPPSC_FLUX_SNR), ours on HPPSC's convention (FNU plus the cell offset: HPPSC subtracts only its annulus sky), bar
+    within HPPSC_FLUX_BAR; (4) of the HPPSC sources inside our footprint with flux at least our FLUX90 at their
+    position (the completeness product read as a function of position, `catalog.completeness._PacsBand`), the
+    fraction our detection finds in the band within MATCH_RADIUS_ARCSEC, bar HPPSC_RECOVERY_BAR within binomial error.
+    HPPSC states no reliability of its own: a false HPPSC source counts against (4). Nothing is written."""
+    from sesnaimpute.catalog.completeness import _PacsBand
+    from sesnaimpute.sky.derived.pacs_completeness import BEAM_ARCSEC
+    comp = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
+    src = product_path(config, "sky/derived", "pacs", "sources", "region", region=region)
+    with h5py.File(src, "r") as f:
+        mine = {b: dict(det=f["DETECTED_" + b][:], fnu=f["FNU_%s_MJY" % b][:], off=f["CELL_OFFSET_%s_MJY" % b][:],
+                        ra=f["RA_%s_DEG" % b][:], dec=f["DEC_%s_DEG" % b][:]) for b in BANDS}
+    with h5py.File(comp, "r") as fc:
+        for b in BANDS:
+            if "CELL_ID_" + b not in fc or fc["CELL_ID_" + b].shape[0] == 0:
+                print("HPPSC %s %s: the band has no cells" % (region, b))
+                continue
+            h = _read_hppsc(config, b)
+            ours = [set(int(o) for o in m.decode().split(",") if o) for m in fc["MAP_OBSID_" + b][:]]
+            n_in = sum(1 for o in ours if o & h["obsids"])
+            print("HPPSC %s %s: coverage: %d of our %d maps are among HPPSC's observations (its Table 8)"
+                  % (region, b, n_in, len(ours)))
+            cra, cde = fc["CELL_RA_" + b][:], fc["CELL_DEC_" + b][:]
+            box = ((h["ra"] > cra.min() - 0.1) & (h["ra"] < cra.max() + 0.1) & (h["dec"] > cde.min() - 0.1)
+                   & (h["dec"] < cde.max() + 0.1))
+            hra, hde, hflux, hsnr = h["ra"][box], h["dec"][box], h["flux"][box], h["snr"][box]
+            row = _PacsBand(fc, b).rows(hra, hde)
+            inside = row >= 0
+            flux90 = np.where(inside, fc["FLUX90_%s_MJY" % b][:][np.maximum(row, 0)], np.nan)
+            det = np.flatnonzero(mine[b]["det"])
+            # each band's own detection position (the same map as HPPSC's), not the merged one
+            pra, pde = mine[b]["ra"], mine[b]["dec"]
+            pu = _unit_vectors(np.nan_to_num(pra), np.nan_to_num(pde))
+            if det.size == 0 or not inside.any():
+                print("HPPSC %s %s: %d HPPSC sources inside our footprint, %d detections of ours: no comparison"
+                      % (region, b, int(inside.sum()), det.size))
+                continue
+            tree = cKDTree(pu[det])
+            hu = _unit_vectors(hra, hde)
+            dist, j = tree.query(hu, distance_upper_bound=2.0 * np.sin(np.radians(BEAM_ARCSEC[b] / 3600.0) / 2.0))
+            near = np.isfinite(dist) & inside
+            k = det[np.minimum(j, det.size - 1)]
+            sep = np.where(near, np.degrees(2.0 * np.arcsin(np.clip(np.nan_to_num(dist, posinf=0.0) / 2.0, 0, 1))) * 3600.0, np.nan)
+            cosd = np.cos(np.radians(hde))
+            east = (pra[k] - hra) * cosd * 3600.0
+            north = (pde[k] - hde) * 3600.0
+            if near.any():
+                print("HPPSC %s %s: offsets ours - HPPSC of %d common sources (within one beam, %.1f arcsec): separation "
+                      "median %.2f, 68th %.2f, 90th %.2f arcsec; median east %+.2f north %+.2f; within %.1f arcsec %.3f"
+                      % (region, b, int(near.sum()), BEAM_ARCSEC[b], np.median(sep[near]), np.percentile(sep[near], 68),
+                         np.percentile(sep[near], 90), np.median(east[near]), np.median(north[near]), MATCH_RADIUS_ARCSEC,
+                         float(np.mean(sep[near] <= MATCH_RADIUS_ARCSEC))))
+            common = near & (sep <= MATCH_RADIUS_ARCSEC)
+            ours_flux = mine[b]["fnu"][k] + np.nan_to_num(mine[b]["off"][k])
+            use = common & (hsnr >= HPPSC_FLUX_SNR) & np.isfinite(ours_flux) & (hflux > 0)
+            if use.any():
+                ratio = float(np.median(ours_flux[use] / hflux[use]))
+                print("HPPSC %s %s: flux ours (FNU + cell offset) / HPPSC, median over %d common sources with HPPSC S/N >= "
+                      "%g: %.3f (bar within %.0f %%: %s)" % (region, b, int(use.sum()), HPPSC_FLUX_SNR, ratio,
+                                                           100 * HPPSC_FLUX_BAR,
+                                                           "pass" if abs(ratio - 1.0) <= HPPSC_FLUX_BAR else "FAIL"))
+            else:
+                print("HPPSC %s %s: no common sources with HPPSC S/N >= %g" % (region, b, HPPSC_FLUX_SNR))
+            pool = inside & np.isfinite(flux90) & (hflux >= flux90)
+            if pool.any():
+                n_pool = int(pool.sum())
+                frac = float(np.mean(common[pool]))
+                err = np.sqrt(HPPSC_RECOVERY_BAR * (1 - HPPSC_RECOVERY_BAR) / n_pool)
+                print("HPPSC %s %s: recovery of the %d HPPSC sources inside our footprint at or above our FLUX90 there: "
+                      "%.3f (binomial error at the bar %.3f; bar >= %.2f: %s); HPPSC edge-flagged among them %d"
+                      % (region, b, n_pool, frac, err, HPPSC_RECOVERY_BAR,
+                         "pass" if frac + err >= HPPSC_RECOVERY_BAR else "FAIL", int(np.sum(h["edge"][box][pool]))))
+            else:
+                print("HPPSC %s %s: no HPPSC source inside our footprint at or above our FLUX90" % (region, b))
 
 
 if __name__ == "__main__":

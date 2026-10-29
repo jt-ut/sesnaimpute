@@ -3934,15 +3934,10 @@ _PACS_COMPLETENESS_CELLS_READINGS = {
     "MAP_OBSID_{b}": ("observation identifier(s)",
         "For each row of MAP_ID_{b}: the Herschel observation identifier(s) the map combines, comma separated."),
     "MAP_SHIFT_{b}_ARCSEC": ("arcsec (east, north)",
-        "For each row of MAP_ID_{b}: how far the map's own astrometry sits from the SESNA positions, east then north "
-        "(map minus SESNA), the median over the map's bright point sources paired one-to-one with a SESNA source within "
-        "one beam; 0, 0 when fewer than 10 pairs exist. A 160 micron map takes the shift (and pairs) of the same "
-        "observation's blue map (70 or 100 micron), which observes through the same pointing and whose bright sources "
-        "are mostly the young stars themselves; a 160 micron map with no blue partner keeps its own. Every catalogue "
-        "position is moved by this shift before it is measured on the map, so a source is measured where the map puts "
-        "it."),
-    "MAP_N_PAIRS_{b}": ("pairs",
-        "For each row of MAP_ID_{b}: the number of bright-source pairs MAP_SHIFT_{b}_ARCSEC was measured from (below 10: no shift applied)."),
+        "For each row of MAP_ID_{b}: 0, 0. The maps are used on their own Herschel header astrometry, registered to "
+        "no other survey (as eHOPS does: its PACS-minus-Spitzer offsets are a fraction of its 2 arcsec association "
+        "radius, Pokhrel et al. 2023 Appendix C). Kept so that a position lookup reads the same columns."),
+    "MAP_N_PAIRS_{b}": ("pairs", "For each row of MAP_ID_{b}: 0 (no registration; see MAP_SHIFT_{b}_ARCSEC)."),
     "CELL_ID_{b}": ("cell id",
         "For each row of CURVE_{b}: the cell's identifier within its map, row-major from the map's first pixel "
         "row (id = iy x n_cells_x + ix, with ix = floor((x + 0.5) / step_x), iy likewise, x and y the map's own "
@@ -3973,25 +3968,17 @@ for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
 # sky.derived.pacs_completeness -- sources_pacs_region (RULINGS_5): the blind PACS source table.
 _PACS_SOURCES_READINGS = {
     "RA_DEG": ("deg ICRS",
-        "One row per PACS source of the region: the bands' blind detections (peaks of each map correlated with its "
-        "band's point-spread template, at least 5 times that map's own noise in the cell) merged across bands: "
-        "detections of two bands closer than the pair's merge radius (3 times the measured position scatter between "
-        "the bands for bright common sources; attributes MERGE_RADIUS_<band>_<band>_ARCSEC) are one source. Its "
-        "position is the sharpest detecting band's (POSITION_BAND), moved back by that map's registration to SESNA. "
-        "Costs, stated: a 70 micron source takes the 160 micron flux of a core within the merge radius; a source "
-        "seen only at 160 micron has a position good to about 2 arcsec, so in clusters it is often a blend; the "
-        "bands' detections are treated as independent. Attributes also: SPURIOUS_BY_SKY_BIN_<band>, peaks the same "
-        "detection finds on the negated maps over the band's detections, per sky bin; N_160_ONLY."),
+        "One row per PACS source of the region, from the PACS maps alone: the bands' blind detections (peaks of each "
+        "map correlated with its band's point-spread template made zero-sum, at least 5 times that map's own noise in "
+        "the cell) merged across bands: detections of two bands closer than the pair's merge radius (3 times the "
+        "measured position scatter between the bands for bright common sources; attributes "
+        "MERGE_RADIUS_<band>_<band>_ARCSEC) are one source. Its position is the sharpest detecting band's "
+        "(POSITION_BAND), on the Herschel header astrometry, not registered to any other survey. Costs, stated: a 70 "
+        "micron source takes the 160 micron flux of a core within the merge radius; a source seen only at 160 micron "
+        "has a position good to about 2 arcsec, so in clusters it is often a blend; the bands' detections are treated "
+        "as independent. Attribute also: N_160_ONLY."),
     "DEC_DEG": ("deg ICRS", "Declination of each PACS source, as RA_DEG."),
     "POSITION_BAND": ("band index", "The band whose detection gives the position: 0 = 70, 1 = 100, 2 = 160 micron."),
-    "R_MATCH_ARCSEC": ("arcsec",
-        "The radius within which a SESNA source is matched to this PACS source: 3 times the combined positional "
-        "scatter of the position band (injected artificial sources found by the same detection, and the map's "
-        "registration pairs against SESNA); for a source seen only at 160 micron, with the 70-160 merge radius added "
-        "in quadrature."),
-    "CHANCE": ("expected SESNA sources",
-        "The number of SESNA sources expected within R_MATCH_ARCSEC of this PACS source by chance: the local SESNA "
-        "density (within 60 arcsec) times the radius's area. Summed, the expected number of chance matches."),
     "DETECTED_{b}": ("true or false", "Whether the {w} micron blind detection found this source (merged into it)."),
     "FNU_{b}_MJY": ("mJy",
         "The {w} micron flux at the source's position where DETECTED_{b}: the catalogue's aperture estimator on the "
@@ -4004,6 +3991,11 @@ _PACS_SOURCES_READINGS = {
     "SNR_{b}": ("dimensionless", "The S/N of the {w} micron detection: its own flux over its cell's noise."),
     "MAP_INDEX_{b}": ("map index, or -1", "The {w} micron map (row of MAP_ID_{b} in the completeness product) that detects the source."),
     "EXTENDED_{b}": ("true or false", "Where DETECTED_{b}: whether the fitted width at the position exceeds 1.5 times the beam."),
+    "RA_{b}_DEG": ("deg ICRS",
+        "Where DETECTED_{b}: the position of the {w} micron detection itself (on that map's own Herschel pointing; the "
+        "100 micron maps are separate observations from the 70 micron ones, so the two can differ by about a pointing "
+        "error); NaN where the band does not detect the source. RA_DEG is the sharpest detecting band's."),
+    "DEC_{b}_DEG": ("deg ICRS", "Declination of the {w} micron detection, as RA_{b}_DEG."),
 }
 for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_u, _r) in _PACS_SOURCES_READINGS.items():
@@ -4016,8 +4008,7 @@ _PHOTOMETRY_PACS_READINGS = {
     "FNU_{b}_MJY": ("mJy",
         "Total flux of the source in the Herschel PACS {w} micron band (the PACS calibration's definition of a "
         "point source's flux), measured with the eHOPS survey's apertures (Pokhrel et al. 2023): aperture "
-        "photometry at the catalogue position (moved by the map's astrometric shift, MAP_SHIFT in the completeness "
-        "product) on the map that is deepest there, aperture radius 9.6 / 8.0 / 12.8 arcsec at 70 / 100 / 160 "
+        "photometry at the catalogue position on the map that is deepest there, aperture radius 9.6 / 8.0 / 12.8 arcsec at 70 / 100 / 160 "
         "micron, sky from a clipped mode in the annulus 12.8-25.6 / 9.6-16.0 / 16.0-22.4 arcsec taken after the "
         "source's own outer light (the point-spread pattern scaled to its flux) is removed from the annulus, so "
         "that a bright source's light is not partly rejected by the clipping, divided by the fraction of a point "
@@ -4051,22 +4042,25 @@ _PHOTOMETRY_PACS_READINGS = {
         "SIGMA_{b}_MJY."),
     "ORIGIN_{b}": ("origin code",
         "1 means a PACS source of the region (sources_pacs_region: the bands' blind detections merged across bands) "
-        "detected in this band lies within that source's matching radius (R_MATCH_ARCSEC) of this source, and this is "
-        "the only SESNA source within it; 2 means that PACS source has two or more SESNA sources within the radius (or "
-        "this source lies within the radius of several), so the flux is an upper bound (an unseparable blend); 90 "
-        "means the band covers the source and no PACS source detected in this band is matched to it (its "
-        "completeness curve gives the chance of that; the three bands' detections are independent); 91 means the "
-        "band does not cover the source."),
+        "detected in this band is this source's nearest within 2 arcsec, and this is the only SESNA source within 2 "
+        "arcsec of it (the band-merging rule of the SESNA and eHOPS catalogues: nearest neighbour within a fixed "
+        "radius set by the two catalogues' astrometric accuracy; Gutermuth et al. 2009, Pokhrel et al. 2023); 2 means "
+        "that PACS source has two or more SESNA sources within 2 arcsec, so the flux is an upper bound for each (an "
+        "unseparable blend); 90 means the band covers the source and no PACS source detected in this band is "
+        "associated with it (its completeness curve gives the chance of that; the three bands' detections are "
+        "independent); 91 means the band does not cover the source. The expected number of chance coincidences over "
+        "the region (the local SESNA density times the area of the 2 arcsec circle, summed over the PACS sources) is "
+        "the attribute EXPECTED_CHANCE_COINCIDENCES of ORIGIN_P70."),
     "LOCAL_RMS_{b}_MJY": ("mJy",
         "Noise of the 30-arcsecond cell containing the source: the scatter of the flux measured at random empty-sky positions in that cell. A PACS source is detected where the aperture-filtered map peaks at five times this value above the cell's empty-sky level. NaN where the band does not cover the source."),
     "OBSID_{b}": ("observation identifier(s)",
         "The Herschel observation identifier(s), comma separated, of the map the flux was measured on; empty where the band does not cover the source."),
     "N_BLEND_{b}": ("number of SESNA sources",
-        "For a source matched to a PACS source (ORIGIN 1 or 2): how many SESNA sources lie within the matching radius of that PACS source (1 for ORIGIN 1); 0 otherwise."),
+        "For a source associated with a PACS source (ORIGIN 1 or 2): how many SESNA sources lie within 2 arcsec of that PACS source (1 for ORIGIN 1); 0 otherwise."),
     "PACS_SOURCE_{b}": ("row number, or -1",
         "The row of the matched PACS source in the region's PACS source table (sources_pacs_region); -1 where none is matched in this band."),
     "MATCH_SEPARATION_{b}_ARCSEC": ("arcsec",
-        "The distance between this source (moved by the map's registration) and the matched PACS source; NaN where none."),
+        "The distance between this source and the PACS source it is associated with; NaN where none."),
     "EXTENDED_{b}": ("true or false",
         "True for a detected source whose measured width is more than 1.5 times the beam width, a sign that the emission is extended rather than a point source; false otherwise, including for every source that is not detected."),
 }
@@ -4085,8 +4079,8 @@ for _band, _wave in (("P70", "70"), ("P100", "100"), ("P160", "160")):
         if _band == "P160" and _name == "FNU_{b}_MJY":
             _text += _P160_NOTE
         if _band == "P160" and _name == "ORIGIN_{b}":
-            _text += (" At 160 micron a peak of a cloud filament can match a young star by position; the expected "
-                      "number of such chance matches is CHANCE in the PACS source table, per source and summed per sky bin.")
+            _text += (" At 160 micron a peak of a cloud filament can fall within 2 arcsec of a young star by chance; "
+                      "such coincidences are counted in EXPECTED_CHANCE_COINCIDENCES.")
         REGISTRY[("photometry_pacs_source", _name.format(b=_band))] = (_units, _text)
 
 

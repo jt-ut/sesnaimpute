@@ -1601,6 +1601,8 @@ def merge_sources(config, bands, n_jobs, stage, flux_grid):
         table["map_" + b] = np.where(src[b] >= 0, pk[b]["map"][np.maximum(src[b], 0)] if pk[b]["map"].size else -1, -1).astype(np.int32)
         table["snr_" + b] = np.where(src[b] >= 0, pk[b]["snr"][np.maximum(src[b], 0)] if pk[b]["snr"].size else np.nan, np.nan)
         table["detected_" + b] = src[b] >= 0
+        table["ra_" + b] = np.where(src[b] >= 0, pk[b]["ra"][np.maximum(src[b], 0)] if pk[b]["ra"].size else np.nan, np.nan)
+        table["dec_" + b] = np.where(src[b] >= 0, pk[b]["dec"][np.maximum(src[b], 0)] if pk[b]["dec"].size else np.nan, np.nan)
     for b, t, fnu, cid, ext in measured:
         k = want[(b, t)]
         keys = bands[b]["cell_map_index"].astype(np.int64) * (1 << 40) + bands[b]["cell_id"]
@@ -1646,6 +1648,8 @@ def write_sources(path, region, bands, merged):
             w("SNR_" + b, np.asarray(merged["snr_" + b], np.float32))
             w("MAP_INDEX_" + b, merged["map_" + b])
             w("EXTENDED_" + b, merged["extended_" + b])
+            w("RA_%s_DEG" % b, np.asarray(merged["ra_" + b], np.float64))
+            w("DEC_%s_DEG" % b, np.asarray(merged["dec_" + b], np.float64))
 
 
 def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None, maps=None, detect_only=False):
