@@ -50,6 +50,7 @@ Run: `PY sesnaimpute.sky.derived.pacs_completeness $CONFIG [--regions ...]`.
 
 import functools
 import os
+import shutil
 import time
 
 import h5py
@@ -364,9 +365,11 @@ def _pooled_median_scatter_one(W, row, value, n_row, min_n):
 def pooled_median_scatter(Ws, row, value, n_row, min_n=MIN_INJECTIONS):
     """Per cell, the median and 1.4826 x the median absolute deviation about it of the `value`s of the records
     (at cell `row`) of the cells pooled with it, on the narrowest of `Ws` that holds at least `min_n` records;
-    NaN where none does."""
-    med = np.full(n_row, np.nan)
-    sc = np.full(n_row, np.nan)
+    NaN where none does. The rows of `Ws` are the output cells (all `n_row` of the records' cells, or a block's cells
+    with the records of the block's whole neighbourhood: `n_row` then counts the cells the records' `row` index)."""
+    n_out = Ws[0].shape[0]
+    med = np.full(n_out, np.nan)
+    sc = np.full(n_out, np.nan)
     for W in Ws:
         # a wider radius only for the cells the narrower ones left without a value
         need = np.flatnonzero(np.isnan(med))
@@ -405,33 +408,37 @@ def _at_flux(values_x, k0, w):
 def curve_on_flux_grid(Ws, row, plane, recovered, sigma_rows, flux_grid, n_row):
     """The recovered fraction on the flux grid from injections made in S/N: per S/N plane the pooled counts of the
     cells within the pooling radius (`pooled_counts`), read for each row at F / its own CELL_SIGMA. Returns
-    (fraction, injections behind it: the smaller of the two bracketing planes' pooled counts), (n_row, n_plane)."""
+    (fraction, injections behind it: the smaller of the two bracketing planes' pooled counts), (n_out, n_plane), the
+    rows of `Ws` being the output cells and `sigma_rows` theirs (all `n_row` cells, or a block's within its
+    neighbourhood's records)."""
     n_x = snr_grid().size
     tot, got = pooled_counts(Ws, row, plane.astype(np.int64), recovered, n_row, n_x)
     with np.errstate(all="ignore"):
         fx = np.where(tot > 0, got / tot, np.nan)
     k0, w, _ = _snr_brackets(sigma_rows, flux_grid)
     fraction = _at_flux(fx, k0, w)
-    r = np.arange(n_row)[:, None]
+    r = np.arange(tot.shape[0])[:, None]
     count = np.where(w <= 0.0, tot[r, k0], np.where(w >= 1.0, tot[r, k0 + 1], np.minimum(tot[r, k0], tot[r, k0 + 1])))
     return np.nan_to_num(fraction, nan=0.0), count
 
 
-def error_on_flux_grid(Ws, row, plane, dflux, sigma_rows, flux_grid, n_row, min_n=MIN_INJECTIONS):
+def error_on_flux_grid(Ws, row, plane, dflux, sigma_rows, flux_grid, n_row, min_n=MIN_INJECTIONS, sigma_out=None):
     """BIAS-like and SCATTER-like arrays on the flux grid from injections made in S/N: per S/N plane, the pooled
     median and 1.4826 x MAD of (recovered - injected flux) / CELL_SIGMA of the injection's own cell, read for each
     row at F / its own CELL_SIGMA and multiplied by that CELL_SIGMA; beyond the grid's brightest S/N both grow in
-    proportion to the flux (the brightest plane's value relative to its flux). (n_row, n_plane) each."""
+    proportion to the flux (the brightest plane's value relative to its flux). (n_out, n_plane) each; `sigma_rows` the
+    noise of the cells the records' `row` index, `sigma_out` that of the output cells (the rows of `Ws`; default all)."""
     n_x = snr_grid().size
     sig = np.asarray(sigma_rows, float)
-    med_x = np.full((n_row, n_x), np.nan)
-    sc_x = np.full((n_row, n_x), np.nan)
+    sig_out = sig if sigma_out is None else np.asarray(sigma_out, float)
+    med_x = np.full((Ws[0].shape[0], n_x), np.nan)
+    sc_x = np.full((Ws[0].shape[0], n_x), np.nan)
     z = dflux.astype(np.float64) / sig[row]
     for p in range(n_x):
         sel = plane == p
         med_x[:, p], sc_x[:, p] = pooled_median_scatter(Ws, row[sel], z[sel], n_row, min_n)
-    k0, w, beyond = _snr_brackets(sig, flux_grid)
-    scale = sig[:, None] * beyond
+    k0, w, beyond = _snr_brackets(sig_out, flux_grid)
+    scale = sig_out[:, None] * beyond
     return (_at_flux(med_x, k0, w) * scale).astype(np.float32), (_at_flux(sc_x, k0, w) * scale).astype(np.float32)
 
 
@@ -502,6 +509,78 @@ def _detection_kernel(tile):
     return h, kf[::-1, ::-1], foot[::-1, ::-1].astype(float), s_full
 
 
+_DETECTION_LAYERS = (("m", np.float32), ("ratio", np.float32), ("norm", np.float32), ("valid", bool), ("pix_valid", bool))
+
+
+def detection_strips(tile):
+    """The strips `prepare_detection` computes (`(first row, last row + 1)`): PREPARE_STRIP_ROWS rows, at least 8 kernel
+    half-widths."""
+    h = tile.injection_half_width()
+    rows = max(pacs_fit.PREPARE_STRIP_ROWS, 8 * h)
+    ny = tile.shape[0]
+    return [(s0, min(s0 + rows, ny)) for s0 in range(0, ny, rows)]
+
+
+def open_detection(tile, config):
+    """The first step of `prepare_detection`: the kernel written beside the prepared layers and the layers created
+    (memory-mapped, to be filled strip by strip by `detection_strip`). Returns the strips."""
+    from numpy.lib.format import open_memmap
+    d = pacs_fit.prepared_dir(config, tile.record)
+    h, kc, fc, s_full = _detection_kernel(tile)
+    np.savez(os.path.join(d, "kernel.npz"), h=h, kc=kc, fc=fc, s_full=s_full)
+    for name, dt in _DETECTION_LAYERS:
+        open_memmap(os.path.join(d, name + ".npy"), mode="w+", dtype=dt, shape=tile.shape).flush()
+    return detection_strips(tile)
+
+
+def detection_strip(tile, config, s0, s1):
+    """One strip of `prepare_detection`, rows s0..s1 written into the layers (`open_detection`), computed with the
+    kernel's half-width of rows either side; strips are independent, so any number run at once."""
+    from numpy.lib.format import open_memmap
+    d = pacs_fit.prepared_dir(config, tile.record)
+    k = np.load(os.path.join(d, "kernel.npz"))
+    h, kc, fc, s_full = int(k["h"]), k["kc"], k["fc"], float(k["s_full"])
+    out = {name: open_memmap(os.path.join(d, name + ".npy"), mode="r+") for name, _ in _DETECTION_LAYERS}
+    ny = tile.shape[0]
+
+    def corr(a, c):
+        return fftconvolve(a, c, mode="same")
+    a0, a1 = max(s0 - h, 0), min(s1 + h, ny)
+    image = np.asarray(tile.image[a0:a1])
+    valid = np.isfinite(image) & np.isfinite(np.asarray(tile.error[a0:a1]))
+    # D = valid pixels in the footprint, B = sum of the template over them, E = of its square, A and C the
+    # image's sums weighted by the template and plain: the zero-sum response is A - B C / D, its kernel's sum of
+    # squares E - B^2 / D (FFT round-off: D is a count, S_valid a sum of squares held >= 0)
+    v = valid.astype(float)
+    dd = np.rint(corr(v, fc))
+    b = corr(v, kc)
+    s_valid = corr(v, kc * kc)
+    del v
+    s_valid -= np.divide(b * b, dd, out=np.zeros_like(b), where=dd > 0)
+    ok = valid & (dd >= 2) & (s_valid > 1e-9 * s_full)
+    ratio = np.divide(b, dd, out=np.zeros_like(b), where=ok)
+    del b, dd
+    norm = np.sqrt(np.divide(s_full, s_valid, out=np.zeros_like(s_valid), where=ok))
+    del s_valid
+    iv = np.where(valid, image, 0.0).astype(float)
+    m = corr(iv, kc)
+    c = corr(iv, fc)
+    del iv
+    c *= ratio
+    m -= c
+    del c
+    m *= norm
+    m = np.where(ok, m, np.nan)
+    r0, r1 = s0 - a0, s1 - a0
+    out["m"][s0:s1] = m[r0:r1]
+    out["ratio"][s0:s1] = ratio[r0:r1]
+    out["norm"][s0:s1] = norm[r0:r1]
+    out["valid"][s0:s1] = ok[r0:r1]
+    out["pix_valid"][s0:s1] = valid[r0:r1]
+    for a in out.values():
+        a.flush()
+
+
 def prepare_detection(tile, config):
     """The detection image of the tile's real image, written once per map beside its prepared layers
     (`pacs_fit.prepared_dir`): the image correlated with the band's own point-spread template made zero-sum over
@@ -513,56 +592,11 @@ def prepare_detection(tile, config):
     whose valid footprint holds at least two pixels. Written: `m.npy` (NaN where not defined), the per-pixel
     valid-footprint mean factor `ratio.npy` and scale `norm.npy` (float32, 0 where not defined), `valid.npy` (where
     m is defined), `pix_valid.npy` (the pixels that enter), `kernel.npz`. Computed strip by strip
-    (pacs_fit.PREPARE_STRIP_ROWS, at least 8 kernel half-widths), each strip with the kernel's half-width of rows
-    either side, so the memory is a few strips whatever the map's size."""
-    from numpy.lib.format import open_memmap
-    d = pacs_fit.prepared_dir(config, tile.record)
-    h, kc, fc, s_full = _detection_kernel(tile)
-    np.savez(os.path.join(d, "kernel.npz"), h=h, kc=kc, fc=fc, s_full=s_full)
-    ny, nx = tile.shape
-    out = {name: open_memmap(os.path.join(d, name + ".npy"), mode="w+", dtype=dt, shape=(ny, nx))
-           for name, dt in (("m", np.float32), ("ratio", np.float32), ("norm", np.float32), ("valid", bool),
-                            ("pix_valid", bool))}
-    rows = max(pacs_fit.PREPARE_STRIP_ROWS, 8 * h)
-
-    def corr(a, c):
-        return fftconvolve(a, c, mode="same")
-    for s0 in range(0, ny, rows):
-        s1 = min(s0 + rows, ny)
-        a0, a1 = max(s0 - h, 0), min(s1 + h, ny)
-        image = np.asarray(tile.image[a0:a1])
-        valid = np.isfinite(image) & np.isfinite(np.asarray(tile.error[a0:a1]))
-        # D = valid pixels in the footprint, B = sum of the template over them, E = of its square, A and C the
-        # image's sums weighted by the template and plain: the zero-sum response is A - B C / D, its kernel's sum of
-        # squares E - B^2 / D (FFT round-off: D is a count, S_valid a sum of squares held >= 0)
-        v = valid.astype(float)
-        dd = np.rint(corr(v, fc))
-        b = corr(v, kc)
-        s_valid = corr(v, kc * kc)
-        del v
-        s_valid -= np.divide(b * b, dd, out=np.zeros_like(b), where=dd > 0)
-        ok = valid & (dd >= 2) & (s_valid > 1e-9 * s_full)
-        ratio = np.divide(b, dd, out=np.zeros_like(b), where=ok)
-        del b, dd
-        norm = np.sqrt(np.divide(s_full, s_valid, out=np.zeros_like(s_valid), where=ok))
-        del s_valid
-        iv = np.where(valid, image, 0.0).astype(float)
-        m = corr(iv, kc)
-        c = corr(iv, fc)
-        del iv
-        c *= ratio
-        m -= c
-        del c
-        m *= norm
-        m = np.where(ok, m, np.nan)
-        r0, r1 = s0 - a0, s1 - a0
-        out["m"][s0:s1] = m[r0:r1]
-        out["ratio"][s0:s1] = ratio[r0:r1]
-        out["norm"][s0:s1] = norm[r0:r1]
-        out["valid"][s0:s1] = ok[r0:r1]
-        out["pix_valid"][s0:s1] = valid[r0:r1]
-    for a in out.values():
-        a.flush()
+    (`detection_strips`), each strip with the kernel's half-width of rows either side, so the memory is a few strips
+    whatever the map's size; the stage runs the strips of all maps in parallel (`_prepare_stage`), this function
+    runs them in this process."""
+    for s0, s1 in open_detection(tile, config):
+        detection_strip(tile, config, s0, s1)
 
 
 _MATCHED = {}
@@ -585,11 +619,29 @@ def matched_state(tile):
 
 
 def _prepare_piece(record, config):
-    """Prepare one map for the run (`pacs_fit.prepare_map`, then `prepare_detection`). Returns the map id."""
+    """Prepare one map for the run (`pacs_fit.prepare_map`, then the detection layers' creation, `open_detection`).
+    Returns `(map index placeholder: the record, its detection strips)`."""
     tile = pacs_fit.prepare_map(config, record)
-    prepare_detection(tile, config)
+    strips = open_detection(tile, config)
     pacs_fit._CACHE.clear()
+    return record, strips
+
+
+def _strip_piece(task, config):
+    """One detection strip of one map (`detection_strip`), the map's tile shared by the strips a worker takes."""
+    record, s0, s1 = task
+    detection_strip(pacs_fit.cached_tile(config, record), config, s0, s1)
     return record.map_id
+
+
+def _prepare_stage(config, records, n_jobs, stage):
+    """Every map prepared for the run: its layers (one task per map, the largest first), then every map's detection
+    strips (one task per strip, over all the maps, so a single large map keeps every worker busy)."""
+    prepared = pieces_module.run(functools.partial(_prepare_piece, config=config), records, n_jobs, stage=stage,
+                                 unit="maps (prepared)")
+    strips = [(r, s0, s1) for r, ss in prepared for s0, s1 in ss]
+    pieces_module.run(functools.partial(_strip_piece, config=config), strips, n_jobs, stage=stage,
+                      unit="strips (detection image)")
 
 
 def detection_cell_stats(tile, ids):
@@ -936,29 +988,18 @@ class Injector:
         return out
 
 
-def _inject_half(injector, Ws, plane, snr, half, n_row, interior_pooled):
-    """Batches of one S/N plane and one half (0 build, 1 held out: the seed's parity), enough that every cell's
-    pooled count reaches MIN_INJECTIONS where the cells allow: a first round sized for the interior, then
-    batches restricted to the cells within the pooling radius of a short cell. Returns the injections, the
-    seconds spent and the injections far from / near (within BLEND_RADIUS_BEAMS of) a detection."""
-    W = Ws[0]
-    first = int(np.ceil(INTERIOR_SAFETY * MIN_INJECTIONS / max(interior_pooled, 1e-9)))
-    rows_all = np.arange(n_row)
+def _inject_batches(injector, plane, snr, half, seeds, rows, block):
+    """Batches of one S/N plane and one half (0 build, 1 held out: the seed's parity) over the cells of `rows` (global
+    row numbers, within one block of the map), one batch per entry of `seeds`. The seeds are (map, S/N plane, batch
+    and half, block): the same for any cut of the work into pieces and any number of workers. Returns the injections
+    (`row` the global row), the seconds spent and the injections far from / near (within BLEND_RADIUS_BEAMS of) a
+    detection."""
     recs = []
-    count = np.zeros(n_row)
     seconds = dict(inject=0.0, aperture=0.0)
     n_by_path = dict(far=0, near=0)
-    for seed in range(first + MAX_EXTRA_BATCHES):
-        if seed < first:
-            rows = rows_all
-        else:
-            short = (W @ count) < MIN_INJECTIONS
-            if not short.any():
-                break
-            rows = np.flatnonzero((W @ short.astype(float)) > 0)
-        r = injector.batch(np.random.default_rng([injector.seed_key, plane, 2 * seed + half]), rows, snr)
+    for seed in seeds:
+        r = injector.batch(np.random.default_rng([injector.seed_key, plane, 2 * seed + half, block]), rows, snr)
         recs.append(r)
-        count += np.bincount(r["row"], minlength=n_row)
         for k in seconds:
             seconds[k] += r["seconds"][k]
         n_by_path["near"] += int(r["near"].sum())
@@ -969,16 +1010,17 @@ def _inject_half(injector, Ws, plane, snr, half, n_row, interior_pooled):
                  det_dist=cat("det_dist", np.float32)), seconds, n_by_path)
 
 
-def pool_product(Ws, rec, flux_grid, sigma_rows, n_row):
+def pool_product(Ws, rec, flux_grid, sigma_rows, n_row, sigma_out=None):
     """The curve from the build half's injections made in S/N (`rec`: row, plane (S/N), recovered): the recovered
     fraction (encoded), its 0.9 flux, and the injections behind the faintest flux plane (`curve_on_flux_grid`)."""
-    fraction, count = curve_on_flux_grid(Ws, rec["row"], rec["plane"], rec["recovered"], sigma_rows, flux_grid, n_row)
+    fraction, count = curve_on_flux_grid(Ws, rec["row"], rec["plane"], rec["recovered"],
+                                         sigma_rows if sigma_out is None else sigma_out, flux_grid, n_row)
     return dict(curve=np.rint(fraction * STORAGE_SCALE).astype(np.uint16),
                 flux90=flux90(fraction, flux_grid).astype(np.float32), n_pos=count[:, -1].astype(np.int32),
                 pooled_total=count)
 
 
-def cell_errors(Ws, flux_grid, sigma_rows, rec):
+def cell_errors(Ws, flux_grid, sigma_rows, rec, sigma_out=None):
     """The error of a reported flux from injections (`rec`: row, plane (S/N), near, dflux = measured - cell offset -
     injected): per S/N plane, the pooled median and 1.4826 x MAD of dflux / CELL_SIGMA over ALL covered injections
     (detected or not) farther than BLEND_RADIUS_BEAMS from every detection (`error_on_flux_grid`; a source within
@@ -987,7 +1029,7 @@ def cell_errors(Ws, flux_grid, sigma_rows, rec):
     n_row = len(sigma_rows)
     sel = ~rec["near"].astype(bool)
     bias, scatter = error_on_flux_grid(Ws, rec["row"][sel].astype(np.int64), rec["plane"][sel].astype(np.int64),
-                                       rec["dflux"][sel], sigma_rows, flux_grid, n_row)
+                                       rec["dflux"][sel], sigma_rows, flux_grid, n_row, sigma_out=sigma_out)
     return dict(scatter=scatter, bias=bias)
 
 
@@ -1041,13 +1083,13 @@ def self_check(config, record):
         raise ValueError("%s: the injected template is not normalised to total flux within 0.5 %%" % record.band)
 
 
-def _real_check(injector, flux_mjy, half):
+def _real_check(injector, flux_mjy, half, rows=None):
     """The catalogue's own measurement in its own regime: REAL_CHECK_POSITIONS empty-sky positions of the real map
     (farther than one beam from every detected source), the aperture flux after injecting `flux_mjy` minus before,
-    over `flux_mjy`. Returns the ratios."""
+    over `flux_mjy`. Returns the ratios. `rows`: the rows the positions are drawn from (default all)."""
     tile = injector.tile
     rng = np.random.default_rng([injector.seed_key, 99999, half])
-    x, y, d = injector.positions(rng, np.arange(injector.ids.size))
+    x, y, d = injector.positions(rng, np.arange(injector.ids.size) if rows is None else rows)
     far = d >= BLEND_RADIUS_BEAMS * injector.beam_px
     x, y = x[far][:REAL_CHECK_POSITIONS], y[far][:REAL_CHECK_POSITIONS]
     before = tile.measure(x, y)
@@ -1057,39 +1099,58 @@ def _real_check(injector, flux_mjy, half):
     return (after.flux[ok] - before.flux[ok]) / flux_mjy
 
 
-#: the injection work of a map is cut into pieces of its (S/N plane, half) pairs, about INJECTION_PIECE_ROWS rows x
-#: all pairs of work each (a map of that many rows is one piece; the largest maps one pair per piece), so a large
-#: mosaic spreads over every worker; every pair keeps its own seeds, so the injections do not depend on the cut
-INJECTION_PIECE_ROWS = 512
+#: The injection work of a map is cut by the map's own cell grid into BLOCKS of INJECTION_BLOCK_LINES lines of cells
+#: (block = cell line // INJECTION_BLOCK_LINES: fixed by the grid, never by the number of workers), and each block's
+#: work into its (S/N plane, half) pairs: a piece is one block and a few pairs, about INJECTION_PIECE_ROWS of the
+#: block's cells per pair of a piece (the largest blocks one pair per piece). Every (block, plane, half, batch) has
+#: its own seeds, so the injections do not depend on the cut into pieces or on n_jobs. The batches go in rounds over
+#: all the blocks at once: the first round (sized for the interior of the map) and then one round per extra batch,
+#: the cells it covers chosen from the whole map's counts, so a block's edge is pooled with its neighbours' injections.
+INJECTION_BLOCK_LINES = 16
+INJECTION_PIECE_ROWS = 64
+#: the pooling is cut into square blocks of POOL_BLOCK_CELLS cells, each pooled from the injections of the cells
+#: within the widest pooling radius of it (a shared memory-mapped table), identically to the whole map
+POOL_BLOCK_CELLS = 8
 
 _INJECTION_STATE = {}
 
 
 def _injection_state(config, record, inp, t):
-    """The process-local Injector of map `t`, its pooling matrix (POOL_ARCSEC) over all rows and the first round's
-    expected pooled count of an interior cell: built on the first piece of the map a worker takes, kept (one map at
+    """The process-local Injector of map `t`, built on the first piece of the map a worker takes, kept (one map at
     a time) for the map's further pieces."""
     key = record.path
     if key not in _INJECTION_STATE:
         _INJECTION_STATE.clear()
-        tile = pacs_fit.cached_tile(config, record)
-        inj = Injector(tile, inp, t + 1)
-        Ws = pool_matrices(cell_centres_arcsec(tile.grid, inj.ids), widenings=POOL_WIDENINGS[:1])
-        # injections one batch puts into the pool of an interior cell: density x the pool's cell count
-        interior = (inj.cell_px * inj.valid_fraction / (SEPARATION_AREAS * inj.separation_px ** 2)) * float(np.median(np.diff(Ws[0].indptr)))
-        _INJECTION_STATE[key] = (inj, Ws, interior)
+        _INJECTION_STATE[key] = Injector(pacs_fit.cached_tile(config, record), inp, t + 1)
     return _INJECTION_STATE[key]
 
 
+def _map_first(task, config, records):
+    """The number of batches of the first round of a map: sized so that an interior cell's pool holds
+    INTERIOR_SAFETY x MIN_INJECTIONS. Returns `(tile index, batches)`."""
+    t, inp = task
+    inj = _injection_state(config, records[t], inp, t)
+    W = pool_matrices(cell_centres_arcsec(inj.tile.grid, inj.ids), widenings=POOL_WIDENINGS[:1])[0]
+    # injections one batch puts into the pool of an interior cell: density x the pool's cell count
+    interior = (inj.cell_px * inj.valid_fraction / (SEPARATION_AREAS * inj.separation_px ** 2)) * float(np.median(np.diff(W.indptr)))
+    return t, int(np.ceil(INTERIOR_SAFETY * MIN_INJECTIONS / max(interior, 1e-9)))
+
+
+def injection_blocks(ids, nx):
+    """The injection blocks of a map whose rows hold the cells `ids` (ascending): `[(block, first row, last row + 1)]`."""
+    blk = np.asarray(ids, np.int64) // nx // INJECTION_BLOCK_LINES
+    b, first = np.unique(blk, return_index=True)
+    return [(int(b[i]), int(first[i]), int(first[i + 1]) if i + 1 < b.size else int(blk.size)) for i in range(b.size)]
+
+
 def _inject_pairs(piece, config, records):
-    """The injections of one piece: `piece = (tile index, inputs, [(S/N plane, half), ...], real check?)` (see
-    `Injector`, `injection_pieces`): for each pair, the batches over the map's cells (`_inject_half`) and around
-    its detected sources' blends (`Injector.measure_positions`); on the piece flagged for it, the real-map self-check. Returns
-    `(tile index, dict)`."""
-    t, inp, pairs, do_check = piece
+    """The injections of one piece: `piece = (tile index, inputs, (block, first row, last row + 1), jobs, real
+    check?)`, `jobs` the `(S/N plane, half, batch seeds, rows or None: the block's)` of the piece (see `Injector`,
+    `_injection_rounds`): the batches of each over the block's cells (`_inject_batches`); on the piece flagged for it, the
+    real-map self-check. Returns `(tile index, dict)`."""
+    t, inp, (b, r0, r1), jobs, do_check = piece
     record = records[t]
-    inj, Ws, interior = _injection_state(config, record, inp, t)
-    n_row = inj.ids.size
+    inj = _injection_state(config, record, inp, t)
     snr = snr_grid()
     check = None
     if do_check:
@@ -1099,85 +1160,207 @@ def _inject_pairs(piece, config, records):
         f_check = 10.0 * pacs_fit.DETECTION_SNR * float(np.median(inj.sigma[inj.ids]))
         check = []
         for half in (0, 1):
-            r = _real_check(inj, f_check, half)
+            r = _real_check(inj, f_check, half, np.arange(r0, r1))
             check.append(float(r.mean()) if r.size else np.nan)
             q = np.percentile(r, [16, 50, 84]) if r.size else np.full(3, np.nan)
             print("  real-map report %s %s half %d: %d empty positions, F = %.0f mJy, injected-minus-before / F: mean %.4f, "
                   "16/50/84 %%: %.4f %.4f %.4f" % (record.band, record.map_id, half, r.size, f_check,
                                                     r.mean() if r.size else np.nan, *q), flush=True)
     done = []
-    for p, half in pairs:
-        r, sec, cnt = _inject_half(inj, Ws, p, snr[p], half, n_row, interior)
-        done.append((p, half, r, sec, cnt))
+    for p, half, seeds, rows in jobs:
+        r, sec, cnt = _inject_batches(inj, p, snr[p], half, seeds, np.arange(r0, r1) if rows is None else rows, b)
+        done.append((p, half, b, seeds[0], r, sec, cnt))
     return t, dict(pairs=done, check=check, n_detected=inj.n_detected)
 
 
-def _finish_tile(piece, records, flux_grid):
-    """A map's product from its pieces' injections: `piece = (tile index, inputs, [the pieces' outputs])`, taken in
-    (S/N plane, half) order as one process makes them, pooled (`pool_product`, `cell_errors`) over the map's rows.
-    Returns `(tile index, dict)`: the pooled arrays of the tile's rows for the product (the build half), the
-    held-out half's injections, and the statistics the parent prints."""
-    t, inp, parts = piece
+def _chunks(jobs, n_rows):
+    """A block's jobs cut into pieces of about INJECTION_PIECE_ROWS of the block's cells per job."""
+    k = int(min(len(jobs), max(1, np.ceil(n_rows / INJECTION_PIECE_ROWS))))
+    return [[jobs[i] for i in c] for c in np.array_split(np.arange(len(jobs)), k) if c.size]
+
+
+def _injection_rounds(config, records, inputs, nx, n_jobs, stage):
+    """The injections of every map of a band, in rounds of pieces over all maps and blocks (`injection_blocks`): the
+    first round makes each map's first batches in every block for every (S/N plane, half) pair; each further round one
+    more batch per pair, over the cells within the pooling radius of a cell whose pool (the WHOLE map's, from the
+    injections so far) is still short of MIN_INJECTIONS, until none is or MAX_EXTRA_BATCHES have been made. Maps from the
+    largest. `nx`: each map's cell grid width. Returns `{tile: [pieces' outputs]}`."""
+    pairs = [(p, half) for p in range(snr_grid().size) for half in (0, 1)]
+    tiles = [t for t, _ in sorted(inputs.items(), key=lambda kv: -kv[1]["ids"].size)]
+    first = dict(pieces_module.run(functools.partial(_map_first, config=config, records=records),
+                                   [(t, inputs[t]) for t in tiles], n_jobs, stage=stage, unit="maps (artificial sources, sizing)"))
+    st, parts, tasks = {}, {t: [] for t in tiles}, []
+    for t in tiles:
+        ids = inputs[t]["ids"]
+        blocks = injection_blocks(ids, nx[t])
+        W = pool_matrices(cell_centres_arcsec(_tile_geometry(records[t])[0], ids), widenings=POOL_WIDENINGS[:1])[0]
+        st[t] = dict(blocks=blocks, W=W, count=np.zeros((len(ids), len(pairs))), first=first[t])
+        for i, blk in enumerate(blocks):
+            jobs = [(p, half, tuple(range(first[t])), None) for p, half in pairs]
+            for j, c in enumerate(_chunks(jobs, blk[2] - blk[1])):
+                tasks.append((t, inputs[t], blk, c, i == 0 and j == 0))
+    for extra in range(MAX_EXTRA_BATCHES + 1):
+        if not tasks:
+            break
+        done = pieces_module.run(functools.partial(_inject_pairs, config=config, records=records), tasks, n_jobs,
+                                 stage=stage, unit="map pieces (artificial sources, round %d)" % extra)
+        for t, part in done:
+            parts[t].append(part)
+            for p, half, _b, _s, r, _sec, _cnt in part["pairs"]:
+                st[t]["count"][:, pairs.index((p, half))] += np.bincount(r["row"], minlength=len(inputs[t]["ids"]))
+        tasks = []
+        if extra == MAX_EXTRA_BATCHES:
+            break
+        for t in tiles:
+            s_ = st[t]
+            short = (s_["W"] @ s_["count"]) < MIN_INJECTIONS
+            act = short.any(axis=0)
+            if not act.any():
+                continue
+            reach = (s_["W"] @ short.astype(float)) > 0
+            for blk in s_["blocks"]:
+                b, r0, r1 = blk
+                jobs = [(p, half, (s_["first"] + extra,), r0 + np.flatnonzero(reach[r0:r1, i]))
+                        for i, (p, half) in enumerate(pairs) if act[i] and reach[r0:r1, i].any()]
+                for c in (_chunks(jobs, r1 - r0) if jobs else []):
+                    tasks.append((t, inputs[t], blk, c, False))
+    return parts
+
+
+_POOL_KEYS = ("row", "plane", "half", "near", "recovered", "dflux")
+
+
+def pool_dir(config, record):
+    """Where a map's injection table is written for the pooling (beside its prepared layers), removed after."""
+    return os.path.join(pacs_fit.prepared_dir(config, record), "pool")
+
+
+def _write_pool_table(t, inp, parts, records, config):
+    """A map's injections, from its pieces' outputs (`parts`), written as the memory-mapped table the pooling tasks
+    read: the records of both halves sorted by row (a stable sort of the records taken in (half, S/N plane, block, batch)
+    order, so the table does not depend on the order the pieces finished), with `offsets` (the first record of
+    every row). Returns `(table directory, the held-out half's injections, the statistics the parent prints)`."""
     ids = np.asarray(inp["ids"], np.int64)
     n_row = ids.size
-    sigma_rows = np.asarray(inp["sigma"], np.float64)
-    Ws = pool_matrices(cell_centres_arcsec(_tile_geometry(records[t])[0], ids))
     snr = snr_grid()
     keys = ("row", "plane", "near", "recovered", "dflux", "flux", "det_flux", "det_dist")
     stores = ({k: [] for k in keys}, {k: [] for k in keys})
     seconds = dict(inject=0.0, aperture=0.0)
     n_by_path = dict(far=0, near=0)
     near_plane = np.zeros((2, snr.size, 2))
-    by_pair = {(p, h): (r, sec, cnt) for part in parts for p, h, r, sec, cnt in part["pairs"]}
-    assert len(by_pair) == 2 * snr.size
-    for p in range(snr.size):
-        for half in (0, 1):
-            r, sec, cnt = by_pair[(p, half)]
-            for k in ("row", "near", "recovered", "dflux", "flux", "det_flux", "det_dist"):
-                stores[half][k].append(r[k])
-            stores[half]["plane"].append(np.full(r["row"].size, p, np.int8))
-            for k in seconds:
-                seconds[k] += sec[k]
-            for k in n_by_path:
-                n_by_path[k] += cnt[k]
-            nr = r["near"]
-            near_plane[half, p] += (nr.sum(), (r["recovered"] & nr).sum())
+    entries = sorted((e for part in parts for e in part["pairs"]), key=lambda e: (e[1], e[0], e[2], e[3]))
+    for p, half, b, _seed, r, sec, cnt in entries:
+        for k in ("row", "near", "recovered", "dflux", "flux", "det_flux", "det_dist"):
+            stores[half][k].append(r[k])
+        stores[half]["plane"].append(np.full(r["row"].size, p, np.int8))
+        for k in seconds:
+            seconds[k] += sec[k]
+        for k in n_by_path:
+            n_by_path[k] += cnt[k]
+        nr = r["near"]
+        near_plane[half, p] += (nr.sum(), (r["recovered"] & nr).sum())
     build, held = ({k: np.concatenate(v) for k, v in s.items()} for s in stores)
-    out = pool_product(Ws, build, flux_grid, sigma_rows, n_row)
-    tot = out.pop("pooled_total")
-    both = {k: np.concatenate([build[k], held[k]]) for k in build}
-    out["errors"] = cell_errors(Ws, flux_grid, sigma_rows, both)          # the product: both halves
-    held["build_errors"] = cell_errors(Ws, flux_grid, sigma_rows, build)  # for the held-out check only
-    out["held"] = held
+    cols = {k: np.concatenate([build[k], held[k]]) for k in ("row", "plane", "near", "recovered", "dflux")}
+    cols["half"] = np.concatenate([np.zeros(build["row"].size, np.int8), np.ones(held["row"].size, np.int8)])
+    order = np.argsort(cols["row"], kind="stable")
+    d = pool_dir(config, records[t])
+    os.makedirs(d, exist_ok=True)
+    for k in _POOL_KEYS:
+        np.save(os.path.join(d, k + ".npy"), cols[k][order])
+    count = np.bincount(cols["row"], minlength=n_row)
+    np.save(os.path.join(d, "offsets.npy"), np.concatenate([[0], np.cumsum(count)]).astype(np.int64))
+    np.save(os.path.join(d, "ids.npy"), ids)
+    np.save(os.path.join(d, "sigma.npy"), np.asarray(inp["sigma"], np.float64))
     check = next(part["check"] for part in parts if part["check"] is not None)
-    out["stats"] = dict(map_id=records[t].map_id, n_row=n_row, n_detected=parts[0]["n_detected"],
-                        n_build=int(build["row"].size), n_held=int(held["row"].size),
-                        min_pool=float(tot.min()), median_pool=float(np.median(tot)),
-                        short=float((tot < MIN_INJECTIONS).mean()), seconds=seconds, n_by_path=n_by_path,
-                        near_plane=near_plane, check=check)
+    stats = dict(map_id=records[t].map_id, n_row=n_row, n_detected=parts[0]["n_detected"],
+                 n_build=int(build["row"].size), n_held=int(held["row"].size), seconds=seconds, n_by_path=n_by_path,
+                 near_plane=near_plane, check=check)
+    return d, held, stats
+
+
+def pool_tasks(t, d, ids, nx):
+    """The pooling tasks of a map: square blocks of POOL_BLOCK_CELLS cells holding rows,
+    `(tile index, table directory, nx, cell line range, cell column range)`."""
+    ids = np.asarray(ids, np.int64)
+    cy, cx = ids // nx, ids % nx
+    b = np.unique(np.c_[cy // POOL_BLOCK_CELLS, cx // POOL_BLOCK_CELLS], axis=0)
+    n = POOL_BLOCK_CELLS
+    return [(t, d, nx, int(i * n), int((i + 1) * n), int(j * n), int((j + 1) * n)) for i, j in b]
+
+
+_POOL_TABLE = {}
+
+
+def _pool_block(task, records, flux_grid):
+    """The pooled curve, flux 0.9, injections behind it and errors (`pool_product`, `cell_errors`) of the cells of one
+    pooling block, from the injections of the cells within the widest pooling radius of it, read from the map's
+    memory-mapped table (`_write_pool_table`) and pooled with the matrices of exactly those cells: each cell's value
+    is the whole map's pooling, whatever the cut. Returns `(tile index, dict of the block's global rows and
+    arrays)`."""
+    t, d, nx, cy0, cy1, cx0, cx1 = task
+    if _POOL_TABLE.get("dir") != d:
+        _POOL_TABLE.clear()
+        _POOL_TABLE.update(dir=d, **{k: np.load(os.path.join(d, k + ".npy"), mmap_mode="r")
+                                     for k in _POOL_KEYS + ("offsets", "ids", "sigma")})
+        _POOL_TABLE["grid"] = _tile_geometry(records[t])[0]
+    tab = _POOL_TABLE
+    ids = tab["ids"]
+    halo = int(np.ceil(POOL_WIDENINGS[-1] * POOL_ARCSEC / pacs_fit.CELL_ARCSEC)) + 1
+    ey0, ey1 = max(cy0 - halo, 0), cy1 + halo
+    ex0, ex1 = max(cx0 - halo, 0), min(cx1 + halo, nx)
+    lines = np.arange(ey0, ey1, dtype=np.int64)
+    a = np.searchsorted(ids, lines * nx + ex0)
+    b = np.searchsorted(ids, lines * nx + ex1)
+    n_line = b - a
+    total = int(n_line.sum())
+    ext = np.repeat(a - (np.cumsum(n_line) - n_line), n_line) + np.arange(total)
+    off = tab["offsets"]
+    per_row = np.asarray(off[ext + 1]) - np.asarray(off[ext])
+    rec = {k: np.concatenate([np.asarray(tab[k][off[x]:off[y]]) for x, y in zip(a, b) if y > x] or [np.zeros(0, tab[k].dtype)])
+           for k in _POOL_KEYS if k != "row"}
+    rec["row"] = np.repeat(np.arange(total), per_row)
+    ext_ids = np.asarray(ids[ext])
+    inside = ((ext_ids // nx >= cy0) & (ext_ids // nx < cy1) & (ext_ids % nx >= cx0) & (ext_ids % nx < cx1))
+    out_local = np.flatnonzero(inside)
+    Ws_full = pool_matrices(cell_centres_arcsec(tab["grid"], ext_ids))
+    Ws = [W[out_local] for W in Ws_full]
+    sig = np.asarray(tab["sigma"])[ext]
+    sig_out = sig[out_local]
+    bm = rec["half"] == 0
+    build = {k: rec[k][bm] for k in ("row", "plane", "recovered", "near", "dflux")}
+    out = pool_product(Ws, build, flux_grid, sig, total, sigma_out=sig_out)
+    out["errors"] = cell_errors(Ws, flux_grid, sig, rec, sigma_out=sig_out)
+    out["build_errors"] = cell_errors(Ws, flux_grid, sig, build, sigma_out=sig_out)
+    out["rows"] = ext[out_local]
     return t, out
 
 
-def injection_pieces(records, inputs):
-    """The injection pieces of a band, map by map from the largest (`(tile index, inputs, pairs, real check?)`, the
-    check on each map's first piece), and each map's piece count."""
-    pairs = [(p, half) for p in range(snr_grid().size) for half in (0, 1)]
-    todo, counts = [], {}
-    for t, inp in sorted(inputs.items(), key=lambda kv: -kv[1]["ids"].size):
-        k = int(min(len(pairs), max(1, np.ceil(np.asarray(inp["ids"]).size / INJECTION_PIECE_ROWS))))
-        chunks = [c for c in np.array_split(np.arange(len(pairs)), k) if c.size]
-        counts[t] = len(chunks)
-        todo += [(t, inp, [pairs[i] for i in c], j == 0) for j, c in enumerate(chunks)]
-    return todo, counts
-
-
-def _inject_tile(piece, config, records, flux_grid, cells=None):
-    """Everything the injection measures on one map tile, in this process: `piece = (tile index, inputs)`.
-    Returns `(tile index, dict)` as `_finish_tile`."""
-    t, inp = piece
-    todo, _ = injection_pieces(records, {t: inp})
-    parts = [_inject_pairs(p, config, records)[1] for p in todo]
-    return _finish_tile((t, inp, parts), records, flux_grid)
+def _assemble_tile(inp, held, stats, blocks, flux_grid):
+    """A map's product from its pooling blocks' outputs (`blocks`) and the held-out half: the arrays of the map's rows
+    for the product (the build half) with the held-out injections and the statistics the parent prints."""
+    n_row = np.asarray(inp["ids"]).size
+    n_plane = flux_grid.size
+    out = dict(curve=np.zeros((n_row, n_plane), np.uint16), flux90=np.full(n_row, np.nan, np.float32),
+               n_pos=np.zeros(n_row, np.int32),
+               errors={k: np.full((n_row, n_plane), np.nan, np.float32) for k in ("scatter", "bias")})
+    build_errors = {k: np.full((n_row, n_plane), np.nan, np.float32) for k in ("scatter", "bias")}
+    tot = np.zeros((n_row, n_plane))
+    filled = np.zeros(n_row, bool)
+    for o in blocks:
+        r = o["rows"]
+        assert not filled[r].any()
+        filled[r] = True
+        out["curve"][r], out["flux90"][r], out["n_pos"][r], tot[r] = o["curve"], o["flux90"], o["n_pos"], o["pooled_total"]
+        for k in out["errors"]:
+            out["errors"][k][r] = o["errors"][k]
+            build_errors[k][r] = o["build_errors"][k]
+    assert filled.all()
+    held = dict(held)
+    held["build_errors"] = build_errors
+    out["held"] = held
+    out["stats"] = dict(stats, min_pool=float(tot.min()), median_pool=float(np.median(tot)),
+                        short=float((tot < MIN_INJECTIONS).mean()))
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -1410,18 +1593,25 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, blue_refs=
     print("  PACS detections %d; by sky bin (faint to bright) %s"
           % (peaks["fnu"].size, [int((peaks["bin"] == j).sum()) for j in range(SKY_BINS)]), flush=True)
 
-    # artificial sources: each map cut into pieces of its (S/N plane, half) pairs, map by map from the biggest;
-    # then each map pooled whole
-    todo, counts = injection_pieces(records, inputs)
-    done = pieces_module.run(functools.partial(_inject_pairs, config=config, records=records),
-                             todo, n_jobs, stage=stage, unit="map pieces (artificial sources)")
-    by_tile = {}
-    for t, part in done:
-        by_tile.setdefault(t, []).append(part)
-    assert all(len(by_tile[t]) == counts[t] for t in counts)
-    injected = pieces_module.run(functools.partial(_finish_tile, records=records, flux_grid=flux_grid),
-                                 [(t, inputs[t], by_tile[t]) for t in counts], n_jobs, stage=stage,
-                                 unit="maps (pooling)")
+    # artificial sources: each map cut by its cell grid into blocks, rounds of pieces over all blocks of all maps; then
+    # the injections of each map written once to a memory-mapped table and pooled by cell blocks
+    by_tile = _injection_rounds(config, records, inputs, {t: geometry[t][2].nx for t in inputs}, n_jobs, stage)
+    counts = {t: len(v) for t, v in by_tile.items()}
+    tables, tasks = {}, []
+    for t in counts:
+        tables[t] = _write_pool_table(t, inputs[t], by_tile[t], records, config)
+        tasks += pool_tasks(t, tables[t][0], inputs[t]["ids"], geometry[t][2].nx)
+    del by_tile
+    pooled = pieces_module.run(functools.partial(_pool_block, records=records, flux_grid=flux_grid),
+                               tasks, n_jobs, stage=stage, unit="cell blocks (pooling)")
+    blocks_of = {t: [] for t in counts}
+    for t, o in pooled:
+        blocks_of[t].append(o)
+    injected = []
+    for t in counts:
+        d, held_t, stats_t = tables[t]
+        injected.append((t, _assemble_tile(inputs[t], held_t, stats_t, blocks_of[t], flux_grid)))
+        shutil.rmtree(d)
     curve = np.zeros((n_row, n_plane), np.uint16)
     n_pos = np.zeros(n_row, np.int32)
     flux90_ = np.full(n_row, np.nan, np.float32)
@@ -1735,8 +1925,7 @@ def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None, maps=No
     to_prepare = [r for r in pacs_fit.read_index(config, region) if r.band in BANDS
                   and (maps is None or any(str(o) in maps for o in r.obsids))]
     to_prepare.sort(key=lambda r: -int(np.prod(r.shape)))
-    pieces_module.run(functools.partial(_prepare_piece, config=config), to_prepare, n_jobs, stage=stage,
-                      unit="maps (prepared)")
+    _prepare_stage(config, to_prepare, n_jobs, stage)
     out = {}
     blue_refs = {}
     for b in BANDS:
