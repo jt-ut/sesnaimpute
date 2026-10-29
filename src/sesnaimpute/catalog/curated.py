@@ -21,7 +21,10 @@ band:
   gone: a source with no map value of its own is off-map, not missing).
 
 Every substitution is recorded per band in `ORIGIN_FNU` (1 = measured
-detection, 2 = 2MASS survey bound, 90 = covered, undetected -- the map's
+detection, 2 = the survey's own upper limit on an undetected source (2MASS bound),
+3 = PACS bound -- a detection within a beam whose flux cannot be assigned to this source
+alone, FNU the detection's flux, a ceiling on this source's flux; neither detected nor
+undetected, passed through as written by the PACS stages, 90 = covered, undetected -- the map's
 own 90%-completeness flux there, 91 = off-map, no completeness value and
 no non-detection term -- COMPLETENESS_2026-10-20.md rule 2: "sources with
 a catalogue DCOMP90 are exactly the on-map sources", so a band with no
@@ -36,8 +39,8 @@ This table is the SED: eleven bands in `definitions.BANDS` order, the eight
 SESNA bands from the delivery and the three Herschel PACS bands (P70, P100,
 P160) from the PACS photometry input
 `sky/derived/pacs/photometry_pacs_source__<Region>.hdf5`, taken as written
-(total flux, the 0.99 upper-bound sentinel and ORIGIN codes 1, 2, 90, 91 are
-the PACS stages' own). Catalogue INCLUSION is a separate rule,
+(total flux and ORIGIN codes 1, 3, 90, 91 are
+the PACS stages' own, copied without interpretation). Catalogue INCLUSION is a separate rule,
 `definitions.SELECTION`, applied downstream, never here. The PACS input is
 joined row for row on NAME after this stage's "SESNA "-strip and
 duplicate-drop; a mismatch is an error naming the first differing row. A
