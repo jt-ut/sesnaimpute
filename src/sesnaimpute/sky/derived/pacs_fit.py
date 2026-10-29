@@ -1087,9 +1087,11 @@ def _paste(image, cx, cy, patch, keep=False):
 
 
 def prepared_dir(config, record):
-    """Where `prepare_map` writes the map's prepared layers and state: one directory per map under the run's
-    PACS products."""
-    return os.path.join(config.data_root, "sky", "derived", "pacs", "prepared", record.map_id)
+    """Where `prepare_map` writes the map's prepared layers and state: one directory per map FILE under the run's
+    PACS products, named from its path in the download area (`record.path`, unique; the map id is not: one map id
+    can name several files, e.g. a level-3 mosaic re-released with more observations)."""
+    return os.path.join(config.data_root, "sky", "derived", "pacs", "prepared",
+                        os.path.splitext(record.path)[0].replace("/", "__"))
 
 
 def _load_layers(omap, out_image, out_error):
