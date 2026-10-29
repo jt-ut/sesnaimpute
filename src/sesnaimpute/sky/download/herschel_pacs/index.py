@@ -288,11 +288,11 @@ def parse_polygon(text):
 
 
 def region_pixels(config, region):
-    """The region's admitted nside-512 pixels: centres and corners in ICRS
-    degrees, (n,2) and (n,4,2)."""
-    path = product_path(config, "catalog", "sesna", "completeness", "source", region)
-    with h5py.File(path, "r") as src:
-        pix = src["HPX_PIX_512"][:]
+    """The region's admitted nside-512 pixels (`catalog.depth_grid.admitted_pixels_512`'s rule, on the raw
+    delivery's own Galactic positions through `catalog.curated.read_galactic`, so this download runs before
+    the catalogue stages): centres and corners in ICRS degrees, (n,2) and (n,4,2)."""
+    from sesnaimpute.catalog import curated, depth_grid
+    pix = depth_grid.admitted_pixels_512_from(*curated.read_galactic(config, region)[1:])
     lon, lat = hp.pix2ang(NSIDE, pix, nest=True, lonlat=True)
     centre = SkyCoord(lon * u.deg, lat * u.deg, frame="galactic").icrs
     xyz = hp.boundaries(NSIDE, pix, step=1, nest=True)       # (n, 3, 4)

@@ -70,6 +70,12 @@ def admitted_pixels_512(config, region):
     with h5py.File(path, "r") as f:
         gl = np.asarray(f["GAL_L_DEG"][:], dtype=np.float64)
         gb = np.asarray(f["GAL_B_DEG"][:], dtype=np.float64)
+    return admitted_pixels_512_from(gl, gb)
+
+
+def admitted_pixels_512_from(gl, gb):
+    """`admitted_pixels_512`'s rule on given Galactic positions (deg): every nside-512 child of the
+    nside-256 pixels that hold at least one of them."""
     pix256 = hp.ang2pix(NSIDE_256, gl, gb, nest=True, lonlat=True).astype(np.int64)
     source_pix256 = np.unique(pix256)
     children = (source_pix256[:, None] * 4 + np.arange(4, dtype=np.int64)[None, :]).reshape(-1)

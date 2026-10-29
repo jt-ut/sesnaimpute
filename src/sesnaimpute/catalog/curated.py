@@ -199,6 +199,17 @@ def read_positions(config, region):
     return name, df["ra"].to_numpy(dtype=np.float64), df["dec"].to_numpy(dtype=np.float64)
 
 
+def read_galactic(config, region):
+    """Returns (name, gal_l_deg, gal_b_deg) for the region's curated rows, in the curated product's own row
+    order: the delivery's own L and B columns (the values this stage writes as GAL_L_DEG / GAL_B_DEG), read
+    as `read_positions` reads the equatorial ones, so a stage that runs before this one (the PACS map
+    download's region pixels) needs no curated product."""
+    df, _ = _read_raw_delivery(_raw_catalog_path(config, region), ["SESNA_NAME", "L", "B"],
+                               n_jobs=config.n_jobs)
+    df, name = _strip_and_dedup(df)
+    return name, df["L"].to_numpy(dtype=np.float64), df["B"].to_numpy(dtype=np.float64)
+
+
 def n_sources(config, region):
     """The number of rows of the region's curated product."""
     return len(read_positions(config, region)[0])
