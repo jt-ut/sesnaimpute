@@ -144,12 +144,21 @@ def mmap_dataset(f, name):
 #: compile-time constant inside `_cell_sum`.
 N_XI_SUPPORT = grid.N_XI_SUPPORT
 
-#: `definitions.BANDS`' own count (8) -- a bare module global, like
+#: `definitions.BANDS`' own count (eleven) -- a bare module global, like
 #: `N_XI_SUPPORT` above, so numba freezes it as a compile-time constant
 #: inside `_cell_sum`'s own per-band non-detection loop (NONDET brief
 #: section 1: the non-detection factor moves into this cell sum, so the
 #: sum now needs the band axis `fittp.likelihood` already carries).
 N_BANDS = len(definitions.BANDS)
+
+#: The SELECTION bands (the eight SESNA bands, `definitions.SELECTION_INDEX`)
+#: as a bitmask: the detected-cleared correlation term of `_nondet_ln_sum`
+#: (its A and B) runs over these only, because `constants.LAMBDA` was
+#: fitted on them; a PACS detection never enters it.
+_SELECTION_BITS = 0
+for _i in definitions.SELECTION_INDEX:
+    _SELECTION_BITS |= 1 << int(_i)
+_SELECTION_BITS = int(_SELECTION_BITS)
 
 #: the column kernel's class-conditional reweighting (SPEC_BMSTP_DRAFT.md
 #: section 5.5): the cloud classes' young stars and shocked H2 knots both
@@ -714,6 +723,29 @@ def _ln_one_minus_c_curve(log10_fhat, curve_row, n, a, c):
 
 
 @numba.njit(cache=True, fastmath=True, error_model="numpy")
+def _bound_ln_sum(a_val, bound, bound_fnu_s, bound_sigma_s, base, slope_b, template_row):
+    """The PACS bound's censored term (ORIGIN 3, owner ruling 2026-10-29)
+    at one `a`: `sum_b ln Phi((FNU_b - F_model_b) / SIGMA_b)` over the
+    bitmask `bound`, linear flux in mJy, `F_model_b = 10 ** log10_fhat_b`
+    with the same `log10_fhat` the non-detection loop forms. Reads no
+    completeness curve and takes no part in the detected-band correlation
+    mixture: it is added to `_nondet_ln_sum`'s result by the caller (0.0,
+    exactly, where `bound` is empty). `fittp.likelihood.ln_bound` is the
+    array twin."""
+    out = 0.0
+    if bound == 0:
+        return out
+    sqrt2 = 1.4142135623730951
+    for b in range(N_BANDS):
+        if not ((bound >> b) & 1):
+            continue
+        log10_fhat = template_row[b] + base + slope_b[b] * a_val
+        z = (bound_fnu_s[b] - 10.0 ** log10_fhat) / bound_sigma_s[b]
+        out += _ln_half_erfc(-z / sqrt2)
+    return out
+
+
+@numba.njit(cache=True, fastmath=True, error_model="numpy")
 def _log_mix(ln_indep, ln_comon, lam):
     """`ln[(1 - lam) * exp(ln_indep) + lam * exp(ln_comon)]`, the one
     log-sum-exp combine `_nondet_ln_sum` below needs (C20 brief): callers
@@ -736,10 +768,10 @@ def _nondet_ln_sum(a_val, active, detected, base, slope_b, template_row, curve_r
     interior `lam`; this mixes the two submodels' JOINT probabilities
     first and conditions once, at the end), the non-detection factor
     CONDITIONAL on this source's own detected bands having cleared.
-    `active`/`detected` are bitmasks over the 8 bands (`1 << b`), already
+    `active`/`detected` are bitmasks over the eleven bands (`1 << b`; `detected` carries SELECTION bands only), already
     restricted to this source's own undetected/detected, covered,
     observed bands by the caller; `template_row` is `template_log[th]`,
-    `curve_rows_s` this source's own `(8, max_n)` measured completeness
+    `curve_rows_s` this source's own `(N_BANDS, max_n)` measured completeness
     curve (COMPLETENESS_2026-10-20.md), read at both bitmasks' bands --
     `band_a`/`band_c`/`band_n` the region-wide per-band index parameters,
     the same measured curve `fittp.likelihood._ln_nondet` reads at the
@@ -919,7 +951,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
               b_origin, dlb, dlx, a_edges_buf, cell_weight,
               m_tab, a_tab, ilo_tab, ihi_tab, a_min_tab, step_tab, n_ap_tab, offset_tab,
               template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask,
-              detected_mask, lam,
+              detected_mask, bound_mask, bound_fnu, bound_sigma, lam,
               gaia_matched, g_s, a_x, a_field, g0_mag, kg_draine, kg_whitney,
               r_diffuse, r_dense, ramp_lo, ramp_hi, x_s_all, y_s_all, z_s_all,
               out_s0, out_s1, a_post_out, a2_post_out):
@@ -928,7 +960,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
     C20_detection_correlation.md): `constants.LAMBDA`, the one survey-wide
     share of comonotone detection, threaded straight to `_nondet_ln_sum`
     (every one of its four callers below) -- `_cell_sum` itself never
-    reads it directly. `detected_mask` (`(n, 8)` bool, FINDINGS.md S03 /
+    reads it directly. `detected_mask` (`(n, N_BANDS)` bool, FINDINGS.md S03 /
     `briefs/round6_2026-10-22/U02_nondet_conditional.md`): the companion
     of `nondet_mask` the conditional comonotone term needs (`
     fittp.likelihood.prepare`'s own `detected`, threaded here the same
@@ -1086,12 +1118,19 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
         slope_b = np.empty(N_BANDS, dtype=np.float64)
         active_full = 0
         detected_full = 0
+        bound_full = 0
         for b in range(N_BANDS):
             slope_b[b] = ext_col_ak[b] + sl
             if nondet_mask[s, b]:
                 active_full |= (1 << b)
-            if detected_mask[s, b]:
+            # DEFECT 2: the detected-cleared correlation term (A and B of
+            # `_nondet_ln_sum`) runs over the SELECTION bands only; LAMBDA
+            # was fitted on those (population/detection_correlation.py), so
+            # a PACS detection never enters it.
+            if detected_mask[s, b] and ((_SELECTION_BITS >> b) & 1):
                 detected_full |= (1 << b)
+            if bound_mask[s, b]:
+                bound_full |= (1 << b)
         matched_s = gaia_matched[s]
         g_s_s = g_s[s]
         a_x_s = a_x[s]
@@ -1201,6 +1240,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         # factor, at ITS OWN a_star.
                         nondet_ln = _nondet_ln_sum(a_star, active, detected_full, base, slope_b,
                                                     template_log[th], curve_rows[s], band_a, band_c, band_n, lam)
+                        nondet_ln += _bound_ln_sum(a_star, bound_full, bound_fnu[s], bound_sigma[s], base, slope_b, template_log[th])
                         term1 = term0 * math.exp(nondet_ln)
                         # NONDET2 section 1: this cell's own Gaia factor, at
                         # ITS OWN a_star, or the window's own constant value.
@@ -1250,6 +1290,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                         # NONDET brief section 1: see the table path above.
                         nondet_ln = _nondet_ln_sum(a_star, active, detected_full, base, slope_b,
                                                     template_log[th], curve_rows[s], band_a, band_c, band_n, lam)
+                        nondet_ln += _bound_ln_sum(a_star, bound_full, bound_fnu[s], bound_sigma[s], base, slope_b, template_log[th])
                         term1 = term0 * math.exp(nondet_ln)
                         # NONDET2 section 1: see the table path above.
                         if gaia_do_percell:
@@ -1304,6 +1345,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     s0 = math.log(dens * w_edge / a_top) + ln_tail
                     nondet_ln = _nondet_ln_sum(a_top, active_full, detected_full, base, slope_b,
                                                 template_log[th], curve_rows[s], band_a, band_c, band_n, lam)
+                    nondet_ln += _bound_ln_sum(a_top, bound_full, bound_fnu[s], bound_sigma[s], base, slope_b, template_log[th])
                     s1 = s0 + nondet_ln
                     gaia_ln = _gaia_ln_gamma(a_top, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
                                               ramp_lo, ramp_hi, matched_s, g_s_s, a_x_s, a_field_s, x_s_s, y_s_s, z_s_s)
@@ -1345,6 +1387,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
                     s0 = math.log(dens * w_edge / a_c0) + ln_tail
                     nondet_ln = _nondet_ln_sum(a_c0, active_full, detected_full, base, slope_b,
                                                 template_log[th], curve_rows[s], band_a, band_c, band_n, lam)
+                    nondet_ln += _bound_ln_sum(a_c0, bound_full, bound_fnu[s], bound_sigma[s], base, slope_b, template_log[th])
                     s1 = s0 + nondet_ln
                     gaia_ln = _gaia_ln_gamma(a_c0, g0m, kgd, kgw, base, sl, r_diffuse, r_dense,
                                               ramp_lo, ramp_hi, matched_s, g_s_s, a_x_s, a_field_s, x_s_s, y_s_s, z_s_s)
@@ -1362,7 +1405,7 @@ def _cell_sum(a_col, xi_edges, sigma_a, a_hat, log10_b_hat, slope, c_theta, h,
 
 #: P02 (round 6 review): one slot per worker PROCESS, mirroring
 #: `fittp.likelihood._F_REF64_CACHE` -- `template_log` is the same
-#: immutable `(n_model, 8)` library array object for every source and
+#: immutable `(n_model, N_BANDS)` library array object for every source and
 #: every design of one {region, class} sweep (`fittp.sweep`'s own
 #: `w["template_log"]`), so this widens it to float64 once, on the first
 #: call after a class change (a new array, a new `id`), and reads the
@@ -1381,7 +1424,7 @@ def _widened_template_log64(template_log):
 
 def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, cell_weight,
              template_log, ext_col_ak, curve_rows, band_a, band_c, band_n, nondet_mask,
-             detected_mask, gaia_inputs):
+             detected_mask, bound_mask, bound_fnu, bound_sigma, gaia_inputs):
     """`(ln_lambda2, ln_lambda0, ln_lambda1, a_post, a2_post)`: `ln <Lambda_C>_s
     (theta)` of SPEC_BMSTP_DRAFT.md section 4.2, plus `ln A_C(s)` (section
     1.3) -- everything the fitter's evidence sum needs from the prior --
@@ -1422,14 +1465,14 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
     `a2_post` NaN there.
 
     NONDET brief section 1 (COMPLETENESS_2026-10-20.md): `template_log`
-    (`m, 8`, `fittp.sweep`'s own register read, `likelihood.N_BANDS`-wide
+    (`m, N_BANDS`, `fittp.sweep`'s own register read, `likelihood.N_BANDS`-wide
     and shared by every design and every source of this class) and
-    `ext_col_ak` (`8,`, this call's own design's per-band dimming in
+    `ext_col_ak` (`N_BANDS,`, this call's own design's per-band dimming in
     `A_K`, `fit_k.ext_col / fit_k.ak_per_av`) place the non-detection
     factor's own flux prediction at each cell's `a*`; `curve_rows`
-    (`n, 8, max_n`, `likelihood.Batch`'s own per-source measured
-    completeness curve), `band_a`/`band_c`/`band_n` (`8,`, region-wide)
-    and `nondet_mask`/`detected_mask` (`n, 8` each) are the same
+    (`n, N_BANDS, max_n`, `likelihood.Batch`'s own per-source measured
+    completeness curve), `band_a`/`band_c`/`band_n` (`N_BANDS,`, region-wide)
+    and `nondet_mask`/`detected_mask`/`bound_mask` (`n, N_BANDS` each; `bound_fnu`/`bound_sigma` the ORIGIN 3 ceiling and error in mJy, scored by `_bound_ln_sum`, no curve) are the same
     completeness inputs `fittp.likelihood.prepare`/`_ln_nondet` read, at
     the clamped mark, for the top-K record's own reporting value -- here
     read at every cell instead, inside `_cell_sum`. `detected_mask`
@@ -1490,7 +1533,11 @@ def ln_prior(reader, rows, h, a_hat, log10_b_hat, slope, sigma_a, model_index, c
                       np.asarray(band_c, dtype=np.float64),
                       np.asarray(band_n, dtype=np.int64),
                       np.ascontiguousarray(np.asarray(nondet_mask)),
-                      np.ascontiguousarray(np.asarray(detected_mask)), float(constants.LAMBDA),
+                      np.ascontiguousarray(np.asarray(detected_mask)),
+                      np.ascontiguousarray(np.asarray(bound_mask)),
+                      np.ascontiguousarray(np.asarray(bound_fnu, dtype=np.float64)),
+                      np.ascontiguousarray(np.asarray(bound_sigma, dtype=np.float64)),
+                      float(constants.LAMBDA),
                       np.ascontiguousarray(matched), np.ascontiguousarray(g_s, dtype=np.float64),
                       np.ascontiguousarray(a_x, dtype=np.float64),
                       np.ascontiguousarray(a_field, dtype=np.float64),
