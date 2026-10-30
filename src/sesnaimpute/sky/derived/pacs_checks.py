@@ -85,6 +85,9 @@ def template_in_aperture(comps, in_wcs, r_ap, step=0.4, nbox=7):
 
 
 PHASES = tuple((a / 3.0, b / 3.0) for b in range(3) for a in range(3))      # input-grid shifts (input pixels) the source is averaged over
+# source shifts (output pixels) test (a) averages the real source over: the divisor is the mean over sub-pixel phases
+# (`pacs_fit._table_aperture`); one phase of a 3.2 arcsec output grid under a 4 pixel aperture reads up to +0.2 % off it
+SOURCE_PHASES = tuple((a / 3.0, b / 3.0) for b in (-1, 0, 1) for a in (-1, 0, 1))
 
 
 def unit_source(rep, out_wcs, band, xo, yo, half_out, phases=PHASES):
@@ -183,18 +186,19 @@ def check_positions(psf, meta, rep_entry, margin):
 
 
 def _real_sources(rep, out_wcs, band, positions, half_out, h):
-    """`unit_source` at each of one sub-group's check positions: (A_real, A_direct, the (2h+1)^2 patch around the
-    source's nearest pixel) per position (a worker's unit of `normalisation_check`)."""
+    """`unit_source` at each of one sub-group's check positions: (A_real, A_real averaged over SOURCE_PHASES, A_direct,
+    the (2h+1)^2 patch around the source's nearest pixel) per position (a worker's unit of `normalisation_check`)."""
     out = []
     for x, y, _kind in positions:
         a_real, a_direct, block, _bx, _by = unit_source(rep, out_wcs, band, x, y, half_out)
-        out.append((a_real, a_direct, block[half_out - h:half_out + h + 1, half_out - h:half_out + h + 1]))
+        a_mean = float(np.mean([unit_source(rep, out_wcs, band, x + fx, y + fy, half_out)[0] for fx, fy in SOURCE_PHASES]))
+        out.append((a_real, a_mean, a_direct, block[half_out - h:half_out + h + 1, half_out - h:half_out + h + 1]))
     return out
 
 
 def normalisation_check(config, record, verbose=True):
     """C2: every sub-group of the band's mosaic, at its check positions (`check_positions`): (a) the real unit source's
-    aperture sum over the production divisor (`MosaicPSF.enclosed_at` with the weights one-hot on the sub-group)
+    aperture sum, averaged over SOURCE_PHASES (the divisor is a phase average), over the production divisor (`MosaicPSF.enclosed_at` with the weights one-hot on the sub-group)
     within TIE_TOLERANCE of 1 (the real source taken at the release EEF: its aperture sum times EEF / A_direct, so a
     template that integrates a little differently from the EEF file, `tie`, does not enter this test; (d) tests it); (b) the same through `Tile.injected` (the production injection, one-hot) against the
     real one within TIE_TOLERANCE; (c) the pixel sums of the same patch within SUM_TOLERANCE; (d) A_direct / EEF within
@@ -222,9 +226,9 @@ def normalisation_check(config, record, verbose=True):
             eef = aperture_eef(config, rep[0])
             one = np.zeros((1, psf.n_sub))
             one[0, k] = 1.0
-            for (x, y, kind), (a_real, a_direct, real_patch) in zip(positions[k], real[k]):
+            for (x, y, kind), (a_real, a_mean, a_direct, real_patch) in zip(positions[k], real[k]):
                 norm = eef / a_direct                    # the real source at the release EEF (the template's own shortfall is `tie`)
-                a_real, real_patch = a_real * norm, real_patch * norm
+                a_real, a_mean, real_patch = a_real * norm, a_mean * norm, real_patch * norm
                 divisor = float(psf.enclosed_at(np.array([x]), np.array([y]), one)[0])
                 cx, cy = int(np.rint(x)), int(np.rint(y))
                 with tile.injected(np.array([x]), np.array([y]), FLUX_MJY, mixture=one):
@@ -233,7 +237,7 @@ def normalisation_check(config, record, verbose=True):
                         raise ValueError("check position (%.1f, %.1f) too near the mosaic edge" % (x, y))
                     a_inj = _aperture_sum(win, x - cx + reach, y - cy + reach, r_px) / FLUX_MJY
                     patch = np.array(tile.image[cy - h:cy + h + 1, cx - h:cx + h + 1]) / FLUX_MJY
-                dev = dict(divisor=a_real / divisor - 1, injected=a_inj / a_real - 1,
+                dev = dict(divisor=a_mean / divisor - 1, injected=a_inj / a_real - 1,
                            sums=patch.sum() / real_patch.sum() - 1, tie=a_direct / eef - 1)
                 tol = dict(divisor=TIE_TOLERANCE, injected=TIE_TOLERANCE, sums=SUM_TOLERANCE, tie=RELEASE_TOLERANCE)
                 n += 1
