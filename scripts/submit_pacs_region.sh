@@ -9,8 +9,10 @@
 #   this host", smoke job 3661756):
 #   --phase 1 (default)  prepare and the three detect jobs
 #   --phase 2            after the detect jobs have ended: each band's K from its detect.pkl (`pacs_stages plan`, read
-#                        here), then its inject job (K nodes), its pool job (K nodes, afterok inject), and finish
-#                        (afterok every pool job)
+#                        here), then its inject job (K nodes); prints "INJECT <band> K=<K> ID=<job id>"
+#   --phase 3 --band B --k K   the band's pool job (K nodes), once its inject job has ended
+#   --phase 4            finish, once every band's pool job has ended
+#   (a job waits in the queue only when it can run: a 7-job chain per region held 7 of the 36 submissions per user)
 #
 #   SYSTEM  vista (gg, 144 workers per node) or stampede3 (spr, 112 workers per node)
 #   --target-minutes  wanted minutes of an injection or pooling job (default 45); sets the nodes K of each band
@@ -33,7 +35,7 @@ SOFTWARE=$ROOT/software/sesnaimpute
 BANDS="P70 P100 P160"
 ABS=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 
-DRY=0; BOX=(); REUSE=(); REFERENCE=(); TARGET=45; TASKS=""; JOB=""; BAND=""; K=1; PHASE=1
+DRY=0; BOX=(); REUSE=(); REFERENCE=(); TARGET=45; TASKS=""; JOB=""; BAND=""; K=1; PHASE=1; POOL_T=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY=1; shift ;;
@@ -44,6 +46,7 @@ while [ $# -gt 0 ]; do
         --target-minutes) TARGET="$2"; shift 2 ;;
         --job) JOB="$2"; shift 2 ;;
         --phase) PHASE="$2"; shift 2 ;;
+        --pool-t) POOL_T="$2"; shift 2 ;;
         --band) BAND="$2"; shift 2 ;;
         --k) K="$2"; shift 2 ;;
         --) shift; break ;;
@@ -126,7 +129,7 @@ if [ "$PHASE" = 1 ]; then
         submit "pacs_${TAG}_${b}_detect" 1 $T "$PREP" detect --band $b
     done
 elif [ "$PHASE" = 2 ]; then
-    [ $((7 + QUEUED)) -le $MAX_SUBMIT ] || { echo "refused: 7 jobs (+ $QUEUED already queued) against $MAX_SUBMIT submitted on $SYSTEM" >&2; exit 1; }
+    [ $((3 + QUEUED)) -le $MAX_SUBMIT ] || { echo "refused: 3 jobs (+ $QUEUED already queued) against $MAX_SUBMIT submitted on $SYSTEM" >&2; exit 1; }
     if [ $DRY -eq 1 ]; then
         [ -n "$TASKS" ] || { echo "--dry-run --phase 2 needs --tasks P70=N,P100=N,P160=N" >&2; exit 2; }
         SIZES=$(sizing --target-minutes $TARGET --tasks "$TASKS")
@@ -141,16 +144,21 @@ elif [ "$PHASE" = 2 ]; then
         done
     fi
     echo "$SIZES" | grep -i "^plan" >&2
-    echo "# $SYSTEM $PART phase 2: 3 x inject, 3 x pool, finish"
-    POOLS=()
+    echo "# $SYSTEM $PART phase 2: 3 x inject (pool: --phase 3 per band as its inject ends; finish: --phase 4)"
     for b in $BANDS; do
         L=$(echo "$SIZES" | grep "^PLAN $b ")
         KB=$(field K "$L"); IT=$(field INJECT_T "$L"); PT=$(field POOL_T "$L")
         [ -n "$KB" ] && [ -n "$IT" ] && [ -n "$PT" ] || { echo "no plan line for $b" >&2; exit 1; }
         INJ=$(submit "pacs_${TAG}_${b}_inject" $KB $IT "" inject --band $b --k $KB)
-        POOLS+=($(submit "pacs_${TAG}_${b}_pool" $KB $PT "$INJ" pool --band $b --k $KB))
+        echo "INJECT $b K=$KB POOL_T=$PT ID=$INJ"
     done
-    submit "pacs_${TAG}_finish" 1 $FINISH_T "$(IFS=:; echo "${POOLS[*]}")" finish >/dev/null
+elif [ "$PHASE" = 3 ]; then
+    [ -n "$BAND" ] && [ "$K" -ge 1 ] && [ -n "$POOL_T" ] || { echo "--phase 3 needs --band, --k and --pool-t (phase 2's POOL_T)" >&2; exit 2; }
+    [ $((1 + QUEUED)) -le $MAX_SUBMIT ] || { echo "refused: 1 job (+ $QUEUED already queued) against $MAX_SUBMIT" >&2; exit 1; }
+    echo "POOL $BAND K=$K ID=$(submit "pacs_${TAG}_${BAND}_pool" $K $POOL_T "" pool --band $BAND --k $K)"
+elif [ "$PHASE" = 4 ]; then
+    [ $((1 + QUEUED)) -le $MAX_SUBMIT ] || { echo "refused: 1 job (+ $QUEUED already queued) against $MAX_SUBMIT" >&2; exit 1; }
+    echo "FINISH ID=$(submit "pacs_${TAG}_finish" 1 $FINISH_T "" finish)"
 else
-    echo "--phase must be 1 or 2" >&2; exit 2
+    echo "--phase must be 1, 2, 3 or 4" >&2; exit 2
 fi
