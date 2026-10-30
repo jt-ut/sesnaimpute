@@ -31,7 +31,7 @@ from sesnaimpute.sky.derived.pacs_psf import APERTURES, aperture_eef, published_
 
 TIE_TOLERANCE = 0.003            # real (normalised to the release EEF) against the divisor; injected against real
 RELEASE_TOLERANCE = 0.015        # A_direct / EEF: the release template against the release EEF (60 arcsec/s: -0.7 %)
-SUM_TOLERANCE = 0.001            # pixel sums of the same patch, real against injected
+SUM_TOLERANCE = 0.01             # pixel sums of the same patch, real against injected (owner 2026-10-30: 1 %; Mon R2 -0.15 %)
 SUBSAMPLES = 6                   # per input pixel side (the box average; 2 x 2 left a 3.2 arcsec pixel's box too narrow: +0.21 %)
 RIM_ARCSEC = (10.0, 20.0, 30.0)  # inside and outside the footprint edge
 FLUX_MJY = 1000.0
