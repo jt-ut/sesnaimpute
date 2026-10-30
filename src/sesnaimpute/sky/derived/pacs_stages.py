@@ -314,7 +314,7 @@ def assemble(config, region, band, box=None):
         pc._POOL_TABLE.clear()
 
 
-def finish(config, region, box=None, reference_product=None, n_jobs=None, stage=None):
+def finish(config, region, box=None, reference_product=None, n_jobs=None, stage=None, clear=True):
     """Stage FINISH: the region's product, its merged PACS sources and the source table, from the bands' `band.pkl`;
     the stage store is removed after (the held-out halves stay for `acceptance`). `reference_product` is for the
     photometry's checks (not used yet). Returns the bands' datasets."""
@@ -329,7 +329,8 @@ def finish(config, region, box=None, reference_product=None, n_jobs=None, stage=
     pc.write_product(product_path(config, "sky/derived", "pacs", "completeness", "source", region=region), region, mag, bands)
     merged = pc.merge_sources(config, bands, n_jobs, stage, flux_grid)
     pc.write_sources(product_path(config, "sky/derived", "pacs", "sources", "region", region=region), region, bands, merged)
-    _clear_store(config, region, box)
+    if clear:                  # the command line clears it only after the acceptances and photometry (a rerun resumes)
+        _clear_store(config, region, box)
     return bands
 
 

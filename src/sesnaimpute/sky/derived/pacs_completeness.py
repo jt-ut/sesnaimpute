@@ -2274,15 +2274,16 @@ def finish_region(config, region, box=None, reference_product=None):
     """What a region script ran after the completeness product was written: the completeness acceptance (the
     held-out halves read from the stage store), `pacs_photometry.build` and `pacs_photometry.acceptance`
     (`reference_product`: the earlier photometry product's path for C4); the held-out halves are removed once the
-    completeness acceptance has read them. Returns nothing; the products are the files."""
+    completeness acceptance and the photometry have run (a rerun after a failure repeats the whole of it). Returns
+    nothing; the products are the files."""
     from sesnaimpute.sky.derived import pacs_photometry
     acceptance(config, region, None, box)
+    pacs_photometry.build(config, regions=[region], box=box)
+    pacs_photometry.acceptance(config, region, reference_product=reference_product, box=box)
     for band in BANDS:
         path = _held_path(config, region, band, box)
         if os.path.exists(path):
             os.remove(path)
-    pacs_photometry.build(config, regions=[region], box=box)
-    pacs_photometry.acceptance(config, region, reference_product=reference_product, box=box)
 
 
 if __name__ == "__main__":

@@ -131,9 +131,11 @@ def main(argv=None):
     elif args.stage == "assemble":
         stages.assemble(config, region, band, **kw)
     elif args.stage == "finish":
-        stages.finish(config, region, reference_product=args.reference_product, **kw)
+        # the store is cleared only once every step has run, so a FINISH that fails in the photometry resumes
+        stages.finish(config, region, reference_product=args.reference_product, clear=False, **kw)
         from sesnaimpute.sky.derived import pacs_completeness
         pacs_completeness.finish_region(config, region, box=box, reference_product=args.reference_product)
+        stages._clear_store(config, region, box)
     elif args.stage == "run":
         stages.run_region(config, region, n_shards=args.of, **kw)
     else:
