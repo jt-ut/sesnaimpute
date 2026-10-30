@@ -1,99 +1,74 @@
 #!/bin/bash
-# Submits one region's staged PACS completeness (sesnaimpute.sky.derived.pacs_stages) as a chain of jobs.
+# Submits one region's staged PACS completeness (sesnaimpute.sky.derived.pacs_stages) as 2 + 3 jobs per band, each heavy
+# job spread over as many nodes as its work needs, so that every job takes about the same time.
 #
-#   submit_pacs_region.sh [--dry-run] [--box RA DEC W H] [--reuse-mosaics] [--reference-product P]
-#                         [--k P70=4,P100=1,P160=4] [--time HH:MM:SS] SYSTEM REGION CONFIG
+#   submit_pacs_region.sh [--dry-run --tasks P70=N,P100=N,P160=N] [--box RA DEC W H] [--reuse-mosaics]
+#                         [--reference-product P] [--target-minutes M] SYSTEM REGION CONFIG
 #
-#   SYSTEM  vista (gg, 144 workers) or stampede3 (spr, 112 workers)
-#   --k     shards K per band (default 1 each); choose with `pacs_stages plan` after the DETECT files exist
-#   --dry-run  prints every sbatch line, with its --dependency, and submits nothing
+#   SYSTEM  vista (gg, 144 workers per node) or stampede3 (spr, 112 workers per node)
+#   --target-minutes  wanted minutes of an injection or pooling job (default 45); sets the nodes K of each band
+#   --dry-run  prints every sbatch line and submits nothing; the bands' round-0 task counts (which the detect jobs read
+#              from detect.pkl) are given by --tasks, and the jobs the detect jobs would submit are printed too
 #
-# Chain (every job -t TIME, default 06:00:00, one node each; TACC's submit filter charges the queue as if every job
-# used its whole limit, so a 48 h limit on a 32-job chain is refused against the balance: size K so a job's stage fits):
-#   prepare (preflight + mosaics)
-#     -> detect <band>                                   one job per band
-#       -> inject round 0, shards 0..K-1                 K jobs per band
-#         -> inject-rest <band>                          rounds 1..40, one job: each is one small batch behind a barrier
-#           -> pool-tables <band>                        the band's injection tables, written once
-#             -> pool shards 0..K-1                      K jobs per band
-#               -> assemble <band>
-#                 -> finish                              after all bands: product, sources, acceptances, photometry
-# Each dependency is afterok. A job whose output file exists does nothing, so a failed chain is resubmitted whole.
-# Queue limits per user (Stampede3 spr 24 running / 36 submitted; Vista gg 20 running / 40 submitted): a chain is
-# 2 + sum over bands of (2K + 4) jobs, at most sum(K) of them running together; the script refuses a chain above
-# the limits (counting the user's jobs already queued) and names the K to lower.
-# The job body is this same file, run by sbatch as `submit_pacs_region.sh --job ...`.
+# Jobs (`pacs_sizing` has the node counts and the -t of every job: 3 x its expected minutes, rounded up to 30 min):
+#   prepare                         1 node: preflight + mosaics
+#     detect <band>                 1 node; at its end plans the band's K from detect.pkl and submits the next two itself
+#       inject <band>               K nodes: rounds 0 .. MAX_EXTRA_BATCHES, the K shares of a round together (one node
+#                                   each, by srun), a barrier between rounds
+#         pool <band>               K nodes (afterok inject): pool tables, the K pool shares together, assemble; the
+#                                   pool job that completes the last band submits finish (claimed by a marker file,
+#                                   so exactly one does)
+#           finish                  1 node: product, sources, acceptances, photometry
+# A job whose output file exists does nothing, so a failed chain is resubmitted whole (a failed finish is submitted
+# alone: `submit_pacs_region.sh --job finish ...` needs sbatch; or resubmit the chain after removing the marker
+# <stage store>/finish_submitted).
+# The job body is this same file, run by sbatch as `submit_pacs_region.sh --job KIND ...`.
 
 ROOT=/work2/08772/jjt277/stampede3
 SLURM_DIR=$ROOT/projects/SESNA_Complete/pacs_slurm
 SOFTWARE=$ROOT/software/sesnaimpute-pacs_injection
 BANDS="P70 P100 P160"
+ABS=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 
-if [ "${1:-}" = "--job" ]; then
-    shift
-    export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 NUMBA_NUM_THREADS=1
-    # glibc: a fixed mmap threshold (no dynamic raise) so the workers' large temporaries go back to the system when
-    # freed (job 3661209: worker memory grew per piece; not reproduced on macOS)
-    export MALLOC_MMAP_THRESHOLD_=131072 MALLOC_TRIM_THRESHOLD_=131072 MALLOC_ARENA_MAX=2
-    ulimit -u $(ulimit -Hu)
-    source /home1/08772/jjt277/startups/sesnaimpute_source.sh
-    export PYTHONPATH=$SOFTWARE/src
-    cd $SLURM_DIR
-    python -c "import numpy, sys; sys.exit(0 if numpy.__version__ == \"1.24.4\" else 1)" || { echo "numpy is not 1.24.4"; exit 1; }
-    python -W ignore -c "import sesnaimpute; print(\"code:\", sesnaimpute.__file__)"
-    ( cd $SOFTWARE && git log --oneline -1 )
-    exec python -W ignore -m sesnaimpute.sky.derived.pacs_stages "$@"
-fi
-
-DRY=0; BOX=(); REUSE=(); REFERENCE=(); KSPEC=""; TIME=06:00:00
+DRY=0; BOX=(); REUSE=(); REFERENCE=(); TARGET=45; TASKS=""; JOB=""; BAND=""; K=1
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY=1; shift ;;
+        --tasks) TASKS="$2"; shift 2 ;;
         --box) BOX=(--box "$2" "$3" "$4" "$5"); shift 5 ;;
         --reuse-mosaics) REUSE=(--reuse-mosaics); shift ;;
         --reference-product) REFERENCE=(--reference-product "$2"); shift 2 ;;
-        --k) KSPEC="$2"; shift 2 ;;
-        --time) TIME="$2"; shift 2 ;;
+        --target-minutes) TARGET="$2"; shift 2 ;;
+        --job) JOB="$2"; shift 2 ;;
+        --band) BAND="$2"; shift 2 ;;
+        --k) K="$2"; shift 2 ;;
         --) shift; break ;;
         -*) echo "unknown option $1" >&2; exit 2 ;;
         *) break ;;
     esac
 done
-[ $# -eq 3 ] || { sed -n '2,8p' "$0" >&2; exit 2; }
+[ $# -eq 3 ] || { sed -n '2,9p' "$0" >&2; exit 2; }
 SYSTEM=$1; REGION=$2; CONFIG=$3
 
 case "$SYSTEM" in
-    vista)     PART=gg;  CPUS=144; MAX_SUBMIT=40; MAX_RUN=20; EXTRA=(--propagate=NONE) ;;
-    stampede3) PART=spr; CPUS=112; MAX_SUBMIT=36; MAX_RUN=24; EXTRA=() ;;
+    vista)     PART=gg;  CPUS=144; MAX_SUBMIT=40; EXTRA=(--propagate=NONE) ;;
+    stampede3) PART=spr; CPUS=112; MAX_SUBMIT=36; EXTRA=() ;;
     *) echo "system must be vista or stampede3" >&2; exit 2 ;;
 esac
 
-for b in $BANDS; do eval "K_$b=1"; done
-for kv in ${KSPEC//,/ }; do
-    b=${kv%%=*}; n=${kv#*=}
-    [[ " $BANDS " == *" $b "* && "$n" =~ ^[1-9][0-9]*$ ]] || { echo "bad --k entry $kv (BAND=K, K >= 1)" >&2; exit 2; }
-    eval "K_$b=$n"
-done
-
-kof() { eval "echo \$K_$1"; }
-TOTAL=2; PEAK=0
-for b in $BANDS; do k=$(kof $b); TOTAL=$((TOTAL + 2 * k + 4)); PEAK=$((PEAK + k)); done
-QUEUED=0
-[ $DRY -eq 1 ] || QUEUED=$(squeue -u "$USER" -h 2>/dev/null | wc -l)
-if [ $((TOTAL + QUEUED)) -gt $MAX_SUBMIT ] || [ $PEAK -gt $MAX_RUN ]; then
-    echo "refused: $TOTAL jobs (+ $QUEUED already queued) against $MAX_SUBMIT submitted, $PEAK running together against $MAX_RUN on $SYSTEM; lower K" >&2
-    exit 1
-fi
-echo "# $SYSTEM $PART: $TOTAL jobs, at most $PEAK running together, $QUEUED already queued"
-
+# the options every job of the chain is given again (the job body parses the same line)
+COMMON=(--target-minutes "$TARGET" "${BOX[@]}" "${REUSE[@]}" "${REFERENCE[@]}")
+# the pacs_stages command line of a stage, in a job
+stage() { python -W ignore -m sesnaimpute.sky.derived.pacs_stages "$1" --config "$CONFIG" --region "$REGION" --n-jobs $CPUS "${BOX[@]}" "${@:2}"; }
 TAG=$(echo "$REGION" | tr -c 'A-Za-z0-9\n' _)
-# submit NAME DEPENDENCY(afterok list or empty) args...  -> prints the job id
+
+# submit NAME NODES TIME DEPENDENCY(afterok list or empty) job-args...  -> prints the job id
 submit() {
-    local name=$1 dep=$2; shift 2
-    local cmd=(sbatch --parsable -J "$name" -o "$SLURM_DIR/%x_%j.out" -e "$SLURM_DIR/%x_%j.err" -p $PART -N 1 -n 1 -c $CPUS
-               -t $TIME -A AST24021 "${EXTRA[@]}")
+    local name=$1 nodes=$2 time=$3 dep=$4; shift 4
+    local cmd=(sbatch --parsable -J "$name" -o "$SLURM_DIR/%x_%j.out" -e "$SLURM_DIR/%x_%j.err" -p $PART -N $nodes -n $nodes -c $CPUS
+               -t $time -A AST24021 "${EXTRA[@]}")
     [ -z "$dep" ] || cmd+=(--dependency="afterok:$dep")
-    cmd+=("$ABS" --job "$@" --config "$CONFIG" --region "$REGION" --n-jobs $CPUS "${BOX[@]}")
+    cmd+=("$ABS" "${COMMON[@]}" --job "$@" "$SYSTEM" "$REGION" "$CONFIG")
     if [ $DRY -eq 1 ]; then
         { printf '%q ' "${cmd[@]}"; echo; } >&2     # the dry-run job id is the job's name
         echo "$name"
@@ -105,25 +80,77 @@ submit() {
         echo "$id"
     fi
 }
-ABS=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+# sizing ARGS...: pacs_sizing of this checkout (no numbers or cluster software needed)
+sizing() { PYTHONPATH="$(dirname "$ABS")/../src" ${DRY_PYTHON:-python3} -m sesnaimpute.sky.derived.pacs_sizing --system $SYSTEM "$@"; }
+# field NAME LINE: the value of NAME=value in a plan line
+field() { echo "$2" | tr ' ' '\n' | sed -n "s/^$1=//p"; }
 
-join() { local IFS=:; echo "$*"; }
+if [ -n "$JOB" ]; then
+    export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 NUMBA_NUM_THREADS=1
+    # glibc: a fixed mmap threshold (no dynamic raise) so the workers' large temporaries go back to the system when
+    # freed (job 3661209: worker memory grew per piece; not reproduced on macOS)
+    export MALLOC_MMAP_THRESHOLD_=131072 MALLOC_TRIM_THRESHOLD_=131072 MALLOC_ARENA_MAX=2
+    ulimit -u $(ulimit -Hu)
+    source /home1/08772/jjt277/startups/sesnaimpute_source.sh
+    export PYTHONPATH=$SOFTWARE/src
+    cd $SLURM_DIR
+    python -c "import numpy, sys; sys.exit(0 if numpy.__version__ == \"1.24.4\" else 1)" || { echo "numpy is not 1.24.4"; exit 1; }
+    python -W ignore -c "import sesnaimpute; print(\"code:\", sesnaimpute.__file__)"
+    ( cd $SOFTWARE && git log --oneline -1 )
+    echo "job $JOB $BAND on $SLURM_JOB_NUM_NODES node(s): $SLURM_JOB_NODELIST"
+    case "$JOB" in
+        prepare) exec python -W ignore -m sesnaimpute.sky.derived.pacs_stages preflight --config "$CONFIG" --region "$REGION" --n-jobs $CPUS "${BOX[@]}" "${REUSE[@]}" "${REFERENCE[@]}" ;;
+        finish)  exec python -W ignore -m sesnaimpute.sky.derived.pacs_stages finish --config "$CONFIG" --region "$REGION" --n-jobs $CPUS "${BOX[@]}" "${REFERENCE[@]}" ;;
+        detect)
+            stage detect --band $BAND || exit 1
+            PLAN=$(stage plan --band $BAND --system $SYSTEM --target-minutes $TARGET) || exit 1
+            echo "$PLAN"
+            LINE=$(echo "$PLAN" | grep "^PLAN $BAND ")
+            KB=$(field K "$LINE"); IT=$(field INJECT_T "$LINE"); PT=$(field POOL_T "$LINE")
+            [ -n "$KB" ] && [ -n "$IT" ] && [ -n "$PT" ] || { echo "no plan line for $BAND"; exit 1; }
+            INJ=$(submit "pacs_${TAG}_${BAND}_inject" $KB $IT "" inject --band $BAND --k $KB) || exit 1
+            submit "pacs_${TAG}_${BAND}_pool" $KB $PT "$INJ" pool --band $BAND --k $KB >/dev/null || exit 1 ;;
+        inject)  stage inject-band --band $BAND --of $K --launcher srun --cpus $CPUS || exit 1 ;;
+        pool)
+            stage pool-band --band $BAND --of $K --launcher srun --cpus $CPUS || exit 1
+            stage claim-finish; RC=$?
+            if [ $RC -eq 0 ]; then
+                eval "$(sizing --times | sed -n 's/^TIMES //p')"
+                submit "pacs_${TAG}_finish" 1 $FINISH_T "" finish >/dev/null || exit 1
+            elif [ $RC -ne 3 ]; then
+                exit $RC
+            fi ;;
+        *) echo "unknown job $JOB" >&2; exit 2 ;;
+    esac
+    exit 0
+fi
 
-PREP=$(submit "pacs_${TAG}_prepare" "" preflight "${REUSE[@]}" "${REFERENCE[@]}")
-ASM=()
+# ---- submission
+eval "$(sizing --times | sed -n 's/^TIMES //p')"
+if [ $DRY -eq 1 ]; then
+    [ -n "$TASKS" ] || { echo "--dry-run needs --tasks P70=N,P100=N,P160=N (the round-0 task counts the detect jobs read)" >&2; exit 2; }
+    SIZES=$(sizing --target-minutes $TARGET --tasks "$TASKS")
+else
+    SIZES=""
+    QUEUED=$(squeue -u "$USER" -h 2>/dev/null | wc -l)
+    [ $((11 + QUEUED)) -le $MAX_SUBMIT ] || { echo "refused: 11 jobs (+ $QUEUED already queued) against $MAX_SUBMIT submitted on $SYSTEM" >&2; exit 1; }
+fi
+echo "# $SYSTEM $PART: 11 jobs (prepare, 3 x detect, 3 x inject, 3 x pool, finish); inject and pool are submitted by the band's detect job"
+
+PREP=$(submit "pacs_${TAG}_prepare" 1 $PREPARE_T "" prepare)
 for b in $BANDS; do
-    k=$(kof $b)
-    DET=$(submit "pacs_${TAG}_${b}_detect" "$PREP" detect --band $b)
-    I0=()
-    for ((s = 0; s < k; s++)); do
-        I0+=($(submit "pacs_${TAG}_${b}_i0_s${s}of${k}" "$DET" inject --band $b --round 0 --shard $s --of $k))
-    done
-    REST=$(submit "pacs_${TAG}_${b}_irest" "$(join "${I0[@]}")" inject-rest --band $b --round 1 --of $k)
-    TAB=$(submit "pacs_${TAG}_${b}_pooltab" "$REST" pool-tables --band $b)
-    PL=()
-    for ((s = 0; s < k; s++)); do
-        PL+=($(submit "pacs_${TAG}_${b}_pool_s${s}of${k}" "$TAB" pool --band $b --shard $s --of $k))
-    done
-    ASM+=($(submit "pacs_${TAG}_${b}_assemble" "$(join "${PL[@]}")" assemble --band $b))
+    eval "T=\$DETECT_${b}_T"
+    DET=$(submit "pacs_${TAG}_${b}_detect" 1 $T "$PREP" detect --band $b)
+    if [ $DRY -eq 1 ]; then
+        echo "$SIZES" | grep "^plan $b" >&2
+        L=$(echo "$SIZES" | grep "^PLAN $b ")
+        KB=$(field K "$L")
+        echo "# submitted by $DET at its end:" >&2
+        INJ=$(submit "pacs_${TAG}_${b}_inject" $KB $(field INJECT_T "$L") "" inject --band $b --k $KB)
+        submit "pacs_${TAG}_${b}_pool" $KB $(field POOL_T "$L") "$INJ" pool --band $b --k $KB >/dev/null
+    fi
 done
-submit "pacs_${TAG}_finish" "$(join "${ASM[@]}")" finish "${REFERENCE[@]}" >/dev/null
+if [ $DRY -eq 1 ]; then
+    echo "# submitted by the pool job that completes the last band:" >&2
+    submit "pacs_${TAG}_finish" 1 $FINISH_T "" finish >/dev/null
+fi

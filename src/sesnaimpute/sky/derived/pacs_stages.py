@@ -95,6 +95,8 @@ def _clear_store(config, region, box):
     sd = stage_dir(config, region, box)
     for b in pc.BANDS:
         shutil.rmtree(os.path.join(sd, b), ignore_errors=True)
+    if os.path.exists(os.path.join(sd, "finish_submitted")):      # the claim of the finish job (`pacs_driver.claim_finish`)
+        os.remove(os.path.join(sd, "finish_submitted"))
 
 
 # ----------------------------------------------------------------------------
