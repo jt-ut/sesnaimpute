@@ -1075,7 +1075,8 @@ def self_check(config, record):
     """The template's normalisation, on a ZERO image: ZERO_CHECK_FLUX_MJY injected at ZERO_CHECK_POSITIONS empty-sky
     positions of `record`'s map, the aperture SUM with no sky subtraction divided by the injected flux times the
     map's encircled-energy fraction at the aperture radius (total-flux normalisation; for a mosaic the local mixture
-    of its input maps', `MosaicPSF.enclosed_at`): every position must be
+    of its input maps' REAL unit sources, resampled, `pacs_checks.expected_enclosed`: absolute, independent of the
+    PSF build's own fractions): every position must be
     within 0.5 %, else the template is not normalised to total flux. Prints the worst ratios and, for
     information, the share of the aperture flux the sky term of the catalogue's own measurement removes on a
     zero image (the clipped mode of the monotonic wing, not the mean the aperture fraction assumes). Raises
@@ -1102,8 +1103,14 @@ def self_check(config, record):
     with tile.blank_image(), tile.injected(x, y, ZERO_CHECK_FLUX_MJY):
         f, sky, _sd, area, cov = pacs_fit._aperture_core(tile.image, tile.error, x, y, r_ap, r_in, r_out, 5)
     if isinstance(tile._psf, pacs_psf.MosaicPSF):
-        # a mosaic has no single release table: the fraction at each position is the local mixture of its input maps'
-        eef = tile._psf.enclosed_at(x, y)
+        # a mosaic has no single release table, and its own enclosed fractions are what the injection was normalised
+        # by (they would cancel): the expected aperture sum is recomputed on a REAL unit source synthesised in each
+        # contributing input map's pixels and resampled (pacs_checks.expected_enclosed), tied to the release EEF
+        from sesnaimpute.sky.derived import pacs_checks
+        eef, tie = pacs_checks.expected_enclosed(config, record, tile, x, y, tile._psf.weights(x, y))
+        if tie > pacs_checks.RELEASE_TOLERANCE:
+            raise ValueError("%s: the synthetic real source is %.2f %% off the release encircled energy (template, pixel "
+                             "area or EEF file)" % (record.band, 100 * tie))
     else:
         eef = pacs_psf.physical_aperture_fraction(config, record, "total", False)
     expected = ZERO_CHECK_FLUX_MJY * eef
@@ -1831,7 +1838,7 @@ def merge_sources(config, bands, n_jobs, stage, flux_grid):
     quadrature; CHANCE the SESNA density within LOCAL_DENSITY_ARCSEC times the radius's area. Returns the table."""
     pk = {b: bands[b]["peaks"] for b in BANDS}
     recs = {b: bands[b].get("records", []) for b in BANDS}
-    psf = {b: pacs_psf.MosaicPSF(recs[b][0].mosaic_dir, tables=False) for b in BANDS if recs[b]}
+    psf = {b: pacs_psf.MosaicPSF(recs[b][0].mosaic_dir, pacs_fit.maps_root(config), tables=False) for b in BANDS if recs[b]}
     radius = {}                         # arcsec; None: half the redder band's local beam at the detection
     for a, b in (("P70", "P100"), ("P70", "P160"), ("P100", "P160")):
         if a not in psf or b not in psf:
@@ -1965,9 +1972,14 @@ def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None, box=Non
         records[b] = [pacs_fit.mosaic_record(config, region, b, box)]
     _prepare_stage(config, [r[0] for r in records.values()], n_jobs, stage)
     out = {}
+    # every band's self-checks before ANY band's injection: a P100 or P160 failure is minutes in, not after the P70 hour
+    from sesnaimpute.sky.derived import pacs_checks
     for b in BANDS:
         if b in records:
             self_check(config, records[b][0])
+            pacs_checks.normalisation_check(config, records[b][0])
+    for b in BANDS:
+        if b in records:
             out[b] = _band_product(config, records[b], ra, dec, n_jobs, stage, flux_grid, detect_only)
         if out.get(b) is None:
             out[b] = _empty_band(ra.size, mag.size)
@@ -2001,6 +2013,83 @@ def build(config, regions=None, box=None, detect_only=False):
             st.done(path, **{"cells_" + b: int(bands[b]["curve"].shape[0]) for b in BANDS})
     progress_module.summary("sky.derived.pacs_completeness", len(names), t0)
     return held
+
+
+# ----------------------------------------------------------------------------
+# the preflight (a Vista development-queue job before every production submission)
+
+def _git_state():
+    """(commit, dirty, upstream commit or None) of the checkout this module is imported from."""
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    git = lambda *a: subprocess.run(("git", "-C", here) + a, capture_output=True, text=True)
+    head = git("rev-parse", "HEAD")
+    if head.returncode:
+        raise ValueError("the code at %s is not a git checkout: the preflight needs the pushed commit" % here)
+    up = git("rev-parse", "@{upstream}")
+    return head.stdout.strip(), bool(git("status", "--porcelain", "--untracked-files=no").stdout.strip()), \
+        (up.stdout.strip() if not up.returncode else None)
+
+
+def preflight(config, region, box=None, reuse_mosaics=False, reference_product=None):
+    """Everything a production submission would otherwise find out hours in, in one job (laptop or Vista development
+    queue; the mosaics it builds are the ones the production job reuses): (1) the code is a clean checkout at its
+    upstream (pushed) commit; (2) no mosaic product of the region exists unless `reuse_mosaics` (intended); (3) the
+    inputs: HPPSC lists and observation table of every band, the HOPS table, the region's source positions, the
+    `reference_product` (earlier photometry product, when given); (4) `write_product` and `write_sources` on empty
+    bands (every dataset name registered); (5) the mosaic of every band, its PSF, the layers and detection kernels
+    (`_prepare_stage`); (6) every band's `self_check` and `pacs_checks.normalisation_check`, all before any injection.
+    Raises ValueError at the first failure, prints PREFLIGHT PASS at the end."""
+    import tempfile
+    from sesnaimpute.sky.derived import pacs_checks, pacs_mosaic, pacs_photometry
+    t0 = time.time()
+    commit, dirty, upstream = _git_state()
+    print("preflight: code %s%s, upstream %s" % (commit, " (UNCOMMITTED CHANGES)" if dirty else "", upstream), flush=True)
+    if dirty or upstream != commit:
+        raise ValueError("the code is not the pushed commit (uncommitted changes, or HEAD differs from its upstream)")
+    for b in BANDS:
+        mdir = pacs_mosaic.product_dir(config, region, b, box)
+        if os.path.exists(os.path.join(mdir, "mosaic.hdf5")) and not reuse_mosaics:
+            raise ValueError("a mosaic product exists at %s: move it aside, or run with reuse_mosaics=True if it is intended" % mdir)
+    for b in BANDS:
+        h = pacs_photometry._read_hppsc(config, b)
+        if not (h["ra"].size and h["obsids"]):
+            raise ValueError("HPPSC %s list or observation table is empty" % b)
+    if not pacs_photometry._match_hops(config, region)[0].size:
+        raise ValueError("no HOPS targets matched for %s" % region)
+    ra, dec = _region_inputs(config, region)
+    if not ra.size:
+        raise ValueError("no source positions for %s" % region)
+    if reference_product is not None:
+        pacs_photometry._c4_ratio(config, region, reference_product)
+    print("preflight: inputs present (%d source positions) %.0f s" % (ra.size, time.time() - t0), flush=True)
+    mag, _grid = canonical_grid()
+    with tempfile.TemporaryDirectory(dir=os.path.join(config.data_root, "sky", "derived")) as tmp:
+        bands = {b: _empty_band(5, mag.size) for b in BANDS}
+        write_product(os.path.join(tmp, "c.hdf5"), region, mag, bands)
+        merged = dict(ra=np.zeros(0), dec=np.zeros(0), position_band=np.zeros(0, np.int8), radius={("P70", "P100"): 1.0}, n=0)
+        for b in BANDS:
+            for k in ("fnu", "sigma", "offset", "snr", "ra", "dec"):
+                merged[k + "_" + b] = np.zeros(0)
+            merged["extended_" + b] = np.zeros(0, bool)
+            merged["map_" + b] = np.zeros(0, np.int32)
+            merged["detected_" + b] = np.zeros(0, bool)
+        write_sources(os.path.join(tmp, "s.hdf5"), region, bands, merged)
+    print("preflight: write_product and write_sources names registered %.0f s" % (time.time() - t0), flush=True)
+    records = {}
+    for b in BANDS:
+        if not [r for r in pacs_fit.read_index(config, region) if r.band == b]:
+            continue
+        if not os.path.exists(os.path.join(pacs_mosaic.product_dir(config, region, b, box), "mosaic.hdf5")):
+            pacs_mosaic.build_mosaic(config, region, b, box=box, n_jobs=config.n_jobs)
+        records[b] = pacs_fit.mosaic_record(config, region, b, box)
+        print("preflight: %s mosaic and PSF built %.0f s" % (b, time.time() - t0), flush=True)
+    _prepare_stage(config, list(records.values()), config.n_jobs, None)
+    print("preflight: layers and detection kernels prepared %.0f s" % (time.time() - t0), flush=True)
+    for b, rec in records.items():
+        self_check(config, rec)
+        pacs_checks.normalisation_check(config, rec)
+    print("PREFLIGHT PASS (%s, %s, code %s) %.0f s" % (region, ", ".join(records), commit[:7], time.time() - t0), flush=True)
 
 
 # ----------------------------------------------------------------------------

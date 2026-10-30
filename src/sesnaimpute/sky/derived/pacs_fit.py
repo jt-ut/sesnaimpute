@@ -685,7 +685,7 @@ class Tile:
         self._image_path = image_path
         if psf is None and getattr(record, "mosaic_dir", ""):
             # the mosaic's mixture PSF (built by `build_mosaic_psf`) is already on the output grid and normalised
-            self._psf = MosaicPSF(record.mosaic_dir)
+            self._psf = MosaicPSF(record.mosaic_dir, maps_root(config))
             self.psf_scale = 1.0
             if self._psf.extent != self.table_half + 0.5:
                 raise ValueError("the mosaic PSF table was built for another table half-width")
@@ -1118,22 +1118,23 @@ class Tile:
         point-spread table's support."""
         return int(min(self.table_half, self.half + np.ceil(self.beam_px)))
 
-    def _add_sources(self, x, y, flux, chunk=256):
+    def _add_sources(self, x, y, flux, chunk=256, mixture=None):
         """Adds, for each (x, y) in map pixels, `flux` (mJy) times the band's point-spread template to
         the image in place (the mean of the template's scan columns, whose total over the plane is 1,
         evaluated by `CachedPairedPSF.evaluate_xy`, the table the fit's own columns come from). Returns
         the original pixels as `(x0, y0, patch)` triples so `_restore` can put them back."""
         saved = []
-        for cx, cy, resp in self._template_patches(x, y, flux, chunk):
+        for cx, cy, resp in self._template_patches(x, y, flux, chunk, mixture):
             for i in range(cx.size):
                 r = _paste(self.image, int(cx[i]), int(cy[i]), resp[i], keep=True)
                 if r is not None:
                     saved.append(r)
         return saved
 
-    def _template_patches(self, x, y, flux, chunk=256):
+    def _template_patches(self, x, y, flux, chunk=256, mixture=None):
         """Per chunk of sources: the patches' lower-left pixels (cx, cy) and the template times `flux` on them,
-        (n, side, side), side = 2 x `injection_half_width` + 1."""
+        (n, side, side), side = 2 x `injection_half_width` + 1. `mixture` (n, n_sub): a mosaic's sub-group fractions
+        in place of the local ones (a one-hot row injects one sub-group's table alone; checks only)."""
         x = np.asarray(x, float)
         y = np.asarray(y, float)
         flux = np.broadcast_to(np.asarray(flux, float), x.shape)
@@ -1146,19 +1147,21 @@ class Tile:
             cy = np.rint(y[sl]).astype(np.int64) - h
             px = np.broadcast_to(cx[:, None, None] + offs[None, None, :], (cx.size, side, side))
             py = np.broadcast_to(cy[:, None, None] + offs[None, :, None], (cx.size, side, side))
-            yield cx, cy, self._psf.evaluate_xy(x[sl], y[sl], px, py).mean(axis=1) * flux[sl][:, None, None]
+            resp = (self._psf.evaluate_xy(x[sl], y[sl], px, py) if mixture is None
+                    else self._psf.evaluate_xy(x[sl], y[sl], px, py, np.asarray(mixture)[sl]))
+            yield cx, cy, resp.mean(axis=1) * flux[sl][:, None, None]
 
     def _restore(self, saved):
         for a0, b0, patch in reversed(saved):          # last added, first undone: patches may overlap
             self.image[b0:b0 + patch.shape[0], a0:a0 + patch.shape[1]] = patch
 
     @contextmanager
-    def injected(self, x, y, flux):
+    def injected(self, x, y, flux, mixture=None):
         """Inside the context the tile's image holds artificial point sources of total flux `flux` (mJy,
         scalar or per source) at the map pixels (x, y), each the band's point-spread template; on exit the
-        real image is back, pixel for pixel. Every measurement made inside (`measure`, ...)
+        real image is back, pixel for pixel. `mixture`: see `_template_patches`. Every measurement made inside (`measure`, ...)
         sees the sources, because they all read the tile's image."""
-        saved = self._add_sources(x, y, flux)
+        saved = self._add_sources(x, y, flux, mixture=mixture)
         try:
             yield self
         finally:
@@ -1531,6 +1534,17 @@ def _table_aperture(table, extent, steps, band, pixel_arcsec):
     return float(np.mean(enclosed)), float(np.mean(fraction))
 
 
+def _table_integral(table, extent, steps, band, pixel_arcsec):
+    """The flux fraction of a one-node table inside the aperture radius, integrated on the table's fine lattice (cells
+    of 1/steps output pixel, anti-aliased edge): the continuous counterpart of `_table_aperture`'s enclosed sum, which
+    samples the table at output pixel centres (a circle of 4 pixels radius on a 3.2 arcsec grid: +-0.2 %)."""
+    r_ap = APERTURES[band][0] / pixel_arcsec
+    o = np.arange(table.shape[0]) / steps - extent
+    xx, yy = np.meshgrid(o, o)
+    w = np.clip((r_ap - np.hypot(xx, yy)) * steps + 0.5, 0.0, 1.0)
+    return float((table * w).sum() / steps ** 2)
+
+
 def _jacobian(out_wcs, in_wcs, x, y):
     """d(input pixel)/d(output pixel) at output pixel (x, y), by central differences through the sky."""
     cols = []
@@ -1552,7 +1566,7 @@ def _mosaic_node(components, out_wcs, in_wcs, node, extent, steps, out_area, ban
     e_plain = total = None
     if centre:
         plain = _node_table(components, out_wcs, node, jac, extent, steps, out_area, False)
-        e_plain, _ = _table_aperture(plain, extent, steps, band, pix)
+        e_plain = _table_integral(plain, extent, steps, band, pix)       # continuous: the release EEF is a continuous integral
         total = float(broad.sum() / plain.sum())
     table = np.load(path, mmap_mode="r+")
     table[index // table.shape[1], index % table.shape[1], 0] = broad
@@ -1601,13 +1615,13 @@ def build_mosaic_psf(config, region, band, box=None):
     # stage 1: the mixture fractions over the mosaic (a regular sample of its pixels) -> mean beam and table size
     pdir = os.path.join(mdir, "_psf")
     os.makedirs(pdir, exist_ok=True)
-    meta = dict(shape=[ny, nx], n_sub=n_sub, keys=[list(k) for k in keys], maps=entries, out_header=m.wcs.to_header(relax=True).tostring(sep=""),
+    meta = dict(region=region, rep=[entries.index(next(e for e in entries if e["sub"] == k)) for k in range(n_sub)],
+                shape=[ny, nx], n_sub=n_sub, keys=[list(k) for k in keys], maps=entries, out_header=m.wcs.to_header(relax=True).tostring(sep=""),
                 extent=0.0, subpixel_steps=PSF_SUBPIXEL_STEPS, integration_order=8, fbar=[1.0 / n_sub] * n_sub,
-                enclosed_sub=[1.0] * n_sub, aperture_fraction_sub=[1.0] * n_sub, sub_beams=[float(b) for b in beams],
-                maps_root=str(maps_root(config)))
+                enclosed_sub=[1.0] * n_sub, aperture_fraction_sub=[1.0] * n_sub, sub_beams=[float(b) for b in beams])
     with open(os.path.join(pdir, "psf.json"), "w") as fh:
         json.dump(meta, fh)
-    probe = MosaicPSF(mdir, tables=False)
+    probe = MosaicPSF(mdir, maps_root(config), tables=False)
     gx, gy = np.meshgrid(np.linspace(0, nx - 1, 40), np.linspace(0, ny - 1, 40))
     f = probe.weights(gx.ravel(), gy.ravel())
     valid = np.isfinite(np.asarray(m.layers["image"])[np.rint(gy.ravel()).astype(int), np.rint(gx.ravel()).astype(int)])
@@ -1654,14 +1668,14 @@ def build_mosaic_psf(config, region, band, box=None):
                 aperture_fraction=float(fbar @ aperture[(slice(None), *ctr)]), broad_over_plain_total=totals, table_half=table_half)
     with open(os.path.join(pdir, "psf.json"), "w") as fh:
         json.dump(meta, fh)
-    return MosaicPSF(mdir)
+    return MosaicPSF(mdir, maps_root(config))
 
 
 def mosaic_psf(config, region, band, box=None):
     """The built mosaic's `MosaicPSF` without its tables (weights, fractions and beams only): `beam_at_sky` is the
     local beam at a sky position."""
     from sesnaimpute.sky.derived import pacs_mosaic
-    return MosaicPSF(pacs_mosaic.product_dir(config, region, band, box), tables=False)
+    return MosaicPSF(pacs_mosaic.product_dir(config, region, band, box), maps_root(config), tables=False)
 
 
 def mosaic_record(config, region, band, box=None, rebuild_psf=False):

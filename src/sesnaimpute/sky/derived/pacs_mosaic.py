@@ -287,12 +287,13 @@ def _intermediate(wcs, x, y):
     return np.radians(m[0, 0] * dx + m[0, 1] * dy), np.radians(m[1, 0] * dx + m[1, 1] * dy)
 
 
-def resample_block(root, rec, in_wcs, out_wcs, out_area, x0, x1, y0, y1, lattice=None):
+def resample_block(root, rec, in_wcs, out_wcs, out_area, x0, x1, y0, y1, lattice=None, layers=None):
     """Map `rec` resampled onto output pixels x0:x1, y0:y1 (zero-origin, half-open). Returns None when no output
     pixel falls inside the map, else a dict of arrays over the block: `valid` (bool: the four interpolation
     neighbours are valid), `image`, `error` (Jy per output pixel), `coverage`, `factor` (the pixel's own area over the reference
     pixel's), and with `lattice` = (lat, step)
-    `smooth` (smoothed error, Jy per output pixel; NaN falls back to nothing: such pixels are invalid)."""
+    `smooth` (smoothed error, Jy per output pixel; NaN falls back to nothing: such pixels are invalid). `layers`: the
+    map's (image, error, coverage) arrays in memory, in place of the file (checks on a synthetic map)."""
     ny, nx = rec.shape
     X, Y = np.meshgrid(np.arange(x0, x1, dtype=float), np.arange(y0, y1, dtype=float))
     ra, dec = out_wcs.all_pix2world(X.ravel(), Y.ravel(), 0)
@@ -303,7 +304,8 @@ def resample_block(root, rec, in_wcs, out_wcs, out_area, x0, x1, y0, y1, lattice
     ix0, ix1 = int(np.floor(px[inside].min())), int(np.floor(px[inside].max())) + 2
     iy0, iy1 = int(np.floor(py[inside].min())), int(np.floor(py[inside].max())) + 2
     ix1, iy1 = min(ix1, nx), min(iy1, ny)
-    img, err, cov = _read_layers(root, rec, slice(iy0, iy1), slice(ix0, ix1))
+    img, err, cov = (_read_layers(root, rec, slice(iy0, iy1), slice(ix0, ix1)) if layers is None
+                     else tuple(np.array(a[iy0:iy1, ix0:ix1], dtype=np.float64) for a in layers))
     good = _good(img, err, cov)
     wx, wy = np.where(inside, px, 0.0) - ix0, np.where(inside, py, 0.0) - iy0
     xi = np.clip(np.floor(wx).astype(np.int64), 0, max(img.shape[1] - 2, 0))

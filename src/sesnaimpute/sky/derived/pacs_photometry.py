@@ -620,7 +620,7 @@ def _read_hppsc(config, band):
     return out
 
 
-def hppsc_checks(config, region):
+def hppsc_checks(config, region, mosaic_box=None):
     """The external check of the region's PACS source list against HPPSC, per band (planner ruling, owner-approved
     2026-10-29; HPPSC enters no product): (1) how many of our maps HPPSC was built from (its observation table, the
     paper's Table 8); (2) the offsets of common sources, HPPSC to our nearest detection in the band within one beam,
@@ -630,7 +630,8 @@ def hppsc_checks(config, region):
     (4) of the HPPSC sources inside our footprint with flux at least our FLUX90 at their position (the completeness
     product read as a function of position, `catalog.completeness._PacsBand`), fitted width at most HPPSC_POINT_BEAMS
     beams and HPPSC S/N at least HPPSC_RECOVERY_SNR, the fraction our detection finds in the band within one beam, bar
-    HPPSC_RECOVERY_BAR within binomial error (the same over all of them, and over the point-like ones, as information). Common sources are matched within one beam,
+    HPPSC_RECOVERY_BAR within binomial error (the same over all of them, and over the point-like ones, as information).
+    `mosaic_box`: a development slice's mosaics (default the whole region's). Common sources are matched within one beam,
     not the association's 2 arcsec, so that the checks measure detection and not the two catalogues' astrometry
     (HPPSC's is 1.5-1.7 arcsec, and the 100 micron maps are separate observations; planner ruling, owner-approved
     2026-10-29). HPPSC states no reliability of its own: a false HPPSC source counts against (4). Nothing is written."""
@@ -666,7 +667,7 @@ def hppsc_checks(config, region):
                 continue
             tree = cKDTree(pu[det])
             hu = _unit_vectors(hra, hde)
-            psf = pacs_fit.mosaic_psf(config, region, b)
+            psf = pacs_fit.mosaic_psf(config, region, b, mosaic_box)
             beam = psf.beam_at_sky(hra, hde)                      # the band's local beam at each HPPSC source
             dist, j = tree.query(hu, distance_upper_bound=2.0 * np.sin(np.radians(psf.sub_beams.max() / 3600.0) / 2.0))
             near = np.isfinite(dist) & inside & (np.nan_to_num(dist, posinf=9.0) < 2.0 * np.sin(np.radians(beam / 3600.0) / 2.0))

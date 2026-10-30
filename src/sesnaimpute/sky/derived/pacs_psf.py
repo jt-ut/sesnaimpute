@@ -632,9 +632,11 @@ class MosaicPSF:
     (after the annulus sky), each measured on every spatial node's table and interpolated between the nodes as the
     tables are (a fixed pixel radius covers less sky off the tangent point); `beam_at` the mixture of the sub-groups'
     beam FWHM. A map counts in the mixture exactly where the mosaic uses it (`pacs_mosaic.valid_at`).
+    `maps_root`: the input-map directory, taken from the config by the caller at read time (`psf.json` stores no
+    absolute path, so a PSF built on another machine reads here).
     Build with `pacs_fit.build_mosaic_psf`."""
 
-    def __init__(self, directory, tables=True):
+    def __init__(self, directory, maps_root, tables=True):
         from astropy.wcs import WCS
         self.directory = directory
         pdir = os.path.join(directory, "_psf")
@@ -650,7 +652,7 @@ class MosaicPSF:
             self._maps.append(dict(wcs=WCS(fits.Header.fromstring(q["wcs_header"])).celestial, shape=tuple(q["shape"]),
                                    lat=np.load(os.path.join(directory, q["lattice"])), step=q["lattice_step"],
                                    scale=q["scale"], sub=q["sub"], bbox=q["bbox"], path=q["path"], hdus=q["hdus"]))
-        self.maps_root = m["maps_root"]
+        self.maps_root = str(maps_root)                       # the config's input-map root at read time
         self.fbar = np.array(m["fbar"])
         self.enclosed = np.array(m["enclosed_sub"])                          # (n_sub, nodes, nodes)
         self.aperture_fraction_sub = np.array(m["aperture_fraction_sub"])
@@ -660,10 +662,10 @@ class MosaicPSF:
             self.table = np.load(os.path.join(pdir, "table.npy"), mmap_mode="r")
 
     def __getstate__(self):
-        return {"directory": self.directory, "tables": hasattr(self, "table")}
+        return {"directory": self.directory, "maps_root": self.maps_root, "tables": hasattr(self, "table")}
 
     def __setstate__(self, state):
-        self.__init__(state["directory"], state["tables"])
+        self.__init__(state["directory"], state["maps_root"], state["tables"])
 
     def weights(self, source_x, source_y):
         """(n, n_sub) mixture fractions f at output pixel positions (zero-origin x, y): the weight 1/(smoothed
