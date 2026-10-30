@@ -53,6 +53,7 @@ Run: `PY sesnaimpute.sky.derived.pacs_completeness $CONFIG [--regions ...]`.
 
 import functools
 import os
+import pickle
 import time
 
 import h5py
@@ -2232,11 +2233,30 @@ def _report_detection(band, d, held):
         "%.4f" % (np.median(floor[d["sky_bin"] == j]) if (d["sky_bin"] == j).any() else np.nan) for j in range(SKY_BINS))))
 
 
-def acceptance(config, region, held_out):
-    """Prints C1-C3 for the region's product and the held-out half kept from the build that wrote it (`build`'s
-    return value for the region). C1: the stored curve and 0.9 flux against the held-out half. C2: the held-out
-    recovered injections' bias and scatter against the stored SCATTER (forced and detected-source fluxes); the
-    detection checks (`_report_detection`). Nothing is written."""
+def _held_path(config, region, band, box=None):
+    from sesnaimpute.sky.derived import pacs_stages
+    return os.path.join(pacs_stages.stage_dir(config, region, box), "held_%s.pkl" % band)
+
+
+def _read_held(config, region, box=None):
+    """`{band: held-out half}` from the stage store's `held_<band>.pkl` files (the bands that have one)."""
+    held = {}
+    for band in BANDS:
+        path = _held_path(config, region, band, box)
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                held[band] = pickle.load(f)
+    return held
+
+
+def acceptance(config, region, held_out=None, box=None):
+    """Prints C1-C3 for the region's product and the held-out half kept from the build that wrote it
+    (`held_out`: `{band: held-out injections}`, `build`'s return value for the region; None reads the stage
+    store's `held_<band>.pkl`, `box` naming the store of a development slice). C1: the stored curve and 0.9 flux
+    against the held-out half. C2: the held-out recovered injections' bias and scatter against the stored SCATTER
+    (forced and detected-source fluxes); the detection checks (`_report_detection`). Nothing is written."""
+    if held_out is None:
+        held_out = _read_held(config, region, box)
     path = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
     with h5py.File(path, "r") as f:
         for band in BANDS:
@@ -2248,6 +2268,21 @@ def acceptance(config, region, held_out):
             _acceptance_c1(band, d, held)
             _acceptance_c2(band, d, held)
             _report_detection(band, d, held)
+
+
+def finish_region(config, region, box=None, reference_product=None):
+    """What a region script ran after the completeness product was written: the completeness acceptance (the
+    held-out halves read from the stage store), `pacs_photometry.build` and `pacs_photometry.acceptance`
+    (`reference_product`: the earlier photometry product's path for C4); the held-out halves are removed once the
+    completeness acceptance has read them. Returns nothing; the products are the files."""
+    from sesnaimpute.sky.derived import pacs_photometry
+    acceptance(config, region, None, box)
+    for band in BANDS:
+        path = _held_path(config, region, band, box)
+        if os.path.exists(path):
+            os.remove(path)
+    pacs_photometry.build(config, regions=[region], box=box)
+    pacs_photometry.acceptance(config, region, reference_product=reference_product, box=box)
 
 
 if __name__ == "__main__":

@@ -531,7 +531,7 @@ def _c4_ratio(config, region, path):
     return float(np.median(flux[use] / f70[h][use])) if use.any() else float("nan"), int(use.sum()), int(((f70[h] >= C4_MIN_F70_MJY)).sum())
 
 
-def acceptance(config, region, reference_product=None):
+def acceptance(config, region, reference_product=None, box=None):
     """Prints C4 and C5 of PACS_COMPLETENESS_PLAN.md for the region's finished photometry product (and the
     completeness product it read). C4: the median of our 70 micron flux over HOPS's for HOPS targets of at
     least 200 mJy, next to the same number for `reference_product` (the earlier product's path), the plan's bar
@@ -580,7 +580,7 @@ def acceptance(config, region, reference_product=None):
         err = float(np.sqrt(np.sum(expected[k] * (1 - expected[k]))) / k.sum())
         print("C5 %s: HOPS 70 micron %g-%g mJy: %d targets, detected %.3f +- %.3f, curve predicts %.3f +- %.3f"
               % (region, lo, hi, int(k.sum()), obs, np.sqrt(max(obs * (1 - obs), 1e-9) / k.sum()), pred, err))
-    hppsc_checks(config, region)
+    hppsc_checks(config, region, box)
 
 
 #: HPPSC (Marton et al. 2017; `sky.download.hppsc`) band list per band, and its band name in the observation table
