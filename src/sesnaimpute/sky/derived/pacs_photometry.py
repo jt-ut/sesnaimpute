@@ -172,14 +172,15 @@ def _sep_arcsec(u, v):
     return np.degrees(2.0 * np.arcsin(np.clip(np.linalg.norm(u - v, axis=-1) / 2.0, 0.0, 1.0))) * 3600.0
 
 
-def cross_match(path, config, region, ra, dec):
+def cross_match(path, config, region, ra, dec, box=None):
     """The SESNA association of the region's PACS sources (`sources_pacs_region`, merged across bands; planner ruling,
     owner-approved 2026-10-29: Rob Gutermuth's band-merging recipe as eHOPS applies it) on the photometry product at
     `path` (rewritten in place). Each SESNA source takes the nearest PACS source within MATCH_RADIUS_ARCSEC. If that PACS
     source has this SESNA source alone within the radius: ORIGIN 1 in every band that detects it, FNU/SIGMA the PACS
     source's. If it has two or more SESNA sources within the radius (a blend): ORIGIN 3 in every detecting band, the
     bound that band's flux and SIGMA that detection's own error. A band that does not detect the PACS source keeps the forced measurement (ORIGIN 90 or 91),
-    unless a detection of that band lies within one beam of the SESNA source (the per-band confusion flag): then
+    unless a detection of that band lies within one beam of the SESNA source (the band's local beam there, from its mosaic's
+    input maps; the per-band confusion flag): then
     ORIGIN 3 (CONFUSED true) with the nearest such detection's flux as the bound. Returns per-band counts {m1, m2, confused}, the
     expected chance coincidences (the local SESNA density within
     CHANCE_DENSITY_ARCSEC x the radius's area, summed over the PACS sources) and the ORIGIN 1 pairs' offsets PACS - SESNA
@@ -230,16 +231,18 @@ def cross_match(path, config, region, ra, dec):
         # the per-band confusion flag (owner-approved 2026-10-29): a covered source with no detection of the band
         # associated, but the band's detection (at its own position) within one beam of it, cannot be called
         # undetected: ORIGIN 3, CONFUSED, the nearest such detection's flux the bound
-        from sesnaimpute.sky.derived.pacs_completeness import BEAM_ARCSEC
         for b in BANDS:
             c, d = cols[b], data[b]
             det = np.flatnonzero(c["det"])
             out[b]["confused"] = 0
             if det.size == 0:
                 continue
+            psf = pacs_fit.mosaic_psf(config, region, b, box)
             bu = _unit_vectors(c["ra"][det], c["dec"][det])
-            bd, bj = cKDTree(bu).query(su, distance_upper_bound=2.0 * np.sin(np.radians(BEAM_ARCSEC[b] / 3600.0) / 2.0))
-            for i in np.flatnonzero(np.isfinite(bd) & (d["ORIGIN"] == ORIGIN_UNDETECTED)):
+            bd, bj = cKDTree(bu).query(su, distance_upper_bound=2.0 * np.sin(np.radians(psf.sub_beams.max() / 3600.0) / 2.0))
+            within = np.isfinite(bd)
+            within[within] = bd[within] < 2.0 * np.sin(np.radians(psf.beam_at_sky(ra[within], dec[within]) / 3600.0) / 2.0)
+            for i in np.flatnonzero(within & (d["ORIGIN"] == ORIGIN_UNDETECTED)):
                 k = int(det[bj[i]])
                 d["FNU"][i], d["CELL_OFFSET"][i], d["SIGMA"][i] = c["fnu"][k], c["off"][k], c["sig"][k]
                 d["ORIGIN"][i], d["PACS_SOURCE"][i], d["N_BLEND"][i] = ORIGIN_BOUND, k, len(claim[k])
@@ -426,7 +429,7 @@ def _build_one_region(config, region, st, box=None):
                           config, config.n_jobs, stage=st, shifts=shifts, cell_row=cell_row, scatter=scatter,
                           flux_grid=flux_grid)
     if records:
-        matched, chance, offsets = cross_match(out_path, config, region, ra, dec)
+        matched, chance, offsets = cross_match(out_path, config, region, ra, dec, box)
         with h5py.File(out_path, "r") as f:
             for b in BANDS:
                 o = f["ORIGIN_" + b][:]
@@ -626,7 +629,6 @@ def hppsc_checks(config, region):
     (HPPSC's is 1.5-1.7 arcsec, and the 100 micron maps are separate observations; planner ruling, owner-approved
     2026-10-29). HPPSC states no reliability of its own: a false HPPSC source counts against (4). Nothing is written."""
     from sesnaimpute.catalog.completeness import _PacsBand
-    from sesnaimpute.sky.derived.pacs_completeness import BEAM_ARCSEC
     comp = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
     src = product_path(config, "sky/derived", "pacs", "sources", "region", region=region)
     with h5py.File(src, "r") as f:
@@ -658,17 +660,19 @@ def hppsc_checks(config, region):
                 continue
             tree = cKDTree(pu[det])
             hu = _unit_vectors(hra, hde)
-            dist, j = tree.query(hu, distance_upper_bound=2.0 * np.sin(np.radians(BEAM_ARCSEC[b] / 3600.0) / 2.0))
-            near = np.isfinite(dist) & inside
+            psf = pacs_fit.mosaic_psf(config, region, b)
+            beam = psf.beam_at_sky(hra, hde)                      # the band's local beam at each HPPSC source
+            dist, j = tree.query(hu, distance_upper_bound=2.0 * np.sin(np.radians(psf.sub_beams.max() / 3600.0) / 2.0))
+            near = np.isfinite(dist) & inside & (np.nan_to_num(dist, posinf=9.0) < 2.0 * np.sin(np.radians(beam / 3600.0) / 2.0))
             k = det[np.minimum(j, det.size - 1)]
             sep = np.where(near, np.degrees(2.0 * np.arcsin(np.clip(np.nan_to_num(dist, posinf=0.0) / 2.0, 0, 1))) * 3600.0, np.nan)
             cosd = np.cos(np.radians(hde))
             east = (pra[k] - hra) * cosd * 3600.0
             north = (pde[k] - hde) * 3600.0
             if near.any():
-                print("HPPSC %s %s: offsets ours - HPPSC of %d common sources (within one beam, %.1f arcsec): separation "
+                print("HPPSC %s %s: offsets ours - HPPSC of %d common sources (within one local beam, median %.1f arcsec): separation "
                       "median %.2f, 68th %.2f, 90th %.2f arcsec; median east %+.2f north %+.2f; within %.1f arcsec %.3f"
-                      % (region, b, int(near.sum()), BEAM_ARCSEC[b], np.median(sep[near]), np.percentile(sep[near], 68),
+                      % (region, b, int(near.sum()), np.median(beam[near]), np.median(sep[near]), np.percentile(sep[near], 68),
                          np.percentile(sep[near], 90), np.median(east[near]), np.median(north[near]), MATCH_RADIUS_ARCSEC,
                          float(np.mean(sep[near] <= MATCH_RADIUS_ARCSEC))))
             common = near                   # within one beam (planner ruling, owner-approved 2026-10-29)
@@ -683,7 +687,7 @@ def hppsc_checks(config, region):
             else:
                 print("HPPSC %s %s: no common sources with HPPSC S/N >= %g" % (region, b, HPPSC_FLUX_SNR))
             above = inside & np.isfinite(flux90) & (hflux >= flux90)
-            point = h["fwhm"][box] <= HPPSC_POINT_BEAMS * BEAM_ARCSEC[b]
+            point = h["fwhm"][box] <= HPPSC_POINT_BEAMS * beam
             for label, pool, ruled in (("all", above, False), ("point-like", above & point, False),
                                        ("point-like with HPPSC S/N >= %g" % HPPSC_RECOVERY_SNR,
                                         above & point & (hsnr >= HPPSC_RECOVERY_SNR), True)):

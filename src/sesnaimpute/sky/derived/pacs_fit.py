@@ -112,8 +112,9 @@ def registration_pairs(tile, ra_deg, dec_deg):
     def plane(r, d):
         return np.c_[((r - ra0 + 180.0) % 360.0 - 180.0) * np.cos(np.radians(de0)) * 3600.0, (d - de0) * 3600.0]
     peaks, sesna = plane(pra, pde), plane(ra_deg, dec_deg)
-    d1, i1 = cKDTree(sesna).query(peaks, distance_upper_bound=tile.beam_arcsec)
+    d1, i1 = cKDTree(sesna).query(peaks, distance_upper_bound=tile.beam_px_max * tile.pixel_arcsec)
     ok = np.isfinite(d1)
+    ok[ok] = d1[ok] < tile.beam_at(nb.x[ok], nb.y[ok])          # within the peak's own (local) beam
     if not ok.any():
         return np.zeros((0, 2))
     _, back = cKDTree(peaks).query(sesna[i1[ok]])
@@ -214,20 +215,38 @@ def _box_templates(table, extent, steps, map_nx, map_ny, sx, sy, x0, y0, side, o
 
 
 @numba.njit(cache=True)
-def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, half, min_beam, r_in, r_out):
+def _mix_templates(subs, fw, extent, steps, map_nx, map_ny, sx, sy, x0, y0, side, out, row, tmp):
+    """`_box_templates` of the mixture sum_k fw[k] x subs[k] (the response tables of a mosaic's sub-groups, or the one
+    table of a map with fw = [1]); `tmp` is scratch of the same shape as the rows written."""
+    nk = subs[0].shape[2]
+    for m in range(nk):
+        for p in range(side * side):
+            out[row + m, p] = 0.0
+    for k in range(len(subs)):
+        if fw[k] > 0:
+            _box_templates(subs[k], extent, steps, map_nx, map_ny, sx, sy, x0, y0, side, tmp, 0)
+            for m in range(nk):
+                for p in range(side * side):
+                    out[row + m, p] += fw[k] * tmp[m, p]
+
+
+@numba.njit(cache=True)
+def _fit_core(img, err, subs, fw, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, half, min_beam, r_in, r_out):
     """Weighted linear fits, one per row. Row i: tn[i] target sources at (tx, ty), un[i]
     nuisance sources at (ux, uy), box centred on pixel (cx[i], cy[i]) of half-width `half`.
     The background is the HOPS/eHOPS convention (owner ruling 2026-10-27): the clipped (IDL mmm) sky of
     the valid pixels in the annulus r_in..r_out (pixels) around the first target, subtracted from the
     data; every PSF column has its own mean over the same annulus subtracted, so a point source returns
     its full flux (the share of its wing the annulus removes is in the model); no free constant.
+    The point-spread table is the mixture of `subs` with the row's fractions fw[i] (the local mixture of a mosaic).
     Returns per-member flux, gain, covariance and a validity flag."""
     n, mmax = tx.shape
     side = 2 * half + 1
     npix = side * side
     map_ny, map_nx = img.shape
     kmax = ux.shape[1]
-    nk = table.shape[2]                  # scan columns per source: 1 (one-direction map) or 2
+    nk = subs[0].shape[2]                # scan columns per source: 1 (one-direction map) or 2
+    tmp = np.empty((nk, side * side))
     cmax = nk * (mmax + kmax)
     abuf = np.empty(npix)
     flux = np.full((n, mmax), np.nan)
@@ -250,10 +269,10 @@ def _fit_core(img, err, table, extent, steps, tx, ty, tn, ux, uy, un, cx, cy, ha
         x0 = cx[i] - half
         y0 = cy[i] - half
         for m in range(mt):
-            _box_templates(table, extent, steps, map_nx, map_ny, tx[i, m], ty[i, m], x0, y0, side, X, nk * m)
+            _mix_templates(subs, fw[i], extent, steps, map_nx, map_ny, tx[i, m], ty[i, m], x0, y0, side, X, nk * m, tmp)
         for k in range(kn):
-            _box_templates(table, extent, steps, map_nx, map_ny, ux[i, k], uy[i, k], x0, y0, side, X,
-                           nk * (mt + k))
+            _mix_templates(subs, fw[i], extent, steps, map_nx, map_ny, ux[i, k], uy[i, k], x0, y0, side, X,
+                           nk * (mt + k), tmp)
         for j in range(side):
             yy = y0 + j
             for ii in range(side):
@@ -685,6 +704,28 @@ class Tile:
         if self.neighbours.x.size:
             self._tree = cKDTree(np.c_[self.neighbours.x, self.neighbours.y])
 
+    def beam_at(self, x, y):
+        """The beam FWHM (arcsec) at map pixel positions: a mosaic's local mixture of its input maps' beams
+        (`MosaicPSF.beam_at`), a map's one beam."""
+        x = np.asarray(x, float)
+        if isinstance(self._psf, MosaicPSF):
+            return self._psf.beam_at(x.ravel(), np.asarray(y, float).ravel()).reshape(x.shape)
+        return np.full(x.shape, self.beam_arcsec)
+
+    def beam_px_at(self, x, y):
+        """`beam_at` in pixels."""
+        return self.beam_at(x, y) / self.pixel_arcsec
+
+    @property
+    def beam_px_max(self):
+        """The widest beam (pixels) the tile's mixture holds."""
+        return (float(self._psf.sub_beams.max()) if isinstance(self._psf, MosaicPSF) else self.beam_arcsec) / self.pixel_arcsec
+
+    @property
+    def beam_px_min(self):
+        """The narrowest beam (pixels) the tile's mixture holds."""
+        return (float(self._psf.sub_beams.min()) if isinstance(self._psf, MosaicPSF) else self.beam_arcsec) / self.pixel_arcsec
+
     @contextmanager
     def writable(self):
         """Inside the context the tile's image is the prepared file memory-mapped copy-on-write, so that `injected`
@@ -762,7 +803,11 @@ class Tile:
 
     def _call(self, tx, ty, tn, ux, uy, un, cx, cy, half):
         psf = self._psf
-        return _fit_core(self.image, self.error, psf.table, psf.extent, psf.subpixel_steps,
+        if isinstance(psf, MosaicPSF):               # the local mixture of the sub-groups' tables at each target
+            subs, fw = tuple(psf.subs), psf.weights(tx[:, 0], ty[:, 0])
+        else:
+            subs, fw = (psf.table,), np.ones((tx.shape[0], 1))
+        return _fit_core(self.image, self.error, subs, fw, psf.extent, psf.subpixel_steps,
                          tx, ty, tn, ux, uy, un, cx, cy, half, MIN_BEAM_FRACTION,
                          self.ann_in_px, self.ann_out_px)
 
@@ -771,7 +816,7 @@ class Tile:
         """Blind, deterministic: local maxima (window one beam) whose single-PSF fit at the
         peak, position refined by a 3x3 parabola, reaches S/N >= NEIGHBOUR_SNR against the
         propagated pixel noise."""
-        r = max(1, int(round(self.beam_px)))
+        r = max(1, int(round(self.beam_px_min)))         # a mosaic: the narrowest beam, wider ones thinned below
         ny, nx = self.shape
         cols = {k: [] for k in ("py", "px", "v0", "left", "right", "down", "up")}
         # strip by strip, each with r + 1 rows of margin (the filter's reach and the 3 x 3 below): the same peaks
@@ -803,6 +848,17 @@ class Tile:
         py, px, v0, left, right, down, up = (np.concatenate(cols[k]) for k in ("py", "px", "v0", "left", "right", "down", "up"))
         if px.size == 0:
             return Neighbours(*(np.empty(0) for _ in range(4)))
+        if isinstance(self._psf, MosaicPSF):
+            # a peak must be the maximum within ITS beam: where the local beam is wider than the filter's window, a
+            # brighter peak within that window (Chebyshev, as the filter) removes it
+            wide = np.flatnonzero(np.round(self.beam_px_at(px, py)) > r)
+            if wide.size:
+                radius = np.round(self.beam_px_at(px[wide], py[wide]))
+                near = cKDTree(np.c_[px, py]).query_ball_point(np.c_[px[wide], py[wide]], radius, p=np.inf)
+                drop = np.array([bool(len(l) > 1 and v0[l].max() > v0[i]) for i, l in zip(wide, near)])
+                keep = np.ones(px.size, bool)
+                keep[wide[drop]] = False
+                py, px, v0, left, right, down, up = (a[keep] for a in (py, px, v0, left, right, down, up))
         # parabolic sub-pixel refinement from the 3x3 around each peak
         with np.errstate(all="ignore"):
             dx = 0.5 * (right - left) / (2 * v0 - left - right)
@@ -832,9 +888,10 @@ class Tile:
         have = np.isfinite(dist)
         nx_, ny_ = self.neighbours.x, self.neighbours.y
         safe = np.where(have, idx, 0)
-        near = have & (dist < self.beam_px)
+        beam = self.beam_px_at(x, y)[:, None]                  # the target's own (local) beam
+        near = have & (dist < beam)
         for ex, ey in own_exclude:
-            near |= have & (np.hypot(nx_[safe] - ex[:, None], ny_[safe] - ey[:, None]) < self.beam_px)
+            near |= have & (np.hypot(nx_[safe] - ex[:, None], ny_[safe] - ey[:, None]) < beam)
         use = have & ~near
         order = np.argsort(~use, axis=1, kind="stable")
         use = np.take_along_axis(use, order, axis=1)
@@ -909,12 +966,13 @@ class Tile:
             sl = slice(lo, lo + chunk)
             xs, ys = x[sl], y[sl]
             f, s_, d_, a_, c_ = _aperture_core(image, error, xs, ys - row0, r_ap, r_in, r_out, 5)
-            eef, fraction = self._corrections_at(xs, ys)
+            mix = self._psf.weights(xs, ys) if isinstance(self._psf, MosaicPSF) else None
+            eef, fraction = self._corrections_at(xs, ys, mix)
             amp = np.where(c_, f / fraction, 0.0)
             if not c_.any():
                 cov[sl] = c_
                 continue
-            model = self._outer_light(xs, ys, rb)
+            model = self._outer_light(xs, ys, rb, mix)
             for _ in range(2):
                 f, s_, d_, a_, c_ = _aperture_core_wing(image, error, xs, ys - row0, r_ap, r_in, r_out, 5,
                                                         model, np.where(c_ & np.isfinite(amp), amp, 0.0))
@@ -923,44 +981,77 @@ class Tile:
             sd_eef[sl] = eef
         return ApertureFit(flux, sky, sd * np.sqrt(area) / sd_eef, cov)
 
-    def _corrections_at(self, xs, ys):
+    def _corrections_at(self, xs, ys, mix=None):
         """(encircled-energy fraction, aperture fraction) that divide the aperture sum at these map positions:
-        the map's two constants, or for a mosaic the local mixture of its sub-groups' (`MosaicPSF`)."""
+        the map's two constants, or for a mosaic the local mixture of its sub-groups' (`MosaicPSF`; `mix`: the
+        mixture fractions there)."""
         if isinstance(self._psf, MosaicPSF):
-            return self._psf.enclosed_at(xs, ys), self._psf.aperture_fraction_at(xs, ys)
+            return self._psf.enclosed_at(xs, ys, mix), self._psf.aperture_fraction_at(xs, ys, mix)
         return self.enclosed_fraction, self.aperture_fraction
 
     #: sub-pixel steps per pixel of the cached outer-light patterns
     OUTER_LIGHT_STEPS = 16
 
-    def _outer_light(self, x, y, rb):
-        """The unit-flux point-spread response on the (2 rb + 1)^2 pixel box around the pixel nearest each (x, y)
-        (the box `_aperture_core_wing` reads), looked up from patterns computed once per map: on a
-        OUTER_LIGHT_STEPS x OUTER_LIGHT_STEPS lattice of sub-pixel positions, in each third x third of the map
-        (the table's own spatial nodes). The lattice step (1/16 pixel) moves the pattern in the annulus by far
-        less than the noise; it enters only the sky estimate."""
+    #: patterns of a mosaic's outer-light cache kept at once (one per sub-group and third x third of the map)
+    OUTER_LIGHT_KEPT = 64
+
+    def _outer_pattern(self, k, node, rb):
+        """The unit-flux response on the (2 rb + 1)^2 box of the sub-pixel lattice (b, a) of third x third `node`, of
+        sub-group `k` alone (a map: the one table), kept in a least-recently-used cache."""
+        from collections import OrderedDict
         steps = self.OUTER_LIGHT_STEPS
         ny, nx = self.shape
         if getattr(self, "_outer_cache", None) is None or self._outer_cache[0] != rb:
-            offs = np.arange(-rb, rb + 1, dtype=float)
-            u = (np.arange(steps) + 0.5) / steps - 0.5
-            cache = np.empty((9, steps, steps, offs.size, offs.size))
-            for node in range(9):
-                cy0 = float(np.floor((node // 3 + 0.5) / 3 * ny))
-                cx0 = float(np.floor((node % 3 + 0.5) / 3 * nx))
-                sx = np.repeat(cx0 + u[None, :], steps, axis=0).ravel()      # [b, a] -> x offset u[a]
-                sy = np.repeat(cy0 + u[:, None], steps, axis=1).ravel()      # [b, a] -> y offset u[b]
-                px = np.broadcast_to(cx0 + offs[None, None, :], (sx.size, offs.size, offs.size))
-                py = np.broadcast_to(cy0 + offs[None, :, None], (sx.size, offs.size, offs.size))
-                cache[node] = self._psf.evaluate_xy(sx, sy, px, py).mean(axis=1).reshape(steps, steps, offs.size, offs.size)
-            self._outer_cache = (rb, cache)
+            self._outer_cache = (rb, OrderedDict())
         cache = self._outer_cache[1]
+        if (k, node) in cache:
+            cache.move_to_end((k, node))
+            return cache[(k, node)]
+        offs = np.arange(-rb, rb + 1, dtype=float)
+        u = (np.arange(steps) + 0.5) / steps - 0.5
+        cy0 = float(np.floor((node // 3 + 0.5) / 3 * ny))
+        cx0 = float(np.floor((node % 3 + 0.5) / 3 * nx))
+        sx = np.repeat(cx0 + u[None, :], steps, axis=0).ravel()      # [b, a] -> x offset u[a]
+        sy = np.repeat(cy0 + u[:, None], steps, axis=1).ravel()      # [b, a] -> y offset u[b]
+        px = np.broadcast_to(cx0 + offs[None, None, :], (sx.size, offs.size, offs.size))
+        py = np.broadcast_to(cy0 + offs[None, :, None], (sx.size, offs.size, offs.size))
+        if isinstance(self._psf, MosaicPSF):
+            one = np.zeros((sx.size, self._psf.n_sub))
+            one[:, k] = 1.0
+            resp = self._psf.evaluate_xy(sx, sy, px, py, one).astype(np.float32)
+        else:
+            resp = self._psf.evaluate_xy(sx, sy, px, py)
+        cache[(k, node)] = resp.mean(axis=1).reshape(steps, steps, offs.size, offs.size)
+        if len(cache) > self.OUTER_LIGHT_KEPT:
+            cache.popitem(last=False)
+        return cache[(k, node)]
+
+    def _outer_light(self, x, y, rb, mix=None):
+        """The unit-flux point-spread response on the (2 rb + 1)^2 pixel box around the pixel nearest each (x, y)
+        (the box `_aperture_core_wing` reads), looked up from patterns computed once: on a OUTER_LIGHT_STEPS x
+        OUTER_LIGHT_STEPS lattice of sub-pixel positions, in each third x third of the map (the table's own spatial
+        nodes). The lattice step (1/16 pixel) moves the pattern in the annulus by far less than the noise; it enters
+        only the sky estimate. A mosaic holds a pattern per sub-group (at most OUTER_LIGHT_KEPT at once) and each
+        position takes the mixture of them with its own fractions `mix` (n, n_sub)."""
+        steps = self.OUTER_LIGHT_STEPS
+        ny, nx = self.shape
         cx = np.floor(x + 0.5)
         cy = np.floor(y + 0.5)
         a = np.clip(np.floor((x - cx + 0.5) * steps).astype(np.int64), 0, steps - 1)
         b = np.clip(np.floor((y - cy + 0.5) * steps).astype(np.int64), 0, steps - 1)
         node = 3 * np.clip((3 * y / ny).astype(np.int64), 0, 2) + np.clip((3 * x / nx).astype(np.int64), 0, 2)
-        return cache[node, b, a]
+        if mix is None:
+            out = np.empty((x.size, 2 * rb + 1, 2 * rb + 1))
+            for nd in np.unique(node):
+                sel = node == nd
+                out[sel] = self._outer_pattern(0, int(nd), rb)[b[sel], a[sel]]
+            return out
+        out = np.zeros((x.size, 2 * rb + 1, 2 * rb + 1))
+        for k in range(mix.shape[1]):
+            for nd in np.unique(node[mix[:, k] > 0]):
+                sel = np.flatnonzero((node == nd) & (mix[:, k] > 0))
+                out[sel] += mix[sel, k, None, None] * self._outer_pattern(k, int(nd), rb)[b[sel], a[sel]]
+        return out
 
     def fitted_fwhm(self, x, y):
         """Best-fit total FWHM (arcsec) of a source at each position (NaN where the fit is not
@@ -969,11 +1060,14 @@ class Tile:
         for detections only (photometry's EXTENDED flag is this > 1.5 x beam)."""
         x = np.atleast_1d(np.asarray(x, float))
         y = np.atleast_1d(np.asarray(y, float))
-        widths = np.array([0.0, 0.7, 1.0, 1.4, 2.0, 2.8, 4.0]) * self.beam_px / 4.0  # Gaussian sigma, pixels
+        beam_px = self.beam_px_at(x, y)                      # the position's own (local) beam
         half = self.half
         side = 2 * half + 1
         psf = self._psf
+        subs, fw = ((tuple(psf.subs), psf.weights(x, y)) if isinstance(psf, MosaicPSF)
+                    else ((psf.table,), np.ones((x.size, 1))))
         out = np.full(x.size, np.nan)
+        tmp = np.zeros((subs[0].shape[2], side * side))
         for i in range(x.size):
             cx, cy = int(round(x[i])), int(round(y[i]))
             y0, x0 = cy - half, cx - half
@@ -984,18 +1078,18 @@ class Tile:
             ok = np.isfinite(d) & np.isfinite(e)
             if ok.sum() < 0.8 * d.size:
                 continue
-            t = np.zeros((psf.table.shape[2], side * side))
-            _box_templates(psf.table, psf.extent, psf.subpixel_steps, self.shape[1], self.shape[0],
-                           x[i], y[i], x0, y0, side, t, 0)
+            t = np.zeros_like(tmp)
+            _mix_templates(subs, fw[i], psf.extent, psf.subpixel_steps, self.shape[1], self.shape[0],
+                           x[i], y[i], x0, y0, side, t, 0, tmp)
             best, best_chi = np.nan, np.inf
-            for s in widths:
+            for s in np.array([0.0, 0.7, 1.0, 1.4, 2.0, 2.8, 4.0]) * beam_px[i] / 4.0:   # Gaussian sigma, pixels
                 cols = [gaussian_filter(c.reshape(side, side), s).ravel() if s > 0 else c for c in t]
                 M = np.c_[(*cols, np.ones(side * side))][ok] / e[ok, None]
                 coef = np.linalg.lstsq(M, d[ok] / e[ok], rcond=None)[0]
                 chi = np.sum((M @ coef - d[ok] / e[ok]) ** 2)
                 if chi < best_chi:
                     best_chi, best = chi, s
-            out[i] = np.hypot(self.beam_arcsec, 2.3548 * best * self.pixel_arcsec)
+            out[i] = np.hypot(beam_px[i] * self.pixel_arcsec, 2.3548 * best * self.pixel_arcsec)
         return out
 
     def near_bright(self, x, y):
@@ -1004,8 +1098,8 @@ class Tile:
         if self._tree is None:
             return np.zeros(x.shape, dtype=bool)
         d, _ = self._tree.query(np.c_[x.ravel(), np.asarray(y, float).ravel()], k=1,
-                                distance_upper_bound=self.beam_px)
-        return (d < self.beam_px).reshape(x.shape)
+                                distance_upper_bound=self.beam_px_max)
+        return (d < self.beam_px_at(x, y).ravel()).reshape(x.shape)
 
     def pixel_sigma(self, x, y):
         """Error-layer value (mJy/pixel) at the nearest pixel, NaN off the data."""
@@ -1443,12 +1537,35 @@ def _jacobian(out_wcs, in_wcs, x, y):
     return np.array(cols).T
 
 
+def _mosaic_node(components, out_wcs, in_wcs, node, extent, steps, out_area, band, pix, path, index, centre):
+    """One (sub-group, spatial node) of `build_mosaic_psf`, a worker's unit: the node's response table written
+    (unscaled, float32) into node `index` of the sub-group's table file `path`, and its aperture sums. Returns
+    (enclosed, aperture fraction) of the broad table and, at the centre node, the plain table's enclosed sum (the
+    normalisation) and the broad-over-plain total."""
+    jac = _jacobian(out_wcs, in_wcs, node[0], node[1])
+    broad = _node_table(components, out_wcs, node, jac, extent, steps, out_area, True)
+    e_broad, a_broad = _table_aperture(broad, extent, steps, band, pix)
+    e_plain = total = None
+    if centre:
+        plain = _node_table(components, out_wcs, node, jac, extent, steps, out_area, False)
+        e_plain, _ = _table_aperture(plain, extent, steps, band, pix)
+        total = float(broad.sum() / plain.sum())
+    table = np.load(path, mmap_mode="r+")
+    table[index // table.shape[1], index % table.shape[1], 0] = broad
+    table.flush()
+    return e_broad, a_broad, e_plain, total
+
+
 def build_mosaic_psf(config, region, band, box=None):
     """Writes `<mosaic>/_psf/` for the built mosaic (`pacs_mosaic.build_mosaic`): psf.json, one response table
     per sub-group (`MosaicPSF`) and the weight-mean table `table.npy`. Sub-groups: the mosaic's PSF groups split
     by input pixel scale and axis orientation (the kernel depends on both). Tables are float32, 3 x 3 spatial
-    nodes (PSF_SPATIAL_NODES) over the mosaic, PSF_SUBPIXEL_STEPS per pixel, the half-width `Tile` uses."""
+    nodes (PSF_SPATIAL_NODES) over the mosaic, PSF_SUBPIXEL_STEPS per pixel, the half-width `Tile` uses. The
+    (sub-group, node) tables are built in parallel (config.n_jobs); the enclosed and aperture fractions are
+    measured on every node's table, the sub-groups' beams stored for `MosaicPSF.beam_at`."""
     import json
+    from joblib import Parallel, delayed
+    from numpy.lib.format import open_memmap
     from sesnaimpute.sky.derived import pacs_mosaic
     mdir = pacs_mosaic.product_dir(config, region, band, box)
     pacs_mosaic._assert_inside_scratch_derived(config, mdir)
@@ -1471,7 +1588,8 @@ def build_mosaic_psf(config, region, band, box=None):
         bbox = pacs_mosaic._bbox_in_output(rec, in_wcs, out_wcs, m.shape) or (0, 0, 0, 0)
         entries.append(dict(path=q["path"], wcs_header=rec.wcs_header, shape=list(rec.shape), lattice=q["lattice"],
                             lattice_step=q["lattice_step"], scale=pacs_mosaic.pixel_area_arcsec2(out_wcs) / pacs_mosaic.pixel_area_arcsec2(in_wcs),
-                            sub=keys.index(key), bbox=[int(v) for v in bbox]))
+                            sub=keys.index(key), bbox=[int(v) for v in bbox],
+                            hdus=[rec.image_hdu, rec.error_hdu, rec.coverage_hdu]))
     n_sub = len(keys)
     rep = [next(r for r, e in zip(m.meta["maps"], entries) if e["sub"] == k) for k in range(n_sub)]
     rep_rec = [recs[q["path"]] for q in rep]
@@ -1481,7 +1599,8 @@ def build_mosaic_psf(config, region, band, box=None):
     os.makedirs(pdir, exist_ok=True)
     meta = dict(shape=[ny, nx], n_sub=n_sub, keys=[list(k) for k in keys], maps=entries, out_header=m.wcs.to_header(relax=True).tostring(sep=""),
                 extent=0.0, subpixel_steps=PSF_SUBPIXEL_STEPS, integration_order=8, fbar=[1.0 / n_sub] * n_sub,
-                enclosed_sub=[1.0] * n_sub, aperture_fraction_sub=[1.0] * n_sub)
+                enclosed_sub=[1.0] * n_sub, aperture_fraction_sub=[1.0] * n_sub, sub_beams=[float(b) for b in beams],
+                maps_root=str(maps_root(config)))
     with open(os.path.join(pdir, "psf.json"), "w") as fh:
         json.dump(meta, fh)
     probe = MosaicPSF(mdir, tables=False)
@@ -1499,35 +1618,46 @@ def build_mosaic_psf(config, region, band, box=None):
     nodes = [(sx, sy) for sy in np.linspace(-.5, ny - .5, PSF_SPATIAL_NODES) for sx in np.linspace(-.5, nx - .5, PSF_SPATIAL_NODES)]
     n_nodes = PSF_SPATIAL_NODES
     mean_table = np.zeros((n_nodes, n_nodes, 1, count, count))
-    enclosed, aperture, totals = [], [], []
+    paths = [os.path.join(pdir, f"sub{k}.npy") for k in range(n_sub)]
+    comps = []
     for k in range(n_sub):
-        rec = rep_rec[k]
-        in_wcs = pacs_mosaic._celestial(rec)
-        components = published_components_for_map(config, rec)
-        table = np.empty((n_nodes, n_nodes, 1, count, count), dtype=np.float32)
-        for i, node in enumerate(nodes):
-            jac = _jacobian(out_wcs, in_wcs, node[0], node[1])
-            broad = _node_table(components, out_wcs, node, jac, extent, steps, out_area, True)
-            if i == (n_nodes ** 2) // 2:
-                plain = _node_table(components, out_wcs, node, jac, extent, steps, out_area, False)
-                e_plain, _ = _table_aperture(plain, extent, steps, band, pix)
-                scale = aperture_eef(config, rec) / e_plain               # Tile's normalisation of an ordinary table
-                e_broad, a_broad = _table_aperture(broad, extent, steps, band, pix)
-                totals.append((float(broad.sum() / plain.sum())))
-            table[i // n_nodes, i % n_nodes, 0] = broad
+        pacs_mosaic._assert_inside_scratch_derived(config, paths[k])
+        open_memmap(paths[k], mode="w+", dtype=np.float32, shape=(n_nodes, n_nodes, 1, count, count)).flush()
+        comps.append(published_components_for_map(config, rep_rec[k]))
+    in_wcs = [pacs_mosaic._celestial(r) for r in rep_rec]
+    centre = (n_nodes ** 2) // 2
+    done = Parallel(n_jobs=config.n_jobs)(
+        delayed(_mosaic_node)(comps[k], out_wcs, in_wcs[k], node, extent, steps, out_area, band, pix, paths[k], i, i == centre)
+        for k in range(n_sub) for i, node in enumerate(nodes))
+    enclosed = np.zeros((n_sub, n_nodes, n_nodes))
+    aperture = np.zeros((n_sub, n_nodes, n_nodes))
+    totals = []
+    for k in range(n_sub):
+        res = done[k * n_nodes ** 2:(k + 1) * n_nodes ** 2]
+        scale = aperture_eef(config, rep_rec[k]) / res[centre][2]            # Tile's normalisation of an ordinary table
+        totals.append(res[centre][3])
+        enclosed[k] = np.array([r[0] for r in res]).reshape(n_nodes, n_nodes) * scale
+        aperture[k] = np.array([r[1] for r in res]).reshape(n_nodes, n_nodes) * scale
+        table = np.load(paths[k], mmap_mode="r+")
         table *= np.float32(scale)
-        enclosed.append(e_broad * scale)
-        aperture.append(a_broad * scale)
-        table.flags.writeable = True
-        np.save(os.path.join(pdir, f"sub{k}.npy"), table)
+        table.flush()
         mean_table += fbar[k] * table
+        del table
     np.save(os.path.join(pdir, "table.npy"), mean_table.astype(np.float32))
-    meta.update(extent=extent, fbar=[float(v) for v in fbar], enclosed_sub=enclosed, aperture_fraction_sub=aperture,
-                beam_arcsec=beam, enclosed_fraction=float(fbar @ np.array(enclosed)),
-                aperture_fraction=float(fbar @ np.array(aperture)), broad_over_plain_total=totals, table_half=table_half)
+    ctr = (n_nodes // 2, n_nodes // 2)
+    meta.update(extent=extent, fbar=[float(v) for v in fbar], enclosed_sub=enclosed.tolist(), aperture_fraction_sub=aperture.tolist(),
+                beam_arcsec=beam, enclosed_fraction=float(fbar @ enclosed[(slice(None), *ctr)]),
+                aperture_fraction=float(fbar @ aperture[(slice(None), *ctr)]), broad_over_plain_total=totals, table_half=table_half)
     with open(os.path.join(pdir, "psf.json"), "w") as fh:
         json.dump(meta, fh)
     return MosaicPSF(mdir)
+
+
+def mosaic_psf(config, region, band, box=None):
+    """The built mosaic's `MosaicPSF` without its tables (weights, fractions and beams only): `beam_at_sky` is the
+    local beam at a sky position."""
+    from sesnaimpute.sky.derived import pacs_mosaic
+    return MosaicPSF(pacs_mosaic.product_dir(config, region, band, box), tables=False)
 
 
 def mosaic_record(config, region, band, box=None, rebuild_psf=False):

@@ -496,7 +496,7 @@ def filtered(tile, x, y, offset_cell, image=None, row0=0):
 
 def _detection_kernel(tile):
     """The detection kernel of the tile: the band's own point-spread template (`Tile._add_sources`'s, at the map
-    centre) on its footprint (where it exceeds ZERO_SUM_FOOTPRINT of its peak). Returns (h, kc, fc, s_full): the
+    centre; a mosaic's weight-mean table, `MosaicPSF.table`, not the local mixture at the centre pixel) on its footprint (where it exceeds ZERO_SUM_FOOTPRINT of its peak). Returns (h, kc, fc, s_full): the
     half-width, the template on the footprint and the footprint as correlated (flipped), and the zero-sum template's
     sum of squares over the footprint."""
     h = tile.injection_half_width()
@@ -505,7 +505,9 @@ def _detection_kernel(tile):
     offs = np.arange(side, dtype=float)
     px = np.broadcast_to((cx - h + offs)[None, None, :], (1, side, side))
     py = np.broadcast_to((cy - h + offs)[None, :, None], (1, side, side))
-    k = tile._psf.evaluate_xy(np.array([float(cx)]), np.array([float(cy)]), px, py).mean(axis=1)[0]
+    psf = tile._psf
+    evaluate = psf.evaluate_mean_xy if isinstance(psf, pacs_psf.MosaicPSF) else psf.evaluate_xy
+    k = evaluate(np.array([float(cx)]), np.array([float(cy)]), px, py).mean(axis=1)[0]
     foot = k > ZERO_SUM_FOOTPRINT * k.max()
     kf = np.where(foot, k, 0.0)
     s_full = float(((k[foot] - k[foot].mean()) ** 2).sum())
@@ -741,7 +743,7 @@ def _injected_delta(tile, x, y, flux, wpx, wpy):
 
 
 def window_peaks(tile, x, y, radius_px, m_offset_cell, m_sigma_cell, offset_cell, flux=None, image=None, row0=0):
-    """For each map position (x, y): the PACS source the blind detection finds within `radius_px` of it, on the
+    """For each map position (x, y): the PACS source the blind detection finds within `radius_px` (one, or one per position) of it, on the
     PSF-matched map (`matched_state`, plus each injection's own change when `flux` is given: the map then holds those
     injections) on the pixels within radius_px + 1.5 (enough for the 8-neighbour test): a local maximum reaching 5 x
     the matched map's own cell noise above its cell offset (`m_sigma_cell`, `m_offset_cell`), the nearest one, its
@@ -754,14 +756,15 @@ def window_peaks(tile, x, y, radius_px, m_offset_cell, m_sigma_cell, offset_cell
     if n == 0:
         return out
     ms = matched_state(tile)
-    h = int(np.ceil(radius_px)) + 2
+    rad = np.broadcast_to(np.asarray(radius_px, float), (n,))[:, None, None]       # one radius, or one per position
+    h = int(np.ceil(rad.max())) + 2
     off = np.arange(-h, h + 1)
     cx, cy = np.rint(x).astype(np.int64), np.rint(y).astype(np.int64)
     px = np.ascontiguousarray(np.broadcast_to(cx[:, None, None] + off[None, None, :], (n, off.size, off.size)))
     py = np.ascontiguousarray(np.broadcast_to(cy[:, None, None] + off[None, :, None], (n, off.size, off.size)))
     dist = np.hypot(px - x[:, None, None], py - y[:, None, None])
     ny, nx = tile.shape
-    use = (dist <= radius_px + 1.5) & (px >= 0) & (px < nx) & (py >= 0) & (py < ny)
+    use = (dist <= rad + 1.5) & (px >= 0) & (px < nx) & (py >= 0) & (py < ny)
     v = np.full(px.shape, np.nan)
     v[use] = ms["m"][py[use], px[use]]
     if flux is not None:
@@ -770,7 +773,7 @@ def window_peaks(tile, x, y, radius_px, m_offset_cell, m_sigma_cell, offset_cell
     good = cid >= 0
     v = np.where(good, v - m_offset_cell[np.maximum(cid, 0)], np.nan)
     thr = np.where(good, pacs_fit.DETECTION_SNR * m_sigma_cell[np.maximum(cid, 0)], np.nan)
-    pk = _local_peaks(v, thr) & (dist <= radius_px)
+    pk = _local_peaks(v, thr) & (dist <= rad)
     found, xc, yc, fnu, dd = out
     cand = np.where(pk, dist, np.inf).reshape(n, -1)
     best = np.argmin(cand, axis=1)
@@ -782,7 +785,7 @@ def window_peaks(tile, x, y, radius_px, m_offset_cell, m_sigma_cell, offset_cell
     if has.any():
         fnu[has] = filtered(tile, xc[has], yc[has], offset_cell, image=image, row0=row0)
         dd[has] = np.hypot(xc[has] - x[has], yc[has] - y[has])
-        found[has] = dd[has] <= radius_px
+        found[has] = dd[has] <= rad[has, 0, 0]
     return found, xc, yc, fnu, dd
 
 
@@ -851,8 +854,7 @@ class Injector:
         self.m_sigma[self.ids] = inp.get("m_sigma", np.full(n, np.nan))
         self.m_offset[self.ids] = inp.get("m_offset", np.full(n, np.nan))
         matched_state(tile)                 # the detection image of the un-injected map, before any injection
-        self.beam_px = tile.beam_px
-        self.beam_area_px = np.pi / (4 * np.log(2)) * tile.beam_px ** 2
+        self.beam_px = tile.beam_px              # the mosaic-wide mean; every radius uses `beam_px_at`
         self.separation_px = tile.injection_half_width() + APERTURES[tile.record.band][2] / tile.pixel_arcsec
         # the PACS sources of the un-injected map (the blind detection), and the matching radius
         self.pos_k_px = float(inp.get("pos_k_arcsec", np.nan)) / tile.pixel_arcsec
@@ -930,19 +932,25 @@ class Injector:
         """Injects one batch of sources of S/N `snr` at random positions of the cells of `rows`, measures each
         through the catalogue's own path, restores the map (`measure_positions`)."""
         x, y, d = self.positions(rng, rows)
-        return self.measure_positions(x, y, d, self.flux_at(x, y, snr), radius_px=self.recovery_radius_px(snr))
+        return self.measure_positions(x, y, d, self.flux_at(x, y, snr), radius_px=self.recovery_radius_px(snr, x, y))
 
-    def recovery_radius_px(self, snr):
-        """The recovery radius at injection S/N `snr`: MATCH_SIGMAS x the detection's measured position scatter there
-        (the scatter x S/N constant over S/N), between one pixel and half a beam."""
+    def beam_px_at(self, x, y):
+        """The local beam (pixels) at map pixel positions (`Tile.beam_px_at`)."""
+        return self.tile.beam_px_at(x, y)
+
+    def recovery_radius_px(self, snr, x, y):
+        """The recovery radius at injection S/N `snr` at each map position (x, y): MATCH_SIGMAS x the detection's
+        measured position scatter there (the scatter x S/N constant over S/N), between one pixel and half the local beam."""
+        half_beam = 0.5 * self.beam_px_at(x, y)
         if not np.isfinite(self.pos_k_px):
-            return 0.5 * self.beam_px
-        return float(np.clip(MATCH_SIGMAS * self.pos_k_px / max(snr, 1e-3), 1.0, 0.5 * self.beam_px))
+            return half_beam
+        return np.clip(MATCH_SIGMAS * self.pos_k_px / max(snr, 1e-3), 1.0, half_beam)
 
     def measure_positions(self, x, y, d, flux, radius_px=None):
         """Injects `flux` (mJy, scalar or one per position) at the map pixels (x, y), `d` the distance (pixels) of
         each to the nearest PACS source of the un-injected map, runs the blind detection around each
-        (`window_peaks` within `radius_px`, the recovery radius at the batch's S/N; half a beam if None), restores the
+        (`window_peaks` within `radius_px`, the recovery radius at the batch's S/N, a scalar or one per position; half the
+        local beam if None), restores the
         map. RECOVERED: a PACS source is found within the radius, and where a source of the un-injected map lies within it the injection is the
         brighter (an injection on an existing peak counts only as the brighter member). Also the forced aperture
         flux at the injected position (the photometric error, SCATTER). Returns dict(row, near (within one
@@ -956,11 +964,12 @@ class Injector:
                    det_dist=np.zeros(0, np.float32), n=0, seconds=dict(inject=0.0, aperture=0.0))
         if n == 0:
             return out
-        r = 0.5 * self.beam_px if radius_px is None else float(radius_px)
+        beam = self.beam_px_at(x, y)
+        r = 0.5 * beam if radius_px is None else np.broadcast_to(np.asarray(radius_px, float), x.shape)
         flux = np.broadcast_to(np.asarray(flux, float), x.shape)
         cid = tile.grid.cell_ids(x, y)
         offset = self.offset[cid]
-        near = d < BLEND_RADIUS_BEAMS * self.beam_px
+        near = d < BLEND_RADIUS_BEAMS * beam
         # an existing PACS source within the radius: the injection counts only if brighter than it
         brighter = np.ones(n, bool)
         if self.det_tree is not None:
@@ -980,7 +989,7 @@ class Injector:
         strip = pacs_fit.PREPARE_STRIP_ROWS
         ny = tile.shape[0]
         mg = (tile.injection_half_width() + int(np.ceil(APERTURES[tile.record.band][2] / tile.pixel_arcsec)) + 1
-              + int(np.ceil(r)) + 2)
+              + int(np.ceil(r.max())) + 2)
         band = np.floor(y / strip).astype(np.int64)
         for b in np.unique(band):
             k = np.flatnonzero(band == b)
@@ -994,7 +1003,7 @@ class Injector:
             t0 = time.time()
             m = tile.measure(x[k], y[k], image=buf, row0=a0)
             flux_out[k], covered[k] = m.flux, m.covered
-            f_, _xc, _yc, df_, dd_ = window_peaks(tile, x[k], y[k], r, self.m_offset, self.m_sigma, self.offset,
+            f_, _xc, _yc, df_, dd_ = window_peaks(tile, x[k], y[k], r[k], self.m_offset, self.m_sigma, self.offset,
                                                   flux=flux[k], image=buf, row0=a0)
             found[k], det_flux[k], det_dist[k] = f_, df_, dd_
             t_ap += time.time() - t0
@@ -1116,7 +1125,7 @@ def _real_check(injector, flux_mjy, half, rows=None):
     tile = injector.tile
     rng = np.random.default_rng([injector.seed_key, 99999, half])
     x, y, d = injector.positions(rng, np.arange(injector.ids.size) if rows is None else rows)
-    far = d >= BLEND_RADIUS_BEAMS * injector.beam_px
+    far = d >= BLEND_RADIUS_BEAMS * injector.beam_px_at(x, y)
     x, y = x[far][:REAL_CHECK_POSITIONS], y[far][:REAL_CHECK_POSITIONS]
     before = tile.measure(x, y)
     with tile.writable(), tile.injected(x, y, flux_mjy):
@@ -1441,9 +1450,9 @@ def _calibrate(piece, config, records):
     rows = np.arange(inj.ids.size)
     for k, snr in enumerate(CALIBRATION_SNR):
         x, y, d = inj.positions(np.random.default_rng([t + 1, 7777, k]), rows)
-        far = d >= inj.beam_px
+        far = d >= inj.beam_px_at(x, y)
         x, y, d = x[far], y[far], d[far]
-        r = inj.measure_positions(x, y, d, inj.flux_at(x, y, snr), radius_px=inj.beam_px)
+        r = inj.measure_positions(x, y, d, inj.flux_at(x, y, snr), radius_px=inj.beam_px_at(x, y))
         good = np.isfinite(r["det_dist"])
         out.append(r["det_dist"][good] * tile.pixel_arcsec * snr)
     return t, (np.concatenate(out) if out else np.zeros(0))
@@ -1768,7 +1777,6 @@ def write_product(path, region, mag, bands):
 MERGE_SIGMAS = 3.0
 MERGE_MIN_SNR = 20.0
 MERGE_MIN_PAIRS = 5
-BEAM_ARCSEC = {"P70": 5.6, "P100": 6.8, "P160": 11.4}
 
 
 def _unit(ra_deg, dec_deg):
@@ -1786,14 +1794,16 @@ def _sep_arcsec(u, v):
 
 def _pair_scatter(pa, pb, beam_red):
     """The per-source position scatter (2-D rms, robust, arcsec) between two bands' bright detections (S/N >=
-    MERGE_MIN_SNR) paired within half the redder beam, and the number of pairs."""
+    MERGE_MIN_SNR) paired within half the redder band's local beam at the first band's detection (`beam_red`: its
+    mosaic's `MosaicPSF.beam_at_sky`), and the number of pairs."""
     a = pa["snr"] >= MERGE_MIN_SNR
     b = pb["snr"] >= MERGE_MIN_SNR
     if not a.any() or not b.any():
         return np.nan, 0
     ua, ub = _unit(pa["ra"][a], pa["dec"][a]), _unit(pb["ra"][b], pb["dec"][b])
-    d, j = cKDTree(ub).query(ua, distance_upper_bound=_chord(beam_red / 2.0))
+    d, j = cKDTree(ub).query(ua, distance_upper_bound=_chord(beam_red.sub_beams.max() / 2.0))
     ok = np.isfinite(d)
+    ok[ok] = _sep_arcsec(ua[ok], ub[j[ok]]) <= beam_red.beam_at_sky(pa["ra"][a][ok], pa["dec"][a][ok]) / 2.0
     if not ok.any():
         return np.nan, 0
     sep = _sep_arcsec(ua[ok], ub[j[ok]])
@@ -1808,7 +1818,7 @@ def _measure_at(piece, config, records):
     tile = pacs_fit.cached_tile(config, records[band][t])
     x, y = tile.xy(*pacs_fit.to_map_frame(ra, dec, shift))
     fnu = filtered(tile, x, y, offset_cell)
-    ext = tile.fitted_fwhm(x, y) > 1.5 * tile.beam_arcsec
+    ext = tile.fitted_fwhm(x, y) > 1.5 * tile.beam_at(x, y)
     return band, t, fnu, tile.grid.cell_ids(x, y), ext
 
 
@@ -1820,12 +1830,16 @@ def merge_sources(config, bands, n_jobs, stage, flux_grid):
     matching radius is the position band's map radius, a 160-only source's with the 70-160 merge radius in
     quadrature; CHANCE the SESNA density within LOCAL_DENSITY_ARCSEC times the radius's area. Returns the table."""
     pk = {b: bands[b]["peaks"] for b in BANDS}
-    radius = {}
+    recs = {b: bands[b].get("records", []) for b in BANDS}
+    psf = {b: pacs_psf.MosaicPSF(recs[b][0].mosaic_dir, tables=False) for b in BANDS if recs[b]}
+    radius = {}                         # arcsec; None: half the redder band's local beam at the detection
     for a, b in (("P70", "P100"), ("P70", "P160"), ("P100", "P160")):
-        rms, n = _pair_scatter(pk[a], pk[b], BEAM_ARCSEC[b])
-        radius[(a, b)] = MERGE_SIGMAS * rms if n >= MERGE_MIN_PAIRS else BEAM_ARCSEC[b] / 2.0
-        print("  merge radius %s-%s: %.2f arcsec (%s)" % (a, b, radius[(a, b)], "3 x rms %.2f from %d pairs" % (rms, n)
-              if n >= MERGE_MIN_PAIRS else "half the redder beam: %d pairs" % n), flush=True)
+        if a not in psf or b not in psf:
+            continue
+        rms, n = _pair_scatter(pk[a], pk[b], psf[b])
+        radius[(a, b)] = MERGE_SIGMAS * rms if n >= MERGE_MIN_PAIRS else None
+        print("  merge radius %s-%s: %s" % (a, b, "%.2f arcsec (3 x rms %.2f from %d pairs)" % (radius[(a, b)], rms, n)
+              if n >= MERGE_MIN_PAIRS else "half the redder band's local beam (%d pairs)" % n), flush=True)
     pos_band, members, pos_u = [], [], []
     for bi, b in enumerate(BANDS):
         p = pk[b]
@@ -1834,15 +1848,17 @@ def merge_sources(config, bands, n_jobs, stage, flux_grid):
         u = _unit(p["ra"], p["dec"])
         order = np.argsort(-p["snr"])
         tree = cKDTree(np.array(pos_u)) if pos_u else None
+        half_beam = 0.5 * psf[b].beam_at_sky(p["ra"], p["dec"])        # the default radius, at each detection of the band
         for i in order:
             best = None
             if tree is not None:
-                rmax = max(radius.get((BANDS[a], b), 0.0) for a in range(bi)) if bi else 0.0
+                reach = {a: (half_beam[i] if radius[(a, b)] is None else radius[(a, b)]) for a in BANDS[:bi] if (a, b) in radius}
+                rmax = max(reach.values(), default=0.0)
                 for k in tree.query_ball_point(u[i], _chord(rmax)):
-                    if b in members[k] or radius.get((BANDS[pos_band[k]], b)) is None:
+                    if b in members[k] or (BANDS[pos_band[k]], b) not in radius:
                         continue
                     sep = _sep_arcsec(u[i], pos_u[k])
-                    if sep <= radius[(BANDS[pos_band[k]], b)] and (best is None or sep < best[1]):
+                    if sep <= reach[BANDS[pos_band[k]]] and (best is None or sep < best[1]):
                         best = (k, sep)
             if best is not None:
                 members[best[0]][b] = int(i)
@@ -1857,7 +1873,6 @@ def merge_sources(config, bands, n_jobs, stage, flux_grid):
     pde = np.array([pk[BANDS[pb]]["dec"][src[BANDS[pb]][k]] for k, pb in enumerate(pos_band)]) if n else np.zeros(0)
     # each detecting band's flux at that band's own detection position (as HPPSC measures it; owner-approved
     # 2026-10-29), on that band's detecting map
-    recs = {b: bands[b].get("records", []) for b in BANDS}
     pieces, want = [], {}
     for b in BANDS:
         det = np.flatnonzero(src[b] >= 0)
@@ -1918,7 +1933,7 @@ def write_sources(path, region, bands, merged):
         w = lambda name, data: build_module.write_dataset(f, name, data, *REGISTRY[(stem, name)])
         ds = w("RA_DEG", np.asarray(merged["ra"], np.float64))
         for (a, b), r in merged["radius"].items():
-            ds.attrs["MERGE_RADIUS_%s_%s_ARCSEC" % (a, b)] = float(r)
+            ds.attrs["MERGE_RADIUS_%s_%s_ARCSEC" % (a, b)] = np.nan if r is None else float(r)
         ds.attrs["N_160_ONLY"] = int((merged["position_band"] == BANDS.index("P160")).sum())
         w("DEC_DEG", np.asarray(merged["dec"], np.float64))
         w("POSITION_BAND", merged["position_band"].astype(np.int8))

@@ -192,6 +192,23 @@ def _good(img, err, cov):
     return np.isfinite(img) & np.isfinite(err) & (err > 0) & (cov > 0)
 
 
+def valid_at(layers, px, py):
+    """Whether the mosaic uses the input map at input pixel coordinates (px, py) (inside the map): the four
+    interpolation neighbours `resample_block` weights are good (`_good`; a neighbour of weight zero is not asked).
+    `layers`: the map's (image, error, coverage) arrays (memory-mapped; only the neighbours are read)."""
+    img, err, cov = layers
+    ny, nx = img.shape
+    xi = np.clip(np.floor(px).astype(np.int64), 0, max(nx - 2, 0))
+    yi = np.clip(np.floor(py).astype(np.int64), 0, max(ny - 2, 0))
+    fx, fy = np.clip(px - xi, 0, 1), np.clip(py - yi, 0, 1)
+    valid = np.ones(px.shape, bool)
+    for dy, by in ((0, 1 - fy), (1, fy)):
+        for dx, bx in ((0, 1 - fx), (1, fx)):
+            jj, ii = np.minimum(yi + dy, ny - 1), np.minimum(xi + dx, nx - 1)
+            valid &= _good(img[jj, ii], err[jj, ii], cov[jj, ii]) | (bx * by == 0)
+    return valid
+
+
 def _smooth_lattice(root, rec, outdir):
     """The median of the map's valid error pixels in a square window of WINDOW_ARCSEC, evaluated on a lattice with
     a spacing of half a window (node (j, i) at pixel (i * step, j * step)); NaN where the window has no valid pixel.
