@@ -217,16 +217,15 @@ def normalisation_check(config, record, verbose=True):
     n = 0
     t0 = time.time()
     positions = [check_positions(psf, psf.meta, psf.meta["rep"][k], h + 2) for k in range(len(reps))]
-    # a sub-group is tested where it contributes to the mosaic (owner ruling 2026-10-30): its nodes, mid-cells and
-    # outer positions only where its own maps carry weight (`map_weights`, before the mean-mixture fallback of an
-    # uncovered position); its rim positions, 10-30 arcsec either side of its
-    # map's edge, always (Aquila's 12.8 deg P160 mosaic failed the patch sums only at nodes degrees from a sub-group's
-    # maps, where its weight is 0 and its table is never used)
+    # a sub-group is tested where it contributes to the mosaic (owner ruling 2026-10-30): every position, rims
+    # included, only where its own maps carry weight (`map_weights`, before the mean-mixture fallback of an uncovered
+    # position): the rims inside its map's edge stay, those outside it go (Aquila failed the patch sums only at nodes
+    # degrees from a sub-group's maps and Chameleon only at rims outside them, weight 0 at each)
     for k in range(len(reps)):
         pts = positions[k]
         x, y = np.array([p[0] for p in pts]), np.array([p[1] for p in pts])
         w = psf.map_weights(x, y)[:, k] if pts else np.zeros(0)
-        positions[k] = [p for p, wk in zip(pts, w) if p[2] == "rim" or wk > 0]
+        positions[k] = [p for p, wk in zip(pts, w) if wk > 0]
     # the real sources (the costly part) in parallel, one sub-group per task; the injections below on one blank image
     real = Parallel(n_jobs=config.n_jobs)(delayed(_real_sources)(rep, psf.out_wcs, record.band, positions[k], half_out, h)
                                           for k, rep in enumerate(reps))
