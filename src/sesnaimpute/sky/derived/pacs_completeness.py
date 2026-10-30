@@ -630,8 +630,8 @@ def matched_state(tile):
 
 def _layer_strip(task, config):
     """Rows of one mosaic's prepared layers (`pacs_fit.mosaic_layer_strip`)."""
-    record, a, b, floor, error_floor = task
-    pacs_fit.mosaic_layer_strip(config, record, a, b, floor, error_floor)
+    record, a, b, floor, error_fraction = task
+    pacs_fit.mosaic_layer_strip(config, record, a, b, floor, error_fraction)
     return record.map_id
 
 
@@ -653,7 +653,7 @@ def _strip_piece(task, config):
 
 def _prepare_stage(config, records, n_jobs, stage):
     """The band mosaics prepared for the run, every step in strips over all workers: the mosaic's layers in mJy (the
-    floors from a sample of rows, `pacs_fit.mosaic_layer_plan`; strips of PREPARE_STRIP_ROWS rows in parallel), the
+    coverage floor from a sample of rows, the error floor from each pixel's own weight, `pacs_fit.mosaic_layer_plan`; strips of PREPARE_STRIP_ROWS rows in parallel), the
     point-spread cache and detection layers (one task per mosaic), then the detection strips (STRIPS_PER_WORKER x
     n_jobs of them where the mosaic is tall enough, `detection_strips`)."""
     plans = [(r, pacs_fit.mosaic_layer_plan(config, r)) for r in records]

@@ -51,7 +51,8 @@ PREPARE_STRIP_ROWS = 256
 CELL_ARCSEC = 30.0
 #: fitting-box half-width in beam FWHM (spec 11.3 step 1)
 FIT_BOX_FWHM = 3.0
-#: a pixel is also dropped if its error is below this fraction of the map's median error
+#: a pixel is also dropped if its error is below this fraction of the map's median error (a mosaic's: of the error its own
+#: weight expects)
 #: (the layer holds a few collapsed values, 1e-7 of the median, that would carry all the weight)
 ERROR_FLOOR_FRACTION = 0.25
 #: a pixel is used only where the coverage layer exceeds this fraction of the map's median
@@ -1260,10 +1261,12 @@ MOSAIC_FLOOR_SAMPLE = 8_000_000
 
 def mosaic_layer_plan(config, record):
     """The first step of a mosaic's `prepare_map`: creates the prepared `image.npy` and `error.npy` (memory-mapped, to be
-    filled by `mosaic_layer_strip`) and returns `(coverage floor, error floor, strips)`, the floors as `_load_layers`
-    defines them (a fraction of the median positive coverage, of the median usable error) but taken from whole
-    rows at a regular stride (MOSAIC_FLOOR_SAMPLE pixels), and the strips `(first row, last row + 1)` of
-    PREPARE_STRIP_ROWS rows. The mosaic is NOT copied serially: the strips are independent, any number run at once."""
+    filled by `mosaic_layer_strip`) and returns `(coverage floor, error fraction, strips)`: the coverage floor as
+    `_load_layers` defines it (a fraction of the median positive coverage) but taken from whole rows at a regular stride
+    (MOSAIC_FLOOR_SAMPLE pixels); the error fraction ERROR_FLOOR_FRACTION, which `mosaic_layer_strip` applies to each
+    pixel's own expected error (its weight layer), not to a mosaic-wide median, so that the deepest overlaps are kept; and
+    the strips `(first row, last row + 1)` of PREPARE_STRIP_ROWS rows. The mosaic is NOT copied serially: the strips are
+    independent, any number run at once."""
     from numpy.lib.format import open_memmap
     d = prepared_dir(config, record)
     os.makedirs(d, exist_ok=True)
@@ -1275,17 +1278,15 @@ def mosaic_layer_plan(config, record):
     with open_map(config, record) as omap:
         rows = np.arange(0, ny, stride)
         cov = np.concatenate([np.asarray(omap.coverage[a:a + 1]).ravel() for a in rows])
-        err = np.concatenate([np.asarray(omap.error[a:a + 1], dtype=np.float32).ravel() for a in rows]) * np.float32(1e3)
     positive = cov[cov > 0]
     floor = MIN_COVERAGE_FRACTION * (np.median(positive) if positive.size else 0.0)
-    usable = err[(cov > floor) & (err > 0)]
-    error_floor = ERROR_FLOOR_FRACTION * (np.median(usable) if usable.size else 0.0)
-    return float(floor), float(error_floor), [(a, min(a + PREPARE_STRIP_ROWS, ny)) for a in range(0, ny, PREPARE_STRIP_ROWS)]
+    return float(floor), ERROR_FLOOR_FRACTION, [(a, min(a + PREPARE_STRIP_ROWS, ny)) for a in range(0, ny, PREPARE_STRIP_ROWS)]
 
 
-def mosaic_layer_strip(config, record, a, b, floor, error_floor):
+def mosaic_layer_strip(config, record, a, b, floor, error_fraction):
     """Rows a..b of a mosaic's prepared layers (`mosaic_layer_plan`), the rule of `_load_layers` (mJy, error NaN where
-    unusable)."""
+    unusable) with the error floor local: a pixel is unusable where its error is not above `error_fraction` of the error
+    its own weight expects, 1 / sqrt(weight) (the mosaic's weight layer, the error layer's units)."""
     from numpy.lib.format import open_memmap
     d = prepared_dir(config, record)
     f32 = np.float32(1e3)
@@ -1293,7 +1294,10 @@ def mosaic_layer_strip(config, record, a, b, floor, error_floor):
         image = np.asarray(omap.image[a:b], dtype=np.float32) * f32
         error = np.asarray(omap.error[a:b], dtype=np.float32) * f32
         good = (np.asarray(omap.coverage[a:b]) > floor) & (error > 0)
-    error[~good | ~(error > error_floor) | ~np.isfinite(image)] = np.nan
+    weight = np.load(os.path.join(record.mosaic_dir, "weight.npy"), mmap_mode="r")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        expected = f32 / np.sqrt(np.asarray(weight[a:b], dtype=np.float32))
+    error[~good | ~(error > error_fraction * expected) | ~np.isfinite(image)] = np.nan
     for name, v in (("image", image), ("error", error)):
         m = open_memmap(os.path.join(d, name + ".npy"), mode="r+")
         m[a:b] = v
@@ -1322,9 +1326,9 @@ def prepare_map(config, record):
     parallel); here they run in this process. Returns the prepared `Tile` (as `open_prepared`)."""
     from numpy.lib.format import open_memmap
     if _is_mosaic(record):
-        floor, error_floor, strips = mosaic_layer_plan(config, record)
+        floor, error_fraction, strips = mosaic_layer_plan(config, record)
         for a, b in strips:
-            mosaic_layer_strip(config, record, a, b, floor, error_floor)
+            mosaic_layer_strip(config, record, a, b, floor, error_fraction)
         return finish_prepare(config, record)
     d = prepared_dir(config, record)
     os.makedirs(d, exist_ok=True)

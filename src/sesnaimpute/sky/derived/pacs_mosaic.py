@@ -16,7 +16,9 @@ Method (briefs/pacs_mosaic_2026-10-29/BRIEF.md, M1-M4 with amendment A1):
   M3a each input map's arbitrary zero level is replaced by one constant o_i per map (`solve_zero_levels`):
       d_ij = median(R_i - R_j) over the output pixels both maps cover (pairs with >= MIN_COMMON_PIXELS), then weighted
       least squares on o_i - o_j = d_ij (weight = pixels in common), each connected set of maps with weighted-mean
-      zero; a map with no qualifying overlap gets 0.
+      zero; a map with no qualifying overlap gets 0.  o_i is a constant surface brightness: the differences are divided by,
+      and o_i multiplied by, the output pixel's own area factor (`tan_area_factor`), so o_i is in Jy per reference-pixel
+      area.  Every common pixel enters the median (no subsample).
   M3  each input (minus o_i) is resampled onto the grid by bilinear interpolation of its surface brightness (Jy per pixel
       divided by the input pixel area, times the output pixel's own area, `tan_area_factor`), which conserves flux.  The weight of map i is
       1 / (smoothed error_i)^2, the error layer median-filtered over WINDOW_ARCSEC; pixels with zero or non-finite
@@ -53,8 +55,6 @@ WINDOW_ARCSEC = 60.0
 STRIP_ROWS = 64
 #: Least common valid output pixels for a pair of maps to enter the zero-level solve.
 MIN_COMMON_PIXELS = 2000
-#: Differences kept per pair (about; the median is taken over this subsample).
-PAIR_SAMPLE = 20000
 #: The band's finest input pixel (arcsec).
 PIXEL_ARCSEC = {"P70": 1.6, "P100": 1.6, "P160": 3.2}
 
@@ -82,8 +82,10 @@ _READING = (
     "The image is sum(w*I)/sum(w); the error is sqrt(sum(w^2*e^2))/sum(w) from the maps' real per-pixel noise, with "
     "the four interpolation neighbours of a pixel taken as fully correlated, so it is not reduced by the interpolation. "
     "Each input map first has its own arbitrary zero level (PACS maps have no defined absolute zero) replaced by one "
-    "constant, solved from all overlaps between maps (least squares on the median differences of overlapping maps); this "
-    "changes no point-source flux measured against the local background. Units: Jy per output pixel. Pixels with no valid input are not-a-number.")
+    "constant surface brightness, solved from all overlaps between maps (least squares on the median differences of "
+    "overlapping maps, each taken over every pixel the two maps share); in each output pixel that constant is multiplied by the "
+    "pixel's own area, like the flux, so it changes no point-source flux measured against the local background. Units: Jy per output pixel. "
+    "Pixels with no valid input are not-a-number.")
 
 
 # ----------------------------------------------------------------------------
@@ -288,7 +290,8 @@ def _intermediate(wcs, x, y):
 def resample_block(root, rec, in_wcs, out_wcs, out_area, x0, x1, y0, y1, lattice=None):
     """Map `rec` resampled onto output pixels x0:x1, y0:y1 (zero-origin, half-open). Returns None when no output
     pixel falls inside the map, else a dict of arrays over the block: `valid` (bool: the four interpolation
-    neighbours are valid), `image`, `error` (Jy per output pixel), `coverage`, and with `lattice` = (lat, step)
+    neighbours are valid), `image`, `error` (Jy per output pixel), `coverage`, `factor` (the pixel's own area over the reference
+    pixel's), and with `lattice` = (lat, step)
     `smooth` (smoothed error, Jy per output pixel; NaN falls back to nothing: such pixels are invalid)."""
     ny, nx = rec.shape
     X, Y = np.meshgrid(np.arange(x0, x1, dtype=float), np.arange(y0, y1, dtype=float))
@@ -319,6 +322,7 @@ def resample_block(root, rec, in_wcs, out_wcs, out_area, x0, x1, y0, y1, lattice
                 acc[k] += b * np.where(g, a[jj, ii], 0.0)
     acc["image"] *= scale
     acc["error"] *= scale
+    acc["factor"] = tan_area_factor(out_wcs, X, Y)         # the output pixel's own area over the reference pixel's
     acc["valid"] = valid
     if lattice is not None:
         lat, step = lattice
@@ -360,8 +364,8 @@ def _blocks(root, outdir, recs, out_wcs, out_area, shape, y0, y1):
 
 def _pair_strip(task):
     """First pass over rows y0:y1: the valid pixel count of each map, and for each pair of maps the count of
-    common valid pixels and an evenly spaced subsample (at most `cap`) of the differences R_i - R_j."""
-    root, outdir, recs, out_header, shape, y0, y1, cap = task
+    common valid pixels and all their differences R_i - R_j in surface brightness (Jy per reference-pixel area), float32."""
+    root, outdir, recs, out_header, shape, y0, y1 = task
     out_wcs = WCS(fits.Header.fromstring(out_header))
     blocks = _blocks(root, outdir, recs, out_wcs, pixel_area_arcsec2(out_wcs), shape, y0, y1)
     counts = {rec.path: int(r["valid"].sum()) for rec, _, r in blocks}
@@ -378,8 +382,7 @@ def _pair_strip(task):
             n = int(both.sum())
             if n == 0:
                 continue
-            d = (A["image"][sa] - B["image"][sb])[both]
-            d = d[np.linspace(0, n - 1, min(n, cap)).astype(np.int64)]
+            d = ((A["image"][sa] - B["image"][sb]) / A["factor"][sa])[both].astype(np.float32)
             pairs[(ra_.path, rb_.path)] = (n, d)
     return counts, pairs
 
@@ -435,7 +438,7 @@ def _strip(task):
             w = np.where(ok, 1.0 / r["smooth"] ** 2, 0.0)
         sl = (slice(by0 - y0, by1 - y0), slice(bx0, bx1))
         sw[sl] += w
-        swi[sl] += w * np.where(ok, r["image"] - offsets[rec.path], 0.0)
+        swi[sl] += w * np.where(ok, r["image"] - offsets[rec.path] * r["factor"], 0.0)
         sw2e2[sl] += (w * np.where(ok, r["error"], 0.0)) ** 2
         cov[sl] += np.where(ok, r["coverage"], 0.0)
     has = sw > 0
@@ -489,11 +492,13 @@ def open_mosaic(config, region, band, box=None):
 def build_mosaic(config, region, band, box=None, n_jobs=None, verbose=True):
     """Builds the band's mosaic of the region (see the module docstring) and returns it opened.
     META (json in mosaic.hdf5): `maps` = per input map {path, group, lattice (file relative to the product), lattice_step
-    (input pixels), window_px, zero_level_jy_per_pixel, zero_level_mjy_per_beam}; `groups`, `group_keys`; `pairs` =
+    (input pixels), window_px, zero_level_jy_per_pixel (Jy per reference-pixel area), zero_level_mjy_per_beam}; `groups`, `group_keys`; `pairs` =
     [{a, b, d, n, residual}] (Jy per output pixel; residual = d - (o_a - o_b))."""
     root = maps_root(config)
     kept, dropped = input_set(read_index(config, region), band)
     print_input_set(region, band, kept, dropped)
+    for r in kept:
+        assert r.unit.strip().lower() == "jy/pixel", f"{r.path}: the map's unit is {r.unit!r}, not Jy/pixel"
     wcs, shape = make_grid(kept, band, box)
     in_wcs = {r.path: _celestial(r) for r in kept}
     kept = [r for r in kept if _bbox_in_output(r, in_wcs[r.path], wcs, shape) is not None]
@@ -518,8 +523,7 @@ def build_mosaic(config, region, band, box=None, n_jobs=None, verbose=True):
     header_text = header.tostring(sep="")
     # pass 1: valid pixel counts and pairwise differences, strip by strip
     starts = list(range(0, ny, STRIP_ROWS))
-    cap = max(32, int(np.ceil(PAIR_SAMPLE / len(starts))))
-    res = pool(delayed(_pair_strip)((root, outdir, kept, header_text, shape, y, min(y + STRIP_ROWS, ny), cap)) for y in starts)
+    res = pool(delayed(_pair_strip)((root, outdir, kept, header_text, shape, y, min(y + STRIP_ROWS, ny))) for y in starts)
     npix = {r.path: 0 for r in kept}
     pair_n, pair_vals = {}, {}
     for counts, pairs in res:

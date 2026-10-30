@@ -30,9 +30,10 @@ the measurements into products:
   its sigma, unless it is itself detected and the brightest of the detections within that beam.
 - extended: a detected source whose fitted width exceeds 1.5 x the beam.
 
-Work is split by map (one piece per band and map: one per band, rows cut in pieces by the pool), the tile's sources
-being transformed to map pixels in one call; the product is preallocated and
-each tile's rows are written as they arrive.
+Work is split by map and by position: each band's mosaic has its sources cut, in order of declination, into pieces of
+at least PHOTOMETRY_PIECE_MIN sources (`pieces.slices`), run over all the workers; a worker transforms a piece's sources to
+map pixels in one call and shares the prepared mosaic with its other pieces. The product is preallocated and
+each piece's rows are written as they arrive.
 """
 
 import functools
@@ -55,6 +56,8 @@ from sesnaimpute.sky.derived.pacs_fit import DETECTION_SNR
 from sesnaimpute.sky.download.herschel_pacs.index import read_index
 
 BANDS = ("P70", "P100", "P160")
+#: least sources in one photometry piece (a piece costs a few ms of overhead; a source about 3 ms)
+PHOTOMETRY_PIECE_MIN = 2000
 
 #: the pipeline's origin codes for a flux (`ORIGIN_FNU` in the source table)
 ORIGIN_DETECTED, ORIGIN_BOUND, ORIGIN_UNDETECTED, ORIGIN_NOT_COVERED = 1, 3, 90, 91
@@ -151,15 +154,15 @@ def _measure_tile(piece, config, records, ra, dec, cell_sigma, cell_offset, shif
     sigma = np.full(n, np.nan)
     origin = np.full(n, ORIGIN_NOT_COVERED, dtype=np.int8)
     subtracted = np.full(n, np.nan)
-    with pacs_fit.open_tile(config, record) as tile:
-        # the map's registration to SESNA, as the completeness stage measured and stored it
-        shift = shifts.get((BANDS[band], map_index), (0.0, 0.0))
-        x, y, single, ok, _floor = singleton_pass(tile, ra[rows], dec[rows], shift, sigma_cell, offset)
-        sigma_annulus = single.sigma
-        flux[ok] = single.flux[ok] - offset[ok]
-        sigma[ok] = sigma_cell[ok]
-        origin[ok] = ORIGIN_UNDETECTED
-        subtracted[ok] = offset[ok]
+    tile = pacs_fit.cached_tile(config, record)
+    # the map's registration to SESNA, as the completeness stage measured and stored it
+    shift = shifts.get((BANDS[band], map_index), (0.0, 0.0))
+    x, y, single, ok, _floor = singleton_pass(tile, ra[rows], dec[rows], shift, sigma_cell, offset)
+    sigma_annulus = single.sigma
+    flux[ok] = single.flux[ok] - offset[ok]
+    sigma[ok] = sigma_cell[ok]
+    origin[ok] = ORIGIN_UNDETECTED
+    subtracted[ok] = offset[ok]
     columns = dict(FNU=flux, SIGMA=sigma, ORIGIN=origin, LOCAL_RMS=sigma_cell.astype(np.float32), CELL_OFFSET=subtracted,
                    SIGMA_ANNULUS=np.asarray(sigma_annulus, np.float32), N_BLEND=np.zeros(n, np.int16),
                    PACS_SOURCE=np.full(n, -1, np.int32), MATCH_SEPARATION=np.full(n, np.nan, np.float32),
@@ -335,7 +338,10 @@ def write_region(out_path, names, ra, dec, records, cell_sigma, cell_offset, cel
         for m in np.unique(cell_map[b][sel]):
             if not 0 <= m < len(by_band[band]):
                 raise ValueError("pacs_photometry: completeness cell map %d is not among the %s mosaics" % (m, band))
-            pieces.append((b, by_band[band][m], sel[cell_map[b][sel] == m]))
+            on_map = sel[cell_map[b][sel] == m]
+            on_map = on_map[np.argsort(dec[on_map], kind="stable")]
+            for a, z in pieces_module.slices(on_map.size, n_jobs, PHOTOMETRY_PIECE_MIN):
+                pieces.append((b, by_band[band][m], np.sort(on_map[a:z])))
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     counts = {}
