@@ -18,7 +18,7 @@ Method (briefs/pacs_mosaic_2026-10-29/BRIEF.md, M1-M4 with amendment A1):
       least squares on o_i - o_j = d_ij (weight = pixels in common), each connected set of maps with weighted-mean
       zero; a map with no qualifying overlap gets 0.
   M3  each input (minus o_i) is resampled onto the grid by bilinear interpolation of its surface brightness (Jy per pixel
-      divided by the input pixel area, times the output pixel area), which conserves flux.  The weight of map i is
+      divided by the input pixel area, times the output pixel's own area, `tan_area_factor`), which conserves flux.  The weight of map i is
       1 / (smoothed error_i)^2, the error layer median-filtered over WINDOW_ARCSEC; pixels with zero or non-finite
       error, zero coverage or a non-finite image have weight 0 and are ignored by the filter.
         image = sum(w_i I_i) / sum(w_i);   error = sqrt(sum(w_i^2 err_i^2)) / sum(w_i)
@@ -74,7 +74,8 @@ _READING = (
     "PACS {band} mosaic of {region}. Every input map of the band that is not contained in another map's observations "
     "is resampled onto this one grid (tangent projection, north up, {pix} arcsec pixels). Resampling interpolates the "
     "surface brightness (flux per unit area) bilinearly between the four nearest input pixel centres and multiplies by "
-    "the output pixel area, so the flux of a source is conserved. The maps are averaged with weights "
+    "the output pixel's own area (a tangent-projection pixel shrinks away from the grid centre), so the flux of a "
+    "source is conserved everywhere on the grid. The maps are averaged with weights "
     "1/(smoothed noise)^2, where the smoothed noise of a map is its own per-pixel noise layer median-filtered over a "
     "square window of {win} arcsec; a weight therefore follows how deep the map is, never the signal in the pixel. "
     "Pixels where a map has zero or undefined noise, zero coverage or an undefined image get weight 0 in that map. "
@@ -245,7 +246,26 @@ def _lattice_at(lat, step, px, py):
 # M3: resampling one map onto a block of the output grid
 
 def pixel_area_arcsec2(wcs):
+    """The pixel area at the reference pixel (arcsec^2)."""
     return float(abs(np.linalg.det(wcs.pixel_scale_matrix)) * 3600.0 ** 2)
+
+
+def tan_area_factor(wcs, x, y):
+    """The area of the tangent-projection pixel at zero-origin (x, y) over the reference pixel's: cos^3 of its
+    angular distance from the tangent point, (1 + rho^2)^(-3/2) with rho the intermediate radius in radians (exact
+    for TAN; 0.6 % at 3.7 deg)."""
+    xi, eta = _intermediate(wcs, x, y)
+    return (1.0 + xi ** 2 + eta ** 2) ** -1.5
+
+
+def _intermediate(wcs, x, y):
+    """The intermediate world coordinates (radians) of zero-origin pixels (x, y) of a TAN `wcs`."""
+    if not all(c.endswith("-TAN") for c in wcs.wcs.ctype):
+        raise ValueError("the mosaic grid is not a tangent projection")
+    x, y = np.broadcast_arrays(np.asarray(x, float), np.asarray(y, float))
+    m = wcs.pixel_scale_matrix
+    dx, dy = x + 1.0 - wcs.wcs.crpix[0], y + 1.0 - wcs.wcs.crpix[1]
+    return np.radians(m[0, 0] * dx + m[0, 1] * dy), np.radians(m[1, 0] * dx + m[1, 1] * dy)
 
 
 def resample_block(root, rec, in_wcs, out_wcs, out_area, x0, x1, y0, y1, lattice=None):
@@ -269,7 +289,7 @@ def resample_block(root, rec, in_wcs, out_wcs, out_area, x0, x1, y0, y1, lattice
     xi = np.clip(np.floor(wx).astype(np.int64), 0, max(img.shape[1] - 2, 0))
     yi = np.clip(np.floor(wy).astype(np.int64), 0, max(img.shape[0] - 2, 0))
     fx, fy = np.clip(wx - xi, 0, 1), np.clip(wy - yi, 0, 1)
-    scale = out_area / pixel_area_arcsec2(in_wcs)
+    scale = out_area * tan_area_factor(out_wcs, X, Y) / pixel_area_arcsec2(in_wcs)   # the output pixel's own area
     acc = {k: np.zeros(X.shape) for k in ("image", "error", "coverage")}
     valid = inside.copy()
     for dy, by in ((0, 1 - fy), (1, fy)):
@@ -511,7 +531,7 @@ def build_mosaic(config, region, band, box=None, n_jobs=None, verbose=True):
         del m
     pool(delayed(_strip)((root, outdir, kept, offsets, header_text, shape, y, min(y + STRIP_ROWS, ny))) for y in starts)
     meta = dict(region=region, band=band, shape=[ny, nx], window_arcsec=WINDOW_ARCSEC, pixel_arcsec=PIXEL_ARCSEC[band],
-                resampler="bilinear interpolation of surface brightness, times the output pixel area",
+                resampler="bilinear interpolation of surface brightness, times the output pixel's own area",
                 maps=[dict(path=r.path, group=group_of[r.path],
                            lattice=os.path.relpath(_lattice_path(outdir, r), outdir), lattice_step=max(1, _window_px(r) // 2),
                            window_px=_window_px(r), zero_level_jy_per_pixel=offsets[r.path],

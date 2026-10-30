@@ -1391,7 +1391,8 @@ def _template_density(components, east, north):
 def _node_table(components, out_wcs, node, jac, extent, steps, out_area, broad):
     """One spatial node's response, (count, count): the unit-flux template (mean of the scan columns) on the
     north-up output grid around output pixel `node` = (x, y), convolved with the input footprint (`_kernel_weights`),
-    sampled at output-pixel offsets -extent..extent in 1/steps; per output pixel (flux)."""
+    sampled at output-pixel offsets -extent..extent in 1/steps; per output pixel (flux), at the node's own output
+    pixel area (`out_area` is the reference pixel's; `pacs_mosaic.tan_area_factor`), as the mosaic's pixels hold it."""
     from scipy.signal import fftconvolve
     weights, half = _kernel_weights(jac, steps, broad)
     count = int(2 * extent * steps) + 1
@@ -1403,7 +1404,8 @@ def _node_table(components, out_wcs, node, jac, extent, steps, out_area, broad):
     east, north = source.spherical_offsets_to(out_wcs.pixel_to_world(xx + node[0], yy + node[1]))
     density = _template_density(components, east.arcsec, north.arcsec)
     conv = fftconvolve(density, weights, mode="same")
-    return conv[pad * steps:pad * steps + count, pad * steps:pad * steps + count] * out_area
+    from sesnaimpute.sky.derived.pacs_mosaic import tan_area_factor
+    return conv[pad * steps:pad * steps + count, pad * steps:pad * steps + count] * (out_area * float(tan_area_factor(out_wcs, *node)))
 
 
 def _table_aperture(table, extent, steps, band, pixel_arcsec):
