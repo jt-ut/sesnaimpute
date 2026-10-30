@@ -2,35 +2,38 @@
 # Submits one region's staged PACS completeness (sesnaimpute.sky.derived.pacs_stages) as 2 + 3 jobs per band, each heavy
 # job spread over as many nodes as its work needs, so that every job takes about the same time.
 #
-#   submit_pacs_region.sh [--dry-run --tasks P70=N,P100=N,P160=N] [--box RA DEC W H] [--reuse-mosaics]
+#   submit_pacs_region.sh [--phase 1|2] [--dry-run [--tasks P70=N,P100=N,P160=N]] [--box RA DEC W H] [--reuse-mosaics]
 #                         [--reference-product P] [--target-minutes M] SYSTEM REGION CONFIG
+#
+#   Two phases, both run on a LOGIN node (TACC refuses sbatch from a compute node: "Job submission is not allowed from
+#   this host", smoke job 3661756):
+#   --phase 1 (default)  prepare and the three detect jobs
+#   --phase 2            after the detect jobs have ended: each band's K from its detect.pkl (`pacs_stages plan`, read
+#                        here), then its inject job (K nodes), its pool job (K nodes, afterok inject), and finish
+#                        (afterok every pool job)
 #
 #   SYSTEM  vista (gg, 144 workers per node) or stampede3 (spr, 112 workers per node)
 #   --target-minutes  wanted minutes of an injection or pooling job (default 45); sets the nodes K of each band
-#   --dry-run  prints every sbatch line and submits nothing; the bands' round-0 task counts (which the detect jobs read
-#              from detect.pkl) are given by --tasks, and the jobs the detect jobs would submit are printed too
+#   --dry-run  prints every sbatch line and submits nothing; phase 2 then takes the bands' round-0 task counts from
+#              --tasks instead of their detect.pkl
 #
 # Jobs (`pacs_sizing` has the node counts and the -t of every job: 3 x its expected minutes, rounded up to 30 min):
 #   prepare                         1 node: preflight + mosaics
-#     detect <band>                 1 node; at its end plans the band's K from detect.pkl and submits the next two itself
+#     detect <band>                 1 node (afterok prepare)                                   -- phase 1
 #       inject <band>               K nodes: rounds 0 .. MAX_EXTRA_BATCHES, the K shares of a round together (one node
-#                                   each, by srun), a barrier between rounds
-#         pool <band>               K nodes (afterok inject): pool tables, the K pool shares together, assemble; the
-#                                   pool job that completes the last band submits finish (claimed by a marker file,
-#                                   so exactly one does)
-#           finish                  1 node: product, sources, acceptances, photometry
-# A job whose output file exists does nothing, so a failed chain is resubmitted whole (a failed finish is submitted
-# alone: `submit_pacs_region.sh --job finish ...` needs sbatch; or resubmit the chain after removing the marker
-# <stage store>/finish_submitted).
+#                                   each, by srun), a barrier between rounds                   -- phase 2
+#         pool <band>               K nodes (afterok inject): pool tables, the K pool shares together, assemble
+#           finish                  1 node (afterok every pool job): product, sources, acceptances, photometry
+# A job whose output file exists does nothing, so a failed job is resubmitted alone or its phase whole.
 # The job body is this same file, run by sbatch as `submit_pacs_region.sh --job KIND ...`.
 
 ROOT=/work2/08772/jjt277/stampede3
 SLURM_DIR=$ROOT/projects/SESNA_Complete/pacs_slurm
-SOFTWARE=$ROOT/software/sesnaimpute-pacs_injection
+SOFTWARE=$ROOT/software/sesnaimpute
 BANDS="P70 P100 P160"
 ABS=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 
-DRY=0; BOX=(); REUSE=(); REFERENCE=(); TARGET=45; TASKS=""; JOB=""; BAND=""; K=1
+DRY=0; BOX=(); REUSE=(); REFERENCE=(); TARGET=45; TASKS=""; JOB=""; BAND=""; K=1; PHASE=1
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY=1; shift ;;
@@ -40,6 +43,7 @@ while [ $# -gt 0 ]; do
         --reference-product) REFERENCE=(--reference-product "$2"); shift 2 ;;
         --target-minutes) TARGET="$2"; shift 2 ;;
         --job) JOB="$2"; shift 2 ;;
+        --phase) PHASE="$2"; shift 2 ;;
         --band) BAND="$2"; shift 2 ;;
         --k) K="$2"; shift 2 ;;
         --) shift; break ;;
@@ -101,56 +105,52 @@ if [ -n "$JOB" ]; then
     case "$JOB" in
         prepare) exec python -W ignore -m sesnaimpute.sky.derived.pacs_stages preflight --config "$CONFIG" --region "$REGION" --n-jobs $CPUS "${BOX[@]}" "${REUSE[@]}" "${REFERENCE[@]}" ;;
         finish)  exec python -W ignore -m sesnaimpute.sky.derived.pacs_stages finish --config "$CONFIG" --region "$REGION" --n-jobs $CPUS "${BOX[@]}" "${REFERENCE[@]}" ;;
-        detect)
-            stage detect --band $BAND || exit 1
-            PLAN=$(stage plan --band $BAND --system $SYSTEM --target-minutes $TARGET) || exit 1
-            echo "$PLAN"
-            LINE=$(echo "$PLAN" | grep "^PLAN $BAND ")
-            KB=$(field K "$LINE"); IT=$(field INJECT_T "$LINE"); PT=$(field POOL_T "$LINE")
-            [ -n "$KB" ] && [ -n "$IT" ] && [ -n "$PT" ] || { echo "no plan line for $BAND"; exit 1; }
-            INJ=$(submit "pacs_${TAG}_${BAND}_inject" $KB $IT "" inject --band $BAND --k $KB) || exit 1
-            submit "pacs_${TAG}_${BAND}_pool" $KB $PT "$INJ" pool --band $BAND --k $KB >/dev/null || exit 1 ;;
+        detect)  stage detect --band $BAND || exit 1 ;;
         inject)  stage inject-band --band $BAND --of $K --launcher srun --cpus $CPUS || exit 1 ;;
-        pool)
-            stage pool-band --band $BAND --of $K --launcher srun --cpus $CPUS || exit 1
-            stage claim-finish; RC=$?
-            if [ $RC -eq 0 ]; then
-                eval "$(sizing --times | sed -n 's/^TIMES //p')"
-                submit "pacs_${TAG}_finish" 1 $FINISH_T "" finish >/dev/null || exit 1
-            elif [ $RC -ne 3 ]; then
-                exit $RC
-            fi ;;
+        pool)    stage pool-band --band $BAND --of $K --launcher srun --cpus $CPUS || exit 1 ;;
         *) echo "unknown job $JOB" >&2; exit 2 ;;
     esac
     exit 0
 fi
 
-# ---- submission
+# ---- submission (a login node)
 eval "$(sizing --times | sed -n 's/^TIMES //p')"
-if [ $DRY -eq 1 ]; then
-    [ -n "$TASKS" ] || { echo "--dry-run needs --tasks P70=N,P100=N,P160=N (the round-0 task counts the detect jobs read)" >&2; exit 2; }
-    SIZES=$(sizing --target-minutes $TARGET --tasks "$TASKS")
-else
-    SIZES=""
-    QUEUED=$(squeue -u "$USER" -h 2>/dev/null | wc -l)
-    [ $((11 + QUEUED)) -le $MAX_SUBMIT ] || { echo "refused: 11 jobs (+ $QUEUED already queued) against $MAX_SUBMIT submitted on $SYSTEM" >&2; exit 1; }
-fi
-echo "# $SYSTEM $PART: 11 jobs (prepare, 3 x detect, 3 x inject, 3 x pool, finish); inject and pool are submitted by the band's detect job"
-
-PREP=$(submit "pacs_${TAG}_prepare" 1 $PREPARE_T "" prepare)
-for b in $BANDS; do
-    eval "T=\$DETECT_${b}_T"
-    DET=$(submit "pacs_${TAG}_${b}_detect" 1 $T "$PREP" detect --band $b)
+QUEUED=0
+[ $DRY -eq 1 ] || QUEUED=$(squeue -u "$USER" -h 2>/dev/null | wc -l)
+if [ "$PHASE" = 1 ]; then
+    [ $((4 + QUEUED)) -le $MAX_SUBMIT ] || { echo "refused: 4 jobs (+ $QUEUED already queued) against $MAX_SUBMIT submitted on $SYSTEM" >&2; exit 1; }
+    echo "# $SYSTEM $PART phase 1: prepare, 3 x detect; run --phase 2 once the detect jobs have ended"
+    PREP=$(submit "pacs_${TAG}_prepare" 1 $PREPARE_T "" prepare)
+    for b in $BANDS; do
+        eval "T=\$DETECT_${b}_T"
+        submit "pacs_${TAG}_${b}_detect" 1 $T "$PREP" detect --band $b
+    done
+elif [ "$PHASE" = 2 ]; then
+    [ $((7 + QUEUED)) -le $MAX_SUBMIT ] || { echo "refused: 7 jobs (+ $QUEUED already queued) against $MAX_SUBMIT submitted on $SYSTEM" >&2; exit 1; }
     if [ $DRY -eq 1 ]; then
-        echo "$SIZES" | grep "^plan $b" >&2
-        L=$(echo "$SIZES" | grep "^PLAN $b ")
-        KB=$(field K "$L")
-        echo "# submitted by $DET at its end:" >&2
-        INJ=$(submit "pacs_${TAG}_${b}_inject" $KB $(field INJECT_T "$L") "" inject --band $b --k $KB)
-        submit "pacs_${TAG}_${b}_pool" $KB $(field POOL_T "$L") "$INJ" pool --band $b --k $KB >/dev/null
+        [ -n "$TASKS" ] || { echo "--dry-run --phase 2 needs --tasks P70=N,P100=N,P160=N" >&2; exit 2; }
+        SIZES=$(sizing --target-minutes $TARGET --tasks "$TASKS")
+    else
+        # the plan from the bands' detect.pkl, read on this login node (light: the detect files' task lists)
+        source /home1/08772/jjt277/startups/sesnaimpute_source.sh
+        SIZES=""
+        for b in $BANDS; do
+            SIZES+=$(PYTHONPATH=$SOFTWARE/src python -W ignore -m sesnaimpute.sky.derived.pacs_stages plan --config "$CONFIG" --region "$REGION" \
+                     --band $b "${BOX[@]}" --system $SYSTEM --target-minutes $TARGET) || { echo "plan of $b failed (has its detect job ended?)" >&2; exit 1; }
+            SIZES+=$'\n'
+        done
     fi
-done
-if [ $DRY -eq 1 ]; then
-    echo "# submitted by the pool job that completes the last band:" >&2
-    submit "pacs_${TAG}_finish" 1 $FINISH_T "" finish >/dev/null
+    echo "$SIZES" | grep -i "^plan" >&2
+    echo "# $SYSTEM $PART phase 2: 3 x inject, 3 x pool, finish"
+    POOLS=()
+    for b in $BANDS; do
+        L=$(echo "$SIZES" | grep "^PLAN $b ")
+        KB=$(field K "$L"); IT=$(field INJECT_T "$L"); PT=$(field POOL_T "$L")
+        [ -n "$KB" ] && [ -n "$IT" ] && [ -n "$PT" ] || { echo "no plan line for $b" >&2; exit 1; }
+        INJ=$(submit "pacs_${TAG}_${b}_inject" $KB $IT "" inject --band $b --k $KB)
+        POOLS+=($(submit "pacs_${TAG}_${b}_pool" $KB $PT "$INJ" pool --band $b --k $KB))
+    done
+    submit "pacs_${TAG}_finish" 1 $FINISH_T "$(IFS=:; echo "${POOLS[*]}")" finish >/dev/null
+else
+    echo "--phase must be 1 or 2" >&2; exit 2
 fi
