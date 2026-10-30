@@ -2046,8 +2046,9 @@ def preflight(config, region, box=None, reuse_mosaics=False, reference_product=N
         h = pacs_photometry._read_hppsc(config, b)
         if not (h["ra"].size and h["obsids"]):
             raise ValueError("HPPSC %s list or observation table is empty" % b)
-    if not pacs_photometry._match_hops(config, region)[0].size:
-        raise ValueError("no HOPS targets matched for %s" % region)
+    # the HOPS table must read (the photometry's C4/C5); HOPS covers Orion only, so most regions match none
+    n_hops = pacs_photometry._match_hops(config, region)[0].size
+    print("preflight: HOPS table read, %d targets in %s (none outside Orion: C4/C5 then report nothing)" % (n_hops, region), flush=True)
     ra, dec = _region_inputs(config, region)
     if not ra.size:
         raise ValueError("no source positions for %s" % region)

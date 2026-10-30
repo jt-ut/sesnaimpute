@@ -99,6 +99,19 @@ def _clear_store(config, region, box):
         os.remove(os.path.join(sd, "finish_submitted"))
 
 
+def clear_prepared(config, region, box=None):
+    """The region's prepared layers removed (`pacs_fit.prepared_dir` of each band's mosaic): two thirds of a region's
+    disk (Orion A 17 of 25 GB; all regions together would exceed the /work quota), rebuilt from the mosaic in minutes
+    and read by nothing once the photometry is written. The mosaics stay."""
+    from sesnaimpute.sky.derived import pacs_mosaic
+    for b in pc.BANDS:
+        if os.path.exists(os.path.join(pacs_mosaic.product_dir(config, region, b, box), "mosaic.hdf5")):
+            d = pacs_fit.prepared_dir(config, pacs_fit.mosaic_record(config, region, b, box))
+            real, root = os.path.realpath(d), os.path.realpath(os.path.join(config.data_root, "sky", "derived", "pacs", "prepared"))
+            assert real.startswith(root + os.sep), "%s resolves outside %s" % (d, root)
+            shutil.rmtree(d, ignore_errors=True)
+
+
 # ----------------------------------------------------------------------------
 # the band's inputs
 

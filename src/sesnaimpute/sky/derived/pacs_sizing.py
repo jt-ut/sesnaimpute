@@ -34,7 +34,10 @@ LATER_S = 4200.0 / (MAX_EXTRA_BATCHES * 3873.0)          # node-s per round-0 ta
 P100_INJECT_S = (9.6 + 12.3) * 60.0         # P100's measured injection node-s (Orion A)
 POOL_TABLES_MIN, POOL_SHARD_MIN = 2.7, 4.5  # P100 on one node (Orion A)
 DETECT_MIN = {"P70": 21.3, "P100": 6.9, "P160": 12.1}    # one node (Orion A)
-PREPARE_MIN, FINISH_MIN = 40.0, 40.0        # one node; NOT measured on Orion A (mosaics reused, photometry): -t 2 h
+PREPARE_MIN, FINISH_MIN = 40.0, 40.0        # one node: -t 2 h (Orion A measured 6.7 min with its mosaics reused, 8.8 min)
+#: a detect job writes its file only at its end, so a region larger than Orion A must not run out of time: one flat
+#: limit, about 11 x Orion A's P70 (the charge held against the balance is 3 jobs per region)
+DETECT_LIMIT = "04:00:00"
 TARGET_MIN = 45.0
 #: per system: workers per node, nodes per job, nodes per user (TACC queue limits)
 SYSTEMS = {"stampede3": dict(cpus=112, per_job=64, per_user=96), "vista": dict(cpus=144, per_job=32, per_user=96)}
@@ -78,7 +81,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.times:
         print("TIMES PREPARE_T=%s FINISH_T=%s %s" % (wall_limit(PREPARE_MIN), wall_limit(FINISH_MIN),
-                                                    " ".join("DETECT_%s_T=%s" % (b, wall_limit(DETECT_MIN[b])) for b in BANDS)))
+                                                    " ".join("DETECT_%s_T=%s" % (b, DETECT_LIMIT) for b in BANDS)))
         return
     for kv in args.tasks.split(","):
         b, n = kv.split("=")

@@ -133,6 +133,7 @@ def main(argv=None):
         from sesnaimpute.sky.derived import pacs_completeness
         pacs_completeness.finish_region(config, region, box=box, reference_product=args.reference_product)
         stages._clear_store(config, region, box)
+        stages.clear_prepared(config, region, box)
     elif args.stage == "run":
         stages.run_region(config, region, n_shards=args.of, **kw)
     else:
