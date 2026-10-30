@@ -43,10 +43,11 @@ from sesnaimpute.gutcolors import crisp
 #: The seven libraries, `fittp.prior_reader._LIB`'s own values.
 LIBRARIES = ("sps", "agb", "pahc", "galz", "yso", "h2shock", "pahn")
 
-#: `definitions.BANDS`' order (J H Ks I1 I2 I3 I4 M1) is `gutcolors.crisp`'s
-#: own BAND_ORDER (crisp.py module docstring); I2 is 4.5 micron
-#: (`definitions.BANDS[4].wvl_um == 4.493`).
-_BAND_KEYS = tuple(b.key for b in definitions.BANDS)
+#: The cascade's own eight SESNA bands, `definitions.SELECTION.bands` (J H Ks
+#: I1 I2 I3 I4 M1) = `gutcolors.crisp`'s BAND_ORDER (crisp.py module
+#: docstring); the register's PACS columns are not read (the cascade has no
+#: far-infrared step). I2 is 4.5 micron (`definitions.BANDS[4].wvl_um == 4.493`).
+_BAND_KEYS = tuple(definitions.SELECTION.bands)
 _I2 = _BAND_KEYS.index("I2")
 N_BANDS = len(_BAND_KEYS)
 N_LABELS = len(crisp.LABELS)
@@ -63,7 +64,7 @@ HAND_CHECK_SEED = 0
 
 def _read_register(config, key):
     """This library's own reference SED: `F_REF` (n_model, N_BANDS) mJy in
-    `definitions.BANDS` order, `FLOOR_LINEAR` (the register's own raw-flux
+    the cascade's band order (`_BAND_KEYS`), `FLOOR_LINEAR` (the register's own raw-flux
     floor, `fittp.sweep._register`'s FREFRAW convention) and `SUBCLASS`,
     all in the register's own row order."""
     path = os.path.join(config.inputs["sed_models"], "registers", "%s_register.hdf5" % key)
