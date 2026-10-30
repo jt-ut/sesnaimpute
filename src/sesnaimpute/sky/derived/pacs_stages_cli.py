@@ -9,6 +9,7 @@ Stages (each skips work whose output file exists, so a resubmitted job resumes):
   inject-rest  INJECT rounds --round (default 1) .. MAX_EXTRA_BATCHES of --band, every shard of --of in turn, in
                this one process, stopping at the first round with no tasks (the rounds after round 0 are one
                small batch each, behind a barrier: one job runs them all instead of 40 jobs queueing)
+  pool-tables  the injection tables of --band, written once before its POOL shards
   pool         POOL shard --shard of --of of --band
   assemble     ASSEMBLE of --band
   finish       FINISH of the region (product, merge, sources, photometry, acceptances)
@@ -17,7 +18,7 @@ Stages (each skips work whose output file exists, so a resubmitted job resumes):
                per job at --rate tasks per second (the rate is an input: measure it on the system)
 
 Common options: --box RA DEC W H (a slice, as pacs_mosaic names it), --n-jobs N (the pool size for this invocation).
-Thin hook for pacs_stages.py (append at the bottom):
+The hook at the bottom of pacs_stages.py calls `main`:
 
     if __name__ == "__main__":
         from sesnaimpute.sky.derived.pacs_stages_cli import main
@@ -31,8 +32,8 @@ import sys
 from sesnaimpute import config as config_module
 
 BANDS = ("P70", "P100", "P160")
-STAGES = ("preflight", "detect", "inject", "inject-rest", "pool", "assemble", "finish", "run", "plan")
-NEEDS_BAND = ("detect", "inject", "inject-rest", "pool", "assemble")
+STAGES = ("preflight", "detect", "inject", "inject-rest", "pool-tables", "pool", "assemble", "finish", "run", "plan")
+NEEDS_BAND = ("detect", "inject", "inject-rest", "pool-tables", "pool", "assemble")
 NEEDS_SHARD = ("inject", "pool")
 # tasks per second of one injection job on a whole node: the P70 round 0 of Orion A on Stampede3 spr (112 workers)
 # ran ~1.1-1.5 per second (job 3661209); an input of `plan`, never a constant of the staging
@@ -123,12 +124,16 @@ def main(argv=None):
         stages.inject(config, region, band, args.round_, args.shard, args.of, **kw)
     elif args.stage == "inject-rest":
         _inject_rest(stages, config, region, band, 1 if args.round_ is None else args.round_, args.of, box)
+    elif args.stage == "pool-tables":
+        stages.pool_tables(config, region, band, **kw)
     elif args.stage == "pool":
         stages.pool(config, region, band, args.shard, args.of, **kw)
     elif args.stage == "assemble":
         stages.assemble(config, region, band, **kw)
     elif args.stage == "finish":
         stages.finish(config, region, reference_product=args.reference_product, **kw)
+        from sesnaimpute.sky.derived import pacs_completeness
+        pacs_completeness.finish_region(config, region, box=box, reference_product=args.reference_product)
     elif args.stage == "run":
         stages.run_region(config, region, n_shards=args.of, **kw)
     else:

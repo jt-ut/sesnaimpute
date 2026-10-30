@@ -13,12 +13,13 @@
 #     -> detect <band>                                   one job per band
 #       -> inject round 0, shards 0..K-1                 K jobs per band
 #         -> inject-rest <band>                          rounds 1..40, one job: each is one small batch behind a barrier
-#           -> pool shards 0..K-1                        K jobs per band
-#             -> assemble <band>
-#               -> finish                                after all bands
+#           -> pool-tables <band>                        the band's injection tables, written once
+#             -> pool shards 0..K-1                      K jobs per band
+#               -> assemble <band>
+#                 -> finish                              after all bands: product, sources, acceptances, photometry
 # Each dependency is afterok. A job whose output file exists does nothing, so a failed chain is resubmitted whole.
 # Queue limits per user (Stampede3 spr 24 running / 36 submitted; Vista gg 20 running / 40 submitted): a chain is
-# 2 + sum over bands of (2K + 3) jobs, at most sum(K) of them running together; the script refuses a chain above
+# 2 + sum over bands of (2K + 4) jobs, at most sum(K) of them running together; the script refuses a chain above
 # the limits (counting the user's jobs already queued) and names the K to lower.
 # The job body is this same file, run by sbatch as `submit_pacs_region.sh --job ...`.
 
@@ -30,6 +31,9 @@ BANDS="P70 P100 P160"
 if [ "${1:-}" = "--job" ]; then
     shift
     export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 NUMBA_NUM_THREADS=1
+    # glibc: a fixed mmap threshold (no dynamic raise) so the workers' large temporaries go back to the system when
+    # freed (job 3661209: worker memory grew per piece; not reproduced on macOS)
+    export MALLOC_MMAP_THRESHOLD_=131072 MALLOC_TRIM_THRESHOLD_=131072 MALLOC_ARENA_MAX=2
     ulimit -u $(ulimit -Hu)
     source /home1/08772/jjt277/startups/sesnaimpute_source.sh
     export PYTHONPATH=$SOFTWARE/src
@@ -71,7 +75,7 @@ done
 
 kof() { eval "echo \$K_$1"; }
 TOTAL=2; PEAK=0
-for b in $BANDS; do k=$(kof $b); TOTAL=$((TOTAL + 2 * k + 3)); PEAK=$((PEAK + k)); done
+for b in $BANDS; do k=$(kof $b); TOTAL=$((TOTAL + 2 * k + 4)); PEAK=$((PEAK + k)); done
 QUEUED=0
 [ $DRY -eq 1 ] || QUEUED=$(squeue -u "$USER" -h 2>/dev/null | wc -l)
 if [ $((TOTAL + QUEUED)) -gt $MAX_SUBMIT ] || [ $PEAK -gt $MAX_RUN ]; then
@@ -109,9 +113,10 @@ for b in $BANDS; do
         I0+=($(submit "pacs_${TAG}_${b}_i0_s${s}of${k}" "$DET" inject --band $b --round 0 --shard $s --of $k))
     done
     REST=$(submit "pacs_${TAG}_${b}_irest" "$(join "${I0[@]}")" inject-rest --band $b --round 1 --of $k)
+    TAB=$(submit "pacs_${TAG}_${b}_pooltab" "$REST" pool-tables --band $b)
     PL=()
     for ((s = 0; s < k; s++)); do
-        PL+=($(submit "pacs_${TAG}_${b}_pool_s${s}of${k}" "$REST" pool --band $b --shard $s --of $k))
+        PL+=($(submit "pacs_${TAG}_${b}_pool_s${s}of${k}" "$TAB" pool --band $b --shard $s --of $k))
     done
     ASM+=($(submit "pacs_${TAG}_${b}_assemble" "$(join "${PL[@]}")" assemble --band $b))
 done

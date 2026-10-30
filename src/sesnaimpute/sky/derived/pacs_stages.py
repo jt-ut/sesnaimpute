@@ -251,6 +251,15 @@ def _pool_tables(config, d, s):
             shutil.rmtree(tmp)
 
 
+def pool_tables(config, region, band, box=None):
+    """The band's injection tables written once, before its pooling shards start (the submit chain's own job: K
+    shards started together would each hold every injection of the band to write the same tables)."""
+    d = _band_dir(config, region, band, box)
+    s = _detect_state(config, region, band, box)
+    if not s.get("empty"):
+        _pool_tables(config, d, s)
+
+
 def pool(config, region, band, shard, n_shards, box=None, n_jobs=None, stage=None):
     """Stage POOL: shard `shard` of `n_shards` of the pooling blocks (`pool_task_list`), written to
     `pool_s<shard>of<n_shards>.pkl`. The injection tables of the band's maps are written first, by the shard that finds
@@ -354,3 +363,8 @@ def run_region(config, region, box=None, n_shards=1, detect_only=False, stage=No
             pool(config, region, b, k, n_shards, box, n_jobs, stage)
         assemble(config, region, b, box)
     return finish(config, region, box, n_jobs=n_jobs, stage=stage)
+
+
+if __name__ == "__main__":
+    from sesnaimpute.sky.derived.pacs_stages_cli import main
+    raise SystemExit(main())
