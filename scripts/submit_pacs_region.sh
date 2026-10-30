@@ -96,7 +96,8 @@ submit() {
         { printf '%q ' "${cmd[@]}"; echo; } >&2     # the dry-run job id is the job's name
         echo "$name"
     else
-        "${cmd[@]}" | cut -d';' -f1
+        # sbatch on Stampede3 prints its banner on stdout too: the id is the last all-digit line
+        "${cmd[@]}" | cut -d';' -f1 | grep -E '^[0-9]+$' | tail -1
     fi
 }
 ABS=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
