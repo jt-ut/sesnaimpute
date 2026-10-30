@@ -539,7 +539,7 @@ def open_map(config, record):
     path = Path(maps_root(config)) / record.path
     if path.suffix.lower() in (".gz", ".zip"):
         raise ValueError("compressed maps must be unpacked before memory-mapped access")
-    with fits.open(path, mode="readonly", memmap=True) as hdus:
+    with fits.open(path, mode="denywrite", memmap=True) as hdus:
         header = fits.Header.fromstring(record.wcs_header)
         arrays = [hdus[i].data for i in (record.image_hdu, record.error_hdu, record.coverage_hdu)]
         if any(a is None or a.shape != tuple(record.shape) for a in arrays):

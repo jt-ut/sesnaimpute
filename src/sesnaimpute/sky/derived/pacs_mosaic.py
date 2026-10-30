@@ -185,7 +185,7 @@ def _read_layers(root, rec, rows=None, cols=None):
     """The map's image, error, coverage (float64 copies of the window rows x cols, as slices)."""
     rows = rows or slice(0, rec.shape[0])
     cols = cols or slice(0, rec.shape[1])
-    with fits.open(os.path.join(root, rec.path), mode="readonly", memmap=True) as hdus:
+    with fits.open(os.path.join(root, rec.path), mode="denywrite", memmap=True) as hdus:
         return tuple(np.array(hdus[i].data[rows, cols], dtype=np.float64)
                      for i in (rec.image_hdu, rec.error_hdu, rec.coverage_hdu))
 
@@ -220,7 +220,7 @@ def _smooth_lattice(root, rec, outdir):
     ny, nx = rec.shape
     nj, ni = (ny - 1) // step + 2, (nx - 1) // step + 2
     lat = np.full((nj, ni), np.nan)
-    with fits.open(os.path.join(root, rec.path), mode="readonly", memmap=True) as hdus:
+    with fits.open(os.path.join(root, rec.path), mode="denywrite", memmap=True) as hdus:
         eh, ch, ih = hdus[rec.error_hdu].data, hdus[rec.coverage_hdu].data, hdus[rec.image_hdu].data
         for j in range(nj):
             r0, r1 = max(0, j * step - half), min(ny, j * step + half + 1)

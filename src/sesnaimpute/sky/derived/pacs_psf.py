@@ -472,7 +472,7 @@ def _map_header(config, record):
     if stored:
         return fits.Header.fromstring(stored)
     path = Path(config.inputs["herschel_pacs_maps"]) / record.path
-    with fits.open(path, mode="readonly", memmap=True) as hdus:
+    with fits.open(path, mode="denywrite", memmap=True) as hdus:
         header = hdus[0].header.copy()
         header.extend(hdus[record.image_hdu].header, update=True, strip=False)
     return header
@@ -607,10 +607,12 @@ def mosaic_scalar(record, name):
 
 def _input_layers(root, q):
     """The (image, error, coverage) arrays of input map `q` (a `psf.json` map entry), memory-mapped and kept open
-    for the life of the process: `MosaicPSF.weights` reads single pixels of them."""
+    for the life of the process: `MosaicPSF.weights` reads single pixels of them. Truly read-only ("denywrite", shared
+    pages): astropy's "readonly" maps copy-on-write, which a node with strict overcommit (Stampede3) charges in full
+    per worker per map (65.7 GB over 115 workers in job 3661155)."""
     path = os.path.join(root, q["path"])
     if path not in _INPUT_LAYERS:
-        hdus = fits.open(path, mode="readonly", memmap=True)
+        hdus = fits.open(path, mode="denywrite", memmap=True)
         _INPUT_LAYERS[path] = (hdus, tuple(hdus[i].data for i in q["hdus"]))
     return _INPUT_LAYERS[path][1]
 
