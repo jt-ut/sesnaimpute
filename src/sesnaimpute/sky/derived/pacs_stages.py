@@ -52,10 +52,13 @@ def _band_dir(config, region, band, box=None):
 
 
 def _atomic_write(path, obj):
-    """Pickle `obj` (protocol 5) to `path` through a temporary file in the same directory."""
+    """Pickle `obj` (protocol 5) to `path` through a temporary file in the same directory, on disk before the rename
+    (Orion A on Stampede3: a 296 MB shard file renamed into place without it read back 280 MiB long)."""
     tmp = "%s.tmp%d" % (path, os.getpid())
     with open(tmp, "wb") as f:
         pickle.dump(obj, f, protocol=5)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
 
 
