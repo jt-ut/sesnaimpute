@@ -97,7 +97,10 @@ submit() {
         echo "$name"
     else
         # sbatch on Stampede3 prints its banner on stdout too: the id is the last all-digit line
-        "${cmd[@]}" | cut -d';' -f1 | grep -E '^[0-9]+$' | tail -1
+        local id
+        id=$("${cmd[@]}" | cut -d';' -f1 | grep -E '^[0-9]+$' | tail -1)
+        [ -n "$id" ] || { echo "submission of $name failed: stopping (cancel this chain's earlier jobs: squeue -u $USER)" >&2; kill -TERM $$; exit 1; }
+        echo "$id"
     fi
 }
 ABS=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
