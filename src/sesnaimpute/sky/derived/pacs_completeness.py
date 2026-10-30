@@ -53,7 +53,7 @@ Run: `PY sesnaimpute.sky.derived.pacs_completeness $CONFIG [--regions ...]`.
 
 import functools
 import os
-import shutil
+import pickle
 import time
 
 import h5py
@@ -496,7 +496,7 @@ def filtered(tile, x, y, offset_cell, image=None, row0=0):
 
 def _detection_kernel(tile):
     """The detection kernel of the tile: the band's own point-spread template (`Tile._add_sources`'s, at the map
-    centre) on its footprint (where it exceeds ZERO_SUM_FOOTPRINT of its peak). Returns (h, kc, fc, s_full): the
+    centre; a mosaic's weight-mean table, `MosaicPSF.table`, not the local mixture at the centre pixel) on its footprint (where it exceeds ZERO_SUM_FOOTPRINT of its peak). Returns (h, kc, fc, s_full): the
     half-width, the template on the footprint and the footprint as correlated (flipped), and the zero-sum template's
     sum of squares over the footprint."""
     h = tile.injection_half_width()
@@ -505,7 +505,9 @@ def _detection_kernel(tile):
     offs = np.arange(side, dtype=float)
     px = np.broadcast_to((cx - h + offs)[None, None, :], (1, side, side))
     py = np.broadcast_to((cy - h + offs)[None, :, None], (1, side, side))
-    k = tile._psf.evaluate_xy(np.array([float(cx)]), np.array([float(cy)]), px, py).mean(axis=1)[0]
+    psf = tile._psf
+    evaluate = psf.evaluate_mean_xy if isinstance(psf, pacs_psf.MosaicPSF) else psf.evaluate_xy
+    k = evaluate(np.array([float(cx)]), np.array([float(cy)]), px, py).mean(axis=1)[0]
     foot = k > ZERO_SUM_FOOTPRINT * k.max()
     kf = np.where(foot, k, 0.0)
     s_full = float(((k[foot] - k[foot].mean()) ** 2).sum())
@@ -628,8 +630,8 @@ def matched_state(tile):
 
 def _layer_strip(task, config):
     """Rows of one mosaic's prepared layers (`pacs_fit.mosaic_layer_strip`)."""
-    record, a, b, floor, error_floor = task
-    pacs_fit.mosaic_layer_strip(config, record, a, b, floor, error_floor)
+    record, a, b, floor, error_fraction = task
+    pacs_fit.mosaic_layer_strip(config, record, a, b, floor, error_fraction)
     return record.map_id
 
 
@@ -651,7 +653,7 @@ def _strip_piece(task, config):
 
 def _prepare_stage(config, records, n_jobs, stage):
     """The band mosaics prepared for the run, every step in strips over all workers: the mosaic's layers in mJy (the
-    floors from a sample of rows, `pacs_fit.mosaic_layer_plan`; strips of PREPARE_STRIP_ROWS rows in parallel), the
+    coverage floor from a sample of rows, the error floor from each pixel's own weight, `pacs_fit.mosaic_layer_plan`; strips of PREPARE_STRIP_ROWS rows in parallel), the
     point-spread cache and detection layers (one task per mosaic), then the detection strips (STRIPS_PER_WORKER x
     n_jobs of them where the mosaic is tall enough, `detection_strips`)."""
     plans = [(r, pacs_fit.mosaic_layer_plan(config, r)) for r in records]
@@ -741,7 +743,7 @@ def _injected_delta(tile, x, y, flux, wpx, wpy):
 
 
 def window_peaks(tile, x, y, radius_px, m_offset_cell, m_sigma_cell, offset_cell, flux=None, image=None, row0=0):
-    """For each map position (x, y): the PACS source the blind detection finds within `radius_px` of it, on the
+    """For each map position (x, y): the PACS source the blind detection finds within `radius_px` (one, or one per position) of it, on the
     PSF-matched map (`matched_state`, plus each injection's own change when `flux` is given: the map then holds those
     injections) on the pixels within radius_px + 1.5 (enough for the 8-neighbour test): a local maximum reaching 5 x
     the matched map's own cell noise above its cell offset (`m_sigma_cell`, `m_offset_cell`), the nearest one, its
@@ -754,14 +756,15 @@ def window_peaks(tile, x, y, radius_px, m_offset_cell, m_sigma_cell, offset_cell
     if n == 0:
         return out
     ms = matched_state(tile)
-    h = int(np.ceil(radius_px)) + 2
+    rad = np.broadcast_to(np.asarray(radius_px, float), (n,))[:, None, None]       # one radius, or one per position
+    h = int(np.ceil(rad.max())) + 2
     off = np.arange(-h, h + 1)
     cx, cy = np.rint(x).astype(np.int64), np.rint(y).astype(np.int64)
     px = np.ascontiguousarray(np.broadcast_to(cx[:, None, None] + off[None, None, :], (n, off.size, off.size)))
     py = np.ascontiguousarray(np.broadcast_to(cy[:, None, None] + off[None, :, None], (n, off.size, off.size)))
     dist = np.hypot(px - x[:, None, None], py - y[:, None, None])
     ny, nx = tile.shape
-    use = (dist <= radius_px + 1.5) & (px >= 0) & (px < nx) & (py >= 0) & (py < ny)
+    use = (dist <= rad + 1.5) & (px >= 0) & (px < nx) & (py >= 0) & (py < ny)
     v = np.full(px.shape, np.nan)
     v[use] = ms["m"][py[use], px[use]]
     if flux is not None:
@@ -770,7 +773,7 @@ def window_peaks(tile, x, y, radius_px, m_offset_cell, m_sigma_cell, offset_cell
     good = cid >= 0
     v = np.where(good, v - m_offset_cell[np.maximum(cid, 0)], np.nan)
     thr = np.where(good, pacs_fit.DETECTION_SNR * m_sigma_cell[np.maximum(cid, 0)], np.nan)
-    pk = _local_peaks(v, thr) & (dist <= radius_px)
+    pk = _local_peaks(v, thr) & (dist <= rad)
     found, xc, yc, fnu, dd = out
     cand = np.where(pk, dist, np.inf).reshape(n, -1)
     best = np.argmin(cand, axis=1)
@@ -782,7 +785,7 @@ def window_peaks(tile, x, y, radius_px, m_offset_cell, m_sigma_cell, offset_cell
     if has.any():
         fnu[has] = filtered(tile, xc[has], yc[has], offset_cell, image=image, row0=row0)
         dd[has] = np.hypot(xc[has] - x[has], yc[has] - y[has])
-        found[has] = dd[has] <= radius_px
+        found[has] = dd[has] <= rad[has, 0, 0]
     return found, xc, yc, fnu, dd
 
 
@@ -851,8 +854,7 @@ class Injector:
         self.m_sigma[self.ids] = inp.get("m_sigma", np.full(n, np.nan))
         self.m_offset[self.ids] = inp.get("m_offset", np.full(n, np.nan))
         matched_state(tile)                 # the detection image of the un-injected map, before any injection
-        self.beam_px = tile.beam_px
-        self.beam_area_px = np.pi / (4 * np.log(2)) * tile.beam_px ** 2
+        self.beam_px = tile.beam_px              # the mosaic-wide mean; every radius uses `beam_px_at`
         self.separation_px = tile.injection_half_width() + APERTURES[tile.record.band][2] / tile.pixel_arcsec
         # the PACS sources of the un-injected map (the blind detection), and the matching radius
         self.pos_k_px = float(inp.get("pos_k_arcsec", np.nan)) / tile.pixel_arcsec
@@ -930,19 +932,25 @@ class Injector:
         """Injects one batch of sources of S/N `snr` at random positions of the cells of `rows`, measures each
         through the catalogue's own path, restores the map (`measure_positions`)."""
         x, y, d = self.positions(rng, rows)
-        return self.measure_positions(x, y, d, self.flux_at(x, y, snr), radius_px=self.recovery_radius_px(snr))
+        return self.measure_positions(x, y, d, self.flux_at(x, y, snr), radius_px=self.recovery_radius_px(snr, x, y))
 
-    def recovery_radius_px(self, snr):
-        """The recovery radius at injection S/N `snr`: MATCH_SIGMAS x the detection's measured position scatter there
-        (the scatter x S/N constant over S/N), between one pixel and half a beam."""
+    def beam_px_at(self, x, y):
+        """The local beam (pixels) at map pixel positions (`Tile.beam_px_at`)."""
+        return self.tile.beam_px_at(x, y)
+
+    def recovery_radius_px(self, snr, x, y):
+        """The recovery radius at injection S/N `snr` at each map position (x, y): MATCH_SIGMAS x the detection's
+        measured position scatter there (the scatter x S/N constant over S/N), between one pixel and half the local beam."""
+        half_beam = 0.5 * self.beam_px_at(x, y)
         if not np.isfinite(self.pos_k_px):
-            return 0.5 * self.beam_px
-        return float(np.clip(MATCH_SIGMAS * self.pos_k_px / max(snr, 1e-3), 1.0, 0.5 * self.beam_px))
+            return half_beam
+        return np.clip(MATCH_SIGMAS * self.pos_k_px / max(snr, 1e-3), 1.0, half_beam)
 
     def measure_positions(self, x, y, d, flux, radius_px=None):
         """Injects `flux` (mJy, scalar or one per position) at the map pixels (x, y), `d` the distance (pixels) of
         each to the nearest PACS source of the un-injected map, runs the blind detection around each
-        (`window_peaks` within `radius_px`, the recovery radius at the batch's S/N; half a beam if None), restores the
+        (`window_peaks` within `radius_px`, the recovery radius at the batch's S/N, a scalar or one per position; half the
+        local beam if None), restores the
         map. RECOVERED: a PACS source is found within the radius, and where a source of the un-injected map lies within it the injection is the
         brighter (an injection on an existing peak counts only as the brighter member). Also the forced aperture
         flux at the injected position (the photometric error, SCATTER). Returns dict(row, near (within one
@@ -956,11 +964,12 @@ class Injector:
                    det_dist=np.zeros(0, np.float32), n=0, seconds=dict(inject=0.0, aperture=0.0))
         if n == 0:
             return out
-        r = 0.5 * self.beam_px if radius_px is None else float(radius_px)
+        beam = self.beam_px_at(x, y)
+        r = 0.5 * beam if radius_px is None else np.broadcast_to(np.asarray(radius_px, float), x.shape)
         flux = np.broadcast_to(np.asarray(flux, float), x.shape)
         cid = tile.grid.cell_ids(x, y)
         offset = self.offset[cid]
-        near = d < BLEND_RADIUS_BEAMS * self.beam_px
+        near = d < BLEND_RADIUS_BEAMS * beam
         # an existing PACS source within the radius: the injection counts only if brighter than it
         brighter = np.ones(n, bool)
         if self.det_tree is not None:
@@ -980,7 +989,7 @@ class Injector:
         strip = pacs_fit.PREPARE_STRIP_ROWS
         ny = tile.shape[0]
         mg = (tile.injection_half_width() + int(np.ceil(APERTURES[tile.record.band][2] / tile.pixel_arcsec)) + 1
-              + int(np.ceil(r)) + 2)
+              + int(np.ceil(r.max())) + 2)
         band = np.floor(y / strip).astype(np.int64)
         for b in np.unique(band):
             k = np.flatnonzero(band == b)
@@ -994,7 +1003,7 @@ class Injector:
             t0 = time.time()
             m = tile.measure(x[k], y[k], image=buf, row0=a0)
             flux_out[k], covered[k] = m.flux, m.covered
-            f_, _xc, _yc, df_, dd_ = window_peaks(tile, x[k], y[k], r, self.m_offset, self.m_sigma, self.offset,
+            f_, _xc, _yc, df_, dd_ = window_peaks(tile, x[k], y[k], r[k], self.m_offset, self.m_sigma, self.offset,
                                                   flux=flux[k], image=buf, row0=a0)
             found[k], det_flux[k], det_dist[k] = f_, df_, dd_
             t_ap += time.time() - t0
@@ -1066,7 +1075,8 @@ def self_check(config, record):
     """The template's normalisation, on a ZERO image: ZERO_CHECK_FLUX_MJY injected at ZERO_CHECK_POSITIONS empty-sky
     positions of `record`'s map, the aperture SUM with no sky subtraction divided by the injected flux times the
     map's encircled-energy fraction at the aperture radius (total-flux normalisation; for a mosaic the local mixture
-    of its input maps', `MosaicPSF.enclosed_at`): every position must be
+    of its input maps' REAL unit sources, resampled, `pacs_checks.expected_enclosed`: absolute, independent of the
+    PSF build's own fractions): every position must be
     within 0.5 %, else the template is not normalised to total flux. Prints the worst ratios and, for
     information, the share of the aperture flux the sky term of the catalogue's own measurement removes on a
     zero image (the clipped mode of the monotonic wing, not the mean the aperture fraction assumes). Raises
@@ -1093,8 +1103,14 @@ def self_check(config, record):
     with tile.blank_image(), tile.injected(x, y, ZERO_CHECK_FLUX_MJY):
         f, sky, _sd, area, cov = pacs_fit._aperture_core(tile.image, tile.error, x, y, r_ap, r_in, r_out, 5)
     if isinstance(tile._psf, pacs_psf.MosaicPSF):
-        # a mosaic has no single release table: the fraction at each position is the local mixture of its input maps'
-        eef = tile._psf.enclosed_at(x, y)
+        # a mosaic has no single release table, and its own enclosed fractions are what the injection was normalised
+        # by (they would cancel): the expected aperture sum is recomputed on a REAL unit source synthesised in each
+        # contributing input map's pixels and resampled (pacs_checks.expected_enclosed), tied to the release EEF
+        from sesnaimpute.sky.derived import pacs_checks
+        eef, tie = pacs_checks.expected_enclosed(config, record, tile, x, y, tile._psf.weights(x, y))
+        if tie > pacs_checks.RELEASE_TOLERANCE:
+            raise ValueError("%s: the synthetic real source is %.2f %% off the release encircled energy (template, pixel "
+                             "area or EEF file)" % (record.band, 100 * tie))
     else:
         eef = pacs_psf.physical_aperture_fraction(config, record, "total", False)
     expected = ZERO_CHECK_FLUX_MJY * eef
@@ -1116,7 +1132,7 @@ def _real_check(injector, flux_mjy, half, rows=None):
     tile = injector.tile
     rng = np.random.default_rng([injector.seed_key, 99999, half])
     x, y, d = injector.positions(rng, np.arange(injector.ids.size) if rows is None else rows)
-    far = d >= BLEND_RADIUS_BEAMS * injector.beam_px
+    far = d >= BLEND_RADIUS_BEAMS * injector.beam_px_at(x, y)
     x, y = x[far][:REAL_CHECK_POSITIONS], y[far][:REAL_CHECK_POSITIONS]
     before = tile.measure(x, y)
     with tile.writable(), tile.injected(x, y, flux_mjy):
@@ -1172,7 +1188,7 @@ def injection_blocks(ids, nx):
 def _inject_pairs(piece, config, records):
     """The injections of one piece: `piece = (tile index, inputs, (block, first row, last row + 1), jobs, real
     check?)`, `jobs` the `(S/N plane, half, batch seeds, rows or None: the block's)` of the piece (see `Injector`,
-    `_injection_rounds`): the batches of each over the block's cells (`_inject_batches`); on the piece flagged for it, the
+    `round_task_list`): the batches of each over the block's cells (`_inject_batches`); on the piece flagged for it, the
     real-map self-check. Returns `(tile index, dict)`."""
     t, inp, (b, r0, r1), jobs, do_check = piece
     record = records[t]
@@ -1205,17 +1221,51 @@ def _chunks(jobs, n_rows):
     return [[jobs[i] for i in c] for c in np.array_split(np.arange(len(jobs)), k) if c.size]
 
 
-def _injection_rounds(config, records, inputs, nx, n_jobs, stage):
-    """The injections of every map of a band, in rounds of pieces over all maps and blocks (`injection_blocks`): the
-    first round makes each map's first batches in every block for every (S/N plane, half) pair; each further round one
-    more batch per pair, over the cells within the pooling radius of a cell whose pool (the WHOLE map's, from the
-    injections so far) is still short of MIN_INJECTIONS, until none is or MAX_EXTRA_BATCHES have been made. Maps from the
-    largest. `nx`: each map's cell grid width. Returns `{tile: [pieces' outputs]}`."""
-    pairs = [(p, half) for p in range(snr_grid().size) for half in (0, 1)]
-    tiles = [t for t, _ in sorted(inputs.items(), key=lambda kv: -kv[1]["ids"].size)]
-    first = dict(pieces_module.run(functools.partial(_map_first, config=config, records=records),
-                                   [(t, inputs[t]) for t in tiles], n_jobs, stage=stage, unit="maps (artificial sources, sizing)"))
-    st, parts, tasks = {}, {t: [] for t in tiles}, []
+def injection_pairs():
+    """The (S/N plane, half) pairs of the injections, in the order of the count columns."""
+    return [(p, half) for p in range(snr_grid().size) for half in (0, 1)]
+
+
+def tile_order(inputs):
+    """The maps of a band as the injections and the pooling take them: from the largest."""
+    return [t for t, _ in sorted(inputs.items(), key=lambda kv: -kv[1]["ids"].size)]
+
+
+def map_sizing(config, records, inputs, n_jobs, stage):
+    """`{tile: batches of the first round}` (`_map_first`) of every map of a band."""
+    return dict(pieces_module.run(functools.partial(_map_first, config=config, records=records),
+                                  [(t, inputs[t]) for t in tile_order(inputs)], n_jobs, stage=stage,
+                                  unit="maps (artificial sources, sizing)"))
+
+
+def part_counts(inputs, done):
+    """What a set of pieces' outputs (`done`, `[(tile, part)]`) add to the maps' injection counts, `{tile: sparse matrix
+    (cells x `injection_pairs`)}`: the counts `round_task_list` reads for the rounds before the one it plans."""
+    pairs = injection_pairs()
+    acc = {}
+    for t, part in done:
+        rows, cols = acc.setdefault(t, ([], []))
+        for p, half, _b, _s, res, _sec, _cnt in part["pairs"]:
+            rows.append(res["row"])
+            cols.append(np.full(res["row"].size, pairs.index((p, half))))
+    out = {}
+    for t, (rows, cols) in acc.items():
+        row, col = np.concatenate(rows or [np.zeros(0, np.int64)]), np.concatenate(cols or [np.zeros(0, np.int64)])
+        out[t] = csr_matrix((np.ones(row.size, np.int64), (row, col)), shape=(len(inputs[t]["ids"]), len(pairs)))
+    return out
+
+
+def round_task_list(records, inputs, nx, first, r, load):
+    """The injections of one map of a band in rounds of pieces over all maps and blocks (`injection_blocks`): round 0
+    makes each map's first batches in every block for every (S/N plane, half) pair; each further round one more batch
+    per pair, over the cells within the pooling radius of a cell whose pool (the WHOLE map's, from the injections of
+    all earlier rounds) is still short of MIN_INJECTIONS, until none is or MAX_EXTRA_BATCHES have been made. Returns the
+    ordered pieces of round `r` (`_inject_pairs`; [] when the band's injections are complete); `load(q)` gives
+    `{tile: counts}` (`part_counts`) of the pieces' outputs of round `q < r` (called only for a round that had pieces).
+    `nx`: each map's cell grid width, `first`: `map_sizing`."""
+    pairs = injection_pairs()
+    tiles = tile_order(inputs)
+    st, tasks = {}, []
     for t in tiles:
         ids = inputs[t]["ids"]
         blocks = injection_blocks(ids, nx[t])
@@ -1225,15 +1275,11 @@ def _injection_rounds(config, records, inputs, nx, n_jobs, stage):
             jobs = [(p, half, tuple(range(first[t])), None) for p, half in pairs]
             for j, c in enumerate(_chunks(jobs, blk[2] - blk[1])):
                 tasks.append((t, inputs[t], blk, c, i == 0 and j == 0))
-    for extra in range(MAX_EXTRA_BATCHES + 1):
+    for extra in range(min(r, MAX_EXTRA_BATCHES + 1)):
         if not tasks:
-            break
-        done = pieces_module.run(functools.partial(_inject_pairs, config=config, records=records), tasks, n_jobs,
-                                 stage=stage, unit="map pieces (artificial sources, round %d)" % extra)
-        for t, part in done:
-            parts[t].append(part)
-            for p, half, _b, _s, r, _sec, _cnt in part["pairs"]:
-                st[t]["count"][:, pairs.index((p, half))] += np.bincount(r["row"], minlength=len(inputs[t]["ids"]))
+            return []
+        for t, m in load(extra).items():
+            st[t]["count"] += m.toarray()
         tasks = []
         if extra == MAX_EXTRA_BATCHES:
             break
@@ -1250,7 +1296,7 @@ def _injection_rounds(config, records, inputs, nx, n_jobs, stage):
                         for i, (p, half) in enumerate(pairs) if act[i] and reach[r0:r1, i].any()]
                 for c in (_chunks(jobs, r1 - r0) if jobs else []):
                     tasks.append((t, inputs[t], blk, c, False))
-    return parts
+    return tasks if r <= MAX_EXTRA_BATCHES else []
 
 
 _POOL_KEYS = ("row", "plane", "half", "near", "recovered", "dflux")
@@ -1261,11 +1307,12 @@ def pool_dir(config, record):
     return os.path.join(pacs_fit.prepared_dir(config, record), "pool")
 
 
-def _write_pool_table(t, inp, parts, records, config):
+def _write_pool_table(t, inp, parts, records, config, d=None):
     """A map's injections, from its pieces' outputs (`parts`), written as the memory-mapped table the pooling tasks
     read: the records of both halves sorted by row (a stable sort of the records taken in (half, S/N plane, block, batch)
     order, so the table does not depend on the order the pieces finished), with `offsets` (the first record of
-    every row). Returns `(table directory, the held-out half's injections, the statistics the parent prints)`."""
+    every row). Written to `d` (default `pool_dir`). Returns `(table directory, the held-out half's injections, the
+    statistics the parent prints)`."""
     ids = np.asarray(inp["ids"], np.int64)
     n_row = ids.size
     snr = snr_grid()
@@ -1289,7 +1336,7 @@ def _write_pool_table(t, inp, parts, records, config):
     cols = {k: np.concatenate([build[k], held[k]]) for k in ("row", "plane", "near", "recovered", "dflux")}
     cols["half"] = np.concatenate([np.zeros(build["row"].size, np.int8), np.ones(held["row"].size, np.int8)])
     order = np.argsort(cols["row"], kind="stable")
-    d = pool_dir(config, records[t])
+    d = d or pool_dir(config, records[t])
     os.makedirs(d, exist_ok=True)
     for k in _POOL_KEYS:
         np.save(os.path.join(d, k + ".npy"), cols[k][order])
@@ -1441,9 +1488,9 @@ def _calibrate(piece, config, records):
     rows = np.arange(inj.ids.size)
     for k, snr in enumerate(CALIBRATION_SNR):
         x, y, d = inj.positions(np.random.default_rng([t + 1, 7777, k]), rows)
-        far = d >= inj.beam_px
+        far = d >= inj.beam_px_at(x, y)
         x, y, d = x[far], y[far], d[far]
-        r = inj.measure_positions(x, y, d, inj.flux_at(x, y, snr), radius_px=inj.beam_px)
+        r = inj.measure_positions(x, y, d, inj.flux_at(x, y, snr), radius_px=inj.beam_px_at(x, y))
         good = np.isfinite(r["det_dist"])
         out.append(r["det_dist"][good] * tile.pixel_arcsec * snr)
     return t, (np.concatenate(out) if out else np.zeros(0))
@@ -1479,11 +1526,12 @@ def _print_tile_stats(s, flux_grid):
               % " ".join("%.3g:%.2f" % (snr[p], bp[p, 1] / max(bp[p, 0], 1)) for p in every), flush=True)
 
 
-def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, detect_only=False):
+def _band_detect(config, records, ra, dec, n_jobs, stage, flux_grid, detect_only=False):
     """Measure every covered cell of every map of one band inside the region's padded source bounding box;
-    choose each source's deepest map; inject artificial sources on every map. Returns the band's datasets
-    (and the held-out half, the printed statistics), or None when no map reaches a source. `records`: the band's
-    one mosaic (`_build_region`)."""
+    choose each source's deepest map; detect the PACS sources and fix the matching radius: everything of the band
+    before its artificial sources (stage DETECT of `pacs_stages`). Returns the band's state (what `_band_dict` and the
+    injection stages read), or None when no map reaches a source; with `detect_only` the band's datasets from the
+    detection alone. `records`: the band's one mosaic (`pacs_stages.run_region`)."""
     n_src = ra.size
     n_plane = flux_grid.size
 
@@ -1612,25 +1660,17 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, detect_onl
     print("  PACS detections %d; by sky bin (faint to bright) %s"
           % (peaks["fnu"].size, [int((peaks["bin"] == j).sum()) for j in range(SKY_BINS)]), flush=True)
 
-    # artificial sources: each map cut by its cell grid into blocks, rounds of pieces over all blocks of all maps; then
-    # the injections of each map written once to a memory-mapped table and pooled by cell blocks
-    by_tile = _injection_rounds(config, records, inputs, {t: geometry[t][2].nx for t in inputs}, n_jobs, stage)
-    counts = {t: len(v) for t, v in by_tile.items()}
-    tables, tasks = {}, []
-    for t in counts:
-        tables[t] = _write_pool_table(t, inputs[t], by_tile[t], records, config)
-        tasks += pool_tasks(t, tables[t][0], inputs[t]["ids"], geometry[t][2].nx)
-    del by_tile
-    pooled = pieces_module.run(functools.partial(_pool_block, records=records, flux_grid=flux_grid),
-                               tasks, n_jobs, stage=stage, unit="cell blocks (pooling)")
-    blocks_of = {t: [] for t in counts}
-    for t, o in pooled:
-        blocks_of[t].append(o)
-    injected = []
-    for t in counts:
-        d, held_t, stats_t = tables[t]
-        injected.append((t, _assemble_tile(inputs[t], held_t, stats_t, blocks_of[t], flux_grid)))
-        shutil.rmtree(d)
+    return dict(records=records, n_src=n_src, geometry=geometry, cols=cols, cell_map=cell_map, cell_id=cell_id, n_row=n_row,
+                src_row=src_row, shifts=shifts, cell_sigma=cell_sigma, cell_offset=cell_offset, m_sigma_rows=m_sigma_rows,
+                m_offset_rows=m_offset_rows, cell_bin=cell_bin, inputs=inputs, peaks=peaks, pos_k=pos_k, r_match=r_match,
+                rms_inj=rms_inj, rms_align=rms_align)
+
+
+def _band_dict(s, injected, flux_grid):
+    """The band's datasets from its state (`_band_detect`) and `injected`, `[(tile index, _assemble_tile's output)]` of
+    its maps (`tile_order`): the curves, errors and the held-out half, the PACS sources' uncertainty."""
+    records, inputs, peaks, geometry, cols = s["records"], s["inputs"], s["peaks"], s["geometry"], s["cols"]
+    n_row, n_plane = s["n_row"], flux_grid.size
     curve = np.zeros((n_row, n_plane), np.uint16)
     n_pos = np.zeros(n_row, np.int32)
     flux90_ = np.full(n_row, np.nan, np.float32)
@@ -1657,18 +1697,18 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, detect_onl
     for s_ in stats:
         _print_tile_stats(s_, flux_grid)
     envelope = curve.max(axis=0).astype(np.uint16) if n_row else np.zeros(n_plane, np.uint16)
-    return dict(curve=curve, source_row=src_row.astype(np.int32), envelope=envelope, n_pos=n_pos,
-                peaks=peaks, r_match=r_match, rms_inj=rms_inj, rms_align=rms_align,
-                cell_m_sigma=m_sigma_rows, cell_m_offset=m_offset_rows,
-                sky_bin=cell_bin.astype(np.int8), n_sigma=cols["n_sigma"].astype(np.int16), flux90=flux90_, bias=errors["bias"], scatter=errors["scatter"],
+    return dict(curve=curve, source_row=s["src_row"].astype(np.int32), envelope=envelope, n_pos=n_pos,
+                peaks=peaks, r_match=s["r_match"], rms_inj=s["rms_inj"], rms_align=s["rms_align"],
+                cell_m_sigma=s["m_sigma_rows"], cell_m_offset=s["m_offset_rows"],
+                sky_bin=s["cell_bin"].astype(np.int8), n_sigma=cols["n_sigma"].astype(np.int16), flux90=flux90_, bias=errors["bias"], scatter=errors["scatter"],
                 held=held, stats=stats,
-                cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=cell_sigma, cell_offset=cell_offset,
-                cell_id=cell_id, cell_map_index=cell_map,
-                cell_map=np.array([records[t].map_id for t in cell_map] or [""], dtype="S")[:n_row],
+                cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=s["cell_sigma"], cell_offset=s["cell_offset"],
+                cell_id=s["cell_id"], cell_map_index=s["cell_map"],
+                cell_map=np.array([records[t].map_id for t in s["cell_map"]] or [""], dtype="S")[:n_row],
                 n_candidate=sum(g[1].size for g in geometry),
                 map_id=np.array([r.map_id for r in records], dtype="S"),
                 map_obsid=np.array([",".join(r.obsids) for r in records], dtype="S"),
-                map_shift=shifts[:, :2].astype(np.float32), map_pairs=shifts[:, 2].astype(np.int32),
+                map_shift=s["shifts"][:, :2].astype(np.float32), map_pairs=s["shifts"][:, 2].astype(np.int32),
                 records=records,
                 map_wcs=np.array([g[3].to_header_string() for g in geometry], dtype="S"),
                 map_shape=np.array([g[2].shape for g in geometry], dtype=np.int32).reshape(len(records), 2),
@@ -1768,7 +1808,6 @@ def write_product(path, region, mag, bands):
 MERGE_SIGMAS = 3.0
 MERGE_MIN_SNR = 20.0
 MERGE_MIN_PAIRS = 5
-BEAM_ARCSEC = {"P70": 5.6, "P100": 6.8, "P160": 11.4}
 
 
 def _unit(ra_deg, dec_deg):
@@ -1786,14 +1825,16 @@ def _sep_arcsec(u, v):
 
 def _pair_scatter(pa, pb, beam_red):
     """The per-source position scatter (2-D rms, robust, arcsec) between two bands' bright detections (S/N >=
-    MERGE_MIN_SNR) paired within half the redder beam, and the number of pairs."""
+    MERGE_MIN_SNR) paired within half the redder band's local beam at the first band's detection (`beam_red`: its
+    mosaic's `MosaicPSF.beam_at_sky`), and the number of pairs."""
     a = pa["snr"] >= MERGE_MIN_SNR
     b = pb["snr"] >= MERGE_MIN_SNR
     if not a.any() or not b.any():
         return np.nan, 0
     ua, ub = _unit(pa["ra"][a], pa["dec"][a]), _unit(pb["ra"][b], pb["dec"][b])
-    d, j = cKDTree(ub).query(ua, distance_upper_bound=_chord(beam_red / 2.0))
+    d, j = cKDTree(ub).query(ua, distance_upper_bound=_chord(beam_red.sub_beams.max() / 2.0))
     ok = np.isfinite(d)
+    ok[ok] = _sep_arcsec(ua[ok], ub[j[ok]]) <= beam_red.beam_at_sky(pa["ra"][a][ok], pa["dec"][a][ok]) / 2.0
     if not ok.any():
         return np.nan, 0
     sep = _sep_arcsec(ua[ok], ub[j[ok]])
@@ -1808,7 +1849,7 @@ def _measure_at(piece, config, records):
     tile = pacs_fit.cached_tile(config, records[band][t])
     x, y = tile.xy(*pacs_fit.to_map_frame(ra, dec, shift))
     fnu = filtered(tile, x, y, offset_cell)
-    ext = tile.fitted_fwhm(x, y) > 1.5 * tile.beam_arcsec
+    ext = tile.fitted_fwhm(x, y) > 1.5 * tile.beam_at(x, y)
     return band, t, fnu, tile.grid.cell_ids(x, y), ext
 
 
@@ -1820,12 +1861,16 @@ def merge_sources(config, bands, n_jobs, stage, flux_grid):
     matching radius is the position band's map radius, a 160-only source's with the 70-160 merge radius in
     quadrature; CHANCE the SESNA density within LOCAL_DENSITY_ARCSEC times the radius's area. Returns the table."""
     pk = {b: bands[b]["peaks"] for b in BANDS}
-    radius = {}
+    recs = {b: bands[b].get("records", []) for b in BANDS}
+    psf = {b: pacs_psf.MosaicPSF(recs[b][0].mosaic_dir, pacs_fit.maps_root(config), tables=False) for b in BANDS if recs[b]}
+    radius = {}                         # arcsec; None: half the redder band's local beam at the detection
     for a, b in (("P70", "P100"), ("P70", "P160"), ("P100", "P160")):
-        rms, n = _pair_scatter(pk[a], pk[b], BEAM_ARCSEC[b])
-        radius[(a, b)] = MERGE_SIGMAS * rms if n >= MERGE_MIN_PAIRS else BEAM_ARCSEC[b] / 2.0
-        print("  merge radius %s-%s: %.2f arcsec (%s)" % (a, b, radius[(a, b)], "3 x rms %.2f from %d pairs" % (rms, n)
-              if n >= MERGE_MIN_PAIRS else "half the redder beam: %d pairs" % n), flush=True)
+        if a not in psf or b not in psf:
+            continue
+        rms, n = _pair_scatter(pk[a], pk[b], psf[b])
+        radius[(a, b)] = MERGE_SIGMAS * rms if n >= MERGE_MIN_PAIRS else None
+        print("  merge radius %s-%s: %s" % (a, b, "%.2f arcsec (3 x rms %.2f from %d pairs)" % (radius[(a, b)], rms, n)
+              if n >= MERGE_MIN_PAIRS else "half the redder band's local beam (%d pairs)" % n), flush=True)
     pos_band, members, pos_u = [], [], []
     for bi, b in enumerate(BANDS):
         p = pk[b]
@@ -1834,15 +1879,17 @@ def merge_sources(config, bands, n_jobs, stage, flux_grid):
         u = _unit(p["ra"], p["dec"])
         order = np.argsort(-p["snr"])
         tree = cKDTree(np.array(pos_u)) if pos_u else None
+        half_beam = 0.5 * psf[b].beam_at_sky(p["ra"], p["dec"])        # the default radius, at each detection of the band
         for i in order:
             best = None
             if tree is not None:
-                rmax = max(radius.get((BANDS[a], b), 0.0) for a in range(bi)) if bi else 0.0
+                reach = {a: (half_beam[i] if radius[(a, b)] is None else radius[(a, b)]) for a in BANDS[:bi] if (a, b) in radius}
+                rmax = max(reach.values(), default=0.0)
                 for k in tree.query_ball_point(u[i], _chord(rmax)):
-                    if b in members[k] or radius.get((BANDS[pos_band[k]], b)) is None:
+                    if b in members[k] or (BANDS[pos_band[k]], b) not in radius:
                         continue
                     sep = _sep_arcsec(u[i], pos_u[k])
-                    if sep <= radius[(BANDS[pos_band[k]], b)] and (best is None or sep < best[1]):
+                    if sep <= reach[BANDS[pos_band[k]]] and (best is None or sep < best[1]):
                         best = (k, sep)
             if best is not None:
                 members[best[0]][b] = int(i)
@@ -1857,7 +1904,6 @@ def merge_sources(config, bands, n_jobs, stage, flux_grid):
     pde = np.array([pk[BANDS[pb]]["dec"][src[BANDS[pb]][k]] for k, pb in enumerate(pos_band)]) if n else np.zeros(0)
     # each detecting band's flux at that band's own detection position (as HPPSC measures it; owner-approved
     # 2026-10-29), on that band's detecting map
-    recs = {b: bands[b].get("records", []) for b in BANDS}
     pieces, want = [], {}
     for b in BANDS:
         det = np.flatnonzero(src[b] >= 0)
@@ -1918,7 +1964,7 @@ def write_sources(path, region, bands, merged):
         w = lambda name, data: build_module.write_dataset(f, name, data, *REGISTRY[(stem, name)])
         ds = w("RA_DEG", np.asarray(merged["ra"], np.float64))
         for (a, b), r in merged["radius"].items():
-            ds.attrs["MERGE_RADIUS_%s_%s_ARCSEC" % (a, b)] = float(r)
+            ds.attrs["MERGE_RADIUS_%s_%s_ARCSEC" % (a, b)] = np.nan if r is None else float(r)
         ds.attrs["N_160_ONLY"] = int((merged["position_band"] == BANDS.index("P160")).sum())
         w("DEC_DEG", np.asarray(merged["dec"], np.float64))
         w("POSITION_BAND", merged["position_band"].astype(np.int8))
@@ -1934,35 +1980,6 @@ def write_sources(path, region, bands, merged):
             w("DEC_%s_DEG" % b, np.asarray(merged["dec_" + b], np.float64))
 
 
-def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None, box=None, detect_only=False):
-    """Measure and write one region. `ra`/`dec` are the region's source positions in the curated order. Each band's
-    only map is its co-added mosaic of the region (`pacs_mosaic.build_mosaic`, built here when absent; `box` (ra, dec,
-    width, height) deg cuts a slice of it, development). Returns the per-band products (for the caller's checks, with
-    each band's held-out half under "held")."""
-    from sesnaimpute.sky.derived import pacs_mosaic
-    mag, flux_grid = canonical_grid()
-    records = {}
-    for b in BANDS:
-        if not os.path.exists(os.path.join(pacs_mosaic.product_dir(config, region, b, box), "mosaic.hdf5")):
-            if not [r for r in pacs_fit.read_index(config, region) if r.band == b]:
-                continue
-            pacs_mosaic.build_mosaic(config, region, b, box=box, n_jobs=n_jobs)
-        records[b] = [pacs_fit.mosaic_record(config, region, b, box)]
-    _prepare_stage(config, [r[0] for r in records.values()], n_jobs, stage)
-    out = {}
-    for b in BANDS:
-        if b in records:
-            self_check(config, records[b][0])
-            out[b] = _band_product(config, records[b], ra, dec, n_jobs, stage, flux_grid, detect_only)
-        if out.get(b) is None:
-            out[b] = _empty_band(ra.size, mag.size)
-    if not detect_only:
-        write_product(out_path, region, mag, out)
-    merged = merge_sources(config, out, n_jobs, stage, flux_grid)
-    write_sources(product_path(config, "sky/derived", "pacs", "sources", "region", region=region), region, out, merged)
-    return out
-
-
 def _region_inputs(config, region):
     """The region's source positions in the curated order, from `catalog.curated.read_positions` (the delivery: the
     curated product is built after the PACS stages)."""
@@ -1972,20 +1989,98 @@ def _region_inputs(config, region):
 
 
 def build(config, regions=None, box=None, detect_only=False):
-    """Writes each region's `completeness_pacs_source` product, regions one after another. Returns
+    """Writes each region's `completeness_pacs_source` product, regions one after another, through the stages of
+    `pacs_stages.run_region` (one process; a rerun after a kill resumes at the first stage file missing). Returns
     `{region: {band: held-out injections}}` for `acceptance` (the command line discards it)."""
+    from sesnaimpute.sky.derived import pacs_stages
     names = regions or [r.name for r in regions_module.REGIONS]
     t0 = time.time()
     held = {}
     for region in names:
         with progress_module.Stage("sky.derived.pacs_completeness", region) as st:
-            ra, dec = _region_inputs(config, region)
             path = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
-            bands = _build_region(config, region, path, ra, dec, config.n_jobs, st, box, detect_only)
+            bands = pacs_stages.run_region(config, region, box, detect_only=detect_only, stage=st)
             held[region] = {b: bands[b]["held"] for b in BANDS}
             st.done(path, **{"cells_" + b: int(bands[b]["curve"].shape[0]) for b in BANDS})
     progress_module.summary("sky.derived.pacs_completeness", len(names), t0)
     return held
+
+
+# ----------------------------------------------------------------------------
+# the preflight (a Vista development-queue job before every production submission)
+
+def _git_state():
+    """(commit, dirty, upstream commit or None) of the checkout this module is imported from."""
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    git = lambda *a: subprocess.run(("git", "-C", here) + a, capture_output=True, text=True)
+    head = git("rev-parse", "HEAD")
+    if head.returncode:
+        raise ValueError("the code at %s is not a git checkout: the preflight needs the pushed commit" % here)
+    up = git("rev-parse", "@{upstream}")
+    return head.stdout.strip(), bool(git("status", "--porcelain", "--untracked-files=no").stdout.strip()), \
+        (up.stdout.strip() if not up.returncode else None)
+
+
+def preflight(config, region, box=None, reuse_mosaics=False, reference_product=None):
+    """Everything a production submission would otherwise find out hours in, in one job (laptop or Vista development
+    queue; the mosaics it builds are the ones the production job reuses): (1) the code is a clean checkout at its
+    upstream (pushed) commit; (2) no mosaic product of the region exists unless `reuse_mosaics` (intended); (3) the
+    inputs: HPPSC lists and observation table of every band, the HOPS table, the region's source positions, the
+    `reference_product` (earlier photometry product, when given); (4) `write_product` and `write_sources` on empty
+    bands (every dataset name registered); (5) the mosaic of every band, its PSF, the layers and detection kernels
+    (`_prepare_stage`); (6) every band's `self_check` and `pacs_checks.normalisation_check`, all before any injection.
+    Raises ValueError at the first failure, prints PREFLIGHT PASS at the end."""
+    import tempfile
+    from sesnaimpute.sky.derived import pacs_checks, pacs_mosaic, pacs_photometry
+    t0 = time.time()
+    commit, dirty, upstream = _git_state()
+    print("preflight: code %s%s, upstream %s" % (commit, " (UNCOMMITTED CHANGES)" if dirty else "", upstream), flush=True)
+    if dirty or upstream != commit:
+        raise ValueError("the code is not the pushed commit (uncommitted changes, or HEAD differs from its upstream)")
+    for b in BANDS:
+        mdir = pacs_mosaic.product_dir(config, region, b, box)
+        if os.path.exists(os.path.join(mdir, "mosaic.hdf5")) and not reuse_mosaics:
+            raise ValueError("a mosaic product exists at %s: move it aside, or run with reuse_mosaics=True if it is intended" % mdir)
+    for b in BANDS:
+        h = pacs_photometry._read_hppsc(config, b)
+        if not (h["ra"].size and h["obsids"]):
+            raise ValueError("HPPSC %s list or observation table is empty" % b)
+    if not pacs_photometry._match_hops(config, region)[0].size:
+        raise ValueError("no HOPS targets matched for %s" % region)
+    ra, dec = _region_inputs(config, region)
+    if not ra.size:
+        raise ValueError("no source positions for %s" % region)
+    if reference_product is not None:
+        pacs_photometry._c4_ratio(config, region, reference_product)
+    print("preflight: inputs present (%d source positions) %.0f s" % (ra.size, time.time() - t0), flush=True)
+    mag, _grid = canonical_grid()
+    with tempfile.TemporaryDirectory(dir=os.path.join(config.data_root, "sky", "derived")) as tmp:
+        bands = {b: _empty_band(5, mag.size) for b in BANDS}
+        write_product(os.path.join(tmp, "c.hdf5"), region, mag, bands)
+        merged = dict(ra=np.zeros(0), dec=np.zeros(0), position_band=np.zeros(0, np.int8), radius={("P70", "P100"): 1.0}, n=0)
+        for b in BANDS:
+            for k in ("fnu", "sigma", "offset", "snr", "ra", "dec"):
+                merged[k + "_" + b] = np.zeros(0)
+            merged["extended_" + b] = np.zeros(0, bool)
+            merged["map_" + b] = np.zeros(0, np.int32)
+            merged["detected_" + b] = np.zeros(0, bool)
+        write_sources(os.path.join(tmp, "s.hdf5"), region, bands, merged)
+    print("preflight: write_product and write_sources names registered %.0f s" % (time.time() - t0), flush=True)
+    records = {}
+    for b in BANDS:
+        if not [r for r in pacs_fit.read_index(config, region) if r.band == b]:
+            continue
+        if not os.path.exists(os.path.join(pacs_mosaic.product_dir(config, region, b, box), "mosaic.hdf5")):
+            pacs_mosaic.build_mosaic(config, region, b, box=box, n_jobs=config.n_jobs)
+        records[b] = pacs_fit.mosaic_record(config, region, b, box)
+        print("preflight: %s mosaic and PSF built %.0f s" % (b, time.time() - t0), flush=True)
+    _prepare_stage(config, list(records.values()), config.n_jobs, None)
+    print("preflight: layers and detection kernels prepared %.0f s" % (time.time() - t0), flush=True)
+    for b, rec in records.items():
+        self_check(config, rec)
+        pacs_checks.normalisation_check(config, rec)
+    print("PREFLIGHT PASS (%s, %s, code %s) %.0f s" % (region, ", ".join(records), commit[:7], time.time() - t0), flush=True)
 
 
 # ----------------------------------------------------------------------------
@@ -2138,11 +2233,30 @@ def _report_detection(band, d, held):
         "%.4f" % (np.median(floor[d["sky_bin"] == j]) if (d["sky_bin"] == j).any() else np.nan) for j in range(SKY_BINS))))
 
 
-def acceptance(config, region, held_out):
-    """Prints C1-C3 for the region's product and the held-out half kept from the build that wrote it (`build`'s
-    return value for the region). C1: the stored curve and 0.9 flux against the held-out half. C2: the held-out
-    recovered injections' bias and scatter against the stored SCATTER (forced and detected-source fluxes); the
-    detection checks (`_report_detection`). Nothing is written."""
+def _held_path(config, region, band, box=None):
+    from sesnaimpute.sky.derived import pacs_stages
+    return os.path.join(pacs_stages.stage_dir(config, region, box), "held_%s.pkl" % band)
+
+
+def _read_held(config, region, box=None):
+    """`{band: held-out half}` from the stage store's `held_<band>.pkl` files (the bands that have one)."""
+    held = {}
+    for band in BANDS:
+        path = _held_path(config, region, band, box)
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                held[band] = pickle.load(f)
+    return held
+
+
+def acceptance(config, region, held_out=None, box=None):
+    """Prints C1-C3 for the region's product and the held-out half kept from the build that wrote it
+    (`held_out`: `{band: held-out injections}`, `build`'s return value for the region; None reads the stage
+    store's `held_<band>.pkl`, `box` naming the store of a development slice). C1: the stored curve and 0.9 flux
+    against the held-out half. C2: the held-out recovered injections' bias and scatter against the stored SCATTER
+    (forced and detected-source fluxes); the detection checks (`_report_detection`). Nothing is written."""
+    if held_out is None:
+        held_out = _read_held(config, region, box)
     path = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
     with h5py.File(path, "r") as f:
         for band in BANDS:
@@ -2154,6 +2268,22 @@ def acceptance(config, region, held_out):
             _acceptance_c1(band, d, held)
             _acceptance_c2(band, d, held)
             _report_detection(band, d, held)
+
+
+def finish_region(config, region, box=None, reference_product=None):
+    """What a region script ran after the completeness product was written: the completeness acceptance (the
+    held-out halves read from the stage store), `pacs_photometry.build` and `pacs_photometry.acceptance`
+    (`reference_product`: the earlier photometry product's path for C4); the held-out halves are removed once the
+    completeness acceptance and the photometry have run (a rerun after a failure repeats the whole of it). Returns
+    nothing; the products are the files."""
+    from sesnaimpute.sky.derived import pacs_photometry
+    acceptance(config, region, None, box)
+    pacs_photometry.build(config, regions=[region], box=box)
+    pacs_photometry.acceptance(config, region, reference_product=reference_product, box=box)
+    for band in BANDS:
+        path = _held_path(config, region, band, box)
+        if os.path.exists(path):
+            os.remove(path)
 
 
 if __name__ == "__main__":

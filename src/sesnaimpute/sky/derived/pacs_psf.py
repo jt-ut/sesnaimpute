@@ -43,6 +43,7 @@ local background. This confirms the old code's 0.911 for P70 parallel 60"/s
 
 import dataclasses
 import json
+from collections import OrderedDict
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -472,7 +473,7 @@ def _map_header(config, record):
     if stored:
         return fits.Header.fromstring(stored)
     path = Path(config.inputs["herschel_pacs_maps"]) / record.path
-    with fits.open(path, mode="readonly", memmap=True) as hdus:
+    with fits.open(path, mode="denywrite", memmap=True) as hdus:
         header = hdus[0].header.copy()
         header.extend(hdus[record.image_hdu].header, update=True, strip=False)
     return header
@@ -589,16 +590,38 @@ class MosaicRecord(MapRecord):
 
 
 _MOSAIC_SCALARS = {}
+_INPUT_LAYERS = {}
 
 
 def mosaic_scalar(record, name):
     """A weight-mean scalar of the mosaic PSF (beam_arcsec, aperture_fraction, enclosed_fraction) from its
-    `_psf/psf.json`."""
-    d = record.mosaic_dir
-    if d not in _MOSAIC_SCALARS:
-        with open(os.path.join(d, "_psf", "psf.json")) as fh:
-            _MOSAIC_SCALARS[d] = json.load(fh)
-    return float(_MOSAIC_SCALARS[d][name])
+    `_psf/psf.json`; read again when the file has been rebuilt (keyed by its modification time)."""
+    path = os.path.join(record.mosaic_dir, "_psf", "psf.json")
+    key = (path, os.stat(path).st_mtime_ns)
+    if key not in _MOSAIC_SCALARS:
+        for old in [k for k in _MOSAIC_SCALARS if k[0] == path]:
+            del _MOSAIC_SCALARS[old]
+        with open(path) as fh:
+            _MOSAIC_SCALARS[key] = json.load(fh)
+    return float(_MOSAIC_SCALARS[key][name])
+
+
+def _input_layers(root, q):
+    """The (image, error, coverage) arrays of input map `q` (a `psf.json` map entry), memory-mapped and kept open
+    for the life of the process: `MosaicPSF.weights` reads single pixels of them. Truly read-only ("denywrite", shared
+    pages): astropy's "readonly" maps copy-on-write, which a node with strict overcommit (Stampede3) charges in full
+    per worker per map (65.7 GB over 115 workers in job 3661155)."""
+    path = os.path.join(root, q["path"])
+    if path not in _INPUT_LAYERS:
+        hdus = fits.open(path, mode="denywrite", memmap=True)
+        _INPUT_LAYERS[path] = (hdus, tuple(hdus[i].data for i in q["hdus"]))
+    return _INPUT_LAYERS[path][1]
+
+
+#: per-position memories of a MosaicPSF (last recently used): mixture fractions, and response patches (256 sources
+#: of 47 x 47 pixels, 4.5 MB, each)
+WEIGHTS_KEPT = 8
+PATCHES_KEPT = 4
 
 
 class MosaicPSF:
@@ -615,9 +638,14 @@ class MosaicPSF:
     `table` (the weight-mean over the mosaic, one component) with `extent`, `subpixel_steps` serves the
     fitting core as for `CachedPairedPSF`; `evaluate_xy` is the exact local mixture; `enclosed_at` and
     `aperture_fraction_at` the same mixture of the sub-groups' enclosed fraction (no sky) and aperture fraction
-    (after the annulus sky). Build with `pacs_fit.build_mosaic_psf`."""
+    (after the annulus sky), each measured on every spatial node's table and interpolated between the nodes as the
+    tables are (a fixed pixel radius covers less sky off the tangent point); `beam_at` the mixture of the sub-groups'
+    beam FWHM. A map counts in the mixture exactly where the mosaic uses it (`pacs_mosaic.valid_at`).
+    `maps_root`: the input-map directory, taken from the config by the caller at read time (`psf.json` stores no
+    absolute path, so a PSF built on another machine reads here).
+    Build with `pacs_fit.build_mosaic_psf`."""
 
-    def __init__(self, directory, tables=True):
+    def __init__(self, directory, maps_root, tables=True):
         from astropy.wcs import WCS
         self.directory = directory
         pdir = os.path.join(directory, "_psf")
@@ -632,26 +660,34 @@ class MosaicPSF:
         for q in m["maps"]:
             self._maps.append(dict(wcs=WCS(fits.Header.fromstring(q["wcs_header"])).celestial, shape=tuple(q["shape"]),
                                    lat=np.load(os.path.join(directory, q["lattice"])), step=q["lattice_step"],
-                                   scale=q["scale"], sub=q["sub"], bbox=q["bbox"]))
+                                   scale=q["scale"], sub=q["sub"], bbox=q["bbox"], path=q["path"], hdus=q["hdus"]))
+        self.maps_root = str(maps_root)                       # the config's input-map root at read time
         self.fbar = np.array(m["fbar"])
-        self.enclosed = np.array(m["enclosed_sub"])
+        self.enclosed = np.array(m["enclosed_sub"])                          # (n_sub, nodes, nodes)
         self.aperture_fraction_sub = np.array(m["aperture_fraction_sub"])
+        self.sub_beams = np.array(m["sub_beams"])
         if tables:
             self.subs = [np.load(os.path.join(pdir, f"sub{k}.npy"), mmap_mode="r") for k in range(self.n_sub)]
             self.table = np.load(os.path.join(pdir, "table.npy"), mmap_mode="r")
 
     def __getstate__(self):
-        return {"directory": self.directory, "tables": hasattr(self, "table")}
+        return {"directory": self.directory, "maps_root": self.maps_root, "tables": hasattr(self, "table")}
 
     def __setstate__(self, state):
-        self.__init__(state["directory"], state["tables"])
+        self.__init__(state["directory"], state["maps_root"], state["tables"])
 
     def weights(self, source_x, source_y):
         """(n, n_sub) mixture fractions f at output pixel positions (zero-origin x, y): the weight 1/(smoothed
-        error)^2 of every input map valid there (inside its footprint with a finite smoothed error), summed per
-        sub-group and normalised; a position no map covers gets the mosaic's mean fractions."""
-        from sesnaimpute.sky.derived.pacs_mosaic import _lattice_at
+        error)^2 of every input map the mosaic uses there (inside its footprint, a finite smoothed error and the four
+        interpolation neighbours good: `pacs_mosaic.resample_block`'s validity, read from single pixels of the input
+        map), summed per sub-group and normalised; a position no map covers gets the mosaic's mean fractions."""
+        from sesnaimpute.sky.derived.pacs_mosaic import _lattice_at, valid_at
         sx, sy = np.asarray(source_x, float), np.asarray(source_y, float)
+        key = (sx.tobytes(), sy.tobytes())
+        cache = self.__dict__.setdefault("_weights_kept", OrderedDict())
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key].copy()
         w = np.zeros((sx.size, self.n_sub))
         for q in self._maps:
             x0, x1, y0, y1 = q["bbox"]
@@ -664,12 +700,33 @@ class MosaicPSF:
             inside = np.isfinite(px) & np.isfinite(py) & (px >= 0) & (px <= nx - 1) & (py >= 0) & (py <= ny - 1)
             lat = _lattice_at(q["lat"], q["step"], np.where(inside, px, 0.0), np.where(inside, py, 0.0)) * q["scale"]
             ok = inside & np.isfinite(lat) & (lat > 0)
+            at = np.flatnonzero(ok)
+            if at.size:
+                ok[at] = valid_at(_input_layers(self.maps_root, q), px[at], py[at])
             w[idx[ok], q["sub"]] += 1.0 / lat[ok] ** 2
         total = w.sum(axis=1)
         f = np.where(total[:, None] > 0, w / np.where(total > 0, total, 1.0)[:, None], self.fbar[None, :])
+        cache[key] = f.copy()
+        if len(cache) > WEIGHTS_KEPT:
+            cache.popitem(last=False)
         return f
 
-    def evaluate_xy(self, source_x, source_y, pixel_x, pixel_y):
+    def _node_values(self, nodes, source_x, source_y):
+        """(n, n_sub) of the per-sub-group node values `nodes` (n_sub, N, N) at the positions, bilinear between the
+        spatial nodes with the weights `_cached_responses` interpolates the tables by."""
+        sx, sy = np.asarray(source_x, float), np.asarray(source_y, float)
+        n = nodes.shape[-1]
+        gx = np.clip((sx + .5) / self.shape[1] * (n - 1), 0.0, n - 1.0)
+        gy = np.clip((sy + .5) / self.shape[0] * (n - 1), 0.0, n - 1.0)
+        ix, iy = np.minimum(gx.astype(np.int64), n - 2), np.minimum(gy.astype(np.int64), n - 2)
+        fx, fy = gx - ix, gy - iy
+        v = (nodes[:, iy, ix] * (1 - fx) * (1 - fy) + nodes[:, iy, ix + 1] * fx * (1 - fy)
+             + nodes[:, iy + 1, ix] * (1 - fx) * fy + nodes[:, iy + 1, ix + 1] * fx * fy)
+        return v.T
+
+    def evaluate_xy(self, source_x, source_y, pixel_x, pixel_y, mixture=None):
+        """The response at the pixels around each source; `mixture` (n, n_sub): the sub-group fractions to use in
+        place of the local `weights` (a one-hot row gives one sub-group's table alone)."""
         sx, sy = np.asarray(source_x, dtype=float), np.asarray(source_y, dtype=float)
         x, y = np.broadcast_arrays(np.asarray(pixel_x, dtype=float), np.asarray(pixel_y, dtype=float))
         if (sx.ndim != 1 or sy.shape != sx.shape or x.ndim != 3 or x.shape[0] != sx.size
@@ -677,19 +734,53 @@ class MosaicPSF:
             raise ValueError('Expected finite source vectors and (n,ny,nx) pixel coordinates')
         if not sx.size:
             return np.empty((0, 1, *x.shape[1:]), dtype=np.float64)
-        f = self.weights(sx, sy)
+        key = None
+        if mixture is None:
+            # the same injections' template is asked for twice (pasted into the image, then applied to the detection
+            # map): a small last-recently-used memory of the patches, bit-identical to computing them again
+            key = (sx.tobytes(), sy.tobytes(), x.shape, np.ascontiguousarray(x).tobytes(), np.ascontiguousarray(y).tobytes())
+            kept = self.__dict__.setdefault("_patches_kept", OrderedDict())
+            if key in kept:
+                kept.move_to_end(key)
+                return kept[key].copy()
+        f = self.weights(sx, sy) if mixture is None else mixture
         xr, yr = x.reshape(sx.size, -1), y.reshape(sx.size, -1)
         out = np.zeros((sx.size, 1, xr.shape[1]))
         for k in range(self.n_sub):
             if f[:, k].any():
                 out += f[:, k, None, None] * _cached_responses(self.subs[k], sx, sy, xr, yr, self.shape[1],
                                                                self.shape[0], self.extent, self.subpixel_steps)
-        return out.reshape((sx.size, 1, *x.shape[1:]))
+        out = out.reshape((sx.size, 1, *x.shape[1:]))
+        if key is not None:
+            kept[key] = out.copy()
+            if len(kept) > PATCHES_KEPT:
+                kept.popitem(last=False)
+        return out
 
-    def enclosed_at(self, source_x, source_y):
-        """The mixture's enclosed fraction inside the aperture radius (no sky) at each position."""
-        return self.weights(source_x, source_y) @ self.enclosed
+    def evaluate_mean_xy(self, source_x, source_y, pixel_x, pixel_y):
+        """The response of the weight-mean table `table` (one component) as `CachedPairedPSF.evaluate_xy`."""
+        sx, sy = np.asarray(source_x, dtype=float), np.asarray(source_y, dtype=float)
+        x, y = np.broadcast_arrays(np.asarray(pixel_x, dtype=float), np.asarray(pixel_y, dtype=float))
+        out = _cached_responses(self.table, sx, sy, x.reshape(sx.size, -1), y.reshape(sx.size, -1), self.shape[1],
+                                self.shape[0], self.extent, self.subpixel_steps)
+        return out.reshape((sx.size, self.table.shape[2], *x.shape[1:]))
 
-    def aperture_fraction_at(self, source_x, source_y):
+    def enclosed_at(self, source_x, source_y, mixture=None):
+        """The mixture's enclosed fraction inside the aperture radius (no sky) at each position (`mixture`: the
+        fractions `weights` returns there, when the caller has them)."""
+        f = self.weights(source_x, source_y) if mixture is None else mixture
+        return (f * self._node_values(self.enclosed, source_x, source_y)).sum(axis=1)
+
+    def aperture_fraction_at(self, source_x, source_y, mixture=None):
         """The mixture's aperture fraction (after the annulus sky) at each position."""
-        return self.weights(source_x, source_y) @ self.aperture_fraction_sub
+        f = self.weights(source_x, source_y) if mixture is None else mixture
+        return (f * self._node_values(self.aperture_fraction_sub, source_x, source_y)).sum(axis=1)
+
+    def beam_at(self, source_x, source_y):
+        """The mixture's beam FWHM (arcsec) at each output pixel position: the weights times the sub-groups' beams."""
+        return self.weights(source_x, source_y) @ self.sub_beams
+
+    def beam_at_sky(self, ra_deg, dec_deg):
+        """`beam_at` at sky positions (a position off the grid gets the mosaic's mean fractions' beam)."""
+        x, y = self.out_wcs.all_world2pix(np.asarray(ra_deg, float), np.asarray(dec_deg, float), 0)
+        return self.beam_at(np.where(np.isfinite(x), x, -1e9), np.where(np.isfinite(y), y, -1e9))

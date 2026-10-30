@@ -3986,8 +3986,8 @@ _PACS_SOURCES_READINGS = {
         "One row per PACS source of the region, from the PACS maps alone: the bands' blind detections (peaks of each "
         "band's mosaic correlated with the mosaic's point-spread template made zero-sum, at least 5 times the mosaic's "
         "noise in the cell) merged across bands: detections of two bands closer than the pair's merge radius (3 times the "
-        "measured position scatter between the bands for bright common sources; attributes "
-        "MERGE_RADIUS_<band>_<band>_ARCSEC) are one source. Its position is the sharpest detecting band's "
+        "measured position scatter between the bands for bright common sources, or, with fewer than five such pairs, half "
+        "the redder band's beam at the detection; attributes MERGE_RADIUS_<band>_<band>_ARCSEC, NaN where the beam was used) are one source. Its position is the sharpest detecting band's "
         "(POSITION_BAND), on the Herschel header astrometry, not registered to any other survey. Costs, stated: a 70 "
         "micron source takes the 160 micron flux of a core within the merge radius; a source seen only at 160 micron "
         "has a position good to about 2 arcsec, so in clusters it is often a blend; the bands' detections are treated "
@@ -4006,7 +4006,7 @@ _PACS_SOURCES_READINGS = {
     "CELL_OFFSET_{b}_MJY": ("mJy", "The empty-sky offset subtracted from FNU_{b}_MJY (CELL_OFFSET of the cell)."),
     "SNR_{b}": ("dimensionless", "The S/N of the {w} micron detection: its own flux over its cell's noise."),
     "MAP_INDEX_{b}": ("map index, or -1", "The {w} micron map (row of MAP_ID_{b} in the completeness product: 0, the mosaic) that detects the source."),
-    "EXTENDED_{b}": ("true or false", "Where DETECTED_{b}: whether the fitted width at the position exceeds 1.5 times the beam."),
+    "EXTENDED_{b}": ("true or false", "Where DETECTED_{b}: whether the fitted width at the position exceeds 1.5 times the beam there (the beam of the maps that make up the mosaic at that position, which differs between the 20 arcsec per second and the 60 arcsec per second maps)."),
     "RA_{b}_DEG": ("deg ICRS",
         "Where DETECTED_{b}: the position of the {w} micron detection itself (on the band's mosaic, which keeps its input maps' Herschel pointing; the "
         "100 micron maps are separate observations from the 70 micron ones, so the two can differ by about a pointing "
@@ -4063,7 +4063,7 @@ _PHOTOMETRY_PACS_READINGS = {
         "ORIGIN 3: bound; a detection within a beam whose flux cannot be assigned to this source alone; FNU is that "
         "detection's flux and is a ceiling on this source's flux (the two cases are told apart by CONFUSED_{b}: false "
         "where that detection has two or more SESNA sources within 2 arcsec of it, true where no detection of this band is "
-        "associated with the source but one lies within one beam of it); 90 means the band covers the source and no PACS "
+        "associated with the source but one lies within one beam of it, the beam there as for EXTENDED_{b}); 90 means the band covers the source and no PACS "
         "source detected in this band is associated with it (its completeness curve gives the chance of that; the three "
         "bands' detections are independent); 91 means the band does not cover the source. Two limits of ORIGIN 90, stated: "
         "the completeness curve is measured over the 30-arcsecond cell, so for a source on a local peak of cloud emission "
