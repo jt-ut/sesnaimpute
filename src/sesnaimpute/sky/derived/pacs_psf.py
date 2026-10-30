@@ -681,13 +681,25 @@ class MosaicPSF:
         error)^2 of every input map the mosaic uses there (inside its footprint, a finite smoothed error and the four
         interpolation neighbours good: `pacs_mosaic.resample_block`'s validity, read from single pixels of the input
         map), summed per sub-group and normalised; a position no map covers gets the mosaic's mean fractions."""
-        from sesnaimpute.sky.derived.pacs_mosaic import _lattice_at, valid_at
         sx, sy = np.asarray(source_x, float), np.asarray(source_y, float)
         key = (sx.tobytes(), sy.tobytes())
         cache = self.__dict__.setdefault("_weights_kept", OrderedDict())
         if key in cache:
             cache.move_to_end(key)
             return cache[key].copy()
+        w = self.map_weights(sx, sy)
+        total = w.sum(axis=1)
+        f = np.where(total[:, None] > 0, w / np.where(total > 0, total, 1.0)[:, None], self.fbar[None, :])
+        cache[key] = f.copy()
+        if len(cache) > WEIGHTS_KEPT:
+            cache.popitem(last=False)
+        return f
+
+    def map_weights(self, source_x, source_y):
+        """(n, n_sub) the summed weights 1/(smoothed error)^2 of each sub-group's input maps the mosaic uses at the
+        positions, unnormalised (zero where none of the sub-group's maps contributes; `weights` normalises them)."""
+        from sesnaimpute.sky.derived.pacs_mosaic import _lattice_at, valid_at
+        sx, sy = np.asarray(source_x, float), np.asarray(source_y, float)
         w = np.zeros((sx.size, self.n_sub))
         for q in self._maps:
             x0, x1, y0, y1 = q["bbox"]
@@ -704,12 +716,7 @@ class MosaicPSF:
             if at.size:
                 ok[at] = valid_at(_input_layers(self.maps_root, q), px[at], py[at])
             w[idx[ok], q["sub"]] += 1.0 / lat[ok] ** 2
-        total = w.sum(axis=1)
-        f = np.where(total[:, None] > 0, w / np.where(total > 0, total, 1.0)[:, None], self.fbar[None, :])
-        cache[key] = f.copy()
-        if len(cache) > WEIGHTS_KEPT:
-            cache.popitem(last=False)
-        return f
+        return w
 
     def _node_values(self, nodes, source_x, source_y):
         """(n, n_sub) of the per-sub-group node values `nodes` (n_sub, N, N) at the positions, bilinear between the
