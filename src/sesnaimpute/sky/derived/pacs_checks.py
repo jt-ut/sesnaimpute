@@ -25,7 +25,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from sesnaimpute.sky.derived import pacs_mosaic
-from sesnaimpute.sky.derived.pacs_fit import (_aperture_core, _template_density, maps_root, read_index)
+from sesnaimpute.sky.derived.pacs_fit import (_aperture_core, _template_density, read_index)
 from sesnaimpute.sky.derived.pacs_psf import APERTURES, aperture_eef, published_components_for_map
 
 TIE_TOLERANCE = 0.003            # real (normalised to the release EEF) against the divisor; injected against real
