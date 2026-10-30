@@ -53,7 +53,6 @@ Run: `PY sesnaimpute.sky.derived.pacs_completeness $CONFIG [--regions ...]`.
 
 import functools
 import os
-import shutil
 import time
 
 import h5py
@@ -1188,7 +1187,7 @@ def injection_blocks(ids, nx):
 def _inject_pairs(piece, config, records):
     """The injections of one piece: `piece = (tile index, inputs, (block, first row, last row + 1), jobs, real
     check?)`, `jobs` the `(S/N plane, half, batch seeds, rows or None: the block's)` of the piece (see `Injector`,
-    `_injection_rounds`): the batches of each over the block's cells (`_inject_batches`); on the piece flagged for it, the
+    `round_task_list`): the batches of each over the block's cells (`_inject_batches`); on the piece flagged for it, the
     real-map self-check. Returns `(tile index, dict)`."""
     t, inp, (b, r0, r1), jobs, do_check = piece
     record = records[t]
@@ -1221,17 +1220,51 @@ def _chunks(jobs, n_rows):
     return [[jobs[i] for i in c] for c in np.array_split(np.arange(len(jobs)), k) if c.size]
 
 
-def _injection_rounds(config, records, inputs, nx, n_jobs, stage):
-    """The injections of every map of a band, in rounds of pieces over all maps and blocks (`injection_blocks`): the
-    first round makes each map's first batches in every block for every (S/N plane, half) pair; each further round one
-    more batch per pair, over the cells within the pooling radius of a cell whose pool (the WHOLE map's, from the
-    injections so far) is still short of MIN_INJECTIONS, until none is or MAX_EXTRA_BATCHES have been made. Maps from the
-    largest. `nx`: each map's cell grid width. Returns `{tile: [pieces' outputs]}`."""
-    pairs = [(p, half) for p in range(snr_grid().size) for half in (0, 1)]
-    tiles = [t for t, _ in sorted(inputs.items(), key=lambda kv: -kv[1]["ids"].size)]
-    first = dict(pieces_module.run(functools.partial(_map_first, config=config, records=records),
-                                   [(t, inputs[t]) for t in tiles], n_jobs, stage=stage, unit="maps (artificial sources, sizing)"))
-    st, parts, tasks = {}, {t: [] for t in tiles}, []
+def injection_pairs():
+    """The (S/N plane, half) pairs of the injections, in the order of the count columns."""
+    return [(p, half) for p in range(snr_grid().size) for half in (0, 1)]
+
+
+def tile_order(inputs):
+    """The maps of a band as the injections and the pooling take them: from the largest."""
+    return [t for t, _ in sorted(inputs.items(), key=lambda kv: -kv[1]["ids"].size)]
+
+
+def map_sizing(config, records, inputs, n_jobs, stage):
+    """`{tile: batches of the first round}` (`_map_first`) of every map of a band."""
+    return dict(pieces_module.run(functools.partial(_map_first, config=config, records=records),
+                                  [(t, inputs[t]) for t in tile_order(inputs)], n_jobs, stage=stage,
+                                  unit="maps (artificial sources, sizing)"))
+
+
+def part_counts(inputs, done):
+    """What a set of pieces' outputs (`done`, `[(tile, part)]`) add to the maps' injection counts, `{tile: sparse matrix
+    (cells x `injection_pairs`)}`: the counts `round_task_list` reads for the rounds before the one it plans."""
+    pairs = injection_pairs()
+    acc = {}
+    for t, part in done:
+        rows, cols = acc.setdefault(t, ([], []))
+        for p, half, _b, _s, res, _sec, _cnt in part["pairs"]:
+            rows.append(res["row"])
+            cols.append(np.full(res["row"].size, pairs.index((p, half))))
+    out = {}
+    for t, (rows, cols) in acc.items():
+        row, col = np.concatenate(rows or [np.zeros(0, np.int64)]), np.concatenate(cols or [np.zeros(0, np.int64)])
+        out[t] = csr_matrix((np.ones(row.size, np.int64), (row, col)), shape=(len(inputs[t]["ids"]), len(pairs)))
+    return out
+
+
+def round_task_list(records, inputs, nx, first, r, load):
+    """The injections of one map of a band in rounds of pieces over all maps and blocks (`injection_blocks`): round 0
+    makes each map's first batches in every block for every (S/N plane, half) pair; each further round one more batch
+    per pair, over the cells within the pooling radius of a cell whose pool (the WHOLE map's, from the injections of
+    all earlier rounds) is still short of MIN_INJECTIONS, until none is or MAX_EXTRA_BATCHES have been made. Returns the
+    ordered pieces of round `r` (`_inject_pairs`; [] when the band's injections are complete); `load(q)` gives
+    `{tile: counts}` (`part_counts`) of the pieces' outputs of round `q < r` (called only for a round that had pieces).
+    `nx`: each map's cell grid width, `first`: `map_sizing`."""
+    pairs = injection_pairs()
+    tiles = tile_order(inputs)
+    st, tasks = {}, []
     for t in tiles:
         ids = inputs[t]["ids"]
         blocks = injection_blocks(ids, nx[t])
@@ -1241,15 +1274,11 @@ def _injection_rounds(config, records, inputs, nx, n_jobs, stage):
             jobs = [(p, half, tuple(range(first[t])), None) for p, half in pairs]
             for j, c in enumerate(_chunks(jobs, blk[2] - blk[1])):
                 tasks.append((t, inputs[t], blk, c, i == 0 and j == 0))
-    for extra in range(MAX_EXTRA_BATCHES + 1):
+    for extra in range(min(r, MAX_EXTRA_BATCHES + 1)):
         if not tasks:
-            break
-        done = pieces_module.run(functools.partial(_inject_pairs, config=config, records=records), tasks, n_jobs,
-                                 stage=stage, unit="map pieces (artificial sources, round %d)" % extra)
-        for t, part in done:
-            parts[t].append(part)
-            for p, half, _b, _s, r, _sec, _cnt in part["pairs"]:
-                st[t]["count"][:, pairs.index((p, half))] += np.bincount(r["row"], minlength=len(inputs[t]["ids"]))
+            return []
+        for t, m in load(extra).items():
+            st[t]["count"] += m.toarray()
         tasks = []
         if extra == MAX_EXTRA_BATCHES:
             break
@@ -1266,7 +1295,7 @@ def _injection_rounds(config, records, inputs, nx, n_jobs, stage):
                         for i, (p, half) in enumerate(pairs) if act[i] and reach[r0:r1, i].any()]
                 for c in (_chunks(jobs, r1 - r0) if jobs else []):
                     tasks.append((t, inputs[t], blk, c, False))
-    return parts
+    return tasks if r <= MAX_EXTRA_BATCHES else []
 
 
 _POOL_KEYS = ("row", "plane", "half", "near", "recovered", "dflux")
@@ -1277,11 +1306,12 @@ def pool_dir(config, record):
     return os.path.join(pacs_fit.prepared_dir(config, record), "pool")
 
 
-def _write_pool_table(t, inp, parts, records, config):
+def _write_pool_table(t, inp, parts, records, config, d=None):
     """A map's injections, from its pieces' outputs (`parts`), written as the memory-mapped table the pooling tasks
     read: the records of both halves sorted by row (a stable sort of the records taken in (half, S/N plane, block, batch)
     order, so the table does not depend on the order the pieces finished), with `offsets` (the first record of
-    every row). Returns `(table directory, the held-out half's injections, the statistics the parent prints)`."""
+    every row). Written to `d` (default `pool_dir`). Returns `(table directory, the held-out half's injections, the
+    statistics the parent prints)`."""
     ids = np.asarray(inp["ids"], np.int64)
     n_row = ids.size
     snr = snr_grid()
@@ -1305,7 +1335,7 @@ def _write_pool_table(t, inp, parts, records, config):
     cols = {k: np.concatenate([build[k], held[k]]) for k in ("row", "plane", "near", "recovered", "dflux")}
     cols["half"] = np.concatenate([np.zeros(build["row"].size, np.int8), np.ones(held["row"].size, np.int8)])
     order = np.argsort(cols["row"], kind="stable")
-    d = pool_dir(config, records[t])
+    d = d or pool_dir(config, records[t])
     os.makedirs(d, exist_ok=True)
     for k in _POOL_KEYS:
         np.save(os.path.join(d, k + ".npy"), cols[k][order])
@@ -1495,11 +1525,12 @@ def _print_tile_stats(s, flux_grid):
               % " ".join("%.3g:%.2f" % (snr[p], bp[p, 1] / max(bp[p, 0], 1)) for p in every), flush=True)
 
 
-def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, detect_only=False):
+def _band_detect(config, records, ra, dec, n_jobs, stage, flux_grid, detect_only=False):
     """Measure every covered cell of every map of one band inside the region's padded source bounding box;
-    choose each source's deepest map; inject artificial sources on every map. Returns the band's datasets
-    (and the held-out half, the printed statistics), or None when no map reaches a source. `records`: the band's
-    one mosaic (`_build_region`)."""
+    choose each source's deepest map; detect the PACS sources and fix the matching radius: everything of the band
+    before its artificial sources (stage DETECT of `pacs_stages`). Returns the band's state (what `_band_dict` and the
+    injection stages read), or None when no map reaches a source; with `detect_only` the band's datasets from the
+    detection alone. `records`: the band's one mosaic (`pacs_stages.run_region`)."""
     n_src = ra.size
     n_plane = flux_grid.size
 
@@ -1628,25 +1659,17 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, detect_onl
     print("  PACS detections %d; by sky bin (faint to bright) %s"
           % (peaks["fnu"].size, [int((peaks["bin"] == j).sum()) for j in range(SKY_BINS)]), flush=True)
 
-    # artificial sources: each map cut by its cell grid into blocks, rounds of pieces over all blocks of all maps; then
-    # the injections of each map written once to a memory-mapped table and pooled by cell blocks
-    by_tile = _injection_rounds(config, records, inputs, {t: geometry[t][2].nx for t in inputs}, n_jobs, stage)
-    counts = {t: len(v) for t, v in by_tile.items()}
-    tables, tasks = {}, []
-    for t in counts:
-        tables[t] = _write_pool_table(t, inputs[t], by_tile[t], records, config)
-        tasks += pool_tasks(t, tables[t][0], inputs[t]["ids"], geometry[t][2].nx)
-    del by_tile
-    pooled = pieces_module.run(functools.partial(_pool_block, records=records, flux_grid=flux_grid),
-                               tasks, n_jobs, stage=stage, unit="cell blocks (pooling)")
-    blocks_of = {t: [] for t in counts}
-    for t, o in pooled:
-        blocks_of[t].append(o)
-    injected = []
-    for t in counts:
-        d, held_t, stats_t = tables[t]
-        injected.append((t, _assemble_tile(inputs[t], held_t, stats_t, blocks_of[t], flux_grid)))
-        shutil.rmtree(d)
+    return dict(records=records, n_src=n_src, geometry=geometry, cols=cols, cell_map=cell_map, cell_id=cell_id, n_row=n_row,
+                src_row=src_row, shifts=shifts, cell_sigma=cell_sigma, cell_offset=cell_offset, m_sigma_rows=m_sigma_rows,
+                m_offset_rows=m_offset_rows, cell_bin=cell_bin, inputs=inputs, peaks=peaks, pos_k=pos_k, r_match=r_match,
+                rms_inj=rms_inj, rms_align=rms_align)
+
+
+def _band_dict(s, injected, flux_grid):
+    """The band's datasets from its state (`_band_detect`) and `injected`, `[(tile index, _assemble_tile's output)]` of
+    its maps (`tile_order`): the curves, errors and the held-out half, the PACS sources' uncertainty."""
+    records, inputs, peaks, geometry, cols = s["records"], s["inputs"], s["peaks"], s["geometry"], s["cols"]
+    n_row, n_plane = s["n_row"], flux_grid.size
     curve = np.zeros((n_row, n_plane), np.uint16)
     n_pos = np.zeros(n_row, np.int32)
     flux90_ = np.full(n_row, np.nan, np.float32)
@@ -1673,18 +1696,18 @@ def _band_product(config, records, ra, dec, n_jobs, stage, flux_grid, detect_onl
     for s_ in stats:
         _print_tile_stats(s_, flux_grid)
     envelope = curve.max(axis=0).astype(np.uint16) if n_row else np.zeros(n_plane, np.uint16)
-    return dict(curve=curve, source_row=src_row.astype(np.int32), envelope=envelope, n_pos=n_pos,
-                peaks=peaks, r_match=r_match, rms_inj=rms_inj, rms_align=rms_align,
-                cell_m_sigma=m_sigma_rows, cell_m_offset=m_offset_rows,
-                sky_bin=cell_bin.astype(np.int8), n_sigma=cols["n_sigma"].astype(np.int16), flux90=flux90_, bias=errors["bias"], scatter=errors["scatter"],
+    return dict(curve=curve, source_row=s["src_row"].astype(np.int32), envelope=envelope, n_pos=n_pos,
+                peaks=peaks, r_match=s["r_match"], rms_inj=s["rms_inj"], rms_align=s["rms_align"],
+                cell_m_sigma=s["m_sigma_rows"], cell_m_offset=s["m_offset_rows"],
+                sky_bin=s["cell_bin"].astype(np.int8), n_sigma=cols["n_sigma"].astype(np.int16), flux90=flux90_, bias=errors["bias"], scatter=errors["scatter"],
                 held=held, stats=stats,
-                cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=cell_sigma, cell_offset=cell_offset,
-                cell_id=cell_id, cell_map_index=cell_map,
-                cell_map=np.array([records[t].map_id for t in cell_map] or [""], dtype="S")[:n_row],
+                cell_ra=cols["ra"], cell_dec=cols["dec"], cell_sigma=s["cell_sigma"], cell_offset=s["cell_offset"],
+                cell_id=s["cell_id"], cell_map_index=s["cell_map"],
+                cell_map=np.array([records[t].map_id for t in s["cell_map"]] or [""], dtype="S")[:n_row],
                 n_candidate=sum(g[1].size for g in geometry),
                 map_id=np.array([r.map_id for r in records], dtype="S"),
                 map_obsid=np.array([",".join(r.obsids) for r in records], dtype="S"),
-                map_shift=shifts[:, :2].astype(np.float32), map_pairs=shifts[:, 2].astype(np.int32),
+                map_shift=s["shifts"][:, :2].astype(np.float32), map_pairs=s["shifts"][:, 2].astype(np.int32),
                 records=records,
                 map_wcs=np.array([g[3].to_header_string() for g in geometry], dtype="S"),
                 map_shape=np.array([g[2].shape for g in geometry], dtype=np.int32).reshape(len(records), 2),
@@ -1956,40 +1979,6 @@ def write_sources(path, region, bands, merged):
             w("DEC_%s_DEG" % b, np.asarray(merged["dec_" + b], np.float64))
 
 
-def _build_region(config, region, out_path, ra, dec, n_jobs, stage=None, box=None, detect_only=False):
-    """Measure and write one region. `ra`/`dec` are the region's source positions in the curated order. Each band's
-    only map is its co-added mosaic of the region (`pacs_mosaic.build_mosaic`, built here when absent; `box` (ra, dec,
-    width, height) deg cuts a slice of it, development). Returns the per-band products (for the caller's checks, with
-    each band's held-out half under "held")."""
-    from sesnaimpute.sky.derived import pacs_mosaic
-    mag, flux_grid = canonical_grid()
-    records = {}
-    for b in BANDS:
-        if not os.path.exists(os.path.join(pacs_mosaic.product_dir(config, region, b, box), "mosaic.hdf5")):
-            if not [r for r in pacs_fit.read_index(config, region) if r.band == b]:
-                continue
-            pacs_mosaic.build_mosaic(config, region, b, box=box, n_jobs=n_jobs)
-        records[b] = [pacs_fit.mosaic_record(config, region, b, box)]
-    _prepare_stage(config, [r[0] for r in records.values()], n_jobs, stage)
-    out = {}
-    # every band's self-checks before ANY band's injection: a P100 or P160 failure is minutes in, not after the P70 hour
-    from sesnaimpute.sky.derived import pacs_checks
-    for b in BANDS:
-        if b in records:
-            self_check(config, records[b][0])
-            pacs_checks.normalisation_check(config, records[b][0])
-    for b in BANDS:
-        if b in records:
-            out[b] = _band_product(config, records[b], ra, dec, n_jobs, stage, flux_grid, detect_only)
-        if out.get(b) is None:
-            out[b] = _empty_band(ra.size, mag.size)
-    if not detect_only:
-        write_product(out_path, region, mag, out)
-    merged = merge_sources(config, out, n_jobs, stage, flux_grid)
-    write_sources(product_path(config, "sky/derived", "pacs", "sources", "region", region=region), region, out, merged)
-    return out
-
-
 def _region_inputs(config, region):
     """The region's source positions in the curated order, from `catalog.curated.read_positions` (the delivery: the
     curated product is built after the PACS stages)."""
@@ -1999,16 +1988,17 @@ def _region_inputs(config, region):
 
 
 def build(config, regions=None, box=None, detect_only=False):
-    """Writes each region's `completeness_pacs_source` product, regions one after another. Returns
+    """Writes each region's `completeness_pacs_source` product, regions one after another, through the stages of
+    `pacs_stages.run_region` (one process; a rerun after a kill resumes at the first stage file missing). Returns
     `{region: {band: held-out injections}}` for `acceptance` (the command line discards it)."""
+    from sesnaimpute.sky.derived import pacs_stages
     names = regions or [r.name for r in regions_module.REGIONS]
     t0 = time.time()
     held = {}
     for region in names:
         with progress_module.Stage("sky.derived.pacs_completeness", region) as st:
-            ra, dec = _region_inputs(config, region)
             path = product_path(config, "sky/derived", "pacs", "completeness", "source", region=region)
-            bands = _build_region(config, region, path, ra, dec, config.n_jobs, st, box, detect_only)
+            bands = pacs_stages.run_region(config, region, box, detect_only=detect_only, stage=st)
             held[region] = {b: bands[b]["held"] for b in BANDS}
             st.done(path, **{"cells_" + b: int(bands[b]["curve"].shape[0]) for b in BANDS})
     progress_module.summary("sky.derived.pacs_completeness", len(names), t0)
