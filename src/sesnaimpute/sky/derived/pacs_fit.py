@@ -76,6 +76,10 @@ PSF_TABLE_HALF_ARCSEC = 65.0
 #: response-table sampling: sub-pixel steps and spatial nodes over the map
 PSF_SUBPIXEL_STEPS = 8
 PSF_SPATIAL_NODES = 3
+#: a mosaic's PSF nodes per axis: at least PSF_SPATIAL_NODES, more where the mosaic is wider, so that nodes are at most
+#: this far apart (Orion A, 8.2 deg, passes the normalisation check at 3 x 3 nodes 4.1 deg apart; Aquila's 12.8 deg at
+#: 6.4 deg read real/divisor +0.30 %: the enclosed fraction between nodes is bilinear in a function curved on that scale)
+MOSAIC_PSF_NODE_SPACING_DEG = 4.25
 #: a fit is trusted only if this fraction of the target beam lies on valid pixels
 MIN_BEAM_FRACTION = 0.9
 
@@ -1633,8 +1637,9 @@ def build_mosaic_psf(config, region, band, box=None):
     extent = table_half + 0.5
     steps = PSF_SUBPIXEL_STEPS
     count = int(2 * extent * steps) + 1
-    nodes = [(sx, sy) for sy in np.linspace(-.5, ny - .5, PSF_SPATIAL_NODES) for sx in np.linspace(-.5, nx - .5, PSF_SPATIAL_NODES)]
-    n_nodes = PSF_SPATIAL_NODES
+    n_nodes = max(PSF_SPATIAL_NODES, int(np.ceil(max(nx, ny) * pix / 3600.0 / MOSAIC_PSF_NODE_SPACING_DEG)) + 1)
+    n_nodes += 1 - n_nodes % 2              # odd: the normalisation is taken at the centre node (`centre` below)
+    nodes = [(sx, sy) for sy in np.linspace(-.5, ny - .5, n_nodes) for sx in np.linspace(-.5, nx - .5, n_nodes)]
     mean_table = np.zeros((n_nodes, n_nodes, 1, count, count))
     paths = [os.path.join(pdir, f"sub{k}.npy") for k in range(n_sub)]
     comps = []
