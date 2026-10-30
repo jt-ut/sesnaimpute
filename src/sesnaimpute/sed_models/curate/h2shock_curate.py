@@ -999,11 +999,14 @@ PACS_BANDS = ("P70", "P100", "P160")
 #: Said once, in the register's bands group (attribute READING), so a reader
 #: who sees the three far-infrared columns at the floor knows why.
 H2SHOCK_FAR_IR_DISCLOSURE = (
-    "H2 shock templates carry no far-infrared continuum or lines in the PACS "
-    "passbands; their PACS fluxes are the convolution of the 2-28 um lines "
-    "through the filters' published response tails, below PACS detectability; "
-    "a PACS detection excludes the class; the [C II] 158 um line in P160 is "
-    "not modelled")
+    "H2 shock templates carry the molecular hydrogen lines only, and no far-infrared "
+    "continuum. The shocks' atomic and ionic fine-structure lines are not modelled, "
+    "among them [O I] 63 um in the 70 um band and [O I] 145 um and [C II] 158 um in "
+    "the 160 um band: the grid's paper (Kristensen et al. 2023) tabulates them, but "
+    "its table of them is not deposited at CDS. The templates' 70, 100 and 160 um "
+    "fluxes are the hydrogen lines' flux through the filters' published response "
+    "tails, far below what PACS detects, and so far below a real shock's: a PACS "
+    "detection weighs against this class more than it would against real shocks.")
 
 
 def pacs_max_flux(register_path):
