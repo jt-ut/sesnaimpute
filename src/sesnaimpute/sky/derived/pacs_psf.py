@@ -43,6 +43,7 @@ local background. This confirms the old code's 0.911 for P70 parallel 60"/s
 
 import dataclasses
 import json
+from collections import OrderedDict
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -617,6 +618,12 @@ def _input_layers(root, q):
     return _INPUT_LAYERS[path][1]
 
 
+#: per-position memories of a MosaicPSF (last recently used): mixture fractions, and response patches (256 sources
+#: of 47 x 47 pixels, 4.5 MB, each)
+WEIGHTS_KEPT = 8
+PATCHES_KEPT = 4
+
+
 class MosaicPSF:
     """The point-spread function of a mosaic: at an output position the weight-fraction mixture over the input
     maps valid there, sum_i f_i P_i, with f_i = w_i / sum w and w_i = 1 / (smoothed error_i)^2 (the mosaic's own
@@ -676,6 +683,11 @@ class MosaicPSF:
         map), summed per sub-group and normalised; a position no map covers gets the mosaic's mean fractions."""
         from sesnaimpute.sky.derived.pacs_mosaic import _lattice_at, valid_at
         sx, sy = np.asarray(source_x, float), np.asarray(source_y, float)
+        key = (sx.tobytes(), sy.tobytes())
+        cache = self.__dict__.setdefault("_weights_kept", OrderedDict())
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key].copy()
         w = np.zeros((sx.size, self.n_sub))
         for q in self._maps:
             x0, x1, y0, y1 = q["bbox"]
@@ -694,6 +706,9 @@ class MosaicPSF:
             w[idx[ok], q["sub"]] += 1.0 / lat[ok] ** 2
         total = w.sum(axis=1)
         f = np.where(total[:, None] > 0, w / np.where(total > 0, total, 1.0)[:, None], self.fbar[None, :])
+        cache[key] = f.copy()
+        if len(cache) > WEIGHTS_KEPT:
+            cache.popitem(last=False)
         return f
 
     def _node_values(self, nodes, source_x, source_y):
@@ -719,6 +734,15 @@ class MosaicPSF:
             raise ValueError('Expected finite source vectors and (n,ny,nx) pixel coordinates')
         if not sx.size:
             return np.empty((0, 1, *x.shape[1:]), dtype=np.float64)
+        key = None
+        if mixture is None:
+            # the same injections' template is asked for twice (pasted into the image, then applied to the detection
+            # map): a small last-recently-used memory of the patches, bit-identical to computing them again
+            key = (sx.tobytes(), sy.tobytes(), x.shape, np.ascontiguousarray(x).tobytes(), np.ascontiguousarray(y).tobytes())
+            kept = self.__dict__.setdefault("_patches_kept", OrderedDict())
+            if key in kept:
+                kept.move_to_end(key)
+                return kept[key].copy()
         f = self.weights(sx, sy) if mixture is None else mixture
         xr, yr = x.reshape(sx.size, -1), y.reshape(sx.size, -1)
         out = np.zeros((sx.size, 1, xr.shape[1]))
@@ -726,7 +750,12 @@ class MosaicPSF:
             if f[:, k].any():
                 out += f[:, k, None, None] * _cached_responses(self.subs[k], sx, sy, xr, yr, self.shape[1],
                                                                self.shape[0], self.extent, self.subpixel_steps)
-        return out.reshape((sx.size, 1, *x.shape[1:]))
+        out = out.reshape((sx.size, 1, *x.shape[1:]))
+        if key is not None:
+            kept[key] = out.copy()
+            if len(kept) > PATCHES_KEPT:
+                kept.popitem(last=False)
+        return out
 
     def evaluate_mean_xy(self, source_x, source_y, pixel_x, pixel_y):
         """The response of the weight-mean table `table` (one component) as `CachedPairedPSF.evaluate_xy`."""
