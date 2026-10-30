@@ -2,10 +2,10 @@
 
 A REAL unit source is synthesised in a representative input map's own pixels, with no table and no kernel algebra:
 the release template (`pacs_fit._template_density`, the published components at the map's position angles) as
-surface brightness at the true sky offsets of 5 x 5 sub-samples of each input pixel (the box average), times the
+surface brightness at the true sky offsets of 6 x 6 sub-samples of each input pixel (the box average), times the
 input pixel's nominal area; that image is resampled onto the mosaic grid by `pacs_mosaic.resample_block` (the real
-resampler), and measured with the production aperture (`pacs_fit._aperture_core`, 5 x 5 sub-pixel edge weights, no
-sky: the aperture sum). Three numbers follow per (sub-group, position):
+resampler), and measured with the production aperture centred on the source (`pacs_fit._aperture_core`, 5 x 5
+sub-pixel edge weights, no sky: the aperture sum). Three numbers follow per (sub-group, position):
 
   A_real    the aperture sum of the resampled unit source (what the mosaic holds where only that map covers),
   A_direct  the template's own integral (smoothed by the input pixel's box) inside the aperture radius
@@ -19,6 +19,7 @@ A_real_k / A_direct_k (`expected_enclosed`, used by `pacs_completeness.self_chec
 it with the production divisor `MosaicPSF.enclosed_at` and with the production injection (`Tile.injected`) on
 every sub-group alone, at nodes, mid-cells, outer positions and the representative map's footprint rim.
 """
+import hashlib
 import time
 from types import SimpleNamespace
 
@@ -31,7 +32,7 @@ from sesnaimpute.sky.derived.pacs_psf import APERTURES, aperture_eef, published_
 TIE_TOLERANCE = 0.003            # real (normalised to the release EEF) against the divisor; injected against real
 RELEASE_TOLERANCE = 0.015        # A_direct / EEF: the release template against the release EEF (60 arcsec/s: -0.7 %)
 SUM_TOLERANCE = 0.001            # pixel sums of the same patch, real against injected
-SUBSAMPLES = 2                   # per input pixel side (the box average of a smooth template)
+SUBSAMPLES = 6                   # per input pixel side (the box average; 2 x 2 left a 3.2 arcsec pixel's box too narrow: +0.21 %)
 RIM_ARCSEC = (10.0, 20.0, 30.0)  # inside and outside the footprint edge
 FLUX_MJY = 1000.0
 
@@ -65,7 +66,9 @@ def template_in_aperture(comps, in_wcs, r_ap, step=0.4, nbox=7):
     flux: on a fine grid of cells `step` arcsec wide with an anti-aliased edge, the box average over nbox x nbox offsets
     across the pixel (along its own, rotated axes). The PSF build holds this (the box-only table) to the release EEF; the
     value here is position-free, so the input grid's sampling of a smooth beam does not enter it."""
-    key = (id(comps), r_ap)
+    # keyed on the content (an object id is reused once a worker's earlier sub-group is freed)
+    key = (r_ap, tuple(np.round(in_wcs.pixel_scale_matrix.ravel() * 3600.0, 9)),
+           tuple((float(c.position_angle_deg), hashlib.sha1(np.ascontiguousarray(c.image).tobytes()).hexdigest()) for c in comps))
     if key not in _DISC:
         m = in_wcs.pixel_scale_matrix * 3600.0                                  # sky arcsec (east, north) per input pixel
         o = np.arange(-int(r_ap / step) - 2, int(r_ap / step) + 3) * step
@@ -84,12 +87,6 @@ def template_in_aperture(comps, in_wcs, r_ap, step=0.4, nbox=7):
 PHASES = tuple((a / 3.0, b / 3.0) for b in range(3) for a in range(3))      # input-grid shifts (input pixels) the source is averaged over
 
 
-def _aperture_sum_phased(img, x, y, radii_px):
-    """`_aperture_sum` averaged over a 3 x 3 lattice of sub-pixel shifts of the aperture centre (as the PSF build's
-    `_table_aperture` averages): the sum a source of random sub-pixel phase gives on average."""
-    return float(np.mean([_aperture_sum(img, x + a / 3.0, y + b / 3.0, radii_px) for b in (-1, 0, 1) for a in (-1, 0, 1)]))
-
-
 def unit_source(rep, out_wcs, band, xo, yo, half_out, phases=PHASES):
     """The real unit source at output pixel (xo, yo) (zero-origin), averaged over the input grid's sub-pixel
     `phases` (the PSF build's tables are the phase average; one phase of a 3.2 arcsec input grid sampling a 11 arcsec
@@ -105,20 +102,24 @@ def unit_source(rep, out_wcs, band, xo, yo, half_out, phases=PHASES):
     px0, py0 = (float(v) for v in in_wcs.all_world2pix(ra0, dec0, 0))
     ix0, iy0 = int(round(px0)) - half_in, int(round(py0)) - half_in
     n = 2 * half_in + 1
-    sub = (np.arange(SUBSAMPLES) + 0.5) / SUBSAMPLES - 0.5
-    shape = (n, n, SUBSAMPLES, SUBSAMPLES)
+    S = SUBSAMPLES
+    # one lattice of sub-samples, 1/S input pixel apart, serves every phase: a phase of k/3 pixel is a shift of k S/3 cells
+    steps = [(int(round(fx * S)), int(round(fy * S))) for fx, fy in phases]
+    if any(abs(a - fx * S) > 1e-9 or abs(b - fy * S) > 1e-9 for (a, b), (fx, fy) in zip(steps, phases)):
+        raise ValueError("the phases must be whole multiples of 1/SUBSAMPLES input pixel")
+    m = (n + 1) * S
+    lat = (np.arange(m) + 0.5) / S - 0.5
+    gx, gy = np.meshgrid(ix0 + lat, iy0 + lat)
+    ra, dec = in_wcs.all_pix2world(gx.ravel(), gy.ravel(), 0)
+    # offsets on the sky from the source (arcsec; the flat form is exact to 1e-7 inside the template's +-100 arcsec)
+    east = (((ra - ra0 + 180.0) % 360.0) - 180.0) * np.cos(np.radians((dec + dec0) / 2)) * 3600.0
+    north = (dec - dec0) * 3600.0
+    density = _template_density(comps, east, north).reshape(m, m)
     cx, cy = int(np.rint(xo)), int(np.rint(yo))
     x0, y0 = cx - half_out, cy - half_out
     block = 0.0
-    for fx, fy in phases:
-        gx = np.broadcast_to((ix0 + fx + np.arange(n))[None, :, None, None] + sub[None, None, None, :], shape)
-        gy = np.broadcast_to((iy0 + fy + np.arange(n))[:, None, None, None] + sub[None, None, :, None], shape)
-        ra, dec = in_wcs.all_pix2world(gx.ravel(), gy.ravel(), 0)
-        # offsets on the sky from the source (arcsec; the flat form is exact to 1e-7 inside the template's +-100 arcsec)
-        east = (((ra - ra0 + 180.0) % 360.0) - 180.0) * np.cos(np.radians((dec + dec0) / 2)) * 3600.0
-        north = (dec - dec0) * 3600.0
-        density = _template_density(comps, east, north).reshape(shape)
-        img = density.mean(axis=(2, 3)) * in_area                # flux fraction per input pixel (unit source)
+    for (a, b), (fx, fy) in zip(steps, phases):
+        img = density[b:b + n * S, a:a + n * S].reshape(n, S, n, S).mean(axis=(1, 3)) * in_area   # flux fraction per input pixel
         win = in_wcs.deepcopy()
         win.wcs.crpix = win.wcs.crpix - np.array([ix0 + fx, iy0 + fy])
         blk = pacs_mosaic.resample_block(None, SimpleNamespace(shape=img.shape), win, out_wcs, out_area, x0, x0 + 2 * half_out + 1,
@@ -126,7 +127,7 @@ def unit_source(rep, out_wcs, band, xo, yo, half_out, phases=PHASES):
         if blk is None or not blk["valid"].all():
             raise ValueError("the synthetic input does not cover the block")
         block = block + blk["image"] / len(phases)
-    a_real = _aperture_sum_phased(block, xo - x0, yo - y0, (r_ap / pix_out, r_in / pix_out, r_out / pix_out))
+    a_real = _aperture_sum(block, xo - x0, yo - y0, (r_ap / pix_out, r_in / pix_out, r_out / pix_out))
     return a_real, template_in_aperture(comps, in_wcs, r_ap), block, x0, y0
 
 
@@ -181,6 +182,16 @@ def check_positions(psf, meta, rep_entry, margin):
     return out
 
 
+def _real_sources(rep, out_wcs, band, positions, half_out, h):
+    """`unit_source` at each of one sub-group's check positions: (A_real, A_direct, the (2h+1)^2 patch around the
+    source's nearest pixel) per position (a worker's unit of `normalisation_check`)."""
+    out = []
+    for x, y, _kind in positions:
+        a_real, a_direct, block, _bx, _by = unit_source(rep, out_wcs, band, x, y, half_out)
+        out.append((a_real, a_direct, block[half_out - h:half_out + h + 1, half_out - h:half_out + h + 1]))
+    return out
+
+
 def normalisation_check(config, record, verbose=True):
     """C2: every sub-group of the band's mosaic, at its check positions (`check_positions`): (a) the real unit source's
     aperture sum over the production divisor (`MosaicPSF.enclosed_at` with the weights one-hot on the sub-group)
@@ -188,6 +199,7 @@ def normalisation_check(config, record, verbose=True):
     template that integrates a little differently from the EEF file, `tie`, does not enter this test; (d) tests it); (b) the same through `Tile.injected` (the production injection, one-hot) against the
     real one within TIE_TOLERANCE; (c) the pixel sums of the same patch within SUM_TOLERANCE; (d) A_direct / EEF within
     RELEASE_TOLERANCE. Raises ValueError listing the worst failures. Returns the worst deviations."""
+    from joblib import Parallel, delayed
     from sesnaimpute.sky.derived import pacs_fit
     tile = pacs_fit.cached_tile(config, record)
     psf = tile._psf
@@ -200,29 +212,36 @@ def normalisation_check(config, record, verbose=True):
     rows = []
     n = 0
     t0 = time.time()
-    for k, rep in enumerate(reps):
-        eef = aperture_eef(config, rep[0])
-        one = np.zeros((1, psf.n_sub))
-        one[0, k] = 1.0
-        for x, y, kind in check_positions(psf, psf.meta, psf.meta["rep"][k], h + 2):
-            a_real, a_direct, block, bx, by = unit_source(rep, psf.out_wcs, record.band, x, y, half_out)
-            norm = eef / a_direct                    # the real source at the release EEF (the template's own shortfall is `tie`)
-            a_real, block = a_real * norm, block * norm
-            divisor = float(psf.enclosed_at(np.array([x]), np.array([y]), one)[0])
-            with tile.blank_image(), tile.injected(np.array([x]), np.array([y]), FLUX_MJY, mixture=one):
-                a_inj = _aperture_sum_phased(tile.image, x, y, r_px) / FLUX_MJY
+    positions = [check_positions(psf, psf.meta, psf.meta["rep"][k], h + 2) for k in range(len(reps))]
+    # the real sources (the costly part) in parallel, one sub-group per task; the injections below on one blank image
+    real = Parallel(n_jobs=config.n_jobs)(delayed(_real_sources)(rep, psf.out_wcs, record.band, positions[k], half_out, h)
+                                          for k, rep in enumerate(reps))
+    reach = int(np.ceil(r_px[2])) + 3
+    with tile.blank_image():
+        for k, rep in enumerate(reps):
+            eef = aperture_eef(config, rep[0])
+            one = np.zeros((1, psf.n_sub))
+            one[0, k] = 1.0
+            for (x, y, kind), (a_real, a_direct, real_patch) in zip(positions[k], real[k]):
+                norm = eef / a_direct                    # the real source at the release EEF (the template's own shortfall is `tie`)
+                a_real, real_patch = a_real * norm, real_patch * norm
+                divisor = float(psf.enclosed_at(np.array([x]), np.array([y]), one)[0])
                 cx, cy = int(np.rint(x)), int(np.rint(y))
-                patch = np.array(tile.image[cy - h:cy + h + 1, cx - h:cx + h + 1]) / FLUX_MJY
-            real_patch = block[half_out - h:half_out + h + 1, half_out - h:half_out + h + 1]
-            dev = dict(divisor=a_real / divisor - 1, injected=a_inj / a_real - 1,
-                       sums=patch.sum() / real_patch.sum() - 1, tie=a_direct / eef - 1)
-            tol = dict(divisor=TIE_TOLERANCE, injected=TIE_TOLERANCE, sums=SUM_TOLERANCE, tie=RELEASE_TOLERANCE)
-            n += 1
-            rows.append((k, kind, x, y, dev))
-            for key, v in dev.items():
-                worst[key] = max(worst[key], abs(v))
-                if abs(v) > tol[key]:
-                    bad.append("sub-group %d %s (%.1f, %.1f) %s %+.4f" % (k, kind, x, y, key, v))
+                with tile.injected(np.array([x]), np.array([y]), FLUX_MJY, mixture=one):
+                    win = np.array(tile.image[cy - reach:cy + reach + 1, cx - reach:cx + reach + 1])
+                    if win.shape != (2 * reach + 1, 2 * reach + 1):
+                        raise ValueError("check position (%.1f, %.1f) too near the mosaic edge" % (x, y))
+                    a_inj = _aperture_sum(win, x - cx + reach, y - cy + reach, r_px) / FLUX_MJY
+                    patch = np.array(tile.image[cy - h:cy + h + 1, cx - h:cx + h + 1]) / FLUX_MJY
+                dev = dict(divisor=a_real / divisor - 1, injected=a_inj / a_real - 1,
+                           sums=patch.sum() / real_patch.sum() - 1, tie=a_direct / eef - 1)
+                tol = dict(divisor=TIE_TOLERANCE, injected=TIE_TOLERANCE, sums=SUM_TOLERANCE, tie=RELEASE_TOLERANCE)
+                n += 1
+                rows.append((k, kind, x, y, dev))
+                for key, v in dev.items():
+                    worst[key] = max(worst[key], abs(v))
+                    if abs(v) > tol[key]:
+                        bad.append("sub-group %d %s (%.1f, %.1f) %s %+.4f" % (k, kind, x, y, key, v))
     if verbose:
         print("  normalisation check (real unit source) %s: %d sub-groups, %d positions, %.0f s; worst |deviation|: real / "
               "divisor %.4f, injected / real %.4f, patch sums %.4f, template / release EEF %.4f (bars %.3f, %.3f, %.3f, %.3f)"
