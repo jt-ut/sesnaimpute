@@ -2,13 +2,14 @@
 # Submits one region's staged PACS completeness (sesnaimpute.sky.derived.pacs_stages) as a chain of jobs.
 #
 #   submit_pacs_region.sh [--dry-run] [--box RA DEC W H] [--reuse-mosaics] [--reference-product P]
-#                         [--k P70=4,P100=1,P160=4] SYSTEM REGION CONFIG
+#                         [--k P70=4,P100=1,P160=4] [--time HH:MM:SS] SYSTEM REGION CONFIG
 #
 #   SYSTEM  vista (gg, 144 workers) or stampede3 (spr, 112 workers)
 #   --k     shards K per band (default 1 each); choose with `pacs_stages plan` after the DETECT files exist
 #   --dry-run  prints every sbatch line, with its --dependency, and submits nothing
 #
-# Chain (every job -t 48:00:00, only the time used is charged; one node each):
+# Chain (every job -t TIME, default 06:00:00, one node each; TACC's submit filter charges the queue as if every job
+# used its whole limit, so a 48 h limit on a 32-job chain is refused against the balance: size K so a job's stage fits):
 #   prepare (preflight + mosaics)
 #     -> detect <band>                                   one job per band
 #       -> inject round 0, shards 0..K-1                 K jobs per band
@@ -44,7 +45,7 @@ if [ "${1:-}" = "--job" ]; then
     exec python -W ignore -m sesnaimpute.sky.derived.pacs_stages "$@"
 fi
 
-DRY=0; BOX=(); REUSE=(); REFERENCE=(); KSPEC=""
+DRY=0; BOX=(); REUSE=(); REFERENCE=(); KSPEC=""; TIME=06:00:00
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY=1; shift ;;
@@ -52,6 +53,7 @@ while [ $# -gt 0 ]; do
         --reuse-mosaics) REUSE=(--reuse-mosaics); shift ;;
         --reference-product) REFERENCE=(--reference-product "$2"); shift 2 ;;
         --k) KSPEC="$2"; shift 2 ;;
+        --time) TIME="$2"; shift 2 ;;
         --) shift; break ;;
         -*) echo "unknown option $1" >&2; exit 2 ;;
         *) break ;;
@@ -89,7 +91,7 @@ TAG=$(echo "$REGION" | tr -c 'A-Za-z0-9\n' _)
 submit() {
     local name=$1 dep=$2; shift 2
     local cmd=(sbatch --parsable -J "$name" -o "$SLURM_DIR/%x_%j.out" -e "$SLURM_DIR/%x_%j.err" -p $PART -N 1 -n 1 -c $CPUS
-               -t 48:00:00 -A AST24021 "${EXTRA[@]}")
+               -t $TIME -A AST24021 "${EXTRA[@]}")
     [ -z "$dep" ] || cmd+=(--dependency="afterok:$dep")
     cmd+=("$ABS" --job "$@" --config "$CONFIG" --region "$REGION" --n-jobs $CPUS "${BOX[@]}")
     if [ $DRY -eq 1 ]; then
