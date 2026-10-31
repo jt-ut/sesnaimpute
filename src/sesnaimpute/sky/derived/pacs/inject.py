@@ -1565,7 +1565,7 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
             e = _bar_counts(edge_W, {k: v[gh_ == g] for k, v in held_r.items()},
                             {k: v[gb_ == g] for k, v in build.items()}, n_loaded)
             both.append(np.where(is_edge[None, :, None], e, both[0]))
-        out["held_bar_counts"] = np.stack(both[1:])  # (class, 5: held n, held got, build n, build got, build own n; rows, planes)
+        out["held_bar_counts"] = np.stack(both[1:])  # (class, 8: `_bar_counts` on the held, then the build half's widening; rows, planes)
         out["edge_cell"] = is_edge
     fb = np.asarray(tab.data["fallback"]) if (rule.short_rule == "widen" and "fallback" in tab.data) else None
     edge_out = (classes_all[out_rows] // 3) if rule.edge_class else None
@@ -1596,11 +1596,13 @@ def _pool_product(Ws, rec, flux_grid_mjy, sigma_rows, n_row, sigma_out):
 
 
 def _bar_counts(Ws, held: dict, build: dict, n_row: int) -> np.ndarray:
-    """The C1 bar's counts (checks._flux90_halves_bar) on the pooling `Ws`: per output row and S/N plane the held half's
-    pooled injections and recovered, and the build half's, all on the widening the held half chooses (the narrowest
-    holding MIN_INJECTIONS held injections, else the widest; the bar's truth p), and fifth the build half's pooled
-    injections on the widening the BUILD half chooses from its own counts (how CURVE takes it). Returns (5, n_out,
-    N_PLANES)."""
+    """The C1 bar's counts (checks._flux90_halves_bar) on the pooling `Ws`: per output row and S/N plane, rows 0-3 the
+    held half's pooled injections and recovered and the build half's, on the widening the HELD half chooses (the
+    narrowest holding MIN_INJECTIONS held injections, else the widest): the held half's draw count (row 0) and its truth
+    p_h = (row 1 + row 3) / (row 0 + row 2), both halves pooled on the held half's pool; rows 4-7 the same four on the
+    widening the BUILD half chooses from its own counts (how CURVE takes it): the build half's draw count (row 6) and its
+    truth p_b = (row 5 + row 7) / (row 4 + row 6), both halves pooled on the build half's pool. Where the two halves
+    choose the same widening rows 4-7 equal rows 0-3. Returns (8, n_out, N_PLANES)."""
     def counts(r):
         key = r["row"].astype(np.int64) * N_PLANES + r["plane"].astype(np.int64)
         t = np.bincount(key, minlength=n_row * N_PLANES).reshape(n_row, N_PLANES).astype(np.float64)
@@ -1610,12 +1612,12 @@ def _bar_counts(Ws, held: dict, build: dict, n_row: int) -> np.ndarray:
     th, gh = counts(held)
     tb, gb = counts(build)
     out = np.stack([Ws[-1] @ m for m in (th, gh, tb, gb)])
-    nb_own = Ws[-1] @ tb
+    own = out.copy()
     for W in reversed(Ws[:-1]):
         lv = np.stack([W @ m for m in (th, gh, tb, gb)])
         out = np.where((lv[0] >= MIN_INJECTIONS)[None], lv, out)
-        nb_own = np.where(lv[2] >= MIN_INJECTIONS, lv[2], nb_own)
-    return np.concatenate([out, nb_own[None]])
+        own = np.where((lv[2] >= MIN_INJECTIONS)[None], lv, own)
+    return np.concatenate([out, own])
 
 
 def _cell_errors(Ws, flux_grid_mjy, sigma_rows, rec, rule, sigma_out, fallback=None, level_min=None):
@@ -1664,7 +1666,7 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
     """The band from its pooling blocks (`_assemble_tile` + `_band_dict`): rows in cell-id order (FROZEN 4); every row
     filled exactly once. `held`, `stats`: `held_and_stats`. `held` gains build_errors (C2), and the held-out half's own
     curve (unrounded fraction) and pooled totals built exactly as the stored curve (`curve`, `curve_total`: C1, per
-    class under a gradient curve); under the gradient curve also `bar_counts` (class, 4, n_row, N_PLANES: `_bar_counts`
+    class under a gradient curve); under the gradient curve also `bar_counts` (class, 8, n_row, N_PLANES: `_bar_counts`
     on the same pooling) and `edge_cell` (the rows whose curve is the edge pool), what checks.completeness_c1 reads. With `rule` (non-legacy) and `records_dir`: the flux-proportional term `fit_flux_term` on the build half, as
     `eps_flux` (also held["eps_flux"]); None otherwise (the legacy rule: not applied)."""
     n_row = np.asarray(detection.cells.ids).size
@@ -1683,7 +1685,7 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
     n_pos = arr(cl, (n_row,), np.int32, 0)
     tot = arr(cl, (n_row, n_plane), np.float64, 0.0)
     h_curve = arr(cl, (n_row, n_plane), np.float32, 0.0)
-    bar_counts = (np.zeros((2, 5, n_row, N_PLANES)) if "held_bar_counts" in p0 else None)
+    bar_counts = (np.zeros((2, p0["held_bar_counts"].shape[1], n_row, N_PLANES)) if "held_bar_counts" in p0 else None)
     edge_cell = np.zeros(n_row, bool)
     h_tot = arr(cl, (n_row, n_plane), np.float64, 0.0)
     errs = {k: arr(el, (n_row, n_plane), np.float32, np.nan) for k in ("scatter", "bias")}

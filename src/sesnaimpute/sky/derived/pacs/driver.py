@@ -79,9 +79,11 @@ TARGET_MIN = 45.0
 DETECT_LIMIT = "04:00:00"
 #: the least -t of an injection on more than one node (a wide region)
 INJECT_FLOOR = "03:00:00"
-#: a region is "small" (phase 1) when its largest band's grid holds fewer pixels than this, in millions (owner
-#: 2026-10-31: IRAS 20050+2720, NGC 7129 and S140 -- 0.2, 3.7 and 7.8 Mpx; the next, L988, is 61 Mpx)
-SMALL_MPX = 20.0
+#: a region is "small" (phase 1) when its largest band's grid holds fewer pixels than this, in millions. 250, from the
+#: mosaic inventory (2026-10-31, 26 regions): only 3 regions lie under 20 Mpx (IRAS 20050+2720, NGC 7129, S140), and
+#: the nine widest (Ophiuchus 263 ... Cepheus Flare 649 Mpx) lie above 250, so phase 1 is the 18 others, Orion A
+#: (246.7 Mpx) the largest of them, and phase 2 the nine widest, run after phase 1's CHECKS are read
+SMALL_MPX = 250.0
 #: the cluster python's numpy (the job refuses another)
 NUMPY_VERSION = "1.24.4"
 #: seconds the phase file sleeps between looks at the queue while it waits for room
