@@ -896,12 +896,16 @@ def held_and_stats(detection: BandDetection, records_dir: str) -> Tuple[dict, di
 
 
 def read_held(records_dir: str) -> Tuple[dict, dict]:
-    """(held-out half, statistics) of a band from its record table (`build_table`): what `assemble_band` takes
-    (contract change: public; the old held/meta came from meta.pkl)."""
+    """(held-out half, statistics) of a band from its record table (`build_table`): what `assemble_band` takes. The held
+    dict also carries the build half's records (build_row, build_plane, build_recovered) for the C1 bar."""
     with h5py.File(os.path.join(records_dir, TABLE_NAME), "r") as f:
         held = {k: f["held"][k][()] for k in f["held"]}
         stats = json.loads(f.attrs["stats"])
         stats["near_plane"] = f["near_plane"][()]
+        # the build half's records (checks.completeness_c1's derived bar: S_hat from both halves' counts)
+        build = f["half"][()] == 0
+        held.update(build_row=f["row"][()][build], build_plane=f["plane"][()][build],
+                    build_recovered=f["recovered"][()][build])
     return held, stats
 
 

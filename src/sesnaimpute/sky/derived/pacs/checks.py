@@ -653,7 +653,7 @@ def hppsc_checks(config, region: str, sources_path: str, photometry_path: str,
             hu = photometry.unit_vectors(hra, hde)
             mpsf = _mosaic_psf(config, region, b, box)
             beam = mpsf.beam_at_sky(hra, hde)                          # the band's local beam at each HPPSC source
-            dist, j = tree.query(hu, distance_upper_bound=photometry.chord(psf.sub_beams.max()))
+            dist, j = tree.query(hu, distance_upper_bound=photometry.chord(mpsf.sub_beams.max()))
             near = np.isfinite(dist) & inside & (np.nan_to_num(dist, posinf=9.0) < photometry.chord(beam))
             k = det[np.minimum(j, det.size - 1)]
             sep = np.where(near, np.degrees(2.0 * np.arcsin(np.clip(np.nan_to_num(dist, posinf=0.0) / 2.0, 0, 1))) * 3600.0, np.nan)

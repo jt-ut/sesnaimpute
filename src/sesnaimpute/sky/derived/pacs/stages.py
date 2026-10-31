@@ -892,6 +892,11 @@ def _stage_assembly(config, region, box, key, n_jobs, **_):
     held, stats = inject.held_and_stats(det, work_dir(config, region, box, key.band))
     bc = inject.assemble_band(det, pooled, held, stats, fgrid, rule=_pooling_rule(),
                               records_dir=work_dir(config, region, box, key.band))
+    rec = mosaic.open_mosaic(config, region, key.band, box).record
+    # what the completeness product reports of the band's map (pacs_completeness._band_dict: the mosaic record's map id
+    # and observations, the injected-position scatter as R_MATCH_INJECTED_RMS, no alignment term)
+    bc.stats.update(map_id=rec.map_id, map_obsid=",".join(rec.obsids), rms_inj=float(det.pos_k_arcsec),
+                    rms_align=float("nan"))
     _write_object(path, dataclasses.replace(bc, detection=None),            # the detection lives in detect.hdf5
                   dict(stage="assembly", band=key.band, K=K, empty=False, rule=repr(_pooling_rule())))
     return [dict(kind="record", path=path)], ""
