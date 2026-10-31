@@ -29,7 +29,8 @@ CELL_SIGMA. How cells pool is a PARAMETER, `PoolingRule` (FIX_SPEC.md sec 8 and 
                    aperture box's mean coverage over the cell's mean coverage: two SCATTER/BIAS per cell)
   short_cell_rule  "nan" (main's: SCATTER NaN where x3 holds fewer than MIN_INJECTIONS far injections on a plane), "widen"
                    (keep widening x4, x5, ... inside the class until MIN_INJECTIONS; when the class over the whole map
-                   cannot reach it, the edge class over the map without the noise window, then the whole map)
+                   cannot reach it, the class over the map with what it holds (>= CLASS_MAP_MIN); below that the edge
+                   class over the map without the noise window, then the whole map: never NaN)
   curve_class      "cell" (main's), "gradient" (two curves per coverage-edge cell, its injections split by |ln r| <= / >
                    0.03, read by the source's own r; other cells carry their cell curve in both)
 
@@ -112,6 +113,9 @@ DETECTION_SNR = 5.0
 NOISE_WINDOW = 1.5
 EDGE_RATIO = 2.0
 GRADIENT_BOUNDARY = 0.03
+#: the "widen" rule's class over the whole map is accepted with fewer than MIN_INJECTIONS far injections, down to
+#: this many (a median and a MAD need two values); below it the map-wide values of the table are used
+CLASS_MAP_MIN = 2
 #: the S/N planes pooled (36)
 N_PLANES = int(round((SNR_LOG_MAX - SNR_LOG_MIN) / SNR_LOG_STEP)) + 1
 
@@ -893,7 +897,8 @@ class PoolingRule:
     `noise_window` (pool only cells with CELL_SIGMA within x this of the target's; None = no window), `edge_class`
     (pool coverage-edge cells -- within-cell coverage max/min > `edge_ratio` -- only with edge cells), `short_rule`
     ("nan": SCATTER NaN where short, main's; "widen": widen beyond the last widening inside the class until
-    min_injections, then the edge class over the map without the window, then the whole map), `gradient_class`
+    min_injections; the class over the whole map with what it holds (>= CLASS_MAP_MIN); then the edge class over the
+    map without the window, then the whole map), `gradient_class`
     (the errors' injections split by |ln r| <= / > `gradient_boundary`: two SCATTER/BIAS per cell), `curve_class`
     ("cell", main's; "gradient": two curves per coverage-edge cell by |ln r|). The three named parameters of the
     brief map onto these fields through `named` (contract change: gradient_class, gradient_boundary, curve_class and
@@ -1038,15 +1043,17 @@ def _pooled_median_scatter_one(W, row, value, n_row, min_n):
 
 def _pooled_median_scatter(Ws, row, value, n_row, min_n):
     """Per output cell, the median and 1.4826 x MAD of the pooled records' values on the narrowest of `Ws` holding at
-    least `min_n` records; NaN where none does (`pacs_completeness.pooled_median_scatter`)."""
+    least `min_n` records (one number, or one per level of `Ws`); NaN where none does
+    (`pacs_completeness.pooled_median_scatter`)."""
     n_out = Ws[0].shape[0]
     med = np.full(n_out, np.nan)
     sc = np.full(n_out, np.nan)
-    for W in Ws:
+    mins = list(min_n) if np.ndim(min_n) else [min_n] * len(Ws)
+    for W, mn in zip(Ws, mins):
         need = np.flatnonzero(np.isnan(med))
         if need.size == 0:
             break
-        m, s_ = _pooled_median_scatter_one(W[need], row, value, n_row, min_n)
+        m, s_ = _pooled_median_scatter_one(W[need], row, value, n_row, mn)
         fill = np.isfinite(m)
         med[need[fill]], sc[need[fill]] = m[fill], s_[fill]
     return med, sc
@@ -1093,12 +1100,15 @@ def curve_on_flux_grid(Ws: list, row: np.ndarray, plane: np.ndarray, recovered: 
 def error_on_flux_grid(Ws: list, row: np.ndarray, plane: np.ndarray, dflux: np.ndarray, sigma_rows: np.ndarray,
                        flux_grid_mjy: np.ndarray, n_row: int, rule: PoolingRule,
                        sigma_out: Optional[np.ndarray] = None,
-                       fallback: Optional[Tuple[np.ndarray, np.ndarray]] = None) -> Tuple[np.ndarray, np.ndarray]:
+                       fallback: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+                       level_min: Optional[Sequence[int]] = None) -> Tuple[np.ndarray, np.ndarray]:
     """(bias, scatter) (n_out, n_flux): pooled median and 1.4826 x MAD of dflux / CELL_SIGMA (the injection's own cell)
     per S/N plane, on the narrowest of `Ws` holding rule.min_injections records (the rule's ladder: under "widen" the
     caller passes the extended ladder, `pool_block`), read at F / the output row's CELL_SIGMA and times it; beyond the
-    grid's brightest S/N in proportion to the flux. Where no level holds enough: `fallback` (median, scatter) per
-    (output row, S/N plane) (the "widen" rule's map-wide values; contract change: added keyword), else NaN.
+    grid's brightest S/N in proportion to the flux. `level_min`: the count each level needs (default rule.min_injections
+    for every level; the "widen" rule's class-over-the-map level takes CLASS_MAP_MIN). Where no level holds enough:
+    `fallback` (median, scatter) per (output row, S/N plane) (the "widen" rule's map-wide values), else NaN. Contract
+    change: `fallback` and `level_min` are added keywords.
     Identity (legacy rule): `error_on_flux_grid` + `pooled_median_scatter` bit-identical."""
     n_x = snr_grid().size
     sig = np.asarray(sigma_rows, float)
@@ -1108,7 +1118,8 @@ def error_on_flux_grid(Ws: list, row: np.ndarray, plane: np.ndarray, dflux: np.n
     z = dflux.astype(np.float64) / sig[row]
     for p in range(n_x):
         sel = plane == p
-        med_x[:, p], sc_x[:, p] = _pooled_median_scatter(Ws, row[sel], z[sel], n_row, rule.min_injections)
+        med_x[:, p], sc_x[:, p] = _pooled_median_scatter(Ws, row[sel], z[sel], n_row,
+                                                         rule.min_injections if level_min is None else level_min)
     if fallback is not None:
         miss = np.isnan(med_x)
         med_x[miss], sc_x[miss] = fallback[0][miss], fallback[1][miss]
@@ -1169,9 +1180,10 @@ def _ladder_extension(bc: _BandCells, out_rows: np.ndarray, short: np.ndarray, c
                       rule: PoolingRule) -> Tuple[list, dict]:
     """The levels beyond the rule's widenings for the output rows short on some plane (`short` (n_out, n_planes), any
     record set of `counts`): x(w+1), x(w+2), ... inside the class (and noise window) until every short plane of the row
-    reaches min_injections in every set, or the radius spans the map (the class over the whole map). Returns ([csr
-    (n_out, n_row) per level], statistics: rows completed at each level, rows left to the map-wide fallbacks). A level's
-    matrix holds rows only for the rows still short when it is reached."""
+    reaches min_injections in every set, or the radius spans the map: that last level is the class over the whole map,
+    accepted down to CLASS_MAP_MIN injections (FIX_SPEC sec 12: "pool the class over the map"). Returns ([csr (n_out,
+    n_row) per level], statistics: rows completed at each level, rows taking the class over the map, rows left to the
+    map-wide fallbacks). A level's matrix holds rows only for the rows still short when it is reached."""
     n_row = bc.ids.size
     levels, hist = [], {}
     need = short.copy()
@@ -1194,6 +1206,13 @@ def _ladder_extension(bc: _BandCells, out_rows: np.ndarray, short: np.ndarray, c
         need = need & st
         levels.append(W)
         if k * rule.radius_arcsec > bc.diameter:
+            # this level is the class over the whole map: accepted down to CLASS_MAP_MIN injections
+            hist["class_map_rows"] = int(need.any(1).sum())
+            hist["class_map_planes"] = int(need.sum())
+            st = np.zeros_like(need)
+            for c in cs:
+                st |= (W @ c) < CLASS_MAP_MIN
+            need = need & st
             break
     hist["to_map_fallback_rows"] = int(need.any(1).sum())
     hist["to_map_fallback_planes"] = int(need.sum())
@@ -1282,9 +1301,13 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
         return csr_matrix((W.data, cols_map[W.indices], W.indptr), shape=(W.shape[0], n_loaded))
 
     ladder = [remap(W, pos_ext) for W in Ws]
+    level_min = [rule.min_injections] * len(Ws)
     if extra:
         pos_all = np.searchsorted(loaded, np.arange(n_all))
         ladder += [remap(W, pos_all) for W in extra]
+        level_min += [rule.min_injections] * len(extra)
+        if "class_map_rows" in hist:
+            level_min[-1] = CLASS_MAP_MIN
     bm = rec["half"] == 0
     build = {k: rec[k][bm] for k in ("row", "plane", "recovered", "near", "dflux", "lnr")}
     # the curve: main's pooling (in S/N, no window, no class), per gradient class for curve_class "gradient"
@@ -1314,7 +1337,7 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
         for g in gsets:
             rr = r if g is None else {k: v[_gradient_class(r["lnr"], rule.gradient_boundary) == g] for k, v in r.items()}
             fbv = None if fb is None else _fallback_values(fb, set_index, g, edge_out, out_rows.size, rule.min_injections)
-            e.append(_cell_errors(ladder, flux_grid_mjy, sig, rr, rule, sig_out, fbv))
+            e.append(_cell_errors(ladder, flux_grid_mjy, sig, rr, rule, sig_out, fbv, level_min))
         return e[0] if len(e) == 1 else {k: np.stack([q[k] for q in e]) for k in ("scatter", "bias")}
 
     out["errors"] = errors({k: rec[k] for k in ("row", "plane", "near", "dflux", "lnr")}, 0)
@@ -1332,13 +1355,13 @@ def _pool_product(Ws, rec, flux_grid_mjy, sigma_rows, n_row, sigma_out):
                 pooled_total=count)
 
 
-def _cell_errors(Ws, flux_grid_mjy, sigma_rows, rec, rule, sigma_out, fallback=None):
+def _cell_errors(Ws, flux_grid_mjy, sigma_rows, rec, rule, sigma_out, fallback=None, level_min=None):
     """SCATTER and BIAS over the records farther than BLEND_RADIUS_BEAMS from every detection (`cell_errors`)."""
     n_row = len(sigma_rows)
     sel = ~rec["near"].astype(bool)
     bias, scatter = error_on_flux_grid(Ws, rec["row"][sel].astype(np.int64), rec["plane"][sel].astype(np.int64),
                                        rec["dflux"][sel], sigma_rows, flux_grid_mjy, n_row, rule, sigma_out=sigma_out,
-                                       fallback=fallback)
+                                       fallback=fallback, level_min=level_min)
     return dict(scatter=scatter, bias=bias)
 
 
