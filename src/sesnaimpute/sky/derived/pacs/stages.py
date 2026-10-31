@@ -550,6 +550,31 @@ def _primary_path(config, region, box, key: _Key) -> str:
     return os.path.join(work_dir(config, region, box, key.band), _record_name(key.stage, key.round, key.shard, key.of))
 
 
+def _rel(config, path: str) -> str:
+    """A path as the stage table stores it: relative to the data root (the table moves with its root; R5 G1: a root
+    copied or moved mid-stage resumed on the absolute path written when the stage started)."""
+    if path and os.path.isabs(path):
+        rel = os.path.relpath(path, config.data_root)
+        if not rel.startswith(os.pardir):
+            return rel
+    return path
+
+
+def _live(config, path: str) -> str:
+    """A stored path resolved against the live data root."""
+    return os.path.join(config.data_root, path) if path and not os.path.isabs(path) else path
+
+
+def _rel_outputs(config, outputs: list) -> list:
+    out = []
+    for o in outputs:
+        o = dict(o, path=_rel(config, o["path"]))
+        if isinstance(o.get("receipt"), dict) and "path" in o["receipt"]:
+            o["receipt"] = dict(o["receipt"], path=_rel(config, o["receipt"]["path"]))
+        out.append(o)
+    return out
+
+
 def _row_state(config, region, box, key: _Key) -> StageRow:
     path = _row_path(config, region, box, key)
     mk = lambda p, done, problem: StageRow(key.stage, key.band, key.round, key.shard, key.of, p, done, problem)
@@ -565,17 +590,19 @@ def _row_state(config, region, box, key: _Key) -> StageRow:
                 host=row.get("host") or "")
     mk = lambda p, done, problem: StageRow(key.stage, key.band, key.round, key.shard, key.of, p, done, problem, **info)
     if not row.get("finished"):
-        return mk(row["path"], False, "started %s on %s (pid %s), not finished" % (row["started"], row["host"], row["pid"]))
+        return mk(_live(config, row["path"]), False, "started %s on %s (pid %s), not finished"
+                  % (row["started"], row["host"], row["pid"]))
     for out in row["outputs"]:
+        out = dict(out, path=_live(config, out["path"]))
         problem = _verify_output(out)
         if problem:
             return mk(out["path"], False, problem)
-    return mk(row["path"], True, "")
+    return mk(_live(config, row["path"]), True, "")
 
 
 def _row_begin(config, region, box, key: _Key, path: str, n_jobs) -> dict:
     os.makedirs(_rows_dir(config, region, box), exist_ok=True)
-    row = dict(stage=key.stage, band=key.band, round=key.round, shard=key.shard, of=key.of, path=path,
+    row = dict(stage=key.stage, band=key.band, round=key.round, shard=key.shard, of=key.of, path=_rel(config, path),
                started=time.strftime("%Y-%m-%dT%H:%M:%S"), finished=None, code=_code_state(),
                host=socket.gethostname(), pid=os.getpid(), n_jobs=n_jobs, outputs=[], note="")
     _write_json(_row_path(config, region, box, key), row)
@@ -584,7 +611,7 @@ def _row_begin(config, region, box, key: _Key, path: str, n_jobs) -> dict:
 
 def _row_end(config, region, box, key: _Key, row: dict, outputs: list, note: str = "") -> None:
     _write_json(_row_path(config, region, box, key),
-                dict(row, finished=time.strftime("%Y-%m-%dT%H:%M:%S"), outputs=outputs, note=note))
+                dict(row, finished=time.strftime("%Y-%m-%dT%H:%M:%S"), outputs=_rel_outputs(config, outputs), note=note))
 
 
 def _row_info(config, region, box, key: _Key) -> Optional[dict]:

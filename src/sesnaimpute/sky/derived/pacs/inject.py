@@ -975,6 +975,16 @@ PRODUCTION_SHORT_CELL_RULE = "widen"
 PRODUCTION_CURVE_CLASS = "gradient"
 SHORT_RULES = ("nan", "widen")
 CURVE_CLASSES = ("cell", "gradient")
+#: what the completed fallback drops first when a windowed cell-plane is still short after the ladder (inside class and
+#: window) spans the map: "class" (R5) keeps the class and the window over the map (FALLBACK_MIN), then the map's
+#: scatter x R(class and window over the map); "window" drops the class: the noise window over the map, any class
+#: (FALLBACK_MIN), then the map's scatter x R(window over the map)
+FALLBACKS = ("class", "window")
+PRODUCTION_FALLBACK = "class"
+#: which class a cell that is both crowded and noisy (CELL_SIGMA > FLUX_TERM_NOISY_FACTOR x median) takes:
+#: "crowded" (R5, crowded takes precedence) or "noisy"
+PRECEDENCES = ("crowded", "noisy")
+PRODUCTION_PRECEDENCE = "crowded"
 
 
 @dataclass(frozen=True)
@@ -998,6 +1008,8 @@ class PoolingRule:
     gradient_class: bool = False
     gradient_boundary: float = GRADIENT_BOUNDARY
     curve_class: str = "cell"
+    fallback: str = PRODUCTION_FALLBACK
+    precedence: str = PRODUCTION_PRECEDENCE
 
     @classmethod
     def legacy(cls) -> "PoolingRule":
@@ -1006,22 +1018,27 @@ class PoolingRule:
         return cls(float(POOL_ARCSEC), tuple(POOL_WIDENINGS), int(MIN_INJECTIONS))
 
     @classmethod
-    def named(cls, pooling_class: str = "none", short_cell_rule: str = "nan", curve_class: str = "cell") -> "PoolingRule":
+    def named(cls, pooling_class: str = "none", short_cell_rule: str = "nan", curve_class: str = "cell",
+              fallback: str = PRODUCTION_FALLBACK, precedence: str = PRODUCTION_PRECEDENCE) -> "PoolingRule":
         """The rule from the brief's parameter names: pooling_class in POOLING_CLASSES, short_cell_rule in SHORT_RULES,
-        curve_class in CURVE_CLASSES; ("none", "nan", "cell") = `legacy()`."""
-        if pooling_class not in POOLING_CLASSES or short_cell_rule not in SHORT_RULES or curve_class not in CURVE_CLASSES:
-            raise ValueError("pooling_class %r, short_cell_rule %r, curve_class %r" % (pooling_class, short_cell_rule, curve_class))
+        curve_class in CURVE_CLASSES, fallback in FALLBACKS, precedence in PRECEDENCES; ("none", "nan", "cell") =
+        `legacy()` (fallback and precedence act only with a noise window)."""
+        if (pooling_class not in POOLING_CLASSES or short_cell_rule not in SHORT_RULES or curve_class not in CURVE_CLASSES
+                or fallback not in FALLBACKS or precedence not in PRECEDENCES):
+            raise ValueError("pooling_class %r, short_cell_rule %r, curve_class %r, fallback %r, precedence %r"
+                             % (pooling_class, short_cell_rule, curve_class, fallback, precedence))
         return cls(float(POOL_ARCSEC), tuple(POOL_WIDENINGS), int(MIN_INJECTIONS),
                    noise_window=None if pooling_class == "none" else NOISE_WINDOW,
                    edge_class=pooling_class == "window_edge", edge_ratio=EDGE_RATIO, short_rule=short_cell_rule,
                    gradient_class=pooling_class == "window_gradient", gradient_boundary=GRADIENT_BOUNDARY,
-                   curve_class=curve_class)
+                   curve_class=curve_class, fallback=fallback, precedence=precedence)
 
     @classmethod
     def production(cls) -> "PoolingRule":
         """The owner's ruled estimator (PRODUCTION_*): window, widen, gradient curve. `legacy()` stays for the
         identity gate only."""
-        return cls.named(PRODUCTION_POOLING_CLASS, PRODUCTION_SHORT_CELL_RULE, PRODUCTION_CURVE_CLASS)
+        return cls.named(PRODUCTION_POOLING_CLASS, PRODUCTION_SHORT_CELL_RULE, PRODUCTION_CURVE_CLASS,
+                         PRODUCTION_FALLBACK, PRODUCTION_PRECEDENCE)
 
     @property
     def is_legacy(self) -> bool:
@@ -1053,18 +1070,23 @@ def crowding_counts(detection: BandDetection) -> np.ndarray:
                       np.int64)
 
 
-def cell_classes(detection: BandDetection) -> np.ndarray:
+def cell_classes(detection: BandDetection, precedence: str = PRODUCTION_PRECEDENCE) -> np.ndarray:
     """Per row the cell class (CELL_CLASSES; owner 2026-10-31 ~13:00): 2 crowded where `crowding_counts` exceeds its
     CROWDED_PERCENTILE over the map's cells, else 1 noisy where CELL_SIGMA > FLUX_TERM_NOISY_FACTOR x the map's median,
-    else 0 quiet. Cached per detection."""
-    key = id(detection)
+    else 0 quiet. `precedence` "noisy": a noisy cell stays noisy when it is also crowded. Cached per detection."""
+    if precedence not in PRECEDENCES:
+        raise ValueError("precedence %r" % (precedence,))
+    key = (id(detection), precedence)
     if _CELL_CLASS.get("key") == key and _CELL_CLASS.get("obj") is detection:
         return _CELL_CLASS["value"]
     sigma = np.asarray(detection.cells.sigma, np.float64)
     out = noise_classes(sigma) if sigma.size else np.zeros(0, np.int8)
     cnt = crowding_counts(detection)
     if cnt.size:
-        out = np.where(cnt > np.percentile(cnt, CROWDED_PERCENTILE), 2, out).astype(np.int8)
+        crowded = cnt > np.percentile(cnt, CROWDED_PERCENTILE)
+        if precedence == "noisy":
+            crowded &= out == 0
+        out = np.where(crowded, 2, out).astype(np.int8)
     _CELL_CLASS.update(key=key, obj=detection, value=out)
     return out
 
@@ -1077,7 +1099,7 @@ def pool_classes(detection: BandDetection, rule: PoolingRule, edge_ratio_per_cel
     n = np.asarray(detection.cells.ids).size
     out = np.zeros(n, np.int8)
     if rule.noise_window is not None and n:
-        out = cell_classes(detection).astype(np.int8)
+        out = cell_classes(detection, rule.precedence).astype(np.int8)
     if rule.edge_class and edge_ratio_per_cell is not None:
         with np.errstate(invalid="ignore"):
             out = out + 3 * (np.asarray(edge_ratio_per_cell, float) > rule.edge_ratio).astype(np.int8)
@@ -1367,6 +1389,24 @@ def _fallback_values(fb: np.ndarray, set_index: int, g: Optional[int], edge_out:
     return med, sc
 
 
+def _window_over_map(last, out_rows: np.ndarray, sigma_all: np.ndarray, window: float):
+    """The "window" fallback's step-2 matrix (n_out, n_all): for the rows `last` (the ladder's map-spanning level) still
+    holds, every cell of the map with CELL_SIGMA within x `window` of the row's (the row itself always), any class."""
+    rows = np.flatnonzero(np.diff(last.indptr) > 0)
+    s = np.asarray(sigma_all, np.float64)
+    ri, cj = [], []
+    for i in rows:
+        t = s[out_rows[i]]
+        with np.errstate(all="ignore"):
+            q = s / t
+        j = np.flatnonzero(((q >= 1.0 / window) & (q <= window)) | (np.arange(s.size) == out_rows[i]))
+        ri.append(np.full(j.size, i, np.int64))
+        cj.append(j)
+    r = np.concatenate(ri) if ri else np.zeros(0, np.int64)
+    c = np.concatenate(cj) if cj else np.zeros(0, np.int64)
+    return csr_matrix((np.ones(r.size), (r, c)), shape=(out_rows.size, s.size))
+
+
 def _class_scaled_fallback(fbv: Tuple[np.ndarray, np.ndarray], W_map, rec: dict, sig: np.ndarray, mad_all: float
                            ) -> Tuple[np.ndarray, np.ndarray]:
     """Step 3 of the completed fallback (FALLBACK_MIN): for the rows of `W_map` (the window class over the whole map),
@@ -1437,7 +1477,12 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
             short |= (Wlast @ c) < rule.min_injections
         if short.any():
             extra, hist = _ladder_extension(_band_cells(detection, tab, rule), out_rows, short, counts, rule)
-    loaded = np.union1d(ext, np.concatenate([W.indices for W in extra])) if extra else ext
+    W_win = None                       # fallback "window": the noise window over the whole map, any class
+    if (extra and rule.noise_window is not None and rule.fallback == "window"
+            and hist.get("to_map_fallback_rows", 0)):
+        W_win = _window_over_map(extra[-1], out_rows, sigma_all, rule.noise_window)
+    loaded = (np.union1d(ext, np.concatenate([W.indices for W in extra + ([W_win] if W_win is not None else [])]))
+              if extra else ext)
     keys = ("plane", "half", "near", "recovered", "dflux", "lnr")
     rec, rec_row = tab.rows(keys, loaded)
     rec["row"] = rec_row
@@ -1457,8 +1502,9 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
         ladder += [remap(W, pos_all) for W in extra]
         level_min += [rule.min_injections] * len(extra)
         if rule.noise_window is not None and hist.get("to_map_fallback_rows", 0):
-            W_map = ladder[-1]
-            ladder.append(W_map)                     # step 2: the window class over the map at FALLBACK_MIN
+            # step 2 at FALLBACK_MIN: the window class over the map ("class"), or the window over the map, any class
+            W_map = ladder[-1] if W_win is None else remap(W_win, pos_all)
+            ladder.append(W_map)
             level_min.append(FALLBACK_MIN)
     bm = rec["half"] == 0
     build = {k: rec[k][bm] for k in ("row", "plane", "recovered", "near", "dflux", "lnr")}
@@ -1623,7 +1669,7 @@ def assemble_band(detection: BandDetection, pooled: Sequence[dict], held: dict, 
     if rule is not None and records_dir is not None and not rule.is_legacy:
         eps = fit_flux_term(detection, records_dir, build_errs["scatter"], flux_grid_mjy, rule)
         held["eps_flux"] = eps
-    cls = cell_classes(detection).astype(np.int8)
+    cls = cell_classes(detection, PRODUCTION_PRECEDENCE if rule is None else rule.precedence).astype(np.int8)
     held["cell_class"] = cls
     return BandCompleteness(detection, curve, f90, n_pos, errs["scatter"], errs["bias"], held, stats, eps, f90_err, cls)
 
@@ -1715,7 +1761,7 @@ def fit_flux_term(detection: BandDetection, records_dir: str, build_scatter: np.
     else:
         s = _read_at_flux(sb, fg, row, flux)
     good = np.isfinite(s) & (s > 0)
-    cls = cell_classes(detection)[row]
+    cls = cell_classes(detection, rule.precedence)[row]
     rng = np.random.default_rng(FLUX_TERM_SEED)
     out = {}
     for c, name in enumerate(FLUX_TERM_CLASSES):
