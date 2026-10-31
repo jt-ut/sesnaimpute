@@ -1590,6 +1590,36 @@ def flux_sigma(scatter_mjy: np.ndarray, eps: np.ndarray, flux: np.ndarray) -> np
     return np.where(e == 0.0, s, np.sqrt(s * s + e * e))
 
 
+def source_ln_r(m: Mosaic, detection: BandDetection, ra: np.ndarray, dec: np.ndarray) -> np.ndarray:
+    """Per SESNA source, ln r = ln(mean coverage of the aperture box at its position / its cell's mean coverage), the
+    quantity the records' `lnr` holds for an injection (M3's r; box of half-side ceil(annulus outer radius) + 1 px at the
+    nearest pixel, the cell's mean over all its pixels), at the registered position (FROZEN 9); NaN for a source outside
+    the band's cells. Under the gradient curve a source with |ln r| > GRADIENT_BOUNDARY reads the second curve."""
+    out = np.full(np.asarray(ra).size, np.nan, np.float32)
+    rows = np.asarray(detection.src_row, np.int64)
+    sel = np.flatnonzero(rows >= 0)
+    if not sel.size:
+        return out
+    x, y = m.xy(*grid.to_map_frame(np.asarray(ra, float)[sel], np.asarray(dec, float)[sel], detection.shift[:2]))
+    ix, iy = np.rint(x).astype(np.int64), np.rint(y).astype(np.int64)
+    rb = int(np.ceil(m.ann_out_px)) + 1
+    ny, nx = _shape_of(m)
+    cov_layer = m.layers["coverage"]
+    box = np.full(sel.size, np.nan)
+    key = np.clip(iy, 0, ny - 1) // TILE * (nx // TILE + 1) + np.clip(ix, 0, nx - 1) // TILE
+    for k in np.unique(key):
+        j = np.flatnonzero(key == k)
+        ty, tx = int(np.clip(iy[j[0]], 0, ny - 1) // TILE), int(np.clip(ix[j[0]], 0, nx - 1) // TILE)
+        y0, x0 = ty * TILE - rb, tx * TILE - rb
+        cov = cov_layer.window(y0, (ty + 1) * TILE + rb, x0, (tx + 1) * TILE + rb)
+        box[j] = _box_mean(cov, y0, x0, ix[j], iy[j], rb, (ny, nx))
+    cells = np.asarray(detection.cells.ids, np.int64)[rows[sel]]
+    mean = _cell_coverage(cov_layer, m.cells, cells)[0]
+    with np.errstate(all="ignore"):
+        out[sel] = np.log(box / mean).astype(np.float32)
+    return out
+
+
 def empty_band(n_src: int, n_flux: int) -> BandCompleteness:
     """A band no mosaic reaches: no rows, SOURCE_ROW -1 (`_empty_band`)."""
     z = lambda dt: np.zeros(0, dt)

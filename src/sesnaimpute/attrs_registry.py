@@ -3980,6 +3980,36 @@ for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
         REGISTRY[("completeness_pacs_source", _name.format(b=_band))] = (
             _u, _r.format(b=_band, w=_w, n=200, mmin="-3.5", mmax="5.5", dm="0.25"))
 
+# sky.derived.pacs -- completeness_pacs_source, the second curve of coverage-edge cells and the flux-proportional error
+# term (owner's estimator ruling 2026-10-31; written only when the build used it).
+_PACS_GRADIENT_READINGS = {
+    "CURVE_GRADIENT_{b}": ("dimensionless (completeness fraction x 600)",
+        "For each row of CURVE_{b}: the same recovered fraction, built only from the artificial sources whose aperture box "
+        "held a mean coverage more than 3 per cent away from the cell's mean (|ln r| > 0.03, r = the box's mean coverage "
+        "over the cell's), i.e. the positions near a coverage gradient inside the cell; CURVE_{b} then holds the curve of "
+        "the other positions. A source reads this curve where its own |SOURCE_LN_R| for the band exceeds 0.03. In a cell "
+        "without such positions both curves are the cell's one curve."),
+    "FLUX90_GRADIENT_{b}_MJY": ("mJy",
+        "FLUX90_{b}_MJY read on CURVE_GRADIENT_{b}: the faintest flux at which that curve is still at least 0.9."),
+    "N_POS_GRADIENT_{b}": ("injections",
+        "N_POS_{b} for CURVE_GRADIENT_{b}: the artificial sources behind its value at the faintest plane."),
+    "EPS_FLUX_{b}": ("relative flux (a fraction of the source flux; dimensionless)",
+        "The part of a {w} micron source's flux error that grows in proportion to its flux, one row per cell noise class "
+        "(row 0: quiet cells; row 1: noisy cells, CELL_SIGMA_{b}_MJY above 2 times the map's median), columns: the "
+        "value, its 16 and 84 per cent bootstrap bounds over cells, and the number of artificial sources it was fitted "
+        "on. A source's flux uncertainty is the square root of (SCATTER_{b}_MJY read at its flux)^2 plus (this value "
+        "times its flux)^2."),
+}
+for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
+    for _name, (_u, _r) in _PACS_GRADIENT_READINGS.items():
+        REGISTRY[("completeness_pacs_source", _name.format(b=_band))] = (_u, _r.format(b=_band, w=_w))
+REGISTRY[("completeness_pacs_source", "SOURCE_LN_R")] = (
+    "dimensionless (natural log of a coverage ratio)",
+    "For each curated source and the bands P70, P100, P160: the natural log of the mean coverage of the aperture box at "
+    "the source's position over the mean coverage of its cell (CURVE row SOURCE_ROW) on the band's mosaic; a source "
+    "with an absolute value above 0.03 reads CURVE_GRADIENT_<band>, else CURVE_<band>. Not a number where the source "
+    "has no row.")
+
 # sky.derived.pacs_completeness -- sources_pacs_region (RULINGS_5): the blind PACS source table.
 _PACS_SOURCES_READINGS = {
     "RA_DEG": ("deg ICRS",

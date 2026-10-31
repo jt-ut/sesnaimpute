@@ -353,11 +353,11 @@ def completeness_c2(band: str, completeness: dict, held: dict) -> List[CheckRow]
     SIGMA is counted and reported as its own row). Identity: `_acceptance_c2`'s values on the non-NaN reads.
 
     The held-out half against the error built from the BUILD half alone (`held["build_errors"]`). Aperture path, per noise
-    class and S/N bin, inside the flux grid: the robust scatter of held-out dflux / SCATTER_build read at the injection's own
-    cell and flux (expected 1.02 +/- 0.05, bar 1.00 +/- 0.10 where >= 200 residuals), over the injections farther than
+    class and S/N bin, inside the flux grid: the robust scatter of held-out dflux / SIGMA_build (SCATTER_build read at the
+    injection's own cell and flux, with the build's flux-proportional term held["eps_flux"] where fitted) (expected 1.02 +/- 0.05, bar 1.00 +/- 0.10 where >= 200 residuals), over the injections farther than
     BLEND_RADIUS_BEAMS from every detection (a source within it is an upper bound). Classes: quiet and noisy (a cell is noisy
-    where its CELL_SIGMA exceeds twice its map's median) and, if the completeness carries `edge_ratio` (r per row), gradient
-    (|ln r| > 0.03). Bias above FLUX90 inside the flux grid: |median dflux / injected| <= 1 %. The same on the detected
+    where its CELL_SIGMA exceeds twice its map's median) and, where the records carry `lnr`, gradient (the injections with
+    |ln r| > 0.03). Bias above FLUX90 inside the flux grid: |median dflux / injected| <= 1 %. The same on the detected
     sources' fluxes (the flux of the PACS source the blind detection found)."""
     d = completeness
     e = held["build_errors"]
@@ -370,13 +370,17 @@ def completeness_c2(band: str, completeness: dict, held: dict) -> List[CheckRow]
     median_sigma = np.array([np.median(d["sigma"][d["cell_map"] == m]) if (d["cell_map"] == m).any() else np.nan
                              for m in range(d["map_id"].size)])
     noisy = d["sigma"] > C2_NOISY_FACTOR * median_sigma[d["cell_map"]]
-    classes = [("quiet", ~noisy), ("noisy", noisy)]
-    if d.get("edge_ratio") is not None:
-        classes.append(("gradient", np.abs(np.log(np.asarray(d["edge_ratio"], float))) > GRADIENT_LN_R))
+    classes = [("quiet", ~noisy[row]), ("noisy", noisy[row])]
+    if "lnr" in held:
+        with np.errstate(invalid="ignore"):
+            classes.append(("gradient", np.abs(np.asarray(held["lnr"], float)) > GRADIENT_LN_R))
     in_grid = lambda f: (f >= d["flux"].min()) & (f <= d["flux"].max())
     ap = ~held["near"].astype(bool) & in_grid(flux)
     s_build = np.full(row.size, np.nan)
     s_build[ap] = _at_injected_flux(e["scatter"], d["flux"], row[ap], flux[ap])
+    # the same SIGMA the products give a detection: with the flux-proportional term where the build fitted one
+    eps = inject.eps_rows(held.get("eps_flux"), d["sigma"])
+    s_build[ap] = inject.flux_sigma(s_build[ap], eps[row[ap]], flux[ap])
     rows: List[CheckRow] = []
     n_nan = int(np.sum(ap & ~np.isfinite(s_build)))
     rows.append(_row("C2_NAN_SIGMA", band, n_nan, detail="held-out reads inside the flux grid whose SCATTER is NaN (not in any scatter above)",
@@ -385,7 +389,7 @@ def completeness_c2(band: str, completeness: dict, held: dict) -> List[CheckRow]
     def scatter_rows(prefix, residual, mask):
         for label, cls in classes:
             for j in range(len(SNR_BIN_CENTRES)):
-                sel = mask & cls[row] & (k == j) & np.isfinite(s_build) & (s_build > 0)
+                sel = mask & cls & (k == j) & np.isfinite(s_build) & (s_build > 0)
                 z = residual[sel] / s_build[sel]
                 value = _robust(z)
                 name = "C2_%s_%s_BIN%d" % (prefix, label.upper(), j)

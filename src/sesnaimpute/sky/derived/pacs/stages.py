@@ -884,7 +884,8 @@ def _stage_assembly(config, region, box, key, n_jobs, **_):
         for i, b in zip(idx, blocks):
             pooled[i] = b
     held, stats = inject.held_and_stats(det, work_dir(config, region, box, key.band))
-    bc = inject.assemble_band(det, pooled, held, stats, fgrid)
+    bc = inject.assemble_band(det, pooled, held, stats, fgrid, rule=_pooling_rule(),
+                              records_dir=work_dir(config, region, box, key.band))
     _write_object(path, dataclasses.replace(bc, detection=None),            # the detection lives in detect.hdf5
                   dict(stage="assembly", band=key.band, K=K, empty=False, rule=repr(_pooling_rule())))
     return [dict(kind="record", path=path)], ""
@@ -920,11 +921,18 @@ def _stage_finish(config, region, box, key, n_jobs, reference_product=None, **_)
         _inside(p, os.path.join(config.data_root, "sky", "derived"))
         os.makedirs(os.path.dirname(p), exist_ok=True)
     ra, dec = region_inputs(config, region)
+    ln_r = None
+    if any(np.ndim(bands[b].curve) == 3 for b in BANDS):     # the gradient curve: each source's own ln r per band
+        ln_r = np.full((ra.size, len(BANDS)), np.nan, np.float32)
+        for i, b in enumerate(BANDS):
+            if b in mosaics and bands[b].detection is not None:
+                ln_r[:, i] = inject.source_ln_r(mosaics[b], bands[b].detection, ra, dec)
     sources = photometry.merge_sources(config, bands, mosaics, fgrid, n_jobs)
     phot = photometry.forced_photometry(config, region, mosaics, bands, ra, dec, n_jobs)
     phot, counts = photometry.cross_match(phot, sources, ra, dec, mosaics)
     receipts = {
-        "completeness": _write_product(paths["completeness"], lambda t: products.write_completeness(t, region, mag, bands)),
+        "completeness": _write_product(paths["completeness"],
+                                       lambda t: products.write_completeness(t, region, mag, bands, ln_r)),
         "sources": _write_product(paths["sources"], lambda t: products.write_sources(t, region, bands, sources)),
         "photometry": _write_product(paths["photometry"], lambda t: products.write_photometry(t, region, phot))}
     rows = []

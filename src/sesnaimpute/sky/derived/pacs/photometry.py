@@ -36,7 +36,7 @@ from scipy.spatial import cKDTree
 
 from sesnaimpute import pieces as pieces_module
 from sesnaimpute.definitions import PACS_BANDS as BANDS
-from sesnaimpute.sky.derived.pacs import detect, grid
+from sesnaimpute.sky.derived.pacs import detect, grid, inject
 from sesnaimpute.sky.derived.pacs.inject import BandCompleteness
 from sesnaimpute.sky.derived.pacs.mosaic import Mosaic
 
@@ -247,7 +247,9 @@ def merge_sources(config, bands: Dict[str, BandCompleteness], mosaics: Dict[str,
         extended[b][k] = ext
         offset[b][k[hit]] = bands[b].detection.cells.offset[row[hit]]
         if hit.any():
-            sigma[b][k[hit]] = calibrated_sigma(bands[b].scatter[row[hit]], flux_grid_mjy, f[hit])
+            eps = inject.eps_rows(bands[b].eps_flux, bands[b].detection.cells.sigma)[row[hit]]
+            sigma[b][k[hit]] = inject.flux_sigma(calibrated_sigma(bands[b].scatter[row[hit]], flux_grid_mjy, f[hit]), eps,
+                                                 f[hit])
     for b in BANDS:
         s = src[b] >= 0
         at = np.maximum(src[b], 0)
