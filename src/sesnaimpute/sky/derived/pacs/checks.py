@@ -51,9 +51,7 @@ from scipy.spatial import cKDTree
 from sesnaimpute.catalog import curated
 from sesnaimpute.definitions import PACS_APERTURES as APERTURES
 from sesnaimpute.definitions import PACS_BANDS as BANDS
-from sesnaimpute.definitions import PACS_BLEND_RADIUS_BEAMS as BLEND_RADIUS_BEAMS
 from sesnaimpute.definitions import PACS_MIN_INJECTIONS as MIN_INJECTIONS
-from sesnaimpute.definitions import PACS_POOL_WIDENINGS as POOL_WIDENINGS
 from sesnaimpute.definitions import PACS_SNR_BIN_CENTRES as SNR_BIN_CENTRES
 from sesnaimpute.definitions import COMPLETENESS_STORAGE_SCALE as STORAGE_SCALE
 from sesnaimpute.sky.derived.pacs import grid, inject, mosaic, photometry, products, psf
@@ -653,8 +651,8 @@ def hppsc_checks(config, region: str, sources_path: str, photometry_path: str,
                 continue
             tree = cKDTree(pu[det])
             hu = photometry.unit_vectors(hra, hde)
-            psf = _mosaic_psf(config, region, b, box)
-            beam = psf.beam_at_sky(hra, hde)                          # the band's local beam at each HPPSC source
+            mpsf = _mosaic_psf(config, region, b, box)
+            beam = mpsf.beam_at_sky(hra, hde)                          # the band's local beam at each HPPSC source
             dist, j = tree.query(hu, distance_upper_bound=photometry.chord(psf.sub_beams.max()))
             near = np.isfinite(dist) & inside & (np.nan_to_num(dist, posinf=9.0) < photometry.chord(beam))
             k = det[np.minimum(j, det.size - 1)]
@@ -978,8 +976,8 @@ def normalisation_check(config, m: Mosaic, n_jobs: Optional[int] = None) -> List
     (owner ruling 2026-10-30): every position, rims included, only where its own maps carry weight (`map_weights`). One row per
     statistic with the worst |deviation|; a failing statistic lists its worst positions in the detail."""
     from joblib import Parallel, delayed
-    psf = m.psf
-    meta = psf.meta
+    mpsf = m.psf
+    meta = mpsf.meta
     reps = _representative_maps(config, meta)
     h = m.injection_half_width()
     half_out = max(h, int(np.ceil(APERTURES[m.band][2] / m.pixel_arcsec)) + 4)
@@ -992,7 +990,7 @@ def normalisation_check(config, m: Mosaic, n_jobs: Optional[int] = None) -> List
     for k in range(len(reps)):
         pts = positions[k]
         x, y = np.array([p[0] for p in pts]), np.array([p[1] for p in pts])
-        w = psf.map_weights(x, y)[:, k] if pts else np.zeros(0)
+        w = mpsf.map_weights(x, y)[:, k] if pts else np.zeros(0)
         positions[k] = [p for p, wk in zip(pts, w) if wk > 0]
     out_wcs = m.grid.wcs
     real = Parallel(n_jobs=n_jobs or 1)(delayed(_real_sources)(rep, out_wcs, m.band, positions[k], half_out, h)
@@ -1002,12 +1000,12 @@ def normalisation_check(config, m: Mosaic, n_jobs: Optional[int] = None) -> List
     tol = dict(divisor=TIE_TOLERANCE, injected=TIE_TOLERANCE, sums=SUM_TOLERANCE, tie=RELEASE_TOLERANCE)
     for k, rep in enumerate(reps):
         eef = psf.aperture_eef(config, rep[0])
-        one = np.zeros((1, psf.n_sub))
+        one = np.zeros((1, mpsf.n_sub))
         one[0, k] = 1.0
         for (x, y, kind), (a_real, a_mean, a_direct, real_patch) in zip(positions[k], real[k]):
             norm = eef / a_direct                    # the real source at the release EEF (the template's own shortfall is `tie`)
             a_real, a_mean, real_patch = a_real * norm, a_mean * norm, real_patch * norm
-            divisor = float(psf.enclosed_at(np.array([x]), np.array([y]), one)[0])
+            divisor = float(mpsf.enclosed_at(np.array([x]), np.array([y]), one)[0])
             win = _injected_window(m, x, y, FLUX_MJY, R, mixture=one)
             cx, cy = int(np.rint(x)), int(np.rint(y))
             a_inj = _aperture_sum(win.image[R - reach:R + reach + 1, R - reach:R + reach + 1], x - cx + reach, y - cy + reach, r_px) / FLUX_MJY

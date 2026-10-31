@@ -69,10 +69,10 @@ from sesnaimpute.definitions import PACS_MIN_INJECTIONS as MIN_INJECTIONS
 from sesnaimpute.definitions import PACS_POOL_ARCSEC as POOL_ARCSEC
 from sesnaimpute.definitions import PACS_POOL_WIDENINGS as POOL_WIDENINGS
 from sesnaimpute.definitions import PACS_SNR_BIN_EDGES as SNR_BIN_EDGES
-from sesnaimpute.sky.derived.pacs import detect, mosaic
+from sesnaimpute.sky.derived.pacs import detect, grid, mosaic
 from sesnaimpute.sky.derived.pacs.detect import BandDetection, CellStats, Kernel, Peaks
 from sesnaimpute.sky.derived.pacs.grid import CELL_ARCSEC, INJECTION_BLOCK_LINES, TILE, CellGrid
-from sesnaimpute.sky.derived.pacs.mosaic import Mosaic, Window
+from sesnaimpute.sky.derived.pacs.mosaic import Mosaic
 
 # ----------------------------------------------------------------------------------------------------------------------
 # constants (moved unchanged from pacs_completeness.py; deleted there in round 3)
@@ -108,8 +108,21 @@ NOISE_WINDOW = 1.5
 EDGE_RATIO = 2.0
 GRADIENT_BOUNDARY = 0.03
 #: the all-cell pool is used with fewer than MIN_INJECTIONS far injections only when the whole map holds fewer (a
-#: median and a MAD need two values); never reached on the gate set
+#: median and a MAD need two values); never reached on the gate set (the legacy-free rules below never use it for a
+#: cell with a noise window)
 MAP_MIN = 2
+#: the completed fallback of the "widen" rule (owner 2026-10-31 after M8: on IRAS 20050 P70 the all-cell pool put noisy
+#: cell-planes with quiet cells and re-introduced the under-statement): after the window has been widened to the whole
+#: map, a cell-plane takes the window class over the whole map if it holds at least FALLBACK_MIN far injections there;
+#: else SCATTER_all(plane) x R_class, R_class = MAD(z of the window class) / MAD(z of the map), each over ALL planes of
+#: the map (the excess is constant across S/N: S140, Taurus, Aquila, M8), so a class of a few dozen cells still gives
+#: thousands of residuals. Never the plain all-cell pool for a cell with a noise window.
+FALLBACK_MIN = 30
+#: owner 2026-10-31 (after M7): the injection rounds continue for a cell until the sampling error of its FLUX90 (from
+#: its pooled counts and the curve's local slope at the 0.9 crossing, `flux90_precision`) is at most this, relative. The
+#: big maps (slope ~1.5 per dex, ~130 pooled injections: 0.040) add no rounds; a map at slope 1.1 per dex needs ~160.
+#: The MIN_INJECTIONS floor and the MAX_EXTRA_BATCHES cap are unchanged; the legacy rule keeps the floor alone.
+FLUX90_PRECISION = 0.05
 #: the S/N planes pooled (36)
 N_PLANES = int(round((SNR_LOG_MAX - SNR_LOG_MIN) / SNR_LOG_STEP)) + 1
 
@@ -524,6 +537,8 @@ def _injector(m: Mosaic, detection: BandDetection, layers: Optional[dict] = None
     if _INJECTOR.get("key") != key:
         _INJECTOR.clear()
         _INJECTOR.update(key=key, injector=Injector(m, detection, 1, layers=layers))
+    elif layers is not None and _INJECTOR["injector"].layers is None:
+        _INJECTOR["injector"].layers = layers            # built without them (first_batches), now given
     return _INJECTOR["injector"]
 
 
@@ -558,19 +573,25 @@ def _chunks(jobs, n_rows):
     return [[jobs[i] for i in c] for c in np.array_split(np.arange(len(jobs)), k) if c.size]
 
 
-def round_tasks(detection: BandDetection, first: int, r: int, load: Callable[[int], np.ndarray]) -> List[InjectionTask]:
+def round_tasks(detection: BandDetection, first: int, r: int, load: Callable[[int], np.ndarray],
+                rule: Optional["PoolingRule"] = None, load_recovered: Optional[Callable[[int], np.ndarray]] = None
+                ) -> List[InjectionTask]:
     """The ordered pieces of round `r` ([] when the band is complete): round 0 = `first` batches in every block for every
-    (plane, half); each later round one more batch per pair over the cells within the pooling radius of a cell whose
-    pooled count (all earlier rounds) is short of MIN_INJECTIONS, up to MAX_EXTRA_BATCHES. `load(q)`: the (rows x pairs)
-    counts of round q's records (`record_counts`; dense or sparse). Identity: `pacs_completeness.round_task_list`
-    (pacs_completeness.py:1258) -- same tasks in the same order (the old (tile index, inputs) fields drop: one mosaic per
-    band)."""
+    (plane, half); each later round one more batch per pair over the cells within the pooling radius of a cell that is
+    SHORT, up to MAX_EXTRA_BATCHES. Short: a pair whose pooled count (all earlier rounds) is below MIN_INJECTIONS (the
+    floor, every rule); and, under a non-legacy `rule` with `load_recovered`, the planes around a cell's 0.9 crossing
+    whose FLUX90 sampling error exceeds FLUX90_PRECISION (`_imprecise`, owner 2026-10-31). `load(q)`, `load_recovered(q)`:
+    the (rows x pairs) counts of round q's records and of their recovered ones (`record_counts`; dense or sparse).
+    Identity (legacy rule or none): `pacs_completeness.round_task_list` (pacs_completeness.py:1258) -- same tasks in the
+    same order (the old (tile index, inputs) fields drop: one mosaic per band)."""
+    precise = rule is not None and not rule.is_legacy and load_recovered is not None
     pairs = injection_pairs()
     ids = np.asarray(detection.cells.ids, np.int64)
     blocks = injection_blocks(ids, detection.cell_grid.nx)
     W = pool_matrices(detection.cell_grid, ids, np.zeros(ids.size, np.int8), PoolingRule.legacy(),
                       widenings=POOL_WIDENINGS[:1])[0]
     count = np.zeros((ids.size, len(pairs)))
+    recovered = np.zeros((ids.size, len(pairs)))
     tasks = []
     for i, blk in enumerate(blocks):
         jobs = [(p, half, tuple(range(first)), None) for p, half in pairs]
@@ -581,10 +602,15 @@ def round_tasks(detection: BandDetection, first: int, r: int, load: Callable[[in
             return []
         q = load(extra)
         count += q.toarray() if hasattr(q, "toarray") else np.asarray(q)
+        if precise:
+            q = load_recovered(extra)
+            recovered += q.toarray() if hasattr(q, "toarray") else np.asarray(q)
         tasks = []
         if extra == MAX_EXTRA_BATCHES:
             break
         short = (W @ count) < MIN_INJECTIONS
+        if precise:
+            short |= _imprecise(W @ count, W @ recovered)
         act = short.any(axis=0)
         if not act.any():
             continue
@@ -595,6 +621,52 @@ def round_tasks(detection: BandDetection, first: int, r: int, load: Callable[[in
             for c in (_chunks(jobs, r1 - r0) if jobs else []):
                 tasks.append(InjectionTask(b, (r0, r1), tuple(c), False))
     return tasks if r <= MAX_EXTRA_BATCHES else []
+
+
+def flux90_precision(n: np.ndarray, rec: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per row and half, from pooled counts `n` and recovered `rec` (rows x pairs, pair = 2 plane + half): the relative
+    sampling error of FLUX90, ln(10) sqrt(p (1 - p) / n_x) / s, p = FLUX90_FRACTION, n_x the smaller pooled count of the
+    two planes bracketing the 0.9 crossing, s = dfrac/dlog10 F over the planes one below to one above them (the curve's
+    local slope; S/N planes are SNR_LOG_STEP dex apart, so log10 F steps alike at fixed CELL_SIGMA) -- M5/M7's arithmetic.
+    Returns (error (rows, 2), crossing plane k (rows, 2; -1 where the pooled curve does not cross 0.9 upward), n_x).
+    NaN error where there is no crossing or a flat slope."""
+    n = np.asarray(n, float).reshape(n.shape[0], N_PLANES, 2)
+    rec = np.asarray(rec, float).reshape(n.shape[0], N_PLANES, 2)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        frac = np.where(n > 0, rec / n, np.nan)
+    rows = n.shape[0]
+    err = np.full((rows, 2), np.nan)
+    kk = np.full((rows, 2), -1, np.int64)
+    nx = np.zeros((rows, 2))
+    below = frac[:, :-1, :] < FLUX90_FRACTION
+    above = frac[:, 1:, :] >= FLUX90_FRACTION
+    cross = below & above                                      # (rows, planes - 1, 2): p_k < 0.9 <= p_k+1
+    has = cross.any(axis=1)
+    k = np.where(has, cross.argmax(axis=1), -1)                # the faintest crossing
+    r, h = np.nonzero(has)
+    k0 = k[r, h]
+    lo, hi = np.maximum(k0 - 1, 0), np.minimum(k0 + 2, N_PLANES - 1)
+    slope = (frac[r, hi, h] - frac[r, lo, h]) / ((hi - lo) * SNR_LOG_STEP)
+    n_x = np.minimum(n[r, k0, h], n[r, k0 + 1, h])
+    p = FLUX90_FRACTION
+    with np.errstate(invalid="ignore", divide="ignore"):
+        e = np.log(10.0) * np.sqrt(p * (1 - p) / n_x) / slope
+    err[r, h] = np.where(slope > 0, e, np.nan)
+    kk[r, h] = k0
+    nx[r, h] = n_x
+    return err, kk, nx
+
+
+def _imprecise(n: np.ndarray, rec: np.ndarray) -> np.ndarray:
+    """(rows x pairs) True on the planes k - 1 .. k + 2 around each (row, half)'s 0.9 crossing whose FLUX90 sampling error
+    exceeds FLUX90_PRECISION: where one more batch narrows FLUX90."""
+    err, k, _n = flux90_precision(n, rec)
+    out = np.zeros((n.shape[0], N_PLANES, 2), bool)
+    r, h = np.nonzero(np.isfinite(err) & (err > FLUX90_PRECISION))
+    for d in (-1, 0, 1, 2):
+        pl = np.clip(k[r, h] + d, 0, N_PLANES - 1)
+        out[r, pl, h] = True
+    return out.reshape(n.shape[0], 2 * N_PLANES)
 
 
 def inject_task(config, m: Mosaic, detection: BandDetection, task: InjectionTask, layers: Optional[dict] = None) -> dict:
@@ -748,6 +820,7 @@ def build_table(records_dir: str, n_row: int, sigma: Optional[np.ndarray] = None
         f.create_dataset("near_plane", data=near_plane)
         if sigma is not None:
             f.create_dataset("fallback", data=_map_fallbacks(table, _f32(sigma), cov))
+            f.create_dataset("fallback_all", data=_map_mad_all_planes(table, _f32(sigma)))
         g = f.create_group("held")
         for k, v in held.items():
             g.create_dataset(k, data=v)
@@ -789,6 +862,29 @@ def _map_fallbacks(table: dict, sigma: np.ndarray, cov: np.ndarray) -> np.ndarra
                         a = np.abs(v - med)
                         mad = 0.5 * (np.partition(a, (a.size - 1) // 2)[(a.size - 1) // 2] + np.partition(a, a.size // 2)[a.size // 2])
                         out[si, gi, ei, p, 1:] = med, MAD_TO_SIGMA * mad
+    return out
+
+
+def _mad(v: np.ndarray) -> float:
+    """1.4826 x the median absolute deviation about the median (NaN for no value): the estimator's scatter."""
+    if not v.size:
+        return float("nan")
+    med = 0.5 * (np.partition(v, (v.size - 1) // 2)[(v.size - 1) // 2] + np.partition(v, v.size // 2)[v.size // 2])
+    a = np.abs(v - med)
+    return MAD_TO_SIGMA * 0.5 * (np.partition(a, (a.size - 1) // 2)[(a.size - 1) // 2] + np.partition(a, a.size // 2)[a.size // 2])
+
+
+def _map_mad_all_planes(table: dict, sigma: np.ndarray) -> np.ndarray:
+    """(2 sets, 3 gradient) 1.4826 MAD of z = dflux / CELL_SIGMA over the far records of the whole map and ALL planes:
+    the denominator of R_class (FALLBACK_MIN); sets both halves / build half, gradient class 0, 1, any."""
+    out = np.full((2, 3), np.nan)
+    far = ~table["near"]
+    z = table["dflux"].astype(np.float64) / sigma[table["row"].astype(np.int64)]
+    gcl = _gradient_class(table["lnr"])
+    for si, halves in enumerate(((0, 1), (0,))):
+        s_set = far & np.isin(table["half"], halves)
+        for gi in range(3):
+            out[si, gi] = _mad(z[s_set if gi == 2 else s_set & (gcl == gi)])
     return out
 
 
@@ -1250,6 +1346,28 @@ def _fallback_values(fb: np.ndarray, set_index: int, g: Optional[int], edge_out:
     return med, sc
 
 
+def _class_scaled_fallback(fbv: Tuple[np.ndarray, np.ndarray], W_map, rec: dict, sig: np.ndarray, mad_all: float
+                           ) -> Tuple[np.ndarray, np.ndarray]:
+    """Step 3 of the completed fallback (FALLBACK_MIN): for the rows of `W_map` (the window class over the whole map),
+    the map's scatter per plane times R_class = 1.4826 MAD(z of the class's far records, all planes) / `mad_all`; the
+    median (the bias) stays the map's. Rows without a class (W_map row empty) keep `fbv`."""
+    med, sc = fbv
+    sc = sc.copy()
+    far = ~rec["near"].astype(bool)
+    row = rec["row"].astype(np.int64)[far]
+    z = rec["dflux"].astype(np.float64)[far] / sig[row]
+    order = np.argsort(row, kind="stable")
+    row_s, z_s = row[order], z[order]
+    starts = np.searchsorted(row_s, np.arange(len(sig) + 1))
+    for i in np.flatnonzero(np.diff(W_map.indptr) > 0):
+        cols = W_map.indices[W_map.indptr[i]:W_map.indptr[i + 1]]
+        v = np.concatenate([z_s[starts[c]:starts[c + 1]] for c in cols])
+        r = _mad(v) / mad_all if mad_all > 0 else np.nan
+        if np.isfinite(r):
+            sc[i] = sc[i] * r
+    return med, sc
+
+
 def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int, int, int], rule: PoolingRule,
                flux_grid_mjy: np.ndarray) -> dict:
     """One square pooling block of POOL_BLOCK_CELLS cells (cell lines i0:i1, columns j0:j1): its rows' curve, flux90,
@@ -1312,10 +1430,15 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
 
     ladder = [remap(W, pos_ext) for W in Ws]
     level_min = [rule.min_injections] * len(Ws)
+    W_map = None                       # the window class over the whole map, for the rows the ladder left short
     if extra:
         pos_all = np.searchsorted(loaded, np.arange(n_all))
         ladder += [remap(W, pos_all) for W in extra]
         level_min += [rule.min_injections] * len(extra)
+        if rule.noise_window is not None and hist.get("to_map_fallback_rows", 0):
+            W_map = ladder[-1]
+            ladder.append(W_map)                     # step 2: the window class over the map at FALLBACK_MIN
+            level_min.append(FALLBACK_MIN)
     bm = rec["half"] == 0
     build = {k: rec[k][bm] for k in ("row", "plane", "recovered", "near", "dflux", "lnr")}
     # the curve: main's pooling (in S/N, no window, no class); under curve_class "gradient" a coverage-edge cell's two
@@ -1355,6 +1478,8 @@ def pool_block(detection: BandDetection, records_dir: str, block: Tuple[int, int
         for g in gsets:
             rr = r if g is None else {k: v[_gradient_class(r["lnr"], rule.gradient_boundary) == g] for k, v in r.items()}
             fbv = None if fb is None else _fallback_values(fb, set_index, g, edge_out, out_rows.size, rule.min_injections)
+            if fbv is not None and W_map is not None and "fallback_all" in tab.data:
+                fbv = _class_scaled_fallback(fbv, W_map, rr, sig, float(np.asarray(tab.data["fallback_all"])[set_index, 2 if g is None else g]))
             e.append(_cell_errors(ladder, flux_grid_mjy, sig, rr, rule, sig_out, fbv, level_min))
         return e[0] if len(e) == 1 else {k: np.stack([q[k] for q in e]) for k in ("scatter", "bias")}
 

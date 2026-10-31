@@ -207,7 +207,7 @@ GRANULE_DEFINITIONS = {
 
 # --- (d) The PACS build ---
 #
-# The far-infrared stages (sky.derived.pacs_* and the package sky.derived.pacs) define these once; every PACS module
+# The far-infrared stages (the package sky.derived.pacs) define these once; every PACS module
 # imports them from here (consolidation round 1, 2026-10-31: they were defined two to four times).
 
 #: the three PACS bands, in wavelength order (the PACS keys of BANDS above)

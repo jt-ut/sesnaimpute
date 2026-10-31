@@ -684,8 +684,9 @@ def _refuse_mixed_k(config, region, box, band, stage, r, of) -> None:
                          "remove its rows and records)" % (region, band, what, ", ".join(map(str, other)), of))
 
 
-def _round_counts(config, region, box, band, q) -> np.ndarray:
-    """The (rows x pairs) injection counts of round q, summed over its K shards (every shard must be done)."""
+def _round_counts(config, region, box, band, q, which: str = "counts/n") -> np.ndarray:
+    """The (rows x pairs) injection counts of round q (`which` "counts/rec": the recovered ones), summed over its K
+    shards (every shard must be done)."""
     shards = _shard_rows(config, region, box, band, "inject", q)
     if len(shards) != 1:
         raise StageError("%s %s: injection round %d has %s" % (region, band, q, "no shard rows" if not shards else "mixed K"))
@@ -699,7 +700,7 @@ def _round_counts(config, region, box, band, q) -> np.ndarray:
         tables, attrs = _read_record(row.path)
         if total is None:
             total = np.zeros(tuple(attrs["count_shape"]), np.int64)
-        np.add.at(total, (tables["counts/row"], tables["counts/pair"]), tables["counts/n"])
+        np.add.at(total, (tables["counts/row"], tables["counts/pair"]), tables[which])
     return total
 
 
@@ -709,7 +710,8 @@ def _round_tasks(config, region, band, r, box=None) -> list:
     det, attrs = _detection(config, region, band, box)
     if det is None or r > MAX_EXTRA_BATCHES:
         return []
-    return inject.round_tasks(det, int(attrs["first"]), r, lambda q: _round_counts(config, region, box, band, q))
+    return inject.round_tasks(det, int(attrs["first"]), r, lambda q: _round_counts(config, region, box, band, q),
+                              _pooling_rule(), lambda q: _round_counts(config, region, box, band, q, "counts/rec"))
 
 
 def _round_task_count(config, region, band, r, box=None) -> int:
@@ -832,14 +834,18 @@ def _stage_inject(config, region, box, key, n_jobs, tasks=None, **_):
     det, _attrs = _detection(config, region, key.band, box)
     m = mosaic.open_mosaic(config, region, key.band, box)
     mine = tasks[key.shard::key.of]
-    done = pieces_module.run(functools.partial(inject.inject_task, config, m, det), mine, n_jobs,
+    layers = detect.open_detection(work_dir(config, region, box, key.band))
+    done = pieces_module.run(functools.partial(inject.inject_task, config, m, det, layers=layers), mine, n_jobs,
                              unit="injection pieces (round %d, shard %d of %d)" % (key.round, key.shard, key.of))
     tables = _concat_records(done) if done else {}
     counts = np.asarray(inject.record_counts(tables, int(np.asarray(det.cells.ids).size)) if tables else
                         np.zeros((int(np.asarray(det.cells.ids).size), 2 * inject.N_PLANES), np.int64))
+    rec = (np.asarray(inject.record_counts({k: np.asarray(v)[np.asarray(tables["recovered"], bool)]
+                                            for k, v in tables.items() if k in ("row", "plane", "half")},
+                                           int(np.asarray(det.cells.ids).size))) if tables else np.zeros_like(counts))
     row, pair = np.nonzero(counts)
     tables.update({"counts/row": row.astype(np.int64), "counts/pair": pair.astype(np.int64),
-                   "counts/n": counts[row, pair].astype(np.int64)})
+                   "counts/n": counts[row, pair].astype(np.int64), "counts/rec": rec[row, pair].astype(np.int64)})
     path = _primary_path(config, region, box, key)
     write_record(path, tables, dict(stage="inject", band=key.band, round=key.round, shard=key.shard, K=key.of,
                                     n_tasks=len(mine), count_shape=list(counts.shape)))

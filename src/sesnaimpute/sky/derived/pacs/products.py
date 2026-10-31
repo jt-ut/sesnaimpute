@@ -38,7 +38,6 @@ from astropy.wcs import WCS
 from sesnaimpute import build as build_module
 from sesnaimpute.attrs_registry import REGISTRY
 from sesnaimpute.config import product_path
-from sesnaimpute.definitions import COMPLETENESS_STORAGE_SCALE as STORAGE_SCALE
 from sesnaimpute.definitions import PACS_BANDS as BANDS
 from sesnaimpute.definitions import PACS_POOL_ARCSEC as POOL_ARCSEC
 from sesnaimpute.definitions import PACS_POOL_WIDENINGS as POOL_WIDENINGS
@@ -98,7 +97,7 @@ def _band_arrays(b: BandCompleteness) -> dict:
     """The arrays of one band's datasets, from the BandCompleteness (the old band dict's keys, `_band_dict`/`_empty_band`)."""
     det = b.detection
     n_plane = b.curve.shape[-1]
-    empty = det is None or det.cell_grid is None
+    empty = det is None or det.cell_grid is None or det.cell_grid.wcs is None     # inject.empty_band: no grid
     if empty:
         z = lambda dt: np.zeros(0, dt)
         return dict(curve=np.zeros((0, n_plane), np.uint16), source_row=np.asarray(det.src_row, np.int32),

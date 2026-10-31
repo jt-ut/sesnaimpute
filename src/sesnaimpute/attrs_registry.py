@@ -3924,7 +3924,7 @@ PACS_COPIED = (
 )
 
 
-# sky.derived.pacs_completeness -- completeness_pacs_source (2026-10-26 repair): the PACS 70 and 100
+# sky.derived.pacs (products.write_completeness) -- completeness_pacs_source (2026-10-26 repair): the PACS 70 and 100
 # micron completeness in the layout of completeness_sesna_source, plus per-cell columns.
 _PACS_COMPLETENESS_CELLS_READINGS = {
     "CELL_SIGMA_{b}_MJY": ("mJy",
@@ -4010,7 +4010,7 @@ REGISTRY[("completeness_pacs_source", "SOURCE_LN_R")] = (
     "with an absolute value above 0.03 reads CURVE_GRADIENT_<band>, else CURVE_<band>. Not a number where the source "
     "has no row.")
 
-# sky.derived.pacs_completeness -- sources_pacs_region (RULINGS_5): the blind PACS source table.
+# sky.derived.pacs (products.write_sources) -- sources_pacs_region (RULINGS_5): the blind PACS source table.
 _PACS_SOURCES_READINGS = {
     "RA_DEG": ("deg ICRS",
         "One row per PACS source of the region, from the PACS maps alone: the bands' blind detections (peaks of each "
@@ -4047,7 +4047,7 @@ for _band, _w in (("P70", "70"), ("P100", "100"), ("P160", "160")):
     for _name, (_u, _r) in _PACS_SOURCES_READINGS.items():
         REGISTRY[("sources_pacs_region", _name.format(b=_band))] = (_u, _r.format(b=_band, w=_w))
 
-# PACS source photometry (sky.derived.pacs_photometry).
+# PACS source photometry (sky.derived.pacs: photometry.py, products.write_photometry).
 _PHOTOMETRY_PACS_READINGS = {
     "NAME": ("source identifier",
         "The SESNA source identifier of each row, in exactly the order of the region's SESNA source catalogue."),

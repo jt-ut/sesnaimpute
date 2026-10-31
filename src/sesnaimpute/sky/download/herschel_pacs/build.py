@@ -166,7 +166,7 @@ def query_scans(config, region, obsids):
     """Each observation's scan direction (nominal/orthogonal) and spacecraft position angle, from the
     HSA's per-observation metadata, cached as CSV and never asked for again while present. The PSF of a
     parallel-mode map needs both of its scans' angles and the map header carries only one
-    (pacs_psf.published_components_for_map)."""
+    (sky.derived.pacs.psf.published_components)."""
     path = index_module.scan_path(config, region)
     if os.path.exists(path) or not obsids:
         return path
